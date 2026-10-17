@@ -1,6 +1,6 @@
 """崩壊上限の値を決める切り上げ（`ceil_significant`）の約束事。
 
-上限の表（`e2e_deberta_w8a8_test.ts` の `COLLAPSE_CEILINGS`）は「最悪 × 2 を有効数字 2 桁で
+上限の表（`packages/models/tests/helpers/collapse-ceilings.ts` の `COLLAPSE_CEILINGS`）は「最悪 × 2 を有効数字 2 桁で
 切り上げた値」なので、ここが 1 段ずれると表の全行が黙って緩む / 締まる。
 """
 

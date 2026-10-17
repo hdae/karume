@@ -443,4 +443,5 @@ NOTE: 2026-08-19 波 H（Gemma 4 E2B）で第 2 層に **op 追加ゼロ**のま
 `pow(x,-0.5)` → rsqrt 寄せ（Gemma4RMSNorm の pow 形）・weight 無し RMSNorm の畳み込み
 （`v_norm` = with_scale=False・ones 合成はハンドラ側）・静的 `select.int` → `slice+squeeze`
 合成（PLE の層別スライス）。token-only 出口（ADR 0068 追記 4）の実行時行選択も既存
-`embedding` の合成で成立（新 op なし）。
+`embedding` の合成で成立（新 op なし）。token-only 出口そのものは 2026-10-17 に削除した
+（同じ行選択は製品グラフの `last_row[R]` が引き継ぐ）。

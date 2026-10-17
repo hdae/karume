@@ -55,10 +55,13 @@ import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
   codecLayout,
+  type GenerationContext,
   parseSafetensors,
   prepareContainer,
   type PreparedModel,
+  type RunOutputs,
   type SafetensorsFile,
+  type Session,
   type SessionDiagnostics,
   type Tensor,
 } from "@karume/runtime";
@@ -68,6 +71,7 @@ import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/c
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { requireCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 const SERIES_NAME = "gemma4-e2b-decode";
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
@@ -508,6 +512,65 @@ const preparedOf = (diagnostics: SessionDiagnostics, where: string) => {
   return prepared;
 };
 
+/**
+ * Runs the greedy loop on one golden prompt with this gate's plan constants (chunk 32, capacity C).
+ * Shared by the default plan-property case and the opt-in parity case so both drive the same loop.
+ */
+const generateCase = async (
+  session: Session,
+  tokenName: string,
+  caseName: string,
+  prompt: readonly number[],
+): Promise<{ readonly generated: readonly number[]; readonly elapsed: number }> => {
+  // 容量が prompt + 継続を覆っていること（覆えないと state スロットが溢れる）。
+  assert(
+    prompt.length + GREEDY_STEPS <= CAPACITY,
+    `${caseName}: T ${prompt.length} + K ${GREEDY_STEPS} が容量 ${CAPACITY} を超える`,
+  );
+  const started = performance.now();
+  const generated = await generateGreedy({
+    session,
+    inputIds: INPUT_IDS,
+    // RoPE の cos / sin は chunk ごとにホストが組む（ADR 0091 決定 1）。
+    derive: (_ids, positions) => gemma4RopeInputs(ROPE_SPEC, positions),
+    token: tokenName,
+    chunkLength: CHUNK_LENGTH,
+    maxPosition: MAX_POSITION,
+    // 容量記号は context 生成だけへ渡る（run の bindings には出ない — 追記 7）。
+    bindings: { [CAPACITY_SYMBOL]: CAPACITY },
+    prompt,
+    maxNewTokens: GREEDY_STEPS,
+  });
+  return { generated, elapsed: performance.now() - started };
+};
+
+/**
+ * One prefill chunk assembled by hand (pad rows 0, absolute positions — not through
+ * `generateGreedy`). Shared by the census case and the opt-in first-token check so both read the
+ * same run shape.
+ */
+const runSingleChunkPrefill = (
+  session: Session,
+  context: GenerationContext,
+  prompt: Int32Array<ArrayBuffer>,
+): Promise<RunOutputs> => {
+  assert(prompt.length <= CHUNK_LENGTH, "census は 1 chunk で踏むケースを使う");
+  const ids = new Int32Array(CHUNK_LENGTH);
+  const positions = new Int32Array(CHUNK_LENGTH);
+  for (let row = 0; row < prompt.length; row += 1) {
+    ids[row] = prompt[row];
+    positions[row] = row;
+  }
+  return session.run(
+    {
+      [INPUT_IDS]: i32Row(CHUNK_LENGTH, ids),
+      ...gemma4RopeInputs(ROPE_SPEC, positions),
+    },
+    undefined,
+    { context, queryLength: prompt.length },
+  );
+};
+
 test({
   name: "Gemma 4 E2B decode 資産: 期待するケースとモデル本体が揃っている",
   // 完全に空の環境だけ SKIP。**何か 1 つでも**あれば欠けは FAIL（`ANY_PRESENT` の JSDoc）。
@@ -524,21 +587,19 @@ test({
 });
 
 /**
- * ①形 / ②greedy parity / ③prefill logits / ⑤計画性質。
- *
- * MUST: Session は **1 本だけ組んで全ステップで共有する**。この資産は約 4GiB で、ステップごとに
- * 組み直すと同じアップロードを何度も払う（1-shot 門が 3 ケースで 1 Session にしたのと同じ
- * 理由）。ステップ間で共有するのは Session（不変の重みと計画キャッシュ）だけで、
- * **GenerationContext は用途ごとに作り分ける** — 生成 1 本 = context 1 本（ADR 0066 決定 6）で、
- * 使い回すと前の生成の KV が残った状態から prefill を始めることになる。
+ * Default case: ① the graph form and ⑤ the plan properties of the decode path. The greedy loop
+ * runs on the golden prompts (inputs only); its token lists are compared with torch only in the
+ * opt-in parity case below, so this case asserts nothing against upstream values. Session and
+ * GenerationContext follow the MUST on the opt-in case (`generateGreedy` owns one context per
+ * generation).
  */
 test({
-  name: "Gemma 4 E2B decode 検収: 固定 token id 列の parity（実 GPU / torch CPU 期待値）",
+  name: "Gemma 4 E2B decode 検収: 形の前提と decode 経路の計画性質（実 GPU）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
     const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
     const parsed = prepareContainer(opened, MODEL_GRAPH);
-    const [logitsName, tokenName] = parsed.graph.outputs;
+    const [, tokenName] = parsed.graph.outputs;
 
     await t.step("① 形の前提: states 形 chunk グラフである", () => {
       assertDecodeForm(parsed);
@@ -547,9 +608,77 @@ test({
     const gpu = await acquireGpu();
     const session = await parsed.createContainerSession(gpu);
     try {
+      await t.step(
+        "⑤ decode 経路の計画性質: 3 ケース × 16 step の生成で計画が prefill 形 / decode 形の 2 本",
+        async () => {
+          /** ケースごとの prefill chunk 本数（多 chunk prefill を踏んだことの実測）。 */
+          const chunkCounts: number[] = [];
+          for (const caseName of EXPECTED_GREEDY_CASES) {
+            const golden = await loadGreedy(caseName);
+            const prompt = [...golden.prompt];
+            assertEquals(golden.expected.length, GREEDY_STEPS, `${caseName}: golden の step 数`);
+
+            const { elapsed } = await generateCase(session, tokenName, caseName, prompt);
+
+            const chunks = Math.ceil(prompt.length / CHUNK_LENGTH);
+            chunkCounts.push(chunks);
+            console.log(
+              `[e2e] gemma4 decode greedy ${caseName}: T=${prompt.length} ` +
+                `(prefill ${chunks} chunk) + K=${GREEDY_STEPS} step / ${elapsed.toFixed(0)}ms`,
+            );
+
+            // ⑤ decode 経路の計画性質: 生成 1 本で導出される計画は **prefill 形（M=32）と
+            // decode 形（M=1）の 2 本だけ**（ADR 0066 決定 4）。ここが step 数に比例して伸びる
+            // 形（例: queryLength が計画鍵に混ざる）は、値は正しいまま毎 step 再導出になる。
+            // ケースを跨いでも 2 本のまま（プロンプト長は計画鍵に効かない）。
+            const prepared = preparedOf(session.diagnostics(), caseName);
+            assertEquals(prepared.cachedPlans, 2, `${caseName}: 導出済み計画の本数`);
+            assertEquals(
+              prepared.hit,
+              true,
+              `${caseName}: 最終 decode step が計画キャッシュに当たる`,
+            );
+          }
+          // 多 chunk prefill（`pastLength > 0` かつ `M > 1`）を最低 1 ケースが踏んだこと。
+          assert(
+            Math.max(...chunkCounts) >= 2,
+            `全ケースが 1 chunk に収まっている（chunk 本数 ${chunkCounts}）— ` +
+              `chunkLength ${CHUNK_LENGTH} では過去つき prefill が 1 度も走らない`,
+          );
+        },
+      );
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * ①形 / ②greedy parity / ③prefill logits / ⑤計画性質。
+ *
+ * MUST: Session は **1 本だけ組んで全ステップで共有する**。この資産は約 4GiB で、ステップごとに
+ * 組み直すと同じアップロードを何度も払う（1-shot 門が 3 ケースで 1 Session にしたのと同じ
+ * 理由）。ステップ間で共有するのは Session（不変の重みと計画キャッシュ）だけで、
+ * **GenerationContext は用途ごとに作り分ける** — 生成 1 本 = context 1 本（ADR 0066 決定 6）で、
+ * 使い回すと前の生成の KV が残った状態から prefill を始めることになる。
+ *
+ * Opt-in case (upstream parity): ② and ③ compare with the torch goldens, and ④ holds the census
+ * prompt's first-token check against the greedy golden (moved out of the census case, which stays
+ * in the default run). ① and ⑤ run in the default case above.
+ */
+test({
+  name: `Gemma 4 E2B decode 検収: 固定 token id 列の parity（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+  ignore: !UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE,
+  fn: async (t) => {
+    const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
+    const parsed = prepareContainer(opened, MODEL_GRAPH);
+    const [logitsName, tokenName] = parsed.graph.outputs;
+
+    const gpu = await acquireGpu();
+    const session = await parsed.createContainerSession(gpu);
+    try {
       await t.step("② greedy parity: 3 ケース × 16 step が torch の期待列と厳密一致", async () => {
-        /** ケースごとの prefill chunk 本数（多 chunk prefill を踏んだことの実測）。 */
-        const chunkCounts: number[] = [];
         for (const caseName of EXPECTED_GREEDY_CASES) {
           const golden = await loadGreedy(caseName);
           const prompt = [...golden.prompt];
@@ -566,59 +695,20 @@ test({
             `${caseName}: golden の最小余裕 ${minMargin} が atol と同程度 — ` +
               `この形では token 列の一致が数値差で反転しうる（門として成立しない）`,
           );
-          // 容量が prompt + 継続を覆っていること（覆えないと state スロットが溢れる）。
-          assert(
-            prompt.length + GREEDY_STEPS <= CAPACITY,
-            `${caseName}: T ${prompt.length} + K ${GREEDY_STEPS} が容量 ${CAPACITY} を超える`,
-          );
 
-          const started = performance.now();
-          const generated = await generateGreedy({
-            session,
-            inputIds: INPUT_IDS,
-            // RoPE の cos / sin は chunk ごとにホストが組む（ADR 0091 決定 1）。
-            derive: (_ids, positions) => gemma4RopeInputs(ROPE_SPEC, positions),
-            token: tokenName,
-            chunkLength: CHUNK_LENGTH,
-            maxPosition: MAX_POSITION,
-            // 容量記号は context 生成だけへ渡る（run の bindings には出ない — 追記 7）。
-            bindings: { [CAPACITY_SYMBOL]: CAPACITY },
-            prompt,
-            maxNewTokens: GREEDY_STEPS,
-          });
-          const elapsed = performance.now() - started;
+          const { generated, elapsed } = await generateCase(session, tokenName, caseName, prompt);
 
           // 検収そのもの。tolerance を持たない離散の一致で、MQA の head 写像違い・層種別の
           // 取り違え・sliding ring の折り返し誤り・KV 共有の割り当て違い・pad 行の混入は
           // どれもここで列を割る。
           assertEquals(generated, expected, `${caseName}: 生成 token 列`);
 
-          const chunks = Math.ceil(prompt.length / CHUNK_LENGTH);
-          chunkCounts.push(chunks);
           console.log(
-            `[e2e] gemma4 decode greedy ${caseName}: T=${prompt.length} ` +
-              `(prefill ${chunks} chunk) + K=${GREEDY_STEPS} step / 最小余裕 ` +
-              `${minMargin.toExponential(3)} / ${elapsed.toFixed(0)}ms`,
-          );
-
-          // ⑤ decode 経路の計画性質: 生成 1 本で導出される計画は **prefill 形（M=32）と
-          // decode 形（M=1）の 2 本だけ**（ADR 0066 決定 4）。ここが step 数に比例して伸びる
-          // 形（例: queryLength が計画鍵に混ざる）は、値は正しいまま毎 step 再導出になる。
-          // ケースを跨いでも 2 本のまま（プロンプト長は計画鍵に効かない）。
-          const prepared = preparedOf(session.diagnostics(), caseName);
-          assertEquals(prepared.cachedPlans, 2, `${caseName}: 導出済み計画の本数`);
-          assertEquals(
-            prepared.hit,
-            true,
-            `${caseName}: 最終 decode step が計画キャッシュに当たる`,
+            `[e2e] gemma4 decode greedy parity ${caseName}: T=${prompt.length} ` +
+              `+ K=${GREEDY_STEPS} step / 最小余裕 ${minMargin.toExponential(3)} / ` +
+              `${elapsed.toFixed(0)}ms`,
           );
         }
-        // 多 chunk prefill（`pastLength > 0` かつ `M > 1`）を最低 1 ケースが踏んだこと。
-        assert(
-          Math.max(...chunkCounts) >= 2,
-          `全ケースが 1 chunk に収まっている（chunk 本数 ${chunkCounts}）— ` +
-            `chunkLength ${CHUNK_LENGTH} では過去つき prefill が 1 度も走らない`,
-        );
       });
 
       await t.step(
@@ -723,6 +813,28 @@ test({
             `context-en: prefill logits の maxAbs ${worst} が atol ${PREFILL_ATOL} を超えた` +
               `（最悪 ${worstAt}）`,
           );
+        },
+      );
+
+      await t.step(
+        "④ census の前提: capital-en の手組み prefill の最終有効行が greedy golden の 1 手目",
+        async () => {
+          const golden = await loadGreedy("capital-en");
+          const context = await session.createGenerationContext({
+            bindings: { [CAPACITY_SYMBOL]: CAPACITY },
+            chunkLength: CHUNK_LENGTH,
+          });
+          try {
+            const prefill = await runSingleChunkPrefill(session, context, golden.prompt);
+            const first = prefill[tokenName].data[golden.prompt.length - 1];
+            assertEquals(
+              first,
+              golden.expected[0],
+              "prefill の最終有効行が greedy golden の 1 手目",
+            );
+          } finally {
+            await context.dispose();
+          }
         },
       );
     } finally {
@@ -871,7 +983,6 @@ test({
     const [, tokenName] = parsed.graph.outputs;
     // 最短ケース（T=6）で足りる — 見るのは走ったパイプラインの種類と本数。
     const golden = await loadGreedy("capital-en");
-    assert(golden.prompt.length <= CHUNK_LENGTH, "census は 1 chunk で踏むケースを使う");
 
     const gpu = await acquireGpu();
     const session = await parsed.createContainerSession(gpu);
@@ -889,20 +1000,7 @@ test({
       chunkLength: CHUNK_LENGTH,
     });
     try {
-      const ids = new Int32Array(CHUNK_LENGTH);
-      const positions = new Int32Array(CHUNK_LENGTH);
-      for (let row = 0; row < golden.prompt.length; row += 1) {
-        ids[row] = golden.prompt[row];
-        positions[row] = row;
-      }
-      const prefill = await session.run(
-        {
-          [INPUT_IDS]: i32Row(CHUNK_LENGTH, ids),
-          ...gemma4RopeInputs(ROPE_SPEC, positions),
-        },
-        undefined,
-        { context, queryLength: golden.prompt.length },
-      );
+      const prefill = await runSingleChunkPrefill(session, context, golden.prompt);
       const prefillCensus = assertStateCensus(session.diagnostics(), "prefill");
       // run 1 回の dispatch 総数（計画上）・融合ヒット数の記録（門ではない — 融合の期待値は
       // assets_fusion_counts_test 側の静的門が持つ）。融合が外れると dispatch は値が正しいまま
@@ -916,8 +1014,8 @@ test({
       const prefillRecord = runRecord(session.diagnostics());
 
       // decode 形（M=1）は prefill とは別の計画なので、キーの検査も 1 度ずつ要る。
+      // The first token is compared with the greedy golden only in the opt-in parity case (④).
       const first = prefill[tokenName].data[golden.prompt.length - 1];
-      assertEquals(first, golden.expected[0], "prefill の最終有効行が greedy golden の 1 手目");
       await session.run(
         {
           [INPUT_IDS]: i32Row(1, Int32Array.of(first)),

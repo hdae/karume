@@ -69,12 +69,30 @@ export const CORE_LANE: Lane = {
 
 export const LANES: readonly Lane[] = [CORE_LANE, ...FAMILY_LANES];
 
-/** Vitest `test.projects` entries for the lanes; every project inherits the root config. */
-export const laneProjects = (): {
+/**
+ * Families that are maintained but not run by default (maintainer ruling 2026-10-17): their
+ * recipes, pipelines and tests stay, and `core` still excludes their files, but `vp test` runs
+ * their lanes only when `KARUME_ALL_FAMILIES=1` is set (`KARUME_ALL_FAMILIES=1 vp test --project
+ * models:siglip2`). The release run uses the default set.
+ */
+export const LOW_PRIORITY_FAMILIES: readonly string[] = ["minicpm5", "siglip2"];
+
+/** The lanes a run without `KARUME_ALL_FAMILIES=1` executes. */
+export const defaultLanes = (
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): readonly Lane[] =>
+  env.KARUME_ALL_FAMILIES === "1"
+    ? LANES
+    : LANES.filter((lane) => !LOW_PRIORITY_FAMILIES.includes(lane.name.replace(/^models:/, "")));
+
+/** Vitest `test.projects` entries for the default lanes; every project inherits the root config. */
+export const laneProjects = (
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): {
   readonly extends: true;
   readonly test: { readonly name: string; readonly include: string[]; readonly exclude: string[] };
 }[] =>
-  LANES.map((lane) => ({
+  defaultLanes(env).map((lane) => ({
     extends: true,
     test: { name: lane.name, include: [...lane.include], exclude: [...lane.exclude] },
   }));

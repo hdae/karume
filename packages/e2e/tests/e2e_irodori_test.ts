@@ -68,6 +68,7 @@ import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesComponents } from "../../models/tests/helpers/series-graphs.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
  * 実重み Irodori backbone（ModernBERT-ja-310m 25 層）の torch CPU 期待値との突合に使う許容誤差。
@@ -477,9 +478,12 @@ for (const target of TARGETS) {
   for (const caseName of discoverCases(SERIES_ROOT, target)) {
     /** ケース ID（ターゲットが違えば同じケース名があるので組で持つ）。 */
     const caseId = `${target}/${caseName}`;
+    // The whole case is upstream parity (per-component torch goldens under a tolerance), so it is
+    // opt-in. Its io-key / shape / dtype assertions only check the golden file against the graph
+    // as preconditions of that comparison, so they stay with it rather than in a default case.
     test({
-      name: `Irodori golden 突合: ${target} / ${caseName}（実 GPU / torch CPU 期待値）`,
-      ignore: !AVAILABLE || !GPU_AVAILABLE,
+      name: `Irodori golden 突合: ${target} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+      ignore: !AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY,
       fn: async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const ioFile = `${IO_PREFIX}${caseName}${IO_SUFFIX}`;

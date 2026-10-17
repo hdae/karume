@@ -117,10 +117,10 @@ are now **graph inputs** built on the host (`deberta/patch.py` is the reference
 implementation, mirrored by `packages/models/src/sbv2/text/rel-pos-tables.ts`). The mirror is pinned
 byte-for-byte by `packages/models/tests/sbv2_rel_pos_parity_test.ts`.
 
-On the Deno side: the real-weight DeBERTa E2E is `packages/runtime/tests/e2e_deberta_test.ts`
+On the Deno side: the real-weight DeBERTa E2E is `packages/e2e/tests/e2e_deberta_test.ts`
 (ported 2026-08-16 — 3 variants × 4 cases against the regular `io.<case>` series, with per-variant
 measured tolerances and the storage-declaration check that catches a series-root mix-up). The
-`io-i8a8.<case>` mirror series is read by `packages/runtime/tests/e2e_deberta_w8a8_test.ts` (ADR 0026
+`io-i8a8.<case>` mirror series is read by `packages/e2e/tests/e2e_deberta_w8a8_test.ts` (ADR 0026
 decision 3, `full-24layer` only): it runs `linearCompute: "a8"` against the mirror with a strict
 tolerance on output.0/1, a collapse ceiling on the deeper layers, and a pipeline-key census (every
 linear runs as an i8a8 GEMM plus `quantize_rows`). The output.0/1 tolerance is a historical value;

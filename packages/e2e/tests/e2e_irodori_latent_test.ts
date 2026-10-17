@@ -73,6 +73,7 @@ import {
   worstDifference,
 } from "./helpers/irodori-assets.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
  * `z` の全要素突合に使う許容誤差（**f32 系列**）。
@@ -302,10 +303,14 @@ for (const series of SERIES) {
   }
 
   const runnable = GPU_AVAILABLE && available;
+  // The two golden cases compare the latent (S, forwards and z under a tolerance) with the torch
+  // full-loop golden, so they are upstream parity and run only on opt-in. Determinism and the
+  // pipelineConfig drift check stay in the default run.
+  const parityRunnable = runnable && UPSTREAM_PARITY;
 
   test({
-    name: `e2e(実GPU): 配布形の latent が full-loop golden と一致する（${series.name} / 参照 + caption あり）`,
-    ignore: !runnable,
+    name: `e2e(実GPU): 配布形の latent が full-loop golden と一致する（${series.name} / 参照 + caption あり）${UPSTREAM_PARITY_OPT_IN}`,
+    ignore: !parityRunnable,
     fn: async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
@@ -322,8 +327,8 @@ for (const series of SERIES) {
   });
 
   test({
-    name: `e2e(実GPU): 参照なし / caption 空でも latent が full-loop golden と一致する（${series.name}）`,
-    ignore: !runnable,
+    name: `e2e(実GPU): 参照なし / caption 空でも latent が full-loop golden と一致する（${series.name}）${UPSTREAM_PARITY_OPT_IN}`,
+    ignore: !parityRunnable,
     fn: async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);

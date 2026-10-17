@@ -323,3 +323,17 @@ claims; the tables above describe the phase-1 move and are kept as the record of
 lane was retired with its only test. One rule was added during acceptance and holds from here on:
 **no runtime or models test imports from `packages/e2e`** (the series table lives in
 `packages/models/tests/helpers`, the A/B-gate and fusion-count helpers in `packages/e2e/tests/helpers`).
+
+## Addendum 2026-10-17 (2) — upstream parity is opt-in; two families are not run by default
+
+The maintainer ruled on the review rows of the triage list: upstream-parity cases (comparisons of
+Karume's model-exit or per-component outputs with torch / diffusers goldens under a tolerance) stay
+in the code but run only with `KARUME_UPSTREAM_PARITY=1` (`packages/e2e/tests/helpers/upstream-parity.ts`;
+the default lanes skip them with that reason). Parity is proven when a family is implemented; later
+changes are caught by the sha256 reference rows and the self A/B checks. Record-only cases were
+deleted. The token-only Gemma 4 exit (ADR 0068 decision 4) is not a product feature and its test
+and recipe entry point were removed. Two families are maintained but not run by default
+(`LOW_PRIORITY_FAMILIES` in the lane table: minicpm5, siglip2): their lanes exist, `core` still
+excludes their files, and `vp test` includes them only with `KARUME_ALL_FAMILIES=1`; the release run
+uses the default set. EmbeddingGemma keeps its parity test in the default run because it is the
+family's only check until it has reference rows.

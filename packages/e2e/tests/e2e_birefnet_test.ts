@@ -91,6 +91,7 @@ import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
  * **BiRefNet_HR / 合成画像**ケース（系列 `birefnet-hr-1024-f16` — 入力が golden とビット同一）の
@@ -709,9 +710,13 @@ for (const series of SERIES) {
     const caseName = entry.name;
     /** ケース ID（系列が違えば同じケース名があるので組で持つ）。 */
     const caseId = `${series.name}/${caseName}`;
+    // The whole case is upstream parity (model-exit torch goldens under a tolerance, plus the mask
+    // agreement with torch), so it is opt-in. Its io-key / shape / dtype assertions only check the
+    // golden file against the graph as preconditions of that comparison; the default run keeps the
+    // output shape / dtype check per series in the geometry case below.
     test({
-      name: `BiRefNet ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
-      ignore: entry.ignore || !GPU_AVAILABLE || held,
+      name: `BiRefNet ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+      ignore: entry.ignore || !GPU_AVAILABLE || held || !UPSTREAM_PARITY,
       fn: async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const [opened, ioBytes] = await Promise.all([

@@ -577,6 +577,8 @@ test("generateGreedy: derive 省略時は input_ids のほかに何も渡さな�
 });
 
 // ---- token-only 出口（ADR 0068 決定 4 の既定形 — `lastRow` 指定時の 1 行ぶん出力） ----
+// The token-only exit series was removed on 2026-10-17; these cases pin the `lastRow` option of
+// `generateGreedy` itself with a fake session.
 
 const LAST_ROW = "last_row";
 

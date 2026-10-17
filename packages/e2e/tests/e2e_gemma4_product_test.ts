@@ -2,13 +2,14 @@
 //
 // 検収するのは ADR [0083](../../../docs/decisions/0083-generation-api-surface.md) 決定 6 と ADR
 // [0085](../../../docs/decisions/0085-ple-host-gather.md) を**同じ再 export に載せた**製品形
-// （案 α）で、既存 2 系列（logits opt-in / token-only）は検収 fixture として残っている。
+// （案 α）で、既存の logits opt-in 系列は検収 fixture として残っている（the token-only exit series
+// was removed on 2026-10-17）。
 //
 // 門は 4 本:
 //
 // ① 形の前提（入力 7 本 = input_ids / **per_layer_inputs** / **rope 4 本** / last_row[R]・出力 2 本 =
 //    選んだ行の logits `[1,R,V]` + 最終 norm 後 hidden `[1,R,H]`・**argmax はグラフに無い**・
-//    PLE 表を引く embedding が無い・states 30 スロットは既存 2 系列と同一〈sliding は window + 8〉）
+//    PLE 表を引く embedding が無い・states 30 スロットは logits opt-in 系列と同一〈sliding は window + 8〉）
 // ② **PLE 逆量子化のビット一致**（ADR 0085 決定 4）: ホスト loader の gather が、台本が torch の
 //    35 表経路で採った `ple.probe.safetensors`（= PLE をグラフに残していたら `embedding` +
 //    直後の `mul` が出していた値そのもの）と**厳密一致**する。GPU を要さない。
@@ -18,11 +19,12 @@
 //    K=16 で厳密一致する。PLE を外に出しても・出口から argmax を外しても**機能が不変**である
 //    ことの証明で、割れたら PLE gather / 逆量子化 / 行選択のどれかの誤り。
 // ④ **出所（provenance）の束縛**: 製品系列が書く `reference.json` が、元チェックポイントの
-//    指紋と③で流用する golden 1 本ずつの digest を持っていること（token-only 系列と同文 —
-//    片方だけ古い組み合わせでも③は緑になれてしまう）。
+//    指紋と③で流用する golden 1 本ずつの digest を持っていること（片方だけ古い組み合わせでも③は
+//    緑になれてしまう）。
 //
 // ホスト側の greedy ループは**この門が自前で組む**。`src/generation/greedy.ts` はグラフ側 argmax
-// 出力を読む形（token-only 出口）で、ホスト sampling を持たない MUST があるため通せない
+// 出力を読む形（token-only 出口 — that exit series was removed on 2026-10-17）で、ホスト sampling を
+// 持たない MUST があるため通せない
 // （製品面の `GenerationSequence` は段 2〜3 の担当 — ADR 0083 決定 1〜8）。chunk の割り方だけは
 // `planPrefillChunks` を共有する（割り方の誤りを期待値側へ写さないため、割り方**以外**は書き下す）。
 //
@@ -61,6 +63,7 @@ import { planPrefillChunks } from "../../models/src/generation/greedy.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 // 全量常駐の予算は helper が正本（同じ式を e2e ごとに写さない）。
 import { allResidentBytes } from "../../models/tests/helpers/ple-budget.ts";
 // 系列出力の容器から PLE の索引と block の読み口を組む（ADR 0109 決定 4）。
@@ -126,12 +129,13 @@ const VOCAB = 262144;
 const HIDDEN = 1536;
 /** 行数記号（`last_row[R]` と出力 2 本の行軸 — exporter の `ROW_SYMBOL`）。 */
 const ROW_SYMBOL = "R";
-/** states スロット本数（所有層 15 × k/v — 既存 2 系列と同一）。 */
+/** states スロット本数（所有層 15 × k/v — logits opt-in 系列と同一）。 */
 const SLOTS = 30;
 
 /**
  * 常駐した圧縮重みの上限（ADR 0085 の主張そのもの — PLE を外して 3.70 → 1.51 GiB）。
- * decode / token-only 系列は同じ観測で 3.0e9 を**超える**ので、この線は両者を分ける。
+ * decode 系列は同じ観測で 3.0e9 を**超える**ので、この線は両者を分ける（the token-only series,
+ * removed on 2026-10-17, sat above it too）。
  */
 const RESIDENT_CEILING = 2_000_000_000;
 
@@ -236,7 +240,7 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> => {
 /**
  * ④ 出所の束縛。③が流用する golden は「この容器を作った実走がその場で digest を採ったもの」で
  * なければならない — logits opt-in 系列を採り直せば digest が動き、この門が落ちて製品系列の
- * 再 export を強制する（token-only 系列の同名門と同文）。
+ * 再 export を強制する（the token-only series' twin gate was removed on 2026-10-17）。
  */
 test({
   name: "Gemma 4 E2B 製品資産: 出所記録が参照 golden を束ねている",
@@ -609,7 +613,7 @@ const i32Row = (rows: number, data: Int32Array<ArrayBuffer>): Tensor => ({
   data,
 });
 
-/** token-only 形と同じ行選択入力（`[1]` の i32）。 */
+/** 行選択入力（`[1]` の i32 — the shape the token-only exit, removed on 2026-10-17, also used）。 */
 const lastRowInput = (row: number): Tensor => ({
   dtype: "i32",
   shape: [1],
@@ -717,22 +721,21 @@ const generate = async (
   }
 };
 
+/**
+ * Default case: the graph form (①) and the residency ceiling (ADR 0085) are structure / gate
+ * checks that do not compare against torch goldens, so they stay in the default run.
+ */
 test({
-  name: "Gemma 4 E2B 製品検収: 交差 parity（実 GPU / ホスト PLE + ホスト argmax）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
+  name: "Gemma 4 E2B 製品検収: 形の前提と常駐の上限（実 GPU）",
+  ignore: !MODEL_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
     const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
     const parsed = prepareContainer(opened, MODEL_GRAPH);
-    const logitsName = parsed.graph.outputs[0];
 
     await t.step("① 形の前提: PLE 外出し + 最終行 logits 出口である", () => {
       assertProductForm(parsed);
     });
 
-    const index = await readPleIndex();
-    // 全 block 常駐（LRU の観測は GPU 不要の②が持つ — こちらは生成の往復で block を
-    // 読み直さないことだけを見る）。
-    const ple = await openPle(allResidentBytes(index));
     const gpu = await acquireGpu();
     const session = await parsed.createContainerSession(gpu);
     try {
@@ -749,7 +752,33 @@ test({
         `[e2e] gemma4 product 常駐: 圧縮 ${storage.residentCompressedBytes} バイト` +
           `（PLE 外出し前の decode 系列は 3.0e9 超）`,
       );
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
 
+/**
+ * Opt-in case: ③ compares the host greedy loop with the torch greedy goldens (upstream parity).
+ * The lazy-load assertions stay here because they observe this generation run; the GPU-free ②
+ * case keeps the LRU policy check in the default run.
+ */
+test({
+  name: `Gemma 4 E2B 製品検収: 交差 parity（実 GPU / ホスト PLE + ホスト argmax）${UPSTREAM_PARITY_OPT_IN}`,
+  ignore: !UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE,
+  fn: async (t) => {
+    const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
+    const parsed = prepareContainer(opened, MODEL_GRAPH);
+    const logitsName = parsed.graph.outputs[0];
+
+    const index = await readPleIndex();
+    // 全 block 常駐（LRU の観測は GPU 不要の②が持つ — こちらは生成の往復で block を
+    // 読み直さないことだけを見る）。
+    const ple = await openPle(allResidentBytes(index));
+    const gpu = await acquireGpu();
+    const session = await parsed.createContainerSession(gpu);
+    try {
       await t.step("③ 3 ケース × 16 step が opt-in 系列の期待列と厳密一致", async () => {
         let totalGathers = 0;
         for (const caseName of EXPECTED_CASES) {

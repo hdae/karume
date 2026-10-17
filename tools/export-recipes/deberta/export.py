@@ -13,7 +13,7 @@ transformers は **5.14.1 でピン**する（`docs/research/2026-08-02-deberta-
 5 項目 — モデリングコードが変わるとグラフ形が変わる）。pyproject.toml / uv.lock には入れず
 `--with` で一時的に足す。
 
-出力レイアウト（Deno 側 `packages/runtime/tests/e2e_deberta_test.ts` が列挙する）:
+出力レイアウト（TS 側 `packages/e2e/tests/e2e_deberta_test.ts` が列挙する）:
 
     outputs/series/deberta/<variant>/model-NNNNN-of-NNNNN.krm 重み・定数 + 2 文書の記述
     outputs/series/deberta/<variant>/io.<case>.safetensors    入力と torch CPU での期待出力

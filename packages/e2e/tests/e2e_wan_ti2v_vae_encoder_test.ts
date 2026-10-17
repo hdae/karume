@@ -123,6 +123,7 @@ import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/c
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
  * 正規化後の潜在の帯（絶対値）。値・導出・故障注入の記録は {@link WAN_I2V_ENCODER_BAND}（I2V の通しの e2e が条件の潜在の
@@ -563,6 +564,101 @@ const vramNote = (sessions: EncoderParts<Session>, residents: EncoderResidents):
 const maxAbsOf = (values: Float32Array): number =>
   values.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
 
+// ---- GPU setup shared by the default case and the opt-in case --------------------------------
+
+/** The opened graphs, the three product Sessions and the residents one GPU case runs on. */
+type EncoderRun = {
+  readonly gpu: GpuContext;
+  readonly opened: EncoderParts<BoundContainer>;
+  readonly models: EncoderParts<PreparedModel>;
+  readonly live: EncoderParts<Session>;
+  readonly outputs: EncoderParts<string>;
+  readonly residents: EncoderResidents;
+};
+
+/**
+ * Opens the three graphs, builds the three product Sessions on one device and hands them to `body`,
+ * so the default case and the opt-in parity case share one lifecycle and one teardown order.
+ */
+const withEncoderSessions = async (body: (run: EncoderRun) => Promise<void>): Promise<void> => {
+  const opened = await openParts();
+  const models = prepareParts(opened);
+  const outputs = {
+    pre: outputOf(models.pre, PRE),
+    attn: outputOf(models.attn, ATTENTION),
+    post: outputOf(models.post, POST),
+  };
+
+  const gpu = verifyRunningGpu(await acquireTestGpu());
+  const residents = new EncoderResidents(gpu);
+  /** 製品の Session 3 本（後始末で畳む — 故障注入の Session は {@link encodeWithRewritten} がその場で畳む）。 */
+  const created: Session[] = [];
+  const createSession = async (model: PreparedModel): Promise<Session> => {
+    const session = await model.createContainerSession(gpu);
+    created.push(session);
+    return session;
+  };
+  let failure: { readonly error: unknown } | undefined;
+  try {
+    const building = performance.now();
+    const live: EncoderParts<Session> = {
+      pre: await createSession(models.pre),
+      attn: await createSession(models.attn),
+      post: await createSession(models.post),
+    };
+    console.log(
+      `[wan-ti2v-vae-encoder] Session 3 本の構築 ${(performance.now() - building).toFixed(0)} ms`,
+    );
+    await body({ gpu, opened, models, live, outputs, residents });
+  } catch (error) {
+    failure = { error };
+    throw error;
+  } finally {
+    // MUST: Session → 常駐 → device の順で畳む（常駐は Session の焼き込みから参照されるので Session を先に畳む。
+    // 1 段が落ちても残りの段を必ず通し、畳む失敗で本体の失敗を上書きしない）。
+    await disposeSteps([
+      () => {
+        if (failure !== undefined) throw failure.error;
+      },
+      ...created.map((session) => () => session.dispose()),
+      () => residents.dispose(),
+      () => settleReleases(gpu),
+      () => gpu.destroy(),
+    ]);
+  }
+};
+
+/** One golden case encoded through the product Sessions. */
+type EncodedCase = {
+  readonly golden: EncoderGolden;
+  readonly mu: Float32Array<ArrayBuffer>;
+  readonly latent: Float32Array;
+  readonly encodeMs: number;
+};
+
+/**
+ * Reads the golden, asserts that the TS preprocessing is bit-identical to its encoder input (the GPU
+ * gets the TS output, as in the product path), encodes that input and normalizes the mu.
+ */
+const encodeCase = async (run: EncoderRun, testCase: EncoderCase): Promise<EncodedCase> => {
+  const golden = await readGolden(testCase);
+  const input = encoderInputOf(testCase, golden.rgb8);
+  const mismatch = firstBitMismatch(input, golden.encoderInput);
+  assertEquals(mismatch, -1, `${testCase.name}: TS の前処理が golden の encoder 入力と割れる`);
+  const started = performance.now();
+  const mu = await encodeOnGpu(run.gpu, run.live, run.outputs, run.residents, input, testCase);
+  const encodeMs = performance.now() - started;
+  return {
+    golden,
+    mu,
+    latent: normalizeWanLatents(mu, WAN22_TI2V_GENERATION.latents),
+    encodeMs,
+  };
+};
+
+const nonFiniteCountOf = (values: Float32Array): number =>
+  values.reduce((count, value) => (Number.isFinite(value) ? count : count + 1), 0);
+
 // ---- テスト -----------------------------------------------------------------------------------
 
 test({
@@ -574,46 +670,19 @@ test({
   },
 });
 
+// Default run: the I/O contract, the bit identity of the TS preprocessing with the golden encoder
+// input, a finite mu and the fused-attention census, for all 9 cases through one Session per graph
+// (so a binding change that carries over the previous plan still fails or goes non-finite here).
+// It owns the per-case results.json ids; the band comparison with the diffusers mu is the opt-in
+// case below.
 test({
   name:
-    "Wan2.2 TI2V VAE encoder: pre → attn → post（常駐の受け渡し）の mu の正規化が上流の非タイル encode と" +
-    "帯の中で一致し、故障注入は帯の外（実 GPU）",
+    "Wan2.2 TI2V VAE encoder: pre → attn → post（常駐の受け渡し）の取り決め・TS の前処理のビット一致・" +
+    "mu の有限性・融合 attention の 3 段（実 GPU）",
   ignore: !ALL_ASSETS || !GPU_AVAILABLE,
   fn: async (t) => {
-    assert(FAULT_CASE !== undefined, "故障注入のケースが表に無い");
-    const opened = await openParts();
-    const models = prepareParts(opened);
-    const outputs = {
-      pre: outputOf(models.pre, PRE),
-      attn: outputOf(models.attn, ATTENTION),
-      post: outputOf(models.post, POST),
-    };
-    /** ケースごとの maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
-    const observed = new Map<string, number>();
-    /** 受入れ（故障注入の入力）の正しい mu（std と 1/std の取り違えの注入に使う）。 */
-    let faultMu: Float32Array<ArrayBuffer> | undefined;
-
-    const gpu = verifyRunningGpu(await acquireTestGpu());
-    const residents = new EncoderResidents(gpu);
-    /** 製品の Session 3 本（後始末で畳む — 故障注入の Session は {@link encodeWithRewritten} がその場で畳む）。 */
-    const created: Session[] = [];
-    const createSession = async (model: PreparedModel): Promise<Session> => {
-      const session = await model.createContainerSession(gpu);
-      created.push(session);
-      return session;
-    };
-    let failure: { readonly error: unknown } | undefined;
-    try {
-      const building = performance.now();
-      const live: EncoderParts<Session> = {
-        pre: await createSession(models.pre),
-        attn: await createSession(models.attn),
-        post: await createSession(models.post),
-      };
-      console.log(
-        `[wan-ti2v-vae-encoder] Session 3 本の構築 ${(performance.now() - building).toFixed(0)} ms`,
-      );
-
+    await withEncoderSessions(async (run) => {
+      const { models, live, residents } = run;
       await t.step("取り決め: 入出力の名前と形・記号（pre [h,w]・attn [S]・post [h,w]）", () => {
         const io = (model: PreparedModel, part: string) => ({
           symbols: [...model.graph.symbols],
@@ -642,46 +711,22 @@ test({
       for (const testCase of CASES) {
         await t.step(
           `${testCase.name}（${testCase.role}）: TS の前処理が golden の encoder 入力とビット一致し、` +
-            "正規化した mu が帯の中",
+            "mu が有限で融合 attention の 3 段を通る",
           async () => {
-            await runRecordedCase(results, { id: testCase.name }, async ({ measurements }) => {
-              const golden = await readGolden(testCase);
-              const input = encoderInputOf(testCase, golden.rgb8);
-              const mismatch = firstBitMismatch(input, golden.encoderInput);
-              assertEquals(
-                mismatch,
-                -1,
-                `${testCase.name}: TS の前処理が golden の encoder 入力と割れる`,
-              );
-
+            await runRecordedCase(results, { id: testCase.name }, async () => {
               const sizeKey = `${testCase.width}x${testCase.height}`;
               const cold = !seenSizes.has(sizeKey);
               seenSizes.add(sizeKey);
-              const started = performance.now();
-              const mu = await encodeOnGpu(gpu, live, outputs, residents, input, testCase);
-              const encodeMs = performance.now() - started;
-              const latent = normalizeWanLatents(mu, WAN22_TI2V_GENERATION.latents);
-              const report = allclose(latent, golden.latent, TOLERANCE);
-              const muReport = allclose(mu, golden.mu, { atol: Number.POSITIVE_INFINITY, rtol: 0 });
+              const { latent, encodeMs } = await encodeCase(run, testCase);
+              const nonFinite = nonFiniteCountOf(latent);
               const attention = attentionPipelines(live.attn.diagnostics());
-              measurements.push({
-                output: "latent",
-                maxAbs: report.maxAbsError,
-                maxRel: report.maxRelError,
-                tolerance: TOLERANCE,
-                stage: "karume",
-              });
-              const line = `${testCase.name}: latent maxAbs=${report.maxAbsError} refMax=${maxAbsOf(
-                golden.latent,
-              )} / mu maxAbs=${muReport.maxAbsError} refMax=${maxAbsOf(
-                golden.mu,
-              )} nonFinite=${report.nonFiniteCount} encodeMs=${encodeMs.toFixed(0)}${
+              const line = `${testCase.name}: nonFinite=${nonFinite} encodeMs=${encodeMs.toFixed(0)}${
                 cold ? "（寸法の 1 本目）" : ""
               } / ${vramNote(live, residents)} / attention ${JSON.stringify(
                 attention.dispatches,
               )} ${attention.keys.join(" ")}`;
               console.log(`[wan-ti2v-vae-encoder] ${line}`);
-              assertEquals(report.nonFiniteCount, 0, `${testCase.name}: 非有限`);
+              assertEquals(nonFinite, 0, `${testCase.name}: 非有限`);
               // mid の attention（D = 640・S = h·w）が融合 attention の 3 段を通る（モジュール doc）。行統計の
               // 変種は S で変わるので寸法ごとに見る。
               for (const kernel of ATTENTION_KERNELS) {
@@ -692,20 +737,57 @@ test({
                   )}）`,
                 );
               }
-              observed.set(testCase.name, report.maxAbsError);
-              if (testCase === FAULT_CASE) faultMu = mu;
-              if (BAND === undefined) {
-                throw new Error(
-                  `${testCase.name}: 帯が未導出（maxAbs ${report.maxAbsError}）— 決定用の最悪 × 5 を帯の定数へ` +
-                    "書く（帯の候補は最後の step が出す）",
-                );
-              }
-              assert(
-                report.pass,
-                `${testCase.name}: maxAbs ${report.maxAbsError} が帯 ${BAND} の外`,
-              );
               return { status: "pass", note: line };
             });
+          },
+        );
+      }
+    });
+  },
+});
+
+// Upstream parity (the normalized mu against the diffusers non-tiled encode under the absolute
+// band), so it is opt-in, together with the fault injections that only prove the band is live and
+// the band-candidate step. It writes the fault/* and band-candidate results.json ids; the per-case
+// ids belong to the default case above, and writing them here would duplicate its settlements.
+test({
+  name:
+    "Wan2.2 TI2V VAE encoder: pre → attn → post（常駐の受け渡し）の mu の正規化が上流の非タイル encode と" +
+    `帯の中で一致し、故障注入は帯の外（実 GPU）${UPSTREAM_PARITY_OPT_IN}`,
+  ignore: !ALL_ASSETS || !GPU_AVAILABLE || !UPSTREAM_PARITY,
+  fn: async (t) => {
+    assert(FAULT_CASE !== undefined, "故障注入のケースが表に無い");
+    await withEncoderSessions(async (run) => {
+      const { gpu, opened, live, outputs, residents } = run;
+      /** ケースごとの maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
+      const observed = new Map<string, number>();
+      /** 受入れ（故障注入の入力）の正しい mu（std と 1/std の取り違えの注入に使う）。 */
+      let faultMu: Float32Array<ArrayBuffer> | undefined;
+
+      for (const testCase of CASES) {
+        await t.step(
+          `${testCase.name}（${testCase.role}）: TS の前処理が golden の encoder 入力とビット一致し、` +
+            "正規化した mu が帯の中",
+          async () => {
+            const { golden, mu, latent } = await encodeCase(run, testCase);
+            const report = allclose(latent, golden.latent, TOLERANCE);
+            const muReport = allclose(mu, golden.mu, { atol: Number.POSITIVE_INFINITY, rtol: 0 });
+            const line = `${testCase.name}: latent maxAbs=${report.maxAbsError} refMax=${maxAbsOf(
+              golden.latent,
+            )} / mu maxAbs=${muReport.maxAbsError} refMax=${maxAbsOf(
+              golden.mu,
+            )} nonFinite=${report.nonFiniteCount}`;
+            console.log(`[wan-ti2v-vae-encoder] ${line}`);
+            assertEquals(report.nonFiniteCount, 0, `${testCase.name}: 非有限`);
+            observed.set(testCase.name, report.maxAbsError);
+            if (testCase === FAULT_CASE) faultMu = mu;
+            if (BAND === undefined) {
+              throw new Error(
+                `${testCase.name}: 帯が未導出（maxAbs ${report.maxAbsError}）— 決定用の最悪 × 5 を帯の定数へ` +
+                  "書く（帯の候補は最後の step が出す）",
+              );
+            }
+            assert(report.pass, `${testCase.name}: maxAbs ${report.maxAbsError} が帯 ${BAND} の外`);
           },
         );
       }
@@ -873,21 +955,6 @@ test({
           );
         });
       }
-    } catch (error) {
-      failure = { error };
-      throw error;
-    } finally {
-      // MUST: Session → 常駐 → device の順で畳む（常駐は Session の焼き込みから参照されるので Session を先に畳む。
-      // 1 段が落ちても残りの段を必ず通し、畳む失敗で本体の失敗を上書きしない）。
-      await disposeSteps([
-        () => {
-          if (failure !== undefined) throw failure.error;
-        },
-        ...created.map((session) => () => session.dispose()),
-        () => residents.dispose(),
-        () => settleReleases(gpu),
-        () => gpu.destroy(),
-      ]);
-    }
+    });
   },
 });

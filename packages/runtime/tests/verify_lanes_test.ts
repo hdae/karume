@@ -20,7 +20,14 @@
 // glob の展開はこの門が自前で行う（`*` は `/` を跨がず、区切りを伴う `**` は 0 個以上のディレクトリ）。
 
 import { readDirSync } from "@karume/test-support/fs";
-import { ALL_TESTS, laneProjects, LANES, type Lane } from "@karume/test-support/lanes";
+import {
+  ALL_TESTS,
+  defaultLanes,
+  laneProjects,
+  LANES,
+  type Lane,
+  LOW_PRIORITY_FAMILIES,
+} from "@karume/test-support/lanes";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import viteConfig from "../../../vite.config.ts";
@@ -197,8 +204,29 @@ test("レーンの門: Vitest の設定は projects を LANES から作り、wor
   assertEquals(projects, laneProjects(), "vite.config.ts の projects が LANES と食い違う");
   assertEquals(
     laneProjects().map((project) => project.test.name),
+    defaultLanes().map((lane) => lane.name),
+  );
+});
+
+test("レーンの門: 既定で走らせないファミリーはレーン表にあり、KARUME_ALL_FAMILIES=1 のときだけ projects に入る", () => {
+  const lowPriority = LOW_PRIORITY_FAMILIES.map((family) => `models:${family}`);
+  for (const name of lowPriority) {
+    assert(
+      LANES.some((lane) => lane.name === name),
+      `${name} が LANES に無い（core が拾ってしまう）`,
+    );
+  }
+  const without = laneProjects({}).map((project) => project.test.name);
+  const withAll = laneProjects({ KARUME_ALL_FAMILIES: "1" }).map((project) => project.test.name);
+  assertEquals(
+    without.filter((name) => lowPriority.includes(name)),
+    [],
+  );
+  assertEquals(
+    withAll,
     LANES.map((lane) => lane.name),
   );
+  assertEquals(without.length + lowPriority.length, withAll.length);
 });
 
 test("レーン解析: glob は * と **/ と {a,b} だけを展開する", () => {

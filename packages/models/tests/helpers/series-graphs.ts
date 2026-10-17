@@ -32,7 +32,6 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   "embeddinggemma-300m": { "": "model" },
   "gemma4-e2b": { "": "model" },
   "gemma4-e2b-decode": { "": "model" },
-  "gemma4-e2b-decode-token": { "": "model" },
   "gemma4-e2b-drafter": { "": "drafter" },
   "gemma4-e2b-product": { "": "model" },
   "gemma4-qat-e2b-product": { "": "model" },

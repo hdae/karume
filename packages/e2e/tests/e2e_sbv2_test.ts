@@ -18,6 +18,11 @@
 // （tests/gpu_gate_test.ts）は *GPU アダプタの有無* だけを見ており、この SKIP とは独立。
 // 逆に、資産が**中途半端に**存在する場合（ターゲット欠け / ケース欠け）は SKIP ではなく
 // FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
+//
+// Upstream parity is opt-in (helpers/upstream-parity.ts): the default run keeps the asset
+// completeness gates and the per-case structure checks (tolerance table length, storage dtype set,
+// io keys, output shape / dtype on the real GPU); the per-output tolerance comparison with the
+// torch CPU goldens runs only with KARUME_UPSTREAM_PARITY=1.
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
@@ -40,6 +45,7 @@ import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesComponents, seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
  * 実重み SBV2 dp の torch CPU 期待値との突合に使う許容誤差。
@@ -654,6 +660,109 @@ const modelUrl = (root: URL, target: string): URL => new URL(`${target}/${MODEL_
  */
 const results = openResults("sbv2-golden");
 
+/**
+ * Loads one golden case, runs it on the GPU and asserts everything except the tolerance
+ * comparison (tolerance table length, storage dtype set, io keys, output keys / shape / dtype).
+ * Both the default structure case and the opt-in parity case go through here, so the parity case
+ * keeps every assertion it had before the split.
+ */
+const runGoldenCase = async (
+  series: Sbv2Series,
+  target: string,
+  caseName: string,
+  ioFile: string,
+) => {
+  const [opened, ioBytes] = await Promise.all([
+    openSeriesContainer(modelUrl(series.root, target)),
+    readBuffer(series.root, target, ioFile),
+  ]);
+  const parsed = prepareContainer(opened, seriesGraph(series.directory, target));
+  const io = parseSafetensors(ioBytes);
+  // Object.hasOwn で見る（素の `tolerances[target]` はプロトタイプ由来のキーを拾う）。
+  assert(
+    Object.hasOwn(series.tolerances, target),
+    `${series.name} 系列の ${target} の tolerance が無い`,
+  );
+  const tolerances = series.tolerances[target];
+  // 出力ごとに値域が違う（front の logs_p は他 3 本より 1 桁小さい）ので、本数が
+  // 合っていない表は「別の出力の閾値で突合する」形で静かに通ってしまう。
+  assertEquals(
+    tolerances.length,
+    parsed.graph.outputs.length,
+    `${series.name}/${target} の tolerance 本数が IR 出力数と違う`,
+  );
+
+  // 系列と資産の格納 dtype が一致する（root 取り違え / 圧縮の掛け忘れの唯一の検出器
+  // — 上の `compressedStorage` の MUST）。適格スロットは 5 ターゲットとも複数あるので、
+  // 「現れた圧縮 dtype の集合」が系列の宣言とちょうど一致することを見る（本数ではなく
+  // 集合で見るのは、f16 系列に i8 資産が混ざる形を「圧縮が 1 本以上ある」で通さないため）。
+  // NOTE: `i32` 格納（記号依存定数 — ADR 0010）は圧縮ではないのでここでは数えない。
+  const compressed = [
+    ...new Set(
+      Object.values(parsed.graph.initializers)
+        .flatMap((initializer) =>
+          initializer.storage === undefined ? [] : [codecLayout(initializer.storage.codec)],
+        )
+        .filter((layout) => layout === "f16" || layout === "i8"),
+    ),
+  ].sort();
+  assertEquals(
+    compressed,
+    series.compressedStorage === undefined ? [] : [series.compressedStorage],
+    `${series.name}/${target}: 圧縮格納 dtype の集合が系列と食い違う`,
+  );
+  // NOTE: i8 の companion scale（ADR 0019）の実在はここでは見ない。容器では束縛表が
+  // scale を block id で指し、`openContainer` の合流層が目次との突合と長さ検査
+  // （行数 × group 数 × 4）まで済ませている（container-v1 §5 / §7）ので、宣言と実体を
+  // 別々に見る門は恒真になる。旧 shard 形ではこの 2 つが独立だったため門があった。
+
+  // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+  const expectedKeys = [
+    ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
+    ...parsed.graph.outputs.map((_, index) => `output.${index}`),
+  ].sort();
+  assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${ioFile} のテンソルキー`);
+
+  // 記号次元 P は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
+  // ケースごとに P が違う（2 / 37 / 203 / 512 / 16）ので、宣言上限 Pmax = 512 に
+  // 依存した実装（プランを Pmax で組む等）はここで値か shape が壊れる。
+  const inputs: Record<string, Tensor> = {};
+  for (const spec of parsed.graph.inputs) {
+    const view = io.tensors.get(`input.${spec.name}`);
+    assert(view !== undefined, `input.${spec.name} が ${ioFile} に無い`);
+    inputs[spec.name] = ioTensor(io, view, spec.dtype);
+  }
+
+  const gpu = await acquireGpu();
+  // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
+  // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
+  // （known-issues の遅延解放）。
+  try {
+    // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+    // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+    assertAdapterMatchesEnvironment(gpu);
+    const session = await parsed.createContainerSession(gpu);
+    try {
+      const outputs = await session.run(inputs);
+      assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+
+      parsed.graph.outputs.forEach((name, index) => {
+        const view = io.tensors.get(`output.${index}`);
+        assert(view !== undefined, `output.${index} が ${ioFile} に無い`);
+        const where = `${series.name}/${target}/${caseName} output.${index} ('${name}')`;
+        const declared = parsed.graph.values[name].dtype;
+        assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+        assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+      });
+      return { parsed, io, outputs, tolerances };
+    } finally {
+      await session.dispose();
+    }
+  } finally {
+    gpu.destroy();
+  }
+};
+
 for (const series of SERIES) {
   const targets = discoverTargets(series.root);
   const cases = targets.flatMap((target) => discoverCases(series.root, target));
@@ -702,112 +811,47 @@ for (const series of SERIES) {
   for (const { target, caseName, ioFile } of cases) {
     /** ケース ID（系列 / ターゲットが違えば同じケース名があるので組で持つ）。 */
     const caseId = `${series.name}/${target}/${caseName}`;
+    // Default run: everything except the tolerance comparison (tolerance table length, storage
+    // dtype set, io key correspondence, output keys / shape / dtype).
     test({
-      name: `SBV2 golden 突合: ${series.name} / ${target} / ${caseName}（実 GPU / torch CPU 期待値）`,
+      name: `SBV2 golden 構造: ${series.name} / ${target} / ${caseName}（実 GPU / 格納 dtype・shape・dtype）`,
       ignore: !available || !GPU_AVAILABLE,
       fn: async () => {
+        await runGoldenCase(series, target, caseName, ioFile);
+      },
+    });
+    // Opt-in: the per-output comparison with the torch CPU goldens under the series' tolerance
+    // table. The results.json entry keeps the case id `caseId`.
+    test({
+      name: `SBV2 golden 突合: ${series.name} / ${target} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+      ignore: !UPSTREAM_PARITY || !available || !GPU_AVAILABLE,
+      fn: async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
-          const [opened, ioBytes] = await Promise.all([
-            openSeriesContainer(modelUrl(series.root, target)),
-            readBuffer(series.root, target, ioFile),
-          ]);
-          const parsed = prepareContainer(opened, seriesGraph(series.directory, target));
-          const io = parseSafetensors(ioBytes);
-          // Object.hasOwn で見る（素の `tolerances[target]` はプロトタイプ由来のキーを拾う）。
-          assert(
-            Object.hasOwn(series.tolerances, target),
-            `${series.name} 系列の ${target} の tolerance が無い`,
+          const { parsed, io, outputs, tolerances } = await runGoldenCase(
+            series,
+            target,
+            caseName,
+            ioFile,
           );
-          const tolerances = series.tolerances[target];
-          // 出力ごとに値域が違う（front の logs_p は他 3 本より 1 桁小さい）ので、本数が
-          // 合っていない表は「別の出力の閾値で突合する」形で静かに通ってしまう。
-          assertEquals(
-            tolerances.length,
-            parsed.graph.outputs.length,
-            `${series.name}/${target} の tolerance 本数が IR 出力数と違う`,
-          );
-
-          // 系列と資産の格納 dtype が一致する（root 取り違え / 圧縮の掛け忘れの唯一の検出器
-          // — 上の `compressedStorage` の MUST）。適格スロットは 5 ターゲットとも複数あるので、
-          // 「現れた圧縮 dtype の集合」が系列の宣言とちょうど一致することを見る（本数ではなく
-          // 集合で見るのは、f16 系列に i8 資産が混ざる形を「圧縮が 1 本以上ある」で通さないため）。
-          // NOTE: `i32` 格納（記号依存定数 — ADR 0010）は圧縮ではないのでここでは数えない。
-          const compressed = [
-            ...new Set(
-              Object.values(parsed.graph.initializers)
-                .flatMap((initializer) =>
-                  initializer.storage === undefined ? [] : [codecLayout(initializer.storage.codec)],
-                )
-                .filter((layout) => layout === "f16" || layout === "i8"),
-            ),
-          ].sort();
-          assertEquals(
-            compressed,
-            series.compressedStorage === undefined ? [] : [series.compressedStorage],
-            `${series.name}/${target}: 圧縮格納 dtype の集合が系列と食い違う`,
-          );
-          // NOTE: i8 の companion scale（ADR 0019）の実在はここでは見ない。容器では束縛表が
-          // scale を block id で指し、`openContainer` の合流層が目次との突合と長さ検査
-          // （行数 × group 数 × 4）まで済ませている（container-v1 §5 / §7）ので、宣言と実体を
-          // 別々に見る門は恒真になる。旧 shard 形ではこの 2 つが独立だったため門があった。
-
-          // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
-          const expectedKeys = [
-            ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
-            ...parsed.graph.outputs.map((_, index) => `output.${index}`),
-          ].sort();
-          assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${ioFile} のテンソルキー`);
-
-          // 記号次元 P は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
-          // ケースごとに P が違う（2 / 37 / 203 / 512 / 16）ので、宣言上限 Pmax = 512 に
-          // 依存した実装（プランを Pmax で組む等）はここで値か shape が壊れる。
-          const inputs: Record<string, Tensor> = {};
-          for (const spec of parsed.graph.inputs) {
-            const view = io.tensors.get(`input.${spec.name}`);
-            assert(view !== undefined, `input.${spec.name} が ${ioFile} に無い`);
-            inputs[spec.name] = ioTensor(io, view, spec.dtype);
-          }
-
-          const gpu = await acquireGpu();
-          // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
-          // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
-          // （known-issues の遅延解放）。
-          try {
-            // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
-            // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
-            assertAdapterMatchesEnvironment(gpu);
-            const session = await parsed.createContainerSession(gpu);
-            try {
-              const outputs = await session.run(inputs);
-              assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
-
-              parsed.graph.outputs.forEach((name, index) => {
-                const view = io.tensors.get(`output.${index}`);
-                assert(view !== undefined, `output.${index} が ${ioFile} に無い`);
-                const where = `${series.name}/${target}/${caseName} output.${index} ('${name}')`;
-                const declared = parsed.graph.values[name].dtype;
-                assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-                assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-                const report = compareTensors(
-                  outputs[name],
-                  ioTensor(io, view, declared),
-                  tolerances[index],
-                );
-                measurements.push({
-                  output: name,
-                  maxAbs: report.maxAbsError,
-                  maxRel: report.maxRelError,
-                  tolerance: tolerances[index],
-                  stage: "karume",
-                });
-                assert(report.pass, `${where}: ${formatAllclose(report)}`);
-              });
-            } finally {
-              await session.dispose();
-            }
-          } finally {
-            gpu.destroy();
-          }
+          parsed.graph.outputs.forEach((name, index) => {
+            const view = io.tensors.get(`output.${index}`);
+            assert(view !== undefined, `output.${index} が ${ioFile} に無い`);
+            const where = `${series.name}/${target}/${caseName} output.${index} ('${name}')`;
+            const declared = parsed.graph.values[name].dtype;
+            const report = compareTensors(
+              outputs[name],
+              ioTensor(io, view, declared),
+              tolerances[index],
+            );
+            measurements.push({
+              output: name,
+              maxAbs: report.maxAbsError,
+              maxRel: report.maxRelError,
+              tolerance: tolerances[index],
+              stage: "karume",
+            });
+            assert(report.pass, `${where}: ${formatAllclose(report)}`);
+          });
         });
       },
     });

@@ -37,15 +37,6 @@
  *   step が帯の候補を出す（{@link bandCandidate}）。計画・縮退門・非有限 0・device lost なしは未導出の回でも緑に
  *   なる（それぞれ独立の step）。最初の実走が導いた値を、実測の表と一緒に定数へ書く。
  *
- * ## 観測（門ではない）
- *
- * - band の壁時計（cache のゼロ化のホスト書き込み・タイル間の毒値の書き込み・ホストの貼り合わせを含む）。
- * - VRAM の山: `monitorDrmUsage`（`helpers/drm-usage.ts` — 区間ごとの fdinfo の山）と、診断から足し上げた内訳
- *   （`vramBreakdown` + タイルの頭の cache のゼロ化の staging）を、見積り（{@link VRAM_ESTIMATE_GIB}）と並べる。
- * - `accept` の非タイルの上流 decode（`frames_full` — patchify 空間・クランプ前）との差（クランプ前とクランプ後）。
- *   タイル化は近似（受容野がタイル内に閉じる）なので 0 にならない。accept の判定とは別の step で出す（観測の側で
- *   落ちても accept の maxAbs と非有限の数は記録に残る）。
- *
  * ## 資産
  *
  * タイル参照 `vae_tiles.*` は chunk グラフの組とは別の在否の組: 3 本とも無ければ明示 SKIP・一部だけなら FAIL
@@ -56,7 +47,7 @@
  *
  * ## Chunk sequence (ADR 0121 stage 4 acceptance)
  *
- * The two GPU tests placed before the tile decode test check the chunk graphs without a tile plan. They keep
+ * The GPU tests placed before the tile decode tests check the chunk graphs without a tile plan. They keep
  * their own band ({@link CHUNK_BAND}), cases (`WAN_TI2V_VAE_CASES`) and results family (`wan-ti2v-vae-chunks`),
  * separate from the tile decode's.
  *
@@ -98,25 +89,21 @@
  *   積むことを門にする（ADR 0121 決定 6 は D の上限の検査が無いまま D = 1024 の実測を段 4 に残した — 値の正しさは
  *   帯が見るが、融合の経路を通ったかは帯からは分からない）。計画の census が無い run は 0 本と数えずに赤にする。
  *
- * ### 記録（門ではない — ADR 0121 段 4 の追記へ写す）
- *
- * - VRAM の内訳（重み・backing・cache・フレーム・読み戻しの staging）・融合 attention の 3 段の dispatch 本数と
- *   パイプラインキー・融合の件数・submit の統計。
- * - 1 submit の GPU 時間の最大（B570 は 1 submit 5 s で device lost）: timestamp は計測モード（`gpuTiming`）の
- *   device でしか取れず、その device では batch を開けない（runtime の `GpuContext.beginBatch`）。なので別のテストで、
- *   同じ 2 グラフを `Session.run`（chunk 1 本 = run 1 回・cache はゼロの常駐）で回して測る（値の照合はしない）。
- *   run 1 回目は実測の裏付けが無い初期のチャンク（`initialChunkSize` 本ずつ）、run 2 回目は時間予算で切ったチャンク。
- *   単発 dispatch の最大は経路に依らない。
- * - NOTE: 裏付け前の submit の最大は batch の経路の**近似**。batch の経路も最初のタイルは裏付け前のチャンクで切る
- *   （裏付けの窓は `BatchScope.finish` で閉じる — runtime の `gpu/submit.ts` の H-5 の注記）が、スケジューラは Session
- *   ごとで、詰めかけのチャンクを enqueue をまたいで持ち越すので、チャンクの切れ目が chunk 境界をまたぎ、最も重い
- *   submit の顔ぶれが run の経路と一致しない。
- * - 計測モードのテストはファイルの先頭に置く（batch の経路の照合より先に走る — 1 submit が長すぎて照合の device が
- *   落ちる回でも、その前に dispatch と submit の時間が残る）。In this file it is the first GPU test: only the
- *   GPU-free tests precede it, and both batch-path tests (chunk sequence, tile decode) follow it.
- *
  * 資産が揃っていない環境と GPU 無し環境は明示 SKIP。資産の完全性（一部だけある環境は FAIL）は GPU 不要のホスト
  * テスト（`wan_ti2v_vae_chunks_host_test.ts`）が見る。
+ *
+ * ## Default run and opt-in upstream parity (maintainer ruling 2026-10-17)
+ *
+ * Every comparison with an upstream reference under a band (the chunk sequence against the diffusers
+ * `_decode`, the tile decode and the accept RGB against the recipe's upstream tiled reference), the
+ * fault injections that only prove those bands are live (the cache faults and the seam faults), and
+ * the band-candidate steps are opt-in behind `KARUME_UPSTREAM_PARITY=1` (`helpers/upstream-parity.ts`).
+ * The default run keeps the checks that do not depend on a band: the asset gates, the GPU-free
+ * unpatchify Uint32 identity with `frames_rgb`, the chunk layout and cache size, the fused-attention
+ * census, the fault loop's Uint32 identity with the product path, the `copyOutputs` rejection, the
+ * TS/Python plan equality, the degenerate Uint32 gate, and every case decoded from NaN-poisoned
+ * frames with 0 non-finite and no device lost. The record-only cases (the measured-mode submit GPU
+ * time, the VRAM and submit statistics, the untiled `frames_full` observation) are removed.
  */
 
 import { readFile } from "@karume/test-support/fs";
@@ -124,6 +111,7 @@ import { test, type TestContext } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import {
   ExecutionError,
+  type GpuContext,
   parseSafetensors,
   prepareContainer,
   type Session,
@@ -131,17 +119,15 @@ import {
 } from "@karume/runtime";
 import {
   decodeWanVaeTile,
-  WAN_VAE_LATENT_INPUT,
   WanVaeChunkCaches,
   wanVaeChunkCount,
   wanVaeChunkLayout,
+  type WanVaeChunkLayout,
   wanVaeFrameCount,
-  wanVaeLatentChunk,
 } from "../../models/src/wan/vae-chunks.ts";
 import type { PlanLayout } from "../../models/src/wan/plan.ts";
 import {
   assembleWanVaeTiles,
-  clampWanVaeFrames,
   decodeWanVaeTiled,
   decodeWanVaeTiles,
   wanVaeBlendExtentAt,
@@ -156,20 +142,14 @@ import {
   wanSpatialCompression,
 } from "../../models/src/wan/tile-decode.ts";
 import { disposeSteps } from "../../models/src/session/dispose-steps.ts";
-import {
-  type DrmTimeline,
-  formatDrmUsage,
-  monitorDrmUsage,
-} from "../../models/tests/helpers/drm-usage.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
-import { lookupTimestampUnitNs } from "../../models/tests/helpers/timestamp-unit.ts";
 import {
   bitsEqual,
   decodeWithFault,
   type Fault,
+  type Fixture,
   readFixture,
-  vramBreakdown,
 } from "../../models/tests/helpers/wan-vae-chunk-loop.ts";
 import {
   ti2vVaeAssets,
@@ -198,16 +178,13 @@ import {
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
-import {
-  assertAdapterMatchesEnvironment,
-  ENVIRONMENT,
-  verifyRunningGpu,
-} from "../../runtime/tests/helpers/environment.ts";
+import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import {
   openResults,
   type RecordedCase,
   runRecordedCase,
 } from "../../runtime/tests/helpers/results.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
  * タイル decode の帯（絶対値 — 出力はクランプ前の patchify 空間のフレーム）。`undefined` = 未導出（モジュール doc
@@ -228,8 +205,6 @@ const TOLERANCE: Tolerance = { atol: BAND ?? Number.POSITIVE_INFINITY, rtol: 0 }
 const OWNER = "WanTi2vPipeline";
 /** RGB のチャネル数（unpatchify の後の `frames_rgb` の先頭の次元）。 */
 const RGB_CHANNELS = 3;
-/** VAE 段の VRAM の見積り（段 4 の診断の合計 3.99 GiB + cache のゼロ化の staging 0.44 GiB — ADR 0121 段 5 の設計）。 */
-const VRAM_ESTIMATE_GIB = "4.2〜4.5";
 
 type CaseName = Ti2vVaeTileCase["name"];
 
@@ -411,14 +386,20 @@ const poisonFrames = async (caches: WanVaeChunkCaches, chunks: number): Promise<
   }
 };
 
+/**
+ * `onTile` の口: 最後のタイルを除き、次のタイルの decode の前にフレームの常駐を毒値で埋め直す（タイルの出力は
+ * `decodeWanVaeTile` が読み戻した後なので、決着したタイルの値は壊さない）。
+ */
+const poisonBetweenTiles =
+  (caches: WanVaeChunkCaches, plan: WanVaeTilePlan, chunks: number) => async (tile: number) => {
+    if (tile < wanVaeTileCount(plan)) await poisonFrames(caches, chunks);
+  };
+
 /** 有効数字 2 桁への切り上げ（段 2 / 4 の e2e の帯の候補と同じ規則）。 */
 const roundUpTwoDigits = (value: number): number => {
   const unit = 10 ** (Math.floor(Math.log10(value)) - 1);
   return Number((Math.ceil(value / unit) * unit).toPrecision(2));
 };
-
-const GIB = 1024 ** 3;
-const gib = (bytes: number): string => (bytes / GIB).toFixed(3);
 
 const results = openResults("wan-ti2v-vae-tiles");
 
@@ -560,177 +541,70 @@ const attentionPipelines = (graph: string, diagnostics: SessionDiagnostics) => {
   };
 };
 
-/** submit の統計（計測なしの device で読める席 — 1 submit の GPU 時間は計測モードのテスト）。 */
-const submitStats = (diagnostics: SessionDiagnostics): string => {
-  const { submit } = diagnostics;
-  const budget = submit.chunkBudget;
-  return [
-    `submit ${submit.submitCount} 本・dispatch ${submit.dispatchCount} 本・窓 ${submit.measuredCount} 本`,
-    `窓平均の最大 ${budget.maxWindowMeanMs?.toFixed(1) ?? "—"} ms`,
-    `推定の最大 ${budget.maxEstimatedMs?.toFixed(1) ?? "—"} ms`,
-    `予算超過 ${budget.overBudgetChunks} 本（予算 ${budget.budgetMs} ms）`,
-  ].join("・");
+/** The two product Sessions, the cache residents and the fixtures one chunk-sequence case runs on. */
+type ChunkRun = {
+  readonly gpu: GpuContext;
+  readonly layout: WanVaeChunkLayout;
+  readonly sessions: { readonly first: Session; readonly next: Session };
+  readonly caches: WanVaeChunkCaches;
+  readonly fixtures: Readonly<Record<ChunkCaseName, Fixture>>;
 };
 
 /**
- * 計測モードの 1 submit の GPU 時間の記録（timestamp の単位は環境キーの表から — 表に無い環境は換算を推測せず
- * 生の値で出す）。
+ * Opens the two chunk graphs and the chunk fixtures, builds both product Sessions and the cache
+ * residents on one device and hands them to `body`, so the default case and the opt-in parity case
+ * share one lifecycle and one teardown order.
  */
-const submitGpuNote = (diagnostics: SessionDiagnostics, unitNs: number | undefined): string => {
-  const observed = diagnostics.submit.chunkBudget.submitGpuTime;
-  if (observed === undefined) throw new Error("計測モードなのに submit の GPU 時間が無い");
-  const time = (value: number): string =>
-    unitNs === undefined
-      ? `${value} tick（換算の表に無い環境）`
-      : `${((value * unitNs) / 1e6).toFixed(1)} ms`;
-  return [
-    `1 submit の GPU 時間の最大 ${time(observed.maxNs)}（${observed.submits} 本）`,
-    `裏付け前 ${observed.unbackedSubmits} 本の最大 ${
-      observed.maxUnbackedNs === undefined ? "—" : time(observed.maxUnbackedNs)
-    }`,
-    `単発 dispatch の最大 ${time(observed.maxDispatchNs)}（${observed.maxDispatchKey ?? "—"}）`,
-    `submit ${diagnostics.submit.submitCount} 本・dispatch ${diagnostics.submit.dispatchCount} 本`,
-  ].join("・");
+const withChunkSessions = async (body: (run: ChunkRun) => Promise<void>): Promise<void> => {
+  const models = await prepareModels();
+  const layout = wanVaeChunkLayout(models.first, models.next);
+  const fixtures = {
+    band: await readFixture(ti2vVaeFixtureUrl("band")),
+    accept: await readFixture(ti2vVaeFixtureUrl("accept")),
+    long: await readFixture(ti2vVaeFixtureUrl("long")),
+  };
+
+  const gpu = verifyRunningGpu(await acquireTestGpu());
+  let first: Session | undefined;
+  let next: Session | undefined;
+  let caches: WanVaeChunkCaches | undefined;
+  let failure: { readonly error: unknown } | undefined;
+  try {
+    first = await models.first.createContainerSession(gpu);
+    next = await models.next.createContainerSession(gpu);
+    caches = await WanVaeChunkCaches.create(gpu, layout);
+    await body({ gpu, layout, sessions: { first, next }, caches, fixtures });
+  } catch (error) {
+    failure = { error };
+    throw error;
+  } finally {
+    // MUST: Session → 常駐 → device の順で畳む（2.1 の e2e と同じ順・同じ理由 — 常駐は Session の焼き込みから
+    // 参照されうるので Session を先に畳む。1 段が落ちても残りの段を必ず通し、畳む失敗で本体の失敗を上書きしない）。
+    await disposeSteps([
+      () => {
+        if (failure !== undefined) throw failure.error;
+      },
+      () => first?.dispose(),
+      () => next?.dispose(),
+      () => caches?.dispose(),
+      // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+      () => settleReleases(gpu),
+      () => gpu.destroy(),
+    ]);
+  }
 };
 
-// 照合のテストより先に置く（モジュール doc「記録」の最後の項）。
+// Default run: the chunk layout and cache size, every case decoded from NaN-poisoned frames with 0
+// non-finite, the fused-attention census, the fault loop's Uint32 identity with the product path and
+// the copyOutputs rejection. It owns the per-case results.json ids; the band comparison with the
+// diffusers `_decode` is the opt-in case below.
 test({
   name:
-    "Wan2.2 TI2V VAE chunk グラフ（実 GPU・計測モード）: first / next の 1 submit の GPU 時間の最大と単発 dispatch の" +
-    "最大を記録する（門ではない・値の照合はしない）",
+    "Wan2.2 TI2V VAE chunk 列: 常駐 cache の first → next の取り決め・毒値のフレームから非有限 0・融合 attention の" +
+    " 3 段・故障注入のループと製品の経路の Uint32 一致（実 GPU）",
   ignore: !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
-    const models = await prepareModels();
-    const layout = wanVaeChunkLayout(models.first, models.next);
-    // 入力は band の chunk 0（時間は値にほぼ依らない — 実運用の値域の潜在にしておく）。
-    const latent = wanVaeLatentChunk(
-      layout,
-      (await readFixture(ti2vVaeFixtureUrl("band"))).latents,
-      0,
-    );
-    let deviceLost: string | undefined;
-    // 計測モード（timestamp-query）: batch は開けないので run で回す（モジュール doc「記録」）。
-    const gpu = await acquireTestGpu({
-      gpuTiming: true,
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
-    let caches: WanVaeChunkCaches | undefined;
-    let failure: { readonly error: unknown } | undefined;
-    try {
-      assertAdapterMatchesEnvironment(gpu);
-      // cache の常駐（WebGPU の新しいバッファはゼロで始まる）を両グラフの run の入力に束ねる。
-      caches = await WanVaeChunkCaches.create(gpu, layout);
-      const liveCaches = caches;
-      const unitNs = lookupTimestampUnitNs(ENVIRONMENT.key);
-      for (const graph of ["first", "next"] as const) {
-        await t.step(
-          `${graph}: run 2 回（1 回目 = 裏付け前のチャンク・2 回目 = 時間予算で切ったチャンク）`,
-          async () => {
-            /** 測れた値（測る前に落ちた回は失敗の記録に原因を書く）。 */
-            let note: string | undefined;
-            await runRecordedCase(
-              chunkResults,
-              { id: `submit/${graph}`, failureNote: (cause) => note ?? String(cause) },
-              async () => {
-                // Session は 1 本ずつ張る（2 本の重みを計測モードの device に同時に載せない）。
-                const session = await models[graph].createContainerSession(gpu);
-                let runFailure: { readonly error: unknown } | undefined;
-                try {
-                  const walls: string[] = [];
-                  for (let index = 0; index < 2; index += 1) {
-                    const started = performance.now();
-                    await session.run({
-                      [WAN_VAE_LATENT_INPUT]: latent,
-                      ...liveCaches.inputs(layout[graph]),
-                    });
-                    walls.push(`${((performance.now() - started) / 1000).toFixed(2)} s`);
-                    // 次の run の確保の前に、この run の中間と読み戻しの解放を待つ。
-                    await settleReleases(gpu);
-                  }
-                  const diagnostics = session.diagnostics();
-                  const measured = `${submitGpuNote(diagnostics, unitNs)}・壁 ${walls.join(" / ")}`;
-                  note = measured;
-                  console.log(`[wan-ti2v-vae] 計測モード ${graph}: ${measured}`);
-                  const observed = diagnostics.submit.chunkBudget.submitGpuTime;
-                  assert(
-                    observed !== undefined && observed.unbackedSubmits > 0,
-                    "1 回目の run の裏付け前のチャンク（initialChunkSize で据え置いた submit）を測れていない",
-                  );
-                  assertEquals(deviceLost, undefined, "device lost");
-                  return { status: "pass", note: measured };
-                } catch (error) {
-                  runFailure = { error };
-                  throw error;
-                } finally {
-                  // 畳む失敗で本体の失敗（例: device lost）を上書きしない — 本体の失敗を先頭の段で投げ直す。
-                  await disposeSteps([
-                    () => {
-                      if (runFailure !== undefined) throw runFailure.error;
-                    },
-                    () => session.dispose(),
-                    () => settleReleases(gpu),
-                  ]);
-                }
-              },
-            );
-          },
-        );
-      }
-    } catch (error) {
-      failure = { error };
-      throw error;
-    } finally {
-      await disposeSteps([
-        () => {
-          if (failure !== undefined) throw failure.error;
-        },
-        () => caches?.dispose(),
-        () => settleReleases(gpu),
-        () => gpu.destroy(),
-      ]);
-    }
-  },
-});
-
-test({
-  name: "Wan2.2 TI2V VAE chunk 列: 常駐 cache の first → next が上流の _decode（unpatchify の前）と帯の中で一致（実 GPU）",
-  ignore: !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const models = await prepareModels();
-    const layout = wanVaeChunkLayout(models.first, models.next);
-    const fixtures = {
-      band: await readFixture(ti2vVaeFixtureUrl("band")),
-      accept: await readFixture(ti2vVaeFixtureUrl("accept")),
-      long: await readFixture(ti2vVaeFixtureUrl("long")),
-    };
-    /** ケースごとの maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
-    const observed = new Map<ChunkCaseName, number>();
-
-    const gpu = verifyRunningGpu(await acquireTestGpu());
-    let first: Session | undefined;
-    let next: Session | undefined;
-    let caches: WanVaeChunkCaches | undefined;
-    let failure: { readonly error: unknown } | undefined;
-    try {
-      first = await models.first.createContainerSession(gpu);
-      next = await models.next.createContainerSession(gpu);
-      caches = await WanVaeChunkCaches.create(gpu, layout);
-      const sessions = { first, next };
-      const liveCaches = caches;
-
-      const compareChunks = (name: ChunkCaseName, got: Float32Array) => {
-        const fixture = fixtures[name];
-        assertEquals(got.length, fixture.frames.length, `${name}: 要素数`);
-        const report = allclose(got, fixture.frames, CHUNK_TOLERANCE);
-        const referenceMax = fixture.frames.reduce(
-          (max, value) => Math.max(max, Math.abs(value)),
-          0,
-        );
-        return { report, referenceMax, ratio: report.maxAbsError / referenceMax };
-      };
-
+    await withChunkSessions(async ({ gpu, layout, sessions, caches: liveCaches, fixtures }) => {
       await t.step(
         "取り決め: 潜在 48 ch・タイル 16・出口 12 ch・cache は表の 32 本（first は time_conv の 2 本を除く 30 本）",
         () => {
@@ -765,9 +639,9 @@ test({
 
       for (const { name, chunks: expectedChunks } of CHUNK_CASES) {
         await t.step(
-          `${name}: chunk 列が上流と帯の中で一致（フレームは毒値で始める）`,
+          `${name}: chunk 列を毒値のフレームから回して非有限 0（chunk 数・フレームの形・要素数）`,
           async () => {
-            await runRecordedCase(chunkResults, { id: name }, async ({ measurements }) => {
+            await runRecordedCase(chunkResults, { id: name }, async () => {
               const fixture = fixtures[name];
               const chunks = wanVaeChunkCount(layout, fixture.latents);
               assertEquals(chunks, expectedChunks, `${name} の chunk 数`);
@@ -781,28 +655,13 @@ test({
               const started = performance.now();
               const got = await decodeWanVaeTile(gpu, sessions, liveCaches, fixture.latents);
               const elapsedMs = performance.now() - started;
-              const { report, referenceMax, ratio } = compareChunks(name, got);
-              measurements.push({
-                output: `frames(${chunks} chunks)`,
-                maxAbs: report.maxAbsError,
-                maxRel: report.maxRelError,
-                tolerance: CHUNK_TOLERANCE,
-                stage: "karume",
-              });
+              assertEquals(got.length, fixture.frames.length, `${name}: 要素数`);
+              const nonFinite = countNonFinite(got);
               console.log(
-                `[wan-ti2v-vae] ${name}: chunks=${chunks} maxAbs=${report.maxAbsError} ` +
-                  `refMax=${referenceMax} ratio=${ratio} nonFinite=${report.nonFiniteCount} ` +
+                `[wan-ti2v-vae] ${name}: chunks=${chunks} nonFinite=${nonFinite} ` +
                   `decodeMs=${elapsedMs.toFixed(0)}`,
               );
-              assertEquals(report.nonFiniteCount, 0, `${name}: 非有限（写されなかったフレーム）`);
-              observed.set(name, report.maxAbsError);
-              if (CHUNK_BAND === undefined) {
-                throw new Error(
-                  `${name}: 帯が未導出（maxAbs ${report.maxAbsError}）— band の maxAbs × 5 を帯の定数へ` +
-                    "書く（帯の候補は最後の step が出す）",
-                );
-              }
-              assert(report.pass, `${name}: maxAbs ${report.maxAbsError} が帯 ${CHUNK_BAND} の外`);
+              assertEquals(nonFinite, 0, `${name}: 非有限（写されなかったフレーム）`);
               return undefined;
             });
           },
@@ -822,31 +681,6 @@ test({
         }
       });
 
-      await t.step(
-        "記録: VRAM の内訳・mid の attention（D = 1024）の pipeline・融合・submit の統計（門ではない）",
-        async () => {
-          await runRecordedCase(chunkResults, { id: "record" }, () => {
-            // 直近のタイル（long — 21 chunk・フレームの常駐が最大）の後の値。
-            const diagnostics = {
-              first: sessions.first.diagnostics(),
-              next: sessions.next.diagnostics(),
-            };
-            const lines = [
-              `vram ${JSON.stringify(
-                vramBreakdown(diagnostics.first, diagnostics.next, liveCaches),
-              )}`,
-              ...Object.entries(diagnostics).flatMap(([graph, stats]) => [
-                `attention ${graph} ${JSON.stringify(attentionPipelines(graph, stats))}`,
-                `fusions ${graph} ${JSON.stringify(stats.lastRunFusions)}`,
-                `submit ${graph} ${submitStats(stats)}`,
-              ]),
-            ];
-            for (const line of lines) console.log(`[wan-ti2v-vae] ${line}`);
-            return Promise.resolve({ status: "pass", note: lines.join(" / ") });
-          });
-        },
-      );
-
       await t.step("故障注入のループは故障なしなら製品の経路と Uint32 で一致", async () => {
         const fixture = fixtures.accept;
         const chunks = wanVaeChunkCount(layout, fixture.latents);
@@ -864,6 +698,81 @@ test({
         );
         assert(bitsEqual(product, looped), "テストのループが製品の経路と違う");
       });
+
+      await t.step(
+        "故障注入: chunk 2 以降も first を使う → copyOutputs の大きさで enqueue が拒まれる",
+        async () => {
+          // first の出力フレームは [12,1,…] で、next 用のフレームの常駐（[12,4,…]）へは写せない —
+          // runtime の `copyOutputs` の大きさの検査が dispatch を積む前に落とす（値を比べる前の赤）。
+          const error = await assertRejects(
+            () =>
+              decodeWithFault(gpu, sessions, liveCaches, fixtures.accept.latents, {
+                kind: "first-for-all",
+              }),
+            ExecutionError,
+            "copyOutputs",
+          );
+          // 拒んだのが chunk 1 のフレームの常駐と first のフレームの形の食い違いであること（他の写し先の拒否と
+          // 取り違えない）。
+          assertStringIncludes(error.message, "'frame 1'");
+          assertStringIncludes(error.message, `[${layout.first.frameShape.join(",")}]`);
+        },
+      );
+    });
+  },
+});
+
+// Upstream parity (the chunk sequence against the diffusers `_decode` under the absolute band), so it
+// is opt-in, together with the cache fault injections that only prove the band is live and the
+// band-candidate step. It writes the fault/* and band-candidate results.json ids; the per-case ids
+// belong to the default case above, and writing them here would duplicate its settlements.
+test({
+  name:
+    "Wan2.2 TI2V VAE chunk 列: 常駐 cache の first → next が上流の _decode（unpatchify の前）と帯の中で一致（実 GPU）" +
+    UPSTREAM_PARITY_OPT_IN,
+  ignore: !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE || !UPSTREAM_PARITY,
+  fn: async (t) => {
+    await withChunkSessions(async ({ gpu, layout, sessions, caches: liveCaches, fixtures }) => {
+      /** ケースごとの maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
+      const observed = new Map<ChunkCaseName, number>();
+
+      const compareChunks = (name: ChunkCaseName, got: Float32Array) => {
+        const fixture = fixtures[name];
+        assertEquals(got.length, fixture.frames.length, `${name}: 要素数`);
+        const report = allclose(got, fixture.frames, CHUNK_TOLERANCE);
+        const referenceMax = fixture.frames.reduce(
+          (max, value) => Math.max(max, Math.abs(value)),
+          0,
+        );
+        return { report, referenceMax, ratio: report.maxAbsError / referenceMax };
+      };
+
+      for (const { name, chunks: expectedChunks } of CHUNK_CASES) {
+        await t.step(
+          `${name}: chunk 列が上流と帯の中で一致（フレームは毒値で始める）`,
+          async () => {
+            const fixture = fixtures[name];
+            const chunks = wanVaeChunkCount(layout, fixture.latents);
+            assertEquals(chunks, expectedChunks, `${name} の chunk 数`);
+            await poisonFrames(liveCaches, chunks);
+            const got = await decodeWanVaeTile(gpu, sessions, liveCaches, fixture.latents);
+            const { report, referenceMax, ratio } = compareChunks(name, got);
+            console.log(
+              `[wan-ti2v-vae] ${name}: chunks=${chunks} maxAbs=${report.maxAbsError} ` +
+                `refMax=${referenceMax} ratio=${ratio} nonFinite=${report.nonFiniteCount}`,
+            );
+            assertEquals(report.nonFiniteCount, 0, `${name}: 非有限（写されなかったフレーム）`);
+            observed.set(name, report.maxAbsError);
+            if (CHUNK_BAND === undefined) {
+              throw new Error(
+                `${name}: 帯が未導出（maxAbs ${report.maxAbsError}）— band の maxAbs × 5 を帯の定数へ` +
+                  "書く（帯の候補は最後の step が出す）",
+              );
+            }
+            assert(report.pass, `${name}: maxAbs ${report.maxAbsError} が帯 ${CHUNK_BAND} の外`);
+          },
+        );
+      }
 
       const faults: readonly { readonly label: string; readonly fault: Fault }[] = [
         {
@@ -914,144 +823,159 @@ test({
         });
       }
 
-      await t.step(
-        "故障注入: chunk 2 以降も first を使う → copyOutputs の大きさで enqueue が拒まれる",
-        async () => {
-          // first の出力フレームは [12,1,…] で、next 用のフレームの常駐（[12,4,…]）へは写せない —
-          // runtime の `copyOutputs` の大きさの検査が dispatch を積む前に落とす（値を比べる前の赤）。
-          const error = await assertRejects(
-            () =>
-              decodeWithFault(gpu, sessions, liveCaches, fixtures.accept.latents, {
-                kind: "first-for-all",
-              }),
-            ExecutionError,
-            "copyOutputs",
-          );
-          // 拒んだのが chunk 1 のフレームの常駐と first のフレームの形の食い違いであること（他の写し先の拒否と
-          // 取り違えない）。
-          assertStringIncludes(error.message, "'frame 1'");
-          assertStringIncludes(error.message, `[${layout.first.frameShape.join(",")}]`);
-        },
-      );
-
       await chunkBandCandidate(t, observed);
-    } catch (error) {
-      failure = { error };
-      throw error;
-    } finally {
-      // MUST: Session → 常駐 → device の順で畳む（2.1 の e2e と同じ順・同じ理由 — 常駐は Session の焼き込みから
-      // 参照されうるので Session を先に畳む。1 段が落ちても残りの段を必ず通し、畳む失敗で本体の失敗を上書きしない）。
-      await disposeSteps([
-        () => {
-          if (failure !== undefined) throw failure.error;
-        },
-        () => first?.dispose(),
-        () => next?.dispose(),
-        () => caches?.dispose(),
-        // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
-        () => settleReleases(gpu),
-        () => gpu.destroy(),
-      ]);
-    }
+    });
   },
 });
 
+/** The two product Sessions, the cache residents and the tile fixtures one tile-decode case runs on. */
+type TileRun = {
+  readonly gpu: GpuContext;
+  readonly layout: WanVaeChunkLayout;
+  /** Sample pixels per latent pixel (VAE scale × patch size). */
+  readonly compression: number;
+  readonly sessions: { readonly first: Session; readonly next: Session };
+  readonly caches: WanVaeChunkCaches;
+  readonly fixtures: Readonly<Record<CaseName, TileFixture>>;
+  /** The device-lost reason so far (`undefined` while the device is alive). */
+  readonly deviceLost: () => string | undefined;
+};
+
+/**
+ * Opens the two chunk graphs and the tile fixtures, builds both product Sessions and the cache
+ * residents on one device that records a device loss, and hands them to `body`, so the default case
+ * and the opt-in parity case share one lifecycle and one teardown order.
+ */
+const withTileSessions = async (body: (run: TileRun) => Promise<void>): Promise<void> => {
+  const models = await prepareModels();
+  const layout = wanVaeChunkLayout(models.first, models.next);
+  const compression = wanSpatialCompression(layout, WAN22_TI2V_GENERATION);
+  const fixtures: Readonly<Record<CaseName, TileFixture>> = {
+    band: await readTileFixture(ti2vVaeTileFixtureUrl("band")),
+    accept: await readTileFixture(ti2vVaeTileFixtureUrl("accept")),
+    wide: await readTileFixture(ti2vVaeTileFixtureUrl("wide")),
+  };
+
+  let deviceLost: string | undefined;
+  const gpu = verifyRunningGpu(
+    await acquireTestGpu({
+      onDeviceLost: (info) => {
+        deviceLost = `${info.reason}: ${info.message}`;
+      },
+    }),
+  );
+  let first: Session | undefined;
+  let next: Session | undefined;
+  let caches: WanVaeChunkCaches | undefined;
+  let failure: { readonly error: unknown } | undefined;
+  try {
+    first = await models.first.createContainerSession(gpu);
+    next = await models.next.createContainerSession(gpu);
+    caches = await WanVaeChunkCaches.create(gpu, layout);
+    await body({
+      gpu,
+      layout,
+      compression,
+      sessions: { first, next },
+      caches,
+      fixtures,
+      deviceLost: () => deviceLost,
+    });
+  } catch (error) {
+    failure = { error };
+    throw error;
+  } finally {
+    // MUST: Session → 常駐 → device の順で畳む（2.1 / 段 4 の e2e と同じ — 1 段が落ちても残りの段を必ず通し、
+    // 本体の失敗を先頭の段に置いて上書きさせない）。
+    await disposeSteps([
+      () => {
+        if (failure !== undefined) throw failure.error;
+      },
+      () => first?.dispose(),
+      () => next?.dispose(),
+      () => caches?.dispose(),
+      // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+      () => settleReleases(gpu),
+      () => gpu.destroy(),
+    ]);
+  }
+};
+
+/**
+ * One tile case through the product tile decode (`decodeWanVaeTiled`), starting from NaN-poisoned
+ * frames and poisoning them again between tiles.
+ */
+const decodeTiledCase = async (run: TileRun, name: CaseName) => {
+  const latents = run.fixtures[name].tensor("latents");
+  const plan = planFor(run.layout, latents.shape);
+  const chunks = latents.shape[1];
+  await poisonFrames(run.caches, chunks);
+  const started = performance.now();
+  const got = await decodeWanVaeTiled(
+    run.gpu,
+    run.sessions,
+    run.caches,
+    plan,
+    latents.data,
+    poisonBetweenTiles(run.caches, plan, chunks),
+  );
+  return { got, plan, chunks, elapsedMs: performance.now() - started };
+};
+
+/**
+ * The accept case decoded tile by tile and assembled on the host, starting from NaN-poisoned frames
+ * (the decoded tiles are returned for the host-side seam fault injections).
+ */
+const decodeAcceptCase = async (run: TileRun) => {
+  const latents = run.fixtures.accept.tensor("latents");
+  const plan = planFor(run.layout, latents.shape);
+  const chunks = latents.shape[1];
+  await poisonFrames(run.caches, chunks);
+  const decodeStarted = performance.now();
+  const tiles = await decodeWanVaeTiles(
+    run.gpu,
+    run.sessions,
+    run.caches,
+    plan,
+    latents.data,
+    poisonBetweenTiles(run.caches, plan, chunks),
+  );
+  const decodeMs = performance.now() - decodeStarted;
+  const assembleStarted = performance.now();
+  const got = assembleWanVaeTiles(tiles, plan);
+  const assembleMs = performance.now() - assembleStarted;
+  return { tiles, got, plan, chunks, decodeMs, assembleMs };
+};
+
+// Default run: the TS/Python plan equality, the degenerate Uint32 gate, and band / accept / wide
+// decoded from NaN-poisoned frames with 0 non-finite and no device lost. It owns the per-case
+// results.json ids; the band comparisons with the upstream tiled reference are the opt-in case below.
 test({
   name:
-    "Wan2.2 TI2V VAE タイル decode: 縮退門 + 832×480・81 フレームが上流のタイル参照（unpatchify の前）と帯の中で" +
-    "一致・accept の RGB が上流の unpatchify → clamp と帯の中で一致（実 GPU）",
+    "Wan2.2 TI2V VAE タイル decode: 計画が Python と一致・縮退門（Uint32）・band / accept / wide を毒値のフレームから" +
+    "回して非有限 0・device lost なし（実 GPU）",
   ignore: !ALL_TILES || !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
-    const [firstOpened, nextOpened] = await Promise.all([
-      openSeriesContainer(ti2vVaeModelUrl(FIRST)),
-      openSeriesContainer(ti2vVaeModelUrl(NEXT)),
-    ]);
-    const firstModel = prepareContainer(firstOpened, seriesGraph(SERIES, FIRST));
-    const nextModel = prepareContainer(nextOpened, seriesGraph(SERIES, NEXT));
-    const layout = wanVaeChunkLayout(firstModel, nextModel);
-    const compression = wanSpatialCompression(layout, WAN22_TI2V_GENERATION);
-    const fixtures: Readonly<Record<CaseName, TileFixture>> = {
-      band: await readTileFixture(ti2vVaeTileFixtureUrl("band")),
-      accept: await readTileFixture(ti2vVaeTileFixtureUrl("accept")),
-      wide: await readTileFixture(ti2vVaeTileFixtureUrl("wide")),
-    };
     const degenerate = await readFixture(ti2vVaeFixtureUrl(DEGENERATE_CASE));
-    /** ラベル（ケース名 / `accept-rgb`）→ maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
-    const observed = new Map<string, number>();
-    /** ケース名 → 非有限の数（門 4 — 判定の前に積む）。 */
-    const nonFinite = new Map<string, number>();
-    /** 故障注入のラベル → maxAbs（記録 — 判定は帯が導出された回だけ）。 */
-    const faultObserved = new Map<string, number>();
-    let bandNote: string | undefined;
+    await withTileSessions(async (run) => {
+      const { gpu, layout, compression, sessions, caches: liveCaches, fixtures } = run;
+      /** ケース名 → 非有限の数（門 4 — 判定の前に積む）。 */
+      const nonFinite = new Map<string, number>();
 
-    let deviceLost: string | undefined;
-    const gpu = verifyRunningGpu(
-      await acquireTestGpu({
-        onDeviceLost: (info) => {
-          deviceLost = `${info.reason}: ${info.message}`;
-        },
-      }),
-    );
-    let monitor: ReturnType<typeof monitorDrmUsage> | undefined;
-    let timeline: DrmTimeline | undefined;
-    let first: Session | undefined;
-    let next: Session | undefined;
-    let caches: WanVaeChunkCaches | undefined;
-    let failure: { readonly error: unknown } | undefined;
-    try {
-      // 標本化は生成の時点で 1 回読む（読めない権限なら投げる）ので、try の中で作って finally で device を畳む。
-      monitor = monitorDrmUsage();
-      const drm = monitor;
-      drm.enter("構築");
-      first = await firstModel.createContainerSession(gpu);
-      next = await nextModel.createContainerSession(gpu);
-      caches = await WanVaeChunkCaches.create(gpu, layout);
-      const sessions = { first, next };
-      const liveCaches = caches;
-      /**
-       * `onTile` の口: 最後のタイルを除き、次のタイルの decode の前にフレームの常駐を毒値で埋め直す（タイルの出力は
-       * `decodeWanVaeTile` が読み戻した後なので、決着したタイルの値は壊さない）。
-       */
-      const poisonBetweenTiles = (plan: WanVaeTilePlan, chunks: number) => async (tile: number) => {
-        if (tile < wanVaeTileCount(plan)) await poisonFrames(liveCaches, chunks);
-      };
-
-      /**
-       * 1 ケースの判定（maxAbs と非有限を記録してから — 未導出の回も候補の材料が残る）。非有限 → 帯が未導出 → 帯の
-       * 外 の順で落とす。
-       */
-      const judge = (
+      /** Records the non-finite count of one case, then fails when it is not 0. */
+      const assertFinite = (
         label: string,
         got: Float32Array,
         want: Float32Array,
-        measurements: RecordedCase["measurements"],
-        output: string,
-        extra = "",
-      ): void => {
-        const { report, referenceMax, ratio } = compare(got, want, TOLERANCE);
-        measurements.push({
-          output,
-          maxAbs: report.maxAbsError,
-          maxRel: report.maxRelError,
-          tolerance: TOLERANCE,
-          stage: "karume",
-        });
-        observed.set(label, report.maxAbsError);
-        nonFinite.set(label, report.nonFiniteCount);
-        console.log(
-          `[wan-ti2v-vae-tiles] ${label}: maxAbs=${report.maxAbsError} refMax=${referenceMax} ` +
-            `ratio=${ratio} nonFinite=${report.nonFiniteCount}${extra}`,
-        );
-        if (report.nonFiniteCount > 0) {
-          throw new Error(`${label}: 非有限 ${report.nonFiniteCount} 個（写されなかったフレーム）`);
+        extra: string,
+      ) => {
+        assertEquals(got.length, want.length, "要素数");
+        const count = countNonFinite(got);
+        nonFinite.set(label, count);
+        console.log(`[wan-ti2v-vae-tiles] ${label}: nonFinite=${count}${extra}`);
+        if (count > 0) {
+          throw new Error(`${label}: 非有限 ${count} 個（写されなかったフレーム）`);
         }
-        if (BAND === undefined) {
-          throw new Error(
-            `${label}: 帯が未導出（maxAbs ${report.maxAbsError}）— band の maxAbs × 5 を帯の定数へ書く` +
-              "（帯の候補は最後の step が出す）",
-          );
-        }
-        assert(report.pass, `${label}: maxAbs ${report.maxAbsError} が帯 ${BAND} の外`);
       };
 
       await t.step(
@@ -1112,7 +1036,6 @@ test({
       await t.step(
         "縮退門: 潜在 16×16（1 枚）ではタイル経路 ≡ 非タイルの chunk 列（Uint32）",
         async () => {
-          drm.enter("縮退門");
           const expectedChunks = CHUNK_CASES.find(({ name }) => name === DEGENERATE_CASE)?.chunks;
           assert(expectedChunks !== undefined, `chunk 列のケース '${DEGENERATE_CASE}' が表に無い`);
           assertEquals(
@@ -1143,54 +1066,131 @@ test({
         },
       );
 
+      for (const name of ["band", "wide"] as const) {
+        await t.step(
+          `${name}: 毒値のフレームから回して非有限 0（タイル経路 decodeWanVaeTiled）`,
+          async () => {
+            await runRecordedCase(results, { id: name }, async () => {
+              const { got, plan, chunks, elapsedMs } = await decodeTiledCase(run, name);
+              assertFinite(
+                name,
+                got,
+                fixtures[name].tensor("frames").data,
+                ` tiles=${wanVaeTileCount(plan)} chunks=${chunks} decodeMs=${elapsedMs.toFixed(0)}`,
+              );
+              return undefined;
+            });
+          },
+        );
+      }
+
       await t.step(
-        "band: 832×480・81 フレーム（12 枚 × 21 chunk）が参照と帯の中で一致（フレームは毒値で始める）",
+        "accept: 毒値のフレームから回して非有限 0（タイルごとの decode + ホストの貼り合わせ）",
         async () => {
-          await runRecordedCase(results, { id: "band" }, async ({ measurements }) => {
-            const fixture = fixtures.band;
-            const latents = fixture.tensor("latents");
-            const plan = planFor(layout, latents.shape);
-            const chunks = latents.shape[1];
-            await poisonFrames(liveCaches, chunks);
-            drm.enter("band");
-            const started = performance.now();
-            const got = await decodeWanVaeTiled(
-              gpu,
-              sessions,
-              liveCaches,
-              plan,
-              latents.data,
-              poisonBetweenTiles(plan, chunks),
-            );
-            const elapsedMs = performance.now() - started;
-            const breakdown = vramBreakdown(
-              sessions.first.diagnostics(),
-              sessions.next.diagnostics(),
-              liveCaches,
-            );
-            // タイルの頭の cache のゼロ化（`queue.writeBuffer` の staging — 次の submit の完了まで生きる）。
-            const zeroStaging = liveCaches.cacheBytes;
-            const vram = Object.fromEntries(
-              Object.entries({
-                ...breakdown,
-                zeroStaging,
-                totalWithZeroStaging: breakdown.total + zeroStaging,
-              }).map(([name, bytes]) => [name, gib(bytes)]),
-            );
-            bandNote = `band: tiles=${wanVaeTileCount(plan)} chunks=${chunks} decodeMs=${elapsedMs.toFixed(
-              0,
-            )} vram GiB ${JSON.stringify(vram)}（見積り ${VRAM_ESTIMATE_GIB} GiB）`;
-            console.log(`[wan-ti2v-vae-tiles] ${bandNote}`);
-            judge(
-              "band",
+          await runRecordedCase(results, { id: "accept" }, async () => {
+            const { got, plan, chunks, decodeMs, assembleMs } = await decodeAcceptCase(run);
+            assertFinite(
+              "accept",
               got,
-              fixture.tensor("frames").data,
-              measurements,
-              `frames(${chunks} chunks × ${wanVaeTileCount(plan)} tiles)`,
-              ` decodeMs=${elapsedMs.toFixed(0)}`,
+              fixtures.accept.tensor("frames").data,
+              ` tiles=${wanVaeTileCount(plan)} chunks=${chunks} decodeMs=${decodeMs.toFixed(
+                0,
+              )} assembleMs=${assembleMs.toFixed(0)}`,
             );
             return undefined;
           });
+        },
+      );
+
+      await t.step(
+        "毒値と device lost: 全ケース（band / accept / wide）で非有限 0・device lost なし",
+        () => {
+          const names = CASES.map(({ name }) => name);
+          assertEquals(
+            names.filter((name) => !nonFinite.has(name)),
+            [],
+            "非有限を数える前に落ちたケース",
+          );
+          assertEquals(
+            names.map((name) => nonFinite.get(name)),
+            names.map(() => 0),
+            `非有限の数（${names.join(" / ")}）`,
+          );
+          assertEquals(run.deviceLost(), undefined, "device lost");
+        },
+      );
+    });
+  },
+});
+
+// Upstream parity (band / accept / wide and the accept RGB against the upstream tiled reference under
+// the absolute band), so it is opt-in, together with the seam fault injections that only prove the
+// band is live and the band-candidate step. It writes the accept-rgb, fault/* and band-candidate
+// results.json ids; the per-case ids belong to the default case above, and writing them here would
+// duplicate its settlements.
+test({
+  name:
+    "Wan2.2 TI2V VAE タイル decode: 縮退門 + 832×480・81 フレームが上流のタイル参照（unpatchify の前）と帯の中で" +
+    "一致・accept の RGB が上流の unpatchify → clamp と帯の中で一致（実 GPU）" +
+    UPSTREAM_PARITY_OPT_IN,
+  ignore: !ALL_TILES || !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE || !UPSTREAM_PARITY,
+  fn: async (t) => {
+    await withTileSessions(async (run) => {
+      const { layout, compression, fixtures } = run;
+      /** ラベル（ケース名 / `accept-rgb`）→ maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
+      const observed = new Map<string, number>();
+      /** 故障注入のラベル → maxAbs（記録 — 判定は帯が導出された回だけ）。 */
+      const faultObserved = new Map<string, number>();
+
+      /**
+       * 1 ケースの判定（maxAbs を記録してから — 未導出の回も候補の材料が残る）。非有限 → 帯が未導出 → 帯の外 の順で
+       * 落とす。
+       */
+      const judge = (
+        label: string,
+        got: Float32Array,
+        want: Float32Array,
+        extra = "",
+        recorded?: {
+          readonly measurements: RecordedCase["measurements"];
+          readonly output: string;
+        },
+      ): void => {
+        const { report, referenceMax, ratio } = compare(got, want, TOLERANCE);
+        recorded?.measurements.push({
+          output: recorded.output,
+          maxAbs: report.maxAbsError,
+          maxRel: report.maxRelError,
+          tolerance: TOLERANCE,
+          stage: "karume",
+        });
+        observed.set(label, report.maxAbsError);
+        console.log(
+          `[wan-ti2v-vae-tiles] ${label}: maxAbs=${report.maxAbsError} refMax=${referenceMax} ` +
+            `ratio=${ratio} nonFinite=${report.nonFiniteCount}${extra}`,
+        );
+        if (report.nonFiniteCount > 0) {
+          throw new Error(`${label}: 非有限 ${report.nonFiniteCount} 個（写されなかったフレーム）`);
+        }
+        if (BAND === undefined) {
+          throw new Error(
+            `${label}: 帯が未導出（maxAbs ${report.maxAbsError}）— band の maxAbs × 5 を帯の定数へ書く` +
+              "（帯の候補は最後の step が出す）",
+          );
+        }
+        assert(report.pass, `${label}: maxAbs ${report.maxAbsError} が帯 ${BAND} の外`);
+      };
+
+      await t.step(
+        "band: 832×480・81 フレーム（12 枚 × 21 chunk）が参照と帯の中で一致（フレームは毒値で始める）",
+        async () => {
+          const { got, elapsedMs } = await decodeTiledCase(run, "band");
+          judge(
+            "band",
+            got,
+            fixtures.band.tensor("frames").data,
+            ` decodeMs=${elapsedMs.toFixed(0)}`,
+          );
         },
       );
 
@@ -1206,54 +1206,14 @@ test({
       await t.step(
         "accept: 480×832・9 フレーム（別の潜在・chunk 境界・縦長）が帯の中",
         async () => {
-          await runRecordedCase(results, { id: "accept" }, async ({ measurements }) => {
-            await poisonFrames(liveCaches, acceptChunks);
-            drm.enter("accept");
-            const decodeStarted = performance.now();
-            acceptTiles = await decodeWanVaeTiles(
-              gpu,
-              sessions,
-              liveCaches,
-              acceptPlan,
-              acceptLatents.data,
-              poisonBetweenTiles(acceptPlan, acceptChunks),
-            );
-            const decodeMs = performance.now() - decodeStarted;
-            const assembleStarted = performance.now();
-            const got = assembleWanVaeTiles(acceptTiles, acceptPlan);
-            const assembleMs = performance.now() - assembleStarted;
-            acceptAssembled = got;
-            judge(
-              "accept",
-              got,
-              acceptWant,
-              measurements,
-              `frames(${acceptChunks} chunks × ${wanVaeTileCount(acceptPlan)} tiles)`,
-              ` decodeMs=${decodeMs.toFixed(0)} assembleMs=${assembleMs.toFixed(0)}`,
-            );
-            return undefined;
-          });
-        },
-      );
-
-      await t.step(
-        "accept の観測: 非タイルの上流 decode（frames_full）との差（門ではない — タイル化の近似）",
-        () => {
-          // accept の判定（未導出の回は必ず赤）とは別の step — 判定の成否に依らず出し、ここで落ちても accept の
-          // maxAbs と非有限の数は記録に残る。クランプは要素ごとなので patchify 空間のまま掛けても RGB で掛けたのと
-          // 同じ値。
-          assert(acceptAssembled !== undefined, "accept が貼り合わされていない");
-          const full = accept.tensor("frames_full").data;
-          const unclamped = compare(acceptAssembled, full, { atol: 0, rtol: 0 });
-          const clampedGot = Float32Array.from(acceptAssembled);
-          const clampedFull = Float32Array.from(full);
-          clampWanVaeFrames(clampedGot);
-          clampWanVaeFrames(clampedFull);
-          const clamped = compare(clampedGot, clampedFull, { atol: 0, rtol: 0 });
-          console.log(
-            `[wan-ti2v-vae-tiles] accept vs untiled (observation): unclamped maxAbs=` +
-              `${unclamped.report.maxAbsError} ratio=${unclamped.ratio} / clamped maxAbs=` +
-              `${clamped.report.maxAbsError} ratio=${clamped.ratio}`,
+          const { tiles, got, decodeMs, assembleMs } = await decodeAcceptCase(run);
+          acceptTiles = tiles;
+          acceptAssembled = got;
+          judge(
+            "accept",
+            got,
+            acceptWant,
+            ` decodeMs=${decodeMs.toFixed(0)} assembleMs=${assembleMs.toFixed(0)}`,
           );
         },
       );
@@ -1276,13 +1236,10 @@ test({
               WAN22_TI2V_GENERATION,
               OWNER,
             );
-            judge(
-              "accept-rgb",
-              video,
-              accept.tensor("frames_rgb").data,
+            judge("accept-rgb", video, accept.tensor("frames_rgb").data, "", {
               measurements,
-              `frames_rgb(${acceptChunks} chunks × ${wanVaeTileCount(acceptPlan)} tiles)`,
-            );
+              output: `frames_rgb(${acceptChunks} chunks × ${wanVaeTileCount(acceptPlan)} tiles)`,
+            });
             return Promise.resolve(undefined);
           });
         },
@@ -1291,36 +1248,15 @@ test({
       await t.step(
         "wide: 1280×704・5 フレーム（28 枚・対ごとに違うブレンド幅）が帯の中",
         async () => {
-          await runRecordedCase(results, { id: "wide" }, async ({ measurements }) => {
-            const fixture = fixtures.wide;
-            const latents = fixture.tensor("latents");
-            const plan = planFor(layout, latents.shape);
-            const chunks = latents.shape[1];
-            await poisonFrames(liveCaches, chunks);
-            drm.enter("wide");
-            const started = performance.now();
-            const got = await decodeWanVaeTiled(
-              gpu,
-              sessions,
-              liveCaches,
-              plan,
-              latents.data,
-              poisonBetweenTiles(plan, chunks),
-            );
-            const elapsedMs = performance.now() - started;
-            judge(
-              "wide",
-              got,
-              fixture.tensor("frames").data,
-              measurements,
-              `frames(${chunks} chunks × ${wanVaeTileCount(plan)} tiles)`,
-              ` decodeMs=${elapsedMs.toFixed(0)}`,
-            );
-            return undefined;
-          });
+          const { got, elapsedMs } = await decodeTiledCase(run, "wide");
+          judge(
+            "wide",
+            got,
+            fixtures.wide.tensor("frames").data,
+            ` decodeMs=${elapsedMs.toFixed(0)}`,
+          );
         },
       );
-      drm.enter("照合の後");
 
       const faults: readonly {
         readonly id: string;
@@ -1375,60 +1311,7 @@ test({
         });
       }
 
-      await t.step(
-        "毒値と device lost: 全ケース（band / accept / wide）で非有限 0・device lost なし",
-        () => {
-          const names = CASES.map(({ name }) => name);
-          assertEquals(
-            names.filter((name) => !nonFinite.has(name)),
-            [],
-            "非有限を数える前に落ちたケース",
-          );
-          assertEquals(
-            names.map((name) => nonFinite.get(name)),
-            names.map(() => 0),
-            `非有限の数（${names.join(" / ")}）`,
-          );
-          assertEquals(deviceLost, undefined, "device lost");
-        },
-      );
-
-      await t.step("記録: VRAM の山（fdinfo）と内訳・band の壁時計（門ではない）", async () => {
-        await runRecordedCase(results, { id: "record" }, () => {
-          timeline = drm.stop();
-          const lines = [
-            ...[...timeline.peaks].map(
-              ([phase, peak]) => `VRAM 山 [${phase}] ${formatDrmUsage(peak)}`,
-            ),
-            bandNote ?? "band の観測なし（band が decode を終える前に落ちた）",
-          ];
-          for (const line of lines) console.log(`[wan-ti2v-vae-tiles] ${line}`);
-          return Promise.resolve({ status: "pass", note: lines.join(" / ") });
-        });
-      });
-
       await bandCandidate(t, observed, faultObserved);
-    } catch (error) {
-      failure = { error };
-      throw error;
-    } finally {
-      // MUST: Session → 常駐 → device の順で畳む（2.1 / 段 4 の e2e と同じ — 1 段が落ちても残りの段を必ず通し、
-      // 本体の失敗を先頭の段に置いて上書きさせない）。
-      await disposeSteps([
-        () => {
-          if (failure !== undefined) throw failure.error;
-        },
-        // 標本化の interval を残さない（記録の step が止める前に落ちた回）。
-        () => {
-          if (timeline === undefined) monitor?.stop();
-        },
-        () => first?.dispose(),
-        () => next?.dispose(),
-        () => caches?.dispose(),
-        // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
-        () => settleReleases(gpu),
-        () => gpu.destroy(),
-      ]);
-    }
+    });
   },
 });

@@ -131,7 +131,7 @@ export const fusionCounts = (
  *
  * スロットの容量記号は 640 で解く — 融合はノード列と**値**の shape で決まり、スロット容量の
  * 値には依存しない（e2e の検収値と同じ 640 を使うのは読み合わせやすさだけ）。入力は全て
- * `[1, M]`（token-only 形の `last_row[1]` は数値次元なのでそのまま）。
+ * `[1, M]`。
  */
 export const decodeFusionCounts = (
   graph: IrGraph,

@@ -3,7 +3,7 @@
  * shared planning side and the rationale live in `runtime/tests/helpers/fusion-counts.ts`). The QAT
  * distribution has its own gate in `e2e_gemma4_qat_fusion_counts_test.ts` (the gemma4-qat lane).
  *
- * MUST: the assets are `outputs/series/gemma4-e2b-decode{,-token}/` and `models/karume-gemma4/`
+ * MUST: the assets are `outputs/series/gemma4-e2b-decode/` and `models/karume-gemma4/`
  * (untracked local assets); where they are missing the cases SKIP explicitly with a reason
  * (ADR 0005).
  */
@@ -19,14 +19,11 @@ import {
 import { decodeFusionCounts, exists, NONE, seriesSource } from "./helpers/fusion-counts.ts";
 
 const GEMMA4_DECODE_MODEL = seriesSource("gemma4-e2b-decode");
-const GEMMA4_TOKEN_MODEL = seriesSource("gemma4-e2b-decode-token");
 
-const GEMMA4_DECODE_AVAILABLE =
-  (await exists(GEMMA4_DECODE_MODEL.part0)) && (await exists(GEMMA4_TOKEN_MODEL.part0));
+const GEMMA4_DECODE_AVAILABLE = await exists(GEMMA4_DECODE_MODEL.part0);
 if (!GEMMA4_DECODE_AVAILABLE) {
   console.warn(
-    `[karume] ${GEMMA4_DECODE_MODEL.part0.pathname} と ${GEMMA4_TOKEN_MODEL.part0.pathname} が揃っていない` +
-      "ため Gemma 4 decode の融合ヒット数を SKIP する",
+    `[karume] ${GEMMA4_DECODE_MODEL.part0.pathname} が無いため Gemma 4 decode の融合ヒット数を SKIP する`,
   );
 }
 
@@ -36,21 +33,20 @@ if (!GEMMA4_DECODE_AVAILABLE) {
  * BSHDの専用添字を追加したため、両方で全50鎖を固定する（ADR 0040追記2026-09-12）。
  */
 test({
-  name: "実資産の Gemma 4 E2B は decode / prefill とも rope 50 を掴む（token-only 形も同一）",
+  name: "実資産の Gemma 4 E2B は decode / prefill とも rope 50 を掴む",
   ignore: !GEMMA4_DECODE_AVAILABLE,
   fn: async () => {
-    for (const [name, source] of [
-      ["logits opt-in", GEMMA4_DECODE_MODEL],
-      ["token-only", GEMMA4_TOKEN_MODEL],
-    ] as const) {
-      const graph = await readContainerGraph(source.part0, source.graph);
-      assertEquals(decodeFusionCounts(graph, 1), { ...NONE, rope: 50 }, `${name} decode（M=1）`);
-      assertEquals(
-        decodeFusionCounts(graph, 32),
-        { ...NONE, rope: 50 },
-        `${name} prefill 形（M=32）`,
-      );
-    }
+    const graph = await readContainerGraph(GEMMA4_DECODE_MODEL.part0, GEMMA4_DECODE_MODEL.graph);
+    assertEquals(
+      decodeFusionCounts(graph, 1),
+      { ...NONE, rope: 50 },
+      "logits opt-in decode（M=1）",
+    );
+    assertEquals(
+      decodeFusionCounts(graph, 32),
+      { ...NONE, rope: 50 },
+      "logits opt-in prefill 形（M=32）",
+    );
   },
 });
 

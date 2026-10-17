@@ -51,6 +51,11 @@ torch.export → コンテナ `krm`〈IR v2〉・uv 管理）。pnpm workspace +
   コア（runtime / hub / 共通層）の大きめ変更・横断変更・リリース前はフル `vp test`。
   コアだけなら `vp test --project core`（門番 3 本を含む）。レーンの表は
   `packages/test-support/src/lanes.ts`、被覆漏れは `verify_lanes_test.ts` が落とす（ADR 0129）
+- **上流との一致**（torch / diffusers の golden と許容差で比べるケース）は opt-in: `KARUME_UPSTREAM_PARITY=1`。
+  既定のレーンでは明示 SKIP。一致は実装時に取り、以後の変化は sha256 の回帰チェックが捕まえる（裁定 2026-10-17・
+  フラグは `packages/e2e/tests/helpers/upstream-parity.ts`）
+- **既定で走らせないファミリー**（minicpm5 / siglip2 — 保守はするが毎回は走らせない・レーン表の `LOW_PRIORITY_FAMILIES`）:
+  `KARUME_ALL_FAMILIES=1 vp test --project models:siglip2`。フル verify とリリース判定は既定の集合で回す
 - 1 ファイルなら `vp test <path>`。GPU を使う走行は他セッションと `flock /tmp/karume-gpu.lock` で
   直列化する。GPU を使わずに回すときは `KARUME_NO_DAWN=1`（CI と同じ構成 — 全 SKIP ガードは
   `KARUME_ALLOW_NO_GPU=1` 等で明示的に開ける）

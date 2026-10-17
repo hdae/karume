@@ -21,6 +21,7 @@ import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/c
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readFileIfPresent } from "../../models/tests/helpers/read-if-present.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
 const SAMPLE_RATE = 48000;
@@ -105,62 +106,97 @@ const tensorOf = (buffer: ArrayBuffer, key: string, where: string): Float32Array
   ) as Float32Array<ArrayBuffer>;
 };
 
-test({
-  name: "e2e(実GPU): 参照音声 → 正規化 → pad → codec encoder が golden の latent と一致する",
-  ignore: !RUNNABLE,
-  fn: async () => {
-    const prepared = prepareContainer(await openSeriesContainer(ENCODER_URL), ENCODER_GRAPH);
-    const gpu = await acquireGpu();
+/** One reference case pushed through the pipeline's chain, with its golden latent beside it. */
+type ChainResult = {
+  readonly rawLength: number;
+  readonly frames: number;
+  readonly actual: Float32Array;
+  readonly expected: Float32Array<ArrayBuffer>;
+};
+
+/**
+ * Runs every golden case through normalize -> reflect pad -> framing -> codec encoder on one
+ * session and hands each result to `check`. Both cases below share this one path so the shape
+ * gate and the parity band always look at the same chain.
+ */
+const runChainOverCases = async (
+  check: (name: string, result: ChainResult) => void,
+): Promise<void> => {
+  const prepared = prepareContainer(await openSeriesContainer(ENCODER_URL), ENCODER_GRAPH);
+  const gpu = await acquireGpu();
+  try {
+    const session = await prepared.createContainerSession(gpu, {});
     try {
-      const session = await prepared.createContainerSession(gpu, {});
-      try {
-        let worst = 0;
-        for (const name of CASES) {
-          const buffer = caseBytes.get(name) as ArrayBuffer;
-          const raw = tensorOf(buffer, "raw", `golden case.${name}`);
-          const expected = tensorOf(buffer, "latent", `golden case.${name}`);
+      for (const name of CASES) {
+        const buffer = caseBytes.get(name) as ArrayBuffer;
+        const raw = tensorOf(buffer, "raw", `golden case.${name}`);
+        const expected = tensorOf(buffer, "latent", `golden case.${name}`);
 
-          // ここがパイプラインと同じ鎖（`pipeline.ts` の `encodeReferenceAudio`）。
-          const padded = reflectPadToHop(normalizeReference(raw, SAMPLE_RATE).data, HOP_LENGTH);
-          const frames = padded.length / HOP_LENGTH;
-          const outputs = await session.run({
-            wav: { dtype: "f32", shape: [1, frames, HOP_LENGTH], data: padded },
-          });
-          const tensor = outputs[prepared.graph.outputs[0]];
-          if (tensor.dtype !== "f32") throw new Error(`encoder の出力が ${tensor.dtype}`);
-          const actual = tensor.data;
-
-          assertEquals(
-            actual.length,
-            expected.length,
-            `${name}: latent の要素数（フレーム幅 ${HOP_LENGTH} の取り違えはここに出る）`,
-          );
-          assertEquals(actual.length / LATENT_DIM, frames, `${name}: latent のフレーム数`);
-          let maxAbs = 0;
-          let absMax = 0;
-          for (let i = 0; i < actual.length; i += 1) {
-            maxAbs = Math.max(maxAbs, Math.abs(actual[i] - expected[i]));
-            absMax = Math.max(absMax, Math.abs(expected[i]));
-          }
-          worst = Math.max(worst, maxAbs);
-          console.log(
-            `[e2e] irodori 参照音声 ${name}: T ${frames} / ${raw.length} サンプル → ` +
-              `latent ${actual.length} 要素 / maxAbs ${maxAbs.toExponential(4)}` +
-              `（|latent| 上端 ${absMax.toFixed(2)}）`,
-          );
-          assertEquals(
-            maxAbs < LATENT_ATOL,
-            true,
-            `${name}: latent の最大絶対差 ${maxAbs} が atol ${LATENT_ATOL} を超えた` +
-              "（緩めず、前処理と encoder のどちらが動いたかを分けて実測する）",
-          );
-        }
-        console.log(`[e2e] irodori 参照音声: 最悪 maxAbs ${worst.toExponential(4)}`);
-      } finally {
-        await session.dispose();
+        // ここがパイプラインと同じ鎖（`pipeline.ts` の `encodeReferenceAudio`）。
+        const padded = reflectPadToHop(normalizeReference(raw, SAMPLE_RATE).data, HOP_LENGTH);
+        const frames = padded.length / HOP_LENGTH;
+        const outputs = await session.run({
+          wav: { dtype: "f32", shape: [1, frames, HOP_LENGTH], data: padded },
+        });
+        const tensor = outputs[prepared.graph.outputs[0]];
+        if (tensor.dtype !== "f32") throw new Error(`encoder の出力が ${tensor.dtype}`);
+        check(name, { rawLength: raw.length, frames, actual: tensor.data, expected });
       }
     } finally {
-      gpu.destroy();
+      await session.dispose();
     }
+  } finally {
+    gpu.destroy();
+  }
+};
+
+const assertLatentShape = (name: string, { frames, actual, expected }: ChainResult): void => {
+  assertEquals(
+    actual.length,
+    expected.length,
+    `${name}: latent の要素数（フレーム幅 ${HOP_LENGTH} の取り違えはここに出る）`,
+  );
+  assertEquals(actual.length / LATENT_DIM, frames, `${name}: latent のフレーム数`);
+};
+
+// The shape gate stays in the default run: a wrong frame width still yields a valid tensor, and
+// only the element count against the golden latent catches it. The value comparison (atol) is
+// upstream parity and is opt-in.
+test({
+  name: "e2e(実GPU): 参照音声 → 正規化 → pad → codec encoder の latent の形が golden と一致する",
+  ignore: !RUNNABLE,
+  fn: () => runChainOverCases(assertLatentShape),
+});
+
+test({
+  name:
+    "e2e(実GPU): 参照音声 → 正規化 → pad → codec encoder が golden の latent と一致する" +
+    UPSTREAM_PARITY_OPT_IN,
+  ignore: !RUNNABLE || !UPSTREAM_PARITY,
+  fn: async () => {
+    let worst = 0;
+    await runChainOverCases((name, result) => {
+      assertLatentShape(name, result);
+      const { rawLength, frames, actual, expected } = result;
+      let maxAbs = 0;
+      let absMax = 0;
+      for (let i = 0; i < actual.length; i += 1) {
+        maxAbs = Math.max(maxAbs, Math.abs(actual[i] - expected[i]));
+        absMax = Math.max(absMax, Math.abs(expected[i]));
+      }
+      worst = Math.max(worst, maxAbs);
+      console.log(
+        `[e2e] irodori 参照音声 ${name}: T ${frames} / ${rawLength} サンプル → ` +
+          `latent ${actual.length} 要素 / maxAbs ${maxAbs.toExponential(4)}` +
+          `（|latent| 上端 ${absMax.toFixed(2)}）`,
+      );
+      assertEquals(
+        maxAbs < LATENT_ATOL,
+        true,
+        `${name}: latent の最大絶対差 ${maxAbs} が atol ${LATENT_ATOL} を超えた` +
+          "（緩めず、前処理と encoder のどちらが動いたかを分けて実測する）",
+      );
+    });
+    console.log(`[e2e] irodori 参照音声: 最悪 maxAbs ${worst.toExponential(4)}`);
   },
 });
