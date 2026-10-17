@@ -285,7 +285,9 @@ def _parse_ts_ledger(source: str) -> dict[str, tuple[str, int, int, int, str, st
             "forbidden",
             None,
         )
-    for name, body in re.findall(r'\["([\w-]+)", \{(.*?)\n  \}\]', source, re.S):
+    # Oxfmt（2026-10-16）は長い項目を「[ / 名前 / { … } / ]」の複数行に割るので、名前と \`{\` の間・
+    # \`}\` と \`]\` の間の空白と改行を許す（RAW の行は 1 行のまま）。
+    for name, body in re.findall(r'\[\s*"([\w-]+)",\s*\{(.*?)\n\s*\},?\s*\]', source, re.S):
         numbers = {
             key: int(re.search(rf"{key}: (\d+)", body).group(1))  # type: ignore[union-attr]
             for key in ("blockElements", "blockBytes", "alignBytes")
@@ -1339,7 +1341,9 @@ def _parse_ts_row_axes(source: str) -> dict[str, tuple[int, ...]]:
         name: axes(raw.group(1))
         for name in re.findall(r'\["([\w-]+)", RAW\("[\w-]+", \d+\)\]', source)
     }
-    for name, body in re.findall(r'\["([\w-]+)", \{(.*?)\n  \}\]', source, re.S):
+    # Oxfmt（2026-10-16）は長い項目を「[ / 名前 / { … } / ]」の複数行に割るので、名前と \`{\` の間・
+    # \`}\` と \`]\` の間の空白と改行を許す（RAW の行は 1 行のまま）。
+    for name, body in re.findall(r'\[\s*"([\w-]+)",\s*\{(.*?)\n\s*\},?\s*\]', source, re.S):
         found = re.search(r"rowAxes: \[([\d, ]*)\]", body)
         assert found is not None, f"{name}: rowAxes を読めない"
         entries[name] = axes(found.group(1))
