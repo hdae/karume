@@ -1,11 +1,15 @@
 /**
- * 重み格納の変種（`w=f32` / `w=f16` / `w=i8` は融合 5 カーネル共通・`w=i4` / `w=i2` は展開経路を
+ * 重み格納の変種（`w=f32` / `w=f16` / `w=bf16` / `w=i8` は融合 5 カーネル共通・`w=i4` / `w=i2` は展開経路を
  * 持つ op だけ — ADR 0069 / 0097）— 融合 5 カーネル（linear / conv1d / conv2d /
  * conv_transpose1d / embedding）が共有する唯一の生成部品（ADR 0018 / 0019）。
  *
  * f16 変種は重みバッファを **`array<u32>`** で束縛し、`unpack2x16float` で 2 要素ずつ展開する
  * （core WGSL・optional feature 依存ゼロ）。添字 `i` の値は `unpack2x16float(w[i >> 1])[i & 1]`
  * で、**平坦添字の偶奇**だけが対を選ぶ。
+ *
+ * bf16 変種（ADR 0131）は f16 と同じ `array<u32>` 束縛・同じ偶奇の対選びで、展開だけが違う:
+ * bf16 は f32 の上位 16 bit そのものなので、語の下位 / 上位半分を `bitcast<f32>` で f32 に
+ * 戻す（`word << 16u` / `word & 0xFFFF0000u`）。変換は常に厳密（丸めも指数域の読み替えも無い）。
  *
  * i8 変種も同じく `array<u32>` 束縛で、`unpack4xI8` が 4 要素を 1 語から取り出す。値は
  * `f32(unpack4xI8(w[i >> 2])[i & 3]) * scale[出力チャネル]` — **scale は縮約の外に出さず
@@ -33,7 +37,7 @@
 import { CodegenError } from "../codegen/errors.ts";
 
 /** 重みスロットの格納形。意味論はどれも f32（計算は常に f32 — ADR 0006）。 */
-export type WeightStorage = "f32" | "f16" | "i8" | "i4" | "i2";
+export type WeightStorage = "f32" | "f16" | "bf16" | "i8" | "i4" | "i2";
 
 /**
  * 融合 5 カーネルが**共有する**変種の全数（スナップショットと縮退ハーネスの網羅を機械的に
@@ -46,7 +50,7 @@ export type WeightStorage = "f32" | "f16" | "i8" | "i4" | "i2";
  * 加えて i4 変種は group 長を WGSL に焼く（キーの `g` 部と対）ので、格納形だけを引数に取る
  * この列挙では表せない — i4 変種はスナップショット側が group 長つきで明示的に並べる。
  */
-export const WEIGHT_STORAGES: readonly WeightStorage[] = ["f32", "f16", "i8"];
+export const WEIGHT_STORAGES: readonly WeightStorage[] = ["f32", "f16", "bf16", "i8"];
 
 /**
  * i4 の group 長 → WGSL に焼く shift（キー断片と生成物の共通導出点 — linear / embedding が共有）。
@@ -88,14 +92,16 @@ export const weightKeyPart = (storage: WeightStorage): string =>
     ? ""
     : storage === "f16"
       ? ":wf16"
-      : storage === "i8"
-        ? ":wi8"
-        : storage === "i2"
-          ? ":wi2"
-          : ":wi4";
+      : storage === "bf16"
+        ? ":wbf16"
+        : storage === "i8"
+          ? ":wi8"
+          : storage === "i2"
+            ? ":wi2"
+            : ":wi4";
 
 /**
- * 重みバッファの WGSL 要素型（f16 は 2 要素・i8 は 4 要素を 1 語に詰めた格納なので u32）。
+ * 重みバッファの WGSL 要素型（f16 / bf16 は 2 要素・i8 は 4 要素を 1 語に詰めた格納なので u32）。
  *
  * `quad` は f32 だけを `vec4<f32>` へ変える（f16 / i8 は pack 済みで配列型が変わらない）。
  */
@@ -108,11 +114,13 @@ export const weightNote = (storage: WeightStorage): string =>
     ? ""
     : storage === "f16"
       ? ", 重み f16 格納"
-      : storage === "i8"
-        ? ", 重み i8 格納"
-        : storage === "i2"
-          ? ", 重み i2 格納"
-          : ", 重み i4 格納";
+      : storage === "bf16"
+        ? ", 重み bf16 格納"
+        : storage === "i8"
+          ? ", 重み i8 格納"
+          : storage === "i2"
+            ? ", 重み i2 格納"
+            : ", 重み i4 格納";
 
 /**
  * i8 / i2 変種で per-channel scale を束ねる局所変数の**既定の**名前。
@@ -125,11 +133,11 @@ export const weightNote = (storage: WeightStorage): string =>
 export const WEIGHT_SCALE_VAR = "wscale_v";
 
 /**
- * f16 / i8 / i4 / i2 変種の展開関数（と i8 / i4 / i2 の scale 束縛宣言）。束縛の直後に置く前提で、**前後 1 行ずつ
+ * f16 / bf16 / i8 / i4 / i2 変種の展開関数（と i8 / i4 / i2 の scale 束縛宣言）。束縛の直後に置く前提で、**前後 1 行ずつ
  * 空行が入る形**に整えてある（f32 では空文字になり、従来の空行 1 本だけが残る）。
  *
- * `scaleBinding` は i8 / i4 / i2 のときだけ使う — 出力束縛の**次の番号**を渡す。f32 / f16 は宣言を
- * 出さないので番号は消費されず、既存 2 変種の生成物は 1 バイトも動かない。
+ * `scaleBinding` は i8 / i4 / i2 のときだけ使う — 出力束縛の**次の番号**を渡す。f32 / f16 / bf16 は
+ * 宣言を出さないので番号は消費されず、f32 / f16 の既存生成物は 1 バイトも動かない。
  *
  * `quad` は {@link weightRead4} と対の quad 展開（`dequant4`）へ切り替える opt-in で、
  * スカラ版 `dequant` は出さない（v4 経路は quad 読みしか使わない）。
@@ -160,6 +168,27 @@ fn dequant4(i: u32) -> vec4<f32> {
 fn dequant(i: u32) -> f32 {
   let pair = unpack2x16float(${name}[i >> 1u]);
   return select(pair.x, pair.y, (i & 1u) == 1u);
+}
+`;
+  }
+  if (storage === "bf16") {
+    // bf16 = f32 の上位 16 bit。語の下位半分は `<< 16u`、上位半分は `& 0xFFFF0000u` で f32 の
+    // ビット列になる（ADR 0131）。NaN / Inf のビット列は bitcast の結果が WGSL の仕様上
+    // 不定だが、重みに非有限は無い（エクスポータが拒む）。quad 版の 4 整列の前提は f16 と同じ。
+    return quad
+      ? `
+// bf16 格納の quad 展開: 要素 i..i+3 = ${name}[i / 2] と ${name}[i / 2 + 1] の 2 語（bf16 は f32 の上位 16 bit）
+fn dequant4(i: u32) -> vec4<f32> {
+  let lo = ${name}[i >> 1u];
+  let hi = ${name}[(i >> 1u) + 1u];
+  return bitcast<vec4<f32>>(vec4<u32>(lo << 16u, lo & 0xFFFF0000u, hi << 16u, hi & 0xFFFF0000u));
+}
+`
+      : `
+// bf16 格納の展開: 要素 i = ${name}[i / 2] の下位 / 上位 16 bit を f32 の上位へ（平坦添字の偶奇で選ぶ）
+fn dequant(i: u32) -> f32 {
+  let word = ${name}[i >> 1u];
+  return bitcast<f32>(select(word << 16u, word & 0xFFFF0000u, (i & 1u) == 1u));
 }
 `;
   }
@@ -277,7 +306,7 @@ fn i4lanes(i: u32) -> u32 {
 `;
 
 /**
- * 出力チャネル `channel` の scale を**縮約の外で 1 度だけ**読む束縛（f32 / f16 は空文字）。
+ * 出力チャネル `channel` の scale を**縮約の外で 1 度だけ**読む束縛（f32 / f16 / bf16 は空文字）。
  *
  * 行末に置く前提で先頭に改行が入る（f32 / f16 では空文字になり、従来の行がそのまま残る）。
  * `indent` は挿入先の字下げをそのまま渡す。
@@ -306,10 +335,10 @@ ${indent}let ${variable} = wscale[${channel}];`
     : "";
 
 /**
- * 重み 1 要素の読み出し式（f32 は直接添字・f16 / i8 は展開関数）。
+ * 重み 1 要素の読み出し式（f32 は直接添字・f16 / bf16 / i8 は展開関数）。
  *
  * `scale` は**scale 式**で、i8 / i4 / i2 変種だけが使う（i8 / i2 は {@link weightScaleWgsl} が
- * 束縛した出力チャネルの {@link WEIGHT_SCALE_VAR} を、i4 は呼び出し側が引いた group の scale を渡す）。f32 / f16 は無視するので、両変種の生成物は
+ * 束縛した出力チャネルの {@link WEIGHT_SCALE_VAR} を、i4 は呼び出し側が引いた group の scale を渡す）。f32 / f16 / bf16 は無視するので、f32 / f16 の生成物は
  * バイト単位で従来のまま。
  */
 export const weightRead = (
@@ -320,7 +349,7 @@ export const weightRead = (
 ): string =>
   storage === "f32"
     ? `${name}[${index}]`
-    : storage === "f16"
+    : storage === "f16" || storage === "bf16"
       ? `dequant(${index})`
       : `dequant(${index}, ${scale})`;
 
@@ -328,7 +357,7 @@ export const weightRead = (
  * 重み **4 要素**（平坦添字 `index`..`index+3`）の読み出し式。
  *
  * MUST: `index` は 4 の倍数（GEMM の v4 経路からのみ呼ぶ）。f32 は `vec4<f32>` 配列の quad
- * 添字、f16 / i8 / i4 / i2 は {@link weightLoaderWgsl} の quad 版が出す `dequant4` に落ちる。
+ * 添字、f16 / bf16 / i8 / i4 / i2 は {@link weightLoaderWgsl} の quad 版が出す `dequant4` に落ちる。
  */
 export const weightRead4 = (
   name: string,
@@ -338,6 +367,6 @@ export const weightRead4 = (
 ): string =>
   storage === "f32"
     ? `${name}[(${index}) >> 2u]`
-    : storage === "f16"
+    : storage === "f16" || storage === "bf16"
       ? `dequant4(${index})`
       : `dequant4(${index}, ${scale})`;

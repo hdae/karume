@@ -676,7 +676,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "capability 不足（非対応 op / 非対応 格納 dtype）は Session 構築で落ちる（実 GPU）",
+  "capability 不足（非対応 op / 非対応 意味論 dtype）は Session 構築で落ちる（実 GPU）",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -693,14 +693,16 @@ test.skipIf(!GPU_AVAILABLE)(
         RuntimeSupportError,
       );
 
-      // NOTE: 非対応格納の代表は **bf16**（f16 は ADR 0018 で実行経路が入った — 適格判定に
-      // 関わらず実行できるので、もう capability 不足にはならない）。
-      const bf16Model = await openChainModel(chainGraph(), [
+      // NOTE: 非対応の**格納**はもう作れない — 台帳の全 codec が実行できる（f16 は ADR 0018、
+      // bf16 は ADR 0131）。dtype 側の代表は「対応 op が受けない意味論 dtype」（matmul の重みが i32）。
+      const unsupportedDtype = chainGraph();
+      unsupportedDtype.values["w"] = { dtype: "i32", shape: [4, 3] };
+      const i32Model = await openChainModel(unsupportedDtype, [
         {
           graph: "model",
           initializer: "w",
-          bytes: new Uint8Array(new ArrayBuffer(24)),
-          encoding: { codec: "bf16" },
+          bytes: new Uint8Array(new ArrayBuffer(48)),
+          encoding: { codec: "i32" },
         },
         {
           graph: "model",
@@ -710,7 +712,7 @@ test.skipIf(!GPU_AVAILABLE)(
         },
       ]);
       await assertRejects(
-        () => createSessionFromContainer(gpu, bf16Model, "model"),
+        () => createSessionFromContainer(gpu, i32Model, "model"),
         RuntimeSupportError,
       );
     } finally {

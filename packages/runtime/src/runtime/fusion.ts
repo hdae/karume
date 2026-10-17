@@ -265,7 +265,7 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
   }
   if (!allF32([plan])) return false;
   const weight = context.weightLayouts?.get(plan.node.ins[1]);
-  if (weight === undefined || weight.storage === "f16") return false;
+  if (weight === undefined || weight.storage === "f16" || weight.storage === "bf16") return false;
   const m = numel(plan.inputShapes[0].slice(0, -1));
   const [n, k] = plan.inputShapes[1];
   const group = weight.storage === "i4" ? weight.groupSize : undefined;

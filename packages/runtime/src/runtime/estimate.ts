@@ -582,6 +582,7 @@ const weightEstimate = (
       // residentCompressedBytes と同じ規律 — 実際に GPU が抱えるバイト数を表す欄なので、
       // scale を除くと実績と食い違う）。どちらも `WeightBuffer` として並んでいる。
       case "f16":
+      case "bf16":
       case "i8":
       case "i4":
       case "i2":

@@ -1,7 +1,8 @@
-// Weight storages shared by the five fused kernels: f16 (ADR 0018) and per-channel i8 (ADR 0019).
-// The two storages mirror each other test-for-test, so the mirrored tests run once per entry of
-// STORAGES (each keeps its own title); storage-specific parts (host decoding, the exhaustive unpack
-// check, the i8 channel axis and rowAxis admission) stay separate.
+// Weight storages shared by the five fused kernels: f16 (ADR 0018), bf16 (ADR 0131) and per-channel
+// i8 (ADR 0019). The storages mirror each other test-for-test, so the mirrored tests run once per
+// entry of STORAGES (each keeps its own title); storage-specific parts (host decoding, the exhaustive
+// unpack check, the i8 channel axis and rowAxis admission) stay separate. bf16 shares f16's packing
+// (two elements per u32 word, the same odd-length traps) and differs only in the unpack (a bitcast).
 //
 // f16 格納の実行経路（ADR 0018）— 適格判定・ロード経路・カーネル変種・診断の通し検証。
 // i8（per-channel symmetric int8）格納の実行経路（ADR 0019）— ロード時検証・適格判定の共用・
@@ -31,6 +32,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type CodecName, perChannelGroupSize } from "../src/format/container/codecs.ts";
 import { ContainerFormatError } from "../src/format/container/header.ts";
 import type { OpenedContainer } from "../src/format/container/open.ts";
+import { bf16BitsToF32, decodeBf16 } from "../src/format/bf16.ts";
 import { decodeF16, f16BitsToF32 } from "../src/format/f16.ts";
 import { alignI8Payload, decodeI8, I8Error } from "../src/format/i8.ts";
 import type { IrGraph } from "../src/format/ir.ts";
@@ -39,7 +41,7 @@ import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
 import { RUNTIME_SUPPORT, WEIGHT_SLOTS } from "../src/ops.ts";
-import { assertRuntimeSupport, RuntimeSupportError } from "../src/ops/support.ts";
+import { assertRuntimeSupport } from "../src/ops/support.ts";
 import {
   eligibleCompressedInitializers,
   ExecutionError,
@@ -51,6 +53,7 @@ import {
   type Tensor,
 } from "../src/runtime/executor.ts";
 import type { EncodingInput, TensorInput } from "./helpers/container-write.ts";
+import { bf16BytesFromBits, quantizeBf16 } from "./helpers/bf16.ts";
 import { f16BytesFromBits, quantizeF16 } from "./helpers/f16.ts";
 import { i8BytesFrom, quantizeI8 } from "./helpers/i8.ts";
 import { mergeGraph, mergeTensors } from "./helpers/merged-graph.ts";
@@ -136,7 +139,7 @@ type QuantizedWeight = {
 
 /** One storage under test, with the expectations that differ between the storages. */
 type WeightStorageCase = {
-  readonly storage: "f16" | "i8";
+  readonly storage: "f16" | "bf16" | "i8";
   readonly codec: CodecName;
   readonly quantize: (weight: FilledTensor, channelAxis: number) => QuantizedWeight;
   /** linear cases on the GEMM tile edges (v4 path and scalar path). */
@@ -209,6 +212,52 @@ const STORAGES: readonly WeightStorageCase[] = [
       diagnostics: "診断は適格 / 適格外 / 非圧縮を実バイト数で区別する（実 GPU）",
       graphOutput:
         "graph 出力にした f16 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
+    },
+  },
+  {
+    // bf16 = f32 の上位 16 bit（ADR 0131）。詰め方は f16 と同じ（2 要素 / 語）なので、奇数長の罠と
+    // 整列の詰め物もそのまま共有する。丸めは f32 の下位 16 bit を落とす RNE（helpers/bf16.ts）。
+    storage: "bf16",
+    codec: "bf16",
+    quantize: (weight) => {
+      const quantized = quantizeBf16(weight.data);
+      return { ...quantized, encoding: { codec: "bf16" } };
+    },
+    tileCases: [
+      {
+        // f16 と同じ形（k=20 の v4 経路 / k=37 のスカラ経路 — 偶奇の検出器）
+        name: "linear v4 [65,20] × W[68,20] + b[68]",
+        op: "linear",
+        inputs: [["x", fill([65, 20], SIGNED)]],
+        weight: fill([68, 20], POSITIVE),
+        channelAxis: 0,
+        bias: fill([68], SIGNED),
+        outShape: [65, 68],
+      },
+      {
+        name: "linear スカラ [70,37] × W[23,37] + b[23]",
+        op: "linear",
+        inputs: [["x", fill([70, 37], SIGNED)]],
+        weight: fill([23, 37], POSITIVE),
+        channelAxis: 0,
+        bias: fill([23], SIGNED),
+        outShape: [70, 23],
+      },
+    ],
+    // 12 elements × 2 bytes, already 4-byte aligned.
+    mixedResidentBytes: 24,
+    // 適格: 21 要素 × 2 バイト = 42 → 4 バイト整列で 44
+    diagnostics: { payloadBytes: 42, residentBytes: 44 },
+    titles: {
+      eligibility: "bf16 の適格判定は f16 と同じ 1 本の判定を通る（新設していない）",
+      graphOutputEligibility: "graph 出力になった bf16 initializer も同じ 1 本の判定で適格外",
+      variants: "w=bf16 変種 5 種が CPU 参照（丸め後の重み）と一致する（奇数長・実 GPU）",
+      tiles: "w=bf16 の linear が GEMM タイル境界（v4 / スカラ）で CPU 参照と一致する（実 GPU）",
+      poison: "w=bf16 変種もプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
+      mixed: "混在消費の bf16 は CPU 展開へ落ち、適格経路とビット単位で同じ値を出す（実 GPU）",
+      diagnostics: "診断は適格 / 適格外 / 非圧縮を実バイト数で区別する（bf16・実 GPU）",
+      graphOutput:
+        "graph 出力にした bf16 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
     },
   },
   {
@@ -437,23 +486,12 @@ test("per-channel codec に行長と違う groupSize を付けると合流で落
 });
 
 /**
- * bf16 は宣言としては valid なまま**実行できない**ので、capability 不足として initializer
- * 名つきで列挙される（i8 は ADR 0019 で門が開いた）。
+ * f16 / bf16 / i8 は同じ capability 門を通る（適格かどうかは実行可否と別軸）。bf16 は ADR 0131 まで
+ * 「宣言としては valid なまま実行できない」格納だったが、今は f16 と同じ経路で実行する。
  */
-test("bf16 は capability 不足で fail loudly（f16 の門は bf16 まで開かない）", () => {
-  const error = assertThrows(
-    // 圧縮重み + f32 bias（`b` を省くと `mergedFor` の既定 f16 になり、fixture の意図が変わる）。
-    () =>
-      assertRuntimeSupport(
-        mergedFor(linearDeclaration(), { w: "bf16", b: "f32" }),
-        RUNTIME_SUPPORT,
-      ),
-    RuntimeSupportError,
-    "capability 不足",
-  );
-  assertEquals(error.message.includes("非対応 格納 'bf16' (1): w"), true, error.message);
-  // f16 / i8 は同じ門を通る（適格かどうかは実行可否と別軸）
+test("f16 / bf16 / i8 は capability 門を通る（適格かどうかは実行可否と別軸）", () => {
   for (const storage of STORAGES) {
+    // 圧縮重み + f32 bias（`b` を省くと `mergedFor` の既定 f16 になり、fixture の意図が変わる）。
     assertRuntimeSupport(
       mergedFor(linearDeclaration(), { b: "f32" }, storage.codec),
       RUNTIME_SUPPORT,
@@ -510,6 +548,30 @@ test("f16 → f32 の展開は ±0 / subnormal / ±Inf / NaN / 最大最小 norm
   // 展開後は必ず f32 で厳密（丸めが 1 度も起きない）
   for (const bits of [0x0001, 0x03ff, 0x0400, 0x7bff, 0x3555]) {
     assertEquals(Math.fround(f16BitsToF32(bits)), f16BitsToF32(bits), `bits=${bits}`);
+  }
+});
+
+test("bf16 → f32 の展開は上位 16 bit の写し（±0 / subnormal / ±Inf / NaN / 最大最小 normal）", () => {
+  assert(Object.is(bf16BitsToF32(0x0000), 0), "+0");
+  assert(Object.is(bf16BitsToF32(0x8000), -0), "-0");
+  // subnormal: 最小（2^-133）と最大（2^-126 に 1 ulp 足りない）— f32 の subnormal にそのまま当たる
+  assertEquals(bf16BitsToF32(0x0001), 2 ** -133);
+  assertEquals(bf16BitsToF32(0x007f), 127 * 2 ** -133);
+  // normal: 最小（2^-126）と最大（(2 - 2^-7) · 2^127）
+  assertEquals(bf16BitsToF32(0x0080), 2 ** -126);
+  assertEquals(bf16BitsToF32(0x7f7f), (2 - 2 ** -7) * 2 ** 127);
+  assertEquals(bf16BitsToF32(0xff7f), -(2 - 2 ** -7) * 2 ** 127);
+  assertEquals(bf16BitsToF32(0x3f80), 1);
+  assertEquals(bf16BitsToF32(0xbf80), -1);
+  assertEquals(bf16BitsToF32(0x7f80), Infinity);
+  assertEquals(bf16BitsToF32(0xff80), -Infinity);
+  assert(Number.isNaN(bf16BitsToF32(0x7fc0)), "quiet NaN");
+  assert(Number.isNaN(bf16BitsToF32(0xff81)), "signaling NaN（符号付き）");
+  // 展開はビットの写しなので、f32 → bf16 の往復（下位 16 bit が 0 の値）は恒等
+  for (const bits of [0x0001, 0x007f, 0x0080, 0x7f7f, 0x3555]) {
+    const value = bf16BitsToF32(bits);
+    assertEquals(Math.fround(value), value, `bits=${bits}`);
+    assertEquals(decodeBf16(bf16BytesFromBits([bits]))[0], value, `bits=${bits}`);
   }
 });
 
@@ -897,6 +959,89 @@ test.skipIf(!GPU_AVAILABLE)(
     // 網羅の証拠（NaN 2046 本・subnormal 2046 本を実際に踏んでいる）
     assertEquals(nan, 2046, "NaN パターン数");
     assertEquals(subnormal, 2046, "subnormal パターン数");
+  },
+);
+
+/**
+ * GPU の bf16 展開（`bitcast<f32>` — ADR 0131）と CPU の {@link bf16BitsToF32} が**全 65,536
+ * パターンで一致**する。運び方は f16 の門と同じ（embedding の [256, 256]・`bits = row·256 + col`）。
+ *
+ * MUST: NaN は**双方 NaN**で見る（WGSL は NaN のペイロード伝播を保証しない — f16 と同じ）。
+ * MUST: f32 の subnormal に当たるパターン（指数 0・仮数 ≠ 0）は **GPU が 0 へ flush してもよい**
+ * （WGSL は subnormal の保持を保証しない）— それ以外はビット一致を要求する。
+ */
+test.skipIf(!GPU_AVAILABLE)(
+  "GPU の bf16 bitcast 展開と CPU 展開が全 65,536 パターンで一致（実 GPU・subnormal は flush を許す）",
+  async () => {
+    const vocab = 256;
+    const hidden = 256;
+    const bytes = bf16BytesFromBits(Array.from({ length: vocab * hidden }, (_, i) => i));
+    const declaration: DeclarationJson = {
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["embedding"] },
+      symbols: [],
+      inputs: [{ name: "index", dtype: "i32", shape: [vocab] }],
+      outputs: ["y"],
+      initializers: { w: {} },
+      values: {
+        w: { dtype: "f32", shape: [vocab, hidden] },
+        y: { dtype: "f32", shape: [vocab, hidden] },
+      },
+      nodes: [
+        {
+          op: "embedding",
+          ins: ["w", "index"],
+          outs: ["y"],
+          attrs: { padding_idx: -1 },
+        },
+      ],
+    };
+    const opened = await openModelBytes(declaration, [
+      { graph: GRAPH_NAME, initializer: "w", bytes, encoding: { codec: "bf16" } },
+    ]);
+    const gpu = await acquireGpu();
+    const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
+    let actual: Float32Array<ArrayBuffer>;
+    try {
+      const outputs = await session.run({ index: fill([vocab], (i) => i, "i32") });
+      actual = outputs["y"].data as Float32Array<ArrayBuffer>;
+      // 圧縮のまま常駐していなければ「GPU の展開」を見ていない
+      assertEquals(session.diagnostics().storage.residentCompressedBytes, bytes.byteLength);
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+    const expected = decodeBf16(bytes);
+    const actualBits = new Uint32Array(actual.buffer, actual.byteOffset, actual.length);
+    const expectedBits = new Uint32Array(expected.buffer, expected.byteOffset, expected.length);
+    let nan = 0;
+    let subnormal = 0;
+    let flushed = 0;
+    for (let i = 0; i < expected.length; i += 1) {
+      if (Number.isNaN(expected[i])) {
+        nan += 1;
+        assert(Number.isNaN(actual[i]), `pattern 0x${i.toString(16)}: GPU 側が NaN でない`);
+        continue;
+      }
+      if (((i >> 7) & 0xff) === 0 && (i & 0x7f) !== 0) {
+        subnormal += 1;
+        if (actual[i] === 0) {
+          flushed += 1;
+          continue;
+        }
+      }
+      assertEquals(
+        actualBits[i],
+        expectedBits[i],
+        `pattern 0x${i.toString(16)}: GPU ${actual[i]} / CPU ${expected[i]}`,
+      );
+    }
+    // 網羅の証拠（NaN 254 本・subnormal 254 本を実際に踏んでいる）。flush の有無は機ごとの事実で、
+    // 門の条件ではない（ここでは数だけ残す）。
+    assertEquals(nan, 254, "NaN パターン数");
+    assertEquals(subnormal, 254, "subnormal パターン数");
+    assert(flushed <= subnormal, "flush の数が subnormal の数を超えている");
   },
 );
 

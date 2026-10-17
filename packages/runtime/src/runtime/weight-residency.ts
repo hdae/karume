@@ -45,7 +45,10 @@ import {
  * だけが最後の砦になる。
  */
 export type ResidentWeight =
+  // f16 と bf16 は別のメンバで持つ（1 メンバに `"f16" | "bf16"` で持つと、`!== "f16"` の絞り込みで
+  // そのメンバが残り、scale を持つ側へ narrowing できない）。
   | { readonly storage: "f16" }
+  | { readonly storage: "bf16" }
   | { readonly storage: "i8" | "i2"; readonly scale: GPUBuffer }
   | { readonly storage: "i4"; readonly scale: GPUBuffer; readonly groupSize: number };
 
@@ -53,8 +56,8 @@ export type ResidentWeight =
  * initializer 1 本の常駐分類（{@link planWeightResidency} の値）。
  *
  * 席は 7 つ:
- * - `raw` — 圧縮しない格納（f32 / i32 / bf16）を生バイトのまま GPU 常駐（session-build.ts の構築相）
- * - `f16` / `i8` / `i2` / `i4` — 圧縮のまま常駐し dequant はカーネル内（ADR 0018 / 0019 / 0097 / 0069）
+ * - `raw` — 圧縮しない格納（f32 / i32）を生バイトのまま GPU 常駐（session-build.ts の構築相）
+ * - `f16` / `bf16` / `i8` / `i2` / `i4` — 圧縮のまま常駐し dequant はカーネル内（ADR 0018 / 0131 / 0019 / 0097 / 0069）
  * - `expanded` — 適格外でロード時に CPU で f32 展開（正しさは保たれ VRAM 削減はゼロ）
  * - `shared` — 借り物の重み（ADR 0096 段 2 §1.3 — 貸し手 Session の GPU バッファを束ねる）
  *
@@ -63,7 +66,7 @@ export type ResidentWeight =
  */
 export type WeightResidency =
   | { readonly seat: "raw"; readonly payloadBytes: number }
-  | { readonly seat: "f16"; readonly payloadBytes: number }
+  | { readonly seat: "f16" | "bf16"; readonly payloadBytes: number }
   | {
       readonly seat: "i8" | "i2";
       readonly payloadBytes: number;
@@ -149,7 +152,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     } catch (cause) {
       throw new ExecutionError(cause instanceof Error ? cause.message : String(cause));
     }
-    if (layout === "f32" || layout === "i32" || layout === "bf16") {
+    if (layout === "f32" || layout === "i32") {
       // 圧縮しない格納は生バイトがそのまま GPU 表現。
       plan.set(name, { seat: "raw", payloadBytes: bytes });
       continue;
@@ -164,8 +167,8 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
       plan.set(name, { seat: "expanded", payloadBytes: bytes, expandedBytes: count * 4 });
       continue;
     }
-    if (layout === "f16") {
-      plan.set(name, { seat: "f16", payloadBytes: bytes });
+    if (layout === "f16" || layout === "bf16") {
+      plan.set(name, { seat: layout, payloadBytes: bytes });
       continue;
     }
     // 量子化 codec: rowAxis / groupSize の存在と値域は合流層が保証済み。存在は型の上で

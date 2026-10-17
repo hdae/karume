@@ -219,7 +219,7 @@ test("公開面が capability 照会とモデル解析の失敗型を提供す�
   for (const op of ["matmul", "add", "sum", "gelu", "amax"]) {
     assertEquals(ops.includes(op), true, op);
   }
-  assertEquals(capabilities().storage, ["f16", "f32", "i2", "i32", "i4", "i8"]);
+  assertEquals(capabilities().storage, ["bf16", "f16", "f32", "i2", "i32", "i4", "i8"]);
   // 容器（`krm` / `krg`）の解析失敗と、付帯資産（safetensors）の解析失敗の 2 型。
   await assertRejects(
     () => openContainer({ kind: "bytes", bytes: new Uint8Array(new ArrayBuffer(4)) }),

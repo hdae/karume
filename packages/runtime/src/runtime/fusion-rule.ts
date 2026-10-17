@@ -176,7 +176,7 @@ export type FusionLimits = {
 
 /** GPU実体を持たない常駐格納情報。scaleの寿命と所有権はSession側に残す。 */
 export type FusionWeightLayout =
-  | { readonly storage: "f16" | "i2" | "i8" }
+  | { readonly storage: "f16" | "bf16" | "i2" | "i8" }
   | { readonly storage: "i4"; readonly groupSize: number };
 
 /** 判定に要るグラフ全体の事実（executor の Session 状態から渡す）。 */

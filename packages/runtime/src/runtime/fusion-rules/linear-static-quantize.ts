@@ -65,7 +65,9 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
     )
       return undefined;
     const weight = context.weightLayouts?.get(linear.node.ins[1]);
-    if (weight === undefined || weight.storage === "f16") return undefined;
+    if (weight === undefined || weight.storage === "f16" || weight.storage === "bf16") {
+      return undefined;
+    }
     const m = numel(linear.inputShapes[0].slice(0, -1));
     const [n, k] = linear.inputShapes[1];
     const group = weight.storage === "i4" ? weight.groupSize : undefined;

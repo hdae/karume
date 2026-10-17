@@ -81,6 +81,7 @@ import {
   type Tensor,
 } from "../src/runtime/executor.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
+import { quantizeBf16 } from "./helpers/bf16.ts";
 import { quantizeF16 } from "./helpers/f16.ts";
 import {
   type DeclarationJson,
@@ -1043,7 +1044,7 @@ test.skipIf(!GPU_AVAILABLE)(
 // the component / word boundaries (f32).
 // ---------------------------------------------------------------------------
 
-type FloatStorage = "f16" | "f32";
+type FloatStorage = "f16" | "bf16" | "f32";
 
 /** Activation of the float-storage cases (row-major, so row 0 does not depend on m). */
 const floatActivation = (length: number): Float32Array<ArrayBuffer> =>
@@ -1065,8 +1066,8 @@ const floatLinearFixture = (
     { length: n * k },
     (_, i) => (i % 2 === 0 ? 1 : -1) * (0.0013 + (i % 23) * 0.017),
   );
-  const rounded = quantizeF16(raw);
-  const weight = storage === "f16" || roundToF16 ? rounded.values : raw;
+  const rounded = storage === "bf16" ? quantizeBf16(raw) : quantizeF16(raw);
+  const weight = storage === "f16" || storage === "bf16" || roundToF16 ? rounded.values : raw;
   const bias = Float32Array.from({ length: n }, (_, i) => Math.sin(i * 0.37) * 0.13);
   const declaration: DeclarationJson = {
     format: "karume-ir",
@@ -1087,7 +1088,7 @@ const floatLinearFixture = (
     {
       graph: GRAPH_NAME,
       initializer: "w",
-      bytes: storage === "f16" ? rounded.bytes : f32Bytes([...weight]),
+      bytes: storage === "f32" ? f32Bytes([...weight]) : rounded.bytes,
       encoding: { codec: storage },
     },
     {
@@ -1159,6 +1160,22 @@ test.skipIf(!GPU_AVAILABLE)(
     ]),
 );
 
+// bf16 shares f16's packing (8 elements per 16-byte word), so the same edge shapes apply.
+test.skipIf(!GPU_AVAILABLE)(
+  "bf16 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
+  () =>
+    checkFloatGemvBits("bf16", [
+      [64, 128],
+      [100, 40],
+      [36, 48],
+      [68, 56],
+      [4, 8],
+      [32, 24],
+      [36, 136],
+      [100, 264],
+    ]),
+);
+
 test.skipIf(!GPU_AVAILABLE)(
   "f32 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
   () =>
@@ -1212,6 +1229,17 @@ test.skipIf(!GPU_AVAILABLE)(
       { m: 1, n: 36, k: 36, storage: "f16" },
       { m: 1, n: 35, k: 40, storage: "f16" },
       { m: 1, n: 36, k: 40, storage: "f32", gemv: true, roundToF16: true },
+    ]),
+);
+
+test.skipIf(!GPU_AVAILABLE)(
+  "bf16 GEMV の行数・K 整列・N 整列の門は f16 と同じ条件で開く（実 GPU）",
+  () =>
+    checkFloatDoor([
+      { m: 2, n: 36, k: 40, storage: "bf16" },
+      { m: 1, n: 36, k: 36, storage: "bf16" },
+      { m: 1, n: 35, k: 40, storage: "bf16" },
+      { m: 1, n: 36, k: 40, storage: "bf16", gemv: true },
     ]),
 );
 

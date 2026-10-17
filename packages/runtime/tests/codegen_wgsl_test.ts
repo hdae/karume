@@ -525,10 +525,17 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     // 動いていない**ことを同じ列挙で機械確認する（変種追加で既存が動くのが最大の事故）。
     ["linear_wf16.wgsl", linearWgsl("f16", false)],
     ["linear_wf16_v4.wgsl", linearWgsl("f16", true)],
+    // 重み bf16 格納の変種（ADR 0131）— f16 の変種と対で置く（展開だけが bitcast に変わる）。
+    ["linear_wbf16.wgsl", linearWgsl("bf16", false)],
+    ["linear_wbf16_v4.wgsl", linearWgsl("bf16", true)],
     ["embedding_wf16.wgsl", embeddingWgsl("f16")],
+    ["embedding_wbf16.wgsl", embeddingWgsl("bf16")],
     ["conv1d_wf16.wgsl", conv1dWgsl("f16")],
+    ["conv1d_wbf16.wgsl", conv1dWgsl("bf16")],
     ["conv2d_wf16.wgsl", conv2dWgsl("f16")],
+    ["conv2d_wbf16.wgsl", conv2dWgsl("bf16")],
     ["conv_transpose1d_wf16.wgsl", convTranspose1dWgsl("f16")],
+    ["conv_transpose1d_wbf16.wgsl", convTranspose1dWgsl("bf16")],
     ["linear_wi8.wgsl", linearWgsl("i8", false)],
     ["linear_wi8_v4.wgsl", linearWgsl("i8", true)],
     // i4 は linear / embedding 限定（ADR 0069）— group 32（既定）の shift を焼いた変種。
@@ -581,6 +588,7 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["linear_gemv_g64.wgsl", linearGemvWgsl("i4", 64)],
     ["linear_gemv_wi8.wgsl", linearGemvWgsl("i8")],
     ["linear_gemv_wf16.wgsl", linearGemvWgsl("f16")],
+    ["linear_gemv_wbf16.wgsl", linearGemvWgsl("bf16")],
     ["linear_gemv_f32.wgsl", linearGemvWgsl("f32")],
     // 同族の **行ブロック変種**（M ≥ 2 — ADR 0082 追記 5 / perf-ledger K-21）。上の M=1 の 3 本と
     // **対で置く**のが条件で、行ブロック化で decode（M=1）の生成物が 1 バイトも動かないことは
@@ -615,6 +623,8 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["conv2d_igemm_v4.wgsl", conv2dIgemmWgsl("f32", true)],
     ["conv2d_igemm_wf16.wgsl", conv2dIgemmWgsl("f16", false)],
     ["conv2d_igemm_wf16_v4.wgsl", conv2dIgemmWgsl("f16", true)],
+    ["conv2d_igemm_wbf16.wgsl", conv2dIgemmWgsl("bf16", false)],
+    ["conv2d_igemm_wbf16_v4.wgsl", conv2dIgemmWgsl("bf16", true)],
     ["conv2d_igemm_wi8.wgsl", conv2dIgemmWgsl("i8", false)],
     ["conv2d_igemm_wi8_v4.wgsl", conv2dIgemmWgsl("i8", true)],
     // 32 行 m タイル変種（ADR 0024 隣接）。**64 行版と対で並べる**のが条件で、
@@ -623,6 +633,8 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["conv2d_igemm_m32_v4.wgsl", conv2dIgemmWgsl("f32", true, GEMM_MTILE_SMALL)],
     ["conv2d_igemm_m32_wf16.wgsl", conv2dIgemmWgsl("f16", false, GEMM_MTILE_SMALL)],
     ["conv2d_igemm_m32_wf16_v4.wgsl", conv2dIgemmWgsl("f16", true, GEMM_MTILE_SMALL)],
+    ["conv2d_igemm_m32_wbf16.wgsl", conv2dIgemmWgsl("bf16", false, GEMM_MTILE_SMALL)],
+    ["conv2d_igemm_m32_wbf16_v4.wgsl", conv2dIgemmWgsl("bf16", true, GEMM_MTILE_SMALL)],
     ["conv2d_igemm_m32_wi8.wgsl", conv2dIgemmWgsl("i8", false, GEMM_MTILE_SMALL)],
     ["conv2d_igemm_m32_wi8_v4.wgsl", conv2dIgemmWgsl("i8", true, GEMM_MTILE_SMALL)],
     // conv1d の implicit GEMM（ADR 0024 の 1D 版）も同じ粒度で 12 変種。**上の conv1d*.wgsl
@@ -632,12 +644,16 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["conv1d_igemm_v4.wgsl", conv1dIgemmWgsl("f32", true)],
     ["conv1d_igemm_wf16.wgsl", conv1dIgemmWgsl("f16", false)],
     ["conv1d_igemm_wf16_v4.wgsl", conv1dIgemmWgsl("f16", true)],
+    ["conv1d_igemm_wbf16.wgsl", conv1dIgemmWgsl("bf16", false)],
+    ["conv1d_igemm_wbf16_v4.wgsl", conv1dIgemmWgsl("bf16", true)],
     ["conv1d_igemm_wi8.wgsl", conv1dIgemmWgsl("i8", false)],
     ["conv1d_igemm_wi8_v4.wgsl", conv1dIgemmWgsl("i8", true)],
     ["conv1d_igemm_m32.wgsl", conv1dIgemmWgsl("f32", false, GEMM_MTILE_SMALL)],
     ["conv1d_igemm_m32_v4.wgsl", conv1dIgemmWgsl("f32", true, GEMM_MTILE_SMALL)],
     ["conv1d_igemm_m32_wf16.wgsl", conv1dIgemmWgsl("f16", false, GEMM_MTILE_SMALL)],
     ["conv1d_igemm_m32_wf16_v4.wgsl", conv1dIgemmWgsl("f16", true, GEMM_MTILE_SMALL)],
+    ["conv1d_igemm_m32_wbf16.wgsl", conv1dIgemmWgsl("bf16", false, GEMM_MTILE_SMALL)],
+    ["conv1d_igemm_m32_wbf16_v4.wgsl", conv1dIgemmWgsl("bf16", true, GEMM_MTILE_SMALL)],
     ["conv1d_igemm_m32_wi8.wgsl", conv1dIgemmWgsl("i8", false, GEMM_MTILE_SMALL)],
     ["conv1d_igemm_m32_wi8_v4.wgsl", conv1dIgemmWgsl("i8", true, GEMM_MTILE_SMALL)],
     // conv1d の i4 変種（ADR 0069 決定 5 の conv1d 追補 — group 32 の shift を焼いた形）。
@@ -656,12 +672,16 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["conv3d_igemm_v4.wgsl", conv3dIgemmWgsl("f32", true)],
     ["conv3d_igemm_wf16.wgsl", conv3dIgemmWgsl("f16", false)],
     ["conv3d_igemm_wf16_v4.wgsl", conv3dIgemmWgsl("f16", true)],
+    ["conv3d_igemm_wbf16.wgsl", conv3dIgemmWgsl("bf16", false)],
+    ["conv3d_igemm_wbf16_v4.wgsl", conv3dIgemmWgsl("bf16", true)],
     ["conv3d_igemm_wi8.wgsl", conv3dIgemmWgsl("i8", false)],
     ["conv3d_igemm_wi8_v4.wgsl", conv3dIgemmWgsl("i8", true)],
     ["conv3d_igemm_m32.wgsl", conv3dIgemmWgsl("f32", false, GEMM_MTILE_SMALL)],
     ["conv3d_igemm_m32_v4.wgsl", conv3dIgemmWgsl("f32", true, GEMM_MTILE_SMALL)],
     ["conv3d_igemm_m32_wf16.wgsl", conv3dIgemmWgsl("f16", false, GEMM_MTILE_SMALL)],
     ["conv3d_igemm_m32_wf16_v4.wgsl", conv3dIgemmWgsl("f16", true, GEMM_MTILE_SMALL)],
+    ["conv3d_igemm_m32_wbf16.wgsl", conv3dIgemmWgsl("bf16", false, GEMM_MTILE_SMALL)],
+    ["conv3d_igemm_m32_wbf16_v4.wgsl", conv3dIgemmWgsl("bf16", true, GEMM_MTILE_SMALL)],
     ["conv3d_igemm_m32_wi8.wgsl", conv3dIgemmWgsl("i8", false, GEMM_MTILE_SMALL)],
     ["conv3d_igemm_m32_wi8_v4.wgsl", conv3dIgemmWgsl("i8", true, GEMM_MTILE_SMALL)],
     // w8a8（活性 i8 化 + 整数内積）。**dp4a 版とエミュ版の両方**を置くのが条件で、
@@ -717,6 +737,8 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["linear_c16_v4.wgsl", linearWgsl("f32", true, "f16")],
     ["linear_wf16_c16.wgsl", linearWgsl("f16", false, "f16")],
     ["linear_wf16_c16_v4.wgsl", linearWgsl("f16", true, "f16")],
+    ["linear_wbf16_c16.wgsl", linearWgsl("bf16", false, "f16")],
+    ["linear_wbf16_c16_v4.wgsl", linearWgsl("bf16", true, "f16")],
     // S の **f16 格納**変種（案 γ 波 1 — `SessionOptions.attentionScoreStorage`）。語彙は
     // 格納重み `wf16` / 計算 `c16` と別の `s16` で、**v4 側しか存在しない**（スカラ経路の
     // 部分書きは同じ u32 語への RMW になるので生成の入口が落とす — 下の fail loudly テスト）。
@@ -4587,7 +4609,8 @@ test("i4 の展開経路が無い conv2d 直接 / conv_transpose1d は生成の�
   assertThrows(() => convTranspose1dWgsl("i4"), CodegenError, "i4");
   // 門は i4 だけを落とす（共有 3 変種は素通り — キーも生成物も従来の形のまま）
   for (const storage of WEIGHT_STORAGES) {
-    const suffix = storage === "f32" ? "" : storage === "f16" ? ":wf16" : ":wi8";
+    const suffix =
+      storage === "f32" ? "" : storage === "f16" ? ":wf16" : storage === "bf16" ? ":wbf16" : ":wi8";
     assertEquals(conv2dKey(storage), `conv2d:v1:f32:direct:wg256${suffix}`);
     assertEquals(convTranspose1dKey(storage), `conv_transpose1d:v2:f32:gather:wg256${suffix}`);
     assertEquals(conv2dWgsl(storage).includes("@compute @workgroup_size(256)"), true, storage);
@@ -4609,7 +4632,8 @@ test("i4 の展開経路が無い conv2d 直接 / conv_transpose1d は生成の�
  */
 test("weight-storage の quad 拡張は既存 4 op の生成物を 1 バイトも動かさない", async () => {
   const existing: readonly (readonly [string, string])[] = WEIGHT_STORAGES.flatMap((weight) => {
-    const suffix = weight === "f32" ? "" : weight === "f16" ? "_wf16" : "_wi8";
+    const suffix =
+      weight === "f32" ? "" : weight === "f16" ? "_wf16" : weight === "bf16" ? "_wbf16" : "_wi8";
     return [
       [`conv1d${suffix}.wgsl`, conv1dWgsl(weight)] as const,
       [`conv2d${suffix}.wgsl`, conv2dWgsl(weight)] as const,
@@ -4617,7 +4641,7 @@ test("weight-storage の quad 拡張は既存 4 op の生成物を 1 バイト�
       [`embedding${suffix}.wgsl`, embeddingWgsl(weight)] as const,
     ];
   });
-  assertEquals(existing.length, 12);
+  assertEquals(existing.length, 16);
   for (const [name, generated] of existing) {
     assertEquals(generated, await fixture(name), `${name}: 拡張前のバイト列と違う`);
     // quad 版の部品が漏れていない（漏れれば上の突合でも落ちるが、原因を名指しできるようにする）

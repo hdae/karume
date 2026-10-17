@@ -850,9 +850,9 @@ export const RUNTIME_SUPPORT: RuntimeSupport = {
   // i8（ADR 0019）・i4（ADR 0069）・i2（ADR 0097 追記 1）は実行経路が入った（適格な重みスロットは
   // 圧縮のまま GPU 常駐・適格外はロード時に CPU で f32 展開）ので、**どの initializer に付いて
   // いても実行できる**。i4 の適格だけ狭い（linear の重みスロット限定 — 適格外は CPU 展開の
-  // 受け皿）。i2 の適格は linear / embedding の重みスロット。
-  // bf16 だけが宣言としては valid で実行できない（capability 不足として列挙で落ちる）。
-  storage: new Set(["f32", "f16", "i8", "i4", "i2", "i32"]),
+  // 受け皿）。i2 の適格は linear / embedding の重みスロット。bf16（ADR 0131）は f16 と同じ経路
+  // （適格は f16 と同じ 5 スロット・適格外は CPU 展開）。
+  storage: new Set(["f32", "f16", "bf16", "i8", "i4", "i2", "i32"]),
   io: new Set(IO_DTYPES),
 };
 

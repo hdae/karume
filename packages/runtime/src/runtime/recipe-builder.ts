@@ -451,7 +451,7 @@ export class RecipeBuilder {
       if (operand.kind === "weightScale") {
         const name = step.binds[operand.index];
         const resident = this.#state.residentWeights.get(name);
-        if (resident === undefined || resident.storage === "f16") {
+        if (resident === undefined || resident.storage === "f16" || resident.storage === "bf16") {
           throw new ExecutionError(
             `融合ルール '${step.rule}': bind ${operand.index} の常駐scaleが無い`,
           );
@@ -714,7 +714,9 @@ export class RecipeBuilder {
    */
   #weightScaleBindings(step: NodePlan, binding: number): readonly BindingRecipe[] {
     const resident = this.#residentWeight(step);
-    if (resident === undefined || resident.storage === "f16") return [];
+    if (resident === undefined || resident.storage === "f16" || resident.storage === "bf16") {
+      return [];
+    }
     return [{ binding, source: { kind: "resident", buffer: resident.scale } }];
   }
 

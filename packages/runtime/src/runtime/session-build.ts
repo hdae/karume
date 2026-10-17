@@ -9,6 +9,7 @@
  */
 
 import { codecLayout } from "../format/container/codecs.ts";
+import { decodeBf16 } from "../format/bf16.ts";
 import { alignF16Payload, decodeF16 } from "../format/f16.ts";
 import { decodeI2 } from "../format/i2.ts";
 import { decodeI4 } from "../format/i4.ts";
@@ -721,20 +722,21 @@ export const buildSessionState = async (
           }
           return scaleForPiece(carried, declaredRows, piece.rowOffset, rows);
         };
-        // 格納 f16 / i8 / i4 / i2 だけが 2 経路に分かれる（ADR 0018 / 0019 / 0069 / 0097）。適格なら
+        // 格納 f16 / bf16 / i8 / i4 / i2 だけが 2 経路に分かれる（ADR 0018 / 0131 / 0019 / 0069 / 0097）。適格なら
         // 生バイトのまま常駐させ dequant はカーネル内（VRAM 削減はこれで初めて成立する）、
         // 適格外はここで f32 へ展開する（正しさは保たれ VRAM 削減はゼロ）。他の格納は
         // 生バイトがそのまま GPU 表現。
         let payload: Uint8Array<ArrayBuffer> | Float32Array<ArrayBuffer> = raw;
-        if (layout === "f16") {
-          if (seat.seat === "f16") {
+        if (layout === "f16" || layout === "bf16") {
+          if (seat.seat === layout) {
             // MUST: 奇数要素長は末尾 2 バイトのゼロ詰めで 4 バイト整列させる。writeBuffer は
-            // 4 の倍数でないサイズを validation で拒む（= 重みが空のまま走り出す）。
+            // 4 の倍数でないサイズを validation で拒む（= 重みが空のまま走り出す）。bf16 も
+            // 2 バイト / 要素なので同じ詰め物を使う。
             payload = tailAligned ? alignF16Payload(raw) : raw;
-            residentWeights.set(name, { storage: "f16" });
+            residentWeights.set(name, { storage: layout });
             residentCompressedBytes += payload.byteLength;
           } else {
-            payload = timedDecode(() => decodeF16(raw));
+            payload = timedDecode(() => (layout === "f16" ? decodeF16(raw) : decodeBf16(raw)));
             hostExpandedBytes += payload.byteLength;
           }
         }

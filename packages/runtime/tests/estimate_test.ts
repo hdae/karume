@@ -115,17 +115,21 @@ test("圧縮しない格納（f32 / i32）は実バイトのまま非圧縮の�
 });
 
 /**
- * 格納 `bf16` の initializer を 1 本だけ持つ合流後のグラフ。IR の語彙としては valid だが
- * `RUNTIME_SUPPORT.storage` に無いので、`createSessionFromContainer` は必ず capability 不足で落ちる。
+ * 実行できない意味論 dtype（matmul の重みが i32）を持つ合流後のグラフ。IR の語彙としては valid だが
+ * matmul は f32 しか受けないので、`createSessionFromContainer` は必ず capability 不足で落ちる。
  *
- * 格納は供給側（束縛表の encoding）が決める — 宣言は `w: {}` のまま。
+ * NOTE: 格納 codec の側では作れない — 台帳の全 codec が実行できる（bf16 は ADR 0131 で開いた）。
  */
-const bf16Graph = (): IrGraph => mergeGraph(plainGraph(), { w: "bf16" });
+const unsupportedGraph = (): IrGraph => {
+  const declaration = plainGraph();
+  declaration.values["w"] = { dtype: "i32", shape: [4, 3] };
+  return mergeGraph(declaration, { w: "i32" });
+};
 
-test("実構築が拒否する格納 dtype（bf16）に見積りを返さない", () => {
+test("実構築が拒否する意味論 dtype に見積りを返さない", () => {
   // 全量面（`estimateGraphMemory`）を直に呼ぶ — `PreparedModel` を経由すると
   // `prepareContainer` の側の門が先に落とし、estimator 自身の門が空回りしていても緑になる。
-  const graph = bf16Graph();
+  const graph = unsupportedGraph();
   assertThrows(
     () => estimateGraphMemory(graph, planWeightResidency(graph), { bindings: { T: 7 } }),
     RuntimeSupportError,

@@ -73,14 +73,17 @@ test.skipIf(!GPU_AVAILABLE)(
 test.skipIf(!GPU_AVAILABLE)(
   "admission は重みの block を 1 つも取る前に落ちる（実 GPU）",
   async () => {
-    // bf16 は容器の codec 台帳にはあるが実行経路が無い（capability 不足）。
+    // 対応 op でも実行できない意味論 dtype（matmul の重みが i32 — capability 不足）。
+    // NOTE: 格納 codec の側では作れない — 台帳の全 codec が実行できる（bf16 は ADR 0131 で開いた）。
+    const unsupportedDtype = baseDeclaration();
+    unsupportedDtype.values["w"] = { dtype: "i32", shape: [4, 3] };
     const counted = countingContainer(
-      await openModelBytes(baseDeclaration(), [
+      await openModelBytes(unsupportedDtype, [
         {
           graph: GRAPH_NAME,
           initializer: "w",
-          bytes: new Uint8Array(new ArrayBuffer(24)),
-          encoding: { codec: "bf16" },
+          bytes: new Uint8Array(new ArrayBuffer(48)),
+          encoding: { codec: "i32" },
         },
         baseTensors()[1],
       ]),
@@ -90,7 +93,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => createSessionFromContainer(gpu, counted.container, GRAPH_NAME),
         RuntimeSupportError,
-        "bf16",
+        "i32",
       );
       assertEquals(counted.reads(), 0, "実行できないモデルなのに重みの block を取っている");
     } finally {

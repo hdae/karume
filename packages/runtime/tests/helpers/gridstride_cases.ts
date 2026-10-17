@@ -131,6 +131,7 @@ import {
 import { alignF16Payload, roundToF16 } from "../../src/format/f16.ts";
 import { alignI8Payload } from "../../src/format/i8.ts";
 import type { WeightStorage } from "../../src/kernels/weight-storage.ts";
+import { quantizeBf16 } from "./bf16.ts";
 import { f32ToF16Bits, quantizeF16 } from "./f16.ts";
 import { quantizeI8 } from "./i8.ts";
 import { fill, type FilledTensor } from "./model-fixture.ts";
@@ -265,6 +266,14 @@ const variantWeight = (
   if (storage === "f32") return { payload: weight, reference: weight };
   if (storage === "f16") {
     const quantized = quantizeF16(weight.data);
+    return {
+      payload: alignF16Payload(quantized.bytes),
+      reference: refTensor(weight.shape, quantized.values),
+    };
+  }
+  if (storage === "bf16") {
+    // bf16 も 2 バイト / 要素なので整列の詰め物は f16 と共用（ADR 0131）。
+    const quantized = quantizeBf16(weight.data);
     return {
       payload: alignF16Payload(quantized.bytes),
       reference: refTensor(weight.shape, quantized.values),

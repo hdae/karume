@@ -99,22 +99,22 @@ import {
  *
  * 適格判定（src/runtime/recipe-builders/linear.ts の `buildLinear`）が k と group 長へ課す整除の
  * 単位でもあるので、門とカーネルが格納ごとに同じ 1 個の導出点を読む。
- * f16 は 8 要素 / 語、f32 は 4 要素 / 語で、両者とも M=1 のみ（ADR 0082 追記 6・7）。
+ * f16 / bf16 は 8 要素 / 語、f32 は 4 要素 / 語で、いずれも M=1 のみ（ADR 0082 追記 6・7・bf16 は ADR 0131）。
  */
 export const linearGemvUnit = (storage: WeightStorage): number => {
   if (storage === "i2") return 64;
   if (storage === "i4") return 32;
   if (storage === "i8") return 16;
-  if (storage === "f16") return 8;
+  if (storage === "f16" || storage === "bf16") return 8;
   if (storage === "f32") return 4;
   // 到達不能で、格納を足したときの刻みの結線漏れをコンパイル時に赤くするのがこの行の役目。
   const unhandled: never = storage;
   throw new CodegenError(`linear_gemv: 未処理の重み格納: ${JSON.stringify(unhandled)}`);
 };
 
-/** f16 / f32 は M=1 だけで検収する。行ブロック側へ暗黙に広げない。 */
+/** f16 / bf16 / f32 は M=1 だけで検収する。行ブロック側へ暗黙に広げない。 */
 const assertRowsStorage = (storage: WeightStorage): void => {
-  if (storage === "f16" || storage === "f32") {
+  if (storage === "f16" || storage === "bf16" || storage === "f32") {
     throw new CodegenError(`linear_gemv: ${storage} 格納の行ブロックは未対応（M=1 変種のみ）`);
   }
 };
@@ -305,7 +305,7 @@ export const linearGemvParams = (
 ): Uint32Array<ArrayBuffer> => {
   const unit = linearGemvUnit(storage);
   gemvGroupShift(storage, groupSize);
-  if ((storage === "f16" || storage === "f32") && m !== 1) {
+  if ((storage === "f16" || storage === "bf16" || storage === "f32") && m !== 1) {
     throw new CodegenError(`linear_gemv params: ${storage} 格納は m=1 のみ（${m}）`);
   }
   if (!Number.isSafeInteger(m) || m < 1 || m > LINEAR_GEMV_MAX_ROWS) {
@@ -372,7 +372,7 @@ const bindings = (unit: number, storage: WeightStorage, quantize = false, packed
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<${quantize ? "u32" : "f32"}>;
 ${
-  storage === "f16" || storage === "f32"
+  storage === "f16" || storage === "bf16" || storage === "f32"
     ? ""
     : "@group(0) @binding(5) var<storage, read> wscale: array<f32>;"
 }`;
@@ -526,6 +526,24 @@ const unitMacsF16 = (slot: string): string => {
     .join("\n");
 };
 
+/**
+ * bf16 8 要素 / 語。詰め方と K 昇順の積和は f16 版と同文で、展開だけが bitcast
+ * （語の下位半分 = `<< 16u`・上位半分 = `& 0xFFFF0000u` — ADR 0131）。
+ */
+const unitMacsBf16 = (slot: string): string => {
+  const lanes = ["x", "y", "z", "w"] as const;
+  return lanes
+    .map((component, pair) => {
+      const word = `b${slot}_${pair}`;
+      const activation = `x${slot}_${pair}`;
+      return `    let ${word} = pw${slot}.${component};
+    let ${activation} = x[xq${slot} + ${Math.floor(pair / 2)}u];
+    acc = acc + ${activation}.${lanes[(pair * 2) % 4]} * bitcast<f32>(${word} << 16u);
+    acc = acc + ${activation}.${lanes[(pair * 2 + 1) % 4]} * bitcast<f32>(${word} & 0xFFFF0000u);`;
+    })
+    .join("\n");
+};
+
 /** f32 4 要素 / 語。通常 GEMM と同じ K 昇順の積和を静的成分で展開する。 */
 const unitMacsF32 = (slot: string): string => {
   const macs = ["x", "y", "z", "w"]
@@ -580,11 +598,13 @@ const unitMacs = (storage: WeightStorage, slot: string, packed = false, fma = fa
     ? unitMacsF32(slot)
     : storage === "f16"
       ? unitMacsF16(slot)
-      : storage === "i4"
-        ? unitMacsI4(slot, packed, fma)
-        : storage === "i2"
-          ? unitMacsI2(slot, packed, fma)
-          : unitMacsI8(slot, packed, fma);
+      : storage === "bf16"
+        ? unitMacsBf16(slot)
+        : storage === "i4"
+          ? unitMacsI4(slot, packed, fma)
+          : storage === "i2"
+            ? unitMacsI2(slot, packed, fma)
+            : unitMacsI8(slot, packed, fma);
 
 /**
  * I4/I8も行ごとの積和を小さな関数へまとめる。K昇順とf32の丸め点はM=1と同じ。
@@ -599,7 +619,7 @@ const rowsWordCall = (storage: "i4" | "i8", slot: string, rows: number): string 
 
 const wordHelperWgsl = (storage: WeightStorage): string => {
   if (storage === "i2") return i2WordWgsl();
-  if (storage === "f16" || storage === "f32") return "";
+  if (storage === "f16" || storage === "bf16" || storage === "f32") return "";
   const scale = storage === "i4" ? "wsa" : "wscale_v";
   return `
 fn linear_${storage}_word(pwa: vec4<u32>, xqa: u32, ${scale}: f32, initial: f32) -> f32 {

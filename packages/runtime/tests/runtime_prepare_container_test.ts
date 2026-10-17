@@ -48,14 +48,17 @@ test("prepareContainer の見積りは重みの block を 1 つも取らずに�
 });
 
 test("prepareContainer は capability 不足・契約違反を重みの block を取る前に落とす", async () => {
-  // bf16 は容器の codec 台帳にはあるが実行経路が無い（ADR 0069 の隣 — capability 不足で列挙）
+  // 対応 op でも実行できない意味論 dtype（matmul は f32 だけ — i32 の重みは capability 不足で列挙）。
+  // NOTE: 格納 codec の側では作れない — 台帳の全 codec が実行できる（bf16 は ADR 0131 で開いた）。
+  const unsupportedDtype = baseDeclaration();
+  unsupportedDtype.values["w"] = { dtype: "i32", shape: [4, 3] };
   const unsupportedCodec = countingContainer(
-    await openModelBytes(baseDeclaration(), [
+    await openModelBytes(unsupportedDtype, [
       {
         graph: GRAPH_NAME,
         initializer: "w",
-        bytes: new Uint8Array(new ArrayBuffer(24)),
-        encoding: { codec: "bf16" },
+        bytes: new Uint8Array(new ArrayBuffer(48)),
+        encoding: { codec: "i32" },
       },
       baseTensors()[1],
     ]),
@@ -63,7 +66,7 @@ test("prepareContainer は capability 不足・契約違反を重みの block �
   assertThrows(
     () => prepareContainer(unsupportedCodec.container, GRAPH_NAME),
     RuntimeSupportError,
-    "bf16",
+    "i32",
   );
   assertEquals(unsupportedCodec.reads(), 0, "capability 門の前に重みの block を取っている");
 
