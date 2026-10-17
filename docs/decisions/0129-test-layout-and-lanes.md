@@ -312,3 +312,14 @@ as in `lanes.ts`; `e2e_gemma4_ple_gpu_test.ts` is listed under `models:gemma4` a
 | `models:wan` | — | `e2e_wan_ab_test.ts`, `e2e_wan_dit_test.ts`, `e2e_wan_pipeline_test.ts`, `e2e_wan_swap_test.ts`, `e2e_wan_umt5_test.ts`, `e2e_wan_vae_chunks_test.ts`, `e2e_wan_vae_tiles_test.ts` |
 | `models:wan-ti2v` | — | `e2e_wan_ti2v_ab_test.ts`, `e2e_wan_ti2v_dit_test.ts`, `e2e_wan_ti2v_i2v_pipeline_test.ts`, `e2e_wan_ti2v_pipeline_test.ts`, `e2e_wan_ti2v_vae_chunks_test.ts`, `e2e_wan_ti2v_vae_encoder_test.ts`, `e2e_wan_ti2v_vae_tiles_test.ts` |
 | `models:umt5` | — | `e2e_umt5_encoder_test.ts` |
+
+## Addendum 2026-10-17 — the triage was applied
+
+The maintainer ruled on the triage list (`docs/research/2026-10-16-test-triage.md`, option a):
+every drop, merge and move row was applied (its "Applied" section is the ledger, including the
+cases dropped as duplicates and the deviations decided at acceptance), the review rows wait for a
+per-row ruling. The lane membership after the change is whatever `packages/test-support/src/lanes.ts`
+claims; the tables above describe the phase-1 move and are kept as the record of it. The dacvae
+lane was retired with its only test. One rule was added during acceptance and holds from here on:
+**no runtime or models test imports from `packages/e2e`** (the series table lives in
+`packages/models/tests/helpers`, the A/B-gate and fusion-count helpers in `packages/e2e/tests/helpers`).
