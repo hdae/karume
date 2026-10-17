@@ -316,6 +316,7 @@ export class WanUniPcSampler {
       return out;
     }
     // 1 次: 上流は `x_t_ − alpha_t·B_h·0`（整数 0 を掛けた 0-d テンソルを引く — ±0 の符号まで写す）。
+    // oxlint-disable-next-line oxc/erasing-op -- deliberate: multiplying by 0 keeps the sign of ±0 (and NaN) that upstream subtracts
     const zero = f32(interval.correctionWeight * 0);
     for (let element = 0; element < sample.length; element += 1) {
       const base = f32(

@@ -110,7 +110,10 @@ describe("形状表", () => {
         GEMM_ROWS_BUCKETS.findIndex((bucket) => sweepCase.m <= bucket.maxRows),
       ),
     );
-    assertEquals([...defaultBuckets].sort(), [0, 1, 2]);
+    assertEquals(
+      [...defaultBuckets].sort((a, b) => a - b),
+      [0, 1, 2],
+    );
   });
 
   it("本番と同じ vec4 経路に乗る形だけを持つ（掃引の対象は本番の生成物）", () => {
@@ -152,7 +155,10 @@ describe("形状表", () => {
         sweepCase.op === "conv2d" ? [conv2dIgemmMTile(sweepCase.channelsOut)] : [],
       ),
     );
-    assertEquals([...mTiles].sort(), [32, 64]);
+    assertEquals(
+      [...mTiles].sort((a, b) => a - b),
+      [32, 64],
+    );
   });
 
   it("attention は ①QK と ③PV が同じ形の対で並ぶ", () => {

@@ -87,6 +87,15 @@ const recordProgress = (): { events: AssetProgress[]; onProgress: (p: AssetProgr
   return { events, onProgress: (progress) => events.push(progress) };
 };
 
+/** Orders [phase, path] pairs element-wise in UTF-16 code-unit order (only a total order is needed). */
+const comparePairs = (a: readonly string[], b: readonly string[]): number => {
+  for (let index = 0; index < Math.min(a.length, b.length); index++) {
+    if (a[index] < b[index]) return -1;
+    if (a[index] > b[index]) return 1;
+  }
+  return a.length - b.length;
+};
+
 test("localDirectory: manifest → resolveSelection → fetchAssets が実体のバイト列で完走する", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
@@ -178,8 +187,8 @@ describe("prefetchAssets: 相 1 を持たない取得元では温めずに compl
     // 取得の要らない ref も complete を 1 回ずつ出す（ADR 0086 追記 2026-10-11）— 渡した ref の
     // size 合計を分母にする呼び手の進捗が、取得元に依らず合計へ届く。
     assertEquals(
-      progress.events.map((event) => [event.phase, event.path]).sort(),
-      refs.map((ref) => ["complete", ref.path]).sort(),
+      progress.events.map((event) => [event.phase, event.path]).sort(comparePairs),
+      refs.map((ref) => ["complete", ref.path]).sort(comparePairs),
       "温めの要らない ref が complete を 1 回ずつ出していない",
     );
     const total = refs.reduce((sum, ref) => sum + ref.size, 0);
@@ -211,8 +220,8 @@ test("prefetchAssets: 相 1 の有無は ref ごと — 越境先が持つなら
   // 進捗は 1 つの規則（全 ref が complete を 1 回）— 温めた越境 ref も、温めの要らないローカルの
   // ref も同じく出る（ADR 0086 追記 2026-10-11）。
   assertEquals(
-    progress.events.map((event) => [event.phase, event.path]).sort(),
-    refs.map((ref) => ["complete", ref.path]).sort(),
+    progress.events.map((event) => [event.phase, event.path]).sort(comparePairs),
+    refs.map((ref) => ["complete", ref.path]).sort(comparePairs),
     "ref ごとの complete が揃っていない",
   );
   // ローカルセッションでも越境ぶんは宣言された越境先を名乗る（セッションが名乗りを持たない

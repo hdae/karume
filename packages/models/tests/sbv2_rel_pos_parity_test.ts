@@ -81,5 +81,6 @@ test("buildRelPosTables: 表は i−j にしか依存しない（Toeplitz）", (
     "maxPosition を変えても表が同じ（バケット規則を読んでいない）",
   );
   // 近傍（線形域）は maxPosition に依らない — 差が出るのは遠方だけであることの固定。
+  // oxlint-disable-next-line oxc/erasing-op -- `row * width + column` spelled out for row 0 keeps the table coordinates readable
   assertEquals(wide.c2pPos.data[0 * 16 + 1], narrow.c2pPos.data[0 * 16 + 1]);
 });

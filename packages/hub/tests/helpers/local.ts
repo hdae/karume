@@ -67,7 +67,7 @@ const fileRefJson = async (
   path,
   size: bytes.byteLength,
   sha256: await sha256Hex(bytes),
-  ...(cross ?? {}),
+  ...cross,
 });
 
 /** 合成した配布形 1 つぶん（`files` は `karume.json` を含む「ディレクトリの中身」）。 */

@@ -33,7 +33,8 @@ for (const [parent, pkg] of ["packages", "tools"].flatMap((p) =>
   }
   for (const file of files) {
     const rel = relative(root, file);
-    (usesDeno(readFileSync(file, "utf8")) ? pending : ported).push?.(rel) ?? pending.add(rel);
+    if (usesDeno(readFileSync(file, "utf8"))) pending.add(rel);
+    else ported.push(rel);
   }
 }
 const config = join(root, `tsconfig.check-${process.pid}.json`);
@@ -51,7 +52,7 @@ writeFileSync(
         "tools/verify-diff/*.ts",
         "tools/release/*.ts",
         "vite.config.ts",
-        ...ported.sort(),
+        ...ported.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
       ],
     },
     null,

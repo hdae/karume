@@ -97,6 +97,7 @@ const withPoisonedWrites = async <T>(
   body: () => Promise<T>,
 ): Promise<{ readonly result: T; readonly writes: number }> => {
   const prototype = Object.getPrototypeOf(queue) as GPUQueue;
+  // oxlint-disable-next-line typescript/unbound-method -- called only as original.apply(this, args), then reassigned
   const original = prototype.writeBuffer;
   let writes = 0;
   prototype.writeBuffer = function (

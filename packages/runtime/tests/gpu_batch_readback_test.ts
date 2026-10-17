@@ -135,6 +135,7 @@ test("batch read: 異なるdeviceと不正memberは発行時に拒否し予約�
     assertEquals(sink.useReferences, 0);
     assertEquals(batch.finished, false);
     await assertRejects(
+      // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply passes `batch` as `this`
       () => Reflect.apply(batch.finishAndRead, batch, [{ sink, wrong: {} }]),
       BatchScopeError,
     );

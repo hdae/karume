@@ -22,7 +22,9 @@ export type OutOfMemoryInjection = {
 };
 
 export const injectOutOfMemory = (device: GPUDevice): OutOfMemoryInjection => {
+  // oxlint-disable-next-line typescript/unbound-method -- kept only to reassign in restore(); called via bind below
   const originalPush = device.pushErrorScope;
+  // oxlint-disable-next-line typescript/unbound-method -- kept only to reassign in restore(); called via bind below
   const originalPop = device.popErrorScope;
   const push = originalPush.bind(device);
   const pop = originalPop.bind(device);

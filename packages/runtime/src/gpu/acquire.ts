@@ -721,7 +721,9 @@ const ignoreRejection = (): void => {};
  */
 const ignoreRejectionIfNativePromise = (value: unknown): void => {
   try {
-    Reflect.apply(Promise.prototype.then, value, [undefined, ignoreRejection]);
+    // Fire-and-forget: the derived promise only exists to mark the rejection as handled.
+    // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply supplies `value` as the receiver; that receiver is the brand check itself
+    void Reflect.apply(Promise.prototype.then, value, [undefined, ignoreRejection]);
   } catch (error) {
     if (!(error instanceof TypeError)) throw error;
   }

@@ -368,6 +368,7 @@ describe("fromPretrained: admission の違反は重みの part を 1 本も取�
 describe("fromPretrained: 取得元に既定は無い", () => {
   it("ref を省くと（型検査の外の JS の呼び出し）、repo が必須であることを言って落ちる", async () => {
     await assertRejects(
+      // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply supplies Umt5Encoder as `this`
       () => Reflect.apply(Umt5Encoder.fromPretrained, Umt5Encoder, []),
       Error,
       "Umt5Encoder.fromPretrained: repo が必須（取得元に既定は無い）",

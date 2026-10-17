@@ -801,7 +801,11 @@ test("sampler: topK / topP で落とした token は一度も引かれない", (
   const sampler = createSampler({ temperature: 1, topK: 2, seed: 31 });
   const seen = new Set<number>();
   for (let draw = 0; draw < 5_000; draw += 1) seen.add(sampler.next(BASE_LOGITS, []));
-  assertEquals([...seen].sort(), [0, 1], "topK 2 で観測された token");
+  assertEquals(
+    [...seen].sort((a, b) => a - b),
+    [0, 1],
+    "topK 2 で観測された token",
+  );
 });
 
 // ---------------------------------------------------------------------------

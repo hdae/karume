@@ -812,36 +812,37 @@ test("完了印は run が歩調を問うたとき、前の印から submit が 
   await scheduler.flush();
   assertEquals(gpu.calls.workDone, 1, "flush のフェンスが 1 本");
 
-  step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
+  // The steps are not awaited: each assertion reads the marker count right after the step returns.
+  void step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
   assertEquals(gpu.calls.workDone, 1, "64 回に届かないうちは置かない");
-  step(scheduler, 1);
+  void step(scheduler, 1);
   assertEquals(gpu.calls.workDone, 2, "64 回に届いたステップで 1 本");
-  step(scheduler, IN_FLIGHT_MARKER_INTERVAL + 30);
+  void step(scheduler, IN_FLIGHT_MARKER_INTERVAL + 30);
   assertEquals(gpu.calls.workDone, 3, "1 ステップで 64 回を超えても 1 本");
-  step(scheduler, 30);
+  void step(scheduler, 30);
   assertEquals(gpu.calls.workDone, 3, "前の印からの 30 回では置かない");
 
   // フェンスの後は窓のチャンク数も印の位置も 0 から数え直す（前の窓の端数を持ち越さない）。
   await scheduler.flush();
   assertEquals(gpu.calls.workDone, 4);
-  step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
+  void step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
   assertEquals(gpu.calls.workDone, 4, "フェンスの前の端数を持ち越さない");
-  step(scheduler, 1);
+  void step(scheduler, 1);
   assertEquals(gpu.calls.workDone, 5, "印の位置もフェンスで 0 へ戻る");
 
   // 単一フェンスの run（flush を通らないフェンス）でも同じく数え直す。
   scheduler.submitPending();
   scheduler.closeMeasurementWindowAfterFence();
-  step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
+  void step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
   assertEquals(gpu.calls.workDone, 5);
-  step(scheduler, 1);
+  void step(scheduler, 1);
   assertEquals(gpu.calls.workDone, 6);
 
   // フェンスに届かなかった窓を捨てたときも数え直す。
   scheduler.discardMeasurementWindow();
-  step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
+  void step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
   assertEquals(gpu.calls.workDone, 6);
-  step(scheduler, 1);
+  void step(scheduler, 1);
   assertEquals(gpu.calls.workDone, 7);
 });
 

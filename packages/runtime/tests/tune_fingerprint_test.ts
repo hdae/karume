@@ -288,6 +288,7 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     const forbidden = (what: string) => (): never => {
       throw new Error(`${what} を読んだ`);
     };
+    // oxlint-disable-next-line typescript/unbound-method -- kept only to reassign in finally; never called
     const originalNow = performance.now;
     const originalDateNow = Date.now;
     Object.defineProperty(navigator, "gpu", {

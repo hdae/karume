@@ -152,7 +152,9 @@ test("NFC: 正本と割れる入力を分節表で再現する（素の normaliz
     assertEquals(
       normalizeNfc(text, qwenAssets.nfcSegments),
       want,
-      `NFC [${[...text].map((ch) => (ch.codePointAt(0) as number).toString(16)).join(" ")}]`,
+      `NFC [${Array.from(text)
+        .map((ch) => (ch.codePointAt(0) as number).toString(16))
+        .join(" ")}]`,
     );
   }
 });

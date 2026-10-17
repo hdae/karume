@@ -15,7 +15,19 @@ export default defineConfig({
   lint: {
     // Repository rule (ADR 0002): TypedArray types in packages/*/src must name their buffer type.
     jsPlugins: [{ name: "karume", specifier: "./tools/lint/oxlint-plugin.ts" }],
-    rules: { "karume/typed-array-buffer": "error" },
+    rules: {
+      "karume/typed-array-buffer": "error",
+      // Off (maintainer ruling 2026-10-17, phase 2 step 2-3):
+      // - the conditional-property idiom `...(cond ? {} : { x })` is deliberate under
+      //   exactOptionalPropertyTypes (an absent key is not an undefined value);
+      "unicorn/no-useless-spread": "off",
+      // - `new Array<number>(n)` pre-sizes the reference implementations on purpose
+      //   (Array.from({ length }) is slower and no clearer);
+      "unicorn/no-new-array": "off",
+      // - error messages interpolate op names and unions; the real risk, an object printed as
+      //   [object Object], stays covered by no-base-to-string.
+      "typescript/restrict-template-expressions": "off",
+    },
     options: { typeAware: true, typeCheck: true },
   },
   test: {

@@ -682,7 +682,7 @@ const parseFileRef = (
   }
   assertPath(fail, path, where);
   const crossRepo = parseCrossRepo(fail, raw, where, scope.ownRepo);
-  const ref: FileRef = { path, size, sha256, ...(crossRepo ?? {}) };
+  const ref: FileRef = { path, size, sha256, ...crossRepo };
   const key = fileRefKey(ref);
   const previous = scope.seen.get(key);
   if (previous !== undefined) {
@@ -967,7 +967,7 @@ const parseText = (
   if (typeof raw !== "string") {
     throw fail.format(`${where}.${key}: 期待 文字列 / 実際 ${typeof raw}`);
   }
-  const length = [...raw].length;
+  const length = Array.from(raw).length;
   if (length > max) {
     throw fail.format(`${where}.${key}: 期待 ${max} 文字以内 / 実際 ${length} 文字`);
   }

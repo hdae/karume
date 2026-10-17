@@ -2046,6 +2046,7 @@ test.skipIf(!GPU_AVAILABLE)(
     /** 焼いた束の世代識別子（`#generationGroups` が預ける token を順に拾う）。 */
     const tokens: number[] = [];
     const inner = internals(context);
+    // oxlint-disable-next-line typescript/unbound-method -- internals are arrow-function properties (no `this`)
     const setBaked = inner.setBakedGroups;
     inner.setBakedGroups = (token, groups) => {
       tokens.push(token);
@@ -2146,6 +2147,7 @@ test.skipIf(!GPU_AVAILABLE)(
       // 焼き込みが起きるのはヒット run からなので、A を backed まで温めてから束を横取りする。
       await assertStep(session, a, FULL, 8, stateA, 1, 1, 0, "A 初回（導出）");
       const internalsA = internals(a);
+      // oxlint-disable-next-line typescript/unbound-method -- internals are arrow-function properties (no `this`)
       const setBaked = internalsA.setBakedGroups;
       let stolen: BakedGroups | undefined;
       internalsA.setBakedGroups = (token, groups) => {

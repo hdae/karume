@@ -923,6 +923,7 @@ test.skipIf(!GPU_AVAILABLE)(
     const nanCol = 3;
     q[(1 * m + nanRow) * d + d - 3] = Number.NaN;
     for (let i = 0; i < d; i += 1) q[(1 * m + zeroRow) * d + i] = 0;
+    // oxlint-disable-next-line oxc/erasing-op -- `0 * n` names head 0 in the (head * n + row) index
     k[(0 * n + nanCol) * d + 1] = Number.NaN;
     const scale = halfScale(d);
     const expected = referenceAttentionQkI8a8({ q, k, batch, m, n, d, scale });
@@ -948,11 +949,13 @@ test.skipIf(!GPU_AVAILABLE)(
     }
     // NaN 列は**全行**が NaN（列 scale の側の伝播 — 行と列で別の経路）
     for (let row = 0; row < m; row += 1) {
+      // oxlint-disable-next-line oxc/erasing-op -- `0 * m` names head 0 in the (head * m + row) index
       assert(Number.isNaN(actual[(0 * m + row) * n + nanCol]), `NaN 列 row=${row}`);
     }
     // 隣の head は無傷（q の NaN 行が head を跨いでいない — NaN 列は head 0 の側の設計）
     for (let col = 0; col < n; col += 1) {
       if (col === nanCol) continue;
+      // oxlint-disable-next-line oxc/erasing-op -- `0 * m` names head 0 in the (head * m + row) index
       assert(Number.isFinite(actual[(0 * m + nanRow) * n + col]), `隣接 head col=${col}`);
     }
     // 全ゼロ行は q = 0・s = tiny なので S も厳密に 0（±0 は同一視）。NaN 列は head 0 の側

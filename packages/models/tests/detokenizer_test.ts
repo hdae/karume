@@ -64,7 +64,8 @@ describe("createStopStringFilter: 型を外した指定は暗黙変換せずに�
 
   it("疎な配列の穴（forEach のように飛ばして黙って捨てない）", () => {
     // [, "END"] の 0 番は穴。穴を飛ばすと "END" だけの指定として受理されてしまう。
-    const sparse = [, "END"];
+    const sparse: (string | undefined)[] = [];
+    sparse[1] = "END";
     assertThrows(
       () => createStopStringFilter(untyped(sparse)),
       ModelInputError,

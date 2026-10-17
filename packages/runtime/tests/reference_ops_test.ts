@@ -81,7 +81,7 @@ test("unary の既知値（torch 既定の定義に一致する）", () => {
   assertEquals(at("gelu", 0), 0);
   assertAlmostEquals(at("gelu", 1), 0.8413447460685429, 1e-6);
   assertAlmostEquals(at("gelu", -1), -0.15865525393145707, 1e-6);
-  assertAlmostEquals(at("gelu", 3), 2.9959503059051097, 1e-6);
+  assertAlmostEquals(at("gelu", 3), 2.99595030590511, 1e-6);
   // |x| > 4 で erf を ±1 に丸めても f32 では区別できない
   assertAlmostEquals(at("gelu", 8), 8, 1e-6);
   // gelu_tanh(x) = 0.5·x·(1 + tanh(√(2/π)·(x + 0.044715x³)))（approximate="tanh"）。

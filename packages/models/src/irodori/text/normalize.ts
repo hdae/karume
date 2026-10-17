@@ -76,7 +76,7 @@ const BRACKET_PAIRS: readonly (readonly [string, string])[] = [
  * 依らないので、外側から順に判定して最初に外れた段で止め、最後に 1 回だけ切り出す。
  */
 const stripOuterBrackets = (text: string): string => {
-  const cps = [...text];
+  const cps = Array.from(text);
   const n = cps.length;
   // 開き括弧の位置 → 同種の括弧だけで数えた対応する閉じ括弧の位置。
   const matchOf = new Map<number, number>();

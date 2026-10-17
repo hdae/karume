@@ -1156,6 +1156,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
   it("Promise（thenable）を返すと await せずに GpuFeatureError で拒み、device を作らない", async () => {
     let awaited = false;
     const thenable = {
+      // oxlint-disable-next-line unicorn/no-thenable -- a fake thenable is the input under test
       then: (resolve: (value: GeometryProfile) => void): void => {
         awaited = true;
         resolve(OPT_IN);
@@ -1258,11 +1259,13 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
       [
         "getter の then",
         {
+          // oxlint-disable-next-line unicorn/no-thenable -- a fake thenable is the input under test
           get then() {
             return then;
           },
         },
       ],
+      // oxlint-disable-next-line unicorn/no-thenable -- a fake thenable is the input under test
       ["toStringTag が Promise", { [Symbol.toStringTag]: "Promise", then }],
     ];
     for (const [name, thenable] of thenables) {

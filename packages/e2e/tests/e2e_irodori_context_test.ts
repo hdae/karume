@@ -78,7 +78,11 @@ describe.skipIf(!RUNNABLE)(
   () => {
     const observed: IrodoriRunComponent[] = [];
     let pipeline: IrodoriPipeline;
+    // The originals are kept unbound on purpose: each patch re-invokes them with `.call(this)` and
+    // the cleanup puts the same function objects back.
+    // oxlint-disable-next-line typescript/unbound-method -- re-invoked with an explicit receiver, restored as-is
     const run = Session.prototype.run;
+    // oxlint-disable-next-line typescript/unbound-method -- re-invoked with an explicit receiver, restored as-is
     const enqueue = Session.prototype.enqueue;
 
     beforeAll(async () => {

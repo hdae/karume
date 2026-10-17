@@ -35,10 +35,17 @@ test.skipIf(!GPU_AVAILABLE || !hasQuantSeat("i8"))(
         quant: "i8",
       },
     );
+    // The originals are kept unbound on purpose: each patch re-invokes them with `.call(this)` /
+    // `.apply(this)` and the finally block puts the same function objects back.
+    // oxlint-disable-next-line typescript/unbound-method -- re-invoked with an explicit receiver, restored as-is
     const build = Session.build;
+    // oxlint-disable-next-line typescript/unbound-method -- re-invoked with an explicit receiver, restored as-is
     const enqueue = Session.prototype.enqueue;
+    // oxlint-disable-next-line typescript/unbound-method -- re-invoked with an explicit receiver, restored as-is
     const sessionDispose = Session.prototype.dispose;
+    // oxlint-disable-next-line typescript/unbound-method -- re-invoked with an explicit receiver, restored as-is
     const residentDispose = ResidentTensor.prototype.dispose;
+    // oxlint-disable-next-line typescript/unbound-method -- re-invoked with an explicit receiver, restored as-is
     const finish = BatchScope.prototype.finish;
     const bodyFault = new Error("probe: enqueue failed");
     const finishFault = new Error("probe: finish failed");

@@ -221,7 +221,7 @@ test("loadContainerComponents: 越境参照が自リポと同じ path でも、�
     const origins = events
       .filter((event) => event.phase === "complete" && event.path === path)
       .map((event) => event.repo)
-      .sort();
+      .sort((a, b) => (a! < b! ? -1 : a! > b! ? 1 : 0));
     assertEquals(origins, [CROSS_REPO, REPO].sort(), `${path} の 2 本が見分けられない`);
   }
 });
@@ -847,7 +847,7 @@ test("components: 差し替え先の part が元リポの別部品と同じ path
     const origins = events
       .filter((event) => event.phase === "complete" && event.path === path)
       .map((event) => event.repo)
-      .sort();
+      .sort((a, b) => (a! < b! ? -1 : a! > b! ? 1 : 0));
     assertEquals(origins, [OTHER_REPO, REPO].sort(), `${path} の 2 本が見分けられない`);
   }
 });

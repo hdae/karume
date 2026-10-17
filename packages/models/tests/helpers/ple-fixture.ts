@@ -273,6 +273,7 @@ export const pleComponentOf = (
         };
       }
       const reader = fixture.openBlock(asset);
+      // oxlint-disable-next-line typescript/unbound-method -- `openBlock` builds `read` as an arrow property that never touches `this`
       return { role: entry.role, length: entry.length, read: reader.read };
     },
   };

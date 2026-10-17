@@ -414,13 +414,15 @@ for (const { family, fixtureName, series } of [
       const elapsed = performance.now() - started;
 
       // 1 文字 1 トークンより短くなる（併合が実際に効いている）ことまで見る。
-      if (ids.length === 0 || ids.length >= [...long].length) {
-        throw new Error(`併合が効いていない（${ids.length} トークン / ${[...long].length} 文字）`);
+      if (ids.length === 0 || ids.length >= Array.from(long).length) {
+        throw new Error(
+          `併合が効いていない（${ids.length} トークン / ${Array.from(long).length} 文字）`,
+        );
       }
       const BUDGET_MS = 5_000;
       if (elapsed > BUDGET_MS) {
         throw new Error(
-          `${[...long].length} 文字の符号化に ${elapsed.toFixed(0)}ms（予算 ${BUDGET_MS}ms）`,
+          `${Array.from(long).length} 文字の符号化に ${elapsed.toFixed(0)}ms（予算 ${BUDGET_MS}ms）`,
         );
       }
     },

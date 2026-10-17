@@ -1093,7 +1093,8 @@ test("ChatSession: done は cleanup を待ち、その直後に次の送信が�
   const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
   const stream = session.send("Name a color.");
   let settled = false;
-  stream.done.then(() => {
+  // Fire-and-forget observer: awaiting here would block on the held cleanup this test releases later.
+  void stream.done.then(() => {
     settled = true;
   });
   const text = stream.text();

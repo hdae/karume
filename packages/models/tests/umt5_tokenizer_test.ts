@@ -196,7 +196,9 @@ test("Wan: 前処理の後の文字列には U+0020 以外の空白も末尾の�
   // 受理集合は共有の前と同じ（Wan の資産の空白の表で全文字を当てる）。
   const encoder = wanParityEncoder();
   const plainOnly = (text: string): boolean =>
-    [...text].every((ch) => ch === " " || !inCodeRanges(wanSpace, ch.codePointAt(0) as number));
+    Array.from(text).every(
+      (ch) => ch === " " || !inCodeRanges(wanSpace, ch.codePointAt(0) as number),
+    );
   let checked = 0;
   for (const [start, end] of wanSpace) {
     for (let cp = start; cp <= end; cp += 1) {

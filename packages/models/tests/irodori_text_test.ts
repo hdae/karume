@@ -681,7 +681,7 @@ test("外側括弧の剥がし: 正本の逐次の形と乱択の入力で一致
     ["(", ")"],
   ];
   const reference = (text: string): string => {
-    let cps = [...text];
+    let cps = Array.from(text);
     while (cps.length >= 2) {
       const pair = pairs.find(([open]) => open === cps[0]);
       if (pair === undefined || cps[cps.length - 1] !== pair[1]) break;

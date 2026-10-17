@@ -349,6 +349,7 @@ test("batch generation: 2つ目の確定が失敗しても全contextをpoisonし
     b = await session.createGenerationContext({ chunkLength: 4 }),
     sink = await gpu.createResident(16);
   const error = new Error("injected second advance"),
+    // oxlint-disable-next-line typescript/unbound-method -- internals are arrow-function properties (no `this`)
     advance = b[RUNTIME_INTERNAL].advance;
   try {
     const batch = await gpu.beginBatch();
@@ -380,6 +381,7 @@ test("batch generation: 不正commitは予約前に拒否し同じbatchで回復
   try {
     const batch = await gpu.beginBatch();
     await assertRejects(() =>
+      // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply passes `session` as `this`
       Reflect.apply(session.enqueue, session, [
         inputs(1, 0),
         {
@@ -466,7 +468,7 @@ test("batch generation: 借り手は貸し手の予約も終端まで保ち論�
     await reader.dispose();
     await lender.dispose();
     await session.dispose();
-    await sink.dispose();
+    sink.dispose();
     gpu.destroy();
   }
 });

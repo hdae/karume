@@ -384,7 +384,11 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
     let fetchCalls = 0;
     const fetchStub: typeof globalThis.fetch = (input) => {
       fetchCalls += 1;
-      return Promise.reject(new Error(`test: ローカル取得元が network へ出た（${String(input)}）`));
+      return Promise.reject(
+        new Error(
+          `test: ローカル取得元が network へ出た（${input instanceof Request ? input.url : String(input)}）`,
+        ),
+      );
     };
     const cacheDiagnostics: string[] = [];
     const retryDiagnostics: string[] = [];

@@ -31,6 +31,10 @@ import { Umt5Encoder } from "../src/umt5/encoder.ts";
 import { WanPipeline } from "../src/wan/pipeline.ts";
 import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 
+// Names what a fetch stub was asked for (a `Request` would otherwise print as "[object Request]").
+const describeRequest = (input: RequestInfo | URL): string =>
+  typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+
 test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択で落ちる", () => {
   // JS からの引数なし呼び出しの形（TS では型検査が先に落とす）。
   const error = assertThrows(
@@ -136,7 +140,9 @@ test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼ばず
   let calls = 0;
   const fetchStub: typeof globalThis.fetch = (input) => {
     calls += 1;
-    return Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${String(input)}）`));
+    return Promise.reject(
+      new Error(`repo_ref_test: 取得層まで進んだ（${describeRequest(input)}）`),
+    );
   };
   await assertRejects(
     () => AnimaPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
@@ -150,7 +156,7 @@ test("fromPretrained: birefnet も ref 欠落時に対応表（BIREFNET_SOURCES�
   // 0.10.0 で公開 pin（`BIREFNET_SOURCES`）が入ったのに、案内だけが「公開リポを持たない」時代の
   // ままだった（下流の報告）。他家族と同じ文言に揃っていることを公開面から見る。
   const fetchStub: typeof globalThis.fetch = (input) =>
-    Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${String(input)}）`));
+    Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${describeRequest(input)}）`));
   const error = await assertRejects(
     () => BirefnetPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
@@ -164,7 +170,7 @@ test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し�
   // （`loadWanFromPretrained`）を共有するが、表に Wan2.1 のキーは無い — 2.1 にだけ存在しないキーを
   // 案内しない（③）ことを、共有の本体を通る公開面から見る。
   const fetchStub: typeof globalThis.fetch = (input) =>
-    Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${String(input)}）`));
+    Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${describeRequest(input)}）`));
   const umt5 = await assertRejects(
     () => Umt5Encoder.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,

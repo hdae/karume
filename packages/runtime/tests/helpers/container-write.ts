@@ -377,7 +377,7 @@ const planDataParts = (input: ModelInput, partBytes: number, blockBytes: number)
       cuts.length === 1
         ? { block: pieceIds[0], encoding }
         : { pieces: cuts.map((cut, i) => ({ block: pieceIds[i], rows: cut.rows })), encoding };
-    binding[tensor.graph] = { ...(binding[tensor.graph] ?? {}), [tensor.initializer]: supply };
+    binding[tensor.graph] = { ...binding[tensor.graph], [tensor.initializer]: supply };
   }
 
   for (const asset of input.assets) {

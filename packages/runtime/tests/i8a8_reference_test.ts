@@ -171,7 +171,7 @@ test("w4a8 参照: linear の既知値（group ごとに i32 → group 境界で
     k: 4,
     groupSize: 2,
   });
-  assertEquals([...out], [14.511811256408691, -76.51968383789062], "w4a8 linear の出力");
+  assertEquals([...out], [14.511811256408691, -76.519683837890625], "w4a8 linear の出力");
 });
 
 test("w4a8 参照: group ごとに f32 へ畳む（全 group を 1 本の和にした形と値が割れる）", () => {

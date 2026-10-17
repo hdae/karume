@@ -406,6 +406,7 @@ describe("WanVaeChunkCaches.create（常駐の確保と失敗時の後始末）"
     const created: string[] = [];
     const disposed: string[] = [];
     // 模擬の常駐（`dispose` と `byteLength` だけを持つ — 実体は fake device に作れないのでテストの境界で cast する）。
+    // oxlint-disable-next-line typescript/no-useless-default-assignment -- false positive: GpuContext.createResident declares `label = "resident"`, so `label` is optional for callers; dropping the default types it `string | undefined`
     gpu.createResident = (byteLength: number, label = "resident") => {
       created.push(label);
       return Promise.resolve({

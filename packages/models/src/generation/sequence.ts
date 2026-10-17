@@ -710,7 +710,7 @@ type LogitsRows = {
    * MUST: 返るのは出力バッファの subarray なので、**次の run まで**しか有効でない
    * （readback バッファは run ごとに作り直される — 保存するなら呼び手が写す）。
    */
-  row(index: number): Float32Array<ArrayBuffer>;
+  readonly row: (index: number) => Float32Array<ArrayBuffer>;
 };
 
 /**

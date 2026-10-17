@@ -520,7 +520,10 @@ test.skipIf(!GPU_AVAILABLE)(
       }
       // 述語が実際に 32 行を選ぶ形と 64 行を選ぶ形の両方が含まれていること（空振りしない門）
       const tiles = new Set(PARITY_CASES.map((testCase) => conv2dIgemmMTile(testCase.channelsOut)));
-      assertEquals([...tiles].sort(), [GEMM_MTILE_SMALL, GEMM_TILE].sort());
+      assertEquals(
+        [...tiles].sort((a, b) => a - b),
+        [GEMM_MTILE_SMALL, GEMM_TILE].sort((a, b) => a - b),
+      );
     } finally {
       gpu.destroy();
     }

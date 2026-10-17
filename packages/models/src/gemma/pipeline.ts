@@ -1539,7 +1539,7 @@ class GemmaPipeline {
       get used(): number {
         return inner.used;
       },
-      generate: inner.generate,
+      generate: (request): GenerationStream => inner.generate(request),
       fork: (): Promise<GenerationSequence> => {
         // MUST: async にしない — dispose 済みの拒否は sequence 側が**同期に**投げる契約で、
         // async で包むと reject に化ける。pipeline の dispose 後も同じく同期に落とす。

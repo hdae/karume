@@ -462,7 +462,7 @@ test("generationProgramFace: 凍結コピーを返す（消費者の書き換え
     (face.stopTokens as number[]).length = 0;
   }, TypeError);
   assertThrows(() => {
-    (face.stopTokens as number[]).sort();
+    (face.stopTokens as number[]).sort((a, b) => a - b);
   }, TypeError);
   // 別実体であること（凍結だけ残してコピーを落とすと、wiring 側の配列まで凍る副作用が出る）。
   assert(face.stopTokens !== wiring.stopTokens, "配線の配列をそのまま出している");

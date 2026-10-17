@@ -115,7 +115,9 @@ export const resolveParts = (representative: URL): readonly URL[] => {
     );
   }
   if (totals.size !== 1) {
-    throw new Error(`${where}: part 連番の総数が ${[...totals].sort()} と食い違っている`);
+    throw new Error(
+      `${where}: part 連番の総数が ${[...totals].sort((a, b) => a - b)} と食い違っている`,
+    );
   }
   const [total] = totals;
   const files: URL[] = [];

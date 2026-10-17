@@ -160,7 +160,7 @@ for (const check of fixture.badness.filter((entry) => entry.template === undefin
     )) {
       bits += tables.badness.test(text) ? "1" : "0";
     }
-    assertEquals([...bits].filter((bit) => bit === "1").length, check.hits, "当たった本数");
+    assertEquals(Array.from(bits).filter((bit) => bit === "1").length, check.hits, "当たった本数");
     assertEquals(await digestBits(bits), check.digest);
   });
 }
@@ -202,7 +202,11 @@ describe("all-codepoint sweeps", () => {
       for (const cp of everyCodePoint) {
         bits += tables.badness.test(fill(template, cp)) ? "1" : "0";
       }
-      assertEquals([...bits].filter((bit) => bit === "1").length, check.hits, "当たった本数");
+      assertEquals(
+        Array.from(bits).filter((bit) => bit === "1").length,
+        check.hits,
+        "当たった本数",
+      );
       assertEquals(await digestBits(bits), check.digest);
     });
   }
