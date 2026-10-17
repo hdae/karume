@@ -238,6 +238,17 @@ attention 重みは消える（f32 経路は保持する）。落ちた質量は
   診断のパイプラインキーに dense の `attention_pv:v1:f32` などが混ざるかで見分ける。
 - 端数を宣言どおりの経路で扱う変更は backlog の later 節にある。
 
+## dp4a の無い device では a8 は速くならない（警告のみ・フォールバック無し）
+
+int8 活性（`linearCompute` / `attentionCompute: "a8"`）の整数内積は、WGSL 言語機能
+`packed_4x8_integer_dot_product`（dp4a）の無い device ではエミュレーションで走る。数値は dp4a 版と同一
+（ADR [0025](decisions/0025-w8a8-linear-execution.md)）だが f32 の経路より速くならず、Apple の Metal では遅い
+（ADR [0115](decisions/0115-geometry-profiles.md) Context）。runtime は黙って f32 へも a8 無しの兄弟プリセットへも
+落とさず、Session 構築で device ごとに 1 回 `console.warn` で知らせる（何が起きたか・逃げ先 = 同じ重みで a8
+無しのプリセット〈配布形は必ず持つ — 配布門番の検査〉か `"f32"`）— ADR
+[0128](decisions/0128-default-preset-original-weights.md) 決定 5。既定に a8 を持つ配布形（anima / irodori /
+wan2.1 / wan2.2）を dp4a の無い GPU で既定のまま使うと、この警告が出る。
+
 ## w8a8（`linearCompute: "a8"`）では非有限値の伝播粒度は同じだが Inf の符号が f32 経路と一致しない
 
 活性 per-token i8 の実行経路（opt-in — 設計は
@@ -1176,7 +1187,7 @@ Consequences）。
   （`KARUME_REFERENCE=write` で自分の機の行を作る）。50 ステップの行は opt-in（`KARUME_WAN_FULL_PIPELINE=1`）の
   ときだけ照合する。
 
-- DiT の i8 席（ADR [0120](decisions/0120-wan-dit-w8a8-seat.md)・2026-10-03）: 参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16` を配布形に足した。GPU の数値の門（r 門・自機 A/B 門）と視認 A/B（段 3〜6）は済み（2026-10-03〜04）。既定は実用席（2026-10-04 の裁定 — `f16` は `quant: "f16"` の明示で選ぶ）。実用席の a8 は Metal（M2）では速くならない（K-70 の実測 — 品質だけを払う席になる）。
+- DiT の i8 席（ADR [0120](decisions/0120-wan-dit-w8a8-seat.md)・2026-10-03）: 参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16` を配布形に足した。GPU の数値の門（r 門・自機 A/B 門）と視認 A/B（段 3〜6）は済み（2026-10-03〜04）。既定は実用席（2026-10-04 の裁定 — `f16` は `quant: "f16"` の明示で選ぶ）。実用席の a8 は Metal（M2）では速くならない（K-70 の実測 — 品質だけを払う席になる）。〈→ 2026-10-17: dp4a の無い device で a8 を要求すると runtime が device ごとに 1 回警告する — ADR 0128 決定 5〉
 - Chrome（段 9 ✅ — 確かめた範囲は事前計算の経路〈`textEncoder: "precomputed"`〉・`f16` 席・832×480・81 フレーム・50 ステップ。RTX 5070 Ti・ADR 0118 追記 2026-10-04「段 9 の結果」。同じ追記の時点で、Chrome での GPU 経路と実用席は未実走）: 既定の束縛上限 128 MiB では VAE の最大の値 192 MiB にも足りない。`acquireGpu` はアダプタ値を要求する
   ので実際の上限はアダプタ次第で、必要な下限は FFN 中間 503,193,600 B（33 フレーム）/ 1,174,118,400 B（81 フレーム）。環境キーは
   WebGPU Developer Features フラグの有無で変わる（sha 行は別）。確認ページは tools/gpu-lab の Wan タブ。

@@ -16,7 +16,7 @@
   Deno ツール依存の検証 4 本（公開面・依存グラフ・barrel・local-dist-server）を置き換え、計測 tools / examples は削除（ブラウザアプリとして作り直す — ADR 0127）。
   結果: 全レーン緑（core 2,929 + 家族 16 レーン 2,119 passed・17 skipped〈opt-in のケース〉・0 failed — 2026-10-16〜17・`26053ef2`〈core はタイマーの空振り 1 件を直した `1c8f6f8b` で再走〉）・Deno 基線との成果物の突合は数値の差 0（[research](research/2026-10-16-node-port-results.md)）。
   **フェーズ 2（整理 — 0.15.0 の中身）**: ① テスト選別（[一覧](research/2026-10-16-test-triage.md): keep 306 / move 16 / drop 4 / merge 42 / review 24 — 利用者の裁定で実施）
-  ② ADR の整理と英訳・コメントの英語化（ADR 0130）③ 数値プロファイル（ADR 0126: 既定 = practical・reference は opt-in）④ 既定のプリセット = オリジナルの重み（ADR 0128・breaking）
+  ② ADR の整理と英訳・コメントの英語化（ADR 0130）③ 数値プロファイル（ADR 0126: 既定 = practical・reference は opt-in）④ ✅ 既定のプリセットの方針（ADR 0128 を書き換え — 既定はモデルごとの手続きで選び記録する実用プリセットのまま・manifest の制約 C1〜C3 を配布門番で検査・README とカードで透明性・dp4a の無い device で a8 を要求すると runtime が警告・オリジナルの重みのプリセットは努力目標・breaking ではない・2026-10-17・ステップ 2-7）
   ⑤ ✅ Node 向けの CacheStorage（`@karume/hub/node` の `nodeCacheStorage`・2026-10-17・ステップ 2-4）⑥ ✅ PNG の sha 行を画素の sha に（ADR 0106 追記 2026-10-17・ステップ 2-5）⑦ lint の規則集合（既定規則の警告 331 件）
   ⑧ ✅ `Deno.test` 形の shim を Vitest 本来の形へ（2026-10-17・ステップ 2-2）。⑨ ✅ bf16 格納（ADR 0131 — runtime / exporter / anima の忠実プリセット `bf16`〈base・4 役〉・2026-10-17・ステップ 2-6）。副産物: Qwen3 text encoder の export の修正（`a5427e6b` 以降落ちていた）・bf16 の丸めは非永続 buffer を外す。**フェーズ 3**: 0.15.0 のリリース（JSR のみか npm も — ADR 0127 未決）。
   同乗の候補（判断はリリース前）: irodori 2 リポの重複の越境参照・sbv2 のサブパス面の再設計・hub ≤ 0.4 の旧名前空間の回収グルーの撤去・HTTP Range 取得。
@@ -27,7 +27,7 @@
   候補の出典は `.claude/reviews/2026-09-25_perf-recon/SUMMARY.md` §9.3（git 追跡外）と perf-ledger 2026-09-26 節（K-59〜K-69・L-20〜L-23）。
   E1（BiRefNet の f16 系列 — ADR [0113](decisions/0113-birefnet-weight-series.md)）の残り = 実 GPU の golden 突合・Lucida f16 の tolerance 導出・実画像の sha 参照行の作成と、段 2（i8 計画 + i8 系列）。
 
-- **要検討: 既定の quant 席を量子化にするか opt-in（元の重み）にするか（起票 2026-09-27・利用者）**: 今は既定で w8a8 などの量子化席を選ぶ。
+- **✅ 要検討: 既定の quant 席を量子化にするか opt-in（元の重み）にするか（起票 2026-09-27・利用者 — 裁定 2026-10-17: 既定は実用プリセットのまま〈モデルごとの手続き + manifest の制約 + 透明性〉・dp4a 非対応は警告・オリジナルの重みは努力目標 — ADR [0128](decisions/0128-default-preset-original-weights.md)・ステップ 2-7）**: 今は既定で w8a8 などの量子化席を選ぶ。
   それが正当かを見直す。「Metal では既定 quant の a8 を外す」判断（perf-ledger K-70・ADR 0115 Consequences）は保留にしてここに合流した。
   **材料集めは済（2026-09-29）**: `.claude/reviews/2026-09-29_quant-default-recon/SUMMARY.md`（git 追跡外）— 席の決まり方（recipe の定数・hub の解決・利用者の口）・
   系列 × 席 33 行の表（格納型・session 宣言・DL サイズ・契約クラス）・席別の実測（B570 / M2 / RTX・未計測を明示）・既定を量子化にした過去の根拠の引用・論点 3 案が守るもの。次 = 利用者と議論。

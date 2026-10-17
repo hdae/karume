@@ -35,6 +35,13 @@ measurements in `docs/research/`.
   `caches` to `loadManifest` / `fetchAssets` / `prefetchAssets` / `openAsset`, and to
   `clearHubCache` to clear it. Entries are written to a temporary file and renamed into place, so an
   aborted or failed transfer never replaces a complete entry.
+- `@karume/runtime` warns once per device when a Session requests int8 activations
+  (`linearCompute` / `attentionCompute: "a8"`) on a device whose WGSL language features lack
+  `packed_4x8_integer_dot_product` (dp4a). The integer dot products then run emulated — same numbers,
+  no speed-up, slower on Apple Metal — and the warning names the way out: the preset with the same
+  weights and no activation quantization, or `"f32"` for the knob. Nothing falls back
+  automatically. Default presets are unchanged; the rule for choosing them and the three manifest
+  constraints the distribution gate now checks are in ADR 0128.
 
 ## [0.14.0] - 2026-10-16
 

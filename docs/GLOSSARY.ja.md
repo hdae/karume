@@ -21,7 +21,7 @@
 | numerics profile ◆ | 数値プロファイル | `SessionOptions` の実行形の束。`practical` / `reference` の 2 値 | 層・経路（実用層・参照層・既定経路） | 新 ADR（0058 / 0110 の改定） |
 | practical profile ◆ | 実用プロファイル | 既定。形と adapter の能力で E / C / R の変種を選ぶ。近似（Q）は含まない | 実用層・実用経路 | 同上 |
 | reference profile ◆ | 参照プロファイル | opt-in。今の既定値の束（自動選択なし）。オラクルと参照値の根 | 参照層・参照経路・既定経路 | 同上 |
-| original weights ◆ | オリジナルの重み（忠実な重み） | exporter が量子化せずに書いた格納型（f16 / f32） | 忠実席・参照席・忠実な席 | ADR 0074 / 0110（改定） |
+| original weights ◆ | オリジナルの重み（忠実な重み） | Karume 側で量子化していない重み。上流の格納のまま（f32 → f32・bf16 → bf16・上流が f16 なら f16・QAT はその整数）で演算は f32 | 忠実席・参照席・忠実な席 | ADR 0128 決定 4・0131 |
 | quantized weights ◆ | 量子化された重み | i8 / i4 / i2 の格納型。`quant` の明示指定で選ぶ | 実用席の重み | 同上 |
 | storage dtype | 格納型 | 容器に書いた重みの形（f32 / f16 / i8 / i4 / i2） | — | glossary.md |
 | activation quantization | 活性量子化（a8） | 活性を int8 に量子化して計算する実行形。品質に効くのでプリセットの中身（明示） | — | ADR 0025 / 0030 |
@@ -38,7 +38,7 @@
 | 英語（コード・docs） | 日本語（対話） | 意味 | やめる言い方 | 正本 |
 | --- | --- | --- | --- | --- |
 | preset ◆ | プリセット | 配布形が「重みの格納型 + 実行ノブ」を束ねた名前（`i4-fast` など）。manifest の `quants` の項目 | 席・quant 席・実用席・参照席 | ADR 0074 / 0075 |
-| default preset ◆ | 既定のプリセット | manifest の `defaultQuant`。0.15 からはオリジナルの重みのプリセット | 既定席・忠実席 | 本計画の裁定 |
+| default preset ◆ | 既定のプリセット | manifest の `defaultQuant`。モデルごとに保守者が実測（速度 / メモリ / 品質）で選んで記録する実用のプリセット（量子化を含むことがある）。オリジナルの重みのプリセットは努力目標で opt-in | 既定席・忠実席 | ADR 0128（2026-10-17 書き換え） |
 | family ◆ | ファミリー | モデルの種類（anima / wan / gemma4 …）。`@karume/models/<family>` | 系列（モデルの意味で） | CLAUDE.md |
 | series ◆ | 中間成果物 | exporter が書く中間成果物のディレクトリ（`outputs/series/<name>/`）。配布形の 1 つ手前 | 系列（資産の意味で）・シリーズ | assets-layout |
 | distribution △ | 配布形 | HF に置く形（manifest + `krm`）。`models/` のミラー | — | ADR 0109 / container-v1 |

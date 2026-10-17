@@ -22,8 +22,8 @@ bf16 initializer as a capability gap, and the exporter's `WEIGHT_DTYPES` could n
 
 Two facts changed the priority during the 0.15 migration:
 
-- The maintainer's ruling of 2026-10-17 on the default preset (ADR 0128, to be rewritten in step
-  2-7) asks for the "faithful" preset of every family to hold the values Karume did not quantize,
+- The maintainer's ruling of 2026-10-17 on the default preset (ADR 0128, rewritten in step
+  2-7 the same day) asks for the "faithful" preset of every family to hold the values Karume did not quantize,
   and names bf16 explicitly: "support bf16 storage if feasible, computing in f32".
 - The upstream Anima checkpoint (`circlestone-labs/Anima-Base-v1.0-Diffusers`) is BF16 in **all four
   components** — text encoder (310 tensors), text conditioner (118), transformer (567) and VAE
@@ -79,7 +79,8 @@ has no bfloat16 dtype).
 
 The preset `bf16` (ADR 0074 grammar, bare storage name; label "Original weights (bf16)") stores
 `text_encoder`, `text_conditioner`, `transformer` and `vae_decoder` as bf16 — the upstream bits. It
-is opt-in; the default stays with the current ruling until step 2-7 rewrites ADR 0128. The scope of
+is opt-in; the default stays `f16+dit8-a8-attn8-s16` (ADR 0128 decision 1: the default is chosen per
+model by procedure; the original-weights preset is best effort — decision 4). The scope of
 this ADR is the base model (`anima-v1.0`). The fine-tuned models in `anima-extra` and the turbo
 model are best-effort follow-ups: the turbo DiT is a LoRA fusion computed in f32, so for it bf16 is
 a rounding of the fused weights, not the upstream bits.
