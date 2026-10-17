@@ -690,3 +690,92 @@ Cases dropped as duplicates are listed with the case that covers them; everythin
 - **irodori_assets_helper (helper-move to packages/e2e, irodori)** — created: `packages/e2e/tests/helpers/irodori-assets.ts`, `packages/e2e/tests/e2e_irodori_assets_helper_test.ts`; deleted: `packages/models/tests/helpers/irodori-assets.ts`, `packages/models/tests/irodori_assets_helper_test.ts`; kept 4 case(s); test run: pass (e2e_irodori_assets_helper_test 4/4 passed; e2e_irodori_cleanup_test 1/1 passed; e2e_irodori_context_test 1/1 passed; e2e_irodori_latent_test 16/16 passed (60s, real GPU)).
 - **png_decode (helper-move: runtime/tests png_decode_test.ts + helpers/png-decode.ts -> packages/test-support)** — created: `packages/test-support/src/png-decode.ts`, `packages/test-support/tests/png_decode_test.ts`; deleted: `packages/runtime/tests/helpers/png-decode.ts`, `packages/runtime/tests/png_decode_test.ts`; kept 8 case(s); test run: pass (png_decode_test 8/8; tools/verify-diff/tests 29/29 (2 files); e2e_depth_anything_real 7/7; e2e_birefnet_real 16/16; e2e_siglip2_image_preprocess_real 10/10; check-ported 0 error lines).
 - **series_graphs (helper-move: packages/runtime/tests/series_graphs_test.ts + helpers/series-graphs.ts -> packages/e2e)** — created: `packages/e2e/tests/e2e_series_graphs_test.ts`, `packages/e2e/tests/helpers/series-graphs.ts`; deleted: `packages/runtime/tests/series_graphs_test.ts`, `packages/runtime/tests/helpers/series-graphs.ts`; kept 6 case(s); test run: skipped-heavy (core: 3 files/20 pass. GPU e2e: 26 files (25 pass/1 skip), 333 pass/9 skip. 2 VAE-tiles files: NO_DAWN load check only (28-file NO_DAWN run 105 pass/247 skip)).
+## Applied (2026-10-17, step 2-1b) — the review rows
+
+Maintainer rulings on the review rows: upstream-parity cases are opt-in (`KARUME_UPSTREAM_PARITY=1`,
+`packages/e2e/tests/helpers/upstream-parity.ts`), record-only cases are deleted, the token-only
+Gemma 4 exit test is removed (its recipe entry point stays: `export_product.py`'s tests use its
+wrapper as an oracle), minicpm5 and siglip2 are maintained but not run by default
+(`LOW_PRIORITY_FAMILIES`), EmbeddingGemma keeps its parity test in the default run, and the
+asset-free blocks of #3 and #5 moved to `packages/models/tests` (commit `466b7196`).
+
+Per file (one agent per file, accepted in the main session):
+
+- **packages/e2e/tests/e2e_irodori_latent_test.ts** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 8 passed / 8 skipped (16); opt-in KARUME_UPSTREAM_PARITY=1: 16 passed (16), 63 s; check-ported: 0 error lines).
+  - opt-in: e2e(実GPU): 配布形の latent が full-loop golden と一致する（<series> / 参照 + caption あり） — x4 series f32/f16/i8/i8+dit4 (z under Z_ATOL/F16_Z_ATOL/W8_Z_ATOL/W4_Z_ATOL plus exact S/forwards/latentDim vs the torch golden)
+  - opt-in: e2e(実GPU): 参照なし / caption 空でも latent が full-loop golden と一致する（<series>） — x4 series
+- **e2e_irodori) — packages/e2e/tests/e2e_irodori_test.ts** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 1 passed / 38 skipped (39); opt-in KARUME_UPSTREAM_PARITY=1: 39 passed (39) in 34.5 s; check-ported: 0 error lines).
+  - opt-in: Irodori golden 突合: <target> / <case> — all 38 per-component torch-golden cases (backbone/text-proj/caption-proj x6, speaker x7, duration x5, dit x7, dit-context x1); ids and results keys unchanged
+- **packages/e2e/tests/e2e_irodori_reference_test.ts** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 1 passed / 1 skipped (2); opt-in KARUME_UPSTREAM_PARITY=1: 2 passed (2), worst maxAbs 2.8685e-5 (ref-odd), same as the documented measurement).
+  - opt-in: '... codec encoder が golden の latent と一致する' + UPSTREAM_PARITY_OPT_IN: maxAbs < LATENT_ATOL (2e-4) vs upstream golden latent; ignore: !RUNNABLE || !UPSTREAM_PARITY
+- **e2e_gemma4_product** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 4 passed | 1 skipped (5), 7.79s; opt-in (KARUME_UPSTREAM_PARITY=1): 5 passed (5), 14.20s; check-ported: 0 error lines).
+  - opt-in: Gemma 4 E2B 製品検収: 交差 parity（実 GPU / ホスト PLE + ホスト argmax）+ opt-in suffix — ③ greedy loop vs torch goldens (3 cases x K=16) plus the lazy-load stats asserted on that run
+- **e2e_birefnet** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 19 passed / 36 skipped (55); opt-in KARUME_UPSTREAM_PARITY=1: 55 passed (55), 201 s test duration).
+  - opt-in: BiRefNet golden 突合: <series> / {checker,disc,noise,ramp} — 6 series x 4 synthetic cases (torch model-exit atol + mask-disagreement limit); ignore += !UPSTREAM_PARITY, title + UPSTREAM_PARITY_OPT_IN
+  - opt-in: BiRefNet 実画像 golden 突合: <series> / photo-* — real-image cases of lucida-1024, birefnet-hr-1024-f16, lucida-1024-f16; same treatment
+- **e2e_deberta): packages/e2e/tests/e2e_deberta_test.ts** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 16 passed / 12 skipped (28); opt-in KARUME_UPSTREAM_PARITY=1: 28 passed (28), 25.9 s).
+  - opt-in: DeBERTa golden 突合: <variant> / <case>（実 GPU / torch CPU 期待値）+ opt-in suffix: per-output atol check vs torch goldens, 3 variants x 4 cases = 12; still recorded via runRecordedCase under id `${variant}/${case}`
+- **e2e_gemma4): packages/e2e/tests/e2e_gemma4_test.ts** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 4 passed | 1 skipped (5); 3 sha rows compared and passed (expected == actual in results.json). opt-in KARUME_UPSTREAM_PARITY=1: 5 passed (5), 25.7s. check-ported: 0 error lines.).
+  - opt-in: Gemma 4 E2B golden 突合 ... + UPSTREAM_PARITY_OPT_IN: torch logits check (atol 1e-2, rtol 0), golden margin > 2*atol precondition, last-position top-1 == torch golden; unchanged
+- **e2e_gemma4_greedy** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 3 passed | 1 skipped (4) in 18.07s; opt-in (KARUME_UPSTREAM_PARITY=1): 4 passed (4) in 29.67s; check-ported: 0 error lines).
+  - opt-in: Opt-in case (original name 'Gemma 4 E2B decode 検収: 固定 token id 列の parity…' + suffix), step ②: greedy token lists === torch expected, plus golden min-margin > 2*atol gate
+  - opt-in: Same opt-in case, step ③ moved verbatim: context-en prefill logits vs torch io golden (atol 1e-2, per-row argmax match, logits dtype/shape and queryLength-sum asserts)
+  - opt-in: Same opt-in case, new step ④: census's 'prefill の最終有効行が greedy golden の 1 手目' assertion (manual 1-chunk prefill of capital-en vs golden.expected[0])
+- **e2e_sbv2) — packages/e2e/tests/e2e_sbv2_test.ts** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 78 passed / 75 skipped (153), 24.7 s; opt-in KARUME_UPSTREAM_PARITY=1: 153 passed (153), 48.6 s).
+  - opt-in: SBV2 golden 突合: <series>/<target>/<case> + OPT_IN suffix — 75 cases (3 series x 5 targets x 5 cases), per-output torch tolerance comparison
+  - opt-in: The results.json entry is still written by runRecordedCase under the unchanged id `${series}/${target}/${case}` (opt-in run only)
+- **packages/e2e/tests/e2e_gemma4_drafter_test.ts** — created: `packages/models/tests/speculative_options_test.ts`; deleted: none; default run: pass; opt-in run: pass (default: 9 passed, 1 skipped (the opt-in 検収 case) across both files; opt-in (drafter file only): 9 passed, draft match 1800/1800 = 100.00% (floor 99%), 47.8 s; check-ported: 0 error lines).
+  - opt-in: gemma4 drafter 検収: draft が torch golden と 99% 以上一致する（実 GPU）: per-case draft match + distinct>=32 check + 99% total step. ignore now !UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE, with the opt-in suffix in the title.
+  - moved: 'Gemma4Pipeline: speculative の k は 1..3・fromAssets では受けない' moved verbatim to packages/models/tests/speculative_options_test.ts (core lane). The e2e file keeps a one-line NOTE pointer; the unused Gemma4Assets import was removed.
+- **e2e_deberta_w8a8) — packages/e2e/tests/e2e_deberta_w8a8_test.ts** — created: `packages/models/tests/collapse_ceilings_test.ts`, `packages/models/tests/helpers/collapse-ceilings.ts`; deleted: none; default run: pass; opt-in run: pass (e2e_deberta_w8a8_test.ts default: 6 passed / 4 skipped (10); opt-in KARUME_UPSTREAM_PARITY=1: 10 passed (7.0 s); collapse_ceilings_test.ts: 10 passed; check-ported: 0 error lines in the 3 files).
+  - opt-in: DeBERTa w8a8 鏡像突合: i8/full-24layer / <case> x4. Strict output.0/1 atol 5e-5 and output.2-24 relRMS collapse ceilings vs the torch mirror. Gated by UPSTREAM_PARITY with the title suffix; results id i8/full-24layer/<case> unchanged.
+  - moved: describe('崩壊上限の判定…') moved verbatim from e2e_deberta_w8a8_test.ts to packages/models/tests/collapse_ceilings_test.ts (core lane; no family token)
+  - moved: STRICT_OUTPUTS, COLLAPSE_CEILINGS, collapseCeilingOf, CollapseReport, judgeCollapse (verbatim) and GRAPH_OUTPUTS moved to new packages/models/tests/helpers/collapse-ceilings.ts; the e2e test imports them from there
+- **e2e_wan_ti2v_vae_encoder** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 2 passed | 1 skipped (3), 2.73s; opt-in (KARUME_UPSTREAM_PARITY=1): 3 passed (3), 6.21s. check-ported: 0 error lines.).
+  - opt-in: Original case '...mu の正規化が上流の非タイル encode と帯の中で一致し、故障注入は帯の外（実 GPU）' + OPT_IN suffix: 9 per-case band steps (atol WAN_I2V_ENCODER_BAND, rtol 0, unchanged)
+  - opt-in: Same opt-in case: 5 fault injections proving the band is live (patchify-swap, std-inverse, post-bindings-swap, logvar, avgdown-parity; ids fault/<id> kept)
+  - opt-in: Same opt-in case: band-candidate step (id band-candidate kept; runs only when BAND is undefined)
+- **packages/e2e/tests/e2e_wan_ti2v_dit_test.ts** — created: none; deleted: none; default run: pass; opt-in run: skipped-heavy (default: 8 passed | 5 skipped (13); skips = 3 parity opt-ins + 2 KARUME_WAN_TI2V_121F cases; results.json shows 24 census, 4 submit, 2 normal-mode and 2 A/B entries, all pass).
+  - opt-in: Full-size S = 8,190 / 7,920 parity: r gate vs f64, 3 fault injections, scale x2 fault, recordWorst, bandCandidate. Ids unchanged: f16+dit8/<case>, <case>/scale-fault, full/worst
+  - opt-in: S = 192 parity: r gate, fault injections, scale fault, recordWorst, bandCandidate. Original title plus suffix; ids unchanged (incl. f16+dit8/s192/worst)
+  - opt-in: New opt-in normal-mode r check (r <= FULL_BAND plus its latents measurement). It reads the output the default normal-mode case keeps, with no GPU re-run. New id f16+dit8/<case>/normal-mode/parity, to avoid a duplicate entry
+  - deleted: 行ブロックの予算の計測 (opt-in KARUME_WAN_TI2V_ROW_BLOCK_PROBE=1, ADR 0124 段 4b) — Opt-in record probe, listed as a record by the triage row. Its incidental gates (backing < none, submit <= 1 s per budget) went with it. Helpers removed: PROBE_BUDGETS, ATTENTION_STAGES, attentionStageMs, pause, nvidia-smi import
+  - deleted: S = 12,090 diag record (opt-in KARUME_WAN_TI2V_LONG_PROBE=1) — Opt-in record probe, listed as a record by the triage row. It asserted only non-finite, device lost and row blocks. LONG_TOKENS kept (the GPU-free test uses it)
+  - deleted: 実用席 f16+dit8-a8-attn8-s16 通常モード・記録だけ — Record-only by its own title: only non-finite 0 and device lost. The triage reason did not name it, so please confirm. Ids f16+dit8-a8-attn8-s16/<case>/normal-mode are no longer written
+- **e2e_wan_dit** — created: none; deleted: none; default run: pass; opt-in run: skipped-heavy (default: 10 passed / 5 skipped (15) in 313.8 s — the 5 skipped are the opt-in parity cases; check-ported 0 error lines; tsc --noEmit (project, noUnusedLocals) 0 errors).
+  - opt-in: Wan DiT 実寸 照合（実 GPU・計測モード / diffusers CPU f64）: f16 S=32,760/14,040 の r 帯・TS timesteps_proj・故障注入 4 件・SUBTLE_FAULT_MARGIN（normalizedRatioGate, ids `${name}` のまま）
+  - opt-in: Wan DiT 実寸 通常モード（計測なし / diffusers CPU f64）: 通常モード出力の実寸の帯（新 id `${name}/normal-mode/band` — 既定の通常モードが normalModeTokens に残した出力を読むので再実行しない）
+  - opt-in: Wan DiT i8 参照席 f16+dit8 S=14,040 の r 帯・故障注入 5 件（scale ×2 = i8ScaleFault, ids `f16+dit8/${name}` と `/scale-fault` のまま）・bandCandidate
+  - opt-in: Wan DiT i8 参照席 f16+dit8 S=192 の組の r 帯・故障注入 5 件・bandCandidate
+  - opt-in: Wan DiT 照合（実 GPU / diffusers CPU f32）: S=192 の比の帯・TS timesteps_proj・故障注入（growth の記録 step も含めてそのまま）
+  - deleted: Wan DiT 実寸 層別（実 GPU・計測用グラフ）: S = 14,040 の各ブロックの出力の差を記録する（門ではない） — record-only（per-layer 比を記録し非有限だけを assert）。results id `${name}/layers` も消える
+  - deleted: Wan DiT 層別（実 GPU・計測用グラフ）: 各ブロックの出力の差を記録する（門ではない） — record-only（S=192/768 の per-layer 記録）
+  - deleted: Wan DiT 実用席 f16+dit8-a8-attn8-s16（実 GPU・通常モード）: 壁時間と確保（fdinfo）の記録 — record-only timing/VRAM（assert は非有限と device lost のみ）。results id `${PRACTICAL_QUANT}/${name}/normal-mode` も消える
+  - deleted: layerRatios / PROBE_* 定数 / PROBE_AVAILABLE 警告 / FULL_CASES の blocks フィールド / practicalRuns の onRun 引数 / drm-usage と Measurement の import — 上の削除で孤立したもの
+- **e2e_gemma4_token_exit** — created: none; deleted: `packages/e2e/tests/e2e_gemma4_token_exit_test.ts`; default run: pass; opt-in run: not-run (fusion_counts default run (GPU lock): 2 passed / 0 failed. check-ported: 0 errors. pytest gemma4/tests: 291 passed, 80 skipped (no Python file changed; unchanged baseline).).
+  - deleted: e2e_gemma4_token_exit_test.ts (all 3 cases: golden completeness, provenance binding, cross-series greedy parity) — Ruling 4 = a: the token-only exit is no longer a product feature. Removed with git rm.
+  - deleted: series-graphs.ts row "gemma4-e2b-decode-token" — Only the deleted e2e test and the token part of the fusion-counts test read it.
+  - deleted: e2e_gemma4_fusion_counts_test.ts: the token-only half (GEMMA4_TOKEN_MODEL, its availability term, its loop entry) — This part checked only the token series. The logits opt-in decode/prefill rope-50 assertions stay in the default run with the same expected values.
+- **e2e_wan_ti2v_vae_tiles** — created: none; deleted: none; default run: pass; opt-in run: skipped-heavy (Default run: 5 passed, 2 skipped (the opt-in cases) of 7, in 575.78 s. check-ported: 0 error lines. vp check: 0 errors, 1 warning that predates this change (planFor template literal).).
+  - opt-in: Chunk parity case (original title + suffix): band/accept/long vs diffusers _decode within CHUNK_BAND, the 3 cache fault injections (fault/* ids kept), band-candidate.
+  - opt-in: Tile parity case (original title + suffix): band/accept/wide vs upstream tiled ref within BAND, accept-rgb (id kept), fault/swap-axes and fault/shift-start, band-candidate.
+  - deleted: chunk measured-mode test (1 submit GPU time, 門ではない) — Record-only (ids submit/first, submit/next). Removed with it: submitGpuNote, submitStats and their now-unused imports.
+  - deleted: chunk step 記録: VRAM の内訳・pipeline・融合・submit の統計 — Record-only step (id record in wan-ti2v-vae-chunks). The vramBreakdown import went with it.
+  - deleted: tile step accept の観測: frames_full との差 — Observation step with no assertion. The clampWanVaeFrames import went with it.
+  - deleted: tile step 記録: VRAM の山（fdinfo）・band の壁時計 — Record-only (id record in wan-ti2v-vae-tiles). Removed with it: the drm monitor, bandNote, the VRAM breakdown, VRAM_ESTIMATE_GIB and gib.
+- **e2e_wan_vae_tiles** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 4 passed, 2 skipped (6), 81.5 s; opt-in: 6 passed (6), 157.4 s; check-ported: 0 error lines).
+  - opt-in: Tile opt-in case: band and accept frames vs the recipe's tiled reference under BAND 2e-5. Writes results ids band/accept (wan-vae-tiles) with their measurements; assertions unchanged.
+  - opt-in: Chunk opt-in case (original title + suffix): band/accept/long vs the untiled _decode under CHUNK_BAND. Writes results ids band/accept/long (wan-vae-chunks).
+  - opt-in: Chunk opt-in case: the 3 band-liveness faults (drop-cache, swap-cache-frames, skip-zero).
+  - deleted: tile band: VRAM peak sampling (withDrmPeak) and vramBreakdown/GIB/gib — VRAM records only per the triage row; the drm-usage and SessionDiagnostics imports were removed as orphans
+  - deleted: tile band: frames_full unclamped/clamped diff log — record only per the triage row; the clampWanVaeFrames import was removed
+  - deleted: decodeMs/assembleMs timing logs in the tile and chunk case steps — timing records with no threshold
+  - deleted: chunk band: VRAM breakdown and lastRunFusions observation logs — record-only observations; the vramBreakdown import was removed
+  - deleted: header doc section '## 観測（門ではない）' — it described the deleted records; replaced by an English note on what is opt-in
+- **e2e_wan_umt5) — packages/e2e/tests/e2e_wan_umt5_test.ts** — created: none; deleted: none; default run: pass; opt-in run: pass (default: 5 passed | 2 skipped (7), 23.2 s; opt-in KARUME_UPSTREAM_PARITY=1: 7 passed (7), 61.5 s; check-ported: 0 error lines; vp check on the file: no lint/type errors).
+  - opt-in: Wan umT5 移植の門: r band vs CPU f64 + 4 fault injections (bucket shift, token replace, layer 0/1 table swap, wo scale x2); result ids <case>, <case>/table-swap, <case>/scale-fault kept
+  - opt-in: umT5 encoder（実 GPU）mirror case: judgeBand on hiddenStates for 10 goldens (original title + opt-in suffix; ids/shape kept as preconditions)
+  - deleted: quality record in the parity case (rowQuality vs unquantized f32 / bf16 text_embeds; measurement output@unquantized-f32-reference) — record-only (decision 8 ②), reason row names it a drop candidate
+  - deleted: step 資源の記録 (results id umt5/resources) and the fdinfo VRAM monitor — record-only, no assertion
+  - deleted: test Wan umT5 資源の記録（計測モード）(results id umt5/resources/gpu-timing) — record-only: the 1 s submit guide was never asserted, only written to the note
+  - deleted: subtle scale fault x1.0001 steps (results ids <accept>/scale-subtle) and SUBTLE_SCALE_FACTOR — record-only probe (r recorded, nothing asserted)
