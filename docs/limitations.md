@@ -233,7 +233,7 @@ attention 重みは消える（f32 経路は保持する）。落ちた質量は
 - **Wan2.1 / Wan2.2**: 受理する全形（寸法 × フレーム数）で self / cross とも宣言どおり。
 - **検出**: 系列の A/B 門が census に完全適格の検査（`assertAttentionSeatsComplete` — 融合 attention の
   全 dispatch が i8a8 / `:s16` の変種であること。比で見るので device に依らない）を掛ける。受理集合の
-  全形はホストテスト（`packages/models/tests/anima_attention_route_test.ts` /
+  全形はホストテスト（`packages/runtime/tests/attention_route_test.ts` /
   `wan_attention_route_test.ts`）が `attentionRoute` に通して固定する。runtime を直接使う場合は、
   診断のパイプラインキーに dense の `attention_pv:v1:f32` などが混ざるかで見分ける。
 - 端数を宣言どおりの経路で扱う変更は backlog の later 節にある。
@@ -1545,7 +1545,7 @@ relattn / demo 資産、wav の実資産 scale）— は GitHub Actions では�
 実資産 + 実 GPU の緑を必須とする（ADR 0005）。CI 側へ寄せるなら golden の fixture 昇格
 （リポ肥大とのトレードオフ）か release gate での資産取得が要る — リリース準備波で再訪。
 
-**資産不在の全 SKIP は `packages/runtime/tests/assets_gate_test.ts` が FAIL にする**（GPU 不在の
+**資産不在の全 SKIP は `packages/runtime/tests/e2e_assets_gate_test.ts` が FAIL にする**（GPU 不在の
 `gpu_gate_test.ts` と同形の門番）。CI は資産を持てないので `KARUME_ALLOW_NO_ASSETS=1` を
 意図表明として設定して抜ける。この env を設定した環境の緑は**リリース判定には使えない**。
 

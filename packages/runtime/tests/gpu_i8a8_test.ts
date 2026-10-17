@@ -611,7 +611,7 @@ test({
     try {
       // 本機は packed_4x8_integer_dot_product を列挙するので**両変種とも実走できる**。
       // この 1 本が「エミュは数値同一」という主張の linear 側の機械的検出器（設計 §4.4。
-      // 融合 attention の QK 側は tests/gpu_attention_i8a8_test.ts が同じ形で持つ）。
+      // 融合 attention の QK 側は tests/gpu_attention_pv_i8a8_test.ts が同じ形で持つ）。
       const dots: readonly I8a8Dot[] = ["dp4a", "emu"];
       for (const testCase of LINEAR_CASES) {
         const prepared = prepareLinear(testCase);
@@ -647,7 +647,7 @@ test({
       const baseline = await runLinear(gpu, prepared, {});
       assertEquals(baseline.pipelineCount, 1, "既定はパイプライン 1 本（quantize_rows が出ない）");
       // 見たいのは「i8a8 ではなく f32 linear（wi8 格納）が 1 本だけ走った」こと。キーの
-      // 綴りそのものは tests/gemm_geometry_test.ts が固定するので、ここは同じ形状
+      // 綴りそのものは tests/geometry_profile_test.ts が固定するので、ここは同じ形状
       //（m=17 → 小 M のタイル幾何バケット / n=19 でスカラ変種）から引く。
       assertEquals(baseline.keys, [linearKey("i8", false, "f32", 17)], "既定のキー");
       // 既定の値は w8（重みだけ量子化）なので、w8a8 の参照とは**一致しない**

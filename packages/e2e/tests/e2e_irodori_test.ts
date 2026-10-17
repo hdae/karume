@@ -67,7 +67,7 @@ import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesComponents } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesComponents } from "../../models/tests/helpers/series-graphs.ts";
 
 /**
  * 実重み Irodori backbone（ModernBERT-ja-310m 25 層）の torch CPU 期待値との突合に使う許容誤差。
@@ -329,7 +329,7 @@ const MODEL_FILE = "model.krm";
  * ターゲット（置き場のディレクトリ）→ 容器の中のグラフ名（ハイフンの綴りだけが違う —
  * weights キーは識別子として下線）。
  *
- * MUST: 表の実体は `helpers/series-graphs.ts` の 1 本（門番 `assets_gate_test.ts` と同じ
+ * MUST: 表の実体は `helpers/series-graphs.ts` の 1 本（門番 `e2e_assets_gate_test.ts` と同じ
  * 正本）。e2e が自前の表を持つと、片方だけ書き換えても誰も落ちない。
  */
 const GRAPH_NAMES: Readonly<Record<string, string>> = seriesComponents(SERIES_NAME);

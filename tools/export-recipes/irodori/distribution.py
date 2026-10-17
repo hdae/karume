@@ -358,7 +358,7 @@ IRODORI_QUANTS: Mapping[str, Any] = {
 #: 既定は `i8-a8`（ユーザー聴感裁定 2026-08-12 — DAC + ヘッドホンで 4 席を通しで確認し
 #: 「音質的な劣化という感じはしない」。配布 25.2% / DiT 常駐 0.37GB / wall ×1.12 が
 #: 既定で効き、最も忠実な `f32` 席は残したまま明示で選べる。数値上の帯（sim LSD 5.64・
-#: i8 golden との z maxAbs 2.97）は `e2e_irodori_w8a8_test.ts` の判別帯が持つ）。
+#: i8 golden との z maxAbs 2.97）は `e2e_irodori_ab_test.ts` の判別帯が持つ）。
 IRODORI_DEFAULT_QUANT = "i8-a8"
 
 #: DACVAE のフレームレート（Hz）— 48kHz / hop 1920 = 25。`irodori.export.CODEC_FRAME_RATE` と

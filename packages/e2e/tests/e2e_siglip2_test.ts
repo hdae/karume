@@ -33,7 +33,7 @@
 // ## TS 前処理を含む鎖は、2 つの門の**合成**で持つ
 //
 // 「PNG を渡したら Python と同じ埋め込みが返る」という鎖は、このテスト単独ではなく
-// `packages/models/tests/image_preprocess_real_test.ts` の**入力側 parity 門**（同じ PNG から
+// `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts` の**入力側 parity 門**（同じ PNG から
 // Python と同じ `pixel_values` が出る — 入力差 ≤ 7.85e-3 = uint8 の 1 LSB 級）と、本テストの
 // **golden 入力での忠実度**の合成で持つ。前処理をここで通さないのは依存方向のため
 // （runtime のテストから models の実装を相対 import するのは逆向き）。分けた副産物として、
@@ -75,7 +75,7 @@ import {
 } from "../../runtime/tests/helpers/reference.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 
 /**
  * 実重み SigLIP2 **base**（`patch16-224`）の torch CPU 期待値との突合に使う許容誤差。
@@ -166,7 +166,7 @@ const SO400M_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 1e-6 };
  * O(1)〜O(7) で、この閾値の 5 桁以上上に出る。一方 **TS 前処理側の誤り**（解像度の取り違え・
  * チャネル順の反転・補間の取り違え）**はこの門では捕まらない** — 入力が golden の
  * `pixel_values` だから。そこは
- * `packages/models/tests/image_preprocess_real_test.ts` が受け持つ（ファイル冒頭の「2 つの門の
+ * `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts` が受け持つ（ファイル冒頭の「2 つの門の
  * 合成」）。
  */
 const REAL_BASE_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 0 };
@@ -247,7 +247,7 @@ const EXPECTED_CASES = ["checker", "noise", "ramp", "ramp-dim"] as const;
 /**
  * **実画像**ケース（`--real-images` を付けた emit だけが持つ）。正本は `export_siglip2.py` の
  * `REAL_CASES`。ここが要るのは golden のケース名だけで、元になった PNG との対応は
- * `packages/models/tests/image_preprocess_real_test.ts` が持つ（このテストは PNG を読まない —
+ * `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts` が持つ（このテストは PNG を読まない —
  * ファイル冒頭の「2 つの門の合成」）。
  */
 const REAL_CASES = ["photo-portrait", "photo-landscape", "photo-corridor", "photo-street"] as const;
@@ -523,7 +523,7 @@ for (const series of SERIES) {
       //
       // 入力は golden に焼かれた `pixel_values`（= 突合ケースと同じもの）。TS 前処理を通した
       // 入力での判別ではなくなったが、主張は落ちない — 前処理側の parity は
-      // `packages/models/tests/image_preprocess_real_test.ts` が入力差 1 LSB 級で縛っており、
+      // `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts` が入力差 1 LSB 級で縛っており、
       // その幅では順序が反転しないことを実測してある（2026-08-14: 人物対と最悪の交差対の差は
       // base 0.1196 / so400m 0.0747 なのに対し、入力を TS 前処理へ差し替えたときの各 cosine の
       // 動きは最大 1.6e-3 —— 2 桁小さい）。

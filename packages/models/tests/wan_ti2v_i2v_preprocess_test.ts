@@ -14,7 +14,7 @@
 //   `permute(0,1,6,4,2,3,5)` と同じ並び（高さと幅の副添字の取り違えを故障注入で赤）。
 // - **encoder の出口の正規化**: `f32(f32(mu − mean) · f32(1 / f32(std)))`（割り算の形・f64 の逆数の形とは割れる）。
 //
-// 実画像の鎖（PNG → … → encoder の入力）の golden とのビット一致は `wan_ti2v_i2v_preprocess_real_test.ts`。
+// 実画像の鎖（PNG → … → encoder の入力）の golden とのビット一致は `e2e_wan_ti2v_i2v_preprocess_real_test.ts`。
 
 import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";

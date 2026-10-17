@@ -46,7 +46,7 @@ import {
   describeAb,
   describeBundleCensus,
   measureAb,
-} from "../../models/tests/helpers/ab-gate.ts";
+} from "./helpers/ab-gate.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { WAN_ASSEMBLE_COMMAND } from "../../models/tests/helpers/wan-distribution.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
@@ -60,7 +60,7 @@ import {
   WAN_AB_OBSERVATION,
   type WanAbSubject,
   type WanStep1Observation,
-} from "../../models/tests/helpers/wan-ab-gate.ts";
+} from "./helpers/wan-ab-gate.ts";
 
 /** 配布形の置き場（`dist.py --pipeline wan` の出力先）。 */
 const ASSETS_DIR = new URL("../../../models/karume-wan2.1/", import.meta.url);

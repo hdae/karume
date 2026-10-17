@@ -1,7 +1,13 @@
 /**
- * 全量面（`from*Assets`）の受け口（`src/hub/components.ts` の `assetComponentOpener`）の門の
- * うち、GPU を取らない受理側（Session を張る側は gpu_asset_container_components_test.ts）:
+ * 全量面（`from*Assets`）の受け口（`src/hub/components.ts` の `assetComponentOpener`）の門。
+ * ①② open a Session on a real GPU (each case is explicitly skipped via `ignore` when no adapter
+ * is present); ③〜⑥ are the acceptance-side gates and need no GPU.
  *
+ * ① **分割形の Record（`<役割>[i]` のキー列）から Session が張れる**（X2-101 —
+ *    「`fromPretrained` で読める配布形は `fromAssets` でも読める」）。バイト列は連結せず part 列の
+ *    まま開くので、重みの block を持つ part が GPU まで届いたことを run の出力で見る。
+ * ② **同じ供給口から Session を 2 本続けて張れる**（block は呼ぶたびに読み直す — 1 度読んだら
+ *    終わりの列にしていないか）。
  * ③ **添字の欠番は fail loudly**（`[0]` と `[2]` だけの Record を黙って 1 本で読まない）。
  *    `[0]` が**無い**形（`dit[1]` だけ / 単一形キー + `dit[1]`）も同じ門で落ちる — 添字つきキーが
  *    1 本でもあるのに `[0]` が無い並びは、混在検査も欠番検査も飛ばして単一形の 1 本になりうる。
@@ -21,8 +27,55 @@
 
 import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
-import { ContainerFormatError } from "@karume/runtime";
+import { acquireGpu, ContainerFormatError } from "@karume/runtime";
 import { openerOf, part, parts, single } from "./helpers/asset-container-fixture.ts";
+import { LINEAR_PROBE_Y, runLinearProbe } from "./helpers/container-fixture.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+
+test({
+  name: "assetComponentOpener: 分割形の Record から Session が張れる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const open = await openerOf(parts("dit"));
+    const component = open("dit");
+    // グラフ宣言は part 0（descriptor）から読めている。
+    assertEquals(component.graph.outputs, ["y"]);
+
+    const gpu = await acquireGpu();
+    try {
+      // 重みの block は末尾の part にしか無いので、既知の出力が出ること自体が「part 列が
+      // 読まれて GPU まで届いた」証拠。2 本続けて張るのは②の門 — 2 本目が空の block 列を
+      // 受けて 0 埋めで張れた形もここで出力が崩れる。
+      for (let index = 0; index < 2; index += 1) {
+        // MUST: `open` を呼び直さない — 呼び直すと供給口ごと作り直されるので、狙っている
+        // 「1 つの部品の `createSession` が毎回 block を読み直す」を 1 度も踏まない。
+        const session = await component.createSession(gpu);
+        assertEquals(await runLinearProbe(session), LINEAR_PROBE_Y, `Session ${index + 1} 本目`);
+        await session.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+test({
+  name: "assetComponentOpener: 単一形の 1 本からも Session が張れる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const open = await openerOf({ dit: single() });
+    assertEquals(open("dit").graph.outputs, ["y"]);
+
+    const gpu = await acquireGpu();
+    try {
+      const session = await open("dit").createSession(gpu);
+      assertEquals(await runLinearProbe(session), LINEAR_PROBE_Y);
+      await session.dispose();
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
 
 test("assetComponentOpener: 添字の欠番は part を名乗って落ちる", async () => {
   const error = await assertRejects(

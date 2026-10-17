@@ -5,7 +5,7 @@
 //
 // ① **1 ターン目の parity**: 温度 0（この層の既定）の sequence で回した 1 ターンが、logits
 //    opt-in 系列の `greedy.<case>.safetensors`（torch full re-forward の期待列）と 3 ケース ×
-//    K=16 で厳密一致する。段 2 の門（`e2e_gemma4_sampler_test.ts`）が**その場で書いたループ**で
+//    K=16 で厳密一致する。段 2 の門（`e2e_gemma4_sequence_test.ts`）が**その場で書いたループ**で
 //    採った同じ列を、**sequence 経由**で採り直す門である — 2 層化（program / sequence）と
 //    ホスト由来入力の席を挟んだことで列が動かないことの証明。
 // ② **多ターンで token を 1 個も落とさない**（決定 4 の `pendingToken` 連結 prefill）: 1 ターン目を
@@ -28,6 +28,13 @@
 //    （`Gemma4Pipeline.sequence().fork()`）で分岐した 2 本が KV を共有しないこと。投機なし /
 //    `"always"` / ゲートつきの 3 系統で、fork を使わない同じ操作列（基準）と token 列が一致する。
 //    順序が要（下の節の doc）。
+//
+// NOTE: the stage-2 sampler gate (formerly `e2e_gemma4_sequence_test.ts`, a hand-written host loop
+// over `createSampler`) was folded into this file. Its temperature-0 parity used the same 3 goldens
+// as ① and its EOS stop indices are the ones ③ pins, so only its unique part survives here: the
+// step right after ① checks that `topK: 1` at temperature 1 reproduces the greedy golden on the
+// real vocabulary (V = 262,144). The sampler unit tests use vocabularies of 4 to 4,096, so this is
+// the only place candidate selection runs at full size.
 //
 // NOTE: golden の出所（`reference.json` が束ねた digest）を突き合わせる門は
 // `e2e_gemma4_product_test.ts` の④が同じ 3 本に対して持っている — 同じ資産に 2 つ置かない。
@@ -67,7 +74,7 @@ import {
   physicalChunkRows,
 } from "../../models/src/generation/sequence.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 // 開いた容器から PLE の索引と block の読み口を組む（ADR 0109 決定 4）。
 import { seriesPleHandle } from "../../models/tests/helpers/ple-series.ts";
@@ -329,6 +336,31 @@ test({
         assert(
           sawMultipleChunks,
           `刻み ${CHUNK_LENGTH} ではどのケースも 1 chunk に収まる（多 chunk prefill が走らない）`,
+        );
+      });
+
+      await t.step("① topK = 1 も実寸の語彙（V = 262,144）で greedy と一致する", async () => {
+        const { name } = EXPECTED_CASES[0];
+        const { prompt, expected } = await readCase(name);
+        const generated = await withSequence([], async (sequence) => {
+          const stream = sequence.generate({
+            prompt,
+            maxNewTokens: GREEDY_STEPS,
+            // Temperature 1 keeps the sampler off the greedy fast path, so every step runs
+            // candidate selection over the full logits row. The candidates collapse to the top
+            // one, so the seed cannot move the sequence.
+            sampler: { temperature: 1, topK: 1, seed: 20_260_831 },
+          });
+          const ids: number[] = [];
+          for await (const event of stream) {
+            if (event.kind === "token") ids.push(event.id);
+          }
+          return ids;
+        });
+        assertEquals(
+          generated,
+          expected,
+          `${name}: topK 1 / 温度 1 の生成 token 列（greedy と同じであること）`,
         );
       });
 

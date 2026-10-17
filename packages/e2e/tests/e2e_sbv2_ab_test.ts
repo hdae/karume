@@ -68,7 +68,7 @@ import {
   overrideQuantSession,
   quantOf,
   referencePartnerOf,
-} from "../../models/tests/helpers/ab-gate.ts";
+} from "./helpers/ab-gate.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 

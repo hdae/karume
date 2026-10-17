@@ -1,6 +1,6 @@
 /**
- * Wan の動画 VAE の chunk 列の e2e（2.1 の `e2e_wan_vae_chunks_test.ts`・2.2 の
- * `e2e_wan_ti2v_vae_chunks_test.ts`）が共有するもの: フィクスチャの読み口・故障注入の口を持つ chunk
+ * Wan の動画 VAE の chunk 列の e2e（2.1 の `e2e_wan_vae_tiles_test.ts`・2.2 の
+ * `e2e_wan_ti2v_vae_tiles_test.ts`）が共有するもの: フィクスチャの読み口・故障注入の口を持つ chunk
  * ループ・VRAM の内訳・ビット一致。
  *
  * 製品の経路は `src/wan/vae-chunks.ts` の `decodeWanVaeTile`。ここのループはそれと同じ部品で組み、

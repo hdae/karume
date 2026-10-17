@@ -5,7 +5,7 @@
 //
 // もともとは `packages/runtime/tests/e2e_birefnet_test.ts` に同居していた（TS 前処理を通した
 // `pixel_values` で推論し、入力側と出力側を 1 本のテストで見ていた）。それを 2 つに割った
-// —— SigLIP2 で先に踏んだのと同じ形（`image_preprocess_real_test.ts` 冒頭）:
+// —— SigLIP2 で先に踏んだのと同じ形（`e2e_siglip2_image_preprocess_real_test.ts` 冒頭）:
 //
 //  ・**入力側（ここ）**: 「同じ PNG から Python と同じ `pixel_values` が出る」—— GPU も
 //    モデル本体（1 系列 964MB）も要らない、前処理層だけの純粋なパリティ。
@@ -50,9 +50,9 @@ import { encodePng } from "../../models/src/image/png.ts";
 // RGB8 の画素列）。テストが実画像を読むためだけの道具を runtime のテスト配下から借りる。
 // models → runtime は**正方向**の依存で、かつ両者とも `tests/` は publish から除外される
 // （packages/*/deno.json の `publish.exclude`）ので、配布物には影響しない。
-import { decodePng } from "../../runtime/tests/helpers/png-decode.ts";
+import { decodePng } from "@karume/test-support/png-decode";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { openResults, recordFailure } from "../../runtime/tests/helpers/results.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import {

@@ -1,6 +1,6 @@
 // 実重み MiniCPM5-1B（states 形 decode グラフ）の実 GPU 検収門 — **固定 token id 列の parity**。
 //
-// 波 A の `packages/runtime/tests/e2e_minicpm5_test.ts` が 1-shot 形（prefill 相当の 1 本道）で
+// 波 A の `e2e_minicpm5_test.ts`（0.15 の選別で削除） が 1-shot 形（prefill 相当の 1 本道）で
 // GQA の数値を受け持つのに対し、こちらは**生成ループ全体**（ADR 0066 決定 4 の prefill-chunk と
 // decode の 2 形 + GenerationContext の KV スロット）が実重みで**torch と同じ token を同じ順で
 // 吐く**ことを受け持つ。検収の形は tolerance ではなく**離散の一致**で、`.lab` / PNG sha256 門と
@@ -54,7 +54,7 @@ import {
 } from "@karume/runtime";
 import { generateGreedy } from "../../models/src/generation/greedy.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { requireCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 

@@ -36,7 +36,7 @@
  * NOTE: 席名と系列 root の綴りは**必ずしも同じではない**（`i8+dit4` 席 ↔ `-i4` 系列 — 席名は
  * 実行構成の名前、系列 root は格納 dtype の名前で、`i8` / `i8-a8` は同じバイトを共有する）。
  * この門が見るのは格納 dtype までの席で、活性量子化の `i8-a8` 席は数値パリティ網に**できない**
- * ため別の門が持つ（`e2e_irodori_w8a8_test.ts` — ADR 0025 決定 6 / 0026）。
+ * ため別の門が持つ（`e2e_irodori_ab_test.ts` — ADR 0025 決定 6 / 0026）。
  *
  * **S と forward 数の完全一致は系列に依らず要求する** — 格納 dtype を落としても duration の
  * 出力を動かす軸は無い（重み格納だけの変更で、S を決める式もホストのまま）ので、ここが
@@ -71,7 +71,7 @@ import {
   readCase,
   readManifest,
   worstDifference,
-} from "../../models/tests/helpers/irodori-assets.ts";
+} from "./helpers/irodori-assets.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
 /**

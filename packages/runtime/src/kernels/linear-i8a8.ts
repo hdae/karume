@@ -45,7 +45,7 @@
  * `navigator.gpu.wgslLanguageFeatures` の列挙（{@link dp4aAvailable}）で、キーに `:dp4a` /
  * `:dp4aEmu` が載るので診断（ADR 0021）でどちらが走ったか見える。唯一の機械的検出器は
  * 「拡張のある機で両変種を実走して atol=0 で突合する」テスト（tests/gpu_i8a8_test.ts と、
- * 融合 attention の QK 側は tests/gpu_attention_i8a8_test.ts）。
+ * 融合 attention の QK 側は tests/gpu_attention_pv_i8a8_test.ts）。
  *
  * ## w4a8 変種（`weight: "i4"` — i4 常駐の重み × per-token i8 活性）
  *

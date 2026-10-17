@@ -20,7 +20,7 @@
 
 import { readdir, readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { decodePng } from "../../packages/runtime/tests/helpers/png-decode.ts";
+import { decodePng } from "@karume/test-support/png-decode";
 import { parseSafetensors, tensorBytes } from "../../packages/runtime/src/format/safetensors.ts";
 import { decodeWav } from "../../packages/models/src/audio/wav.ts";
 

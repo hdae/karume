@@ -1,5 +1,5 @@
 // `assetComponentOpener` の門が使う最小の資産フィクスチャ
-// （asset_container_components_test.ts と gpu_asset_container_components_test.ts の共有）。
+// （asset_container_components_test.ts と asset_container_components_test.ts の共有）。
 //
 // 容器の書き手は `container-fixture.ts` 経由（形式の道具 — 向こうの NOTE）。
 

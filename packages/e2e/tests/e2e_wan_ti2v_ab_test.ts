@@ -76,10 +76,10 @@ import { type Rgb8Image, WanTi2vPipeline } from "../../models/wan.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { sha256Hex } from "../../runtime/tests/helpers/reference.ts";
 import { openResults, type Results } from "../../runtime/tests/helpers/results.ts";
-import type { AbBand } from "../../models/tests/helpers/ab-gate.ts";
+import type { AbBand } from "./helpers/ab-gate.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
-import { runWanAbCase, type WanAbSubject } from "../../models/tests/helpers/wan-ab-gate.ts";
+import { runWanAbCase, type WanAbSubject } from "./helpers/wan-ab-gate.ts";
 import { WAN_I2V_IMAGE_SHA256 } from "../../models/tests/helpers/wan-i2v-image.ts";
 import {
   WAN_I2V_SOURCE_SHAPE,

@@ -1,6 +1,6 @@
 /**
  * `Umt5Encoder`（`@karume/models/umt5`）の**構築の門**と umT5 のグラフ宣言の取り決め（`umt5GraphContract`）。
- * GPU も実資産も要らない範囲だけを見る（実 GPU の符号化は `e2e_umt5_encoder_test.ts`）。
+ * GPU も実資産も要らない範囲だけを見る（実 GPU の符号化は `e2e_wan_umt5_test.ts`）。
  *
  * 押さえるのは 3 点:
  *

@@ -120,7 +120,7 @@ import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.t
 import type { BoundContainer } from "../../runtime/src/format/container/bind.ts";
 import type { IrNode } from "../../runtime/src/format/ir.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 

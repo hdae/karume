@@ -102,7 +102,7 @@ import {
   wanRopeTables,
 } from "../../models/src/wan/dit-rope.ts";
 import { timestepsProj } from "../../models/src/wan/dit-timestep.ts";
-import { quantOf } from "../../models/tests/helpers/ab-gate.ts";
+import { quantOf } from "./helpers/ab-gate.ts";
 import { effectiveSessionOptions } from "../../models/tests/helpers/census-table.ts";
 import { formatDrmUsage, monitorDrmUsage } from "../../models/tests/helpers/drm-usage.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
@@ -111,7 +111,7 @@ import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
 import { timestampUnitNs } from "../../models/tests/helpers/timestamp-unit.ts";
 import { WAN_ASSEMBLE_COMMAND } from "../../models/tests/helpers/wan-distribution.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import {
   assertAdapterMatchesEnvironment,
   ENVIRONMENT,

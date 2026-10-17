@@ -415,7 +415,7 @@ test({
 
 /**
  * GPU の `unpack4xU8` + group scale と CPU の {@link decodeI4} が**全 15 nibble 値 × 語内 8 位置で
- * ビット一致**する（i8 側 `gpu_i8_weights_test.ts` の「全 256 値 × 4 レーン」の i4 鏡像）。
+ * ビット一致**する（i8 側 `gpu_f16_i8_weights_test.ts` の「全 256 値 × 4 レーン」の i4 鏡像）。
  *
  * 運び方: embedding の weight を `[16, 32]`（g16 = 行あたり 2 group）とし、行 r・列 c の量子化値を
  * `((r + c) % 15) − 7` にする。平坦添字は `r·32 + c` なので、**同じ nibble 値が語内 8 位置すべてに

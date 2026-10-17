@@ -36,7 +36,7 @@
 //   - `units < 4` — 先読みループが**一度も回らず**端数ループだけで縮約が終わる
 // MUST: 重みは **scale の単位ごとに大きさを変える**（i4 = group ごと・i8 = 出力チャネルごと）。
 // 全単位で同じ scale だと、添字〈i4 は `(unit · 32) >> shift`・i8 は `wscale[col]`〉の
-// 取り違えが一切値に出ない（gpu_i4_weights_test.ts / gpu_i8_weights_test.ts と同じ罠）。
+// 取り違えが一切値に出ない（gpu_i4_weights_test.ts / gpu_f16_i8_weights_test.ts と同じ罠）。
 // MUST: 隣接要素の符号を交互にする（i4 は pack の上下 nibble・i8 は語内レーンの取り違えが、
 // 対称パターンでは値の上で打ち消し合う）。
 //
@@ -74,7 +74,14 @@ import { linearKey } from "../src/kernels/linear.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
-import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import {
+  createSessionFromContainer,
+  type RunInput,
+  type SessionOptions,
+  type Tensor,
+} from "../src/runtime/executor.ts";
+import type { TensorInput } from "./helpers/container-write.ts";
+import { quantizeF16 } from "./helpers/f16.ts";
 import {
   type DeclarationJson,
   f32Bytes,
@@ -85,7 +92,7 @@ import {
 } from "./helpers/model-fixture.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
 /**
@@ -206,22 +213,30 @@ type RunResult = {
   readonly keys: readonly string[];
 };
 
-/** 組み上げたモデル 1 本を走らせて出力と走ったキーを返す（格納 2 種で共有）。 */
-const runLinear = async (
+/** Runs one assembled model on the given input and returns the output and the keys that ran. */
+const runLinearOn = async (
   gpu: GpuContext,
   model: Promise<OpenedContainer>,
-  m: number,
-  k: number,
+  x: RunInput,
+  options: SessionOptions = {},
 ): Promise<RunResult> => {
-  const session = await createSessionFromContainer(gpu, await model, GRAPH_NAME);
+  const session = await createSessionFromContainer(gpu, await model, GRAPH_NAME, options);
   try {
-    const output = (await session.run({ x: fill([m, k], XS) }))["y"];
+    const output = (await session.run({ x }))["y"];
     const census = requireCensus(session.diagnostics().lastRunPipelines, "linear");
     return { output, keys: census.map((row) => row.key) };
   } finally {
     await session.dispose();
   }
 };
+
+/** 組み上げたモデル 1 本を走らせて出力と走ったキーを返す（格納 2 種で共有）。 */
+const runLinear = (
+  gpu: GpuContext,
+  model: Promise<OpenedContainer>,
+  m: number,
+  k: number,
+): Promise<RunResult> => runLinearOn(gpu, model, fill([m, k], XS));
 
 /** f32 の生ビット列（-0 / NaN も含めて 1 ビットの差を見る）。 */
 const bits = (tensor: Tensor): Uint32Array =>
@@ -1025,4 +1040,226 @@ test({
       gpu.destroy();
     }
   },
+});
+
+// ---------------------------------------------------------------------------
+// Float storage (f16 / f32 — ADR 0082 addenda 6 and 7). The same three viewpoints as the
+// quantized storages, run per storage because each storage is its own generated branch.
+// The float GEMV gate admits M=1 only, so the bit-identity partner is M=2: that still runs the
+// M16N16 GEMM skeleton and is not another member of the family. The shapes include N edges and
+// prefetch edges real models never reach, plus the packed-f16 pair / word boundaries (f16) and
+// the component / word boundaries (f32).
+// ---------------------------------------------------------------------------
+
+type FloatStorage = "f16" | "f32";
+
+/** Activation of the float-storage cases (row-major, so row 0 does not depend on m). */
+const floatActivation = (length: number): Float32Array<ArrayBuffer> =>
+  Float32Array.from({ length }, (_, i) => Math.sin(i * 0.73) * 1.17);
+
+/**
+ * `linear(x, w, b)` with float-stored weights. f16 storage always holds f16-rounded values (the
+ * CPU reference sees the same rounded values); `roundToF16` rounds f32-stored weights too.
+ */
+const floatLinearFixture = (
+  m: number,
+  n: number,
+  k: number,
+  storage: FloatStorage,
+  roundToF16 = false,
+) => {
+  // Scatter sign and magnitude between neighbours so a swapped lo/hi of a pair does not cancel out.
+  const raw = Float32Array.from(
+    { length: n * k },
+    (_, i) => (i % 2 === 0 ? 1 : -1) * (0.0013 + (i % 23) * 0.017),
+  );
+  const rounded = quantizeF16(raw);
+  const weight = storage === "f16" || roundToF16 ? rounded.values : raw;
+  const bias = Float32Array.from({ length: n }, (_, i) => Math.sin(i * 0.37) * 0.13);
+  const declaration: DeclarationJson = {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["linear"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
+    outputs: ["y"],
+    initializers: { w: {}, b: {} },
+    values: {
+      w: { dtype: "f32", shape: [n, k] },
+      b: { dtype: "f32", shape: [n] },
+      y: { dtype: "f32", shape: [m, n] },
+    },
+    nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
+  };
+  const tensors: readonly TensorInput[] = [
+    {
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: storage === "f16" ? rounded.bytes : f32Bytes([...weight]),
+      encoding: { codec: storage },
+    },
+    {
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: f32Bytes([...bias]),
+      encoding: { codec: "f32" },
+    },
+  ];
+  const input = refTensor([m, k], floatActivation(m * k));
+  return {
+    model: () => openModelBytes(declaration, tensors),
+    input,
+    reference: () =>
+      applyReferenceOp("linear", [input, refTensor([n, k], weight), refTensor([n], bias)], {}, [
+        m,
+        n,
+      ]),
+  };
+};
+
+type FloatLinearFixture = ReturnType<typeof floatLinearFixture>;
+
+const runFloatLinear = (
+  gpu: GpuContext,
+  data: FloatLinearFixture,
+  options: SessionOptions = {},
+): Promise<RunResult> => runLinearOn(gpu, data.model(), data.input, options);
+
+/**
+ * M=1 float GEMV against the default GEMM (M=2, first row) bit for bit, and against the CPU
+ * reference.
+ */
+const checkFloatGemvBits = async (
+  storage: FloatStorage,
+  shapes: readonly (readonly [number, number])[],
+): Promise<void> => {
+  const gpu = await acquireGpu();
+  try {
+    for (const [n, k] of shapes) {
+      const data = floatLinearFixture(1, n, k, storage);
+      const actual = await runFloatLinear(gpu, data);
+      // The float gate is M=1 only. M=2 runs the same M16N16 GEMM skeleton, not a family variant.
+      const expected = await runFloatLinear(gpu, floatLinearFixture(2, n, k, storage));
+      assertEquals(actual.keys, [linearGemvKey(storage)]);
+      assertEquals(expected.keys, [linearKey(storage, true, "f32", 2)]);
+      assertEquals(actual.output.shape, [1, n]);
+      assertEquals(bits(actual.output), bits(expected.output).subarray(0, n), `n=${n} k=${k}`);
+      const report = compareTensors(actual.output, data.reference(), GEMM_TOLERANCE);
+      assert(report.pass, formatAllclose(report));
+    }
+  } finally {
+    gpu.destroy();
+  }
+};
+
+test({
+  name: "f16 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () =>
+    checkFloatGemvBits("f16", [
+      [64, 128],
+      [100, 40],
+      [36, 48],
+      [68, 56],
+      [4, 8],
+      [32, 24],
+      [36, 136],
+      [100, 264],
+    ]),
+});
+
+test({
+  name: "f32 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () =>
+    checkFloatGemvBits("f32", [
+      [64, 128],
+      [100, 20],
+      [36, 24],
+      [68, 28],
+      [4, 4],
+      [32, 12],
+      [36, 132],
+      [100, 260],
+    ]),
+});
+
+/** One float gate case. `gemv` marks the shape that the gate admits. */
+type FloatDoorCase = {
+  readonly m: number;
+  readonly n: number;
+  readonly k: number;
+  readonly storage: FloatStorage;
+  readonly gemv?: boolean;
+  /** f32 storage holding f16-representable values. */
+  readonly roundToF16?: boolean;
+};
+
+const checkFloatDoor = async (cases: readonly FloatDoorCase[]): Promise<void> => {
+  const gpu = await acquireGpu();
+  try {
+    for (const c of cases) {
+      const data = floatLinearFixture(c.m, c.n, c.k, c.storage, c.roundToF16);
+      const actual = await runFloatLinear(gpu, data);
+      assertEquals(actual.keys, [
+        c.gemv === true
+          ? linearGemvKey(c.storage)
+          : linearKey(c.storage, c.k % 4 === 0 && c.n % 4 === 0, "f32", c.m),
+      ]);
+      const report = compareTensors(actual.output, data.reference(), GEMM_TOLERANCE);
+      assert(report.pass, formatAllclose(report));
+    }
+  } finally {
+    gpu.destroy();
+  }
+};
+
+test({
+  name: "f16 GEMV の行数・K 整列・N 整列の門と f32 格納の別変種を検証する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () =>
+    checkFloatDoor([
+      { m: 2, n: 36, k: 40, storage: "f16" },
+      { m: 1, n: 36, k: 36, storage: "f16" },
+      { m: 1, n: 35, k: 40, storage: "f16" },
+      { m: 1, n: 36, k: 40, storage: "f32", gemv: true, roundToF16: true },
+    ]),
+});
+
+test({
+  name: "f32 GEMV の行数・K 整列・N 整列の門は条件を外すと通常 GEMM を選ぶ（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () =>
+    checkFloatDoor([
+      { m: 2, n: 36, k: 20, storage: "f32" },
+      { m: 1, n: 36, k: 18, storage: "f32" },
+      { m: 1, n: 35, k: 20, storage: "f32" },
+    ]),
+});
+
+/** An f16-compute request keeps the GEMM key (checks the key only; numbers live above). */
+const checkF16ComputeKeepsGemm = async (storage: FloatStorage): Promise<void> => {
+  const gpu = await acquireGpu({ shaderF16: true });
+  try {
+    const actual = await runFloatLinear(gpu, floatLinearFixture(1, 36, 40, storage), {
+      linearCompute: "f16",
+    });
+    assertEquals(actual.keys, [linearKey(storage, true, "f16", 1)]);
+  } finally {
+    gpu.destroy();
+  }
+};
+
+test({
+  name: "f16 格納でも f16 計算の指定は GEMV に置き換えない（実 GPU）",
+  // The census does not depend on timing, so only shader-f16 gates this case.
+  ignore: !SHADER_F16_AVAILABLE,
+  fn: () => checkF16ComputeKeepsGemm("f16"),
+});
+
+test({
+  name: "f32 格納でも f16 計算の指定は GEMV に置き換えない（実 GPU）",
+  // The census does not depend on timing, so only shader-f16 gates this case.
+  ignore: !SHADER_F16_AVAILABLE,
+  fn: () => checkF16ComputeKeepsGemm("f32"),
 });

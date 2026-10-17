@@ -3,7 +3,7 @@
  * （ADR 0121 段 4）: 系列の置き場・フィクスチャのケースの表・取り決めの期待値（cache の表を含む）・資産の在否。
  *
  * GPU 不要の突き合わせ（`e2e_wan_ti2v_vae_chunks_host_test.ts`）と実 GPU の chunk 列の照合
- * （`e2e_wan_ti2v_vae_chunks_test.ts`）が同じ表を読む — 表を 2 か所で育てると、片方だけに足したケースが黙って
+ * （`e2e_wan_ti2v_vae_tiles_test.ts`）が同じ表を読む — 表を 2 か所で育てると、片方だけに足したケースが黙って
  * 片方の門を外れる。
  *
  * ケースの正本は `tools/export-recipes/wan/export_vae.py` の `TI2V_FIXTURE_CASES`。cache の表の正本は上流の decoder の

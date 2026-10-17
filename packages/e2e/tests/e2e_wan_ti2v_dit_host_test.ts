@@ -20,8 +20,8 @@
 // FAIL にする（下の完全性テスト — S = 192 の組と実寸の組は別の回に書くので組ごとに見る）。GPU は使わない
 // （実 GPU の r 門は `e2e_wan_ti2v_dit_test.ts`）。
 //
-// NOTE: 容器のグラフ名は綴らず、系列のグラフ名の表（`runtime/tests/helpers/series-graphs.ts` — 門番
-// `assets_gate_test.ts` と同じ正本）から引く。
+// NOTE: 容器のグラフ名は綴らず、系列のグラフ名の表（`packages/models/tests/helpers/series-graphs.ts` — 門番
+// `e2e_assets_gate_test.ts` と同じ正本）から引く。
 
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
@@ -32,7 +32,7 @@ import { patchifyLatents, wanTokenGrid } from "../../models/src/wan/dit-tokens.t
 import { wanRopeTables } from "../../models/src/wan/dit-rope.ts";
 import { timestepsProj } from "../../models/src/wan/dit-timestep.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import {
   caseFiles,
   conditionMask,

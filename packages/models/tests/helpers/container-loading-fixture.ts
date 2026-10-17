@@ -1,6 +1,6 @@
 // コンテナ経路のロード（`src/hub/components.ts`）の門が共有する疑似 HF 取得層と `karume/5` の
-// 配布形（container_loading_test.ts と gpu_container_loading_test.ts と
-// container_components_test.ts）。
+// 配布形（container_loading_test.ts と container_loading_test.ts と
+// container_loading_test.ts）。
 //
 // NOTE: hub / runtime の**テストの都合**は import しない（`helpers/memory-cache.ts` と同じ
 // 規律）。唯一の例外が容器の**書き手**（`helpers/container-fixture.ts` 経由の

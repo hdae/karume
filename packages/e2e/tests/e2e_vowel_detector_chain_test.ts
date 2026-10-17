@@ -5,12 +5,12 @@
 // `src/vowel-detector/postprocess.ts`）は models の実装なので、この門は models 側にある。
 // もともとは `packages/runtime/tests/e2e_vowel_detector_test.ts` に同居していたが、runtime の
 // テストが models の実装を相対 import する**逆向きの依存**になっていたため、鎖ごとこちらへ
-// 移した（SigLIP2 で先に踏んだ分担 — `image_preprocess_real_test.ts` 冒頭）。
+// 移した（SigLIP2 で先に踏んだ分担 — `e2e_siglip2_image_preprocess_real_test.ts` 冒頭）。
 //
 // ## runtime 側との分担
 //
-// - **ロジットの数値突合**（合成 golden 4 ケース・torch CPU 期待値）は runtime 側が持つ
-//   （`e2e_vowel_detector_test.ts`）。`.lab` だけだと「ロジットが動いてもラベルが変わらな
+// - **ロジットの数値突合**（合成 golden 4 ケース・torch CPU 期待値）は 0.15 の選別で削除した
+//   （`e2e_vowel_detector_test.ts` — 鎖の sha 行が受け持つ）。`.lab` だけだと「ロジットが動いてもラベルが変わらな
 //   かった」変更が素通りするので、あちらが 1e-5 級の tolerance で押さえる。
 // - **`.lab` の完全一致**（実音声・全鎖）は**ここ**。離散のラベル列なので tolerance を持たない
 //   （PNG / WAV の sha256 門と同じ哲学 — 出口の成果物そのものを固定する）。
@@ -29,8 +29,8 @@
 // **pad は 1 要素も無い**（奇数フレームの端数 1 本だけを切り捨てる）。以前は配布形だけが
 // 長さバケット + 右ゼロ pad を採っていて、pad が末尾のロジットを O(1) 動かすせいで `.lab` が
 // この門と割れていた（実測: pad 2 フレーム = 40ms でも max abs diff 2.2〜3.2）。バケットが
-// 消えた今は**配布形の `.lab` もここと完全一致**する（`e2e_vowel_detector_lab_test.ts` が
-// 同じ 4 本で実測する）。
+// 消えた今は**配布形の `.lab` もここと完全一致**する (each case below checks this as step ②':
+// the distribution pipeline's `.lab` must equal this direct real-length path's `.lab`).
 //
 // ## 資産
 //
@@ -45,6 +45,10 @@
 // - mel 基底: `tests/fixtures/vowel-detector/parity.json`（git 追跡・上流
 //   `assets/feature_config.json` そのまま）。配布形は同じ行列を `assets` 席の safetensors で
 //   配る（`dist.py --pipeline vowel-detector`）が、この門は配布形を経由しない。
+// - Distribution form: `models/karume-vowel-detector/` (untracked). Only step ②' reads it, through
+//   `VowelDetectorPipeline.fromAssets` → `detect`. The direct path keeps the fixture mel basis, so
+//   ②' also pins that the distributed mel basis yields the same `.lab`. When it is missing, ②'
+//   alone is skipped with a warning (the direct-path gates still run).
 //
 // 資産が無い環境では**明示 SKIP** する（系列ごと・音声ごとに独立）。ADR 0005 の「全 SKIP は
 // 明示 FAIL」門番は *GPU アダプタの有無* だけを見ており、この SKIP とは独立。golden ケースの
@@ -54,6 +58,8 @@
 import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
+import { parseManifest, resolveSelection } from "@karume/hub";
+import type { Manifest } from "@karume/hub";
 import { acquireGpu, prepareContainer, type PreparedModel } from "@karume/runtime";
 import { decodeWav } from "../../models/src/audio/wav.ts";
 import {
@@ -62,8 +68,9 @@ import {
   SAMPLE_RATE,
 } from "../../models/src/vowel-detector/features.ts";
 import { logitsToSegments, toLab } from "../../models/src/vowel-detector/postprocess.ts";
+import { VowelDetectorPipeline } from "../../models/src/vowel-detector/pipeline.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { openResults, recordFailure } from "../../runtime/tests/helpers/results.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import {
@@ -75,6 +82,7 @@ import {
   settleOrObserve,
 } from "../../runtime/tests/helpers/reference.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
+import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
 /**
  * 実音声 1 本の宣言（グラフは 4 本で共有 — 違うのは長さだけ）。
@@ -304,6 +312,13 @@ const references = openReferences(
 /** ロジットの実物のファイル名（結果の席からの相対）。 */
 const logitsArtifact = (entry: Case): string => `${entry.name}-logits.safetensors`;
 
+/** Distribution form (output of `karume dist --pipeline vowel-detector`) read by step ②'. */
+const DIST_DIR = new URL("../../../models/karume-vowel-detector/", import.meta.url);
+/** Command that builds the distribution form (pasted into the skip warning). */
+const DIST_COMMAND =
+  "cd tools/export-recipes && uv run python -m vowel_detector.export && " +
+  "uv run python dist.py --pipeline vowel-detector";
+
 /** SKIP 時にそのまま貼れる生成コマンド（グラフは 1 本 — 長さの指定は要らない）。 */
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run python -m vowel_detector.export";
 
@@ -363,6 +378,29 @@ const assertSymbolicTimeAxis = (parsed: PreparedModel): void => {
   );
 };
 
+/**
+ * Reads the distribution assets from disk (local stand-in for `fetchAssets` — no fetch layer).
+ * MUST: zero-length parts are listed too (the index is the id inside the container; skipping one
+ * shifts every later part).
+ */
+const loadDistAssets = async (
+  manifest: Manifest,
+): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
+  const selection = resolveSelection(manifest, {});
+  let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
+  for (const name of Object.keys(selection.containers)) {
+    const { parts } = selection.containers[name];
+    for (const [index, ref] of parts.entries()) {
+      assets = { ...assets, [`${name}[${index}]`]: await readFile(new URL(ref.path, DIST_DIR)) };
+    }
+  }
+  for (const name of Object.keys(selection.assets)) {
+    const { path } = selection.assets[name];
+    assets = { ...assets, [name]: await readFile(new URL(path, DIST_DIR)) };
+  }
+  return assets;
+};
+
 /** 資産の有無（登録時点で必要なので同期で見る）。 */
 const available = modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
 
@@ -370,6 +408,15 @@ if (!available) {
   console.warn(
     `[karume] ${SERIES_ROOT.pathname} に export 済み資産が無いため実音声の全鎖 E2E を ` +
       `SKIP する（重みがリポジトリ管理外）。生成: ${GENERATE_COMMAND}`,
+  );
+}
+
+/** Distribution manifest (`undefined` = absent: step ②' is skipped explicitly, see the warning). */
+const distManifestText = await readTextIfPresent(new URL("karume.json", DIST_DIR));
+if (available && distManifestText === undefined) {
+  console.warn(
+    `[karume] ${DIST_DIR.pathname} is missing, so the distribution .lab check (step ②') of the ` +
+      `vowel-detector chain E2E is skipped. Build: ${DIST_COMMAND}`,
   );
 }
 
@@ -459,6 +506,23 @@ for (const entry of CASES) {
             segments.map((segment) => segment.label).filter((label) => label !== "pau"),
             [...VOWEL_SEQUENCE],
             "「あ、い、う、え、お。」から 5 母音が順に出ていない",
+          );
+        }
+
+        // ②' The distribution pipeline (`fromAssets` → `detect`) must give exactly this direct
+        // real-length `.lab` — no pad, no length bucket. No tolerance: `.lab` is the discrete
+        // artifact itself. On mismatch suspect the distribution side (pad or rounding reintroduced
+        // in the pipeline, or `pipelineConfig` drifting from the graph).
+        if (distManifestText !== undefined) {
+          const manifest = parseManifest(distManifestText);
+          await using pipeline = await VowelDetectorPipeline.fromAssets({
+            manifest,
+            assets: await loadDistAssets(manifest),
+          });
+          assertEquals(
+            (await pipeline.detect(wav.data)).lab,
+            toLab(segments),
+            `${entry.name}: 配布形経由の .lab が実長の直接経路と違う`,
           );
         }
 

@@ -1,6 +1,6 @@
 // 掃引の記録（`karume-geometry-sweep/2`）の合成 fixture — 生成器（src/tune/derive.ts）のテストが共有する。
 //
-// runtime の生成器のテスト（tune_profile_test.ts・tune_derive_test.ts）と、道具の生成物の描画・CLI の
+// runtime の生成器のテスト（tune_profile_test.ts・tune_profile_test.ts）と、道具の生成物の描画・CLI の
 // テスト（tools/geometry-sweep/profile_test.ts・render_test.ts — 道具は tests/helpers を掴んでよい:
 // ADR 0008 追記 2026-09-05）が同じ記録から表を作る。GPU を使わない。
 
@@ -144,7 +144,7 @@ export const rejectionOf = (verdict: SlotVerdict, geometry: GemmGeometry): strin
   return found.reason;
 };
 
-// --- 注入の表のテスト（tune_derive_test.ts）の記録: linear 1 ケース・2 本の掃引 ---
+// --- 注入の表のテスト（tune_profile_test.ts）の記録: linear 1 ケース・2 本の掃引 ---
 
 export const DEFAULT = defaultGemmGeometry();
 export const FAST: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };

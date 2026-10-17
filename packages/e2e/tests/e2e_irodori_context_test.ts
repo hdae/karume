@@ -34,7 +34,7 @@ import {
   loadLocalAssets,
   MODEL,
   readManifest,
-} from "../../models/tests/helpers/irodori-assets.ts";
+} from "./helpers/irodori-assets.ts";
 import { sha256Hex } from "../../models/tests/helpers/container-fixture.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { Session } from "../../runtime/src/runtime/executor.ts";

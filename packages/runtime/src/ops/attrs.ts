@@ -345,7 +345,7 @@ export const assertFiniteAttr = (value: unknown, where: string, what: string): n
 
 /**
  * masked_fill の埋め値。実測値 −3.4028234663852886e+38 は f32 の最小有限値ちょうどで、
- * JSON 往復でも f32 丸めでも ulp が動かない（tests/ops_contract_test.ts が固定）。
+ * JSON 往復でも f32 丸めでも ulp が動かない（tests/ops_conformance_test.ts が固定）。
  */
 const assertFillValue = (value: unknown, where: string): number =>
   assertFiniteAttr(value, where, "masked_fill の value");

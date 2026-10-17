@@ -93,7 +93,7 @@ import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { requireCensus, SEAT_SIGNATURES } from "../../runtime/tests/helpers/pipeline-census.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 
 /**
  * output.0 / output.1 に掛ける厳密 tolerance（**歴史値** — ADR 0026 決定 3）。

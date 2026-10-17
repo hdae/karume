@@ -11,7 +11,7 @@
 // 併せて、全家族が GPU へ要求する feature（`sessionGpuFeatures` — 宣言 ∪ 実効設定が要る feature）も
 // 宣言そのままであることを見る（要求が増えると、同じ資産を読む device の条件が黙って厳しくなる）。
 //
-// ミラーが無い機では理由を出して**明示 SKIP** する（`runtime/tests/assets_fusion_counts_test.ts`
+// ミラーが無い機では理由を出して**明示 SKIP** する（`runtime/tests/e2e_*_fusion_counts_test.ts`
 // と同じ規律 — ミラーごと無い形は `runtime/tests/distribution_gate_test.ts` が FAIL にする）。
 
 import { isNotFound, readDir, readTextFile } from "@karume/test-support/fs";

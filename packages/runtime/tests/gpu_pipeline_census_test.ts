@@ -141,7 +141,7 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     // 故障注入の位置は**レシピ生成**（`RecipeBuilder.buildRecipes` の matmul が dispatch 上限超過で
-    // throw — gpu_prepared_plan_test.ts と同じ仕掛け）。出力タイル辺は既定幾何から導く（定数で
+    // throw — gpu_params_cache_test.ts と同じ仕掛け）。出力タイル辺は既定幾何から導く（定数で
     // 書くと辺を変えた瞬間に throw が起きず、assertRejects だけが静かに落ちる）。
     // NOTE: `bindSymbols`（入力 shape の検証）と `planSteps`（計画・融合判定）の失敗は対象外 —
     // どちらも `#prepareInvocation` で「直近 run」の席を倒すより前に throw する。

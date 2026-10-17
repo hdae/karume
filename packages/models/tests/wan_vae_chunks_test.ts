@@ -1,7 +1,7 @@
 // Wan2.1 の動画 VAE の chunk グラフ 2 本のホスト側（`src/wan/vae-chunks.ts` の GPU 不要の部分）—
 // グラフ宣言から chunk 列の取り決めを導く門・潜在の chunk の切り出し・フレームの連結。
 //
-// 実 GPU と実資産での chunk 列の照合は `e2e_wan_vae_chunks_test.ts`。e2e は正常系の資産だけを通すので、
+// 実 GPU と実資産での chunk 列の照合は `e2e_wan_vae_tiles_test.ts`。e2e は正常系の資産だけを通すので、
 // 宣言の故障形（取り決めから外れた資産を名指しで落とす分岐）はここが唯一の門になる。宣言は
 // `helpers/stub-model.ts` の流儀で、正しい形を 1 つ書いてから 1 点だけ壊す。
 

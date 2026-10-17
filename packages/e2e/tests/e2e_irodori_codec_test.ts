@@ -8,7 +8,7 @@
 //
 // 入力は実 z（`outputs/series/irodori-v4-small/pipeline/case.full.safetensors` の `z`・S = 161）。
 // 合成乱数ではなく実運用の値域を使うのは、Snake の `sin(αx)` が入力の値域に強く効くため
-// （`packages/runtime/tests/e2e_dacvae_test.ts` の tolerance 導出と同じ理由）。
+// （`e2e_dacvae_test.ts`〈0.15 の選別で削除〉 の tolerance 導出と同じ理由）。
 //
 // 資産が欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。
 
@@ -17,7 +17,7 @@ import { assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "@karume/runtime";
 import { decodeTiles, planCodecTiles } from "../../models/src/irodori/codec.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readFileIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 

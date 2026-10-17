@@ -35,7 +35,7 @@
 // 系列からは組めない — `fromAssets` が受けるのは**manifest が持つもの**（part 列のキー・
 // model / quant の選択軸・2 文書の期待 hash）で、manifest を持たない系列出力には無いからである
 // （`helpers/gemma-mirror.ts` のモジュール doc と同じ理由）。重みも PLE も同じ焼き直しなので
-// golden の断定はそのまま保てる（取得元だけが `e2e_gemma4_directory_test.ts` と違う）。
+// golden の断定はそのまま保てる（取得元だけが `e2e_gemma4_pretrained_test.ts` と違う）。
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";

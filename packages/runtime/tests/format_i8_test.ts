@@ -1,6 +1,6 @@
 // i8（per-channel symmetric int8）格納の CPU 側展開・整列（format/i8.ts — ADR 0019）。
 //
-// これまで i8.ts は `gpu_i8_weights_test.ts` からしか踏まれず、アダプタ無しの環境では丸ごと
+// これまで i8.ts は `gpu_f16_i8_weights_test.ts` からしか踏まれず、アダプタ無しの環境では丸ごと
 // SKIP されていた（3 兄弟のうち i4 だけが CPU 単体の門を持つ非対称）。多軸 keepdim scale の
 // 桁上がり・broadcast の拒否・整列の詰めを GPU の有無から独立させるのがこのファイルの役目。
 //

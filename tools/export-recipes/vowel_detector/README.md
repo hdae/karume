@@ -104,7 +104,7 @@ The clip runs at its own length: no padding, no bucket, and therefore no length-
 That also removes a discrepancy the bucketed form had no gate for — the padded path disagreed with
 the exact-length path on 3 of the 4 real utterances (a 20 ms boundary shift, a 40 ms `pau`
 appearing at the tail, a 40 ms `pau` appearing mid-utterance), because the backward GRU reads state
-back out of the padding. `packages/models/tests/e2e_vowel_detector_lab_test.ts` now pins the two
+back out of the padding. `packages/models/tests/e2e_vowel_detector_chain_test.ts` now pins the two
 paths to be byte-identical.
 
 `pipelineConfig` comes from two independent places and they are checked against each other before

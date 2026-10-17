@@ -9,7 +9,7 @@
 // 期待値は**手計算した定数**で置く（実装と同じ式で組み直すと恒真化する）。Wan2.2 TI2V-5B の形の枚数は
 // 設計（d6 の事実「行ブロックの枚数 — 計算値」）が node で独立に計算した値と同じ。
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@karume/test-support/test";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { planRowBlocks, rowBlockLimit } from "../src/runtime/fusion.ts";
@@ -150,6 +150,40 @@ describe("融合 attention の枚数（Wan2.2 TI2V-5B の形・束縛上限 2,14
     );
     // 合計 1,152 B は予算 1,100 B を超える — 予算は合計の上限ではない。
     assertEquals(blocks[0].scoreBytes + blocks[0].statsBytes > 1100, true);
+  });
+});
+
+// The block count must also bound the row statistics, not only S: these shapes have a row of S
+// smaller than its row statistics, so splitting by S alone would overflow the binding limit.
+describe("row statistics also bound the block count (plain attention, no states)", () => {
+  it("キー長 1 の形は行統計も上限に収まる枚数を自動で選ぶ", () => {
+    // f32・q = [1, 32, 1048576, 1]・k = v = [1, 32, 1, 1]・上限 128 MiB。1 行のスコアは 32×4 = 128B、
+    // 行統計は 32×8 = 256B。スコアだけで割ると 1 枚になり、行統計 256 MiB が上限の 2 倍になる。
+    const blocks = planAttentionBlocks(
+      { batch: 32, rows: 1048576, cols: 1, scoreBytes: 4 },
+      128 * MiB,
+    );
+    assertEquals(blocks, [
+      { offset: 0, rows: 524288, scoreBytes: 64 * MiB, statsBytes: 128 * MiB },
+      { offset: 524288, rows: 524288, scoreBytes: 64 * MiB, statsBytes: 128 * MiB },
+    ]);
+    for (const block of blocks) {
+      assert(block.scoreBytes <= 128 * MiB && block.statsBytes <= 128 * MiB, JSON.stringify(block));
+    }
+  });
+
+  it("f16 計算でキー長 4 未満の形も行統計で割る", () => {
+    // B·H = 1・M = 8・N = 3・f16 → 1 行のスコア 6B・行統計 8B。上限 24B → 3 行 / 枚で 3 / 3 / 2。
+    // 上限は「スコアだけで割ると行統計が溢れる」値に選ぶ: スコアだけなら 4 行 / 枚 × 2 枚で、
+    // 1 枚の行統計 32B が上限 24B を超える（上限 16B では両式とも 2 行 / 枚になり区別できない）。
+    const blocks = planAttentionBlocks({ batch: 1, rows: 8, cols: 3, scoreBytes: 2 }, 24);
+    assertEquals(
+      blocks.map((block) => block.rows),
+      [3, 3, 2],
+    );
+    for (const block of blocks) {
+      assert(block.scoreBytes <= 24 && block.statsBytes <= 24, JSON.stringify(block));
+    }
   });
 });
 

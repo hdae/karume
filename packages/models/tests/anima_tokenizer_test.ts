@@ -480,7 +480,7 @@ test("AnimaTokenizers: 対にならないサロゲートは両トークナイザ
   assert(error.cause instanceof Error);
   assert(!(error.cause instanceof ModelInputError), "cause は共有ヘルパの素の Error");
   // 逆側: 門が全部を落としていないことの対（対になったサロゲートを通す側は
-  // `anima_input_error_test.ts` が所有者に対して直接見る — この fixture の Qwen2 語彙は
+  // `anima_sampler_test.ts` が所有者に対して直接見る — この fixture の Qwen2 語彙は
   // 実配布の縮小版で、非 BMP のバイト token を持たない）。
   assert(tokenizers.encode(caseById("tags").text).qwenIds.length >= PROMPT_MIN_TOKENS);
 });

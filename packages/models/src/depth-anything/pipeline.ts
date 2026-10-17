@@ -67,7 +67,7 @@
  *
  * - モデルの答えは焼かれた解像度（518²）の `predicted_depth` そのもので、そこから先の拡大は
  *   情報を増やさない**表示解像度への引き伸ばし**だから。数値の正はその 518² の地図に対して
- *   `packages/runtime/tests/e2e_depth_anything_test.ts` が掛かっている。
+ *   `packages/runtime/tests/e2e_depth_anything_real_test.ts` が掛かっている。
  * - `post_process_depth_estimation` は transformers 側の任意の便宜関数で、チェックポイントの
  *   定義（`preprocessor_config.json`）には現れない。前処理の `resample` と違い、**配布形が
  *   宣言として持つ事実ではない**。
@@ -78,7 +78,7 @@
  *
  * ## MUST: 数値の正はここでは担保されない
  *
- * 正はグラフ単位の golden E2E（`packages/runtime/tests/e2e_depth_anything_test.ts` — 実重み ×
+ * 正はグラフ単位の golden E2E（`packages/runtime/tests/e2e_depth_anything_real_test.ts` — 実重み ×
  * 合成 4 + 実画像 4 ケース）と、前処理のパリティ門
  * （`packages/models/tests/image_preprocess_test.ts` / 実画像は
  * `packages/models/tests/e2e_depth_anything_real_test.ts`）が担保する。

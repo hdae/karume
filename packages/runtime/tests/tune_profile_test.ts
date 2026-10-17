@@ -4,23 +4,55 @@
 // 固定するのは ① 規則の抽出（既定比の門・出力一致の門・クラスの全ケースで勝つこと・幾何平均での
 // 比較・掃引にケースが無いクラスの既定）② adapter を混ぜないこと。生成物の TS の描画と CLI
 // （`main.ts profile --check`）は tools/geometry-sweep/profile_test.ts が固定する。
+//
+// Also pinned here: (3) the injected table built by buildGeometryProfile (its fields, match,
+// provenance, the kernels fingerprint it cannot derive, description and opt-in tables), and (4) the
+// record-field gates of deriveGeometryProfile (ADR 0117 decision 8: caseSet / defaultKernels /
+// candidateKernels; provenance.userAgent from the records, ADR 0117 addendum 2026-10-02; the
+// injection gate on the returned table). The JSON round trip of a table is pinned by
+// tune_profile_json_test.ts and the matching by tune_mismatch_test.ts.
 
-import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertInstanceOf,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { describe, it } from "@karume/test-support/test";
+import { deriveGeometryProfile, type GeometrySweepInput, sweepCaseSetId } from "../tune.ts";
 import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
-import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
-import { GEMM_ROWS_BUCKETS, type GemmGeometry } from "../src/kernels/gemm-geometry.ts";
+import {
+  assertGeometryProfile,
+  DEFAULT_GEOMETRY_PROFILE,
+  selectGeometryProfile,
+} from "../src/kernels/geometry-profile.ts";
+import {
+  GEMM_ROWS_BUCKETS,
+  type GemmGeometry,
+  gemmGeometryForRows,
+} from "../src/kernels/gemm-geometry.ts";
 import { defaultI8a8Geometry, type I8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
-import { PROFILE_GEMM_ROWS_BOUNDS } from "../src/tune/cases.ts";
+import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES } from "../src/tune/cases.ts";
 import { conv2dCandidate, gemmCandidate, i8a8Candidate } from "../src/tune/geometries.ts";
 import {
+  buildGeometryProfile,
   deriveProfile,
+  geometryProfileJson,
   parseSweepReport,
   profileRowsSegments,
   type SlotVerdict,
   type SweepSource,
   verdictLines,
 } from "../src/tune/derive.ts";
+import {
+  candidateKernelsId,
+  type CasePlanner,
+  geometryProfileKernelsId,
+  KernelsIdError,
+  sweepCandidateKernelsId,
+} from "../src/tune/fingerprint.ts";
+import { casePlan } from "../src/tune/harness.ts";
 import {
   A,
   ADAPTER,
@@ -29,6 +61,7 @@ import {
   bmmCase,
   type CaseRef,
   caseRows,
+  FAST,
   linearCase,
   matmulCase,
   OPTIONS,
@@ -39,6 +72,8 @@ import {
   ROWS_SLOT_NAMES,
   SMALL,
   source,
+  SOURCES,
+  SPEC,
   verdictOf,
 } from "./helpers/sweep-records.ts";
 
@@ -1134,6 +1169,350 @@ describe("parseSweepReport", () => {
         meta,
       );
       assertEquals(parsed.rows.length, 1);
+    }
+  });
+});
+
+/** 段の上端 → 範囲の綴り（7 段の期待値を手で書いたもの — 生成器の綴りの正本ではない）。 */
+const RANGES: Readonly<Record<number, string>> = {
+  16: "≤ 16",
+  32: "17〜32",
+  64: "33〜64",
+  128: "65〜128",
+  256: "129〜256",
+  512: "257〜512",
+};
+const rangeOf = (maxRows: number): string => RANGES[maxRows] ?? "> 512";
+
+describe("buildGeometryProfile", () => {
+  it("欄ごとの値は採否の幾何そのもので、runtime の門（acquireGpu が注入を受ける門）を通る", () => {
+    const verdicts = deriveProfile(SOURCES, SPEC);
+    const profile = buildGeometryProfile(SPEC, SOURCES, verdicts);
+    assertGeometryProfile(profile);
+    assertEquals(verdictOf(verdicts, "gemmRows > 512").outcome.kind, "adopted");
+    assertEquals(profile.gemmRows.at(-1)?.geometry, FAST);
+    assertEquals(
+      profile.gemmRows.map((rule) => rule.maxRows),
+      [16, 32, 64, 128, 256, 512, Infinity],
+    );
+    for (const rule of profile.gemmRows) {
+      const slot = verdictOf(verdicts, `gemmRows ${rangeOf(rule.maxRows)}`);
+      assertEquals(rule.geometry, slot.outcome.geometry, slot.slot);
+    }
+    const slots = [
+      ["attention.qk", profile.attention.qk],
+      ["attention.pv", profile.attention.pv],
+      ["conv2d.rows64", profile.conv2d.rows64],
+      ["conv2d.rows32", profile.conv2d.rows32],
+      ["i8a8.linear", profile.i8a8.linear],
+      ["i8a8.attentionQk", profile.i8a8.attentionQk],
+      ["i8a8.attentionPv", profile.i8a8.attentionPv],
+    ] as const;
+    for (const [slot, geometry] of slots) {
+      assertEquals(geometry, verdictOf(verdicts, slot).outcome.geometry, slot);
+    }
+  });
+
+  it("掃引にケースが無い欄は既定の表（DEFAULT_GEOMETRY_PROFILE）と同じ値になる（gemmRows の段は範囲を覆う既定の段）", () => {
+    const profile = buildGeometryProfile(SPEC, SOURCES, deriveProfile(SOURCES, SPEC));
+    // 段の上端の M を runtime の既定の表で引いた幾何 = 段の範囲を覆う既定の段の幾何（段は既定の細分）
+    for (const rule of profile.gemmRows.slice(0, -1)) {
+      assertEquals(rule.geometry, gemmGeometryForRows(rule.maxRows), String(rule.maxRows));
+    }
+    assertEquals(profile.attention, DEFAULT_GEOMETRY_PROFILE.attention);
+    assertEquals(profile.conv2d, DEFAULT_GEOMETRY_PROFILE.conv2d);
+    assertEquals(profile.i8a8, DEFAULT_GEOMETRY_PROFILE.i8a8);
+  });
+
+  it("match と provenance は spec と掃引の順で決まり、adapter は 4 欄をそのまま・指紋とケース集合の版は今の runtime の値（architecture を省けば match は vendor だけ）", () => {
+    const verdicts = deriveProfile(SOURCES, SPEC);
+    const profile = buildGeometryProfile(SPEC, SOURCES, verdicts);
+    assertEquals(profile.id, "test-gpu");
+    assertEquals(profile.match, { vendor: "apple", architecture: "metal-3" });
+    const { provenance: _provenance, ...table } = profile;
+    assertEquals(profile.provenance, {
+      sweep: "a.json, b.json",
+      sha256: "sha-a, sha-b",
+      date: "2026-09-29T00:00:00.000Z, 2026-09-29T00:00:00.000Z",
+      candidateSet: "full, full",
+      adapter: { vendor: "apple", architecture: "metal-3", device: "", description: "Test GPU" },
+      kernels: geometryProfileKernelsId(table),
+      caseSet: sweepCaseSetId(),
+    });
+    // 指紋は表の幾何から導いた値（既定の表の指紋とは違う — 採用した幾何が入っている）
+    assert(profile.provenance.kernels !== geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE));
+    const { architecture: _, ...vendorOnly } = SPEC;
+    assertEquals(buildGeometryProfile(vendorOnly, SOURCES, verdicts).match, { vendor: "apple" });
+  });
+});
+
+describe("buildGeometryProfile: 指紋を導けない表", () => {
+  it("採った幾何で掃引の shape の dispatch が 65535 を超える表は作らず、表・ケース・欄・幾何を名指して投げる", () => {
+    // 上限の大きい device の掃引なら通りうる幾何（tileN 4 — conv2d 512² の N = 262144 が 65536 workgroup）
+    const narrow = { regM: 1, regN: 4, wgX: 1, wgY: 16 };
+    const verdicts = deriveProfile(SOURCES, SPEC).map((verdict) =>
+      verdict.slot === "conv2d.rows32"
+        ? { ...verdict, outcome: { ...verdict.outcome, geometry: narrow } }
+        : verdict,
+    );
+    const error = assertThrows(() => buildGeometryProfile(SPEC, SOURCES, verdicts), Error);
+    assertInstanceOf(error.cause, KernelsIdError);
+    for (const part of [
+      "生成した表 'test-gpu' の provenance.kernels（カーネルの指紋）を導けない",
+      "conv2d-c96-512x512",
+      "conv2d.rows32",
+      JSON.stringify(narrow),
+      "65535",
+    ]) {
+      assertStringIncludes(error.message, part);
+    }
+  });
+});
+
+describe("buildGeometryProfile: description と注入専用", () => {
+  const described = { ...SPEC, description: "Test GPU" };
+  const optIn = {
+    from: SPEC.from,
+    id: SPEC.id,
+    optIn: true,
+    out: SPEC.out,
+    minSpeedup: SPEC.minSpeedup,
+  } as const;
+  const adapter = { vendor: "apple", architecture: "metal-3", description: "Test GPU" };
+
+  it("description を指定した表は match に description を持ち、その機種にだけ当たる", () => {
+    const profile = buildGeometryProfile(described, SOURCES, deriveProfile(SOURCES, described));
+    assertEquals(profile.match, {
+      vendor: "apple",
+      architecture: "metal-3",
+      description: "Test GPU",
+    });
+    assertEquals(selectGeometryProfile(adapter, [profile]), profile);
+    assertEquals(
+      selectGeometryProfile({ ...adapter, description: "" }, [profile]),
+      DEFAULT_GEOMETRY_PROFILE,
+    );
+  });
+
+  it("注入専用の表は match の欄ごと無く、門を通り、同じ adapter でも自動では選ばれない", () => {
+    const profile = buildGeometryProfile(optIn, SOURCES, deriveProfile(SOURCES, optIn));
+    assert(!("match" in profile), JSON.stringify(profile));
+    assertGeometryProfile(profile);
+    assertEquals(selectGeometryProfile(adapter, [profile]), DEFAULT_GEOMETRY_PROFILE);
+    assert(!("match" in JSON.parse(geometryProfileJson(profile))));
+  });
+});
+
+const CHROME_153 =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
+const CHROME_154 =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
+
+/** linear M = 1024 の 1 ケース（A が既定より ×1.2 速く出力一致）の記録に、`fields` の欄を足したもの。 */
+const record = (fields: Record<string, unknown> = {}): Record<string, unknown> => ({
+  ...report(caseRows(linearCase(1024), BIG, [[A, { speedup: 1.2 }]])),
+  ...fields,
+});
+
+/** 記録の列を生成器の入力にする（sha256 は記録ごとに別 — 同じ値の 2 本は生成器が拒む）。 */
+const inputs = (...records: readonly Record<string, unknown>[]): GeometrySweepInput[] =>
+  records.map((value, index) => ({
+    report: value,
+    path: `sweep-${index}.json`,
+    sha256: `sha-${index}`,
+  }));
+
+/** Options of the public deriveGeometryProfile (the helpers' OPTIONS is deriveProfile's spec). */
+const RECORD_OPTIONS = { id: "test-gpu", vendor: "apple", architecture: "metal-3" } as const;
+
+const derive = (...records: readonly Record<string, unknown>[]) =>
+  deriveGeometryProfile(inputs(...records), RECORD_OPTIONS);
+
+describe("記録の照合キー caseSet / defaultKernels（ADR 0117 決定 8）", () => {
+  const current = {
+    caseSet: sweepCaseSetId(),
+    defaultKernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+  };
+
+  it("今の runtime の値を持つ記録は受け、欄の無い記録（この欄より前の記録）と同じ表になる", () => {
+    const withKeys = derive(record(current));
+    const without = derive(record());
+    assertEquals(withKeys.profile, without.profile);
+    assertEquals(withKeys.verdicts, without.verdicts);
+    assertEquals(withKeys.profile.gemmRows.at(-1)?.geometry, A);
+  });
+
+  for (const key of ["caseSet", "defaultKernels"] as const) {
+    it(`${key} が今の runtime の値と違えば、記録の値と今の値の両方を名指して止まる`, () => {
+      const stale = "0123456789abcdef";
+      const error = assertThrows(
+        () => derive(record({ ...current, [key]: stale })),
+        Error,
+        `sweep-0.json: ${key} ${stale} が今の runtime の ${current[key]} と違う`,
+      );
+      assertStringIncludes(error.message, "掃引し直す");
+    });
+
+    it(`${key} が文字列でなければ止まる（黙って照合を飛ばさない）`, () => {
+      assertThrows(
+        () => derive(record({ ...current, [key]: 1 })),
+        Error,
+        `sweep-0.json: ${key} が文字列でない（1）`,
+      );
+    });
+  }
+
+  it("2 本目の記録だけが違っても、その記録を名指して止まる", () => {
+    assertThrows(
+      () => derive(record(current), record({ ...current, caseSet: "ffffffffffffffff" })),
+      Error,
+      "sweep-1.json: caseSet ffffffffffffffff",
+    );
+  });
+
+  it("aborted・startedAt・cases[].elapsedMs は生成器の判定に効かない", () => {
+    const plain = derive(record(current));
+    const base = record(current);
+    const cases = base.cases;
+    if (!Array.isArray(cases)) throw new Error("fixture の cases が配列でない");
+    const annotated = derive({
+      ...base,
+      startedAt: "2026-09-26T23:00:00.000Z",
+      aborted: true,
+      cases: cases.map((summary: Record<string, unknown>) => ({ ...summary, elapsedMs: 1234.5 })),
+    });
+    assertEquals(annotated.profile, plain.profile);
+    assertEquals(annotated.verdicts, plain.verdicts);
+  });
+});
+
+describe("表の provenance.userAgent（ADR 0117 追記 2026-10-02）", () => {
+  it("記録の userAgent の文字列をそのまま 1 要素の配列で写す", () => {
+    assertEquals(derive(record({ userAgent: CHROME_154 })).profile.provenance?.userAgent, [
+      CHROME_154,
+    ]);
+  });
+
+  it("Deno の CLI の記録（{ deno }）は Deno の navigator.userAgent と同じ綴り Deno/<版> にする", () => {
+    assertEquals(derive(record({ userAgent: { deno: "2.9.6" } })).profile.provenance?.userAgent, [
+      "Deno/2.9.6",
+    ]);
+  });
+
+  it("全ての記録で同じ値なら 1 要素だけ書く（今のブラウザとそのまま比べられる）", () => {
+    const { profile } = derive(
+      record({ userAgent: CHROME_154 }),
+      record({ userAgent: CHROME_154 }),
+    );
+    assertEquals(profile.provenance?.userAgent, [CHROME_154]);
+  });
+
+  it("記録どうしで違えば、現れた順に重複を除いて並べる（', ' を含む値でも要素ごとに分かれたまま）", () => {
+    const { profile } = derive(
+      record({ userAgent: CHROME_153 }),
+      record({ userAgent: CHROME_154 }),
+      record({ userAgent: CHROME_153 }),
+      record({ userAgent: { deno: "2.9.6" } }),
+    );
+    assertEquals(profile.provenance?.userAgent, [CHROME_153, CHROME_154, "Deno/2.9.6"]);
+  });
+
+  it("userAgent の無い記録が混ざれば欄ごと書かない（一部の記録のブラウザを表の値にしない）", () => {
+    const { profile } = derive(record({ userAgent: CHROME_154 }), record());
+    assertEquals(profile.provenance !== undefined && "userAgent" in profile.provenance, false);
+  });
+
+  it("文字列でも { deno: 文字列 } でもない userAgent は記録を名指して止まる", () => {
+    for (const userAgent of [1, { deno: 2 }, { deno: "2.9.6", v8: "14" }, null]) {
+      assertThrows(
+        () => derive(record({ userAgent })),
+        Error,
+        "sweep-0.json: userAgent が文字列でも { deno: 文字列 } でもない",
+        JSON.stringify(userAgent),
+      );
+    }
+  });
+});
+
+describe("記録の照合キー candidateKernels（測った候補のカーネル — ADR 0117 決定 8）", () => {
+  // 指紋は記録の行を今の runtime の case plan で組み直すので、ケースは今の形状表にあるもの（合成の id では導けない）
+  const LINEAR: CaseRef = {
+    caseId: "linear-m1024-n2048-k2048",
+    op: "linear",
+    shape: "M1024 N2048 K2048",
+  };
+  const MEASURED = [
+    { caseId: LINEAR.caseId, geometryParams: BIG },
+    { caseId: LINEAR.caseId, geometryParams: A },
+  ];
+  const measuredRecord = (fields: Record<string, unknown> = {}): Record<string, unknown> => ({
+    ...report(caseRows(LINEAR, BIG, [[A, { speedup: 1.2 }]])),
+    dp4a: false,
+    ...fields,
+  });
+
+  it("今の runtime の値を持つ記録は受け、欄の無い記録と同じ表になる", () => {
+    const current = sweepCandidateKernelsId(MEASURED, false);
+    const withKey = derive(measuredRecord({ candidateKernels: current }));
+    const without = derive(measuredRecord());
+    assertEquals(withKey.profile, without.profile);
+    assertEquals(withKey.profile.gemmRows.at(-1)?.geometry, A);
+  });
+
+  it("既定を変えず候補の WGSL だけが違う runtime で焼いた記録は、両方の値を名指して止まる", () => {
+    // 記録を書いた runtime: 既定の幾何以外の dispatch の WGSL だけが今と違う（defaultKernels は同じ値のまま）
+    const candidatesOnly: CasePlanner = (sweepCase, limit, dp4a) => {
+      const plan = casePlan(sweepCase, limit, dp4a);
+      const defaultGeometry = JSON.stringify(plan.defaultCandidate.geometry);
+      return {
+        ...plan,
+        launch: (candidate) => {
+          const launch = plan.launch(candidate);
+          return JSON.stringify(candidate.geometry) === defaultGeometry
+            ? launch
+            : { ...launch, wgsl: `${launch.wgsl}\n// older` };
+        },
+      };
+    };
+    const stale = candidateKernelsId(MEASURED, false, SWEEP_CASES, candidatesOnly);
+    const current = sweepCandidateKernelsId(MEASURED, false);
+    const error = assertThrows(
+      () =>
+        derive(
+          measuredRecord({
+            defaultKernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+            candidateKernels: stale,
+          }),
+        ),
+      Error,
+      `sweep-0.json: candidateKernels ${stale} が今の runtime の ${current} と違う（測った候補のカーネル`,
+    );
+    assertStringIncludes(error.message, "掃引し直す");
+  });
+
+  it("candidateKernels が文字列でない・dp4a が真偽値でない記録は止まる（黙って照合を飛ばさない）", () => {
+    const current = sweepCandidateKernelsId(MEASURED, false);
+    assertThrows(
+      () => derive(measuredRecord({ candidateKernels: 1 })),
+      Error,
+      "sweep-0.json: candidateKernels が文字列でない（1）",
+    );
+    assertThrows(
+      () => derive(measuredRecord({ candidateKernels: current, dp4a: undefined })),
+      Error,
+      "sweep-0.json: dp4a が真偽値でない",
+    );
+  });
+});
+
+describe("deriveGeometryProfile は返す表を注入の門に通す", () => {
+  it("id が空の表は作らず、注入の門の文言で止まる（match のある表・注入専用の表とも）", () => {
+    for (const options of [{ ...RECORD_OPTIONS, id: "" }, { id: "", optIn: true } as const]) {
+      assertThrows(
+        () => deriveGeometryProfile(inputs(record()), options),
+        Error,
+        "生成した表 '' が注入の門を通らない — 幾何プロファイル: id が空",
+      );
     }
   });
 });

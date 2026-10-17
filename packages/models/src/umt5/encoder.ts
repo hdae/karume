@@ -36,7 +36,7 @@
  *
  * ## MUST: 数値の正はここでは担保されない
  *
- * 正は実 GPU の e2e（`packages/models/tests/e2e_umt5_encoder_test.ts` — Wan の umT5 の移植の門
+ * 正は実 GPU の e2e（`packages/models/tests/e2e_wan_umt5_test.ts` — Wan の umT5 の移植の門
  * 〈`e2e_wan_umt5_test.ts`〉と同じ golden・同じ帯）と、トークナイザのパリティ（`umt5_tokenizer_test.ts`）・
  * バケット表のバイト一致（`umt5_relative_position_test.ts`）が担保する。
  */

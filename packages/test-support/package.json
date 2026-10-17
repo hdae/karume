@@ -13,7 +13,8 @@
     "./local-dist-server": "./src/local-dist-server.ts",
     "./module-graph": "./src/module-graph.ts",
     "./lanes": "./src/lanes.ts",
-    "./process-events": "./src/process-events.ts"
+    "./process-events": "./src/process-events.ts",
+    "./png-decode": "./src/png-decode.ts"
   },
   "dependencies": {
     "oxc-parser": "catalog:",

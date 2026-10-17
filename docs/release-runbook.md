@@ -57,7 +57,7 @@ extra（追加学習系）が公式リポの text stack を参照する組（ADR
    `--out` は `models/<repo>`（リポ名と同名）に置く — §2 の台本は `models/<repo>` をそのまま上げる
 4. **`karume-anima-extra` を上げる**
    - [ ] extra ミラーの生成後に**越境の実資産門を復活**させる — `packages/models/tests/e2e_anima_test.ts`
-         の `CROSS_REPO_MIRRORS` と `packages/runtime/tests/assets_fusion_counts_test.ts` の
+         の `CROSS_REPO_MIRRORS` と `packages/runtime/tests/e2e_*_fusion_counts_test.ts` の
          `MIRRORS` にエントリを戻し、extra 変種の融合ヒット数と参照 sha を新規凍結する
          （公式リポの自己完結化で一旦空にした門 — 表と配り分けの機構は残してある）
 
@@ -88,7 +88,7 @@ NOTE（次リリース限り）: 旧 `hdae/karume-anima-turbo` は ADR 0087 で�
       （`KARUME_ALLOW_NO_SHADER_F16` / `KARUME_ALLOW_NO_TIMESTAMP_QUERY` /
       `KARUME_ALLOW_NO_ASSETS` / `KARUME_ALLOW_NO_REFERENCE` / `KARUME_ALLOW_NO_DISTRIBUTION`）が
       要るが、**それらを設定した環境の緑はリリース判定に使わない**（既定では `gpu_gate_test.ts` /
-      `assets_gate_test.ts` / 系列ごとの参照門 / `distribution_gate_test.ts` が FAIL にする）
+      `e2e_assets_gate_test.ts` / 系列ごとの参照門 / `distribution_gate_test.ts` が FAIL にする）
 - [ ] **期待値を作るモードが 1 つも立っていないこと**: `KARUME_REFERENCE`（`write` / `rewrite`）と
       `KARUME_SURFACE=write` は期待値を実測で書き替える口で、検証ではない。とくに参照門の緑条件は
       「作るモードなら行が 0 件でも緑」（`packages/runtime/tests/helpers/reference.ts`）なので、

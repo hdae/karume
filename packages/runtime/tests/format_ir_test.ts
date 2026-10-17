@@ -310,7 +310,7 @@ test("parseIrDeclaration: ノードの構造", () => {
 // 宣言する op だけ）。パーサは本数を見ない — ここで見るのは「見ていないこと」そのもので、
 // 非 effect op の `outs: []` が落ちるのは**別の規則**（出力の宣言が孤立する）による。
 test("parseIrDeclaration: outs の本数はパーサの担当ではない", () => {
-  // 出力宣言ごと消せばパーサは通る（本数の執行は tests/ops_contract_test.ts が固定する）
+  // 出力宣言ごと消せばパーサは通る（本数の執行は tests/ops_conformance_test.ts が固定する）
   const graph = parseMutated((g) => {
     g.nodes[1].outs = [];
     delete g.values["y"];

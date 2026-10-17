@@ -59,7 +59,7 @@ import {
 } from "../../models/src/gemma/rope.ts";
 import { planPrefillChunks } from "../../models/src/generation/greedy.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 // 全量常駐の予算は helper が正本（同じ式を e2e ごとに写さない）。
 import { allResidentBytes } from "../../models/tests/helpers/ple-budget.ts";

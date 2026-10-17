@@ -9,6 +9,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@karume/test-support/test";
 import type { IrGraph } from "../src/format/ir.ts";
+import { mergedGraph } from "../src/format/container/bind.ts";
 import { type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, planGraph } from "../src/runtime/plan.ts";
 import {
@@ -18,6 +19,7 @@ import {
   linearGemvParallelPackedParams,
   linearGemvParallelPackedWgsl,
   linearGemvParallelWgsl,
+  linearGemvStaticQuantizeKey,
   linearGemvStaticQuantizePackedKey,
   linearGemvStaticQuantizePackedParams,
 } from "../src/kernels/linear-gemv.ts";
@@ -26,7 +28,11 @@ import {
   staticQuantizeParams,
 } from "../src/kernels/static-quantize.ts";
 import { mergeGraph, type StorageMap, type StorageSpec } from "./helpers/merged-graph.ts";
-import type { DeclarationJson } from "./helpers/model-fixture.ts";
+import {
+  linearStaticQuantizeModel,
+  type LinearStaticQuantizeOptions,
+} from "./helpers/linear-static-quantize-graph.ts";
+import { type DeclarationJson, GRAPH_NAME } from "./helpers/model-fixture.ts";
 
 type Storage = "i2" | "i4" | "i8";
 
@@ -422,5 +428,98 @@ describe("packed 活性の生成物（ADR 0105）", () => {
     );
     assertThrows(() => staticQuantizePackedParams(1536, 0), Error, "恒等");
     assertThrows(() => staticQuantizePackedParams(1534, scale), Error, "4 の倍数");
+  });
+});
+
+/** Plans the `x → linear → static_quantize` graph with the linear→SRQ fusion (ADR 0103) enabled. */
+const fuseLinearStaticQuantize = (
+  o: LinearStaticQuantizeOptions = {},
+  context: Partial<Parameters<typeof planFusions>[1]> = {},
+) => {
+  // 合流結果（格納つき IrGraph）は供給元に依らない — メモリ内容器 1 本で足りる。
+  const graph = mergedGraph(linearStaticQuantizeModel(o).graphs[GRAPH_NAME], GRAPH_NAME);
+  const weight: FusionWeightLayout =
+    o.storage === "i4"
+      ? { storage: "i4", groupSize: o.group ?? 512 }
+      : { storage: o.storage ?? "i8" };
+  return planFusions(planGraph(graph, {}).nodes, {
+    useCounts: countUses(graph),
+    outputNames: new Set(graph.outputs),
+    limits: {
+      maxStorageBufferBindingSize: 128 * 1024 * 1024,
+      maxComputeWorkgroupsPerDimension: 65535,
+    },
+    fuseLinearStaticQuantize: true,
+    linearGemvReduce: "parallel",
+    linearCompute: "f32",
+    weightLayouts: new Map([["w", weight]]),
+    ...context,
+  });
+};
+
+describe("linear→static_quantizeの任意融合", () => {
+  it("明示指定と実測形だけを受理し、出力・外部入力・scaleの借用元を保持する", () => {
+    for (const storage of ["i2", "i4", "i8"] as const) {
+      for (const m of [1, 4, 8]) {
+        const n = storage === "i2" ? 12288 : 256,
+          planned = fuseLinearStaticQuantize({ storage, m, n }),
+          step = planned.steps[0];
+        assertEquals(planned.counts.linearStaticQuantize, 1);
+        if (step.kind !== "fused") throw Error("融合されていない");
+        assertEquals(step.ins, ["x", "w", "b"]);
+        assertEquals(step.binds, ["x", "w", "b"]);
+        assertEquals(step.outputName, "y");
+        assertEquals(step.temps, []);
+        assertEquals(
+          step.dispatches[0].key,
+          linearGemvStaticQuantizeKey(
+            storage,
+            storage === "i4" ? 512 : undefined,
+            storage === "i2" ? 2 : 32,
+          ),
+        );
+        assertEquals(step.dispatches[0].operands?.at(-1), { kind: "weightScale", index: 1 });
+        assertEquals(step.dispatches[0].params[3], 0);
+      }
+    }
+  });
+  it("無指定・別計算方式・展開済み重み・未検収形は既存経路へ残す", () => {
+    for (const context of [
+      { fuseLinearStaticQuantize: undefined },
+      { fuseLinearStaticQuantize: false },
+      { linearGemvReduce: "sequential" },
+      { linearGemvReduce: "parallel-subgroup32" },
+      { linearCompute: "a8" },
+      { linearCompute: "f16" },
+      { weightLayouts: new Map() },
+      { weightLayouts: new Map([["w", { storage: "f16" }]]) },
+    ] satisfies Partial<Parameters<typeof planFusions>[1]>[]) {
+      assertEquals(fuseLinearStaticQuantize({}, context).counts.linearStaticQuantize, 0);
+    }
+    for (const o of [
+      { m: 9 },
+      { n: 260 },
+      { k: 1504 },
+      { publicLinear: true },
+      { sharedLinear: true },
+      { interpose: true },
+    ])
+      assertEquals(fuseLinearStaticQuantize(o).counts.linearStaticQuantize, 0);
+  });
+  it("scale 0は既存の恒等演算を維持し、tile数の上限を黙って縮めない", () => {
+    const step = fuseLinearStaticQuantize({ scale: 0 }).steps[0];
+    if (step.kind !== "fused") throw Error("融合されていない");
+    assertEquals(step.dispatches[0].params[262], 1);
+    assertThrows(() =>
+      fuseLinearStaticQuantize(
+        {},
+        {
+          limits: {
+            maxStorageBufferBindingSize: 128 * 1024 * 1024,
+            maxComputeWorkgroupsPerDimension: 2,
+          },
+        },
+      ),
+    );
   });
 });

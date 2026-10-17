@@ -17,17 +17,17 @@
 //
 // 資産が 1 つも無い環境は生成コマンド付きで**明示 SKIP**（ADR 0005）。一部だけある環境は SKIP ではなく FAIL にする
 // （容器 2 本 + フィクスチャ 3 本で 1 組 — 書き手は一組で据える）。GPU は使わない（実 GPU の chunk 列の照合は
-// `e2e_wan_ti2v_vae_chunks_test.ts`）。
+// `e2e_wan_ti2v_vae_tiles_test.ts`）。
 //
-// NOTE: 容器のグラフ名は綴らず、系列のグラフ名の表（`runtime/tests/helpers/series-graphs.ts` — 門番
-// `assets_gate_test.ts` と同じ正本）から引く。
+// NOTE: 容器のグラフ名は綴らず、系列のグラフ名の表（`packages/models/tests/helpers/series-graphs.ts` — 門番
+// `e2e_assets_gate_test.ts` と同じ正本）から引く。
 
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { prepareContainer, type PreparedModel } from "@karume/runtime";
 import { wanVaeChunkLayout, wanVaeFrameCount } from "../../models/src/wan/vae-chunks.ts";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { readFixture } from "../../models/tests/helpers/wan-vae-chunk-loop.ts";
 import {
   ti2vVaeAssets,

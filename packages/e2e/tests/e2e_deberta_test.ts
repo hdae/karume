@@ -56,7 +56,7 @@ import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 
 /**
  * **f32 系列 / full-24layer**（全層 hidden_states 25 本出し）の torch CPU 期待値との突合に
@@ -156,7 +156,7 @@ type DebertaVariant = {
   /**
    * 容器の中のグラフ名。
    *
-   * MUST: 綴らず `helpers/series-graphs.ts` の表から引く（門番 `assets_gate_test.ts` と
+   * MUST: 綴らず `helpers/series-graphs.ts` の表から引く（門番 `e2e_assets_gate_test.ts` と
    * 同じ 1 本）。表と e2e が別々にグラフ名を持つと、片方だけ書き換えても誰も落ちない。
    */
   readonly graph: string;

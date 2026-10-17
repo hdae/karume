@@ -1,12 +1,12 @@
 // ADR 0005「全ケース SKIP は明示 FAIL」の**配布形ミラー**版の門番（実重み系列版は
-// tests/assets_gate_test.ts・GPU 版は tests/gpu_gate_test.ts）。
+// tests/e2e_assets_gate_test.ts・GPU 版は tests/gpu_gate_test.ts）。
 //
 // 配布形ミラー（`models/karume-<family>/`）を根にする検査 — anima / sbv2 / irodori / gemma4 /
 // QAT / wan の実資産 e2e（packages/models/tests/e2e_*_test.ts と helpers/irodori-assets.ts）・融合ヒット数の
-// 配布形節（anima / anima-extra / irodori / gemma4 / gemma4-qat / wan — tests/assets_fusion_counts_test.ts）
+// 配布形節（anima / anima-extra / irodori / gemma4 / gemma4-qat / wan — tests/e2e_*_fusion_counts_test.ts）
 // — は、いずれも `karume.json` の有無で `ignore` し `console.warn` だけを残して緑になる。
 // `outputs/series/` だけ持つ機（新しい作業機・worktree を別ホストへ持ち出した場合）では
-// assets_gate_test.ts が緑のまま実資産検査が丸ごと消えるので、ここで 1 本落とす。
+// e2e_assets_gate_test.ts が緑のまま実資産検査が丸ごと消えるので、ここで 1 本落とす。
 //
 // 欠如の検出（ミラーごと無い形）の射程は**公開済みの全ミラー**（2026-09-25 裁定）。e2e がまだ読まないミラー（siglip2 など）も
 // 載せる — 門番の射程を「今 e2e が読むもの」に合わせると、e2e を足した日に門番の更新を忘れて

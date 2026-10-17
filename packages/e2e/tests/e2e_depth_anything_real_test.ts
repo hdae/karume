@@ -1,21 +1,18 @@
 // Depth Anything V2 の**実画像**の門 —— TS 前処理層（`src/image/preprocess.ts`・**bicubic**）と
 // PNG 符号化（`src/image/png.ts`）を通す 2 つの主張を持つ。
 //
-// ## この門が受け持つ主張と、runtime 側との分担
+// ## What this file asserts (after the 0.15 test triage)
 //
-// もともとは `packages/runtime/tests/e2e_depth_anything_test.ts` に同居していた（TS 前処理を
-// 通した `pixel_values` で推論し、入力側と出力側を 1 本のテストで見ていた）。それを 2 つに
-// 割った —— SigLIP2 で先に踏んだのと同じ形（`image_preprocess_real_test.ts` 冒頭）:
+// The torch golden-parity file (`e2e_depth_anything_real_test.ts`) was merged into this one on
+// 2026-10-17 and its model-exit parity cases were dropped: the model output is pinned per
+// environment by the sha256 rows of the discrimination test below (ADR 0106), and the
+// asset-completeness gate moved here unchanged. What remains:
 //
-//  ・**入力側（ここ）**: 「同じ PNG から `DPTImageProcessor` と同じ `pixel_values` が出る」——
-//    GPU もモデル本体（99MB）も要らない、前処理層だけの純粋なパリティ。
-//  ・**出力側（runtime）**: golden に焼かれた `pixel_values` を入力にした実 GPU 忠実度。
-//    あちらの golden 突合は**合成 4 + 実画像 4 の全 8 ケース**を同じ `GOLDEN_TOLERANCE` で
-//    回しており、実画像の分布点での忠実度はそこが持つ。
-//
-// 「PNG を渡したら同じ深度地図が返る」という鎖の主張は、この 2 つの**合成**で持つ（ここが
-// 入力差 ≤ {@link PIXEL_ATOL} = 1 LSB を保証し、runtime 側がその入力での忠実度を保証する）。
-// 割った理由は依存方向 —— runtime のテストが models の実装を相対 import していた（逆向き）。
+//  ・**input side**: the TS preprocessing (`src/image/preprocess.ts`, **bicubic**) yields the same
+//    `pixel_values` as `DPTImageProcessor` from the same PNG — no GPU and no model body (99 MB).
+//  ・**output side**: the real-image discrimination test runs the model on the GPU, asserts the
+//    composition-level ordering of near and far regions, writes the depth PNGs and checks their
+//    sha256 rows.
 //
 // MUST: DA-V2 の resize は **bicubic**（`preprocessor_config.json` の `"resample": 3`）。
 // SigLIP2 / BiRefNet の bilinear（2）と**違う**ので、{@link IMAGE_FILTER} を渡さずに既定へ
@@ -35,12 +32,18 @@
 // （`outputs/verify/<環境キー>/<日付>_depth-anything/`）もリポジトリ管理外。ただし性格は割れて
 // いて、**読み**の corpus はホスト資産（消すと台本での焼き直しと凍結コピーが要る）、**書き**の
 // verify は `rm -rf` で常に安全に消せる席である。**1 件も無ければ明示 SKIP**、**golden が中途半端に欠けていれば FAIL**
-// （欠けの FAIL は runtime 側の「資産の完全性」テストが名指しで出す —— 系列ディレクトリの
-// 列挙はあちらが持つ）。
+// （欠けの FAIL はこのファイルの資産の完全性の門が名指しで出す）。
 // ADR 0005 の「全 SKIP は明示 FAIL」門番は *GPU アダプタの有無* だけを見ており、この SKIP とは
 // 独立。
 
-import { isNotFound, readFile, statSync, writeFile } from "@karume/test-support/fs";
+import {
+  type DirEntry,
+  isNotFound,
+  readDirSync,
+  readFile,
+  statSync,
+  writeFile,
+} from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import {
@@ -59,9 +62,9 @@ import { encodePng } from "../../models/src/image/png.ts";
 // RGB8 の画素列）。テストが実画像を読むためだけの道具を runtime のテスト配下から借りる。
 // models → runtime は**正方向**の依存で、かつ両者とも `tests/` は publish から除外される
 // （packages/*/deno.json の `publish.exclude`）ので、配布物には影響しない。
-import { decodePng } from "../../runtime/tests/helpers/png-decode.ts";
-import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { decodePng } from "@karume/test-support/png-decode";
+import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { openResults, recordFailure } from "../../runtime/tests/helpers/results.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import {
@@ -372,6 +375,73 @@ if (!REAL_AVAILABLE) {
       `画像の生成: ${IMAGE_COMMAND} / golden の生成: ${GENERATE}`,
   );
 }
+
+// Asset completeness gate (merged from the former e2e_depth_anything_real_test.ts in the 0.15 test
+// triage — docs/research/2026-10-16-test-triage.md). The skips above only say "nothing to run";
+// this gate turns a *partially* present series directory into a FAIL instead of a silent green
+// SKIP, naming what is missing.
+
+/**
+ * Synthetic golden cases every emit writes. Source of truth: `build_cases` in
+ * `depth_anything/export.py` (the same 4 images regardless of the model axis).
+ */
+const SYNTHETIC_CASES = ["checker", "disc", "noise", "ramp"] as const;
+
+/**
+ * Lists a directory; only a missing directory degrades to empty.
+ * MUST: propagate everything but NotFound — reading a permission error as "no assets" turns a
+ * check that never ran into a silent green SKIP.
+ */
+const listDir = (url: URL): readonly DirEntry[] => {
+  try {
+    return [...readDirSync(url)];
+  } catch (cause) {
+    if (isNotFound(cause)) return [];
+    throw cause;
+  }
+};
+
+/** Golden case names found in the series directory (`io.<case>.safetensors`). */
+const discoverGoldenCases = (root: URL): readonly string[] =>
+  listDir(root)
+    .filter(
+      (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
+    )
+    .map((entry) => entry.name.slice(IO_PREFIX.length, entry.name.length - IO_SUFFIX.length))
+    .sort();
+
+const DISCOVERED_GOLDEN = discoverGoldenCases(SERIES_ROOT);
+const realCaseNames = new Set<string>(REAL_CASES.map((entry) => entry.name));
+const FOUND_SYNTHETIC = DISCOVERED_GOLDEN.filter((name) => !realCaseNames.has(name));
+const FOUND_REAL = DISCOVERED_GOLDEN.filter((name) => realCaseNames.has(name));
+/**
+ * Whether anything at all is present (the completeness test's skip predicate). It MUST also look
+ * at the model: a loss that wiped every golden but left the model behind would otherwise skip the
+ * very test that is meant to fail on it. The gate may sleep only on a completely empty directory.
+ */
+const ANY_PRESENT = DISCOVERED_GOLDEN.length > 0 || modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
+
+test({
+  name: "Depth Anything 資産: 期待するケースとモデル本体が揃っている",
+  // Skip only a completely empty environment ("never generated"); with anything present, a gap
+  // fails (including a model whose goldens are all gone — see ANY_PRESENT).
+  ignore: !ANY_PRESENT,
+  fn: () => {
+    assertEquals(
+      FOUND_SYNTHETIC,
+      [...SYNTHETIC_CASES],
+      `${SERIES_ROOT.pathname} の合成画像 golden ケース`,
+    );
+    // Real-image goldens are optional but all-or-none (an emit with `--real-images` writes all 4).
+    // Rounding a partial set to SKIP would let assets lost mid-regeneration pass silently.
+    assert(
+      FOUND_REAL.length === 0 || FOUND_REAL.length === REAL_CASES.length,
+      `${SERIES_ROOT.pathname} の実画像 golden が ${FOUND_REAL.length}/${REAL_CASES.length} 本` +
+        `（採り直す: ${GENERATE}）`,
+    );
+    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
+  },
+});
 
 for (const entry of REAL_CASES) {
   test({

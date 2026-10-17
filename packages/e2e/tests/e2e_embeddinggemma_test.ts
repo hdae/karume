@@ -30,7 +30,7 @@ import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 
 /**
  * 実重み EmbeddingGemma-300m の torch CPU 期待値との突合に使う許容誤差。

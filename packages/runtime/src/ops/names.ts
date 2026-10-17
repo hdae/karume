@@ -392,7 +392,7 @@ export const WEIGHT_SLOTS: ReadonlyMap<string, number> = new Map([
  * 出力チャネルの軸で、linear `[out,in]` / conv1d `[Cout,Cin/g,K]` / conv2d `[Cout,Cin/g,Kh,Kw]` /
  * conv3d `[Cout,Cin/g,Kt,Kh,Kw]` / embedding `[V,H]` は 0、**conv_transpose1d だけ `[Cin,Cout,K]` の転置レイアウトで 1**。
  *
- * MUST: キー集合は {@link WEIGHT_SLOTS} と一致させる（tests/ops_contract_test.ts が固定）。
+ * MUST: キー集合は {@link WEIGHT_SLOTS} と一致させる（tests/ops_conformance_test.ts が固定）。
  * 片方だけ増えると、新しい重みスロットの i8 が「軸 0 の scale」として黙って実行される。
  */
 export const WEIGHT_CHANNEL_AXES: ReadonlyMap<string, number> = new Map([

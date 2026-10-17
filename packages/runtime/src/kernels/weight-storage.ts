@@ -18,7 +18,7 @@
  * MUST: 語と位置の選択は**平坦添字**から作る。行内の相対添字で偶奇（f16）や 4 剰余（i8）を
  * 取ると、行長が 2 / 4 の倍数のときだけ偶然一致して数値が合う（行の先頭が常に語境界に来る
  * ため）。行長が奇数 / 4 の倍数でないテストが唯一の検出器になる
- * （tests/gpu_f16_weights_test.ts と tests/gpu_i8_weights_test.ts の MUST）。
+ * （tests/gpu_f16_i8_weights_test.ts と tests/gpu_f16_i8_weights_test.ts の MUST）。
  *
  * MUST: `w=f32` / `w=f16` 変種の生成物は**バイト単位で従来のまま**。キーの格納判別子は f32 で
  * 空文字になり、WGSL の挿入点（{@link weightLoaderWgsl} / {@link weightScaleWgsl}）は

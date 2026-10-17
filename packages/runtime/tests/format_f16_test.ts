@@ -1,6 +1,6 @@
 // f16（IEEE 754 binary16）格納の CPU 側展開・丸め・整列（format/f16.ts — ADR 0018 / 0028）。
 //
-// これまで f16.ts は `gpu_f16_weights_test.ts` / `gpu_f16_compute_test.ts` からしか踏まれず、
+// これまで f16.ts は `gpu_f16_i8_weights_test.ts` / `gpu_f16_compute_test.ts` からしか踏まれず、
 // アダプタ無しの環境では丸ごと SKIP されていた（3 兄弟のうち i4 だけが CPU 単体の門を持つ
 // 非対称）。境界（±0 / subnormal / 最大有限 / ±Inf / NaN / 丸めの同点）の固定を GPU の有無から
 // 独立させるのがこのファイルの役目。

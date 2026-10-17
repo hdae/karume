@@ -15,7 +15,7 @@ import {
   loadLocalAssets,
   MODEL,
   readManifest,
-} from "../../models/tests/helpers/irodori-assets.ts";
+} from "./helpers/irodori-assets.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { Session } from "../../runtime/src/runtime/executor.ts";
 import { BatchScope, ResidentTensor } from "../../runtime/src/gpu/device.ts";

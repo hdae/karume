@@ -17,17 +17,17 @@
  *
  * ## 値の出どころ（2026-09-26 時点・全て GPU 不要で導出）
  *
- * - **既存テストに散っていた値**: irodori DiT の i8a8 linear 317（`e2e_irodori_w8a8_test.ts` —
+ * - **既存テストに散っていた値**: irodori DiT の i8a8 linear 317（`e2e_irodori_ab_test.ts` —
  *   ADR 0114 でグラフを割った後は `dit` 245 + `dit_context` 72）・
  *   gemma4 E2B decode の GEMV 277（`e2e_gemma4_greedy_test.ts`）・RMS→add 融合 106 / linear→SRQ
- *   融合 275 / packed SRQ 70（`runtime/tests/assets_fusion_counts_test.ts`）。
+ *   融合 275 / packed SRQ 70（`runtime/tests/e2e_*_fusion_counts_test.ts`）。
  * - **配布ミラーの計画から機械的に導いた値**: 容器の part 0（グラフ宣言だけ）を読み、
- *   `gpu_linear_gemv_parallel_census_test.ts` の GPU 不要 describe と同じ手筋 —
+ *   `gpu_linear_gemv_parallel_test.ts` の GPU 不要 describe と同じ手筋 —
  *   linear の格納（`planWeightResidency`）と形を recipe-builder と同じ述語
  *   （`linearGemvParallelEligible` / i8a8 の「i8・i4 × k % 4 == 0」/ f16 計算の「i8・i4 以外」）に
  *   通して本数を出す。融合で決まる本数（RMS→add・linear→SRQ・packed）は `planFusions` の
  *   融合ステップが計画時に持つ dispatch キーを `SEAT_SIGNATURES` で数えた値（WebGPU core 既定の
- *   limits — `assets_fusion_counts_test.ts` と同じ）。states 形 attention は
+ *   limits — `e2e_*_fusion_counts_test.ts` と同じ）。states 形 attention は
  *   `recipe-builders/attention.ts` の選択（M ≤ 8 で ①' / M < 16 で ③'・readonly は常に ①'③'）と
  *   M ≤ 8 の行ブロック 1 枚から、attention ノード 1 本あたり ①③ 各 1 本。
  *   gemma4-qat E4B の行はこの手筋で導いた（同じ計算が E2B の既知値 275 / 2・106・275・70 + 70・
@@ -270,7 +270,7 @@ const GEMMA4_E2B_DRAFTER_GEMV = { variant: 2, reference: 66 } as const;
  * per_layer_model_projection 8960×1536。
  */
 const GEMMA4_QAT_E2B_GEMV = { variant: 275, reference: 2 } as const;
-/** RMS→add 融合（M に依らない — `assets_fusion_counts_test.ts` が M 1〜64 で固定）。 */
+/** RMS→add 融合（M に依らない — `e2e_*_fusion_counts_test.ts` が M 1〜64 で固定）。 */
 const GEMMA4_E2B_RMS_ADD = { variant: 106 } as const;
 const GEMMA4_E2B_DRAFTER_RMS_ADD = { variant: 24 } as const;
 /** linear→SRQ 融合（並列 GEMV に落ちる 275 本の全て — M ≤ 8）。 */
@@ -287,7 +287,7 @@ const GEMMA4_E2B_DRAFTER_STATE_PARALLEL = { variant: 24, reference: 0 } as const
 
 /**
  * gemma4-qat E4B（製品グラフ・42 層）: linear 344 本のうち並列 GEMV は 342 本 — 形ごとの内訳は
- * runtime `gpu_linear_gemv_parallel_census_test.ts` の QAT E4B の describe が固定している。残り 2 本は
+ * runtime `gpu_linear_gemv_parallel_test.ts` の QAT E4B の describe が固定している。残り 2 本は
  * E2B と同じ機序（i2 の lm_head と f32 格納の per_layer_model_projection）で逐次へ落ちる。
  */
 const GEMMA4_QAT_E4B_GEMV = { variant: 342, reference: 2 } as const;

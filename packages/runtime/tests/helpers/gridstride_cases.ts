@@ -376,7 +376,7 @@ export const convTranspose1dCase = (storage: WeightStorage): DegenerateCase => {
   const channelsOut = 2;
   const lengthIn = 12_000;
   // K は契約（2·padding == K − stride）に縛られてここでは偶数（奇数長の対選択は
-  // stride 1 が取れる tests/gpu_f16_weights_test.ts が見る）
+  // stride 1 が取れる tests/gpu_f16_i8_weights_test.ts が見る）
   const kernel = 4;
   const stride = 2;
   const padding = 1;
@@ -424,7 +424,7 @@ export const conv2dCase = (storage: WeightStorage): DegenerateCase => {
   const heightIn = 4;
   const widthIn = 8_000;
   // NOTE: Kh·Kw が偶数なので重み行の先頭は常に語境界。f16 の対選択（奇数長）を踏むのは
-  // tests/gpu_f16_weights_test.ts の担当で、ここは縮退耐性だけを見る。
+  // tests/gpu_f16_i8_weights_test.ts の担当で、ここは縮退耐性だけを見る。
   const kernelH = 3;
   const kernelW = 2;
   const paddingH = 1;

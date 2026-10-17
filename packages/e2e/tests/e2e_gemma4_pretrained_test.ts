@@ -27,15 +27,25 @@
 // （`packages/models/tests/` も `examples/` も publish には入らない）。取得層は資産を
 // **永続キャッシュ**（Deno は DENO_DIR）へ写すので、この門を 1 度回すと約 4GiB がそこに残る
 // （掃除は `@karume/hub` の `clearHubCache`）。
+//
+// ## Directory source
+//
+// The last test reads the same mirror through `nodeDirectory` (`@karume/hub/node`) instead of
+// the HTTP server. Two gates: the temperature-0 chat matches the same golden (the local source
+// delivers the same bytes: container descriptor, streamed weight parts and the lazy PLE blocks
+// all come from that one source), and neither `fetch` nor `CacheStorage` is touched. A local
+// source never copies bytes into a cache, so this test leaves nothing in the persistent cache.
 
 import { readTextFile, readTextFileSync } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { MANIFEST_FILENAME, parseManifest } from "@karume/hub";
+import { nodeDirectory } from "@karume/hub/node";
 import { MemoryCacheStorage } from "../../hub/tests/helpers/mock.ts";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
-import { Gemma4Pipeline } from "../../models/src/gemma/pipeline.ts";
-import type { Gemma4ChatMessage } from "../../models/src/gemma/text/chat.ts";
+// MUST: 入口は**公開面**（`./gemma` サブパス）から取る — `src/...` を直に掴むと、面が痩せていても
+// 門が緑のままになる（消費者が書けない経路で検収したことになる）。
+import { type Gemma4ChatMessage, Gemma4Pipeline } from "../../models/gemma.ts";
 import { serveLocalDist } from "@karume/test-support/local-dist-server";
 import { mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import type { SessionOverrides } from "../../models/src/session/options.ts";
@@ -75,6 +85,20 @@ const CASES = [
     maxNewTokens: 24,
     expected: "The capital of France is **Paris**.",
     stop: { reason: "eos", token: 106, tokens: 9 },
+  },
+] as const;
+
+/**
+ * Cases for the directory source: the same golden as `CASES` plus the Japanese case of
+ * `e2e_gemma4_chat_test.ts` (same bytes through another source, so the values must not drift).
+ */
+const DIRECTORY_CASES = [
+  ...CASES,
+  {
+    fixture: "japanese",
+    maxNewTokens: 24,
+    expected: "2023年時点で、およそ1,400万人です。",
+    stop: { reason: "eos", token: 106, tokens: 18 },
   },
 ] as const;
 
@@ -313,6 +337,89 @@ test({
           assert(checked > 0, `${one.name}: 表の期待と突き合わせた run が 1 本も無い`);
         }
       });
+    }
+  },
+});
+
+/** 触れた瞬間に落ちる CacheStorage（呼ばれた回数も数える — 診断へ化けても気づけるように）。 */
+class HostileCacheStorage implements CacheStorage {
+  calls = 0;
+
+  open(): Promise<Cache> {
+    this.calls += 1;
+    throw new Error("test: ローカル取得元が CacheStorage を開いた");
+  }
+  match(): Promise<Response | undefined> {
+    this.calls += 1;
+    throw new Error("test: ローカル取得元が CacheStorage を引いた");
+  }
+  has(): Promise<boolean> {
+    this.calls += 1;
+    throw new Error("test: ローカル取得元が CacheStorage を引いた");
+  }
+  delete(): Promise<boolean> {
+    this.calls += 1;
+    throw new Error("test: ローカル取得元が CacheStorage を消した");
+  }
+  /** 旧名前空間の回収（hub のセッション入口）だけは通す — 消すものが無いことを答える。 */
+  keys(): Promise<string[]> {
+    return Promise.resolve([]);
+  }
+}
+
+test({
+  name: "gemma4 ディレクトリ直読み: fromPretrained → chat が同じ golden を出す（実 GPU）",
+  ignore: !AVAILABLE || !GPU_AVAILABLE,
+  fn: async (t) => {
+    const caches = new HostileCacheStorage();
+    let fetchCalls = 0;
+    const fetchStub: typeof globalThis.fetch = (input) => {
+      fetchCalls += 1;
+      return Promise.reject(new Error(`test: ローカル取得元が network へ出た（${String(input)}）`));
+    };
+    const cacheDiagnostics: string[] = [];
+    const retryDiagnostics: string[] = [];
+
+    const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+      maxResidentPleBytes: await maxResidentPleBytes(),
+      // HTTP 取得元専用のノブ。ローカル取得元では 1 つも効かない = 触られない。
+      fetch: fetchStub,
+      caches,
+      onCacheError: (diagnostic) => cacheDiagnostics.push(diagnostic.url),
+      onRetry: (diagnostic) => retryDiagnostics.push(diagnostic.url),
+    });
+    try {
+      await t.step(
+        "① 温度 0 の chat が fromAssets / 疑似 HF 経路と同じ golden を出す",
+        async () => {
+          for (const { fixture: name, maxNewTokens, expected, stop } of DIRECTORY_CASES) {
+            const { messages } = caseOf(name);
+            const started = performance.now();
+            // 明示の温度 0 が配布形の推奨サンプラ（温度 1）を上書きする — golden は greedy の列。
+            const stream = pipeline.chat(messages, { maxNewTokens, sampler: { temperature: 0 } });
+            const parts: string[] = [];
+            for await (const chunk of stream) parts.push(chunk);
+            const stopped = await stream.done;
+            console.log(
+              `[e2e] gemma4 nodeDirectory ${name}: ${JSON.stringify(parts.join(""))} / ` +
+                `${JSON.stringify(stopped)} / ${(performance.now() - started).toFixed(0)}ms`,
+            );
+            assertEquals(parts.join(""), expected, `${name}: 温度 0 の出力`);
+            assertEquals(stopped, stop, `${name}: 停止理由`);
+          }
+        },
+      );
+
+      await t.step("② network も CacheStorage も 1 度も通っていない", () => {
+        assertEquals(fetchCalls, 0, "ローカル取得元が fetch を呼んだ");
+        assertEquals(caches.calls, 0, "ローカル取得元が CacheStorage を触った");
+        // 触っていないので診断も 1 本も来ない（キャッシュ失敗を握り潰す経路に落ちていない）。
+        assertEquals(cacheDiagnostics, [], "キャッシュ診断が飛んでいる");
+        // 再試行も HTTP 取得元だけのもの（ローカル取得元は取得層を通らない）。
+        assertEquals(retryDiagnostics, [], "再試行の通知が飛んでいる");
+      });
+    } finally {
+      await pipeline.dispose();
     }
   },
 });

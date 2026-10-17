@@ -251,7 +251,7 @@ ${slots}`;
  * で組むと 5 番目のスロットが `var k4` になり、関数スコープの `let k4`（K のパック数）を覆い隠す —
  * WGSL ではシャドーイングが合法なのでコンパイルも validation も通り、以降のスロットの範囲判定
  * `kpack < k4` が常に偽になって S の列が黙って 0 になる（充填スロット 5 以上の 16 幾何で実測）。
- * 検出器は tests/codegen_i8a8_shadowing_test.ts（宣言名の重なり）と tests/gpu_attention_i8a8_test.ts
+ * 検出器は tests/codegen_i8a8_shadowing_test.ts（宣言名の重なり）と tests/gpu_attention_pv_i8a8_test.ts
  * （スロット 8 / 16 の幾何で参照と atol=0）。
  */
 const fillB = (geometry: I8a8Geometry, name: string, baseName: string, value: string): string => {

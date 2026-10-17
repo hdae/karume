@@ -1,0 +1,160 @@
+/**
+ * Irodori の実 GPU E2E 門が共有する**読み口**（配布形の資産と full-loop golden）。
+ *
+ * 門そのものは席ごとに別ファイルへ分かれる（格納 dtype の席は数値パリティ網 =
+ * `e2e_irodori_latent_test.ts`・活性量子化の `i8-a8` 席は判別帯 + キー census =
+ * `e2e_irodori_ab_test.ts` — 網の性格が違うので同じ表には乗らない）。共有するのは
+ * 「どこから何を読むか」だけで、**何を要求するかは各門が持つ**。
+ *
+ * NOTE: ローカル読みに `Deno.readFile` を使うのはテストだけ。パッケージ本体は Web 標準 API
+ * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
+ */
+
+import { readFile } from "@karume/test-support/fs";
+import { parseManifest, resolveSelection } from "@karume/hub";
+import type { FileRef, Manifest, ModelEntry } from "@karume/hub";
+import { parseSafetensors } from "@karume/runtime";
+import { readTextIfPresent } from "../../../models/tests/helpers/read-if-present.ts";
+
+/** 配布形の置き場（`karume dist --pipeline irodori` の既定の出力先）。 */
+export const ASSETS_DIR = new URL("../../../../models/karume-irodori-v4-small/", import.meta.url);
+
+/** SKIP 時にそのまま貼れる生成コマンド。 */
+export const DIST_COMMAND = "cd tools/exporter && uv run karume dist --pipeline irodori";
+export const GOLDEN_COMMAND =
+  "cd tools/exporter && uv run --with 'transformers==5.14.1' python irodori_pipeline.py";
+
+export const MODEL = "v4-small";
+
+/** 系列 root（格納 dtype の名前）から full-loop golden の置き場を組む。 */
+export const goldenDir = (seriesRoot: string): URL =>
+  new URL(`../../../../outputs/series/${seriesRoot}/pipeline/`, import.meta.url);
+
+/** 配布形の manifest（無い環境では undefined = 焼いていない）。 */
+export const manifestText: string | undefined = await readTextIfPresent(
+  new URL("karume.json", ASSETS_DIR),
+);
+
+/** golden `meta.json` のうち、門が読む欄だけ（形は exporter が持つ — ここは読み口）。 */
+export type GoldenCase = {
+  readonly text: string;
+  readonly caption: string;
+  readonly S: number;
+  readonly forwards: number;
+  readonly zAbsMax: number;
+  readonly reference: { readonly frames: number } | null;
+};
+
+export type GoldenMeta = {
+  readonly steps: number;
+  readonly initScale: number;
+  readonly cfgRange: readonly [number, number];
+  readonly cfgScales: { readonly text: number; readonly speaker: number; readonly caption: number };
+  readonly frameRate: number;
+  readonly tEmbedDim: number;
+  readonly caps: { readonly text: number; readonly speaker: number; readonly caption: number };
+  readonly cases: Readonly<Record<string, GoldenCase>>;
+};
+
+export const readManifest = (): Manifest => parseManifest(manifestText as string);
+
+export const modelEntry = (manifest: Manifest): ModelEntry => {
+  if (!Object.hasOwn(manifest.models, MODEL)) {
+    throw new Error(
+      `配布形に model '${MODEL}' が無い（あるもの: ${manifest.available.models.join(" / ")}）`,
+    );
+  }
+  return manifest.models[MODEL];
+};
+
+/** 配布形にこの quant 席があるか（席が無い環境は「組み直していない」= SKIP 側）。 */
+export const hasQuantSeat = (quant: string): boolean =>
+  manifestText !== undefined && Object.hasOwn(modelEntry(readManifest()).quants, quant);
+
+/**
+ * 配布形が要求する資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない）。
+ *
+ * 部品は容器の part 列を `<部品>[i]` の綴りで並べる（part 0 から添字順・**長さ 0 の part も
+ * 並べる** — 添字が容器の中の id なので、飛ばすと以降が 1 つずつ繰り上がる）。
+ */
+export const loadLocalAssets = async (
+  manifest: Manifest,
+  quant: string,
+): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
+  const selection = resolveSelection(manifest, { model: MODEL, quant });
+  const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
+  let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
+  const read = async (key: string, ref: FileRef): Promise<void> => {
+    const cached = byPath.get(ref.path);
+    const bytes = cached ?? (await readFile(new URL(ref.path, ASSETS_DIR)));
+    if (cached === undefined) byPath.set(ref.path, bytes);
+    assets = { ...assets, [key]: bytes };
+  };
+  for (const name of Object.keys(selection.containers)) {
+    const { parts } = selection.containers[name];
+    for (const [index, ref] of parts.entries()) await read(`${name}[${index}]`, ref);
+  }
+  for (const name of Object.keys(selection.assets)) await read(name, selection.assets[name]);
+  return assets;
+};
+
+/** golden の 1 ケース（`case.<name>.safetensors`）から f32 テンソルを引く。 */
+export const readCase = async (
+  directory: URL,
+  name: string,
+): Promise<(tensor: string) => Float32Array<ArrayBuffer>> => {
+  const bytes = await readFile(new URL(`case.${name}.safetensors`, directory));
+  const file = parseSafetensors(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  );
+  return (tensor: string): Float32Array<ArrayBuffer> => {
+    const spec = file.tensors.get(tensor);
+    if (spec === undefined) throw new Error(`golden case.${name} に '${tensor}' が無い`);
+    if (spec.dtype !== "F32") throw new Error(`golden '${tensor}' の dtype が ${spec.dtype}`);
+    // MUST: 写して返す（golden の buffer は 1 本を全テンソルで共有しており、`initialNoise` は
+    // パイプラインが**そのまま書き換える**配列になる — 借りたままだと 2 回目の突合が壊れる）。
+    return new Float32Array(
+      file.buffer.slice(spec.byteOffset, spec.byteOffset + spec.byteLength),
+    ) as Float32Array<ArrayBuffer>;
+  };
+};
+
+/**
+ * 全要素の最大絶対差と、その位置（差分の報告用）。
+ *
+ * MUST: NaN / ±Inf は数えて落とす。`difference > maxAbs` は NaN で常に偽なので、素朴に書くと
+ * **全要素 NaN の出力が maxAbs 0 として tolerance 門を素通りする**（この戻り値だけを見る門が
+ * `e2e_irodori_latent_test.ts` / `e2e_irodori_ab_test.ts` にある）。対照は
+ * `e2e_depth_anything_real_test.ts` の pixel_values 突合。
+ */
+export const worstDifference = (
+  actual: Float32Array,
+  expected: Float32Array,
+): { readonly maxAbs: number; readonly at: number } => {
+  if (actual.length !== expected.length) {
+    throw new Error(`要素数が違う（実測 ${actual.length} / golden ${expected.length}）`);
+  }
+  let maxAbs = 0;
+  let at = 0;
+  let nonFinite = 0;
+  let firstNonFinite = -1;
+  for (let index = 0; index < actual.length; index += 1) {
+    if (!Number.isFinite(actual[index]) || !Number.isFinite(expected[index])) {
+      nonFinite += 1;
+      if (firstNonFinite < 0) firstNonFinite = index;
+      continue;
+    }
+    const difference = Math.abs(actual[index] - expected[index]);
+    if (difference > maxAbs) {
+      maxAbs = difference;
+      at = index;
+    }
+  }
+  if (nonFinite > 0) {
+    throw new Error(
+      `非有限の標本が ${nonFinite} 個ある（最初は ${firstNonFinite}: ` +
+        `実測 ${actual[firstNonFinite]} / golden ${expected[firstNonFinite]}）`,
+    );
+  }
+  return { maxAbs, at };
+};

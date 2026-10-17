@@ -362,7 +362,7 @@
   (a) タイル参照の読み口と補助関数（`readTileFixture`・`planMeta`・`compare`・`absMax`・`poisonFrames`・`roundUpTwoDigits`）が 3 本の e2e に重複 → 共有の test helper へ
   (b) recipe の `_peak_rss_gib` などの補助が 3 か所に重複 → `_shared` へ
   (c) 既存の DiT の入力 5 本に dtype の検査が無い（2.2 の追加 2 本だけが dtype を見る）
-  (d) `e2e_wan_ti2v_dit_test.ts` の `bandCandidate` の有効数字 2 桁の切り上げが、浮動小数の誤差で 1 単位上へ切り上がりうる（通しの e2e `e2e_wan_ti2v_pipeline_test.ts` の `roundUpTwoDigits` は `toPrecision(12)` を挟んで直した。タイルの e2e `e2e_wan_ti2v_vae_tiles_test.ts` と段 4 の chunk の e2e `e2e_wan_ti2v_vae_chunks_test.ts` の `roundUpTwoDigits` は挟んでいない — (a) の共有の test helper へ寄せるときに一緒に直せる）
+  (d) `e2e_wan_ti2v_dit_test.ts` の `bandCandidate` の有効数字 2 桁の切り上げが、浮動小数の誤差で 1 単位上へ切り上がりうる（通しの e2e `e2e_wan_ti2v_pipeline_test.ts` の `roundUpTwoDigits` は `toPrecision(12)` を挟んで直した。タイルの e2e `e2e_wan_ti2v_vae_tiles_test.ts` と段 4 の chunk の e2e `e2e_wan_ti2v_vae_tiles_test.ts` の `roundUpTwoDigits` は挟んでいない — (a) の共有の test helper へ寄せるときに一緒に直せる）
   (e) `pipelineConfig` の reader の文言に owner の接頭辞が無い（2.1 / 2.2 のどちらの class の失敗か文言で区別できない）
   (f) 2.1 と 2.2 の通しの e2e が同じ補助関数の写しを持つ（`readFixture`・`difference`・一覧画像など）
   (g) gpu の経路の admission（`admitWanText`）を 48 ch・7 入力の DiT と組み合わせたホストテストが無い（段 6 の結果）
@@ -372,7 +372,7 @@
   (a) `filePresent` を中立の test helper へ移す（今は VAE の helper `wan-ti2v-vae.ts` が DiT の helper `wan-ti2v-dit.ts` から import する — VAE のテストが DiT の helper の import に依る）
   (b) 共有 helper `wan-vae-chunk-loop.ts` の drop-cache の故障注入が、名指した cache がグラフに在ることを assert する（無い名前だと黙って故障なしになる — 2.1 と 2.2 の両レーンを回す）
   (c) DupUp3D の閉じた形（up0 / up1 を融合 upsample2x に乗せる）— perf-ledger K-77
-  (d) 2.1 の VAE chunk e2e（`e2e_wan_vae_chunks_test.ts`）の「故障注入のループは故障なしなら製品の経路と Uint32 で一致」の step で、`decodeWithFault(none)` の前にもフレームを毒値で埋め直し、非有限 0 を assert する（2.2 の e2e は段 4 で直し済み — 直したら 2.1 の VAE chunk e2e を実走する）
+  (d) 2.1 の VAE chunk e2e（`e2e_wan_vae_tiles_test.ts`）の「故障注入のループは故障なしなら製品の経路と Uint32 で一致」の step で、`decodeWithFault(none)` の前にもフレームを毒値で埋め直し、非有限 0 を assert する（2.2 の e2e は段 4 で直し済み — 直したら 2.1 の VAE chunk e2e を実走する）
   **段 3 の隣接の小物（起票 2026-10-04・提案）**:
   (a) ✅ gpu-lab の Wan タブの再生 fps と既定のフレーム数を記述子と `video.fps` から読む（段 8a・2026-10-06）
   (b) 実験用ミラー（umT5 の追加学習版）のモデルカードに「Wan へ差し替える使い方」の段落を足す
@@ -562,7 +562,7 @@
   `inputs/vowel-detector/` 直下から読む。この開発機は上流リポを丸ごと置いた形なので、組み立ての前に
   `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` を 1 回打つ。
 - 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）。**門番は消化済み**
-  （`packages/runtime/tests/assets_gate_test.ts` + CI env `KARUME_ALLOW_NO_ASSETS=1` —
+  （`packages/runtime/tests/e2e_assets_gate_test.ts` + CI env `KARUME_ALLOW_NO_ASSETS=1` —
   2026-09-05）。残るのは golden の fixture 昇格 / release gate での資産取得の判断
 - リポ直下 README の書き上げ・JSR npm 互換層の sideEffects 検証。**0.8.0 の範囲外
   （2026-09-03 裁定 — Status 行だけスタブと名乗る形へ差し替え済み）。復活条件 = 1.0 または

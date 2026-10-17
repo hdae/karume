@@ -109,7 +109,7 @@ import {
 } from "../../models/src/wan/dit-tokens.ts";
 import { type WanRopeBase, wanRopeTables } from "../../models/src/wan/dit-rope.ts";
 import { timestepsProj } from "../../models/src/wan/dit-timestep.ts";
-import { quantOf } from "../../models/tests/helpers/ab-gate.ts";
+import { quantOf } from "./helpers/ab-gate.ts";
 import { effectiveSessionOptions } from "../../models/tests/helpers/census-table.ts";
 import { formatDrmUsage, monitorDrmUsage } from "../../models/tests/helpers/drm-usage.ts";
 import { formatNvidiaTimeline, monitorNvidiaSmi } from "../../models/tests/helpers/nvidia-smi.ts";
@@ -154,7 +154,7 @@ import {
   assertSeatsApplied,
 } from "../../runtime/tests/helpers/pipeline-census.ts";
 import { attentionRoute } from "../../runtime/src/runtime/attention-route.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import {
   assertAdapterMatchesEnvironment,
   ENVIRONMENT,

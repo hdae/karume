@@ -65,7 +65,7 @@ import {
 import { generateGreedy } from "../../models/src/generation/greedy.ts";
 import { gemma4RopeInputs, type Gemma4RopeSpec } from "../../models/src/gemma/rope.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { requireCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 

@@ -36,7 +36,7 @@ import {
 import { wanVaeChunkLayout } from "../src/wan/vae-chunks.ts";
 import { wanVaeBlendExtentAt, wanVaeTileCount } from "../src/wan/vae-tiles.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "./helpers/series-graphs.ts";
 import {
   ti2vVaeModelUrl,
   WAN_TI2V_VAE_FIRST as FIRST,

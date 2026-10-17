@@ -1,7 +1,7 @@
 // 実重み Gemma 4 E2B（1-shot causal LM）の実 GPU golden E2E — **混成格納（embedding i8 ×
 // linear i4）と層種別 2 本の attention が実モデルで効いていること**の検収。
 //
-// `e2e_minicpm5_test.ts` が「真の GQA が 24 層の言語モデルとして正しい数値を出す」を受け持つ
+// `e2e_minicpm5_greedy_test.ts` が「真の GQA が 24 層の言語モデルとして正しい数値を出す」を受け持つ
 // 鏡像元で、こちらが増やして見るのは Gemma 4 に固有の 3 点:
 //
 // - **MQA 8:1**（k / v の head が 1 本 — minicpm5 の 16:2 より縮退が強い形）
@@ -65,7 +65,7 @@ import {
   runRecordedCase,
 } from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 
 /**
  * 生 logits（`[1,T,262144]`）の torch CPU 期待値との突合に使う許容誤差。

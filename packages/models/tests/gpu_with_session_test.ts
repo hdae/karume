@@ -6,7 +6,7 @@
  * - body の返り値と例外は包まずにそのまま呼び手へ渡る。dispose も落ちたときだけ、body の例外を
  *   先頭にした `AggregateError` で両方を運ぶ（dispose の失敗で最初の失敗を上書きしない）。
  * - `run` は Session の出力を返し、`observe` はその run の**後**・呼び手へ戻る**前**に毎回呼ばれる。
- * - Session の構築が落ちたら body は呼ばれない（GPU を取らない枝なので with_session_test.ts）。
+ * - Session の構築が落ちたら body は呼ばれない（GPU を取らない枝 — this file's last describe, run without an adapter）。
  *
  * NOTE: `Session` は `#` 付き private field を持つクラスで fake に置き換えられないため、重みを
  * 持たない小さなグラフ（y = x + x）をメモリ内容器で組んで実 Session を張る。dispose の回数は
@@ -27,8 +27,10 @@ import {
   type SessionOptions,
   type Tensor,
 } from "@karume/runtime";
+import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import type { ModelComponent } from "../src/hub/components.ts";
 import { withSession } from "../src/session/with-session.ts";
+import { openerOf, single } from "./helpers/asset-container-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const GRAPH = "double";
@@ -237,4 +239,32 @@ describe({
       });
     });
   },
+});
+
+/*
+ * NOTE: `withSession` は最初に `createSession(gpu, …)` を呼ぶだけで、それより前に gpu を触らない。
+ * 構築が即 reject する部品なら実アダプタは要らないので、`GpuContext` は偽物（`fake-gpu.ts`）を渡す。
+ */
+describe("withSession", () => {
+  describe("Session の構築が落ちたとき", () => {
+    it("body を呼ばず、構築の例外をそのまま伝える", async () => {
+      const failure = new Error("Session を張れなかった");
+      const open = await openerOf({ dit: single() });
+      const component: ModelComponent = {
+        ...open("dit"),
+        createSession: () => Promise.reject(failure),
+      };
+      let bodyCalled = false;
+
+      const error = await assertRejects(() =>
+        withSession(fakeGpuContext(fakeDevice()), component, {}, undefined, () => {
+          bodyCalled = true;
+          return Promise.resolve();
+        }),
+      );
+
+      assertStrictEquals(error, failure);
+      assertEquals(bodyCalled, false);
+    });
+  });
 });

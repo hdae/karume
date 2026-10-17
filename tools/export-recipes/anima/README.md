@@ -268,7 +268,7 @@ that was expanded to f32 at load time:
 `hostExpanded` being 0 everywhere is **by design**: the exporter only **declares** f16 for what
 passed the eligibility check, so the runtime's "declared f16 but ineligible → expand on the CPU"
 path is never entered (that path itself is reachable with hand-written IR, and
-`packages/runtime/tests/gpu_f16_weights_test.ts` pins it in isolation).
+`packages/runtime/tests/gpu_f16_i8_weights_test.ts` pins it in isolation).
 
 **This is what put the full 28-layer DiT on a real GPU**: the 7,465MiB of f32 exceeded the GPUBuffer
 ceiling of 7,280MiB (`docs/known-issues.md`) and could not be loaded, whereas f16 is 3,731.5MiB,

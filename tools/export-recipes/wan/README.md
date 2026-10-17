@@ -197,7 +197,7 @@ Measured on 2026-10-02 (tile 32):
 | GPU (B570, Deno) chunk loop vs upstream, `band`       | max abs 4.65e-6 (ratio 3.58e-6)                |
 | GPU chunk loop vs upstream, `accept`                  | max abs 3.55e-6 (ratio 2.77e-6)                |
 
-The GPU check is `packages/models/tests/e2e_wan_vae_chunks_test.ts` (one tile = one batch, only the
+The GPU check is `packages/models/tests/e2e_wan_vae_tiles_test.ts` (one tile = one batch, only the
 frames are read back; fault injections must leave the tolerance).
 
 ### Tiled decode (stage 5)
@@ -306,7 +306,7 @@ Measured on 2026-10-05:
 | GPU (B570, Deno) chunk loop vs upstream, `band`           | max abs 9.48e-6 (tolerance 4.8e-5)                  |
 | GPU chunk loop vs upstream, `accept` / `long` (21 chunks) | max abs 7.42e-6 / 1.15e-5                           |
 
-The GPU check is `packages/e2e/tests/e2e_wan_ti2v_vae_chunks_test.ts` and the asset check
+The GPU check is `packages/e2e/tests/e2e_wan_ti2v_vae_tiles_test.ts` and the asset check
 `packages/e2e/tests/e2e_wan_ti2v_vae_chunks_host_test.ts`, both in `vp test --project models:wan-ti2v`.
 
 The pytest side is `wan/tests/test_dup_up_3d.py`, `wan/tests/test_vae_patch_ti2v.py` and the

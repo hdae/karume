@@ -35,7 +35,7 @@ VRAM に対してモデルが大きい機では GB 級モデルの連続投入�
 再実測 = 計 12 本が同一署名で再現・新規 0**・**2026-09-03 にレビュー修正波後の HEAD `b7e32c1` を
 macOS 26 で再実測 = 同じ 12 本が同一署名で再現。フル verify は 1856 passed / 13 failed /
 139 ignored で、13 本目は本節の対象ではなく下の `--diagnostics` 節**）で attention i8a8 系 4 本
-（`gpu_attention_i8a8_test.ts` 3 本 + `gpu_attention_pv_i8a8_test.ts` 1 本）+
+（`gpu_attention_pv_i8a8_test.ts` 3 本 + `gpu_attention_pv_i8a8_test.ts` 1 本）+
 **conv1d parity 2 本 + conv2d parity 2 本**
 （旧記述は conv2d のみ — conv1d の 2 本が記載から漏れていた・症状は同型）+
 **gru_scan / gru_scan_reverse の分解 parity 2 本**（下の節）+ GEMV u32 門 1 本 + OOM 門 1 本

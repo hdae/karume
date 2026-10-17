@@ -18,7 +18,7 @@ import { assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareContainer } from "@karume/runtime";
 import { normalizeReference, reflectPadToHop } from "../../models/src/irodori/host/reference.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readFileIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
@@ -45,7 +45,7 @@ const LATENT_DIM = 32;
  * 埋もれている、というのがこの 3 行の読み。
  *
  * atol 2e-4 は実測最悪 2.8685e-5（ref-odd）の **7.0 倍**。runtime の encoder 単体門
- * （`e2e_dacvae_test.ts` の `ENCODER_TOLERANCE`）と同じ値になったのは偶然ではなく、上の
+ * （`e2e_dacvae_test.ts`〈0.15 の選別で削除〉の `ENCODER_TOLERANCE`）と同じ値になったのは偶然ではなく、上の
  * 「前処理の寄与が encoder の差に埋もれる」の帰結（それでも**独立に導出**する — 前処理側が
  * 悪化したときに、こちらの実測表が先に動く）。
  *

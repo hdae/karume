@@ -62,7 +62,7 @@ import { normalizeToNchw, resizeRgb8 } from "../../models/src/image/preprocess.t
 // RGB8 の画素列）。テストが実画像を読むためだけの道具を runtime のテスト配下から借りる。
 // models → runtime は**正方向**の依存で、かつ両者とも `tests/` は publish から除外される
 // （packages/*/deno.json の `publish.exclude`）ので、配布物には影響しない。
-import { decodePng } from "../../runtime/tests/helpers/png-decode.ts";
+import { decodePng } from "@karume/test-support/png-decode";
 
 /**
  * 全経路（PNG → resize → normalize）の許容差。uint8 の 1 LSB が正規化後 `1 / 127.5` に

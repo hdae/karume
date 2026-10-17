@@ -19,7 +19,14 @@
 //    `var<workgroup>` の宣言から数えた総量と突き合わせ、埋め込みの表と既定の表は WebGPU の既定の上限で通る。
 
 import { platformObject } from "@karume/test-support/webgpu";
-import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+  assertRejects,
+  assertStrictEquals,
+  assertThrows,
+} from "@std/assert";
 import { describe, it } from "@karume/test-support/test";
 // テスト専用: 別 realm の Promise を作る手段（runtime の本体は Web 標準 API だけ — ここは tests の依存）
 import { createContext, runInContext } from "node:vm";
@@ -45,9 +52,14 @@ import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/inde
 import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
 import { NVIDIA_BLACKWELL } from "../src/kernels/geometry-profiles/nvidia-blackwell.ts";
 import {
+  assertGemmGeometry,
   defaultGemmGeometry,
+  GEMM_TILE_K,
   type GemmGeometry,
   gemmGeometryForRows,
+  gemmQuadsPerThread,
+  gemmTileM,
+  gemmTileN,
 } from "../src/kernels/gemm-geometry.ts";
 import {
   defaultI8a8Geometry,
@@ -570,6 +582,208 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
         );
       }
     }
+  });
+});
+
+// skinny-M 向けタイル幾何の選択（src/kernels/gemm-geometry.ts の `gemmGeometryForRows`）と、
+// それが matmul / bmm / linear のキー・生成物へどう流れるか（GPU 不要）。
+//
+// 検証の眼目は 3 点:
+//
+// 1. **バケット境界**が表のとおりで、M ≥ 128 は既定幾何のまま（Anima / SBV2 の既存キーと
+//    既存性能を動かさない境界）。
+// 2. **キーと生成物が同じ幾何**から出る。片方だけ行数を渡し忘れると、キャッシュに載った別幾何の
+//    WGSL が executor の dispatch 数と噛み合わず、出力タイルが例外なしに欠ける。
+// 3. **幾何を変えても数値契約は動かない**（K タイル 16・外側 t 昇順・内側 kk 昇順・積和の字面）。
+//    ここは字面の固定で、値のビット一致そのものは tests/gpu_gemm_skinny_test.ts が実 GPU で見る。
+
+/** 表の代表点（バケットごとに「境界の内側」と「境界を 1 越えた側」を持つ）。 */
+const ROW_SAMPLES = [1, 4, 16, 17, 64, 65, 128, 4096] as const;
+
+describe("gemmGeometryForRows buckets and the keys / WGSL they produce", () => {
+  it("gemmGeometryForRows のバケット境界は 64 / 512 で、M >= 513 は既定幾何へ落ちる", () => {
+    // 小 M バケット（2026-08-11 掃引: M=1/4/64 とも M16N16 が対既定 ×3.0〜3.2 の最良。
+    // M=64 は行タイル 4 枚 = 重みを 4 回読み直してもなお workgroup 数の勝ち）
+    for (const rows of [0, 1, 2, 4, 16, 17, 32, 63, 64]) {
+      assertEquals(gemmGeometryForRows(rows), { regM: 1, regN: 4, wgX: 4, wgY: 16 }, `M=${rows}`);
+    }
+    // 中 M バケット（掃引 M=318 ×1.67 / M=512 ×1.28。波①で Anima/SBV2 の E2E A/B とセット採用）
+    for (const rows of [65, 127, 128, 129, 318, 512]) {
+      assertEquals(gemmGeometryForRows(rows), { regM: 4, regN: 4, wgX: 8, wgY: 16 }, `M=${rows}`);
+    }
+    // MUST: ここから上は既定のまま（掃引の実測点の外 — DiT の 2026-08-10 実測選定を動かさない）
+    for (const rows of [513, 1024, 4096, 65536]) {
+      assertEquals(gemmGeometryForRows(rows), defaultGemmGeometry(), `M=${rows}`);
+    }
+  });
+
+  it("バケットの幾何は全て充填の整除条件を満たす（穴の空くタイル形を表に置けない）", () => {
+    for (const rows of ROW_SAMPLES) {
+      const geometry = gemmGeometryForRows(rows);
+      // 落ちる組み合わせは「充填が届かない語が 0 のまま内積へ入る」= 例外の出ない誤値
+      assertGemmGeometry(geometry, `M=${rows}`);
+      // 共有メモリは WebGPU 既定上限 16,384 B（sa = tileM·16 f32 + sb = 16·(tileN/4) vec4）
+      const shared =
+        gemmTileM(geometry) * GEMM_TILE_K * 4 + GEMM_TILE_K * (gemmTileN(geometry) / 4) * 16;
+      assertEquals(shared <= 16384, true, `M=${rows}: 共有 ${shared} B`);
+      // 小 M バケットは行タイル 4 枚（= 重みの読み直し 4 回）以内。掃引の結論は「読み直しを
+      // 増やしてでも workgroup を増やす方が勝つ」だが、際限なく増えると転送律速へ戻る
+      if (rows <= 64) {
+        assertEquals(
+          Math.ceil(Math.max(rows, 1) / gemmTileM(geometry)) <= 4,
+          true,
+          `M=${rows}: 行タイルが 5 枚以上になる`,
+        );
+      }
+    }
+  });
+
+  it("gemmGeometryForRows は非負整数以外を fail loudly にする", () => {
+    for (const rows of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assertThrows(() => gemmGeometryForRows(rows), CodegenError, "行数 M は u32 の非負整数");
+    }
+  });
+
+  it("行数はキーに載り、バケットが違えば別パイプラインになる", () => {
+    // 幾何判別子 `r{regM}x{regN}w{wgX}` はタイル辺と併せて幾何を一意に決める（wgY は tileM/regM）
+    assertEquals(linearKey("f32", true, "f32", 4), "linear:v2:f32:reg16x16r1x4w4v4");
+    assertEquals(linearKey("f32", true, "f32", 64), "linear:v2:f32:reg16x16r1x4w4v4");
+    assertEquals(linearKey("f32", true, "f32", 318), "linear:v2:f32:reg64x32r4x4w8v4");
+    assertEquals(matmulKey(false, 4), "matmul:v2:f32:reg16x16r1x4w4");
+    assertEquals(bmmKey(true, 17), "bmm:v2:f32:reg16x16r1x4w4v4");
+    // 3 バケットのキーは互いに衝突しない
+    const keys = [4, 318, 4096].map((rows) => linearKey("f32", true, "f32", rows));
+    assertEquals(new Set(keys).size, keys.length, keys.join(", "));
+  });
+
+  it("行数を渡さない呼び出しと M >= 513 は既存のキー・生成物をバイト単位で保つ", () => {
+    // 融合 attention とスナップショットが通る経路（行数を持たない）
+    assertEquals(linearKey("f32", true), "linear:v2:f32:reg128x128r8x8w16v4");
+    assertEquals(matmulKey(true), "matmul:v2:f32:reg128x128r8x8w16v4");
+    assertEquals(bmmKey(false), "bmm:v2:f32:reg128x128r8x8w16");
+    for (const rows of [513, 1024, 4096]) {
+      assertEquals(linearKey("i8", false, "f32", rows), linearKey("i8", false));
+      assertEquals(linearWgsl("f16", true, "f16", rows), linearWgsl("f16", true, "f16"));
+      assertEquals(matmulWgsl(true, rows), matmulWgsl(true));
+      assertEquals(bmmWgsl(false, rows), bmmWgsl(false));
+    }
+  });
+
+  it("生成物の workgroup 形・共有タイル・出力タイル原点はキーの幾何と一致する", () => {
+    for (const rows of ROW_SAMPLES) {
+      const geometry = gemmGeometryForRows(rows);
+      const tileM = gemmTileM(geometry);
+      const tileN = gemmTileN(geometry);
+      const quads = gemmQuadsPerThread(geometry);
+      const variants: readonly (readonly [string, string])[] = [
+        [`linear M=${rows}`, linearWgsl("f32", true, "f32", rows)],
+        [`matmul M=${rows}`, matmulWgsl(true, rows)],
+        [`bmm M=${rows}`, bmmWgsl(true, rows)],
+      ];
+      for (const [where, wgsl] of variants) {
+        assertEquals(
+          wgsl.includes(`@compute @workgroup_size(${geometry.wgX}, ${geometry.wgY})`),
+          true,
+          `${where}: workgroup 形`,
+        );
+        assertEquals(
+          wgsl.includes(`var<workgroup> sa: array<f32, ${tileM * GEMM_TILE_K}>;`),
+          true,
+          `${where}: 共有 A タイル`,
+        );
+        assertEquals(
+          wgsl.includes(`var<workgroup> sb: array<vec4<f32>, ${GEMM_TILE_K * (tileN / 4)}>;`),
+          true,
+          `${where}: 共有 B タイル`,
+        );
+        assertEquals(
+          wgsl.includes(`let orow0 = wid.y * ${tileM}u + lid.y * ${geometry.regM}u;`),
+          true,
+          `${where}: 出力タイルの行原点`,
+        );
+        // acc は regM × (regN/4) 本ちょうど（1 本多い / 少ないは静的展開の取り違え）
+        assertEquals(
+          wgsl.includes(`var acc${geometry.regM - 1}_${quads - 1} = vec4<f32>(`),
+          true,
+          `${where}: acc の右下`,
+        );
+        assertEquals(wgsl.includes(`var acc${geometry.regM}_0 =`), false, `${where}: acc の行超過`);
+        assertEquals(wgsl.includes(`var acc0_${quads} =`), false, `${where}: acc の列超過`);
+      }
+    }
+  });
+
+  it("幾何を変えても K 縮約の刻みと積和の字面は動かない（ADR 0022 の数値契約）", () => {
+    for (const rows of ROW_SAMPLES) {
+      const wgsl = linearWgsl("f32", true, "f32", rows);
+      const where = `linear M=${rows}`;
+      // 外側 t 昇順 / 内側 kk 昇順 / K タイル 16 — 1 出力要素あたりの加算順序そのもの
+      assertEquals(wgsl.includes(`let tiles = (dims.k + 15u) / ${GEMM_TILE_K}u;`), true, where);
+      assertEquals(wgsl.includes("for (var t = 0u; t < tiles; t = t + 1u) {"), true, where);
+      assertEquals(
+        wgsl.includes(`for (var kk = 0u; kk < ${GEMM_TILE_K}u; kk = kk + 1u) {`),
+        true,
+        where,
+      );
+      // MUST: 積和は `acc = acc + a * b` の字面のまま（fma を明示しない）
+      assertEquals(wgsl.includes("acc0_0 = acc0_0 + "), true, where);
+      assertEquals(wgsl.includes("fma("), false, `${where}: fma の明示`);
+    }
+  });
+
+  it("同じ行数からは常にバイト単位で同じ WGSL が出る（決定性）", () => {
+    for (const rows of ROW_SAMPLES) {
+      assertEquals(linearWgsl("f32", true, "f32", rows), linearWgsl("f32", true, "f32", rows));
+      assertEquals(matmulWgsl(false, rows), matmulWgsl(false, rows));
+    }
+    // バケットが違えば生成物も違い（キーだけ分かれて中身が同じ = 幾何が流れていない）、
+    // 同じバケットなら行数が違っても生成物は同じ（キーの基数が M の値ぶん爆発しない）
+    assertNotEquals(matmulWgsl(true, 64), matmulWgsl(true, 65));
+    assertNotEquals(matmulWgsl(true, 512), matmulWgsl(true, 513));
+    assertEquals(matmulWgsl(true, 4), matmulWgsl(true, 32));
+    assertEquals(matmulWgsl(true, 65), matmulWgsl(true, 512));
+  });
+});
+
+// 明示の幾何（src/kernels/gemm.ts の `GemmSpec.geometry` — tools/geometry-sweep の計測用の差し替え点）。
+// 守るのは 2 点: 省略時の生成物が 1 バイトも動かないこと（本番の経路は渡さない）と、渡したときに
+// キーと WGSL が**同じ幾何**を名乗ること（片方だけ読み落とすとキャッシュに載った別幾何の WGSL が
+// dispatch 数と噛み合わずタイルが欠ける）。
+// The byte-identity half is covered by the default-profile describe above; this block keeps the
+// override half (a non-default geometry wins over the per-op resolution in both key and WGSL).
+describe("an explicit geometry overrides the per-op resolution", () => {
+  it("明示の幾何は op 別の解決より優先し、キーと WGSL が同じ幾何を名乗る", () => {
+    const explicit: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 8 };
+    const workgroup = `@compute @workgroup_size(${explicit.wgX}, ${explicit.wgY})`;
+    // linear: M=4096 のバケット（既定 128×128）を上書きする
+    assertEquals(
+      linearKey("f16", true, "f32", 4096, undefined, explicit),
+      "linear:v2:f32:reg32x32r4x4w8v4:wf16",
+    );
+    assertEquals(
+      linearWgsl("f16", true, "f32", 4096, undefined, explicit).includes(workgroup),
+      true,
+    );
+    // 融合 attention: 既定固定を上書きする
+    assertEquals(
+      attentionQkKey(true, "f32", "f32", false, false, false, explicit),
+      "attention_qk:v1:f32:reg32x32r4x4w8v4",
+    );
+    assertEquals(
+      attentionPvWgsl(true, "f32", "f32", false, false, explicit).includes(workgroup),
+      true,
+    );
+    // conv2d: m タイルの解決を上書きする（辺と workgroup 形で幾何が決まる綴り）
+    assertEquals(
+      conv2dIgemmKey("f16", true, 64, explicit),
+      "conv2d:v3:f32:igemm32x32v4:wg8x8:wf16",
+    );
+    assertEquals(conv2dIgemmWgsl("f16", true, 64, explicit).includes(workgroup), true);
+    // 門は明示でも同じ（穴の空くタイル形は生成時に落ちる）
+    assertThrows(
+      () => linearWgsl("f16", true, "f32", 4096, undefined, { regM: 3, regN: 4, wgX: 8, wgY: 8 }),
+      CodegenError,
+    );
   });
 });
 
