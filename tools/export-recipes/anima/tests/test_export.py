@@ -314,6 +314,16 @@ class TestFakeQuant:
 
         assert torch.equal(model.weight, model.weight.to(torch.float16).to(torch.float32))
 
+    def test_bf16_rounds_the_weights_to_representable_values(self):
+        """忠実プリセットの丸め（ADR 0131 決定 2 — 上流が BF16 なら no-op になる側の丸め）。"""
+        model = nn.Linear(4, 3)
+        before = model.weight.clone()
+
+        scales, overrides = export_anima._fake_quant(argparse.Namespace(dtype="bf16"), model, "t")
+
+        assert (scales, overrides) == ({}, {})
+        assert torch.equal(model.weight, before.to(torch.bfloat16).to(torch.float32))
+
     def test_i8_rounds_to_per_channel_representable_values(self):
         model = nn.Linear(4, 3)
 
@@ -327,8 +337,9 @@ class TestFakeQuant:
         """MUST: 圧縮系列は別ディレクトリ（ADR 0018 / 0019）— 同居させると f32 の網が消える。"""
         roots = export_anima.DEFAULT_OUT_ROOTS
 
-        assert set(roots) == set(export_anima.WEIGHT_DTYPES) == {"f32", "f16", "i8", "i4"}
+        assert set(roots) == set(export_anima.WEIGHT_DTYPES) == {"f32", "f16", "bf16", "i8", "i4"}
         assert len(set(roots.values())) == len(roots)
+        assert roots["bf16"].name == "anima-bf16"
 
 
 class TestFakeQuantI4:
@@ -432,6 +443,11 @@ class TestDtypeTargets:
     def test_i4_covers_the_transformer_only(self):
         """i4 の対象は i8 と同じ（DiT が支配項・text / cond / VAE は f16 系列を共有する）。"""
         assert export_anima.DTYPE_TARGETS["i4"] == ("transformer",)
+
+    def test_bf16_covers_all_four_targets(self):
+        """忠実プリセットは 4 役とも bf16（ADR 0131 決定 3 — 上流は 4 部品とも BF16）。"""
+        assert export_anima.DTYPE_TARGETS["bf16"] == export_anima.TARGETS
+        assert export_anima.BASE_WEIGHT_DTYPES["bf16"] == "bf16"
 
     @pytest.mark.parametrize("flag", ["--target", "--verify"])
     def test_an_i8_target_outside_the_table_is_refused(self, monkeypatch, flag):

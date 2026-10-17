@@ -66,6 +66,8 @@ from anima.distribution import (
     anima_sources,
     anima_weights,
     notice_markdown,
+    seat_base_storage,
+    text_stack_role,
 )
 from dist import main
 from karume.artifacts import STAGING_SUFFIX
@@ -80,6 +82,7 @@ from karume.dist import (
     assemble_family,
     assert_model_name,
     assert_quant_presentation,
+    complete_quant_weights,
     materialize,
     resolve_card_renderer,
     verify_dist,
@@ -136,6 +139,15 @@ _PAYLOADS = {
     "vae_decoder": _weights_container("vae-decoder", "f16", named="vae_decoder"),
     "tokenizer": b'{"qwen2": true}',
     "tokenizer_2": b'{"t5": true}',
+    # 忠実プリセット `bf16` の 4 役（ADR 0131 — 素版だけが持つ）。
+    "text_encoder_bf16": _weights_container("text-encoder-bf16", "bf16", named="text_encoder"),
+    "text_conditioner_bf16": _weights_container(
+        "text-conditioner-bf16", "bf16", named="text_conditioner"
+    ),
+    "transformer_bf16": _weights_container(
+        "transformer-bf16", "bf16", named="transformer", rope=_ROPE_BASE
+    ),
+    "vae_decoder_bf16": _weights_container("vae-decoder-bf16", "bf16", named="vae_decoder"),
 }
 
 #: transformer の席の part 本数（資産 `rope_base` の専用 part が 1 本増える）。
@@ -143,8 +155,11 @@ _TRANSFORMER_PARTS = len(_PAYLOADS["transformer_f16"])
 
 #: 役割名 → part 本数（{@link placed_paths} / {@link part_paths} の上書き）。
 _PART_TOTALS: Mapping[str, int] = {
-    f"transformer_{storage}": _TRANSFORMER_PARTS for storage in ("f16", "i8", "i4")
+    f"transformer_{storage}": _TRANSFORMER_PARTS for storage in ("f16", "i8", "i4", "bf16")
 }
+
+#: text stack の 3 部品（{@link text_stack_role} で格納ごとの役割名になる）。
+_TEXT_STACK_COMPONENTS = ("text_encoder", "text_conditioner", "vae_decoder")
 
 
 def _write(path: Path, payload: bytes) -> None:
@@ -205,6 +220,7 @@ def _build_series(
     with_i4: bool = False,
     i8_rope: bytes | None = None,
     i4_rope: bytes | None = None,
+    bf16_rope: bytes | None = None,
     mark: bytes = b"",
     calib_method: str = "gptq",
     calib_model: str | None = None,
@@ -212,8 +228,9 @@ def _build_series(
     """系列レイアウト（`outputs/series/` 相当）を偽資産で再現する（`io.*` の混入込み）。
 
     `mark` は transformer 系列だけに混ぜる差分 — ファミリー組み立てで「モデルごとに違う重み」と
-    「モデル間で同一の base 資産」を作り分けるための軸。`i8_rope` / `i4_rope` は rope 素表を
-    f16 系列からずらす軸（系列ごとに独立に振れる — 網が全系列に掛かっていることを見るため）。
+    「モデル間で同一の base 資産」を作り分けるための軸。`i8_rope` / `i4_rope` / `bf16_rope` は
+    rope 素表を f16 系列からずらす軸（系列ごとに独立に振れる — 網が全系列に掛かっていることを
+    見るため）。text stack は**モデルが宣言した格納ラベルの数だけ**書く（素版は f16 + bf16）。
     `calib_method` は i4 系列の丸め方式をずらす軸（既定は配布可の `gptq`）。`calib_model` は
     **校正条件だけ**を別モデルのものへずらす軸（`--model` を取り違えて焼いた系列 — 重みも
     格納形も正しいまま条件だけが別）。
@@ -231,16 +248,25 @@ def _build_series(
             sources,
             transformer={**sources.transformer, "i4": series_dir / f"{model}-i4-dyn"},
         )
-    write_component(sources.base / "text_encoder" / "model.krm", _PAYLOADS["text_encoder"])
-    write_component(
-        sources.text_conditioner / "text_conditioner" / "model.krm",
-        _PAYLOADS["text_conditioner"],
-    )
-    write_component(sources.base / "vae_decoder" / "model.krm", _PAYLOADS["vae_decoder"])
-    # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
-    _write(sources.base / "text_encoder" / "io.t005.safetensors", b"io-fixture")
-    _write(sources.base / "vae_decoder" / "io.case0.safetensors", b"io-fixture")
-    ropes = {"f16": _ROPE_BASE, "i8": i8_rope or _ROPE_BASE, "i4": i4_rope or _ROPE_BASE}
+    for storage, base in sources.base.items():
+        text_series = {
+            "text_encoder": base,
+            "text_conditioner": sources.text_conditioner[storage],
+            "vae_decoder": base,
+        }
+        for component, series in text_series.items():
+            write_component(
+                series / component / "model.krm", _PAYLOADS[text_stack_role(component, storage)]
+            )
+        # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
+        _write(base / "text_encoder" / "io.t005.safetensors", b"io-fixture")
+        _write(base / "vae_decoder" / "io.case0.safetensors", b"io-fixture")
+    ropes = {
+        "f16": _ROPE_BASE,
+        "i8": i8_rope or _ROPE_BASE,
+        "i4": i4_rope or _ROPE_BASE,
+        "bf16": bf16_rope or _ROPE_BASE,
+    }
     for storage, series in sources.transformer.items():
         role = f"transformer_{storage}"
         rope = ropes[storage]
@@ -316,10 +342,14 @@ def _in_subtree(
     """
     if paths is None:
         storages = anima_model(model).storages if storages is None else storages
+        # 役割 → その dtype ラベル（weights の席だけ — assets の席は格納形に依らず常に出る）。
+        labels = {
+            files.file: label for entry in ANIMA_WEIGHTS.values() for label, files in entry.items()
+        }
         declared = {
             role: rel
             for role, rel in OUTPUT_PATHS.items()
-            if not role.startswith("transformer_") or role.removeprefix("transformer_") in storages
+            if role not in labels or labels[role] in storages
         }
         paths = placed_paths(declared, ANIMA_WEIGHTS, _PART_TOTALS)
     return [f"{model}/{rel}" for rel in paths]
@@ -431,7 +461,7 @@ class TestPlacementStrategy:
         out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
         _assemble_anima(sources, out_dir)
         # 書き直すのは系列の **part 0**（再 export は part ごとに truncate 上書きする）。
-        source = container_parts(sources.base / "text_encoder" / "model.krm")[0]
+        source = container_parts(sources.base["f16"] / "text_encoder" / "model.krm")[0]
         with source.open("wb") as handle:
             handle.write(b"rewritten-after-assembly")
         placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
@@ -439,7 +469,7 @@ class TestPlacementStrategy:
 
     def test_it_stops_when_an_input_is_missing(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        for part in container_parts(sources.base / "vae_decoder" / "model.krm"):
+        for part in container_parts(sources.base["f16"] / "vae_decoder" / "model.krm"):
             part.unlink()
         with pytest.raises(DistError, match="組み立ての入力が無い"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
@@ -565,7 +595,7 @@ class TestLoraProvenance:
         自前の `<model>-f16` の両方の席で同じ門が掛かることを見る。
         """
         sources = _build_series(tmp_path / "series", model=model)
-        _bake_lora_record(sources.text_conditioner, component="text_conditioner")
+        _bake_lora_record(sources.text_conditioner["f16"], component="text_conditioner")
         out_dir = tmp_path / "models" / model
 
         with pytest.raises(DistError, match="焼いた記録のある系列が来ている"):
@@ -601,7 +631,8 @@ class TestModelVariants:
         manifest = _assemble_anima(sources, out_dir, ANIMA_BASE_MODEL_NAME)
 
         entry = manifest["models"][ANIMA_BASE_MODEL_NAME]
-        assert sorted(entry["weights"]["transformer"]) == ["f16", "i8"]
+        # bf16 は忠実プリセット（ADR 0131 決定 3 — 素版だけ）。
+        assert sorted(entry["weights"]["transformer"]) == ["bf16", "f16", "i8"]
         assert "f16+dit4" not in entry["quants"]
         assert "f16+dit4-attn8-s16" not in entry["quants"]
         assert not (out_dir / ANIMA_BASE_MODEL_NAME / OUTPUT_PATHS["transformer_i4"]).exists()
@@ -627,7 +658,9 @@ class TestModelVariants:
         """
         assert [name for name, spec in ANIMA_MODELS.items() if "i4" in spec.storages] == []
         for name, spec in ANIMA_MODELS.items():
-            assert spec.storages == ("f16", "i8"), name
+            # 忠実プリセット `bf16` は素版だけ（ADR 0131 決定 3 — 他モデルは後続）。
+            expected = ("f16", "i8", "bf16") if name == ANIMA_BASE_MODEL_NAME else ("f16", "i8")
+            assert spec.storages == expected, name
 
     def test_the_official_variants_split_on_the_text_conditioner(self, tmp_path: Path) -> None:
         """text_conditioner を共有するのは実測でビット同一だった変種だけ（2026-09-01）。
@@ -641,7 +674,7 @@ class TestModelVariants:
 
         assert turbo.text_conditioner == turbo.base
         assert aesthetic.text_conditioner != aesthetic.base
-        assert aesthetic.text_conditioner.name == f"{ANIMA_AESTHETIC_MODEL_NAME}-f16"
+        assert aesthetic.text_conditioner["f16"].name == f"{ANIMA_AESTHETIC_MODEL_NAME}-f16"
 
     def test_a_fine_tune_reads_its_own_text_conditioner(self, tmp_path: Path) -> None:
         """第三者 fine-tune は llm_adapter も焼き直しているので、共有系列を読ませない。"""
@@ -650,7 +683,7 @@ class TestModelVariants:
 
         assert base.text_conditioner == base.base
         assert wai.text_conditioner != wai.base
-        assert wai.text_conditioner.name == "anima-wai-v1.0-f16"
+        assert wai.text_conditioner["f16"].name == "anima-wai-v1.0-f16"
 
     def test_the_default_quant_stays_the_same_seat(self, tmp_path: Path) -> None:
         """既定席は turbo と揃える（利用者が model を変えても既定の意味が動かない）。"""
@@ -870,7 +903,7 @@ class TestStorageGate:
     def test_it_stops_when_an_f16_component_is_stored_as_raw_f32(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
         replace_component(
-            sources.base / "text_encoder" / "model.krm",
+            sources.base["f16"] / "text_encoder" / "model.krm",
             _weights_container("text-encoder", "f32", named="text_encoder"),
         )
         out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
@@ -921,7 +954,7 @@ class TestStorageGate:
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
     def test_no_transformer_series_slips_into_another_series_seat(self) -> None:
-        """3 席 × 他 2 系列の**全ての**取り違えが、要求か禁止のどちらかで落ちる。
+        """4 席 × 他 3 系列の**全ての**取り違えが、要求か禁止のどちらかで落ちる。
 
         席が増えた日に片方の表だけ更新されると、網から漏れた組み合わせが黙って配布形に並ぶ
         （系列 root の取り違えは数値の門では原理的に検出できない — ADR 0027 / 0029）。
@@ -931,6 +964,7 @@ class TestStorageGate:
             "transformer_f16": {"f32", "f16"},
             "transformer_i8": {"f32", "i8"},
             "transformer_i4": {"f32", "i8", "i4"},
+            "transformer_bf16": {"f32", "bf16"},
         }
         # MUST: 列挙元を production の表へ縛る。ここをテスト内 dict のままにすると、4 本目の
         # 系列が `STORAGE_REQUIREMENTS` に生えて `headers` に足されなかったとき、docstring が
@@ -980,9 +1014,55 @@ class TestStorageGate:
                     with pytest.raises(DistError):
                         _assemble_anima(sources, out_dir, spec=_i4_seat())
 
+    def test_the_bf16_seats_refuse_every_other_series_through_the_real_gates(
+        self, tmp_path: Path
+    ) -> None:
+        """忠実プリセット（ADR 0131）の 4 役と、他の格納の同じ部品の取り違えを**実 gate**で回す。
+
+        素版は transformer に f16 / i8 / bf16 の 3 席、text stack 3 部品に f16 / bf16 の 2 席を
+        持つ。bf16 系列を f16 席へ（または逆へ）挿す取り違えは shape も part 数も同じなので、
+        格納の門だけが検出器 — 対角だけが通り、非対角は全部落ちることを見る。
+        """
+        model = ANIMA_BASE_MODEL_NAME
+        seats = [
+            (component, storage, other)
+            for component, storages in (
+                ("transformer", ("f16", "i8", "bf16")),
+                *((component, ("f16", "bf16")) for component in _TEXT_STACK_COMPONENTS),
+            )
+            for storage in storages
+            for other in storages
+        ]
+        for component, storage, series in seats:
+            sources = _build_series(
+                tmp_path / f"series-{component}-{storage}-{series}", model=model
+            )
+            if component == "transformer":
+                root = sources.transformer[storage]
+            elif component == "text_conditioner":
+                root = sources.text_conditioner[storage]
+            else:
+                root = sources.base[storage]
+            replace_component(
+                root / component / "model.krm",
+                _weights_container(
+                    "swapped-series",
+                    series,
+                    named=component,
+                    rope=_ROPE_BASE if component == "transformer" else None,
+                ),
+            )
+            out_dir = tmp_path / "models" / f"{component}-{storage}-{series}"
+
+            if series == storage:
+                _assemble_anima(sources, out_dir, model)
+            else:
+                with pytest.raises(DistError):
+                    _assemble_anima(sources, out_dir, model)
+
     def test_it_stops_when_the_component_is_not_a_container(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        replace_component(sources.base / "vae_decoder" / "model.krm", b"not-a-container")
+        replace_component(sources.base["f16"] / "vae_decoder" / "model.krm", b"not-a-container")
         with pytest.raises(DistError, match="コンテナとして読めない"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
@@ -1085,12 +1165,18 @@ class TestQuantNaming:
     """席名は ADR 0074 の文法（`<格納>[+<部品><ビット>]…[-<ノブ>]…`）と表示欄（ADR 0075）。"""
 
     def test_every_seat_starts_from_the_shared_base_storage(self) -> None:
-        """Anima の基底格納は `f16` — text 経路 3 役が f16 固定なので、圧縮は `+dit…` で綴る。
+        """Anima の基底格納は `f16`（忠実プリセットだけ `bf16`）— 圧縮は `+dit…` で綴る。
 
         `<格納>` を字句どおり全役割共通の基底に取る規則（ADR 0074 決定 1・決定 6）が破れると、
-        席名が「transformer の格納だけ」を名乗る旧綴りへ戻る。
+        席名が「transformer の格納だけ」を名乗る旧綴りへ戻る。基底は text stack の格納ラベル
+        （f16 / bf16）のどちらかで、表が text stack を名指しするならその基底と一致する。
         """
-        assert all(name.startswith("f16") for name in ANIMA_QUANTS), sorted(ANIMA_QUANTS)
+        bases = {name: seat_base_storage(name) for name in ANIMA_QUANTS}
+        assert bases == {name: "bf16" if name == "bf16" else "f16" for name in ANIMA_QUANTS}
+        for name, quant in ANIMA_QUANTS.items():
+            for role, label in quant["weights"].items():
+                if role != "transformer":
+                    assert label == bases[name], (name, role)
 
     def test_the_component_override_token_spells_the_transformer(self) -> None:
         """略称は recipe が定める（ADR 0074 決定 4）— 対応はカードにも出る。"""
@@ -1098,7 +1184,7 @@ class TestQuantNaming:
         assert set(ANIMA_QUANT_ABBREVIATIONS.values()) <= set(ANIMA_WEIGHTS)
 
     def test_every_seat_carries_a_label_and_a_description_within_the_limits(self) -> None:
-        """表示欄は optional だが、Anima は 8 席とも書く（選択 UI に出す family なので）。"""
+        """表示欄は optional だが、Anima は 9 席とも書く（選択 UI に出す family なので）。"""
         for name, quant in ANIMA_QUANTS.items():
             assert quant["label"] and quant["description"], name
             assert_quant_presentation(f"anima.quants.{name}", quant)
@@ -1107,6 +1193,159 @@ class TestQuantNaming:
         """既定は `defaultQuant` が指している（ADR 0075 決定 3）— 散文に書くと二重持ちになる。"""
         for name, quant in ANIMA_QUANTS.items():
             assert "default" not in quant["description"].lower(), name
+
+
+#: 忠実プリセット追加（ADR 0131）より前から在る席の完全写像（text stack 3 役は f16 固定）。
+#: 表が名指ししない役割を埋める規則を「席名の `<格納>`」に替えても、既存席の写像は 1 つも
+#: 動かない — その事実をリテラルで固定する（導出から期待値を作ると、規則の誤りがそのまま
+#: 期待値へ写って恒真になる）。
+_PRE_BF16_MAPPINGS: Mapping[str, Mapping[str, str]] = {
+    name: {
+        "text_encoder": "f16",
+        "text_conditioner": "f16",
+        "transformer": transformer,
+        "vae_decoder": "f16",
+    }
+    for name, transformer in {
+        "f16": "f16",
+        "f16+dit8": "i8",
+        "f16+dit8-a8": "i8",
+        "f16+dit8-a8-attn8": "i8",
+        "f16+dit8-a8-attn8-s16": "i8",
+        "f16+dit4": "i4",
+        "f16+dit4-attn8-s16": "i4",
+        "f16-c16": "f16",
+    }.items()
+}
+
+
+class TestFaithfulPreset:
+    """忠実プリセット `bf16`（ADR 0131 決定 3 — 4 役とも bf16・素版 `anima-v1.0` だけ）。"""
+
+    @pytest.fixture
+    def base_assembled(self, tmp_path: Path) -> tuple[Path, dict]:
+        sources = _build_series(tmp_path / "series", model=ANIMA_BASE_MODEL_NAME)
+        out_dir = tmp_path / "models" / ANIMA_BASE_MODEL_NAME
+        return out_dir, _assemble_anima(sources, out_dir, ANIMA_BASE_MODEL_NAME)
+
+    def test_the_seat_name_yields_its_base_storage(self) -> None:
+        """`<格納>` は最初の `+` / `-` の前（ADR 0074 の文法）。"""
+        assert seat_base_storage("bf16") == "bf16"
+        assert seat_base_storage("f16") == "f16"
+        assert seat_base_storage("f16+dit8-a8-attn8-s16") == "f16"
+        assert seat_base_storage("f16-c16") == "f16"
+
+    @pytest.mark.parametrize("model", list(ANIMA_MODELS))
+    def test_the_existing_seats_keep_their_mapping_on_every_model(self, model: str) -> None:
+        """既存席の完全写像は埋め方の規則を替えても不変（i4 席は注入した spec で見る）。"""
+        spec = anima_model(model)
+        spec = replace(spec, storages=(*spec.storages, "i4"))
+        weights = anima_weights(spec)
+        completed = complete_quant_weights(weights, anima_quants(spec))
+
+        assert {
+            name: quant["weights"] for name, quant in completed.items() if name != "bf16"
+        } == _PRE_BF16_MAPPINGS
+
+    def test_only_the_base_model_declares_the_seat(self) -> None:
+        """席とファイルは storages から導く — 後続（turbo / aesthetic / extra）には生えない。"""
+        holders = [name for name, spec in ANIMA_MODELS.items() if "bf16" in anima_quants(spec)]
+        assert holders == [ANIMA_BASE_MODEL_NAME]
+        for name, spec in ANIMA_MODELS.items():
+            declares = name == ANIMA_BASE_MODEL_NAME
+            for role, labels in anima_weights(spec).items():
+                assert ("bf16" in labels) is declares, (name, role)
+
+    def test_the_seat_maps_all_four_components_to_bf16(self, base_assembled) -> None:
+        _, manifest = base_assembled
+        entry = manifest["models"][ANIMA_BASE_MODEL_NAME]
+
+        assert entry["quants"]["bf16"]["weights"] == {
+            "text_encoder": "bf16",
+            "text_conditioner": "bf16",
+            "transformer": "bf16",
+            "vae_decoder": "bf16",
+        }
+        assert entry["quants"]["bf16"]["label"] == "Original weights (bf16)"
+        assert entry["quants"]["bf16"]["session"] == {}
+        # 既存席は f16 の text stack のまま（席名の `<格納>` が埋める）。
+        for name, mapping in _PRE_BF16_MAPPINGS.items():
+            if name in entry["quants"]:
+                assert entry["quants"][name]["weights"] == mapping, name
+        assert entry["defaultQuant"] == ANIMA_DEFAULT_QUANT
+
+    def test_the_bf16_files_sit_next_to_the_unchanged_f16_ones(self, base_assembled) -> None:
+        """bf16 は `.bf16` を名乗る別ファイル — f16 の text stack の path は 1 つも動かない
+        （追加学習リポがその path を越境参照している）。"""
+        out_dir, _ = base_assembled
+        assert {role: OUTPUT_PATHS[role] for role in _TEXT_STACK_COMPONENTS} == {
+            "text_encoder": "text_encoder/model.krm",
+            "text_conditioner": "text_conditioner/model.krm",
+            "vae_decoder": "vae_decoder/model.krm",
+        }
+        for component in (*_TEXT_STACK_COMPONENTS, "transformer"):
+            role = f"{component}_bf16"
+            assert OUTPUT_PATHS[role] == f"{component}/model.bf16.krm"
+            placed = out_dir / ANIMA_BASE_MODEL_NAME / OUTPUT_PATHS[role]
+            assert read_component(placed) == _PAYLOADS[role]
+        assert _present(out_dir) == sorted([*_in_subtree(ANIMA_BASE_MODEL_NAME), MANIFEST_FILENAME])
+        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(ANIMA_BASE_MODEL_NAME))
+
+    def test_the_series_are_read_from_the_bf16_directories(self, tmp_path: Path) -> None:
+        """text stack + VAE は共有の `anima-bf16`、DiT は `<model>-bf16-dyn`。"""
+        sources = anima_sources(tmp_path / "series", ANIMA_BASE_MODEL_NAME)
+
+        assert sources.base == {
+            "f16": tmp_path / "series" / "anima-f16",
+            "bf16": tmp_path / "series" / "anima-bf16",
+        }
+        assert sources.text_conditioner == sources.base
+        assert sources.transformer["bf16"] == tmp_path / "series" / "anima-v1.0-bf16-dyn"
+
+    def test_the_card_lists_the_seat_with_its_presentation(self, tmp_path: Path) -> None:
+        """カードの quant 表は manifest 由来 — 席の行に表示欄（ADR 0075）と 4 役の格納が出る。"""
+        _build_series(tmp_path / "series", model=ANIMA_BASE_MODEL_NAME)
+        out_dir = tmp_path / "dist"
+        main(
+            [
+                "--pipeline",
+                "anima",
+                "--series",
+                str(tmp_path / "series"),
+                "--model",
+                ANIMA_BASE_MODEL_NAME,
+                "--out",
+                str(out_dir),
+            ]
+        )
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+
+        row = next(line for line in card.splitlines() if line.startswith("| `bf16` |"))
+        assert ANIMA_QUANTS["bf16"]["label"] in row
+        assert ANIMA_QUANTS["bf16"]["description"] in row
+        for component in (*_TEXT_STACK_COMPONENTS, "transformer"):
+            assert f"`{component}` = `bf16`" in row
+
+    def test_the_rope_check_reaches_the_bf16_series(self, tmp_path: Path) -> None:
+        sources = _build_series(
+            tmp_path / "series", model=ANIMA_BASE_MODEL_NAME, bf16_rope=b"rope-base-DIFFERENT"
+        )
+        with pytest.raises(DistError, match="バイト同一でない"):
+            _assemble_anima(sources, tmp_path / "models" / "out", ANIMA_BASE_MODEL_NAME)
+
+    @pytest.mark.parametrize("component", ["transformer", "text_conditioner"])
+    def test_the_lora_check_reaches_the_bf16_series(self, tmp_path: Path, component: str) -> None:
+        """「LoRA を焼かずに焼く」は bf16 系列にも掛かる（網は系列ごと）。"""
+        sources = _build_series(tmp_path / "series", model=ANIMA_BASE_MODEL_NAME)
+        series = (
+            sources.transformer["bf16"]
+            if component == "transformer"
+            else sources.text_conditioner["bf16"]
+        )
+        _bake_lora_record(series, component=component)
+
+        with pytest.raises(DistError, match="焼いた記録のある系列が来ている"):
+            _assemble_anima(sources, tmp_path / "models" / "out", ANIMA_BASE_MODEL_NAME)
 
 
 class TestI4Quants:
@@ -1381,11 +1620,25 @@ class TestFamilyAssembly:
             )
         ]
         # 重みの part はモデルごと・末尾の資産 part（rope 素表）だけがモデル間で畳まれる。
+        # 1 モデルだけが持つ格納（素版の忠実プリセット bf16）は畳む相手が居ないので、
+        # text stack も rope の part も丸ごとそのモデルのサブツリーに残る（ADR 0041 §5）。
+        common = set.intersection(*(set(anima_model(model).storages) for model in FAMILY_MODELS))
         for model in FAMILY_MODELS:
             for storage in anima_model(model).storages:
                 numbered = part_paths(OUTPUT_PATHS[f"transformer_{storage}"], _TRANSFORMER_PARTS)
                 expected += [f"{model}/{rel}" for rel in numbered[:-1]]
-                expected.append(f"{SHARED_DIRNAME}/{numbered[-1]}")
+                tail = SHARED_DIRNAME if storage in common else model
+                expected.append(f"{tail}/{numbered[-1]}")
+                if storage != "f16" and storage not in common:
+                    private_text = {
+                        text_stack_role(component, storage): OUTPUT_PATHS[
+                            text_stack_role(component, storage)
+                        ]
+                        for component in _TEXT_STACK_COMPONENTS
+                    }
+                    expected += [
+                        f"{model}/{rel}" for rel in placed_paths(private_text, ANIMA_WEIGHTS)
+                    ]
         assert _present(out_dir) == sorted(set(expected) | {MANIFEST_FILENAME})
 
     def test_it_leaves_no_empty_directory_behind_after_folding(self, family) -> None:

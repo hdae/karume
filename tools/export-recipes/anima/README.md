@@ -317,6 +317,38 @@ treat this gate as redundant and remove it.
 > whose ckpt is genuinely f32, the same injection turns **both** the emit gate and the E2E red
 > (exceeding atol by more than 31× — ADR 0027).
 
+### bf16 storage emit (`--dtype bf16` — ADR 0131)
+
+`--dtype bf16` follows the f16 discipline: it rounds the weights to bf16-representable values
+(round-to-nearest-even) **before** the reference and golden capture, and stores only the weight
+slots whose `f32 → bf16 → f32` round trip is bit-exact in bf16 (the rest stay f32). Upstream ships
+all four components in BF16, so for the parameters the rounding is a no-op and the asset holds the
+upstream bits. All four targets go to `outputs/series/anima-bf16/`; the shipping DiT is the S-form
+series, with `--out` spelled out like the f16 one:
+
+```sh
+uv run --group anima python -m anima.export --dtype bf16                   # all 4 → anima-bf16/
+uv run --group anima python -m anima.export --dtype bf16 --dit-graph dyn \
+  --out ../../outputs/series/anima-v1.0-bf16-dyn
+uv run --group anima python -m anima.pipeline_ref --dtype bf16              # fixture
+```
+
+The faithful preset `bf16` is declared by `anima-v1.0` only (`AnimaModel.storages`): the assembly
+takes `text_encoder` / `text_conditioner` / `vae_decoder` from `anima-bf16/` and the DiT from
+`anima-v1.0-bf16-dyn/`, and places them next to the f16 files as `<component>/model.bf16.krm`.
+
+Measured (2026-10-17): the goldens of all four targets (and the S-form DiT) are byte-identical to
+f32 references taken with the same code (`--dtype f32`). One condition behind that:
+`round_weights_to_bf16` leaves **non-persistent** buffers alone — the RoPE buffer
+`rotary_emb.inv_freq` of the text conditioner is computed in f32 at init rather than loaded from
+the checkpoint, and rounding it moved 31 of its 32 elements (by up to 4.37e-4, 1.4e-4 in the
+output) while no parameter moved. The f16 rounding still touches it (the f16 series is frozen).
+
+The export of `text_encoder` needs `disable_packed_sequence_detection` (applied by
+`build_text_encoder`): without an `attention_mask`, `Qwen3Model` looks for packed sequences in
+the position ids, and under tracing that check cannot short-circuit, leaving an `index` / `eq`
+mask the exporter no longer constant-folds (ADR 0010, 2026-10-10 addendum).
+
 ### i8 storage emit (`--dtype i8` — ADR 0019)
 
 `--dtype i8` fake-quants with **per-channel symmetric int8** (no zero point) before taking the

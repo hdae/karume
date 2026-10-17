@@ -115,6 +115,11 @@ class TestComponentDtype:
     def test_f16_series_rounds_every_component(self, label):
         assert anima_pipeline.component_dtype("f16", label) == "f16"
 
+    @pytest.mark.parametrize("label", LABELS)
+    def test_bf16_series_rounds_every_component_to_bf16(self, label):
+        """忠実プリセットは 4 役とも bf16（ADR 0131 決定 3 — 資産は `anima-bf16/`）。"""
+        assert anima_pipeline.component_dtype("bf16", label) == "bf16"
+
     def test_i8_series_quantizes_only_the_transformer(self):
         """資産は `outputs/series/anima-i8/transformer` + `outputs/series/anima-f16/` の他 3 つ。"""
         assert anima_pipeline.component_dtype("i8", "transformer") == "i8"

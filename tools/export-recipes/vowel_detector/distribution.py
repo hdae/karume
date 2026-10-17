@@ -154,7 +154,7 @@ VOWEL_DETECTOR_STORAGE_REQUIREMENTS: Mapping[str, str] = {VOWEL_DETECTOR_GRAPH_R
 #: （anima / irodori / sbv2 と同じ規律）。I32 を載せないのは、i32 が圧縮ではなく素の格納
 #: （`karume.emit` の plain 側）で、添字表として素の系列にも普通に居るから。
 VOWEL_DETECTOR_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    VOWEL_DETECTOR_GRAPH_ROLE: ("f16", "i8", "i4")
+    VOWEL_DETECTOR_GRAPH_ROLE: ("f16", "bf16", "i8", "i4")
 }
 
 #: weights の宣言（dtype ラベル → 役割名）。グラフは 1 本で dtype も 1 つしかないので quant 表は

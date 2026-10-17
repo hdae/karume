@@ -76,7 +76,7 @@ import torch
 from _shared.paths import SERIES_ROOT
 from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.convert import normalize_boundary_tensor
-from karume.quantize import fake_quant_int8, round_weights_to_f16
+from karume.quantize import fake_quant_int8, round_weights_to_bf16, round_weights_to_f16
 
 from .resolution import parse_resolution, resolution_meta
 
@@ -86,11 +86,12 @@ DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 #: 無い）系列が入る。結合すると argparse の受理だけが広がり、`component_dtype` / `DEFAULT_OUTS`
 #: の素の KeyError まで落ちない — text_encoder のロードまで数分走った末に診断文言ゼロで死ぬ形で、
 #: fail loudly（理由を挙げて落ちる）を満たさない。席を足すときは下の 3 表と同時に足す。
-REF_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
+REF_DTYPES: tuple[str, ...] = ("f32", "f16", "bf16", "i8")
 #: 生成物の既定の置き場（格納 dtype 別）。**配布形 `models/` とは別の系列側**（上の MUST）。
 DEFAULT_OUTS = {
     "f32": SERIES_ROOT / "anima-pipeline",
     "f16": SERIES_ROOT / "anima-pipeline-f16",
+    "bf16": SERIES_ROOT / "anima-pipeline-bf16",
     "i8": SERIES_ROOT / "anima-pipeline-i8",
 }
 
@@ -99,10 +100,11 @@ DEFAULT_OUTS = {
 COMPONENT_DTYPES = {
     "f32": {},
     "f16": {},
+    "bf16": {},
     "i8": {"transformer": "i8"},
 }
 #: `COMPONENT_DTYPES` に載らないコンポーネントの既定（f32 系列は丸めない）。
-_FALLBACK_DTYPE = {"f32": "f32", "f16": "f16", "i8": "f16"}
+_FALLBACK_DTYPE = {"f32": "f32", "f16": "f16", "bf16": "bf16", "i8": "f16"}
 
 
 def component_dtype(dtype: str, label: str) -> str:
@@ -115,7 +117,12 @@ def _fake_quant(dtype: str, model: torch.nn.Module, label: str) -> None:
     effective = component_dtype(dtype, label)
     if effective == "f32":
         return
-    report = fake_quant_int8(model) if effective == "i8" else round_weights_to_f16(model)
+    if effective == "i8":
+        report = fake_quant_int8(model)
+    elif effective == "bf16":
+        report = round_weights_to_bf16(model)
+    else:
+        report = round_weights_to_f16(model)
     print(f"[fake-quant] {label} ({effective}): {report.describe()}", flush=True)
 
 

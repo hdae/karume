@@ -81,34 +81,32 @@ def _calib_record(method: str, model: str) -> bytes:
 
 
 def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> Path:
-    """素版 1 モデルの系列（f16 / i8 の配布系列 + **変種の i4 系列**）を偽資産で作る。
+    """素版 1 モデルの系列（f16 / i8 / bf16 の配布系列 + **変種の i4 系列**）を偽資産で作る。
 
     weights の席は**正当なコンテナ**（組み立ては入力を開いて宣言の全規則で見る —
     `karume.dist.assert_weight_components_verified`）。rope 素表は transformer の容器の
     **資産**（ADR 0109 決定 4）なので、同じ器の中へ入る。
     """
     sources = anima_sources(series_dir, MODEL)
-    write_component(
-        sources.base / "text_encoder" / "model.krm",
-        ir_container(mark="te", named="text_encoder", storage="f16"),
-    )
-    write_component(
-        sources.text_conditioner / "text_conditioner" / "model.krm",
-        ir_container(mark="tc", named="text_conditioner", storage="f16"),
-    )
-    write_component(
-        sources.base / "vae_decoder" / "model.krm",
-        ir_container(mark="vae", named="vae_decoder", storage="f16"),
-    )
+    # text stack は素版が宣言する格納ラベルの数だけ（f16 + 忠実プリセットの bf16）。
+    for storage, base in sources.base.items():
+        write_component(
+            base / "text_encoder" / "model.krm",
+            ir_container(mark=f"te-{storage}", named="text_encoder", storage=storage),
+        )
+        write_component(
+            sources.text_conditioner[storage] / "text_conditioner" / "model.krm",
+            ir_container(mark=f"tc-{storage}", named="text_conditioner", storage=storage),
+        )
+        write_component(
+            base / "vae_decoder" / "model.krm",
+            ir_container(mark=f"vae-{storage}", named="vae_decoder", storage=storage),
+        )
     _write(sources.tokenizers / "qwen2-tokenizer.json", b'{"qwen2": true}')
     _write(sources.tokenizers / "t5-tokenizer.json", b'{"t5": true}')
     rope = AssetInput(ROPE_BASE_ROLE, 4, b"rope")
     variant = series_dir / eval_dist.EVAL_SERIES.format(model=MODEL)
-    for series, storage in (
-        (sources.transformer["f16"], "f16"),
-        (sources.transformer["i8"], "i8"),
-        (variant, "i4"),
-    ):
+    for storage, series in {**sources.transformer, "i4": variant}.items():
         write_component(
             series / "transformer" / "model.krm",
             ir_container(
@@ -131,7 +129,7 @@ class TestEvalPlan:
         plan = eval_dist.eval_plan(tmp_path / "series", MODEL)
 
         assert "i4" not in anima_model(MODEL).storages, "配布の受理集合が動いている"
-        assert set(plan.weights["transformer"]) == {"f16", "i8", "i4"}
+        assert set(plan.weights["transformer"]) == {"f16", "i8", "bf16", "i4"}
         assert "f16+dit4" in plan.quants
 
     def test_the_i4_seat_reads_the_variant_series(self, tmp_path):

@@ -23,6 +23,7 @@ docs/research/2026-08-02-anima-recon.md）。素の diffusers モジュールは
     uv run python -m anima.export --dtype i8    # → …/anima-i8/（DiT のみ）
     uv run python -m anima.export --dtype i4    # → …/anima-i4/（DiT のみ・混成）
     uv run python -m anima.export --dtype f16 --dit-graph dyn  # → …-f16-dyn/
+    uv run python -m anima.export --dtype bf16  # → …/anima-bf16/（4 役・上流の BF16 そのまま）
 
 MUST: `--dit-graph dyn` は **transformer 専用の追加系列**で、静的系列を置き換えない
 （既存資産・E2E・tolerance を 1 つも動かさないのが波 T2 の前提）。patchify /
@@ -139,6 +140,7 @@ from karume.quantize import (
     fake_quant_int4,
     fake_quant_int8,
     iter_quant_targets,
+    round_weights_to_bf16,
     round_weights_to_f16,
 )
 
@@ -150,7 +152,7 @@ from .card import ANIMA_METADATA
 #: core の `karume.emit.WEIGHT_DTYPES` から引かない — core が書ける集合（i4 追加 —
 #: ADR 0069）と anima が系列・検収を持つ集合は別の判断で、結合すると core 側の拡張が
 #: そのままこの CLI の受理に化ける。
-WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
+WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "bf16", "i8", "i4")
 
 #: i4 group32 で丸める**モジュール型**（= i4 の実行経路を持つ op と対 — `karume.emit` の
 #: `I4_WEIGHT_OPS`）。DiT に実在する量子化可能型は `nn.Linear` だけ（patchify も
@@ -183,7 +185,13 @@ NON_STAGE_I4_WEIGHTS: frozenset[str] = frozenset(
 
 #: 系列名 → `export_to_file` へ渡す**既定**の格納 dtype。i4 系列だけ既定が i8 で、適格な重みは
 #: 1 本単位の `weight_dtype_overrides` で i4 へ振る（deberta の `BASE_WEIGHT_DTYPES` と同形）。
-BASE_WEIGHT_DTYPES: Mapping[str, str] = {"f32": "f32", "f16": "f16", "i8": "i8", "i4": "i8"}
+BASE_WEIGHT_DTYPES: Mapping[str, str] = {
+    "f32": "f32",
+    "f16": "f16",
+    "bf16": "bf16",
+    "i8": "i8",
+    "i4": "i8",
+}
 
 #: 実重みの取得元（HF Hub。ローカルキャッシュ済み — recon §7）。
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
@@ -196,6 +204,7 @@ DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 DEFAULT_OUT_ROOTS = {
     "f32": SERIES_ROOT / "anima",
     "f16": SERIES_ROOT / "anima-f16",
+    "bf16": SERIES_ROOT / "anima-bf16",
     "i8": SERIES_ROOT / "anima-i8",
     "i4": SERIES_ROOT / "anima-i4",
 }
@@ -219,6 +228,8 @@ TARGETS = (
 DTYPE_TARGETS = {
     "f32": TARGETS,
     "f16": TARGETS,
+    # 忠実プリセット `bf16` は 4 役とも bf16（ADR 0131 決定 3 — 上流が 4 部品とも BF16）。
+    "bf16": TARGETS,
     "i8": (TARGET_TRANSFORMER,),
     "i4": (TARGET_TRANSFORMER,),
 }
@@ -334,6 +345,8 @@ def build_text_encoder(args: argparse.Namespace, verify: bool) -> Component:
     if args.num_layers is not None:
         model.layers = model.layers[: args.num_layers]
     model.eval()
+    # マスクを渡さないラッパの前提（トレース中の packed sequence 検出を eager と同じ None に）。
+    patch.disable_packed_sequence_detection()
     _fake_quant(args, model, TARGET_TEXT_ENCODER)
     generator = _generator(0)
     # 長さは下限（2 — 0/1 特殊化の回避線）から上限 512 の間に散らす。Tmax ちょうどの
@@ -951,6 +964,10 @@ def _fake_quant(
         return report.scales, {}
     if args.dtype == "i4":
         return _fake_quant_i4(args, model, target, calib_probe)
+    if args.dtype == "bf16":
+        rounded = round_weights_to_bf16(model)
+        print(f"[fake-quant] {target}: bf16 表現可能値へ丸めた — {rounded.describe()}", flush=True)
+        return {}, {}
     rounded = round_weights_to_f16(model)
     print(f"[fake-quant] {target}: f16 表現可能値へ丸めた — {rounded.describe()}", flush=True)
     return {}, {}
@@ -1231,7 +1248,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--out",
         type=Path,
         default=None,
-        help="出力先（既定は --dtype ごとの系列 — outputs/series/anima{,-f16,-i8,-i4}/・ADR 0018）",
+        help="出力先（既定は --dtype ごとの系列 —"
+        " outputs/series/anima{,-f16,-bf16,-i8,-i4}/・ADR 0018）",
     )
     parser.add_argument(
         "--dtype",

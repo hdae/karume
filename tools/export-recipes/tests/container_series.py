@@ -85,8 +85,8 @@ def read_component(path: Path) -> list[bytes]:
 def i2_container(*, named: str) -> list[bytes]:
     """重み 1 本を `int2-off`（layout `i2`）で持つ最小の正当なコンテナの part 列。
 
-    `ir_fixtures.ir_container` は `karume.emit.WEIGHT_DTYPES`（f32 / f16 / i8 / i4）しか書けないが、
-    格納の門が見る語彙は codec 台帳の layout 全体で、i2 は QAT 系列（固定の packed 値 —
+    `ir_fixtures.ir_container` は `karume.emit.WEIGHT_DTYPES`（f32 / f16 / bf16 / i8 / i4）しか
+    書けないが、格納の門が見る語彙は codec 台帳の layout 全体で、i2 は QAT 系列（固定の packed 値 —
     `FixedQuantizedWeight`）だけが持つ。その系列 root を素の f32 席へ取り違えたときに禁止表が
     落とすことを、**本物の束縛表**で試すための席（scale の companion が f32 なので「f32 を
     含む」も真になり、要求検査は素通りする — 実物の圧縮系列と同じ形）。

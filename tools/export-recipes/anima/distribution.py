@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -75,6 +76,23 @@ ANIMA_PIPELINE = "anima/1"
 #: （`anima/pipeline_ref.py` の同 NOTE）なので、turbo 席もここを共有して差し支えない。
 ANIMA_BASE_SERIES = "anima-f16"
 ANIMA_TOKENIZER_SERIES = "anima-demo"
+
+#: text stack（text_encoder / text_conditioner / vae_decoder — DiT の格納に依らない 3 役）の
+#: 格納ラベル → 共有系列。f16 は全モデルが引き、bf16 は忠実プリセット `bf16`（4 役とも bf16 —
+#: ADR 0131 決定 3）を {@link AnimaModel.storages} に持つモデルだけが引く。bf16 系列も LoRA を
+#: 焼かずに焼く（{@link ANIMA_BASE_SERIES} と同じ MUST・同じ網 — {@link assert_lora_provenance}）。
+ANIMA_TEXT_STACK_SERIES: Mapping[str, str] = {"f16": ANIMA_BASE_SERIES, "bf16": "anima-bf16"}
+
+
+def text_stack_role(component: str, storage: str) -> str:
+    """text stack の配置の役割名（{@link OUTPUT_PATHS} のキー）。
+
+    MUST: f16 は**素の部品名**のまま（`text_encoder` 等）— 追加学習リポの越境参照
+    （dist の `--ref-role`）がこの綴りで名指ししているので、格納を足しても動かさない。
+    他の格納は `<部品>_<格納>`（transformer の `transformer_<格納>` と同じ形）。
+    """
+    return component if storage == "f16" else f"{component}_{storage}"
+
 
 #: 焼き込んだ LoRA の帰属を残すファイル（系列のターゲット直下）。系列レイアウトの綴りは
 #: 読み手（ここ）が持ち、書き手（`anima/export.py`）はここから引く — 2 箇所で独立に動かさない。
@@ -203,6 +221,10 @@ EXTRA_NOTICE_MARKDOWN = notice_markdown(
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
 #: 役割名でだけ引くので、綴りが 2 箇所で独立に動くことは起きない。
+#:
+#: MUST: f16 の text stack の path（`text_encoder/model.krm` 等）は動かさない — 追加学習リポ
+#: （karume-anima-extra）がこの path を越境参照している。bf16 の text stack は `.bf16` を
+#: 名乗る別ファイルとして隣に並ぶ（{@link text_stack_role}）。
 OUTPUT_PATHS: Mapping[str, str] = {
     "text_encoder": "text_encoder/model.krm",
     "text_conditioner": "text_conditioner/model.krm",
@@ -212,17 +234,23 @@ OUTPUT_PATHS: Mapping[str, str] = {
     "vae_decoder": "vae_decoder/model.krm",
     "tokenizer": "tokenizer/qwen2-tokenizer.json",
     "tokenizer_2": "tokenizer_2/t5-tokenizer.json",
+    "text_encoder_bf16": "text_encoder/model.bf16.krm",
+    "text_conditioner_bf16": "text_conditioner/model.bf16.krm",
+    "transformer_bf16": "transformer/model.bf16.krm",
+    "vae_decoder_bf16": "vae_decoder/model.bf16.krm",
 }
 
 #: 席名の部品上書きトークン → その weights 名（ADR 0074 決定 4 — **略称の定義は recipe が
-#: 持ち、生成モデルカードの quant 表に対応を必ず出す**）。Anima の基底格納は `f16`（text 経路
-#: 3 役が f16 固定）で、圧縮が掛かるのは transformer だけなので席名は `f16+dit<ビット>` になる。
+#: 持ち、生成モデルカードの quant 表に対応を必ず出す**）。Anima の基底格納は `f16`（忠実
+#: プリセットだけ 4 役とも `bf16`）で、圧縮が掛かるのは transformer だけなので席名は
+#: `f16+dit<ビット>` になる。
 ANIMA_QUANT_ABBREVIATIONS: Mapping[str, str] = {"dit": "transformer"}
 
 #: quant 表（v1 の `presets` — ADR 0041 §3 で改名）。`session` の語彙は manifest 所有。
 #: 席名は ADR 0074 の文法 `<格納>[+<部品><ビット>]…[-<ノブ>]…` で、`<格納>` は**全役割に共通の
-#: 基底格納**（Anima は f16）。**dtype ラベルが 1 つしかない weights は書かない** —
-#: {@link complete_quant_weights} が完全写像へ埋める（写せば済む席を quant の数だけ複製しない）。
+#: 基底格納**（Anima は f16 / 忠実プリセットだけ bf16）。**表が名指ししない weights は書かない** —
+#: {@link anima_quants} が席名の `<格納>` で埋める（{@link seat_base_storage} — 写せば済む席を
+#: quant の数だけ複製しない）。
 #:
 #: `label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語・64 / 200 字上限）。
 #: 席の実態（格納・ノブ・嬉しさ）から書く: id は機械の都合で、人が読むのはこの 2 欄という
@@ -299,6 +327,21 @@ ANIMA_QUANTS: Mapping[str, Any] = {
         "label": "Full quality, f16 compute",
         "description": "f16 storage computed in f16 throughout. Needs the shader-f16 GPU feature,"
         " and trades numerical headroom for speed.",
+    },
+    # 忠実プリセット（ADR 0131 決定 3 — 上流の checkpoint は 4 部品とも BF16 なので、bf16 格納は
+    # 上流のビット列そのもの）。席は `bf16` を {@link AnimaModel.storages} に持つモデルにだけ
+    # 生える（{@link anima_quants} の導出）。
+    "bf16": {
+        "weights": {
+            "text_encoder": "bf16",
+            "text_conditioner": "bf16",
+            "transformer": "bf16",
+            "vae_decoder": "bf16",
+        },
+        "session": {},
+        "label": "Original weights (bf16)",
+        "description": "All four components stored as bf16 with f32 compute — the upstream"
+        " checkpoint's own values, bit for bit. Same size as f16.",
     },
 }
 
@@ -389,6 +432,10 @@ STORAGE_REQUIREMENTS: Mapping[str, str] = {
     "transformer_i8": "i8",
     "transformer_i4": "i4",
     "vae_decoder": "f16",
+    "text_encoder_bf16": "bf16",
+    "text_conditioner_bf16": "bf16",
+    "transformer_bf16": "bf16",
+    "vae_decoder_bf16": "bf16",
 }
 
 #: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
@@ -401,9 +448,20 @@ STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: と決めた構成が、席名が int8 を名乗ったまま既定席で沈黙して出る。
 #: MUST: 禁止は**役割ごとに集合**で持つ（1 つだけだと 4 本目の系列が生えた日に、名指ししなかった
 #: ほうが黙って素通りする — irodori と同じ規律）。f16 席は i8 / i4 の不在で二重に締まる。
+#: MUST: bf16 系列（ADR 0131）と他の系列の取り違えも両向きで落とす — bf16 系列は bf16 + f32、
+#: f16 系列は f16 + f32 で、どちらも相手の要求を満たさないが、要求だけに頼ると「両方を含む混成」
+#: が生えた日に沈黙する。bf16 の役割は f16 / i8 / i4 を、他の役割は bf16 を禁じる。
 ANIMA_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    "transformer_f16": ("i8", "i4"),
-    "transformer_i8": ("i4",),
+    "text_encoder": ("bf16",),
+    "text_conditioner": ("bf16",),
+    "vae_decoder": ("bf16",),
+    "transformer_f16": ("bf16", "i8", "i4"),
+    "transformer_i8": ("bf16", "i4"),
+    "transformer_i4": ("bf16",),
+    "text_encoder_bf16": ("f16", "i8", "i4"),
+    "text_conditioner_bf16": ("f16", "i8", "i4"),
+    "transformer_bf16": ("f16", "i8", "i4"),
+    "vae_decoder_bf16": ("f16", "i8", "i4"),
 }
 
 #: グラフを持つ部品名 = manifest の weights のキー = **容器のグラフ名**（container-v1 §2.1 —
@@ -422,14 +480,24 @@ ANIMA_VAE_DECODER_ROLE = "vae_decoder"
 #: {@link STORAGE_REQUIREMENTS} が要求する格納形と 1:1（ADR 0041 §3）。`i4` は**混成の系列**を
 #: 指すラベルで、実体は「i4 適格な重みが i4 group32・残りは i8」（`anima/export.py`）。
 ANIMA_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    ANIMA_TEXT_ENCODER_ROLE: {"f16": WeightFiles("text_encoder")},
-    ANIMA_TEXT_CONDITIONER_ROLE: {"f16": WeightFiles("text_conditioner")},
+    ANIMA_TEXT_ENCODER_ROLE: {
+        "f16": WeightFiles("text_encoder"),
+        "bf16": WeightFiles("text_encoder_bf16"),
+    },
+    ANIMA_TEXT_CONDITIONER_ROLE: {
+        "f16": WeightFiles("text_conditioner"),
+        "bf16": WeightFiles("text_conditioner_bf16"),
+    },
     ANIMA_TRANSFORMER_ROLE: {
         "f16": WeightFiles("transformer_f16"),
         "i8": WeightFiles("transformer_i8"),
         "i4": WeightFiles("transformer_i4"),
+        "bf16": WeightFiles("transformer_bf16"),
     },
-    ANIMA_VAE_DECODER_ROLE: {"f16": WeightFiles("vae_decoder")},
+    ANIMA_VAE_DECODER_ROLE: {
+        "f16": WeightFiles("vae_decoder"),
+        "bf16": WeightFiles("vae_decoder_bf16"),
+    },
 }
 
 #: assets の宣言（quant 選択に依存しない無条件ファイル — ADR 0041 §3）。
@@ -451,6 +519,8 @@ class AnimaModel:
     #: transformer の格納 dtype ラベル。ここに無い格納形の系列は**要求も宣言もしない**
     #: （2026-08-23・波 J-4 ②: 校正条件を {@link pipeline_config} から導く形にした
     #: 〈`anima.calib.calib_conditions`〉ので、i4 席は turbo 専用ではなくなった）。
+    #: text stack の格納ラベル（{@link ANIMA_TEXT_STACK_SERIES} のキー）もここから引く — `bf16` を
+    #: 持つモデルは text stack 3 役の bf16 系列も要求・宣言する（忠実プリセットは 4 役とも bf16）。
     storages: tuple[str, ...]
     #: text_conditioner を自前で持つか。`False` = 素の共有系列（{@link ANIMA_BASE_SERIES}）。
     #: 第三者 fine-tune は DiT だけでなく llm_adapter（= text_conditioner）も焼き直している
@@ -489,9 +559,10 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
         own_text_conditioner=False,
         pipeline_config=ANIMA_TURBO_PIPELINE_CONFIG,
     ),
+    # 忠実プリセット `bf16`（ADR 0131 決定 3）は base だけ — turbo / aesthetic / extra は後続。
     ANIMA_BASE_MODEL_NAME: AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8"),
+        storages=("f16", "i8", "bf16"),
         own_text_conditioner=False,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
@@ -550,15 +621,17 @@ EXTRA_MODELS: tuple[str, ...] = ("anima-wai-v1.0", "anima-copycat-20260610")
 class AnimaSources:
     """組み立ての入力となる系列ディレクトリ群。
 
-    テキスト経路と VAE は DiT の格納 dtype に依らないので f16 系列 1 本を共有する
-    （ADR 0019）。transformer だけが f16 / i8 / i4 の 3 系列に分かれる。
+    テキスト経路と VAE は DiT の格納 dtype に依らないので、text stack の格納ラベルごとに系列
+    1 本を共有する（ADR 0019 — f16 は全モデル・bf16 は忠実プリセットを持つモデルだけ）。
+    transformer は f16 / i8 / i4 / bf16 の系列に分かれる。
     """
 
     #: 格納 dtype ラベル → transformer 系列（{@link AnimaModel.storages} の順）。
     transformer: Mapping[str, Path]
-    base: Path
-    #: text_conditioner を持つ系列（素は {@link base} と同じ）。
-    text_conditioner: Path
+    #: text stack の格納ラベル → text_encoder / VAE を持つ系列（{@link ANIMA_TEXT_STACK_SERIES}）。
+    base: Mapping[str, Path]
+    #: 同・text_conditioner を持つ系列（素は {@link base} と同じ・キーも同じ）。
+    text_conditioner: Mapping[str, Path]
     tokenizers: Path
 
 
@@ -567,14 +640,22 @@ def anima_sources(series_dir: Path, model: str = ANIMA_BASE_MODEL_NAME) -> Anima
 
     モデル名は transformer の系列と、自前の text_conditioner を持つモデルの静的系列にだけ
     掛かる — text_encoder / VAE / tokenizer は上流の fine-tune が触らない部分なので、
-    どのモデルでも共有系列 1 本から引く。
+    どのモデルでも格納ラベルごとの共有系列 1 本から引く。
     """
     spec = anima_model(model)
+    text_storages = [storage for storage in spec.storages if storage in ANIMA_TEXT_STACK_SERIES]
     return AnimaSources(
         transformer={storage: series_dir / f"{model}-{storage}-dyn" for storage in spec.storages},
-        base=series_dir / ANIMA_BASE_SERIES,
-        text_conditioner=series_dir
-        / (f"{model}-f16" if spec.own_text_conditioner else ANIMA_BASE_SERIES),
+        base={storage: series_dir / ANIMA_TEXT_STACK_SERIES[storage] for storage in text_storages},
+        text_conditioner={
+            storage: series_dir
+            / (
+                f"{model}-{storage}"
+                if spec.own_text_conditioner
+                else ANIMA_TEXT_STACK_SERIES[storage]
+            )
+            for storage in text_storages
+        },
         tokenizers=series_dir / ANIMA_TOKENIZER_SERIES / "text",
     )
 
@@ -657,7 +738,10 @@ def assert_lora_provenance(sources: AnimaSources, expected: str | None) -> None:
     records = [
         series / "transformer" / LORA_PROVENANCE_FILE for series in transformer_series(sources)
     ]
-    records.append(sources.text_conditioner / "text_conditioner" / LORA_PROVENANCE_FILE)
+    records += [
+        series / "text_conditioner" / LORA_PROVENANCE_FILE
+        for series in sources.text_conditioner.values()
+    ]
     for path in records:
         if expected is None:
             if path.is_file():
@@ -736,38 +820,60 @@ def anima_placements(sources: AnimaSources) -> dict[str, Path]:
 
     この表に無いものは出力へ入らない（`io.*.safetensors` を落とす仕掛けはこれで足りる）。
     """
-    placements = {
-        "text_encoder": sources.base / "text_encoder" / "model.krm",
-        "text_conditioner": sources.text_conditioner / "text_conditioner" / "model.krm",
-        "vae_decoder": sources.base / "vae_decoder" / "model.krm",
-        "tokenizer": sources.tokenizers / "qwen2-tokenizer.json",
-        "tokenizer_2": sources.tokenizers / "t5-tokenizer.json",
-    }
+    placements: dict[str, Path] = {}
+    for storage, series in sources.base.items():
+        placements[text_stack_role(ANIMA_TEXT_ENCODER_ROLE, storage)] = (
+            series / "text_encoder" / "model.krm"
+        )
+        placements[text_stack_role(ANIMA_TEXT_CONDITIONER_ROLE, storage)] = (
+            sources.text_conditioner[storage] / "text_conditioner" / "model.krm"
+        )
+        placements[text_stack_role(ANIMA_VAE_DECODER_ROLE, storage)] = (
+            series / "vae_decoder" / "model.krm"
+        )
+    placements["tokenizer"] = sources.tokenizers / "qwen2-tokenizer.json"
+    placements["tokenizer_2"] = sources.tokenizers / "t5-tokenizer.json"
     for storage, series in sources.transformer.items():
         placements[f"transformer_{storage}"] = series / "transformer" / "model.krm"
     return placements
 
 
 def anima_weights(spec: AnimaModel) -> Mapping[str, Mapping[str, WeightFiles]]:
-    """モデルが持つ格納形だけへ絞った weights 宣言（席の無い dtype ラベルは載せない）。"""
+    """モデルが持つ格納形だけへ絞った weights 宣言（席の無い dtype ラベルは載せない）。
+
+    絞りは全役割に同じ 1 規則で掛かる — text stack の `f16` は全モデルの storages に在るので
+    残り、`bf16` は忠実プリセットを持つモデルにだけ残る。
+    """
     return {
-        role: (
-            {label: files for label, files in labels.items() if label in spec.storages}
-            if role == "transformer"
-            else labels
-        )
+        role: {label: files for label, files in labels.items() if label in spec.storages}
         for role, labels in ANIMA_WEIGHTS.items()
     }
 
 
+def seat_base_storage(name: str) -> str:
+    """席名の `<格納>` 部（最初の `+` / `-` の前 — ADR 0074 の文法で全役割に共通の基底格納）。"""
+    return re.split(r"[+-]", name, maxsplit=1)[0]
+
+
 def anima_quants(spec: AnimaModel) -> Mapping[str, Any]:
-    """モデルが持つ格納形で成立する quant 席だけへ絞る。
+    """モデルが持つ格納形で成立する quant 席だけへ絞り、表が名指ししない役割を埋める。
 
     MUST: 席の取捨は**宣言した格納形から導く**（席名の直書きリストを別に持たない）。2 箇所に
     分けて持つと、格納形を増やした日に席だけが増えない / 減らした日に席だけが残る。
+
+    MUST: 名指しの無い役割は**席名の `<格納>`**（{@link seat_base_storage}）で埋める — text stack
+    が f16 / bf16 の 2 ラベルを持つモデルでは、core の {@link complete_quant_weights} が「複数ある
+    のに指定が無い」で落とす（既定を勝手に選ばない）ので、選ぶ根拠を席名の文法に置く。埋めた
+    ラベルが役割に無ければ、core が「dtype が無い」で落とす。
     """
+    weights = anima_weights(spec)
     return {
-        name: entry
+        name: {
+            **entry,
+            "weights": {
+                role: entry["weights"].get(role, seat_base_storage(name)) for role in weights
+            },
+        }
         for name, entry in ANIMA_QUANTS.items()
         if entry["weights"]["transformer"] in spec.storages
     }

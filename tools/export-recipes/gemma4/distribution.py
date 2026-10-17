@@ -225,8 +225,8 @@ GEMMA4_STORAGE_ALSO_REQUIRED: Mapping[str, str] = {GEMMA4_ROLE: "i8"}
 #: 素通りさせる（出力ヘッドの i8 で要求が満たされる）。受理率が 1 〜 3 割落ちるだけの資産は
 #: 形も manifest も正しいままなので、ここが唯一の検出器になる。
 GEMMA4_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    GEMMA4_ROLE: ("f16",),
-    GEMMA4_DRAFTER_ROLE: ("f16", "i4"),
+    GEMMA4_ROLE: ("f16", "bf16"),
+    GEMMA4_DRAFTER_ROLE: ("f16", "bf16", "i4"),
 }
 
 #: 格納 dtype のラベル（quant 席の綴りでもある）。役割ごとに**基底格納が 1 つずつ**なので
