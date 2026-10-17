@@ -239,6 +239,10 @@
     ],
     "./node": [
       {
+        "name": "nodeCacheStorage",
+        "kind": "function"
+      },
+      {
         "name": "nodeDirectory",
         "kind": "function"
       }
