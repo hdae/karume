@@ -9,6 +9,18 @@
 
 ## now — 0.14.0 リリース後（2026-10-16）
 
+- **0.15 への移行（起票 2026-10-15・利用者の裁定 — ADR [0126](decisions/0126-numerics-profiles.md) / [0127](decisions/0127-node-dawn-toolchain.md) / [0128](decisions/0128-default-preset-original-weights.md) / [0129](decisions/0129-test-layout-and-lanes.md) / [0130](decisions/0130-project-language.md)・全て proposed）**:
+  branch `wip/0.15`（worktree はリポ外 `~/workspace/karume-wt-0.15`・main は 0.14.0 のまま）。
+  **フェーズ 1（移植）✅ 2026-10-16**: Node 24 + Dawn（npm `webgpu`）+ Vite+（Vitest の projects = レーン・Oxlint・Oxfmt・TypeScript 7）へ移植。
+  テスト一式を機械移植し、実重みの e2e 61 本を私的 `packages/e2e` へ、共通の土台（Dawn の注入・Deno 形の shim・fs）を私的 `packages/test-support` へ。
+  Deno ツール依存の検証 4 本（公開面・依存グラフ・barrel・local-dist-server）を置き換え、計測 tools / examples は削除（ブラウザアプリとして作り直す — ADR 0127）。
+  結果: 全レーン緑（core 2,929 + 家族 16 レーン 2,119 passed・17 skipped〈opt-in のケース〉・0 failed — 2026-10-16〜17・`26053ef2`〈core はタイマーの空振り 1 件を直した `1c8f6f8b` で再走〉）・Deno 基線との成果物の突合は数値の差 0（[research](research/2026-10-16-node-port-results.md)）。
+  **フェーズ 2（整理 — 0.15.0 の中身）**: ① テスト選別（[一覧](research/2026-10-16-test-triage.md): keep 306 / move 16 / drop 4 / merge 42 / review 24 — 利用者の裁定で実施）
+  ② ADR の整理と英訳・コメントの英語化（ADR 0130）③ 数値プロファイル（ADR 0126: 既定 = practical・reference は opt-in）④ 既定のプリセット = オリジナルの重み（ADR 0128・breaking）
+  ⑤ Node 向けの CacheStorage（hub の HTTP 取得元が Node で動く条件 — ADR 0127 未決）⑥ PNG の sha 行を画素の sha に（ADR 0127 未決）⑦ lint の規則集合（既定規則の警告 331 件）
+  ⑧ `Deno.test` 形の shim を Vitest 本来の形へ。**フェーズ 3**: 0.15.0 のリリース（JSR のみか npm も — ADR 0127 未決）。
+  同乗の候補（判断はリリース前）: irodori 2 リポの重複の越境参照・sbv2 のサブパス面の再設計・hub ≤ 0.4 の旧名前空間の回収グルーの撤去・HTTP Range 取得。
+
 - **高速化 / メモリの波の残り（起票 2026-09-25・利用者裁定 = 参照層 / 実用層の 2 層に分ける・実用層でもデバイス内決定性 MUST）**:
   イテレーション 1〜3 の済んだ記録（契約と土台・B3 anima の DiT 常駐・B4 irodori の条件側 K/V・H-35・K-70・E1 段 1）は[退避先](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md)。
   次のイテレーション候補 = 波 2 の残り（DiT 速度: B1 → B2）/ 波 3（メモリ: E1 の残り → E2 → E5 → E4）/ 波 4（実用層カーネル: C2 VAE conv i8a8 → C1 → D2 → D1 → D3）。
