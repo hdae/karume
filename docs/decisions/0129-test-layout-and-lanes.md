@@ -337,3 +337,13 @@ and recipe entry point were removed. Two families are maintained but not run by 
 excludes their files, and `vp test` includes them only with `KARUME_ALL_FAMILIES=1`; the release run
 uses the default set. EmbeddingGemma keeps its parity test in the default run because it is the
 family's only check until it has reference rows.
+
+## Addendum 2026-10-17 (3) — decision 6 is fulfilled: the shim is gone
+
+Phase 2 step 2-2 replaced the Deno-shaped registration with Vitest's own forms: a codemod
+(`packages/test-support/codemod/port-shim.mjs`) rewrote the object and three-argument forms to
+`test.skipIf(cond)(name, fn)` and moved the imports to `vite-plus/test` (308 files), and the 54
+files that used sequential sub-steps were restructured by hand into `describe` / `it` with
+`beforeAll` / `afterAll` (557 steps became `it`s; titles, case ids and reference-row keys
+unchanged). `@karume/test-support/test` no longer exists. `@std/assert` stays as the assertion
+library.

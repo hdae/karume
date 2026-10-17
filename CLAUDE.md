@@ -33,7 +33,7 @@ torch.export → コンテナ `krm`〈IR v2〉・uv 管理）。pnpm workspace +
   ランタイム固有のサブパスは `hub/node`（`nodeDirectory`）と `hub/deno`（`denoDirectory`）だけ
 - `packages/models/` — **barrel（mod.ts）+ ファミリ別サブパス export の両建て**
 - `packages/e2e/`（私的）— 実重みの e2e（ローカル資産 + GPU）。家族ごとのレーンでリリース前に回す（ADR 0129）
-- `packages/test-support/`（私的）— テストのハーネス（Dawn の注入・Deno 形の test shim・fs helper・
+- `packages/test-support/`（私的）— テストのハーネス（Dawn の注入・fs helper・
   レーン表・移植の codemod）。移植の規則は同ディレクトリの README
 - `tools/exporter/` — PyPI `karume` = **汎用 core のみ**（src layout・境界は machine gate —
   ADR 0065）/ `tools/export-recipes/` — モデル別 recipe（wheel 外・uv workspace 共有 venv・
