@@ -8,7 +8,7 @@
 //
 // 表の中身が実物と合っているかは `e2e_assets_gate_test.ts` が実資産で見る（この門の射程外）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { GRAPH_NAME_PATTERN } from "../../runtime/src/format/container/limits.ts";
 import { SERIES_GRAPHS, seriesComponents, seriesGraph } from "./helpers/series-graphs.ts";

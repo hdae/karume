@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, createSessionFromContainer } from "../mod.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -23,10 +23,9 @@ const graph = (): DeclarationJson => ({
   ],
 });
 for (const fail of [false, true]) {
-  test({
-    name: `レシピ並列準備: ${fail ? "失敗時も全件を待つ" : "完了順が逆でも依存順に実行する"}`,
-    ignore: !GPU_AVAILABLE,
-    fn: async () => {
+  test.skipIf(!GPU_AVAILABLE)(
+    `レシピ並列準備: ${fail ? "失敗時も全件を待つ" : "完了順が逆でも依存順に実行する"}`,
+    async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openGraphModel(graph()), "model");
       const original = gpu.device.createComputePipelineAsync.bind(gpu.device);
@@ -83,5 +82,5 @@ for (const fail of [false, true]) {
         gpu.destroy();
       }
     },
-  });
+  );
 }

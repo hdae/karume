@@ -5,7 +5,7 @@
 // E2E の外側 — グラフを 1 つも実行しないので、誤りは「音の長さが変わる」「無音になる」形で
 // しか出ず、数値突合では捕まらない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";

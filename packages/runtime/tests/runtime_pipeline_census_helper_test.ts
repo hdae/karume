@@ -2,7 +2,7 @@
 // 行は偽物で、述語の相手は src の key 関数が返す実物のキー。
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import {
   ATTENTION_STATS_KEY,
   attentionPvKey,

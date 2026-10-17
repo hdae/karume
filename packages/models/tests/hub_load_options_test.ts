@@ -13,7 +13,7 @@
 // 最後に、公開面から見た対として「anima の `fromPretrained` が `onRetry` を `loadManifest` まで
 // 運ぶ」ことを mock fetch の 429 で見る（1 家族で足りる — 運ぶ経路は 9 家族とも同じ 1 本）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import type { AssetProgress, CacheDiagnostic, RetryDiagnostic } from "@karume/hub";
 import { hubLoadOptions } from "../src/hub/load-options.ts";

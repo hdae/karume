@@ -3,7 +3,7 @@
 // No adapter is needed: the feature checks wrap a fake device in the real `GpuContext`, and the
 // limits checks are pure functions.
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import type { GpuFeaturesSpec, RequiredLimitsSpec } from "@karume/hub";
 import type { RequiredLimits } from "@karume/runtime";

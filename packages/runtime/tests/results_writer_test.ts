@@ -20,7 +20,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { parseResultsDocument } from "../../../tools/verify-diff/diff.ts";
 import type { Environment } from "./helpers/environment.ts";
 import {

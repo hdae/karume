@@ -22,7 +22,7 @@
 // ADR 0020 決定 1 の「実 GPU で実走して確かめる」水準は、軸変種についてはここにしか無い
 // （tests/gpu_ops_test.ts の NaN ケースは rank 2 の最終次元 = 行変種しか踏まない）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
 import {
@@ -433,10 +433,9 @@ const firstMismatches = (a: Uint32Array, b: Uint32Array): readonly string[] => {
   return found;
 };
 
-test({
-  name: "軸 reduce は「permute + 行 reduce」と**ビット単位で一致**する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "軸 reduce は「permute + 行 reduce」と**ビット単位で一致**する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     let sawNonInvolution = false;
     try {
@@ -497,7 +496,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * executor の踏み分け。最終次元 = 行 reduce（既存キー）、それ以外 = 軸変種。
@@ -528,10 +527,9 @@ const reduceKeysUsed = async (
   }
 };
 
-test({
-  name: "executor は縮約軸で 2 カーネルを踏み分ける（最終次元 = 行 / それ以外 = 軸・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "executor は縮約軸で 2 カーネルを踏み分ける（最終次元 = 行 / それ以外 = 軸・実 GPU）",
+  async () => {
     assertEquals(
       await reduceKeysUsed([4, 6, 8], 2),
       new Set([reduceKey({ op: "sum", dtype: "f32" })]),
@@ -545,4 +543,4 @@ test({
       new Set([axisReduceKey({ op: "sum", dtype: "f32" })]),
     );
   },
-});
+);

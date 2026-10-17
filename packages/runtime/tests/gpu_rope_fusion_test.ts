@@ -1,7 +1,7 @@
 // half-split RoPE の exact peephole（融合ルール rope — src/runtime/fusion.ts）:
 // 既存 primitive 列とのビット parity と dispatch 削減を直接固定する。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { ROPE_BSHD_KEY, ROPE_KEY } from "../src/kernels/rope.ts";
@@ -147,10 +147,9 @@ const ropeInputs = (heads: number, sequence: number): Readonly<Record<string, Te
   };
 };
 
-test({
-  name: "half-split RoPE 融合は slice/direct-first 両順で有限値ビット / NaN 分類が一致し 1 dispatch へ畳む（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "half-split RoPE 融合は slice/direct-first 両順で有限値ビット / NaN 分類が一致し 1 dispatch へ畳む（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const inputs = ropeInputs(1, 3);
     try {
@@ -186,7 +185,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **census**（ADR 0058 決定 4）。融合が RoPE カーネル 1 本だけで済んでいることはキーでしか
@@ -195,10 +194,9 @@ test({
  * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。census は無条件に
  * 検査する（空・undefined は tests/helpers/pipeline-census.ts の `requireCensus` が落とす）。
  */
-test({
-  name: "half-split RoPE 融合が走らせるのは RoPE カーネル 1 本だけ（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "half-split RoPE 融合が走らせるのは RoPE カーネル 1 本だけ（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const inputs = ropeInputs(1, 3);
     try {
@@ -222,14 +220,13 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // H=1 だけでは `row / sequence` の head 方向の畳み込みが 1 度も踏まれない（row < sequence の
 // ままなので token = row になってしまう）。実配布は H=16 なのでここが本番の添字。
-test({
-  name: "RoPE 融合は H≥2 でも head 方向の添字が primitive 列とビット一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "RoPE 融合は H≥2 でも head 方向の添字が primitive 列とビット一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const inputs = ropeInputs(3, 5);
     try {
@@ -260,12 +257,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "RoPE の内部値が graph output または別 consumer を持てば融合しない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "RoPE の内部値が graph output または別 consumer を持てば融合しない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const sequence = 2;
     const inputs = {
@@ -362,12 +358,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "BSHD RoPEはtoken/head軸・端数・幅・特殊値をprimitive列とビット一致で処理する（実GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "BSHD RoPEはtoken/head軸・端数・幅・特殊値をprimitive列とビット一致で処理する（実GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const [heads, sequence, dim] of [
@@ -416,12 +411,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "BSHD RoPEはgrid-strideの複数巡回でもprimitive列とビット一致する（実GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "BSHD RoPEはgrid-strideの複数巡回でもprimitive列とビット一致する（実GPU）",
+  async () => {
     const gpu = await acquireGpu({ [LIMIT_CAPS]: { maxComputeWorkgroupsPerDimension: 2 } });
     const heads = 8,
       sequence = 17,
@@ -454,34 +448,30 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "BSHD RoPEは専用キーだけで走る（実GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
-    const gpu = await acquireGpu();
+test.skipIf(!GPU_AVAILABLE)("BSHD RoPEは専用キーだけで走る（実GPU）", async () => {
+  const gpu = await acquireGpu();
+  try {
+    const session = await createSessionFromContainer(
+      gpu,
+      await openModelBytes(ropeGraph("direct-first", false, 3, 128, "bshd"), []),
+      GRAPH_NAME,
+    );
     try {
-      const session = await createSessionFromContainer(
-        gpu,
-        await openModelBytes(ropeGraph("direct-first", false, 3, 128, "bshd"), []),
-        GRAPH_NAME,
+      await session.run({
+        x: fill([1, 5, 3, 128], (i) => Math.sin(i)),
+        cos: fill([1, 5, 1, 128], (i) => Math.cos(i)),
+        sin: fill([1, 5, 1, 128], (i) => Math.sin(i)),
+      });
+      assertEquals(
+        requireCensus(session.diagnostics().lastRunPipelines, "bshd").map((row) => row.key),
+        [ROPE_BSHD_KEY],
       );
-      try {
-        await session.run({
-          x: fill([1, 5, 3, 128], (i) => Math.sin(i)),
-          cos: fill([1, 5, 1, 128], (i) => Math.cos(i)),
-          sin: fill([1, 5, 1, 128], (i) => Math.sin(i)),
-        });
-        assertEquals(
-          requireCensus(session.diagnostics().lastRunPipelines, "bshd").map((row) => row.key),
-          [ROPE_BSHD_KEY],
-        );
-      } finally {
-        await session.dispose();
-      }
     } finally {
-      gpu.destroy();
+      await session.dispose();
     }
-  },
+  } finally {
+    gpu.destroy();
+  }
 });

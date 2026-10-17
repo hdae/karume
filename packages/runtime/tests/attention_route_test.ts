@@ -5,7 +5,7 @@
  */
 
 import { assertEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { attentionRoute, type AttentionSeats } from "../src/runtime/attention-route.ts";
 
 const A8_S16: AttentionSeats = { attentionCompute: "a8", attentionScoreStorage: "f16" };

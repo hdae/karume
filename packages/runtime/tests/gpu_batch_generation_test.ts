@@ -1,4 +1,4 @@
-import { test as denoTest } from "@karume/test-support/test";
+import { test as vitestTest } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { acquireGpu, createSessionFromContainer, type Tensor } from "../mod.ts";
 import { RUNTIME_INTERNAL } from "../src/gpu/device.ts";
@@ -70,7 +70,7 @@ const open = async (window?: number) => {
   return { gpu, session };
 };
 const test = (name: string, fn: () => Promise<void>): void =>
-  denoTest({ name, ignore: !GPU_AVAILABLE, fn });
+  vitestTest.skipIf(!GPU_AVAILABLE)(name, fn);
 for (const window of [undefined, 4]) {
   test(`batch generation: ${window === undefined ? "full" : "sliding"}のprefillとdecodeが通常runとu32一致する`, async () => {
     const { gpu, session } = await open(window),

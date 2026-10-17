@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { createByteAdmission } from "../src/concurrency.ts";
 

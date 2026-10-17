@@ -7,7 +7,7 @@
 // （S・行統計・i8a8 の量子化の一時）は見積りが実行と同じ純関数で数える（ADR 0124 決定 7）。それ以外の中間ピークは**近似**なので突合しない（他の融合が中間を消す — estimator
 // の unaccounted 欄が認めている差）。アダプタ無しは明示 SKIP。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import type { PreparedModel, SessionOptions } from "../src/runtime/executor.ts";
@@ -117,30 +117,24 @@ const assertPlanBackingMatchesEstimate = async (variant: {
   }
 };
 
-test({
-  name: "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（full 変種・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  // 列容量 = C = 16（S は容量に比例する側）。
-  fn: () => assertPlanBackingMatchesEstimate({ capacity: 16 }),
-});
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（full 変種・実 GPU）",
+  () => assertPlanBackingMatchesEstimate({ capacity: 16 }),
+);
 
-test({
-  name: "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（sliding 変種・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  // 列容量 = W−1+M = 8−1+4 = 11（容量 C とは別の式 — full と同じ数にならない形を選ぶ）。
-  fn: () => assertPlanBackingMatchesEstimate({ capacity: 8, window: 8 }),
-});
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（sliding 変種・実 GPU）",
+  () => assertPlanBackingMatchesEstimate({ capacity: 8, window: 8 }),
+);
 
 /**
  * 行ブロック**複数枚**での 2 実装一致。H=64 / Hkv=2 / D=8 / C=16 では S の 1 行が
  * 64·16·4 = 4096B なのに対し state スロットは 2·16·8·4 = 1024B なので、上限 8192B に絞ると
  * 「スロットは束縛できるが S 4 行は束縛できない」形になり、行ブロックが必ず割れる。
  */
-test({
-  name: "states 形 attention の中間総量が複数枚でも slot 表と厳密一致する（full 変種・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  // 1 枚 2 行の 2 枚（8192 ÷ 4096 = 2 行／枚・M=4）。
-  fn: () =>
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 attention の中間総量が複数枚でも slot 表と厳密一致する（full 変種・実 GPU）",
+  () =>
     assertPlanBackingMatchesEstimate({
       capacity: 16,
       heads: 64,
@@ -148,13 +142,11 @@ test({
       limitCap: 8192,
       expectedBlocks: 2,
     }),
-});
+);
 
-test({
-  name: "states 形 attention の中間総量が端数ブロックでも slot 表と厳密一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  // M=5 を 2 行／枚で割ると 3 枚（2 行 + 2 行 + 1 行）— サイズクラスが 2 種同時に生きる唯一の形。
-  fn: () =>
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 attention の中間総量が端数ブロックでも slot 表と厳密一致する（実 GPU）",
+  () =>
     assertPlanBackingMatchesEstimate({
       capacity: 16,
       heads: 64,
@@ -163,13 +155,11 @@ test({
       limitCap: 10240,
       expectedBlocks: 3,
     }),
-});
+);
 
-test({
-  name: "states 形 attention の中間総量が複数枚でも slot 表と厳密一致する（sliding 変種・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  // 列容量 = W−1+M = 8−1+4 = 11 → 1 行 64·11·4 = 2816B。上限 5632B で 2 行／枚の 2 枚。
-  fn: () =>
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 attention の中間総量が複数枚でも slot 表と厳密一致する（sliding 変種・実 GPU）",
+  () =>
     assertPlanBackingMatchesEstimate({
       capacity: 16,
       heads: 64,
@@ -179,7 +169,7 @@ test({
       limitCap: 8192,
       expectedBlocks: 2,
     }),
-});
+);
 
 /**
  * 分解 attention の次元。スコアの 1 行 = `heads·keys·4` = 512B・全幅 = 32KiB で、q / kᵀ / v / y は
@@ -249,26 +239,20 @@ const assertRowBlockAttentionMatchesEstimate = async (variant: {
   }
 };
 
-test({
-  name: "行ブロック attention の中間総量が 1 枚の形で slot 表と厳密一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  // 絞らない（device の上限は全幅 32KiB を優に超える）— 分割が起きなくても窓は融合後の形で数える。
-  fn: () => assertRowBlockAttentionMatchesEstimate({ expectedBlocks: 1 }),
-});
+test.skipIf(!GPU_AVAILABLE)(
+  "行ブロック attention の中間総量が 1 枚の形で slot 表と厳密一致する（実 GPU）",
+  () => assertRowBlockAttentionMatchesEstimate({ expectedBlocks: 1 }),
+);
 
-test({
-  name: "行ブロック attention の中間総量が複数枚でも slot 表と厳密一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  // 8192 ÷ 512 = 16 行／枚 → M = 64 は 16 行 × 4 枚。
-  fn: () => assertRowBlockAttentionMatchesEstimate({ limitCap: 8192, expectedBlocks: 4 }),
-});
+test.skipIf(!GPU_AVAILABLE)(
+  "行ブロック attention の中間総量が複数枚でも slot 表と厳密一致する（実 GPU）",
+  () => assertRowBlockAttentionMatchesEstimate({ limitCap: 8192, expectedBlocks: 4 }),
+);
 
-test({
-  name: "行ブロック attention の中間総量が不揃いの枚数でも slot 表と厳密一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  // 6144 ÷ 512 = 12 行／枚 → ceil(64 / 12) = 6 枚を等分すると 11 行 × 4 枚 + 10 行 × 2 枚。
-  fn: () => assertRowBlockAttentionMatchesEstimate({ limitCap: 6144, expectedBlocks: 6 }),
-});
+test.skipIf(!GPU_AVAILABLE)(
+  "行ブロック attention の中間総量が不揃いの枚数でも slot 表と厳密一致する（実 GPU）",
+  () => assertRowBlockAttentionMatchesEstimate({ limitCap: 6144, expectedBlocks: 6 }),
+);
 
 /**
  * 融合 attention op（states 欄なし — ADR 0023）1 ノードのグラフの形。DiT の self-attention を縮めた形で、
@@ -343,30 +327,24 @@ const assertFusedAttentionMatchesEstimate = async (variant: {
   }
 };
 
-test({
-  name: "融合 attention op の中間総量が slot 表と厳密一致する（f32・予算なし・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () => assertFusedAttentionMatchesEstimate({ options: {}, expectedBlocks: 1 }),
-});
+test.skipIf(!GPU_AVAILABLE)(
+  "融合 attention op の中間総量が slot 表と厳密一致する（f32・予算なし・実 GPU）",
+  () => assertFusedAttentionMatchesEstimate({ options: {}, expectedBlocks: 1 }),
+);
 
-test({
-  name: "融合 attention op の中間総量が予算で割った形でも slot 表と厳密一致する（f32 + mask・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  // S の 1 行 = 4 × 64 × 4 = 1,024B。予算 16 KiB は 16 行 / 枚 → M = 64 は 4 枚。
-  fn: () =>
+test.skipIf(!GPU_AVAILABLE)(
+  "融合 attention op の中間総量が予算で割った形でも slot 表と厳密一致する（f32 + mask・実 GPU）",
+  () =>
     assertFusedAttentionMatchesEstimate({
       options: { attentionRowBlockMaxBytes: 16 * 1024 },
       mask: true,
       expectedBlocks: 4,
     }),
-});
+);
 
-test({
-  name: "融合 attention op の中間総量が a8 + s16 で予算で割った形でも slot 表と厳密一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  // s16 の S の 1 行 = 4 × 64 × 2 = 512B。予算 16 KiB は 32 行 / 枚 → 2 枚。i8a8 の量子化の一時
-  // （qq / qs / kq / ks / vt / vq / vs）と permute・量子化の 4 dispatch がループの外に並ぶ形。
-  fn: () =>
+test.skipIf(!GPU_AVAILABLE)(
+  "融合 attention op の中間総量が a8 + s16 で予算で割った形でも slot 表と厳密一致する（実 GPU）",
+  () =>
     assertFusedAttentionMatchesEstimate({
       options: {
         attentionCompute: "a8",
@@ -375,7 +353,7 @@ test({
       },
       expectedBlocks: 2,
     }),
-});
+);
 
 // ---------------------------------------------------------------------------
 // 実 GPU 突合
@@ -429,10 +407,9 @@ const gpuWeightModel = (): PreparedModel => {
   ]);
 };
 
-test({
-  name: "estimator の重み・state が実測診断と厳密一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "estimator の重み・state が実測診断と厳密一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const weightModel = gpuWeightModel();
@@ -471,4 +448,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

@@ -7,7 +7,7 @@
  * 重複させない。ローカル取得元（相 1 を持たない取得元）側の no-op は `local_test.ts`。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import {
   type AssetPhase,

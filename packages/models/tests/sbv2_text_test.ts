@@ -7,7 +7,7 @@
 // 資産（outputs/misc/sbv2-demo/）に依存するのは末尾の 1 本だけで、それ以外は資産なしで走る。
 
 import { isNotFound, readTextFile, statSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertFalse, assertThrows } from "@std/assert";
 import { Sbv2InputError } from "../src/sbv2/errors.ts";
 import { buildSbv2ModelInput } from "../src/sbv2/text/model-input.ts";
@@ -427,19 +427,15 @@ if (!assetAvailable) {
   );
 }
 
-test({
-  name: "デモ資産: symbols.json が JP-Extra の規則として読める",
-  ignore: !assetAvailable,
-  fn: async () => {
-    const rules = parseJpExtraRules(JSON.parse(await readTextFile(SYMBOLS_PATH)), "symbols.json");
-    // 値そのものは資産が正（TS 側に期待値表を作らない — それをやると資産の意味が消える）。
-    // ここで固定するのは「規則として成立していること」だけ。
-    assertEquals(rules.symbols[0], rules.pad, "記号表の先頭が PAD");
-    assert(rules.toneStart + 1 < rules.numTones, "tone 基点 + 最大 tone(1) が範囲内");
-    assert(rules.languageId < rules.numLanguages, "言語 ID が範囲内");
-    for (const punctuation of rules.punctuations) {
-      assert(rules.symbolToId.has(punctuation), `句読点 ${punctuation} が記号表に無い`);
-    }
-    assert(rules.hopLength > 0 && rules.samplingRate > 0);
-  },
+test.skipIf(!assetAvailable)("デモ資産: symbols.json が JP-Extra の規則として読める", async () => {
+  const rules = parseJpExtraRules(JSON.parse(await readTextFile(SYMBOLS_PATH)), "symbols.json");
+  // 値そのものは資産が正（TS 側に期待値表を作らない — それをやると資産の意味が消える）。
+  // ここで固定するのは「規則として成立していること」だけ。
+  assertEquals(rules.symbols[0], rules.pad, "記号表の先頭が PAD");
+  assert(rules.toneStart + 1 < rules.numTones, "tone 基点 + 最大 tone(1) が範囲内");
+  assert(rules.languageId < rules.numLanguages, "言語 ID が範囲内");
+  for (const punctuation of rules.punctuations) {
+    assert(rules.symbolToId.has(punctuation), `句読点 ${punctuation} が記号表に無い`);
+  }
+  assert(rules.hopLength > 0 && rules.samplingRate > 0);
 });

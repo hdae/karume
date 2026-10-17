@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { closeableGenerator } from "../src/concurrency/closeable-generator.ts";
 

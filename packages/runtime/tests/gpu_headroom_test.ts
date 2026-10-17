@@ -9,7 +9,7 @@
  */
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { fitsHeadroom, probePieces } from "../src/gpu/headroom.ts";
 import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";
@@ -48,11 +48,8 @@ describe("probePieces（試し確保の割り方）", () => {
 });
 
 describe("fitsHeadroom（実 GPU）", () => {
-  it(
+  it.skipIf(!GPU_AVAILABLE)(
     "小さい量は入り、天井を越える量は device を生かしたまま false",
-    {
-      ignore: !GPU_AVAILABLE,
-    },
     async () => {
       const gpu = await acquireGpu();
       try {
@@ -82,11 +79,8 @@ describe("fitsHeadroom（実 GPU）", () => {
     },
   );
 
-  it(
+  it.skipIf(!GPU_AVAILABLE)(
     "true の後は同じ量を本当に確保できる（解放を待ってから返る）",
-    {
-      ignore: !GPU_AVAILABLE,
-    },
     async () => {
       const gpu = await acquireGpu();
       try {

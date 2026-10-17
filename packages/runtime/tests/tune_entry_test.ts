@@ -4,7 +4,7 @@
 // 無い環境で明示 SKIP。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import {
   deriveGeometryProfile,
   type GeometrySweepCaseSummary,
@@ -161,10 +161,9 @@ describe("timestampUnitFor", () => {
 });
 
 describe("runGeometrySweep: 実 GPU", () => {
-  it({
-    name: "中断済みの signal なら行を作らず、設定と adapter を載せた記録を返す",
-    ignore: adapter === null,
-    fn: async () => {
+  it.skipIf(adapter === null)(
+    "中断済みの signal なら行を作らず、設定と adapter を載せた記録を返す",
+    async () => {
       const kinds: GeometrySweepProgress["kind"][] = [];
       const swept = await runGeometrySweep({
         candidateSet: "quick",
@@ -188,12 +187,11 @@ describe("runGeometrySweep: 実 GPU", () => {
       assertEquals(swept.settings.rounds, 1);
       assert(!("cases" in swept.settings), JSON.stringify(swept.settings));
     },
-  });
+  );
 
-  it({
-    name: "1 ケースを quick で測ると既定の行が先頭・全行が既定と出力一致し、通知は started → 行 → ケースの順",
-    ignore: adapter === null,
-    fn: async () => {
+  it.skipIf(adapter === null)(
+    "1 ケースを quick で測ると既定の行が先頭・全行が既定と出力一致し、通知は started → 行 → ケースの順",
+    async () => {
       const id = "linear-m16-n3072-k1024";
       const kinds: GeometrySweepProgress["kind"][] = [];
       const notified: GeometrySweepRow[] = [];
@@ -233,16 +231,15 @@ describe("runGeometrySweep: 実 GPU", () => {
       // 通知の case と記録の cases[] は同じ値（elapsedMs を含む）
       assertEquals(summaries, swept.cases);
     },
-  });
+  );
 });
 
 describe("runGeometrySweep: 実 GPU — 中断の記録（aborted）", () => {
   const id = "linear-m16-n3072-k1024";
 
-  it({
-    name: "ケースの途中（既定の行の直後）で中断すると aborted が true で、そのケースは再測定を持たず elapsedMs を持つ",
-    ignore: adapter === null,
-    fn: async () => {
+  it.skipIf(adapter === null)(
+    "ケースの途中（既定の行の直後）で中断すると aborted が true で、そのケースは再測定を持たず elapsedMs を持つ",
+    async () => {
       const abort = new AbortController();
       const swept = await runGeometrySweep({
         candidateSet: "quick",
@@ -263,12 +260,11 @@ describe("runGeometrySweep: 実 GPU — 中断の記録（aborted）", () => {
       assertEquals(swept.cases[0].defaultRepeat, undefined);
       assertRecordFields(swept);
     },
-  });
+  );
 
-  it({
-    name: "全て測り終えた後（最後のケースの通知）に届いた中断は数えない（aborted が false — 記録は欠けていない）",
-    ignore: adapter === null,
-    fn: async () => {
+  it.skipIf(adapter === null)(
+    "全て測り終えた後（最後のケースの通知）に届いた中断は数えない（aborted が false — 記録は欠けていない）",
+    async () => {
       const abort = new AbortController();
       const swept = await runGeometrySweep({
         candidateSet: "quick",
@@ -284,5 +280,5 @@ describe("runGeometrySweep: 実 GPU — 中断の記録（aborted）", () => {
       assert(swept.cases[0].defaultRepeat !== undefined, "再測定まで測り終えていない");
       assertRecordFields(swept);
     },
-  });
+  );
 });

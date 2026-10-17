@@ -6,7 +6,7 @@
  * 値のビット parity を見る役で、こちらは反例を GPU 抜きで細かく積む役。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { ADALN_NORM_KEY, adalnNormParams } from "../src/kernels/adaln-norm.ts";

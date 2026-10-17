@@ -54,7 +54,7 @@
 // FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "../../runtime/mod.ts";
 import {
@@ -446,24 +446,19 @@ if (!AVAILABLE) {
   );
 }
 
-test({
-  name: "Irodori 資産: 期待するターゲットとケースが揃っている",
-  // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-  ignore: !AVAILABLE,
-  fn: () => {
-    assertEquals(TARGETS, EXPECTED_TARGETS, `${SERIES_ROOT.pathname} のターゲット`);
-    assertEquals(Object.keys(TOLERANCES).sort(), EXPECTED_TARGETS, "ターゲット別 tolerance の表");
-    assertEquals(Object.keys(GRAPH_NAMES).sort(), EXPECTED_TARGETS, "ターゲット別グラフ名の表");
-    for (const target of TARGETS) {
-      assert(Object.hasOwn(EXPECTED_CASES, target), `${target} の期待ケース表が無い`);
-      assertEquals(
-        discoverCases(SERIES_ROOT, target),
-        [...EXPECTED_CASES[target]],
-        `${target} の golden ケース`,
-      );
-      assert(modelPresent(modelUrl(target)), `${target}/${MODEL_FILE} が無い`);
-    }
-  },
+test.skipIf(!AVAILABLE)("Irodori 資産: 期待するターゲットとケースが揃っている", () => {
+  assertEquals(TARGETS, EXPECTED_TARGETS, `${SERIES_ROOT.pathname} のターゲット`);
+  assertEquals(Object.keys(TOLERANCES).sort(), EXPECTED_TARGETS, "ターゲット別 tolerance の表");
+  assertEquals(Object.keys(GRAPH_NAMES).sort(), EXPECTED_TARGETS, "ターゲット別グラフ名の表");
+  for (const target of TARGETS) {
+    assert(Object.hasOwn(EXPECTED_CASES, target), `${target} の期待ケース表が無い`);
+    assertEquals(
+      discoverCases(SERIES_ROOT, target),
+      [...EXPECTED_CASES[target]],
+      `${target} の golden ケース`,
+    );
+    assert(modelPresent(modelUrl(target)), `${target}/${MODEL_FILE} が無い`);
+  }
 });
 
 /**
@@ -481,10 +476,9 @@ for (const target of TARGETS) {
     // The whole case is upstream parity (per-component torch goldens under a tolerance), so it is
     // opt-in. Its io-key / shape / dtype assertions only check the golden file against the graph
     // as preconditions of that comparison, so they stay with it rather than in a default case.
-    test({
-      name: `Irodori golden 突合: ${target} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
-      ignore: !AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY,
-      fn: async () => {
+    test.skipIf(!AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+      `Irodori golden 突合: ${target} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+      async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const ioFile = `${IO_PREFIX}${caseName}${IO_SUFFIX}`;
           const [opened, ioBytes] = await Promise.all([
@@ -571,6 +565,6 @@ for (const target of TARGETS) {
           }
         });
       },
-    });
+    );
   }
 }

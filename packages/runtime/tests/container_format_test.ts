@@ -4,7 +4,7 @@
  */
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { bindDeclarations } from "../src/format/container/bind.ts";
 import {
   parseGraphDescriptor,

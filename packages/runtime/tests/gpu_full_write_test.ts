@@ -13,7 +13,7 @@
 // MUST: 毒値は「ありえない値」ではなく **0 でない有限値**にする。ゼロ埋めの取り違えを見たいので、
 // 0 を毒値にすると pad のゼロ領域と区別できない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type AcquireGpuOptions } from "../src/gpu/device.ts";
 import { referenceLinearI8a8 } from "../src/reference/i8a8.ts";
@@ -97,10 +97,9 @@ const runPoisoned = async (
   }
 };
 
-test({
-  name: "cat はプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "cat はプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
+  async () => {
     // [2,1] + [2,2] → [2,3]。毒値バッファは 6 要素で、cat の出力とサイズクラスが一致する。
     const graph = poisonGraph(
       [2, 3],
@@ -126,12 +125,11 @@ test({
       "毒値の残存",
     );
   },
-});
+);
 
-test({
-  name: "pad のゼロ領域は毒値ではなく厳密に 0 になる（full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "pad のゼロ領域は毒値ではなく厳密に 0 になる（full-write / 実 GPU）",
+  async () => {
     // [2,2] を [1,1] で埋める → [2,4]。ゼロ領域が毒値のまま残れば即座に赤くなる。
     const graph = poisonGraph([2, 4], [{ name: "x", shape: [2, 2] }], {
       op: "pad",
@@ -145,12 +143,11 @@ test({
       assertEquals(Object.is(output.data[index], 0), true, `要素 ${index} が +0 でない`);
     }
   },
-});
+);
 
-test({
-  name: "flip はプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "flip はプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
+  async () => {
     // flip は**全単射**（出力 1 要素 ← 入力 1 要素）なので、書き漏らしが起こるとすれば
     // grid-stride の打ち切りか添字の飛びで、どちらも毒値の残存として出る。
     // [2,3] の軸 1 を反転 → [2,3]（毒値バッファは 6 要素で同サイズクラス）。
@@ -167,12 +164,11 @@ test({
       "毒値の残存",
     );
   },
-});
+);
 
-test({
-  name: "upsample_bilinear2d は毒値を 1 語も残さない（full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "upsample_bilinear2d は毒値を 1 語も残さない（full-write / 実 GPU）",
+  async () => {
     // 出力 1 要素 = 1 スレッドだが、**N·C を 1 本の平面添字へ畳む**ので、平面の切り方を
     // 誤ると特定の平面だけが丸ごと書かれない。B·C = 4 平面（`[2,2,…]`）で踏む。
     // [2,2,2,3] → [2,2,3,2]（要素数 24 で入出力が同サイズクラス = 毒値バッファが配り直される）。
@@ -196,12 +192,11 @@ test({
       assertEquals(output.data[plane * 6 + 5], 6 + plane * 6, `平面 ${plane} の右下`);
     }
   },
-});
+);
 
-test({
-  name: "deform_conv2d は毒値を 1 語も残さない（full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "deform_conv2d は毒値を 1 語も残さない（full-write / 実 GPU）",
+  async () => {
     // 出力 1 要素 = 1 スレッドだが、平坦添字を B / Cout / Hout / Wout の 4 段へ分解するので、
     // 段の切り方を誤ると特定のチャネルやバッチが丸ごと書かれない。バッチ 2 で踏む。
     // x[2,2,3,4] * W[3,2,2,3]・padding [1,1] → Hout 4 / Wout 4 → [2,3,4,4]（96 要素）。
@@ -240,67 +235,62 @@ test({
       "バッチ 2 枚が同一（B の添字分解が効いていない）",
     );
   },
-});
+);
 
-test({
-  name: "gru_scan は毒値を 1 語も残さない（full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
-    // 出力 `[T,N,H]` は「時間ループ × バッチ grid-stride × lane（隠れユニット）」の 3 段で
-    // 書かれる。段のどれかが縮退すると、そのステップ / バッチ / ユニットだけが毒値のまま残る
-    // （contract 検査も CPU 参照突合も**書かれた要素しか見ない**ので、ここが唯一の門）。
-    // MUST: バッチ 2 で踏む（1 workgroup = 1 バッチ要素なので、grid-stride の打ち切りは
-    // N ≥ 2 でしか出ない）。
-    const outShape = [3, 2, 4];
-    const graph = poisonGraph(
-      outShape,
-      [
-        { name: "gi", shape: [3, 2, 12] },
-        { name: "h0", shape: [2, 4] },
-        { name: "w", shape: [12, 4] },
-        { name: "b", shape: [12] },
-      ],
-      { op: "gru_scan", attrs: {} },
-    );
-    const { output, reuseCount } = await runPoisoned(graph, {
-      gi: fill([3, 2, 12], (i) => ((i % 11) - 5) * 0.17),
-      // バッチ 2 枚で違う初期状態（h0 を読み飛ばす実装と、B の段の縮退を同時に踏む）
-      h0: fill([2, 4], (i) => (i < 4 ? 0.6 : -0.4)),
-      w: fill([12, 4], (i) => ((i % 7) - 3) * 0.09),
-      b: fill([12], (i) => ((i % 5) - 2) * 0.13),
-    });
-    assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
-    assertEquals(output.shape, outShape);
+test.skipIf(!GPU_AVAILABLE)("gru_scan は毒値を 1 語も残さない（full-write / 実 GPU）", async () => {
+  // 出力 `[T,N,H]` は「時間ループ × バッチ grid-stride × lane（隠れユニット）」の 3 段で
+  // 書かれる。段のどれかが縮退すると、そのステップ / バッチ / ユニットだけが毒値のまま残る
+  // （contract 検査も CPU 参照突合も**書かれた要素しか見ない**ので、ここが唯一の門）。
+  // MUST: バッチ 2 で踏む（1 workgroup = 1 バッチ要素なので、grid-stride の打ち切りは
+  // N ≥ 2 でしか出ない）。
+  const outShape = [3, 2, 4];
+  const graph = poisonGraph(
+    outShape,
+    [
+      { name: "gi", shape: [3, 2, 12] },
+      { name: "h0", shape: [2, 4] },
+      { name: "w", shape: [12, 4] },
+      { name: "b", shape: [12] },
+    ],
+    { op: "gru_scan", attrs: {} },
+  );
+  const { output, reuseCount } = await runPoisoned(graph, {
+    gi: fill([3, 2, 12], (i) => ((i % 11) - 5) * 0.17),
+    // バッチ 2 枚で違う初期状態（h0 を読み飛ばす実装と、B の段の縮退を同時に踏む）
+    h0: fill([2, 4], (i) => (i < 4 ? 0.6 : -0.4)),
+    w: fill([12, 4], (i) => ((i % 7) - 3) * 0.09),
+    b: fill([12], (i) => ((i % 5) - 2) * 0.13),
+  });
+  assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
+  assertEquals(output.shape, outShape);
+  assertEquals(
+    [...output.data].filter((value) => value === POISON),
+    [],
+    "毒値の残存",
+  );
+  // MUST: バッチ 2 枚が**別の値**（B の段を落とすと 2 枚目が 1 枚目の複製になり、毒値検査
+  // だけでは素通りする）。h0 が枚ごとに違うので、段が効いていれば必ず割れる。
+  for (let step = 0; step < outShape[0]; step += 1) {
+    const base = step * 8;
     assertEquals(
-      [...output.data].filter((value) => value === POISON),
-      [],
-      "毒値の残存",
-    );
-    // MUST: バッチ 2 枚が**別の値**（B の段を落とすと 2 枚目が 1 枚目の複製になり、毒値検査
-    // だけでは素通りする）。h0 が枚ごとに違うので、段が効いていれば必ず割れる。
-    for (let step = 0; step < outShape[0]; step += 1) {
-      const base = step * 8;
-      assertEquals(
-        [...output.data.slice(base, base + 4)].every(
-          (value, index) => value === output.data[base + 4 + index],
-        ),
-        false,
-        `t=${step}: バッチ 2 枚が同一（B の段が効いていない）`,
-      );
-    }
-    // MUST: 時間方向にも値が動いている（時間ループが 1 ステップで打ち切られていない）。
-    assertEquals(
-      [...output.data.slice(0, 8)].every((value, index) => value === output.data[8 + index]),
+      [...output.data.slice(base, base + 4)].every(
+        (value, index) => value === output.data[base + 4 + index],
+      ),
       false,
-      "t=0 と t=1 が同一（時間ループが縮退している）",
+      `t=${step}: バッチ 2 枚が同一（B の段が効いていない）`,
     );
-  },
+  }
+  // MUST: 時間方向にも値が動いている（時間ループが 1 ステップで打ち切られていない）。
+  assertEquals(
+    [...output.data.slice(0, 8)].every((value, index) => value === output.data[8 + index]),
+    false,
+    "t=0 と t=1 が同一（時間ループが縮退している）",
+  );
 });
 
-test({
-  name: "conv2d 直接カーネル（groups>1）は毒値を 1 語も残さない（full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv2d 直接カーネル（groups>1）は毒値を 1 語も残さない（full-write / 実 GPU）",
+  async () => {
     // 出力の全バイトを 1 スレッド 1 要素で書く形（ADR 0017）。grid-stride の打ち切りや
     // 平坦添字の分解（B / Cout / H / W の 4 段）の誤りは、書かれない要素 = 毒値の残存に出る。
     // MUST: **groups > 1**（ADR 0024 の踏み分けで直接カーネルへ流れる側）。groups == 1 は
@@ -331,7 +321,7 @@ test({
       "毒値の残存",
     );
   },
-});
+);
 
 /**
  * conv2d の implicit GEMM（`groups == 1` — ADR 0024）は GEMM 骨格と同じタイル書き出しなので、
@@ -376,10 +366,9 @@ const CONV2D_IGEMM_POISON_CASES: readonly {
   },
 ];
 
-test({
-  name: "conv2d の implicit GEMM は毒値を 1 語も残さない（タイル書き出しの full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv2d の implicit GEMM は毒値を 1 語も残さない（タイル書き出しの full-write / 実 GPU）",
+  async () => {
     for (const testCase of CONV2D_IGEMM_POISON_CASES) {
       const graph = poisonGraph(
         testCase.outShape,
@@ -404,12 +393,11 @@ test({
       );
     }
   },
-});
+);
 
-test({
-  name: "rms_norm は毒値を 1 語も残さない（行カーネルの full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "rms_norm は毒値を 1 語も残さない（行カーネルの full-write / 実 GPU）",
+  async () => {
     // 行ループの縮退（grid-stride）や行内ループの打ち切りは「書かれない行 / 列」を残す。
     // [3,4]（毒値バッファは 12 要素で同サイズクラス）。
     const graph = poisonGraph(
@@ -431,7 +419,7 @@ test({
       "毒値の残存",
     );
   },
-});
+);
 
 /**
  * GEMM 3 op（matmul / bmm / linear）のタイル書き出し（64×64 レジスタタイル — src/kernels/gemm.ts）。
@@ -509,10 +497,9 @@ const GEMM_POISON_CASES: readonly {
   },
 ];
 
-test({
-  name: "GEMM 3 op は毒値を 1 語も残さない（タイル書き出しの full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "GEMM 3 op は毒値を 1 語も残さない（タイル書き出しの full-write / 実 GPU）",
+  async () => {
     for (const testCase of GEMM_POISON_CASES) {
       const graph = poisonGraph(testCase.outShape, testCase.operands, {
         op: testCase.op,
@@ -532,12 +519,11 @@ test({
       );
     }
   },
-});
+);
 
-test({
-  name: "conv_transpose1d は毒値を 1 語も残さない（gather 形の full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv_transpose1d は毒値を 1 語も残さない（gather 形の full-write / 実 GPU）",
+  async () => {
     // 素直な scatter 実装（入力 1 点を出力の複数点へ散らす）はゼロ初期化前提なので、
     // プール再利用バッファでは寄与の無い位置に毒値が残る。gather 形はここを必ず書く。
     // x[1,1,3] * W[1,2,4] stride=2 padding=1 → [1,2,6]（毒値バッファは 12 要素で同サイズ）。
@@ -562,7 +548,7 @@ test({
       "毒値の残存",
     );
   },
-});
+);
 
 /**
  * w8a8 linear（1 ノード = 2 dispatch）の**ノード内一時バッファ** `xq` / `xs` の full-write。
@@ -603,10 +589,9 @@ const i8a8PoisonGraph = (
   ],
 });
 
-test({
-  name: "i8a8 linear の一時バッファ（xq / xs）が毒値を 1 語も残さない（full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "i8a8 linear の一時バッファ（xq / xs）が毒値を 1 語も残さない（full-write / 実 GPU）",
+  async () => {
     // m=4 / n=5 / k=8 → y = 80 バイト・xq = m·k = 32 バイト・xs = m·4 = 16 バイト。
     // 3 つとも別のサイズクラスなので、毒値の行き先を毒値バッファの大きさで選び分けられる。
     const m = 4;
@@ -673,12 +658,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "attention は 3 dispatch でも出力の全バイトを書く（毒値の残存なし / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attention は 3 dispatch でも出力の全バイトを書く（毒値の残存なし / 実 GPU）",
+  async () => {
     // 融合 attention は 1 ノード = 3 dispatch（① QK → ② 行統計 → ③ PV — ADR 0023）。
     // full-write が掛かるのは**ノードの出力 O** で、③ の書き出しが端タイルを取りこぼすと
     // プール再利用バッファの毒値がそのまま結果に残る（cat と同じ「複数 dispatch で 1 ノード」）。
@@ -707,7 +691,7 @@ test({
     // 恒真化の門: 出力が全て同じ値なら「毒値が無い」は何も検証していない
     assert(new Set([...output.data]).size > 1, "出力が定数（毒値検査が恒真になっている）");
   },
-});
+);
 
 /**
  * S の **f16 格納**変種（案 γ 波 1）の full-write。
@@ -721,10 +705,9 @@ test({
  * MUST: 適格形（`D % 4 == 0 && N % 4 == 0`）を使う — 非適格だと f32 格納へ縮退して
  * この変種を 1 度も踏まない。
  */
-test({
-  name: "S の f16 格納変種も毒値を 1 語も残さない（①QK の 2 語書き / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "S の f16 格納変種も毒値を 1 語も残さない（①QK の 2 語書き / 実 GPU）",
+  async () => {
     for (const testCase of [
       // 1 タイルに収まる最小形（S 144B / 行統計 48B / O 96B は全て別クラス）
       { name: "attention s16 小 M3 N12 D4", m: 3, n: 12, d: 4 },
@@ -759,7 +742,7 @@ test({
       assert(new Set([...output.data]).size > 1, `${name}: 出力が定数`);
     }
   },
-});
+);
 
 /**
  * f16 **計算**変種（ADR 0028）の full-write。族が増えたので、書き出しのガードが変種ごとに
@@ -768,10 +751,9 @@ test({
  * NOTE: 融合 attention の S は f16 変種では**半分のバイト数**になるためサイズクラスが変わり、
  * 毒値バッファが配り直されるのはノード出力 O だけ、という前提は f32 変種と同じまま。
  */
-test({
-  name: "f16 計算変種も毒値を 1 語も残さない（タイル書き出しの full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE || !SHADER_F16_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE || !SHADER_F16_AVAILABLE)(
+  "f16 計算変種も毒値を 1 語も残さない（タイル書き出しの full-write / 実 GPU）",
+  async () => {
     const acquire = { shaderF16: true } as const;
 
     const attention = await runPoisoned(
@@ -833,12 +815,11 @@ test({
       );
     }
   },
-});
+);
 
-test({
-  name: "軸 reduce は毒値を 1 語も残さない（full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "軸 reduce は毒値を 1 語も残さない（full-write / 実 GPU）",
+  async () => {
     // 軸変種は「1 スレッド = 1 出力」で `out[t]` を 1 回だけ書く。grid-stride の打ち切りや
     // `out_count` の取り違えは、書かれない要素 = 毒値の残存として出る（行 reduce と違い
     // workgroup 単位ではないので、打ち切りの粒度も違う = 別の検出対象）。
@@ -863,4 +844,4 @@ test({
       "毒値の残存",
     );
   },
-});
+);

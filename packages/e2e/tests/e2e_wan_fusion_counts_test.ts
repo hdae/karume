@@ -7,7 +7,7 @@
  */
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import type { ContainerManifest } from "../../runtime/tests/helpers/container-graph.ts";
@@ -71,10 +71,9 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
  * ヒット数は S に依存しない（DiT は S = 192 と実寸 14,040 の 2 点）。0 が非 0 に変わったら、まず
  * ROPE_RULE / ADALN_RULE の受理集合が意図せず広がっていないかを見る（Irodori DiT の門と同じ読み方）。
  */
-test({
-  name: "実資産の Wan2.1 は run 1 回で DiT silu 2・VAE の chunk グラフ silu 29 / upsample2x 3 を掴む（rope / adaln は綴りが違って 0）",
-  ignore: !WAN_AVAILABLE,
-  fn: async () => {
+test.skipIf(!WAN_AVAILABLE)(
+  "実資産の Wan2.1 は run 1 回で DiT silu 2・VAE の chunk グラフ silu 29 / upsample2x 3 を掴む（rope / adaln は綴りが違って 0）",
+  async () => {
     const transformer = await readWanGraph("transformer");
     for (const sequence of [192, 14040]) {
       assertEquals(
@@ -92,4 +91,4 @@ test({
       );
     }
   },
-});
+);

@@ -19,7 +19,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { sweepCaseSetId } from "../tune.ts";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";

@@ -27,7 +27,7 @@
 // 通して、判定の分岐そのものを実 GPU 上で踏む。MUST: 注入が効いていること自体を先に門にする
 // （置換が空振りすると「壊したのに一致した」= 恒真テストになる）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 import {
@@ -368,10 +368,9 @@ test("メモ: 同時の要求は 1 回の実行を共有し、OOM で落ちた�
 // (1) 健全な device（この Linux / NVIDIA）
 // ---------------------------------------------------------------------------
 
-test({
-  name: "素の判定は dp4a を選び、分岐と厳密一致フラグが整合する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "素の判定は dp4a を選び、分岐と厳密一致フラグが整合する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const decision = await decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY);
@@ -405,7 +404,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 既定でない i8a8 attention 幾何（64×64 タイル — 既定は ①QK 128×64 / ③PV 64×128、apple-metal-3
@@ -414,10 +413,9 @@ test({
  */
 const PROFILE_GEOMETRY: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 };
 
-test({
-  name: "プロファイルの幾何を渡すとカナリアはその幾何の生成物を撃ち、判定が得られる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "プロファイルの幾何を渡すとカナリアはその幾何の生成物を撃ち、判定が得られる（実 GPU）",
+  async () => {
     const geometry = { qk: PROFILE_GEOMETRY, pv: PROFILE_GEOMETRY };
     const gpu = await acquireGpu();
     try {
@@ -470,16 +468,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // (2) 故障注入（不一致経路の分岐）
 // ---------------------------------------------------------------------------
 
-test({
-  name: "dp4a 変種だけが既知解を外すと attention は emu へ落ちる（実 GPU・故障注入）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "dp4a 変種だけが既知解を外すと attention は emu へ落ちる（実 GPU・故障注入）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const decision = await decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_DP4A);
@@ -499,12 +496,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "両変種が既知解を外すと GpuFeatureError で落ちる（縮退先が無い・実 GPU・故障注入）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "両変種が既知解を外すと GpuFeatureError で落ちる（縮退先が無い・実 GPU・故障注入）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const error = await assertRejects(
@@ -521,16 +517,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // (2') 故障注入（判定則 v2 の帯の分岐 — Apple M2 の実測が要求した経路）
 // ---------------------------------------------------------------------------
 
-test({
-  name: "両腕が同一の微小エピローグ摂動で帯内に留まると dp4a のまま通る（実 GPU・故障注入）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "両腕が同一の微小エピローグ摂動で帯内に留まると dp4a のまま通る（実 GPU・故障注入）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const decision = await decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, NUDGE_BOTH);
@@ -547,12 +542,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "両腕が同一でも帯外の摂動なら GpuFeatureError（ビット同一は免罪符でない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "両腕が同一でも帯外の摂動なら GpuFeatureError（ビット同一は免罪符でない・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const error = await assertRejects(
@@ -564,12 +558,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "片腕だけが帯内ならその腕を採る（M2 + dp4a 故障の姿・実 GPU・故障注入）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "片腕だけが帯内ならその腕を採る（M2 + dp4a 故障の姿・実 GPU・故障注入）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const decision = await decideAttentionI8a8Dot(
@@ -585,7 +578,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // (3) Session からの利用（メモ化 1 回 / 席の反映 / a8 でない Session は払わない）
@@ -630,10 +623,9 @@ const runAttention = async (
   }
 };
 
-test({
-  name: "カナリアの判定は device 単位に 1 度で、a8 Session はその席を読む（実 GPU・故障注入）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "カナリアの判定は device 単位に 1 度で、a8 Session はその席を読む（実 GPU・故障注入）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // 実機は健全なので、注入した判定をメモへ**先に**焼く（焼かなければ dp4a になる）。
@@ -660,7 +652,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **census**（ADR 0058 決定 4）。注入した席（`BREAK_DP4A` で emu へ倒した判定）が Session の
@@ -672,10 +664,9 @@ test({
  * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  * `acquireGpu` は呼ぶたび新しい device を作るのでメモの席もこのテスト専用。
  */
-test({
-  name: "注入した席（emu）は a8 Session の ①QK / ③PV の両方に届く（実 GPU・故障注入）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "注入した席（emu）は a8 Session の ①QK / ③PV の両方に届く（実 GPU・故障注入）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const seeded = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() =>
@@ -701,12 +692,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "attentionCompute が 'a8' でない Session はカナリアを 1 dispatch も払わない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attentionCompute が 'a8' でない Session はカナリアを 1 dispatch も払わない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       await runAttention(gpu, {});
@@ -723,4 +713,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

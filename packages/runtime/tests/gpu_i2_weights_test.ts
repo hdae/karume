@@ -1,5 +1,5 @@
 // INT2 の packed 実行・CPU展開・借用を、同じ復元値の f32 経路と突き合わせる。
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import type { OpenedContainer } from "../src/format/container/open.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
@@ -103,10 +103,9 @@ const openLinear = (
 const bits = (tensor: Tensor): Uint32Array<ArrayBuffer> =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.byteLength / 4);
 
-test({
-  name: "INT2 linear は GEMV・行ブロック・prefill GEMM・端列で f32 展開とビット一致する",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "INT2 linear は GEMV・行ブロック・prefill GEMM・端列で f32 展開とビット一致する",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const [m, n, k] of [
@@ -165,12 +164,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "INT2 embedding は全2bit位置を復元し同じ表を linear へ借用できる",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "INT2 embedding は全2bit位置を復元し同じ表を linear へ借用できる",
+  async () => {
     const gpu = await acquireGpu();
     const n = 7,
       k = 64,
@@ -230,12 +228,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "INT2 の一般消費はCPUで展開し非対応の計算指定を拒否する",
-  ignore: !GPU_AVAILABLE || !SHADER_F16_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE || !SHADER_F16_AVAILABLE)(
+  "INT2 の一般消費はCPUで展開し非対応の計算指定を拒否する",
+  async () => {
     const gpu = await acquireGpu({ shaderF16: true });
     const n = 4,
       k = 64,
@@ -277,12 +274,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "INT2 の行分割ロードは全量ロードと一致する（packed / CPU展開）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "INT2 の行分割ロードは全量ロードと一致する（packed / CPU展開）",
+  async () => {
     const gpu = await acquireGpu();
     const n = 7,
       k = 64,
@@ -322,12 +318,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "INT2 行ブロックは長い縮約と端の行でも M=1 の積和とビット一致する",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "INT2 行ブロックは長い縮約と端の行でも M=1 の積和とビット一致する",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // r1 / r2 / r4、語の先読みと残り、長い K を跨ぐ。scale と bias は2冪に限定しない。
@@ -377,4 +372,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

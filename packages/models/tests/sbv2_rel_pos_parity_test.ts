@@ -3,7 +3,7 @@
 // "no table baked into the container" check read the series assets, so they live in
 // packages/e2e/tests/e2e_sbv2_rel_pos_parity_test.ts.
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { buildRelPosTables } from "../src/sbv2/text/rel-pos-tables.ts";
 

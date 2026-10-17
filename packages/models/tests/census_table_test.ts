@@ -12,7 +12,7 @@
 
 import { isNotFound, readDir, readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { type Manifest, parseManifest, type SessionSpec } from "@karume/hub";
 import { resolveGemmaSessionOptions } from "../src/gemma/session-options.ts";
 import {
@@ -159,30 +159,26 @@ if (MIRRORS.length === 0) {
   );
 }
 
-describe({
-  name: "配布ミラーの束は census 表に行を持つ",
-  ignore: MIRRORS.length === 0,
-  fn: () => {
-    it("非参照値を持つ全 quant 席の (系列, モデル, 実効 SessionOptions) に行がある", () => {
-      const missing: string[] = [];
-      let bundles = 0;
-      for (const [mirror, manifest] of MIRRORS) {
-        for (const [modelName, entry] of Object.entries(manifest.models)) {
-          const family = entry.pipeline.name;
-          for (const [quantName, quant] of Object.entries(entry.quants)) {
-            const where = `${mirror} ${modelName} '${quantName}'`;
-            const effective = effectiveSessionOptions(family, quant.session, {}, where);
-            if (bundleKey(effective) === "") continue;
-            bundles++;
-            if (censusRowOf(family, modelName, effective) === undefined) {
-              missing.push(`${where}: ${family} [${bundleKey(effective)}]`);
-            }
+describe.skipIf(MIRRORS.length === 0)("配布ミラーの束は census 表に行を持つ", () => {
+  it("非参照値を持つ全 quant 席の (系列, モデル, 実効 SessionOptions) に行がある", () => {
+    const missing: string[] = [];
+    let bundles = 0;
+    for (const [mirror, manifest] of MIRRORS) {
+      for (const [modelName, entry] of Object.entries(manifest.models)) {
+        const family = entry.pipeline.name;
+        for (const [quantName, quant] of Object.entries(entry.quants)) {
+          const where = `${mirror} ${modelName} '${quantName}'`;
+          const effective = effectiveSessionOptions(family, quant.session, {}, where);
+          if (bundleKey(effective) === "") continue;
+          bundles++;
+          if (censusRowOf(family, modelName, effective) === undefined) {
+            missing.push(`${where}: ${family} [${bundleKey(effective)}]`);
           }
         }
       }
-      assertEquals(missing, [], "census 表（helpers/census-table.ts）に行の無い束");
-      // 0 件で緑になる形（ミラーはあるが非参照値の束を 1 つも読めていない）を通さない。
-      assert(bundles > 0, "ミラーはあるが非参照値の束を 1 つも検査していない");
-    });
-  },
+    }
+    assertEquals(missing, [], "census 表（helpers/census-table.ts）に行の無い束");
+    // 0 件で緑になる形（ミラーはあるが非参照値の束を 1 つも読めていない）を通さない。
+    assert(bundles > 0, "ミラーはあるが非参照値の束を 1 つも検査していない");
+  });
 });

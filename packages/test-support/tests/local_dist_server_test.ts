@@ -5,7 +5,7 @@
 // ので、パス門・配信表・起動時検査はここで縛る。観測はステータスコードと文言の部分一致。
 
 import { makeTempDir, mkdir, remove, writeFile, writeTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { serveLocalDist } from "@karume/test-support/local-dist-server";
 

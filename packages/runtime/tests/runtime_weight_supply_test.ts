@@ -17,7 +17,7 @@
 // tests/gpu_write_buffer_copy_test.ts が持つ。
 
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import type { BoundContainer } from "../src/format/container/bind.ts";
 import { openMemoryContainer } from "../src/format/container/memory.ts";
 import { parseIrDeclarationValue } from "../src/format/ir.ts";

@@ -14,7 +14,7 @@
 //
 // torch（torchvision）そのものとの突合は golden `deform_conv2d_block`（e2e_golden_test.ts）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
 import { RunArena } from "../src/gpu/arena.ts";
@@ -264,10 +264,9 @@ const runBoth = async (
   }
 };
 
-test({
-  name: "deform_conv2d は offset 0・mask 1 で conv2d 直接カーネルとビット同一（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "deform_conv2d は offset 0・mask 1 で conv2d 直接カーネルとビット同一（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of PARITY_CASES) {
@@ -289,7 +288,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 単一ノードグラフで deform_conv2d を 1 回走らせる（executor 経路）。 */
 const runDeform = async (
@@ -320,10 +319,9 @@ const runDeform = async (
   }
 };
 
-test({
-  name: "deform_conv2d の境界は clamp ではなくゼロ埋め（手計算値と厳密一致 / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "deform_conv2d の境界は clamp ではなくゼロ埋め（手計算値と厳密一致 / 実 GPU）",
+  async () => {
     // 1×1 カーネル・Cin=Cout=1・weight 1・bias 0 なので、出力は
     // `mask · bilinear(x, oy + off_y, ox + off_x)` そのもの（値は f32 で厳密）。
     const x = fill([1, 1, 2, 2], (i) => 1 + i);
@@ -349,12 +347,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "deform_conv2d の NaN offset は 0 に落ちず出力へ伝播する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "deform_conv2d の NaN offset は 0 に落ちず出力へ伝播する（実 GPU）",
+  async () => {
     // 正の形の範囲判定（`> −1 && < in`）は NaN で false 側に落ちるので、ビット列判定で
     // NaN を先に分けていなければ**この出力は 0 になる**（沈黙誤値）。
     const x = fill([1, 1, 2, 2], (i) => 1 + i);
@@ -377,4 +374,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

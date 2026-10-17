@@ -43,7 +43,7 @@ import {
   statSync,
   writeFile,
 } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   assert,
   assertEquals,
@@ -293,12 +293,10 @@ const textOf = (pipeline: WanPipeline, name: string): string => {
   return entry.prompt;
 };
 
-test({
-  name:
-    "Wan の text_encoder の差し替えの対照（GPU 不要・模擬 GPU）: 差さず umT5 の越境先の mapping も無ければ、" +
+test.skipIf(!DIST_PRESENT)(
+  "Wan の text_encoder の差し替えの対照（GPU 不要・模擬 GPU）: 差さず umT5 の越境先の mapping も無ければ、" +
     "umT5 の part 0 の事前取得で「越境先が無い」の案内を cause に持って落ち、Wan の取得元から umT5 の part を読まない",
-  ignore: !DIST_PRESENT,
-  fn: async () => {
+  async () => {
     const wanParts = await wanTextEncoderParts();
     const [part0] = wanParts;
     const reads: Read[] = [];
@@ -325,15 +323,13 @@ test({
       "umT5 の part を Wan の取得元から読もうとした",
     );
   },
-});
+);
 
-test({
-  name:
-    `Wan の text_encoder の差し替え（実 GPU・opt-in ${SWAP_ENV}）: umT5 の越境先の mapping 無しで構築が通り、` +
+test.skipIf(SWAP_DIRECTORY === undefined || !DIST_PRESENT || !GPU_AVAILABLE)(
+  `Wan の text_encoder の差し替え（実 GPU・opt-in ${SWAP_ENV}）: umT5 の越境先の mapping 無しで構築が通り、` +
     "差し替え先の束縛された block が全部 text 段で差し替え先から読み切られ（ほかに text encoder のバイト列の出所が無い）、" +
     "2 ステップの生成が非有限 0・宣言どおりの形",
-  ignore: SWAP_DIRECTORY === undefined || !DIST_PRESENT || !GPU_AVAILABLE,
-  fn: async () => {
+  async () => {
     assert(SWAP_DIRECTORY !== undefined);
     const swapRoot = directoryUrl(SWAP_DIRECTORY);
     assert(
@@ -516,4 +512,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

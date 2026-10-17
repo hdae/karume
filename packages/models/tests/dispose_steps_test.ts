@@ -15,7 +15,7 @@
 // `#disposal ??= #chain(...)` の側の性質で、実 GPU の e2e が踏む（内部取得の GPU をスタブに
 // 差し替える口が無いため、ここでは helper の振る舞いだけを縛る）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { disposeSteps } from "../src/session/dispose-steps.ts";
 

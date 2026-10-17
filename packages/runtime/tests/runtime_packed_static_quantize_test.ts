@@ -7,7 +7,7 @@
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import type { IrGraph } from "../src/format/ir.ts";
 import { mergedGraph } from "../src/format/container/bind.ts";
 import { type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";

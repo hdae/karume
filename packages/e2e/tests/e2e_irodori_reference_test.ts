@@ -13,7 +13,7 @@
 //
 // 資産が欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareContainer } from "@karume/runtime";
 import { normalizeReference, reflectPadToHop } from "../../models/src/irodori/host/reference.ts";
@@ -162,18 +162,15 @@ const assertLatentShape = (name: string, { frames, actual, expected }: ChainResu
 // The shape gate stays in the default run: a wrong frame width still yields a valid tensor, and
 // only the element count against the golden latent catches it. The value comparison (atol) is
 // upstream parity and is opt-in.
-test({
-  name: "e2e(実GPU): 参照音声 → 正規化 → pad → codec encoder の latent の形が golden と一致する",
-  ignore: !RUNNABLE,
-  fn: () => runChainOverCases(assertLatentShape),
-});
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 参照音声 → 正規化 → pad → codec encoder の latent の形が golden と一致する",
+  () => runChainOverCases(assertLatentShape),
+);
 
-test({
-  name:
-    "e2e(実GPU): 参照音声 → 正規化 → pad → codec encoder が golden の latent と一致する" +
+test.skipIf(!RUNNABLE || !UPSTREAM_PARITY)(
+  "e2e(実GPU): 参照音声 → 正規化 → pad → codec encoder が golden の latent と一致する" +
     UPSTREAM_PARITY_OPT_IN,
-  ignore: !RUNNABLE || !UPSTREAM_PARITY,
-  fn: async () => {
+  async () => {
     let worst = 0;
     await runChainOverCases((name, result) => {
       assertLatentShape(name, result);
@@ -199,4 +196,4 @@ test({
     });
     console.log(`[e2e] irodori 参照音声: 最悪 maxAbs ${worst.toExponential(4)}`);
   },
-});
+);

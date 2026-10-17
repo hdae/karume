@@ -18,7 +18,7 @@
 // MUST: B / H / Hkv / M / N / D は複数形状（端数・v4・行タイル 2 枚跨ぎ）を回す。カーネルは
 // B·H を 1 本のバッチ軸に畳むので、B=1 だけでは `b·Hkv + h/r` の恒等式が検証されない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { attentionPvKey, attentionQkKey } from "../src/kernels/attention.ts";
@@ -244,10 +244,9 @@ const assertBitEqual = (fused: Tensor, split: Tensor, where: string): void => {
   assert(new Set(bits(fused)).size > 1, `${where}: 出力が定数（ビット一致が恒真になっている）`);
 };
 
-test({
-  name: "GQA 形 attention の出力が repeat_kv 実体化版と**ビット単位で一致**する（r ∈ {1,2,4,8}・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "GQA 形 attention の出力が repeat_kv 実体化版と**ビット単位で一致**する（r ∈ {1,2,4,8}・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of SHAPES) {
@@ -262,16 +261,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * mask / s16 との**直交**（GQA は K / V の base だけの軸）。mask は `[1,1,M,N]` のまま Hkv に
  * 依らず、S の f16 格納も書き手と読み手が同時に切り替わるだけで写像には触れない。
  */
-test({
-  name: "GQA は加算 mask と S の f16 格納（s16）と直交してビット同一を保つ（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "GQA は加算 mask と S の f16 格納（s16）と直交してビット同一を保つ（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // mask 付き（r=4・行タイル 2 枚跨ぎ）
@@ -317,7 +315,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **故障注入**（ADR 0067 決定 2 の受入条件）。head 対応を取り違えた実体化と突き合わせて
@@ -328,10 +326,9 @@ test({
  * ② ③PV 側の写像漏れ: K だけ正しく実体化し、V は **kv-head 0 に張り付いた**形にする
  *    （①QK を写して ③PV を写し忘れたカーネルが出す値と同型 — S は正しいのに V だけ別 head）。
  */
-test({
-  name: "GQA のビット同一の門は head 写像の誤り（r 誤り・③PV の写像漏れ）を検出する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "GQA のビット同一の門は head 写像の誤り（r 誤り・③PV の写像漏れ）を検出する（実 GPU）",
+  async () => {
     const shape = INJECT_SHAPE;
     const gpu = await acquireGpu();
     try {
@@ -366,7 +363,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **census**（ADR 0058 決定 4）。r > 1 では GQA 変種のキーが**実際に走った**こと、r = 1 では
@@ -376,10 +373,9 @@ test({
  * 無条件に FAIL にする（「entries が空なら次の形へ」で守ると全ケースが無検査のまま緑になる —
  * tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
-test({
-  name: "GQA のキーは r > 1 でだけ立つ（r=1 は従来キーのまま・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "GQA のキーは r > 1 でだけ立つ（r=1 は従来キーのまま・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of SHAPES) {
@@ -412,7 +408,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **GQA × i8a8 は fail loudly**（ADR 0067 決定 3 — 黙って f32 経路へ落とすと性能が静かに変わる。
@@ -424,10 +420,9 @@ test({
  * MUST: 段別適格判定を跨いだ非適格形（{@link I8A8_INELIGIBLE}）も**同じ**エラーで落ちること
  * まで見る — 拒否が要求モードではなく段の適格性で決まる実装では、そこだけが沈黙で縮退する。
  */
-test({
-  name: "GQA × attentionCompute 'a8' は fail loudly（段別適格性に依らず・同形の非 GQA は走る・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "GQA × attentionCompute 'a8' は fail loudly（段別適格性に依らず・同形の非 GQA は走る・実 GPU）",
+  async () => {
     const shape = SHAPES[2];
     const gpu = await acquireGpu();
     try {
@@ -471,4 +466,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

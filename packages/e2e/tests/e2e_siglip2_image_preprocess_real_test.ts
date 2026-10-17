@@ -54,7 +54,7 @@
 // 採り直しの途中で落ちた資産が黙って通る）。runtime 側 e2e と同じ流儀。
 
 import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { normalizeToNchw, resizeRgb8 } from "../../models/src/image/preprocess.ts";
@@ -171,29 +171,23 @@ for (const series of SERIES) {
     );
   }
 
-  test({
-    name: `実画像前処理 資産: ${series} — golden と PNG が揃っている`,
-    // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-    ignore: !anyAsset,
-    fn: () => {
-      assert(
-        goldens === 0 || goldens === REAL_CASES.length,
-        `${series} の実画像 golden が ${goldens}/${REAL_CASES.length} 本` +
-          `（採り直す: ${generateCommand(series)}）`,
-      );
-      assert(
-        imageCount === 0 || imageCount === REAL_CASES.length,
-        `${CORPUS_DIR.pathname} の実画像が ${imageCount}/${REAL_CASES.length} 枚` +
-          `（焼き直す: ${IMAGE_COMMAND}）`,
-      );
-    },
+  test.skipIf(!anyAsset)(`実画像前処理 資産: ${series} — golden と PNG が揃っている`, () => {
+    assert(
+      goldens === 0 || goldens === REAL_CASES.length,
+      `${series} の実画像 golden が ${goldens}/${REAL_CASES.length} 本` +
+        `（採り直す: ${generateCommand(series)}）`,
+    );
+    assert(
+      imageCount === 0 || imageCount === REAL_CASES.length,
+      `${CORPUS_DIR.pathname} の実画像が ${imageCount}/${REAL_CASES.length} 枚` +
+        `（焼き直す: ${IMAGE_COMMAND}）`,
+    );
   });
 
   for (const entry of REAL_CASES) {
-    test({
-      name: `実画像前処理パリティ: ${series} / ${entry.name}（TS の f64 経路 対 torchvision）`,
-      ignore: !runnable,
-      fn: async () => {
+    test.skipIf(!runnable)(
+      `実画像前処理パリティ: ${series} / ${entry.name}（TS の f64 経路 対 torchvision）`,
+      async () => {
         const [goldenBytes, png] = await Promise.all([
           readBytes(goldenUrl(series, entry.name)),
           readBytes(new URL(entry.file, CORPUS_DIR)),
@@ -250,6 +244,6 @@ for (const series of SERIES) {
             `（標本 ${worst}: ${got[worst]} 対 ${expected[worst]}）が ${PIXEL_ATOL} を超えた`,
         );
       },
-    });
+    );
   }
 }

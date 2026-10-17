@@ -6,7 +6,7 @@
  * missing the case SKIPs explicitly with a reason (ADR 0005).
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { FusionCounts } from "../../runtime/src/runtime/fusion.ts";
 import { readContainerGraph } from "../../runtime/tests/helpers/container-graph.ts";
@@ -28,10 +28,9 @@ if (!MINICPM5_DECODE_AVAILABLE) {
  * （片方だけ動いたら、どちらの発行形が変わったのかがこの対で割れる）。silu 24 は 24 層の
  * gate MLP。
  */
-test({
-  name: "実資産の MiniCPM5 decode は rope 48 / silu 24 を掴む（M 非依存）",
-  ignore: !MINICPM5_DECODE_AVAILABLE,
-  fn: async () => {
+test.skipIf(!MINICPM5_DECODE_AVAILABLE)(
+  "実資産の MiniCPM5 decode は rope 48 / silu 24 を掴む（M 非依存）",
+  async () => {
     const graph = await readContainerGraph(
       MINICPM5_DECODE_MODEL.part0,
       MINICPM5_DECODE_MODEL.graph,
@@ -41,4 +40,4 @@ test({
       assertEquals(decodeFusionCounts(graph, rows), expected, `M=${rows}`);
     }
   },
-});
+);

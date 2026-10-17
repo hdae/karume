@@ -22,7 +22,7 @@
 // NOTE: 容器のグラフ名は綴らず、系列のグラフ名の表（`packages/models/tests/helpers/series-graphs.ts` — 門番
 // `e2e_assets_gate_test.ts` と同じ正本）から引く。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { prepareContainer, type PreparedModel } from "@karume/runtime";
 import { wanVaeChunkLayout, wanVaeFrameCount } from "../../models/src/wan/vae-chunks.ts";
@@ -138,25 +138,21 @@ const irViolations = (graph: Graph): readonly string[] => {
   return violations;
 };
 
-test({
-  name: "Wan2.2 TI2V VAE chunk 資産: 2 グラフとフィクスチャ 3 本が揃っている",
-  // 1 つも無い環境は「生成していない」なので SKIP。1 つでもあるなら欠けは FAIL。
-  ignore: !ANY_PRESENT,
-  fn: () => {
+test.skipIf(!ANY_PRESENT)(
+  "Wan2.2 TI2V VAE chunk 資産: 2 グラフとフィクスチャ 3 本が揃っている",
+  () => {
     assertEquals(
       ASSETS.filter(({ present }) => !present).map(({ path }) => path),
       [],
       `資産の欠け（生成: ${GENERATE}）`,
     );
   },
-});
+);
 
-test({
-  name:
-    "Wan2.2 TI2V VAE chunk 宣言（GPU 不要）: 潜在 48 ch・タイル 16・出口 12 ch・cache は表の 32 本" +
+test.skipIf(!ALL_PRESENT)(
+  "Wan2.2 TI2V VAE chunk 宣言（GPU 不要）: 潜在 48 ch・タイル 16・出口 12 ch・cache は表の 32 本" +
     "（first は time_conv の 2 本を除く 30 本）・フレーム [12,1,128,128] / [12,4,128,128]",
-  ignore: !ALL_PRESENT,
-  fn: async () => {
+  async () => {
     const layout = wanVaeChunkLayout(await prepared(FIRST), await prepared(NEXT));
     assertEquals(
       [layout.latentChannels, layout.tile, layout.sampleTile, layout.sampleChannels],
@@ -199,14 +195,12 @@ test({
       "first の cache の合計バイト数（f32）",
     );
   },
-});
+);
 
-test({
-  name:
-    "Wan2.2 TI2V VAE chunk IR（GPU 不要）: rank 5 は conv3d の重みだけ・op は語彙の 15 種の中・attention は" +
+test.skipIf(!ALL_PRESENT)(
+  "Wan2.2 TI2V VAE chunk IR（GPU 不要）: rank 5 は conv3d の重みだけ・op は語彙の 15 種の中・attention は" +
     "各グラフ 1 本",
-  ignore: !ALL_PRESENT,
-  fn: async () => {
+  async () => {
     for (const component of [FIRST, NEXT]) {
       const { graph } = await prepared(component);
       assertEquals(irViolations(graph), [], component);
@@ -219,14 +213,12 @@ test({
       assertEquals(rank5, [...conv3dWeights(graph)].sort(), `${component}: rank 5 の値の顔ぶれ`);
     }
   },
-});
+);
 
-test({
-  name:
-    "Wan2.2 TI2V VAE chunk IR の検査自身（GPU 不要）: 書き換えた宣言を 1 件ずつ拒む" +
+test.skipIf(!ALL_PRESENT)(
+  "Wan2.2 TI2V VAE chunk IR の検査自身（GPU 不要）: 書き換えた宣言を 1 件ずつ拒む" +
     "（initializer でない conv3d の重み・rank 5 のグラフ入力・rank 5 の conv2d の重み・語彙外の op・attention 0 本）",
-  ignore: !ALL_PRESENT,
-  fn: async () => {
+  async () => {
     // 守っている宣言（上のテスト）から 1 点だけ壊す — 違反がちょうど 1 件で、その主張の文言であること。
     const { graph } = await prepared(NEXT);
     const conv2d = graph.nodes.find(({ op }) => op === "conv2d");
@@ -302,14 +294,12 @@ test({
       assertStringIncludes(violations[0], message, label);
     }
   },
-});
+);
 
-test({
-  name:
-    "Wan2.2 TI2V VAE chunk フィクスチャ（GPU 不要）: メタ（タイル 16・chunk 数・役割・f16 の丸め・参照の素性）と" +
+test.skipIf(!ALL_PRESENT)(
+  "Wan2.2 TI2V VAE chunk フィクスチャ（GPU 不要）: メタ（タイル 16・chunk 数・役割・f16 の丸め・参照の素性）と" +
     "形（latents [48,F,16,16]・frames [12,1+4(F−1),128,128]）が表どおり・seed は 3 本で互いに違う",
-  ignore: !ALL_PRESENT,
-  fn: async () => {
+  async () => {
     const seeds: string[] = [];
     for (const { name, role, chunks } of CASES) {
       const fixture = await readFixture(ti2vVaeFixtureUrl(name));
@@ -344,4 +334,4 @@ test({
     // 帯の決定用と受入れ用は別の潜在（決定と受入れの独立 — ADR 0118 追記 2026-10-02）。
     assertEquals(new Set(seeds).size, CASES.length, `seed の重複（${seeds.join(" / ")}）`);
   },
-});
+);

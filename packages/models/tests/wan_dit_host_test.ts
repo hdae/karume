@@ -9,7 +9,7 @@
 // - `timesteps_proj`: atol（下の `TIMESTEPS_PROJ_ATOL` の doc に実測）。
 
 import { readFile, readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import {

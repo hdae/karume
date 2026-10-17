@@ -8,7 +8,7 @@
 // 期待値は**手計算した定数**で置く — 実装と同じ式で組み直すと恒真化して、算式がずれたときに
 // 1 件も落ちない。実行計画との突合（実 GPU）は estimate_test.ts の側にある。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { planStateAttention } from "../src/runtime/state-attention-plan.ts";

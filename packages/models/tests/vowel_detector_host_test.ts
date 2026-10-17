@@ -29,7 +29,7 @@
 // 数値が僅かにずれても文字列は割れるか一致するかのどちらかにしかならない。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import {

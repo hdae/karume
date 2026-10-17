@@ -73,7 +73,7 @@
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
 import { assert, assertEquals } from "@std/assert";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   acquireGpu,
   type GpuContext,
@@ -238,15 +238,13 @@ if (!AVAILABLE) {
   );
 }
 
-test({
-  name: `DeBERTa w8a8 資産（${VARIANT}）: 鏡像 io の全ケースとモデル本体が揃っている`,
-  // 鏡像が 1 つでもあれば欠けは FAIL（生成を途中で止めた席を「未生成」と読まない）。
-  ignore: !AVAILABLE,
-  fn: () => {
+test.skipIf(!AVAILABLE)(
+  `DeBERTa w8a8 資産（${VARIANT}）: 鏡像 io の全ケースとモデル本体が揃っている`,
+  () => {
     assertEquals(FILES.map(caseNameOf), [...EXPECTED_CASES], `${ROOT.pathname} の鏡像ケース`);
     assert(modelPresent(new URL(MODEL_FILE, ROOT)), `${MODEL_FILE} が無い`);
   },
-});
+);
 
 /** Session を a8 で組み、鏡像 io の入力で 1 回 run する（数値門と census の共通部）。 */
 const openCase = async (file: string) => {
@@ -333,10 +331,9 @@ const runCheckedCase = async (
 
 for (const file of FILES) {
   const caseName = caseNameOf(file);
-  test({
-    name: `DeBERTa w8a8: ${VARIANT} / ${caseName} runs in a8 with the graph's outputs, shapes and dtypes (real GPU)`,
-    ignore: !RUNNABLE,
-    fn: async () => {
+  test.skipIf(!RUNNABLE)(
+    `DeBERTa w8a8: ${VARIANT} / ${caseName} runs in a8 with the graph's outputs, shapes and dtypes (real GPU)`,
+    async () => {
       const gpu = await acquireGpu();
       try {
         await runCheckedCase(gpu, file);
@@ -344,11 +341,10 @@ for (const file of FILES) {
         gpu.destroy();
       }
     },
-  });
-  test({
-    name: `DeBERTa w8a8 鏡像突合: ${VARIANT} / ${caseName}（実 GPU / torch 鏡像期待値）${UPSTREAM_PARITY_OPT_IN}`,
-    ignore: !RUNNABLE || !UPSTREAM_PARITY,
-    fn: async () => {
+  );
+  test.skipIf(!RUNNABLE || !UPSTREAM_PARITY)(
+    `DeBERTa w8a8 鏡像突合: ${VARIANT} / ${caseName}（実 GPU / torch 鏡像期待値）${UPSTREAM_PARITY_OPT_IN}`,
+    async () => {
       await runRecordedCase(results, { id: `${VARIANT}/${caseName}` }, async (recorded) => {
         const { measurements, comparisons } = recorded;
         const gpu = await acquireGpu();
@@ -396,13 +392,12 @@ for (const file of FILES) {
         assertEquals(failures, [], "帯を外れた出力（厳密: output.0/1・崩壊上限: output.2〜）");
       });
     },
-  });
+  );
 }
 
-test({
-  name: `DeBERTa w8a8（${VARIANT}）: run が i8a8 GEMM と quantize_rows だけで linear を回す（キー census）`,
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  `DeBERTa w8a8（${VARIANT}）: run が i8a8 GEMM と quantize_rows だけで linear を回す（キー census）`,
+  async () => {
     // 内訳は T に依らない（計画は記号次元の束縛で形が変わるだけで、dispatch の並びは同じ）ので
     // 1 ケースで足りる。`padded` を使うのはマスク経路まで同じ run に乗せるため。
     const file = `${ACT_IO_PREFIX}padded${IO_SUFFIX}`;
@@ -430,4 +425,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

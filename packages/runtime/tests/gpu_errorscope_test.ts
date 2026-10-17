@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertInstanceOf, assertRejects } from "@std/assert";
 import { acquireGpu, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
 import {
@@ -21,10 +21,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-test({
-  name: "workgroup サイズ超過のパイプラインは errorScope 経由で例外になる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "workgroup サイズ超過のパイプラインは errorScope 経由で例外になる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache = new PipelineCache(gpu.device);
     try {
@@ -60,12 +59,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "withPipelineScope は body の同期例外でも 2 本とも pop する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "withPipelineScope は body の同期例外でも 2 本とも pop する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // 積み残し / 過剰 pop はスコープの中身を見ても分からない（自分の push と pop は LIFO で
@@ -98,12 +96,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "無効パイプラインは internal ではなく validation として返る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "無効パイプラインは internal ではなく validation として返る（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache = new PipelineCache(gpu.device);
     try {
@@ -125,12 +122,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "同一 device 上の複数 Session の並行 run が互いに干渉せず完走する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "同一 device 上の複数 Session の並行 run が互いに干渉せず完走する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // 後始末は取得の直後から保証する。構築と dispose は allSettled で全部の決着を待ってから回収し、
     // 片方の失敗で成功した側の Session や device を破棄し損ねない（失敗系のテストが後続の GPU
@@ -178,12 +174,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "Session.run は自分のスコープ区間を device 単位ロックで守る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "Session.run は自分のスコープ区間を device 単位ロックで守る（実 GPU）",
+  async () => {
     // プリミティブ（GpuContext.withScopeLock）の契約は gpu_device_test が固定しているが、
     // それを Session.run が**使っている**という結線はここでしか固定されない。executor から
     // ラップが外れる（あるいは readback / flush をロック外へ動かす）リファクタは、この 1 本が
@@ -225,4 +220,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

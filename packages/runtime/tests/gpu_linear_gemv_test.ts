@@ -58,7 +58,7 @@
 //   行ブロックのスナップショット（linear_gemv_r*.wgsl）だけ — **M=1 の緑は行ブロックの
 //   根拠にならない**ことの実証（2026-09-07 実測）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import type { OpenedContainer } from "../src/format/container/open.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
@@ -242,10 +242,9 @@ const runLinear = (
 const bits = (tensor: Tensor): Uint32Array =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
-test({
-  name: "M=1 の i4 linear は GEMV 族で走っても既定経路と 1 ビットも違わない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "M=1 の i4 linear は GEMV 族で走っても既定経路と 1 ビットも違わない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of CASES) {
@@ -296,7 +295,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 門（`buildLinear` の分岐）1 件ぶんの期待キー。 */
 type DoorCase = {
@@ -401,12 +400,10 @@ const DOOR_CASES: readonly DoorCase[] = [
   },
 ];
 
-test({
-  name:
-    `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i4 × group32 以上 × v4 でだけ開く` +
+test.skipIf(!GPU_AVAILABLE)(
+  `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i4 × group32 以上 × v4 でだけ開く` +
     "（実 GPU / 診断キー）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const door of DOOR_CASES) {
@@ -445,7 +442,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // i8 格納（lm_head — perf-ledger K-16）。i4 と同じ 3 観点を、別枝の生成（1 語 16 要素・
@@ -535,10 +532,9 @@ const linearI8Model = (
   ]);
 };
 
-test({
-  name: "M=1 の i8 linear は GEMV 族で走っても既定経路と 1 ビットも違わない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "M=1 の i8 linear は GEMV 族で走っても既定経路と 1 ビットも違わない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of I8_CASES) {
@@ -588,7 +584,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 門（i8 側）1 件ぶんの期待キー。i8 は group を持たないので軸は M / k / n の 3 本。 */
 type DoorI8Case = {
@@ -667,12 +663,10 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
   },
 ];
 
-test({
-  name:
-    `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i8 × k%16 × v4 でだけ開く` +
+test.skipIf(!GPU_AVAILABLE)(
+  `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i8 × k%16 × v4 でだけ開く` +
     "（実 GPU / 診断キー）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const door of DOOR_I8_CASES) {
@@ -709,7 +703,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 行ブロック変種（M ≥ 2 — ADR 0082 追記 5 / perf-ledger K-21）。M=1 変種と同じ 3 観点を、
@@ -984,10 +978,9 @@ const checkRowsCase = async (
   );
 };
 
-test({
-  name: "行ブロック（M ≥ 2）の i4 linear は既定経路と 1 ビットも違わない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "行ブロック（M ≥ 2）の i4 linear は既定経路と 1 ビットも違わない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const rowsCase of ROWS_CASES) {
@@ -1011,12 +1004,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "行ブロック（M ≥ 2）の i8 linear は既定経路と 1 ビットも違わない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "行ブロック（M ≥ 2）の i8 linear は既定経路と 1 ビットも違わない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const rowsCase of ROWS_I8_CASES) {
@@ -1040,7 +1032,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // Float storage (f16 / f32 — ADR 0082 addenda 6 and 7). The same three viewpoints as the
@@ -1152,10 +1144,9 @@ const checkFloatGemvBits = async (
   }
 };
 
-test({
-  name: "f16 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () =>
+test.skipIf(!GPU_AVAILABLE)(
+  "f16 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
+  () =>
     checkFloatGemvBits("f16", [
       [64, 128],
       [100, 40],
@@ -1166,12 +1157,11 @@ test({
       [36, 136],
       [100, 264],
     ]),
-});
+);
 
-test({
-  name: "f32 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () =>
+test.skipIf(!GPU_AVAILABLE)(
+  "f32 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
+  () =>
     checkFloatGemvBits("f32", [
       [64, 128],
       [100, 20],
@@ -1182,7 +1172,7 @@ test({
       [36, 132],
       [100, 260],
     ]),
-});
+);
 
 /** One float gate case. `gemv` marks the shape that the gate admits. */
 type FloatDoorCase = {
@@ -1214,28 +1204,26 @@ const checkFloatDoor = async (cases: readonly FloatDoorCase[]): Promise<void> =>
   }
 };
 
-test({
-  name: "f16 GEMV の行数・K 整列・N 整列の門と f32 格納の別変種を検証する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () =>
+test.skipIf(!GPU_AVAILABLE)(
+  "f16 GEMV の行数・K 整列・N 整列の門と f32 格納の別変種を検証する（実 GPU）",
+  () =>
     checkFloatDoor([
       { m: 2, n: 36, k: 40, storage: "f16" },
       { m: 1, n: 36, k: 36, storage: "f16" },
       { m: 1, n: 35, k: 40, storage: "f16" },
       { m: 1, n: 36, k: 40, storage: "f32", gemv: true, roundToF16: true },
     ]),
-});
+);
 
-test({
-  name: "f32 GEMV の行数・K 整列・N 整列の門は条件を外すと通常 GEMM を選ぶ（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () =>
+test.skipIf(!GPU_AVAILABLE)(
+  "f32 GEMV の行数・K 整列・N 整列の門は条件を外すと通常 GEMM を選ぶ（実 GPU）",
+  () =>
     checkFloatDoor([
       { m: 2, n: 36, k: 20, storage: "f32" },
       { m: 1, n: 36, k: 18, storage: "f32" },
       { m: 1, n: 35, k: 20, storage: "f32" },
     ]),
-});
+);
 
 /** An f16-compute request keeps the GEMM key (checks the key only; numbers live above). */
 const checkF16ComputeKeepsGemm = async (storage: FloatStorage): Promise<void> => {
@@ -1250,16 +1238,12 @@ const checkF16ComputeKeepsGemm = async (storage: FloatStorage): Promise<void> =>
   }
 };
 
-test({
-  name: "f16 格納でも f16 計算の指定は GEMV に置き換えない（実 GPU）",
-  // The census does not depend on timing, so only shader-f16 gates this case.
-  ignore: !SHADER_F16_AVAILABLE,
-  fn: () => checkF16ComputeKeepsGemm("f16"),
-});
+test.skipIf(!SHADER_F16_AVAILABLE)(
+  "f16 格納でも f16 計算の指定は GEMV に置き換えない（実 GPU）",
+  () => checkF16ComputeKeepsGemm("f16"),
+);
 
-test({
-  name: "f32 格納でも f16 計算の指定は GEMV に置き換えない（実 GPU）",
-  // The census does not depend on timing, so only shader-f16 gates this case.
-  ignore: !SHADER_F16_AVAILABLE,
-  fn: () => checkF16ComputeKeepsGemm("f32"),
-});
+test.skipIf(!SHADER_F16_AVAILABLE)(
+  "f32 格納でも f16 計算の指定は GEMV に置き換えない（実 GPU）",
+  () => checkF16ComputeKeepsGemm("f32"),
+);

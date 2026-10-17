@@ -3,7 +3,7 @@
 // fixture `wan-umt5/relative-position.json` に書いた綴りと突き合わせる。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import type { Tensor } from "@karume/runtime";
 import { buildUmt5RelativePositionBuckets, type I32Tensor } from "../src/umt5/relative-position.ts";

@@ -5,7 +5,7 @@
 // 末尾トリムは golden 3 ケース（`outputs/series/dacvae-32dim/host/trim.safetensors` — 上流
 // `find_flattening_point` の実測が焼かれている）との突合。golden が無い環境は明示 SKIP。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
@@ -250,10 +250,9 @@ if (!GOLDEN_AVAILABLE) {
   );
 }
 
-test({
-  name: "findFlatteningPoint: golden 3 ケースが上流 find_flattening_point と同じ位置を返す",
-  ignore: !GOLDEN_AVAILABLE,
-  fn: () => {
+test.skipIf(!GOLDEN_AVAILABLE)(
+  "findFlatteningPoint: golden 3 ケースが上流 find_flattening_point と同じ位置を返す",
+  () => {
     const bytes = trimBytes as Uint8Array<ArrayBuffer>;
     const file = parseSafetensors(
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
@@ -275,7 +274,7 @@ test({
       );
     }
   },
-});
+);
 
 test("findFlatteningPoint: 全部 0 の latent は先頭で平坦（窓が全部 pad と同じ）", () => {
   assertEquals(findFlatteningPoint(new Float32Array(10 * LATENT_DIM), 10, LATENT_DIM), 0);

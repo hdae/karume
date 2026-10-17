@@ -4,7 +4,7 @@
 
 import { readTextFileSync } from "@karume/test-support/fs";
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { ContainerFormatError } from "../src/format/container/header.ts";
 import { sortedObject } from "../src/format/container/json.ts";
 import {

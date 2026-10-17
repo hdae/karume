@@ -20,7 +20,7 @@
 //   - `gru_scan` と `gru_scan_reverse` の出力が**違う**こと（方向が効いていること）
 // を毎ケース確かめる（走査方向を無視した実装は前者だけでは緑のまま通る）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
@@ -261,10 +261,9 @@ const asSingleOpInputs = (
 });
 
 for (const op of ["gru_scan", "gru_scan_reverse"] as const) {
-  test({
-    name: `${op} 1 ノードの出力が torch 分解の逐語（linear + elementwise 列）と**ビット単位で一致**する（実 GPU）`,
-    ignore: !GPU_AVAILABLE,
-    fn: async () => {
+  test.skipIf(!GPU_AVAILABLE)(
+    `${op} 1 ノードの出力が torch 分解の逐語（linear + elementwise 列）と**ビット単位で一致**する（実 GPU）`,
+    async () => {
       const gpu = await acquireGpu();
       try {
         const parityCases = [
@@ -310,15 +309,14 @@ for (const op of ["gru_scan", "gru_scan_reverse"] as const) {
         gpu.destroy();
       }
     },
-  });
+  );
 }
 
 // 走査方向が本当に効いていることの門。逆方向を「順方向と同じ走査」で実装しても上の parity は
 // **両側が同じ誤りを持つ**ので緑になりうる（参照グラフも同じ関数から順序を受け取るため）。
-test({
-  name: "gru_scan と gru_scan_reverse は同じ入力で違う出力を出す（走査方向が効いている）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "gru_scan と gru_scan_reverse は同じ入力で違う出力を出す（走査方向が効いている）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const geometry of CASES) {
@@ -340,4 +338,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

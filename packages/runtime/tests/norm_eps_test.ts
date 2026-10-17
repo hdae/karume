@@ -6,7 +6,7 @@
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { layerNormParams } from "../src/kernels/layer-norm.ts";
 import { rmsNormParams } from "../src/kernels/rms-norm.ts";

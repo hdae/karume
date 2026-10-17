@@ -4,7 +4,7 @@
 // pipeline テストへ 2 本に割れていて、残り 5 家族は写像を直接叩く門を持っていなかった）。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import type { SessionSpec } from "@karume/hub";
 import { sessionOptionsViolation } from "@karume/runtime";
 import { ANIMA_SESSION_POLICY } from "../src/anima/pipeline.ts";

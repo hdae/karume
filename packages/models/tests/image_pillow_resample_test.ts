@@ -4,7 +4,7 @@
 // ことだけを見る（GPU 不要・資産不要）。
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import {
   PILLOW_BICUBIC,
   PILLOW_LANCZOS,

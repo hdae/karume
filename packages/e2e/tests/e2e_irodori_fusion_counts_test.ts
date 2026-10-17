@@ -7,7 +7,7 @@
  */
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import type { FusionCounts } from "../../runtime/src/runtime/fusion.ts";
@@ -85,10 +85,9 @@ const irodoriDitShapes = (sequence: number): Readonly<Record<string, readonly nu
  * ここが動く**こと」の両方。0 が非 0 に変わったら、まず ROPE_RULE / ADALN_RULE の受理集合が
  * 意図せず広がっていないかを見る（広げた瞬間 fallback の正しさ保証が消える）。
  */
-test({
-  name: "実資産の Irodori DiT は run 1 回で rowBlockAttention 12 / silu 17 / identityExpand 24 を掴む（rope / adaln は綴りが違って 0）",
-  ignore: !IRODORI_AVAILABLE,
-  fn: async () => {
+test.skipIf(!IRODORI_AVAILABLE)(
+  "実資産の Irodori DiT は run 1 回で rowBlockAttention 12 / silu 17 / identityExpand 24 を掴む（rope / adaln は綴りが違って 0）",
+  async () => {
     const graph = await readIrodoriGraph("dit");
     const expected: FusionCounts = {
       ...NONE,
@@ -109,55 +108,51 @@ test({
       "dit_context",
     );
   },
-});
+);
 
-test({
-  name: "実資産の Irodori 条件経路と codec の融合ヒット数",
-  ignore: !IRODORI_AVAILABLE,
-  fn: async () => {
-    // backbone（ModernBERT-ja 25 層）だけは半割り形の RoPE なので、25 層 × q/k = 50 を掴む。
-    // Irodori 自前のブロック（dit / speaker）が 0 なのと対になる観測点で、**片方だけ外れたら
-    // どちらの綴りが変わったのか**がここで割れる。
-    assertEquals(
-      fusionCounts(await readIrodoriGraph("backbone"), { input_ids: [1, 256] }),
-      { ...NONE, rope: 50 },
-      "backbone",
-    );
-    assertEquals(
-      fusionCounts(await readIrodoriGraph("text_proj"), { hidden: [1, 256, 768] }),
-      { ...NONE, silu: 1 },
-      "text_proj",
-    );
-    assertEquals(
-      fusionCounts(await readIrodoriGraph("caption_proj"), { hidden: [1, 512, 768] }),
-      { ...NONE, silu: 1 },
-      "caption_proj",
-    );
-    // speaker は 8 ブロック（silu 8 + ゲート 8）。RoPE は DiT と同じ偶奇形なので 0。
-    assertEquals(
-      fusionCounts(await readIrodoriGraph("speaker"), { latent: [1, 750, 128] }),
-      { ...NONE, silu: 8 },
-      "speaker",
-    );
-    assertEquals(
-      fusionCounts(await readIrodoriGraph("duration"), {
-        text_state: [1, 256, 512],
-        speaker_vec: [1, 768],
-        has_speaker: [1, 1],
-        caption_vec: [1, 512],
-        has_caption: [1, 1],
-      }),
-      { ...NONE, silu: 5 },
-      "duration",
-    );
-    // codec は Snake 活性（`sin` 29 本 — sigmoid ではない）と `conv_transpose1d` 4 本で、
-    // silu / upsample2x のどちらの形も持たない。全 0 は「掴む形が無い」の記録で、非 0 へ
-    // 変わったら受理集合が広がったということ。
-    for (const [name, shapes] of [
-      ["codec_decoder", { latent: [1, 750, 32] }],
-      ["codec_encoder", { wav: [1, 750, 1920] }],
-    ] as const) {
-      assertEquals(fusionCounts(await readIrodoriGraph(name), shapes), NONE, name);
-    }
-  },
+test.skipIf(!IRODORI_AVAILABLE)("実資産の Irodori 条件経路と codec の融合ヒット数", async () => {
+  // backbone（ModernBERT-ja 25 層）だけは半割り形の RoPE なので、25 層 × q/k = 50 を掴む。
+  // Irodori 自前のブロック（dit / speaker）が 0 なのと対になる観測点で、**片方だけ外れたら
+  // どちらの綴りが変わったのか**がここで割れる。
+  assertEquals(
+    fusionCounts(await readIrodoriGraph("backbone"), { input_ids: [1, 256] }),
+    { ...NONE, rope: 50 },
+    "backbone",
+  );
+  assertEquals(
+    fusionCounts(await readIrodoriGraph("text_proj"), { hidden: [1, 256, 768] }),
+    { ...NONE, silu: 1 },
+    "text_proj",
+  );
+  assertEquals(
+    fusionCounts(await readIrodoriGraph("caption_proj"), { hidden: [1, 512, 768] }),
+    { ...NONE, silu: 1 },
+    "caption_proj",
+  );
+  // speaker は 8 ブロック（silu 8 + ゲート 8）。RoPE は DiT と同じ偶奇形なので 0。
+  assertEquals(
+    fusionCounts(await readIrodoriGraph("speaker"), { latent: [1, 750, 128] }),
+    { ...NONE, silu: 8 },
+    "speaker",
+  );
+  assertEquals(
+    fusionCounts(await readIrodoriGraph("duration"), {
+      text_state: [1, 256, 512],
+      speaker_vec: [1, 768],
+      has_speaker: [1, 1],
+      caption_vec: [1, 512],
+      has_caption: [1, 1],
+    }),
+    { ...NONE, silu: 5 },
+    "duration",
+  );
+  // codec は Snake 活性（`sin` 29 本 — sigmoid ではない）と `conv_transpose1d` 4 本で、
+  // silu / upsample2x のどちらの形も持たない。全 0 は「掴む形が無い」の記録で、非 0 へ
+  // 変わったら受理集合が広がったということ。
+  for (const [name, shapes] of [
+    ["codec_decoder", { latent: [1, 750, 32] }],
+    ["codec_encoder", { wav: [1, 750, 1920] }],
+  ] as const) {
+    assertEquals(fusionCounts(await readIrodoriGraph(name), shapes), NONE, name);
+  }
 });

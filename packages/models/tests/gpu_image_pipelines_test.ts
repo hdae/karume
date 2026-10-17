@@ -23,7 +23,7 @@
  */
 
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import {
   acquireGpu,
   type GpuContext,
@@ -391,76 +391,72 @@ const withGpu = async (fn: (gpu: GpuContext) => Promise<void>): Promise<void> =>
 };
 
 for (const family of [siglip2, birefnet, depthAnything]) {
-  describe({
-    name: `${family.name}（実 GPU・小グラフ）`,
-    ignore: !GPU_AVAILABLE,
-    fn: () => {
-      it("前処理 → グラフ 1 回 → 後処理を結線し、診断を 1 回渡す", async () => {
-        await withGpu(async (gpu) => {
-          const observed: SessionDiagnostics[] = [];
-          const handle = await family.build({
-            gpu,
-            onRunDiagnostics: (diagnostics) => observed.push(diagnostics),
-          });
-          try {
-            assertOutput(await handle.run(IMAGE), family.expected(IMAGE), family.tolerance);
-            assertEquals(observed.length, 1);
-            assert(observed[0].lastRun !== undefined, "run の後の診断でない");
-          } finally {
-            await handle.dispose();
-          }
+  describe.skipIf(!GPU_AVAILABLE)(`${family.name}（実 GPU・小グラフ）`, () => {
+    it("前処理 → グラフ 1 回 → 後処理を結線し、診断を 1 回渡す", async () => {
+      await withGpu(async (gpu) => {
+        const observed: SessionDiagnostics[] = [];
+        const handle = await family.build({
+          gpu,
+          onRunDiagnostics: (diagnostics) => observed.push(diagnostics),
         });
-      });
-
-      it("並行に呼んでも両方が正しい値を返す（1 つの Session を順に使う）", async () => {
-        await withGpu(async (gpu) => {
-          let calls = 0;
-          const handle = await family.build({ gpu, onRunDiagnostics: () => (calls += 1) });
-          try {
-            const flipped: Rgb8Image = { ...IMAGE, data: IMAGE.data.map((byte) => 255 - byte) };
-            const [first, second] = await Promise.all([handle.run(IMAGE), handle.run(flipped)]);
-            assertOutput(first, family.expected(IMAGE), family.tolerance);
-            assertOutput(second, family.expected(flipped), family.tolerance);
-            assertEquals(calls, 2);
-          } finally {
-            await handle.dispose();
-          }
-        });
-      });
-
-      it("dispose は in-flight の呼び出しを待って畳み、2 度目も同じ完了を返す", async () => {
-        await withGpu(async (gpu) => {
-          const handle = await family.build({ gpu, onRunDiagnostics: () => {} });
-          const running = handle.run(IMAGE);
-          const disposal = handle.dispose();
-          assertStrictEquals(handle.dispose(), disposal);
-          // 先に受けた呼び出しは dispose の巻き添えにならない（Session を畳むのはその後）。
-          assertOutput(await running, family.expected(IMAGE), family.tolerance);
-          await disposal;
-        });
-      });
-
-      it("dispose 後の呼び出しは fail loudly で拒む", async () => {
-        await withGpu(async (gpu) => {
-          const handle = await family.build({ gpu, onRunDiagnostics: () => {} });
+        try {
+          assertOutput(await handle.run(IMAGE), family.expected(IMAGE), family.tolerance);
+          assertEquals(observed.length, 1);
+          assert(observed[0].lastRun !== undefined, "run の後の診断でない");
+        } finally {
           await handle.dispose();
-          await assertRejects(() => handle.run(IMAGE), Error, family.disposedMessage);
-        });
+        }
       });
+    });
 
-      it("渡した共有 GPU は dispose しても破棄しない", async () => {
-        await withGpu(async (gpu) => {
-          const first = await family.build({ gpu, onRunDiagnostics: () => {} });
-          await first.dispose();
-          // 同じ GPU で次のパイプラインが張れて動く = 前のパイプラインが device を壊していない。
-          const second = await family.build({ gpu, onRunDiagnostics: () => {} });
-          try {
-            assertOutput(await second.run(IMAGE), family.expected(IMAGE), family.tolerance);
-          } finally {
-            await second.dispose();
-          }
-        });
+    it("並行に呼んでも両方が正しい値を返す（1 つの Session を順に使う）", async () => {
+      await withGpu(async (gpu) => {
+        let calls = 0;
+        const handle = await family.build({ gpu, onRunDiagnostics: () => (calls += 1) });
+        try {
+          const flipped: Rgb8Image = { ...IMAGE, data: IMAGE.data.map((byte) => 255 - byte) };
+          const [first, second] = await Promise.all([handle.run(IMAGE), handle.run(flipped)]);
+          assertOutput(first, family.expected(IMAGE), family.tolerance);
+          assertOutput(second, family.expected(flipped), family.tolerance);
+          assertEquals(calls, 2);
+        } finally {
+          await handle.dispose();
+        }
       });
-    },
+    });
+
+    it("dispose は in-flight の呼び出しを待って畳み、2 度目も同じ完了を返す", async () => {
+      await withGpu(async (gpu) => {
+        const handle = await family.build({ gpu, onRunDiagnostics: () => {} });
+        const running = handle.run(IMAGE);
+        const disposal = handle.dispose();
+        assertStrictEquals(handle.dispose(), disposal);
+        // 先に受けた呼び出しは dispose の巻き添えにならない（Session を畳むのはその後）。
+        assertOutput(await running, family.expected(IMAGE), family.tolerance);
+        await disposal;
+      });
+    });
+
+    it("dispose 後の呼び出しは fail loudly で拒む", async () => {
+      await withGpu(async (gpu) => {
+        const handle = await family.build({ gpu, onRunDiagnostics: () => {} });
+        await handle.dispose();
+        await assertRejects(() => handle.run(IMAGE), Error, family.disposedMessage);
+      });
+    });
+
+    it("渡した共有 GPU は dispose しても破棄しない", async () => {
+      await withGpu(async (gpu) => {
+        const first = await family.build({ gpu, onRunDiagnostics: () => {} });
+        await first.dispose();
+        // 同じ GPU で次のパイプラインが張れて動く = 前のパイプラインが device を壊していない。
+        const second = await family.build({ gpu, onRunDiagnostics: () => {} });
+        try {
+          assertOutput(await second.run(IMAGE), family.expected(IMAGE), family.tolerance);
+        } finally {
+          await second.dispose();
+        }
+      });
+    });
   });
 }

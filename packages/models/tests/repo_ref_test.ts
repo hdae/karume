@@ -15,7 +15,7 @@
 //     素通りの席を作ったことで HF 側の門が緩んでいないこと。
 // 正常系（文字列 = main 追従 / オブジェクトはそのまま）も同じ 1 本が担うので合わせて縛る。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   assertEquals,
   assertRejects,

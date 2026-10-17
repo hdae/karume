@@ -5,7 +5,7 @@
 // 遠い場所で出る（形の合う別の出力を掴めば、もっともらしい token 列が黙って返る）ので、
 // 検証が抜けた欄はそのまま沈黙劣化の入口になる。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import type { PreparedModel } from "@karume/runtime";
 import {

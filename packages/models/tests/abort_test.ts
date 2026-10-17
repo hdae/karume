@@ -15,7 +15,7 @@
 // timer throttling を受け入れている — 理由の正本は `src/concurrency/abort.ts` の NOTE。ブラウザ
 // 実測の話なのでここでは縛らない。ここが縛るのは「マクロタスクへ譲っている」こと。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { settleAbort } from "../src/concurrency/abort.ts";
 

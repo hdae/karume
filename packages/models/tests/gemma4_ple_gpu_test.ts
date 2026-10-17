@@ -6,7 +6,7 @@
  * dtype → codec、piece の並びと part 割り、繋ぎ直したバイト列が原本と一致すること）④block が
  * 1 本の索引の供給形。実 GPU での値の一致は `e2e_gemma4_ple_gpu_test.ts` が持つ。
  */
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   type IrDeclaration,

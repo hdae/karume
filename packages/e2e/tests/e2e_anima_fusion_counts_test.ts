@@ -19,7 +19,7 @@
  */
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import type { FusionCounts } from "../../runtime/src/runtime/fusion.ts";
@@ -96,10 +96,9 @@ const ditShapes = (sequence: number): Readonly<Record<string, readonly number[]>
   rope_sin: [1, 1, sequence, 128],
 });
 
-test({
-  name: "実資産の DiT は run 1 回で adaln 85 / rope 56 / silu 2 を掴む（w8a8 と f16 で同一）",
-  ignore: !ASSETS_AVAILABLE,
-  fn: async () => {
+test.skipIf(!ASSETS_AVAILABLE)(
+  "実資産の DiT は run 1 回で adaln 85 / rope 56 / silu 2 を掴む（w8a8 と f16 で同一）",
+  async () => {
     const expected: FusionCounts = { ...NONE, silu: 2, rope: 56, adaln: 85 };
     for (const quant of ["i8", "f16"] as const) {
       const graph = await readAnimaGraph("transformer", quant);
@@ -108,12 +107,11 @@ test({
       assertEquals(fusionCounts(graph, ditShapes(1024)), expected, `${quant}: 512px（S=1024）`);
     }
   },
-});
+);
 
-test({
-  name: "実資産の text encoder / conditioner / VAE decoder の融合ヒット数",
-  ignore: !ASSETS_AVAILABLE,
-  fn: async () => {
+test.skipIf(!ASSETS_AVAILABLE)(
+  "実資産の text encoder / conditioner / VAE decoder の融合ヒット数",
+  async () => {
     const textEncoder = await readAnimaGraph("text_encoder", "f16");
     assertEquals(
       fusionCounts(textEncoder, { input_ids: [1, 64] }),
@@ -136,7 +134,7 @@ test({
       "VAE decoder（タイル 1 枚ぶん）",
     );
   },
-});
+);
 
 /**
  * 追加変種（extra）の融合ヒット数。値は 2026-09-24 に extra（karume/0.13.0・越境先
@@ -151,10 +149,9 @@ test({
 const EXTRA_MODELS = ["anima-copycat-20260610", "anima-wai-v1.0"] as const;
 const EXTRA_CROSS_REPO_COMPONENTS = ["text_encoder", "vae_decoder"] as const;
 
-test({
-  name: "実資産の extra は 2 変種とも manifest の変種表と一致し、共有部品を越境参照で持つ",
-  ignore: !EXTRA_AVAILABLE,
-  fn: () => {
+test.skipIf(!EXTRA_AVAILABLE)(
+  "実資産の extra は 2 変種とも manifest の変種表と一致し、共有部品を越境参照で持つ",
+  () => {
     const manifest = EXTRA_MANIFEST as ContainerManifest;
     // 変種が増えた日に、融合の門を通らない変種が黙って配られないように表ごと固定する。
     assertEquals(Object.keys(manifest.models).sort(), [...EXTRA_MODELS]);
@@ -169,13 +166,12 @@ test({
       assertEquals(crossed, [...EXTRA_CROSS_REPO_COMPONENTS], `${model}: 越境参照で持つ部品`);
     }
   },
-});
+);
 
 for (const model of EXTRA_MODELS) {
-  test({
-    name: `実資産の extra ${model} の融合ヒット数（越境先の共有部品を含む）`,
-    ignore: !EXTRA_AVAILABLE,
-    fn: async () => {
+  test.skipIf(!EXTRA_AVAILABLE)(
+    `実資産の extra ${model} の融合ヒット数（越境先の共有部品を含む）`,
+    async () => {
       const manifest = EXTRA_MANIFEST as ContainerManifest;
       const read = (component: string, dtype: string): Promise<IrGraph> =>
         readDistributionGraph(EXTRA_DIR, manifest, model, component, dtype, MIRRORS);
@@ -204,5 +200,5 @@ for (const model of EXTRA_MODELS) {
         "VAE decoder（越境・タイル 1 枚ぶん）",
       );
     },
-  });
+  );
 }

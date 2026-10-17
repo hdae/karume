@@ -13,7 +13,7 @@
 //     ホスト側の `(T, T)` 表は 8·T² bytes 級なので、上限の無い配布形は無制限に膨らむ。
 
 import { assert, assertEquals, assertFalse, assertRejects, assertThrows } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { parseManifest } from "@karume/hub";
 import {
   assertBertWidth,

@@ -1,4 +1,4 @@
-import { test as denoTest } from "@karume/test-support/test";
+import { test as vitestTest } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   acquireGpu,
@@ -16,7 +16,7 @@ import {
 } from "../../runtime/tests/helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 const test = (name: string, fn: () => Promise<void>): void =>
-  denoTest({ name, ignore: !GPU_AVAILABLE, fn });
+  vitestTest.skipIf(!GPU_AVAILABLE)(name, fn);
 const model = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,

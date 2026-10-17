@@ -35,7 +35,7 @@
  */
 
 import { readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertThrows } from "@std/assert";
 import { type FileRef, type Manifest, parseManifest, resolveSelection } from "@karume/hub";
 import type { Session, SessionDiagnostics } from "@karume/runtime";
@@ -259,10 +259,9 @@ const errorText = (cause: unknown): string =>
 
 const ID = `${MODEL}-${PRACTICAL}`;
 
-test({
-  name: `e2e(実GPU): ${ID} の front 出力が参照席と決定性・census・帯で釣り合う（自機 A/B）`,
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  `e2e(実GPU): ${ID} の front 出力が参照席と決定性・census・帯で釣り合う（自機 A/B）`,
+  async () => {
     await runRecordedCase(results, { id: ID, failureNote: errorText }, async (recorded) => {
       const manifest = readManifest();
       const reference = referencePartnerOf(manifest, MODEL, PRACTICAL);
@@ -294,14 +293,13 @@ test({
       return { status: "pass", note: `census ${census}` };
     });
   },
-});
+);
 
 // --- 故障注入（ADR 0110 決定 5-5 — 門が赤になることを assert する）-------------------
 
-test({
-  name: "e2e(実GPU): 故障注入 ① 実用席の session を空にした manifest は床で赤になる",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 故障注入 ① 実用席の session を空にした manifest は床で赤になる",
+  async () => {
     const id = `fault1-empty-session-${MODEL}`;
     await runRecordedCase(results, { id, failureNote: errorText }, async (recorded) => {
       const manifest = readManifest();
@@ -327,12 +325,11 @@ test({
       });
     });
   },
-});
+);
 
-test({
-  name: "e2e(実GPU): 故障注入 ② 実用席の 2 回目だけ別 seed にすると決定性の門が赤になる",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 故障注入 ② 実用席の 2 回目だけ別 seed にすると決定性の門が赤になる",
+  async () => {
     const manifest = readManifest();
     const first = await observeFront(manifest, PRACTICAL, SEED);
     const second = await observeFront(manifest, PRACTICAL, SEED + 1);
@@ -343,4 +340,4 @@ test({
       "ビット一致しない",
     );
   },
-});
+);

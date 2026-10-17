@@ -26,7 +26,7 @@
 // MUST: 期待値は**丸め後の重み**（fake-quant — ADR 0006）で作る。丸め前の f32 で比較すると
 // 量子化誤差と実装誤差が混ざり、tolerance を緩める圧力になる。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type CodecName, perChannelGroupSize } from "../src/format/container/codecs.ts";
 import { ContainerFormatError } from "../src/format/container/header.ts";
@@ -731,51 +731,47 @@ const WEIGHTED_CASES: readonly WeightedCase[] = [
 ];
 
 for (const storage of STORAGES) {
-  test({
-    name: storage.titles.variants,
-    ignore: !GPU_AVAILABLE,
-    fn: async () => {
-      const gpu = await acquireGpu();
-      try {
-        for (const testCase of WEIGHTED_CASES) {
-          const quantized = storage.quantize(testCase.weight, testCase.channelAxis);
-          // A payload that is not 4-byte aligned needs the zero padding (f16: an odd element
-          // count; i8: an element count that is not a multiple of 4).
-          assert(
-            quantized.bytes.byteLength % 4 !== 0,
-            `${testCase.name}: payload is 4-byte aligned (the zero-padding path is not taken)`,
-          );
-          const { output, residentBytes } = await runWeighted(gpu, testCase, quantized);
-          // 圧縮のまま常駐している（= CPU 展開に落ちていない）。ゼロ詰めぶんと scale を含む。
-          const padded = quantized.bytes.byteLength + (4 - (quantized.bytes.byteLength % 4));
-          assertEquals(
-            residentBytes,
-            padded + (quantized.scale?.byteLength ?? 0),
-            `${testCase.name}: GPU 常駐圧縮バイト数（scale 込み）`,
-          );
-          const reference = refTensor(testCase.weight.shape, quantized.values);
-          const operands: RefTensor[] =
-            testCase.op === "embedding"
-              ? [reference, ...testCase.inputs.map(([, tensor]) => tensor as RefTensor)]
-              : [
-                  ...testCase.inputs.map(([, tensor]) => tensor as RefTensor),
-                  reference,
-                  ...(testCase.bias === undefined ? [] : [testCase.bias as RefTensor]),
-                ];
-          const expected = applyReferenceOp(
-            testCase.op,
-            operands,
-            testCase.attrs ?? {},
-            testCase.outShape,
-          );
-          assertEquals(output.shape, expected.shape, testCase.name);
-          const report = compareTensors(output, expected, GEMM_TOLERANCE);
-          assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
-        }
-      } finally {
-        gpu.destroy();
+  test.skipIf(!GPU_AVAILABLE)(storage.titles.variants, async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const testCase of WEIGHTED_CASES) {
+        const quantized = storage.quantize(testCase.weight, testCase.channelAxis);
+        // A payload that is not 4-byte aligned needs the zero padding (f16: an odd element
+        // count; i8: an element count that is not a multiple of 4).
+        assert(
+          quantized.bytes.byteLength % 4 !== 0,
+          `${testCase.name}: payload is 4-byte aligned (the zero-padding path is not taken)`,
+        );
+        const { output, residentBytes } = await runWeighted(gpu, testCase, quantized);
+        // 圧縮のまま常駐している（= CPU 展開に落ちていない）。ゼロ詰めぶんと scale を含む。
+        const padded = quantized.bytes.byteLength + (4 - (quantized.bytes.byteLength % 4));
+        assertEquals(
+          residentBytes,
+          padded + (quantized.scale?.byteLength ?? 0),
+          `${testCase.name}: GPU 常駐圧縮バイト数（scale 込み）`,
+        );
+        const reference = refTensor(testCase.weight.shape, quantized.values);
+        const operands: RefTensor[] =
+          testCase.op === "embedding"
+            ? [reference, ...testCase.inputs.map(([, tensor]) => tensor as RefTensor)]
+            : [
+                ...testCase.inputs.map(([, tensor]) => tensor as RefTensor),
+                reference,
+                ...(testCase.bias === undefined ? [] : [testCase.bias as RefTensor]),
+              ];
+        const expected = applyReferenceOp(
+          testCase.op,
+          operands,
+          testCase.attrs ?? {},
+          testCase.outShape,
+        );
+        assertEquals(output.shape, expected.shape, testCase.name);
+        const report = compareTensors(output, expected, GEMM_TOLERANCE);
+        assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
       }
-    },
+    } finally {
+      gpu.destroy();
+    }
   });
 }
 
@@ -797,37 +793,33 @@ for (const storage of STORAGES) {
  * ADR 0019 の「(Σ x·q)·s は CPU 展開とのビット一致を失う」に触れる。
  */
 for (const storage of STORAGES) {
-  test({
-    name: storage.titles.tiles,
-    ignore: !GPU_AVAILABLE,
-    fn: async () => {
-      const gpu = await acquireGpu();
-      try {
-        for (const testCase of storage.tileCases) {
-          const quantized = storage.quantize(testCase.weight, testCase.channelAxis);
-          // scale がチャネルごとに違う（同じなら軸の取り違えが数値に出ない — 恒真化の門）
-          if (quantized.scale !== undefined) {
-            assert(new Set(quantized.scale).size > 1, `${testCase.name}: scale が全チャネルで同じ`);
-          }
-          const { output } = await runWeighted(gpu, testCase, quantized);
-          const expected = applyReferenceOp(
-            testCase.op,
-            [
-              testCase.inputs[0][1] as RefTensor,
-              refTensor(testCase.weight.shape, quantized.values),
-              testCase.bias as RefTensor,
-            ],
-            {},
-            testCase.outShape,
-          );
-          assertEquals(output.shape, expected.shape, testCase.name);
-          const report = compareTensors(output, expected, GEMM_TOLERANCE);
-          assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
+  test.skipIf(!GPU_AVAILABLE)(storage.titles.tiles, async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const testCase of storage.tileCases) {
+        const quantized = storage.quantize(testCase.weight, testCase.channelAxis);
+        // scale がチャネルごとに違う（同じなら軸の取り違えが数値に出ない — 恒真化の門）
+        if (quantized.scale !== undefined) {
+          assert(new Set(quantized.scale).size > 1, `${testCase.name}: scale が全チャネルで同じ`);
         }
-      } finally {
-        gpu.destroy();
+        const { output } = await runWeighted(gpu, testCase, quantized);
+        const expected = applyReferenceOp(
+          testCase.op,
+          [
+            testCase.inputs[0][1] as RefTensor,
+            refTensor(testCase.weight.shape, quantized.values),
+            testCase.bias as RefTensor,
+          ],
+          {},
+          testCase.outShape,
+        );
+        assertEquals(output.shape, expected.shape, testCase.name);
+        const report = compareTensors(output, expected, GEMM_TOLERANCE);
+        assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
       }
-    },
+    } finally {
+      gpu.destroy();
+    }
   });
 }
 
@@ -842,10 +834,9 @@ for (const storage of STORAGES) {
  * MUST: NaN だけは**双方 NaN**で見る。WGSL は NaN のペイロード伝播を保証しないため、
  * ビット列の一致を要求すると仕様外の性質に依存したテストになる。
  */
-test({
-  name: "GPU の unpack2x16float と CPU 展開が全 65,536 パターンでビット一致（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "GPU の unpack2x16float と CPU 展開が全 65,536 パターンでビット一致（実 GPU）",
+  async () => {
     const vocab = 256;
     const hidden = 256;
     const bytes = f16BytesFromBits(Array.from({ length: vocab * hidden }, (_, i) => i));
@@ -907,7 +898,7 @@ test({
     assertEquals(nan, 2046, "NaN パターン数");
     assertEquals(subnormal, 2046, "subnormal パターン数");
   },
-});
+);
 
 /**
  * GPU の `unpack4xI8` + scale 乗算と CPU の {@link decodeI8} が**全 256 値 × 4 レーン位置で
@@ -920,10 +911,9 @@ test({
  * scale は行ごとに違う非 2 冪の値にする（scale を掛け忘れる誤り・行を取り違える誤りの検出器で、
  * 同時に「f32 乗算の丸め 1 回」がホストと一致することの検証になる）。
  */
-test({
-  name: "GPU の unpack4xI8 と CPU 展開が全 256 値 × 4 レーンでビット一致（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "GPU の unpack4xI8 と CPU 展開が全 256 値 × 4 レーンでビット一致（実 GPU）",
+  async () => {
     const vocab = 256;
     const hidden = 4;
     const quantized: number[] = [];
@@ -988,7 +978,7 @@ test({
     // 網羅の証拠（256 値 × 4 レーンを実際に踏んでいる）
     assertEquals(seen.size, 256 * 4, "値 × レーンの網羅数");
   },
-});
+);
 
 /**
  * 変種経路の full-write（ADR 0014）。プール再利用バッファに毒値を仕込んでから圧縮変種を
@@ -1043,99 +1033,95 @@ const poisonedGraph = (
 const POISON = new Float32Array(new Uint32Array([0xdeadbeef]).buffer)[0];
 
 for (const storage of STORAGES) {
-  test({
-    name: storage.titles.poison,
-    ignore: !GPU_AVAILABLE,
-    fn: async () => {
-      const gpu = await acquireGpu();
-      try {
-        // linear（タイル形）と embedding（grid-stride + 範囲外分岐）の 2 本で踏む
-        const cases: readonly {
-          readonly name: string;
-          readonly graph: DeclarationJson;
-          readonly tensors: readonly TensorInput[];
-          readonly inputs: Record<string, Tensor>;
-          readonly count: number;
-        }[] = [
-          (() => {
-            const quantized = storage.quantize(fill([3, 7], POSITIVE), 0);
-            const bias = fill([3], SIGNED);
-            return {
-              name: "linear",
-              graph: poisonedGraph(
-                "linear",
-                { ins: ["x", "w", "b"], attrs: {} },
-                [["x", fill([4, 7], SIGNED)]],
-                [3, 7],
-                [4, 3],
-                [3],
-              ),
-              tensors: [
-                {
-                  graph: GRAPH_NAME,
-                  initializer: "b",
-                  bytes: new Uint8Array(bias.data.buffer.slice(0)),
-                  encoding: { codec: "f32" },
-                },
-                {
-                  graph: GRAPH_NAME,
-                  initializer: "w",
-                  bytes: quantized.bytes,
-                  encoding: quantized.encoding,
-                },
-              ],
-              inputs: { x: fill([4, 7], SIGNED) },
-              count: 12,
-            };
-          })(),
-          (() => {
-            const quantized = storage.quantize(fill([5, 3], SIGNED), 0);
-            return {
-              name: "embedding",
-              graph: poisonedGraph(
-                "embedding",
-                { ins: ["w", "idx"], attrs: { padding_idx: -1 } },
-                [["idx", fill([4], (i) => i % 5, "i32")]],
-                [5, 3],
-                [4, 3],
-              ),
-              tensors: [
-                {
-                  graph: GRAPH_NAME,
-                  initializer: "w",
-                  bytes: quantized.bytes,
-                  encoding: quantized.encoding,
-                },
-              ],
-              inputs: { idx: fill([4], (i) => i % 5, "i32") },
-              count: 12,
-            };
-          })(),
-        ];
-        for (const testCase of cases) {
-          const opened = await openModelBytes(testCase.graph, testCase.tensors);
-          const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
-          try {
-            const outputs = await session.run({
-              seed: fill([testCase.count], () => POISON),
-              ...testCase.inputs,
-            });
-            const reuseCount = session.diagnostics().lastRun?.reuseCount ?? 0;
-            // 再利用が起きていなければ毒値検査は何も見ていない（恒真化の門）
-            assert(reuseCount >= 1, `${testCase.name}: プール再利用が起きていない`);
-            assertEquals(
-              [...outputs["y"].data].filter((value) => value === POISON),
-              [],
-              `${testCase.name}: 毒値の残存`,
-            );
-          } finally {
-            await session.dispose();
-          }
+  test.skipIf(!GPU_AVAILABLE)(storage.titles.poison, async () => {
+    const gpu = await acquireGpu();
+    try {
+      // linear（タイル形）と embedding（grid-stride + 範囲外分岐）の 2 本で踏む
+      const cases: readonly {
+        readonly name: string;
+        readonly graph: DeclarationJson;
+        readonly tensors: readonly TensorInput[];
+        readonly inputs: Record<string, Tensor>;
+        readonly count: number;
+      }[] = [
+        (() => {
+          const quantized = storage.quantize(fill([3, 7], POSITIVE), 0);
+          const bias = fill([3], SIGNED);
+          return {
+            name: "linear",
+            graph: poisonedGraph(
+              "linear",
+              { ins: ["x", "w", "b"], attrs: {} },
+              [["x", fill([4, 7], SIGNED)]],
+              [3, 7],
+              [4, 3],
+              [3],
+            ),
+            tensors: [
+              {
+                graph: GRAPH_NAME,
+                initializer: "b",
+                bytes: new Uint8Array(bias.data.buffer.slice(0)),
+                encoding: { codec: "f32" },
+              },
+              {
+                graph: GRAPH_NAME,
+                initializer: "w",
+                bytes: quantized.bytes,
+                encoding: quantized.encoding,
+              },
+            ],
+            inputs: { x: fill([4, 7], SIGNED) },
+            count: 12,
+          };
+        })(),
+        (() => {
+          const quantized = storage.quantize(fill([5, 3], SIGNED), 0);
+          return {
+            name: "embedding",
+            graph: poisonedGraph(
+              "embedding",
+              { ins: ["w", "idx"], attrs: { padding_idx: -1 } },
+              [["idx", fill([4], (i) => i % 5, "i32")]],
+              [5, 3],
+              [4, 3],
+            ),
+            tensors: [
+              {
+                graph: GRAPH_NAME,
+                initializer: "w",
+                bytes: quantized.bytes,
+                encoding: quantized.encoding,
+              },
+            ],
+            inputs: { idx: fill([4], (i) => i % 5, "i32") },
+            count: 12,
+          };
+        })(),
+      ];
+      for (const testCase of cases) {
+        const opened = await openModelBytes(testCase.graph, testCase.tensors);
+        const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
+        try {
+          const outputs = await session.run({
+            seed: fill([testCase.count], () => POISON),
+            ...testCase.inputs,
+          });
+          const reuseCount = session.diagnostics().lastRun?.reuseCount ?? 0;
+          // 再利用が起きていなければ毒値検査は何も見ていない（恒真化の門）
+          assert(reuseCount >= 1, `${testCase.name}: プール再利用が起きていない`);
+          assertEquals(
+            [...outputs["y"].data].filter((value) => value === POISON),
+            [],
+            `${testCase.name}: 毒値の残存`,
+          );
+        } finally {
+          await session.dispose();
         }
-      } finally {
-        gpu.destroy();
       }
-    },
+    } finally {
+      gpu.destroy();
+    }
   });
 }
 
@@ -1147,88 +1133,84 @@ for (const storage of STORAGES) {
  * ずれている形（例: 展開表が誤っていて GPU 側も同じ誤りを持つ）を見逃す。
  */
 for (const storage of STORAGES) {
-  test({
-    name: storage.titles.mixed,
-    ignore: !GPU_AVAILABLE,
-    fn: async () => {
-      const weight = fill([3, 4], POSITIVE);
-      const bias = fill([3], SIGNED);
-      const quantized = storage.quantize(weight, 0);
-      const tensors: readonly TensorInput[] = [
-        {
-          graph: GRAPH_NAME,
-          initializer: "w",
-          bytes: quantized.bytes,
-          encoding: quantized.encoding,
-        },
-        {
-          graph: GRAPH_NAME,
-          initializer: "b",
-          bytes: new Uint8Array(bias.data.buffer.slice(0)),
-          encoding: { codec: "f32" },
-        },
-      ];
-      const x = fill([2, 4], SIGNED);
-      const run = async (
-        gpu: GpuContext,
-        declaration: DeclarationJson,
-      ): Promise<{
-        readonly y: Tensor;
-        readonly resident: number;
-        readonly expanded: number;
-      }> => {
-        const session = await createSessionFromContainer(
-          gpu,
-          await openModelBytes(declaration, tensors),
-          GRAPH_NAME,
-        );
-        try {
-          const outputs = await session.run({ x });
-          const diagnostics = session.diagnostics().storage;
-          return {
-            y: outputs["y"],
-            resident: diagnostics.residentCompressedBytes,
-            expanded: diagnostics.hostExpandedBytes,
-          };
-        } finally {
-          await session.dispose();
-        }
-      };
-      const gpu = await acquireGpu();
+  test.skipIf(!GPU_AVAILABLE)(storage.titles.mixed, async () => {
+    const weight = fill([3, 4], POSITIVE);
+    const bias = fill([3], SIGNED);
+    const quantized = storage.quantize(weight, 0);
+    const tensors: readonly TensorInput[] = [
+      {
+        graph: GRAPH_NAME,
+        initializer: "w",
+        bytes: quantized.bytes,
+        encoding: quantized.encoding,
+      },
+      {
+        graph: GRAPH_NAME,
+        initializer: "b",
+        bytes: new Uint8Array(bias.data.buffer.slice(0)),
+        encoding: { codec: "f32" },
+      },
+    ];
+    const x = fill([2, 4], SIGNED);
+    const run = async (
+      gpu: GpuContext,
+      declaration: DeclarationJson,
+    ): Promise<{
+      readonly y: Tensor;
+      readonly resident: number;
+      readonly expanded: number;
+    }> => {
+      const session = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(declaration, tensors),
+        GRAPH_NAME,
+      );
       try {
-        const eligible = await run(gpu, linearDeclaration());
-        // w を add でも消費する = 混在消費（同じ linear ノードは残す）
-        const mixed = await run(
-          gpu,
-          linearDeclaration(
-            [{ op: "add", ins: ["w", "w"], outs: ["z"], attrs: {} }],
-            { z: { dtype: "f32", shape: [3, 4] } },
-            ["z"],
-          ),
-        );
-        assertEquals(
-          eligible.resident,
-          storage.mixedResidentBytes,
-          "適格側は圧縮のまま常駐（scale 込み）",
-        );
-        assertEquals(eligible.expanded, 0);
-        assertEquals(mixed.resident, 0, "混在消費は 1 バイトも圧縮常駐しない");
-        assertEquals(mixed.expanded, 48, "CPU 展開バイト数（f32 換算 12 要素）");
-        // 同じ重み・同じ演算なので出力はビット単位で一致する（丸めの差も出ない）
-        assertEquals([...mixed.y.data], [...eligible.y.data]);
-        // オラクル: 丸め後の重みでの CPU 参照
-        const expected = applyReferenceOp(
-          "linear",
-          [x as RefTensor, refTensor([3, 4], quantized.values), bias as RefTensor],
-          {},
-          [2, 3],
-        );
-        const report = compareTensors(eligible.y, expected, GEMM_TOLERANCE);
-        assertEquals(report.pass, true, formatAllclose(report));
+        const outputs = await session.run({ x });
+        const diagnostics = session.diagnostics().storage;
+        return {
+          y: outputs["y"],
+          resident: diagnostics.residentCompressedBytes,
+          expanded: diagnostics.hostExpandedBytes,
+        };
       } finally {
-        gpu.destroy();
+        await session.dispose();
       }
-    },
+    };
+    const gpu = await acquireGpu();
+    try {
+      const eligible = await run(gpu, linearDeclaration());
+      // w を add でも消費する = 混在消費（同じ linear ノードは残す）
+      const mixed = await run(
+        gpu,
+        linearDeclaration(
+          [{ op: "add", ins: ["w", "w"], outs: ["z"], attrs: {} }],
+          { z: { dtype: "f32", shape: [3, 4] } },
+          ["z"],
+        ),
+      );
+      assertEquals(
+        eligible.resident,
+        storage.mixedResidentBytes,
+        "適格側は圧縮のまま常駐（scale 込み）",
+      );
+      assertEquals(eligible.expanded, 0);
+      assertEquals(mixed.resident, 0, "混在消費は 1 バイトも圧縮常駐しない");
+      assertEquals(mixed.expanded, 48, "CPU 展開バイト数（f32 換算 12 要素）");
+      // 同じ重み・同じ演算なので出力はビット単位で一致する（丸めの差も出ない）
+      assertEquals([...mixed.y.data], [...eligible.y.data]);
+      // オラクル: 丸め後の重みでの CPU 参照
+      const expected = applyReferenceOp(
+        "linear",
+        [x as RefTensor, refTensor([3, 4], quantized.values), bias as RefTensor],
+        {},
+        [2, 3],
+      );
+      const report = compareTensors(eligible.y, expected, GEMM_TOLERANCE);
+      assertEquals(report.pass, true, formatAllclose(report));
+    } finally {
+      gpu.destroy();
+    }
   });
 }
 
@@ -1240,71 +1222,67 @@ for (const storage of STORAGES) {
  * プロトタイプの降格バグの逆）。
  */
 for (const storage of STORAGES) {
-  test({
-    name: storage.titles.diagnostics,
-    ignore: !GPU_AVAILABLE,
-    fn: async () => {
-      // 重み 3·7 = 21 要素（ゼロ詰めが要る長さ）/ bias 3 要素を **圧縮格納で宣言**
-      const weight = storage.quantize(fill([3, 7], POSITIVE), 0);
-      const bias = storage.quantize(fill([3], SIGNED), 0);
-      const scale = fill([3], POSITIVE);
-      const declaration: DeclarationJson = {
-        format: "karume-ir",
-        version: 2,
-        requires: { ops: ["linear", "mul"] },
-        symbols: [],
-        inputs: [{ name: "x", dtype: "f32", shape: [2, 7] }],
-        outputs: ["y"],
-        initializers: { w: {}, b: {}, s: {} },
-        values: {
-          w: { dtype: "f32", shape: [3, 7] },
-          b: { dtype: "f32", shape: [3] },
-          s: { dtype: "f32", shape: [3] },
-          h: { dtype: "f32", shape: [2, 3] },
-          y: { dtype: "f32", shape: [2, 3] },
-        },
-        nodes: [
-          { op: "linear", ins: ["x", "w", "b"], outs: ["h"], attrs: {} },
-          { op: "mul", ins: ["h", "s"], outs: ["y"], attrs: {} },
-        ],
-      };
-      const opened = await openModelBytes(declaration, [
-        { graph: GRAPH_NAME, initializer: "w", bytes: weight.bytes, encoding: weight.encoding },
-        // i8: bias は rank 1（行 = 3・行長 1）— per-channel の groupSize は行長 1。
-        { graph: GRAPH_NAME, initializer: "b", bytes: bias.bytes, encoding: bias.encoding },
-        {
-          graph: GRAPH_NAME,
-          initializer: "s",
-          bytes: new Uint8Array(scale.data.buffer.slice(0)),
-          encoding: { codec: "f32" },
-        },
-      ]);
-      const gpu = await acquireGpu();
-      const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
-      try {
-        const diagnostics = session.diagnostics().storage;
-        assertEquals(weight.bytes.byteLength, storage.diagnostics.payloadBytes);
-        assertEquals(diagnostics.residentCompressedBytes, storage.diagnostics.residentBytes);
-        // 適格外: bias 3 要素を f32 展開 = 12 バイト（f32 格納の s は**どちらにも入らない**。
-        // bias の scale は GPU に上がらないので常駐にも展開にも数えない）
-        assertEquals(diagnostics.hostExpandedBytes, 12);
-        // 展開した bias が値としても正しい（診断だけ合っていて中身が壊れている形を塞ぐ）
-        const x = fill([2, 7], SIGNED);
-        const outputs = await session.run({ x });
-        const linear = applyReferenceOp(
-          "linear",
-          [x as RefTensor, refTensor([3, 7], weight.values), refTensor([3], bias.values)],
-          {},
-          [2, 3],
-        );
-        const expected = applyReferenceOp("mul", [linear, scale as RefTensor], {}, [2, 3]);
-        const report = compareTensors(outputs["y"], expected, GEMM_TOLERANCE);
-        assertEquals(report.pass, true, formatAllclose(report));
-      } finally {
-        await session.dispose();
-        gpu.destroy();
-      }
-    },
+  test.skipIf(!GPU_AVAILABLE)(storage.titles.diagnostics, async () => {
+    // 重み 3·7 = 21 要素（ゼロ詰めが要る長さ）/ bias 3 要素を **圧縮格納で宣言**
+    const weight = storage.quantize(fill([3, 7], POSITIVE), 0);
+    const bias = storage.quantize(fill([3], SIGNED), 0);
+    const scale = fill([3], POSITIVE);
+    const declaration: DeclarationJson = {
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["linear", "mul"] },
+      symbols: [],
+      inputs: [{ name: "x", dtype: "f32", shape: [2, 7] }],
+      outputs: ["y"],
+      initializers: { w: {}, b: {}, s: {} },
+      values: {
+        w: { dtype: "f32", shape: [3, 7] },
+        b: { dtype: "f32", shape: [3] },
+        s: { dtype: "f32", shape: [3] },
+        h: { dtype: "f32", shape: [2, 3] },
+        y: { dtype: "f32", shape: [2, 3] },
+      },
+      nodes: [
+        { op: "linear", ins: ["x", "w", "b"], outs: ["h"], attrs: {} },
+        { op: "mul", ins: ["h", "s"], outs: ["y"], attrs: {} },
+      ],
+    };
+    const opened = await openModelBytes(declaration, [
+      { graph: GRAPH_NAME, initializer: "w", bytes: weight.bytes, encoding: weight.encoding },
+      // i8: bias は rank 1（行 = 3・行長 1）— per-channel の groupSize は行長 1。
+      { graph: GRAPH_NAME, initializer: "b", bytes: bias.bytes, encoding: bias.encoding },
+      {
+        graph: GRAPH_NAME,
+        initializer: "s",
+        bytes: new Uint8Array(scale.data.buffer.slice(0)),
+        encoding: { codec: "f32" },
+      },
+    ]);
+    const gpu = await acquireGpu();
+    const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
+    try {
+      const diagnostics = session.diagnostics().storage;
+      assertEquals(weight.bytes.byteLength, storage.diagnostics.payloadBytes);
+      assertEquals(diagnostics.residentCompressedBytes, storage.diagnostics.residentBytes);
+      // 適格外: bias 3 要素を f32 展開 = 12 バイト（f32 格納の s は**どちらにも入らない**。
+      // bias の scale は GPU に上がらないので常駐にも展開にも数えない）
+      assertEquals(diagnostics.hostExpandedBytes, 12);
+      // 展開した bias が値としても正しい（診断だけ合っていて中身が壊れている形を塞ぐ）
+      const x = fill([2, 7], SIGNED);
+      const outputs = await session.run({ x });
+      const linear = applyReferenceOp(
+        "linear",
+        [x as RefTensor, refTensor([3, 7], weight.values), refTensor([3], bias.values)],
+        {},
+        [2, 3],
+      );
+      const expected = applyReferenceOp("mul", [linear, scale as RefTensor], {}, [2, 3]);
+      const report = compareTensors(outputs["y"], expected, GEMM_TOLERANCE);
+      assertEquals(report.pass, true, formatAllclose(report));
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
   });
 }
 
@@ -1317,55 +1295,51 @@ for (const storage of STORAGES) {
  * 読める。
  */
 for (const storage of STORAGES) {
-  test({
-    name: storage.titles.graphOutput,
-    ignore: !GPU_AVAILABLE,
-    fn: async () => {
-      const weight = fill([3, 4], POSITIVE);
-      const bias = fill([3], SIGNED);
-      const quantized = storage.quantize(weight, 0);
-      const opened = await openModelBytes(linearDeclaration([], {}, ["w"]), [
-        {
-          graph: GRAPH_NAME,
-          initializer: "w",
-          bytes: quantized.bytes,
-          encoding: quantized.encoding,
-        },
-        {
-          graph: GRAPH_NAME,
-          initializer: "b",
-          bytes: new Uint8Array(bias.data.buffer.slice(0)),
-          encoding: { codec: "f32" },
-        },
-      ]);
-      const x = fill([2, 4], SIGNED);
-      const gpu = await acquireGpu();
-      const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
-      try {
-        const diagnostics = session.diagnostics().storage;
-        assertEquals(
-          diagnostics.residentCompressedBytes,
-          0,
-          "グラフ出力の重みは 1 バイトも圧縮常駐しない",
-        );
-        assertEquals(diagnostics.hostExpandedBytes, 48, "CPU 展開バイト数（f32 換算 12 要素）");
-        const outputs = await session.run({ x });
-        // 重みは実行に依らない定数なので、丸め後の値とビット単位で一致する
-        assertEquals(outputs["w"].shape, [3, 4]);
-        assertEquals([...outputs["w"].data], [...quantized.values]);
-        // 同じ run の計算側も従来どおり（展開経路でも値は変わらない）
-        const expected = applyReferenceOp(
-          "linear",
-          [x as RefTensor, refTensor([3, 4], quantized.values), bias as RefTensor],
-          {},
-          [2, 3],
-        );
-        const report = compareTensors(outputs["y"], expected, GEMM_TOLERANCE);
-        assertEquals(report.pass, true, formatAllclose(report));
-      } finally {
-        await session.dispose();
-        gpu.destroy();
-      }
-    },
+  test.skipIf(!GPU_AVAILABLE)(storage.titles.graphOutput, async () => {
+    const weight = fill([3, 4], POSITIVE);
+    const bias = fill([3], SIGNED);
+    const quantized = storage.quantize(weight, 0);
+    const opened = await openModelBytes(linearDeclaration([], {}, ["w"]), [
+      {
+        graph: GRAPH_NAME,
+        initializer: "w",
+        bytes: quantized.bytes,
+        encoding: quantized.encoding,
+      },
+      {
+        graph: GRAPH_NAME,
+        initializer: "b",
+        bytes: new Uint8Array(bias.data.buffer.slice(0)),
+        encoding: { codec: "f32" },
+      },
+    ]);
+    const x = fill([2, 4], SIGNED);
+    const gpu = await acquireGpu();
+    const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
+    try {
+      const diagnostics = session.diagnostics().storage;
+      assertEquals(
+        diagnostics.residentCompressedBytes,
+        0,
+        "グラフ出力の重みは 1 バイトも圧縮常駐しない",
+      );
+      assertEquals(diagnostics.hostExpandedBytes, 48, "CPU 展開バイト数（f32 換算 12 要素）");
+      const outputs = await session.run({ x });
+      // 重みは実行に依らない定数なので、丸め後の値とビット単位で一致する
+      assertEquals(outputs["w"].shape, [3, 4]);
+      assertEquals([...outputs["w"].data], [...quantized.values]);
+      // 同じ run の計算側も従来どおり（展開経路でも値は変わらない）
+      const expected = applyReferenceOp(
+        "linear",
+        [x as RefTensor, refTensor([3, 4], quantized.values), bias as RefTensor],
+        {},
+        [2, 3],
+      );
+      const report = compareTensors(outputs["y"], expected, GEMM_TOLERANCE);
+      assertEquals(report.pass, true, formatAllclose(report));
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
   });
 }

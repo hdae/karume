@@ -3,7 +3,7 @@
 // 実 GPU での参照照合と縮退門は `e2e_wan_vae_tiles_test.ts`。ここは**幾何の凍結表**（Python 側と
 // 同じ値 — ADR 0033 追記 9a の二重凍結）・配置の不変条件・貼り合わせの解析解を押さえる。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   assert,
   assertEquals,

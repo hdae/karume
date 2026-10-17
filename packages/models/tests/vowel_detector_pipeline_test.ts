@@ -35,7 +35,7 @@
 // ⑥ **検出の実行経路の例外**（偽の Session）— run や診断コールバックの失敗の後に Session の
 //    解放まで落ちても、呼び手の例外から最初の失敗を辿れる。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { ModelInputError } from "../src/errors.ts";

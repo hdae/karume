@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { createSampler, type SamplerSpec } from "../src/generation/sampler.ts";
 import {

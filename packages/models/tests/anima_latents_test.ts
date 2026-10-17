@@ -1,7 +1,7 @@
 // latent / 条件テンソルの整形と RGBA 化の挙動テスト。GPU も資産も要らない純関数。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   assert,
   assertEquals,

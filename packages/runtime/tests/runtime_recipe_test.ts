@@ -12,7 +12,7 @@
  * ADR 0068 決定 1 の受入条件「単一出力ノードのレシピ表現は列化前と同値」がここの 1 本目。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { GpuDeviceLostError } from "../src/gpu/context.ts";
 import type { StorageRoles } from "../src/gpu/pipeline-cache.ts";

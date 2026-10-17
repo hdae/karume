@@ -3,7 +3,7 @@
 // "__proto__" の 2 本で、krm 側の拒否とメモリ経路側の実行が同じ 2 つのフィクスチャを共有する
 // ため片割れ（krm 側）だけがここに GPU 無しで同居する。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { ContainerFormatError } from "../src/format/container/header.ts";
@@ -35,10 +35,9 @@ const expectedChain = (x: Tensor): ArrayLike<number> => {
   return applyReferenceOp("relu", [g]).data;
 };
 
-test({
-  name: "initializer を使う鎖グラフが CPU 参照と一致し、出力はグラフ出力だけ返る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "initializer を使う鎖グラフが CPU 参照と一致し、出力はグラフ出力だけ返る（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
@@ -59,7 +58,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * "__proto__" を名前に使う最小グラフ。入力名 / シンボル名（前者）と出力名（後者）で分ける
@@ -103,10 +102,9 @@ test("'__proto__' を値名に持つ宣言は krm が黙って消さずに拒否
   assertStringIncludes(error.message, "__proto__");
 });
 
-test({
-  name: "'__proto__' という入力名 / シンボル名 / 出力名がメモリ内容器で黙って消えない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "'__proto__' という入力名 / シンボル名 / 出力名がメモリ内容器で黙って消えない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const x = fill([4, 3], (i) => ((i % 7) - 3) * 0.5);
     const expected = applyReferenceOp("relu", [x]).data;
@@ -145,7 +143,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * reshape / 恒等 expand の別名（ADR 0011）を踏む鎖。
@@ -189,10 +187,9 @@ for (const [aliasOp, expectedShape, identityExpands] of [
   ["reshape", [6, 2], 0],
   ["expand", [3, 4], 2],
 ] as const) {
-  test({
-    name: `${aliasOp} の別名がコピー無しで、生きている別名を後続の確保に配り直さない（実 GPU）`,
-    ignore: !GPU_AVAILABLE,
-    fn: async () => {
+  test.skipIf(!GPU_AVAILABLE)(
+    `${aliasOp} の別名がコピー無しで、生きている別名を後続の確保に配り直さない（実 GPU）`,
+    async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(
         gpu,
@@ -229,7 +226,7 @@ for (const [aliasOp, expectedShape, identityExpands] of [
         gpu.destroy();
       }
     },
-  });
+  );
 }
 
 /**
@@ -275,10 +272,9 @@ const topkLifetimeGraph = (pinIndices: boolean): DeclarationJson => ({
   ],
 });
 
-test({
-  name: "多出力ノードの slot ごとの uses / pin が正しく、片方だけ消費する形でも値が壊れない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "多出力ノードの slot ごとの uses / pin が正しく、片方だけ消費する形でも値が壊れない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const x = fill([3, 8], (i) => ((i % 7) - 3) * 0.5 + (i % 3) * 0.25);
@@ -352,12 +348,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "同一 Session への並行 run は直列化され、全件が CPU 参照と一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "同一 Session への並行 run は直列化され、全件が CPU 参照と一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
@@ -381,12 +376,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "実行中の run がある間の dispose は run の完了後に重みを破棄する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "実行中の run がある間の dispose は run の完了後に重みを破棄する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
@@ -404,12 +398,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "submitPolicy でチャンクを 1 に絞ると dispatch ごとに submit される（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "submitPolicy でチャンクを 1 に絞ると dispatch ごとに submit される（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // 既定の initialChunkSize=16 では 3 dispatch のグラフがチャンク途中 submit を通らない
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model", {
@@ -436,12 +429,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "診断がパイプライン数と直近 run の中間バッファ再利用を報告する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "診断がパイプライン数と直近 run の中間バッファ再利用を報告する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
@@ -461,7 +453,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **型の外から来る呼び手**（JS の消費者・改名前の綴りを残した古いビルド）を作る。TS の型は
@@ -470,10 +462,9 @@ test({
 const jsCallerOptions = (options: Readonly<Record<string, string>>): SessionOptions =>
   options as unknown as SessionOptions;
 
-test({
-  name: "実行形ノブの union 外の綴りは Session 構築で全件列挙して落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "実行形ノブの union 外の綴りは Session 構築で全件列挙して落ちる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const opened = await openChainModel();
     try {
@@ -506,12 +497,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "GEMV並列加算は不正な綴りと未実装の計算精度の組を構築時に拒否する",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "GEMV並列加算は不正な綴りと未実装の計算精度の組を構築時に拒否する",
+  async () => {
     const gpu = await acquireGpu();
     const opened = await openChainModel();
     try {
@@ -532,12 +522,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "planBackingBudgetBytes は非負の安全な整数だけを受ける（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "planBackingBudgetBytes は非負の安全な整数だけを受ける（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const opened = await openChainModel();
     try {
@@ -565,12 +554,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "linearGemvRowsThreadTarget は 1 以上の安全な整数だけを受ける（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "linearGemvRowsThreadTarget は 1 以上の安全な整数だけを受ける（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const opened = await openChainModel();
     try {
@@ -598,12 +586,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "失敗した run の直後の診断は 1 本前の成功 run の実績を残さない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "失敗した run の直後の診断は 1 本前の成功 run の実績を残さない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
@@ -636,7 +623,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * `d` は誰にも読まれずグラフ出力でもない中間出力（IR は到達不能な値を禁じていない）。
@@ -661,10 +648,9 @@ const deadValueGraph = (): DeclarationJson => ({
   ],
 });
 
-test({
-  name: "消費者ゼロの中間出力もノード境界でプールへ戻る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "消費者ゼロの中間出力もノード境界でプールへ戻る（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(
       gpu,
@@ -687,12 +673,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "capability 不足（非対応 op / 非対応 格納 dtype）は Session 構築で落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "capability 不足（非対応 op / 非対応 格納 dtype）は Session 構築で落ちる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // conv_transpose2d は語彙にすら無い op（ADR 0007 の allowlist 凍結）— 契約表に
@@ -732,12 +717,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "契約外のグラフ（非空 attrs / op が受理しない dtype）は Session 構築で落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "契約外のグラフ（非空 attrs / op が受理しない dtype）は Session 構築で落ちる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // どちらも capability 突合（op 名 + dtype + attrs）が最初の門で捕まえる
@@ -763,7 +747,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 実測グラフ（DeBERTa front）の mask 経路をそのまま縮めたもの:
@@ -798,10 +782,9 @@ const maskGraph = (): DeclarationJson => ({
   ],
 });
 
-test({
-  name: "i32 入力 → bool 中間 → 非 f32 出力の鎖が CPU 参照と厳密一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "i32 入力 → bool 中間 → 非 f32 出力の鎖が CPU 参照と厳密一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(
       gpu,
@@ -831,14 +814,13 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // MUST: 要素は全型 4 バイトなので、TypedArray の取り違えは writeBuffer を素通りして
 // ビット列の読み替えになる（例外は出ない）。宣言 dtype との突合が唯一の防波堤。
-test({
-  name: "宣言 dtype と食い違う入力テンソルは転送前に落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "宣言 dtype と食い違う入力テンソルは転送前に落ちる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(
       gpu,
@@ -870,12 +852,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "run の入力不整合と dispose 後の実行は fail loudly（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "run の入力不整合と dispose 後の実行は fail loudly（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
@@ -903,12 +884,11 @@ test({
     await session.dispose();
     gpu.destroy();
   },
-});
+);
 
-test({
-  name: "宣言 shape と計算 shape の食い違いは 1 dispatch も出さずに落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "宣言 shape と計算 shape の食い違いは 1 dispatch も出さずに落ちる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // IR は shape を計算しないので、宣言の誤りは実行計画の段で初めて見つかる
     const wrong = chainGraph();
@@ -924,12 +904,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "導出相で落ちた run は GPU コマンドを 1 件も積まない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "導出相で落ちた run は GPU コマンドを 1 件も積まない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // 2 ノード目（matmul）が上限超過で throw する。dispatch の発行は**レシピ実行相**にしか
     // 無く、そこへ入る前に導出相が落ちるので、1 ノード目（relu）のぶんも積まれない
@@ -977,15 +956,14 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // 値の総当たり（5 ノブ × 6 値）は tests/runtime_execution_knobs_test.ts が GPU 非依存で回す。
 // ここに残すのは「検査が実構築の経路にも繋がっている」1 本だけ（`createSession` から
 // `assertExecutionKnobs` へ届いていることの証明で、受理集合そのものの検査ではない）。
-test({
-  name: "実行形設定の変換可能なオブジェクトは実構築でも文字列として受理されない",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "実行形設定の変換可能なオブジェクトは実構築でも文字列として受理されない",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const model = await openChainModel();
@@ -1016,4 +994,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

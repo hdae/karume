@@ -24,7 +24,7 @@
 // NOTE: manifest の `session` → `SessionOptions` の写像は 7 家族共有になったので、門は
 // `session_options_test.ts` にある。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   assert,
   assertAlmostEquals,

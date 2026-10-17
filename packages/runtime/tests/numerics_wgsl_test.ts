@@ -5,7 +5,7 @@
  */
 
 import { assertEquals, assertMatch, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { f32Literal } from "../src/codegen/numerics-wgsl.ts";
 

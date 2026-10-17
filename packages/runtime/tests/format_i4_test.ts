@@ -4,7 +4,7 @@
 // tests 側 tools/exporter/tests/test_emit.py の `q=[1,2] → 0xA9` と同じ値で両言語を対に固定
 // する）。実装から期待値を引くと往復が恒真化する。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { decodeI4, I4Error } from "../src/format/i4.ts";
 

@@ -3,7 +3,7 @@
 // テスト補助の helper も引かない（helper が src/ を引いていると、この門の検出力がそのぶん減る）。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   acquireGpu,
@@ -85,10 +85,9 @@ const expectedRows = (x: readonly number[], rows: number): Float32Array<ArrayBuf
   return out;
 };
 
-test({
-  name: "公開面だけでモデルを開き、記号次元込みのグラフを実行できる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "公開面だけでモデルを開き、記号次元込みのグラフを実行できる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
     // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
@@ -151,17 +150,16 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 0 要素テンソル（shape に 0 を含む）の経路。要素数 0 は dispatch 数 0・確保サイズ 0 を
  * 生み、各所の下限クランプ（最小 4 バイト）に乗って通っている。shape を保ったまま長さ 0 の
  * data が返ること、そして同じ Session の後続 run が壊れないことをここで固定する。
  */
-test({
-  name: "0 要素テンソル（記号次元 T=0）が shape を保ったまま長さ 0 で返る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "0 要素テンソル（記号次元 T=0）が shape を保ったまま長さ 0 で返る（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
     // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
@@ -193,7 +191,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 test("ランタイム内部の直列化プリミティブは公開型面に現れない（ADR 0008）", () => {
   // 型レベルの門。`withScopeLock` / `raceDeviceLost` が素の名前で GpuContext に載っていると

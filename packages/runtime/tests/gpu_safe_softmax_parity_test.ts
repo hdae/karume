@@ -19,7 +19,7 @@
 // MUST: **全 −inf 行を含むケース**を必ず回す（故障注入 — この行が無いと ① の masked_fill が
 // 一度も発火せず、両者が素の softmax として一致するだけの恒真テストになる）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
@@ -157,10 +157,9 @@ const CASES: readonly Case[] = [
   },
 ];
 
-test({
-  name: "safe_softmax 1 ノードの出力が分解ガード相当（softmax + masked_fill）と**ビット単位で一致**する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "safe_softmax 1 ノードの出力が分解ガード相当（softmax + masked_fill）と**ビット単位で一致**する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of CASES) {
@@ -215,15 +214,14 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // 空行を持たない入力では safe_softmax は**素の softmax とビット同一**でなければならない
 // （① の identity を −inf に変えた影響が有限行へ漏れていないことの直接の門 — 上の parity は
 // masked_fill を挟むので、素の softmax そのものとの一致は別に見る）。
-test({
-  name: "safe_softmax は −inf を含まない入力で素の softmax とビット単位で一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "safe_softmax は −inf を含まない入力で素の softmax とビット単位で一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const [rows, dim] of [
@@ -248,4 +246,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

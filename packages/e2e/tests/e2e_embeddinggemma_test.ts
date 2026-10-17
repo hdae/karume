@@ -17,7 +17,7 @@
 // （下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "../../runtime/mod.ts";
 import {
@@ -128,15 +128,9 @@ if (!AVAILABLE) {
   );
 }
 
-test({
-  name: "EmbeddingGemma 資産: 期待するケースとモデル本体が揃っている",
-  // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
-  //（モデルだけ残って golden が全滅した欠損も拾う — `ANY_PRESENT` の JSDoc）。
-  ignore: !ANY_PRESENT,
-  fn: () => {
-    assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
-    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
-  },
+test.skipIf(!ANY_PRESENT)("EmbeddingGemma 資産: 期待するケースとモデル本体が揃っている", () => {
+  assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
+  assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
 });
 
 /**
@@ -148,10 +142,9 @@ test({
 const results = openResults("embeddinggemma-golden");
 
 for (const caseName of CASES) {
-  test({
-    name: `EmbeddingGemma golden 突合: ${caseName}（実 GPU / torch CPU 期待値）`,
-    ignore: !AVAILABLE || !GPU_AVAILABLE,
-    fn: async () => {
+  test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+    `EmbeddingGemma golden 突合: ${caseName}（実 GPU / torch CPU 期待値）`,
+    async () => {
       await runRecordedCase(results, { id: caseName }, async ({ measurements }) => {
         const [opened, ioBytes] = await Promise.all([
           openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
@@ -220,5 +213,5 @@ for (const caseName of CASES) {
         }
       });
     },
-  });
+  );
 }

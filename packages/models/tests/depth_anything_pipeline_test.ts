@@ -33,7 +33,7 @@
 //    （`pipeline.ts` のモジュール doc）は、畳んでも shape も非負性も合ったまま通るので、
 //    「畳んだら落ちる」形の検査を置く。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { parseDepthAnythingPipelineConfig } from "../src/depth-anything/config.ts";

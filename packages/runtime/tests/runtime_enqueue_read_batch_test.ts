@@ -14,7 +14,7 @@
 // device（`helpers/fake-gpu.ts`）で決定論的に固定できる。
 
 import { assertEquals, assertInstanceOf, assertNotEquals, assertStringIncludes } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import type { IrGraph } from "../src/format/ir.ts";
 import {
   type BatchScope,

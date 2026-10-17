@@ -11,7 +11,7 @@
 // この門の本体。通してしまうと、どれも例外ではなく「未初期化の過去を読む」「貸し手が確定した
 // KV を上書きする」という**別の値**として出る。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { IrError, type IrGraph } from "../src/format/ir.ts";
 import { OpContractError } from "../src/ops.ts";

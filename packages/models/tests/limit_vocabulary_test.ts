@@ -21,7 +21,7 @@
  * と同じ流儀。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { RequiredLimitName } from "@karume/hub";
 import { REQUIRED_LIMIT_KEYS } from "../../runtime/src/gpu/device.ts";

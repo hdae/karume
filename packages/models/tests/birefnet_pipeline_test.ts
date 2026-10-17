@@ -34,7 +34,7 @@
 //    落ちる非対称なケースを置く。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   assert,
   assertAlmostEquals,

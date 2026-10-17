@@ -1,5 +1,5 @@
 import { platformObject } from "@karume/test-support/webgpu";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { GpuInternalError, GpuValidationError } from "../src/gpu/error-scope.ts";
@@ -279,10 +279,9 @@ test("PipelineKeyConflictError は Session を跨いで検出される（同一 
   assertEquals(gpu.modules, [WGSL_A], "衝突時は device に触らない");
 });
 
-test({
-  name: "パイプラインキャッシュは device 寿命で、dispose 済み Session のキーも残る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "パイプラインキャッシュは device 寿命で、dispose 済み Session のキーも残る（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const model = () => openGraphModel(singleOpDeclaration("relu", [[8, 8]], [[8, 8]]));
     const x = fill([8, 8], (i) => (i % 13) - 6);
@@ -325,7 +324,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // storage 束縛の役割（WGSL 宣言 → 計画の材料 — ADR 0093 決定 1）

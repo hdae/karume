@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { gemmUsesVec4 } from "../src/kernels/gemm.ts";
 import { GEMM_ROWS_BUCKETS } from "../src/kernels/gemm-geometry.ts";
 import { LINEAR_I8A8_MAX_K } from "../src/kernels/linear-i8a8.ts";

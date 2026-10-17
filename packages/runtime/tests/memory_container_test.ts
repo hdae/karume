@@ -10,7 +10,7 @@
  */
 
 import { assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { ContainerFormatError } from "../src/format/container/header.ts";
 import { type MemoryTensor, openMemoryContainer } from "../src/format/container/memory.ts";
 import { type IrDeclaration, parseIrDeclarationValue } from "../src/format/ir.ts";

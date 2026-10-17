@@ -8,7 +8,7 @@
 //  ③ 区間の宣言（cfgMinT/cfgMaxT・minSeconds/maxSeconds）が逆順なら落とす — 逆順は
 //     「CFG が 1 度も掛からない」形で沈黙し、forward 数が減るだけで例外が出ない
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   IRODORI_PIPELINE_MAJOR,

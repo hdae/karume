@@ -3,7 +3,7 @@
 // golden (outputs/series/dacvae-32dim/host/) lives in
 // packages/e2e/tests/e2e_irodori_reference_host_test.ts.
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { integratedLoudness, kWeightingFilters } from "../src/irodori/host/loudness.ts";
 import { ModelInputError } from "../src/errors.ts";

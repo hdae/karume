@@ -8,7 +8,7 @@
 
 import { platformObject } from "@karume/test-support/webgpu";
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { geometryProfileMismatch, sweepCaseSetId } from "../tune.ts";
 import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import { geometryProfileKernelsId } from "../src/tune/fingerprint.ts";

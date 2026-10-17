@@ -32,7 +32,7 @@
 //
 // 資産不要。`shader-f16` を列挙しないアダプタでは SKIP（既定の f32 経路の検証は無傷）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
@@ -268,10 +268,9 @@ const LINEAR_SHAPES: readonly {
   { name: "スカラ m5 n7 k1", m: 5, n: 7, k: 1 },
 ];
 
-test({
-  name: "linear の f16 計算変種は「入力を f16 に丸めた f32 変種」とビット単位で一致する（実 GPU）",
-  ignore: !F16_GPU,
-  fn: async () => {
+test.skipIf(!F16_GPU)(
+  "linear の f16 計算変種は「入力を f16 に丸めた f32 変種」とビット単位で一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu({ shaderF16: true });
     try {
       for (const shape of LINEAR_SHAPES) {
@@ -314,12 +313,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "重み f16 格納 × f16 計算の組は往復恒等（unpack2x16float の値は f16 に厳密に戻る）",
-  ignore: !F16_GPU,
-  fn: async () => {
+test.skipIf(!F16_GPU)(
+  "重み f16 格納 × f16 計算の組は往復恒等（unpack2x16float の値は f16 に厳密に戻る）",
+  async () => {
     const gpu = await acquireGpu({ shaderF16: true });
     try {
       for (const shape of LINEAR_SHAPES) {
@@ -363,7 +361,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 融合 attention
@@ -465,10 +463,9 @@ const attentionOracle = async (
   return out.output;
 };
 
-test({
-  name: "融合 attention の f16 変種は分解経路 + 丸め 3 点とビット単位で一致する（実 GPU）",
-  ignore: !F16_GPU,
-  fn: async () => {
+test.skipIf(!F16_GPU)(
+  "融合 attention の f16 変種は分解経路 + 丸め 3 点とビット単位で一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu({ shaderF16: true });
     try {
       for (const shape of ATTENTION_SHAPES) {
@@ -534,16 +531,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // fail loudly（黙って f32 へ落とさない）
 // ---------------------------------------------------------------------------
 
-test({
-  name: "f16 計算の要求は shader-f16 無しの device では Session 構築で落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "f16 計算の要求は shader-f16 無しの device では Session 構築で落ちる（実 GPU）",
+  async () => {
     // MUST: **shaderF16 を要求していない** device を作る（既定の acquireGpu）。
     const gpu = await acquireGpu();
     try {
@@ -563,12 +559,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "i8 常駐の重み × linearCompute 'f16'（w8a16）は fail loudly（実 GPU）",
-  ignore: !F16_GPU,
-  fn: async () => {
+test.skipIf(!F16_GPU)(
+  "i8 常駐の重み × linearCompute 'f16'（w8a16）は fail loudly（実 GPU）",
+  async () => {
     const m = 4;
     const n = 8;
     const k = 8;
@@ -625,4 +620,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

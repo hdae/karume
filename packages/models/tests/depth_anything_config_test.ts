@@ -12,7 +12,7 @@
 //    配布形を通すと `pixel_values` が uint8 1 LSB の 34 倍ずれる。受理集合がファミリごとに
 //    違うことが、スキーマを共有しない理由そのものなので、両向きに固定する。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { parseDepthAnythingPipelineConfig } from "../src/depth-anything/config.ts";

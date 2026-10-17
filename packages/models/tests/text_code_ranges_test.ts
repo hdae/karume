@@ -4,7 +4,7 @@
 // **唯一の判定器**で、外すと例外を出さずに「別の文字分類」になる — pre-token の切れ目が変わり
 // id 列が静かに別物になる形なので、家族側の e2e からは壊しても緑のまま見える位置にある。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { type CodeRanges, inCodeRanges } from "../src/text/code-ranges.ts";
 

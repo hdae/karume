@@ -41,7 +41,7 @@
 // - 分解経路とのビット同一（tests/gpu_attention_parity_test.ts）は i8a8 では原理的に成立
 //   しない。同テストは f32 / f16 変種専用の門として据え置く（別キーなので構造的に混ざらない）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import {
@@ -513,10 +513,9 @@ test("attention_pv i8a8: 形状群の Vᵀ は丸め境界から十分離れて�
 // (a) 整数を受け取ってからの純関数との atol=0 / (a2) Vᵀ の量子化の atol=0
 // ---------------------------------------------------------------------------
 
-test({
-  name: "attention_pv i8a8 の O が TS 参照（整数の手前で割った純関数）と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attention_pv i8a8 の O が TS 参照（整数の手前で割った純関数）と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of PV_SHAPES) {
@@ -575,16 +574,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // (b) qP の生成（exp の実装差 — atol=0 は原理的に立たない）
 // ---------------------------------------------------------------------------
 
-test({
-  name: "attention_pv i8a8: qP は TS 参照と必ず ±1 段以内で一致する（exp の実装差・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attention_pv i8a8: qP は TS 参照と必ず ±1 段以内で一致する（exp の実装差・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     let total = 0;
     let mismatched = 0;
@@ -624,16 +622,15 @@ test({
     );
     assert(rate < 0.02, `qP の不一致率 ${rate} が 2% を超えた（exp の実装差にしては大きい）`);
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // (c) dp4a とエミュ
 // ---------------------------------------------------------------------------
 
-test({
-  name: "attention_pv i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attention_pv i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of PV_SHAPES) {
@@ -647,7 +644,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // ①QK i8a8 — raw dispatch (reads S directly; the atol=0 oracle for S)
@@ -847,10 +844,9 @@ test("attention_qk i8a8: 形状群の q / k は丸め境界から十分離れて
   assert(worst > TIE_MARGIN, `最悪余裕 ${worst}`);
 });
 
-test({
-  name: "attention_qk i8a8 の S が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attention_qk i8a8 の S が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of QK_SHAPES) {
@@ -873,12 +869,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "attention_qk i8a8: K 側の充填スロットが 5 以上の幾何でも S が TS 参照と atol=0 で一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attention_qk i8a8: K 側の充填スロットが 5 以上の幾何でも S が TS 参照と atol=0 で一致する（実 GPU）",
+  async () => {
     // 充填の値変数が関数スコープの `k4`（K のパック数）を覆い隠していた欠陥（2026-09-27）の検出器。
     // 1 スレッドが埋める K 側スロット数 = regN · tileK / 4 / wgY が 5 以上の幾何で、5 番目以降の
     // 列が黙って 0 になっていた。既定幾何（2 スロット）では踏めないので、8 / 16 スロットの幾何で撃つ。
@@ -913,12 +908,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "attention_qk i8a8: NaN 行は行全体・NaN 列は列全体へ伝播し、ゼロ行は厳密に 0（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attention_qk i8a8: NaN 行は行全体・NaN 列は列全体へ伝播し、ゼロ行は厳密に 0（実 GPU）",
+  async () => {
     const shape: QkShape = { name: "nan/zero B·H2 M8 N12 D20", batch: 2, m: 8, n: 12, d: 20 };
     const { batch, m, n, d } = shape;
     const q = headVaried(QUERY, batch, m, d);
@@ -967,12 +961,11 @@ test({
       assertEquals(actual[(1 * m + zeroRow) * n + col], 0, `ゼロ行 col=${col}`);
     }
   },
-});
+);
 
-test({
-  name: "attention_qk i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attention_qk i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // 本機は packed_4x8_integer_dot_product を列挙するので**両変種とも実走できる**。
@@ -989,7 +982,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // Session 経路（attentionCompute: "a8"）— 段ごとの適格判定と混成
@@ -1041,10 +1034,9 @@ const relativeRms = (actual: ArrayLike<number>, expected: ArrayLike<number>): nu
   return Math.sqrt(diff / norm);
 };
 
-test({
-  name: "attentionCompute:'a8' は ①QK と ③PV を整数内積にし、②行統計は f32 のまま走る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attentionCompute:'a8' は ①QK と ③PV を整数内積にし、②行統計は f32 のまま走る（実 GPU）",
+  async () => {
     // MUST: **shader-f16 を要求しない既定の device** で走ること（i8a8 は feature ゲートの外）。
     const gpu = await acquireGpu();
     try {
@@ -1074,7 +1066,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **census**（ADR 0058 決定 4）。どの変種が実際に走ったかはキーでしか見えない
@@ -1084,10 +1076,9 @@ test({
  * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
  * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
-test({
-  name: "attentionCompute:'a8' の変種選択（①③ i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attentionCompute:'a8' の変種選択（①③ i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const shape = { b: 2, h: 3, m: 65, n: 68 };
@@ -1134,12 +1125,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "attentionCompute:'a8' の両段縮退（D%4 / N%4 とも不適格）は f32 経路とビット同一（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attentionCompute:'a8' の両段縮退（D%4 / N%4 とも不適格）は f32 経路とビット同一（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // 縮退は沈黙（検出器はキーと値の 2 本 — キー側は下の census が持つ）
@@ -1151,13 +1141,12 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 段ごとに独立な適格判定（混成）は値に出ないのでキーが唯一の検出器。空の census を落とす理由は上の census と同じ。 */
-test({
-  name: "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // ① N % 4 != 0 → ③PV だけ f32（①QK は D=20 で i8a8 のまま）
@@ -1211,12 +1200,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "attention_pv i8a8: N が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attention_pv i8a8: N が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
+  async () => {
     // 門のすぐ外側（4 の倍数で 2^17 + 4）。|acc| ≤ N·127² は i32 に収まるが、門は安全側。
     const n = LINEAR_I8A8_MAX_K + 4;
     const shape = { b: 1, h: 1, m: 1, n };
@@ -1234,13 +1222,12 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ①QK has its own D gate, a separate branch from the ③PV N gate above.
-test({
-  name: "attention i8a8: D が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attention i8a8: D が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
+  async () => {
     // 門のすぐ外側（4 の倍数で 2^17 + 4）。|acc| ≤ D·127² は i32 に収まるが、門は安全側。
     const d = LINEAR_I8A8_MAX_K + 4;
     const shape = { b: 1, h: 1, m: 1, n: 4 };
@@ -1258,4 +1245,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

@@ -25,17 +25,16 @@
  * 配るしかない）ので、これらは `open(key)` ではなく**供給口を作る時点**で落ちる。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { acquireGpu, ContainerFormatError } from "@karume/runtime";
 import { openerOf, part, parts, single } from "./helpers/asset-container-fixture.ts";
 import { LINEAR_PROBE_Y, runLinearProbe } from "./helpers/container-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-test({
-  name: "assetComponentOpener: 分割形の Record から Session が張れる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "assetComponentOpener: 分割形の Record から Session が張れる（実 GPU）",
+  async () => {
     const open = await openerOf(parts("dit"));
     const component = open("dit");
     // グラフ宣言は part 0（descriptor）から読めている。
@@ -57,12 +56,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "assetComponentOpener: 単一形の 1 本からも Session が張れる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "assetComponentOpener: 単一形の 1 本からも Session が張れる（実 GPU）",
+  async () => {
     const open = await openerOf({ dit: single() });
     assertEquals(open("dit").graph.outputs, ["y"]);
 
@@ -75,7 +73,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 test("assetComponentOpener: 添字の欠番は part を名乗って落ちる", async () => {
   const error = await assertRejects(

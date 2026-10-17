@@ -9,7 +9,7 @@
 //  ⑤ `weights` の部分集合を渡すとその役割だけが選択に出る（assets は常に全数）。
 //  ⑥ 未知の model / quant / weights は**利用可能な一覧**を添えて落ちる（ADR 0041 §8）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertNotStrictEquals, assertThrows } from "@std/assert";
 import {
   type FileRef,

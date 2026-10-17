@@ -17,7 +17,7 @@
 
 import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import { MATTE_PROCEDURES, matteFromLogits, type MatteProcedure } from "../src/birefnet/matte.ts";
 import { floatsOf, readBuffer, viewOf } from "./helpers/wan-ti2v-dit.ts";

@@ -15,7 +15,7 @@
 // 取らずに回る門だけ。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import type { IrGraph } from "../src/format/ir.ts";
 import { numel, OpContractError } from "../src/ops.ts";
 import { RuntimeSupportError } from "../src/ops/support.ts";

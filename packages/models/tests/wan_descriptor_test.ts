@@ -3,7 +3,7 @@
 // その前に記述子ごとにここで落とす。世代を足したら GENERATIONS に 1 行足す（同じ検査を当てる）。
 
 import { assertEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import {
   WAN21_GENERATION,
   WAN22_TI2V_GENERATION,

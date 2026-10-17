@@ -9,7 +9,7 @@
 //
 // 門の実体は runtime 側に 1 本だけ置く（`container-files.ts` 等と同じパッケージ跨ぎ相対 import）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertPublicSurface } from "../../runtime/tests/helpers/public-surface.ts";
 
 test("公開面: hub の exports（. と ./deno）がスナップショットと一致する", async () => {

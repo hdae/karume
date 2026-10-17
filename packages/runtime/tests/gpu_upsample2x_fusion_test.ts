@@ -2,7 +2,7 @@
 // エクスポータと同じ expand 2 本の列を private 1-pass copy に置換しても、全ビットが
 // そのまま複製されることを固定する。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
@@ -105,10 +105,9 @@ const expectedUpsampleWords = (input: Uint32Array): Uint32Array => {
   return out;
 };
 
-test({
-  name: "VAE nearest x2 融合は実 export 列と同じ全要素を書き、2→1 dispatch へ畳む（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "VAE nearest x2 融合は実 export 列と同じ全要素を書き、2→1 dispatch へ畳む（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const x = fill(SHAPE, (i) => Math.sin(i * 0.37) * 3.1 + i / 997);
     // コピー融合は算術をしないため、以下のビット列も全て保存されなければならない。
@@ -147,12 +146,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "upsample x2 の内部値が output / 別 consumer なら、また near-shape なら融合しない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "upsample x2 の内部値が output / 別 consumer なら、また near-shape なら融合しない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const x = fill(SHAPE, (i) => (i % 13) - 6.25);
     try {
@@ -215,4 +213,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

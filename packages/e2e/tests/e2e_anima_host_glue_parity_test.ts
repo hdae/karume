@@ -25,7 +25,7 @@
  * SKIP** する（ADR 0005）。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors, type Tensor } from "@karume/runtime";
 import { cfgEulerStep, sigmaSchedule } from "../../models/src/anima/sampler.ts";
@@ -134,20 +134,18 @@ for (const variant of VARIANTS) {
   }
   const ignore = fixture === undefined;
 
-  test({
-    name: `${variant}: sigmaSchedule が参照の sigma 列（終端 0 込み）とビット一致する`,
-    ignore,
-    fn: () => {
+  test.skipIf(ignore)(
+    `${variant}: sigmaSchedule が参照の sigma 列（終端 0 込み）とビット一致する`,
+    () => {
       assert(fixture !== undefined);
       const { steps, shift } = fixture.meta;
       assertBitIdentical(sigmaSchedule(steps, shift), fixture.f32("sigmas").data, "sigmas");
     },
-  });
+  );
 
-  test({
-    name: `${variant}: cfgEulerStep を ref_steps 回つなぐと参照の latent 列とビット一致する`,
-    ignore,
-    fn: () => {
+  test.skipIf(ignore)(
+    `${variant}: cfgEulerStep を ref_steps 回つなぐと参照の latent 列とビット一致する`,
+    () => {
       assert(fixture !== undefined);
       const { ref_steps: refSteps, guidance_scale: guidance } = fixture.meta;
       const sigmas = fixture.f32("sigmas").data;
@@ -177,12 +175,11 @@ for (const variant of VARIANTS) {
         previous = expected;
       }
     },
-  });
+  );
 
-  test({
-    name: `${variant}: denormalizeLatents が参照の逆正規化 latent とビット一致する`,
-    ignore,
-    fn: () => {
+  test.skipIf(ignore)(
+    `${variant}: denormalizeLatents が参照の逆正規化 latent とビット一致する`,
+    () => {
       assert(fixture !== undefined);
       // 本番は VAE config の写し（animaLatents）を使うので、ここでもそれを渡す。写しが
       // この変種の参照と同じ数であることを先に押さえる（変種ごとに VAE を読み直して採った値）。
@@ -199,12 +196,11 @@ for (const variant of VARIANTS) {
         "latents_denorm",
       );
     },
-  });
+  );
 
-  test({
-    name: `${variant}: padSequence が参照の 512 行ゼロ詰め（正・ネガティブ）とビット一致する`,
-    ignore,
-    fn: () => {
+  test.skipIf(ignore)(
+    `${variant}: padSequence が参照の 512 行ゼロ詰め（正・ネガティブ）とビット一致する`,
+    () => {
       assert(fixture !== undefined);
       const rows = fixture.meta.min_sequence_length;
       for (const prefix of ["", "neg_"]) {
@@ -229,5 +225,5 @@ for (const variant of VARIANTS) {
         );
       }
     },
-  });
+  );
 }

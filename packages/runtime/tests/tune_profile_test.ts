@@ -19,7 +19,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { deriveGeometryProfile, type GeometrySweepInput, sweepCaseSetId } from "../tune.ts";
 import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
 import {

@@ -27,7 +27,7 @@
 // `F.pad(p_attn, [w, w])` は T ≳ 2900 で必要 workgroup 数が 65535 を超える）。他の族は
 // 「今の実測形では超えない」だけなので、上限を踏むかどうかで載せる・載せないを決めない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { IrDtype } from "../src/format/ir.ts";
 import { RunArena } from "../src/gpu/arena.ts";
@@ -204,10 +204,9 @@ const CASES: readonly DegenerateCase[] = [
   adalnNormCase(),
 ];
 
-test({
-  name: "grid-stride の全カーネル族が必要数より遥かに少ない workgroup でも全域を書く（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "grid-stride の全カーネル族が必要数より遥かに少ない workgroup でも全域を書く（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of CASES) {
@@ -223,7 +222,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * f16 計算変種（ADR 0028）の族。**別の device が要る**（`shader-f16` は device 作成時にしか
@@ -231,10 +230,9 @@ test({
  */
 const F16_CASES: readonly DegenerateCase[] = [attentionStatsF16Case()];
 
-test({
-  name: "f16 計算変種の grid-stride 族も縮退した dispatch で全域を書く（実 GPU）",
-  ignore: !GPU_AVAILABLE || !SHADER_F16_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE || !SHADER_F16_AVAILABLE)(
+  "f16 計算変種の grid-stride 族も縮退した dispatch で全域を書く（実 GPU）",
+  async () => {
     const gpu = await acquireGpu({ shaderF16: true });
     try {
       for (const testCase of F16_CASES) {
@@ -249,4 +247,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

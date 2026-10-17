@@ -32,7 +32,7 @@
 // テスト）— そこは無音の見かけ成功になる。
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
@@ -346,15 +346,9 @@ const references = openReferences(
   new URL("../../runtime/tests/fixtures/references/gemma4-golden.json", import.meta.url),
 );
 
-test({
-  name: "Gemma 4 E2B 資産: 期待するケースとモデル本体が揃っている",
-  // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
-  //（モデルだけ残って golden が全滅した欠損も拾う — `ANY_PRESENT` の JSDoc）。
-  ignore: !ANY_PRESENT,
-  fn: () => {
-    assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
-    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
-  },
+test.skipIf(!ANY_PRESENT)("Gemma 4 E2B 資産: 期待するケースとモデル本体が揃っている", () => {
+  assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
+  assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
 });
 
 /** One golden case run through the shared Session (preconditions already asserted). */
@@ -427,10 +421,9 @@ const withGoldenSession = async (
  * is the opt-in case below. One Session crosses T = 6 / 10 / 598 here as well (see that case's
  * JSDoc for why).
  */
-test({
-  name: "Gemma 4 E2B golden: 3 ケースの最終位置 logits の sha256 参照行と定数出力の門（実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "Gemma 4 E2B golden: 3 ケースの最終位置 logits の sha256 参照行と定数出力の門（実 GPU）",
+  async () => {
     /** 系列全体の所要時間（ケースの外で落ちた回の決着に載せる）。 */
     const seriesStartedAt = performance.now();
     /** ケースの catch が既に決着を残したか（残していれば系列の席を二重に積まない）。 */
@@ -503,7 +496,7 @@ test({
       throw cause;
     }
   },
-});
+);
 
 /**
  * ②logits の tolerance 突合 と ③最終位置 greedy の一致（実 GPU / torch CPU 期待値）。
@@ -518,10 +511,9 @@ test({
 // Upstream parity (model-exit logits vs torch under GEMMA4_TOLERANCE, and the top-1 vs the torch
 // golden), so it is opt-in. It writes no results entries: the case ids belong to the default sha
 // case above, and writing them here would overwrite its settlements.
-test({
-  name: `Gemma 4 E2B golden 突合: 3 ケースの logits と最終位置 greedy（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
-  ignore: !AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY,
-  fn: async () => {
+test.skipIf(!AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+  `Gemma 4 E2B golden 突合: 3 ケースの logits と最終位置 greedy（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+  async () => {
     await withGoldenSession(async (runCase) => {
       for (const caseName of CASES) {
         const { actual, expected, where } = await runCase(caseName);
@@ -556,7 +548,7 @@ test({
       }
     });
   },
-});
+);
 
 /** 内訳 1 本ぶん（キーと dispatch 数だけを見る — 実時間はこの門の関心事ではない）。 */
 type TimingEntry = { readonly key: string; readonly dispatchCount: number };
@@ -613,10 +605,9 @@ const assertStorageKeys = (entries: readonly TimingEntry[], shown: string): void
  * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い device でも走る）。undefined / 空は
  * tests/helpers/pipeline-census.ts の `requireCensus` が落とす（空振りの緑にしない）。
  */
-test({
-  name: "Gemma 4 E2B census: MQA 35 本と混成格納のキー（実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "Gemma 4 E2B census: MQA 35 本と混成格納のキー（実 GPU）",
+  async () => {
     const parsed = prepareContainer(
       await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
       GRAPH_NAME,
@@ -678,7 +669,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 const RUNNABLE = AVAILABLE && GPU_AVAILABLE;
 if (RUNNABLE) references.warnMissing(CASES);

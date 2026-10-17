@@ -4,7 +4,7 @@
 // 不成立 / Dim("S") の上限）ので、入口で条件を名指しできていることをここで固定する。
 // 資産も GPU も要らない純関数。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ANIMA_SPATIAL_COMPRESSION } from "../src/anima/dit-tokens.ts";
 import {

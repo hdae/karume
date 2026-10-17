@@ -14,7 +14,7 @@
  */
 
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { type MemoryContainerInput, openMemoryContainer } from "../src/format/container/memory.ts";
 import { type IrDeclaration, parseIrDeclarationValue } from "../src/format/ir.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
@@ -119,7 +119,7 @@ const withPoisonedWrites = async <T>(
   }
 };
 
-describe("writeBuffer は呼んだ時点でバイト列を写す", { ignore: !GPU_AVAILABLE }, () => {
+describe.skipIf(!GPU_AVAILABLE)("writeBuffer は呼んだ時点でバイト列を写す", () => {
   it("writeBuffer が戻った直後に元のバイト列を毒で埋めても、フェンス後の常駐（出力）は元の値のまま", async () => {
     const gpu = await acquireGpu();
     try {

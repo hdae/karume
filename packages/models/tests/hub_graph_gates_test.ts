@@ -9,7 +9,7 @@
 // ② 入力名そのものが無い場合は、軸を読む前に名指しで落とす。
 // ③ 文言には family・どの宣言を見ていたか（`where`）・入力名・軸・実値・期待値が全部入る。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertThrows } from "@std/assert";
 import { stubModel } from "./helpers/stub-model.ts";
 import { assertGraphInputDim } from "../src/hub/graph-gates.ts";

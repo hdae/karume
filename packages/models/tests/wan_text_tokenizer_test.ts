@@ -12,7 +12,7 @@
 // 縛るのは振る舞い 1 つ: 「同じ文字列を入れたら、上流と同じ id 列が出るか、同じ理由で拒む」。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertInstanceOf, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { parseCodeRanges } from "../src/text/code-ranges.ts";
@@ -370,10 +370,9 @@ test("parseWanTokenizerAsset: 語彙の値域門は T5 の共通層と同じ（�
 
 // ---- 実資産（全語彙）での突合 -------------------------------------------------
 
-test({
-  name: "実資産: 全語彙の資産から組んだ encoder もフィクスチャの全ケースと同じ決着になる",
-  ignore: seriesAsset === undefined,
-  fn: () => {
+test.skipIf(seriesAsset === undefined)(
+  "実資産: 全語彙の資産から組んだ encoder もフィクスチャの全ケースと同じ決着になる",
+  () => {
     // フィクスチャの語彙は部分集合（断片の部分文字列）なので、資産の読み取り（25.6 万行）と
     // 全語彙の格子でも同じ id 列 / 拒否になることをここで見る。
     const full = new WanPromptEncoder(parseWanTokenizerAsset(JSON.parse(seriesAsset as string)));
@@ -385,4 +384,4 @@ test({
       }
     }
   },
-});
+);

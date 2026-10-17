@@ -18,7 +18,7 @@
 
 import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import {

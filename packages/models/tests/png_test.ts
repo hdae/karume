@@ -6,7 +6,7 @@
 // 中身を保証する）。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { ModelInputError } from "../src/errors.ts";
 import { crc32, encodePng } from "../src/image/png.ts";
 

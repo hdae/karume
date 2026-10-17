@@ -24,7 +24,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { type DistributionSource, localDirectory, type Manifest, parseManifest } from "@karume/hub";
 import type { EnqueueOptions, RunInput, RunInputs, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";

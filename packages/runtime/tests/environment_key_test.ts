@@ -5,7 +5,7 @@
 // ならないまま門の意味が消えるので、綴りの規則そのものをここで縛る。
 
 import { platformObject } from "@karume/test-support/webgpu";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   assertAdapterMatchesEnvironment,

@@ -15,7 +15,7 @@
 // 対称パターンでは値が合う — ADR 0069 決定 4 ①）。
 // MUST: 期待値は**丸め後の重み**（fake-quant — ADR 0006）で作る。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { OpenedContainer } from "../src/format/container/open.ts";
 import { decodeI4 } from "../src/format/i4.ts";
@@ -150,10 +150,9 @@ const CASES: readonly I4Case[] = [
   },
 ];
 
-test({
-  name: "w=i4 の linear が CPU 参照（丸め後の重み）と一致する（v4 / スカラ / group 2 種・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "w=i4 の linear が CPU 参照（丸め後の重み）と一致する（v4 / スカラ / group 2 種・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of CASES) {
@@ -191,12 +190,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "同一グラフ内の group 16 / 32 が別パイプラインで正しく走る（キーの g 部の分離・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "同一グラフ内の group 16 / 32 が別パイプラインで正しく走る（キーの g 部の分離・実 GPU）",
+  async () => {
     // 同じ m / n / k / v4 の linear 2 本 — キーが g 部でしか違わない形。キーに group が
     // 乗っていないと片方の WGSL（焼き込んだ shift）が他方の資産で走り、scale 添字が
     // ずれた沈黙誤値になる。
@@ -279,12 +277,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "適格（GPU dequant）と適格外（CPU 展開）の出力がビット単位で一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "適格（GPU dequant）と適格外（CPU 展開）の出力がビット単位で一致する（実 GPU）",
+  async () => {
     // w をグラフ出力に足すと適格外（消費が重みスロット以外にもある扱い）になり、ロード時に
     // decodeI4 で f32 展開される。dequant がビット一致なら、同じ GEMM カーネルが同じ f32 の
     // MAC 列を同じ順で畳むので、y は**ビット単位で**一致する（ADR 0069 受入 ④ の e2e 形）。
@@ -318,7 +315,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** embedding の語彙表 `[V,D]` を i4 で持つグラフ（`wAsOutput` で適格外にできる）。 */
 const i4EmbeddingModel = (
@@ -357,10 +354,9 @@ const i4EmbeddingModel = (
   ]);
 };
 
-test({
-  name: "w=i4 の embedding が CPU 参照（丸め後の表）と一致する（group 2 種・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "w=i4 の embedding が CPU 参照（丸め後の表）と一致する（group 2 種・実 GPU）",
+  async () => {
     // 語彙表は `[V,D]`（`channel_rows` が恒等）で、group は D 軸に沿って切られる。1 スレッドが
     // 1 出力要素なので scale は要素ごとに引かれる — 行 / group の取り違えは
     // {@link groupVarying} の振幅差でそのまま値に出る。D は group で割り切れる形だけ
@@ -411,7 +407,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * GPU の `unpack4xU8` + group scale と CPU の {@link decodeI4} が**全 15 nibble 値 × 語内 8 位置で
@@ -423,10 +419,9 @@ test({
  * group で割り切れる〉から来る不変で、i8 / f16 の「行長が語の倍数でない罠」は i4 には存在しない）。
  * 振幅は行 × group で変えるので、scale 添字の誤りも同時に検出できる。
  */
-test({
-  name: "GPU の unpack4xU8 と CPU 展開が全 15 nibble 値 × 語内 8 位置でビット一致（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "GPU の unpack4xU8 と CPU 展開が全 15 nibble 値 × 語内 8 位置でビット一致（実 GPU）",
+  async () => {
     const vocab = 16;
     const hidden = 32;
     const groupSize = 16;
@@ -479,12 +474,11 @@ test({
     const expectedBits = new Uint32Array(expected.buffer, expected.byteOffset, expected.length);
     assertEquals(actualBits, expectedBits, "GPU 展開と CPU 展開がビット一致しない");
   },
-});
+);
 
-test({
-  name: "embedding も適格（GPU dequant）と適格外（CPU 展開）でビット一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "embedding も適格（GPU dequant）と適格外（CPU 展開）でビット一致する（実 GPU）",
+  async () => {
     // 適格外の受け皿は `decodeI4` による `[V,D]` の f32 展開。展開がビット一致なら、同じ
     // gather カーネルが同じバイトを写すので出力は**ビット単位で**一致する。
     const groupSize = 32;
@@ -519,7 +513,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // conv1d の implicit GEMM（ADR 0069 決定 5 の conv1d 追補・波 J-5b）
@@ -667,10 +661,9 @@ const CONV_CASES: readonly ConvCase[] = [
   },
 ];
 
-test({
-  name: "w=i4 の conv1d(igemm) が f32 双子（丸め後の重み）とビット単位で一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "w=i4 の conv1d(igemm) が f32 双子（丸め後の重み）とビット単位で一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of CONV_CASES) {
@@ -735,12 +728,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "conv1d(i4) も適格（GPU dequant）と適格外（CPU 展開 rank3）でビット一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv1d(i4) も適格（GPU dequant）と適格外（CPU 展開 rank3）でビット一致する（実 GPU）",
+  async () => {
     // w をグラフ出力に足すと適格外になり、ロード時に `decodeI4` で f32 展開される。
     // **rank 3 の重み × rank 2 の scale** を CPU 側が GPU と同じ添字式で読めることの門。
     const testCase = CONV_CASES[1];
@@ -781,12 +773,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "groups > 1 の conv1d は i4 を常駐させず CPU 展開へ落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "groups > 1 の conv1d は i4 を常駐させず CPU 展開へ落ちる（実 GPU）",
+  async () => {
     // 直接カーネル（groups > 1）に展開経路は無い。適格判定が落とすので packed のまま
     // 常駐せず、CPU 展開の受け皿へ回る（正しさは保たれ VRAM 削減はゼロ）。
     const groupSize = 16;
@@ -825,7 +816,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * GEMM の **A 側**（conv1d igemm の重みタイル）の i4 展開が CPU の {@link decodeI4} と
@@ -841,10 +832,9 @@ test({
  * 変えるので scale 添字の誤りも同時に検出できる。
  * MUST: v4（`dequant4`）とスカラ（`dequant`）の**両方**を踏む — 分けるのは `Lout % 4` だけ。
  */
-test({
-  name: "conv1d の A 側 i4 展開が全 15 nibble 値 × 語内 8 位置で CPU 展開とビット一致（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv1d の A 側 i4 展開が全 15 nibble 値 × 語内 8 位置で CPU 展開とビット一致（実 GPU）",
+  async () => {
     const channelsOut = 16;
     const channelsIn = 32;
     const groupSize = 16;
@@ -913,7 +903,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 適格判定（i4 の狭め — GPU 非依存）
@@ -997,10 +987,9 @@ test("i4 の適格は linear / embedding / groups==1 の conv1d の重みスロ�
   assertEquals(eligible([{ op: "add", ins: ["w", "w"], outs: ["y"], attrs: {} }]), []);
 });
 
-test({
-  name: "i4 常駐の重み × linearCompute 'f16'（w4a16）は fail loudly（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "i4 常駐の重み × linearCompute 'f16'（w4a16）は fail loudly（実 GPU）",
+  async () => {
     const testCase = CASES[1];
     const quantized = quantizeI4(testCase.weight.data, testCase.weight.shape, testCase.groupSize);
     // f16 計算変種は device 作成時の 'shader-f16' が前提（無いと別の門で落ちて w4a16 の
@@ -1022,12 +1011,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "linearCompute 'a8' × i4 常駐は w4a8 経路（整数内積）で走る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "linearCompute 'a8' × i4 常駐は w4a8 経路（整数内積）で走る（実 GPU）",
+  async () => {
     // ノブ `linearCompute: "a8"` の意味は「活性を i8 にして整数内積で計算する」で、重みの
     // 格納形は別軸（i8 常駐 → w8a8 / i4 常駐 → w4a8 — perf-ledger Q-8）。**この組の挙動を
     // ここで固定する**という意図は据え置いたまま、期待を w4a8 経路へ書き換えてある
@@ -1096,4 +1084,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

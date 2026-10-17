@@ -15,7 +15,7 @@ import {
   writeTextFileSync,
 } from "@karume/test-support/fs";
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import type { Environment } from "./helpers/environment.ts";
 import { parseSafetensors } from "../mod.ts";
 import {

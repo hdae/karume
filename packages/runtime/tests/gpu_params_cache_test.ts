@@ -13,7 +13,7 @@
 // 毎 dispatch 確保に戻っても緑になる（どちらも例外は出ない）。
 
 import { assertEquals, assertRejects } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { GpuOutOfMemoryError } from "../src/gpu/error-scope.ts";
@@ -80,10 +80,9 @@ const input = (rows: number): Tensor => ({
   data: Float32Array.from({ length: rows * 3 }, (_, i) => ((i % 9) - 4) * 0.5),
 });
 
-test({
-  name: "同じ内容の params は run 内で 1 本に畳まれ、ヒット run は 1 本も触らない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "同じ内容の params は run 内で 1 本に畳まれ、ヒット run は 1 本も触らない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
@@ -115,12 +114,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "導出済み計画から追い出されても params キャッシュは生き残り全ヒットする（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "導出済み計画から追い出されても params キャッシュは生き残り全ヒットする（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
@@ -157,7 +155,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * params キャッシュが **Session 寿命で無界**であること（by-design — docs/limitations.md）を
@@ -168,10 +166,9 @@ test({
  * 「可変 shape を長時間回すと GPU バッファが単調増加する」という制約が挙動からは見えない
  * （例外も警告も出ず、`diagnostics().weights.allocCount` が伸びるだけ）。
  */
-test({
-  name: "params キャッシュは Session 寿命で無界（可変 shape の run ごとに単調増加・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "params キャッシュは Session 寿命で無界（可変 shape の run ごとに単調増加・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
@@ -205,7 +202,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 新しい Session で 1 run だけ回した出力（巻き戻し後の値の照合先）。 */
 const freshOutput = async (
@@ -225,11 +222,8 @@ const freshOutput = async (
 // 再試行でも同じ無効バッファを直参照する計画に当たり、validation エラーが Session の寿命いっぱい
 // 続く。巻き戻すのは「その実行が新しく足したもの」だけで、既存の正常なエントリは残す。
 describe("params の確保が非致命 OOM で失敗した実行の後（注入・実 GPU）", () => {
-  it(
+  it.skipIf(!GPU_AVAILABLE)(
     "失敗した run が足した params と計画だけを捨てて次の run で作り直し、既存の計画は残す",
-    {
-      ignore: !GPU_AVAILABLE,
-    },
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -272,11 +266,8 @@ describe("params の確保が非致命 OOM で失敗した実行の後（注入�
     },
   );
 
-  it(
+  it.skipIf(!GPU_AVAILABLE)(
     "失敗で決着した batch の enqueue が足した params と計画を捨て、次の batch で作り直す",
-    {
-      ignore: !GPU_AVAILABLE,
-    },
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -320,11 +311,8 @@ describe("params の確保が非致命 OOM で失敗した実行の後（注入�
 // 積もる（params は破棄せず weights アリーナが持つ — `RecipeBuilder.forgetParams`）。
 // enqueue は導出が入力の検査より前にあるので、入力の誤りでも params を載せた後に落ちる。
 describe("ホスト側の失敗（入力の要素数の誤り）で落ちる enqueue を繰り返したとき（実 GPU）", () => {
-  it(
+  it.skipIf(!GPU_AVAILABLE)(
     "1 回目に作れた params と計画を残し、繰り返しても params を新しく確保しない",
-    {
-      ignore: !GPU_AVAILABLE,
-    },
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -427,10 +415,9 @@ const openProjection = (): Promise<OpenedContainer> =>
 const bits = (tensor: Tensor): readonly number[] =>
   Array.from(new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length));
 
-test({
-  name: "同一 bindings の 2 run 目は導出済み計画に当たり、出力はビット単位で一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "同一 bindings の 2 run 目は導出済み計画に当たり、出力はビット単位で一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openProjection(), "model");
     try {
@@ -460,12 +447,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "bindings が変わる run は導出し直し、元へ戻すと再びヒットする（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "bindings が変わる run は導出し直し、元へ戻すと再びヒットする（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openProjection(), "model");
     try {
@@ -492,14 +478,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  // MUST: 上限は定数から読む（数値の写しを持つと、上限を動かしたときに門だけが古い本数を
-  // 主張して「追い出しが起きていない」ことを検出できなくなる）。
-  name: "導出済み計画は上限本数で頭打ちになり、最古のものから追い出される（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "導出済み計画は上限本数で頭打ちになり、最古のものから追い出される（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openProjection(), "model");
     const capacity = PREPARED_PLAN_CAPACITY;
@@ -532,12 +515,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "ヒット run も融合回数を報告する（キャッシュで常設診断が消えない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "ヒット run も融合回数を報告する（キャッシュで常設診断が消えない・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openProjection(), "model");
     try {
@@ -555,12 +537,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "導出相で落ちた run の部分レシピはキャッシュに載らない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "導出相で落ちた run の部分レシピはキャッシュに載らない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // matmul の**出力タイル辺**で上限超過が決まる（`ceil(n / tileN) > 上限`）。辺は定数では
     // なく既定幾何から導く — 直接書くと辺を変えた瞬間に throw が起きず、assertRejects だけが
@@ -613,4 +594,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

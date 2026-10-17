@@ -19,7 +19,7 @@
 // - w4a8 の group 整除の門を外す → ⑤d が落ちる（端数の k が NaN / 隣の行の混入を返す）
 // - `roundTiesToEven` を `Math.round` にする → ⑦が落ちる（同点が +∞ 方向へ倒れる）
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import {
   I8a8Error,

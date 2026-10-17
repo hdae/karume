@@ -14,7 +14,7 @@
 // MUST: 各群は「門が空振りしていない」ことを自前で持つ（期待値の非自明性・対照・故障注入）。
 // states 形は厳密 0 が正規に出る形なので、確認が無いと「何も計算していない」実装が緑で通る。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { referenceStateAppend, referenceStateAttention } from "../src/reference/state-attention.ts";
@@ -514,10 +514,9 @@ const crossSeriesReports = async (
   return reports;
 };
 
-test({
-  name: "states 形の多 step が帯 mask つき 1-shot 融合 attention と一致する（交差オラクル・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形の多 step が帯 mask つき 1-shot 融合 attention と一致する（交差オラクル・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     let worstAbs = 0;
     try {
@@ -539,12 +538,11 @@ test({
     // 0（両族ビット同一）が出るが、fma の使い方はドライバ依存なので他機の非ゼロは正常。
     console.log(`[states cross-oracle] maxAbs=${worstAbs}`);
   },
-});
+);
 
-test({
-  name: "窓を 1 広げた states 形は交差オラクルと一致しない（故障注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "窓を 1 広げた states 形は交差オラクルと一致しない（故障注入・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // W=4 の系列を W=5（容量も 5）で組み直す。論理長の進行は 0 → 3 → 4 → 5 → 6 → 7 なので、
@@ -573,7 +571,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 群 2: ADR 0066 受入条件② — padding 行 no-op の機械証明
@@ -622,10 +620,9 @@ const paddedInputs = (
 const tightInputs = (model: StateModel, query: number, salt: number): StepInputs =>
   paddedInputs(model, query, query, salt);
 
-test({
-  name: "pad 行は KV スロットのバイト列にも出力にも現れない（ADR 0066 受入条件②・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "pad 行は KV スロットのバイト列にも出力にも現れない（ADR 0066 受入条件②・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, PAD_MODEL);
     // 3 本の context を同じ Session で回す。pad の有無は物理 chunk 行数 M の違いなので、
@@ -736,7 +733,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 群 3: ADR 0067 受入条件⑤ — 空行 → 0 の直接門（executor 経由）
@@ -757,10 +754,9 @@ const isEmptyRow = (past: number, query: number, window: number, row: number): b
   return Math.min(limit, past + query - 1) < lower;
 };
 
-test({
-  name: "pad 行が窓から落ちた出力行は厳密 0（ADR 0067 受入条件⑤・Session.run 経由・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "pad 行が窓から落ちた出力行は厳密 0（ADR 0067 受入条件⑤・Session.run 経由・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, EMPTY_MODEL);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -827,7 +823,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 群 4: 容量非依存（ADR 0066 決定 3 — 仕事量が論理長のみで決まることの値側）
@@ -835,10 +831,9 @@ test({
 
 const SYMBOLIC_MODEL: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: "C" };
 
-test({
-  name: "容量 C=8 と C=4096 で全 step の出力がビット同一（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "容量 C=8 と C=4096 で全 step の出力がビット同一（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, SYMBOLIC_MODEL);
     const small = await session.createGenerationContext({ chunkLength: 4, bindings: { C: 8 } });
@@ -875,7 +870,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 群 5: KV 共有層の実行（ADR 0067 決定 4 — Gemma 4 E2B の 20 層パターン）
@@ -936,10 +931,9 @@ const SHARED_SERIES: readonly SharedSeries[] = [
   },
 ];
 
-test({
-  name: "KV 共有層（読者 2 本 → append 1 本）が実行できる（ADR 0067 決定 4 / 5b・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "KV 共有層（読者 2 本 → append 1 本）が実行できる（ADR 0067 決定 4 / 5b・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const series of SHARED_SERIES) {
@@ -1047,4 +1041,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

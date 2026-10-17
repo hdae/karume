@@ -6,7 +6,7 @@
 // 同じ誤りを共有していても両方緑になる）。窓の集合が値に出る形（in-window の V を col 番号に
 // して平均を作る）で、述語の上限・下限・リング写像の 3 つが 1 つの数値に畳まれる。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertAlmostEquals, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { DispatchLimitError } from "../src/codegen/errors.ts";

@@ -14,7 +14,7 @@
 //  ④ **グラフ入力の形** — 名前 4 本・shape `[1, rows, headDim]`・f32
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   assertGemma4RopeSpec,

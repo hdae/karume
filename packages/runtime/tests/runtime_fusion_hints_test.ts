@@ -9,7 +9,7 @@
  * runtime のテストから tools を import しない（ADR 0008 追記 2026-09-03）。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import type { IrGraph } from "../src/format/ir.ts";
 import {

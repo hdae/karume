@@ -9,7 +9,7 @@
 // 故障注入の口（差し替え可能な一様乱数源）も無いので**直接は踏めない** — この分岐だけは
 // テスト不能として明記する（塞ぐには生成器の面を広げるしかなく、それは値の正本を緩める）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { nextUint64, Randn } from "../src/anima/random.ts";

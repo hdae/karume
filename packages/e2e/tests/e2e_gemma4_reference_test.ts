@@ -14,7 +14,7 @@
  * 門番は GPU アダプタの有無だけを見ており、この SKIP とは独立。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { nodeDirectory } from "@karume/hub/node";
 import { Gemma4Pipeline } from "../../models/gemma.ts";
 import { openReferences, registerReferenceGate } from "../../runtime/tests/helpers/reference.ts";
@@ -49,19 +49,17 @@ const SEATS = mirrorSeats(MIRROR_DIR);
 
 for (const seat of SEATS) {
   const id = seatCaseId(seat);
-  test({
-    name:
-      `gemma4 ${id}（${seat.row === "reference" ? "参照行" : "実用行"}）: ` +
+  test.skipIf(!RUNNABLE || references.lacksReference(id))(
+    `gemma4 ${id}（${seat.row === "reference" ? "参照行" : "実用行"}）: ` +
       "固定プロンプトの greedy の token id 列がこの機の参照値と一致する（実 GPU）",
-    ignore: !RUNNABLE || references.lacksReference(id),
-    fn: () =>
+    () =>
       settleSeatReference({
         references,
         results,
         seat,
         open: (choice) => Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), choice),
       }),
-  });
+  );
 }
 
 /** この門が持つケース ID 全部（参照値が無いものを登録時に 1 度だけ知らせる）。 */

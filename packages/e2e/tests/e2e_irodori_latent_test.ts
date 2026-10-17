@@ -51,7 +51,7 @@
  * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { IrodoriPipeline } from "../../models/mod.ts";
 import { parseIrodoriPipelineConfig } from "../../models/src/irodori/config.ts";
@@ -308,10 +308,9 @@ for (const series of SERIES) {
   // pipelineConfig drift check stay in the default run.
   const parityRunnable = runnable && UPSTREAM_PARITY;
 
-  test({
-    name: `e2e(実GPU): 配布形の latent が full-loop golden と一致する（${series.name} / 参照 + caption あり）${UPSTREAM_PARITY_OPT_IN}`,
-    ignore: !parityRunnable,
-    fn: async () => {
+  test.skipIf(!parityRunnable)(
+    `e2e(実GPU): 配布形の latent が full-loop golden と一致する（${series.name} / 参照 + caption あり）${UPSTREAM_PARITY_OPT_IN}`,
+    async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
       // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
@@ -324,12 +323,11 @@ for (const series of SERIES) {
       );
       await runCase(series, pipeline, "full", readMeta().cases["full"]);
     },
-  });
+  );
 
-  test({
-    name: `e2e(実GPU): 参照なし / caption 空でも latent が full-loop golden と一致する（${series.name}）${UPSTREAM_PARITY_OPT_IN}`,
-    ignore: !parityRunnable,
-    fn: async () => {
+  test.skipIf(!parityRunnable)(
+    `e2e(実GPU): 参照なし / caption 空でも latent が full-loop golden と一致する（${series.name}）${UPSTREAM_PARITY_OPT_IN}`,
+    async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
       await using pipeline = await IrodoriPipeline.fromAssets(
@@ -342,12 +340,11 @@ for (const series of SERIES) {
       // speaker のゼロ短絡と caption 空の CFG off が効く経路（forward が 100 → 60 に落ちる）。
       await runCase(series, pipeline, "no-ref", readMeta().cases["no-ref"]);
     },
-  });
+  );
 
-  test({
-    name: `e2e(実GPU): 同じ seed の生成は 2 回ともバイト同一（${series.name} / 乱数もホストグルーも決定的）`,
-    ignore: !runnable,
-    fn: async () => {
+  test.skipIf(!runnable)(
+    `e2e(実GPU): 同じ seed の生成は 2 回ともバイト同一（${series.name} / 乱数もホストグルーも決定的）`,
+    async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
       await using pipeline = await IrodoriPipeline.fromAssets(
@@ -374,12 +371,11 @@ for (const series of SERIES) {
         "同じ seed・同じ要求で latent が変わった（乱数かホストグルーに非決定性がある）",
       );
     },
-  });
+  );
 
-  test({
-    name: `e2e(資産): 配布形の pipelineConfig が golden の生成条件と一致する（${series.name}）`,
-    ignore: !available,
-    fn: () => {
+  test.skipIf(!available)(
+    `e2e(資産): 配布形の pipelineConfig が golden の生成条件と一致する（${series.name}）`,
+    () => {
       // GPU は要らない — 門の**前提**（golden 再生成と dist 再生成がずれていないこと）だけを見る。
       const meta = readMeta();
       const config = parseIrodoriPipelineConfig(modelEntry(readManifest()).pipelineConfig);
@@ -407,5 +403,5 @@ for (const series of SERIES) {
         );
       }
     },
-  });
+  );
 }

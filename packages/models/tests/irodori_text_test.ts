@@ -17,7 +17,7 @@
 // 内部の分割の仕方は縛らない。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { packCaptionIds, packIds } from "../src/irodori/host/pack.ts";

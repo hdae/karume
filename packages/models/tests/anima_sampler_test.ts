@@ -6,7 +6,7 @@
 // 切り出して commit してある — `anima_latents_test.ts`）。
 
 import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { imageToRgba } from "../src/anima/image.ts";
 import {
   assertAcceptableSteps,

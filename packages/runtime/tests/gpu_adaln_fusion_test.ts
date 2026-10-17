@@ -6,7 +6,7 @@
 // 積）の storage 往復を消すので、丸め位置が素の列とずれれば有限値のビット列が動く。
 // workgroup u32 staging による丸め障壁が実バックエンドで効いているかは、ここでしか分からない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { ADALN_NORM_KEY } from "../src/kernels/adaln-norm.ts";
@@ -152,10 +152,9 @@ const testInputs = (options: AdalnGraphOptions = {}): Readonly<Record<string, Te
   ...(options.gate !== false ? { gate_src: fill([1, DIM], (i) => i / 31) } : {}),
 });
 
-test({
-  name: "adaLN 融合は窓 6 / 7 とも primitive と有限ビット / NaN 分類が一致し、4→1 dispatch へ畳む（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "adaLN 融合は窓 6 / 7 とも primitive と有限ビット / NaN 分類が一致し、4→1 dispatch へ畳む（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const gate of [true, false] as const) {
@@ -202,12 +201,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "adaLN の内部 output / 別 consumer / 別名は strict matcher から fallback する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "adaLN の内部 output / 別 consumer / 別名は strict matcher から fallback する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const inputs = testInputs();
     const cases: readonly { readonly name: string; readonly options: AdalnGraphOptions }[] = [
@@ -255,4 +253,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

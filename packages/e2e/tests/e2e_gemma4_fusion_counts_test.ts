@@ -9,7 +9,7 @@
  */
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import {
   type ContainerManifest,
@@ -32,10 +32,9 @@ if (!GEMMA4_DECODE_AVAILABLE) {
  * 旧BHSD matcherではM=1・H=1のkだけが一致し、decode=15 / prefill=0だった。
  * BSHDの専用添字を追加したため、両方で全50鎖を固定する（ADR 0040追記2026-09-12）。
  */
-test({
-  name: "実資産の Gemma 4 E2B は decode / prefill とも rope 50 を掴む",
-  ignore: !GEMMA4_DECODE_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GEMMA4_DECODE_AVAILABLE)(
+  "実資産の Gemma 4 E2B は decode / prefill とも rope 50 を掴む",
+  async () => {
     const graph = await readContainerGraph(GEMMA4_DECODE_MODEL.part0, GEMMA4_DECODE_MODEL.graph);
     assertEquals(
       decodeFusionCounts(graph, 1),
@@ -48,7 +47,7 @@ test({
       "logits opt-in prefill 形（M=32）",
     );
   },
-});
+);
 
 // 配布形も先頭part（part 0）をmanifestから引く。旧seriesとQATの両方で発行順を守る。
 const family = "gemma4";
@@ -58,10 +57,9 @@ const available = await exists(manifestUrl);
 if (!available) {
   console.warn(`[karume] ${manifestUrl.pathname} が無いため配布形のRoPE検査をSKIPする`);
 }
-test({
-  name: `実配布 ${family} E2B は RoPE 50 と任意指定のRMS→add 106を掴む`,
-  ignore: !available,
-  fn: async () => {
+test.skipIf(!available)(
+  `実配布 ${family} E2B は RoPE 50 と任意指定のRMS→add 106を掴む`,
+  async () => {
     const manifest: ContainerManifest = JSON.parse(await readTextFile(manifestUrl));
     // MUST: quant は名指しする（下の SRQ の期待値は i2 / i4 の格納と group 長に依存する —
     // manifest の並びの先頭を採ると、quant を足した日に並び順で期待値が割れる）。
@@ -93,4 +91,4 @@ test({
       }
     }
   },
-});
+);

@@ -27,7 +27,7 @@
 //    正方形では**原理的に検出できない**ため。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { parseSiglip2PipelineConfig } from "../src/siglip2/config.ts";

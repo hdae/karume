@@ -34,7 +34,7 @@ import {
   writeFileSync,
 } from "@karume/test-support/fs";
 import { assert, assertEquals, assertFalse } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { SERIES_GRAPHS } from "../../models/tests/helpers/series-graphs.ts";
 
@@ -86,11 +86,9 @@ const directoryPresent = (url: URL): boolean => {
   }
 };
 
-test({
-  name: "資産門番: 実重み系列が 1 つも無い全 SKIP は明示 FAIL（ADR 0005）",
-  // opt-out は「実資産無しを承知で通す」意図表明のときだけ。既定では ignore しない。
-  ignore: ALLOW_NO_ASSETS,
-  fn: () => {
+test.skipIf(ALLOW_NO_ASSETS)(
+  "資産門番: 実重み系列が 1 つも無い全 SKIP は明示 FAIL（ADR 0005）",
+  () => {
     assert(
       seriesAssetsPresent(SERIES_PARENT),
       `${SERIES_PARENT.pathname} に表（packages/models/tests/helpers/series-graphs.ts）の系列の容器が 1 つも無く、` +
@@ -99,13 +97,11 @@ test({
         "資産の無い環境で意図的に通すには KARUME_ALLOW_NO_ASSETS=1 を設定すること。",
     );
   },
-});
+);
 
-test({
-  name: "資産門番: 在る系列の容器が開けて、期待の weights キーを名乗る（ADR 0108 段 3）",
-  // opt-out は上の 1 本と共有する（「実資産無しを承知で通す」は同じ 1 つの意図表明）。
-  ignore: ALLOW_NO_ASSETS,
-  fn: async () => {
+test.skipIf(ALLOW_NO_ASSETS)(
+  "資産門番: 在る系列の容器が開けて、期待の weights キーを名乗る（ADR 0108 段 3）",
+  async () => {
     const broken: string[] = [];
     for (const [series, components] of Object.entries(SERIES_GRAPHS)) {
       const root = new URL(`${series}/`, SERIES_PARENT);
@@ -136,7 +132,7 @@ test({
         "退役した系列なら上の表から行を消すこと。",
     );
   },
-});
+);
 
 describe("資産門番の判定（表の系列の容器が 1 つでも在るか）", () => {
   /** 一時ディレクトリを系列の根として判定を引き、後始末する。 */

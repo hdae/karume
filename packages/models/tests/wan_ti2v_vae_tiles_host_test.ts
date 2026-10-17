@@ -19,7 +19,7 @@
 // `vae_tiles.*` の在否はここでは見ない（GPU の照合の側の組）。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { prepareContainer, type PreparedModel } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
@@ -277,25 +277,18 @@ const prepared = async (component: string): Promise<PreparedModel> =>
     seriesGraph(SERIES, component),
   );
 
-test({
-  name: "Wan2.2 TI2V VAE のタイルの実資産: chunk グラフ 2 本が揃っている",
-  // 1 本も無い環境は「生成していない」なので SKIP。1 本でもあるなら欠けは FAIL。
-  ignore: !ANY_GRAPH,
-  fn: () => {
-    assertEquals(
-      GRAPHS.filter(({ present }) => !present).map(({ path }) => path),
-      [],
-      `chunk グラフの欠け（生成: ${GENERATE}）`,
-    );
-  },
+test.skipIf(!ANY_GRAPH)("Wan2.2 TI2V VAE のタイルの実資産: chunk グラフ 2 本が揃っている", () => {
+  assertEquals(
+    GRAPHS.filter(({ present }) => !present).map(({ path }) => path),
+    [],
+    `chunk グラフの欠け（生成: ${GENERATE}）`,
+  );
 });
 
-test({
-  name:
-    "Wan2.2 TI2V VAE のタイルの実資産（GPU 不要）: layout は計画のリテラルと一致・2.2 の記述子の admission を通り" +
+test.skipIf(!ALL_GRAPHS)(
+  "Wan2.2 TI2V VAE のタイルの実資産（GPU 不要）: layout は計画のリテラルと一致・2.2 の記述子の admission を通り" +
     "・2.1 の記述子では落ちる",
-  ignore: !ALL_GRAPHS,
-  fn: async () => {
+  async () => {
     const layout = wanVaeChunkLayout(await prepared(FIRST), await prepared(NEXT));
     assertEquals(
       {
@@ -325,4 +318,4 @@ test({
       `${OWNER}: VAE の出口 12 チャネルが RGB 3 × unpatchify 1² = 3 と違う`,
     );
   },
-});
+);

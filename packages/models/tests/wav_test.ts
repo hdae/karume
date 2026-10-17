@@ -7,7 +7,7 @@
 // リーダが int16 の両端で実測した値）とも突き合わせる（無ければその 1 本だけ SKIP）。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { decodeWav, encodeWav } from "../src/audio/wav.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { readTextIfPresent } from "./helpers/read-if-present.ts";
@@ -101,10 +101,9 @@ test("decodeWav: int16 は 32768 で割る（下端 −32768 が厳密に −1.0
   );
 });
 
-test({
-  name: "decodeWav: int16 のスケールが golden の上流リーダ実測（wavScale）と一致する",
-  ignore: goldenText === undefined,
-  fn: () => {
+test.skipIf(goldenText === undefined)(
+  "decodeWav: int16 のスケールが golden の上流リーダ実測（wavScale）と一致する",
+  () => {
     const meta = JSON.parse(goldenText as string) as {
       readonly wavScale: {
         readonly probeInt16: readonly number[];
@@ -126,7 +125,7 @@ test({
       "上流（soundfile）の int16 正規化と綴りが違う",
     );
   },
-});
+);
 
 // ---- 往復（読みと書きのスケールが非対称であること自体を固定する）--------
 

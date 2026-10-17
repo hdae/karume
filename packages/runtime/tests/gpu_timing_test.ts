@@ -4,7 +4,7 @@
 // （SubmitStats.dispatchCount / pipelineCount）との**相互検算**で固定する。内訳だけを単体で
 // 見ると、集計が空でも 0 件でも緑になってしまう（計測が黙って死んでいる形が素通りする）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertGreater, assertThrows } from "@std/assert";
 import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { acquireGpu, GpuFeatureError, planTimestampFeature } from "../src/gpu/device.ts";
@@ -115,10 +115,9 @@ test("planTimestampFeature が gpuTiming の三値を判定し、必須指定の
   assert(error.message.includes("shader-f16"), error.message);
 });
 
-test({
-  name: "gpuTiming: true の内訳が dispatch 数・キー集合と相互に一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
+  "gpuTiming: true の内訳が dispatch 数・キー集合と相互に一致する（実 GPU）",
+  async () => {
     const result = await runOnce(true);
     assert(result.timingEnabled, "true を要求して有効にならないのは device 側の矛盾");
     const timing = result.timing;
@@ -156,14 +155,13 @@ test({
     assertEquals(timing.clampedNegativeSamples, 0, "非単調な timestamp は観測されない");
     assertGreater(timing.totalNs, 0, "実 GPU の計測が全て 0 になるのは計測が死んでいる形");
   },
-});
+);
 
 // 既定（undefined）と明示 false が**同じ**であることの門。ここが割れると、計測の代価が
 // アダプタ次第で既定経路に乗る（1 dispatch = 1 pass — ADR 0021 / 案 3）。
-test({
-  name: "gpuTiming の既定と false は feature を要求せず、内訳も出さない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "gpuTiming の既定と false は feature を要求せず、内訳も出さない（実 GPU）",
+  async () => {
     for (const requested of [undefined, false] as const) {
       const result = await runOnce(requested);
       const where = `gpuTiming: ${String(requested)}`;
@@ -172,16 +170,15 @@ test({
       assertEquals(result.timing, undefined, where);
     }
   },
-});
+);
 
-test({
-  name: "計測モードは実行結果を変えない（同一グラフの出力がバイト一致・実 GPU）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
+  "計測モードは実行結果を変えない（同一グラフの出力がバイト一致・実 GPU）",
+  async () => {
     const timed = await runOnce(true);
     const plain = await runOnce(false);
     assert(timed.timingEnabled, "対照が成立していない（計測側が有効になっていない）");
     assertEquals(timed.bytes, plain.bytes, "1 dispatch = 1 pass に開いても出力は同一バイト");
     assertEquals(timed.dispatchCount, plain.dispatchCount, "dispatch 数も変わらない");
   },
-});
+);

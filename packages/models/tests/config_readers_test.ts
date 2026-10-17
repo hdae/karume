@@ -9,7 +9,7 @@
 // ③ 欄の有無は `Object.hasOwn` で見る（横断不変条件）— 継承した `toString` などを「有る」と
 //    読むと、未宣言の欄が prototype の値で黙って通る。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { assertAllowedKeys, readChannels, readNumber, readOnly } from "../src/config/readers.ts";
 

@@ -26,7 +26,7 @@
  * （黙ってホスト経路へ退避しないことが席の契約である）。
  */
 import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, parseSafetensors, type Tensor } from "@karume/runtime";
 import { nodeDirectory } from "@karume/hub/node";
@@ -108,10 +108,9 @@ const assertBitsEqual = (actual: Float32Array, expected: Float32Array, where: st
   );
 };
 
-test({
-  name: "PLE GPU 常駐: gather が golden ともホスト経路とも u32 完全一致（実GPU）",
-  ignore: !PRODUCT_PRESENT || !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!PRODUCT_PRESENT || !GPU_AVAILABLE)(
+  "PLE GPU 常駐: gather が golden ともホスト経路とも u32 完全一致（実GPU）",
+  async () => {
     const { index, openBlock } = await openSeriesPle(PRODUCT_ROOT);
     const probe = parseSafetensors((await readFile(new URL(PLE_PROBE_FILE, PRODUCT_ROOT))).buffer);
     const tokenView = probe.tensors.get(PROBE_TOKENS_KEY);
@@ -163,7 +162,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 1 ターンの greedy 生成 id 列（停止 token も含めて観測席で拾う）。 */
 const generateIds = async (
@@ -187,10 +186,9 @@ const generateIds = async (
 // E2B は i4（group scale）・E4B は i2（行 scale）で、格納形ごとに `embedding` の変種が変わる —
 // 両方を回さないと片方の scale の引き方が黙って間違っていても緑になる。
 for (const model of ["e2b", "e4b"] as const) {
-  test({
-    name: `PLE GPU 常駐: QAT ${model} の greedy 生成 id 列が host と完全一致（実GPU）`,
-    ignore: !QAT_PRESENT || !GPU_AVAILABLE,
-    fn: async () => {
+  test.skipIf(!QAT_PRESENT || !GPU_AVAILABLE)(
+    `PLE GPU 常駐: QAT ${model} の greedy 生成 id 列が host と完全一致（実GPU）`,
+    async () => {
       const source = nodeDirectory(QAT_ROOT);
       const expected = await generateIds(() => Gemma4QatPipeline.fromPretrained(source, { model }));
       assertEquals(
@@ -203,13 +201,12 @@ for (const model of ["e2b", "e4b"] as const) {
       );
       assertEquals(actual, expected, "GPU 常駐席の生成 id 列");
     },
-  });
+  );
 }
 
-test({
-  name: "PLE GPU 常駐: 通常 Gemma 4 E2B は載れば parity・載らなければ不足を名乗る（実GPU）",
-  ignore: !GEMMA_PRESENT || !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GEMMA_PRESENT || !GPU_AVAILABLE)(
+  "PLE GPU 常駐: 通常 Gemma 4 E2B は載れば parity・載らなければ不足を名乗る（実GPU）",
+  async () => {
     const source = nodeDirectory(GEMMA_ROOT);
     // 索引は配布形ミラーの `model` 容器の資産（ADR 0109 決定 4）— 開くのは part 0 と索引だけ。
     const { index } = await openGemma4Ple(GEMMA_ROOT);
@@ -239,15 +236,14 @@ test({
     );
     assertEquals(actual, expected, "GPU 常駐席の生成 id 列");
   },
-});
+);
 
 // 温度 > 0 の decode は greedy 経路を通らず通常 run（= `enqueueRead`）で走る。gather と target を
 // 同じ batch に積むので、GPU 常駐席が余分に払うフェンスは prefill の chunk ぶんだけになる
 // （ADR 0054 追記〈グラフ出力の一括読み戻し〉— 席の残件 ①）。
-test({
-  name: "PLE GPU 常駐: 既定サンプラー経路の decode も host と同じ id 列で、余分なフェンスは prefill ぶんだけ（実GPU）",
-  ignore: !QAT_PRESENT || !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!QAT_PRESENT || !GPU_AVAILABLE)(
+  "PLE GPU 常駐: 既定サンプラー経路の decode も host と同じ id 列で、余分なフェンスは prefill ぶんだけ（実GPU）",
+  async () => {
     const source = nodeDirectory(QAT_ROOT);
     const generate = async (
       pleResidency: "host" | "gpu",
@@ -286,4 +282,4 @@ test({
     // 席の残件 ① の前は decode ごとに 1 本増えていた（= 16 + 1）。
     assertEquals(resident.fences - host.fences, 1, `host ${host.fences} / gpu ${resident.fences}`);
   },
-});
+);

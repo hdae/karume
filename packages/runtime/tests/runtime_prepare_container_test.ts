@@ -8,7 +8,7 @@
 // ②実行できないモデルは prepareContainer の時点で落ちること — 落ちた時点で重みの block に
 //   1 つも触れていないことを、同じ取得回数で言う。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { OpContractError } from "../src/ops.ts";
 import { RuntimeSupportError } from "../src/ops/support.ts";

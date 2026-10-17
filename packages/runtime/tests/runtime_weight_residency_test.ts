@@ -10,7 +10,7 @@
 //    唯一の突合になる。i8 の scale は**チャネル軸の取り違えが即バイト数の違いになる**
 //    （conv_transpose1d の `[Cin,Cout,K]` は軸 1 — 軸 0 と読むと golden の実 scale と一致しない）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type InitializerSupply, mergedGraph } from "../src/format/container/bind.ts";
 import type { IrGraph } from "../src/format/ir.ts";

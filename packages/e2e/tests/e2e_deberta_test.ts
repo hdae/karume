@@ -42,7 +42,7 @@
 // goldens runs only with KARUME_UPSTREAM_PARITY=1.
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
@@ -264,25 +264,21 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-test({
-  name: "DeBERTa golden: w8a8 鏡像 io が通常ケースの列挙に紛れない",
-  // 資産の有無に依らず走る（prefix の規約そのものを見るテスト）。
-  fn: () => {
-    // 正本は `deberta/export.py` の `ACT_IO_PREFIX` の MUST。`io.` の startsWith で通常ケースを
-    // 拾う以上、鏡像の prefix が `io.` で始まった時点で w8 の期待値が汚染される。
-    assert(
-      !ACT_IO_PREFIX.startsWith(IO_PREFIX),
-      `鏡像 prefix '${ACT_IO_PREFIX}' が通常ケースの prefix '${IO_PREFIX}' で始まっている`,
-    );
-    for (const variant of VARIANTS) {
-      for (const file of goldenFiles(variant.root)) {
-        assert(
-          !file.startsWith(ACT_IO_PREFIX),
-          `${variant.name}: 鏡像 golden '${file}' が通常ケースとして拾われている`,
-        );
-      }
+test("DeBERTa golden: w8a8 鏡像 io が通常ケースの列挙に紛れない", () => {
+  // 正本は `deberta/export.py` の `ACT_IO_PREFIX` の MUST。`io.` の startsWith で通常ケースを
+  // 拾う以上、鏡像の prefix が `io.` で始まった時点で w8 の期待値が汚染される。
+  assert(
+    !ACT_IO_PREFIX.startsWith(IO_PREFIX),
+    `鏡像 prefix '${ACT_IO_PREFIX}' が通常ケースの prefix '${IO_PREFIX}' で始まっている`,
+  );
+  for (const variant of VARIANTS) {
+    for (const file of goldenFiles(variant.root)) {
+      assert(
+        !file.startsWith(ACT_IO_PREFIX),
+        `${variant.name}: 鏡像 golden '${file}' が通常ケースとして拾われている`,
+      );
     }
-  },
+  }
 });
 
 /**
@@ -406,12 +402,9 @@ for (const variant of VARIANTS) {
     );
   }
 
-  test({
-    name: `DeBERTa 資産（${variant.name}）: 期待するケースとモデル本体が揃っている`,
-    // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
-    //（モデルだけ残って golden が全滅した欠損も拾う — `anyPresent` の JSDoc）。
-    ignore: !anyPresent,
-    fn: () => {
+  test.skipIf(!anyPresent)(
+    `DeBERTa 資産（${variant.name}）: 期待するケースとモデル本体が揃っている`,
+    () => {
       assertEquals(
         files.map(caseNameOf),
         [...EXPECTED_CASES],
@@ -419,7 +412,7 @@ for (const variant of VARIANTS) {
       );
       assert(modelPresent(new URL(MODEL_FILE, variant.root)), `${MODEL_FILE} が無い`);
     },
-  });
+  );
 
   for (const file of files) {
     const caseName = caseNameOf(file);
@@ -427,19 +420,17 @@ for (const variant of VARIANTS) {
     const caseId = `${variant.name}/${caseName}`;
     // Default run: everything except the tolerance comparison (output count, storage dtype set,
     // io key correspondence, output keys / shape / dtype).
-    test({
-      name: `DeBERTa golden 構造: ${variant.name} / ${caseName}（実 GPU / 出力の本数・格納 dtype・shape・dtype）`,
-      ignore: !available || !GPU_AVAILABLE,
-      fn: async () => {
+    test.skipIf(!available || !GPU_AVAILABLE)(
+      `DeBERTa golden 構造: ${variant.name} / ${caseName}（実 GPU / 出力の本数・格納 dtype・shape・dtype）`,
+      async () => {
         await runGoldenCase(variant, file);
       },
-    });
+    );
     // Opt-in: the per-output comparison with the torch CPU goldens under the variant's tolerance.
     // The results.json entry keeps the case id `caseId`.
-    test({
-      name: `DeBERTa golden 突合: ${variant.name} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
-      ignore: !UPSTREAM_PARITY || !available || !GPU_AVAILABLE,
-      fn: async () => {
+    test.skipIf(!UPSTREAM_PARITY || !available || !GPU_AVAILABLE)(
+      `DeBERTa golden 突合: ${variant.name} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+      async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const { parsed, io, outputs } = await runGoldenCase(variant, file);
           parsed.graph.outputs.forEach((name, index) => {
@@ -463,6 +454,6 @@ for (const variant of VARIANTS) {
           });
         });
       },
-    });
+    );
   }
 }

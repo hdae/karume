@@ -8,7 +8,7 @@
 // MUST: 期待値は実装式ではなく IEEE 754 binary16 の定義から書き下す（`2**-24` 刻みの
 // subnormal・65504 の最大有限・65520 のオーバフロー境界）。実装から引くと恒真になる。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { alignF16Payload, decodeF16, f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 

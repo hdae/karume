@@ -6,7 +6,7 @@
 // 畳み、その後で `dit` / combine / euler を開く（VRAM ピークの MUST — `dit-loop.ts` の
 // `projectContextOnGpu`）。故障はループ本体（`dit` の最初の enqueue）に注入し、前段は素通しに
 // して、その順序と解放の本数を同じ 1 回の生成で見る。
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { IrodoriPipeline } from "../../models/mod.ts";
 import {
@@ -23,10 +23,9 @@ import { BatchScope, ResidentTensor } from "../../runtime/src/gpu/device.ts";
 if (!hasQuantSeat("i8")) {
   console.warn(`[karume] Irodori cleanup テストの i8 資産が無いため SKIP。生成: ${DIST_COMMAND}`);
 }
-test({
-  name: "Irodori 常駐ループ: 本体と多重 cleanup の失敗を保ち、全 Session と resident を解放する（実 GPU）",
-  ignore: !GPU_AVAILABLE || !hasQuantSeat("i8"),
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE || !hasQuantSeat("i8"))(
+  "Irodori 常駐ループ: 本体と多重 cleanup の失敗を保ち、全 Session と resident を解放する（実 GPU）",
+  async () => {
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest, "i8");
     const pipeline = await IrodoriPipeline.fromAssets(
@@ -151,4 +150,4 @@ test({
       await pipeline.dispose();
     }
   },
-});
+);

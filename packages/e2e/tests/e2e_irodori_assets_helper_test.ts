@@ -4,7 +4,7 @@
 // tolerance 門が見る**唯一の数**で、資産も GPU も要る門の中に埋まっている。そのため比較子
 // 自身の退行は「門が緑のまま何も検出しない」形でしか出ない — ここが資産なしで踏める唯一の席。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { worstDifference } from "./helpers/irodori-assets.ts";
 

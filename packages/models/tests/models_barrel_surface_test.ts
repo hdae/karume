@@ -9,7 +9,7 @@
 // NOTE: 型 export（`GreedySpec`）は実行時に観測できないので、ここで見るのは値 export だけ。
 // 型だけを戻した場合は「型はあるのに実装が無い」形になり、消費側の `deno check` が落ちる。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import config from "../package.json" with { type: "json" };
 import * as models from "../mod.ts";

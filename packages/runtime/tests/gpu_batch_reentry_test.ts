@@ -8,7 +8,7 @@
 //
 // The file also holds the batch scope x unsettled run self-deadlock detector cases (bottom section).
 
-import { test as denoTest } from "@karume/test-support/test";
+import { test as vitestTest } from "vite-plus/test";
 import { assertEquals, assertRejects } from "@std/assert";
 import {
   acquireGpu,
@@ -37,7 +37,7 @@ const session = async (gpu: GpuContext) =>
     "model",
   );
 const test = (name: string, fn: () => Promise<void>): void =>
-  denoTest({ name, ignore: !GPU_AVAILABLE, fn });
+  vitestTest.skipIf(!GPU_AVAILABLE)(name, fn);
 
 /**
  * 自己デッドロックの回帰は「決着しない」形で現れるので、待ちに上限を置く（timer は必ず解除して

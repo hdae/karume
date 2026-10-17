@@ -6,7 +6,7 @@
 // （f32 / f16 / int8-sym / int4-sym-g）を使う — どれか 1 codec が 2 段の経路で欠けても沈黙しない
 // ため。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import type { BoundContainer } from "../src/format/container/bind.ts";
 import { openMemoryContainer } from "../src/format/container/memory.ts";
@@ -32,10 +32,9 @@ const bitsOf = (tensor: Tensor): readonly number[] => [
   ...new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length),
 ];
 
-test({
-  name: "2 段境界は createSessionFromContainer と出力ビット同一・storage 診断一致（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "2 段境界は createSessionFromContainer と出力ビット同一・storage 診断一致（実 GPU）",
+  async () => {
     const fixture = buildFixture();
     const gpu = await acquireGpu();
     try {
@@ -69,12 +68,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "admission は重みの block を 1 つも取る前に落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "admission は重みの block を 1 つも取る前に落ちる（実 GPU）",
+  async () => {
     // bf16 は容器の codec 台帳にはあるが実行経路が無い（capability 不足）。
     const counted = countingContainer(
       await openModelBytes(baseDeclaration(), [
@@ -99,7 +97,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 重み `w`（`[4,3]` f32）を 2 本の piece で供給し、**2 本目の読みだけ**を落とすメモリ内容器。
@@ -144,10 +142,9 @@ const halfUploadedContainer = (): { readonly container: BoundContainer; reads():
   };
 };
 
-test({
-  name: "構築の途中で落ちても同じ device で作り直せる（部分 Session が残らない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "構築の途中で落ちても同じ device で作り直せる（部分 Session が残らない・実 GPU）",
+  async () => {
     // Session 構築が途中で失敗したとき、GPU 側に半端な資源や壊れた常駐を残さないこと。
     // 供給元が容器になっても成り立つべき不変条件で、admission の相だけを見る他の 2 本とは別。
     const broken = halfUploadedContainer();
@@ -182,4 +179,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

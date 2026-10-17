@@ -10,7 +10,7 @@
 // 設計（d6 の事実「行ブロックの枚数 — 計算値」）が node で独立に計算した値と同じ。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { planRowBlocks, rowBlockLimit } from "../src/runtime/fusion.ts";
 import { planAttentionBlocks } from "../src/runtime/recipe-builders/attention.ts";

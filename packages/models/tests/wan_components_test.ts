@@ -31,7 +31,7 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { SafetensorsError } from "@karume/runtime";
 import {
   type DistributionSource,

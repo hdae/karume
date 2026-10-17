@@ -17,7 +17,7 @@
  */
 
 import { assertRejects } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { type Manifest, parseManifest } from "@karume/hub";
 import { BirefnetPipeline } from "../src/birefnet/pipeline.ts";
 import { DepthAnythingPipeline } from "../src/depth-anything/pipeline.ts";
@@ -175,24 +175,18 @@ const families: readonly Family[] = [
   },
 ];
 
-describe({
-  name: "fromAssets の自前 GPU 取得（実 GPU）",
-  // MUST: アダプタ無し環境は明示 SKIP（ADR 0005）。自前取得の経路は acquireGpu を踏むので、
-  // アダプタが無いと GpuUnavailableError に化けて門が見えない。
-  ignore: !GPU_AVAILABLE,
-  fn: () => {
-    for (const family of families) {
-      it(`${family.name}: 取った device が宣言の limits を満たさなければ構築で落とす`, async () => {
-        await assertRejects(
-          async () => {
-            // 通ってしまったら（= 修正前）後始末だけして、下の assertRejects に落とさせる。
-            const pipeline = await family.build();
-            await pipeline.dispose();
-          },
-          Error,
-          LIMITS_MESSAGE,
-        );
-      });
-    }
-  },
+describe.skipIf(!GPU_AVAILABLE)("fromAssets の自前 GPU 取得（実 GPU）", () => {
+  for (const family of families) {
+    it(`${family.name}: 取った device が宣言の limits を満たさなければ構築で落とす`, async () => {
+      await assertRejects(
+        async () => {
+          // 通ってしまったら（= 修正前）後始末だけして、下の assertRejects に落とさせる。
+          const pipeline = await family.build();
+          await pipeline.dispose();
+        },
+        Error,
+        LIMITS_MESSAGE,
+      );
+    });
+  }
 });

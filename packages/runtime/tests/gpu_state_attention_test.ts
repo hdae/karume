@@ -15,7 +15,7 @@
 // MUST: 故障注入で**各門がそれぞれの変異を検出する**ことを同じテストで示す（検出しない門は
 // 何も見ていない）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import {
@@ -404,10 +404,9 @@ const padRows = (spec: StateCase): readonly number[] => {
 const bitsOf = (data: Float32Array<ArrayBuffer>): Uint32Array =>
   new Uint32Array(data.buffer, data.byteOffset, data.length);
 
-test({
-  name: "states 形 attention が CPU 参照と一致する（実 GPU・full / sliding × GQA × 行ブロック）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 attention が CPU 参照と一致する（実 GPU・full / sliding × GQA × 行ブロック）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     let worstAbs = 0;
@@ -459,7 +458,7 @@ test({
     // 実測最悪値を tolerance の根拠として残す（緩めた瞬間・誤差が伸びた瞬間に桁で気づける）
     console.log(`[states parity] maxAbs=${worstAbs} maxRel=${worstRel}`);
   },
-});
+);
 
 /**
  * 述語の直接検査に使う 1 枚ブロックのケース（S を読み戻してビット列で見る）。
@@ -478,10 +477,9 @@ const PREDICATE_CASES: readonly StateCase[] = [
   PARITY_CASES[11],
 ];
 
-test({
-  name: "①QK が書く S は述語外が厳密 −inf・live 範囲は全列が書かれる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "①QK が書く S は述語外が厳密 −inf・live 範囲は全列が書かれる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -552,12 +550,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "state_append がスロットへ書いた値を ①③ が読み戻す（ring 往復・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "state_append がスロットへ書いた値を ①③ が読み戻す（ring 往復・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -619,7 +616,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * `C > W` のスロットで `Q > C` の chunk を書いたときの**重複排除**（ring が 1 回の append の中で
@@ -633,10 +630,9 @@ test({
  * 両側が同じ誤りを持つと突合が恒真になる）。物理行 `r` の中身は「`r` へ写る論理行のうち最後の
  * 1 本」= `Q` 未満で `col ≡ r (mod C)` の最大の `col`。
  */
-test({
-  name: "Q > C の append は物理行ごとに最後の論理行だけを残す（C > W の重複排除・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "Q > C の append は物理行ごとに最後の論理行だけを残す（C > W の重複排除・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -691,12 +687,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "同一入力の 2 回 dispatch はビット単位で同一（states 形の決定性・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "同一入力の 2 回 dispatch はビット単位で同一（states 形の決定性・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -710,12 +705,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "容量 C と行ブロック分割は出力のビット列を動かさない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "容量 C と行ブロック分割は出力のビット列を動かさない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -784,7 +778,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 故障注入 1 件（`apply` は対象カーネルの WGSL だけを書き換える）。 */
 type Injection = {
@@ -861,10 +855,9 @@ const INJECTIONS: readonly Injection[] = [
   },
 ];
 
-test({
-  name: "故障注入: 変異版はいずれも突合で赤くなる（門が実際に検出器であることの実証・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "故障注入: 変異版はいずれも突合で赤くなる（門が実際に検出器であることの実証・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -916,7 +909,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 非有限値の伝播（ADR 0020 の NaN 伝播契約が states 形でも成立していること）
@@ -953,10 +946,9 @@ const poisonFirstInsRow = (
  * MUST: 恒真化しないこと。NaN を入れない対照 run で同じ行が**非 0 の有限値**になることを
  * 併せて見る（「その行はもともと 0」で緑になる形を塞ぐ）。
  */
-test({
-  name: "states 形は全 NaN の q 行を NaN のまま出し、他の行へ漏らさない（②の nan_max・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形は全 NaN の q 行を NaN のまま出し、他の行へ漏らさない（②の nan_max・実 GPU）",
+  async () => {
     const spec = PARITY_CASES[1]; // full r1 prefill B2（B2 H4 M6 D8 C32 P0 Q6・pad 行なし）
     const plane = 1;
     const row = 2;
@@ -1014,17 +1006,16 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * ③PV の pad 行 0 書きが **0·NaN の穴も閉じている**こと（src/kernels/state-attention.ts の
  * 「値が契約上無意味」を 0 で固定する分岐）。非有限な V が混ざっても、pad 行は live を 1 度も
  * 走査しないので厳密 0 のまま — 走査してから 0 を掛ける実装だと `0 · ±Inf = NaN` になる。
  */
-test({
-  name: "states 形は非有限な V を有効行だけへ伝え、pad 行 / 空行は厳密 0 のまま（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形は非有限な V を有効行だけへ伝え、pad 行 / 空行は厳密 0 のまま（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -1080,7 +1071,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * ② の**空行ガード**（`amax == -inf` の行は Σ ループを 1 度も回さない + stats (0,0) を書く）の
@@ -1089,10 +1080,9 @@ test({
  *
  * ガードが無いと `exp(-inf - (-inf))` = `exp(NaN)` = NaN が分母へ入り、行全体が NaN になる。
  */
-test({
-  name: "①QK の述語を常に偽へ落としても ② の空行ガードで出力は厳密 0（NaN を出さない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "①QK の述語を常に偽へ落としても ② の空行ガードで出力は厳密 0（NaN を出さない・実 GPU）",
+  async () => {
     const spec = PARITY_CASES[2]; // full r2 pad B2 D6（P5 Q3 M6）
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
@@ -1127,4 +1117,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

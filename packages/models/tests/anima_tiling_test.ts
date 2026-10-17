@@ -4,7 +4,7 @@
 // **幾何の不変条件**（固定形の decoder が食える配置であること）と**貼り合わせの解析解**を
 // 押さえる。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ANIMA_SPATIAL_COMPRESSION } from "../src/anima/dit-tokens.ts";
 import {

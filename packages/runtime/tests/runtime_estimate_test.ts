@@ -7,7 +7,7 @@
 // 1 dispatch の近似）が実行相とずれたときの症状は沈黙（例外も警告も出ず、数字だけがずれる）
 // なので、算式そのものを手計算の定数で押さえる。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { PreparedModel } from "../src/runtime/executor.ts";
 import { openGraph, weight } from "./helpers/estimate-graphs.ts";

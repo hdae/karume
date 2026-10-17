@@ -1,6 +1,6 @@
 // 途中 latent → RGB プレビュー近似の挙動テスト。GPU も資産も要らない純関数。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { approximatePreview } from "../src/anima/preview.ts";
 

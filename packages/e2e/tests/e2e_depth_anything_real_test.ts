@@ -44,7 +44,7 @@ import {
   statSync,
   writeFile,
 } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
@@ -421,35 +421,27 @@ const FOUND_REAL = DISCOVERED_GOLDEN.filter((name) => realCaseNames.has(name));
  */
 const ANY_PRESENT = DISCOVERED_GOLDEN.length > 0 || modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
 
-test({
-  name: "Depth Anything 資産: 期待するケースとモデル本体が揃っている",
-  // Skip only a completely empty environment ("never generated"); with anything present, a gap
-  // fails (including a model whose goldens are all gone — see ANY_PRESENT).
-  ignore: !ANY_PRESENT,
-  fn: () => {
-    assertEquals(
-      FOUND_SYNTHETIC,
-      [...SYNTHETIC_CASES],
-      `${SERIES_ROOT.pathname} の合成画像 golden ケース`,
-    );
-    // Real-image goldens are optional but all-or-none (an emit with `--real-images` writes all 4).
-    // Rounding a partial set to SKIP would let assets lost mid-regeneration pass silently.
-    assert(
-      FOUND_REAL.length === 0 || FOUND_REAL.length === REAL_CASES.length,
-      `${SERIES_ROOT.pathname} の実画像 golden が ${FOUND_REAL.length}/${REAL_CASES.length} 本` +
-        `（採り直す: ${GENERATE}）`,
-    );
-    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
-  },
+test.skipIf(!ANY_PRESENT)("Depth Anything 資産: 期待するケースとモデル本体が揃っている", () => {
+  assertEquals(
+    FOUND_SYNTHETIC,
+    [...SYNTHETIC_CASES],
+    `${SERIES_ROOT.pathname} の合成画像 golden ケース`,
+  );
+  // Real-image goldens are optional but all-or-none (an emit with `--real-images` writes all 4).
+  // Rounding a partial set to SKIP would let assets lost mid-regeneration pass silently.
+  assert(
+    FOUND_REAL.length === 0 || FOUND_REAL.length === REAL_CASES.length,
+    `${SERIES_ROOT.pathname} の実画像 golden が ${FOUND_REAL.length}/${REAL_CASES.length} 本` +
+      `（採り直す: ${GENERATE}）`,
+  );
+  assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
 });
 
 for (const entry of REAL_CASES) {
-  test({
-    name:
-      `Depth Anything 実画像前処理パリティ: ${entry.name}` +
+  test.skipIf(!REAL_AVAILABLE)(
+    `Depth Anything 実画像前処理パリティ: ${entry.name}` +
       "（TS の bicubic + 畳んだ正規化 対 DPTImageProcessor）",
-    ignore: !REAL_AVAILABLE,
-    fn: async () => {
+    async () => {
       const [goldenBytes, png] = await Promise.all([
         readBuffer(goldenUrl(entry.name)),
         readImage(entry.file),
@@ -509,15 +501,13 @@ for (const entry of REAL_CASES) {
           "フィルタか丸めの取り違え",
       );
     },
-  });
+  );
 }
 
-test({
-  name:
-    "Depth Anything 実画像 判別: 構図から言える近い領域の深度が遠い領域を上回る" +
+test.skipIf(!REAL_AVAILABLE || !GPU_AVAILABLE)(
+  "Depth Anything 実画像 判別: 構図から言える近い領域の深度が遠い領域を上回る" +
     "（深度 PNG も書く）",
-  ignore: !REAL_AVAILABLE || !GPU_AVAILABLE,
-  fn: async () => {
+  async () => {
     // 判別は**領域平均の順序**だけを見る（閾値は置かない — `depth_anything/export.py` の
     // `_real_sanity` と同じ形で、あちらは torch 側に掛かっている）。一様に潰れた出力も
     // 入力非依存の出力も、上下反転も、両領域の平均が並ぶか逆転するので落ちる。実測は
@@ -668,7 +658,7 @@ test({
         .join("\n"),
     );
   },
-});
+);
 
 /** sha 門が走る条件（実画像の群 + GPU — 判別のテストと同じ）。 */
 const RUNNABLE = REAL_AVAILABLE && GPU_AVAILABLE;

@@ -51,7 +51,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { parseManifest, resolveSelection } from "@karume/hub";
 
 /**
@@ -257,22 +257,17 @@ const assertDistributionIntact = async (root: URL, series: string): Promise<void
   );
 };
 
-test({
-  name: "配布門番: 配布形ミラーが欠けた全 SKIP は明示 FAIL（ADR 0005）",
-  // opt-out は「配布形ミラー無しを承知で通す」意図表明のときだけ。既定では ignore しない。
-  ignore: ALLOW_NO_DISTRIBUTION,
-  fn: () => assertNoDistributionMissing(MODELS_ROOT, DISTRIBUTIONS),
-});
+test.skipIf(ALLOW_NO_DISTRIBUTION)(
+  "配布門番: 配布形ミラーが欠けた全 SKIP は明示 FAIL（ADR 0005）",
+  () => assertNoDistributionMissing(MODELS_ROOT, DISTRIBUTIONS),
+);
 
 for (const series of discoverDistributions(MODELS_ROOT)) {
   const root = distributionRoot(MODELS_ROOT, series);
-  test({
-    name: `配布門番: ${series} の manifest が hub の parser を通り（karume/5）、既定 quant の part が宣言どおり在る`,
-    // 名簿にあるミラーの不在は上の 1 本が名指しで落とす（同じ壊れで 2 本赤くしても読み手の仕事は
-    // 増えない）。名簿に無いものの不在はここでしか見えないので走らせる。
-    ignore: REQUIRED.has(series) && manifestKnownAbsent(root),
-    fn: () => assertDistributionIntact(root, series),
-  });
+  test.skipIf(REQUIRED.has(series) && manifestKnownAbsent(root))(
+    `配布門番: ${series} の manifest が hub の parser を通り（karume/5）、既定 quant の part が宣言どおり在る`,
+    () => assertDistributionIntact(root, series),
+  );
 }
 
 // 以下は門番の判定そのものの故障注入。一時ディレクトリだけで完結する（実資産も GPU も要らない）

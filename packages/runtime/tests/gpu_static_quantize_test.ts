@@ -1,5 +1,5 @@
 // static_quantize の実 GPU 突合（CPU 参照側の門は static_quantize_test.ts）。
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { BUFFER_USAGE as U, MAP_MODE } from "../src/gpu/webgpu-constants.ts";
@@ -69,10 +69,9 @@ const direct = async (gpu: GpuContext, c: Case): Promise<Uint32Array<ArrayBuffer
   return result;
 };
 
-test({
-  name: "static_quantize は Session と grid-stride の複数巡回で公式 CPU とビット一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "static_quantize は Session と grid-stride の複数巡回で公式 CPU とビット一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const c of await cases()) {
@@ -96,12 +95,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "static_quantize はスカラ・空軸・多次元の shape を保つ（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "static_quantize はスカラ・空軸・多次元の shape を保つ（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of [[], [0, 16], [2, 3, 17]]) {
@@ -129,4 +127,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

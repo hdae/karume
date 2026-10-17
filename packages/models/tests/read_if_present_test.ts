@@ -9,7 +9,7 @@
 
 import { makeTempDir, mkdir, remove, writeTextFile } from "@karume/test-support/fs";
 import { assertEquals, assertRejects } from "@std/assert";
-import { afterAll, beforeAll, describe, it } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
 
 describe("readTextIfPresent / readFileIfPresent", () => {

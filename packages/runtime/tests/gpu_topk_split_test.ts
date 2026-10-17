@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, prepareContainer } from "../mod.ts";
 import {
@@ -9,10 +9,9 @@ import {
 } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-test({
-  name: "topk k=1: 分割境界と大語彙でNaN・同点・符号付きゼロの値ビットを保つ",
-  ignore: !GPU_AVAILABLE,
-  async fn() {
+test.skipIf(!GPU_AVAILABLE)(
+  "topk k=1: 分割境界と大語彙でNaN・同点・符号付きゼロの値ビットを保つ",
+  async function () {
     const gpu = await acquireGpu();
     try {
       for (const dim of [16383, 16384, 16385, 262144]) {
@@ -69,7 +68,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 const intermediateGraph = (rows: number, dim: number): DeclarationJson => ({
   format: "karume-ir",
@@ -95,10 +94,9 @@ const intermediateGraph = (rows: number, dim: number): DeclarationJson => ({
   ],
 });
 
-test({
-  name: "topk k=1: 中間入力をmergeまで保ち初回とbacking再利用で同じ値を返す",
-  ignore: !GPU_AVAILABLE,
-  async fn() {
+test.skipIf(!GPU_AVAILABLE)(
+  "topk k=1: 中間入力をmergeまで保ち初回とbacking再利用で同じ値を返す",
+  async function () {
     const rows = 8,
       dim = 32769;
     const gpu = await acquireGpu();
@@ -129,7 +127,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 test("topk1 mergeで同時に必要な元入力・部分結果・2出力を見積りに含める", async () => {
   const rows = 512,
@@ -142,10 +140,9 @@ test("topk1 mergeで同時に必要な元入力・部分結果・2出力を見�
   assert(workspace >= minimum, `workspace ${workspace} < simultaneously live ${minimum}`);
 });
 
-test({
-  name: "topk k=1: 外側が空なら分割用一時を作らず空の2出力を返す",
-  ignore: !GPU_AVAILABLE,
-  async fn() {
+test.skipIf(!GPU_AVAILABLE)(
+  "topk k=1: 外側が空なら分割用一時を作らず空の2出力を返す",
+  async function () {
     const gpu = await acquireGpu();
     try {
       for (const dim of [16383, 16384, 262144]) {
@@ -185,4 +182,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

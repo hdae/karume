@@ -10,7 +10,7 @@
  * 発動する（in_w 8,650,802・out_w 34 でも末尾の源座標が in_w に届く）。
  */
 import { assertEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { acquireGpu, prepareContainer } from "../mod.ts";
 import { referenceUpsampleBilinear2d } from "../src/reference/ops.ts";
 import { GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./helpers/model-fixture.ts";
@@ -43,33 +43,29 @@ describe("upsample_bilinear2d: 1 軸が 2^24 を超える縮小の端点", () =>
     assertEquals([...out.data], EXPECTED);
   });
 
-  it({
-    name: "GPU も各平面の末尾を読む（実 GPU）",
-    ignore: !GPU_AVAILABLE,
-    async fn() {
-      const gpu = await acquireGpu();
+  it.skipIf(!GPU_AVAILABLE)("GPU も各平面の末尾を読む（実 GPU）", async function () {
+    const gpu = await acquireGpu();
+    try {
+      const prepared = prepareContainer(
+        await openModelBytes(
+          singleOpDeclaration("upsample_bilinear2d", [INPUT_SHAPE], [OUTPUT_SHAPE], {
+            attrs: { output_size: [1, 2] },
+          }),
+          [],
+        ),
+        GRAPH_NAME,
+      );
+      const session = await prepared.createContainerSession(gpu);
       try {
-        const prepared = prepareContainer(
-          await openModelBytes(
-            singleOpDeclaration("upsample_bilinear2d", [INPUT_SHAPE], [OUTPUT_SHAPE], {
-              attrs: { output_size: [1, 2] },
-            }),
-            [],
-          ),
-          GRAPH_NAME,
-        );
-        const session = await prepared.createContainerSession(gpu);
-        try {
-          const out = await session.run({
-            x0: { dtype: "f32", shape: INPUT_SHAPE, data: input() },
-          });
-          assertEquals([...out.y.data], EXPECTED);
-        } finally {
-          await session.dispose();
-        }
+        const out = await session.run({
+          x0: { dtype: "f32", shape: INPUT_SHAPE, data: input() },
+        });
+        assertEquals([...out.y.data], EXPECTED);
       } finally {
-        gpu.destroy();
+        await session.dispose();
       }
-    },
+    } finally {
+      gpu.destroy();
+    }
   });
 });

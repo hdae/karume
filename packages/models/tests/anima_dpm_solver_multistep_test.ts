@@ -11,7 +11,7 @@
 // tolerance（{@link TOLERANCE}）の導出根拠はモジュール側の doc（「参照とビット一致しない」の
 // MUST 節）が正本 —— ここに数値の由来を二重に書かない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { dpmSolverMultistepStep, needsUncond } from "../src/generation/dpm-solver-multistep.ts";
 

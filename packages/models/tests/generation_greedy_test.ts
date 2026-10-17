@@ -7,7 +7,7 @@
 // 残骸を食っても例外を出さない）、実装の誤りが検収 e2e の 1 個の不一致に潰れてしまう位置に
 // ある。Session は narrow interface（`GreedySession`）で受けるので、fake は素の object 1 個。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type {
   GenerationContextSpec,

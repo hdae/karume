@@ -21,7 +21,7 @@
 // 縛れる純関数なので、最後の 1 本で同じく直接叩く — ここが壊れると購読側へ**別 step の潜在が
 // 黙って**届き、実 GPU の WAV 門は観測席を通らないので緑のままになる。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   assertEquals,
   assertNotStrictEquals,

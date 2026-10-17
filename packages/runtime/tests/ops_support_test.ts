@@ -11,7 +11,7 @@
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { mergedGraph } from "../src/format/container/bind.ts";
 import type { CodecLayout } from "../src/format/container/codecs.ts";
 import type { IrDtype, IrGraph } from "../src/format/ir.ts";

@@ -16,7 +16,7 @@
 // MUST: B / H / M / N / D は複数形状（端数込み）を回す。カーネルは B と H を 1 本のバッチ軸へ
 // 畳むので、B=1 だけでは軸の取り違えが値に出ない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
@@ -199,10 +199,9 @@ const bandMask = (
   return data;
 };
 
-test({
-  name: "attention 1 ノードの出力が分解経路（bmm/softmax/bmm）と**ビット単位で一致**する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attention 1 ノードの出力が分解経路（bmm/softmax/bmm）と**ビット単位で一致**する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of SHAPES) {
@@ -243,7 +242,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **加算 mask 版のビット同一の門**（ADR 0023 改訂）。融合側は ①QK の書き出し epilogue で
@@ -254,10 +253,9 @@ test({
  * mask の値は **0 と大きい負値の混在**（実測の band mask）で、最後の 1 形だけ `-Infinity`
  * （エクスポータが −inf を折り込む形）を通す。
  */
-test({
-  name: "加算 mask 付き attention の出力が分解経路（bmm → add → softmax → bmm）とビット単位で一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "加算 mask 付き attention の出力が分解経路（bmm → add → softmax → bmm）とビット単位で一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const [index, shape] of SHAPES.entries()) {
@@ -336,7 +334,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * Session 経路の結線（ADR 0023 改訂）。mask で増えるのは **①QK の束縛 1 本とキーの 1 語**
@@ -366,10 +364,9 @@ const maskedAttention = (): {
   return { graph, inputs: { x0: q, x1: k, x2: v, x3: mask } };
 };
 
-test({
-  name: "加算 mask は i8a8 とは組めない（黙って縮退しない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "加算 mask は i8a8 とは組めない（黙って縮退しない・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const { graph, inputs } = maskedAttention();
@@ -386,7 +383,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **census**（ADR 0058 決定 4）。mask 変種が実際に走ったか・dispatch が増えていないかは
@@ -396,38 +393,30 @@ test({
  * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
  * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
-test({
-  name: "加算 mask は ①QK のキーと束縛だけを増やす（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
-    const gpu = await acquireGpu();
+test.skipIf(!GPU_AVAILABLE)("加算 mask は ①QK のキーと束縛だけを増やす（実 GPU）", async () => {
+  const gpu = await acquireGpu();
+  try {
+    const { graph, inputs } = maskedAttention();
+    const session = await createSessionFromContainer(gpu, await openGraphModel(graph), GRAPH_NAME);
     try {
-      const { graph, inputs } = maskedAttention();
-      const session = await createSessionFromContainer(
-        gpu,
-        await openGraphModel(graph),
-        GRAPH_NAME,
+      await session.run(inputs);
+      const entries = requireCensus(session.diagnostics().lastRunPipelines, "masked attention");
+      const keys = entries.map((entry) => entry.key);
+      // 1 ノード = 3 dispatch のまま（mask で dispatch は増えない）
+      assertEquals(
+        entries.reduce((sum, entry) => sum + entry.dispatchCount, 0),
+        3,
       );
-      try {
-        await session.run(inputs);
-        const entries = requireCensus(session.diagnostics().lastRunPipelines, "masked attention");
-        const keys = entries.map((entry) => entry.key);
-        // 1 ノード = 3 dispatch のまま（mask で dispatch は増えない）
-        assertEquals(
-          entries.reduce((sum, entry) => sum + entry.dispatchCount, 0),
-          3,
-        );
-        assertEquals(keys.includes(attentionQkKey(true, "f32", "f32", true)), true, "mask 変種");
-        assertEquals(keys.includes(attentionQkKey(true)), false, "mask 無しの ①QK が残っている");
-        // ②③ は mask なしと同じキー（生成物も同じ = スナップショットが固定）
-        assertEquals(keys.includes(attentionPvKey(true)), true, "③PV は mask で変わらない");
-      } finally {
-        await session.dispose();
-      }
+      assertEquals(keys.includes(attentionQkKey(true, "f32", "f32", true)), true, "mask 変種");
+      assertEquals(keys.includes(attentionQkKey(true)), false, "mask 無しの ①QK が残っている");
+      // ②③ は mask なしと同じキー（生成物も同じ = スナップショットが固定）
+      assertEquals(keys.includes(attentionPvKey(true)), true, "③PV は mask で変わらない");
     } finally {
-      gpu.destroy();
+      await session.dispose();
     }
-  },
+  } finally {
+    gpu.destroy();
+  }
 });
 
 /**
@@ -439,10 +428,9 @@ test({
  * 恒真化の門: **同じ形の mask 無し**は i8a8 で走ること（拒否の原因が mask であって
  * 「その形が i8a8 で走らない」ではないことを固定する）。
  */
-test({
-  name: "mask × attentionCompute 'a8' は D%4 / N%4 に依らず一貫して拒否される（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "mask × attentionCompute 'a8' は D%4 / N%4 に依らず一貫して拒否される（実 GPU）",
+  async () => {
     // ①QK 適格（D%4）× ③PV 適格（N%4）の 3 通り。真×真 は従来から拒否され、残り 2 つが
     // 素通りしていた（偽×真 = 混成 / 偽×偽 = 全段 f32 への沈黙の縮退）。
     const shapes: readonly Shape[] = [
@@ -511,4 +499,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

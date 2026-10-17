@@ -16,7 +16,7 @@
 // already checks row for row are not repeated there.
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { STRIDED_RANK } from "../src/codegen/strided.ts";
 import { evalDim, parseDim } from "../src/format/dims.ts";

@@ -14,7 +14,7 @@
 // GPU も実資産も要らない。
 
 import { readFile, readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import {

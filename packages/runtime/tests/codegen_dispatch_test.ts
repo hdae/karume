@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import { DispatchLimitError } from "../src/codegen/errors.ts";

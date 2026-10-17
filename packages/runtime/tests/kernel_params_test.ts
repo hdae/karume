@@ -12,7 +12,7 @@
 // カーネル側は gather を代表に取る（要素数を素の safe-integer 判定で受けていた側 —
 // 一本化前は u32 超過が黙って narrowing されていた）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { assertU32Params } from "../src/codegen/params.ts";

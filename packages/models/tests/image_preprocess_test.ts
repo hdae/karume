@@ -45,7 +45,7 @@
 
 import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { ModelInputError } from "../src/errors.ts";
 import {
   normalizationOverflow,

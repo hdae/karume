@@ -7,7 +7,7 @@
 // 走らない — ADR 0005 追記のレーン規約）。
 
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { settleReleasedMemory } from "../src/session/settle-released-memory.ts";
 import { losableGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 

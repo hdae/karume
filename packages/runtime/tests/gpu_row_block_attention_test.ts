@@ -22,7 +22,7 @@
  * 常に一致する）。出力が定数でないことも毎回確かめる。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
@@ -201,10 +201,9 @@ const SHAPES: readonly Shape[] = [
 /** 強制する枚数（1 = 既定と同じ形・2/3 は等分・5 は端数割）。 */
 const SPLITS: readonly number[] = [1, 2, 3, 5];
 
-test({
-  name: "行ブロック実行は枚数を変えても素の 9 ノード列と**ビット単位で一致**する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "行ブロック実行は枚数を変えても素の 9 ノード列と**ビット単位で一致**する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of SHAPES) {
@@ -229,7 +228,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 予算分割 parity（ADR 0124）。`SessionOptions.attentionRowBlockMaxBytes` で束縛上限より細かく割った
@@ -240,10 +239,9 @@ test({
  * ピークが予算なしの融合（1 枚）より厳密に小さいことを同時に見る（予算が融合の文脈に届かないまま
  * 1 枚で回った形を緑にしない）。
  */
-test({
-  name: "予算 attentionRowBlockMaxBytes で割った行ブロック実行は素の 9 ノード列と**ビット単位で一致**し、枚数が増えピークが縮む（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "予算 attentionRowBlockMaxBytes で割った行ブロック実行は素の 9 ノード列と**ビット単位で一致**し、枚数が増えピークが縮む（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of SHAPES) {
@@ -265,7 +263,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * ポータビリティ門の合成グラフ。**実資産を要らない**形で `S = H·M·N·4` を 128MiB 超へ持ち上げる
@@ -280,10 +278,9 @@ const OVERSIZE: Shape = {
   headDim: 8,
 };
 
-test({
-  name: "maxStorageBufferBindingSize=128MiB へ絞った device で、S が上限を超えるグラフが行ブロックで通る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "maxStorageBufferBindingSize=128MiB へ絞った device で、S が上限を超えるグラフが行ブロックで通る（実 GPU）",
+  async () => {
     const scoreBytes = OVERSIZE.heads * OVERSIZE.queries * OVERSIZE.keys * 4;
     assert(
       scoreBytes > CORE_STORAGE_BINDING_LIMIT,
@@ -330,4 +327,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

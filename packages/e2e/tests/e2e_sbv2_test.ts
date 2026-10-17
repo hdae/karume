@@ -25,7 +25,7 @@
 // torch CPU goldens runs only with KARUME_UPSTREAM_PARITY=1.
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
@@ -777,11 +777,9 @@ for (const series of SERIES) {
     );
   }
 
-  test({
-    name: `SBV2 資産（${series.name}）: 期待するターゲットとケースが揃っている`,
-    // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
-    ignore: !available,
-    fn: () => {
+  test.skipIf(!available)(
+    `SBV2 資産（${series.name}）: 期待するターゲットとケースが揃っている`,
+    () => {
       assertEquals(targets, [...EXPECTED_TARGETS], `${series.root.pathname} のターゲット`);
       // tolerance はターゲットごとに実測から導く。表の穴は「別ターゲットの値で突合する」
       // 沈黙誤りになるので、ターゲット一覧との等値で塞ぐ（系列ごとに 1 枚ずつ）。
@@ -806,26 +804,24 @@ for (const series of SERIES) {
         assert(modelPresent(modelUrl(series.root, target)), `${target}/${MODEL_FILE} が無い`);
       }
     },
-  });
+  );
 
   for (const { target, caseName, ioFile } of cases) {
     /** ケース ID（系列 / ターゲットが違えば同じケース名があるので組で持つ）。 */
     const caseId = `${series.name}/${target}/${caseName}`;
     // Default run: everything except the tolerance comparison (tolerance table length, storage
     // dtype set, io key correspondence, output keys / shape / dtype).
-    test({
-      name: `SBV2 golden 構造: ${series.name} / ${target} / ${caseName}（実 GPU / 格納 dtype・shape・dtype）`,
-      ignore: !available || !GPU_AVAILABLE,
-      fn: async () => {
+    test.skipIf(!available || !GPU_AVAILABLE)(
+      `SBV2 golden 構造: ${series.name} / ${target} / ${caseName}（実 GPU / 格納 dtype・shape・dtype）`,
+      async () => {
         await runGoldenCase(series, target, caseName, ioFile);
       },
-    });
+    );
     // Opt-in: the per-output comparison with the torch CPU goldens under the series' tolerance
     // table. The results.json entry keeps the case id `caseId`.
-    test({
-      name: `SBV2 golden 突合: ${series.name} / ${target} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
-      ignore: !UPSTREAM_PARITY || !available || !GPU_AVAILABLE,
-      fn: async () => {
+    test.skipIf(!UPSTREAM_PARITY || !available || !GPU_AVAILABLE)(
+      `SBV2 golden 突合: ${series.name} / ${target} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+      async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const { parsed, io, outputs, tolerances } = await runGoldenCase(
             series,
@@ -854,6 +850,6 @@ for (const series of SERIES) {
           });
         });
       },
-    });
+    );
   }
 }

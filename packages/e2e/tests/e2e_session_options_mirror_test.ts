@@ -15,7 +15,7 @@
 // と同じ規律 — ミラーごと無い形は `runtime/tests/distribution_gate_test.ts` が FAIL にする）。
 
 import { isNotFound, readDir, readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { type Manifest, parseManifest } from "@karume/hub";
 import { ANIMA_SESSION_POLICY } from "../../models/src/anima/pipeline.ts";
@@ -99,10 +99,9 @@ if (MIRRORS.length === 0) {
   );
 }
 
-test({
-  name: "配布形ミラーの全 quant で、共通の合成が 1 本化前の写像と同じ SessionOptions を返す",
-  ignore: MIRRORS.length === 0,
-  fn: () => {
+test.skipIf(MIRRORS.length === 0)(
+  "配布形ミラーの全 quant で、共通の合成が 1 本化前の写像と同じ SessionOptions を返す",
+  () => {
     let checked = 0;
     for (const [mirror, manifest] of MIRRORS) {
       for (const [modelName, entry] of Object.entries(manifest.models)) {
@@ -129,4 +128,4 @@ test({
     // 0 件で緑になる形（manifest はあるが quant を 1 つも読めていない）を通さない。
     if (checked === 0) throw new Error("ミラーはあるが quant を 1 つも検査していない");
   },
-});
+);

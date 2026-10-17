@@ -2,7 +2,7 @@
 // アダプタ無し環境でも回帰を撃てる位置に置く。`createSessionFromContainer` 経由の GPU テストは「実構築でも
 // 拒否される」1 本だけを残し、値の総当たりはここが正本。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { assertExecutionKnobs } from "../src/runtime/session-options-check.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";

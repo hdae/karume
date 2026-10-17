@@ -16,7 +16,7 @@
 // NOTE と同じ理由で、ここだけ runtime のテスト道具を借りる。
 
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import type { ModelInput } from "../../runtime/tests/helpers/container-write.ts";
 import { Gemma4Pipeline } from "../gemma.ts";

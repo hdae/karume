@@ -21,7 +21,7 @@
 // MUST: 変種（v4 / スカラ）と格納（f32 / f16 / i8）を全て踏む。踏んだ変種は `expectVec4` で
 // 明示的に固定する（判定の取り違えが「両方とも同じ変種で緑」に紛れないため）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import { alignF16Payload } from "../src/format/f16.ts";
@@ -667,10 +667,9 @@ const assertParity = (
   assert(new Set(direct).size > 1, `${where}: 出力が定数（ビット一致が恒真になっている）`);
 };
 
-test({
-  name: "conv2d の implicit GEMM は直接カーネルと**ビット単位で一致**する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv2d の implicit GEMM は直接カーネルと**ビット単位で一致**する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of CASES) {
@@ -680,7 +679,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **32 行 m タイル変種**（ADR 0024 隣接）の恒久の門。
@@ -697,10 +696,9 @@ test({
  * 33〜64 の帯（33 / 70 の 2 枚目）/ M < 32（20 / 12 / 5 / 4 / 3）/ **m タイル 2 枚以上 × i8**
  * （96 = 3 枚・70 = 3 枚・66 = 3 枚 — scale 軸取り違えの唯一の検出器）。
  */
-test({
-  name: "conv2d の 32 行 m タイル変種も直接カーネルとビット単位で一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv2d の 32 行 m タイル変種も直接カーネルとビット単位で一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of CASES) {
@@ -719,7 +717,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * executor の踏み分け（ADR 0024）。`groups == 1` は implicit GEMM、`groups > 1` は直接カーネル
@@ -756,10 +754,9 @@ const conv2dKeysUsed = async (channels: number, groups: number): Promise<Readonl
   }
 };
 
-test({
-  name: "executor は groups で 2 カーネルを踏み分ける（1 = igemm / >1 = 直接・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "executor は groups で 2 カーネルを踏み分ける（1 = igemm / >1 = 直接・実 GPU）",
+  async () => {
     // Cin = Cout = 6・3×3 → kFlat = 54（groups=1）で 4 の倍数でないのでスカラ変種。
     // Cout=6 は `6 % 64 == 6` なので m タイルは 32 行（{@link conv2dIgemmMTile}）。
     assertEquals(
@@ -770,7 +767,7 @@ test({
     // depthwise（groups = Cin = Cout）も直接カーネル側
     assertEquals(await conv2dKeysUsed(6, 6), new Set([conv2dKey("f32")]));
   },
-});
+);
 
 /**
  * m タイルの選択が **executor に結線されている**ことの門（ADR 0024 隣接）。
@@ -778,10 +775,9 @@ test({
  * MUST: 値ではなく**実際に走ったパイプラインキー**で見る。どちらのタイル形も出力はビット
  * 同一なので、値の一致は結線の証拠にならない（述語を潰しても数値テストは全て緑のまま）。
  */
-test({
-  name: "executor は M%64 で m タイル 64/32 を踏み分ける（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "executor は M%64 で m タイル 64/32 を踏み分ける（実 GPU）",
+  async () => {
     // Cout = 96（census の本命 — `96 % 64 == 32`）→ 32 行
     assertEquals(
       await conv2dKeysUsed(96, 1),
@@ -790,4 +786,4 @@ test({
     // Cout = 64（`64 % 64 == 0`）→ 64 行のまま（既存キーが動かないことの確認も兼ねる）
     assertEquals(await conv2dKeysUsed(64, 1), new Set([conv2dIgemmKey("f32", true, GEMM_TILE)]));
   },
-});
+);

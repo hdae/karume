@@ -14,7 +14,7 @@
 // ⑦ が無いと、波 D で context を鍵に混ぜる実装が「値は正しいまま decode が毎 step 再導出」と
 // いう形で通ってしまう（例外も警告も出ない）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   assert,
   assertEquals,
@@ -246,10 +246,9 @@ const injectedHost = (gpu: GpuContext, graph: IrGraph): GenerationContextHost =>
   adopt: (allocate) => allocate(),
 });
 
-test({
-  name: "createGenerationContext はスロットごとに物理確保し、dispose で返す（診断つき・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "createGenerationContext はスロットごとに物理確保し、dispose で返す（診断つき・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     try {
@@ -326,12 +325,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "確保の await を跨いで dispose された Session は context を握らせない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "確保の await を跨いで dispose された Session は context を握らせない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     try {
@@ -354,12 +352,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "states 宣言を持たないグラフでは GenerationContext を作れない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 宣言を持たないグラフでは GenerationContext を作れない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(
       gpu,
@@ -378,12 +375,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "spec の検査: chunkLength は 1 以上の整数・記号容量は bindings だけで決まる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "spec の検査: chunkLength は 1 以上の整数・記号容量は bindings だけで決まる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const symbolic = await stateSession(gpu, symbolicGraph());
@@ -435,12 +431,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "スロット単体が maxStorageBufferBindingSize を超える容量は fail loudly（絞った device・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "スロット単体が maxStorageBufferBindingSize を超える容量は fail loudly（絞った device・実 GPU）",
+  async () => {
     // Gemma 4 E2B の full 層（131K 容量 × f32）と同型の 1GiB スロット。core 既定 128MiB の機では
     // 束縛できない = ADR 0066 追記 5 が拒否を要求する形。
     const capacity = 131072;
@@ -483,7 +478,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * OOM 門の前提: スロット 1 本（1GiB）を束縛できるアダプタで、**合計 64GiB** の要求が device の
@@ -505,10 +500,9 @@ if (GPU_AVAILABLE && BINDING_LIMIT < OOM_SLOT_BYTES) {
   );
 }
 
-test({
-  name: "state 確保の失敗は out-of-memory errorScope で fail loudly（実 GPU）",
-  ignore: !GPU_AVAILABLE || BINDING_LIMIT < OOM_SLOT_BYTES,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE || BINDING_LIMIT < OOM_SLOT_BYTES)(
+  "state 確保の失敗は out-of-memory errorScope で fail loudly（実 GPU）",
+  async () => {
     const elements = OOM_SLOT_BYTES / 4;
     const states: DeclarationJson["states"] = {};
     for (let i = 0; i < OOM_SLOT_COUNT; i += 1) {
@@ -544,12 +538,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "確保途中の失敗は確保済みバッファをちょうど 1 回ずつ返す（故障注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "確保途中の失敗は確保済みバッファをちょうど 1 回ずつ返す（故障注入・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const graph = prepareContainer(
       await openStateModel(stateGraph(NUMERIC_STATES)),
@@ -587,12 +580,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "確保中の device 消失は GpuDeviceLostError にして全確保物を返す（故障注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "確保中の device 消失は GpuDeviceLostError にして全確保物を返す（故障注入・実 GPU）",
+  async () => {
     // この case は device を壊すので専用の GpuContext を取る。
     const gpu = await acquireGpu();
     const graph = prepareContainer(
@@ -610,12 +602,11 @@ test({
     assert(error.message.includes("GenerationContext の state 確保"), error.message);
     assertEquals(injected.destroyCounts, [1, 1, 1], "消失でも確保物は 1 本残らず返る");
   },
-});
+);
 
-test({
-  name: "spec の chunkBuckets は凍結コピーで公開され、許可集合を組む（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "spec の chunkBuckets は凍結コピーで公開され、許可集合を組む（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     try {
@@ -664,12 +655,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "確保の await を跨いだ chunkBuckets の push は許可集合に届かない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "確保の await を跨いだ chunkBuckets の push は許可集合に届かない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     try {
@@ -692,12 +682,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "確保の await を跨いだ chunkLength の書き換えは context に届かない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "確保の await を跨いだ chunkLength の書き換えは context に届かない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     try {
@@ -721,12 +710,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "論理長は run の成功で進み、rewind は 0..pastLength の整数だけを受ける（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "論理長は run の成功で進み、rewind は 0..pastLength の整数だけを受ける（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -772,12 +760,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "論理長は u32 の上限で fail loudly（Uint32Array への沈黙切り詰めの遮断・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "論理長は u32 の上限で fail loudly（Uint32Array への沈黙切り詰めの遮断・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     try {
@@ -814,12 +801,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "汚染後は dispose 以外の全操作を拒否する（読みも含む・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "汚染後は dispose 以外の全操作を拒否する（読みも含む・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const context = await session.createGenerationContext({ chunkLength: 2 });
@@ -856,12 +842,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "device 消失後の GenerationContext は全操作が GpuDeviceLostError（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "device 消失後の GenerationContext は全操作が GpuDeviceLostError（実 GPU）",
+  async () => {
     // この case は device を壊すので専用の GpuContext を取る。
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
@@ -884,12 +869,11 @@ test({
     assertStrictEquals(again, failure, "2 度目以降も同じ完了（同じ失敗）を返す");
     await session.dispose().catch(() => undefined);
   },
-});
+);
 
-test({
-  name: "device.destroy() 直後（lost の反応前）から全操作を拒否する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "device.destroy() 直後（lost の反応前）から全操作を拒否する（実 GPU）",
+  async () => {
     // この case は device を壊すので専用の GpuContext を取る。
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
@@ -916,12 +900,11 @@ test({
 
     await session.dispose().catch(() => undefined);
   },
-});
+);
 
-test({
-  name: "論理長 uniform は毎回全域が書き直され、書いた値が GPU 上に載る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "論理長 uniform は毎回全域が書き直され、書いた値が GPU 上に載る（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -971,7 +954,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // 波 C ではここが「context を 2 本作っても 2 回目の run が同じ計画鍵に当たる」を見ていた。
 // 波 D-1 で参照完全性が入り、**states を宣言するグラフは必ず state 参照ノードを持つ**ように
@@ -981,10 +964,9 @@ test({
 // ②state 参照ノードを持つグラフの 1-shot 実行は fail loudly（黙って state 抜きで走らない）
 // NOTE: 「同じ鍵に当たる（hit: true）」= ADR 0066 受入条件③の run 側は波 D-3 で結線され、
 // tests/gpu_state_execution_test.ts が「別 context・同容量なら 2 本目が hit」の形で持っている。
-test({
-  name: "context 生成は計画導出を走らせず、state 参照グラフの 1-shot 実行は拒否される（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "context 生成は計画導出を走らせず、state 参照グラフの 1-shot 実行は拒否される（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const input: Tensor = {
@@ -1023,7 +1005,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // `Session.run` の第 3 引数の寿命契約（R6-1 / CG5-2）。run 本体は `#serialize` 越し
 // （1 マイクロタスク以降）に走り、`context` / `queryLength` を await を跨いだ複数の時点で読むので、
@@ -1042,10 +1024,9 @@ const RUN_INPUT: Tensor = {
   data: Float32Array.from([1, 2, 3, 4, 5, 6, 7, 8]),
 };
 
-test({
-  name: "run の queryLength は発行時に固定される（発行後の書き換えを読まない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "run の queryLength は発行時に固定される（発行後の書き換えを読まない・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -1063,12 +1044,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "run の context は発行時に固定され、リースも同じ写しに立つ（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "run の context は発行時に固定され、リースも同じ写しに立つ（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const first = await session.createGenerationContext({ chunkLength: 4 });
@@ -1092,12 +1072,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "同一 context への未 await 並行発行は 2 本目を拒否する（別 context は通る・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "同一 context への未 await 並行発行は 2 本目を拒否する（別 context は通る・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -1134,16 +1113,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // deferred commit（投機デコードの verify 形 — 論理長を run の成功では進めず、受理行数で確定する）
 // ---------------------------------------------------------------------------
 
-test({
-  name: "deferred run は論理長を保留し、commit(rows) が受理行数だけ進める（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "deferred run は論理長を保留し、commit(rows) が受理行数だけ進める（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -1231,12 +1209,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "pendingCommit は凍結して返り、受理行数の上限は外から書き換えられない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "pendingCommit は凍結して返り、受理行数の上限は外から書き換えられない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -1265,12 +1242,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "失敗した deferred run は保留を作らない / dispose は保留ごと畳む（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "失敗した deferred run は保留を作らない / dispose は保留ごと畳む（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -1294,7 +1270,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** sliding スロット（窓 8）を 1 本持つグラフ。容量は記号 `C` で context 側から与える。 */
 const slidingGraph = (): DeclarationJson =>
@@ -1304,10 +1280,9 @@ const slidingGraph = (): DeclarationJson =>
     { window: 8 },
   );
 
-test({
-  name: "slidingSlack は sliding スロットの capacity − window の最小（sliding 無しは undefined）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "slidingSlack は sliding スロットの capacity − window の最小（sliding 無しは undefined）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu);
     const sliding = await stateSession(gpu, slidingGraph());
@@ -1348,12 +1323,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "deferred run の queryLength は sliding の余裕まで（超える発行は同期区間で拒否・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "deferred run の queryLength は sliding の余裕まで（超える発行は同期区間で拒否・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const sliding = await stateSession(gpu, slidingGraph());
     // 容量 9 / 窓 8 → 余裕 1。deferred は「余裕」= 1 行まで（借り手 = readonly 読者の窓の
@@ -1384,7 +1358,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // fork（会話状態の分岐 — ADR 0066 追記〈2026-10-11〉）
@@ -1520,10 +1494,9 @@ const readSlotWords = async (
   return words;
 };
 
-test({
-  name: "fork は全スロットの全バイトと論理長を写し、分岐は独立に進む（u32・診断つき・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "fork は全スロットの全バイトと論理長を写し、分岐は独立に進む（u32・診断つき・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await forkSession(gpu);
     const source = await session.createGenerationContext({ chunkLength: 4, chunkBuckets: [2] });
@@ -1620,12 +1593,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "fork() を await せず同じ tick に元へ run を発行しても、複製は呼んだ時点の状態を持つ（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "fork() を await せず同じ tick に元へ run を発行しても、複製は呼んだ時点の状態を持つ（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await forkSession(gpu);
     const source = await session.createGenerationContext({ chunkLength: 4 });
@@ -1651,12 +1623,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "fork() の直後（await 前）の rewind / 2 本目の fork / dispose は通る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "fork() の直後（await 前）の rewind / 2 本目の fork / dispose は通る（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await forkSession(gpu);
     const source = await session.createGenerationContext({ chunkLength: 4 });
@@ -1692,12 +1663,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "fork の拒否: 汚染・進行中 run・batch の予約中・commit 待ち・dispose 済み Session（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "fork の拒否: 汚染・進行中 run・batch の予約中・commit 待ち・dispose 済み Session（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await forkSession(gpu);
     const sink = await gpu.createResident(FORK_DEPTH * 4);
@@ -1773,22 +1743,18 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "device 消失後の fork は GpuDeviceLostError（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
-    // この case は device を壊すので専用の GpuContext を取る。
-    const gpu = await acquireGpu();
-    const session = await forkSession(gpu);
-    const context = await session.createGenerationContext({ chunkLength: 4 });
-    gpu.destroy();
-    // destroy 直後（lost の反応前）から拒否する — 失われた device 上の確保は無効なバッファを
-    // 返すだけなので、通すと空の KV を持つ複製ができる。
-    await assertRejects(() => context.fork(), GpuDeviceLostError, "device が失われた");
-    await session.dispose().catch(() => undefined);
-  },
+test.skipIf(!GPU_AVAILABLE)("device 消失後の fork は GpuDeviceLostError（実 GPU）", async () => {
+  // この case は device を壊すので専用の GpuContext を取る。
+  const gpu = await acquireGpu();
+  const session = await forkSession(gpu);
+  const context = await session.createGenerationContext({ chunkLength: 4 });
+  gpu.destroy();
+  // destroy 直後（lost の反応前）から拒否する — 失われた device 上の確保は無効なバッファを
+  // 返すだけなので、通すと空の KV を持つ複製ができる。
+  await assertRejects(() => context.fork(), GpuDeviceLostError, "device が失われた");
+  await session.dispose().catch(() => undefined);
 });
 
 /**
@@ -1858,10 +1824,9 @@ const armableFaults = (
   };
 };
 
-test({
-  name: "fork の確保途中の失敗は確保物をちょうど 1 回ずつ返し、元は無傷（故障注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "fork の確保途中の失敗は確保物をちょうど 1 回ずつ返し、元は無傷（故障注入・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const graph = prepareContainer(
       await openStateModel(stateGraph(NUMERIC_STATES)),
@@ -1897,12 +1862,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "分岐の独立の門は空振りでない — 複製の dispatch が元のスロットを束ねると元が動く（故障注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "分岐の独立の門は空振りでない — 複製の dispatch が元のスロットを束ねると元が動く（故障注入・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await forkSession(gpu);
     const source = await session.createGenerationContext({ chunkLength: 4 });
@@ -1946,7 +1910,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * `adopt` に await を挟む host（同期区間の契約を破る将来の改修の再現 — 故障注入）。
@@ -1964,10 +1928,9 @@ const delayedAdoptHost = (
   },
 });
 
-test({
-  name: "同期区間の門は空振りでない — 複製の前に await を挟む host では後続の書き込みを写す（故障注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "同期区間の門は空振りでない — 複製の前に await を挟む host では後続の書き込みを写す（故障注入・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const graph = prepareContainer(
       await openStateModel(stateGraph(NUMERIC_STATES)),
@@ -2022,12 +1985,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "実 Session の fork も同期区間で複製する — 同じ区間の後続の書き込みは複製に入らない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "実 Session の fork も同期区間で複製する — 同じ区間の後続の書き込みは複製に入らない（実 GPU）",
+  async () => {
     // 上の門は host を自作するので、`Session.#adopt`（判定 → `allocate` を同期に呼ぶ）の側に
     // await が入る退行は捕まらない。ここは同じ形を実 Session の登録経路で縛る。退行の再現は
     // `#adopt` の `allocate()` の前に `await Promise.resolve()` を 1 段挟む形（`allocate` が
@@ -2059,12 +2021,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "fork の所要時間を記録する（スロット 2 本 × 64 MiB・記録のみ・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "fork の所要時間を記録する（スロット 2 本 × 64 MiB・記録のみ・実 GPU）",
+  async () => {
     // 複製は scheduler の外の自前 submit なので、巨大な複製の所要は他に観測点が無い。値の門は
     // 置かない（device と負荷で動く）— 弱い GPU で TDR 域に近づくかを読む材料として残す。
     // MUST: 区間の末尾で queue の完了を待つ。fork が待つ popErrorScope の解決はコピーの実行
@@ -2104,4 +2065,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

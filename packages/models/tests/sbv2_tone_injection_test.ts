@@ -8,7 +8,7 @@
 // 経路は、実辞書があるときだけ走らせる（0.6.0 以降、解析はパッケージの外側にある）。
 
 import { isNotFound, readDirSync, readFileSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { analyzeWithWords, JtdDictionary, OverlayDictionary, type OverlayEntry } from "@hdae/yomi";
 import { Sbv2InputError } from "../src/sbv2/errors.ts";
@@ -454,10 +454,9 @@ const entry = (reading: string, accentType: number): OverlayEntry => ({
   accentType,
 });
 
-test({
-  name: "解析器の返り値はそのまま発話になる（修正辞書は呼び手側で効かせる）",
-  ignore: dictUrl === undefined,
-  fn: () => {
+test.skipIf(dictUrl === undefined)(
+  "解析器の返り値はそのまま発話になる（修正辞書は呼び手側で効かせる）",
+  () => {
     const dict = jtd();
     const rules = testRules();
     const tokenizer = textTokenizer();
@@ -502,12 +501,11 @@ test({
       "sum(word2ph) が音素数と違う",
     );
   },
-});
+);
 
-test({
-  name: "解析どおりの発話は門を素通りし、tone だけを直した発話も通る",
-  ignore: dictUrl === undefined,
-  fn: () => {
+test.skipIf(dictUrl === undefined)(
+  "解析どおりの発話は門を素通りし、tone だけを直した発話も通る",
+  () => {
     const dict = jtd();
     const rules = testRules();
     const tokenizer = textTokenizer();
@@ -543,4 +541,4 @@ test({
       Sbv2InputError,
     );
   },
-});
+);

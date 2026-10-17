@@ -10,7 +10,7 @@
 // の `TestPartExpansion`（連番の part 列の展開・単一形と連番の同居の拒否）。
 
 import { makeTempDir, readFileSync, remove, writeFileSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   assert,
   assertEquals,

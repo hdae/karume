@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { makeTempDir, mkdir, remove, writeTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 
 const ENTRY = fileURLToPath(new URL("../main.ts", import.meta.url));
 

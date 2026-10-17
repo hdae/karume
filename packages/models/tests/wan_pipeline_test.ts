@@ -14,7 +14,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { parseManifest } from "@karume/hub";
 import type { CodecName, RunInputs, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
@@ -1631,10 +1631,9 @@ if (textEmbedsSeries === undefined) {
   );
 }
 
-test({
-  name: "既定の negative: テキスト埋め込み資産の negative の行の原文とビット同一（2 つの経路の既定が同じ文字列）",
-  ignore: textEmbedsSeries === undefined,
-  fn: () => {
+test.skipIf(textEmbedsSeries === undefined)(
+  "既定の negative: テキスト埋め込み資産の negative の行の原文とビット同一（2 つの経路の既定が同じ文字列）",
+  () => {
     if (textEmbedsSeries === undefined) throw new Error("ignore の条件と食い違う");
     const embeds = parseWanTextEmbeds(textEmbedsSeries.buffer);
     assertEquals(
@@ -1642,7 +1641,7 @@ test({
       [WAN_DEFAULT_NEGATIVE_PROMPT],
     );
   },
-});
+);
 
 describe("家族 admission: umT5 のグラフ宣言 × ホストが組む形（入力名・i32・記号 L・幅・格納）", () => {
   type Umt5Spec = {
@@ -1970,10 +1969,9 @@ if (distManifestText === undefined) {
 /** 既定席（ADR 0120 裁定 2026-10-04 の 4 — 今いちばん実用的な席。正本は recipe の `WAN_DEFAULT_QUANT`）。 */
 const PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
 
-test({
-  name: "配布形の既定席: quant を省いた構築は実用席へ解決する（manifest の karume.json だけを読む）",
-  ignore: distManifestText === undefined,
-  fn: async () => {
+test.skipIf(distManifestText === undefined)(
+  "配布形の既定席: quant を省いた構築は実用席へ解決する（manifest の karume.json だけを読む）",
+  async () => {
     assert(distManifestText !== undefined);
     // 席の解決は家族 admission（重みを読む前）で決まる。limits が全部 0 の共有 GPU を渡すと、どの席も宣言する
     // requiredLimits（umT5 の語彙埋め込み）で落ち、その文言が解決した席を名指す — 重みも GPU も使わずに席を観測する。
@@ -1987,7 +1985,7 @@ test({
       `WanPipeline: quant '${PRACTICAL_QUANT}' が要求する device limit`,
     );
   },
-});
+);
 
 describe("WanPipeline.generate（模擬 Session・GPU 経路の text 段）", () => {
   it("text 段は positive → negative を回して畳み、畳んだ後に DiT の段を張る（Session の実行オプションは {}）", async () => {

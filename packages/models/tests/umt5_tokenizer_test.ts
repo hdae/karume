@@ -12,7 +12,7 @@
 // 読み口の拒否と、Wan（前処理の後に同じトークナイザを通す）で空白の拒否が起きないことを見る。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertInstanceOf, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { type CodeRanges, inCodeRanges, parseCodeRanges } from "../src/text/code-ranges.ts";
@@ -297,10 +297,9 @@ test("parseUmt5TokenizerAsset: 壊れた表は落とす（入力起因ではな�
 
 // ---- 実資産（全語彙）での突合 -------------------------------------------------
 
-test({
-  name: "実資産: 全語彙の資産から組んだトークナイザもフィクスチャの全ケースと同じ決着になる",
-  ignore: seriesAsset === undefined,
-  fn: () => {
+test.skipIf(seriesAsset === undefined)(
+  "実資産: 全語彙の資産から組んだトークナイザもフィクスチャの全ケースと同じ決着になる",
+  () => {
     // フィクスチャの語彙は部分集合（断片の部分文字列）なので、資産の読み取り（25.6 万行）と全語彙の格子でも
     // 同じ id 列 / 拒否になることをここで見る。
     const full = new Umt5Tokenizer(parseUmt5TokenizerAsset(JSON.parse(seriesAsset as string)));
@@ -313,4 +312,4 @@ test({
       }
     }
   },
-});
+);

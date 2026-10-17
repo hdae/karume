@@ -14,7 +14,7 @@
 // 形として必ず表に置く。
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { mergedGraph } from "../src/format/container/bind.ts";
 import { type CodecName, groupScaleShape, payloadBytes } from "../src/format/container/codecs.ts";
 import { ContainerFormatError } from "../src/format/container/header.ts";

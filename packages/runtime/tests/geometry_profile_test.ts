@@ -27,7 +27,7 @@ import {
   assertStrictEquals,
   assertThrows,
 } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 // テスト専用: 別 realm の Promise を作る手段（runtime の本体は Web 標準 API だけ — ここは tests の依存）
 import { createContext, runInContext } from "node:vm";
 import { CodegenError } from "../src/codegen/errors.ts";

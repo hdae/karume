@@ -56,7 +56,7 @@
 // 要るのはグラフ本体と WAV だけなので、系列の有無も `model.krm` の有無で見る。
 
 import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseManifest, resolveSelection } from "@karume/hub";
 import type { Manifest } from "@karume/hub";
@@ -435,10 +435,9 @@ for (const entry of CASES) {
     );
   }
 
-  test({
-    name: `母音検出 実音声の全鎖: ${entry.name} — WAV → 特徴 → 実 GPU → .lab（${entry.why}）`,
-    ignore: !audioAvailable || !GPU_AVAILABLE,
-    fn: async () => {
+  test.skipIf(!audioAvailable || !GPU_AVAILABLE)(
+    `母音検出 実音声の全鎖: ${entry.name} — WAV → 特徴 → 実 GPU → .lab（${entry.why}）`,
+    async () => {
       // 所要時間は WAV の読みから決着の記録の直前まで（失敗した回も同じ範囲で残す）。
       const started = performance.now();
       const elapsedMs = (): number => Math.round(performance.now() - started);
@@ -550,7 +549,7 @@ for (const entry of CASES) {
         throw new Error(referenceMismatchMessage(entry.name, outcome.settlement, references));
       }
     },
-  });
+  );
 }
 
 /** sha 門が数えるケース（系列・WAV・GPU が揃ったもの — 登録時に同期で決まる）。 */

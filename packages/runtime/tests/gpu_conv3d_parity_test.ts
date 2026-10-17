@@ -19,7 +19,7 @@
 // MUST: 恒真化しないこと。①と②は別のパイプライン・別の WGSL・別の生成関数で、出力が定数で
 // ないことも見る。bias は全ケース非ゼロ（符号付きゼロの領域を避ける）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { alignF16Payload } from "../src/format/f16.ts";
@@ -500,10 +500,9 @@ const runParity = async (
   });
 };
 
-test({
-  name: "conv3d の implicit GEMM は CPU 参照と一致する（形 8 種 × m タイル 64 / 32・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv3d の implicit GEMM は CPU 参照と一致する（形 8 種 × m タイル 64 / 32・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of PARITY_CASES) {
@@ -526,7 +525,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 2. 恒等門 ①: Kt = 1 の conv3d ≡ フレームごとの conv2d（Uint32 完全一致）
@@ -724,10 +723,9 @@ const IDENTITY_REAL: readonly Conv3dCase[] = [
   },
 ];
 
-test({
-  name: "恒等門 ①: Kt = 1 の conv3d はフレームごとの conv2d と Uint32 で一致する（小形 3 種 + 実寸 4 形・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "恒等門 ①: Kt = 1 の conv3d はフレームごとの conv2d と Uint32 で一致する（小形 3 種 + 実寸 4 形・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of [...IDENTITY_SMALL, ...IDENTITY_REAL]) {
@@ -743,7 +741,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 3. 恒等門 ②: 時間の先頭 2 枚がゼロの Kt = 3 ≡ 重みの最終スライスの Kt = 1
@@ -868,10 +866,9 @@ const ZERO_FRAME_CASES: readonly Conv3dCase[] = [
   },
 ];
 
-test({
-  name: "恒等門 ②: 先頭 2 枚がゼロの Kt = 3 は最終スライスの Kt = 1 と一致する（符号付きゼロのみ許容・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "恒等門 ②: 先頭 2 枚がゼロの Kt = 3 は最終スライスの Kt = 1 と一致する（符号付きゼロのみ許容・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of ZERO_FRAME_CASES) {
@@ -887,7 +884,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 4. Session 経由（executor への結線）
@@ -979,10 +976,9 @@ const POISON_CASES: readonly {
   },
 ];
 
-test({
-  name: "conv3d は毒値を 1 語も残さず、executor は既定幾何の implicit GEMM を踏む（full-write / 実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv3d は毒値を 1 語も残さず、executor は既定幾何の implicit GEMM を踏む（full-write / 実 GPU）",
+  async () => {
     for (const testCase of POISON_CASES) {
       const gpu = await acquireGpu();
       const graph = poisonGraph(testCase.outShape, testCase.x, testCase.w, testCase.padding);
@@ -1021,12 +1017,11 @@ test({
       }
     }
   },
-});
+);
 
-test({
-  name: "conv3d の N タイル数が dispatch 上限を超える形は DispatchLimitError（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv3d の N タイル数が dispatch 上限を超える形は DispatchLimitError（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // MUST: 閾値は**既定幾何の tileN** から導く（辺を定数で書くと、幾何を変えた瞬間に throw が
     // 起きず assertRejects だけが静かに落ちるドリフトになる — gpu_runtime_executor_test.ts と同じ）。
@@ -1061,12 +1056,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "conv3d の groups > 1 は Session の構築時に落ちる（GPU の実装済み subset — ADR 0118 決定 1）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv3d の groups > 1 は Session の構築時に落ちる（GPU の実装済み subset — ADR 0118 決定 1）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const graph = singleOpDeclaration(
@@ -1085,16 +1079,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * f16 格納の重み（Wan の quant 席 — ADR 0118 決定 7）が**圧縮のまま常駐**し、`:wf16` の変種が走る。
  * 適格判定（WEIGHT_SLOTS）→ 常駐 → 導出相の `weightStorage` → キーの結線を 1 本で見る。
  */
-test({
-  name: "conv3d の f16 重みは圧縮のまま常駐し、w=f16 変種が CPU 参照と一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv3d の f16 重みは圧縮のまま常駐し、w=f16 変種が CPU 参照と一致する（実 GPU）",
+  async () => {
     const xShape = [4, 3, 5, 8];
     const wShape = [10, 4, 3, 3, 3];
     const outShape = [10, 1, 5, 8];
@@ -1158,4 +1151,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

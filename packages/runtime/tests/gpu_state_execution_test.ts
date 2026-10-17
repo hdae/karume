@@ -23,7 +23,7 @@
 // `referenceStateAttention` へ食わせる）。1 step だけの突合では「append が書いた行を次の step が
 // 過去として読む」という結線そのものが検証されない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { referenceStateAppend, referenceStateAttention } from "../src/reference/state-attention.ts";
@@ -282,10 +282,9 @@ const assertStep = async (
 
 const FULL: StateModel = { heads: 4, kvHeads: 4, depth: 4, capacity: 8 };
 
-test({
-  name: "prefill → decode の鎖が CPU 参照と一致し、2 step 目以降はレシピがキャッシュに当たる",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "prefill → decode の鎖が CPU 参照と一致し、2 step 目以降はレシピがキャッシュに当たる",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -335,12 +334,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "pad 行（queryLength < M）は KV に書かれず、次 step の過去にも現れない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "pad 行（queryLength < M）は KV に書かれず、次 step の過去にも現れない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -360,14 +358,13 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 const SLIDING: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: 4, window: 4 };
 
-test({
-  name: "sliding は ring の wrap を跨いでも CPU 参照と一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "sliding は ring の wrap を跨いでも CPU 参照と一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, SLIDING);
     const context = await session.createGenerationContext({ chunkLength: 3 });
@@ -395,7 +392,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // 投機デコードの verify 形（sliding の余裕 + deferred commit）
@@ -512,10 +509,9 @@ const runVerifyChain = async (
   }
 };
 
-test({
-  name: "deferred commit + sliding の余裕: 棄却行は次 step の出力を 1 語も動かさない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "deferred commit + sliding の余裕: 棄却行は次 step の出力を 1 語も動かさない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const slack = VERIFY_WINDOW + VERIFY_SLACK;
@@ -540,7 +536,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 借り手（drafter 相当）: 貸し手と**同名**の external スロットを readonly attention 1 本が
@@ -669,10 +665,9 @@ const runBorrowedVerifyChain = async (
   }
 };
 
-test({
-  name: "deferred commit + 借り手の readonly 窓: 棄却行は drafter が読む列を 1 語も動かさない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "deferred commit + 借り手の readonly 窓: 棄却行は drafter が読む列を 1 語も動かさない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // `m = 0`（全棄却 = 例外復旧の `commit(0)`）が最悪ケース。C = 16 / W = 8 / P = 12 で
@@ -698,29 +693,25 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 const GQA: StateModel = { heads: 4, kvHeads: 2, depth: 4, capacity: 8 };
 
-test({
-  name: "GQA（r=2）の states 形が CPU 参照と一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
-    const gpu = await acquireGpu();
-    const session = await stateSession(gpu, GQA);
-    const context = await session.createGenerationContext({ chunkLength: 4 });
-    const state = newOracle(GQA, 8);
-    try {
-      await assertStep(session, context, GQA, 8, state, 4, 4, 2, "prefill");
-      await assertStep(session, context, GQA, 8, state, 1, 1, 17, "decode 1");
-      await assertStep(session, context, GQA, 8, state, 1, 1, 29, "decode 2");
-      assertEquals(context.pastLength, 6);
-    } finally {
-      await context.dispose();
-      await session.dispose();
-      gpu.destroy();
-    }
-  },
+test.skipIf(!GPU_AVAILABLE)("GQA（r=2）の states 形が CPU 参照と一致する（実 GPU）", async () => {
+  const gpu = await acquireGpu();
+  const session = await stateSession(gpu, GQA);
+  const context = await session.createGenerationContext({ chunkLength: 4 });
+  const state = newOracle(GQA, 8);
+  try {
+    await assertStep(session, context, GQA, 8, state, 4, 4, 2, "prefill");
+    await assertStep(session, context, GQA, 8, state, 1, 1, 17, "decode 1");
+    await assertStep(session, context, GQA, 8, state, 1, 1, 29, "decode 2");
+    assertEquals(context.pastLength, 6);
+  } finally {
+    await context.dispose();
+    await session.dispose();
+    gpu.destroy();
+  }
 });
 
 /**
@@ -729,10 +720,9 @@ test({
  * MUST: 源は計測に依らない `lastRunPipelines`。空の census は無条件に FAIL にする
  * （`entries` が空なら素通り、にすると全ケースが無検査のまま緑になる — `requireCensus`）。
  */
-test({
-  name: "states 形 attention の dispatch は変種キーどおりに走る（census・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 attention の dispatch は変種キーどおりに走る（census・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const [label, model, sliding] of [
@@ -768,7 +758,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **census**（ADR 0058 決定 4 ③）— `stateAttentionReduce: "parallel"` を指定したとき、①' と ③'
@@ -784,10 +774,9 @@ test({
  * `stateQkParallelEligible`）。門を条件式から独立させるため、期待は行ごとに `qkParallel` の
  * 真偽で直書きする（判定を輸入すると実装と一緒に間違える）。
  */
-test({
-  name: "states 形 attention ①QK / ③PV の縮約形は席と計画の M どおりに走る（census・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 attention ①QK / ③PV の縮約形は席と計画の M どおりに走る（census・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const [label, model, sliding, reduce, chunkRows, qkParallel, pvParallel] of [
@@ -853,7 +842,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** ①ₜ / ③ₜ（`M ≥ 16` で選ぶ行タイル共有経路）を踏ませるための形（`M = 16` が入る容量）。 */
 const TILED: StateModel = { heads: 4, kvHeads: 2, depth: 4, capacity: 64 };
@@ -875,10 +864,9 @@ const TILED_SLIDING: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: 16
  * ①ₜ / ③ₜ は参照経路と値が 1 ビットも違わないので、数値門は原理的に鳴らない。
  * MUST: 期待は行ごとに**段ごとに**直書きする（判定を輸入すると実装と一緒に間違える）。
  */
-test({
-  name: "states 形 attention ①QK / ③PV の 3 経路は計画の M と席どおりに走る（census・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 attention ①QK / ③PV の 3 経路は計画の M と席どおりに走る（census・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const [label, model, sliding, reduce, chunkRows, qkExpected, pvExpected] of [
@@ -949,12 +937,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "rewind は full のみの context で効き、sliding を含む context では全拒否（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "rewind は full のみの context で効き、sliding を含む context では全拒否（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const full = await stateSession(gpu, FULL);
     const sliding = await stateSession(gpu, SLIDING);
@@ -985,7 +972,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **進行中 run のリース**（波 D-7）。
@@ -996,10 +983,9 @@ test({
  * **同期区間**で立つので、`run()` を await しない並びでも捕まえられる（本体でリースを取ると
  * マイクロタスク 1 段のぶんだけ窓が開く）。
  */
-test({
-  name: "進行中の generation run がある間の rewind は fail loudly（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "進行中の generation run がある間の rewind は fail loudly（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 1 });
@@ -1035,7 +1021,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **dispose の 2 段化**（波 D-7）。
@@ -1045,10 +1031,9 @@ test({
  * 非 await 並びは Session の `run(); session.dispose();` と同じ意味論になる（受理済み run は
  * 完走し、その後で実体が返る）。1 段で閉じる実装ではここで run が「dispose 済み」で落ちる。
  */
-test({
-  name: "dispose は新規受付だけを同期に閉じ、受理済み run は完走する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "dispose は新規受付だけを同期に閉じ、受理済み run は完走する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 1 });
@@ -1085,7 +1070,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 行ブロックの**強制分割 parity**（ADR 0067 決定 7 / ADR 0060 と同じ流儀）。
@@ -1095,10 +1080,9 @@ test({
  * 1 度も走らない。`ROW_BLOCK_SPLIT` はその経路を実機で回すための唯一の手段で、値は
  * **ビット単位で同一**でなければならない（畳んでいるのは中間の実体化幅だけ）。
  */
-test({
-  name: "行ブロックを強制分割しても出力はビット同一（states 形・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "行ブロックを強制分割しても出力はビット同一（states 形・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const single = await stateSession(gpu, FULL);
     const split = await stateSession(gpu, FULL, { [ROW_BLOCK_SPLIT]: 2 });
@@ -1125,7 +1109,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 予算 `attentionRowBlockMaxBytes`（ADR 0124）で割った states 形も、1 枚実行と**ビット単位で一致**する。
@@ -1136,10 +1120,9 @@ test({
  * MUST: 恒真化しないこと。①QK の dispatch 本数（= 枚数）が 2 で予算なしの 1 と違うことと、中間の
  * ピークが厳密に小さいことを同時に見る（予算が導出相に届かないまま同じ経路を 2 回撃つ形を緑にしない）。
  */
-test({
-  name: "予算で割った states 形は 1 枚実行とビット同一で、枚数が増えピークが縮む（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "予算で割った states 形は 1 枚実行とビット同一で、枚数が増えピークが縮む（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // 2 本目の構築が投げても 1 本目と gpu を破棄する（Session ごとに try を張る）。
     try {
@@ -1189,7 +1172,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 数値変種（`attentionCompute` / `attentionScoreStorage`）× states 形は **fail loudly**
@@ -1198,10 +1181,9 @@ test({
  * MUST: 黙って f32 経路で走らせない。opt-in を指定したのに効かない状態は、値も診断も変わらない
  * まま「速くなっていない」だけで残る。
  */
-test({
-  name: "states 形は f32 以外の数値変種と組めない（縮退でなく fail loudly・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形は f32 以外の数値変種と組めない（縮退でなく fail loudly・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cases: readonly (readonly [string, SessionOptions, string])[] = [
       ["attentionCompute a8", { attentionCompute: "a8" }, "attentionCompute"],
@@ -1227,14 +1209,13 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 const SMALL: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: 6 };
 
-test({
-  name: "full スロットの容量超過はエンコード前に落ち、context を汚染しない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "full スロットの容量超過はエンコード前に落ち、context を汚染しない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, SMALL);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -1262,7 +1243,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 実行形の門（ADR 0066 決定 4 — 固定長 chunk / decode の 2 本だけ）。
@@ -1275,10 +1256,9 @@ test({
  * `GenerationContext` 側の `queryLength ≤ chunkLength` 検査は内部面の防波堤として残っており、
  * 直接駆動する門は tests/gpu_generation_context_test.ts が持つ（二重簿記にしない）。
  */
-test({
-  name: "実行形は固定長 chunk と decode の 2 本だけ・queryLength は M / 正整数で拒否（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "実行形は固定長 chunk と decode の 2 本だけ・queryLength は M / 正整数で拒否（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     // chunkLength=2 に対し M=2（prefill 形）と M=1（decode 形）の 2 本だけが通る。
@@ -1330,13 +1310,12 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 新規の拒否形の追加検査（chunkLength=4 に M=2 / M=3 — decode 形の 1 とも一致しない）。 */
-test({
-  name: "chunkLength と 1 のどちらでもない M は fail loudly（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "chunkLength と 1 のどちらでもない M は fail loudly（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -1357,7 +1336,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * run 前検査（`assertGenerationRun`）は導出相の後に居るので、ミス run はそこで落ちるまでに計画と
@@ -1367,10 +1346,9 @@ test({
  * 足した params と計画を巻き戻す」）。errorScope の pop より前に落ちる run なので、「捨てる scope の
  * 中身を見ずに外す側へ倒す」形もこの門で赤くなる。
  */
-test({
-  name: "ミス run が run 前検査で落ちても計画と params は残り、繰り返しても params を新しく確保しない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "ミス run が run 前検査で落ちても計画と params は残り、繰り返しても params を新しく確保しない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 2 });
@@ -1412,7 +1390,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 上の門の対。pop より前に落ちる run でも、捨てる errorScope が GPU 側の失敗（params の確保の
@@ -1421,10 +1399,9 @@ test({
  * OOM には差し替わらない。注入は out-of-memory スコープの pop だけを差し替える
  * （`helpers/oom-injection.ts`）ので、run 前検査で落ちた run の後始末の pop に当たる。
  */
-test({
-  name: "ミス run が run 前検査で落ちても、捨てた errorScope が非致命 OOM を捕捉していれば計画と params を外し、次の run で作り直す（注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "ミス run が run 前検査で落ちても、捨てた errorScope が非致命 OOM を捕捉していれば計画と params を外し、次の run で作り直す（注入・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 2 });
@@ -1466,7 +1443,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 有効行 `query` 行ぶんの値を物理 `rows` 行の `[1, planes, rows, depth]` へ 0 詰めで並べる
@@ -1544,10 +1521,9 @@ const bucketInputs = (
  * 一致する** — 短い chunk を pad 無しで回すのはこの一致が成り立つ限りでの高速化なので、
  * 一致が崩れたら「速いが違う値」になる（例外も警告も出ない）。
  */
-test({
-  name: "chunkBuckets の物理行数は通り、有効行の出力は M=chunkLength と一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "chunkBuckets の物理行数は通り、有効行の出力は M=chunkLength と一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     // chunkLength=8 / バケット [4]。許可集合は {1, 4, 8}。
@@ -1618,14 +1594,13 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 const SYMBOLIC: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: "C" };
 
-test({
-  name: "計画鍵は容量で決まり、context の識別子では決まらない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "計画鍵は容量で決まり、context の識別子では決まらない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, SYMBOLIC);
     const first = await session.createGenerationContext({ chunkLength: 1, bindings: { C: 8 } });
@@ -1682,7 +1657,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **両方に現れる記号**の照合（ADR 0066 追記 7 の「効く範囲の分担」の実行時執行）。
@@ -1691,10 +1666,9 @@ test({
  * `bindSymbols`）と `spec.bindings`（context）。割れたまま走ると「確保容量は 4・計画と dispatch は
  * 3」のような分裂が例外も警告も無く成立するので、エンコード前に落とす。
  */
-test({
-  name: "states と入力の両方に現れる記号は 2 つの束縛点で一致しないと fail loudly（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states と入力の両方に現れる記号は 2 つの束縛点で一致しないと fail loudly（実 GPU）",
+  async () => {
     const shared: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: "M" };
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, shared);
@@ -1721,12 +1695,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "state 参照グラフを generation 無しで run すると fail loudly（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "state 参照グラフを generation 無しで run すると fail loudly（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     try {
@@ -1747,7 +1720,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 内部面（論理長の進行を直に駆動する / 焼き込み束を覗く）。**故障注入と前提づくり専用**で、
@@ -1768,10 +1741,9 @@ const internals = (context: GenerationContext) => context[RUNTIME_INTERNAL];
  * NOTE: これが踏むのは判定の結線であって、GPU 側の失敗（device 消失・validation）そのものでは
  * ない。そちらの注入面は波 C の保留（L8 fake device）待ち。
  */
-test({
-  name: "state を submit した run の失敗は context を poison する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "state を submit した run の失敗は context を poison する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // sliding にするのは full 容量の run 前検査（past + query ≤ C）を避けるため — ring は
     // 論理長がいくつでも回る。
@@ -1801,7 +1773,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **切替 A/B**（ADR 0066 受入条件③の完成形 — 決定 5 の焼き込み単位の分離）。
@@ -1813,10 +1785,9 @@ test({
  * MUST: 入力の salt を context ごとに変える — KV の取り違えは例外を出さず**値にしか出ない**ので、
  * 同じ入力を配ると鎖の誤りが自己相殺しうる。
  */
-test({
-  name: "context を交互に切り替えても再導出・backing 再構築ゼロで KV を取り違えない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "context を交互に切り替えても再導出・backing 再構築ゼロで KV を取り違えない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const a = await session.createGenerationContext({ chunkLength: 1 });
@@ -1865,7 +1836,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * backing が**退役して作り直された**後の復帰（ADR 0066 決定 5 の世代識別子）。
@@ -1876,10 +1847,9 @@ test({
  * 束ねた dispatch** になる（値か例外のどちらかで必ず壊れる）。焼き直しが backing の再構築に
  * 追随していることを、値の正しさと回数の両方で押さえる。
  */
-test({
-  name: "予算 0 では切替のたびに backing を作り直し、context 側も焼き直す（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "予算 0 では切替のたびに backing を作り直し、context 側も焼き直す（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL, { planBackingBudgetBytes: 0 });
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -1928,7 +1898,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 予算内で**保持した形**の間の行き来では焼き直しが増えない（ADR 0095 決定 3）。
@@ -1937,10 +1907,9 @@ test({
  * 予算 0 の門と同じ往復を既定予算で回して、`rebindCount` が形ごとの初回 1 回ずつで止まること
  * を見る（生成 1 ターンの prefill ⇄ decode の切替で毎回焼き直す形が、この波で消えた点）。
  */
-test({
-  name: "予算内で保持した 2 形の往復は焼き直しを増やさない（既定予算・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "予算内で保持した 2 形の往復は焼き直しを増やさない（既定予算・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 4 });
@@ -1986,7 +1955,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** backing 1 本ぶんの実測（領域 = `residentBytes` / 所有する入力バッファ = `inputBytes`）。 */
 type Measured = { readonly residentBytes: number; readonly inputBytes: number };
@@ -2051,10 +2020,9 @@ const BUDGET_SPEC = { chunkLength: 4, chunkBuckets: [2] } as const;
  * 捨てないと、破棄済みバッファを束ねた group が context の参照ぶんだけ生き残る ②戻った run が
  * 焼き直しを 1 回増やす。保持したままの形の束は残っている（①が「全部捨てる」ではないことの対）。
  */
-test({
-  name: "退役した backing の束は捨てられ、戻った run で 1 回だけ焼き直す（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "退役した backing の束は捨てられ、戻った run で 1 回だけ焼き直す（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const wide = await stateBackingBytes(gpu, BUDGET_MODEL, BUDGET_SPEC, 4);
     const decode = await stateBackingBytes(gpu, BUDGET_MODEL, BUDGET_SPEC, 1);
@@ -2155,7 +2123,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **故障注入** — 切替 A/B（上）が空振りでないことの実証。
@@ -2165,10 +2133,9 @@ test({
  * 再現する。A / B は同容量なのでバッファの大きさは 1 バイトも違わず、**validation は通って値だけが
  * 静かに変わる** — この突合が落ちなければ、切替 A/B の parity は何も守っていない。
  */
-test({
-  name: "context 側の束を取り違えると出力が前の context の KV を読む（故障注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "context 側の束を取り違えると出力が前の context の KV を読む（故障注入・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const a = await session.createGenerationContext({ chunkLength: 1 });
@@ -2209,7 +2176,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 席 `"parallel"`（①' の D 並列縮約 + ③' の KV 並列縮約）を **`Session.run` 経由で値まで**
@@ -2226,10 +2193,9 @@ test({
  * 一致を契約にすると別の主張になる）。見るのは「オラクルと帯で一致」と「席をまたいでも
  * 同じ帯に収まる」の 2 点。
  */
-test({
-  name: "stateAttentionReduce:'parallel' は Session.run 経由でも参照鎖と一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "stateAttentionReduce:'parallel' は Session.run 経由でも参照鎖と一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const parallel = await stateSession(gpu, GQA, { stateAttentionReduce: "parallel" });
     const sequential = await stateSession(gpu, GQA);
@@ -2290,7 +2256,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 融合の適用・非適用が分かれる形（`chunkRows <= 8` かつ `colCap <= 1024` が適用条件）。 */
 const FUSION_CASES = [
@@ -2307,10 +2273,9 @@ const FUSION_CASES = [
  * NOTE: 数値一致とキー確認は別テストに割ってある（キー確認は下）。キー確認の源は計測に依らない
  * census（`lastRunPipelines`）なので、どちらも計測の無い device で走る。
  */
-test({
-  name: "parallel-fused は state 更新後も parallel と u32 一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "parallel-fused は state 更新後も parallel と u32 一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const [chunkRows, capacity, window] of FUSION_CASES) {
@@ -2353,7 +2318,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * 2 本目 = キー。適用形では融合キーが 1 本だけ立ち、非適用形では従来の ② / ③' が立つ。
@@ -2361,50 +2326,46 @@ test({
  * NOTE: 融合の採否はレシピ構築時に `chunkRows` と `colCap` だけで決まるので、1 step 走らせれば
  * 立つキーは出揃う（値の進行は上のテストが見る）。
  */
-test({
-  name: "parallel-fused は適用形だけstats/PVをまとめる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
-    const gpu = await acquireGpu();
-    try {
-      for (const [chunkRows, capacity, window, expectedFusion] of FUSION_CASES) {
-        const model: StateModel = { heads: 4, kvHeads: 1, depth: 17, capacity, window };
-        const session = await stateSession(gpu, model, {
-          stateAttentionReduce: "parallel-fused",
-        });
-        const context = await session.createGenerationContext({ chunkLength: chunkRows });
-        try {
-          await runStep(
-            session,
-            context,
-            model,
-            stepInputs(model, chunkRows, 13),
-            chunkRows,
-            chunkRows,
-          );
-          const entries = requireCensus(
-            session.diagnostics().lastRunPipelines,
-            `M=${chunkRows} cap=${capacity}`,
-          );
-          assertEquals(
-            countDispatches(entries, SEAT_SIGNATURES.stateAttentionReduce["parallel-fused"]) > 0,
-            expectedFusion,
-          );
-          assertEquals(
-            entries.some((e) => e.key.startsWith("attention_state_stats:")),
-            !expectedFusion,
-          );
-          assertEquals(
-            entries.some((e) => e.key.startsWith("attention_state_pv:")),
-            !expectedFusion,
-          );
-        } finally {
-          await context.dispose();
-          await session.dispose();
-        }
+test.skipIf(!GPU_AVAILABLE)("parallel-fused は適用形だけstats/PVをまとめる（実 GPU）", async () => {
+  const gpu = await acquireGpu();
+  try {
+    for (const [chunkRows, capacity, window, expectedFusion] of FUSION_CASES) {
+      const model: StateModel = { heads: 4, kvHeads: 1, depth: 17, capacity, window };
+      const session = await stateSession(gpu, model, {
+        stateAttentionReduce: "parallel-fused",
+      });
+      const context = await session.createGenerationContext({ chunkLength: chunkRows });
+      try {
+        await runStep(
+          session,
+          context,
+          model,
+          stepInputs(model, chunkRows, 13),
+          chunkRows,
+          chunkRows,
+        );
+        const entries = requireCensus(
+          session.diagnostics().lastRunPipelines,
+          `M=${chunkRows} cap=${capacity}`,
+        );
+        assertEquals(
+          countDispatches(entries, SEAT_SIGNATURES.stateAttentionReduce["parallel-fused"]) > 0,
+          expectedFusion,
+        );
+        assertEquals(
+          entries.some((e) => e.key.startsWith("attention_state_stats:")),
+          !expectedFusion,
+        );
+        assertEquals(
+          entries.some((e) => e.key.startsWith("attention_state_pv:")),
+          !expectedFusion,
+        );
+      } finally {
+        await context.dispose();
+        await session.dispose();
       }
-    } finally {
-      gpu.destroy();
     }
-  },
+  } finally {
+    gpu.destroy();
+  }
 });

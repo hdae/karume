@@ -1,7 +1,7 @@
 // The accepted set of `Gemma4Pipeline`'s `speculative` option. It is rejected before any asset is
 // read, so this case needs neither the distribution mirror nor a GPU.
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertRejects } from "@std/assert";
 import { Gemma4Pipeline } from "../gemma.ts";
 import type { Gemma4Assets } from "../src/gemma/pipeline.ts";

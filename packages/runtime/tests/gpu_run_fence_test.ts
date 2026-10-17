@@ -10,7 +10,7 @@
 // ③ の出力 0 本は、copy が 1 件も積まれない = 待つ相手が居ない形で、単一フェンス経路のまま
 // 通すと GPU 実行の完了前に run が戻る。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
 import { RunArena, STORAGE_USAGE } from "../src/gpu/arena.ts";
@@ -72,10 +72,9 @@ const bits = (data: Tensor["data"] | Float32Array<ArrayBuffer>): readonly number
 const session = async (gpu: GpuContext, json: DeclarationJson): Promise<Session> =>
   await createSessionFromContainer(gpu, await openGraphModel(json), "model");
 
-test({
-  name: "gpuTiming OFF の run はフェンスを mapAsync 1 本に畳む（onSubmittedWorkDone 0 回・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "gpuTiming OFF の run はフェンスを mapAsync 1 本に畳む（onSubmittedWorkDone 0 回・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const target = await session(gpu, TWO_OUTPUTS);
     // 計数は Session 構築（重みアップロードの 1 本）の**後**から始める。
@@ -103,12 +102,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "gpuTiming ON の run は二段待ちのまま（timestamp 回収が flush に乗る・実 GPU）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
+  "gpuTiming ON の run は二段待ちのまま（timestamp 回収が flush に乗る・実 GPU）",
+  async () => {
     const gpu = await acquireGpu({ gpuTiming: true });
     const target = await session(gpu, TWO_OUTPUTS);
     const fences = countFences(gpu);
@@ -129,12 +127,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "グラフ出力 0 本の run は従来のフェンスへ落ちる（無フェンスで返さない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "グラフ出力 0 本の run は従来のフェンスへ落ちる（無フェンスで返さない・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const target = await session(gpu, NO_OUTPUT);
     const fences = countFences(gpu);
@@ -152,12 +149,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "submit だけして待たない ArenaFlush でも destroy 前に未 submit を残さない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "submit だけして待たない ArenaFlush でも destroy 前に未 submit を残さない（実 GPU）",
+  async () => {
     // 単一フェンス run が RunArena へ渡す後始末そのもの（`submitPending` のみ・完了は待たない）。
     // 故障注入は 2 方向:
     // ①closure から `submitPending()` を抜く → copy が未 submit のまま捨てられ、読み戻しが
@@ -204,4 +200,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

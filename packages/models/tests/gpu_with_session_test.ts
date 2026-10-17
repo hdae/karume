@@ -14,7 +14,7 @@
  */
 
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import {
   acquireGpu,
   ExecutionError,
@@ -110,135 +110,131 @@ const withGpu = async (fn: (gpu: GpuContext) => Promise<void>): Promise<void> =>
   }
 };
 
-describe({
-  name: "withSession（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () => {
-    describe("body が値を返したとき", () => {
-      it("その値を包まずに返し、渡した options で張った Session を 1 回だけ dispose する", async () => {
-        await withGpu(async (gpu) => {
-          const log = emptyLog();
-          const options: SessionOptions = { planBackingBudgetBytes: 0 };
-          const value = { marker: "body の返り値" };
-          let received: Session | undefined;
+describe.skipIf(!GPU_AVAILABLE)("withSession（実 GPU）", () => {
+  describe("body が値を返したとき", () => {
+    it("その値を包まずに返し、渡した options で張った Session を 1 回だけ dispose する", async () => {
+      await withGpu(async (gpu) => {
+        const log = emptyLog();
+        const options: SessionOptions = { planBackingBudgetBytes: 0 };
+        const value = { marker: "body の返り値" };
+        let received: Session | undefined;
 
-          const result = await withSession(gpu, spiedComponent(log), options, undefined, (_, s) => {
-            received = s;
-            return Promise.resolve(value);
-          });
-
-          assertStrictEquals(result, value);
-          assertEquals(log.sessions.length, 1);
-          assertStrictEquals(log.options[0], options);
-          assertStrictEquals(received, log.sessions[0], "body に渡る Session が張ったものと違う");
-          assertEquals(log.disposeCalls, 1);
-          await assertDisposed(log.sessions[0]);
+        const result = await withSession(gpu, spiedComponent(log), options, undefined, (_, s) => {
+          received = s;
+          return Promise.resolve(value);
         });
+
+        assertStrictEquals(result, value);
+        assertEquals(log.sessions.length, 1);
+        assertStrictEquals(log.options[0], options);
+        assertStrictEquals(received, log.sessions[0], "body に渡る Session が張ったものと違う");
+        assertEquals(log.disposeCalls, 1);
+        await assertDisposed(log.sessions[0]);
       });
     });
+  });
 
-    describe("body が throw したとき", () => {
-      it("Session を 1 回だけ dispose し、body の例外をそのまま伝える", async () => {
-        await withGpu(async (gpu) => {
-          const log = emptyLog();
-          const thrown = new Error("body の途中で落ちた");
+  describe("body が throw したとき", () => {
+    it("Session を 1 回だけ dispose し、body の例外をそのまま伝える", async () => {
+      await withGpu(async (gpu) => {
+        const log = emptyLog();
+        const thrown = new Error("body の途中で落ちた");
 
-          const error = await assertRejects(() =>
-            withSession(gpu, spiedComponent(log), {}, undefined, async (run) => {
-              await run(inputOf([1, 2]));
+        const error = await assertRejects(() =>
+          withSession(gpu, spiedComponent(log), {}, undefined, async (run) => {
+            await run(inputOf([1, 2]));
+            throw thrown;
+          }),
+        );
+
+        assertStrictEquals(error, thrown);
+        assertEquals(log.sessions.length, 1);
+        assertEquals(log.disposeCalls, 1);
+        await assertDisposed(log.sessions[0]);
+      });
+    });
+  });
+
+  describe("body も dispose も throw したとき", () => {
+    it("dispose の失敗で上書きせず、body の例外を先頭に両方を AggregateError で伝える", async () => {
+      await withGpu(async (gpu) => {
+        const log = emptyLog();
+        const thrown = new Error("body の途中で落ちた");
+        const disposeFailure = new Error("flush に失敗した");
+        const spied = spiedComponent(log);
+        const component: ModelComponent = {
+          ...spied,
+          createSession: async (gpuContext, options) => {
+            const session = await spied.createSession(gpuContext, options);
+            const dispose = session.dispose.bind(session);
+            session.dispose = async () => {
+              await dispose();
+              throw disposeFailure;
+            };
+            return session;
+          },
+        };
+
+        const error = await assertRejects(
+          () =>
+            withSession(gpu, component, {}, undefined, () => {
               throw thrown;
             }),
-          );
+          AggregateError,
+        );
 
-          assertStrictEquals(error, thrown);
-          assertEquals(log.sessions.length, 1);
-          assertEquals(log.disposeCalls, 1);
-          await assertDisposed(log.sessions[0]);
+        assertEquals(error.errors.length, 2);
+        assertStrictEquals(error.errors[0], thrown);
+        assertStrictEquals(error.errors[1], disposeFailure);
+        assertEquals(log.disposeCalls, 1);
+        await assertDisposed(log.sessions[0]);
+      });
+    });
+  });
+
+  describe("run", () => {
+    it("Session の出力を返し、observe を run の後・呼び手へ戻る前に 1 回ずつ呼ぶ", async () => {
+      await withGpu(async (gpu) => {
+        const log = emptyLog();
+        const events: string[] = [];
+        const observed: SessionDiagnostics[] = [];
+        const observe = (diagnostics: SessionDiagnostics) => {
+          events.push("observe");
+          observed.push(diagnostics);
+        };
+
+        const outputs = await withSession(gpu, spiedComponent(log), {}, observe, async (run) => {
+          const first = await run(inputOf([1, 2]));
+          events.push("run 1 が戻った");
+          const second = await run(inputOf([3, -4]));
+          events.push("run 2 が戻った");
+          return [valuesOf(first), valuesOf(second)];
         });
+
+        assertEquals(outputs, [
+          [2, 4],
+          [6, -8],
+        ]);
+        assertEquals(events, ["observe", "run 1 が戻った", "observe", "run 2 が戻った"]);
+        // run の前に読んだ診断なら直近 run の欄は空のまま。
+        assert(observed.every((diagnostics) => diagnostics.lastRun !== undefined));
+        assertEquals(log.disposeCalls, 1);
       });
     });
 
-    describe("body も dispose も throw したとき", () => {
-      it("dispose の失敗で上書きせず、body の例外を先頭に両方を AggregateError で伝える", async () => {
-        await withGpu(async (gpu) => {
-          const log = emptyLog();
-          const thrown = new Error("body の途中で落ちた");
-          const disposeFailure = new Error("flush に失敗した");
-          const spied = spiedComponent(log);
-          const component: ModelComponent = {
-            ...spied,
-            createSession: async (gpuContext, options) => {
-              const session = await spied.createSession(gpuContext, options);
-              const dispose = session.dispose.bind(session);
-              session.dispose = async () => {
-                await dispose();
-                throw disposeFailure;
-              };
-              return session;
-            },
-          };
+    it("observe が無くても Session の出力を返す", async () => {
+      await withGpu(async (gpu) => {
+        const log = emptyLog();
 
-          const error = await assertRejects(
-            () =>
-              withSession(gpu, component, {}, undefined, () => {
-                throw thrown;
-              }),
-            AggregateError,
-          );
+        const values = await withSession(gpu, spiedComponent(log), {}, undefined, async (run) =>
+          valuesOf(await run(inputOf([0.5, -1.5]))),
+        );
 
-          assertEquals(error.errors.length, 2);
-          assertStrictEquals(error.errors[0], thrown);
-          assertStrictEquals(error.errors[1], disposeFailure);
-          assertEquals(log.disposeCalls, 1);
-          await assertDisposed(log.sessions[0]);
-        });
+        assertEquals(values, [1, -3]);
+        assertEquals(log.disposeCalls, 1);
       });
     });
-
-    describe("run", () => {
-      it("Session の出力を返し、observe を run の後・呼び手へ戻る前に 1 回ずつ呼ぶ", async () => {
-        await withGpu(async (gpu) => {
-          const log = emptyLog();
-          const events: string[] = [];
-          const observed: SessionDiagnostics[] = [];
-          const observe = (diagnostics: SessionDiagnostics) => {
-            events.push("observe");
-            observed.push(diagnostics);
-          };
-
-          const outputs = await withSession(gpu, spiedComponent(log), {}, observe, async (run) => {
-            const first = await run(inputOf([1, 2]));
-            events.push("run 1 が戻った");
-            const second = await run(inputOf([3, -4]));
-            events.push("run 2 が戻った");
-            return [valuesOf(first), valuesOf(second)];
-          });
-
-          assertEquals(outputs, [
-            [2, 4],
-            [6, -8],
-          ]);
-          assertEquals(events, ["observe", "run 1 が戻った", "observe", "run 2 が戻った"]);
-          // run の前に読んだ診断なら直近 run の欄は空のまま。
-          assert(observed.every((diagnostics) => diagnostics.lastRun !== undefined));
-          assertEquals(log.disposeCalls, 1);
-        });
-      });
-
-      it("observe が無くても Session の出力を返す", async () => {
-        await withGpu(async (gpu) => {
-          const log = emptyLog();
-
-          const values = await withSession(gpu, spiedComponent(log), {}, undefined, async (run) =>
-            valuesOf(await run(inputOf([0.5, -1.5]))),
-          );
-
-          assertEquals(values, [1, -3]);
-          assertEquals(log.disposeCalls, 1);
-        });
-      });
-    });
-  },
+  });
 });
 
 /*

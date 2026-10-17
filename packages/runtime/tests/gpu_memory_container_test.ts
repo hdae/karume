@@ -49,7 +49,7 @@ import {
   writeModelContainer,
   type WrittenContainer,
 } from "./helpers/container-write.ts";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 
 const M = 4;
 const K = 32;
@@ -268,7 +268,7 @@ const copyingSource = (written: WrittenContainer): BlockSource => ({
     Promise.resolve(written.parts[part].slice(offset, offset + length)),
 });
 
-describe("memory container session", { ignore: !GPU_AVAILABLE }, () => {
+describe.skipIf(!GPU_AVAILABLE)("memory container session", () => {
   it("メモリ内容器から作った Session は krm 経路と出力バイト列・常駐バイト数が一致する", async () => {
     const q = quantize();
     const written = await writeModelContainer(containerInput(q), OPTIONS);

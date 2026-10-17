@@ -10,7 +10,7 @@
 // The all-codepoint sweeps (BADNESS_RE `\w` / `\s` / `.`, single-character prompt_clean, NFC
 // version drift) are the describe block at the end of this file.
 
-import { describe, test } from "@karume/test-support/test";
+import { describe, test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { inCodeRanges } from "../src/text/code-ranges.ts";

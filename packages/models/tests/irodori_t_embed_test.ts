@@ -2,7 +2,7 @@
 // comparison of the `t_embed` table and of the t schedule reads outputs/series, so it lives in
 // packages/e2e/tests/e2e_irodori_t_embed_test.ts.
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { timestepEmbedding, timestepFrequencies } from "../src/irodori/host/t-embed.ts";
 

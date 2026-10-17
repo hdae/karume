@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { ContainerFormatError } from "../src/format/container/header.ts";
 import { decodeI2, I2Error } from "../src/format/i2.ts";

@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertAlmostEquals, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import {
   allclose,

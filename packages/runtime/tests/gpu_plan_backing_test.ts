@@ -14,7 +14,7 @@
 // ピークは生まれない）が崩れる。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { GpuOutOfMemoryError } from "../src/gpu/error-scope.ts";
 import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";
@@ -102,10 +102,9 @@ const runFresh = async (
   }
 };
 
-test({
-  name: "backed run の出力は非 backed 実行とビット単位で一致する（stale slot の門・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "backed run の出力は非 backed 実行とビット単位で一致する（stale slot の門・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
@@ -132,12 +131,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "backed run のアリーナ確保は readback staging だけになる（入力固定の門・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "backed run のアリーナ確保は readback staging だけになる（入力固定の門・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
@@ -163,12 +161,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "同一 signature の並行 run は共有入力バッファでも取り違えない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "同一 signature の並行 run は共有入力バッファでも取り違えない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
@@ -188,7 +185,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** グラフ出力が入力の別名になる形（reshape）+ 実 dispatch を 1 本持つ形。 */
 const ALIAS_GRAPH: DeclarationJson = {
@@ -209,10 +206,9 @@ const ALIAS_GRAPH: DeclarationJson = {
   ],
 };
 
-test({
-  name: "グラフ出力が入力の別名でも backed run は読み戻せる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "グラフ出力が入力の別名でも backed run は読み戻せる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const opened = await openGraphModel(ALIAS_GRAPH);
     const session = await createSessionFromContainer(gpu, opened, "model");
@@ -239,7 +235,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** backing 1 本ぶんの実測（領域 = `residentBytes` / 所有する入力バッファ = `inputBytes`）。 */
 type Measured = { readonly residentBytes: number; readonly inputBytes: number };
@@ -290,10 +286,9 @@ const backingBytes = async (
   }
 };
 
-test({
-  name: "予算内の 2 signature は交互に回しても保持されたまま作り直されない（既定予算・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "予算内の 2 signature は交互に回しても保持されたまま作り直されない（既定予算・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const narrow = await backingBytes(gpu, 4);
@@ -357,12 +352,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "予算 0 の Session は切替のたびに作り直す（従来の容量 1 の再現・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "予算 0 の Session は切替のたびに作り直す（従来の容量 1 の再現・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const narrow = await backingBytes(gpu, 4);
@@ -401,12 +395,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "新規 1 本だけで予算を超える形は保持中を全て退役させて 1 本だけ持つ（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "新規 1 本だけで予算を超える形は保持中を全て退役させて 1 本だけ持つ（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const narrow = await backingBytes(gpu, 4);
@@ -442,12 +435,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "backed 計画が LRU から追い出されると backing も返り、後続 run は完走する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "backed 計画が LRU から追い出されると backing も返り、後続 run は完走する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
@@ -477,7 +469,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * attention（ノード内一時 2 本）+ reshape（別名・グラフ出力）。slot 導出の 3 経路
@@ -517,10 +509,9 @@ const tempInputs = (phase: number) => ({
 /** アリーナが 1 本のバッファに配る大きさ（最小 4 バイト + 4 バイト整列）。 */
 const bufferBytes = (count: number): number => Math.max(4, count * 4);
 
-test({
-  name: "slot の総バイト数は非 backed run のプール確保と一致する（footprint 不変の門・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "slot の総バイト数は非 backed run のプール確保と一致する（footprint 不変の門・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // グラフ入力 3 本のアップロード（q: [1,1,ROWS,4] / k, v: [1,1,4,4]）。backed run では同じ
     // 大きさのバッファを backing が所有する = 診断の `inputBytes` の期待値でもある。
@@ -580,7 +571,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** storage バッファ 1 本ぶんの記録（確保の順に 1 要素 = その実体の destroy 回数）。 */
 type BufferRecord = { readonly destroyCounts: number[] };
@@ -731,17 +722,15 @@ const assertPartialBackingFault = async (
   }
 };
 
-test({
-  name: "backing 確保の途中失敗は確保済みだけを 1 回返し、旧 backing は保持したまま（既定予算・故障注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () => assertPartialBackingFault(undefined, { retainsOld: true }),
-});
+test.skipIf(!GPU_AVAILABLE)(
+  "backing 確保の途中失敗は確保済みだけを 1 回返し、旧 backing は保持したまま（既定予算・故障注入・実 GPU）",
+  () => assertPartialBackingFault(undefined, { retainsOld: true }),
+);
 
-test({
-  name: "予算 0 では確保の前に旧 backing が退役し、確保済みと合わせてちょうど 1 回ずつ返る（故障注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () => assertPartialBackingFault(0, { retainsOld: false }),
-});
+test.skipIf(!GPU_AVAILABLE)(
+  "予算 0 では確保の前に旧 backing が退役し、確保済みと合わせてちょうど 1 回ずつ返る（故障注入・実 GPU）",
+  () => assertPartialBackingFault(0, { retainsOld: false }),
+);
 
 /**
  * 予算ちょうどの Session に 3 つ目の signature を入れて、退役するのが**最も古く使われた方**
@@ -840,17 +829,15 @@ const assertLruOrder = async (touched: 4 | 9): Promise<void> => {
   }
 };
 
-test({
-  name: "予算超過の退役は最も古く使われた 1 本（直前に触った T=4 が残る・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () => assertLruOrder(4),
-});
+test.skipIf(!GPU_AVAILABLE)(
+  "予算超過の退役は最も古く使われた 1 本（直前に触った T=4 が残る・実 GPU）",
+  () => assertLruOrder(4),
+);
 
-test({
-  name: "予算超過の退役は最も古く使われた 1 本（直前に触った T=9 が残る・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () => assertLruOrder(9),
-});
+test.skipIf(!GPU_AVAILABLE)(
+  "予算超過の退役は最も古く使われた 1 本（直前に触った T=9 が残る・実 GPU）",
+  () => assertLruOrder(9),
+);
 
 // batch の失敗決着（ADR 0095 決定 2 の batch 版）。非致命 OOM（`createBuffer` が無効なバッファを
 // 返すだけで例外にならない）は enqueue を成功させたまま、`finish()` の errorScope で初めて
@@ -860,11 +847,8 @@ test({
 // 計画の導出は前置きの run で済ませておく（enqueue の導出が作る params も storage を使うので、
 // 同じ記録に混ざると「backing の実体がちょうど 1 回返る」の勘定が崩れる）。
 describe("batch の finish で GPU 失敗（非致命 OOM）が判明したとき（注入・実 GPU）", () => {
-  it(
+  it.skipIf(!GPU_AVAILABLE)(
     "その batch が新規構築した backing は退役してちょうど 1 回返り、次の batch が同じ形を作り直す",
-    {
-      ignore: !GPU_AVAILABLE,
-    },
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -938,11 +922,8 @@ describe("batch の finish で GPU 失敗（非致命 OOM）が判明したと�
     },
   );
 
-  it(
+  it.skipIf(!GPU_AVAILABLE)(
     "既存の backing に当たっただけの batch の失敗では退役させない（再構築のスラッシングを起こさない）",
-    {
-      ignore: !GPU_AVAILABLE,
-    },
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -994,11 +975,8 @@ describe("batch の finish で GPU 失敗（非致命 OOM）が判明したと�
 // batch。同じ区間の別の enqueue が作った backing は有効なので、決着で退役させない — 退役させると
 // 無関係な入力の誤りのたびに backing を作り直すことになる（ADR 0095 決定 2 が避けている形）。
 describe("ホスト側の失敗だけで batch が失敗に決着したとき（実 GPU）", () => {
-  it(
+  it.skipIf(!GPU_AVAILABLE)(
     "同じ区間の別の enqueue が新規構築した backing は保持したまま残す",
-    {
-      ignore: !GPU_AVAILABLE,
-    },
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");

@@ -24,7 +24,7 @@
 // - `ref-hot` — 振幅 3 倍（LUFS 測定そのものが値域に依らないこと）
 
 import { readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertAlmostEquals, assertEquals } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { integratedLoudness } from "../../models/src/irodori/host/loudness.ts";
@@ -139,10 +139,9 @@ const maxAbsDiff = (actual: Float32Array, expected: Float32Array, where: string)
 
 // ---- golden とのパリティ（本体）-------------------------------------------
 
-test({
-  name: "参照音声のホスト前処理が golden（上流実測）と一致する — 5 ケース",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "参照音声のホスト前処理が golden（上流実測）と一致する — 5 ケース",
+  async () => {
     const meta = readMeta();
     assertEquals(meta.sampleRate, SAMPLE_RATE, "golden の sampleRate");
     assertEquals(meta.hopLength, HOP_LENGTH, "golden の hopLength");
@@ -198,49 +197,44 @@ test({
         )} / 利得 ${worstGain.toExponential(3)} / 波形 ${worstWave.toExponential(3)}`,
     );
   },
-});
+);
 
 // ---- 枝の踏み分け（恒真化の遮断）------------------------------------------
 
-test({
-  name: "golden の 5 ケースが狙った枝を実際に踏んでいる",
-  ignore: !RUNNABLE,
-  fn: async () => {
-    const meta = readMeta();
-    const short = meta.cases["ref-short"];
-    const odd = meta.cases["ref-odd"];
-    const hot = meta.cases["ref-hot"];
-    const base = meta.cases["ref-default"];
+test.skipIf(!RUNNABLE)("golden の 5 ケースが狙った枝を実際に踏んでいる", async () => {
+  const meta = readMeta();
+  const short = meta.cases["ref-short"];
+  const odd = meta.cases["ref-odd"];
+  const hot = meta.cases["ref-hot"];
+  const base = meta.cases["ref-default"];
 
-    // ① 0.5 秒未満のゼロ pad 測定枝。
-    assertEquals(short.seconds < 0.5, true, `ref-short が ${short.seconds} 秒 — 枝を踏まない`);
-    // ② peak 制限枝。**LUFS 経路でこれを踏むのは ref-short だけ**（ref-hot は上流の
-    //    「正規化しない」経路で peak を踏むケースで、−16 正規化を通すと利得 0.27 倍で
-    //    peak が 0.81 まで下がり、制限が掛からない）。
-    const normalizedShort = normalizeReference((await readCase("ref-short"))["raw"], SAMPLE_RATE);
-    assertEquals(normalizedShort.peakBeforeScale > 1, true, "ref-short が peak > 1 にならない");
-    assertEquals(normalizedShort.peakGain < 1, true, "ref-short で peak 制限が掛かっていない");
-    const normalizedHot = normalizeReference((await readCase("ref-hot"))["raw"], SAMPLE_RATE);
-    assertEquals(
-      normalizedHot.peakGain,
-      1,
-      "ref-hot が −16 正規化の後で peak 制限を踏んだ（前提が変わった — doc の説明を直す）",
-    );
-    assertEquals(hot.peakGain < 1, true, "golden の ref-hot が peak 制限枝を踏んでいない");
-    // ③ reflect pad の端数枝と恒等枝。
-    assertEquals(base.padSamples, 0, "ref-default が pad の恒等枝を踏んでいない");
-    assertEquals(
-      0 < odd.padSamples && odd.padSamples < HOP_LENGTH,
-      true,
-      `ref-odd の pad が ${odd.padSamples} サンプル — 端数枝を踏んでいない`,
-    );
-  },
+  // ① 0.5 秒未満のゼロ pad 測定枝。
+  assertEquals(short.seconds < 0.5, true, `ref-short が ${short.seconds} 秒 — 枝を踏まない`);
+  // ② peak 制限枝。**LUFS 経路でこれを踏むのは ref-short だけ**（ref-hot は上流の
+  //    「正規化しない」経路で peak を踏むケースで、−16 正規化を通すと利得 0.27 倍で
+  //    peak が 0.81 まで下がり、制限が掛からない）。
+  const normalizedShort = normalizeReference((await readCase("ref-short"))["raw"], SAMPLE_RATE);
+  assertEquals(normalizedShort.peakBeforeScale > 1, true, "ref-short が peak > 1 にならない");
+  assertEquals(normalizedShort.peakGain < 1, true, "ref-short で peak 制限が掛かっていない");
+  const normalizedHot = normalizeReference((await readCase("ref-hot"))["raw"], SAMPLE_RATE);
+  assertEquals(
+    normalizedHot.peakGain,
+    1,
+    "ref-hot が −16 正規化の後で peak 制限を踏んだ（前提が変わった — doc の説明を直す）",
+  );
+  assertEquals(hot.peakGain < 1, true, "golden の ref-hot が peak 制限枝を踏んでいない");
+  // ③ reflect pad の端数枝と恒等枝。
+  assertEquals(base.padSamples, 0, "ref-default が pad の恒等枝を踏んでいない");
+  assertEquals(
+    0 < odd.padSamples && odd.padSamples < HOP_LENGTH,
+    true,
+    `ref-odd の pad が ${odd.padSamples} サンプル — 端数枝を踏んでいない`,
+  );
 });
 
-test({
-  name: "ブロックのゼロ pad: ref-odd と ref-plain の LUFS が一致しない（末尾を捨てていない）",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "ブロックのゼロ pad: ref-odd と ref-plain の LUFS が一致しない（末尾を捨てていない）",
+  async () => {
     // ref-odd は ref-plain の先頭 144,000 サンプルに 777 サンプル足したもの。末尾の欠けた
     // ブロックを捨てる実装（`torch.nn.Unfold` の綴り）では、この 777 サンプルが 1 ブロックも
     // 作らないので**両者の LUFS が厳密に一致**してしまう。`julius.core.unfold` はゼロ pad して
@@ -257,4 +251,4 @@ test({
       `ref-odd と ref-plain の LUFS 差が ${gap} しかない — 末尾の欠けたブロックを捨てている`,
     );
   },
-});
+);

@@ -29,7 +29,7 @@
 // （docs/limitations.md に記載）。量子化値 `xq` そのものは、行 scale が非有限のとき
 // `vec4<i32>(NaN)` が不定値になるので**契約の外**（突合は scale と最終出力だけ）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
 import { perChannelGroupSize } from "../src/format/container/codecs.ts";
@@ -235,10 +235,9 @@ const runQuantizeRows = async (
   }
 };
 
-test({
-  name: "quantize_rows: WGSL の round は偶数丸め（同点 3 点をカーネル内で実測固定・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "quantize_rows: WGSL の round は偶数丸め（同点 3 点をカーネル内で実測固定・実 GPU）",
+  async () => {
     // amax = 127 にすると s = f32(127 · (1/127)) = 1.0 ちょうどになり、x/s が入力そのものに
     // なる（除数 1.0 の除算は 2.5 ULP の余地が無く**厳密**なので、同点規則だけを切り出せる）。
     // 同点（±0.5 / ±1.5 / 2.5 / ±3.5）の丸め先がそのまま量子化値として観測できる。
@@ -256,12 +255,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "quantize_rows: 小 D 変種は従来形と q / scale ともビット同一（幾何 4 通り × 縮退経路・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "quantize_rows: 小 D 変種は従来形と q / scale ともビット同一（幾何 4 通り × 縮退経路・実 GPU）",
+  async () => {
     // 幾何は dim から決まる: 128 → 8 行 × 32 レーン / 64 → 16 × 16 / 20 → 32 × 8 / 8 → 128 × 2。
     // 行ごとに大きさを変える（全行同じ scale だと「別の行の amax を使う」誤りが値に出ない）。
     // 行数は rowsPerGroup の倍数から外し、末尾の「行が無い組」の経路も踏む。
@@ -301,12 +299,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "quantize_rows が TS 参照と一致する（絶対値最大の厳密復元 / 全ゼロ行 / 行別 scale / 端数・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "quantize_rows が TS 参照と一致する（絶対値最大の厳密復元 / 全ゼロ行 / 行別 scale / 端数・実 GPU）",
+  async () => {
     // dim は 4 の倍数だが **256（workgroup 幅）の倍数でも 16 の倍数でもない**形を選ぶ
     // （1 スレッドが複数 quad を担当する経路と、担当が 0 個のスレッドが出る経路の両方を踏む）。
     const rows = 7;
@@ -353,12 +350,11 @@ test({
       assert(sawExtreme, `行 ${row} に絶対値最大の要素が無い`);
     }
   },
-});
+);
 
-test({
-  name: "quantize_rows は NaN / Inf を行 scale へ伝播する（素の max では消える・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "quantize_rows は NaN / Inf を行 scale へ伝播する（素の max では消える・実 GPU）",
+  async () => {
     // 行 0 = 通常 / 行 1 = 末尾に NaN / 行 2 = 中央に +Inf / 行 3 = 中央に −Inf
     const rows = 4;
     const dim = 8;
@@ -386,7 +382,7 @@ test({
     // 通常行の量子化値は参照と一致（非有限行の q は契約の外 — ファイル冒頭）
     assertExact(actual.q.slice(0, dim), expected.q.slice(0, dim), "quantize_rows q（通常行）");
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // Session 経路（linearCompute: "a8"）
@@ -527,10 +523,9 @@ const LINEAR_CASES: readonly LinearCase[] = [
   { name: "i8a8 v4 小 [3,4] × W[8,4]", m: 3, n: 8, k: 4 },
 ];
 
-test({
-  name: "linearCompute:'a8' の linear が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "linearCompute:'a8' の linear が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of LINEAR_CASES) {
@@ -555,12 +550,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "i8a8: NaN 行は行全体へ伝播し、ゼロ行と負値は厳密に一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "i8a8: NaN 行は行全体へ伝播し、ゼロ行と負値は厳密に一致する（実 GPU）",
+  async () => {
     // 行 2 に NaN を 1 つ・行 5 を全ゼロ・残りは正負混在
     const nanRow = 2;
     const zeroRow = 5;
@@ -601,12 +595,11 @@ test({
       );
     }
   },
-});
+);
 
-test({
-  name: "i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // 本機は packed_4x8_integer_dot_product を列挙するので**両変種とも実走できる**。
@@ -634,12 +627,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "i8a8 は opt-in × i8 常駐 × k%4==0 のときだけ効く（既定は従来経路のまま・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "i8a8 は opt-in × i8 常駐 × k%4==0 のときだけ効く（既定は従来経路のまま・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // ① 既定（linearCompute 省略）は i8 資産でも従来の f32 経路（linear 1 本だけ）
@@ -667,7 +659,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * K=0（in_features 0）の退化 shape。契約（src/ops.ts の linear）では有効な形だが、`k % 4 == 0`
@@ -679,10 +671,9 @@ test({
  * 落ちる。K=0 自体は既定の f32 経路でも 0 バイト束縛の最小サイズ違反で落ちる（linearCompute
  * とは無関係の別要因）ので、ここは 2 経路の一致だけを見る。
  */
-test({
-  name: "i8a8: K=0 の i8 常駐 linear は opt-in でも既定と同じ経路（i8a8 固有の失敗を出さない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "i8a8: K=0 の i8 常駐 linear は opt-in でも既定と同じ経路（i8a8 固有の失敗を出さない・実 GPU）",
+  async () => {
     const m = 3;
     const n = 8;
     const bias = fill([n], SIGNED);
@@ -716,12 +707,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "i8a8: k が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "i8a8: k が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
+  async () => {
     // 門のすぐ外側（4 の倍数で 2^17 + 4）。|acc| ≤ k·127·128 は i32 に収まるが、門は安全側。
     const k = LINEAR_I8A8_MAX_K + 4;
     const prepared = prepareLinear({ name: "overflow gate", m: 1, n: 4, k });
@@ -742,7 +732,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // w4a8（i4 常駐の重み × per-token i8 活性 — perf-ledger Q-8）
@@ -898,10 +888,9 @@ const prepareW4a8 = (
   return { model: i4LinearModel(m, n, k, groupSize, quantized, bias), x, expected };
 };
 
-test({
-  name: "linearCompute:'a8' × i4 常駐（w4a8）が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / group 2 種・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "linearCompute:'a8' × i4 常駐（w4a8）が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / group 2 種・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of W4A8_CASES) {
@@ -932,12 +921,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "w4a8: NaN 行は行全体へ伝播し、ゼロ行と負値は厳密に一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "w4a8: NaN 行は行全体へ伝播し、ゼロ行と負値は厳密に一致する（実 GPU）",
+  async () => {
     // 非有限の伝播は i8a8 と**同じ根拠に立たない** — w4a8 は `xs · wscale` の早期畳み込みを
     // 使えず（wscale が group ごとに変わる）、`xs` を最後の fma 1 回へ回す。したがって
     // `xs = ±Inf` かつ group 縮約が 0 の組で `fma(0, Inf, bias)` のような分岐が割れる余地があり、
@@ -980,12 +968,11 @@ test({
     assert(new Set(others).size > 1, "NaN / ゼロ行の外が定数");
     assertEquals(y.shape, [m, n]);
   },
-});
+);
 
-test({
-  name: "w4a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（i4 レーン展開は内積変種に依らない・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "w4a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（i4 レーン展開は内積変種に依らない・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const dots: readonly I8a8Dot[] = ["dp4a", "emu"];
@@ -1018,12 +1005,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "w4a8 は opt-in のときだけ効き、既定の f32 i4 経路とは値が割れる（活性量子化の裏取り・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "w4a8 は opt-in のときだけ効き、既定の f32 i4 経路とは値が割れる（活性量子化の裏取り・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const testCase = W4A8_CASES[3];
@@ -1048,4 +1034,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

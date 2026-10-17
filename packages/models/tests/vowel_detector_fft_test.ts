@@ -15,7 +15,7 @@
 //    `[9,5,1]`、先頭 2 lag の自己相関が共に `[5,2]`）。向きは公開 API から観測できないので、
 //    そのための API は足さない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertAlmostEquals, assertThrows } from "@std/assert";
 import { Fft } from "../src/vowel-detector/fft.ts";
 

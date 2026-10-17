@@ -54,7 +54,7 @@
 // 資産不要。**`shader-f16` も不要**（core WGSL の pack2x16float — ADR 0030 決定 1 が無傷で
 // あることの実行側の証拠）。アダプタ無し環境は明示 SKIP。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import { roundToF16 } from "../src/format/f16.ts";
@@ -395,10 +395,9 @@ const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
     .filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY))
     .reduce((sum, [, count]) => sum + count, 0);
 
-test({
-  name: "①QK の s16 書き出しは Math.f16round とビット一致する（pack2x16float の丸めが RTE であることの直接の門・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "①QK の s16 書き出しは Math.f16round とビット一致する（pack2x16float の丸めが RTE であることの直接の門・実 GPU）",
+  async () => {
     // `scale = 1` かつ k を単位ベクトルにすると `S[m][n] = q[m][n % D]` が**厳密**に出る
     // （0 との積と 0 の加算しか混ざらないので内積の丸めがゼロ）。したがって S の各要素は
     // 上の同点値そのもので、書き出された 16bit が Math.f16round と一致するかだけが残る。
@@ -474,16 +473,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // (2) atol=0（s16 変種 ≡ S をホストで f16 に丸めた f32 変種）
 // ---------------------------------------------------------------------------
 
-test({
-  name: "attentionScoreStorage:'f16' は「S を f16 に丸めた f32 変種」とビット単位で一致する（v4 / タイル端 / K 端数 / B·H≥2・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attentionScoreStorage:'f16' は「S を f16 に丸めた f32 変種」とビット単位で一致する（v4 / タイル端 / K 端数 / B·H≥2・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of S16_SHAPES) {
@@ -526,7 +524,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **census**（ADR 0058 決定 4）。3 カーネルが**同時に** s16 へ切り替わったことをキーで見る。
@@ -535,10 +533,9 @@ test({
  * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
  * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
-test({
-  name: "attentionScoreStorage:'f16' は ①QK / ②行統計 / ③PV が同時に s16 へ切り替わる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attentionScoreStorage:'f16' は ①QK / ②行統計 / ③PV が同時に s16 へ切り替わる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of S16_SHAPES) {
@@ -566,16 +563,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // (3) 適格判定の 2 方向（適格 → s16 キー / 非適格 → f32 キー + ビット同一）
 // ---------------------------------------------------------------------------
 
-test({
-  name: "attentionScoreStorage:'f16' の非適格形（D%4 / N%4）は f32 格納へ沈黙で縮退する（検出器はキー検査・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attentionScoreStorage:'f16' の非適格形（D%4 / N%4）は f32 格納へ沈黙で縮退する（検出器はキー検査・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of DEGRADED_SHAPES) {
@@ -591,13 +587,12 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 非適格形の縮退を見る唯一の検出器（キー検査）。無条件 assert の理由は上の census と同じ。 */
-test({
-  name: "非適格形は s16 キーを 1 本も出さず f32 格納の ②行統計が走る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "非適格形は s16 キーを 1 本も出さず f32 格納の ②行統計が走る（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of DEGRADED_SHAPES) {
@@ -618,16 +613,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // (4) fail loudly（c16 との併用は黙ってどちらかに解釈しない）
 // ---------------------------------------------------------------------------
 
-test({
-  name: "attentionScoreStorage 'f16' × attentionCompute 'f16' は Session 構築で落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attentionScoreStorage 'f16' × attentionCompute 'f16' は Session 構築で落ちる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const graph = singleOpDeclaration(
@@ -660,7 +654,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // (5) 本命の組（i8a8 × s16）— 直交していることのキー検査
@@ -668,10 +662,9 @@ test({
 
 const A8_S16_SHAPE: AttentionShape = { name: "B2 H3 M65 N68 D20", b: 2, h: 3, m: 65, n: 68, d: 20 };
 
-test({
-  name: "attentionCompute:'a8' × attentionScoreStorage:'f16' は直交して同時に立つ（shader-f16 不要・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attentionCompute:'a8' × attentionScoreStorage:'f16' は直交して同時に立つ（shader-f16 不要・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const shape = A8_S16_SHAPE;
@@ -693,13 +686,12 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 直交（3 軸が同時に立つ）を見る唯一の検出器。無条件 assert の理由は上の census と同じ。 */
-test({
-  name: "attentionCompute:'a8' × attentionScoreStorage:'f16' は ①③ が i8a8・② だけ s16 のキーで走る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "attentionCompute:'a8' × attentionScoreStorage:'f16' は ①③ が i8a8・② だけ s16 のキーで走る（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const shape = A8_S16_SHAPE;
@@ -729,7 +721,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // (6) ③PV i8a8 の qP を s16 で再導出（±1 段 + 不一致率の門 — ADR 0030 の門の s16 版）
@@ -847,10 +839,9 @@ const observeQpS16 = async (
   }
 };
 
-test({
-  name: "③PV i8a8 × s16: qP は「f16 に丸めた S」から作った TS 参照と必ず ±1 段以内で一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "③PV i8a8 × s16: qP は「f16 に丸めた S」から作った TS 参照と必ず ±1 段以内で一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     let total = 0;
     let mismatched = 0;
@@ -912,16 +903,15 @@ test({
     );
     assert(rate < 0.02, `qP の不一致率 ${rate} が 2% を超えた（exp の実装差にしては大きい）`);
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // (7) NaN 行の伝播（格納形が変わっても非有限値の扱いが動かない）
 // ---------------------------------------------------------------------------
 
-test({
-  name: "s16 でも NaN を含む行はそのまま NaN を伝播する（f32 格納と同じ行が NaN になる・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "s16 でも NaN を含む行はそのまま NaN を伝播する（f32 格納と同じ行が NaN になる・実 GPU）",
+  async () => {
     const shape: AttentionShape = { name: "NaN 行 B1 H2 M8 N8 D4", b: 1, h: 2, m: 8, n: 8, d: 4 };
     const { b, h, m, n, d } = shape;
     const q = fill([b, h, m, d], QUERY);
@@ -962,4 +952,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

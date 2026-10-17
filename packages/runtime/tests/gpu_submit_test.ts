@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertLess, assertRejects, assertThrows } from "@std/assert";
 import { type GpuContext, GpuDeviceLostError } from "../src/gpu/device.ts";
 import {

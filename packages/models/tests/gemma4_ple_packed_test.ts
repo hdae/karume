@@ -22,7 +22,7 @@
  */
 
 import { readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { type OpenedContainer, parseSafetensors } from "@karume/runtime";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";

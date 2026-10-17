@@ -22,7 +22,7 @@
 // MUST: 変種（v4 / スカラ）と格納（f32 / f16 / i8）を全て踏む。踏んだ変種は `expectVec4` で
 // 明示的に固定する（判定の取り違えが「両方とも同じ変種で緑」に紛れないため）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import { alignF16Payload } from "../src/format/f16.ts";
@@ -540,10 +540,9 @@ const assertParity = (testCase: ParityCase, where: string, result: ParityResult)
   assert(new Set(direct).size > 1, `${where}: 出力が定数（ビット一致が恒真になっている）`);
 };
 
-test({
-  name: "conv1d の implicit GEMM は直接カーネルと**ビット単位で一致**する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv1d の implicit GEMM は直接カーネルと**ビット単位で一致**する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of CASES) {
@@ -553,7 +552,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **32 行 m タイル変種**の恒久の門。全ケースを 32 行タイルで**強制的に**流す（述語が
@@ -564,10 +563,9 @@ test({
  * 述語に従って選ばれた形だけを検査すると、述語の境界をずらす誤りが「変種が走らなくなる
  * だけ」で緑のまま通る。
  */
-test({
-  name: "conv1d の 32 行 m タイル変種も直接カーネルとビット単位で一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv1d の 32 行 m タイル変種も直接カーネルとビット単位で一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of CASES) {
@@ -586,7 +584,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * **符号付きゼロ = ビット同一の唯一の例外**（負ケース）。機序をテストとして記録し、将来
@@ -602,10 +600,9 @@ test({
  * 成り立つことの裏返し）。値としては `−0.0 == +0.0` なので、allclose でも `===` でも
  * **絶対に検出できない** — ビット比較だけがこの差を見る。
  */
-test({
-  name: "conv1d: bias が −0.0 のとき padding だけの出力で符号付きゼロが割れる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv1d: bias が −0.0 のとき padding だけの出力で符号付きゼロが割れる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const testCase: ParityCase = {
@@ -653,7 +650,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * executor の踏み分け。`groups == 1` は implicit GEMM、`groups > 1` は直接カーネル
@@ -690,10 +687,9 @@ const conv1dKeysUsed = async (channels: number, groups: number): Promise<Readonl
   }
 };
 
-test({
-  name: "executor は groups で 2 カーネルを踏み分ける（1 = igemm / >1 = 直接・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "executor は groups で 2 カーネルを踏み分ける（1 = igemm / >1 = 直接・実 GPU）",
+  async () => {
     // Cin = Cout = 6・K=3 → kFlat = 18（groups=1）で 4 の倍数でないのでスカラ変種。
     // Cout=6 は `6 % 64 == 6` なので m タイルは 32 行。
     assertEquals(
@@ -704,7 +700,7 @@ test({
     // depthwise（groups = Cin = Cout）も直接カーネル側
     assertEquals(await conv1dKeysUsed(6, 6), new Set([conv1dKey("f32")]));
   },
-});
+);
 
 /**
  * m タイルの選択が **executor に結線されている**ことの門。
@@ -712,10 +708,9 @@ test({
  * MUST: 値ではなく**実際に走ったパイプラインキー**で見る。どちらのタイル形も出力はビット
  * 同一なので、値の一致は結線の証拠にならない（述語を潰しても数値テストは全て緑のまま）。
  */
-test({
-  name: "conv1d の executor は M%64 で m タイル 64/32 を踏み分ける（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "conv1d の executor は M%64 で m タイル 64/32 を踏み分ける（実 GPU）",
+  async () => {
     // Cout = 96（`96 % 64 == 32`）→ 32 行。kFlat = 288・Lout = 8 なので v4。
     assertEquals(
       await conv1dKeysUsed(96, 1),
@@ -724,4 +719,4 @@ test({
     // Cout = 64（`64 % 64 == 0`）→ 64 行のまま
     assertEquals(await conv1dKeysUsed(64, 1), new Set([conv1dIgemmKey("f32", true, GEMM_TILE)]));
   },
-});
+);

@@ -12,7 +12,7 @@
 //  - 1 軸だけ壊す → その軸名・期待値・実測値を含む文言で reject
 // の対偶で、門そのものと門の位置（GPU を取りに行く前）を同時に縛る。GPU へは 1 度も触らない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { admitIrodori, assetOpener } from "../src/irodori/admission.ts";

@@ -8,7 +8,7 @@
  * MUST: `caches` は必ず渡す（helpers/mock.ts の MUST — 渡さないと Deno の実キャッシュに書く）。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
   evictCachedAssets,

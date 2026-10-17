@@ -10,7 +10,7 @@
 // 1 点だけ壊す（helpers/safetensors.ts と同じ規律）。
 // NOTE: チャンク CRC はデコーダが検証しないので 0 を書く。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertRejects } from "@std/assert";
 import { decodePng } from "@karume/test-support/png-decode";
 

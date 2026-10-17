@@ -4,7 +4,7 @@
 // 高さ / 幅 / チャネル数を全部違う値にして、巡回長 3 以上の並べ替えでしか通らない形にしてある。
 // 実重み・実 GPU での門は E2E（P3 波 2）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   ditPatchGeometry,

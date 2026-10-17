@@ -9,7 +9,7 @@
 // でも区別しない — 2026-09-21 実測）。値として出ていないことは実行時にしか観測できないので、
 // 名指しの門をここに置く。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import * as runtime from "../mod.ts";
 

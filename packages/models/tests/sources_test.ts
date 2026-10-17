@@ -19,7 +19,7 @@
 // 公開リポを持たないファミリ（vowel-detector）は表自体を持たないので、この門の対象外
 // （ADR 0073 決定 1）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";
 import type { HubRepoRef } from "@karume/hub";
 import { ANIMA_SOURCES } from "../src/anima/config.ts";

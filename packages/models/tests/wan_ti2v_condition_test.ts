@@ -13,7 +13,7 @@
 //    手間がかかるので、ここで直接縛る。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { wanConditionMask, withWanFirstFrameCondition } from "../src/wan/dit-loop.ts";
 import { type WanPatchGeometry, wanTokenGrid } from "../src/wan/dit-tokens.ts";
 

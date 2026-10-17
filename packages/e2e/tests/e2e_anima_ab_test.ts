@@ -31,7 +31,7 @@
  * （{@link withManifestOverride}）で、元の配布形は 1 バイトも書き換えない。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertThrows } from "@std/assert";
 import { type DistributionSource, type Manifest, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
@@ -171,10 +171,9 @@ const errorText = (cause: unknown): string =>
 
 for (const { resolution, band } of CASES) {
   const id = `${PRACTICAL}-${formatResolution(resolution)}`;
-  test({
-    name: `e2e(実GPU): ${id} の step 1 latent が参照席と決定性・census・帯で釣り合う（自機 A/B）`,
-    ignore: !RUNNABLE,
-    fn: async () => {
+  test.skipIf(!RUNNABLE)(
+    `e2e(実GPU): ${id} の step 1 latent が参照席と決定性・census・帯で釣り合う（自機 A/B）`,
+    async () => {
       await runRecordedCase(results, { id, failureNote: errorText }, async (recorded) => {
         const manifest = readManifest();
         const reference = referencePartnerOf(manifest, MODEL, PRACTICAL);
@@ -199,7 +198,7 @@ for (const { resolution, band } of CASES) {
         return { status: "pass", note: `census ${census}` };
       });
     },
-  });
+  );
 }
 
 // --- 故障注入（各門が空振りでないことの実証 — ADR 0110 決定 5-5）------------------
@@ -207,10 +206,9 @@ for (const { resolution, band } of CASES) {
 // どれも「門が赤になること」を assert する（緑 = 門が故障を見逃した）。一時 manifest は同じ配布形を
 // symlink で借り、実用席の `session` だけを差し替える。解像度は {@link FAULT_CASE} の 1 本だけ。
 
-test({
-  name: "e2e(実GPU): 故障注入 ① 実用席の session を空にした manifest は床で赤になる",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 故障注入 ① 実用席の session を空にした manifest は床で赤になる",
+  async () => {
     const { resolution, band } = FAULT_CASE;
     const id = `fault1-empty-session-${formatResolution(resolution)}`;
     await runRecordedCase(results, { id, failureNote: errorText }, async (recorded) => {
@@ -243,12 +241,11 @@ test({
       assertThrows(() => judgeAb(measured, band, id), Error, "床の失敗");
     });
   },
-});
+);
 
-test({
-  name: "e2e(実GPU): 故障注入 ② 実用席の 2 回目だけ別 seed にすると決定性の門が赤になる",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 故障注入 ② 実用席の 2 回目だけ別 seed にすると決定性の門が赤になる",
+  async () => {
     const { resolution } = FAULT_CASE;
     const source = nodeDirectory(ASSETS_DIR);
     const first = await observeStep1(source, PRACTICAL, resolution, SEED);
@@ -259,17 +256,16 @@ test({
       "ビット一致しない",
     );
   },
-});
+);
 
 /**
  * 故障注入 ③ — `attentionCompute` だけ外した席。census（元の配布形の宣言が期待）が赤になることを
  * assert する。帯の判定は**記録だけ**（ADR 0030 決定 5 の再演 — 積み重ねた席の後段の失効は数値で
  * 掴みにくい。帯が緑のままなら census が要ることの実証、赤なら床の係数 k を 0 より上に置く材料）。
  */
-test({
-  name: "e2e(実GPU): 故障注入 ③ attentionCompute だけ外した席は census で赤になる（帯は記録）",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 故障注入 ③ attentionCompute だけ外した席は census で赤になる（帯は記録）",
+  async () => {
     const { resolution, band } = FAULT_CASE;
     const id = `fault3-no-attention-a8-${formatResolution(resolution)}`;
     await runRecordedCase(results, { id, failureNote: errorText }, async (recorded) => {
@@ -315,4 +311,4 @@ test({
       return { status: "pass", note: `帯 ${bandVerdict}` };
     });
   },
-});
+);

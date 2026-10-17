@@ -23,7 +23,7 @@
 // NOTE: 容器のグラフ名は綴らず、系列のグラフ名の表（`packages/models/tests/helpers/series-graphs.ts` — 門番
 // `e2e_assets_gate_test.ts` と同じ正本）から引く。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { codecLayout, type OpenedContainer, prepareContainer } from "@karume/runtime";
 import { WAN22_TI2V_GENERATION } from "../../models/src/wan/descriptor.ts";
@@ -122,11 +122,9 @@ const seriesGraphOf = (opened: OpenedContainer) => {
   return opened.graphs[name];
 };
 
-test({
-  name: "Wan2.2 TI2V DiT 資産: 容器と全ケース（S = 192・T2V 5 本 + I2V 5 本）の golden が揃っている",
-  // 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL。
-  ignore: !ANY_PRESENT,
-  fn: () => {
+test.skipIf(!ANY_PRESENT)(
+  "Wan2.2 TI2V DiT 資産: 容器と全ケース（S = 192・T2V 5 本 + I2V 5 本）の golden が揃っている",
+  () => {
     assert(MODEL_PRESENT, `${SERIES_DIR.pathname}${MODEL_FILE} が無い`);
     assertEquals(
       expectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
@@ -134,12 +132,11 @@ test({
       `golden の欠け（生成: ${GENERATE}）`,
     );
   },
-});
+);
 
-test({
-  name: "Wan2.2 TI2V DiT 容器（GPU 不要）: 入力 7 本・条件マスクは bool [1,S,1]・linear 310・where 182・i8 307",
-  ignore: !MODEL_PRESENT,
-  fn: async () => {
+test.skipIf(!MODEL_PRESENT)(
+  "Wan2.2 TI2V DiT 容器（GPU 不要）: 入力 7 本・条件マスクは bool [1,S,1]・linear 310・where 182・i8 307",
+  async () => {
     const graph = seriesGraphOf(await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)));
     const { declaration } = graph;
     assertEquals(
@@ -155,12 +152,11 @@ test({
     );
     assertEquals(i8.length, EXPECTED_I8_WEIGHTS, "i8 の重みの本数");
   },
-});
+);
 
-test({
-  name: "Wan2.2 TI2V DiT 容器（GPU 不要）: 2.2 の世代の記述子の入力の形で ditContract を通り、form は ti2v",
-  ignore: !MODEL_PRESENT,
-  fn: async () => {
+test.skipIf(!MODEL_PRESENT)(
+  "Wan2.2 TI2V DiT 容器（GPU 不要）: 2.2 の世代の記述子の入力の形で ditContract を通り、form は ti2v",
+  async () => {
     const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
     const prepared = prepareContainer(opened, seriesGraph(SERIES_NAME, COMPONENT));
     const contract = ditContract(
@@ -172,7 +168,7 @@ test({
     );
     assertEquals(contract.form, "ti2v");
   },
-});
+);
 
 /**
  * ホスト関数（patchify・資産 `rope_base` からの RoPE 表・`timesteps_proj` 2 本・テストの中の条件マスク）が
@@ -234,17 +230,14 @@ const assertHostInputs = async (cases: readonly Ti2vCase[]): Promise<void> => {
   }
 };
 
-test({
-  name: "Wan2.2 TI2V DiT ホスト: patchify・rope_base の RoPE 表・timesteps_proj 2 本・条件マスクが golden の入力と一致する",
-  ignore: !ASSETS_AVAILABLE,
-  fn: () => assertHostInputs(CASES),
-});
+test.skipIf(!ASSETS_AVAILABLE)(
+  "Wan2.2 TI2V DiT ホスト: patchify・rope_base の RoPE 表・timesteps_proj 2 本・条件マスクが golden の入力と一致する",
+  () => assertHostInputs(CASES),
+);
 
-test({
-  name: "Wan2.2 TI2V DiT 実寸の資産: 全ケース（2 つの形・決定用 6 本 + 受入れ 8 本）の golden が揃っている",
-  // 1 本も無ければ「まだ足していない」として SKIP。1 本でもあれば欠けは FAIL（足す途中・中断）。
-  ignore: !FULL_ANY_PRESENT,
-  fn: () => {
+test.skipIf(!FULL_ANY_PRESENT)(
+  "Wan2.2 TI2V DiT 実寸の資産: 全ケース（2 つの形・決定用 6 本 + 受入れ 8 本）の golden が揃っている",
+  () => {
     assert(MODEL_PRESENT, `${SERIES_DIR.pathname}${MODEL_FILE} が無い（実寸の golden だけがある）`);
     assertEquals(
       fullExpectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
@@ -252,12 +245,10 @@ test({
       `実寸の golden の欠け（生成・途中から再開: ${GENERATE_FULL}）`,
     );
   },
-});
+);
 
-test({
-  name:
-    "Wan2.2 TI2V DiT 実寸のホスト（S = 8,190 / 7,920・条件フレーム P = 390 / 880）: patchify・RoPE 表・" +
+test.skipIf(!FULL_AVAILABLE)(
+  "Wan2.2 TI2V DiT 実寸のホスト（S = 8,190 / 7,920・条件フレーム P = 390 / 880）: patchify・RoPE 表・" +
     "timesteps_proj 2 本・条件マスクが golden の入力と一致する",
-  ignore: !FULL_AVAILABLE,
-  fn: () => assertHostInputs(FULL_CASES),
-});
+  () => assertHostInputs(FULL_CASES),
+);

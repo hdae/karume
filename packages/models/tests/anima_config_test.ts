@@ -3,7 +3,7 @@
 // hub は `pipelineConfig` を素通しするので、**ここが唯一の門**。主に縛るのは 2 つ:
 // ①必須欄の欠落・型違いを名指しで落とす ②未知キーを fail loudly（黙って既定へ縮退させない）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseAnimaPipelineConfig } from "../src/anima/config.ts";
 import { ModelInputError } from "../src/errors.ts";

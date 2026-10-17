@@ -6,7 +6,7 @@
  * missing the case SKIPs explicitly with a reason (ADR 0005).
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { FusionCounts } from "../../runtime/src/runtime/fusion.ts";
 import { readContainerGraph } from "../../runtime/tests/helpers/container-graph.ts";
@@ -30,10 +30,9 @@ if (!GEMMA_AVAILABLE) {
  * identityExpand は **0**。SDPA を保存した資産（ADR 0023 改訂 — mask 付き attention）では
  * 分解由来の恒等 expand が IR ごと消える（決定 6 と同じ機序。分解資産の頃は 96 だった）。
  */
-test({
-  name: "実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）を掴む",
-  ignore: !GEMMA_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GEMMA_AVAILABLE)(
+  "実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）を掴む",
+  async () => {
     const graph = await readContainerGraph(GEMMA_MODEL.part0, GEMMA_MODEL.graph);
     const expected: FusionCounts = { ...NONE, rope: 48 };
     // ヒット数は T に依存しない（Tmax = 512 の内側で 2 点）。
@@ -45,4 +44,4 @@ test({
       );
     }
   },
-});
+);

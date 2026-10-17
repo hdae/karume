@@ -12,7 +12,7 @@
 
 import { readFile } from "@karume/test-support/fs";
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import {
   parseGraphDescriptor,
   parseModelDescriptor,

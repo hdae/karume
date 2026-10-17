@@ -14,7 +14,7 @@
  * 押さえる。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   acquireGpu,
@@ -213,10 +213,9 @@ test("ホストで組む宣言はグラフ単体の規則を通る（前方参�
   );
 });
 
-test({
-  name: "常駐 CFG + Euler ループは TS 正本とビット一致し、フェンスは batch の 1 本（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "常駐 CFG + Euler ループは TS 正本とビット一致し、フェンスは batch の 1 本（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const initial = fill(7);
@@ -235,12 +234,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "CFG 窓の外の step（変種 0 本）は cond をそのまま Euler へ渡す（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "CFG 窓の外の step（変種 0 本）は cond をそのまま Euler へ渡す（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const initial = fill(11);
@@ -254,4 +252,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

@@ -8,7 +8,7 @@
 // GPU も実資産も要らない（helpers/safetensors.ts の `buildSafetensors` で組んだ最小の
 // safetensors を `parseSafetensors` で読む）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, AssertionError, assertStrictEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, type TensorView } from "../src/format/safetensors.ts";
 import { IO_ENCODING, ioTensor } from "./helpers/golden-io.ts";

@@ -10,7 +10,7 @@
 //    （スロットの当該行に毒値を置いて値が動かないこと）・故障注入（live を 1 列広げる / 窓の先頭を
 //    1 列前へずらす / 写像の法を window へ戻す）が赤になること
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import {
@@ -168,10 +168,9 @@ const assertBitIdentical = (
   }
 };
 
-test({
-  name: "states 形 readonly 変種: 参照の帯・states 形（P−1・Q=1）とビット同一・空行と決定性（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 readonly 変種: 参照の帯・states 形（P−1・Q=1）とビット同一・空行と決定性（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -216,7 +215,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 故障注入 — live の式と物理行の写像を崩した変異が参照の帯で落ちること（門が空振りでない証明）。 */
 const MUTATIONS: readonly { readonly name: string; readonly mutate: StateMutation }[] = [
@@ -243,10 +242,9 @@ const MUTATIONS: readonly { readonly name: string; readonly mutate: StateMutatio
   },
 ];
 
-test({
-  name: "states 形 readonly 変種: 故障注入（live のずれ・窓の先頭のずれ・写像の法）は参照の帯で落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 readonly 変種: 故障注入（live のずれ・窓の先頭のずれ・写像の法）は参照の帯で落ちる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -284,4 +282,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

@@ -47,7 +47,7 @@
 // 「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
@@ -375,12 +375,9 @@ for (const series of SERIES) {
     );
   }
 
-  test({
-    name: `SigLIP2 資産: ${series.name} — 期待するケースとモデル本体が揃っている`,
-    // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
-    //（モデルだけ残って golden が全滅した欠損も拾う — `anyPresent` の JSDoc）。
-    ignore: !anyPresent,
-    fn: () => {
+  test.skipIf(!anyPresent)(
+    `SigLIP2 資産: ${series.name} — 期待するケースとモデル本体が揃っている`,
+    () => {
       assertEquals(cases, [...EXPECTED_CASES], `${root.pathname} の合成画像 golden ケース`);
       // 実画像は**任意だが全部か 0 か**（`--real-images` を付けた emit は 4 本まとめて書く）。
       // 部分的な欠けを SKIP に丸めると、採り直しの途中で落ちた資産が黙って通る。
@@ -391,7 +388,7 @@ for (const series of SERIES) {
       );
       assert(modelPresent(new URL(MODEL_FILE, root)), `${MODEL_FILE} が無い`);
     },
-  });
+  );
 
   /**
    * 突合を回すケース。合成と実画像で**入力の作り方は同じ**（どちらも golden の
@@ -417,10 +414,9 @@ for (const series of SERIES) {
     /** ケース ID（系列が違えば同じケース名があるので組で持つ）。 */
     const caseId = `${series.name}/${caseName}`;
     if (!entry.ignore) caseIds.push(caseId);
-    test({
-      name: `SigLIP2 ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
-      ignore: entry.ignore || !GPU_AVAILABLE,
-      fn: async () => {
+    test.skipIf(entry.ignore || !GPU_AVAILABLE)(
+      `SigLIP2 ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
+      async () => {
         /** sha の決着（突合したときだけ — 記録の後で不一致を落とすために外へ持ち出す）。 */
         let settlement: ReferenceSettlement | undefined;
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
@@ -508,13 +504,12 @@ for (const series of SERIES) {
           throw new Error(referenceMismatchMessage(caseId, settlement, references));
         }
       },
-    });
+    );
   }
 
-  test({
-    name: `SigLIP2 判別: ${series.name} — 人物 2 枚の cosine が人物と風景のどの対よりも高い`,
-    ignore: !realAvailable || !GPU_AVAILABLE,
-    fn: async () => {
+  test.skipIf(!realAvailable || !GPU_AVAILABLE)(
+    `SigLIP2 判別: ${series.name} — 人物 2 枚の cosine が人物と風景のどの対よりも高い`,
+    async () => {
       // golden 突合だけだと「期待値と合っている」ことしか言えず、埋め込みとして意味のある
       // 出力かは別問題（1 点へ潰れた出力は期待値も同じく潰れていれば通ってしまう）。ここは
       // **別々の入力どうしの順序**を見るので、出力がケース間で定数なら cosine が全て 1 に
@@ -572,7 +567,7 @@ for (const series of SERIES) {
         }
       }
     },
-  });
+  );
 }
 
 const RUNNABLE = caseIds.length > 0 && GPU_AVAILABLE;

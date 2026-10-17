@@ -65,7 +65,7 @@
 // FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
@@ -640,12 +640,9 @@ for (const series of SERIES) {
   /** この機で GPU テストを止める系列か（{@link HELD_SERIES} — 資産の完全性テストには掛けない）。 */
   const held = heldReason(series) !== undefined;
 
-  test({
-    name: `BiRefNet 資産: ${series.name} — 期待するケースとモデル本体が揃っている`,
-    // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
-    //（モデルだけ残って golden が全滅した欠損も拾う — `Discovery.anyPresent` の JSDoc）。
-    ignore: !found.anyPresent,
-    fn: () => {
+  test.skipIf(!found.anyPresent)(
+    `BiRefNet 資産: ${series.name} — 期待するケースとモデル本体が揃っている`,
+    () => {
       assertEquals(found.cases, [...EXPECTED_CASES], `${root.pathname} の合成画像 golden ケース`);
       // 実画像は**任意だが全部か 0 か**（`--real-images` を付けた emit は 4 本まとめて書く）。
       // 部分的な欠けを SKIP に丸めると、採り直しの途中で落ちた資産が黙って通る。
@@ -656,13 +653,11 @@ for (const series of SERIES) {
       );
       assert(modelPresent(new URL(MODEL_FILE, root)), `${MODEL_FILE} が無い`);
     },
-  });
+  );
 
-  test({
-    name: `BiRefNet 格納: ${series.name} — 容器の圧縮格納 dtype の集合が系列の宣言と一致する`,
-    // GPU 不要（容器を開いて束縛表を読むだけ）。held の機でも走らせる — 止める理由は dispatch。
-    ignore: !modelPresent(new URL(MODEL_FILE, root)),
-    fn: async () => {
+  test.skipIf(!modelPresent(new URL(MODEL_FILE, root)))(
+    `BiRefNet 格納: ${series.name} — 容器の圧縮格納 dtype の集合が系列の宣言と一致する`,
+    async () => {
       // 系列と資産の格納 dtype が一致する（root 取り違え / `--dtype` の付け忘れの唯一の検出器 —
       // {@link Series.compressedStorage}）。本数ではなく**集合**で見るのは、f16 系列に別の圧縮
       // 格納が混ざる形を「圧縮が 1 本以上ある」で通さないため（ADR 0029 決定 2・e2e_sbv2 と同じ形）。
@@ -685,7 +680,7 @@ for (const series of SERIES) {
         `${series.name}: 圧縮格納 dtype の集合が系列と食い違う（採り直す: ${series.generate}）`,
       );
     },
-  });
+  );
 
   /**
    * 突合を回すケース。合成と実画像で**入力の作り方は同じ**（どちらも golden の
@@ -714,10 +709,9 @@ for (const series of SERIES) {
     // agreement with torch), so it is opt-in. Its io-key / shape / dtype assertions only check the
     // golden file against the graph as preconditions of that comparison; the default run keeps the
     // output shape / dtype check per series in the geometry case below.
-    test({
-      name: `BiRefNet ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
-      ignore: entry.ignore || !GPU_AVAILABLE || held || !UPSTREAM_PARITY,
-      fn: async () => {
+    test.skipIf(entry.ignore || !GPU_AVAILABLE || held || !UPSTREAM_PARITY)(
+      `BiRefNet ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+      async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const [opened, ioBytes] = await Promise.all([
             openSeriesContainer(new URL(MODEL_FILE, root)),
@@ -789,13 +783,12 @@ for (const series of SERIES) {
           }
         });
       },
-    });
+    );
   }
 
-  test({
-    name: `BiRefNet 幾何判別: ${series.name} — disc の円内 logit 平均が円外を上回る`,
-    ignore: !found.available || !GPU_AVAILABLE || held,
-    fn: async () => {
+  test.skipIf(!found.available || !GPU_AVAILABLE || held)(
+    `BiRefNet 幾何判別: ${series.name} — disc の円内 logit 平均が円外を上回る`,
+    async () => {
       // golden 突合だけだと「期待値と合っている」ことしか言えず、マットとして意味のある出力かは
       // 別問題（一様に潰れた出力は期待値も同じく潰れていれば通ってしまう）。ここは**画像の中の
       // 既知の幾何**（円）で切るので、出力が一様なら平均が並んで落ちる。閾値は置かない
@@ -831,5 +824,5 @@ for (const series of SERIES) {
         gpu.destroy();
       }
     },
-  });
+  );
 }

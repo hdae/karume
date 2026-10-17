@@ -26,7 +26,7 @@
  * （ADR 0005）。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type DistributionSource, type Manifest, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
@@ -165,10 +165,9 @@ const errorText = (cause: unknown): string =>
 
 for (const input of CASES) {
   const id = `${PRACTICAL}-${input.name}`;
-  test({
-    name: `e2e(実GPU): ${id} の step 1 潜在が参照席と決定性・census・帯で釣り合う（自機 A/B）`,
-    ignore: !RUNNABLE,
-    fn: async () => {
+  test.skipIf(!RUNNABLE)(
+    `e2e(実GPU): ${id} の step 1 潜在が参照席と決定性・census・帯で釣り合う（自機 A/B）`,
+    async () => {
       await runRecordedCase(results, { id, failureNote: errorText }, async (recorded) => {
         const manifest = readManifest();
         const reference = referencePartnerOf(manifest, MODEL, PRACTICAL);
@@ -196,7 +195,7 @@ for (const input of CASES) {
         return { status: "pass", note: `census ${census}` };
       });
     },
-  });
+  );
 }
 
 // --- Key census of the practical seat (exact dispatch counts per run) -----------------
@@ -264,10 +263,9 @@ const censusOf = (diagnostics: SessionDiagnostics, component: CensusComponent): 
   return { i8a8Linear, quantizeRows, plainLinear };
 };
 
-test({
-  name: `e2e(実GPU): dit / dit_context の run が i8a8 GEMM と quantize_rows だけで回る（キー census）`,
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  `e2e(実GPU): dit / dit_context の run が i8a8 GEMM と quantize_rows だけで回る（キー census）`,
+  async () => {
     const manifest = readManifest();
     // 束の census 表の行（鍵は quant 席の宣言を家族の合成に通した実効設定）。この門は `i8-a8`
     // 席そのものの門なので、行が無いのは表の欠落として落とす。
@@ -342,14 +340,13 @@ test({
       );
     }
   },
-});
+);
 
 // --- 故障注入（ADR 0110 決定 5-5 — 門が赤になることを assert する）-------------------
 
-test({
-  name: "e2e(実GPU): 故障注入 ① 実用席の session を空にした manifest は床で赤になる",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 故障注入 ① 実用席の session を空にした manifest は床で赤になる",
+  async () => {
     const id = `fault1-empty-session-${FAULT_CASE.name}`;
     await runRecordedCase(results, { id, failureNote: errorText }, async (recorded) => {
       const manifest = readManifest();
@@ -381,12 +378,11 @@ test({
       assertThrows(() => judgeAb(measured, FAULT_CASE.band, id), Error, "床の失敗");
     });
   },
-});
+);
 
-test({
-  name: "e2e(実GPU): 故障注入 ② 実用席の 2 回目だけ別 seed にすると決定性の門が赤になる",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 故障注入 ② 実用席の 2 回目だけ別 seed にすると決定性の門が赤になる",
+  async () => {
     const source = nodeDirectory(ASSETS_DIR);
     const first = await observeStep1(source, PRACTICAL, FAULT_CASE, SEED);
     const second = await observeStep1(source, PRACTICAL, FAULT_CASE, SEED + 1);
@@ -396,4 +392,4 @@ test({
       "ビット一致しない",
     );
   },
-});
+);

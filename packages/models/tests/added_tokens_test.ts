@@ -8,7 +8,7 @@
 // - **計算量**: 全候補が同じ文字（`<`）で始まる語彙でも、照合は入力長 × 最長の候補長に収まる。
 //   先頭 1 文字で束ねるだけだと、本文の `<` ごとに全候補を走査する。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { createAddedTokenMatcher, splitAddedTokens } from "../src/text/added-tokens.ts";
 

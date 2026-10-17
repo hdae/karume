@@ -10,7 +10,7 @@
 // ①〜③ が無いと、退行は「たまたま fail loudly」か「沈黙誤値」のどちらかに割れる形で戻る
 // （どちらも run の戻り値の見た目は正常）。④ は負の門で、契約を clone 側へ倒したら赤くなる。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext, type ResidentTensor } from "../src/gpu/device.ts";
 import {
@@ -72,10 +72,9 @@ const bits = (data: Tensor["data"] | ArrayBuffer): readonly number[] =>
 const openSession = async (gpu: GpuContext): Promise<Session> =>
   await createSessionFromContainer(gpu, await openGraphModel(GRAPH), "model");
 
-test({
-  name: "run 直後の shape 書き換えは解決 shape に届かない（発行時 snapshot・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "run 直後の shape 書き換えは解決 shape に届かない（発行時 snapshot・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await openSession(gpu);
     try {
@@ -94,12 +93,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "run 直後の inputs member 差し替えは実行に届かない（発行時 snapshot・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "run 直後の inputs member 差し替えは実行に届かない（発行時 snapshot・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await openSession(gpu);
     try {
@@ -119,12 +117,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "run 直後の bindings 書き換えは束縛衝突を起こさない（発行時 snapshot・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "run 直後の bindings 書き換えは束縛衝突を起こさない（発行時 snapshot・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await openSession(gpu);
     try {
@@ -142,12 +139,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "run 直後の data 書き換えは実行に届く（borrowed の負の門・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "run 直後の data 書き換えは実行に届く（borrowed の負の門・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await openSession(gpu);
     try {
@@ -170,12 +166,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "enqueue も発行時 snapshot で走る（inputs / shape / copyOutputs・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "enqueue も発行時 snapshot で走る（inputs / shape / copyOutputs・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await openSession(gpu);
     const sink = await gpu.createResident(BYTES, "sink");
@@ -206,4 +201,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

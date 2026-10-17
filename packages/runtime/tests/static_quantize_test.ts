@@ -1,6 +1,6 @@
 // 公式 Torch CPU の期待ビット列。表方式と独立した CPU 参照の両方を同じ oracle に突き合わせる。
 // 実 GPU 突合は gpu_static_quantize_test.ts（同じ oracle を helpers 経由で共有する）。
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { staticQuantizeParams } from "../src/kernels/static-quantize.ts";
 import { assertNodeContract } from "../src/ops.ts";

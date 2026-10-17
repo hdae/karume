@@ -3,7 +3,7 @@
 // 共有する唯一の受理集合**なので、門の正本は device を要らない側に置く — 実 GPU 経由の同じ門
 // （gpu_generation_context_test.ts）はアダプタ無しの環境では 1 本も走らない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { mergedGraph } from "../src/format/container/bind.ts";
 import type { IrGraph } from "../src/format/ir.ts";

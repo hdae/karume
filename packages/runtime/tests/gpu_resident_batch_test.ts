@@ -8,7 +8,7 @@
 // ② が無いと、内部で flush へ退避していても値は正しいまま緑になる（例外も警告も出ない）。
 // ③ が無いと、前後の enqueue の入力が入れ替わっても「どちらも計算はされている」ので気づけない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import {
   acquireGpu,
@@ -90,10 +90,9 @@ const producerSession = async (gpu: GpuContext): Promise<Session> =>
 const consumerSession = async (gpu: GpuContext): Promise<Session> =>
   await createSessionFromContainer(gpu, await openGraphModel(CONSUMER), "model");
 
-test({
-  name: "常駐入力は writeBuffer 無しで束ねられ、ホスト入力の run とビット一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "常駐入力は writeBuffer 無しで束ねられ、ホスト入力の run とビット一致する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const resident = await gpu.createResident(BYTES, "x");
     const session = await producerSession(gpu);
@@ -117,12 +116,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "enqueue の連鎖は常駐テンソル経由で値を渡し、フェンスは batch の 1 本だけ（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "enqueue の連鎖は常駐テンソル経由で値を渡し、フェンスは batch の 1 本だけ（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const producer = await producerSession(gpu);
     const consumer = await consumerSession(gpu);
@@ -153,12 +151,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "settle() は区間の途中でフェンスを 1 本だけ張り、以後のチャンク上限を推定へ切り替える（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "settle() は区間の途中でフェンスを 1 本だけ張り、以後のチャンク上限を推定へ切り替える（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const producer = await producerSession(gpu);
     const consumer = await consumerSession(gpu);
@@ -198,12 +195,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "settle() は in-flight の enqueue がある間は fail loudly（窓の帰属を守る・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "settle() は in-flight の enqueue がある間は fail loudly（窓の帰属を守る・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const producer = await producerSession(gpu);
     const consumer = await consumerSession(gpu);
@@ -226,12 +222,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "settle() の途中は enqueue も 2 度目の settle() も finish() も fail loudly（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "settle() の途中は enqueue も 2 度目の settle() も finish() も fail loudly（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const producer = await producerSession(gpu);
     const consumer = await consumerSession(gpu);
@@ -272,12 +267,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "連続 enqueue の入力書き込みは先行 dispatch を追い越さない（eager submit の門・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "連続 enqueue の入力書き込みは先行 dispatch を追い越さない（eager submit の門・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const first = await gpu.createResident(BYTES, "first");
@@ -314,12 +308,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "常駐入力の識別子は導出済み計画のキーに効く（差し替えで再導出・戻すとヒット・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "常駐入力の識別子は導出済み計画のキーに効く（差し替えで再導出・戻すとヒット・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const a = await gpu.createResident(BYTES, "a");
@@ -360,12 +353,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "焼き込みから参照中の常駐テンソルは破棄できない（故障注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "焼き込みから参照中の常駐テンソルは破棄できない（故障注入・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const bound = await gpu.createResident(BYTES, "bound");
@@ -398,12 +390,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "破棄済み常駐テンソルの利用は全ての面で fail loudly（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "破棄済み常駐テンソルの利用は全ての面で fail loudly（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const dead = await gpu.createResident(BYTES, "dead");
@@ -430,16 +421,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // 消失した device では `queue.writeBuffer` が破棄済みバッファへの**沈黙 no-op**（警告すら
 // 出ない）になり、`createBuffer` の errorScope も消失を捕らえない（pop は null で resolve）ため
 // 無効なバッファを掴んだ resident が成功として返る。どちらも loud になるのは次のフェンスで、
 // その間の診断は誤導的 — 入口の同期検査でしか止められない。
-test({
-  name: "device.destroy() 直後（lost の反応前）から常駐テンソルの受付を拒否する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "device.destroy() 直後（lost の反応前）から常駐テンソルの受付を拒否する（実 GPU）",
+  async () => {
     // この case は device を壊すので専用の GpuContext を取る。
     const gpu = await acquireGpu();
     const resident = await gpu.createResident(BYTES, "victim");
@@ -471,12 +461,11 @@ test({
     await assertRejects(() => resident.read(), GpuDeviceLostError);
     await assertRejects(() => gpu.createResident(BYTES, "after-lost"), GpuDeviceLostError);
   },
-});
+);
 
-test({
-  name: "常駐テンソルの大きさ不一致は入力側・写し先側とも fail loudly（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "常駐テンソルの大きさ不一致は入力側・写し先側とも fail loudly（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const wrong = await gpu.createResident(BYTES + 4, "wrong");
@@ -510,32 +499,27 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "createResident は 4 の倍数の正の大きさしか受けない",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
-    const gpu = await acquireGpu();
-    try {
-      for (const bad of [0, -4, 6, 1.5]) {
-        await assertRejects(
-          () => gpu.createResident(bad),
-          ResidentTensorError,
-          "4 の倍数",
-          `byteLength=${bad}`,
-        );
-      }
-    } finally {
-      gpu.destroy();
+test.skipIf(!GPU_AVAILABLE)("createResident は 4 の倍数の正の大きさしか受けない", async () => {
+  const gpu = await acquireGpu();
+  try {
+    for (const bad of [0, -4, 6, 1.5]) {
+      await assertRejects(
+        () => gpu.createResident(bad),
+        ResidentTensorError,
+        "4 の倍数",
+        `byteLength=${bad}`,
+      );
     }
-  },
+  } finally {
+    gpu.destroy();
+  }
 });
 
-test({
-  name: "決着済みの batch には enqueue できず、finish は何度でも同じ決着を返す（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "決着済みの batch には enqueue できず、finish は何度でも同じ決着を返す（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const sink = await gpu.createResident(BYTES, "sink");
@@ -560,12 +544,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "計測が有効な device では batch を開けない（実 GPU・timestamp-query 必須）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
+  "計測が有効な device では batch を開けない（実 GPU・timestamp-query 必須）",
+  async () => {
     const gpu = await acquireGpu({ gpuTiming: true });
     try {
       await assertRejects(() => gpu.beginBatch(), BatchScopeError, "gpuTiming");
@@ -573,12 +556,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "別の GpuContext で開いた batch には enqueue できない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "別の GpuContext で開いた batch には enqueue できない（実 GPU）",
+  async () => {
     const owner = await acquireGpu();
     const other = await acquireGpu();
     const session = await producerSession(other);
@@ -599,7 +581,7 @@ test({
       other.destroy();
     }
   },
-});
+);
 
 /** y = reshape(x)（[ROWS,COLS] → [COUNT]）。出力が入力の**別名**になる縮退グラフ。 */
 const ALIAS: DeclarationJson = {
@@ -614,10 +596,9 @@ const ALIAS: DeclarationJson = {
   nodes: [{ op: "reshape", ins: ["x"], outs: ["y"], attrs: {} }],
 };
 
-test({
-  name: "未 await の enqueue を積んだ直後の finish() でも全て区間に入る（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "未 await の enqueue を積んだ直後の finish() でも全て区間に入る（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const sink = await gpu.createResident(BYTES, "sink");
@@ -650,12 +631,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "別 GpuContext の常駐テンソルはヒット経路でも fail loudly（ID 衝突の門・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "別 GpuContext の常駐テンソルはヒット経路でも fail loudly（ID 衝突の門・実 GPU）",
+  async () => {
     const owner = await acquireGpu();
     const other = await acquireGpu();
     const session = await producerSession(owner);
@@ -696,12 +676,11 @@ test({
       other.destroy();
     }
   },
-});
+);
 
-test({
-  name: "copyOutputs の写し元と写し先が同一バッファなら enqueue 時点で落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "copyOutputs の写し元と写し先が同一バッファなら enqueue 時点で落ちる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openGraphModel(ALIAS), "model");
     const state = await gpu.createResident(BYTES, "state");
@@ -726,12 +705,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "進行中の run が束ねている常駐テンソルは破棄できない（故障注入・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "進行中の run が束ねている常駐テンソルは破棄できない（故障注入・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const bound = await gpu.createResident(BYTES, "bound");
@@ -775,7 +753,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 2x（PRODUCER の出力）の参照値。 */
 const doubled = (phase: number): Float32Array<ArrayBuffer> => {
@@ -786,10 +764,9 @@ const doubled = (phase: number): Float32Array<ArrayBuffer> => {
 // 非 await の enqueue が本体で落ちても、区間は「dispatch が 1 本少ないまま成功」で決着して
 // いた（errorScope が捕らえるのは GPU 側の失敗だけで、ホスト側の throw は戻り Promise にしか
 // 出ない = 握っていなければ未処理拒否として抜けるだけ）。この門はその帰属を固定する。
-test({
-  name: "非 await の enqueue の失敗は finish() に帰属する（最初の 1 件・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "非 await の enqueue の失敗は finish() に帰属する（最初の 1 件・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const wrong = await gpu.createResident(BYTES + 4, "wrong");
@@ -833,16 +810,15 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // 束縛予約（`#bindInput`）が立つのは実行本体 = マイクロタスク 1 段後なので、焼き込みも束縛も
 // 0 本の resident には「API が受理した直後の同じ tick に dispose が通る」窓が開いていた。
 // dispose の doc が謳う「誤りは dispose の呼び出し点で真因のまま落ちる」を、受理済みの
 // run / enqueue に対しても成り立たせるのが発行時の使用予約。
-test({
-  name: "発行済み run / enqueue が使う常駐テンソルは同じ tick でも破棄できない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "発行済み run / enqueue が使う常駐テンソルは同じ tick でも破棄できない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const fresh = await gpu.createResident(BYTES, "fresh");
@@ -882,12 +858,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "使用予約の取得が途中で落ちても取得済みは漏れない（rollback の門・実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "使用予約の取得が途中で落ちても取得済みは漏れない（rollback の門・実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const alive = await gpu.createResident(BYTES, "alive");
@@ -925,15 +900,14 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // createResident が async なのは errorScope で囲むため（上限超過の createBuffer は同期例外を
 // 投げず**無効なバッファを返す**）。push/pop を外しても値は正しいままなので、この門が無いと
 // 「無効な resident が成功として返り、以後の write が沈黙 no-op になる」退行が全緑で通る。
-test({
-  name: "上限超過の createResident は errorScope 経由で型付き例外になる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "上限超過の createResident は errorScope 経由で型付き例外になる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // MUST: 上限超過かつ 4 の倍数を保つ（崩れると同期の引数検査が先に出て、別の門を検査して
@@ -961,15 +935,14 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // 区間は device 単位の errorScope 区間ロックを握り続けるので、finish() を通らずに抜けると
 // 以後の run が例外も診断も無く待ち続ける。`await using` はその取りこぼしを起こしにくくする
 // 書き方で、asyncDispose が無いと TS では型エラー・JS では TypeError（しかもロック取得後）。
-test({
-  name: "await using で開いた batch 区間は抜けた時点で決着している（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "await using で開いた batch 区間は抜けた時点で決着している（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const sink = await gpu.createResident(BYTES, "sink");
@@ -993,7 +966,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * グラフ出力に initializer 名を書いた形（IR が許す）。その値は焼き込みの値写像に載らないので
@@ -1024,10 +997,9 @@ const openInitializerOutputModel = () =>
     },
   ]);
 
-test({
-  name: "initializer 由来のグラフ出力への copyOutputs は積む前に落ち、区間の他を巻き添えにしない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "initializer 由来のグラフ出力への copyOutputs は積む前に落ち、区間の他を巻き添えにしない（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(
       gpu,
@@ -1072,4 +1044,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

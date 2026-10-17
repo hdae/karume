@@ -5,7 +5,7 @@
  */
 import { isNotFound, readTextFile, stat } from "@karume/test-support/fs";
 import { assertEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import type { IrGraph } from "../../runtime/src/format/ir.ts";
 import {
   linearGemvPackedEligible,
@@ -102,10 +102,9 @@ const planParallelKeys = (
   return { keys: Object.fromEntries([...keys].toSorted(([a], [b]) => (a < b ? -1 : 1))), packed };
 };
 
-describe({
-  name: "QAT E4B の製品グラフでの並列 GEMV の適用（計画・GPU 不要）",
-  ignore: !QAT_AVAILABLE,
-  fn: () => {
+describe.skipIf(!QAT_AVAILABLE)(
+  "QAT E4B の製品グラフでの並列 GEMV の適用（計画・GPU 不要）",
+  () => {
     it("i2 の lm_head と f32 の per_layer_model_projection を除く全 linear が E4B の行に載る", async () => {
       const manifest: ContainerManifest = JSON.parse(await readTextFile(QAT_MANIFEST));
       const head = containerPart0(manifest, "e4b", "model", "i4");
@@ -136,4 +135,4 @@ describe({
       assertEquals(planParallelKeys(graph, 9), { keys: { [NOT_PARALLEL]: 344 }, packed: 0 });
     });
   },
-});
+);

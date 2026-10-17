@@ -8,7 +8,7 @@
 //
 // 面を変えたときの更新手順は失敗メッセージが持つ（`KARUME_SURFACE=write`）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertPublicSurface } from "./helpers/public-surface.ts";
 
 test("公開面: runtime の exports がスナップショットと一致する", async () => {

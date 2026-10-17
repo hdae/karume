@@ -13,7 +13,7 @@
  */
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { assertTernaryCodes } from "../src/format/container/bind.ts";
 import { codecLayout } from "../src/format/container/codecs.ts";
 import { ContainerFormatError } from "../src/format/container/header.ts";

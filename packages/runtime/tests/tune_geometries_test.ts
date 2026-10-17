@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import {
   assertGemmGeometry,
   defaultGemmGeometry,

@@ -10,7 +10,7 @@
 //    テストが文言を逐語 assert しているので、ここが落とすと 5 本が一斉に赤になる。
 // ④ decode 段（不正 UTF-8）と parse 段（JSON 構文違反）を別の文言で落とす。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { openContainer } from "@karume/runtime";
 import { readAssetBuffer, readAssetJson, readWholeAsset } from "../src/hub/asset-readers.ts";

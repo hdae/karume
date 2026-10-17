@@ -8,7 +8,7 @@
 // ② 計測の無い常駐経路（enqueue — ADR 0054）でも埋まる（この欄の存在理由）。
 // ③ レシピ生成で落ちた run の直後は undefined（1 本前の成功 run の表を残さない）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
@@ -72,11 +72,9 @@ const assertNonTrivial = (census: Census | undefined): Census => {
   return census;
 };
 
-test({
-  name: "lastRunPipelines は計測の実発行内訳とキー集合・本数が一致する（ミス / ヒット run・実 GPU）",
-  // 計測（timestamp-query）が無い device では突合の相手が居ない — 明示 SKIP。
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
+  "lastRunPipelines は計測の実発行内訳とキー集合・本数が一致する（ミス / ヒット run・実 GPU）",
+  async () => {
     const gpu = await acquireGpu({ gpuTiming: true });
     const session = await openSession(gpu);
     try {
@@ -99,12 +97,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "lastRunPipelines は計測の無い常駐経路（enqueue）でも埋まり、run と同じ表になる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "lastRunPipelines は計測の無い常駐経路（enqueue）でも埋まり、run と同じ表になる（実 GPU）",
+  async () => {
     // 計測を要求しない device（計測有効だと beginBatch が拒否される — ADR 0054）。
     const gpu = await acquireGpu();
     const session = await openSession(gpu);
@@ -133,12 +130,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "レシピ生成で落ちた run の直後は lastRunPipelines が undefined（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "レシピ生成で落ちた run の直後は lastRunPipelines が undefined（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     // 故障注入の位置は**レシピ生成**（`RecipeBuilder.buildRecipes` の matmul が dispatch 上限超過で
     // throw — gpu_params_cache_test.ts と同じ仕掛け）。出力タイル辺は既定幾何から導く（定数で
@@ -193,4 +189,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

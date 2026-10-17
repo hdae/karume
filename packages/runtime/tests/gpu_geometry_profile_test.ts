@@ -28,7 +28,7 @@
 
 import { platformObject } from "@karume/test-support/webgpu";
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { acquireGpu, GpuContext } from "../src/gpu/device.ts";
 import {
   DEFAULT_GEOMETRY_PROFILE,
@@ -419,29 +419,24 @@ describe("gemmRows の代表 M", () => {
   });
 });
 
-describe({
-  name: "幾何プロファイルの診断（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () => {
-    it("Session は実機の adapter から選ばれたプロファイルの名前を診断に出す", async () => {
-      const gpu = await acquireGpu();
-      try {
-        const run = await runCase(gpu, linearCase(40));
-        assertEquals(run.profile, selectGeometryProfile(gpu.adapterInfo).id);
-        // adapterInfo が空の機（古い Chromium の adapter.info 欠落）は既定に落ちる
-        const blank = await runCase(contextAs(gpu, "", "", ""), linearCase(40));
-        assertEquals(blank.profile, DEFAULT_GEOMETRY_PROFILE.id);
-      } finally {
-        gpu.destroy();
-      }
-    });
-  },
+describe.skipIf(!GPU_AVAILABLE)("幾何プロファイルの診断（実 GPU）", () => {
+  it("Session は実機の adapter から選ばれたプロファイルの名前を診断に出す", async () => {
+    const gpu = await acquireGpu();
+    try {
+      const run = await runCase(gpu, linearCase(40));
+      assertEquals(run.profile, selectGeometryProfile(gpu.adapterInfo).id);
+      // adapterInfo が空の機（古い Chromium の adapter.info 欠落）は既定に落ちる
+      const blank = await runCase(contextAs(gpu, "", "", ""), linearCase(40));
+      assertEquals(blank.profile, DEFAULT_GEOMETRY_PROFILE.id);
+    } finally {
+      gpu.destroy();
+    }
+  });
 });
 
-describe({
-  name: "埋め込みプロファイルの幾何は既定プロファイルとビット同一（実 GPU）",
-  ignore: !GPU_AVAILABLE || BUILTIN_GEOMETRY_PROFILES.length === 0,
-  fn: () => {
+describe.skipIf(!GPU_AVAILABLE || BUILTIN_GEOMETRY_PROFILES.length === 0)(
+  "埋め込みプロファイルの幾何は既定プロファイルとビット同一（実 GPU）",
+  () => {
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
       const route = profile.match === undefined ? "注入" : "adapter の選択";
       it(`'${profile.id}'（${route}）の Session は全ケースで既定と Uint32 一致し、その幾何のキーで走る`, async () => {
@@ -470,91 +465,86 @@ describe({
       });
     }
   },
+);
+
+describe.skipIf(!GPU_AVAILABLE)("acquireGpu で注入した幾何プロファイル（実 GPU）", () => {
+  it("apple-metal-3 を注入した device の Session は全ケースでその表の名前・幾何のキーで走り、既定と Uint32 一致する", async () => {
+    const plain = await acquireGpu();
+    // 渡した表は acquire 時に複製される — 後から書き換えても device の表（id）は変わらない
+    const handedOver = structuredClone(APPLE_METAL_3);
+    const injected = await acquireGpu({ geometryProfile: handedOver });
+    (handedOver as { id: string }).id = "changed-after-acquire";
+    try {
+      const baseline = contextAs(plain, "", "", "");
+      for (const testCase of CASES) {
+        await assertRunsWithProfile(baseline, injected, APPLE_METAL_3, testCase);
+      }
+    } finally {
+      injected.destroy();
+      plain.destroy();
+    }
+  });
+
+  it("コールバック形（ADR 0117 決定 6）: device の adapter 情報で 1 度呼ばれ、返した埋め込みの表で Session が走り既定と Uint32 一致する・undefined なら自動選択", async () => {
+    const plain = await acquireGpu();
+    const seen: GPUAdapterInfo[] = [];
+    const injected = await acquireGpu({
+      geometryProfile: (adapterInfo) => {
+        seen.push(adapterInfo);
+        return APPLE_METAL_3;
+      },
+    });
+    const automatic = await acquireGpu({ geometryProfile: () => undefined });
+    try {
+      assertEquals(seen.length, 1);
+      assert(
+        seen[0] === injected.adapterInfo,
+        "コールバックの adapterInfo が GpuContext のものと別物",
+      );
+      const baseline = contextAs(plain, "", "", "");
+      for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case()]) {
+        await assertRunsWithProfile(baseline, injected, APPLE_METAL_3, testCase);
+      }
+      const run = await runCase(automatic, linearCase(40));
+      assertEquals(run.profile, selectGeometryProfile(automatic.adapterInfo).id);
+    } finally {
+      automatic.destroy();
+      injected.destroy();
+      plain.destroy();
+    }
+  });
+
+  it("注入した表は adapter と match を見ない（apple-metal-3 に当たる adapter でも、別 vendor の表が使われる）", async () => {
+    const gpu = await acquireGpu();
+    try {
+      const baseline = contextAs(gpu, "", "", "");
+      // 埋め込みの選択なら apple-metal-3 が当たる adapter に、match が nvidia の表を注入する
+      const subject = contextAs(
+        gpu,
+        "apple",
+        "metal-3",
+        APPLE_METAL_3.match?.description ?? "",
+        NVIDIA_BLACKWELL,
+      );
+      assertEquals(selectGeometryProfile(subject.adapterInfo).id, APPLE_METAL_3.id);
+      for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case()]) {
+        await assertRunsWithProfile(baseline, subject, NVIDIA_BLACKWELL, testCase);
+      }
+    } finally {
+      gpu.destroy();
+    }
+  });
 });
 
-describe({
-  name: "acquireGpu で注入した幾何プロファイル（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () => {
-    it("apple-metal-3 を注入した device の Session は全ケースでその表の名前・幾何のキーで走り、既定と Uint32 一致する", async () => {
-      const plain = await acquireGpu();
-      // 渡した表は acquire 時に複製される — 後から書き換えても device の表（id）は変わらない
-      const handedOver = structuredClone(APPLE_METAL_3);
-      const injected = await acquireGpu({ geometryProfile: handedOver });
-      (handedOver as { id: string }).id = "changed-after-acquire";
-      try {
-        const baseline = contextAs(plain, "", "", "");
-        for (const testCase of CASES) {
-          await assertRunsWithProfile(baseline, injected, APPLE_METAL_3, testCase);
-        }
-      } finally {
-        injected.destroy();
-        plain.destroy();
-      }
-    });
-
-    it("コールバック形（ADR 0117 決定 6）: device の adapter 情報で 1 度呼ばれ、返した埋め込みの表で Session が走り既定と Uint32 一致する・undefined なら自動選択", async () => {
-      const plain = await acquireGpu();
-      const seen: GPUAdapterInfo[] = [];
-      const injected = await acquireGpu({
-        geometryProfile: (adapterInfo) => {
-          seen.push(adapterInfo);
-          return APPLE_METAL_3;
-        },
-      });
-      const automatic = await acquireGpu({ geometryProfile: () => undefined });
-      try {
-        assertEquals(seen.length, 1);
-        assert(
-          seen[0] === injected.adapterInfo,
-          "コールバックの adapterInfo が GpuContext のものと別物",
-        );
-        const baseline = contextAs(plain, "", "", "");
-        for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case()]) {
-          await assertRunsWithProfile(baseline, injected, APPLE_METAL_3, testCase);
-        }
-        const run = await runCase(automatic, linearCase(40));
-        assertEquals(run.profile, selectGeometryProfile(automatic.adapterInfo).id);
-      } finally {
-        automatic.destroy();
-        injected.destroy();
-        plain.destroy();
-      }
-    });
-
-    it("注入した表は adapter と match を見ない（apple-metal-3 に当たる adapter でも、別 vendor の表が使われる）", async () => {
-      const gpu = await acquireGpu();
-      try {
-        const baseline = contextAs(gpu, "", "", "");
-        // 埋め込みの選択なら apple-metal-3 が当たる adapter に、match が nvidia の表を注入する
-        const subject = contextAs(
-          gpu,
-          "apple",
-          "metal-3",
-          APPLE_METAL_3.match?.description ?? "",
-          NVIDIA_BLACKWELL,
-        );
-        assertEquals(selectGeometryProfile(subject.adapterInfo).id, APPLE_METAL_3.id);
-        for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case()]) {
-          await assertRunsWithProfile(baseline, subject, NVIDIA_BLACKWELL, testCase);
-        }
-      } finally {
-        gpu.destroy();
-      }
-    });
-  },
-});
-
-describe({
-  name: "dp4a カナリアは注入した表の i8a8 attention 幾何で撃つ（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: () => {
+describe.skipIf(!GPU_AVAILABLE)(
+  "dp4a カナリアは注入した表の i8a8 attention 幾何で撃つ（実 GPU）",
+  () => {
     it("attentionCompute a8 の Session 構築で、カナリアが注入した表の ①QK / ③PV 幾何の WGSL をコンパイルする", async (context) => {
       const gpu = await acquireGpu({ geometryProfile: APPLE_METAL_3 });
       try {
         if (!dp4aAvailable(gpu.wgslLanguageFeatures)) {
           // 非広告の device ではカナリアが走らない（emu 直行）— 見る対象が無いので明示 SKIP
-          console.warn(`SKIP ${context.name}: dot4I8Packed が広告されていない`);
+          console.warn(`SKIP ${context.task.name}: dot4I8Packed が広告されていない`);
           return;
         }
         const compiled: string[] = [];
@@ -591,4 +581,4 @@ describe({
       }
     });
   },
-});
+);

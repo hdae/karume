@@ -3,7 +3,7 @@
 // 同じ dispatch で読み書きが分かれる slot は別領域）と「規則そのもの」（別名・pinned・一時の LIFO・
 // 上限の fail loudly・決定性）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   planTransients,

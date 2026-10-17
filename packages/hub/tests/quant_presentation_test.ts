@@ -1,6 +1,6 @@
 import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { ManifestFormatError, parseManifest } from "../mod.ts";
 import { FETCH_MANIFEST_TEXT } from "./helpers/fixture.ts";
 

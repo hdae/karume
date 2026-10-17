@@ -12,7 +12,7 @@
 //
 // 資産が欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "@karume/runtime";
 import { decodeTiles, planCodecTiles } from "../../models/src/irodori/codec.ts";
@@ -80,10 +80,9 @@ const readLatent = (): Float32Array<ArrayBuffer> => {
   ) as Float32Array<ArrayBuffer>;
 };
 
-test({
-  name: "e2e(実GPU): codec のタイル decode は単発 decode と全サンプルでビット一致する",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): codec のタイル decode は単発 decode と全サンプルでビット一致する",
+  async () => {
     const latent = readLatent();
     const frames = latent.length / LATENT_DIM;
     const prepared = prepareContainer(await openSeriesContainer(DECODER_URL), DECODER_GRAPH);
@@ -138,4 +137,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

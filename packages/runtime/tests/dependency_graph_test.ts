@@ -47,7 +47,7 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { readDir, readTextFile } from "@karume/test-support/fs";
 import { type ModuleEdge, walkModuleGraph } from "@karume/test-support/module-graph";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 
 /** リポジトリ根（`pnpm-workspace.yaml` の置き場）。 */
 const REPO_ROOT = new URL("../../../", import.meta.url);

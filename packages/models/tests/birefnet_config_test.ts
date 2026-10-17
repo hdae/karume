@@ -12,7 +12,7 @@
 // ④ `postprocess` は閉じた集合（`MATTE_PROCEDURES`）の宣言で、必須・既定なし（ADR 0125）。
 //    集合の外は綴り違いも Object.prototype の綴りも落とす。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { parseBirefnetPipelineConfig } from "../src/birefnet/config.ts";

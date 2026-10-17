@@ -36,7 +36,7 @@
 // 独立。
 
 import { isNotFound, readFile, statSync, writeFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
@@ -318,12 +318,10 @@ for (const series of SERIES) {
   }
 
   for (const entry of REAL_CASES) {
-    test({
-      name:
-        `BiRefNet 実画像前処理パリティ: ${series.name} / ${entry.name}` +
+    test.skipIf(!realAvailable)(
+      `BiRefNet 実画像前処理パリティ: ${series.name} / ${entry.name}` +
         "（TS の畳んだ正規化 対 handler.py の 2 段）",
-      ignore: !realAvailable,
-      fn: async () => {
+      async () => {
         const [goldenBytes, png] = await Promise.all([
           readBuffer(goldenUrl(series, entry.name)),
           readImage(entry.file),
@@ -375,15 +373,13 @@ for (const series of SERIES) {
             `（標本 ${worst}: ${got[worst]} 対 ${expected[worst]}）が ${PIXEL_ATOL} を超えた`,
         );
       },
-    });
+    );
   }
 
-  test({
-    name:
-      `BiRefNet 実画像 判別: ${series.name} — 顕著物体のある 2 枚の前景比が無い 2 枚を` +
+  test.skipIf(!realAvailable || !GPU_AVAILABLE)(
+    `BiRefNet 実画像 判別: ${series.name} — 顕著物体のある 2 枚の前景比が無い 2 枚を` +
       "上回る（マット PNG も書く）",
-    ignore: !realAvailable || !GPU_AVAILABLE,
-    fn: async () => {
+    async () => {
       // 判別は**前景比の順序**だけを見る（閾値は置かない — `birefnet/export.py` の
       // `_real_sanity` と同じ形で、あちらは torch 側に掛かっている）。一様に潰れた出力（全前景
       // / 全背景）も入力非依存の出力も、両群の前景比が並ぶので落ちる。実測は人物側が
@@ -535,7 +531,7 @@ for (const series of SERIES) {
           .join("\n"),
       );
     },
-  });
+  );
 }
 
 // GPU も資産も揃った系列だけが sha 門を走らせる（揃わない系列のケースは参照値の欠けとして

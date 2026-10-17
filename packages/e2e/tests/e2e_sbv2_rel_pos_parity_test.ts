@@ -23,7 +23,7 @@ import {
   readFile,
   readTextFileSync,
 } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors, prepareContainer } from "../../runtime/mod.ts";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
@@ -146,10 +146,9 @@ for (const { ioFile, rule } of PARITY_CASES) {
   });
 }
 
-test({
-  name: "DeBERTa の添字表はコンテナに 1 本も焼き込まれていない",
-  ignore: CASES.length === 0,
-  fn: async () => {
+test.skipIf(CASES.length === 0)(
+  "DeBERTa の添字表はコンテナに 1 本も焼き込まれていない",
+  async () => {
     // 昇格が効いていれば、T で切り出す `sym_prefix_slice` は 1 本も残らない（残っていたら
     // Tmax=512 の `[1,512,512]` を抱えたまま = 2MiB の死荷重）。値は正しいまま容量だけが
     // 戻る類なので、E2E では捕まらない。
@@ -166,4 +165,4 @@ test({
       "グラフ入力の並び",
     );
   },
-});
+);

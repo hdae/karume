@@ -18,7 +18,7 @@
 // census 門（同決定 4 ③ — 席を指定したとき ①' と ③' が実際に走る）は
 // gpu_state_execution_test.ts。
 
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import {
@@ -325,10 +325,9 @@ const assertBitIdentical = (
   }
 };
 
-test({
-  name: "states 形 ③' KV 並列縮約は f64 参照と ③ の両方の帯に収まり、構造的保証を保つ（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 ③' KV 並列縮約は f64 参照と ③ の両方の帯に収まり、構造的保証を保つ（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -421,13 +420,12 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 故障注入 — 各変異が①の帯で落ちること（門が空振りでない証明）。 */
-test({
-  name: "states 形 ③' の故障注入（木縮約を潰す / レーン幅を変える）は参照との帯で落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 ③' の故障注入（木縮約を潰す / レーン幅を変える）は参照との帯で落ちる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // live がレーン数を跨ぐ形でないと「レーン 0 の部分和だけ」でも一致してしまう
@@ -469,7 +467,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * ①' の S を ① と突き合わせる（**構造は厳密・値だけ帯**）。単一ブロックのケース専用
@@ -556,10 +554,9 @@ const assertQkScores = (
  * 差が ①' 由来か ③' 由来か分けられない）。席そのままの組（①' + ③'）は最後に f64 参照との
  * 帯だけ見る。
  */
-test({
-  name: "states 形 ①' D 並列縮約は f64 参照と ① の両方の帯に収まり、構造的保証を保つ（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 ①' D 並列縮約は f64 参照と ① の両方の帯に収まり、構造的保証を保つ（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -662,13 +659,12 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** 故障注入 — 各変異が①の帯で落ちること（門が空振りでない証明）。 */
-test({
-  name: "states 形 ①' の故障注入（木縮約を潰す / レーン幅を変える）は参照との帯で落ちる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "states 形 ①' の故障注入（木縮約を潰す / レーン幅を変える）は参照との帯で落ちる（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       // D がレーン数を跨ぐ形でないと「レーン 0 の部分和だけ」でも一致してしまう（D 32 = 2 本／レーン）
@@ -710,7 +706,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // Stats/PV fusion (`statsPvFusion`) is a variant on top of the parallel seat (QK and PV both
 // parallel), so its gates live beside the parallel-variant gates above.
@@ -767,114 +763,106 @@ describe("states attention の行統計/PV融合", () => {
     assertEquals(stateStatsPvEligible(1, 1025), false);
   });
 
-  it({
-    name: "ring・GQA・端数D・pad・行分割でparallelと同じ値を返す",
-    ignore: !GPU_AVAILABLE,
-    fn: async () => {
-      const gpu = await acquireGpu(),
-        cache = new Map<string, GPUComputePipeline>();
-      let maxAbs = 0;
-      try {
-        for (const depth of [1, 17, 256, 512]) {
-          for (const [chunkRows, query, window, past] of [
-            [1, 1, 0, 0],
-            [4, 4, 0, 31],
-            [8, 1, 0, 95],
-            [8, 4, 1, 4095],
-            [4, 1, 31, 4095],
-            [8, 8, 127, 0xfffffff0],
-            // live 701（= past + query）で行統計の 256 レーン grid-stride が 3 周回る形。
-            // 他の 6 形は live ≤ 134 なので 1 周で終わり、多周回の加算順が ② と一致する
-            // ことを実機で見る線が無い（colCap 717 ≤ 1024 で適用条件は満たす）。
-            // 実行時間が depth ループ 4 本に掛かるので、長い列はこの 1 形だけにする。
-            [1, 1, 0, 700],
-          ]) {
-            const spec: StateCase = {
-              name: "fused",
-              batch: 2,
-              heads: 4,
-              kvHeads: depth === 1 ? 4 : 1,
-              chunkRows,
-              query,
-              window,
-              past,
-              depth,
-              capacity: window ? window + 8 : past + chunkRows + 16,
-            };
-            const inputs = fusionInputs(spec);
-            const ref = referenceStateAttention({ ...spec, ...inputs, scale: halfScale(depth) });
-            const before = await runStateAttention(gpu.device, spec, inputs, {
-              cache,
-              qkReduce: "parallel",
-              pvReduce: "parallel",
-            });
-            for (const rowsBlock of [chunkRows, 1]) {
-              const after = await runStateAttention(gpu.device, { ...spec, rowsBlock }, inputs, {
-                cache,
-                qkReduce: "parallel",
-                pvReduce: "parallel",
-                statsPvFusion: true,
-              });
-              assertEquals(new Uint32Array(after.out.buffer), new Uint32Array(before.out.buffer));
-              for (let i = 0; i < after.out.length; i++) {
-                const error = Math.abs(after.out[i] - ref.data[i]);
-                assert(error < 5e-6, "states attention の既存絶対許容差");
-                maxAbs = Math.max(maxAbs, error);
-              }
-            }
-          }
-        }
-        console.log("stats/PV融合 vs f64 maxAbs", maxAbs);
-      } finally {
-        gpu.destroy();
-      }
-    },
-  });
-
-  it({
-    name: "NaN/Infの分類とpadの厳密0を維持する",
-    ignore: !GPU_AVAILABLE,
-    fn: async () => {
-      const gpu = await acquireGpu(),
-        cache = new Map<string, GPUComputePipeline>();
-      try {
-        const spec: StateCase = {
-          name: "special",
-          batch: 1,
-          heads: 4,
-          kvHeads: 1,
-          chunkRows: 4,
-          query: 1,
-          window: 31,
-          past: 40,
-          capacity: 39,
-          depth: 17,
-        };
-        for (const target of ["q", "insK", "insV", "slotK", "slotV"] as const) {
+  it.skipIf(!GPU_AVAILABLE)("ring・GQA・端数D・pad・行分割でparallelと同じ値を返す", async () => {
+    const gpu = await acquireGpu(),
+      cache = new Map<string, GPUComputePipeline>();
+    let maxAbs = 0;
+    try {
+      for (const depth of [1, 17, 256, 512]) {
+        for (const [chunkRows, query, window, past] of [
+          [1, 1, 0, 0],
+          [4, 4, 0, 31],
+          [8, 1, 0, 95],
+          [8, 4, 1, 4095],
+          [4, 1, 31, 4095],
+          [8, 8, 127, 0xfffffff0],
+          // live 701（= past + query）で行統計の 256 レーン grid-stride が 3 周回る形。
+          // 他の 6 形は live ≤ 134 なので 1 周で終わり、多周回の加算順が ② と一致する
+          // ことを実機で見る線が無い（colCap 717 ≤ 1024 で適用条件は満たす）。
+          // 実行時間が depth ループ 4 本に掛かるので、長い列はこの 1 形だけにする。
+          [1, 1, 0, 700],
+        ]) {
+          const spec: StateCase = {
+            name: "fused",
+            batch: 2,
+            heads: 4,
+            kvHeads: depth === 1 ? 4 : 1,
+            chunkRows,
+            query,
+            window,
+            past,
+            depth,
+            capacity: window ? window + 8 : past + chunkRows + 16,
+          };
           const inputs = fusionInputs(spec);
-          inputs[target].set([NaN, Infinity, -Infinity, 0, -0]);
+          const ref = referenceStateAttention({ ...spec, ...inputs, scale: halfScale(depth) });
           const before = await runStateAttention(gpu.device, spec, inputs, {
             cache,
             qkReduce: "parallel",
             pvReduce: "parallel",
           });
-          const after = await runStateAttention(gpu.device, spec, inputs, {
-            cache,
-            qkReduce: "parallel",
-            pvReduce: "parallel",
-            statsPvFusion: true,
-          });
-          const a = new Uint32Array(after.out.buffer),
-            b = new Uint32Array(before.out.buffer);
-          for (let i = 0; i < a.length; i++) {
-            if (Number.isNaN(before.out[i])) assert(Number.isNaN(after.out[i]));
-            else assertEquals(a[i], b[i]);
-            if (Math.floor(i / spec.depth) % spec.chunkRows >= spec.query) assertEquals(a[i], 0);
+          for (const rowsBlock of [chunkRows, 1]) {
+            const after = await runStateAttention(gpu.device, { ...spec, rowsBlock }, inputs, {
+              cache,
+              qkReduce: "parallel",
+              pvReduce: "parallel",
+              statsPvFusion: true,
+            });
+            assertEquals(new Uint32Array(after.out.buffer), new Uint32Array(before.out.buffer));
+            for (let i = 0; i < after.out.length; i++) {
+              const error = Math.abs(after.out[i] - ref.data[i]);
+              assert(error < 5e-6, "states attention の既存絶対許容差");
+              maxAbs = Math.max(maxAbs, error);
+            }
           }
         }
-      } finally {
-        gpu.destroy();
       }
-    },
+      console.log("stats/PV融合 vs f64 maxAbs", maxAbs);
+    } finally {
+      gpu.destroy();
+    }
+  });
+
+  it.skipIf(!GPU_AVAILABLE)("NaN/Infの分類とpadの厳密0を維持する", async () => {
+    const gpu = await acquireGpu(),
+      cache = new Map<string, GPUComputePipeline>();
+    try {
+      const spec: StateCase = {
+        name: "special",
+        batch: 1,
+        heads: 4,
+        kvHeads: 1,
+        chunkRows: 4,
+        query: 1,
+        window: 31,
+        past: 40,
+        capacity: 39,
+        depth: 17,
+      };
+      for (const target of ["q", "insK", "insV", "slotK", "slotV"] as const) {
+        const inputs = fusionInputs(spec);
+        inputs[target].set([NaN, Infinity, -Infinity, 0, -0]);
+        const before = await runStateAttention(gpu.device, spec, inputs, {
+          cache,
+          qkReduce: "parallel",
+          pvReduce: "parallel",
+        });
+        const after = await runStateAttention(gpu.device, spec, inputs, {
+          cache,
+          qkReduce: "parallel",
+          pvReduce: "parallel",
+          statsPvFusion: true,
+        });
+        const a = new Uint32Array(after.out.buffer),
+          b = new Uint32Array(before.out.buffer);
+        for (let i = 0; i < a.length; i++) {
+          if (Number.isNaN(before.out[i])) assert(Number.isNaN(after.out[i]));
+          else assertEquals(a[i], b[i]);
+          if (Math.floor(i / spec.depth) % spec.chunkRows >= spec.query) assertEquals(a[i], 0);
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
   });
 });

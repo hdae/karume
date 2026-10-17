@@ -3,7 +3,7 @@
 // model assets.
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { AllcloseError } from "../../runtime/src/reference/allclose.ts";
 import {
   COLLAPSE_CEILINGS,

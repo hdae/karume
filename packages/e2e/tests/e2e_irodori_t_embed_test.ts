@@ -8,7 +8,7 @@
 // `outputs/series/irodori-v4-small/pipeline/t-embed.safetensors`（`t` `[40]` と
 // `t_embed` `[40,512]`）。生成していない環境では**明示 SKIP** する（ADR 0005）。GPU は要らない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { tSchedule } from "../../models/src/irodori/host/sampler.ts";
@@ -80,46 +80,41 @@ const readGolden = (bytes: Uint8Array<ArrayBuffer>) => {
   return { t: view("t"), table: view("t_embed") };
 };
 
-test({
-  name: "Irodori t_embed: ホスト式が torch 基準の golden 表と一致する",
-  ignore: !AVAILABLE,
-  fn: () => {
-    const { t, table } = readGolden(goldenBytes as Uint8Array<ArrayBuffer>);
-    const [steps, width] = [table.shape[0], table.shape[1]];
-    assertEquals(t.shape, [steps], "t と t_embed の step 数");
-    const frequencies = timestepFrequencies(width);
-    let worst = 0;
-    let where = "";
-    let nonFinite = 0;
-    for (let step = 0; step < steps; step += 1) {
-      const row = timestepEmbedding(t.data[step], frequencies);
-      assertEquals(row.length, width, `step ${step} の幅`);
-      for (let column = 0; column < width; column += 1) {
-        const golden = table.data[step * width + column];
-        if (!Number.isFinite(row[column]) || !Number.isFinite(golden)) {
-          nonFinite += 1;
-          continue;
-        }
-        const diff = Math.abs(row[column] - golden);
-        if (diff > worst) {
-          worst = diff;
-          where = `step ${step}（t=${t.data[step]}）列 ${column}`;
-        }
+test.skipIf(!AVAILABLE)("Irodori t_embed: ホスト式が torch 基準の golden 表と一致する", () => {
+  const { t, table } = readGolden(goldenBytes as Uint8Array<ArrayBuffer>);
+  const [steps, width] = [table.shape[0], table.shape[1]];
+  assertEquals(t.shape, [steps], "t と t_embed の step 数");
+  const frequencies = timestepFrequencies(width);
+  let worst = 0;
+  let where = "";
+  let nonFinite = 0;
+  for (let step = 0; step < steps; step += 1) {
+    const row = timestepEmbedding(t.data[step], frequencies);
+    assertEquals(row.length, width, `step ${step} の幅`);
+    for (let column = 0; column < width; column += 1) {
+      const golden = table.data[step * width + column];
+      if (!Number.isFinite(row[column]) || !Number.isFinite(golden)) {
+        nonFinite += 1;
+        continue;
+      }
+      const diff = Math.abs(row[column] - golden);
+      if (diff > worst) {
+        worst = diff;
+        where = `step ${step}（t=${t.data[step]}）列 ${column}`;
       }
     }
-    // MUST: NaN / ±Inf は不合格。素朴な差分判定だと NaN が「差 0」に化けて通る。
-    assertEquals(nonFinite, 0, "t_embed に非有限の標本");
-    assert(
-      worst <= T_EMBED_ATOL,
-      `t_embed の最大絶対差 ${worst.toExponential(4)} が atol ${T_EMBED_ATOL} を超えた（${where}）`,
-    );
-  },
+  }
+  // MUST: NaN / ±Inf は不合格。素朴な差分判定だと NaN が「差 0」に化けて通る。
+  assertEquals(nonFinite, 0, "t_embed に非有限の標本");
+  assert(
+    worst <= T_EMBED_ATOL,
+    `t_embed の最大絶対差 ${worst.toExponential(4)} が atol ${T_EMBED_ATOL} を超えた（${where}）`,
+  );
 });
 
-test({
-  name: "Irodori t スケジュール: 閉形式が上流 linspace と 1 ulp 級で一致する",
-  ignore: !AVAILABLE,
-  fn: () => {
+test.skipIf(!AVAILABLE)(
+  "Irodori t スケジュール: 閉形式が上流 linspace と 1 ulp 級で一致する",
+  () => {
     const { t } = readGolden(goldenBytes as Uint8Array<ArrayBuffer>);
     const steps = t.shape[0];
     // golden は末尾の 0 を落とした `[:-1]` なので、こちらも同じ範囲だけを見る。
@@ -133,4 +128,4 @@ test({
       `t スケジュールの最大絶対差 ${worst.toExponential(4)} が atol ${T_SCHEDULE_ATOL} を超えた`,
     );
   },
-});
+);

@@ -3,7 +3,7 @@
 // 本体（main.ts）は起動と同時に registry から `jsr:@karume/*` を取りに行くので、門は cli.ts に
 // 切り出してある。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { isPinRef, parseSmokeArgs } from "../cli.ts";
 

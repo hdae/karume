@@ -15,7 +15,7 @@
 // 実 GPU は使わない。上限は環境ごとに違い、実物で超過を作るには数 GiB の資産が要るので、門
 // そのものは「limits を絞ったフェイク device」でしか決定論的に固定できない。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import type { BoundContainer } from "../src/format/container/bind.ts";
 import type { IrGraph } from "../src/format/ir.ts";

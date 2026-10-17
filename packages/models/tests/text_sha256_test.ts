@@ -4,7 +4,7 @@
 // 63 / 64 / 65 バイト・2 ブロック目の境界）を全て踏む。
 
 import { assertEquals } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { sha256HexSync } from "../src/text/sha256.ts";
 
 const subtleHex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>

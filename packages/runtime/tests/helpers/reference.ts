@@ -43,7 +43,7 @@
  */
 
 import { readTextFileSync, writeFile, writeTextFileSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { fail } from "@std/assert";
 import { ENVIRONMENT, type Environment } from "./environment.ts";
 import type { ResultEntry, Results } from "./results.ts";
@@ -393,11 +393,9 @@ export const registerReferenceGate = (
         heldHere.join(" / "),
     );
   }
-  test({
-    name: `参照門: この環境（${environment}）の参照値が登録した全ケースにある`,
-    // GPU も資産も無い環境では sha 門自体が走らない（この門番も鳴らさない）。
-    ignore: ALLOW_NO_REFERENCE || !options.runnable,
-    fn: () => {
+  test.skipIf(ALLOW_NO_REFERENCE || !options.runnable)(
+    `参照門: この環境（${environment}）の参照値が登録した全ケースにある`,
+    () => {
       if (referenceGatePasses(references, options.caseIds, holds)) return;
       const { missing, staleHolds } = referenceGateFindings(references, options.caseIds, holds);
       const lines = [
@@ -427,7 +425,7 @@ export const registerReferenceGate = (
       );
       fail(lines.join("\n"));
     },
-  });
+  );
 };
 
 /**

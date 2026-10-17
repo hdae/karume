@@ -5,7 +5,7 @@
 // ③ 読めない文書で黙って空にしないこと の 3 面である。
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { buildDiff, type LoadedResults, parseResultsDocument } from "../diff.ts";
 import { parseArgs, single } from "../main.ts";
 

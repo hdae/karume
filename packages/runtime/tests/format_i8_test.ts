@@ -7,7 +7,7 @@
 // MUST: 期待値は実装の走査式ではなく「軸ごとの座標 → scale の添字」を手で書き下したもので
 // 持つ（同じ桁上がり式を写すと添字バグが両側で相殺する）。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { alignI8Payload, decodeI8, I8Error } from "../src/format/i8.ts";
 

@@ -6,7 +6,7 @@
 // packages/e2e/tests/e2e_sbv2_relattn_parity_test.ts (ADR 0129). The fault-injection test below
 // guards that parity check against being vacuous.
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { buildRelattnTables, RELATTN_WINDOW_SIZE } from "../src/sbv2/relattn-tables.ts";
 

@@ -4,7 +4,7 @@
 // generate を待たずにここで縛る。決着の順を握るために、操作の中身は**手で決着させる
 // promise**（`Promise.withResolvers`）にしてある — タイマー待ちに頼ると順序が緩む。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertRejects } from "@std/assert";
 import { createOperationChain } from "../src/concurrency/serial.ts";
 

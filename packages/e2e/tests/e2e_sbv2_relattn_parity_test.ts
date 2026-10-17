@@ -18,7 +18,7 @@
 // live here (ADR 0129).
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors, prepareContainer } from "@karume/runtime";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
@@ -126,10 +126,9 @@ for (const { target, ioFile } of AVAILABLE) {
 }
 
 for (const target of TABLE_INPUT_TARGETS) {
-  test({
-    name: `相対位置表の窓幅: ${target} の焼き込み表と TS 定数が一致する`,
-    ignore: discoverCases(target).length === 0,
-    fn: async () => {
+  test.skipIf(discoverCases(target).length === 0)(
+    `相対位置表の窓幅: ${target} の焼き込み表と TS 定数が一致する`,
+    async () => {
       // 沈黙誤値クラスの門（ADR 0013）。key 側の表はホストが作るが、**value 側の表
       // `idx_v` はコンテナに焼き込まれていて幅が `2w+1`**。ここが TS の窓幅定数と食い違えば
       // ホストは違う幅の埋め込みを前提に添字を作っている — shape エラーにならず黙って
@@ -149,5 +148,5 @@ for (const target of TABLE_INPUT_TARGETS) {
       assertEquals(baked[0].length, 4, `${target} の焼き込み表の rank`);
       assertEquals(baked[0][3], 2 * RELATTN_WINDOW_SIZE + 1, `${target} の相対位置埋め込みの幅`);
     },
-  });
+  );
 }

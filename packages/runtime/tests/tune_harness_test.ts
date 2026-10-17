@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertMatch, assertThrows } from "@std/assert";
 import { acquireGpu } from "../mod.ts";
 import { parseStorageRoles } from "../src/gpu/pipeline-cache.ts";
@@ -183,100 +183,92 @@ test("1 dispatch 15 µs の小さいケースでも、掃引の反復は opbench
   assert(reps * nsPerDispatch >= TARGET_PASS_MS * 1e6);
 });
 
-test({
-  name: "実 GPU: f32 linear を既定と 64×64/256 で測ると両方の時間が正で出力が一致する",
-  ignore: adapter === null,
-  fn: async () => {
+test.skipIf(adapter === null)(
+  "実 GPU: f32 linear を既定と 64×64/256 で測ると両方の時間が正で出力が一致する",
+  async () => {
     assertMeasuredPair(
       await sweepPair(LINEAR, GEMM_64X64),
       gemmCandidate(defaultGemmGeometry()).name,
       GEMM_64X64.name,
     );
   },
-});
+);
 
-test({
-  name: "実 GPU: i8a8 linear を既定と 64×64/256 で測ると両方の時間が正で出力が一致する",
-  ignore: adapter === null,
-  fn: async () => {
+test.skipIf(adapter === null)(
+  "実 GPU: i8a8 linear を既定と 64×64/256 で測ると両方の時間が正で出力が一致する",
+  async () => {
     assertMeasuredPair(
       await sweepPair(I8A8_LINEAR, I8A8_64X64),
       i8a8Candidate(defaultI8a8Geometry("linear")).name,
       I8A8_64X64.name,
     );
   },
-});
+);
 
-test({
-  name: "実 GPU: timestamp-query の無い device は壁時計（wall）で同じ規約を回す",
-  ignore: adapter === null,
-  fn: async () => {
+test.skipIf(adapter === null)(
+  "実 GPU: timestamp-query の無い device は壁時計（wall）で同じ規約を回す",
+  async () => {
     const result = await sweepPair(LINEAR, GEMM_64X64, false);
     assertMeasuredPair(result, gemmCandidate(defaultGemmGeometry()).name, GEMM_64X64.name);
     // 単位が wall なら round の値は壁時計そのもの
     for (const row of result.rows) assertEquals(row.rounds, row.wallRounds);
   },
-});
+);
 
-test({
-  name: "実 GPU: f32 融合 attention の ①QK を既定と 64×64/256 で測ると出力が一致する",
-  ignore: adapter === null,
-  fn: async () => {
+test.skipIf(adapter === null)(
+  "実 GPU: f32 融合 attention の ①QK を既定と 64×64/256 で測ると出力が一致する",
+  async () => {
     assertMeasuredPair(
       await sweepPair(attentionCase("attention", "qk"), GEMM_64X64),
       gemmCandidate(defaultGemmGeometry()).name,
       GEMM_64X64.name,
     );
   },
-});
+);
 
-test({
-  name: "実 GPU: f32 融合 attention の ③PV（前段 ①QK → ② 行統計）を既定と 64×64/256 で測ると出力が一致する",
-  ignore: adapter === null,
-  fn: async () => {
+test.skipIf(adapter === null)(
+  "実 GPU: f32 融合 attention の ③PV（前段 ①QK → ② 行統計）を既定と 64×64/256 で測ると出力が一致する",
+  async () => {
     assertMeasuredPair(
       await sweepPair(attentionCase("attention", "pv"), GEMM_64X64),
       gemmCandidate(defaultGemmGeometry()).name,
       GEMM_64X64.name,
     );
   },
-});
+);
 
-test({
-  name: "実 GPU: i8a8 融合 attention の ①QK を既定と 64×64/256 で測ると出力が一致する",
-  ignore: adapter === null,
-  fn: async () => {
+test.skipIf(adapter === null)(
+  "実 GPU: i8a8 融合 attention の ①QK を既定と 64×64/256 で測ると出力が一致する",
+  async () => {
     assertMeasuredPair(
       await sweepPair(attentionCase("i8a8-attention", "qk"), I8A8_64X64),
       i8a8Candidate(defaultI8a8Geometry("attention_qk")).name,
       I8A8_64X64.name,
     );
   },
-});
+);
 
-test({
-  name: "実 GPU: i8a8 融合 attention の ③PV を既定と 64×64/256 で測ると出力が一致する",
-  ignore: adapter === null,
-  fn: async () => {
+test.skipIf(adapter === null)(
+  "実 GPU: i8a8 融合 attention の ③PV を既定と 64×64/256 で測ると出力が一致する",
+  async () => {
     assertMeasuredPair(
       await sweepPair(attentionCase("i8a8-attention", "pv"), I8A8_64X64),
       i8a8Candidate(defaultI8a8Geometry("attention_pv")).name,
       I8A8_64X64.name,
     );
   },
-});
+);
 
-test({
-  name: "実 GPU: conv2d の implicit GEMM を既定と 64×64/256 で測ると出力が一致する",
-  ignore: adapter === null,
-  fn: async () => {
+test.skipIf(adapter === null)(
+  "実 GPU: conv2d の implicit GEMM を既定と 64×64/256 で測ると出力が一致する",
+  async () => {
     assertMeasuredPair(
       await sweepPair(CONV2D, CONV2D_64X64),
       conv2dCandidate(gemmMTileGeometry(64)).name,
       CONV2D_64X64.name,
     );
   },
-});
+);
 
 // 幾何どうしの一致は「全幾何が同じ取り違え（束縛の入れ替わり・params の誤り）をしている」場合を
 // 検出できないので、linear の既定幾何の出力だけは CPU の参照と突き合わせる。参照の丸め順は
@@ -337,10 +329,9 @@ const resourceWords = (target: SweepCase, name: string): Uint32Array<ArrayBuffer
   return words;
 };
 
-test({
-  name: "実 GPU: f32 linear の既定幾何の出力は CPU 参照（K 昇順の逐次積和 + 末尾の bias・非融合か fma 縮約のどちらか）とビット同一",
-  ignore: adapter === null,
-  fn: async () => {
+test.skipIf(adapter === null)(
+  "実 GPU: f32 linear の既定幾何の出力は CPU 参照（K 昇順の逐次積和 + 末尾の bias・非融合か fma 縮約のどちらか）とビット同一",
+  async () => {
     const target: LinearCase = {
       id: "test-linear-cpu-m64-n64-k64",
       op: "linear",
@@ -395,7 +386,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /**
  * dense の GEMM（matmul / bmm — bias 無し・B 側 `[K,N]`）の CPU 参照 2 本（非融合 / fma 縮約）。
@@ -453,10 +444,9 @@ const assertDenseMatchesReference = async (target: MatmulCase | BmmCase): Promis
   }
 };
 
-test({
-  name: "実 GPU: f32 matmul の出力は CPU 参照（K 昇順の逐次積和・非融合か fma 縮約のどちらか）とビット同一",
-  ignore: adapter === null,
-  fn: async () => {
+test.skipIf(adapter === null)(
+  "実 GPU: f32 matmul の出力は CPU 参照（K 昇順の逐次積和・非融合か fma 縮約のどちらか）とビット同一",
+  async () => {
     // M / N / K を全て違う値にする（m・n・k の取り違えが寸法の食い違いとして出る）
     await assertDenseMatchesReference({
       id: "test-matmul-cpu-m64-n48-k32",
@@ -469,12 +459,11 @@ test({
       source: "test",
     });
   },
-});
+);
 
-test({
-  name: "実 GPU: f32 bmm（batch 3）の出力は CPU 参照とビット同一（バッチの取り違えは参照と食い違う）",
-  ignore: adapter === null,
-  fn: async () => {
+test.skipIf(adapter === null)(
+  "実 GPU: f32 bmm（batch 3）の出力は CPU 参照とビット同一（バッチの取り違えは参照と食い違う）",
+  async () => {
     // 入力は資源ごとの擬似乱数列なのでバッチごとに値が違う — z のオフセットを取り違えると
     // （全バッチが 0 枚目を読む・書き先が重なる・書き残しが 0 のまま）参照と一致しない
     await assertDenseMatchesReference({
@@ -488,4 +477,4 @@ test({
       source: "test",
     });
   },
-});
+);

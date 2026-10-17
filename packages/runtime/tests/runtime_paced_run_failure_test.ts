@@ -14,7 +14,7 @@
 // 持つ。値は計算しない — 見るのは失敗の決着と後始末で、出力の値ではない。
 
 import { platformObject } from "@karume/test-support/webgpu";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   assert,
   assertEquals,

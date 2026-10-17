@@ -15,7 +15,7 @@
 // なので models 側が正 — 2026-08-16 移設済み）。exporter 側の生成・参照も同じ path を指す。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   normalizeNfc,

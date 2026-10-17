@@ -9,7 +9,7 @@
 
 import { fileURLToPath } from "node:url";
 import { makeTempDir, remove, writeTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import {
   assert,
   assertEquals,

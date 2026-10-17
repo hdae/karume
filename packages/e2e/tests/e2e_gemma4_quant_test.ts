@@ -9,7 +9,7 @@ import {
   writeTextFile,
 } from "@karume/test-support/fs";
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { describe, it } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { localDirectory, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
@@ -40,10 +40,9 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
       `[karume] ${root.pathname} が無い（か karume/5 でない）ためquantの実GPU検査をSKIP`,
     );
   }
-  describe({
-    name: `${family}: quant定義からGEMVを選ぶ（実GPU）`,
-    ignore: !available || !GPU_AVAILABLE,
-    fn: () => {
+  describe.skipIf(!available || !GPU_AVAILABLE)(
+    `${family}: quant定義からGEMVを選ぶ（実GPU）`,
+    () => {
       it("既定quant・参照quant・明示上書きの優先順位を守る", async () => {
         const original = await readTextFile(new URL("karume.json", root));
         const parsed = parseManifest(original);
@@ -399,7 +398,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
         }
       });
     },
-  });
+  );
   // Kept as its own case rather than one more mode of the loop above: that loop compares
   // 24-token chat text, while this one fixes 64-token greedy id equality and the exact
   // per-phase packed counts read from lastRunFusions.
@@ -410,10 +409,9 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
   // 見ない。実グラフでは 210 本の SRQ と 275 本の融合エピローグが混ざるので、対付けが 1 本でも
   // 外れた形（生産側だけ packed・消費側だけ packed）はここでしか出ない。
   if (family === "gemma4-qat") {
-    describe({
-      name: "gemma4-qat: packed int8 活性（ADR 0105・実GPU）",
-      ignore: !available || !GPU_AVAILABLE,
-      fn: () => {
+    describe.skipIf(!available || !GPU_AVAILABLE)(
+      "gemma4-qat: packed int8 活性（ADR 0105・実GPU）",
+      () => {
         it("席 on / off の 64 token greedy id 列が完全一致し、decode 計画だけが 70 本を掴む", async () => {
           const outputs: number[][] = [];
           const packedByPhase: Record<string, number[]> = {};
@@ -475,6 +473,6 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
           assertEquals(packedByPhase["on:prefill"], [0], "席 on の prefill 計画");
         });
       },
-    });
+    );
   }
 }

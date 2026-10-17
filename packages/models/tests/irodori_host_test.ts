@@ -13,7 +13,7 @@ import {
   assertStrictEquals,
   assertThrows,
 } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { ModelInputError } from "../src/errors.ts";
 import { conditionFromStateOverride, patchRequestedLatent } from "../src/irodori/conditioning.ts";
 import { buildDitMask, SEGMENT_ORDER } from "../src/irodori/host/mask.ts";

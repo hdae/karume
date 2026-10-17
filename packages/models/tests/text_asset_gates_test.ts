@@ -8,7 +8,7 @@
 // NOTE: 文字列・数値・オブジェクトの素の型検査（`asString` / `asNumber` / `asRecord`）は id 系の
 // 門の土台なので、id の検査が「型検査を通り抜けた値」だけを見ていることが判る最小限だけ書く。
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   asId,

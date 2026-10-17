@@ -9,7 +9,7 @@
  * いないことを、候補の全幾何 × 3 カーネル × 変種で見る。
  */
 
-import { test } from "@karume/test-support/test";
+import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { attentionPvI8a8Wgsl, attentionQkI8a8Wgsl } from "../src/kernels/attention-i8a8.ts";
 import { linearI8a8Wgsl } from "../src/kernels/linear-i8a8.ts";
