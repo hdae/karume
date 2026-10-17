@@ -3,7 +3,7 @@
 IR に載るのは `anima/export.py` が書き出す 4 グラフだけで、その外側 — トークナイズ /
 スケジューラ（sigmas）/ timestep 埋め込み表 / CFG / Euler 更新 / latent 逆正規化 / 512
 パディング — は全てホストコードになる。**そのホスト側の「数の正」がここ**で、Deno 側の
-通しチェーン E2E（`packages/models/tests/e2e_anima_test.ts`）は TS で書いたグルーを
+通しチェーン E2E（`packages/e2e/tests/e2e_anima_test.ts`）は TS で書いたグルーを
 このフィクスチャの対応値と突き合わせてから使う。
 
 正本は diffusers 0.39 の `modular_pipelines/anima/`（encoders.py / before_denoise.py /

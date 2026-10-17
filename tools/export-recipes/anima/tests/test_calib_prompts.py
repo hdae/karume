@@ -5,7 +5,7 @@
 
 - 重複が無く、既定本数がコーパスに収まる（縮小実行が「同じプロンプトを N 回」にならない）
 - 先頭を切っても被写体 / 画風の混合が保たれる（`--calib-prompts N` は先頭 N 本）
-- 評価入力 3 箇所（`pipeline_ref` / Deno E2E / eval-images）から**部分一致でも**分離している
+- 評価入力 3 箇所（`pipeline_ref` / TS E2E / 視認評価の 4 ケース）から**部分一致でも**分離している
 - 分離検査そのものが**素通りしない**（フォールト注入で落ちること）
 - 評価入力の抽出が空になったら fail loudly（黙って分離検査が緩む方が危ない）
 """
@@ -60,7 +60,7 @@ class TestCorpus:
 
 class TestEvaluationSources:
     def test_it_gathers_all_three_sources(self):
-        """`pipeline_ref` の固定 2 本 + Deno E2E の 1 本 + eval-images の 4 ケース。"""
+        """`pipeline_ref` の固定 2 本 + TS E2E の 1 本 + 視認評価の 4 ケース。"""
         evaluated = evaluation_prompts()
 
         assert PROMPT in evaluated

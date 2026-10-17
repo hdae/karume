@@ -360,7 +360,7 @@ MIGRATE_SPEC_SECTION = "## 12. 移行 CLI の契約"
 WRONG_POINTERS = ("ADR 0109 決定 3", "ADR 0109 決定 8")
 
 #: 誤指しを走査する根（`docs/` は ADR 自身が住む場所なので外す）。
-POINTER_SCAN_ROOTS = ("packages", "tools", "examples")
+POINTER_SCAN_ROOTS = ("packages", "tools")
 
 #: 走査する綴り（読み手の TS と書き手の Python の両方 — 誤指しは両側で起きる）。
 POINTER_SCAN_SUFFIXES = (".py", ".ts")

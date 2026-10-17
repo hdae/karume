@@ -819,7 +819,7 @@ class TestTheCaseWriters:
             assert 0 < distance < 1e-5 * float(f64.abs().max()), name
 
     def test_the_f64_key_is_spelled_like_the_typescript_reader(self) -> None:
-        source = (REPO_ROOT / "packages/models/tests/e2e_wan_dit_test.ts").read_text()
+        source = (REPO_ROOT / "packages/e2e/tests/e2e_wan_dit_test.ts").read_text()
         declared = re.findall(r'^const REFERENCE_F64_KEY = "([^"]+)";$', source, re.MULTILINE)
 
         assert declared == [export_dit.REFERENCE_F64_KEY]

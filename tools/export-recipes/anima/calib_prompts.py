@@ -6,10 +6,10 @@
 
 - **評価入力と分離する**（2026-08-21 ユーザー裁定）— 校正で見たプロンプトをそのまま評価に
   使うと、PSNR / 視認が「校正で見た絵をそのまま出せたか」を測る数になり、校正の質ではなく
-  漏れを測ることになる。評価入力の**正本は 3 箇所とも別ファイル**（`anima.pipeline_ref` の
-  固定プロンプトと、Deno 側の E2E / eval-images）なので、写しをここへ置かず
-  {@link evaluation_prompts} が実ファイルから抽出して {@link assert_calib_disjoint} で
-  突き合わせる（写すと片方だけ古くなる）。
+  漏れを測ることになる。評価入力の正本は `anima.pipeline_ref` の固定プロンプトと TS 側の E2E
+  （実ファイルから抽出 — 写すと片方だけ古くなる）、それに視認評価の 4 ケース（正本だった
+  `examples/` が移植で消えたので {@link EVAL_IMAGE_SUBJECTS} に置く）で、{@link evaluation_prompts}
+  が集めて {@link assert_calib_disjoint} で突き合わせる。
 - **Anima の領域に寄せる** — 模型はアニメ画像特化（danbooru 系タグ）なので、校正も同じタグ
   語彙で採る。**被写体（人数 0〜4・動物）・構図（寄り / 引き / 俯瞰 / 煽り / 後ろ姿）・
   画風（chibi / 線画 / 水彩 / フィルム粒子）を散らす** — 1 つの型へ寄せると、活性の偏りが
@@ -74,8 +74,21 @@ CALIB_PROMPTS: tuple[str, ...] = (
 
 #: 評価入力の正本（リポジトリ相対）。Deno 側なので import できず、**実ファイルから抽出**する
 #: （写しを持つと片方だけ古くなり、分離検査が黙って緩む）。抽出が空になったら fail loudly。
-E2E_SOURCE = Path("packages/models/tests/e2e_anima_test.ts")
-EVAL_IMAGES_SOURCE = Path("examples/anima/eval-images.ts")
+E2E_SOURCE = Path("packages/e2e/tests/e2e_anima_test.ts")
+
+#: 視認評価（eval-images）の 4 ケース。正本だった `examples/anima/eval-images.ts` は 0.15 の移植で
+#: 削除された（ADR 0127 — 計測ツールと例はブラウザアプリとして作り直す）ので、戻るまでは
+#: **ここが唯一の置き場**。合成はあちらの `prompt()` と同じ `<prefix>, <subject>, <suffix>`。
+#: NOTE: アプリを作り直すときはこの 4 本をあちらから読み直すこと — 写しを 2 つにすると分離検査が
+#: 片方だけ古くなる（この定数を正本にして TS 側が引く形でもよい）。
+EVAL_IMAGE_QUALITY_PREFIX = "score_9, score_8_up, score_7_up"
+EVAL_IMAGE_QUALITY_SUFFIX = "masterpiece, best quality"
+EVAL_IMAGE_SUBJECTS: tuple[str, ...] = (
+    "1girl, solo, school uniform, cherry blossoms, outdoors, smile, upper body",
+    "scenery, mountain, lake, forest, no humans, blue sky, clouds",
+    "school hallway, perspective, vanishing point, indoor, windows, sunlight, no humans",
+    "1girl, solo, full body, standing, city street, buildings, detailed background",
+)
 
 #: TS の二重引用符文字列 1 本（エスケープ込み）。
 _STRING = r'"((?:[^"\\]|\\.)*)"'
@@ -103,29 +116,19 @@ def _declaration(text: str, source: Path, name: str) -> str:
 
 
 def _eval_image_prompts() -> tuple[str, ...]:
-    """`examples/anima/eval-images.ts` が実際に渡すプロンプト（4 ケース）。
-
-    合成の式（`` `${QUALITY_PREFIX}, ${subject}, ${QUALITY_SUFFIX}` ``）だけはあちらの
-    `prompt()` を写している — 定数と被写体は実ファイルから引くので、写しは 1 行に閉じる。
-    """
-    text = _read_source(EVAL_IMAGES_SOURCE)
-    prefix = _declaration(text, EVAL_IMAGES_SOURCE, "QUALITY_PREFIX")
-    suffix = _declaration(text, EVAL_IMAGES_SOURCE, "QUALITY_SUFFIX")
-    subjects = re.findall(rf"subject:\s*{_STRING}", text)
-    if not subjects:
-        raise AssertionError(
-            f"{EVAL_IMAGES_SOURCE} から subject を 1 件も抽出できなかった"
-            "（ケース表の綴りが変わっている）"
-        )
-    return tuple(f"{prefix}, {subject}, {suffix}" for subject in subjects)
+    """視認評価の 4 ケースのプロンプト（{@link EVAL_IMAGE_SUBJECTS} を合成したもの）。"""
+    return tuple(
+        f"{EVAL_IMAGE_QUALITY_PREFIX}, {subject}, {EVAL_IMAGE_QUALITY_SUFFIX}"
+        for subject in EVAL_IMAGE_SUBJECTS
+    )
 
 
 def evaluation_prompts() -> tuple[str, ...]:
     """校正から**分離すべき**評価入力の全量（3 箇所の正本から抽出）。
 
     - `anima.pipeline_ref` の固定プロンプト（参照フィクスチャ = 数値パリティの入力）
-    - Deno 側 E2E（`packages/models/tests/e2e_anima_test.ts`）の `PROMPT`
-    - eval-images（`examples/anima/eval-images.ts`）の 4 ケース
+    - TS 側 E2E（`packages/e2e/tests/e2e_anima_test.ts`）の `PROMPT`
+    - 視認評価の 4 ケース（{@link EVAL_IMAGE_SUBJECTS} — 元は `examples/anima/eval-images.ts`）
     """
     return (
         PROMPT,
