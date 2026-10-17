@@ -17,6 +17,11 @@ measurements in `docs/research/`.
 
 ### Added
 
+- bf16 weight storage is executed (`@karume/runtime`). A weight stored as bf16 stays resident
+  packed two per 32-bit word and is expanded in the kernel by a bit cast, under the same eligibility
+  rule as f16 (the weight slot of the fused kernels; everything else is expanded to f32 at load).
+  `capabilities().storage` lists `bf16`. Until now a bf16 initializer was accepted by the container
+  format but rejected at `prepareContainer`.
 - `nodeCacheStorage(root)` in `@karume/hub/node`: a `CacheStorage` on the Node.js file system for
   the fetch layer behind the Hugging Face source. Node has no Cache API, so until now a Node
   application could read a local distribution but not load from the hub; pass the result as

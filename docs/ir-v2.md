@@ -188,8 +188,9 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
   §6.3）: `f32` / `f16` / `bf16` / `i32` と量子化 4 種 `int8-sym` / `int4-sym-g` / `int2-off` /
   `ternary`。`i32` 以外は**意味論 f32 の符号化**で、`i32` だけが**生の int32**（記号依存定数の
   焼き込み先 — ADR [0010](decisions/0010-symbolic-constant-folding.md)。「格納語彙は f32 の
-  符号化」の明示的な例外）。**ランタイムが実行できるのは bf16 以外** — bf16 だけが「宣言としては
-  valid、実行は fail loudly（capability 不足の診断付き）」。台帳が持つのは格納形式だけで、実行できるかの
+  符号化」の明示的な例外）。**台帳の全 codec をランタイムが実行できる**（bf16 は 2026-10-17 まで
+  「宣言としては valid、実行は fail loudly」だったが、ADR [0131](decisions/0131-bf16-weight-execution.md)
+  で f16 と同じ経路に乗った）。台帳が持つのは格納形式だけで、実行できるかの
   正本は runtime の `RUNTIME_SUPPORT.storage`（`packages/runtime/src/ops/contracts.ts` — 展開経路の集合）である
   （container-v1 §6.2・ADR 0108 追記 12）。
 - **合流層**（container-v1 §13.3）: グラフと束縛表を**重み取得前に合流**し、合流後表現に対して

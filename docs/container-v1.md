@@ -569,9 +569,9 @@ codec に関わらず拒否する）。scale の dtype の
 軸 ③ の述語は展開経路ごとに 3 本ある: 共通の `eligibleCompressedInitializers`（消費が重みスロットだけ）と、
 それとの積で狭める `i4EligibleInitializers` / `i2EligibleInitializers`。
 
-`bf16` は①だけを満たす（台帳にあるので宣言は valid だが、`RUNTIME_SUPPORT.storage` に無いので実行は
-fail loudly）。`i2` は①②③だが③は linear / embedding だけ。**新しい codec を「宣言だけ先に受理する」道が
-通っている**。
+`bf16` は 2026-10-17（ADR 0131）まで①だけを満たしていた（台帳にあるので宣言は valid・`RUNTIME_SUPPORT.storage`
+に無いので実行は fail loudly）— 今は f16 と同じく①②③。`i2` は①②③だが③は linear / embedding だけ。
+**新しい codec を「宣言だけ先に受理する」道が通っている**（bf16 がその実例で、宣言から 2 か月後に実行経路が乗った）。
 
 展開の実装は軸と別に 2 つある。
 

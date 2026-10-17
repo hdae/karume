@@ -451,11 +451,11 @@ Deno 2.9.6 の `ext/webgpu/buffer.rs`（`mapAsync`）と `queue.rs`（`onSubmitt
 - **Deno CLI の tok/s は製品の性能指標に使わない** — 採否判定は Chrome の壁と GPU 時間で行う。
   根因と実測は [decode 速度調査](research/2026-09-19-qat-speed-recon.md) §3.2。
 
-## bf16 格納は宣言のみ受理・実行は fail loudly
+## 圧縮格納の実行経路と適格 — VRAM が縮むのは適格な重みスロットだけ
 
-codec 台帳に `bf16` が登録されているので宣言としては受理するが、実行経路が無く `prepareContainer` が
-capability 不足（`RuntimeSupportError`）として重みを取る前に全件列挙で拒否する（[ir-v2](ir-v2.md)
-「値と型」）。設計は [decisions/0006](decisions/0006-quantization.md) で確定済み。
+codec 台帳の全 codec を実行できる（bf16 は 2026-10-17 まで「宣言のみ受理・実行は fail loudly」だったが、
+[decisions/0131](decisions/0131-bf16-weight-execution.md) で f16 と同じ経路に乗った）。実行できるかの正本は
+`RUNTIME_SUPPORT.storage`（[ir-v2](ir-v2.md)「値と型」）。
 
 group 量子化（w4）は [decisions/0069](decisions/0069-packed-w4-storage.md) で**解禁・実行
 経路も実装済み**（2026-08-18）— codec `int4-sym-g`（格納型 `i4`・packed 4bit・K 方向 group の
@@ -470,7 +470,8 @@ per-channel として読むと沈黙誤値になるため）。
 
 **f16 は 2026-08-03 に解禁**（[decisions/0018](decisions/0018-f16-weight-execution.md)）、
 **i8（per-channel symmetric int8）も同日に解禁**
-（[decisions/0019](decisions/0019-i8-weight-execution.md)）— ただしどちらも VRAM が縮むのは
+（[decisions/0019](decisions/0019-i8-weight-execution.md)）、**bf16 は 2026-10-17 に解禁**
+（[decisions/0131](decisions/0131-bf16-weight-execution.md) — f16 と同じ適格・展開は bitcast）— ただしいずれも VRAM が縮むのは
 **適格な重みスロットだけ**。適格外（bias / norm 系 weight / その他の op / 混在消費 /
 消費ゼロ）はロード時に CPU で f32 展開され、**VRAM 削減はゼロ**で縮むのは配信サイズのみ。
 内訳は `Session.diagnostics().storage` で観測する（ADR 0006 の常設診断。i8 の
