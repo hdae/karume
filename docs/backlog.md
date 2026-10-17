@@ -18,7 +18,7 @@
   **フェーズ 2（整理 — 0.15.0 の中身）**: ① テスト選別（[一覧](research/2026-10-16-test-triage.md): keep 306 / move 16 / drop 4 / merge 42 / review 24 — 利用者の裁定で実施）
   ② ADR の整理と英訳・コメントの英語化（ADR 0130）③ 数値プロファイル（ADR 0126: 既定 = practical・reference は opt-in）④ 既定のプリセット = オリジナルの重み（ADR 0128・breaking）
   ⑤ ✅ Node 向けの CacheStorage（`@karume/hub/node` の `nodeCacheStorage`・2026-10-17・ステップ 2-4）⑥ ✅ PNG の sha 行を画素の sha に（ADR 0106 追記 2026-10-17・ステップ 2-5）⑦ lint の規則集合（既定規則の警告 331 件）
-  ⑧ ✅ `Deno.test` 形の shim を Vitest 本来の形へ（2026-10-17・ステップ 2-2）。**フェーズ 3**: 0.15.0 のリリース（JSR のみか npm も — ADR 0127 未決）。
+  ⑧ ✅ `Deno.test` 形の shim を Vitest 本来の形へ（2026-10-17・ステップ 2-2）。⑨ ✅ bf16 格納（ADR 0131 — runtime / exporter / anima の忠実プリセット `bf16`〈base・4 役〉・2026-10-17・ステップ 2-6）。副産物: Qwen3 text encoder の export の修正（`a5427e6b` 以降落ちていた）・bf16 の丸めは非永続 buffer を外す。**フェーズ 3**: 0.15.0 のリリース（JSR のみか npm も — ADR 0127 未決）。
   同乗の候補（判断はリリース前）: irodori 2 リポの重複の越境参照・sbv2 のサブパス面の再設計・hub ≤ 0.4 の旧名前空間の回収グルーの撤去・HTTP Range 取得。
 
 - **高速化 / メモリの波の残り（起票 2026-09-25・利用者裁定 = 参照層 / 実用層の 2 層に分ける・実用層でもデバイス内決定性 MUST）**:

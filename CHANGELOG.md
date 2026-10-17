@@ -22,6 +22,13 @@ measurements in `docs/research/`.
   rule as f16 (the weight slot of the fused kernels; everything else is expanded to f32 at load).
   `capabilities().storage` lists `bf16`. Until now a bf16 initializer was accepted by the container
   format but rejected at `prepareContainer`.
+- The exporter writes bf16 storage (`weight_dtype="bf16"` and per-tensor overrides) under the same
+  rule as f16: a weight is stored as bf16 only when the `f32 → bf16 → f32` round trip is bit-exact;
+  `karume.quantize.round_weights_to_bf16` rounds a model before the references are captured.
+- The Anima base model (`anima-v1.0` in `hdae/karume-anima`) gains the preset `bf16`: all four
+  components stored as bf16 — the upstream checkpoint's own values, bit for bit — with f32 compute,
+  the same download size as `f16`. The other presets, their files and the default are unchanged;
+  the new files sit under `anima-v1.0/`. The distribution is re-uploaded with the release.
 - `nodeCacheStorage(root)` in `@karume/hub/node`: a `CacheStorage` on the Node.js file system for
   the fetch layer behind the Hugging Face source. Node has no Cache API, so until now a Node
   application could read a local distribution but not load from the hub; pass the result as

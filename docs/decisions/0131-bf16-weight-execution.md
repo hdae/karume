@@ -66,9 +66,14 @@ re-bias and no subnormal reinterpretation — exact on both the host and the GPU
 `weight_dtype="bf16"` (and per-tensor overrides) stores a weight as bf16 only when the round trip
 `f32 → bf16 → f32` is bit-exact, otherwise it stays f32 — the same rule as f16, so the stored bytes
 are always the values the golden was computed with (ADR 0006, fake-quant first). Recipes round the
-model with `round_weights_to_bf16` (round-to-nearest-even) before capturing references. For a bf16
-upstream checkpoint the rounding is a no-op and the asset holds the upstream bits. bf16 payloads
-are serialised through an `int16` view (numpy has no bfloat16 dtype).
+model with `round_weights_to_bf16` (round-to-nearest-even) before capturing references. The
+rounding covers the parameters and the persistent buffers — what the checkpoint carries — and
+leaves non-persistent buffers alone: those are computed in f32 at init (the RoPE `inv_freq`), the
+upstream uses them in f32, and rounding one moved the Anima text conditioner's golden by 1.4e-4
+while no parameter moved (measured 2026-10-17; the f16 rounding keeps touching them so the frozen
+f16 series does not change). For a bf16 upstream checkpoint the rounding is therefore a no-op and
+the asset holds the upstream bits. bf16 payloads are serialised through an `int16` view (numpy
+has no bfloat16 dtype).
 
 ### 3. Anima ships a faithful preset `bf16`: all four components in bf16
 
@@ -88,8 +93,9 @@ a rounding of the fused weights, not the upstream bits.
   (five fused kernels with odd row lengths, GEMM tile edges, pool poison, mixed consumption,
   diagnostics, graph output); the GEMV bit-identity and gate tests run for bf16 next to f16.
 - The bf16 series of a recipe must produce the same goldens as its f32 series when the upstream is
-  bf16 (the rounding is a no-op), and the e2e sha rows of the bf16 preset are per environment like
-  every other preset (ADR 0106).
+  bf16 (the rounding is a no-op) — measured 2026-10-17 for Anima: the goldens of all four targets and
+  of the S-form DiT are byte-identical to f32 references taken with the same code. The e2e sha rows
+  of the bf16 preset are per environment like every other preset (ADR 0106).
 
 ## Consequences
 
@@ -97,8 +103,11 @@ a rounding of the fused weights, not the upstream bits.
   only"; `docs/quantization.md` table 1 gains the row's status; `docs/ir-v2.md` and
   `docs/container-v1.md` drop the bf16 exception.
 - Distribution size: an all-bf16 Anima preset downloads 5.06 GiB — the same as `f16`. The
-  distribution repository gains a bf16 copy of the shared text stack and VAE (+1.41 GiB) and a bf16
-  DiT per model (+3.64 GiB each). VRAM equals the f16 preset.
+  distribution repository gains a bf16 text stack and VAE (+1.41 GiB) and a bf16 DiT (+3.64 GiB) for
+  the base model. While only one model ships bf16, those files sit in that model's own subtree
+  (`anima-v1.0/…/model.bf16.krm`): the assembly folds a file into `shared/` only when two or more
+  models carry the same bytes, so a later bf16 preset for another model moves the text stack and VAE
+  under `shared/` and changes their published paths. VRAM equals the f16 preset.
 - Geometry profiles (ADR 0115) are keyed by pipeline key, so `:wbf16` GEMMs fall back to the default
   geometry; the faithful preset is not tuned for speed.
 - `CodecLayout` and `WeightStorage` both carry `bf16`; the residency and fusion types gained a
