@@ -20,6 +20,9 @@
       "deno-nvidia-geforce-rtx-3080-ti": "da099f4fe71a64e3e398869deff3fc64a538d5e4f0eceeb5ea22547598f7e326",
       "node-nvidia-geforce-rtx-3080-ti": "da099f4fe71a64e3e398869deff3fc64a538d5e4f0eceeb5ea22547598f7e326"
     },
+    "bf16-1024": {
+      "node-nvidia-geforce-rtx-3080-ti": "151008f280e60a94773106c919e3c6db1cb9e36905481b68f15d2a186ce65ccd"
+    },
     "extra-anima-copycat-20260610-cfg": {
       "deno-intel-graphics-bmg-g21": "a15ae777c1a39983626ec1573a65beaf32a2686020917707f798c80e1598396e",
       "deno-nvidia-geforce-rtx-3080-ti": "73e1d0512076278ecee9717dffc8b33a32402adbca0061ad4cd0bd0bd20253a3",

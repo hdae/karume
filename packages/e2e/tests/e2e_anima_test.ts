@@ -116,6 +116,9 @@ const REFERENCE = [
   { quant: "f16+dit8-a8-attn8-s16", resolution: { width: 1024, height: 1024 } },
   { quant: "f16+dit8-a8-attn8-s16", resolution: { width: 512, height: 512 } },
   { quant: "f16", resolution: { width: 1024, height: 1024 } },
+  // 忠実プリセット（4 役とも上流の bf16 ビット列 — ADR 0131 決定 3・2026-10-17 に全モデルへ）。turbo の
+  // 1 ケースだけ行を持つ（他のモデルの bf16 は export 時に上流 checkpoint とのバイト突合で担保）。
+  { quant: "bf16", resolution: { width: 1024, height: 1024 } },
 ] as const satisfies readonly { quant: string; resolution: ImageSize }[];
 
 /** ケース ID（ログのラベル / 参照値の鍵 / 実物のファイル名）。 */
@@ -485,7 +488,7 @@ for (const { quant, resolution } of REFERENCE) {
   const label = caseIdOf(quant, resolution);
   // request 側 `sampler:"euler"` の明示が manifest 既定（= 公式配布の宣言）とビット同一である
   // ことは、**生成を 1 本も増やさず**最短の 512 ケースだけを明示に振り替えて見る。既定経路の
-  // 門は残り 2 ケースと fromPretrained（同じ quant/512 を既定で回して同じ sha を要求する）が
+  // 門は残りのケースと fromPretrained（同じ quant/512 を既定で回して同じ sha を要求する）が
   // 保つので、どちらの経路も裸のまま残らない。
   const sampler: AnimaSamplerType | undefined = resolution.width === 512 ? "euler" : undefined;
   test.skipIf(!RUNNABLE || references.lacksReference(label))(
