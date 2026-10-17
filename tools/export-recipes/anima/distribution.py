@@ -522,7 +522,9 @@ class AnimaModel:
     #: text stack の格納ラベル（{@link ANIMA_TEXT_STACK_SERIES} のキー）もここから引く — `bf16` を
     #: 持つモデルは text stack 3 役の bf16 系列も要求・宣言する（忠実プリセットは 4 役とも bf16）。
     storages: tuple[str, ...]
-    #: text_conditioner を自前で持つか。`False` = 素の共有系列（{@link ANIMA_BASE_SERIES}）。
+    #: text_conditioner を自前で持つか（f16 の話 — bf16 は {@link text_conditioner_series} が
+    #: 決める）。
+    #: `False` = 素の共有系列（{@link ANIMA_BASE_SERIES}）。
     #: 第三者 fine-tune は DiT だけでなく llm_adapter（= text_conditioner）も焼き直している
     #: ので、共有すると**別のモデルのテキスト条件付け**で走る（絵だけが静かにずれる）。
     own_text_conditioner: bool
@@ -550,16 +552,19 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
     # 公式 Turbo（蒸留済み checkpoint そのもの — 旧 anima-turbo の LoRA 焼き込みは不要に
     # なった）。lora_sha256=None は「焼いていない」の積極検査で、lora_provenance.json を持つ
     # 旧 fused 系列の挿し込みを落とす。text_conditioner は base と f16 丸め後ビット同一の実測
-    # （2026-09-01）で共有系列を使う。旧 fused turbo が持っていた i4 席は**持ち越さない**
+    # （2026-09-01）で f16 は共有系列を使う（bf16 は上流ビットが 60 / 118 テンソルで違う —
+    # 2026-10-17 実測・最大 2.98e-8 の近ゼロ要素のみ — ので自前の系列:
+    # {@link text_conditioner_series}）。
+    # 旧 fused turbo が持っていた i4 席は**持ち越さない**
     # （2026-09-01 ユーザー裁定 — 全モデル i4 なしに揃う。復活レバーは素版と同じ
     # `anima.eval_dist`）。
     ANIMA_TURBO_MODEL_NAME: AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8"),
+        storages=("f16", "i8", "bf16"),
         own_text_conditioner=False,
         pipeline_config=ANIMA_TURBO_PIPELINE_CONFIG,
     ),
-    # 忠実プリセット `bf16`（ADR 0131 決定 3）は base だけ — turbo / aesthetic / extra は後続。
+    # 忠実プリセット `bf16`（ADR 0131 決定 3・追記 2026-10-17）は全モデルが持つ。
     ANIMA_BASE_MODEL_NAME: AnimaModel(
         lora_sha256=None,
         storages=("f16", "i8", "bf16"),
@@ -569,7 +574,7 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
     # 公式 Aesthetic。i4 席を持たないのは素版と同じ裁定線（上の NOTE — 全モデル i4 なし）。
     ANIMA_AESTHETIC_MODEL_NAME: AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8"),
+        storages=("f16", "i8", "bf16"),
         own_text_conditioner=True,
         pipeline_config=ANIMA_AESTHETIC_PIPELINE_CONFIG,
     ),
@@ -578,25 +583,25 @@ ANIMA_MODELS: Mapping[str, AnimaModel] = {
     # どちらも base と f16 丸め後 64/118 テンソル差の実測（2026-09-01）で自前。
     "anima-turbo-v1.0": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8"),
+        storages=("f16", "i8", "bf16"),
         own_text_conditioner=True,
         pipeline_config=ANIMA_TURBO_PIPELINE_CONFIG,
     ),
     "anima-aesthetic-v1.0": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8"),
+        storages=("f16", "i8", "bf16"),
         own_text_conditioner=True,
         pipeline_config=ANIMA_AESTHETIC_PIPELINE_CONFIG,
     ),
     "anima-wai-v1.0": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8"),
+        storages=("f16", "i8", "bf16"),
         own_text_conditioner=True,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
     "anima-copycat-20260610": AnimaModel(
         lora_sha256=None,
-        storages=("f16", "i8"),
+        storages=("f16", "i8", "bf16"),
         own_text_conditioner=True,
         pipeline_config=ANIMA_BASE_PIPELINE_CONFIG,
     ),
@@ -635,12 +640,29 @@ class AnimaSources:
     tokenizers: Path
 
 
+def text_conditioner_series(model: str, spec: AnimaModel, storage: str) -> str:
+    """text_conditioner の系列名（格納ラベルごと）。
+
+    f16 は {@link AnimaModel.own_text_conditioner} が決める（f16 丸め後にビット同一なら共有系列）。
+    bf16 は**上流のビット列を保つ**ので base 以外は常に自前の系列 — turbo-v1.1 の llm_adapter は
+    base と f16 丸め後は同一でも、bf16 では 60 / 118 テンソルが違う（2026-10-17 実測・最大 2.98e-8・
+    近ゼロ要素のみ）。配布の組み立てはバイトが同じ部品だけを `shared/` へ畳むので、共有の最適化は
+    ここで決めなくても失われない。
+    """
+    if storage == "bf16":
+        if model == ANIMA_BASE_MODEL_NAME:
+            return ANIMA_TEXT_STACK_SERIES[storage]
+        return f"{model}-bf16"
+    return f"{model}-{storage}" if spec.own_text_conditioner else ANIMA_TEXT_STACK_SERIES[storage]
+
+
 def anima_sources(series_dir: Path, model: str = ANIMA_BASE_MODEL_NAME) -> AnimaSources:
     """系列の親ディレクトリ（`outputs/series/`）から 1 モデルぶんの系列を引く。
 
-    モデル名は transformer の系列と、自前の text_conditioner を持つモデルの静的系列にだけ
-    掛かる — text_encoder / VAE / tokenizer は上流の fine-tune が触らない部分なので、
-    どのモデルでも格納ラベルごとの共有系列 1 本から引く。
+    モデル名は transformer の系列と、自前の text_conditioner を持つモデルの系列にだけ掛かる
+    （{@link text_conditioner_series} — bf16 は base 以外のどのモデルでも自前）。text_encoder /
+    VAE / tokenizer は上流の fine-tune が触らない部分なので、どのモデルでも格納ラベルごとの
+    共有系列 1 本から引く。
     """
     spec = anima_model(model)
     text_storages = [storage for storage in spec.storages if storage in ANIMA_TEXT_STACK_SERIES]
@@ -648,12 +670,7 @@ def anima_sources(series_dir: Path, model: str = ANIMA_BASE_MODEL_NAME) -> Anima
         transformer={storage: series_dir / f"{model}-{storage}-dyn" for storage in spec.storages},
         base={storage: series_dir / ANIMA_TEXT_STACK_SERIES[storage] for storage in text_storages},
         text_conditioner={
-            storage: series_dir
-            / (
-                f"{model}-{storage}"
-                if spec.own_text_conditioner
-                else ANIMA_TEXT_STACK_SERIES[storage]
-            )
+            storage: series_dir / text_conditioner_series(model, spec, storage)
             for storage in text_storages
         },
         tokenizers=series_dir / ANIMA_TOKENIZER_SERIES / "text",

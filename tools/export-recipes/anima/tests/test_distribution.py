@@ -367,8 +367,8 @@ def assembled(tmp_path: Path) -> tuple[Path, dict]:
     return out_dir, manifest
 
 
-#: 席を注入して組んだときの格納形（{@link _i4_seat}）。
-I4_SEAT_STORAGES = ("f16", "i8", "i4")
+#: 席を注入して組んだときの格納形（{@link _i4_seat} と同じ導出 — 宣言した格納形 + i4）。
+I4_SEAT_STORAGES = (*anima_model(ANIMA_TURBO_MODEL_NAME).storages, "i4")
 
 
 @pytest.fixture
@@ -631,20 +631,20 @@ class TestModelVariants:
         manifest = _assemble_anima(sources, out_dir, ANIMA_BASE_MODEL_NAME)
 
         entry = manifest["models"][ANIMA_BASE_MODEL_NAME]
-        # bf16 は忠実プリセット（ADR 0131 決定 3 — 素版だけ）。
+        # bf16 は忠実プリセット（ADR 0131 決定 3 — 追記 2026-10-17 で全モデル）。
         assert sorted(entry["weights"]["transformer"]) == ["bf16", "f16", "i8"]
         assert "f16+dit4" not in entry["quants"]
         assert "f16+dit4-attn8-s16" not in entry["quants"]
         assert not (out_dir / ANIMA_BASE_MODEL_NAME / OUTPUT_PATHS["transformer_i4"]).exists()
 
-    def test_the_official_aesthetic_carries_the_same_two_storages(self, tmp_path: Path) -> None:
-        """Aesthetic も f16 / i8 の 2 席（既定は視認裁定の 30 step / CFG 4 — 2026-09-01）。"""
+    def test_the_official_aesthetic_carries_the_same_three_storages(self, tmp_path: Path) -> None:
+        """Aesthetic も f16 / i8 / bf16 の 3 席（既定は視認裁定の 30 step / CFG 4）。"""
         sources = _build_series(tmp_path / "series", model=ANIMA_AESTHETIC_MODEL_NAME)
         out_dir = tmp_path / "models" / ANIMA_AESTHETIC_MODEL_NAME
         manifest = _assemble_anima(sources, out_dir, ANIMA_AESTHETIC_MODEL_NAME)
 
         entry = manifest["models"][ANIMA_AESTHETIC_MODEL_NAME]
-        assert sorted(entry["weights"]["transformer"]) == ["f16", "i8"]
+        assert sorted(entry["weights"]["transformer"]) == ["bf16", "f16", "i8"]
         defaults = entry["pipelineConfig"]["defaults"]
         assert (defaults["steps"], defaults["guidanceScale"]) == (30, 4)
 
@@ -658,23 +658,26 @@ class TestModelVariants:
         """
         assert [name for name, spec in ANIMA_MODELS.items() if "i4" in spec.storages] == []
         for name, spec in ANIMA_MODELS.items():
-            # 忠実プリセット `bf16` は素版だけ（ADR 0131 決定 3 — 他モデルは後続）。
-            expected = ("f16", "i8", "bf16") if name == ANIMA_BASE_MODEL_NAME else ("f16", "i8")
-            assert spec.storages == expected, name
+            # 忠実プリセット `bf16` は全モデル（ADR 0131 決定 3・追記 2026-10-17）。
+            assert spec.storages == ("f16", "i8", "bf16"), name
 
     def test_the_official_variants_split_on_the_text_conditioner(self, tmp_path: Path) -> None:
-        """text_conditioner を共有するのは実測でビット同一だった変種だけ（2026-09-01）。
+        """text_conditioner を共有するのは実測でビット同一だった変種の f16 だけ（2026-09-01）。
 
-        Turbo は base と f16 丸め後ビット同一なので共有系列を読み、Aesthetic は 64 テンソル
+        Turbo は base と f16 丸め後ビット同一なので f16 は共有系列を読み、Aesthetic は 64 テンソル
         差が残る実測なので自前で持つ — 取り違えると**別のモデルのテキスト条件付け**で走り、
-        ロードも実行も通って絵だけが静かにずれる。
+        ロードも実行も通って絵だけが静かにずれる。bf16 は上流のビット列を保つので turbo も自前
+        （base と 60 / 118 テンソルが違う — 2026-10-17 実測）。
         """
         turbo = anima_sources(tmp_path / "series", ANIMA_TURBO_MODEL_NAME)
         aesthetic = anima_sources(tmp_path / "series", ANIMA_AESTHETIC_MODEL_NAME)
 
-        assert turbo.text_conditioner == turbo.base
+        assert turbo.text_conditioner["f16"] == turbo.base["f16"]
+        assert turbo.text_conditioner["bf16"] != turbo.base["bf16"]
+        assert turbo.text_conditioner["bf16"].name == f"{ANIMA_TURBO_MODEL_NAME}-bf16"
         assert aesthetic.text_conditioner != aesthetic.base
         assert aesthetic.text_conditioner["f16"].name == f"{ANIMA_AESTHETIC_MODEL_NAME}-f16"
+        assert aesthetic.text_conditioner["bf16"].name == f"{ANIMA_AESTHETIC_MODEL_NAME}-bf16"
 
     def test_a_fine_tune_reads_its_own_text_conditioner(self, tmp_path: Path) -> None:
         """第三者 fine-tune は llm_adapter も焼き直しているので、共有系列を読ませない。"""
@@ -684,6 +687,7 @@ class TestModelVariants:
         assert base.text_conditioner == base.base
         assert wai.text_conditioner != wai.base
         assert wai.text_conditioner["f16"].name == "anima-wai-v1.0-f16"
+        assert wai.text_conditioner["bf16"].name == "anima-wai-v1.0-bf16"
 
     def test_the_default_quant_stays_the_same_seat(self, tmp_path: Path) -> None:
         """既定席は turbo と揃える（利用者が model を変えても既定の意味が動かない）。"""
@@ -1220,7 +1224,7 @@ _PRE_BF16_MAPPINGS: Mapping[str, Mapping[str, str]] = {
 
 
 class TestFaithfulPreset:
-    """忠実プリセット `bf16`（ADR 0131 決定 3 — 4 役とも bf16・素版 `anima-v1.0` だけ）。"""
+    """忠実プリセット `bf16`（ADR 0131 決定 3 — 4 役とも bf16・追記 2026-10-17 で全モデル）。"""
 
     @pytest.fixture
     def base_assembled(self, tmp_path: Path) -> tuple[Path, dict]:
@@ -1247,14 +1251,13 @@ class TestFaithfulPreset:
             name: quant["weights"] for name, quant in completed.items() if name != "bf16"
         } == _PRE_BF16_MAPPINGS
 
-    def test_only_the_base_model_declares_the_seat(self) -> None:
-        """席とファイルは storages から導く — 後続（turbo / aesthetic / extra）には生えない。"""
+    def test_every_model_declares_the_seat(self) -> None:
+        """席とファイルは storages から導く — 全モデルが 4 役とも bf16 を持つ（2026-10-17）。"""
         holders = [name for name, spec in ANIMA_MODELS.items() if "bf16" in anima_quants(spec)]
-        assert holders == [ANIMA_BASE_MODEL_NAME]
+        assert holders == list(ANIMA_MODELS)
         for name, spec in ANIMA_MODELS.items():
-            declares = name == ANIMA_BASE_MODEL_NAME
             for role, labels in anima_weights(spec).items():
-                assert ("bf16" in labels) is declares, (name, role)
+                assert "bf16" in labels, (name, role)
 
     def test_the_seat_maps_all_four_components_to_bf16(self, base_assembled) -> None:
         _, manifest = base_assembled
@@ -1605,10 +1608,16 @@ class TestFamilyAssembly:
     def test_the_shared_and_the_private_files_together_cover_the_tree(self, family) -> None:
         out_dir, _ = family
         # rope 素表は transformer の容器の中なので、畳みの単位はコンポーネント丸ごとのまま。
+        # bf16 の text stack も全モデルが持つ（2026-10-17）ので畳まれる — 偽資産は conditioner の
+        # 中身をモデル間で同じにしているため自前の系列から読んでも `shared/` へ畳まれる（実物は
+        # 上流の llm_adapter が違うので各モデルのサブツリーに残る）。
         shared_roles = (
             "text_encoder",
             "text_conditioner",
             "vae_decoder",
+            "text_encoder_bf16",
+            "text_conditioner_bf16",
+            "vae_decoder_bf16",
             "tokenizer",
             "tokenizer_2",
         )

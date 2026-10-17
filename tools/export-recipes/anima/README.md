@@ -323,19 +323,32 @@ treat this gate as redundant and remove it.
 (round-to-nearest-even) **before** the reference and golden capture, and stores only the weight
 slots whose `f32 → bf16 → f32` round trip is bit-exact in bf16 (the rest stay f32). Upstream ships
 all four components in BF16, so for the parameters the rounding is a no-op and the asset holds the
-upstream bits. All four targets go to `outputs/series/anima-bf16/`; the shipping DiT is the S-form
-series, with `--out` spelled out like the f16 one:
+upstream bits. All four targets of the base model go to `outputs/series/anima-bf16/`; the shipping
+DiT is the S-form series, with `--out` spelled out like the f16 one. Every other model exports its
+DiT and its own `text_conditioner` from the converted repo (text encoder and VAE are shared with the
+base — the fine-tunes do not touch them):
 
 ```sh
-uv run --group anima python -m anima.export --dtype bf16                   # all 4 → anima-bf16/
+uv run --group anima python -m anima.export --dtype bf16                   # base: all 4 → anima-bf16/
 uv run --group anima python -m anima.export --dtype bf16 --dit-graph dyn \
   --out ../../outputs/series/anima-v1.0-bf16-dyn
 uv run --group anima python -m anima.pipeline_ref --dtype bf16              # fixture
+# every other model (anima-turbo-v1.1 / anima-aesthetic-v1.1 / anima-turbo-v1.0 /
+# anima-aesthetic-v1.0 / anima-wai-v1.0 / anima-copycat-20260610): own conditioner + S-form DiT
+uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diffusers/anima-turbo-v1.1 \
+  --target text_conditioner --dtype bf16 --out ../../outputs/series/anima-turbo-v1.1-bf16
+uv run --group anima python -m anima.export --repo ../../outputs/misc/anima-diffusers/anima-turbo-v1.1 \
+  --target transformer --dtype bf16 --dit-graph dyn --out ../../outputs/series/anima-turbo-v1.1-bf16-dyn
 ```
 
-The faithful preset `bf16` is declared by `anima-v1.0` only (`AnimaModel.storages`): the assembly
-takes `text_encoder` / `text_conditioner` / `vae_decoder` from `anima-bf16/` and the DiT from
-`anima-v1.0-bf16-dyn/`, and places them next to the f16 files as `<component>/model.bf16.krm`.
+The faithful preset `bf16` is declared by every model (`AnimaModel.storages`): the assembly takes
+`text_encoder` / `vae_decoder` from `anima-bf16/`, the `text_conditioner` from the model's own
+`<model>-bf16/` (the base from `anima-bf16/` — `text_conditioner_series`) and the DiT from
+`<model>-bf16-dyn/`, and places them next to the f16 files as `<component>/model.bf16.krm`. The
+conditioner is never shared under bf16, not even for `anima-turbo-v1.1` whose f16 conditioner is
+shared with the base: its upstream BF16 `llm_adapter` differs from the base's in 60 of 118 tensors
+(near-zero elements only, at most 2.98e-8 — erased by f16 rounding, kept by bf16; measured
+2026-10-17).
 
 Measured (2026-10-17): the goldens of all four targets (and the S-form DiT) are byte-identical to
 f32 references taken with the same code (`--dtype f32`). One condition behind that:
