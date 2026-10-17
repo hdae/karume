@@ -30,12 +30,12 @@
 // `vec4<i32>(NaN)` が不定値になるので**契約の外**（突合は scale と最終出力だけ）。
 
 import { test } from "vite-plus/test";
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
 import { perChannelGroupSize } from "../src/format/container/codecs.ts";
 import type { OpenedContainer } from "../src/format/container/open.ts";
 import { RunArena } from "../src/gpu/arena.ts";
-import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
+import { acquireGpu, GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../src/gpu/submit.ts";
 import {
@@ -46,6 +46,7 @@ import {
   quantizeRowsWgsl,
 } from "../src/kernels/quantize-rows.ts";
 import {
+  dp4aAvailable,
   LINEAR_I8A8_MAX_K,
   linearI8a8Key,
   linearI8a8UsesVec4,
@@ -623,6 +624,69 @@ test.skipIf(!GPU_AVAILABLE)(
         // どちらも TS 参照と一致する（両者が同じだけずれている形を塞ぐ）
         assertExact(results["emu"].data, prepared.expected, `${testCase.name}: エミュ vs 参照`);
       }
+    } finally {
+      gpu.destroy();
+    }
+  },
+);
+
+/** `console.warn` を差し替えて `body` を走らせ、必ず元へ戻す（出た文言をそのまま返す）。 */
+const captureWarnings = async (body: () => Promise<void>): Promise<string[]> => {
+  const original = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((arg) => String(arg)).join(" "));
+  };
+  try {
+    await body();
+  } finally {
+    console.warn = original;
+  }
+  return warnings;
+};
+
+test.skipIf(!GPU_AVAILABLE)(
+  "i8a8: dp4a の無い device で a8 を要求すると device ごとに 1 回だけ警告し、ある device では警告しない（実 GPU）",
+  async () => {
+    // ADR 0128 決定 5 — dp4a 非対応はフォールバックでも自動の兄弟プリセットでもなく、警告。
+    // 判定（src/runtime/a8-emulation-warning.ts）と「1 回」（GpuContext.warnOnce）の単体は
+    // tests/a8_emulation_warning_test.ts。ここは Session 構築の実走からその両方が出ることを見る。
+    const gpu = await acquireGpu();
+    try {
+      const smallCase: LinearCase = { name: "a8 警告 [3,4] × W[8,4]", m: 3, n: 8, k: 4 };
+      const prepared = prepareLinear(smallCase);
+      // 本機は dp4a を列挙する（上の両変種の突合がその前提）— ある device では黙って通る。
+      assert(dp4aAvailable(gpu.wgslLanguageFeatures), "本機は dp4a を列挙する前提");
+      const quiet = await captureWarnings(async () => {
+        await runLinear(gpu, prepared, { linearCompute: "a8" });
+      });
+      assertEquals(
+        quiet.filter((warning) => warning.includes("dp4a")),
+        [],
+        "dp4a のある device では警告しない",
+      );
+      // 同じ実物の device を「dp4a を列挙しない」GpuContext で包む — 変えるのは能力の面だけで、
+      // 構築は実際にエミュ版のカーネルで走る（警告の根拠と実走が一致する）。
+      const stripped = new GpuContext(gpu.device, gpu.adapterInfo, gpu.limits, new Set());
+      const warnings = await captureWarnings(async () => {
+        const first = await runLinear(stripped, prepared, { linearCompute: "a8" });
+        assertEquals(
+          first.keys.includes(linearI8a8Key(linearI8a8UsesVec4(smallCase.n), false)),
+          true,
+          "エミュ版のキーで走る",
+        );
+        assertExact(first.y.data, prepared.expected, "エミュ vs 参照");
+        // 2 本目の a8 の Session は同じ device なので出ない・a8 を使わない Session も出ない
+        await runLinear(stripped, prepared, { linearCompute: "a8" });
+        await runLinear(stripped, prepared, {});
+      });
+      assertEquals(
+        warnings.length,
+        1,
+        `警告は device ごとに 1 回（出たもの: ${JSON.stringify(warnings)}）`,
+      );
+      assertStringIncludes(warnings[0] ?? "", 'linearCompute: "a8"');
+      assertStringIncludes(warnings[0] ?? "", "quant で明示");
     } finally {
       gpu.destroy();
     }

@@ -159,6 +159,14 @@ type GpuContextInternals = {
    */
   pipelines(): PipelineCache;
   /**
+   * 同じ `key` の警告を **device 1 個につき 1 回だけ** `console.warn` に出す。
+   *
+   * 「この device に dp4a が無い」のように device の性質そのものである事実は、Session を何本
+   * 作っても 1 回で足りる — a8 の Session を部品ごとに並べる家族で同じ文言が本数だけ流れるのを
+   * 避ける。文言は呼び手が組む（この層から kernels / runtime 層への import を作らないため）。
+   */
+  warnOnce(key: string, message: string): void;
+  /**
    * `acquireGpu({ geometryProfile })` で注入された GEMM 幾何のプロファイル（DECIDED: ADR 0115）。
    * 注入が無ければ undefined で、Session 構築が adapter から埋め込みの表を選ぶ。
    *
@@ -269,6 +277,8 @@ export class GpuContext {
    * 未参照なら undefined のまま = 1 本も作らない（Session を作らない利用者はコストを払わない）。
    */
   #pipelines: PipelineCache | undefined;
+  /** {@link GpuContextInternals.warnOnce} が出し終えたキー。 */
+  readonly #warned = new Set<string>();
 
   constructor(
     device: GPUDevice,
@@ -305,6 +315,11 @@ export class GpuContext {
       pipelines: (): PipelineCache => {
         this.#pipelines ??= new PipelineCache(this.device);
         return this.#pipelines;
+      },
+      warnOnce: (key: string, message: string): void => {
+        if (this.#warned.has(key)) return;
+        this.#warned.add(key);
+        console.warn(message);
       },
       geometryProfile,
     };

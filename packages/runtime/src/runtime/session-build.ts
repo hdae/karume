@@ -29,6 +29,7 @@ import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
 import { type GeometryProfile, selectGeometryProfile } from "../kernels/geometry-profile.ts";
 import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
+import { A8_EMULATION_WARNING_KEY, a8EmulationWarning } from "./a8-emulation-warning.ts";
 import type { FusionCounts } from "./fusion.ts";
 import { countUses, declaredDtypes, ExecutionError } from "./plan.ts";
 import type { GenerationLimits, StepRecipe } from "./recipe.ts";
@@ -564,6 +565,17 @@ export const buildSessionState = async (
   // 整数内積変種は **linear と attention で別席**（{@link SessionState}）。どちらも
   // `I8A8_DOT` の指定が最優先で、指定が無ければ族ごとの既定に落ちる。
   const dp4a = dp4aAvailable(gpu.wgslLanguageFeatures);
+  // dp4a の無い device で a8 を要求されたら知らせる（device ごとに 1 回）。落とさない・f32 へも
+  // a8 無しの兄弟プリセットへも黙って落とさない（DECIDED: ADR 0128 決定 5）— 数値は同じで、
+  // 利用者が失うのは速度だけなので、事実を見せて選び直してもらう。
+  const emulationWarning = a8EmulationWarning(
+    linearCompute,
+    attentionCompute,
+    gpu.wgslLanguageFeatures,
+  );
+  if (emulationWarning !== undefined) {
+    gpu[RUNTIME_INTERNAL].warnOnce(A8_EMULATION_WARNING_KEY, emulationWarning);
+  }
   const attentionI8a8Dot = await resolveAttentionI8a8Dot(
     gpu,
     options[I8A8_DOT],
