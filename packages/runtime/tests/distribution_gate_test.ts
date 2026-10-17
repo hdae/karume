@@ -52,7 +52,7 @@ import {
   assertThrows,
 } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
-import { parseManifest, resolveSelection } from "@karume/hub";
+import { type Manifest, type ModelEntry, parseManifest, resolveSelection } from "@karume/hub";
 
 /**
  * 「配布形ミラー無しでの全 SKIP」を明示的に許可する opt-out（`KARUME_ALLOW_NO_ASSETS` と同形）。
@@ -257,6 +257,90 @@ const assertDistributionIntact = async (root: URL, series: string): Promise<void
   );
 };
 
+/** label / description が在るか（空白だけは無いと数える — モデルカードの表示と同じ扱い）。 */
+const hasText = (value: string | undefined): boolean => (value ?? "").trim() !== "";
+
+/** 2 つの weights 写像が同じか（同じ部品の集合に、部品ごとに同じ dtype ラベル）。 */
+const sameWeights = (
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>>,
+): boolean => {
+  const roles = Object.keys(left);
+  return (
+    roles.length === Object.keys(right).length &&
+    roles.every((role) => Object.hasOwn(right, role) && right[role] === left[role])
+  );
+};
+
+/**
+ * 1 モデルの既定プリセットとプリセット一覧が、配布形の満たすべき 3 制約を破っている箇所を返す
+ * （違反ごとに 1 文・プリセットを名指し。満たしていれば空）。DECIDED: ADR 0128 決定 2。
+ *
+ * - C1: 既定プリセットは素の WebGPU で走る — `quants[defaultQuant].gpuFeatures` が無いか、
+ *   true のメンバーを持たない（今日の語彙では `shaderF16` を要求しない）。
+ * - C2: `linearCompute` か `attentionCompute` が `"a8"` のプリセットには、どちらも `"a8"` でなく
+ *   weights の写像が同一（同じ部品・同じラベル = 同じコンテナ）の別名の兄弟プリセットがある。
+ *   この兄弟が、dp4a の無い device で runtime が出す警告
+ *   （packages/runtime/src/runtime/a8-emulation-warning.ts）の指す逃げ先で、追加の取得が要らない。
+ * - C3: プリセットが 2 つ以上あるモデルでは、全プリセットが trim して空でない label と description を
+ *   持つ（選択 UI とモデルカードが人に見せる面）。プリセットが 1 つだけのモデルは選ぶものが無いので除く。
+ */
+const defaultPresetViolations = (entry: ModelEntry): string[] => {
+  const violations: string[] = [];
+  const requested = Object.entries(entry.quants[entry.defaultQuant]?.gpuFeatures ?? {})
+    .filter(([, value]) => value === true)
+    .map(([feature]) => feature);
+  if (requested.length > 0) {
+    violations.push(
+      `C1: 既定プリセット '${entry.defaultQuant}' が GPU feature を要求している` +
+        `（${requested.join(", ")}）— 既定は素の WebGPU で走らなければならない`,
+    );
+  }
+  const presets = Object.entries(entry.quants);
+  for (const [name, quant] of presets) {
+    const knobs = (["linearCompute", "attentionCompute"] as const)
+      .filter((knob) => quant.session[knob] === "a8")
+      .map((knob) => `${knob}: "a8"`);
+    if (knobs.length === 0) continue;
+    const sibling = presets.some(
+      ([other, candidate]) =>
+        other !== name &&
+        candidate.session.linearCompute !== "a8" &&
+        candidate.session.attentionCompute !== "a8" &&
+        sameWeights(quant.weights, candidate.weights),
+    );
+    if (!sibling) {
+      violations.push(
+        `C2: プリセット '${name}' は int8 活性（${knobs.join(", ")}）を持つが、` +
+          "同じ weights で活性量子化を持たない兄弟プリセットが無い",
+      );
+    }
+  }
+  if (presets.length >= 2) {
+    for (const [name, quant] of presets) {
+      for (const field of ["label", "description"] as const) {
+        if (!hasText(quant[field])) {
+          violations.push(`C3: プリセット '${name}' に ${field} が無い（空白だけも無いと数える）`);
+        }
+      }
+    }
+  }
+  return violations;
+};
+
+/** manifest の全モデルが ADR 0128 決定 2 の制約（C1〜C3）を満たすことを断言する（系列とモデルを名指し）。 */
+const assertDefaultPresetPolicy = (manifest: Manifest, series: string): void => {
+  for (const [model, entry] of Object.entries(manifest.models)) {
+    assertEquals(
+      defaultPresetViolations(entry),
+      [],
+      `models/${series}/ の model '${model}' の既定プリセットとプリセット一覧が ` +
+        "ADR 0128 決定 2 の制約を破っている。karume dist の recipe（tools/export-recipes）の" +
+        "プリセットの宣言を直して焼き直すこと。",
+    );
+  }
+};
+
 test.skipIf(ALLOW_NO_DISTRIBUTION)(
   "配布門番: 配布形ミラーが欠けた全 SKIP は明示 FAIL（ADR 0005）",
   () => assertNoDistributionMissing(MODELS_ROOT, DISTRIBUTIONS),
@@ -267,6 +351,13 @@ for (const series of discoverDistributions(MODELS_ROOT)) {
   test.skipIf(REQUIRED.has(series) && manifestKnownAbsent(root))(
     `配布門番: ${series} の manifest が hub の parser を通り（karume/5）、既定 quant の part が宣言どおり在る`,
     () => assertDistributionIntact(root, series),
+  );
+  test.skipIf(REQUIRED.has(series) && manifestKnownAbsent(root))(
+    `配布門番: ${series} の既定プリセットとプリセット一覧が ADR 0128 決定 2 の制約（C1〜C3）を満たす`,
+    async () => {
+      const manifest = parseManifest(await readTextFile(new URL("karume.json", root)));
+      assertDefaultPresetPolicy(manifest, series);
+    },
   );
 }
 
@@ -493,5 +584,143 @@ describe("配布門番の判定（manifest の宣言と配布形の食い違い�
       arrange(root, "karume/4");
       await assertRejects(() => assertDistributionIntact(root, "synthetic"), Error, "karume/4");
     });
+  });
+});
+
+describe("配布門番の判定（既定プリセットとプリセット一覧 — ADR 0128 決定 2）", () => {
+  const sha256 = "0".repeat(64);
+  /** manifest に書くプリセットの宣言（JSON のまま — 型と値の検査は hub の parser に任せる）。 */
+  type FabricatedQuant = {
+    readonly weights: Readonly<Record<string, string>>;
+    readonly [key: string]: unknown;
+  };
+  const labelled = { label: "Preset", description: "A preset for the test." };
+  /** 素の WebGPU で走る、活性量子化を持たない i8 のプリセット（C2 の兄弟の雛形）。 */
+  const plainI8 = { weights: { text: "i8", dit: "i8" }, session: {}, ...labelled };
+  /** i8 の重みに int8 活性を載せたプリセット。 */
+  const a8I8 = {
+    weights: { text: "i8", dit: "i8" },
+    session: { linearCompute: "a8", attentionCompute: "a8" },
+    ...labelled,
+  };
+
+  /**
+   * `quants` を宣言した 1 モデルの manifest を hub の parser に通し、そのモデルの宣言を返す
+   * （weights の容器は quants が参照する部品 × ラベルから組む — parser の完全写像の検査を通すため）。
+   */
+  const entryOf = (
+    quants: Readonly<Record<string, FabricatedQuant>>,
+    defaultQuant: string,
+  ): ModelEntry => {
+    const weights: Record<string, Record<string, unknown>> = {};
+    for (const quant of Object.values(quants)) {
+      for (const [role, label] of Object.entries(quant.weights)) {
+        weights[role] = {
+          ...weights[role],
+          [label]: {
+            container: {
+              descriptor: { graph: { length: 10, sha256 }, model: { length: 5, sha256 } },
+              parts: [
+                { path: `m/${role}/model.${label}-00001-of-00002.krm`, size: 39, sha256 },
+                { path: `m/${role}/model.${label}-00002-of-00002.krm`, size: 8, sha256 },
+              ],
+            },
+          },
+        };
+      }
+    }
+    const manifest = parseManifest(
+      JSON.stringify({
+        format: MANIFEST_FORMAT,
+        generator: "karume/0.15.0",
+        defaultModel: "m",
+        models: {
+          m: {
+            pipeline: "anima/1",
+            weights,
+            assets: {},
+            quants,
+            defaultQuant,
+            pipelineConfig: {},
+          },
+        },
+      }),
+    );
+    return manifest.models["m"]!;
+  };
+
+  /** 違反が 1 件だけで、その文がプリセットを名指しし、制約の記号を含むことを断言する。 */
+  const assertSingleViolation = (entry: ModelEntry, constraint: string, preset: string): void => {
+    const violations = defaultPresetViolations(entry);
+    assertEquals(violations.length, 1, violations.join("\n"));
+    assertStringIncludes(violations[0]!, `${constraint}:`);
+    assertStringIncludes(violations[0]!, `'${preset}'`);
+  };
+
+  it("label と description を持つ 2 プリセットで、a8 に兄弟があれば違反は無い", () => {
+    assertEquals(defaultPresetViolations(entryOf({ a8: a8I8, i8: plainI8 }, "a8")), []);
+  });
+
+  it("既定が shaderF16 を要求すれば C1 違反として既定プリセットを名指しする", () => {
+    const f16 = {
+      weights: { text: "f16", dit: "f16" },
+      session: { linearCompute: "f16" },
+      gpuFeatures: { shaderF16: true },
+      ...labelled,
+    };
+    const entry = entryOf({ f16, i8: plainI8 }, "f16");
+    assertSingleViolation(entry, "C1", "f16");
+    assertStringIncludes(defaultPresetViolations(entry)[0]!, "shaderF16");
+  });
+
+  it("既定でないプリセットの shaderF16 は C1 違反にしない", () => {
+    const f16 = {
+      weights: { text: "f16", dit: "f16" },
+      session: {},
+      gpuFeatures: { shaderF16: true },
+      ...labelled,
+    };
+    assertEquals(defaultPresetViolations(entryOf({ f16, i8: plainI8 }, "i8")), []);
+  });
+
+  it("a8 のプリセットに兄弟が無ければ C2 違反として、そのプリセットと a8 のノブを名指しする", () => {
+    const f32 = { weights: { text: "f32", dit: "f32" }, session: {}, ...labelled };
+    const entry = entryOf({ a8: a8I8, f32 }, "a8");
+    assertSingleViolation(entry, "C2", "a8");
+    const [violation] = defaultPresetViolations(entry);
+    assertStringIncludes(violation!, `linearCompute: "a8"`);
+    assertStringIncludes(violation!, `attentionCompute: "a8"`);
+  });
+
+  it("兄弟の候補の weights がラベル 1 つでも違えば C2 違反のまま（追加の取得が要る）", () => {
+    const nearly = { weights: { text: "f32", dit: "i8" }, session: {}, ...labelled };
+    assertSingleViolation(entryOf({ a8: a8I8, nearly }, "a8"), "C2", "a8");
+  });
+
+  it("同じ weights でも、兄弟の候補が片方の a8 を残していれば C2 違反のまま", () => {
+    const attentionOnly = { ...a8I8, session: { attentionCompute: "a8" } };
+    const entry = entryOf({ a8: a8I8, attentionOnly }, "a8");
+    const violations = defaultPresetViolations(entry);
+    assertEquals(violations.length, 2, violations.join("\n"));
+    assertStringIncludes(violations[0]!, "C2: プリセット 'a8'");
+    assertStringIncludes(violations[1]!, "C2: プリセット 'attentionOnly'");
+  });
+
+  it("description の無いプリセットは C3 違反として、そのプリセットを名指しする", () => {
+    const withoutDescription = { weights: plainI8.weights, session: {}, label: "Preset" };
+    const entry = entryOf({ a8: a8I8, i8: withoutDescription }, "a8");
+    assertSingleViolation(entry, "C3", "i8");
+    assertStringIncludes(defaultPresetViolations(entry)[0]!, "description");
+  });
+
+  it("空白だけの label は無いと数え、C3 違反として、そのプリセットを名指しする", () => {
+    const entry = entryOf({ a8: { ...a8I8, label: " \t " }, i8: plainI8 }, "a8");
+    assertSingleViolation(entry, "C3", "a8");
+    assertStringIncludes(defaultPresetViolations(entry)[0]!, "label");
+  });
+
+  it("プリセットが 1 つだけのモデルは label と description が無くても C3 の対象外", () => {
+    const f32 = { weights: { text: "f32", dit: "f32" }, session: {} };
+    assertEquals(defaultPresetViolations(entryOf({ f32 }, "f32")), []);
   });
 });
