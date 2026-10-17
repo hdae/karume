@@ -1,6 +1,9 @@
 /**
  * Anima の**移植の門**（実 GPU）。manifest → 資産 → `AnimaPipeline` → `generate` →
- * `encodePng` まで通し、出力 PNG の sha256 が参照値と**ビット一致**するかだけを見る。
+ * `encodePng` まで通し、出力画素（`encodePng` が IDAT に書く RGB8 の画素列 — {@link rgbPixels}）の sha256 が
+ * 参照値と**ビット一致**するかだけを見る。PNG は実物として残すが、sha は圧縮前の画素列に対して採る —
+ * IDAT の deflate はランタイムの zlib 実装で変わり（Deno と Node で画素が同一でもバイトが違う）、
+ * 行が数値ではなく圧縮器を掴むため（ADR 0106 追記決定 9）。
  *
  * 参照値は `fixtures/references/anima.json` に**環境キーごとの行**で入っている
  * （`helpers/reference.ts`）。この門が主張できるのは「その機で数値が動いていない」ことだけで、
@@ -304,11 +307,26 @@ const mismatchReport = (
   actual: string,
   dumped: URL,
 ): string =>
-  `${label}: 出力 PNG の sha256 が参照と一致しない\n` +
+  `${label}: 出力画素の sha256 が参照と一致しない\n` +
   `  期待 ${expected}\n  実際 ${actual}\n` +
   `  PNG ${png.length} バイト / 画像 ${image.width}×${image.height}\n` +
   `  画素 ${describePixels(image)}\n` +
   `  実物 ${dumped.pathname}（参照はバイト列ではなく sha256 のみなので先頭差分位置は出せない）`;
+
+/**
+ * sha を採る画素列: `encodePng` が IDAT に書く RGB8（行優先・alpha を落とした形）。`GeneratedImage.data` は
+ * RGBA で alpha は常に 255（`encodePng` が検査する）なので情報は落ちず、実物の PNG を decode した画素列と
+ * 同じバイト列になる — 行は実物から再計算できる（ADR 0106 追記決定 9）。
+ */
+const rgbPixels = (image: GeneratedImage): Uint8Array<ArrayBuffer> => {
+  const pixels = new Uint8Array(new ArrayBuffer(image.width * image.height * 3));
+  for (let source = 0, target = 0; source < image.data.length; source += 4, target += 3) {
+    pixels[target] = image.data[source];
+    pixels[target + 1] = image.data[source + 1];
+    pixels[target + 2] = image.data[source + 2];
+  }
+  return pixels;
+};
 
 /**
  * 実物を残し、参照値と突き合わせ、決着を結果 JSON へ積む（全門共通の末端）。
@@ -385,10 +403,10 @@ const assertReferencePng = async (
     ...(onEvent === undefined ? {} : { onEvent }),
   });
   const png = await encodePng(image.data, image.width, image.height);
-  const actual = await sha256Hex(png);
+  const actual = await sha256Hex(rgbPixels(image));
   const elapsedMs = performance.now() - started;
   console.log(
-    `[e2e] ${label}: ${(elapsedMs / 1000).toFixed(1)}s / PNG ${png.length}B / sha256 ${actual}`,
+    `[e2e] ${label}: ${(elapsedMs / 1000).toFixed(1)}s / PNG ${png.length}B / pixels sha256 ${actual}`,
   );
   await settlePng(label, image, png, actual, elapsedMs, options.twin);
 };
@@ -552,10 +570,10 @@ const assertBasePng = async (
     ...(options.sampler === undefined ? {} : { sampler: options.sampler }),
   });
   const png = await encodePng(image.data, image.width, image.height);
-  const actual = await sha256Hex(png);
+  const actual = await sha256Hex(rgbPixels(image));
   const elapsedMs = performance.now() - started;
   console.log(
-    `[e2e] ${label}: ${(elapsedMs / 1000).toFixed(1)}s / PNG ${png.length}B / sha256 ${actual}`,
+    `[e2e] ${label}: ${(elapsedMs / 1000).toFixed(1)}s / PNG ${png.length}B / pixels sha256 ${actual}`,
   );
   await settlePng(label, image, png, actual, elapsedMs, options.twin);
 };
@@ -1078,10 +1096,10 @@ const assertResidencyTwin = async (
     },
   });
   const png = await encodePng(image.data, image.width, image.height);
-  const actual = await sha256Hex(png);
+  const actual = await sha256Hex(rgbPixels(image));
   const elapsedMs = performance.now() - started;
   console.log(
-    `[e2e] ${label}: ${(elapsedMs / 1000).toFixed(1)}s / PNG ${png.length}B / sha256 ${actual}`,
+    `[e2e] ${label}: ${(elapsedMs / 1000).toFixed(1)}s / PNG ${png.length}B / pixels sha256 ${actual}`,
   );
   await assertRunningAdapter();
   const expected = references.lookup(twin);
