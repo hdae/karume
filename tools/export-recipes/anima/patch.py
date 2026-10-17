@@ -230,12 +230,34 @@ def reference_vae_decode(vae: nn.Module, latents: torch.Tensor) -> torch.Tensor:
 # ---- ① Qwen3 テキストエンコーダ --------------------------------------------
 
 
+def disable_packed_sequence_detection() -> None:
+    """`transformers` の packed sequence 検出を「検出なし」に固定する（プロセス全域）。
+
+    MUST: **プロセス全域の差し替え**（VAE パッチと同じ流儀）。`Qwen3Model` はマスクを渡さないと
+    `position_ids` から packed sequence（位置が途中で 0 に戻る複数文の連結）を探す。eager では
+    1 文の単調な位置で `None`（検出なし）に落ちるが、トレース中はその値依存の早期 return が
+    取れず、`cumsum` を位置で引く `index` と `eq` のマスクがグラフに残る。exporter は「記号軸を
+    添字テンソルで引く index」を定数畳み込みから外す（ADR 0010 追記 2026-10-10）ので、語彙外の
+    op として export が落ちる（2026-10-17 実測: `aten.index.Tensor` ×2・`aten.eq.Tensor`・
+    `aten.ne.Scalar`）。この recipe の text encoder は `padding="longest"` の単一プロンプト
+    （位置は 0..T−1 の単調増加）なので、検出結果は eager と同じく常に None — その値に固定する。
+    """
+    import transformers.masking_utils as masking_utils
+
+    def no_packed_sequences(position_ids: torch.Tensor) -> None:
+        del position_ids
+        return None
+
+    masking_utils.find_packed_sequence_indices = no_packed_sequences
+
+
 class AnimaTextEncoder(nn.Module):
     """`Qwen3Model` の `last_hidden_state`。`attention_mask` は渡さない。
 
     パイプラインは `padding="longest"` の単一プロンプトなのでマスクは全 1 で、
     `causal & all_true == causal`。加算バイアスが同一テンソルになるため eager はビット一致
-    する（`--verify text_encoder` が実測する）。
+    する（`--verify text_encoder` が実測する）。export の前に
+    {@link disable_packed_sequence_detection} を掛ける（マスクを渡さない形の前提）。
     """
 
     def __init__(self, model: nn.Module) -> None:

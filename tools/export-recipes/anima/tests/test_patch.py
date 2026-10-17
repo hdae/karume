@@ -383,3 +383,40 @@ class TestDitTokens:
             if len(graph.values[name].shape) >= 3
         }
         assert baked == {}, f"解像度依存の焼き込みが残っている: {baked}"
+
+
+class TestTextEncoderExport:
+    """`AnimaTextEncoder`（マスクを渡さない形）が tiny の Qwen3 で S 形の export を通る。"""
+
+    def test_the_text_encoder_exports_without_the_packed_sequence_mask(self) -> None:
+        """`find_packed_sequence_indices` を固定しないと、トレース中の検出が `cumsum` を位置で引く
+        `index` と `eq` のマスクを残し、exporter が語彙外の op で落ちる（2026-10-17 実測 —
+        exporter が記号軸を添字で引く index を畳まなくなった ADR 0010 追記 2026-10-10 以降）。
+        """
+        transformers = pytest.importorskip("transformers")
+        from torch.export import Dim
+
+        from karume.pipeline import export_module
+
+        config = transformers.Qwen3Config(
+            vocab_size=64,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=8,
+            max_position_embeddings=64,
+            use_cache=False,
+        )
+        model = transformers.Qwen3Model(config).eval()
+        patch_anima.disable_packed_sequence_detection()
+        ids = torch.randint(0, 64, (1, 8), generator=torch.Generator().manual_seed(0))
+        graph, _ = export_module(
+            patch_anima.AnimaTextEncoder(model),
+            (ids,),
+            dynamic_shapes=({1: Dim("T", min=2, max=64)},),
+        )
+
+        assert graph.symbols == ["T"]
+        assert [entry.name for entry in graph.inputs] == ["input_ids"]
