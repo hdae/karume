@@ -47,7 +47,7 @@ upstream checkpoint read from its safetensors header (weight tensors only):
 
 | Distribution (models)                      | Presets                                                                                                       | `defaultQuant`          | Upstream storage                                                                    | Preset holding the original values                                                                                                  |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------- | ----------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| anima, anima-extra (7)                     | `f16` `f16+dit8` `f16+dit8-a8` `f16+dit8-a8-attn8` `f16+dit8-a8-attn8-s16` `f16-c16`; `bf16` (anima-v1.0 only) | `f16+dit8-a8-attn8-s16` | BF16 in all four components                                                         | `bf16` for the base model `anima-v1.0` (ADR 0131, 2026-10-17); the six fine-tuned and turbo models have none yet                   |
+| anima, anima-extra (7)                     | `f16` `f16+dit8` `f16+dit8-a8` `f16+dit8-a8-attn8` `f16+dit8-a8-attn8-s16` `f16-c16` `bf16`                                              | `f16+dit8-a8-attn8-s16` | BF16 in all four components                                                         | `bf16` (ADR 0131; all seven models since 2026-10-17)                                                                                |
 | sbv2-jvnv (4)                              | `f16+bert8` `i8` `i8-a8` `i8+bert4` `i4`                                                                      | `i8+bert4`              | F32                                                                                 | none; an f32 preset was not shipped ("1.32 GB impractical", `sbv2/distribution.py:11`) and `f16+bert8` keeps the text encoder in i8 |
 | irodori v4 / v4.1-small                    | `f32` `f16` `i8` `i8-a8` `i8+dit4`                                                                            | `i8-a8`                 | F32                                                                                 | `f32`                                                                                                                               |
 | wan2.1 t2v-1.3b                            | `f16` `f16+dit8` `f16+dit8-a8-attn8-s16`                                                                      | `f16+dit8-a8-attn8-s16` | DiT F32                                                                             | none; `f16` is the widest (its text encoder is the cross-referenced umT5 i8)                                                        |
@@ -158,8 +158,7 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
 
    | Family                                             | Original-weights preset | Status on 2026-10-17                                                   |
    | -------------------------------------------------- | ----------------------- | ---------------------------------------------------------------------- |
-   | anima base (`anima-v1.0`)                          | `bf16`                  | shipped (ADR 0131)                                                     |
-   | anima fine-tuned / turbo (6 models)                | —                       | follow-up of ADR 0131 (the turbo DiT is a LoRA fusion computed in f32) |
+   | anima (all seven models)                           | `bf16`                  | shipped (ADR 0131; every checkpoint is BF16, no LoRA fusion)           |
    | irodori v4 / v4.1-small                            | `f32`                   | shipped                                                                |
    | birefnet-hr                                        | `f16`                   | shipped (upstream f16)                                                 |
    | lucida, depth-anything-v2, siglip2, vowel-detector | `f32`                   | shipped                                                                |
@@ -234,8 +233,7 @@ sync. No distribution was rebuilt.
 
 ## Open points
 
-1. anima fine-tuned / turbo `bf16` (ADR 0131 follow-up); gemma4 `bf16` (PLE); whether to add sbv2
-   `f32`. Each closes a row of decision 4's table.
+1. gemma4 `bf16` (PLE); whether to add sbv2 `f32`. Each closes a row of decision 4's table.
 2. Revisiting decision 5 (warning versus automatic sibling) once there is field evidence.
 3. The memory pre-check's "which presets fit this device" report (building blocks exist:
    `estimateGraphMemory`, `fitsHeadroom`); not scheduled.

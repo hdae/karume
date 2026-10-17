@@ -80,10 +80,19 @@ has no bfloat16 dtype).
 The preset `bf16` (ADR 0074 grammar, bare storage name; label "Original weights (bf16)") stores
 `text_encoder`, `text_conditioner`, `transformer` and `vae_decoder` as bf16 — the upstream bits. It
 is opt-in; the default stays `f16+dit8-a8-attn8-s16` (ADR 0128 decision 1: the default is chosen per
-model by procedure; the original-weights preset is best effort — decision 4). The scope of
-this ADR is the base model (`anima-v1.0`). The fine-tuned models in `anima-extra` and the turbo
-model are best-effort follow-ups: the turbo DiT is a LoRA fusion computed in f32, so for it bf16 is
-a rounding of the fused weights, not the upstream bits.
+model by procedure; the original-weights preset is best effort — decision 4). The preset was
+shipped for the base model (`anima-v1.0`) first and extended to the other six models the same day
+(addendum 2026-10-17): every Anima checkpoint — the official turbo / aesthetic variants and the two
+fine-tunes in `anima-extra` — is a BF16 checkpoint of DiT + `llm_adapter` (no LoRA fusion is
+involved since ADR 0087), so bf16 holds the upstream bits for all of them.
+
+Under bf16 the recipe exports the `text_conditioner` of every model from its own checkpoint
+(`text_conditioner_series`): the f16 preset of `anima-turbo-v1.1` shares the base conditioner
+because the two are bit-identical after f16 rounding, but their upstream BF16 bits differ in 60 of
+118 tensors (near-zero elements, at most 2.98e-8 — below f16's smallest step, 2^-24). The assembly
+still folds byte-identical files into `shared/`: the text encoder and the VAE (untouched by every
+fine-tune) are stored once, and so is the conditioner of the three official variants whose upstream
+bits coincide (`anima-aesthetic-v1.1`, `anima-turbo-v1.0`, `anima-aesthetic-v1.0`).
 
 ### 4. Verification
 
@@ -105,10 +114,10 @@ a rounding of the fused weights, not the upstream bits.
   `docs/container-v1.md` drop the bf16 exception.
 - Distribution size: an all-bf16 Anima preset downloads 5.06 GiB — the same as `f16`. The
   distribution repository gains a bf16 text stack and VAE (+1.41 GiB) and a bf16 DiT (+3.64 GiB) for
-  the base model. While only one model ships bf16, those files sit in that model's own subtree
-  (`anima-v1.0/…/model.bf16.krm`): the assembly folds a file into `shared/` only when two or more
-  models carry the same bytes, so a later bf16 preset for another model moves the text stack and VAE
-  under `shared/` and changes their published paths. VRAM equals the f16 preset.
+  the base model. With every model shipping bf16 (addendum 2026-10-17) the text encoder and the VAE
+  sit under `shared/`, each model carries its own bf16 DiT, and the conditioner is folded only where
+  two models hold the same upstream bits (local mirror: 35 → 50 GiB for `karume-anima`). VRAM
+  equals the f16 preset.
 - Geometry profiles (ADR 0115) are keyed by pipeline key, so `:wbf16` GEMMs fall back to the default
   geometry; the faithful preset is not tuned for speed.
 - `CodecLayout` and `WeightStorage` both carry `bf16`; the residency and fusion types gained a
@@ -129,5 +138,4 @@ a rounding of the fused weights, not the upstream bits.
 
 - gemma4 (upstream BF16, shipped as i4 only): a faithful preset also needs the PLE tables in bf16;
   deferred ("best effort", maintainer ruling 2026-10-17).
-- `anima-extra` and turbo bf16 presets (decision 3).
 - Whether the geometry sweep should cover `:wbf16` GEMMs.

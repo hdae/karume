@@ -43,9 +43,10 @@ extra（追加学習系）が公式リポの text stack を参照する組（ADR
    **全部揃うか 1 つも無いか**の 2 通りだけで、部分指定は落ちる。
    **extra は 2 モデル同居なので `--model anima-wai-v1.0 --model anima-copycat-20260610` で
    1 リポを 1 回で焼く**（`--model` は繰り返し指定 = ファミリー組み立て。先頭が `defaultModel`）。
-   `--ref-role` は `text_encoder` / `vae_decoder` / `tokenizer` / `tokenizer_2` の 4 つ
-   （`text_conditioner` は extra の 2 モデルとも自前なので越境しない — `distribution.py` の
-   `own_text_conditioner=True`）。
+   `--ref-role` は `text_encoder` / `vae_decoder` / `text_encoder_bf16` / `vae_decoder_bf16` / `tokenizer` /
+   `tokenizer_2` の 6 つ（役割名は artifact のキーで、bf16 の text stack は別役割 — 2026-10-17 に bf16 を
+   全モデルへ広げた。`text_conditioner` は extra の 2 モデルとも自前なので越境しない — `distribution.py` の
+   `own_text_conditioner=True`・bf16 はどのモデルも自前）。
    **カードの Usage 例に載る repo 名は pipeline の宣言（`Pipeline.repo_name`）から導かれ、`--out` の
    ディレクトリ名は見ない**（0.5.0 で `-release` 付きステージング名が公開カードに写った実害は、この導出で
    構造的に消えた）。extra は宣言の `karume-anima-extra` がそのまま載るので `--repo` は要らない。

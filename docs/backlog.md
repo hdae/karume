@@ -18,7 +18,7 @@
   **フェーズ 2（整理 — 0.15.0 の中身）**: ① テスト選別（[一覧](research/2026-10-16-test-triage.md): keep 306 / move 16 / drop 4 / merge 42 / review 24 — 利用者の裁定で実施）
   ② ADR の整理と英訳・コメントの英語化（ADR 0130）③ 数値プロファイル（ADR 0126: 既定 = practical・reference は opt-in）④ ✅ 既定のプリセットの方針（ADR 0128 を書き換え — 既定はモデルごとの手続きで選び記録する実用プリセットのまま・manifest の制約 C1〜C3 を配布門番で検査・README とカードで透明性・dp4a の無い device で a8 を要求すると runtime が警告・オリジナルの重みのプリセットは努力目標・breaking ではない・2026-10-17・ステップ 2-7）
   ⑤ ✅ Node 向けの CacheStorage（`@karume/hub/node` の `nodeCacheStorage`・2026-10-17・ステップ 2-4）⑥ ✅ PNG の sha 行を画素の sha に（ADR 0106 追記 2026-10-17・ステップ 2-5）⑦ lint の規則集合（既定規則の警告 331 件）
-  ⑧ ✅ `Deno.test` 形の shim を Vitest 本来の形へ（2026-10-17・ステップ 2-2）。⑨ ✅ bf16 格納（ADR 0131 — runtime / exporter / anima の忠実プリセット `bf16`〈base・4 役〉・2026-10-17・ステップ 2-6）。副産物: Qwen3 text encoder の export の修正（`a5427e6b` 以降落ちていた）・bf16 の丸めは非永続 buffer を外す。**フェーズ 3**: 0.15.0 のリリース（JSR のみか npm も — ADR 0127 未決）。
+  ⑧ ✅ `Deno.test` 形の shim を Vitest 本来の形へ（2026-10-17・ステップ 2-2）。⑨ ✅ bf16 格納（ADR 0131 — runtime / exporter / anima の忠実プリセット `bf16`〈base・4 役〉・2026-10-17・ステップ 2-6。後続 ✅ 同日: 残り 6 モデル〈turbo / aesthetic ×2 世代・wai / copycat〉も `bf16`・bf16 の conditioner は base 以外自前・export は上流 checkpoint とバイト突合で 7 モデル全部一致）。⑩ a8 の計測（利用者 2026-10-17 — umt5 の受理表を開き `i8-a8` を候補にして品質〈埋め込みの relRMS・Wan の自機 A/B・視認〉と速度を測る・sbv2 の `i8-a8` も再計測〈前回 2026-08〉・結果で席を足すか決める）。副産物: Qwen3 text encoder の export の修正（`a5427e6b` 以降落ちていた）・bf16 の丸めは非永続 buffer を外す。**フェーズ 3**: 0.15.0 のリリース（JSR のみか npm も — ADR 0127 未決）。
   同乗の候補（判断はリリース前）: irodori 2 リポの重複の越境参照・sbv2 のサブパス面の再設計・hub ≤ 0.4 の旧名前空間の回収グルーの撤去・HTTP Range 取得。
 
 - **高速化 / メモリの波の残り（起票 2026-09-25・利用者裁定 = 参照層 / 実用層の 2 層に分ける・実用層でもデバイス内決定性 MUST）**:
@@ -93,6 +93,8 @@
 - Pixel（8GB 級 Android Chrome）の `err.cause` 再判定 — [known-issues](known-issues.md)。
 
 ## later
+
+- **gemma4 の prefill を w4a8 で（perf-ledger K-60・利用者 2026-10-17「backlog で」）**: decode は M=1 の GEMV のまま、prefill（M=768 の chunk）だけ `linearCompute: "a8"` × i4 へ載せる受理表の設計（M で使い分ける）。今の a8 は M=1 でも GEMM 骨格へ落ち GEMV の 8.45 倍遅い（[research 2026-09-19](research/2026-09-19-qat-speed-recon.md)）ので、受理表を開くだけでは済まない。
 
 - **活性 f16 の実行形（w16a16）（起票 2026-10-11・利用者「今度やる」）**: 今の runtime は重みの格納だけを f16 にでき、計算と活性は f32（attention だけ `attentionCompute: "f16"` がある — ADR 0006 は活性 f16 を不採用）。価値は中間の容量で、BiRefNet の 2048² のように中間のテンソルが VRAM の大半を占める形で効く（ADR 0113）。`shader-f16` が要る。上流の w16a16 とビット単位の一致は見込めない（カーネルが違う — ADR 0005 の追記 2026-10-11 の数値の水準で扱う）。下調べは [research 2026-08-04](research/2026-08-04-intermediate-f16-design.md)。
 
