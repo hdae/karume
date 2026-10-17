@@ -32,8 +32,8 @@
 //    走行中 / dispose 済みは同期に throw・写しは呼んだ同期区間（直後の send が分岐に入らない）
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { beforeAll, describe, it, test } from "vite-plus/test";
 import { ModelInputError } from "../src/errors.ts";
 import {
   dropOldestTurns,
@@ -465,8 +465,8 @@ test("ChatSession 溢れ: 落とせるものが尽きたら fail loudly（黙っ
   assertEquals(host.created(), 0, "確保してから捨てる形になっていない");
 });
 
-test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す / throw を素通しする）", async (t) => {
-  await t.step("返した履歴で撃ち直す（system も落とせる）", async () => {
+describe("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す / throw を素通しする）", () => {
+  it("返した履歴で撃ち直す（system も落とせる）", async () => {
     const asked = { role: "user", content: "Name a color." } as const;
     // system 込みでは 1 だけ足りず、system を落とせば通る容量。
     const capacity =
@@ -490,7 +490,7 @@ test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す / thr
     );
   });
 
-  await t.step("throw はそのまま呼び手へ届く（包まない）", async () => {
+  it("throw はそのまま呼び手へ届く（包まない）", async () => {
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
     const refusal = new Error("ホストが切り詰めを拒否した");
     const session = new Gemma4ChatSession(host, {
@@ -509,7 +509,7 @@ test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す / thr
     assertEquals(caught, refusal, "ポリシーの例外が同一性のまま届く");
   });
 
-  await t.step("末尾（今の発話）を落とすポリシーは fail loudly", async () => {
+  it("末尾（今の発話）を落とすポリシーは fail loudly", async () => {
     // 長さは縮むので長さの門は通る。通してしまうと「問いの無い会話」に答えが付く（描画は
     // 末尾 role を制約しないので例外ゼロで確定する）。
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
@@ -521,7 +521,7 @@ test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す / thr
     await assertRejects(() => session.send(LONG_ASK).text(), Error, "今の発話（末尾）を落とした");
   });
 
-  await t.step("履歴を写して返すポリシーは通る（末尾の判定は参照でなく値）", async () => {
+  it("履歴を写して返すポリシーは通る（末尾の判定は参照でなく値）", async () => {
     // 渡す履歴は凍結コピーなので、`{ ...turn }` へ写して返す実装は正当。参照同一性で見ると
     // この正当なポリシーが「末尾を落とした」と誤判定される。
     const asked = { role: "user", content: "Name a color." } as const;
@@ -543,7 +543,7 @@ test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す / thr
     assertEquals(session.turns, [asked, { role: "assistant", content: "Blue." }]);
   });
 
-  await t.step("縮まない履歴は無限ループにせず fail loudly", async () => {
+  it("縮まない履歴は無限ループにせず fail loudly", async () => {
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
     let calls = 0;
     const session = new Gemma4ChatSession(host, {
@@ -563,15 +563,15 @@ test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す / thr
   });
 });
 
-test("ChatSession capacity: 省略時は program の既定・渡せばそれが sequence と溢れ判定の物差し", async (t) => {
-  await t.step("省略時は配布形の既定がそのまま降りる", async () => {
+describe("ChatSession capacity: 省略時は program の既定・渡せばそれが sequence と溢れ判定の物差し", () => {
+  it("省略時は配布形の既定がそのまま降りる", async () => {
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
     const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
     assertEquals(await session.send("Name a color.").text(), "Blue.");
     assertEquals(host.capacities(), [640], "sequence へ渡る容量");
   });
 
-  await t.step("渡した容量が sequence へ降り、切り詰めの判断もその値で行う", async () => {
+  it("渡した容量が sequence へ降り、切り詰めの判断もその値で行う", async () => {
     // program の既定は十分広い（640）が、セッションは狭い容量を選ぶ — 既定で判断していれば
     // 溢れ処理は 1 度も呼ばれず、選んだ容量で判断していれば呼ばれる。
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
@@ -595,7 +595,7 @@ test("ChatSession capacity: 省略時は program の既定・渡せばそれが 
     assertEquals(host.created(), 0, "溢れると分かったターンは KV を確保しない");
   });
 
-  await t.step("通るターンでは選んだ容量が sequence へ降りる", async () => {
+  it("通るターンでは選んだ容量が sequence へ降りる", async () => {
     // program の既定（640）ではなくセッションが選んだ値が `host.sequence` へ渡ること。
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
     const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 128 });
@@ -604,7 +604,7 @@ test("ChatSession capacity: 省略時は program の既定・渡せばそれが 
   });
 });
 
-test("ChatSession speculative: 指定はそのまま sequence へ降り、未指定は欄ごと渡さない", async (t) => {
+describe("ChatSession speculative: 指定はそのまま sequence へ降り、未指定は欄ごと渡さない", () => {
   // 投機はセッション単位の席（借り手 context が sequence の寿命に束ねられているので、ターン
   // ごとには切り替えられない）。この層がするのは「降ろすかどうか」だけで、判定は pipeline 側に
   // ある — `speculative: undefined` を**渡してしまう**退行は、pipeline の既定（drafter が居れば
@@ -614,7 +614,7 @@ test("ChatSession speculative: 指定はそのまま sequence へ降り、未指
     { text: "Red.", closes: true },
   ] as const;
 
-  await t.step("未指定: 欄そのものを渡さない（pipeline の既定へ倒す）", async () => {
+  it("未指定: 欄そのものを渡さない（pipeline の既定へ倒す）", async () => {
     const host = fakeHost([...script], programOf(640));
     const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
     assertEquals(await session.send("Name a color.").text(), "Blue.");
@@ -622,7 +622,7 @@ test("ChatSession speculative: 指定はそのまま sequence へ降り、未指
     assertEquals(host.speculatives(), [undefined]);
   });
 
-  await t.step('true / false / "always" はそのまま降りる', async () => {
+  it('true / false / "always" はそのまま降りる', async () => {
     // `"always"` は自己採算ゲート抜きの席（段 4-B ④）— この層はどれも解釈せず素通しする。
     for (const speculative of [true, false, "always"] as const) {
       const host = fakeHost([...script], programOf(640));
@@ -636,7 +636,7 @@ test("ChatSession speculative: 指定はそのまま sequence へ降り、未指
     }
   });
 
-  await t.step("sequence を作り直しても同じ値が降りる（会話の途中で切り替わらない）", async () => {
+  it("sequence を作り直しても同じ値が降りる（会話の途中で切り替わらない）", async () => {
     // 打ち切ったターン（`closes: false`）の後は KV を継げないので sequence を作り直す — その
     // 2 本目にも同じ指定が降りることを見る（セッションの設定であってターンの設定ではない）。
     const host = fakeHost(
@@ -840,12 +840,16 @@ test("ChatSession: 停止文字列で切ったターンは chat() と同じ理�
   assertEquals(host.created(), 2, "停止文字列で切ったターンの後は sequence を作り直す");
 });
 
-test("ChatSession capacity: 容量の関係は構築時に見る（設定した場所で落ちる）", async (t) => {
+describe("ChatSession capacity: 容量の関係は構築時に見る（設定した場所で落ちる）", () => {
   // 検査を sequence 側だけに任せると、長いターンでは `#shrink` が履歴を実際に切り詰めてから
   // 容量エラーになり、真因（宣言ミス）がどの診断にも出ない。式は `sequence.ts` と同じ 2 本。
-  const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
+  // One host is shared by all its: the last it asserts that only its own sequence was created.
+  let host: FakeHost;
+  beforeAll(() => {
+    host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
+  });
 
-  await t.step("chunkLength 未満（1 chunk すら入らない）", () => {
+  it("chunkLength 未満（1 chunk すら入らない）", () => {
     assertThrows(
       () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 8 }),
       ModelInputError,
@@ -853,7 +857,7 @@ test("ChatSession capacity: 容量の関係は構築時に見る（設定した�
     );
   });
 
-  await t.step("maxPosition 超過（容量いっぱいの会話が位置上限の外を引く）", () => {
+  it("maxPosition 超過（容量いっぱいの会話が位置上限の外を引く）", () => {
     assertThrows(
       () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 4097 }),
       ModelInputError,
@@ -861,7 +865,7 @@ test("ChatSession capacity: 容量の関係は構築時に見る（設定した�
     );
   });
 
-  await t.step("値域（安全整数でない容量）", () => {
+  it("値域（安全整数でない容量）", () => {
     assertThrows(
       () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 64.5 }),
       ModelInputError,
@@ -869,16 +873,13 @@ test("ChatSession capacity: 容量の関係は構築時に見る（設定した�
     );
   });
 
-  await t.step(
-    "chunkLength ちょうど / maxPosition ちょうどは通る（門が広すぎない対）",
-    async () => {
-      const edge = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 32 });
-      new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 4096 });
-      // 構築が通っただけでなく、選んだ容量がそのまま sequence へ降りることまで見る。
-      assertEquals(await edge.send("Name a color.").text(), "Blue.");
-      assertEquals(host.capacities(), [32]);
-    },
-  );
+  it("chunkLength ちょうど / maxPosition ちょうどは通る（門が広すぎない対）", async () => {
+    const edge = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 32 });
+    new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 4096 });
+    // 構築が通っただけでなく、選んだ容量がそのまま sequence へ降りることまで見る。
+    assertEquals(await edge.send("Name a color.").text(), "Blue.");
+    assertEquals(host.capacities(), [32]);
+  });
 });
 
 test("ChatSession: sequence 確保の await 中に dispose されたら、その sequence を畳んで落ちる", async () => {
@@ -916,7 +917,7 @@ test("ChatSession: sequence 確保の await 中に dispose されたら、その
   assertEquals(host.disposed(), 1, "確保できてしまった sequence は畳んでから落とす");
 });
 
-test("ChatSession sampler: ターン → セッション → 配布形の既定の順に解決する", async (t) => {
+describe("ChatSession sampler: ターン → セッション → 配布形の既定の順に解決する", () => {
   // 退行すると配布形の推奨サンプラが黙って温度 0（greedy）へ落ちる — 例外は出ず、出力が
   // 「妙に決定的」になることでしか気づけない。
   const recommended: Gemma4DefaultSampler = { temperature: 1, topK: 64, topP: 0.95 };
@@ -925,14 +926,14 @@ test("ChatSession sampler: ターン → セッション → 配布形の既定�
     { text: "Red.", closes: true },
   ] as const;
 
-  await t.step("どちらも省略すれば配布形の宣言が効く", async () => {
+  it("どちらも省略すれば配布形の宣言が効く", async () => {
     const host = fakeHost([...script], programOf(640), {}, recommended);
     const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
     assertEquals(await session.send("Name a color.").text(), "Blue.");
     assertEquals(host.samplers()[0], recommended);
   });
 
-  await t.step("セッション指定が配布形の宣言を上書きする", async () => {
+  it("セッション指定が配布形の宣言を上書きする", async () => {
     const host = fakeHost([...script], programOf(640), {}, recommended);
     const session = new Gemma4ChatSession(host, {
       maxNewTokens: MAX_NEW_TOKENS,
@@ -942,7 +943,7 @@ test("ChatSession sampler: ターン → セッション → 配布形の既定�
     assertEquals(host.samplers()[0], { temperature: 0.5 });
   });
 
-  await t.step("ターン指定がセッション指定を上書きする", async () => {
+  it("ターン指定がセッション指定を上書きする", async () => {
     const host = fakeHost([...script], programOf(640), {}, recommended);
     const session = new Gemma4ChatSession(host, {
       maxNewTokens: MAX_NEW_TOKENS,
@@ -956,7 +957,7 @@ test("ChatSession sampler: ターン → セッション → 配布形の既定�
     assertEquals(host.samplers(), [{ temperature: 0.5 }, { temperature: 0 }]);
   });
 
-  await t.step("3 段とも無ければ欄そのものを渡さない（低層の既定 = 温度 0）", async () => {
+  it("3 段とも無ければ欄そのものを渡さない（低層の既定 = 温度 0）", async () => {
     const host = fakeHost([...script], programOf(640));
     const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
     assertEquals(await session.send("Name a color.").text(), "Blue.");
@@ -1228,8 +1229,8 @@ test("ChatSession.fork: 分岐は履歴と KV を引き継ぎ、以後は元と�
   assertEquals(host.disposed(), 2);
 });
 
-test("ChatSession.fork: KV が空の会話は GPU の複製を出さず、履歴と設定だけを写す", async (t) => {
-  await t.step("まだ送っていない会話", async () => {
+describe("ChatSession.fork: KV が空の会話は GPU の複製を出さず、履歴と設定だけを写す", () => {
+  it("まだ送っていない会話", async () => {
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
     const session = new Gemma4ChatSession(host, {
       system: SYSTEM,
@@ -1253,7 +1254,7 @@ test("ChatSession.fork: KV が空の会話は GPU の複製を出さず、履歴
     await session.dispose();
   });
 
-  await t.step("直前のターンが EOS で閉じていない会話（KV は捨ててある）", async () => {
+  it("直前のターンが EOS で閉じていない会話（KV は捨ててある）", async () => {
     const host = fakeHost(
       [
         { text: "Blue", closes: false },

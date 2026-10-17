@@ -17,8 +17,8 @@
 // （`packages/models/tests/e2e_wan_ti2v_vae_encoder_test.ts`）に任せる — 既定のレーンで同じ Session を 3 寸法
 // （1280×704 → 704×1280 → 256×160）に束縛し直し、束縛ごとに golden と突き合わせる。
 
-import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
+import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { conv2dIgemmMTile } from "../src/kernels/conv2d.ts";
 import { conv3dIgemmKey } from "../src/kernels/conv3d.ts";
@@ -31,7 +31,7 @@ import {
   type RefTensor,
   refTensor,
 } from "../src/reference/ops.ts";
-import { createSessionFromContainer } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, type Session } from "../src/runtime/executor.ts";
 import type { Tensor } from "../src/runtime/session-types.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -131,80 +131,77 @@ const BINDINGS: readonly { readonly h: number; readonly w: number; readonly v4: 
   { h: 3, w: 5, v4: false },
 ];
 
-test({
-  name:
-    "記号の空間の conv3d → 非対称 pad → stride 2 の conv2d は、同じ Session の束縛 3 回で CPU 参照と一致し、" +
+describe.skipIf(!GPU_AVAILABLE)(
+  "記号の空間の conv3d → 非対称 pad → stride 2 の conv2d は、同じ Session の束縛 3 回で CPU 参照と一致し、" +
     "束縛で conv3d の変種を踏み分け、戻りの回は 1 回目とビット一致（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async (t) => {
-    const gpu = await acquireGpu();
-    const session = await createSessionFromContainer(
-      gpu,
-      await openModelBytes(downGraph(), []),
-      GRAPH_NAME,
-    );
-    try {
-      const mTile = conv2dIgemmMTile(CHANNELS_MID);
-      const outputsByRun: { readonly y3: Float32Array; readonly y: Float32Array }[] = [];
-      for (const [index, { h, w, v4 }] of BINDINGS.entries()) {
-        await t.step(
-          `run ${index + 1}: h = ${h}・w = ${w}（conv3d は ${v4 ? "v4" : "スカラ"}）`,
-          async () => {
-            const x = fill([CHANNELS_IN, 1, 2 * h, 2 * w], (i) => SIGNED(i + h * 31 + w));
-            const outputs = await session.run({ x, ...WEIGHTS });
-            const reference = referenceDown(x);
-            assertEquals(outputs["y3"].shape, [CHANNELS_MID, 1, 2 * h, 2 * w], "conv3d の出口の形");
-            assertEquals(outputs["y"].shape, [1, CHANNELS_OUT, h, w], "conv2d の出口の形");
-            for (const [name, expected] of [
-              ["y3", reference.y3],
-              ["y", reference.y],
-            ] as const) {
-              const got = outputs[name].data;
-              if (!(got instanceof Float32Array) || !(expected.data instanceof Float32Array)) {
-                throw new Error(`${name}: f32 でない`);
-              }
-              const report = allclose(got, expected.data, CPU_REFERENCE_TOLERANCE);
-              assert(
-                report.pass,
-                `${name}: CPU 参照と帯の外（maxAbs ${report.maxAbsError}・maxRel ${report.maxRelError}）`,
-              );
-              // 出力が定数でない（恒真化していない）こと。
-              assert(new Set(got).size > 1, `${name}: 出力が定数`);
-            }
-            const conv3dKeys = requireCensus(
-              session.diagnostics().lastRunPipelines,
-              `run ${index + 1}`,
-            )
-              .map((row) => row.key)
-              .filter((key) => key.startsWith("conv3d:"));
-            assertEquals(conv3dKeys, [conv3dIgemmKey("f32", v4, mTile)], "踏んだ conv3d の変種");
-            const [y3, y] = [outputs["y3"].data, outputs["y"].data];
-            if (!(y3 instanceof Float32Array) || !(y instanceof Float32Array)) {
-              throw new Error("y3 / y が f32 でない");
-            }
-            outputsByRun.push({ y3, y });
-          },
-        );
-      }
-      await t.step(
-        "戻りの回（run 3）は 1 回目と Uint32 で一致する（conv3d の出口 y3 と最終の出口 y）",
-        () => {
-          const [first, , back] = outputsByRun;
-          assert(first !== undefined && back !== undefined, "run 1 / 3 の出力が無い");
-          const bits = (values: Float32Array): number[] => [
-            ...new Uint32Array(values.buffer, values.byteOffset, values.length),
-          ];
-          assertEquals(
-            bits(back.y3),
-            bits(first.y3),
-            "y3（conv3d の変種がスカラ → v4 → スカラと切り替わる）",
-          );
-          assertEquals(bits(back.y), bits(first.y), "y");
-        },
+  () => {
+    let gpu: Awaited<ReturnType<typeof acquireGpu>> | undefined;
+    let session: Session;
+    const mTile = conv2dIgemmMTile(CHANNELS_MID);
+    const outputsByRun: { readonly y3: Float32Array; readonly y: Float32Array }[] = [];
+
+    beforeAll(async () => {
+      gpu = await acquireGpu();
+      session = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(downGraph(), []),
+        GRAPH_NAME,
       );
-    } finally {
-      await session.dispose();
-      gpu.destroy();
+    });
+
+    afterAll(async () => {
+      // A failed beforeAll leaves session unassigned; the GPU is released either way.
+      await session?.dispose();
+      gpu?.destroy();
+    });
+
+    for (const [index, { h, w, v4 }] of BINDINGS.entries()) {
+      it(`run ${index + 1}: h = ${h}・w = ${w}（conv3d は ${v4 ? "v4" : "スカラ"}）`, async () => {
+        const x = fill([CHANNELS_IN, 1, 2 * h, 2 * w], (i) => SIGNED(i + h * 31 + w));
+        const outputs = await session.run({ x, ...WEIGHTS });
+        const reference = referenceDown(x);
+        assertEquals(outputs["y3"].shape, [CHANNELS_MID, 1, 2 * h, 2 * w], "conv3d の出口の形");
+        assertEquals(outputs["y"].shape, [1, CHANNELS_OUT, h, w], "conv2d の出口の形");
+        for (const [name, expected] of [
+          ["y3", reference.y3],
+          ["y", reference.y],
+        ] as const) {
+          const got = outputs[name].data;
+          if (!(got instanceof Float32Array) || !(expected.data instanceof Float32Array)) {
+            throw new Error(`${name}: f32 でない`);
+          }
+          const report = allclose(got, expected.data, CPU_REFERENCE_TOLERANCE);
+          assert(
+            report.pass,
+            `${name}: CPU 参照と帯の外（maxAbs ${report.maxAbsError}・maxRel ${report.maxRelError}）`,
+          );
+          // 出力が定数でない（恒真化していない）こと。
+          assert(new Set(got).size > 1, `${name}: 出力が定数`);
+        }
+        const conv3dKeys = requireCensus(session.diagnostics().lastRunPipelines, `run ${index + 1}`)
+          .map((row) => row.key)
+          .filter((key) => key.startsWith("conv3d:"));
+        assertEquals(conv3dKeys, [conv3dIgemmKey("f32", v4, mTile)], "踏んだ conv3d の変種");
+        const [y3, y] = [outputs["y3"].data, outputs["y"].data];
+        if (!(y3 instanceof Float32Array) || !(y instanceof Float32Array)) {
+          throw new Error("y3 / y が f32 でない");
+        }
+        outputsByRun.push({ y3, y });
+      });
     }
+
+    it("戻りの回（run 3）は 1 回目と Uint32 で一致する（conv3d の出口 y3 と最終の出口 y）", () => {
+      const [first, , back] = outputsByRun;
+      assert(first !== undefined && back !== undefined, "run 1 / 3 の出力が無い");
+      const bits = (values: Float32Array): number[] => [
+        ...new Uint32Array(values.buffer, values.byteOffset, values.length),
+      ];
+      assertEquals(
+        bits(back.y3),
+        bits(first.y3),
+        "y3（conv3d の変種がスカラ → v4 → スカラと切り替わる）",
+      );
+      assertEquals(bits(back.y), bits(first.y), "y");
+    });
   },
-});
+);

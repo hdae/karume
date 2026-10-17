@@ -19,7 +19,6 @@
 // を明示 SKIP する（①② は常に走る）。
 
 import { isNotFound, readTextFileSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { ExecutionError } from "@karume/runtime";
@@ -36,6 +35,7 @@ import { GEMMA4_CHUNK_BUCKETS, Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import type { GenerationGraph } from "../src/generation/program.ts";
 import type { GraphOwner } from "../src/hub/components.ts";
 import { stubModel } from "./helpers/stub-model.ts";
+import { beforeAll, describe, it, test } from "vite-plus/test";
 
 /**
  * 受理される最小形（4 つの数 + `rope` — `sampler` だけが optional）。
@@ -101,31 +101,31 @@ test("gemma4 pipelineConfig: 3 つの数 + rope と optional な sampler を読�
   });
 });
 
-test("gemma4 pipelineConfig: 未知キーと欠落は fail loudly", async (t) => {
-  await t.step("オブジェクトでない宣言（`unknown` の境界パーサ）", () => {
+describe("gemma4 pipelineConfig: 未知キーと欠落は fail loudly", () => {
+  it("オブジェクトでない宣言（`unknown` の境界パーサ）", () => {
     for (const raw of [undefined, null, 42, "chunkLength=32", [MINIMAL]]) {
       assertThrows(() => parseGemma4PipelineConfig(raw), Error, "オブジェクトでない");
     }
   });
-  await t.step("根の未知キー（綴り違いが既定へ縮退しない）", () => {
+  it("根の未知キー（綴り違いが既定へ縮退しない）", () => {
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, capasity: 640 }),
       Error,
       "未知キー 'capasity'",
     );
   });
-  await t.step("sampler の未知キー（宣言できる欄は 3 つだけ）", () => {
+  it("sampler の未知キー（宣言できる欄は 3 つだけ）", () => {
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, sampler: { ...RECOMMENDED, seed: 7 } }),
       Error,
       "未知キー 'seed'",
     );
   });
-  await t.step("欄の欠落", () => {
+  it("欄の欠落", () => {
     const { capacity: _dropped, ...rest } = MINIMAL;
     assertThrows(() => parseGemma4PipelineConfig(rest), Error, "pipelineConfig.capacity: 無い");
   });
-  await t.step("maxChunkLength は必須（無いと trace 範囲の外を誰も落とせない）", () => {
+  it("maxChunkLength は必須（無いと trace 範囲の外を誰も落とせない）", () => {
     // 欠落を「上限なし」として通すと、上限 768 の資産に chunkLength 1024 を渡す形が例外なしで
     // 走る（門を入れる前の実測 — 2026-09-03）。宣言が唯一の出どころなので欠落は fail loudly。
     const { maxChunkLength: _dropped, ...rest } = MINIMAL;
@@ -135,19 +135,19 @@ test("gemma4 pipelineConfig: 未知キーと欠落は fail loudly", async (t) =>
       "pipelineConfig.maxChunkLength: 無い",
     );
   });
-  await t.step("rope は必須（欠けたまま動くと回転しない attention が黙って走る）", () => {
+  it("rope は必須（欠けたまま動くと回転しない attention が黙って走る）", () => {
     const { rope: _dropped, ...rest } = MINIMAL;
     assertThrows(() => parseGemma4PipelineConfig(rest), Error, "pipelineConfig.rope: 無い");
   });
-  await t.step("sampler は欄ごと無ければ通る（= 低層の既定 = greedy）", () => {
+  it("sampler は欄ごと無ければ通る（= 低層の既定 = greedy）", () => {
     assertEquals(parseGemma4PipelineConfig(MINIMAL).sampler, undefined);
   });
 });
 
-test("gemma4 pipelineConfig: rope の受理集合", async (t) => {
+describe("gemma4 pipelineConfig: rope の受理集合", () => {
   const withRope = (rope: unknown): unknown => ({ ...MINIMAL, rope });
 
-  await t.step("層種別は 2 本ちょうど（未知の層種別・欠落）", () => {
+  it("層種別は 2 本ちょうど（未知の層種別・欠落）", () => {
     assertThrows(
       () => parseGemma4PipelineConfig(withRope({ ...ROPE, local_attention: ROPE.full_attention })),
       Error,
@@ -161,7 +161,7 @@ test("gemma4 pipelineConfig: rope の受理集合", async (t) => {
     );
   });
 
-  await t.step("層種別の欄は 3 つちょうど（綴り違いが既定へ縮退しない）", () => {
+  it("層種別の欄は 3 つちょうど（綴り違いが既定へ縮退しない）", () => {
     assertThrows(
       () =>
         parseGemma4PipelineConfig(
@@ -188,7 +188,7 @@ test("gemma4 pipelineConfig: rope の受理集合", async (t) => {
     );
   });
 
-  await t.step("値域の門は rope.ts が持つ（同じ式を 2 実装しない）", () => {
+  it("値域の門は rope.ts が持つ（同じ式を 2 実装しない）", () => {
     // 奇数の rotaryDim は「前半 = 後半」の並びが崩れる = 上流と別の表を黙って作る。
     assertThrows(
       () =>
@@ -225,25 +225,22 @@ test("gemma4 pipelineConfig: rope の受理集合", async (t) => {
   });
 });
 
-test("gemma4 pipelineConfig: 値域", async (t) => {
-  await t.step("数は 1 以上の整数", () => {
+describe("gemma4 pipelineConfig: 値域", () => {
+  it("数は 1 以上の整数", () => {
     assertThrows(() => parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 0 }), Error);
     assertThrows(() => parseGemma4PipelineConfig({ ...MINIMAL, maxPosition: 1.5 }), Error);
   });
-  await t.step(
-    "chunk の行数は 2 以上（1 行は decode 形の専用値 — 資産の齟齬として素の Error）",
-    () => {
-      for (const key of ["chunkLength", "maxChunkLength"]) {
-        const error = assertThrows(
-          () => parseGemma4PipelineConfig({ ...MINIMAL, [key]: 1 }),
-          Error,
-          `pipelineConfig.${key}: 2 以上の整数でない`,
-        );
-        assert(!(error instanceof ModelInputError), error.message);
-      }
-    },
-  );
-  await t.step("sampler の値域は generation/sampler.ts の assertSpec と同じ", () => {
+  it("chunk の行数は 2 以上（1 行は decode 形の専用値 — 資産の齟齬として素の Error）", () => {
+    for (const key of ["chunkLength", "maxChunkLength"]) {
+      const error = assertThrows(
+        () => parseGemma4PipelineConfig({ ...MINIMAL, [key]: 1 }),
+        Error,
+        `pipelineConfig.${key}: 2 以上の整数でない`,
+      );
+      assert(!(error instanceof ModelInputError), error.message);
+    }
+  });
+  it("sampler の値域は generation/sampler.ts の assertSpec と同じ", () => {
     const sampler = { ...RECOMMENDED };
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, sampler: { ...sampler, temperature: -1 } }),
@@ -263,26 +260,26 @@ test("gemma4 pipelineConfig: 値域", async (t) => {
   });
 });
 
-test("gemma4 pipelineConfig: chunkLength ≤ maxChunkLength / capacity ≤ maxPosition", async (t) => {
-  await t.step("既定の chunkLength が記号 M の trace 範囲の外", () => {
+describe("gemma4 pipelineConfig: chunkLength ≤ maxChunkLength / capacity ≤ maxPosition", () => {
+  it("既定の chunkLength が記号 M の trace 範囲の外", () => {
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 129 }),
       Error,
       "maxChunkLength 128 を超えた",
     );
   });
-  await t.step("上限ちょうどは通る（門が広すぎないことの対）", () => {
+  it("上限ちょうどは通る（門が広すぎないことの対）", () => {
     const config = parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 128 });
     assertEquals(config.chunkLength, 128);
   });
-  await t.step("1 chunk すら入らない容量", () => {
+  it("1 chunk すら入らない容量", () => {
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 64, capacity: 32 }),
       Error,
       "capacity 32 を超えた",
     );
   });
-  await t.step("容量いっぱいの会話がモデルの位置上限の外を引く", () => {
+  it("容量いっぱいの会話がモデルの位置上限の外を引く", () => {
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, capacity: 2048, maxPosition: 1024 }),
       Error,
@@ -299,7 +296,7 @@ test("gemma4 pipelineConfig: chunkLength ≤ maxChunkLength / capacity ≤ maxPo
 // バイト列を 1 本も開く前に通す」ことなので、`model` にはゴミを渡す（開かれていれば
 // コンテナ側の文言で落ちる = この門が抜けている）。
 
-test("gemma4 fromAssets: config は fromPretrained と同じ門を、バイト列を開く前に通る", async (t) => {
+describe("gemma4 fromAssets: config は fromPretrained と同じ門を、バイト列を開く前に通る", () => {
   const junk = new Uint8Array<ArrayBuffer>(new ArrayBuffer(8));
   const fromAssets = (config: unknown): Promise<Gemma4Pipeline> =>
     Gemma4Pipeline.fromAssets({
@@ -309,28 +306,28 @@ test("gemma4 fromAssets: config は fromPretrained と同じ門を、バイト�
       tokenizer: junk,
     });
 
-  await t.step("未知キー", async () => {
+  it("未知キー", async () => {
     await assertRejects(
       () => fromAssets({ ...MINIMAL, capasity: 640 }),
       Error,
       "未知キー 'capasity'",
     );
   });
-  await t.step("3 つの数の関係", async () => {
+  it("3 つの数の関係", async () => {
     await assertRejects(
       () => fromAssets({ ...MINIMAL, capacity: 2048 }),
       Error,
       "maxPosition 1024 を超えた",
     );
   });
-  await t.step("sampler の値域（V2-b が名指しした非対称そのもの）", async () => {
+  it("sampler の値域（V2-b が名指しした非対称そのもの）", async () => {
     await assertRejects(
       () => fromAssets({ ...MINIMAL, sampler: { ...RECOMMENDED, temperature: -1 } }),
       Error,
       "0 以上の有限数でない",
     );
   });
-  await t.step("宣言が正しければ門を抜け、コンテナ側の文言で落ちる（陰性対照）", async () => {
+  it("宣言が正しければ門を抜け、コンテナ側の文言で落ちる（陰性対照）", async () => {
     // 「config の門で全部落ちているから緑」ではないことを見る対。
     const error = await assertRejects(() => fromAssets({ ...MINIMAL }), Error);
     assertEquals(error.message.includes("pipelineConfig"), false, error.message);
@@ -390,14 +387,17 @@ const ropeGraph = (
   patch: Readonly<Record<string, readonly (number | string)[]>> = {},
 ): GenerationGraph => ropeOwner(patch).graph;
 
-test("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食い違いは名指しで落ちる", async (t) => {
-  const config = parseGemma4PipelineConfig(MINIMAL);
+describe("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食い違いは名指しで落ちる", () => {
+  let config: Gemma4PipelineConfig;
+  beforeAll(() => {
+    config = parseGemma4PipelineConfig(MINIMAL);
+  });
 
-  await t.step("宣言どおり（陰性対照 — 門が全部落として緑になっていないこと）", () => {
+  it("宣言どおり（陰性対照 — 門が全部落として緑になっていないこと）", () => {
     assertRopeInputShapes(ropeGraph(), config);
   });
 
-  await t.step("層種別の取り違え（full の席に sliding の幅）", () => {
+  it("層種別の取り違え（full の席に sliding の幅）", () => {
     // exporter 側 `rope.py` が `head_dim` / `global_head_dim` の分岐で自認している間違い方。
     const error = assertThrows(
       () => assertRopeInputShapes(ropeGraph({ fullCos: [1, "M", 256] }), config),
@@ -407,7 +407,7 @@ test("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食い違
     assert(error.message.includes("headDim 512"), error.message);
   });
 
-  await t.step("配布形が headDim を偽った宣言（同じ食い違いの逆側）", () => {
+  it("配布形が headDim を偽った宣言（同じ食い違いの逆側）", () => {
     const lying = parseGemma4PipelineConfig({
       ...MINIMAL,
       rope: { ...ROPE, sliding_attention: { theta: 10000, headDim: 128, rotaryDim: 128 } },
@@ -419,7 +419,7 @@ test("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食い違
     );
   });
 
-  await t.step("次元の数が違う宣言（`[1, M, headDim]` でない）", () => {
+  it("次元の数が違う宣言（`[1, M, headDim]` でない）", () => {
     assertThrows(
       () => assertRopeInputShapes(ropeGraph({ fullSin: [1, 512] }), config),
       Error,
@@ -427,7 +427,7 @@ test("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食い違
     );
   });
 
-  await t.step("RoPE がホスト供給でない資産（入力そのものが無い）", () => {
+  it("RoPE がホスト供給でない資産（入力そのものが無い）", () => {
     assertThrows(
       () => assertRopeInputShapes(ropeGraph({ slidingSin: [] }), config),
       Error,
@@ -436,11 +436,15 @@ test("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食い違
   });
 });
 
-test("gemma4 家族 admission: 配下の門の文言は呼んだ家族の入口名を名乗る", async (t) => {
-  const config = parseGemma4PipelineConfig(MINIMAL);
-  const qat = gemmaEntryName("gemma4-qat");
+describe("gemma4 家族 admission: 配下の門の文言は呼んだ家族の入口名を名乗る", () => {
+  let config: Gemma4PipelineConfig;
+  let qat: string;
+  beforeAll(() => {
+    config = parseGemma4PipelineConfig(MINIMAL);
+    qat = gemmaEntryName("gemma4-qat");
+  });
 
-  await t.step("RoPE の幅の食い違い（QAT の入口から）", () => {
+  it("RoPE の幅の食い違い（QAT の入口から）", () => {
     const error = assertThrows(
       () => admitGemma4(ropeOwner({ fullCos: [1, "M", 256] }), config, undefined, qat),
       Error,
@@ -449,7 +453,7 @@ test("gemma4 家族 admission: 配下の門の文言は呼んだ家族の入口�
     assert(error.message.startsWith("Gemma4QatPipeline: "), error.message);
   });
 
-  await t.step("出口の本数の食い違い（QAT の入口から）", () => {
+  it("出口の本数の食い違い（QAT の入口から）", () => {
     // `ropeGraph` の出口は logits 1 本 — 製品グラフの契約（logits + hidden の 2 本）で落ちる。
     const error = assertThrows(
       () => admitGemma4(ropeOwner(), config, undefined, qat),
@@ -494,10 +498,13 @@ test("gemma4 pipelineConfig: 配布形ミラーの宣言がこのパーサを素
 // （門が無かった頃、上限 768 の資産に chunkLength 1024 を渡すと例外なしで走っていた —
 // 2026-09-03 実測）そのものを守る門なので、ここで直接叩く。
 
-test("assertChunkLength: 実行時ノブの受理集合（宣言との関係を 3 本とも見る）", async (t) => {
-  const config = parseGemma4PipelineConfig(MINIMAL);
+describe("assertChunkLength: 実行時ノブの受理集合（宣言との関係を 3 本とも見る）", () => {
+  let config: Gemma4PipelineConfig;
+  beforeAll(() => {
+    config = parseGemma4PipelineConfig(MINIMAL);
+  });
 
-  await t.step("decode 形の専用値（1）を prefill 形として通さない", () => {
+  it("decode 形の専用値（1）を prefill 形として通さない", () => {
     assertThrows(
       () => assertChunkLength(1, config),
       ModelInputError,
@@ -505,7 +512,7 @@ test("assertChunkLength: 実行時ノブの受理集合（宣言との関係を 
     );
   });
 
-  await t.step("非整数は落とす", () => {
+  it("非整数は落とす", () => {
     assertThrows(
       () => assertChunkLength(3.5, config),
       ModelInputError,
@@ -513,11 +520,11 @@ test("assertChunkLength: 実行時ノブの受理集合（宣言との関係を 
     );
   });
 
-  await t.step("宣言 maxChunkLength ちょうどは通る（門が広すぎないことの対）", () => {
+  it("宣言 maxChunkLength ちょうどは通る（門が広すぎないことの対）", () => {
     assertEquals(assertChunkLength(config.maxChunkLength, config), config.maxChunkLength);
   });
 
-  await t.step("宣言 maxChunkLength 超過（記号 M を焼いた trace 範囲の外）", () => {
+  it("宣言 maxChunkLength 超過（記号 M を焼いた trace 範囲の外）", () => {
     assertThrows(
       () => assertChunkLength(config.maxChunkLength + 1, config),
       ModelInputError,
@@ -525,7 +532,7 @@ test("assertChunkLength: 実行時ノブの受理集合（宣言との関係を 
     );
   });
 
-  await t.step("maxPosition 超過（3 本目の門が到達可能であることの確認）", () => {
+  it("maxPosition 超過（3 本目の門が到達可能であることの確認）", () => {
     // maxChunkLength を maxPosition より大きく宣言した配布形でだけ踏める枝。
     const wide = parseGemma4PipelineConfig({
       ...MINIMAL,
@@ -549,13 +556,13 @@ test("assertChunkLength: 実行時ノブの受理集合（宣言との関係を 
 // 元の診断が `cause` で残ること）②既定の梯子が自分の規則を満たすこと。既定が規則を破ると
 // 「明示指定していないのに fromAssets が落ちる」形になり、落ちる場所が入口から遠い。
 
-test("assertGemma4ChunkBuckets: 受理集合は runtime に委ね、入口の名前だけを足す", async (t) => {
-  await t.step("配布既定の chunkLength に載る指定はそのまま返る", () => {
+describe("assertGemma4ChunkBuckets: 受理集合は runtime に委ね、入口の名前だけを足す", () => {
+  it("配布既定の chunkLength に載る指定はそのまま返る", () => {
     const buckets: readonly number[] = [32, 64];
     assertEquals(assertGemma4ChunkBuckets(buckets, SHIPPED_CHUNK_LENGTH), buckets);
   });
 
-  await t.step("chunkLength ちょうどは prefill 形と重なるので落ちる（cause に元の診断）", () => {
+  it("chunkLength ちょうどは prefill 形と重なるので落ちる（cause に元の診断）", () => {
     const error = assertThrows(
       () => assertGemma4ChunkBuckets([SHIPPED_CHUNK_LENGTH], SHIPPED_CHUNK_LENGTH),
       ModelInputError,
@@ -570,7 +577,7 @@ test("assertGemma4ChunkBuckets: 受理集合は runtime に委ね、入口の名
     );
   });
 
-  await t.step("既定の梯子 GEMMA4_CHUNK_BUCKETS 自身が受理集合の中にある", () => {
+  it("既定の梯子 GEMMA4_CHUNK_BUCKETS 自身が受理集合の中にある", () => {
     assert(Object.isFrozen(GEMMA4_CHUNK_BUCKETS), "module スコープの共有配列は凍結");
     for (const [index, rows] of GEMMA4_CHUNK_BUCKETS.entries()) {
       if (index > 0) {

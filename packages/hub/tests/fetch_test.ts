@@ -1,4 +1,4 @@
-import { test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import {
   type AssetPhase,
@@ -138,7 +138,7 @@ test("loadManifest: 可変 ref は 1 回だけ解決し、以降は同一 SHA �
   }
 });
 
-test("loadManifest: revision 未指定の main 解決だけを 1 回 warn する", async (t) => {
+describe("loadManifest: revision 未指定の main 解決だけを 1 回 warn する", () => {
   const load = async (revision?: string): Promise<string[]> => {
     const mock = createMockFetch({ sha: SHA, files: serveAll() });
     const caches = new MemoryCacheStorage();
@@ -154,7 +154,7 @@ test("loadManifest: revision 未指定の main 解決だけを 1 回 warn する
     });
   };
 
-  await t.step("revision 省略なら 1 回だけ出て、解決した SHA と 2 択の案内を載せる", async () => {
+  it("revision 省略なら 1 回だけ出て、解決した SHA と 2 択の案内を載せる", async () => {
     const warnings = await load();
     assertEquals(warnings.length, 1, "警告が出ない / 複数回出ている");
     const [warning] = warnings;
@@ -165,19 +165,19 @@ test("loadManifest: revision 未指定の main 解決だけを 1 回 warn する
     assert(warning.includes("_SOURCES"), `${warning} が models の対応表へ誘導していない`);
   });
 
-  await t.step("'main' の明示指定では出さない（可変 ref でよいという意思表示）", async () => {
+  it("'main' の明示指定では出さない（可変 ref でよいという意思表示）", async () => {
     assertEquals(await load("main"), []);
   });
 
-  await t.step("SHA 指定では出さない", async () => {
+  it("SHA 指定では出さない", async () => {
     assertEquals(await load(SHA), []);
   });
 
-  await t.step("タグ・ブランチの明示指定でも出さない", async () => {
+  it("タグ・ブランチの明示指定でも出さない", async () => {
     assertEquals(await load("v1.0"), []);
   });
 
-  await t.step("解決に失敗したときは warn ではなく失敗そのものが上がる", async () => {
+  it("解決に失敗したときは warn ではなく失敗そのものが上がる", async () => {
     const mock = createMockFetch({ files: serveAll() }); // sha 無し = 解決 API は 404
     const warnings = await captureWarnings(async () => {
       await assertRejects(
@@ -222,7 +222,7 @@ test("loadManifest: 可変 ref の解決失敗はオフライン不可として 
   assert(error.message.includes("オフライン"), "オフライン不可であることを明示する");
 });
 
-test("loadManifest: URL の構造を壊す repo 名は取得に出る前に HubError で断る", async (t) => {
+describe("loadManifest: URL の構造を壊す repo 名は取得に出る前に HubError で断る", () => {
   // repo は取得層で percent-encode されずに URL へ綴り込まれる（`/` が構造要素）ので、`?` `#` は
   // `/resolve/<SHA>/...` を query / fragment へ押し出し、`../` と 3 セグメント以上は別の path を指す。
   const cases: readonly [string, string][] = [
@@ -234,7 +234,7 @@ test("loadManifest: URL の構造を壊す repo 名は取得に出る前に HubE
     ["1 セグメント", "anima"],
   ];
   for (const [label, repo] of cases) {
-    await t.step(label, async () => {
+    it(label, async () => {
       for (const revision of [undefined, SHA]) {
         const mock = createMockFetch({ sha: SHA, files: serveAll() });
         const error = await assertRejects(
@@ -266,7 +266,7 @@ test("loadManifest: repo が文字列でない参照は素の TypeError でな�
   assertEquals(mock.calls, [], "repo の無い参照のまま取得へ出ている");
 });
 
-test("loadManifest: revision 解決の応答が commit SHA でなければ固定せずに落とす", async (t) => {
+describe("loadManifest: revision 解決の応答が commit SHA でなければ固定せずに落とす", () => {
   // 非準拠ミラー・カスタム fetch が可変 ref や短縮形を返すと、それを「固定済みの世代」として
   // 以後の全取得が解決し直す形になり、1 つの commit に固定する契約が成り立たない。
   const cases: readonly [string, string][] = [
@@ -276,7 +276,7 @@ test("loadManifest: revision 解決の応答が commit SHA でなければ固定
     ["大文字の 16 進", SHA.toUpperCase()],
   ];
   for (const [label, sha] of cases) {
-    await t.step(label, async () => {
+    it(label, async () => {
       const mock = createMockFetch({ sha, files: serveAll() });
       const error = await assertRejects(
         () =>
@@ -457,7 +457,7 @@ test("loadManifest: 完全キャッシュ済みでも中断済み signal なら 
   assertEquals(hubCache(caches).entries.size, 1, "中断を破損と取り違えてキャッシュを捨てている");
 });
 
-test("loadManifest: 渡した HubRepoRef を後から書き換えても取得先は動かない", async (t) => {
+describe("loadManifest: 渡した HubRepoRef を後から書き換えても取得先は動かない", () => {
   // 呼び出し側の値を読み直す実装だと、表示用の `loaded.repo` は旧値のまま、取得は旧 SHA で
   // 新しい repo・ホストへ出る（名乗りと取得先が食い違う）。
   const OTHER_HUB = "https://another.test";
@@ -469,7 +469,7 @@ test("loadManifest: 渡した HubRepoRef を後から書き換えても取得先
     }
   };
 
-  await t.step("ロードの後の書き換え", async () => {
+  it("ロードの後の書き換え", async () => {
     const mock = createMockFetch({ files: serveAll() });
     const caches = new MemoryCacheStorage();
     const ref = { repo: REPO, hubUrl: HUB_URL, revision: SHA };
@@ -482,7 +482,7 @@ test("loadManifest: 渡した HubRepoRef を後から書き換えても取得先
     assertEquals(loaded.repo, REPO);
   });
 
-  await t.step("revision 解決を待っている最中の書き換え", async () => {
+  it("revision 解決を待っている最中の書き換え", async () => {
     const mock = createMockFetch({ sha: SHA, files: serveAll() });
     const caches = new MemoryCacheStorage();
     const ref = { repo: REPO, hubUrl: HUB_URL, revision: "main" };
@@ -1144,7 +1144,7 @@ test("fetchAssets: abort(reason) が primitive でもそのまま伝播する", 
   assertStrictEquals(error, "app:cancelled");
 });
 
-test("onProgress の例外は通知の段に依らず取得を落とさない（warn で届く）", async (t) => {
+describe("onProgress の例外は通知の段に依らず取得を落とさない（warn で届く）", () => {
   // downloading は取得層が隔離して warn だけで続行する。complete まで同じ扱いでないと、同じ UI 側の
   // 例外が「受信中なら無害・終端ならロード全体の失敗」と段で意味を変える。
   const failure = new Error("ui: 描画の不具合");
@@ -1152,7 +1152,7 @@ test("onProgress の例外は通知の段に依らず取得を落とさない（
     throw failure;
   };
 
-  await t.step("fetchAssets（network 取得 = downloading と complete）", async () => {
+  it("fetchAssets（network 取得 = downloading と complete）", async () => {
     const caches = new MemoryCacheStorage();
     const { mock, loaded } = await load({ files: serveAll() }, caches);
     const files = selectionFiles(loaded.manifest);
@@ -1168,7 +1168,7 @@ test("onProgress の例外は通知の段に依らず取得を落とさない（
     );
   });
 
-  await t.step("prefetchAssets（キャッシュヒット = complete だけ）", async () => {
+  it("prefetchAssets（キャッシュヒット = complete だけ）", async () => {
     const caches = new MemoryCacheStorage();
     const { mock, loaded } = await load({ files: serveAll() }, caches);
     const refs = Object.values(selectionFiles(loaded.manifest)).filter(
@@ -1441,14 +1441,14 @@ test("fetchAssets: 進捗は実際に取りに行った先の (repo, revision) �
   }
 });
 
-test("loadManifest: 読み込んだ repo 自身を指す越境参照は ManifestFormatError で断る", async (t) => {
+describe("loadManifest: 読み込んだ repo 自身を指す越境参照は ManifestFormatError で断る", () => {
   // 自リポの別 revision を越境で指す形は、参照の同一性（repo と revision を含む）とキャッシュの
   // 実体（HF では revision を含まない）がずれる — 片方を保護しても共有の実体ごと消える。
   for (const [label, revision] of [
     ["同じ revision", SHA],
     ["別の revision", FOREIGN_SHA],
   ]) {
-    await t.step(label, async () => {
+    it(label, async () => {
       const selfCross = crossRepoManifest
         .replaceAll(FOREIGN_REPO, REPO)
         .replaceAll(FOREIGN_SHA, revision);
@@ -1726,7 +1726,7 @@ test("openAsset: 越境参照は宣言された (repo, revision) の口で開く
   assertEquals(await reader.read(0, ref.size), foreignBytes, "自リポのバイト列が読めている");
 });
 
-test("openAsset: 宣言 size の外は取得元と在庫の有無に依らず読めない", async (t) => {
+describe("openAsset: 宣言 size の外は取得元と在庫の有無に依らず読めない", () => {
   // 区間読み口が見る境界は**宣言 size**（`openAsset` の doc）。HF の取得層は宣言 size を読み出しの
   // 境界に使わないので、同じ sha256 に短い size を宣言した参照が warm エントリを開くと、宣言の外
   // （実体の残り）が読めてしまう — ローカルは宣言 size で拒否するので取得元で挙動が割れる。
@@ -1750,7 +1750,7 @@ test("openAsset: 宣言 size の外は取得元と在庫の有無に依らず読
   ];
 
   for (const warm of [false, true]) {
-    await t.step(`HF・${warm ? "warm" : "cold"}・宣言どおりの参照`, async () => {
+    it(`HF・${warm ? "warm" : "cold"}・宣言どおりの参照`, async () => {
       const { mock, caches, loaded, ref } = await openable();
       const access = { fetch: mock.fetch, caches };
       if (warm) await prefetchAssets(loaded, [ref], access);
@@ -1762,7 +1762,7 @@ test("openAsset: 宣言 size の外は取得元と在庫の有無に依らず読
     });
   }
 
-  await t.step("HF・warm・同じ sha256 に短い size を宣言した参照", async () => {
+  it("HF・warm・同じ sha256 に短い size を宣言した参照", async () => {
     const { mock, caches, loaded, ref } = await openable();
     const access = { fetch: mock.fetch, caches };
     await prefetchAssets(loaded, [ref], access);
@@ -1773,19 +1773,16 @@ test("openAsset: 宣言 size の外は取得元と在庫の有無に依らず読
   });
 
   for (const shrink of [0, 1]) {
-    await t.step(
-      `ローカル・${shrink === 0 ? "宣言どおり" : "短い size を宣言"}の参照`,
-      async () => {
-        const local = await loadManifest(localDirectory(adapter, { label: "./models/test" }));
-        const ref = selectionFiles(local.manifest)["tokenizer"];
-        const declared: FileRef = { ...ref, size: ref.size - shrink };
-        const reader = await openAsset(local, declared);
-        assert(reader !== undefined);
-        for (const [offset, length] of outside(declared.size)) {
-          await assertRejects(() => reader.read(offset, length), Error, "宣言 size");
-        }
-      },
-    );
+    it(`ローカル・${shrink === 0 ? "宣言どおり" : "短い size を宣言"}の参照`, async () => {
+      const local = await loadManifest(localDirectory(adapter, { label: "./models/test" }));
+      const ref = selectionFiles(local.manifest)["tokenizer"];
+      const declared: FileRef = { ...ref, size: ref.size - shrink };
+      const reader = await openAsset(local, declared);
+      assert(reader !== undefined);
+      for (const [offset, length] of outside(declared.size)) {
+        await assertRejects(() => reader.read(offset, length), Error, "宣言 size");
+      }
+    });
   }
 });
 

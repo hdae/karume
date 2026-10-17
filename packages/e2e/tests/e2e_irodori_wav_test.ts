@@ -63,7 +63,7 @@
  */
 
 import { readFile, writeFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertFalse, assertRejects, assertStrictEquals } from "@std/assert";
 import { type FileRef, parseManifest, resolveSelection } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
@@ -428,44 +428,54 @@ const runCase = async (
   return { audio, sha: actual };
 };
 
-test({
-  name: `e2e(実GPU): 配布形 ${MODEL} / quant ${QUANT} の WAV が参照 sha256 と一致する`,
-  ignore: !RUNNABLE,
-  fn: async (t) => {
-    // 参照値を書きうる走行なので、キーを採ったアダプタと実行アダプタの同一性を先に見る。
-    await assertRunningAdapter();
-    const manifest = readManifest();
-    // 門の前提を先に見る（実効ノブが動いていたら、生成する前に「条件が違う」と言う）。
-    const config = assertReferenceKnobs(modelEntry(manifest));
-    const assets = await loadLocalAssets(manifest);
-    // 参照音声は 48kHz mono PCM16。周波数が配布形と違えば `generate` が fail loudly（リサンプル
-    // は持たない）ので、ここでは読むだけにする。
-    const reference = decodeWav(referenceBytes as Uint8Array<ArrayBuffer>);
+describe.skipIf(!RUNNABLE)(
+  `e2e(実GPU): 配布形 ${MODEL} / quant ${QUANT} の WAV が参照 sha256 と一致する`,
+  () => {
+    let config: IrodoriPipelineConfig;
+    let reference: DecodedWav;
     // run 1 回ごとの観測。`lastRun`（アリーナ実績）の有無が「ホスト経路か常駐経路か」の
     // **独立な証拠**になる — 常駐経路の `enqueue` はアリーナも計測窓も作らないので undefined。
     const runs: { component: IrodoriRunComponent; hasArena: boolean }[] = [];
-    // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
     // 3.3GB の資産を 2 度読まないよう、全ケースは 1 本のパイプラインを共有する。
-    await using pipeline = await IrodoriPipeline.fromAssets(
-      { manifest, assets },
-      {
-        model: MODEL,
-        quant: QUANT,
-        onRunDiagnostics: (component: IrodoriRunComponent, diagnostics: SessionDiagnostics) =>
-          runs.push({ component, hasArena: diagnostics.lastRun !== undefined }),
-      },
-    );
+    let pipeline: IrodoriPipeline | undefined;
     /** 通常経路の実測 sha（onEvent 経路との経路間ビット同一を、参照行を経由せずに見る相手）。 */
     const plainSha = new Map<string, string>();
-    for (const item of CASES) {
-      await t.step({
-        name: `${item.name}: ${item.why}`,
-        // この環境の参照値が無く、作るモードでもないケースは明示 SKIP する
-        // （理由と作り方は登録時の警告に出ている）。
-        ignore: references.lacksReference(item.name),
-        fn: async () => {
-          plainSha.set(item.name, (await runCase(pipeline, config, item, reference)).sha);
+
+    // The its below run only after beforeAll succeeded; this narrows the shared pipeline.
+    const opened = (): IrodoriPipeline => {
+      assert(pipeline !== undefined, "パイプラインが開いていない（beforeAll が失敗している）");
+      return pipeline;
+    };
+
+    beforeAll(async () => {
+      // 参照値を書きうる走行なので、キーを採ったアダプタと実行アダプタの同一性を先に見る。
+      await assertRunningAdapter();
+      const manifest = readManifest();
+      // 門の前提を先に見る（実効ノブが動いていたら、生成する前に「条件が違う」と言う）。
+      config = assertReferenceKnobs(modelEntry(manifest));
+      const assets = await loadLocalAssets(manifest);
+      // 参照音声は 48kHz mono PCM16。周波数が配布形と違えば `generate` が fail loudly（リサンプル
+      // は持たない）ので、ここでは読むだけにする。
+      reference = decodeWav(referenceBytes as Uint8Array<ArrayBuffer>);
+      pipeline = await IrodoriPipeline.fromAssets(
+        { manifest, assets },
+        {
+          model: MODEL,
+          quant: QUANT,
+          onRunDiagnostics: (component: IrodoriRunComponent, diagnostics: SessionDiagnostics) =>
+            runs.push({ component, hasArena: diagnostics.lastRun !== undefined }),
         },
+      );
+    });
+    // [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
+    // (Formerly `await using` around the body: it still runs after the last it has called dispose().)
+    afterAll(() => pipeline?.[Symbol.asyncDispose]());
+
+    for (const item of CASES) {
+      // この環境の参照値が無く、作るモードでもないケースは明示 SKIP する
+      // （理由と作り方は登録時の警告に出ている）。
+      it.skipIf(references.lacksReference(item.name))(`${item.name}: ${item.why}`, async () => {
+        plainSha.set(item.name, (await runCase(opened(), config, item, reference)).sha);
       });
     }
 
@@ -480,11 +490,10 @@ test({
     //  ③ `denoise-step` は **step 単位**で `config.steps` 回（CFG の内側の forward 数ではない）。
     //  ④ コールバックの throw が生成ごと落とす（step 粒度の中断手段）。
     const withEvents = CASES[0];
-    await t.step({
-      name: `onEvent: ホスト経路でも WAV sha が同一（step ${REFERENCE_KNOBS.steps} 回の発火）`,
-      // sha の同一性がこの段の主張の半分なので、参照値が無い環境では丸ごと SKIP する。
-      ignore: references.lacksReference(withEvents.name),
-      fn: async () => {
+    // sha の同一性がこの段の主張の半分なので、参照値が無い環境では丸ごと SKIP する。
+    it.skipIf(references.lacksReference(withEvents.name))(
+      `onEvent: ホスト経路でも WAV sha が同一（step ${REFERENCE_KNOBS.steps} 回の発火）`,
+      async () => {
         const log: string[] = [];
         const shapes = new Set<string>();
         const lengths = new Set<number>();
@@ -496,7 +505,7 @@ test({
           twinSha !== undefined,
           `通常経路の実測 sha が無い（${withEvents.name} の step が走っていない）`,
         );
-        const { audio } = await runCase(pipeline, config, withEvents, reference, {
+        const { audio } = await runCase(opened(), config, withEvents, reference, {
           twinSha,
           onEvent: (event) => {
             if (event.kind === "stage") {
@@ -573,14 +582,14 @@ test({
           "生成後に呼んだ copyLatents が step 1 の値を返さない",
         );
       },
-    });
+    );
 
-    await t.step("onEvent: コールバックの throw は生成ごと落とす（step 粒度の中断）", async () => {
+    it("onEvent: コールバックの throw は生成ごと落とす（step 粒度の中断）", async () => {
       const seen: string[] = [];
       const abortAt = 2;
       await assertRejects(
         () =>
-          pipeline.generate({
+          opened().generate({
             text: CASES[1].text,
             seed: CASES[1].seed,
             onEvent: (event) => {
@@ -612,7 +621,8 @@ test({
     // `concurrency/serial.ts` は `serial_test.ts` が独立に縛っているが、`IrodoriPipeline` が
     // その鎖へ正しく載っていることは公開面からしか見えない。**この step は最後に置く**
     // （ここでパイプラインを解放するため）。
-    await t.step("dispose は in-flight の完了を待ち、2 度目も同じ完了を返す", async () => {
+    it("dispose は in-flight の完了を待ち、2 度目も同じ完了を返す", async () => {
+      const pipeline = opened();
       const order: string[] = [];
       const running = pipeline.generate({ text: CASES[1].text, seed: CASES[1].seed }).then(() => {
         order.push("generate");
@@ -637,7 +647,7 @@ test({
       );
     });
   },
-});
+);
 
 // 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
 // 数えるのは上の現役ケースだけ（廃止済みケースの行が残っていても緑にはしない）。

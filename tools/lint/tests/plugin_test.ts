@@ -14,7 +14,7 @@
  *    取りこぼされること（明記と現物の食い違いを落とす）
  * 3. **対象の外** — `packages/<pkg>/tests/`・`tools/`・`examples/` は型引数が無くても報告しない
  *
- * NOTE: リポの慣習に合わせて `test`（文脈）+ `t.step`（振る舞い）で書く。
+ * NOTE: リポの慣習に合わせて `describe`（文脈）+ `it`（振る舞い）で書く。
  */
 
 import { execFile } from "node:child_process";
@@ -23,8 +23,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { assert, assertEquals } from "@std/assert";
-import { test } from "@karume/test-support/test";
 import { makeTempDir, mkdir, remove, writeTextFile } from "@karume/test-support/fs";
+import { describe, it } from "vite-plus/test";
 import { isTargetFile } from "../oxlint-plugin.ts";
 
 const RULE = "karume/typed-array-buffer";
@@ -130,8 +130,8 @@ const reportedByFile = async (
 const reported = async (source: string, filename = IN_SCOPE): Promise<string[]> =>
   (await reportedByFile({ [filename]: source })).get(filename) ?? [];
 
-test("型の位置で型引数を省いた TypedArray を報告する", async (t) => {
-  await t.step("引数・戻り型・型引数・配列・型エイリアス・欄・satisfies の全てで拾う", async () => {
+describe("型の位置で型引数を省いた TypedArray を報告する", () => {
+  it("引数・戻り型・型引数・配列・型エイリアス・欄・satisfies の全てで拾う", async () => {
     const source = [
       "export const f = (a: Float32Array): Uint8Array => new Uint8Array(a.length);",
       "export const g = async (): Promise<Int32Array> => new Int32Array(1);",
@@ -151,7 +151,7 @@ test("型の位置で型引数を省いた TypedArray を報告する", async (t
     ]);
   });
 
-  await t.step("修飾名 globalThis.X は右端の名前で拾う", async () => {
+  it("修飾名 globalThis.X は右端の名前で拾う", async () => {
     const source = [
       "export type A = globalThis.Float32Array;",
       "export const f = (bytes: globalThis.Uint8Array): number => bytes.length;",
@@ -159,7 +159,7 @@ test("型の位置で型引数を省いた TypedArray を報告する", async (t
     assertEquals(await reported(source), ["globalThis.Float32Array", "globalThis.Uint8Array"]);
   });
 
-  await t.step("interface の extends と class の implements でも拾う", async () => {
+  it("interface の extends と class の implements でも拾う", async () => {
     const source = [
       "export interface Samples extends Float32Array {}",
       "export interface Bytes extends globalThis.Uint8Array {}",
@@ -168,7 +168,7 @@ test("型の位置で型引数を省いた TypedArray を報告する", async (t
     assertEquals(await reported(source), ["Float32Array", "globalThis.Uint8Array", "Int16Array"]);
   });
 
-  await t.step("12 種の TypedArray の名前を全て対象にする", async () => {
+  it("12 種の TypedArray の名前を全て対象にする", async () => {
     const names = [
       "Int8Array",
       "Uint8Array",
@@ -187,7 +187,7 @@ test("型の位置で型引数を省いた TypedArray を報告する", async (t
     assertEquals(await reported(source), names);
   });
 
-  await t.step("報告の文言は名前と、境界なら <ArrayBufferLike> を明示する道を示す", async () => {
+  it("報告の文言は名前と、境界なら <ArrayBufferLike> を明示する道を示す", async () => {
     const [diagnostic] = await lint({ [IN_SCOPE]: "export type T = Float32Array;" });
     assert(diagnostic !== undefined, "報告が無い");
     assertEquals(diagnostic.code, RULE_CODE);
@@ -196,8 +196,8 @@ test("型の位置で型引数を省いた TypedArray を報告する", async (t
   });
 });
 
-test("型引数を書いた型と、値の位置は報告しない", async (t) => {
-  await t.step("<ArrayBuffer> と <ArrayBufferLike> の明示は通す", async () => {
+describe("型引数を書いた型と、値の位置は報告しない", () => {
+  it("<ArrayBuffer> と <ArrayBufferLike> の明示は通す", async () => {
     const source = [
       "export const f = (a: Float32Array<ArrayBuffer>): Uint8Array<ArrayBuffer> =>",
       "  new Uint8Array(a.length);",
@@ -210,40 +210,34 @@ test("型引数を書いた型と、値の位置は報告しない", async (t) =
     assertEquals(await reported(source), []);
   });
 
-  await t.step(
-    "new / from / instanceof / typeof の型クエリ・コメント・文字列は対象外",
-    async () => {
-      const source = [
-        "// Float32Array をコメントに書いても型の位置ではない",
-        "export const a = new Float32Array(4);",
-        "export const b = Uint8Array.from([1, 2]);",
-        "export const c = (value: unknown): boolean => value instanceof Int16Array;",
-        "export const d: typeof Float64Array = Float64Array;",
-        'export const e = "Uint32Array";',
-        "export const f = Float32Array.BYTES_PER_ELEMENT;",
-      ].join("\n");
-      assertEquals(await reported(source), []);
-    },
-  );
+  it("new / from / instanceof / typeof の型クエリ・コメント・文字列は対象外", async () => {
+    const source = [
+      "// Float32Array をコメントに書いても型の位置ではない",
+      "export const a = new Float32Array(4);",
+      "export const b = Uint8Array.from([1, 2]);",
+      "export const c = (value: unknown): boolean => value instanceof Int16Array;",
+      "export const d: typeof Float64Array = Float64Array;",
+      'export const e = "Uint32Array";',
+      "export const f = Float32Array.BYTES_PER_ELEMENT;",
+    ].join("\n");
+    assertEquals(await reported(source), []);
+  });
 
-  await t.step(
-    "TypedArray の名前を型参照に書かない typeof 経由の形は取りこぼす（ADR 0002 に明記）",
-    async () => {
-      // 構文だけでは型の中身（既定の ArrayBufferLike になること）が分からない。拾えるように
-      // なったら ADR 0002 の「取りこぼす形」とこのケースを一緒に直す。
-      const source = [
-        "export type I = InstanceType<typeof Float32Array>;",
-        "export type R = ReturnType<typeof Uint8Array.from>;",
-      ].join("\n");
-      assertEquals(await reported(source), []);
-    },
-  );
+  it("TypedArray の名前を型参照に書かない typeof 経由の形は取りこぼす（ADR 0002 に明記）", async () => {
+    // 構文だけでは型の中身（既定の ArrayBufferLike になること）が分からない。拾えるように
+    // なったら ADR 0002 の「取りこぼす形」とこのケースを一緒に直す。
+    const source = [
+      "export type I = InstanceType<typeof Float32Array>;",
+      "export type R = ReturnType<typeof Uint8Array.from>;",
+    ].join("\n");
+    assertEquals(await reported(source), []);
+  });
 });
 
-test("対象は packages/<pkg>/src/ の下だけ", async (t) => {
+describe("対象は packages/<pkg>/src/ の下だけ", () => {
   const bare = "export const f = (a: Float32Array): number => a.length;";
 
-  await t.step("packages の 3 パッケージの src は対象", async () => {
+  it("packages の 3 パッケージの src は対象", async () => {
     const filenames = ["runtime", "hub", "models"].map((pkg) => `packages/${pkg}/src/deep/file.ts`);
     const result = await reportedByFile(
       Object.fromEntries(filenames.map((filename) => [filename, bare])),
@@ -253,7 +247,7 @@ test("対象は packages/<pkg>/src/ の下だけ", async (t) => {
     }
   });
 
-  await t.step("tests・tools・examples は型引数が無くても報告しない", async () => {
+  it("tests・tools・examples は型引数が無くても報告しない", async () => {
     const filenames = [
       "packages/runtime/tests/sample_test.ts",
       "packages/models/tests/helpers/sample.ts",
@@ -269,7 +263,7 @@ test("対象は packages/<pkg>/src/ の下だけ", async (t) => {
     }
   });
 
-  await t.step("Windows の区切り（\\）でも同じ判定になる", () => {
+  it("Windows の区切り（\\）でも同じ判定になる", () => {
     assert(isTargetFile("C:\\repo\\packages\\runtime\\src\\gpu\\submit.ts"));
     assert(!isTargetFile("C:\\repo\\packages\\runtime\\tests\\gpu_test.ts"));
   });

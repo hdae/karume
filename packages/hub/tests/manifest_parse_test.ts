@@ -1,5 +1,5 @@
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   HubError,
@@ -127,9 +127,9 @@ const withModel = (
 const containerOf = (text: string) =>
   parseManifest(text).models["m"].weights["net"]["f16"].container;
 
-test("parseManifest: fixture の全違反ケースが宣言どおりのエラー型で赤くなる", async (t) => {
+describe("parseManifest: fixture の全違反ケースが宣言どおりのエラー型で赤くなる", () => {
   for (const testCase of invalidCases) {
-    await t.step(`${testCase.name} → ${testCase.error}`, () => {
+    it(`${testCase.name} → ${testCase.error}`, () => {
       const thrown = assertThrows(() => parseManifest(JSON.stringify(testCase.manifest)), HubError);
       assertEquals(thrown.name, testCase.error);
       assert(
@@ -235,7 +235,7 @@ test("parseManifest: karume/2 の綴り（dtype エントリが {file}）も版�
   assert(!error.message.includes("'file'"), `${error.message} が枝葉の未知キーを主因にしている`);
 });
 
-test("parseManifest: 規模上限を数値で弾く", async (t) => {
+describe("parseManifest: 規模上限を数値で弾く", () => {
   const modelEntry = (quantName: string) => ({
     pipeline: "anima/1",
     weights: { net: { f16: { container: CONTAINER } } },
@@ -245,7 +245,7 @@ test("parseManifest: 規模上限を数値で弾く", async (t) => {
     pipelineConfig: {},
   });
 
-  await t.step("models 33 件", () => {
+  it("models 33 件", () => {
     let models: Record<string, unknown> = {};
     for (let index = 0; index < 33; index += 1) {
       models = { ...models, [`m${index}`]: modelEntry("q") };
@@ -259,7 +259,7 @@ test("parseManifest: 規模上限を数値で弾く", async (t) => {
     assertThrows(() => parseManifest(text), ManifestFormatError);
   });
 
-  await t.step("weights 33 件", () => {
+  it("weights 33 件", () => {
     let weights: Record<string, unknown> = {};
     let mapping: Record<string, string> = {};
     for (let index = 0; index < 33; index += 1) {
@@ -278,7 +278,7 @@ test("parseManifest: 規模上限を数値で弾く", async (t) => {
     );
   });
 
-  await t.step("parts 1025 件（1024 件は通る）", () => {
+  it("parts 1025 件（1024 件は通る）", () => {
     const parts = (count: number): unknown[] => [
       part(0, count, PART0_SIZE, "b2"),
       ...Array.from({ length: count - 1 }, (_unused, index) => part(index + 1, count, 8, "c3")),
@@ -292,7 +292,7 @@ test("parseManifest: 規模上限を数値で弾く", async (t) => {
     );
   });
 
-  await t.step("assets 33 件", () => {
+  it("assets 33 件", () => {
     let assets: Record<string, unknown> = {};
     for (let index = 0; index < 33; index += 1) {
       assets = { ...assets, [`a${index}`]: { ...FILE, path: `assets/a${index}.json` } };
@@ -300,7 +300,7 @@ test("parseManifest: 規模上限を数値で弾く", async (t) => {
     assertThrows(() => parseManifest(withModel({ assets })), ManifestFormatError);
   });
 
-  await t.step("quants 33 件", () => {
+  it("quants 33 件", () => {
     let quants: Record<string, unknown> = {};
     for (let index = 0; index < 33; index += 1) {
       quants = { ...quants, [`q${index}`]: { weights: { net: "f16" }, session: {} } };
@@ -311,19 +311,19 @@ test("parseManifest: 規模上限を数値で弾く", async (t) => {
     );
   });
 
-  await t.step("pipelineConfig 256KiB 超（モデルあたり）", () => {
+  it("pipelineConfig 256KiB 超（モデルあたり）", () => {
     const pipelineConfig = { blob: "x".repeat(256 * 1024) };
     assertThrows(() => parseManifest(withModel({ pipelineConfig })), ManifestFormatError);
   });
 
-  await t.step("manifest 本体 1MiB 超", () => {
+  it("manifest 本体 1MiB 超", () => {
     // pipelineConfig 単体の上限より先に本体の上限へ当たる形（同じ 1 本の門を別経路から踏む）。
     const text = `${" ".repeat(1024 * 1024)}${withModel()}`;
     assertThrows(() => parseManifest(text), ManifestFormatError);
   });
 });
 
-test("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエラーで落とす", async (t) => {
+describe("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエラーで落とす", () => {
   // 深さは**バイト数と独立**に伸びる（開き括弧の連続だけで数千段が数 KB）。深さ検査が無いと
   // 全域走査の再帰がスタックを食い潰し、`ManifestFormatError` ではなく素の `RangeError` が
   // 抜けて `instanceof HubError` の分岐から漏れる。ここはその型を観測値として固定する。
@@ -332,14 +332,14 @@ test("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエラー
   const withDeepConfig = (depth: number): string =>
     withModel({ pipelineConfig: { deep: "@" } }).replace('"@"', nested(depth));
 
-  await t.step("素の再帰なら RangeError になる深さでも ManifestFormatError になる", () => {
+  it("素の再帰なら RangeError になる深さでも ManifestFormatError になる", () => {
     const text = withDeepConfig(3000);
     assert(new TextEncoder().encode(text).length < 1024 * 1024, "1MiB 未満で組めていない");
     const error = assertThrows(() => parseManifest(text), ManifestFormatError);
     assert(error.message.includes("入れ子"), `${error.message} が深さ超過を名指ししていない`);
   });
 
-  await t.step("実用の入れ子（pipelineConfig 数段）は通る", () => {
+  it("実用の入れ子（pipelineConfig 数段）は通る", () => {
     // 上限を実用要求より下に置いてしまう退行の検出器（上限値そのものの下限を縛る）。
     const manifest = parseManifest(
       withModel({ pipelineConfig: { a: { b: { c: [[[1, 2], [3]]] } } } }),
@@ -348,7 +348,7 @@ test("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエラー
   });
 });
 
-test("parseManifest: 規模上限を超える weights の診断は線形で、利用可能ラベルを打ち切る", async (t) => {
+describe("parseManifest: 規模上限を超える weights の診断は線形で、利用可能ラベルを打ち切る", () => {
   // 件数検査より先に走る診断用走査（エラーに「利用可能なラベル」を載せるためのもの）が件数の
   // 2 乗で重いと、1MiB 以内の manifest 1 本で主スレッドを十数分止められる（DoS 防波堤の抜け道）。
   /** 中身が空の weights エントリを `count` 件持つ weights 表（組み立て側も線形に保つ）。 */
@@ -369,7 +369,7 @@ test("parseManifest: 規模上限を超える weights の診断は線形で、�
   // 「上限ちょうど」の step が赤になる）。
   const LABEL_LIMIT = 32;
 
-  await t.step("空の weights 20000 件は時間上限内に ManifestFormatError で落ちる", () => {
+  it("空の weights 20000 件は時間上限内に ManifestFormatError で落ちる", () => {
     const text = withModel({ weights: emptyWeights(20000) });
     assert(new TextEncoder().encode(text).length < 1024 * 1024, "1MiB 未満で組めていない");
     const started = performance.now();
@@ -380,24 +380,21 @@ test("parseManifest: 規模上限を超える weights の診断は線形で、�
     assert(elapsed < 2000, `${Math.round(elapsed)} ms かかった（上限 2000 ms）`);
   });
 
-  await t.step(
-    "上限超過のエラーに載る dtypes はちょうど上限件数で、打ち切ったことを本文が名乗る",
-    () => {
-      const error = assertThrows(
-        () => parseManifest(withModel({ weights: emptyWeights(100) })),
-        ManifestFormatError,
-      );
-      // 「以下」では上限より少なく（0 件でも）打ち切る実装が通る — 上限件数までは載ることを縛る。
-      assertEquals(
-        Object.keys(error.available.dtypes).length,
-        LABEL_LIMIT,
-        `${Object.keys(error.available.dtypes).length} 件が載った（打ち切り値 ${LABEL_LIMIT}）`,
-      );
-      assert(error.message.includes("打ち切"), `${error.message} が打ち切りを名乗っていない`);
-    },
-  );
+  it("上限超過のエラーに載る dtypes はちょうど上限件数で、打ち切ったことを本文が名乗る", () => {
+    const error = assertThrows(
+      () => parseManifest(withModel({ weights: emptyWeights(100) })),
+      ManifestFormatError,
+    );
+    // 「以下」では上限より少なく（0 件でも）打ち切る実装が通る — 上限件数までは載ることを縛る。
+    assertEquals(
+      Object.keys(error.available.dtypes).length,
+      LABEL_LIMIT,
+      `${Object.keys(error.available.dtypes).length} 件が載った（打ち切り値 ${LABEL_LIMIT}）`,
+    );
+    assert(error.message.includes("打ち切"), `${error.message} が打ち切りを名乗っていない`);
+  });
 
-  await t.step("件数検査より前のエラーでも打ち切りを名乗る", () => {
+  it("件数検査より前のエラーでも打ち切りを名乗る", () => {
     // 未知キーの検査は weights の件数検査より先に落ちる — 本文が件数超過を語らない経路でも、
     // 載っている一覧が一部だけであることを読み手が取り違えないようにする。
     const error = assertThrows(
@@ -413,7 +410,7 @@ test("parseManifest: 規模上限を超える weights の診断は線形で、�
     assert(error.message.includes("打ち切"), `${error.message} が打ち切りを名乗っていない`);
   });
 
-  await t.step("上限ちょうど（weights 32 件）は全件が載り、打ち切りを名乗らない", () => {
+  it("上限ちょうど（weights 32 件）は全件が載り、打ち切りを名乗らない", () => {
     // 片側だけだと「常に打ち切る」実装でも緑になる — 正常な manifest の available は欠けない。
     const manifest = parseManifest(withModel(validWeights(LABEL_LIMIT)));
     assertEquals(Object.keys(manifest.models["m"].available.dtypes).length, LABEL_LIMIT);
@@ -540,14 +537,14 @@ test("parseManifest: モデル間で同一 path を指す共有は成立する�
   assert(same === shared, "同一 path の参照が畳まれていない");
 });
 
-test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t) => {
-  await t.step("descriptor は 2 文書それぞれの長さと sha256 を持つ", () => {
+describe("parseManifest: weights の container 欄（ADR 0109 決定 3）", () => {
+  it("descriptor は 2 文書それぞれの長さと sha256 を持つ", () => {
     const container = containerOf(withModel());
     assertEquals(container.descriptor.graph, DESCRIPTOR.graph);
     assertEquals(container.descriptor.model, DESCRIPTOR.model);
   });
 
-  await t.step("parts は宣言順のまま保たれる（添字が part の id）", () => {
+  it("parts は宣言順のまま保たれる（添字が part の id）", () => {
     const parts = [PART0, part(1, 3, 8, "c3"), part(2, 3, 16, "d4")];
     const container = containerOf(withModel({ weights: withContainer({ parts }) }));
     assertEquals(
@@ -556,7 +553,7 @@ test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t
     );
   });
 
-  await t.step("2 件ちょうどは通り、1 件で落ちる（part 0 + part 1 が最小）", () => {
+  it("2 件ちょうどは通り、1 件で落ちる（part 0 + part 1 が最小）", () => {
     assertEquals(containerOf(withModel()).parts.length, 2);
     assertThrows(
       () => parseManifest(withModel({ weights: withContainer({ parts: [PART0] }) })),
@@ -565,7 +562,7 @@ test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t
     );
   });
 
-  await t.step("parts の中でも同一 path の 3 点セット不一致は拒否する", () => {
+  it("parts の中でも同一 path の 3 点セット不一致は拒否する", () => {
     const error = assertThrows(
       () =>
         parseManifest(
@@ -583,7 +580,7 @@ test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t
     );
   });
 
-  await t.step("退役した shards / extras のキーは未知キーとして落ちる", () => {
+  it("退役した shards / extras のキーは未知キーとして落ちる", () => {
     for (const retired of ["shards", "extras"]) {
       const error = assertThrows(
         () =>
@@ -603,7 +600,7 @@ test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t
     }
   });
 
-  await t.step("container / descriptor / 文書の未知キーも落ちる", () => {
+  it("container / descriptor / 文書の未知キーも落ちる", () => {
     const patches: Record<string, unknown>[] = [
       { weights: { net: { f16: { container: { ...CONTAINER, graph: FILE } } } } },
       {
@@ -627,7 +624,7 @@ test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t
     }
   });
 
-  await t.step("descriptor の model は省略できない（krm は必ずモデル記述を持つ）", () => {
+  it("descriptor の model は省略できない（krm は必ずモデル記述を持つ）", () => {
     assertThrows(
       () =>
         parseManifest(
@@ -641,14 +638,14 @@ test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t
   });
 });
 
-test("parseManifest: part 0 の size は「ヘッダ + 2 文書」ちょうど（container-v1 §8）", async (t) => {
+describe("parseManifest: part 0 の size は「ヘッダ + 2 文書」ちょうど（container-v1 §8）", () => {
   // 宣言どうしの整合なので、1 バイトも取らずに見られる。ここが緩いと「取得してから長さ違いに
   // 気づく」形に戻る。
-  await t.step("ちょうどは通る", () => {
+  it("ちょうどは通る", () => {
     assertEquals(containerOf(withModel()).parts[0].size, PART0_SIZE);
   });
 
-  await t.step("1 バイトでもずれれば両側とも落ちる", () => {
+  it("1 バイトでもずれれば両側とも落ちる", () => {
     for (const delta of [-1, 1]) {
       const error = assertThrows(
         () =>
@@ -668,7 +665,7 @@ test("parseManifest: part 0 の size は「ヘッダ + 2 文書」ちょうど�
     }
   });
 
-  await t.step("descriptor の長さを動かせば part 0 の要求もその分動く", () => {
+  it("descriptor の長さを動かせば part 0 の要求もその分動く", () => {
     const graph = { ...DESCRIPTOR.graph, length: GRAPH_LENGTH + 100 };
     const container = containerOf(
       withModel({
@@ -682,7 +679,7 @@ test("parseManifest: part 0 の size は「ヘッダ + 2 文書」ちょうど�
   });
 });
 
-test("parseManifest: descriptor の 1 文書は 32MiB まで（container-v1 §10）", async (t) => {
+describe("parseManifest: descriptor の 1 文書は 32MiB まで（container-v1 §10）", () => {
   // 綴りは Python 正本 `tools/exporter/src/karume/container.py` の `MAX_DESCRIPTOR_BYTES` と同値。
   const LIMIT = 32 * 2 ** 20;
   const sized = (length: number) => ({
@@ -690,12 +687,12 @@ test("parseManifest: descriptor の 1 文書は 32MiB まで（container-v1 §10
     parts: [{ ...PART0, size: HEADER_BYTES + length + MODEL_LENGTH }, PART1],
   });
 
-  await t.step("ちょうど 32MiB は通る（書き手と同じ閉区間）", () => {
+  it("ちょうど 32MiB は通る（書き手と同じ閉区間）", () => {
     const container = containerOf(withModel({ weights: withContainer(sized(LIMIT)) }));
     assertEquals(container.descriptor.graph.length, LIMIT);
   });
 
-  await t.step("1 バイト超は落ちる", () => {
+  it("1 バイト超は落ちる", () => {
     const error = assertThrows(
       () => parseManifest(withModel({ weights: withContainer(sized(LIMIT + 1)) })),
       ManifestFormatError,
@@ -703,14 +700,14 @@ test("parseManifest: descriptor の 1 文書は 32MiB まで（container-v1 §10
     assert(error.message.includes(String(LIMIT)), `${error.message} が上限を名乗っていない`);
   });
 
-  await t.step("長さ 0 の文書は拒否する（krm は必ず 2 文書を持つ）", () => {
+  it("長さ 0 の文書は拒否する（krm は必ず 2 文書を持つ）", () => {
     assertThrows(
       () => parseManifest(withModel({ weights: withContainer(sized(0)) })),
       ManifestFormatError,
     );
   });
 
-  await t.step("sha256 は小文字 hex 64 桁", () => {
+  it("sha256 は小文字 hex 64 桁", () => {
     for (const sha256 of ["F2".repeat(32), "f2".repeat(31), 12]) {
       assertThrows(
         () =>
@@ -729,7 +726,7 @@ test("parseManifest: descriptor の 1 文書は 32MiB まで（container-v1 §10
   });
 });
 
-test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 — ファイル長で測る）", async (t) => {
+describe("parseManifest: part のバイト上限 1024MiB（container-v1 §10 — ファイル長で測る）", () => {
   // 読み手は「器の寸法を宣言から見積る」（ADR 0089）前提で組まれているので、上限違反の part を
   // parse が黙って通すとブラウザで初めて破綻する。上限の綴りは Python 正本
   // `tools/exporter/src/karume/container.py` の `PART_MAX_BYTES` と同値。
@@ -740,7 +737,7 @@ test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 — フ
     sha256: mark.repeat(32),
   });
 
-  await t.step("上限超過は落ち、エラーが part の path・寸法・上限を名指しする", () => {
+  it("上限超過は落ち、エラーが part の path・寸法・上限を名指しする", () => {
     const error = assertThrows(
       () =>
         parseManifest(
@@ -755,7 +752,7 @@ test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 — フ
     }
   });
 
-  await t.step("ちょうど 1024MiB は通る（書き手と同じ閉区間）", () => {
+  it("ちょうど 1024MiB は通る（書き手と同じ閉区間）", () => {
     // 片側だけだと「常に落ちる」実装でも緑になる。
     const container = containerOf(
       withModel({ weights: withContainer({ parts: [PART0, big(LIMIT, "c3")] }) }),
@@ -763,7 +760,7 @@ test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 — フ
     assertEquals(container.parts[1].size, LIMIT);
   });
 
-  await t.step("非 part の FileRef は対象外 — assets は上限超でも通る", () => {
+  it("非 part の FileRef は対象外 — assets は上限超でも通る", () => {
     // MUST: 上限は**part 分割の契約**であって全 FileRef の天井ではない（それは 16GiB の
     // `MAX_FILE_BYTES`）。ここを取り違えると、part に割らない単体の資産で上限を超えるものが
     // 読めなくなる。
@@ -776,11 +773,11 @@ test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 — フ
   });
 });
 
-test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決定 3）", async (t) => {
+describe("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決定 3）", () => {
   const EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
   const emptyPart = { path: "net/model-00002-of-00003.krm", size: 0, sha256: EMPTY_SHA };
 
-  await t.step("添字 1 の長さ 0 は通り、宣言にそのまま残る", () => {
+  it("添字 1 の長さ 0 は通り、宣言にそのまま残る", () => {
     const container = containerOf(
       withModel({
         weights: withContainer({ parts: [PART0, emptyPart, part(2, 3, 16, "d4")] }),
@@ -790,7 +787,7 @@ test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決�
     assertEquals(container.parts[1].sha256, EMPTY_SHA);
   });
 
-  await t.step("part 0 の長さ 0 は落ちる（ヘッダ + 2 文書を必ず持つ）", () => {
+  it("part 0 の長さ 0 は落ちる（ヘッダ + 2 文書を必ず持つ）", () => {
     assertThrows(
       () =>
         parseManifest(
@@ -802,7 +799,7 @@ test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決�
     );
   });
 
-  await t.step("長さ 0 なのに sha256 が空列の値でなければ落ちる", () => {
+  it("長さ 0 なのに sha256 が空列の値でなければ落ちる", () => {
     const error = assertThrows(
       () =>
         parseManifest(
@@ -817,7 +814,7 @@ test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決�
     assert(error.message.includes(EMPTY_SHA), `${error.message} が空列の sha256 を出していない`);
   });
 
-  await t.step("assets の長さ 0 は従来どおり拒否する（空を許すのは parts だけ）", () => {
+  it("assets の長さ 0 は従来どおり拒否する（空を許すのは parts だけ）", () => {
     assertThrows(
       () =>
         parseManifest(
@@ -841,8 +838,8 @@ test("parseManifest: pipeline の major は形だけ検査し、裁定は models
 const withQuant = (patch: Record<string, unknown>): string =>
   withModel({ quants: { q: { weights: { net: "f16" }, session: {}, ...patch } } });
 
-test("parseManifest: quant の表示欄 label / description（ADR 0075）", async (t) => {
-  await t.step("設定した文字列がそのまま型面へ出る", () => {
+describe("parseManifest: quant の表示欄 label / description（ADR 0075）", () => {
+  it("設定した文字列がそのまま型面へ出る", () => {
     const manifest = parseManifest(
       withQuant({
         label: "Balanced (int8)",
@@ -854,13 +851,13 @@ test("parseManifest: quant の表示欄 label / description（ADR 0075）", asyn
     assertEquals(quant.description, "Half the download of f16 with no visible difference.");
   });
 
-  await t.step("未設定の席は欄を持たない（呼び手が id をそのまま出す）", () => {
+  it("未設定の席は欄を持たない（呼び手が id をそのまま出す）", () => {
     const quant = parseManifest(withModel()).models["m"].quants["q"];
     assertEquals(quant.label, undefined);
     assertEquals(quant.description, undefined);
   });
 
-  await t.step("上限ちょうどは通り、1 文字超で落ちる", () => {
+  it("上限ちょうどは通り、1 文字超で落ちる", () => {
     // 片側だけだと「常に落ちる」実装でも緑になるので、境界の両側を観測する。
     assertEquals(
       parseManifest(withQuant({ label: "x".repeat(64) })).models["m"].quants["q"].label?.length,
@@ -878,7 +875,7 @@ test("parseManifest: quant の表示欄 label / description（ADR 0075）", asyn
     );
   });
 
-  await t.step("上限超過は期待と実際を添えて落ちる", () => {
+  it("上限超過は期待と実際を添えて落ちる", () => {
     const error = assertThrows(
       () => parseManifest(withQuant({ label: "x".repeat(70) })),
       ManifestFormatError,
@@ -887,13 +884,13 @@ test("parseManifest: quant の表示欄 label / description（ADR 0075）", asyn
     assert(error.message.includes("実際 70 文字"), `${error.message} が実際の長さを出していない`);
   });
 
-  await t.step("非文字列は期待と実際を添えて落ちる", () => {
+  it("非文字列は期待と実際を添えて落ちる", () => {
     const error = assertThrows(() => parseManifest(withQuant({ label: 12 })), ManifestFormatError);
     assert(error.message.includes("期待 文字列"), `${error.message} が期待の型を出していない`);
     assert(error.message.includes("実際 number"), `${error.message} が実際の型を出していない`);
   });
 
-  await t.step("内容の意味は解釈しない（上限内なら実態と食い違う説明も通る）", () => {
+  it("内容の意味は解釈しない（上限内なら実態と食い違う説明も通る）", () => {
     // ADR 0075 決定 2: 長さは境界検査、内容の妥当性は hub には判定できないし、しない。
     const quant = parseManifest(
       withQuant({ label: "f32 (lossless)", description: "🌀".repeat(64) }),
@@ -904,8 +901,8 @@ test("parseManifest: quant の表示欄 label / description（ADR 0075）", asyn
   });
 });
 
-test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席）", async (t) => {
-  await t.step("limit 名 → 最小値の部分写像として型面へ出る", () => {
+describe("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席）", () => {
+  it("limit 名 → 最小値の部分写像として型面へ出る", () => {
     const manifest = parseManifest(
       withQuant({
         requiredLimits: { maxBufferSize: 2147483648, maxStorageBufferBindingSize: 1073741824 },
@@ -917,7 +914,7 @@ test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席�
     });
   });
 
-  await t.step("未設定の席は欄を持たず、空の宣言は空のまま通る", () => {
+  it("未設定の席は欄を持たず、空の宣言は空のまま通る", () => {
     assertEquals(parseManifest(withModel()).models["m"].quants["q"].requiredLimits, undefined);
     assertEquals(
       parseManifest(withQuant({ requiredLimits: {} })).models["m"].quants["q"].requiredLimits,
@@ -925,7 +922,7 @@ test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席�
     );
   });
 
-  await t.step("runtime の requiredLimits 語彙の名前を受ける", () => {
+  it("runtime の requiredLimits 語彙の名前を受ける", () => {
     // 綴りが runtime（`REQUIRED_LIMIT_KEYS`）と 1 対 1 であることの観測点。compute 系まで
     // 明示する語彙なので、workgroup 系が拒否されないことまで見る。
     const manifest = parseManifest(
@@ -946,7 +943,7 @@ test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席�
     assertEquals(Object.keys(manifest.models["m"].quants["q"].requiredLimits ?? {}).length, 9);
   });
 
-  await t.step("未知の limit 名は許可一覧つきで落ちる（綴り違いを黙って無視しない）", () => {
+  it("未知の limit 名は許可一覧つきで落ちる（綴り違いを黙って無視しない）", () => {
     const error = assertThrows(
       () => parseManifest(withQuant({ requiredLimits: { maxBufferSizes: 1024 } })),
       ManifestReferenceError,
@@ -957,7 +954,7 @@ test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席�
     );
   });
 
-  await t.step("非正整数は期待と実際を添えて落ちる", () => {
+  it("非正整数は期待と実際を添えて落ちる", () => {
     for (const value of [0, -1, 1.5, "1024", null]) {
       const error = assertThrows(
         () => parseManifest(withQuant({ requiredLimits: { maxBufferSize: value } })),
@@ -972,7 +969,7 @@ test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席�
 
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";
 
-test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 §7）", async (t) => {
+describe("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 §7）", () => {
   const cross = { repo: "other/stack", revision: COMMIT };
   /** 容器まるごとを越境させた形（ADR 0109 決定 3 — 越境は容器単位）。 */
   const foreignContainer = (patch: Record<string, unknown> = {}) => ({
@@ -983,7 +980,7 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     ],
   });
 
-  await t.step("容器の全 part に同じ座標が載る", () => {
+  it("容器の全 part に同じ座標が載る", () => {
     const container = containerOf(
       withModel({ weights: { net: { f16: { container: foreignContainer() } } } }),
     );
@@ -993,7 +990,7 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     }
   });
 
-  await t.step("assets の参照にも同じ席が載る", () => {
+  it("assets の参照にも同じ席が載る", () => {
     const manifest = parseManifest(
       withModel({
         assets: { tokenizer: { ...FILE, ...cross } },
@@ -1003,7 +1000,7 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     assertEquals(manifest.models["m"].assets["tokenizer"].revision, COMMIT);
   });
 
-  await t.step("越境は容器単位 — 混在も片方だけも落ちる", () => {
+  it("越境は容器単位 — 混在も片方だけも落ちる", () => {
     const mixed: unknown[][] = [
       [PART0, { ...PART1, ...cross }],
       [{ ...PART0, ...cross }, PART1],
@@ -1026,7 +1023,7 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     }
   });
 
-  await t.step("片方だけの宣言は両方向とも落ちる", () => {
+  it("片方だけの宣言は両方向とも落ちる", () => {
     for (const half of [{ repo: "other/stack" }, { revision: COMMIT }]) {
       const error = assertThrows(
         () =>
@@ -1051,7 +1048,7 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     }
   });
 
-  await t.step("revision はブランチ・タグ・短縮形・大文字を拒否する", () => {
+  it("revision はブランチ・タグ・短縮形・大文字を拒否する", () => {
     for (const revision of ["main", "v1.0", COMMIT.slice(0, 7), COMMIT.toUpperCase()]) {
       assertThrows(
         () =>
@@ -1067,7 +1064,7 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     }
   });
 
-  await t.step("repo は owner/name の 2 セグメント許可リスト", () => {
+  it("repo は owner/name の 2 セグメント許可リスト", () => {
     for (const repo of ["stack", "other/stack/extra", "other/..", "other/.hidden", "other/re po"]) {
       assertThrows(
         () =>
@@ -1083,7 +1080,7 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     }
   });
 
-  await t.step("同じ path でもリポが違えば別のファイル（3 点セット一致を要求しない）", () => {
+  it("同じ path でもリポが違えば別のファイル（3 点セット一致を要求しない）", () => {
     // path だけで畳むと、正しい manifest が「重複 path の食い違い」で拒否され、取得層では
     // 片方のバイト列がもう片方に配られる。同一性は (repo, revision, path) の 3 つ。
     const manifest = parseManifest(
@@ -1109,7 +1106,7 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     assertEquals(manifest.models["m"].weights["text"]["f16"].container.parts[1].size, 128);
   });
 
-  await t.step("同一の (repo, revision, path) は 1 本に畳まれる", () => {
+  it("同一の (repo, revision, path) は 1 本に畳まれる", () => {
     const manifest = parseManifest(
       withModel({
         weights: {
@@ -1124,7 +1121,7 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     assert(net.parts[1] === text.parts[1], "同一参照が畳まれていない");
   });
 
-  await t.step("同一の (repo, revision, path) で 3 点セットが食い違えば拒否する", () => {
+  it("同一の (repo, revision, path) で 3 点セットが食い違えば拒否する", () => {
     assertThrows(
       () =>
         parseManifest(
@@ -1150,9 +1147,9 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
   });
 });
 
-test("parseManifest: quantのGEMV加算指定を保持し、未指定と不正値を区別する", async (t) => {
+describe("parseManifest: quantのGEMV加算指定を保持し、未指定と不正値を区別する", () => {
   for (const linearGemvReduce of ["sequential", "parallel"] as const) {
-    await t.step(linearGemvReduce, () => {
+    it(linearGemvReduce, () => {
       const manifest = parseManifest(
         withModel({
           quants: { q: { weights: { net: "f16" }, session: { linearGemvReduce } } },
@@ -1161,23 +1158,28 @@ test("parseManifest: quantのGEMV加算指定を保持し、未指定と不正�
       assertEquals(manifest.models.m.quants.q.session, { linearGemvReduce });
     });
   }
-  assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
+  // These assertions sat in the former test body outside any step; each is now its own it.
+  it("未宣言なら欄ごと無い", () => {
+    assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
+  });
   for (const value of ["auto", "Parallel", 1, true, null]) {
-    assertThrows(
-      () =>
-        parseManifest(
-          withModel({
-            quants: { q: { weights: { net: "f16" }, session: { linearGemvReduce: value } } },
-          }),
-        ),
-      HubError,
-    );
+    it(`${JSON.stringify(value)}は拒否`, () => {
+      assertThrows(
+        () =>
+          parseManifest(
+            withModel({
+              quants: { q: { weights: { net: "f16" }, session: { linearGemvReduce: value } } },
+            }),
+          ),
+        HubError,
+      );
+    });
   }
 });
 
-test("parseManifest: quantのattention縮約形を保持し、未指定と不正値を区別する", async (t) => {
+describe("parseManifest: quantのattention縮約形を保持し、未指定と不正値を区別する", () => {
   for (const stateAttentionReduce of ["sequential", "parallel", "parallel-fused"] as const) {
-    await t.step(stateAttentionReduce, () => {
+    it(stateAttentionReduce, () => {
       const manifest = parseManifest(
         withModel({
           quants: { q: { weights: { net: "f16" }, session: { stateAttentionReduce } } },
@@ -1186,10 +1188,13 @@ test("parseManifest: quantのattention縮約形を保持し、未指定と不正
       assertEquals(manifest.models.m.quants.q.session, { stateAttentionReduce });
     });
   }
-  assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
+  // This assertion sat in the former test body outside any step; it is now its own it.
+  it("未宣言なら欄ごと無い", () => {
+    assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
+  });
   // `parallel-subgroup32` は GEMV の語彙で attention には無い（綴りの取り違えを通さない）。
   for (const value of ["auto", "Parallel", "parallel-subgroup32", 1, true, null]) {
-    await t.step(`${JSON.stringify(value)}は拒否`, () => {
+    it(`${JSON.stringify(value)}は拒否`, () => {
       assertThrows(
         () =>
           parseManifest(
@@ -1202,7 +1207,7 @@ test("parseManifest: quantのattention縮約形を保持し、未指定と不正
     });
   }
   // 実配布の通常 E2B i4-fast と同じ形（GEMV・RMS 融合との同時宣言）を 1 件固定する。
-  await t.step("linearGemvReduce・fuseRmsNormAddと同時に宣言できる", () => {
+  it("linearGemvReduce・fuseRmsNormAddと同時に宣言できる", () => {
     const session = {
       linearGemvReduce: "parallel",
       stateAttentionReduce: "parallel-fused",
@@ -1217,10 +1222,10 @@ test("parseManifest: quantのattention縮約形を保持し、未指定と不正
   });
 });
 
-test("parseManifest: 融合の真偽値を保持し、未指定・不正値と区別する", async (t) => {
+describe("parseManifest: 融合の真偽値を保持し、未指定・不正値と区別する", () => {
   for (const key of ["fuseRmsNormAdd", "fuseLinearStaticQuantize", "packedStaticQuantize"]) {
     for (const value of [false, true]) {
-      await t.step(`${key}=${value}`, () => {
+      it(`${key}=${value}`, () => {
         const session = { [key]: value };
         const manifest = parseManifest(
           withModel({
@@ -1232,7 +1237,7 @@ test("parseManifest: 融合の真偽値を保持し、未指定・不正値と�
     }
     for (const value of [null, 0, 1, "true", "false", [], {}]) {
       // 段名に値を綴るのは、assertThrowsの既定メッセージが対象キー・値を出さないため。
-      await t.step(`${key}=${JSON.stringify(value)}は拒否`, () => {
+      it(`${key}=${JSON.stringify(value)}は拒否`, () => {
         assertThrows(
           () =>
             parseManifest(
@@ -1246,7 +1251,7 @@ test("parseManifest: 融合の真偽値を保持し、未指定・不正値と�
     }
   }
   // 実配布のi4-fastと同じ形（GEMV指定と真偽値3欄の同時宣言）を1件固定する。
-  await t.step("linearGemvReduceと同時に宣言できる", () => {
+  it("linearGemvReduceと同時に宣言できる", () => {
     const session = {
       linearGemvReduce: "parallel",
       fuseRmsNormAdd: true,
@@ -1260,7 +1265,7 @@ test("parseManifest: 融合の真偽値を保持し、未指定・不正値と�
     );
     assertEquals(manifest.models.m.quants.q.session, session);
   });
-  await t.step("未宣言なら欄ごと無い", () => {
+  it("未宣言なら欄ごと無い", () => {
     assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
   });
 });

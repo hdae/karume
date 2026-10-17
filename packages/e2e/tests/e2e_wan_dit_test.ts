@@ -50,7 +50,7 @@
  * 同じ台本の `--dtype i8` が書く系列（linear 307 本が i8 per-channel・bias / norm は上流の f32）を、系列 root を
  * 切り替えて同じ門で見る。
  *
- * - **参照席 `f16+dit8`（`session` 空）の r 門**（段 3）: f16 席の実寸と同じ 1 本（{@link normalizedRatioGate}）を、
+ * - **参照席 `f16+dit8`（`session` 空）の r 門**（段 3）: f16 席の実寸と同じ 1 本（{@link registerNormalizedRatioGate}）を、
  *   S = 192 の組（9 本 — S = 128 の受入れ 1 本を含む）と S = 14,040（8 本・計測モード）で回す。i8 系列は全ケースが
  *   f64 の参照（`output.f64` — i8 の fake-quant 重みで採った値）を持つので、S = 192 の組も r で見る。帯は組ごとに
  *   決定用 6 本の最悪 × 5（{@link I8_NORMALIZED_BAND} — 未導出の間は r と帯の候補を出して赤）。故障注入は f16 席と
@@ -75,7 +75,7 @@
  */
 
 import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
-import { test, type TestContext } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import {
@@ -397,7 +397,7 @@ type I8Group = 192 | 14040;
  * （ADR 0118 決定 8 の外挿）。S = 192 の組も r で見る — i8 系列は全ケースが f64 の参照を持つので、f16 席の S = 192 の
  * 比の帯（{@link DIT_RATIO_BAND}）とは指標が違う。
  *
- * `undefined` = 未導出: 門は各ケースの r と帯の候補（{@link bandCandidate}）を出して**赤で止まる**（通る値を
+ * `undefined` = 未導出: 門は各ケースの r と帯の候補（{@link registerBandCandidate}）を出して**赤で止まる**（通る値を
  * 仮置きして検出力の無い門を作らない）。GPU の実測の後に、実測の表と一緒にここへ書く。
  *
  * MUST: 受入れの結果を見てこの値も決定用のケースも変えない（f16 席と同じ）。受入れが帯を外れたら、帯を広げずに
@@ -424,6 +424,8 @@ const I8_NORMALIZED_BAND: Readonly<Record<I8Group, number | undefined>> = {
  * 主張は「i8 の scale の取り違え（軸・値・束縛）を r の帯が掴める」こと（ADR 0120 検収 段 3）。
  */
 const I8_SCALE_FAULT_WEIGHT = "blocks.15.attn1.to_v.weight";
+/** The scale-fault label in the it titles, the notes and the wrapping describe's title. */
+const I8_SCALE_FAULT_LABEL = `${I8_SCALE_FAULT_WEIGHT} の scale を 2 倍`;
 
 /** 配布形ミラー（実用席の束の正本 — `dist.py --pipeline wan` の出力先）。 */
 const DIST_ROOT = new URL("../../../models/karume-wan2.1/", import.meta.url);
@@ -766,25 +768,20 @@ const readRopeBase = async (opened: OpenedContainer): Promise<WanRopeBase> => {
 
 const results = openResults("wan-dit");
 
-test({
-  name: "Wan DiT 資産: 容器と全ケースの golden が揃っている",
-  // 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL。
-  ignore: !ANY_PRESENT,
-  fn: () => {
-    assert(MODEL_PRESENT, `${SERIES_DIR.pathname}${MODEL_FILE} が無い`);
-    assertEquals(
-      expectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
-      [],
-      `golden の欠け（生成: ${GENERATE}）`,
-    );
-  },
+// 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL。
+test.skipIf(!ANY_PRESENT)("Wan DiT 資産: 容器と全ケースの golden が揃っている", () => {
+  assert(MODEL_PRESENT, `${SERIES_DIR.pathname}${MODEL_FILE} が無い`);
+  assertEquals(
+    expectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
+    [],
+    `golden の欠け（生成: ${GENERATE}）`,
+  );
 });
 
-test({
-  name: "Wan DiT i8 資産: i8 系列の容器と全ケース（S = 192 の組 9 本・S = 14,040 の 8 本）の golden が揃っている",
-  // 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL（f16 系列と同じ規律）。
-  ignore: !I8_ANY_PRESENT,
-  fn: () => {
+// 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL（f16 系列と同じ規律）。
+test.skipIf(!I8_ANY_PRESENT)(
+  "Wan DiT i8 資産: i8 系列の容器と全ケース（S = 192 の組 9 本・S = 14,040 の 8 本）の golden が揃っている",
+  () => {
     assert(I8_MODEL_PRESENT, `${I8_SERIES_DIR.pathname}${MODEL_FILE} が無い`);
     assertEquals(
       i8ExpectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
@@ -792,7 +789,7 @@ test({
       `i8 の golden の欠け（生成: ${I8_GENERATE}）`,
     );
   },
-});
+);
 
 test("Wan DiT 行ブロックの期待値（GPU 不要）: B570 の束縛上限で ADR 0118 決定 6 の表（24 枚 / 5 枚）を再現する", () => {
   assertEquals(
@@ -801,10 +798,9 @@ test("Wan DiT 行ブロックの期待値（GPU 不要）: B570 の束縛上限�
   );
 });
 
-test({
-  name: "Wan DiT ホスト: patchify と資産 rope_base からの RoPE 表が golden の入力とビット一致する",
-  ignore: !ASSETS_AVAILABLE,
-  fn: async () => {
+test.skipIf(!ASSETS_AVAILABLE)(
+  "Wan DiT ホスト: patchify と資産 rope_base からの RoPE 表が golden の入力とビット一致する",
+  async () => {
     const base = await readRopeBase(await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)));
     // 実寸（S = 14,040 / 32,760・非正方の格子 9·30·52 / 21·30·52）でもホストの並べ替えが torch とビット一致すること。
     for (const { name } of [...CASES, ...FULL_CASES]) {
@@ -832,7 +828,7 @@ test({
       );
     }
   },
-});
+);
 
 /**
  * 計測モードの照合が出した出力（通常モードで回すケースだけ — ケース名 → unpatchify 前のトークン）。
@@ -841,10 +837,10 @@ test({
  * 切れ目も通常の実行と変わりうる。それでも値が 1 ビットも動かないこと（チャンクの切れ目は値を動かさない）を
  * 直接縛る。2 つのモードは device が違う（計測の feature の有無）ので、同時に載せず別のテストで順に回す。
  *
- * MUST: 計測モードの照合を通常モードより前に登録する（Deno は同じファイルのテストを登録順に回す）。計測モードを
+ * MUST: 計測モードの照合を通常モードより前に登録する（Vitest は同じファイルのテストを登録順に回す）。計測モードを
  * 飛ばした回（`--filter` など）は通常モードに比べる相手が無いので、比較を黙って省かず落とす。
  *
- * NOTE: the default measured-mode case ({@link fullStructureGate}) fills this, so the Uint32 gate runs
+ * NOTE: the default measured-mode case ({@link registerFullStructureGate}) fills this, so the Uint32 gate runs
  * without the opt-in parity cases.
  */
 const measuredTokens = new Map<string, Float32Array>();
@@ -976,49 +972,111 @@ const assertForwardStructure = (
 };
 
 /**
+ * What a describe's `beforeAll` assigns for the its of that describe (the device, the opened
+ * container, the prepared graph, ...). The its and the hooks registered after it read the values
+ * through {@link required} when they run, never at collection time: a skipped describe still runs
+ * its factory, and nothing is assigned then.
+ */
+type Fixture = {
+  gpu?: GpuContext;
+  opened?: OpenedContainer;
+  prepared?: PreparedModel;
+  /** The i8 graph name, read when used ({@link i8Graph}). */
+  graph?: string;
+  base?: WanRopeBase;
+  options?: SessionOptions;
+  deviceLost?: string;
+};
+
+/** The fixture's value, or a loud failure when its `beforeAll` did not get that far. */
+const required = <K extends keyof Fixture>(fixture: Fixture, key: K): NonNullable<Fixture[K]> => {
+  const value = fixture[key];
+  if (value === undefined) throw new Error(`fixture '${key}' was not assigned by beforeAll`);
+  return value;
+};
+
+/**
+ * The `afterAll` of a describe that acquired a device: wait for the releases, then destroy the
+ * device (the `finally` of the former single test).
+ */
+const releaseDevice = async (fixture: Fixture): Promise<void> => {
+  if (fixture.gpu === undefined) return;
+  await settleReleases(fixture.gpu);
+  fixture.gpu.destroy();
+};
+
+/**
+ * Registers the hooks of one Session scope in the caller's describe: a `beforeAll` that opens the
+ * Session on the fixture's device and prepared graph (`prepare` defaults to the fixture's), and an
+ * `afterAll` that disposes it and waits for the releases. The caller registers its device hooks
+ * first: Vitest runs `beforeAll` hooks in registration order and `afterAll` hooks in reverse
+ * (`sequence.hooks: "stack"`, the default), so the Session opens after the device and is disposed
+ * before the device goes. A describe holds at most one Session scope; a test that opened several
+ * Sessions one after another wraps each scope in its own describe so two never coexist.
+ */
+const registerSessionScope = (
+  fixture: Fixture,
+  prepare: () => PreparedModel = () => required(fixture, "prepared"),
+): { readonly session: () => Session; readonly prepared: () => PreparedModel } => {
+  let prepared: PreparedModel | undefined;
+  let session: Session | undefined;
+  beforeAll(async () => {
+    prepared = prepare();
+    session = await prepared.createContainerSession(required(fixture, "gpu"));
+  });
+  afterAll(async () => {
+    if (session === undefined) return;
+    await session.dispose();
+    // 次の組の Session の確保の前に、この組の確保の解放を待つ（{@link settleReleases}）。
+    await settleReleases(required(fixture, "gpu"));
+  });
+  return {
+    session: () => {
+      if (session === undefined) throw new Error("the Session was not opened by beforeAll");
+      return session;
+    },
+    prepared: () => {
+      if (prepared === undefined) throw new Error("the graph was not prepared by beforeAll");
+      return prepared;
+    },
+  };
+};
+
+/**
  * Default run of an S = 192 group: one forward per case on one Session, held to
  * {@link assertForwardStructure}. The upstream bands of the same cases are the opt-in
- * {@link normalizedRatioGate} / S = 192 ratio case.
+ * {@link registerNormalizedRatioGate} / S = 192 ratio case. Registers one Session scope
+ * ({@link registerSessionScope}) and one it per case in the caller's describe.
  */
-const smallStructureGate = async (
-  t: TestContext,
-  gpu: GpuContext,
-  prepared: PreparedModel,
+const registerSmallStructureGate = (
+  fixture: Fixture,
   seriesDir: URL,
   idPrefix: string,
   cases: readonly { readonly name: string; readonly role: string }[],
-): Promise<void> => {
-  const session = await prepared.createContainerSession(gpu);
-  try {
-    for (const { name, role } of cases) {
-      const id = `${idPrefix}${name}`;
-      await t.step(`${id}（${role}）`, async () => {
-        const golden = await loadGolden(name, seriesDir);
-        const outputs = await session.run(graphInputs(golden, prepared.graph.inputs, name));
-        const tensor = outputs[prepared.graph.outputs[0]];
-        if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
-        assertForwardStructure(tensor.data, session.diagnostics(), id);
-      });
-    }
-  } finally {
-    await session.dispose();
-    await settleReleases(gpu);
+): void => {
+  const scope = registerSessionScope(fixture);
+  for (const { name, role } of cases) {
+    const id = `${idPrefix}${name}`;
+    it(`${id}（${role}）`, async () => {
+      const prepared = scope.prepared();
+      const session = scope.session();
+      const golden = await loadGolden(name, seriesDir);
+      const outputs = await session.run(graphInputs(golden, prepared.graph.inputs, name));
+      const tensor = outputs[prepared.graph.outputs[0]];
+      if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
+      assertForwardStructure(tensor.data, session.diagnostics(), id);
+    });
   }
 };
 
-/** {@link fullStructureGate} の入力（系列 root 1 つ × 実寸の S 1 つ）。 */
+/** {@link registerFullStructureGate} の入力（系列 root 1 つ × 実寸の S 1 つ）。 */
 type FullStructureSpec = {
-  readonly t: TestContext;
-  readonly gpu: GpuContext;
-  readonly prepared: PreparedModel;
   readonly seriesDir: URL;
   /** 結果の ID・step 名・ログの接頭辞（f16 席は空・i8 の参照席は {@link I8_ID_PREFIX}）。 */
   readonly idPrefix: string;
   readonly tokens: number;
   /** The case whose io inputs drive the two runs. */
   readonly name: string;
-  readonly bindingLimit: number;
-  readonly deviceLost: () => string | undefined;
   /** Keep the first run's tokens for the normal-mode Uint32 gate ({@link measuredTokens}). */
   readonly keepMeasured: boolean;
 };
@@ -1028,14 +1086,19 @@ type FullStructureSpec = {
  * case twice (the first run carries the pipeline build and the unbacked `initialChunkSize`
  * chunks, the second the backed chunks of later runs), and each run is held to the golden S,
  * {@link assertForwardStructure} and the row-block count derived from the binding limit
- * ({@link expectedRowBlocks}). The step then gates the per-submit GPU time at
+ * ({@link expectedRowBlocks}). The it then gates the per-submit GPU time at
  * {@link SUBMIT_GPU_LIMIT_MS}. None of this compares with upstream; the full-size bands are the
- * opt-in {@link normalizedRatioGate}.
+ * opt-in {@link registerNormalizedRatioGate}. Registers one it in the caller's describe; the
+ * device, the prepared graph and the device-lost reason come from the fixture.
  */
-const fullStructureGate = async (spec: FullStructureSpec): Promise<void> => {
-  const { t, gpu, prepared, idPrefix, tokens, name, bindingLimit } = spec;
+const registerFullStructureGate = (fixture: Fixture, spec: FullStructureSpec): void => {
+  const { idPrefix, tokens, name } = spec;
   const id = `${idPrefix}${name}`;
-  await t.step(`${idPrefix}S = ${tokens} の 1 submit の GPU 時間・所要・確保`, async () => {
+  it(`${idPrefix}S = ${tokens} の 1 submit の GPU 時間・所要・確保`, async () => {
+    const gpu = required(fixture, "gpu");
+    const prepared = required(fixture, "prepared");
+    // 期待値の元は device が実際に許した束縛上限（runtime の行ブロックが見るのと同じ値）。
+    const bindingLimit = gpu.device.limits.maxStorageBufferBindingSize;
     const built = performance.now();
     const session = await prepared.createContainerSession(gpu);
     const buildMs = performance.now() - built;
@@ -1096,7 +1159,7 @@ const fullStructureGate = async (spec: FullStructureSpec): Promise<void> => {
               1,
             )} ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
           );
-          assertEquals(spec.deviceLost(), undefined, "device lost");
+          assertEquals(fixture.deviceLost, undefined, "device lost");
           return { status: "pass", note };
         },
       );
@@ -1115,7 +1178,7 @@ const fullStructureGate = async (spec: FullStructureSpec): Promise<void> => {
 // Session で形を切り替えると、退役した slot backing が切り替えの run の後始末まで残り、2 つの S の backing が同時に載る
 // （runtime の `estimate.ts` — `peakAccountedBytes` の doc にある「退役から実際の destroy() までの窓」）。
 
-/** {@link normalizedRatioGate} の 1 ケース。 */
+/** {@link registerNormalizedRatioGate} の 1 ケース。 */
 type GateCase = {
   readonly name: string;
   /** step 名に出す役割（`full-band` / `band` …）。 */
@@ -1124,12 +1187,8 @@ type GateCase = {
   readonly accept: boolean;
 };
 
-/** {@link normalizedRatioGate} の入力（系列 root 1 つ × S の組 1 つ）。 */
+/** {@link registerNormalizedRatioGate} の入力（系列 root 1 つ × S の組 1 つ）。 */
 type GateSpec = {
-  readonly t: TestContext;
-  readonly gpu: GpuContext;
-  readonly prepared: PreparedModel;
-  readonly base: WanRopeBase;
   /** golden の置き場（系列の部品ディレクトリ）。 */
   readonly seriesDir: URL;
   /** 結果の ID・step 名・ログの接頭辞（f16 席は空・i8 の参照席は {@link I8_ID_PREFIX}）。 */
@@ -1139,12 +1198,12 @@ type GateSpec = {
   readonly band: number | undefined;
   /**
    * Full-size groups only: the golden S each case must have. The row-block count and the per-submit
-   * GPU-time gate of the same groups are default-run checks ({@link fullStructureGate}).
+   * GPU-time gate of the same groups are default-run checks ({@link registerFullStructureGate}).
    */
   readonly tokens?: number;
 };
 
-/** 1 ケースの r（{@link bandCandidate} の材料 — 判定の前に積むので帯の外の回も残る）。 */
+/** 1 ケースの r（{@link registerBandCandidate} の材料 — 判定の前に積むので帯の外の回も残る）。 */
 type CaseRatio = { readonly name: string; readonly accept: boolean; readonly ratio: number };
 
 /**
@@ -1155,197 +1214,197 @@ type CaseRatio = { readonly name: string; readonly accept: boolean; readonly rat
  * 1 ケース: io の入力で 1 forward → f64 の参照に対する比を CPU f32 の参照自身の比で割った r を帯で判定する。受入れは
  * 加えて TS の timesteps_proj の入力と故障注入 4 件（{@link faultInjections}）。帯が未導出なら r を出して赤で止める。
  * Full-size groups (`tokens`) also assert the golden S. Opt-in only (upstream parity); the
- * finiteness / fusion / row-block / submit-time checks run by default in {@link fullStructureGate}
- * and {@link smallStructureGate}.
+ * finiteness / fusion / row-block / submit-time checks run by default in
+ * {@link registerFullStructureGate} and {@link registerSmallStructureGate}.
+ *
+ * Registers one Session scope ({@link registerSessionScope}) and one it per case in the caller's
+ * describe; the device, the prepared graph and the RoPE base come from the fixture.
  *
  * 返すのは r を出せたケースの r（帯の候補の材料）。
+ * The returned list is filled by the its as they run (read it from an it registered after them).
  */
-const normalizedRatioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]> => {
-  const { t, gpu, prepared, base, band, tokens: fullTokens, idPrefix } = spec;
+const registerNormalizedRatioGate = (fixture: Fixture, spec: GateSpec): readonly CaseRatio[] => {
+  const { band, tokens: fullTokens, idPrefix } = spec;
   /** 失敗文言の帯の呼び名（実寸の組は f16 席の既存の文言のまま）。 */
   const bandLabel = fullTokens === undefined ? "帯" : "実寸の帯";
   const ratios: CaseRatio[] = [];
-  const session = await prepared.createContainerSession(gpu);
-  try {
-    const run = async (inputs: Record<string, Tensor>): Promise<Float32Array<ArrayBuffer>> => {
-      const outputs = await session.run(inputs);
-      const tensor = outputs[prepared.graph.outputs[0]];
-      if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
-      // 次の run の確保（2 本目は slot backing の構築）の前に、この run の中間の解放を待つ。
-      await settleReleases(gpu);
-      return tensor.data;
-    };
-    for (const { name, role, accept } of spec.cases) {
-      const id = `${idPrefix}${name}`;
-      await t.step(`${id}（${role}）`, async () => {
-        // 帯の外で落ちた回も、比と故障注入の記録を results.json に残す。
-        let caseNote = "";
-        await runRecordedCase(
-          results,
-          {
-            id,
-            failureNote: () => caseNote,
-          },
-          async ({ measurements }) => {
-            const golden = await loadGolden(name, spec.seriesDir);
-            if (fullTokens !== undefined) {
-              assertEquals(
-                wanTokenGrid(golden.latentShape, WAN_GEOMETRY).count,
-                fullTokens,
-                `${id}: golden の S`,
-              );
-            }
-            const inputs = graphInputs(golden, prepared.graph.inputs, name);
-            // 誤差の基準は f64 の参照で、判定は CPU f32 の参照自身の誤差で正規化した比
-            // （{@link DIT_FULL_NORMALIZED_BAND} / {@link I8_NORMALIZED_BAND}）。GPU と CPU f32 の参照の差は記録だけ。
-            const expected = floatsOf(golden.reference, REFERENCE_F64_KEY, name);
-            const reference = floatsOf(golden.reference, "output", name);
-            const referenceError = referenceErrorOf(golden, name);
-            const referenceRatio = ratioOf(referenceError);
-            const referenceQuantile = absErrorQuantile(reference, expected, RECORDED_QUANTILE);
-            // 帯が未導出の回は無限の帯として記録する（記録だけの欄と同じ書き方 — 判定は下で赤にする）。
-            const toleranceOf = (diff: Difference) =>
-              band === undefined
-                ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
-                : recordedTolerance(diff, band * referenceRatio);
-            const tokens = await run(inputs);
-            const latents = unpatchifyTokens(tokens, golden.latentShape, WAN_GEOMETRY);
-            const diff = difference(latents, expected);
-            const diffF32 = difference(latents, reference);
-            measurements.push(
-              {
-                output: "latents",
-                maxAbs: diff.maxAbs,
-                maxRel: diff.maxRel,
-                tolerance: toleranceOf(diff),
-                stage: "karume",
-              },
-              {
-                output: "latents@f32-reference",
-                maxAbs: diffF32.maxAbs,
-                maxRel: diffF32.maxRel,
-                tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
-                stage: "karume",
-              },
-              {
-                output: "f32-reference@f64-reference",
-                maxAbs: referenceError.maxAbs,
-                maxRel: referenceError.maxRel,
-                tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
-                stage: "karume",
-              },
+  const scope = registerSessionScope(fixture);
+  const run = async (inputs: Record<string, Tensor>): Promise<Float32Array<ArrayBuffer>> => {
+    const outputs = await scope.session().run(inputs);
+    const tensor = outputs[scope.prepared().graph.outputs[0]];
+    if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
+    // 次の run の確保（2 本目は slot backing の構築）の前に、この run の中間の解放を待つ。
+    await settleReleases(required(fixture, "gpu"));
+    return tensor.data;
+  };
+  for (const { name, role, accept } of spec.cases) {
+    const id = `${idPrefix}${name}`;
+    it(`${id}（${role}）`, async () => {
+      const prepared = scope.prepared();
+      const base = required(fixture, "base");
+      // 帯の外で落ちた回も、比と故障注入の記録を results.json に残す。
+      let caseNote = "";
+      await runRecordedCase(
+        results,
+        {
+          id,
+          failureNote: () => caseNote,
+        },
+        async ({ measurements }) => {
+          const golden = await loadGolden(name, spec.seriesDir);
+          if (fullTokens !== undefined) {
+            assertEquals(
+              wanTokenGrid(golden.latentShape, WAN_GEOMETRY).count,
+              fullTokens,
+              `${id}: golden の S`,
             );
-            ratios.push({ name, accept, ratio: normalizedRatio(diff, referenceRatio) });
-            const notes = [
-              formatNormalized("io の入力 / f64 参照", diff, referenceRatio),
-              formatDifference("CPU f32 参照 / f64 参照（正規化の分母）", referenceError),
-              formatDifference("io の入力 / CPU f32 参照（記録）", diffF32),
-              quantileRatio("io の入力 / f64 参照", latents, expected, referenceQuantile),
-            ];
-            assertEquals(diff.nonFinite, 0, `${id}: 非有限`);
+          }
+          const inputs = graphInputs(golden, prepared.graph.inputs, name);
+          // 誤差の基準は f64 の参照で、判定は CPU f32 の参照自身の誤差で正規化した比
+          // （{@link DIT_FULL_NORMALIZED_BAND} / {@link I8_NORMALIZED_BAND}）。GPU と CPU f32 の参照の差は記録だけ。
+          const expected = floatsOf(golden.reference, REFERENCE_F64_KEY, name);
+          const reference = floatsOf(golden.reference, "output", name);
+          const referenceError = referenceErrorOf(golden, name);
+          const referenceRatio = ratioOf(referenceError);
+          const referenceQuantile = absErrorQuantile(reference, expected, RECORDED_QUANTILE);
+          // 帯が未導出の回は無限の帯として記録する（記録だけの欄と同じ書き方 — 判定は下で赤にする）。
+          const toleranceOf = (diff: Difference) =>
+            band === undefined
+              ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
+              : recordedTolerance(diff, band * referenceRatio);
+          const tokens = await run(inputs);
+          const latents = unpatchifyTokens(tokens, golden.latentShape, WAN_GEOMETRY);
+          const diff = difference(latents, expected);
+          const diffF32 = difference(latents, reference);
+          measurements.push(
+            {
+              output: "latents",
+              maxAbs: diff.maxAbs,
+              maxRel: diff.maxRel,
+              tolerance: toleranceOf(diff),
+              stage: "karume",
+            },
+            {
+              output: "latents@f32-reference",
+              maxAbs: diffF32.maxAbs,
+              maxRel: diffF32.maxRel,
+              tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
+              stage: "karume",
+            },
+            {
+              output: "f32-reference@f64-reference",
+              maxAbs: referenceError.maxAbs,
+              maxRel: referenceError.maxRel,
+              tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
+              stage: "karume",
+            },
+          );
+          ratios.push({ name, accept, ratio: normalizedRatio(diff, referenceRatio) });
+          const notes = [
+            formatNormalized("io の入力 / f64 参照", diff, referenceRatio),
+            formatDifference("CPU f32 参照 / f64 参照（正規化の分母）", referenceError),
+            formatDifference("io の入力 / CPU f32 参照（記録）", diffF32),
+            quantileRatio("io の入力 / f64 参照", latents, expected, referenceQuantile),
+          ];
+          assertEquals(diff.nonFinite, 0, `${id}: 非有限`);
 
-            let hostDiff: Difference | undefined;
-            let faults: FaultResult[] = [];
-            if (accept) {
-              // 製品の経路の入力（ホストの timesteps_proj）も同じ帯で受け入れる（S = 192 の照合と同じ形）。
-              const width = viewOf(golden.io, "input.timesteps_proj", name).shape[1];
-              const hostLatents = unpatchifyTokens(
-                await run({
-                  ...inputs,
-                  timesteps_proj: {
-                    dtype: "f32",
-                    shape: [1, width],
-                    data: timestepsProj(golden.timestep, width),
-                  },
-                }),
-                golden.latentShape,
-                WAN_GEOMETRY,
-              );
-              hostDiff = difference(hostLatents, expected);
-              measurements.push({
-                output: "latents@host-timesteps-proj",
-                maxAbs: hostDiff.maxAbs,
-                maxRel: hostDiff.maxRel,
-                tolerance: toleranceOf(hostDiff),
-                stage: "karume",
-              });
-              notes.push(
-                formatNormalized("TS の timesteps_proj / f64 参照", hostDiff, referenceRatio),
-                quantileRatio(
-                  "TS の timesteps_proj / f64 参照",
-                  hostLatents,
-                  expected,
-                  referenceQuantile,
-                ),
-              );
-              faults = await faultInjections(golden, inputs, tokens, expected, run, base);
-              notes.push(
-                ...faults.map(
-                  ({ note, ratio }) =>
-                    `${note}・r ${(ratio / referenceRatio).toPrecision(3)}（${
-                      band === undefined
-                        ? "帯は未導出"
-                        : `帯の ${(ratio / referenceRatio / band).toFixed(1)} 倍`
-                    }）`,
-                ),
-              );
-            }
-            // 判定の前に出す（帯の外へ出た回も比が手元に残る）。
-            caseNote = notes.join(" / ");
-            console.log(`[wan-dit] ${id}: ${caseNote}`);
+          let hostDiff: Difference | undefined;
+          let faults: FaultResult[] = [];
+          if (accept) {
+            // 製品の経路の入力（ホストの timesteps_proj）も同じ帯で受け入れる（S = 192 の照合と同じ形）。
+            const width = viewOf(golden.io, "input.timesteps_proj", name).shape[1];
+            const hostLatents = unpatchifyTokens(
+              await run({
+                ...inputs,
+                timesteps_proj: {
+                  dtype: "f32",
+                  shape: [1, width],
+                  data: timestepsProj(golden.timestep, width),
+                },
+              }),
+              golden.latentShape,
+              WAN_GEOMETRY,
+            );
+            hostDiff = difference(hostLatents, expected);
+            measurements.push({
+              output: "latents@host-timesteps-proj",
+              maxAbs: hostDiff.maxAbs,
+              maxRel: hostDiff.maxRel,
+              tolerance: toleranceOf(hostDiff),
+              stage: "karume",
+            });
+            notes.push(
+              formatNormalized("TS の timesteps_proj / f64 参照", hostDiff, referenceRatio),
+              quantileRatio(
+                "TS の timesteps_proj / f64 参照",
+                hostLatents,
+                expected,
+                referenceQuantile,
+              ),
+            );
+            faults = await faultInjections(golden, inputs, tokens, expected, run, base);
+            notes.push(
+              ...faults.map(
+                ({ note, ratio }) =>
+                  `${note}・r ${(ratio / referenceRatio).toPrecision(3)}（${
+                    band === undefined
+                      ? "帯は未導出"
+                      : `帯の ${(ratio / referenceRatio / band).toFixed(1)} 倍`
+                  }）`,
+              ),
+            );
+          }
+          // 判定の前に出す（帯の外へ出た回も比が手元に残る）。
+          caseNote = notes.join(" / ");
+          console.log(`[wan-dit] ${id}: ${caseNote}`);
 
-            if (band === undefined) {
-              throw new Error(
-                `${id}: 帯が未導出（r ${normalizedRatio(diff, referenceRatio).toPrecision(
-                  3,
-                )}）— 決定用の最悪 r × 5 を帯の定数へ書く（帯の候補は同じ組の最後の step が出す）`,
-              );
-            }
-            // 故障注入の判定を先に置く（受入れが帯の外でも、帯が故障を拾えるかは判定される）。
-            for (const { label, ratio } of faults) {
-              const normalized = ratio / referenceRatio;
-              assert(
-                normalized > band,
-                `${id}: 故障注入 ${label} の r ${normalized.toPrecision(
-                  3,
-                )} が${bandLabel} ${band} の内に収まった`,
-              );
-            }
-            if (accept) {
-              const subtle = faults.find(({ label }) => label === TIMESTEP_OFF_BY_ONE);
-              if (subtle === undefined) {
-                throw new Error(`${id}: 故障注入 ${TIMESTEP_OFF_BY_ONE} が無い`);
-              }
-              const margin = subtle.ratio / referenceRatio / band;
-              assert(
-                margin >= SUBTLE_FAULT_MARGIN,
-                `${id}: 故障注入 ${TIMESTEP_OFF_BY_ONE} が${bandLabel}の ${margin.toFixed(
-                  2,
-                )} 倍（${SUBTLE_FAULT_MARGIN} 倍以上のはず — 帯が広すぎる兆候）`,
-              );
-            }
+          if (band === undefined) {
+            throw new Error(
+              `${id}: 帯が未導出（r ${normalizedRatio(diff, referenceRatio).toPrecision(
+                3,
+              )}）— 決定用の最悪 r × 5 を帯の定数へ書く（帯の候補は同じ組の最後の step が出す）`,
+            );
+          }
+          // 故障注入の判定を先に置く（受入れが帯の外でも、帯が故障を拾えるかは判定される）。
+          for (const { label, ratio } of faults) {
+            const normalized = ratio / referenceRatio;
             assert(
-              normalizedRatio(diff, referenceRatio) <= band,
-              `${id}: ${notes[0]} が${bandLabel} ${band} の外`,
+              normalized > band,
+              `${id}: 故障注入 ${label} の r ${normalized.toPrecision(
+                3,
+              )} が${bandLabel} ${band} の内に収まった`,
             );
-            if (hostDiff !== undefined) {
-              assert(
-                normalizedRatio(hostDiff, referenceRatio) <= band,
-                `${id}: TS の timesteps_proj の r ${normalizedRatio(
-                  hostDiff,
-                  referenceRatio,
-                ).toPrecision(3)} が${bandLabel} ${band} の外`,
-              );
+          }
+          if (accept) {
+            const subtle = faults.find(({ label }) => label === TIMESTEP_OFF_BY_ONE);
+            if (subtle === undefined) {
+              throw new Error(`${id}: 故障注入 ${TIMESTEP_OFF_BY_ONE} が無い`);
             }
-            return { status: "pass", note: notes.join(" / ") };
-          },
-        );
-      });
-    }
-  } finally {
-    await session.dispose();
-    // 次の組の Session の確保の前に、この組の確保の解放を待つ（{@link settleReleases}）。
-    await settleReleases(gpu);
+            const margin = subtle.ratio / referenceRatio / band;
+            assert(
+              margin >= SUBTLE_FAULT_MARGIN,
+              `${id}: 故障注入 ${TIMESTEP_OFF_BY_ONE} が${bandLabel}の ${margin.toFixed(
+                2,
+              )} 倍（${SUBTLE_FAULT_MARGIN} 倍以上のはず — 帯が広すぎる兆候）`,
+            );
+          }
+          assert(
+            normalizedRatio(diff, referenceRatio) <= band,
+            `${id}: ${notes[0]} が${bandLabel} ${band} の外`,
+          );
+          if (hostDiff !== undefined) {
+            assert(
+              normalizedRatio(hostDiff, referenceRatio) <= band,
+              `${id}: TS の timesteps_proj の r ${normalizedRatio(
+                hostDiff,
+                referenceRatio,
+              ).toPrecision(3)} が${bandLabel} ${band} の外`,
+            );
+          }
+          return { status: "pass", note: notes.join(" / ") };
+        },
+      );
+    });
   }
   return ratios;
 };
@@ -1355,16 +1414,19 @@ const normalizedRatioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]
  * 最悪 r × 5）どおりに決定用のケースだけから作る。受入れの r は並べて出すが候補には使わない（帯の決定と受入れの
  * 独立）。決定用のどれかが r を出す前に落ちた回は候補を出さない（欠けた最悪は最悪ではない）。帯が導出済みなら
  * 何もしない。
+ * Registers that it in the caller's describe after the gate's its (`ratiosOf` reads the list
+ * {@link registerNormalizedRatioGate} returned when the it runs); the band is a constant, so
+ * whether the it exists is known at collection time.
  */
-const bandCandidate = async (
-  t: TestContext,
+const registerBandCandidate = (
   label: string,
   cases: readonly GateCase[],
-  ratios: readonly CaseRatio[],
+  ratiosOf: () => readonly CaseRatio[],
   band: number | undefined,
-): Promise<void> => {
+): void => {
   if (band !== undefined) return;
-  await t.step(`${label}: 帯の候補（未導出）`, () => {
+  it(`${label}: 帯の候補（未導出）`, () => {
+    const ratios = ratiosOf();
     const expected = cases.filter(({ accept }) => !accept).length;
     const decided = ratios.filter(({ accept }) => !accept);
     const worst = Math.max(...decided.map(({ ratio }) => ratio));
@@ -1420,257 +1482,250 @@ const scaledScaleContainer = (
 
 /**
  * i8 に固有の故障注入（{@link scaledScaleContainer}）で受入れケースを回し、r が帯の外へ出ることを門にする
- * （ADR 0120 検収 段 3）。Session は {@link normalizedRatioGate} の Session を畳んだ後に別に張る（2 本を同時に
+ * （ADR 0120 検収 段 3）。Session は {@link registerNormalizedRatioGate} の Session を畳んだ後に別に張る（2 本を同時に
  * 載せない — 実寸で 2 本は B570 の予算を食う）。
+ * Registers one Session scope on the scaled container ({@link registerSessionScope}) and one it
+ * per accept case; the caller wraps it in its own describe, after the ratio gate's describe.
  */
-const i8ScaleFault = async (
-  t: TestContext,
-  gpu: GpuContext,
-  opened: OpenedContainer,
-  graph: string,
+const registerI8ScaleFault = (
+  fixture: Fixture,
   cases: readonly GateCase[],
   band: number | undefined,
-): Promise<void> => {
-  const label = `${I8_SCALE_FAULT_WEIGHT} の scale を 2 倍`;
-  const prepared = prepareContainer(
-    scaledScaleContainer(opened, graph, I8_SCALE_FAULT_WEIGHT),
-    graph,
-  );
-  const session = await prepared.createContainerSession(gpu);
-  try {
-    for (const { name } of cases.filter(({ accept }) => accept)) {
-      const id = `${I8_ID_PREFIX}${name}/scale-fault`;
-      await t.step(`${id}（故障注入 ${label} → 帯の外）`, async () => {
-        let note = "";
-        await runRecordedCase(
-          results,
-          { id, failureNote: () => note },
-          async ({ measurements }) => {
-            const golden = await loadGolden(name, I8_SERIES_DIR);
-            const expected = floatsOf(golden.reference, REFERENCE_F64_KEY, name);
-            const referenceRatio = ratioOf(referenceErrorOf(golden, name));
-            const outputs = await session.run(graphInputs(golden, prepared.graph.inputs, name));
-            const tensor = outputs[prepared.graph.outputs[0]];
-            if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
-            await settleReleases(gpu);
-            const diff = difference(
-              unpatchifyTokens(tensor.data, golden.latentShape, WAN_GEOMETRY),
-              expected,
-            );
-            const normalized = normalizedRatio(diff, referenceRatio);
-            measurements.push({
-              output: "latents@scale-fault",
-              maxAbs: diff.maxAbs,
-              maxRel: diff.maxRel,
-              tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
-              stage: "karume",
-            });
-            note = `${formatNormalized(`故障注入 ${label} / f64 参照`, diff, referenceRatio)}（${
-              band === undefined ? "帯は未導出" : `帯の ${(normalized / band).toFixed(1)} 倍`
-            }）`;
-            console.log(`[wan-dit] ${id}: ${note}`);
-            if (band === undefined) {
-              throw new Error(`${id}: 帯が未導出（故障注入の r ${normalized}）`);
-            }
-            assert(
-              normalized > band,
-              `${id}: 故障注入 ${label} の r ${normalized.toPrecision(
-                3,
-              )} が帯 ${band} の内に収まった`,
-            );
-            return { status: "pass", note };
-          },
+): void => {
+  const label = I8_SCALE_FAULT_LABEL;
+  const scope = registerSessionScope(fixture, () => {
+    const graph = required(fixture, "graph");
+    return prepareContainer(
+      scaledScaleContainer(required(fixture, "opened"), graph, I8_SCALE_FAULT_WEIGHT),
+      graph,
+    );
+  });
+  for (const { name } of cases.filter(({ accept }) => accept)) {
+    const id = `${I8_ID_PREFIX}${name}/scale-fault`;
+    it(`${id}（故障注入 ${label} → 帯の外）`, async () => {
+      const gpu = required(fixture, "gpu");
+      const prepared = scope.prepared();
+      const session = scope.session();
+      let note = "";
+      await runRecordedCase(results, { id, failureNote: () => note }, async ({ measurements }) => {
+        const golden = await loadGolden(name, I8_SERIES_DIR);
+        const expected = floatsOf(golden.reference, REFERENCE_F64_KEY, name);
+        const referenceRatio = ratioOf(referenceErrorOf(golden, name));
+        const outputs = await session.run(graphInputs(golden, prepared.graph.inputs, name));
+        const tensor = outputs[prepared.graph.outputs[0]];
+        if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
+        await settleReleases(gpu);
+        const diff = difference(
+          unpatchifyTokens(tensor.data, golden.latentShape, WAN_GEOMETRY),
+          expected,
         );
+        const normalized = normalizedRatio(diff, referenceRatio);
+        measurements.push({
+          output: "latents@scale-fault",
+          maxAbs: diff.maxAbs,
+          maxRel: diff.maxRel,
+          tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
+          stage: "karume",
+        });
+        note = `${formatNormalized(`故障注入 ${label} / f64 参照`, diff, referenceRatio)}（${
+          band === undefined ? "帯は未導出" : `帯の ${(normalized / band).toFixed(1)} 倍`
+        }）`;
+        console.log(`[wan-dit] ${id}: ${note}`);
+        if (band === undefined) {
+          throw new Error(`${id}: 帯が未導出（故障注入の r ${normalized}）`);
+        }
+        assert(
+          normalized > band,
+          `${id}: 故障注入 ${label} の r ${normalized.toPrecision(3)} が帯 ${band} の内に収まった`,
+        );
+        return { status: "pass", note };
       });
-    }
-  } finally {
-    await session.dispose();
-    await settleReleases(gpu);
+    });
   }
 };
 
-test({
-  name:
-    "Wan DiT 実寸 計測モード（実 GPU）: S = 32,760 / 14,040 の 1 forward の行ブロックは S ごとの枚数・" +
+/**
+ * The opt-in parity of one i8 reference-seat group, registered in the caller's describe in the
+ * order the former test ran it: the ratio gate ({@link registerNormalizedRatioGate}), the scale
+ * fault ({@link registerI8ScaleFault}), then the band candidate ({@link registerBandCandidate}).
+ * The ratio gate and the scale fault each hold one Session, so each gets its own describe and the
+ * first Session is disposed before the second opens. `label` names the group (the ratio gate's
+ * describe and the band candidate).
+ */
+const registerI8ParityGroups = (fixture: Fixture, label: string, spec: GateSpec): void => {
+  let ratios: readonly CaseRatio[] = [];
+  describe(label, () => {
+    ratios = registerNormalizedRatioGate(fixture, spec);
+  });
+  describe(`${I8_ID_PREFIX}故障注入 ${I8_SCALE_FAULT_LABEL}`, () => {
+    registerI8ScaleFault(fixture, spec.cases, spec.band);
+  });
+  registerBandCandidate(label, spec.cases, () => ratios, spec.band);
+};
+
+describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE)(
+  "Wan DiT 実寸 計測モード（実 GPU）: S = 32,760 / 14,040 の 1 forward の行ブロックは S ごとの枚数・" +
     "融合の件数・非有限 0・1 submit の GPU 時間 ≤ 1 s",
-  ignore: !ASSETS_AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const prepared = prepareContainer(
-      await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
-      GRAPH,
-    );
-    assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
-    let deviceLost: string | undefined;
-    // 計測モード（timestamp-query）: submit ごとの GPU 時間は既存の回収に相乗りして測る（新しい待ちを
-    // 足さない — runtime の `ChunkBudgetStats.submitGpuTime`）。計算は通常の実行と同じだが、1 dispatch
-    // = 1 pass になる分だけ窓の壁時計が変わる。チャンクの切れ目は壁時計の窓から学んだ推定で決まるので、
-    // 通常の実行と同じなのは裏付け前のチャンク（initialChunkSize）だけで、裏付けが付いた後（最初の窓を
-    // 閉じた後）の切れ目は変わりうる。
-    const gpu = await acquireTestGpu({
-      gpuTiming: true,
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
+  () => {
+    const fixture: Fixture = {};
+    beforeAll(async () => {
+      fixture.prepared = prepareContainer(
+        await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
+        GRAPH,
+      );
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      // 計測モード（timestamp-query）: submit ごとの GPU 時間は既存の回収に相乗りして測る（新しい待ちを
+      // 足さない — runtime の `ChunkBudgetStats.submitGpuTime`）。計算は通常の実行と同じだが、1 dispatch
+      // = 1 pass になる分だけ窓の壁時計が変わる。チャンクの切れ目は壁時計の窓から学んだ推定で決まるので、
+      // 通常の実行と同じなのは裏付け前のチャンク（initialChunkSize）だけで、裏付けが付いた後（最初の窓を
+      // 閉じた後）の切れ目は変わりうる。
+      fixture.gpu = await acquireTestGpu({
+        gpuTiming: true,
+        onDeviceLost: (info) => {
+          fixture.deviceLost = `${info.reason}: ${info.message}`;
+        },
+      });
+      assertAdapterMatchesEnvironment(fixture.gpu);
     });
-    try {
-      assertAdapterMatchesEnvironment(gpu);
-      // 期待値の元は device が実際に許した束縛上限（runtime の行ブロックが見るのと同じ値）。
-      const bindingLimit = gpu.device.limits.maxStorageBufferBindingSize;
-      for (const { tokens, normalModeCase } of FULL_CASES_BY_TOKENS) {
-        await fullStructureGate({
-          t,
-          gpu,
-          prepared,
-          seriesDir: SERIES_DIR,
-          idPrefix: "",
-          tokens,
-          name: normalModeCase,
-          bindingLimit,
-          deviceLost: () => deviceLost,
-          keepMeasured: true,
-        });
-      }
-    } finally {
-      await settleReleases(gpu);
-      gpu.destroy();
+    afterAll(() => releaseDevice(fixture));
+    for (const { tokens, normalModeCase } of FULL_CASES_BY_TOKENS) {
+      registerFullStructureGate(fixture, {
+        seriesDir: SERIES_DIR,
+        idPrefix: "",
+        tokens,
+        name: normalModeCase,
+        keepMeasured: true,
+      });
     }
   },
-});
+);
 
-test({
-  name:
-    "Wan DiT 実寸 照合（実 GPU・計測モード / diffusers CPU f64）: S = 32,760 / 14,040 の 1 forward が S ごとの" +
+describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+  "Wan DiT 実寸 照合（実 GPU・計測モード / diffusers CPU f64）: S = 32,760 / 14,040 の 1 forward が S ごとの" +
     `実寸の帯の内・故障注入は帯の外${UPSTREAM_PARITY_OPT_IN}`,
-  ignore: !ASSETS_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY,
-  fn: async (t) => {
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
-    const prepared = prepareContainer(opened, GRAPH);
-    assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
-    const base = await readRopeBase(opened);
-    // Same measured-mode device as the band derivation (ADR 0118 stage 3 / 8 measured there).
-    const gpu = await acquireTestGpu({ gpuTiming: true });
-    try {
-      assertAdapterMatchesEnvironment(gpu);
-      for (const { tokens: fullTokens, cases } of FULL_CASES_BY_TOKENS) {
-        await normalizedRatioGate({
-          t,
-          gpu,
-          prepared,
-          base,
+  () => {
+    const fixture: Fixture = {};
+    beforeAll(async () => {
+      const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
+      fixture.prepared = prepareContainer(opened, GRAPH);
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      fixture.base = await readRopeBase(opened);
+      // Same measured-mode device as the band derivation (ADR 0118 stage 3 / 8 measured there).
+      fixture.gpu = await acquireTestGpu({ gpuTiming: true });
+      assertAdapterMatchesEnvironment(fixture.gpu);
+    });
+    afterAll(() => releaseDevice(fixture));
+    // One describe per S: each group holds its own Session, closed before the next group opens.
+    for (const { tokens: fullTokens, cases } of FULL_CASES_BY_TOKENS) {
+      describe(`S = ${fullTokens}`, () => {
+        registerNormalizedRatioGate(fixture, {
           seriesDir: SERIES_DIR,
           idPrefix: "",
           cases: cases.map(({ name, role }) => ({ name, role, accept: role === "full-accept" })),
           band: DIT_FULL_NORMALIZED_BAND[fullTokens],
           tokens: fullTokens,
         });
-      }
-    } finally {
-      await settleReleases(gpu);
-      gpu.destroy();
+      });
     }
   },
-});
+);
 
-test({
-  name:
-    "Wan DiT 実寸 通常モード（実 GPU・計測なし）: S ごと（32,760 / 14,040）の 1 forward の所要を記録する" +
+describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE)(
+  "Wan DiT 実寸 通常モード（実 GPU・計測なし）: S ごと（32,760 / 14,040）の 1 forward の所要を記録する" +
     "（計測モードの出力と Uint32 で一致・非有限 0）",
-  ignore: !ASSETS_AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const prepared = prepareContainer(
-      await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
-      GRAPH,
-    );
-    let deviceLost: string | undefined;
-    // 所要は計測を切った通常の実行で採る（ADR 0118 追記 2026-10-02 — 計測モードは 1 dispatch = 1 pass）。
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
+  () => {
+    const fixture: Fixture = {};
+    beforeAll(async () => {
+      fixture.prepared = prepareContainer(
+        await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
+        GRAPH,
+      );
+      // 所要は計測を切った通常の実行で採る（ADR 0118 追記 2026-10-02 — 計測モードは 1 dispatch = 1 pass）。
+      fixture.gpu = await acquireTestGpu({
+        onDeviceLost: (info) => {
+          fixture.deviceLost = `${info.reason}: ${info.message}`;
+        },
+      });
+      assertAdapterMatchesEnvironment(fixture.gpu);
     });
-    try {
-      assertAdapterMatchesEnvironment(gpu);
-      // S ごとに Session を張り直す（理由は計測モードの照合と同じ — 2 つの S の backing を同時に載せない）。
-      for (const { tokens: fullTokens, normalModeCase: name } of FULL_CASES_BY_TOKENS) {
-        await t.step(`S = ${fullTokens}`, async () => {
-          const built = performance.now();
-          const session = await prepared.createContainerSession(gpu);
-          const buildMs = performance.now() - built;
-          try {
-            await runRecordedCase(results, { id: `${name}/normal-mode` }, async () => {
-              const golden = await loadGolden(name);
-              const inputs = graphInputs(golden, prepared.graph.inputs, name);
-              const runs: FullRun[] = [];
-              const produced: Float32Array<ArrayBuffer>[] = [];
-              // 1 本目は最初の run（パイプラインの生成と、裏付け前の initialChunkSize のチャンク）、2 本目は
-              // 2 回目以降の形（slot backing・時間予算で切ったチャンク）。生成の 1 ステップに近いのは 2 本目。
-              for (const label of ["1 本目", "2 本目"]) {
-                const started = performance.now();
-                const outputs = await session.run(inputs);
-                const wallMs = performance.now() - started;
-                const tensor = outputs[prepared.graph.outputs[0]];
-                if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
-                produced.push(tensor.data);
-                runs.push(observeRun(label, session.diagnostics(), wallMs, outputBytes(outputs)));
-                await settleReleases(gpu);
-              }
-              const tokens = produced[produced.length - 1];
-              // Kept before any assertion so the opt-in band case can still report on a red run here.
-              normalModeTokens.set(name, tokens);
-              const budget = session.diagnostics().submit.chunkBudget;
-              const note = [
-                `構築 ${(buildMs / 1000).toFixed(1)} s`,
-                ...runs.map((observed) => formatRun(observed)),
-                `窓平均の最大 ${
-                  budget.maxWindowMeanMs?.toFixed(1) ?? "—"
-                } ms・予算超過 ${budget.overBudgetChunks} 本`,
-              ].join(" / ");
-              console.log(`[wan-dit] 実寸 S = ${fullTokens} の通常モード: ${note}`);
-              assertEquals(
-                tokens.reduce((count, value) => count + (Number.isFinite(value) ? 0 : 1), 0),
-                0,
-                `${name}: 非有限`,
+    afterAll(() => releaseDevice(fixture));
+    // S ごとに Session を張り直す（理由は計測モードの照合と同じ — 2 つの S の backing を同時に載せない）。
+    for (const { tokens: fullTokens, normalModeCase: name } of FULL_CASES_BY_TOKENS) {
+      it(`S = ${fullTokens}`, async () => {
+        const gpu = required(fixture, "gpu");
+        const prepared = required(fixture, "prepared");
+        const built = performance.now();
+        const session = await prepared.createContainerSession(gpu);
+        const buildMs = performance.now() - built;
+        try {
+          await runRecordedCase(results, { id: `${name}/normal-mode` }, async () => {
+            const golden = await loadGolden(name);
+            const inputs = graphInputs(golden, prepared.graph.inputs, name);
+            const runs: FullRun[] = [];
+            const produced: Float32Array<ArrayBuffer>[] = [];
+            // 1 本目は最初の run（パイプラインの生成と、裏付け前の initialChunkSize のチャンク）、2 本目は
+            // 2 回目以降の形（slot backing・時間予算で切ったチャンク）。生成の 1 ステップに近いのは 2 本目。
+            for (const label of ["1 本目", "2 本目"]) {
+              const started = performance.now();
+              const outputs = await session.run(inputs);
+              const wallMs = performance.now() - started;
+              const tensor = outputs[prepared.graph.outputs[0]];
+              if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
+              produced.push(tensor.data);
+              runs.push(observeRun(label, session.diagnostics(), wallMs, outputBytes(outputs)));
+              await settleReleases(gpu);
+            }
+            const tokens = produced[produced.length - 1];
+            // Kept before any assertion so the opt-in band case can still report on a red run here.
+            normalModeTokens.set(name, tokens);
+            const budget = session.diagnostics().submit.chunkBudget;
+            const note = [
+              `構築 ${(buildMs / 1000).toFixed(1)} s`,
+              ...runs.map((observed) => formatRun(observed)),
+              `窓平均の最大 ${
+                budget.maxWindowMeanMs?.toFixed(1) ?? "—"
+              } ms・予算超過 ${budget.overBudgetChunks} 本`,
+            ].join(" / ");
+            console.log(`[wan-dit] 実寸 S = ${fullTokens} の通常モード: ${note}`);
+            assertEquals(
+              tokens.reduce((count, value) => count + (Number.isFinite(value) ? 0 : 1), 0),
+              0,
+              `${name}: 非有限`,
+            );
+            const measured = measuredTokens.get(name);
+            if (measured === undefined) {
+              throw new Error(
+                `${name}: 計測モードの照合の出力が無い（同じ回で計測モードの照合を先に回す — ` +
+                  "measuredTokens の MUST）",
               );
-              const measured = measuredTokens.get(name);
-              if (measured === undefined) {
-                throw new Error(
-                  `${name}: 計測モードの照合の出力が無い（同じ回で計測モードの照合を先に回す — ` +
-                    "measuredTokens の MUST）",
-                );
-              }
-              for (const [index, data] of produced.entries()) {
-                const { label } = runs[index];
-                assertEquals(
-                  firstBitMismatch(data, measured),
-                  -1,
-                  `${name}: 通常モードの ${label}が計測モードの出力と Uint32 で一致しない` +
-                    "（値は最初に割れる要素の添字）",
-                );
-              }
-              assertEquals(deviceLost, undefined, "device lost");
-              return { status: "pass", note };
-            });
-          } finally {
-            await session.dispose();
-            await settleReleases(gpu);
-          }
-        });
-      }
-    } finally {
-      await settleReleases(gpu);
-      gpu.destroy();
+            }
+            for (const [index, data] of produced.entries()) {
+              const { label } = runs[index];
+              assertEquals(
+                firstBitMismatch(data, measured),
+                -1,
+                `${name}: 通常モードの ${label}が計測モードの出力と Uint32 で一致しない` +
+                  "（値は最初に割れる要素の添字）",
+              );
+            }
+            assertEquals(fixture.deviceLost, undefined, "device lost");
+            return { status: "pass", note };
+          });
+        } finally {
+          await session.dispose();
+          await settleReleases(gpu);
+        }
+      });
     }
   },
-});
+);
 
-test({
-  name:
-    "Wan DiT 実寸 通常モード（計測なし / diffusers CPU f64）: S ごと（32,760 / 14,040）の 1 forward が実寸の帯の内" +
+describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+  "Wan DiT 実寸 通常モード（計測なし / diffusers CPU f64）: S ごと（32,760 / 14,040）の 1 forward が実寸の帯の内" +
     UPSTREAM_PARITY_OPT_IN,
-  ignore: !ASSETS_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY,
-  fn: async (t) => {
+  () => {
     for (const { tokens: fullTokens, normalModeCase: name } of FULL_CASES_BY_TOKENS) {
-      await t.step(`S = ${fullTokens}`, async () => {
+      it(`S = ${fullTokens}`, async () => {
         const fullBand = DIT_FULL_NORMALIZED_BAND[fullTokens];
         await runRecordedCase(
           results,
@@ -1712,7 +1767,7 @@ test({
       });
     }
   },
-});
+);
 
 // 実用席の時間と確保（ADR 0120 段 4）と i8 の参照席の r 門（段 3）は、f16 席の実寸の後・S = 192 の前に置く。並びは
 // 確保の大きい順（実用席の S = 32,760 → 14,040 → i8 の参照席の S = 14,040 → S = 192 の組）— 理由は f16 席の実寸を
@@ -1744,341 +1799,303 @@ const practicalRuns = async (
   return { runs, nonFinite };
 };
 
-test({
-  name:
-    `Wan DiT 実用席 ${PRACTICAL_QUANT}（実 GPU・計測モード）: S = 32,760 / 14,040 の 1 パスの GPU 時間を` +
+describe.skipIf(!PRACTICAL_RUNNABLE || !GPU_AVAILABLE)(
+  `Wan DiT 実用席 ${PRACTICAL_QUANT}（実 GPU・計測モード）: S = 32,760 / 14,040 の 1 パスの GPU 時間を` +
     "記録し、1 submit の GPU 時間 ≤ 1 s・非有限 0",
-  ignore: !PRACTICAL_RUNNABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const options = practicalSessionOptions();
-    const prepared = prepareContainer(
-      await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR)),
-      i8Graph(),
-    );
-    let deviceLost: string | undefined;
-    // 計測モードの意味は f16 席の実寸の照合と同じ（1 dispatch = 1 pass — 壁時計は下の通常モードが採る）。1 submit の
-    // 門は a8 で dispatch が増える分（anima で 3,087 → 3,311 / step — ADR 0030）を席ごとに測り直す（ADR 0120 リスク 8）。
-    const gpu = await acquireTestGpu({
-      gpuTiming: true,
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
+  () => {
+    const fixture: Fixture = {};
+    beforeAll(async () => {
+      fixture.options = practicalSessionOptions();
+      fixture.prepared = prepareContainer(
+        await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR)),
+        i8Graph(),
+      );
+      // 計測モードの意味は f16 席の実寸の照合と同じ（1 dispatch = 1 pass — 壁時計は下の通常モードが採る）。1 submit の
+      // 門は a8 で dispatch が増える分（anima で 3,087 → 3,311 / step — ADR 0030）を席ごとに測り直す（ADR 0120 リスク 8）。
+      fixture.gpu = await acquireTestGpu({
+        gpuTiming: true,
+        onDeviceLost: (info) => {
+          fixture.deviceLost = `${info.reason}: ${info.message}`;
+        },
+      });
+      assertAdapterMatchesEnvironment(fixture.gpu);
     });
-    try {
-      assertAdapterMatchesEnvironment(gpu);
-      // S ごとに Session を張り直す（2 つの S の backing を同時に載せない — f16 席の実寸と同じ）。
-      for (const { tokens, name } of PRACTICAL_TIMING_CASES) {
-        await t.step(`${PRACTICAL_QUANT} S = ${tokens}`, async () => {
-          const built = performance.now();
-          const session = await prepared.createContainerSession(gpu, options);
-          const buildMs = performance.now() - built;
-          let note = "";
-          try {
-            await runRecordedCase(
-              results,
-              { id: `${PRACTICAL_QUANT}/full-s${tokens}/submit`, failureNote: () => note },
-              async () => {
-                const golden = await loadGolden(name);
-                const { runs, nonFinite } = await practicalRuns(
-                  session,
-                  gpu,
-                  graphInputs(golden, prepared.graph.inputs, name),
-                  prepared.graph.outputs[0],
-                );
-                const unitNs = timestampUnitNs(ENVIRONMENT.key);
-                const submit = submitGpuNote(session.diagnostics(), unitNs);
-                note = [
-                  submit.note,
-                  `構築 ${(buildMs / 1000).toFixed(1)} s`,
-                  ...runs.map((observed) => formatRun(observed, unitNs)),
-                  `融合 ${JSON.stringify(session.diagnostics().lastRunFusions)}`,
-                  `非有限 ${nonFinite}`,
-                ].join(" / ");
-                console.log(
-                  `[wan-dit] 実用席 ${PRACTICAL_QUANT} S = ${tokens} の計測モード: ${note}`,
-                );
-                assertEquals(nonFinite, 0, `${name}: 非有限`);
-                assert(
-                  submit.unbackedSubmits > 0,
-                  "最初の run の裏付け前のチャンク（initialChunkSize で据え置いた submit）を測れていない",
-                );
-                assert(
-                  submit.maxMs <= SUBMIT_GPU_LIMIT_MS,
-                  `1 submit の GPU 時間の最大 ${submit.maxMs.toFixed(
-                    1,
-                  )} ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
-                );
-                assertEquals(deviceLost, undefined, "device lost");
-                return { status: "pass", note };
-              },
-            );
-          } finally {
-            await session.dispose();
-            await settleReleases(gpu);
-          }
-        });
-      }
-    } finally {
-      await settleReleases(gpu);
-      gpu.destroy();
-    }
-  },
-});
-
-test({
-  name:
-    "Wan DiT i8 参照席 f16+dit8（実 GPU・計測モード）: S = 14,040 の 1 forward の行ブロック・融合の件数・非有限 0・" +
-    "1 submit の GPU 時間 ≤ 1 s",
-  ignore: !I8_FULL_AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const prepared = prepareContainer(
-      await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR)),
-      i8Graph(),
-    );
-    assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
-    let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      gpuTiming: true,
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
-    try {
-      assertAdapterMatchesEnvironment(gpu);
-      await fullStructureGate({
-        t,
-        gpu,
-        prepared,
-        seriesDir: I8_SERIES_DIR,
-        idPrefix: I8_ID_PREFIX,
-        tokens: 14040,
-        name: I8_FULL_CASES[0].name,
-        bindingLimit: gpu.device.limits.maxStorageBufferBindingSize,
-        deviceLost: () => deviceLost,
-        keepMeasured: false,
-      });
-    } finally {
-      await settleReleases(gpu);
-      gpu.destroy();
-    }
-  },
-});
-
-test({
-  name:
-    "Wan DiT i8 参照席 f16+dit8（実 GPU・計測モード / diffusers CPU f64）: S = 14,040 の 1 forward が r の帯の内・" +
-    `故障注入 5 件（f16 席と同じ 4 件 + scale の 2 倍）は帯の外${UPSTREAM_PARITY_OPT_IN}`,
-  ignore: !I8_FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY,
-  fn: async (t) => {
-    const graph = i8Graph();
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR));
-    const prepared = prepareContainer(opened, graph);
-    assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
-    const base = await readRopeBase(opened);
-    // Same measured-mode device as the band derivation (I8_NORMALIZED_BAND: S = 14,040 measured there).
-    const gpu = await acquireTestGpu({ gpuTiming: true });
-    try {
-      assertAdapterMatchesEnvironment(gpu);
-      const band = I8_NORMALIZED_BAND[14040];
-      const ratios = await normalizedRatioGate({
-        t,
-        gpu,
-        prepared,
-        base,
-        seriesDir: I8_SERIES_DIR,
-        idPrefix: I8_ID_PREFIX,
-        cases: I8_FULL_CASES,
-        band,
-        tokens: 14040,
-      });
-      await i8ScaleFault(t, gpu, opened, graph, I8_FULL_CASES, band);
-      await bandCandidate(t, `${I8_ID_PREFIX}S = 14,040`, I8_FULL_CASES, ratios, band);
-    } finally {
-      await settleReleases(gpu);
-      gpu.destroy();
-    }
-  },
-});
-
-test({
-  name: "Wan DiT i8 参照席 f16+dit8（実 GPU）: S = 192 の組の 1 forward の融合の件数・非有限 0",
-  ignore: !I8_SMALL_AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const prepared = prepareContainer(
-      await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR)),
-      i8Graph(),
-    );
-    assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
-    const gpu = await acquireTestGpu();
-    try {
-      assertAdapterMatchesEnvironment(gpu);
-      await smallStructureGate(t, gpu, prepared, I8_SERIES_DIR, I8_ID_PREFIX, I8_SMALL_CASES);
-    } finally {
-      // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
-      await settleReleases(gpu);
-      gpu.destroy();
-    }
-  },
-});
-
-test({
-  name:
-    "Wan DiT i8 参照席 f16+dit8（実 GPU / diffusers CPU f64）: S = 192 の組の 1 forward が r の帯の内・" +
-    `故障注入 5 件（f16 席と同じ 4 件 + scale の 2 倍）は帯の外${UPSTREAM_PARITY_OPT_IN}`,
-  ignore: !I8_SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY,
-  fn: async (t) => {
-    const graph = i8Graph();
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR));
-    const prepared = prepareContainer(opened, graph);
-    assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
-    const base = await readRopeBase(opened);
-    const gpu = await acquireTestGpu();
-    try {
-      assertAdapterMatchesEnvironment(gpu);
-      const band = I8_NORMALIZED_BAND[192];
-      const ratios = await normalizedRatioGate({
-        t,
-        gpu,
-        prepared,
-        base,
-        seriesDir: I8_SERIES_DIR,
-        idPrefix: I8_ID_PREFIX,
-        cases: I8_SMALL_CASES,
-        band,
-      });
-      await i8ScaleFault(t, gpu, opened, graph, I8_SMALL_CASES, band);
-      await bandCandidate(t, `${I8_ID_PREFIX}S = 192 の組`, I8_SMALL_CASES, ratios, band);
-    } finally {
-      // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
-      await settleReleases(gpu);
-      gpu.destroy();
-    }
-  },
-});
-
-test({
-  name: "Wan DiT S 形（実 GPU）: 全ケースの 1 forward の融合の件数・非有限 0",
-  ignore: !ASSETS_AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const prepared = prepareContainer(
-      await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
-      GRAPH,
-    );
-    assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
-    const gpu = await acquireTestGpu();
-    try {
-      assertAdapterMatchesEnvironment(gpu);
-      await smallStructureGate(t, gpu, prepared, SERIES_DIR, "", CASES);
-    } finally {
-      // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
-      await settleReleases(gpu);
-      gpu.destroy();
-    }
-  },
-});
-
-test({
-  name: `Wan DiT 照合（実 GPU / diffusers CPU f32）: S 形の 1 forward が帯の内・故障注入は帯の外${UPSTREAM_PARITY_OPT_IN}`,
-  ignore: !ASSETS_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY,
-  fn: async (t) => {
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
-    const prepared = prepareContainer(opened, GRAPH);
-    assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
-    const base = await readRopeBase(opened);
-    const gpu = await acquireTestGpu();
-    try {
-      assertAdapterMatchesEnvironment(gpu);
-      const session = await prepared.createContainerSession(gpu);
-      try {
-        const run = async (inputs: Record<string, Tensor>): Promise<Float32Array<ArrayBuffer>> => {
-          const outputs = await session.run(inputs);
-          const tensor = outputs[prepared.graph.outputs[0]];
-          if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
-          return tensor.data;
-        };
-        for (const { name, role } of CASES) {
-          await t.step(`${name}（${role}）`, async () => {
-            await runRecordedCase(results, { id: name }, async ({ measurements }) => {
+    afterAll(() => releaseDevice(fixture));
+    // S ごとに Session を張り直す（2 つの S の backing を同時に載せない — f16 席の実寸と同じ）。
+    for (const { tokens, name } of PRACTICAL_TIMING_CASES) {
+      it(`${PRACTICAL_QUANT} S = ${tokens}`, async () => {
+        const gpu = required(fixture, "gpu");
+        const prepared = required(fixture, "prepared");
+        const options = required(fixture, "options");
+        const built = performance.now();
+        const session = await prepared.createContainerSession(gpu, options);
+        const buildMs = performance.now() - built;
+        let note = "";
+        try {
+          await runRecordedCase(
+            results,
+            { id: `${PRACTICAL_QUANT}/full-s${tokens}/submit`, failureNote: () => note },
+            async () => {
               const golden = await loadGolden(name);
-              const inputs = graphInputs(golden, prepared.graph.inputs, name);
-              const expected = floatsOf(golden.reference, "output", name);
-              const tokens = await run(inputs);
-              const latents = unpatchifyTokens(tokens, golden.latentShape, WAN_GEOMETRY);
-              const diff = difference(latents, expected);
-              measurements.push({
-                output: "latents",
-                maxAbs: diff.maxAbs,
-                maxRel: diff.maxRel,
-                tolerance: recordedTolerance(diff),
-                stage: "karume",
-              });
-              const notes = [formatDifference("io の入力", diff)];
-              assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
-
-              // ホストの timesteps_proj（TS）で回した値（製品の経路の入力）も同じ比の帯で見る。入力そのものの
-              // 差（torch と TS の `exp` の 1 ULP — 最悪 3.05e-5）は `wan_dit_host_test.ts` の絶対 atol 1.5e-4 が
-              // 押さえる（値域が [-1, 1] の sin / cos なので絶対で足りる — 帯の指標を比に変えても据え置く）。
-              const width = viewOf(golden.io, "input.timesteps_proj", name).shape[1];
-              const hostTimestep = unpatchifyTokens(
-                await run({
-                  ...inputs,
-                  timesteps_proj: {
-                    dtype: "f32",
-                    shape: [1, width],
-                    data: timestepsProj(golden.timestep, width),
-                  },
-                }),
-                golden.latentShape,
-                WAN_GEOMETRY,
+              const { runs, nonFinite } = await practicalRuns(
+                session,
+                gpu,
+                graphInputs(golden, prepared.graph.inputs, name),
+                prepared.graph.outputs[0],
               );
-              const hostDiff = difference(hostTimestep, expected);
-              measurements.push({
-                output: "latents@host-timesteps-proj",
-                maxAbs: hostDiff.maxAbs,
-                maxRel: hostDiff.maxRel,
-                tolerance: recordedTolerance(hostDiff),
-                stage: "karume",
-              });
-              notes.push(formatDifference("TS の timesteps_proj", hostDiff));
-              const faults =
-                role === "accept"
-                  ? await faultInjections(golden, inputs, tokens, expected, run, base)
-                  : [];
-              notes.push(...faults.map(({ note }) => note));
-              // 判定の前に出す（帯の外へ出た回も全ケースの比が手元に残る）。
-              console.log(`[wan-dit] ${name}: ${notes.join(" / ")}`);
-
-              // 故障注入の判定を先に置く（受入れが帯の外でも、帯が故障を拾えるかは判定される）。
-              for (const { label, ratio } of faults) {
-                assert(
-                  ratio > DIT_RATIO_BAND,
-                  `${name}: 故障注入 ${label} が帯 ${DIT_RATIO_BAND} の内に収まった`,
-                );
-              }
-              if (role !== "growth") {
-                assert(
-                  ratioOf(diff) <= DIT_RATIO_BAND,
-                  `${name}: ${notes[0]} が帯 ${DIT_RATIO_BAND} の外`,
-                );
-                assert(
-                  ratioOf(hostDiff) <= DIT_RATIO_BAND,
-                  `${name}: ${notes[1]} が帯 ${DIT_RATIO_BAND} の外`,
-                );
-              }
-              return { status: "pass", note: notes.join(" / ") };
-            });
-          });
+              const unitNs = timestampUnitNs(ENVIRONMENT.key);
+              const submit = submitGpuNote(session.diagnostics(), unitNs);
+              note = [
+                submit.note,
+                `構築 ${(buildMs / 1000).toFixed(1)} s`,
+                ...runs.map((observed) => formatRun(observed, unitNs)),
+                `融合 ${JSON.stringify(session.diagnostics().lastRunFusions)}`,
+                `非有限 ${nonFinite}`,
+              ].join(" / ");
+              console.log(
+                `[wan-dit] 実用席 ${PRACTICAL_QUANT} S = ${tokens} の計測モード: ${note}`,
+              );
+              assertEquals(nonFinite, 0, `${name}: 非有限`);
+              assert(
+                submit.unbackedSubmits > 0,
+                "最初の run の裏付け前のチャンク（initialChunkSize で据え置いた submit）を測れていない",
+              );
+              assert(
+                submit.maxMs <= SUBMIT_GPU_LIMIT_MS,
+                `1 submit の GPU 時間の最大 ${submit.maxMs.toFixed(
+                  1,
+                )} ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
+              );
+              assertEquals(fixture.deviceLost, undefined, "device lost");
+              return { status: "pass", note };
+            },
+          );
+        } finally {
+          await session.dispose();
+          await settleReleases(gpu);
         }
-      } finally {
-        await session.dispose();
-      }
-    } finally {
-      // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
-      await settleReleases(gpu);
-      gpu.destroy();
+      });
     }
   },
-});
+);
+
+describe.skipIf(!I8_FULL_AVAILABLE || !GPU_AVAILABLE)(
+  "Wan DiT i8 参照席 f16+dit8（実 GPU・計測モード）: S = 14,040 の 1 forward の行ブロック・融合の件数・非有限 0・" +
+    "1 submit の GPU 時間 ≤ 1 s",
+  () => {
+    const fixture: Fixture = {};
+    beforeAll(async () => {
+      fixture.prepared = prepareContainer(
+        await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR)),
+        i8Graph(),
+      );
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      fixture.gpu = await acquireTestGpu({
+        gpuTiming: true,
+        onDeviceLost: (info) => {
+          fixture.deviceLost = `${info.reason}: ${info.message}`;
+        },
+      });
+      assertAdapterMatchesEnvironment(fixture.gpu);
+    });
+    afterAll(() => releaseDevice(fixture));
+    registerFullStructureGate(fixture, {
+      seriesDir: I8_SERIES_DIR,
+      idPrefix: I8_ID_PREFIX,
+      tokens: 14040,
+      name: I8_FULL_CASES[0].name,
+      keepMeasured: false,
+    });
+  },
+);
+
+describe.skipIf(!I8_FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+  "Wan DiT i8 参照席 f16+dit8（実 GPU・計測モード / diffusers CPU f64）: S = 14,040 の 1 forward が r の帯の内・" +
+    `故障注入 5 件（f16 席と同じ 4 件 + scale の 2 倍）は帯の外${UPSTREAM_PARITY_OPT_IN}`,
+  () => {
+    const fixture: Fixture = {};
+    beforeAll(async () => {
+      fixture.graph = i8Graph();
+      fixture.opened = await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR));
+      fixture.prepared = prepareContainer(fixture.opened, fixture.graph);
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      fixture.base = await readRopeBase(fixture.opened);
+      // Same measured-mode device as the band derivation (I8_NORMALIZED_BAND: S = 14,040 measured there).
+      fixture.gpu = await acquireTestGpu({ gpuTiming: true });
+      assertAdapterMatchesEnvironment(fixture.gpu);
+    });
+    afterAll(() => releaseDevice(fixture));
+    registerI8ParityGroups(fixture, `${I8_ID_PREFIX}S = 14,040`, {
+      seriesDir: I8_SERIES_DIR,
+      idPrefix: I8_ID_PREFIX,
+      cases: I8_FULL_CASES,
+      band: I8_NORMALIZED_BAND[14040],
+      tokens: 14040,
+    });
+  },
+);
+
+describe.skipIf(!I8_SMALL_AVAILABLE || !GPU_AVAILABLE)(
+  "Wan DiT i8 参照席 f16+dit8（実 GPU）: S = 192 の組の 1 forward の融合の件数・非有限 0",
+  () => {
+    const fixture: Fixture = {};
+    beforeAll(async () => {
+      fixture.prepared = prepareContainer(
+        await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR)),
+        i8Graph(),
+      );
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      fixture.gpu = await acquireTestGpu();
+      assertAdapterMatchesEnvironment(fixture.gpu);
+    });
+    // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+    afterAll(() => releaseDevice(fixture));
+    registerSmallStructureGate(fixture, I8_SERIES_DIR, I8_ID_PREFIX, I8_SMALL_CASES);
+  },
+);
+
+describe.skipIf(!I8_SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+  "Wan DiT i8 参照席 f16+dit8（実 GPU / diffusers CPU f64）: S = 192 の組の 1 forward が r の帯の内・" +
+    `故障注入 5 件（f16 席と同じ 4 件 + scale の 2 倍）は帯の外${UPSTREAM_PARITY_OPT_IN}`,
+  () => {
+    const fixture: Fixture = {};
+    beforeAll(async () => {
+      fixture.graph = i8Graph();
+      fixture.opened = await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR));
+      fixture.prepared = prepareContainer(fixture.opened, fixture.graph);
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      fixture.base = await readRopeBase(fixture.opened);
+      fixture.gpu = await acquireTestGpu();
+      assertAdapterMatchesEnvironment(fixture.gpu);
+    });
+    // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+    afterAll(() => releaseDevice(fixture));
+    registerI8ParityGroups(fixture, `${I8_ID_PREFIX}S = 192 の組`, {
+      seriesDir: I8_SERIES_DIR,
+      idPrefix: I8_ID_PREFIX,
+      cases: I8_SMALL_CASES,
+      band: I8_NORMALIZED_BAND[192],
+    });
+  },
+);
+
+describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE)(
+  "Wan DiT S 形（実 GPU）: 全ケースの 1 forward の融合の件数・非有限 0",
+  () => {
+    const fixture: Fixture = {};
+    beforeAll(async () => {
+      fixture.prepared = prepareContainer(
+        await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
+        GRAPH,
+      );
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      fixture.gpu = await acquireTestGpu();
+      assertAdapterMatchesEnvironment(fixture.gpu);
+    });
+    // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+    afterAll(() => releaseDevice(fixture));
+    registerSmallStructureGate(fixture, SERIES_DIR, "", CASES);
+  },
+);
+
+describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+  `Wan DiT 照合（実 GPU / diffusers CPU f32）: S 形の 1 forward が帯の内・故障注入は帯の外${UPSTREAM_PARITY_OPT_IN}`,
+  () => {
+    const fixture: Fixture = {};
+    beforeAll(async () => {
+      const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
+      fixture.prepared = prepareContainer(opened, GRAPH);
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      fixture.base = await readRopeBase(opened);
+      fixture.gpu = await acquireTestGpu();
+      assertAdapterMatchesEnvironment(fixture.gpu);
+    });
+    // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+    afterAll(() => releaseDevice(fixture));
+    const scope = registerSessionScope(fixture);
+    const run = async (inputs: Record<string, Tensor>): Promise<Float32Array<ArrayBuffer>> => {
+      const outputs = await scope.session().run(inputs);
+      const tensor = outputs[scope.prepared().graph.outputs[0]];
+      if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
+      return tensor.data;
+    };
+    for (const { name, role } of CASES) {
+      it(`${name}（${role}）`, async () => {
+        const prepared = scope.prepared();
+        const base = required(fixture, "base");
+        await runRecordedCase(results, { id: name }, async ({ measurements }) => {
+          const golden = await loadGolden(name);
+          const inputs = graphInputs(golden, prepared.graph.inputs, name);
+          const expected = floatsOf(golden.reference, "output", name);
+          const tokens = await run(inputs);
+          const latents = unpatchifyTokens(tokens, golden.latentShape, WAN_GEOMETRY);
+          const diff = difference(latents, expected);
+          measurements.push({
+            output: "latents",
+            maxAbs: diff.maxAbs,
+            maxRel: diff.maxRel,
+            tolerance: recordedTolerance(diff),
+            stage: "karume",
+          });
+          const notes = [formatDifference("io の入力", diff)];
+          assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
+
+          // ホストの timesteps_proj（TS）で回した値（製品の経路の入力）も同じ比の帯で見る。入力そのものの
+          // 差（torch と TS の `exp` の 1 ULP — 最悪 3.05e-5）は `wan_dit_host_test.ts` の絶対 atol 1.5e-4 が
+          // 押さえる（値域が [-1, 1] の sin / cos なので絶対で足りる — 帯の指標を比に変えても据え置く）。
+          const width = viewOf(golden.io, "input.timesteps_proj", name).shape[1];
+          const hostTimestep = unpatchifyTokens(
+            await run({
+              ...inputs,
+              timesteps_proj: {
+                dtype: "f32",
+                shape: [1, width],
+                data: timestepsProj(golden.timestep, width),
+              },
+            }),
+            golden.latentShape,
+            WAN_GEOMETRY,
+          );
+          const hostDiff = difference(hostTimestep, expected);
+          measurements.push({
+            output: "latents@host-timesteps-proj",
+            maxAbs: hostDiff.maxAbs,
+            maxRel: hostDiff.maxRel,
+            tolerance: recordedTolerance(hostDiff),
+            stage: "karume",
+          });
+          notes.push(formatDifference("TS の timesteps_proj", hostDiff));
+          const faults =
+            role === "accept"
+              ? await faultInjections(golden, inputs, tokens, expected, run, base)
+              : [];
+          notes.push(...faults.map(({ note }) => note));
+          // 判定の前に出す（帯の外へ出た回も全ケースの比が手元に残る）。
+          console.log(`[wan-dit] ${name}: ${notes.join(" / ")}`);
+
+          // 故障注入の判定を先に置く（受入れが帯の外でも、帯が故障を拾えるかは判定される）。
+          for (const { label, ratio } of faults) {
+            assert(
+              ratio > DIT_RATIO_BAND,
+              `${name}: 故障注入 ${label} が帯 ${DIT_RATIO_BAND} の内に収まった`,
+            );
+          }
+          if (role !== "growth") {
+            assert(
+              ratioOf(diff) <= DIT_RATIO_BAND,
+              `${name}: ${notes[0]} が帯 ${DIT_RATIO_BAND} の外`,
+            );
+            assert(
+              ratioOf(hostDiff) <= DIT_RATIO_BAND,
+              `${name}: ${notes[1]} が帯 ${DIT_RATIO_BAND} の外`,
+            );
+          }
+          return { status: "pass", note: notes.join(" / ") };
+        });
+      });
+    }
+  },
+);
 
 /** 故障注入 1 件の結果（判定は呼び手が全ケースの比を出してから行う）。 */
 type FaultResult = { readonly label: string; readonly ratio: number; readonly note: string };

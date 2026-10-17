@@ -1,5 +1,5 @@
 import { readDirSync, readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { stateStatsPvWgsl } from "../src/kernels/state-attention-stats-pv.ts";
 import { rmsNormSubgroupWgsl } from "../src/kernels/rms-norm-subgroup.ts";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
@@ -5211,43 +5211,34 @@ test("conv3d igemm params は入力長 + 2·padding が i32 に収まらない�
 // i2 では格納が約 1 GiB で届くので binding 上限の検査では止まらない。巨大な重みは確保せず、
 // params の受理集合をここで固定する。
 
-test("linearParams: 重み [N, K] の論理要素数", async (t) => {
-  await t.step(
-    "N·K ≥ 2^32 の形（M 65・N 131076・K 32768 で行 131072 が語 0 を指す）を拒否する",
-    () => {
-      assertThrows(() => linearParams(65, 131076, 32768), CodegenError, "n * k");
-    },
-  );
+describe("linearParams: 重み [N, K] の論理要素数", () => {
+  it("N·K ≥ 2^32 の形（M 65・N 131076・K 32768 で行 131072 が語 0 を指す）を拒否する", () => {
+    assertThrows(() => linearParams(65, 131076, 32768), CodegenError, "n * k");
+  });
 
-  await t.step("N·K = 2^32 ちょうどは拒否し、2^32 − 16 は受理する", () => {
+  it("N·K = 2^32 ちょうどは拒否し、2^32 − 16 は受理する", () => {
     assertThrows(() => linearParams(65, 131072, 32768), CodegenError, "n * k");
     assertEquals([...linearParams(65, 268435455, 16)], [65, 268435455, 16, 0]);
   });
 });
 
-test("linearI8a8Params: w4a8（i4 重み × i8 活性）の重み [N, K] の論理要素数", async (t) => {
-  await t.step(
-    "N·K = 2^32 の形（行頭 wcol·dims.k が折り返す）を拒否し、2^32 − 32 は受理する",
-    () => {
-      assertThrows(() => linearI8a8Params(65, 131072, 32768, 32), CodegenError, "n * k");
-      assertEquals([...linearI8a8Params(65, 134217727, 32, 32)], [65, 134217727, 32, 0]);
-    },
-  );
+describe("linearI8a8Params: w4a8（i4 重み × i8 活性）の重み [N, K] の論理要素数", () => {
+  it("N·K = 2^32 の形（行頭 wcol·dims.k が折り返す）を拒否し、2^32 − 32 は受理する", () => {
+    assertThrows(() => linearI8a8Params(65, 131072, 32768, 32), CodegenError, "n * k");
+    assertEquals([...linearI8a8Params(65, 134217727, 32, 32)], [65, 134217727, 32, 0]);
+  });
 
-  await t.step(
-    "i8 変種は行頭を語数で作るので、同じ N·K = 2^32 を論理要素数の門では落とさない",
-    () => {
-      assertEquals([...linearI8a8Params(65, 131072, 32768)], [65, 131072, 32768, 0]);
-    },
-  );
+  it("i8 変種は行頭を語数で作るので、同じ N·K = 2^32 を論理要素数の門では落とさない", () => {
+    assertEquals([...linearI8a8Params(65, 131072, 32768)], [65, 131072, 32768, 0]);
+  });
 });
 
-test("embeddingParams: 重み [V, H] の論理要素数", async (t) => {
-  await t.step("V·H = 2^32 の形（最後の行が先頭行の整数コードを読む）を拒否する", () => {
+describe("embeddingParams: 重み [V, H] の論理要素数", () => {
+  it("V·H = 2^32 の形（最後の行が先頭行の整数コードを読む）を拒否する", () => {
     assertThrows(() => embeddingParams(32768, 32768, 131072), CodegenError, "vocab * hidden");
   });
 
-  await t.step("V·H = 2^32 − 1 は受理する", () => {
+  it("V·H = 2^32 − 1 は受理する", () => {
     assertEquals(embeddingParams(1, 1, 0xffff_ffff)[2], 0xffff_ffff);
   });
 });

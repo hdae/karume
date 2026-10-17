@@ -12,8 +12,8 @@
  */
 
 import { makeTempDir, mkdir, readFile, remove, writeFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { fetchAssets, HubFetchError, IntegrityError, loadManifest, openAsset } from "../mod.ts";
 import { nodeDirectory } from "../node.ts";
 import { driverOf } from "../src/source.ts";
@@ -48,19 +48,29 @@ const withDistribution = async (
   }
 };
 
-test("nodeDirectory: 実ディレクトリの配布形が末尾 / の有無に関わらず読める", async (t) => {
-  await withDistribution(async (root) => {
-    for (const spelling of [root, `${root}/`]) {
-      await t.step(`root = ${spelling === root ? "末尾なし" : "末尾あり"}`, async () => {
-        const loaded = await loadManifest(nodeDirectory(spelling));
-        const assets = await fetchAssets(loaded, selectionFiles(loaded.manifest));
-        PART_KEYS.forEach((key, index) => {
-          assertEquals(assets[key], payloadFor(FETCHED_PART_PATHS[index]));
-        });
-        assertEquals(assets["tokenizer"], payloadFor(TOKENIZER_PATH));
-      });
-    }
+describe("nodeDirectory: 実ディレクトリの配布形が末尾 / の有無に関わらず読める", () => {
+  // One materialized distribution shared by both spellings (the root path is only known once
+  // beforeAll has run, so each it derives its spelling from the trailing-slash flag).
+  let root: string | undefined;
+  beforeAll(async () => {
+    root = await materialize((await buildLocalDist()).files);
   });
+  afterAll(async () => {
+    if (root !== undefined) await remove(root, { recursive: true });
+  });
+
+  for (const trailing of [false, true]) {
+    it(`root = ${trailing ? "末尾あり" : "末尾なし"}`, async () => {
+      assert(root !== undefined, "配布形を書き出せていない");
+      const spelling = trailing ? `${root}/` : root;
+      const loaded = await loadManifest(nodeDirectory(spelling));
+      const assets = await fetchAssets(loaded, selectionFiles(loaded.manifest));
+      PART_KEYS.forEach((key, index) => {
+        assertEquals(assets[key], payloadFor(FETCHED_PART_PATHS[index]));
+      });
+      assertEquals(assets["tokenizer"], payloadFor(TOKENIZER_PATH));
+    });
+  }
 });
 
 test("nodeDirectory: file: URL の root でも同じ配布形を指す", async () => {

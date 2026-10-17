@@ -10,8 +10,8 @@
 // Philox と別物 — ADR 0083 決定 7）。したがって期待値はすべて**この門が手で書き下した理論値**で、
 // 実装から採った fixture は 1 つも無い。分布そのものは χ² 門（下段）で縛る。
 
-import { test } from "@karume/test-support/test";
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
+import { describe, it, test } from "vite-plus/test";
 import { ModelInputError } from "../src/errors.ts";
 import {
   createSampler,
@@ -330,8 +330,8 @@ const assertNucleus = (logits: Float32Array<ArrayBuffer>, topP: number): void =>
   assertEquals(new Uint32Array(logits.buffer, logits.byteOffset, logits.length), before);
 };
 
-test("top-p 単独指定の全語彙順位", async (t) => {
-  await t.step("正負の同値、符号付きゼロ、subnormal、禁止 token を比較ソートと同じ順に残す", () => {
+describe("top-p 単独指定の全語彙順位", () => {
+  it("正負の同値、符号付きゼロ、subnormal、禁止 token を比較ソートと同じ順に残す", () => {
     const bits = Uint32Array.of(
       0x7fc00000, // 入力 view の外の NaN を読まない。
       0x80000000,
@@ -360,7 +360,7 @@ test("top-p 単独指定の全語彙順位", async (t) => {
     }
   });
 
-  await t.step("全件ソートで得た累積確率の直前・一致・直後でも候補と確率を変えない", () => {
+  it("全件ソートで得た累積確率の直前・一致・直後でも候補と確率を変えない", () => {
     let state = 20260910;
     const logits = Float32Array.from({ length: 8192 }, () => {
       state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
@@ -378,7 +378,7 @@ test("top-p 単独指定の全語彙順位", async (t) => {
     }
   });
 
-  await t.step("昇順・降順・同値が多い大語彙でも分布の全ビットが参照と一致する", () => {
+  it("昇順・降順・同値が多い大語彙でも分布の全ビットが参照と一致する", () => {
     for (const shape of ["ascending", "descending", "ties"] as const) {
       const logits = Float32Array.from({ length: 32768 }, (_, token) =>
         shape === "ascending"
@@ -632,8 +632,8 @@ test("sampler: 未知のキーは黙って無視せず、許可キーを並べ�
   });
 });
 
-test("sampler: 型を外した logitBias は加算せずに入力の誤りで落ちる", async (t) => {
-  await t.step("文字列の bias は文字列連結にならない（temperature 0 の選択を変えない）", () => {
+describe("sampler: 型を外した logitBias は加算せずに入力の誤りで落ちる", () => {
+  it("文字列の bias は文字列連結にならない（temperature 0 の選択を変えない）", () => {
     // `1 + "0"` は `"10"` — f32 へ 10 として書かれ、bias なしなら選ばれる token 1 が 0 に化ける。
     assertThrows(
       () => createSampler(untypedSpec({ temperature: 0, logitBias: [[0, "0"]] })),
@@ -642,7 +642,7 @@ test("sampler: 型を外した logitBias は加算せずに入力の誤りで落
     );
   });
 
-  await t.step("null / boolean の bias を 0 / 1 として黙って受けない", () => {
+  it("null / boolean の bias を 0 / 1 として黙って受けない", () => {
     for (const bias of [null, true, false, undefined]) {
       assertThrows(
         () => createSampler(untypedSpec({ logitBias: [[0, bias]] })),
@@ -653,7 +653,7 @@ test("sampler: 型を外した logitBias は加算せずに入力の誤りで落
     }
   });
 
-  await t.step("配列でない logitBias・2 要素でない組は形の誤り", () => {
+  it("配列でない logitBias・2 要素でない組は形の誤り", () => {
     for (const logitBias of [new Map([[0, 1]]), { 0: 1 }, [[0]], [[0, 1, 2]], [0]]) {
       assertThrows(
         () => createSampler(untypedSpec({ logitBias })),
@@ -664,7 +664,7 @@ test("sampler: 型を外した logitBias は加算せずに入力の誤りで落
     }
   });
 
-  await t.step("発行時の写し（snapshotSpec）も同じ門を先に通す", () => {
+  it("発行時の写し（snapshotSpec）も同じ門を先に通す", () => {
     // 上層（chat / ChatSession）は抽選器を作る前に写すので、写しが形の誤りを TypeError に
     // 化かすと入力の誤りに見えない。
     assertThrows(
@@ -674,7 +674,7 @@ test("sampler: 型を外した logitBias は加算せずに入力の誤りで落
     );
   });
 
-  await t.step("-Infinity（禁止）と有限数は従来どおり受ける", () => {
+  it("-Infinity（禁止）と有限数は従来どおり受ける", () => {
     createSampler({
       logitBias: [
         [0, Number.NEGATIVE_INFINITY],
@@ -688,15 +688,15 @@ test("sampler: 型を外した logitBias は加算せずに入力の誤りで落
 // 失敗の分類（ADR 0107 — 呼び手の分岐先で型を割る）
 // ---------------------------------------------------------------------------
 
-test("sampler: 失敗の分類は呼び手の分岐先で決まる", async (t) => {
-  await t.step("指定の値域は入力起因（呼び手が値を直せば通る）", () => {
+describe("sampler: 失敗の分類は呼び手の分岐先で決まる", () => {
+  it("指定の値域は入力起因（呼び手が値を直せば通る）", () => {
     assertThrows(() => createSampler({ topP: 0 }), ModelInputError, "topP 0");
     // seed の受理集合の所有者は `request-gates.ts` の 1 本（ADR 0107 決定 6）。ここが
     // `ModelInputError` で落ちること自体が、`Randu` が自前の条件を持っていないことの対。
     assertThrows(() => createSampler({ seed: -1 }), ModelInputError, "seed -1");
   });
 
-  await t.step("語彙の外の logitBias も入力起因（語彙が判るのが最初の抽選なだけ）", () => {
+  it("語彙の外の logitBias も入力起因（語彙が判るのが最初の抽選なだけ）", () => {
     assertThrows(
       () => createSampler({ logitBias: [[9, 1]] }).next(f32([1, 2]), []),
       ModelInputError,
@@ -704,13 +704,13 @@ test("sampler: 失敗の分類は呼び手の分岐先で決まる", async (t) =
     );
   });
 
-  await t.step("logits の NaN は入力起因ではない（呼び手が要求を直しても直らない）", () => {
+  it("logits の NaN は入力起因ではない（呼び手が要求を直しても直らない）", () => {
     // 重みか配線の破れで、HTTP サーバーなら 500。同じ型で捕まると「入力を直せ」と返す形になる。
     const error = assertThrows(() => createSampler().next(f32([Number.NaN, 1]), []), Error, "NaN");
     assert(!(error instanceof ModelInputError), "logits の NaN が入力起因に分類されている");
   });
 
-  await t.step("履歴の token id が語彙の外も入力起因ではない（唯一の呼び元は検査済み）", () => {
+  it("履歴の token id が語彙の外も入力起因ではない（唯一の呼び元は検査済み）", () => {
     // `createSampler` は公開面に出ておらず、`history` を渡すのは `GenerationSequence.generate`
     // だけ（検査済み prompt + 自分が選んだ token）。ここが落ちるのは配線の破れである。
     const error = assertThrows(

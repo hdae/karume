@@ -37,16 +37,16 @@
 // source never copies bytes into a cache, so this test leaves nothing in the persistent cache.
 
 import { readTextFile, readTextFileSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
-import { MANIFEST_FILENAME, parseManifest } from "@karume/hub";
+import { MANIFEST_FILENAME, type ModelEntry, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import { MemoryCacheStorage } from "../../hub/tests/helpers/mock.ts";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 // MUST: 入口は**公開面**（`./gemma` サブパス）から取る — `src/...` を直に掴むと、面が痩せていても
 // 門が緑のままになる（消費者が書けない経路で検収したことになる）。
 import { type Gemma4ChatMessage, Gemma4Pipeline } from "../../models/gemma.ts";
-import { serveLocalDist } from "@karume/test-support/local-dist-server";
+import { type LocalDistServer, serveLocalDist } from "@karume/test-support/local-dist-server";
 import { mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import type { SessionOverrides } from "../../models/src/session/options.ts";
 import {
@@ -135,88 +135,92 @@ if (!AVAILABLE) {
   );
 }
 
-test({
-  name: "gemma4 配布形: manifest の宣言と PLE 索引の対応（GPU 不要）",
-  ignore: !AVAILABLE,
-  fn: async () => {
-    const manifest = parseManifest(MANIFEST_TEXT ?? "");
-    const entry = manifest.models[manifest.defaultModel];
-    assertEquals(entry.pipeline, { name: "gemma4", major: 1 }, "pipeline 契約");
-    // weights の役割は製品グラフ + 投機の drafter の 2 本ちょうど（ADR 0096 段 2 で
-    // `drafter` が増えた）。tokenizer は manifest の assets の席、PLE は `model` 容器の資産
-    // （ADR 0109 決定 4）— ここが増えたら「sidecar を weights へ戻した」退行である。
-    assertEquals(
-      Object.keys(entry.weights),
-      ["model", "drafter"],
-      "weights は製品グラフ + drafter の 2 本（PLE は容器の資産・tokenizer は assets の席）",
-    );
-    assertEquals(Object.keys(entry.assets), ["tokenizer"], "manifest の assets は tokenizer だけ");
-    // ④ 索引（schema 3）が名指しする block が、そのまま `model` 容器の資産として在る — 突合は
-    // helper（`readGemma4PleIndex`）が全件で行い、片方だけ焼き直したミラーはここで落ちる。
-    const { index } = await openGemma4Ple(MIRROR_DIR);
-    assert(index.values.blocks.length > 0, "PLE 索引が values の block を 1 本も持たない");
-    assert(index.scales.blocks.length > 0, "PLE 索引が scales の block を 1 本も持たない");
-    assertEquals(index.values.blocks.at(-1)?.stop, index.tokens, "values の区間が tokens で閉じる");
-    assertEquals(index.scales.blocks.at(-1)?.stop, index.tokens, "scales の区間が tokens で閉じる");
-  },
+test.skipIf(!AVAILABLE)("gemma4 配布形: manifest の宣言と PLE 索引の対応（GPU 不要）", async () => {
+  const manifest = parseManifest(MANIFEST_TEXT ?? "");
+  const entry = manifest.models[manifest.defaultModel];
+  assertEquals(entry.pipeline, { name: "gemma4", major: 1 }, "pipeline 契約");
+  // weights の役割は製品グラフ + 投機の drafter の 2 本ちょうど（ADR 0096 段 2 で
+  // `drafter` が増えた）。tokenizer は manifest の assets の席、PLE は `model` 容器の資産
+  // （ADR 0109 決定 4）— ここが増えたら「sidecar を weights へ戻した」退行である。
+  assertEquals(
+    Object.keys(entry.weights),
+    ["model", "drafter"],
+    "weights は製品グラフ + drafter の 2 本（PLE は容器の資産・tokenizer は assets の席）",
+  );
+  assertEquals(Object.keys(entry.assets), ["tokenizer"], "manifest の assets は tokenizer だけ");
+  // ④ 索引（schema 3）が名指しする block が、そのまま `model` 容器の資産として在る — 突合は
+  // helper（`readGemma4PleIndex`）が全件で行い、片方だけ焼き直したミラーはここで落ちる。
+  const { index } = await openGemma4Ple(MIRROR_DIR);
+  assert(index.values.blocks.length > 0, "PLE 索引が values の block を 1 本も持たない");
+  assert(index.scales.blocks.length > 0, "PLE 索引が scales の block を 1 本も持たない");
+  assertEquals(index.values.blocks.at(-1)?.stop, index.tokens, "values の区間が tokens で閉じる");
+  assertEquals(index.scales.blocks.at(-1)?.stop, index.tokens, "scales の区間が tokens で閉じる");
 });
 
-test({
-  name: "gemma4 配布形: fromPretrained → chat が実 GPU で完走し既定サンプラが宣言どおり",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    await using server = await serveLocalDist(new URL(".", MIRROR_DIR).pathname);
-    const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
-      // Node has no CacheStorage; the HTTP source needs one (hub prefetches through it).
-      caches: new MemoryCacheStorage(),
-      maxResidentPleBytes: await maxResidentPleBytes(),
+describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "gemma4 配布形: fromPretrained → chat が実 GPU で完走し既定サンプラが宣言どおり",
+  () => {
+    let server: LocalDistServer;
+    let pipeline: Gemma4Pipeline;
+    beforeAll(async () => {
+      server = await serveLocalDist(new URL(".", MIRROR_DIR).pathname);
+      pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
+        // Node has no CacheStorage; the HTTP source needs one (hub prefetches through it).
+        caches: new MemoryCacheStorage(),
+        maxResidentPleBytes: await maxResidentPleBytes(),
+      });
     });
-    try {
-      await t.step("② 配布形が宣言した推奨サンプラが省略時の既定として載っている", () => {
-        assertEquals(pipeline.defaultSampler, RECOMMENDED_SAMPLER);
-      });
+    afterAll(async () => {
+      // Both stay unassigned when beforeAll failed before reaching them.
+      try {
+        await pipeline?.dispose();
+      } finally {
+        await server?.close();
+      }
+    });
 
-      await t.step("① 温度 0 の chat が fromAssets 経路と同じ golden を出す", async () => {
-        for (const { fixture: name, maxNewTokens, expected, stop } of CASES) {
-          const { messages } = caseOf(name);
-          const started = performance.now();
-          const stream = pipeline.chat(messages, {
-            // 明示の温度 0 が既定（推奨サンプラ）を上書きする — golden は greedy の列。
-            maxNewTokens,
-            sampler: { temperature: 0 },
-          });
-          const parts: string[] = [];
-          for await (const chunk of stream) parts.push(chunk);
-          const stopped = await stream.done;
-          console.log(
-            `[e2e] gemma4 fromPretrained ${name}: ${JSON.stringify(parts.join(""))} / ` +
-              `${JSON.stringify(stopped)} / ${(performance.now() - started).toFixed(0)}ms`,
-          );
-          assertEquals(parts.join(""), expected, `${name}: 温度 0 の出力`);
-          assertEquals(stopped, stop, `${name}: 停止理由`);
-        }
-      });
+    it("② 配布形が宣言した推奨サンプラが省略時の既定として載っている", () => {
+      assertEquals(pipeline.defaultSampler, RECOMMENDED_SAMPLER);
+    });
 
-      await t.step("③ 既定サンプラ（温度 1.0）でも同じ会話が完走する", async () => {
-        const { messages } = caseOf(CASES[0].fixture);
-        // `sampler` を省略 = 配布形の宣言で走る（抽選は splitmix64 で決定的だが、値そのものは
-        // 固定しない —— HF の sampling とは列が一致しないので golden にする意味が無い）。
-        const stream = pipeline.chat(messages, { maxNewTokens: 8 });
+    it("① 温度 0 の chat が fromAssets 経路と同じ golden を出す", async () => {
+      for (const { fixture: name, maxNewTokens, expected, stop } of CASES) {
+        const { messages } = caseOf(name);
+        const started = performance.now();
+        const stream = pipeline.chat(messages, {
+          // 明示の温度 0 が既定（推奨サンプラ）を上書きする — golden は greedy の列。
+          maxNewTokens,
+          sampler: { temperature: 0 },
+        });
         const parts: string[] = [];
         for await (const chunk of stream) parts.push(chunk);
         const stopped = await stream.done;
-        console.log(`[e2e] gemma4 既定サンプラ: ${JSON.stringify(parts.join(""))}`);
-        assert(parts.join("").length > 0, "既定サンプラで 1 文字も出ていない");
-        assert(
-          stopped.reason === "eos" || stopped.reason === "max-tokens",
-          `停止理由 ${stopped.reason}`,
+        console.log(
+          `[e2e] gemma4 fromPretrained ${name}: ${JSON.stringify(parts.join(""))} / ` +
+            `${JSON.stringify(stopped)} / ${(performance.now() - started).toFixed(0)}ms`,
         );
-      });
-    } finally {
-      await pipeline.dispose();
-    }
+        assertEquals(parts.join(""), expected, `${name}: 温度 0 の出力`);
+        assertEquals(stopped, stop, `${name}: 停止理由`);
+      }
+    });
+
+    it("③ 既定サンプラ（温度 1.0）でも同じ会話が完走する", async () => {
+      const { messages } = caseOf(CASES[0].fixture);
+      // `sampler` を省略 = 配布形の宣言で走る（抽選は splitmix64 で決定的だが、値そのものは
+      // 固定しない —— HF の sampling とは列が一致しないので golden にする意味が無い）。
+      const stream = pipeline.chat(messages, { maxNewTokens: 8 });
+      const parts: string[] = [];
+      for await (const chunk of stream) parts.push(chunk);
+      const stopped = await stream.done;
+      console.log(`[e2e] gemma4 既定サンプラ: ${JSON.stringify(parts.join(""))}`);
+      assert(parts.join("").length > 0, "既定サンプラで 1 文字も出ていない");
+      assert(
+        stopped.reason === "eos" || stopped.reason === "max-tokens",
+        `停止理由 ${stopped.reason}`,
+      );
+    });
   },
-});
+);
 
 /**
  * **census**（ADR 0058 決定 4 ③）— ③PV の縮約形が**合成の規則どおり**に効くこと: 明示 > quant 宣言 >
@@ -238,11 +242,9 @@ test({
  * NOTE: `onRunDiagnostics` を付けると GPU 上の greedy 出力経路は外れる（src/gemma/pipeline.ts の
  * `greedyOutput`）。census はフック有りの経路のもので、この前提は計測を外しても変わらない。
  */
-test({
-  name: "gemma4 配布形: ③PV の縮約形は明示 > quant 宣言 > 参照経路の順で決まる（census）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    await using server = await serveLocalDist(new URL(".", MIRROR_DIR).pathname);
+describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "gemma4 配布形: ③PV の縮約形は明示 > quant 宣言 > 参照経路の順で決まる（census）",
+  () => {
     const cases = [
       { name: "i4（宣言なし）→ 参照経路", options: { quant: "i4" }, expect: "sequential" },
       {
@@ -257,10 +259,18 @@ test({
       },
       { name: "既定 quant（宣言 parallel-fused）→ ③ 無し", options: {}, expect: "parallel-fused" },
     ] as const;
-    const manifest = parseManifest(MANIFEST_TEXT ?? "");
-    const entry = manifest.models.e2b;
+    let server: LocalDistServer;
+    let entry: ModelEntry;
+    beforeAll(async () => {
+      server = await serveLocalDist(new URL(".", MIRROR_DIR).pathname);
+      const manifest = parseManifest(MANIFEST_TEXT ?? "");
+      entry = manifest.models.e2b;
+    });
+    afterAll(async () => {
+      await server?.close();
+    });
     for (const one of cases) {
-      await t.step(one.name, async () => {
+      it(one.name, async () => {
         // 実効の束（選んだ quant 席の宣言 + 明示指定を家族の合成に通した値）→ 束の census 表の行。
         const {
           quant = entry.defaultQuant,
@@ -339,7 +349,7 @@ test({
       });
     }
   },
-});
+);
 
 /** 触れた瞬間に落ちる CacheStorage（呼ばれた回数も数える — 診断へ化けても気づけるように）。 */
 class HostileCacheStorage implements CacheStorage {
@@ -367,10 +377,9 @@ class HostileCacheStorage implements CacheStorage {
   }
 }
 
-test({
-  name: "gemma4 ディレクトリ直読み: fromPretrained → chat が同じ golden を出す（実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
+describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "gemma4 ディレクトリ直読み: fromPretrained → chat が同じ golden を出す（実 GPU）",
+  () => {
     const caches = new HostileCacheStorage();
     let fetchCalls = 0;
     const fetchStub: typeof globalThis.fetch = (input) => {
@@ -380,46 +389,47 @@ test({
     const cacheDiagnostics: string[] = [];
     const retryDiagnostics: string[] = [];
 
-    const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
-      maxResidentPleBytes: await maxResidentPleBytes(),
-      // HTTP 取得元専用のノブ。ローカル取得元では 1 つも効かない = 触られない。
-      fetch: fetchStub,
-      caches,
-      onCacheError: (diagnostic) => cacheDiagnostics.push(diagnostic.url),
-      onRetry: (diagnostic) => retryDiagnostics.push(diagnostic.url),
-    });
-    try {
-      await t.step(
-        "① 温度 0 の chat が fromAssets / 疑似 HF 経路と同じ golden を出す",
-        async () => {
-          for (const { fixture: name, maxNewTokens, expected, stop } of DIRECTORY_CASES) {
-            const { messages } = caseOf(name);
-            const started = performance.now();
-            // 明示の温度 0 が配布形の推奨サンプラ（温度 1）を上書きする — golden は greedy の列。
-            const stream = pipeline.chat(messages, { maxNewTokens, sampler: { temperature: 0 } });
-            const parts: string[] = [];
-            for await (const chunk of stream) parts.push(chunk);
-            const stopped = await stream.done;
-            console.log(
-              `[e2e] gemma4 nodeDirectory ${name}: ${JSON.stringify(parts.join(""))} / ` +
-                `${JSON.stringify(stopped)} / ${(performance.now() - started).toFixed(0)}ms`,
-            );
-            assertEquals(parts.join(""), expected, `${name}: 温度 0 の出力`);
-            assertEquals(stopped, stop, `${name}: 停止理由`);
-          }
-        },
-      );
-
-      await t.step("② network も CacheStorage も 1 度も通っていない", () => {
-        assertEquals(fetchCalls, 0, "ローカル取得元が fetch を呼んだ");
-        assertEquals(caches.calls, 0, "ローカル取得元が CacheStorage を触った");
-        // 触っていないので診断も 1 本も来ない（キャッシュ失敗を握り潰す経路に落ちていない）。
-        assertEquals(cacheDiagnostics, [], "キャッシュ診断が飛んでいる");
-        // 再試行も HTTP 取得元だけのもの（ローカル取得元は取得層を通らない）。
-        assertEquals(retryDiagnostics, [], "再試行の通知が飛んでいる");
+    let pipeline: Gemma4Pipeline;
+    beforeAll(async () => {
+      pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+        maxResidentPleBytes: await maxResidentPleBytes(),
+        // HTTP 取得元専用のノブ。ローカル取得元では 1 つも効かない = 触られない。
+        fetch: fetchStub,
+        caches,
+        onCacheError: (diagnostic) => cacheDiagnostics.push(diagnostic.url),
+        onRetry: (diagnostic) => retryDiagnostics.push(diagnostic.url),
       });
-    } finally {
-      await pipeline.dispose();
-    }
+    });
+    afterAll(async () => {
+      // Unassigned when beforeAll failed while loading.
+      await pipeline?.dispose();
+    });
+
+    it("① 温度 0 の chat が fromAssets / 疑似 HF 経路と同じ golden を出す", async () => {
+      for (const { fixture: name, maxNewTokens, expected, stop } of DIRECTORY_CASES) {
+        const { messages } = caseOf(name);
+        const started = performance.now();
+        // 明示の温度 0 が配布形の推奨サンプラ（温度 1）を上書きする — golden は greedy の列。
+        const stream = pipeline.chat(messages, { maxNewTokens, sampler: { temperature: 0 } });
+        const parts: string[] = [];
+        for await (const chunk of stream) parts.push(chunk);
+        const stopped = await stream.done;
+        console.log(
+          `[e2e] gemma4 nodeDirectory ${name}: ${JSON.stringify(parts.join(""))} / ` +
+            `${JSON.stringify(stopped)} / ${(performance.now() - started).toFixed(0)}ms`,
+        );
+        assertEquals(parts.join(""), expected, `${name}: 温度 0 の出力`);
+        assertEquals(stopped, stop, `${name}: 停止理由`);
+      }
+    });
+
+    it("② network も CacheStorage も 1 度も通っていない", () => {
+      assertEquals(fetchCalls, 0, "ローカル取得元が fetch を呼んだ");
+      assertEquals(caches.calls, 0, "ローカル取得元が CacheStorage を触った");
+      // 触っていないので診断も 1 本も来ない（キャッシュ失敗を握り潰す経路に落ちていない）。
+      assertEquals(cacheDiagnostics, [], "キャッシュ診断が飛んでいる");
+      // 再試行も HTTP 取得元だけのもの（ローカル取得元は取得層を通らない）。
+      assertEquals(retryDiagnostics, [], "再試行の通知が飛んでいる");
+    });
   },
-});
+);

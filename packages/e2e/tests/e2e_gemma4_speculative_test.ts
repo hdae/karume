@@ -48,13 +48,13 @@
 // `e2e_gemma4_drafter_test.ts` の資産門が FAIL にする。
 
 import { isNotFound, readFile, readTextFileSync, statSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { type Manifest, MANIFEST_FILENAME, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import {
   acquireGpu,
   type GenerationContext,
+  type GpuContext,
   parseSafetensors,
   type SafetensorsFile,
   type Session,
@@ -62,13 +62,17 @@ import {
   type StateAttentionReduce,
   type Tensor,
 } from "@karume/runtime";
+import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import {
   Gemma4Pipeline,
   type GenerationRunPhase,
   type GenerationStop,
 } from "../../models/gemma.ts";
-import { parseGemma4PipelineConfig } from "../../models/src/gemma/config.ts";
-import { createGemma4Ple } from "../../models/src/gemma/ple.ts";
+import {
+  type Gemma4PipelineConfig,
+  parseGemma4PipelineConfig,
+} from "../../models/src/gemma/config.ts";
+import { createGemma4Ple, type Gemma4Ple } from "../../models/src/gemma/ple.ts";
 import { gemma4RopeInputs, type Gemma4RopeSpec } from "../../models/src/gemma/rope.ts";
 import { GEMMA4_DRAFT_STEPS } from "../../models/src/gemma/speculative.ts";
 import type { SamplerSpec } from "../../models/src/generation/sampler.ts";
@@ -309,168 +313,165 @@ const tokensPerCycle = (stop: GenerationStop): number => {
 // ① 同一性（sequential）— 投機あり / 無しの列が厳密一致する
 // ---------------------------------------------------------------------------
 
-test({
-  name: "gemma4 投機①: sequential 席で投機 / 非投機の token 列が厳密一致する（実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const started = performance.now();
-    const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
-      speculative: { k: GEMMA4_DRAFT_STEPS },
-      // 参照経路（runtime の既定）— decode も verify も同じ縮約カーネルを通る席。
-      stateAttentionReduce: "sequential",
-      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
+describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "gemma4 投機①: sequential 席で投機 / 非投機の token 列が厳密一致する（実 GPU）",
+  () => {
+    let pipeline: Gemma4Pipeline;
+
+    beforeAll(async () => {
+      const started = performance.now();
+      pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+        speculative: { k: GEMMA4_DRAFT_STEPS },
+        // 参照経路（runtime の既定）— decode も verify も同じ縮約カーネルを通る席。
+        stateAttentionReduce: "sequential",
+        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
+      });
+      console.log(
+        `[e2e] gemma4 投機①: pipeline ロード ${(performance.now() - started).toFixed(0)}ms`,
+      );
     });
-    console.log(
-      `[e2e] gemma4 投機①: pipeline ロード ${(performance.now() - started).toFixed(0)}ms`,
-    );
-    try {
-      for (const name of CASES) {
-        await t.step(`${name}: 投機 / 非投機の ${MAX_NEW_TOKENS} token`, async () => {
-          const golden = await readGoldenCase(name);
-          const capacity = capacityFor(pipeline, golden.prompt.length);
-          const speculative = await runTurn(pipeline, golden.prompt, {
-            speculative: "always",
-            capacity,
-            tokens: MAX_NEW_TOKENS,
-          });
-          const plain = await runTurn(pipeline, golden.prompt, {
-            speculative: false,
-            capacity,
-            tokens: MAX_NEW_TOKENS,
-          });
 
-          // 投機の唯一の契約（速くなるだけで列は変わらない）。
-          assertEquals(speculative.ids, plain.ids, `${name}: 投機 / 非投機の token id 列`);
-          assertEquals(speculative.positions, plain.positions, `${name}: 絶対位置列`);
-          assertEquals(speculative.stop.reason, plain.stop.reason, `${name}: 停止理由`);
-          assertEquals(speculative.stop.tokens, plain.stop.tokens, `${name}: 生成 token 数`);
-          // 非投機の sequence は勘定の欄ごと持たない（欄が生えていたら投機経路を通っている）。
-          assertEquals(plain.stop.speculation, undefined, `${name}: 非投機ターンの speculation 欄`);
+    afterAll(async () => {
+      // Undefined when the load in beforeAll threw.
+      await pipeline?.dispose();
+    });
 
-          const perCycle = tokensPerCycle(speculative.stop);
-          const speculation = speculative.stop.speculation;
-          assert(speculation !== undefined, "投機ターンに勘定が載っていない");
-          const goldenPrefix = commonPrefix(speculative.ids, golden.continuation);
-          console.log(
-            `[e2e] gemma4 投機① ${name}: T=${golden.prompt.length} / ${speculative.ids.length} ` +
-              `token / ${speculation.cycles} cycle / 受理 ${speculation.accepted}/` +
-              `${speculation.drafted} / ${perCycle.toFixed(3)} token/cycle / 分布 [${speculation.acceptedHistogram.join(
-                ",",
-              )}] / 投機 ${speculative.ms.toFixed(0)}ms vs 非投機 ${plain.ms.toFixed(0)}ms / ` +
-              `torch 継続列との先頭一致 ${goldenPrefix}`,
-          );
-
-          // 外部参照点（①が「投機 == 非投機」だけでは拾えない、両側そろっての退行を落とす）。
-          assert(
-            goldenPrefix >= GOLDEN_PREFIX_FLOOR,
-            `${name}: torch 継続列との先頭一致が ${goldenPrefix} token しかない（床 ` +
-              `${GOLDEN_PREFIX_FLOOR}）— 投機と非投機がそろって別の列へ動いている`,
-          );
-
-          const floor = ACCEPTANCE_FLOOR[name];
-          if (floor !== undefined) {
-            assert(
-              perCycle >= floor,
-              `${name}: 受理率 ${perCycle.toFixed(3)} token/cycle が床 ${floor.toFixed(2)} に` +
-                `満たない（受理 ${speculation.accepted} / ${speculation.cycles} cycle・分布 [${speculation.acceptedHistogram.join(
-                  ",",
-                )}]）`,
-            );
-          }
+    for (const name of CASES) {
+      it(`${name}: 投機 / 非投機の ${MAX_NEW_TOKENS} token`, async () => {
+        const golden = await readGoldenCase(name);
+        const capacity = capacityFor(pipeline, golden.prompt.length);
+        const speculative = await runTurn(pipeline, golden.prompt, {
+          speculative: "always",
+          capacity,
+          tokens: MAX_NEW_TOKENS,
         });
-      }
+        const plain = await runTurn(pipeline, golden.prompt, {
+          speculative: false,
+          capacity,
+          tokens: MAX_NEW_TOKENS,
+        });
 
-      await t.step(
-        "readme-recipes（配布形の推奨 sampler・温度 1）: 投機 / 非投機の列が同一",
-        async () => {
-          // 投機は温度に依らず張る — 受理の抽選は行ごとに非投機と同じ logits・history・順序で
-          // `sampler.next` を呼ぶので、RNG の消費列まで一致する。torch との parity は採れない（RNG が
-          // 別物）が、投機 / 非投機の同一性はここで見る。sampler は配布形の宣言（推奨値）そのもの。
-          const sampler: SamplerSpec = { ...pipelineConfig().sampler, seed: 1 };
-          assert(
-            (sampler.temperature ?? 0) > 0,
-            "配布形の推奨 sampler が温度 0（この門の前提が崩れている）",
-          );
-          const golden = await readGoldenCase("readme-recipes");
-          const capacity = capacityFor(pipeline, golden.prompt.length);
-          const speculative = await runTurn(pipeline, golden.prompt, {
-            speculative: "always",
-            capacity,
-            tokens: MAX_NEW_TOKENS,
-            sampler,
-          });
-          const plain = await runTurn(pipeline, golden.prompt, {
-            speculative: false,
-            capacity,
-            tokens: MAX_NEW_TOKENS,
-            sampler,
-          });
-          assertEquals(speculative.ids, plain.ids, "温度 1: 投機 / 非投機の token id 列");
-          assertEquals(speculative.positions, plain.positions, "温度 1: 絶対位置列");
-          assertEquals(speculative.stop.tokens, plain.stop.tokens, "温度 1: 生成 token 数");
-          // 抽選が実際に走っていること（温度 0 の列と自分の長さの範囲で一致していれば RNG が
-          // 消費されていない）。NOTE: 生テキストの継続は温度 1 だと早々に停止 token を引く
-          // （2026-09-08 の実測は 3 token）ので受理率はここでは見ない — 推奨 sampler での受理率は
-          // 段 4 の実測項目。
-          const greedy = await runTurn(pipeline, golden.prompt, {
-            speculative: false,
-            capacity,
-            tokens: MAX_NEW_TOKENS,
-          });
-          assert(
-            commonPrefix(plain.ids, greedy.ids) < plain.ids.length,
-            "温度 1 の列が温度 0 の列と一致（抽選が効いていない）",
-          );
-          const speculation = speculative.stop.speculation;
-          assert(speculation !== undefined && speculation.cycles >= 1, "投機が張られていない");
-          console.log(
-            `[e2e] gemma4 投機① readme-recipes（温度 ${sampler.temperature}・topK ${sampler.topK}・` +
-              `topP ${sampler.topP}）: ${plain.ids.length} token / ${speculation.cycles} cycle / ${tokensPerCycle(
-                speculative.stop,
-              ).toFixed(
-                3,
-              )} token/cycle / 温度 0 との先頭一致 ${commonPrefix(plain.ids, greedy.ids)}`,
-          );
-        },
-      );
+        // 投機の唯一の契約（速くなるだけで列は変わらない）。
+        assertEquals(speculative.ids, plain.ids, `${name}: 投機 / 非投機の token id 列`);
+        assertEquals(speculative.positions, plain.positions, `${name}: 絶対位置列`);
+        assertEquals(speculative.stop.reason, plain.stop.reason, `${name}: 停止理由`);
+        assertEquals(speculative.stop.tokens, plain.stop.tokens, `${name}: 生成 token 数`);
+        // 非投機の sequence は勘定の欄ごと持たない（欄が生えていたら投機経路を通っている）。
+        assertEquals(plain.stop.speculation, undefined, `${name}: 非投機ターンの speculation 欄`);
 
-      await t.step(
-        "自己採算ゲート付き（既定の speculative: true）: always と同じ列を出す",
-        async () => {
-          // ゲートは cycle ごとに「投機 / decode 形」を壁時計で選ぶ。sequential 席では両者が
-          // ビット同一（⑤の門）なので、どこで切り替わっても列は変わらない — ここが割れるなら
-          // 切替そのもの（hidden の継ぎ・frontier の commit）が壊れている。
-          const golden = await readGoldenCase("readme-recipes");
-          const capacity = capacityFor(pipeline, golden.prompt.length);
-          const gated = await runTurn(pipeline, golden.prompt, {
-            speculative: true,
-            capacity,
-            tokens: MAX_NEW_TOKENS,
-          });
-          const always = await runTurn(pipeline, golden.prompt, {
-            speculative: "always",
-            capacity,
-            tokens: MAX_NEW_TOKENS,
-          });
-          assertEquals(gated.ids, always.ids, "ゲート付き / always の token id 列");
-          assertEquals(gated.positions, always.positions, "絶対位置列");
-          assertEquals(gated.stop.tokens, always.stop.tokens, "生成 token 数");
-          const speculation = gated.stop.speculation;
-          assert(speculation !== undefined, "ゲート付きのターンに勘定が載っていない");
-          // MUST: 落ちた step 数は**門にしない**（壁時計依存で、host と負荷で変わる）。この機で
-          // どう出たかを記録するだけである。
-          console.log(
-            `[e2e] gemma4 投機① ゲート: ${gated.ids.length} token / ${speculation.cycles} cycle / ` +
-              `plain step ${speculation.plainSteps} / 切替 ${speculation.switches} / ` +
-              `ゲート ${gated.ms.toFixed(0)}ms vs always ${always.ms.toFixed(0)}ms`,
+        const perCycle = tokensPerCycle(speculative.stop);
+        const speculation = speculative.stop.speculation;
+        assert(speculation !== undefined, "投機ターンに勘定が載っていない");
+        const goldenPrefix = commonPrefix(speculative.ids, golden.continuation);
+        console.log(
+          `[e2e] gemma4 投機① ${name}: T=${golden.prompt.length} / ${speculative.ids.length} ` +
+            `token / ${speculation.cycles} cycle / 受理 ${speculation.accepted}/` +
+            `${speculation.drafted} / ${perCycle.toFixed(3)} token/cycle / 分布 [${speculation.acceptedHistogram.join(
+              ",",
+            )}] / 投機 ${speculative.ms.toFixed(0)}ms vs 非投機 ${plain.ms.toFixed(0)}ms / ` +
+            `torch 継続列との先頭一致 ${goldenPrefix}`,
+        );
+
+        // 外部参照点（①が「投機 == 非投機」だけでは拾えない、両側そろっての退行を落とす）。
+        assert(
+          goldenPrefix >= GOLDEN_PREFIX_FLOOR,
+          `${name}: torch 継続列との先頭一致が ${goldenPrefix} token しかない（床 ` +
+            `${GOLDEN_PREFIX_FLOOR}）— 投機と非投機がそろって別の列へ動いている`,
+        );
+
+        const floor = ACCEPTANCE_FLOOR[name];
+        if (floor !== undefined) {
+          assert(
+            perCycle >= floor,
+            `${name}: 受理率 ${perCycle.toFixed(3)} token/cycle が床 ${floor.toFixed(2)} に` +
+              `満たない（受理 ${speculation.accepted} / ${speculation.cycles} cycle・分布 [${speculation.acceptedHistogram.join(
+                ",",
+              )}]）`,
           );
-        },
-      );
-    } finally {
-      await pipeline.dispose();
+        }
+      });
     }
+
+    it("readme-recipes（配布形の推奨 sampler・温度 1）: 投機 / 非投機の列が同一", async () => {
+      // 投機は温度に依らず張る — 受理の抽選は行ごとに非投機と同じ logits・history・順序で
+      // `sampler.next` を呼ぶので、RNG の消費列まで一致する。torch との parity は採れない（RNG が
+      // 別物）が、投機 / 非投機の同一性はここで見る。sampler は配布形の宣言（推奨値）そのもの。
+      const sampler: SamplerSpec = { ...pipelineConfig().sampler, seed: 1 };
+      assert(
+        (sampler.temperature ?? 0) > 0,
+        "配布形の推奨 sampler が温度 0（この門の前提が崩れている）",
+      );
+      const golden = await readGoldenCase("readme-recipes");
+      const capacity = capacityFor(pipeline, golden.prompt.length);
+      const speculative = await runTurn(pipeline, golden.prompt, {
+        speculative: "always",
+        capacity,
+        tokens: MAX_NEW_TOKENS,
+        sampler,
+      });
+      const plain = await runTurn(pipeline, golden.prompt, {
+        speculative: false,
+        capacity,
+        tokens: MAX_NEW_TOKENS,
+        sampler,
+      });
+      assertEquals(speculative.ids, plain.ids, "温度 1: 投機 / 非投機の token id 列");
+      assertEquals(speculative.positions, plain.positions, "温度 1: 絶対位置列");
+      assertEquals(speculative.stop.tokens, plain.stop.tokens, "温度 1: 生成 token 数");
+      // 抽選が実際に走っていること（温度 0 の列と自分の長さの範囲で一致していれば RNG が
+      // 消費されていない）。NOTE: 生テキストの継続は温度 1 だと早々に停止 token を引く
+      // （2026-09-08 の実測は 3 token）ので受理率はここでは見ない — 推奨 sampler での受理率は
+      // 段 4 の実測項目。
+      const greedy = await runTurn(pipeline, golden.prompt, {
+        speculative: false,
+        capacity,
+        tokens: MAX_NEW_TOKENS,
+      });
+      assert(
+        commonPrefix(plain.ids, greedy.ids) < plain.ids.length,
+        "温度 1 の列が温度 0 の列と一致（抽選が効いていない）",
+      );
+      const speculation = speculative.stop.speculation;
+      assert(speculation !== undefined && speculation.cycles >= 1, "投機が張られていない");
+      console.log(
+        `[e2e] gemma4 投機① readme-recipes（温度 ${sampler.temperature}・topK ${sampler.topK}・` +
+          `topP ${sampler.topP}）: ${plain.ids.length} token / ${speculation.cycles} cycle / ${tokensPerCycle(
+            speculative.stop,
+          ).toFixed(3)} token/cycle / 温度 0 との先頭一致 ${commonPrefix(plain.ids, greedy.ids)}`,
+      );
+    });
+
+    it("自己採算ゲート付き（既定の speculative: true）: always と同じ列を出す", async () => {
+      // ゲートは cycle ごとに「投機 / decode 形」を壁時計で選ぶ。sequential 席では両者が
+      // ビット同一（⑤の門）なので、どこで切り替わっても列は変わらない — ここが割れるなら
+      // 切替そのもの（hidden の継ぎ・frontier の commit）が壊れている。
+      const golden = await readGoldenCase("readme-recipes");
+      const capacity = capacityFor(pipeline, golden.prompt.length);
+      const gated = await runTurn(pipeline, golden.prompt, {
+        speculative: true,
+        capacity,
+        tokens: MAX_NEW_TOKENS,
+      });
+      const always = await runTurn(pipeline, golden.prompt, {
+        speculative: "always",
+        capacity,
+        tokens: MAX_NEW_TOKENS,
+      });
+      assertEquals(gated.ids, always.ids, "ゲート付き / always の token id 列");
+      assertEquals(gated.positions, always.positions, "絶対位置列");
+      assertEquals(gated.stop.tokens, always.stop.tokens, "生成 token 数");
+      const speculation = gated.stop.speculation;
+      assert(speculation !== undefined, "ゲート付きのターンに勘定が載っていない");
+      // MUST: 落ちた step 数は**門にしない**（壁時計依存で、host と負荷で変わる）。この機で
+      // どう出たかを記録するだけである。
+      console.log(
+        `[e2e] gemma4 投機① ゲート: ${gated.ids.length} token / ${speculation.cycles} cycle / ` +
+          `plain step ${speculation.plainSteps} / 切替 ${speculation.switches} / ` +
+          `ゲート ${gated.ms.toFixed(0)}ms vs always ${always.ms.toFixed(0)}ms`,
+      );
+    });
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // ②③④ 既定席（i4-fast = GEMV parallel + RMS→add 融合 + attention parallel-fused）— 同一性・phase の観測・見積りの厳密門
@@ -497,272 +498,278 @@ const recordOf = (diagnostics: SessionDiagnostics, phase: GenerationRunPhase): P
 const ofKind = (records: readonly PhaseRecord[], kind: GenerationRunPhase["kind"]) =>
   records.filter((record) => record.phase.kind === kind);
 
-test({
-  name: "gemma4 投機②③④: 既定席の同一性・phase の本数・見積りの合算（実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
+describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "gemma4 投機②③④: 既定席の同一性・phase の本数・見積りの合算（実 GPU）",
+  () => {
     /** 観測を集める窓（step が開けている間だけ積む）。 */
     let records: PhaseRecord[] | undefined;
-    const started = performance.now();
-    const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
-      speculative: { k: GEMMA4_DRAFT_STEPS },
-      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
-      onRunDiagnostics: (diagnostics, phase) => {
-        records?.push(recordOf(diagnostics, phase));
-      },
-    });
-    console.log(
-      `[e2e] gemma4 投機②: pipeline ロード ${(performance.now() - started).toFixed(0)}ms`,
-    );
+    let pipeline: Gemma4Pipeline;
     const k = GEMMA4_DRAFT_STEPS;
-    try {
-      await t.step("② 既定席（i4-fast）で投機 / 非投機の token 列が一致する", async () => {
-        for (const name of CASES) {
-          const golden = await readGoldenCase(name);
-          const capacity = capacityFor(pipeline, golden.prompt.length);
-          const speculative = await runTurn(pipeline, golden.prompt, {
-            speculative: "always",
-            capacity,
-            tokens: MAX_NEW_TOKENS,
-          });
-          const plain = await runTurn(pipeline, golden.prompt, {
-            speculative: false,
-            capacity,
-            tokens: MAX_NEW_TOKENS,
-          });
-          // 既定席でも M=1（decode）と M=4（verify）はビット同一（⑤の門）なので、列の一致を
-          // ①と同じく門にする — 自己採算ゲートの壁時計の選択が出力を変えない前提がこれである。
-          assertEquals(speculative.ids.length, MAX_NEW_TOKENS, `${name}: 投機側の token 数`);
-          assertEquals(plain.ids.length, MAX_NEW_TOKENS, `${name}: 非投機側の token 数`);
-          const first = commonPrefix(speculative.ids, plain.ids);
-          let diverged = 0;
-          for (let index = 0; index < MAX_NEW_TOKENS; index += 1) {
-            if (speculative.ids[index] !== plain.ids[index]) diverged += 1;
-          }
-          console.log(
-            `[e2e] gemma4 投機② ${name}: 相違 ${diverged}/${MAX_NEW_TOKENS} 個・最初の不一致 ` +
-              `${first === MAX_NEW_TOKENS ? "無し" : `@${first}`} / ${tokensPerCycle(
-                speculative.stop,
-              ).toFixed(3)} token/cycle / 投機 ${speculative.ms.toFixed(0)}ms vs 非投機 ` +
-              `${plain.ms.toFixed(0)}ms`,
-          );
-          // MUST: ログを門より先に出す（割れた機でも相違の位置と個数が記録に残るように）。
-          assertEquals(
-            diverged,
-            0,
-            `${name}: 既定席で投機 / 非投機の token 列が ${diverged}/${MAX_NEW_TOKENS} 個違う` +
-              `（最初 @${first}）— この機では M=1 と M=4 がビット同一でない`,
-          );
-          assertEquals(first, MAX_NEW_TOKENS, `${name}: 投機 / 非投機の共通接頭辞`);
-        }
-      });
 
-      await t.step(
-        "② 既定席の自己採算ゲート付き（speculative: true）: always と同じ列を出す",
-        async () => {
-          // ゲートは cycle ごとに「投機 / decode 形」を壁時計で選ぶ。既定席でも両者はビット
-          // 同一（⑤の門）なので、どこで切り替わっても列は変わらない — ここが割れるなら切替
-          // そのもの（hidden の継ぎ・frontier の commit）か、既定席の M=1 / M=4 の同一性が壊れている。
-          const golden = await readGoldenCase("readme-recipes");
-          const capacity = capacityFor(pipeline, golden.prompt.length);
-          const gated = await runTurn(pipeline, golden.prompt, {
-            speculative: true,
-            capacity,
-            tokens: MAX_NEW_TOKENS,
-          });
-          const always = await runTurn(pipeline, golden.prompt, {
-            speculative: "always",
-            capacity,
-            tokens: MAX_NEW_TOKENS,
-          });
-          assertEquals(gated.ids, always.ids, "既定席: ゲート付き / always の token id 列");
-          assertEquals(gated.positions, always.positions, "既定席: 絶対位置列");
-          assertEquals(gated.stop.tokens, always.stop.tokens, "既定席: 生成 token 数");
-          const speculation = gated.stop.speculation;
-          assert(speculation !== undefined, "ゲート付きのターンに勘定が載っていない");
-          // MUST: 落ちた step 数は**門にしない**（壁時計依存で、host と負荷で変わる）。この機で
-          // どう出たかを記録するだけである。
-          console.log(
-            `[e2e] gemma4 投機② ゲート: ${gated.ids.length} token / ${speculation.cycles} cycle / ` +
-              `plain step ${speculation.plainSteps} / 切替 ${speculation.switches} / ` +
-              `ゲート ${gated.ms.toFixed(0)}ms vs always ${always.ms.toFixed(0)}ms`,
-          );
+    beforeAll(async () => {
+      const started = performance.now();
+      pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+        speculative: { k: GEMMA4_DRAFT_STEPS },
+        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
+        onRunDiagnostics: (diagnostics, phase) => {
+          records?.push(recordOf(diagnostics, phase));
         },
+      });
+      console.log(
+        `[e2e] gemma4 投機②: pipeline ロード ${(performance.now() - started).toFixed(0)}ms`,
+      );
+    });
+
+    afterAll(async () => {
+      // Undefined when the load in beforeAll threw.
+      await pipeline?.dispose();
+    });
+
+    it("② 既定席（i4-fast）で投機 / 非投機の token 列が一致する", async () => {
+      for (const name of CASES) {
+        const golden = await readGoldenCase(name);
+        const capacity = capacityFor(pipeline, golden.prompt.length);
+        const speculative = await runTurn(pipeline, golden.prompt, {
+          speculative: "always",
+          capacity,
+          tokens: MAX_NEW_TOKENS,
+        });
+        const plain = await runTurn(pipeline, golden.prompt, {
+          speculative: false,
+          capacity,
+          tokens: MAX_NEW_TOKENS,
+        });
+        // 既定席でも M=1（decode）と M=4（verify）はビット同一（⑤の門）なので、列の一致を
+        // ①と同じく門にする — 自己採算ゲートの壁時計の選択が出力を変えない前提がこれである。
+        assertEquals(speculative.ids.length, MAX_NEW_TOKENS, `${name}: 投機側の token 数`);
+        assertEquals(plain.ids.length, MAX_NEW_TOKENS, `${name}: 非投機側の token 数`);
+        const first = commonPrefix(speculative.ids, plain.ids);
+        let diverged = 0;
+        for (let index = 0; index < MAX_NEW_TOKENS; index += 1) {
+          if (speculative.ids[index] !== plain.ids[index]) diverged += 1;
+        }
+        console.log(
+          `[e2e] gemma4 投機② ${name}: 相違 ${diverged}/${MAX_NEW_TOKENS} 個・最初の不一致 ` +
+            `${first === MAX_NEW_TOKENS ? "無し" : `@${first}`} / ${tokensPerCycle(
+              speculative.stop,
+            ).toFixed(3)} token/cycle / 投機 ${speculative.ms.toFixed(0)}ms vs 非投機 ` +
+            `${plain.ms.toFixed(0)}ms`,
+        );
+        // MUST: ログを門より先に出す（割れた機でも相違の位置と個数が記録に残るように）。
+        assertEquals(
+          diverged,
+          0,
+          `${name}: 既定席で投機 / 非投機の token 列が ${diverged}/${MAX_NEW_TOKENS} 個違う` +
+            `（最初 @${first}）— この機では M=1 と M=4 がビット同一でない`,
+        );
+        assertEquals(first, MAX_NEW_TOKENS, `${name}: 投機 / 非投機の共通接頭辞`);
+      }
+    });
+
+    it("② 既定席の自己採算ゲート付き（speculative: true）: always と同じ列を出す", async () => {
+      // ゲートは cycle ごとに「投機 / decode 形」を壁時計で選ぶ。既定席でも両者はビット
+      // 同一（⑤の門）なので、どこで切り替わっても列は変わらない — ここが割れるなら切替
+      // そのもの（hidden の継ぎ・frontier の commit）か、既定席の M=1 / M=4 の同一性が壊れている。
+      const golden = await readGoldenCase("readme-recipes");
+      const capacity = capacityFor(pipeline, golden.prompt.length);
+      const gated = await runTurn(pipeline, golden.prompt, {
+        speculative: true,
+        capacity,
+        tokens: MAX_NEW_TOKENS,
+      });
+      const always = await runTurn(pipeline, golden.prompt, {
+        speculative: "always",
+        capacity,
+        tokens: MAX_NEW_TOKENS,
+      });
+      assertEquals(gated.ids, always.ids, "既定席: ゲート付き / always の token id 列");
+      assertEquals(gated.positions, always.positions, "既定席: 絶対位置列");
+      assertEquals(gated.stop.tokens, always.stop.tokens, "既定席: 生成 token 数");
+      const speculation = gated.stop.speculation;
+      assert(speculation !== undefined, "ゲート付きのターンに勘定が載っていない");
+      // MUST: 落ちた step 数は**門にしない**（壁時計依存で、host と負荷で変わる）。この機で
+      // どう出たかを記録するだけである。
+      console.log(
+        `[e2e] gemma4 投機② ゲート: ${gated.ids.length} token / ${speculation.cycles} cycle / ` +
+          `plain step ${speculation.plainSteps} / 切替 ${speculation.switches} / ` +
+          `ゲート ${gated.ms.toFixed(0)}ms vs always ${always.ms.toFixed(0)}ms`,
+      );
+    });
+
+    // ③④は同じ 1 ターンの観測を共有する（見積りは「その走行が実際に抱えた常駐」と突き合わせる
+    // ので、容量は既定のまま = `estimateSessionMemory` が既定で見積る形と同じにする）。
+    // The turn ran between ② and ③ in the former test body. It is taken lazily by whichever of
+    // ③ / ④ runs first, so it still runs after ② (not in beforeAll, which would move it before ②
+    // and change the pipeline state the observation sees), and a failure fails both ③ and ④.
+    let observation: Promise<{ turn: Turn; observed: PhaseRecord[] }> | undefined;
+    const observeTurn = () =>
+      (observation ??= (async () => {
+        const golden = await readGoldenCase("short-en");
+        const observed: PhaseRecord[] = [];
+        records = observed;
+        const turn = await runTurn(pipeline, golden.prompt, {
+          speculative: "always",
+          tokens: PHASE_TOKENS,
+        });
+        records = undefined;
+        return { turn, observed };
+      })());
+
+    it("③ run 通知の本数と種別が投機の勘定と一致する", async () => {
+      const { turn, observed } = await observeTurn();
+      const speculation = turn.stop.speculation;
+      assert(speculation !== undefined, "投機が張られていない");
+      const drafts = ofKind(observed, "draft");
+      const verifies = ofKind(observed, "verify");
+      const prefills = ofKind(observed, "prefill");
+      // 非投機の decode run は 1 本も混ざらない（投機ターンの decode は `k'=0` の verify として
+      // 出る — 種別が混ざると「投機なのに decode へ落ちた cycle」が沈黙する）。
+      //
+      // MUST: この 0 本が成り立つのは上の `speculative: "always"`（ゲート無し）のターンだけ
+      // である。既定の `auto` では自己採算ゲートが落とす plain step が `decode` 通知として
+      // **正当に**出る（本数 = `speculation.plainSteps`・run の形が M=1・R=1 で decode そのもの
+      // だから同じ枝を名乗る）ので、この席と下の総数の式（`plainSteps` の項が無い）はどちらも
+      // ゲート付きのターンには当てはまらない。
+      assertEquals(ofKind(observed, "decode").length, 0, "投機ターンに decode 通知が混ざった");
+      assertEquals(drafts.length, speculation.draftRuns, "draft 通知の本数 = draftRuns");
+      assertEquals(verifies.length, speculation.cycles, "verify 通知の本数 = cycles");
+      assertEquals(
+        observed.length,
+        prefills.length + speculation.cycles + speculation.draftRuns,
+        "通知の総数（prefill chunk + cycle + draft run）",
+      );
+      // cycle は 1 始まりの連番（同じ cycle の draft と verify が同じ番号を名乗る）。
+      assertEquals(
+        verifies.map((record) => (record.phase.kind === "verify" ? record.phase.cycle : -1)),
+        Array.from({ length: speculation.cycles }, (_unused, index) => index + 1),
+        "verify の cycle 番号",
+      );
+      // 受理数の合計が勘定と一致する（phase が運ぶ `accepted` と `GenerationStop` の合算が
+      // 別々に数えられていないこと）。
+      const accepted = verifies.reduce(
+        (sum, record) => sum + (record.phase.kind === "verify" ? record.phase.accepted : 0),
+        0,
+      );
+      assertEquals(accepted, speculation.accepted, "phase の accepted 合計");
+
+      // verify 形（M=k+1 / R=k+1）の計画は 2 本目以降 LRU に居続ける（毎 cycle 導出へ落ちると
+      // 例外は出ないまま decode のホットパスに計画導出が戻る）。
+      const missed = verifies.slice(1).filter((record) => record.preparedHit !== true).length;
+      assertEquals(
+        missed,
+        0,
+        `2 本目以降の verify ${verifies.length - 1} 本のうち ${missed} 本が PreparedPlan を` +
+          `外した（hit: [${verifies.map((record) => String(record.preparedHit)).join(",")}]）`,
+      );
+      // state bind group の焼き直しは **cycle 数に比例しない**。焼き直しが起きるのは
+      // (context, backing) の組が変わったときだけで、同じ物理行数の verify が続く区間では
+      // 1 度も増えない。
+      const rowsSeries = verifies.map((record) =>
+        record.phase.kind === "verify" ? record.phase.rows : -1,
+      );
+      // MUST: 縛るのは「**M=k+1 の verify が続く区間**で焼き直さない」である。予算末尾の
+      // `k' = 0` の cycle だけは decode 形（M=1）の run になり、その物理行数がこの context で
+      // 初出なら bind group が 1 度だけ焼き直される — 末尾が `k'=0` に着地するかは受理列
+      // （GPU / driver 依存）で決まるので、混ぜると環境差で割れる門になる。
+      const bucketed = verifies.filter(
+        (record) => record.phase.kind === "verify" && record.phase.rows > 1,
+      );
+      const rebinds = bucketed.map((record) => record.rebindCount);
+      // 実測（2026-09-08）では prefill 形 → verify 形の切替ぶん 1 回だけが 2 本目の verify までに
+      // 現れ、そこから 1 度も動かない（`k'` が 2 / 1 に縮む cycle も、有効行が減るだけで物理
+      // 行数はバケット `k+1` のままなので焼き直しは起きない）。
+      assert(bucketed.length >= 4, `M=k+1 の verify が ${bucketed.length} 本では比例を見られない`);
+      const settled = new Set(rebinds.slice(1));
+      assertEquals(
+        settled.size,
+        1,
+        `2 本目以降の verify で rebindCount が動いた（cycle 数に比例して焼き直している）: [${rebinds.join(
+          ",",
+        )}]`,
+      );
+      assert(
+        rebinds[1] - rebinds[0] <= 1,
+        `verify 形へ落ち着くまでの焼き直しが ${rebinds[1] - rebinds[0]} 回ある: [${rebinds.join(
+          ",",
+        )}]`,
+      );
+      console.log(
+        `[e2e] gemma4 投機③: prefill ${prefills.length} + draft ${drafts.length} + verify ` +
+          `${verifies.length} 通（うち M=k+1 が ${bucketed.length} 本）/ 配送 ` +
+          `${turn.stop.tokens} token / verify の行数 [${rowsSeries.join(",")}] / rebind [${rebinds.join(
+            ",",
+          )}]`,
+      );
+    });
+
+    it("④ 見積りが drafter の常駐と借り手 state と verify 形を合算する", async () => {
+      const { observed } = await observeTurn();
+      // 診断は phase で Session が分かれる（draft = 借り手・それ以外 = 貸し手）。
+      const lender = ofKind(observed, "verify")[0];
+      const borrower = ofKind(observed, "draft")[0];
+      assert(lender !== undefined && borrower !== undefined, "貸し手 / 借り手の診断が採れていない");
+      // MUST: 観測値は見積りを取る**前**に出す（見積りが落ちる形でも突合の材料が残るように）。
+      console.log(
+        `[e2e] gemma4 投機④ 観測: 常駐重み target ${lender.residentCompressedBytes} B + ` +
+          `drafter ${borrower.residentCompressedBytes} B / state 貸し手 ` +
+          `${lender.stateResidentBytes} B + 借り手 ${borrower.stateResidentBytes} B`,
+      );
+      const report = pipeline.estimateSessionMemory();
+
+      // 1. 常駐重み: 2 Session が実際に GPU 上へ置いたバイト数の和と厳密一致。
+      assertEquals(
+        report.resident.weights.compressedBytes,
+        lender.residentCompressedBytes + borrower.residentCompressedBytes,
+        `圧縮常駐の見積り（target ${lender.residentCompressedBytes} + drafter ` +
+          `${borrower.residentCompressedBytes}）`,
+      );
+      // 2. 借り手 context は論理長 uniform だけ（借り物スロットは 1 バイトも確保しない）。
+      assertEquals(borrower.stateResidentBytes, LENGTHS_BYTES, "借り手 context の常駐バイト数");
+      // 3. state は貸し手ぶん + 借り手の 8 バイト。
+      assertEquals(
+        report.resident.stateBytes,
+        lender.stateResidentBytes + LENGTHS_BYTES,
+        `state の見積り（貸し手 ${lender.stateResidentBytes} + 借り手 ${LENGTHS_BYTES}）`,
       );
 
-      // ③④は同じ 1 ターンの観測を共有する（見積りは「その走行が実際に抱えた常駐」と突き合わせる
-      // ので、容量は既定のまま = `estimateSessionMemory` が既定で見積る形と同じにする）。
-      const golden = await readGoldenCase("short-en");
-      records = [];
-      const turn = await runTurn(pipeline, golden.prompt, {
-        speculative: "always",
-        tokens: PHASE_TOKENS,
-      });
-      const observed = records;
-      records = undefined;
-
-      await t.step("③ run 通知の本数と種別が投機の勘定と一致する", () => {
-        const speculation = turn.stop.speculation;
-        assert(speculation !== undefined, "投機が張られていない");
-        const drafts = ofKind(observed, "draft");
-        const verifies = ofKind(observed, "verify");
-        const prefills = ofKind(observed, "prefill");
-        // 非投機の decode run は 1 本も混ざらない（投機ターンの decode は `k'=0` の verify として
-        // 出る — 種別が混ざると「投機なのに decode へ落ちた cycle」が沈黙する）。
-        //
-        // MUST: この 0 本が成り立つのは上の `speculative: "always"`（ゲート無し）のターンだけ
-        // である。既定の `auto` では自己採算ゲートが落とす plain step が `decode` 通知として
-        // **正当に**出る（本数 = `speculation.plainSteps`・run の形が M=1・R=1 で decode そのもの
-        // だから同じ枝を名乗る）ので、この席と下の総数の式（`plainSteps` の項が無い）はどちらも
-        // ゲート付きのターンには当てはまらない。
-        assertEquals(ofKind(observed, "decode").length, 0, "投機ターンに decode 通知が混ざった");
-        assertEquals(drafts.length, speculation.draftRuns, "draft 通知の本数 = draftRuns");
-        assertEquals(verifies.length, speculation.cycles, "verify 通知の本数 = cycles");
-        assertEquals(
-          observed.length,
-          prefills.length + speculation.cycles + speculation.draftRuns,
-          "通知の総数（prefill chunk + cycle + draft run）",
-        );
-        // cycle は 1 始まりの連番（同じ cycle の draft と verify が同じ番号を名乗る）。
-        assertEquals(
-          verifies.map((record) => (record.phase.kind === "verify" ? record.phase.cycle : -1)),
-          Array.from({ length: speculation.cycles }, (_unused, index) => index + 1),
-          "verify の cycle 番号",
-        );
-        // 受理数の合計が勘定と一致する（phase が運ぶ `accepted` と `GenerationStop` の合算が
-        // 別々に数えられていないこと）。
-        const accepted = verifies.reduce(
-          (sum, record) => sum + (record.phase.kind === "verify" ? record.phase.accepted : 0),
-          0,
-        );
-        assertEquals(accepted, speculation.accepted, "phase の accepted 合計");
-
-        // verify 形（M=k+1 / R=k+1）の計画は 2 本目以降 LRU に居続ける（毎 cycle 導出へ落ちると
-        // 例外は出ないまま decode のホットパスに計画導出が戻る）。
-        const missed = verifies.slice(1).filter((record) => record.preparedHit !== true).length;
-        assertEquals(
-          missed,
-          0,
-          `2 本目以降の verify ${verifies.length - 1} 本のうち ${missed} 本が PreparedPlan を` +
-            `外した（hit: [${verifies.map((record) => String(record.preparedHit)).join(",")}]）`,
-        );
-        // state bind group の焼き直しは **cycle 数に比例しない**。焼き直しが起きるのは
-        // (context, backing) の組が変わったときだけで、同じ物理行数の verify が続く区間では
-        // 1 度も増えない。
-        const rowsSeries = verifies.map((record) =>
-          record.phase.kind === "verify" ? record.phase.rows : -1,
-        );
-        // MUST: 縛るのは「**M=k+1 の verify が続く区間**で焼き直さない」である。予算末尾の
-        // `k' = 0` の cycle だけは decode 形（M=1）の run になり、その物理行数がこの context で
-        // 初出なら bind group が 1 度だけ焼き直される — 末尾が `k'=0` に着地するかは受理列
-        // （GPU / driver 依存）で決まるので、混ぜると環境差で割れる門になる。
-        const bucketed = verifies.filter(
-          (record) => record.phase.kind === "verify" && record.phase.rows > 1,
-        );
-        const rebinds = bucketed.map((record) => record.rebindCount);
-        // 実測（2026-09-08）では prefill 形 → verify 形の切替ぶん 1 回だけが 2 本目の verify までに
-        // 現れ、そこから 1 度も動かない（`k'` が 2 / 1 に縮む cycle も、有効行が減るだけで物理
-        // 行数はバケット `k+1` のままなので焼き直しは起きない）。
-        assert(
-          bucketed.length >= 4,
-          `M=k+1 の verify が ${bucketed.length} 本では比例を見られない`,
-        );
-        const settled = new Set(rebinds.slice(1));
-        assertEquals(
-          settled.size,
-          1,
-          `2 本目以降の verify で rebindCount が動いた（cycle 数に比例して焼き直している）: [${rebinds.join(
-            ",",
-          )}]`,
-        );
-        assert(
-          rebinds[1] - rebinds[0] <= 1,
-          `verify 形へ落ち着くまでの焼き直しが ${rebinds[1] - rebinds[0]} 回ある: [${rebinds.join(
-            ",",
-          )}]`,
-        );
-        console.log(
-          `[e2e] gemma4 投機③: prefill ${prefills.length} + draft ${drafts.length} + verify ` +
-            `${verifies.length} 通（うち M=k+1 が ${bucketed.length} 本）/ 配送 ` +
-            `${turn.stop.tokens} token / verify の行数 [${rowsSeries.join(",")}] / rebind [${rebinds.join(
-              ",",
-            )}]`,
-        );
-      });
-
-      await t.step("④ 見積りが drafter の常駐と借り手 state と verify 形を合算する", () => {
-        // 診断は phase で Session が分かれる（draft = 借り手・それ以外 = 貸し手）。
-        const lender = ofKind(observed, "verify")[0];
-        const borrower = ofKind(observed, "draft")[0];
-        assert(
-          lender !== undefined && borrower !== undefined,
-          "貸し手 / 借り手の診断が採れていない",
-        );
-        // MUST: 観測値は見積りを取る**前**に出す（見積りが落ちる形でも突合の材料が残るように）。
-        console.log(
-          `[e2e] gemma4 投機④ 観測: 常駐重み target ${lender.residentCompressedBytes} B + ` +
-            `drafter ${borrower.residentCompressedBytes} B / state 貸し手 ` +
-            `${lender.stateResidentBytes} B + 借り手 ${borrower.stateResidentBytes} B`,
-        );
-        const report = pipeline.estimateSessionMemory();
-
-        // 1. 常駐重み: 2 Session が実際に GPU 上へ置いたバイト数の和と厳密一致。
-        assertEquals(
-          report.resident.weights.compressedBytes,
-          lender.residentCompressedBytes + borrower.residentCompressedBytes,
-          `圧縮常駐の見積り（target ${lender.residentCompressedBytes} + drafter ` +
-            `${borrower.residentCompressedBytes}）`,
-        );
-        // 2. 借り手 context は論理長 uniform だけ（借り物スロットは 1 バイトも確保しない）。
-        assertEquals(borrower.stateResidentBytes, LENGTHS_BYTES, "借り手 context の常駐バイト数");
-        // 3. state は貸し手ぶん + 借り手の 8 バイト。
-        assertEquals(
-          report.resident.stateBytes,
-          lender.stateResidentBytes + LENGTHS_BYTES,
-          `state の見積り（貸し手 ${lender.stateResidentBytes} + 借り手 ${LENGTHS_BYTES}）`,
-        );
-
-        // 4. verify シナリオの入出力は decode より「行が k 本増えたぶん」ちょうど大きい。
-        //    行 1 本ぶんの**入力**バイト数は同じ報告から導く（prefill と decode は R=1 で同形・
-        //    違いは chunk 行数だけなので、その差を行数で割ると 1 行ぶんになる）。式を写さずに
-        //    報告の内側で閉じるので、`chunkLength` や PLE の幅が変わっても追随が要らない。
-        const named = (name: string) => {
-          const scenario = report.scenarios.find((entry) => entry.name === name);
-          assert(scenario !== undefined, `シナリオ '${name}' が報告に無い`);
-          return scenario;
-        };
-        const prefill = named("prefill");
-        const decode = named("decode");
-        const verify = named("verify");
-        const chunkLength = pipeline.program.chunkLength;
-        const perRowInputBytes = (prefill.ioBytes - decode.ioBytes) / (chunkLength - 1);
-        assert(
-          Number.isSafeInteger(perRowInputBytes),
-          `1 行ぶんの入力バイト数が整数にならない（prefill ${prefill.ioBytes} − decode ` +
-            `${decode.ioBytes} を ${chunkLength - 1} 行で割った ${perRowInputBytes}）`,
-        );
-        const rows = k + 1;
-        assertEquals(
-          verify.ioBytes - decode.ioBytes,
-          // 入力: 行が k 本増える（token / PLE / RoPE）+ 行選択 `last_row` が k 要素増える。
-          k * perRowInputBytes +
-            k * 4 +
-            // 出力: 選んだ行の logits と hidden を k 行ぶん余計に readback する。
-            k * (VOCAB + HIDDEN) * 4,
-          `verify（${rows} 行）と decode（1 行）の ioBytes 差`,
-        );
-        console.log(
-          `[e2e] gemma4 投機④: 常駐重み ${report.resident.weights.compressedBytes} B（target ` +
-            `${lender.residentCompressedBytes} + drafter ${borrower.residentCompressedBytes}）/ ` +
-            `state ${report.resident.stateBytes} B / io prefill ${prefill.ioBytes}・decode ` +
-            `${decode.ioBytes}・verify ${verify.ioBytes} B / 1 行 ${perRowInputBytes} B`,
-        );
-      });
-    } finally {
-      await pipeline.dispose();
-    }
+      // 4. verify シナリオの入出力は decode より「行が k 本増えたぶん」ちょうど大きい。
+      //    行 1 本ぶんの**入力**バイト数は同じ報告から導く（prefill と decode は R=1 で同形・
+      //    違いは chunk 行数だけなので、その差を行数で割ると 1 行ぶんになる）。式を写さずに
+      //    報告の内側で閉じるので、`chunkLength` や PLE の幅が変わっても追随が要らない。
+      const named = (name: string) => {
+        const scenario = report.scenarios.find((entry) => entry.name === name);
+        assert(scenario !== undefined, `シナリオ '${name}' が報告に無い`);
+        return scenario;
+      };
+      const prefill = named("prefill");
+      const decode = named("decode");
+      const verify = named("verify");
+      const chunkLength = pipeline.program.chunkLength;
+      const perRowInputBytes = (prefill.ioBytes - decode.ioBytes) / (chunkLength - 1);
+      assert(
+        Number.isSafeInteger(perRowInputBytes),
+        `1 行ぶんの入力バイト数が整数にならない（prefill ${prefill.ioBytes} − decode ` +
+          `${decode.ioBytes} を ${chunkLength - 1} 行で割った ${perRowInputBytes}）`,
+      );
+      const rows = k + 1;
+      assertEquals(
+        verify.ioBytes - decode.ioBytes,
+        // 入力: 行が k 本増える（token / PLE / RoPE）+ 行選択 `last_row` が k 要素増える。
+        k * perRowInputBytes +
+          k * 4 +
+          // 出力: 選んだ行の logits と hidden を k 行ぶん余計に readback する。
+          k * (VOCAB + HIDDEN) * 4,
+        `verify（${rows} 行）と decode（1 行）の ioBytes 差`,
+      );
+      console.log(
+        `[e2e] gemma4 投機④: 常駐重み ${report.resident.weights.compressedBytes} B（target ` +
+          `${lender.residentCompressedBytes} + drafter ${borrower.residentCompressedBytes}）/ ` +
+          `state ${report.resident.stateBytes} B / io prefill ${prefill.ioBytes}・decode ` +
+          `${decode.ioBytes}・verify ${verify.ioBytes} B / 1 行 ${perRowInputBytes} B`,
+      );
+    });
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // ⑤ カーネル同値（u32）— verify の行 0 と decode の 1 行
@@ -780,23 +787,38 @@ type RowPair = {
   readonly immediate: Float32Array<ArrayBuffer>;
 };
 
-test({
-  name: "gemma4 投機⑤: verify の行 0 と decode 1 行の logits が u32 一致する（実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const config = pipelineConfig();
-    const rope: Gemma4RopeSpec = config.rope;
-    const golden = await readGoldenCase("short-en");
-    const prompt = golden.prompt;
-    const { index, openBlock } = await openGemma4Ple(MIRROR_DIR);
-    const ple = createGemma4Ple({
-      index,
-      openBlock,
-      vocabSize: VOCAB,
-      maxResidentBytes: allResidentBytes(index),
+describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "gemma4 投機⑤: verify の行 0 と decode 1 行の logits が u32 一致する（実 GPU）",
+  () => {
+    let config: Gemma4PipelineConfig;
+    let rope: Gemma4RopeSpec;
+    let golden: GoldenCase;
+    let prompt: number[];
+    let ple: Gemma4Ple;
+    let component: Awaited<ReturnType<typeof openMirrorComponent>>;
+    let gpu: GpuContext;
+
+    beforeAll(async () => {
+      config = pipelineConfig();
+      rope = config.rope;
+      golden = await readGoldenCase("short-en");
+      prompt = golden.prompt;
+      const { index, openBlock } = await openGemma4Ple(MIRROR_DIR);
+      ple = createGemma4Ple({
+        index,
+        openBlock,
+        vocabSize: VOCAB,
+        maxResidentBytes: allResidentBytes(index),
+      });
+      component = await openMirrorComponent(MIRROR_DIR, "model");
+      gpu = await acquireGpu();
     });
-    const component = await openMirrorComponent(MIRROR_DIR, "model");
-    const gpu = await acquireGpu();
+
+    afterAll(() => {
+      // Each is undefined when beforeAll threw before creating it.
+      gpu?.destroy();
+      ple?.dispose();
+    });
 
     /**
      * 1 run（`last_row` の要素数が R を束縛する）。返すのは選んだ行の logits。
@@ -954,66 +976,58 @@ test({
       return { mismatches, firstIndex, maxAbsDiff, left, right };
     };
 
-    try {
-      await t.step("① sequential 席では u32 で厳密一致する", async () => {
-        const started = performance.now();
-        const pair = await measure("sequential");
-        const { mismatches, firstIndex, maxAbsDiff, left, right } = compare(pair);
-        assertEquals(
-          mismatches,
-          0,
-          `verify の行 0 と decode 1 行が ${mismatches}/${VOCAB} 語で違う（最初 @${firstIndex}: ` +
-            `${pair.deferred[firstIndex]} vs ${pair.immediate[firstIndex]}・最大絶対差 ` +
-            `${maxAbsDiff}）`,
-        );
-        // 要約が恒真化していないこと（同じ突合を型どおりの厳密比較でもう一度通す）。
-        assertEquals(left, right, "u32 の厳密比較");
-        console.log(
-          `[e2e] gemma4 投機⑤ sequential: u32 一致（${VOCAB} 語）/ ` +
-            `${(performance.now() - started).toFixed(0)}ms`,
-        );
-      });
+    it("① sequential 席では u32 で厳密一致する", async () => {
+      const started = performance.now();
+      const pair = await measure("sequential");
+      const { mismatches, firstIndex, maxAbsDiff, left, right } = compare(pair);
+      assertEquals(
+        mismatches,
+        0,
+        `verify の行 0 と decode 1 行が ${mismatches}/${VOCAB} 語で違う（最初 @${firstIndex}: ` +
+          `${pair.deferred[firstIndex]} vs ${pair.immediate[firstIndex]}・最大絶対差 ` +
+          `${maxAbsDiff}）`,
+      );
+      // 要約が恒真化していないこと（同じ突合を型どおりの厳密比較でもう一度通す）。
+      assertEquals(left, right, "u32 の厳密比較");
+      console.log(
+        `[e2e] gemma4 投機⑤ sequential: u32 一致（${VOCAB} 語）/ ` +
+          `${(performance.now() - started).toFixed(0)}ms`,
+      );
+    });
 
-      // attention 3 変種 × GEMV 2 種 × RMS→add 融合の全組（① が持つ sequential × sequential × 融合なしを除く
-      // 11 組）を同じ u32 門で固定する — 自己採算ゲートは壁時計で M=1 / M=4 を選ぶので、選べるどの席でも
-      // 2 経路がビット同一でなければ実用層のデバイス内決定性（ADR 0110 決定 6）が成り立たない。
-      // 組を間引くと「門に無い組は同一を主張しない」という穴が残る（2026-09-26 に全組へ広げた）。
-      for (const attention of ["sequential", "parallel", "parallel-fused"] as const) {
-        for (const gemv of ["sequential", "parallel"] as const) {
-          for (const fuse of [false, true] as const) {
-            if (attention === "sequential" && gemv === "sequential" && !fuse) continue;
-            await t.step(
-              `attention=${attention} / GEMV=${gemv} / RMS融合=${fuse} でverify行0とdecodeがu32一致する`,
-              async () => {
-                const started = performance.now();
-                const { mismatches, firstIndex, maxAbsDiff, left, right } = compare(
-                  await measure(attention, gemv, fuse),
-                );
-                // MUST: ログを門より先に出す（割れた機でも相違の規模が記録に残るように）。
-                console.log(
-                  `[e2e] gemma4 投機⑤ ${attention}/${gemv}/fuse=${fuse}: u32 相違 ${mismatches}/${VOCAB} 語` +
-                    `（最初 @${firstIndex}）/ 最大絶対差 ${maxAbsDiff} / ${(
-                      performance.now() - started
-                    ).toFixed(0)}ms`,
-                );
-                assertEquals(mismatches, 0);
-                assertEquals(left, right);
-              },
+    // attention 3 変種 × GEMV 2 種 × RMS→add 融合の全組（① が持つ sequential × sequential × 融合なしを除く
+    // 11 組）を同じ u32 門で固定する — 自己採算ゲートは壁時計で M=1 / M=4 を選ぶので、選べるどの席でも
+    // 2 経路がビット同一でなければ実用層のデバイス内決定性（ADR 0110 決定 6）が成り立たない。
+    // 組を間引くと「門に無い組は同一を主張しない」という穴が残る（2026-09-26 に全組へ広げた）。
+    for (const attention of ["sequential", "parallel", "parallel-fused"] as const) {
+      for (const gemv of ["sequential", "parallel"] as const) {
+        for (const fuse of [false, true] as const) {
+          if (attention === "sequential" && gemv === "sequential" && !fuse) continue;
+          it(`attention=${attention} / GEMV=${gemv} / RMS融合=${fuse} でverify行0とdecodeがu32一致する`, async () => {
+            const started = performance.now();
+            const { mismatches, firstIndex, maxAbsDiff, left, right } = compare(
+              await measure(attention, gemv, fuse),
             );
-          }
+            // MUST: ログを門より先に出す（割れた機でも相違の規模が記録に残るように）。
+            console.log(
+              `[e2e] gemma4 投機⑤ ${attention}/${gemv}/fuse=${fuse}: u32 相違 ${mismatches}/${VOCAB} 語` +
+                `（最初 @${firstIndex}）/ 最大絶対差 ${maxAbsDiff} / ${(
+                  performance.now() - started
+                ).toFixed(0)}ms`,
+            );
+            assertEquals(mismatches, 0);
+            assertEquals(left, right);
+          });
         }
       }
-
-      await t.step("linear→SRQ指定は通常版のMTP verify行0/decode一致を保つ", async () => {
-        const { mismatches, left, right } = compare(
-          await measure("parallel", "parallel", true, true),
-        );
-        assertEquals(mismatches, 0);
-        assertEquals(left, right);
-      });
-    } finally {
-      gpu.destroy();
-      ple.dispose();
     }
+
+    it("linear→SRQ指定は通常版のMTP verify行0/decode一致を保つ", async () => {
+      const { mismatches, left, right } = compare(
+        await measure("parallel", "parallel", true, true),
+      );
+      assertEquals(mismatches, 0);
+      assertEquals(left, right);
+    });
   },
-});
+);

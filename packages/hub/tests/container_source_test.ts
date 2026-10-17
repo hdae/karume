@@ -16,7 +16,7 @@
  *     取り直す。
  */
 
-import { test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import {
   type DirectoryAdapter,
@@ -378,8 +378,8 @@ test("openContainerSource: 範囲外・長さ 0 の part・未知の添字は fa
   assertEquals(mock.calls, [], "不正な区間の読みが network に出ている");
 });
 
-test("openContainerSource: verified は取得元が全量を検証したかを答える", async (t) => {
-  await t.step("HF セッションは取得層が part 全量を流しながら照合する", async () => {
+describe("openContainerSource: verified は取得元が全量を検証したかを答える", () => {
+  it("HF セッションは取得層が part 全量を流しながら照合する", async () => {
     const caches = new MemoryCacheStorage();
     const { loaded, mock } = await openRemote(caches);
     const remote = openContainerSource(loaded, containerOf(loaded, "net"), {
@@ -389,12 +389,12 @@ test("openContainerSource: verified は取得元が全量を検証したかを�
     assertEquals(remote.verified, true);
   });
 
-  await t.step("ローカルディレクトリは sha256 を照合しない（ADR 0086 決定 2）", async () => {
+  it("ローカルディレクトリは sha256 を照合しない（ADR 0086 決定 2）", async () => {
     const { loaded } = await openLocal();
     assertEquals(openContainerSource(loaded, containerOf(loaded, "net")).verified, false);
   });
 
-  await t.step("越境は**越境先**の取得元で決まる（ローカルセッション + HF 越境）", async () => {
+  it("越境は**越境先**の取得元で決まる（ローカルセッション + HF 越境）", async () => {
     // セッションの取得元（ローカル）だけを見る綴りなら false になる組み合わせ。
     const caches = new MemoryCacheStorage();
     const mock = createMockFetch({ files: serveAll() });

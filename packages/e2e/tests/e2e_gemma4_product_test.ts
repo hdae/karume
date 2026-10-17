@@ -35,10 +35,11 @@
 // **明示 SKIP** し、自系列があるのに正本が欠けている形は SKIP でなく **FAIL** にする。
 
 import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
+  type GpuContext,
   parseSafetensors,
   prepareContainer,
   type PreparedModel,
@@ -167,10 +168,9 @@ if (!MODEL_PRESENT) {
  * （期待列の正本）。容器の中も同じ規律で、**グラフはあるのに PLE の資産が無い**（外出しが
  * 効いていない焼き方）は未生成でなく欠損なので、SKIP でなく FAIL にする。
  */
-test({
-  name: "Gemma 4 E2B 製品資産: PLE の資産と期待列の正本が揃っている",
-  ignore: !MODEL_PRESENT,
-  fn: async () => {
+test.skipIf(!MODEL_PRESENT)(
+  "Gemma 4 E2B 製品資産: PLE の資産と期待列の正本が揃っている",
+  async () => {
     const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
     assert(
       Object.hasOwn(opened.model?.assets ?? {}, PLE_INDEX_ASSET),
@@ -189,7 +189,7 @@ test({
       );
     }
   },
-});
+);
 
 /** 系列ディレクトリの名前（記録が名乗る `series` と突き合わせる側）。 */
 const seriesName = (root: URL): string =>
@@ -242,10 +242,9 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> => {
  * なければならない — logits opt-in 系列を採り直せば digest が動き、この門が落ちて製品系列の
  * 再 export を強制する（the token-only series' twin gate was removed on 2026-10-17）。
  */
-test({
-  name: "Gemma 4 E2B 製品資産: 出所記録が参照 golden を束ねている",
-  ignore: !MODEL_PRESENT,
-  fn: async () => {
+test.skipIf(!MODEL_PRESENT)(
+  "Gemma 4 E2B 製品資産: 出所記録が参照 golden を束ねている",
+  async () => {
     const path = new URL(REFERENCE_FILE, PRODUCT_ROOT);
     assert(
       exists(path),
@@ -287,7 +286,7 @@ test({
       );
     }
   },
-});
+);
 
 /**
  * ファイル 1 本を `ArrayBuffer` として読む。
@@ -382,10 +381,9 @@ const fullBytesOf = (table: Gemma4PleTable, plan: TableExpectation): number =>
  *
  * GPU を要さない（loader は Web 標準 API だけで閉じている）。
  */
-test({
-  name: "Gemma 4 E2B 製品検収: PLE 逆量子化がグラフ内 embedding とビット一致（GPU 不要）",
-  ignore: !MODEL_PRESENT,
-  fn: async () => {
+test.skipIf(!MODEL_PRESENT)(
+  "Gemma 4 E2B 製品検収: PLE 逆量子化がグラフ内 embedding とビット一致（GPU 不要）",
+  async () => {
     const index = await readPleIndex();
     assertEquals(index.tokens, VOCAB, "索引の token 行数（= 主 embedding の vocab）");
     assertEquals(index.layers, LAYERS, "索引の層数");
@@ -521,7 +519,7 @@ test({
         `（${(fullStats.residentBytes / 1024 / 1024).toFixed(0)} MiB）`,
     );
   },
-});
+);
 
 /**
  * ① 形の前提。既存 2 系列との差分（入力 +2 本・出力は最終行 logits・argmax 不在・PLE 表の不在）を
@@ -725,126 +723,137 @@ const generate = async (
  * Default case: the graph form (①) and the residency ceiling (ADR 0085) are structure / gate
  * checks that do not compare against torch goldens, so they stay in the default run.
  */
-test({
-  name: "Gemma 4 E2B 製品検収: 形の前提と常駐の上限（実 GPU）",
-  ignore: !MODEL_PRESENT || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
-    const parsed = prepareContainer(opened, MODEL_GRAPH);
+describe.skipIf(!MODEL_PRESENT || !GPU_AVAILABLE)(
+  "Gemma 4 E2B 製品検収: 形の前提と常駐の上限（実 GPU）",
+  () => {
+    let parsed: PreparedModel;
+    beforeAll(async () => {
+      const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
+      parsed = prepareContainer(opened, MODEL_GRAPH);
+    });
 
-    await t.step("① 形の前提: PLE 外出し + 最終行 logits 出口である", () => {
+    it("① 形の前提: PLE 外出し + 最終行 logits 出口である", () => {
       assertProductForm(parsed);
     });
 
-    const gpu = await acquireGpu();
-    const session = await parsed.createContainerSession(gpu);
-    try {
-      const storage = session.diagnostics().storage;
-      assert(storage !== undefined, "diagnostics.storage が無い");
-      assertEquals(storage.hostExpandedBytes, 0, "hostExpandedBytes（適格落ちの CPU 展開）");
-      // ADR 0085 の主張そのもの: PLE を外した容器は常駐が半分以下になる。
-      assert(
-        storage.residentCompressedBytes < RESIDENT_CEILING,
-        `residentCompressedBytes ${storage.residentCompressedBytes} が ${RESIDENT_CEILING} 以上` +
-          `（PLE がグラフに残った容器を読んでいる — ADR 0085 の常駐削減が効いていない）`,
-      );
-      console.log(
-        `[e2e] gemma4 product 常駐: 圧縮 ${storage.residentCompressedBytes} バイト` +
-          `（PLE 外出し前の decode 系列は 3.0e9 超）`,
-      );
-    } finally {
-      await session.dispose();
-      gpu.destroy();
-    }
+    // This section was the test body after the step (no step title of its own); it owns the GPU
+    // session it opens, so the acquire / dispose pair stays inside this one case.
+    it("常駐の上限: PLE を外した容器は常駐が半分以下になる", async () => {
+      const gpu = await acquireGpu();
+      const session = await parsed.createContainerSession(gpu);
+      try {
+        const storage = session.diagnostics().storage;
+        assert(storage !== undefined, "diagnostics.storage が無い");
+        assertEquals(storage.hostExpandedBytes, 0, "hostExpandedBytes（適格落ちの CPU 展開）");
+        // ADR 0085 の主張そのもの: PLE を外した容器は常駐が半分以下になる。
+        assert(
+          storage.residentCompressedBytes < RESIDENT_CEILING,
+          `residentCompressedBytes ${storage.residentCompressedBytes} が ${RESIDENT_CEILING} 以上` +
+            `（PLE がグラフに残った容器を読んでいる — ADR 0085 の常駐削減が効いていない）`,
+        );
+        console.log(
+          `[e2e] gemma4 product 常駐: 圧縮 ${storage.residentCompressedBytes} バイト` +
+            `（PLE 外出し前の decode 系列は 3.0e9 超）`,
+        );
+      } finally {
+        await session.dispose();
+        gpu.destroy();
+      }
+    });
   },
-});
+);
 
 /**
  * Opt-in case: ③ compares the host greedy loop with the torch greedy goldens (upstream parity).
  * The lazy-load assertions stay here because they observe this generation run; the GPU-free ②
  * case keeps the LRU policy check in the default run.
  */
-test({
-  name: `Gemma 4 E2B 製品検収: 交差 parity（実 GPU / ホスト PLE + ホスト argmax）${UPSTREAM_PARITY_OPT_IN}`,
-  ignore: !UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
-    const parsed = prepareContainer(opened, MODEL_GRAPH);
-    const logitsName = parsed.graph.outputs[0];
+describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
+  `Gemma 4 E2B 製品検収: 交差 parity（実 GPU / ホスト PLE + ホスト argmax）${UPSTREAM_PARITY_OPT_IN}`,
+  () => {
+    let logitsName: string;
+    let index: Gemma4PleIndex;
+    let ple: Gemma4Ple;
+    let gpu: GpuContext | undefined;
+    let session: Awaited<ReturnType<PreparedModel["createContainerSession"]>> | undefined;
+    beforeAll(async () => {
+      const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
+      const parsed = prepareContainer(opened, MODEL_GRAPH);
+      logitsName = parsed.graph.outputs[0];
 
-    const index = await readPleIndex();
-    // 全 block 常駐（LRU の観測は GPU 不要の②が持つ — こちらは生成の往復で block を
-    // 読み直さないことだけを見る）。
-    const ple = await openPle(allResidentBytes(index));
-    const gpu = await acquireGpu();
-    const session = await parsed.createContainerSession(gpu);
-    try {
-      await t.step("③ 3 ケース × 16 step が opt-in 系列の期待列と厳密一致", async () => {
-        let totalGathers = 0;
-        for (const caseName of EXPECTED_CASES) {
-          const golden = parseSafetensors(
-            await readBuffer(GOLDEN_ROOT, `${GREEDY_PREFIX}${caseName}${SUFFIX}`),
-          );
-          const prompt = [...goldenI32(golden, "prompt")];
-          const expected = [...goldenI32(golden, "expected")];
-          assertEquals(expected.length, GREEDY_STEPS, `${caseName}: golden の step 数`);
+      index = await readPleIndex();
+      // 全 block 常駐（LRU の観測は GPU 不要の②が持つ — こちらは生成の往復で block を
+      // 読み直さないことだけを見る）。
+      ple = await openPle(allResidentBytes(index));
+      gpu = await acquireGpu();
+      session = await parsed.createContainerSession(gpu);
+    });
+    afterAll(async () => {
+      await session?.dispose();
+      gpu?.destroy();
+    });
 
-          // 最長ケースだけ細かい刻みで流す（多 chunk prefill = chunk を跨ぐ PLE gather を
-          // 実重みで踏む唯一の経路 — `LONG_CASE_CHUNK_LENGTH` の doc）。
-          const chunkLength = caseName === LONG_CASE ? LONG_CASE_CHUNK_LENGTH : CHUNK_LENGTH;
-          const chunks = planPrefillChunks(prompt.length, chunkLength).length;
-          if (caseName === LONG_CASE) {
-            assert(
-              chunks > 1,
-              `${caseName}: 刻み ${chunkLength} で 1 chunk に収まる（chunk を跨ぐ gather が走らない）`,
-            );
-          }
+    it("③ 3 ケース × 16 step が opt-in 系列の期待列と厳密一致", async () => {
+      assert(session !== undefined, "session was not created in beforeAll");
+      let totalGathers = 0;
+      for (const caseName of EXPECTED_CASES) {
+        const golden = parseSafetensors(
+          await readBuffer(GOLDEN_ROOT, `${GREEDY_PREFIX}${caseName}${SUFFIX}`),
+        );
+        const prompt = [...goldenI32(golden, "prompt")];
+        const expected = [...goldenI32(golden, "expected")];
+        assertEquals(expected.length, GREEDY_STEPS, `${caseName}: golden の step 数`);
 
-          const started = performance.now();
-          const generated = await generate(
-            session,
-            logitsName,
-            ple,
-            prompt,
-            GREEDY_STEPS,
-            chunkLength,
-          );
-          totalGathers += generated.gathers;
-          assertEquals(
-            generated.tokens,
-            expected,
-            `${caseName}: 生成 token 列（対 logits opt-in 系列 golden）`,
-          );
-          console.log(
-            `[e2e] gemma4 product ${caseName}: T=${prompt.length}（刻み ${chunkLength} = ` +
-              `${chunks} chunk）+ K=${GREEDY_STEPS} step / PLE gather ${generated.gathers} 回 / ` +
-              `${(performance.now() - started).toFixed(0)}ms`,
+        // 最長ケースだけ細かい刻みで流す（多 chunk prefill = chunk を跨ぐ PLE gather を
+        // 実重みで踏む唯一の経路 — `LONG_CASE_CHUNK_LENGTH` の doc）。
+        const chunkLength = caseName === LONG_CASE ? LONG_CASE_CHUNK_LENGTH : CHUNK_LENGTH;
+        const chunks = planPrefillChunks(prompt.length, chunkLength).length;
+        if (caseName === LONG_CASE) {
+          assert(
+            chunks > 1,
+            `${caseName}: 刻み ${chunkLength} で 1 chunk に収まる（chunk を跨ぐ gather が走らない）`,
           );
         }
-        // 遅延ロードが実効（恒真でない）: gather は数十回走るのに、block の取得は最大でも
-        // 本数ぶん。毎回読み直す実装ならここが gather 回数まで伸びる。
-        const stats = ple.stats();
-        assert(
-          totalGathers > stats.loads,
-          `PLE gather ${totalGathers} 回に対し block 取得 ${stats.loads} 回` +
-            `（キャッシュが効いていない）`,
+
+        const started = performance.now();
+        const generated = await generate(
+          session,
+          logitsName,
+          ple,
+          prompt,
+          GREEDY_STEPS,
+          chunkLength,
         );
-        assert(
-          stats.loads <= index.values.blocks.length + index.scales.blocks.length,
-          `block 取得 ${stats.loads} 回が本数 ${
-            index.values.blocks.length + index.scales.blocks.length
-          } を超える（読み直しが起きている）`,
+        totalGathers += generated.gathers;
+        assertEquals(
+          generated.tokens,
+          expected,
+          `${caseName}: 生成 token 列（対 logits opt-in 系列 golden）`,
         );
         console.log(
-          `[e2e] gemma4 product PLE 遅延ロード: gather ${totalGathers} 回 / block 取得 ` +
-            `${stats.loads} 回（全 ${
-              index.values.blocks.length + index.scales.blocks.length
-            } 本中）`,
+          `[e2e] gemma4 product ${caseName}: T=${prompt.length}（刻み ${chunkLength} = ` +
+            `${chunks} chunk）+ K=${GREEDY_STEPS} step / PLE gather ${generated.gathers} 回 / ` +
+            `${(performance.now() - started).toFixed(0)}ms`,
         );
-      });
-    } finally {
-      await session.dispose();
-      gpu.destroy();
-    }
+      }
+      // 遅延ロードが実効（恒真でない）: gather は数十回走るのに、block の取得は最大でも
+      // 本数ぶん。毎回読み直す実装ならここが gather 回数まで伸びる。
+      const stats = ple.stats();
+      assert(
+        totalGathers > stats.loads,
+        `PLE gather ${totalGathers} 回に対し block 取得 ${stats.loads} 回` +
+          `（キャッシュが効いていない）`,
+      );
+      assert(
+        stats.loads <= index.values.blocks.length + index.scales.blocks.length,
+        `block 取得 ${stats.loads} 回が本数 ${
+          index.values.blocks.length + index.scales.blocks.length
+        } を超える（読み直しが起きている）`,
+      );
+      console.log(
+        `[e2e] gemma4 product PLE 遅延ロード: gather ${totalGathers} 回 / block 取得 ` +
+          `${stats.loads} 回（全 ${index.values.blocks.length + index.scales.blocks.length} 本中）`,
+      );
+    });
   },
-});
+);

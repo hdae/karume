@@ -41,14 +41,16 @@
 // SKIP ではなく FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
+  type GpuContext,
   parseSafetensors,
   prepareContainer,
   type PreparedModel,
   type SafetensorsFile,
+  type Session,
   type SessionDiagnostics,
   type Tensor,
 } from "@karume/runtime";
@@ -324,19 +326,15 @@ const preparedOf = (diagnostics: SessionDiagnostics, where: string) => {
   return prepared;
 };
 
-test({
-  name: "MiniCPM5 decode 資産: 期待するケースとモデル本体が揃っている",
-  // 完全に空の環境だけ SKIP。**何か 1 つでも**あれば欠けは FAIL（`ANY_PRESENT` の JSDoc）。
-  ignore: !ANY_PRESENT,
-  fn: () => {
-    assertEquals(IO_CASES, [...EXPECTED_IO_CASES], `${SERIES_ROOT.pathname} の io ケース`);
-    assertEquals(
-      GREEDY_CASES,
-      [...EXPECTED_GREEDY_CASES],
-      `${SERIES_ROOT.pathname} の greedy ケース`,
-    );
-    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
-  },
+// 完全に空の環境だけ SKIP。**何か 1 つでも**あれば欠けは FAIL（`ANY_PRESENT` の JSDoc）。
+test.skipIf(!ANY_PRESENT)("MiniCPM5 decode 資産: 期待するケースとモデル本体が揃っている", () => {
+  assertEquals(IO_CASES, [...EXPECTED_IO_CASES], `${SERIES_ROOT.pathname} の io ケース`);
+  assertEquals(
+    GREEDY_CASES,
+    [...EXPECTED_GREEDY_CASES],
+    `${SERIES_ROOT.pathname} の greedy ケース`,
+  );
+  assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
 });
 
 /**
@@ -348,203 +346,196 @@ test({
  * **GenerationContext は用途ごとに作り分ける** — 生成 1 本 = context 1 本（ADR 0066 決定 6）で、
  * 使い回すと前の生成の KV が残った状態から prefill を始めることになる。
  */
-test({
-  name: "MiniCPM5 decode 検収: 固定 token id 列の parity（実 GPU / torch CPU 期待値）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
-    const parsed = prepareContainer(opened, MODEL_GRAPH);
-    const [logitsName, tokenName] = parsed.graph.outputs;
+describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "MiniCPM5 decode 検収: 固定 token id 列の parity（実 GPU / torch CPU 期待値）",
+  () => {
+    // Assigned in beforeAll; the its do not run when beforeAll throws.
+    let parsed!: PreparedModel;
+    let logitsName!: string;
+    let tokenName!: string;
+    let gpu: GpuContext | undefined;
+    let session!: Session;
 
-    await t.step("① 形の前提: states 形 chunk グラフである", () => {
+    beforeAll(async () => {
+      const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
+      parsed = prepareContainer(opened, MODEL_GRAPH);
+      [logitsName, tokenName] = parsed.graph.outputs;
+      gpu = await acquireGpu();
+      session = await parsed.createContainerSession(gpu);
+    });
+
+    afterAll(async () => {
+      // Same order as the former finally block: the session first, then the device.
+      await session?.dispose();
+      gpu?.destroy();
+    });
+
+    it("① 形の前提: states 形 chunk グラフである", () => {
       assertDecodeForm(parsed);
     });
 
-    const gpu = await acquireGpu();
-    const session = await parsed.createContainerSession(gpu);
-    try {
-      await t.step("② greedy parity: 3 ケース × 16 step が torch の期待列と厳密一致", async () => {
-        /** ケースごとの prefill chunk 本数（多 chunk prefill を踏んだことの実測）。 */
-        const chunkCounts: number[] = [];
-        for (const caseName of EXPECTED_GREEDY_CASES) {
-          const golden = await loadGreedy(caseName);
-          const prompt = [...golden.prompt];
-          const expected = [...golden.expected];
-          assertEquals(expected.length, GREEDY_STEPS, `${caseName}: golden の step 数`);
+    it("② greedy parity: 3 ケース × 16 step が torch の期待列と厳密一致", async () => {
+      /** ケースごとの prefill chunk 本数（多 chunk prefill を踏んだことの実測）。 */
+      const chunkCounts: number[] = [];
+      for (const caseName of EXPECTED_GREEDY_CASES) {
+        const golden = await loadGreedy(caseName);
+        const prompt = [...golden.prompt];
+        const expected = [...golden.expected];
+        assertEquals(expected.length, GREEDY_STEPS, `${caseName}: golden の step 数`);
 
-          // golden 側の資格（**恒真でない**）: torch 側の 1 位 / 2 位の差が atol の 2 倍を
-          // 超えていれば、③の許容内の数値差では 1 位が動けない = この列は数値差で割れない。
-          // 台本側は `MARGIN_FLOOR = 1e-2` で採るケースを選んでおり、実測の最小余裕は
-          // context-ja の 0.0261（step 15）= atol 1e-3 の 26 倍。
-          const minMargin = Math.min(...golden.margin);
-          assert(
-            minMargin > 2 * PREFILL_ATOL,
-            `${caseName}: golden の最小余裕 ${minMargin} が atol と同程度 — ` +
-              `この形では token 列の一致が数値差で反転しうる（門として成立しない）`,
-          );
-          // 容量が prompt + 継続を覆っていること（覆えないと state スロットが溢れる）。
-          assert(
-            prompt.length + GREEDY_STEPS <= CAPACITY,
-            `${caseName}: T ${prompt.length} + K ${GREEDY_STEPS} が容量 ${CAPACITY} を超える`,
-          );
-
-          const started = performance.now();
-          const generated = await generateGreedy({
-            session,
-            inputIds: INPUT_IDS,
-            // この系列は RoPE 表を焼いたままなのでグラフ入力は今も `position_ids` 1 本だが、
-            // 位置の供給口は `GreedySpec.derive` に一本化された（ADR 0091 決定 1 — gemma4 側が
-            // 位置から cos / sin を組む形になり、`positionIds` 欄は退役した）。
-            derive: (_ids, positions) => ({ [POSITION_IDS]: i32Row(positions.length, positions) }),
-            token: tokenName,
-            chunkLength: CHUNK_LENGTH,
-            maxPosition: MAX_POSITION,
-            // 容量記号は context 生成だけへ渡る（run の bindings には出ない — 追記 7）。
-            bindings: { [CAPACITY_SYMBOL]: CAPACITY },
-            prompt,
-            maxNewTokens: GREEDY_STEPS,
-          });
-          const elapsed = performance.now() - started;
-
-          // 検収そのもの。tolerance を持たない離散の一致で、GQA の head 写像違い・RoPE の
-          // 位置ずれ・KV スロットの行写像違い・pad 行の混入はどれもここで列を割る。
-          assertEquals(generated, expected, `${caseName}: 生成 token 列`);
-
-          const chunks = Math.ceil(prompt.length / CHUNK_LENGTH);
-          chunkCounts.push(chunks);
-          console.log(
-            `[e2e] minicpm5 decode greedy ${caseName}: T=${prompt.length} ` +
-              `(prefill ${chunks} chunk) + K=${GREEDY_STEPS} step / 最小余裕 ` +
-              `${minMargin.toExponential(3)} / ${elapsed.toFixed(0)}ms`,
-          );
-
-          // ⑤ decode 経路の計画性質: 生成 1 本で導出される計画は **prefill 形（M=32）と
-          // decode 形（M=1）の 2 本だけ**（ADR 0066 決定 4）。ここが step 数に比例して伸びる
-          // 形（例: queryLength が計画鍵に混ざる）は、値は正しいまま毎 step 再導出になる。
-          // ケースを跨いでも 2 本のまま（プロンプト長は計画鍵に効かない）。
-          const prepared = preparedOf(session.diagnostics(), caseName);
-          assertEquals(prepared.cachedPlans, 2, `${caseName}: 導出済み計画の本数`);
-          assertEquals(
-            prepared.hit,
-            true,
-            `${caseName}: 最終 decode step が計画キャッシュに当たる`,
-          );
-        }
-        // 多 chunk prefill（`pastLength > 0` かつ `M > 1`）を最低 1 ケースが踏んだこと。
+        // golden 側の資格（**恒真でない**）: torch 側の 1 位 / 2 位の差が atol の 2 倍を
+        // 超えていれば、③の許容内の数値差では 1 位が動けない = この列は数値差で割れない。
+        // 台本側は `MARGIN_FLOOR = 1e-2` で採るケースを選んでおり、実測の最小余裕は
+        // context-ja の 0.0261（step 15）= atol 1e-3 の 26 倍。
+        const minMargin = Math.min(...golden.margin);
         assert(
-          Math.max(...chunkCounts) >= 2,
-          `全ケースが 1 chunk に収まっている（chunk 本数 ${chunkCounts}）— ` +
-            `chunkLength ${CHUNK_LENGTH} では過去つき prefill が 1 度も走らない`,
+          minMargin > 2 * PREFILL_ATOL,
+          `${caseName}: golden の最小余裕 ${minMargin} が atol と同程度 — ` +
+            `この形では token 列の一致が数値差で反転しうる（門として成立しない）`,
         );
+        // 容量が prompt + 継続を覆っていること（覆えないと state スロットが溢れる）。
+        assert(
+          prompt.length + GREEDY_STEPS <= CAPACITY,
+          `${caseName}: T ${prompt.length} + K ${GREEDY_STEPS} が容量 ${CAPACITY} を超える`,
+        );
+
+        const started = performance.now();
+        const generated = await generateGreedy({
+          session,
+          inputIds: INPUT_IDS,
+          // この系列は RoPE 表を焼いたままなのでグラフ入力は今も `position_ids` 1 本だが、
+          // 位置の供給口は `GreedySpec.derive` に一本化された（ADR 0091 決定 1 — gemma4 側が
+          // 位置から cos / sin を組む形になり、`positionIds` 欄は退役した）。
+          derive: (_ids, positions) => ({ [POSITION_IDS]: i32Row(positions.length, positions) }),
+          token: tokenName,
+          chunkLength: CHUNK_LENGTH,
+          maxPosition: MAX_POSITION,
+          // 容量記号は context 生成だけへ渡る（run の bindings には出ない — 追記 7）。
+          bindings: { [CAPACITY_SYMBOL]: CAPACITY },
+          prompt,
+          maxNewTokens: GREEDY_STEPS,
+        });
+        const elapsed = performance.now() - started;
+
+        // 検収そのもの。tolerance を持たない離散の一致で、GQA の head 写像違い・RoPE の
+        // 位置ずれ・KV スロットの行写像違い・pad 行の混入はどれもここで列を割る。
+        assertEquals(generated, expected, `${caseName}: 生成 token 列`);
+
+        const chunks = Math.ceil(prompt.length / CHUNK_LENGTH);
+        chunkCounts.push(chunks);
+        console.log(
+          `[e2e] minicpm5 decode greedy ${caseName}: T=${prompt.length} ` +
+            `(prefill ${chunks} chunk) + K=${GREEDY_STEPS} step / 最小余裕 ` +
+            `${minMargin.toExponential(3)} / ${elapsed.toFixed(0)}ms`,
+        );
+
+        // ⑤ decode 経路の計画性質: 生成 1 本で導出される計画は **prefill 形（M=32）と
+        // decode 形（M=1）の 2 本だけ**（ADR 0066 決定 4）。ここが step 数に比例して伸びる
+        // 形（例: queryLength が計画鍵に混ざる）は、値は正しいまま毎 step 再導出になる。
+        // ケースを跨いでも 2 本のまま（プロンプト長は計画鍵に効かない）。
+        const prepared = preparedOf(session.diagnostics(), caseName);
+        assertEquals(prepared.cachedPlans, 2, `${caseName}: 導出済み計画の本数`);
+        assertEquals(prepared.hit, true, `${caseName}: 最終 decode step が計画キャッシュに当たる`);
+      }
+      // 多 chunk prefill（`pastLength > 0` かつ `M > 1`）を最低 1 ケースが踏んだこと。
+      assert(
+        Math.max(...chunkCounts) >= 2,
+        `全ケースが 1 chunk に収まっている（chunk 本数 ${chunkCounts}）— ` +
+          `chunkLength ${CHUNK_LENGTH} では過去つき prefill が 1 度も走らない`,
+      );
+    });
+
+    it("③ prefill logits: context-en の 3 chunk を有効行だけ突合（診断線）", async () => {
+      // ②が離散の一致だけを見るのに対し、ここは**連続値**を見る。列が割れないまま数値が
+      // じわりとずれる変更（融合の外れ・縮約順序の変化）は②を素通りするので、その線を
+      // ここが受け持つ。`generateGreedy` は通さず、chunk の組み立て（pad 0・絶対位置・
+      // 物理行数固定）を**この場で書く** — 生成ループと同じヘルパを使うと、割り方の誤りが
+      // 期待値の側にも同じように入って恒真化する。
+      //
+      // 故障注入の実測（2026-08-18）: 2 本目以降の chunk だけ絶対位置を +1 すると、最初に
+      // ずれた行（位置 33）の argmax が即座に割れる。一方**全行を一様に +1** しても
+      // maxAbs 8.9e-5 で素通りする — RoPE は相対位置しか見ないので、これは門の弱さでは
+      // なく不変性そのもの（この経路で捕まえられるのは chunk 間の相対ずれ・行の取り違え・
+      // pad 行の混入で、絶対位置の一様なオフセットではない）。
+      const io = await loadIo("context-en");
+      const total = io.ids.length;
+      const vocab = io.logits.length / total;
+      assertEquals(io.tokens.length, total, "io の token 行数");
+      assert(Number.isSafeInteger(vocab), `io の logits 長 ${io.logits.length} が行数で割れない`);
+
+      const context = await session.createGenerationContext({
+        bindings: { [CAPACITY_SYMBOL]: CAPACITY },
+        chunkLength: CHUNK_LENGTH,
       });
-
-      await t.step(
-        "③ prefill logits: context-en の 3 chunk を有効行だけ突合（診断線）",
-        async () => {
-          // ②が離散の一致だけを見るのに対し、ここは**連続値**を見る。列が割れないまま数値が
-          // じわりとずれる変更（融合の外れ・縮約順序の変化）は②を素通りするので、その線を
-          // ここが受け持つ。`generateGreedy` は通さず、chunk の組み立て（pad 0・絶対位置・
-          // 物理行数固定）を**この場で書く** — 生成ループと同じヘルパを使うと、割り方の誤りが
-          // 期待値の側にも同じように入って恒真化する。
-          //
-          // 故障注入の実測（2026-08-18）: 2 本目以降の chunk だけ絶対位置を +1 すると、最初に
-          // ずれた行（位置 33）の argmax が即座に割れる。一方**全行を一様に +1** しても
-          // maxAbs 8.9e-5 で素通りする — RoPE は相対位置しか見ないので、これは門の弱さでは
-          // なく不変性そのもの（この経路で捕まえられるのは chunk 間の相対ずれ・行の取り違え・
-          // pad 行の混入で、絶対位置の一様なオフセットではない）。
-          const io = await loadIo("context-en");
-          const total = io.ids.length;
-          const vocab = io.logits.length / total;
-          assertEquals(io.tokens.length, total, "io の token 行数");
-          assert(
-            Number.isSafeInteger(vocab),
-            `io の logits 長 ${io.logits.length} が行数で割れない`,
+      let worst = 0;
+      let worstAt = "";
+      let chunks = 0;
+      let totalQueryLength = 0;
+      try {
+        for (let position = 0; position < total; position += CHUNK_LENGTH) {
+          const queryLength = Math.min(CHUNK_LENGTH, total - position);
+          totalQueryLength += queryLength;
+          // pad 行は 0 のまま（ADR 0066 追記 6 の値契約）— `Int32Array` の初期値がその契約。
+          const ids = new Int32Array(CHUNK_LENGTH);
+          const positions = new Int32Array(CHUNK_LENGTH);
+          for (let row = 0; row < queryLength; row += 1) {
+            ids[row] = io.ids[position + row];
+            positions[row] = position + row;
+          }
+          const outputs = await session.run(
+            {
+              [INPUT_IDS]: i32Row(CHUNK_LENGTH, ids),
+              [POSITION_IDS]: i32Row(CHUNK_LENGTH, positions),
+            },
+            undefined,
+            { context, queryLength },
           );
+          chunks += 1;
 
-          const context = await session.createGenerationContext({
-            bindings: { [CAPACITY_SYMBOL]: CAPACITY },
-            chunkLength: CHUNK_LENGTH,
-          });
-          let worst = 0;
-          let worstAt = "";
-          let chunks = 0;
-          let totalQueryLength = 0;
-          try {
-            for (let position = 0; position < total; position += CHUNK_LENGTH) {
-              const queryLength = Math.min(CHUNK_LENGTH, total - position);
-              totalQueryLength += queryLength;
-              // pad 行は 0 のまま（ADR 0066 追記 6 の値契約）— `Int32Array` の初期値がその契約。
-              const ids = new Int32Array(CHUNK_LENGTH);
-              const positions = new Int32Array(CHUNK_LENGTH);
-              for (let row = 0; row < queryLength; row += 1) {
-                ids[row] = io.ids[position + row];
-                positions[row] = position + row;
-              }
-              const outputs = await session.run(
-                {
-                  [INPUT_IDS]: i32Row(CHUNK_LENGTH, ids),
-                  [POSITION_IDS]: i32Row(CHUNK_LENGTH, positions),
-                },
-                undefined,
-                { context, queryLength },
-              );
-              chunks += 1;
+          const logits = outputs[logitsName];
+          assertEquals(logits.dtype, "f32", "logits の dtype");
+          assertEquals(logits.shape, [1, CHUNK_LENGTH, vocab], "logits の shape（物理 chunk 形）");
+          const tokens = outputs[tokenName];
+          assertEquals(tokens.dtype, "i32", "token の dtype");
+          assertEquals(tokens.shape, [1, CHUNK_LENGTH, 1], "token の shape");
 
-              const logits = outputs[logitsName];
-              assertEquals(logits.dtype, "f32", "logits の dtype");
-              assertEquals(
-                logits.shape,
-                [1, CHUNK_LENGTH, vocab],
-                "logits の shape（物理 chunk 形）",
-              );
-              const tokens = outputs[tokenName];
-              assertEquals(tokens.dtype, "i32", "token の dtype");
-              assertEquals(tokens.shape, [1, CHUNK_LENGTH, 1], "token の shape");
-
-              for (let row = 0; row < queryLength; row += 1) {
-                const where = `位置 ${position + row}`;
-                // token は離散なので厳密一致（②と同じ判定を chunk の途中行にも掛ける）。
-                assertEquals(tokens.data[row], io.tokens[position + row], `${where}: argmax token`);
-                const base = row * vocab;
-                const reference = (position + row) * vocab;
-                for (let column = 0; column < vocab; column += 1) {
-                  const delta = Math.abs(
-                    logits.data[base + column] - io.logits[reference + column],
-                  );
-                  // MUST: NaN を「最悪値」として**残す**書き方にする（`!(delta <= worst)` だと
-                  // 一度 NaN を掴んでも次の有限値で上書きされ、非有限が黙って消える）。
-                  if (Number.isNaN(delta) || delta > worst) {
-                    worst = delta;
-                    worstAt = `${where} / 列 ${column}`;
-                  }
-                }
+          for (let row = 0; row < queryLength; row += 1) {
+            const where = `位置 ${position + row}`;
+            // token は離散なので厳密一致（②と同じ判定を chunk の途中行にも掛ける）。
+            assertEquals(tokens.data[row], io.tokens[position + row], `${where}: argmax token`);
+            const base = row * vocab;
+            const reference = (position + row) * vocab;
+            for (let column = 0; column < vocab; column += 1) {
+              const delta = Math.abs(logits.data[base + column] - io.logits[reference + column]);
+              // MUST: NaN を「最悪値」として**残す**書き方にする（`!(delta <= worst)` だと
+              // 一度 NaN を掴んでも次の有限値で上書きされ、非有限が黙って消える）。
+              if (Number.isNaN(delta) || delta > worst) {
+                worst = delta;
+                worstAt = `${where} / 列 ${column}`;
               }
             }
-          } finally {
-            // MUST: 途中で落ちても返す（KV 容量ぶんの VRAM を抱えたままにしない）。
-            await context.dispose();
           }
-          // 恒真回避: `chunks` はループ反復数そのものなので自己比較になる（G4 L-4）。
-          // 各 chunk の queryLength の総和が有効行数 total と一致することを実効に検査する。
-          assertEquals(totalQueryLength, total, "chunk の queryLength 総和");
-          console.log(
-            `[e2e] minicpm5 decode prefill context-en: ${chunks} chunk / 有効 ${total} 行 / ` +
-              `logits maxAbs ${worst.toExponential(3)}（最悪 ${worstAt}）`,
-          );
-          // 非有限（NaN / inf）はここで必ず落ちる（`worst` が NaN なら `<=` は偽）。
-          assert(
-            worst <= PREFILL_ATOL,
-            `context-en: prefill logits の maxAbs ${worst} が atol ${PREFILL_ATOL} を超えた` +
-              `（最悪 ${worstAt}）`,
-          );
-        },
+        }
+      } finally {
+        // MUST: 途中で落ちても返す（KV 容量ぶんの VRAM を抱えたままにしない）。
+        await context.dispose();
+      }
+      // 恒真回避: `chunks` はループ反復数そのものなので自己比較になる（G4 L-4）。
+      // 各 chunk の queryLength の総和が有効行数 total と一致することを実効に検査する。
+      assertEquals(totalQueryLength, total, "chunk の queryLength 総和");
+      console.log(
+        `[e2e] minicpm5 decode prefill context-en: ${chunks} chunk / 有効 ${total} 行 / ` +
+          `logits maxAbs ${worst.toExponential(3)}（最悪 ${worstAt}）`,
       );
-    } finally {
-      await session.dispose();
-      gpu.destroy();
-    }
+      // 非有限（NaN / inf）はここで必ず落ちる（`worst` が NaN なら `<=` は偽）。
+      assert(
+        worst <= PREFILL_ATOL,
+        `context-en: prefill logits の maxAbs ${worst} が atol ${PREFILL_ATOL} を超えた` +
+          `（最悪 ${worstAt}）`,
+      );
+    });
   },
-});
+);
 
 /** census 1 回ぶんの内訳（states 形カーネル族の dispatch 数）。 */
 type StateCensus = {
@@ -640,10 +631,9 @@ const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): Stat
  * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い device でも走る）。undefined / 空は
  * 上の {@link assertStateCensus} が落とす。
  */
-test({
-  name: "MiniCPM5 decode census: states 形カーネル族が GQA 変種で走る（実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "MiniCPM5 decode census: states 形カーネル族が GQA 変種で走る（実 GPU）",
+  async () => {
     const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
     const parsed = prepareContainer(opened, MODEL_GRAPH);
     const [, tokenName] = parsed.graph.outputs;
@@ -696,4 +686,4 @@ test({
       gpu.destroy();
     }
   },
-});
+);

@@ -1,5 +1,5 @@
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { admitGemma4Qat, assertGemma4QatModel, assertGemma4QatPle } from "../src/gemma/qat.ts";
 import { gemma4QatRopeInputs, gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
@@ -157,9 +157,9 @@ const pleIndexOf = (model: "e2b" | "e4b"): Gemma4PleIndex =>
     storage: model === "e2b" ? "i4" : "i2",
   }).index;
 
-test("固定 QAT の family admission", async (t) => {
+describe("固定 QAT の family admission", () => {
   for (const model of ["e2b", "e4b"] as const) {
-    await t.step(`${model} の固定混成と共有 head を受ける`, () => {
+    it(`${model} の固定混成と共有 head を受ける`, () => {
       const graph = graphOf(model);
       assertEquals(admitGemma4Qat(graph, model), model);
       assertEquals(admitGemma4Qat(graph), model);
@@ -169,7 +169,7 @@ test("固定 QAT の family admission", async (t) => {
         "構成が違う",
       );
     });
-    await t.step(`${model} の共有 head は前後の SRQ が無くても受ける`, () => {
+    it(`${model} の共有 head は前後の SRQ が無くても受ける`, () => {
       // 公式 checkpoint の lm_head は SRQ の scale が入出力とも 0（未較正 = 恒等）なので、
       // recipe は恒等 SRQ を IR に挟まない。SRQ 有りの形（上の step）も受ける。
       assertEquals(admitGemma4Qat(graphOf(model, "head-without-srq"), model), model);
@@ -197,19 +197,19 @@ test("固定 QAT の family admission", async (t) => {
     ["extra-consumer", "前後に固定 SRQ"],
   ];
   for (const [fault, message] of rejections) {
-    await t.step(`改変 ${fault} を拒否する`, () => {
+    it(`改変 ${fault} を拒否する`, () => {
       assertThrows(() => admitGemma4Qat(graphOf("e2b", fault)), Error, message);
     });
   }
 
-  await t.step("未対応の model 名を拒否する", () => {
+  it("未対応の model 名を拒否する", () => {
     assertThrows(() => assertGemma4QatModel("12b"), Error, "未対応 model '12b'");
     assertEquals(assertGemma4QatModel("e2b"), "e2b");
     assertEquals(assertGemma4QatModel("e4b"), "e4b");
     assertThrows(() => admitGemma4Qat(graphOf("e2b"), "12b"), Error, "未対応 model '12b'");
   });
 
-  await t.step("PLE の格納・層数・次元をグラフへ突合する", () => {
+  it("PLE の格納・層数・次元をグラフへ突合する", () => {
     for (const model of ["e2b", "e4b"] as const) {
       assertGemma4QatPle(model, graphOf(model), pleIndexOf(model));
     }
@@ -237,17 +237,17 @@ test("固定 QAT の family admission", async (t) => {
   });
 });
 
-test("固定 QAT は MTP 指定を資産取得より前に拒否する", async (t) => {
+describe("固定 QAT は MTP 指定を資産取得より前に拒否する", () => {
   // 型側は `speculative?: never` で塞いであるが、JS の呼び手・`as` 経由・動的に組んだ option には
   // 効かない。実行時の拒否が**資産を 1 byte も取る前**に出ることを、存在しない取得元で確かめる。
-  await t.step("fromPretrained", async () => {
+  it("fromPretrained", async () => {
     await assertRejects(
       () => Gemma4QatPipeline.fromPretrained("does-not-exist", { speculative: true } as never),
       Error,
       "QAT の MTP は未対応",
     );
   });
-  await t.step("fromAssets", async () => {
+  it("fromAssets", async () => {
     await assertRejects(
       () => Gemma4QatPipeline.fromAssets({} as never, { speculative: true } as never),
       Error,
@@ -256,12 +256,12 @@ test("固定 QAT は MTP 指定を資産取得より前に拒否する", async (
   });
 });
 
-test("QAT のホスト RoPE", async (t) => {
+describe("QAT のホスト RoPE", () => {
   const spec = {
     sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
     full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
   } satisfies Gemma4RopeSpec;
-  await t.step("pad と回転しない次元を厳密に保存し、入力4本を返す", () => {
+  it("pad と回転しない次元を厳密に保存し、入力4本を返す", () => {
     const input = gemma4QatRopeInputs(spec, [0, 17, 127]);
     assertEquals(Object.keys(input).length, 4);
     for (const [key, tensor] of Object.entries(input)) {
@@ -286,14 +286,14 @@ test("QAT のホスト RoPE", async (t) => {
       }
     }
   });
-  await t.step("角度の f32 丸めを保ち、通常 Gemma の f64 契約へ戻らない", () => {
+  it("角度の f32 丸めを保ち、通常 Gemma の f64 契約へ戻らない", () => {
     // Torch f32: sin(tensor(127) * (1 / tensor(10))) = 0x3e086dee。
     // theta=10000、次元32/256は逆周波数1/10。べき乗そのものは厳密なので角度の丸めだけを検査する。
     const key = "rope_sliding_attention_sin";
     assertEquals(gemma4QatRopeInputs(spec, [127])[key].data[32], 0.13323184847831726);
     assertEquals(gemma4RopeInputs(spec, [127])[key].data[32], 0.13323204219341278);
   });
-  await t.step("両層種別 × 位置 5 点の cos / sin を golden とビット単位で突合する", async () => {
+  it("両層種別 × 位置 5 点の cos / sin を golden とビット単位で突合する", async () => {
     // 1 要素だけの検査では、逆周波数が厳密に表せる次元を選んだときに「べき乗段の丸めが
     // 抜けても緑」になる。golden は表全体を u32 で凍結してその抜けを捕まえる。
     // MUST: これは **karume 自身の出力の凍結**で、上流 Torch とのビット一致ではない
@@ -325,7 +325,7 @@ test("QAT のホスト RoPE", async (t) => {
       }
     }
   });
-  await t.step("不正な位置と f32 で表せない逆周波数を拒否する", () => {
+  it("不正な位置と f32 で表せない逆周波数を拒否する", () => {
     assertThrows(() => gemma4QatRopeInputs(spec, [-1]), Error, "非負整数");
     assertThrows(
       () =>

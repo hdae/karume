@@ -107,7 +107,7 @@
  */
 
 import { readFile } from "@karume/test-support/fs";
-import { test, type TestContext } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import {
   ExecutionError,
@@ -229,32 +229,30 @@ const FIXTURE_WEIGHTS = "f16-rounded";
 const FIXTURE_REFERENCE =
   "snapped-tile decode with upstream blend_v / blend_h in patchify space before unpatchify and clamp (CPU f32)";
 
-test({
-  name: "Wan2.2 TI2V VAE タイル参照: vae_tiles の 3 本（band / accept / wide）が揃っている",
-  // 1 本も無い環境は「生成していない」なので SKIP。1 本でもあるなら欠けは FAIL（chunk グラフの組とは別の組）。
-  ignore: !ANY_TILES,
-  fn: () => {
+// 1 本も無い環境は「生成していない」なので SKIP。1 本でもあるなら欠けは FAIL（chunk グラフの組とは別の組）。
+test.skipIf(!ANY_TILES)(
+  "Wan2.2 TI2V VAE タイル参照: vae_tiles の 3 本（band / accept / wide）が揃っている",
+  () => {
     assertEquals(
       TILE_ASSETS.filter(({ present }) => !present).map(({ path }) => path),
       [],
       `タイル参照の欠け（生成: ${GENERATE_TILES}）`,
     );
   },
-});
+);
 
-test({
-  name: "Wan2.2 TI2V VAE タイル参照: タイル参照があるなら照合の前提の chunk グラフの組（容器 2 本 + vae_chunks.*）も揃っている",
-  // タイル参照の書き手は chunk の組に依らない（HF の snapshot から書く）ので、この組み合わせは起こりうる。SKIP に
-  // すると GPU の照合が一度も走らないままレーンが緑で終わる。
-  ignore: !ANY_TILES,
-  fn: () => {
+// タイル参照の書き手は chunk の組に依らない（HF の snapshot から書く）ので、この組み合わせは起こりうる。SKIP に
+// すると GPU の照合が一度も走らないままレーンが緑で終わる。
+test.skipIf(!ANY_TILES)(
+  "Wan2.2 TI2V VAE タイル参照: タイル参照があるなら照合の前提の chunk グラフの組（容器 2 本 + vae_chunks.*）も揃っている",
+  () => {
     assertEquals(
       CHUNK_ASSETS.filter(({ present }) => !present).map(({ path }) => path),
       [],
       `タイル参照はあるが chunk グラフの組が欠けている（生成: ${GENERATE_CHUNKS}）`,
     );
   },
-});
+);
 
 /** タイル参照 1 本（F32 のテンソルとメタ — 書き手は `vae_tiling.write_fixture`）。 */
 type TileFixture = {
@@ -331,14 +329,12 @@ const LITERAL_LAYOUT: PlanLayout = {
   sampleChannels: SAMPLE_CHANNELS,
 };
 
-test({
-  name:
-    "Wan2.2 TI2V VAE タイル参照（GPU 不要）: accept の frames に VAE 段の末尾（finishWanVaeFrames）を当てた RGB が" +
+// 帯に依らない照合（unpatchify は置換・clamp は f32 の値を f32 の値へ写すだけ — 同じ入力なら丸めの差は出ない）。
+// 一部だけの組は在否のテストが落とすので、ここは 3 本揃った機だけで回す。
+test.skipIf(!ALL_TILES)(
+  "Wan2.2 TI2V VAE タイル参照（GPU 不要）: accept の frames に VAE 段の末尾（finishWanVaeFrames）を当てた RGB が" +
     "上流の unpatchify → clamp の frames_rgb と Uint32 一致",
-  // 帯に依らない照合（unpatchify は置換・clamp は f32 の値を f32 の値へ写すだけ — 同じ入力なら丸めの差は出ない）。
-  // 一部だけの組は在否のテストが落とすので、ここは 3 本揃った機だけで回す。
-  ignore: !ALL_TILES,
-  fn: async () => {
+  async () => {
     const spec = CASES.find(({ name }) => name === "accept");
     assert(spec !== undefined && spec.rgb, "accept のケース（frames_rgb を持つ）が表に無い");
     const fixture = await readTileFixture(ti2vVaeTileFixtureUrl("accept"));
@@ -363,7 +359,7 @@ test({
       "TS の unpatchify → clamp が上流の frames_rgb とビット一致しない",
     );
   },
-});
+);
 
 const absMax = (values: Float32Array): number =>
   values.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
@@ -404,38 +400,35 @@ const roundUpTwoDigits = (value: number): number => {
 const results = openResults("wan-ti2v-vae-tiles");
 
 /**
- * 未導出の帯（`undefined`）の候補を出して赤で止める step（band だけから作り、受入れと故障注入の maxAbs は並べるが
- * 候補に使わない。band が maxAbs を出す前に落ちた回は候補を出さない）。帯が導出済みなら何もしない。
+ * 未導出の帯（`undefined`）の候補を出して赤で止める step の本体（band だけから作り、受入れと故障注入の maxAbs は
+ * 並べるが候補に使わない。band が maxAbs を出す前に落ちた回は候補を出さない）。帯が導出済みなら step は SKIP
+ * （登録側の `it.skipIf`）。
  */
 const bandCandidate = async (
-  t: TestContext,
   observed: ReadonlyMap<string, number>,
   faults: ReadonlyMap<string, number>,
 ): Promise<void> => {
-  if (BAND !== undefined) return;
-  await t.step("帯の候補（未導出）", async () => {
-    const band = observed.get("band");
-    const candidate =
-      band === undefined
-        ? "band が maxAbs を出す前に落ちた — 候補にしない（落ちたケースを先に調べる）"
-        : band > 0
-          ? `band の maxAbs ${band.toExponential(3)} × 5 = ${(band * 5).toExponential(3)}` +
-            `（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(band * 5)}）`
-          : "band の maxAbs が 0 — × 5 で帯を導けない（照合の経路を先に調べる）";
-    const format = (value: number | undefined): string => value?.toExponential(3) ?? "—";
-    const accepted = ["accept", "accept-rgb", "wide"].map(
-      (label) => `${label} ${format(observed.get(label))}`,
-    );
-    const injected = [...faults].map(([label, value]) => `${label} ${format(value)}`);
-    const message = `帯が未導出 — ${candidate}。受入れの maxAbs（帯の決定に使わない）: ${accepted.join(
-      " / ",
-    )}。故障注入の maxAbs（C4 で帯の外かを判定）: ${
-      injected.length === 0 ? "—" : injected.join(" / ")
-    }`;
-    await runRecordedCase(results, { id: "band-candidate", failureNote: () => message }, () => {
-      console.log(`[wan-ti2v-vae-tiles] ${message}`);
-      throw new Error(message);
-    });
+  const band = observed.get("band");
+  const candidate =
+    band === undefined
+      ? "band が maxAbs を出す前に落ちた — 候補にしない（落ちたケースを先に調べる）"
+      : band > 0
+        ? `band の maxAbs ${band.toExponential(3)} × 5 = ${(band * 5).toExponential(3)}` +
+          `（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(band * 5)}）`
+        : "band の maxAbs が 0 — × 5 で帯を導けない（照合の経路を先に調べる）";
+  const format = (value: number | undefined): string => value?.toExponential(3) ?? "—";
+  const accepted = ["accept", "accept-rgb", "wide"].map(
+    (label) => `${label} ${format(observed.get(label))}`,
+  );
+  const injected = [...faults].map(([label, value]) => `${label} ${format(value)}`);
+  const message = `帯が未導出 — ${candidate}。受入れの maxAbs（帯の決定に使わない）: ${accepted.join(
+    " / ",
+  )}。故障注入の maxAbs（C4 で帯の外かを判定）: ${
+    injected.length === 0 ? "—" : injected.join(" / ")
+  }`;
+  await runRecordedCase(results, { id: "band-candidate", failureNote: () => message }, () => {
+    console.log(`[wan-ti2v-vae-tiles] ${message}`);
+    throw new Error(message);
   });
 };
 
@@ -485,37 +478,28 @@ const prepareModels = async () => {
 };
 
 /**
- * 未導出の帯（`undefined`）の候補を出して赤で止める step（band だけから作り、受入れの maxAbs は並べるが候補に
- * 使わない。band が maxAbs を出す前に落ちた回は候補を出さない）。帯が導出済みなら何もしない。
+ * 未導出の帯（`undefined`）の候補を出して赤で止める step の本体（band だけから作り、受入れの maxAbs は並べるが
+ * 候補に使わない。band が maxAbs を出す前に落ちた回は候補を出さない）。帯が導出済みなら step は SKIP（登録側の
+ * `it.skipIf`）。
  */
-const chunkBandCandidate = async (
-  t: TestContext,
-  observed: ReadonlyMap<ChunkCaseName, number>,
-): Promise<void> => {
-  if (CHUNK_BAND !== undefined) return;
-  await t.step("帯の候補（未導出）", async () => {
-    const band = observed.get("band");
-    const candidate =
-      band === undefined
-        ? "band が maxAbs を出す前に落ちた — 候補にしない（落ちたケースを先に調べる）"
-        : band > 0
-          ? `band の maxAbs ${band.toExponential(3)} × 5 = ${(band * 5).toExponential(3)}` +
-            `（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(band * 5)}）`
-          : "band の maxAbs が 0 — × 5 で帯を導けない（照合の経路を先に調べる）";
-    const accepted = CHUNK_CASES.filter(({ role }) => role === "accept").map(
-      ({ name }) => `${name} ${observed.get(name)?.toExponential(3) ?? "—"}`,
-    );
-    const message = `帯が未導出 — ${candidate}。受入れの maxAbs（帯の決定に使わない）: ${accepted.join(
-      " / ",
-    )}`;
-    await runRecordedCase(
-      chunkResults,
-      { id: "band-candidate", failureNote: () => message },
-      () => {
-        console.log(`[wan-ti2v-vae] ${message}`);
-        throw new Error(message);
-      },
-    );
+const chunkBandCandidate = async (observed: ReadonlyMap<ChunkCaseName, number>): Promise<void> => {
+  const band = observed.get("band");
+  const candidate =
+    band === undefined
+      ? "band が maxAbs を出す前に落ちた — 候補にしない（落ちたケースを先に調べる）"
+      : band > 0
+        ? `band の maxAbs ${band.toExponential(3)} × 5 = ${(band * 5).toExponential(3)}` +
+          `（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(band * 5)}）`
+        : "band の maxAbs が 0 — × 5 で帯を導けない（照合の経路を先に調べる）";
+  const accepted = CHUNK_CASES.filter(({ role }) => role === "accept").map(
+    ({ name }) => `${name} ${observed.get(name)?.toExponential(3) ?? "—"}`,
+  );
+  const message = `帯が未導出 — ${candidate}。受入れの maxAbs（帯の決定に使わない）: ${accepted.join(
+    " / ",
+  )}`;
+  await runRecordedCase(chunkResults, { id: "band-candidate", failureNote: () => message }, () => {
+    console.log(`[wan-ti2v-vae] ${message}`);
+    throw new Error(message);
   });
 };
 
@@ -551,282 +535,274 @@ type ChunkRun = {
 };
 
 /**
- * Opens the two chunk graphs and the chunk fixtures, builds both product Sessions and the cache
- * residents on one device and hands them to `body`, so the default case and the opt-in parity case
- * share one lifecycle and one teardown order.
+ * Registers, in the enclosing describe, a beforeAll that opens the two chunk graphs and the chunk
+ * fixtures and builds both product Sessions and the cache residents on one device, and an afterAll
+ * that tears them down, so the default suite and the opt-in parity suite share one lifecycle and one
+ * teardown order. Returns the accessor the its read the run through.
  */
-const withChunkSessions = async (body: (run: ChunkRun) => Promise<void>): Promise<void> => {
-  const models = await prepareModels();
-  const layout = wanVaeChunkLayout(models.first, models.next);
-  const fixtures = {
-    band: await readFixture(ti2vVaeFixtureUrl("band")),
-    accept: await readFixture(ti2vVaeFixtureUrl("accept")),
-    long: await readFixture(ti2vVaeFixtureUrl("long")),
-  };
-
-  const gpu = verifyRunningGpu(await acquireTestGpu());
+const registerChunkSessions = (): (() => ChunkRun) => {
+  let gpu: GpuContext | undefined;
   let first: Session | undefined;
   let next: Session | undefined;
   let caches: WanVaeChunkCaches | undefined;
-  let failure: { readonly error: unknown } | undefined;
-  try {
-    first = await models.first.createContainerSession(gpu);
-    next = await models.next.createContainerSession(gpu);
-    caches = await WanVaeChunkCaches.create(gpu, layout);
-    await body({ gpu, layout, sessions: { first, next }, caches, fixtures });
-  } catch (error) {
-    failure = { error };
-    throw error;
-  } finally {
+  let run: ChunkRun | undefined;
+  beforeAll(async () => {
+    const models = await prepareModels();
+    const layout = wanVaeChunkLayout(models.first, models.next);
+    const fixtures = {
+      band: await readFixture(ti2vVaeFixtureUrl("band")),
+      accept: await readFixture(ti2vVaeFixtureUrl("accept")),
+      long: await readFixture(ti2vVaeFixtureUrl("long")),
+    };
+
+    const device = verifyRunningGpu(await acquireTestGpu());
+    gpu = device;
+    first = await models.first.createContainerSession(device);
+    next = await models.next.createContainerSession(device);
+    caches = await WanVaeChunkCaches.create(device, layout);
+    run = { gpu: device, layout, sessions: { first, next }, caches, fixtures };
+  });
+  afterAll(async () => {
+    const device = gpu;
     // MUST: Session → 常駐 → device の順で畳む（2.1 の e2e と同じ順・同じ理由 — 常駐は Session の焼き込みから
-    // 参照されうるので Session を先に畳む。1 段が落ちても残りの段を必ず通し、畳む失敗で本体の失敗を上書きしない）。
+    // 参照されうるので Session を先に畳む。1 段が落ちても残りの段を必ず通す）。Vitest reports an afterAll failure
+    // apart from the its, so a teardown failure cannot overwrite a test failure.
     await disposeSteps([
-      () => {
-        if (failure !== undefined) throw failure.error;
-      },
       () => first?.dispose(),
       () => next?.dispose(),
       () => caches?.dispose(),
       // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
-      () => settleReleases(gpu),
-      () => gpu.destroy(),
+      () => (device === undefined ? undefined : settleReleases(device)),
+      () => device?.destroy(),
     ]);
-  }
+  });
+  return () => {
+    if (run === undefined) throw new Error("chunk-sequence setup (beforeAll) did not complete");
+    return run;
+  };
 };
 
 // Default run: the chunk layout and cache size, every case decoded from NaN-poisoned frames with 0
 // non-finite, the fused-attention census, the fault loop's Uint32 identity with the product path and
 // the copyOutputs rejection. It owns the per-case results.json ids; the band comparison with the
-// diffusers `_decode` is the opt-in case below.
-test({
-  name:
-    "Wan2.2 TI2V VAE chunk 列: 常駐 cache の first → next の取り決め・毒値のフレームから非有限 0・融合 attention の" +
+// diffusers `_decode` is the opt-in suite below.
+describe.skipIf(!CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE)(
+  "Wan2.2 TI2V VAE chunk 列: 常駐 cache の first → next の取り決め・毒値のフレームから非有限 0・融合 attention の" +
     " 3 段・故障注入のループと製品の経路の Uint32 一致（実 GPU）",
-  ignore: !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE,
-  fn: async (t) => {
-    await withChunkSessions(async ({ gpu, layout, sessions, caches: liveCaches, fixtures }) => {
-      await t.step(
-        "取り決め: 潜在 48 ch・タイル 16・出口 12 ch・cache は表の 32 本（first は time_conv の 2 本を除く 30 本）",
-        () => {
-          assertEquals(
-            [layout.latentChannels, layout.tile, layout.sampleTile, layout.sampleChannels],
-            [LATENT_CHANNELS, TILE, SAMPLE_TILE, SAMPLE_CHANNELS],
-          );
-          assertEquals(
-            layout.next.caches,
-            CACHE_TABLE.map(({ name }) => name),
-          );
-          assertEquals(
-            layout.next.caches.filter((name) => !layout.first.caches.includes(name)),
-            [...TIME_CONV_CACHES],
-          );
-          assertEquals(layout.first.frameShape, [SAMPLE_CHANNELS, 1, SAMPLE_TILE, SAMPLE_TILE]);
-          assertEquals(layout.next.frameShape, [SAMPLE_CHANNELS, 4, SAMPLE_TILE, SAMPLE_TILE]);
-        },
+  () => {
+    const chunkRun = registerChunkSessions();
+
+    it("取り決め: 潜在 48 ch・タイル 16・出口 12 ch・cache は表の 32 本（first は time_conv の 2 本を除く 30 本）", () => {
+      const { layout } = chunkRun();
+      assertEquals(
+        [layout.latentChannels, layout.tile, layout.sampleTile, layout.sampleChannels],
+        [LATENT_CHANNELS, TILE, SAMPLE_TILE, SAMPLE_CHANNELS],
       );
+      assertEquals(
+        layout.next.caches,
+        CACHE_TABLE.map(({ name }) => name),
+      );
+      assertEquals(
+        layout.next.caches.filter((name) => !layout.first.caches.includes(name)),
+        [...TIME_CONV_CACHES],
+      );
+      assertEquals(layout.first.frameShape, [SAMPLE_CHANNELS, 1, SAMPLE_TILE, SAMPLE_TILE]);
+      assertEquals(layout.next.frameShape, [SAMPLE_CHANNELS, 4, SAMPLE_TILE, SAMPLE_TILE]);
+    });
 
-      await t.step("観測: タイルの頭の cache のゼロ化（ホストからの書き込み）の量と時間", () => {
-        // 2.1 と同じ記録（GPU 側でゼロを書く口が runtime に無い — `vae-chunks.ts` の doc）。段 5 で 1 生成あたり
-        // タイル数ぶん払う。
-        const started = performance.now();
-        liveCaches.zero();
-        const hostMs = performance.now() - started;
-        console.log(
-          `[wan-ti2v-vae] zero: bytes=${liveCaches.cacheBytes} hostMs=${hostMs.toFixed(1)}`,
-        );
-        assertEquals(liveCaches.cacheBytes, CACHE_BYTES);
-      });
+    it("観測: タイルの頭の cache のゼロ化（ホストからの書き込み）の量と時間", () => {
+      const { caches: liveCaches } = chunkRun();
+      // 2.1 と同じ記録（GPU 側でゼロを書く口が runtime に無い — `vae-chunks.ts` の doc）。段 5 で 1 生成あたり
+      // タイル数ぶん払う。
+      const started = performance.now();
+      liveCaches.zero();
+      const hostMs = performance.now() - started;
+      console.log(
+        `[wan-ti2v-vae] zero: bytes=${liveCaches.cacheBytes} hostMs=${hostMs.toFixed(1)}`,
+      );
+      assertEquals(liveCaches.cacheBytes, CACHE_BYTES);
+    });
 
-      for (const { name, chunks: expectedChunks } of CHUNK_CASES) {
-        await t.step(
-          `${name}: chunk 列を毒値のフレームから回して非有限 0（chunk 数・フレームの形・要素数）`,
-          async () => {
-            await runRecordedCase(chunkResults, { id: name }, async () => {
-              const fixture = fixtures[name];
-              const chunks = wanVaeChunkCount(layout, fixture.latents);
-              assertEquals(chunks, expectedChunks, `${name} の chunk 数`);
-              assertEquals(fixture.frameShape, [
-                SAMPLE_CHANNELS,
-                wanVaeFrameCount(chunks),
-                SAMPLE_TILE,
-                SAMPLE_TILE,
-              ]);
-              await poisonFrames(liveCaches, chunks);
-              const started = performance.now();
-              const got = await decodeWanVaeTile(gpu, sessions, liveCaches, fixture.latents);
-              const elapsedMs = performance.now() - started;
-              assertEquals(got.length, fixture.frames.length, `${name}: 要素数`);
-              const nonFinite = countNonFinite(got);
-              console.log(
-                `[wan-ti2v-vae] ${name}: chunks=${chunks} nonFinite=${nonFinite} ` +
-                  `decodeMs=${elapsedMs.toFixed(0)}`,
-              );
-              assertEquals(nonFinite, 0, `${name}: 非有限（写されなかったフレーム）`);
-              return undefined;
-            });
-          },
-        );
-      }
-
-      await t.step("mid の attention（D = 1024）は両グラフで融合 attention の 3 段を通る", () => {
-        // 直近のタイルの計画から（帯が未導出でも各ケースは照合の前に回し切るので census は埋まる）。
-        for (const [graph, session] of Object.entries(sessions)) {
-          const { dispatches } = attentionPipelines(graph, session.diagnostics());
-          for (const kernel of ATTENTION_KERNELS) {
-            assert(
-              dispatches[kernel] > 0,
-              `${graph}: ${kernel} の dispatch が 0 本（${JSON.stringify(dispatches)}）`,
-            );
-          }
-        }
-      });
-
-      await t.step("故障注入のループは故障なしなら製品の経路と Uint32 で一致", async () => {
-        const fixture = fixtures.accept;
-        const chunks = wanVaeChunkCount(layout, fixture.latents);
-        // 毒値は各デコードの前に入れ直す（2 本目が 1 本目の書いたフレームを読み戻して一致を装う形を消す）。
-        await poisonFrames(liveCaches, chunks);
-        const product = await decodeWanVaeTile(gpu, sessions, liveCaches, fixture.latents);
-        await poisonFrames(liveCaches, chunks);
-        const looped = await decodeWithFault(gpu, sessions, liveCaches, fixture.latents, {
-          kind: "none",
+    for (const { name, chunks: expectedChunks } of CHUNK_CASES) {
+      it(`${name}: chunk 列を毒値のフレームから回して非有限 0（chunk 数・フレームの形・要素数）`, async () => {
+        const { gpu, layout, sessions, caches: liveCaches, fixtures } = chunkRun();
+        await runRecordedCase(chunkResults, { id: name }, async () => {
+          const fixture = fixtures[name];
+          const chunks = wanVaeChunkCount(layout, fixture.latents);
+          assertEquals(chunks, expectedChunks, `${name} の chunk 数`);
+          assertEquals(fixture.frameShape, [
+            SAMPLE_CHANNELS,
+            wanVaeFrameCount(chunks),
+            SAMPLE_TILE,
+            SAMPLE_TILE,
+          ]);
+          await poisonFrames(liveCaches, chunks);
+          const started = performance.now();
+          const got = await decodeWanVaeTile(gpu, sessions, liveCaches, fixture.latents);
+          const elapsedMs = performance.now() - started;
+          assertEquals(got.length, fixture.frames.length, `${name}: 要素数`);
+          const nonFinite = countNonFinite(got);
+          console.log(
+            `[wan-ti2v-vae] ${name}: chunks=${chunks} nonFinite=${nonFinite} ` +
+              `decodeMs=${elapsedMs.toFixed(0)}`,
+          );
+          assertEquals(nonFinite, 0, `${name}: 非有限（写されなかったフレーム）`);
+          return undefined;
         });
-        assertEquals(
-          looped.filter((value) => !Number.isFinite(value)).length,
-          0,
-          "非有限（ループが写さなかったフレーム）",
-        );
-        assert(bitsEqual(product, looped), "テストのループが製品の経路と違う");
       });
+    }
 
-      await t.step(
-        "故障注入: chunk 2 以降も first を使う → copyOutputs の大きさで enqueue が拒まれる",
-        async () => {
-          // first の出力フレームは [12,1,…] で、next 用のフレームの常駐（[12,4,…]）へは写せない —
-          // runtime の `copyOutputs` の大きさの検査が dispatch を積む前に落とす（値を比べる前の赤）。
-          const error = await assertRejects(
-            () =>
-              decodeWithFault(gpu, sessions, liveCaches, fixtures.accept.latents, {
-                kind: "first-for-all",
-              }),
-            ExecutionError,
-            "copyOutputs",
+    it("mid の attention（D = 1024）は両グラフで融合 attention の 3 段を通る", () => {
+      const { sessions } = chunkRun();
+      // 直近のタイルの計画から（帯が未導出でも各ケースは照合の前に回し切るので census は埋まる）。
+      for (const [graph, session] of Object.entries(sessions)) {
+        const { dispatches } = attentionPipelines(graph, session.diagnostics());
+        for (const kernel of ATTENTION_KERNELS) {
+          assert(
+            dispatches[kernel] > 0,
+            `${graph}: ${kernel} の dispatch が 0 本（${JSON.stringify(dispatches)}）`,
           );
-          // 拒んだのが chunk 1 のフレームの常駐と first のフレームの形の食い違いであること（他の写し先の拒否と
-          // 取り違えない）。
-          assertStringIncludes(error.message, "'frame 1'");
-          assertStringIncludes(error.message, `[${layout.first.frameShape.join(",")}]`);
-        },
+        }
+      }
+    });
+
+    it("故障注入のループは故障なしなら製品の経路と Uint32 で一致", async () => {
+      const { gpu, layout, sessions, caches: liveCaches, fixtures } = chunkRun();
+      const fixture = fixtures.accept;
+      const chunks = wanVaeChunkCount(layout, fixture.latents);
+      // 毒値は各デコードの前に入れ直す（2 本目が 1 本目の書いたフレームを読み戻して一致を装う形を消す）。
+      await poisonFrames(liveCaches, chunks);
+      const product = await decodeWanVaeTile(gpu, sessions, liveCaches, fixture.latents);
+      await poisonFrames(liveCaches, chunks);
+      const looped = await decodeWithFault(gpu, sessions, liveCaches, fixture.latents, {
+        kind: "none",
+      });
+      assertEquals(
+        looped.filter((value) => !Number.isFinite(value)).length,
+        0,
+        "非有限（ループが写さなかったフレーム）",
       );
+      assert(bitsEqual(product, looped), "テストのループが製品の経路と違う");
+    });
+
+    it("故障注入: chunk 2 以降も first を使う → copyOutputs の大きさで enqueue が拒まれる", async () => {
+      const { gpu, layout, sessions, caches: liveCaches, fixtures } = chunkRun();
+      // first の出力フレームは [12,1,…] で、next 用のフレームの常駐（[12,4,…]）へは写せない —
+      // runtime の `copyOutputs` の大きさの検査が dispatch を積む前に落とす（値を比べる前の赤）。
+      const error = await assertRejects(
+        () =>
+          decodeWithFault(gpu, sessions, liveCaches, fixtures.accept.latents, {
+            kind: "first-for-all",
+          }),
+        ExecutionError,
+        "copyOutputs",
+      );
+      // 拒んだのが chunk 1 のフレームの常駐と first のフレームの形の食い違いであること（他の写し先の拒否と
+      // 取り違えない）。
+      assertStringIncludes(error.message, "'frame 1'");
+      assertStringIncludes(error.message, `[${layout.first.frameShape.join(",")}]`);
     });
   },
-});
+);
 
 // Upstream parity (the chunk sequence against the diffusers `_decode` under the absolute band), so it
 // is opt-in, together with the cache fault injections that only prove the band is live and the
 // band-candidate step. It writes the fault/* and band-candidate results.json ids; the per-case ids
-// belong to the default case above, and writing them here would duplicate its settlements.
-test({
-  name:
-    "Wan2.2 TI2V VAE chunk 列: 常駐 cache の first → next が上流の _decode（unpatchify の前）と帯の中で一致（実 GPU）" +
+// belong to the default suite above, and writing them here would duplicate its settlements.
+describe.skipIf(!CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+  "Wan2.2 TI2V VAE chunk 列: 常駐 cache の first → next が上流の _decode（unpatchify の前）と帯の中で一致（実 GPU）" +
     UPSTREAM_PARITY_OPT_IN,
-  ignore: !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE || !UPSTREAM_PARITY,
-  fn: async (t) => {
-    await withChunkSessions(async ({ gpu, layout, sessions, caches: liveCaches, fixtures }) => {
-      /** ケースごとの maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
-      const observed = new Map<ChunkCaseName, number>();
+  () => {
+    const chunkRun = registerChunkSessions();
+    /** ケースごとの maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
+    const observed = new Map<ChunkCaseName, number>();
 
-      const compareChunks = (name: ChunkCaseName, got: Float32Array) => {
+    const compareChunks = (name: ChunkCaseName, got: Float32Array) => {
+      const fixture = chunkRun().fixtures[name];
+      assertEquals(got.length, fixture.frames.length, `${name}: 要素数`);
+      const report = allclose(got, fixture.frames, CHUNK_TOLERANCE);
+      const referenceMax = fixture.frames.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+      return { report, referenceMax, ratio: report.maxAbsError / referenceMax };
+    };
+
+    for (const { name, chunks: expectedChunks } of CHUNK_CASES) {
+      it(`${name}: chunk 列が上流と帯の中で一致（フレームは毒値で始める）`, async () => {
+        const { gpu, layout, sessions, caches: liveCaches, fixtures } = chunkRun();
         const fixture = fixtures[name];
-        assertEquals(got.length, fixture.frames.length, `${name}: 要素数`);
-        const report = allclose(got, fixture.frames, CHUNK_TOLERANCE);
-        const referenceMax = fixture.frames.reduce(
-          (max, value) => Math.max(max, Math.abs(value)),
-          0,
+        const chunks = wanVaeChunkCount(layout, fixture.latents);
+        assertEquals(chunks, expectedChunks, `${name} の chunk 数`);
+        await poisonFrames(liveCaches, chunks);
+        const got = await decodeWanVaeTile(gpu, sessions, liveCaches, fixture.latents);
+        const { report, referenceMax, ratio } = compareChunks(name, got);
+        console.log(
+          `[wan-ti2v-vae] ${name}: chunks=${chunks} maxAbs=${report.maxAbsError} ` +
+            `refMax=${referenceMax} ratio=${ratio} nonFinite=${report.nonFiniteCount}`,
         );
-        return { report, referenceMax, ratio: report.maxAbsError / referenceMax };
-      };
+        assertEquals(report.nonFiniteCount, 0, `${name}: 非有限（写されなかったフレーム）`);
+        observed.set(name, report.maxAbsError);
+        if (CHUNK_BAND === undefined) {
+          throw new Error(
+            `${name}: 帯が未導出（maxAbs ${report.maxAbsError}）— band の maxAbs × 5 を帯の定数へ` +
+              "書く（帯の候補は最後の step が出す）",
+          );
+        }
+        assert(report.pass, `${name}: maxAbs ${report.maxAbsError} が帯 ${CHUNK_BAND} の外`);
+      });
+    }
 
-      for (const { name, chunks: expectedChunks } of CHUNK_CASES) {
-        await t.step(
-          `${name}: chunk 列が上流と帯の中で一致（フレームは毒値で始める）`,
-          async () => {
-            const fixture = fixtures[name];
-            const chunks = wanVaeChunkCount(layout, fixture.latents);
-            assertEquals(chunks, expectedChunks, `${name} の chunk 数`);
-            await poisonFrames(liveCaches, chunks);
-            const got = await decodeWanVaeTile(gpu, sessions, liveCaches, fixture.latents);
-            const { report, referenceMax, ratio } = compareChunks(name, got);
-            console.log(
-              `[wan-ti2v-vae] ${name}: chunks=${chunks} maxAbs=${report.maxAbsError} ` +
-                `refMax=${referenceMax} ratio=${ratio} nonFinite=${report.nonFiniteCount}`,
-            );
-            assertEquals(report.nonFiniteCount, 0, `${name}: 非有限（写されなかったフレーム）`);
-            observed.set(name, report.maxAbsError);
-            if (CHUNK_BAND === undefined) {
-              throw new Error(
-                `${name}: 帯が未導出（maxAbs ${report.maxAbsError}）— band の maxAbs × 5 を帯の定数へ` +
-                  "書く（帯の候補は最後の step が出す）",
-              );
+    const faults: readonly { readonly label: string; readonly fault: Fault }[] = [
+      {
+        label: "cache 更新忘れ（copyOutputs から 1 本外す）",
+        fault: { kind: "drop-cache", cache: DROPPED_CACHE },
+      },
+      { label: "cache の 2 フレームの順を逆にする", fault: { kind: "swap-cache-frames" } },
+      { label: "タイルの頭で cache をゼロに戻さない", fault: { kind: "skip-zero" } },
+    ];
+    for (const { label, fault } of faults) {
+      it(`故障注入: ${label} → accept が帯の外`, async () => {
+        const { gpu, sessions, caches: liveCaches, fixtures } = chunkRun();
+        await runRecordedCase(
+          chunkResults,
+          { id: `fault/${fault.kind}` },
+          async ({ measurements }) => {
+            if (fault.kind === "skip-zero") {
+              // 前のタイル（band）の cache を残したまま accept を回す。
+              await decodeWanVaeTile(gpu, sessions, liveCaches, fixtures.band.latents);
             }
-            assert(report.pass, `${name}: maxAbs ${report.maxAbsError} が帯 ${CHUNK_BAND} の外`);
+            const got = await decodeWithFault(
+              gpu,
+              sessions,
+              liveCaches,
+              fixtures.accept.latents,
+              fault,
+            );
+            const { report, ratio } = compareChunks("accept", got);
+            measurements.push({
+              output: `frames(fault ${fault.kind})`,
+              maxAbs: report.maxAbsError,
+              maxRel: report.maxRelError,
+              tolerance: CHUNK_TOLERANCE,
+              stage: "karume",
+            });
+            console.log(
+              `[wan-ti2v-vae] fault ${fault.kind}: maxAbs=${report.maxAbsError} ratio=${ratio}` +
+                (CHUNK_BAND === undefined
+                  ? ""
+                  : ` band×${(report.maxAbsError / CHUNK_BAND).toFixed(1)}`),
+            );
+            if (CHUNK_BAND === undefined) {
+              throw new Error(`${label}: 帯が未導出（故障注入の maxAbs ${report.maxAbsError}）`);
+            }
+            assert(!report.pass, `${label}: 帯 ${CHUNK_BAND} の中に収まった（帯が広すぎる兆候）`);
+            return undefined;
           },
         );
-      }
+      });
+    }
 
-      const faults: readonly { readonly label: string; readonly fault: Fault }[] = [
-        {
-          label: "cache 更新忘れ（copyOutputs から 1 本外す）",
-          fault: { kind: "drop-cache", cache: DROPPED_CACHE },
-        },
-        { label: "cache の 2 フレームの順を逆にする", fault: { kind: "swap-cache-frames" } },
-        { label: "タイルの頭で cache をゼロに戻さない", fault: { kind: "skip-zero" } },
-      ];
-      for (const { label, fault } of faults) {
-        await t.step(`故障注入: ${label} → accept が帯の外`, async () => {
-          await runRecordedCase(
-            chunkResults,
-            { id: `fault/${fault.kind}` },
-            async ({ measurements }) => {
-              if (fault.kind === "skip-zero") {
-                // 前のタイル（band）の cache を残したまま accept を回す。
-                await decodeWanVaeTile(gpu, sessions, liveCaches, fixtures.band.latents);
-              }
-              const got = await decodeWithFault(
-                gpu,
-                sessions,
-                liveCaches,
-                fixtures.accept.latents,
-                fault,
-              );
-              const { report, ratio } = compareChunks("accept", got);
-              measurements.push({
-                output: `frames(fault ${fault.kind})`,
-                maxAbs: report.maxAbsError,
-                maxRel: report.maxRelError,
-                tolerance: CHUNK_TOLERANCE,
-                stage: "karume",
-              });
-              console.log(
-                `[wan-ti2v-vae] fault ${fault.kind}: maxAbs=${report.maxAbsError} ratio=${ratio}` +
-                  (CHUNK_BAND === undefined
-                    ? ""
-                    : ` band×${(report.maxAbsError / CHUNK_BAND).toFixed(1)}`),
-              );
-              if (CHUNK_BAND === undefined) {
-                throw new Error(`${label}: 帯が未導出（故障注入の maxAbs ${report.maxAbsError}）`);
-              }
-              assert(!report.pass, `${label}: 帯 ${CHUNK_BAND} の中に収まった（帯が広すぎる兆候）`);
-              return undefined;
-            },
-          );
-        });
-      }
-
-      await chunkBandCandidate(t, observed);
-    });
+    it.skipIf(CHUNK_BAND !== undefined)("帯の候補（未導出）", () => chunkBandCandidate(observed));
   },
-});
+);
 
 /** The two product Sessions, the cache residents and the tile fixtures one tile-decode case runs on. */
 type TileRun = {
@@ -842,63 +818,67 @@ type TileRun = {
 };
 
 /**
- * Opens the two chunk graphs and the tile fixtures, builds both product Sessions and the cache
- * residents on one device that records a device loss, and hands them to `body`, so the default case
- * and the opt-in parity case share one lifecycle and one teardown order.
+ * Registers, in the enclosing describe, a beforeAll that opens the two chunk graphs and the tile
+ * fixtures and builds both product Sessions and the cache residents on one device that records a
+ * device loss, and an afterAll that tears them down, so the default suite and the opt-in parity suite
+ * share one lifecycle and one teardown order. Returns the accessor the its read the run through.
  */
-const withTileSessions = async (body: (run: TileRun) => Promise<void>): Promise<void> => {
-  const models = await prepareModels();
-  const layout = wanVaeChunkLayout(models.first, models.next);
-  const compression = wanSpatialCompression(layout, WAN22_TI2V_GENERATION);
-  const fixtures: Readonly<Record<CaseName, TileFixture>> = {
-    band: await readTileFixture(ti2vVaeTileFixtureUrl("band")),
-    accept: await readTileFixture(ti2vVaeTileFixtureUrl("accept")),
-    wide: await readTileFixture(ti2vVaeTileFixtureUrl("wide")),
-  };
-
-  let deviceLost: string | undefined;
-  const gpu = verifyRunningGpu(
-    await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    }),
-  );
+const registerTileSessions = (): (() => TileRun) => {
+  let gpu: GpuContext | undefined;
   let first: Session | undefined;
   let next: Session | undefined;
   let caches: WanVaeChunkCaches | undefined;
-  let failure: { readonly error: unknown } | undefined;
-  try {
-    first = await models.first.createContainerSession(gpu);
-    next = await models.next.createContainerSession(gpu);
-    caches = await WanVaeChunkCaches.create(gpu, layout);
-    await body({
-      gpu,
+  let run: TileRun | undefined;
+  beforeAll(async () => {
+    const models = await prepareModels();
+    const layout = wanVaeChunkLayout(models.first, models.next);
+    const compression = wanSpatialCompression(layout, WAN22_TI2V_GENERATION);
+    const fixtures: Readonly<Record<CaseName, TileFixture>> = {
+      band: await readTileFixture(ti2vVaeTileFixtureUrl("band")),
+      accept: await readTileFixture(ti2vVaeTileFixtureUrl("accept")),
+      wide: await readTileFixture(ti2vVaeTileFixtureUrl("wide")),
+    };
+
+    let deviceLost: string | undefined;
+    const device = verifyRunningGpu(
+      await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      }),
+    );
+    gpu = device;
+    first = await models.first.createContainerSession(device);
+    next = await models.next.createContainerSession(device);
+    caches = await WanVaeChunkCaches.create(device, layout);
+    run = {
+      gpu: device,
       layout,
       compression,
       sessions: { first, next },
       caches,
       fixtures,
       deviceLost: () => deviceLost,
-    });
-  } catch (error) {
-    failure = { error };
-    throw error;
-  } finally {
-    // MUST: Session → 常駐 → device の順で畳む（2.1 / 段 4 の e2e と同じ — 1 段が落ちても残りの段を必ず通し、
-    // 本体の失敗を先頭の段に置いて上書きさせない）。
+    };
+  });
+  afterAll(async () => {
+    const device = gpu;
+    // MUST: Session → 常駐 → device の順で畳む（2.1 / 段 4 の e2e と同じ — 1 段が落ちても残りの段を必ず通す）。
+    // Vitest reports an afterAll failure apart from the its, so a teardown failure cannot overwrite a test
+    // failure.
     await disposeSteps([
-      () => {
-        if (failure !== undefined) throw failure.error;
-      },
       () => first?.dispose(),
       () => next?.dispose(),
       () => caches?.dispose(),
       // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
-      () => settleReleases(gpu),
-      () => gpu.destroy(),
+      () => (device === undefined ? undefined : settleReleases(device)),
+      () => device?.destroy(),
     ]);
-  }
+  });
+  return () => {
+    if (run === undefined) throw new Error("tile-decode setup (beforeAll) did not complete");
+    return run;
+  };
 };
 
 /**
@@ -949,369 +929,339 @@ const decodeAcceptCase = async (run: TileRun) => {
 
 // Default run: the TS/Python plan equality, the degenerate Uint32 gate, and band / accept / wide
 // decoded from NaN-poisoned frames with 0 non-finite and no device lost. It owns the per-case
-// results.json ids; the band comparisons with the upstream tiled reference are the opt-in case below.
-test({
-  name:
-    "Wan2.2 TI2V VAE タイル decode: 計画が Python と一致・縮退門（Uint32）・band / accept / wide を毒値のフレームから" +
+// results.json ids; the band comparisons with the upstream tiled reference are the opt-in suite below.
+describe.skipIf(!ALL_TILES || !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE)(
+  "Wan2.2 TI2V VAE タイル decode: 計画が Python と一致・縮退門（Uint32）・band / accept / wide を毒値のフレームから" +
     "回して非有限 0・device lost なし（実 GPU）",
-  ignore: !ALL_TILES || !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const degenerate = await readFixture(ti2vVaeFixtureUrl(DEGENERATE_CASE));
-    await withTileSessions(async (run) => {
-      const { gpu, layout, compression, sessions, caches: liveCaches, fixtures } = run;
-      /** ケース名 → 非有限の数（門 4 — 判定の前に積む）。 */
-      const nonFinite = new Map<string, number>();
+  () => {
+    let degenerate: Fixture | undefined;
+    beforeAll(async () => {
+      degenerate = await readFixture(ti2vVaeFixtureUrl(DEGENERATE_CASE));
+    });
+    const tileRun = registerTileSessions();
+    /** ケース名 → 非有限の数（門 4 — 判定の前に積む）。 */
+    const nonFinite = new Map<string, number>();
 
-      /** Records the non-finite count of one case, then fails when it is not 0. */
-      const assertFinite = (
-        label: string,
-        got: Float32Array,
-        want: Float32Array,
-        extra: string,
-      ) => {
-        assertEquals(got.length, want.length, "要素数");
-        const count = countNonFinite(got);
-        nonFinite.set(label, count);
-        console.log(`[wan-ti2v-vae-tiles] ${label}: nonFinite=${count}${extra}`);
-        if (count > 0) {
-          throw new Error(`${label}: 非有限 ${count} 個（写されなかったフレーム）`);
-        }
-      };
-
-      await t.step(
-        "計画: TS の計画（資産の入力形から・2.2 の記述子）がフィクスチャのメタ（Python）と一致",
-        () => {
-          assertEquals(
-            [layout.latentChannels, layout.tile, layout.sampleTile, layout.sampleChannels],
-            [LATENT_CHANNELS, TILE, SAMPLE_TILE, SAMPLE_CHANNELS],
-          );
-          assertWanVaeMatchesGeneration(layout, WAN22_TI2V_GENERATION, OWNER);
-          for (const { name, role, chunks, height, width, full, rgb } of CASES) {
-            const fixture = fixtures[name];
-            const latents = fixture.tensor("latents");
-            assertEquals(
-              latents.shape,
-              [LATENT_CHANNELS, chunks, height, width],
-              `${name} の潜在の形`,
-            );
-            assertEquals(
-              {
-                role: fixture.meta("role"),
-                weights: fixture.meta("weights"),
-                reference: fixture.meta("reference"),
-              },
-              { role, weights: FIXTURE_WEIGHTS, reference: FIXTURE_REFERENCE },
-              `${name} の役割と素性（f16 の丸め・patchify 空間の参照）`,
-            );
-            const plan = planFor(layout, latents.shape);
-            const ours = planMeta(plan);
-            const theirs = Object.fromEntries(
-              Object.keys(ours).map((key) => [key, fixture.meta(key)]),
-            );
-            assertEquals(ours, theirs, `${name} の幾何`);
-            const frames = wanVaeFrameCount(chunks);
-            assertEquals(
-              fixture.tensor("frames").shape,
-              [SAMPLE_CHANNELS, frames, height * plan.scale, width * plan.scale],
-              `${name} の frames の形（patchify 空間）`,
-            );
-            assertEquals(fixture.has("frames_full"), full, `${name} の frames_full の有無`);
-            assertEquals(fixture.has("frames_rgb"), rgb, `${name} の frames_rgb の有無`);
-            if (rgb) {
-              assertEquals(
-                fixture.tensor("frames_rgb").shape,
-                [RGB_CHANNELS, frames, height * compression, width * compression],
-                `${name} の frames_rgb の形`,
-              );
-            }
-          }
-          const band = planFor(layout, fixtures.band.tensor("latents").shape);
-          assertEquals(wanVaeTileCount(band), 12);
-          assertEquals([...band.rows.starts], [0, 7, 14]);
-          assertEquals([...band.cols.starts], [0, 12, 24, 36]);
-          assertEquals(wanVaeTileCount(planFor(layout, fixtures.wide.tensor("latents").shape)), 28);
-        },
-      );
-
-      await t.step(
-        "縮退門: 潜在 16×16（1 枚）ではタイル経路 ≡ 非タイルの chunk 列（Uint32）",
-        async () => {
-          const expectedChunks = CHUNK_CASES.find(({ name }) => name === DEGENERATE_CASE)?.chunks;
-          assert(expectedChunks !== undefined, `chunk 列のケース '${DEGENERATE_CASE}' が表に無い`);
-          assertEquals(
-            degenerate.latentShape,
-            [LATENT_CHANNELS, expectedChunks, TILE, TILE],
-            "縮退門の潜在の形",
-          );
-          const plan = planFor(layout, degenerate.latentShape);
-          assertEquals(wanVaeTileCount(plan), 1);
-          const chunks = wanVaeChunkCount(layout, degenerate.latents);
-          await poisonFrames(liveCaches, chunks);
-          const tiled = await decodeWanVaeTiled(
-            gpu,
-            sessions,
-            liveCaches,
-            plan,
-            degenerate.latents,
-          );
-          // 毒値は各デコードの前に入れ直す（2 本目が 1 本目の書いたフレームを読み戻して一致を装う形を消す）。
-          await poisonFrames(liveCaches, chunks);
-          const direct = await decodeWanVaeTile(gpu, sessions, liveCaches, degenerate.latents);
-          assertEquals(
-            tiled.length,
-            SAMPLE_CHANNELS * wanVaeFrameCount(chunks) * SAMPLE_TILE * SAMPLE_TILE,
-          );
-          assertEquals(countNonFinite(tiled), 0, "非有限（写されなかったフレーム）");
-          assert(bitsEqual(tiled, direct), "タイル経路が chunk 列とビット一致しない");
-        },
-      );
-
-      for (const name of ["band", "wide"] as const) {
-        await t.step(
-          `${name}: 毒値のフレームから回して非有限 0（タイル経路 decodeWanVaeTiled）`,
-          async () => {
-            await runRecordedCase(results, { id: name }, async () => {
-              const { got, plan, chunks, elapsedMs } = await decodeTiledCase(run, name);
-              assertFinite(
-                name,
-                got,
-                fixtures[name].tensor("frames").data,
-                ` tiles=${wanVaeTileCount(plan)} chunks=${chunks} decodeMs=${elapsedMs.toFixed(0)}`,
-              );
-              return undefined;
-            });
-          },
-        );
+    /** Records the non-finite count of one case, then fails when it is not 0. */
+    const assertFinite = (label: string, got: Float32Array, want: Float32Array, extra: string) => {
+      assertEquals(got.length, want.length, "要素数");
+      const count = countNonFinite(got);
+      nonFinite.set(label, count);
+      console.log(`[wan-ti2v-vae-tiles] ${label}: nonFinite=${count}${extra}`);
+      if (count > 0) {
+        throw new Error(`${label}: 非有限 ${count} 個（写されなかったフレーム）`);
       }
+    };
 
-      await t.step(
-        "accept: 毒値のフレームから回して非有限 0（タイルごとの decode + ホストの貼り合わせ）",
-        async () => {
-          await runRecordedCase(results, { id: "accept" }, async () => {
-            const { got, plan, chunks, decodeMs, assembleMs } = await decodeAcceptCase(run);
-            assertFinite(
-              "accept",
-              got,
-              fixtures.accept.tensor("frames").data,
-              ` tiles=${wanVaeTileCount(plan)} chunks=${chunks} decodeMs=${decodeMs.toFixed(
-                0,
-              )} assembleMs=${assembleMs.toFixed(0)}`,
-            );
-            return undefined;
-          });
-        },
+    it("計画: TS の計画（資産の入力形から・2.2 の記述子）がフィクスチャのメタ（Python）と一致", () => {
+      const { layout, compression, fixtures } = tileRun();
+      assertEquals(
+        [layout.latentChannels, layout.tile, layout.sampleTile, layout.sampleChannels],
+        [LATENT_CHANNELS, TILE, SAMPLE_TILE, SAMPLE_CHANNELS],
       );
+      assertWanVaeMatchesGeneration(layout, WAN22_TI2V_GENERATION, OWNER);
+      for (const { name, role, chunks, height, width, full, rgb } of CASES) {
+        const fixture = fixtures[name];
+        const latents = fixture.tensor("latents");
+        assertEquals(latents.shape, [LATENT_CHANNELS, chunks, height, width], `${name} の潜在の形`);
+        assertEquals(
+          {
+            role: fixture.meta("role"),
+            weights: fixture.meta("weights"),
+            reference: fixture.meta("reference"),
+          },
+          { role, weights: FIXTURE_WEIGHTS, reference: FIXTURE_REFERENCE },
+          `${name} の役割と素性（f16 の丸め・patchify 空間の参照）`,
+        );
+        const plan = planFor(layout, latents.shape);
+        const ours = planMeta(plan);
+        const theirs = Object.fromEntries(Object.keys(ours).map((key) => [key, fixture.meta(key)]));
+        assertEquals(ours, theirs, `${name} の幾何`);
+        const frames = wanVaeFrameCount(chunks);
+        assertEquals(
+          fixture.tensor("frames").shape,
+          [SAMPLE_CHANNELS, frames, height * plan.scale, width * plan.scale],
+          `${name} の frames の形（patchify 空間）`,
+        );
+        assertEquals(fixture.has("frames_full"), full, `${name} の frames_full の有無`);
+        assertEquals(fixture.has("frames_rgb"), rgb, `${name} の frames_rgb の有無`);
+        if (rgb) {
+          assertEquals(
+            fixture.tensor("frames_rgb").shape,
+            [RGB_CHANNELS, frames, height * compression, width * compression],
+            `${name} の frames_rgb の形`,
+          );
+        }
+      }
+      const band = planFor(layout, fixtures.band.tensor("latents").shape);
+      assertEquals(wanVaeTileCount(band), 12);
+      assertEquals([...band.rows.starts], [0, 7, 14]);
+      assertEquals([...band.cols.starts], [0, 12, 24, 36]);
+      assertEquals(wanVaeTileCount(planFor(layout, fixtures.wide.tensor("latents").shape)), 28);
+    });
 
-      await t.step(
-        "毒値と device lost: 全ケース（band / accept / wide）で非有限 0・device lost なし",
-        () => {
-          const names = CASES.map(({ name }) => name);
-          assertEquals(
-            names.filter((name) => !nonFinite.has(name)),
-            [],
-            "非有限を数える前に落ちたケース",
-          );
-          assertEquals(
-            names.map((name) => nonFinite.get(name)),
-            names.map(() => 0),
-            `非有限の数（${names.join(" / ")}）`,
-          );
-          assertEquals(run.deviceLost(), undefined, "device lost");
-        },
+    it("縮退門: 潜在 16×16（1 枚）ではタイル経路 ≡ 非タイルの chunk 列（Uint32）", async () => {
+      const { gpu, layout, sessions, caches: liveCaches } = tileRun();
+      assert(degenerate !== undefined, "縮退門のフィクスチャ（beforeAll）が読めていない");
+      const expectedChunks = CHUNK_CASES.find(({ name }) => name === DEGENERATE_CASE)?.chunks;
+      assert(expectedChunks !== undefined, `chunk 列のケース '${DEGENERATE_CASE}' が表に無い`);
+      assertEquals(
+        degenerate.latentShape,
+        [LATENT_CHANNELS, expectedChunks, TILE, TILE],
+        "縮退門の潜在の形",
       );
+      const plan = planFor(layout, degenerate.latentShape);
+      assertEquals(wanVaeTileCount(plan), 1);
+      const chunks = wanVaeChunkCount(layout, degenerate.latents);
+      await poisonFrames(liveCaches, chunks);
+      const tiled = await decodeWanVaeTiled(gpu, sessions, liveCaches, plan, degenerate.latents);
+      // 毒値は各デコードの前に入れ直す（2 本目が 1 本目の書いたフレームを読み戻して一致を装う形を消す）。
+      await poisonFrames(liveCaches, chunks);
+      const direct = await decodeWanVaeTile(gpu, sessions, liveCaches, degenerate.latents);
+      assertEquals(
+        tiled.length,
+        SAMPLE_CHANNELS * wanVaeFrameCount(chunks) * SAMPLE_TILE * SAMPLE_TILE,
+      );
+      assertEquals(countNonFinite(tiled), 0, "非有限（写されなかったフレーム）");
+      assert(bitsEqual(tiled, direct), "タイル経路が chunk 列とビット一致しない");
+    });
+
+    for (const name of ["band", "wide"] as const) {
+      it(`${name}: 毒値のフレームから回して非有限 0（タイル経路 decodeWanVaeTiled）`, async () => {
+        const run = tileRun();
+        await runRecordedCase(results, { id: name }, async () => {
+          const { got, plan, chunks, elapsedMs } = await decodeTiledCase(run, name);
+          assertFinite(
+            name,
+            got,
+            run.fixtures[name].tensor("frames").data,
+            ` tiles=${wanVaeTileCount(plan)} chunks=${chunks} decodeMs=${elapsedMs.toFixed(0)}`,
+          );
+          return undefined;
+        });
+      });
+    }
+
+    it("accept: 毒値のフレームから回して非有限 0（タイルごとの decode + ホストの貼り合わせ）", async () => {
+      const run = tileRun();
+      await runRecordedCase(results, { id: "accept" }, async () => {
+        const { got, plan, chunks, decodeMs, assembleMs } = await decodeAcceptCase(run);
+        assertFinite(
+          "accept",
+          got,
+          run.fixtures.accept.tensor("frames").data,
+          ` tiles=${wanVaeTileCount(plan)} chunks=${chunks} decodeMs=${decodeMs.toFixed(
+            0,
+          )} assembleMs=${assembleMs.toFixed(0)}`,
+        );
+        return undefined;
+      });
+    });
+
+    it("毒値と device lost: 全ケース（band / accept / wide）で非有限 0・device lost なし", () => {
+      const run = tileRun();
+      const names = CASES.map(({ name }) => name);
+      assertEquals(
+        names.filter((name) => !nonFinite.has(name)),
+        [],
+        "非有限を数える前に落ちたケース",
+      );
+      assertEquals(
+        names.map((name) => nonFinite.get(name)),
+        names.map(() => 0),
+        `非有限の数（${names.join(" / ")}）`,
+      );
+      assertEquals(run.deviceLost(), undefined, "device lost");
     });
   },
-});
+);
 
 // Upstream parity (band / accept / wide and the accept RGB against the upstream tiled reference under
 // the absolute band), so it is opt-in, together with the seam fault injections that only prove the
 // band is live and the band-candidate step. It writes the accept-rgb, fault/* and band-candidate
-// results.json ids; the per-case ids belong to the default case above, and writing them here would
+// results.json ids; the per-case ids belong to the default suite above, and writing them here would
 // duplicate its settlements.
-test({
-  name:
-    "Wan2.2 TI2V VAE タイル decode: 縮退門 + 832×480・81 フレームが上流のタイル参照（unpatchify の前）と帯の中で" +
+describe.skipIf(!ALL_TILES || !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+  "Wan2.2 TI2V VAE タイル decode: 縮退門 + 832×480・81 フレームが上流のタイル参照（unpatchify の前）と帯の中で" +
     "一致・accept の RGB が上流の unpatchify → clamp と帯の中で一致（実 GPU）" +
     UPSTREAM_PARITY_OPT_IN,
-  ignore: !ALL_TILES || !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE || !UPSTREAM_PARITY,
-  fn: async (t) => {
-    await withTileSessions(async (run) => {
-      const { layout, compression, fixtures } = run;
-      /** ラベル（ケース名 / `accept-rgb`）→ maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
-      const observed = new Map<string, number>();
-      /** 故障注入のラベル → maxAbs（記録 — 判定は帯が導出された回だけ）。 */
-      const faultObserved = new Map<string, number>();
+  () => {
+    const tileRun = registerTileSessions();
+    /** ラベル（ケース名 / `accept-rgb`）→ maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
+    const observed = new Map<string, number>();
+    /** 故障注入のラベル → maxAbs（記録 — 判定は帯が導出された回だけ）。 */
+    const faultObserved = new Map<string, number>();
 
-      /**
-       * 1 ケースの判定（maxAbs を記録してから — 未導出の回も候補の材料が残る）。非有限 → 帯が未導出 → 帯の外 の順で
-       * 落とす。
-       */
-      const judge = (
-        label: string,
-        got: Float32Array,
-        want: Float32Array,
-        extra = "",
-        recorded?: {
-          readonly measurements: RecordedCase["measurements"];
-          readonly output: string;
-        },
-      ): void => {
-        const { report, referenceMax, ratio } = compare(got, want, TOLERANCE);
-        recorded?.measurements.push({
-          output: recorded.output,
-          maxAbs: report.maxAbsError,
-          maxRel: report.maxRelError,
-          tolerance: TOLERANCE,
-          stage: "karume",
-        });
-        observed.set(label, report.maxAbsError);
-        console.log(
-          `[wan-ti2v-vae-tiles] ${label}: maxAbs=${report.maxAbsError} refMax=${referenceMax} ` +
-            `ratio=${ratio} nonFinite=${report.nonFiniteCount}${extra}`,
-        );
-        if (report.nonFiniteCount > 0) {
-          throw new Error(`${label}: 非有限 ${report.nonFiniteCount} 個（写されなかったフレーム）`);
-        }
-        if (BAND === undefined) {
-          throw new Error(
-            `${label}: 帯が未導出（maxAbs ${report.maxAbsError}）— band の maxAbs × 5 を帯の定数へ書く` +
-              "（帯の候補は最後の step が出す）",
-          );
-        }
-        assert(report.pass, `${label}: maxAbs ${report.maxAbsError} が帯 ${BAND} の外`);
-      };
-
-      await t.step(
-        "band: 832×480・81 フレーム（12 枚 × 21 chunk）が参照と帯の中で一致（フレームは毒値で始める）",
-        async () => {
-          const { got, elapsedMs } = await decodeTiledCase(run, "band");
-          judge(
-            "band",
-            got,
-            fixtures.band.tensor("frames").data,
-            ` decodeMs=${elapsedMs.toFixed(0)}`,
-          );
-        },
+    /**
+     * 1 ケースの判定（maxAbs を記録してから — 未導出の回も候補の材料が残る）。非有限 → 帯が未導出 → 帯の外 の順で
+     * 落とす。
+     */
+    const judge = (
+      label: string,
+      got: Float32Array,
+      want: Float32Array,
+      extra = "",
+      recorded?: {
+        readonly measurements: RecordedCase["measurements"];
+        readonly output: string;
+      },
+    ): void => {
+      const { report, referenceMax, ratio } = compare(got, want, TOLERANCE);
+      recorded?.measurements.push({
+        output: recorded.output,
+        maxAbs: report.maxAbsError,
+        maxRel: report.maxRelError,
+        tolerance: TOLERANCE,
+        stage: "karume",
+      });
+      observed.set(label, report.maxAbsError);
+      console.log(
+        `[wan-ti2v-vae-tiles] ${label}: maxAbs=${report.maxAbsError} refMax=${referenceMax} ` +
+          `ratio=${ratio} nonFinite=${report.nonFiniteCount}${extra}`,
       );
-
-      // 受入れ: decode 済みのタイルを残し、VAE 段の末尾の照合と故障注入（ホスト側の貼り合わせ）に使い回す。
-      const accept = fixtures.accept;
-      const acceptLatents = accept.tensor("latents");
-      const acceptWant = accept.tensor("frames").data;
-      const acceptPlan = planFor(layout, acceptLatents.shape);
-      const acceptChunks = acceptLatents.shape[1];
-      let acceptTiles: Float32Array<ArrayBuffer>[] = [];
-      let acceptAssembled: Float32Array<ArrayBuffer> | undefined;
-
-      await t.step(
-        "accept: 480×832・9 フレーム（別の潜在・chunk 境界・縦長）が帯の中",
-        async () => {
-          const { tiles, got, decodeMs, assembleMs } = await decodeAcceptCase(run);
-          acceptTiles = tiles;
-          acceptAssembled = got;
-          judge(
-            "accept",
-            got,
-            acceptWant,
-            ` decodeMs=${decodeMs.toFixed(0)} assembleMs=${assembleMs.toFixed(0)}`,
-          );
-        },
-      );
-
-      await t.step(
-        "accept の RGB: VAE 段の末尾（finishWanVaeFrames — unpatchify → clamp）が上流の unpatchify → clamp と帯の中",
-        async () => {
-          await runRecordedCase(results, { id: "accept-rgb" }, ({ measurements }) => {
-            assert(acceptAssembled !== undefined, "accept が貼り合わされていない");
-            const spec = CASES.find(({ name }) => name === "accept");
-            assert(spec !== undefined, "accept のケースが表に無い");
-            const video = finishWanVaeFrames(
-              acceptAssembled,
-              {
-                frames: wanVaeFrameCount(acceptChunks),
-                width: spec.width * compression,
-                height: spec.height * compression,
-                tiles: acceptPlan,
-              },
-              WAN22_TI2V_GENERATION,
-              OWNER,
-            );
-            judge("accept-rgb", video, accept.tensor("frames_rgb").data, "", {
-              measurements,
-              output: `frames_rgb(${acceptChunks} chunks × ${wanVaeTileCount(acceptPlan)} tiles)`,
-            });
-            return Promise.resolve(undefined);
-          });
-        },
-      );
-
-      await t.step(
-        "wide: 1280×704・5 フレーム（28 枚・対ごとに違うブレンド幅）が帯の中",
-        async () => {
-          const { got, elapsedMs } = await decodeTiledCase(run, "wide");
-          judge(
-            "wide",
-            got,
-            fixtures.wide.tensor("frames").data,
-            ` decodeMs=${elapsedMs.toFixed(0)}`,
-          );
-        },
-      );
-
-      const faults: readonly {
-        readonly id: string;
-        readonly label: string;
-        readonly plan: () => WanVaeTilePlan;
-      }[] = [
-        {
-          // 縦長でだけ値に出る（正方では対合）。枚数は 4×3 = 3×4 で揃うので形の検査を抜ける。
-          id: "swap-axes",
-          label: "行と列の取り違え",
-          plan: () => ({ ...acceptPlan, rows: acceptPlan.cols, cols: acceptPlan.rows }),
-        },
-        {
-          // TS と Python の丸めが割れたときの形（decode した位置と貼る位置が 1 潜在ずれる）。
-          id: "shift-start",
-          label: "開始位置の 1 潜在ずれ",
-          plan: () => ({
-            ...acceptPlan,
-            rows: {
-              ...acceptPlan.rows,
-              starts: acceptPlan.rows.starts.map((start, index) =>
-                index === 1 ? start + 1 : start,
-              ),
-            },
-          }),
-        },
-      ];
-      for (const { id, label, plan } of faults) {
-        await t.step(`故障注入: ${label} → accept が帯の外`, async () => {
-          await runRecordedCase(results, { id: `fault/${id}` }, ({ measurements }) => {
-            assert(acceptTiles.length > 0, "accept のタイルが decode されていない");
-            const got = assembleWanVaeTiles(acceptTiles, plan());
-            const { report, ratio } = compare(got, acceptWant, TOLERANCE);
-            measurements.push({
-              output: `frames(fault ${id})`,
-              maxAbs: report.maxAbsError,
-              maxRel: report.maxRelError,
-              tolerance: TOLERANCE,
-              stage: "karume",
-            });
-            faultObserved.set(label, report.maxAbsError);
-            console.log(
-              `[wan-ti2v-vae-tiles] fault ${id}: maxAbs=${report.maxAbsError} ratio=${ratio}` +
-                (BAND === undefined ? "" : ` band×${(report.maxAbsError / BAND).toFixed(1)}`),
-            );
-            if (BAND === undefined) {
-              throw new Error(`${label}: 帯が未導出（故障注入の maxAbs ${report.maxAbsError}）`);
-            }
-            assert(!report.pass, `${label}: 帯 ${BAND} の中に収まった（帯が広すぎる兆候）`);
-            return Promise.resolve(undefined);
-          });
-        });
+      if (report.nonFiniteCount > 0) {
+        throw new Error(`${label}: 非有限 ${report.nonFiniteCount} 個（写されなかったフレーム）`);
       }
+      if (BAND === undefined) {
+        throw new Error(
+          `${label}: 帯が未導出（maxAbs ${report.maxAbsError}）— band の maxAbs × 5 を帯の定数へ書く` +
+            "（帯の候補は最後の step が出す）",
+        );
+      }
+      assert(report.pass, `${label}: maxAbs ${report.maxAbsError} が帯 ${BAND} の外`);
+    };
 
-      await bandCandidate(t, observed, faultObserved);
+    it("band: 832×480・81 フレーム（12 枚 × 21 chunk）が参照と帯の中で一致（フレームは毒値で始める）", async () => {
+      const run = tileRun();
+      const { got, elapsedMs } = await decodeTiledCase(run, "band");
+      judge(
+        "band",
+        got,
+        run.fixtures.band.tensor("frames").data,
+        ` decodeMs=${elapsedMs.toFixed(0)}`,
+      );
     });
+
+    // 受入れ: decode 済みのタイルを残し、VAE 段の末尾の照合と故障注入（ホスト側の貼り合わせ）に使い回す。
+    /** The accept fixture, its reference frames, plan and chunk count (derived from the run's fixtures). */
+    const acceptCase = () => {
+      const { layout, fixtures } = tileRun();
+      const accept = fixtures.accept;
+      const latents = accept.tensor("latents");
+      return {
+        accept,
+        want: accept.tensor("frames").data,
+        plan: planFor(layout, latents.shape),
+        chunks: latents.shape[1],
+      };
+    };
+    let acceptTiles: Float32Array<ArrayBuffer>[] = [];
+    let acceptAssembled: Float32Array<ArrayBuffer> | undefined;
+
+    it("accept: 480×832・9 フレーム（別の潜在・chunk 境界・縦長）が帯の中", async () => {
+      const { want } = acceptCase();
+      const { tiles, got, decodeMs, assembleMs } = await decodeAcceptCase(tileRun());
+      acceptTiles = tiles;
+      acceptAssembled = got;
+      judge(
+        "accept",
+        got,
+        want,
+        ` decodeMs=${decodeMs.toFixed(0)} assembleMs=${assembleMs.toFixed(0)}`,
+      );
+    });
+
+    it("accept の RGB: VAE 段の末尾（finishWanVaeFrames — unpatchify → clamp）が上流の unpatchify → clamp と帯の中", async () => {
+      const { compression } = tileRun();
+      const { accept, plan: acceptPlan, chunks: acceptChunks } = acceptCase();
+      await runRecordedCase(results, { id: "accept-rgb" }, ({ measurements }) => {
+        assert(acceptAssembled !== undefined, "accept が貼り合わされていない");
+        const spec = CASES.find(({ name }) => name === "accept");
+        assert(spec !== undefined, "accept のケースが表に無い");
+        const video = finishWanVaeFrames(
+          acceptAssembled,
+          {
+            frames: wanVaeFrameCount(acceptChunks),
+            width: spec.width * compression,
+            height: spec.height * compression,
+            tiles: acceptPlan,
+          },
+          WAN22_TI2V_GENERATION,
+          OWNER,
+        );
+        judge("accept-rgb", video, accept.tensor("frames_rgb").data, "", {
+          measurements,
+          output: `frames_rgb(${acceptChunks} chunks × ${wanVaeTileCount(acceptPlan)} tiles)`,
+        });
+        return Promise.resolve(undefined);
+      });
+    });
+
+    it("wide: 1280×704・5 フレーム（28 枚・対ごとに違うブレンド幅）が帯の中", async () => {
+      const run = tileRun();
+      const { got, elapsedMs } = await decodeTiledCase(run, "wide");
+      judge(
+        "wide",
+        got,
+        run.fixtures.wide.tensor("frames").data,
+        ` decodeMs=${elapsedMs.toFixed(0)}`,
+      );
+    });
+
+    const faults: readonly {
+      readonly id: string;
+      readonly label: string;
+      readonly plan: (acceptPlan: WanVaeTilePlan) => WanVaeTilePlan;
+    }[] = [
+      {
+        // 縦長でだけ値に出る（正方では対合）。枚数は 4×3 = 3×4 で揃うので形の検査を抜ける。
+        id: "swap-axes",
+        label: "行と列の取り違え",
+        plan: (acceptPlan) => ({ ...acceptPlan, rows: acceptPlan.cols, cols: acceptPlan.rows }),
+      },
+      {
+        // TS と Python の丸めが割れたときの形（decode した位置と貼る位置が 1 潜在ずれる）。
+        id: "shift-start",
+        label: "開始位置の 1 潜在ずれ",
+        plan: (acceptPlan) => ({
+          ...acceptPlan,
+          rows: {
+            ...acceptPlan.rows,
+            starts: acceptPlan.rows.starts.map((start, index) => (index === 1 ? start + 1 : start)),
+          },
+        }),
+      },
+    ];
+    for (const { id, label, plan } of faults) {
+      it(`故障注入: ${label} → accept が帯の外`, async () => {
+        const { want: acceptWant, plan: acceptPlan } = acceptCase();
+        await runRecordedCase(results, { id: `fault/${id}` }, ({ measurements }) => {
+          assert(acceptTiles.length > 0, "accept のタイルが decode されていない");
+          const got = assembleWanVaeTiles(acceptTiles, plan(acceptPlan));
+          const { report, ratio } = compare(got, acceptWant, TOLERANCE);
+          measurements.push({
+            output: `frames(fault ${id})`,
+            maxAbs: report.maxAbsError,
+            maxRel: report.maxRelError,
+            tolerance: TOLERANCE,
+            stage: "karume",
+          });
+          faultObserved.set(label, report.maxAbsError);
+          console.log(
+            `[wan-ti2v-vae-tiles] fault ${id}: maxAbs=${report.maxAbsError} ratio=${ratio}` +
+              (BAND === undefined ? "" : ` band×${(report.maxAbsError / BAND).toFixed(1)}`),
+          );
+          if (BAND === undefined) {
+            throw new Error(`${label}: 帯が未導出（故障注入の maxAbs ${report.maxAbsError}）`);
+          }
+          assert(!report.pass, `${label}: 帯 ${BAND} の中に収まった（帯が広すぎる兆候）`);
+          return Promise.resolve(undefined);
+        });
+      });
+    }
+
+    it.skipIf(BAND !== undefined)("帯の候補（未導出）", () =>
+      bandCandidate(observed, faultObserved),
+    );
   },
-});
+);

@@ -60,7 +60,7 @@
 
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { test } from "@karume/test-support/test";
+import { beforeAll, describe, it, test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import type { AssetProgress, DistributionSource } from "@karume/hub";
 import { acquireGpu } from "@karume/runtime";
@@ -342,23 +342,30 @@ const assertLandsOnTotal = (
   );
 };
 
-test("loadContainerComponents: ローカル取得元だけのロードでも、進捗は合計へ着地する", async (t) => {
+describe("loadContainerComponents: ローカル取得元だけのロードでも、進捗は合計へ着地する", () => {
   // 相 1（温め）を持たない取得元の part も、温めの段で complete を 1 回出す（ADR 0086 追記
   // 2026-10-11）— 出さないと分母に入った part の分だけ最後の値が届かず、資産が無ければ通知が
   // 1 度も来ない。
-  const front = await serveContainer("front/model.f32", linearComponent("front"));
-  const voice = await serveContainer("voice/model.f32", linearComponent("voice"));
-  const tokenizer = new TextEncoder().encode(JSON.stringify({ vocab: ["a"] }));
-  const tokenizerRef = {
-    path: "tokenizer/tokenizer.json",
-    size: tokenizer.byteLength,
-    sha256: [...new Uint8Array(await crypto.subtle.digest("SHA-256", tokenizer))]
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join(""),
-  };
-  const parts = [...front.parts, ...voice.parts].filter((part) => part.size > 0);
+  let front: ServedContainer;
+  let voice: ServedContainer;
+  let tokenizer: Uint8Array<ArrayBuffer>;
+  let tokenizerRef: { path: string; size: number; sha256: string };
+  let parts: ServedContainer["parts"];
+  beforeAll(async () => {
+    front = await serveContainer("front/model.f32", linearComponent("front"));
+    voice = await serveContainer("voice/model.f32", linearComponent("voice"));
+    tokenizer = new TextEncoder().encode(JSON.stringify({ vocab: ["a"] }));
+    tokenizerRef = {
+      path: "tokenizer/tokenizer.json",
+      size: tokenizer.byteLength,
+      sha256: [...new Uint8Array(await crypto.subtle.digest("SHA-256", tokenizer))]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join(""),
+    };
+    parts = [...front.parts, ...voice.parts].filter((part) => part.size > 0);
+  });
   for (const withAssets of [false, true]) {
-    await t.step(withAssets ? "資産あり" : "資産なし", async () => {
+    it(withAssets ? "資産あり" : "資産なし", async () => {
       const source = memorySource(
         {
           test: {
@@ -847,10 +854,9 @@ test("components: 差し替え先の part が元リポの別部品と同じ path
 
 // ---- Real-GPU gates -------------------------------------------------------------
 
-test({
-  name: "loadContainerComponents: Session 構築は進捗を 1 イベントも動かさない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "loadContainerComponents: Session 構築は進捗を 1 イベントも動かさない（実 GPU）",
+  async () => {
     const rig = await prepareComponent();
     const fetchedCount = fetched(rig.parts["dit"]).length;
 
@@ -880,12 +886,11 @@ test({
     assertEquals(events.length, afterLoad, "Session 構築が進捗イベントを追加している");
     assertEquals(rig.mock.paths.length, calls, "Session 構築が network へ出ている");
   },
-});
+);
 
-test({
-  name: "loadContainerComponents: 同じ供給口から Session を 2 本続けて張れる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "loadContainerComponents: 同じ供給口から Session を 2 本続けて張れる（実 GPU）",
+  async () => {
     const rig = await prepareComponent();
     const { open } = await loadContainerComponents(
       "test.fromPretrained",
@@ -910,12 +915,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "loadContainerComponents: ロード時の signal は Session 構築へ持ち越さない（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "loadContainerComponents: ロード時の signal は Session 構築へ持ち越さない（実 GPU）",
+  async () => {
     const rig = await prepareComponent();
     const controller = new AbortController();
     const { open } = await loadContainerComponents(
@@ -940,14 +944,13 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "requiredLimits 超過は自前 GPU 取得の経路でも重みの part を取らない（アダプタ実測）",
-  // MUST: アダプタ無し環境は明示 SKIP（ADR 0005）。この経路の突き合わせ相手は
-  // `readAdapterLimits()` なので、アダプタが無いと GpuUnavailableError に化けて門が見えない。
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+// MUST: アダプタ無し環境は明示 SKIP（ADR 0005）。この経路の突き合わせ相手は
+// `readAdapterLimits()` なので、アダプタが無いと GpuUnavailableError に化けて門が見えない。
+test.skipIf(!GPU_AVAILABLE)(
+  "requiredLimits 超過は自前 GPU 取得の経路でも重みの part を取らない（アダプタ実測）",
+  async () => {
     // どの実機も満たせない要求（`Number.MAX_SAFE_INTEGER` — manifest が受ける最大値）。
     const rig = await prepareSiglip2({ quants: quantsRequiring(Number.MAX_SAFE_INTEGER) });
     const parts = rig.parts["vision"];
@@ -968,4 +971,4 @@ test({
       assertEquals(rig.mock.paths.includes(part.path), false, `${part.path} を取っている`);
     }
   },
-});
+);

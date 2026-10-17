@@ -21,9 +21,9 @@
 // も要らない — ADR 0086）。ミラーが無い環境では**明示 SKIP**。
 
 import { isNotFound, readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { nodeDirectory } from "@karume/hub/node";
+import { beforeAll, describe, it } from "vite-plus/test";
 import { Gemma4Pipeline } from "../../models/gemma.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
@@ -111,14 +111,18 @@ const runCase = async (
   }
 };
 
-test({
-  name: "gemma4: ③PV の縮約順（parallel / sequential）で token 列が 1 個も動かない（実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const maxResidentPleBytes = await allResidentPleBytesOfMirror(MIRROR_DIR);
+describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "gemma4: ③PV の縮約順（parallel / sequential）で token 列が 1 個も動かない（実 GPU）",
+  () => {
+    let maxResidentPleBytes: number;
     const runs: Run[][] = [];
+
+    beforeAll(async () => {
+      maxResidentPleBytes = await allResidentPleBytesOfMirror(MIRROR_DIR);
+    });
+
     for (const reduce of REDUCERS) {
-      await t.step(`stateAttentionReduce = ${reduce}`, async () => {
+      it(`stateAttentionReduce = ${reduce}`, async () => {
         const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
           maxResidentPleBytes,
           stateAttentionReduce: reduce,
@@ -141,13 +145,25 @@ test({
       });
     }
 
-    const [parallel, sequential] = runs;
-    assertEquals(runs.length, REDUCERS.length, "両方の縮約順で走っていない");
-    for (const [index, { fixture: name }] of CASES.entries()) {
-      // 陽性対照 — 「どちらも 0 個だった」形で等式が成立するのを塞ぐ。
-      assert(parallel[index].ids.length > 0, `${name}: 1 token も生成していない`);
-      assertEquals(parallel[index].ids, sequential[index].ids, `${name}: 縮約順で割れた token 列`);
-      assertEquals(parallel[index].stop, sequential[index].stop, `${name}: 縮約順で割れた停止理由`);
-    }
+    // The comparison was the tail of the former test body, after both steps; it runs after the
+    // per-reducer its (Vitest runs a file's its in order and keeps going past a failure).
+    it("両方の縮約順の token 列と停止理由が一致する", () => {
+      const [parallel, sequential] = runs;
+      assertEquals(runs.length, REDUCERS.length, "両方の縮約順で走っていない");
+      for (const [index, { fixture: name }] of CASES.entries()) {
+        // 陽性対照 — 「どちらも 0 個だった」形で等式が成立するのを塞ぐ。
+        assert(parallel[index].ids.length > 0, `${name}: 1 token も生成していない`);
+        assertEquals(
+          parallel[index].ids,
+          sequential[index].ids,
+          `${name}: 縮約順で割れた token 列`,
+        );
+        assertEquals(
+          parallel[index].stop,
+          sequential[index].stop,
+          `${name}: 縮約順で割れた停止理由`,
+        );
+      }
+    });
   },
-});
+);

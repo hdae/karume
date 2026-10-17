@@ -14,7 +14,7 @@
 // Session と context は narrow interface（`GenerationSession` / `GenerationContextFace`）で
 // 受けるので、fake は素の object 1 個で足りる。
 
-import { test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { GenerationContext, RunInputs, Session } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
@@ -473,7 +473,7 @@ test("GenerationSequence: 発行済みの signal は 1 本も run を出さず�
   assertEquals(await stream.done, { reason: "aborted", tokens: 0 });
 });
 
-test("GenerationSequence: 最終 prefill の後に届いた中断でも、計算済みの logits から token が 1 個届く", async (t) => {
+describe("GenerationSequence: 最終 prefill の後に届いた中断でも、計算済みの logits から token が 1 個届く", () => {
   // 中断は run を発行する前（段の境目）にだけ見る（ADR 0083 決定 5）。最終 prefill の run は
   // 既に logits を返しているので、その後に届いた中断でも最初の token は抽選されて届き、新しい
   // run は走らない（by-design — docs/limitations.md「生成 sequence」節）。
@@ -483,7 +483,7 @@ test("GenerationSequence: 最終 prefill の後に届いた中断でも、計算
     // 残りがあれば次の decode の run の前で中断が効く。
     ["maxNewTokens 3", 3, { reason: "aborted", tokens: 1 }],
   ] as const) {
-    await t.step(name, async () => {
+    it(name, async () => {
       const fake = fakeSession({ tokens: [5, 6, 7] });
       const sequence = await createGenerationSequence({
         session: fake.session,
@@ -1000,11 +1000,11 @@ test("GenerationSequence: 受理集合は同期に落ちる（順番待ちにも
   assertEquals(fake.calls.length, 0);
 });
 
-test("受理集合の値域検査は 1 本の純関数（高レベル面と generate が同じ式を見る）", async (t) => {
+describe("受理集合の値域検査は 1 本の純関数（高レベル面と generate が同じ式を見る）", () => {
   // 高レベル面（`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`）は `generate` を async
   // generator の本体で呼ぶので、発行時に落とすにはこの関数を自分で呼ぶしかない。式を写して
   // 2 本持つと片方だけが古くなるので、正本が 1 本であること自体をここで縛る。
-  await t.step("受理される要求は通る（門が恒真に落ちていないことの対）", () => {
+  it("受理される要求は通る（門が恒真に落ちていないことの対）", () => {
     assertGenerationRequestValues(VOCAB, { maxNewTokens: 1 });
     assertGenerationRequestValues(VOCAB, {
       maxNewTokens: 8,
@@ -1013,7 +1013,7 @@ test("受理集合の値域検査は 1 本の純関数（高レベル面と gene
     });
   });
 
-  await t.step("maxNewTokens の値域", () => {
+  it("maxNewTokens の値域", () => {
     assertThrows(
       () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 0 }),
       ModelInputError,
@@ -1026,7 +1026,7 @@ test("受理集合の値域検査は 1 本の純関数（高レベル面と gene
     );
   });
 
-  await t.step("stopTokens の語彙外と重複", () => {
+  it("stopTokens の語彙外と重複", () => {
     assertThrows(
       () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 1, stopTokens: [VOCAB] }),
       ModelInputError,
@@ -1039,7 +1039,7 @@ test("受理集合の値域検査は 1 本の純関数（高レベル面と gene
     );
   });
 
-  await t.step("sampler の指定（抽選は decode の途中で走るので発行時に落とす）", () => {
+  it("sampler の指定（抽選は decode の途中で走るので発行時に落とす）", () => {
     assertThrows(
       () =>
         assertGenerationRequestValues(VOCAB, {
@@ -1051,7 +1051,7 @@ test("受理集合の値域検査は 1 本の純関数（高レベル面と gene
     );
   });
 
-  await t.step("generate は同じ関数を通る（片方だけ緩む形を作らない）", async () => {
+  it("generate は同じ関数を通る（片方だけ緩む形を作らない）", async () => {
     // 故障注入: 関数が受理する値は generate も受理し、拒む値は generate も拒む。
     const fake = fakeSession();
     const sequence = await createGenerationSequence({

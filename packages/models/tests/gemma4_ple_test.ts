@@ -17,7 +17,7 @@
 //   LRU の追い出し順・0（常駐なし）・1 本すら載らない予算の拒否を凍結する。
 // - **解放**: `dispose()` で常駐が空になり、以後の gather は fail loudly。
 
-import { test } from "@karume/test-support/test";
+import { beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { createGemma4Ple } from "../src/gemma/ple.ts";
@@ -94,14 +94,17 @@ const tensorOf = async (
 
 // ---- 索引の受理集合 --------------------------------------------------------
 
-test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) => {
-  const raw = fixture().document;
+describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
+  let raw: ReturnType<typeof fixture>["document"];
+  beforeAll(() => {
+    raw = fixture().document;
+  });
 
-  await t.step("正常系（陰性対照 — 常に落ちる門になっていない）", () => {
+  it("正常系（陰性対照 — 常に落ちる門になっていない）", () => {
     assertEquals(parseGemma4PleIndex(raw).tokens, SPEC.tokens);
   });
 
-  await t.step("旧 sidecar の版は読まない（両読みしない）", () => {
+  it("旧 sidecar の版は読まない（両読みしない）", () => {
     for (const schema of [1, 2, 4]) {
       assertThrows(
         () => parseGemma4PleIndex({ ...raw, schema }),
@@ -111,11 +114,11 @@ test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) =
     }
   });
 
-  await t.step("未知キー（綴り違いが黙って既定へ縮退しない）", () => {
+  it("未知キー（綴り違いが黙って既定へ縮退しない）", () => {
     assertThrows(() => parseGemma4PleIndex({ ...raw, shards: [] }), Error, "未知キー 'shards'");
   });
 
-  await t.step("storage は i8 / i4 / i2", () => {
+  it("storage は i8 / i4 / i2", () => {
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, storage: "i3" }),
       Error,
@@ -123,7 +126,7 @@ test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) =
     );
   });
 
-  await t.step("storage の欠落を i8 と読まない（schema 3 では必須）", () => {
+  it("storage の欠落を i8 と読まない（schema 3 では必須）", () => {
     const { storage: _, ...withoutStorage } = raw;
     assertThrows(
       () => parseGemma4PleIndex(withoutStorage),
@@ -132,7 +135,7 @@ test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) =
     );
   });
 
-  await t.step("embedScale は正の有限数（0 は行が全部 0 になる）", () => {
+  it("embedScale は正の有限数（0 は行が全部 0 になる）", () => {
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, embedScale: 0 }),
       Error,
@@ -140,7 +143,7 @@ test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) =
     );
   });
 
-  await t.step("rowBytes は宣言（層数 / 次元 / 格納）から決まる値と一致する", () => {
+  it("rowBytes は宣言（層数 / 次元 / 格納）から決まる値と一致する", () => {
     const values = raw.values as { rowBytes: number; blocks: unknown[] };
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, values: { ...values, rowBytes: values.rowBytes + 4 } }),
@@ -149,7 +152,7 @@ test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) =
     );
   });
 
-  await t.step("block 名の重複（同じ実体を 2 つの範囲が名乗る）", () => {
+  it("block 名の重複（同じ実体を 2 つの範囲が名乗る）", () => {
     assertThrows(
       () =>
         parseGemma4PleIndex({
@@ -172,7 +175,7 @@ test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) =
     );
   });
 
-  await t.step("範囲の非連続（引けない id が黙って生まれる）", () => {
+  it("範囲の非連続（引けない id が黙って生まれる）", () => {
     assertThrows(
       () =>
         parseGemma4PleIndex({
@@ -195,7 +198,7 @@ test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) =
     );
   });
 
-  await t.step("合計行数の不一致（索引だけ焼き直した組み合わせ）", () => {
+  it("合計行数の不一致（索引だけ焼き直した組み合わせ）", () => {
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, tokens: SPEC.tokens + 1 }),
       Error,
@@ -203,7 +206,7 @@ test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) =
     );
   });
 
-  await t.step("2 表は独立に分割できる（block 境界が揃っている必要は無い）", () => {
+  it("2 表は独立に分割できる（block 境界が揃っている必要は無い）", () => {
     const index = pleFixture({ ...SPEC, valueRows: 2, scaleRows: 3 }).index;
     assertEquals(index.values.blocks.length, 3);
     assertEquals(index.scales.blocks.length, 2);
@@ -212,15 +215,18 @@ test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) =
 
 // ---- 索引と容器の資産の突合（admission の席）-------------------------------
 
-test("readGemma4PleIndex: 容器の資産から索引を読み、指し先を全件列挙で突合する", async (t) => {
-  const rig = fixture();
+describe("readGemma4PleIndex: 容器の資産から索引を読み、指し先を全件列挙で突合する", () => {
+  let rig: ReturnType<typeof fixture>;
+  beforeAll(() => {
+    rig = fixture();
+  });
 
-  await t.step("正常系（陰性対照）", async () => {
+  it("正常系（陰性対照）", async () => {
     const index = await readGemma4PleIndex("test", pleComponentOf(rig));
     assertEquals(index, rig.index);
   });
 
-  await t.step("索引そのものが無い", async () => {
+  it("索引そのものが無い", async () => {
     await assertRejects(
       () => readGemma4PleIndex("test", pleComponentOf(rig, { ple_index: undefined })),
       Error,
@@ -228,7 +234,7 @@ test("readGemma4PleIndex: 容器の資産から索引を読み、指し先を全
     );
   });
 
-  await t.step("索引の役割が違う", async () => {
+  it("索引の役割が違う", async () => {
     await assertRejects(
       () => readGemma4PleIndex("test", pleComponentOf(rig, { ple_index: { role: "rope-base" } })),
       Error,
@@ -236,7 +242,7 @@ test("readGemma4PleIndex: 容器の資産から索引を読み、指し先を全
     );
   });
 
-  await t.step("指し先の block が容器に無い / 役割が違う / 長さが違う — 全件列挙", async () => {
+  it("指し先の block が容器に無い / 役割が違う / 長さが違う — 全件列挙", async () => {
     const error = await assertRejects(
       () =>
         readGemma4PleIndex(
@@ -255,7 +261,7 @@ test("readGemma4PleIndex: 容器の資産から索引を読み、指し先を全
     assert(error.message.includes("ple.scales.2: 論理長 1"), error.message);
   });
 
-  await t.step("容器にあって索引が指していない block（1 本も読まないまま動く形）", () => {
+  it("容器にあって索引が指していない block（1 本も読まないまま動く形）", () => {
     assertThrows(
       () =>
         assertGemma4PleAssets("test", rig.index, {

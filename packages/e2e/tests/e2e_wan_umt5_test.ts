@@ -46,7 +46,7 @@
  */
 
 import { readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { fetchAssets, loadManifest, resolveSelection } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
@@ -320,13 +320,22 @@ const forward = async (
   return { output, run };
 };
 
+/**
+ * A resource a describe's `beforeAll` opens (device, Session, encoder), or a loud failure when that
+ * `beforeAll` did not get that far. The `afterAll` hooks read the raw `undefined` to close only what
+ * was opened.
+ */
+const requireOpened = <T>(value: T | undefined, what: string): T => {
+  if (value === undefined) throw new Error(`the ${what} was not opened by beforeAll`);
+  return value;
+};
+
 const results = openResults("wan-umt5");
 
-test({
-  name: "Wan umT5 資産: i8 系列の容器と全ケース（決定用 6 本・受入れ 4 本）の golden が揃っている",
-  // 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL。
-  ignore: !ANY_PRESENT,
-  fn: () => {
+// 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL。
+test.skipIf(!ANY_PRESENT)(
+  "Wan umT5 資産: i8 系列の容器と全ケース（決定用 6 本・受入れ 4 本）の golden が揃っている",
+  () => {
     assert(MODEL_PRESENT, `${SERIES_DIR.pathname}${MODEL_FILE} が無い`);
     assertEquals(
       expectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
@@ -334,14 +343,12 @@ test({
       `golden の欠け（生成: ${GENERATE}）`,
     );
   },
-});
+);
 
-test({
-  name:
-    "Wan umT5 ホスト（GPU 不要）: TS のトークナイザの id 列と TS のバケット表が golden の入力（Python の経路）と" +
+test.skipIf(!ASSETS_AVAILABLE || tokenizerText === undefined)(
+  "Wan umT5 ホスト（GPU 不要）: TS のトークナイザの id 列と TS のバケット表が golden の入力（Python の経路）と" +
     "ビット一致し、golden が今の容器から採られている",
-  ignore: !ASSETS_AVAILABLE || tokenizerText === undefined,
-  fn: async () => {
+  async () => {
     const encoder = tokenizerEncoder();
     const part0 = await containerPart0Sha256();
     for (const { name, role } of CASES) {
@@ -355,7 +362,7 @@ test({
       hostInputs(encoder, golden, name);
     }
   },
-});
+);
 
 /** 1 ケースの r（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
 type CaseRatio = { readonly name: string; readonly role: CaseRole; readonly ratio: number };
@@ -390,265 +397,312 @@ const bandCandidate = (ratios: readonly CaseRatio[]): string => {
   );
 };
 
-test({
-  name:
-    "Wan umT5 (real GPU, default run): the graph takes input_ids and the bucket table and returns one " +
+describe.skipIf(!ASSETS_AVAILABLE || tokenizerText === undefined || !GPU_AVAILABLE)(
+  "Wan umT5 (real GPU, default run): the graph takes input_ids and the bucket table and returns one " +
     "output, and each case's TS-input forward has the golden's output shape with no non-finite value",
-  ignore: !ASSETS_AVAILABLE || tokenizerText === undefined || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const encoder = tokenizerEncoder();
-    const graph = graphName();
-    const prepared = prepareContainer(
-      await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
-      graph,
-    );
-    assertEquals(
-      prepared.graph.inputs.map(({ name }) => name),
-      [INPUT_IDS_KEY, BUCKETS_KEY],
-      "グラフ入力",
-    );
-    assertEquals(prepared.graph.outputs.length, 1, "グラフの出力は 1 本");
+  () => {
+    // Assigned in beforeAll; the its do not run when beforeAll throws.
+    let encoder!: WanPromptEncoder;
+    let prepared!: PreparedModel;
+    let gpu: GpuContext | undefined;
+    let session: Session | undefined;
     let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
-    try {
+
+    beforeAll(async () => {
+      encoder = tokenizerEncoder();
+      const graph = graphName();
+      prepared = prepareContainer(
+        await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
+        graph,
+      );
+      assertEquals(
+        prepared.graph.inputs.map(({ name }) => name),
+        [INPUT_IDS_KEY, BUCKETS_KEY],
+        "グラフ入力",
+      );
+      assertEquals(prepared.graph.outputs.length, 1, "グラフの出力は 1 本");
+      gpu = await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      });
       assertAdapterMatchesEnvironment(gpu);
-      const session = await prepared.createContainerSession(gpu);
+      session = await prepared.createContainerSession(gpu);
+    });
+
+    afterAll(async () => {
+      // Same order as the former finally blocks: the Session first, then the device.
+      if (gpu === undefined) return;
       try {
-        for (const { name, role } of CASES) {
-          await t.step(`${name}（${role}）`, async () => {
-            const golden = await loadGolden(name);
-            const { inputs } = hostInputs(encoder, golden, name);
-            const { output } = await forward(session, prepared, gpu, inputs, name);
-            assertEquals(output.shape, golden.outputShape, `${name}: 出力の形`);
-            const nonFinite = output.data.filter((value) => !Number.isFinite(value)).length;
-            assertEquals(nonFinite, 0, `${name}: 非有限`);
-            assertEquals(deviceLost, undefined, "device lost");
-          });
+        if (session !== undefined) {
+          await session.dispose();
+          await settleReleases(gpu);
         }
       } finally {
-        await session.dispose();
         await settleReleases(gpu);
+        gpu.destroy();
       }
-    } finally {
-      await settleReleases(gpu);
-      gpu.destroy();
+    });
+
+    for (const { name, role } of CASES) {
+      it(`${name}（${role}）`, async () => {
+        const device = requireOpened(gpu, "device");
+        const golden = await loadGolden(name);
+        const { inputs } = hostInputs(encoder, golden, name);
+        const { output } = await forward(
+          requireOpened(session, "Session"),
+          prepared,
+          device,
+          inputs,
+          name,
+        );
+        assertEquals(output.shape, golden.outputShape, `${name}: 出力の形`);
+        const nonFinite = output.data.filter((value) => !Number.isFinite(value)).length;
+        assertEquals(nonFinite, 0, `${name}: 非有限`);
+        assertEquals(deviceLost, undefined, "device lost");
+      });
     }
   },
-});
+);
 
-test({
-  name:
-    "Wan umT5 移植の門（実 GPU / CPU 層逐次 f64）: TS の入力で回した 1 forward の正規化比 r が帯の内・故障注入 4 件は" +
+/**
+ * Registers the hooks of one Session scope in the caller's describe: `beforeAll` opens the Session
+ * over `prepared()` on `gpu()`, `afterAll` disposes it and waits for the releases. Each scope gets
+ * its own describe so two Sessions never coexist (the scopes run one after another, in registration
+ * order). Returns the accessor the its use.
+ */
+const registerSessionScope = (
+  prepared: () => PreparedModel,
+  gpu: () => GpuContext,
+): (() => Session) => {
+  let session: Session | undefined;
+  beforeAll(async () => {
+    session = await prepared().createContainerSession(gpu());
+  });
+  afterAll(async () => {
+    if (session === undefined) return;
+    await session.dispose();
+    await settleReleases(gpu());
+  });
+  return () => requireOpened(session, "Session");
+};
+
+describe.skipIf(
+  !UPSTREAM_PARITY || !ASSETS_AVAILABLE || tokenizerText === undefined || !GPU_AVAILABLE,
+)(
+  "Wan umT5 移植の門（実 GPU / CPU 層逐次 f64）: TS の入力で回した 1 forward の正規化比 r が帯の内・故障注入 4 件は" +
     "帯の外" +
     UPSTREAM_PARITY_OPT_IN,
-  ignore: !UPSTREAM_PARITY || !ASSETS_AVAILABLE || tokenizerText === undefined || !GPU_AVAILABLE,
-  fn: async (t) => {
+  () => {
     const band = UMT5_NORMALIZED_BAND;
-    const encoder = tokenizerEncoder();
-    const graph = graphName();
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
-    const prepared = prepareContainer(opened, graph);
-    assertEquals(
-      prepared.graph.inputs.map(({ name }) => name),
-      [INPUT_IDS_KEY, BUCKETS_KEY],
-      "グラフ入力",
-    );
-    assertEquals(prepared.graph.outputs.length, 1, "グラフの出力は 1 本");
-    let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
     const ratios: CaseRatio[] = [];
-    try {
+    // Assigned in beforeAll; the its do not run when beforeAll throws.
+    let encoder!: WanPromptEncoder;
+    let graph!: string;
+    let opened!: OpenedContainer;
+    let prepared!: PreparedModel;
+    let gpu: GpuContext | undefined;
+    let deviceLost: string | undefined;
+    const device = (): GpuContext => requireOpened(gpu, "device");
+
+    beforeAll(async () => {
+      encoder = tokenizerEncoder();
+      graph = graphName();
+      opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
+      prepared = prepareContainer(opened, graph);
+      assertEquals(
+        prepared.graph.inputs.map(({ name }) => name),
+        [INPUT_IDS_KEY, BUCKETS_KEY],
+        "グラフ入力",
+      );
+      assertEquals(prepared.graph.outputs.length, 1, "グラフの出力は 1 本");
+      gpu = await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      });
       assertAdapterMatchesEnvironment(gpu);
-      const session = await prepared.createContainerSession(gpu);
-      try {
-        for (const { name, role } of CASES) {
-          await t.step(`${name}（${role}）`, async () => {
-            let caseNote = "";
-            await runRecordedCase(
-              results,
-              {
-                id: name,
-                failureNote: () => caseNote,
-              },
-              async ({ measurements }) => {
-                const golden = await loadGolden(name);
-                const { ids, inputs } = hostInputs(encoder, golden, name);
-                const referenceRatio = referenceRatioOf(golden, name);
-                const { output, run } = await forward(session, prepared, gpu, inputs, name);
-                assertEquals(output.shape, golden.outputShape, `${name}: 出力の形`);
-                const diff = difference(output.data, golden.expected);
-                const diffF32 = difference(output.data, golden.reference);
-                const referenceDiff = difference(golden.reference, golden.expected);
-                const ratio = ratioOf(diff) / referenceRatio;
-                ratios.push({ name, role, ratio });
-                const unbounded = { atol: Number.POSITIVE_INFINITY, rtol: 0 };
-                measurements.push(
-                  {
-                    output: "output@f64-reference",
-                    maxAbs: diff.maxAbs,
-                    maxRel: diff.maxRel,
-                    // 判定と同じ境界を絶対値へ写す（未導出の回は無限の帯 — 判定は下で赤にする）。
-                    tolerance:
-                      band === undefined
-                        ? unbounded
-                        : { atol: band * referenceRatio * diff.referenceMaxAbs, rtol: 0 },
-                    stage: "karume",
-                  },
-                  {
-                    output: "output@f32-reference",
-                    maxAbs: diffF32.maxAbs,
-                    maxRel: diffF32.maxRel,
-                    tolerance: unbounded,
-                    stage: "karume",
-                  },
-                  {
-                    output: "f32-reference@f64-reference",
-                    maxAbs: referenceDiff.maxAbs,
-                    maxRel: referenceDiff.maxRel,
-                    tolerance: unbounded,
-                    stage: "karume",
-                  },
-                );
-                const notes = [
-                  `L ${ids.length}`,
-                  formatRatio("GPU / f64 参照", diff, referenceRatio),
-                  `CPU f32 参照 / f64 参照（正規化の分母）: 比 ${referenceRatio.toExponential(3)}`,
-                  formatRun(run),
-                ];
-                assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
+    });
 
-                const faults: { label: string; ratio: number }[] = [];
-                if (role === "accept") {
-                  const injected: readonly (readonly [string, Umt5SessionInputs])[] = [
-                    ["相対位置の表を 1 ずらす", umt5SessionInputs(ids, shiftedBuckets(ids.length))],
-                    [
-                      "id 列の中ほどの 1 トークンを別の id に",
-                      umt5SessionInputs(
-                        replacedToken(ids),
-                        buildUmt5RelativePositionBuckets(ids.length),
-                      ),
-                    ],
-                  ];
-                  for (const [label, faulty] of injected) {
-                    const { output: faultOutput } = await forward(
-                      session,
-                      prepared,
-                      gpu,
-                      faulty,
-                      `${name} ${label}`,
-                    );
-                    const faultDiff = difference(faultOutput.data, golden.expected);
-                    faults.push({ label, ratio: ratioOf(faultDiff) / referenceRatio });
-                    notes.push(`故障注入 ${formatRatio(label, faultDiff, referenceRatio)}`);
-                  }
-                }
-                // 判定の前に出す（帯の外へ出た回も比が手元に残る）。
-                caseNote = notes.join(" / ");
-                console.log(`[wan-umt5] ${name}: ${caseNote}`);
-                assertEquals(deviceLost, undefined, "device lost");
-                judgeBand(band, name, ratio, faults);
-                return { status: "pass", note: caseNote };
-              },
-            );
-          });
-        }
-      } finally {
-        await session.dispose();
-        await settleReleases(gpu);
-      }
-
-      const swapLabel = "層 0 / 1 の相対位置の表の取り違え";
-      const swapped = prepareContainer(
-        swappedTablesContainer(opened, graph, SWAPPED_TABLES),
-        graph,
-      );
-      // 本体の Session を畳んだ後に張る（2 本を同時に載せない — 重み 5.3 GiB × 2 は B570 の天井
-      // 9,600 MiB を越える）。
-      const faultSession = await swapped.createContainerSession(gpu);
-      try {
-        for (const { name } of CASES.filter(({ role }) => role === "accept")) {
-          const id = `${name}/table-swap`;
-          await t.step(`${id}（故障注入 ${swapLabel} → 帯の外）`, async () => {
-            let note = "";
-            await runRecordedCase(results, { id, failureNote: () => note }, async () => {
-              const golden = await loadGolden(name);
-              const { inputs } = hostInputs(encoder, golden, name);
-              const referenceRatio = referenceRatioOf(golden, name);
-              const { output } = await forward(faultSession, swapped, gpu, inputs, id);
-              const faultDiff = difference(output.data, golden.expected);
-              const ratio = ratioOf(faultDiff) / referenceRatio;
-              note = `故障注入 ${formatRatio(swapLabel, faultDiff, referenceRatio)}（${
-                band === undefined ? "帯は未導出" : `帯の ${(ratio / band).toFixed(1)} 倍`
-              }）`;
-              console.log(`[wan-umt5] ${id}: ${note}`);
-              if (band === undefined) throw new Error(`${id}: 帯が未導出（故障注入の r ${ratio}）`);
-              assert(ratio > band, `${id}: r ${ratio.toPrecision(3)} が帯 ${band} の内に収まった`);
-              return { status: "pass", note };
-            });
-          });
-        }
-      } finally {
-        await faultSession.dispose();
-        await settleReleases(gpu);
-      }
-
-      // i8 に固有の故障注入（scale の倍率）。前の Session を畳んでから別の Session を張る
-      // （表の取り違えと同じ理由 — 2 本を同時に載せない）。
-      const label = `${I8_SCALE_FAULT_WEIGHT} の scale を ${GROSS_SCALE_FACTOR} 倍`;
-      const scaled = prepareContainer(
-        scaledScaleContainer(opened, graph, I8_SCALE_FAULT_WEIGHT, GROSS_SCALE_FACTOR),
-        graph,
-      );
-      const scaledSession = await scaled.createContainerSession(gpu);
-      try {
-        for (const { name } of CASES.filter(({ role }) => role === "accept")) {
-          const id = `${name}/scale-fault`;
-          await t.step(`${id}（故障注入 ${label} → 帯の外）`, async () => {
-            let note = "";
-            await runRecordedCase(results, { id, failureNote: () => note }, async () => {
-              const golden = await loadGolden(name);
-              const { inputs } = hostInputs(encoder, golden, name);
-              const referenceRatio = referenceRatioOf(golden, name);
-              const { output } = await forward(scaledSession, scaled, gpu, inputs, id);
-              const faultDiff = difference(output.data, golden.expected);
-              const ratio = ratioOf(faultDiff) / referenceRatio;
-              note = `故障注入 ${formatRatio(label, faultDiff, referenceRatio)}（${
-                band === undefined ? "帯は未導出" : `帯の ${(ratio / band).toPrecision(3)} 倍`
-              }）`;
-              console.log(`[wan-umt5] ${id}: ${note}`);
-              assertEquals(deviceLost, undefined, "device lost");
-              if (band === undefined) {
-                throw new Error(`${id}: 帯が未導出（故障注入の r ${ratio}）`);
-              }
-              assert(ratio > band, `${id}: r ${ratio.toPrecision(3)} が帯 ${band} の内に収まった`);
-              return { status: "pass", note };
-            });
-          });
-        }
-      } finally {
-        await scaledSession.dispose();
-        await settleReleases(gpu);
-      }
-
-      if (band === undefined) {
-        await t.step("帯の候補（未導出）", () => {
-          throw new Error(`帯が未導出 — ${bandCandidate(ratios)}`);
-        });
-      }
-    } finally {
+    afterAll(async () => {
+      // Runs after the Session scopes below have closed theirs (the former outer finally block).
+      if (gpu === undefined) return;
       await settleReleases(gpu);
       gpu.destroy();
+    });
+
+    describe("main Session", () => {
+      const session = registerSessionScope(() => prepared, device);
+      for (const { name, role } of CASES) {
+        it(`${name}（${role}）`, async () => {
+          let caseNote = "";
+          await runRecordedCase(
+            results,
+            {
+              id: name,
+              failureNote: () => caseNote,
+            },
+            async ({ measurements }) => {
+              const golden = await loadGolden(name);
+              const { ids, inputs } = hostInputs(encoder, golden, name);
+              const referenceRatio = referenceRatioOf(golden, name);
+              const { output, run } = await forward(session(), prepared, device(), inputs, name);
+              assertEquals(output.shape, golden.outputShape, `${name}: 出力の形`);
+              const diff = difference(output.data, golden.expected);
+              const diffF32 = difference(output.data, golden.reference);
+              const referenceDiff = difference(golden.reference, golden.expected);
+              const ratio = ratioOf(diff) / referenceRatio;
+              ratios.push({ name, role, ratio });
+              const unbounded = { atol: Number.POSITIVE_INFINITY, rtol: 0 };
+              measurements.push(
+                {
+                  output: "output@f64-reference",
+                  maxAbs: diff.maxAbs,
+                  maxRel: diff.maxRel,
+                  // 判定と同じ境界を絶対値へ写す（未導出の回は無限の帯 — 判定は下で赤にする）。
+                  tolerance:
+                    band === undefined
+                      ? unbounded
+                      : { atol: band * referenceRatio * diff.referenceMaxAbs, rtol: 0 },
+                  stage: "karume",
+                },
+                {
+                  output: "output@f32-reference",
+                  maxAbs: diffF32.maxAbs,
+                  maxRel: diffF32.maxRel,
+                  tolerance: unbounded,
+                  stage: "karume",
+                },
+                {
+                  output: "f32-reference@f64-reference",
+                  maxAbs: referenceDiff.maxAbs,
+                  maxRel: referenceDiff.maxRel,
+                  tolerance: unbounded,
+                  stage: "karume",
+                },
+              );
+              const notes = [
+                `L ${ids.length}`,
+                formatRatio("GPU / f64 参照", diff, referenceRatio),
+                `CPU f32 参照 / f64 参照（正規化の分母）: 比 ${referenceRatio.toExponential(3)}`,
+                formatRun(run),
+              ];
+              assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
+
+              const faults: { label: string; ratio: number }[] = [];
+              if (role === "accept") {
+                const injected: readonly (readonly [string, Umt5SessionInputs])[] = [
+                  ["相対位置の表を 1 ずらす", umt5SessionInputs(ids, shiftedBuckets(ids.length))],
+                  [
+                    "id 列の中ほどの 1 トークンを別の id に",
+                    umt5SessionInputs(
+                      replacedToken(ids),
+                      buildUmt5RelativePositionBuckets(ids.length),
+                    ),
+                  ],
+                ];
+                for (const [label, faulty] of injected) {
+                  const { output: faultOutput } = await forward(
+                    session(),
+                    prepared,
+                    device(),
+                    faulty,
+                    `${name} ${label}`,
+                  );
+                  const faultDiff = difference(faultOutput.data, golden.expected);
+                  faults.push({ label, ratio: ratioOf(faultDiff) / referenceRatio });
+                  notes.push(`故障注入 ${formatRatio(label, faultDiff, referenceRatio)}`);
+                }
+              }
+              // 判定の前に出す（帯の外へ出た回も比が手元に残る）。
+              caseNote = notes.join(" / ");
+              console.log(`[wan-umt5] ${name}: ${caseNote}`);
+              assertEquals(deviceLost, undefined, "device lost");
+              judgeBand(band, name, ratio, faults);
+              return { status: "pass", note: caseNote };
+            },
+          );
+        });
+      }
+    });
+
+    const swapLabel = "層 0 / 1 の相対位置の表の取り違え";
+    // 本体の Session を畳んだ後に張る（2 本を同時に載せない — 重み 5.3 GiB × 2 は B570 の天井
+    // 9,600 MiB を越える）。
+    describe(`fault Session: ${swapLabel}`, () => {
+      let swapped!: PreparedModel;
+      beforeAll(() => {
+        swapped = prepareContainer(swappedTablesContainer(opened, graph, SWAPPED_TABLES), graph);
+      });
+      const faultSession = registerSessionScope(() => swapped, device);
+      for (const { name } of CASES.filter(({ role }) => role === "accept")) {
+        const id = `${name}/table-swap`;
+        it(`${id}（故障注入 ${swapLabel} → 帯の外）`, async () => {
+          let note = "";
+          await runRecordedCase(results, { id, failureNote: () => note }, async () => {
+            const golden = await loadGolden(name);
+            const { inputs } = hostInputs(encoder, golden, name);
+            const referenceRatio = referenceRatioOf(golden, name);
+            const { output } = await forward(faultSession(), swapped, device(), inputs, id);
+            const faultDiff = difference(output.data, golden.expected);
+            const ratio = ratioOf(faultDiff) / referenceRatio;
+            note = `故障注入 ${formatRatio(swapLabel, faultDiff, referenceRatio)}（${
+              band === undefined ? "帯は未導出" : `帯の ${(ratio / band).toFixed(1)} 倍`
+            }）`;
+            console.log(`[wan-umt5] ${id}: ${note}`);
+            if (band === undefined) throw new Error(`${id}: 帯が未導出（故障注入の r ${ratio}）`);
+            assert(ratio > band, `${id}: r ${ratio.toPrecision(3)} が帯 ${band} の内に収まった`);
+            return { status: "pass", note };
+          });
+        });
+      }
+    });
+
+    // i8 に固有の故障注入（scale の倍率）。前の Session を畳んでから別の Session を張る
+    // （表の取り違えと同じ理由 — 2 本を同時に載せない）。
+    const label = `${I8_SCALE_FAULT_WEIGHT} の scale を ${GROSS_SCALE_FACTOR} 倍`;
+    describe(`fault Session: ${label}`, () => {
+      let scaled!: PreparedModel;
+      beforeAll(() => {
+        scaled = prepareContainer(
+          scaledScaleContainer(opened, graph, I8_SCALE_FAULT_WEIGHT, GROSS_SCALE_FACTOR),
+          graph,
+        );
+      });
+      const scaledSession = registerSessionScope(() => scaled, device);
+      for (const { name } of CASES.filter(({ role }) => role === "accept")) {
+        const id = `${name}/scale-fault`;
+        it(`${id}（故障注入 ${label} → 帯の外）`, async () => {
+          let note = "";
+          await runRecordedCase(results, { id, failureNote: () => note }, async () => {
+            const golden = await loadGolden(name);
+            const { inputs } = hostInputs(encoder, golden, name);
+            const referenceRatio = referenceRatioOf(golden, name);
+            const { output } = await forward(scaledSession(), scaled, device(), inputs, id);
+            const faultDiff = difference(output.data, golden.expected);
+            const ratio = ratioOf(faultDiff) / referenceRatio;
+            note = `故障注入 ${formatRatio(label, faultDiff, referenceRatio)}（${
+              band === undefined ? "帯は未導出" : `帯の ${(ratio / band).toPrecision(3)} 倍`
+            }）`;
+            console.log(`[wan-umt5] ${id}: ${note}`);
+            assertEquals(deviceLost, undefined, "device lost");
+            if (band === undefined) {
+              throw new Error(`${id}: 帯が未導出（故障注入の r ${ratio}）`);
+            }
+            assert(ratio > band, `${id}: r ${ratio.toPrecision(3)} が帯 ${band} の内に収まった`);
+            return { status: "pass", note };
+          });
+        });
+      }
+    });
+
+    if (band === undefined) {
+      it("帯の候補（未導出）", () => {
+        throw new Error(`帯が未導出 — ${bandCandidate(ratios)}`);
+      });
     }
   },
-});
+);
 
 /**
  * `Umt5Encoder`（`@karume/models/umt5`）の通しの e2e（実 GPU）— 配布形ミラー `models/karume-umt5-xxl` を
@@ -710,12 +764,10 @@ const loadMirror = async () => {
 /** 1 ケースの入力（golden のメタの前処理の後の文字列）と、その golden の id 列との最初の食い違い。 */
 const idsMismatch = (ids: Int32Array, golden: Golden): number => firstMismatch(ids, golden.ids);
 
-test({
-  name:
-    "umT5 encoder ホスト（GPU 不要）: ミラーのトークナイザが golden の前処理の後の文字列から golden の id 列を出し、" +
+test.skipIf(!DIST_PRESENT || !GOLDENS_PRESENT)(
+  "umT5 encoder ホスト（GPU 不要）: ミラーのトークナイザが golden の前処理の後の文字列から golden の id 列を出し、" +
     "golden はミラーの text_encoder の part 0 から採られている",
-  ignore: !DIST_PRESENT || !GOLDENS_PRESENT,
-  fn: async () => {
+  async () => {
     const { loaded, selection } = await loadMirror();
     assert(Object.hasOwn(selection.assets, TOKENIZER), `ミラーに資産 '${TOKENIZER}' が無い`);
     const assets = await fetchAssets(loaded, { [TOKENIZER]: selection.assets[TOKENIZER] });
@@ -735,130 +787,140 @@ test({
       assertEquals(at, -1, `${name}: id 列が golden と ${at} 番目で割れる（${ids.length} 本）`);
     }
   },
-});
+);
 
-test({
-  name:
-    "umT5 encoder (real GPU, default run): built by fromPretrained(nodeDirectory), tokenize and inputIds " +
+/**
+ * Registers the hooks that build the mirror's `Umt5Encoder` on a test device in the caller's
+ * describe: `beforeAll` acquires the device and runs `fromPretrained`, `afterAll` disposes the
+ * encoder (idempotent — an it may already have disposed it), waits for the releases, fails on a
+ * device loss and destroys the device. Returns the accessors the its use and the device-lost message (undefined while none).
+ */
+const registerMirrorEncoder = (): {
+  readonly gpu: () => GpuContext;
+  readonly encoder: () => Umt5Encoder;
+  readonly deviceLost: () => string | undefined;
+} => {
+  let gpu: GpuContext | undefined;
+  let encoder: Umt5Encoder | undefined;
+  let deviceLost: string | undefined;
+  beforeAll(async () => {
+    gpu = await acquireTestGpu({
+      onDeviceLost: (info) => {
+        deviceLost = `${info.reason}: ${info.message}`;
+      },
+    });
+    encoder = await Umt5Encoder.fromPretrained(nodeDirectory(DIST_ROOT), {
+      gpu,
+      model: MIRROR_MODEL,
+      quant: MIRROR_QUANT,
+    });
+  });
+  afterAll(async () => {
+    if (gpu === undefined) return;
+    try {
+      if (encoder !== undefined) {
+        await encoder.dispose();
+        await settleReleases(gpu);
+      }
+      // The former test bodies checked this after the dispose (a device loss during dispose).
+      assertEquals(deviceLost, undefined, "device lost");
+    } finally {
+      gpu.destroy();
+    }
+  });
+  return {
+    gpu: () => requireOpened(gpu, "device"),
+    encoder: () => requireOpened(encoder, "encoder"),
+    deviceLost: () => deviceLost,
+  };
+};
+
+describe.skipIf(!DIST_PRESENT || !GOLDENS_PRESENT || !GPU_AVAILABLE)(
+  "umT5 encoder (real GPU, default run): built by fromPretrained(nodeDirectory), tokenize and inputIds " +
     "match the golden ids and hiddenStates has the golden's shape with no non-finite value for all 10 " +
     "goldens; an aborted signal throws its reason before the run, and encode fails after dispose",
-  ignore: !DIST_PRESENT || !GOLDENS_PRESENT || !GPU_AVAILABLE,
-  fn: async (t) => {
-    let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
-    try {
-      const encoder = await Umt5Encoder.fromPretrained(nodeDirectory(DIST_ROOT), {
-        gpu,
-        model: MIRROR_MODEL,
-        quant: MIRROR_QUANT,
+  () => {
+    const mirror = registerMirrorEncoder();
+
+    for (const { name } of CASES) {
+      it(name, async () => {
+        const encoder = mirror.encoder();
+        const golden = await loadGolden(name);
+        const text = golden.meta.cleaned;
+        const tokenized = encoder.tokenize(text);
+        assertEquals(idsMismatch(tokenized, golden), -1, `${name}: tokenize の id 列`);
+
+        const encoding = await encoder.encode(text);
+        assertEquals(idsMismatch(encoding.inputIds, golden), -1, `${name}: inputIds`);
+        assertEquals(encoding.length, golden.ids.length, `${name}: length`);
+        const [, rows, width] = golden.outputShape;
+        assertEquals([encoding.length, encoding.hiddenSize], [rows, width], `${name}: 形`);
+        const nonFinite = encoding.hiddenStates.filter((value) => !Number.isFinite(value)).length;
+        assertEquals(nonFinite, 0, `${name}: 非有限`);
+        assertEquals(mirror.deviceLost(), undefined, "device lost");
+        await settleReleases(mirror.gpu());
       });
-      try {
-        for (const { name } of CASES) {
-          await t.step(name, async () => {
-            const golden = await loadGolden(name);
-            const text = golden.meta.cleaned;
-            const tokenized = encoder.tokenize(text);
-            assertEquals(idsMismatch(tokenized, golden), -1, `${name}: tokenize の id 列`);
-
-            const encoding = await encoder.encode(text);
-            assertEquals(idsMismatch(encoding.inputIds, golden), -1, `${name}: inputIds`);
-            assertEquals(encoding.length, golden.ids.length, `${name}: length`);
-            const [, rows, width] = golden.outputShape;
-            assertEquals([encoding.length, encoding.hiddenSize], [rows, width], `${name}: 形`);
-            const nonFinite = encoding.hiddenStates.filter(
-              (value) => !Number.isFinite(value),
-            ).length;
-            assertEquals(nonFinite, 0, `${name}: 非有限`);
-            assertEquals(deviceLost, undefined, "device lost");
-            await settleReleases(gpu);
-          });
-        }
-
-        await t.step(
-          "中断済みの signal は run の前に reason をそのまま投げ、次の encode は回る",
-          async () => {
-            const controller = new AbortController();
-            const reason = new Error("umt5-encoder: テストの中断");
-            controller.abort(reason);
-            const error = await assertRejects(() =>
-              encoder.encode("a cat", { signal: controller.signal }),
-            );
-            assertStrictEquals(error, reason);
-            const after = await encoder.encode("a cat");
-            assertEquals(after.length, encoder.tokenize("a cat").length);
-          },
-        );
-      } finally {
-        await encoder.dispose();
-        await settleReleases(gpu);
-      }
-      await assertRejects(() => encoder.encode("a cat"), Error, "dispose 済み");
-      assertEquals(deviceLost, undefined, "device lost");
-    } finally {
-      gpu.destroy();
     }
-  },
-});
 
-test({
-  name:
-    "umT5 encoder（実 GPU）: fromPretrained(nodeDirectory) で組み、golden 10 本の hiddenStates の正規化比 r が帯の内" +
+    it("中断済みの signal は run の前に reason をそのまま投げ、次の encode は回る", async () => {
+      const encoder = mirror.encoder();
+      const controller = new AbortController();
+      const reason = new Error("umt5-encoder: テストの中断");
+      controller.abort(reason);
+      const error = await assertRejects(() =>
+        encoder.encode("a cat", { signal: controller.signal }),
+      );
+      assertStrictEquals(error, reason);
+      const after = await encoder.encode("a cat");
+      assertEquals(after.length, encoder.tokenize("a cat").length);
+    });
+
+    // The former test body's tail after its finally block (dispose, then the rejected encode).
+    it("encode fails after dispose", async () => {
+      const encoder = mirror.encoder();
+      await encoder.dispose();
+      await settleReleases(mirror.gpu());
+      await assertRejects(() => encoder.encode("a cat"), Error, "dispose 済み");
+      assertEquals(mirror.deviceLost(), undefined, "device lost");
+    });
+  },
+);
+
+describe.skipIf(!UPSTREAM_PARITY || !DIST_PRESENT || !GOLDENS_PRESENT || !GPU_AVAILABLE)(
+  "umT5 encoder（実 GPU）: fromPretrained(nodeDirectory) で組み、golden 10 本の hiddenStates の正規化比 r が帯の内" +
     "（Wan の umT5 の移植の門と同じ golden・同じ帯）・tokenize と inputIds が golden の id 列" +
     UPSTREAM_PARITY_OPT_IN,
-  ignore: !UPSTREAM_PARITY || !DIST_PRESENT || !GOLDENS_PRESENT || !GPU_AVAILABLE,
-  fn: async (t) => {
-    let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
-    try {
-      const encoder = await Umt5Encoder.fromPretrained(nodeDirectory(DIST_ROOT), {
-        gpu,
-        model: MIRROR_MODEL,
-        quant: MIRROR_QUANT,
-      });
-      try {
-        for (const { name } of CASES) {
-          await t.step(name, async () => {
-            const golden = await loadGolden(name);
-            const text = golden.meta.cleaned;
-            const tokenized = encoder.tokenize(text);
-            assertEquals(idsMismatch(tokenized, golden), -1, `${name}: tokenize の id 列`);
+  () => {
+    const mirror = registerMirrorEncoder();
 
-            const encoding = await encoder.encode(text);
-            assertEquals(idsMismatch(encoding.inputIds, golden), -1, `${name}: inputIds`);
-            assertEquals(encoding.length, golden.ids.length, `${name}: length`);
-            const [, rows, width] = golden.outputShape;
-            assertEquals([encoding.length, encoding.hiddenSize], [rows, width], `${name}: 形`);
-            const diff = difference(encoding.hiddenStates, golden.expected);
-            const referenceRatio = referenceRatioOf(golden, name);
-            const ratio = ratioOf(diff) / referenceRatio;
-            console.log(
-              `[umt5-encoder] ${name}: L ${encoding.length} / ${formatRatio(
-                "GPU / f64 参照",
-                diff,
-                referenceRatio,
-              )}`,
-            );
-            assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
-            assertEquals(deviceLost, undefined, "device lost");
-            judgeBand(UMT5_NORMALIZED_BAND, name, ratio, []);
-            await settleReleases(gpu);
-          });
-        }
-      } finally {
-        await encoder.dispose();
-        await settleReleases(gpu);
-      }
-      assertEquals(deviceLost, undefined, "device lost");
-    } finally {
-      gpu.destroy();
+    for (const { name } of CASES) {
+      it(name, async () => {
+        const encoder = mirror.encoder();
+        const golden = await loadGolden(name);
+        const text = golden.meta.cleaned;
+        const tokenized = encoder.tokenize(text);
+        assertEquals(idsMismatch(tokenized, golden), -1, `${name}: tokenize の id 列`);
+
+        const encoding = await encoder.encode(text);
+        assertEquals(idsMismatch(encoding.inputIds, golden), -1, `${name}: inputIds`);
+        assertEquals(encoding.length, golden.ids.length, `${name}: length`);
+        const [, rows, width] = golden.outputShape;
+        assertEquals([encoding.length, encoding.hiddenSize], [rows, width], `${name}: 形`);
+        const diff = difference(encoding.hiddenStates, golden.expected);
+        const referenceRatio = referenceRatioOf(golden, name);
+        const ratio = ratioOf(diff) / referenceRatio;
+        console.log(
+          `[umt5-encoder] ${name}: L ${encoding.length} / ${formatRatio(
+            "GPU / f64 参照",
+            diff,
+            referenceRatio,
+          )}`,
+        );
+        assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
+        assertEquals(mirror.deviceLost(), undefined, "device lost");
+        judgeBand(UMT5_NORMALIZED_BAND, name, ratio, []);
+        await settleReleases(mirror.gpu());
+      });
     }
   },
-});
+);

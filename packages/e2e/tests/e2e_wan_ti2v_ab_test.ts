@@ -4,7 +4,7 @@
  * で `session` が空の参照席（manifest から導く — `referencePartnerOf`。今の配布形では `f16+dit8`）と比べる。比較相手は同機の
  * 参照層で、torch golden は使わない（ADR 0110 決定 5 ②）。
  *
- * 手順・判定・故障注入は 2.1（`e2e_wan_ab_test.ts`）と共有の 1 本（`helpers/wan-ab-gate.ts` の {@link runWanAbCase}）:
+ * 手順・判定・故障注入は 2.1（`e2e_wan_ab_test.ts`）と共有の 1 本（`helpers/wan-ab-gate.ts` の {@link registerWanAbCase}）:
  * 参照席で step 1 の潜在（2 ステップの通しの 1 step 目）を採って打ち切る → 実用席で同じことを独立に 2 回 → 決定性（2 回が
  * ビット一致）・census（実用席の DiT の各パスで linear 310 本ちょうどが i8a8・参照経路の linear 0 本 — 束の census 表の
  * `wan-ti2v` の行。attention の 2 ノブは 1 本以上）・帯（`judgeAb`）。
@@ -41,7 +41,7 @@
  *
  * env の opt-in `KARUME_WAN_TI2V_I2V_FULL=1`（I2V の通しの e2e の opt-in と同じ変数）のときだけ回す（既定のレーンに入れない —
  * 利用者の裁定）。故障注入は回さない（門の空振りは T2V の 33 フレームが示す — 手順は同じ 1 本）。census と決定性は
- * {@link runWanAbCase} のまま。加えて {@link runWanAbCase} は条件画像を渡したケースの各観測で encoder の 3 グラフの run が
+ * {@link registerWanAbCase} のまま。加えて {@link registerWanAbCase} は条件画像を渡したケースの各観測で encoder の 3 グラフの run が
  * 届いたことを見る（画像が要求から落ちて両席とも T2V で回ると、relRMS は T2V の値で帯の内に収まり census も DiT しか
  * 見ないので、帯と census では掴めない）。回すコマンド:
  *
@@ -57,7 +57,7 @@
  *
  * ## device の使い方
  *
- * device は Deno.test 1 本で 1 つ取り、観測の間に `settleReleases` で解放を待つ（2.1 と同じ）。opt-in の env を付けて `--filter`
+ * device は describe 1 本で 1 つ取り、観測の間に `settleReleases` で解放を待つ（2.1 と同じ）。opt-in の env を付けて `--filter`
  * なしで回すと 1 プロセスで device を順に取る（121 → 33 → I2V）。`destroy()` が VRAM をすぐ返さない機（B570 — ADR 0120 リスク 6）
  * では前のケースの確保の残りが次のケースの確保に重なりうるので、opt-in のケースは上のコマンドで単独に回す（通しの e2e の
  * opt-in と同じ規律）。並びを 121 フレームが先にしているのは、`--filter` なしで回したときでも大きい確保を device の残りを
@@ -69,9 +69,9 @@
  */
 
 import { readFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
-import { parseSafetensors } from "@karume/runtime";
+import { type GpuContext, parseSafetensors } from "@karume/runtime";
 import { type Rgb8Image, WanTi2vPipeline } from "../../models/wan.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { sha256Hex } from "../../runtime/tests/helpers/reference.ts";
@@ -79,7 +79,12 @@ import { openResults, type Results } from "../../runtime/tests/helpers/results.t
 import type { AbBand } from "./helpers/ab-gate.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
-import { runWanAbCase, type WanAbSubject } from "./helpers/wan-ab-gate.ts";
+import {
+  assigned,
+  registerWanAbCase,
+  type WanAbScope,
+  type WanAbSubject,
+} from "./helpers/wan-ab-gate.ts";
 import { WAN_I2V_IMAGE_SHA256 } from "../../models/tests/helpers/wan-i2v-image.ts";
 import {
   WAN_I2V_SOURCE_SHAPE,
@@ -186,7 +191,7 @@ if (manifestText === undefined) {
 const RUNNABLE = GPU_AVAILABLE && manifestText !== undefined;
 
 /**
- * 2.2 の門の対象（共有の段 {@link runWanAbCase} へ渡す）。`caseResults` はケースの結果の席（opt-in のケースは
+ * 2.2 の門の対象（共有の段 {@link registerWanAbCase} へ渡す）。`caseResults` はケースの結果の席（opt-in のケースは
  * 既定のレーンと分ける — モジュール doc）、`request` は要求の固定値（I2V のケースは条件画像と fit を足す）。
  *
  * MUST: 呼ぶのは {@link RUNNABLE} のテストの中だけ（配布形が無いのにここへ来たら ignore の判定の破れなので落とす）。
@@ -251,52 +256,57 @@ const readI2vImage = async (): Promise<Rgb8Image> => {
 for (const { frames, band, optIn } of CASES) {
   const id = `${WAN_TI2V_PRACTICAL_QUANT}-${frames}f`;
   const faults = frames === FAULT_FRAMES;
-  test({
-    name:
-      `e2e(実GPU): Wan2.2 ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う（自機 A/B）` +
+  describe.skipIf(!RUNNABLE || (optIn && !LONG_CLIP))(
+    `e2e(実GPU): Wan2.2 ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う（自機 A/B）` +
       (faults ? "・故障注入 5 件は赤" : "") +
       (optIn ? "（opt-in KARUME_WAN_TI2V_121F=1）" : ""),
-    ignore: !RUNNABLE || (optIn && !LONG_CLIP),
-    fn: async (t) => {
-      const gpu = await acquireTestGpu();
-      try {
+    () => {
+      // One device per case, shared by the case's its (acquired before, released after them all).
+      let gpu: GpuContext | undefined;
+      let subject: WanAbSubject | undefined;
+      beforeAll(async () => {
+        gpu = await acquireTestGpu();
         assertAdapterMatchesEnvironment(gpu);
-        await runWanAbCase(t, gpu, subjectOf(optIn ? longClipResults : results), {
-          id,
-          frames,
-          band,
-          faults,
-        });
-      } finally {
+        subject = subjectOf(optIn ? longClipResults : results);
+      });
+      afterAll(async () => {
+        if (gpu === undefined) return;
         await settleReleases(gpu);
         gpu.destroy();
-      }
+      });
+      const scope: WanAbScope = {
+        gpu: () => assigned(gpu, "gpu"),
+        subject: () => assigned(subject, "subject"),
+      };
+      registerWanAbCase(scope, { id, frames, band, faults });
     },
-  });
+  );
 }
 
 {
   const id = `${WAN_TI2V_PRACTICAL_QUANT}-i2v-crop-${I2V_FRAMES}f`;
-  test({
-    name:
-      `e2e(実GPU): Wan2.2 ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う` +
+  describe.skipIf(!RUNNABLE || !I2V_FULL || !I2V_FIXTURE_PRESENT)(
+    `e2e(実GPU): Wan2.2 ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う` +
       "（自機 A/B・条件画像 boxing-cats・opt-in KARUME_WAN_TI2V_I2V_FULL=1）",
-    ignore: !RUNNABLE || !I2V_FULL || !I2V_FIXTURE_PRESENT,
-    fn: async (t) => {
-      const image = await readI2vImage();
-      const gpu = await acquireTestGpu();
-      try {
+    () => {
+      let gpu: GpuContext | undefined;
+      let subject: WanAbSubject | undefined;
+      beforeAll(async () => {
+        const image = await readI2vImage();
+        gpu = await acquireTestGpu();
         assertAdapterMatchesEnvironment(gpu);
-        await runWanAbCase(t, gpu, subjectOf(i2vResults, { ...REQUEST, image, fit: "crop" }), {
-          id,
-          frames: I2V_FRAMES,
-          band: I2V_BAND,
-          faults: false,
-        });
-      } finally {
+        subject = subjectOf(i2vResults, { ...REQUEST, image, fit: "crop" });
+      });
+      afterAll(async () => {
+        if (gpu === undefined) return;
         await settleReleases(gpu);
         gpu.destroy();
-      }
+      });
+      const scope: WanAbScope = {
+        gpu: () => assigned(gpu, "gpu"),
+        subject: () => assigned(subject, "subject"),
+      };
+      registerWanAbCase(scope, { id, frames: I2V_FRAMES, band: I2V_BAND, faults: false });
     },
-  });
+  );
 }

@@ -4,7 +4,7 @@
  * 要求の固定値・ログの接頭）は {@link WanAbSubject} で受け、手順・判定の順・故障注入の形・結果の席への記録は 1 本にする（世代で
  * 門の主張が割れないように）。「何を赤にするか」の判定そのものは `ab-gate.ts` の純関数。
  *
- * 1 ケース（= フレーム数 1 つ）の手順（{@link runWanAbCase}）:
+ * 1 ケース（= フレーム数 1 つ）の手順（{@link registerWanAbCase}）:
  *
  * 1. 参照席（manifest から導く — `referencePartnerOf`）の pipeline で **step 1 の潜在**（2 ステップの通しの 1 step 目 — 席が
  *    最初に効いた直後・決定 5-4）を採り、購読側の throw で生成を打ち切る（`captureThenAbort`）。dispose して解放を待つ。
@@ -20,7 +20,7 @@
  * 書き換えない。
  */
 
-import { type TestContext } from "@karume/test-support/test";
+import { beforeAll, it } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type DistributionSource, parseManifest, type SessionSpec } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
@@ -85,7 +85,7 @@ export type WanAbPipeline = AsyncDisposable & {
   generate(request: WanTi2vGenerateRequest): Promise<GeneratedVideo>;
 };
 
-/** 世代ごとの違い（門の手順と判定は {@link runWanAbCase} の 1 本）。 */
+/** 世代ごとの違い（門の手順と判定は {@link registerWanAbCase} の 1 本）。 */
 export type WanAbSubject = {
   /** ログの接頭（`[e2e] <label> A/B …`）。 */
   readonly label: string;
@@ -294,7 +294,7 @@ export const observeOverridden = (
     (source) => observeStep1(gpu, subject, source, subject.practical, frames, SEED),
   );
 
-/** {@link runWanAbCase} が呼び手へ返す観測（2.1 のノブ単位の記録が A/B の観測を使い回す）。 */
+/** {@link registerWanAbCase} が呼び手へ返す観測（2.1 のノブ単位の記録が A/B の観測を使い回す）。 */
 export type WanAbRun = {
   /** 参照席の名前（manifest から導いた値）。 */
   readonly reference: string;
@@ -315,30 +315,65 @@ export type WanAbCase = {
 };
 
 /**
- * 1 ケース（フレーム数 1 つ）の自機 A/B 門を `t` の step として回す（モジュール doc の手順）。device の取得・アダプタの
- * 検査・後始末は呼び手が持つ（Deno.test 1 本で device 1 つ）。
+ * Read access to the values the caller's `beforeAll` assigns at describe scope (the device and the
+ * subject). The accessors are only called from hooks and its, never at collection time.
  */
-export const runWanAbCase = async (
-  t: TestContext,
-  gpu: GpuContext,
-  subject: WanAbSubject,
-  { id, frames, band, faults }: WanAbCase,
-): Promise<WanAbRun> => {
-  const { label, practical, results } = subject;
-  const manifest = parseManifest(subject.manifestText);
-  const reference = referencePartnerOf(manifest, subject.model, practical);
-  const effective = effectiveSessionOf(
-    subject,
-    quantOf(manifest, subject.model, practical).session,
-    id,
-  );
-  const row = practicalRowOf(subject, effective, id);
-  const source = nodeDirectory(subject.assetsRoot);
-  const referenceRun = await observeStep1(gpu, subject, source, reference, frames, SEED);
-  const first = await observeStep1(gpu, subject, source, practical, frames, SEED);
-  const second = await observeStep1(gpu, subject, source, practical, frames, SEED);
+export type WanAbScope = {
+  readonly gpu: () => GpuContext;
+  readonly subject: () => WanAbSubject;
+};
 
-  await t.step(`${id}: 決定性・census・帯`, async () => {
+/** The value a `beforeAll` assigned, or a loud failure when the hook did not get that far. */
+export const assigned = <T>(value: T | undefined, what: string): T => {
+  if (value === undefined) throw new Error(`${what} was not assigned by beforeAll`);
+  return value;
+};
+
+/** What the case's `beforeAll` derives and observes before its its run. */
+type WanAbCaseState = WanAbRun & {
+  readonly effective: SessionOptions;
+  readonly row: BundleCensusRow;
+  /** 実用席の 2 回目。 */
+  readonly second: WanStep1Observation;
+};
+
+/**
+ * Registers one case (one frame count) of the self A/B gate inside the caller's describe (the steps
+ * in the module doc): a `beforeAll` takes the three observations, then one it per gate step. The
+ * caller owns the device (acquiring it, checking the adapter, releasing it) in its own
+ * `beforeAll` / `afterAll`, registered before this call — Vitest runs a suite's `beforeAll` hooks
+ * sequentially in registration order (`sequence.hooks: "stack"`, the default), so the device is
+ * there when the observations start. Returns an accessor for the observations, valid inside its
+ * registered after this call.
+ */
+export const registerWanAbCase = (
+  scope: WanAbScope,
+  { id, frames, band, faults }: WanAbCase,
+): (() => WanAbRun) => {
+  let state: WanAbCaseState | undefined;
+  beforeAll(async () => {
+    const gpu = scope.gpu();
+    const subject = scope.subject();
+    const { practical } = subject;
+    const manifest = parseManifest(subject.manifestText);
+    const reference = referencePartnerOf(manifest, subject.model, practical);
+    const effective = effectiveSessionOf(
+      subject,
+      quantOf(manifest, subject.model, practical).session,
+      id,
+    );
+    const row = practicalRowOf(subject, effective, id);
+    const source = nodeDirectory(subject.assetsRoot);
+    const referenceRun = await observeStep1(gpu, subject, source, reference, frames, SEED);
+    const first = await observeStep1(gpu, subject, source, practical, frames, SEED);
+    const second = await observeStep1(gpu, subject, source, practical, frames, SEED);
+    state = { reference, referenceRun, first, second, effective, row };
+  });
+  const current = (): WanAbCaseState => assigned(state, `${id}: the observations`);
+
+  it(`${id}: 決定性・census・帯`, async () => {
+    const { label, practical, results } = scope.subject();
+    const { reference, referenceRun, first, second, effective, row } = current();
     await runRecordedCase(results, { id, failureNote: errorText }, (recorded) => {
       const measured = measureAb(first.latent, referenceRun.latent);
       recorded.comparisons.push(
@@ -357,75 +392,81 @@ export const runWanAbCase = async (
     });
   });
 
-  if (!faults) return { reference, referenceRun, first };
+  if (!faults) return current;
 
   // --- 故障注入（各門が空振りでないことの実証 — ADR 0110 決定 5-5）-----------------------
   // どれも「門が赤になること」を assert する（緑 = 門が故障を見逃した）。①〜③ は ADR 0120 決定 4 の 3 件、
   // ④⑤ は census の「ちょうど」と上限が実物の値で効くことの裏取り。
 
-  await t.step(
-    "故障注入 ① 実用席の session を空にした manifest（= 参照席そのもの）は床で赤",
-    async () => {
-      const faultId = `fault1-empty-session-${frames}f`;
-      await runRecordedCase(results, { id: faultId, failureNote: errorText }, async (recorded) => {
-        const faulty = await observeOverridden(gpu, subject, {}, frames);
-        const measured = measureAb(faulty.latent, referenceRun.latent);
-        recorded.comparisons.push(
-          comparisonOf(
-            { output: WAN_AB_OBSERVATION, reference, practical: `${practical}（session 空）` },
-            measured,
-            band,
-          ),
-        );
-        console.log(`[e2e] ${label} 故障注入 ① ${describeAb(measured)}`);
-        assertThrows(() => judgeAb(measured, band, faultId), Error, "床の失敗");
-      });
-    },
-  );
+  it("故障注入 ① 実用席の session を空にした manifest（= 参照席そのもの）は床で赤", async () => {
+    const gpu = scope.gpu();
+    const subject = scope.subject();
+    const { label, practical, results } = subject;
+    const { reference, referenceRun } = current();
+    const faultId = `fault1-empty-session-${frames}f`;
+    await runRecordedCase(results, { id: faultId, failureNote: errorText }, async (recorded) => {
+      const faulty = await observeOverridden(gpu, subject, {}, frames);
+      const measured = measureAb(faulty.latent, referenceRun.latent);
+      recorded.comparisons.push(
+        comparisonOf(
+          { output: WAN_AB_OBSERVATION, reference, practical: `${practical}（session 空）` },
+          measured,
+          band,
+        ),
+      );
+      console.log(`[e2e] ${label} 故障注入 ① ${describeAb(measured)}`);
+      assertThrows(() => judgeAb(measured, band, faultId), Error, "床の失敗");
+    });
+  });
 
   // NOTE: ⑤ は帯の上限で赤になることを見るので、帯が未導出（`undefined`）の間は `judgeAb` が「帯が未導出」で投げて
   // この step も赤になる（帯の宣言の後に有効 — 2.1 の段 3 / 4 と同じ扱い。② はその間も効く）。
-  await t.step(
-    "故障注入 ② / ⑤ 実用席を別 seed で回す — 1 回目との決定性・参照席に対する上限が赤",
-    async () => {
-      const faultId = `fault2-5-other-seed-${frames}f`;
-      await runRecordedCase(results, { id: faultId, failureNote: errorText }, async (recorded) => {
-        const shifted = await observeStep1(
-          gpu,
-          subject,
-          nodeDirectory(subject.assetsRoot),
-          practical,
-          frames,
-          SEED + 1,
-        );
-        // ② 決定性: 同じ席の 2 回目だけ入力が違う形（ビット一致の門が実物の潜在で差を掴む）。
-        assertThrows(
-          () => assertBitIdentical(first.latent, shifted.latent, "故障注入 ②"),
-          Error,
-          "ビット一致しない",
-        );
-        // ⑤ 上限: 観測点が参照と無関係な潜在になった形（崩壊の代理 — 別の初期ノイズの step 1）。
-        const measured = measureAb(shifted.latent, referenceRun.latent);
-        recorded.comparisons.push(
-          comparisonOf(
-            {
-              output: WAN_AB_OBSERVATION,
-              reference,
-              practical: `${practical}（seed ${SEED + 1}）`,
-            },
-            measured,
-            band,
-          ),
-        );
-        console.log(`[e2e] ${label} 故障注入 ⑤ ${describeAb(measured)}`);
-        assertThrows(() => judgeAb(measured, band, faultId), Error, "上限の失敗");
-      });
-    },
-  );
+  it("故障注入 ② / ⑤ 実用席を別 seed で回す — 1 回目との決定性・参照席に対する上限が赤", async () => {
+    const gpu = scope.gpu();
+    const subject = scope.subject();
+    const { label, practical, results } = subject;
+    const { reference, referenceRun, first } = current();
+    const faultId = `fault2-5-other-seed-${frames}f`;
+    await runRecordedCase(results, { id: faultId, failureNote: errorText }, async (recorded) => {
+      const shifted = await observeStep1(
+        gpu,
+        subject,
+        nodeDirectory(subject.assetsRoot),
+        practical,
+        frames,
+        SEED + 1,
+      );
+      // ② 決定性: 同じ席の 2 回目だけ入力が違う形（ビット一致の門が実物の潜在で差を掴む）。
+      assertThrows(
+        () => assertBitIdentical(first.latent, shifted.latent, "故障注入 ②"),
+        Error,
+        "ビット一致しない",
+      );
+      // ⑤ 上限: 観測点が参照と無関係な潜在になった形（崩壊の代理 — 別の初期ノイズの step 1）。
+      const measured = measureAb(shifted.latent, referenceRun.latent);
+      recorded.comparisons.push(
+        comparisonOf(
+          {
+            output: WAN_AB_OBSERVATION,
+            reference,
+            practical: `${practical}（seed ${SEED + 1}）`,
+          },
+          measured,
+          band,
+        ),
+      );
+      console.log(`[e2e] ${label} 故障注入 ⑤ ${describeAb(measured)}`);
+      assertThrows(() => judgeAb(measured, band, faultId), Error, "上限の失敗");
+    });
+  });
 
   // ③ 帯の判定は記録だけ（ADR 0030 決定 5 の再演 — 積み重ねた席の後段の失効は数値で掴みにくい。帯が緑の
   // ままなら census が要ることの実証、赤なら床の係数を 0 より上に置く材料）。
-  await t.step("故障注入 ③ attentionCompute だけ外した席は census で赤（帯は記録）", async () => {
+  it("故障注入 ③ attentionCompute だけ外した席は census で赤（帯は記録）", async () => {
+    const gpu = scope.gpu();
+    const subject = scope.subject();
+    const { label, practical, results } = subject;
+    const { reference, referenceRun, effective, row } = current();
     const faultId = `fault3-no-attention-a8-${frames}f`;
     await runRecordedCase(results, { id: faultId, failureNote: errorText }, async (recorded) => {
       const { attentionCompute: _dropped, ...withoutAttention } = declaredSessionOf(subject);
@@ -458,24 +499,22 @@ export const runWanAbCase = async (
     });
   });
 
-  await t.step(
-    "故障注入 ④ census 表の linear の本数を 1 ずらすと実物の census で赤（GPU の追加なし）",
-    () => {
-      for (const delta of [-1, 1]) {
-        assertThrows(
-          () =>
-            assertPracticalCensus(
-              shiftedLinearRow(row, delta),
-              first,
-              effective,
-              `故障注入 ④（${delta > 0 ? "+" : ""}${delta}）`,
-            ),
-          Error,
-          "linearCompute=a8 の変種",
-        );
-      }
-    },
-  );
+  it("故障注入 ④ census 表の linear の本数を 1 ずらすと実物の census で赤（GPU の追加なし）", () => {
+    const { first, effective, row } = current();
+    for (const delta of [-1, 1]) {
+      assertThrows(
+        () =>
+          assertPracticalCensus(
+            shiftedLinearRow(row, delta),
+            first,
+            effective,
+            `故障注入 ④（${delta > 0 ? "+" : ""}${delta}）`,
+          ),
+        Error,
+        "linearCompute=a8 の変種",
+      );
+    }
+  });
 
-  return { reference, referenceRun, first };
+  return current;
 };

@@ -20,7 +20,7 @@
 //    2026-10-11）。写さないと分岐した会話が最初の数 cycle の投機を繰り返し、共有すると片方の
 //    分岐の壁がもう片方のモードを倒す。
 
-import { test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import {
@@ -356,8 +356,8 @@ test("ゲート T5 定常: 16 観測に 1 回 plain を測り、その step は�
   assertEquals(counted.switches, 1);
 });
 
-test("ゲート T6 skip: 周期だけ進み、W1 もブロックも動かさない", async (t) => {
-  await t.step("周期は進む（`W1` の初回サンプルがそのぶん早く来る）", () => {
+describe("ゲート T6 skip: 周期だけ進み、W1 もブロックも動かさない", () => {
+  it("周期は進む（`W1` の初回サンプルがそのぶん早く来る）", () => {
     // 呼び手が「壁の観測に混ぜない」と決めた cycle（各ターンの最初の cycle）— 決定は読むが、
     // 返すのは観測ではなく `skip()` である。混ぜない cycle でも GPU の仕事は 1 本走っている。
     const gate = createSpeculationGate();
@@ -369,7 +369,7 @@ test("ゲート T6 skip: 周期だけ進み、W1 もブロックも動かさな�
     assertEquals(gate.switches, 0);
   });
 
-  await t.step("ブロックには数えない", () => {
+  it("ブロックには数えない", () => {
     const gate = createSpeculationGate({ window: 2, confirm: 1 });
     assertEquals(gate.decide(), "speculate");
     gate.skip();
@@ -383,12 +383,12 @@ test("ゲート T6 skip: 周期だけ進み、W1 もブロックも動かさな�
   });
 });
 
-test("ゲート T7 冪等: decide は状態を動かさない（切替は観測で起きる）", async (t) => {
+describe("ゲート T7 冪等: decide は状態を動かさない（切替は観測で起きる）", () => {
   // `decide()` は純粋な読み取りである。ここで縛るのは 2 方向: 同じ状態での重複読みが状態を
   // 進めないことと、状態が動いた（観測 / `skip`）直後の読みが**必ず作り直される**ことである。
   // 後者を見ないと、決定をメモ化して観測でだけ捨てる実装（= `skip` した cycle の決定が 1 手
   // 古いまま出る）が緑のまま通る。
-  await t.step("起点（まだ何も測っていない）", () => {
+  it("起点（まだ何も測っていない）", () => {
     const gate = createSpeculationGate();
     assertEquals(
       [gate.decide(), gate.decide(), gate.decide()],
@@ -397,7 +397,7 @@ test("ゲート T7 冪等: decide は状態を動かさない（切替は観測�
     assertEquals(gate.switches, 0);
   });
 
-  await t.step("倒れた直後に何度読んでも、切替は 1 回・探索の周期もずれない", () => {
+  it("倒れた直後に何度読んでも、切替は 1 回・探索の周期もずれない", () => {
     const gate = createSpeculationGate({ window: 2, confirm: 1 });
     // 3 手目の**観測**で plain へ倒れる（決定ではなく観測が状態を動かす）。
     run(gate, LOSING, 3);
@@ -416,7 +416,7 @@ test("ゲート T7 冪等: decide は状態を動かさない（切替は観測�
     assertEquals(gate.mode, "plain");
   });
 
-  await t.step("観測を返せば次の決定は作り直される", () => {
+  it("観測を返せば次の決定は作り直される", () => {
     const gate = createSpeculationGate();
     // 16 手目 = 定常の `W1` の測り直し。
     run(gate, WINNING, 15);
@@ -426,7 +426,7 @@ test("ゲート T7 冪等: decide は状態を動かさない（切替は観測�
     assertEquals(gate.decide(), "speculate", "観測を返しても決定が更新されていない");
   });
 
-  await t.step("skip した cycle の決定も持ち越されない（周期は 1 進む）", () => {
+  it("skip した cycle の決定も持ち越されない（周期は 1 進む）", () => {
     const gate = createSpeculationGate();
     assertEquals(gate.decide(), "speculate");
     gate.skip();
@@ -492,9 +492,9 @@ const CONDITIONS: readonly Condition[] = [
   },
 ];
 
-test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain へ落ちる", async (t) => {
+describe("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain へ落ちる", () => {
   for (const condition of CONDITIONS) {
-    await t.step(`${condition.name}（比 ${condition.ratio}）`, () => {
+    it(`${condition.name}（比 ${condition.ratio}）`, () => {
       // 定数が research の表と同じものであること（表を写し間違えた瞬間に赤くなる）。
       assertAlmostEquals(
         condition.cycle / condition.delivered / condition.plain,
@@ -540,7 +540,7 @@ test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain へ�
     });
   }
 
-  await t.step("不感帯（M2 要約の 0.970）は enter も leave も跨がない", () => {
+  it("不感帯（M2 要約の 0.970）は enter も leave も跨がない", () => {
     // 0.970 は「戻る」側の閾値 0.97 のすぐ上で、`< enter` を満たさない = 現状維持である。
     // 3〜4% の差は受理数のノイズ（cycle あたり sd は平均の 43%）に埋もれるので、動かさない
     // のが正しい。
@@ -562,8 +562,8 @@ test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain へ�
   });
 });
 
-test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) => {
-  await t.step("alpha は 0 < α ≤ 1", () => {
+describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
+  it("alpha は 0 < α ≤ 1", () => {
     assertThrows(() => createSpeculationGate({ alpha: 0 }), Error, "alpha 0 が正の有限数でない");
     assertThrows(
       () => createSpeculationGate({ alpha: Number.NaN }),
@@ -573,7 +573,7 @@ test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) =
     assertThrows(() => createSpeculationGate({ alpha: 1.5 }), Error, "alpha 1.5 が 0 < α ≤ 1 の外");
   });
 
-  await t.step("ブロックは 2 cycle 以上（1 なら 1 サンプル判定に戻る）", () => {
+  it("ブロックは 2 cycle 以上（1 なら 1 サンプル判定に戻る）", () => {
     assertThrows(
       () => createSpeculationGate({ window: 1 }),
       Error,
@@ -586,7 +586,7 @@ test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) =
     );
   });
 
-  await t.step("連続本数とバーストは 1 以上の整数", () => {
+  it("連続本数とバーストは 1 以上の整数", () => {
     assertThrows(
       () => createSpeculationGate({ confirm: 0 }),
       Error,
@@ -595,7 +595,7 @@ test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) =
     assertThrows(() => createSpeculationGate({ burst: 0 }), Error, "burst 0 が 1 以上の整数でない");
   });
 
-  await t.step("打ち切りの下限は 1 以上 burst 以下の整数", () => {
+  it("打ち切りの下限は 1 以上 burst 以下の整数", () => {
     assertThrows(
       () => createSpeculationGate({ burstMin: 0 }),
       Error,
@@ -616,7 +616,7 @@ test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) =
     assertEquals(createSpeculationGate({ burst: 1 }).mode, "speculate");
   });
 
-  await t.step("強い負けの上乗せは 2 本とも正の有限数（早抜けは未指定 = off）", () => {
+  it("強い負けの上乗せは 2 本とも正の有限数（早抜けは未指定 = off）", () => {
     for (const [name, value] of [
       ["earlyLeave", 0],
       ["earlyLeave", -1],
@@ -637,7 +637,7 @@ test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) =
     assertEquals(createSpeculationGate({ earlyLeave: undefined }).mode, "speculate");
   });
 
-  await t.step("探索の間隔は 1 以上の整数・上限は基本間隔以上", () => {
+  it("探索の間隔は 1 以上の整数・上限は基本間隔以上", () => {
     assertThrows(
       () => createSpeculationGate({ exploreBase: 0 }),
       Error,
@@ -655,7 +655,7 @@ test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) =
     );
   });
 
-  await t.step("不感帯は 1 を挟む（enter < 1 < leave）", () => {
+  it("不感帯は 1 を挟む（enter < 1 < leave）", () => {
     assertThrows(
       () => createSpeculationGate({ enter: 1 }),
       Error,
@@ -673,7 +673,7 @@ test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) =
     );
   });
 
-  await t.step("端の値は通る（門が広すぎないことの対）", () => {
+  it("端の値は通る（門が広すぎないことの対）", () => {
     const gate = createSpeculationGate({
       alpha: 1,
       window: 2,
@@ -715,8 +715,8 @@ test("ゲート T9 門: ノブの不受理は家族横断の ModelInputError で
   }
 });
 
-test("ゲート T10 分岐: fork は観測状態を写した独立のゲートを返す", async (t) => {
-  await t.step("同じ観測列を与えると、元と分岐の決定列とモードの推移が一致する", () => {
+describe("ゲート T10 分岐: fork は観測状態を写した独立のゲートを返す", () => {
+  it("同じ観測列を与えると、元と分岐の決定列とモードの推移が一致する", () => {
     const gate = createSpeculationGate();
     // 17 本で `W1` は測り済み・ブロック 1 は満ちる直前（T2 と同じ位置）。
     run(gate, MILD, 17);
@@ -734,7 +734,7 @@ test("ゲート T10 分岐: fork は観測状態を写した独立のゲート�
     assertEquals(fresh.mode, "speculate", "観測の無いゲートが 18 本で倒れた（門が空振りする）");
   });
 
-  await t.step("片方だけに観測を与えても、もう片方は動かない（両向き）", () => {
+  it("片方だけに観測を与えても、もう片方は動かない（両向き）", () => {
     // 同じ履歴を持つ双子を基準にする（分岐しなかった場合の振る舞い）。
     const knobs = { window: 2, confirm: 1 };
     const gate = createSpeculationGate(knobs);

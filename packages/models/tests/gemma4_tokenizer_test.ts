@@ -19,7 +19,7 @@
 // 見る（部分集合と full の食い違いを塞ぐ門）。無い環境では SKIP する。GPU は使わない。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { createBpeModel } from "../src/text/bpe.ts";
@@ -164,20 +164,20 @@ const parseAsset = (asset: Record<string, unknown>): void => {
   parseGemmaTokenizerAsset(new TextEncoder().encode(JSON.stringify(asset)));
 };
 
-test("資産 JSON の門: 信用できない外部入力として扱う", async (t) => {
-  await t.step("最小形は通る", () => {
+describe("資産 JSON の門: 信用できない外部入力として扱う", () => {
+  it("最小形は通る", () => {
     parseAsset(minimalAsset());
   });
 
-  await t.step("知らない format 版は読まない", () => {
+  it("知らない format 版は読まない", () => {
     assertThrows(() => parseAsset({ ...minimalAsset(), format: "karume-gemma-tokenizer/2" }));
   });
 
-  await t.step("出所記録 source は読み流す（書き手が必ず綴る欄）", () => {
+  it("出所記録 source は読み流す（書き手が必ず綴る欄）", () => {
     parseAsset({ ...minimalAsset(), source: { path: "synthetic" } });
   });
 
-  await t.step("未知キーは落ちる（同版内の欄の追加・綴り違いを黙って読み流さない）", () => {
+  it("未知キーは落ちる（同版内の欄の追加・綴り違いを黙って読み流さない）", () => {
     assertThrows(
       () => parseAsset({ ...minimalAsset(), mergeCount: 1 }),
       Error,
@@ -188,7 +188,7 @@ test("資産 JSON の門: 信用できない外部入力として扱う", async 
     assertThrows(() => parseAsset(asset), Error, "tokenizer.spec: 未知キー 'extra'");
   });
 
-  await t.step("欄が欠ければ「無い」で落ちる", () => {
+  it("欄が欠ければ「無い」で落ちる", () => {
     const { mergesCount: _, ...withoutCount } = minimalAsset();
     assertThrows(() => parseAsset(withoutCount), Error, "tokenizer.mergesCount: 無い");
     const asset = minimalAsset();
@@ -197,7 +197,7 @@ test("資産 JSON の門: 信用できない外部入力として扱う", async 
     assertThrows(() => parseAsset(asset), Error, "tokenizer.spec.decoder: 無い");
   });
 
-  await t.step("宣言された構成が 1 欄でも違えば落ちる", () => {
+  it("宣言された構成が 1 欄でも違えば落ちる", () => {
     for (const field of ["normalizer", "preTokenizer", "decoder"]) {
       const asset = minimalAsset();
       asset["spec"] = { ...(asset["spec"] as Record<string, unknown>), [field]: "別物" };
@@ -205,18 +205,18 @@ test("資産 JSON の門: 信用できない外部入力として扱う", async 
     }
   });
 
-  await t.step("未知の post_processor は落ちる", () => {
+  it("未知の post_processor は落ちる", () => {
     const asset = minimalAsset();
     asset["spec"] = { ...(asset["spec"] as Record<string, unknown>), postProcessor: "bos-only" };
     assertThrows(() => parseAsset(asset), Error, "postProcessor");
   });
 
-  await t.step("merges の行数が申告と違えば落ちる", () => {
+  it("merges の行数が申告と違えば落ちる", () => {
     // 欠けても BPE は「見つからないので結合しない」だけで落ちない（分割だけが静かに変わる）。
     assertThrows(() => parseAsset({ ...minimalAsset(), mergesCount: 2 }), Error, "行数");
   });
 
-  await t.step("特殊トークンが追加語彙の外なら落ちる", () => {
+  it("特殊トークンが追加語彙の外なら落ちる", () => {
     assertThrows(
       () => parseAsset({ ...minimalAsset(), specialIds: [0, 1, 2, 5] }),
       Error,
@@ -224,7 +224,7 @@ test("資産 JSON の門: 信用できない外部入力として扱う", async 
     );
   });
 
-  await t.step("追加語彙の id 重複は落ちる（綴り→id と id→綴りが食い違う）", () => {
+  it("追加語彙の id 重複は落ちる（綴り→id と id→綴りが食い違う）", () => {
     // 同じ id を 2 つの綴りが指すと、encode は両方をその id にし、decode は片方しか返せない。
     // 両方とも語彙の外（300）に置く — 語彙内の id だと綴り不一致の検査が先に落とし、id 重複の
     // 検査を外しても赤にならない。
@@ -245,7 +245,7 @@ test("資産 JSON の門: 信用できない外部入力として扱う", async 
     );
   });
 
-  await t.step("語彙内の id を綴りの違う追加語彙が使えば落ちる", () => {
+  it("語彙内の id を綴りの違う追加語彙が使えば落ちる", () => {
     // `["ZZ", 259]`（語彙では "a"）を受けると encode("a") が 259 を返し、decode(259) が "ZZ" になる。
     assertThrows(
       () =>
@@ -263,7 +263,7 @@ test("資産 JSON の門: 信用できない外部入力として扱う", async 
     );
   });
 
-  await t.step("語彙の外への採番は従来どおり受ける（EmbeddingGemma の形）", () => {
+  it("語彙の外への採番は従来どおり受ける（EmbeddingGemma の形）", () => {
     parseAsset({
       ...minimalAsset(),
       addedTokens: [
@@ -275,11 +275,11 @@ test("資産 JSON の門: 信用できない外部入力として扱う", async 
     });
   });
 
-  await t.step("`<bos>` / `<eos>` / `<unk>` が語彙の外なら落ちる", () => {
+  it("`<bos>` / `<eos>` / `<unk>` が語彙の外なら落ちる", () => {
     assertThrows(() => parseAsset({ ...minimalAsset(), bosId: 9999 }), Error, "語彙に無い");
   });
 
-  await t.step("JSON でないバイト列は落ちる", () => {
+  it("JSON でないバイト列は落ちる", () => {
     assertThrows(
       () => parseGemmaTokenizerAsset(new TextEncoder().encode("{")),
       Error,
@@ -299,9 +299,9 @@ for (const { family, fixtureName, series } of [
   const fixture = await readFixture(fixtureName);
   const tokenizer = new GemmaTokenizer(assetsOf(fixture));
 
-  test(`${family} 符号化パリティ: 上流 tokenizers と id 列がビット一致`, async (t) => {
+  describe(`${family} 符号化パリティ: 上流 tokenizers と id 列がビット一致`, () => {
     for (const testCase of fixture.encode) {
-      await t.step(`${testCase.name} — ${testCase.why}`, () => {
+      it(`${testCase.name} — ${testCase.why}`, () => {
         assertEquals(tokenizer.encode(testCase.text), testCase.ids, "add_special_tokens=False");
         assertEquals(
           tokenizer.encodeWithSpecialTokens(testCase.text),
@@ -312,9 +312,9 @@ for (const { family, fixtureName, series } of [
     }
   });
 
-  test(`${family} 復号パリティ: 上流 tokenizers と文字列がビット一致`, async (t) => {
+  describe(`${family} 復号パリティ: 上流 tokenizers と文字列がビット一致`, () => {
     for (const testCase of fixture.decode) {
-      await t.step(`${testCase.name} — ${testCase.why}`, () => {
+      it(`${testCase.name} — ${testCase.why}`, () => {
         assertEquals(
           tokenizer.decode(testCase.ids, { skipSpecialTokens: false }),
           testCase.text,
@@ -377,10 +377,9 @@ for (const { family, fixtureName, series } of [
     );
   }
 
-  test({
-    name: `${family} 実資産突合: 全語彙でもフィクスチャと同じ id 列（部分集合の穴を塞ぐ）`,
-    ignore: seriesBytes === undefined,
-    fn: () => {
+  test.skipIf(seriesBytes === undefined)(
+    `${family} 実資産突合: 全語彙でもフィクスチャと同じ id 列（部分集合の穴を塞ぐ）`,
+    () => {
       const tokenizerFull = full();
       for (const testCase of fixture.encode) {
         assertEquals(tokenizerFull.encode(testCase.text), testCase.ids, testCase.name);
@@ -398,12 +397,11 @@ for (const { family, fixtureName, series } of [
         );
       }
     },
-  });
+  );
 
-  test({
-    name: `${family} 実資産の日本語長文: 併合キューが実用時間で終わる`,
-    ignore: seriesBytes === undefined,
-    fn: () => {
+  test.skipIf(seriesBytes === undefined)(
+    `${family} 実資産の日本語長文: 併合キューが実用時間で終わる`,
+    () => {
       // 正規化後の断片は入力全長 1 本になるので、50,000 文字は記号 50,000 個の 1 断片。
       // 全走査の実装なら併合（約 20,000 回）ごとに列を舐めて 10^8〜10^9 回規模の探索になる
       // （数十秒〜）。merge queue の実測は 20ms 前後で、予算はその 250 倍を採ってある。
@@ -426,5 +424,5 @@ for (const { family, fixtureName, series } of [
         );
       }
     },
-  });
+  );
 }

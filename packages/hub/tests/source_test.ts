@@ -6,8 +6,8 @@
  * ここで固定する（将来ここへ「明示 mapping → fail loudly」の解決順が入る）。
  */
 
-import { test } from "@karume/test-support/test";
 import { assertEquals, assertStrictEquals } from "@std/assert";
+import { describe, it, test } from "vite-plus/test";
 import { type FileRef, fileRefKey } from "../src/manifest.ts";
 import { type PinnedSource, sourceForRef } from "../src/source.ts";
 
@@ -50,15 +50,15 @@ test("sourceForRef: repo と revision が揃った参照だけが宣言された
   assertStrictEquals(crossed === source, false, "越境先がセッションの取得元と同一になっている");
 });
 
-test("sourceForRef: 片方だけの宣言では越境しない（対でのみ意味を持つ）", async (t) => {
+describe("sourceForRef: 片方だけの宣言では越境しない（対でのみ意味を持つ）", () => {
   // parse が対を強制するので manifest 経由では現れないが、分岐が片方だけを見ていると
   // 「越境先の revision を自リポへ効かせる」等の取り違えが黙って成立する。
-  await t.step("repo だけ", () => {
+  it("repo だけ", () => {
     const { source, calls } = recordingSource();
     assertStrictEquals(sourceForRef(source, ref({ repo: "someone/other" })), source);
     assertEquals(calls, []);
   });
-  await t.step("revision だけ", () => {
+  it("revision だけ", () => {
     const { source, calls } = recordingSource();
     assertStrictEquals(sourceForRef(source, ref({ revision: SHA })), source);
     assertEquals(calls, []);
@@ -76,11 +76,11 @@ test("fileRefKey: 対が揃った越境参照だけが宣言座標つきのキ�
   );
 });
 
-test("fileRefKey: 片方だけの宣言は自リポの path キーへ畳まれる（sourceForRef と同じ判定）", async (t) => {
-  await t.step("repo だけ", () => {
+describe("fileRefKey: 片方だけの宣言は自リポの path キーへ畳まれる（sourceForRef と同じ判定）", () => {
+  it("repo だけ", () => {
     assertEquals(fileRefKey(ref({ repo: "someone/other" })), ref().path);
   });
-  await t.step("revision だけ", () => {
+  it("revision だけ", () => {
     assertEquals(fileRefKey(ref({ revision: SHA })), ref().path);
   });
 });

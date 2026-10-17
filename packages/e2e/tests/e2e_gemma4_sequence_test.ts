@@ -47,17 +47,20 @@
 // 2 系統を同じ pipeline で回すため）— ミラーが無い環境では⑥だけを明示 SKIP する。
 
 import { isNotFound, readFile, readTextFileSync, statSync } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { MANIFEST_FILENAME, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import {
   acquireGpu,
+  type GpuContext,
   parseSafetensors,
+  type PreparedModel,
   prepareContainer,
   type SafetensorsFile,
+  type Session,
 } from "@karume/runtime";
-import { createGemma4Ple } from "../../models/src/gemma/ple.ts";
+import { createGemma4Ple, type Gemma4Ple } from "../../models/src/gemma/ple.ts";
 import {
   gemma4RopeInputNames,
   gemma4RopeInputs,
@@ -224,21 +227,36 @@ const readCase = async (
 const tokenIds = (events: readonly GenerationEvent[]): number[] =>
   events.filter((event) => event.kind === "token").map((event) => event.id);
 
-test({
-  name: "Gemma 4 E2B sequence 検収: 1 ターン parity・多ターン連結・停止 token 2 系統（実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    // 容器は 1 度だけ開く（重みも PLE も同じ `model` 容器の中にある）。
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
-    const parsed = prepareContainer(opened, MODEL_GRAPH);
+describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "Gemma 4 E2B sequence 検収: 1 ターン parity・多ターン連結・停止 token 2 系統（実 GPU）",
+  () => {
+    let parsed: PreparedModel;
+    let ple: Gemma4Ple;
+    // Undefined until beforeAll creates them: afterAll releases only what was created.
+    let gpu: GpuContext | undefined;
+    let session: Session | undefined;
 
-    const { index, openBlock } = await seriesPleHandle(opened, `test: ${PRODUCT_ROOT.pathname}`);
-    const ple = createGemma4Ple({
-      index,
-      openBlock,
-      vocabSize: VOCAB,
-      // 全 block 常駐（生成の往復で読み直さない）= PLE 全量ぶんの予算。
-      maxResidentBytes: gemma4PleTotalBytes(index),
+    beforeAll(async () => {
+      // 容器は 1 度だけ開く（重みも PLE も同じ `model` 容器の中にある）。
+      const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
+      parsed = prepareContainer(opened, MODEL_GRAPH);
+
+      const { index, openBlock } = await seriesPleHandle(opened, `test: ${PRODUCT_ROOT.pathname}`);
+      ple = createGemma4Ple({
+        index,
+        openBlock,
+        vocabSize: VOCAB,
+        // 全 block 常駐（生成の往復で読み直さない）= PLE 全量ぶんの予算。
+        maxResidentBytes: gemma4PleTotalBytes(index),
+      });
+
+      gpu = await acquireGpu();
+      session = await parsed.createContainerSession(gpu);
+    });
+
+    afterAll(async () => {
+      await session?.dispose();
+      gpu?.destroy();
     });
 
     /** 静的配線（停止集合とバケットだけを変えて作る — 他は同じ資産の同じ結線）。 */
@@ -271,14 +289,13 @@ test({
         },
       });
 
-    const gpu = await acquireGpu();
-    const session = await parsed.createContainerSession(gpu);
     /** 1 会話 = 1 sequence（context を抱えたままにしないので、使い終わりで返す）。 */
     const withSequence = async <T>(
       stopTokens: readonly number[],
       body: (sequence: GenerationSequence) => Promise<T>,
       chunkBuckets: readonly number[] = [],
     ): Promise<T> => {
+      assert(session !== undefined, "the session is created in beforeAll");
       const sequence = await createGenerationSequence({
         session,
         program: programOf(stopTokens, chunkBuckets),
@@ -290,248 +307,239 @@ test({
       }
     };
 
-    try {
-      await t.step("① 温度 0 の sequence が 3 ケース × 16 step で期待列と一致", async () => {
-        /** 2 本以上に割れた prefill を 1 度でも踏んだか（刻みの退行検出 — `CHUNK_LENGTH` の doc）。 */
-        let sawMultipleChunks = false;
-        for (const { name } of EXPECTED_CASES) {
-          const { prompt, expected } = await readCase(name);
-          assertEquals(expected.length, GREEDY_STEPS, `${name}: golden の step 数`);
+    it("① 温度 0 の sequence が 3 ケース × 16 step で期待列と一致", async () => {
+      /** 2 本以上に割れた prefill を 1 度でも踏んだか（刻みの退行検出 — `CHUNK_LENGTH` の doc）。 */
+      let sawMultipleChunks = false;
+      for (const { name } of EXPECTED_CASES) {
+        const { prompt, expected } = await readCase(name);
+        assertEquals(expected.length, GREEDY_STEPS, `${name}: golden の step 数`);
 
-          const started = performance.now();
-          const { events, stop } = await withSequence([], async (sequence) => {
-            const stream = sequence.generate({ prompt, maxNewTokens: GREEDY_STEPS });
-            const collected: GenerationEvent[] = [];
-            for await (const event of stream) collected.push(event);
-            return { events: collected, stop: await stream.done };
-          });
+        const started = performance.now();
+        const { events, stop } = await withSequence([], async (sequence) => {
+          const stream = sequence.generate({ prompt, maxNewTokens: GREEDY_STEPS });
+          const collected: GenerationEvent[] = [];
+          for await (const event of stream) collected.push(event);
+          return { events: collected, stop: await stream.done };
+        });
 
-          assertEquals(tokenIds(events), expected, `${name}: sequence 経由の生成 token 列`);
-          assertEquals(
-            stop,
-            { reason: "max-tokens", tokens: GREEDY_STEPS },
-            `${name}: 停止理由と生成 token 数`,
-          );
-          // prefill イベントは chunk の割り方どおり（短い 2 ケースは 1 本・最長ケースは 19 本）。
-          const prefills = events.filter((event) => event.kind === "prefill");
-          assertEquals(
-            prefills.length,
-            Math.ceil(prompt.length / CHUNK_LENGTH),
-            `${name}: prefill イベント数`,
-          );
-          if (prefills.length > 1) sawMultipleChunks = true;
-          // 位置は prompt の続きから 1 ずつ（sequence は counter を持たず context から導出する）。
-          assertEquals(
-            events.filter((event) => event.kind === "token").map((event) => event.position),
-            Array.from({ length: GREEDY_STEPS }, (_unused, step) => prompt.length + step),
-            `${name}: token イベントの絶対位置`,
-          );
-          console.log(
-            `[e2e] gemma4 sequence ${name}: T=${prompt.length} + K=${GREEDY_STEPS} step / ` +
-              `${(performance.now() - started).toFixed(0)}ms`,
-          );
-        }
-        // 刻みを「全ケースが 1 chunk に収まる値」へ戻すと、この門が守っている sequence 層の
-        // 多 chunk 経路が例外も差分も出さずに消える（`CHUNK_LENGTH` の doc）。ここで落とす。
-        assert(
-          sawMultipleChunks,
-          `刻み ${CHUNK_LENGTH} ではどのケースも 1 chunk に収まる（多 chunk prefill が走らない）`,
+        assertEquals(tokenIds(events), expected, `${name}: sequence 経由の生成 token 列`);
+        assertEquals(
+          stop,
+          { reason: "max-tokens", tokens: GREEDY_STEPS },
+          `${name}: 停止理由と生成 token 数`,
         );
+        // prefill イベントは chunk の割り方どおり（短い 2 ケースは 1 本・最長ケースは 19 本）。
+        const prefills = events.filter((event) => event.kind === "prefill");
+        assertEquals(
+          prefills.length,
+          Math.ceil(prompt.length / CHUNK_LENGTH),
+          `${name}: prefill イベント数`,
+        );
+        if (prefills.length > 1) sawMultipleChunks = true;
+        // 位置は prompt の続きから 1 ずつ（sequence は counter を持たず context から導出する）。
+        assertEquals(
+          events.filter((event) => event.kind === "token").map((event) => event.position),
+          Array.from({ length: GREEDY_STEPS }, (_unused, step) => prompt.length + step),
+          `${name}: token イベントの絶対位置`,
+        );
+        console.log(
+          `[e2e] gemma4 sequence ${name}: T=${prompt.length} + K=${GREEDY_STEPS} step / ` +
+            `${(performance.now() - started).toFixed(0)}ms`,
+        );
+      }
+      // 刻みを「全ケースが 1 chunk に収まる値」へ戻すと、この門が守っている sequence 層の
+      // 多 chunk 経路が例外も差分も出さずに消える（`CHUNK_LENGTH` の doc）。ここで落とす。
+      assert(
+        sawMultipleChunks,
+        `刻み ${CHUNK_LENGTH} ではどのケースも 1 chunk に収まる（多 chunk prefill が走らない）`,
+      );
+    });
+
+    it("① topK = 1 も実寸の語彙（V = 262,144）で greedy と一致する", async () => {
+      const { name } = EXPECTED_CASES[0];
+      const { prompt, expected } = await readCase(name);
+      const generated = await withSequence([], async (sequence) => {
+        const stream = sequence.generate({
+          prompt,
+          maxNewTokens: GREEDY_STEPS,
+          // Temperature 1 keeps the sampler off the greedy fast path, so every step runs
+          // candidate selection over the full logits row. The candidates collapse to the top
+          // one, so the seed cannot move the sequence.
+          sampler: { temperature: 1, topK: 1, seed: 20_260_831 },
+        });
+        const ids: number[] = [];
+        for await (const event of stream) {
+          if (event.kind === "token") ids.push(event.id);
+        }
+        return ids;
+      });
+      assertEquals(
+        generated,
+        expected,
+        `${name}: topK 1 / 温度 1 の生成 token 列（greedy と同じであること）`,
+      );
+    });
+
+    it("② break → 続きの 2 ターン目が参照走と厳密一致（token を 1 個も落とさない）", async () => {
+      const { name } = EXPECTED_CASES[0];
+      const { prompt, expected } = await readCase(name);
+
+      const generated = await withSequence([], async (sequence) => {
+        // 1 ターン目: 途中で break（`return()` 経由で finally へ入る経路）。
+        const first = sequence.generate({ prompt, maxNewTokens: GREEDY_STEPS });
+        const head: number[] = [];
+        for await (const event of first) {
+          if (event.kind !== "token") continue;
+          head.push(event.id);
+          if (head.length === BREAK_AFTER) break;
+        }
+        assertEquals(
+          await first.done,
+          { reason: "closed", tokens: BREAK_AFTER },
+          "1 ターン目の停止理由と生成 token 数",
+        );
+        assertEquals(head, expected.slice(0, BREAK_AFTER), "1 ターン目の token 列");
+
+        // 2 ターン目: 新しい token を足さずに続きだけ（pendingToken が先頭へ連結される）。
+        const second = sequence.generate({
+          prompt: [],
+          maxNewTokens: GREEDY_STEPS - BREAK_AFTER,
+        });
+        const tail: number[] = [];
+        for await (const event of second) {
+          if (event.kind === "token") tail.push(event.id);
+        }
+        assertEquals(
+          await second.done,
+          { reason: "max-tokens", tokens: GREEDY_STEPS - BREAK_AFTER },
+          "2 ターン目の停止理由と生成 token 数",
+        );
+        return [...head, ...tail];
       });
 
-      await t.step("① topK = 1 も実寸の語彙（V = 262,144）で greedy と一致する", async () => {
-        const { name } = EXPECTED_CASES[0];
+      assertEquals(
+        generated,
+        expected,
+        `${name}: 中断 → 再開の連結列（1 本で流した参照走と厳密一致すること — ` +
+          `割れたら pendingToken が落ちているか、再開の run 形が違う）`,
+      );
+      console.log(
+        `[e2e] gemma4 sequence 多ターン: ${BREAK_AFTER} + ${GREEDY_STEPS - BREAK_AFTER} token が ` +
+          `1 本走りと一致`,
+      );
+    });
+
+    it("③ EOS 集合を宣言した program は実出力で止まる", async () => {
+      for (const { name, firstStop } of EXPECTED_CASES) {
         const { prompt, expected } = await readCase(name);
-        const generated = await withSequence([], async (sequence) => {
+        const { events, stop } = await withSequence(STOP_TOKENS, async (sequence) => {
+          const stream = sequence.generate({ prompt, maxNewTokens: GREEDY_STEPS });
+          const collected: GenerationEvent[] = [];
+          for await (const event of stream) collected.push(event);
+          return { events: collected, stop: await stream.done };
+        });
+
+        // 停止 token 自体は `token` イベントに出さない（本文ではなく終端記号）。
+        assertEquals(
+          tokenIds(events),
+          expected.slice(0, firstStop),
+          `${name}: 停止までに出た token 列`,
+        );
+        assertEquals(
+          stop,
+          // 停止 token 自体も生成 1 個ぶん（`GenerationStop.tokens` の doc）— 本文は firstStop 個。
+          { reason: "eos", token: expected[firstStop], tokens: firstStop + 1 },
+          `${name}: EOS 集合 [${STOP_TOKENS.join(",")}] での停止`,
+        );
+        console.log(`[e2e] gemma4 sequence ${name}: EOS 停止 @${firstStop}`);
+      }
+    });
+
+    it("④ 要求が足した停止 token でも実出力で止まる（配布形の集合は空）", async () => {
+      // ③と同じ添字で止まるが、停止集合の出どころが違う — program は**空**で、その要求だけが
+      // 停止 token を宣言する。ここが割れたら和集合の判定が program 側しか見ていない。
+      for (const { name, firstStop } of EXPECTED_CASES) {
+        const { prompt, expected } = await readCase(name);
+        const { events, stop } = await withSequence([], async (sequence) => {
           const stream = sequence.generate({
             prompt,
             maxNewTokens: GREEDY_STEPS,
-            // Temperature 1 keeps the sampler off the greedy fast path, so every step runs
-            // candidate selection over the full logits row. The candidates collapse to the top
-            // one, so the seed cannot move the sequence.
-            sampler: { temperature: 1, topK: 1, seed: 20_260_831 },
+            stopTokens: [expected[firstStop]],
           });
-          const ids: number[] = [];
-          for await (const event of stream) {
-            if (event.kind === "token") ids.push(event.id);
-          }
-          return ids;
+          const collected: GenerationEvent[] = [];
+          for await (const event of stream) collected.push(event);
+          return { events: collected, stop: await stream.done };
         });
+
         assertEquals(
-          generated,
-          expected,
-          `${name}: topK 1 / 温度 1 の生成 token 列（greedy と同じであること）`,
+          tokenIds(events),
+          expected.slice(0, firstStop),
+          `${name}: 停止までに出た token 列（③と同じ列であること）`,
         );
-      });
+        assertEquals(
+          stop,
+          // 理由だけが③と違う（配布形の終端記号ではなく、この要求の都合で止めた）。
+          { reason: "stop-token", token: expected[firstStop], tokens: firstStop + 1 },
+          `${name}: 要求の停止 token [${expected[firstStop]}] での停止`,
+        );
+        console.log(`[e2e] gemma4 sequence ${name}: 要求の停止 token @${firstStop}`);
+      }
+    });
+    it("⑤ prefill バケットを宣言しても token 列が動かない", async () => {
+      // 末尾 chunk を pad 無しの小さい物理行数で流す（ADR 0066 追記〈バケット〉）。行局所な
+      // op（linear / pointwise / norm）は物理行数を変えても有効行の値を変えないが、GEMM の
+      // 幾何は M で変わる（`gemm-geometry.ts` の段）ので**ビット同一は契約しない** — 縛るのは
+      // ①と同じ golden token 列である。
+      let sawBucketRows = false;
+      for (const { name } of EXPECTED_CASES) {
+        const { prompt, expected } = await readCase(name);
+        const tail = prompt.length % CHUNK_LENGTH;
+        // 末尾 chunk がバケットに載ったか（載らない刻みだと、この step は①の再走に化ける）。
+        const rows = physicalChunkRows(
+          tail === 0 ? CHUNK_LENGTH : tail,
+          programOf([], CHUNK_BUCKETS),
+        );
+        // M=1 は decode 形であってバケットではない（有効行 1 本の chunk は
+        // `physicalChunkRows` が常に 1 を返す）ので、陽性対照から外す。
+        if (rows > 1 && rows < CHUNK_LENGTH) sawBucketRows = true;
 
-      await t.step(
-        "② break → 続きの 2 ターン目が参照走と厳密一致（token を 1 個も落とさない）",
-        async () => {
-          const { name } = EXPECTED_CASES[0];
-          const { prompt, expected } = await readCase(name);
-
-          const generated = await withSequence([], async (sequence) => {
-            // 1 ターン目: 途中で break（`return()` 経由で finally へ入る経路）。
-            const first = sequence.generate({ prompt, maxNewTokens: GREEDY_STEPS });
-            const head: number[] = [];
-            for await (const event of first) {
-              if (event.kind !== "token") continue;
-              head.push(event.id);
-              if (head.length === BREAK_AFTER) break;
-            }
-            assertEquals(
-              await first.done,
-              { reason: "closed", tokens: BREAK_AFTER },
-              "1 ターン目の停止理由と生成 token 数",
-            );
-            assertEquals(head, expected.slice(0, BREAK_AFTER), "1 ターン目の token 列");
-
-            // 2 ターン目: 新しい token を足さずに続きだけ（pendingToken が先頭へ連結される）。
-            const second = sequence.generate({
-              prompt: [],
-              maxNewTokens: GREEDY_STEPS - BREAK_AFTER,
-            });
-            const tail: number[] = [];
-            for await (const event of second) {
-              if (event.kind === "token") tail.push(event.id);
-            }
-            assertEquals(
-              await second.done,
-              { reason: "max-tokens", tokens: GREEDY_STEPS - BREAK_AFTER },
-              "2 ターン目の停止理由と生成 token 数",
-            );
-            return [...head, ...tail];
-          });
-
-          assertEquals(
-            generated,
-            expected,
-            `${name}: 中断 → 再開の連結列（1 本で流した参照走と厳密一致すること — ` +
-              `割れたら pendingToken が落ちているか、再開の run 形が違う）`,
-          );
-          console.log(
-            `[e2e] gemma4 sequence 多ターン: ${BREAK_AFTER} + ${
-              GREEDY_STEPS - BREAK_AFTER
-            } token が ` + `1 本走りと一致`,
-          );
-        },
-      );
-
-      await t.step("③ EOS 集合を宣言した program は実出力で止まる", async () => {
-        for (const { name, firstStop } of EXPECTED_CASES) {
-          const { prompt, expected } = await readCase(name);
-          const { events, stop } = await withSequence(STOP_TOKENS, async (sequence) => {
+        const started = performance.now();
+        const { events, stop } = await withSequence(
+          [],
+          async (sequence) => {
             const stream = sequence.generate({ prompt, maxNewTokens: GREEDY_STEPS });
             const collected: GenerationEvent[] = [];
             for await (const event of stream) collected.push(event);
             return { events: collected, stop: await stream.done };
-          });
-
-          // 停止 token 自体は `token` イベントに出さない（本文ではなく終端記号）。
-          assertEquals(
-            tokenIds(events),
-            expected.slice(0, firstStop),
-            `${name}: 停止までに出た token 列`,
-          );
-          assertEquals(
-            stop,
-            // 停止 token 自体も生成 1 個ぶん（`GenerationStop.tokens` の doc）— 本文は firstStop 個。
-            { reason: "eos", token: expected[firstStop], tokens: firstStop + 1 },
-            `${name}: EOS 集合 [${STOP_TOKENS.join(",")}] での停止`,
-          );
-          console.log(`[e2e] gemma4 sequence ${name}: EOS 停止 @${firstStop}`);
-        }
-      });
-
-      await t.step("④ 要求が足した停止 token でも実出力で止まる（配布形の集合は空）", async () => {
-        // ③と同じ添字で止まるが、停止集合の出どころが違う — program は**空**で、その要求だけが
-        // 停止 token を宣言する。ここが割れたら和集合の判定が program 側しか見ていない。
-        for (const { name, firstStop } of EXPECTED_CASES) {
-          const { prompt, expected } = await readCase(name);
-          const { events, stop } = await withSequence([], async (sequence) => {
-            const stream = sequence.generate({
-              prompt,
-              maxNewTokens: GREEDY_STEPS,
-              stopTokens: [expected[firstStop]],
-            });
-            const collected: GenerationEvent[] = [];
-            for await (const event of stream) collected.push(event);
-            return { events: collected, stop: await stream.done };
-          });
-
-          assertEquals(
-            tokenIds(events),
-            expected.slice(0, firstStop),
-            `${name}: 停止までに出た token 列（③と同じ列であること）`,
-          );
-          assertEquals(
-            stop,
-            // 理由だけが③と違う（配布形の終端記号ではなく、この要求の都合で止めた）。
-            { reason: "stop-token", token: expected[firstStop], tokens: firstStop + 1 },
-            `${name}: 要求の停止 token [${expected[firstStop]}] での停止`,
-          );
-          console.log(`[e2e] gemma4 sequence ${name}: 要求の停止 token @${firstStop}`);
-        }
-      });
-      await t.step("⑤ prefill バケットを宣言しても token 列が動かない", async () => {
-        // 末尾 chunk を pad 無しの小さい物理行数で流す（ADR 0066 追記〈バケット〉）。行局所な
-        // op（linear / pointwise / norm）は物理行数を変えても有効行の値を変えないが、GEMM の
-        // 幾何は M で変わる（`gemm-geometry.ts` の段）ので**ビット同一は契約しない** — 縛るのは
-        // ①と同じ golden token 列である。
-        let sawBucketRows = false;
-        for (const { name } of EXPECTED_CASES) {
-          const { prompt, expected } = await readCase(name);
-          const tail = prompt.length % CHUNK_LENGTH;
-          // 末尾 chunk がバケットに載ったか（載らない刻みだと、この step は①の再走に化ける）。
-          const rows = physicalChunkRows(
-            tail === 0 ? CHUNK_LENGTH : tail,
-            programOf([], CHUNK_BUCKETS),
-          );
-          // M=1 は decode 形であってバケットではない（有効行 1 本の chunk は
-          // `physicalChunkRows` が常に 1 を返す）ので、陽性対照から外す。
-          if (rows > 1 && rows < CHUNK_LENGTH) sawBucketRows = true;
-
-          const started = performance.now();
-          const { events, stop } = await withSequence(
-            [],
-            async (sequence) => {
-              const stream = sequence.generate({ prompt, maxNewTokens: GREEDY_STEPS });
-              const collected: GenerationEvent[] = [];
-              for await (const event of stream) collected.push(event);
-              return { events: collected, stop: await stream.done };
-            },
-            CHUNK_BUCKETS,
-          );
-
-          assertEquals(tokenIds(events), expected, `${name}: バケット付きの生成 token 列`);
-          assertEquals(
-            stop,
-            { reason: "max-tokens", tokens: GREEDY_STEPS },
-            `${name}: 停止理由と生成 token 数`,
-          );
-          // chunk の**割り方**は chunkLength のまま（変わるのは末尾 chunk を載せる行数だけ）。
-          assertEquals(
-            events.filter((event) => event.kind === "prefill").length,
-            Math.ceil(prompt.length / CHUNK_LENGTH),
-            `${name}: prefill イベント数（割り方はバケットで変わらない）`,
-          );
-          console.log(
-            `[e2e] gemma4 sequence バケット ${name}: T=${prompt.length} / 末尾 chunk ${rows} 行 / ` +
-              `${(performance.now() - started).toFixed(0)}ms`,
-          );
-        }
-        assert(
-          sawBucketRows,
-          `バケット [${CHUNK_BUCKETS.join(",")}] にどのケースの末尾 chunk も載らない` +
-            `（この step が①の再走になっている）`,
+          },
+          CHUNK_BUCKETS,
         );
-      });
-    } finally {
-      await session.dispose();
-      gpu.destroy();
-    }
+
+        assertEquals(tokenIds(events), expected, `${name}: バケット付きの生成 token 列`);
+        assertEquals(
+          stop,
+          { reason: "max-tokens", tokens: GREEDY_STEPS },
+          `${name}: 停止理由と生成 token 数`,
+        );
+        // chunk の**割り方**は chunkLength のまま（変わるのは末尾 chunk を載せる行数だけ）。
+        assertEquals(
+          events.filter((event) => event.kind === "prefill").length,
+          Math.ceil(prompt.length / CHUNK_LENGTH),
+          `${name}: prefill イベント数（割り方はバケットで変わらない）`,
+        );
+        console.log(
+          `[e2e] gemma4 sequence バケット ${name}: T=${prompt.length} / 末尾 chunk ${rows} 行 / ` +
+            `${(performance.now() - started).toFixed(0)}ms`,
+        );
+      }
+      assert(
+        sawBucketRows,
+        `バケット [${CHUNK_BUCKETS.join(",")}] にどのケースの末尾 chunk も載らない` +
+          `（この step が①の再走になっている）`,
+      );
+    });
   },
-});
+);
 
 // ---------------------------------------------------------------------------
 // ⑥ 分岐の独立（fork — ADR 0066 / 0083 の追記 2026-10-11・裁定 8）
@@ -608,134 +616,148 @@ const forkTurn = async (
   return { ids, stop };
 };
 
-test({
-  name: "Gemma 4 E2B sequence 検収 ⑥: fork した 2 本は KV を共有しない（投機なし / always / ゲートつき・実 GPU）",
-  ignore: !MIRROR_WITH_DRAFTER || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const started = performance.now();
-    const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
-      speculative: { k: GEMMA4_DRAFT_STEPS },
-      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
-    });
-    console.log(
-      `[e2e] gemma4 sequence ⑥: pipeline ロード ${(performance.now() - started).toFixed(0)}ms`,
-    );
-    try {
-      const tokenizer = pipeline.tokenizer;
+describe.skipIf(!MIRROR_WITH_DRAFTER || !GPU_AVAILABLE)(
+  "Gemma 4 E2B sequence 検収 ⑥: fork した 2 本は KV を共有しない（投機なし / always / ゲートつき・実 GPU）",
+  () => {
+    // Undefined until beforeAll loads it: afterAll releases only what was created.
+    let loaded: Gemma4Pipeline | undefined;
+    let p0: number[];
+    let x: number[];
+    let y: number[];
+    let z: number[];
+    const pipelineOf = (): Gemma4Pipeline => {
+      assert(loaded !== undefined, "the pipeline is loaded in beforeAll");
+      return loaded;
+    };
+
+    beforeAll(async () => {
+      const started = performance.now();
+      loaded = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+        speculative: { k: GEMMA4_DRAFT_STEPS },
+        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
+      });
+      console.log(
+        `[e2e] gemma4 sequence ⑥: pipeline ロード ${(performance.now() - started).toFixed(0)}ms`,
+      );
+      const tokenizer = loaded.tokenizer;
       // P0 は全体描画、X / Y / Z は差分（前のターンが EOS で止まれば、閉じる札は pendingToken が
       // 前置する — 上限で止まって閉じていない場合もある〈{@link FORK_TURN_TOKENS}〉）。X と Y は
       // 違う内容で、Z は直前のターンの中身に依る問い（X の行を読む）にする。
-      const p0 = gemma4ChatPrompt(tokenizer, [
+      p0 = gemma4ChatPrompt(tokenizer, [
         { role: "user", content: "Write one short sentence about the sea." },
       ]);
-      const x = gemma4ChatTurn(tokenizer, {
+      x = gemma4ChatTurn(tokenizer, {
         role: "user",
         content: "Now write one about mountains.",
       });
-      const y = gemma4ChatTurn(tokenizer, {
+      y = gemma4ChatTurn(tokenizer, {
         role: "user",
         content: "Now write one about a desert at night.",
       });
-      const z = gemma4ChatTurn(tokenizer, {
+      z = gemma4ChatTurn(tokenizer, {
         role: "user",
         content: "Repeat your previous sentence word for word.",
       });
+    });
 
-      const systems = [
-        ["投機なし", false],
-        ["always", "always"],
-        ["ゲートつき", true],
-      ] as const;
-      for (const [label, speculative] of systems) {
-        await t.step(`${label}: S で X → 分岐で Y → S で Z が基準と一致`, async () => {
-          const stepStarted = performance.now();
-          /** fork を使わない操作列（基準）。 */
-          const baseline = async (prompts: readonly (readonly number[])[]): Promise<ForkTurn[]> => {
-            const sequence = await pipeline.sequence({ speculative });
-            try {
-              const turns: ForkTurn[] = [];
-              for (const prompt of prompts) turns.push(await forkTurn(sequence, prompt));
-              return turns;
-            } finally {
-              await sequence.dispose();
-            }
-          };
-          // 基準: B = P0 → X → Z・B2 = P0 → Y。
-          const [, expectedX, expectedZ] = await baseline([p0, x, z]);
-          const [, expectedY] = await baseline([p0, y]);
-          // 陽性対照: Z は直前のターンの行を読む（P0 → Y → Z の Z は基準の Z と違う）。同じなら、
-          // 分岐の Y が元の X の行を上書きしても下の Z の突合では検出できない。
-          const [, , afterY] = await baseline([p0, y, z]);
-          assertNotEquals(
-            afterY.ids,
-            expectedZ.ids,
-            `${label}: Z が直前のターンに依らない（上書きの検出力が無い）`,
-          );
+    afterAll(async () => {
+      await loaded?.dispose();
+    });
 
-          // 検査: S = P0 → F = S.fork() → S で X → F で Y → S で Z。
-          const source = await pipeline.sequence({ speculative });
-          let forked: GenerationSequence | undefined;
-          /** 検査側の各ターンの停止の理由（EOS で閉じたか上限で止まったか — ログに残す）。 */
-          const reasons: string[] = [];
-          const turn = async (
-            name: string,
-            sequence: GenerationSequence,
-            prompt: readonly number[],
-          ): Promise<ForkTurn> => {
-            const observed = await forkTurn(sequence, prompt);
-            reasons.push(`${name}=${observed.stop.reason}`);
-            return observed;
-          };
+    const systems = [
+      ["投機なし", false],
+      ["always", "always"],
+      ["ゲートつき", true],
+    ] as const;
+    for (const [label, speculative] of systems) {
+      it(`${label}: S で X → 分岐で Y → S で Z が基準と一致`, async () => {
+        const pipeline = pipelineOf();
+        const stepStarted = performance.now();
+        /** fork を使わない操作列（基準）。 */
+        const baseline = async (prompts: readonly (readonly number[])[]): Promise<ForkTurn[]> => {
+          const sequence = await pipeline.sequence({ speculative });
           try {
-            await turn("P0", source, p0);
-            forked = await source.fork();
-            assertEquals(forked.used, source.used, `${label}: 分岐が会話の位置を引き継いでいない`);
-            assertEquals(await turn("X", source, x), expectedX, `${label}: 元の X が基準と違う`);
-            assertEquals(
-              await turn("Y", forked, y),
-              expectedY,
-              `${label}: 分岐の Y が基準と違う（複製が元の状態を写していない）`,
-            );
-            assertEquals(
-              await turn("Z", source, z),
-              expectedZ,
-              `${label}: 元の Z が基準と違う（分岐の Y が元の KV を上書きした）`,
-            );
+            const turns: ForkTurn[] = [];
+            for (const prompt of prompts) turns.push(await forkTurn(sequence, prompt));
+            return turns;
           } finally {
-            // 停止の理由は一致の検査が落ちたときにこそ要る（前提の「前のターンを閉じた」かを読む）。
-            console.log(`[e2e] gemma4 sequence ⑥ ${label}: 停止 ${reasons.join(" ")}`);
-            await forked?.dispose();
-            await source.dispose();
+            await sequence.dispose();
           }
-          console.log(
-            `[e2e] gemma4 sequence ⑥ ${label}: 基準 3 本 + 分岐 1 組が一致 / ` +
-              `${(performance.now() - stepStarted).toFixed(0)}ms`,
-          );
-        });
-      }
-
-      // 最後に置く（pipeline を畳む）。分岐は Gemma4Pipeline.sequence の包みが `#handed` に載せ、
-      // pipeline の dispose が巻き取る — Session の dispose は context を畳まないので、ここが
-      // 漏れると分岐の KV と drafter の借り手が pipeline の寿命の後まで残る。包みのこの性質は
-      // pipeline の構築に実 Session と GPU が要るので、GPU 無しの門を組めずここで見る。
-      await t.step("pipeline の dispose は畳んでいない分岐も巻き取る", async () => {
-        const source = await pipeline.sequence({ speculative: "always" });
-        await forkTurn(source, p0);
-        const forked = await source.fork();
-        await pipeline.dispose();
-        // 分岐の sequence が dispose 済み（= drafter の借り手 → 複製した context の順に返した）。
-        // 巻き取られていなければ、ここは同期に投げず、dispose 済みの Session への run で後から
-        // 落ちる。
-        assertThrows(
-          () => forked.generate({ prompt: [...x], maxNewTokens: 1 }),
-          Error,
-          "GenerationSequence: dispose 済みでは生成できない",
+        };
+        // 基準: B = P0 → X → Z・B2 = P0 → Y。
+        const [, expectedX, expectedZ] = await baseline([p0, x, z]);
+        const [, expectedY] = await baseline([p0, y]);
+        // 陽性対照: Z は直前のターンの行を読む（P0 → Y → Z の Z は基準の Z と違う）。同じなら、
+        // 分岐の Y が元の X の行を上書きしても下の Z の突合では検出できない。
+        const [, , afterY] = await baseline([p0, y, z]);
+        assertNotEquals(
+          afterY.ids,
+          expectedZ.ids,
+          `${label}: Z が直前のターンに依らない（上書きの検出力が無い）`,
         );
-        // pipeline の dispose 後の分岐の fork は、包みが同期に落とす。
-        assertThrows(() => forked.fork(), Error, "dispose 済みでは sequence を作れない");
+
+        // 検査: S = P0 → F = S.fork() → S で X → F で Y → S で Z。
+        const source = await pipeline.sequence({ speculative });
+        let forked: GenerationSequence | undefined;
+        /** 検査側の各ターンの停止の理由（EOS で閉じたか上限で止まったか — ログに残す）。 */
+        const reasons: string[] = [];
+        const turn = async (
+          name: string,
+          sequence: GenerationSequence,
+          prompt: readonly number[],
+        ): Promise<ForkTurn> => {
+          const observed = await forkTurn(sequence, prompt);
+          reasons.push(`${name}=${observed.stop.reason}`);
+          return observed;
+        };
+        try {
+          await turn("P0", source, p0);
+          forked = await source.fork();
+          assertEquals(forked.used, source.used, `${label}: 分岐が会話の位置を引き継いでいない`);
+          assertEquals(await turn("X", source, x), expectedX, `${label}: 元の X が基準と違う`);
+          assertEquals(
+            await turn("Y", forked, y),
+            expectedY,
+            `${label}: 分岐の Y が基準と違う（複製が元の状態を写していない）`,
+          );
+          assertEquals(
+            await turn("Z", source, z),
+            expectedZ,
+            `${label}: 元の Z が基準と違う（分岐の Y が元の KV を上書きした）`,
+          );
+        } finally {
+          // 停止の理由は一致の検査が落ちたときにこそ要る（前提の「前のターンを閉じた」かを読む）。
+          console.log(`[e2e] gemma4 sequence ⑥ ${label}: 停止 ${reasons.join(" ")}`);
+          await forked?.dispose();
+          await source.dispose();
+        }
+        console.log(
+          `[e2e] gemma4 sequence ⑥ ${label}: 基準 3 本 + 分岐 1 組が一致 / ` +
+            `${(performance.now() - stepStarted).toFixed(0)}ms`,
+        );
       });
-    } finally {
-      await pipeline.dispose();
     }
+
+    // 最後に置く（pipeline を畳む）。分岐は Gemma4Pipeline.sequence の包みが `#handed` に載せ、
+    // pipeline の dispose が巻き取る — Session の dispose は context を畳まないので、ここが
+    // 漏れると分岐の KV と drafter の借り手が pipeline の寿命の後まで残る。包みのこの性質は
+    // pipeline の構築に実 Session と GPU が要るので、GPU 無しの門を組めずここで見る。
+    it("pipeline の dispose は畳んでいない分岐も巻き取る", async () => {
+      const pipeline = pipelineOf();
+      const source = await pipeline.sequence({ speculative: "always" });
+      await forkTurn(source, p0);
+      const forked = await source.fork();
+      await pipeline.dispose();
+      // 分岐の sequence が dispose 済み（= drafter の借り手 → 複製した context の順に返した）。
+      // 巻き取られていなければ、ここは同期に投げず、dispose 済みの Session への run で後から
+      // 落ちる。
+      assertThrows(
+        () => forked.generate({ prompt: [...x], maxNewTokens: 1 }),
+        Error,
+        "GenerationSequence: dispose 済みでは生成できない",
+      );
+      // pipeline の dispose 後の分岐の fork は、包みが同期に落とす。
+      assertThrows(() => forked.fork(), Error, "dispose 済みでは sequence を作れない");
+    });
   },
-});
+);

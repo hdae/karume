@@ -7,7 +7,7 @@
  * 直接実装したもの）を注入する — HF 取得元のハンドルを組む公開 factory は無い。
  */
 
-import { test } from "@karume/test-support/test";
+import { beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import {
   fetchAssets,
@@ -20,7 +20,12 @@ import {
   openAsset,
   prefetchAssets,
 } from "../mod.ts";
-import type { AssetProgress, DirectoryAdapter, LocalDirectoryOptions } from "../mod.ts";
+import type {
+  AssetProgress,
+  DirectoryAdapter,
+  LoadedManifest,
+  LocalDirectoryOptions,
+} from "../mod.ts";
 import { type FileRef, MANIFEST_FILENAME } from "../src/manifest.ts";
 import {
   DistributionSource,
@@ -35,6 +40,7 @@ import {
   CROSS_REVISION,
   FETCHED_PART_PATHS,
   memoryDirectory,
+  type MemoryDirectory,
   PART_KEYS,
   TOKENIZER_PATH,
 } from "./helpers/local.ts";
@@ -152,13 +158,19 @@ test("localDirectory: fetchAssets は 1 本につき 1 回だけ読み、CacheSt
   );
 });
 
-test("prefetchAssets: 相 1 を持たない取得元では温めずに complete だけを出す（入力検査だけは効く）", async (t) => {
-  const dist = await buildLocalDist();
-  const { directory, loaded } = await openLocal(dist.files);
-  const files = selectionFiles(loaded.manifest);
-  const refs = PART_KEYS.map((key): FileRef => files[key]);
+describe("prefetchAssets: 相 1 を持たない取得元では温めずに complete だけを出す（入力検査だけは効く）", () => {
+  let directory: MemoryDirectory;
+  let loaded: LoadedManifest;
+  let refs: FileRef[];
 
-  await t.step("温めるべきキャッシュが無いのは失敗ではない（実体を読まずに返る）", async () => {
+  beforeAll(async () => {
+    const dist = await buildLocalDist();
+    ({ directory, loaded } = await openLocal(dist.files));
+    const files = selectionFiles(loaded.manifest);
+    refs = PART_KEYS.map((key): FileRef => files[key]);
+  });
+
+  it("温めるべきキャッシュが無いのは失敗ではない（実体を読まずに返る）", async () => {
     const progress = recordProgress();
     directory.reads.length = 0;
     await prefetchAssets(loaded, refs, { onProgress: progress.onProgress });
@@ -175,7 +187,7 @@ test("prefetchAssets: 相 1 を持たない取得元では温めずに complete 
     for (const event of progress.events) assertEquals(event.fileLoaded, event.fileTotal);
   });
 
-  await t.step("呼び出し側の誤り（空の refs）は取得元に触れる前に落とす", async () => {
+  it("呼び出し側の誤り（空の refs）は取得元に触れる前に落とす", async () => {
     await assertRejects(() => prefetchAssets(loaded, []), ManifestReferenceError, LABEL);
   });
 });

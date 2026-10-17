@@ -17,7 +17,7 @@
 //
 // 数値のビット同一（既定 GEMM 経路との u32 完全一致）は実 GPU 側 = tests/gpu_linear_gemv_test.ts。
 
-import { test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
 import {
@@ -353,8 +353,8 @@ test("INT4・INT8 行ブロックは既定の全高さでシェーダーを12 KB
 // subject of the row-block gates above: pure functions of the shape, keys that tell every
 // generated text apart, and fail-loudly rejection before codegen.
 
-test("M=1 GEMVの形状選択", async (t) => {
-  await t.step("実測した大語彙INT8をc16へ選び、別キーでWGSLを識別する", () => {
+describe("M=1 GEMVの形状選択", () => {
+  it("実測した大語彙INT8をc16へ選び、別キーでWGSLを識別する", () => {
     const selected = defaultLinearGemvVariant({ storage: "i8", n: 262144, k: 1536 });
     assertEquals(selected, { cols: 16, unroll: 4 });
     assertEquals(linearGemvKey("i8", undefined, selected), "linear_gemv:v1:f32:c16u4:wi8");
@@ -367,7 +367,7 @@ test("M=1 GEMVの形状選択", async (t) => {
     );
   });
 
-  await t.step("格納型や行列形が異なる場合と形状未指定の生成は従来の変種を保つ", () => {
+  it("格納型や行列形が異なる場合と形状未指定の生成は従来の変種を保つ", () => {
     assertEquals(defaultLinearGemvVariant(), { cols: 32, unroll: 4 });
     const storageTypes: readonly WeightStorage[] = ["i2", "i4", "f16", "f32"];
     for (const storage of storageTypes) {
@@ -388,8 +388,8 @@ test("M=1 GEMVの形状選択", async (t) => {
   });
 });
 
-test("GEMV並列加算の選択とコード生成", async (t) => {
-  await t.step("decodeと少数行の検証で同じ幾何を選び、prefillと未計測形へ拡張しない", () => {
+describe("GEMV並列加算の選択とコード生成", () => {
+  it("decodeと少数行の検証で同じ幾何を選び、prefillと未計測形へ拡張しない", () => {
     for (const m of [1, 4, 8]) {
       assertEquals(linearGemvParallelLanes("i4", m, 256, 1536, 32), 32);
       assertEquals(linearGemvParallelLanes("i4", m, 6144, 1536, 512), 4);
@@ -405,36 +405,33 @@ test("GEMV並列加算の選択とコード生成", async (t) => {
     assertEquals(linearGemvParallelLanes("i4", 1, 260, 1536, 32), undefined);
     assertEquals(linearGemvParallelLanes("f16", 1, 256, 1536), undefined);
   });
-  await t.step(
-    "通常 E4B（i4 g32 + i8 lm_head）の形を E2B の同種行の lanes で選ぶ（未実測の写し）",
-    () => {
-      // 形は上流 config（hidden 2560・intermediate 10240・kv 2・層 42・PLE 256）から導いた実形。
-      // QAT E4B は配布ミラーの記述子を根にする census テスト側が見る。
-      const rows: readonly [number, number, 4 | 16 | 32][] = [
-        [10752, 2560, 4],
-        [2048, 2560, 4],
-        [512, 2560, 32],
-        [256, 2560, 32],
-        [2560, 2048, 32],
-        [10240, 2560, 4],
-        [2560, 10240, 32],
-        [2560, 256, 4],
-        [4096, 2560, 4],
-        [1024, 2560, 32],
-        [2560, 4096, 32],
-      ];
-      for (const m of [1, 4, 8]) {
-        for (const [n, k, lanes] of rows) {
-          assertEquals(linearGemvParallelLanes("i4", m, n, k, 32), lanes, `i4 ${n}×${k} M${m}`);
-        }
-        assertEquals(linearGemvParallelLanes("i8", m, 262144, 2560), 16);
+  it("通常 E4B（i4 g32 + i8 lm_head）の形を E2B の同種行の lanes で選ぶ（未実測の写し）", () => {
+    // 形は上流 config（hidden 2560・intermediate 10240・kv 2・層 42・PLE 256）から導いた実形。
+    // QAT E4B は配布ミラーの記述子を根にする census テスト側が見る。
+    const rows: readonly [number, number, 4 | 16 | 32][] = [
+      [10752, 2560, 4],
+      [2048, 2560, 4],
+      [512, 2560, 32],
+      [256, 2560, 32],
+      [2560, 2048, 32],
+      [10240, 2560, 4],
+      [2560, 10240, 32],
+      [2560, 256, 4],
+      [4096, 2560, 4],
+      [1024, 2560, 32],
+      [2560, 4096, 32],
+    ];
+    for (const m of [1, 4, 8]) {
+      for (const [n, k, lanes] of rows) {
+        assertEquals(linearGemvParallelLanes("i4", m, n, k, 32), lanes, `i4 ${n}×${k} M${m}`);
       }
-      assertEquals(linearGemvParallelLanes("i4", 9, 10240, 2560, 32), undefined);
-      // i2 の lm_head（QAT E4B）は E2B にも行が無いので足していない。
-      assertEquals(linearGemvParallelLanes("i2", 1, 262144, 2560), undefined);
-    },
-  );
-  await t.step("キーが加算形・格納・group・laneを区別する", () => {
+      assertEquals(linearGemvParallelLanes("i8", m, 262144, 2560), 16);
+    }
+    assertEquals(linearGemvParallelLanes("i4", 9, 10240, 2560, 32), undefined);
+    // i2 の lm_head（QAT E4B）は E2B にも行が無いので足していない。
+    assertEquals(linearGemvParallelLanes("i2", 1, 262144, 2560), undefined);
+  });
+  it("キーが加算形・格納・group・laneを区別する", () => {
     const keys = new Map<string, string>();
     for (const storage of ["i2", "i4", "i8"] as const) {
       for (const group of storage === "i4" ? [32, 512, 2048, 4096] : [undefined]) {
@@ -456,7 +453,7 @@ test("GEMV並列加算の選択とコード生成", async (t) => {
     }
     assertEquals(keys.size, 60);
   });
-  await t.step("未対応格納と不正なgroupをコード生成前に拒否する", () => {
+  it("未対応格納と不正なgroupをコード生成前に拒否する", () => {
     assertThrows(() => linearGemvParallelWgsl("f16", undefined, 4));
     assertThrows(() => linearGemvParallelWgsl("f32", undefined, 4));
     assertThrows(() => linearGemvParallelWgsl("i4", 16, 4));
@@ -468,7 +465,7 @@ test("GEMV並列加算の選択とコード生成", async (t) => {
   });
 });
 
-test("subgroup32変種の積和はparallelと同じ綴り", async (t) => {
+describe("subgroup32変種の積和はparallelと同じ綴り", () => {
   // ADR 0101 決定 3（積和は parallel と同一）を綴りで縛る。parallel 族だけ fma 化して subgroup が
   // `acc + x * d` のまま残ると、Metal では縮約の入れ方が式形で変わり u32 一致が崩れる（ADR 0105 追記 4）。
   // GPU 実走の u32 一致門（helpers/gemv-subgroup-check.ts）は Deno で SKIP になるので、この門が常設側。
@@ -477,7 +474,7 @@ test("subgroup32変種の積和はparallelと同じ綴り", async (t) => {
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line.startsWith("acc = "));
-  await t.step("全60形でfma行の列が一致し、積和にacc + x * dが残らない", () => {
+  it("全60形でfma行の列が一致し、積和にacc + x * dが残らない", () => {
     let compared = 0;
     for (const storage of ["i2", "i4", "i8"] as const) {
       for (const group of storage === "i4" ? [32, 512, 2048, 4096] : [undefined]) {

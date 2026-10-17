@@ -7,7 +7,7 @@
  * gpu_ops_test.ts の argmax 門が 2 相形のケースも含めて見る。
  */
 
-import { test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
 import {
@@ -19,33 +19,33 @@ import {
   topkOneSplitGroups,
 } from "../src/kernels/argmax.ts";
 
-test("argmax 2 相分割の経路選択は行長の純関数", async (t) => {
-  await t.step("閾値未満は 1 dispatch 形（区間 0）", () => {
+describe("argmax 2 相分割の経路選択は行長の純関数", () => {
+  it("閾値未満は 1 dispatch 形（区間 0）", () => {
     for (const dim of [1, 256, 4096, ARGMAX_SPLIT_MIN_DIM - 1]) {
       assertEquals(argmaxSplitGroups(dim), 0, `dim=${dim}`);
     }
   });
 
-  await t.step("閾値以上は区間 ceil(dim / span) 本（端数の区間も 1 本に数える）", () => {
+  it("閾値以上は区間 ceil(dim / span) 本（端数の区間も 1 本に数える）", () => {
     assertEquals(argmaxSplitGroups(ARGMAX_SPLIT_MIN_DIM), 4);
     assertEquals(argmaxSplitGroups(ARGMAX_SPLIT_MIN_DIM + 1), 5);
     // gemma4 の語彙長（drafter の lm_head 出口）
     assertEquals(argmaxSplitGroups(262144), 262144 / ARGMAX_SPLIT_SPAN);
   });
 
-  await t.step("一時は [rows, groups] × (値 + index) の 8 バイト", () => {
+  it("一時は [rows, groups] × (値 + index) の 8 バイト", () => {
     assertEquals(argmaxSplitPartialBytes(3, 64), 3 * 64 * 8);
   });
 });
 
-test("argmax 2 相分割の params は分割の形と一致しないと落ちる", async (t) => {
-  await t.step("正しい形は 4 語（rows, dim, groups, −inf）", () => {
+describe("argmax 2 相分割の params は分割の形と一致しないと落ちる", () => {
+  it("正しい形は 4 語（rows, dim, groups, −inf）", () => {
     const params = argmaxSplitParams(2, 262144, 64);
     assertEquals([...params.slice(0, 3)], [2, 262144, 64]);
     assertEquals(params[3], 0xff800000);
   });
 
-  await t.step("groups が純関数の値と違えば落ちる（1 dispatch 形の dim も）", () => {
+  it("groups が純関数の値と違えば落ちる（1 dispatch 形の dim も）", () => {
     assertThrows(() => argmaxSplitParams(1, 262144, 63), CodegenError, "分割の形に合わない");
     assertThrows(() => argmaxSplitParams(1, 4096, 1), CodegenError, "分割の形に合わない");
     assertThrows(() => argmaxSplitParams(1, 262144, 0), CodegenError, "分割の形に合わない");

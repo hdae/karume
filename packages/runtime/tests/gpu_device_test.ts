@@ -1,6 +1,6 @@
 import { captureUncaughtExceptions } from "@karume/test-support/process-events";
 import { platformObject } from "@karume/test-support/webgpu";
-import { test } from "@karume/test-support/test";
+import { describe, it, test } from "vite-plus/test";
 import {
   assert,
   assertEquals,
@@ -111,10 +111,9 @@ test("assertLimitsGranted は要求を下回る limit を fail loudly にする"
   assertLimitsGranted(planned, fakeAdapterLimits());
 });
 
-test({
-  name: "acquireGpu は引き上げ済み limits の device を返す（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "acquireGpu は引き上げ済み limits の device を返す（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       for (const key of REQUIRED_LIMIT_KEYS) {
@@ -128,12 +127,11 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "readAdapterLimits は acquireGpu が計画する limits と同じ値を返す（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "readAdapterLimits は acquireGpu が計画する limits と同じ値を返す（実 GPU）",
+  async () => {
     // 配布形の requiredLimits を重み DL 前に突き合わせる側（models の admission）は、この戻りと
     // 取得後の `GpuContext.limits` を同じ物差しとして使う。式がずれると「DL 前は通ったのに
     // 構築で落ちる」（または逆）が生まれる。
@@ -145,7 +143,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // `AcquireGpuOptions.gpu` — the WebGPU implementation can be passed explicitly (Node applications
 // hand over Dawn's `GPU` instead of defining `navigator.gpu`). No real GPU is needed: the fake
@@ -186,20 +184,17 @@ const withoutNavigatorGpu = async (body: () => Promise<void>): Promise<void> => 
   }
 };
 
-test("AcquireGpuOptions.gpu（WebGPU 実装の注入）", async (t) => {
-  await t.step(
-    "acquireGpu は渡された GPU からアダプタを取り、navigator.gpu を読まない",
-    async () => {
-      const fake = fakeGpu();
-      await withoutNavigatorGpu(async () => {
-        const gpu = await acquireGpu({ gpu: fake.gpu });
-        gpu.destroy();
-      });
-      assertEquals(fake.requests(), 1);
-    },
-  );
+describe("AcquireGpuOptions.gpu（WebGPU 実装の注入）", () => {
+  it("acquireGpu は渡された GPU からアダプタを取り、navigator.gpu を読まない", async () => {
+    const fake = fakeGpu();
+    await withoutNavigatorGpu(async () => {
+      const gpu = await acquireGpu({ gpu: fake.gpu });
+      gpu.destroy();
+    });
+    assertEquals(fake.requests(), 1);
+  });
 
-  await t.step("readAdapterLimits も同じ口を使う", async () => {
+  it("readAdapterLimits も同じ口を使う", async () => {
     const fake = fakeGpu();
     await withoutNavigatorGpu(async () => {
       const limits = await readAdapterLimits({ gpu: fake.gpu });
@@ -208,7 +203,7 @@ test("AcquireGpuOptions.gpu（WebGPU 実装の注入）", async (t) => {
     assertEquals(fake.requests(), 1);
   });
 
-  await t.step("渡さなければ navigator.gpu に戻る（無ければ GpuUnavailableError）", async () => {
+  it("渡さなければ navigator.gpu に戻る（無ければ GpuUnavailableError）", async () => {
     const original = Object.getOwnPropertyDescriptor(navigator, "gpu");
     Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true });
     try {
@@ -220,10 +215,9 @@ test("AcquireGpuOptions.gpu（WebGPU 実装の注入）", async (t) => {
   });
 });
 
-test({
-  name: "acquireGpu は features / wgslLanguageFeatures を集合に正規化する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "acquireGpu は features / wgslLanguageFeatures を集合に正規化する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       assert(gpu.features instanceof Set);
@@ -235,7 +229,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 // 「true × feature 不在」だけは実機で作れない（アダプタの feature は消せない）ため、
 // 判定を切り出した純関数で全 6 通りを固定する。ADR 0028。
@@ -261,10 +255,9 @@ test("planShaderF16Feature は undefined を「要求しない」に倒し、必
   assert(error.message.includes("f32"), error.message);
 });
 
-test({
-  name: "acquireGpu({shaderF16}) は feature を要求し、実走カナリアを通したときだけ有効になる（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "acquireGpu({shaderF16}) は feature を要求し、実走カナリアを通したときだけ有効になる（実 GPU）",
+  async () => {
     // ① 既定では要求しない（既存経路の device 能力面を 1 ビットも広げない）
     const plain = await acquireGpu();
     try {
@@ -296,7 +289,7 @@ test({
       enabled.destroy();
     }
   },
-});
+);
 
 /**
  * カナリアが触る面（バッファ 2 本・パイプライン生成・1 dispatch・読み戻し）だけのフェイク
@@ -585,10 +578,9 @@ test("popFailureScopes は両スコープ捕捉時に OOM を返す（validation
   assertEquals(await popFailureScopes(poppingDevice([]), "clean"), undefined);
 });
 
-test({
-  name: "並行する errorScope 区間で validation 失敗が正しい側に帰属する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "並行する errorScope 区間で validation 失敗が正しい側に帰属する（実 GPU）",
+  async () => {
     const gpu = await acquireGpu();
     try {
       const { layout } = await new PipelineCache(gpu.device).get(
@@ -628,12 +620,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name: "GpuContext は device.lost を購読し、意図的な破棄と区別して記録する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!GPU_AVAILABLE)(
+  "GpuContext は device.lost を購読し、意図的な破棄と区別して記録する（実 GPU）",
+  async () => {
     let notified = 0;
     const gpu = await acquireGpu({ onDeviceLost: () => (notified += 1) });
 
@@ -649,7 +640,7 @@ test({
     assertEquals(gpu.lost?.reason, "destroyed");
     assertEquals(notified, 0, "意図的な破棄は消失通知の対象外");
   },
-});
+);
 
 test("subgroup32は明示要求と必要な全機能を要求し、既定では要求しない", () => {
   const present = new Set(["subgroups", "subgroup-size-control"]),

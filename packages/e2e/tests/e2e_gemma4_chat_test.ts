@@ -38,7 +38,7 @@
 // golden の断定はそのまま保てる（取得元だけが `e2e_gemma4_pretrained_test.ts` と違う）。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 // MUST: 入口は**公開面**（`./gemma` サブパス）から取る — 消費者が書けない import で検収すると、
 // 「面が痩せていること」に門が気づけない（`src/...` を直に掴めば何でも見える）。
@@ -169,321 +169,335 @@ const openPipeline = async (options: Gemma4PipelineOptions = {}): Promise<Gemma4
     },
   );
 
-test({
-  name: "Gemma 4 E2B chat 検収: 文字列 in → 文字列 out・逐次と一括の一致（実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async (t) => {
-    const pipeline = await openPipeline();
+describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "Gemma 4 E2B chat 検収: 文字列 in → 文字列 out・逐次と一括の一致（実 GPU）",
+  () => {
+    // Assigned in beforeAll; the its below run sequentially against this one pipeline.
+    let pipeline: Gemma4Pipeline;
     /** dispose の**前**に発行し、汲み始めるのは**後**にする stream（下の寿命の門で使う）。 */
     let issuedBeforeDispose: Gemma4ChatStream | undefined;
-    try {
-      await t.step("① 温度 0 の chat が実重みで完走し、固定した greedy golden と一致", async () => {
-        for (const { fixture: name, maxNewTokens, expected, stop } of CASES) {
-          const { messages } = caseOf(name);
-          const started = performance.now();
-          const stream = pipeline.chat(messages, { maxNewTokens });
-          const parts: string[] = [];
-          for await (const chunk of stream) parts.push(chunk);
-          const stopped = await stream.done;
+    /** ⑥ が採った 2 ターン目の参照（⑦ が同じ会話をセッションで組んで突き合わせる）。 */
+    let followUpAnswer: string | undefined;
 
-          console.log(
-            `[e2e] gemma4 chat ${name}: ${JSON.stringify(parts.join(""))} / ` +
-              `${JSON.stringify(stopped)} / ${(performance.now() - started).toFixed(0)}ms`,
-          );
-          assertEquals(parts.join(""), expected, `${name}: 温度 0 の出力`);
-          assertEquals(stopped, stop, `${name}: 停止理由`);
-          // 片は「確定したぶんだけ」なので空文字は流れない（偽の 1 反復を作らない）。
-          assertEquals(parts.filter((part) => part === "").length, 0, `${name}: 空の片`);
-        }
-      });
+    beforeAll(async () => {
+      pipeline = await openPipeline();
+    });
+    // dispose is idempotent; this covers runs where the "dispose 後" suite below never started
+    // (a failing beforeAll, or a name filter that selects only the its before it).
+    afterAll(async () => {
+      if (pipeline !== undefined) await pipeline.dispose();
+    });
 
-      await t.step("② パイプラインが握る資産の chat id 列がフィクスチャと一致", () => {
-        for (const { fixture: name } of CASES) {
-          const { messages, ids } = caseOf(name);
-          assertEquals(gemma4ChatPrompt(pipeline.tokenizer, messages), ids, name);
-        }
-      });
+    it("① 温度 0 の chat が実重みで完走し、固定した greedy golden と一致", async () => {
+      for (const { fixture: name, maxNewTokens, expected, stop } of CASES) {
+        const { messages } = caseOf(name);
+        const started = performance.now();
+        const stream = pipeline.chat(messages, { maxNewTokens });
+        const parts: string[] = [];
+        for await (const chunk of stream) parts.push(chunk);
+        const stopped = await stream.done;
 
-      await t.step("③ streaming の片の連結 = 同じ会話の token 列の一括 decode", async () => {
-        for (const { fixture: name, maxNewTokens, expected, stop } of CASES) {
-          const { ids } = caseOf(name);
-          // 低レベル面は 1 会話 = 1 sequence（context を跨がせない）。
-          const sequence = await pipeline.sequence();
-          try {
-            const stream = sequence.generate({ prompt: ids, maxNewTokens });
-            const tokens: number[] = [];
-            for await (const event of stream) if (event.kind === "token") tokens.push(event.id);
-            assertEquals(await stream.done, stop, `${name}: 低レベル面の停止理由`);
-            assertEquals(
-              pipeline.tokenizer.decode(tokens),
-              expected,
-              `${name}: 一括 decode（逐次が byte run を取りこぼしていれば割れる）`,
-            );
-          } finally {
-            await sequence.dispose();
-          }
-        }
-      });
-
-      await t.step("④ 停止集合は上流の generation_config.json の宣言と一致", () => {
-        const ascending = (ids: readonly number[]): number[] => [...ids].sort((a, b) => a - b);
-        assertEquals(ascending(pipeline.program.stopTokens), ascending(STOP_TOKENS), "program");
-        assertEquals(ascending(fixture.stopTokens), ascending(STOP_TOKENS), "フィクスチャ");
-      });
-
-      await t.step("⑤ 射程外の会話は GPU に触る前に落ちる（同期の throw）", () => {
-        assertThrows(
-          () =>
-            pipeline.chat(
-              [{ role: "user", content: "hi", tools: [] }] as unknown as Gemma4ChatMessage[],
-              { maxNewTokens: 4 },
-            ),
-          Error,
-          "射程外の欄",
+        console.log(
+          `[e2e] gemma4 chat ${name}: ${JSON.stringify(parts.join(""))} / ` +
+            `${JSON.stringify(stopped)} / ${(performance.now() - started).toFixed(0)}ms`,
         );
-        assertThrows(
-          () =>
-            pipeline.chat([{ role: "tool", content: "…" }] as unknown as Gemma4ChatMessage[], {
-              maxNewTokens: 4,
-            }),
-          Error,
-          "role",
-        );
-      });
+        assertEquals(parts.join(""), expected, `${name}: 温度 0 の出力`);
+        assertEquals(stopped, stop, `${name}: 停止理由`);
+        // 片は「確定したぶんだけ」なので空文字は流れない（偽の 1 反復を作らない）。
+        assertEquals(parts.filter((part) => part === "").length, 0, `${name}: 空の片`);
+      }
+    });
 
-      /** ⑥ が採った 2 ターン目の参照（⑦ が同じ会話をセッションで組んで突き合わせる）。 */
-      let followUpAnswer: string | undefined;
+    it("② パイプラインが握る資産の chat id 列がフィクスチャと一致", () => {
+      for (const { fixture: name } of CASES) {
+        const { messages, ids } = caseOf(name);
+        assertEquals(gemma4ChatPrompt(pipeline.tokenizer, messages), ids, name);
+      }
+    });
 
-      await t.step("⑥ 増分描画の多ターンが chat() の全体描画と逐語一致", async () => {
-        const { fixture: name, maxNewTokens } = CASES[0];
-        const first = caseOf(name).messages;
-
-        /** 高レベル面（毎ターン会話全体を描き直す）で 1 ターン汲む。 */
-        const viaChat = async (
-          messages: readonly Gemma4ChatMessage[],
-          limit: number,
-        ): Promise<string> => {
-          const parts: string[] = [];
-          for await (const chunk of pipeline.chat(messages, { maxNewTokens: limit })) {
-            parts.push(chunk);
-          }
-          return parts.join("");
-        };
-
-        const answer1 = await viaChat(first, maxNewTokens);
-        // 2 ターン目の参照は「1 ターン目の応答を会話へ入れて全体を描き直した」もの。
-        const grown: Gemma4ChatMessage[] = [
-          ...first,
-          { role: "assistant", content: answer1 },
-          FOLLOW_UP,
-        ];
-        const answer2 = await viaChat(grown, FOLLOW_UP_TOKENS);
-        followUpAnswer = answer2;
-
-        // 低レベル面: 1 会話 = 1 sequence。2 ターン目に流すのは**差分だけ**で、前 turn を閉じる
-        // `<turn|>` は `pendingToken` が前置する（turn-local 契約 — ADR 0083 決定 4 / 0084 決定 5）。
+    it("③ streaming の片の連結 = 同じ会話の token 列の一括 decode", async () => {
+      for (const { fixture: name, maxNewTokens, expected, stop } of CASES) {
+        const { ids } = caseOf(name);
+        // 低レベル面は 1 会話 = 1 sequence（context を跨がせない）。
         const sequence = await pipeline.sequence();
         try {
-          const turn = async (prompt: readonly number[], limit: number) => {
-            const stream = sequence.generate({ prompt, maxNewTokens: limit });
-            const ids: number[] = [];
-            for await (const event of stream) if (event.kind === "token") ids.push(event.id);
-            return { text: pipeline.tokenizer.decode(ids), stop: await stream.done };
-          };
-
-          const prompt1 = gemma4ChatPrompt(pipeline.tokenizer, first);
-          const first1 = await turn(prompt1, maxNewTokens);
-          assertEquals(first1.text, answer1, "1 ターン目（全体描画は chat と同じ経路）");
-          // `used` は「会話が占めている論理位置」— prompt + 生成（停止 token 込み）で説明が付く。
-          assertEquals(sequence.used, prompt1.length + first1.stop.tokens, "1 ターン目の後の used");
-
-          const delta = gemma4ChatTurn(pipeline.tokenizer, FOLLOW_UP);
-          const second = await turn(delta, FOLLOW_UP_TOKENS);
-          console.log(
-            `[e2e] gemma4 増分ターン: ${JSON.stringify(second.text)} / ` +
-              `差分 ${delta.length} token / used ${sequence.used}`,
-          );
+          const stream = sequence.generate({ prompt: ids, maxNewTokens });
+          const tokens: number[] = [];
+          for await (const event of stream) if (event.kind === "token") tokens.push(event.id);
+          assertEquals(await stream.done, stop, `${name}: 低レベル面の停止理由`);
           assertEquals(
-            second.text,
-            answer2,
-            "2 ターン目が全体描画の chat() と逐語一致しない（差分描画か pendingToken の連結が" +
-              "会話を別物にしている）",
-          );
-          assertEquals(
-            sequence.used,
-            prompt1.length + first1.stop.tokens + delta.length + second.stop.tokens,
-            "2 ターン目の後の used",
+            pipeline.tokenizer.decode(tokens),
+            expected,
+            `${name}: 一括 decode（逐次が byte run を取りこぼしていれば割れる）`,
           );
         } finally {
           await sequence.dispose();
         }
-      });
+      }
+    });
 
-      await t.step("⑦ ChatSession の 2 ターンが⑥と同じ会話になる", async () => {
-        const { fixture: name, maxNewTokens, expected } = CASES[0];
-        const first = caseOf(name).messages;
-        // このケースは user 1 発話（セッションは文字列で受けるので、system も過去 turn も無い）。
-        assertEquals(first.length, 1, `${name}: 1 発話のケースでないと send に写せない`);
-        assert(followUpAnswer !== undefined, "⑥ が 2 ターン目の参照を採っていない");
+    it("④ 停止集合は上流の generation_config.json の宣言と一致", () => {
+      const ascending = (ids: readonly number[]): number[] => [...ids].sort((a, b) => a - b);
+      assertEquals(ascending(pipeline.program.stopTokens), ascending(STOP_TOKENS), "program");
+      assertEquals(ascending(fixture.stopTokens), ascending(STOP_TOKENS), "フィクスチャ");
+    });
 
-        await using session = new Gemma4ChatSession(pipeline, { maxNewTokens });
-        // 1 ターン目は golden そのもの（`chat()` と同じ全体描画から始まる）。
-        assertEquals(await session.send(first[0].content).text(), expected, "1 ターン目");
-        // 2 ターン目は差分描画 + KV の継続。セッションが継ぐ条件（前ターンが EOS で閉じた）と
-        // 履歴の積み方が壊れれば、ここで⑥の参照から離れる。
-        const second = session.send(FOLLOW_UP.content, { maxNewTokens: FOLLOW_UP_TOKENS });
-        assertEquals(await second.text(), followUpAnswer, "2 ターン目（⑥ の参照と逐語一致）");
-        assertEquals((await second.done).reason, "eos", "2 ターン目の停止理由");
-        assertEquals(
-          session.turns,
-          [
-            first[0],
-            { role: "assistant", content: expected },
-            FOLLOW_UP,
-            { role: "assistant", content: followUpAnswer },
-          ],
-          "履歴は「流した本文」だけで積まれる",
-        );
-      });
-
-      await t.step("⑧ 要求は発行時に写す（汲み始める前の書き換えは効かない）", async () => {
-        // 型 doc の MUST。写しが受け手（`GenerationSequence.generate` / `createSampler`）まで
-        // 遅れると、それは async generator の本体 = **最初の `next()`** なので「発行してから
-        // 汲み始めるまで」の窓で書き換えた停止集合・抽選指定が黙って効く。
-        // 観測は**受理集合の外**へ書き換える形で採る（写していれば通る / 写していなければ
-        // 受け手の再検査で落ちる = 分布に頼らない決定的な差）。
-        const { messages } = caseOf(CASES[0].fixture);
-        const stopTokens = [7];
-        const sampler = { temperature: 0 };
-        const stream = pipeline.chat(messages, {
-          maxNewTokens: CASES[0].maxNewTokens,
-          stopTokens,
-          sampler,
-        });
-        stopTokens.push(Number.MAX_SAFE_INTEGER); // 語彙の外（`generate` の再検査が落とす値）
-        sampler.temperature = -1; // `createSampler` の受理集合の外
-        assertEquals(await stream.text(), CASES[0].expected, "発行後の書き換えが効いている");
-      });
-
-      await t.step(
-        "⑨ chat の capacity は sequence へ降りる（既定へ黙って縮退しない）",
-        async () => {
-          // 降ろし忘れは既定（`program.capacity`）でも動くため**例外にならない** — 受理集合の外を
-          // 渡して「落ちること」で降りていることを見る。落ちるのは発行時ではなく最初の `next()`
-          // （`createGenerationSequence` は本体の中で呼ばれる）ので、同期でないことも同時に固定する。
-          const { messages } = caseOf(CASES[0].fixture);
-          const stream = pipeline.chat(messages, {
-            maxNewTokens: 4,
-            capacity: CHUNK_LENGTH - 1,
-          });
-          await assertRejects(
-            () => stream.text(),
-            Error,
-            `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} を下回る`,
-          );
-        },
-      );
-
-      await t.step("⑩ estimateSessionMemory は既定を wiring から採り、値域を fail loudly", () => {
-        // 見積りは純関数（`estimateGraphMemory`）だが `gpu.limits` を読むので実パイプラインが
-        // 要る — run は 1 回も足さない。既定引数が配布形の宣言（chunkLength / capacity）を
-        // 使っていることは「明示して呼んだ結果と等しい」で縛る（別の既定へ退行すると割れる）。
-        const implicit = pipeline.estimateSessionMemory();
-        const explicit = pipeline.estimateSessionMemory({
-          chunkLength: CHUNK_LENGTH,
-          capacity: CAPACITY,
-        });
-        assertEquals(implicit, explicit, "既定引数が wiring の 2 数を使っていない");
-        // 恒真でないことの対: 容量を変えれば state のバイト数は動く。
-        const half = pipeline.estimateSessionMemory({ capacity: CAPACITY / 2 });
-        assert(
-          half.resident.stateBytes < implicit.resident.stateBytes,
-          `容量を半分にしても state のバイト数が動かない: ${half.resident.stateBytes}`,
-        );
-        // MUST: `maxStorageBufferBindingSize` を必ず渡す（states 形 attention のノード内一時は
-        // 行ブロック枚数がこの上限だけで決まる — 省くと estimator が fail loudly する）。
-        assert(implicit.peakAccountedBytes > 0, "見積りが 0 バイトを名乗っている");
-        // slot backing の保持予算（ADR 0095）は pipeline options を省けば runtime の既定が効く。
-        assertEquals(
-          implicit.planBackingBudgetBytes,
-          DEFAULT_PLAN_BACKING_BUDGET_BYTES,
-          "予算の既定が報告に載っていない（pipeline が別の値を渡している）",
-        );
-
-        // 失敗経路 3 本（どれも Session を張り直す前に落ちる）。
-        assertThrows(
-          () => pipeline.estimateSessionMemory({ capacity: CHUNK_LENGTH - 1 }),
-          Error,
-          `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} を下回る`,
-        );
-        assertThrows(
-          () => pipeline.estimateSessionMemory({ capacity: MAX_POSITION + 1 }),
-          Error,
-          `capacity ${MAX_POSITION + 1} が maxPosition ${MAX_POSITION} を超えた`,
-        );
-        assertThrows(
-          () => pipeline.estimateSessionMemory({ chunkLength: MAX_CHUNK_LENGTH + 1 }),
-          Error,
-          `chunkLength ${MAX_CHUNK_LENGTH + 1} が配布形の宣言 maxChunkLength`,
-        );
-        // 安全整数でない容量は「1 以上の整数でない」の門が受ける（大小関係の診断とは分ける —
-        // `createGenerationSequence` / `Gemma4ChatSession` と同じ 3 本・値域の穴を作らない）。
-        assertThrows(
-          () => pipeline.estimateSessionMemory({ capacity: 1.5 }),
-          Error,
-          "capacity 1.5 が 1 以上の整数でない",
-        );
-      });
-
-      // async generator の本体は最初の `next()` まで走らないので、発行時の検査だけでは
-      // 「発行 → dispose → 汲み始める」が抜ける。汲まないまま dispose を跨がせる。
-      issuedBeforeDispose = pipeline.chat([{ role: "user", content: "hi" }], { maxNewTokens: 4 });
-    } finally {
-      await pipeline.dispose();
-    }
-
-    await t.step("dispose 済みのパイプラインは生成を受けない", async () => {
+    it("⑤ 射程外の会話は GPU に触る前に落ちる（同期の throw）", () => {
       assertThrows(
-        () => pipeline.chat([{ role: "user", content: "hi" }], { maxNewTokens: 4 }),
+        () =>
+          pipeline.chat(
+            [{ role: "user", content: "hi", tools: [] }] as unknown as Gemma4ChatMessage[],
+            { maxNewTokens: 4 },
+          ),
         Error,
-        "dispose 済み",
+        "射程外の欄",
       );
-      await assertRejects(() => pipeline.sequence(), Error, "dispose 済み");
-
-      // 発行済み・未反復の stream も**発行時と同じ pipeline の文言**で閉じる（ランタイムの
-      // Session 文言に化けると、呼び手には真因＝自分が dispose したことが読み取れない）。
-      const issued = issuedBeforeDispose;
-      assert(issued !== undefined, "dispose の前に stream を発行していない");
-      await assertRejects(
-        async () => {
-          for await (const _chunk of issued) {
-            /* 1 個も来ない */
-          }
-        },
+      assertThrows(
+        () =>
+          pipeline.chat([{ role: "tool", content: "…" }] as unknown as Gemma4ChatMessage[], {
+            maxNewTokens: 4,
+          }),
         Error,
-        "Gemma4Pipeline: dispose 済みでは生成できない",
+        "role",
       );
     });
 
-    await t.step("公開の program 面は凍結された数だけで、dispose 後も読める", () => {
-      // NOTE: PLE（`model` 容器の資産）のホストキャッシュが dispose で返ることは
-      // `gemma4_ple_test.ts` の単体門が持つ（公開面から `derivedInputs.derive` は引けない =
-      // 面を絞った意図どおり）。
-      // ここで見るのは絞った後の面の性質 — 配布形が宣言した数がそのまま読め、消費者側の
-      // 書き込みが生成ループの停止集合へ届かないこと。
-      const program = pipeline.program;
-      assertEquals(program.chunkLength, CHUNK_LENGTH);
-      assertEquals(program.capacity, CAPACITY);
-      assertEquals(program.maxPosition, MAX_POSITION);
-      assertEquals(Object.isFrozen(program), true, "program が凍結されていない");
-      assertEquals(Object.isFrozen(program.stopTokens), true, "stopTokens が凍結されていない");
-      // 凍結コピーなので、停止集合を空にしようとしても落ちる（黙って EOS で止まらなくならない）。
-      assertThrows(() => {
-        (program.stopTokens as number[]).length = 0;
-      }, TypeError);
+    it("⑥ 増分描画の多ターンが chat() の全体描画と逐語一致", async () => {
+      const { fixture: name, maxNewTokens } = CASES[0];
+      const first = caseOf(name).messages;
+
+      /** 高レベル面（毎ターン会話全体を描き直す）で 1 ターン汲む。 */
+      const viaChat = async (
+        messages: readonly Gemma4ChatMessage[],
+        limit: number,
+      ): Promise<string> => {
+        const parts: string[] = [];
+        for await (const chunk of pipeline.chat(messages, { maxNewTokens: limit })) {
+          parts.push(chunk);
+        }
+        return parts.join("");
+      };
+
+      const answer1 = await viaChat(first, maxNewTokens);
+      // 2 ターン目の参照は「1 ターン目の応答を会話へ入れて全体を描き直した」もの。
+      const grown: Gemma4ChatMessage[] = [
+        ...first,
+        { role: "assistant", content: answer1 },
+        FOLLOW_UP,
+      ];
+      const answer2 = await viaChat(grown, FOLLOW_UP_TOKENS);
+      followUpAnswer = answer2;
+
+      // 低レベル面: 1 会話 = 1 sequence。2 ターン目に流すのは**差分だけ**で、前 turn を閉じる
+      // `<turn|>` は `pendingToken` が前置する（turn-local 契約 — ADR 0083 決定 4 / 0084 決定 5）。
+      const sequence = await pipeline.sequence();
+      try {
+        const turn = async (prompt: readonly number[], limit: number) => {
+          const stream = sequence.generate({ prompt, maxNewTokens: limit });
+          const ids: number[] = [];
+          for await (const event of stream) if (event.kind === "token") ids.push(event.id);
+          return { text: pipeline.tokenizer.decode(ids), stop: await stream.done };
+        };
+
+        const prompt1 = gemma4ChatPrompt(pipeline.tokenizer, first);
+        const first1 = await turn(prompt1, maxNewTokens);
+        assertEquals(first1.text, answer1, "1 ターン目（全体描画は chat と同じ経路）");
+        // `used` は「会話が占めている論理位置」— prompt + 生成（停止 token 込み）で説明が付く。
+        assertEquals(sequence.used, prompt1.length + first1.stop.tokens, "1 ターン目の後の used");
+
+        const delta = gemma4ChatTurn(pipeline.tokenizer, FOLLOW_UP);
+        const second = await turn(delta, FOLLOW_UP_TOKENS);
+        console.log(
+          `[e2e] gemma4 増分ターン: ${JSON.stringify(second.text)} / ` +
+            `差分 ${delta.length} token / used ${sequence.used}`,
+        );
+        assertEquals(
+          second.text,
+          answer2,
+          "2 ターン目が全体描画の chat() と逐語一致しない（差分描画か pendingToken の連結が" +
+            "会話を別物にしている）",
+        );
+        assertEquals(
+          sequence.used,
+          prompt1.length + first1.stop.tokens + delta.length + second.stop.tokens,
+          "2 ターン目の後の used",
+        );
+      } finally {
+        await sequence.dispose();
+      }
+    });
+
+    it("⑦ ChatSession の 2 ターンが⑥と同じ会話になる", async () => {
+      const { fixture: name, maxNewTokens, expected } = CASES[0];
+      const first = caseOf(name).messages;
+      // このケースは user 1 発話（セッションは文字列で受けるので、system も過去 turn も無い）。
+      assertEquals(first.length, 1, `${name}: 1 発話のケースでないと send に写せない`);
+      assert(followUpAnswer !== undefined, "⑥ が 2 ターン目の参照を採っていない");
+
+      await using session = new Gemma4ChatSession(pipeline, { maxNewTokens });
+      // 1 ターン目は golden そのもの（`chat()` と同じ全体描画から始まる）。
+      assertEquals(await session.send(first[0].content).text(), expected, "1 ターン目");
+      // 2 ターン目は差分描画 + KV の継続。セッションが継ぐ条件（前ターンが EOS で閉じた）と
+      // 履歴の積み方が壊れれば、ここで⑥の参照から離れる。
+      const second = session.send(FOLLOW_UP.content, { maxNewTokens: FOLLOW_UP_TOKENS });
+      assertEquals(await second.text(), followUpAnswer, "2 ターン目（⑥ の参照と逐語一致）");
+      assertEquals((await second.done).reason, "eos", "2 ターン目の停止理由");
+      assertEquals(
+        session.turns,
+        [
+          first[0],
+          { role: "assistant", content: expected },
+          FOLLOW_UP,
+          { role: "assistant", content: followUpAnswer },
+        ],
+        "履歴は「流した本文」だけで積まれる",
+      );
+    });
+
+    it("⑧ 要求は発行時に写す（汲み始める前の書き換えは効かない）", async () => {
+      // 型 doc の MUST。写しが受け手（`GenerationSequence.generate` / `createSampler`）まで
+      // 遅れると、それは async generator の本体 = **最初の `next()`** なので「発行してから
+      // 汲み始めるまで」の窓で書き換えた停止集合・抽選指定が黙って効く。
+      // 観測は**受理集合の外**へ書き換える形で採る（写していれば通る / 写していなければ
+      // 受け手の再検査で落ちる = 分布に頼らない決定的な差）。
+      const { messages } = caseOf(CASES[0].fixture);
+      const stopTokens = [7];
+      const sampler = { temperature: 0 };
+      const stream = pipeline.chat(messages, {
+        maxNewTokens: CASES[0].maxNewTokens,
+        stopTokens,
+        sampler,
+      });
+      stopTokens.push(Number.MAX_SAFE_INTEGER); // 語彙の外（`generate` の再検査が落とす値）
+      sampler.temperature = -1; // `createSampler` の受理集合の外
+      assertEquals(await stream.text(), CASES[0].expected, "発行後の書き換えが効いている");
+    });
+
+    it("⑨ chat の capacity は sequence へ降りる（既定へ黙って縮退しない）", async () => {
+      // 降ろし忘れは既定（`program.capacity`）でも動くため**例外にならない** — 受理集合の外を
+      // 渡して「落ちること」で降りていることを見る。落ちるのは発行時ではなく最初の `next()`
+      // （`createGenerationSequence` は本体の中で呼ばれる）ので、同期でないことも同時に固定する。
+      const { messages } = caseOf(CASES[0].fixture);
+      const stream = pipeline.chat(messages, {
+        maxNewTokens: 4,
+        capacity: CHUNK_LENGTH - 1,
+      });
+      await assertRejects(
+        () => stream.text(),
+        Error,
+        `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} を下回る`,
+      );
+    });
+
+    it("⑩ estimateSessionMemory は既定を wiring から採り、値域を fail loudly", () => {
+      // 見積りは純関数（`estimateGraphMemory`）だが `gpu.limits` を読むので実パイプラインが
+      // 要る — run は 1 回も足さない。既定引数が配布形の宣言（chunkLength / capacity）を
+      // 使っていることは「明示して呼んだ結果と等しい」で縛る（別の既定へ退行すると割れる）。
+      const implicit = pipeline.estimateSessionMemory();
+      const explicit = pipeline.estimateSessionMemory({
+        chunkLength: CHUNK_LENGTH,
+        capacity: CAPACITY,
+      });
+      assertEquals(implicit, explicit, "既定引数が wiring の 2 数を使っていない");
+      // 恒真でないことの対: 容量を変えれば state のバイト数は動く。
+      const half = pipeline.estimateSessionMemory({ capacity: CAPACITY / 2 });
+      assert(
+        half.resident.stateBytes < implicit.resident.stateBytes,
+        `容量を半分にしても state のバイト数が動かない: ${half.resident.stateBytes}`,
+      );
+      // MUST: `maxStorageBufferBindingSize` を必ず渡す（states 形 attention のノード内一時は
+      // 行ブロック枚数がこの上限だけで決まる — 省くと estimator が fail loudly する）。
+      assert(implicit.peakAccountedBytes > 0, "見積りが 0 バイトを名乗っている");
+      // slot backing の保持予算（ADR 0095）は pipeline options を省けば runtime の既定が効く。
+      assertEquals(
+        implicit.planBackingBudgetBytes,
+        DEFAULT_PLAN_BACKING_BUDGET_BYTES,
+        "予算の既定が報告に載っていない（pipeline が別の値を渡している）",
+      );
+
+      // 失敗経路 3 本（どれも Session を張り直す前に落ちる）。
+      assertThrows(
+        () => pipeline.estimateSessionMemory({ capacity: CHUNK_LENGTH - 1 }),
+        Error,
+        `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} を下回る`,
+      );
+      assertThrows(
+        () => pipeline.estimateSessionMemory({ capacity: MAX_POSITION + 1 }),
+        Error,
+        `capacity ${MAX_POSITION + 1} が maxPosition ${MAX_POSITION} を超えた`,
+      );
+      assertThrows(
+        () => pipeline.estimateSessionMemory({ chunkLength: MAX_CHUNK_LENGTH + 1 }),
+        Error,
+        `chunkLength ${MAX_CHUNK_LENGTH + 1} が配布形の宣言 maxChunkLength`,
+      );
+      // 安全整数でない容量は「1 以上の整数でない」の門が受ける（大小関係の診断とは分ける —
+      // `createGenerationSequence` / `Gemma4ChatSession` と同じ 3 本・値域の穴を作らない）。
+      assertThrows(
+        () => pipeline.estimateSessionMemory({ capacity: 1.5 }),
+        Error,
+        "capacity 1.5 が 1 以上の整数でない",
+      );
+    });
+
+    // The its below observe the pipeline after dispose; this suite's beforeAll runs after every
+    // it above (Vitest runs a file's tasks in definition order).
+    describe("dispose 後", () => {
+      beforeAll(async () => {
+        try {
+          // async generator の本体は最初の `next()` まで走らないので、発行時の検査だけでは
+          // 「発行 → dispose → 汲み始める」が抜ける。汲まないまま dispose を跨がせる。
+          issuedBeforeDispose = pipeline.chat([{ role: "user", content: "hi" }], {
+            maxNewTokens: 4,
+          });
+        } finally {
+          await pipeline.dispose();
+        }
+      });
+
+      it("dispose 済みのパイプラインは生成を受けない", async () => {
+        assertThrows(
+          () => pipeline.chat([{ role: "user", content: "hi" }], { maxNewTokens: 4 }),
+          Error,
+          "dispose 済み",
+        );
+        await assertRejects(() => pipeline.sequence(), Error, "dispose 済み");
+
+        // 発行済み・未反復の stream も**発行時と同じ pipeline の文言**で閉じる（ランタイムの
+        // Session 文言に化けると、呼び手には真因＝自分が dispose したことが読み取れない）。
+        const issued = issuedBeforeDispose;
+        assert(issued !== undefined, "dispose の前に stream を発行していない");
+        await assertRejects(
+          async () => {
+            for await (const _chunk of issued) {
+              /* 1 個も来ない */
+            }
+          },
+          Error,
+          "Gemma4Pipeline: dispose 済みでは生成できない",
+        );
+      });
+
+      it("公開の program 面は凍結された数だけで、dispose 後も読める", () => {
+        // NOTE: PLE（`model` 容器の資産）のホストキャッシュが dispose で返ることは
+        // `gemma4_ple_test.ts` の単体門が持つ（公開面から `derivedInputs.derive` は引けない =
+        // 面を絞った意図どおり）。
+        // ここで見るのは絞った後の面の性質 — 配布形が宣言した数がそのまま読め、消費者側の
+        // 書き込みが生成ループの停止集合へ届かないこと。
+        const program = pipeline.program;
+        assertEquals(program.chunkLength, CHUNK_LENGTH);
+        assertEquals(program.capacity, CAPACITY);
+        assertEquals(program.maxPosition, MAX_POSITION);
+        assertEquals(Object.isFrozen(program), true, "program が凍結されていない");
+        assertEquals(Object.isFrozen(program.stopTokens), true, "stopTokens が凍結されていない");
+        // 凍結コピーなので、停止集合を空にしようとしても落ちる（黙って EOS で止まらなくならない）。
+        assertThrows(() => {
+          (program.stopTokens as number[]).length = 0;
+        }, TypeError);
+      });
     });
   },
-});
+);
 
 /**
  * slot backing の保持予算（ADR 0095）の**透過**— pipeline options の値が
@@ -493,10 +507,9 @@ test({
  * （`createSession` への透過）は観測席が無いので、ここが見るのは見積り側だけである
  * （両者へ同じ値を渡すことは pipeline の 1 本の実装で、握った値は `Gemma4State` に 1 つしかない）。
  */
-test({
-  name: "planBackingBudgetBytes は pipeline options から見積りへ透過する（実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "planBackingBudgetBytes は pipeline options から見積りへ透過する（実 GPU）",
+  async () => {
     // 既定（256 MiB）とも最大シナリオとも違う値を選ぶ（どちらの既定へ落ちても落ちる形）。
     const budget = 4 * 1024 * 1024 * 1024;
     const reports: AdmissionReport[] = [];
@@ -544,7 +557,7 @@ test({
       "経路の差は追加勘定と厳密に一致する",
     );
   },
-});
+);
 
 /**
  * slot backing の保持予算（ADR 0095）の**透過（Session 側）**— pipeline options の値が
@@ -603,10 +616,9 @@ const observeSecondTurn = async (options: Gemma4PipelineOptions): Promise<Observ
   }
 };
 
-test({
-  name: "planBackingBudgetBytes は Session へ透過する（予算 0 は保持 1 本・既定は 2 本・実 GPU）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE,
-  fn: async () => {
+test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
+  "planBackingBudgetBytes は Session へ透過する（予算 0 は保持 1 本・既定は 2 本・実 GPU）",
+  async () => {
     /** 観測列の形（prefill 1 本 + decode 複数）を先に固定する — 門が空振らないことの対。 */
     const assertShape = (runs: readonly ObservedRun[], label: string): ObservedRun[] => {
       assertEquals(
@@ -663,4 +675,4 @@ test({
       );
     }
   },
-});
+);

@@ -101,7 +101,7 @@
  */
 
 import { readFile, writeFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { type DistributionSource, parseManifest, resolveSelection } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
@@ -398,16 +398,18 @@ const fullResults = openResults("wan-ti2v-pipeline-full");
 /** 121 フレームの結果の席（同じく既定のレーンと分ける）。 */
 const longClipResults = openResults("wan-ti2v-pipeline-121f");
 
-test({
-  name: "Wan2.2 通しの参照: 2 ステップの参照 3 本が揃っている",
-  ignore: !ANY_FIXTURE,
-  fn: () => {
-    assertEquals(
-      FIXTURES_PRESENT,
-      FIXTURES_PRESENT.map(() => true),
-      `${STEPS_ROOT.pathname} の欠け`,
-    );
-  },
+/** A value a `beforeAll` assigns, read inside an `it` (fails loudly when the hook did not assign it). */
+const assigned = <T>(value: T | undefined, what: string): T => {
+  assert(value !== undefined, `${what} is not assigned (its beforeAll did not complete)`);
+  return value;
+};
+
+test.skipIf(!ANY_FIXTURE)("Wan2.2 通しの参照: 2 ステップの参照 3 本が揃っている", () => {
+  assertEquals(
+    FIXTURES_PRESENT,
+    FIXTURES_PRESENT.map(() => true),
+    `${STEPS_ROOT.pathname} の欠け`,
+  );
 });
 
 /** 参照 1 本（F32 のテンソル・形・メタ）。 */
@@ -619,12 +621,10 @@ const loadPipeline = (
 /** 2 ステップの通しの要求の共通部分（寸法とプロンプトと初期ノイズはケースが足す）。 */
 const TWO_STEP = { steps: STEPS, guidance: GUIDANCE, shift: SHIFT, frames: FRAMES } as const;
 
-test({
-  name:
-    "Wan2.2 通し（ホスト・GPU 不要）: 参照のメタ（埋め込み資産・σ / timestep・shift 5.0）と統計 48 値が TS と一致し、" +
+test.skipIf(!ANY_FIXTURE)(
+  "Wan2.2 通し（ホスト・GPU 不要）: 参照のメタ（埋め込み資産・σ / timestep・shift 5.0）と統計 48 値が TS と一致し、" +
     "参照の DiT 出力から CFG + UniPC が参照の潜在をビット一致で再現する",
-  ignore: !ANY_FIXTURE,
-  fn: async () => {
+  async () => {
     const embedsSha = await sha256Hex(await readFile(TEXT_EMBEDS_URL));
     const schedule = wanUniPcSchedule(STEPS, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps);
     const mean = Float32Array.from(WAN22_LATENTS_MEAN);
@@ -693,7 +693,7 @@ test({
       }
     }
   },
-});
+);
 
 /** 観測点（帯を持つ出力 — 各 step の後の潜在とクランプ後のフレーム）。 */
 const OBSERVATION_POINTS = ["latents.0", "latents.1", "frames"] as const;
@@ -724,20 +724,15 @@ const roundUpTwoDigits = (value: number): number => {
   return Number((Math.ceil(Number((value / unit).toPrecision(12))) * unit).toPrecision(2));
 };
 
-test({
-  name:
-    "Wan2.2 通し 2 ステップ（実 GPU）: 1280×704・17 フレームの潜在とフレームが参照と帯の内・故障注入は帯の外・" +
+describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
+  "Wan2.2 通し 2 ステップ（実 GPU）: 1280×704・17 フレームの潜在とフレームが参照と帯の内・故障注入は帯の外・" +
     "sha256 の環境行（参照席の帯のケース・seed 経路の 2 寸法・実用席の seed 経路・GPU 経路）",
-  ignore: !DIST_PRESENT || !GPU_AVAILABLE,
-  fn: async (t) => {
+  () => {
     let deviceLost: string | undefined;
-    const gpu = verifyRunningGpu(
-      await acquireTestGpu({
-        onDeviceLost: (info) => {
-          deviceLost = `${info.reason}: ${info.message}`;
-        },
-      }),
-    );
+    // One device shared by the its below (acquired before them, destroyed after them all), and the
+    // reference-seat pipeline the band, fault and seed its run on.
+    let gpuContext: GpuContext | undefined;
+    let referencePipeline: WanTi2vPipeline | undefined;
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     /**
      * 参照席の seed 経路の 1280×704 の実物（RGB のバイト列）— 同じ要求の実用席のケースの床（{@link runSeedCase} の
@@ -756,6 +751,7 @@ test({
       height: number,
       beforeSettle: (bytes: Uint8Array<ArrayBuffer>) => void,
     ): Promise<void> => {
+      const gpu = assigned(gpuContext, "gpuContext");
       let settlement: ReferenceSettlement | undefined;
       try {
         await runRecordedCase(results, { id }, async () => {
@@ -792,455 +788,456 @@ test({
         throw new Error(referenceMismatchMessage(id, settlement, references));
       }
     };
-    try {
-      const pipeline = await loadPipeline(
-        gpu,
+    beforeAll(async () => {
+      gpuContext = verifyRunningGpu(
+        await acquireTestGpu({
+          onDeviceLost: (info) => {
+            deviceLost = `${info.reason}: ${info.message}`;
+          },
+        }),
+      );
+      referencePipeline = await loadPipeline(
+        gpuContext,
         diagnostics,
         "precomputed",
         WAN_TI2V_REFERENCE_QUANT,
       );
+    });
+    afterAll(async () => {
+      if (gpuContext === undefined) return;
       try {
-        const { prompts } = pipeline;
-        const caseRatios: CaseRatios[] = [];
-
-        for (const { name, role } of CASES) {
-          const id = bandCaseId(name);
-          await t.step({
-            name: `${id}（${role}）`,
-            ignore: !ANY_FIXTURE,
-            fn: async () => {
-              const fixture = await readFixture(fixtureUrl(name));
-              assertEquals(fixture.meta("role"), role, `${name}: 役割`);
-              // band は原文・accept は正規化後の文字列で引く（受理集合の 2 つの綴りを両方通す）。
-              const prompt = textOf(
-                prompts,
-                fixture.meta("prompt"),
-                role === "band" ? "prompt" : "normalized",
-              );
-              let settlement: ReferenceSettlement | undefined;
-              let caseNote = "";
-              try {
-                await runRecordedCase(
-                  results,
-                  { id, failureNote: () => caseNote },
-                  async ({ measurements }) => {
-                    const observed = await observe(pipeline, diagnostics, {
-                      ...TWO_STEP,
-                      prompt,
-                      latents: fixture.tensor("latents_init"),
-                      width: WIDTH,
-                      height: HEIGHT,
-                    });
-                    assert("video" in observed, "generate が最後まで回っていない");
-                    assertEquals(observed.latents.length, STEPS, "denoise-step の数");
-                    const { video } = observed;
-                    assertEquals(
-                      [video.frames, video.height, video.width],
-                      [FRAMES, HEIGHT, WIDTH],
-                    );
-                    const diffs = OBSERVATION_POINTS.map((point) => ({
-                      point,
-                      band: bandOf(point),
-                      // 参照のフレームはクランプ後で書かれている（`ti2v_few_step_ref.decode_frames` の clamp）。
-                      diff:
-                        point === "frames"
-                          ? difference(video.data, fixture.tensor("frames"))
-                          : difference(
-                              observed.latents[point === "latents.0" ? 0 : 1],
-                              fixture.tensor(point),
-                            ),
-                    }));
-                    for (const { point, band, diff } of diffs) {
-                      measurements.push({
-                        output: point,
-                        maxAbs: diff.maxAbs,
-                        maxRel: diff.maxRel,
-                        // 未導出の帯は無限の帯として記録する（判定は下で赤にする — 段 2 の `toleranceOf` と同じ扱い）。
-                        tolerance:
-                          band === undefined
-                            ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
-                            : { atol: band * diff.referenceMax, rtol: 0 },
-                        stage: "karume",
-                      });
-                    }
-                    const notes = [
-                      ...diffs.map(({ point, diff }) => formatDifference(point, diff)),
-                      ...formatObserved(observed),
-                    ];
-                    caseNote = notes.join(" / ");
-                    console.log(`[wan-ti2v-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
-                    for (const { point, diff } of diffs) {
-                      assertEquals(diff.nonFinite, 0, `${id}: ${point} の非有限`);
-                    }
-                    assertEquals(deviceLost, undefined, "device lost");
-                    caseRatios.push({
-                      name,
-                      role,
-                      ratios: {
-                        "latents.0": diffs[0].diff.ratio,
-                        "latents.1": diffs[1].diff.ratio,
-                        frames: diffs[2].diff.ratio,
-                      },
-                    });
-                    for (const { point, band, diff } of diffs) {
-                      if (band === undefined) {
-                        throw new Error(
-                          `${id}: ${point} の帯が未導出（比 ${diff.ratio.toExponential(3)}）— ` +
-                            "帯の候補は「帯の候補」の step が出す",
-                        );
-                      }
-                      assert(
-                        diff.ratio <= band,
-                        `${id}: ${formatDifference(point, diff)} が帯 ${band} の外`,
-                      );
-                    }
-                    const outcome = await settleOrObserve(references, results, {
-                      id,
-                      artifact: `${id}.rgb`,
-                      bytes: rgbBytes(video),
-                    });
-                    settlement = outcome.settlement;
-                    return { ...outcome.fields, note: caseNote };
-                  },
-                );
-              } finally {
-                // 次のケースの確保の前に、このケースの段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
-                await settleReleases(gpu);
-              }
-              if (settlement?.check.status === "fail") {
-                throw new Error(referenceMismatchMessage(id, settlement, references));
-              }
-            },
-          });
-        }
-
-        // 未導出の帯の候補（決定用だけから作る — 受入れの比は並べるが候補に使わない。決定用のどれかが比を出す前に落ちた回は
-        // 候補を出さない）。帯が導出済みなら step を作らない。
-        if (!BANDS_DERIVED) {
-          await t.step({
-            name: "帯の候補（未導出）",
-            ignore: !ANY_FIXTURE,
-            fn: () => {
-              const expected = CASES.filter(({ role }) => role === "band").length;
-              const decided = caseRatios.filter(({ role }) => role === "band");
-              const candidate =
-                decided.length === expected
-                  ? OBSERVATION_POINTS.map((point) => {
-                      const worst = Math.max(...decided.map(({ ratios }) => ratios[point]));
-                      return `${point}: 決定用 ${expected} 本の最悪 ${worst.toExponential(3)} × 5 = ${(
-                        worst * 5
-                      ).toExponential(
-                        3,
-                      )}（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(worst * 5)}）`;
-                    }).join(" / ")
-                  : `決定用 ${expected} 本のうち比が出たのは ${decided.length} 本 — 候補にしない（落ちたケースを先に調べる）`;
-              const accepted = caseRatios
-                .filter(({ role }) => role === "accept")
-                .map(
-                  ({ name, ratios }) =>
-                    `${name} ${OBSERVATION_POINTS.map(
-                      (point) => `${point} ${ratios[point].toExponential(3)}`,
-                    ).join("・")}`,
-                );
-              throw new Error(
-                `帯が未導出 — ${candidate}。受入れの比（帯の決定に使わない）: ${
-                  accepted.join(" / ") || "なし"
-                }`,
-              );
-            },
-          });
-        }
-
-        // 故障注入（受入れの初期ノイズ — 潜在だけを見るので VAE の段の前で止める）。
-        let acceptFixture: Fixture | undefined;
-        const faults: readonly {
-          readonly label: string;
-          readonly request: (
-            ferret: string,
-            negative: string,
-          ) => Omit<WanGenerateRequest, "onEvent" | "latents">;
-        }[] = [
-          {
-            label: "プロンプトの正負の取り違え",
-            request: (ferret, negative) => ({
-              ...TWO_STEP,
-              prompt: negative,
-              negativePrompt: ferret,
-            }),
-          },
-          {
-            label: "guidance 5.0 → 5.05",
-            request: (ferret) => ({ ...TWO_STEP, prompt: ferret, guidance: 5.05 }),
-          },
-          {
-            label: "shift 5.0 → 3.0",
-            request: (ferret) => ({ ...TWO_STEP, prompt: ferret, shift: 3 }),
-          },
-        ];
-        const lastBand = LATENT_RATIO_BANDS[STEPS - 1];
-        for (const { label, request } of faults) {
-          await t.step({
-            name: `故障注入: ${label} → ${ACCEPT_CASE} の潜在が帯の外`,
-            ignore: !ANY_FIXTURE,
-            fn: async () => {
-              try {
-                acceptFixture ??= await readFixture(fixtureUrl(ACCEPT_CASE));
-                const accept = acceptFixture;
-                const ferret = textOf(prompts, accept.meta("prompt"), "prompt");
-                const negative = textOf(prompts, accept.meta("negative"), "prompt");
-                const observed = await observe(
-                  pipeline,
-                  diagnostics,
-                  {
-                    ...request(ferret, negative),
-                    latents: accept.tensor("latents_init"),
-                    width: WIDTH,
-                    height: HEIGHT,
-                  },
-                  { abortAfterDenoise: true },
-                );
-                // 段のイベント名が変わって打ち切りが効かないと、28 タイルの VAE を黙って払う（値の判定には出ない）。
-                assert(!("video" in observed), "DiT の段の後で止まっていない");
-                assertEquals(observed.latents.length, STEPS, "denoise-step の数");
-                const diff = difference(
-                  observed.latents[STEPS - 1],
-                  accept.tensor(`latents.${STEPS - 1}`),
-                );
-                console.log(
-                  `[wan-ti2v-pipeline] fault ${label}: ${formatDifference(
-                    `latents.${STEPS - 1}`,
-                    diff,
-                  )}（${
-                    lastBand === undefined
-                      ? "帯は未導出"
-                      : `帯の ${(diff.ratio / lastBand).toFixed(1)} 倍`
-                  }）`,
-                );
-                if (lastBand === undefined) {
-                  throw new Error(
-                    `${label}: 帯が未導出（故障注入の比 ${diff.ratio.toExponential(3)}）`,
-                  );
-                }
-                assert(
-                  diff.ratio > FAULT_MARGIN * lastBand,
-                  `${label}: 比 ${diff.ratio} が帯 ${lastBand} の ${FAULT_MARGIN} 倍を超えない`,
-                );
-              } finally {
-                await settleReleases(gpu);
-              }
-            },
-          });
-        }
-
-        // seed 経路の 2 ステップ（2 寸法 — 完走・非有限 0・sha256 の環境行）。
-        for (const { id, width, height } of SEED_CASES) {
-          await t.step(`${id}（seed 経路・sha256 の環境行）`, () =>
-            runSeedCase(pipeline, id, width, height, (bytes) => {
-              // 実用席のケースと同じ要求（1280×704）の実物だけ床の相手に残す。
-              if (width === WIDTH && height === HEIGHT) referenceSeedRgb = bytes;
-            }),
-          );
-        }
+        await referencePipeline?.dispose();
       } finally {
-        await pipeline.dispose();
+        // MUST: device を捨てる前に解放を待つ（B570 の destroy の遅れ — 後続のテストの予算を残す）。
+        await settleReleases(gpuContext);
+        gpuContext.destroy();
       }
+    });
+    const caseRatios: CaseRatios[] = [];
 
-      // 実用席の seed 経路（参照席の pipeline を畳んでから席の pipeline を組む — 構築では Session を張らない）。
-      await t.step(`${PRACTICAL_SEED_CASE_ID}（実用席・seed 経路・sha256 の環境行）`, async () => {
-        await using practical = await loadPipeline(
-          gpu,
-          diagnostics,
-          "precomputed",
-          WAN_TI2V_PRACTICAL_QUANT,
+    for (const { name, role } of CASES) {
+      const id = bandCaseId(name);
+      it.skipIf(!ANY_FIXTURE)(`${id}（${role}）`, async () => {
+        const gpu = assigned(gpuContext, "gpuContext");
+        const pipeline = assigned(referencePipeline, "referencePipeline");
+        const { prompts } = pipeline;
+        const fixture = await readFixture(fixtureUrl(name));
+        assertEquals(fixture.meta("role"), role, `${name}: 役割`);
+        // band は原文・accept は正規化後の文字列で引く（受理集合の 2 つの綴りを両方通す）。
+        const prompt = textOf(
+          prompts,
+          fixture.meta("prompt"),
+          role === "band" ? "prompt" : "normalized",
         );
-        await runSeedCase(practical, PRACTICAL_SEED_CASE_ID, WIDTH, HEIGHT, (bytes) => {
-          // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 配布形の経路で席の `session` が Session に届かない
-          // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として書くと、参照行と同じ sha が凍結され、以後この行は
-          // 実用層の退行も決定性も縛らない。行を書く前（`settleOrObserve` の前）に落とす。
-          if (referenceSeedRgb === undefined) {
-            throw new Error(
-              `${PRACTICAL_SEED_CASE_ID}: 同じ要求の参照席の実物が無い（参照席の seed 経路の 1280×704 が回っていない — 床を確かめられない）`,
-            );
-          }
-          const reference = referenceSeedRgb;
-          assert(
-            bytes.length !== reference.length ||
-              bytes.some((value, index) => value !== reference[index]),
-            `${PRACTICAL_SEED_CASE_ID}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
-          );
-        });
-      });
-
-      // GPU 経路（umT5 の text 段を畳んでから DiT・VAE の段を張る）。
-      await t.step({
-        name: `${GPU_TEXT_CASE_ID}（GPU 経路・sha256 の環境行）`,
-        ignore: !GPU_TEXT_PRESENT,
-        fn: async () => {
-          let settlement: ReferenceSettlement | undefined;
-          try {
-            // 構築では Session を張らない（umT5 の重みは generate ごとに text 段で読む — ADR 0119 決定 11）。
-            await using gpuPipeline = await loadPipeline(
-              gpu,
-              diagnostics,
-              "gpu",
-              WAN_TI2V_REFERENCE_QUANT,
-            );
-            const prompt = textOf(gpuPipeline.prompts, SEED_PROMPT, "prompt");
-            await runRecordedCase(results, { id: GPU_TEXT_CASE_ID }, async () => {
-              const observed = await observe(gpuPipeline, diagnostics, {
+        let settlement: ReferenceSettlement | undefined;
+        let caseNote = "";
+        try {
+          await runRecordedCase(
+            results,
+            { id, failureNote: () => caseNote },
+            async ({ measurements }) => {
+              const observed = await observe(pipeline, diagnostics, {
                 ...TWO_STEP,
                 prompt,
-                seed: SEED,
+                latents: fixture.tensor("latents_init"),
                 width: WIDTH,
                 height: HEIGHT,
               });
               assert("video" in observed, "generate が最後まで回っていない");
               assertEquals(observed.latents.length, STEPS, "denoise-step の数");
-              // text 段は DiT 段を張る前に畳む（段の境目の並び — VRAM の点も同じ並びで採る）。
-              assertEquals(
-                observed.drm.marks.slice(0, 3).map(({ label }) => label),
-                ["text_encoder start", "text_encoder end", "transformer start"],
-                "text 段 → DiT 段の順",
-              );
-              assert(observed.diagnostics.has("text_encoder"), "umT5 の run の診断が届いていない");
               const { video } = observed;
               assertEquals([video.frames, video.height, video.width], [FRAMES, HEIGHT, WIDTH]);
-              const nonFinite = countNonFinite(video.data);
+              const diffs = OBSERVATION_POINTS.map((point) => ({
+                point,
+                band: bandOf(point),
+                // 参照のフレームはクランプ後で書かれている（`ti2v_few_step_ref.decode_frames` の clamp）。
+                diff:
+                  point === "frames"
+                    ? difference(video.data, fixture.tensor("frames"))
+                    : difference(
+                        observed.latents[point === "latents.0" ? 0 : 1],
+                        fixture.tensor(point),
+                      ),
+              }));
+              for (const { point, band, diff } of diffs) {
+                measurements.push({
+                  output: point,
+                  maxAbs: diff.maxAbs,
+                  maxRel: diff.maxRel,
+                  // 未導出の帯は無限の帯として記録する（判定は下で赤にする — 段 2 の `toleranceOf` と同じ扱い）。
+                  tolerance:
+                    band === undefined
+                      ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
+                      : { atol: band * diff.referenceMax, rtol: 0 },
+                  stage: "karume",
+                });
+              }
               const notes = [
-                "textEncoder: gpu（umT5 i8・活性 f32）",
-                `非有限 ${nonFinite}`,
+                ...diffs.map(({ point, diff }) => formatDifference(point, diff)),
                 ...formatObserved(observed),
               ];
-              console.log(`[wan-ti2v-pipeline] ${GPU_TEXT_CASE_ID}:\n  ${notes.join("\n  ")}`);
-              assertEquals(nonFinite, 0, `${GPU_TEXT_CASE_ID}: 非有限`);
+              caseNote = notes.join(" / ");
+              console.log(`[wan-ti2v-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
+              for (const { point, diff } of diffs) {
+                assertEquals(diff.nonFinite, 0, `${id}: ${point} の非有限`);
+              }
               assertEquals(deviceLost, undefined, "device lost");
+              caseRatios.push({
+                name,
+                role,
+                ratios: {
+                  "latents.0": diffs[0].diff.ratio,
+                  "latents.1": diffs[1].diff.ratio,
+                  frames: diffs[2].diff.ratio,
+                },
+              });
+              for (const { point, band, diff } of diffs) {
+                if (band === undefined) {
+                  throw new Error(
+                    `${id}: ${point} の帯が未導出（比 ${diff.ratio.toExponential(3)}）— ` +
+                      "帯の候補は「帯の候補」の step が出す",
+                  );
+                }
+                assert(
+                  diff.ratio <= band,
+                  `${id}: ${formatDifference(point, diff)} が帯 ${band} の外`,
+                );
+              }
               const outcome = await settleOrObserve(references, results, {
-                id: GPU_TEXT_CASE_ID,
-                artifact: `${GPU_TEXT_CASE_ID}.rgb`,
+                id,
+                artifact: `${id}.rgb`,
                 bytes: rgbBytes(video),
               });
               settlement = outcome.settlement;
-              return { ...outcome.fields, note: notes.join(" / ") };
-            });
-          } finally {
-            await settleReleases(gpu);
-          }
-          if (settlement?.check.status === "fail") {
-            throw new Error(referenceMismatchMessage(GPU_TEXT_CASE_ID, settlement, references));
-          }
-        },
+              return { ...outcome.fields, note: caseNote };
+            },
+          );
+        } finally {
+          // 次のケースの確保の前に、このケースの段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
+          await settleReleases(gpu);
+        }
+        if (settlement?.check.status === "fail") {
+          throw new Error(referenceMismatchMessage(id, settlement, references));
+        }
       });
-    } finally {
-      // MUST: device を捨てる前に解放を待つ（B570 の destroy の遅れ — 後続のテストの予算を残す）。
-      await settleReleases(gpu);
-      gpu.destroy();
     }
+
+    // 未導出の帯の候補（決定用だけから作る — 受入れの比は並べるが候補に使わない。決定用のどれかが比を出す前に落ちた回は
+    // 候補を出さない）。帯が導出済みなら step を作らない。
+    if (!BANDS_DERIVED) {
+      it.skipIf(!ANY_FIXTURE)("帯の候補（未導出）", () => {
+        const expected = CASES.filter(({ role }) => role === "band").length;
+        const decided = caseRatios.filter(({ role }) => role === "band");
+        const candidate =
+          decided.length === expected
+            ? OBSERVATION_POINTS.map((point) => {
+                const worst = Math.max(...decided.map(({ ratios }) => ratios[point]));
+                return `${point}: 決定用 ${expected} 本の最悪 ${worst.toExponential(3)} × 5 = ${(
+                  worst * 5
+                ).toExponential(3)}（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(worst * 5)}）`;
+              }).join(" / ")
+            : `決定用 ${expected} 本のうち比が出たのは ${decided.length} 本 — 候補にしない（落ちたケースを先に調べる）`;
+        const accepted = caseRatios
+          .filter(({ role }) => role === "accept")
+          .map(
+            ({ name, ratios }) =>
+              `${name} ${OBSERVATION_POINTS.map(
+                (point) => `${point} ${ratios[point].toExponential(3)}`,
+              ).join("・")}`,
+          );
+        throw new Error(
+          `帯が未導出 — ${candidate}。受入れの比（帯の決定に使わない）: ${
+            accepted.join(" / ") || "なし"
+          }`,
+        );
+      });
+    }
+
+    // 故障注入（受入れの初期ノイズ — 潜在だけを見るので VAE の段の前で止める）。
+    let acceptFixture: Fixture | undefined;
+    const faults: readonly {
+      readonly label: string;
+      readonly request: (
+        ferret: string,
+        negative: string,
+      ) => Omit<WanGenerateRequest, "onEvent" | "latents">;
+    }[] = [
+      {
+        label: "プロンプトの正負の取り違え",
+        request: (ferret, negative) => ({
+          ...TWO_STEP,
+          prompt: negative,
+          negativePrompt: ferret,
+        }),
+      },
+      {
+        label: "guidance 5.0 → 5.05",
+        request: (ferret) => ({ ...TWO_STEP, prompt: ferret, guidance: 5.05 }),
+      },
+      {
+        label: "shift 5.0 → 3.0",
+        request: (ferret) => ({ ...TWO_STEP, prompt: ferret, shift: 3 }),
+      },
+    ];
+    const lastBand = LATENT_RATIO_BANDS[STEPS - 1];
+    for (const { label, request } of faults) {
+      it.skipIf(!ANY_FIXTURE)(`故障注入: ${label} → ${ACCEPT_CASE} の潜在が帯の外`, async () => {
+        const gpu = assigned(gpuContext, "gpuContext");
+        const pipeline = assigned(referencePipeline, "referencePipeline");
+        const { prompts } = pipeline;
+        try {
+          acceptFixture ??= await readFixture(fixtureUrl(ACCEPT_CASE));
+          const accept = acceptFixture;
+          const ferret = textOf(prompts, accept.meta("prompt"), "prompt");
+          const negative = textOf(prompts, accept.meta("negative"), "prompt");
+          const observed = await observe(
+            pipeline,
+            diagnostics,
+            {
+              ...request(ferret, negative),
+              latents: accept.tensor("latents_init"),
+              width: WIDTH,
+              height: HEIGHT,
+            },
+            { abortAfterDenoise: true },
+          );
+          // 段のイベント名が変わって打ち切りが効かないと、28 タイルの VAE を黙って払う（値の判定には出ない）。
+          assert(!("video" in observed), "DiT の段の後で止まっていない");
+          assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+          const diff = difference(
+            observed.latents[STEPS - 1],
+            accept.tensor(`latents.${STEPS - 1}`),
+          );
+          console.log(
+            `[wan-ti2v-pipeline] fault ${label}: ${formatDifference(
+              `latents.${STEPS - 1}`,
+              diff,
+            )}（${
+              lastBand === undefined
+                ? "帯は未導出"
+                : `帯の ${(diff.ratio / lastBand).toFixed(1)} 倍`
+            }）`,
+          );
+          if (lastBand === undefined) {
+            throw new Error(`${label}: 帯が未導出（故障注入の比 ${diff.ratio.toExponential(3)}）`);
+          }
+          assert(
+            diff.ratio > FAULT_MARGIN * lastBand,
+            `${label}: 比 ${diff.ratio} が帯 ${lastBand} の ${FAULT_MARGIN} 倍を超えない`,
+          );
+        } finally {
+          await settleReleases(gpu);
+        }
+      });
+    }
+
+    // seed 経路の 2 ステップ（2 寸法 — 完走・非有限 0・sha256 の環境行）。
+    for (const { id, width, height } of SEED_CASES) {
+      it(`${id}（seed 経路・sha256 の環境行）`, () =>
+        runSeedCase(
+          assigned(referencePipeline, "referencePipeline"),
+          id,
+          width,
+          height,
+          (bytes) => {
+            // 実用席のケースと同じ要求（1280×704）の実物だけ床の相手に残す。
+            if (width === WIDTH && height === HEIGHT) referenceSeedRgb = bytes;
+          },
+        ));
+    }
+
+    // 実用席の seed 経路（参照席の pipeline を畳んでから席の pipeline を組む — 構築では Session を張らない）。
+    it(`${PRACTICAL_SEED_CASE_ID}（実用席・seed 経路・sha256 の環境行）`, async () => {
+      // The reference-seat its above are done: dispose that pipeline before building this seat's
+      // (afterAll disposes it again, idempotently, for runs where this it does not run).
+      await referencePipeline?.dispose();
+      await using practical = await loadPipeline(
+        assigned(gpuContext, "gpuContext"),
+        diagnostics,
+        "precomputed",
+        WAN_TI2V_PRACTICAL_QUANT,
+      );
+      await runSeedCase(practical, PRACTICAL_SEED_CASE_ID, WIDTH, HEIGHT, (bytes) => {
+        // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 配布形の経路で席の `session` が Session に届かない
+        // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として書くと、参照行と同じ sha が凍結され、以後この行は
+        // 実用層の退行も決定性も縛らない。行を書く前（`settleOrObserve` の前）に落とす。
+        if (referenceSeedRgb === undefined) {
+          throw new Error(
+            `${PRACTICAL_SEED_CASE_ID}: 同じ要求の参照席の実物が無い（参照席の seed 経路の 1280×704 が回っていない — 床を確かめられない）`,
+          );
+        }
+        const reference = referenceSeedRgb;
+        assert(
+          bytes.length !== reference.length ||
+            bytes.some((value, index) => value !== reference[index]),
+          `${PRACTICAL_SEED_CASE_ID}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
+        );
+      });
+    });
+
+    // GPU 経路（umT5 の text 段を畳んでから DiT・VAE の段を張る）。
+    it.skipIf(!GPU_TEXT_PRESENT)(`${GPU_TEXT_CASE_ID}（GPU 経路・sha256 の環境行）`, async () => {
+      const gpu = assigned(gpuContext, "gpuContext");
+      let settlement: ReferenceSettlement | undefined;
+      try {
+        // 構築では Session を張らない（umT5 の重みは generate ごとに text 段で読む — ADR 0119 決定 11）。
+        await using gpuPipeline = await loadPipeline(
+          gpu,
+          diagnostics,
+          "gpu",
+          WAN_TI2V_REFERENCE_QUANT,
+        );
+        const prompt = textOf(gpuPipeline.prompts, SEED_PROMPT, "prompt");
+        await runRecordedCase(results, { id: GPU_TEXT_CASE_ID }, async () => {
+          const observed = await observe(gpuPipeline, diagnostics, {
+            ...TWO_STEP,
+            prompt,
+            seed: SEED,
+            width: WIDTH,
+            height: HEIGHT,
+          });
+          assert("video" in observed, "generate が最後まで回っていない");
+          assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+          // text 段は DiT 段を張る前に畳む（段の境目の並び — VRAM の点も同じ並びで採る）。
+          assertEquals(
+            observed.drm.marks.slice(0, 3).map(({ label }) => label),
+            ["text_encoder start", "text_encoder end", "transformer start"],
+            "text 段 → DiT 段の順",
+          );
+          assert(observed.diagnostics.has("text_encoder"), "umT5 の run の診断が届いていない");
+          const { video } = observed;
+          assertEquals([video.frames, video.height, video.width], [FRAMES, HEIGHT, WIDTH]);
+          const nonFinite = countNonFinite(video.data);
+          const notes = [
+            "textEncoder: gpu（umT5 i8・活性 f32）",
+            `非有限 ${nonFinite}`,
+            ...formatObserved(observed),
+          ];
+          console.log(`[wan-ti2v-pipeline] ${GPU_TEXT_CASE_ID}:\n  ${notes.join("\n  ")}`);
+          assertEquals(nonFinite, 0, `${GPU_TEXT_CASE_ID}: 非有限`);
+          assertEquals(deviceLost, undefined, "device lost");
+          const outcome = await settleOrObserve(references, results, {
+            id: GPU_TEXT_CASE_ID,
+            artifact: `${GPU_TEXT_CASE_ID}.rgb`,
+            bytes: rgbBytes(video),
+          });
+          settlement = outcome.settlement;
+          return { ...outcome.fields, note: notes.join(" / ") };
+        });
+      } finally {
+        await settleReleases(gpu);
+      }
+      if (settlement?.check.status === "fail") {
+        throw new Error(referenceMismatchMessage(GPU_TEXT_CASE_ID, settlement, references));
+      }
+    });
   },
-});
+);
 
 // NOTE: opt-in の env を付けて `--filter` なしで回すと、既定のレーンの `Deno.test` と合わせて 1 プロセスで device を 2 つ順に
 // 取る（B570 の `destroy()` が VRAM を返さない件に当たる）。`--filter "50 ステップ"` で単独のプロセスとして回す（モジュール doc
 // 「device の使い方」）。
-test({
-  name:
-    "Wan2.2 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_TI2V_FULL_PIPELINE=1）: 1280×704・33 フレーム（参照席と実用席）が" +
+describe.skipIf(!FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE)(
+  "Wan2.2 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_TI2V_FULL_PIPELINE=1）: 1280×704・33 フレーム（参照席と実用席）が" +
     "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図・sha256 の環境行",
-  ignore: !FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE,
-  fn: async (t) => {
+  () => {
     let deviceLost: string | undefined;
-    const gpu = verifyRunningGpu(
-      await acquireTestGpu({
-        onDeviceLost: (info) => {
-          deviceLost = `${info.reason}: ${info.message}`;
-        },
-      }),
-    );
+    // One device shared by the its below (acquired before them, destroyed after them all).
+    let gpuContext: GpuContext | undefined;
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
-    try {
-      /** 参照席の実物（RGB のバイト列）の sha256 — 同じ要求の実用席の床の比べる相手（既定のレーンの実用行と同じ床）。 */
-      let referenceRgbSha: string | undefined;
-      for (const { id, quant } of FULL_CASES) {
-        await t.step(id, async () => {
-          let settlement: ReferenceSettlement | undefined;
-          try {
-            await using pipeline = await loadPipeline(gpu, diagnostics, "precomputed", quant);
-            await runRecordedCase(fullResults, { id }, async () => {
-              const observed = await observe(pipeline, diagnostics, {
-                prompt: textOf(pipeline.prompts, SEED_PROMPT, "prompt"),
-                seed: SEED,
-                shift: SHIFT,
-                width: WIDTH,
-                height: HEIGHT,
-                frames: FULL_FRAMES,
-              });
-              assert("video" in observed, "generate が最後まで回っていない");
-              assertEquals(
-                observed.latents.length,
-                FULL_STEPS,
-                "denoise-step の数（manifest の既定）",
-              );
-              const { video } = observed;
-              assertEquals([video.frames, video.height, video.width], [FULL_FRAMES, HEIGHT, WIDTH]);
-              const nonFinite = countNonFinite(video.data);
-              const notes = [`席 ${quant}`, `非有限 ${nonFinite}`, ...formatObserved(observed)];
-              console.log(`[wan-ti2v-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
-              assertEquals(nonFinite, 0, "非有限");
-              assertEquals(deviceLost, undefined, "device lost");
-              await writeWanFrames(fullResults, id, video);
-              const sheet = contactSheet(video, 4, 8, 4);
-              await writeFile(
-                fullResults.artifact(`${id}-sheet.png`),
-                await encodePng(sheet.rgba, sheet.width, sheet.height),
-              );
-              console.log(`[wan-ti2v-pipeline] PNG: ${fullResults.dir.pathname}`);
-              const bytes = rgbBytes(video);
-              const sha = await sha256Hex(bytes);
-              if (quant === WAN_TI2V_REFERENCE_QUANT) {
-                referenceRgbSha = sha;
-              } else {
-                // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 席の `session` が Session に届かない
-                // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として凍結しないよう、突合と書き込みの前に落とす。
-                if (referenceRgbSha === undefined) {
-                  throw new Error(
-                    `${id}: 同じ要求の参照席の実物が無い（参照席の 50 ステップが回っていない — 床を確かめられない）`,
-                  );
-                }
-                assert(
-                  sha !== referenceRgbSha,
-                  `${id}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
+    beforeAll(async () => {
+      gpuContext = verifyRunningGpu(
+        await acquireTestGpu({
+          onDeviceLost: (info) => {
+            deviceLost = `${info.reason}: ${info.message}`;
+          },
+        }),
+      );
+    });
+    afterAll(async () => {
+      if (gpuContext === undefined) return;
+      await settleReleases(gpuContext);
+      gpuContext.destroy();
+    });
+    /** 参照席の実物（RGB のバイト列）の sha256 — 同じ要求の実用席の床の比べる相手（既定のレーンの実用行と同じ床）。 */
+    let referenceRgbSha: string | undefined;
+    for (const { id, quant } of FULL_CASES) {
+      it(id, async () => {
+        const gpu = assigned(gpuContext, "gpuContext");
+        let settlement: ReferenceSettlement | undefined;
+        try {
+          await using pipeline = await loadPipeline(gpu, diagnostics, "precomputed", quant);
+          await runRecordedCase(fullResults, { id }, async () => {
+            const observed = await observe(pipeline, diagnostics, {
+              prompt: textOf(pipeline.prompts, SEED_PROMPT, "prompt"),
+              seed: SEED,
+              shift: SHIFT,
+              width: WIDTH,
+              height: HEIGHT,
+              frames: FULL_FRAMES,
+            });
+            assert("video" in observed, "generate が最後まで回っていない");
+            assertEquals(
+              observed.latents.length,
+              FULL_STEPS,
+              "denoise-step の数（manifest の既定）",
+            );
+            const { video } = observed;
+            assertEquals([video.frames, video.height, video.width], [FULL_FRAMES, HEIGHT, WIDTH]);
+            const nonFinite = countNonFinite(video.data);
+            const notes = [`席 ${quant}`, `非有限 ${nonFinite}`, ...formatObserved(observed)];
+            console.log(`[wan-ti2v-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
+            assertEquals(nonFinite, 0, "非有限");
+            assertEquals(deviceLost, undefined, "device lost");
+            await writeWanFrames(fullResults, id, video);
+            const sheet = contactSheet(video, 4, 8, 4);
+            await writeFile(
+              fullResults.artifact(`${id}-sheet.png`),
+              await encodePng(sheet.rgba, sheet.width, sheet.height),
+            );
+            console.log(`[wan-ti2v-pipeline] PNG: ${fullResults.dir.pathname}`);
+            const bytes = rgbBytes(video);
+            const sha = await sha256Hex(bytes);
+            if (quant === WAN_TI2V_REFERENCE_QUANT) {
+              referenceRgbSha = sha;
+            } else {
+              // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 席の `session` が Session に届かない
+              // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として凍結しないよう、突合と書き込みの前に落とす。
+              if (referenceRgbSha === undefined) {
+                throw new Error(
+                  `${id}: 同じ要求の参照席の実物が無い（参照席の 50 ステップが回っていない — 床を確かめられない）`,
                 );
               }
-              const outcome = await settleOrObserve(references, fullResults, {
-                id,
-                artifact: `${id}.rgb`,
-                bytes,
-              });
-              settlement = outcome.settlement;
-              return { ...outcome.fields, note: notes.join(" / ") };
+              assert(
+                sha !== referenceRgbSha,
+                `${id}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
+              );
+            }
+            const outcome = await settleOrObserve(references, fullResults, {
+              id,
+              artifact: `${id}.rgb`,
+              bytes,
             });
-          } finally {
-            // 次の席の確保の前に、この席の段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
-            await settleReleases(gpu);
-          }
-          if (settlement?.check.status === "fail") {
-            throw new Error(referenceMismatchMessage(id, settlement, references));
-          }
-        });
-      }
-    } finally {
-      await settleReleases(gpu);
-      gpu.destroy();
+            settlement = outcome.settlement;
+            return { ...outcome.fields, note: notes.join(" / ") };
+          });
+        } finally {
+          // 次の席の確保の前に、この席の段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
+          await settleReleases(gpu);
+        }
+        if (settlement?.check.status === "fail") {
+          throw new Error(referenceMismatchMessage(id, settlement, references));
+        }
+      });
     }
   },
-});
+);
 
 // NOTE: 50 ステップの通しと同じく `--filter "121 フレーム"` で単独のプロセスとして回す（モジュール doc「device の使い方」）。
-test({
-  name:
-    "Wan2.2 通し 121 フレーム（実 GPU・opt-in KARUME_WAN_TI2V_121F=1）: 1280×704・2 ステップ（参照席・seed 経路）が完走し" +
+test.skipIf(!LONG_CLIP || !DIST_PRESENT || !GPU_AVAILABLE)(
+  "Wan2.2 通し 121 フレーム（実 GPU・opt-in KARUME_WAN_TI2V_121F=1）: 1280×704・2 ステップ（参照席・seed 経路）が完走し" +
     "非有限 0・sha256 の環境行・所要と段の切り替えの VRAM",
-  ignore: !LONG_CLIP || !DIST_PRESENT || !GPU_AVAILABLE,
-  fn: async () => {
+  async () => {
     let deviceLost: string | undefined;
     const gpu = verifyRunningGpu(
       await acquireTestGpu({
@@ -1292,7 +1289,7 @@ test({
       throw new Error(referenceMismatchMessage(LONG_CLIP_CASE_ID, settlement, references));
     }
   },
-});
+);
 
 /**
  * 参照門に登録するケース（回せるものだけ — 帯のケースは参照と配布形、seed のケースは配布形、GPU 経路は加えて umT5 の

@@ -26,7 +26,7 @@
 
 import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { describe, it, test } from "@karume/test-support/test";
+import { beforeAll, describe, it, test } from "vite-plus/test";
 import { ModelInputError } from "../src/errors.ts";
 import { createBpeModel } from "../src/text/bpe.ts";
 import {
@@ -129,17 +129,17 @@ if (seriesBytes === undefined) {
   );
 }
 
-test("gemma4 chat 描画: 上流 apply_chat_template と文字列がビット一致", async (t) => {
+describe("gemma4 chat 描画: 上流 apply_chat_template と文字列がビット一致", () => {
   for (const testCase of fixture.chat) {
-    await t.step(`${testCase.name} — ${testCase.why}`, () => {
+    it(`${testCase.name} — ${testCase.why}`, () => {
       assertEquals(renderGemma4Chat(testCase.messages), testCase.rendered);
     });
   }
 });
 
-test("gemma4 chat 符号化: 上流 apply_chat_template(tokenize=True) と id 列が一致", async (t) => {
+describe("gemma4 chat 符号化: 上流 apply_chat_template(tokenize=True) と id 列が一致", () => {
   for (const testCase of fixture.chat) {
-    await t.step(`${testCase.name} — ${testCase.why}`, () => {
+    it(`${testCase.name} — ${testCase.why}`, () => {
       assertEquals(gemma4ChatPrompt(tokenizer, testCase.messages), testCase.ids);
     });
   }
@@ -155,48 +155,41 @@ test("gemma4 chat: `<bos>` の所有者は chat 関数だけ（double-BOS を作
   assertEquals(ids.filter((id) => id === bos).length, 1, "付けるのは 1 個だけ");
 });
 
-test("gemma4 chat 射程: 素の会話の外は fail loudly（黙って無視しない）", async (t) => {
-  const reject = (
-    label: string,
-    messages: readonly unknown[],
-    expected: string,
-  ): Promise<boolean> =>
-    t.step(label, () => {
+describe("gemma4 chat 射程: 素の会話の外は fail loudly（黙って無視しない）", () => {
+  const reject = (label: string, messages: readonly unknown[], expected: string): void => {
+    it(label, () => {
       assertThrows(
         () => renderGemma4Chat(messages as readonly Gemma4ChatMessage[]),
         ModelInputError,
         expected,
       );
     });
+  };
 
-  await reject("空の会話", [], "会話が空");
-  await reject(
+  reject("空の会話", [], "会話が空");
+  reject(
     "tools（関数宣言）",
     [{ role: "user", content: "hi", tools: [{ name: "search" }] }],
     "射程外の欄",
   );
-  await reject(
+  reject(
     "reasoning（thinking チャネル）",
     [{ role: "assistant", content: "hi", reasoning: "…" }],
     "射程外の欄",
   );
-  await reject(
+  reject(
     "tool_calls",
     [{ role: "assistant", content: "", tool_calls: [{ function: { name: "f" } }] }],
     "射程外の欄",
   );
-  await reject("role が tool", [{ role: "tool", content: "…" }], "role");
-  await reject(
-    "role が model（template の出力側の綴り）",
-    [{ role: "model", content: "…" }],
-    "role",
-  );
-  await reject(
+  reject("role が tool", [{ role: "tool", content: "…" }], "role");
+  reject("role が model（template の出力側の綴り）", [{ role: "model", content: "…" }], "role");
+  reject(
     "画像パート（content が配列）",
     [{ role: "user", content: [{ type: "image_url", image_url: { url: "…" } }] }],
     "content",
   );
-  await reject(
+  reject(
     "assistant 本文の thinking 綴り（上流は strip_thinking で巻き戻す）",
     [{ role: "assistant", content: "a<|channel>thought\nx<channel|>b" }],
     "thinking",
@@ -307,9 +300,9 @@ const TURN_CASES: readonly TurnCase[] = [
   },
 ];
 
-test("gemma4 chat 増分: 差分の積み上げが全会話の描画と文字列一致（turn-local）", async (t) => {
+describe("gemma4 chat 増分: 差分の積み上げが全会話の描画と文字列一致（turn-local）", () => {
   for (const testCase of TURN_CASES) {
-    await t.step(testCase.name, () => {
+    it(testCase.name, () => {
       let prefix: Gemma4ChatMessage[] = [...testCase.head];
       for (const turn of testCase.turns) {
         const { body } = modelAnswerTokens(tokenizer, prefix, turn.answer);
@@ -330,11 +323,15 @@ test("gemma4 chat 増分: 差分の積み上げが全会話の描画と文字列
   }
 });
 
-test("gemma4 chat 増分: 差分 token 列の連結が全会話の id 列と一致（pendingToken 込み）", async (t) => {
-  const stopId = tokenizer.addedTokenId(END_OF_TURN);
-  assert(stopId !== undefined, "資産に <turn|> が無い");
+describe("gemma4 chat 増分: 差分 token 列の連結が全会話の id 列と一致（pendingToken 込み）", () => {
+  let stopId: number;
+  beforeAll(() => {
+    const id = tokenizer.addedTokenId(END_OF_TURN);
+    assert(id !== undefined, "資産に <turn|> が無い");
+    stopId = id;
+  });
   for (const testCase of TURN_CASES) {
-    await t.step(testCase.name, () => {
+    it(testCase.name, () => {
       let prefix: Gemma4ChatMessage[] = [...testCase.head];
       // 実運用の経路をそのまま写す: 初回だけ全体を描き、以後は「本文 + pendingToken + 差分」。
       let rebuilt = gemma4ChatPrompt(tokenizer, prefix);
@@ -363,22 +360,23 @@ test("gemma4 chat 増分: 差分に `<turn|>` を含めない（pendingToken と
   assertEquals(rendered.includes("<bos>"), false, "差分に <bos> は入らない");
 });
 
-test("gemma4 chat 増分 射程: 素の発話の外は fail loudly", async (t) => {
-  const reject = (label: string, message: unknown, expected: string): Promise<boolean> =>
-    t.step(label, () => {
+describe("gemma4 chat 増分 射程: 素の発話の外は fail loudly", () => {
+  const reject = (label: string, message: unknown, expected: string): void => {
+    it(label, () => {
       assertThrows(
         () => renderGemma4ChatTurn(message as Gemma4ChatMessage),
         ModelInputError,
         expected,
       );
     });
+  };
 
   // model turn は生成が埋める席で、template も連続 assistant を 1 つへ畳む（差分では描けない）。
-  await reject("assistant", { role: "assistant", content: "…" }, "'assistant' は差分にできない");
-  await reject("role が tool", { role: "tool", content: "…" }, "role");
-  await reject("role が model", { role: "model", content: "…" }, "role");
-  await reject("tools（射程外の欄）", { role: "user", content: "hi", tools: [] }, "射程外の欄");
-  await reject("content が配列", { role: "user", content: [{ type: "text" }] }, "content");
+  reject("assistant", { role: "assistant", content: "…" }, "'assistant' は差分にできない");
+  reject("role が tool", { role: "tool", content: "…" }, "role");
+  reject("role が model", { role: "model", content: "…" }, "role");
+  reject("tools（射程外の欄）", { role: "user", content: "hi", tools: [] }, "射程外の欄");
+  reject("content が配列", { role: "user", content: [{ type: "text" }] }, "content");
 });
 
 test("gemma4 chat 停止 token: 資産から導出した集合が上流の宣言と一致", () => {
@@ -563,7 +561,7 @@ test("chat 停止文字列: 複数の停止文字列は本文に先に現れた�
   assertEquals(parts.join(""), "a");
 });
 
-test("chat 停止文字列: 停止理由を差し替えても内側の勘定を写す（stopStringOf）", async (t) => {
+describe("chat 停止文字列: 停止理由を差し替えても内側の勘定を写す（stopStringOf）", () => {
   // `chat` と `Gemma4ChatSession.#finish` は、停止文字列で閉じたターンだけ `GenerationStop` を
   // **別の object へ組み直す**。組み直しで欄が 1 つ落ちても型は通る（`speculation` は optional）
   // ので、「停止文字列で閉じたターンだけ投機の勘定が消える」形は例外にならない。
@@ -576,14 +574,14 @@ test("chat 停止文字列: 停止理由を差し替えても内側の勘定を�
     acceptedHistogram: [1, 1, 1, 1],
   };
 
-  await t.step("投機のターン: 勘定はそのまま写る（数え直さない）", () => {
+  it("投機のターン: 勘定はそのまま写る（数え直さない）", () => {
     const inner: GenerationStop = { reason: "max-tokens", tokens: 9, speculation };
     const stop = stopStringOf("END", inner);
     assertEquals(stop, { reason: "stop-string", stopString: "END", tokens: 9, speculation });
     assert(stop.speculation === speculation, "勘定を組み直している（内側の値をそのまま写さない）");
   });
 
-  await t.step("非投機のターン: 欄そのものを生やさない", () => {
+  it("非投機のターン: 欄そのものを生やさない", () => {
     const stop = stopStringOf("END", { reason: "eos", token: 3, tokens: 4 });
     assertEquals(stop, { reason: "stop-string", stopString: "END", tokens: 4 });
     assertEquals(Object.hasOwn(stop, "speculation"), false, "非投機のターンに欄が生えている");
@@ -739,7 +737,7 @@ test("chat 一括: 1 つのストリームは 1 通りにしか消費できな�
 // `flush` の失敗を伝播させる経路が実在する = 例外 1 つで二度と動かないパイプライン）。
 // 席の返却と例外の畳み方はこの 1 本に集めてあるので、故障注入もここで書ける（GPU 不要）。
 
-test("chat 後始末: 席は無条件に返り、後始末の失敗は本体の例外と併せて運ぶ", async (t) => {
+describe("chat 後始末: 席は無条件に返り、後始末の失敗は本体の例外と併せて運ぶ", () => {
   const failing = (error: unknown) => (): Promise<void> => Promise.reject(error);
   const caughtOf = (work: Promise<void>): Promise<unknown> =>
     work.then(
@@ -747,7 +745,7 @@ test("chat 後始末: 席は無条件に返り、後始末の失敗は本体の�
       (error: unknown) => error,
     );
 
-  await t.step("成功した後始末は席を返すだけ", async () => {
+  it("成功した後始末は席を返すだけ", async () => {
     let released = 0;
     await closeChatTurn(
       "test",
@@ -760,7 +758,7 @@ test("chat 後始末: 席は無条件に返り、後始末の失敗は本体の�
     assertEquals(released, 1);
   });
 
-  await t.step("後始末が失敗しても席は返る（鎖を握ったままにしない）", async () => {
+  it("後始末が失敗しても席は返る（鎖を握ったままにしない）", async () => {
     const boom = new Error("context.dispose が flush の失敗を伝播した");
     let released = 0;
     const caught = await caughtOf(
@@ -772,7 +770,7 @@ test("chat 後始末: 席は無条件に返り、後始末の失敗は本体の�
     assertEquals(released, 1, "席は無条件に返る");
   });
 
-  await t.step("本体も失敗していれば 2 本とも運ぶ（どちらの事実も消さない）", async () => {
+  it("本体も失敗していれば 2 本とも運ぶ（どちらの事実も消さない）", async () => {
     const body = new Error("ターン本体");
     const cleanup = new Error("後始末");
     let released = 0;
@@ -786,7 +784,7 @@ test("chat 後始末: 席は無条件に返り、後始末の失敗は本体の�
     assertEquals(released, 1);
   });
 
-  await t.step("席を持たない呼び手（send）でも畳み方は同じ", async () => {
+  it("席を持たない呼び手（send）でも畳み方は同じ", async () => {
     const body = new Error("ターン本体");
     const cleanup = new Error("後始末");
     const caught = await caughtOf(closeChatTurn("test", { error: body }, failing(cleanup)));
@@ -795,10 +793,9 @@ test("chat 後始末: 席は無条件に返り、後始末の失敗は本体の�
   });
 });
 
-test({
-  name: "gemma4 chat 実資産突合: 全語彙でもフィクスチャと同じ id 列（部分集合の穴を塞ぐ）",
-  ignore: seriesBytes === undefined,
-  fn: () => {
+test.skipIf(seriesBytes === undefined)(
+  "gemma4 chat 実資産突合: 全語彙でもフィクスチャと同じ id 列（部分集合の穴を塞ぐ）",
+  () => {
     const full = new GemmaTokenizer(
       parseGemmaTokenizerAsset(seriesBytes as Uint8Array<ArrayBuffer>),
     );
@@ -811,7 +808,7 @@ test({
       "実資産から導出した停止 token 集合",
     );
   },
-});
+);
 
 // ---- 観測席の呼び出し規則（`runDiagnosticsHook`）------------------------------
 //

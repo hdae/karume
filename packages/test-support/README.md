@@ -8,37 +8,22 @@ Dawn as the WebGPU implementation), plus the codemods used while porting the Den
 | Import | Contents |
 | --- | --- |
 | `@karume/test-support/setup` | Vitest `setupFiles` entry. Creates one Dawn `GPU` per worker process, installs it as `navigator.gpu`, and installs the WebGPU namespaces / error classes (`GPUBufferUsage`, `GPUMapMode`, `GPUOutOfMemoryError`, ...) as globals, as Deno and browsers have them. `KARUME_DAWN_FLAGS` passes Dawn toggles (e.g. `disable-dawn-features=timestamp_quantization`). |
-| `@karume/test-support/test` | Deno-shaped registration on Vitest: `test(name, fn)` / `test({ name, ignore, only, fn })`, `describe` / `it` (string and object forms), `beforeAll` / `afterAll` / `beforeEach` / `afterEach`, and a `TestContext` whose `t.step(...)` runs sub-steps sequentially inside the test (a failed step records its error, later steps still run, the test fails afterwards). Deno's sanitizer options are accepted and ignored. |
 | `@karume/test-support/fs` | Deno-shaped file helpers on `node:fs`: `readFile`, `readTextFile`, `writeFile`, `writeTextFile` (+ `Sync` forms), `mkdir`, `remove`, `makeTempDir`, `stat`, `readDir`, `symlink`, `readLinkSync`, `realPathSync`, `readRange(path, offset, length)`, and the error predicates `isNotFound` / `isADirectory` / `isFilesystemLoop`. Byte results always own their `ArrayBuffer`. |
 | `@karume/test-support/webgpu` | `platformObject<T>(fields)` — supplies the nominal `__brand` that `@webgpu/types` puts on platform interfaces, for hand-built fakes. |
 
-## Porting a Deno test file (phase 1 rules)
+## Writing tests
 
-Phase 1 is a **behaviour-preserving port**: the test keeps its assertions, its structure, its
-names and its Japanese text. Do not fix, prune, or restructure tests in this phase.
+Tests use Vitest's own registration — `import { describe, it, test, beforeAll, afterAll } from
+"vite-plus/test"`, with `test.skipIf(cond)` / `describe.skipIf(cond)` for conditions known at
+collection time and `context.skip()` for conditions known only at run time — and `@std/assert`
+assertions. Sequential sub-steps are `it`s inside a `describe`: Vitest runs them in order and a
+failing `it` does not stop the following ones. Runs that exercise the GPU are wrapped in
+`flock /tmp/karume-gpu.lock …` so concurrent sessions do not share the device; CPU-only files do
+not need the lock.
 
-1. Run the codemod: `node packages/test-support/codemod/port-deno-test.mjs --write <files>`.
-   It rewrites `Deno.test` → `test`, `@std/testing/bdd` → `@karume/test-support/test`,
-   `Deno.env.get` → `process.env`, the file APIs → `@karume/test-support/fs`,
-   `x instanceof Deno.errors.NotFound` → `isNotFound(x)`, `Deno.exit` / `Deno.memoryUsage` /
-   `Deno.build.*` → `process.*`, and adds the imports. Lines it cannot map are printed as `REMAINING`.
-2. Port the `REMAINING` lines by hand with the same shape:
-   - `Deno.open` + `seek` + `read` loops → `readRange(path, offset, length)`;
-   - `Deno.Command` → `node:child_process` (`execFile` promisified; a missing binary is `isNotFound`);
-   - `Deno.version.*` / `Deno.build.*` → `process.versions.*` / `process.platform` / `process.arch`;
-   - `Deno.serve` → `node:http`;
-   - hand-built platform objects that fail with "Property '__brand' is missing" → `platformObject<T>({...})`.
-3. Type-check: `node packages/test-support/codemod/check-ported.mjs <files>` must print 0 errors.
-   (The gate hides errors in files that still reference Deno; everything else must be clean.)
-4. Run: `vp test <files>`. Wrap runs that exercise the GPU (family lanes, runtime GPU tests) in
-   `flock /tmp/karume-gpu.lock …` so concurrent sessions do not share the device; CPU-only files
-   (the Vitest setup only creates the Dawn instance) do not need the lock. Compare the Vitest summary with the Deno baseline for the same files
-   (`node packages/test-support/codemod/deno-baseline.mjs <files>` prints the Deno counts from
-   `outputs/misc/0.15-baseline-2026-10-16/deno-junit/*.xml`): the number of passed tests and of
-   skipped (= Deno "ignored") tests must match. Sub-steps are not counted by Vitest; a mismatch in
-   top-level counts is a porting defect until proven otherwise.
-5. Report every judgement call (anything beyond the mechanical rules) in the result; do not widen
-   the change to other files.
+The codemods under `codemod/` are the record of the Deno port: `port-deno-test.mjs`,
+`move-e2e.mjs`, `check-ported.mjs` and `deno-baseline.mjs` did the phase-1 port, and
+`port-shim.mjs` replaced the Deno-shaped registration shim with Vitest's forms in phase 2.
 
 ## Known differences between Deno and Node runs
 

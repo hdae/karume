@@ -68,7 +68,7 @@
  */
 
 import { readFile, writeFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { type FileRef, parseManifest, resolveSelection } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
@@ -416,10 +416,9 @@ const assertNoCollision = (
   }
 };
 
-test({
-  name: `e2e(実GPU): 配布形 ${MODEL} / quant ${QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
-  ignore: !RUNNABLE || references.lacksReference(caseIdOf(MODEL, QUANT)),
-  fn: async () => {
+test.skipIf(!RUNNABLE || references.lacksReference(caseIdOf(MODEL, QUANT)))(
+  `e2e(実GPU): 配布形 ${MODEL} / quant ${QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
+  async () => {
     const manifest = readManifest();
     const defaults = assertReferenceKnobs(modelEntry(manifest));
     const assets = await loadLocalAssets(manifest);
@@ -444,12 +443,11 @@ test({
     );
     await settleCase(audio, wav, actual, defaults, elapsedMs);
   },
-});
+);
 
-test({
-  name: `e2e(実GPU): 配布形 ${MODEL} / quant ${BERT4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
-  ignore: !RUNNABLE || references.lacksReference(caseIdOf(MODEL, BERT4_QUANT)),
-  fn: async () => {
+test.skipIf(!RUNNABLE || references.lacksReference(caseIdOf(MODEL, BERT4_QUANT)))(
+  `e2e(実GPU): 配布形 ${MODEL} / quant ${BERT4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
+  async () => {
     const manifest = readManifest();
     const defaults = assertReferenceKnobs(modelEntry(manifest));
     const assets = await loadLocalAssets(manifest, BERT4_QUANT);
@@ -480,12 +478,11 @@ test({
     ]);
     await settleCase(audio, wav, actual, defaults, elapsedMs, BERT4_QUANT);
   },
-});
+);
 
-test({
-  name: `e2e(実GPU): 配布形 ${MODEL} / quant ${W4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
-  ignore: !RUNNABLE || references.lacksReference(caseIdOf(MODEL, W4_QUANT)),
-  fn: async () => {
+test.skipIf(!RUNNABLE || references.lacksReference(caseIdOf(MODEL, W4_QUANT)))(
+  `e2e(実GPU): 配布形 ${MODEL} / quant ${W4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
+  async () => {
     const manifest = readManifest();
     const defaults = assertReferenceKnobs(modelEntry(manifest));
     const assets = await loadLocalAssets(manifest, W4_QUANT);
@@ -521,13 +518,12 @@ test({
     ]);
     await settleCase(audio, wav, actual, defaults, elapsedMs, W4_QUANT);
   },
-});
+);
 
 for (const gate of SPEAKER_GATES) {
-  test({
-    name: `e2e(実GPU): 配布形 ${gate.model} / quant ${QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
-    ignore: !RUNNABLE || references.lacksReference(caseIdOf(gate.model, QUANT)),
-    fn: async () => {
+  test.skipIf(!RUNNABLE || references.lacksReference(caseIdOf(gate.model, QUANT)))(
+    `e2e(実GPU): 配布形 ${gate.model} / quant ${QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
+    async () => {
       const manifest = readManifest();
       const defaults = assertReferenceKnobs(modelEntry(manifest, gate.model), gate.speaker);
       const assets = await loadLocalAssets(manifest, QUANT, gate.model);
@@ -559,7 +555,7 @@ for (const gate of SPEAKER_GATES) {
       ]);
       await settleCase(audio, wav, actual, defaults, elapsedMs, QUANT, gate.model);
     },
-  });
+  );
 }
 
 // --- スタイル / 話者の門（実資産が要る側）------------------------------------
@@ -569,12 +565,14 @@ for (const gate of SPEAKER_GATES) {
 // ここが落ちる形は全て**沈黙誤値クラス** — 通してしまうと shape は合ったまま別のスタイル・
 // 別の話者の声が出る（ADR 0039 決定 4）。
 
-test({
-  name: "e2e(実GPU): スタイル / 話者は実資産の表から解決され、食い違いは fail loudly",
-  ignore: !RUNNABLE,
-  fn: async (t) => {
-    const manifest = readManifest();
-    const assets = await loadLocalAssets(manifest);
+describe.skipIf(!RUNNABLE)(
+  "e2e(実GPU): スタイル / 話者は実資産の表から解決され、食い違いは fail loudly",
+  () => {
+    // Assigned in beforeAll; the its below run sequentially against this one pipeline.
+    let manifest: Manifest;
+    let assets: Record<string, Uint8Array<ArrayBuffer>>;
+    let pipeline: Sbv2Pipeline;
+    let utterance: Sbv2Utterance;
     const open = (patch: Record<string, Uint8Array<ArrayBuffer>> = {}): Promise<Sbv2Pipeline> =>
       Sbv2Pipeline.fromAssets(
         { manifest, assets: { ...assets, ...patch } },
@@ -595,22 +593,27 @@ test({
         ]),
       );
 
-    await using pipeline = await open();
-    const utterance = await utteranceOnce();
+    beforeAll(async () => {
+      manifest = readManifest();
+      assets = await loadLocalAssets(manifest);
+      pipeline = await open();
+      utterance = await utteranceOnce();
+    });
+    // Replaces the former `await using`: the pipeline is released once all its below have run.
+    afterAll(async () => {
+      if (pipeline !== undefined) await pipeline.dispose();
+    });
 
-    await t.step(
-      "未知のスタイルは利用可能な一覧を添えて落ちる（既定へ黙って落ちない）",
-      async () => {
-        // jvnv は 7 スタイル（Neutral + 6 感情）を持つ — 実在しない名前で叩く。
-        await assertRejects(
-          () => pipeline.generate(utterance, { style: "Whisper" }),
-          Error,
-          "スタイル 'Whisper' は manifest に無い",
-        );
-      },
-    );
+    it("未知のスタイルは利用可能な一覧を添えて落ちる（既定へ黙って落ちない）", async () => {
+      // jvnv は 7 スタイル（Neutral + 6 感情）を持つ — 実在しない名前で叩く。
+      await assertRejects(
+        () => pipeline.generate(utterance, { style: "Whisper" }),
+        Error,
+        "スタイル 'Whisper' は manifest に無い",
+      );
+    });
 
-    await t.step("未知の話者も同じく落ちる", async () => {
+    it("未知の話者も同じく落ちる", async () => {
       // jvnv は 1 モデル 1 話者（F1 は 'jvnv-F1-jp' だけ）。
       await assertRejects(
         () => pipeline.generate(utterance, { speaker: "jvnv-F9-jp" }),
@@ -619,7 +622,7 @@ test({
       );
     });
 
-    await t.step("style_vectors の行数が pipelineConfig の件数と違えば構築時に落ちる", async () => {
+    it("style_vectors の行数が pipelineConfig の件数と違えば構築時に落ちる", async () => {
       // F1 は 7 スタイル。3 行の表を渡すと、行番号 3 以降が表の外を指す（= 沈黙誤値の入口）。
       await assertRejects(
         () => open({ style_vectors: table("style_vectors", 3, 256) }),
@@ -628,7 +631,7 @@ test({
       );
     });
 
-    await t.step("speaker_embeddings の列数がグラフ入力と違えば構築時に落ちる", async () => {
+    it("speaker_embeddings の列数がグラフ入力と違えば構築時に落ちる", async () => {
       await assertRejects(
         () => open({ speaker_embeddings: table("speaker_embeddings", 1, 256) }),
         Error,
@@ -642,7 +645,7 @@ test({
     // Session を張る前に落とす。`parseSbv2PipelineConfig` 側の同名の門は**配布形の既定値**に
     // 対するもので、実行時ノブは誰も見ていなかった。
 
-    await t.step("lengthScale 0 は Session を張る前に入力起因で落ちる", async () => {
+    it("lengthScale 0 は Session を張る前に入力起因で落ちる", async () => {
       await assertRejects(
         () => pipeline.generate(utterance, { lengthScale: 0 }),
         Sbv2InputError,
@@ -650,7 +653,7 @@ test({
       );
     });
 
-    await t.step("非有限のノブは値そのものを添えて落ちる", async () => {
+    it("非有限のノブは値そのものを添えて落ちる", async () => {
       await assertRejects(
         () => pipeline.generate(utterance, { sdpRatio: Number.NaN }),
         Sbv2InputError,
@@ -658,7 +661,7 @@ test({
       );
     });
 
-    await t.step("空の発話は落ちる（0 音素で front を回さない）", async () => {
+    it("空の発話は落ちる（0 音素で front を回さない）", async () => {
       await assertRejects(
         () => pipeline.generate({ leadingPunctuations: [], moras: [], words: [] }),
         Sbv2InputError,
@@ -666,7 +669,7 @@ test({
       );
     });
   },
-});
+);
 
 // --- 直列化と寿命（並行 generate / dispose 済み判定）--------------------------
 //
@@ -676,25 +679,35 @@ test({
 // しか捕まらない。gemma4 側には同型の門がある（`e2e_gemma4_chat_test.ts` の
 // 「dispose 済みのパイプラインは生成を受けない」）。
 
-test({
-  name: "e2e(実GPU): 並行 generate は直列化され、dispose 後は生成を受けない",
-  ignore: !RUNNABLE,
-  fn: async (t) => {
-    const manifest = readManifest();
-    const assets = await loadLocalAssets(manifest);
+describe.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 並行 generate は直列化され、dispose 後は生成を受けない",
+  () => {
+    // Assigned in beforeAll; the its below run sequentially against this one pipeline.
     const seen: string[] = [];
-    const pipeline = await Sbv2Pipeline.fromAssets(
-      { manifest, assets },
-      {
-        model: MODEL,
-        quant: QUANT,
-        onRunDiagnostics: (component) => seen.push(component),
-      },
-    );
-    const utterance = await utteranceOnce();
+    let pipeline: Sbv2Pipeline;
+    let utterance: Sbv2Utterance;
 
-    try {
-      await t.step("2 本を同時発行しても run はインターリーブしない", async () => {
+    beforeAll(async () => {
+      const manifest = readManifest();
+      const assets = await loadLocalAssets(manifest);
+      pipeline = await Sbv2Pipeline.fromAssets(
+        { manifest, assets },
+        {
+          model: MODEL,
+          quant: QUANT,
+          onRunDiagnostics: (component) => seen.push(component),
+        },
+      );
+      utterance = await utteranceOnce();
+    });
+    // dispose is idempotent; this returns the GPU when the first it below never ran (a failing
+    // beforeAll, or a name filter that skips it).
+    afterAll(async () => {
+      if (pipeline !== undefined) await pipeline.dispose();
+    });
+
+    it("2 本を同時発行しても run はインターリーブしない", async () => {
+      try {
         // await せずに 2 本発行する（鎖が無ければ 2 本目の text_encoder が 1 本目の front より
         // 先に走りうる）。
         await Promise.all([
@@ -702,13 +715,13 @@ test({
           pipeline.generate(utterance, { seed: SEED }),
         ]);
         assertEquals(seen, ["text_encoder", "front", "voice", "text_encoder", "front", "voice"]);
-      });
-    } finally {
-      // 上の段が落ちても GPU は返す（この後の 2 段は dispose 済みの挙動を見る）。
-      await pipeline.dispose();
-    }
+      } finally {
+        // 上の段が落ちても GPU は返す（この後の 2 段は dispose 済みの挙動を見る）。
+        await pipeline.dispose();
+      }
+    });
 
-    await t.step("dispose 済みでは生成できない", async () => {
+    it("dispose 済みでは生成できない", async () => {
       await assertRejects(
         () => pipeline.generate(utterance, { seed: SEED }),
         Error,
@@ -716,11 +729,11 @@ test({
       );
     });
 
-    await t.step("2 度目の dispose は同じ完了を返す（先に返して破棄済みと誤らせない）", () => {
+    it("2 度目の dispose は同じ完了を返す（先に返して破棄済みと誤らせない）", () => {
       assert(pipeline.dispose() === pipeline.dispose(), "dispose() が別の Promise を返した");
     });
   },
-});
+);
 
 // --- 観測席（onRunDiagnostics）------------------------------------------------
 //
@@ -729,10 +742,9 @@ test({
 // 要求しない GPU では `lastRunTiming` が undefined のまま（ADR 0021/0032 — 黙って近似
 // しない）ことも門に含める。
 
-test({
-  name: "e2e(実GPU): onRunDiagnostics は run 1 回ごとに component 名付きで診断を運ぶ",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): onRunDiagnostics は run 1 回ごとに component 名付きで診断を運ぶ",
+  async () => {
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest);
     const seen: { component: string; dispatches: number; ran: boolean; timed: boolean }[] = [];
@@ -769,12 +781,11 @@ test({
       }
     }
   },
-});
+);
 
-test({
-  name: "e2e(実GPU): 発話は呼び手側で組み、models は解析器を持たない（0.6.0 の入口）",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 発話は呼び手側で組み、models は解析器を持たない（0.6.0 の入口）",
+  async () => {
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest);
     await using pipeline = await Sbv2Pipeline.fromAssets(
@@ -823,7 +834,7 @@ test({
       "が words の",
     );
   },
-});
+);
 
 // 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
 // 数えるのは上の現役ケースだけ（廃止済みケースの行が残っていても緑にはしない）。

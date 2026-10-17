@@ -50,7 +50,7 @@
 import { createReadStream } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import { readFile, stat, writeFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assertEquals, assertFalse, assertRejects, assertStrictEquals } from "@std/assert";
 import { type FileRef, parseManifest, resolveSelection, selectionRefs } from "@karume/hub";
 import { acquireGpu, type GpuContext, type SessionDiagnostics } from "@karume/runtime";
@@ -393,30 +393,36 @@ const assertReferencePng = async (
   await settlePng(label, image, png, actual, elapsedMs, options.twin);
 };
 
+/** Injection seats for building the turbo distribution. */
+type TurboOptions = {
+  readonly caches?: CacheStorage;
+  readonly onRunDiagnostics?: (component: string, diagnostics: SessionDiagnostics) => void;
+  readonly residency?: AnimaResidency;
+  /** 共有 GPU（呼び手の所有物 — 破棄は呼び手）。 */
+  readonly gpu?: GpuContext;
+};
+
 /**
- * turbo の配布形を**取得層経由**（ローカル HTTP + `fromPretrained`）で組み、`body` に渡す。
- * 戻り値は body を抜けた後の pipeline — **既に dispose 済み**で、解放後の面を検査する門
- * （下の onEvent 節）だけがこれを使う。
+ * An opened turbo distribution. Disposing it releases the pipeline through its
+ * [Symbol.asyncDispose] and then stops the server; later disposals return the first completion,
+ * so a describe can close it inside an it and again in afterAll.
+ */
+type OpenedTurbo = AsyncDisposable & { readonly pipeline: AnimaPipeline };
+
+/**
+ * turbo の配布形を**取得層経由**（ローカル HTTP + `fromPretrained`）で組む。
+ * Returns it open: {@link withTurbo} and the describes that share one pipeline across their its
+ * (opened in beforeAll, closed in afterAll) build it through this one path.
  *
  * MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。呼び手が
- * 自分のインスタンスを渡した場合は、body を抜けた後にその中身を検査できる。
+ * 自分のインスタンスを渡した場合は、閉じた後にその中身を検査できる。
  */
-const withTurbo = async (
-  quant: string,
-  options: {
-    readonly caches?: CacheStorage;
-    readonly onRunDiagnostics?: (component: string, diagnostics: SessionDiagnostics) => void;
-    readonly residency?: AnimaResidency;
-    /** 共有 GPU（呼び手の所有物 — 破棄は呼び手）。 */
-    readonly gpu?: GpuContext;
-  },
-  body: (pipeline: AnimaPipeline) => Promise<void>,
-): Promise<AnimaPipeline> => {
+const openTurbo = async (quant: string, options: TurboOptions): Promise<OpenedTurbo> => {
   const manifest = readManifest();
   const server = await serveAssets(servedOrigins(manifest, quant, ASSETS_DIR));
+  let pipeline: AnimaPipeline;
   try {
-    // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
-    await using pipeline = await AnimaPipeline.fromPretrained(
+    pipeline = await AnimaPipeline.fromPretrained(
       { repo: REPO, hubUrl: `http://127.0.0.1:${server.addr.port}` },
       {
         quant,
@@ -428,11 +434,33 @@ const withTurbo = async (
         ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       },
     );
-    await body(pipeline);
-    return pipeline;
-  } finally {
+  } catch (error) {
     await server.shutdown();
+    throw error;
   }
+  let closing: Promise<void> | undefined;
+  const close = async (): Promise<void> => {
+    try {
+      // [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
+      await pipeline[Symbol.asyncDispose]();
+    } finally {
+      await server.shutdown();
+    }
+  };
+  return {
+    pipeline,
+    [Symbol.asyncDispose]: () => (closing ??= close()),
+  };
+};
+
+/** Builds the turbo distribution with {@link openTurbo}, passes it to `body`, then disposes it. */
+const withTurbo = async (
+  quant: string,
+  options: TurboOptions,
+  body: (pipeline: AnimaPipeline) => Promise<void>,
+): Promise<void> => {
+  await using opened = await openTurbo(quant, options);
+  await body(opened.pipeline);
 };
 
 for (const { quant, resolution } of REFERENCE) {
@@ -442,20 +470,18 @@ for (const { quant, resolution } of REFERENCE) {
   // 門は残り 2 ケースと fromPretrained（同じ quant/512 を既定で回して同じ sha を要求する）が
   // 保つので、どちらの経路も裸のまま残らない。
   const sampler: AnimaSamplerType | undefined = resolution.width === 512 ? "euler" : undefined;
-  test({
-    name:
-      `e2e(実GPU): quant ${quant} / ${formatResolution(resolution)} / ${STEPS}step / ` +
+  test.skipIf(!RUNNABLE || references.lacksReference(label))(
+    `e2e(実GPU): quant ${quant} / ${formatResolution(resolution)} / ${STEPS}step / ` +
       `seed ${SEED} の PNG が参照 sha256 と一致する` +
       (sampler === undefined ? "" : `（sampler:"${sampler}" 明示）`),
-    ignore: !RUNNABLE || references.lacksReference(label),
-    fn: async () => {
+    async () => {
       await withTurbo(quant, {}, (pipeline) =>
         assertReferencePng(label, pipeline, resolution, {
           ...(sampler === undefined ? {} : { sampler }),
         }),
       );
     },
-  });
+  );
 }
 
 // --- request 側 sampler の上書き（DPM++ 2M）-----------------------------------
@@ -473,18 +499,16 @@ for (const { quant, resolution } of REFERENCE) {
  */
 const TURBO_DPMPP_CASE = `${caseIdOf(REFERENCE[1].quant, REFERENCE[1].resolution)}-dpmpp`;
 
-test({
-  name:
-    `e2e(実GPU): turbo ${formatResolution(REFERENCE[1].resolution)} を request の ` +
+test.skipIf(!RUNNABLE || references.lacksReference(TURBO_DPMPP_CASE))(
+  `e2e(実GPU): turbo ${formatResolution(REFERENCE[1].resolution)} を request の ` +
     `sampler:"dpmpp-2m" で回すと DPM++ 2M の参照 sha256 と一致する`,
-  ignore: !RUNNABLE || references.lacksReference(TURBO_DPMPP_CASE),
-  fn: async () => {
+  async () => {
     const { quant, resolution } = REFERENCE[1];
     await withTurbo(quant, {}, (pipeline) =>
       assertReferencePng(TURBO_DPMPP_CASE, pipeline, resolution, { sampler: "dpmpp-2m" }),
     );
   },
-});
+);
 
 // --- CFG（素の base 配布形）--------------------------------------------------
 //
@@ -571,13 +595,11 @@ const assertBaseReferencePng = async (
   }
 };
 
-test({
-  name:
-    `e2e(実GPU): 素の base / CFG ${BASE_REFERENCE.guidanceScale} / ` +
+test.skipIf(!RUNNABLE || references.lacksReference("base-cfg"))(
+  `e2e(実GPU): 素の base / CFG ${BASE_REFERENCE.guidanceScale} / ` +
     `${BASE_REFERENCE.steps}step の PNG が参照 sha256 と一致する`,
-  ignore: !RUNNABLE || references.lacksReference("base-cfg"),
-  fn: () => assertBaseReferencePng("base-cfg"),
-});
+  () => assertBaseReferencePng("base-cfg"),
+);
 
 // --- 全量面（fromAssets）で分割配布形を読む -----------------------------------
 //
@@ -614,10 +636,9 @@ const readLocalAssets = async (
   return { manifest, assets };
 };
 
-test({
-  name: "e2e(実GPU): 分割配布形を fromAssets（全量面）で組んでも 素の base の参照 sha256 と一致する",
-  ignore: !RUNNABLE || references.lacksReference("base-cfg-fromAssets-shards"),
-  fn: async () => {
+test.skipIf(!RUNNABLE || references.lacksReference("base-cfg-fromAssets-shards"))(
+  "e2e(実GPU): 分割配布形を fromAssets（全量面）で組んでも 素の base の参照 sha256 と一致する",
+  async () => {
     const { quant } = BASE_REFERENCE;
     const input = await readLocalAssets(ASSETS_DIR, readManifest(), quant);
     // 分割形であること自体をこの門で確かめる — 単一形の配布形へ戻った日には、黙って
@@ -631,7 +652,7 @@ test({
     await using pipeline = await AnimaPipeline.fromAssets(input, { model: BASE_MODEL, quant });
     await assertBasePng("base-cfg-fromAssets-shards", pipeline, { twin: "base-cfg" });
   },
-});
+);
 
 /**
  * 素の base を {@link BASE_REFERENCE} と同じノブ（CFG 4 / 20step / seed 42 / 同じネガティブ）で
@@ -640,13 +661,11 @@ test({
  * CFG≠1 の経路にも上書き席の門を置く — DPM++ 2M の 2 次項は cond/uncond の**合成後**の値を
  * 履歴に持つので、turbo（CFG 無し）の一致だけでは合成と履歴の噛み合わせが裸のまま残る。
  */
-test({
-  name:
-    `e2e(実GPU): 素の base を request の sampler:"dpmpp-2m" で回すと ` +
+test.skipIf(!RUNNABLE || references.lacksReference("base-cfg-dpmpp"))(
+  `e2e(実GPU): 素の base を request の sampler:"dpmpp-2m" で回すと ` +
     `DPM++ 2M の参照 sha256 と一致する`,
-  ignore: !RUNNABLE || references.lacksReference("base-cfg-dpmpp"),
-  fn: () => assertBaseReferencePng("base-cfg-dpmpp", { sampler: "dpmpp-2m" }),
-});
+  () => assertBaseReferencePng("base-cfg-dpmpp", { sampler: "dpmpp-2m" }),
+);
 
 // --- 越境参照（extra の変種）--------------------------------------------------
 //
@@ -664,12 +683,10 @@ const extraCaseIdOf = (model: string): string => `extra-${model}-cfg`;
 
 for (const model of EXTRA_MODELS) {
   const label = extraCaseIdOf(model);
-  test({
-    name:
-      `e2e(実GPU): extra ${model} を越境参照込みで組み、CFG ${BASE_REFERENCE.guidanceScale} / ` +
+  test.skipIf(!EXTRA_RUNNABLE || references.lacksReference(label))(
+    `e2e(実GPU): extra ${model} を越境参照込みで組み、CFG ${BASE_REFERENCE.guidanceScale} / ` +
       `${BASE_REFERENCE.steps}step の PNG が参照 sha256 と一致する`,
-    ignore: !EXTRA_RUNNABLE || references.lacksReference(label),
-    fn: async () => {
+    async () => {
       const manifest = parseManifest(extraManifestText as string);
       const sessionOrigin = originKey(REPO, REVISION_SHA);
       const crossOrigins = [
@@ -683,7 +700,7 @@ for (const model of EXTRA_MODELS) {
         source: { dir: EXTRA_ASSETS_DIR, manifest, model },
       });
     },
-  });
+  );
 }
 
 // --- fromPretrained（取得層込み）--------------------------------------------
@@ -696,10 +713,9 @@ for (const model of EXTRA_MODELS) {
 // 解像度が 512 なのは RAM の都合（取得層のメモリキャッシュが資産の写しを持つ）。ビット一致の
 // 門としては 1024 と同格 — 上の 512 ケースと**同じバイト**が出ることを双子の検査で要求する。
 
-test({
-  name: "e2e(実GPU): fromPretrained（取得層 + integrity 検証）の PNG が参照 sha256 と一致する",
-  ignore: !RUNNABLE || references.lacksReference("fromPretrained-512"),
-  fn: async () => {
+test.skipIf(!RUNNABLE || references.lacksReference("fromPretrained-512"))(
+  "e2e(実GPU): fromPretrained（取得層 + integrity 検証）の PNG が参照 sha256 と一致する",
+  async () => {
     const quant = "f16+dit8-a8-attn8-s16";
     const resolution: ImageSize = { width: 512, height: 512 };
     const fetched = selectionRefs(resolveSelection(readManifest(), { quant }));
@@ -748,7 +764,7 @@ test({
       throw new Error(`注入したキャッシュのエントリ数が ${entries}（期待 ${expected}）`);
     }
   },
-});
+);
 
 // --- onEvent（生成イベントの観測席）------------------------------------------
 //
@@ -763,148 +779,153 @@ test({
 //  ④ コールバックの throw が生成を落とし、その後の `dispose` が正常に効く（例外を握らない
 //     流儀の副産物 = step 粒度の中断手段）。
 
-test({
-  name: "e2e(実GPU): onEvent の観測は数値に触らない（イベント列 / 途中 latent / 中断）",
-  ignore: !RUNNABLE || references.lacksReference("onEvent-1024"),
-  fn: async (t) => {
+describe.skipIf(!RUNNABLE || references.lacksReference("onEvent-1024"))(
+  "e2e(実GPU): onEvent の観測は数値に触らない（イベント列 / 途中 latent / 中断）",
+  () => {
     const quant = "f16+dit8-a8-attn8-s16";
     const resolution: ImageSize = { width: 1024, height: 1024 };
-    const manifest = readManifest();
-    const { scheduler } = parseAnimaPipelineConfig(
-      manifest.models[manifest.defaultModel].pipelineConfig,
-    );
     const runs: string[] = [];
-    // 戻りは**解放済み**の本体（`withTurbo` を抜けた時点で dispose が走っている）。中断した
-    // 生成の後でも解放が正常に効くこと（直列化鎖は失敗を次へ持ち越さない）はここで通る。
-    const disposed = await withTurbo(
-      quant,
-      {
+    let scheduler: ReturnType<typeof parseAnimaPipelineConfig>["scheduler"];
+    let pipeline: AnimaPipeline;
+    let turbo: OpenedTurbo | undefined;
+    beforeAll(async () => {
+      const manifest = readManifest();
+      ({ scheduler } = parseAnimaPipelineConfig(
+        manifest.models[manifest.defaultModel].pipelineConfig,
+      ));
+      turbo = await openTurbo(quant, {
         onRunDiagnostics: (component) => runs.push(component),
-      },
-      async (pipeline) => {
-        await t.step("イベント列と途中 latent を固定し、PNG は参照 sha256 のまま", async () => {
-          const log: string[] = [];
-          const shapes: string[] = [];
-          const lengths: number[] = [];
-          let firstStep: (() => { data: Float32Array<ArrayBuffer> }) | undefined;
-          let firstStepData: Float32Array | undefined;
-          await assertReferencePng("onEvent-1024", pipeline, resolution, {
-            twin: caseIdOf(REFERENCE[0].quant, REFERENCE[0].resolution),
+      });
+      pipeline = turbo.pipeline;
+    });
+    // After both its: dispose, then check that the disposed pipeline refuses to generate.
+    // 中断した生成の後でも解放が正常に効くこと（直列化鎖は失敗を次へ持ち越さない）はここで通る。
+    afterAll(async () => {
+      if (turbo === undefined) return;
+      await turbo[Symbol.asyncDispose]();
+      await assertRejects(
+        () => pipeline.generate({ prompt: PROMPT, steps: 2, seed: SEED }),
+        Error,
+        "dispose 済み",
+      );
+    });
+
+    it("イベント列と途中 latent を固定し、PNG は参照 sha256 のまま", async () => {
+      const log: string[] = [];
+      const shapes: string[] = [];
+      const lengths: number[] = [];
+      let firstStep: (() => { data: Float32Array<ArrayBuffer> }) | undefined;
+      let firstStepData: Float32Array | undefined;
+      await assertReferencePng("onEvent-1024", pipeline, resolution, {
+        twin: caseIdOf(REFERENCE[0].quant, REFERENCE[0].resolution),
+        onEvent: (event) => {
+          if (event.kind === "stage") {
+            log.push(`stage:${event.component}:${event.at}`);
+            return;
+          }
+          if (event.kind === "vae-tile") {
+            log.push(`tile:${event.tile}/${event.tiles}`);
+            return;
+          }
+          // 既定の段ごと運転では出ない — 出たら下の期待列と食い違って落ちる。
+          if (event.kind === "residency") {
+            log.push(`residency:${event.action}/${event.reason}`);
+            return;
+          }
+          log.push(`step:${event.step}/${event.steps}@${event.sigma}`);
+          const snapshot = event.copyLatents();
+          shapes.push(snapshot.shape.join("x"));
+          lengths.push(snapshot.data.length);
+          // 写しを壊す。内部配列を渡していたら以後の step が NaN 汚染され、PNG の sha が割れる。
+          snapshot.data.fill(Number.NaN);
+          if (event.step === 1) {
+            firstStep = event.copyLatents;
+            firstStepData = event.copyLatents().data;
+          }
+        },
+      });
+
+      // ① 実行構造との完全一致。VAE タイル数は診断側の run 数から採る（独立な観測）。
+      const tiles = runs.filter((component) => component === "vae_decoder").length;
+      const sigmas = sigmaSchedule(STEPS, scheduler.shift);
+      assertEquals(
+        log,
+        [
+          "stage:text_encoder:start",
+          "stage:text_encoder:end",
+          "stage:text_conditioner:start",
+          "stage:text_conditioner:end",
+          "stage:transformer:start",
+          ...Array.from({ length: STEPS }, (_, at) => `step:${at + 1}/${STEPS}@${sigmas[at]}`),
+          "stage:transformer:end",
+          "stage:vae_decoder:start",
+          ...Array.from({ length: tiles }, (_, at) => `tile:${at + 1}/${tiles}`),
+          "stage:vae_decoder:end",
+        ],
+        "イベント列が実行構造と合わない（段の前後 / step 数 / タイル数）",
+      );
+
+      // ② 途中 latent の形。解像度から導く（テストに 128 を書かない）。
+      const latentHeight = resolution.height / ANIMA_SPATIAL_COMPRESSION;
+      const latentWidth = resolution.width / ANIMA_SPATIAL_COMPRESSION;
+      const channels = lengths[0] / (latentHeight * latentWidth);
+      assertEquals(
+        new Set(shapes),
+        new Set([`1x${channels}x${latentHeight}x${latentWidth}`]),
+        `途中 latent の形が [1,C,${latentHeight},${latentWidth}] でない`,
+      );
+      assertEquals(
+        new Set(lengths),
+        new Set([channels * latentHeight * latentWidth]),
+        "途中 latent の要素数が形と合わない",
+      );
+
+      // ③ 生成が終わった後に呼んでも step 1 の値が返る（lazy だが束縛は作った時点）。
+      assertEquals(
+        Array.from((firstStep as () => { data: Float32Array<ArrayBuffer> })().data.slice(0, 8)),
+        Array.from((firstStepData as Float32Array).slice(0, 8)),
+        "生成後に呼んだ copyLatents が step 1 の値を返さない",
+      );
+    });
+
+    it("コールバックの throw は生成ごと落とす（step 粒度の中断）", async () => {
+      const seen: string[] = [];
+      const abortAt = 2;
+      await assertRejects(
+        () =>
+          pipeline.generate({
+            prompt: PROMPT,
+            resolution: { width: 512, height: 512 },
+            steps: abortAt,
+            seed: SEED,
             onEvent: (event) => {
-              if (event.kind === "stage") {
-                log.push(`stage:${event.component}:${event.at}`);
-                return;
-              }
-              if (event.kind === "vae-tile") {
-                log.push(`tile:${event.tile}/${event.tiles}`);
-                return;
-              }
-              // 既定の段ごと運転では出ない — 出たら下の期待列と食い違って落ちる。
-              if (event.kind === "residency") {
-                log.push(`residency:${event.action}/${event.reason}`);
-                return;
-              }
-              log.push(`step:${event.step}/${event.steps}@${event.sigma}`);
-              const snapshot = event.copyLatents();
-              shapes.push(snapshot.shape.join("x"));
-              lengths.push(snapshot.data.length);
-              // 写しを壊す。内部配列を渡していたら以後の step が NaN 汚染され、PNG の sha が割れる。
-              snapshot.data.fill(Number.NaN);
-              if (event.step === 1) {
-                firstStep = event.copyLatents;
-                firstStepData = event.copyLatents().data;
+              seen.push(
+                event.kind === "stage"
+                  ? `stage:${event.component}:${event.at}`
+                  : event.kind === "denoise-step"
+                    ? `step:${event.step}`
+                    : event.kind === "residency"
+                      ? `residency:${event.action}/${event.reason}`
+                      : `tile:${event.tile}`,
+              );
+              if (event.kind === "denoise-step" && event.step === abortAt) {
+                throw new Error("購読側で中断");
               }
             },
-          });
-
-          // ① 実行構造との完全一致。VAE タイル数は診断側の run 数から採る（独立な観測）。
-          const tiles = runs.filter((component) => component === "vae_decoder").length;
-          const sigmas = sigmaSchedule(STEPS, scheduler.shift);
-          assertEquals(
-            log,
-            [
-              "stage:text_encoder:start",
-              "stage:text_encoder:end",
-              "stage:text_conditioner:start",
-              "stage:text_conditioner:end",
-              "stage:transformer:start",
-              ...Array.from({ length: STEPS }, (_, at) => `step:${at + 1}/${STEPS}@${sigmas[at]}`),
-              "stage:transformer:end",
-              "stage:vae_decoder:start",
-              ...Array.from({ length: tiles }, (_, at) => `tile:${at + 1}/${tiles}`),
-              "stage:vae_decoder:end",
-            ],
-            "イベント列が実行構造と合わない（段の前後 / step 数 / タイル数）",
-          );
-
-          // ② 途中 latent の形。解像度から導く（テストに 128 を書かない）。
-          const latentHeight = resolution.height / ANIMA_SPATIAL_COMPRESSION;
-          const latentWidth = resolution.width / ANIMA_SPATIAL_COMPRESSION;
-          const channels = lengths[0] / (latentHeight * latentWidth);
-          assertEquals(
-            new Set(shapes),
-            new Set([`1x${channels}x${latentHeight}x${latentWidth}`]),
-            `途中 latent の形が [1,C,${latentHeight},${latentWidth}] でない`,
-          );
-          assertEquals(
-            new Set(lengths),
-            new Set([channels * latentHeight * latentWidth]),
-            "途中 latent の要素数が形と合わない",
-          );
-
-          // ③ 生成が終わった後に呼んでも step 1 の値が返る（lazy だが束縛は作った時点）。
-          assertEquals(
-            Array.from((firstStep as () => { data: Float32Array<ArrayBuffer> })().data.slice(0, 8)),
-            Array.from((firstStepData as Float32Array).slice(0, 8)),
-            "生成後に呼んだ copyLatents が step 1 の値を返さない",
-          );
-        });
-
-        await t.step("コールバックの throw は生成ごと落とす（step 粒度の中断）", async () => {
-          const seen: string[] = [];
-          const abortAt = 2;
-          await assertRejects(
-            () =>
-              pipeline.generate({
-                prompt: PROMPT,
-                resolution: { width: 512, height: 512 },
-                steps: abortAt,
-                seed: SEED,
-                onEvent: (event) => {
-                  seen.push(
-                    event.kind === "stage"
-                      ? `stage:${event.component}:${event.at}`
-                      : event.kind === "denoise-step"
-                        ? `step:${event.step}`
-                        : event.kind === "residency"
-                          ? `residency:${event.action}/${event.reason}`
-                          : `tile:${event.tile}`,
-                  );
-                  if (event.kind === "denoise-step" && event.step === abortAt) {
-                    throw new Error("購読側で中断");
-                  }
-                },
-              }),
-            Error,
-            "購読側で中断",
-          );
-          // 例外を握らないので DiT の段で止まる — VAE 段は 1 度も開かない。
-          assertEquals(seen.at(-1), `step:${abortAt}`, "中断した step が最後のイベントでない");
-          assertFalse(seen.includes("stage:transformer:end"), "中断したのに段が正常終了している");
-          assertFalse(
-            seen.some((entry) => entry.startsWith("stage:vae_decoder")),
-            "中断したのに VAE 段へ入っている",
-          );
-        });
-      },
-    );
-    await assertRejects(
-      () => disposed.generate({ prompt: PROMPT, steps: 2, seed: SEED }),
-      Error,
-      "dispose 済み",
-    );
+          }),
+        Error,
+        "購読側で中断",
+      );
+      // 例外を握らないので DiT の段で止まる — VAE 段は 1 度も開かない。
+      assertEquals(seen.at(-1), `step:${abortAt}`, "中断した step が最後のイベントでない");
+      assertFalse(seen.includes("stage:transformer:end"), "中断したのに段が正常終了している");
+      assertFalse(
+        seen.some((entry) => entry.startsWith("stage:vae_decoder")),
+        "中断したのに VAE 段へ入っている",
+      );
+    });
   },
-});
+);
 
 // --- 公開契約（直列化 / dispose / 共有 GPU の所有権）--------------------------
 //
@@ -917,53 +938,57 @@ test({
 //
 // MUST: 生成は最小構成（512² / 2 step）で回す — ここで見るのは順序であって画素ではない。
 
-test({
-  name: "e2e(実GPU): 並行 generate は直列に走り、dispose は in-flight を待ってから破棄する",
-  ignore: !RUNNABLE,
-  fn: async (t) => {
+describe.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 並行 generate は直列に走り、dispose は in-flight を待ってから破棄する",
+  () => {
     const { quant } = REFERENCE[1];
     const resolution: ImageSize = { width: 512, height: 512 };
     const request = { prompt: PROMPT, resolution, steps: 2, seed: SEED };
-    await withTurbo(quant, {}, async (pipeline) => {
-      await t.step("並行に投げた 2 本の段が交互にならない", async () => {
-        const log: string[] = [];
-        const trace = (tag: string) => (event: AnimaGenerateEvent) => {
-          if (event.kind === "stage") log.push(`${tag}:${event.component}:${event.at}`);
-        };
-        // await せずに 2 本投げる（鎖が外れていれば段が交互に現れる）。
-        await Promise.all([
-          pipeline.generate({ ...request, onEvent: trace("a") }),
-          pipeline.generate({ ...request, onEvent: trace("b") }),
-        ]);
-        const firstEnd = log.indexOf("a:vae_decoder:end");
-        const secondStart = log.indexOf("b:text_encoder:start");
-        assertEquals(firstEnd >= 0 && secondStart >= 0, true, `段の記録が足りない: ${log}`);
-        assertEquals(
-          firstEnd < secondStart,
-          true,
-          `1 本目の最終段より前に 2 本目が始まっている（鎖が外れている）: ${log}`,
-        );
-      });
+    let pipeline: AnimaPipeline;
+    let turbo: OpenedTurbo | undefined;
+    beforeAll(async () => {
+      turbo = await openTurbo(quant, {});
+      pipeline = turbo.pipeline;
+    });
+    afterAll(() => turbo?.[Symbol.asyncDispose]());
 
-      await t.step("dispose は生成の完了より後に解決し、2 度目も同じ完了を返す", async () => {
-        const order: string[] = [];
-        const running = pipeline.generate(request).then(() => {
-          order.push("generate");
-        });
-        const disposal = pipeline.dispose();
-        assertStrictEquals(pipeline.dispose(), disposal, "2 度目の dispose が別の完了を返す");
-        await Promise.all([running, disposal.then(() => order.push("dispose"))]);
-        // 破棄が先に解決すると、消費側は「解放済み」と見なして次へ進んでしまう。
-        assertEquals(order, ["generate", "dispose"]);
+    it("並行に投げた 2 本の段が交互にならない", async () => {
+      const log: string[] = [];
+      const trace = (tag: string) => (event: AnimaGenerateEvent) => {
+        if (event.kind === "stage") log.push(`${tag}:${event.component}:${event.at}`);
+      };
+      // await せずに 2 本投げる（鎖が外れていれば段が交互に現れる）。
+      await Promise.all([
+        pipeline.generate({ ...request, onEvent: trace("a") }),
+        pipeline.generate({ ...request, onEvent: trace("b") }),
+      ]);
+      const firstEnd = log.indexOf("a:vae_decoder:end");
+      const secondStart = log.indexOf("b:text_encoder:start");
+      assertEquals(firstEnd >= 0 && secondStart >= 0, true, `段の記録が足りない: ${log}`);
+      assertEquals(
+        firstEnd < secondStart,
+        true,
+        `1 本目の最終段より前に 2 本目が始まっている（鎖が外れている）: ${log}`,
+      );
+    });
+
+    it("dispose は生成の完了より後に解決し、2 度目も同じ完了を返す", async () => {
+      const order: string[] = [];
+      const running = pipeline.generate(request).then(() => {
+        order.push("generate");
       });
+      const disposal = pipeline.dispose();
+      assertStrictEquals(pipeline.dispose(), disposal, "2 度目の dispose が別の完了を返す");
+      await Promise.all([running, disposal.then(() => order.push("dispose"))]);
+      // 破棄が先に解決すると、消費側は「解放済み」と見なして次へ進んでしまう。
+      assertEquals(order, ["generate", "dispose"]);
     });
   },
-});
+);
 
-test({
-  name: "e2e(実GPU): 渡した GpuContext は dispose で破棄しない（所有権は渡した側）",
-  ignore: !RUNNABLE,
-  fn: async () => {
+test.skipIf(!RUNNABLE)(
+  "e2e(実GPU): 渡した GpuContext は dispose で破棄しない（所有権は渡した側）",
+  async () => {
     const { quant } = REFERENCE[1];
     const server = await serveAssets(servedOrigins(readManifest(), quant, ASSETS_DIR));
     // 共有 GPU は呼び出し側の所有物。破棄してしまうと、同じ device を使う他の
@@ -989,7 +1014,7 @@ test({
       await server.shutdown();
     }
   },
-});
+);
 
 // --- DiT 常駐（residency — ADR 0112）------------------------------------------
 //
@@ -1123,62 +1148,23 @@ const expectedStages = (
   "stage:vae_decoder:end",
 ];
 
-test({
-  name:
-    'e2e(実GPU): residency "transformer" は同じケースの 2 回目も解像度の往復も参照 sha256 の双子と' +
+describe.skipIf(!RESIDENCY_RUNNABLE)(
+  'e2e(実GPU): residency "transformer" は同じケースの 2 回目も解像度の往復も参照 sha256 の双子と' +
     "一致し、DiT を読み直さない",
-  ignore: !RESIDENCY_RUNNABLE,
-  fn: async (t) => {
+  () => {
     const { quant } = REFERENCE[0];
     const runs = transformerRuns();
-    await withTurbo(
-      quant,
-      { residency: "transformer", onRunDiagnostics: runs.observe },
-      async (pipeline) => {
-        const generate = async (label: string, size: 512 | 1024): Promise<void> => {
-          runs.begin();
-          const log = await assertResidencyTwin(label, pipeline, size, undefined);
-          assertEquals(log, expectedStages(["retained/request"]), `${label} のイベント列`);
-        };
-        const weightsOf = (diagnostics: SessionDiagnostics): number =>
-          diagnostics.weights.allocatedBytes;
-
-        await t.step(
-          "(a) 1024² を 2 回: 2 回とも双子の行と一致し、2 回目は計画にも backing にも当たる",
-          async () => {
-            await generate("residency-1024-first", 1024);
-            await generate("residency-1024-second", 1024);
-            const [first, second] = runs.perGenerate;
-            assertEquals(first.length, STEPS);
-            assertEquals(second.length, STEPS);
-            // 段ごと運転なら 2 回目の最初の run は新しい Session なので必ず外れる（常駐の直接証拠）。
-            assertEquals(
-              second[0].lastRunPrepared?.hit,
-              true,
-              "2 回目の最初の run が導出済み計画に当たらない",
-            );
-            assertEquals(
-              second.at(-1)?.planBacking.buildCount,
-              first.at(-1)?.planBacking.buildCount,
-              "2 回目の generate で backing を作り直している",
-            );
-            assertEquals(
-              weightsOf(second[0]),
-              weightsOf(first[0]),
-              "2 回目で重みのバイト数が増えた",
-            );
-          },
-        );
-
-        await t.step(
-          "(b) 512² → 1024² → 512² の往復: 各解像度の双子と一致し、保持する backing は 1 本まで",
-          async () => {
-            await generate("residency-roundtrip-512-first", 512);
-            await generate("residency-roundtrip-1024", 1024);
-            await generate("residency-roundtrip-512-second", 512);
-          },
-        );
-
+    let pipeline: AnimaPipeline;
+    let turbo: OpenedTurbo | undefined;
+    beforeAll(async () => {
+      turbo = await openTurbo(quant, { residency: "transformer", onRunDiagnostics: runs.observe });
+      pipeline = turbo.pipeline;
+    });
+    // The checks over every generate of (a) and (b) run after both its, whatever their outcome,
+    // and before the pipeline is disposed.
+    afterAll(async () => {
+      if (turbo === undefined) return;
+      try {
         const all = runs.perGenerate.flat();
         for (const diagnostics of all) {
           assertEquals(
@@ -1201,110 +1187,139 @@ test({
           paramsAllocated,
           "generate を跨いで重みアリーナに params 以外の確保が増えた（重みの読み直し）",
         );
-      },
-    );
-  },
-});
+      } finally {
+        await turbo[Symbol.asyncDispose]();
+      }
+    });
 
-test({
-  name: "e2e(実GPU): residency の request 上書き（持つ → 手放す）・中断後の作り直し・常駐ありの dispose",
-  ignore: !RESIDENCY_RUNNABLE,
-  fn: async (t) => {
+    const generate = async (label: string, size: 512 | 1024): Promise<void> => {
+      runs.begin();
+      const log = await assertResidencyTwin(label, pipeline, size, undefined);
+      assertEquals(log, expectedStages(["retained/request"]), `${label} のイベント列`);
+    };
+    const weightsOf = (diagnostics: SessionDiagnostics): number =>
+      diagnostics.weights.allocatedBytes;
+
+    it("(a) 1024² を 2 回: 2 回とも双子の行と一致し、2 回目は計画にも backing にも当たる", async () => {
+      await generate("residency-1024-first", 1024);
+      await generate("residency-1024-second", 1024);
+      const [first, second] = runs.perGenerate;
+      assertEquals(first.length, STEPS);
+      assertEquals(second.length, STEPS);
+      // 段ごと運転なら 2 回目の最初の run は新しい Session なので必ず外れる（常駐の直接証拠）。
+      assertEquals(
+        second[0].lastRunPrepared?.hit,
+        true,
+        "2 回目の最初の run が導出済み計画に当たらない",
+      );
+      assertEquals(
+        second.at(-1)?.planBacking.buildCount,
+        first.at(-1)?.planBacking.buildCount,
+        "2 回目の generate で backing を作り直している",
+      );
+      assertEquals(weightsOf(second[0]), weightsOf(first[0]), "2 回目で重みのバイト数が増えた");
+    });
+
+    it("(b) 512² → 1024² → 512² の往復: 各解像度の双子と一致し、保持する backing は 1 本まで", async () => {
+      await generate("residency-roundtrip-512-first", 512);
+      await generate("residency-roundtrip-1024", 1024);
+      await generate("residency-roundtrip-512-second", 512);
+    });
+  },
+);
+
+describe.skipIf(!RESIDENCY_RUNNABLE)(
+  "e2e(実GPU): residency の request 上書き（持つ → 手放す）・中断後の作り直し・常駐ありの dispose",
+  () => {
     const { quant } = REFERENCE[1];
     const runs = transformerRuns();
-    // 構築オプションは既定（per-stage）のまま、request だけで常駐を切り替える。
-    const disposed = await withTurbo(
-      quant,
-      { onRunDiagnostics: runs.observe },
-      async (pipeline) => {
-        await t.step(
-          "(c) request 1 = transformer で持ち、request 2 = per-stage が使ってから手放す",
-          async () => {
-            runs.begin();
-            assertEquals(
-              await assertResidencyTwin("residency-request-retain", pipeline, 512, "transformer"),
-              expectedStages(["retained/request"]),
-            );
-            runs.begin();
-            assertEquals(
-              await assertResidencyTwin("residency-request-release", pipeline, 512, "per-stage"),
-              expectedStages(["released/request"]),
-            );
-            // request 2 は持ち越した DiT を使った（読み直していない）。
-            assertEquals(
-              runs.perGenerate[1][0].lastRunPrepared?.hit,
-              true,
-              "持ち越した DiT を使っていない",
-            );
-          },
-        );
+    let pipeline: AnimaPipeline;
+    let turbo: OpenedTurbo | undefined;
+    beforeAll(async () => {
+      // 構築オプションは既定（per-stage）のまま、request だけで常駐を切り替える。
+      turbo = await openTurbo(quant, { onRunDiagnostics: runs.observe });
+      pipeline = turbo.pipeline;
+    });
+    afterAll(() => turbo?.[Symbol.asyncDispose]());
 
-        await t.step(
-          "(d) onEvent の throw で DiT 段を中断すると常駐 DiT を捨て、次の generate は作り直して一致する",
-          async () => {
-            runs.begin();
-            await assertResidencyTwin("residency-before-abort", pipeline, 512, "transformer");
-            const seen: string[] = [];
-            const abortAt = 2;
-            await assertRejects(
-              () =>
-                pipeline.generate({
-                  prompt: PROMPT,
-                  resolution: { width: 512, height: 512 },
-                  steps: abortAt,
-                  seed: SEED,
-                  onEvent: (event) => {
-                    seen.push(
-                      event.kind === "denoise-step"
-                        ? `step:${event.step}`
-                        : (residencyLogOf(event) ?? `tile:${event.kind}`),
-                    );
-                    if (event.kind === "denoise-step" && event.step === abortAt) {
-                      throw new Error("購読側で中断");
-                    }
-                  },
-                }),
-              Error,
-              "購読側で中断",
-            );
-            // 中断の直後に常駐 DiT を捨てたことを名乗り、段は正常終了しない（end は出ない）。
-            assertEquals(seen.slice(-2), [`step:${abortAt}`, "residency:evicted/failure"]);
-            assertFalse(seen.includes("stage:transformer:end"), "中断したのに段が正常終了している");
+    it("(c) request 1 = transformer で持ち、request 2 = per-stage が使ってから手放す", async () => {
+      runs.begin();
+      assertEquals(
+        await assertResidencyTwin("residency-request-retain", pipeline, 512, "transformer"),
+        expectedStages(["retained/request"]),
+      );
+      runs.begin();
+      assertEquals(
+        await assertResidencyTwin("residency-request-release", pipeline, 512, "per-stage"),
+        expectedStages(["released/request"]),
+      );
+      // request 2 は持ち越した DiT を使った（読み直していない）。
+      assertEquals(
+        runs.perGenerate[1][0].lastRunPrepared?.hit,
+        true,
+        "持ち越した DiT を使っていない",
+      );
+    });
 
-            runs.begin();
-            assertEquals(
-              await assertResidencyTwin("residency-after-abort", pipeline, 512, "transformer"),
-              expectedStages(["retained/request"]),
-            );
-            // 捨てた後なので、最初の run は新しい Session（導出済み計画に当たらない）。
-            assertEquals(
-              runs.perGenerate.at(-1)?.[0].lastRunPrepared?.hit,
-              false,
-              "捨てたはずの DiT を使っている",
-            );
-          },
-        );
-        // (e) ここを抜けると `withTurbo` の `await using` が常駐 DiT を抱えたまま dispose する
-        // （(d) の最後の generate が retained で抜けている）。
-      },
-    );
+    it("(d) onEvent の throw で DiT 段を中断すると常駐 DiT を捨て、次の generate は作り直して一致する", async () => {
+      runs.begin();
+      await assertResidencyTwin("residency-before-abort", pipeline, 512, "transformer");
+      const seen: string[] = [];
+      const abortAt = 2;
+      await assertRejects(
+        () =>
+          pipeline.generate({
+            prompt: PROMPT,
+            resolution: { width: 512, height: 512 },
+            steps: abortAt,
+            seed: SEED,
+            onEvent: (event) => {
+              seen.push(
+                event.kind === "denoise-step"
+                  ? `step:${event.step}`
+                  : (residencyLogOf(event) ?? `tile:${event.kind}`),
+              );
+              if (event.kind === "denoise-step" && event.step === abortAt) {
+                throw new Error("購読側で中断");
+              }
+            },
+          }),
+        Error,
+        "購読側で中断",
+      );
+      // 中断の直後に常駐 DiT を捨てたことを名乗り、段は正常終了しない（end は出ない）。
+      assertEquals(seen.slice(-2), [`step:${abortAt}`, "residency:evicted/failure"]);
+      assertFalse(seen.includes("stage:transformer:end"), "中断したのに段が正常終了している");
+
+      runs.begin();
+      assertEquals(
+        await assertResidencyTwin("residency-after-abort", pipeline, 512, "transformer"),
+        expectedStages(["retained/request"]),
+      );
+      // 捨てた後なので、最初の run は新しい Session（導出済み計画に当たらない）。
+      assertEquals(
+        runs.perGenerate.at(-1)?.[0].lastRunPrepared?.hit,
+        false,
+        "捨てたはずの DiT を使っている",
+      );
+    });
     // NOTE: 縛るのは「常駐を持ったままの dispose が reject せずに済み、以後の生成を受けない」まで。
     // 常駐 DiT が実際に畳まれたことは観測しない — GpuContext / device に live バイトの診断が無く、
     // 共有 GPU で「dispose 後に DiT 相当が確保できる」を見ても VRAM に余裕のある機では常駐が
     // 残っていても通る（判別にならない）。「常駐 DiT を畳んでから GPU を破棄する」順序と失敗の扱いは
     // `anima_residency_test.ts` の `disposeResidencyThenGpu` が GPU 無しで縛る。
-    await t.step(
-      "(e) 常駐を持ったままの dispose は投げずに済み、以後は生成を受けない",
-      async () => {
-        await assertRejects(
-          () => disposed.generate({ prompt: PROMPT, steps: 2, seed: SEED }),
-          Error,
-          "dispose 済み",
-        );
-      },
-    );
+    it("(e) 常駐を持ったままの dispose は投げずに済み、以後は生成を受けない", async () => {
+      // The dispose happens here, with the DiT still retained by the last generate of (d)
+      // (it ends retained); afterAll's dispose then returns this same completion.
+      await turbo?.[Symbol.asyncDispose]();
+      await assertRejects(
+        () => pipeline.generate({ prompt: PROMPT, steps: 2, seed: SEED }),
+        Error,
+        "dispose 済み",
+      );
+    });
   },
-});
+);
 
 // 先回りの退避（H-35）: 常駐 DiT の上の空きを実際に削り、generate が段を張る前に常駐 DiT を退避して
 // （OOM を踏まずに）通ることを見る。量る点は 2 つ（`residency.ts` の「退避の 2 本の線」）なので行も 2 本。
@@ -1376,12 +1391,10 @@ const squeezeHeadroom = async (gpu: GpuContext, tight: boolean): Promise<GPUBuff
   }
 };
 
-test({
-  name:
-    "e2e(実GPU): residency headroom — 常駐 DiT の上に空きが足りなければ text 段の前に evicted/headroom" +
+test.skipIf(!RESIDENCY_RUNNABLE)(
+  "e2e(実GPU): residency headroom — 常駐 DiT の上に空きが足りなければ text 段の前に evicted/headroom" +
     " で退避し、2 回目も双子と一致する",
-  ignore: !RESIDENCY_RUNNABLE,
-  fn: async () => {
+  async () => {
     const { quant } = REFERENCE[1];
     const gpu = await acquireGpu();
     let dummies: GPUBuffer[] = [];
@@ -1406,14 +1419,12 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
-test({
-  name:
-    "e2e(実GPU): residency headroom — 最初の generate でも DiT を席に載せた後に空きが足りなければ" +
+test.skipIf(!RESIDENCY_RUNNABLE)(
+  "e2e(実GPU): residency headroom — 最初の generate でも DiT を席に載せた後に空きが足りなければ" +
     " VAE 段の前に evicted/headroom で退避し、双子と一致する",
-  ignore: !RESIDENCY_RUNNABLE,
-  fn: async () => {
+  async () => {
     // 決定性の根拠（詰めた後の空き < 256 MiB < 余裕 ≤ VAE の必要量）を門の側でも縛る。
     assertEquals(HEADROOM_TIGHT_DUMMY_BYTES < HEADROOM_MARGIN_BYTES, true);
     const { quant } = REFERENCE[1];
@@ -1441,7 +1452,7 @@ test({
       gpu.destroy();
     }
   },
-});
+);
 
 /** この門が持つケース ID 全部（参照値が無いものを登録時に 1 度だけ知らせる）。 */
 const CASE_IDS: readonly string[] = [

@@ -81,7 +81,7 @@
  */
 
 import { isNotFound, readFile, readTextFile, statSync, writeFile } from "@karume/test-support/fs";
-import { test } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
   type DistributionSource,
@@ -413,16 +413,18 @@ const results = openResults("wan-pipeline");
 /** 50 ステップの通しの結果の席（既定のレーンと分ける — モジュール doc）。 */
 const fullResults = openResults("wan-pipeline-full");
 
-test({
-  name: "Wan 通しの参照: 少ステップの参照 3 本が揃っている",
-  ignore: !ANY_FIXTURE,
-  fn: () => {
-    assertEquals(
-      FIXTURES_PRESENT,
-      FIXTURES_PRESENT.map(() => true),
-      `${SERIES_ROOT.pathname} の欠け`,
-    );
-  },
+/** A value a `beforeAll` assigns, read inside an `it` (fails loudly when the hook did not assign it). */
+const assigned = <T>(value: T | undefined, what: string): T => {
+  assert(value !== undefined, `${what} is not assigned (its beforeAll did not complete)`);
+  return value;
+};
+
+test.skipIf(!ANY_FIXTURE)("Wan 通しの参照: 少ステップの参照 3 本が揃っている", () => {
+  assertEquals(
+    FIXTURES_PRESENT,
+    FIXTURES_PRESENT.map(() => true),
+    `${SERIES_ROOT.pathname} の欠け`,
+  );
 });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -477,31 +479,33 @@ const countingSource = (manifest: Record<string, unknown>, requested: string[]) 
   );
 };
 
-test({
-  name:
-    "Wan 配布形の家族 admission（GPU 不要）: pipeline の major・pipelineConfig・quant の session の齟齬・" +
+describe.skipIf(!DIST_PRESENT)(
+  "Wan 配布形の家族 admission（GPU 不要）: pipeline の major・pipelineConfig・quant の session の齟齬・" +
     "計測（gpuTiming）の共有 device・GPU 経路のトークナイザ資産の欠落は名指しで落ち、それまでに重みの part 1 以降と" +
     "資産を 1 本も取らない（事前計算の経路は umT5 に 1 バイトも触らない）",
-  ignore: !DIST_PRESENT,
-  fn: async (t) => {
-    const original = await readTextFile(new URL("karume.json", DIST_ROOT));
-    const parsed = parseManifest(original);
-    // part 0 = descriptor は admission の入力そのもので、門より前に取る契約
-    // （packages/models/src/hub/components.ts の相 1）。門の後にしか触れてはいけないのは part 1
-    // 以降と assets（埋め込み・トークナイザ・RoPE の素表）。
-    const model = parsed.models[parsed.defaultModel];
-    assert(model !== undefined, `配布形の manifest に既定モデル '${parsed.defaultModel}' が無い`);
-    const heavyPaths = new Set([
-      ...Object.values(model.weights).flatMap((entry) =>
-        Object.values(entry).flatMap((weights) =>
-          weights.container.parts
-            .slice(1)
-            .map((ref) => (ref.repo === undefined ? ref.path : `${UMT5_PREFIX}${ref.path}`)),
+  () => {
+    let original: string | undefined;
+    let heavyPaths: ReadonlySet<string> | undefined;
+    beforeAll(async () => {
+      original = await readTextFile(new URL("karume.json", DIST_ROOT));
+      const parsed = parseManifest(original);
+      // part 0 = descriptor は admission の入力そのもので、門より前に取る契約
+      // （packages/models/src/hub/components.ts の相 1）。門の後にしか触れてはいけないのは part 1
+      // 以降と assets（埋め込み・トークナイザ・RoPE の素表）。
+      const model = parsed.models[parsed.defaultModel];
+      assert(model !== undefined, `配布形の manifest に既定モデル '${parsed.defaultModel}' が無い`);
+      heavyPaths = new Set([
+        ...Object.values(model.weights).flatMap((entry) =>
+          Object.values(entry).flatMap((weights) =>
+            weights.container.parts
+              .slice(1)
+              .map((ref) => (ref.repo === undefined ? ref.path : `${UMT5_PREFIX}${ref.path}`)),
+          ),
         ),
-      ),
-      ...Object.values(model.assets).map((ref) => ref.path),
-    ]);
-    assert(heavyPaths.size > 0);
+        ...Object.values(model.assets).map((ref) => ref.path),
+      ]);
+      assert(heavyPaths.size > 0);
+    });
     const faults: readonly {
       readonly label: string;
       readonly patch: (model: Record<string, unknown>) => Record<string, unknown>;
@@ -573,12 +577,15 @@ test({
       },
     ];
     for (const { label, patch, textEncoder, gpu, message } of faults) {
-      await t.step({
-        name: `${label}（textEncoder: ${textEncoder}）`,
-        ignore: textEncoder === "gpu" && !GPU_TEXT_PRESENT,
-        fn: async () => {
+      it.skipIf(textEncoder === "gpu" && !GPU_TEXT_PRESENT)(
+        `${label}（textEncoder: ${textEncoder}）`,
+        async () => {
+          const heavyPathSet = assigned(heavyPaths, "heavyPaths");
           const requested: string[] = [];
-          const source = countingSource(overrideModel(original, patch), requested);
+          const source = countingSource(
+            overrideModel(assigned(original, "original"), patch),
+            requested,
+          );
           await assertRejects(
             () =>
               WanPipeline.fromPretrained(source, {
@@ -591,17 +598,17 @@ test({
             message,
           );
           assert(requested.includes("karume.json"), `manifest を読んでいない: ${requested}`);
-          const heavy = requested.filter((path) => heavyPaths.has(path));
+          const heavy = requested.filter((path) => heavyPathSet.has(path));
           assertEquals(heavy, [], "admission の前に重みの part 1 以降・資産を取っている");
           if (textEncoder === "precomputed") {
             const umt5 = requested.filter((path) => path.startsWith(UMT5_PREFIX));
             assertEquals(umt5, [], "事前計算の経路が umT5 の容器に触っている");
           }
         },
-      });
+      );
     }
   },
-});
+);
 
 /** 参照 1 本（F32 のテンソルとメタ）。 */
 type Fixture = {
@@ -773,12 +780,10 @@ const textOf = (
   return entry[form];
 };
 
-test({
-  name:
-    "Wan 通し（ホスト・GPU 不要）: 配布形の埋め込み資産と σ / timestep が参照のメタと一致し、参照の DiT " +
+test.skipIf(!ANY_PRESENT)(
+  "Wan 通し（ホスト・GPU 不要）: 配布形の埋め込み資産と σ / timestep が参照のメタと一致し、参照の DiT " +
     "出力から CFG + UniPC が参照の潜在をビット一致で再現する",
-  ignore: !ANY_PRESENT,
-  fn: async () => {
+  async () => {
     const embedsBytes = await readDistributionEmbeds();
     const embeds = parseWanTextEmbeds(embedsBytes.buffer);
     assertEquals(
@@ -835,105 +840,267 @@ test({
       }
     }
   },
-});
+);
 
-test({
-  name:
-    "Wan 通し 2 ステップ（実 GPU）: 832×480・33 フレームの潜在とフレームが参照と帯の内・故障注入は帯の外・" +
+describe.skipIf(!ANY_PRESENT || !GPU_AVAILABLE)(
+  "Wan 通し 2 ステップ（実 GPU）: 832×480・33 フレームの潜在とフレームが参照と帯の内・故障注入は帯の外・" +
     "sha256 の環境行（`f16` 席と i8 の 2 席〈参照行 / 実用行〉）",
-  ignore: !ANY_PRESENT || !GPU_AVAILABLE,
-  fn: async (t) => {
+  () => {
     let deviceLost: string | undefined;
-    const gpu = verifyRunningGpu(
-      await acquireTestGpu({
-        onDeviceLost: (info) => {
-          deviceLost = `${info.reason}: ${info.message}`;
-        },
-      }),
-    );
+    // One device and one `f16` pipeline shared by the its below (built before them, disposed after them all).
+    let gpuContext: GpuContext | undefined;
+    let f16Pipeline: WanPipeline | undefined;
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
-    try {
-      const pipeline = await loadPipeline(gpu, diagnostics, "precomputed", F16_QUANT);
-      const { prompts } = pipeline;
+    beforeAll(async () => {
+      gpuContext = verifyRunningGpu(
+        await acquireTestGpu({
+          onDeviceLost: (info) => {
+            deviceLost = `${info.reason}: ${info.message}`;
+          },
+        }),
+      );
+      f16Pipeline = await loadPipeline(gpuContext, diagnostics, "precomputed", F16_QUANT);
+    });
+    afterAll(async () => {
+      if (gpuContext === undefined) return;
       try {
-        for (const { name, role } of CASES) {
-          await t.step(`${name}（${role}）`, async () => {
-            const fixture = await readFixture(fixtureUrl(name));
-            const promptName = fixture.meta("prompt");
-            // band は原文・accept は正規化後の文字列で引く（受理集合の 2 つの綴りを両方通す）。
-            const prompt = textOf(prompts, promptName, role === "band" ? "prompt" : "normalized");
-            const id = `2step-${name}`;
-            let settlement: ReferenceSettlement | undefined;
-            await runRecordedCase(results, { id }, async ({ measurements }) => {
-              const observed = await observe(pipeline, diagnostics, {
-                prompt,
-                latents: fixture.tensor("latents_init"),
-                steps: STEPS,
-              });
-              assert("video" in observed, "generate が最後まで回っていない");
-              assertEquals(observed.latents.length, STEPS, "denoise-step の数");
-              const diffs = [
-                ...observed.latents.map((latents, step) => ({
-                  output: `latents.${step}`,
-                  band: LATENT_RATIO_BANDS[step],
-                  diff: difference(latents, fixture.tensor(`latents.${step}`)),
-                })),
-                {
-                  output: "frames",
-                  band: FRAME_RATIO_BAND,
-                  diff: difference(observed.video.data, clamped(fixture.tensor("frames"))),
-                },
-              ];
-              for (const { output, band, diff } of diffs) {
-                measurements.push({
-                  output,
-                  maxAbs: diff.maxAbs,
-                  maxRel: diff.maxRel,
-                  tolerance: { atol: band * diff.referenceMax, rtol: 0 },
-                  stage: "karume",
-                });
-              }
-              const notes = [
-                ...diffs.map(({ output, diff }) => formatDifference(output, diff)),
-                ...formatObserved(observed),
-              ];
-              console.log(`[wan-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
-              for (const { output, band, diff } of diffs) {
-                assertEquals(diff.nonFinite, 0, `${id}: ${output} の非有限`);
-                assert(
-                  diff.ratio <= band,
-                  `${id}: ${formatDifference(output, diff)} が帯 ${band} の外`,
-                );
-              }
-              assertEquals(deviceLost, undefined, "device lost");
-              const outcome = await settleOrObserve(references, results, {
-                id,
-                artifact: `${id}.rgb`,
-                bytes: rgbBytes(observed.video),
-              });
-              settlement = outcome.settlement;
-              return { ...outcome.fields, note: notes.join(" / ") };
-            });
-            if (settlement?.check.status === "fail") {
-              throw new Error(referenceMismatchMessage(id, settlement, references));
-            }
-          });
-        }
+        await f16Pipeline?.dispose();
+      } finally {
+        // MUST: device を捨てる前に解放を待つ（B570 の destroy の遅れ — 後続のテストの予算を残す）。
+        await settleReleases(gpuContext);
+        gpuContext.destroy();
+      }
+    });
 
-        /**
-         * seed 経路の 2 ステップ 1 本（完走・非有限 0・sha256 の環境行）。`f16` 席と i8 の 2 席が同じこの 1 本を通る
-         * （席ごとに違うのは pipeline と ID と行のクラスの表示だけ）。
-         */
-        const seedPath = async (target: WanPipeline, id: string, quant: string): Promise<void> => {
-          let settlement: ReferenceSettlement | undefined;
-          await runRecordedCase(results, { id }, async () => {
-            const observed = await observe(target, diagnostics, {
-              prompt: textOf(target.prompts, SEED_CASE.prompt, "prompt"),
-              seed: SEED_CASE.seed,
+    for (const { name, role } of CASES) {
+      it(`${name}（${role}）`, async () => {
+        const pipeline = assigned(f16Pipeline, "f16Pipeline");
+        const fixture = await readFixture(fixtureUrl(name));
+        const promptName = fixture.meta("prompt");
+        // band は原文・accept は正規化後の文字列で引く（受理集合の 2 つの綴りを両方通す）。
+        const prompt = textOf(
+          pipeline.prompts,
+          promptName,
+          role === "band" ? "prompt" : "normalized",
+        );
+        const id = `2step-${name}`;
+        let settlement: ReferenceSettlement | undefined;
+        await runRecordedCase(results, { id }, async ({ measurements }) => {
+          const observed = await observe(pipeline, diagnostics, {
+            prompt,
+            latents: fixture.tensor("latents_init"),
+            steps: STEPS,
+          });
+          assert("video" in observed, "generate が最後まで回っていない");
+          assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+          const diffs = [
+            ...observed.latents.map((latents, step) => ({
+              output: `latents.${step}`,
+              band: LATENT_RATIO_BANDS[step],
+              diff: difference(latents, fixture.tensor(`latents.${step}`)),
+            })),
+            {
+              output: "frames",
+              band: FRAME_RATIO_BAND,
+              diff: difference(observed.video.data, clamped(fixture.tensor("frames"))),
+            },
+          ];
+          for (const { output, band, diff } of diffs) {
+            measurements.push({
+              output,
+              maxAbs: diff.maxAbs,
+              maxRel: diff.maxRel,
+              tolerance: { atol: band * diff.referenceMax, rtol: 0 },
+              stage: "karume",
+            });
+          }
+          const notes = [
+            ...diffs.map(({ output, diff }) => formatDifference(output, diff)),
+            ...formatObserved(observed),
+          ];
+          console.log(`[wan-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
+          for (const { output, band, diff } of diffs) {
+            assertEquals(diff.nonFinite, 0, `${id}: ${output} の非有限`);
+            assert(
+              diff.ratio <= band,
+              `${id}: ${formatDifference(output, diff)} が帯 ${band} の外`,
+            );
+          }
+          assertEquals(deviceLost, undefined, "device lost");
+          const outcome = await settleOrObserve(references, results, {
+            id,
+            artifact: `${id}.rgb`,
+            bytes: rgbBytes(observed.video),
+          });
+          settlement = outcome.settlement;
+          return { ...outcome.fields, note: notes.join(" / ") };
+        });
+        if (settlement?.check.status === "fail") {
+          throw new Error(referenceMismatchMessage(id, settlement, references));
+        }
+      });
+    }
+
+    /**
+     * seed 経路の 2 ステップ 1 本（完走・非有限 0・sha256 の環境行）。`f16` 席と i8 の 2 席が同じこの 1 本を通る
+     * （席ごとに違うのは pipeline と ID と行のクラスの表示だけ）。
+     */
+    const seedPath = async (target: WanPipeline, id: string, quant: string): Promise<void> => {
+      let settlement: ReferenceSettlement | undefined;
+      await runRecordedCase(results, { id }, async () => {
+        const observed = await observe(target, diagnostics, {
+          prompt: textOf(target.prompts, SEED_CASE.prompt, "prompt"),
+          seed: SEED_CASE.seed,
+          steps: STEPS,
+        });
+        assert("video" in observed, "generate が最後まで回っていない");
+        assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+        const { video } = observed;
+        assertEquals([video.frames, video.height, video.width], [DEFAULT_FRAMES, 480, 832]);
+        const nonFinite = video.data.reduce(
+          (count, value) => count + (Number.isFinite(value) ? 0 : 1),
+          0,
+        );
+        const notes = [await rowClassOf(quant), `非有限 ${nonFinite}`, ...formatObserved(observed)];
+        console.log(`[wan-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
+        assertEquals(nonFinite, 0, `${id}: 非有限`);
+        assertEquals(deviceLost, undefined, "device lost");
+        const outcome = await settleOrObserve(references, results, {
+          id,
+          artifact: `${id}.rgb`,
+          bytes: rgbBytes(video),
+        });
+        settlement = outcome.settlement;
+        return { ...outcome.fields, note: notes.join(" / ") };
+      });
+      if (settlement?.check.status === "fail") {
+        throw new Error(referenceMismatchMessage(id, settlement, references));
+      }
+    };
+
+    it(`${SEED_CASE.id}（seed 経路・sha256 の環境行）`, async () => {
+      await seedPath(assigned(f16Pipeline, "f16Pipeline"), SEED_CASE.id, F16_QUANT);
+    });
+
+    // 故障注入（受入れの初期ノイズ — 潜在だけを見るので VAE の段の前で止める）。
+    // Each fault it reads the accept fixture and its prompts itself (the request is built from them).
+    const faults: readonly {
+      readonly label: string;
+      readonly request: (prompts: {
+        readonly ferret: string;
+        readonly negative: string;
+      }) => Omit<WanGenerateRequest, "onEvent" | "latents" | "steps">;
+    }[] = [
+      {
+        label: "プロンプトの正負の取り違え",
+        request: ({ ferret, negative }) => ({ prompt: negative, negativePrompt: ferret }),
+      },
+      { label: "guide 5.0 → 5.05", request: ({ ferret }) => ({ prompt: ferret, guidance: 5.05 }) },
+    ];
+    const lastBand = LATENT_RATIO_BANDS[STEPS - 1];
+    for (const { label, request } of faults) {
+      it(`故障注入: ${label} → ${ACCEPT_CASE} の潜在が帯の外`, async () => {
+        const pipeline = assigned(f16Pipeline, "f16Pipeline");
+        const accept = await readFixture(fixtureUrl(ACCEPT_CASE));
+        const ferret = textOf(pipeline.prompts, accept.meta("prompt"), "prompt");
+        const negative = textOf(pipeline.prompts, accept.meta("negative"), "prompt");
+        const observed = await observe(
+          pipeline,
+          diagnostics,
+          {
+            ...request({ ferret, negative }),
+            latents: accept.tensor("latents_init"),
+            steps: STEPS,
+          },
+          { abortAfterDenoise: true },
+        );
+        const diff = difference(observed.latents[STEPS - 1], accept.tensor(`latents.${STEPS - 1}`));
+        console.log(
+          `[wan-pipeline] fault ${label}: ${formatDifference(
+            `latents.${STEPS - 1}`,
+            diff,
+          )}（帯の ${(diff.ratio / lastBand).toFixed(1)} 倍）`,
+        );
+        assert(
+          diff.ratio > FAULT_MARGIN * lastBand,
+          `${label}: 比 ${diff.ratio} が帯 ${lastBand} の ${FAULT_MARGIN} 倍を超えない`,
+        );
+      });
+    }
+
+    // i8 の 2 席（ADR 0120 段 5 — 参照行 / 実用行）。席ごとに pipeline を同じ device の上に張る（構築では Session を
+    // 張らないので、`f16` 席の pipeline と並べても DiT / VAE の確保は重ならない — 段の Session は generate の中だけ）。
+    for (const quant of SEAT_QUANTS) {
+      const id = seatCaseId(quant, SEED_CASE.id);
+      it(`${id}（${quant} の席・seed 経路・sha256 の環境行）`, async () => {
+        const gpu = assigned(gpuContext, "gpuContext");
+        try {
+          await using seatPipeline = await loadPipeline(gpu, diagnostics, "precomputed", quant);
+          await seedPath(seatPipeline, id, quant);
+        } finally {
+          // 次の席の確保の前に、この席の段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
+          await settleReleases(gpu);
+        }
+      });
+    }
+  },
+);
+
+describe.skipIf(!GPU_TEXT_PRESENT || !GPU_AVAILABLE)(
+  "Wan 通し 2 ステップ GPU 経路（実 GPU）: umT5 の text 段を畳んでから DiT・VAE の段を張り、固定プロンプトと" +
+    "自由プロンプトが完走・非有限 0・段の所要と切り替えの VRAM・sha256 の環境行",
+  () => {
+    let deviceLost: string | undefined;
+    // One device and one GPU-path pipeline shared by the its below (built before them, disposed after them all).
+    let gpuContext: GpuContext | undefined;
+    let gpuTextPipeline: WanPipeline | undefined;
+    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+    beforeAll(async () => {
+      gpuContext = verifyRunningGpu(
+        await acquireTestGpu({
+          onDeviceLost: (info) => {
+            deviceLost = `${info.reason}: ${info.message}`;
+          },
+        }),
+      );
+      // 構築では Session を張らない（umT5 の重みは generate ごとに text 段で読む — ADR 0119 決定 11）。
+      gpuTextPipeline = await loadPipeline(gpuContext, diagnostics, "gpu", F16_QUANT);
+    });
+    afterAll(async () => {
+      if (gpuContext === undefined) return;
+      try {
+        await gpuTextPipeline?.dispose();
+      } finally {
+        await settleReleases(gpuContext);
+        gpuContext.destroy();
+      }
+    });
+
+    for (const spec of GPU_TEXT_CASES) {
+      it(spec.id, async () => {
+        const gpu = assigned(gpuContext, "gpuContext");
+        const pipeline = assigned(gpuTextPipeline, "gpuTextPipeline");
+        const prompt =
+          "asset" in spec.prompt
+            ? textOf(pipeline.prompts, spec.prompt.asset, "prompt")
+            : spec.prompt.text;
+        let settlement: ReferenceSettlement | undefined;
+        try {
+          await runRecordedCase(results, { id: spec.id }, async () => {
+            const observed = await observe(pipeline, diagnostics, {
+              prompt,
+              seed: spec.seed,
               steps: STEPS,
             });
             assert("video" in observed, "generate が最後まで回っていない");
             assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+            // text 段は DiT 段を張る前に畳む（段の境目の並び — VRAM の点も同じ並びで採る）。
+            assertEquals(
+              observed.drm.marks.slice(0, 3).map(({ label }) => label),
+              ["text_encoder start", "text_encoder end", "transformer start"],
+              "text 段 → DiT 段の順",
+            );
+            assert(observed.diagnostics.has("text_encoder"), "umT5 の run の診断が届いていない");
             const { video } = observed;
             assertEquals([video.frames, video.height, video.width], [DEFAULT_FRAMES, 480, 832]);
             const nonFinite = video.data.reduce(
@@ -941,178 +1108,33 @@ test({
               0,
             );
             const notes = [
-              await rowClassOf(quant),
+              "textEncoder: gpu（umT5 i8・活性 f32）",
+              `プロンプト ${JSON.stringify(prompt.trim().slice(0, 80))}`,
               `非有限 ${nonFinite}`,
               ...formatObserved(observed),
             ];
-            console.log(`[wan-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
-            assertEquals(nonFinite, 0, `${id}: 非有限`);
+            console.log(`[wan-pipeline] ${spec.id}:\n  ${notes.join("\n  ")}`);
+            assertEquals(nonFinite, 0, `${spec.id}: 非有限`);
             assertEquals(deviceLost, undefined, "device lost");
             const outcome = await settleOrObserve(references, results, {
-              id,
-              artifact: `${id}.rgb`,
+              id: spec.id,
+              artifact: `${spec.id}.rgb`,
               bytes: rgbBytes(video),
             });
             settlement = outcome.settlement;
             return { ...outcome.fields, note: notes.join(" / ") };
           });
-          if (settlement?.check.status === "fail") {
-            throw new Error(referenceMismatchMessage(id, settlement, references));
-          }
-        };
-
-        await t.step(`${SEED_CASE.id}（seed 経路・sha256 の環境行）`, async () => {
-          await seedPath(pipeline, SEED_CASE.id, F16_QUANT);
-        });
-
-        // 故障注入（受入れの初期ノイズ — 潜在だけを見るので VAE の段の前で止める）。
-        const accept = await readFixture(fixtureUrl(ACCEPT_CASE));
-        const ferret = textOf(prompts, accept.meta("prompt"), "prompt");
-        const negative = textOf(prompts, accept.meta("negative"), "prompt");
-        const faults: readonly {
-          readonly label: string;
-          readonly request: Omit<WanGenerateRequest, "onEvent" | "latents" | "steps">;
-        }[] = [
-          {
-            label: "プロンプトの正負の取り違え",
-            request: { prompt: negative, negativePrompt: ferret },
-          },
-          { label: "guide 5.0 → 5.05", request: { prompt: ferret, guidance: 5.05 } },
-        ];
-        const lastBand = LATENT_RATIO_BANDS[STEPS - 1];
-        for (const { label, request } of faults) {
-          await t.step(`故障注入: ${label} → ${ACCEPT_CASE} の潜在が帯の外`, async () => {
-            const observed = await observe(
-              pipeline,
-              diagnostics,
-              {
-                ...request,
-                latents: accept.tensor("latents_init"),
-                steps: STEPS,
-              },
-              { abortAfterDenoise: true },
-            );
-            const diff = difference(
-              observed.latents[STEPS - 1],
-              accept.tensor(`latents.${STEPS - 1}`),
-            );
-            console.log(
-              `[wan-pipeline] fault ${label}: ${formatDifference(
-                `latents.${STEPS - 1}`,
-                diff,
-              )}（帯の ${(diff.ratio / lastBand).toFixed(1)} 倍）`,
-            );
-            assert(
-              diff.ratio > FAULT_MARGIN * lastBand,
-              `${label}: 比 ${diff.ratio} が帯 ${lastBand} の ${FAULT_MARGIN} 倍を超えない`,
-            );
-          });
+        } finally {
+          // 次のケースの確保の前に、このケースの段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
+          await settleReleases(gpu);
         }
-
-        // i8 の 2 席（ADR 0120 段 5 — 参照行 / 実用行）。席ごとに pipeline を同じ device の上に張る（構築では Session を
-        // 張らないので、`f16` 席の pipeline と並べても DiT / VAE の確保は重ならない — 段の Session は generate の中だけ）。
-        for (const quant of SEAT_QUANTS) {
-          const id = seatCaseId(quant, SEED_CASE.id);
-          await t.step(`${id}（${quant} の席・seed 経路・sha256 の環境行）`, async () => {
-            try {
-              await using seatPipeline = await loadPipeline(gpu, diagnostics, "precomputed", quant);
-              await seedPath(seatPipeline, id, quant);
-            } finally {
-              // 次の席の確保の前に、この席の段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
-              await settleReleases(gpu);
-            }
-          });
+        if (settlement?.check.status === "fail") {
+          throw new Error(referenceMismatchMessage(spec.id, settlement, references));
         }
-      } finally {
-        await pipeline.dispose();
-      }
-    } finally {
-      // MUST: device を捨てる前に解放を待つ（B570 の destroy の遅れ — 後続のテストの予算を残す）。
-      await settleReleases(gpu);
-      gpu.destroy();
+      });
     }
   },
-});
-
-test({
-  name:
-    "Wan 通し 2 ステップ GPU 経路（実 GPU）: umT5 の text 段を畳んでから DiT・VAE の段を張り、固定プロンプトと" +
-    "自由プロンプトが完走・非有限 0・段の所要と切り替えの VRAM・sha256 の環境行",
-  ignore: !GPU_TEXT_PRESENT || !GPU_AVAILABLE,
-  fn: async (t) => {
-    let deviceLost: string | undefined;
-    const gpu = verifyRunningGpu(
-      await acquireTestGpu({
-        onDeviceLost: (info) => {
-          deviceLost = `${info.reason}: ${info.message}`;
-        },
-      }),
-    );
-    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
-    try {
-      // 構築では Session を張らない（umT5 の重みは generate ごとに text 段で読む — ADR 0119 決定 11）。
-      await using pipeline = await loadPipeline(gpu, diagnostics, "gpu", F16_QUANT);
-      for (const spec of GPU_TEXT_CASES) {
-        await t.step(spec.id, async () => {
-          const prompt =
-            "asset" in spec.prompt
-              ? textOf(pipeline.prompts, spec.prompt.asset, "prompt")
-              : spec.prompt.text;
-          let settlement: ReferenceSettlement | undefined;
-          try {
-            await runRecordedCase(results, { id: spec.id }, async () => {
-              const observed = await observe(pipeline, diagnostics, {
-                prompt,
-                seed: spec.seed,
-                steps: STEPS,
-              });
-              assert("video" in observed, "generate が最後まで回っていない");
-              assertEquals(observed.latents.length, STEPS, "denoise-step の数");
-              // text 段は DiT 段を張る前に畳む（段の境目の並び — VRAM の点も同じ並びで採る）。
-              assertEquals(
-                observed.drm.marks.slice(0, 3).map(({ label }) => label),
-                ["text_encoder start", "text_encoder end", "transformer start"],
-                "text 段 → DiT 段の順",
-              );
-              assert(observed.diagnostics.has("text_encoder"), "umT5 の run の診断が届いていない");
-              const { video } = observed;
-              assertEquals([video.frames, video.height, video.width], [DEFAULT_FRAMES, 480, 832]);
-              const nonFinite = video.data.reduce(
-                (count, value) => count + (Number.isFinite(value) ? 0 : 1),
-                0,
-              );
-              const notes = [
-                "textEncoder: gpu（umT5 i8・活性 f32）",
-                `プロンプト ${JSON.stringify(prompt.trim().slice(0, 80))}`,
-                `非有限 ${nonFinite}`,
-                ...formatObserved(observed),
-              ];
-              console.log(`[wan-pipeline] ${spec.id}:\n  ${notes.join("\n  ")}`);
-              assertEquals(nonFinite, 0, `${spec.id}: 非有限`);
-              assertEquals(deviceLost, undefined, "device lost");
-              const outcome = await settleOrObserve(references, results, {
-                id: spec.id,
-                artifact: `${spec.id}.rgb`,
-                bytes: rgbBytes(video),
-              });
-              settlement = outcome.settlement;
-              return { ...outcome.fields, note: notes.join(" / ") };
-            });
-          } finally {
-            // 次のケースの確保の前に、このケースの段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
-            await settleReleases(gpu);
-          }
-          if (settlement?.check.status === "fail") {
-            throw new Error(referenceMismatchMessage(spec.id, settlement, references));
-          }
-        });
-      }
-    } finally {
-      await settleReleases(gpu);
-      gpu.destroy();
-    }
-  },
-});
+);
 
 /** 一覧図（`rows × cols` のマス・各マスはフレームを `factor` 分の 1 に箱平均で縮めたもの）。 */
 const contactSheet = (
@@ -1156,90 +1178,94 @@ const contactSheet = (
   return { rgba, width, height };
 };
 
-test({
-  name:
-    "Wan 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_FULL_PIPELINE=1）: 既定の設定の 33 / 81 フレーム（`f16` 席と実用席）が" +
+describe.skipIf(!FULL_PIPELINE || !ANY_PRESENT || !GPU_AVAILABLE)(
+  "Wan 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_FULL_PIPELINE=1）: 既定の設定の 33 / 81 フレーム（`f16` 席と実用席）が" +
     "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図",
-  ignore: !FULL_PIPELINE || !ANY_PRESENT || !GPU_AVAILABLE,
-  fn: async (t) => {
+  () => {
     let deviceLost: string | undefined;
-    const gpu = verifyRunningGpu(
-      await acquireTestGpu({
-        onDeviceLost: (info) => {
-          deviceLost = `${info.reason}: ${info.message}`;
-        },
-      }),
-    );
+    // One device shared by the its below (acquired before them, released after them all).
+    let gpuContext: GpuContext | undefined;
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
-    try {
-      // ケースごとに席の pipeline を張る（構築では Session を張らない — `f16` 席と実用席を確保の大きい順に交互に回す）。
-      for (const spec of FULL_CASES) {
-        await t.step(spec.id, async () => {
-          const frames = spec.frames ?? DEFAULT_FRAMES;
-          let settlement: ReferenceSettlement | undefined;
-          try {
-            await using pipeline = await loadPipeline(gpu, diagnostics, "precomputed", spec.quant);
-            await runRecordedCase(fullResults, { id: spec.id }, async () => {
-              const observed = await observe(pipeline, diagnostics, {
-                prompt: textOf(pipeline.prompts, spec.prompt, "prompt"),
-                seed: spec.seed,
-                frames: spec.frames,
-              });
-              assert("video" in observed, "generate が最後まで回っていない");
-              assertEquals(
-                observed.latents.length,
-                FULL_STEPS,
-                "denoise-step の数（manifest の既定）",
-              );
-              const { video } = observed;
-              assertEquals([video.frames, video.height, video.width], [frames, 480, 832]);
-              const nonFinite = video.data.reduce(
-                (count, value) => count + (Number.isFinite(value) ? 0 : 1),
-                0,
-              );
-              const notes = [
-                await rowClassOf(spec.quant),
-                `非有限 ${nonFinite}`,
-                ...formatObserved(observed),
-              ];
-              console.log(`[wan-pipeline] ${spec.id}:\n  ${notes.join("\n  ")}`);
-              assertEquals(nonFinite, 0, "非有限");
-              assertEquals(deviceLost, undefined, "device lost");
-              for (let frame = 0; frame < video.frames; frame += 1) {
-                await writeFile(
-                  fullResults.artifact(`${spec.id}-frame-${String(frame).padStart(2, "0")}.png`),
-                  await encodePng(wanFrameToRgba(video, frame), video.width, video.height),
-                );
-              }
-              const sheet = contactSheet(video, 4, 8, 4);
-              await writeFile(
-                fullResults.artifact(`${spec.id}-sheet.png`),
-                await encodePng(sheet.rgba, sheet.width, sheet.height),
-              );
-              console.log(`[wan-pipeline] PNG: ${fullResults.dir.pathname}`);
-              const outcome = await settleOrObserve(references, fullResults, {
-                id: spec.id,
-                artifact: `${spec.id}.rgb`,
-                bytes: rgbBytes(video),
-              });
-              settlement = outcome.settlement;
-              return { ...outcome.fields, note: notes.join(" / ") };
+    beforeAll(async () => {
+      gpuContext = verifyRunningGpu(
+        await acquireTestGpu({
+          onDeviceLost: (info) => {
+            deviceLost = `${info.reason}: ${info.message}`;
+          },
+        }),
+      );
+    });
+    afterAll(async () => {
+      if (gpuContext === undefined) return;
+      await settleReleases(gpuContext);
+      gpuContext.destroy();
+    });
+
+    // ケースごとに席の pipeline を張る（構築では Session を張らない — `f16` 席と実用席を確保の大きい順に交互に回す）。
+    for (const spec of FULL_CASES) {
+      it(spec.id, async () => {
+        const gpu = assigned(gpuContext, "gpuContext");
+        const frames = spec.frames ?? DEFAULT_FRAMES;
+        let settlement: ReferenceSettlement | undefined;
+        try {
+          await using pipeline = await loadPipeline(gpu, diagnostics, "precomputed", spec.quant);
+          await runRecordedCase(fullResults, { id: spec.id }, async () => {
+            const observed = await observe(pipeline, diagnostics, {
+              prompt: textOf(pipeline.prompts, spec.prompt, "prompt"),
+              seed: spec.seed,
+              frames: spec.frames,
             });
-          } finally {
-            // 次のケースの確保の前に、このケースの段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
-            await settleReleases(gpu);
-          }
-          if (settlement?.check.status === "fail") {
-            throw new Error(referenceMismatchMessage(spec.id, settlement, references));
-          }
-        });
-      }
-    } finally {
-      await settleReleases(gpu);
-      gpu.destroy();
+            assert("video" in observed, "generate が最後まで回っていない");
+            assertEquals(
+              observed.latents.length,
+              FULL_STEPS,
+              "denoise-step の数（manifest の既定）",
+            );
+            const { video } = observed;
+            assertEquals([video.frames, video.height, video.width], [frames, 480, 832]);
+            const nonFinite = video.data.reduce(
+              (count, value) => count + (Number.isFinite(value) ? 0 : 1),
+              0,
+            );
+            const notes = [
+              await rowClassOf(spec.quant),
+              `非有限 ${nonFinite}`,
+              ...formatObserved(observed),
+            ];
+            console.log(`[wan-pipeline] ${spec.id}:\n  ${notes.join("\n  ")}`);
+            assertEquals(nonFinite, 0, "非有限");
+            assertEquals(deviceLost, undefined, "device lost");
+            for (let frame = 0; frame < video.frames; frame += 1) {
+              await writeFile(
+                fullResults.artifact(`${spec.id}-frame-${String(frame).padStart(2, "0")}.png`),
+                await encodePng(wanFrameToRgba(video, frame), video.width, video.height),
+              );
+            }
+            const sheet = contactSheet(video, 4, 8, 4);
+            await writeFile(
+              fullResults.artifact(`${spec.id}-sheet.png`),
+              await encodePng(sheet.rgba, sheet.width, sheet.height),
+            );
+            console.log(`[wan-pipeline] PNG: ${fullResults.dir.pathname}`);
+            const outcome = await settleOrObserve(references, fullResults, {
+              id: spec.id,
+              artifact: `${spec.id}.rgb`,
+              bytes: rgbBytes(video),
+            });
+            settlement = outcome.settlement;
+            return { ...outcome.fields, note: notes.join(" / ") };
+          });
+        } finally {
+          // 次のケースの確保の前に、このケースの段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
+          await settleReleases(gpu);
+        }
+        if (settlement?.check.status === "fail") {
+          throw new Error(referenceMismatchMessage(spec.id, settlement, references));
+        }
+      });
     }
   },
-});
+);
 
 /**
  * 登録するケース（回せるものだけ — 事前計算の経路は配布形と少ステップの参照、GPU 経路は配布形と umT5 のミラーが要る。

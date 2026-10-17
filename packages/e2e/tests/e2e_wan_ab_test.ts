@@ -5,7 +5,7 @@
  * 同機の参照層で、torch golden は使わない（`f16` 席は重みが違うので床が恒真になる — ADR 0110 決定 5 ②）。
  *
  * 1 ケース（= フレーム数 1 つ）の手順（形は `e2e_anima_ab_test.ts` と同じ・本体は 2.2 と共有の
- * `helpers/wan-ab-gate.ts` の {@link runWanAbCase}）:
+ * `helpers/wan-ab-gate.ts` の {@link registerWanAbCase}）:
  *
  * 1. 参照席の pipeline で **step 1 の潜在**（2 ステップの通しの 1 step 目 — 席が最初に効いた直後・決定 5-4）を採り、
  *    購読側の throw で生成を打ち切る（`captureThenAbort`）。dispose して解放を待つ。
@@ -32,7 +32,7 @@
  * （`withManifestOverride`）で張り、元の配布形は 1 バイトも書き換えない。
  */
 
-import { test, type TestContext } from "@karume/test-support/test";
+import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { SessionSpec } from "@karume/hub";
 import type { GpuContext } from "@karume/runtime";
@@ -52,14 +52,16 @@ import { WAN_ASSEMBLE_COMMAND } from "../../models/tests/helpers/wan-distributio
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
 import {
+  assigned,
   declaredSessionOf,
   effectiveSessionOf,
   errorText,
   observeOverridden,
-  runWanAbCase,
+  registerWanAbCase,
   WAN_AB_OBSERVATION,
+  type WanAbRun,
+  type WanAbScope,
   type WanAbSubject,
-  type WanStep1Observation,
 } from "./helpers/wan-ab-gate.ts";
 
 /** 配布形の置き場（`dist.py --pipeline wan` の出力先）。 */
@@ -147,7 +149,7 @@ if (manifestText === undefined) {
 const RUNNABLE = GPU_AVAILABLE && manifestText !== undefined;
 
 /**
- * 2.1 の門の対象（共有の段 {@link runWanAbCase} へ渡す）。要求の固定値（`request`）は省いて世代の既定（832×480・
+ * 2.1 の門の対象（共有の段 {@link registerWanAbCase} へ渡す）。要求の固定値（`request`）は省いて世代の既定（832×480・
  * guidance / shift は manifest の既定）に乗せる — `e2e_wan_pipeline_test.ts` の seed 経路の sha 行と同じ要求。
  *
  * MUST: 呼ぶのは {@link RUNNABLE} のテストの中だけ（配布形が無いのにここへ来たら ignore の判定の破れなので落とす）。
@@ -180,15 +182,12 @@ const subjectOf = (): WanAbSubject => {
  * NOTE: 層ごとの差は採らない — i8 の重みで層別の出口を持つ計測用グラフ（`…-i8-dyn-probe`）がまだ無い（export 台本の
  * `--layers` は f16 系列だけ）。
  */
-const recordKnobLadder = async (
-  t: TestContext,
-  gpu: GpuContext,
-  subject: WanAbSubject,
-  frames: number,
-  reference: { readonly name: string; readonly observation: WanStep1Observation },
-  practical: WanStep1Observation,
-): Promise<void> => {
-  await t.step(`ノブ単位の記録（${frames} フレーム・門ではない）`, async () => {
+const registerKnobLadder = (scope: WanAbScope, frames: number, run: () => WanAbRun): void => {
+  it(`ノブ単位の記録（${frames} フレーム・門ではない）`, async () => {
+    const gpu = scope.gpu();
+    const subject = scope.subject();
+    const { reference: referenceName, referenceRun, first: practical } = run();
+    const reference = { name: referenceName, observation: referenceRun };
     const id = `knobs-${frames}f`;
     await runRecordedCase(results, { id, failureNote: errorText }, async (recorded) => {
       const rungs = knobRungs(declaredSessionOf(subject), id);
@@ -236,38 +235,30 @@ for (const { frames, band } of CASES) {
   const id = `${PRACTICAL}-${frames}f`;
   const faults = frames === FAULT_FRAMES;
   const knobs = frames === FAULT_FRAMES || FULL_PIPELINE;
-  test({
-    name:
-      `e2e(実GPU): Wan ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う（自機 A/B）` +
+  describe.skipIf(!RUNNABLE)(
+    `e2e(実GPU): Wan ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う（自機 A/B）` +
       (faults ? "・故障注入 5 件は赤" : "") +
       (knobs ? "・ノブ単位の relRMS を記録" : ""),
-    ignore: !RUNNABLE,
-    fn: async (t) => {
-      const gpu = await acquireTestGpu();
-      try {
+    () => {
+      // One device per case, shared by the case's its (acquired before, released after them all).
+      let gpu: GpuContext | undefined;
+      let subject: WanAbSubject | undefined;
+      beforeAll(async () => {
+        gpu = await acquireTestGpu();
         assertAdapterMatchesEnvironment(gpu);
-        const subject = subjectOf();
-        const { reference, referenceRun, first } = await runWanAbCase(t, gpu, subject, {
-          id,
-          frames,
-          band,
-          faults,
-        });
-
-        if (knobs) {
-          await recordKnobLadder(
-            t,
-            gpu,
-            subject,
-            frames,
-            { name: reference, observation: referenceRun },
-            first,
-          );
-        }
-      } finally {
+        subject = subjectOf();
+      });
+      afterAll(async () => {
+        if (gpu === undefined) return;
         await settleReleases(gpu);
         gpu.destroy();
-      }
+      });
+      const scope: WanAbScope = {
+        gpu: () => assigned(gpu, "gpu"),
+        subject: () => assigned(subject, "subject"),
+      };
+      const run = registerWanAbCase(scope, { id, frames, band, faults });
+      if (knobs) registerKnobLadder(scope, frames, run);
     },
-  });
+  );
 }
