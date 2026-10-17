@@ -177,9 +177,9 @@ def export_to_file(
 ) -> IrGraph:
     """変換して `krm` として据え、格納宣言を commit したグラフを返す（export → 公開の一本道）。
 
-    `weight_dtype` が `"f16"` / `"i8"` / `"i4"` のとき適格な重みスロットだけが圧縮格納になる
-    （ADR 0018 / 0019 / 0069）。呼び出し側は**丸め（fake-quant）を参照・golden の採取より前に
-    済ませておく** MUST — 掛け忘れは `emit.stored_model` が fail loudly で落とす。
+    `weight_dtype` が `"f16"` / `"bf16"` / `"i8"` / `"i4"` のとき適格な重みスロットだけが圧縮格納に
+    なる（ADR 0018 / 0131 / 0019 / 0069）。呼び出し側は**丸め（fake-quant）を参照・golden の
+    採取より前に済ませておく** MUST — 掛け忘れは `emit.stored_model` が fail loudly で落とす。
     `weight_scales` は i8 / i4 の scale 台帳（`quantize.fake_quant_int8` / `fake_quant_int4` の
     戻り — 混成では両者を合流して渡す）。`weight_dtype_overrides`（テンソルキー → dtype）は
     1 本単位の明示指定で既定に優先する（混成格納 — 線引きは `emit._plan_weight_dtype`）。

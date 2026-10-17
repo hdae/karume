@@ -31,6 +31,7 @@ from karume.quantize import (
     group_size_of,
     quantize_to_int4,
     quantize_to_int8,
+    round_weights_to_bf16,
     round_weights_to_f16,
 )
 
@@ -134,6 +135,98 @@ class TestOverflow:
 
         with pytest.raises(QuantizeError, match="有限値 1 個が非有限へ飽和"):
             round_weights_to_f16(model)
+
+
+def is_bf16_exact(tensor: torch.Tensor) -> bool:
+    return bool(torch.equal(tensor, tensor.to(torch.bfloat16).to(torch.float32)))
+
+
+class TestBf16Rounding:
+    """bf16 の fake-quant（f16 版と対 — 対象・冪等性・計数は同じ）。"""
+
+    def test_parameters_and_f32_buffers_become_bf16_representable(self):
+        model = Tiny()
+        assert not is_bf16_exact(model.linear.weight)
+
+        round_weights_to_bf16(model)
+
+        assert is_bf16_exact(model.linear.weight)
+        assert is_bf16_exact(model.linear.bias)
+        assert is_bf16_exact(model.scale)
+        assert model.linear.weight.dtype is torch.float32
+
+    def test_rounding_is_round_to_nearest_even(self):
+        """仮数 7 bit の RNE — ちょうど中間は偶数側、中間より上は繰り上がる。
+
+        切り捨て（上位 16 bit をそのまま取る）だと 2 つ目と 3 つ目が下側へ落ちる。
+        """
+        model = Tiny()
+        with torch.no_grad():
+            # 1 + 2**-8 は 1.0 と 1 + 2**-7 のちょうど中間 → 偶数（1.0）へ。
+            model.scale[0] = 1 + 2**-8
+            # 1 + 3·2**-9 は中間より上 → 1 + 2**-7 へ。
+            model.scale[1] = 1 + 3 * 2**-9
+            # 1 + 3·2**-8 は 1 + 2**-7 と 1 + 2**-6 の中間 → 偶数（1 + 2**-6）へ。
+            model.scale[2] = 1 + 3 * 2**-8
+
+        round_weights_to_bf16(model)
+
+        assert model.scale.tolist() == [1.0, 1 + 2**-7, 1 + 2**-6]
+
+    def test_non_f32_buffers_are_left_alone(self):
+        model = Tiny()
+
+        round_weights_to_bf16(model)
+
+        assert model.index.dtype is torch.int64
+        assert torch.equal(model.index, torch.arange(3, dtype=torch.int64))
+
+    def test_rounding_is_idempotent(self):
+        model = Tiny()
+        round_weights_to_bf16(model)
+        first = model.linear.weight.clone()
+
+        round_weights_to_bf16(model)
+
+        assert torch.equal(model.linear.weight, first)
+
+    def test_the_report_counts_what_was_rounded(self):
+        model = Tiny()
+
+        report = round_weights_to_bf16(model)
+
+        assert report.parameters == 2  # weight / bias
+        assert report.buffers == 1  # scale のみ（index は f32 でない）
+        assert report.elements == 4 * 3 + 3 + 3
+
+    def test_values_beyond_the_f16_range_stay_finite(self):
+        """bf16 の指数域は f32 と同じ — f16 なら飽和する 1e6 も有限のまま丸まる。"""
+        model = Tiny()
+        with torch.no_grad():
+            model.linear.weight[0, 0] = 1e6
+
+        round_weights_to_bf16(model)
+
+        assert torch.isfinite(model.linear.weight).all()
+
+    def test_finite_values_at_the_top_of_the_f32_range_fail_loudly(self):
+        """f32 の最大有限値は bf16 の最大有限値（≈3.39e38）を超え、RNE で静かに inf になる。"""
+        model = Tiny()
+        with torch.no_grad():
+            model.linear.weight[0, 0] = torch.finfo(torch.float32).max
+
+        with pytest.raises(QuantizeError, match="有限値 1 個が非有限へ飽和"):
+            round_weights_to_bf16(model)
+
+    def test_already_infinite_values_are_not_reported_as_overflow(self):
+        """元から非有限なら丸めのせいではない（f16 版と同じ扱い）。"""
+        model = Tiny()
+        with torch.no_grad():
+            model.linear.weight[0, 0] = float("inf")
+
+        round_weights_to_bf16(model)
+
+        assert torch.isinf(model.linear.weight[0, 0])
 
 
 class Weighted(nn.Module):

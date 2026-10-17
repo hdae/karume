@@ -312,9 +312,9 @@ class TestF16Storage:
     def test_an_unknown_weight_dtype_fails_loudly(self, tmp_path):
         graph, tensors = weight_graph()
 
-        # bf16 は IR の語彙にはあるが実行経路が無い（ADR 0006）。
+        # i2 は IR の語彙にはあるが書き手が無い（固定 packed の QAT 系列だけが持つ — ADR 0097）。
         with pytest.raises(EmitError, match="書き出せない"):
-            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="bf16")
+            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="i2")
 
     def test_the_breakdown_counts_eligible_and_plain_bytes(self, tmp_path):
         graph, tensors = weight_graph()
@@ -329,11 +329,11 @@ class TestF16Storage:
         assert breakdown.plain_bytes == 3 * 4
 
     def test_the_breakdown_counts_a_declared_bf16_initializer(self):
-        """bf16 は「宣言だけ受理」の格納 dtype（実行可否は verify が単独で持つ）。
+        """内訳は宣言だけから数える — 書き手を通さない手組みグラフの bf16 も数えられる。
 
         内訳はバイト数を数えるだけの層なので、**読めるグラフを数えられない**状態
-        （語彙にある dtype で KeyError）を作らない。エクスポータは bf16 を書かないので、
-        到達経路は `parse_ir_graph` で読んだグラフと手組みグラフ。
+        （語彙にある dtype で KeyError）を作らない。書き手が書いた bf16 の内訳は
+        `TestBf16Storage` が見る。
         """
         graph, _ = weight_graph()
         graph.initializers["w"] = IrInitializer(tensor="enc.w", storage=IrStorage(dtype="bf16"))
@@ -380,6 +380,96 @@ class TestF16Storage:
         assert breakdown.plain_bytes == 4 * 8 * 4
         assert breakdown.compressed_tensors == 0
         assert breakdown.compressed_bytes == 0
+
+
+def bf16_weight_graph(**kwargs) -> tuple[IrGraph, dict[str, torch.Tensor]]:
+    """`weight_graph` を bf16 の fake-quant 済みにしたもの。
+
+    `weight_graph` の値は f16 で丸めてあり、bf16 では表現できない。
+    """
+    graph, tensors = weight_graph(**kwargs)
+    return graph, {
+        key: value.to(torch.bfloat16).to(torch.float32) for key, value in tensors.items()
+    }
+
+
+class TestBf16Storage:
+    """bf16 格納（ADR 0131）— 適格規則と書き出しの骨格は f16 と同じ。"""
+
+    def test_eligible_weights_are_stored_as_bf16_and_bias_stays_f32(self, tmp_path):
+        graph, tensors = bf16_weight_graph()
+
+        path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="bf16")
+
+        declared = written_graph(path).initializers
+        assert declared["w"].storage.dtype == "bf16"
+        assert declared["emb"].storage.dtype == "bf16"
+        assert declared["b"].storage.dtype == "f32"
+        assert stored_layout(path, "enc.w") == "bf16"
+        assert stored_layout(path, "enc.emb") == "bf16"
+        assert stored_layout(path, "enc.b") == "f32"
+        expected = compressed_view(graph, {"w": "bf16", "emb": "bf16"})
+        assert written_graph(path).to_dict() == expected.to_dict()
+
+    def test_the_eligibility_is_the_same_as_f16(self, tmp_path):
+        """適格集合は f16 と同じ（i4 のような絞り込みは無い）。
+
+        グラフ出力に載った重みは f16 と同じく f32 のまま書く。
+        """
+        graph, tensors = bf16_weight_graph(output_weight=True)
+
+        path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="bf16")
+
+        assert written_graph(path).to_dict() == compressed_view(graph, {"emb": "bf16"}).to_dict()
+
+    @pytest.mark.parametrize("key", ["enc.w", "enc.emb"])
+    def test_the_payload_is_the_upper_half_of_each_f32(self, tmp_path, key):
+        """payload = bf16 のリトルエンディアン 2 バイト / 要素（奇数要素の `enc.emb` も含む）。
+
+        比較の基準は f32 のビット列の上位 16 bit を直接切り出したもの — `to(bfloat16)` を
+        基準にすると書き手と同じ変換をなぞるだけになる。
+        """
+        graph, tensors = bf16_weight_graph()
+        bits = tensors[key].reshape(-1).view(torch.int32)
+        upper = (bits >> 16).to(torch.int16)
+
+        path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="bf16")
+
+        assert stored_bytes(path, key) == upper.numpy().tobytes()
+        converted = tensors[key].to(torch.bfloat16).view(torch.int16)
+        assert stored_bytes(path, key) == converted.numpy().tobytes()
+
+    def test_the_stored_values_read_back_to_the_rounded_weights_bit_for_bit(self, tmp_path):
+        graph, tensors = bf16_weight_graph()
+        expected = tensors["enc.emb"].clone()
+
+        path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="bf16")
+
+        stored = stored_tensor(path, "enc.emb", torch.bfloat16, expected.shape).to(torch.float32)
+        assert torch.equal(stored.view(torch.int32), expected.view(torch.int32))
+
+    def test_an_f16_exact_but_not_bf16_exact_weight_fails_loudly(self, tmp_path):
+        """f16 の丸め済みは bf16 の丸め済みではない — 格納を取り違えた丸めは黙って通さない。
+
+        `1 + 2**-9` は f16（仮数 10 bit）では厳密・bf16（仮数 7 bit）では表現できない。
+        """
+        graph, tensors = bf16_weight_graph()
+        tensors["enc.w"] = torch.full((3, 4), 1 + 2**-9)
+
+        with pytest.raises(EmitError, match=r"bf16 で表現できない値を含む.*fake-quant"):
+            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="bf16")
+
+    def test_the_breakdown_counts_the_written_bf16_bytes(self, tmp_path):
+        graph, tensors = bf16_weight_graph()
+
+        path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="bf16")
+        breakdown = storage_breakdown(written_graph(path))
+
+        assert breakdown.compressed_tensors == 2
+        assert breakdown.compressed_bytes == (3 * 4 + 3 * 5) * 2
+        assert breakdown.plain_tensors == 1
+        assert breakdown.plain_bytes == 3 * 4
+        assert breakdown.scale_bytes == 0
 
 
 def int8_weight_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:

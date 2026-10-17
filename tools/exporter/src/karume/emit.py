@@ -93,8 +93,9 @@ from karume.quantize import (
     quantize_to_int8,
 )
 
-#: 書き出せる格納 dtype（重みスロット向け）。bf16 は実行経路が無い（ADR 0006）。
-WEIGHT_DTYPES = ("f32", "f16", "i8", "i4")
+#: 書き出せる格納 dtype（重みスロット向け）。bf16 は f16 と同じ骨格（適格 = 往復がビット一致・
+#: 実行経路は ADR 0131）。
+WEIGHT_DTYPES = ("f32", "f16", "bf16", "i8", "i4")
 
 #: i4 の**実行経路を持つ** op（= i4 適格な重みスロットの消費先 — ADR 0069 決定 5 の linear と
 #: その embedding / conv1d 追補）。ランタイム側 `packages/runtime/src/runtime/plan.ts` の
@@ -353,6 +354,11 @@ def unpack_int4(packed: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
 def _is_f16_exact(tensor: torch.Tensor) -> bool:
     """f32 → f16 → f32 の往復がビット一致するか（= fake-quant 済みか）。"""
     return bool(torch.equal(tensor, tensor.to(torch.float16).to(torch.float32)))
+
+
+def _is_bf16_exact(tensor: torch.Tensor) -> bool:
+    """f32 → bf16 → f32 の往復がビット一致するか（= fake-quant 済みか）。"""
+    return bool(torch.equal(tensor, tensor.to(torch.bfloat16).to(torch.float32)))
 
 
 def _unrounded(name: str, tensor_key: str, detail: str) -> EmitError:
@@ -696,9 +702,9 @@ def _plan_weight_dtype(
         # fail loudly で受ける。
         if dtype == "i4" and key not in weight_dtype_overrides and name not in i4_eligible:
             continue
-        if dtype == "f16":
-            declaration = IrInitializer(tensor=key, storage=IrStorage(dtype="f16"))
-            conversion = _Conversion(dtype="f16", name=name)
+        if dtype in ("f16", "bf16"):
+            declaration = IrInitializer(tensor=key, storage=IrStorage(dtype=dtype))
+            conversion = _Conversion(dtype=dtype, name=name)
         else:
             if dtype == "i8":
                 scale_key, scale, declaration = _plan_i8(
@@ -750,6 +756,10 @@ def _convert_for_storage(key: str, tensor: torch.Tensor, conversion: _Conversion
         if not _is_f16_exact(tensor):
             raise _unrounded(conversion.name, key, "f16 で表現できない値を含む")
         return tensor.to(torch.float16)
+    if conversion.dtype == "bf16":
+        if not _is_bf16_exact(tensor):
+            raise _unrounded(conversion.name, key, "bf16 で表現できない値を含む")
+        return tensor.to(torch.bfloat16)
     if conversion.dtype == "i8":
         quantized = quantize_to_int8(tensor, conversion.scale)
         # MUST: scale は fake-quant が使った値**そのまま**で逆変換する（再計算禁止 — ADR 0019）。
@@ -770,8 +780,8 @@ def _convert_for_storage(key: str, tensor: torch.Tensor, conversion: _Conversion
 
 #: 格納 dtype → 1 要素の **bit** 数（IR の宣言だけからバイト数を導出するための表）。
 #:
-#: 語彙は verify の `STORAGE_DTYPES` に揃える（`bf16` は宣言だけ受理する格納 dtype で、
-#: 実行可否は `verify.assert_runtime_support` が単独で持つ）— ここは**バイト数を数えるだけ**の
+#: 語彙は verify の `STORAGE_DTYPES` に揃える（実行可否は `verify.assert_runtime_support` が
+#: 単独で持つ）— ここは**バイト数を数えるだけ**の
 #: 層なので、読めるグラフを数えられない状態を作らない。bit 単位なのは packed 4bit
 #: （1 バイトに 2 要素 — ADR 0069 決定 2）が要素バイト数で表せないため。
 _STORAGE_BITS = {"f32": 32, "f16": 16, "bf16": 16, "i8": 8, "i4": 4, "i2": 2, "i32": 32}
@@ -862,7 +872,12 @@ class _StoredTensors(Mapping[str, Buffer]):
             raise EmitError(f"テンソル '{key}': meta のまま格納しようとしている（実体が無い）")
         # memoryview 経由で渡す（`tobytes()` は 1 本ぶんの複製を作る — DiT の重みは
         # 1 テンソルで数百 MB あり、ピーク RAM をそのぶん押し上げる）。
-        return memoryview(tensor.contiguous().numpy()).cast("B")
+        stored = tensor.contiguous()
+        if stored.dtype is torch.bfloat16:
+            # numpy は bfloat16 を持たない — 同じ 2 バイトの int16 へ読み替える（ビット列は不変・
+            # バイト列は bf16 のリトルエンディアン 2 バイト / 要素そのもの）。
+            stored = stored.view(torch.int16)
+        return memoryview(stored.numpy()).cast("B")
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._tensors)

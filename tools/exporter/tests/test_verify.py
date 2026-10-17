@@ -1310,7 +1310,21 @@ class TestRuntimeSupport:
         assert "非対応 意味論 dtype (2)" in message
         assert "値 'v': i32" in message and "値 'i': f32" in message
 
-    def test_unsupported_storage_dtype_is_reported(self):
+    def test_bf16_storage_passes_the_capability_gate(self):
+        """bf16 は f16 と同じ経路で実行できる（ADR 0131・TS 側 RUNTIME_SUPPORT.storage と同じ）。"""
+        graph = parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "bf16"}}})
+
+        assert assert_runtime_support(graph) is None
+
+    def test_unsupported_storage_dtype_is_reported(self, monkeypatch):
+        """対応表に無い格納は列挙で落ちる。
+
+        IR の格納語彙は全て実行できるので、対応表を bf16 抜きへ狭めて門そのものを見る
+        （TS 側 ops_support_test の `M0_SUPPORT` と同じ形）。
+        """
+        monkeypatch.setattr(
+            "karume.verify.M0_STORAGE_DTYPES", frozenset({"f32", "f16", "i8", "i4", "i2", "i32"})
+        )
         graph = parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "bf16"}}})
 
         with pytest.raises(ContainerError, match="非対応 格納 dtype"):

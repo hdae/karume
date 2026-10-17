@@ -77,6 +77,43 @@ def round_weights_to_f16(model: torch.nn.Module) -> RoundReport:
     return RoundReport(parameters=counts["parameter"], buffers=counts["buffer"], elements=elements)
 
 
+def round_weights_to_bf16(model: torch.nn.Module) -> RoundReport:
+    """パラメータと f32 バッファを bf16 表現可能値へ丸める（計算は f32 のまま）。
+
+    {@link round_weights_to_f16} と対（対象・冪等性・計数は同じ）。丸めは
+    `Tensor.to(bfloat16)` の RNE（bf16 = f32 の上位 16 bit）。
+
+    MUST: 有限値が非有限へ飽和したら fail loudly。bf16 は f32 と指数域が同じでも仮数が 7 bit
+    なので最大有限値は (2 − 2⁻⁷)·2¹²⁷ ≈ 3.39e38 で、それを超える f32 の上端
+    （|x| ≥ (2 − 2⁻⁸)·2¹²⁷）は RNE で静かに ±inf へ繰り上がる — 無検査だと f16 版と同じく
+    「重みに inf が入ったモデル」と「同じ inf で計算した参照」が一致してしまう。
+    """
+    counts = {"parameter": 0, "buffer": 0}
+    elements = 0
+    with torch.no_grad():
+        # named_parameters / named_buffers は既定で重複（重み共有）を 1 度しか出さない。
+        # bf16 丸めは冪等なので 2 度当たっても値は変わらないが、計数は実体の本数で出す。
+        targets = [("parameter", name, t) for name, t in model.named_parameters()]
+        targets += [("buffer", name, t) for name, t in model.named_buffers()]
+        for kind, name, tensor in targets:
+            if tensor.dtype is not torch.float32:
+                continue
+            rounded = tensor.to(torch.bfloat16).to(torch.float32)
+            # 要素単位: 元から非有限の要素は丸めのせいではないので数えない。
+            saturated = torch.isfinite(tensor) & ~torch.isfinite(rounded)
+            if saturated.any():
+                overflow = int(saturated.sum())
+                raise QuantizeError(
+                    f"'{name}': bf16 への丸めで有限値 {overflow} 個が非有限へ飽和した"
+                    f"（bf16 の最大有限値は ≈3.39e38・実測 max |x| = "
+                    f"{float(tensor.abs().max()):.4g}）"
+                )
+            tensor.copy_(rounded)
+            counts[kind] += 1
+            elements += tensor.numel()
+    return RoundReport(parameters=counts["parameter"], buffers=counts["buffer"], elements=elements)
+
+
 # ---- i8（per-channel symmetric）— ADR 0019 ---------------------------------
 
 #: 量子化幅の片側（**−128 は使わない**）。±127 に閉じると最大絶対値要素が `q = ±127` に

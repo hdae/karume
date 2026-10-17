@@ -294,14 +294,15 @@ F32_BOOL_DTYPES = frozenset({"f32", "bool"})
 I32_DTYPES = frozenset({"i32"})
 #: グラフ入力として転送できる意味論 dtype（ADR 0009 — 要素は全型 4 バイト）。
 IO_DTYPES = SEMANTIC_DTYPES
-#: ランタイムが実行できる格納 dtype（宣言としては bf16 も valid）。
+#: ランタイムが実行できる格納 dtype。
 #: `i32` は記号依存定数の焼き込み先として実行対象（生の int32 — ADR 0010）。
-#: `f16` は ADR 0018 / `i8` は ADR 0019 / `i4` は ADR 0069 / `i2` は ADR 0097 — 適格な重み
+#: `f16` は ADR 0018 / `bf16` は ADR 0131 / `i8` は ADR 0019 / `i4` は ADR 0069 / `i2` は
+#: ADR 0097 — 適格な重み
 #: スロットは圧縮のまま GPU 常駐し、適格外はロード時に CPU で f32 展開されるので、どちらの経路でも
 #: 実行できる（TS 側 RuntimeSupport.storage の鏡像）。i4 と i2 は適格が狭い — i4 は linear /
 #: embedding / conv1d（`groups == 1`）の重みスロット限定（`emit.I4_WEIGHT_OPS`）、i2 は linear /
 #: embedding の重みスロット限定の固定 packed（ADR 0097）。
-M0_STORAGE_DTYPES = frozenset({"f32", "f16", "i8", "i4", "i2", "i32"})
+M0_STORAGE_DTYPES = frozenset({"f32", "f16", "bf16", "i8", "i4", "i2", "i32"})
 
 OpKind = Literal[
     "unary",

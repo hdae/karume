@@ -730,8 +730,10 @@ the attrs are placed here.
 
 - A Python interpretation oracle for the IR (numerical comparison). Numerical verification is
   handled by the Deno-side E2E.
-- **bf16 storage** (it is in the IR vocabulary but has no execution path — ADR 0006). f16 is
-  implemented in ADR 0018, i8 + per-channel scale in ADR 0019, and i4 + group scale in ADR 0069.
+- **bf16 storage** is no longer pending: it is written like f16 (eligible only when the f32 → bf16
+  → f32 round trip is bit-exact; `round_weights_to_bf16` does the rounding) and executed by the
+  runtime since ADR 0131. f16 is implemented in ADR 0018, i8 + per-channel scale in ADR 0019, and
+  i4 + group scale in ADR 0069.
 - Host implementations of the runtime pipelines (SBV2: text → durations → assembling y_mask → voice
   / Anima: tokenization → scheduler → CFG → denormalization). The layer that connects the emitted
   targets is outside the exporter's scope (for Anima the host implementation lives in
