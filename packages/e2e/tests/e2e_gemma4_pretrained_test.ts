@@ -36,12 +36,11 @@
 // all come from that one source), and neither `fetch` nor `CacheStorage` is touched. A local
 // source never copies bytes into a cache, so this test leaves nothing in the persistent cache.
 
-import { readTextFile, readTextFileSync } from "@karume/test-support/fs";
+import { makeTempDir, readTextFile, readTextFileSync, remove } from "@karume/test-support/fs";
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { MANIFEST_FILENAME, type ModelEntry, parseManifest } from "@karume/hub";
-import { nodeDirectory } from "@karume/hub/node";
-import { MemoryCacheStorage } from "../../hub/tests/helpers/mock.ts";
+import { nodeCacheStorage, nodeDirectory } from "@karume/hub/node";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 // MUST: 入口は**公開面**（`./gemma` サブパス）から取る — `src/...` を直に掴むと、面が痩せていても
 // 門が緑のままになる（消費者が書けない経路で検収したことになる）。
@@ -161,21 +160,25 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
   "gemma4 配布形: fromPretrained → chat が実 GPU で完走し既定サンプラが宣言どおり",
   () => {
     let server: LocalDistServer;
+    let cacheDir: string;
     let pipeline: Gemma4Pipeline;
     beforeAll(async () => {
       server = await serveLocalDist(new URL(".", MIRROR_DIR).pathname);
+      // The HTTP source prefetches through a CacheStorage; the real on-disk one in a temporary
+      // directory keeps the distribution out of RAM and out of any user cache.
+      cacheDir = await makeTempDir({ prefix: "karume-gemma4-cache-" });
       pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
-        // Node has no CacheStorage; the HTTP source needs one (hub prefetches through it).
-        caches: new MemoryCacheStorage(),
+        caches: nodeCacheStorage(cacheDir),
         maxResidentPleBytes: await maxResidentPleBytes(),
       });
     });
     afterAll(async () => {
-      // Both stay unassigned when beforeAll failed before reaching them.
+      // All stay unassigned when beforeAll failed before reaching them.
       try {
         await pipeline?.dispose();
       } finally {
         await server?.close();
+        if (cacheDir !== undefined) await remove(cacheDir, { recursive: true });
       }
     });
 
@@ -260,14 +263,20 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       { name: "既定 quant（宣言 parallel-fused）→ ③ 無し", options: {}, expect: "parallel-fused" },
     ] as const;
     let server: LocalDistServer;
+    let cacheDir: string;
+    let caches: CacheStorage;
     let entry: ModelEntry;
     beforeAll(async () => {
       server = await serveLocalDist(new URL(".", MIRROR_DIR).pathname);
+      // One on-disk cache for every case: the distribution is warmed once and read back per case.
+      cacheDir = await makeTempDir({ prefix: "karume-gemma4-cache-" });
+      caches = nodeCacheStorage(cacheDir);
       const manifest = parseManifest(MANIFEST_TEXT ?? "");
       entry = manifest.models.e2b;
     });
     afterAll(async () => {
       await server?.close();
+      if (cacheDir !== undefined) await remove(cacheDir, { recursive: true });
     });
     for (const one of cases) {
       it(one.name, async () => {
@@ -287,7 +296,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         try {
           const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
             gpu,
-            caches: new MemoryCacheStorage(),
+            caches,
             maxResidentPleBytes: await maxResidentPleBytes(),
             onRunDiagnostics: (diagnostics, phase) => {
               runs.push(diagnostics.lastRunPipelines);
