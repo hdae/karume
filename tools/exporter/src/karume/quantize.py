@@ -78,10 +78,16 @@ def round_weights_to_f16(model: torch.nn.Module) -> RoundReport:
 
 
 def round_weights_to_bf16(model: torch.nn.Module) -> RoundReport:
-    """パラメータと f32 バッファを bf16 表現可能値へ丸める（計算は f32 のまま）。
+    """パラメータと **checkpoint が運ぶ** f32 バッファを bf16 表現可能値へ丸める（計算は f32）。
 
-    {@link round_weights_to_f16} と対（対象・冪等性・計数は同じ）。丸めは
-    `Tensor.to(bfloat16)` の RNE（bf16 = f32 の上位 16 bit）。
+    {@link round_weights_to_f16} と対（冪等性・計数は同じ）。丸めは `Tensor.to(bfloat16)` の
+    RNE（bf16 = f32 の上位 16 bit）。
+
+    MUST: 非永続バッファ（`persistent=False` — `state_dict()` に出ない）は丸めない。それは
+    checkpoint に無く初期化時に f32 で計算される値（RoPE の `inv_freq` など）で、上流の推論も
+    f32 のまま使う。bf16 の資産は「上流のビット列 + 上流と同じ f32 の計算定数」で、丸めると
+    上流が持っていない誤差を golden に入れる（実測: Anima の text_conditioner で 1.4e-4 —
+    ADR 0131 決定 2）。f16 版は既存の系列と golden を動かさないため従来どおり全バッファを丸める。
 
     MUST: 有限値が非有限へ飽和したら fail loudly。bf16 は f32 と指数域が同じでも仮数が 7 bit
     なので最大有限値は (2 − 2⁻⁷)·2¹²⁷ ≈ 3.39e38 で、それを超える f32 の上端
@@ -93,8 +99,10 @@ def round_weights_to_bf16(model: torch.nn.Module) -> RoundReport:
     with torch.no_grad():
         # named_parameters / named_buffers は既定で重複（重み共有）を 1 度しか出さない。
         # bf16 丸めは冪等なので 2 度当たっても値は変わらないが、計数は実体の本数で出す。
+        # state_dict のキー = checkpoint が運ぶテンソル（非永続バッファは出ない）。
+        carried = model.state_dict().keys()
         targets = [("parameter", name, t) for name, t in model.named_parameters()]
-        targets += [("buffer", name, t) for name, t in model.named_buffers()]
+        targets += [("buffer", name, t) for name, t in model.named_buffers() if name in carried]
         for kind, name, tensor in targets:
             if tensor.dtype is not torch.float32:
                 continue

@@ -181,6 +181,21 @@ class TestBf16Rounding:
         assert model.index.dtype is torch.int64
         assert torch.equal(model.index, torch.arange(3, dtype=torch.int64))
 
+    def test_non_persistent_buffers_keep_their_f32_values(self):
+        """checkpoint に無い計算値（RoPE の inv_freq のような `persistent=False` のバッファ）は
+        上流も f32 のまま使うので丸めない。永続バッファ（`scale`）は丸める。
+        """
+        model = Tiny()
+        computed = torch.tensor([1 + 2**-9, 1 + 3 * 2**-9, 0.1])
+        model.register_buffer("computed", computed.clone(), persistent=False)
+        assert "computed" not in model.state_dict()
+
+        report = round_weights_to_bf16(model)
+
+        assert torch.equal(model.computed, computed)
+        assert is_bf16_exact(model.scale)
+        assert report.buffers == 1
+
     def test_rounding_is_idempotent(self):
         model = Tiny()
         round_weights_to_bf16(model)
