@@ -305,6 +305,7 @@ e2e を持つとき（gemma4）に、fixture と結果の席が同じ名前で�
   Deno の版で出力が変わりうる）。環境キーは Deno の版を含まない（決定 2）ので、Deno の版上げで同じキーの PNG の行が
   割れうる。これは赤で気づく形で、数値の不変を確かめてから `rewrite` する（決定 3 の「何が変わったのかを先に言える
   とき」）。WAV（TS 実装の PCM 書き出し）と f32 safetensors は数値だけで決まる。
+  **改訂（2026-10-17）**: PNG の行は圧縮前の画素列の sha に変えた（追記決定 9）— 圧縮器の差は行に乗らない。
 
 ### 追記決定 7: 既存の検査に足した sha の順序
 
@@ -353,3 +354,22 @@ depth-anything の実画像 = 判別、vowel-detector の全鎖 = `.lab` の完�
 - opt-in のケース（環境変数で有効になる id）は無効時に登録しない（Wan の `CASE_IDS` の条件つき登録が前例）。
 - 棚卸し（2026-10-03・全 12 家族）: B570 で行が無いのは Wan の `gpu-text-*` 2 本（10d-4 で write）だけ。RTX 3080 Ti では anima の
   extra 2 本が新たに赤になる（行の無い機は赤 — 本 ADR の思想どおり）。行を 1 本も持たない機は前後で変わらない。
+
+## 追記（2026-10-17）— PNG の行は圧縮前の画素列の sha で持つ
+
+### 追記決定 9: PNG を実物に持つケースの sha は、PNG のバイト列ではなく `encodePng` が IDAT に書く RGB8 の画素列に対して採る
+
+Node への移植（ADR [0127](0127-node-dawn-toolchain.md)）で、同じ GPU（RTX 3080 Ti）の Deno と Node の走行は全系列で数値の差 0 だったが、
+anima の PNG の行 11 本だけが割れた。PNG の IDAT は `CompressionStream("deflate")` の出力で、その zlib 実装はランタイムごとに違う
+（画素は同一・バイトが違う）。行が掴みたいのは数値であって圧縮器ではないので、sha は `encodePng` が IDAT に書く画素列（行優先・RGB8 —
+`GeneratedImage.data` の RGBA から alpha〈常に 255・`encodePng` が検査する〉を落としたもの）に対して採る。PNG は従来どおり
+実物として結果の席に残す（目視用）。
+
+- 追記決定 6 の「sha は実物ファイルのバイト列に対して採る」は PNG の実物には当てはまらない。実物の PNG を
+  `decodePng`（`@karume/test-support/png-decode`）で展開した画素列の sha が行と一致する。
+- 既存の行の焼き直し: 3 環境キー × 11 ケース = 33 行を、行のバイト sha と一致する凍結済みの実物
+  （`outputs/verify/<環境キー>/…/*.png`）を展開して再計算した（走り直しではない）。再計算の後、
+  `deno-nvidia-geforce-rtx-3080-ti` と `node-nvidia-geforce-rtx-3080-ti` の行は 11 ケース全てで一致した
+  （Dawn と wgpu でこの GPU の画素はビット同一 — 移植の突合の裏付け）。
+- 追記決定 6 の「Deno の版上げで PNG の行が割れうる」は解消（圧縮器の差は行に乗らない）。
+- `tools/verify-diff` は結果の `actual` を比べる道具で、PNG の行が画素の sha になっても扱いは変わらない。

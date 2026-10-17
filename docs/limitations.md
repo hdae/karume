@@ -1777,8 +1777,8 @@ B570 / Mesa ANV でフル verify: 当時の定数 1 本に対して 16 本すべ
 行を持つ系列は 9 系列（2026-09-26 — ADR 0106 追記その 3）: anima / sbv2 / irodori の PNG / WAV に加え、siglip2 /
 gemma4 の golden（runtime 側 e2e — 行は `packages/runtime/tests/fixtures/references/<系列>-golden.json`）・
 birefnet / depth-anything の実画像・vowel-detector の全鎖の f32 出力（safetensors）と、gemma4 / gemma4-qat の
-quant 席の token id 列（JSON）。PNG の実物は数値に加えてエンコーダ（Deno の `CompressionStream`）にも依存し、
-環境キーは Deno の版を含まないので、Deno の版上げで数値が同じでも同じキーの PNG の行が割れうる（赤で気づく形）。
+quant 席の token id 列（JSON）。PNG を実物に持つ anima の行は圧縮前の画素列（RGB8）の sha で、PNG のバイト列
+（IDAT の deflate はランタイムの zlib 実装に依存する）は行に乗らない（2026-10-17・ADR 0106 追記）。
 
 機序: IEEE 754 の加減乗除はデバイス間でも完全同一だが、①超越関数（`exp` 等）の実装が
 ドライバ / コンパイラ依存 ②シェーダコンパイラの fma 融合判断（積和を 1 命令に融合すると

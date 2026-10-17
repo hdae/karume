@@ -272,8 +272,10 @@ differs only where intended (phase 3).
 - **The fetch layer's read strategy on Node.** `@hdae/fetch-cache` defaults to the "blob" strategy
   unless a Deno global exists; hub asks for "stream" on Deno and Node itself (Node's Blob is
   in-memory). The default belongs in the fetch layer.
-- **What the per-environment sha256 rows hash.** PNG artifacts are hashed as encoded bytes, and the
-  deflate output differs between Deno's and Node's zlib while the pixels are identical (the port
-  measured 0 numeric differences across every family; 69 of 80 Node rows equal the Deno rows and the
-  11 others are all anima PNGs). Hashing the decoded pixels (or the raw tensor) would make the rows
-  runtime-independent.
+- **What the per-environment sha256 rows hash — resolved 2026-10-17.** PNG artifacts were hashed as
+  encoded bytes, and the deflate output differs between Deno's and Node's zlib while the pixels are
+  identical (the port measured 0 numeric differences across every family; 69 of 80 Node rows equalled
+  the Deno rows and the 11 others were all anima PNGs). PNG rows now hash the RGB8 pixels the encoder
+  writes (ADR 0106, addendum 2026-10-17); the other artifacts (safetensors, WAV, raw RGB) were
+  runtime-independent already. The 33 anima rows were recomputed from the frozen artifacts, and the
+  Deno and Node rows on the RTX 3080 Ti are equal for every case.
