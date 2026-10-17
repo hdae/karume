@@ -588,18 +588,23 @@ const assertBasePng = async (
  * 下の 1 本（同じ参照 sha を要求する）で別に閉じる。
  *
  * `source` はセッション repo として配る配布形（省略時は公式リポの素の base）。越境参照の門
- * （下の「越境参照」節）が extra の変種を同じノブで通すのに使う。
+ * （下の「越境参照」節）が extra の変種を同じノブで通すのに使う。`quant` は席の上書き
+ * （省略時は {@link BASE_REFERENCE} の実用席 — 忠実席 `bf16` の門が使う）。
  */
 const assertBaseReferencePng = async (
   label: string,
-  options: { readonly sampler?: AnimaSamplerType; readonly source?: DistributionSource } = {},
+  options: {
+    readonly sampler?: AnimaSamplerType;
+    readonly source?: DistributionSource;
+    readonly quant?: string;
+  } = {},
 ): Promise<void> => {
   const { dir, manifest, model } = options.source ?? {
     dir: ASSETS_DIR,
     manifest: readManifest(),
     model: BASE_MODEL,
   };
-  const { quant } = BASE_REFERENCE;
+  const quant = options.quant ?? BASE_REFERENCE.quant;
   const server = await serveAssets(servedOrigins(manifest, quant, dir, model));
   try {
     // MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。
@@ -617,6 +622,16 @@ test.skipIf(!RUNNABLE || references.lacksReference("base-cfg"))(
   `e2e(実GPU): 素の base / CFG ${BASE_REFERENCE.guidanceScale} / ` +
     `${BASE_REFERENCE.steps}step の PNG が参照 sha256 と一致する`,
   () => assertBaseReferencePng("base-cfg"),
+);
+
+// 忠実プリセット `bf16`（ADR 0131 決定 3 — 4 役とも上流 checkpoint の BF16 のビット列・演算は f32）。
+// CFG の門と同じノブで 1 枚焼き、この機の行と突き合わせる。f16 席とは丸めが違う（f16 は指数域が
+// 狭い）ので別の行を持ち、双子ではない。bf16 の重みはカーネル内の bitcast で展開される
+// （ADR 0131 決定 1）— この門はその経路が配布形の実資産で通ることまで含めて固定する。
+test.skipIf(!RUNNABLE || references.lacksReference("base-cfg-bf16"))(
+  `e2e(実GPU): 素の base の忠実席 bf16 / CFG ${BASE_REFERENCE.guidanceScale} / ` +
+    `${BASE_REFERENCE.steps}step の PNG が参照 sha256 と一致する`,
+  () => assertBaseReferencePng("base-cfg-bf16", { quant: "bf16" }),
 );
 
 // --- 全量面（fromAssets）で分割配布形を読む -----------------------------------
@@ -1477,6 +1492,7 @@ const CASE_IDS: readonly string[] = [
   ...REFERENCE.map(({ quant, resolution }) => caseIdOf(quant, resolution)),
   TURBO_DPMPP_CASE,
   "base-cfg",
+  "base-cfg-bf16",
   "base-cfg-fromAssets-shards",
   "base-cfg-dpmpp",
   "fromPretrained-512",

@@ -7,6 +7,9 @@
       "deno-nvidia-geforce-rtx-3080-ti": "da099f4fe71a64e3e398869deff3fc64a538d5e4f0eceeb5ea22547598f7e326",
       "node-nvidia-geforce-rtx-3080-ti": "da099f4fe71a64e3e398869deff3fc64a538d5e4f0eceeb5ea22547598f7e326"
     },
+    "base-cfg-bf16": {
+      "node-nvidia-geforce-rtx-3080-ti": "83ccb11f867b25330910f24247f2ca6e37a22bd0c2560ee6189aef767fd16782"
+    },
     "base-cfg-dpmpp": {
       "deno-intel-graphics-bmg-g21": "7123f36248c042af15681bdc759baf6484299e56457fa4abc88444450404845a",
       "deno-nvidia-geforce-rtx-3080-ti": "071b2ca0a97d4471e739250a54e797c11de36c36ccb81c72f7d8e2e79382ae3e",
