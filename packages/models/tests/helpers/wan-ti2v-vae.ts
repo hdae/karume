@@ -2,7 +2,7 @@
  * Wan2.2 TI2V-5B の VAE decoder の chunk グラフ（f16 系列 `wan2.2-ti2v-5b-f16-dyn`）のテストが共有するもの
  * （ADR 0121 段 4）: 系列の置き場・フィクスチャのケースの表・取り決めの期待値（cache の表を含む）・資産の在否。
  *
- * GPU 不要の突き合わせ（`wan_ti2v_vae_chunks_host_test.ts`）と実 GPU の chunk 列の照合
+ * GPU 不要の突き合わせ（`e2e_wan_ti2v_vae_chunks_host_test.ts`）と実 GPU の chunk 列の照合
  * （`e2e_wan_ti2v_vae_chunks_test.ts`）が同じ表を読む — 表を 2 か所で育てると、片方だけに足したケースが黙って
  * 片方の門を外れる。
  *

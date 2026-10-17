@@ -7,7 +7,7 @@
 // ③ 配布ミラーの束の網羅: 数値を変える非参照値を 1 つでも持つ quant 席は、表に行があること
 //    （census の無い束が配布に増えるのを機械で防ぐ — ADR 0110 決定 5 ①）。
 //
-// ミラーが無い機では③だけを理由つきで**明示 SKIP** する（`session_options_mirror_test.ts` と同じ
+// ミラーが無い機では③だけを理由つきで**明示 SKIP** する（`e2e_session_options_mirror_test.ts` と同じ
 // 規律 — ミラーごと無い形は `runtime/tests/distribution_gate_test.ts` が FAIL にする）。
 
 import { isNotFound, readDir, readTextFile } from "@karume/test-support/fs";

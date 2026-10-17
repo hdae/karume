@@ -306,8 +306,8 @@ Measured on 2026-10-05:
 | GPU (B570, Deno) chunk loop vs upstream, `band`           | max abs 9.48e-6 (tolerance 4.8e-5)                  |
 | GPU chunk loop vs upstream, `accept` / `long` (21 chunks) | max abs 7.42e-6 / 1.15e-5                           |
 
-The GPU check is `packages/models/tests/e2e_wan_ti2v_vae_chunks_test.ts` and the asset check
-`packages/models/tests/wan_ti2v_vae_chunks_host_test.ts`, both in `deno task test:models:wan-ti2v`.
+The GPU check is `packages/e2e/tests/e2e_wan_ti2v_vae_chunks_test.ts` and the asset check
+`packages/e2e/tests/e2e_wan_ti2v_vae_chunks_host_test.ts`, both in `vp test --project models:wan-ti2v`.
 
 The pytest side is `wan/tests/test_dup_up_3d.py`, `wan/tests/test_vae_patch_ti2v.py` and the
 TI2V-5B classes of `wan/tests/test_export_vae.py`. With the `wan` group installed they always run on

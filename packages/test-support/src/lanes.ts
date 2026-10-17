@@ -51,7 +51,6 @@ export const FAMILY_LANES: readonly Lane[] = [
   family("minicpm5", both("minicpm5")),
   family("embeddinggemma", [`${E2E}/e2e_embeddinggemma*_test.ts`]),
   family("deberta", [`${E2E}/e2e_deberta*_test.ts`]),
-  family("dacvae", [`${E2E}/e2e_dacvae*_test.ts`]),
   family("wan", both("wan"), both("wan_ti2v")),
   family("wan-ti2v", both("wan_ti2v")),
   family("umt5", both("umt5"), both("wan")),

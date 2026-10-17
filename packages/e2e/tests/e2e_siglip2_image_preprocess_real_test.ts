@@ -57,7 +57,7 @@ import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
-import { normalizeToNchw, resizeRgb8 } from "../src/image/preprocess.ts";
+import { normalizeToNchw, resizeRgb8 } from "../../models/src/image/preprocess.ts";
 // NOTE: PNG デコーダは karume 本体が持たない設計（preprocess.ts のモジュール doc — 入口は
 // RGB8 の画素列）。テストが実画像を読むためだけの道具を runtime のテスト配下から借りる。
 // models → runtime は**正方向**の依存で、かつ両者とも `tests/` は publish から除外される

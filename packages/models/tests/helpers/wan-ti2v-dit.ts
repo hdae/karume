@@ -2,7 +2,7 @@
  * Wan2.2 TI2V-5B の DiT（i8 系列 `wan2.2-ti2v-5b-i8-dyn`）のテストが共有するもの（ADR 0121 段 1 / 段 2）:
  * 系列の置き場・golden のケースの表・golden の読み口・ホスト側の条件マスク。
  *
- * GPU 不要の突き合わせ（`wan_ti2v_dit_host_test.ts`）と実 GPU の r 門（`e2e_wan_ti2v_dit_test.ts`）が同じ
+ * GPU 不要の突き合わせ（`e2e_wan_ti2v_dit_host_test.ts`）と実 GPU の r 門（`e2e_wan_ti2v_dit_test.ts`）が同じ
  * ケースの表を読む — 表を 2 か所で育てると、片方だけに足したケースが黙って片方の門を外れる。
  *
  * ケースの正本は `tools/export-recipes/wan/ti2v_export_dit.py` の `CASES`（S = 192 — 段 1 の `write`）と

@@ -26,11 +26,11 @@
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { codecLayout, type OpenedContainer, prepareContainer } from "@karume/runtime";
-import { WAN22_TI2V_GENERATION } from "../src/wan/descriptor.ts";
-import { ditContract } from "../src/wan/dit-loop.ts";
-import { patchifyLatents, wanTokenGrid } from "../src/wan/dit-tokens.ts";
-import { wanRopeTables } from "../src/wan/dit-rope.ts";
-import { timestepsProj } from "../src/wan/dit-timestep.ts";
+import { WAN22_TI2V_GENERATION } from "../../models/src/wan/descriptor.ts";
+import { ditContract } from "../../models/src/wan/dit-loop.ts";
+import { patchifyLatents, wanTokenGrid } from "../../models/src/wan/dit-tokens.ts";
+import { wanRopeTables } from "../../models/src/wan/dit-rope.ts";
+import { timestepsProj } from "../../models/src/wan/dit-timestep.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import {
@@ -52,7 +52,7 @@ import {
   WAN_TI2V_MODEL_FILE as MODEL_FILE,
   WAN_TI2V_SERIES_DIR as SERIES_DIR,
   WAN_TI2V_SERIES_NAME as SERIES_NAME,
-} from "./helpers/wan-ti2v-dit.ts";
+} from "../../models/tests/helpers/wan-ti2v-dit.ts";
 
 /**
  * `timesteps_proj` の TS 実装と上流（torch CPU f32）の許容差（絶対）。

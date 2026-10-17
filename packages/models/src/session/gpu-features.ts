@@ -78,7 +78,7 @@ const FEATURES: { readonly [K in keyof Required<GpuFeaturesSpec>]: GpuFeatureEnt
  * Session 構築で落ちる（共有 GPU なら admission 席で落とせたはずの能力不足が、取得の後まで
  * 遅れる）。「要求する feature = 宣言 ∪ 実効設定が要る feature」を家族ごとに書き分けない。
  * NOTE: 何も足さないときは `spec` をそのまま返す（宣言だけを見る形と同じ値になる — 配布形
- * ミラーの全 quant がこの形であることは `tests/session_options_mirror_test.ts` が見る）。
+ * ミラーの全 quant がこの形であることは `packages/e2e/tests/e2e_session_options_mirror_test.ts` が見る）。
  */
 export const sessionGpuFeatures = (
   spec: GpuFeaturesSpec | undefined,

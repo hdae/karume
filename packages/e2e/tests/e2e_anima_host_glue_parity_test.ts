@@ -28,10 +28,13 @@
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors, type Tensor } from "@karume/runtime";
-import { cfgEulerStep, sigmaSchedule } from "../src/anima/sampler.ts";
-import { animaLatents, denormalizeLatents, padSequence } from "../src/anima/latents.ts";
-import { needsUncond } from "../src/generation/dpm-solver-multistep.ts";
-import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
+import { cfgEulerStep, sigmaSchedule } from "../../models/src/anima/sampler.ts";
+import { animaLatents, denormalizeLatents, padSequence } from "../../models/src/anima/latents.ts";
+import { needsUncond } from "../../models/src/generation/dpm-solver-multistep.ts";
+import {
+  readFileIfPresent,
+  readTextIfPresent,
+} from "../../models/tests/helpers/read-if-present.ts";
 
 /** フィクスチャ 4 変種（ディレクトリ名 = `pipeline_ref.py` の既定出力 / turbo の `--out`）。 */
 const VARIANTS = [

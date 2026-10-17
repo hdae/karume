@@ -839,7 +839,7 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
     };
     /** 潜在 48 チャネルの patch（`tokens` の幅 192）。 */
     const TI2V_PATCH = wanDitPatch(48);
-    /** recipe `wan/ti2v_export_dit.py` と同じ宣言（`wan_ti2v_dit_host_test.ts` の `EXPECTED_INPUTS`）。 */
+    /** recipe `wan/ti2v_export_dit.py` と同じ宣言（`e2e_wan_ti2v_dit_host_test.ts` の `EXPECTED_INPUTS`）。 */
     const TI2V_VALID: readonly Ti2vInput[] = [
       { name: "tokens", shape: [1, "S", 192] },
       { name: "timesteps_proj", shape: [1, 256] },

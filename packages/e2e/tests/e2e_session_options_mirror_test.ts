@@ -18,22 +18,25 @@ import { isNotFound, readDir, readTextFile } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import { type Manifest, parseManifest } from "@karume/hub";
-import { ANIMA_SESSION_POLICY } from "../src/anima/pipeline.ts";
-import { BIREFNET_SESSION_POLICY } from "../src/birefnet/pipeline.ts";
-import { DEPTH_ANYTHING_SESSION_POLICY } from "../src/depth-anything/pipeline.ts";
-import { GEMMA_SESSION_POLICY, resolveGemmaSessionOptions } from "../src/gemma/session-options.ts";
-import { IRODORI_SESSION_POLICY } from "../src/irodori/admission.ts";
-import { SBV2_SESSION_POLICY } from "../src/sbv2/pipeline.ts";
-import { sessionGpuFeatures } from "../src/session/gpu-features.ts";
+import { ANIMA_SESSION_POLICY } from "../../models/src/anima/pipeline.ts";
+import { BIREFNET_SESSION_POLICY } from "../../models/src/birefnet/pipeline.ts";
+import { DEPTH_ANYTHING_SESSION_POLICY } from "../../models/src/depth-anything/pipeline.ts";
+import {
+  GEMMA_SESSION_POLICY,
+  resolveGemmaSessionOptions,
+} from "../../models/src/gemma/session-options.ts";
+import { IRODORI_SESSION_POLICY } from "../../models/src/irodori/admission.ts";
+import { SBV2_SESSION_POLICY } from "../../models/src/sbv2/pipeline.ts";
+import { sessionGpuFeatures } from "../../models/src/session/gpu-features.ts";
 import {
   type FamilySessionPolicy,
   resolveSessionOptions,
   toSessionOptions,
-} from "../src/session/options.ts";
-import { SIGLIP2_SESSION_POLICY } from "../src/siglip2/pipeline.ts";
-import { VOWEL_DETECTOR_SESSION_POLICY } from "../src/vowel-detector/pipeline.ts";
-import { UMT5_ENCODER_SESSION_POLICY } from "../src/umt5/encoder.ts";
-import { WAN_SESSION_POLICY } from "../src/wan/family.ts";
+} from "../../models/src/session/options.ts";
+import { SIGLIP2_SESSION_POLICY } from "../../models/src/siglip2/pipeline.ts";
+import { VOWEL_DETECTOR_SESSION_POLICY } from "../../models/src/vowel-detector/pipeline.ts";
+import { UMT5_ENCODER_SESSION_POLICY } from "../../models/src/umt5/encoder.ts";
+import { WAN_SESSION_POLICY } from "../../models/src/wan/family.ts";
 
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 

@@ -25,10 +25,10 @@
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { prepareContainer, type PreparedModel } from "@karume/runtime";
-import { wanVaeChunkLayout, wanVaeFrameCount } from "../src/wan/vae-chunks.ts";
+import { wanVaeChunkLayout, wanVaeFrameCount } from "../../models/src/wan/vae-chunks.ts";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
-import { readFixture } from "./helpers/wan-vae-chunk-loop.ts";
+import { readFixture } from "../../models/tests/helpers/wan-vae-chunk-loop.ts";
 import {
   ti2vVaeAssets,
   ti2vVaeFixtureUrl,
@@ -47,7 +47,7 @@ import {
   WAN_TI2V_VAE_SERIES as SERIES,
   WAN_TI2V_VAE_TILE as TILE,
   WAN_TI2V_VAE_TIME_CONV_CACHES as TIME_CONV_CACHES,
-} from "./helpers/wan-ti2v-vae.ts";
+} from "../../models/tests/helpers/wan-ti2v-vae.ts";
 
 type Graph = PreparedModel["graph"];
 

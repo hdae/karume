@@ -19,9 +19,13 @@
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "@karume/test-support/test";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
-import { WAN22_TI2V_GENERATION } from "../src/wan/descriptor.ts";
-import { fitWanI2vImage, patchifyWanImage, wanI2vPixels } from "../src/wan/i2v-preprocess.ts";
-import { normalizeWanLatents } from "../src/wan/latents.ts";
+import { WAN22_TI2V_GENERATION } from "../../models/src/wan/descriptor.ts";
+import {
+  fitWanI2vImage,
+  patchifyWanImage,
+  wanI2vPixels,
+} from "../../models/src/wan/i2v-preprocess.ts";
+import { normalizeWanLatents } from "../../models/src/wan/latents.ts";
 import {
   WAN_I2V_GOLDEN_CASES,
   WAN_I2V_GOLDEN_GENERATE,
@@ -30,8 +34,13 @@ import {
   WAN_I2V_IMAGE_SHA256,
   wanI2vGoldenName,
   wanI2vGoldenUrl,
-} from "./helpers/wan-i2v-image.ts";
-import { filePresent, firstBitMismatch, readBuffer, viewOf } from "./helpers/wan-ti2v-dit.ts";
+} from "../../models/tests/helpers/wan-i2v-image.ts";
+import {
+  filePresent,
+  firstBitMismatch,
+  readBuffer,
+  viewOf,
+} from "../../models/tests/helpers/wan-ti2v-dit.ts";
 
 /** 登録時点で必要なので同期で数える（`ignore` の判定に使う）。 */
 const present = WAN_I2V_GOLDEN_CASES.filter((testCase) =>
