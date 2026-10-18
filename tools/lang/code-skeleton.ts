@@ -39,31 +39,47 @@ const walk = (value: unknown, visit: (node: AstNode) => void): void => {
   }
 };
 
+/** How a template quasi ends: in no comment, inside a `//` line, or inside a `/* … *\/` block. */
+export type CommentCarry = "none" | "line" | "block";
+
 /**
  * Spans of comment-like text inside a template quasi. `//` starts a comment unless it follows `:` (a
- * URL) or `/`; it ends at the line end. `/*` ends at the next `*\/` or at the end of the quasi.
+ * URL) or `/`; it ends at the line end. `/*` ends at the next `*\/` or at the end of the quasi. A
+ * comment that an interpolation (`${…}`) interrupts continues in the next quasi: `carry` says how
+ * the previous quasi ended, and the returned carry says how this one ends (the interpolated
+ * expression itself stays code).
  */
-export const commentSpansInTemplate = (text: string, offset: number): Span[] => {
+export const commentSpansInTemplate = (
+  text: string,
+  offset: number,
+  carry: CommentCarry = "none",
+): { readonly spans: Span[]; readonly carry: CommentCarry } => {
   const spans: Span[] = [];
+  let open = carry;
   let i = 0;
   while (i < text.length) {
-    if (text.startsWith("/*", i)) {
-      const close = text.indexOf("*/", i + 2);
+    if (open === "block" || text.startsWith("/*", i)) {
+      const close = text.indexOf("*/", open === "block" ? i : i + 2);
       const end = close < 0 ? text.length : close + 2;
       spans.push([offset + i, offset + end]);
       i = end;
+      open = close < 0 ? "block" : "none";
       continue;
     }
-    if (text.startsWith("//", i) && (i === 0 || (text[i - 1] !== ":" && text[i - 1] !== "/"))) {
+    if (
+      open === "line" ||
+      (text.startsWith("//", i) && (i === 0 || (text[i - 1] !== ":" && text[i - 1] !== "/")))
+    ) {
       const newline = text.indexOf("\n", i);
       const end = newline < 0 ? text.length : newline;
       spans.push([offset + i, offset + end]);
       i = end;
+      open = newline < 0 ? "line" : "none";
       continue;
     }
     i += 1;
   }
-  return spans;
+  return { spans, carry: open };
 };
 
 type TemplateElement = AstNode & { readonly value?: { readonly raw?: unknown } };
@@ -98,10 +114,13 @@ export const skeletonOf = (filename: string, source: string): string => {
   const cuts: Span[] = result.comments.map((comment) => [comment.start, comment.end]);
   walk(result.program, (node) => {
     if (node.type !== "TemplateLiteral") return;
+    let carry: CommentCarry = "none";
     for (const quasi of (node as TemplateLiteral).quasis ?? []) {
       const raw = rawTextOf(source, quasi);
       if (raw === undefined) continue;
-      cuts.push(...commentSpansInTemplate(raw[0], raw[1]));
+      const found = commentSpansInTemplate(raw[0], raw[1], carry);
+      cuts.push(...found.spans);
+      carry = found.carry;
     }
   });
   cuts.sort((a, b) => a[0] - b[0]);

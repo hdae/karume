@@ -56,22 +56,48 @@ describe("skeletonOf", () => {
   it("throws when the source does not parse", () => {
     assertThrows(() => skeletonOf("bad.ts", "const = ;\n"), Error, "cannot parse bad.ts");
   });
+
+  // A WGSL comment that an interpolation interrupts ("// tile (${rows} rows × ${cols} cols)") is
+  // still a comment after the interpolation; the interpolated expressions stay code.
+  it("treats the rest of a // comment after an interpolation as a comment", () => {
+    const source = (note: string, rows: string): string =>
+      `const rows = 4;\nexport const w = ${BT}// ${note} (\${${rows}} rows) ${note}\nfn f() {}\n${BT};\n`;
+    assertEquals(
+      skeletonOf("w.ts", source("注記", "rows")),
+      skeletonOf("w.ts", source("note", "rows")),
+    );
+    assertNotEquals(
+      skeletonOf("w.ts", source("note", "rows")),
+      skeletonOf("w.ts", source("note", "rows + 1")),
+    );
+  });
+
+  it("treats the rest of a block comment after an interpolation as a comment", () => {
+    const source = (note: string): string =>
+      `const k = 4;\nexport const w = ${BT}/* ${note} \${k} ${note} */ fn f() {}\n${BT};\n`;
+    assertEquals(skeletonOf("w.ts", source("注")), skeletonOf("w.ts", source("note")));
+  });
 });
 
 describe("commentSpansInTemplate", () => {
   it("finds line and block comments with the given offset", () => {
     const text = "a // b\nc /* d */ e";
-    assertEquals(commentSpansInTemplate(text, 0), [
+    assertEquals(commentSpansInTemplate(text, 0).spans, [
       [2, 6],
       [9, 16],
     ]);
-    assertEquals(commentSpansInTemplate(text, 10), [
+    assertEquals(commentSpansInTemplate(text, 10).spans, [
       [12, 16],
       [19, 26],
     ]);
   });
 
-  it("runs an unterminated block comment to the end of the text", () => {
-    assertEquals(commentSpansInTemplate("x /* open", 0), [[2, 9]]);
+  it("runs an unterminated block comment to the end of the text and reports the carry", () => {
+    assertEquals(commentSpansInTemplate("x /* open", 0), { spans: [[2, 9]], carry: "block" });
+    assertEquals(commentSpansInTemplate("// to the end", 0).carry, "line");
+    assertEquals(commentSpansInTemplate(" still comment\ncode", 0, "line"), {
+      spans: [[0, 14]],
+      carry: "none",
+    });
   });
 });
