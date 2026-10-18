@@ -1,22 +1,24 @@
-// 正規化の eps の f32 値域（op 契約〈ops/attrs.ts〉と正規化カーネルの params が共有する唯一の判定）。
+// The f32 range of a normalization eps (the single check shared by the op contract
+// <ops/attrs.ts> and the params of the normalization kernels).
 //
-// 同じ条件を attrs と params が別々に持つと、片側だけ直される（subnormal を params だけが通して
-// いた前例がある）ので、判定はここ 1 箇所に置く。例外の種類と文言は呼び手が決める。
+// When attrs and params each hold the same condition, only one side gets fixed (there is a
+// precedent where only params let subnormals through), so the check lives here in one place. The
+// caller decides the exception type and message.
 
-/** f32 の最小正規数（2^-126）。 */
+/** The smallest normal f32 (2^-126). */
 const F32_MIN_NORMAL = 2 ** -126;
 
 /**
- * eps が f32 として使えない理由。
+ * Why an eps cannot be used as an f32.
  *
- * - `not-positive`: 有限の正数でない（0・負・NaN・±Inf）
- * - `subnormal`: f32 へ丸めると 0 か subnormal になる。FTZ（subnormal を 0 として扱う — WGSL が
- *   許す）の GPU では eps = 0 で走り、全ゼロ行がゼロ除算になる
- * - `overflow`: f32 へ丸めると無限大になる（GPU 側だけ `1/sqrt(… + Inf) = 0` で bias 一色）
+ * - `not-positive`: not a finite positive number (0, negative, NaN, ±Inf)
+ * - `subnormal`: rounds to 0 or a subnormal in f32. On a GPU with FTZ (treating subnormals as 0 —
+ *   WGSL allows it) it runs with eps = 0, and an all-zero row becomes a division by zero
+ * - `overflow`: rounds to infinity in f32 (only the GPU side gives `1/sqrt(… + Inf) = 0`, all bias)
  */
 export type F32EpsDefect = "not-positive" | "subnormal" | "overflow";
 
-/** eps が「有限かつ f32 の正規数に丸まる」なら `undefined`、そうでなければ理由を返す。 */
+/** `undefined` when eps is finite and rounds to a normal f32; otherwise the reason. */
 export const f32EpsDefect = (value: number): F32EpsDefect | undefined => {
   if (!Number.isFinite(value) || value <= 0) return "not-positive";
   const rounded = Math.fround(value);

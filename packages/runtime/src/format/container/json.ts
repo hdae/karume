@@ -1,11 +1,11 @@
 /**
- * descriptor / IR の JSON を**安全に読む**ための門と、正準直列化の補助 — docs/container-v1.md §0 /
- * §10、docs/ir-v2.md「正準直列化」。
+ * The guard for **reading the JSON of a descriptor / IR safely**, and helpers for canonical
+ * serialization — docs/container-v1.md §0 / §10, docs/ir-v2.md "Canonical serialization".
  *
- * - 読み: UTF-8 として不正・JSON として不正・非有限数（`1e999` は文法上正当で Infinity に丸まる）・
- *   深すぎる入れ子・`__proto__` キーは fail loudly。
- * - 書き: 名前をキーに持つ map は **code point 順**（UTF-16 単位の順ではない）。数値の綴りは
- *   `JSON.stringify` = ECMAScript `Number::toString` がそのまま正準。
+ * - Reading: invalid UTF-8, invalid JSON, non-finite numbers (`1e999` is grammatically valid and
+ *   rounds to Infinity), too-deep nesting and `__proto__` keys fail loudly.
+ * - Writing: maps keyed by name are in **code point order** (not UTF-16 unit order). The spelling of
+ *   numbers is canonical as `JSON.stringify` = ECMAScript `Number::toString` writes it.
  */
 
 import { ContainerFormatError } from "./header.ts";
@@ -17,8 +17,8 @@ export const isJsonObject = (value: unknown): value is JsonObject =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
- * `JSON.parse` を通ったあとの値を検査する（fail loudly の理由は各分岐）。
- * 深さは根を 0 と数える。
+ * Checks a value after `JSON.parse` (each branch says why it fails loudly).
+ * Depth counts the root as 0.
  */
 export const assertJsonSafe = (
   value: unknown,
@@ -38,8 +38,9 @@ export const assertJsonSafe = (
   }
   if (isJsonObject(value)) {
     for (const key of Object.keys(value)) {
-      // 素の `{}` へ代入すると [[Prototype]] 設定に化けて own property が作られない名前。
-      // Deno は既定でこの setter を無効化しているが、ブラウザ（対象実行系の一方）では起きる。
+      // The name whose assignment to a plain `{}` turns into setting [[Prototype]], so no own
+      // property is created. Deno disabled this setter by default, but Node and browsers (the
+      // target runtimes) perform it.
       if (key === "__proto__") fail(`${path}: キー '__proto__' は受理しない`);
       assertJsonSafe(value[key], `${path}.${key}`, depth + 1, fail);
     }
@@ -48,7 +49,7 @@ export const assertJsonSafe = (
   fail(`${path}: JSON として表せない値`);
 };
 
-/** バイト列 → 検査済みの JSON 値。`maxBytes` は文書ごとの上限（§10）。 */
+/** Bytes → a checked JSON value. `maxBytes` is the per-document limit (§10). */
 export const decodeJsonDocument = (
   bytes: Uint8Array<ArrayBuffer>,
   path: string,
@@ -75,9 +76,9 @@ export const decodeJsonDocument = (
 };
 
 /**
- * code point 順の比較（ir-v2.md「正準直列化」）。`Array.prototype.sort` の既定は UTF-16 単位の
- * 順なので、非 BMP 文字（サロゲートペア）で順序が変わる — 名前は実測で全て ASCII だが、規則は
- * 書き手に依らず 1 つに固定する。
+ * Code point order comparison (ir-v2.md "Canonical serialization"). The default of
+ * `Array.prototype.sort` is UTF-16 unit order, so non-BMP characters (surrogate pairs) change the
+ * order — names are all ASCII in practice, but the rule is fixed to one regardless of the writer.
  */
 export const compareCodePoints = (a: string, b: string): number => {
   const ia = a[Symbol.iterator]();
@@ -98,12 +99,13 @@ export const sortedByCodePoints = (keys: Iterable<string>): string[] =>
   [...keys].sort(compareCodePoints);
 
 /**
- * 名前をキーに持つ map の正準形 — code point 順に並べたエントリ列。直列化は
- * {@link canonicalJsonText} だけが行う。
+ * Canonical form of a map keyed by name — a list of entries in code point order. Only
+ * {@link canonicalJsonText} serializes it.
  *
- * MUST: 正準順をオブジェクトの列挙順で表さない。JS のオブジェクトは整数に見えるキー（"2" / "10"）を
- * 挿入順に関係なく先に昇順で列挙するので、並べた順に代入しても `JSON.stringify` は "2","10" と
- * 書く（code point 順は "10","2" — Python の書き手はこちらを書く）。
+ * MUST: the canonical order is not expressed by an object's enumeration order. JS objects enumerate
+ * integer-like keys ("2" / "10") first in ascending order regardless of insertion order, so even when
+ * assigned in sorted order `JSON.stringify` writes "2","10" (code point order is "10","2" — which
+ * is what the Python writer writes).
  */
 export class SortedEntries {
   readonly entries: readonly (readonly [string, unknown])[];
@@ -112,8 +114,9 @@ export class SortedEntries {
   }
 
   /**
-   * MUST: `JSON.stringify` に渡されたら落ちる。素のまま綴らせると `{"entries":[...]}` という
-   * 別物の JSON が例外なしに出る — 正準形を綴れるのは {@link canonicalJsonText} だけ。
+   * MUST: fails when passed to `JSON.stringify`. Spelled as is, it would yield a different JSON,
+   * `{"entries":[...]}`, without an exception — only {@link canonicalJsonText} can spell the
+   * canonical form.
    */
   toJSON(): never {
     throw new ContainerFormatError(
@@ -123,10 +126,11 @@ export class SortedEntries {
 }
 
 /**
- * オブジェクトのキーを code point 順に並べたエントリ列（値は `map` で変換 — 既定は恒等）。
+ * An object's keys as a list of entries in code point order (values converted by `map` — identity
+ * by default).
  *
- * MUST: キー `__proto__` は書き手の側でも拒否する（docs/container-v1.md §0）。読み手が拒否する
- * 名前を書けば、自分の出力を自分で読めない。
+ * MUST: the key `__proto__` is rejected on the writer side too (docs/container-v1.md §0). Writing a
+ * name the reader rejects would make our own output unreadable by ourselves.
  */
 export const sortedObject = <T>(
   source: Readonly<Record<string, T>>,
@@ -140,8 +144,8 @@ export const sortedObject = <T>(
   );
 
 /**
- * 自由形の JSON 値（ノードの `attrs` など）を再帰的に正準化する — オブジェクトはキーを code point
- * 順に、配列は宣言順のまま、スカラーはそのまま。
+ * Recursively canonicalizes a free-form JSON value (a node's `attrs` and the like) — objects get
+ * their keys in code point order, arrays keep their declared order, scalars stay as they are.
  */
 export const canonicalJsonValue = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(canonicalJsonValue);
@@ -153,16 +157,18 @@ const fieldText = ([key, value]: readonly [string, unknown]): string =>
   `${JSON.stringify(key)}:${canonicalJsonText(value)}`;
 
 /**
- * 正準 JSON の直列化器（空白なし）。{@link SortedEntries} はエントリ列の順に、固定スキーマの
- * オブジェクトは組み立てた欄の順に書く（固定スキーマの欄名は整数に見えないので列挙順 = 組み立て順）。
- * 並べ替えはしない — 順は組み立て側が決める（Python の `canonical_json` と同じ分担）。
+ * Canonical JSON serializer (no whitespace). {@link SortedEntries} is written in entry order, and
+ * fixed-schema objects in the order their fields were assembled (fixed-schema field names do not look
+ * like integers, so enumeration order = assembly order). It does not sort — the assembling side
+ * decides the order (the same split as Python's `canonical_json`).
  *
- * `JSON.stringify` が黙って書き換える値（非有限数 → null・配列の穴と undefined → null）は
- * fail loudly。固定スキーマの undefined の欄は書かない（`JSON.stringify` と同じ — 省略可能な欄）。
+ * Values that `JSON.stringify` rewrites silently (non-finite numbers → null, array holes and
+ * undefined → null) fail loudly. Fixed-schema fields that are undefined are not written (as
+ * `JSON.stringify` does — optional fields).
  */
 export const canonicalJsonText = (value: unknown): string => {
   if (value instanceof SortedEntries) return `{${value.entries.map(fieldText).join(",")}}`;
-  // Array.from は穴を undefined として渡す（map は穴を飛ばし、join が空文字に綴る）。
+  // Array.from passes holes as undefined (map skips holes, and join spells them as empty strings).
   if (Array.isArray(value)) return `[${Array.from(value, canonicalJsonText).join(",")}]`;
   if (isJsonObject(value)) {
     const fields = Object.entries(value).filter(([, field]) => field !== undefined);

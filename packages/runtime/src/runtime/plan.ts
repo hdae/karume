@@ -1,9 +1,10 @@
 /**
- * 実行計画（純関数）: シンボル束縛 → 全値の shape 解決 → ノードごとの出力 shape 評価と
- * 宣言との照合。GPU に触れないのでアダプタ無し環境でも検証できる。
+ * Execution plan (pure functions): symbol binding → shape resolution of every value → per-node
+ * output-shape evaluation and comparison with the declarations. It touches no GPU, so it can be
+ * verified in environments without an adapter.
  *
- * 静的形状（ADR 0004）: 全ノードの出力 shape は 1 dispatch も出す前に確定する。ここで
- * 落ちなかったグラフだけが executor のエンコード段に進む。
+ * Static shapes (ADR 0004): every node's output shape is fixed before a single dispatch is issued.
+ * Only graphs that pass here proceed to the executor's encode step.
  */
 
 import { evalDim, parseDim, solveDim } from "../format/dims.ts";
@@ -30,17 +31,22 @@ import {
   WEIGHT_SLOTS,
 } from "../ops.ts";
 
-/** 実行時に契約・束縛・宣言のいずれかが破れた（黙って近似せず必ずこれを投げる）。 */
+/**
+ * A contract, binding or declaration was violated at run time (always thrown — never approximated
+ * silently).
+ */
 export class ExecutionError extends Error {
   override readonly name = "ExecutionError";
 }
 
 /**
- * 入力境界の診断で型外の値を綴る（number は値・string は JSON の引用・それ以外は `typeof` の型名）。
+ * Spells an out-of-type value in an input-boundary diagnostic (a number as its value, a string as a
+ * JSON quote, anything else as its `typeof` type name).
  *
- * MUST: 利用者の変換（`toString` / `Symbol.toPrimitive` / `toJSON`）を呼ばない。`String(x)` や
- * テンプレートリテラルで綴ると、変換が throw するオブジェクトでは `ExecutionError` の代わりに
- * 利用者の例外が抜け、symbol ではテンプレートリテラル自体が `TypeError` を投げる。
+ * MUST: do not call user conversions (`toString` / `Symbol.toPrimitive` / `toJSON`). Spelling with
+ * `String(x)` or a template literal lets the user's exception escape instead of `ExecutionError`
+ * for objects whose conversion throws, and for a symbol the template literal itself throws
+ * `TypeError`.
  */
 export const describeInputValue = (value: unknown): string =>
   typeof value === "number"
@@ -49,14 +55,20 @@ export const describeInputValue = (value: unknown): string =>
       ? JSON.stringify(value)
       : typeof value;
 
-/** 記号次元 → 実行時の具体値。 */
+/** Symbolic dimension → concrete value at run time. */
 export type SymbolBindings = Readonly<Record<string, number>>;
 
-/** ノード出力 1 本ぶんの計画（{@link NodePlan.outputs} に**出力 slot 昇順**で並ぶ）。 */
+/**
+ * The plan of one node output (listed in {@link NodePlan.outputs} in **ascending output slot
+ * order**).
+ */
 export type NodeOutputPlan = {
   readonly name: string;
   readonly shape: readonly number[];
-  /** 出力の意味論 dtype（契約から導き宣言と照合済み — {@link resolveNodeDtypes}）。 */
+  /**
+   * The output's semantic dtype (derived from the contract and checked against the declaration —
+   * {@link resolveNodeDtypes}).
+   */
   readonly dtype: IrDtype;
 };
 
@@ -64,29 +76,37 @@ export type NodePlan = {
   readonly node: IrNode;
   readonly contract: OpContract;
   readonly inputShapes: readonly (readonly number[])[];
-  /** 入力の意味論 dtype（宣言由来）。カーネルの要素型はここから決まる。 */
+  /**
+   * The inputs' semantic dtypes (from the declarations). The kernel's element type follows from
+   * these.
+   */
   readonly inputDtypes: readonly IrDtype[];
   /**
-   * 出力 slot 昇順の計画（`node.outs` と同順・同長 — ADR 0068 決定 1）。
+   * The plan in ascending output slot order (same order and length as `node.outs` — ADR 0068
+   * decision 1).
    *
-   * MUST: 名前・shape・dtype を別々の列で持たない。3 本の並列配列は「長さが揃っている」
-   * という不変条件を型で表せず、slot をずらして読む誤りが shape 検査を素通りする。
+   * MUST: do not hold names, shapes and dtypes in separate lists. Three parallel arrays cannot
+   * express the invariant "the lengths match" in the type, and reading with a shifted slot slips
+   * past the shape check.
    */
   readonly outputs: readonly NodeOutputPlan[];
 };
 
 export type GraphPlan = {
   readonly bindings: SymbolBindings;
-  /** 入力・initializer・全ノード出力の解決済み shape。 */
+  /** Resolved shapes of the inputs, initializers and every node output. */
   readonly shapes: ReadonlyMap<string, readonly number[]>;
   readonly nodes: readonly NodePlan[];
 };
 
-/** 宣言 shape を束縛で具体化する。未束縛シンボルは dims.ts が DimError で落とす。 */
+/** Concretises a declared shape with the bindings. dims.ts fails an unbound symbol with DimError. */
 export const resolveShape = (shape: readonly IrDim[], bindings: SymbolBindings): number[] =>
   shape.map((dim) => (typeof dim === "number" ? dim : evalDim(parseDim(dim), bindings)));
 
-/** 値名 → 宣言（入力は inputs[]、それ以外は values{} — IR がちょうど 1 箇所を保証する）。 */
+/**
+ * Value name → declaration (inputs in inputs[], everything else in values{} — the IR guarantees
+ * exactly one place).
+ */
 const declarationOf = (
   graph: IrGraph,
   name: string,
@@ -100,7 +120,10 @@ const declarationOf = (
   return { dtype: value.dtype, shape: value.shape };
 };
 
-/** ノードの入出力 dtype を宣言から集めて契約と照合し、**出力 slot 順の dtype 列**を返す。 */
+/**
+ * Collects a node's input and output dtypes from the declarations, checks them against the contract
+ * and returns **the dtypes in output slot order**.
+ */
 const nodeDtypes = (
   graph: IrGraph,
   node: IrNode,
@@ -116,9 +139,10 @@ const nodeDtypes = (
 };
 
 /**
- * 束縛に依存しない契約検査（Session 構築時に 1 回）。アリティ・attrs・dtype 規則を見る。
- * MUST: 未対応 dtype はここで落とす — カーネルは op ごとに解禁した要素型しか持たず、
- * 別の型の値を dispatch すると例外なしにビット列を読み替えた誤値が出る。
+ * Binding-independent contract checks (once, at Session construction). Checks arity, attrs and the
+ * dtype rules.
+ * MUST: fail unsupported dtypes here — kernels only have the element types enabled per op, and
+ * dispatching a value of another type yields wrong values from reinterpreted bits, with no exception.
  */
 export const validateGraphContracts = (graph: IrGraph): void => {
   graph.nodes.forEach((node, index) => {
@@ -146,13 +170,15 @@ export const validateGraphContracts = (graph: IrGraph): void => {
 };
 
 /**
- * conv3d の **GPU 実装済み subset**（ADR 0118 決定 1 — ADR 0064 軸 A）の門: `groups == 1` だけ。
+ * The check for conv3d's **implemented GPU subset** (ADR 0118 decision 1 — ADR 0064 axis A):
+ * `groups == 1` only.
  *
- * 意味論（契約・CPU 参照）は groups 一般を受けるが、GPU は implicit GEMM（groups == 1）しか
- * 持たない。MUST: Session の構築時（= 計画時）に落とす — 導出相まで持ち越すと、1 度も走らない
- * まま構築に成功した Session が初回 run で初めて落ちる（どの op のどの attrs が原因かは同じでも、
- * 資産を開いた時点で分かる事実を遅らせる理由が無い）。
- * MUST: `groups` は既定値で補完しない（`conv3dAttrs` が欠落を落とす — ADR 0015）。
+ * The semantics (contract and CPU reference) accept general groups, but the GPU has only the
+ * implicit GEMM (groups == 1). MUST: fail at Session construction (= plan time) — deferring to the
+ * derivation phase lets a Session that was built without ever running fail only at its first run
+ * (the culprit op and attrs are the same either way, but there is no reason to delay a fact that is
+ * known when the asset is opened).
+ * MUST: do not fill `groups` with a default (`conv3dAttrs` fails a missing one — ADR 0015).
  */
 const assertConv3dSubset = (node: IrNode, where: string): void => {
   const { groups } = conv3dAttrs(node.attrs, where);
@@ -165,21 +191,25 @@ const assertConv3dSubset = (node: IrNode, where: string): void => {
 };
 
 /**
- * 借り物スロット（`states[].external` — ADR 0096 段 2 §1.1）の所有権規律。束縛にも GPU にも
- * 依存しないので Session 構築時に 1 回、**4 点**を見る:
+ * Ownership rules of borrowed slots (`states[].external` — ADR 0096, addendum of 2026-09-08 on
+ * stage 2). They depend on neither bindings nor the GPU, so **four points** are checked once at
+ * Session construction:
  *
- * 1. external スロットへの `state_append` は **0 本**（実体は借り先の context が持ち、書くのは
- *    貸し手だけ）。書く形を通すと、貸し手が確定した過去 KV を借り手が上書きする
- * 2. external スロットの読者は **readonly attention だけ**（今 step の k/v を足す形は
- *    「自分で書いた行を読む」前提なので、書き手の居ないスロットでは必ず未初期化行を読む）
- * 3. readonly の読者が参照するスロットは **external だけ**（2 の対 — 自前スロットを
- *    append 無しで readonly に読む形は、書き手不在の検査〈{@link assertStateOrder}〉を
- *    すり抜けるための抜け道になる）
- * 4. external が 1 本でもあれば**全スロットが external**（段 2 の借り手 context は自前スロットを
- *    持たないので、混在は「確保する側と借りる側が 1 つの context に同居する」形になる）
+ * 1. **Zero** `state_append` to an external slot (the backing belongs to the lending context and
+ *    only the lender writes). Letting a write through makes the borrower overwrite past KV the
+ *    lender has committed
+ * 2. The readers of an external slot are **readonly attention only** (the form that adds this
+ *    step's k/v assumes "reading rows it wrote itself", so on a slot without a writer it always
+ *    reads uninitialised rows)
+ * 3. A slot referenced by a readonly reader is **external only** (the dual of 2 — reading an own
+ *    slot readonly without an append would be a back door around the missing-writer check
+ *    〈{@link assertStateOrder}〉)
+ * 4. If any slot is external, **every slot is external** (the stage 2 borrowing context has no own
+ *    slots, so a mix would mean "the allocating side and the borrowing side live in one context")
  *
- * MUST: fail loudly。4 点とも破れは例外ではなく**別の値**（未初期化の過去 / 上書きされた KV）
- * として出る種類なので、実行前のここでしか止められない。
+ * MUST: fail loudly. A violation of any of the four shows up not as an exception but as **different
+ * values** (an uninitialised past / overwritten KV), so it can only be stopped here, before
+ * execution.
  */
 const assertStateOwnership = (graph: IrGraph): void => {
   const names = Object.keys(graph.states);
@@ -217,7 +247,7 @@ const assertStateOwnership = (graph: IrGraph): void => {
   );
 };
 
-/** 1 スロットに触れたノード 1 本ぶんの記録（{@link assertStateOrder}）。 */
+/** The record of one node that touched a slot ({@link assertStateOrder}). */
 type StateTouch = {
   readonly index: number;
   readonly op: string;
@@ -226,23 +256,26 @@ type StateTouch = {
 };
 
 /**
- * state effect の順序（ADR 0067 決定 5b の②）。state 参照は**テンソルのデータ辺を張らない**
- * ため DAG のトポロジ順では順序が決まらず、契約は `nodes` **配列順**そのもの。束縛に依存
- * しないので Session 構築時に 1 回、スロットごとに 3 点を見る:
+ * Order of state effects (ADR 0067 decision 5b, item 2). State references **draw no tensor data
+ * edges**, so the DAG's topological order does not fix the order; the contract is the `nodes`
+ * **array order** itself. It does not depend on bindings, so three points per slot are checked
+ * once at Session construction:
  *
- * 1. `state_append` は 1 スロットにつき**ちょうど 1 本**。2 本以上は 1 step に 2 回書く形で、
- *    ring の位置式が二重に進み読者が見る過去が step の途中で変わる。0 本は誰もスロットへ
- *    書かないまま `advance` で論理長だけ進む形で、読者が未初期化（ゼロ）行を過去として読み、
- *    2 step 目以降が沈黙で誤値を返す。KV 共有層（ADR 0067 決定 5 の「`state_append` ノードが
- *    無い層」）は**スロット単位で 1 本の append を複数の読者が共有する**形なので、スロット
- *    単位のこの検査と両立する — 弾かれるのはスロット全体に書き手が居ない形だけ
- * 2. append が在るなら**そのスロットに触れる最後のノード**（append より後に読者が居ると、
- *    その読者は「今 step の k/v を過去として二重に読む」— 第 3 / 4 巡 high 指摘の閉鎖）
- * 3. 同一スロットに触れる全ノードの `window` は**存在有無も値も一致**（論理 col → 物理 row の
- *    写像は読み書き同式 MUST — ADR 0067 決定 4。読み側だけ別式にすると沈黙誤読）
+ * 1. **Exactly one** `state_append` per slot. Two or more write twice in one step: the ring
+ *    position formula advances twice and the past that readers see changes mid-step. Zero means
+ *    nobody writes the slot while `advance` still moves the logical length: readers read
+ *    uninitialised (zero) rows as the past and every step from the second on silently returns wrong
+ *    values. KV-sharing layers (ADR 0067 decision 5's "layers without a `state_append` node")
+ *    **share one append per slot among several readers**, so they are compatible with this per-slot
+ *    check — only a slot with no writer at all is rejected
+ * 2. If an append exists, it is **the last node touching that slot** (a reader after the append
+ *    "reads this step's k/v twice, as the past" — closes the high findings of review rounds 3 / 4)
+ * 3. Every node touching the same slot agrees on `window` **in presence and value** (logical col →
+ *    physical row MUST use the same formula for reads and writes — ADR 0067 decision 4. A different
+ *    formula on the read side alone is a silent misread)
  *
- * MUST: fail loudly。3 点とも「順序 / 宣言の誤り」が例外ではなく**別の値**として出る種類の
- * 破れなので、実行前のここでしか止められない。
+ * MUST: fail loudly. In all three, an "order / declaration error" shows up not as an exception but
+ * as **different values**, so it can only be stopped here, before execution.
  */
 const assertStateOrder = (graph: IrGraph): void => {
   const externalSlots = new Set(
@@ -252,7 +285,7 @@ const assertStateOrder = (graph: IrGraph): void => {
   graph.nodes.forEach((node, index) => {
     const slots = Object.values(node.states);
     if (slots.length === 0) return;
-    // attrs の値域検査は assertNodeContract が済ませている（ここは引き直すだけ）。
+    // assertNodeContract has already checked the attrs' ranges (this only reads them again).
     const window = stateWindow(node.attrs, `nodes[${index}] (${node.op})`);
     for (const slot of slots) {
       const list = touches.get(slot) ?? [];
@@ -262,9 +295,10 @@ const assertStateOrder = (graph: IrGraph): void => {
   });
   for (const [slot, list] of touches) {
     const appends = list.filter((touch) => touch.appends);
-    // 借り物スロット（external）の書き手は貸し手 context の側に居る。append 0 本が**正規**なので
-    // 下の 3 枝（1 本ちょうど / 終端）は掛けず、window の一致だけを見る（読み書き同式は
-    // 貸し手・借り手を跨いでも成り立たなければならない — 借り手の窓が広いと窓外を読む）。
+    // The writer of a borrowed (external) slot lives on the lending context's side. Zero appends is
+    // **valid**, so the three branches below (exactly one / terminal) are skipped and only window
+    // agreement is checked (the same read/write formula must hold across lender and borrower — a
+    // wider borrower window reads outside the window).
     if (externalSlots.has(slot)) {
       assertSameWindow(slot, list);
       continue;
@@ -286,7 +320,7 @@ const assertStateOrder = (graph: IrGraph): void => {
           `（ADR 0067 決定 5b。書き手が居ないと未初期化の過去を読んで論理長だけ進む）`,
       );
     }
-    // ここに来た時点で append はちょうど 1 本（上の 2 枝が 0 本と 2 本以上を落としている）。
+    // Here there is exactly one append (the two branches above failed zero and two or more).
     const last = list[list.length - 1];
     if (!last.appends) {
       throw new ExecutionError(
@@ -301,8 +335,9 @@ const assertStateOrder = (graph: IrGraph): void => {
 };
 
 /**
- * 同一スロットに触れる全ノードの `window` が**存在有無も値も**一致すること
- * （{@link assertStateOrder} の 3 — 論理 col → 物理 row の写像は読み書き同式 MUST）。
+ * Every node touching the same slot agrees on `window` **in presence and value**
+ * (point 3 of {@link assertStateOrder} — logical col → physical row MUST use the same formula for
+ * reads and writes).
  */
 const assertSameWindow = (slot: string, list: readonly StateTouch[]): void => {
   const first = list[0];
@@ -317,16 +352,20 @@ const assertSameWindow = (slot: string, list: readonly StateTouch[]): void => {
 };
 
 /**
- * sym_prefix_slice の**グラフ文脈が要る**契約（ADR 0010）。attrs の形は契約表が済ませており、
- * ここは「グラフ全体を見ないと判定できない」3 点だけを見る。
+ * The contract of sym_prefix_slice that **needs the graph context** (ADR 0010). The contract table
+ * has already checked the attrs' form; this checks only the three points that "cannot be decided
+ * without seeing the whole graph".
  *
- * 1. `sym` が `graph.symbols` にある（無ければ実行時に束縛が取れず、prefix 長が決まらない）
- * 2. `dim` が入力 rank の内側
- * 3. 入力の宣言 shape が**記号を含まない静的形**（= Tmax 形）。ここが記号だと、読み出し
- *    stride が実行のたびに縮む値から組まれ、T < Tmax で必ず別の行を読む
+ * 1. `sym` is in `graph.symbols` (otherwise no binding exists at run time and the prefix length is
+ *    undetermined)
+ * 2. `dim` is inside the input rank
+ * 3. The input's declared shape is **a static shape without symbols** (= the Tmax shape). If it were
+ *    symbolic, the read stride would be built from a value that shrinks on every run, and T < Tmax
+ *    always reads different rows
  *
- * MUST: 束縛前に落とす。3 は束縛後の数値 shape からは見分けが付かない（T = Tmax の run では
- * 数値が一致してしまう）ので、宣言の形を見られるここでしか検出できない。
+ * MUST: fail before binding. Point 3 cannot be told apart from the numeric shapes after binding (on
+ * a run with T = Tmax the numbers match), so it can only be detected here, where the declared form
+ * is visible.
  */
 const assertSymPrefixSlice = (graph: IrGraph, node: IrNode, where: string): void => {
   const { sym, slices } = symPrefixSliceAttrs(node.attrs, where);
@@ -355,20 +394,22 @@ const assertSymPrefixSlice = (graph: IrGraph, node: IrNode, where: string): void
 };
 
 /**
- * slice / flip の対象軸が**宣言レベルで静的**であることを見る（ADR 0014）。
+ * Checks that the target axis of slice / flip is **static at the declaration level** (ADR 0014).
  *
- * MUST: 束縛前に落とす。束縛後の数値 shape では記号かどうかが見分けられない（T = 実長の
- * run では数値が一致してしまう）ので、宣言の形を見られるここでしか検出できない —
- * assertSymPrefixSlice が「入力は Tmax 形」を見るのと同じ層。
+ * MUST: fail before binding. The numeric shapes after binding cannot tell whether an axis is
+ * symbolic (on a run with T = the actual length the numbers match), so it can only be detected
+ * here, where the declared form is visible — the same layer where assertSymPrefixSlice checks "the
+ * input has the Tmax shape".
  *
- * 軸ごとの理由:
- * - `slice` — 記号軸の切り出しは `sym_prefix_slice` の担当で、こちらは静的専業
- *   （ADR 0014 が「重複させない」と決めた分担）。
- * - `flip` — 実測は全て静的軸（flow の 192ch / sdp の 2ch）。動的軸の反転はカーネル上は
- *   書けるが、要求実測が出るまで語彙を広げない（softmax の dim と同じ絞り方）。
+ * Reasons per axis:
+ * - `slice` — slicing a symbolic axis belongs to `sym_prefix_slice`; this op is static only
+ *   (the split ADR 0014 decided so that the two do not overlap).
+ * - `flip` — every measured use is a static axis (flow's 192ch / sdp's 2ch). Reversing a dynamic
+ *   axis could be written in the kernel, but the vocabulary is not widened until a measured need
+ *   appears (the same narrowing as softmax's dim).
  *
- * `cat` の連結軸だけは ADR 0046 で緩めた（{@link assertCatAxis}）。エクスポータ側の shape 層も
- * 同じ規則を持つ（受理集合を両側で揃える）。
+ * Only `cat`'s concatenation axis was relaxed, by ADR 0046 ({@link assertCatAxis}). The exporter's
+ * shape layer has the same rule (the accepted set is kept equal on both sides).
  */
 const assertStaticLayoutAxis = (
   graph: IrGraph,
@@ -390,22 +431,26 @@ const assertStaticLayoutAxis = (
 };
 
 /**
- * cat の連結軸は〈定数〉または〈**同一**シンボルの一次式〉（ADR 0046 が ADR 0014 を改訂）。
+ * cat's concatenation axis is 〈a constant〉 or 〈a linear expression of **one** symbol〉 (ADR 0046
+ * revises ADR 0014).
  *
- * 総和 `Σ(coeff_i·sym + offset_i)` は同一シンボルなら次元言語 `coeff·sym+offset` にそのまま
- * 載る（`S`+1519 → `S+1519`、`S`+`S` → `2S`）。**異なるシンボルの混在**だけが表現できない。
+ * The sum `Σ(coeff_i·sym + offset_i)` fits the dimension language `coeff·sym+offset` as is when the
+ * symbol is the same (`S`+1519 → `S+1519`, `S`+`S` → `2S`). Only **a mix of different symbols**
+ * cannot be expressed.
  *
- * MUST: 束縛前に落とす。束縛後の数値 shape では別シンボルどうしが同じ値に解決されうるので、
- * 宣言の形を見られるここでしか検出できない（slice / flip の静的軸検査と同じ層）。
- * 出力の軸長が総和と一致することは planGraph が束縛後の数値で照合する — ここは「宣言だけで
- * 表現不能な形」を止める側だけを持つ。
+ * MUST: fail before binding. After binding, different symbols can resolve to the same value in the
+ * numeric shapes, so it can only be detected here, where the declared form is visible (the same
+ * layer as the static-axis check of slice / flip).
+ * planGraph checks with the bound numbers that the output axis length equals the sum — this side
+ * only stops "forms that cannot be expressed from the declarations alone".
  */
 const assertCatAxis = (graph: IrGraph, node: IrNode, where: string): void => {
   const dim = catDim(node.attrs, where);
   let sym: string | undefined;
   for (const name of node.ins) {
     const shape = declarationOf(graph, name).shape;
-    // rank 違い（dim が外）は束縛後に computeOutputShape が見る（ここの担当ではない）。
+    // A rank mismatch (dim outside) is checked by computeOutputShape after binding (not this
+    // check's job).
     if (dim >= shape.length) continue;
     const extent = shape[dim];
     if (typeof extent === "number") continue;
@@ -422,8 +467,9 @@ const assertCatAxis = (graph: IrGraph, node: IrNode, where: string): void => {
 };
 
 /**
- * 値名 → 宣言 dtype（入力・initializer・全ノード出力）。束縛に依存しないので Session 構築時に
- * 1 回だけ引けばよい。転送（upload）と readback の TypedArray はこれで決まる。
+ * Value name → declared dtype (inputs, initializers and every node output). It does not depend on
+ * bindings, so one lookup at Session construction suffices. It decides the TypedArray of uploads and
+ * readbacks.
  */
 export const declaredDtypes = (graph: IrGraph): ReadonlyMap<string, IrDtype> => {
   const dtypes = new Map<string, IrDtype>();
@@ -433,14 +479,15 @@ export const declaredDtypes = (graph: IrGraph): ReadonlyMap<string, IrDtype> => 
 };
 
 /**
- * 重みスロットで消費される initializer → per-channel scale の**チャネル軸**（ADR 0019）。
+ * Initializer consumed in a weight slot → **channel axis** of its per-channel scale (ADR 0019).
  *
- * 適格な initializer（{@link eligibleCompressedInitializers}）は消費が重みスロットだけなので、
- * 消費側 op から軸が一意に決まる。同じ重みを軸の違う 2 op（例: linear と
- * conv_transpose1d）が食う形は scale の意味が割れるので fail loudly。
+ * An eligible initializer ({@link eligibleCompressedInitializers}) is consumed only in weight slots,
+ * so the consuming op determines the axis uniquely. The same weight consumed by two ops with
+ * different axes (e.g. linear and conv_transpose1d) splits the meaning of the scale, so it fails
+ * loudly.
  *
- * MUST: 判定は {@link WEIGHT_SLOTS} と対の {@link WEIGHT_CHANNEL_AXES} から引く。軸を
- * カーネル側の定数から推測すると、scale の平坦添字がずれても shape 検査を素通りする。
+ * MUST: look the axis up in {@link WEIGHT_CHANNEL_AXES}, the pair of {@link WEIGHT_SLOTS}. Guessing
+ * the axis from kernel-side constants lets a shifted flat scale index slip past the shape check.
  */
 export const weightChannelAxes = (graph: IrGraph): ReadonlyMap<string, number> => {
   const axes = new Map<string, number>();
@@ -465,22 +512,24 @@ export const weightChannelAxes = (graph: IrGraph): ReadonlyMap<string, number> =
 };
 
 /**
- * 圧縮格納のまま GPU 常駐**できる** initializer（ADR 0018 / 0019 の適格判定 — f16 と i8 で
- * 共用する。判定はグラフ構造だけで決まり、格納 dtype を見ないため分ける理由が無い）。
+ * Initializers that **can** stay GPU-resident in compressed storage (the eligibility of ADR 0018 /
+ * 0019 — shared by f16 and i8. The decision depends only on the graph structure and does not look
+ * at the storage dtype, so there is no reason to split it).
  *
- * 適格 = 「その initializer の消費が、{@link WEIGHT_SLOTS} に載った op の重みスロット**だけ**」。
- * 束縛にも GPU にも依存しない。
+ * Eligible = "the initializer is consumed **only** in weight slots of ops listed in
+ * {@link WEIGHT_SLOTS}". Depends on neither bindings nor the GPU.
  *
- * MUST: 消費が 1 つでも重みスロット以外にあれば適格外。同じテンソルを linear の重みと
- * elementwise の被演算子の両方で使うグラフでは、後者のカーネルが f32 として読むため、
- * 圧縮のまま上げるとビット列の読み替えになる（例外は出ない）。
- * MUST: 消費ゼロの initializer も適格外にする。実行に使われないバイトを「GPU 常駐圧縮」として
- * 数えると診断（ADR 0006）が実態からずれる。
- * MUST: `graph.outputs` に載った initializer も適格外にする（IR は initializer 名をそのまま
- * グラフ出力に書くことを許す）。readback は宣言 dtype の semantic f32（4 バイト / 要素）を
- * 仮定して重みバッファから写すため、圧縮のまま常駐すると大半のサイズで copy が実バッファを
- * はみ出して validation で落ち（原因を指さない誤誘導）、極小サイズではゼロ詰めまで収まって
- * ビット列の読み替えが黙って返る。
+ * MUST: one consumption outside a weight slot makes it ineligible. In a graph that uses the same
+ * tensor both as a linear weight and as an elementwise operand, the latter's kernel reads it as f32,
+ * so uploading it compressed reinterprets the bits (no exception is raised).
+ * MUST: an initializer with zero consumers is ineligible too. Counting bytes that execution never
+ * uses as "GPU-resident compressed" makes the diagnostics (ADR 0006) drift from reality.
+ * MUST: an initializer listed in `graph.outputs` is ineligible too (the IR allows writing an
+ * initializer name directly as a graph output). Readback copies from the weight buffer assuming the
+ * declared dtype's semantic f32 (4 bytes / element), so if it stayed resident compressed the copy
+ * overruns the real buffer for most sizes and fails validation (misleading — it does not point at
+ * the cause), while for tiny sizes it fits within the zero padding and silently returns
+ * reinterpreted bits.
  */
 export const eligibleCompressedInitializers = (graph: IrGraph): ReadonlySet<string> => {
   const initializers = new Set(Object.keys(graph.initializers));
@@ -499,34 +548,38 @@ export const eligibleCompressedInitializers = (graph: IrGraph): ReadonlySet<stri
 };
 
 /**
- * i4 の**展開経路を持つ** op（ADR 0069 決定 5 と embedding / conv1d 追補）。conv1d は
- * **groups == 1 のときに限り**適格で、その絞り込みは attrs を見ないと決まらないので
- * {@link i4Executable} が担う。エクスポータ側 `karume/emit.py: I4_WEIGHT_OPS` +
- * `_has_i4_kernel` の鏡像 — **集合の中身も絞りの構造も対**（片側だけ集合へ足すと、鏡像を
- * 名乗る 2 定数が別物になり将来の追補で片側だけが更新される）。
+ * Ops that **have an i4 decode path** (ADR 0069 decision 5 and its embedding / conv1d addenda 6 /
+ * 7). conv1d is eligible **only with groups == 1**, and that narrowing needs the attrs, so
+ * {@link i4Executable} does it. The mirror of the exporter's `karume/emit.py: I4_WEIGHT_OPS` +
+ * `_has_i4_kernel` — **both the set's contents and the narrowing's structure are paired** (adding to
+ * the set on one side only would turn the two constants that claim to mirror each other into
+ * different things, and a future addendum would update only one side).
  *
- * MUST: conv2d / conv3d / conv_transpose1d を入れない（展開経路そのものが無い — 生成側でも
- * src/kernels/gemm.ts の conv2d / conv3d 門と src/kernels/conv1d.ts の direct 門が落とす）。
+ * MUST: do not include conv2d / conv3d / conv_transpose1d (they have no decode path at all — the
+ * codegen side also rejects them: the conv2d / conv3d checks in src/kernels/gemm.ts and the direct
+ * kernel check in src/kernels/conv1d.ts).
  */
 const I4_WEIGHT_OPS: ReadonlySet<string> = new Set([LINEAR_OP, EMBEDDING_OP, CONV1D_OP]);
 
 /**
- * このノードの重みスロットに i4 の展開経路があるか（ADR 0069 決定 5 と その追補の述語）。
+ * Whether this node's weight slot has an i4 decode path (the predicate of ADR 0069 decision 5 and
+ * its addenda).
  *
- * conv1d は **`groups == 1` の implicit GEMM だけ**が展開経路を持つ（A タイル充填の group
- * scale — gemm.ts の `fillAConv`）。`groups > 1` は直接カーネルへ流れ、そちらに展開経路は
- * 無い（src/kernels/conv1d.ts）。conv_transpose1d は転置レイアウトの pack が要るので対象外
- * （2026-08-20 ユーザー裁定）。
+ * For conv1d, **only the implicit GEMM with `groups == 1`** has a decode path (the group scale while
+ * filling the A tile — `fillAConv` in gemm.ts). `groups > 1` goes to the direct kernel, which has no
+ * decode path (src/kernels/conv1d.ts). conv_transpose1d is excluded because it would need a pack in
+ * the transposed layout (the maintainer's ruling of 2026-08-20).
  *
- * MUST: `groups` は**既定値で補完しない**（`conv1dAttrs` が欠落を落とす — ADR 0015 の
- * 「欄を作った後は既定値補完をしないことだけが担保する」）。ここが黙って 1 を仮定すると、
- * depthwise の重みが i4 で常駐して直接カーネルが packed バイトを f32 として読む。
+ * MUST: **do not fill `groups` with a default** (`conv1dAttrs` fails a missing one — ADR 0015: once
+ * the field exists, only the absence of default filling guarantees it). If this silently assumed 1,
+ * a depthwise weight would stay resident as i4 and the direct kernel would read the packed bytes as
+ * f32.
  */
 const i4Executable = (node: IrNode): boolean =>
   I4_WEIGHT_OPS.has(node.op) &&
   (node.op !== CONV1D_OP || conv1dAttrs(node.attrs, `nodes (${node.op})`).groups === 1);
 
-/** INT2 は linear / embedding の重みだけを packed のまま実行できる（ADR 0097）。 */
+/** INT2 can be executed packed only for linear / embedding weights (ADR 0097). */
 export const i2EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
   const executable = new Set<string>();
   const other = new Set<string>();
@@ -542,13 +595,14 @@ export const i2EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
 };
 
 /**
- * 重みスロットでの消費が {@link i4Executable} を満たす op **だけ**の initializer（i4 の適格集合の
- * 狭め — ADR 0069 決定 5。エクスポータ側 `karume/emit.py: i4_eligible_initializers` の鏡像）。
+ * Initializers whose weight-slot consumers are **only** ops satisfying {@link i4Executable} (the
+ * narrowing of the i4 eligible set — ADR 0069 decision 5. The mirror of the exporter's
+ * `karume/emit.py: i4_eligible_initializers`).
  *
- * MUST: {@link eligibleCompressedInitializers} との**積**で使う — ここは「重みスロットの中で
- * 展開経路の無い op（conv2d / conv3d / conv_transpose1d / groups > 1 の conv1d）にも食われていないか」
- * だけを見る。共有された重みを常駐させるとそちらのカーネルが packed バイトを f32 として読む
- * （例外は出ない）。
+ * MUST: use it as an **intersection** with {@link eligibleCompressedInitializers} — this only checks
+ * "is it also consumed, among weight slots, by an op without a decode path (conv2d / conv3d /
+ * conv_transpose1d / conv1d with groups > 1)". Keeping a shared weight resident makes that op's
+ * kernel read the packed bytes as f32 (no exception is raised).
  */
 export const i4EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
   const executable = new Set<string>();
@@ -565,11 +619,13 @@ export const i4EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
 };
 
 /**
- * 値名 → グラフ内での消費回数。MUST: `node.ins` の厳密な延べ計数（同じ値を 2 回取れば 2）。
+ * Value name → number of uses in the graph. MUST: an exact count over `node.ins` with repeats (a
+ * value taken twice counts 2).
  *
- * NOTE: 多出力ノード（ADR 0068 決定 1）でも数え方は 1 文字も変わらない — 数えるのは**消費側**
- * だけで、定義側が 1 本か複数本かに依らない。出力ごとの `uses` は「その値名の消費回数」を
- * この表から引くだけ（recipe-builder の `#buildStep`）。
+ * NOTE: multi-output nodes (ADR 0068 decision 1) do not change the counting at all — only the
+ * **consuming side** is counted, regardless of whether the defining side has one output or several.
+ * The `uses` of each output just looks up "the use count of that value name" in this table
+ * (`#buildStep` in recipe-builder).
  */
 export const countUses = (graph: IrGraph): ReadonlyMap<string, number> => {
   const counts = new Map<string, number>();
@@ -587,13 +643,14 @@ const assertExtent = (size: number, where: string): number => {
 };
 
 /**
- * **states 専用記号**（states の shape にしか現れない記号 — KV 容量 `C` 等）の集合。
+ * The set of **states-only symbols** (symbols that appear only in states shapes — the KV capacity
+ * `C` and the like).
  *
- * 束縛点は `createGenerationContext(spec.bindings)` の側（ADR 0066 追記 7 の束縛点 2）で、
- * run / enqueue の入力からは原理的に解けない。valid な IR では「入力から解けない記号 =
- * states に現れる記号」が成立する（format/ir.ts の checkSymbolBindability が入力 ∪ states の
- * どちらかへの出現を要求し、states 専用記号の値 shape 出現を拒否している）ので、判定は
- * 「入力 shape の次元位置に現れない」だけでよい。
+ * Their binding point is `createGenerationContext(spec.bindings)` (binding point 2 of ADR 0066
+ * addendum 7), and they cannot in principle be solved from run / enqueue inputs. In a valid IR
+ * "symbols not solvable from inputs = symbols appearing in states" holds (checkSymbolBindability in
+ * format/ir.ts requires an appearance in inputs ∪ states and rejects states-only symbols in value
+ * shapes), so the test only needs "does not appear at a dimension position of an input shape".
  */
 export const statesOnlySymbols = (graph: IrGraph): ReadonlySet<string> => {
   const fromInputs = new Set<string>();
@@ -607,17 +664,20 @@ export const statesOnlySymbols = (graph: IrGraph): ReadonlySet<string> => {
 };
 
 /**
- * context の容量束縛と run の解決済み束縛が、**両方に現れる記号**で一致することを確かめる
- * （ADR 0066 追記 7 の「効く範囲の分担」の実行時執行）。
+ * Checks that the context's capacity bindings and the run's resolved bindings agree on **symbols
+ * that appear in both** (run-time enforcement of the "division of reach" in ADR 0066 addendum 7).
  *
- * 記号は 2 つの束縛点を持つ: 入力 shape（run — {@link bindSymbols}）と `spec.bindings`（context）。
- * states と入力の**両方**に現れる記号はその 2 箇所で独立に決まるので、割れたまま走ると
- * 「確保容量は C=4・計画と dispatch は C=3」のような分裂が例外も警告も無く成立する
- * （state の読み書きが宣言 shape の外へ落ちる = robustness で捨てられる沈黙誤読）。
+ * A symbol has two binding points: input shapes (the run — {@link bindSymbols}) and `spec.bindings`
+ * (the context). A symbol that appears in **both** states and inputs is decided independently at
+ * the two places, so running with them split lets a divergence such as "allocated capacity C=4,
+ * plan and dispatch C=3" stand with no exception or warning (state reads and writes fall outside
+ * the declared shape = a silent misread whose out-of-bounds accesses robust buffer access discards).
  *
- * MUST: エンコードの前に落とす（この段の失敗は state に届かないので poison しない）。
- * NOTE: 片方にしか現れない記号は対象外 — states 専用記号は run の bindings で与えられない
- * （{@link bindSymbols} が拒否）し、値 shape 専用の記号は context が知らない。
+ * MUST: fail before encoding (a failure at this step does not reach the state, so it does not
+ * poison).
+ * NOTE: symbols that appear on only one side are out of scope — states-only symbols cannot be given
+ * in the run's bindings ({@link bindSymbols} rejects them), and the context does not know symbols
+ * that appear only in value shapes.
  */
 export const assertGenerationBindings = (
   contextBindings: SymbolBindings,
@@ -636,24 +696,30 @@ export const assertGenerationBindings = (
 };
 
 /**
- * 実入力の shape からシンボルを束縛する。
+ * Binds the symbols from the actual input shapes.
  *
- * MUST: 束縛は**入力 shape の次元位置**から取る（要素数からの逆算はしない — 複数シンボルが
- * 混ざると解が一意でなく、静かに誤った束縛が通る）。1 次元 1 シンボルの派生形（`2T` /
- * `T+8` 等）は位置ごとに解が一意なので束縛源になる（{@link solveDim} — ADR 0057）。
- * MUST: **states 専用記号は要求しない・seed でも受けない**（ADR 0066 追記 7 の効く範囲の
- * 分担 — 値 shape の解決に効くのは入力由来の束縛だけで、容量の正本は context が持つ）。
- * 受けると「context 生成時の容量」と「run に渡した値」の二重簿記になり、食い違いは値には
- * 出ず計画キャッシュの鍵だけが静かに割れる（同じ計画が別鍵で重複導出される）。
- * MUST: 割り切れない実寸は fail loudly。丸めて受けると、宣言 `2T` に奇数長を渡した run が
- * 「末尾 1 要素だけ意味の違う入力」として最後まで通る。
- * MUST: 束縛の有無は `Object.hasOwn` のみで見る。`bindings[sym] !== undefined` は
- * Object.prototype 由来の `toString` 等が素通りし、以後の算術が黙って NaN 化する。
+ * MUST: take bindings from **dimension positions of input shapes** (no back-solving from element
+ * counts — with several symbols mixed the solution is not unique and a wrong binding passes
+ * quietly). Derived forms with one symbol per dimension (`2T` / `T+8` and the like) have a unique
+ * solution per position, so they are binding sources ({@link solveDim} — ADR 0057).
+ * MUST: **do not require states-only symbols, and do not accept them in seed either** (the
+ * division of reach of ADR 0066 addendum 7 — only input-derived bindings resolve value shapes; the
+ * context holds the source of truth for capacity). Accepting them would keep two books ("the
+ * capacity at context creation" and "the value passed to the run"), and a disagreement would not
+ * show in the values but would quietly split the plan cache key (the same plan derived twice under
+ * different keys).
+ * MUST: an actual size that does not divide fails loudly. Rounding it would let a run that passes an
+ * odd length to a declared `2T` go all the way through as "an input whose last element alone means
+ * something different".
+ * MUST: test whether a binding exists only with `Object.hasOwn`. `bindings[sym] !== undefined` lets
+ * `toString` and the like from Object.prototype through, and later arithmetic silently turns into
+ * NaN.
  *
- * @param deferredInputs shape を伴わない入力（常駐テンソル — バイト列と大きさしか持たない
- *   ので、ホスト側に shape が無い）。これらは**束縛源にならず、照合もされない**: 宣言 shape は
- *   他の入力か `seed` で決まった束縛から `planGraph` が解決し、実体の大きさとの突合は
- *   executor が解決済み shape に対して行う。決まらないシンボルは従来どおり fail loudly。
+ * @param deferredInputs inputs without a shape (resident tensors — they carry only bytes and a size,
+ *   so the host has no shape). They **are not binding sources and are not checked**: `planGraph`
+ *   resolves their declared shapes from bindings fixed by other inputs or `seed`, and the executor
+ *   matches the backing's size against the resolved shape. A symbol that stays undetermined fails
+ *   loudly as before.
  */
 export const bindSymbols = (
   graph: IrGraph,
@@ -662,12 +728,12 @@ export const bindSymbols = (
   deferredInputs?: ReadonlySet<string>,
 ): SymbolBindings => {
   const symbols = new Set(graph.symbols);
-  // MUST: シンボル名を蓄積する器は null プロトタイプ。シンボルの文法（dims.ts の
-  // `[A-Za-z_][A-Za-z0-9_]*`）は "__proto__" にマッチし、素の `{}` では代入が
-  // [[Prototype]] 設定に化けて own property が作られないため、束縛できたはずのシンボルが
-  // 直後の hasOwn 検査で「束縛できなかった」として落ちる（受理集合がエンジンで割れる）。
-  // Deno はこの setter を無効化しているため手元では再現しないが、ブラウザ（対象実行系の
-  // 一方）では起きる。
+  // MUST: the container that accumulates symbol names has a null prototype. The symbol grammar
+  // (`[A-Za-z_][A-Za-z0-9_]*` in dims.ts) matches "__proto__", and on a plain `{}` the assignment
+  // turns into setting [[Prototype]] without creating an own property, so a symbol that was bound
+  // fails the hasOwn check right after as "could not be bound" (the accepted set splits by engine).
+  // Deno disables this setter, so it did not reproduce in the Deno-era tests; Node and browsers
+  // have it.
   const bindings: Record<string, number> = Object.create(null);
   const statesOnly = statesOnlySymbols(graph);
   for (const [sym, value] of Object.entries(seed)) {
@@ -686,8 +752,9 @@ export const bindSymbols = (
   }
 
   const declared = new Set(graph.inputs.map((spec) => spec.name));
-  // MUST: 遅延入力も「グラフの入力か」の検査を通す（素通りさせると、名前を間違えた常駐
-  // テンソルが黙って無視され、本来の入力は「渡されていない」で落ちる）。
+  // MUST: deferred inputs also go through the "is it a graph input" check (letting them through
+  // would silently ignore a resident tensor with a misspelt name, and the real input would fail as
+  // "not passed").
   for (const name of [...Object.keys(inputShapes), ...(deferredInputs ?? [])]) {
     if (!declared.has(name)) throw new ExecutionError(`'${name}' はグラフの入力ではない`);
   }
@@ -728,14 +795,16 @@ export const bindSymbols = (
   }
 
   for (const sym of graph.symbols) {
-    // states 専用記号は入力から解けないのが正規（束縛点は context 生成 — 上の MUST）。
+    // States-only symbols are legitimately unsolvable from inputs (bound at context creation — the
+    // MUST above).
     if (statesOnly.has(sym)) continue;
     if (!Object.hasOwn(bindings, sym)) {
       throw new ExecutionError(`シンボル '${sym}' を入力 shape から束縛できなかった`);
     }
   }
 
-  // 2 巡目: 数値次元も派生形も含めて宣言 shape を評価し直し、実入力と全一致を要求する。
+  // Second pass: re-evaluate the declared shapes, numeric dimensions and derived forms included,
+  // and require a full match with the actual inputs.
   for (const spec of graph.inputs) {
     if (deferredInputs?.has(spec.name) === true) continue;
     const resolved = resolveShape(spec.shape, bindings);
@@ -752,11 +821,13 @@ export const bindSymbols = (
 };
 
 /**
- * 束縛済みの shape を全値に配り、各ノードの出力 shape を契約から計算して宣言と照合する。
+ * Distributes the bound shapes to every value, computes each node's output shape from its contract
+ * and checks it against the declaration.
  *
- * @param stateShapes 束縛解決済みの state スロット shape（スロット名 → 容量込みの具体形）。
- *   実体を確保する GenerationContext（ADR 0066 決定 1）が渡す — 省略した計画では state 参照
- *   ノードが fail loudly する（黙って従来形として計算しない）。
+ * @param stateShapes binding-resolved state slot shapes (slot name → concrete shape including
+ *   capacity). The GenerationContext that allocates the backing (ADR 0066 decision 1) passes them —
+ *   in a plan without them, state-referencing nodes fail loudly (they are not silently computed in
+ *   the old form).
  */
 export const planGraph = (
   graph: IrGraph,
@@ -768,11 +839,12 @@ export const planGraph = (
   for (const [name, value] of Object.entries(graph.values)) {
     shapes.set(name, resolveShape(value.shape, bindings));
   }
-  // MUST: 解決済み shape の要素数が安全整数に収まることを、値が 1 つの表に揃うこの位置で
-  // 一度だけ見る（format/safetensors.ts の `elementCount` と同型の**逐次**検査 — 積を最後に
-  // 見るのでは、途中の桁あふれが端数を落とした後の値しか残らない）。`numel` は素の積を返す
-  // ので、2^53 を超えた時点で確保バイト数も dispatch 数も丸まった値になり、例外なしに
-  // 宣言範囲の外を読み書きする形へ落ちる。
+  // MUST: check once, at this point where every value is in one table, that the element count of
+  // each resolved shape fits a safe integer (an **incremental** check of the same form as
+  // `elementCount` in format/safetensors.ts — checking the product at the end only sees the value
+  // after an intermediate overflow has dropped the low digits). `numel` returns the plain product,
+  // so beyond 2^53 both the allocation size and the dispatch count become rounded values, ending in
+  // reads and writes outside the declared range with no exception.
   for (const [name, shape] of shapes) {
     let count = 1;
     for (const dim of shape) {
@@ -802,11 +874,12 @@ export const planGraph = (
       }
       return shape;
     });
-    // reshape / expand は「宣言 shape が目標形」、permute は attrs が要る（ADR 0011）。
-    // 宣言を渡しても照合は下で必ず行う — 目標形として使う op だけが自明に一致するだけで、
-    // 他の op は従来どおり計算 shape と宣言の食い違いで落ちる。
-    // NOTE: 目標形を要求する 2 op（reshape / expand）は単一出力なので、{@link ShapeContext} は
-    // 宣言 shape を 1 本しか受けない（slot 0）。多出力 op の shape は入力から導く。
+    // For reshape / expand "the declared shape is the target shape"; permute needs attrs (ADR 0011).
+    // Passing the declaration does not skip the check below — only ops that use it as the target
+    // shape match trivially; other ops still fail on a mismatch between computed and declared shape.
+    // NOTE: the two ops that require a target shape (reshape / expand) have a single output, so
+    // {@link ShapeContext} takes only one declared shape (slot 0). Multi-output ops derive their
+    // shapes from the inputs.
     const computed = computeOutputShape(contract, inputShapes, where, {
       declared: declaredShapes[0],
       attrs: node.attrs,
@@ -814,9 +887,10 @@ export const planGraph = (
       states: node.states,
       stateShapes,
     });
-    // MUST: 列長の一致をここで見る。契約が宣言する出力数（`node.outs` の本数 —
-    // assertNodeContract が済ませている）と shape 計算が返した列の長さがずれると、以下の
-    // 照合が undefined を触って TypeError になり、どの op のどの slot が欠けたのか出ない。
+    // MUST: check the list lengths here. If the output count the contract declares (the length of
+    // `node.outs` — checked by assertNodeContract) and the length of the list the shape computation
+    // returned diverge, the comparison below touches undefined and throws TypeError without saying
+    // which slot of which op is missing.
     if (computed.length !== declaredShapes.length) {
       throw new ExecutionError(
         `${where}: 出力 shape の計算が ${computed.length} 本（宣言は ${declaredShapes.length} 本）`,

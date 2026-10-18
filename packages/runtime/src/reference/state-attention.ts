@@ -1,81 +1,98 @@
 /**
- * states 形 attention（ADR 0067 決定 4 / 6）と `state_append`（決定 5）の CPU 参照。
+ * CPU reference of states-form attention (ADR 0067 decisions 4 / 6) and `state_append`
+ * (decision 5).
  *
- * GPU 側（src/kernels/state-attention.ts）と**構造を揃えない**のがオラクルの条件:
+ * The oracle's condition is **not to share the structure** of the GPU side
+ * (src/kernels/state-attention.ts):
  *
- * - GPU は 3 dispatch（S 実体化 → 行統計 → 非実体化 PV）だが、参照は**素直な 3 段**
- *   （S → P を実体化 → PV）で書く。融合の段の誤りが両側で相殺しない
- *   （`referenceAttention` の MUST と同じ規律）。
- * - 縮約は **f64 で積んで格納時に 1 度だけ f32 へ丸める**（GPU の f32 逐次累積とはビット一致
- *   しないのが正しい — だから allclose で判定する）。
- * - 論理 col → 物理行の写像・両側述語・空行 → 0 は**意味論そのもの**なので同じ式になる。
- *   ここが同じでも突合は恒真化しない（GPU 側は 3 dispatch とバッファ跨ぎ、参照は 1 ループで、
- *   一致するのは値だけ）。
- * - 走査範囲は GPU 側と**共有しない**。参照は論理列 `[0, P+Q)` を上端から歩き、列は述語だけで
- *   選ぶ（窓の下限を割った所で打ち切るのは、窓の述語が col について単調だから — 述語の外の列を
- *   読み飛ばすのと同じ集合になる）。GPU の live 範囲（`stateColumnBase` / `stateLiveColumns`）を
- *   借りると、その範囲が列を狭く取りこぼす誤りを両側が共有して突合が恒真になる（広く誤る分は
- *   述語が落とすので無害）。
+ * - The GPU uses 3 dispatches (materialize S → row statistics → non-materialized PV), while the
+ *   reference is written as **three plain steps** (S → materialize P → PV). Errors in the fused
+ *   steps do not cancel out between the two sides (the same discipline as the MUST of
+ *   `referenceAttention`).
+ * - Reductions **accumulate in f64 and round to f32 once, when stored** (not matching the GPU's
+ *   sequential f32 accumulation bit for bit is correct — which is why allclose decides).
+ * - The logical col → physical row mapping, the two-sided predicate and empty row → 0 are **the
+ *   semantics itself**, so they are the same expressions. The comparison does not become vacuous
+ *   even so (the GPU side spans 3 dispatches and buffers, the reference is one loop; only the
+ *   values agree).
+ * - The scan range is **not shared** with the GPU side. The reference walks the logical columns
+ *   `[0, P+Q)` from the top and selects columns by the predicate alone (stopping where it falls
+ *   below the window's lower bound is valid because the window predicate is monotonic in col — it
+ *   gives the same set as skipping the columns outside the predicate). Borrowing the GPU's live
+ *   range (`stateColumnBase` / `stateLiveColumns`) would let both sides share an error where that
+ *   range misses columns by being too narrow, and the comparison would become vacuous (an error on
+ *   the wide side is harmless because the predicate drops it).
  *
- * MUST: 空行（述語を満たす col が 1 本も無い行）と述語外の寄与は**厳密 0**（tolerance ではなく
- * 厳密比較で見る門の相手 — ADR 0067 決定 6）。参照は述語外の列の K / V を**読まずに飛ばす**
- * （数式 `O[row] = Σ_{述語内の col} P[row,col] · V(col)` のとおり）。GPU は live 範囲の述語外の
- * 列にも重み 0 × V を足すので、両側が一致するのは **V が有限のとき**である。有限の V では
- * 0 × V = 0 を足しても和は変わらず、参照の値は live 範囲で 0 × V を足す形とビット同一になる。
- * V に NaN / ±Inf があると GPU は 0 × NaN でその列を live に含む行が NaN になり、参照は
- * ならない — 非有限値は契約外（docs/limitations.md「非有限値（NaN / ±Infinity）は検査しない」）。
- * MUST: pad 行（`row ≥ queryLength`）は**厳密 0 を書く**（出力は full-write されるが、
- * ADR 0066 追記 6 の「値が契約上無意味」を 0 で固定した — GPU 側は pad 行の live 走査を
- * 丸ごと省く形でこれを満たす。空行 ⊂ pad 行なので、空行 → 0 はこの規約が包含する）。逆に
- * `state_append` は先頭 `queryLength` 行しか書かない（スロットは full-write 対象外）。
+ * MUST: empty rows (rows where no col satisfies the predicate) and contributions outside the
+ * predicate are **exactly 0** (the counterpart of a check by exact comparison, not tolerance —
+ * ADR 0067 decision 6). The reference **skips without reading** the K / V of columns outside the
+ * predicate (as in the formula `O[row] = Σ_{col in predicate} P[row,col] · V(col)`). The GPU also
+ * adds weight 0 × V for the live-range columns outside the predicate, so the two sides agree
+ * **when V is finite**. With a finite V, adding 0 × V = 0 does not change the sum, and the
+ * reference's value is bit-identical to the form that adds 0 × V over the live range.
+ * When V holds NaN / ±Inf, the GPU gives NaN through 0 × NaN on the rows whose live range contains
+ * that column, while the reference does not — non-finite values are outside the contract
+ * (docs/limitations.md "Non-finite values (NaN / ±Infinity) are not checked").
+ * MUST: pad rows (`row ≥ queryLength`) **are written as exact 0** (the output is fully written, and
+ * "the values carry no meaning by contract" of ADR 0066 addendum 6 was fixed at 0 — the GPU side
+ * satisfies it by skipping the live scan of pad rows entirely. Empty rows ⊂ pad rows, so this
+ * convention contains empty row → 0). Conversely, `state_append` writes only the first
+ * `queryLength` rows (slots are outside the full-write rule).
  */
 
 import { stateSliding } from "../kernels/state-attention.ts";
 import { ReferenceOpError, type RefTensor } from "./ops.ts";
 
-/** states 形の形状と論理長（記号は ADR 0067 決定 4 — src/kernels/state-attention.ts の表）。 */
+/**
+ * Shape and logical lengths of the states form (symbols from ADR 0067 decision 4 — the table in
+ * src/kernels/state-attention.ts).
+ */
 export type StateAttentionRefShape = {
-  /** `B`。 */
+  /** `B`. */
   readonly batch: number;
-  /** `H`（q の head 数）。 */
+  /** `H` (number of q heads). */
   readonly heads: number;
-  /** `Hkv`（k / v の head 数 — `H % Hkv == 0`）。 */
+  /** `Hkv` (number of k / v heads — `H % Hkv == 0`). */
   readonly kvHeads: number;
-  /** `M`（物理 chunk 行数）。 */
+  /** `M` (physical chunk rows). */
   readonly chunkRows: number;
-  /** `D`。 */
+  /** `D`. */
   readonly depth: number;
-  /** `C`（スロットの行容量）。 */
+  /** `C` (row capacity of the slot). */
   readonly capacity: number;
-  /** `W`（`0` = full）。 */
+  /** `W` (`0` = full). */
   readonly window: number;
-  /** `P`（pastLength）。 */
+  /** `P` (pastLength). */
   readonly past: number;
-  /** `Q`（queryLength — `1 ≤ Q ≤ M`）。 */
+  /** `Q` (queryLength — `1 ≤ Q ≤ M`). */
   readonly query: number;
 };
 
 export type StateAttentionRefInput = StateAttentionRefShape & {
-  /** `[B,H,M,D]`。 */
+  /** `[B,H,M,D]`. */
   readonly q: Float32Array<ArrayBuffer>;
-  /** 今 step の k `[B,Hkv,M,D]`（有効データは先頭 `Q` 行）。 */
+  /** This step's k `[B,Hkv,M,D]` (valid data is the first `Q` rows). */
   readonly insK: Float32Array<ArrayBuffer>;
-  /** 今 step の v `[B,Hkv,M,D]`。 */
+  /** This step's v `[B,Hkv,M,D]`. */
   readonly insV: Float32Array<ArrayBuffer>;
-  /** 過去の k スロット `[B,Hkv,C,D]`。 */
+  /** The past k slot `[B,Hkv,C,D]`. */
   readonly slotK: Float32Array<ArrayBuffer>;
-  /** 過去の v スロット `[B,Hkv,C,D]`。 */
+  /** The past v slot `[B,Hkv,C,D]`. */
   readonly slotV: Float32Array<ArrayBuffer>;
-  /** 半スケール（q 側と k 側の**両方**へ掛ける値 — 片側だけの実装はこのオラクルが検出する）。 */
+  /**
+   * The half scale (applied to **both** the q side and the k side — this oracle detects an
+   * implementation that applies it to one side only).
+   */
   readonly scale: number;
 };
 
 /**
- * 論理長 `past` と窓 `window` の値域（どちらも非負の整数）。
+ * Range of the logical length `past` and the window `window` (both non-negative integers).
  *
- * MUST: 容量との比較より先に見る。負の `window` は `stateSliding` が false なので黙って full
- * 扱いになり、負の `past` は live 列を 0 本へ潰して厳密 0 を返す — どちらも「オラクルが黙って
- * 別の数を返す」形で、突合の赤ではなく誤った期待値になる。
+ * MUST: checked before the comparison with the capacity. A negative `window` makes `stateSliding`
+ * false and is silently treated as full, and a negative `past` collapses the live columns to 0 and
+ * returns exact 0 — both are forms where "the oracle silently returns another number", giving a
+ * wrong expected value instead of a red comparison.
  */
 const assertPastAndWindow = (where: string, past: number, window: number): void => {
   if (!Number.isSafeInteger(past) || past < 0) {
@@ -87,10 +104,11 @@ const assertPastAndWindow = (where: string, past: number, window: number): void 
 };
 
 /**
- * queryLength の値域（`1 ≤ Q ≤ M` の整数）。
+ * Range of queryLength (an integer with `1 ≤ Q ≤ M`).
  *
- * MUST: 範囲比較の前に整数かを見る。NaN は全ての比較が偽で範囲検査を素通りし（行ループが 0 回で
- * 出力が全 0）、1.5 は半端な live 列数で NaN を返す — どちらも黙って別の数を返す形。
+ * MUST: check for an integer before the range comparison. Every comparison with NaN is false, so it
+ * slips past the range check (the row loop runs 0 times and the output is all 0), and 1.5 returns
+ * NaN through a fractional live column count — both silently return another number.
  */
 const assertQuery = (query: number, chunkRows: number): void => {
   if (!Number.isSafeInteger(query) || query < 1 || query > chunkRows) {
@@ -99,11 +117,13 @@ const assertQuery = (query: number, chunkRows: number): void => {
 };
 
 /**
- * 形と論理長の整合（取り違えを突合の前で落とす）。
+ * Consistency of shape and logical lengths (mix-ups fail before the comparison).
  *
- * MUST: 次元は範囲比較の前に整数かを見る（{@link assertQuery} と同じ理由）。非整数は次元の積が
- * 整数になると配列長の検査も通り、半端な shape（例 D=1.5）の出力を黙って返す。NaN は `< 1` が
- * 偽で素通りし、後段の配列長の検査が偶然拾うだけ（文言が形の誤りを名乗らない）。
+ * MUST: check the dimensions for integers before the range comparison (the same reason as
+ * {@link assertQuery}). A non-integer passes the array-length check too when the product of the
+ * dimensions is an integer, and silently returns an output of a fractional shape (e.g. D=1.5). NaN
+ * slips past because `< 1` is false, and only the later array-length check catches it by accident
+ * (with a message that does not name a shape error).
  */
 const assertShape = (shape: StateAttentionRefShape): void => {
   const { batch, heads, kvHeads, chunkRows, depth, capacity, window, past, query } = shape;
@@ -129,7 +149,7 @@ const assertShape = (shape: StateAttentionRefShape): void => {
   }
 };
 
-/** 与えられた配列の長さが期待どおりか（引数の取り違え = shape 不一致で落とす）。 */
+/** Whether a given array has the expected length (an argument mix-up fails as a shape mismatch). */
 const assertLength = (name: string, data: Float32Array<ArrayBuffer>, expected: number): void => {
   if (data.length !== expected) {
     throw new ReferenceOpError(`${name}: 要素数 ${data.length} が期待 ${expected} と合わない`);
@@ -137,23 +157,28 @@ const assertLength = (name: string, data: Float32Array<ArrayBuffer>, expected: n
 };
 
 /**
- * 論理 col → スロット物理行（**読み書き同式** — GPU 側 `slot_row` の写し）。
+ * Logical col → physical slot row (**the same formula for reads and writes** — a copy of the GPU
+ * side's `slot_row`).
  *
- * MUST: `state_append` の書き（{@link referenceStateAppend}）と同じ関数を使う。参照側で
- * 読みと書きの式が割れていると、GPU 側の同じ誤りをオラクルが再現して突合が恒真になる。
- * MUST: 剰余の法は**容量 `C`**（窓 `W` ではない — `src/kernels/state-attention.ts` の
- * `stateSlotRowWgsl` の doc。`C > W` の余裕が「論理長より先に書かれた行」の置き場になる）。
+ * MUST: use the same function as the write of `state_append` ({@link referenceStateAppend}). If
+ * the reference's read and write formulas diverged, the oracle would reproduce the same error as
+ * the GPU side and the comparison would become vacuous.
+ * MUST: the modulus is **the capacity `C`** (not the window `W` — the doc of `stateSlotRowWgsl` in
+ * `src/kernels/state-attention.ts`. The slack of `C > W` holds "rows written ahead of the logical
+ * length").
  */
 const slotRow = (window: number, capacity: number, col: number): number =>
   stateSliding(window) ? col % capacity : col;
 
 /**
- * states 形 attention。出力は `[B,H,M,D]`（pad 行を含む全 M 行）。
+ * States-form attention. The output is `[B,H,M,D]` (all M rows including pad rows).
  *
- * 述語は**両側**（causal `col ≤ P + row` AND sliding `col ≥ max(0, P + row − W + 1)`）。
- * 列は論理列 `[0, P+Q)` から述語だけで選び、述語外の列は K / V を読まずに飛ばす（モジュール doc）。
- * 空行は出力が厳密 0（行 max が −inf のときの構造的な 0 — ADR 0067 決定 6）。
- * pad 行（`row ≥ query`）も厳密 0（`out` の 0 初期化のまま — モジュール doc の値契約）。
+ * The predicate is **two-sided** (causal `col ≤ P + row` AND sliding
+ * `col ≥ max(0, P + row − W + 1)`). Columns are selected from the logical columns `[0, P+Q)` by the
+ * predicate alone, and columns outside it are skipped without reading K / V (module doc).
+ * An empty row outputs exact 0 (the structural 0 when the row max is −inf — ADR 0067 decision 6).
+ * Pad rows (`row ≥ query`) are exact 0 too (`out` keeps its 0 initialization — the value contract
+ * in the module doc).
  */
 export const referenceStateAttention = (input: StateAttentionRefInput): RefTensor => {
   assertShape(input);
@@ -165,32 +190,36 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
   assertLength("slotK", input.slotK, batch * kvHeads * capacity * depth);
   assertLength("slotV", input.slotV, batch * kvHeads * capacity * depth);
   const scale = Math.fround(input.scale);
-  // 論理列の全数。列番号は number（f64）で持つ — sliding の P は u32 の上端まで取りうるので、
-  // Int32 に詰めると 2^31 以上が負に巻き戻る。
+  // Total number of logical columns. Column numbers are kept as number (f64) — sliding's P can
+  // reach the top of u32, so packing them into Int32 would wrap values ≥ 2^31 to negative.
   const columns = past + query;
   const shape = [batch, heads, chunkRows, depth];
   const out = new Float32Array(batch * heads * chunkRows * depth);
   for (let plane = 0; plane < batch * heads; plane += 1) {
-    // kv 平面は**整数除算**（`z / r = b·Hkv + h/r` — GPU の `wid.z / r` と同じ恒等式）
+    // The kv plane is an **integer division** (`z / r = b·Hkv + h/r` — the same identity as the
+    // GPU's `wid.z / r`)
     const kvPlane = Math.floor(plane / repeat);
-    // MUST: 走るのは有効行だけ（pad 行は 0 初期化のまま = GPU の ③ が書く厳密 0 と同じ値）。
+    // MUST: only valid rows run (pad rows keep their 0 initialization = the same value as the
+    // exact 0 the GPU's ③ writes).
     for (let row = 0; row < query; row += 1) {
       const qBase = (plane * chunkRows + row) * depth;
       const limit = past + row;
-      // 述語を満たす列を論理列の上端から歩いて集める。causal の上限より上は飛ばし、窓の下限を
-      // 割ったら打ち切る — 窓の述語 `limit − col < W` は col が小さいほど偽になる単調な形なので、
-      // 一度外れた列より下は全て外れる（sliding の P は u32 の上端まで取りうるので、0 まで
-      // 歩くと参照が終わらない）。
+      // Collect the columns that satisfy the predicate by walking from the top of the logical
+      // columns. Skip those above the causal upper bound and stop once below the window's lower
+      // bound — the window predicate `limit − col < W` is monotonic, becoming false as col gets
+      // smaller, so once a column falls out every column below it does too (sliding's P can reach
+      // the top of u32, so walking down to 0 would never end the reference).
       const selected: number[] = [];
       for (let col = columns - 1; col >= 0; col -= 1) {
         if (col > limit) continue;
-        // 下限は GPU 側（`in_window`）と同じ `limit − col < W` の形（u32 の巻き戻り安全形）
+        // The lower bound has the same form `limit − col < W` as the GPU side (`in_window`) (the
+        // form safe against u32 wraparound)
         if (stateSliding(window) && limit - col >= window) break;
         selected.push(col);
       }
-      // 和は論理列の昇順で積む（集めた順は降順）。
+      // Sums accumulate in ascending logical-column order (collected in descending order).
       selected.reverse();
-      // ① S（述語を満たす列だけ。述語外の列は K を読まない）
+      // ① S (only the columns that satisfy the predicate; K is not read for the others)
       const scores = selected.map((col) => {
         const kBase =
           col < past
@@ -203,17 +232,19 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
         }
         return Math.fround(acc);
       });
-      // ② safe-softmax（identity −inf・空行は全 0）
+      // ② safe-softmax (identity −inf; an empty row is all 0)
       let amax = Number.NEGATIVE_INFINITY;
       for (const score of scores) amax = Math.max(amax, score);
       if (amax === Number.NEGATIVE_INFINITY) {
-        // 空行は出力**厳密 0**（out は 0 初期化なので書かずに次の行へ）
+        // An empty row outputs **exact 0** (out is 0-initialized, so go to the next row without
+        // writing)
         continue;
       }
       let total = 0;
       for (const score of scores) total += Math.exp(score - amax);
       const weights = scores.map((score) => Math.fround(Math.exp(score - amax) / total));
-      // ③ O[row, d] = Σ_{述語内の col} P[row,col] · V(col, d)（述語外の V は読まない）
+      // ③ O[row, d] = Σ_{col in predicate} P[row,col] · V(col, d) (V outside the predicate is not
+      // read)
       for (let d = 0; d < depth; d += 1) {
         let acc = 0;
         for (const [i, col] of selected.entries()) {
@@ -232,32 +263,33 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
 };
 
 export type StateAppendRefInput = {
-  /** `B·Hkv`（スロットの平面数）。 */
+  /** `B·Hkv` (number of slot planes). */
   readonly kvPlanes: number;
-  /** `M`（入力の行ストライド）。 */
+  /** `M` (row stride of the input). */
   readonly chunkRows: number;
-  /** `D`。 */
+  /** `D`. */
   readonly depth: number;
-  /** `C`（スロットの行容量）。 */
+  /** `C` (row capacity of the slot). */
   readonly capacity: number;
-  /** `W`（`0` = full）。 */
+  /** `W` (`0` = full). */
   readonly window: number;
-  /** `P`（書き込み先の論理位置の起点）。 */
+  /** `P` (start of the logical positions written to). */
   readonly past: number;
-  /** `Q`（**書くのはこの行数だけ**）。 */
+  /** `Q` (**only this many rows are written**). */
   readonly query: number;
-  /** 今 step の k か v `[B,Hkv,M,D]`。 */
+  /** This step's k or v `[B,Hkv,M,D]`. */
   readonly x: Float32Array<ArrayBuffer>;
-  /** 書き込み前のスロット `[B,Hkv,C,D]`（**破壊しない** — 複製を返す）。 */
+  /** The slot before the write `[B,Hkv,C,D]` (**not modified** — a copy is returned). */
   readonly slot: Float32Array<ArrayBuffer>;
 };
 
 /**
- * `state_append`。返すのは**書き込み後のスロットの複製**（`[B,Hkv,C,D]`）。
+ * `state_append`. Returns **a copy of the slot after the write** (`[B,Hkv,C,D]`).
  *
- * MUST: 入力の `slot` を破壊しない（同じ配列を複数のケースで使い回すテストで、前のケースの
- * 書き込みが次のケースの「書き込み前」に混ざる）。
- * MUST: 書くのは先頭 `Q` 行だけ。pad 行を書かないことが値で見える形（残骸が残る）で出る。
+ * MUST: do not modify the input `slot` (in a test that reuses the same array across cases, the
+ * previous case's write would leak into the next case's "before the write").
+ * MUST: only the first `Q` rows are written. Not writing pad rows shows up in the values (leftovers
+ * remain).
  */
 export const referenceStateAppend = (input: StateAppendRefInput): RefTensor => {
   const { kvPlanes, chunkRows, depth, capacity, window, past, query } = input;
@@ -290,34 +322,39 @@ export const referenceStateAppend = (input: StateAppendRefInput): RefTensor => {
   return { dtype: "f32", shape: [kvPlanes, capacity, depth], data: out };
 };
 
-/** readonly（past だけを読む — ADR 0096 決定 1）の形と論理長。`M = Q = 1` 固定なので欄は持たない。 */
+/**
+ * Shape and logical lengths of readonly (reads the past only — ADR 0096 decision 1). `M = Q = 1`
+ * is fixed, so there are no fields for them.
+ */
 export type StateAttentionReadonlyRefInput = {
   readonly batch: number;
   readonly heads: number;
   readonly kvHeads: number;
   readonly depth: number;
-  /** `C`（貸し手スロットの行容量）。 */
+  /** `C` (row capacity of the lender's slot). */
   readonly capacity: number;
-  /** `W`（`0` = full）。 */
+  /** `W` (`0` = full). */
   readonly window: number;
-  /** `P`（貸し手の pastLength — query は論理位置 `P−1`）。 */
+  /** `P` (the lender's pastLength — the query is at logical position `P−1`). */
   readonly past: number;
-  /** `[B,H,1,D]`。 */
+  /** `[B,H,1,D]`. */
   readonly q: Float32Array<ArrayBuffer>;
-  /** 貸し手の k スロット `[B,Hkv,C,D]`。 */
+  /** The lender's k slot `[B,Hkv,C,D]`. */
   readonly slotK: Float32Array<ArrayBuffer>;
-  /** 貸し手の v スロット `[B,Hkv,C,D]`。 */
+  /** The lender's v slot `[B,Hkv,C,D]`. */
   readonly slotV: Float32Array<ArrayBuffer>;
   readonly scale: number;
 };
 
 /**
- * readonly attention（drafter の cross-attention — ADR 0096 決定 1）。出力は `[B,H,1,D]`。
+ * readonly attention (the drafter's cross-attention — ADR 0096 decision 1). The output is
+ * `[B,H,1,D]`.
  *
- * 位置 `P−1` の query 1 行が、スロットの列 `[P − min(P, W), P)`（full は `[0, P)`）を読む。
- * 今 step の ins は**無い**。述語は `col < P`（棄却行 = 論理長より先に書かれた行を読まない）AND
- * sliding `P−1−col < W`。`P = 0` は空行 → 厳密 0。数値契約（半スケール・−inf identity・f64 で
- * 積んで格納時に 1 度だけ f32 へ）は {@link referenceStateAttention} と同じ。
+ * One query row at position `P−1` reads the slot columns `[P − min(P, W), P)` (`[0, P)` for full).
+ * There is **no** ins for the current step. The predicate is `col < P` (rejected rows = rows
+ * written ahead of the logical length are not read) AND sliding `P−1−col < W`. `P = 0` is an empty
+ * row → exact 0. The numeric contract (half scale, −inf identity, accumulate in f64 and round to
+ * f32 once when stored) is the same as {@link referenceStateAttention}.
  */
 export const referenceStateAttentionReadonly = (
   input: StateAttentionReadonlyRefInput,

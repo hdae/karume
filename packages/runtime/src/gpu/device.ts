@@ -1,25 +1,30 @@
 /**
- * WebGPU デバイスの取得と能力の正規化。
+ * Acquiring the WebGPU device and normalizing its capabilities.
  *
- * この層の責務は「実装差のある面（features / limits / WGSL 言語機能）を 1 箇所で正規化し、
- * 沈黙故障を全て loud な例外に変換すること」。
+ * The job of this layer: "normalize the surfaces that differ between implementations (features /
+ * limits / WGSL language features) in one place, and turn every silent failure into a loud
+ * exception".
  *
- * MUST: device をモジュールスコープに捕獲しない。device を破棄した後の続行は `acquireGpu()` からの
- * 再構築になる（個々の `buffer.destroy()` はそのバッファのぶんを次の poll で返すが、device を握る層は
- * device の寿命に縛られる）。device を握る層（PipelineCache / SubmitScheduler / RunArena）は全て
- * GpuContext と同じ寿命で作り直せる構造でなければならない。
+ * MUST: do not capture the device at module scope. Continuing after the device is destroyed means
+ * rebuilding from `acquireGpu()` (an individual `buffer.destroy()` returns that buffer's share at
+ * the next poll, but the layers that hold the device are bound to the device's lifetime). Every
+ * layer that holds the device (PipelineCache / SubmitScheduler / RunArena) has to be structured so
+ * it can be rebuilt with the same lifetime as GpuContext.
  *
- * **この層の入口**で、実体は 2 つに分かれている: {@link "./acquire.ts"}（device を取って
- * GpuContext を組み立てるまで — アダプタ取得・limits / features の計画と検査・カナリアの実走）
- * と {@link "./context.ts"}（取得済み device の器 — GpuContext / ResidentTensor / BatchScope
- * とランタイム内部面）。ここは両者の公開名を再 export するだけで、実装を持たない。
+ * **This is the layer's entry point**; the implementation is split in two: {@link "./acquire.ts"}
+ * (everything up to taking the device and assembling a GpuContext — adapter acquisition, planning
+ * and checking limits / features, running the canaries) and {@link "./context.ts"} (the container
+ * of an acquired device — GpuContext / ResidentTensor / BatchScope and the runtime-internal
+ * surface). This file only re-exports the public names of both and holds no implementation.
  *
- * MUST: 実体（値）の依存は **acquire → context の一方向**に保つ。GpuContext を構築するのは
- * `acquireGpu` だけなので逆向きの実体 import は要らず、作れば device 取得・カナリアと器の
- * 寿命管理が循環する（context から acquire への参照は `import type` だけ — 消去されるので
- * 実行時の import グラフは一方向のまま）。
- * MUST: 利用者・runtime の他モジュール・テストは**この綴り（`device.ts`）で import する**。
- * 層の入口を 1 つに保つための facade で、2 ファイルへの分割は実装の都合にすぎない。
+ * MUST: keep the value (runtime) dependency **one-way, acquire → context**. Only `acquireGpu`
+ * constructs a GpuContext, so no value import is needed in the other direction; adding one would
+ * make device acquisition / the canaries and the container's lifetime management circular (context
+ * refers to acquire only through `import type` — it is erased, so the runtime import graph stays
+ * one-way).
+ * MUST: users, other runtime modules and tests **import through this name (`device.ts`)**. It is a
+ * facade that keeps a single entry point for the layer; the split into two files is only an
+ * implementation convenience.
  */
 
 export {

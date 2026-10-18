@@ -1,8 +1,9 @@
 /**
- * 族別導出 — 行正規化と固定量子化（layer_norm・static_quantize・rms_norm）。
+ * Per-op-family derivation — row normalisation and fixed quantization (layer_norm,
+ * static_quantize, rms_norm).
  *
- * 入口は {@link "../recipe-builder.ts"} の `RecipeBuilder` で、共有サービス（Session の状態と
- * params の書き込み）は {@link RecipeBuildFace} 経由でだけ触る。
+ * The entry is `RecipeBuilder` in {@link "../recipe-builder.ts"}; the shared services (Session
+ * state and params writes) are reached only through {@link RecipeBuildFace}.
  */
 
 import type { BindingSource, StepRecipeBuilder } from "../recipe.ts";
@@ -31,7 +32,7 @@ import { rmsNormSubgroupKey, rmsNormSubgroupWgsl } from "../../kernels/rms-norm-
 import type { RecipeBuildFace } from "../recipe-builder.ts";
 import { PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
 
-/** layer_norm（最終次元・affine あり）。1 行 = 1 workgroup で、行方向は grid-stride。 */
+/** layer_norm (last dimension, with affine). One row = one workgroup, grid-stride over rows. */
 export const buildLayerNorm = async (
   face: RecipeBuildFace,
   step: NodePlan,
@@ -65,11 +66,11 @@ export const buildLayerNorm = async (
 };
 
 /**
- * 固定 SRQ の表は既存の不変 params キャッシュで保持する（ADR 0097）。
+ * The fixed SRQ table is held in the existing immutable params cache (ADR 0097).
  *
- * `packed` が `"write"` のときは出力を packed int8（u32 1 語 = 4 要素）で書く別キーへ落とす
- * （ADR 0105）。出力バッファの確保は宣言 shape のまま（= 実際に書くのはその 1/4）で、
- * アリーナのバケットを動かさない。
+ * When `packed` is `"write"`, the output goes to a separate key that writes packed int8 (one u32
+ * word = 4 elements) (ADR 0105). The output buffer is still allocated with the declared shape
+ * (= only 1/4 of it is actually written), so the arena buckets do not move.
  */
 export const buildStaticQuantize = async (
   face: RecipeBuildFace,
@@ -107,8 +108,9 @@ export const buildStaticQuantize = async (
       { binding: 2, source: outs[0] },
     ],
     workgroups: [
-      // packed も f32 経路と同じ「1 スレッド 1 要素」の幾何（ADR 0105 追記 1）なので、
-      // dispatch 数は要素数から引く（詰めるのは workgroup 内の共有メモリ経由）。
+      // packed uses the same "one thread, one element" geometry as the f32 path (ADR 0105
+      // addendum 1), so the dispatch count comes from the element count (packing goes through
+      // workgroup shared memory).
       gridStrideWorkgroups(
         count,
         STATIC_QUANTIZE_WORKGROUP_SIZE,
@@ -121,8 +123,8 @@ export const buildStaticQuantize = async (
 };
 
 /**
- * rms_norm（最終次元・weight のみ）。layer_norm と同じ 1 行 = 1 workgroup の形で、
- * 縮約は二乗和 1 パス（ADR 0017）。
+ * rms_norm (last dimension, weight only). The same one row = one workgroup shape as layer_norm;
+ * the reduction is a single sum-of-squares pass (ADR 0017).
  */
 export const buildRmsNorm = async (
   face: RecipeBuildFace,

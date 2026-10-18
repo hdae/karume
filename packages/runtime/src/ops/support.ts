@@ -1,16 +1,18 @@
 /**
- * ランタイム対応表（実行できる op / 格納 / 転送 dtype）と、グラフとの突合門。
+ * The runtime support table (executable ops / storage / transfer dtypes) and the check that matches
+ * a graph against it.
  *
- * 表の実値は契約表（{@link "./contracts.ts"} の `RUNTIME_SUPPORT`）が持ち、ここは**型と突合の
- * 手続きだけ**を置く。グラフ単体で決まる規則（宣言・SSA・語彙）は `format/ir.ts`、宣言 shape と
- * 供給の突合は `format/container/bind.ts` が持つので、この層が見るのは「このランタイムで実行
- * できるか」の 1 点に閉じる。
+ * The table's actual values live in the contract table (`RUNTIME_SUPPORT` in
+ * {@link "./contracts.ts"}); this module holds **only the types and the matching procedure**. Rules
+ * decided by the graph alone (declarations, SSA, vocabulary) belong to `format/ir.ts`, and matching
+ * declared shapes against the supply belongs to `format/container/bind.ts`, so this layer looks at
+ * one thing only: "can this runtime execute it".
  */
 
 import { type CodecLayout, codecLayout } from "../format/container/codecs.ts";
 import type { IrDtype, IrGraph } from "../format/ir.ts";
 
-/** capability 不足（実行できない op / 意味論 dtype / attrs / 格納）。 */
+/** Missing capability (an op / semantic dtype / attrs / storage that cannot be executed). */
 export class RuntimeSupportError extends Error {
   constructor(message: string) {
     super(message);
@@ -18,65 +20,69 @@ export class RuntimeSupportError extends Error {
   }
 }
 
-/** op ごとの実行可能条件。op 名だけでは dtype と attrs の差が表せない。 */
+/** Per-op conditions for execution. The op name alone cannot express dtype and attrs differences. */
 export type OpSupport = {
   /**
-   * 実行できる意味論 dtype の**和**（op ごとに違う — 契約表 src/ops/contracts.ts が正本）。
-   * スロット別契約の op ではこの和が実際の受理より広いので、入力の突合には使わない。
+   * The **union** of the semantic dtypes that can be executed (differs per op — the contract table
+   * in src/ops/contracts.ts is the source of truth). For ops with a per-slot contract this union is
+   * wider than what is actually accepted, so it is not used to match inputs.
    */
   readonly dtypes: ReadonlySet<IrDtype>;
   /**
-   * **入力スロット別**の受理集合（並びは契約のアリティぶん）。uniform 契約では全スロットが
-   * 同じ集合になる。
+   * The accepted set **per input slot** (ordered, one per contract arity). Under a uniform contract
+   * every slot has the same set.
    *
-   * MUST: 入力の突合はこちらで行う。和だけで見ると gather / embedding / masked_fill の
-   * スロット取り違え（`gather(index, src)` のように値と添字を逆に渡した形）が
-   * 「どちらの dtype も和には入っている」として列挙門を素通りする — 契約検査（plan.ts）まで
-   * 落ちて初めて 1 件ずつ止まるので、「非対応は全件列挙」の意図が壊れる。
+   * MUST: match inputs against this field. Looking only at the union lets a slot mix-up in gather /
+   * embedding / masked_fill (value and index passed the wrong way round, as in `gather(index, src)`)
+   * slip through the enumerating check as "both dtypes are in the union" — it is then stopped one
+   * case at a time only by the contract check (plan.ts), which breaks the intent of "list every
+   * unsupported item".
    */
   readonly slotDtypes: readonly ReadonlySet<IrDtype>[];
   /**
-   * **出力 slot 別**に現れうる意味論 dtype（契約表の出力 dtype 写像の値域 — 並びは契約が
-   * 宣言する出力数ぶん。ADR 0068 決定 1）。
+   * The semantic dtypes that can appear **per output slot** (the range of the contract table's
+   * output dtype mapping — ordered, one per output the contract declares. ADR 0068 decision 1).
    *
-   * MUST: 入力スロット 0 の受理集合で代用しない。比較（f32 → bool）・bool の `sum`（→ i32）・
-   * `where`（bool → f32）は入力と出力の dtype が違うため、スロット 0 で突き合わせると
-   * **正しいグラフが列挙門で落ちる**。逆に恒等な op では両者が一致するので、専用の欄を
-   * 持たせても既存の判定は変わらない。
+   * MUST: do not substitute the accepted set of input slot 0. Comparisons (f32 → bool), `sum` of
+   * bool (→ i32) and `where` (bool → f32) have different input and output dtypes, so matching
+   * against slot 0 makes **a correct graph fail the enumerating check**. Conversely, for identity
+   * ops the two agree, so a dedicated field does not change any existing verdict.
    */
   readonly outDtypes: readonly ReadonlySet<IrDtype>[];
   /**
-   * 実装済みの attr キー（契約表が宣言する必須 attrs と省略可能 attrs〈`optionalAttrs`〉の
-   * キーの和）。
+   * The implemented attr keys (the union of the keys of the required attrs and the optional attrs
+   * (`optionalAttrs`) declared by the contract table).
    */
   readonly attrKeys: ReadonlySet<string>;
 };
 
-/** ランタイムが実行できる op（dtype / attrs 込み）と格納 dtype の対応表。 */
+/** The table of the ops (including dtype / attrs) and storage dtypes the runtime can execute. */
 export type RuntimeSupport = {
   readonly ops: ReadonlyMap<string, OpSupport>;
   /**
-   * 実行できる格納 dtype。
+   * The storage dtypes that can be executed.
    *
-   * NOTE: f16 は「適格な重みスロットなら圧縮のまま GPU 常駐、それ以外はロード時に CPU で
-   * f32 展開」（ADR 0018）で、どちらの経路でも実行できるためこの集合に入る。適格判定の
-   * 結果は実行の可否ではなく VRAM の効き方を変えるだけなので、ここでは分岐しない
-   * （適格 0MB を沈黙させないのは Session の診断の役目 — ADR 0006）。
+   * NOTE: f16 is "kept compressed and GPU-resident for an eligible weight slot, otherwise decoded
+   * to f32 on the CPU at load time" (ADR 0018); it can be executed on either path, so it is in this
+   * set. The eligibility verdict does not change whether it can execute, only how VRAM is used, so
+   * there is no branch here (keeping an eligible 0 MB from being silent is the job of the Session's
+   * diagnostics — ADR 0006).
    */
   readonly storage: ReadonlySet<CodecLayout>;
   /**
-   * グラフ入力として転送できる意味論 dtype。
+   * The semantic dtypes that can be transferred as graph inputs.
    *
-   * MUST: op 起点の突合とは別軸で要る。実行器はどのノードも消費しない入力も含めて
-   * `graph.inputs` を全件転送するため、転送層の制約は「その入力を使うノードがあるか」と
-   * 無関係に実在する。この軸が無いと、未使用入力の dtype 違反だけが列挙門を素通りする。
+   * MUST: this axis is needed separately from the op-based matching. The executor transfers every
+   * entry of `graph.inputs`, including inputs that no node consumes, so the transfer layer's
+   * constraints exist regardless of "whether a node uses that input". Without this axis, only the
+   * dtype violation of an unused input would slip through the enumerating check.
    */
   readonly io: ReadonlySet<IrDtype>;
 };
 
 /**
- * ノードが触る値の宣言 dtype。ins / outs が inputs[] か values{} のちょうど 1 箇所で
- * 宣言されることは IR パーサが保証済み（checkDefinitions / checkDeclarations）。
+ * The declared dtype of a value a node touches. The IR parser already guarantees that ins / outs
+ * are declared in exactly one place, inputs[] or values{} (checkDefinitions / checkDeclarations).
  */
 const declaredDtype = (graph: IrGraph, name: string): IrDtype => {
   const input = graph.inputs.find((spec) => spec.name === name);
@@ -84,26 +90,28 @@ const declaredDtype = (graph: IrGraph, name: string): IrDtype => {
 };
 
 /**
- * ランタイム対応表と突合する。
+ * Matches the graph against the runtime support table.
  *
- * MUST: op 名だけでなく**意味論 dtype と attrs まで**見る。名前だけの突合は「対応表には
- * あるのに実行時に落ちる」を作る（docs/research の recon §3-9 が名指しした形 — 先行実験で
- * 実バグとして観測されている）。
- * 非対応は**全件列挙して** fail loudly する（1 件ずつ落とすと、対応表を埋める側が
- * 何本足りないのか分からない）。
+ * MUST: look not only at the op name but **at the semantic dtypes and attrs too**. Matching by name
+ * alone produces "in the support table, yet fails at execution" (the shape named by the recon in
+ * docs/research, §3-9 — observed as a real bug in the prior experiment).
+ * Unsupported items are **all enumerated** and fail loudly (failing one at a time leaves whoever
+ * fills the support table unable to tell how many are missing).
  *
- * NOTE: 同じ規則を plan.ts の `validateGraphContracts` も見るが層が違う — こちらは
- * 「モデル作者へ capability 不足を一度に列挙する門」、あちらは「GPU 非依存に毎回通る
- * 契約検査」。両者とも src/ops.ts の契約表由来なので規則が割れることはない。
+ * NOTE: plan.ts's `validateGraphContracts` looks at the same rules, but at a different layer — this
+ * one is "the check that lists missing capabilities to the model author at once", that one is "the
+ * GPU-independent contract check run every time". Both derive from the contract table of
+ * src/ops.ts, so the rules cannot diverge.
  */
 export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): void => {
   const missingOps = new Set<string>();
-  // MUST: dtype 違反は**宣言（値名）単位に重複除去**する。エイリアス入力（`add(h,h)`）や、
-  // 定義ノードの outs と消費ノードの ins の両方に現れる値は同じ宣言を何度も踏むため、素朴に
-  // 積むと件数 N が「直すべき宣言の本数」より多く出て、列挙の指標としての意味が薄れる。
+  // MUST: dedupe dtype violations **per declaration (value name)**. An aliased input (`add(h,h)`),
+  // or a value that appears both in the defining node's outs and in a consuming node's ins, hits the
+  // same declaration several times; collecting naively makes the count N larger than "the number of
+  // declarations to fix" and weakens its meaning as an enumeration measure.
   const badDtypes = new Map<string, IrDtype>();
   const badAttrs: string[] = [];
-  // 転送層の軸。ノード起点の突合より先に見る（宣言順 = inputs が先）。
+  // The transfer-layer axis. Checked before the node-based matching (declaration order = inputs first).
   for (const spec of graph.inputs) {
     if (!support.io.has(spec.dtype)) badDtypes.set(spec.name, spec.dtype);
   }
@@ -115,17 +123,20 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
     }
     const where = `nodes[${index}] (${node.op})`;
     node.ins.forEach((name, slot) => {
-      // 契約より入力が多い形（アリティ違反）は契約検査の担当。ここは列挙門なので、
-      // 対応するスロットが無いぶんは和で見て 1 件でも多く拾う。
+      // More inputs than the contract (an arity violation) is the contract check's job. This is the
+      // enumerating check, so inputs without a matching slot are looked at via the union to catch as
+      // many as possible.
       const accept = op.slotDtypes[slot] ?? op.dtypes;
       const dtype = declaredDtype(graph, name);
       if (!accept.has(dtype)) badDtypes.set(name, dtype);
     });
     node.outs.forEach((name, slot) => {
-      // 出力は契約表の写像の値域を**出力 slot 別に**見る（cast は attrs.to で決まるので
-      // 語彙全体）。入力側の集合で代用すると、比較や bool の sum のように dtype が変わる op で
-      // 正しいグラフが落ちる。契約より出力が多い形（出力数違反）は入力側と同様に契約検査の
-      // 担当で、余ったぶんは全 slot の和で見て 1 件でも多く拾う。
+      // Outputs are checked against the range of the contract table's mapping **per output slot**
+      // (cast is decided by attrs.to, so the whole vocabulary). Substituting the input-side set
+      // makes correct graphs fail for ops that change the dtype, such as comparisons or sum of bool.
+      // More outputs than the contract (an output-count violation) is, as on the input side, the
+      // contract check's job; the surplus is looked at via the union of all slots to catch as many
+      // as possible.
       const accept =
         op.outDtypes[slot] ?? new Set(op.outDtypes.flatMap((slotAccept) => [...slotAccept]));
       const dtype = declaredDtype(graph, name);
@@ -137,8 +148,10 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
     if (unknown.length > 0) badAttrs.push(`${where}: ${unknown.join(", ")}`);
   });
 
-  // 格納は展開経路（layout）で見る — `ternary` は `int2-off` と同じ i2 経路なので個別の対応は要らない。
-  // 共有 initializer は格納を持たない（実行可否は貸し手の常駐重みが決める — 借り手構築時の門）。
+  // Storage is checked by decode path (layout) — `ternary` is the same i2 path as `int2-off`, so it
+  // needs no support of its own.
+  // A shared initializer has no storage (whether it can execute is decided by the lender's resident
+  // weight — checked when the borrower is built).
   const missingStorage = new Map<CodecLayout, string[]>();
   for (const [name, initializer] of Object.entries(graph.initializers)) {
     if (initializer.shared !== undefined) continue;

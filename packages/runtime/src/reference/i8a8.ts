@@ -1,76 +1,91 @@
 /**
- * w8a8 linear（活性 per-token i8 × 重み per-channel i8）の **CPU 参照**（ADR 0005 の段 2）。
+ * **CPU reference** of w8a8 linear (per-token i8 activations × per-channel i8 weights) (stage 2 of
+ * ADR 0005).
  *
- * 本経路の数値契約は **GPU と atol=0 で一致する**ことで、これは他のカーネル（f32 の縮約順序が
- * 実装で変わる）と決定的に違う性質になる。成立の根拠は 2 つ:
+ * The numeric contract of this path is **agreement with the GPU at atol=0**, a property that sets
+ * it apart from the other kernels (whose f32 reduction order varies with the implementation). It
+ * rests on two facts:
  *
- * 1. 内積が `i32` の**厳密加算**なので、タイル分割・端数 0 埋め・加算順序のどれも値を変えない。
- * 2. 浮動小数の演算は出力 1 要素あたり 3 つだけ — `f32(acc)` / `xs·wscale` / `fma`。変換と
- *    乗算は WGSL 仕様も correctly rounded を要求する。**`fma` だけは仕様保証が無い**
- *    （WGSL §15.7.4.1 は精度を `x*y+z` から継承と規定 — 融合実装なら単一丸めで本参照と
- *    一致し、非融合展開も仕様適合で 1 ULP 帯の差になり得る。Vulkan 実測は融合側で atol=0
- *    成立・Metal は 1 ULP 差 = docs/known-issues.md）。atol=0 は「仕様の帰結」ではなく
- *    **device 別 conformance の門**として維持する。
+ * 1. The dot product is an **exact `i32` addition**, so neither tiling, zero-padding of the
+ *    remainder nor the addition order changes the value.
+ * 2. There are only three floating-point operations per output element — `f32(acc)` / `xs·wscale`
+ *    / `fma`. The WGSL spec requires the conversion and the multiplication to be correctly rounded.
+ *    **Only `fma` has no spec guarantee** (WGSL §15.7.4.1 states that its accuracy is inherited from
+ *    `x*y+z` — a fused implementation rounds once and matches this reference, while a non-fused
+ *    expansion is also spec-conforming and can differ within a 1 ULP band. Measured: atol=0 holds on
+ *    the fused side on Vulkan, Metal differs by 1 ULP = docs/known-issues.md). atol=0 is kept not
+ *    as "a consequence of the spec" but as **a per-device conformance check**.
  *
- * MUST: GPU 側のタイル構造を写さない（src/kernels/linear-i8a8.ts の 64×64 タイル・共有
- * メモリ・K 端数 0 埋めは**ここには無い**）。素の 3 重ループで書くことが、タイル境界と端数の
- * 扱いを検証対象として残す唯一の方法（referenceLinear と同じ規律）。
+ * MUST: do not copy the GPU side's tile structure (the 64×64 tiles, shared memory and zero-padding
+ * of the K remainder of src/kernels/linear-i8a8.ts are **not here**). Writing a plain triple loop is
+ * the only way to keep the handling of tile boundaries and remainders under verification (the same
+ * discipline as referenceLinear).
  *
- * ## 丸めの同点規則（実測で確定・2026-08-03）
+ * ## Tie-breaking of rounding (settled by measurement, 2026-08-03)
  *
- * WGSL の `round` は**偶数丸め**（実測: `round(0.5)=0` / `round(1.5)=2` / `round(-0.5)=-0` /
- * `round(2.5)=2`）で、`torch.round` と一致する。JS の `Math.round` は half-up（+∞ 方向）で
- * **一致しない** — 正本は {@link roundTiesToEven} 1 本に閉じる。
+ * WGSL's `round` is **round-half-to-even** (measured: `round(0.5)=0` / `round(1.5)=2` /
+ * `round(-0.5)=-0` / `round(2.5)=2`), which matches `torch.round`. JS's `Math.round` is half-up
+ * (toward +∞) and **does not match** — the source of truth is confined to the single
+ * {@link roundTiesToEven}.
  *
- * ## `fma` の鏡像（実測で確定・2026-08-03）
+ * ## Mirroring `fma` (settled by measurement, 2026-08-03)
  *
- * GPU 側の最終式は `fma(f32(acc), xs·ws, bias)`（積を丸めずに 1 度だけ丸める）。JS には fma が
- * 無いが、`f32(acc)` と `xs·ws` はどちらも f32 なので**倍精度での積は厳密**（24+24 = 48 ≤ 53
- * ビット）で、`Math.fround(a * s + b)` が単一丸めの結果と一致する。本機で 100,000 サンプルの
- * 全数一致を実測済み（素の `a*b+c` / 明示 `fma` / `bitcast` 固定の 3 形とも同値だった）。
- * NOTE: 厳密和が 54 ビットを超える組では倍精度の中間丸めが理論上効きうる（`|f32(acc)·s|` と
- * `|bias|` の指数差が大きい場合）。実測では 1 件も出ていないが、原理的な保証ではない。
+ * The GPU side's final expression is `fma(f32(acc), xs·ws, bias)` (rounding once without rounding
+ * the product). JS has no fma, but `f32(acc)` and `xs·ws` are both f32, so **their product is exact
+ * in double precision** (24+24 = 48 ≤ 53 bits), and `Math.fround(a * s + b)` matches the
+ * single-rounding result. Measured on this machine: all 100,000 samples matched (the plain `a*b+c`,
+ * an explicit `fma` and a `bitcast`-pinned form all gave the same values).
+ * NOTE: for pairs whose exact sum exceeds 54 bits, the intermediate rounding in double precision can
+ * in theory take effect (when the exponents of `|f32(acc)·s|` and `|bias|` differ widely). Not a
+ * single case has been measured, but it is not a guarantee in principle.
  *
- * ## 除算だけは atol=0 の外（実測で判明・2026-08-03）
+ * ## Only division is outside atol=0 (found by measurement, 2026-08-03)
  *
- * WGSL の f32 除算は仕様上 2.5 ULP まで許され、本機の実測でも `a / b` が IEEE の正しい丸めと
- * 200,000 サンプル中 55,605 件で 1 ULP 割れた（乗算・加算・`fma` は 0 件）。したがって
- * `q = round(x / s)` は **`x/s` が半整数の近傍にある要素でだけ ±1 段揺れうる**。
- * scale の側は `amax * (1/127)` の**乗算**で作るので厳密に一致する（src/kernels/
- * quantize-rows.ts の MUST）。atol=0 の突合は「丸め境界から十分離れたデータ」でのみ成立する
- * 契約で、余裕はテスト側が実測して門にする（tests/gpu_i8a8_test.ts）。
+ * The WGSL spec allows f32 division up to 2.5 ULP, and on this machine `a / b` measured 1 ULP off
+ * IEEE correct rounding in 55,605 of 200,000 samples (multiplication, addition and `fma`: 0).
+ * Therefore `q = round(x / s)` **can move by ±1 step only for elements where `x/s` is near a half
+ * integer**. The scale side is built by the **multiplication** `amax * (1/127)` and matches exactly
+ * (the MUST of src/kernels/quantize-rows.ts). The atol=0 comparison is a contract that holds only
+ * on "data far enough from the rounding boundaries", and the test side measures that margin and
+ * makes it a check (tests/gpu_i8a8_test.ts).
  */
 
 /**
- * 参照に渡された値が契約に合わない（`k` が group 長で割り切れない等）。
+ * A value passed to the reference does not meet the contract (`k` not divisible by the group
+ * length, etc.).
  *
- * MUST: `reference/ops.ts` の `ReferenceOpError` を引かない。本モジュールは import を 1 本も
- * 持たない自己完結形で、あちらを引くと `../ops.ts` 系のモジュールグラフが本番コード
- * （src/gpu/attention-dp4a-canary.ts の import 連鎖）まで太る。`format/i4.ts` の `I4Error` と
- * 同じ「その層だけの軽い Error」を置く。
+ * MUST: do not import `ReferenceOpError` from `reference/ops.ts`. This module is self-contained
+ * with no import at all; importing it would grow the `../ops.ts` module graph all the way into
+ * production code (the import chain of src/gpu/attention-dp4a-canary.ts). It keeps a "light Error
+ * for this layer only", like `I4Error` in `format/i4.ts`.
  */
 export class I8a8Error extends Error {
   override readonly name = "I8a8Error";
 }
 
 /**
- * 量子化の格子の端と scale の床。
+ * The edge of the quantization grid and the floor of the scale.
  *
- * MUST: src/kernels/quantize-rows.ts の定数を**輸入しない**。共有すると「格子を ±128 に
- * する」「床を落とす」といった退行が参照にも同じだけ乗り、突合が恒真化する（故障注入②で
- * 実証済み）。参照は仕様（設計 doc §4.2）から独立に書き下す。
+ * MUST: do not **import** the constants of src/kernels/quantize-rows.ts. Sharing them would put a
+ * regression such as "make the grid ±128" or "drop the floor" into the reference to the same
+ * extent, and the comparison would become vacuous (demonstrated by fault injection ②). The
+ * reference is written out independently from the spec (design doc §4.2).
  */
 const ABS_MAX = 127;
-/** f32 の最小 normal（`torch.finfo(float32).tiny`）。 */
+/** The smallest normal f32 (`torch.finfo(float32).tiny`). */
 const F32_TINY = 1.1754943508222875e-38;
-/** MUST: scale は 127 での除算ではなく 1/127 との**乗算**（除算は正しく丸められない）。 */
+/**
+ * MUST: the scale is a **multiplication** by 1/127, not a division by 127 (division is not
+ * correctly rounded).
+ */
 const INV_ABS_MAX = Math.fround(1 / ABS_MAX);
 
 /**
- * 偶数丸め（round-half-to-even）。WGSL の `round` / `torch.round` と同じ規則。
+ * Round-half-to-even. The same rule as WGSL's `round` / `torch.round`.
  *
- * MUST: `Math.round` を使わない（half-up なので `-0.5 → 0` は合うが `0.5 → 1` /
- * `2.5 → 3` で割れる）。量子化の格子の境界にちょうど乗る入力は実データでも普通に出る。
+ * MUST: do not use `Math.round` (it is half-up, so `-0.5 → 0` matches but `0.5 → 1` /
+ * `2.5 → 3` diverge). Inputs that land exactly on a quantization grid boundary occur routinely in
+ * real data.
  */
 export const roundTiesToEven = (value: number): number => {
   if (!Number.isFinite(value)) return value;
@@ -78,35 +93,39 @@ export const roundTiesToEven = (value: number): number => {
   const fraction = value - floor;
   if (fraction > 0.5) return floor + 1;
   if (fraction < 0.5) return floor;
-  // 同点は偶数側へ（floor が偶数なら floor、奇数なら floor + 1）
+  // A tie goes to the even side (floor when floor is even, floor + 1 when it is odd)
   return floor % 2 === 0 ? floor : floor + 1;
 };
 
 type QuantizedRows = {
   /**
-   * 量子化した活性（`[rows, dim]` の平坦 i8 — GPU の `xq` を 4 詰めから展開した形）。
+   * The quantized activations (flat i8 of `[rows, dim]` — the GPU's `xq` decoded from its 4-per-word
+   * packing).
    *
-   * NOTE: 行の scale が非有限（NaN / Inf）のとき、この値は**契約の外**（GPU 側は
-   * `vec4<i32>(NaN)` が不定値になる）。突合の対象は `scale` と最終出力だけにする。
+   * NOTE: when a row's scale is non-finite (NaN / Inf), these values are **outside the contract**
+   * (on the GPU side `vec4<i32>(NaN)` is an indeterminate value). Only `scale` and the final output
+   * are compared.
    */
   readonly q: Int8Array<ArrayBuffer>;
-  /** 行ごとの scale（`[rows]`）。 */
+  /** Per-row scale (`[rows]`). */
   readonly scale: Float32Array<ArrayBuffer>;
 };
 
 /**
- * 行（= token）ごとの symmetric i8 量子化（src/kernels/quantize-rows.ts の鏡像）。
+ * Symmetric i8 quantization per row (= token) (the mirror of src/kernels/quantize-rows.ts).
  *
- * MUST: NaN は行の scale へ伝播させる（`amax` が NaN なら `s` も NaN）。GPU 側はビット列
- * 判定でこれを保証しており、参照が素の `Math.max` で NaN を飲むと突合が恒真化する。
+ * MUST: NaN propagates into the row's scale (if `amax` is NaN, so is `s`). The GPU side guarantees
+ * this with a bit-pattern check; if the reference swallowed NaN with a plain `Math.max`, the
+ * comparison would become vacuous.
  */
 export const quantizeRowsReference = (
   x: ArrayLike<number>,
   rows: number,
   dim: number,
 ): QuantizedRows => {
-  // MUST: 計算の前に形と長さを突き合わせる。足りない要素は undefined → NaN として行の scale へ
-  // 伝播し、契約外の「NaN 行」を期待値として返す（テンソル中の NaN は正規の入力なので見ない）。
+  // MUST: check shape and length before computing. Missing elements would propagate as
+  // undefined → NaN into the row's scale and return an out-of-contract "NaN row" as the expected
+  // value (NaN inside the tensor is a legitimate input, so it is not checked).
   for (const [name, value] of [
     ["rows", rows],
     ["dim", dim],
@@ -142,12 +161,13 @@ export const quantizeRowsReference = (
 };
 
 /**
- * `x/s` が丸め境界（半整数）からどれだけ離れているかの最小値。
+ * The smallest distance of `x/s` from a rounding boundary (a half integer).
  *
- * GPU の除算は 2.5 ULP まで許されるので、**この余裕が大きいデータでだけ** GPU と参照の
- * 量子化値が完全に一致する（上の docstring）。テストは atol=0 を主張する前にこの値を
- * 実測して門にする — 余裕が縮んだのに気づかずに atol=0 を掲げると、実質は「たまたま通って
- * いるだけ」になる。|x/s| ≤ 127 での 2.5 ULP は約 1.9e-5 なので、1e-3 も取れば桁で安全。
+ * GPU division is allowed up to 2.5 ULP, so the GPU's and the reference's quantized values match
+ * exactly **only on data where this margin is large** (the docstring above). Tests measure this
+ * value and make it a check before claiming atol=0 — claiming atol=0 without noticing that the
+ * margin shrank would in effect mean "it only happens to pass". 2.5 ULP at |x/s| ≤ 127 is about
+ * 1.9e-5, so a margin of 1e-3 is safe by orders of magnitude.
  */
 export const quantizeRowsTieMargin = (x: ArrayLike<number>, rows: number, dim: number): number => {
   const { scale } = quantizeRowsReference(x, rows, dim);
@@ -164,13 +184,13 @@ export const quantizeRowsTieMargin = (x: ArrayLike<number>, rows: number, dim: n
 };
 
 type LinearI8a8Input = {
-  /** 活性 `[m, k]`（f32・量子化前）。 */
+  /** Activations `[m, k]` (f32, before quantization). */
   readonly x: ArrayLike<number>;
-  /** 重み `[n, k]` の**量子化済み整数値**（±127）。 */
+  /** **Quantized integer values** of the weight `[n, k]` (±127). */
   readonly weight: ArrayLike<number>;
-  /** 重みの per-channel scale `[n]`。 */
+  /** Per-channel scale of the weight `[n]`. */
   readonly weightScale: ArrayLike<number>;
-  /** bias `[n]`（常に f32 — ADR 0006）。 */
+  /** bias `[n]` (always f32 — ADR 0006). */
   readonly bias: ArrayLike<number>;
   readonly m: number;
   readonly n: number;
@@ -178,10 +198,11 @@ type LinearI8a8Input = {
 };
 
 /**
- * w8a8 linear の参照 — `out = f32(Σ xq·wq) · (xs[row] · wscale[col]) + bias[col]`。
+ * Reference of w8a8 linear — `out = f32(Σ xq·wq) · (xs[row] · wscale[col]) + bias[col]`.
  *
- * MUST: 乗算の順序は GPU と同じ（`xs · wscale` を先に 1 つの f32 へ畳む）。逐次形
- * （`f32(acc) · xs · wscale`）にすると丸めの位置が動いて atol=0 が崩れる。
+ * MUST: the multiplication order is the same as the GPU's (`xs · wscale` is folded into one f32
+ * first). The sequential form (`f32(acc) · xs · wscale`) moves the rounding points and breaks
+ * atol=0.
  */
 export const referenceLinearI8a8 = (input: LinearI8a8Input): Float32Array<ArrayBuffer> => {
   const { x, weight, weightScale, bias, m, n, k } = input;
@@ -189,7 +210,7 @@ export const referenceLinearI8a8 = (input: LinearI8a8Input): Float32Array<ArrayB
   const out = new Float32Array(m * n);
   for (let row = 0; row < m; row += 1) {
     for (let col = 0; col < n; col += 1) {
-      // 整数の厳密和（|acc| ≤ k·127·128 は 2^53 に遠く及ばないので JS の number で厳密）
+      // Exact integer sum (|acc| ≤ k·127·128 is far below 2^53, so a JS number is exact)
       let acc = 0;
       for (let i = 0; i < k; i += 1) acc += q[row * k + i] * weight[col * k + i];
       const combined = Math.fround(scale[row] * weightScale[col]);
@@ -200,50 +221,56 @@ export const referenceLinearI8a8 = (input: LinearI8a8Input): Float32Array<ArrayB
 };
 
 type LinearW4a8Input = {
-  /** 活性 `[m, k]`（f32・量子化前）。 */
+  /** Activations `[m, k]` (f32, before quantization). */
   readonly x: ArrayLike<number>;
-  /** 重み `[n, k]` の**量子化済み整数値**（±7 — offset 8 は展開済み）。 */
+  /** **Quantized integer values** of the weight `[n, k]` (±7 — offset 8 already decoded). */
   readonly weight: ArrayLike<number>;
-  /** 重みの group scale（`[n, k/g]` の平坦）。 */
+  /** Group scales of the weight (flat `[n, k/g]`). */
   readonly weightScale: ArrayLike<number>;
-  /** bias `[n]`（常に f32 — ADR 0006）。 */
+  /** bias `[n]` (always f32 — ADR 0006). */
   readonly bias: ArrayLike<number>;
   readonly m: number;
   readonly n: number;
   readonly k: number;
-  /** K 方向の group 長（`k` を割り切る）。 */
+  /** Group length along K (divides `k`). */
   readonly groupSize: number;
 };
 
 /**
- * w4a8 linear の参照 — **group ごとに i32 で厳密に畳み、group 境界でだけ f32 へ flush**:
+ * Reference of w4a8 linear — **fold each group exactly in i32 and flush to f32 only at group
+ * boundaries**:
  *
  * ```
- * accf = Σ_gi fma(f32(Σ_{i∈gi} xq·wq), wscale[col, gi], accf)   // 丸め k/g 回
- * out  = fma(accf, xs[row], bias[col])                          // + 1 回
+ * accf = Σ_gi fma(f32(Σ_{i∈gi} xq·wq), wscale[col, gi], accf)   // k/g roundings
+ * out  = fma(accf, xs[row], bias[col])                          // + 1
  * ```
  *
- * MUST: `xs` を group の中へ持ち込まない（`xs·wscale` を先に畳む {@link referenceLinearI8a8}
- * の MUST は **w4a8 では成立しない** — wscale が group ごとに変わるので、畳むと丸めが
- * `k/g` 回ぶん増えて GPU（src/kernels/linear-i8a8.ts）と atol=0 が崩れる）。
- * MUST: 畳み順は「group 昇順」。全 group を 1 本の整数和にまとめると丸め回数が 1 回に減り、
- * 値が割れるデータが存在する（tests/i8a8_reference_test.ts が固定する）。
- * MUST: GPU 側のタイル構造を写さない（素の 4 重ループ — {@link referenceLinearI8a8} と同じ
- * 規律。group はタイルではなく**量子化軸**なので、これは構造の写しではなく仕様そのもの）。
- * NOTE: `fma` の鏡像は {@link referenceLinearI8a8} と同文（`Math.fround(a * b + c)`）で、
- * 厳密和が 54 ビットを超える組では倍精度の中間丸めが理論上効きうる。
+ * MUST: do not bring `xs` into the group (the MUST of {@link referenceLinearI8a8} that folds
+ * `xs·wscale` first **does not hold for w4a8** — wscale changes per group, so folding adds `k/g`
+ * roundings and breaks atol=0 against the GPU (src/kernels/linear-i8a8.ts)).
+ * MUST: the folding order is "ascending group". Collapsing all groups into one integer sum reduces
+ * the roundings to one, and data exists on which the values diverge (pinned by
+ * tests/i8a8_reference_test.ts).
+ * MUST: do not copy the GPU side's tile structure (a plain quadruple loop — the same discipline as
+ * {@link referenceLinearI8a8}. A group is **the quantization axis**, not a tile, so this is the spec
+ * itself, not a copy of the structure).
+ * NOTE: the `fma` mirror is the same text as in {@link referenceLinearI8a8}
+ * (`Math.fround(a * b + c)`); for pairs whose exact sum exceeds 54 bits the intermediate rounding in
+ * double precision can in theory take effect.
  */
 export const referenceLinearW4a8 = (input: LinearW4a8Input): Float32Array<ArrayBuffer> => {
   const { x, weight, weightScale, bias, m, n, k, groupSize } = input;
-  // MUST: group 長そのものの値域を先に見る。非整数（k=5, g=2.5）は groups が整数でも活性と重みの
-  // 添字が非整数になって NaN を、負（k=4, g=-2）は group ループが 0 回で bias を黙って返す。
+  // MUST: check the range of the group length itself first. A non-integer (k=5, g=2.5) gives NaN
+  // through non-integer activation and weight indices even when groups is an integer; a negative
+  // one (k=4, g=-2) runs the group loop 0 times and silently returns bias.
   if (!Number.isSafeInteger(groupSize) || groupSize < 1) {
     throw new I8a8Error(`w4a8 参照: group 長 ${groupSize} が正の整数でない`);
   }
   const groups = k / groupSize;
-  // MUST: 突合の前に落とす。端数のある `k` は group ループが `[m,k]` 平坦の**次の行**の活性を
-  // 足し込み（col=0）、非整数の scale 添字で NaN を返す（col≥1）— どちらも「オラクルが黙って
-  // 別の数を返す」形なので、atol=0 を主張する門の意味が消える。
+  // MUST: fail before the comparison. With a `k` that leaves a remainder, the group loop adds the
+  // activations of **the next row** of the flat `[m,k]` (col=0) and returns NaN through a
+  // non-integer scale index (col≥1) — both are forms where "the oracle silently returns another
+  // number", and the check that claims atol=0 loses its meaning.
   if (!Number.isSafeInteger(groups)) {
     throw new I8a8Error(
       `w4a8 参照: k=${k} が group 長 ${groupSize} で割り切れない（K 方向の量子化軸）`,
@@ -255,7 +282,7 @@ export const referenceLinearW4a8 = (input: LinearW4a8Input): Float32Array<ArrayB
     for (let col = 0; col < n; col += 1) {
       let accf = 0;
       for (let group = 0; group < groups; group += 1) {
-        // 整数の厳密和（|acci| ≤ g·127·8 は 2^53 に遠く及ばないので JS の number で厳密）
+        // Exact integer sum (|acci| ≤ g·127·8 is far below 2^53, so a JS number is exact)
         let acci = 0;
         for (let i = group * groupSize; i < (group + 1) * groupSize; i += 1) {
           acci += q[row * k + i] * weight[col * k + i];
@@ -269,27 +296,34 @@ export const referenceLinearW4a8 = (input: LinearW4a8Input): Float32Array<ArrayB
 };
 
 /**
- * P̃ の量子化格子の端と `1/127`。
+ * The edge of P̃'s quantization grid and `1/127`.
  *
- * MUST: 上の {@link ABS_MAX} と**束ねない**。あちらは「行 amax から作る適応 scale」の格子で、
- * こちらは「`P̃ = exp(S−m)` の行内 max が構造的に 1.0 だから scale が 1/127 に縮退する」という
- * 別の事実（設計 §2.2）。値が一致するのは偶然に近く、束ねると片方の変更が黙って伝播する。
+ * MUST: do not **merge** them with {@link ABS_MAX} above. That one is the grid of "an adaptive
+ * scale built from the row amax"; this one rests on a different fact, "the in-row max of
+ * `P̃ = exp(S−m)` is 1.0 by construction, so the scale degenerates to 1/127" (design §2.2). The
+ * values agree almost by coincidence, and merging them would silently propagate a change of one to
+ * the other.
  */
 const P_ABS_MAX = 127;
 const INV_P_ABS_MAX = Math.fround(1 / P_ABS_MAX);
 
 /**
- * ③PV が A タイル充填で作る量子化列 `qP = round(127·exp(S−m))` の参照（`[batch·m, n]` 平坦）。
+ * Reference of the quantized sequence `qP = round(127·exp(S−m))` that ③PV builds while filling the
+ * A tile (flat `[batch·m, n]`).
  *
- * **GPU とビット一致はしない**（`exp` の実装差 — 設計 §4.2）。この参照の役目は
- * 「不一致は必ず ±1 段」という門と不一致率の記録で、テスト側がそれを assert する。
- * MUST: 丸めは偶数丸め（{@link roundTiesToEven}）。`Math.round` は half-up で割れる。
- * NOTE: clamp を置かないのは GPU 側と同じ理由（`m` が行の厳密な最大なら `exp(S−m) ≤ 1`）。
- * `rowMax` に行の最大でない値を渡すと 127 を超えうるが、それは呼び出し側の契約違反。
- * そのとき 128 は Int8Array の格納で **−128 へ暗黙ラップ**する（throw しない）— GPU 側も
- * `pack4xI8` が下位 8 bit を詰めるので同じ −128 になり、参照と GPU は**揃って**静かに誤る。
- * 参照だけ throw にすると契約違反入力で GPU と別挙動になるため、明記に留める（境界は
- * `S − m > ln(127.5/127) ≈ 0.00393` で 128 到達 — 偶数丸めで 127.5 が 128 側へ丸まる）。
+ * **It does not match the GPU bit for bit** (implementation differences of `exp` — design §4.2).
+ * The role of this reference is the check "a mismatch is always ±1 step" and recording the mismatch
+ * rate, which the test side asserts.
+ * MUST: rounding is round-half-to-even ({@link roundTiesToEven}). `Math.round` is half-up and
+ * diverges.
+ * NOTE: there is no clamp for the same reason as on the GPU side (`exp(S−m) ≤ 1` when `m` is the
+ * exact row max). Passing a `rowMax` that is not the row max can exceed 127, but that is a contract
+ * violation by the caller. In that case 128 **wraps implicitly to −128** when stored into the
+ * Int8Array (no throw) — on the GPU side `pack4xI8` packs the low 8 bits and gives the same −128,
+ * so the reference and the GPU go wrong silently **together**. Throwing only in the reference would
+ * behave differently from the GPU on contract-violating input, so it is only documented here (the
+ * boundary: 128 is reached at `S − m > ln(127.5/127) ≈ 0.00393` — round-half-to-even rounds 127.5
+ * to 128).
  */
 export const referenceAttentionPvQuant = (
   s: ArrayLike<number>,
@@ -310,13 +344,15 @@ export const referenceAttentionPvQuant = (
 };
 
 type AttentionPvI8a8CoreInput = {
-  /** `qP`（`[batch, m, n]` の平坦・0..127 の整数）。GPU が A タイルで作った列そのもの。 */
+  /**
+   * `qP` (flat `[batch, m, n]`, integers 0..127). Exactly the sequence the GPU built in the A tile.
+   */
   readonly qp: ArrayLike<number>;
-  /** Vᵀ の量子化値（`[batch, d, n]` の平坦・±127 の整数 — **N 連続**）。 */
+  /** Quantized values of Vᵀ (flat `[batch, d, n]`, integers ±127 — **N contiguous**). */
   readonly vq: ArrayLike<number>;
-  /** 行統計の `1/Σexp(S−m)`（`[batch·m]`）。 */
+  /** The row statistic `1/Σexp(S−m)` (`[batch·m]`). */
   readonly rowInv: ArrayLike<number>;
-  /** Vᵀ の行 scale（`[batch·d]`）= V の**列** scale。 */
+  /** Row scale of Vᵀ (`[batch·d]`) = the **column** scale of V. */
   readonly vs: ArrayLike<number>;
   readonly batch: number;
   readonly m: number;
@@ -325,17 +361,20 @@ type AttentionPvI8a8CoreInput = {
 };
 
 /**
- * 融合 attention ③PV の i8a8 変種の参照 — **整数を受け取ってからの純関数**。
+ * Reference of the i8a8 variant of fused attention ③PV — **a pure function from the integers on**.
  *
- * `O[b,m,d] = f32(Σ_n qP·vq) · ((inv·(1/127)) · vs[b,d])` で、浮動小数の演算は
- * `f32(acc)` / `inv·(1/127)` / `prow·vs` / 積 の 4 つだけ。したがって **GPU と atol=0**
- * （`qP` の生成だけが `exp` の実装差を持ち、それは {@link referenceAttentionPvQuant} 側の
- * 別の門に切り出してある — 設計 §4.2 の 2 段分割）。
+ * `O[b,m,d] = f32(Σ_n qP·vq) · ((inv·(1/127)) · vs[b,d])`, with only four floating-point
+ * operations: `f32(acc)` / `inv·(1/127)` / `prow·vs` / the product. Hence **atol=0 against the GPU**
+ * (only the generation of `qP` carries the implementation differences of `exp`, and that is split
+ * off into a separate check on the {@link referenceAttentionPvQuant} side — the two-step split of
+ * design §4.2).
  *
- * MUST: 乗算の順序は GPU と同じ（`prow · vs` を先に 1 つの f32 へ畳む）。逐次形
- * （`f32(acc)·prow·vs`）にすると丸めの位置が動いて atol=0 が崩れる。
- * MUST: `1/127` は乗算で作る（GPU 側と同じ — 除算は正しく丸められない）。
- * MUST: GPU 側のタイル構造を写さない（素の 4 重ループ — 他の参照と同じ規律）。
+ * MUST: the multiplication order is the same as the GPU's (`prow · vs` is folded into one f32
+ * first). The sequential form (`f32(acc)·prow·vs`) moves the rounding points and breaks atol=0.
+ * MUST: `1/127` is built by multiplication (the same as the GPU side — division is not correctly
+ * rounded).
+ * MUST: do not copy the GPU side's tile structure (a plain quadruple loop — the same discipline as
+ * the other references).
  */
 export const referenceAttentionPvI8a8Core = (
   input: AttentionPvI8a8CoreInput,
@@ -346,7 +385,7 @@ export const referenceAttentionPvI8a8Core = (
     for (let row = 0; row < m; row += 1) {
       const prow = Math.fround(rowInv[b * m + row] * INV_P_ABS_MAX);
       for (let col = 0; col < d; col += 1) {
-        // 整数の厳密和（|acc| ≤ n·127² は 2^53 に遠く及ばないので JS の number で厳密）
+        // Exact integer sum (|acc| ≤ n·127² is far below 2^53, so a JS number is exact)
         let acc = 0;
         for (let i = 0; i < n; i += 1) {
           acc += qp[(b * m + row) * n + i] * vq[(b * d + col) * n + i];
@@ -360,35 +399,38 @@ export const referenceAttentionPvI8a8Core = (
 };
 
 type AttentionQkI8a8Input = {
-  /** q `[batch, m, d]`（f32・量子化前。batch は B·H を畳んだ 1 軸）。 */
+  /** q `[batch, m, d]` (f32, before quantization; batch is one axis folding B·H). */
   readonly q: ArrayLike<number>;
-  /** k `[batch, n, d]`（f32・量子化前）。 */
+  /** k `[batch, n, d]` (f32, before quantization). */
   readonly k: ArrayLike<number>;
   readonly batch: number;
   readonly m: number;
   readonly n: number;
   readonly d: number;
-  /** **半スケール**（ADR 0023 の `√scale_factor`）。q 側と k 側の両方へ掛かる。 */
+  /** **The half scale** (`√scale_factor` of ADR 0023). Applied to both the q side and the k side. */
   readonly scale: number;
 };
 
 /**
- * 融合 attention ①QK の i8a8 変種の参照 —
- * `S[b,m,n] = f32(Σ_d qq·kq) · ((qs[b,m]·scale) · (ks[b,n]·scale))`。
+ * Reference of the i8a8 variant of fused attention ①QK —
+ * `S[b,m,n] = f32(Σ_d qq·kq) · ((qs[b,m]·scale) · (ks[b,n]·scale))`.
  *
- * MUST: 半スケールは**量子化の後**（dequant 側）で掛ける。量子化の前に掛ける形にすると
- * 丸めが 1 段増え、GPU（src/kernels/attention-i8a8.ts）との atol=0 が崩れる。
- * MUST: 乗算の順序も GPU と同じ（`qs'·ks'` を先に 1 つの f32 へ畳む）。逐次形
- * （`f32(acc)·qs'·ks'`）にすると丸めの位置が動く。
- * MUST: GPU 側のタイル構造を写さない（素の 4 重ループで書くことが、タイル境界と K 端数の
- * 扱いを検証対象として残す唯一の方法 — {@link referenceLinearI8a8} と同じ規律）。
+ * MUST: the half scale is applied **after quantization** (on the dequant side). Applying it before
+ * quantization adds one rounding step and breaks atol=0 against the GPU
+ * (src/kernels/attention-i8a8.ts).
+ * MUST: the multiplication order is the same as the GPU's too (`qs'·ks'` is folded into one f32
+ * first). The sequential form (`f32(acc)·qs'·ks'`) moves the rounding points.
+ * MUST: do not copy the GPU side's tile structure (writing a plain quadruple loop is the only way
+ * to keep the handling of tile boundaries and the K remainder under verification — the same
+ * discipline as {@link referenceLinearI8a8}).
  */
 export const referenceAttentionQkI8a8 = (
   input: AttentionQkI8a8Input,
 ): Float32Array<ArrayBuffer> => {
   const { batch, m, n, d } = input;
   const scale = Math.fround(input.scale);
-  // 縮約軸 D が q / k とも最内連続なので、量子化は行 = (b, m) / (b, n) の per-token そのもの
+  // The reduced axis D is innermost-contiguous for both q and k, so quantization is per-token over
+  // the rows (b, m) / (b, n) as they are
   const query = quantizeRowsReference(input.q, batch * m, d);
   const key = quantizeRowsReference(input.k, batch * n, d);
   const out = new Float32Array(batch * m * n);
@@ -396,7 +438,7 @@ export const referenceAttentionQkI8a8 = (
     for (let row = 0; row < m; row += 1) {
       const qs = Math.fround(query.scale[b * m + row] * scale);
       for (let col = 0; col < n; col += 1) {
-        // 整数の厳密和（|acc| ≤ d·127² は 2^53 に遠く及ばないので JS の number で厳密）
+        // Exact integer sum (|acc| ≤ d·127² is far below 2^53, so a JS number is exact)
         let acc = 0;
         for (let i = 0; i < d; i += 1) {
           acc += query.q[(b * m + row) * d + i] * key.q[(b * n + col) * d + i];

@@ -1,7 +1,7 @@
 /**
- * 融合ルール `rmsNormAdd`（`rms_norm → add` — ADR 0099）。全ルール共通の適格条件と
- * `defineRule` は {@link "../fusion-rule.ts"}、適用順を決める宣言表は
- * {@link "../fusion.ts"} の `FUSION_RULES`。
+ * Fusion rule `rmsNormAdd` (`rms_norm → add` — ADR 0099). The eligibility conditions shared by
+ * every rule and `defineRule` are in {@link "../fusion-rule.ts"}; the declaration table that fixes
+ * the application order is `FUSION_RULES` in {@link "../fusion.ts"}.
  */
 
 import { numel, rmsNormEps } from "../../ops.ts";
@@ -29,7 +29,10 @@ type RmsNormAddMatch = FusionMatch & {
   readonly subgroup: boolean;
 };
 
-/** 共有・出力・broadcastは既存経路へ戻す。実測した最終次元に限定する（ADR 0099）。 */
+/**
+ * Shared, output and broadcast cases go back to the existing path. Limited to the measured last
+ * dimensions (ADR 0099).
+ */
 export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch>({
   name: "rmsNormAdd",
   heads: ["rms_norm"],
@@ -53,7 +56,8 @@ export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch>({
     )
       return undefined;
     const binds = [...norm.node.ins, add.node.ins[1 - position]];
-    // 重複bindingを要求する形は今回の検収外。外部入力の延べ参照は共通の解放簿記が導く。
+    // Shapes that need a duplicated binding are outside this acceptance. The shared release
+    // bookkeeping derives the total references to external inputs.
     if (new Set(binds).size !== 3) return undefined;
     return {
       window: chain,

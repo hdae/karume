@@ -1,7 +1,7 @@
 /**
- * 融合ルール `rope`（half-split RoPE の 7 ノード）。全ルール共通の適格条件と `defineRule` は
- * {@link "../fusion-rule.ts"}、適用順を決める宣言表は {@link "../fusion.ts"} の
- * `FUSION_RULES`。
+ * Fusion rule `rope` (the 7 nodes of a half-split RoPE). The eligibility conditions shared by
+ * every rule and `defineRule` are in {@link "../fusion-rule.ts"}; the declaration table that fixes
+ * the application order is `FUSION_RULES` in {@link "../fusion.ts"}.
  */
 
 import { catDim, numel, sliceAttrs, SYM_PREFIX_SLICE_OP } from "../../ops.ts";
@@ -33,35 +33,37 @@ type RopeMatch = FusionMatch & {
 };
 
 /**
- * half-split RoPE: エクスポータが作る**連続 7 ノード**。attention の slice-first と
- * text encoder / Gemma 系の direct-mul-first の 2 順序だけを受理する。
+ * half-split RoPE: the **7 consecutive nodes** the exporter produces. Only two orders are
+ * accepted: slice-first (attention) and direct-mul-first (text encoders / the Gemma family).
  *
  * - slice-first: `slice×2, neg, cat, mul(x,cos), mul(cat,sin), add`
  * - direct-first: `mul(x,cos), slice×2, neg, cat, mul(cat,sin), add`
  *
- * MUST: `[1,H,S,D]` / table `[1,1,S,D]` または `[1,S,H,D]` / table `[1,S,1,D]`
- * （D は正の偶数）/ dim=3 の
- * `0-D/2` / `D/2-D` だけ。head 幅 D は**実測 2 種（128 と 256）**あるので slice の境界から
- * 導くが、偶奇 RoPE（`x[0::2]` / `x[1::2]` 形）・別 broadcast・別 cat 軸は「式が似ている」で
- * 広げない — 受理集合を広げた瞬間、「掴めなければ既存経路で必ず正しい」という fallback の
- * 保証が効かなくなる。カーネル（kernels/rope.ts）は `head_dim` / `half_dim` を uniform で
- * 受けるので、D の一般化に WGSL の変更は要らない。
+ * MUST: only `[1,H,S,D]` / table `[1,1,S,D]` or `[1,S,H,D]` / table `[1,S,1,D]`
+ * (D a positive even number) / dim=3 with
+ * `0-D/2` / `D/2-D`. The head width D has **two measured values (128 and 256)**, so it is
+ * derived from the slice boundaries; but even/odd RoPE (the `x[0::2]` / `x[1::2]` form), other
+ * broadcasts and other cat axes are not admitted because "the formula looks similar" — the moment
+ * the accepted set widens, the fallback guarantee ("if it does not match, the existing path is
+ * always correct") stops holding. The kernel (kernels/rope.ts) takes `head_dim` / `half_dim` as
+ * uniforms, so generalising D needs no WGSL change.
  *
- * ## 窓内 passthrough
+ * ## In-window passthrough
  *
- * `cat` と続く `mul` の間に、cos / sin 表を実行時 T へ縮める {@link SYM_PREFIX_SLICE_OP} が
- * **1 本だけ**挟まる形が実測にある（Gemma 系。表は θ 系統ごとに 1 度作って全層で使い回すので、
- * 挟まるのは各系統の初出 1 箇所だけ）。この 1 本は鎖の値を消費しないので融合ステップの前へ
- * 動かせる（合法性の判定は {@link "../fusion-rule.ts"} の `passthroughIsIndependent`）。
+ * A measured form has **exactly one** {@link SYM_PREFIX_SLICE_OP} between `cat` and the following
+ * `mul`, shrinking the cos / sin table to the runtime T (the Gemma family; the table is built once
+ * per θ variant and reused by every layer, so it sits only at the first use of each variant). That
+ * one node consumes no value of the chain, so it can move in front of the fused step (legality is
+ * decided by `passthroughIsIndependent` in {@link "../fusion-rule.ts"}).
  *
- * 外部入力の延べ回数: x が slice×2 と direct mul で 3 回、cos / sin が各 1 回。
+ * Total uses of external inputs: x 3 times (slice×2 and the direct mul), cos / sin once each.
  */
 export const ROPE_RULE = defineRule<RopeMatch>({
   name: "rope",
   heads: ["mul", "slice"],
   match: (nodes, index, context) => {
-    // 全ノードで呼ばれるので、先頭 op を見てから配列を作る（ノードごとの短命 slice は
-    // dispatch 削減ぶんを CPU 側で食い返す）。
+    // Called for every node, so check the leading op before building an array (a short-lived
+    // slice per node would eat back on the CPU what the dispatch reduction saves).
     const leading = nodes[index];
     const directFirst = leading?.node.op === "mul";
     if (!directFirst && leading?.node.op !== "slice") return undefined;
@@ -78,8 +80,9 @@ export const ROPE_RULE = defineRule<RopeMatch>({
     )
       return undefined;
     cursor += 4;
-    // 窓内 passthrough は cos / sin 表の sym_prefix_slice 1 本だけ（実測形）。ここを
-    // 「任意 op の任意本数」に広げると、鎖と無関係なノードを跨いだ並べ替えまで受理してしまう。
+    // The only in-window passthrough is the one sym_prefix_slice of the cos / sin table (the
+    // measured form). Widening this to "any number of any op" would accept reorderings across
+    // nodes unrelated to the chain.
     if (nodes[cursor]?.node.op === SYM_PREFIX_SLICE_OP) cursor += 1;
     const direct = directFirst ? leading : nodes[cursor];
     if (!directFirst) cursor += 1;
@@ -89,8 +92,8 @@ export const ROPE_RULE = defineRule<RopeMatch>({
       return undefined;
     const windowEnd = cursor + 2;
 
-    // MUST: use-count と解放簿記は**実際のノード順**で持つ。役割順に並べ替えた列を使うと
-    // direct-first だけ内部値の集合がずれる。
+    // MUST: keep the use counts and the release bookkeeping in **the actual node order**. A list
+    // reordered by role shifts the set of internal values for direct-first only.
     const chain = directFirst
       ? [direct, first, second, neg, cat, cross, add]
       : [first, second, neg, cat, direct, cross, add];
@@ -115,14 +118,15 @@ export const ROPE_RULE = defineRule<RopeMatch>({
     if (axis1 < 1 || axis2 < 1 || headDim < 2 || headDim % 2 !== 0) return undefined;
     const tablesMatch = (shape: readonly number[]): boolean =>
       sameShape(direct.inputShapes[1], shape) && sameShape(cross.inputShapes[1], shape);
-    // 両者が一致する退化形は既存BHSDを優先し、既存のキー・本文を維持する。
+    // In the degenerate form where both match, the existing BHSD wins, keeping the existing key and
+    // body.
     const layout = tablesMatch([1, 1, axis2, headDim])
       ? "bhsd"
       : tablesMatch([1, axis1, 1, headDim])
         ? "bshd"
         : undefined;
     if (layout === undefined) return undefined;
-    // 両レイアウトとも第2軸が表添字の除数（BHSD=S、BSHD=H）。
+    // In both layouts the second axis is the divisor of the table index (BHSD=S, BSHD=H).
     const tableAxisSize = axis2;
     const halfDim = headDim / 2;
 

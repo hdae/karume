@@ -4,7 +4,7 @@
 @group(0) @binding(2) var<storage, read_write> out: array<f32>;
 
 fn log1p_series(x: f32) -> f32 {
-  // 係数は 1/k（Horner 形）。切り替え点より外は log(1+x) をそのまま使う。
+  // The coefficients are 1/k (Horner form). Outside the switch point, log(1+x) is used as is.
   let series = x * (1.0 - x * (0.5 - x * (0.3333333333333333 - x * (0.25 - x * (0.2 - x * (0.16666666666666666 - x * (0.14285714285714285 - x * (0.125 - x * (0.1111111111111111 - x * (0.1))))))))));
   return select(log(1.0 + x), series, abs(x) < 0.25);
 }

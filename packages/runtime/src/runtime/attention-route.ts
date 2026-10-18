@@ -1,47 +1,53 @@
 /**
- * 融合 attention の**経路の判定**（席の要求 × 形 → 段ごとに実際に走る経路）— 判定の正本はここ 1 本。
+ * **Route decision** of fused attention (requested options × shape → the route each stage actually
+ * runs) — the single source of truth for that decision.
  *
- * a8（`attentionCompute`）と s16（`attentionScoreStorage`）は、形の条件を満たさない段だけが f32 経路へ
- * 沈黙で縮退する（ADR 0030 決定 5 / ADR 0058 決定 3）。レシピ導出（recipe-builders/attention.ts の
- * `buildAttention`）と、系列の受理集合を通すテストが**同じ関数**を呼ぶ — 判定を二重に書くと、
- * 片方だけが動いて「テストでは適格・実行では縮退」が黙って起こる。
+ * a8 (`attentionCompute`) and s16 (`attentionScoreStorage`) fall back silently to the f32 route only
+ * for the stages whose shape conditions are not met (ADR 0030 decision 5 / ADR 0058 decision 3).
+ * Recipe derivation (`buildAttention` in recipe-builders/attention.ts) and the tests that run a
+ * family's acceptance set call the **same function** — writing the decision twice lets one copy move
+ * alone, and "eligible in the tests, fallen back at run time" happens silently.
  *
- * NOTE: `export` はレシピ導出とテストのため（mod.ts の公開面には出さない — ADR 0008）。
+ * NOTE: the `export` is for recipe derivation and the tests (not part of the public surface of
+ * mod.ts — ADR 0008).
  */
 
 import { attentionPvI8a8Eligible, attentionQkI8a8Eligible } from "../kernels/attention-i8a8.ts";
 import { attentionScoreUsesF16, type ScoreStorage } from "../kernels/score-storage.ts";
 import type { ComputePrecision } from "./session-types.ts";
 
-/** 段（①QK / ③PV）の経路。`dense` は f32 / f16 の GEMM 骨格（`attentionCompute` の f32 / f16）。 */
+/** Route of a stage (①QK / ③PV). `dense` is the f32 / f16 GEMM skeleton (`attentionCompute` f32 / f16). */
 export type AttentionStageRoute = "i8a8" | "dense";
 
-/** 1 つの融合 attention で実際に走る経路（②行統計は常に f32 計算で、S の格納形だけが動く）。 */
+/** The routes one fused attention actually runs (② row statistics always compute in f32; only the storage form of S moves). */
 export type AttentionRoute = {
   readonly qk: AttentionStageRoute;
   readonly pv: AttentionStageRoute;
   readonly score: ScoreStorage;
 };
 
-/** 経路を決める席（Session の解決済みの値 — 省略値の代入は session-build.ts の責務）。 */
+/** The options that decide the route (the Session's resolved values — filling omitted values is session-build.ts's job). */
 export type AttentionSeats = {
   readonly attentionCompute: ComputePrecision;
   readonly attentionScoreStorage: ScoreStorage;
 };
 
 /**
- * 席の要求と形（`depth` = D・`cols` = キー長 N）から、段ごとに実際に走る経路を決める。
+ * Decides, from the requested options and the shape (`depth` = D, `cols` = key length N), the route
+ * each stage actually runs.
  *
- * - i8a8: MUST: 適格判定は**段ごとに独立**。① は q / k のパック方向が D・③ は P̃ / Vᵀ のパック方向が
- *   N なので、条件も別々になる（両方満たさない形・片方だけの形が実在する）。
- * - S の格納形: `pack2x16float` の 2 要素／語なので、書き手 ①QK が v4 経路を取る形
- *   （`D % 4 == 0 && N % 4 == 0`）だけが適格。MUST: S の格納形は 3 カーネル（①②③）で**同時に**
- *   切り替わる — 書き手と読み手で一致していなければならないので、段ごとの混成はあり得ない
- *   （i8a8 の段ごとの独立とは別の話で、① が i8a8 でも f32 でも S の格納形は 1 つに決まる）。
+ * - i8a8: MUST: eligibility is decided **independently per stage**. ① packs q / k along D and ③
+ *   packs P̃ / Vᵀ along N, so the conditions differ too (shapes that meet neither and shapes that
+ *   meet only one both exist).
+ * - Storage form of S: `pack2x16float` holds 2 elements per word, so only shapes where the writer
+ *   ①QK takes the v4 route (`D % 4 == 0 && N % 4 == 0`) are eligible. MUST: the storage form of S
+ *   switches in all 3 kernels (①②③) **at once** — writer and readers must agree, so mixing per
+ *   stage cannot happen (a separate matter from the per-stage independence of i8a8: whether ① is
+ *   i8a8 or f32, the storage form of S is decided as one).
  *
- * MUST: mask × a8・GQA × a8 の拒否は、この戻り値ではなく**要求されたモード**
- * （`attentionCompute === "a8"`）で見る（buildAttention の MUST — 適格判定込みの値で見ると、
- * 縮退する形だけが拒否をすり抜ける）。
+ * MUST: the rejections of mask × a8 and GQA × a8 look at the **requested mode**
+ * (`attentionCompute === "a8"`), not at this return value (the MUST of buildAttention — looking at
+ * the value after eligibility lets exactly the shapes that fall back slip past the rejection).
  */
 export const attentionRoute = (
   seats: AttentionSeats,

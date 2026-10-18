@@ -1,9 +1,9 @@
 /**
- * 族別導出 — elementwise（単項 / 二項 / cast / where）・行 reduce・argmax / topk とその分割経路・
- * cumsum・softmax・masked_fill。
+ * Per-op-family derivation — elementwise (unary / binary / cast / where), row reduce, argmax / topk
+ * and their split paths, cumsum, softmax, masked_fill.
  *
- * 入口は {@link "../recipe-builder.ts"} の `RecipeBuilder` で、共有サービス（Session の状態と
- * params の書き込み）は {@link RecipeBuildFace} 経由でだけ触る。
+ * The entry is `RecipeBuilder` in {@link "../recipe-builder.ts"}; the shared services (Session
+ * state and params writes) are reached only through {@link RecipeBuildFace}.
  */
 
 import {
@@ -77,7 +77,7 @@ import type { IrDtype } from "../../format/ir.ts";
 import type { RecipeBuildFace } from "../recipe-builder.ts";
 import { PARAMS_STORAGE_USAGE, PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
 
-/** elementwise 族の生成入力のうち rank に依らない部分（rank はエンコード時に決まる）。 */
+/** The rank-independent part of the elementwise family's generation input (rank set at encode). */
 type ElementwiseOp =
   | { readonly op: UnaryOpName | BinaryOpName | typeof WHERE_OP; readonly dtype: IrDtype }
   | { readonly op: typeof CAST_OP; readonly dtype: IrDtype; readonly to: IrDtype };
@@ -90,7 +90,7 @@ export const buildElementwise = async (
   outs: readonly BindingSource[],
   builder: StepRecipeBuilder,
 ): Promise<void> => {
-  // rank 0（スカラ）は codegen の rank ≥ 1 契約に合わせて長さ 1 の 1 次元に正規化する。
+  // Rank 0 (a scalar) is normalised to one dimension of length 1 for codegen's rank ≥ 1 contract.
   const outShape = step.outputs[0].shape.length === 0 ? [1] : [...step.outputs[0].shape];
   const rank = outShape.length;
   const spec: ElementwiseSpec =
@@ -99,7 +99,8 @@ export const buildElementwise = async (
       : { op: element.op, rank, dtype: element.dtype };
   const key = elementwiseKey(spec);
   const { pipeline, layout, roles } = await face.state.cache.get(key, elementwiseWgsl(spec));
-  // attrs のスカラ（clamp の min/max など）は params の末尾に f32 で載る（並びは契約表）。
+  // Scalars from attrs (clamp's min/max and so on) go at the end of params as f32 (order per the
+  // contract table).
   const params = face.writeParams(
     elementwiseParams(
       spec,
@@ -129,14 +130,16 @@ export const buildElementwise = async (
 };
 
 /**
- * reduce 族（sum / amax / amin）。**縮約軸で 2 変種に踏み分ける**:
+ * The reduce family (sum / amax / amin). **Two variants, chosen by the reduction axis**:
  *
- * - 最終次元 → 行 reduce（既存カーネル・1 行 = 1 workgroup + 256 幅ツリー）
- * - それ以外 → 軸 reduce（1 スレッド = 1 出力・コアレス読み。縮約順序は行 reduce と
- *   厳密に一致 = 出力ビット同一 — src/codegen/reduce.ts の {@link axisReduceWgsl}）
+ * - last dimension → row reduce (the existing kernel, one row = one workgroup + a 256-wide tree)
+ * - any other → axis reduce (one thread = one output, coalesced reads. The reduction order
+ *   matches the row reduce exactly = bit-identical output — {@link axisReduceWgsl} in
+ *   src/codegen/reduce.ts)
  *
- * MUST: 分岐は**軸だけ**で決める。速度で選ぶ余地を作ると、最終次元でも軸変種が走る形が
- * でき、既定経路のビット不変（PNG sha256 門）が実行時条件に依存してしまう。
+ * MUST: the branch is decided **by the axis only**. Leaving room to choose by speed would allow the
+ * axis variant to run even on the last dimension, and the default path's bit stability (the PNG
+ * sha256 check) would depend on run-time conditions.
  */
 export const buildRowReduce = async (
   face: RecipeBuildFace,
@@ -148,7 +151,8 @@ export const buildRowReduce = async (
 ): Promise<void> => {
   const inputShape = step.inputShapes[0];
   const axis = reduceDim(step.node.attrs, `nodes (${step.node.op})`);
-  // 要素型はキーに載る（bool の sum は u32 を読んで i32 の個数を書く — ADR 0009）。
+  // The element type is part of the key (a sum over bool reads u32 and writes an i32 count —
+  // ADR 0009).
   const spec = { op, dtype: step.inputDtypes[0] };
   const lastDim = axis === inputShape.length - 1;
   const outCount = numel(step.outputs[0].shape);
@@ -164,8 +168,8 @@ export const buildRowReduce = async (
       : axisReduceParams(outCount, inputShape[axis], inner),
     PARAMS_UNIFORM_USAGE,
   );
-  // 行 reduce は 1 行 = 1 workgroup、軸 reduce は 1 スレッド = 1 出力。どちらも上限を
-  // 超えたら縮退させ、カーネル側の grid-stride で回す。
+  // Row reduce is one row = one workgroup, axis reduce one thread = one output. Both are clamped
+  // beyond the limit, and the kernel's grid-stride loop covers the rest.
   const groups = gridStrideWorkgroups(
     outCount,
     lastDim ? 1 : AXIS_REDUCE_WORKGROUP_SIZE,
@@ -186,17 +190,19 @@ export const buildRowReduce = async (
 };
 
 /**
- * argmax（最終次元・rank 保存・出力 i32 — ADR 0068 決定 2）。短い行は**1 dispatch**で、行 reduce と
- * 同じ「1 行 = 1 workgroup + 行方向 grid-stride」（形とタイブレークの根拠は
- * src/kernels/argmax.ts）。長い行（`argmaxSplitGroups(dim) > 0` — 語彙長の lm_head 出口）は
- * **2 dispatch**（区間ごとの部分最大元 → 行ごとの merge）で、結果は 1 dispatch 形と
- * ビット同一（同ファイルの「2 相分割」節）。
+ * argmax (last dimension, rank kept, i32 output — ADR 0068 decision 2). Short rows take **one
+ * dispatch**, the same "one row = one workgroup + grid-stride over rows" as the row reduce (the
+ * basis of the shape and the tie-break is in src/kernels/argmax.ts). Long rows
+ * (`argmaxSplitGroups(dim) > 0` — the vocabulary-length lm_head exit) take **two dispatches**
+ * (partial maximum per range → merge per row), bit-identical to the one-dispatch form (the
+ * two-phase split section of the same file).
  *
- * MUST: 軸で踏み分けない（reduce 族と違い最終次元専業 — 契約に `dim` の欄が無い）。
- * 行数は**入力の先行次元の積**から取る（出力の要素数と一致するが、カーネルが読む量は
- * 入力側の形で決まる）。
- * MUST: 経路の選択は形の純関数（`argmaxSplitGroups`）— 見積り（estimate.ts の argmax の
- * 一時）と同じ関数を通す。
+ * MUST: no branching by axis (unlike the reduce family, last dimension only — the contract has no
+ * `dim` field).
+ * The row count comes from **the product of the input's leading dimensions** (it equals the
+ * output's element count, but how much the kernel reads is set by the input's shape).
+ * MUST: the path choice is a pure function of the shape (`argmaxSplitGroups`) — the same function
+ * as the estimate (the argmax temporary in estimate.ts) goes through.
  */
 export const buildArgmax = async (
   face: RecipeBuildFace,
@@ -210,14 +216,16 @@ export const buildArgmax = async (
   const rows = numel(inputShape.slice(0, -1));
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const groups = argmaxSplitGroups(dim);
-  // 外側が空なら従来経路へ残す（topk(k=1) と同じ — 分割一時 0B はレシピの寿命契約に入らない）。
+  // An empty outer extent stays on the existing path (as in topk(k=1) — a 0 B split temporary does
+  // not fit the recipe's lifetime contract).
   if (rows > 0 && groups > 0) {
     await buildMaxIndexSplit(face, rows, dim, groups, binds[0], outs[0], builder);
     return;
   }
   const { pipeline, layout, roles } = await face.state.cache.get(ARGMAX_KEY, ARGMAX_WGSL);
   const params = face.writeParams(argmaxParams(rows, dim), PARAMS_UNIFORM_USAGE);
-  // 1 行 = 1 workgroup。上限を超えたら縮退させ、カーネル側の行 grid-stride で回す。
+  // One row = one workgroup. Clamped beyond the limit; the kernel's row grid-stride loop covers
+  // the rest.
   builder.dispatch({
     key: ARGMAX_KEY,
     pipeline,
@@ -233,7 +241,8 @@ export const buildArgmax = async (
 };
 
 /**
- * 部分最大と最小添字の縮約を共有し、topk(k=1)だけ元入力の値ビットも写す。
+ * Shares the reduction of partial maximum and smallest index; only topk(k=1) also copies the value
+ * bits of the original input.
  * DECIDED: docs/decisions/0068-decode-exit-multi-output.md#addendum-9-2026-09-11--topk-k1-over-long-rows-also-uses-two-dispatches
  */
 const buildMaxIndexSplit = async (
@@ -257,7 +266,8 @@ const buildMaxIndexSplit = async (
     value === undefined ? ARGMAX_SPLIT_MERGE_WGSL : topkOneSplitMergeWgsl(),
   );
   const params = face.writeParams(argmaxSplitParams(rows, dim, groups), PARAMS_UNIFORM_USAGE);
-  // 部分結果 [rows, groups, 2]（u32）。partial の直前に確保し merge の直後に返す。
+  // Partial result [rows, groups, 2] (u32). Allocated right before partial, returned right after
+  // merge.
   const partial = builder.allocTemp(argmaxSplitPartialBytes(rows, groups));
   builder.dispatch({
     key: ARGMAX_SPLIT_PARTIAL_KEY,
@@ -269,8 +279,8 @@ const buildMaxIndexSplit = async (
       { binding: 1, source: input },
       { binding: 2, source: partial },
     ],
-    // x 軸 = 区間（1 workgroup = 1 区間・欠落は沈黙誤値なので上限超過は fail loudly）、
-    // y 軸 = 行（grid-stride で縮退可）。
+    // x axis = ranges (one workgroup = one range; a missing one is a silent wrong value, so
+    // exceeding the limit fails loudly), y axis = rows (may be clamped onto grid-stride).
     workgroups: [
       tiledWorkgroups(groups, 1, limit, "argmax split partial"),
       gridStrideWorkgroups(rows, 1, limit),
@@ -299,17 +309,19 @@ const buildMaxIndexSplit = async (
 };
 
 /**
- * topk（最終次元・static-k・**出力 2 本** — ADR 0068 決定 3）。
- * k=1 の長い行は argmax の部分最大・merge を共用し、それ以外は1 dispatch。
- * 値は選ばれた元入力のu32を写し、NaNのペイロードと符号付きゼロを維持する。
+ * topk (last dimension, static k, **two outputs** — ADR 0068 decision 3).
+ * Long rows with k=1 share argmax's partial maximum and merge; everything else is one dispatch.
+ * The values copy the selected original input's u32, keeping NaN payloads and signed zeros.
  *
- * MUST: 出力は**列で受ける**（`outs[0]` = 値 f32・`outs[1]` = 添字 i32）。順序は
- * {@link "../recipe.ts"} の `StepRecipe.outputs` と同じ出力 slot 昇順で、`node.outs` の並びがそのまま bind 面の
- * 1 dispatch経路の束縛番号 2 / 3 に対応する。取り違えると shape も byteLength も同じ（どちらも `[…, k]` の
- * 4 バイト要素）なので**例外なしに値と添字が入れ替わる**。
- * MUST: 分割経路の一時は実行・見積りの双方へ載せる。出力と同居させない。
- * 1 dispatch 経路の scratch は workgroup storage に閉じ、k の実装上限は
- * device limit から判定する（{@link assertTopkK} — 縮退しない）。
+ * MUST: outputs are **received as a list** (`outs[0]` = values f32, `outs[1]` = indices i32). The
+ * order is ascending output slot, the same as `StepRecipe.outputs` in {@link "../recipe.ts"}, and
+ * the order of `node.outs` maps directly onto bindings 2 / 3 of the bind surface of the
+ * one-dispatch path. Swapping them keeps shape and byteLength the same (both are 4-byte elements of
+ * `[…, k]`), so **values and indices trade places with no exception**.
+ * MUST: the split path's temporaries are counted in both execution and estimate. They do not share
+ * storage with the outputs.
+ * The one-dispatch path's scratch stays in workgroup storage, and the implementation limit on k
+ * is decided from the device limit ({@link assertTopkK} — no fallback).
  */
 export const buildTopk = async (
   face: RecipeBuildFace,
@@ -322,12 +334,14 @@ export const buildTopk = async (
   const dim = inputShape[inputShape.length - 1];
   const rows = numel(inputShape.slice(0, -1));
   const where = `nodes (${step.node.op})`;
-  // `1 ≤ k ≤ 最終次元` は契約層（attrs スキーマ + shape 規則）が済ませている。ここで見るのは
-  // **device 依存の実装上限**だけ（workgroup storage — 上限値つきで fail loudly）。
+  // `1 ≤ k ≤ last dimension` is already settled by the contract layer (attrs schema + shape
+  // rules). What is checked here is only **the device-dependent implementation limit** (workgroup
+  // storage — fails loudly with the limit value).
   const k = topkK(step.node.attrs, where);
   assertTopkK(k, face.state.gpu.limits.maxComputeWorkgroupStorageSize, where);
   const splitGroups = topkOneSplitGroups(dim);
-  // 外側が空なら従来経路へ残す。分割一時0Bはレシピの寿命契約に入らない。
+  // An empty outer extent stays on the existing path. A 0 B split temporary does not fit the
+  // recipe's lifetime contract.
   if (k === 1 && rows > 0 && splitGroups > 0) {
     await buildMaxIndexSplit(face, rows, dim, splitGroups, binds[0], outs[1], builder, outs[0]);
     return;
@@ -335,7 +349,8 @@ export const buildTopk = async (
   const key = topkKey(k);
   const { pipeline, layout, roles } = await face.state.cache.get(key, topkWgsl(k));
   const params = face.writeParams(topkParams(rows, dim), PARAMS_UNIFORM_USAGE);
-  // 1 行 = 1 workgroup。上限を超えたら縮退させ、カーネル側の行 grid-stride で回す。
+  // One row = one workgroup. Clamped beyond the limit; the kernel's row grid-stride loop covers
+  // the rest.
   const groups = gridStrideWorkgroups(
     rows,
     1,
@@ -357,8 +372,8 @@ export const buildTopk = async (
 };
 
 /**
- * cumsum（最終次元の前縁和）。**1 invocation = 1 行**の逐次走査で、行方向を grid-stride で
- * 回す（形の根拠は src/kernels/cumsum.ts）。
+ * cumsum (prefix sum over the last dimension). A sequential scan with **one invocation = one
+ * row**, grid-stride over rows (the basis of the shape is in src/kernels/cumsum.ts).
  */
 export const buildCumsum = async (
   face: RecipeBuildFace,
@@ -392,10 +407,11 @@ export const buildCumsum = async (
 };
 
 /**
- * softmax（最終次元、safe-softmax）。layer_norm と同じ 1 行 = 1 workgroup の形。
+ * softmax (last dimension, safe-softmax). The same one row = one workgroup shape as layer_norm.
  *
- * `safe` は safe_softmax 変種（行 max が −inf の行に 0 を書く — ADR 0044）。カーネルは
- * 同じ生成関数から出た 2 本で、dispatch の形（バインド・workgroup 数）は同じ。
+ * `safe` is the safe_softmax variant (writes 0 to a row whose max is −inf — ADR 0044). The two
+ * kernels come from the same generator, and the dispatch shape (bindings, workgroup count) is the
+ * same.
  */
 export const buildSoftmax = async (
   face: RecipeBuildFace,
@@ -434,8 +450,9 @@ export const buildSoftmax = async (
 };
 
 /**
- * masked_fill。出力と x は同形・連続で、mask だけを右詰め broadcast の stride で読む。
- * stride の組み立ては strided 族の expand と同じ規則（{@link expandSrcStrides}）。
+ * masked_fill. The output and x have the same shape and are contiguous; only the mask is read with
+ * right-aligned broadcast strides. The strides follow the same rule as expand in the strided family
+ * ({@link expandSrcStrides}).
  */
 export const buildMaskedFill = async (
   face: RecipeBuildFace,
@@ -445,8 +462,8 @@ export const buildMaskedFill = async (
   builder: StepRecipeBuilder,
 ): Promise<void> => {
   const outShape = step.outputs[0].shape;
-  // 規則は expand と同一だが、診断の主語は masked_fill の側に付け替える（グラフに expand が
-  // 無いのに「expand の入力」と出ると原因の当たりを外す）。
+  // The rule is the same as expand, but the diagnostic's subject is switched to masked_fill (an
+  // "input of expand" message on a graph with no expand would point away from the cause).
   const maskStrides = expandSrcStrides(step.inputShapes[1], outShape, {
     src: "masked_fill の mask",
     out: "masked_fill の出力",

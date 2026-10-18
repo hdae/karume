@@ -1,32 +1,38 @@
 /**
- * int8 活性（`linearCompute` / `attentionCompute: "a8"`）を dp4a の無い device で走らせるときの
- * 警告（DECIDED: ADR 0128 決定 5 — dp4a 非対応はフォールバックでも自動の兄弟プリセットでもなく、警告）。
+ * The warning for running int8 activations (`linearCompute` / `attentionCompute: "a8"`) on a device
+ * without dp4a (DECIDED: ADR 0128 decision 5 — a device without dp4a gets a warning, not a fallback
+ * and not an automatic sibling preset).
  *
- * i8a8 の整数内積は dp4a（WGSL 言語機能 `packed_4x8_integer_dot_product`）があればその組み込みで、
- * 無ければエミュレーションで走る。**両変種の数値は同一**（src/kernels/linear-i8a8.ts）なので
- * 正しさの問題ではなく、速度だけの問題 — エミュレーションは f32 の経路より速くならず、Apple の
- * Metal では遅くなる実測がある（ADR 0115 / ADR 0128 Context）。a8 を既定に持つ配布形
- * （anima / irodori / wan）は dp4a のある GPU で測って選ばれたもので、dp4a の無い device の利用者は
- * 速度の利得が無いまま活性量子化の品質差だけを払う。黙って通すとその事実が利用者から見えない
- * （診断のパイプラインキー `:dp4aEmu` には出るが、既定で使う人は診断を読まない）。
+ * The i8a8 integer dot product uses the dp4a built-in (WGSL language feature
+ * `packed_4x8_integer_dot_product`) when it exists and runs emulated otherwise. **Both variants give
+ * identical numbers** (src/kernels/linear-i8a8.ts), so this is not a correctness problem but a speed
+ * problem only — emulation is never faster than the f32 path, and on Apple's Metal it was measured
+ * to be slower (ADR 0115 / ADR 0128 Context). The distributions with a8 in their default
+ * (anima / irodori / wan) were chosen by measurement on GPUs with dp4a; a user on a device without
+ * dp4a pays the quality cost of activation quantization with no speed gain. Passing silently hides
+ * that fact from the user (it shows in the diagnostics' pipeline key `:dp4aEmu`, but people on the
+ * default do not read diagnostics).
  *
- * 判定は純関数にして GPU 無しで検証できる形に置く。device ごとに 1 回に絞るのは呼び手
- * （session-build.ts）が {@link GpuContext} の `warnOnce` で担う — a8 の Session を部品ごとに
- * 並べる家族（anima の text encoder / DiT）で同じ 1 事実が Session の本数だけ流れるのを避ける。
+ * The decision is a pure function so it can be tested without a GPU. Limiting it to once per device
+ * is the caller's job (session-build.ts) through `warnOnce` of {@link GpuContext} — it keeps the same
+ * single fact from appearing once per Session in families that build one a8 Session per component
+ * (anima's text encoder / DiT).
  */
 
 import { DP4A_WGSL_FEATURE, dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import type { ComputePrecision } from "./session-types.ts";
 
-/** `GpuContext.warnOnce` のキー（device ごとに 1 回の単位 = 「この device に dp4a が無い」という事実）。 */
+/** The `GpuContext.warnOnce` key (the once-per-device unit = the fact "this device has no dp4a"). */
 export const A8_EMULATION_WARNING_KEY = "a8-without-dp4a";
 
 /**
- * a8 を要求されたが device に dp4a が無いときの警告文。それ以外（a8 を使わない・dp4a がある）は undefined。
+ * The warning text when a8 was requested but the device has no dp4a. Otherwise (a8 not used, or dp4a
+ * present) undefined.
  *
- * 文言は attention のカナリアの警告（session-build.ts）と同じ流儀 — 何が起きたか・何をすれば消えるか。
- * 逃げ先の「同じ重みで活性量子化を持たないプリセット」が必ずあることは配布形の機械検査
- * （`distribution_gate_test.ts` — ADR 0128 決定 2）が保証する。
+ * The wording follows the attention canary's warning (session-build.ts) — what happened, and what
+ * makes it go away. That an escape route, "a preset with the same weights and no activation
+ * quantization", always exists is guaranteed by the mechanical check of distributions
+ * (`distribution_gate_test.ts` — ADR 0128 decision 2).
  */
 export const a8EmulationWarning = (
   linearCompute: ComputePrecision,

@@ -1,101 +1,123 @@
 /**
- * 融合 attention の **i8a8 カーネル**（①QK / ③PV）が、この device で**既知解を返すか**を
- * 実走で確かめるカナリア。判定結果が `SessionState.attentionI8a8Dot` の既定になる。
+ * A canary that checks by running whether the **i8a8 kernels** of fused attention (①QK / ③PV)
+ * **return a known answer** on this device. Its verdict becomes the default of
+ * `SessionState.attentionI8a8Dot`.
  *
- * ## なぜ attention だけ実走の門が要るのか
+ * ## Why only attention needs a run-time check
  *
- * 「`dot4I8Packed` 版とエミュ版は同じ整数を返す」（src/kernels/linear-i8a8.ts）は整数演算の
- * 性質から導かれる主張で、linear では Metal を含めて実機で通っている。attention にだけ実走の門を
- * 置いたのは、当初 Apple M2 で融合 attention の i8a8 テストが落ち、「attention の文脈（幾何・
- * 共有タイルの充填・書き出し）で dp4a / emu が不一致になる」と推論したためだった。この推論は
- * 2026-08-29 のカナリアの実機検証で撤回した — M2 でも両変種はビット同一で、落ちていたのは GPU と
- * TS 参照の比較（両変種が共有する f32 エピローグの 1 ULP 差 — 下の §判定則 v2・
- * docs/known-issues.md）だった。
+ * "The `dot4I8Packed` version and the emulated version return the same integers"
+ * (src/kernels/linear-i8a8.ts) is a claim derived from the properties of integer arithmetic, and
+ * for linear it holds on real hardware, Metal included. The run-time check was put on attention
+ * alone because the fused-attention i8a8 tests initially failed on an Apple M2, and we inferred
+ * that "dp4a / emu disagree in the context of attention (geometry, filling the shared tiles,
+ * writing out)". That inference was withdrawn after verifying the canary on real hardware on
+ * 2026-08-29 — the two variants are bit-identical on the M2 too, and what failed was the comparison
+ * between the GPU and the TS reference (a 1 ULP difference in the f32 epilogue both variants share
+ * — §Decision rule v2 below, docs/known-issues.md).
  *
- * 門は撤回の後も残す。根拠は変種間の一致ではなく**既知解との突合**で、整数内積の変種がこの device で
- * 正しい値を返すことを実走で確かめる手段はこれだけだから（アダプタの列挙から数値を変える経路を
- * 自動選択しない — ADR 0058 決定 2）。したがって:
+ * The check stays after the withdrawal. Its ground is not agreement between variants but
+ * **comparison with a known answer**: it is the only way to confirm by running that the
+ * integer-dot-product variant returns correct values on this device (no path that changes the
+ * numbers is selected automatically from the adapter's list — ADR 0058 decision 2). Therefore:
  *
- * - MUST: カナリアは **production の幾何で最低 1 タイル全域**を埋める形で撃つ。極小形は
- *   タイル充填の担当割りも K タイルの巡回も踏まないので、その経路の故障を素通りする。
- * - MUST: 突合の**一次判定**は **既知解**（TS 参照 src/reference/i8a8.ts）と行う。腕同士の
- *   相互比較を一次判定にすると、emu の側が壊れている device で「両方同じ誤値 → 一致 →
- *   健全」と判定する（どちらの腕が壊れるかは device ごとに違い、事前に排除できない）。
- *   相互比較を使うのは**両腕とも既知解の sanity 帯に収まった後**の腕選びだけ（下記 3）。
- * - MUST: 両腕とも sanity 帯を外したら {@link GpuFeatureError} で落とす。変種選択の問題では
- *   なく「この device の整数 attention が壊れている」ので、黙って片方を選ぶと ADR 0058 決定 2
- *   （アダプタ能力から数値を変える経路を自動選択しない）を守ったまま誤値を配ることになる。
+ * - MUST: the canary is fired in a form that fills **at least one whole tile at production
+ *   geometry**. A tiny shape exercises neither the work assignment of tile filling nor the cycling
+ *   over K tiles, so failures on those paths would pass straight through.
+ * - MUST: the **primary verdict** of the comparison is made against the **known answer** (the TS
+ *   reference src/reference/i8a8.ts). If cross-comparing the arms were the primary verdict, a
+ *   device whose emu side is broken would be judged "both give the same wrong value → agree →
+ *   healthy" (which arm breaks differs per device and cannot be ruled out in advance).
+ *   Cross-comparison is used only to pick an arm **after both arms fell within the known answer's
+ *   sanity band** (step 3 below).
+ * - MUST: if both arms fall outside the sanity band, fail with {@link GpuFeatureError}. It is not a
+ *   variant-selection problem but "this device's integer attention is broken", so silently picking
+ *   one would hand out wrong values while still honoring ADR 0058 decision 2 (no path that changes
+ *   the numbers is selected automatically from the adapter's capabilities).
  *
- * 縮退したことは診断に出る — emu を選べばパイプラインキーに `:dp4aEmu` が載る
- * （src/kernels/attention-i8a8.ts・ADR 0058 決定 3）。
+ * A fallback shows in the diagnostics — choosing emu puts `:dp4aEmu` in the pipeline key
+ * (src/kernels/attention-i8a8.ts, ADR 0058 decision 3).
  *
- * ## 判定則 v2 — なぜ atol=0 だけでは足りないか
+ * ## Decision rule v2 — why atol=0 alone is not enough
  *
- * 初版は「既知解と atol=0 で一致した腕」しか採らなかった。ところが Apple M2 の実測
- * （2026-08-29 / Deno 2.9.6 — docs/research/2026-08-29-chatgpt-review-verification.md）は
- * **dp4a と emu が 1 ビットも違わない**（カナリア ①QK v4 の実測は両腕とも
- * 28.433290481567383）のに、既知解 28.43328857421875 とは**ちょうど 1 ULP** ずれる。整数段
- * （③PV の qP）は 62,088 要素で不一致 0% なので、ずれているのは整数内積ではなく**両変種が
- * 共有する f32 エピローグの丸め**（仮説: naga→MSL の FMA 契約差 — 未確定）。初版はこれを
- * 「両腕とも既知解を外した」と読んで落とし、M2 で `attentionCompute: "a8"` を丸ごと殺していた。
+ * The first version accepted only "an arm that matched the known answer with atol=0". However, the
+ * measurement on an Apple M2 (2026-08-29 / Deno 2.9.6 —
+ * docs/research/2026-08-29-chatgpt-review-verification.md) shows that **dp4a and emu do not differ
+ * by a single bit** (canary ①QK v4 measured 28.433290481567383 on both arms), yet they are off from
+ * the known answer 28.43328857421875 by **exactly 1 ULP**. The integer stage (qP of ③PV) mismatches
+ * in 0% of 62,088 elements, so what is off is not the integer dot product but **the rounding of the
+ * f32 epilogue both variants share** (hypothesis: a difference in FMA contraction in naga→MSL — not
+ * settled). The first version read this as "both arms missed the known answer", failed, and killed
+ * `attentionCompute: "a8"` entirely on the M2.
  *
- * そこで判定は次の順で行う（{@link decideAttentionI8a8Dot}）:
+ * So the verdict is made in this order ({@link decideAttentionI8a8Dot}):
  *
- * 1. dp4a が既知解と厳密一致 → `"dp4a"`（健全機は従来どおり 1 submit で終わる）。
- * 2. emu が既知解と厳密一致 → `"emu"`（片腕だけ壊れた device）。
- * 3. どちらも厳密一致しないなら **sanity 帯**（{@link SANITY_RELATIVE_TOLERANCE}）で裁く。
- *    片腕だけ帯内ならその腕。両腕とも帯内なら**腕同士が全 6 変種の全要素でビット同一か**を
- *    見て、同一なら `"dp4a"`（= 変種選択が数値に無関係であることを機械検証できたので
- *    ADR 0058 決定 2 は満たされる）、相違なら既知解に近い腕（同点は dp4a）。
- * 4. 両腕とも帯外 → {@link GpuFeatureError}（本当に壊れている device だけがここへ来る）。
+ * 1. dp4a matches the known answer exactly → `"dp4a"` (a healthy machine finishes in 1 submit as
+ *    before).
+ * 2. emu matches the known answer exactly → `"emu"` (a device with only one arm broken).
+ * 3. If neither matches exactly, judge by the **sanity band** ({@link SANITY_RELATIVE_TOLERANCE}).
+ *    If only one arm is inside the band, that arm. If both are inside, check **whether the arms are
+ *    bit-identical in every element of all 6 variants**: if identical, `"dp4a"` (= it has been
+ *    verified mechanically that the variant choice does not affect the numbers, so ADR 0058
+ *    decision 2 is satisfied); if they differ, the arm closer to the known answer (ties go to
+ *    dp4a).
+ * 4. Both arms outside the band → {@link GpuFeatureError} (only a truly broken device gets here).
  *
- * 3 と 4 で決まった判定は「厳密一致ではなかった」事実を戻り値
- * （{@link AttentionI8a8Decision.exact}）に載せる。呼び手（src/runtime/executor.ts）は
- * device 単位に 1 度だけ警告を出す — 黙って通さないが、実行は止めない。
+ * A verdict decided by 3 or 4 carries the fact "it was not an exact match" in the return value
+ * ({@link AttentionI8a8Decision.exact}). The caller (src/runtime/session-build.ts) warns once per
+ * device — it does not let it pass silently, but does not stop execution.
  *
- * ## 撃つ変種（生成物のキー軸の最小代表集合）
+ * ## Variants fired (the minimal representative set of the generated key axes)
  *
- * ①QK は `v4`（出力列 `N % 4`）× S の格納形、③PV は `v4`（出力列 `D % 4`）× S の格納形で
- * WGSL が分岐する。実際に生成されうる組は 6 つで、それを 1 submit で撃つ:
+ * The WGSL of ①QK branches on `v4` (output columns `N % 4`) × the storage form of S, and ③PV on
+ * `v4` (output columns `D % 4`) × the storage form of S. 6 combinations can actually be generated,
+ * and they are fired in 1 submit:
  *
- * - ①QK: `v4/s=f32` / `スカラ/s=f32` / `v4/s=f16`
- * - ③PV: `v4/s=f32` / `スカラ/s=f32` / `v4/s=f16`
+ * - ①QK: `v4/s=f32` / `scalar/s=f32` / `v4/s=f16`
+ * - ③PV: `v4/s=f32` / `scalar/s=f32` / `v4/s=f16`
  *
- * `スカラ × s=f16` は生成できない（s16 は v4 経路専用 — src/kernels/score-storage.ts）ので
- * 直積にはならない。幾何（タイル辺・担当割り）は **Session が選んだ幾何プロファイルの i8a8 attention
- * 幾何**（src/kernels/geometry-profile.ts の `i8a8.attentionQk` / `i8a8.attentionPv`）をそのまま使う —
- * production が実走する WGSL と 1 文字も違わない生成物を撃つためで、既定プロファイルなら従来どおり
- * `defaultI8a8Geometry` の幾何になる。**バッチ軸（B·H ≥ 2）はカナリアの守備範囲外** — base の算術は dp4a /
- * emu で 1 文字も変わらない生成部分で、既存の GPU テストが検出器を持っている。
+ * `scalar × s=f16` cannot be generated (s16 is for the v4 path only —
+ * src/kernels/score-storage.ts), so it is not a full product. The geometry (tile edges, work
+ * assignment) is **the i8a8 attention geometry of the geometry profile the Session chose**
+ * (`i8a8.attentionQk` / `i8a8.attentionPv` of src/kernels/geometry-profile.ts) used as is — so the
+ * canary fires output that does not differ by a single character from the WGSL production runs;
+ * with the default profile it is the geometry of `defaultI8a8Geometry` as before. **The batch axis
+ * (B·H ≥ 2) is outside the canary's scope** — the base arithmetic is a generated part that does not
+ * change by a single character between dp4a / emu, and existing GPU tests have detectors for it.
  *
- * ## 固定入力（凍結）
+ * ## Fixed inputs (frozen)
  *
- * 入力は全て決定的な純関数で作る（乱数は使わない — 失敗が再現しないため）。形（M / N / D）だけは
- * 渡された幾何のタイル辺から導き、値の作り方（下記）は幾何に依らない。**量子化は
- * ホスト側で済ませて i8 ペイロードを直接上げる**ので、`quantize_rows` の除算（WGSL は
- * 2.5 ULP まで許される）はカナリアの経路に入らない = 既知解との一致は atol=0 で主張できる。
- * ③PV だけは `qP = round(127·exp(S−m))` を GPU が作るため `exp` の実装差が乗る。そこで
- * **`127·exp(S−m)` が丸め境界（半整数）から 0.30 以上離れる S しか使わない**
- * （WGSL の `exp` 誤差は数 ULP = 1e-5 のオーダーなので桁で安全）。この余裕は
- * tests/gpu_attention_dp4a_canary_test.ts が固定入力の全値で実測して門にする。
+ * Every input is made by a deterministic pure function (no random numbers — a failure would not
+ * reproduce). Only the shape (M / N / D) is derived from the tile edges of the given geometry; how
+ * the values are made (below) does not depend on the geometry. **Quantization is done on the host
+ * and the i8 payload is uploaded directly**, so the division in `quantize_rows` (WGSL allows up to
+ * 2.5 ULP) is not on the canary's path = agreement with the known answer can be claimed with
+ * atol=0. Only ③PV has the GPU make `qP = round(127·exp(S−m))`, so implementation differences of
+ * `exp` enter. Hence **only S values for which `127·exp(S−m)` stays at least 0.30 away from a
+ * rounding boundary (a half-integer) are used** (the error of WGSL's `exp` is a few ULP = on the
+ * order of 1e-5, safe by orders of magnitude). tests/gpu_attention_dp4a_canary_test.ts measures
+ * this margin over every value of the fixed inputs and makes it a check.
  *
- * ①QK は既知解を **f16 の格子そのもの**に載せる。s16 変種は「既知解をホストで f16 に丸めた
- * 列」と突き合わせるので、既知解が f16 の丸め境界の近くにあると、GPU の S が sanity 帯の
- * 内側で違うだけでも格納後の値が 1 段ずれ、差が f16 の 1 ULP（帯の 55 倍）へ増幅されて
- * **両腕とも帯外**になる（旧固定入力の最小余裕は相対 1.78e-7 = 帯の 1/56 しか無かった）。
- * 載せ方は 2 つ:
+ * ①QK puts the known answer **on the f16 grid itself**. The s16 variant is compared against "the
+ * known answer rounded to f16 on the host", so if the known answer sat near an f16 rounding
+ * boundary, a GPU S that differs only inside the sanity band would shift the stored value by one
+ * step, amplifying the difference to 1 f16 ULP (55 times the band) and putting **both arms outside
+ * the band** (the old fixed inputs had a minimum margin of only 1.78e-7 relative = 1/56 of the
+ * band). Two ways put it there:
  *
- * 1. **倍率を 2 の冪に閉じる** — `S = f32(acc)·((qscale·scale)·(kscale·scale))` の 3 因子を
- *    全て 2 の冪にする（{@link QK_DEPTH} 256 で半スケールは 0.25 / 値を `整数 × 2⁻ᵉ` で作ると
- *    `amax·(1/127)` がちょうど `2⁻ᵉ`）。積の丸めが 1 度も起きないので `S = acc·2⁻ᵏ` が厳密。
- * 2. **acc の有効桁を f16 の仮数（11 ビット）に収める** — k の行 max 以外を ±64 に固定すると
- *    `acc = 64·M` になり、`|M| ≤ 2047` なら S は f16 ちょうど。設計の実測最大は **|M| = 519**。
+ * 1. **Keep the factors powers of 2** — make all 3 factors of
+ *    `S = f32(acc)·((qscale·scale)·(kscale·scale))` powers of 2 ({@link QK_DEPTH} 256 gives a half
+ *    scale of 0.25 / making values as `integer × 2⁻ᵉ` makes `amax·(1/127)` exactly `2⁻ᵉ`). The
+ *    product never rounds, so `S = acc·2⁻ᵏ` is exact.
+ * 2. **Fit the significant digits of acc into the f16 mantissa (11 bits)** — fixing everything in k
+ *    except the row max to ±64 gives `acc = 64·M`, and with `|M| ≤ 2047` S is exactly an f16. The
+ *    measured maximum of the design is **|M| = 519**.
  *
- * さらに **M を奇数**に固定して `S = 0` を締め出す（0 は相対の余裕が定義できず、帯の絶対床
- * だけが残って f16 の subnormal 1 段に負ける）。M の偶奇は「q の奇数要素の個数」で決まるので、
- * 奇数要素を **2 つだけ**（行 max と col 1）に固定する。余裕は
- * tests/gpu_attention_dp4a_canary_test.ts が既知解 8,192 要素の全数で実測して門にする
- * （実測は帯の **24.4 倍** — 旧固定入力は 0.018 倍だった）。
+ * Further, **M is fixed odd** to exclude `S = 0` (0 has no definable relative margin; only the
+ * band's absolute floor would remain, which loses to one f16 subnormal step). The parity of M is
+ * decided by "the number of odd elements of q", so the odd elements are fixed to **exactly 2** (the
+ * row max and col 1). tests/gpu_attention_dp4a_canary_test.ts measures the margin over all 8,192
+ * elements of the known answer and makes it a check (measured at **24.4 times** the band — the old
+ * fixed inputs were at 0.018 times).
  */
 
 import { type I8a8Geometry, i8a8TileM, i8a8TileN } from "../kernels/i8a8-geometry.ts";
@@ -129,76 +151,96 @@ import {
 } from "./error-scope.ts";
 import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
-/** 診断とエラー文言に使う名前（この 1 本で「どのカナリアが落ちたか」が読める）。 */
+/**
+ * The name used in diagnostics and error messages (this one string tells "which canary failed").
+ */
 const WHERE = "attention i8a8 カナリア";
 
-/** 生成 WGSL の差し替え口（**故障注入テスト専用**）。既定は production の生成物そのもの。 */
+/**
+ * A hook to replace the generated WGSL (**for fault-injection tests only**). By default the
+ * production output itself.
+ */
 export type CanaryWgslPatch = (wgsl: string) => string;
 
 const IDENTITY_PATCH: CanaryWgslPatch = (wgsl) => wgsl;
 
 /**
- * sanity 帯の相対幅。要素ごとの許容は `max(|既知解| · この値, {@link SANITY_ABSOLUTE_FLOOR})`。
+ * The relative width of the sanity band. The per-element tolerance is
+ * `max(|known answer| · this value, {@link SANITY_ABSOLUTE_FLOOR})`.
  *
- * 導出（M2 実測 2026-08-29 — docs/research/2026-08-29-chatgpt-review-verification.md）:
+ * Derivation (M2 measurement 2026-08-29 — docs/research/2026-08-29-chatgpt-review-verification.md):
  *
- * - **許容したい側** = 両変種が共有する f32 エピローグの丸め差。実測は 1 ULP
- *   （28.433290481567383 vs 既知解 28.43328857421875 = 相対 6.7e-8）で、数 ULP を見ても
- *   1.2e-7 相対。帯の **2 桁下**に収まる。
- * - **弾きたい側** = 実際の整数故障。故障注入（dp4a の WGSL 破壊）の実測は 28.435983657836914
- *   = 相対 9.5e-5 で、帯の **1 桁上**。
+ * - **What we want to accept** = the rounding difference of the f32 epilogue both variants share.
+ *   Measured at 1 ULP (28.433290481567383 vs the known answer 28.43328857421875 = 6.7e-8 relative);
+ *   even allowing a few ULP it is 1.2e-7 relative. It sits **2 orders of magnitude below** the
+ *   band.
+ * - **What we want to reject** = real integer failures. The fault injection (breaking the dp4a
+ *   WGSL) measured 28.435983657836914 = 9.5e-5 relative, **1 order of magnitude above** the band.
  *
- * つまり 1e-5 は両者の間に 3 桁あいた谷の底に置いてある。MUST NOT: 緩める — 1e-3 まで広げると
- * f16 格納 1 ULP（相対 ~1e-3）級の実害まで帯に入り、s16 変種の検出器が死ぬ。
+ * So 1e-5 sits at the bottom of a valley 3 orders of magnitude wide between the two. MUST NOT:
+ * loosen it — widening to 1e-3 would let real damage on the order of 1 f16 storage ULP (~1e-3
+ * relative) into the band and kill the detector for the s16 variants.
  *
- * 帯が許すのは **f32 エピローグの差**だけで、s16 変種では格納の丸めが「帯の内側の差」を
- * f16 の 1 段（帯の 55 倍）へ増幅する — つまり丸めが帯を跨ぐ増幅器になる。したがって帯が
- * s16 でも閉じることは帯幅ではなく**固定入力の f16 境界からの余裕**が担保する（§固定入力）。
+ * The band accepts only **differences in the f32 epilogue**; in the s16 variants the storage
+ * rounding amplifies "a difference inside the band" to one f16 step (55 times the band) — the
+ * rounding becomes an amplifier that crosses the band. Therefore that the band also closes for s16
+ * is guaranteed not by the band width but by **the margin of the fixed inputs from f16 boundaries**
+ * (§Fixed inputs).
  */
 export const SANITY_RELATIVE_TOLERANCE = 1e-5;
 
 /**
- * sanity 帯の絶対床。相対だけで裁くと `|既知解| → 0` で許容も 0 に潰れ、0 近傍の要素だけが
- * 事実上 atol=0 のまま残る（帯が要素ごとにまだらになる）。
+ * The absolute floor of the sanity band. Judging by the relative width alone, the tolerance
+ * collapses to 0 as `|known answer| → 0`, and only elements near 0 effectively stay at atol=0 (the
+ * band becomes patchy per element).
  *
- * 1e-7 の根拠: 現在の固定入力の最小振幅は ③PV の |O| = 6.2e-4（f32 の ULP は ~6e-11）なので
- * 床が効く要素は今は無い — 相対側だけで既に ~100 ULP の余裕がある。効き始めるのは既知解を
- * 作り直して 0 近傍が現れたときで、そこでも 1e-7 は「数 ULP の丸め差は飲むが、整数故障は
- * 飲まない」位置にある（③PV の acc が 1 ずれると |O| は最小でも 5e-4 動く — prow·vs の下限）。
+ * Why 1e-7: the smallest amplitude in the current fixed inputs is |O| = 6.2e-4 of ③PV (the f32 ULP
+ * there is ~6e-11), so no element is governed by the floor today — the relative side alone already
+ * leaves ~100 ULP of margin. It starts to matter when the known answer is rebuilt and values near 0
+ * appear; even then 1e-7 sits where it "absorbs rounding differences of a few ULP but not integer
+ * failures" (if ③PV's acc is off by 1, |O| moves by at least 5e-4 — the lower bound of prow·vs).
  */
 export const SANITY_ABSOLUTE_FLOOR = 1e-7;
 
 // ---------------------------------------------------------------------------
-// 固定入力（凍結 — 値を動かしたらテストの余裕実測をやり直すこと）
+// Fixed inputs (frozen — if you move a value, redo the tests' margin measurements)
 // ---------------------------------------------------------------------------
 
 /**
- * ①QK の縮約長。**16 の冪**であること MUST — 半スケール `√(1/√depth)` が 2 の冪になり
- * （256 → 0.25）、dequant の倍率に丸めが 1 度も入らない（§固定入力 の 1）。既定幾何では
- * K タイル 16 枚ぶんで、「2 タイル以上」の要件（テストが門にする）を大きく満たす。
+ * The reduction length of ①QK. It MUST be **a power of 16** — so that the half scale
+ * `√(1/√depth)` is a power of 2 (256 → 0.25) and the dequant factor never rounds (item 1 of §Fixed
+ * inputs). With the default geometry that is 16 K tiles, comfortably meeting the "2 tiles or more"
+ * requirement (which the test makes a check).
  */
 const QK_DEPTH = 256;
 
 /**
- * ①QK の行 scale の指数（`qscale = 2⁻ᵉ`）。**行ごとに変える** — 行 scale の取り違えが値に
- * 出る形にする（旧固定入力の行 scale は 128 行とも同値で、行の取り違えが素通りしていた）。
+ * The exponent of ①QK's row scale (`qscale = 2⁻ᵉ`). **It varies per row** — so that mixing up row
+ * scales shows in the values (in the old fixed inputs all 128 rows had the same row scale, and a
+ * row mix-up passed straight through).
  */
 const QK_ROW_EXPONENT = (row: number): number => row % 3;
 
-/** ①QK の列 scale の指数（`kscale = 2⁻ᶠ`）。行側と別周期にする。 */
+/** The exponent of ①QK's column scale (`kscale = 2⁻ᶠ`). A different period from the row side. */
 const QK_COL_EXPONENT = (col: number): number => col % 4;
 
-/** q の行 max（±127）が載る位置。col 0（k の行 max と当たる席）と col 1（奇数枠）は避ける。 */
+/**
+ * Where q's row max (±127) sits. Avoids col 0 (the slot that meets k's row max) and col 1 (the odd
+ * slot).
+ */
 const QK_SPIKE_COLUMN = (row: number): number => 2 + ((row * 37) % (QK_DEPTH - 2));
 
 /**
- * ①QK の q の量子化値（§固定入力 の 2 — `acc = 64·M` と M の奇数性はここで決まる）。
+ * The quantized values of ①QK's q (item 2 of §Fixed inputs — `acc = 64·M` and M's oddness are
+ * decided here).
  *
- * - col 0 = ±64: k の行 max（±127）と当たる席。**64 の倍数 MUST** — ここだけ 64 を括り
- *   出せないと `acc` が 64 の倍数でなくなり、`|acc| ≤ 2047` を強いられて設計が破れる。
- * - col {@link QK_SPIKE_COLUMN} = ±127: 行 max（= 量子化が 127 を返す唯一の席）。奇数 1 つめ。
- * - col 1 = ±31 の奇数: 奇数 2 つめ。**奇数がちょうど 2 つ**なので M は必ず奇数になる。
- * - 残り = ±30 の偶数（M の偶奇に効かない席）。
+ * - col 0 = ±64: the slot that meets k's row max (±127). **A multiple of 64 MUST** — if 64 could
+ *   not be factored out here alone, `acc` would no longer be a multiple of 64, forcing
+ *   `|acc| ≤ 2047` and breaking the design.
+ * - col {@link QK_SPIKE_COLUMN} = ±127: the row max (= the only slot where quantization returns
+ *   127). The first odd value.
+ * - col 1 = odd within ±31: the second odd value. **Exactly 2 odd values**, so M is always odd.
+ * - the rest = even within ±30 (slots that do not affect M's parity).
  */
 const QK_QUERY_QUANT = (row: number, col: number): number => {
   if (col === 0) return row % 2 === 0 ? 64 : -64;
@@ -208,44 +250,46 @@ const QK_QUERY_QUANT = (row: number, col: number): number => {
 };
 
 /**
- * ①QK の k の量子化値。行 max（i = 0）だけが ±127 で、残りは **±64 に固定**する
- * （`acc = 64·M` の 64 はここから括り出る）。符号の周期 67 は列数 64 より大きいので、
- * 64 列の符号列は全て相異なる（列の取り違えが値に出る）。
+ * The quantized values of ①QK's k. Only the row max (i = 0) is ±127; the rest are **fixed to ±64**
+ * (the 64 of `acc = 64·M` is factored out from here). The sign period 67 is larger than the 64
+ * columns, so the sign sequences of the 64 columns are all distinct (a column mix-up shows in the
+ * values).
  */
 const QK_KEY_QUANT = (col: number, i: number): number => {
   if (i === 0) return col % 2 === 0 ? 127 : -127;
   return (i * 7 + col * 5) % 67 < 34 ? 64 : -64;
 };
 
-/** ①QK の q（f32・量子化前 = 量子化値 × 行 scale）。 */
+/** ①QK's q (f32, before quantization = quantized value × row scale). */
 const QK_QUERY = (row: number, col: number): number =>
   QK_QUERY_QUANT(row, col) * 2 ** -QK_ROW_EXPONENT(row);
 
-/** ①QK の k（f32・量子化前 = 量子化値 × 列 scale）。 */
+/** ①QK's k (f32, before quantization = quantized value × column scale). */
 const QK_KEY = (col: number, i: number): number =>
   QK_KEY_QUANT(col, i) * 2 ** -QK_COL_EXPONENT(col);
 
 /**
- * ③PV の S が行 max から下がる幅（1/64 刻み）。**16 本とも f16 ちょうどで表せて**、
- * `127·exp(-j/64)` が半整数から 0.30 以上離れる j だけを選んである（qP は
- * 127/121/112/102/93/86/77/68/60/52/44/34/26/18/9/1 の 16 段になる）。
- * MUST: 先頭は 0 — 行の max がその行に実在する（`exp(S−m) ≤ 1` が構造で保証される）形にする。
+ * How far ③PV's S drops below the row max (in steps of 1/64). **All 16 are exactly representable in
+ * f16**, and only j for which `127·exp(-j/64)` stays at least 0.30 away from a half-integer are
+ * chosen (qP takes the 16 levels 127/121/112/102/93/86/77/68/60/52/44/34/26/18/9/1).
+ * MUST: the first is 0 — so that the row max actually exists in that row (`exp(S−m) ≤ 1` is
+ * guaranteed by structure).
  */
 const PV_SCORE_STEPS = [0, 3, 8, 14, 20, 25, 32, 40, 48, 57, 68, 84, 102, 125, 169, 310] as const;
 
-/** ③PV の行 max。1/64 刻みの S が f16 ちょうどに収まる小さな値なら何でもよい。 */
+/** ③PV's row max. Any small value whose 1/64-step S fits exactly in f16 will do. */
 const PV_ROW_MAX = 2;
 
-/** ③PV の行 `1/Σexp` （f32 で厳密な 1/8 刻み — 行ごとに変える）。 */
+/** ③PV's row `1/Σexp` (exact 1/8 steps in f32 — varies per row). */
 const PV_ROW_INV = (row: number): number => (1 + (row % 5)) / 8;
 
-/** ③PV の Vᵀ 量子化値（±127 の整数・N 連続）。 */
+/** ③PV's quantized Vᵀ values (integers within ±127, contiguous over N). */
 const PV_V_QUANT = (i: number): number => ((i * 53) % 251) - 125;
 
-/** ③PV の V の per-column scale（f32 で厳密な 1/8 刻み）。 */
+/** ③PV's per-column scale of V (exact 1/8 steps in f32). */
 const PV_V_SCALE = (col: number): number => 0.5 + (col % 9) * 0.125;
 
-/** 半スケール（ADR 0023 の `√scale_factor`）— 実形と同じ作り方で 1 つ求める。 */
+/** The half scale (ADR 0023's `√scale_factor`) — computed once, the same way as for real shapes. */
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
 
 const fillBy = (length: number, value: (i: number) => number): Float32Array<ArrayBuffer> => {
@@ -254,7 +298,10 @@ const fillBy = (length: number, value: (i: number) => number): Float32Array<Arra
   return data;
 };
 
-/** 行優先の 2 次元版（①QK の値は「行 / 列のどちらの席か」で決まるので添字を分けて渡す）。 */
+/**
+ * The row-major 2-D version (①QK's values depend on "which row / column slot", so the indices are
+ * passed separately).
+ */
 const fillRowsBy = (
   rows: number,
   cols: number,
@@ -267,41 +314,45 @@ const fillRowsBy = (
   return data;
 };
 
-/** ①QK の固定入力と既知解。 */
+/** ①QK's fixed inputs and known answer. */
 type QkCase = {
   readonly rows: number;
   readonly cols: number;
   readonly depth: number;
   readonly scale: number;
-  /** 量子化済み q / k のペイロード（`[行, depth]` の平坦 i8 = GPU の 4 詰めと同じ並び）。 */
+  /**
+   * The quantized q / k payloads (flat i8 of `[row, depth]` = the same order as the GPU's packing
+   * by 4).
+   */
   readonly queryPayload: Int8Array<ArrayBuffer>;
   readonly keyPayload: Int8Array<ArrayBuffer>;
   readonly queryScale: Float32Array<ArrayBuffer>;
   readonly keyScale: Float32Array<ArrayBuffer>;
-  /** 既知解 S（`[rows, cols]`）。 */
+  /** The known answer S (`[rows, cols]`). */
   readonly expected: Float32Array<ArrayBuffer>;
 };
 
-/** ③PV の固定入力と既知解。 */
+/** ③PV's fixed inputs and known answer. */
 type PvCase = {
   readonly rows: number;
-  /** 縮約軸 N（= params の `k`）。 */
+  /** The reduction axis N (= `k` of the params). */
   readonly cols: number;
-  /** 出力の列 D（= params の `n`）。 */
+  /** The output columns D (= `n` of the params). */
   readonly depth: number;
   readonly scores: Float32Array<ArrayBuffer>;
-  /** 行統計 `[max, inv]`（②行統計の出力と同じ並び）。 */
+  /** Row statistics `[max, inv]` (the same order as the output of ② row statistics). */
   readonly stats: Float32Array<ArrayBuffer>;
   readonly valuePayload: Int8Array<ArrayBuffer>;
   readonly valueScale: Float32Array<ArrayBuffer>;
-  /** 既知解 O（`[rows, depth]`）。 */
+  /** The known answer O (`[rows, depth]`). */
   readonly expected: Float32Array<ArrayBuffer>;
 };
 
 /**
- * ①QK の固定入力（**タイル辺は渡された幾何から導く** — プロファイルが幾何を替えてもカナリアは
- * 1 タイル全域を埋め続ける）。K は {@link QK_DEPTH} 固定で、既定の幾何では 16 タイル
- * （1 タイルだと巡回そのものが踏まれないので 2 タイル以上が要件 — テストが門にする）。
+ * ①QK's fixed inputs (**the tile edges are derived from the given geometry** — even when a profile
+ * changes the geometry, the canary keeps filling one whole tile). K is fixed at {@link QK_DEPTH};
+ * with the default geometry that is 16 tiles (with 1 tile the cycling itself is not exercised, so 2
+ * or more tiles is a requirement — the test makes it a check).
  */
 export const buildQkCase = (geometry: I8a8Geometry): QkCase => {
   const rows = i8a8TileM(geometry);
@@ -321,7 +372,8 @@ export const buildQkCase = (geometry: I8a8Geometry): QkCase => {
     keyPayload: quantizedKey.q,
     queryScale: quantizedQuery.scale,
     keyScale: quantizedKey.scale,
-    // 参照は q / k を自分で量子化する（同じ純関数なので上のペイロードと必ず一致する）
+    // The reference quantizes q / k by itself (the same pure function, so it always matches the
+    // payloads above)
     expected: referenceAttentionQkI8a8({
       q: query,
       k: key,
@@ -334,7 +386,10 @@ export const buildQkCase = (geometry: I8a8Geometry): QkCase => {
   };
 };
 
-/** ③PV の固定入力（同上 — ③ は ① と別の幾何を取りうるので導出元も別）。 */
+/**
+ * ③PV's fixed inputs (likewise — ③ can take a different geometry from ①, so it is derived
+ * separately).
+ */
 export const buildPvCase = (geometry: I8a8Geometry): PvCase => {
   const rows = i8a8TileM(geometry);
   const depth = i8a8TileN(geometry);
@@ -342,7 +397,7 @@ export const buildPvCase = (geometry: I8a8Geometry): PvCase => {
   const scores = new Float32Array(rows * cols);
   const stats = new Float32Array(rows * 2);
   for (let row = 0; row < rows; row += 1) {
-    // 行ごとに位相をずらす（行の取り違えが qP の並びに出る形）
+    // Shift the phase per row (so a row mix-up shows in the order of qP)
     for (let i = 0; i < cols; i += 1) {
       const step = PV_SCORE_STEPS[(i + row) % PV_SCORE_STEPS.length];
       scores[row * cols + i] = PV_ROW_MAX - step / 64;
@@ -355,8 +410,9 @@ export const buildPvCase = (geometry: I8a8Geometry): PvCase => {
   const valueScale = fillBy(depth, PV_V_SCALE);
   const rowMax = new Float32Array(rows).fill(PV_ROW_MAX);
   const rowInv = fillBy(rows, PV_ROW_INV);
-  // A タイル充填が作る整数列（GPU 側の `round(127·exp(S−m))` に対応）と、
-  // 整数を受け取ってからの純関数（atol=0 が立つ側）を分けて既知解を組む。
+  // Build the known answer by separating the integer sequence that A-tile filling produces
+  // (matching the GPU's `round(127·exp(S−m))`) from the pure function after the integers are
+  // received (the side where atol=0 holds).
   const quantized = referenceAttentionPvQuant(scores, rowMax, rows, cols);
   return {
     rows,
@@ -380,16 +436,18 @@ export const buildPvCase = (geometry: I8a8Geometry): PvCase => {
 };
 
 // ---------------------------------------------------------------------------
-// S の f16 格納（固定入力を GPU と同じ並びで詰める / 読み戻す）
+// f16 storage of S (pack / read back the fixed inputs in the same order as the GPU)
 // ---------------------------------------------------------------------------
 
 /**
- * f16 **ちょうどで表せる正規数**の 16bit パターン。
+ * The 16-bit pattern of a **normal number exactly representable** in f16.
  *
- * MUST: 一般の f32 を渡さない — 丸めも subnormal も Inf も扱わず、仮数の下位 13bit を
- * 黙って捨てる。固定 S は 1/64 刻みで |v| ≤ 3 の正規数だけなので、指数の付け替えと仮数の
- * 切り出しで厳密に決まる（丸めの正本は {@link roundToF16} 側で、こちらは詰め直しの器）。
- * 往復の一致（{@link f16BitsToF32} で戻ること）は固定入力の全値でテストが門にする。
+ * MUST: do not pass a general f32 — it handles neither rounding nor subnormals nor Inf, and
+ * silently drops the low 13 bits of the mantissa. The fixed S are only normal numbers in steps of
+ * 1/64 with |v| ≤ 3, so re-biasing the exponent and cutting the mantissa determine it exactly (the
+ * source of truth for rounding is {@link roundToF16}; this is only a repacking container).
+ * The round trip (getting back through {@link f16BitsToF32}) is made a check by the test over every
+ * value of the fixed inputs.
  */
 const exactF16Bits = (view: DataView, value: number): number => {
   view.setFloat32(0, value);
@@ -401,8 +459,8 @@ const exactF16Bits = (view: DataView, value: number): number => {
 };
 
 /**
- * S を GPU と同じ格納形（`pack2x16float` の 2 要素／語）へ詰める。
- * MUST: 下位半分が偶数添字（`pack2x16float(vec2(x, y))` の x 側）。
+ * Packs S into the same storage form as the GPU (`pack2x16float`, 2 elements per word).
+ * MUST: the low half holds the even index (the x side of `pack2x16float(vec2(x, y))`).
  */
 export const packScoresF16 = (scores: Float32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> => {
   const words = new Uint32Array(scores.length / 2);
@@ -415,7 +473,7 @@ export const packScoresF16 = (scores: Float32Array<ArrayBuffer>): Uint32Array<Ar
   return words;
 };
 
-/** f16 格納の S を f32 へ戻す（`unpack2x16float` は厳密なので丸めは起きない）。 */
+/** Turns f16-stored S back into f32 (`unpack2x16float` is exact, so no rounding happens). */
 const unpackScoresF16 = (words: Uint32Array<ArrayBuffer>): Float32Array<ArrayBuffer> => {
   const values = new Float32Array(words.length * 2);
   for (let word = 0; word < words.length; word += 1) {
@@ -426,44 +484,51 @@ const unpackScoresF16 = (words: Uint32Array<ArrayBuffer>): Float32Array<ArrayBuf
 };
 
 // ---------------------------------------------------------------------------
-// 実走
+// Running
 // ---------------------------------------------------------------------------
 
 const STORAGE_IN = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST;
 const STORAGE_OUT = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC;
 
 /**
- * カナリアが撃つ融合 attention の i8a8 幾何（①QK / ③PV — Session が選んだプロファイルの
- * `i8a8.attentionQk` / `i8a8.attentionPv` から組む）。
+ * The i8a8 geometry of fused attention the canary fires (①QK / ③PV — built from
+ * `i8a8.attentionQk` / `i8a8.attentionPv` of the profile the Session chose).
  */
 export type AttentionI8a8CanaryGeometry = {
   readonly qk: I8a8Geometry;
   readonly pv: I8a8Geometry;
 };
 
-/** 1 変種を既知解と突き合わせた結果（{@link compareToReference}）。 */
+/** The result of comparing one variant with the known answer ({@link compareToReference}). */
 export type CanaryVariantOutcome = {
-  /** production のパイプラインキーそのもの（どの生成物の話か診断で読める）。 */
+  /**
+   * The production pipeline key itself (the diagnostics tell which generated output it concerns).
+   */
   readonly key: string;
-  /** 既知解と atol=0 で一致したか。 */
+  /** Whether it matched the known answer with atol=0. */
   readonly exact: boolean;
-  /** 全要素が sanity 帯に収まったか。 */
+  /** Whether every element fell within the sanity band. */
   readonly withinBand: boolean;
-  /** 既知解との最大絶対誤差。 */
+  /** The maximum absolute error against the known answer. */
   readonly maxAbsError: number;
-  /** 帯余裕の最大（`|誤差| / 許容`）。1 以下が帯内。 */
+  /** The maximum band ratio (`|error| / tolerance`). At most 1 is inside the band. */
   readonly maxBandRatio: number;
-  /** 最初の不一致の診断（厳密一致なら undefined）。 */
+  /** Diagnostic of the first mismatch (undefined on an exact match). */
   readonly mismatch: string | undefined;
-  /** 読み戻した出力そのもの。**腕同士のビット同一比較に要る**ので保持する（数 KB）。 */
+  /**
+   * The read-back output itself. Kept because **the bit-identity comparison between arms needs it**
+   * (a few KB).
+   */
   readonly output: Uint8Array<ArrayBuffer>;
 };
 
 /**
- * 既知解との全数比較。厳密一致（atol=0）と sanity 帯の 2 つを 1 走査で採る。
+ * Full comparison with the known answer. Takes both the exact match (atol=0) and the sanity band in
+ * one scan.
  *
- * MUST: 帯・最大の更新は `!(diff <= x)` / {@link Math.max} の形で書く。`diff > x` で書くと
- * NaN が黙って「帯内」に落ちる（無効 dispatch や未初期化の読み戻しが健全と判定される）。
+ * MUST: write the updates of the band and the maxima in the form `!(diff <= x)` / {@link Math.max}.
+ * Written as `diff > x`, a NaN silently lands "inside the band" (an invalid dispatch or an
+ * uninitialized readback would be judged healthy).
  */
 const compareToReference = (
   key: string,
@@ -494,9 +559,11 @@ const compareToReference = (
     maxAbsError = Math.max(maxAbsError, diff);
     maxBandRatio = Math.max(maxBandRatio, diff / tolerance);
   }
-  // MUST: 診断は**帯外の要素を優先**する。厳密不一致だが帯内の要素（M2 の 1 ULP 差）を先頭に
-  // 立てると、帯外の故障が別にあるとき「無関係な微小差」と「帯余裕 10 倍」が同じ行に並んで
-  // 誤読させる（M2 実機で実害を確認 — 帯外テストの期待キーが読めなかった）。
+  // MUST: the diagnostic **prefers elements outside the band**. Leading with an element that is an
+  // inexact match but inside the band (the M2's 1 ULP difference) would, when a failure outside the
+  // band exists elsewhere, put "an unrelated tiny difference" and "band ratio 10" on the same line
+  // and mislead (real harm confirmed on the M2 — the expected key of the outside-band test could
+  // not be read).
   return {
     key,
     exact,
@@ -508,46 +575,52 @@ const compareToReference = (
   };
 };
 
-/** 1 変種ぶんの実走計画（パイプライン生成は済み・バッファ確保はこれから）。 */
+/** The run plan of one variant (pipeline already created, buffers yet to be allocated). */
 type Variant = {
-  /** production のパイプラインキーそのもの（診断でどの生成物が落ちたか読める形にする）。 */
+  /** The production pipeline key itself (so the diagnostics tell which generated output failed). */
   readonly key: string;
   readonly pipeline: GPUComputePipeline;
-  /** 束縛（0 番の params は実走側が足す）。 */
+  /** Bindings (the params at binding 0 are added by the running side). */
   readonly bindings: readonly (readonly [number, GPUBuffer])[];
   readonly params: GPUBuffer;
   readonly output: GPUBuffer;
   readonly outputBytes: number;
   readonly workgroups: readonly [number, number, number];
-  /** 読み戻したバイト列を既知解と突き合わせる。 */
+  /** Compares the read-back bytes with the known answer. */
   readonly compare: (bytes: ArrayBuffer) => CanaryVariantOutcome;
 };
 
-/** 片腕（dp4a か emu のどちらか）を 6 変種とも撃った結果（{@link probeAttentionI8a8Dot}）。 */
+/**
+ * The result of firing one arm (either dp4a or emu) on all 6 variants ({@link
+ * probeAttentionI8a8Dot}).
+ */
 export type CanaryProbe = {
   readonly dot: I8a8Dot;
-  /** 6 変種**全て**が既知解と atol=0 で一致したか。 */
+  /** Whether **all** 6 variants matched the known answer with atol=0. */
   readonly exact: boolean;
-  /** 6 変種**全て**が sanity 帯に収まったか。 */
+  /** Whether **all** 6 variants fell within the sanity band. */
   readonly withinBand: boolean;
-  /** 6 変種を通した最大絶対誤差。 */
+  /** The maximum absolute error across the 6 variants. */
   readonly maxAbsError: number;
-  /** 6 変種を通した最大の帯余裕（1 以下が帯内）。 */
+  /** The maximum band ratio across the 6 variants (at most 1 is inside the band). */
   readonly maxBandRatio: number;
-  /** 最初に既知解を外した変種の診断（{@link exact} なら undefined）。 */
+  /**
+   * Diagnostic of the first variant that missed the known answer (undefined when {@link exact}).
+   */
   readonly mismatch: string | undefined;
-  /** 変種ごとの内訳（順序は生成順で、腕を跨いで同じ）。 */
+  /** Per-variant breakdown (in generation order, the same across arms). */
   readonly variants: readonly CanaryVariantOutcome[];
 };
 
 /**
- * 6 変種を 1 submit で撃ち、**全変種の突合結果**を返す。
+ * Fires the 6 variants in 1 submit and returns **the comparison results of all variants**.
  *
- * MUST: 途中で打ち切らない（初版は最初の不一致で return していた）。腕同士のビット同一比較
- * （{@link decideAttentionI8a8Dot} の 3）に全変種の出力が要り、帯判定にも全要素の走査が要る。
- * MUST: 呼び手は device 単位の errorScope 区間ロックの中で呼ぶ（{@link decideAttentionI8a8Dot}）。
- * `await` を跨いで errorScope を張るため、裸で走らせると並行 Session の run と交差して失敗が
- * 誤帰属する。
+ * MUST: do not stop midway (the first version returned at the first mismatch). The bit-identity
+ * comparison between arms (step 3 of {@link decideAttentionI8a8Dot}) needs the output of every
+ * variant, and the band verdict needs a scan of every element.
+ * MUST: the caller calls this inside the per-device errorScope section lock
+ * ({@link decideAttentionI8a8Dot}). It pushes errorScopes across `await`s, so running it bare would
+ * interleave with a concurrent Session's run and misattribute failures.
  */
 export const probeAttentionI8a8Dot = async (
   gpu: GpuContext,
@@ -573,8 +646,9 @@ export const probeAttentionI8a8Dot = async (
       `${WHERE} '${key}' のパイプライン生成`,
     );
 
-  // パイプラインは同期区間の**外**で作る（生成は await を伴う）。**スカラ × s=f16 は組まない**
-  // — ①QK 側は生成そのものが拒む（s16 は v4 経路専用）ので、③PV だけ撃っても対にならない。
+  // Pipelines are created **outside** the synchronous section (creation involves awaits). **scalar
+  // × s=f16 is not assembled** — on the ①QK side generation itself refuses it (s16 is for the v4
+  // path only), so firing only ③PV would not make a pair.
   const shapes = [
     { v4: true, score: "f32" },
     { v4: false, score: "f32" },
@@ -616,9 +690,9 @@ export const probeAttentionI8a8Dot = async (
   };
 
   try {
-    // MUST: push から pop の発行までに await を挟まない（device 単位 LIFO の交錯を防ぐ根拠 —
-    // src/gpu/context.ts の「errorScope 区間の不変条件」）。確保・束縛・エンコード・submit は
-    // 全て同期。
+    // MUST: no await between the push and the issue of the pop (the ground for preventing
+    // interleaving in the per-device LIFO — "Invariants of errorScope sections" in
+    // src/gpu/context.ts). Allocation, binding, encoding and submit are all synchronous.
     pushFailureScopes(device);
     let variants: readonly Variant[];
     let staging: GPUBuffer;
@@ -659,7 +733,7 @@ export const probeAttentionI8a8Dot = async (
           ],
           compare: (bytes) =>
             score === "f16"
-              ? // s16 変種の出力 ≡ S をホストで f16 に丸めた f32 変種（丸めは格納の 1 回だけ）
+              ? // s16 output ≡ the f32 variant with S rounded to f16 on the host (rounded once, at storage)
                 compareToReference(
                   key,
                   unpackScoresF16(new Uint32Array(bytes)),
@@ -695,8 +769,9 @@ export const probeAttentionI8a8Dot = async (
             tiledWorkgroups(pv.rows, i8a8TileM(pvGeometry), limit, WHERE),
             1,
           ],
-          // S の格納形は入力側の話なので、③ の既知解は 3 変種とも同じ 1 本（固定 S は f16
-          // ちょうどで表せる = 詰め直しで 1 ビットも動かない）。
+          // The storage form of S concerns the input side, so ③'s known answer is the same one for
+          // all 3 variants (the fixed S are exactly representable in f16 = repacking does not move
+          // a single bit).
           compare: (bytes) =>
             compareToReference(key, new Float32Array(bytes), pv.expected, new Uint8Array(bytes)),
         };
@@ -736,8 +811,8 @@ export const probeAttentionI8a8Dot = async (
       }
       device.queue.submit([encoder.finish()]);
     } catch (cause) {
-      // MUST: push した 2 本は必ず pop して積み残さない（積み残すと以後の検証結果が誤った
-      // スコープに吸われ、エラーが恒久的に見えなくなる）。
+      // MUST: always pop the two pushed scopes and leave nothing on the stack (leftovers make later
+      // validation results land in the wrong scope, and errors become permanently invisible).
       await discardFailureScopes(device);
       throw cause;
     }
@@ -745,9 +820,9 @@ export const probeAttentionI8a8Dot = async (
       popFailureScopes(device, WHERE),
       `${WHERE}の検証`,
     );
-    // MUST: validation / OOM は「既知解と違う」ではなく loud な失敗として上げる。無効な
-    // dispatch は全 0 を返すので、不一致に潰すと「この device の整数 attention が壊れている」
-    // と誤診断する。
+    // MUST: raise validation / OOM as a loud failure, not as "differs from the known answer". An
+    // invalid dispatch returns all 0, so collapsing it into a mismatch would misdiagnose "this
+    // device's integer attention is broken".
     if (failure !== undefined) throw failure;
 
     await gpu[RUNTIME_INTERNAL].raceDeviceLost(
@@ -768,8 +843,9 @@ export const probeAttentionI8a8Dot = async (
       withinBand: outcomes.every((outcome) => outcome.withinBand),
       maxAbsError: outcomes.reduce((worst, o) => Math.max(worst, o.maxAbsError), 0),
       maxBandRatio: outcomes.reduce((worst, o) => Math.max(worst, o.maxBandRatio), 0),
-      // 変種を跨いだ集約も帯外を優先する（compareToReference と同じ理由 — 帯外の変種が
-      // あるのに、並び順が先の帯内変種の 1 ULP 差を代表にしない）。
+      // The aggregation across variants also prefers outside-the-band (the same reason as
+      // compareToReference — when a variant outside the band exists, the 1 ULP difference of an
+      // earlier variant inside the band is not made the representative).
       mismatch: (
         outcomes.find((outcome) => !outcome.withinBand) ??
         outcomes.find((outcome) => outcome.mismatch !== undefined)
@@ -781,7 +857,10 @@ export const probeAttentionI8a8Dot = async (
   }
 };
 
-/** {@link AttentionI8a8Decision} がどの分岐で決まったか（判定則 v2 — モジュール冒頭 §判定則 v2）。 */
+/**
+ * Which branch decided {@link AttentionI8a8Decision} (decision rule v2 — §Decision rule v2 at the
+ * top of the module).
+ */
 export type CanaryBranch =
   | "dp4a-exact"
   | "emu-exact"
@@ -789,7 +868,10 @@ export type CanaryBranch =
   | "band-both-identical"
   | "band-both-differ";
 
-/** 分岐ごとの日本語の根拠（警告文言の頭 — {@link formatAttentionI8a8Decision}）。 */
+/**
+ * The Japanese rationale per branch (the head of the warning message — {@link
+ * formatAttentionI8a8Decision}).
+ */
 const BRANCH_NOTE: Record<CanaryBranch, string> = {
   "dp4a-exact": "dot4I8Packed 版が既知解と厳密一致した",
   "emu-exact": "dot4I8Packed 版だけが既知解を外し、エミュ版は厳密一致した",
@@ -800,22 +882,23 @@ const BRANCH_NOTE: Record<CanaryBranch, string> = {
     "両腕とも厳密一致は外したが sanity 帯に収まり、腕同士は相違したので既知解に近い側を採った",
 };
 
-/** カナリアの判定（{@link decideAttentionI8a8Dot}）。 */
+/** The canary's verdict ({@link decideAttentionI8a8Dot}). */
 export type AttentionI8a8Decision = {
   readonly dot: I8a8Dot;
   /**
-   * 選んだ腕が既知解と **atol=0** で一致したか。false は「帯内だが厳密ではない」— 呼び手は
-   * 実行を止めず、device 単位に 1 度だけ警告を出す（黙って通さない）。
+   * Whether the chosen arm matched the known answer with **atol=0**. false means "inside the band
+   * but not exact" — the caller does not stop execution and warns once per device (it does not pass
+   * silently).
    */
   readonly exact: boolean;
   readonly branch: CanaryBranch;
-  /** 選んだ腕の既知解との最大絶対誤差（{@link exact} なら 0）。 */
+  /** The chosen arm's maximum absolute error against the known answer (0 when {@link exact}). */
   readonly maxAbsError: number;
-  /** 選んだ腕の最大の帯余裕（`|誤差| / 許容` — 1 以下が帯内）。 */
+  /** The chosen arm's maximum band ratio (`|error| / tolerance` — at most 1 is inside the band). */
   readonly maxBandRatio: number;
 };
 
-/** 判定の根拠 1 行（警告と診断の共通の言い回し）。 */
+/** The one-line rationale of the verdict (wording shared by the warning and the diagnostics). */
 export const formatAttentionI8a8Decision = (decision: AttentionI8a8Decision): string =>
   `${BRANCH_NOTE[decision.branch]}ので '${decision.dot}' を選んだ` +
   `（既知解との最大絶対誤差 ${decision.maxAbsError} / 帯余裕 ${decision.maxBandRatio}）`;
@@ -829,10 +912,11 @@ const decide = (probe: CanaryProbe, branch: CanaryBranch): AttentionI8a8Decision
 });
 
 /**
- * 腕同士が**全 6 変種の全要素**でビット同一か。1 変種でも 1 バイトでも違えば「相違」。
+ * Whether the arms are bit-identical in **every element of all 6 variants**. If even 1 byte of 1
+ * variant differs, they "differ".
  *
- * 読み戻したバイト列をそのまま比べる（f32 も f16 格納も同じ規律で見られる）。変種の並びは
- * 生成順で腕を跨いで同じなので、添字で対にできる。
+ * The read-back bytes are compared as is (f32 and f16 storage are judged by the same rule). The
+ * order of variants is the generation order and is the same across arms, so they pair by index.
  */
 const armsBitIdentical = (a: CanaryProbe, b: CanaryProbe): boolean =>
   a.variants.length === b.variants.length &&
@@ -845,18 +929,22 @@ const armsBitIdentical = (a: CanaryProbe, b: CanaryProbe): boolean =>
   });
 
 /**
- * 融合 attention の整数内積変種を**この device の実走**で決める（device 単位に 1 度 —
- * メモ化は {@link GpuContext} 側）。手順はモジュール冒頭 §判定則 v2 の 1〜4 そのもの:
+ * Decides the integer-dot-product variant of fused attention by **running on this device** (once
+ * per device — memoization is on the {@link GpuContext} side). The procedure is exactly steps 1 to
+ * 4 of §Decision rule v2 at the top of the module:
  *
- * - dp4a が既知解と厳密一致 → `"dp4a"`（**この経路では emu 側を撃たない** — 健全な機で払う
- *   コストを 1 submit に留める。emu が壊れている機は dp4a を選んだ時点で無関係）。
- * - dp4a だけ不一致 → `"emu"`（linear の席は別なので、linear は dp4a のまま維持される）。
- * - どちらも厳密一致しない → sanity 帯で裁く（片腕だけ帯内 / 両腕帯内でビット同一 /
- *   両腕帯内で相違）。
- * - 両腕とも帯外 → {@link GpuFeatureError}。変種の選び方の問題ではないので縮退先が無い。
+ * - dp4a matches the known answer exactly → `"dp4a"` (**the emu side is not fired on this path** —
+ *   the cost paid by a healthy machine stays at 1 submit. A machine whose emu is broken is
+ *   irrelevant once dp4a is chosen).
+ * - only dp4a mismatches → `"emu"` (linear has its own option, so linear stays on dp4a).
+ * - neither matches exactly → judge by the sanity band (only one arm inside / both inside and
+ *   bit-identical / both inside and different).
+ * - both arms outside the band → {@link GpuFeatureError}. It is not a matter of how the variant is
+ *   chosen, so there is nothing to fall back to.
  *
- * `patch` は**故障注入テスト専用**の生成物差し替え口（不一致経路と両不一致経路は健全な実機
- * では作れない — src/gpu/acquire.ts の shader-f16 カナリアと同じ事情）。
+ * `patch` is a hook to replace the generated output, **for fault-injection tests only** (the
+ * mismatch path and the both-mismatch path cannot be produced on a healthy real machine — the same
+ * situation as the shader-f16 canary in src/gpu/acquire.ts).
  */
 export const decideAttentionI8a8Dot = (
   gpu: GpuContext,
@@ -872,12 +960,13 @@ export const decideAttentionI8a8Dot = (
       return decide(dp4a.withinBand ? dp4a : emu, "band-single-arm");
     }
     if (dp4a.withinBand) {
-      // 腕同士がビット同一 = 「変種選択は数値に無関係」（ADR 0058 決定 2）が**この device で
-      // 機械検証できた**ということなので、既定の dp4a をそのまま採る。共有エピローグの丸めが
-      // 既知解と数 ULP ずれているだけの M2 はここへ来る。
+      // Bit-identical arms mean "the variant choice does not affect the numbers" (ADR 0058 decision
+      // 2) **has been verified mechanically on this device**, so the default dp4a is taken as is.
+      // The M2, whose shared epilogue rounding is only a few ULP off the known answer, comes here.
       if (armsBitIdentical(dp4a, emu)) return decide(dp4a, "band-both-identical");
-      // 相違するなら変種選択が数値を動かしている。帯内なので実行は止めないが、既知解に近い
-      // 腕を採る（同点は dp4a — 既定を動かす根拠が無い）。
+      // If they differ, the variant choice moves the numbers. Inside the band, so execution does
+      // not stop, but the arm closer to the known answer is taken (ties go to dp4a — there is no
+      // ground for moving away from the default).
       return decide(emu.maxAbsError < dp4a.maxAbsError ? emu : dp4a, "band-both-differ");
     }
     throw new GpuFeatureError(

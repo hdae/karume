@@ -1,55 +1,62 @@
 /**
- * 中間バッファ（ノード出力・ノード内一時）の**静的 liveness パッキング**（ADR 0093）。
+ * **Static liveness packing** of intermediate buffers (node outputs and node temporaries) (ADR 0093).
  *
- * 確保プログラム（{@link TransientProgram} — レシピ列または融合前ノード列から組む）を、実行相と
- * 同じイベント順で再生して各論理テンソルの生存区間と実寸を取り、時間区間が重ならないテンソル同士が
- * 同じバイトを共有できるように領域バッファの offset へ配置する。返るのは領域の本数と大きさ・
- * slot ごとの `(region, offset, byteLength)`・ステップごとの slot 割当。
+ * Replays the allocation program ({@link TransientProgram} — built from a recipe list or from the
+ * pre-fusion node list) in the same event order as the execution phase, takes the live interval and
+ * the real size of each logical tensor, and places them at offsets in region buffers so that tensors
+ * whose time intervals do not overlap can share the same bytes. It returns the number and size of the
+ * regions, `(region, offset, byteLength)` per slot, and the slot assignment per step.
  *
- * MUST: 純関数（GPU 資源を作らず、入力も変更しない）。実行（recipe.ts）・焼き込み（backing）・
- * 見積り（estimate.ts）は**この 1 本**を共有する — 規則が 2 箇所に分かれると、確保と見積り
- * （または確保と束縛）が例外なしに別の数を主張する。
- * MUST: 再生の順序は次のとおり — ステップ出力の確保
- * （slot 昇順）→ dispatch ごとに一時の確保（`allocBefore`）→ dispatch → 一時の解放（`releaseAfter`・
- * 確保の逆順）→ 入力の解放（延べ列）→ 定義ぶんの解放（出力 slot 昇順）。順序が割れると
- * 「まだ読まれる入力が出力として配り直される」形が例外なしに生まれる。
- * MUST: **同じ dispatch で片方が読まれ他方が書かれる 2 テンソルは別の領域**に置く。WebGPU の
- * usage scope 検証は GPUBuffer 単位（束縛範囲は見ない）で、同じバッファを `read`
- * （read-only-storage）と `read_write`（storage）の両方で 1 dispatch に束ねると validation で
- * 落ちる。読み同士・書き同士の同居は合法。
- * MUST: 実寸は {@link toSizeClass}（4 バイト整列・4 バイト床）— 束縛 `size` も offset もこの単位。
- * offset は `offsetAlignment`（device の `minStorageBufferOffsetAlignment`・仕様既定 256）に整列する。
- * MUST: 上限超過（slot 実寸 > `maxStorageBufferBindingSize`・領域 > `maxBufferSize` に収まらない
- * slot）は**配置の前に全件列挙して**落とす（ADR 0093 決定 5 — errorScope より前の決定論的検査）。
+ * MUST: a pure function (creates no GPU resources and does not modify its inputs). Execution
+ * (recipe.ts), baking (backing) and the estimate (estimate.ts) share **this one function** — rules
+ * split across two places let allocation and estimate (or allocation and binding) claim different
+ * numbers with no exception.
+ * MUST: the replay order is — allocate the step outputs (ascending slot) → per dispatch, allocate
+ * temporaries (`allocBefore`) → dispatch → release temporaries (`releaseAfter`, reverse allocation
+ * order) → release inputs (the release list) → release the definition's own count (ascending output
+ * slot). A different order silently produces "an input that is still read gets reassigned as an
+ * output", with no exception.
+ * MUST: **two tensors where one is read and the other written in the same dispatch go into
+ * different regions**. WebGPU's usage-scope validation works per GPUBuffer (it ignores the binding
+ * range), and binding the same buffer as both `read` (read-only-storage) and `read_write` (storage)
+ * in one dispatch fails validation. Sharing among reads, or among writes, is legal.
+ * MUST: the real size is {@link toSizeClass} (4-byte alignment, 4-byte floor) — the binding `size`
+ * and the offset use this unit. Offsets are aligned to `offsetAlignment` (the device's
+ * `minStorageBufferOffsetAlignment`, spec default 256).
+ * MUST: over-limit cases (slot real size > `maxStorageBufferBindingSize`, a slot that does not fit
+ * in a region ≤ `maxBufferSize`) are **listed in full before placement** and fail (ADR 0093
+ * decision 5 — a deterministic check ahead of the errorScope).
  *
- * 計算量: slot 数 n に対し配置は O(n · 領域内の重なり候補) で、実資産（n ≈ 2,000）でもミリ秒級。
- * 決定性: 並び順は (実寸 降順, 確保イベント 昇順) で固定し、同じ入力からは常に同じ計画が出る。
+ * Cost: for n slots, placement is O(n · overlap candidates within a region); milliseconds even for
+ * real assets (n ≈ 2,000).
+ * Determinism: the order is fixed as (real size descending, allocation event ascending), so the same
+ * input always gives the same plan.
  */
 
 import { toSizeClass } from "../gpu/arena.ts";
 import { ExecutionError } from "./plan.ts";
 
-/** 再生で束縛先を指す参照（値名 = ステップ出力・グラフ入力・重み / 一時 = 同一ステップ内の添字）。 */
+/** A reference to a binding target in the replay (value name = step output, graph input or weight / temp = index within the same step). */
 export type TransientRef =
   | { readonly kind: "value"; readonly name: string }
   | { readonly kind: "temp"; readonly id: number };
 
-/** ステップ出力 1 本の確保仕様（`StepOutput` の計画向きの写し）。 */
+/** The allocation spec of one step output (a planning-oriented copy of `StepOutput`). */
 export type TransientOutputSpec = {
   readonly name: string;
-  /** `alias` は入力実体をそのまま出力にする形（reshape / 恒等 expand）— 確保が出ない。 */
+  /** `alias` makes the input's backing the output as is (reshape / identity expand) — no allocation. */
   readonly kind: "alloc" | "alias";
-  /** `alloc` の実寸（整列前）。`alias` では読まない。 */
+  /** The real size of `alloc` (before alignment). Not read for `alias`. */
   readonly byteLength: number;
-  /** `alias` の元の値名（グラフ入力 / 重みなど slot を持たない値は再生側で undefined になる）。 */
+  /** The source value name of `alias` (values without a slot, such as graph inputs / weights, become undefined in the replay). */
   readonly source?: string;
-  /** 出力値の将来の消費回数（`node.ins` の厳密な延べ計数）。 */
+  /** Future consumption count of the output value (the exact count over `node.ins`). */
   readonly uses: number;
-  /** グラフ出力（末尾まで生存・他の値と共有しない）。 */
+  /** Graph output (alive to the end, shared with no other value). */
   readonly pinned: boolean;
 };
 
-/** ノード内一時の確保仕様（`TempRecipe` と同形）。 */
+/** The allocation spec of a node temporary (same shape as `TempRecipe`). */
 export type TransientTempSpec = {
   readonly byteLength: number;
   readonly allocBefore: number;
@@ -57,28 +64,28 @@ export type TransientTempSpec = {
 };
 
 /**
- * dispatch 1 本の読み / 書きの役割（usage scope の制約に使う）。役割はカーネルの WGSL 宣言
- * （`var<storage, read>` / `read_write`）から採る — 手書きの表を持たない。
+ * The read / write roles of one dispatch (used for the usage-scope constraint). The roles come from
+ * the kernel's WGSL declarations (`var<storage, read>` / `read_write`) — no hand-written table.
  */
 export type TransientDispatchSpec = {
   readonly reads: readonly TransientRef[];
   readonly writes: readonly TransientRef[];
 };
 
-/** 実行ステップ 1 つぶんの確保プログラム。 */
+/** The allocation program of one execution step. */
 export type TransientStepSpec = {
   readonly outputs: readonly TransientOutputSpec[];
   readonly temps: readonly TransientTempSpec[];
   readonly dispatches: readonly TransientDispatchSpec[];
-  /** ステップ末尾に解放する入力の**延べ列**。 */
+  /** The **release list** of inputs released at the end of the step (one entry per use). */
   readonly releases: readonly string[];
 };
 
 export type TransientProgram = readonly TransientStepSpec[];
 
 /**
- * 計画が従う device の上限（granted 値）。見積りは呼び手が渡した granted 値を使い、無指定の欄と
- * offset 整列は WebGPU core 既定で埋める。
+ * The device limits the plan follows (granted values). The estimate uses the granted values the
+ * caller passed and fills unspecified fields and the offset alignment with WebGPU core defaults.
  */
 export type TransientLimits = {
   readonly maxBufferSize: number;
@@ -86,39 +93,40 @@ export type TransientLimits = {
   readonly offsetAlignment: number;
 };
 
-/** 配置済み slot（領域添字・領域内 offset・束縛 size = 整列済み実寸）。 */
+/** A placed slot (region index, offset within the region, binding size = aligned real size). */
 export type TransientSlot = {
   readonly region: number;
   readonly offset: number;
   readonly byteLength: number;
 };
 
-/** ステップごとの slot 割当（`alias` の出力は undefined）。 */
+/** The slot assignment per step (undefined for `alias` outputs). */
 export type TransientStepSlots = {
   readonly outputs: readonly (number | undefined)[];
   readonly temps: readonly number[];
 };
 
 export type TransientPlan = {
-  /** 領域ごとのバイト数（`createBuffer` する大きさ・4 バイト整列）。 */
+  /** Bytes per region (the size passed to `createBuffer`, 4-byte aligned). */
   readonly regions: readonly number[];
   readonly slots: readonly TransientSlot[];
   readonly steps: readonly TransientStepSlots[];
-  /** グラフ出力の slot（readback を許す集合）。 */
+  /** Slots of graph outputs (the set allowed for readback). */
   readonly pinned: ReadonlySet<number>;
-  /** 領域の総和（= 中間に要する GPU バイト数）。 */
+  /** Sum of the regions (= GPU bytes needed for intermediates). */
   readonly totalBytes: number;
-  /** 同時生存バイトの最大（下界 — first-fit がこれに一致すれば断片化ゼロ）。 */
+  /** Maximum of simultaneously live bytes (a lower bound — zero fragmentation when first-fit matches it). */
   readonly peakLiveBytes: number;
   /**
-   * 先に置かれた別の slot とバイト範囲を共有する slot の本数（= 生存区間が重ならないので同じ
-   * バイトを配り直した回数）。診断値で、full-write（ADR 0014）の
-   * 故障注入テストが「配り直しが実際に起きた」ことを確かめる観測点。
+   * Number of slots that share a byte range with another slot placed earlier (= how many times the
+   * same bytes were reassigned because the live intervals do not overlap). A diagnostic value: the
+   * observation point where the fault-injection test of full-write (ADR 0014) confirms that
+   * reassignment actually happened.
    */
   readonly sharedSlots: number;
 };
 
-/** WebGPU core の保証既定（見積りが device 無しで使う）。 */
+/** The guaranteed WebGPU core defaults (used by the estimate without a device). */
 export const CORE_TRANSIENT_LIMITS: TransientLimits = {
   maxBufferSize: 256 * 1024 * 1024,
   maxStorageBufferBindingSize: 128 * 1024 * 1024,
@@ -151,11 +159,11 @@ const assertLimits = (limits: TransientLimits): void => {
 };
 
 /**
- * 確保プログラムを再生して配置する（モジュール doc の MUST 群）。
+ * Replays the allocation program and places it (the MUSTs of the module doc).
  *
- * 再生の簿記（参照計数）: 定義ぶんの 1 + `uses` を retain し、
- * 入力の解放と定義ぶんの解放で減らす。負になれば消費計数の誤り、末尾に残れば解放漏れ — どちらも
- * fail loudly（pinned は残ってよい）。
+ * Replay bookkeeping (reference counts): retain 1 for the definition + `uses`, and decrement on input
+ * release and on release of the definition's own count. Going negative is a consumption-count error,
+ * remaining at the end is a release leak — both fail loudly (pinned slots may remain).
  */
 export const planTransients = (
   program: TransientProgram,
@@ -225,7 +233,7 @@ export const planTransients = (
         retain(slot, 0, false);
         temps[id] = slot;
       });
-      // usage scope: この dispatch で読まれる slot と書かれる slot は同じ領域に置けない。
+      // Usage scope: a slot read in this dispatch and a slot written in it cannot share a region.
       const reads = dispatch.reads
         .map((ref) => resolve(ref, temps))
         .filter((s): s is number => s !== undefined);
@@ -239,7 +247,7 @@ export const planTransients = (
     });
     for (const name of step.releases) release(env.get(name));
     for (const slot of outputs) release(slot);
-    // 別名の出力は slot を持たない（束縛は ValueSource の元をそのまま解決する）。
+    // Alias outputs have no slot (the binding resolves the ValueSource's origin directly).
     steps.push({
       outputs: step.outputs.map((output, index) =>
         output.kind === "alias" ? undefined : outputs[index],
@@ -257,7 +265,7 @@ export const planTransients = (
     );
   }
 
-  // 上限は配置の前に全件列挙して落とす（ADR 0093 決定 5）。
+  // Limits: list every violation before placement and fail (ADR 0093 decision 5).
   const bindingCap = Math.min(limits.maxStorageBufferBindingSize, limits.maxBufferSize);
   const oversized = intervals.filter((iv) => iv.byteLength > bindingCap);
   if (oversized.length > 0) {
@@ -269,7 +277,7 @@ export const planTransients = (
     );
   }
 
-  // 配置: 実寸の大きい順（同寸は確保順）に first-fit。
+  // Placement: first-fit in descending real size (equal sizes in allocation order).
   const order = intervals
     .map((_, id) => id)
     .sort(
@@ -300,7 +308,7 @@ export const planTransients = (
       }
       if (offset + iv.byteLength > limits.maxBufferSize) continue;
       slots[id] = { region, offset, byteLength: iv.byteLength };
-      // バイト範囲を先住の slot と共有する（生存が重ならないので合法）= 配り直し 1 回。
+      // Shares a byte range with an earlier slot (legal because the lifetimes do not overlap) = one reassignment.
       const end = offset + iv.byteLength;
       if (
         entry.placed.some(
@@ -319,7 +327,7 @@ export const planTransients = (
     }
   }
 
-  // 生存ピーク（下界）。
+  // Live peak (lower bound).
   let peakLiveBytes = 0;
   for (const iv of intervals) {
     let live = 0;

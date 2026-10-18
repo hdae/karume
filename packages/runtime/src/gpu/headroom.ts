@@ -1,36 +1,40 @@
 /**
- * 空き VRAM の**試し確保** — 「今この瞬間に `bytes` ぶんの確保が通るか」を、非致命な唯一の確保経路
- * （`createBuffer`）で 1 度だけ踏んで確かめる。
+ * A **trial allocation** of free VRAM — checks "would an allocation of `bytes` succeed right now"
+ * by going once through the only non-fatal allocation path (`createBuffer`).
  *
- * ## なぜ試し確保か
+ * ## Why a trial allocation
  *
- * WebGPU が「余力切れでも device を失わない」と保証している確保は `createBuffer` / `createTexture`
- * の out-of-memory だけ（仕様: "If the allocation fails without side-effects, generate an
- * out-of-memory error"）。実装もその線で作られている — wgpu-core（Deno）は `create_buffer` の
- * OOM だけを非致命扱いにし、`queue.writeBuffer` が内部で作る staging・submit・bind group 生成の
- * OOM は device を無効化する（`handle_hal_error` → `lose()`）。Dawn（Chrome）も同じ規則
- * （`Device::HandleError` — OOM を errorScope へ通す呼び出しは createBuffer / createTexture /
- * createQuerySet だけ）。しかも Deno はその OOM を**普通の** `GPUOutOfMemoryError` として
- * errorScope へ届け、`device.lost` は次の呼び出しまで解決しない。つまり「OOM を踏んでから退避する」
- * 設計は、踏んだ OOM が staging 側だった時点で手遅れになる（docs/research/2026-09-27-h35-oom-device-lost.md）。
- * 大きな確保（重みのアップロード）を伴う段の前に、その量が入るかをここで先に見る。
+ * The only allocations for which WebGPU guarantees "running out does not lose the device" are the
+ * out-of-memory cases of `createBuffer` / `createTexture` (specification: "If the allocation fails
+ * without side-effects, generate an out-of-memory error"). Implementations follow that line —
+ * wgpu-core (Deno) treats only the OOM of `create_buffer` as non-fatal, while an OOM in the staging
+ * that `queue.writeBuffer` creates internally, in a submit or in bind group creation invalidates
+ * the device (`handle_hal_error` → `lose()`). Dawn (Chrome) has the same rule
+ * (`Device::HandleError` — the only calls that route OOM to the errorScope are createBuffer /
+ * createTexture / createQuerySet). Moreover Deno delivers that OOM to the errorScope as an
+ * **ordinary** `GPUOutOfMemoryError`, and `device.lost` does not resolve until the next call. So a
+ * design that "evicts after hitting an OOM" is already too late when the OOM it hit was on the
+ * staging side (docs/research/2026-09-27-h35-oom-device-lost.md). Before a step that involves a
+ * large allocation (uploading weights), check here first whether that amount fits.
  *
- * ## 何を測っているか
+ * ## What it measures
  *
- * wgpu の OOM は実際の確保失敗ではなく、`VK_EXT_memory_budget` の予算に対する事前チェック
- * （使用量 + 要求 ≥ 予算の 97% で OOM）なので、この試し確保は「device-local heap の予算残」を
- * 同じ検査で直接読む形になる。予算は他プロセスの使用量でも動く（Mesa は `使用量 + 空き × 0.9`）ので、
- * 結果は**その瞬間の事実**であって予約ではない。呼び手は後続の確保が別の理由で落ちる可能性を消せない
- * （最終門は従来どおり out-of-memory errorScope）。
+ * A wgpu OOM is not a real allocation failure but a pre-check against the `VK_EXT_memory_budget`
+ * budget (OOM when usage + request ≥ 97% of the budget), so this trial allocation reads "the budget
+ * left on the device-local heap" directly through the same check. The budget also moves with other
+ * processes' usage (Mesa uses `usage + free × 0.9`), so the result is **a fact of that moment**,
+ * not a reservation. The caller cannot rule out that a later allocation fails for another reason
+ * (the final check is still the out-of-memory errorScope).
  *
- * MUST: 確保するのは STORAGE（device-local heap の検査）。host-visible な種類（MAP_*）にすると
- * システム RAM 側の heap まで検査対象に入り、聞きたい heap の答えにならない。
- * MUST: 確保したバッファは即 destroy し、`onSubmittedWorkDone`（= device poll）で解放を確定させてから
- * 返る。wgpu の poll は解放（maintain）→ 99% 線の判定の順なので、この待ちは device を危険にしない。
- * `queue.submit([])` は出さない — submit 側の 99% 線判定は解放より先に走るため、天井近くでは
- * 試し確保ぶんの使用量を抱えたまま判定を踏む。
- * MUST NOT: 結果を「空き容量」として公開しない（二分探索で天井を測る用途は診断ツールに留める —
- * 常に動く値を API の顔にすると当て推量の温床になる: ADR 0070 決定 5）。
+ * MUST: allocate STORAGE (a check of the device-local heap). A host-visible kind (MAP_*) would
+ * bring the system-RAM heap into the check and would not answer for the heap in question.
+ * MUST: destroy the allocated buffers at once and return only after `onSubmittedWorkDone` (= a
+ * device poll) has settled the release. wgpu's poll runs release (maintain) → the 99% line check,
+ * in that order, so this wait does not endanger the device.
+ * Do not issue `queue.submit([])` — the submit-side 99% line check runs before the release, so near
+ * the ceiling it would hit the check while still holding the trial allocation's usage.
+ * MUST NOT: expose the result as "free memory" (binary search for the ceiling stays in diagnostic
+ * tools — making an always-moving value the face of the API breeds guesswork: ADR 0070 decision 5).
  */
 
 import type { GpuContext } from "./context.ts";
@@ -44,13 +48,15 @@ import {
 import { BUFFER_USAGE } from "./webgpu-constants.ts";
 
 /**
- * `bytes` を `maxBufferSize` 以下の**等分**に割る（各片は 4 バイト整列・最後の片も他と同じ大きさ ± 4）。
+ * Splits `bytes` into **equal** pieces of at most `maxBufferSize` (each piece 4-byte aligned; the
+ * last piece the same size as the others ± 4).
  *
- * 等分にするのは、割り当て器（gpu-allocator）がブロック（既定 256 MiB）未満の要求をブロックから
- * 切り出すため — 端数の小片を 1 本作ると、事前チェックが見た量より大きい実確保（新規ブロック）が
- * 起きうる。等分なら片はどれも `bytes / 片数` で、`bytes` が GiB 級なら全片が専用確保になる。
+ * Equal pieces because the allocator (gpu-allocator) carves requests smaller than a block (256 MiB
+ * by default) out of a block — a single small remainder piece could cause a real allocation (a new
+ * block) larger than the amount the pre-check saw. With equal pieces every piece is
+ * `bytes / pieces`, and when `bytes` is in the GiB range every piece is a dedicated allocation.
  *
- * NOTE: `export` は GPU 無しで割り方を縛るテストのため（`mod.ts` には出さない）。
+ * NOTE: exported so that a test can pin the split without a GPU (not exposed from `mod.ts`).
  */
 export const probePieces = (bytes: number, maxBufferSize: number): number[] => {
   if (!Number.isSafeInteger(bytes) || bytes < 0) {
@@ -62,8 +68,8 @@ export const probePieces = (bytes: number, maxBufferSize: number): number[] => {
   if (bytes === 0) return [];
   let count = Math.ceil(bytes / maxBufferSize);
   let each = Math.ceil(bytes / count / 4) * 4;
-  // 4 バイト整列の切り上げで片が maxBufferSize を超える形（bytes が maxBufferSize の倍数の直上）は
-  // 片を 1 本増やす。
+  // When rounding up to 4-byte alignment pushes a piece over maxBufferSize (bytes just above a
+  // multiple of maxBufferSize), add one more piece.
   if (each > maxBufferSize) {
     count += 1;
     each = Math.ceil(bytes / count / 4) * 4;
@@ -72,14 +78,18 @@ export const probePieces = (bytes: number, maxBufferSize: number): number[] => {
 };
 
 /**
- * `bytes` ぶんの確保が今通るかを試す（詳細はモジュール冒頭）。
+ * Tries whether an allocation of `bytes` succeeds now (details in the module header).
  *
- * - `true`: 確保は通り、全部 destroy して解放まで待った（次の確保に同じ量を期待してよい — 予約ではない）
- * - `false`: out-of-memory（device は生きている — 呼び手はここで退避なり縮退なりを決める）
- * - throw: validation（バグ）/ `GpuDeviceLostError`（既に無効な device — 解放待ちの中で表面化する）
+ * - `true`: the allocation succeeded; everything was destroyed and the release awaited (the next
+ *   allocation may expect the same amount — it is not a reservation)
+ * - `false`: out-of-memory (the device is alive — the caller decides here whether to evict or fall
+ *   back)
+ * - throw: validation (a bug) / `GpuDeviceLostError` (an already invalid device — it surfaces
+ *   during the release wait)
  *
- * MUST: push から pop の**発行**までを 1 つの同期区間に保つ（この間に await を挟むと、他所の errorScope
- * と LIFO が交錯する — `gpu/context.ts` 冒頭「errorScope 区間の不変条件」）。
+ * MUST: keep everything from the push to the **issue** of the pop in one synchronous section (an
+ * await in between interleaves the LIFO with errorScopes elsewhere — "Invariants of errorScope
+ * sections" at the top of `gpu/context.ts`).
  */
 export const fitsHeadroom = async (gpu: GpuContext, bytes: number): Promise<boolean> => {
   const pieces = probePieces(bytes, gpu.limits.maxBufferSize);
@@ -94,14 +104,15 @@ export const fitsHeadroom = async (gpu: GpuContext, bytes: number): Promise<bool
       );
     }
   } catch (cause) {
-    // 同期例外（実装が仕様外で投げる場合）でも 2 本のスコープを積み残さない。
+    // Even on a synchronous exception (an implementation throwing outside the spec), do not leave
+    // the two scopes on the stack.
     await discardFailureScopes(device);
     for (const probe of probes) probe.destroy();
     throw cause;
   }
   const failure = await popFailureScopes(device, "空きの試し確保");
   for (const probe of probes) probe.destroy();
-  // 解放の確定（poll）。無効化済みの device ならここで GpuDeviceLostError になる。
+  // Settle the release (poll). On an already invalidated device this becomes GpuDeviceLostError.
   await gpu[RUNTIME_INTERNAL].raceDeviceLost(
     device.queue.onSubmittedWorkDone(),
     "空きの試し確保の後始末",

@@ -18,11 +18,11 @@ fn main(
   let stride = nwg.x * 256u;
   var t = gid.x;
   while (t < params.out_count) {
-    // 出力添字 t = outer·inner + i。縮約軸だけを外した先頭アドレスへ戻す。
+    // output index t = outer·inner + i; back to the base address with only the reduced axis removed
     let base = (t / inner) * axis_len * inner + (t % inner);
     var acc: array<f32, 9>;
     for (var m = 0u; m < 256u; m = m + 1u) {
-      // 行 reduce の葉の並び（ビット反転）を 1 スレッドで再現する
+      // reproduce the leaf order of the row reduce (bit reversal) in one thread
       let slot = reverseBits(m) >> 24u;
       var v = 0.0;
       var c = slot;

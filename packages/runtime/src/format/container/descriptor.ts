@@ -1,16 +1,20 @@
 /**
- * 2 文書 descriptor（グラフ記述 / モデル記述）の型・parse・宣言検査・正準直列化 —
- * docs/container-v1.md §2 / §4 / §5 / §6 / §7。
+ * Types, parsing, declaration checks and canonical serialization of the two-document descriptor
+ * (graph descriptor / model descriptor) — docs/container-v1.md §2 / §4 / §5 / §6 / §7.
  *
- * - **グラフ記述** = `graphs`（IR v2）+ const 領域の目次と束縛 + `capabilities`。`krm` と `krg` で
- *   **バイト単位に同一**（`krg` のバイトコピー抽出の条件 — §9）。
- * - **モデル記述** = 束縛表 + 重み / 資産の目次 + parts の内部配置 + provenance。
+ * - **Graph descriptor** = `graphs` (IR v2) + the const region's index and bindings +
+ *   `capabilities`. **Byte-identical** in a `krm` and a `krg` (the condition for byte-copy extraction
+ *   of a `krg` — §9).
+ * - **Model descriptor** = binding table + weight / asset index + the internal layout of parts +
+ *   provenance.
  *
- * ここで掛けるのは**宣言だけで決まる検査**（重みを 1 バイトも取る前に効く — §7）。宣言 shape と
- * encoding から決まる payload 長・piece の被覆・group 長の規則は合流層（`bind.ts`）が持つ。
+ * Applied here are **the checks determined by declarations alone** (effective before fetching a
+ * single byte of weights — §7). The rules for payload length, piece coverage and group length,
+ * which are determined by the declared shape and the encoding, belong to the merge layer
+ * (`bind.ts`).
  *
- * descriptor は自分の正しさを証明できない: 2 文書のバイト列は**外側の期待 hash + 長さ**で先に
- * 検証してから parse する（`open.ts`）。
+ * A descriptor cannot prove its own correctness: the bytes of the 2 documents are verified with
+ * **the outer expected hash + length** first and parsed after that (`open.ts`).
  */
 
 import {
@@ -52,12 +56,12 @@ import {
 } from "../ir.ts";
 
 // ---------------------------------------------------------------------------
-// 型
+// Types
 // ---------------------------------------------------------------------------
 
 declare const sha256HexBrand: unique symbol;
 
-/** 小文字 16 進 64 文字の sha256（§0）。 */
+/** sha256 as 64 lowercase hex characters (§0). */
 export type Sha256Hex = string & { readonly [sha256HexBrand]: true };
 
 export type EncodingPacking = {
@@ -67,8 +71,9 @@ export type EncodingPacking = {
 };
 
 /**
- * 格納の宣言（§6.1）。bit 数は `packing` からの派生値なので欄を持たない。`rowAxis` / `groupSize` /
- * `scale` は量子化 codec（台帳の `scale: "required"`）でのみ書き、非量子化では書けない。
+ * Storage declaration (§6.1). The bit count is derived from `packing`, so it has no field.
+ * `rowAxis` / `groupSize` / `scale` are written only for quantized codecs (`scale: "required"` in
+ * the ledger) and cannot be written for non-quantized ones.
  */
 export type Encoding = {
   readonly codec: CodecName;
@@ -79,7 +84,7 @@ export type Encoding = {
   readonly zeroPoint?: { readonly block: string };
 };
 
-/** const 領域の block（§2.1 — offset は const 領域の先頭からの相対）。 */
+/** A block of the const region (§2.1 — offset is relative to the start of the const region). */
 export type ConstBlockRecord = {
   readonly id: string;
   readonly offset: number;
@@ -87,7 +92,10 @@ export type ConstBlockRecord = {
   readonly sha256: Sha256Hex;
 };
 
-/** const block → initializer の束縛（グラフの所有物なのでグラフ記述側 — §3）。 */
+/**
+ * Binding of a const block → an initializer (owned by the graph, so on the graph descriptor side —
+ * §3).
+ */
 export type ConstantBinding = {
   readonly graph: string;
   readonly initializer: string;
@@ -95,7 +103,7 @@ export type ConstantBinding = {
   readonly encoding: Encoding;
 };
 
-/** グラフ記述（§2.1）。 */
+/** Graph descriptor (§2.1). */
 export type GraphDescriptor = {
   readonly format: "karume-container";
   readonly version: 1;
@@ -114,26 +122,29 @@ export type GraphDescriptor = {
 export type BlockRole = "weight" | "scale" | "zero-point" | "asset";
 const BLOCK_ROLES: readonly BlockRole[] = ["weight", "scale", "zero-point", "asset"];
 
-/** part 2 以降の block（§2.2 — offset は所属 part の先頭からの相対）。 */
+/** A block in part 2 onward (§2.2 — offset is relative to the start of its part). */
 export type DataBlockRecord = ConstBlockRecord & {
   readonly part: number;
   readonly role: BlockRole;
 };
 
-/** part の内部配置（§2.2 — 添字 1 以上だけ。part 0 の完全性は外側の期待 hash が張る）。 */
+/**
+ * Internal layout of a part (§2.2 — index 1 and above only. The integrity of part 0 is covered by
+ * the outer expected hash).
+ */
 export type PartRecord = {
   readonly index: number;
   readonly length: number;
   readonly sha256: Sha256Hex;
 };
 
-/** piece 列の 1 本（§5 — `rows` は先頭次元の半開区間）。 */
+/** One entry of a piece list (§5 — `rows` is a half-open range of the first dimension). */
 export type WeightPiece = {
   readonly block: string;
   readonly rows: readonly [number, number];
 };
 
-/** 供給形（§5）。`block`（丸ごと 1 本）と `pieces`（2 本以上の行分割）は排他。 */
+/** Supply form (§5). `block` (whole) and `pieces` (split by rows into 2 or more) are exclusive. */
 export type WeightSupply =
   | { readonly block: string; readonly pieces?: undefined; readonly encoding: Encoding }
   | {
@@ -142,15 +153,18 @@ export type WeightSupply =
       readonly encoding: Encoding;
     };
 
-/** 資産（§2.2 — runtime は `role` を解釈しない）。 */
+/** Asset (§2.2 — the runtime does not interpret `role`). */
 export type AssetBinding = {
   readonly block: string;
   readonly role: string;
-  /** payload のバイト数（論理長）。block 長はこれを 4 の倍数へ切り上げた値 MUST（末尾は 0x00 詰め）。 */
+  /**
+   * Payload byte count (logical length). The block length MUST be this rounded up to a multiple of
+   * 4 (tail padded with 0x00).
+   */
   readonly length: number;
 };
 
-/** 出所（§2.3 — 本文は載せない）。 */
+/** Provenance (§2.3 — no full texts). */
 export type Provenance = {
   readonly license: string;
   readonly notice?: string;
@@ -158,30 +172,32 @@ export type Provenance = {
   readonly writer?: string;
 };
 
-/** モデル記述（§2.2）。 */
+/** Model descriptor (§2.2). */
 export type ModelDescriptor = {
   readonly format: "karume-model";
   readonly version: 1;
   /**
-   * 束縛表が使う codec 登録名の集合（§2.1 の `capabilities.codecs` の置き場をこちらへ移した —
-   * グラフ記述は `krm` / `krg` でバイト同一 MUST なので、束縛表に依存する欄を持てない）。
+   * The set of registered codec names the binding table uses (moved here from `capabilities.codecs`
+   * of §2.1 — the graph descriptor MUST be byte-identical in `krm` / `krg`, so it cannot have a
+   * field that depends on the binding table).
    */
   readonly codecs: readonly CodecName[];
   readonly parts: readonly PartRecord[];
   readonly blocks: readonly DataBlockRecord[];
-  /** グラフ名 → initializer 名 → 供給。 */
+  /** Graph name → initializer name → supply. */
   readonly binding: Readonly<Record<string, Readonly<Record<string, WeightSupply>>>>;
-  /** 資産名 → `{ block, role }`。 */
+  /** Asset name → `{ block, role }`. */
   readonly assets: Readonly<Record<string, AssetBinding>>;
   readonly provenance: Provenance;
 };
 
 // ---------------------------------------------------------------------------
-// 小さな読み取り器（全て path 付きで落ちる）
+// Small readers (all fail with a path)
 // ---------------------------------------------------------------------------
 
-// NOTE: 関数宣言にするのは、`never` 戻りの呼び出しを TS が制御フローの打ち切りとして扱う条件が
-// 「宣言型が明示された識別子」であるため（const の arrow では narrowing が効かない）。
+// NOTE: a function declaration, because TS treats a call returning `never` as ending control flow
+// only for "an identifier with an explicitly declared type" (narrowing does not work with a const
+// arrow).
 function fail(message: string): never {
   throw new ContainerFormatError(message);
 }
@@ -214,7 +230,10 @@ const requirePositive = (value: unknown, path: string): number => {
   return n;
 };
 
-/** 既知キー以外が 1 つでもあれば拒否し、必須キーの欠けも拒否する（§0 — 未知のキーは fail loudly）。 */
+/**
+ * Rejects any key that is not known, and rejects missing required keys (§0 — unknown keys fail
+ * loudly).
+ */
 const requireKeys = (
   object: JsonObject,
   required: readonly string[],
@@ -232,7 +251,7 @@ const requireKeys = (
 const requireStrings = (value: unknown, path: string): string[] =>
   requireArray(value, path).map((item, i) => requireString(item, `${path}[${i}]`));
 
-/** 集合として扱う欄（重複は集合等価の判定を曖昧にする）。 */
+/** A field treated as a set (duplicates would make the set-equality check ambiguous). */
 const requireUniqueStrings = (value: unknown, path: string): string[] => {
   const list = requireStrings(value, path);
   const seen = new Set<string>();
@@ -250,7 +269,7 @@ export const asSha256Hex = (value: unknown, path: string): Sha256Hex => {
   return value as Sha256Hex;
 };
 
-/** バイト列の sha256 を 16 進で返す。`subarray` をそのまま渡せる（複製しない）。 */
+/** Returns the sha256 of bytes in hex. A `subarray` can be passed as is (no copy). */
 export const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<Sha256Hex> => {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join(
@@ -288,7 +307,8 @@ export const parseEncoding = (value: unknown, path: string): Encoding => {
     blockBytes: requirePositive(packingObject["blockBytes"], `${path}.packing.blockBytes`),
     alignBytes: requirePositive(packingObject["alignBytes"], `${path}.packing.alignBytes`),
   };
-  // 宣言の packing は台帳の写し — 食い違いは「別の版の台帳で書かれた資産」（§6.1）。
+  // The declared packing is a copy of the ledger — a mismatch means "an asset written with a
+  // different version of the ledger" (§6.1).
   for (const key of PACKING_KEYS) {
     if (packing[key] !== entry.packing[key]) {
       fail(
@@ -355,7 +375,7 @@ const canonicalEncoding = (encoding: Encoding): Record<string, unknown> => ({
 });
 
 // ---------------------------------------------------------------------------
-// block の形（§4.1）
+// Block shape (§4.1)
 // ---------------------------------------------------------------------------
 
 const assertBlockShape = (block: ConstBlockRecord, path: string): void => {
@@ -371,7 +391,9 @@ const assertBlockShape = (block: ConstBlockRecord, path: string): void => {
   }
 };
 
-/** 同じ領域（const 領域 / 1 つの part）の block が互いに重ならず領域長に収まること。 */
+/**
+ * The blocks of one region (the const region / one part) do not overlap and fit in the region length.
+ */
 const assertNoOverlap = (
   blocks: readonly ConstBlockRecord[],
   regionLength: number,
@@ -417,7 +439,7 @@ const parseDataBlock = (value: unknown, path: string): DataBlockRecord => {
 };
 
 // ---------------------------------------------------------------------------
-// グラフ記述（§2.1）
+// Graph descriptor (§2.1)
 // ---------------------------------------------------------------------------
 
 const GRAPH_DESCRIPTOR_KEYS = ["format", "version", "capabilities", "graphs", "const"] as const;
@@ -428,7 +450,10 @@ const requireFormat = (object: JsonObject, expected: string, path: string): void
   if (object["version"] !== 1) fail(`${path}.version が 1 でない: ${String(object["version"])}`);
 };
 
-/** グラフ記述のバイト列を検査つきで読む（宣言だけで決まる検査まで済ませて返す）。 */
+/**
+ * Reads graph descriptor bytes with checks (returns after the checks determined by declarations
+ * alone).
+ */
 export const parseGraphDescriptor = (bytes: Uint8Array<ArrayBuffer>): GraphDescriptor => {
   const path = "graphDescriptor";
   const object = requireObject(decodeJsonDocument(bytes, path, MAX_DESCRIPTOR_BYTES, fail), path);
@@ -443,7 +468,8 @@ export const parseGraphDescriptor = (bytes: Uint8Array<ArrayBuffer>): GraphDescr
     `${path}.capabilities.features`,
   );
   if (features.length > 0) {
-    // 初版は拡張点を 1 つも定義していない（§2.1）— 知らない機能を要求する資産を黙って読まない。
+    // The first edition defines no extension point (§2.1) — assets that require unknown features
+    // are not read silently.
     fail(`${path}.capabilities.features: 未知の機能 [${features.join(", ")}]（初版は空配列のみ）`);
   }
 
@@ -465,7 +491,7 @@ export const parseGraphDescriptor = (bytes: Uint8Array<ArrayBuffer>): GraphDescr
       throw cause;
     }
   }
-  // capabilities.ops は全グラフの requires.ops の和集合と完全一致（§2.1）。
+  // capabilities.ops equals exactly the union of requires.ops of all graphs (§2.1).
   const union = sortedByCodePoints(
     new Set(graphNames.flatMap((name) => graphs[name].requires.ops)),
   );
@@ -508,13 +534,14 @@ export const parseGraphDescriptor = (bytes: Uint8Array<ArrayBuffer>): GraphDescr
   return descriptor;
 };
 
-/** グラフ記述の宣言検査（const 目次と束縛の整合）。 */
+/** Declaration checks of the graph descriptor (consistency of the const index and bindings). */
 export const validateGraphDescriptor = (descriptor: GraphDescriptor): void => {
   const path = "graphDescriptor.const";
   const region = descriptor.const;
-  // §10 の天井は part 1 にも掛かる。krg では part 1 の寸法を持つのがこの欄だけなので、記述の
-  // 検査で止めないと読み口の長さ照合を通って巨大な一括読みに届く（krm はモデル記述の parts 側でも
-  // 見るが、重複は無害）。
+  // The ceiling of §10 applies to part 1 as well. In a krg this field is the only one holding part
+  // 1's size, so unless the descriptor check stops it, it passes the reader's length check and
+  // reaches a huge bulk read (a krm also checks it on the model descriptor's parts side, but the
+  // duplication is harmless).
   if (region.length > PART_MAX_BYTES) {
     fail(`${path}.length ${region.length} が part 長の天井 ${PART_MAX_BYTES} を超える`);
   }
@@ -526,13 +553,13 @@ export const validateGraphDescriptor = (descriptor: GraphDescriptor): void => {
     if (ids.has(block.id)) fail(`${blockPath}: block id '${block.id}' が重複`);
     ids.add(block.id);
     assertBlockShape(block, blockPath);
-    // const.blocks は offset 昇順で並ぶ（§2.1 — 読み手が並べ直さずに済む）。
+    // const.blocks are in ascending offset order (§2.1 — the reader need not reorder them).
     if (block.offset <= previousOffset) fail(`${blockPath}: offset ${block.offset} が昇順でない`);
     previousOffset = block.offset;
   }
   assertNoOverlap(region.blocks, region.length, path);
 
-  // 規則①: 1 block ≤ 1 参照。scale / zeroPoint の block も同様。
+  // Rule ①: 1 block ≤ 1 reference. The same for scale / zeroPoint blocks.
   const referenced = new Set<string>();
   const claim = (id: string, by: string): void => {
     if (!ids.has(id)) fail(`${by}: const 目次に無い block '${id}'`);
@@ -575,12 +602,16 @@ export const validateGraphDescriptor = (descriptor: GraphDescriptor): void => {
     }
   }
   for (const id of ids) {
-    // 規則⑤: どこからも参照されない block は余剰（黙って太った配布形を受理しない）。
+    // Rule ⑤: a block referenced from nowhere is surplus (a bloated distribution is not accepted
+    // silently).
     if (!referenced.has(id)) fail(`${path}: block '${id}' がどこからも参照されていない（余剰）`);
   }
 };
 
-/** グラフ記述の正準直列化（docs/ir-v2.md「正準直列化」の規則をグラフ記述全体へ広げたもの）。 */
+/**
+ * Canonical serialization of the graph descriptor (the rules of docs/ir-v2.md "Canonical
+ * serialization" extended to the whole graph descriptor).
+ */
 export const serializeGraphDescriptor = (descriptor: GraphDescriptor): Uint8Array<ArrayBuffer> => {
   validateGraphDescriptor(descriptor);
   const bytes = encodeJsonBytes({
@@ -623,7 +654,7 @@ const sortConstants = (constants: readonly ConstantBinding[]): ConstantBinding[]
   });
 
 // ---------------------------------------------------------------------------
-// モデル記述（§2.2）
+// Model descriptor (§2.2)
 // ---------------------------------------------------------------------------
 
 const MODEL_DESCRIPTOR_KEYS = [
@@ -663,7 +694,8 @@ const parseSupply = (value: unknown, path: string): WeightSupply => {
     };
   });
   if (pieces.length < 2) fail(`${path}.pieces は 2 本以上（1 本なら 'block' で書く）`);
-  // 規則④: 行範囲を隙間なく被覆（末尾 = shape[0] は宣言 shape を知る合流層が見る）。
+  // Rule ④: the row range is covered without gaps (end = shape[0] is checked by the merge layer,
+  // which knows the declared shape).
   let cursor = 0;
   for (const [i, piece] of pieces.entries()) {
     if (piece.rows[0] !== cursor) {
@@ -674,7 +706,7 @@ const parseSupply = (value: unknown, path: string): WeightSupply => {
   return { pieces, encoding };
 };
 
-/** モデル記述のバイト列を検査つきで読む。 */
+/** Reads model descriptor bytes with checks. */
 export const parseModelDescriptor = (bytes: Uint8Array<ArrayBuffer>): ModelDescriptor => {
   const path = "modelDescriptor";
   const object = requireObject(decodeJsonDocument(bytes, path, MAX_DESCRIPTOR_BYTES, fail), path);
@@ -757,7 +789,10 @@ export const parseModelDescriptor = (bytes: Uint8Array<ArrayBuffer>): ModelDescr
   return descriptor;
 };
 
-/** 供給形の実体 block と付随 block（scale / zeroPoint）— 参照検査の共通経路。 */
+/**
+ * The data blocks and companion blocks (scale / zeroPoint) of a supply — the shared path of the
+ * reference checks.
+ */
 const supplyBlocks = (
   supply: WeightSupply,
 ): {
@@ -770,7 +805,10 @@ const supplyBlocks = (
   zeroPoint: supply.encoding.zeroPoint?.block,
 });
 
-/** モデル記述の宣言検査（グラフ記述との突合は {@link validateAgainstGraph}）。 */
+/**
+ * Declaration checks of the model descriptor (the check against the graph descriptor is
+ * {@link validateAgainstGraph}).
+ */
 export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
   const path = "modelDescriptor";
   if (descriptor.parts.length === 0) {
@@ -781,7 +819,8 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
     fail(`${path}.blocks の件数が上限 ${MAX_BLOCKS} を超える`);
   }
 
-  // parts は添字 1 から昇順に隙間なく（§2.2 — part 0 は自己参照になるので載せない）。
+  // parts run from index 1 in ascending order without gaps (§2.2 — part 0 is not listed, as it would
+  // be self-referential).
   const partLength = new Map<number, number>();
   for (const [i, part] of descriptor.parts.entries()) {
     const partPath = `${path}.parts[${i}]`;
@@ -811,7 +850,8 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
     assertNoOverlap(blocks, partLength.get(part) ?? 0, `${path} part ${part}`);
   }
 
-  // 規則①: 1 block ≤ 1 binding。role は参照する側が決める（実体 = weight・scale・zero-point・asset）。
+  // Rule ①: 1 block ≤ 1 binding. The referencing side decides the role (data = weight, scale,
+  // zero-point, asset).
   const referenced = new Set<string>();
   const claim = (id: string, role: BlockRole, by: string): DataBlockRecord => {
     const block = byId.get(id);
@@ -837,7 +877,8 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
             .part,
       );
       const firstPart = parts[0];
-      // 規則③: companion scale / zeroPoint の block は実体（piece 列なら piece 1）と同一 part。
+      // Rule ③: the companion scale / zeroPoint block is in the same part as the data (piece 1 for a
+      // piece list).
       if (refs.scale !== undefined) {
         const scalePart = claim(refs.scale, "scale", `${entryPath}.encoding.scale`).part;
         if (scalePart !== firstPart) {
@@ -863,8 +904,9 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
   for (const [name, asset] of Object.entries(descriptor.assets)) {
     const assetPath = `${path}.assets['${name}']`;
     const block = claim(asset.block, "asset", assetPath);
-    // 資産は shape を持たないので論理長を自分で宣言する（§2.2）。block 長 = 論理長の 4 の倍数への
-    // 切り上げ MUST — 詰め物の量まで宣言で閉じる（消費側が末尾の 0x00 を推測で剥がない）。
+    // An asset has no shape, so it declares its logical length itself (§2.2). Block length MUST be
+    // the logical length rounded up to a multiple of 4 — even the amount of padding is fixed by the
+    // declaration (consumers do not strip trailing 0x00 by guessing).
     if (alignUp(asset.length, BLOCK_TAIL_ALIGN) !== block.length) {
       fail(
         `${assetPath}.length: 論理長 ${asset.length} を ${BLOCK_TAIL_ALIGN} の倍数へ切り上げた値が block '${asset.block}' の長さ ${block.length} と違う`,
@@ -874,7 +916,8 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
   for (const id of byId.keys()) {
     if (!referenced.has(id)) fail(`${path}: block '${id}' がどこからも参照されていない（余剰）`);
   }
-  // `codecs` は束縛表が使う codec の集合と完全一致（宣言と実際の突合 — 重みを取る前に台帳と照合）。
+  // `codecs` equals exactly the set of codecs the binding table uses (declaration checked against
+  // actual use — matched against the ledger before fetching weights).
   const declared = sortedByCodePoints(descriptor.codecs);
   const actual = sortedByCodePoints(usedCodecs);
   if (!sameSet(declared, actual)) {
@@ -886,7 +929,10 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
   }
 };
 
-/** 2 文書のあいだの突合（§2 / §5 の規則⑤ — 束縛表のキー集合と initializer 集合の完全一致）。 */
+/**
+ * Check between the 2 documents (§2 / rule ⑤ of §5 — the binding table's key set exactly equals the
+ * initializer set).
+ */
 export const validateAgainstGraph = (model: ModelDescriptor, graph: GraphDescriptor): void => {
   const constPart = model.parts[0];
   if (constPart.length !== graph.const.length) {
@@ -933,7 +979,7 @@ export const validateAgainstGraph = (model: ModelDescriptor, graph: GraphDescrip
   }
 };
 
-/** モデル記述の正準直列化。 */
+/** Canonical serialization of the model descriptor. */
 export const serializeModelDescriptor = (descriptor: ModelDescriptor): Uint8Array<ArrayBuffer> => {
   validateModelDescriptor(descriptor);
   const bytes = encodeJsonBytes({

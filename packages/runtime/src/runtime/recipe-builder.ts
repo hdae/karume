@@ -1,31 +1,36 @@
 /**
- * 導出相 — 実行ステップ列をレシピ列へ落とす（{@link RecipeBuilder}）。
+ * Derivation phase — lowers the execution step list to the recipe list ({@link RecipeBuilder}).
  *
- * 構造: 「計画（純関数・plan.ts）→ **導出**（ここ）→ **実行**（レシピ型と汎用ループ —
- * src/runtime/recipe.ts）」。ステップ 1 つごとに pipeline / layout を引き、params を書き、
- * bind 面と workgroup 数を決めて {@link StepRecipe} を組む。op 別の踏み分け（カーネル変種の
- * 選択・融合ルールの replay・i8a8 / f16 の opt-in 経路）はこの層に閉じる。
+ * Structure: "planning (pure functions, plan.ts) → **derivation** (here) → **execution** (recipe
+ * types and the generic loop — src/runtime/recipe.ts)". For each step it looks up the pipeline /
+ * layout, writes the params, decides the bind surface and workgroup count, and builds a
+ * {@link StepRecipe}. Per-op branching (kernel-variant selection, replay of fusion rules, the i8a8 /
+ * f16 opt-in paths) is closed within this layer.
  *
- * ## 置き場（導出相の入口）
+ * ## Layout (entry point of the derivation phase)
  *
- * **このファイルが導出相の入口**で、演算族ごとの導出は `recipe-builders/` 配下の 6 ファイル
- * （elementwise / layout / linear / norm / attention / conv）に分かれている。ここが持つのは
- * 名前解決と全件 settle（{@link RecipeBuilder.buildRecipes}）・融合ステップの replay・契約
- * kind の dispatch・params キャッシュと実績・重みスロットの解決だけで、族別関数へは
- * {@link RecipeBuildFace} という狭い面を 1 つ渡す。
- * MUST: 消費側は**この綴り（`recipe-builder.ts`）で import する**。族別の 6 ファイルへの分割は
- * 実装の都合にすぎず、{@link RecipeBuilder} が導出相の唯一の入口であることは変わらない。
- * MUST: 実体（値）の依存は **recipe-builder → recipe-builders の一方向**に保つ。族別側から
- * ここへの参照は `import type` だけ（消去されるので実行時の import グラフに逆辺が出ない）で、
- * 両者が要る**値**（params の usage）は `recipe-builders/params-usage.ts` に置く。
+ * **This file is the entry point of the derivation phase**; the derivation per operator family is
+ * split into 6 files under `recipe-builders/` (elementwise / layout / linear / norm / attention /
+ * conv). What this file holds is name resolution and settling every step
+ * ({@link RecipeBuilder.buildRecipes}), the replay of fused steps, the dispatch on contract kind, the
+ * params cache and its counts, and weight-slot resolution; the family functions receive one narrow
+ * surface, {@link RecipeBuildFace}.
+ * MUST: consumers **import it by this name (`recipe-builder.ts`)**. The split into 6 family files is
+ * an implementation convenience only; {@link RecipeBuilder} stays the single entry point of the
+ * derivation phase.
+ * MUST: value dependencies stay **one-way, recipe-builder → recipe-builders**. The family side
+ * refers to this file only with `import type` (erased, so no reverse edge appears in the run-time
+ * import graph), and **values** both sides need (the params usage) live in
+ * `recipe-builders/params-usage.ts`.
  *
- * MUST: 導出相は **run 寿命の状態に触れない**（{@link RunArena} の確保も dispatch の発行も
- * しない）。触れるのは Session 以上の寿命を持つ実体（重み・per-channel scale・params キャッシュ
- * = Session 常駐、パイプライン = device 常駐の {@link SessionPipelines}）だけで、これが
- * 「導出相の成果物を解決済み bindings をキーに Session へ常駐させてよい」根拠そのもの
- * （executor.ts の PreparedPlan）。
- * MUST: 依存は executor.ts → ここの**一方向**（型 import を含めて逆辺を作らない）。Session の
- * 状態は {@link RecipeBuilderContext} という構造的な面だけで受け取る。
+ * MUST: the derivation phase **does not touch run-lifetime state** (it neither allocates from a
+ * {@link RunArena} nor issues dispatches). It touches only objects whose lifetime is the Session or
+ * longer (weights, per-channel scales, the params cache = Session-resident; pipelines =
+ * device-resident {@link SessionPipelines}), and this is the very basis of "the products of the
+ * derivation phase may be kept resident in the Session keyed by the resolved bindings" (executor.ts's
+ * PreparedPlan).
+ * MUST: dependencies run **one way, executor.ts → here** (no reverse edge, type imports included).
+ * Session state is received only through the structural surface {@link RecipeBuilderContext}.
  */
 
 import { gridStrideWorkgroups } from "../codegen/dispatch.ts";
@@ -95,65 +100,73 @@ import {
 import { PARAMS_STORAGE_USAGE, PARAMS_UNIFORM_USAGE } from "./recipe-builders/params-usage.ts";
 
 /**
- * 導出相が読む Session の状態（**必要な欄だけ**の構造的な面）。
+ * The Session state the derivation phase reads (a structural surface with **only the fields it
+ * needs**).
  *
- * MUST: executor.ts の `SessionState` を import しない — Session → RecipeBuilder の一方向
- * import を型でも崩さないため。Session は自分の状態をそのまま渡す（構造的に適合する）。
- * MUST: run 寿命の器（{@link RunArena} の run アリーナ・env・スケジューラ）は載せない。
- * 載せた時点で「導出相は run 寿命の状態に触れない」がモジュール doc の宣言だけになり、
- * 導出済み計画を Session へ常駐させる根拠が型の上から消える。
+ * MUST: do not import executor.ts's `SessionState` — to keep the one-way import Session →
+ * RecipeBuilder intact at the type level too. The Session passes its own state as is (it fits
+ * structurally).
+ * MUST: run-lifetime containers (the run arena of {@link RunArena}, env, the scheduler) are not
+ * carried. The moment they are, "the derivation phase does not touch run-lifetime state" becomes a
+ * mere statement in the module doc, and the basis for keeping prepared plans resident in the Session
+ * disappears from the types.
  */
 export type RecipeBuilderContext = {
   readonly gpu: GpuContext;
   readonly graph: IrGraph;
   /**
-   * パイプラインの引き先（device 寿命のキャッシュ + この Session の使用記録 —
-   * {@link SessionPipelines}）。実体は device 側にあるので、run 寿命の器を載せない規律
-   * （下の MUST）とは無関係に Session を跨いで生き残る。
+   * Where pipelines are looked up (the device-lifetime cache + this Session's usage record —
+   * {@link SessionPipelines}). The objects live on the device side, so they survive across Sessions
+   * regardless of the rule against carrying run-lifetime containers (the MUST below).
    */
   readonly cache: SessionPipelines;
-  /** params の確保先（**Session 常駐**の weights アリーナ — `#writeParams` の MUST）。 */
+  /** Where params are allocated (the **Session-resident** weights arena — the MUST of `#writeParams`). */
   readonly weights: RunArena;
   readonly weightBuffers: ReadonlyMap<string, GPUBuffer>;
   readonly paramsCache: Map<string, GPUBuffer>;
   /**
-   * 圧縮のまま常駐した重み（席・scale・group 長 — カーネル変種の選択と追加束縛の導出元。
-   * 表に無い値は f32 として読む）。
+   * Weights resident in compressed form (residency class, scale, group length — the source for
+   * kernel-variant selection and extra bindings. A value not in the table is read as f32).
    */
   readonly residentWeights: ReadonlyMap<string, ResidentWeight>;
   readonly linearCompute: "f32" | "a8" | "f16";
   readonly attentionCompute: ComputePrecision;
   readonly attentionScoreStorage: ScoreStorage;
-  /** states 形 attention ③PV の縮約形（executor の {@link SessionState} が既定を決める）。 */
+  /** The reduction form of states-form attention ③PV (the executor's {@link SessionState} decides the default). */
   readonly stateAttentionReduce: StateAttentionReduce;
   readonly linearGemvReduce: LinearGemvReduce;
   readonly rmsNormReduce: RmsNormReduce;
   /**
-   * 行ブロック gemv の並列度目標（`SessionOptions.linearGemvRowsThreadTarget` — Session 生成時に
-   * 固定される静的なノブ。`undefined` はカーネル側の既定）。
+   * The parallelism target of the row-block GEMV (`SessionOptions.linearGemvRowsThreadTarget` — a
+   * static knob fixed at Session creation. `undefined` is the kernel-side default).
    */
   readonly linearGemvRowsThreadTarget: number | undefined;
   /**
-   * i8a8 の整数内積変種（**族ごとに別席** — 「両変種はビット同一」が attention だけ実機で
-   * 反証されているため。executor の {@link SessionState} が既定を決める）。
+   * The i8a8 integer dot-product variant (**a separate field per family** — split because "both
+   * variants are bit-identical" was once thought refuted on real hardware for attention only; that
+   * inference was withdrawn on 2026-08-29, and the fields stay — `SessionState.attentionI8a8Dot` in
+   * session-build.ts. The executor's {@link SessionState} decides the default).
    */
   readonly linearI8a8Dot: I8a8Dot;
   readonly attentionI8a8Dot: I8a8Dot;
   /**
-   * 行ブロック枚数の強制（**テスト専用** — executor の `ROW_BLOCK_SPLIT`）。分解経路は
-   * 融合ルールが受け取るが、states 形の行ブロック（ADR 0067 決定 7）は導出相が直接割るので
-   * ここにも同じノブが要る（強制分割 parity の足を経路ごとに別のノブにしない）。
+   * Forcing the number of row blocks (**test only** — the executor's `ROW_BLOCK_SPLIT`). The
+   * decomposed path receives it through the fusion rules, but the row blocks of the states form (ADR
+   * 0067 decision 7) are split directly by the derivation phase, so the same knob is needed here too
+   * (the forced-split parity is not driven by a different knob per path).
    */
   readonly rowBlockSplit: number | undefined;
   /**
-   * 行ブロックの一時 1 本ごとの予算（`SessionOptions.attentionRowBlockMaxBytes` — ADR 0124）。
-   * 融合 attention と states 形は導出相が直接割るので、融合ルールの文脈と同じ値をここにも持つ
-   * （{@link rowBlockSplit} と同じ理由）。`undefined` = 予算なし。
+   * The budget per row-block temporary (`SessionOptions.attentionRowBlockMaxBytes` — ADR 0124).
+   * Fused attention and the states form are split directly by the derivation phase, so the same value
+   * as in the fusion rules' context is held here too (same reason as {@link rowBlockSplit}).
+   * `undefined` = no budget.
    */
   readonly attentionRowBlockMaxBytes: number | undefined;
   /**
-   * GEMM 幾何のプロファイル（executor の {@link SessionState} が構築時に 1 度だけ選ぶ —
-   * DECIDED: ADR 0115）。matmul / bmm / linear・融合 attention・conv2d・i8a8 の導出が幾何を引く先。
+   * The GEMM geometry profile (chosen once at construction by the executor's {@link SessionState} —
+   * DECIDED: ADR 0115). Where the derivation of matmul / bmm / linear, fused attention, conv2d and
+   * i8a8 looks up geometry.
    */
   readonly geometryProfile: GeometryProfile;
   readonly useCounts: ReadonlyMap<string, number>;
@@ -161,35 +174,37 @@ export type RecipeBuilderContext = {
 };
 
 /**
- * state ノードのビルドに要る文脈（束縛解決済みのスロット容量と、run 前検査の集積先）。
+ * The context the build of state nodes needs (slot capacities with bindings resolved, and where the
+ * pre-run checks are collected).
  *
- * MUST: 集積は導出相の 1 度きり（{@link GenerationLimits} は導出済み計画と同じ寿命で持ち、
- * ヒット run はここを走らせない）。run ごとに数え直す形にすると、ヒット run だけ検査が
- * 消えるか、2 実装に分かれる。
+ * MUST: collected once, in the derivation phase ({@link GenerationLimits} has the same lifetime as
+ * the prepared plan, and a hit run does not run this). Recounting per run would either drop the
+ * check from hit runs only or split it into two implementations.
  */
 export type StateBuildContext = {
-  /** スロット名 → 束縛解決済みの容量込み具体形（`GenerationContext` が渡す）。 */
+  /** Slot name → concrete shape including capacity, with bindings resolved (passed by `GenerationContext`). */
   readonly shapes: ReadonlyMap<string, readonly number[]>;
   readonly chunkRows: Set<number>;
   readonly fullCapacities: Map<string, number>;
 };
 
 /**
- * 族別導出（`recipe-builders/` 配下）が触れてよい共有サービスの面。
+ * The surface of shared services the family derivations (under `recipe-builders/`) may touch.
  *
- * MUST: 族別モジュールへ渡すのは**この面だけ**で、{@link RecipeBuilder} そのものは渡さない。
- * params キャッシュの所有者と params 実績のカウンタを 1 つに保つのがこの面の役目で、
- * `writeParams` がその両方を閉じ込める（面を広げて `paramsCache` を直接見せた時点で、
- * 実績の数え上げが族ごとに散る）。
+ * MUST: **only this surface** is passed to the family modules, never the {@link RecipeBuilder}
+ * itself. Its job is to keep one owner of the params cache and one counter of params counts, and
+ * `writeParams` encloses both (the moment the surface is widened to expose `paramsCache` directly,
+ * the counting scatters across families).
  */
 export type RecipeBuildFace = {
   /**
-   * 導出相の状態のうち、族別導出が**実際に読む欄だけ**。
+   * The parts of the derivation-phase state that the family derivations **actually read**.
    *
-   * MUST: 可変の `paramsCache` / `weights`（{@link RecipeBuilderContext}）をここに載せない —
-   * `readonly` はプロパティ参照に掛かるだけで Map もアリーナも中身は書ける。全体をそのまま
-   * 渡すと、上の「params キャッシュの所有者を 1 つに保つ」が doc の宣言だけになる。
-   * 欄を増やすのは読む側が実際に現れたときだけ。
+   * MUST: the mutable `paramsCache` / `weights` ({@link RecipeBuilderContext}) are not carried here
+   * — `readonly` applies only to the property reference, and the contents of a Map or an arena stay
+   * writable. Passing the whole state turns "keep one owner of the params cache" above into a mere
+   * statement in the doc.
+   * Fields are added only when a reader actually appears.
    */
   readonly state: Pick<
     RecipeBuilderContext,
@@ -215,24 +230,25 @@ export type RecipeBuildFace = {
 };
 
 /**
- * params キャッシュへ新しく載せた 1 件（{@link RecipeBuilder.addedParams} — 失敗の決着で
- * {@link RecipeBuilder.forgetParams} が巻き戻す単位）。
+ * One entry newly put into the params cache ({@link RecipeBuilder.addedParams} — the unit that
+ * {@link RecipeBuilder.forgetParams} rolls back when a run settles with a failure).
  */
 export type AddedParams = { readonly key: string; readonly buffer: GPUBuffer };
 
 /**
- * 導出相の本体。Session は 1 個だけ持ち、run / enqueue のミス経路から
- * {@link RecipeBuilder.buildRecipes} を呼ぶ。
+ * The body of the derivation phase. A Session holds exactly one and calls
+ * {@link RecipeBuilder.buildRecipes} from the miss path of run / enqueue.
  */
 export class RecipeBuilder {
   readonly #state: RecipeBuilderContext;
-  /** 族別導出へ渡す面（private helper を閉じ込めた 1 個。構築はコンストラクタの 1 度きり）。 */
+  /** The surface passed to the family derivations (one object enclosing the private helpers, built once in the constructor). */
   readonly #face: RecipeBuildFace;
   /**
-   * 進行中 run の params 実績（run の頭でリセットし、決着時に Session の診断へ移す）。
-   * 新規生成は件数ではなく**載せた実体の列**で持つ — 失敗した実行の巻き戻し
-   * （{@link RecipeBuilder.forgetParams}）が要るのはこの列で、件数（`allocCount`）はその長さから
-   * 導出する（独立に数えると、片方だけ通る経路で 2 つがずれる）。
+   * The params counts of the run in progress (reset at the head of a run, moved to the Session's
+   * diagnostics when it settles). New allocations are kept as **the list of objects put in**, not as
+   * a count — the rollback of a failed execution ({@link RecipeBuilder.forgetParams}) needs this
+   * list, and the count (`allocCount`) is derived from its length (counting independently would let
+   * the two drift on a path that updates only one).
    */
   #paramsAdded: AddedParams[] = [];
   #paramsReuseCount = 0;
@@ -248,32 +264,34 @@ export class RecipeBuilder {
     };
   }
 
-  /** params 実績を run の頭でリセットする（Session が run / enqueue の入口で 1 度だけ呼ぶ）。 */
+  /** Resets the params counts at the head of a run (the Session calls it once at the entry of run / enqueue). */
   resetParamsStats(): void {
     this.#paramsAdded = [];
     this.#paramsReuseCount = 0;
   }
 
-  /** リセット以降に積んだ params 実績（Session の `lastRunParams` はこの値そのもの）。 */
+  /** The params counts accumulated since the reset (the Session's `lastRunParams` is exactly this value). */
   get paramsStats(): ParamsCacheStats {
     return { allocCount: this.#paramsAdded.length, reuseCount: this.#paramsReuseCount };
   }
 
-  /** リセット以降に params キャッシュへ新しく載せたもの（写し — 失敗の決着まで持ち越せる）。 */
+  /** What was newly put into the params cache since the reset (a copy — it can be carried until the failure settles). */
   get addedParams(): readonly AddedParams[] {
     return [...this.#paramsAdded];
   }
 
   /**
-   * 失敗で決着した実行が載せた params をキャッシュから外す。
+   * Removes from the cache the params put in by an execution that settled with a failure.
    *
-   * 非致命 OOM の確保は例外にならず無効なバッファを返し、失敗は後の errorScope で初めて判明する。
-   * 外さないと、メモリが空いた後の再導出も同じ内容キーで無効なバッファに当たり続ける。
-   * MUST: 外すのはキーが**同じ実体**を指しているときだけ。キーで消すと、巻き戻しより先に
-   * 同じ内容で載せ直された別の実体まで外す。
-   * MUST: destroy しない。所有は weights アリーナで、破棄は `Session.dispose` に相乗りする
-   * （{@link RecipeBuilder.#writeParams} の MUST — 破棄の担い手を増やさない）。外した実体は
-   * どの計画からも参照されないまま dispose まで残る（1 本は数十バイト規模）。
+   * An allocation that hits a non-fatal OOM does not throw; it returns an invalid buffer, and the
+   * failure is found only later by the errorScope. Without removal, re-derivation after memory frees
+   * up keeps hitting the invalid buffer under the same content key.
+   * MUST: remove an entry only when its key points at **the same object**. Removing by key would also
+   * remove another object put back in with the same content before the rollback.
+   * MUST: do not destroy it. The weights arena owns it, and destruction rides on `Session.dispose`
+   * (the MUST of {@link RecipeBuilder.#writeParams} — do not add another party responsible for
+   * destruction). A removed object stays until dispose, referenced by no plan (each one is tens of
+   * bytes).
    */
   forgetParams(added: readonly AddedParams[]): void {
     for (const { key, buffer } of added) {
@@ -282,13 +300,15 @@ export class RecipeBuilder {
   }
 
   /**
-   * 導出相 — ステップ列をレシピ列へ落とす。GPU コマンドを 1 つも出さず、run 寿命の実体
-   * （{@link RunArena} のバッファ）にも触れない（モジュール doc の MUST）。
+   * Derivation phase — lowers the step list to the recipe list. Issues not a single GPU command and
+   * touches no run-lifetime object (the buffers of {@link RunArena}) (the MUST of the module doc).
    *
-   * @param stateShapes 束縛解決済みの state スロット shape（スロット名 → 容量込みの具体形）。
-   *   MUST: レシピは「bindings ∪ 容量」の純関数のまま — context の**識別子は渡さない**
-   *   （ADR 0066 決定 5。実体は run ごとに `GenerationEncoding` が配る）。省略した導出で
-   *   state ノードに当たれば fail loudly（黙って従来形として組まない）。
+   * @param stateShapes The state-slot shapes with bindings resolved (slot name → concrete shape
+   *   including capacity).
+   *   MUST: a recipe stays a pure function of "bindings ∪ capacities" — the context's **identity is
+   *   not passed** (ADR 0066 decision 5; the objects are handed out per run by `GenerationEncoding`).
+   *   A derivation without it that meets a state node fails loudly (it does not silently build the
+   *   older form).
    */
   async buildRecipes(
     steps: readonly ExecStep[],
@@ -297,8 +317,9 @@ export class RecipeBuilder {
     readonly recipes: readonly StepRecipe[];
     readonly generation: GenerationLimits;
   }> {
-    // 実体は実行相まで決まらないので、導出相は「その値名が既に定義済みか」だけを追う
-    // （束縛漏れを実行相へ持ち越さず、ここで fail loudly にする）。
+    // The objects are not fixed until the execution phase, so the derivation phase tracks only
+    // "whether the value name is already defined" (a missing binding fails loudly here instead of
+    // being carried into the execution phase).
     const defined = new Set(this.#state.graph.inputs.map((spec) => spec.name));
     const states: StateBuildContext = {
       shapes: stateShapes ?? new Map(),
@@ -306,11 +327,12 @@ export class RecipeBuilder {
       fullCapacities: new Map(),
     };
     const recipes: StepRecipe[] = [];
-    // 名前は元の順に解決し、各ステップのコンパイル待ちだけを重ねる。
+    // Names are resolved in the original order; only the compilation waits of the steps overlap.
     // DECIDED: docs/decisions/0042-prepared-execution-plan.md#addendum-2026-09-11--asynchronous-compilation
     const pending = steps.map((step) => this.#buildStep(step, defined, states));
-    // 途中の失敗で先に抜けると、後続の params 書き込みが run の後始末を追い越す。
-    // 全件を待ち、失敗も元のステップ順で返す。GPU コマンドの順序はレシピ列が保つ。
+    // Leaving early on a failure in the middle would let later params writes overtake the run's
+    // clean-up. Wait for every step, and report failures in the original step order. The recipe list
+    // keeps the order of GPU commands.
     const settled = await Promise.allSettled(pending);
     for (const result of settled) {
       if (result.status === "rejected") throw result.reason;
@@ -323,9 +345,10 @@ export class RecipeBuilder {
   }
 
   /**
-   * 値名 → bind 面の出どころ。重みは Session 常駐なので実体まで解決し、それ以外
-   * （グラフ入力・ノード出力・別名）は値名のまま残す。ノード内一時にはなりえないので
-   * 戻りは {@link ValueSource}（別名元としてもそのまま使える）。
+   * Value name → source on the bind surface. Weights are Session-resident, so they are resolved down
+   * to the object; everything else (graph inputs, node outputs, aliases) stays a value name. It can
+   * never be a node temporary, so the return type is {@link ValueSource} (usable as is as an alias
+   * origin too).
    */
   #bindingSource(name: string, defined: ReadonlySet<string>): ValueSource {
     const resident = this.#state.weightBuffers.get(name);
@@ -335,37 +358,42 @@ export class RecipeBuilder {
   }
 
   /**
-   * 実行ステップ 1 つ（素のノード または 融合ステップ）のレシピ。
+   * The recipe of one execution step (a plain node or a fused step).
    *
-   * MUST: 確保 → retain → 本体 → 入力の release（延べ）→ 定義ぶんの release、という簿記は
-   * 両者で**1 本**に閉じる（再生側は src/runtime/transient-plan.ts）。融合ごとに手書きの解放簿記を
-   * 置くと、計画の参照計数が融合の本数だけ別実装になり、1 本でもずれると例外なしの
-   * 沈黙誤値になる（早すぎる解放なら配り直しで値が化け、多すぎれば peak が落ちない）。
-   * MUST: 出力列は**出力 slot 昇順**で組む（{@link StepRecipe.outputs} の順序規約 — 実行・
-   * 計画・焼き込みと共有する 1 本）。融合ステップは単一出力（fusion.ts の窓ガード）。
+   * MUST: the bookkeeping allocate → retain → body → release of inputs (the release list) → release
+   * of the definition's own count is closed in **one path** for both (the replay side is
+   * src/runtime/transient-plan.ts). Hand-written release bookkeeping per fusion would make the plan's
+   * reference counting a separate implementation per fusion, and a single drift becomes a silently
+   * wrong value with no exception (a release too early corrupts the value through reassignment; too
+   * many and the peak does not drop).
+   * MUST: the output list is built in **ascending output slot** (the ordering rule of
+   * {@link StepRecipe.outputs} — one order shared with execution, planning and baking). A fused step
+   * has a single output (the window guard of fusion.ts).
    */
   async #buildStep(
     step: ExecStep,
     defined: Set<string>,
     states: StateBuildContext,
   ): Promise<StepRecipe> {
-    // 素のノードの出力列は `node.outs` と同順・同長（plan.ts の {@link NodePlan.outputs}）。
+    // A plain node's output list has the same order and length as `node.outs` ({@link NodePlan.outputs} in plan.ts).
     const outSlots: readonly { readonly name: string; readonly shape: readonly number[] }[] =
       step.kind === "node"
         ? step.plan.outputs
         : [{ name: step.outputName, shape: step.outputShape }];
-    // bind 面のオペランド順（重複無し）と解放簿記の延べ列は別物。素のノードでは
-    // どちらも node.ins に一致し、融合ステップだけが 2 つを別々に宣言する。
+    // The operand order of the bind surface (no duplicates) and the release list of the bookkeeping
+    // are different things. For a plain node both equal node.ins; only a fused step declares the two
+    // separately.
     const bindNames = step.kind === "node" ? step.plan.node.ins : step.binds;
     const consumedNames = step.kind === "node" ? step.plan.node.ins : step.ins;
     const binds = bindNames.map((name) => this.#bindingSource(name, defined));
-    // 要素順を変えない別名では**入力バッファをそのまま出力の実体にする**
-    // （別名 — ADR 0011）。dispatch も確保も出さない。要素数一致は planGraph が済ませているので、
-    // 別名先の実バッファは宣言 shape ぶんの大きさを必ず満たす。
-    // MUST: 別名元は bind 面の先頭（temp にはなりえない）。
-    // MUST: 別名化しうるop（reshape / expand / permute）は**単一出力**なので、別名の出力列は
-    // 常に 1 本きり。多出力 op を別名化する形はここでは表せない（増やすときは alias の
-    // 「どの入力を」まで slot ごとに宣言することになる）。
+    // An alias that keeps the element order **makes the input buffer the output's object as is**
+    // (alias — ADR 0011). It issues neither a dispatch nor an allocation. planGraph has already
+    // checked that the element counts match, so the real buffer behind the alias always covers the
+    // size of the declared shape.
+    // MUST: the alias origin is the head of the bind surface (it can never be a temp).
+    // MUST: the ops that can alias (reshape / expand / permute) have a **single output**, so the
+    // output list of an alias is always exactly one. This form cannot express aliasing a
+    // multi-output op (adding it would require declaring "which input" per slot for the alias).
     const aliasesInput = step.kind === "node" && step.aliasesInput;
     const outputs: readonly StepOutput[] = outSlots.map(({ name, shape }): StepOutput => {
       const bookkeeping = {
@@ -377,14 +405,15 @@ export class RecipeBuilder {
         ? { ...bookkeeping, kind: "alias", source: binds[0] }
         : { ...bookkeeping, kind: "alloc", byteLength: numel(shape) * 4 };
     });
-    // 出力は「その値名」として束ねる。実行相が dispatch より前に env へ載せるので、
-    // 同一ステップ内の bind もこの列で解決できる。
+    // Outputs are bound as "that value name". The execution phase puts them in env before the
+    // dispatches, so binds within the same step can be resolved through this list too.
     const outs: readonly BindingSource[] = outputs.map((output) => ({
       kind: "value",
       name: output.name,
     }));
 
-    // 入力参照を検証した後に定義を進め、実行順と同じ名前解決を保つ。
+    // Advance the definitions after checking the input references, keeping name resolution the same
+    // as the execution order.
     for (const output of outputs) defined.add(output.name);
     const builder = new StepRecipeBuilder();
     if (step.kind === "node") {
@@ -406,28 +435,33 @@ export class RecipeBuilder {
       temps: builder.temps,
       dispatches: builder.dispatches,
       releases: consumedNames,
-      // MUST: 判別は契約（`state_append` だけが書き手 — ADR 0067 決定 5）。融合ステップは
-      // state を触るノードを含めない（fusion.ts の窓ガード）ので常に false。
+      // MUST: the discrimination is by contract (only `state_append` writes — ADR 0067 decision 5).
+      // Fused steps never contain nodes that touch state (the window guard of fusion.ts), so they are
+      // always false.
       writesState: step.kind === "node" && step.plan.contract.kind === "stateAppend",
     };
-    // MUST: 宣言の静的検査はこの 1 箇所（レシピが外へ出る唯一の口）。素のノードの各 `#build*` と
-    // 融合の replay が同じ器（{@link StepRecipeBuilder}）へ宣言するので、経路ごとに検査を置くと
-    // 追加した経路だけ無検査で通る形になる。
+    // MUST: the static check of the declaration happens in this one place (the only exit through
+    // which a recipe leaves). Each `#build*` of plain nodes and the fusion replay declare into the
+    // same builder ({@link StepRecipeBuilder}), so a check per path would let a newly added path pass
+    // unchecked.
     validateStepRecipe(recipe);
     return recipe;
   }
 
   /**
-   * 融合ステップの dispatch 列。
+   * The dispatch list of a fused step.
    *
-   * bind 面の既定は「params, 入力…, 出力」（`operands` を宣言しない融合ルールの共通形）で、`operands` を宣言した
-   * ルールだけがステップ内一時を混ぜた並びを取る。**一時の確保・解放は
-   * {@link StepRecipeBuilder} に replay させる**（寿命の導出点を 2 つに増やさない）ので、
-   * 計画の簿記は素のノードと同じ 1 本（src/runtime/transient-plan.ts の再生）に閉じたままになる。
+   * The default bind surface is "params, inputs…, output" (the common form of fusion rules that do
+   * not declare `operands`); only rules that declare `operands` take an order mixing in step
+   * temporaries. **Allocation and release of temporaries are replayed into
+   * {@link StepRecipeBuilder}** (no second point that derives lifetimes), so the plan's bookkeeping
+   * stays closed in the same single path as plain nodes (the replay of
+   * src/runtime/transient-plan.ts).
    *
-   * MUST: {@link FusedStep} は**単一出力**（fusion.ts の窓ガードが契約の出力数 1 を要求する）
-   * なので、`{ kind: "output" }` が指すのは常に `outs[0]`。多出力の融合を入れるなら、
-   * オペランドが出力 slot を持つ形（`{ kind: "output", slot }`）から設計し直す。
+   * MUST: a {@link FusedStep} has a **single output** (the window guard of fusion.ts requires the
+   * contract's output count to be 1), so `{ kind: "output" }` always points at `outs[0]`. Adding
+   * multi-output fusion means redesigning from a form where operands carry an output slot
+   * (`{ kind: "output", slot }`).
    */
   async #buildFused(
     step: FusedStep,
@@ -456,11 +490,12 @@ export class RecipeBuilder {
             `融合ルール '${step.rule}': bind ${operand.index} の常駐scaleが無い`,
           );
         }
-        // 既存の重みscaleを借りる。所有者・sharedWeightsのリースはSessionのまま。
+        // Borrow the existing weight scale. The owner and the sharedWeights lease stay with the Session.
         return { kind: "resident", buffer: resident.scale };
       }
       const temp = temps[operand.id];
-      // 未確保の一時を束ねるのは寿命宣言の破れ（確保より前の dispatch から読んでいる）。
+      // Binding an unallocated temporary breaks the lifetime declaration (it is read from a dispatch
+      // before its allocation).
       if (temp === undefined) {
         throw new ExecutionError(`融合ルール '${step.rule}': 一時 ${operand.id} が未確保`);
       }
@@ -498,7 +533,7 @@ export class RecipeBuilder {
             ? workgroups.counts
             : [gridStrideWorkgroups(workgroups.items, workgroups.size, limit), 1, 1],
       });
-      // MUST: 同一境界の解放は確保の逆順（計画の再生と同じ順）。
+      // MUST: releases at the same boundary go in reverse allocation order (the same order as the plan replay).
       for (let id = step.temps.length - 1; id >= 0; id -= 1) {
         if (step.temps[id].releaseAfter === index) builder.releaseTemp(temps[id]);
       }
@@ -506,12 +541,13 @@ export class RecipeBuilder {
   }
 
   /**
-   * 素のノード 1 つの本体（確保・retain・解放は計画の再生が済ませる）。
+   * The body of one plain node (allocation, retain and release are done by the plan replay).
    *
-   * MUST: op 別ビルダは**出力列**（`outs` — 出力 slot 昇順）を受け、単一出力のカーネルは
-   * `outs[0]` だけを書く（ADR 0068 決定 1）。多出力 op はスロットを明示して自分の列を書く。
-   * 出力の**確保**の順序は列の昇順で、実行・slot 導出・焼き込みと共有の 1 本
-   * （{@link StepRecipe.outputs} の順序規約）。
+   * MUST: each per-op builder receives the **output list** (`outs` — ascending output slot), and a
+   * single-output kernel writes only `outs[0]` (ADR 0068 decision 1). A multi-output op writes its own
+   * list with explicit slots. The **allocation** order of outputs is the ascending order of the list,
+   * one order shared with execution, slot derivation and baking (the ordering rule of
+   * {@link StepRecipe.outputs}).
    */
   async #buildNode(
     step: NodePlan,
@@ -520,7 +556,7 @@ export class RecipeBuilder {
     outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
     states: StateBuildContext,
-    /** packed int8 活性の役割（ADR 0105 — 受理は fusion.ts の 1 箇所で済んでいる）。 */
+    /** The role of packed int8 activations (ADR 0105 — acceptance was settled in one place, fusion.ts). */
     packed: PackedActivations | undefined,
   ): Promise<void> {
     switch (step.contract.kind) {
@@ -546,7 +582,7 @@ export class RecipeBuilder {
         );
         break;
       case "where":
-        // 生成入力は**値スロット**の dtype（スロット 0 は条件で常に bool）。
+        // The generated input is the dtype of the **value slot** (slot 0 is the condition, always bool).
         await buildElementwise(
           this.#face,
           step,
@@ -578,7 +614,7 @@ export class RecipeBuilder {
         await buildTopk(this.#face, step, binds, outs, builder);
         break;
       case "permute":
-        // 要素順が変わらない場合は既存aliasの簿記だけで完結する（ADR 0011）。
+        // When the element order does not change, the existing alias bookkeeping is all it takes (ADR 0011).
         if (!aliasesInput) {
           await buildStridedCopy(this.#face, step, "permute", binds, outs, builder);
         }
@@ -588,7 +624,7 @@ export class RecipeBuilder {
         await buildStridedCopy(this.#face, step, step.contract.kind, binds, outs, builder);
         break;
       case "expand":
-        // 恒等 expand は別名化済み（0 dispatch）。複製軸が 1 つでもあれば実体化コピー。
+        // An identity expand is already aliased (0 dispatches). With even one replicated axis it is a materialising copy.
         if (!aliasesInput) {
           await buildStridedCopy(this.#face, step, step.contract.kind, binds, outs, builder);
         }
@@ -621,10 +657,12 @@ export class RecipeBuilder {
         await buildSoftmax(this.#face, step, true, binds, outs, builder);
         break;
       case "attention":
-        // 欄の有無が形を判別する（ADR 0067 決定 4）。states 形は別族カーネル
-        // （src/kernels/state-attention.ts）で、融合 attention とは 1 バイトも共有しない。
-        // states 形はさらに 2 つ: 今 step の k/v も読む従来形と、past だけを読む **readonly**
-        // 形（ADR 0096 段 2 §1.2 — ins が q 1 本で、束縛が 1 本ずつ詰まった別カーネル）。
+        // The presence of the field decides the form (ADR 0067 decision 4). The states form is a
+        // separate kernel family (src/kernels/state-attention.ts) and shares not a single byte with
+        // fused attention.
+        // The states form splits further in two: the older form that also reads this step's k/v, and
+        // the **readonly** form that reads only the past (ADR 0096 stage 2 addendum — ins is q alone,
+        // a separate kernel with the bindings packed one by one).
         if (Object.keys(step.node.states).length === 0) {
           await buildAttention(this.#face, step, binds, outs, builder);
         } else if (stateReadonly(step.node.attrs, `nodes (${step.node.op})`)) {
@@ -661,16 +699,16 @@ export class RecipeBuilder {
         await buildGruScan(this.#face, step, binds, outs, builder);
         break;
       case "reshape":
-        // 別名化は #buildStep で済んでいる（この op は 1 dispatch も出さない）。
+        // Aliasing was done in #buildStep (this op issues not a single dispatch).
         break;
       case "stateAppend":
         await buildStateAppend(this.#face, step, binds, builder, states);
         break;
       default: {
-        // MUST: 未処理の kind をここで止める。switch が素通りすると出力バッファに 1 バイトも
-        // 書かれないまま次のノードへ進み、配り直しの残骸がそのまま値になる
-        // （full-write 不変条件の破れ — ADR 0014）。型としては到達不能で、op を足したときの
-        // 結線漏れをコンパイル時に赤くするのがこの分岐の役目。
+        // MUST: stop an unhandled kind here. If the switch falls through, the next node runs with
+        // not a single byte written to the output buffer, and the debris of reassignment becomes the
+        // value (a break of the full-write invariant — ADR 0014). It is unreachable by type; the job
+        // of this branch is to turn a missing wiring red at compile time when an op is added.
         const unhandled: never = step.contract;
         throw new ExecutionError(`未処理の op kind: ${JSON.stringify(unhandled)}`);
       }
@@ -678,18 +716,19 @@ export class RecipeBuilder {
   }
 
   /**
-   * このノードの重みスロットに常駐している重み（席・scale・group 長）。圧縮常駐していない
-   * 値では `undefined`（= f32 として読む）。
+   * The weight resident at this node's weight slot (residency class, scale, group length).
+   * `undefined` for a value not resident in compressed form (= read as f32).
    *
-   * MUST: スロット位置は適格判定と**同じ表**（{@link WEIGHT_SLOTS}）から引く。片方だけ
-   * ずれると、圧縮のまま上げた重みを f32 カーネルが読む（あるいはその逆）ビット列の
-   * 読み替えになり、例外は 1 つも出ない。
+   * MUST: the slot position is looked up in **the same table** as the eligibility decision
+   * ({@link WEIGHT_SLOTS}). If only one side drifted, an f32 kernel would read a weight uploaded in
+   * compressed form (or the reverse) — a reinterpretation of the bit pattern, with not a single
+   * exception.
    */
   #residentWeight(step: NodePlan): ResidentWeight | undefined {
     return this.#state.residentWeights.get(this.#weightSlotName(step));
   }
 
-  /** このノードの重みスロットに束縛された値名（{@link WEIGHT_SLOTS} が正本）。 */
+  /** The value name bound to this node's weight slot ({@link WEIGHT_SLOTS} is the source of truth). */
   #weightSlotName(step: NodePlan): string {
     const slot = WEIGHT_SLOTS.get(step.node.op);
     if (slot === undefined) {
@@ -698,19 +737,20 @@ export class RecipeBuilder {
     return step.node.ins[slot];
   }
 
-  /** このノードの重みスロットの格納形（カーネル変種の選択 — ADR 0018）。 */
+  /** The storage form of this node's weight slot (kernel-variant selection — ADR 0018). */
   #weightStorage(step: NodePlan): WeightStorage {
     return this.#residentWeight(step)?.storage ?? "f32";
   }
 
   /**
-   * i8 / i4 変種の追加束縛（per-channel / group scale）。f32 / f16 では空配列になり、
-   * bind group は従来のままになる（ADR 0019 / 0069）。
+   * The extra bindings of the i8 / i4 variants (per-channel / group scale). For f32 / f16 this is an
+   * empty array, and the bind group stays as before (ADR 0019 / 0069).
    *
-   * MUST: 束縛番号はカーネル側の定数（`*_SCALE_BINDING`）から引く。WGSL の宣言と executor が
-   * 別々に番号を持つと、変種を足したときに片方だけずれる。
-   * NOTE: 「i8 / i4 常駐なのに scale バッファが無い」の実行時検査は要らない —
-   * {@link ResidentWeight} が席と対で scale を要求しており、型が保証している。
+   * MUST: the binding number comes from the kernel-side constant (`*_SCALE_BINDING`). If the WGSL
+   * declaration and the executor each held their own number, adding a variant would shift only one.
+   * NOTE: no run-time check for "i8 / i4 resident but no scale buffer" is needed —
+   * {@link ResidentWeight} requires a scale paired with the residency class, and the type guarantees
+   * it.
    */
   #weightScaleBindings(step: NodePlan, binding: number): readonly BindingRecipe[] {
     const resident = this.#residentWeight(step);
@@ -721,11 +761,12 @@ export class RecipeBuilder {
   }
 
   /**
-   * i4 常駐の重みの group 長（executor が宣言から写した値 — ADR 0069）。
+   * The group length of an i4-resident weight (the value the executor copied from the declaration —
+   * ADR 0069).
    *
-   * 呼ぶのは席が i4 と分かっている経路だけなので、それ以外は黙って既定へ落とさず
-   * fail loudly にする — 既定で埋めると「group 64 の資産が group 32 のパイプラインで走る」
-   * 沈黙誤値になる。
+   * It is called only on paths where the residency class is known to be i4, so anything else fails
+   * loudly instead of silently falling back to a default — filling in a default would be the silently
+   * wrong value "an asset with group 64 runs on a group-32 pipeline".
    */
   #weightGroupSize(step: NodePlan): number {
     const resident = this.#residentWeight(step);
@@ -738,34 +779,38 @@ export class RecipeBuilder {
   }
 
   /**
-   * dispatch の params uniform / storage を確保して書く。**内容そのものをキーにした Session
-   * 常駐キャッシュ**を通すので、同じ内容の params は Session の生涯で 1 度しか確保・転送
-   * されない（params の全バイトは グラフ・node.attrs・解決済み shape の純関数で、実行時の
-   * テンソル値に依存しない）。キーは usage と全要素を連結した文字列そのもの — ハッシュでは
-   * ないので衝突が原理的に無い。
+   * Allocates and writes a dispatch's params uniform / storage. It goes through **a Session-resident
+   * cache keyed by the content itself**, so params with the same content are allocated and uploaded
+   * only once in the Session's life (every byte of params is a pure function of the graph,
+   * node.attrs and the resolved shapes, and does not depend on tensor values at run time). The key is
+   * the string concatenating the usage and every element — not a hash, so collisions are impossible
+   * in principle.
    *
-   * MUST: 確保先は **weights アリーナ（Session 常駐）**で、RunArena からは取らない。run ごとの
-   * アリーナは run 末尾で破棄されるため、そこから配るとキャッシュが破棄済みバッファを指す。
-   * MUST: キャッシュしたバッファは**一度書いたら二度と書き換えない**。ADR 0004 が
-   * `allocHostWritten` をプール対象外にしているのは「`queue.writeBuffer` が未 submit の先行
-   * エンコードを追い越す」ためだが、ここは同じバッファへの 2 度目の writeBuffer が存在しない
-   * ので追い越しハザードが原理的に生じない（配り直しとは別レイヤの、内容同一性による
-   * 共有）。
-   * MUST: 破棄は weights アリーナの dispose に相乗りする（`Session.dispose` →
-   * `RunArena.destroy` の flush-before-destroy）。キャッシュ専用の破棄経路を新設すると
-   * flush の担い手が 2 つになり、どちらが先に走るかで破棄済みバッファ参照の submit が生まれる。
-   * NOTE: 失敗 run（`scheduler.discard` 経路）の後も、**既にあった**エントリは有効。バッファの
-   * 内容は不変で、discard が捨てるのは未 submit のエンコードだけなので、params の値は影響を
-   * 受けない。失敗した実行が**新しく載せた**エントリだけは Session が
-   * {@link RecipeBuilder.forgetParams} で外す（確保自体が非致命 OOM で無効だった可能性がある）。
-   * NOTE: **このキャッシュは Session 寿命で無界**（by-design — `docs/limitations.md`）。
-   * 同範囲の他キャッシュ（`SubmitScheduler.MEASURED_HISTORY` /
-   * `PREPARED_PLAN_CAPACITY`）が上限を持つのに対し、ここは追い出しを持たない —— params を
-   * 追い出す = 破棄することになるが、生きている導出済み計画がその実体を**直参照で畳み込んで
-   * いる**ため、安全にやるには参照計数という別の簿記が要る。可変 shape を同一 Session で
-   * 多数回回す用途（可変長 TTS / 系列長可変の埋め込み）では 1 run につきノード種ぶんの小
-   * バッファが積み上がるので、`diagnostics().weights.allocCount` の伸びを見て Session を
-   * 切り直すこと。無界であること自体は tests/gpu_params_cache_test.ts が門にしている。
+   * MUST: allocate from the **weights arena (Session-resident)**, not from a RunArena. A per-run arena
+   * is destroyed at the end of the run, so handing out from it would leave the cache pointing at
+   * destroyed buffers.
+   * MUST: a cached buffer is **written once and never rewritten**. ADR 0004 excludes
+   * `allocHostWritten` from pooling because "`queue.writeBuffer` overtakes earlier unsubmitted
+   * encodes", but here no second writeBuffer to the same buffer exists, so the overtaking hazard
+   * cannot arise in principle (sharing by identity of content, a layer separate from reassignment).
+   * MUST: destruction rides on dispose of the weights arena (`Session.dispose` → the
+   * flush-before-destroy of `RunArena.destroy`). A destruction path dedicated to the cache would give
+   * flush two owners, and depending on which runs first a submit referencing a destroyed buffer would
+   * appear.
+   * NOTE: after a failed run (the `scheduler.discard` path), entries that **already existed** stay
+   * valid. Buffer contents are immutable and discard drops only unsubmitted encodes, so params values
+   * are unaffected. Only entries **newly put in** by the failed execution are removed by the Session
+   * through {@link RecipeBuilder.forgetParams} (the allocation itself may have been invalid due to a
+   * non-fatal OOM).
+   * NOTE: **this cache is unbounded for the lifetime of the Session** (by-design —
+   * `docs/limitations.md`). Unlike the other caches of the same scope (`MEASURED_HISTORY` in
+   * gpu/submit.ts / `PREPARED_PLAN_CAPACITY`), which have bounds, this one has no eviction —
+   * evicting params means destroying them, but live prepared plans **fold the objects in as direct
+   * references**, so doing it safely needs separate bookkeeping, reference counting. Uses that run
+   * many variable shapes in one Session (variable-length TTS / embeddings of variable sequence length)
+   * pile up small buffers, one per node kind per run, so watch the growth of
+   * `diagnostics().weights.allocCount` and recreate the Session. Being unbounded is itself pinned by a
+   * check in tests/gpu_params_cache_test.ts.
    */
   #writeParams(params: Uint32Array<ArrayBuffer>, usage: number): GPUBuffer {
     const key = `u${usage}:${params.join(",")}`;

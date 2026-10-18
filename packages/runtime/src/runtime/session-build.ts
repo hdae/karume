@@ -1,11 +1,13 @@
 /**
- * Session の構築相（{@link buildSessionState} = `Session.build` の本体と、構築だけが使う
- * 部品 — companion scale / 供給単位の取り回し / カナリア /
- * {@link SessionState}）。ノブの受理条件と既定は session-options-check.ts（見積りと共有する純関数）。
+ * The construction phase of a Session ({@link buildSessionState} = the body of `Session.build`, and
+ * the parts only construction uses — companion scales / handling of supply units / the canary /
+ * {@link SessionState}). The acceptance conditions and defaults of the knobs are in
+ * session-options-check.ts (pure functions shared with the estimate).
  *
- * MUST: executor.ts へ import を張らない（循環 import の禁止 — session-types.ts と同じ規律）。
- * 構築相が返すのは状態（{@link SessionState}）だけで、`Session` は private constructor を
- * 持つため実体はファサード側で作る。依存は {@link "./executor.ts"} → ここの**一方向**。
+ * MUST: no import of executor.ts (no circular imports — the same rule as session-types.ts). The
+ * construction phase returns only state ({@link SessionState}); `Session` has a private constructor,
+ * so the object is created on the facade side. Dependencies run **one way**:
+ * {@link "./executor.ts"} → here.
  */
 
 import { codecLayout } from "../format/container/codecs.ts";
@@ -55,15 +57,15 @@ import {
 } from "./session-types.ts";
 import { executionKnobDefaults, sessionOptionsViolation } from "./session-options-check.ts";
 
-/** MUST: `queue.writeBuffer` で書くバッファはプール外（アリーナの不変条件）。 */
+/** MUST: buffers written with `queue.writeBuffer` are outside the pool (the arena's invariant). */
 export const HOST_WRITTEN_USAGE =
   BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST | BUFFER_USAGE.COPY_SRC;
 
 /**
- * companion scale の実体（量子化 codec のみ・piece 列では piece 1 だけ）。
+ * The object of a companion scale (quantized codecs only; for a piece list, piece 1 only).
  *
- * `shape` は**rank 2 group 形** `[shape[rowAxis], 行長 / groupSize]`（container-v1 §6.1）。
- * per-channel（i8 / i2）は group 数 1 の `[rows, 1]` で、消費側は 1 形だけを扱う。
+ * `shape` is the **rank-2 group form** `[shape[rowAxis], row length / groupSize]` (container-v1
+ * §6.1). Per-channel (i8 / i2) is `[rows, 1]` with one group, so consumers handle a single form.
  */
 export type ReadyScale = {
   readonly bytes: Uint8Array<ArrayBuffer>;
@@ -71,42 +73,43 @@ export type ReadyScale = {
 };
 
 /**
- * 供給元（コンテナの供給計画）から Session 構築へ渡る initializer 1 本ぶんの実体。
- * **バイト列**で受け渡す（コンテナの block でも呼び手の器でもない — 供給元の形を消費側に
- * 漏らさない）。
+ * The object of one initializer passed from the supply side (the container's supply plan) to Session
+ * construction. Passed as **bytes** (neither a container block nor the caller's container — the
+ * supply side's form does not leak to the consumer).
  */
 export type ReadyInitializer = {
   readonly name: string;
-  /** 格納 payload（丸ごと / その piece だけ）。整列の詰め物を含まない生バイト列。 */
+  /** The stored payload (whole / that piece only). Raw bytes without alignment padding. */
   readonly payload: Uint8Array<ArrayBuffer>;
   readonly scale?: ReadyScale;
   /**
-   * 分割テンソルの位置（丸ごと 1 本で来たときは undefined — container-v1 §5）。
+   * The position within a split tensor (undefined when it arrives whole — container-v1 §5).
    *
-   * 消費側は `first` でバッファを確保して scale を上げ、`last` でだけ末尾整列の詰め物を掛け、
-   * 各 piece を `rowOffset` から決まるバイト位置へ書く（中間 piece に詰め物を掛けると、
-   * 詰め物が次の piece の先頭バイトを潰す沈黙誤値になる）。
+   * The consumer allocates the buffer and uploads the scale on `first`, applies the tail-alignment
+   * padding only on `last`, and writes each piece at the byte position given by `rowOffset` (padding
+   * a middle piece would overwrite the first bytes of the next piece — a silently wrong value).
    */
   readonly piece?: {
-    /** この piece が始まる行（先頭次元）。 */
+    /** The row (leading dimension) where this piece starts. */
     readonly rowOffset: number;
-    /** この piece の行数。 */
+    /** Rows in this piece. */
     readonly rows: number;
-    /** piece 1（バッファ確保と companion scale の転送を担う席）。 */
+    /** Piece 1 (the one responsible for allocating the buffer and uploading the companion scale). */
     readonly first: boolean;
-    /** piece n（末尾整列の詰め物を担う席）。 */
+    /** Piece n (the one responsible for the tail-alignment padding). */
     readonly last: boolean;
   };
 };
 
 /**
- * 量子化格納の companion scale（ADR 0019 / 0069）。実在・F32・形（rank 2 group 形への正規化）は
- * 供給元（コンテナの合流層）が済ませているので、ここは view を組むだけ。
+ * The companion scale of quantized storage (ADR 0019 / 0069). Presence, F32 and shape
+ * (normalisation to the rank-2 group form) are already handled by the supply side (the container's
+ * merge layer), so this only builds a view.
  *
- * MUST: `Float32Array` の view はコピーせずに張る（scale は重み本体に比べれば小さいが、
- * ここで無条件コピーを挟むと「生バイトのまま常駐」の経路が二重確保になる）。バイト位置の
- * 4 バイト整列は供給元が保証する（コンテナの 64 B 整列 block / メモリ内容器の scale の
- * `byteOffset % 4` の門）。
+ * MUST: the `Float32Array` view is created without copying (the scale is small compared with the
+ * weight body, but an unconditional copy here would double-allocate on the "resident as raw bytes"
+ * path). The 4-byte alignment of the byte position is guaranteed by the supply side (the container's
+ * 64 B-aligned blocks / the `byteOffset % 4` check on scales of the in-memory container).
  */
 const scaleTensor = (
   item: ReadyInitializer,
@@ -118,7 +121,7 @@ const scaleTensor = (
 } => {
   const scale = item.scale;
   if (scale === undefined) {
-    // 存在は型の上でだけ optional なので、黙って読み飛ばさず言い直す（fail loudly）。
+    // Presence is optional only in the type, so restate the check rather than skip silently (fail loudly).
     throw new ExecutionError(`initializer '${item.name}': 格納 ${layout} なのに scale が無い`);
   }
   return {
@@ -133,11 +136,13 @@ const scaleTensor = (
 };
 
 /**
- * piece（先頭次元の行範囲）の CPU 展開が読む companion scale の切り出し。
+ * The slice of the companion scale read by the CPU decode of a piece (a row range of the leading
+ * dimension).
  *
- * scale は rank 2 group 形 `[行, group 数]` で、piece 分割は行の軸が 0 の initializer にしか
- * 許されない（container-v1 §5 規則④ — 供給元が保証）。行の軸が 0 でない形（`[Cin,Cout,K]` の
- * conv_transpose1d）は丸ごとしか来ないので、ここには現れない。
+ * The scale is in the rank-2 group form `[rows, groups]`, and splitting into pieces is allowed only
+ * for initializers whose row axis is 0 (container-v1 §5 rule ④ — guaranteed by the supply side). A
+ * shape whose row axis is not 0 (conv_transpose1d's `[Cin,Cout,K]`) only arrives whole, so it never
+ * appears here.
  */
 const scaleForPiece = (
   scale: { readonly values: Float32Array<ArrayBuffer>; readonly shape: readonly [number, number] },
@@ -154,8 +159,9 @@ const scaleForPiece = (
 };
 
 /**
- * per-channel scale（rank 2 `[rows, 1]`）を、CPU 展開（`decodeI8` / `decodeI2` — keepdim broadcast 形の
- * stride で引く）が読む形へ写す。バイト列は同じで、形だけを読み替える。
+ * Maps a per-channel scale (rank 2 `[rows, 1]`) to the form read by the CPU decode (`decodeI8` /
+ * `decodeI2` — they index with the strides of the keepdim broadcast form). The bytes are the same;
+ * only the shape is reinterpreted.
  */
 const keepdimScaleShape = (
   weightShape: readonly number[],
@@ -164,11 +170,13 @@ const keepdimScaleShape = (
 ): readonly number[] => weightShape.map((_, axis) => (axis === rowAxis ? rows : 1));
 
 /**
- * GPU 常駐経路の per-channel scale が**平坦添字で引ける形**であることを見る（ADR 0019）。
+ * Checks that the per-channel scale of the GPU-resident path is **in a form indexable by a flat
+ * index** (ADR 0019).
  *
- * カーネルは `wscale[出力チャネル]` と読むので、scale は行の軸だけが伸びた rank 2 `[rows, 1]`
- * （rows = 重みの `shape[rowAxis]`）でなければならない。group 数が 1 でない形（i4 の group 形）は
- * i8 / i2 の席には来ないが、宣言と供給元の食い違いは沈黙誤値になるので**ここが唯一の門**。
+ * The kernel reads `wscale[output channel]`, so the scale must be rank 2 `[rows, 1]` stretched only
+ * along the row axis (rows = the weight's `shape[rowAxis]`). Forms with more than one group (the
+ * group form of i4) never reach the i8 / i2 residency classes, but a mismatch between declaration and
+ * supply side becomes a silently wrong value, so **this is the only check**.
  */
 const assertRowScale = (
   name: string,
@@ -186,43 +194,50 @@ const assertRowScale = (
 };
 
 /**
- * Session 構築が消費する**供給の単位**（コンテナの part 1 本 = その part にある block の実体列）。
- * フェンス（空 submit + 完了待ち）はこの単位で 1 回、errorScope は item（block）ごとに張る。
+ * The **supply unit** consumed by Session construction (one container part = the list of objects of
+ * the blocks in that part). The fence (an empty submit + waiting for completion) happens once per
+ * unit; an errorScope is set per item (block).
  */
 export type WeightBatch = {
   readonly origin: string | undefined;
   /**
-   * part の block の実体列。1 本引くたびに block を 1 本読む（lazy）ので、消費側は 1 本ずつ
-   * 上げて手放す — `queue.writeBuffer` は呼んだ時点でバイト列を写す（WebGPU 仕様）ので、
-   * フェンスまで握らない。JS 側に生きる重みのバイト列は part 1 本ではなく item 1 本（block 1 本
-   * + piece 1 なら同乗する scale の block + 展開席ならその f32 展開結果）と、展開席の piece 列の
-   * 間だけ生きる持ち越し scale の写し（その initializer の scale 全量 — piece 1 で写し、最後の
-   * piece で手放す）になる。scan 型の取得元（hub）では block と同乗 scale が保持枠の器の view
-   * なので、そこに保持枠 1 本 + GC を待つ器が重なる（持ち越し scale の写しと展開結果は値なので
-   * scan 型でも保持枠の外に乗る）。GC を待つ器の本数は宣言からは閉じない — 実測では external
-   * 最大が最大 part の約 1.5〜4.4 本だった（container-v1 §11）。
+   * The list of objects of the part's blocks. Each pull reads one block (lazy), so the consumer
+   * uploads them one at a time and lets go — `queue.writeBuffer` copies the bytes at the call (the
+   * WebGPU spec), so they are not held until the fence. The weight bytes alive on the JS side are
+   * not one part but one item (one block + on piece 1 the scale block that rides along + on the
+   * expanded class its f32 decode result), plus the copy of the carried scale that lives only during
+   * a piece list of the expanded class (the whole scale of that initializer — copied on piece 1 and
+   * released on the last piece). With a scan-type source (hub) the block and the riding scale are
+   * views into the retention slot's container, so one retention slot + containers waiting for GC
+   * stack on top (the carried scale copy and the decode result are values, so even with scan-type
+   * sources they sit outside the retention slot). The number of containers waiting for GC is not
+   * bounded by the declaration — measured external maximum was about 1.5 to 4.4 times the largest
+   * part (container-v1 §11).
    *
-   * MUST: 1 度だけ、次の batch を引く前に最後まで回す。scan 型の取得元（hub）は part 順の
-   * 直列読みを前提に part を 1 枠だけ保持するので、途中で次の part を引くと part 全量の
-   * 読み直しが往復する。2 度回すと黙って 0 本になりうる（実行時の検出は無い — 唯一の消費者が
-   * 内部の `buildSessionState` なので doc の MUST で守る）。
+   * MUST: iterate once, to the end, before pulling the next batch. A scan-type source (hub) keeps
+   * only one part on the premise of reading parts sequentially in order, so pulling the next part
+   * midway makes the whole part be read again. Iterating twice may silently yield 0 items (there is
+   * no run-time detection — the only consumer is the internal `buildSessionState`, so the MUST in the
+   * doc protects it).
    */
   readonly items: AsyncIterable<ReadyInitializer>;
 };
 
 /**
- * 重みアップロード区間のラベル（errorScope とフェンスの帰属先）。`origin` から導出する —
- * batch 側と別々に持つと、片方だけ名乗り方が変わったときに 2 つの名前で同じ失敗が出る。
+ * The label of the weight-upload interval (what the errorScope and the fence are attributed to).
+ * Derived from `origin` — keeping it separately on the batch side would let the same failure appear
+ * under two names when only one side changes how it names itself.
  */
 const uploadLabel = (origin: string | undefined): string =>
   origin === undefined ? "重みのアップロード" : `${origin} の重みアップロード`;
 
 /**
- * 供給単位由来の失敗に帰属先（`part N`）を足して**同じエラーを返す**（`origin` が無ければ
- * 素通し — 文言が 1 文字も変わらない）。
+ * Adds the attribution (`part N`) to a failure that came from a supply unit and **returns the same
+ * error** (passed through when there is no `origin` — the text does not change by a single
+ * character).
  *
- * MUST: 新しい Error で包み直さない。呼び出し側はクラスで分岐しており（宣言違反 =
- * `ContainerFormatError`）、包むと分岐が壊れて stack も切れる。
+ * MUST: do not wrap it in a new Error. Callers branch on the class (a declaration violation =
+ * `ContainerFormatError`); wrapping breaks the branch and cuts the stack.
  */
 const attributeToOrigin = (origin: string | undefined, cause: unknown): unknown => {
   if (origin !== undefined && cause instanceof Error) {
@@ -232,49 +247,54 @@ const attributeToOrigin = (origin: string | undefined, cause: unknown): unknown 
 };
 
 /**
- * 導出相まるごとの成果物（Session 常駐 — キーは {@link "./executor.ts"} の
- * `Session.#preparedKey`）。
+ * The whole product of the derivation phase (Session-resident — the key is
+ * `Session.#preparedKey` in {@link "./executor.ts"}).
  *
- * MUST: 後段が実際に参照するものだけを持つ（`GraphPlan.nodes` / `GraphPlan.bindings` は
- * レシピ導出が終われば誰も読まない）。読まれない導出物を抱えると、キャッシュの寿命が
- * 「run の入出力に効く事実」から離れ、何を再利用しているのかが読めなくなる。
+ * MUST: hold only what later phases actually reference (`GraphPlan.nodes` / `GraphPlan.bindings`
+ * are read by nobody once recipe derivation is over). Holding derived products nobody reads detaches
+ * the cache's lifetime from "facts that affect the run's inputs and outputs", and what is being
+ * reused becomes unreadable.
  */
 export type PreparedPlan = {
-  /** 入力・initializer・全ノード出力の解決済み shape（`#uploadInput` / `#readOutputs` が読む）。 */
+  /** The resolved shapes of inputs, initializers and every node output (read by `#bindInputs` / `#readOutputs`). */
   readonly shapes: ReadonlyMap<string, readonly number[]>;
   readonly recipes: readonly StepRecipe[];
-  /** 計画時に決まった融合回数（ヒット run もこの値を常設診断へ報告する — ADR 0040 §3）。 */
+  /** The fusion counts decided at planning (hit runs report this value to the permanent diagnostics too — ADR 0040 decision 3). */
   readonly fusions: FusionCounts;
   /**
-   * generation run の run 前検査に要る計画事実（{@link "./recipe.ts"} の
-   * `assertGenerationRun`）。state ノードを持たないグラフでは空で、その run は検査を 1 つも
-   * 通さない（見る対象が無い）。
+   * The plan facts the pre-run check of a generation run needs (`assertGenerationRun` in
+   * {@link "./recipe.ts"}). Empty for a graph without state nodes, and such a run passes no check
+   * (there is nothing to look at).
    */
   readonly generation: GenerationLimits;
 };
 
 /**
- * 融合 attention の整数内積変種を決める（{@link SessionState.attentionI8a8Dot} の入口）。
+ * Decides the integer dot-product variant of fused attention (the entry of
+ * {@link SessionState.attentionI8a8Dot}).
  *
- * カナリア（src/gpu/attention-dp4a-canary.ts）を走らせるのは「拡張を広告していて、かつ a8 を
- * 要求された」ときだけ:
+ * The canary (src/gpu/attention-dp4a-canary.ts) runs only when "the extension is advertised and a8
+ * was requested":
  *
- * - `I8A8_DOT` 指定時は走らせない — テストが変種を強制している最中に環境判定を挟むと、
- *   何を測ったのかが診断からも数値からも消える。
- * - 非広告 → dp4a 変種は生成すらされないので判定する対象が無い（従来どおり emu 直行）。
- * - a8 以外 → i8a8 の attention カーネルが 1 本も出ないので、この席の値は 1 度も読まれない。
- *   「使わない機能の初回コスト」を全 Session に配らないための門で、判定は最初に a8 を要求した
- *   Session が払い、以後は device 単位でメモ化される。
+ * - Not when `I8A8_DOT` is given — inserting an environment decision while a test forces a variant
+ *   would erase from both the diagnostics and the numbers what was measured.
+ * - Not advertised → the dp4a variant is not even generated, so there is nothing to decide (straight
+ *   to emu as before).
+ * - Not a8 → not a single i8a8 attention kernel is emitted, so this field's value is never read. It
+ *   is the guard that keeps "the first-use cost of a feature not used" from being handed to every
+ *   Session; the decision is paid by the first Session that requests a8, and memoised per device
+ *   afterwards.
  *
- * カナリアが「既知解と厳密一致ではないが sanity 帯には収まった」で決めた場合は**黙って
- * 通さない** — 警告をメモの実体の中で出すことで、device 単位に 1 度だけになる（Session ごとに
- * 出すと a8 の Session を並べただけで同じ 1 事実が繰り返し流れる）。
+ * When the canary decided by "not an exact match with the known answer, but within the sanity
+ * band", it does **not pass silently** — the warning is printed inside the memoised body, so it
+ * appears once per device (printing it per Session would repeat the same single fact just by lining
+ * up a8 Sessions).
  *
- * カナリアは `profile` の i8a8 attention 幾何（production の ①QK / ③PV が実走する幾何）で撃つ。
- * メモが device 単位のままでよいのは、プロファイルが同じ {@link GpuContext} の注入された表
- * （`acquireGpu({ geometryProfile })`）か、無ければ `adapterInfo` の純関数
- * （{@link selectGeometryProfile}）で、どちらも device の寿命の間は不変 — 同じ device ならどの
- * Session でも同じ幾何になるから。
+ * The canary fires with the i8a8 attention geometry of `profile` (the geometry production's ①QK /
+ * ③PV actually run). The memo can stay per device because the profile is either the table injected
+ * into the same {@link GpuContext} (`acquireGpu({ geometryProfile })`) or, absent that, a pure
+ * function of `adapterInfo` ({@link selectGeometryProfile}); both are invariant over the device's
+ * lifetime — the same device gives the same geometry for every Session.
  */
 const resolveAttentionI8a8Dot = async (
   gpu: GpuContext,
@@ -298,12 +318,13 @@ const resolveAttentionI8a8Dot = async (
 };
 
 /**
- * カナリアが厳密一致を得られないまま帯内で決めたことを 1 回だけ知らせる。
+ * Reports once that the canary decided within the band without an exact match.
  *
- * 止めないのは、この形が実在の健全な device（Apple M2 — 共有 f32 エピローグの丸めが既知解と
- * 数 ULP ずれるだけ）だからで、黙らないのは「帯内だから通した」が**測定に効く事実**だから
- * （a8 の出力はこの device で他機とビット同一にならない）。文言は @karume/hub の main 追従警告
- * と同じ流儀 — 何が起きたか・何をすれば消えるかを 1 本の console.warn で出す。
+ * It does not stop because this case is a real, healthy device (Apple M2 — the rounding of the shared
+ * f32 epilogue is only a few ULP off the known answer), and it does not stay silent because "passed
+ * because within the band" is **a fact that affects measurement** (the a8 output on this device is
+ * not bit-identical with other machines). The wording follows the main-tracking warning of
+ * @karume/hub — what happened and what makes it go away, in one console.warn.
  */
 const warnInexactAttentionCanary = (decision: AttentionI8a8Decision): void => {
   console.warn(
@@ -318,118 +339,128 @@ const warnInexactAttentionCanary = (decision: AttentionI8a8Decision): void => {
 export type SessionState = {
   readonly gpu: GpuContext;
   /**
-   * 実行するグラフ。MUST: 供給元（開いた容器）を丸ごと持たない — 取得元のバイト列を掴むと
-   * 配布ファイル全量の ArrayBuffer が Session の寿命まで固定され、part ごとの逐次消費
-   * （ADR 0108 決定 9）の「参照を手放す」契約が成立しない。構築後に要るのは graph だけ。
+   * The graph to execute. MUST: do not hold the supply side (the opened container) as a whole —
+   * holding the source's bytes pins an ArrayBuffer of the whole distribution file for the Session's
+   * lifetime, and the "let go of references" contract of per-part sequential consumption (ADR 0108
+   * decision 9) no longer holds. After construction only the graph is needed.
    */
   readonly graph: IrGraph;
   /**
-   * device 寿命のパイプラインキャッシュ（GpuContext 所有）への、この Session ぶんの使用記録つき
-   * の面。**キャッシュ自体は Session 常駐ではない** — 同一 device の Session は 1 本を共有する。
+   * This Session's surface, with a usage record, onto the device-lifetime pipeline cache (owned by
+   * GpuContext). **The cache itself is not Session-resident** — Sessions on the same device share one.
    */
   readonly cache: SessionPipelines;
   readonly scheduler: SubmitScheduler;
   /**
-   * 中間バッファ計画の上限（device の granted 値 — ADR 0093 決定 1）。計画は Session 構築後に
-   * 変わらない値だけを見るので、ここで 1 度固定する。
+   * The limits of intermediate-buffer planning (the device's granted values — ADR 0093 decision 1).
+   * The plan looks only at values that do not change after Session construction, so they are fixed
+   * here once.
    */
   readonly transientLimits: TransientLimits;
   readonly weights: RunArena;
   readonly weightBuffers: ReadonlyMap<string, GPUBuffer>;
   /**
-   * 重みの常駐分類（prepare 相の純関数の結果 — {@link "./weight-residency.ts"} の
-   * `planWeightResidency`）。
-   * {@link "./executor.ts"} の `Session.exportWeight` が席を名乗るために構築後も保つ。
+   * The residency classes of the weights (the result of the prepare phase's pure function —
+   * `planWeightResidency` in {@link "./weight-residency.ts"}).
+   * Kept after construction so that `Session.exportWeight` in {@link "./executor.ts"} can name the
+   * residency class.
    */
   readonly residency: ReadonlyMap<string, WeightResidency>;
   /**
-   * この Session が借りている重み（{@link SessionOptions.sharedWeights} の実体）。
-   * dispose で借用を返す先で、**貸し手の生存はこの計数が保証する**。
+   * The weights this Session borrows (the objects of {@link SessionOptions.sharedWeights}).
+   * Where borrows are returned on dispose; **the lender's survival is guaranteed by this count**.
    */
   readonly sharedWeights: readonly SharedWeight[];
   /**
-   * params バッファの内容アドレスキャッシュ（キー = usage + 全要素の連結 —
-   * `RecipeBuilder.#writeParams`）。実体は weights アリーナが所有する Session 常駐バッファで、
-   * ここは「内容 → 既に上げてあるバッファ」の索引だけを持つ。
-   * MUST: モジュールスコープに置かない（副作用ゼロの不変条件 — Session ごとに device も
-   * バッファも別）。
+   * The content-addressed cache of params buffers (key = usage + all elements concatenated —
+   * `RecipeBuilder.#writeParams`). The objects are Session-resident buffers owned by the weights
+   * arena; this holds only the index "content → buffer already uploaded".
+   * MUST: not at module scope (the zero-side-effect invariant — each Session has its own device and
+   * buffers).
    */
   readonly paramsCache: Map<string, GPUBuffer>;
   /**
-   * 解決済み bindings → 導出済み実行計画（LRU・上限 {@link "./executor.ts"} の
-   * `PREPARED_PLAN_CAPACITY`）。
-   * MUST: モジュールスコープに置かない（副作用ゼロの不変条件 — Session ごとに graph も
-   * 常駐バッファも別で、レシピはその実体を直参照で畳み込んでいる）。
+   * Resolved bindings → derived execution plan (LRU, bounded by `PREPARED_PLAN_CAPACITY` in
+   * {@link "./executor.ts"}).
+   * MUST: not at module scope (the zero-side-effect invariant — each Session has its own graph and
+   * resident buffers, and the recipes fold those objects in as direct references).
    */
   readonly prepared: Map<string, PreparedPlan>;
   /**
-   * 圧縮のまま常駐した重み（席と付随実体 — ADR 0018 / 0019 / 0069）。ここに無い値は f32 と
-   * して読む — カーネル変種の選択も追加束縛もこの表 1 つで決まる。
+   * Weights resident in compressed form (residency class and attached objects — ADR 0018 / 0019 /
+   * 0069). A value not in it is read as f32 — kernel-variant selection and extra bindings are both
+   * decided by this one table.
    *
-   * MUST: 席・scale・group 長を並列 Map に割らない（{@link ResidentWeight} の doc）。載せるのは
-   * Session 構築の 1 箇所だけで、group 長は宣言（graph）から写す — 別の値を渡せる形にすると
-   * 「group 64 の資産が group 32 のパイプラインで走る」沈黙誤値になる。
+   * MUST: do not split residency class, scale and group length into parallel Maps (the doc of
+   * {@link ResidentWeight}). It is filled in one place only, Session construction, and the group
+   * length is copied from the declaration (graph) — a form that allows passing another value becomes
+   * the silently wrong value "an asset with group 64 runs on a group-32 pipeline".
    */
   readonly residentWeights: ReadonlyMap<string, ResidentWeight>;
   readonly storage: StorageDiagnostics;
-  /** 構築相の費用内訳（{@link SessionBuildStats}）。構築の決着で確定し、以後不変。 */
+  /** The cost breakdown of the construction phase ({@link SessionBuildStats}). Fixed when construction settles, immutable afterwards. */
   readonly buildStats: SessionBuildStats;
-  /** linear の実行形（opt-in — {@link SessionOptions.linearCompute}）。 */
+  /** The execution form of linear (opt-in — {@link SessionOptions.linearCompute}). */
   readonly linearCompute: "f32" | "a8" | "f16";
-  /** slot backing を同時に保持する予算（{@link SessionOptions.planBackingBudgetBytes}）。 */
+  /** The budget for holding slot backings at the same time ({@link SessionOptions.planBackingBudgetBytes}). */
   readonly planBackingBudgetBytes: number;
-  /** 融合 attention の実行形（opt-in — {@link SessionOptions.attentionCompute}）。 */
+  /** The execution form of fused attention (opt-in — {@link SessionOptions.attentionCompute}). */
   readonly attentionCompute: ComputePrecision;
-  /** S の格納形（opt-in — {@link SessionOptions.attentionScoreStorage}）。計算形と直交する軸。 */
+  /** The storage form of S (opt-in — {@link SessionOptions.attentionScoreStorage}). An axis orthogonal to the compute form. */
   readonly attentionScoreStorage: ScoreStorage;
   /**
-   * states 形 attention ①QK / ③PV の縮約形（opt-in —
-   * {@link SessionOptions.stateAttentionReduce}）。`"parallel"` でも **①' が選ばれるのは M ≤ 8 の
-   * 計画だけ**（decode と投機の verify — prefill 計画は ① のまま）で、**③' が選ばれるのは M < 16 の計画だけ**
-   * （M ≥ 16 は席に依らず ③ₜ = ③ とビット同一のタイル経路 — 席は 1 つ）。
+   * The reduction form of states-form attention ①QK / ③PV (opt-in —
+   * {@link SessionOptions.stateAttentionReduce}). Even with `"parallel"`, **①' is chosen only for
+   * plans with M ≤ 8** (decode and speculative verify — prefill plans stay on ①), and **③' only for
+   * plans with M < 16** (M ≥ 16 takes the tiled path, bit-identical with ③ₜ = ③ regardless of the
+   * option — a single option value).
    */
   readonly stateAttentionReduce: StateAttentionReduce;
   readonly linearGemvReduce: LinearGemvReduce;
   readonly rmsNormReduce: RmsNormReduce;
   /**
-   * 行ブロック gemv の並列度目標（opt-in — {@link SessionOptions.linearGemvRowsThreadTarget}）。
-   * 省略（`undefined`）はカーネル側の既定 = 参照 device の飽和点。
+   * The parallelism target of the row-block GEMV (opt-in —
+   * {@link SessionOptions.linearGemvRowsThreadTarget}). Omitted (`undefined`) is the kernel-side
+   * default = the saturation point of the reference device.
    */
   readonly linearGemvRowsThreadTarget: number | undefined;
   /**
-   * **linear の** i8a8 整数内積変種。既定は `navigator.gpu.wgslLanguageFeatures` の列挙から
-   * 決まり、テストは {@link I8A8_DOT} で強制できる。**どちらでも数値は 1 ビットも変わらない**
-   * （linear は Metal を含めて実走で反証されていない — docs/known-issues.md）。
+   * The i8a8 integer dot-product variant **of linear**. The default is decided from the enumeration
+   * of `navigator.gpu.wgslLanguageFeatures`, and tests can force it with {@link I8A8_DOT}. **Either
+   * way the numbers do not change by a single bit** (for linear this has not been refuted on real
+   * hardware, Metal included — docs/known-issues.md).
    */
   readonly linearI8a8Dot: I8a8Dot;
   /**
-   * **融合 attention の** i8a8 整数内積変種（①QK / ③PV）。既定は device 単位の実走カナリア
-   * （src/gpu/attention-dp4a-canary.ts — 一次判定は既知解との突合）が決め、テストは
-   * {@link I8A8_DOT} で強制できる。linear と席を分けたのは、当初「両変種はビット同一」が
-   * attention だけ Apple M2 で崩れると推論したためで、この推論は 2026-08-29 に撤回した（M2 でも
-   * 両変種はビット同一 — 外れていたのは共有 f32 エピローグの 1 ULP・docs/known-issues.md）。
-   * 席とカナリアは残す（根拠はカナリアの冒頭 doc）。
+   * The i8a8 integer dot-product variant **of fused attention** (①QK / ③PV). The default is decided
+   * by a per-device run-time canary (src/gpu/attention-dp4a-canary.ts — the primary decision is the
+   * comparison with the known answer), and tests can force it with {@link I8A8_DOT}. It was split
+   * from linear because it was initially inferred that "both variants are bit-identical" broke for
+   * attention only, on Apple M2; that inference was withdrawn on 2026-08-29 (on M2 too both variants
+   * are bit-identical — what differed was 1 ULP of the shared f32 epilogue, docs/known-issues.md).
+   * The field and the canary stay (the rationale is in the canary's head doc).
    */
   readonly attentionI8a8Dot: I8a8Dot;
-  /** 行ブロック枚数の強制（テスト専用 — {@link ROW_BLOCK_SPLIT}）。 */
+  /** Forcing the number of row blocks (test only — {@link ROW_BLOCK_SPLIT}). */
   readonly rowBlockSplit: number | undefined;
   /**
-   * 行ブロックの一時 1 本ごとの予算（{@link SessionOptions.attentionRowBlockMaxBytes} — ADR 0124）。
-   * `undefined` = 予算なし（束縛上限のまま）。
-   * MUST: 構築後に変えない（導出済み計画のキーは解決済み bindings だけで、枚数はこの値を含意している
-   * ものとして計画を引く — {@link rowBlockSplit} と同じ Session 単位の不変値）。
+   * The budget per row-block temporary ({@link SessionOptions.attentionRowBlockMaxBytes} — ADR 0124).
+   * `undefined` = no budget (the binding limit stays).
+   * MUST: not changed after construction (the key of a prepared plan is only the resolved bindings,
+   * and plans are looked up assuming the block count implied by this value — a Session-level
+   * invariant like {@link rowBlockSplit}).
    */
   readonly attentionRowBlockMaxBytes: number | undefined;
   /**
-   * GEMM 幾何のプロファイル（`acquireGpu` で注入された表、無ければ adapter から構築時に 1 度だけ
-   * 選ぶ静的な表 — DECIDED: ADR 0115）。
-   * MUST: 構築後に選び直さない（同じ Session の導出済み計画・パイプラインキーが 1 本の表に
-   * 対応していることが、計画キャッシュをプロファイル抜きで引いてよい根拠）。
+   * The GEMM geometry profile (the table injected through `acquireGpu`, or absent that a static table
+   * chosen once from the adapter at construction — DECIDED: ADR 0115).
+   * MUST: not re-chosen after construction (that the prepared plans and pipeline keys of one Session
+   * correspond to a single table is the basis for looking up the plan cache without the profile).
    */
   readonly geometryProfile: GeometryProfile;
   readonly fuseRmsNormAdd: boolean;
   readonly fuseLinearStaticQuantize: boolean;
-  /** 固定 SRQ の活性を packed int8 で並列 GEMV へ渡す（ADR 0105）。 */
+  /** Passes the activations of fixed SRQ to the parallel GEMV as packed int8 (ADR 0105). */
   readonly packedStaticQuantize: boolean;
   readonly useCounts: ReadonlyMap<string, number>;
   readonly dtypes: ReadonlyMap<string, IrDtype>;
@@ -437,14 +468,16 @@ export type SessionState = {
 };
 
 /**
- * 構築の入口で取る {@link SessionOptions} の写し（{@link buildSessionState} の冒頭の MUST）。
+ * The copy of {@link SessionOptions} taken at the entry of construction (the MUST at the head of
+ * {@link buildSessionState}).
  *
- * MUST: 欄は 1 つずつ通常のプロパティ読みで写す（spread にしない）。spread は自前の列挙可能な欄
- * しか写さないので、非列挙の欄や prototype 由来の欄が黙って落ち、写す前は拒否していた値が既定へ
- * 化けて通る。型を全欄必須の写像にしてあるので、SessionOptions に欄を足すとここが型エラーになる
- * （写し忘れた欄が黙って既定になる形を作らない）。
- * submitPolicy は中身ごと写す（scheduler の構築は await の後）。sharedWeights の実体は借りる
- * （読むのは await より前の同期区間）。
+ * MUST: fields are copied one by one with ordinary property reads (no spread). Spread copies only own
+ * enumerable fields, so non-enumerable fields and fields from the prototype drop silently, and a
+ * value that would have been rejected before the copy turns into the default and passes. The type is
+ * a mapping with every field required, so adding a field to SessionOptions makes this a type error
+ * (no form where a forgotten field silently becomes the default).
+ * submitPolicy is copied with its contents (the scheduler is built after an await). The objects of
+ * sharedWeights are borrowed (they are read in the synchronous section before the await).
  */
 const snapshotSessionOptions = (
   requested: SessionOptions,
@@ -469,11 +502,11 @@ const snapshotSessionOptions = (
 });
 
 /**
- * {@link "./executor.ts"} の `Session.build` の本体（構築トランザクションそのもの）。契約と
- * MUST はファサード側 `Session.build` の doc が正本。
+ * The body of `Session.build` in {@link "./executor.ts"} (the construction transaction itself). The
+ * contract and the MUSTs are owned by the doc of `Session.build` on the facade side.
  *
- * 返すのは `new Session(state)` に渡す {@link SessionState} だけ — `Session` は private
- * constructor なので、ここからは実体を作らない。
+ * It returns only the {@link SessionState} passed to `new Session(state)` — `Session` has a private
+ * constructor, so the object is not created here.
  */
 export const buildSessionState = async (
   gpu: GpuContext,
@@ -482,18 +515,21 @@ export const buildSessionState = async (
   batches: AsyncIterable<WeightBatch>,
   requested: SessionOptions,
 ): Promise<SessionState> => {
-  // MUST: options は入口で 1 回だけ写し、以降の検査・能力検査・state 作成は全て写しから読む。
-  // 構築は await を跨ぐ（カナリア・重みの供給）ので、呼び手の object を読み直すと、待つ間の
-  // 書き換えが入口の組合せ検査（ADR 0105 決定 1）を経ずに state へ届く（写し方は
-  // {@link snapshotSessionOptions}）。
+  // MUST: options are copied once at the entry, and every later check, capability check and state
+  // creation reads from the copy. Construction spans awaits (the canary, the weight supply), so
+  // re-reading the caller's object would let a modification made during the wait reach the state
+  // without passing the combination check at the entry (ADR 0105 decision 1) (how it is copied:
+  // {@link snapshotSessionOptions}).
   const options: SessionOptions = snapshotSessionOptions(requested);
-  // MUST: device の生存は入口と決着の直前（下の try の末尾）の 2 回、構築自身が見る。重みの
-  // アップロードの完了待ちは消失を例外へ変えるが、重みを 1 本も上げないグラフ（initializer 無し・
-  // 全て shared）はその待ちに一度も届かず、消失済み device に結び付いた Session が成功で返る。
+  // MUST: construction itself checks that the device is alive twice, at the entry and right before
+  // settling (the end of the try below). Waiting for the weight upload to complete turns a loss into
+  // an exception, but a graph that uploads no weight (no initializers, or all shared) never reaches
+  // that wait, and a Session tied to a lost device would return as a success.
   assertDeviceUsable(gpu, "Session の構築");
-  // MUST: GPU の能力に依らない検査（型・綴り・組合せ・値域）は全て {@link sessionOptionsViolation}
-  // の 1 本で先に見る。models 側の合成（明示 > 宣言 > 既定）が重み取得前に同じ判定を借りるので、
-  // ここで条件を書き足すと 2 つの入口の受理集合が割れる。
+  // MUST: every check that does not depend on GPU capabilities (type, spelling, combination, range)
+  // runs first through the single {@link sessionOptionsViolation}. The models-side composition
+  // (explicit > declared > default) borrows the same decision before fetching weights, so adding a
+  // condition here would split the accepted sets of the two entries.
   const violation = sessionOptionsViolation(options);
   if (violation !== undefined) throw new ExecutionError(violation);
   const {
@@ -506,7 +542,7 @@ export const buildSessionState = async (
     planBackingBudgetBytes,
   } = executionKnobDefaults(options);
   const linearGemvRowsThreadTarget = options.linearGemvRowsThreadTarget;
-  // 以降は GPU の能力（feature / WGSL 言語機能）を見る門だけ。
+  // From here on, only checks that look at GPU capabilities (features / WGSL language features).
   if (
     rmsNormReduce === "subgroup32" &&
     (!gpu.features.has("subgroups") ||
@@ -525,9 +561,9 @@ export const buildSessionState = async (
       "linearGemvReduce: parallel-subgroup32 は acquireGpu({ subgroups: true }) が必要",
     );
   }
-  // MUST: f16 計算を要求されたのに feature が無い device なら**ここで落とす**。黙って f32
-  // 経路へ落とすと、既定経路と opt-in の区別が診断からも数値からも見えなくなる
-  // （ADR 0025 決定 1 と同じ理由）。
+  // MUST: when f16 compute is requested on a device without the feature, **fail here**. Falling back
+  // silently to the f32 path would make the distinction between the default path and the opt-in
+  // invisible in both the diagnostics and the numbers (the same reason as ADR 0025 decision 1).
   if ((linearCompute === "f16" || attentionCompute === "f16") && !gpu.shaderF16Enabled) {
     throw new ExecutionError(
       "f16 計算変種を要求したが、device が 'shader-f16' を有効化していない" +
@@ -536,38 +572,45 @@ export const buildSessionState = async (
         "（feature は device 作成時にしか要求できない）",
     );
   }
-  // GEMM 幾何のプロファイル（DECIDED: ADR 0115）。`acquireGpu({ geometryProfile })` で注入された
-  // 表があればそれ（門は device を作る前に通過済み・`match` は見ない）、無ければ adapter の
-  // (vendor, architecture, description) と埋め込みの静的な表で決まる（`adapterInfo` をそのまま
-  // 渡すので `description` も照合に載る・`match` を省いた埋め込みの表は注入でだけ使われる）。
-  // どちらも実行中に選び直さない。埋め込み側の壊れた表・同順位の衝突は**重みを 1 バイトも上げる前に**落とす（その op に当たる run まで
-  // 気づけない形にしない）。
-  // MUST: 選択はここ 1 箇所。dp4a カナリア（`resolveAttentionI8a8Dot`）と診断の id
-  // （`SessionState.geometryProfile`）はこの返り値を引く — 別々に選ぶと、カナリアが検証した幾何と
-  // 実走の幾何が食い違いうる。
+  // The GEMM geometry profile (DECIDED: ADR 0115). If a table was injected through
+  // `acquireGpu({ geometryProfile })`, that one (its check already passed before the device was
+  // created; `match` is not looked at); otherwise it is decided by the adapter's (vendor,
+  // architecture, description) and the embedded static tables (`adapterInfo` is passed as is, so
+  // `description` takes part in matching too; an embedded table without `match` is used only by
+  // injection). Neither is re-chosen during execution. A broken embedded table or a tie of equal rank
+  // fails **before a single byte of weights is uploaded** (not in a form that goes unnoticed until a
+  // run that hits that op).
+  // MUST: the selection happens in this one place. The dp4a canary (`resolveAttentionI8a8Dot`) and
+  // the diagnostic id (`SessionState.geometryProfile`) use this return value — choosing separately
+  // could make the geometry the canary verified differ from the geometry actually run.
   const geometryProfile =
     gpu[RUNTIME_INTERNAL].geometryProfile ?? selectGeometryProfile(gpu.adapterInfo);
 
-  // MUST: 重みの確保に入る前に、席ごとの確保寸法を device の絶対上限と突き合わせる（batch
-  // ループより前 = 1 バイトも上げる前）。確保失敗の検出は item（block）単位 errorScope
-  // （ADR 0108 決定 9）が担うが、それは実装の報告品質に依存し（out-of-memory scope が黙る
-  // device が実在する — docs/known-issues.md の Metal 節）、捕まえても数 GiB
-  // 転送した後にしか出ない。寸法は宣言だけで確定している（常駐計画は prepare 相の純関数）ので、
-  // 決定論的に落とせるぶんはここで落とす（同 known-issues が名指しした「明示サイズ門」）。
-  // NOTE: 見るのは絶対上限だけで空き VRAM とは比べない（ADR 0070 決定 5 の規律 — 検査は
-  // 純粋な比較のままで、総量の可否の最終門は errorScope に残る）。
+  // MUST: before allocating weights, compare the allocation size of each residency class with the
+  // device's absolute limits (before the batch loop = before a single byte is uploaded). Detecting
+  // allocation failure is the job of the per-item (block) errorScope (ADR 0108 decision 9), but that
+  // depends on the implementation's reporting quality (devices whose out-of-memory scope stays silent
+  // exist — the Metal section of docs/known-issues.md), and even when caught it shows only after
+  // several GiB were transferred. The sizes are fixed by the declaration alone (the residency plan is
+  // a pure function of the prepare phase), so what can fail deterministically fails here (the
+  // "explicit size check" named by the same known-issues entry).
+  // NOTE: only absolute limits are looked at, never free VRAM (the rule of ADR 0070 decision 5 — the
+  // check stays a pure comparison, and the final check of whether the total fits stays with the
+  // errorScope).
   assertWeightsWithinLimits(residency, gpu.limits);
 
-  // 共有 initializer（借り物の重み — ADR 0096 段 2 §1.3）の突合。**バイトを 1 つも上げる前**に
-  // 席・宣言 shape・意味論 dtype・貸し手の codec・device を見る（門の中身は `resolveSharedWeights`）。
+  // Matching of shared initializers (borrowed weights — ADR 0096 decision 2 and its stage 2
+  // addendum). **Before a single byte is uploaded**, check the residency class, declared shape,
+  // semantic dtype, the lender's codec and the device (the check itself is `resolveSharedWeights`).
   const shared = resolveSharedWeights(graph, residency, gpu, options.sharedWeights);
 
-  // 整数内積変種は **linear と attention で別席**（{@link SessionState}）。どちらも
-  // `I8A8_DOT` の指定が最優先で、指定が無ければ族ごとの既定に落ちる。
+  // The integer dot-product variant is **a separate field for linear and attention**
+  // ({@link SessionState}). For both, `I8A8_DOT` takes precedence, and without it each family falls
+  // to its own default.
   const dp4a = dp4aAvailable(gpu.wgslLanguageFeatures);
-  // dp4a の無い device で a8 を要求されたら知らせる（device ごとに 1 回）。落とさない・f32 へも
-  // a8 無しの兄弟プリセットへも黙って落とさない（DECIDED: ADR 0128 決定 5）— 数値は同じで、
-  // 利用者が失うのは速度だけなので、事実を見せて選び直してもらう。
+  // When a8 is requested on a device without dp4a, report it (once per device). Do not fail, and do
+  // not silently fall to f32 or to a sibling preset without a8 (DECIDED: ADR 0128 decision 5) — the
+  // numbers are the same and the user loses only speed, so show the fact and let them choose again.
   const emulationWarning = a8EmulationWarning(
     linearCompute,
     attentionCompute,
@@ -589,13 +632,15 @@ export const buildSessionState = async (
   const weightBuffers = new Map<string, GPUBuffer>();
   const residentWeights = new Map<string, ResidentWeight>();
   /**
-   * 展開席の piece 列が持ち越す companion scale の**写し**（キー = initializer 名）。
+   * The **copy** of the companion scale carried along a piece list of the expanded class (key =
+   * initializer name).
    *
-   * MUST: view ではなく値の写しを持つ。scale の実体は piece 1 と同じ part にしか無く
-   * （規則③）、取得元の返りは器の view でありうる（seek 型なら scale の block、hub の scan 型
-   * なら part の保持枠）。view のまま抱えるとその器が列の最後（piece の last）まで生き残り、
-   * 重みのホスト RAM を item 1 本ぶんに抑える block 粒度の上限が崩れる。写すのは scale だけで、
-   * 重み本体は 1 バイトも写さない。
+   * MUST: hold a copy of the values, not a view. The scale's object exists only in the same part as
+   * piece 1 (rule ③), and what the source returns may be a view into a container (the scale block for
+   * seek-type sources, the part's retention slot for hub's scan type). Held as a view, that container
+   * would survive until the end of the list (the last piece), breaking the block-granularity bound
+   * that keeps the host RAM of weights to one item. Only the scale is copied; not a single byte of the
+   * weight body.
    */
   const carriedScales = new Map<
     string,
@@ -603,10 +648,11 @@ export const buildSessionState = async (
   >();
   let residentCompressedBytes = 0;
   let hostExpandedBytes = 0;
-  // 構築相の費用内訳（{@link SessionBuildStats}）。ホスト時計だけで刻む集計器で、
-  // MUST NOT: 計測のために GPU フェンスを足さない・submit の位置を動かさない
-  // （batch ごと submit 1 回という ADR 0108 決定 9 の契約が崩れると、瞬間ピークが重み 1 本ぶん
-  // 押し上がる）。よって writeBuffer の実転送時間は uploadFenceMs に吸われたままになる。
+  // The cost breakdown of the construction phase ({@link SessionBuildStats}). An aggregator ticking
+  // with the host clock only;
+  // MUST NOT: add GPU fences for measurement or move the position of submits (breaking the contract
+  // of one submit per batch, ADR 0108 decision 9, pushes the momentary peak up by one weight). So the
+  // real transfer time of writeBuffer stays absorbed in uploadFenceMs.
   let partCount = 0;
   let supplyWaitMs = 0;
   let decodeMs = 0;
@@ -614,8 +660,9 @@ export const buildSessionState = async (
   let writeBufferIssueMs = 0;
   let uploadedBytes = 0;
   let uploadFenceMs = 0;
-  // 計測の巻き付けは 3 経路（decode / createBuffer / writeBuffer）とも呼び出し点が複数あるので
-  // 局所ヘルパに畳む。**呼び出しの順序も引数も 1 つも変えない**（計測は素通しの薄い層）。
+  // The measurement wrapping has several call sites for each of the 3 paths (decode / createBuffer /
+  // writeBuffer), so it is folded into local helpers. **Not a single call order or argument changes**
+  // (measurement is a thin pass-through layer).
   const timedDecode = (decode: () => Float32Array<ArrayBuffer>): Float32Array<ArrayBuffer> => {
     const start = performance.now();
     const expanded = decode();
@@ -628,8 +675,8 @@ export const buildSessionState = async (
     bufferCreateMs += performance.now() - start;
     return buffer;
   };
-  // 書き込み先オフセットは piece 列（分割テンソル）のためにある — 丸ごとの経路は常に 0 で、
-  // piece は「行オフセット × 1 行のバイト長」を渡して 1 本のバッファへ継ぎ足す。
+  // The destination offset exists for piece lists (split tensors) — the whole path always passes 0,
+  // and a piece passes "row offset × byte length of one row" to append into one buffer.
   const timedWrite = (
     buffer: GPUBuffer,
     data: Uint8Array<ArrayBuffer> | Float32Array<ArrayBuffer>,
@@ -640,63 +687,70 @@ export const buildSessionState = async (
     writeBufferIssueMs += performance.now() - start;
     uploadedBytes += data.byteLength;
   };
-  /** 借用を積み終えた共有 initializer（構築が失敗したらここから 1 本ずつ返す）。 */
+  /** Shared initializers whose borrow has been added (on construction failure they are returned one by one from here). */
   const borrowed: SharedWeight[] = [];
   try {
-    // 借り物の重みは block を 1 つも読まずに台帳へ載る（バイトは貸し手が既に GPU へ
-    // 上げている）。借用計数を先に積むのは、構築中に貸し手が dispose される窓を塞ぐため。
+    // Borrowed weights enter the ledger without reading a single block (the lender has already
+    // uploaded the bytes to the GPU). The borrow count is added first to close the window in which
+    // the lender could be disposed during construction.
     for (const { name, shared: weight } of shared) {
       const internals = weight[RUNTIME_INTERNAL];
       internals.retain();
       borrowed.push(weight);
       weightBuffers.set(name, internals.buffer);
-      // 圧縮席（f16 / i8 / i4）は貸し手の付随実体（scale・group 長）ごと引き継ぐ。ここに
-      // 載らない名前は f32 として読まれる（重み台帳の既定）ので、席の突合が門になっている。
+      // Compressed classes (f16 / i8 / i4) take over the lender's attached objects (scale, group
+      // length) as well. A name not entered here is read as f32 (the default of the weight ledger),
+      // so the residency-class match acts as the check.
       if (internals.resident !== undefined) residentWeights.set(name, internals.resident);
     }
-    // 反復待ち（= 供給側の費用）は for await が隠すので、**前を処理し終えた時刻**との差で測る
-    // （次が届くまでの間はこの 2 点の間にしか無い）。待ちは 2 段ある — part の列の次の 1 本
-    // （batch）と、part の中の次の block（item — block の読みと検証はこちらに入る）。どちらも
-    // 同じ時計で足す（{@link SessionBuildStats.supplyWaitMs}）。
+    // The iteration wait (= the cost of the supply side) is hidden by for await, so it is measured as
+    // the difference from **the time the previous one finished processing** (the time until the next
+    // arrives lies only between these two points). There are two levels of waiting — the next element
+    // of the part list (batch) and the next block within a part (item — reading and verifying the
+    // block fall here). Both are added on the same clock ({@link SessionBuildStats.supplyWaitMs}).
     let supplyBoundary = performance.now();
     for await (const batch of batches) {
       supplyWaitMs += performance.now() - supplyBoundary;
       partCount += 1;
-      // errorScope とフェンスは同じラベルを名乗る MUST（別々に組むと同じアップロード区間の
-      // 失敗が 2 つの名前で出る）。
+      // MUST: the errorScope and the fence use the same label (built separately, a failure of the
+      // same upload interval would appear under two names).
       const label = uploadLabel(batch.origin);
-      /** initializer 1 本ぶん（丸ごと / 1 piece）の展開とアップロード。同期区間の中で呼ぶ。 */
+      /** Decode and upload of one initializer (whole / one piece). Called inside the synchronous section. */
       const uploadItem = (item: ReadyInitializer): void => {
         const name = item.name;
         const initializer = graph.initializers[name];
         const raw = item.payload;
-        // 席はプランナが正本（全 initializer を載せる契約 — 欠けは簿記の破れ）。
+        // The planner is the source of truth for the residency class (the contract lists every
+        // initializer — a gap is a broken bookkeeping).
         const seat = residency.get(name);
         if (seat === undefined) {
           throw new ExecutionError(`initializer '${name}': 常駐分類が無い`);
         }
-        // MUST: 借り物の席に実体が来る形は落とす。共有 initializer は突合集合の外
-        // （供給元）なので `items` には現れない — 現れたら簿記の破れで、通すと貸し手の
-        // バッファを指す名前に別のバイト列を上書きすることになる。
+        // MUST: an object arriving for a borrowed class fails. Shared initializers are outside the
+        // matched set (supply side), so they never appear in `items` — if one does, the bookkeeping is
+        // broken, and letting it through would overwrite with other bytes a name that points at the
+        // lender's buffer.
         if (seat.seat === "shared" || initializer.storage === undefined) {
           throw new ExecutionError(`initializer '${name}': 共有宣言（shared）なのに実体が来た`);
         }
         const storage = initializer.storage;
         const layout = codecLayout(storage.codec);
-        // initializer の宣言 shape は数値のみ（パーサが保証 — 記号次元は拒否）。
+        // An initializer's declared shape is numeric only (guaranteed by the parser — symbolic dimensions are rejected).
         const declaredShape = graph.values[name].shape.map(Number);
         const declaredRows = declaredShape[0];
-        // 分割テンソル（piece 列）は「先頭次元の連続範囲」で届く。展開に渡す shape はその
-        // piece の形、バイト位置と長さは**宣言由来の 1 行あたりバイト長**の按分で決まる
-        // （行あたりの長さは宣言から割り切れる — 供給元が shape の残り次元を突き合わせて
-        // いるので、行数だけが piece ごとに変わる）。
+        // A split tensor (piece list) arrives as "contiguous ranges of the leading dimension". The
+        // shape passed to decoding is the piece's shape, and the byte position and length follow from
+        // a proportional share of **the bytes per row derived from the declaration** (the length per
+        // row divides out of the declaration — the supply side has matched the remaining dimensions of
+        // the shape, so only the row count changes per piece).
         const piece = item.piece;
         const pieceShape =
           piece === undefined ? declaredShape : [piece.rows, ...declaredShape.slice(1)];
         const rows = pieceShape[0];
-        // MUST: 宣言由来のバイト長と現物が食い違ったら落とす。プランナ（と見積り）は実
-        // テンソルを見ずに宣言だけで数えるので、ここが「宣言 = 現物」を実際に確かめる唯一の
-        // 点になる（供給元の突合門が成立していれば発火しない — 二重の網）。
+        // MUST: fail when the byte length derived from the declaration and the real object disagree.
+        // The planner (and the estimate) count from the declaration alone without looking at real
+        // tensors, so this is the only point that actually verifies "declaration = real object" (it
+        // never fires when the supply side's matching check holds — a second net).
         const expectedBytes =
           piece === undefined ? seat.payloadBytes : rows * (seat.payloadBytes / declaredRows);
         if (raw.byteLength !== expectedBytes) {
@@ -704,18 +758,20 @@ export const buildSessionState = async (
             `initializer '${name}': 宣言由来 ${expectedBytes} バイトに対し実テンソルが ${raw.byteLength} バイト`,
           );
         }
-        // 書き込み先のバイト位置（丸ごとは常に 0）。生バイト席は格納バイト列、展開席は f32
-        // 展開後のバイト列が GPU に載るので、按分の基準になる全体長が席で違う。
+        // The destination byte position (always 0 when whole). The raw-byte classes put the stored
+        // bytes on the GPU and the expanded class the bytes after f32 decoding, so the total length
+        // that the proportional share is based on differs by class.
         const wholeBytes = seat.seat === "expanded" ? seat.expandedBytes : seat.payloadBytes;
         const byteOffset = piece === undefined ? 0 : piece.rowOffset * (wholeBytes / declaredRows);
-        // 末尾のゼロ詰めを掛けてよいのは「丸ごと」と「piece 列の末尾」だけ。中間 piece に
-        // 掛けると詰め物が次の piece の先頭バイトを 0 で潰す（中間 piece が 4 バイト整列で
-        // あることは供給元の担当 — こちらは詰め物を掛けない側で不変条件を守る）。
+        // The trailing zero padding may be applied only "whole" and to "the last piece of a list".
+        // Applied to a middle piece, the padding overwrites the first bytes of the next piece with 0
+        // (that a middle piece is 4-byte aligned is the supply side's job — this side keeps the
+        // invariant by not padding).
         const tailAligned = piece === undefined || piece.last;
         /**
-         * 展開席（CPU で f32 化）が読む scale（rank 2 group 形）— piece 列ではその piece の行範囲
-         * だけを返す。実体は piece 1 にしか無いので、そこで値を写して列の最後まで持ち越す
-         * （{@link carriedScales} の MUST）。
+         * The scale read by the expanded class (f32 on the CPU) (rank-2 group form) — for a piece list
+         * only the piece's row range is returned. The object exists only on piece 1, so its values are
+         * copied there and carried to the end of the list (the MUST of {@link carriedScales}).
          */
         const expandedScale = (): {
           readonly values: Float32Array<ArrayBuffer>;
@@ -734,16 +790,18 @@ export const buildSessionState = async (
           }
           return scaleForPiece(carried, declaredRows, piece.rowOffset, rows);
         };
-        // 格納 f16 / bf16 / i8 / i4 / i2 だけが 2 経路に分かれる（ADR 0018 / 0131 / 0019 / 0069 / 0097）。適格なら
-        // 生バイトのまま常駐させ dequant はカーネル内（VRAM 削減はこれで初めて成立する）、
-        // 適格外はここで f32 へ展開する（正しさは保たれ VRAM 削減はゼロ）。他の格納は
-        // 生バイトがそのまま GPU 表現。
+        // Only stored f16 / bf16 / i8 / i4 / i2 split into two paths (ADR 0018 / 0131 / 0019 / 0069 / 0097).
+        // Eligible ones stay resident as raw bytes with dequantization inside the kernel (this is
+        // what makes the VRAM saving happen at all); ineligible ones are decoded to f32 here
+        // (correctness is kept, VRAM saving is zero). For other storage the raw bytes are the GPU
+        // representation as is.
         let payload: Uint8Array<ArrayBuffer> | Float32Array<ArrayBuffer> = raw;
         if (layout === "f16" || layout === "bf16") {
           if (seat.seat === layout) {
-            // MUST: 奇数要素長は末尾 2 バイトのゼロ詰めで 4 バイト整列させる。writeBuffer は
-            // 4 の倍数でないサイズを validation で拒む（= 重みが空のまま走り出す）。bf16 も
-            // 2 バイト / 要素なので同じ詰め物を使う。
+            // MUST: an odd element count is padded with 2 trailing zero bytes to 4-byte alignment.
+            // writeBuffer rejects sizes that are not a multiple of 4 in validation (= execution
+            // starts with empty weights). bf16 is also 2 bytes per element, so it uses the same
+            // padding.
             payload = tailAligned ? alignF16Payload(raw) : raw;
             residentWeights.set(name, { storage: layout });
             residentCompressedBytes += payload.byteLength;
@@ -755,13 +813,13 @@ export const buildSessionState = async (
         if (layout === "i8" || layout === "i2") {
           const rowAxis = storage.rowAxis ?? 0;
           if (seat.seat === "i8" || seat.seat === "i2") {
-            // scale は分割前の**全体**に掛かる 1 本きりなので、形の突合も確保も転送も
-            // piece 1（丸ごとなら唯一の実体）でだけ行う。突合に渡すのは piece の形では
-            // なく宣言 shape。
+            // The scale is a single one covering the **whole** tensor before splitting, so its shape
+            // match, allocation and upload happen only on piece 1 (the only object when whole). The
+            // match is given the declared shape, not the piece's shape.
             if (piece === undefined || piece.first) {
               const scale = scaleTensor(item, layout);
               assertRowScale(name, declaredShape, scale.shape, seat.rowAxis);
-              // MUST: scale のバッファも「GPU 常駐圧縮」に数える（実際に抱えるバイト数）。
+              // MUST: the scale buffer also counts as "GPU-resident compressed" (the bytes actually held).
               residentCompressedBytes += scale.bytes.byteLength;
               const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
               if (scale.bytes.byteLength > 0) {
@@ -769,8 +827,9 @@ export const buildSessionState = async (
               }
               residentWeights.set(name, { storage: layout, scale: scaleBuffer });
             }
-            // MUST: 要素数が 4 の倍数でない重みは末尾をゼロ詰めして 4 バイト整列させる
-            // （f16 の 2 バイト詰めと同じ理由 — writeBuffer が validation で落ちる）。
+            // MUST: a weight whose element count is not a multiple of 4 is padded with trailing
+            // zeros to 4-byte alignment (the same reason as the 2-byte padding of f16 — writeBuffer
+            // fails validation).
             payload = tailAligned ? alignI8Payload(raw) : raw;
             residentCompressedBytes += payload.byteLength;
           } else {
@@ -785,28 +844,32 @@ export const buildSessionState = async (
           }
         }
         if (layout === "i4") {
-          // 適格は f16 / i8 より狭い「消費が linear / embedding / conv1d(groups==1) の
-          // 重みスロットのみ」（ADR 0069 決定 5 とその追補 — 展開経路が GEMM 骨格のタイル
-          // 読み〈linear は B 側・conv1d igemm は A 側〉と embedding のカーネルにしか無い）。
-          // 展開経路の無い重みスロット（conv2d / conv_transpose1d / groups > 1 の conv1d）と
-          // 共有される i4 は CPU 展開の受け皿へ（正しさは保たれ VRAM 削減はゼロ —
-          // i8 の適格外と同じ設計）。判定はプランナが済ませている。
+          // Eligibility is narrower than for f16 / i8: "only weight slots consumed by linear /
+          // embedding / conv1d(groups==1)" (ADR 0069 decision 5 and its addendum — decode paths exist
+          // only in the tile reads of the GEMM skeleton 〈B side for linear, A side for conv1d
+          // igemm〉 and in the embedding kernel). Weight slots without a decode path (conv2d /
+          // conv_transpose1d / conv1d with groups > 1) and shared i4 go to the CPU-decode fallback
+          // (correctness is kept, VRAM saving is zero — the same design as the ineligible i8 case).
+          // The planner has already decided.
           if (seat.seat === "i4") {
-            // ペイロードは詰め物不要で常に 4 バイト整列 — バイト長 = numel / 2 で、numel は
-            // group_size（2 冪 ≥ 16）の倍数だからバイト長は 8 の倍数（ADR 0069 決定 2）。
-            // piece の行あたり長も同じ理由で 8 の倍数になる。
+            // The payload needs no padding and is always 4-byte aligned — byte length = numel / 2,
+            // and numel is a multiple of group_size (a power of 2 ≥ 16), so the byte length is a
+            // multiple of 8 (ADR 0069 decision 2). A piece's length per row is a multiple of 8 for the
+            // same reason.
             residentCompressedBytes += payload.byteLength;
             if (piece === undefined || piece.first) {
               const scale = scaleTensor(item, layout);
-              // MUST: scale のバッファも「GPU 常駐圧縮」に数える（i8 と同じ — 実際に抱える
-              // バイト数。exporter の storage_breakdown と診断の意味を揃える）。
+              // MUST: the scale buffer also counts as "GPU-resident compressed" (as for i8 — the bytes
+              // actually held; keeps the meaning in line with the exporter's storage_breakdown and the
+              // diagnostics).
               residentCompressedBytes += scale.bytes.byteLength;
               const scaleBuffer = timedAlloc(Math.max(4, scale.bytes.byteLength));
               if (scale.bytes.byteLength > 0) {
                 timedWrite(scaleBuffer, scale.bytes, 0);
               }
-              // group 長は宣言から写した 1 箇所（プランナ）だけが決める — 別経路で渡せる形に
-              // すると「group 64 の資産が group 32 のパイプラインで走る」沈黙誤値になる。
+              // The group length is decided only in the one place that copies it from the declaration
+              // (the planner) — a form that can pass it through another path becomes the silently
+              // wrong value "an asset with group 64 runs on a group-32 pipeline".
               residentWeights.set(name, {
                 storage: "i4",
                 scale: scaleBuffer,
@@ -814,8 +877,9 @@ export const buildSessionState = async (
               });
             }
           } else {
-            // 値域（2 冪 ≥ 16・整除）は合流層が保証済み。存在は型の上でだけ optional
-            // なので、黙って読み飛ばさず言い直す（「格納 i8 なのに scale が無い」と同じ流儀）。
+            // The range (power of 2 ≥ 16, divisibility) is guaranteed by the merge layer. Presence is
+            // optional only in the type, so restate the check rather than skip silently (the same
+            // convention as "stored i8 but no scale").
             const groupSize = storage.groupSize;
             if (groupSize === undefined) {
               throw new ExecutionError(`initializer '${name}': 格納 i4 なのに groupSize が無い`);
@@ -827,9 +891,11 @@ export const buildSessionState = async (
             hostExpandedBytes += payload.byteLength;
           }
         }
-        // バッファの確保は丸ごと 1 回 / piece 列なら先頭 1 回。piece でも寸法は**全体ぶん**
-        // を宣言から出す（分割は GPU 側の配置を 1 バイトも変えない — 生バイト席は格納
-        // バイト長の 4 バイト切り上げ = 末尾詰め物ぶん、展開席は f32 展開後のバイト長）。
+        // The buffer is allocated once when whole / once at the head of a piece list. Even for pieces
+        // the size is computed from the declaration for **the whole tensor** (splitting does not change
+        // the GPU-side layout by a single byte — for the raw-byte classes the stored byte length
+        // rounded up to 4 bytes = the trailing padding; for the expanded class the byte length after
+        // f32 decoding).
         if (piece === undefined) {
           weightBuffers.set(name, timedAlloc(Math.max(4, payload.byteLength)));
         } else if (piece.first) {
@@ -844,17 +910,19 @@ export const buildSessionState = async (
           throw new ExecutionError(`initializer '${name}': piece 1 で確保したバッファが台帳に無い`);
         }
         if (payload.byteLength > 0) timedWrite(buffer, payload, byteOffset);
-        // 持ち越した scale は列を読み切ったところで捨てる（生きているのは 1 列ぶんだけ）。
+        // The carried scale is dropped once the list has been read to the end (only one list's worth is alive).
         if (piece?.last === true) carriedScales.delete(name);
       };
-      // MUST: 重みアップロードも errorScope で囲む（ADR 0004 の「errorScope 常設」）。上限超過の
-      // createBuffer は同期例外を投げずに無効バッファを返し、無効バッファ / 整列違反への
-      // writeBuffer も警告すら出さない no-op になるため、包まないと重みが空のまま走り出す。
-      // MUST NOT: この区間の中で await しない。push から pop の発行までを 1 つの同期区間に
-      // 保つことが、device 単位ロックを取らずに LIFO の交錯を防いでいる根拠になっている。
-      // 区間の粒度: block（item）ごと（ADR 0108 決定 9 — push / pop は 1.81 µs / 回でほぼ無料。
-      // 費用の主はフェンスなのでフェンスは batch = part ごと 1 回に留める）。次の item の読み
-      // （`for await` の反復待ち）は区間の外に来る。
+      // MUST: weight upload is also wrapped in an errorScope (the "errorScope always on" of ADR
+      // 0004). A createBuffer over the limit returns an invalid buffer without a synchronous
+      // exception, and writeBuffer into an invalid buffer / with a misalignment becomes a no-op
+      // without even a warning, so without the wrapping execution starts with empty weights.
+      // MUST NOT: await inside this interval. Keeping push through the issue of pop in one
+      // synchronous section is the basis for preventing LIFO interleaving without taking a per-device
+      // lock.
+      // Interval granularity: per block (item) (ADR 0108 decision 9 — push / pop costs 1.81 µs each,
+      // nearly free. The main cost is the fence, so the fence stays at once per batch = part). The
+      // read of the next item (the iteration wait of `for await`) comes outside the interval.
       supplyBoundary = performance.now();
       for await (const item of batch.items) {
         supplyWaitMs += performance.now() - supplyBoundary;
@@ -862,9 +930,9 @@ export const buildSessionState = async (
         try {
           uploadItem(item);
         } catch (cause) {
-          // MUST: push した 2 本は必ず pop して積み残さない（積み残すと以後の検証結果が誤った
-          // スコープに吸われ、エラーが恒久的に見えなくなる）。破棄は外側の transaction 境界が
-          // 1 箇所で持つ。
+          // MUST: always pop the two pushed scopes and leave none behind (leftovers would swallow
+          // later validation results into the wrong scope and make errors permanently invisible).
+          // Disposal is held in one place by the outer transaction boundary.
           await discardFailureScopes(gpu.device);
           throw attributeToOrigin(batch.origin, cause);
         }
@@ -873,54 +941,59 @@ export const buildSessionState = async (
           `${label}（initializer '${item.name}'）`,
         );
         if (failure !== undefined) throw failure;
-        // item への参照はこの反復で尽きる（CPU 側バイト列の解放はフェンスを待たない — 下の
-        // フェンスの NOTE）。
+        // The reference to the item ends with this iteration (releasing the CPU-side bytes does not
+        // wait for the fence — the NOTE on the fence below).
         supplyBoundary = performance.now();
       }
-      // 列の終わりを知るまでの待ち（最後の item の後の反復）も供給側の費用。
+      // The wait until the end of the list is known (the iteration after the last item) is also a
+      // cost of the supply side.
       supplyWaitMs += performance.now() - supplyBoundary;
 
-      // MUST: batch（コンテナの part）ごとに**実際の submit を 1 回**出して完了まで待つ
-      // （ADR 0108 決定 9）。queue.writeBuffer は staging を確保して溜め込み、submit の完了まで
-      // それを解放しない — 数 GiB の重みを上げた直後は VRAM が二重計上のまま最初の run に入り、
-      // 初回ピークが重み 1 本ぶん押し上がる（f16 preset で実測 +2.7GiB。
-      // docs/research/2026-08-08-vram-oom-misreport.md §4）。逐次消費ではこの解放が
-      // staging のピーク O(最大 batch) の成立条件そのものになる。
-      // NOTE: フェンスが律するのは staging だけで、CPU 側のバイト列ではない。WebGPU の
-      // `writeBuffer` は呼んだ時点で `dataContents` を写す（仕様の content timeline —
-      // "a copy of the bytes held by the buffer source"）ので、戻った後に元のバイト列が
-      // 書き換わっても GPU に載る値は変わらない。したがって item は上げた反復で手放し、
-      // フェンスまで握らない（ADR 0070 決定 3 / ADR 0108 決定 9 の 2026-09-24 追記・
-      // 実機の固定は tests/gpu_write_buffer_copy_test.ts）。
-      // MUST NOT: scheduler.flush() で代用しない。pending dispatch が空だと flush は submit を
-      // 出さない（早期 return するのは submit の部分だけで、完了待ち・計測窓の締め・timestamp の
-      // 回収は行う）。submit の無い完了待ちでは staging が解放されない（research 2026-08-08 §4 の
-      // 実測）ので、明示の submit([]) の代わりにならない。
-      // NOTE: submit ごとの onSubmittedWorkDone を禁じているのは run のホットパス（submit.ts の
-      // 「計測の帰属」）で、ここは batch ごと 1 回・窓の外なので推定にも壁時計にも乗らない。
-      // NOTE: errorScope で囲まないのは、空の submit が確保も検証も伴わないため（両建てで囲む
-      // のは「確保を伴う区間」— device.ts の pushFailureScopes）。加えて Session の構築は
-      // GpuContext のスコープロック外なので、await を跨ぐスコープをここに張ると並行 Session の
-      // 失敗を誤帰属させる口になる。
+      // MUST: per batch (container part), issue **one real submit** and wait for completion (ADR 0108
+      // decision 9). queue.writeBuffer allocates and accumulates staging and does not release it
+      // until the submit completes — right after uploading several GiB of weights the VRAM enters the
+      // first run still double-counted, and the first peak rises by one weight (measured +2.7GiB with
+      // the f16 preset; docs/research/2026-08-08-vram-oom-misreport.md §4). With sequential
+      // consumption this release is the very condition for the staging peak O(largest batch).
+      // NOTE: the fence governs only the staging, not the CPU-side bytes. WebGPU's `writeBuffer`
+      // copies `dataContents` at the call (the spec's content timeline — "a copy of the bytes held by
+      // the buffer source"), so rewriting the original bytes after it returns does not change the
+      // values on the GPU. Therefore an item is let go in the iteration that uploaded it and not held
+      // until the fence (ADR 0070 decision 3 / ADR 0108 decision 9, addendum of 2026-09-24; pinned on
+      // hardware by tests/gpu_write_buffer_copy_test.ts).
+      // MUST NOT: substitute scheduler.flush(). With no pending dispatch, flush issues no submit (the
+      // early return covers only the submit; waiting for completion, closing the measurement window
+      // and collecting timestamps still happen). A completion wait without a submit does not release
+      // staging (measured in research 2026-08-08 §4), so it cannot replace the explicit submit([]).
+      // NOTE: what forbids onSubmittedWorkDone per submit is the run's hot path (the "Attribution of
+      // measurements" section of submit.ts); this is once per batch and outside the window, so it
+      // enters neither the estimate nor the wall clock.
+      // NOTE: it is not wrapped in an errorScope because an empty submit involves neither allocation
+      // nor validation (the pair wraps "intervals that allocate" — pushFailureScopes in
+      // gpu/error-scope.ts). Moreover Session construction is outside GpuContext's scope lock, so a
+      // scope spanning an await here would open a door to misattributing failures of concurrent
+      // Sessions.
       gpu.device.queue.submit([]);
-      // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
-      // raceCanaryDeviceLost の doc）ため競わせる — ハングを失敗に変換する保険。
+      // MUST: some implementations may never resolve onSubmittedWorkDone after a loss (measured in the
+      // doc of raceCanaryDeviceLost), so it is raced — insurance that turns a hang into a failure.
       const fenceStart = performance.now();
       await gpu[RUNTIME_INTERNAL].raceDeviceLost(gpu.device.queue.onSubmittedWorkDone(), label);
       uploadFenceMs += performance.now() - fenceStart;
       supplyBoundary = performance.now();
     }
-    // 決着の直前の判定（入口の MUST）。try の内側に置くのは、落ちたときに下の catch で所有した
-    // 重みを破棄し、積んだ借用を返すため。
+    // The check right before settling (the MUST at the entry). It sits inside the try so that a
+    // failure lets the catch below destroy the owned weights and return the added borrows.
     assertDeviceUsable(gpu, "Session の構築");
   } catch (cause) {
-    // transaction 境界（ADR 0108 決定 9）: 途中の batch で失敗したら（宣言違反・入力列の例外・
-    // GPU エラーのいずれでも）、アップロード済みの重みごと weights アリーナを破棄して
-    // 部分 Session を公開しない。
-    // MUST: 後始末の失敗で本体の例外を上書きしない（run 側と同じ規律）。原因は本体側に
-    // あり、destroy の rejection（主因は device 消失）に差し替わると調査の起点が消える。
+    // Transaction boundary (ADR 0108 decision 9): when a batch fails midway (a declaration violation,
+    // an exception from the input sequence or a GPU error alike), the weights arena is destroyed
+    // along with the uploaded weights and no partial Session is published.
+    // MUST: a failure of the clean-up does not overwrite the main exception (the same rule as on the
+    // run side). The cause lies on the main side, and replacing it with destroy's rejection (mainly a
+    // device loss) erases the starting point of the investigation.
     await weights.destroy().catch(() => undefined);
-    // MUST: 積んだ借用は必ず返す（返し損ねると貸し手 Session が永久に dispose できない）。
+    // MUST: always return the added borrows (failing to return them leaves the lending Session unable
+    // to dispose forever).
     for (const weight of borrowed) weight[RUNTIME_INTERNAL].release();
     throw cause;
   }
@@ -928,13 +1001,15 @@ export const buildSessionState = async (
   return {
     gpu,
     graph,
-    // MUST: パイプラインキャッシュは GpuContext 所有の 1 本を借りる（device 寿命 —
-    // `GpuContextInternals.pipelines`）。ここで新しく割ると、同一 device の Session ごとに
-    // 同じ WGSL のコンパイルと getBindGroupLayout の解決を払い直す。
-    // MUST: 借りるのは**構築の決着点だけ**で、構築相の途中では 1 本も引かない。構築相は
-    // GpuContext のスコープロックの外なので、ここでパイプラインを生成すると並行構築の
-    // errorScope が誤帰属する（gpu/device.ts「errorScope 区間の不変条件」）。実際の生成は
-    // 全て初回 run のミス経路（RecipeBuilder）= ロックの内側で起きる。
+    // MUST: the pipeline cache borrows the single one owned by GpuContext (device lifetime —
+    // `GpuContextInternals.pipelines`). Allocating a new one here would make every Session on the
+    // same device pay again for compiling the same WGSL and resolving getBindGroupLayout.
+    // MUST: it is borrowed **only at the settling point of construction**, and not a single pipeline
+    // is looked up during the construction phase. The construction phase is outside GpuContext's
+    // scope lock, so creating pipelines here would misattribute the errorScope of a concurrent
+    // construction (the "Invariants of errorScope sections" at the head of GpuContext in
+    // gpu/context.ts). All actual creation happens on the miss path of the first run (RecipeBuilder)
+    // = inside the lock.
     cache: new SessionPipelines(gpu[RUNTIME_INTERNAL].pipelines()),
     scheduler,
     transientLimits: {
@@ -966,11 +1041,13 @@ export const buildSessionState = async (
     linearGemvReduce,
     linearGemvRowsThreadTarget,
     planBackingBudgetBytes,
-    // linear の拡張の有無は**速度にしか効かない**（両変種は同じ整数を返す）ので、機能検出では
-    // なく経路選択としてここで 1 度だけ決める（src/kernels/linear-i8a8.ts の docstring）。
+    // Whether linear has the extension **affects only speed** (both variants return the same
+    // integers), so it is decided once here as a path choice rather than a feature detection (the
+    // docstring of src/kernels/linear-i8a8.ts).
     linearI8a8Dot: options[I8A8_DOT] ?? (dp4a ? "dp4a" : "emu"),
-    // attention は列挙ではなく**実走カナリアの判定**（上の `attentionI8a8Dot` — 既知解との突合）で
-    // 決める（当初の根拠だった M2 での変種間の不一致は撤回済み — SessionState.attentionI8a8Dot の doc）。
+    // Attention decides not by enumeration but by **the run-time canary's verdict** (`attentionI8a8Dot`
+    // above — the comparison with the known answer) (the original rationale, a mismatch between
+    // variants on M2, has been withdrawn — the doc of SessionState.attentionI8a8Dot).
     attentionI8a8Dot,
     rowBlockSplit: options[ROW_BLOCK_SPLIT],
     attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes,

@@ -1,7 +1,7 @@
 /**
- * 融合ルール `silu`（`sigmoid → mul`）。全ルール共通の適格条件と `defineRule` は
- * {@link "../fusion-rule.ts"}、適用順を決める宣言表は {@link "../fusion.ts"} の
- * `FUSION_RULES`。
+ * Fusion rule `silu` (`sigmoid → mul`). The eligibility conditions shared by every rule and
+ * `defineRule` are in {@link "../fusion-rule.ts"}; the declaration table that fixes the
+ * application order is `FUSION_RULES` in {@link "../fusion.ts"}.
  */
 
 import { numel } from "../../ops.ts";
@@ -28,13 +28,15 @@ type SiluMatch = FusionMatch & {
 };
 
 /**
- * SiLU: `sigmoid(x) → mul(x, sigmoid)` の連続 2 ノード。
+ * SiLU: two consecutive nodes `sigmoid(x) → mul(x, sigmoid)`.
  *
- * MUST: 中間 sigmoid 値は唯一の consumer が直後の mul で、graph output でないこと。
- * MUST: 全スロットが同 shape の f32 だけ。broadcast SiLU や別入力との gate へ一般化しない
- * （「式が似ている」で受理集合を広げると、fallback が正しいという保証の外へ出る）。
+ * MUST: the only consumer of the intermediate sigmoid value is the mul right after it, and it is
+ * not a graph output.
+ * MUST: every slot is f32 with the same shape only. Do not generalise to a broadcast SiLU or to a
+ * gate with another input (widening the accepted set because "the formula looks similar" steps
+ * outside the guarantee that the fallback is correct).
  *
- * 外部入力の延べ回数: x が sigmoid と mul で各 1 回 = 2 回。
+ * Total uses of external inputs: x once each in sigmoid and mul = 2.
  */
 export const SILU_RULE = defineRule<SiluMatch>({
   name: "silu",

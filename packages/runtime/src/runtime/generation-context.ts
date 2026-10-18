@@ -1,19 +1,22 @@
 /**
- * GenerationContext — 生成 1 本ぶんの可変 state を所有する器（ADR 0066 決定 1 / 3 / 5 / 6 / 7）。
+ * GenerationContext — the container that owns one generation's mutable state (ADR 0066 decisions
+ * 1 / 3 / 5 / 6 / 7).
  *
- * Session（不変重み + 計画キャッシュ）から `states{}` 宣言（ADR 0066 決定 2 — format/ir.ts）を
- * 読み、スロットごとの物理バッファ 1 本と、論理長を運ぶ可変 uniform 1 本を確保する。これは
- * **第 5 の寿命クラス**で、既存 4 クラス（重みアリーナ / slot backing / run アリーナ /
- * {@link ResidentTensor}）のどれにも載せない — 前 3 者は寿命が `Session.dispose` に一本化されて
- * おり、ResidentTensor は GpuContext 所有の別 dispose 契約を持つため、どちらも「context 単位で
- * 返す」（決定 6）と粒度が合わない。素の `createBuffer` + 自前の簿記が最小の形になる。
+ * It reads the `states{}` declarations (ADR 0066 decision 2 — format/ir.ts) from the Session
+ * (immutable weights + plan cache) and allocates one physical buffer per slot plus one mutable
+ * uniform that carries the logical lengths. This is **a fifth lifetime class**, not placed in any
+ * of the existing four (weight arena / slot backing / run arena / {@link ResidentTensor}) — the
+ * first three have their lifetime unified under `Session.dispose`, and ResidentTensor has a separate
+ * dispose contract owned by the GpuContext, so neither matches the granularity of "returned per
+ * context" (decision 6). A plain `createBuffer` plus its own bookkeeping is the smallest form.
  *
- * MUST: ここが持つのは所有権・寿命・搬送路（論理長 uniform）と、**state を束ねる bind group の
- * 置き場**（ADR 0066 決定 5 の分離焼き込み）だけ。束ね方を決めるのは実行側で、context はその
- * 成果物を backing の世代識別子と対で預かるだけの器（{@link GenerationContextInternals}）。
- * MUST: executor.ts を import しない（Session → context の一方向 import を型でも崩さない）。
- * Session から借りる面は {@link GenerationContextHost} の構造的な数欄だけ
- * （`RecipeBuilderContext` と同じ流儀）。
+ * MUST: this holds only ownership, lifetime, the carrier (the logical-length uniform) and **the place
+ * for the bind groups that bind the state** (the separate baking of ADR 0066 decision 5). The
+ * execution side decides how to bind; the context is only the container that keeps that product
+ * paired with the backing's generation id ({@link GenerationContextInternals}).
+ * MUST: do not import executor.ts (keep the one-way Session → context import intact, in types too).
+ * The surface borrowed from the Session is only the few structural fields of
+ * {@link GenerationContextHost} (the same style as `RecipeBuilderContext`).
  */
 
 import { evalDim, parseDim } from "../format/dims.ts";
@@ -28,193 +31,239 @@ import type { BakedGroups } from "./recipe.ts";
 import type { GenerationContextSpec } from "./session-types.ts";
 
 /**
- * 論理長 uniform のバイト数（`pastLength` / `queryLength` の 2 語 — ADR 0066 追記 4）。
+ * Byte size of the logical-length uniform (two words, `pastLength` / `queryLength` — ADR 0066
+ * addendum 4).
  *
- * MUST: 2 語ちょうど。カーネル側の `struct { past: u32, query: u32 }` と同じ大きさで、
- * 既存の params uniform（`struct Params { rows: u32, dim: u32 }` — codegen/reduce.ts）と
- * 同じ形なので、束縛の最小サイズはこの 8 バイトで足りる。
+ * MUST: exactly two words. It is the size of the kernel-side `struct { past: u32, query: u32 }` and
+ * has the same form as the existing params uniform (`struct Params { rows: u32, dim: u32 }` —
+ * codegen/reduce.ts), so these 8 bytes satisfy the minimum binding size.
  */
 export const LENGTHS_BYTES: number = 8;
 
 /**
- * 論理長 uniform の usage。
+ * Usage of the logical-length uniform.
  *
- * `COPY_SRC` を付けるのは**内容を読み戻せる唯一の観測点**を残すため — `queue.writeBuffer` は
- * 無効なバッファや整列違反に対して警告すら出さない no-op になるので、「書いた値が実際に
- * 載っているか」は読み戻す以外に確かめる手段が無い（実行経路はこのコピーを出さない）。
+ * `COPY_SRC` is set to keep **the only observation point from which the contents can be read
+ * back** — `queue.writeBuffer` becomes a no-op without even a warning on an invalid buffer or an
+ * alignment violation, so reading back is the only way to confirm "the written value is really
+ * there" (the execution path never issues this copy).
  */
 const LENGTHS_USAGE = BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST | BUFFER_USAGE.COPY_SRC;
 
-/** state スロットの dtype は f32 のみ（`STATE_DTYPES` — f16 席は ADR 0066 追記 5 の予約）。 */
+/** State slots are f32 only (`STATE_DTYPES` — an f16 option is reserved by ADR 0066 addendum 5). */
 export const STATE_ELEMENT_BYTES: number = 4;
 
 /**
- * 論理長の上限（搬送先が `Uint32Array` / WGSL `u32` — ADR 0066 追記 4）。
+ * Upper bound of a logical length (carried in a `Uint32Array` / WGSL `u32` — ADR 0066 addendum 4).
  *
- * MUST: safe integer だけでは足りない。`Uint32Array` への代入は範囲外を**黙って切り詰める**ので、
- * `queryLength = 2**32` は uniform 上で 0 になり、ホストが持つ論理長と GPU が見る値が例外も警告も
- * 無いまま分裂する（`writeBuffer` は値を検査しない）。
+ * MUST: a safe integer is not enough. Assigning to a `Uint32Array` **silently truncates**
+ * out-of-range values, so `queryLength = 2**32` becomes 0 in the uniform, and the host's logical
+ * length and the value the GPU sees split with no exception or warning (`writeBuffer` does not
+ * check values).
  */
 const MAX_LOGICAL_LENGTH = 0xffffffff;
 
-/** state スロット 1 本の物理実体（束縛解決済み — 実行中に再確保しない = 静的物理格納）。 */
+/**
+ * The physical backing of one state slot (bindings resolved — never reallocated during execution =
+ * static physical storage).
+ */
 export type StateSlotBacking = {
   readonly buffer: GPUBuffer;
-  /** 束縛解決済みの容量込み具体形（宣言 shape と同 rank）。 */
+  /** The binding-resolved concrete shape including capacity (same rank as the declared shape). */
   readonly shape: readonly number[];
   readonly byteLength: number;
 };
 
 /**
- * context が Session から借りる面（**必要な欄だけ**の構造的な面）。
+ * The surface the context borrows from the Session (a structural surface with **only the fields it
+ * needs**).
  *
- * MUST: executor.ts の `SessionState` を import しない（モジュール doc の一方向 import）。
- * Session は自分の状態から組んだこの束を渡す。
+ * MUST: do not import `SessionState` from executor.ts (the one-way import of the module doc).
+ * The Session passes this bundle, built from its own state.
  */
 export type GenerationContextHost = {
   readonly gpu: GpuContext;
   readonly graph: IrGraph;
   /**
-   * 未 submit のエンコードを出し切る（flush-before-destroy — ADR 0004。実体は
-   * `SubmitScheduler.flush`）。
+   * Drains unsubmitted encoding (flush-before-destroy — ADR 0004. Implemented by
+   * `SubmitScheduler.flush`).
    */
   flush(): Promise<void>;
-  /** Session の run / enqueue / dispose と同じチェーンへ積む（実体は `Session.#serialize`）。 */
+  /**
+   * Queues onto the same chain as the Session's run / enqueue / dispose (implemented by
+   * `Session.#serialize`).
+   */
   serialize<T>(body: () => Promise<T>): Promise<T>;
-  /** 破棄の決着を Session の診断へ返す（`stateBacking.residentBytes` の生存集合から外す）。 */
+  /**
+   * Reports a settled disposal to the Session's diagnostics (removes it from the live set of
+   * `stateBacking.residentBytes`).
+   */
   forget(context: GenerationContext): void;
   /**
-   * 新しい context を確保して Session の生存集合へ登録する（実体は `Session.#adopt` —
-   * `createGenerationContext` と {@link GenerationContext.fork} が共有する登録の 1 経路）。
+   * Allocates a new context and registers it in the Session's live set (implemented by
+   * `Session.#adopt` — the single registration path shared by `createGenerationContext` and
+   * {@link GenerationContext.fork}).
    *
-   * MUST: Session の dispose を**呼んだ時点で同期に**検査し、その直後に `allocate` を**同期に**
-   * 呼ぶ（間に await を挟まない）。fork はこの区間で元のスロットの複製を submit し終える前提で
-   * 元に予約を立てないので、ここに await が 1 つ入るだけで、直後に元へ発行された run の書き込み後の
-   * 状態を写す（例外の出ない取り違え）。
-   * MUST: 登録は確保が決着した後で、その前に dispose をもう一度見る（確保の await を跨いで
-   * dispose された Session へ登録しない — 確保した context は畳んでから落とす）。
+   * MUST: check the Session's dispose **synchronously at the time of the call**, and call `allocate`
+   * **synchronously** right after (no await in between). fork relies on finishing the submit of the
+   * source slots' copy within this section and places no reservation on the source, so a single
+   * await here makes it copy the state after the writes of a run issued to the source right after
+   * (a mix-up with no exception).
+   * MUST: register after the allocation settles, and check dispose once more before that (do not
+   * register into a Session disposed across the allocation's await — tear the allocated context
+   * down before failing).
    *
-   * @param refusal Session が dispose 済みのときに投げる `ExecutionError` の文言（呼び手の文脈を
-   *   付ける — 呼んだ時点と確保の後のどちらの検査で落ちても同じ文言）。
+   * @param refusal the `ExecutionError` message thrown when the Session is already disposed (it adds
+   *   the caller's context — the same message whether the check at call time or the one after
+   *   allocation fails).
    */
   adopt(allocate: () => Promise<GenerationContext>, refusal: string): Promise<GenerationContext>;
 };
 
 /**
- * {@link GenerationContext} のランタイム内部面（利用者ストーリーに対応しない実体と進行）。
+ * The runtime-internal surface of {@link GenerationContext} (backing and progress that do not map
+ * to a user story).
  *
- * MUST: 素の名前で公開しない（ADR 0008 の薄い面）。論理長の進行は run の成功で起きる契約
- * （決定 6 — ホスト側の手動加算は API にしない）なので、`advance` / `poison` / `writeLengths` は
- * **実行統合（`Session.run` の generation 面）だけが呼ぶ**。
+ * MUST: do not expose it under a plain name (the thin surface of ADR 0008). Advancing the logical
+ * length is a contract that happens on a successful run (decision 6 — manual host-side addition is
+ * not an API), so `advance` / `poison` / `writeLengths` are **called only by the execution
+ * integration (the generation surface of `Session.run`)**.
  */
 type GenerationContextInternals = {
-  /** state スロットの実体（generation run の bind group はここから束ねる — 決定 5）。 */
+  /** The state slots' backing (a generation run's bind groups bind from here — decision 5). */
   readonly slots: ReadonlyMap<string, StateSlotBacking>;
   /**
-   * この context が**借り手**か（ADR 0096 段 2 §2.1）。真のとき論理長は自分では進まず、
-   * スロットの実体も lengths 以外は貸し手のもの。
+   * Whether this context is a **borrower** (ADR 0096, addendum of 2026-09-08 on stage 2). When
+   * true, its logical length does not advance on its own, and apart from the lengths the slot
+   * backings belong to the lender.
    *
-   * MUST: 実行統合（`Session.run`）はこの 1 欄で「進行させない」を判断する。借り手側の
-   * `advance` / `defer` を黙って no-op にすると、貸し手の P だけが動く形と区別が付かない。
+   * MUST: the execution integration (`Session.run`) decides "do not advance" from this one field.
+   * Silently turning the borrower's `advance` / `defer` into no-ops would be indistinguishable from
+   * a form where only the lender's P moves.
    */
   readonly borrowing: boolean;
-  /** この context の device（借用時の同一 device 照合 — 別 device のスロットは束縛できない）。 */
+  /**
+   * This context's device (the same-device check when borrowing — slots of another device cannot be
+   * bound).
+   */
   readonly gpu: GpuContext;
   /**
-   * sliding なスロット名 → 窓幅（借用時に**貸し手と借り手で一致**を見るための面）。
+   * Sliding slot name → window width (the surface for checking **lender and borrower agree** when
+   * borrowing).
    *
-   * MUST: 論理 col → 物理 row の写像は読み書き同式（ADR 0067 決定 4）。グラフ内の一致は
-   * `validateGraphContracts` が見るが、貸し借りは**2 つのグラフに跨る**ので、ここで突き合わせる
-   * 以外に検出点が無い（借り手の窓だけ広いと、窓の外に落ちた行を過去として読む）。
+   * MUST: logical col → physical row uses the same formula for reads and writes (ADR 0067 decision
+   * 4). `validateGraphContracts` checks agreement within a graph, but lending **spans two graphs**,
+   * so comparing here is the only detection point (a wider borrower window reads rows that fell out
+   * of the window as the past).
    */
   readonly slidingSlots: ReadonlyMap<string, number>;
-  /** 貸し手として使えるか（借り手 context の生成時に 1 度だけ）。 */
+  /** Whether it can serve as a lender (once, when a borrowing context is created). */
   assertLendable(where: string): void;
-  /** 借り手を登録する（生きている間は貸し手の `dispose` を拒否する）。 */
+  /** Registers a borrower (while it lives, the lender's `dispose` is refused). */
   registerBorrower(borrower: GenerationContext): void;
-  /** 借り手の登録を外す（借り手の `dispose`）。 */
+  /** Removes a borrower's registration (the borrower's `dispose`). */
   forgetBorrower(borrower: GenerationContext): void;
   /**
-   * この context が許す物理 chunk 行数の集合 = `{1} ∪ chunkBuckets ∪ {chunkLength}`
-   * （run 前検査 `assertGenerationRun` — src/runtime/recipe.ts が読む唯一の形）。
+   * The set of physical chunk row counts this context allows = `{1} ∪ chunkBuckets ∪ {chunkLength}`
+   * (the only form read by the pre-run check `assertGenerationRun` — src/runtime/recipe.ts).
    *
-   * MUST: 構築は context 生成時の 1 度きり。run ごとに組み直すと、decode のホットパスに
-   * バケット本数ぶんの Set 構築が毎 step 乗る（実行形の本数はここでは固定なのに）。
+   * MUST: built only once, at context creation. Rebuilding it per run would put a Set construction
+   * per bucket on the decode hot path every step (although the number of execution shapes is fixed
+   * here).
    */
   readonly allowedRows: ReadonlySet<number>;
-  /** 論理長 uniform（レシピは固定束縛でこれを参照する — 追記 4）。 */
+  /** The logical-length uniform (recipes reference it through a fixed binding — addendum 4). */
   readonly lengths: GPUBuffer;
-  /** この context が常駐させている GPU バイト数（診断 `stateBacking.residentBytes` の元）。 */
+  /**
+   * GPU bytes this context keeps resident (the source of the diagnostic
+   * `stateBacking.residentBytes`).
+   */
   readonly bytes: number;
   /**
-   * 容量記号の解決済み束縛（`spec.bindings` の検査済みの写し — ADR 0066 追記 7）。
+   * Resolved bindings of the capacity symbols (the checked copy of `spec.bindings` — ADR 0066
+   * addendum 7).
    *
-   * states と入力の**両方**に現れる記号は、context 側（容量）と run 側（入力 shape）の 2 箇所で
-   * 独立に決まる。実行統合はこの表と run の解決済み束縛を照合して分裂を fail loudly にする
-   * （割れたまま走ると、確保容量と計画が別の値で組まれた state を沈黙で読む）。
+   * A symbol that appears in **both** states and inputs is decided independently at two places: the
+   * context side (capacity) and the run side (input shapes). The execution integration checks this
+   * table against the run's resolved bindings and fails a split loudly (running with them split
+   * silently reads state whose allocated capacity and plan were built from different values).
    */
   readonly bindings: SymbolBindings;
   /**
-   * 進行中の generation run を 1 本受け付ける（**`Session.run` の同期区間で**取り、run の決着で
-   * 必ず返す）。取れなければ fail loudly（dispose 要求後・汚染後・device 消失後、および
-   * **同一 context に未決着 run が既に 1 本ある**とき — {@link GenerationContext.rewind} の doc と
-   * 同じ「論理長が横から動く」形が、2 本目の発行そのもので起きる）。
+   * Accepts one in-flight generation run (taken **in the synchronous section of `Session.run`** and
+   * always returned when the run settles). If it cannot be taken, it fails loudly (after a dispose
+   * request, after poisoning, after device loss, and when **the same context already has one
+   * unsettled run** — the same "logical length moved from the side" as in the doc of
+   * {@link GenerationContext.rewind} happens by issuing the second run itself).
    */
   acquireRun(kind?: "batch"): void;
   assertCanDispose(): void;
-  /** 進行中の generation run を返す（成功・失敗の両経路で必ず 1 度）。 */
+  /**
+   * Returns the in-flight generation run (always exactly once, on both the success and the failure
+   * path).
+   */
   releaseRun(): void;
   /**
-   * 論理長の内部読み（run の頭で 1 度だけ — 遮断面は**破棄本体の実行後**）。
+   * The internal read of the logical length (once, at the head of a run — it is cut off **after
+   * the disposal body runs**).
    *
-   * MUST: 利用者面の `pastLength` を run から読まない。dispose は 2 段（受付終了 → chained な
-   * 破棄本体）で、受理済み run は 1 段目と 2 段目の間で走るため、利用者面の判定では
-   * 「`run(); dispose()` の非 await 並び」が受理済み run を殺す。
+   * MUST: do not read the user-facing `pastLength` from a run. dispose has two steps (closing
+   * admission → the chained disposal body), and an accepted run executes between the first and the
+   * second, so a user-facing check would let "`run(); dispose()` issued without await" kill the
+   * accepted run.
    */
   pastLength(): number;
   /**
-   * `token` の backing に対して焼いてある context 側 bind group（無ければ undefined = 焼き直し）。
+   * The context-side bind groups baked for the backing of `token` (undefined if none = bake again).
    *
-   * MUST: 引くときに必ず `token` を照合する（**引ける形を token 無しで作らない**）。束は
-   * backing 所有のバッファ（slot / 入力）も掴んでいるので、退役した backing の token で焼いた束を
-   * そのまま dispatch すると破棄済みバッファを読む — 照合と焼き直しと dispatch の順を
-   * 1 箇所に閉じるための引数（executor の `#generationGroups`）。
+   * MUST: always match `token` on lookup (**never create a lookup without a token**). A bundle also
+   * holds buffers owned by the backing (slots / inputs), so dispatching a bundle baked under the
+   * token of a retired backing reads destroyed buffers — the argument keeps the order of matching,
+   * re-baking and dispatch in one place (`#generationGroups` in the executor).
    */
   bakedGroups(token: number): BakedGroups | undefined;
-  /** 焼いた束を預ける（`token` の backing が保持されている間だけ引ける）。 */
+  /** Stores a baked bundle (it can be looked up only while the backing of `token` is kept). */
   setBakedGroups(token: number, groups: BakedGroups): void;
   /**
-   * `token` の backing の束を捨てる（Session が backing を退役させるときに呼ぶ）。
-   * MUST: 退役と同時に捨てる — 束は退役した実体を掴んでいるので、残すと参照ぶんの寿命が延びる。
+   * Drops the bundle of the backing of `token` (called when the Session retires a backing).
+   * MUST: drop it at retirement — the bundle holds the retired backing, so keeping it extends that
+   * lifetime by the reference.
    */
   dropBakedGroups(token: number): void;
   /**
-   * 論理長を書き出す（毎 run の encode 前 — {@link GenerationContext} の doc）。
-   * `pastLength` は**呼び出し側が run の頭で捕捉した値**（内部の現在値との一致を照合する）。
+   * Writes the logical lengths (before every run's encode — the doc of {@link GenerationContext}).
+   * `pastLength` is **the value the caller captured at the head of the run** (checked against the
+   * current internal value).
    */
   writeLengths(pastLength: number, queryLength: number): void;
-  /** 論理長を進める（**run の成功でのみ** — 決定 6）。捕捉 P の照合は `writeLengths` と同じ。 */
+  /**
+   * Advances the logical length (**only on a successful run** — decision 6). The captured P is
+   * checked as in `writeLengths`.
+   */
   advance(pastLength: number, queryLength: number): void;
   /**
-   * 論理長を**進めずに保留する**（`commit: "deferred"` の run が例外なく返ったとき）。
+   * **Holds the logical length pending without advancing it** (when a `commit: "deferred"` run
+   * returned without an exception).
    *
-   * 進行の権利をホストへ 1 度だけ渡す形で、渡した先は {@link GenerationContext.commit}。
-   * 保留がある間は新しい run のリースと `rewind` を拒否するので、「GPU が見た論理長」と
-   * 「進行の基準」が割れる窓は開かない（ADR 0066 決定 6 の二重簿記の禁止はこの形でも保たれる —
-   * 論理長を動かせるのは依然 1 経路だけ）。捕捉 P の照合は `advance` と同じ。
+   * It hands the right to advance to the host exactly once, to {@link GenerationContext.commit}.
+   * While a pending commit exists, new run leases and `rewind` are refused, so no window opens in
+   * which "the logical length the GPU saw" and "the basis of progress" diverge (the ban on double
+   * bookkeeping of ADR 0066 decision 6 holds in this form too — there is still only one path that
+   * can move the logical length). The captured P is checked as in `advance`.
    */
   defer(pastLength: number, queryLength: number): void;
-  /** 汚染する（state 変更 dispatch を含む run の失敗 — 追記 3）。 */
+  /** Poisons the context (failure of a run containing a state-changing dispatch — addendum 3). */
   poison(reason: string): void;
 };
 
 /**
- * sliding なスロットの名前 → 窓幅 `W`（ノード attrs `window` 由来 — ADR 0067 決定 4）。
+ * Sliding slot name → window width `W` (from the node attrs `window` — ADR 0067 decision 4).
  *
- * MUST: 判定材料はノード側にしかない（`graph.states` の宣言は容量だけを持ち、窓は
- * **参照するノード**が宣言する）。同一スロットに触れる全ノードで `window` が一致することは
- * `validateGraphContracts` の `assertStateOrder` が Session 構築時に済ませているので、
- * ここは 1 本でも sliding 宣言があれば sliding として拾えばよい。
+ * MUST: the information exists only on the node side (the `graph.states` declaration holds only the
+ * capacity; the window is declared by **the referencing nodes**). `assertStateOrder` in
+ * `validateGraphContracts` has already checked at Session construction that every node touching
+ * the same slot agrees on `window`, so here one sliding declaration is enough to treat the slot as
+ * sliding.
  */
 const slidingSlotWindows = (graph: IrGraph): ReadonlyMap<string, number> => {
   const sliding = new Map<string, number>();
@@ -229,15 +278,18 @@ const slidingSlotWindows = (graph: IrGraph): ReadonlyMap<string, number> => {
 };
 
 /**
- * sliding スロットの**余裕**（`capacity − window` の最小 — sliding が 1 本も無ければ undefined）。
+ * The **slack** of the sliding slots (the minimum of `capacity − window` — undefined if there is no
+ * sliding slot).
  *
- * 余裕は「論理長より先に書かれた行」の置き場で、ring の法が窓ではなく容量であること
- * （`src/kernels/state-attention.ts` の `stateSlotRowWgsl`）と対で意味を持つ。ホストは
- * この数を超える行数を投機的に書いてはいけない — 超えると棄却行が live な過去 KV を潰す。
+ * Slack is the room for "rows written ahead of the logical length", and it is meaningful together
+ * with the ring modulus being the capacity, not the window (`stateSlotRowWgsl` in
+ * `src/kernels/state-attention.ts`). The host must not speculatively write more rows than this — if
+ * it does, rejected rows overwrite live past KV.
  *
- * MUST: 容量軸は**スロット shape の軸 2**（`[B,Hkv,C,D]` — states 形 op の契約。実行計画側
- * `recipe-builders/attention.ts` の `buildStateAttention` / `buildStateAppend` も同じ軸を読む）。
- * ここで別の軸を読むと、公開する余裕が実際の物理行数と無関係な数になる。
+ * MUST: the capacity axis is **axis 2 of the slot shape** (`[B,Hkv,C,D]` — the contract of the
+ * states-form ops. On the execution-plan side, `buildStateAttention` / `buildStateAppend` in
+ * `recipe-builders/attention.ts` read the same axis). Reading another axis here would make the
+ * published slack a number unrelated to the actual physical row count.
  */
 const slidingSlackRows = (
   slots: ReadonlyMap<string, StateSlotBacking>,
@@ -245,9 +297,10 @@ const slidingSlackRows = (
 ): number | undefined => {
   let slack: number | undefined;
   for (const [name, window] of windows) {
-    // 参照完全性（states 宣言とノードの states 欄の対応）は IR 層が済ませているので、名前は
-    // 必ず引ける。rank が足りない形は shape 層が run で落とすが、ここで黙って飛ばすと
-    // 「余裕なし」と区別の付かない undefined か、別軸由来の過大な余裕を公開してしまう。
+    // The IR layer has already checked referential integrity (states declarations vs the nodes'
+    // states fields), so the name always resolves. The shape layer fails a shape with too low a rank
+    // at run time, but silently skipping it here would publish either an undefined that cannot be
+    // told from "no slack" or an oversized slack taken from another axis.
     const shape = slots.get(name)?.shape;
     if (shape === undefined || shape.length < 3) {
       throw new ExecutionError(
@@ -267,11 +320,12 @@ const slidingSlackRows = (
 };
 
 /**
- * `chunkLength` の値域検査（GPU 非依存の純関数）。
+ * Range check of `chunkLength` (a GPU-independent pure function).
  *
- * MUST: 上限は u32（`queryLength ≤ chunkLength` の門を通じて論理長の上限もここで決まる —
- * {@link MAX_LOGICAL_LENGTH}）。estimator（estimate.ts）も同じ門を通す — 実構築が拒否する
- * 指定に見積りだけが正常値を返すと、作れない構成へ admission の数字が与えられる。
+ * MUST: the upper bound is u32 (through the `queryLength ≤ chunkLength` check this also fixes the
+ * upper bound of the logical length — {@link MAX_LOGICAL_LENGTH}). The estimator (estimate.ts) goes
+ * through the same check — if only the estimate returned a normal value for a spec the real
+ * construction rejects, admission numbers would be given to a configuration that cannot be built.
  */
 export const assertChunkLength = (chunkLength: number): void => {
   if (!Number.isSafeInteger(chunkLength) || chunkLength < 1 || chunkLength > MAX_LOGICAL_LENGTH) {
@@ -283,16 +337,19 @@ export const assertChunkLength = (chunkLength: number): void => {
 };
 
 /**
- * `chunkBuckets` の値域・順序検査（GPU 非依存の純関数 — {@link assertChunkLength} と同じ流儀）。
+ * Range and order check of `chunkBuckets` (a GPU-independent pure function — the same style as
+ * {@link assertChunkLength}).
  *
- * 受理するのは「2 以上 `chunkLength` 未満の整数の**狭義昇順**列」だけ。3 つの拒否理由:
- * `1` は decode 形そのもので追加の実行形にならない・`chunkLength` 以上は
- * {@link GenerationContext} の `queryLength ≤ chunkLength` 契約の外（宣言 shape に載らない行が
- * 出る）・重複と降順は「`queryLength` 以上の最小バケット」という選び方が線形走査で決まらなく
- * なる（呼び出し側が並べ替えを持つと、context が許す集合と選ぶ集合が別々に育つ）。
+ * Only "a **strictly increasing** list of integers ≥ 2 and < `chunkLength`" is accepted. Three
+ * reasons for rejection: `1` is the decode shape itself and adds no execution shape; values ≥
+ * `chunkLength` lie outside the `queryLength ≤ chunkLength` contract of {@link GenerationContext}
+ * (rows that do not fit the declared shape appear); duplicates and descending order keep the choice
+ * "smallest bucket ≥ `queryLength`" from being decided by a linear scan (if the caller kept its own
+ * sorting, the set the context allows and the set it chooses from would grow apart).
  *
- * MUST: 見積り（estimate.ts）も同じ門を通す — 実構築が拒否する指定に見積りだけが正常値を
- * 返すと、作れない構成へ admission の数字が与えられる。
+ * MUST: the estimate (estimate.ts) goes through the same check — if only the estimate returned a
+ * normal value for a spec the real construction rejects, admission numbers would be given to a
+ * configuration that cannot be built.
  */
 export const assertChunkBuckets = (
   chunkBuckets: readonly number[] | undefined,
@@ -318,11 +375,13 @@ export const assertChunkBuckets = (
 };
 
 /**
- * context が許す物理 chunk 行数の集合 — `{1}`（decode 形）∪ `chunkBuckets` ∪ `{chunkLength}`
- * （prefill 形）。昇順のまま入れる（`assertChunkRowsAllowed` の診断がこの反復順をそのまま列挙する）。
+ * The set of physical chunk row counts a context allows — `{1}` (decode shape) ∪ `chunkBuckets` ∪
+ * `{chunkLength}` (prefill shape). Inserted in ascending order (the diagnostic of
+ * `assertChunkRowsAllowed` lists them in this iteration order).
  *
- * MUST: context の構築と見積り（estimate.ts）が同じこの 1 本で集合を作る（片方だけ直されると、
- * run が拒否する形に見積りが数を返す）。値域は {@link assertChunkBuckets} が先に見る前提。
+ * MUST: context construction and the estimate (estimate.ts) build the set with this one function
+ * (if only one side were fixed, the estimate would return numbers for shapes a run rejects). It
+ * assumes {@link assertChunkBuckets} has checked the range first.
  */
 export const allowedChunkRows = (
   chunkLength: number,
@@ -330,13 +389,14 @@ export const allowedChunkRows = (
 ): ReadonlySet<number> => new Set([1, ...chunkBuckets, chunkLength]);
 
 /**
- * `spec.bindings` を検査して null プロトタイプの表へ写す。
+ * Checks `spec.bindings` and copies them into a null-prototype table.
  *
- * MUST: 束縛の器は null プロトタイプ（plan.ts の `bindSymbols` と同じ理由 — シンボルの文法
- * `[A-Za-z_][A-Za-z0-9_]*` は "__proto__" にマッチし、素の `{}` では代入が [[Prototype]] 設定に
- * 化けて own property が作られない）。
- * MUST: 記号容量は**ここで与えられた値だけ**で決まる。states は束縛源にならず（ADR 0066
- * 決定 2）、context は入力を 1 本も持たないので、入力 shape からの推定は原理的に不可能。
+ * MUST: the bindings container has a null prototype (the same reason as `bindSymbols` in plan.ts —
+ * the symbol grammar `[A-Za-z_][A-Za-z0-9_]*` matches "__proto__", and on a plain `{}` the
+ * assignment turns into setting [[Prototype]] without creating an own property).
+ * MUST: a symbolic capacity is decided **only by the values given here**. States are not a binding
+ * source (ADR 0066 decision 2) and the context has no inputs at all, so inferring from input shapes
+ * is impossible in principle.
  */
 export const resolveBindings = (
   graph: IrGraph,
@@ -359,10 +419,11 @@ export const resolveBindings = (
 };
 
 /**
- * スロット 1 本の宣言 shape を束縛で具体化する（容量込みの具体形 — ADR 0066 決定 2）。
+ * Concretises one slot's declared shape with the bindings (the concrete shape including capacity —
+ * ADR 0066 decision 2).
  *
- * MUST: 未束縛シンボルは fail loudly。ここを 0 や 1 で埋めると、容量の足りないスロットのまま
- * 生成が走り出して沈黙 OOB になる。
+ * MUST: an unbound symbol fails loudly. Filling it with 0 or 1 would start generation on a slot
+ * without enough capacity, ending in a silent OOB.
  */
 export const resolveSlotShape = (
   name: string,
@@ -389,10 +450,11 @@ export const resolveSlotShape = (
   });
 
 /**
- * スロット単体の検査に使う device の絶対上限（ADR 0089 — 物理空き VRAM は推測しない）。
+ * The device's absolute limits used for the per-slot check (ADR 0089 — physical free VRAM is not
+ * guessed).
  *
- * `GenerationContext.create` は `GpuContext.limits`（2 欄とも granted 値）を、estimator は
- * `EstimateOptions` の同名欄（どちらも任意）をそのまま渡す。
+ * `GenerationContext.create` passes `GpuContext.limits` (both fields are granted values); the
+ * estimator passes the fields of the same name in `EstimateOptions` (both optional) as they are.
  */
 export type SlotLimits = {
   readonly maxStorageBufferBindingSize?: number;
@@ -400,17 +462,19 @@ export type SlotLimits = {
 };
 
 /**
- * スロット 1 本のバイト数を device の絶対上限と突き合わせる（ADR 0066 追記 5）。
+ * Checks one slot's byte size against the device's absolute limits (ADR 0066 addendum 5).
  *
- * MUST: 上限は 2 本とも見る。`maxStorageBufferBindingSize ≤ maxBufferSize` は device を計画
- * する側（gpu/device.ts の `planRequiredLimits`）が保っている関係であって、外から渡された
- * GpuContext にまで効く保証ではない — 束縛上限だけを見る形にすると、関係が崩れた device で
- * 「確保そのものが通らない大きさ」を素通しして無効バッファを掴む。
- * MUST: 見積り（estimate.ts）も**この 1 本**を通す。写しを置くと、実構築が拒否する容量へ
- * 見積りだけが数字を返す形（起動時には数字が出て最初のターンで落ちる）が復活する。
+ * MUST: check both limits. `maxStorageBufferBindingSize ≤ maxBufferSize` is a relation kept by the
+ * side that plans the device (`planRequiredLimits` in gpu/device.ts), not a guarantee for a
+ * GpuContext passed in from outside — checking only the binding limit would, on a device where the
+ * relation is broken, let through "a size whose allocation itself cannot succeed" and hold an
+ * invalid buffer.
+ * MUST: the estimate (estimate.ts) goes through **this one function** too. A copy would bring back
+ * the form where only the estimate returns numbers for a capacity the real construction rejects
+ * (numbers at startup, a failure on the first turn).
  *
- * 上限が未指定の欄は検査しない — 見積りの呼び手は device を持たないことがあり、そこで既定値を
- * 捏造すると「どの device でも実際には出ない境界」を estimator だけが主張する。
+ * Fields without a limit are not checked — estimate callers may have no device, and inventing a
+ * default there would make the estimator alone claim "a boundary that no device actually has".
  */
 export const assertSlotWithinLimits = (
   name: string,
@@ -420,9 +484,9 @@ export const assertSlotWithinLimits = (
 ): void => {
   for (const limitName of ["maxStorageBufferBindingSize", "maxBufferSize"] as const) {
     const limit = limits[limitName];
-    // MUST: スロット単体のバイト数が上限を超える容量指定は fail loudly（追記 5）。
-    // 分割して束ねる形は持たない（KV は連続容量 — 決定 8 の明示選択）ので、超過は容量設計の
-    // 誤りとして呼び出し点で落とす以外に手が無い。
+    // MUST: a capacity whose single-slot byte size exceeds a limit fails loudly (addendum 5).
+    // There is no split-and-bind form (KV is one contiguous capacity — the explicit choice of
+    // decision 8), so an overrun can only fail at the call site as an error in capacity design.
     if (limit !== undefined && byteLength > limit) {
       throw new ExecutionError(
         `state '${name}': 容量 [${shape.join(",")}] の ${byteLength} バイトが ` +
@@ -434,103 +498,117 @@ export const assertSlotWithinLimits = (
 };
 
 /**
- * 借り手 context が抱える借用の状態（ADR 0096 段 2 §2.1）。**貸し手の実体そのもの**を持つ
- * （写しではない — 写すと「どちらが本物か」が生まれる）。
+ * The borrowing state a borrowing context holds (ADR 0096, addendum of 2026-09-08 on stage 2). It
+ * holds **the lender itself** (not a copy — a copy would raise "which one is real").
  */
 type BorrowState = {
   readonly lender: GenerationContext;
-  /** 貸し手の `slidingSlack` の写し（借り手は自前のスロットを持たないので導出できない）。 */
+  /**
+   * A copy of the lender's `slidingSlack` (the borrower has no slots of its own, so it cannot
+   * derive it).
+   */
   readonly slidingSlack: number | undefined;
 };
 
 export class GenerationContext {
   /**
-   * 固定長 prefill chunk の行数（ADR 0066 決定 4 — context 生成時に確定する計画時定数）。
-   * decode は `queryLength = 1` 固定形で、prefill の末尾 chunk は pad で埋める（切るのは
-   * `queryLength`）。
+   * Row count of a fixed-length prefill chunk (ADR 0066 decision 4 — a plan-time constant fixed at
+   * context creation). decode is the fixed `queryLength = 1` shape, and the last prefill chunk is
+   * filled with padding (cut by `queryLength`).
    */
   readonly chunkLength: number;
   /**
-   * prefill 形として `chunkLength` に加えて許す物理 chunk 行数（狭義昇順・凍結コピー —
-   * ADR 0066 決定 4 / 追記〈バケット〉）。宣言していなければ空。
+   * Physical chunk row counts allowed as prefill shapes in addition to `chunkLength` (strictly
+   * increasing, frozen copy — ADR 0066 decision 4 / addendum 10 (buckets)). Empty if none was
+   * declared.
    *
-   * 呼び出し側は chunk ごとに `queryLength` 以上の最小の値を物理行数に選ぶ（無ければ
-   * `chunkLength`）。`chunkLength` はバケットを足しても**最大値のまま**で、
-   * `queryLength ≤ chunkLength` の上限も動かない。
+   * Per chunk, the caller picks the smallest value ≥ `queryLength` as the physical row count
+   * (`chunkLength` if none). `chunkLength` **stays the maximum** when buckets are added, and the
+   * bound `queryLength ≤ chunkLength` does not move either.
    */
   readonly chunkBuckets: readonly number[];
   /**
-   * sliding スロットの**余裕行数** = `capacity − window` の最小（sliding が 1 本も無ければ
-   * undefined）。ring の法は窓ではなく容量（`src/kernels/state-attention.ts` の
-   * `stateSlotRowWgsl`）なので、この行数までは**論理長より先に**物理 ring へ書いても、棄却して
-   * 良い（= `commit` で受理しない）行が live な過去 KV を潰さない。
+   * The **slack rows** of the sliding slots = the minimum of `capacity − window` (undefined if there
+   * is no sliding slot). The ring modulus is the capacity, not the window (`stateSlotRowWgsl` in
+   * `src/kernels/state-attention.ts`), so up to this many rows can be written to the physical ring
+   * **ahead of the logical length** without rows that may be rejected (= not accepted by `commit`)
+   * overwriting live past KV.
    *
-   * 投機デコード（draft を検証してから受理行数を確定する形）の `queryLength` の上限がこれで、
-   * `commit: "deferred"` の run は `queryLength ≤ slidingSlack` を発行の同期区間で執行する
-   * （`Session.run`）。下端が最も低い読者は**借り手**（readonly = drafter）の
-   * `P+m−W` で、棄却行 `j` が潰す論理列 `P+j−C` がそこより下に落ちる条件が
-   * `j − m < capacity − window` = この余裕（`m` = commit した行数・`commit(0)` を含む）。
+   * This is the upper bound of `queryLength` in speculative decoding (verifying a draft before fixing
+   * the accepted row count), and a `commit: "deferred"` run enforces `queryLength ≤ slidingSlack` in
+   * the synchronous section of issue (`Session.run`). The reader with the lowest lower edge is the
+   * **borrower** (readonly = the drafter) at `P+m−W`, and the condition for the logical column
+   * `P+j−C` overwritten by rejected row `j` to fall below it is `j − m < capacity − window` = this
+   * slack (`m` = committed rows, including `commit(0)`).
    */
   readonly slidingSlack: number | undefined;
-  /** ランタイム内部面（利用者が触る面ではない）。 */
+  /** The runtime-internal surface (not a surface for users). */
   readonly [RUNTIME_INTERNAL]: GenerationContextInternals;
   readonly #host: GenerationContextHost;
   readonly #slots: ReadonlyMap<string, StateSlotBacking>;
-  /** 借用の状態（undefined = 自前のスロットを持つ通常の context）。 */
+  /** Borrowing state (undefined = an ordinary context with its own slots). */
   readonly #borrow: BorrowState | undefined;
   /**
-   * この context を借りている context の集合（ADR 0096 段 2 §2.1）。
+   * The contexts borrowing this context (ADR 0096, addendum of 2026-09-08 on stage 2).
    *
-   * MUST: 生きている間の `dispose()` は fail loudly。借り手の bind group は貸し手のスロット
-   * バッファを掴んでいるので、破棄すると次の draft が破棄済みバッファを読む。
+   * MUST: `dispose()` while any is alive fails loudly. The borrowers' bind groups hold the lender's
+   * slot buffers, so destroying them makes the next draft read destroyed buffers.
    */
   readonly #borrowers = new Set<GenerationContext>();
   /**
-   * sliding なスロット名 → 窓幅（{@link GenerationContext.rewind} の全拒否条件 —
-   * ADR 0066 追記 2。窓幅は {@link GenerationContext.slidingSlack} の算出にも使う）。
+   * Sliding slot name → window width (the blanket refusal condition of
+   * {@link GenerationContext.rewind} — ADR 0066 addendum 2. The widths also feed
+   * {@link GenerationContext.slidingSlack}).
    */
   readonly #slidingSlots: ReadonlyMap<string, number>;
   readonly #lengths: GPUBuffer;
   /**
-   * 論理長の書き出し値。**全域を毎回書く**（部分書きにすると、片方だけ更新された組が残って
-   * 「pastLength は新しく queryLength は前 step」という混ざった uniform で dispatch が回る）。
+   * The values written for the logical lengths. **The whole range is written every time** (a partial
+   * write could leave a half-updated pair, and dispatches would run with a mixed uniform: "pastLength
+   * new, queryLength from the previous step").
    */
   readonly #lengthValues = new Uint32Array(2);
   #pastLength = 0;
   /**
-   * commit 待ちの deferred run（{@link GenerationContext.commit} が畳むまで残る）。
+   * The deferred run waiting for commit (kept until {@link GenerationContext.commit} folds it).
    *
-   * MUST: 立っている間は run のリースと `rewind` を拒否する。物理 ring には `queryLength` 行が
-   * 既に書かれていて論理長だけが止まっている状態で、次の run や巻き戻しを通すと「どこまでが
-   * 確定した KV か」を 2 箇所が別々に決めることになる。
+   * MUST: while it is set, run leases and `rewind` are refused. The physical ring already holds
+   * `queryLength` written rows while only the logical length is stopped; letting the next run or a
+   * rewind through would have two places decide separately "how far the KV is committed".
    */
   #pending: { readonly pastLength: number; readonly queryLength: number } | undefined;
   /**
-   * context 側で焼いた bind group 束（backing の世代識別子 → 束 — ADR 0066 決定 5）。Session が
-   * backing を複数保持する（perf-ledger H-15）ので、保持中の backing ごとに 1 束を持ち、退役した
-   * backing の束は Session が `dropBakedGroups` で捨てる。**GPUBindGroup は destroy 不要**
-   * （GC 任せ）だが、掴んでいる backing 所有のバッファの寿命を延ばすので、退役と同時に手放す。
+   * Context-side baked bind group bundles (backing generation id → bundle — ADR 0066 decision 5).
+   * The Session keeps several backings (perf-ledger H-15), so there is one bundle per kept backing,
+   * and the Session drops the bundles of retired backings with `dropBakedGroups`. **A GPUBindGroup
+   * needs no destroy** (left to GC), but it extends the lifetime of the backing-owned buffers it
+   * holds, so it is let go at retirement.
    */
   readonly #baked = new Map<number, BakedGroups>();
-  /** 汚染の理由（追記 3）。立つと `dispose` 以外の全操作を拒否する（読みも含む）。 */
+  /**
+   * The poison reason (addendum 3). Once set, every operation except `dispose` is refused (reads
+   * included).
+   */
   #poisoned: string | undefined;
   /**
-   * 高々1本の使用予約。runはその完了、batchは区間の最終決着まで保つ。
-   * batch中はSessionの実行本体だけが先に戻るため、通常runと異なりdisposeを拒否する。
+   * At most one use reservation. A run keeps it until it completes, a batch until the section's
+   * final settlement. During a batch only the Session's execution body returns early, so unlike an
+   * ordinary run, dispose is refused.
    */
   #runKind: "run" | "batch" | undefined;
   /**
-   * dispose の 1 段目 — **新規受付の終了**（同期に立つ）。以後の run admission と利用者面の
-   * 読み書きを拒否するが、受理済み run の内部面（論理長の搬送・進行）は**まだ通す**。
+   * Step 1 of dispose — **closing admission** (set synchronously). Later run admission and
+   * user-facing reads and writes are refused, but the internal surface of accepted runs (carrying
+   * and advancing the logical length) **still passes**.
    */
   #disposeRequested = false;
-  /** dispose の 2 段目 — 破棄本体が走り出したこと（内部面もここで閉じる）。 */
+  /** Step 2 of dispose — the disposal body has started (the internal surface closes here too). */
   #disposed = false;
   #disposal: Promise<void> | undefined;
 
   /**
-   * MUST: 構築の入口は {@link GenerationContext.create} と {@link GenerationContext.fork} だけ
-   * （errorScope の門を迂回させない）。
+   * MUST: the only construction entry points are {@link GenerationContext.create} and
+   * {@link GenerationContext.fork} (no bypassing the errorScope check).
    */
   private constructor(
     host: GenerationContextHost,
@@ -546,14 +624,15 @@ export class GenerationContext {
     this.#slots = slots;
     this.#slidingSlots = slidingSlots;
     this.#borrow = borrow;
-    // 借り手の余裕は**貸し手の写し**（ADR 0096 段 2 §2.1）。自前で導出すると、貸し手が
-    // sliding 宣言を持つのに借り手の readonly ノードが window を宣言していない形で
-    // 「余裕なし」を名乗り、投機の上限がホスト側で緩む。
+    // A borrower's slack is **a copy of the lender's** (ADR 0096, addendum of 2026-09-08 on stage
+    // 2). Deriving it locally would claim "no slack" when the lender has a sliding declaration but
+    // the borrower's readonly nodes declare no window, loosening the speculation bound on the host.
     this.slidingSlack =
       borrow === undefined ? slidingSlackRows(slots, slidingSlots) : borrow.slidingSlack;
     this.#lengths = lengths;
     this.chunkLength = chunkLength;
-    // 凍結コピー: 呼び出し側の配列を後から書き換えられると、許可集合（下）と公開面が割れる。
+    // Frozen copy: if the caller's array were modified later, the allowed set (below) and the
+    // public surface would diverge.
     this.chunkBuckets = Object.freeze([...chunkBuckets]);
     this[RUNTIME_INTERNAL] = {
       slots,
@@ -562,9 +641,11 @@ export class GenerationContext {
       slidingSlots,
       allowedRows: allowedChunkRows(chunkLength, this.chunkBuckets),
       lengths,
-      // 容量は確定済み（静的物理格納 — ADR 0066 決定 3）なので、ここで 1 度畳んで持つ。
-      // MUST: 借り手はスロットのバイト数を数えない（実体は貸し手 context の所有物で、
-      // 両方が数えると診断 `stateBacking.residentBytes` が同じ VRAM を二重計上する）。
+      // The capacity is fixed (static physical storage — ADR 0066 decision 3), so it is summed once
+      // here.
+      // MUST: a borrower does not count the slots' bytes (the backing is owned by the lending
+      // context, and if both counted, the diagnostic `stateBacking.residentBytes` would count the
+      // same VRAM twice).
       bytes:
         borrow === undefined
           ? [...slots.values()].reduce((total, slot) => total + slot.byteLength, 0) + LENGTHS_BYTES
@@ -588,9 +669,10 @@ export class GenerationContext {
       },
       acquireRun: (kind): void => {
         this.#assertUsable("run");
-        // MUST: 未 commit の deferred run がある間は次を発行させない。2 本目は「1 本目が
-        // 書いた物理行のうちどこまでが確定か」が決まらないまま P を捕捉するので、commit(rows)
-        // が後から論理長を動かした時点で GPU が見た P と食い違う（例外の出ない位置ずれ）。
+        // MUST: while an uncommitted deferred run exists, do not issue the next one. The second
+        // run would capture P before "how many of the physical rows the first one wrote are
+        // committed" is decided, so once commit(rows) moves the logical length it disagrees with
+        // the P the GPU saw (a position shift with no exception).
         if (this.#pending !== undefined) {
           throw new ExecutionError(
             `run: commit 待ちの generation run がある（pastLength ${this.#pending.pastLength} + ` +
@@ -598,11 +680,12 @@ export class GenerationContext {
               "context.commit(rows) で受理した行数を確定させてから次を発行すること",
           );
         }
-        // MUST: 同一 context への未決着 run は 1 本まで。2 本目は 1 本目が進めた論理長 P' で
-        // uniform と dispatch を組むが、位置入力（RoPE の position_ids 等）は**呼び出し側が
-        // 発行時に組んだ通常のグラフ入力**で、ランタイムは中身を見ない。つまり KV の論理長は
-        // 正しいまま位置だけが静かにずれる（例外も警告も出ない沈黙誤値）。1 本ずつ await して
-        // 発行すること — 並行させたい生成は context を分ける。
+        // MUST: at most one unsettled run per context. The second would build its uniform and
+        // dispatches from the logical length P' the first advanced to, but position inputs (RoPE's
+        // position_ids and the like) are **ordinary graph inputs the caller built at issue time**,
+        // and the runtime does not look inside them. So the KV logical length stays right while the
+        // positions quietly shift (silent wrong values with no exception or warning). Await each
+        // run before issuing the next — generations meant to run in parallel use separate contexts.
         if (this.#runKind !== undefined) {
           throw new ExecutionError(
             "run: 進行中の generation run がある GenerationContext へ並行発行された" +
@@ -611,11 +694,13 @@ export class GenerationContext {
               "context を分けること",
           );
         }
-        // MUST: 借り手の run は**貸し手のリースも**取る（ADR 0096 段 2 §2.1 — 既存 acquireRun と
-        // 同じ席）。これで貸し手の run / commit / rewind と直列化され、貸し手の poison・未 commit
-        // の deferred run・進行中 run がそのまま借り手の拒否理由になる。
-        // MUST: 自分の検査を全て通してから取る（取ってから落ちると、返し手の居ないリースが
-        // 貸し手に 1 本残って以後の rewind / commit が永久に拒否される）。
+        // MUST: a borrower's run **also takes the lender's lease** (ADR 0096, addendum of
+        // 2026-09-08 on stage 2 — at the same point as the existing acquireRun). This serialises it
+        // with the lender's run / commit / rewind, and the lender's poison, uncommitted deferred
+        // run and in-flight run become the borrower's reasons for refusal as they are.
+        // MUST: take it only after all of this context's own checks pass (failing after taking it
+        // would leave a lease on the lender with nobody to return it, refusing every later rewind /
+        // commit forever).
         this.#borrow?.lender[RUNTIME_INTERNAL].acquireRun(kind);
         this.#runKind = kind ?? "run";
       },
@@ -631,9 +716,10 @@ export class GenerationContext {
       },
       pastLength: (): number => {
         this.#assertInternalUsable("pastLength");
-        // 借り手の論理長は**貸し手の P の写し**（ADR 0096 段 2 §2.1）。写すのは run の頭の
-        // この 1 点だけで、以後の `writeLengths` はこの値との一致を照合する（リースを握って
-        // いる間は貸し手の P が動かないので、写しと現物は run の決着まで一致し続ける）。
+        // A borrower's logical length is **a copy of the lender's P** (ADR 0096, addendum of
+        // 2026-09-08 on stage 2). It is copied only at this one point, the head of the run, and the
+        // later `writeLengths` checks agreement with this value (while the lease is held the
+        // lender's P does not move, so the copy and the original agree until the run settles).
         if (this.#borrow !== undefined) {
           this.#pastLength = this.#borrow.lender[RUNTIME_INTERNAL].pastLength();
         }
@@ -657,45 +743,48 @@ export class GenerationContext {
   }
 
   /**
-   * スロット容量と `chunkLength` を確定して物理確保する（ADR 0066 決定 6）。
+   * Fixes the slot capacities and `chunkLength` and allocates physically (ADR 0066 decision 6).
    *
-   * MUST: async なのは errorScope で囲むため（決定 6 の「確保失敗は out-of-memory errorScope で
-   * fail loudly」）。上限超過 / 余力切れの `createBuffer` は同期例外を投げず**無効なバッファを
-   * 返す**ので、囲まないと空の KV を束ねたまま生成ループが回る。
-   * MUST: 上限ゲート（追記 5）は確保の**前**に通す。後にすると、超過は「無効バッファ由来の
-   * validation」という一段派生した診断になり、どのスロットが大きすぎたのかが消える。
+   * MUST: it is async in order to wrap the allocation in an errorScope (decision 6's "an allocation
+   * failure fails loudly through the out-of-memory errorScope"). A `createBuffer` over a limit or out
+   * of room throws no synchronous exception and **returns an invalid buffer**, so without the scope
+   * the generation loop would run with empty KV bound.
+   * MUST: the limit check (addendum 5) runs **before** allocation. After it, an overrun would become
+   * a second-hand diagnostic, "validation from an invalid buffer", and which slot was too large would
+   * be lost.
    */
   static async create(
     host: GenerationContextHost,
     spec: GenerationContextSpec,
   ): Promise<GenerationContext> {
     const { gpu, graph } = host;
-    // MUST: 確保を始める前に device の使用可否を見る（決定 7）。失われた device 上の
-    // createBuffer は無効なバッファを返すだけなので、通すと「空の KV を持つ context」が
-    // 出来上がる（errorScope も device 消失後は失敗を報告しない）。
+    // MUST: check that the device is usable before allocating (decision 7). createBuffer on a lost
+    // device just returns an invalid buffer, so letting it through yields "a context with empty KV"
+    // (the errorScope reports no failure after device loss either).
     assertDeviceUsable(gpu, "createGenerationContext");
     const names = Object.keys(graph.states);
-    // MUST: state の無いグラフでは作らせない。context は「1 生成ぶんの可変 state の所有者」
-    // なので、states 宣言が 0 本のモデルに対しては器そのものが無意味 — 取り違え（別モデルの
-    // Session から作った）の検出線をここに置く。
+    // MUST: refuse graphs without state. A context is "the owner of one generation's mutable
+    // state", so for a model with zero states declarations the container itself is meaningless —
+    // this is the detection line for a mix-up (created from another model's Session).
     if (names.length === 0) {
       throw new ExecutionError(
         "このグラフは states 宣言を持たない（GenerationContext は state スロットの所有者なので、" +
           "state の無いモデルでは作れない — 1-shot 実行は Session.run / enqueue をそのまま使う）",
       );
     }
-    // MUST: 検査した実体をそのまま持ち回る（`spec` から読み直さない）。検査点と下の
-    // constructor 渡しの間には確保の await（`raceDeviceLost`）があり、その窓で呼び手が渡した
-    // spec を書き換えると、未検査の値が通る（TOCTOU）— **配列も長さも**ここで捕捉した実体
-    // だけを使う（`chunkLength` を読み直すと、検査は M=8 で通したのに context は M=1 という
-    // 形が例外なしに成立する）。
+    // MUST: carry the checked values themselves (do not read `spec` again). Between the check and
+    // the constructor call below lies the allocation's await (`raceDeviceLost`); if the caller
+    // modified the spec it passed in that window, unchecked values would pass (TOCTOU) — use only
+    // what is captured here, **arrays and lengths alike** (reading `chunkLength` again would let
+    // "checked with M=8 but the context has M=1" stand with no exception).
     const chunkLength = spec.chunkLength;
     assertChunkLength(chunkLength);
     const chunkBuckets = Object.freeze([...(spec.chunkBuckets ?? [])]);
     assertChunkBuckets(chunkBuckets, chunkLength);
-    // 借り物スロット（external — ADR 0096 段 2 §1.1）と `borrow` は**対**。片方だけの形は
-    // どちらの向きも fail loudly（external があるのに自前確保すると空の過去を読み、borrow だけ
-    // なら誰も読まないスロットを貸し手から掴む）。
+    // Borrowed slots (external — ADR 0096, addendum of 2026-09-08 on stage 2) and `borrow` come
+    // **in pairs**. Either one alone fails loudly in both directions (allocating locally despite
+    // external slots reads an empty past; `borrow` alone grabs slots from the lender that nobody
+    // reads).
     const external = names.filter((name) => graph.states[name].external);
     if (external.length > 0 && spec.borrow === undefined) {
       throw new ExecutionError(
@@ -721,8 +810,9 @@ export class GenerationContext {
       return { name, shape, byteLength };
     });
 
-    // MUST: push から pop の**発行**までに await を挟まない（device 単位 LIFO の交錯を防ぐ根拠 —
-    // GpuContext 冒頭「errorScope 区間の不変条件」の 3 つ目。同期区間で完結するのでロック不要）。
+    // MUST: no await between push and **issuing** the pop (the basis that prevents interleaving on
+    // the per-device LIFO — the third rule of "Invariants of errorScope sections" at the top of
+    // GpuContext. It completes in a synchronous section, so no lock is needed).
     pushFailureScopes(gpu.device);
     const where = "GenerationContext の state 確保";
     const created: GPUBuffer[] = [];
@@ -747,9 +837,9 @@ export class GenerationContext {
       created.push(lengths);
       const pending = popFailureScopes(gpu.device, where);
       popped = true;
-      // MUST: 消失後の popErrorScope が解決しない実装がありうる（ResidentTensor.read の
-      // mapAsync と同じ理由）ため競わせる — ハングを失敗に変換し、消失を
-      // GpuDeviceLostError へ正規化する。
+      // MUST: race it, because an implementation may never resolve popErrorScope after loss (the
+      // same reason as mapAsync in ResidentTensor.read) — this turns a hang into a failure and
+      // normalises loss to GpuDeviceLostError.
       const failure = await gpu[RUNTIME_INTERNAL].raceDeviceLost(pending, where);
       if (failure !== undefined) throw failure;
       context = new GenerationContext(
@@ -763,12 +853,14 @@ export class GenerationContext {
       );
       return context;
     } finally {
-      // MUST: 後始末の失敗で本体の例外を上書きしない（Session 構築と同じ規律）。push した
-      // 2 本は必ず pop する（pop 発行前に抜けた場合だけ — 二重 pop は他所のスコープを取る）。
+      // MUST: a cleanup failure must not overwrite the body's exception (the same rule as Session
+      // construction). The two pushed scopes are always popped (only when leaving before the pop
+      // was issued — a double pop would take someone else's scope).
       if (!popped) await discardFailureScopes(gpu.device);
-      // MUST: context を返す場合**以外**は確保済みを 1 本残らず返す（同期 throw・pop の
-      // reject・device 消失のいずれでも漏らさない。この窓で漏れた実体は dispose からも
-      // 到達できない）。destroy はこの finally 1 回きりなので二重呼び出しにならない。
+      // MUST: **unless** the context is returned, return every allocated buffer (leak none on a
+      // synchronous throw, a rejected pop or device loss. A backing leaked in this window is
+      // unreachable from dispose too). destroy runs only in this finally, so it is never called
+      // twice.
       if (context === undefined) {
         for (const buffer of created) buffer.destroy();
       }
@@ -776,18 +868,23 @@ export class GenerationContext {
   }
 
   /**
-   * **借り手 context** を作る（ADR 0096 段 2 §2.1 — drafter が target の KV を読む形）。
+   * Creates a **borrowing context** (ADR 0096, addendum of 2026-09-08 on stage 2 — the drafter
+   * reads the target's KV).
    *
-   * 確保するのは論理長 uniform 1 枚だけで、スロットは貸し手の実体をそのまま束ねる。束ね方は
-   * **名前**（借り手の宣言名 = 貸し手の宣言名 MUST）で、形は「借り手の宣言 shape を**貸し手の
-   * bindings**（同名記号 MUST — 容量 `C`）で解いた値」が貸し手スロットの実形と一致すること。
+   * It allocates only one logical-length uniform and binds the lender's slot backings as they are.
+   * Binding goes by **name** (the borrower's declared name = the lender's declared name, MUST), and
+   * the shape must be such that "the borrower's declared shape solved with **the lender's
+   * bindings** (same-named symbols, MUST — the capacity `C`)" equals the actual shape of the
+   * lender's slot.
    *
-   * MUST: `bindings` を受けない（貸し手のものを継承する — 2 つの束縛点を持つと、容量記号が
-   * 割れたまま「貸し手の 131072 行のスロットを 512 行として読む」形が例外なしに成立する）。
-   * MUST: `chunkLength` は 1 ちょうど（借り手の実行形は decode 1 本だけ = readonly attention は
-   * M 1 固定 — §1.2 の形検査と対）。`chunkBuckets` の禁止はここに書かない — `chunkLength = 1`
-   * では既存の {@link assertChunkBuckets}（要素は `2..chunkLength−1`）が空以外を全て落とすので、
-   * 重ねて書くと到達しない分岐になる。
+   * MUST: do not accept `bindings` (they are inherited from the lender — with two binding points,
+   * "reading the lender's 131072-row slot as 512 rows" would stand with the capacity symbol split
+   * and no exception).
+   * MUST: `chunkLength` is exactly 1 (the borrower's only execution shape is decode = readonly
+   * attention has M fixed at 1 — paired with the readonly attention shape check of the same
+   * addendum). The ban on `chunkBuckets` is not written here — with `chunkLength = 1` the existing
+   * {@link assertChunkBuckets} (elements in `2..chunkLength−1`) already fails anything non-empty, so
+   * writing it again would be an unreachable branch.
    */
   static async #createBorrowed(
     host: GenerationContextHost,
@@ -827,8 +924,9 @@ export class GenerationContext {
             "（external スロットは貸し手と同じ名前で宣言する MUST — ADR 0096 段 2 §2.1）",
         );
       }
-      // MUST: 窓は貸し手と**存在有無も値も**一致（読み書き同式 — ADR 0067 決定 4 を貸し借りへ
-      // 延長した面）。借り手の窓だけ広いと、貸し手が既に上書きした行を過去として読む。
+      // MUST: the window agrees with the lender's **in presence and value** (the same read/write
+      // formula — ADR 0067 decision 4 extended to lending). A wider borrower window alone reads rows
+      // the lender has already overwritten as the past.
       const window = windows.get(name);
       const lent = internals.slidingSlots.get(name);
       if (window !== lent) {
@@ -849,9 +947,10 @@ export class GenerationContext {
       slots.set(name, backing);
     }
 
-    // 確保するのは lengths 1 枚だけ（スロットは借り物）。errorScope の規律は自前確保の経路と
-    // 同じ — createBuffer は上限超過でも同期例外を投げないため、囲まないと無効なバッファへ
-    // 論理長を書き続ける沈黙 no-op になる。
+    // Only the lengths buffer is allocated (the slots are borrowed). The errorScope rules are the
+    // same as on the own-allocation path — createBuffer throws no synchronous exception even over a
+    // limit, so without the scope it becomes a silent no-op that keeps writing logical lengths into
+    // an invalid buffer.
     pushFailureScopes(gpu.device);
     const where = "GenerationContext（借り手）の論理長確保";
     let popped = false;
@@ -872,15 +971,17 @@ export class GenerationContext {
         slots,
         slidingSlotWindows(graph),
         created,
-        // MUST: 上の検査を通った値（1 ちょうど）を定数で渡す — 検査点と await の間で `spec` が
-        // 書き換わっても借り手の実行形は 1 のまま（自前確保の経路と同じ TOCTOU の閉じ方）。
+        // MUST: pass the value that passed the check above (exactly 1) as a constant — even if
+        // `spec` is modified between the check and the await, the borrower's execution shape stays
+        // 1 (the same TOCTOU closure as the own-allocation path).
         1,
         [],
         bindings,
         { lender, slidingSlack: lender.slidingSlack },
       );
-      // MUST: 登録は構築の**後**（借り手の実体が出来てから貸し手の dispose を塞ぐ）。ここが
-      // 落ちる（await の窓で貸し手が dispose された）なら lengths を返して漏らさない。
+      // MUST: register **after** construction (block the lender's dispose once the borrower
+      // exists). If this fails (the lender was disposed in the await window), return the lengths
+      // buffer instead of leaking it.
       internals.registerBorrower(borrowed);
       context = borrowed;
       return context;
@@ -891,16 +992,18 @@ export class GenerationContext {
   }
 
   /**
-   * {@link GenerationContext.fork} の本体（確保 → 複製の submit → pop の発行）。
+   * The body of {@link GenerationContext.fork} (allocate → submit the copy → issue the pop).
    *
-   * MUST: push から pop の**発行**までを await なしで行う（`create` と `ResidentTensor.read` と
-   * 同じ形 — GpuContext 冒頭「errorScope 区間の不変条件」の 3 つ目）。この同期区間で複製を
-   * submit し終えることが、元に予約を立てずに済む根拠そのもの（{@link GenerationContext.fork} の
-   * doc）。コピーは 1 encoder・1 submit にまとめ、`SubmitScheduler` の pending には載せない
-   * （別の run の失敗で discard される列に混ぜない）。
-   * MUST: 写すのは全スロットの**全バイト**（sliding の ring の余裕行も含む — 論理長より先に書かれた
-   * 行も物理配置ごと写さないと、複製の ring が元と別の配置になる）。焼いた bind group は写さない
-   * （元のスロットを束ねている — 写すと複製の run が元の KV へ書く）。
+   * MUST: go from push to **issuing** the pop without await (the same form as `create` and
+   * `ResidentTensor.read` — the third rule of "Invariants of errorScope sections" at the top of
+   * GpuContext). Finishing the copy's submit in this synchronous section is exactly why no
+   * reservation on the source is needed (the doc of {@link GenerationContext.fork}). The copies go
+   * in one encoder and one submit and are not put on the `SubmitScheduler`'s pending list (not mixed
+   * into a list that another run's failure discards).
+   * MUST: copy **every byte** of every slot (including the slack rows of the sliding ring — unless
+   * rows written ahead of the logical length are copied with their physical layout, the copy's ring
+   * would have a different layout from the source). Baked bind groups are not copied (they bind the
+   * source slots — copying them would make the copy's runs write into the source KV).
    */
   static async #forkFrom(
     host: GenerationContextHost,
@@ -946,14 +1049,15 @@ export class GenerationContext {
         source.chunkBuckets,
         source[RUNTIME_INTERNAL].bindings,
       );
-      // 論理長は fork() を呼んだ同期区間で捕捉した値（複製したバイトと同じ時点の値）。
+      // The logical length is the value captured in fork()'s synchronous section (the same moment
+      // as the copied bytes).
       forked.#pastLength = pastLength;
       context = forked;
       return context;
     } finally {
-      // MUST: 後始末の規律は `create` と同じ（pop 発行前に抜けた場合だけ捨てる・返さない場合は
-      // 確保済みを 1 本残らず返す）。submit 済みのコピーが参照していても destroy は安全
-      // （実解放は完了まで実装が遅延する）。
+      // MUST: the cleanup rules are the same as `create` (discard only when leaving before the pop
+      // was issued; when not returning, return every allocated buffer). destroy is safe even while
+      // a submitted copy references it (the implementation delays the real release until completion).
       if (!popped) await discardFailureScopes(gpu.device);
       if (context === undefined) {
         for (const buffer of created) buffer.destroy();
@@ -962,18 +1066,20 @@ export class GenerationContext {
   }
 
   /**
-   * 確定済み KV の論理長（ADR 0066 決定 6）。
+   * The logical length of the committed KV (ADR 0066 decision 6).
    *
-   * 進行は **run の成功でのみ**起きる（ホスト側の手動加算は API にしない — 二重簿記の禁止）。
-   * 汚染後・device 消失後は読めない（追記 3 の「以後の全操作 fail loudly」と決定 7 — どちらも
-   * 背後の物理 state は回復不能なので、この数値を「ここから再開できる」と読ませない。読めるのは
-   * 「どこまで進んだか」であって「そこから続けられるか」ではなく、区別できない形で返すと
-   * ホストは必ず後者として使う）。
+   * It advances **only on a successful run** (manual host-side addition is not an API — no double
+   * bookkeeping). It cannot be read after poisoning or device loss (addendum 3's "every later
+   * operation fails loudly" and decision 7 — in both cases the physical state behind it is
+   * unrecoverable, so this number must not be read as "you can resume from here". What it tells is
+   * "how far it got", not "whether it can continue from there", and returned in a form that cannot
+   * tell the two apart, the host would always use it as the latter).
    *
-   * 借り手 context（`createGenerationContext({ borrow })` で作ったもの）では、この値は**借り手
-   * run の開始時に貸し手から写した論理長**の snapshot で、貸し手が進んでも更新されない（run を
-   * 1 本も回していなければ `0`）。借り手の現在値が要る場面では貸し手の `pastLength` を読む
-   * こと — 投機デコードの生成面もそうしている（ADR 0096 段 2 §2.1）。
+   * On a borrowing context (created with `createGenerationContext({ borrow })`), this value is a
+   * snapshot of **the logical length copied from the lender when a borrower run started**, and it is
+   * not updated when the lender advances (`0` if no run has been executed). Where the current value
+   * is needed, read the lender's `pastLength` — the speculative decoding generation surface does
+   * that too (ADR 0096, addendum of 2026-09-08 on stage 2).
    */
   get pastLength(): number {
     this.#assertUsable("pastLength");
@@ -981,18 +1087,20 @@ export class GenerationContext {
   }
 
   /**
-   * commit 待ちの deferred run（`GenerationRun.commit: "deferred"` — 無ければ undefined）。
+   * The deferred run waiting for commit (`GenerationRun.commit: "deferred"` — undefined if none).
    *
-   * `pastLength` は run が捕捉した論理長・`queryLength` は物理 ring へ書いた行数で、
-   * {@link GenerationContext.commit} が受け取れる `rows` の上限がそのまま `queryLength`。
+   * `pastLength` is the logical length the run captured and `queryLength` the number of rows written
+   * to the physical ring; the upper bound of the `rows` {@link GenerationContext.commit} accepts is
+   * exactly `queryLength`.
    *
-   * 返るのは**凍結済み**の object（`Object.freeze`）— 上限検査が信頼する値なので、書き換えは
-   * strict mode（モジュールは常に strict）で `TypeError` になる。
+   * The returned object is **frozen** (`Object.freeze`) — the bound check trusts these values, so a
+   * write throws `TypeError` in strict mode (modules are always strict).
    *
-   * 借り手 context では**常に undefined**（借り手は deferred run も commit も拒否されるので保留を
-   * 持たない）。貸し手に保留があっても借り手からは見えないので、「draft してよいか」の判定に
-   * 借り手のこの値を使わないこと — 保留は貸し手の `pendingCommit` を読む（保留中の貸し手に対する
-   * 借り手 run は、貸し手側のリース取得が拒否する）。
+   * On a borrowing context it is **always undefined** (a borrower is refused both deferred runs and
+   * commit, so it never holds a pending commit). A lender's pending commit is not visible from the
+   * borrower, so do not use the borrower's value to decide "may I draft" — read the lender's
+   * `pendingCommit` (a borrower run against a lender with a pending commit is refused by the
+   * lender-side lease acquisition).
    */
   get pendingCommit(): { readonly pastLength: number; readonly queryLength: number } | undefined {
     this.#assertUsable("pendingCommit");
@@ -1000,24 +1108,28 @@ export class GenerationContext {
   }
 
   /**
-   * 保留中の deferred run のうち**受理した行数だけ**論理長を進める（ADR 0066 決定 6 の
-   * 「論理長は run の成功で進む」を投機デコードの検証形へ広げた面）。
+   * Advances the logical length of the pending deferred run **by the accepted rows only** (ADR 0066
+   * decision 6's "the logical length advances on a successful run" widened to the verify shape of
+   * speculative decoding).
    *
-   * `rows` は `0 ≤ rows ≤ pendingCommit.queryLength` の整数で、`0` は「1 行も受理しない」
-   * （論理長は動かず、保留だけが畳まれる）。物理 ring には `queryLength` 行が書かれたままだが、
-   * 受理しなかった行が潰した論理列は sliding の余裕（{@link GenerationContext.slidingSlack}）の
-   * 外に落ちる — 余裕を超える `queryLength` の deferred run は `Session.run` の同期区間で
-   * 落ちている（`queryLength ≤ slidingSlack`）。
+   * `rows` is an integer with `0 ≤ rows ≤ pendingCommit.queryLength`; `0` means "accept no row"
+   * (the logical length does not move; only the pending commit is folded). The physical ring keeps
+   * the `queryLength` written rows, but the logical columns overwritten by rows that were not
+   * accepted fall outside the sliding slack ({@link GenerationContext.slidingSlack}) — a deferred
+   * run whose `queryLength` exceeds the slack has already failed in the synchronous section of
+   * `Session.run` (`queryLength ≤ slidingSlack`).
    *
-   * MUST: **進行中の generation run が居る間は fail loudly**（`rewind` と同じ根拠 — run は頭で
-   * 捕捉した P で uniform と dispatch 数を決めるので、横から動かすと GPU が見た論理長と進行の
-   * 基準が分裂する）。
-   * MUST: 保留が無い呼びは fail loudly（immediate な run の後に呼ばれた commit を黙って
-   * no-op にすると、ホストは「受理行数を伝えた」と信じたまま二重に進んだ論理長で走り続ける）。
+   * MUST: **fail loudly while a generation run is in flight** (the same reason as `rewind` — a run
+   * fixes its uniform and dispatch counts from the P captured at its head, so moving it from the
+   * side splits the logical length the GPU saw from the basis of progress).
+   * MUST: a call without a pending commit fails loudly (silently turning a commit called after an
+   * immediate run into a no-op would leave the host believing "I reported the accepted rows" while
+   * it keeps running on a logical length advanced twice).
    */
   commit(rows: number): void {
     this.#assertUsable("commit");
-    // 借り手は論理長を持たない（進めるのも確定させるのも貸し手 — ADR 0096 段 2 §2.1）。
+    // A borrower has no logical length (the lender advances and commits — ADR 0096, addendum of
+    // 2026-09-08 on stage 2).
     this.#assertNotBorrowing("commit");
     if (this.#runKind !== undefined) {
       throw new ExecutionError(
@@ -1041,35 +1153,41 @@ export class GenerationContext {
           "（書いていない行は確定できない）",
       );
     }
-    // 保留を立てた run 以降に論理長が動いていないこと（リースと rewind を塞いである以上、
-    // 割れたら実装の不変条件破れ — 沈黙で続けさせない）。
+    // The logical length has not moved since the run that set the pending commit (with leases and
+    // rewind blocked, a split is a broken implementation invariant — do not let it continue
+    // silently).
     this.#assertCapturedPast(pending.pastLength, "commit");
     const next = pending.pastLength + rows;
-    // MUST: 和の u32 上限は `#advance` と同じ理由でここでも見る（両項が u32 以下でも溢れる）。
+    // MUST: check the sum's u32 bound here too, for the same reason as `#advance` (it overflows
+    // even with both terms ≤ u32).
     if (next > MAX_LOGICAL_LENGTH) {
       throw new ExecutionError(
         `commit: pastLength ${pending.pastLength} + 受理行数 ${rows} = ${next} が ` +
           `u32 の上限 ${MAX_LOGICAL_LENGTH} を超える（論理長の搬送先は u32 — ADR 0066 追記 4）`,
       );
     }
-    // MUST: 論理長の更新と保留の解除は不可分（先に解除すると、上の検査で落ちた commit の後に
-    // 「保留も無く論理長も進んでいない」状態が残り、書かれた行が誰からも辿れなくなる）。
+    // MUST: updating the logical length and clearing the pending commit are indivisible (clearing
+    // first would, after a commit that failed the checks above, leave a state with "no pending
+    // commit and no advance", and the written rows would be unreachable from anywhere).
     this.#pastLength = next;
     this.#pending = undefined;
   }
 
   /**
-   * 論理位置を切り詰める（ADR 0066 決定 6）。`0 ≤ position ≤ pastLength` の整数のみ。
+   * Truncates the logical position (ADR 0066 decision 6). Integers with
+   * `0 ≤ position ≤ pastLength` only.
    *
-   * MUST: **進行中の generation run が居る間は fail loudly**。run は頭で捕捉した `P` で
-   * uniform を書き・dispatch 数を算出し・成功時に `advance` するので、その途中で論理長を横から
-   * 動かすと「GPU が読んだ P」と「進行の基準にした P」が分裂する（例外は出ず、KV の論理位置
-   * だけが静かにずれる）。リースは `Session.run` の**同期区間**で立つので、`run()` を await せず
-   * 直後に呼んだ形も捕まる。
-   * MUST: **sliding スロットを 1 本でも含む context は全拒否**（ADR 0066 追記 2）。ring は
-   * エビクトが起きた後、resident な位置への巻き戻しでも物理配置と論理範囲が一致しない
-   * （左詰め compaction を持たないため）。ORT GenAI が同じ理由で current 未満への rewind を
-   * 全拒否しているのと同じ契約で、緩めるなら compaction の実装と対にする。
+   * MUST: **fail loudly while a generation run is in flight**. A run writes its uniform, computes
+   * its dispatch counts and `advance`s on success from the `P` captured at its head, so moving the
+   * logical length from the side in the middle splits "the P the GPU read" from "the P progress was
+   * based on" (no exception — only the KV's logical position quietly shifts). The lease is set in
+   * the **synchronous section** of `Session.run`, so a call right after a `run()` that was not
+   * awaited is caught too.
+   * MUST: **a context that contains even one sliding slot refuses every rewind** (ADR 0066 addendum
+   * 2). After an eviction, the ring's physical layout and logical range disagree even for a rewind
+   * to a resident position (there is no left compaction). It is the same contract as ORT GenAI,
+   * which refuses every rewind below current for the same reason; relaxing it goes together with an
+   * implementation of compaction.
    */
   rewind(position: number): void {
     this.#assertUsable("rewind");
@@ -1110,27 +1228,31 @@ export class GenerationContext {
   }
 
   /**
-   * 同じ Session・同じ容量の context を**丸ごと複製**する（ADR 0066 追記〈2026-10-11〉— 会話の
-   * 分岐）。返るのは全スロットの全バイトと `pastLength` を写した独立の context で、呼び手が所有し
-   * `dispose` も各自で行う（元との親子の依存は無く、元を先に dispose してよい）。
+   * **Duplicates a whole context** of the same Session and capacity (ADR 0066 addendum of
+   * 2026-10-11 — forking the conversation). It returns an independent context with every byte of
+   * every slot and `pastLength` copied; the caller owns it and disposes it separately (there is no
+   * parent-child dependency on the source, and the source may be disposed first).
    *
-   * 次の場合は呼んだ同期区間で判定し、戻り Promise を reject する: dispose 要求の後・device 消失の後
-   * （`GpuDeviceLostError`）・汚染の後・決着していない run がある（借り手の run が貸し手の予約を
-   * 取っている間を含む）・batch の使用予約中・deferred commit の確定待ち・借り手 context・
-   * Session が dispose 済み。生きている借り手を持つ貸し手と sliding を含む context は拒否しない
-   * （借り手は KV に 1 行も書かない — 元の借り手は元のスロットを束ねたまま残り、複製には借り手が
-   * いない）。
+   * The following are decided in the synchronous section of the call and reject the returned
+   * Promise: after a dispose request, after device loss (`GpuDeviceLostError`), after poisoning, an
+   * unsettled run (including while a borrower's run holds the lender's reservation), during a
+   * batch's use reservation, while a deferred commit is pending, a borrowing context, and a Session
+   * already disposed. A lender with live borrowers and a context with sliding slots are not refused
+   * (borrowers write no KV row — the source's borrowers stay bound to the source slots, and the copy
+   * has no borrowers).
    *
-   * MUST: 検査・`pastLength` の捕捉・確保・複製の submit を**この同期区間で await なしに**終える
-   * （`host.adopt` と `#forkFrom` の MUST）。元に予約を立てないので、
-   * 正しさの根拠は「元が静止している（進行中の run も保留も無い = 未 submit の書き込みが無い）」と
-   * 「複製をここで submit する（queue の順序が先行の書き込みの後・後続の書き込みの前を保証する）」の
-   * 2 つだけ。だから `fork()` を await せずに元へ発行した run / `rewind` / `dispose` / 2 本目の
-   * `fork` はどれも通り、複製は呼んだ時点の状態を持つ。
-   * NOTE: 複製は自前の encoder と submit で出す（Session の直列化鎖にも `SubmitScheduler` にも
-   * 載せない — `createGenerationContext` と同じく batch 区間との待ち合わせに辺を足さない）。その
-   * GPU 時間は scheduler の統計に載らない。確保の失敗は out-of-memory errorScope で fail loudly に
-   * なり、元は無傷のまま残る。
+   * MUST: finish the checks, the capture of `pastLength`, the allocation and the copy's submit **in
+   * this synchronous section, without await** (the MUSTs of `host.adopt` and `#forkFrom`). No
+   * reservation is placed on the source, so correctness rests on just two facts: "the source is
+   * quiescent (no in-flight run and no pending commit = no unsubmitted writes)" and "the copy is
+   * submitted here (queue order guarantees after the earlier writes and before the later ones)".
+   * That is why a run / `rewind` / `dispose` / second `fork` issued to the source without awaiting
+   * `fork()` all go through, and the copy holds the state at the time of the call.
+   * NOTE: the copy is issued with its own encoder and submit (on neither the Session's
+   * serialisation chain nor the `SubmitScheduler` — like `createGenerationContext`, it adds no edge
+   * to the waits on batch sections). Its GPU time does not appear in the scheduler's statistics. An
+   * allocation failure fails loudly through the out-of-memory errorScope, and the source stays
+   * intact.
    */
   fork(): Promise<GenerationContext> {
     let pastLength: number;
@@ -1173,34 +1295,39 @@ export class GenerationContext {
   }
 
   /**
-   * state スロットと論理長 uniform を返す（ADR 0066 決定 6 — flush-before-destroy）。
-   * batchの使用予約中は受付を閉じず拒否する。finish後に再試行できる。
-   * 以下の二段破棄は通常runの契約。
+   * Returns the state slots and the logical-length uniform (ADR 0066 decision 6 —
+   * flush-before-destroy). During a batch's use reservation it refuses without closing admission;
+   * it can be retried after finish. The two-step disposal below is the contract for ordinary runs.
    *
-   * MUST: **2 段**にする。同期に立つのは 1 段目（新規受付の終了 — 以後の run admission と
-   * 利用者面の読み書きを拒否）だけで、内部面（論理長の搬送・進行）の遮断は Session チェーンに
-   * 積んだ破棄本体が走り出した 2 段目。dispose 本体は先行 run の**後**に走るので、既に受理された
-   * run はここで殺されず完走する（`run(); context.dispose();` の非 await 並びが Session の
-   * `run(); session.dispose();` と同じ意味論になる）。1 段で閉じると、受理済み run の
-   * `writeLengths` / `advance` が「dispose 済み」で落ちる。
-   * MUST: 2 度目以降も同じ完了を返す（`Session.dispose` と同じ理由 — 先に返すと呼び手が
-   * 「破棄済み」と見なして `device.destroy()` まで進み、flush-before-destroy が崩れる）。
-   * MUST: flush が失敗（主因は device 消失）してもバッファ破棄と簿記の返却は必ず行い、失敗
-   * 自体は握り潰さず後始末の後に伝播させる（`RunArena.#destroyOnce` と同じ規律）。
-   * NOTE: Session より長生きしてよい。この経路が触るのは注入された flush と自分のバッファだけで、
-   * Session の重み・計画キャッシュには手を出さない（順序の依存を作らない）。
+   * MUST: use **two steps**. Only step 1 is set synchronously (closing admission — later run
+   * admission and user-facing reads and writes are refused); the internal surface (carrying and
+   * advancing the logical length) is cut off in step 2, when the disposal body queued on the
+   * Session chain starts. The dispose body runs **after** earlier runs, so an already accepted run
+   * is not killed here and completes (`run(); context.dispose();` without await has the same
+   * semantics as the Session's `run(); session.dispose();`). Closing in one step would make the
+   * accepted run's `writeLengths` / `advance` fail as "disposed".
+   * MUST: return the same completion on the second and later calls (the same reason as
+   * `Session.dispose` — returning early would let the caller treat it as "disposed" and proceed to
+   * `device.destroy()`, breaking flush-before-destroy).
+   * MUST: even if flush fails (mainly device loss), always destroy the buffers and return the
+   * bookkeeping, and propagate the failure itself after the cleanup instead of swallowing it (the
+   * same rule as `RunArena.#destroyOnce`).
+   * NOTE: it may outlive the Session. This path touches only the injected flush and its own buffers,
+   * never the Session's weights or plan cache (it creates no ordering dependency).
    */
   dispose(): Promise<void> {
-    // batchの使用予約中は受付を閉じず拒否する。finish後の再試行は従来の破棄手順へ進む。
+    // During a batch's use reservation, refuse without closing admission. A retry after finish
+    // proceeds to the usual disposal.
     try {
       this.#assertCanDispose();
     } catch (cause) {
       return Promise.reject(cause);
     }
-    // MUST: 借り手が生きている間は破棄しない（ADR 0096 段 2 §2.1）。借り手の bind group は
-    // このスロットバッファを掴んでおり、破棄すると次の draft が破棄済みバッファを読む。
-    // `dispose` の「冪等・非 throw」契約からの**意図的な逸脱**で、受付終了フラグを立てる前に
-    // 返す（立ててから落とすと、以後どの操作も通らない context が残る）。
+    // MUST: do not dispose while borrowers are alive (ADR 0096, addendum of 2026-09-08 on stage 2).
+    // The borrowers' bind groups hold these slot buffers, and destroying them makes the next draft
+    // read destroyed buffers. This is a **deliberate departure** from the "idempotent, non-throwing"
+    // contract of `dispose`, and it returns before setting the admission-closed flag (failing after
+    // setting it would leave a context through which no operation passes).
     if (this.#borrowers.size > 0 && this.#disposal === undefined) {
       return Promise.reject(
         new ExecutionError(
@@ -1215,19 +1342,20 @@ export class GenerationContext {
       try {
         await this.#host.flush();
       } finally {
-        // MUST: 借り物のスロットは破棄しない（所有者は貸し手 context）。借り手が破棄すると、
-        // 貸し手の次の run が破棄済みバッファへ書く。
+        // MUST: do not destroy borrowed slots (the lending context owns them). If the borrower
+        // destroyed them, the lender's next run would write into destroyed buffers.
         if (this.#borrow === undefined) {
           for (const slot of this.#slots.values()) slot.buffer.destroy();
         } else {
           this.#borrow.lender[RUNTIME_INTERNAL].forgetBorrower(this);
         }
         this.#lengths.destroy();
-        // MUST: 焼いた束もここで手放す。以後 run は来ない（`#assertUsable` が落とす）ので
-        // 正しさには効かないが、掴んだままだと破棄済みバッファを参照する bind group が
-        // context の参照ぶんだけ生き残る。
+        // MUST: let go of the baked bundles here too. No run comes afterwards (`#assertUsable`
+        // fails it), so it does not affect correctness, but holding them keeps bind groups that
+        // reference destroyed buffers alive for as long as the context references them.
         this.#baked.clear();
-        // 未 commit の保留はここで捨てる（物理バッファごと畳むので、確定させる相手が居ない）。
+        // Drop an uncommitted pending commit here (the physical buffers are torn down, so there is
+        // nothing left to commit).
         this.#pending = undefined;
         this.#host.forget(this);
       }
@@ -1235,7 +1363,10 @@ export class GenerationContext {
     return this.#disposal;
   }
 
-  /** バッチ中の破棄待ちをSession鎖へ積むと、後続enqueueとの自己待ちになるため拒否する。 */
+  /**
+   * Refuses during a batch: queuing a pending disposal on the Session chain would wait on itself
+   * through later enqueues.
+   */
   #assertCanDispose(): void {
     if (this.#runKind === "batch") {
       throw new ExecutionError(
@@ -1245,14 +1376,15 @@ export class GenerationContext {
   }
 
   /**
-   * 論理長 uniform を書く（ADR 0066 追記 4 の搬送路）。
+   * Writes the logical-length uniform (the carrier of ADR 0066 addendum 4).
    *
-   * MUST: params の内容アドレスキャッシュ（ADR 0042）には**載せない**。毎 step 値が変わるものを
-   * 内容アドレスに載せると「キャッシュ無界成長」と「PreparedPlan ヒット時に導出相が走らず更新
-   * 不能」の両方を踏む。実体は context 所有のこのバッファ 1 本きりで、レシピからは固定束縛
-   * （`BindingSource` の `lengths`）で参照する。
-   * MUST: 呼ぶのは**毎 run の encode 前**（`queue.writeBuffer` は issue 順で queue timeline に
-   * 載るので、submit 済みの dispatch を追い越さない — ADR 0004 不変条件④）。
+   * MUST: **do not put it** in the content-addressed params cache (ADR 0042). Putting a value that
+   * changes every step into a content address hits both "unbounded cache growth" and "cannot be
+   * updated, because derivation does not run on a PreparedPlan hit". The backing is this one
+   * context-owned buffer, and recipes reference it through a fixed binding (`lengths` of
+   * `BindingSource`).
+   * MUST: call it **before every run's encode** (`queue.writeBuffer` enters the queue timeline in
+   * issue order, so it does not overtake submitted dispatches — ADR 0004 invariant ④).
    */
   #writeLengths(pastLength: number, queryLength: number): void {
     this.#assertInternalUsable("writeLengths");
@@ -1264,18 +1396,20 @@ export class GenerationContext {
   }
 
   /**
-   * 論理長を進める（ADR 0066 決定 6 — **run の成功でのみ**呼ぶ）。
+   * Advances the logical length (ADR 0066 decision 6 — call it **only on a successful run**).
    *
-   * WHY 決定 6 の「論理長は run の成功で進む」は 2 形になった: `commit: "immediate"`（既定・
-   * 従来）は run の成功でここが進め、`commit: "deferred"` は成功で {@link GenerationContext.commit}
-   * へ権利を渡す（{@link #defer}）。どちらも論理長を動かす経路は**同時に 1 本**で、未 commit の
-   * 間は次の run も rewind も拒否されるので、二重簿記（ホスト側にもう 1 つの論理長が生まれる形）は
-   * 生まない。
+   * WHY decision 6's "the logical length advances on a successful run" now has two forms:
+   * `commit: "immediate"` (default, the original form) advances here on a successful run, and
+   * `commit: "deferred"` hands the right to {@link GenerationContext.commit} on success
+   * ({@link #defer}). In both, **only one path at a time** moves the logical length, and while a
+   * commit is pending both the next run and rewind are refused, so no double bookkeeping (a second
+   * logical length on the host side) arises.
    *
-   * NOTE: full スロットの実行時検査 `pastLength + queryLength ≤ 容量`（ADR 0067 決定 4 の④）は
-   * **run のエンコード前**に居る（`assertGenerationRun` — src/runtime/recipe.ts）。容量軸がどの
-   * 次元かを決めるのは op 契約なので、導出相が集めた {@link GenerationLimits} が正本で、
-   * ここでは重ねて見ない（進行の時点で検査しても、既に書かれた後で手遅れになる）。
+   * NOTE: the run-time check of full slots, `pastLength + queryLength ≤ capacity` (item ④ of ADR
+   * 0067 decision 4), sits **before the run's encode** (`assertGenerationRun` —
+   * src/runtime/recipe.ts). The op contract decides which dimension is the capacity axis, so the
+   * {@link GenerationLimits} collected by the derivation phase are the source of truth, and this
+   * does not check again (checking at the time of advancing would be too late, after the write).
    */
   #advance(pastLength: number, queryLength: number): void {
     this.#assertInternalUsable("advance");
@@ -1283,9 +1417,9 @@ export class GenerationContext {
     this.#assertCapturedPast(pastLength, "advance");
     this.#assertQueryLength(queryLength, "advance");
     const next = this.#pastLength + queryLength;
-    // MUST: 加算後の論理長も u32 に収まること。両項が u32 以下でも和は溢れるので、ここが
-    // 唯一の検査点になる（超えたまま代入すると、次の writeLengths が切り詰めた past を
-    // 沈黙のまま GPU に載せる — {@link MAX_LOGICAL_LENGTH}）。
+    // MUST: the logical length after the addition also fits u32. The sum overflows even with both
+    // terms ≤ u32, so this is the only check point (assigning an overrun would make the next
+    // writeLengths silently put a truncated past on the GPU — {@link MAX_LOGICAL_LENGTH}).
     if (next > MAX_LOGICAL_LENGTH) {
       throw new ExecutionError(
         `advance: pastLength ${this.#pastLength} + queryLength ${queryLength} = ${next} が ` +
@@ -1296,11 +1430,13 @@ export class GenerationContext {
   }
 
   /**
-   * 論理長を進めずに保留する（`commit: "deferred"` の run の成功でのみ — {@link #advance} の対）。
+   * Holds the logical length pending without advancing it (only on a successful `commit:
+   * "deferred"` run — the pair of {@link #advance}).
    *
-   * MUST: 保留は高々 1 本（未 commit の間は `acquireRun` が次の run を拒否するので、2 本目の
-   * `defer` に到達する経路そのものが無い）。到達したらランタイム内部の不変条件破れなので、
-   * 上書きせず即死させる — 上書きすると 1 本目が書いた行がどこからも辿れなくなる。
+   * MUST: at most one pending commit (while a commit is pending, `acquireRun` refuses the next run,
+   * so no path reaches a second `defer`). Reaching it means a broken runtime-internal invariant, so
+   * fail immediately instead of overwriting — overwriting would make the rows written by the first
+   * unreachable from anywhere.
    */
   #defer(pastLength: number, queryLength: number): void {
     this.#assertInternalUsable("defer");
@@ -1313,34 +1449,38 @@ export class GenerationContext {
           `queryLength ${this.#pending.queryLength}）— 内部の不変条件破れ`,
       );
     }
-    // MUST: 凍結して立てる（getter がこの実体をそのまま返し、`commit` はその `queryLength` を
-    // 受理行数の上限として信頼するので、外から書き換えられると「書いていない行の確定」が
-    // 上限検査を素通りする）。
+    // MUST: set it frozen (the getter returns this object as is, and `commit` trusts its
+    // `queryLength` as the bound on accepted rows, so an outside write would let "committing rows
+    // that were never written" slip past the bound check).
     this.#pending = Object.freeze({ pastLength, queryLength });
   }
 
   /**
-   * 汚染する（ADR 0066 追記 3 — state 変更 dispatch を含む run の失敗）。
+   * Poisons the context (ADR 0066 addendum 3 — failure of a run containing a state-changing
+   * dispatch).
    *
-   * 論理長は進まないが物理 ring は上書きされ得るので、rollback / staging を持たない設計では
-   * 「以後の全操作を拒否」以外に整合を主張する手段が無い（復旧 = 新しい context + ホスト側
-   * 再構築）。トリガは run の失敗経路（executor の `#poisonOnStateWrite`）。
+   * The logical length does not advance, but the physical ring may have been overwritten, so in a
+   * design without rollback / staging "refuse every later operation" is the only way to claim
+   * consistency (recovery = a new context + a host-side rebuild). The trigger is the run's failure
+   * path (`#poisonOnStateWrite` in the executor).
    *
-   * MUST: 2 度目以降は最初の理由を保つ（真因を後続の失敗で上書きしない）。
+   * MUST: keep the first reason on later calls (do not overwrite the real cause with later failures).
    */
   #poison(reason: string): void {
     this.#poisoned ??= reason;
   }
 
   /**
-   * **利用者面**の使用可否（読み取りを含む全操作 — 例外は後始末の
-   * {@link GenerationContext.dispose} だけ）。dispose 要求・device 消失・汚染をここで落とす。
+   * Usability of the **user-facing surface** (every operation including reads — the only exception
+   * is the cleanup {@link GenerationContext.dispose}). Fails a dispose request, device loss and
+   * poisoning here.
    *
-   * MUST: 読みと書きで条件を分けない。汚染も device 消失も「背後の物理 state が失われた」状態で、
-   * そこで論理長だけを返せるようにすると復旧不能な context が正常値を持つ器に見える
-   * （追記 3 の「以後の全操作 fail loudly」）。
-   * MUST: 見るのは dispose の**1 段目**（受付終了）。run admission もこの面なので、
-   * `dispose()` の後に発行された run はここで拒否される。
+   * MUST: do not split the condition between reads and writes. Poisoning and device loss are both
+   * states where "the physical state behind it is lost", and letting the logical length alone be
+   * returned would make an unrecoverable context look like a container holding a normal value
+   * (addendum 3's "every later operation fails loudly").
+   * MUST: check **step 1** of dispose (admission closed). Run admission is on this surface too, so
+   * a run issued after `dispose()` is refused here.
    */
   #assertUsable(where: string): void {
     if (this.#disposeRequested) {
@@ -1350,8 +1490,9 @@ export class GenerationContext {
   }
 
   /**
-   * **内部面**（論理長の搬送・進行・読み）の使用可否。見るのは dispose の**2 段目**（破棄本体が
-   * 走り出したか）で、1 段目と 2 段目の間に居る受理済み run は通す。
+   * Usability of the **internal surface** (carrying, advancing and reading the logical length). It
+   * checks **step 2** of dispose (whether the disposal body has started), letting accepted runs
+   * between step 1 and step 2 through.
    */
   #assertInternalUsable(where: string): void {
     if (this.#disposed) {
@@ -1361,9 +1502,11 @@ export class GenerationContext {
   }
 
   /**
-   * 借り手 context が触れない面（論理長を動かす 4 つ）— `commit` / `rewind` は利用者面の
-   * 拒否、`advance` / `defer` はランタイム内部の不変条件破れ（実行統合が
-   * {@link GenerationContextInternals.borrowing} を見て呼ばない契約 — ADR 0096 段 2 §2.1）。
+   * The surface a borrowing context cannot touch (the four operations that move the logical length)
+   * — `commit` / `rewind` are user-facing refusals, `advance` / `defer` are broken runtime-internal
+   * invariants (by contract the execution integration checks
+   * {@link GenerationContextInternals.borrowing} and does not call them — ADR 0096, addendum of
+   * 2026-09-08 on stage 2).
    */
   #assertNotBorrowing(where: string): void {
     if (this.#borrow === undefined) return;
@@ -1373,7 +1516,7 @@ export class GenerationContext {
     );
   }
 
-  /** 2 つの遮断面が共有する「背後の物理 state が生きているか」。 */
+  /** "Is the physical state behind it alive", shared by the two cut-off surfaces. */
   #assertLive(where: string): void {
     assertDeviceUsable(this.#host.gpu, where);
     if (this.#poisoned !== undefined) {
@@ -1385,11 +1528,13 @@ export class GenerationContext {
   }
 
   /**
-   * run が頭で捕捉した `pastLength` が今の論理長と一致すること。
+   * The `pastLength` a run captured at its head equals the current logical length.
    *
-   * MUST: uniform へ書く値・dispatch 数の算出・容量の検査・進行が**同じ 1 つの P** から出るのが
-   * states 形の前提（ADR 0066 決定 3 / 追記 4）。リースがあれば横から動く経路は塞がっているので、
-   * ここが割れたら実装の不変条件破れ — 沈黙で続けさせず即死させる。
+   * MUST: the states form assumes that the value written to the uniform, the dispatch-count
+   * computation, the capacity check and the advance all come from **one and the same P** (ADR 0066
+   * decision 3 / addendum 4). With a lease, every path that moves it from the side is blocked, so a
+   * split here is a broken implementation invariant — fail immediately instead of continuing
+   * silently.
    */
   #assertCapturedPast(pastLength: number, where: string): void {
     if (pastLength !== this.#pastLength) {
@@ -1401,15 +1546,17 @@ export class GenerationContext {
   }
 
   /**
-   * 今 step の実 token 数の検査（ADR 0066 決定 4 の 2 つの実行形に共通）。
+   * Check of this step's real token count (common to the two execution shapes of ADR 0066 decision
+   * 4).
    *
-   * prefill-chunk は `queryLength ≤ chunkLength`（超えた行は物理 shape に載らない）、decode は
-   * `queryLength = 1`。0 を許さないのは「何も進めない run」が state の書き込み範囲を空にして、
-   * 進行と物理内容の対応が観測できなくなるため。
+   * prefill-chunk has `queryLength ≤ chunkLength` (rows beyond it do not fit the physical shape),
+   * decode has `queryLength = 1`. 0 is not allowed because "a run that advances nothing" empties the
+   * state's write range, and the correspondence between progress and physical contents can no
+   * longer be observed.
    *
-   * NOTE: u32 の上限（{@link MAX_LOGICAL_LENGTH}）はここで重ねて見ない — `chunkLength` が
-   * create で u32 以下に絞られているので `queryLength ≤ chunkLength` がそのまま上限になる
-   * （`rewind` の `position ≤ pastLength` も同じ形で上限が伝わる）。
+   * NOTE: the u32 bound ({@link MAX_LOGICAL_LENGTH}) is not checked again here — `chunkLength` is
+   * narrowed to ≤ u32 in create, so `queryLength ≤ chunkLength` is the bound as is (`rewind`'s
+   * `position ≤ pastLength` passes the bound on in the same way).
    */
   #assertQueryLength(queryLength: number, where: string): void {
     if (!Number.isSafeInteger(queryLength) || queryLength < 1) {

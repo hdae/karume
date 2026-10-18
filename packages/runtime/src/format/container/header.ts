@@ -1,15 +1,16 @@
 /**
- * コンテナ先頭の固定ヘッダと、単一形の part 配置 — docs/container-v1.md §1 / §8 / §9。
+ * The fixed header at the start of a container, and the part layout of the single form —
+ * docs/container-v1.md §1 / §8 / §9.
  *
  * ```text
- *  0.. 4  magic          "KRMC" = モデル容器（krm） / "KRGC" = グラフ容器（krg）
- *  4.. 8  u32 LE         コンテナ版
- *  8..16  u64 LE         グラフ記述のバイト長
- * 16..24  u64 LE         モデル記述のバイト長（krg では 0 MUST）
+ *  0.. 4  magic          "KRMC" = model container (krm) / "KRGC" = graph container (krg)
+ *  4.. 8  u32 LE         container version
+ *  8..16  u64 LE         byte length of the graph descriptor
+ * 16..24  u64 LE         byte length of the model descriptor (MUST be 0 in a krg)
  * ```
  *
- * 種別を持つのは magic だけで、descriptor の中に `kind` 欄は無い（同じ事実を 2 か所に持たせない —
- * ADR 0108 決定 1）。JSON を 1 バイトも読む前に種別で弾ける。
+ * Only the magic carries the kind; the descriptor has no `kind` field (the same fact is not kept in
+ * two places — ADR 0108 decision 1). The kind can be rejected before a single byte of JSON is read.
  */
 
 import {
@@ -22,7 +23,10 @@ import {
   PAD_BYTE,
 } from "./limits.ts";
 
-/** コンテナ形式の違反（未対応・不整合・破損）を 1 本に集める例外。黙って近似しないための入口。 */
+/**
+ * The one error for container-format violations (unsupported, inconsistent, corrupt). The entry
+ * point for not approximating silently.
+ */
 export class ContainerFormatError extends Error {
   constructor(message: string) {
     super(message);
@@ -39,7 +43,7 @@ export type ContainerHeader = {
   readonly modelDescriptorLength: number;
 };
 
-/** `value` を `align` の倍数へ切り上げる。 */
+/** Rounds `value` up to a multiple of `align`. */
 export const alignUp = (value: number, align: number): number => {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new ContainerFormatError(`整列対象が非負の安全整数でない: ${value}`);
@@ -60,7 +64,7 @@ const readSafeUint64 = (view: DataView, offset: number, label: string): number =
   return Number(raw);
 };
 
-/** ヘッダを書き出す。`modelDescriptorLength` が 0 のときだけ `krg` を名乗れる（§1）。 */
+/** Writes the header. Only a `modelDescriptorLength` of 0 may claim to be a `krg` (§1). */
 export const writeHeader = (header: ContainerHeader): Uint8Array<ArrayBuffer> => {
   if (header.kind === "graph" && header.modelDescriptorLength !== 0) {
     throw new ContainerFormatError("krg はモデル記述を持てない（長さは 0 MUST）");
@@ -80,7 +84,10 @@ export const writeHeader = (header: ContainerHeader): Uint8Array<ArrayBuffer> =>
   return bytes;
 };
 
-/** 先頭 24 バイトからヘッダを読む。未知の magic / 版・安全整数超過・種別と長さの矛盾は拒否（§1）。 */
+/**
+ * Reads the header from the first 24 bytes. Unknown magic / version, values beyond safe integers
+ * and kind/length contradictions are rejected (§1).
+ */
 export const readHeader = (bytes: Uint8Array<ArrayBuffer>): ContainerHeader => {
   if (bytes.byteLength < HEADER_BYTES) {
     throw new ContainerFormatError(
@@ -126,18 +133,20 @@ export const readHeader = (bytes: Uint8Array<ArrayBuffer>): ContainerHeader => {
 };
 
 /**
- * part 0（ヘッダ + 2 文書）の長さ。単一形では、次の part が長さ 0 でなければこの直後を 64 B
- * 整列まで詰める（§1 / §8 — 規則は {@link derivePartOffsets}）。
+ * Length of part 0 (header + 2 documents). In the single form, unless the next part has length 0,
+ * the bytes right after it are padded up to 64 B alignment (§1 / §8 — the rule is
+ * {@link derivePartOffsets}).
  */
 export const part0Length = (header: ContainerHeader): number =>
   HEADER_BYTES + header.graphDescriptorLength + header.modelDescriptorLength;
 
 /**
- * 単一形で各 part が置かれる絶対 offset（§8）。
+ * Absolute offset of each part in the single form (§8).
  *
- * 書き手と読み手がここを共有するので、単一形にだけ存在する part 間の詰め物の規則が 1 箇所に
- * 閉じる。**長さ 0 の part の前に詰め物を挟まない** MUST — 挟むと、const が空の `krm` から抜いた
- * `krg` と直接書いた `krg` がバイトでずれる（§3 / §9）。
+ * Writer and reader share this, so the rule for the padding between parts, which exists only in the
+ * single form, lives in one place. **Padding MUST NOT be inserted before a part of length 0** —
+ * otherwise a `krg` extracted from a `krm` with an empty const region and a `krg` written directly
+ * differ in bytes (§3 / §9).
  */
 export const derivePartOffsets = (
   part0Bytes: number,
@@ -154,11 +163,11 @@ export const derivePartOffsets = (
 };
 
 /**
- * `krg` = `[ヘッダ'][グラフ記述][詰め物][const 領域]` を組み立てる（§9）。
+ * Assembles `krg` = `[header'][graph descriptor][padding][const region]` (§9).
  *
- * `krg` を直接書く側と、`krm` から抜き出す側の**両方**がこれを呼ぶ。同じ関数を通るので
- * 「抽出結果 = 直接書いた krg」がバイト単位で成り立つ（`krg` の同一性を内容ハッシュで判定する
- * 条件 — ADR 0108 決定 4）。
+ * **Both** the side that writes a `krg` directly and the side that extracts it from a `krm` call
+ * this. Going through the same function makes "extracted result = directly written krg" hold byte
+ * for byte (the condition for deciding `krg` identity by content hash — ADR 0108 decision 4).
  */
 export const assembleGraphContainer = (
   graphDescriptorBytes: Uint8Array<ArrayBuffer>,

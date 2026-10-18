@@ -1,40 +1,48 @@
 /**
- * strided 実体化コピーカーネルの WGSL 生成（ADR 0011）。
+ * WGSL generation for the strided materializing-copy kernels (ADR 0011).
  *
- * 入力を `(offset, strides[STRIDED_RANK])` で読み、**出力は常に連続**。permute は軸を
- * 並べ替えた stride、expand は複製する軸の stride 0 で表現する — レイアウト op の実体化を
- * 1 カーネル族に閉じ込め、elementwise / reduce / matmul の codegen を連続入力前提のまま
- * 温存するための形（ADR 0011 の案 B）。
+ * The input is read through `(offset, strides[STRIDED_RANK])` and **the output is always
+ * contiguous**. permute is expressed as permuted strides, expand as stride 0 on the replicated
+ * axes — a form that confines the materialization of layout ops to one kernel family and keeps the
+ * elementwise / reduce / matmul codegen on its contiguous-input assumption (option B of ADR 0011).
  *
- * MUST: 生成は決定的 — 同一キーからバイト単位で同一の WGSL が出ること（キーと WGSL を
- * 同じ正準化から組み立てる）。**要素型はキーに含める**（ADR 0009）— bool マスクの expand と
- * i32 添字の expand が実測に存在し、載せないと別要素型の dispatch に同じパイプラインが
- * 割り当たってビット列の読み替えが例外なしに通る。
- * MUST: grid-stride ループ前提。1 次元の dispatch 上限（仕様既定 65535）は実モデルで超える。
+ * MUST: generation is deterministic — the same key gives byte-identical WGSL (key and WGSL are built
+ * from the same canonicalization). **The element type is part of the key** (ADR 0009) — an expand
+ * of a bool mask and an expand of i32 indices occur in practice, and without it in the key the same
+ * pipeline is assigned to a dispatch of another element type and the bit pattern is reinterpreted
+ * without an exception.
+ * MUST: grid-stride loops are assumed. Real models exceed the per-dimension dispatch limit (65535 by
+ * default in the spec).
  *
- * rank は **STRIDED_RANK に固定**して 1 dtype = 1 パイプラインにする。実 rank が足りない
- * ぶんは呼び出し側が左詰めで 1（dims）と 0（strides）に埋める — 右詰め broadcast と同じ
- * 埋め方で、余った先行軸の座標は常に 0 になり読み出し位置に寄与しない。
+ * The rank is **fixed at STRIDED_RANK** so that one dtype = one pipeline. The caller pads the
+ * missing rank on the left with 1 (dims) and 0 (strides) — the same padding as right-aligned
+ * broadcast, so the coordinates of the extra leading axes are always 0 and do not contribute to the
+ * read position.
  *
- * 本ファイルは**読み族と書き族の 2 つ**を持つ（ADR 0014）。書き族（cat）は読み族の双対 —
- * 入力を連続で読み、出力へ `(offset, strides)` で書く。同じ params レイアウトと同じ決定性
- * キー規約を共有し、走査の向きだけが逆になる。
+ * This file has **two families, read and write** (ADR 0014). The write family (cat) is the dual of
+ * the read family — it reads the input contiguously and writes the output through
+ * `(offset, strides)`. Both share the same params layout and the same deterministic key convention;
+ * only the direction of traversal is reversed.
  */
 
 import { type IrDtype, SEMANTIC_DTYPES } from "../format/ir.ts";
 import { CodegenError } from "./errors.ts";
 import { assertU32Params } from "./params.ts";
 
-/** DeBERTa front の値は全て rank ≤ 4（ADR 0011）。rank ≥ 5 は rank 下げ正規化で先に潰す。 */
+/**
+ * Value ranks are capped at 4 (ADR 0011: its first premise, every DeBERTa-front value having
+ * rank ≤ 4, is gone; ADR 0016 keeps 4 for Anima and ADR 0118 admits rank 5 only for conv3d
+ * weights). Rank ≥ 5 values are lowered first by the rank-lowering normalization.
+ */
 export const STRIDED_RANK = 4;
 export const STRIDED_WORKGROUP_SIZE = 256;
 
 export type StridedSpec = {
-  /** 要素の意味論 dtype（入力・出力とも同型 — レイアウト op は値に触らない）。 */
+  /** Semantic dtype of the elements (input and output alike — layout ops do not touch values). */
   readonly dtype: IrDtype;
 };
 
-/** 意味論 dtype → WGSL のスカラ型。bool の格納は u32 の 0 / 1（ADR 0009）。 */
+/** Semantic dtype → WGSL scalar type. A bool is stored as u32 0 / 1 (ADR 0009). */
 const WGSL_SCALAR: Readonly<Record<IrDtype, string>> = {
   f32: "f32",
   i32: "i32",
@@ -50,17 +58,18 @@ const canonicalize = (spec: StridedSpec): IrDtype => {
 };
 
 /**
- * MUST: WGSL に埋まる生成パラメータは全てキーに載せる（rank・workgroup サイズ・要素型）。
- * 載せずに定数を変えると、旧定数でコンパイル済みのパイプラインが同じキーで再利用される。
+ * MUST: every generation parameter baked into the WGSL goes into the key (rank, workgroup size,
+ * element type). Changing a constant without it in the key reuses a pipeline compiled with the old
+ * constant under the same key.
  */
 export const stridedKey = (spec: StridedSpec): string =>
   `strided:v1:${canonicalize(spec)}:r${STRIDED_RANK}:wg${STRIDED_WORKGROUP_SIZE}`;
 
 /**
- * params のレイアウト（storage, u32 配列）:
- * `[0]=要素数 n, [1..STRIDED_RANK]=出力 dims, 続けて入力 strides を同数, 末尾に offset`。
- * uniform ではなく storage で渡すのは、この族に workgroupBarrier が無く一様性解析の制約を
- * 受けないため（elementwise と同じ理由）。
+ * The params layout (storage, a u32 array):
+ * `[0]=element count n, [1..STRIDED_RANK]=output dims, then as many input strides, offset last`.
+ * It is passed as storage rather than uniform because this family has no workgroupBarrier and is
+ * not constrained by the uniformity analysis (the same reason as elementwise).
  */
 export const stridedWgsl = (spec: StridedSpec): string => {
   const scalar = WGSL_SCALAR[canonicalize(spec)];
@@ -68,7 +77,8 @@ export const stridedWgsl = (spec: StridedSpec): string => {
   const strideAt = (d: number): number => 1 + STRIDED_RANK + d;
   const offsetAt = 1 + 2 * STRIDED_RANK;
 
-  // 出力の平坦添字を最終軸から divmod で分解する（出力は常に連続）。
+  // Decompose the flat output index with divmod from the last axis (the output is always
+  // contiguous).
   const decode: string[] = ["    var rem = i;"];
   for (let d = STRIDED_RANK - 1; d >= 1; d -= 1) {
     decode.push(`    let c${d} = rem % params[${dimAt(d)}u]; rem = rem / params[${dimAt(d)}u];`);
@@ -110,7 +120,7 @@ const assertRank = (shape: readonly number[], what: string): void => {
   }
 };
 
-/** 連続レイアウトの stride（右から running product）。 */
+/** Strides of a contiguous layout (running product from the right). */
 const contiguousStrides = (shape: readonly number[]): number[] => {
   const strides = new Array<number>(shape.length).fill(0);
   let running = 1;
@@ -122,9 +132,9 @@ const contiguousStrides = (shape: readonly number[]): number[] => {
 };
 
 /**
- * permute の読み出し stride。`dims[d]` = 出力の次元 d が取る入力の次元番号なので、
- * 出力の次元 d を 1 進めると入力側は `dims[d]` 軸を 1 進む。
- * 並べ替えの妥当性（全単射・rank 一致）は契約表が済ませている前提。
+ * Read strides of permute. `dims[d]` = the input dimension that output dimension d takes, so one
+ * step along output dimension d is one step along input axis `dims[d]`.
+ * Assumes the contract table has already checked the permutation (bijective, matching rank).
  */
 export const permuteSrcStrides = (
   srcShape: readonly number[],
@@ -146,7 +156,7 @@ export const permuteSrcStrides = (
   });
 };
 
-/** {@link expandSrcStrides} の診断の主語（既定は expand そのもの）。 */
+/** The subject named in {@link expandSrcStrides}'s diagnostics (expand itself by default). */
 type BroadcastLabels = {
   readonly src: string;
   readonly out: string;
@@ -155,12 +165,14 @@ type BroadcastLabels = {
 const EXPAND_LABELS: BroadcastLabels = { src: "expand の入力", out: "expand の出力" };
 
 /**
- * 右詰め broadcast の読み出し stride。複製する次元（入力の長さが 1）は **stride 0**、
- * rank が増えたぶんの先行軸も stride 0。契約側（長さ 1 の次元しか拡張しない）は済ませている前提。
+ * Read strides of right-aligned broadcast. A replicated dimension (input length 1) gets
+ * **stride 0**, and so do the leading axes added by a larger rank. Assumes the contract side (only
+ * dimensions of length 1 are expanded) has already been checked.
  *
- * MUST: 診断の主語は呼び出し側が差し替える。この規則は masked_fill の mask 読みでも共有する
- * （規則を 2 箇所に書けば必ず割れる）が、そのとき「expand の入力の rank が…」と出ると、
- * グラフに expand が 1 本も無いのに expand を疑わせる誤誘導になる。
+ * MUST: the caller replaces the subject of the diagnostics. masked_fill's mask read shares this
+ * rule too (a rule written in two places always diverges), and a message such as "the rank of the
+ * expand input …" there would mislead the reader into suspecting an expand when the graph has
+ * none.
  */
 export const expandSrcStrides = (
   srcShape: readonly number[],
@@ -182,8 +194,9 @@ export const expandSrcStrides = (
 };
 
 /**
- * slice の読み出し stride（ADR 0014）。読み方は**入力の連続 stride そのもの**で、切り出しは
- * offset だけで表す（ADR 0011 が予告した「可変点は params の offset 1 語」）。
+ * Read strides of slice (ADR 0014). The read uses **the input's contiguous strides as they are**,
+ * and the cut is expressed by the offset alone (what ADR 0011 anticipated: "the only variable point
+ * is the one offset word in params").
  */
 export const sliceSrcStrides = (srcShape: readonly number[]): number[] => {
   assertRank(srcShape, "slice の入力");
@@ -191,11 +204,11 @@ export const sliceSrcStrides = (srcShape: readonly number[]): number[] => {
 };
 
 /**
- * slice の読み出し先頭位置 = `start × 当該軸の入力 stride`。
+ * Read start position of slice = `start × the input stride of that axis`.
  *
- * MUST: stride は**入力**の shape から組む（{@link sliceSrcStrides} と同じ表）。出力側の
- * 縮んだ shape から組むと切り出し軸より前の送り幅が縮み、2 行目以降が別の行を読む
- * （sym_prefix_slice の MUST と同型の罠）。
+ * MUST: the strides are built from the **input** shape (the same table as {@link sliceSrcStrides}).
+ * Built from the shrunken output shape, the steps of the axes before the sliced one shrink and the
+ * second and later rows read other rows (the same trap as the MUST of sym_prefix_slice).
  */
 export const sliceSrcOffset = (srcShape: readonly number[], dim: number, start: number): number => {
   assertRank(srcShape, "slice の入力");
@@ -213,12 +226,13 @@ export const sliceSrcOffset = (srcShape: readonly number[], dim: number, start: 
 };
 
 /**
- * sym_prefix_slice の読み出し stride（ADR 0010）。入力は **Tmax で焼いた定数の全長**で、
- * 出力はその先頭を切り出した連続バッファ。offset は 0 で、読み方は入力の連続 stride そのもの。
+ * Read strides of sym_prefix_slice (ADR 0010). The input is **the full length of a constant baked
+ * at Tmax**, and the output is a contiguous buffer cut from its head. The offset is 0 and the read
+ * uses the input's contiguous strides as they are.
  *
- * MUST: stride は**入力（Tmax 形）の shape** から組む。束縛後の出力 shape から組むと行の
- * 送り幅が縮み、2 行目以降が定数表の別の行を読む（T = Tmax のときだけ正しく、それ以外で
- * 静かに壊れる形）。
+ * MUST: the strides are built from **the input (Tmax-shaped) shape**. Built from the bound output
+ * shape, the row step shrinks and the second and later rows read other rows of the constant table
+ * (correct only when T = Tmax, silently broken otherwise).
  */
 export const prefixSliceSrcStrides = (srcShape: readonly number[]): number[] => {
   assertRank(srcShape, "sym_prefix_slice の入力");
@@ -226,12 +240,13 @@ export const prefixSliceSrcStrides = (srcShape: readonly number[]): number[] => 
 };
 
 /**
- * params バッファの中身を組み立てる。実 rank に足りないぶんは**左詰めで**
- * dims=1 / strides=0 に埋める（右詰め broadcast と同じ埋め方 — 余った先行軸の座標は
- * 常に 0 になり読み出し位置に寄与しない）。
+ * Builds the contents of the params buffer. The missing rank is padded **on the left** with
+ * dims=1 / strides=0 (the same padding as right-aligned broadcast — the coordinates of the extra
+ * leading axes are always 0 and do not contribute to the read position).
  *
- * 読み族・書き族で**同じレイアウト**（走査する側の dims と、相手側の strides + offset）を
- * 使う — 走査の向きが逆になるだけで params の意味構造は双対そのものだから。
+ * The read and write families use **the same layout** (the dims of the traversed side, and the
+ * strides + offset of the other side) — only the direction of traversal is reversed, and the
+ * meaning of params is exactly dual.
  */
 const packStridedParams = (
   dims: readonly number[],
@@ -270,27 +285,29 @@ export const stridedParams = (
 ): Uint32Array<ArrayBuffer> =>
   packStridedParams(outShape, srcStrides, offset, { shape: "strided の出力", rank: "出力" });
 
-// ---- strided 書きコピー族（読み族の双対 — ADR 0014）----------------------
+// ---- strided write-copy family (the dual of the read family — ADR 0014) ----------------------
 
 export const STRIDED_WRITE_WORKGROUP_SIZE = 256;
 
 /**
- * MUST: 読み族と**同じ決定性キー規約**（要素型・rank・workgroup サイズを載せる）。族名だけを
- * 変えて他を揃えるのは、双方が同じ可変点しか持たないことの表明でもある。
+ * MUST: **the same deterministic key convention** as the read family (element type, rank and
+ * workgroup size go in). Changing only the family name and keeping the rest also states that both
+ * have the same variable points and no others.
  */
 export const stridedWriteKey = (spec: StridedSpec): string =>
   `strided_write:v1:${canonicalize(spec)}:r${STRIDED_RANK}:wg${STRIDED_WRITE_WORKGROUP_SIZE}`;
 
 /**
- * strided **書き**コピーの WGSL（cat の実行 — ADR 0014）。入力を連続で読み、出力へ
- * `(offset, strides[STRIDED_RANK])` で書く（{@link stridedWgsl} の双対）。
+ * WGSL of the strided **write** copy (how cat runs — ADR 0014). It reads the input contiguously and
+ * writes the output through `(offset, strides[STRIDED_RANK])` (the dual of {@link stridedWgsl}).
  *
- * params のレイアウトは読み族と同じ:
- * `[0]=要素数 n, [1..STRIDED_RANK]=**入力** dims, 続けて**出力** strides を同数, 末尾に offset`。
+ * The params layout is the same as the read family's:
+ * `[0]=element count n, [1..STRIDED_RANK]=**input** dims, then as many **output** strides, offset
+ * last`.
  *
- * MUST: 1 dispatch が書くのは出力の部分領域だけ。**ノード単位で出力全域を覆う**ことは
- * 呼び出し側（executor の cat）が offset の総和と出力の軸長を突き合わせて担保する
- * （full-write 不変条件 — ADR 0004 / 0014）。
+ * MUST: one dispatch writes only a subregion of the output. **Covering the whole output per node**
+ * is guaranteed by the caller (the executor's cat), which matches the sum of the offsets against
+ * the output's axis length (the full-write invariant — ADR 0004 / 0014).
  */
 export const stridedWriteWgsl = (spec: StridedSpec): string => {
   const scalar = WGSL_SCALAR[canonicalize(spec)];
@@ -298,7 +315,8 @@ export const stridedWriteWgsl = (spec: StridedSpec): string => {
   const strideAt = (d: number): number => 1 + STRIDED_RANK + d;
   const offsetAt = 1 + 2 * STRIDED_RANK;
 
-  // 入力の平坦添字を最終軸から divmod で分解する（入力は常に連続）。
+  // Decompose the flat input index with divmod from the last axis (the input is always
+  // contiguous).
   const decode: string[] = ["    var rem = i;"];
   for (let d = STRIDED_RANK - 1; d >= 1; d -= 1) {
     decode.push(`    let c${d} = rem % params[${dimAt(d)}u]; rem = rem / params[${dimAt(d)}u];`);
@@ -333,7 +351,8 @@ export const stridedWriteWgsl = (spec: StridedSpec): string => {
 };
 
 /**
- * 書き族の params（走査するのは**入力**なので dims は入力 shape、strides は出力側）。
+ * params of the write family (the traversed side is the **input**, so dims are the input shape and
+ * strides are the output side's).
  */
 export const stridedWriteParams = (
   srcShape: readonly number[],
@@ -346,10 +365,12 @@ export const stridedWriteParams = (
   });
 
 /**
- * cat の書き込み stride（出力の連続 stride）と、入力 `k` の書き出し先頭位置。
+ * Write strides of cat (the output's contiguous strides) and the write start position of input
+ * `k`.
  *
- * offset は「連結軸の先行入力の長さの総和 × その軸の出力 stride」。ここを取り違えると
- * 出力の一部が二重に書かれ、残りが**未書き込みのまま**（配り直しなら前の値）残る。
+ * offset = "the sum of the lengths of the preceding inputs along the concatenation axis × the
+ * output stride of that axis". Getting it wrong writes part of the output twice and leaves the rest
+ * **unwritten** (the previous value when the buffer is reused).
  */
 export const catOutStrides = (outShape: readonly number[]): number[] => {
   assertRank(outShape, "cat の出力");

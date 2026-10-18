@@ -1,10 +1,12 @@
-// safetensors リーダ（読み取り専用・I/O を持たない — 呼び出し側が ArrayBuffer を渡す）。
-// レイアウト: [u64 LE ヘッダ長][ヘッダ JSON][データ節]。data_offsets はデータ節先頭からの相対。
+// safetensors reader (read-only, no I/O — the caller passes an ArrayBuffer).
+// Layout: [u64 LE header length][header JSON][data section]. data_offsets are relative to the
+// start of the data section.
 
 /**
- * 付帯資産の safetensors が持ちうる格納 dtype（公式 safetensors の語彙の部分集合）。未知は
- * fail loudly — packed 4bit / 2bit のような**方言 dtype は受理しない**（配布形は容器 `krm` へ
- * 移っており、量子化格納は容器の codec が担う）。
+ * Storage dtypes an auxiliary-asset safetensors file may have (a subset of the official safetensors
+ * vocabulary). Unknown ones fail loudly — **dialect dtypes such as packed 4-bit / 2-bit are not
+ * accepted** (the distribution has moved to the `krm` container, and quantized storage is handled by
+ * the container's codecs).
  */
 export type SafetensorsDtype =
   | "F32"
@@ -18,12 +20,14 @@ export type SafetensorsDtype =
   | "BOOL";
 
 /**
- * dtype → 1 要素の byte 数。バイト長の検証は `numel × bytes` の厳密一致で、テンソル先頭に
- * 要求する byte 整列もこの値（コピーせず typed array view を張る前提 — view の要素整列 =
- * 要素サイズ）。
+ * dtype → bytes per element. The byte-length check is an exact match of `numel × bytes`, and the
+ * byte alignment required at a tensor's start is this value too (on the premise that a typed array
+ * view is created without a copy — a view's element alignment = the element size).
  *
- * NOTE: 付帯資産の語彙には packed 型（要素サイズと整列要求が割れる 4bit / 2bit 詰めの類）が
- * 無いので 1 表で足りる。packed 型を受理する日は整列表を分け直す（ADR 0069 決定 2 の 3 面分離）。
+ * NOTE: the auxiliary-asset vocabulary has no packed types (the 4-bit / 2-bit packed kind, where the
+ * element size and the alignment requirement split), so one table suffices. The day packed types are
+ * accepted, the alignment table is split again (the three-surface split of ADR 0069 decision 2 —
+ * superseded for weights by ADR 0108 decisions 10–13).
  */
 const DTYPE_BYTES: Readonly<Record<SafetensorsDtype, number>> = {
   F32: 4,
@@ -32,7 +36,8 @@ const DTYPE_BYTES: Readonly<Record<SafetensorsDtype, number>> = {
   I8: 1,
   U8: 1,
   I32: 4,
-  // U32 は意味論 bool の実表現（u32 の 0/1 — ADR 0009）。golden の io がこの形で書かれる。
+  // U32 is the physical form of semantic bool (u32 0/1 — ADR 0009). Golden io is written in this
+  // form.
   U32: 4,
   I64: 8,
   BOOL: 1,
@@ -42,7 +47,7 @@ export type TensorView = {
   readonly name: string;
   readonly dtype: SafetensorsDtype;
   readonly shape: readonly number[];
-  /** ファイル先頭からの絶対 byte offset（データ節相対ではない）。 */
+  /** Absolute byte offset from the start of the file (not relative to the data section). */
   readonly byteOffset: number;
   readonly byteLength: number;
 };
@@ -54,16 +59,18 @@ export type SafetensorsFile = {
 };
 
 /**
- * ヘッダだけを解いた結果（データ節のバイトは持たない）。
+ * The result of parsing only the header (it holds no bytes of the data section).
  *
- * テンソル表の検査（被覆・整列・末尾）は宣言とファイル長だけで完結するので、区間読みする
- * 呼び手はファイル全量を持たずにこの表を得られる。
+ * The checks of the tensor table (coverage, alignment, tail) need only the declarations and the file
+ * length, so a caller that reads ranges can get this table without holding the whole file.
  */
 export type SafetensorsHeader = {
-  /** データ節の先頭（ファイル先頭からの絶対 byte offset = 8 + ヘッダ長）。 */
+  /**
+   * Start of the data section (absolute byte offset from the start of the file = 8 + header length).
+   */
   readonly dataStart: number;
   readonly metadata: ReadonlyMap<string, string>;
-  /** byteOffset は {@link TensorView} どおりファイル先頭からの絶対値。 */
+  /** byteOffset is absolute from the start of the file, as in {@link TensorView}. */
   readonly tensors: ReadonlyMap<string, TensorView>;
 };
 
@@ -108,7 +115,10 @@ const elementCount = (shape: readonly number[], where: string): number => {
   return count;
 };
 
-/** 宣言（dtype + 要素数）から決まるテンソルのバイト長（下の「サイズ不一致」門が使う）。 */
+/**
+ * Byte length of a tensor determined by its declaration (dtype + element count) (used by the "size
+ * mismatch" check below).
+ */
 const declaredByteLength = (dtype: SafetensorsDtype, count: number): number =>
   count * DTYPE_BYTES[dtype];
 
@@ -173,22 +183,25 @@ const decodeHeader = (
   return parsed;
 };
 
-// 判別は `ArrayBuffer.isView`（`instanceof ArrayBuffer` は realm を跨ぐと false になり、
-// 別 realm の ArrayBuffer が view として扱われて `SafetensorsError` ではなく TypeError で落ちる）。
+// Distinguished with `ArrayBuffer.isView` (`instanceof ArrayBuffer` is false across realms, so an
+// ArrayBuffer from another realm would be treated as a view and fail with a TypeError instead of a
+// `SafetensorsError`).
 const asPrefixBytes = (prefix: Uint8Array<ArrayBuffer> | ArrayBuffer): Uint8Array<ArrayBuffer> =>
   ArrayBuffer.isView(prefix) ? prefix : new Uint8Array(prefix);
 
 /**
- * 先頭 8 バイトからヘッダ長（ヘッダ JSON のバイト数）を読む。
+ * Reads the header length (the byte count of the header JSON) from the first 8 bytes.
  *
- * 区間読みする呼び手が「8 バイト読む → N を知る → 8+N バイトを読み直す」の 2 段を踏むための
- * 入口。prefix はファイル先頭からの連続した区間で、8 バイト以上あればよい。
+ * The entry point for a range-reading caller to take the two steps "read 8 bytes → learn N → read
+ * 8+N bytes again". prefix is a contiguous range from the start of the file and needs at least 8
+ * bytes.
  *
- * MUST: 2 段目の読みは**既知のファイル長で clamp する** — この面はファイル長を受け取らないので
- * 見られるのは安全整数超えだけで、長さの妥当性は {@link parseSafetensorsHeader} が唯一検査する。
- * 壊れたヘッダ長（例: 1 TiB）をそのまま読み長にすると、確保か読みが先に RangeError / OOM で
- * 落ち、`SafetensorsError` に到達できない。呼び手はファイル長を必ず持っている
- * （{@link parseSafetensorsHeader} の必須引数）。
+ * MUST: the second read is **clamped to the known file length** — this function does not receive the
+ * file length, so it can only see values beyond safe integers; {@link parseSafetensorsHeader} is the
+ * only place that checks whether the length is plausible. Using a corrupt header length (e.g. 1 TiB)
+ * as the read length makes the allocation or the read fail first with a RangeError / OOM, never
+ * reaching `SafetensorsError`. The caller always has the file length (a required argument of
+ * {@link parseSafetensorsHeader}).
  */
 export const safetensorsHeaderLength = (prefix: Uint8Array<ArrayBuffer> | ArrayBuffer): number => {
   const bytes = asPrefixBytes(prefix);
@@ -205,14 +218,16 @@ export const safetensorsHeaderLength = (prefix: Uint8Array<ArrayBuffer> | ArrayB
 };
 
 /**
- * ファイル先頭の区間（8 + ヘッダ長バイト以上）と**ファイル全長**からヘッダを解く。
+ * Parses the header from the range at the start of the file (at least 8 + header length bytes) and
+ * **the total file length**.
  *
- * データ節のバイトを 1 つも読まずに済むのは、被覆・整列・末尾の検査が「宣言の集合」と
- * 「ファイル長」だけで閉じているため。資産を区間読みする呼び手は、この表の byteOffset /
- * byteLength をそのまま読み口へ渡せる。
+ * No byte of the data section needs to be read because the coverage, alignment and tail checks close
+ * over just "the set of declarations" and "the file length". A caller that reads an asset by ranges
+ * can pass this table's byteOffset / byteLength straight to its reader.
  *
- * prefix が足りない場合は必要な長さを文言に載せて fail loudly — 呼び手が読み足す長さを
- * 例外から決められる MUST（勝手に 0 埋めして解くと壊れたヘッダを黙って受理する）。
+ * When the prefix is too short it fails loudly with the needed length in the message — the caller
+ * MUST be able to decide from the error how much more to read (zero-filling on its own and parsing
+ * would silently accept a corrupt header).
  */
 export const parseSafetensorsHeader = (
   prefix: Uint8Array<ArrayBuffer> | ArrayBuffer,
@@ -255,8 +270,9 @@ export const parseSafetensorsHeader = (
   const dataLength = fileLength - dataStart;
   const ordered = [...declared].sort((a, b) => a.begin - b.begin || a.end - b.end);
   const tensors = new Map<string, TensorView>();
-  // データ節は宣言の集合で隙間なく覆われる MUST — 重複は同一バイトの二重意味、隙間と
-  // 末尾の未使用領域は「読めていない宣言がある」ことの徴候なので、いずれも黙って通さない。
+  // The data section MUST be covered by the set of declarations without gaps — an overlap gives the
+  // same bytes two meanings, and gaps and unused space at the tail are signs that "some declaration
+  // was not read", so none of them is let through silently.
   let cursor = 0;
   for (const entry of ordered) {
     const where = `tensor '${entry.name}'`;
@@ -277,7 +293,7 @@ export const parseSafetensorsHeader = (
     }
     const align = DTYPE_BYTES[entry.dtype];
     if ((dataStart + entry.begin) % align !== 0) {
-      // コピーを作らず typed array view を張る前提が崩れるため受理しない。
+      // Not accepted: it breaks the premise that a typed array view is created without a copy.
       throw new SafetensorsError(
         `${where}: 絶対 offset ${
           dataStart + entry.begin
@@ -300,17 +316,17 @@ export const parseSafetensorsHeader = (
 };
 
 /**
- * ファイル全体を 1 本の ArrayBuffer で受け取り、テンソル表を厳密に検査して view を返す。
- * view はコピーを作らず buffer 上の byteOffset / byteLength で参照する。
+ * Takes the whole file as one ArrayBuffer, checks the tensor table strictly and returns views.
+ * The views make no copy; they refer to byteOffset / byteLength on the buffer.
  *
- * このリーダの読み手は付帯資産（rope 素表・style 表・mel 基底・golden の io 等）で、Session の
- * 重みは容器 `krm` の経路が読む。
+ * The readers of this reader are auxiliary assets (rope tables, style tables, mel bases, golden io
+ * and so on); Session weights are read by the `krm` container path.
  *
- * buffer 全体をファイルの実長として扱う — ファイルより長い buffer の末尾の余白は
- * 「データ節末尾の未使用領域」として拒否する。
+ * The whole buffer is treated as the actual file length — slack at the tail of a buffer longer than
+ * the file is rejected as "unused space at the tail of the data section".
  *
- * 検査そのものは {@link parseSafetensorsHeader} の 1 実装だけが持つ MUST — 全量経路と区間読み
- * 経路で受理する形が食い違わないため。
+ * The checks themselves MUST live only in the one implementation, {@link parseSafetensorsHeader} —
+ * so that the whole-file path and the range-read path accept the same forms.
  */
 export const parseSafetensors = (buffer: ArrayBuffer): SafetensorsFile => {
   const { metadata, tensors } = parseSafetensorsHeader(buffer, buffer.byteLength);
@@ -318,11 +334,11 @@ export const parseSafetensors = (buffer: ArrayBuffer): SafetensorsFile => {
 };
 
 /**
- * テンソルの生バイト（コピーしない）。
+ * The raw bytes of a tensor (no copy).
  *
- * NOTE: dtype 別の TypedArray は返さない。呼び手が欲しい形（f32 / u32 / bf16 の再解釈）は
- * 資産ごとに違うので、この面は「raw バイト + dtype + 論理 shape（{@link TensorView}）」までを
- * 渡し、view の張り方は呼び手に委ねる。
+ * NOTE: no per-dtype TypedArray is returned. The form a caller wants (reinterpreting as f32 / u32 /
+ * bf16) differs per asset, so this function hands over "raw bytes + dtype + logical shape
+ * ({@link TensorView})" and leaves creating the view to the caller.
  */
 export const tensorBytes = (file: SafetensorsFile, view: TensorView): Uint8Array<ArrayBuffer> =>
   new Uint8Array(file.buffer, view.byteOffset, view.byteLength);

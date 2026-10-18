@@ -1,7 +1,7 @@
 /**
- * 融合ルール `adaln`（DiT の変調 — 窓 6 / 7 ノード）。全ルール共通の適格条件と `defineRule`
- * は {@link "../fusion-rule.ts"}、適用順を決める宣言表は {@link "../fusion.ts"} の
- * `FUSION_RULES`。
+ * Fusion rule `adaln` (DiT modulation — a window of 6 / 7 nodes). The eligibility conditions
+ * shared by every rule and `defineRule` are in {@link "../fusion-rule.ts"}; the declaration table
+ * that fixes the application order is `FUSION_RULES` in {@link "../fusion.ts"}.
  */
 
 import { LAYER_NORM_OP, layerNormAttrs, numel } from "../../ops.ts";
@@ -23,35 +23,36 @@ type AdalnMatch = FusionMatch & {
   readonly eps: number;
 };
 
-/** 変調ベクトルの broadcast 形（先行軸を全て 1 にした `[1,…,1,dim]`）。 */
+/** The broadcast shape of the modulation vector (`[1,…,1,dim]`, every leading axis 1). */
 const modulationShape = (rowShape: readonly number[], dim: number): readonly number[] => [
   ...rowShape.slice(0, -1).map(() => 1),
   dim,
 ];
 
 /**
- * adaLN（DiT の変調）: エクスポータが出す**窓 6 / 7 ノード**。
+ * adaLN (DiT modulation): the **window of 6 / 7 nodes** the exporter emits.
  *
  * ```
  * layer_norm(x, w, b)              -> t          [.., dim]
- * reshape × 2〜3                    （窓内 passthrough — 変調ベクトルの unsqueeze）
+ * reshape × 2–3                     (in-window passthrough — unsqueeze of the modulation vector)
  * add(scale, one[1])               -> s          [1,..,1,dim]
  * mul(t, s)                        -> p          [.., dim]
  * add(p, shift)                    -> y          [.., dim]
  * ```
  *
- * 畳むのは `layer_norm / add / mul / add` の 4 本で、間の reshape は 0 dispatch の別名のまま
- * 融合ステップの前に並ぶ（{@link "../fusion-rule.ts"} の `passthroughIsIndependent` が
- * 並べ替えの合法性を見る）。
+ * The four folded nodes are `layer_norm / add / mul / add`; the reshapes in between stay
+ * zero-dispatch aliases placed in front of the fused step (`passthroughIsIndependent` in
+ * {@link "../fusion-rule.ts"} checks that the reordering is legal).
  *
- * MUST: `one` は**値を仮定せず**バッファとして束ね、カーネルが `one[0]` を読む。IR の
- * initializer の中身は融合パスからは見えない（見えたとしても `1.0` を焼き込んだ瞬間、
- * 「掴めなければ必ず正しい」の外側に出る）。
- * MUST: mul / add の入力順は実測形どおりに固定する（有限値では可換でも NaN payload の
- * 選ばれ方がバックエンドで違いうる）。SiLU のように順序変種を key へ載せる形にはしない —
- * 実測が 1 順序しかないので受理集合を広げない。
+ * MUST: `one` is bound as a buffer **without assuming its value**, and the kernel reads
+ * `one[0]`. The fusion pass cannot see the contents of an IR initializer (and even if it could,
+ * baking in `1.0` would step outside "if it does not match, it is always correct").
+ * MUST: the input order of mul / add is fixed to the measured form (commutative for finite
+ * values, but which NaN payload wins may differ between backends). Unlike SiLU, the order
+ * variants are not carried in the key — only one order is measured, so the accepted set is not
+ * widened.
  *
- * 外部入力の延べ回数: x / ln weight / ln bias / scale / one / shift が各 1 回 = 6 回。
+ * Total uses of external inputs: x / ln weight / ln bias / scale / one / shift once each = 6.
  */
 export const ADALN_RULE = defineRule<AdalnMatch>({
   name: "adaln",
@@ -59,8 +60,9 @@ export const ADALN_RULE = defineRule<AdalnMatch>({
   match: (nodes, index, context) => {
     const norm = nodes[index];
     if (norm?.node.op !== LAYER_NORM_OP) return undefined;
-    // 窓内 passthrough は「直後に並ぶ連続 reshape」だけ。実測は shift / scale の 2 本と、
-    // gate を足した 3 本の 2 形（gate は鎖の外で消費される）。
+    // The in-window passthrough is only "the consecutive reshapes right after". Two forms are
+    // measured: 2 (shift / scale) and 3 with the gate added (the gate is consumed outside the
+    // chain).
     let cursor = index + 1;
     while (nodes[cursor]?.node.op === "reshape") cursor += 1;
     const passthroughCount = cursor - index - 1;
@@ -73,8 +75,8 @@ export const ADALN_RULE = defineRule<AdalnMatch>({
     if (modulate.node.op !== "add" || multiply.node.op !== "mul" || offset.node.op !== "add")
       return undefined;
 
-    // MUST: use-count と解放簿記は**畳むノードだけ**から導く（passthrough は素のノードとして
-    // 既存経路が数える）。
+    // MUST: derive the use counts and the release bookkeeping from **the folded nodes only** (the
+    // existing path counts the passthroughs as plain nodes).
     const chain = [norm, modulate, multiply, offset];
     if (!allF32(chain)) return undefined;
 
@@ -108,8 +110,9 @@ export const ADALN_RULE = defineRule<AdalnMatch>({
       return undefined;
     if (!internalsArePrivate(chain, context)) return undefined;
 
-    // bind 面はカーネルの binding 1〜6 と 1 対 1 なので**重複を許さない**（同じ値名が 2 スロットに
-    // 来る形は実測に無く、{@link FusedStep.binds} の「重複無し」も崩す）。
+    // The bind surface maps one-to-one onto the kernel's bindings 1–6, so **no duplicates** (a
+    // value name in two slots is not measured, and it would break the "no duplicates" of
+    // {@link FusedStep.binds}).
     const binds = [
       norm.node.ins[0],
       norm.node.ins[1],
@@ -142,8 +145,8 @@ export const ADALN_RULE = defineRule<AdalnMatch>({
         key: ADALN_NORM_KEY,
         wgsl: () => ADALN_NORM_WGSL,
         params: adalnNormParams(matched.rows, matched.dim, matched.eps),
-        // 1 行 = 1 workgroup（行方向 grid-stride）なので、割り数は 1 で行数がそのまま
-        // workgroup 数になる。`@workgroup_size` は行内の 256 スレッドで別物。
+        // One row = one workgroup (grid-stride over rows), so the divisor is 1 and the row count
+        // is the workgroup count. `@workgroup_size` is the separate 256 threads inside a row.
         workgroups: { kind: "gridStride", items: matched.rows, size: 1 },
       },
     ],

@@ -1,8 +1,8 @@
 /**
- * 融合ルール `rowBlockAttention`（分解 attention の 9 ノードを**クエリ行のブロック実行**へ）と
- * その分割の純関数 {@link planRowBlocks}。全ルール共通の適格条件と `defineRule` は
- * {@link "../fusion-rule.ts"}、適用順を決める宣言表は {@link "../fusion.ts"} の
- * `FUSION_RULES`。
+ * Fusion rule `rowBlockAttention` (the 9 nodes of decomposed attention into **block execution over
+ * query rows**) and its splitting pure function {@link planRowBlocks}. The eligibility conditions
+ * shared by every rule and `defineRule` are in {@link "../fusion-rule.ts"}; the declaration table
+ * that fixes the application order is `FUSION_RULES` in {@link "../fusion.ts"}.
  */
 
 import { numel, SAFE_SOFTMAX_OP, softmaxDim } from "../../ops.ts";
@@ -30,39 +30,44 @@ import {
   sameShape,
 } from "../fusion-rule.ts";
 
-/** 行ブロック 1 枚（クエリ行の半開区間 `[offset, offset + rows)`）。 */
+/** One row block (the half-open range of query rows `[offset, offset + rows)`). */
 type RowBlock = {
   readonly offset: number;
   readonly rows: number;
 };
 
 /**
- * 行ブロックの一時 **1 本ごと**の上限（バイト）と、それを決めた側（{@link rowBlockLimit} の結果）。
+ * The limit (bytes) **per** row-block temporary, and the side that set it (the result of
+ * {@link rowBlockLimit}).
  *
- * 上限は合計ではない: S 1 枚と行統計 1 枚はそれぞれこの上限以下で、同時に生きる合計は上限を
- * 超えうる（ADR 0124 決定 1）。
+ * The limit is not a total: one S block and one row-statistics block are each within it, and what
+ * is alive together may exceed it (ADR 0124 decision 1).
  */
 export type RowBlockLimit = {
   readonly bytes: number;
   /**
-   * 上限を決めた側。超過の文言で名指す（利用者の予算で落ちたのか、device の束縛上限で落ちたのかで
-   * 直し方が違う）。
+   * The side that set the limit. The over-limit message names it (the fix differs depending on
+   * whether the caller's budget or the device's binding limit was hit).
    */
   readonly source: "maxStorageBufferBindingSize" | "attentionRowBlockMaxBytes";
 };
 
 /**
- * 行ブロックの一時 1 本ごとの上限を導く純関数 — device の granted な `maxStorageBufferBindingSize` と、
- * 利用者が渡す予算（`SessionOptions.attentionRowBlockMaxBytes`）の小さいほう
- * （DECIDED: docs/decisions/0124-attention-row-block-budget.md 決定 1）。
+ * The pure function that derives the limit per row-block temporary — the smaller of the device's
+ * granted `maxStorageBufferBindingSize` and the budget the caller passes
+ * (`SessionOptions.attentionRowBlockMaxBytes`)
+ * (DECIDED: docs/decisions/0124-attention-row-block-budget.md decision 1).
  *
- * MUST: 行ブロックで割る 3 つの形（融合 attention・states 形・分解の `rowBlockAttention`）と見積りは、
- * 全てこの 1 本を通す。式を呼び手ごとに書くと、片方だけ直された実装に対して見積りが別の枚数を
- * 主張し続ける。
- * MUST: 予算なし（`undefined`）では束縛上限そのものを返す — 既定の枚数・キー・WGSL は予算の欄を
- * 足す前と 1 バイトも変わらない。予算と束縛上限が等しいときも束縛上限の側を名乗る（枚数は同じ）。
- * NOTE: 中間バッファの配置の上限検査（transient-plan.ts）はこの値を使わない。予算は行ブロックの一時
- * だけを縛るノブで、FFN の中間のような他の束縛は granted 値のまま検査する。
+ * MUST: the three forms that split by row blocks (fused attention, the states form, the decomposed
+ * `rowBlockAttention`) and the estimate all go through this one function. Writing the formula per
+ * caller would let the estimate keep claiming a different count against an implementation where
+ * only one side was fixed.
+ * MUST: with no budget (`undefined`) it returns the binding limit itself — the default count, keys
+ * and WGSL do not change by a single byte from before the budget field was added. When the budget
+ * equals the binding limit, the binding limit is named as the source (the count is the same).
+ * NOTE: the placement limit check for intermediate buffers (transient-plan.ts) does not use this
+ * value. The budget is a knob that binds only the row-block temporaries; other bindings such as FFN
+ * intermediates are checked against the granted value.
  */
 export const rowBlockLimit = (granted: number, budget: number | undefined): RowBlockLimit =>
   budget !== undefined && budget < granted
@@ -70,25 +75,30 @@ export const rowBlockLimit = (granted: number, budget: number | undefined): RowB
     : { bytes: granted, source: "maxStorageBufferBindingSize" };
 
 /**
- * クエリ行を「1 枚が上限に収まる**最小枚数**」へ等分する純関数。
+ * The pure function that splits the query rows evenly into "the **smallest count** where each block
+ * fits the limit".
  *
- * 入力は解決済みの静的な数だけ（device の granted limit・利用者の予算・1 行あたりのバイト数・行数）で、
- * 実測は 1 つも混ざらない — 実行時オートチューン禁止（ADR 0022）を満たす唯一の形。
- * したがって同じ device・同じ予算・同じ束縛からは常に同じ枚数が出て、prepared plan のキー
- * （解決済み bindings）が枚数まで含意する（S が違えば別キーなので枚数も別に導かれる。予算は
- * Session の寿命を通じて不変）。
+ * Its inputs are resolved static numbers only (the device's granted limit, the caller's budget,
+ * bytes per row, row count); no measurement enters — the only form that satisfies the ban on
+ * run-time autotuning (ADR 0022).
+ * So the same device, the same budget and the same bindings always give the same count, and the
+ * prepared-plan key (the resolved bindings) implies the count too (a different S is a different
+ * key, so its count is derived separately; the budget does not change over the Session's
+ * lifetime).
  *
- * 等分にするのは、末尾だけ極端に短いブロックを作らないため（幾何のバケットが 1 枚だけ
- * 別になり、パイプラインが 1 本余計に生える）。端数は先頭から 1 行ずつ配る。
+ * The split is even so that no block at the end is extremely short (that one block would land in a
+ * different geometry bucket and grow one extra pipeline). The remainder is dealt one row at a time
+ * from the front.
  *
- * MUST: **1 行でも上限に入らない形は fail loudly**。ここで黙って分割を諦めると、確保も
- * 束縛も失敗するグラフが「融合が外れただけ」に見える。上限を予算が決めたときは文言で予算を
- * 名指す（予算を 1 行ぶん以上にすれば通る形で、device の側の問題ではない）。
+ * MUST: **a shape where even one row does not fit the limit fails loudly**. Silently giving up on
+ * the split here would make a graph whose allocation and binding both fail look like "the fusion
+ * just dropped out". When the budget set the limit, the message names the budget (raising the
+ * budget to at least one row makes it pass; it is not a device-side problem).
  *
- * @param limit 1 本ごとの上限。数値は device の束縛上限そのもの（予算なし）として読む。予算を
- *   掛けるときは {@link rowBlockLimit} の結果を渡す。
- * @param forced 枚数の強制（テスト専用）。上限（予算を掛けたときは予算との小さいほう）に収まらない
- *   枚数は同じく fail loudly。
+ * @param limit The limit per temporary. A number is read as the device's binding limit itself (no
+ *   budget). Pass the result of {@link rowBlockLimit} when a budget applies.
+ * @param forced Forces the count (test only). A count that does not fit the limit (with a budget,
+ *   the smaller of the two) also fails loudly.
  */
 export const planRowBlocks = (
   rows: number,
@@ -143,64 +153,69 @@ export const planRowBlocks = (
 };
 
 type RowBlockAttentionMatch = FusionMatch & {
-  /** `[q, kᵀ, mask, v]`（bind 面の並び — 重複無し）。 */
+  /** `[q, kᵀ, mask, v]` (the bind surface order — no duplicates). */
   readonly binds: readonly string[];
   readonly outputName: string;
   readonly outputShape: readonly number[];
-  /** B·H を畳んだバッチ軸。 */
+  /** The batch axis with B·H folded. */
   readonly heads: number;
-  /** クエリ行数 M（= S）。 */
+  /** Query row count M (= S). */
   readonly queries: number;
-  /** キー列数 N（= C）。 */
+  /** Key column count N (= C). */
   readonly keys: number;
-  /** head 幅 D（q / k / v で共通）。 */
+  /** Head width D (shared by q / k / v). */
   readonly headDim: number;
   readonly blocks: readonly RowBlock[];
   readonly limits: FusionLimits;
 };
 
 /**
- * 分解 attention の**行ブロック実行**: エクスポータが出す連続 9 ノード
+ * **Row-block execution** of decomposed attention: the 9 consecutive nodes the exporter emits
  *
  * ```
  * bmm(q[H,M,D], kᵀ[H,D,N])   -> S     [H,M,N]
  * reshape                     -> S4    [1,H,M,N]
  * add(S4, mask[1,1,1,N])      -> Sm    [1,H,M,N]
  * safe_softmax(Sm, dim=3)     -> P4    [1,H,M,N]
- * expand（恒等）→ reshape      -> P     [H,M,N]
- * expand（恒等）→ reshape      -> V     [H,N,D]
+ * expand (identity) → reshape -> P     [H,M,N]
+ * expand (identity) → reshape -> V     [H,N,D]
  * bmm(P, V)                   -> O     [H,M,D]
  * ```
  *
- * を、**クエリ行のブロックごとの同型 4 dispatch** へ置き換える。畳んでいるのは演算ではなく
- * **中間の実体化幅**で、`S` / `Sm` / `P` はブロック 1 枚ぶんのステップ内一時になる
- * （全 M を実体化すると `H·M·N·4` バイトがストレージ束縛の上限を越える機がある — WebGPU core
- * 既定の `maxStorageBufferBindingSize` は 128MiB）。
+ * and replaces them with **4 dispatches of the same form per block of query rows**. What is folded
+ * is not the ops but **the materialised width of the intermediates**: `S` / `Sm` / `P` become
+ * step-internal temporaries of one block each (materialising all M takes `H·M·N·4` bytes, which
+ * exceeds the storage binding limit on some machines — the WebGPU core default
+ * `maxStorageBufferBindingSize` is 128MiB).
  *
- * ## ビット同一の根拠
+ * ## Why the result is bit-identical
  *
- * - 2 本の bmm は**行の担当割りだけ**を変える（{@link "../../kernels/gemm.ts"} `BmmRowWindow`）。
- *   1 出力要素の K 縮約順も丸めの並びも 1 文字も動かない（src/kernels/gemm-geometry.ts の
- *   数値契約）。ブロックごとに幾何のバケットが変わりうるが、幾何が決めるのは担当割りだけ。
- * - `add`（mask は `[1,1,1,N]` broadcast）と `safe_softmax`（最終次元の行内縮約）はどちらも
- *   **行内で閉じている**ので、行を切っても 1 行あたりの演算列が変わらない。したがって
- *   ブロックバッファ相手に既存カーネルをそのまま撃てる（行オフセットは要らない）。
+ * - The two bmms change **only the assignment of rows** (`GemmRowWindow` in
+ *   {@link "../../kernels/gemm.ts"}). Neither the K reduction order of an output element nor the
+ *   order of rounding moves by a single character (the numeric contract of
+ *   src/kernels/gemm-geometry.ts). The geometry bucket may differ per block, but geometry decides
+ *   only the assignment.
+ * - `add` (mask is a `[1,1,1,N]` broadcast) and `safe_softmax` (an in-row reduction over the last
+ *   dimension) are both **closed within a row**, so cutting rows does not change the op sequence
+ *   per row. The existing kernels can therefore run as they are on the block buffers (no row
+ *   offset needed).
  *
- * ## 常時融合・枚数は静的
+ * ## Always fused, static count
  *
- * 掴めた窓は**必ず**融合し、枚数 n は {@link planRowBlocks} が device の granted limit と
- * 解決済み shape だけから決める。**n = 1 の機では素の 4 dispatch 列と完全に同一**
- * （行窓変種を使わず `bmmKey(v4, m)` の既存キー・既存 params のまま）で、追加コストはゼロ。
+ * A grabbed window is **always** fused, and {@link planRowBlocks} decides the count n from the
+ * device's granted limit and the resolved shapes only. **On a machine with n = 1 it is exactly the
+ * plain 4-dispatch list** (no row-window variant; the existing `bmmKey(v4, m)` key and existing
+ * params), at zero extra cost.
  *
- * ## 適用順と head 衝突
+ * ## Application order and head collisions
  *
- * 先頭 op は `bmm` で、他ルールの先頭 op（`rms_norm` / `sigmoid` / `reshape` / `mul` / `slice` /
- * `layer_norm`）と互いに素なので宣言順は結果に効かない。窓の内側には `reshape` /
- * `expand` が 5 本あるが、掴んだ時点で走査は窓幅ぶん進むので内側で別ルールが発火する余地は
- * 無い（掴めなかったときだけ内側の `reshape` が upsample2x の先頭として試され、6 ノードの
- * 綴りが違うので落ちる）。
+ * The leading op is `bmm`, disjoint from the other rules' leading ops (`rms_norm` / `sigmoid` /
+ * `reshape` / `mul` / `slice` / `layer_norm`), so the declaration order does not affect the
+ * result. The window contains five `reshape` / `expand`, but once grabbed the scan advances by the
+ * window width, so no other rule can fire inside it (only when it is not grabbed is an inner
+ * `reshape` tried as the head of upsample2x, which fails because the 6-node spelling differs).
  *
- * 外部入力の延べ回数: q / kᵀ / mask / v が各 1 回 = 4 回。
+ * Total uses of external inputs: q / kᵀ / mask / v once each = 4.
  */
 export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
   name: "rowBlockAttention",
@@ -230,7 +245,7 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
     const chain = [qk, reshapeScores, addMask, softmax, expandP, reshapeP, expandV, reshapeV, pv];
     if (!allF32(chain)) return undefined;
 
-    // 結線（窓の並びだけでは「同じ形の別の鎖が隣り合っている」を排除できない）。
+    // Wiring (the window order alone cannot rule out "another chain of the same form next to it").
     if (
       reshapeScores.node.ins[0] !== qk.outputs[0].name ||
       addMask.node.ins[0] !== reshapeScores.outputs[0].name ||
@@ -257,7 +272,8 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       !sameShape(addMask.inputShapes[1], [1, 1, 1, keys]) ||
       !sameShape(addMask.outputs[0].shape, scores4) ||
       !sameShape(softmax.outputs[0].shape, scores4) ||
-      // 恒等 expand（複製軸を持たない）でなければ、素の列は実体化コピーを 1 本出す。
+      // Unless the expand is an identity (no replicated axis), the plain list emits one
+      // materialising copy.
       !sameShape(expandP.inputShapes[0], scores4) ||
       !sameShape(expandP.outputs[0].shape, scores4) ||
       !sameShape(reshapeP.outputs[0].shape, scores3) ||
@@ -267,7 +283,8 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       !sameShape(pv.outputs[0].shape, [heads, queries, headDim])
     )
       return undefined;
-    // 縮約軸は最終次元固定（契約が既に見ているが、窓の受理集合としても明示する）。
+    // The reduction axis is fixed to the last dimension (the contract already checks it, but it is
+    // stated again as part of the window's accepted set).
     if (softmaxDim(softmax.node.attrs ?? {}, "行ブロック attention の safe_softmax") !== 3) {
       return undefined;
     }
@@ -276,10 +293,12 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
     const binds = [qk.node.ins[0], qk.node.ins[1], addMask.node.ins[1], expandV.node.ins[0]];
     if (new Set(binds).size !== binds.length) return undefined;
 
-    // ここから先は fail loudly の領域（掴めた窓は必ず融合する）。素の列へ落としても
-    // 実体化幅は増えるだけなので、「分割しきれない」を沈黙の fallback にしてはならない。
-    // 上限は束縛上限と予算の小さいほう（{@link rowBlockLimit}）。`limits` 自体は下げない — dispatch 数の
-    // 検査と他の束縛は granted 値のまま。
+    // From here on is fail-loudly territory (a grabbed window is always fused). Dropping to the
+    // plain list only widens the materialisation, so "cannot be split" is never turned into a
+    // silent fallback.
+    // The limit is the smaller of the binding limit and the budget ({@link rowBlockLimit}).
+    // `limits` itself is not lowered — the dispatch-count checks and other bindings keep the
+    // granted values.
     const blocks = planRowBlocks(
       queries,
       heads * keys * 4,
@@ -302,7 +321,8 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
   },
   build: (matched) => {
     const { heads, queries, keys, headDim, blocks, limits } = matched;
-    // n = 1 は行窓変種を使わない（既存キー・既存 params のまま = 素の 4 dispatch 列と同一）。
+    // n = 1 uses no row-window variant (existing key and params = identical to the plain 4-dispatch
+    // list).
     const windowed = blocks.length > 1;
     const dispatchLimit = limits.maxComputeWorkgroupsPerDimension;
     const temps: FusedTemp[] = [];
@@ -311,8 +331,9 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       const first = dispatches.length;
       const rows = block.rows;
       const bytes = heads * rows * keys * 4;
-      // 一時は 3 本とも「次の dispatch が読み終えたら返す」— 同時生存は常に 2 本で、
-      // 3 本目は配り直しで 1 本目の実体を掴む（ブロックを跨いでも同じ）。
+      // All three temporaries are "returned once the next dispatch has read them" — exactly two are
+      // alive at once, and the third gets the first one's storage by reallocation (across blocks
+      // too).
       const scores = temps.length;
       temps.push({ byteLength: bytes, allocBefore: first, releaseAfter: first + 1 });
       const masked = temps.length;
@@ -320,7 +341,7 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       const probabilities = temps.length;
       temps.push({ byteLength: bytes, allocBefore: first + 2, releaseAfter: first + 3 });
 
-      // ① QK: A（q）だけ全 M ストライド + 行オフセットで読み、S はブロックとして書く。
+      // ① QK: only A (q) is read with the full-M stride + row offset; S is written as a block.
       const qkV4 = gemmUsesVec4(headDim, keys);
       const qkGeometry = gemmGeometryForRows(rows);
       const qkWhere = `行ブロック bmm(QK) [${heads},${rows},${headDim}] × [${heads},${headDim},${keys}]`;
@@ -345,7 +366,7 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
         },
       });
 
-      // ② 加算 mask。ブロックバッファ相手なので素の elementwise がそのまま撃てる。
+      // ② The additive mask. It works on the block buffer, so the plain elementwise runs as is.
       const maskedShape = [1, heads, rows, keys];
       const elementwise: ElementwiseSpec = { op: "add", rank: 4, dtype: "f32" };
       dispatches.push({
@@ -365,7 +386,8 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
         },
       });
 
-      // ③ safe_softmax（1 行 = 1 workgroup）。行内で閉じるので行を切っても値は動かない。
+      // ③ safe_softmax (one row = one workgroup). Closed within a row, so cutting rows does not
+      // move values.
       dispatches.push({
         key: SAFE_SOFTMAX_KEY,
         wgsl: () => SAFE_SOFTMAX_WGSL,
@@ -377,7 +399,8 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
         workgroups: { kind: "gridStride", items: heads * rows, size: 1 },
       });
 
-      // ④ PV: A（P）はブロックとして読み、出力だけ全 M ストライド + 行オフセットで書く。
+      // ④ PV: A (P) is read as a block; only the output is written with the full-M stride + row
+      // offset.
       const pvV4 = gemmUsesVec4(keys, headDim);
       const pvGeometry = gemmGeometryForRows(rows);
       const pvWhere = `行ブロック bmm(PV) [${heads},${rows},${keys}] × [${heads},${keys},${headDim}]`;

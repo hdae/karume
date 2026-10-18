@@ -1,15 +1,15 @@
-/** 行ごとの scale を持つ packed INT2 の CPU 展開（ADR 0097）。 */
+/** CPU decode of packed INT2 with one scale per row (ADR 0097). */
 export class I2Error extends Error {
   override readonly name = "I2Error";
 }
 
-/** 論理形 [rows, width]。各行を u32 整列させ、末尾の暗黙パディングを禁止する。 */
+/** Logical shape [rows, width]. Every row is u32-aligned; implicit tail padding is forbidden. */
 export const isI2Shape = (shape: readonly (number | string)[]): boolean =>
   shape.length === 2 &&
   shape.every((dim) => typeof dim === "number" && Number.isSafeInteger(dim) && dim > 0) &&
   Number(shape[1]) % 16 === 0;
 
-/** 下位 2bit から順に u=q+2。scale の乗算ごとに f32 へ丸める。 */
+/** From the low 2 bits upward, u=q+2. Each multiplication by the scale is rounded to f32. */
 export const decodeI2 = (
   bytes: Uint8Array<ArrayBuffer>,
   shape: readonly number[],

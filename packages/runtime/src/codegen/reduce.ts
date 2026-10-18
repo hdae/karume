@@ -1,28 +1,34 @@
 /**
- * reduce（1 軸・keepdim 無し）カーネルの WGSL 生成。**2 変種**を持つ:
+ * WGSL generation for reduce kernels (one axis, no keepdim). It has **two variants**:
  *
- * - **行 reduce**（最終次元）: 入力を先行次元を平坦化した `[rows, dim]` の連続レイアウトとして
- *   扱う。1 行 = 1 workgroup(256) + 256 幅のビット反転二分木。
- * - **軸 reduce**（最終次元以外）: 1 スレッド = 1 出力。縮約軸の送りは `inner`（= 縮約軸より
- *   後ろの次元の積）で、**隣接スレッドが連続アドレスを読む**（コアレス）。
+ * - **Row reduce** (last dimension): treats the input as the contiguous layout `[rows, dim]` with
+ *   the leading dimensions flattened. One row = one workgroup (256) + a 256-wide bit-reversed
+ *   binary tree.
+ * - **Axis reduce** (any dimension but the last): one thread = one output. The reduced axis is
+ *   stepped by `inner` (= the product of the dimensions after the reduced axis), so **adjacent
+ *   threads read contiguous addresses** (coalesced).
  *
- * MUST: 軸変種の**縮約順序は行 reduce と厳密に一致させる**（設計と記号検証は
- * docs/research/2026-08-04-vae-axis-reduce-recon.md §5.2）。permute + 行 reduce から軸 reduce へ
- * 置き換えても出力がビット同一であることが、この族の数値契約（PNG sha256 門・
- * tests/gpu_reduce_axis_parity_test.ts の atol=0）を成立させている。
+ * MUST: the axis variant's **reduction order matches the row reduce exactly** (design and symbolic
+ * verification in docs/research/2026-08-04-vae-axis-reduce-recon.md §5.2). That the output stays
+ * bit-identical when permute + row reduce is replaced by axis reduce is what makes this family's
+ * numeric contract hold (the PNG sha256 check, atol=0 in tests/gpu_reduce_axis_parity_test.ts).
  *
- * MUST: 生成は決定的（同一キー → バイト単位同一 WGSL）。キーと WGSL は同じ正準化から作る。
- * MUST: 1 行 = 1 workgroup を基本にしつつ、**行方向も grid-stride** で回す。行数をそのまま
- * dispatch 数にすると 1 次元の workgroup 上限（仕様既定 65535）を実モデルが超える。
- * MUST: 要素型（入力・出力とも）をキーに載せる。`sum` は f32 の総和と **bool の個数
- * カウント（→ i32）** の 2 形を持ち、載せないと片方の dispatch にもう片方のパイプラインが
- * 割り当たってビット列の読み替えが例外なしに通る（ADR 0009）。
+ * MUST: generation is deterministic (same key → byte-identical WGSL). Key and WGSL are built from
+ * the same canonicalization.
+ * MUST: one row = one workgroup as the base, while **the row direction is grid-stride too**. Using
+ * the row count as the dispatch count makes real models exceed the per-dimension workgroup limit
+ * (65535 by default in the spec).
+ * MUST: the element type (of both input and output) goes into the key. `sum` has two forms, the f32
+ * sum and **the count of a bool (→ i32)**; without it in the key, one form's pipeline is assigned to
+ * the other's dispatch and the bit pattern is reinterpreted without an exception (ADR 0009).
  *
- * params を uniform で渡すのは、行ループの中に workgroupBarrier があるため。ループ条件が
- * workgroup 内で一様である必要があり、storage からのロードは一様性解析で保証されない。
+ * params are passed as a uniform because the row loop contains a workgroupBarrier. The loop
+ * condition must be uniform within the workgroup, and loads from storage are not proven uniform by
+ * the uniformity analysis.
  *
- * MUST: `amax` / `amin` は縮約対象に NaN があれば NaN を返す（torch と同じ）。ドライバの
- * `max` / `min` は NaN を飲むので、伝播はビット列判定の {@link IS_NAN_BITS_WGSL} が担う。
+ * MUST: `amax` / `amin` return NaN when the reduced elements contain a NaN (the same as torch). The
+ * driver's `max` / `min` swallow NaN, so propagation is carried by the bit-pattern check
+ * {@link IS_NAN_BITS_WGSL}.
  */
 
 import type { IrDtype } from "../format/ir.ts";
@@ -35,7 +41,7 @@ const REDUCE_WORKGROUP_SIZE = 256;
 
 export type ReduceSpec = {
   readonly op: ReduceOpName;
-  /** 入力の意味論 dtype（出力は契約表の写像で決まる）。 */
+  /** Semantic dtype of the input (the output follows from the contract table's mapping). */
   readonly dtype: IrDtype;
 };
 
@@ -54,18 +60,18 @@ const canonicalize = (spec: ReduceSpec): CanonicalSpec => {
   if (!contract.dtypes.includes(spec.dtype)) {
     throw new CodegenError(`reduce codegen: op '${op}' は dtype '${spec.dtype}' を実行できない`);
   }
-  // 行 reduce は単一出力なので出力 slot 0。
+  // Row reduce has a single output, so output slot 0.
   return { op, from: spec.dtype, to: outputDtypeOf(contract, 0, spec.dtype, "reduce codegen") };
 };
 
-/** 意味論 dtype → WGSL のスカラ型。bool の格納は u32 の 0 / 1（ADR 0009）。 */
+/** Semantic dtype → WGSL scalar type. A bool is stored as u32 0 / 1 (ADR 0009). */
 const WGSL_SCALAR: Readonly<Record<IrDtype, string>> = {
   f32: "f32",
   i32: "i32",
   bool: "u32",
 };
 
-/** f32 の最大有限値。WGSL に無限大リテラルが無いため identity にこれを使う。 */
+/** The largest finite f32. WGSL has no infinity literal, so this serves as the identity. */
 const F32_MAX = "3.402823466e38";
 
 const IDENTITY: Readonly<Record<ReduceOpName, Readonly<Partial<Record<IrDtype, string>>>>> = {
@@ -75,9 +81,10 @@ const IDENTITY: Readonly<Record<ReduceOpName, Readonly<Partial<Record<IrDtype, s
 };
 
 /**
- * NaN 伝播する `max` / `min`。**縮約は 2 段（1 スレッドの走査 + workgroup の木）**なので、
- * 伝播は畳み込み関数の側で閉じる（片方の段だけ守っても NaN は identity に飲まれる）。
- * 非 NaN のときは素の `max` / `min` そのままで、既存の数値結果は動かない。
+ * NaN-propagating `max` / `min`. **The reduction has two stages (one thread's scan + the
+ * workgroup tree)**, so propagation is closed inside the combine function (guarding only one stage
+ * lets the identity swallow the NaN). For non-NaN values it is the plain `max` / `min`, so existing
+ * numeric results do not move.
  */
 const NAN_PROPAGATING_FN: Readonly<Partial<Record<ReduceOpName, string>>> = {
   amax: NAN_MAX_WGSL,
@@ -91,15 +98,17 @@ const COMBINE: Readonly<Record<ReduceOpName, (a: string, b: string) => string>> 
 };
 
 /**
- * 累算器へ載せるときの読み方。bool 入力は「真の個数」を数えるので 0 / 1 の i32 に落とす
- * （格納規約が破れても真偽で数える形 — `i32(x)` はビット列をそのまま整数にする）。
+ * How a value is read into the accumulator. A bool input counts "the number of trues", so it drops
+ * to an i32 of 0 / 1 (a form that counts by truth even when the storage convention is broken —
+ * `i32(x)` would turn the bit pattern into an integer as is).
  */
 const load = (expr: string, from: IrDtype): string =>
   from === "bool" ? `select(0i, 1i, ${expr} != 0u)` : expr;
 
 /**
- * v2: amax / amin に NaN 伝播の畳み込み関数が入り WGSL 本文が変わった。版は **族ごと**に
- * 上げる（`sum` はキーが変わるだけで生成物は同一 — op 別の例外表を持たない）。
+ * v2: amax / amin gained the NaN-propagating combine function and their WGSL body changed. The
+ * version is bumped **per family** (`sum` only changes its key and its generated code is identical
+ * — there is no per-op exception table).
  */
 export const reduceKey = (spec: ReduceSpec): string => {
   const { op, from, to } = canonicalize(spec);
@@ -116,7 +125,8 @@ export const reduceWgsl = (spec: ReduceSpec): string => {
     );
   }
   const accumulator = WGSL_SCALAR[to];
-  // 同型なら 1 語で書く（f32 形の生成物はスナップショットでバイト単位に凍結されている）。
+  // When both types are the same, write one word (the f32 form's output is frozen byte for byte by
+  // the snapshots).
   const label = from === to ? from : `${from}>${to}`;
   const propagate = NAN_PROPAGATING_FN[op];
   const helpers = propagate === undefined ? [] : [IS_NAN_BITS_WGSL, propagate];
@@ -163,7 +173,7 @@ export const reduceWgsl = (spec: ReduceSpec): string => {
     "    if (lid == 0u) {",
     "      out[row] = scratch[0u];",
     "    }",
-    "    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える",
+    "    // line up the end of the scratch[0] reads before the next row overwrites scratch[lid]",
     "    workgroupBarrier();",
     "    row = row + nwg.x;",
     "  }",
@@ -173,9 +183,9 @@ export const reduceWgsl = (spec: ReduceSpec): string => {
 };
 
 /**
- * uniform の Params。2 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保はプロジェクトの
- * 慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない — WGSL の最小 binding
- * サイズは struct の実サイズ〈ここでは 8 バイト〉）。
+ * The uniform Params. 16 bytes are allocated even for two words of content (allocating in 16-byte
+ * units is a project convention <the fusion pass pins the same form in ADR 0040>, not a spec
+ * requirement — WGSL's minimum binding size is the struct's actual size <8 bytes here>).
  */
 export const reduceParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("reduce params", { rows, dim });
@@ -186,19 +196,21 @@ export const reduceParams = (rows: number, dim: number): Uint32Array<ArrayBuffer
 };
 
 /**
- * 軸 reduce の並列形（1 スレッド = 1 出力）。**行 reduce と同じサイズであること**が縮約順序
- * 一致の条件なので、別の数として書かずに {@link REDUCE_WORKGROUP_SIZE} から定義する。
+ * The parallel shape of axis reduce (one thread = one output). **Being the same size as the row
+ * reduce** is the condition for the reduction orders to match, so it is defined from
+ * {@link REDUCE_WORKGROUP_SIZE} rather than written as a separate number.
  */
 export const AXIS_REDUCE_WORKGROUP_SIZE = REDUCE_WORKGROUP_SIZE;
 
 /**
- * workgroup サイズの log2（2 冪でなければ生成の入口で落とす）。
+ * log2 of the workgroup size (rejected at the generation entry when it is not a power of two).
  *
- * MUST: carry-stack の段数（`log2 + 1`）とビット反転の shift（`32 − log2`）はサイズから導く。
- * 手写しの定数を並べると片方だけずれた形が**例外なしの沈黙誤値**になる（段数が足りなければ
- * 一度も書かれていない段を読み、shift がずれれば葉の並びが行 reduce の木と食い違う）。
- * 2 冪でないサイズは段数が小数になるだけでなく、行 reduce のツリー縮約（stride の半減）も
- * 成立しない。
+ * MUST: the carry-stack depth (`log2 + 1`) and the bit-reversal shift (`32 − log2`) are derived
+ * from the size. Hand-copied constants side by side let one of them drift into **a silent wrong
+ * value without an exception** (too few levels read a level that was never written; a shifted
+ * shift puts the leaves in an order different from the row reduce's tree). A size that is not a
+ * power of two not only makes the depth fractional, it also breaks the row reduce's tree reduction
+ * (halving the stride).
  */
 const workgroupSizeBits = (size: number): number => {
   const bits = Math.log2(size);
@@ -209,8 +221,9 @@ const workgroupSizeBits = (size: number): number => {
 };
 
 /**
- * 軸 reduce 変種のキー。行 reduce（{@link reduceKey}）とは**別のパイプライン**で、既存の
- * キー文字列は 1 バイトも変えない（既定経路の WGSL / キーを動かさないための別変種化）。
+ * Key of the axis reduce variant. It is **a separate pipeline** from the row reduce
+ * ({@link reduceKey}), and the existing key strings do not change by a single byte (a separate
+ * variant so that the default path's WGSL / keys do not move).
  */
 export const axisReduceKey = (spec: ReduceSpec): string => {
   const { op, from, to } = canonicalize(spec);
@@ -218,20 +231,23 @@ export const axisReduceKey = (spec: ReduceSpec): string => {
 };
 
 /**
- * 最終次元以外の軸を縮約する変種。1 スレッドが 1 出力を担当し、縮約軸を `inner` 送りで走査する。
+ * The variant that reduces an axis other than the last one. One thread owns one output and scans
+ * the reduced axis in steps of `inner`.
  *
- * 縮約順序の再現（**MUST** — ビット同一の根拠）:
+ * Reproducing the reduction order (**MUST** — the basis of bit identity):
  *
- * 1. 行 reduce は「レーン `i` が `x[i], x[i+256], x[i+512], …` を identity から左結合で畳む」
- *    ので、ここでも slot `i` を同じ順序・同じ identity 始まりで作る（`+0.0` の畳み込みを
- *    省略しない — 行 reduce も identity を実際に足すので、`-0.0 + 0.0 = +0.0` の 1 例外まで
- *    同じ挙動になる）。
- * 2. 行 reduce の木は `scratch[lid] = combine(scratch[lid], scratch[lid + stride])`
- *    （stride = 128 → 1）なので、最初に組む対は (0,128) / (1,129) … = **葉の順序がビット反転**。
- *    slot を `reverseBits` の順に carry-stack（2 進カウンタ）へ push すると、この木と
- *    記号式が完全一致する（dim 1〜512 の 21 ケースで検証済み — recon §5.2）。
- * 3. combine の引数順は「先に push した側が第 1 引数」（木の `scratch[lid]` が第 1 引数）。
- *    `amax` / `amin` の NaN 伝播は対称なので値は変わらないが、`sum` の丸めは順序で変わる。
+ * 1. The row reduce has "lane `i` fold `x[i], x[i+256], x[i+512], …` left-associatively starting
+ *    from the identity", so slot `i` is built here in the same order starting from the same
+ *    identity (the `+0.0` fold is not skipped — the row reduce actually adds the identity too, so
+ *    the behaviour matches down to the one exception `-0.0 + 0.0 = +0.0`).
+ * 2. The row reduce's tree is `scratch[lid] = combine(scratch[lid], scratch[lid + stride])`
+ *    (stride = 128 → 1), so the first pairs formed are (0,128) / (1,129) … = **the leaf order is
+ *    bit-reversed**. Pushing the slots onto a carry-stack (a binary counter) in `reverseBits` order
+ *    makes the symbolic expression match this tree exactly (verified on 21 cases with dim 1–512 —
+ *    recon §5.2).
+ * 3. The combine argument order is "the side pushed first is the first argument" (the tree's
+ *    `scratch[lid]` is the first argument). NaN propagation in `amax` / `amin` is symmetric so the
+ *    value does not change, but `sum`'s rounding depends on the order.
  */
 export const axisReduceWgsl = (spec: ReduceSpec): string => {
   const { op, from, to } = canonicalize(spec);
@@ -248,7 +264,7 @@ export const axisReduceWgsl = (spec: ReduceSpec): string => {
   const helpers = propagate === undefined ? [] : [IS_NAN_BITS_WGSL, propagate];
   const size = AXIS_REDUCE_WORKGROUP_SIZE;
   const bits = workgroupSizeBits(size);
-  // size 回 push した後に有効なのは最上段 1 つだけなので `log2(size) + 1` 段要る。
+  // After `size` pushes only the top level is valid, so `log2(size) + 1` levels are needed.
   const stackDepth = bits + 1;
   return [
     `// karume axis reduce ${op} (non-last dim, ${label}, generated)`,
@@ -272,11 +288,11 @@ export const axisReduceWgsl = (spec: ReduceSpec): string => {
     `  let stride = nwg.x * ${size}u;`,
     "  var t = gid.x;",
     "  while (t < params.out_count) {",
-    "    // 出力添字 t = outer·inner + i。縮約軸だけを外した先頭アドレスへ戻す。",
+    "    // output index t = outer·inner + i; back to the base address with only the reduced axis removed",
     "    let base = (t / inner) * axis_len * inner + (t % inner);",
     `    var acc: array<${accumulator}, ${stackDepth}>;`,
     `    for (var m = 0u; m < ${size}u; m = m + 1u) {`,
-    "      // 行 reduce の葉の並び（ビット反転）を 1 スレッドで再現する",
+    "      // reproduce the leaf order of the row reduce (bit reversal) in one thread",
     `      let slot = reverseBits(m) >> ${32 - bits}u;`,
     `      var v = ${identity};`,
     "      var c = slot;",
@@ -300,10 +316,11 @@ export const axisReduceWgsl = (spec: ReduceSpec): string => {
 };
 
 /**
- * 軸 reduce の uniform Params（`{out_count, axis_len, inner}`・16 バイト確保）。
+ * The uniform Params of axis reduce (`{out_count, axis_len, inner}`, 16 bytes allocated).
  *
- * `inner` は縮約軸より後ろの次元の積。0 になるのは後続の軸に長さ 0 があるときだけで、
- * そのとき `out_count` も 0 なので `t / inner` は 1 度も評価されない（ループに入らない）。
+ * `inner` is the product of the dimensions after the reduced axis. It is 0 only when a later axis
+ * has length 0, and then `out_count` is 0 too, so `t / inner` is never evaluated (the loop is not
+ * entered).
  */
 export const axisReduceParams = (
   outCount: number,

@@ -1,45 +1,52 @@
 /**
- * i4（K 方向 group symmetric packed 4bit）格納の CPU 側展開（ADR 0069 の適格外スロット用 /
- * GPU 側 `unpack4xU8` + マスク／シフト + scale 乗算のホスト鏡像）。
+ * CPU-side decode of i4 storage (group-symmetric packed 4-bit along K) (for the ineligible slots of
+ * ADR 0069 / the host mirror of the GPU-side `unpack4xU8` + mask/shift + scale multiplication).
  *
- * MUST: 展開はこの 1 箇所だけに置く（format/i8.ts と同文の理由 — ロード経路とテストが別々に
- * i4 を解釈すると、pack 順〈要素 2i = 下位 nibble / 2i+1 = 上位・格納値 u = q + 8〉の
- * 取り違えが沈黙する）。pack 順の正本はエクスポータ `karume/emit.py: pack_int4`。
+ * MUST: decoding lives in this one place only (the same reason as format/i8.ts — if the load path
+ * and the tests interpret i4 separately, a mix-up of the pack order 〈element 2i = low nibble / 2i+1 =
+ * high, stored value u = q + 8〉 goes unnoticed). The source of truth for the pack order is the
+ * exporter's `karume/emit.py: pack_int4`.
  *
- * ビット一致の根拠: 復元値は `f32(q) · s` の **f32 丸め 1 回**（`q ∈ [−7,7]` は f32 で厳密・
- * i8.ts と同じ論証）。エクスポータの逆変換門（`dequant(unpack(pack(w)))` のビット一致 —
- * ADR 0069 決定 4 ③）も同じ式で張られているため、TS / Python / WGSL の 3 実装が同じ数を出す。
+ * Why it is bit-identical: the decoded value is `f32(q) · s` with **one f32 rounding** (`q ∈ [−7,7]`
+ * is exact in f32 — the same argument as i8.ts). The exporter's round-trip check (bit identity of
+ * `dequant(unpack(pack(w)))` — ADR 0069 decision 4 ③) uses the same formula, so the three
+ * implementations TS / Python / WGSL produce the same numbers.
  */
 
 import { groupScaleShape } from "./container/codecs.ts";
 
-/** 要素数（format 層は src/ops.ts に依存しない — i8.ts と同じ理由でこの 1 行だけ持つ）。 */
+/**
+ * Element count (the format layer does not depend on src/ops.ts — keeps this one line for the same
+ * reason as i8.ts).
+ */
 const numel = (shape: readonly number[]): number => shape.reduce((count, dim) => count * dim, 1);
 
-/** 展開で契約が破れた（バイト長・group 形 scale・group 長の不一致）。 */
+/** The decode contract was broken (mismatched byte length, group-shaped scale or group length). */
 export class I4Error extends Error {
   override readonly name = "I4Error";
 }
 
 /**
- * i4 の量子化行の長さ = **先頭次元を行・残りを平坦化**した長さ（`numel / shape[0]`）。
+ * Length of an i4 quantization row = the length with **the first dimension as rows and the rest
+ * flattened** (`numel / shape[0]`).
  *
- * 適格 op の `channel_rows`（エクスポータ `karume/quantize.py`）はどれもこの形
- * （linear `[O,I]` → `I` / embedding `[V,D]` → `D` / conv1d `[O,Cin,K]` → `Cin·K`）で、
- * rank 2 の重みでは「最終次元」と一致する。
+ * The `channel_rows` of every eligible op (exporter `karume/quantize.py`) has this form
+ * (linear `[O,I]` → `I` / embedding `[V,D]` → `D` / conv1d `[O,Cin,K]` → `Cin·K`), and for
+ * rank 2 weights it equals "the last dimension".
  */
 const rowLength = (shape: readonly number[]): number => numel(shape) / shape[0];
 
 /**
- * packed 4bit のバイト列を group 形 scale で f32 へ展開する。
+ * Decodes packed 4-bit bytes into f32 with a group-shaped scale.
  *
- * `scaleShape` は {@link groupScaleShape}（行の軸 0）の rank 2 形（ADR 0069 決定 3 — i8 の keepdim
- * broadcast 形とは受理集合が交わらない別物。取り違えはここで fail loudly にする — 黙って
- * broadcast 解釈すると group scale が 1 チャネル 1 値として配られる沈黙誤値になる）。
+ * `scaleShape` is the rank 2 shape of {@link groupScaleShape} (row axis 0) (ADR 0069 decision 3 — a
+ * different thing from i8's keepdim broadcast shape; their accepted sets do not overlap. A mix-up
+ * fails loudly here — silently reading it as a broadcast would hand out the group scale as one
+ * value per channel, a silent wrong value).
  *
- * MUST: nibble の並びは**平坦メモリ順**（`[O,Cin,K]` row-major = `[O, Cin·K]` 平坦と同一
- * バイト列）。行 = 先頭次元・group = 行内の連続 `groupSize` 要素で、GPU 側の平坦添字
- * （`arow·(k>>shift) + (ak0>>shift)`）と同じ式になる。
+ * MUST: nibbles are in **flat memory order** (`[O,Cin,K]` row-major = the same bytes as the flat
+ * `[O, Cin·K]`). Row = first dimension, group = `groupSize` consecutive elements within a row; this
+ * is the same formula as the GPU-side flat index (`arow·(k>>shift) + (ak0>>shift)`).
  */
 export const decodeI4 = (
   bytes: Uint8Array<ArrayBuffer>,
@@ -89,8 +96,9 @@ export const decodeI4 = (
       for (let element = 0; element < groupSize; element += 1, i += 1) {
         const byte = bytes[i >> 1];
         const u = (i & 1) === 1 ? byte >> 4 : byte & 0x0f;
-        // MUST: 積の丸めは 1 回だけ（i8.ts と同文 — GPU 側は f32 の乗算 1 回）。offset 8 は
-        // 「zero_point 省略時の既定」（ADR 0069 決定 3 の予約 2）で、pack 側 emit.py と対。
+        // MUST: round the product only once (the same as i8.ts — the GPU side does one f32
+        // multiplication). Offset 8 is "the default when zero_point is omitted" (reservation ② of
+        // ADR 0069 decision 3), paired with the pack side in emit.py.
         out[i] = Math.fround((u - 8) * s);
       }
     }

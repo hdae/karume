@@ -1,29 +1,31 @@
 /**
- * 取得済み device の器（{@link GpuContext}）と、それが所有する常駐テンソル / バッチ区間。
+ * The container of an acquired device ({@link GpuContext}), and the resident tensors / batch
+ * sections it owns.
  *
- * MUST: このファイルから `acquire.ts` を**実体として** import しない。層の依存は
- * acquire → context の一方向で、{@link GpuContext} を構築するのは `acquireGpu` 側だけ
- * （逆向きの参照は `import type` のみ — 消去されるので実行時の import グラフは一方向のまま）。
- * 層の入口はこの 2 ファイルの公開名を再 export する `device.ts`。
+ * MUST: this file does not **value-import** `acquire.ts`. The layer's dependency is one-way,
+ * acquire → context, and only the `acquireGpu` side constructs a {@link GpuContext} (the reverse
+ * reference is `import type` only — it is erased, so the runtime import graph stays one-way).
+ * The entry point of the layer is `device.ts`, which re-exports the public names of these 2 files.
  *
- * この層はさらに 3 つ、**device と同じ寿命で GpuContext が所有する**器を持つ:
- * {@link ResidentTensor}（Session を跨いで共有できる第 4 の寿命クラス）と
- * {@link BatchScope}（フェンス 1 本で閉じる enqueue 区間）、そして
- * {@link GpuContextInternals.pipelines}（コンパイル済み compute pipeline のキャッシュ）。
- * 前 2 者は errorScope 区間と消失レースの規律がそのまま効くため、GPU バッファの器でありながら
- * ここに置いてある。
+ * This layer also has three more containers **owned by GpuContext with the same lifetime as the
+ * device**: {@link ResidentTensor} (a 4th lifetime class that can be shared across Sessions),
+ * {@link BatchScope} (an enqueue section closed by one fence), and
+ * {@link GpuContextInternals.pipelines} (the cache of compiled compute pipelines).
+ * The first two are GPU-buffer containers but live here because the discipline of errorScope
+ * sections and the loss race applies to them as is.
  */
 
-// MUST: 型だけを取る（実体を import するとこの層（context.ts）→ カナリア → kernels / reference の
-// 依存が生まれ、「この層から kernels / reference への import を作らない」規律が崩れる —
-// {@link GpuContextInternals.attentionI8a8Dot}）。`import type` は消去されるので、
-// 実行時の import グラフは今までどおり一方向のまま。
+// MUST: take types only (a value import would create the dependency this layer (context.ts) →
+// canary → kernels / reference, breaking the rule "this layer creates no import into kernels /
+// reference" — {@link GpuContextInternals.attentionI8a8Dot}). `import type` is erased, so the
+// runtime import graph stays one-way as before.
 import type { AttentionI8a8Decision } from "./attention-dp4a-canary.ts";
-// MUST: acquire.ts からも型だけを取る（値を取ると冒頭の「acquire → context の一方向」が
-// 壊れる）。消去される参照なので、実行時の import グラフは acquire → context のまま。
+// MUST: take only types from acquire.ts too (taking a value would break "acquire → context,
+// one-way" at the top). The reference is erased, so the runtime import graph stays acquire →
+// context.
 import type { DeviceLostHandler, RequiredLimits } from "./acquire.ts";
-// MUST: kernels からも型だけを取る（冒頭の attention-dp4a-canary と同じ理由 — この層から kernels への
-// 実体の import を作らない）。
+// MUST: take only types from kernels too (the same reason as attention-dp4a-canary above — no value
+// import from this layer into kernels).
 import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import { STORAGE_USAGE } from "./arena.ts";
 import {
@@ -35,23 +37,24 @@ import {
 import { PipelineCache } from "./pipeline-cache.ts";
 import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
-/** device が失われた状態での操作。待ち続ける代わりに必ずこれを投げる。 */
+/** An operation on a device that has been lost. Always thrown instead of waiting forever. */
 export class GpuDeviceLostError extends Error {
   override readonly name = "GpuDeviceLostError";
 }
 
 /**
- * 消失理由を {@link GpuDeviceLostError} の文言へ足す接尾（未消失・情報無しなら空文字）。
+ * A suffix that adds the loss reason to the message of {@link GpuDeviceLostError} (an empty string
+ * when not lost or without information).
  *
- * MUST: 消失を例外へ変える経路（`#raceDeviceLost` の待ち・{@link assertDeviceUsable} の同期判定・
- * shader-f16 カナリアの `raceCanaryDeviceLost`・`runtime/generation-context.ts` の同名判定）は
- * 全てこれを通す。`GPUDeviceLostInfo.message` は
- * **バックエンドが入れた真因の唯一の生き残り**で（Metal の
- * `Device::create_query_set: ...` 相当）、errorScope には入らない — 消失済み device の
- * エラーは Deno の error handler の入口で捨てられるため、ここで落とすと真因は karume の
- * どこにも残らない（`docs/limitations.md` の Metal timestamp 節）。
- * 接**頭**は変えない: 「どこで失われたか」を先に読ませる形は既存の呼び手と doc が前提に
- * している（理由は後置の追加情報）。
+ * MUST: every path that turns a loss into an exception (the wait of `#raceDeviceLost`, the
+ * synchronous check of {@link assertDeviceUsable}, `raceCanaryDeviceLost` of the shader-f16 canary,
+ * the check of the same name in `runtime/generation-context.ts`) goes through this.
+ * `GPUDeviceLostInfo.message` is **the only survivor of the real cause the backend put in** (the
+ * equivalent of Metal's `Device::create_query_set: ...`) and does not reach the errorScope — errors
+ * of a lost device are dropped at the entrance of Deno's error handler, so dropping it here leaves
+ * the real cause nowhere in karume (the Metal timestamp section of `docs/limitations.md`).
+ * The **prefix** does not change: existing callers and docs assume the form that lets the reader
+ * see "where it was lost" first (the reason is extra information appended after it).
  */
 export const describeDeviceLoss = (info: GPUDeviceLostInfo | undefined): string => {
   if (info === undefined) return "";
@@ -59,142 +62,168 @@ export const describeDeviceLoss = (info: GPUDeviceLostInfo | undefined): string 
   return ` — reason: ${info.reason}${message === "" ? "" : ` / ${message}`}`;
 };
 
-/** 常駐テンソル（{@link ResidentTensor}）の寿命規律の破れ（破棄後利用・参照中の破棄）。 */
+/**
+ * A breach of the lifetime discipline of a resident tensor ({@link ResidentTensor}) (use after
+ * dispose, dispose while referenced).
+ */
 export class ResidentTensorError extends Error {
   override readonly name = "ResidentTensorError";
 }
 
-/** バッチ区間（{@link BatchScope}）の使い方の破れ（決着後の enqueue・計測との併用など）。 */
+/**
+ * A breach of how a batch section ({@link BatchScope}) is used (enqueue after settlement, combining
+ * with measurement, and the like).
+ */
 export class BatchScopeError extends Error {
   override readonly name = "BatchScopeError";
 }
 
-/** GPU 側時間計測（pass 境界の timestamp）に要る feature — ADR 0021。 */
+/** The feature needed for GPU-side time measurement (timestamps at pass boundaries) — ADR 0021. */
 export const TIMESTAMP_QUERY_FEATURE: GPUFeatureName = "timestamp-query";
 
 /**
- * f16 **計算**変種（共有タイルを f16 にする GEMM — `enable f16`）に要る feature。
+ * The feature needed by the f16 **compute** variants (GEMM with f16 shared tiles — `enable f16`).
  *
- * MUST: 重み**格納** f16（ADR 0018）と混同しない。格納側は core WGSL の `unpack2x16float`
- * だけで動き、この feature を一切要求しない。こちらは WGSL の `f16` 型そのものを使うので
- * feature が無ければシェーダのコンパイルが通らない。
+ * MUST: do not confuse it with f16 weight **storage** (ADR 0018). The storage side works with core
+ * WGSL's `unpack2x16float` alone and never requests this feature. This side uses WGSL's `f16` type
+ * itself, so without the feature the shader does not compile.
  */
 export const SHADER_F16_FEATURE: GPUFeatureName = "shader-f16";
 
 /**
- * **ランタイム内部だけが触る面**の鍵（mod.ts からは輸出しない — ADR 0008 の「薄い面」を
- * 汚さない）。{@link GpuContext} / {@link ResidentTensor} / {@link BatchScope} は利用者向けの
- * 数メソッドだけを素の名前で持ち、executor が要る実体（直列化プリミティブ・GPUBuffer・
- * 焼き込み参照計数・メンバ登録）はこの鍵の下に畳む。テスト専用ノブ（`I8A8_DOT`）と同じ流儀。
+ * The key of **the surface that only the runtime touches** (not exported from mod.ts — it does not
+ * pollute the "thin surface" of ADR 0008). {@link GpuContext} / {@link ResidentTensor} /
+ * {@link BatchScope} carry only the few methods for users under plain names, and fold what the
+ * executor needs (serialization primitives, GPUBuffer, baked reference counts, member registration)
+ * under this key. The same style as the test-only knob (`I8A8_DOT`).
  *
- * MUST: 宣言は {@link GpuContext} より**前**に置く。クラス本体の計算プロパティ名は
- * クラス定義時に評価されるので、後ろに置くと TDZ で落ちる。
+ * MUST: declare it **before** {@link GpuContext}. Computed property names in a class body are
+ * evaluated when the class is defined, so placing it after would fail in the TDZ.
  */
 export const RUNTIME_INTERNAL: unique symbol = Symbol("karume.runtimeInternal");
 
-/** {@link GpuContext} のランタイム内部面（利用者ストーリーに対応しない直列化プリミティブ）。 */
+/**
+ * The runtime-internal surface of {@link GpuContext} (serialization primitives that do not map to a
+ * user story).
+ */
 type GpuContextInternals = {
   /**
-   * `work` の決着と device 消失を競わせ、消失が先なら {@link GpuDeviceLostError} にする。
+   * Races the settling of `work` against device loss, and turns it into {@link GpuDeviceLostError}
+   * if the loss comes first.
    *
-   * MUST: 待ちは失敗ではなくハングになりうる（`onSubmittedWorkDone` / `mapAsync` が消失後に
-   * 解決するかは実装差のある面 — {@link "./acquire.ts"} の `raceCanaryDeviceLost` の doc に実測を記録）。
-   * 決着時は購読を必ず解除する（reaction を積み残さない）。
+   * MUST: a wait can become a hang rather than a failure (whether `onSubmittedWorkDone` /
+   * `mapAsync` resolve after a loss is a surface that differs between implementations —
+   * measurements are recorded in the doc of `raceCanaryDeviceLost` in {@link "./acquire.ts"}).
+   * On settling, the subscription is always removed (no reactions are left behind).
    */
   raceDeviceLost<T>(work: Promise<T>, where: string): Promise<T>;
   /**
-   * `await` を跨いで errorScope を張る区間を、device 単位で直列化して実行する。
-   * 規則の全体は {@link GpuContext} 冒頭「errorScope 区間の不変条件」を参照。
+   * Runs a section that keeps errorScopes pushed across `await`s, serialized per device.
+   * For the full rules see "Invariants of errorScope sections" at the top of {@link GpuContext}.
    *
-   * トレードオフ: 保持区間は run 1 本の GPU 操作全体（エンコード〜`flush()` の完了待ち〜
-   * readback〜アリーナ破棄）に及ぶため、同一 device 上の複数 Session の run は丸ごと
-   * 直列化される。区間を狭めない理由は「run が GPU 操作を発行するのは自分のロック区間内
-   * のみ」という不変条件を単純に保つため（executor の #runOnce を参照）。それでもこの設計を
-   * 採るのは、誤帰属の帰結が「無関係な run が落ち、本来落ちるべき run が全 0 を静かに返す」
-   * ことだから — 沈黙した誤値は検出手段が無く、失うスループットとは釣り合わない。
+   * Trade-off: the held section spans the whole GPU work of one run (encoding to the wait for
+   * `flush()` completion to readback to arena destruction), so runs of several Sessions on the same
+   * device are serialized whole. The section is not narrowed to keep the invariant "a run issues
+   * GPU operations only inside its own lock section" simple (see #runOnce in the executor). The
+   * design is still taken because the consequence of misattribution is "an unrelated run fails, and
+   * the run that should fail silently returns all 0" — a silent wrong value has no means of
+   * detection and does not weigh against the lost throughput.
    *
-   * MUST: 利用者の面に出さない。素の名前で公開すると
-   * `gpu.withScopeLock(() => session.run(...))` が書けてしまい、run が同じロックを取りに行って
-   * **診断も例外も出ないまま自己デッドロック**する（再入検出器は置けない — 下記 doc）。
+   * MUST: do not expose it on the user surface. Published under a plain name,
+   * `gpu.withScopeLock(() => session.run(...))` could be written, and run would go for the same
+   * lock and **self-deadlock with neither diagnostics nor exception** (no reentrancy detector can
+   * be put in — see the doc below).
    */
   withScopeLock<T>(body: () => Promise<T>): Promise<T>;
   /**
-   * 融合 attention の整数内積変種を **device 単位で 1 度だけ**決める（遅延・メモ化）。
+   * Decides the integer-dot-product variant of fused attention **only once per device** (lazy,
+   * memoized).
    *
-   * `run` は判定の実体（{@link "./attention-dp4a-canary.ts"} の `decideAttentionI8a8Dot`）を
-   * 呼び手が渡す形にしてある — この層から kernels / reference 層への import を作らないため
-   * （逆向きの import は canary 側が張る）。MUST: 呼び出し点は Session 構築の 1 箇所だけ
-   * （複数の実体を渡せる形にすると、メモが「最初に渡された判定」を意味するだけの席になる）。
+   * `run` is shaped so that the caller passes the actual decision (`decideAttentionI8a8Dot` of
+   * {@link "./attention-dp4a-canary.ts"}) — so that this layer creates no import into the kernels /
+   * reference layers (the import in the other direction is made by the canary side). MUST: there is
+   * only one call site, in Session construction (a shape that accepts several implementations would
+   * turn the memo into a field that merely means "the decision passed first").
    *
-   * MUST: メモするのは **Promise そのもの**（値ではない）。attentionCompute "a8" の Session を
-   * 並行構築すると、値でメモする形ではカナリアが 2 本走って device 単位 1 回の契約が崩れる。
-   * 失敗（両腕とも sanity 帯を外した / device 消失）も同じ Promise のまま配る — device の性質は
-   * 走らせ直しても変わらないので、再試行は同じ結論を得るためだけに 1 submit を払う。
-   * MUST: ただし {@link GpuOutOfMemoryError} で落ちた判定だけはメモから外す（決着の後の要求が
-   * 走らせ直す）。カナリアの一時バッファの確保失敗は device の性質ではなく、他の Session が VRAM を
-   * 天井付近まで埋めた瞬間の一過性の状態なので、保持すると空きが戻っても同じ GpuContext では a8 の
-   * Session を作れなくなる。外すのは保持中の Promise が落ちた本人と同じときだけ（進行中の要求の
-   * 共有は崩さない）。
+   * MUST: memoize **the Promise itself** (not the value). When Sessions with attentionCompute "a8"
+   * are built concurrently, memoizing the value would run the canary twice and break the contract
+   * of once per device. A failure (both arms outside the sanity band / device loss) is also handed
+   * out as the same Promise — a device property does not change by rerunning, so a retry would only
+   * pay 1 submit to reach the same conclusion.
+   * MUST: but a decision that failed with {@link GpuOutOfMemoryError} is removed from the memo (a
+   * request after the settlement reruns it). A failed allocation of the canary's temporary buffers
+   * is not a device property but a transient state of the moment when other Sessions filled VRAM
+   * near the ceiling, so keeping it would make it impossible to create an a8 Session on the same
+   * GpuContext even after memory frees up. It is removed only when the held Promise is the very one
+   * that failed (sharing among in-flight requests is not broken).
    *
-   * 席が持つのは変種 1 値ではなく**判定まるごと**（{@link AttentionI8a8Decision}）。「既知解と
-   * 厳密一致ではなかったが帯内なので通した」という事実は判定と同じ寿命で、値に潰すと呼び手が
-   * 警告を出せなくなる。
+   * The slot holds **the whole decision** ({@link AttentionI8a8Decision}), not just the one variant
+   * value. The fact "it did not match the known answer exactly but was inside the band, so it was
+   * let through" has the same lifetime as the decision; collapsing it to a value would leave the
+   * caller unable to warn.
    */
   attentionI8a8Dot(run: () => Promise<AttentionI8a8Decision>): Promise<AttentionI8a8Decision>;
   /**
-   * コンパイル済み compute pipeline のキャッシュ（**device 1 個につき 1 個** — 初回参照で生成）。
+   * The cache of compiled compute pipelines (**one per device** — created on first reference).
    *
-   * 寿命が device 単位なのは、パイプラインの再利用可能性が device 単位だから — 同一 device 上の
-   * Session はブラウザ側の暗黙キャッシュ（WGSL 文字列がキー）に当たるだけで、明示キャッシュを
-   * Session ごとに割ると `createShaderModule` / `createComputePipeline` の呼び出しと
-   * `getBindGroupLayout` の解決を Session の本数だけ払い直すことになる。
+   * Its lifetime is per device because whether a pipeline can be reused is decided per device —
+   * Sessions on the same device merely hit the browser's implicit cache (keyed by the WGSL string),
+   * and splitting an explicit cache per Session would pay the `createShaderModule` /
+   * `createComputePipeline` calls and the resolution of `getBindGroupLayout` once per Session.
    *
-   * MUST: 破棄・消失で明示的に捨てない（**GpuContext インスタンスと心中する** — ADR 0004 の
-   * 再構築規律）。lazy 生成なので、destroy で undefined に戻すと次の参照が「死んだ device の
-   * キャッシュ」を新品として作り直してしまう。作り直しの唯一の入口は `acquireGpu()` からの
-   * GpuContext 再構築で、その時点で新しい空のキャッシュになる。
-   * MUST: 呼び手（executor）は **Session の構築相からは触らない** — 構築相はスコープロックの
-   * 外にあり、そこでパイプラインを生成すると並行構築の errorScope が誤帰属する
-   * （{@link GpuContext} 冒頭「errorScope 区間の不変条件」）。
+   * MUST: do not drop it explicitly on destroy or loss (**it lives and dies with the GpuContext
+   * instance** — the rebuild discipline of ADR 0004). It is created lazily, so resetting it to
+   * undefined on destroy would make the next reference build "the cache of a dead device" as if
+   * new. The only way to rebuild is reconstructing the GpuContext from `acquireGpu()`, which gives
+   * a new, empty cache at that point.
+   * MUST: the caller (executor) **does not touch it from the Session construction phase** — the
+   * construction phase is outside the scope lock, and creating pipelines there would misattribute
+   * the errorScopes of concurrent constructions ("Invariants of errorScope sections" at the top of
+   * {@link GpuContext}).
    */
   pipelines(): PipelineCache;
   /**
-   * 同じ `key` の警告を **device 1 個につき 1 回だけ** `console.warn` に出す。
+   * Emits a warning with the same `key` to `console.warn` **only once per device**.
    *
-   * 「この device に dp4a が無い」のように device の性質そのものである事実は、Session を何本
-   * 作っても 1 回で足りる — a8 の Session を部品ごとに並べる家族で同じ文言が本数だけ流れるのを
-   * 避ける。文言は呼び手が組む（この層から kernels / runtime 層への import を作らないため）。
+   * A fact that is a property of the device itself, such as "this device has no dp4a", needs saying
+   * only once however many Sessions are created — this avoids the same message flowing once per
+   * Session in families that line up a8 Sessions per component. The caller builds the message (so
+   * that this layer creates no import into the kernels / runtime layers).
    */
   warnOnce(key: string, message: string): void;
   /**
-   * `acquireGpu({ geometryProfile })` で注入された GEMM 幾何のプロファイル（DECIDED: ADR 0115）。
-   * 注入が無ければ undefined で、Session 構築が adapter から埋め込みの表を選ぶ。
+   * The GEMM geometry profile injected with `acquireGpu({ geometryProfile })` (DECIDED: ADR 0115).
+   * undefined without an injection, in which case Session construction picks an embedded table from
+   * the adapter.
    *
-   * 読み手は Session 構築の選択 1 箇所だけ（dp4a カナリアの幾何と診断の `geometryProfile` は
-   * その選択の結果を引く）。利用者の面に出さないのは、渡した本人は値を知っていて、Session が
-   * 実際に使った表は `SessionDiagnostics.geometryProfile` で観測できるから。
-   * MUST: device の寿命の間は不変（同じ device の Session・カナリアの判定メモが 1 本の表に
-   * 対応していることが、判定を device 単位でメモしてよい根拠）。
+   * The only reader is the selection in Session construction (the geometry of the dp4a canary and
+   * the `geometryProfile` of the diagnostics take the result of that selection). It is not on the
+   * user surface because whoever passed it knows the value, and the table a Session actually used
+   * can be observed through `SessionDiagnostics.geometryProfile`.
+   * MUST: unchanged for the device's lifetime (that the Sessions and the canary's decision memo on
+   * the same device correspond to one table is the ground for memoizing the decision per device).
    */
   readonly geometryProfile?: GeometryProfile;
 };
 
 /**
- * device が使える状態かの同期判定（常駐テンソル経路の受付門 — ADR 0054）。Session の構築
- * （`runtime/session-build.ts`）・run / enqueue の受付（`runtime/executor.ts`）・
- * GenerationContext の遮断面（`runtime/generation-context.ts` — ADR 0066 決定 7）も同じ判定を
- * 借りる（判定はここ 1 箇所・runtime の内部向け — mod.ts には出さない）。
+ * A synchronous check of whether the device is usable (the admission guard of the resident-tensor
+ * path — ADR 0054). Session construction (`runtime/session-build.ts`), the admission of run /
+ * enqueue (`runtime/executor.ts`) and the shut-off surface of GenerationContext
+ * (`runtime/generation-context.ts` — ADR 0066 decision 7) borrow the same check (the check lives
+ * here alone and is runtime-internal — not exposed from mod.ts).
  *
- * MUST: `lost` だけでなく `destroyRequested` も見る。`destroy()` はフラグを同期に立てるのに
- * `device.lost` の reaction が走るのは以後のタスクなので、`lost` だけだとその窓で操作が通る。
- * 通したときの現れ方が沈黙なのがここを置く理由 — {@link ResidentTensor.write} と
- * GenerationContext の論理長 uniform の書き込みは破棄済みバッファへの**沈黙 no-op**（警告すら
- * 出ない）になり、{@link GpuContext.createResident} は
- * 消失後の `popErrorScope` が null で resolve する（`docs/research/2026-08-16-device-lost-wait-settlement.md`）
- * ため**無効なバッファを掴んだまま成功として返る**。いずれも loud になるのは次のフェンスで、
- * その間の診断は誤導的になる。
- * MUST: 型は {@link GpuDeviceLostError}（lost device 由来の GPU 資源は WebGPU 仕様上回復不能で、
- * 意図的な破棄と予期しない消失で復旧手段は変わらないので型は分けない）。
+ * MUST: look at `destroyRequested` as well as `lost`. `destroy()` sets the flag synchronously, but
+ * the reaction of `device.lost` runs in a later task, so with `lost` alone operations pass in that
+ * window. The reason this exists is that passing shows up silently — {@link ResidentTensor.write}
+ * and GenerationContext's write of the logical-length uniform become **silent no-ops** on destroyed
+ * buffers (not even a warning), and {@link GpuContext.createResident} **returns as a success while
+ * holding an invalid buffer**, because `popErrorScope` resolves with null after a loss
+ * (`docs/research/2026-08-16-device-lost-wait-settlement.md`). Either way it becomes loud only at
+ * the next fence, and the diagnostics in between mislead.
+ * MUST: the type is {@link GpuDeviceLostError} (GPU resources from a lost device are unrecoverable
+ * per the WebGPU specification, and the recovery is the same for an intentional destroy and an
+ * unexpected loss, so the types are not split).
  */
 export const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
   if (gpu.destroyRequested || gpu.lost !== undefined) {
@@ -206,51 +235,55 @@ export const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
 };
 
 /**
- * 取得済み device と正規化済み能力の束。
+ * A bundle of an acquired device and its normalized capabilities.
  *
- * `device.lost` の購読はコンストラクタで**無条件に、かつ 1 回だけ**行う。消失を未処理の
- * まま放置すると `mapAsync` / `onSubmittedWorkDone` が永久に解決せず、失敗ではなくハングと
- * して現れる。購読を任意にしないことで、消失は必ず {@link GpuContext.lost} に記録され、
- * この層の待機は例外に変換される。
+ * The subscription to `device.lost` is made in the constructor **unconditionally and only once**.
+ * Leaving a loss unhandled makes `mapAsync` / `onSubmittedWorkDone` never resolve, showing up as a
+ * hang rather than a failure. Because the subscription is not optional, a loss is always recorded
+ * in {@link GpuContext.lost}, and the waits of this layer are turned into exceptions.
  *
- * ## errorScope 区間の不変条件（device 単位・この層が守らせる）
+ * ## Invariants of errorScope sections (per device, enforced by this layer)
  *
- * errorScope は **device 単位の LIFO スタック**で、`popErrorScope()` は呼んだ時点のスタック
- * 先頭を無条件に取る。つまり「誰のスコープか」という概念が無い。ここから 3 つの規則が出る:
+ * errorScopes are a **per-device LIFO stack**, and `popErrorScope()` unconditionally takes the top
+ * of the stack at the time it is called. That is, there is no notion of "whose scope". Three rules
+ * follow:
  *
- * - MUST: `await` を跨いで errorScope を張る区間は `withScopeLock`
- *   （{@link GpuContextInternals}）の中で実行する。重なると①自分のエラーが他人のスコープに
- *   入り②自分の pop が他人のスコープを取るため、失敗が無関係な呼び出しに帰属し、本来
- *   落ちるべき呼び出しは沈黙のまま全 0 を返す。
- * - MUST NOT: `withScopeLock` の中で `withScopeLock` を再取得する（自己デッドロック）。
- *   ロックは再入可能ではない。検出器は置かない — 「保持中」フラグでは**正当な待ち行列**
- *   （別 Session が先行区間の完了を待って並ぶ形）と再入が区別できず、区別するには async
- *   呼び出しを跨ぐ実行コンテキスト追跡が要る。Web 標準 API のみという制約（ADR 0002）の下で
- *   純粋な手段が無いため、取得点を executor の 1 箇所に限定し、その内側の層（PipelineCache /
- *   SubmitScheduler / RunArena）は同期区間で完結するスコープしか使わない、という層規約で守る。
- * - 同期区間だけで完結するスコープ（{@link "./error-scope.ts"} の `withPipelineScope` /
- *   {@link pushFailureScopes}〜{@link popFailureScopes}）はロック不要。他のタスクが割り込む
- *   余地が無く、LIFO の入れ子が必ず均衡するため。ロック内から呼ばれる層（PipelineCache 等）
- *   はこの形でなければならない。
+ * - MUST: a section that keeps errorScopes pushed across `await`s runs inside `withScopeLock`
+ *   ({@link GpuContextInternals}). If sections overlap, ① one's errors land in another's scope and
+ *   ② one's pop takes another's scope, so a failure is attributed to an unrelated call and the call
+ *   that should fail silently returns all 0.
+ * - MUST NOT: re-acquire `withScopeLock` inside `withScopeLock` (self-deadlock). The lock is not
+ *   reentrant. No detector is put in — a "held" flag cannot tell **a legitimate queue** (another
+ *   Session waiting in line for an earlier section to complete) from reentry, and telling them
+ *   apart needs execution-context tracking across async calls. Under the constraint of Web standard
+ *   APIs only (ADR 0002) there is no pure means, so it is kept by a layering rule: the acquisition
+ *   point is limited to one place in the executor, and the layers inside it (PipelineCache /
+ *   SubmitScheduler / RunArena) use only scopes that complete within a synchronous section.
+ * - Scopes that complete within a synchronous section (`withPipelineScope` /
+ *   {@link pushFailureScopes} to {@link popFailureScopes} of {@link "./error-scope.ts"}) need no
+ *   lock. No other task can cut in, and the LIFO nesting always balances. Layers called from inside
+ *   the lock (PipelineCache and the like) have to take this form.
  */
 export class GpuContext {
-  /** ランタイム内部面（利用者が触る面ではない）。 */
+  /** The runtime-internal surface (not a surface users touch). */
   readonly [RUNTIME_INTERNAL]: GpuContextInternals;
   /**
-   * 生の device（ランタイムの管理外で触る面）。ここから `destroy()` を呼ぶと
-   * {@link "./acquire.ts"} の `AcquireGpuOptions.onDeviceLost` の抑止が効かず予期しない消失として通知され、
-   * `pushErrorScope` / `popErrorScope` を張ると errorScope 区間ロック（LIFO の排他）に参加しない。
-   * 後始末は {@link GpuContext.destroy} を使うこと。
+   * The raw device (a surface touched outside the runtime's management). Calling `destroy()` from
+   * here bypasses the suppression of `AcquireGpuOptions.onDeviceLost` in {@link "./acquire.ts"} and
+   * is reported as an unexpected loss, and pushing `pushErrorScope` / `popErrorScope` here does not
+   * take part in the errorScope section lock (LIFO exclusion). Use {@link GpuContext.destroy} for
+   * cleanup.
    */
   readonly device: GPUDevice;
   readonly adapterInfo: GPUAdapterInfo;
-  /** device が実際に有効化した feature（アダプタが持つだけの feature は含まない）。 */
+  /** Features the device actually enabled (not including features the adapter merely has). */
   readonly features: ReadonlySet<string>;
   /**
-   * WGSL 言語機能（未実装環境では空集合）。単独では GPU 対応の証明にしない。使ってよいのは
-   * 数値が同一な変種の選択（w8a8 の dot4I8Packed / エミュ — ADR 0025）と、明示要求時の
-   * 必要条件の検査（subgroup_id — device feature と実走も要求する）に限る。
-   * 線引きの正本は {@link "./acquire.ts"} の `readWgslLanguageFeatures`。
+   * WGSL language features (an empty set on implementations without them). On their own they are
+   * not proof of GPU support. They may be used only for choosing between numerically identical
+   * variants (dot4I8Packed / emulation of w8a8 — ADR 0025) and for checking a necessary condition
+   * when explicitly requested (subgroup_id — the device feature and a canary run are required too).
+   * The source of truth for the line is `readWgslLanguageFeatures` in {@link "./acquire.ts"}.
    */
   readonly wgslLanguageFeatures: ReadonlySet<string>;
   readonly limits: RequiredLimits;
@@ -258,26 +291,28 @@ export class GpuContext {
   #destroyRequested = false;
   readonly #lostListeners = new Set<DeviceLostHandler>();
   /**
-   * errorScope 区間の直列化チェーン。決着（成功・失敗）だけを次に渡すため自身は決して
-   * reject しない（1 本の失敗で以後の全区間を巻き添えにしない）。
+   * The serialization chain of errorScope sections. It passes on only the settlement (success or
+   * failure), so it never rejects itself (one failure does not drag every later section down).
    */
   #scopeChain: Promise<void> = Promise.resolve();
   /**
-   * 融合 attention の内積変種カナリアの結果（{@link GpuContextInternals.attentionI8a8Dot}）。
-   * 未要求なら undefined のまま = 1 dispatch も出ない（a8 を使わない利用者はコストを払わない）。
+   * The result of the dot-product variant canary of fused attention
+   * ({@link GpuContextInternals.attentionI8a8Dot}). Stays undefined unless requested = not a single
+   * dispatch is issued (users who do not use a8 pay nothing).
    */
   #attentionI8a8Dot: Promise<AttentionI8a8Decision> | undefined;
   /**
-   * {@link ResidentTensor} の識別子の発番。**モジュールスコープに置かない**（副作用ゼロの
-   * 不変条件）— GpuContext ごとに別空間で足りる（resident は device を跨がない）。
+   * Issues the identifiers of {@link ResidentTensor}. **Not placed at module scope** (the
+   * zero-side-effect invariant) — a separate space per GpuContext is enough (a resident does not
+   * cross devices).
    */
   #residentSeq = 0;
   /**
-   * device 寿命のパイプラインキャッシュ（{@link GpuContextInternals.pipelines}）。
-   * 未参照なら undefined のまま = 1 本も作らない（Session を作らない利用者はコストを払わない）。
+   * The device-lifetime pipeline cache ({@link GpuContextInternals.pipelines}).
+   * Stays undefined until referenced = none is created (users who create no Session pay nothing).
    */
   #pipelines: PipelineCache | undefined;
-  /** {@link GpuContextInternals.warnOnce} が出し終えたキー。 */
+  /** Keys that {@link GpuContextInternals.warnOnce} has already emitted. */
   readonly #warned = new Set<string>();
 
   constructor(
@@ -303,8 +338,9 @@ export class GpuContext {
         if (this.#attentionI8a8Dot !== undefined) return this.#attentionI8a8Dot;
         const decision = run();
         this.#attentionI8a8Dot = decision;
-        // 呼び手の reaction より先に登録するので、呼び手が拒否を受け取った時点でメモは空いている。
-        // 呼び手へ返すのは decision そのものなので、拒否はそのまま呼び手に届く。
+        // Registered before the caller's reaction, so the memo is already empty by the time the
+        // caller receives the rejection. The caller gets decision itself, so the rejection reaches
+        // the caller as is.
         decision.catch((cause: unknown) => {
           if (cause instanceof GpuOutOfMemoryError && this.#attentionI8a8Dot === decision) {
             this.#attentionI8a8Dot = undefined;
@@ -332,15 +368,18 @@ export class GpuContext {
     }
     void device.lost.then((info) => {
       this.#lost = info;
-      // 通知中の解除で反復が壊れないよう複製してから呼ぶ。消失は 1 度きりなので、通知後は
-      // 購読を空にして以後の onLost を即時通知経路に落とす。
+      // Copy before calling so that unsubscribing during notification does not break the
+      // iteration. A loss happens only once, so after notifying, the subscriptions are emptied and
+      // later onLost calls fall to the immediate-notification path.
       const listeners = [...this.#lostListeners];
       this.#lostListeners.clear();
       for (const listener of listeners) {
-        // MUST: listener の例外は通知の fan-out を止めない。購読は上で clear 済みで再通知が
-        // 無いため、公開 onDeviceLost（挿入順で先）の throw で後続の内部購読
-        // （`raceDeviceLost`）へ通知が届かないと、消失が例外ではなくハングになる。捕えた例外は
-        // 握り潰さず、消失の制御経路から切り離して非同期に再 throw する。
+        // MUST: a listener's exception does not stop the notification fan-out. The subscriptions
+        // were cleared above and there is no renotification, so if a throw from the public
+        // onDeviceLost (first in insertion order) kept the notification from reaching the later
+        // internal subscriptions (`raceDeviceLost`), the loss would become a hang instead of an
+        // exception. The caught exception is not swallowed; it is detached from the loss's control
+        // path and rethrown asynchronously.
         try {
           listener(info);
         } catch (cause) {
@@ -352,61 +391,66 @@ export class GpuContext {
     });
   }
 
-  /** 消失済みならその情報。未消失は undefined。`destroy()` 後も記録される。 */
+  /** The information if lost; undefined if not. Also recorded after `destroy()`. */
   get lost(): GPUDeviceLostInfo | undefined {
     return this.#lost;
   }
 
-  /** 意図的な破棄を要求済みか（予期しない消失と区別するため）。 */
+  /**
+   * Whether an intentional destroy has been requested (to tell it apart from an unexpected loss).
+   */
   get destroyRequested(): boolean {
     return this.#destroyRequested;
   }
 
   /**
-   * GPU 側時間計測が有効か（ADR 0021）。
+   * Whether GPU-side time measurement is enabled (ADR 0021).
    *
-   * MUST: 要求値を別フィールドに複製せず、**実際に有効化された feature** から導く。
-   * device の feature 集合は要求したものそのものなので、複製すると「要求したのに載らなかった」
-   * ときに診断だけが有効を主張する形になる（内訳が空のまま「計測中」に見える）。
+   * MUST: do not copy the requested value into another field; derive it from **the features
+   * actually enabled**. The device's feature set is exactly what was requested, so a copy would let
+   * the diagnostics alone claim it is enabled when "requested but not granted" (an empty breakdown
+   * that looks like "measuring").
    */
   get gpuTimingEnabled(): boolean {
     return this.features.has(TIMESTAMP_QUERY_FEATURE);
   }
 
   /**
-   * f16 計算変種が使えるか（ADR 0028）。
+   * Whether the f16 compute variants are usable (ADR 0028).
    *
-   * MUST: {@link GpuContext.gpuTimingEnabled} と同じ規律で、要求値の複製ではなく**実際に
-   * 有効化された feature** から導く。ここが true を返すのは `acquireGpu({shaderF16: true})`
-   * が feature の要求とカナリアの実走の両方を通ったときだけ。
+   * MUST: by the same discipline as {@link GpuContext.gpuTimingEnabled}, derived from **the
+   * features actually enabled**, not from a copy of the requested value. This returns true only
+   * when `acquireGpu({shaderF16: true})` passed both the feature request and the canary run.
    */
   get shaderF16Enabled(): boolean {
     return this.features.has(SHADER_F16_FEATURE);
   }
 
   /**
-   * 未解除の消失購読の本数（診断）。
+   * The number of loss subscriptions not yet removed (diagnostics).
    *
-   * `raceDeviceLost`（{@link GpuContextInternals}）は決着時に必ず解除するので、待機が全て
-   * 決着していれば基線に戻る。基線は 0 ではなく構成で変わる: `onDeviceLost` を渡して構築した
-   * 場合はコンストラクタが張る常駐の 1 本を含み（基線 1）、利用者が {@link GpuContext.onLost}
-   * で張って未解除の購読もその本数だけ数に入る。基線に戻らないことが「flush / readback ごとに reaction が積み残る」
-   * リークの姿で、挙動からは観測できない（ハングも誤値も起こさず、長寿命 Session で単調増加
-   * するだけ）。
-   * 見えない残留を正直に数値で出すためだけの面。
+   * `raceDeviceLost` ({@link GpuContextInternals}) always unsubscribes on settling, so when every
+   * wait has settled the count returns to its baseline. The baseline is not 0 and depends on the
+   * configuration: when constructed with `onDeviceLost`, it includes the resident one set by the
+   * constructor (baseline 1), and subscriptions a user set with {@link GpuContext.onLost} and has
+   * not removed also count. Not returning to the baseline is what the leak "a reaction is left
+   * behind per flush / readback" looks like, and it is not observable from behavior (no hang, no
+   * wrong value — it only grows monotonically in a long-lived Session).
+   * A surface only for showing an invisible residue honestly as a number.
    */
   get pendingLostListeners(): number {
     return this.#lostListeners.size;
   }
 
   /**
-   * device 消失を購読する。戻り値の関数で解除する。購読時点で既に消失していれば**即時
-   * （同期）**に通知して取りこぼしを作らない。
+   * Subscribes to device loss. The returned function unsubscribes. If the device is already lost at
+   * subscription time, it notifies **immediately (synchronously)** so that nothing is missed.
    *
-   * MUST: 待機のたびに `device.lost.then(...)` を新しく張らない。`lost` は device の寿命の間
-   * 未解決のままなので、`.then` は解除手段の無い reaction として promise に積まれ続け、
-   * flush / readback ごとに単調増加する（長寿命 Session でのリーク）。購読はここに一本化し、
-   * 待機側は `raceDeviceLost`（{@link GpuContextInternals}）を使って決着時に必ず解除する。
+   * MUST: do not set a new `device.lost.then(...)` for every wait. `lost` stays unresolved for the
+   * device's lifetime, so each `.then` piles up on the promise as a reaction with no way to remove
+   * it, growing monotonically per flush / readback (a leak in a long-lived Session). Subscription
+   * is unified here, and waiting sides use `raceDeviceLost` ({@link GpuContextInternals}), which
+   * always unsubscribes on settling.
    */
   onLost(listener: DeviceLostHandler): () => void {
     const info = this.#lost;
@@ -420,7 +464,10 @@ export class GpuContext {
     };
   }
 
-  /** {@link GpuContextInternals.raceDeviceLost} の実体（面は `RUNTIME_INTERNAL` の下だけ）。 */
+  /**
+   * The implementation of {@link GpuContextInternals.raceDeviceLost} (exposed only under
+   * `RUNTIME_INTERNAL`).
+   */
   async #raceDeviceLost<T>(work: Promise<T>, where: string): Promise<T> {
     let unsubscribe: () => void = () => {};
     const lost = new Promise<never>((_resolve, reject) => {
@@ -439,7 +486,10 @@ export class GpuContext {
     }
   }
 
-  /** {@link GpuContextInternals.withScopeLock} の実体（面は `RUNTIME_INTERNAL` の下だけ）。 */
+  /**
+   * The implementation of {@link GpuContextInternals.withScopeLock} (exposed only under
+   * `RUNTIME_INTERNAL`).
+   */
   #withScopeLock<T>(body: () => Promise<T>): Promise<T> {
     const result = this.#scopeChain.then(body);
     this.#scopeChain = result.then(
@@ -450,21 +500,25 @@ export class GpuContext {
   }
 
   /**
-   * Session を跨いで共有できる常駐バッファを作る（**第 4 の寿命クラス** — 重みアリーナ /
-   * slot backing / run アリーナのどれにも属さない）。
+   * Creates a resident buffer that can be shared across Sessions (**the 4th lifetime class** — it
+   * belongs to none of the weight arena / slot backing / run arena).
    *
-   * 用途は「生成ループの間ずっと GPU に置いたままにしたい値」— 条件テンソル（ループ前に
-   * {@link ResidentTensor.write} で 1 度だけ投入）と、ステップ間で受け渡す潜在
-   * （{@link Session.enqueue} の `copyOutputs` で書き、次の enqueue の入力にする）。どちらも
-   * ホストを 1 度も経由しないので、run 境界のフェンスを消せる。
+   * Its use is "values to keep on the GPU throughout a generation loop" — condition tensors (put in
+   * once with {@link ResidentTensor.write} before the loop) and latents passed between steps
+   * (written by `copyOutputs` of {@link Session.enqueue} and used as the input of the next
+   * enqueue). Neither goes through the host even once, so the fences at run boundaries can be
+   * removed.
    *
-   * MUST: async なのは errorScope で囲むため。上限超過 / 余力切れの `createBuffer` は同期
-   * 例外を投げず**無効なバッファを返す**ので、囲まないと以後の `writeBuffer` が警告すら
-   * 出さない no-op になり、空の常駐テンソルのまま生成ループが回る。
-   * MUST: `byteLength` は 4 の倍数（要素は全型 4 バイト — ADR 0009 の意味論 dtype）。
-   * MUST: 消失済み device では受け付けない（{@link assertDeviceUsable} — errorScope は
-   * 消失を捕らえないので、囲んでいても無効なバッファが成功として返る）。判定は入口と、pop の
-   * 決着の後の 2 回（待ちの間の消失は入口では見えない）。
+   * MUST: it is async in order to wrap it in errorScopes. A `createBuffer` over a limit / out of
+   * memory throws no synchronous exception and **returns an invalid buffer**, so without the scopes
+   * later `writeBuffer`s become no-ops without even a warning, and the generation loop runs with an
+   * empty resident tensor.
+   * MUST: `byteLength` is a multiple of 4 (every element type is 4 bytes — the semantic dtypes of
+   * ADR 0009).
+   * MUST: a lost device is not accepted ({@link assertDeviceUsable} — errorScopes do not catch a
+   * loss, so even with the scopes an invalid buffer comes back as a success). The check runs twice:
+   * at the entrance and after the pop settles (a loss during the wait is not visible at the
+   * entrance).
    */
   async createResident(byteLength: number, label = "resident"): Promise<ResidentTensor> {
     assertDeviceUsable(this, `resident '${label}' の確保`);
@@ -473,8 +527,9 @@ export class GpuContext {
         `resident '${label}': byteLength は 4 の倍数の正の整数である必要がある: ${byteLength}`,
       );
     }
-    // MUST: push から pop の発行までに await を挟まない（device 単位 LIFO の交錯を防ぐ根拠 —
-    // クラス冒頭「errorScope 区間の不変条件」の 3 つ目）。
+    // MUST: no await between the push and the issue of the pop (the ground for preventing
+    // interleaving in the per-device LIFO — the 3rd of "Invariants of errorScope sections" at the
+    // top of the class).
     pushFailureScopes(this.device);
     let buffer: GPUBuffer;
     try {
@@ -488,10 +543,11 @@ export class GpuContext {
       buffer.destroy();
       throw failure;
     }
-    // MUST: pop を待つ間に失われた device でも成功として返さない。消失後の pop は null で決着する
-    // （docs/research/2026-08-16-device-lost-wait-settlement.md）ので、入口の判定だけでは使えない
-    // 常駐テンソルが確保の成功として出回り、失敗地点が初回の write / read へずれる
-    // （`BatchScope.finish` の pop の後の判定と同じ形）。
+    // MUST: do not return a success even for a device lost while waiting for the pop. A pop after a
+    // loss settles with null (docs/research/2026-08-16-device-lost-wait-settlement.md), so with
+    // only the entrance check an unusable resident tensor would circulate as a successful
+    // allocation, and the failure point would shift to the first write / read (the same shape as
+    // the check after the pop in `BatchScope.finish`).
     try {
       assertDeviceUsable(this, `resident '${label}' の確保`);
     } catch (cause) {
@@ -503,33 +559,38 @@ export class GpuContext {
   }
 
   /**
-   * フェンス無しの enqueue を束ねる区間を開く（{@link Session.enqueue} — H-5）。
+   * Opens a section that bundles enqueues without fences ({@link Session.enqueue} — H-5).
    *
-   * 区間の間 **device 単位の errorScope 区間ロックを保持し続ける**
-   * （`withScopeLock` — {@link GpuContextInternals}）。これが「batch の内側で出した GPU 操作は
-   * 全て batch の errorScope に帰属する」ことと、「pop がスタック先頭を取り違えない」ことの根拠。
+   * For the duration of the section it **keeps holding the per-device errorScope section lock**
+   * (`withScopeLock` — {@link GpuContextInternals}). This is the ground for "every GPU operation
+   * issued inside the batch is attributed to the batch's errorScope" and for "a pop does not take
+   * the wrong top of the stack".
    *
-   * MUST: 区間中に同一 device の {@link Session.run} / `dispose` を**発行しない**（await の
-   * 有無に依らない）。run は区間ロックを取りに行くので {@link BatchScope.finish} まで決着せず、
-   * その run が同一 Session の `enqueue` より前に居ると「finish → in-flight リース → enqueue 本体
-   * → 先行 run → 区間ロック」の 4 辺が閉じて確定的な自己デッドロックになる（区間を開く**前**に
-   * 発行した未 await の run も同じ — `beginBatch` はコンストラクタで同期にロックを先取りするので、
-   * 同一 tick なら常に batch が先）。この形は `Session.enqueue` が {@link BatchScopeError} へ
-   * 変換する。
-   * NOTE: 閉路にならない形でも、**区間中に await する Session 操作全般**（`session.dispose()` /
-   * `context.dispose()`）は先行に未決着 run があると `finish()` まで返らず、利用者からは
-   * ハングに見える。batch 中は `enqueue` と `finish` だけを使うこと。**Session の構築も同じ**
-   * — `attentionCompute: "a8"` の初回構築はカナリア（{@link GpuContextInternals.attentionI8a8Dot}）
-   * で区間ロックを取りに行くため、区間中に構築すると `finish()` まで返らない。
-   * MUST: 計測が有効な device では開けない。1 dispatch = 1 pass に開いた timestamp は
-   * flush でしか回収されないため、batch の間 N run 分が未回収で溜まる（内訳を取るなら
-   * 通常の run で計測すること — ADR 0021）。
-   * NOTE: 同一 device で 2 本目を開こうとすると、1 本目が {@link BatchScope.finish} で
-   * ロックを返すまでここで待つ（区間は device 単位で排他 — 入れ子にはならない）。
-   * MUST: 消失済み・破棄要求済みの device では開かない（{@link assertDeviceUsable}）。開くと
-   * 区間ロックを取って enqueue を受理し続け、失敗が `finish()` まで遅れる。区間の途中で消失した
-   * ときに finish で検出するのは設計上の受容だが、開く時点で既に使えない device は同期に判定できる。
-   * 判定は入口と、区間ロックを取れた直後の 2 回（先行区間のロック解放を待つ間の消失は入口では見えない）。
+   * MUST: **do not issue** {@link Session.run} / `dispose` on the same device during the section
+   * (with or without await). run goes for the section lock and does not settle until
+   * {@link BatchScope.finish}; if that run sits before an `enqueue` of the same Session, the 4
+   * edges "finish → in-flight lease → enqueue body → earlier run → section lock" close into a
+   * certain self-deadlock (the same for an un-awaited run issued **before** the section was opened
+   * — `beginBatch` grabs the lock synchronously in the constructor, so within the same tick the
+   * batch is always first). `Session.enqueue` turns this shape into a {@link BatchScopeError}.
+   * NOTE: even in shapes that do not form a cycle, **any Session operation awaited during the
+   * section** (`session.dispose()` / `context.dispose()`) does not return until `finish()` if an
+   * unsettled run is ahead, which looks like a hang to the user. During a batch, use only `enqueue`
+   * and `finish`. **The same goes for Session construction** — the first construction with
+   * `attentionCompute: "a8"` goes for the section lock in the canary
+   * ({@link GpuContextInternals.attentionI8a8Dot}), so constructing during the section does not
+   * return until `finish()`.
+   * MUST: it cannot be opened on a device with measurement enabled. Timestamps opened as 1 dispatch
+   * = 1 pass are collected only by flush, so N runs' worth would pile up uncollected during the
+   * batch (to get a breakdown, measure with ordinary runs — ADR 0021).
+   * NOTE: trying to open a second one on the same device waits here until the first returns the
+   * lock in {@link BatchScope.finish} (sections are exclusive per device — they do not nest).
+   * MUST: do not open on a lost or destroy-requested device ({@link assertDeviceUsable}). Opening
+   * would take the section lock and keep accepting enqueues, delaying the failure until `finish()`.
+   * Detecting a loss in the middle of a section at finish is an accepted part of the design, but a
+   * device already unusable when opening can be judged synchronously.
+   * The check runs twice: at the entrance and right after the section lock is acquired (a loss
+   * while waiting for an earlier section to release the lock is not visible at the entrance).
    */
   async beginBatch(): Promise<BatchScope> {
     assertDeviceUsable(this, "batch の開始");
@@ -546,11 +607,11 @@ export class GpuContext {
   }
 
   /**
-   * device を破棄する（device が握る VRAM を丸ごと返す最後の経路 — 個々のバッファは `destroy()` +
-   * poll で返る）。
+   * Destroys the device (the last path that returns all the VRAM the device holds — individual
+   * buffers return with `destroy()` + poll).
    *
-   * MUST: 未 submit のエンコードと生存中のバッファを持つ層（RunArena）を先に flush /
-   * destroy してから呼ぶこと。破棄後の続行は `acquireGpu()` での再構築になる。
+   * MUST: flush / destroy the layers holding unsubmitted encodes and live buffers (RunArena) before
+   * calling this. Continuing after destroy means rebuilding with `acquireGpu()`.
    */
   destroy(): void {
     this.#destroyRequested = true;
@@ -558,82 +619,100 @@ export class GpuContext {
   }
 }
 
-/** {@link ResidentTensor} のランタイム内部面。 */
+/** The runtime-internal surface of {@link ResidentTensor}. */
 type ResidentInternals = {
-  /** 焼き込み / 別名の対象になる実体。 */
+  /** The backing object that becomes the target of baking / aliasing. */
   readonly buffer: GPUBuffer;
   /**
-   * GpuContext 内で一意な識別子。**導出済み計画のキーと backing signature に載る**ので、
-   * resident を差し替えれば別 signature（= 焼き直し）になり、戻せば元の backing に当たる。
+   * An identifier unique within the GpuContext. **It goes into the key of derived plans and into
+   * the backing signature**, so replacing a resident gives another signature (= rebaking), and
+   * putting it back hits the original backing.
    */
   readonly id: number;
   /**
-   * この実体を確保した GpuContext。
+   * The GpuContext that allocated this backing.
    *
-   * MUST: 束縛する側（executor）が「自分の device の resident か」を照合するために載せる。
-   * {@link id} は GpuContext ごとの独立採番なので、別 context の同 id・同サイズな resident は
-   * 導出済み計画のキーが衝突する — ヒット run（焼き込み済み backing）では渡された実体が
-   * 一切参照されないため、**例外も警告も無く前の context の古い値を読む**。ミス経路だけは
-   * device 不一致の validation で偶然落ちるが、キャッシュが当たった瞬間に検出が消える。
-   * {@link BatchScope} が owner を検査しているのと同じ門をここにも置く。
+   * MUST: carried so that the binding side (executor) can check "is this a resident of my device".
+   * {@link id} is numbered independently per GpuContext, so a resident from another context with
+   * the same id and size collides on the key of the derived plan — in a hit run (a baked backing)
+   * the passed object is never referenced, so **the old value of the previous context is read with
+   * neither exception nor warning**. Only the miss path fails, by chance, with a device-mismatch
+   * validation error, and the detection vanishes the moment the cache hits.
+   * The same guard as the owner check in {@link BatchScope} is placed here too.
    */
   readonly owner: GpuContext;
-  /** 焼き込み bind group からの参照を 1 本積む（backing の構築時）。 */
+  /** Adds one reference from a baked bind group (when a backing is built). */
   retainBaked(): void;
-  /** 焼き込み参照を 1 本返す（backing の退役時）。 */
+  /** Returns one baked reference (when a backing is retired). */
   releaseBaked(): void;
   /**
-   * **進行中の run が入力として束ねた**ことを 1 本積む（焼き込み参照とは別枠）。
+   * Adds one record that **an in-flight run bound this as an input** (separate from baked
+   * references).
    *
-   * 焼き込み参照は backing が生きている間の静的な参照だが、こちらはミス run の
-   * 「env へ生バッファを束縛 → パイプライン生成を await → エンコード」という窓を塞ぐための
-   * 予約。この窓では焼き込みがまだ 1 本も無いため、参照計数だけでは dispose が素通りする。
+   * A baked reference is a static reference while the backing lives, whereas this is a reservation
+   * that closes the window of a miss run, "bind the raw buffer into env → await pipeline creation →
+   * encode". In this window there is not yet a single baked reference, so reference counts alone
+   * would let dispose through.
    */
   retainBound(): void;
-  /** 進行中 run の束縛予約を 1 本返す（run のエンコードと submit が済んだ時点）。 */
+  /**
+   * Returns one binding reservation of an in-flight run (once the run's encoding and submit are
+   * done).
+   */
   releaseBound(): void;
   /**
-   * **発行済み（未決着）の run / enqueue が使う**ことを 1 本積む（焼き込み・束縛とは別枠）。
+   * Adds one record that **an issued (unsettled) run / enqueue uses this** (separate from baked
+   * references and bindings).
    *
-   * MUST: 取るのは `Session.run` / `Session.enqueue` の**発行の同期区間**。実行本体は
-   * マイクロタスクを 1 段挟むので、本体（束縛予約 {@link retainBound}）で取ると、焼き込みも
-   * 束縛もまだ 1 本も立っていない `bakedRefs === 0` の resident では「API が受理した run が
-   * 居るのに同じ tick の `dispose()` が通る」窓が開く。その run は後で fail loudly になるが、
-   * 失敗地点が dispose の呼び出し点から run の決着へずれ、{@link ResidentTensor.dispose} の
-   * doc が謳う「誤りは dispose の呼び出し点で真因のまま落ちる」が受理済み run に対して
-   * 成り立たなくなる。入力だけでなく `copyOutputs` の写し先も対象。
+   * MUST: it is taken in **the synchronous section of the issue** of `Session.run` /
+   * `Session.enqueue`. The execution body comes one microtask later, so taking it in the body
+   * (binding reservation {@link retainBound}) would open, for a resident with `bakedRefs === 0`
+   * where neither baking nor binding has happened yet, a window where "a `dispose()` in the same
+   * tick passes although a run the API accepted exists". That run fails loudly later, but the
+   * failure point shifts from the dispose call site to the run's settlement, and the promise in the
+   * doc of {@link ResidentTensor.dispose}, "a mistake fails at the dispose call site with its real
+   * cause", would not hold for an accepted run. Covers the destination of `copyOutputs` as well as
+   * inputs.
    */
   retainUse(): void;
-  /** 使用予約を 1 本返す（run / enqueue の決着時 — 成功・失敗のどちらの経路でも必ず）。 */
+  /**
+   * Returns one use reservation (when the run / enqueue settles — always, on both the success and
+   * the failure path).
+   */
   releaseUse(): void;
 };
 
-/** ホストから常駐テンソルへ書ける配列（要素は全型 4 バイト — ADR 0009 と同じ規約）。 */
+/**
+ * Arrays the host can write into a resident tensor (every element type is 4 bytes — the same
+ * convention as ADR 0009).
+ */
 export type ResidentData =
   | Float32Array<ArrayBuffer>
   | Int32Array<ArrayBuffer>
   | Uint32Array<ArrayBuffer>;
 
 /**
- * GpuContext が所有する常駐バッファ（**第 4 の寿命クラス**）。
+ * A resident buffer owned by GpuContext (**the 4th lifetime class**).
  *
- * 既存 3 クラス（重みアリーナ / slot backing / run アリーナ）はどれも Session の内側に閉じて
- * いて、Session を跨いだ受け渡しは必ずホスト経由（readback → writeBuffer）になる。生成ループ
- * のようにグラフ間で値を回す形では、その 1 往復ごとにフェンスが 2 本立つ。ここはその往復を
- * 消すためだけの器で、**dtype も shape も持たない**（バイト列と大きさだけ）。
+ * The existing 3 classes (weight arena / slot backing / run arena) are all closed inside a Session,
+ * and any hand-over across Sessions always goes through the host (readback → writeBuffer). In a
+ * shape that cycles values between graphs, such as a generation loop, each round trip raises 2
+ * fences. This container exists only to remove that round trip and **has neither dtype nor shape**
+ * (only bytes and a size).
  *
- * MUST: 破棄は「参照されていないこと」を確かめてから（{@link ResidentTensor.dispose}）。
- * flush-before-destroy（ADR 0004）は次の 2 つで満たしている — ①焼き込み bind group からの参照が
- * 1 本でもある間は破棄を拒む ②`enqueue` は末尾で必ず eager submit するので、戻った時点で
- * この実体を参照する**未 submit の**エンコードは存在しない（submit 済みのコマンドが参照する
- * バッファの破棄は WebGPU 的に安全 — 実解放は完了まで実装が遅延する）。
+ * MUST: destroy only after confirming "it is not referenced" ({@link ResidentTensor.dispose}).
+ * flush-before-destroy (ADR 0004) is met by these two: ① destroying is refused while even one
+ * reference from a baked bind group exists ② `enqueue` always submits eagerly at its end, so when
+ * it returns there is no **unsubmitted** encode referring to this backing (destroying a buffer
+ * referenced by already-submitted commands is safe in WebGPU terms — the implementation defers the
+ * real release until completion).
  */
 export class ResidentTensor {
-  /** 確保したバイト数（要求値そのもの — 4 の倍数）。 */
+  /** The number of bytes allocated (the requested value itself — a multiple of 4). */
   readonly byteLength: number;
-  /** 診断用の名前（GPUBuffer のラベルと同じ）。 */
+  /** A name for diagnostics (the same as the GPUBuffer's label). */
   readonly label: string;
-  /** ランタイム内部面（利用者が触る面ではない）。 */
+  /** The runtime-internal surface (not a surface users touch). */
   readonly [RUNTIME_INTERNAL]: ResidentInternals;
   readonly #gpu: GpuContext;
   readonly #buffer: GPUBuffer;
@@ -642,7 +721,10 @@ export class ResidentTensor {
   #boundRefs = 0;
   #useRefs = 0;
 
-  /** MUST: 構築の入口は {@link GpuContext.createResident} だけ（errorScope の門を迂回させない）。 */
+  /**
+   * MUST: the only entry point for construction is {@link GpuContext.createResident} (the
+   * errorScope guard is not bypassed).
+   */
   constructor(gpu: GpuContext, id: number, buffer: GPUBuffer, byteLength: number, label: string) {
     this.#gpu = gpu;
     this.#buffer = buffer;
@@ -691,49 +773,53 @@ export class ResidentTensor {
     };
   }
 
-  /** 破棄済みか。 */
+  /** Whether it has been disposed. */
   get disposed(): boolean {
     return this.#disposed;
   }
 
-  /** 焼き込み bind group から参照されている本数（0 でなければ破棄できない）。 */
+  /** The number of references from baked bind groups (it cannot be disposed unless 0). */
   get bakedReferences(): number {
     return this.#bakedRefs;
   }
 
-  /** 進行中の run が入力として束ねている本数（0 でなければ破棄できない）。 */
+  /** The number of in-flight runs that bound it as an input (it cannot be disposed unless 0). */
   get boundReferences(): number {
     return this.#boundRefs;
   }
 
   /**
-   * 発行済み（未決着）の run / enqueue が入力または `copyOutputs` の写し先として使っている
-   * 本数（0 でなければ破棄できない）。
+   * The number of issued (unsettled) runs / enqueues using it as an input or as the destination of
+   * `copyOutputs` (it cannot be disposed unless 0).
    */
   get useReferences(): number {
     return this.#useRefs;
   }
 
   /**
-   * ホストから全域を書く（`queue.writeBuffer`）。生成ループに入る**前**の条件テンソル投入用。
+   * Writes the whole range from the host (`queue.writeBuffer`). For putting in condition tensors
+   * **before** a generation loop starts.
    *
-   * MUST: 大きさは厳密一致。部分書きを許すと残りのバイトが前の内容のまま残り、例外も警告も
-   * 出ないまま古い条件で回る（full-write — ADR 0014 と同じ思想）。
-   * MUST NOT: **発行済み（未決着）の run / enqueue がこの実体を入力に取っている間は書かない**。
-   * 実行本体は 1 マイクロタスク以降に走るので、発行直後の同一 tick の write はその dispatch より
-   * 先に queue へ載り、**発行時に意図した値ではなく後から書いた値**を dispatch に読ませる
-   * （例外も警告も出ない）。書いてよいのは戻り Promise が settle した後 — 非 await で回す
-   * `enqueue` なら {@link BatchScope.finish} の後。ホスト入力 `Tensor.data`（`Session.run` の
-   * 「入力の寿命」節の MUST NOT）と**同じ borrowed 側の契約**で、機構の門は置かない（値の
-   * 複製を毎回払わないための線引きも同じ）。
-   * MUST: この `writeBuffer` は issue 順で queue timeline に載るので、**先に submit 済みの
-   * dispatch を追い越さない**。追い越すのは未 submit のエンコードだけ（ADR 0004 不変条件④）
-   * で、`enqueue` はその末尾で必ず submit してから戻るため、**決着済みの** enqueue とは
-   * 競合しない。これは queue timeline の順序の主張であって、上の MUST NOT が言う「発行したが
-   * 本体がまだ走っていない窓」を守るものではない（そちらは呼び出し側の契約）。
-   * MUST: 消失済み device では書かない（{@link assertDeviceUsable}）。`queue.writeBuffer` は
-   * 破棄済みバッファに対して例外も警告も出さない no-op なので、ここで止めないと空の条件の
-   * まま生成ループが回る。
+   * MUST: the size matches exactly. Allowing partial writes would leave the remaining bytes with
+   * their previous contents, and the loop would run with stale conditions with neither exception
+   * nor warning (the same thinking as full-write — ADR 0014).
+   * MUST NOT: **write while an issued (unsettled) run / enqueue takes this backing as an input**.
+   * The execution body runs one microtask or more later, so a write in the same tick right after
+   * issue lands on the queue before that dispatch and makes the dispatch read **the value written
+   * later, not the value intended at issue** (with neither exception nor warning). Writing is
+   * allowed after the returned Promise settles — for an `enqueue` run without await, after {@link
+   * BatchScope.finish}. It is **the same borrowed-side contract** as the host input `Tensor.data`
+   * (the MUST NOT of the "input lifetime" section of `Session.run`), and no mechanical guard is put
+   * in (the line drawn to avoid paying for a copy of the value every time is the same too).
+   * MUST: this `writeBuffer` lands on the queue timeline in issue order, so it **does not overtake
+   * dispatches already submitted**. Only unsubmitted encodes are overtaken (ADR 0004
+   * buffer-management invariant ④), and `enqueue` always submits at its end before returning, so it
+   * does not conflict with **settled** enqueues. This is a claim about the order of the queue
+   * timeline and does not protect the window the MUST NOT above speaks of, "issued but the body has
+   * not run yet" (that is the caller's contract).
+   * MUST: do not write on a lost device ({@link assertDeviceUsable}). `queue.writeBuffer` is a
+   * no-op on a destroyed buffer with neither exception nor warning, so without stopping here the
+   * generation loop would run with empty conditions.
    */
   write(data: ResidentData): void {
     this.#assertUsable("write");
@@ -747,25 +833,29 @@ export class ResidentTensor {
   }
 
   /**
-   * 全域をホストへ読み戻す（staging へ copy → `mapAsync`）。**フェンスはこの 1 本だけ**で、
-   * 生成ループの終端で潜在を 1 度取り出すために置いてある。
+   * Reads the whole range back to the host (copy to staging → `mapAsync`). **This is the only
+   * fence**, placed to take the latent out once at the end of a generation loop.
    *
-   * MUST: 呼ぶのは {@link BatchScope.finish} の**後**。batch の内側で呼ぶとフェンスが 1 本増え、
-   * しかも区間が決着する前の値を読む（区間の残りの enqueue を含まない）。
+   * MUST: call it **after** {@link BatchScope.finish}. Calling it inside the batch adds one more
+   * fence and also reads a value from before the section settled (without the section's remaining
+   * enqueues).
    *
-   * MUST: 消失済み device では読まない（{@link assertDeviceUsable} — `write` /
-   * {@link GpuContext.createResident} と同じ門）。`destroy()` 直後の窓（フラグは同期に立つが
-   * `device.lost` の reaction は次のタスク）では破棄済み device 上で staging を確保して copy を
-   * submit してしまい、消失後の `popErrorScope` は null で resolve するので失敗は捕まらない。
+   * MUST: do not read on a lost device ({@link assertDeviceUsable} — the same guard as `write` /
+   * {@link GpuContext.createResident}). In the window right after `destroy()` (the flag is set
+   * synchronously but the reaction of `device.lost` runs in the next task), staging would be
+   * allocated and the copy submitted on a destroyed device, and since `popErrorScope` resolves with
+   * null after a loss, the failure would not be caught.
    */
   async read(): Promise<ArrayBuffer> {
     this.#assertUsable("read");
     const device = this.#gpu.device;
     const where = `resident '${this.label}' の読み戻し`;
     assertDeviceUsable(this.#gpu, where);
-    // MUST: copy → submit も errorScope の両建てで囲む。COPY_SRC 欠落等の validation 失敗も
-    // staging の確保失敗も例外にならず、読み戻しが全 0 のまま静かに返る（#readOutputs と同じ）。
-    // MUST NOT: push から pop の発行までに await を挟まない（同期区間で完結するのでロック不要）。
+    // MUST: wrap copy → submit in the errorScope pair as well. Neither a validation failure such as
+    // a missing COPY_SRC nor a failed staging allocation becomes an exception, and the readback
+    // would quietly return all 0 (the same as #readOutputs).
+    // MUST NOT: put an await between the push and the issue of the pop (it completes within a
+    // synchronous section, so no lock is needed).
     pushFailureScopes(device);
     let popped = false;
     let staging: GPUBuffer | undefined;
@@ -781,37 +871,39 @@ export class ResidentTensor {
       popped = true;
       const failure = await pending;
       if (failure !== undefined) throw failure;
-      // MUST: 消失後の mapAsync が解決しない実装がありうる（実測は raceCanaryDeviceLost の
-      // doc）ため競わせる — ハングを失敗に変換する保険。
+      // MUST: an implementation may never resolve mapAsync after a loss (measurements in the doc of
+      // raceCanaryDeviceLost), so race it — insurance that turns a hang into a failure.
       await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(staging.mapAsync(MAP_MODE.READ), where);
       const copy = staging.getMappedRange().slice(0);
       staging.unmap();
       return copy;
     } finally {
       if (!popped) await discardFailureScopes(device);
-      // MUST: staging は成否によらず必ず返す（destroy は暗黙 unmap を含む）。
+      // MUST: always return staging regardless of the outcome (destroy implies unmap).
       staging?.destroy();
     }
   }
 
   /**
-   * 破棄する（2 度目以降は no-op）。
+   * Disposes (no-op from the second time on).
    *
-   * MUST: 焼き込み bind group から参照されている間は **fail loudly**。黙って破棄すると、
-   * その backing の dispatch が破棄済みバッファを束ねたまま submit され、コマンドバッファ
-   * ごと失敗して**無関係な dispatch まで実行されないまま誤った値が静かに残る**（ADR 0004）。
-   * 参照を外すには、その Session を dispose するか、別 signature の run / enqueue で backing を
-   * 切り替える。
-   * MUST: **進行中の run が入力として束ねている間**も同じく fail loudly。焼き込みが立つのは
-   * backing 構築（= ヒット run 以降）なので、ミス run の「束縛 → パイプライン生成の await →
-   * エンコード」の窓は焼き込み参照だけでは守れない（その窓で破棄すると、再開したエンコードが
-   * 破棄済みバッファを掴んで run が validation で落ちる）。この予約があると、誤りは
-   * dispose の呼び出し点で真因のまま落ちる。
-   * MUST: **発行済み（未決着）の run / enqueue が入力または `copyOutputs` の写し先として
-   * 使っている間**も同じく fail loudly。束縛予約が立つのは実行本体（マイクロタスク以降）なので、
-   * 「API が受理した直後の同じ tick」は焼き込みも束縛も 0 本 — その窓を塞ぐのは発行の同期区間で
-   * 取る使用予約（{@link ResidentInternals.retainUse}）だけで、上の保証が受理済みの run / enqueue
-   * に対して成り立つ根拠もそこにある。
+   * MUST: **fail loudly** while referenced from a baked bind group. Destroying silently would let
+   * that backing's dispatches be submitted with the destroyed buffer bound, failing the whole
+   * command buffer, and **even unrelated dispatches never run, silently leaving wrong values
+   * behind** (ADR 0004). To remove the reference, dispose that Session or switch the backing with a
+   * run / enqueue of another signature.
+   * MUST: likewise fail loudly **while an in-flight run binds it as an input**. Baked references
+   * appear only when a backing is built (= from the hit run on), so the window of a miss run, "bind
+   * → await pipeline creation → encode", cannot be protected by baked references alone (destroying
+   * in that window makes the resumed encode grab the destroyed buffer and the run fails with
+   * validation). With this reservation, the mistake fails at the dispose call site with its real
+   * cause.
+   * MUST: likewise fail loudly **while an issued (unsettled) run / enqueue uses it as an input or
+   * as the destination of `copyOutputs`**. The binding reservation appears in the execution body (a
+   * microtask or more later), so in "the same tick right after the API accepted it" there are 0
+   * baked references and 0 bindings — the only thing that closes that window is the use reservation
+   * taken in the synchronous section of the issue ({@link ResidentInternals.retainUse}), and that
+   * is also the ground for the guarantee above holding for accepted runs / enqueues.
    */
   dispose(): void {
     if (this.#disposed) return;
@@ -827,8 +919,8 @@ export class ResidentTensor {
           "その run の完了を await してから破棄すること",
       );
     }
-    // 焼き込み・束縛より後に見る（どちらもこれより狭い窓を名指しするので、診断としては
-    // そちらが先に出る方が近い）。
+    // Checked after baking and binding (both name a window narrower than this one, so as a
+    // diagnostic it is closer to the cause for them to come out first).
     if (this.#useRefs > 0) {
       throw new ResidentTensorError(
         `resident '${this.label}': 発行済みの run / enqueue が入力または写し先として使用中` +
@@ -854,149 +946,191 @@ export class ResidentTensor {
 }
 
 /**
- * batch が決着時に取りまとめる相手（実体は {@link SubmitScheduler}）。
- * 構造型にしてあるのは、device 層が submit 層へ依存しないため。
+ * The parties a batch gathers at settlement (the implementation is {@link SubmitScheduler}).
+ * It is a structural type so that the device layer does not depend on the submit layer.
  */
 export type BatchMember = {
-  /** 未 submit のエンコードを submit する（**フェンスは張らない**）。 */
+  /** Submits the unsubmitted encodes (**without a fence**). */
   submitPending(): void;
-  /** batch のフェンス完了後に計測窓を閉じる。 */
+  /** Closes the measurement window after the batch's fence has completed. */
   closeMeasurementWindowAfterFence(): void;
-  /** フェンスに到達しなかった batch の計測窓を記録せずに捨てる。 */
+  /**
+   * Discards, without recording, the measurement window of a batch that never reached its fence.
+   */
   discardMeasurementWindow(): void;
 };
 
 /**
- * batch の失敗の出どころ（{@link BatchFinalizer.fail} の第 2 引数）。
+ * Where a batch failure came from (the second argument of {@link BatchFinalizer.fail}).
  *
- * - `"gpu"`: 区間本体（errorScope の検査・完了フェンス・読み戻し）が失敗した。errorScope が
- *   GPU 側の失敗を報告したときのほか、検査より前に落ちて scope を検査せずに捨てたとき・device
- *   消失を含む — どれも「区間で作った資源が有効だった」と確かめられていない。
- * - `"host"`: 区間本体は失敗を報告せずに通り、enqueue 本体のホスト側の失敗
- *   （{@link BatchInternals.leave}）か finalizer の失敗で決着した。区間で作った資源は有効。
+ * - `"gpu"`: the body of the section (the errorScope check, the completion fence, the readback)
+ *   failed. Besides the errorScope reporting a GPU-side failure, this includes failing before the
+ *   check and discarding the scopes unchecked, and device loss — in none of them has it been
+ *   confirmed that "the resources made in the section were valid".
+ * - `"host"`: the body of the section passed without reporting a failure, and the settlement came
+ *   from a host-side failure of an enqueue body ({@link BatchInternals.leave}) or of a finalizer.
+ *   The resources made in the section are valid.
  *
- * 分けるのは、確保が非致命 OOM で無効だった資源の巻き戻し（`Session` の
- * `#rollbackSettled`）が `"gpu"` のときだけ要るため。ホスト側の失敗でも巻き戻すと、何度でも
- * 同じく落ちる失敗のたびに作り直しが起きる。
+ * They are split because the rollback of resources whose allocation was invalid due to a non-fatal
+ * OOM (`#rollbackSettled` of `Session`) is needed only for `"gpu"`. Rolling back on a host-side
+ * failure too would rebuild every time the same failure recurs, however often.
  */
 export type BatchFailureOrigin = "gpu" | "host";
 
-/** バッチの成功判定後に状態を確定し、成否によらず使用予約を返す。 */
+/**
+ * After the batch's success is decided, commits the state, and returns the use reservations
+ * regardless of the outcome.
+ */
 type BatchFinalizer = {
   complete(): void;
   fail(cause: unknown, origin: BatchFailureOrigin): void;
   release(): void;
 };
 
-/** 区間の決着時に 1 本の staging へ連結コピーして読み戻す写し元（{@link BatchInternals.readAtFinish}）。 */
+/**
+ * A copy source read back at section settlement by concatenated copy into one staging ({@link
+ * BatchInternals.readAtFinish}).
+ */
 export type BatchReadSource = {
   readonly buffer: GPUBuffer;
   readonly offset: number;
   readonly size: number;
 };
 
-/** {@link BatchInternals.readAtFinish} で登録したグラフ出力の読み戻し 1 件（決着まで保持）。 */
+/**
+ * One readback of graph outputs registered with {@link BatchInternals.readAtFinish} (kept until
+ * settlement).
+ */
 type GraphRead = {
   readonly sources: readonly BatchReadSource[];
   readonly resolve: (buffers: readonly ArrayBuffer[]) => void;
   readonly reject: (cause: unknown) => void;
-  /** 決着の読み戻しで埋まる（区間の成否が決まるまで呼び手へは返さない）。 */
+  /**
+   * Filled by the settlement's readback (not returned to the caller until the section's outcome is
+   * decided).
+   */
   result?: readonly ArrayBuffer[];
 };
 
-/** {@link BatchScope} のランタイム内部面。 */
+/** The runtime-internal surface of {@link BatchScope}. */
 type BatchInternals = {
-  /** errorScope 区間が実際に開くまでの待ち（{@link GpuContext.beginBatch} が await する）。 */
+  /**
+   * The wait until the errorScope section actually opens ({@link GpuContext.beginBatch} awaits it).
+   */
   readonly entered: Promise<void>;
-  /** 決着時に取りまとめる相手を登録する（同じ相手の重複登録は無害）。 */
+  /** Registers a party to gather at settlement (registering the same party twice is harmless). */
   join(member: BatchMember): void;
   /**
-   * enqueue の受け口として使える状態か検査し、**in-flight リースを 1 本取る**
-   * （決着済み / 別 device は fail loudly で、リースは取らない）。
+   * Checks that it can accept an enqueue, and **takes one in-flight lease** (settled / another
+   * device fails loudly and takes no lease).
    *
-   * MUST: 呼ぶのは `Session.enqueue` の**同期区間**（`#chain` に積む前）。enqueue の本体は
-   * マイクロタスクを 1 段挟むので、本体でリースを取ると「未 await の enqueue を積んだ直後に
-   * `finish()`」で finish が先に決着し、積んだ enqueue が 1 本も dispatch されないまま区間が
-   * 正常終了に見える（沈黙の空振り）。
+   * MUST: call it in **the synchronous section** of `Session.enqueue` (before queuing on `#chain`).
+   * The enqueue body comes one microtask later, so taking the lease in the body would let
+   * `finish()` right after queuing un-awaited enqueues settle first, and the section would look
+   * like a normal end with not one of the queued enqueues dispatched (a silent no-op).
    */
   enter(owner: GpuContext): void;
   /**
-   * in-flight リースを 1 本返す（enqueue 本体の成功・失敗どちらの経路でも必ず）。
+   * Returns one in-flight lease (always, on both the success and the failure path of the enqueue
+   * body).
    *
-   * `failure` を渡すと、その区間の**最初の 1 件だけ**をホスト側の失敗として記録し、
-   * {@link BatchScope.finish} が帰属先になる（渡さなければ従来どおり何も記録しない）。
-   * 記録が要るのは、非 await の `enqueue` が本体で落ちたときに「区間は 0 dispatch 少ないまま
-   * 成功」で決着してしまうため — errorScope に載るのは GPU 側の失敗だけで、ホスト側の throw は
-   * 戻り Promise にしか出ない（握っていなければ未処理拒否として抜ける）。
-   * MUST: 2 件目以降は捨てる。1 件目に引きずられた派生失敗が並ぶと根因が読めなくなる
-   * （errorScope が internal / out-of-memory を優先するのと同じ判断）。
+   * Passing `failure` records **only the first one** of the section as a host-side failure, and
+   * {@link BatchScope.finish} becomes where it is attributed (passing nothing records nothing, as
+   * before). It needs recording because when an un-awaited `enqueue` fails in its body, the section
+   * would otherwise settle as "success, with 0 dispatches fewer" — only GPU-side failures land in
+   * the errorScope, and a host-side throw shows only on the returned Promise (escaping as an
+   * unhandled rejection if nobody holds it).
+   * MUST: drop the second and later ones. A row of derived failures dragged along by the first
+   * would make the root cause unreadable (the same judgement as the errorScope preferring internal
+   * / out-of-memory).
    */
   leave(failure?: { readonly cause: unknown }): void;
   onSettled(finalizer: BatchFinalizer): void;
   /**
-   * グラフ出力の slot を区間の決着時に読み戻す相手として登録する（`Session.enqueueRead`）。
-   * 常駐テンソルの読み戻し（{@link BatchScope.finishAndRead}）と同じ 1 本の staging に連結し、
-   * その map が唯一のフェンスになる。戻りは区間が例外なく決着した後にだけ解決し、失敗
-   * （GPU 側・ホスト側とも）では拒否する。
+   * Registers graph-output slots as parties to read back at section settlement
+   * (`Session.enqueueRead`). They are concatenated into the same one staging as the readback of
+   * resident tensors ({@link BatchScope.finishAndRead}), and its map is the only fence. The return
+   * value resolves only after the section settles without an exception, and rejects on failure (GPU
+   * side or host side).
    *
-   * MUST: 呼ぶのは enqueue 本体（in-flight リースを持つ間）。`finish` は全リースの返却を待って
-   * から読み戻しへ進むので、リースの中で登録した相手は取りこぼさない。読み戻しが始まった後の
-   * 登録は fail loudly（解決しない Promise を返さない）。
+   * MUST: call it from the enqueue body (while holding an in-flight lease). `finish` proceeds to
+   * the readback only after every lease has been returned, so parties registered inside a lease are
+   * not missed. Registration after the readback has started fails loudly (no Promise that never
+   * resolves is returned).
    */
   readAtFinish(sources: readonly BatchReadSource[]): Promise<readonly ArrayBuffer[]>;
   /**
-   * {@link BatchInternals.readAtFinish} が登録時に行う受け口の検査（読み戻し開始後の拒否と、
-   * 登録済み合計 + 今回分の上限）だけを、登録せずに行う。
+   * Performs only the admission checks that {@link BatchInternals.readAtFinish} makes at
+   * registration (rejection after the readback has started, and the limit on the registered total +
+   * this request), without registering.
    *
-   * MUST: `Session.enqueueRead` は dispatch を 1 本も積む前にこれを呼ぶ — 登録（readAtFinish）は
-   * submit の後なので、そこで初めて落ちると救える失敗（読み戻しが大きすぎるだけ）が state 書込み
-   * 後の失敗になり context を poison する。検査の実装は readAtFinish と同じ 1 本。
-   * readAtFinish 側の検査は外さない（この検査と登録の間に他 Session の登録が挟まりうる）。
+   * MUST: `Session.enqueueRead` calls this before queuing a single dispatch — registration
+   * (readAtFinish) happens after the submit, so failing there for the first time would turn a
+   * recoverable failure (the readback is merely too large) into a failure after the state write,
+   * poisoning the context. The check is implemented once, shared with readAtFinish.
+   * The check on the readAtFinish side is not removed (another Session's registration can come
+   * between this check and the registration).
    */
   assertReadAtFinish(sources: readonly BatchReadSource[]): void;
 };
 
 /**
- * フェンス無しの enqueue を束ねる区間（{@link GpuContext.beginBatch}）。
+ * A section that bundles enqueues without fences ({@link GpuContext.beginBatch}).
  *
- * 区間の間 device の errorScope 区間ロックを保持し、`out-of-memory` + `validation` の 2 本を
- * 張り続ける。{@link BatchScope.finish} が ①全メンバの未 submit を出し切り ②
- * `onSubmittedWorkDone` を**1 回だけ**待ち ③スコープを pop して失敗を型付き例外にする。
+ * For the duration of the section it holds the device's errorScope section lock and keeps the two
+ * scopes `out-of-memory` + `validation` pushed. {@link BatchScope.finish} ① drains the unsubmitted
+ * work of every member ② waits for `onSubmittedWorkDone` **only once** ③ pops the scopes and turns
+ * a failure into a typed exception.
  *
- * トレードオフ（設計上の受容）:
+ * Trade-offs (accepted by design):
  *
- * - **失敗の帰属は batch 単位**。1 区間に N 本の enqueue が相乗りするので、validation /
- *   out-of-memory が出ても「どの enqueue か」までは絞れない。切り分けが要るときは通常の
- *   `run` で 1 本ずつ回す（run は従来どおり run 単位で帰属する）。
- * - **device 消失の検出は finish まで遅延する**。区間中の待ちが 1 本も無いのだから当然で、
- *   消失は finish の `raceDeviceLost` が例外へ変換する（enqueue 側はハングしない — 待たない
- *   から）。
+ * - **Failures are attributed per batch**. N enqueues ride in one section, so even when validation
+ *   / out-of-memory comes out it cannot be narrowed to "which enqueue". When isolation is needed,
+ *   run them one by one with ordinary `run`s (run is attributed per run as before).
+ * - **Detection of device loss is delayed until finish**. Naturally so, since there is not a single
+ *   wait during the section; the loss is turned into an exception by finish's `raceDeviceLost`
+ *   (the enqueue side does not hang — it does not wait).
  */
 export class BatchScope {
-  /** ランタイム内部面（利用者が触る面ではない）。 */
+  /** The runtime-internal surface (not a surface users touch). */
   readonly [RUNTIME_INTERNAL]: BatchInternals;
   readonly #gpu: GpuContext;
   readonly #members = new Set<BatchMember>();
   readonly #finalizers: BatchFinalizer[] = [];
   readonly #completion: Promise<Readonly<Record<string, ArrayBuffer>> | undefined>;
   readonly #release: () => void;
-  /** 未返却の in-flight リースが全て返ったことの通知（{@link BatchInternals.enter}）。 */
+  /**
+   * Notification that every outstanding in-flight lease has been returned ({@link
+   * BatchInternals.enter}).
+   */
   readonly #drained = Promise.withResolvers<void>();
   #leases = 0;
   #readback: readonly (readonly [string, ResidentTensor])[] | undefined;
-  /** 決着時に読み戻すグラフ出力（{@link BatchInternals.readAtFinish}）。 */
+  /** Graph outputs read back at settlement ({@link BatchInternals.readAtFinish}). */
   readonly #graphReads: GraphRead[] = [];
-  /** 決着の読み戻しへ進んだか（以後の登録は fail loudly）。 */
+  /** Whether the settlement's readback has started (registrations after it fail loudly). */
   #readbackStarted = false;
   #finished = false;
-  /** {@link BatchScope.settle} の途中か（この間の enqueue は拒否する — 窓の帰属を守る）。 */
+  /**
+   * Whether {@link BatchScope.settle} is in progress (enqueues during it are rejected — protecting
+   * the window's attribution).
+   */
   #settling = false;
-  /** 区間で最初に起きたホスト側の失敗（{@link BatchInternals.leave}）。2 件目以降は捨てる。 */
+  /**
+   * The first host-side failure in the section ({@link BatchInternals.leave}). The second and later
+   * are dropped.
+   */
   #failure: { readonly cause: unknown } | undefined;
-  /** {@link BatchScope.finish} が返す決着（errorScope の結果と {@link #failure} の合流）。 */
+  /**
+   * The settlement {@link BatchScope.finish} returns (the errorScope result merged with {@link
+   * #failure}).
+   */
   #settled: Promise<void> | undefined;
 
-  /** MUST: 構築の入口は {@link GpuContext.beginBatch} だけ（計測との併用の門をここに置く）。 */
+  /**
+   * MUST: the only entry point for construction is {@link GpuContext.beginBatch} (the guard against
+   * combining with measurement lives there).
+   */
   constructor(gpu: GpuContext) {
     this.#gpu = gpu;
     const hold = Promise.withResolvers<void>();
@@ -1004,29 +1138,35 @@ export class BatchScope {
     this.#release = hold.resolve;
     this.#completion = gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
       try {
-        // MUST: ロックを取れた時点で device の生存を見直す（push より前）。`beginBatch` の入口の
-        // 判定は先行区間のロック解放を待つ前なので、待ちの間の消失を見ていない。開くと消失済み
-        // device の上で区間ロックを握り続け、利用者の finish まで後続の区間を待たせる。投げれば
-        // 下の catch が beginBatch の待ちを拒否し、hold を待たずにロックを返す。
+        // MUST: recheck that the device is alive once the lock is acquired (before the push). The
+        // check at the entrance of `beginBatch` comes before waiting for an earlier section to
+        // release the lock, so it has not seen a loss during the wait. Opening would keep holding
+        // the section lock on a lost device and make later sections wait until the user's finish. A
+        // throw makes the catch below reject the beginBatch wait and return the lock without
+        // waiting for hold.
         assertDeviceUsable(gpu, "batch の開始");
         pushFailureScopes(gpu.device);
       } catch (cause) {
-        // MUST: 開けなかったことを beginBatch の待ちへ必ず伝える（伝えないとハングになる）。
+        // MUST: always tell the beginBatch wait that opening failed (otherwise it hangs).
         entered.reject(cause);
         throw cause;
       }
       entered.resolve();
       await hold.promise;
-      // MUST: フェンスを張る前に in-flight の enqueue を全て決着させる。`finish()` は同期で
-      // `#finished` を立てるだけなので、これが無いと「未 await の enqueue を積んだ直後の
-      // finish()」で ①まだ本体が走っていない enqueue が全て reject し、区間は 0 dispatch の
-      // まま**成功で決着する** ②走り出していた enqueue はフェンスと pop の後に submit し、
-      // 未完了の GPU 実行を残したまま finish が返る（直後の read が古い値を返す）。
+      // MUST: settle every in-flight enqueue before setting the fence. `finish()` only sets
+      // `#finished` synchronously, so without this, with "finish() right after queuing un-awaited
+      // enqueues", ① every enqueue whose body has not run yet rejects and the section **settles as
+      // a success** with 0 dispatches ② enqueues that had started submit after the fence and the
+      // pop, and finish returns with GPU execution still incomplete (a read right after returns a
+      // stale value).
       await this.#drained.promise;
       const device = gpu.device;
       let outputs: Readonly<Record<string, ArrayBuffer>> | undefined;
       let popped = false;
-      /** 完了フェンス（読み戻しの `mapAsync` か `onSubmittedWorkDone`）に到達したか。 */
+      /**
+       * Whether the completion fence (the readback's `mapAsync` or `onSubmittedWorkDone`) was
+       * reached.
+       */
       let fenced = false;
       const checkFailureScopes = async (): Promise<void> => {
         const pending = popFailureScopes(
@@ -1038,14 +1178,14 @@ export class BatchScope {
         if (failure !== undefined) throw failure;
       };
       try {
-        // enqueue は末尾で必ず submit するので通常ここは空振りする。それでも出し切るのは、
-        // 「batch が閉じた時点で未 submit のエンコードは 1 つも無い」を区間側の責務として
-        // 閉じるため（破棄経路の担い手を増やさない — ADR 0004）。
+        // enqueue always submits at its end, so normally this is a no-op. It drains anyway to close
+        // "no unsubmitted encode exists once the batch closes" as the section's responsibility (no
+        // extra party carrying the disposal path — ADR 0004).
         for (const member of this.#members) member.submitPending();
-        // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
-        // raceCanaryDeviceLost の doc）ため競わせる。
-        // MUST: ここから先の登録は受けない（全リースが返った後なので来ないはずだが、来たら
-        // 解決しない Promise を返すよりは fail loudly）。
+        // MUST: an implementation may never resolve onSubmittedWorkDone after a loss (measurements
+        // in the doc of raceCanaryDeviceLost), so race it.
+        // MUST: accept no registrations from here on (every lease has been returned, so none should
+        // come, but if one does, failing loudly beats returning a Promise that never resolves).
         this.#readbackStarted = true;
         if (this.#readbackBytes() > 0) {
           outputs = await this.#readOutputs(
@@ -1057,7 +1197,8 @@ export class BatchScope {
             },
           );
         } else {
-          // 写し元が 1 本も無い登録（グラフ出力 0 本）は従来の完了フェンスで閉じる。
+          // A registration with no copy source at all (0 graph outputs) closes with the usual
+          // completion fence.
           for (const read of this.#graphReads) read.result = [];
           await gpu[RUNTIME_INTERNAL].raceDeviceLost(
             device.queue.onSubmittedWorkDone(),
@@ -1069,12 +1210,13 @@ export class BatchScope {
         if (!popped) await discardFailureScopes(device);
         throw cause;
       } finally {
-        // 計測窓は batch のフェンス 1 回で閉じる。窓に N 本の enqueue が入るぶん推定は粗く
-        // （過大に）出るが、過大 = チャンクが小さくなる向き = TDR に対して安全側
-        // （src/gpu/submit.ts の「計測の帰属」）。
-        // MUST: 閉じるのはフェンスに到達した経路だけ。読み戻しが `mapAsync` より前の errorScope
-        // 検査で落ちた窓は GPU 実行の途中にあり、閉じると過小な実測が推定に入ってチャンク上限が
-        // 恒久的に開く（危険側）。その窓は捨てて既存の推定を据え置く。
+        // The measurement window closes with the batch's single fence. With N enqueues in the
+        // window the estimate comes out coarse (too large), but too large = smaller chunks = the
+        // safe side for TDR ("attribution of measurements" in src/gpu/submit.ts).
+        // MUST: close only on paths that reached the fence. A window whose readback failed at the
+        // errorScope check before `mapAsync` is in the middle of GPU execution; closing it would
+        // put a too-small measurement into the estimate and open the chunk limit permanently (the
+        // dangerous side). That window is discarded and the existing estimate is kept.
         for (const member of this.#members) {
           if (fenced) member.closeMeasurementWindowAfterFence();
           else member.discardMeasurementWindow();
@@ -1082,15 +1224,17 @@ export class BatchScope {
       }
       if (!popped) {
         await checkFailureScopes();
-        // MUST: pop 待ちの間の消失はフェンスの競合に掛からない（`raceDeviceLost` は待ちを抜けた
-        // 時点で購読を外す）。消失後の pop は null で決着する（docs/research の
-        // 2026-08-16-device-lost-wait-settlement）ので、ここで見ないと消失を跨いだ finish が
-        // 成功で返り「区間は無事に閉じた」と誤読される。
+        // MUST: a loss while waiting for the pop is not caught by the fence race (`raceDeviceLost`
+        // unsubscribes as soon as its wait ends). A pop after a loss settles with null
+        // (docs/research 2026-08-16-device-lost-wait-settlement), so without checking here a finish
+        // that crossed a loss would return a success and be misread as "the section closed
+        // cleanly".
         assertDeviceUsable(gpu, "batch の完了");
       }
       return outputs;
     });
-    // 決着を finish が受け取るまで未処理拒否にしない（拒否の中身は finish がそのまま返す）。
+    // Do not let the settlement become an unhandled rejection until finish receives it (finish
+    // returns the rejection as is).
     void this.#completion.catch(() => undefined);
     this[RUNTIME_INTERNAL] = {
       entered: entered.promise,
@@ -1106,7 +1250,8 @@ export class BatchScope {
       readAtFinish: (sources) => {
         this.#assertGraphReadAcceptable(sources);
         const { promise, resolve, reject } = Promise.withResolvers<readonly ArrayBuffer[]>();
-        // 決着を呼び手が受け取るまで未処理拒否にしない（拒否の中身は finish がそのまま返す）。
+        // Do not let the settlement become an unhandled rejection until the caller receives it
+        // (finish returns the rejection as is).
         void promise.catch(() => undefined);
         this.#graphReads.push({ sources, resolve, reject });
         return promise;
@@ -1131,7 +1276,8 @@ export class BatchScope {
         if (this.#leases === 0) {
           throw new BatchScopeError("batch の in-flight リースの返却が過多（内部の簿記の破れ）");
         }
-        // MUST: 記録は `#drained` を解決する前（区間本体はその解決の先で pop と合流する）。
+        // MUST: record before resolving `#drained` (the section body joins the pop after that
+        // resolution).
         this.#failure ??= failure;
         this.#leases -= 1;
         if (this.#leases === 0 && this.#finished) this.#drained.resolve();
@@ -1139,29 +1285,33 @@ export class BatchScope {
     };
   }
 
-  /** 決着済みか（{@link BatchScope.finish} を 1 度でも呼んだか）。 */
+  /** Whether it has settled (whether {@link BatchScope.finish} has been called even once). */
   get finished(): boolean {
     return this.#finished;
   }
 
   /**
-   * 区間の**途中**でフェンスを 1 本だけ張り、ここまでに出した dispatch の実測で
-   * {@link SubmitScheduler} の推定を裏付ける（perf-ledger P-2）。
+   * Sets a single fence **in the middle** of the section and backs the estimate of
+   * {@link SubmitScheduler} with a measurement of the dispatches issued so far (perf-ledger P-2).
    *
-   * 区間の計測窓は {@link BatchScope.finish} の 1 回でしか閉じないので、区間の間ずっと
-   * 「実測 0」= チャンクは `initialChunkSize` に据え置かれる（submit.ts の不変条件 1 —
-   * 実測 0 は成長の根拠にならない）。数万 dispatch の区間（irodori の DiT ループ）では
-   * submit が数千回になり、1 回 ≈0.5 ms のホスト固定費が壁時計に積む。最初の 1 実行を
-   * await した直後にここを 1 度呼ぶと、残りの区間は裏付けのある予算でチャンクが伸びる。
+   * The section's measurement window closes only once, at {@link BatchScope.finish}, so throughout
+   * the section the measurement is "0" = chunks stay at `initialChunkSize` (invariant 1 of
+   * submit.ts — a measurement of 0 is no ground for growth). In a section of tens of thousands of
+   * dispatches (irodori's DiT loop) submits run into the thousands, and a host fixed cost of ≈0.5
+   * ms each adds up in wall time. Calling this once right after awaiting the first execution lets
+   * the rest of the section grow its chunks with a backed budget.
    *
-   * やることは finish の ①未 submit を出し切る ②`onSubmittedWorkDone` を 1 回待つ ③窓を
-   * 閉じる、だけ（リースの決着待ちと errorScope の pop はしない — 区間は続く）。
+   * It does only finish's ① drain unsubmitted work ② wait once for `onSubmittedWorkDone` ③ close
+   * the window (it neither waits for leases to settle nor pops the errorScope — the section goes
+   * on).
    *
-   * MUST: 呼ぶのは in-flight の enqueue が無い時点（enqueue を await した直後）。未 await の
-   * enqueue が残っていれば fail loudly — その enqueue の submit がフェンスの後・窓を閉じる前に
-   * 混ざると、フェンスが待っていない dispatch まで実測に入って推定が過小に出る（過小 =
-   * チャンクが膨らむ = TDR 域へ向かう危険側）。待っている間の新規 enqueue も同じ理由で拒否する。
-   * MUST: finish 済みの区間では fail loudly。device 消失は finish と同じく例外へ変換する。
+   * MUST: call it when no enqueue is in flight (right after awaiting an enqueue). If an un-awaited
+   * enqueue remains, it fails loudly — if that enqueue's submit slipped in after the fence and
+   * before the window closes, dispatches the fence did not wait for would enter the measurement and
+   * the estimate would come out too small (too small = chunks swell = the dangerous side, toward
+   * TDR territory). New enqueues while waiting are rejected for the same reason.
+   * MUST: fails loudly on a finished section. Device loss is turned into an exception, as in
+   * finish.
    */
   async settle(): Promise<void> {
     if (this.#finished) throw new BatchScopeError("finish() 済みの batch では settle() できない");
@@ -1186,33 +1336,37 @@ export class BatchScope {
   }
 
   /**
-   * 区間を閉じる。**新規 enqueue を拒否 → in-flight の enqueue が全て決着するのを待つ →
-   * 未 submit を出し切る → フェンス 1 本で全 enqueue の完了を待つ → errorScope を pop して
-   * 失敗を型付き例外にする**、の順で進む。
-   * `finishAndRead`指定時はcopy後にerrorScopeを検査し、mapを唯一の完了フェンスにする。
+   * Closes the section. It proceeds in the order **reject new enqueues → wait for every in-flight
+   * enqueue to settle → drain unsubmitted work → wait for every enqueue's completion with one fence
+   * → pop the errorScopes and turn a failure into a typed exception**.
+   * With `finishAndRead`, the errorScopes are checked after the copy, and the map is the only
+   * completion fence.
    *
-   * MUST: 2 度目以降も同じ完了を返す（先に返すと呼び出し側が破棄へ進み、ロックと errorScope が
-   * 開いたまま残る）。
-   * MUST: 区間の中で起きた**最初のホスト側失敗**もここへ帰属する（{@link BatchInternals.leave}）
-   * — errorScope が何も捕らえていなければその失敗を、両方あるときは errorScope 側を投げて
-   * 記録を `cause` に載せる。**破壊的な挙動変更**（0.7.0 まではホスト側の失敗が
-   * `ExecutionError` 等として `finish()` から出ることは無かった）だが、これが無いと「非 await の
-   * `enqueue` が本体で落ちた区間が、dispatch を 1 本落としたまま成功で決着する」— しかも
-   * 戻り Promise を握っていなければ未処理拒否として抜けるだけになる。同じ失敗は enqueue の
-   * 戻り Promise 側にも従来どおり出る（1 つの事実が 2 経路で見えるのは `run` と同じ）。
-   * MUST: {@link BatchScope.settle} の途中では閉じられない（fail loudly）。区間の遷移は
-   * open → settling → open → finished の 1 方向で、飛び越えを許すと settle 側のフェンスが
-   * errorScope の pop より後に解け、未 await の `settle()` が未処理拒否として抜ける
-   * （finish は既に決着を返しているので事実が 1 つ消える）。拒否は**同期 throw ではなく
-   * 拒否済み Promise** で返す — finish は従来から同期には投げない規約で、`await using` /
-   * `Symbol.asyncDispose` 経路の後始末で例外が置き換わるのを避ける。
-   * NOTE: in-flight を待つので、`enqueue()` の戻り Promise を await せずに `finish()` を
-   * 呼んでも積んだぶんは必ず区間に入って完了する（リースの機構は {@link BatchInternals.enter}）。
+   * MUST: return the same completion from the second call on (returning earlier would let the
+   * caller proceed to destroy with the lock and errorScopes still open).
+   * MUST: **the first host-side failure** in the section is also attributed here
+   * ({@link BatchInternals.leave}) — if the errorScopes caught nothing, that failure is thrown;
+   * when both exist, the errorScope side is thrown with the record in its `cause`. It is **a
+   * breaking change of behavior** (up to 0.7.0 a host-side failure never came out of `finish()` as
+   * `ExecutionError` or the like), but without it "a section whose un-awaited `enqueue` failed in
+   * its body settles as a success with one dispatch missing" — and if nobody holds the returned
+   * Promise, it merely escapes as an unhandled rejection. The same failure still shows on the
+   * enqueue's returned Promise as before (one fact visible on two paths, the same as `run`).
+   * MUST: it cannot be closed while {@link BatchScope.settle} is in progress (fails loudly). The
+   * section's transitions go one way, open → settling → open → finished; allowing a skip would let
+   * the settle side's fence resolve after the errorScope pop, and an un-awaited `settle()` would
+   * escape as an unhandled rejection (finish has already returned its settlement, so one fact
+   * disappears). The rejection is returned as **a rejected Promise, not a synchronous throw** —
+   * finish has always followed the rule of never throwing synchronously, which avoids an exception
+   * being replaced during cleanup on the `await using` / `Symbol.asyncDispose` path.
+   * NOTE: it waits for in-flight work, so even calling `finish()` without awaiting the Promise
+   * returned by `enqueue()`, everything queued always enters the section and completes (the lease
+   * mechanism is {@link BatchInternals.enter}).
    */
   finish(): Promise<void> {
     if (this.#settling) {
-      // MUST: 決着は積まない（`#settled` を拒否で埋めると settle を await した後の正当な
-      // finish() まで同じ拒否を返し続ける）。
+      // MUST: do not store the settlement (filling `#settled` with a rejection would keep returning
+      // the same rejection even to a legitimate finish() after awaiting settle).
       return Promise.reject(
         new BatchScopeError(
           "settle() の途中の batch は finish() できない（settle() を await してから閉じること）",
@@ -1221,25 +1375,30 @@ export class BatchScope {
     }
     if (this.#settled === undefined) {
       this.#finished = true;
-      // in-flight が 1 本も無ければここで決着させる（enqueue を 1 本も出していない区間・
-      // 全て await 済みの区間は従来どおり待ちが増えない）。
+      // If nothing is in flight, settle it here (sections that issued no enqueue, or whose enqueues
+      // were all awaited, get no extra wait, as before).
       if (this.#leases === 0) this.#drained.resolve();
       this.#release();
       this.#settled = this.#resolveFinish();
-      // 決着を呼び出し側が受け取るまで未処理拒否にしない（中身は finish がそのまま返す）。
+      // Do not let the settlement become an unhandled rejection until the caller receives it
+      // (finish returns its contents as is).
       void this.#settled.catch(() => undefined);
     }
     return this.#settled;
   }
 
   /**
-   * 指定した常駐出力をまとめて読み戻し、そのmapをバッチの完了フェンスにする。
-   * 既存finishの後にreadする二重待ちを避ける。空の指定はfinishと同じフェンスで閉じる。
+   * Reads back the given resident outputs together and makes that map the batch's completion fence.
+   * Avoids the double wait of a read after the existing finish. An empty selection closes with the
+   * same fence as finish.
    *
-   * 構成は同期区間で固定し、全出力を決着まで使用予約する。データは借用であり、
-   * 呼び出しから決着まではwriteしない。返したArrayBufferは呼び手の所有物。
-   * 指定できるのは未終了・settle中でないbatchへ1回だけ。以後のfinishは同じ決着を待つ。
-   * 出力の合計はdeviceのmaxBufferSize以下とし、別device・破棄済みは受け付けない。
+   * The composition is fixed in the synchronous section, and every output is held under a use
+   * reservation until settlement. The data is borrowed and is not written from the call until
+   * settlement. The returned ArrayBuffers belong to the caller.
+   * It can be specified only once, on a batch that is neither finished nor settling. Later finish
+   * calls wait for the same settlement.
+   * The outputs total at most the device's maxBufferSize; another device's or disposed outputs are
+   * not accepted.
    * DECIDED: docs/decisions/0054-resident-loop-and-fence.md#addendum-2026-09-12--batch-end-readback-of-resident-tensors
    */
   finishAndRead(
@@ -1250,10 +1409,10 @@ export class BatchScope {
       this.#assertReadbackAcceptable();
       assertDeviceUsable(this.#gpu, "batch の読み戻し");
       const entries = Object.entries(outputs);
-      // MUST: 写しの後にもう一度検査する。`Object.entries` は利用者の getter を同期で走らせるので、
-      // その中で同じ batch の `finishAndRead` / `finish` が先に決着させられる。ここで弾かないと
-      // 外側が `#readback` を上書きし、内側が予約した常駐の使用予約が永久に返らない（以後
-      // dispose できない）。
+      // MUST: check again after the copy. `Object.entries` runs the user's getters synchronously,
+      // and inside them a `finishAndRead` / `finish` of the same batch can settle it first. Without
+      // rejecting here, the outer call would overwrite `#readback`, and the use reservations the
+      // inner call took on residents would never be returned (they could never be disposed again).
       this.#assertReadbackAcceptable();
       let totalBytes = 0;
       for (const [name, resident] of entries) {
@@ -1278,14 +1437,19 @@ export class BatchScope {
     return this.finish().then(async () => (await this.#completion) ?? {});
   }
 
-  /** `finishAndRead` の受け口（未終了・settle 中でない batch へ 1 回だけ）。 */
+  /**
+   * The admission of `finishAndRead` (only once, on a batch that is neither finished nor settling).
+   */
   #assertReadbackAcceptable(): void {
     if (this.#finished || this.#settling) {
       throw new BatchScopeError("finishAndRead は未終了・settle中でない batch に1回だけ指定できる");
     }
   }
 
-  /** グラフ出力の読み戻しを登録できるか（{@link BatchInternals.readAtFinish} の受け口）。 */
+  /**
+   * Whether a graph-output readback can be registered (the admission of {@link
+   * BatchInternals.readAtFinish}).
+   */
   #assertGraphReadAcceptable(sources: readonly BatchReadSource[]): void {
     if (this.#readbackStarted) {
       throw new BatchScopeError("決着の読み戻しが始まった batch にはグラフ出力を登録できない");
@@ -1294,7 +1458,10 @@ export class BatchScope {
     this.#assertReadbackBytes(this.#readbackBytes() + total, "グラフ出力の読み戻し");
   }
 
-  /** 決着時の staging に載る合計バイト数（常駐の指定 + 登録済みグラフ出力）。 */
+  /**
+   * The total bytes on the settlement's staging (the resident selection + registered graph
+   * outputs).
+   */
   #readbackBytes(): number {
     const residents = (this.#readback ?? []).reduce(
       (sum, [, resident]) => sum + resident.byteLength,
@@ -1306,7 +1473,9 @@ export class BatchScope {
     );
   }
 
-  /** 1 本の staging に収まるか（分割 staging や複数 map へ黙って切り替えない — ADR 0054）。 */
+  /**
+   * Whether it fits in one staging (no silent switch to split staging or several maps — ADR 0054).
+   */
   #assertReadbackBytes(total: number, where: string): void {
     if (!Number.isSafeInteger(total) || total > this.#gpu.limits.maxBufferSize) {
       throw new BatchScopeError(
@@ -1316,9 +1485,11 @@ export class BatchScope {
   }
 
   /**
-   * 常駐テンソルの指定とグラフ出力の登録を 1 本の staging へ連結コピーして読み戻す。
-   * 常駐の対応表を返し、グラフ出力は登録側の `result` に置く（呼び手へ返すのは区間の成否が
-   * 決まった後 — {@link BatchScope.#resolveFinish}）。
+   * Reads back the resident-tensor selection and the registered graph outputs by concatenated copy
+   * into one staging.
+   * Returns the map of residents and puts graph outputs in the registrant's `result` (they are
+   * returned to the caller only after the section's outcome is decided —
+   * {@link BatchScope.#resolveFinish}).
    */
   async #readOutputs(
     residents: readonly (readonly [string, ResidentTensor])[],
@@ -1372,26 +1543,28 @@ export class BatchScope {
   }
 
   /**
-   * `await using` 対応（Explicit Resource Management）— {@link BatchScope.finish} の別名。
+   * `await using` support (Explicit Resource Management) — an alias of {@link BatchScope.finish}.
    *
-   * 区間は device 単位の errorScope 区間ロックを握り続けるので、`finish()` を通らずに抜けると
-   * ロックが恒久保持され、以後その device の {@link Session.run} が例外も診断も出さずに待ち
-   * 続ける。この面は「その取りこぼしを起こしにくい書き方（`await using`）を可能にする」もので、
-   * 平文の `try`/`finally` を書き忘れた場合の無診断ハングそのものは塞がない。
+   * The section keeps holding the per-device errorScope section lock, so leaving without going
+   * through `finish()` holds the lock forever, and from then on {@link Session.run} on that device
+   * keeps waiting with neither exception nor diagnostics. This surface "enables a way of writing
+   * (`await using`) that makes that slip less likely"; it does not close the undiagnosed hang
+   * itself when a plain `try`/`finally` is forgotten.
    */
   [Symbol.asyncDispose](): Promise<void> {
     return this.finish();
   }
 
   /**
-   * errorScope の pop 結果と記録したホスト側失敗を 1 本の決着にまとめる
-   * （{@link BatchScope.finish} の中身 — 区間の**途中**決着である公開
-   * {@link BatchScope.settle} とは別物なので、同名を避けてこの名前にしている）。
+   * Merges the result of the errorScope pop and the recorded host-side failure into one settlement
+   * (the contents of {@link BatchScope.finish} — it is different from the public
+   * {@link BatchScope.settle}, which settles **midway** through the section, so this name avoids
+   * the same name).
    */
   async #resolveFinish(): Promise<void> {
     let failure: { readonly cause: unknown } | undefined;
-    // 区間本体が失敗したときだけ "gpu"（{@link BatchFailureOrigin}）。以後に決まる失敗
-    // （記録したホスト側の失敗・finalizer の失敗）は "host" のまま。
+    // "gpu" only when the section body failed ({@link BatchFailureOrigin}). Failures decided later
+    // (a recorded host-side failure, a finalizer failure) stay "host".
     let origin: BatchFailureOrigin = "host";
     try {
       try {
@@ -1417,7 +1590,7 @@ export class BatchScope {
           try {
             finalizer.fail(failure.cause, origin);
           } catch {
-            /* 元の失敗を保持し、残る使用予約も返す。 */
+            /* Keep the original failure and return the remaining use reservations too. */
           }
         }
       };
@@ -1436,8 +1609,9 @@ export class BatchScope {
       this.#finalizers.length = 0;
       for (const [, resident] of this.#readback ?? []) resident[RUNTIME_INTERNAL].releaseUse();
       this.#readback = undefined;
-      // グラフ出力の読み戻しは区間の成否が決まった後にだけ返す（finishAndRead と同じ「合流の後」
-      // — 成功データを持ったまま finish が失敗する形を作らない）。
+      // Graph-output readbacks are returned only after the section's outcome is decided ("after the
+      // merge", the same as finishAndRead — no shape where finish fails while holding success
+      // data).
       for (const read of this.#graphReads) {
         if (failure === undefined && read.result !== undefined) read.resolve(read.result);
         else {

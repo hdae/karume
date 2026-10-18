@@ -1,40 +1,46 @@
 /**
- * メモリ必要量 estimator（ADR 0070 決定 5）— GPU に一切触れない純関数で「必要側」のバイト数を
- * カテゴリ別に出す。
+ * Memory demand estimator (ADR 0070 decision 5) — a pure function that never touches the GPU and
+ * reports the "demand side" bytes by category.
  *
- * MUST: **空き側との比較はしない**。WebGPU は総 / 空き VRAM を露出しないので、比較の形にした
- * 瞬間に「予算が取れない環境での当て推量」になる（ADR 0070 決定 5 — llama.cpp の 0/0 デバイス
- * 除外と同型の前例）。ここが返すのは数字だけで、可否の判定は一切しない。
- * MUST: 見積りは**絶対保証ではない**。勘定に入っていないものは
- * {@link AdmissionReport.unaccounted} が形式として認め、実際の**最終門は out-of-memory
- * errorScope**（src/gpu/device.ts の 2 本組）のまま — estimator は Session 構築 /
- * `createGenerationContext` の事前診断であって、超えていても実行は止めない。
+ * MUST: **no comparison with the free side**. WebGPU exposes neither total nor free VRAM, so the
+ * moment it became a comparison it would be "guessing where no budget is available" (ADR 0070
+ * decision 5 — the same precedent as llama.cpp's exclusion of 0/0 devices). This returns numbers
+ * only and makes no go / no-go decision at all.
+ * MUST: the estimate is **not an absolute guarantee**. {@link AdmissionReport.unaccounted} admits in
+ * its format what is not accounted for, and the real **final check remains the out-of-memory
+ * errorScope** (the `pushFailureScopes` pair in src/gpu/error-scope.ts) — the estimator is an
+ * advance diagnostic for Session construction / `createGenerationContext` and does not stop
+ * execution when exceeded.
  *
- * 報告の形は**常駐 + シナリオ**の 2 段（ADR 0070 決定 5 の再具体化）。Session が寿命を通じて
- * 抱えるもの（重み・state スロット）は {@link AdmissionReport.resident} の 1 組で、run の形
- * （prefill / decode）ごとに変わるものは {@link AdmissionReport.scenarios} に**別々の計算**
- * として並ぶ。同じ数字を 1 本に潰すと、prefill 形でしか出ない中間の山を decode しか回さない
- * 呼び手に押しつけるか、その逆に decode の数字で prefill を通すかのどちらかになる。
- * 2 形のどちらでもない形（投機デコードの verify run — ADR 0096）は、呼び手が
- * {@link AdmissionScenarioSpec} で**同じ計算経路に**足す（式を呼び手側で組み直させない）。
+ * The report has two levels, **resident + scenarios** (a refinement of ADR 0070 decision 5). What
+ * the Session holds over its lifetime (weights, state slots) is the single
+ * {@link AdmissionReport.resident} group, and what changes per run shape (prefill / decode) is
+ * listed in {@link AdmissionReport.scenarios} as **separate computations**. Folding them into one
+ * number would either push a peak of intermediates that only the prefill shape produces onto a
+ * caller that only runs decode, or conversely let prefill pass on decode's numbers.
+ * Shapes that are neither of the two (the verify run of speculative decoding — ADR 0096) are added
+ * by the caller through {@link AdmissionScenarioSpec} **to the same computation path** (the caller
+ * never rebuilds the formulas).
  *
- * 実測（{@link SessionDiagnostics}）との対応:
+ * Correspondence with the measurements ({@link SessionDiagnostics}):
  * - {@link AdmissionReport.resident}`.weights.compressedBytes` ↔ `storage.residentCompressedBytes`
  * - {@link AdmissionReport.resident}`.weights.expandedBytes` ↔ `storage.hostExpandedBytes`
- * - {@link AdmissionReport.resident}`.weights.uncompressedBytes` — 対応する診断欄は無い
- *   （ADR 0006 の `storage` 診断は低精度格納の実績だけを数える。実測の総量は
- *   `weights.allocatedBytes` — params 込み — でしか観測できない）
- * - {@link AdmissionReport.resident}`.stateBytes` ↔ `stateBacking.residentBytes`（context 1 本のとき）
+ * - {@link AdmissionReport.resident}`.weights.uncompressedBytes` — no corresponding diagnostic
+ *   field (the `storage` diagnostics of ADR 0006 count only low-precision storage. The measured
+ *   total is observable only through `weights.allocatedBytes`, which includes params)
+ * - {@link AdmissionReport.resident}`.stateBytes` ↔ `stateBacking.residentBytes` (with one context)
  * - {@link AdmissionScenario.workspaceBytes} ↔ `planBacking.residentBytes` /
- *   `lastRun.peakTransientBytes`（そのシナリオの形で回した run のもの — 診断の
- *   `residentBytes` は**保持中の backing 全ての総和**なので、対応するのは 1 形だけを回した
- *   Session か `retainedCount === 1` のとき。予算つきの保持は ADR 0095 決定 1）
+ *   `lastRun.peakTransientBytes` (of a run executed in that scenario's shape — the diagnostic
+ *   `residentBytes` is **the sum over all kept backings**, so it corresponds only for a Session that
+ *   ran one shape or when `retainedCount === 1`. Budgeted keeping is ADR 0095 decision 1)
  *
- * MUST: 分類も算式も**実装と同じ導出元**から引く（重みの席と宣言由来バイト数は
- * weight-residency.ts の純関数プランナ、整列とサイズクラスは `toSizeClass`、state の 1 要素
- * バイト数と論理長 uniform は generation-context.ts の定数、物理 chunk 行 `M` の載る軸は
- * ops/shapes.ts の op 契約）。式をここで書き直すと、片方だけ直された実装に対して estimator が
- * 例外も警告も無く別の数を主張し続ける。
+ * MUST: take both the classification and the formulas **from the same sources as the
+ * implementation** (the weights' residency class and declared bytes from the pure planner in
+ * weight-residency.ts, alignment and size classes from `toSizeClass`, the state's bytes per element
+ * and the logical-length uniform from the constants in generation-context.ts, the axis that carries
+ * the physical chunk rows `M` from the op contracts in ops/shapes.ts). Rewriting the formulas here
+ * would let the estimator keep claiming a different number, with no exception or warning, against
+ * an implementation fixed on one side only.
  */
 
 import { parseDim, solveDim } from "../format/dims.ts";
@@ -102,248 +108,297 @@ import type { ScoreStorage } from "../kernels/score-storage.ts";
 import { planWeightBuffers, type WeightResidency } from "./weight-residency.ts";
 
 /**
- * **予約名**のシナリオ。`generation` を渡さない見積りは `"run"` の 1 本、渡した見積りは
- * ADR 0066 決定 4 の実行 2 形（`"prefill"` / `"decode"`）で、この 3 つは呼び手が
- * {@link AdmissionScenarioSpec.name} に使えない。
+ * The **reserved-name** scenarios. An estimate without `generation` has the single `"run"`; with it,
+ * the two execution shapes of ADR 0066 decision 4 (`"prefill"` / `"decode"`). Callers cannot use
+ * these three for {@link AdmissionScenarioSpec.name}.
  */
 export type AdmissionScenarioName = "run" | "prefill" | "decode";
 
 /**
- * 呼び手が足す追加シナリオの仕様（{@link EstimateOptions}`.generation.scenarios`）。
+ * The spec of an extra scenario added by the caller ({@link EstimateOptions}`.generation.scenarios`).
  *
- * 既存 2 形（prefill / decode）と**同じ計算経路**を、物理 chunk 行だけ差し替えて 1 本増やす口。
- * 投機デコードの verify run（`queryLength = k+1` 行を 1 回で流す形 — ADR 0096）のように、
- * ADR 0066 決定 4 の 2 形のどちらでもない形の必要量を、呼び手が式を組み直さずに引くためにある。
+ * An entry point that adds one more computation on **the same computation path** as the existing two
+ * shapes (prefill / decode), with only the physical chunk rows replaced. It exists so that callers
+ * can get the demand of a shape that is neither of the two shapes of ADR 0066 decision 4 — like the
+ * verify run of speculative decoding (`queryLength = k+1` rows in one pass — ADR 0096) — without
+ * rebuilding the formulas.
  */
 export type AdmissionScenarioSpec = {
   /**
-   * 報告に載る名前。予約名（{@link AdmissionScenarioName} の 3 つ）と、同じ列の他の追加名との
-   * 重複は fail loudly（名前で引く呼び手が黙って先頭だけを見る形を作らない）。
+   * The name in the report. A duplicate of a reserved name (the three of
+   * {@link AdmissionScenarioName}) or of another extra name in the same list fails loudly (no form
+   * where a caller looking up by name silently sees only the first).
    */
   readonly name: string;
   /**
-   * この形の物理 chunk 行 `M`。`1..generation.chunkLength` の整数（外は fail loudly —
-   * `queryLength ≤ chunkLength` の契約の外にある行数を名乗らせない）で、さらに context の許す
-   * 行数（1・`generation.chunkBuckets`・`generation.chunkLength`）のどれか（外は run が拒否する
-   * 形なので、同じく fail loudly）。
+   * The physical chunk rows `M` of this shape. An integer in `1..generation.chunkLength` (outside
+   * fails loudly — no claiming a row count outside the `queryLength ≤ chunkLength` contract), and
+   * also one of the row counts the context allows (1, `generation.chunkBuckets`,
+   * `generation.chunkLength`; outside is a shape the run rejects, so it fails loudly too).
    */
   readonly chunkLength: number;
   /**
-   * グラフ入力側の記号次元の**上書き**（`options.bindings` の写しに重ねる）。省略すると
-   * `options.bindings` そのまま。値域と束縛点の門は既存 2 形と同じ（states 専用記号と物理
-   * chunk 行の記号は受けない）。
+   * **Overrides** of graph-input symbolic dimensions (laid over a copy of `options.bindings`). If
+   * omitted, `options.bindings` as is. The range and binding-point checks are the same as for the
+   * existing two shapes (states-only symbols and symbols of the physical chunk rows are not
+   * accepted).
    */
   readonly bindings?: SymbolBindings;
 };
 
 /**
- * run の形 1 つぶんの必要バイト数（{@link AdmissionReport.scenarios} の 1 要素）。
+ * The bytes needed by one run shape (one element of {@link AdmissionReport.scenarios}).
  *
- * ここに入るのは**run の形で変わるものだけ** — 重みと state スロットは形に依らないので
- * {@link AdmissionReport.resident} の側にある。
+ * Only **what changes with the run shape** goes here — weights and state slots do not depend on the
+ * shape, so they are on the {@link AdmissionReport.resident} side.
  */
 export type AdmissionScenario = {
-  /** 予約名（{@link AdmissionScenarioName}）か、呼び手が足した {@link AdmissionScenarioSpec.name}。 */
+  /**
+   * A reserved name ({@link AdmissionScenarioName}) or an {@link AdmissionScenarioSpec.name} added
+   * by the caller.
+   */
   readonly name: string;
-  /** グラフ入力バッファ + 出力 readback staging（厳密）。 */
+  /** Graph input buffers + output readback staging (exact). */
   readonly ioBytes: number;
   /**
-   * 中間（transient）slot 表の必要バイト = prepared backing の必要側と同義（**近似**）。
+   * The bytes needed by the transient slot table = the demand side of the prepared backing
+   * (**approximate**).
    *
-   * 融合前のノード列（行ブロック attention は融合後の形）を宣言順に歩き、実行相と同じ確保規則
-   * （消費回数は `countUses`・グラフ出力は pinned で解放しない・別名化できる出力は確保せず
-   * 入力の実体を別名で使う）で slot の生存区間を作り、実行相と同じ配置関数（生存区間と offset
-   * による配置 — ADR 0093）が割り当てた領域の総和。**states 形 attention の
-   * ノード内一時（スコア S と行統計）はここに入る** — 融合の成立に依存せず必ず出て、capacity
-   * 律速のグラフでは中間の主役になるため（算式は {@link stateAttentionTemps}）。
-   * **行ブロック attention（ADR 0060）の窓は融合後の形で入る** — 実行相と同じ融合計画が掴んだ
-   * 窓は、スコア・mask 加算後・softmax 後の全幅ではなく、行ブロック 1 枚ぶんの一時と出力で数える
-   * （ADR 0093 追記 2026-10-10）。それ以外のノード内一時と、他の融合が畳んで消す中間は勘定に
-   * 入らない（{@link AdmissionReport.unaccounted}）。
+   * Walks the pre-fusion node list (row-block attention in its post-fusion form) in declaration
+   * order, builds slot live ranges with the same allocation rules as the execution phase (use
+   * counts from `countUses`; graph outputs are pinned and never released; outputs that can be
+   * aliased are not allocated and use the input's backing under another name), and sums the regions
+   * assigned by the same placement function as the execution phase (placement by live ranges and
+   * offsets — ADR 0093). **The in-node temporaries of states-form attention (scores S and row
+   * statistics) are included** — they always appear regardless of whether fusion applies, and in
+   * capacity-bound graphs they dominate the intermediates (formula: {@link stateAttentionTemps}).
+   * **Row-block attention (ADR 0060) windows are included in their post-fusion form** — a window
+   * claimed by the same fusion plan as execution is counted as one row block's temporaries plus the
+   * output, not as the full width of the scores, mask-added scores and softmax output (ADR 0093
+   * addendum of 2026-10-10). Other in-node temporaries and intermediates folded away by other fusions
+   * are not accounted for ({@link AdmissionReport.unaccounted}).
    */
   readonly workspaceBytes: number;
 };
 
-/** 必要バイト数の報告（{@link estimateGraphMemory} / `PreparedModel.estimate` の戻り）。 */
+/**
+ * The report of needed bytes (returned by {@link estimateGraphMemory} / `PreparedModel.estimate`).
+ */
 export type AdmissionReport = {
-  /** run の形に依らず Session の寿命ぶん抱えるもの。 */
+  /** What the Session holds for its lifetime, regardless of the run shape. */
   readonly resident: {
     readonly weights: {
       /**
-       * 圧縮のまま GPU 常駐する重み + companion scale のバイト数（整列詰め物込み — 厳密）。
-       * 診断の `storage.residentCompressedBytes` と厳密に対応する（0 要素テンソルの 4 バイト床
-       * だけが唯一の差 — 診断側は床なしの実バイトを数える）。
+       * Bytes of weights GPU-resident in compressed form + companion scales (including alignment
+       * padding — exact). Corresponds exactly to the diagnostic `storage.residentCompressedBytes`
+       * (the only difference is the 4-byte floor of zero-element tensors — the diagnostic counts
+       * the real bytes without the floor).
        */
       readonly compressedBytes: number;
       /**
-       * 圧縮しない格納（f32 / i32）のまま常駐する重みのバイト数（厳密）。
+       * Bytes of weights resident in uncompressed storage (f32 / i32) (exact).
        *
-       * MUST: 圧縮 / 展開と別の欄で持つ — 診断の `storage` は低精度格納の実績だけを数える
-       * （ADR 0006）ので、ここを `compressedBytes` に混ぜると「診断との厳密一致」が f32 重みを
-       * 持つモデルで沈黙して崩れる。
+       * MUST: keep it in a field separate from compressed / expanded — the diagnostic `storage`
+       * counts only low-precision storage (ADR 0006), so mixing this into `compressedBytes` would
+       * silently break "exact agreement with the diagnostics" on models with f32 weights.
        */
       readonly uncompressedBytes: number;
-      /** 適格外でロード時に f32 展開して常駐する重みの展開後バイト数（厳密）。 */
+      /**
+       * Bytes after expansion of ineligible weights that are expanded to f32 at load and kept
+       * resident (exact).
+       */
       readonly expandedBytes: number;
-      /** 上記 3 欄の和。 */
+      /** The sum of the three fields above. */
       readonly totalBytes: number;
     };
     /**
-     * `GenerationContext` 1 本ぶんの state スロット + 論理長 uniform（厳密）。
+     * State slots + logical-length uniform of one `GenerationContext` (exact).
      *
-     * NOTE: `options.generation` を省略すると 0。`graph.states` が非空なグラフでは
-     * {@link AdmissionScenario.workspaceBytes} の計画が state スロットの解決済み shape を
-     * 要求するので、そもそも generation 無しでは見積れず fail loudly になる（黙って 0 を返す
-     * 窓は無い）。
+     * NOTE: 0 when `options.generation` is omitted. For a graph with non-empty `graph.states`, the
+     * plan of {@link AdmissionScenario.workspaceBytes} requires the slots' resolved shapes, so it
+     * cannot be estimated without generation at all and fails loudly (there is no window that
+     * silently returns 0).
      */
     readonly stateBytes: number;
   };
   /**
-   * run の形ごとの必要バイト数（1 要素以上 — 名前の決まり方は {@link AdmissionScenarioName}）。
-   * 呼び手が {@link EstimateOptions}`.generation.scenarios` を渡すと、既存 2 形の**後ろ**に
-   * 宣言順で並ぶ。
+   * The bytes needed per run shape (one element or more — names as in
+   * {@link AdmissionScenarioName}). When the caller passes
+   * {@link EstimateOptions}`.generation.scenarios`, they follow the existing two shapes in
+   * declaration order.
    */
   readonly scenarios: readonly AdmissionScenario[];
   /**
-   * この見積りが使った slot backing の保持予算（{@link EstimateOptions.planBackingBudgetBytes} —
-   * 省略時は `DEFAULT_PLAN_BACKING_BUDGET_BYTES`）。{@link AdmissionReport.peakAccountedBytes} の
-   * 片側の項がそのまま読めるように報告する（同じ数を呼び手が組み直さずに済む）。
+   * The slot-backing keep budget this estimate used ({@link EstimateOptions.planBackingBudgetBytes}
+   * — `DEFAULT_PLAN_BACKING_BUDGET_BYTES` when omitted). Reported so that one term of
+   * {@link AdmissionReport.peakAccountedBytes} can be read directly (callers need not rebuild the
+   * same number).
    */
   readonly planBackingBudgetBytes: number;
   /**
-   * 補助Sessionや常駐入出力の追加勘定。resident / scenarios の内訳とは重複させない。
-   * 省略は0。runtimeの単体Session見積りは省略し、modelsが補助資源を持つ場合に加える。
+   * Extra accounting for auxiliary Sessions and resident inputs / outputs. It does not overlap the
+   * resident / scenarios breakdown. Omitted means 0. The runtime's single-Session estimate omits
+   * it; models add it when they hold auxiliary resources.
    * DECIDED: docs/decisions/0070-shard-loading-admission.md#auxiliary-resource-breakdown-2026-09-12
    */
   readonly auxiliaryBytes?: number;
   /**
-   * 常駐の総和 + **保持集合の上限** + 補助資源（= `resident.weights.totalBytes + resident.stateBytes +
-   * max(planBackingBudgetBytes, max(ioBytes + workspaceBytes)) + (auxiliaryBytes ?? 0)` — 内側の
-   * max はシナリオとバケット形の全体）。
+   * Resident total + **the bound of the kept set** + auxiliary resources (=
+   * `resident.weights.totalBytes + resident.stateBytes + max(planBackingBudgetBytes, max(ioBytes +
+   * workspaceBytes)) + (auxiliaryBytes ?? 0)` — the inner max is over all scenarios and bucket
+   * shapes).
    *
-   * **上限保証ではなく「勘定に入れた分のピーク」**を名乗る欄（名前の由来）。シナリオ側を和では
-   * なく `max(予算, 最大シナリオ)` で足すのは、Session が抱える slot backing の保持集合が
-   * **その量を超えないから**（ADR 0095 決定 1 / 4）: 新しい signature のヒット run は
-   * 「保持分 + 新規 ≤ 予算」になるまで古い順に退役させてから確保し、新規 1 本だけで予算を
-   * 超える形は保持中を全て退役させてその 1 本だけを持つ（executor の
-   * `Session.#evictBackingsFor`）。計画（`PreparedPlan`）が `PREPARED_PLAN_CAPACITY` 本まで
-   * LRU で残るのとは別の勘定である。
+   * A field that claims **"the peak of what is accounted for", not a guaranteed upper bound** (hence
+   * the name). The scenario side is added as `max(budget, largest scenario)` rather than a sum
+   * because the Session's kept set of slot backings **never exceeds that amount** (ADR 0095
+   * decisions 1 / 4): a hit run with a new signature retires the oldest until "kept + new ≤ budget"
+   * before allocating, and a single new backing that alone exceeds the budget retires every kept one
+   * and is kept alone (`Session.#evictBackingsFor` in the executor). This is accounted separately
+   * from the plans (`PreparedPlan`), which stay in an LRU of up to `PREPARED_PLAN_CAPACITY`.
    *
-   * 「最大シナリオ」は**追加シナリオも含めた** {@link AdmissionReport.scenarios} 全体の最大
-   * （追加分だけ勘定から漏れると、verify 形が最大のときにピークが過小になる）に、
-   * `generation.chunkBuckets` の各物理行数で同じ計算をした形（バケット形）を加えた最大。
-   * バケット形は {@link AdmissionReport.scenarios} に列挙しない（公開の列は prefill / decode と
-   * 追加シナリオのまま）。最大 M の prefill 形で代表させないのは、行ブロックの等分が枚数の
-   * 境界で「行数の少ない形のほうが一時が大きい」を作り、中間が M に単調でないため。
-   * バケット形が予算の内側で他の形と同時に保持されるぶんは、予算の項が上から押さえる（過大側へ
-   * 倒す — 「勘定に入れた分のピーク」の意味論はそのまま）。予算は各 backing の領域 + 所有する
-   * 入力バッファを勘定する（診断の `residentBytes + inputBytes`）。
+   * "The largest scenario" is the maximum over all of {@link AdmissionReport.scenarios} **including
+   * the extra scenarios** (if only those escaped the accounting, the peak would be too low when the
+   * verify shape is the largest), together with the same computation for each physical row count of
+   * `generation.chunkBuckets` (the bucket shapes). Bucket shapes are not listed in
+   * {@link AdmissionReport.scenarios} (the public list stays prefill / decode plus the extra
+   * scenarios). The largest-M prefill shape is not used as the representative because the equal
+   * split into row blocks creates, at the boundary of the block count, "a shape with fewer rows has
+   * larger temporaries", so the intermediates are not monotonic in M.
+   * When bucket shapes are kept at the same time as other shapes within the budget, the budget term
+   * bounds them from above (it errs on the large side — the semantics of "the peak of what is
+   * accounted for" stay). The budget counts each backing's regions + the input buffers it owns
+   * (the diagnostics' `residentBytes + inputBytes`).
    */
   readonly peakAccountedBytes: number;
-  /** 勘定に入っていないもの（見積りが絶対保証でないことを形式が認める欄 — ADR 0070 決定 5）。 */
+  /**
+   * What is not accounted for (the field whose format admits that the estimate is not an absolute
+   * guarantee — ADR 0070 decision 5).
+   */
   readonly unaccounted: readonly string[];
 };
 
 export type EstimateOptions = {
-  /** Session と同じ states attention 設定。省略時は参照経路の一時を見積る。 */
+  /**
+   * The same states attention setting as the Session. When omitted, the temporaries of the
+   * reference path are estimated.
+   */
   readonly stateAttentionReduce?: StateAttentionReduce;
   /**
-   * 記号次元の値（グラフ入力側 — run に渡すのと同じ束縛）。states 専用記号（容量）と
-   * 物理 chunk 行 `M` の記号は、どちらも {@link EstimateOptions.generation} の側から決まるので
-   * ここでは受けない（前者は `generation.bindings`・後者は `generation.chunkLength`）。
+   * Values of symbolic dimensions (the graph-input side — the same bindings passed to a run).
+   * States-only symbols (capacity) and the symbols of the physical chunk rows `M` are both decided
+   * on the {@link EstimateOptions.generation} side, so they are not accepted here (the former from
+   * `generation.bindings`, the latter from `generation.chunkLength`).
    */
   readonly bindings?: SymbolBindings;
   /**
-   * 見積る `GenerationContext` の仕様（省略すると state を数えない）。
+   * The spec of the `GenerationContext` to estimate (when omitted, no state is counted).
    *
-   * `scenarios` は ADR 0066 決定 4 の 2 形に**加えて**数える形の列（{@link AdmissionScenarioSpec}）—
-   * `GenerationContext` の形には 1 バイトも効かない見積り専用の欄で、常駐側（state スロット）は
-   * どの形でも同じなので動かない。
+   * `scenarios` is a list of shapes counted **in addition to** the two shapes of ADR 0066 decision 4
+   * ({@link AdmissionScenarioSpec}) — an estimate-only field that has no effect at all on the
+   * `GenerationContext`'s shape; the resident side (state slots) is the same for every shape and
+   * does not move.
    */
   readonly generation?: GenerationContextSpec & {
     readonly scenarios?: readonly AdmissionScenarioSpec[];
   };
   /**
-   * `maxStorageBufferBindingSize` の granted 値（`GPUDevice.limits` / `readAdapterLimits`）。
+   * The granted value of `maxStorageBufferBindingSize` (`GPUDevice.limits` / `readAdapterLimits`).
    *
-   * 使うのは 3 箇所。① states 形 attention のノード内一時の行ブロック枚数 — 一時は**行ブロック
-   * 1 枚ぶん**しか同時生存せず、その枚数はこの上限だけで決まる（{@link planStateAttention} —
-   * ADR 0022 の実行時オートチューン禁止により device の granted limit と束縛だけの純関数）。
-   * ② 全グラフの中間配置の束縛上限 — 行ブロック attention の枚数と、slot 実寸の上限検査に使う
-   * （実行相と同じ granted 値で詰める — ADR 0093 決定 4 / 5）。② は無指定なら WebGPU core 既定で詰める。
-   * ③ 融合 attention op（states 欄なし）のノード内一時の行ブロック枚数（ADR 0124 決定 7）。
-   * 無指定のときは、枚数がどの device でも同じになる形だけを数える — WebGPU core 既定（128 MiB・
-   * device の granted 値は常にこれ以上）で 1 枚に収まる形と、`attentionRowBlockMaxBytes` が
-   * core 既定以下の形（上限は全 device で予算そのもの）。それ以外は fail loudly
-   * （{@link fusedAttentionBlocks}）。
+   * Used in three places. ① The row-block count of the in-node temporaries of states-form attention
+   * — only **one row block's** temporaries are live at a time, and the count is decided by this
+   * limit alone ({@link planStateAttention} — a pure function of the device's granted limit and the
+   * bindings, because ADR 0022 bans run-time autotuning). ② The binding limit of intermediate
+   * placement for every graph — used for the row-block count of row-block attention and for the
+   * limit check of actual slot sizes (packed with the same granted value as the execution phase —
+   * ADR 0093 decisions 4 / 5). For ②, the WebGPU core default is used when unspecified.
+   * ③ The row-block count of the in-node temporaries of fused attention ops (no states field — ADR
+   * 0124 decision 7). When unspecified, only shapes whose count is the same on every device are
+   * counted — shapes that fit in one block under the WebGPU core default (128 MiB; a device's
+   * granted value is always at least this), and shapes whose `attentionRowBlockMaxBytes` is at most
+   * the core default (the limit is then the budget itself on every device). Anything else fails
+   * loudly ({@link fusedAttentionBlocks}).
    *
-   * MUST: states 形 attention を持つグラフでは**必須**（{@link stateAttentionTemps} が
-   * fail loudly）。融合 attention op で枚数が束縛上限に依る形でも必須（③）。既定値で埋めると、
-   * どの device でも実際には出ない枚数を estimator だけが主張する。**値域（正の安全整数）は
-   * グラフの形に依らず入口で見る**（① を読まない形でだけ不正値が黙って通ると、値域門の位置が
-   * 呼び手から見えない）。
+   * MUST: **required** for graphs with states-form attention ({@link stateAttentionTemps} fails
+   * loudly). Also required for fused attention ops whose count depends on the binding limit (③).
+   * Filling a default would make the estimator alone claim a count that no device actually has.
+   * **The range (a positive safe integer) is checked at the entry regardless of the graph's shape**
+   * (if an invalid value passed silently only for shapes that do not read ①, the location of the
+   * range check would be invisible to the caller).
    */
   readonly maxStorageBufferBindingSize?: number;
   /**
-   * `maxBufferSize` の granted 値（`GPUDevice.limits` / `readAdapterLimits`）。
+   * The granted value of `maxBufferSize` (`GPUDevice.limits` / `readAdapterLimits`).
    *
-   * 使うのは state スロット単体の上限検査（`maxStorageBufferBindingSize` と**対**— 実構築は
-   * 2 本とも見る: ADR 0066 追記 5）と、中間パッキングの領域の上限（実行相と同じ granted 値で
-   * 詰める — ADR 0093 決定 4）。後者は `workspaceBytes` を動かしうる（first-fit の領域の割れ方が
-   * 上限で変わる）。offset 整列は device 値を受ける欄が無いので WebGPU core 既定（256）で詰める。
+   * Used for the per-slot limit check of state slots (**paired** with `maxStorageBufferBindingSize`
+   * — the real construction checks both: ADR 0066 addendum 5) and for the region limit of
+   * intermediate packing (packed with the same granted value as the execution phase — ADR 0093
+   * decision 4). The latter can move `workspaceBytes` (how first-fit splits regions depends on the
+   * limit). There is no field for a device value of the offset alignment, so it packs with the
+   * WebGPU core default (256).
    *
-   * 任意欄にしてあるのは、device を持たない呼び手（グラフだけを握った見積り）を壊さないため。
-   * 渡した欄だけが検査に効き、未指定の側は既定値で埋めない（どの device でも実際には出ない
-   * 境界を estimator だけが主張しないため）。中間パッキングだけは無指定でも領域の上限が要るので、
-   * 束縛上限と WebGPU core 既定の大きいほうで詰める。値域（正の安全整数）はグラフの形に依らず
-   * 入口で見る。
+   * The field is optional so as not to break callers without a device (estimates that hold only a
+   * graph). Only the fields passed take part in the checks, and the missing side is not filled with
+   * a default (so that the estimator alone never claims a boundary that no device actually has).
+   * Intermediate packing alone needs a region limit even when unspecified, so it uses the larger of
+   * the binding limit and the WebGPU core default. The range (a positive safe integer) is checked at
+   * the entry regardless of the graph's shape.
    */
   readonly maxBufferSize?: number;
   /**
-   * slot backing の保持予算（`SessionOptions.planBackingBudgetBytes` と同じ値・既定
-   * `DEFAULT_PLAN_BACKING_BUDGET_BYTES` = 256 MiB）。
+   * The slot-backing keep budget (the same value as `SessionOptions.planBackingBudgetBytes`; default
+   * `DEFAULT_PLAN_BACKING_BUDGET_BYTES` = 256 MiB).
    *
-   * MUST: 検査は `createContainerSession` と同じ（非負の安全な整数以外は fail loudly）。見積りだけが
-   * Session の作れない予算を受けると、「見積れたのに構築が落ちる」形になる。
-   * 効くのは {@link AdmissionReport.peakAccountedBytes} だけで、シナリオごとの数字は動かない
-   * （予算は保持**本数**の側の量で、1 本の形の必要量ではない）。予算 0 = 常に 1 本なので、
-   * ピークは従来どおりシナリオ側の最大になる。
+   * MUST: the check is the same as `createContainerSession` (anything but a non-negative safe
+   * integer fails loudly). If only the estimate accepted a budget with which no Session can be
+   * built, the result would be "estimated, but construction fails".
+   * It affects only {@link AdmissionReport.peakAccountedBytes}; the per-scenario numbers do not move
+   * (the budget is a quantity on the side of **how many** are kept, not the demand of one shape).
+   * Budget 0 = always one, so the peak is the largest scenario, as before.
    */
   readonly planBackingBudgetBytes?: number;
   /**
-   * 行ブロックの一時 1 本ごとの予算（`SessionOptions.attentionRowBlockMaxBytes` と同じ値・省略 = 予算なし
-   * — ADR 0124）。
+   * The budget per row-block temporary (the same value as `SessionOptions.attentionRowBlockMaxBytes`;
+   * omitted = no budget — ADR 0124).
    *
-   * 行ブロックの枚数は実行と同じ導出（`rowBlockLimit` — 束縛上限とこの値の小さいほう）で決める。
-   * 効くのは行ブロックで割る勘定（states 形 attention のスコア S と行統計・行ブロック attention の窓の
-   * 一時）で、中間の配置の上限検査は束縛上限のまま（実行と同じ）。
-   * MUST: 検査は `createContainerSession` と同じ（正の安全な整数以外は fail loudly）。
-   * MUST: 1 行ぶんの一時がこの値を超える形は、実行の計画導出と同じ文言で fail loudly — 見積りが
-   * 予算違反を事前に知る手段（実行では重みを上げた後の run で落ちる）。
+   * The row-block count is decided by the same derivation as execution (`rowBlockLimit` — the
+   * smaller of the binding limit and this value). It affects the accounting split into row blocks
+   * (the scores S and row statistics of states-form attention, the window temporaries of row-block
+   * attention); the limit check of intermediate placement stays at the binding limit (as in
+   * execution).
+   * MUST: the check is the same as `createContainerSession` (anything but a positive safe integer
+   * fails loudly).
+   * MUST: a shape whose temporaries for a single row exceed this value fails loudly with the same
+   * message as execution's plan derivation — the way for the estimate to learn of a budget violation
+   * in advance (in execution it fails in a run after the weights are uploaded).
    */
   readonly attentionRowBlockMaxBytes?: number;
   /**
-   * 融合 attention の計算形（`SessionOptions.attentionCompute` と同じ値・省略は runtime の既定と同じ
-   * `"f32"` — `stateAttentionReduce` と同じ前例）。
+   * The compute form of fused attention (the same value as `SessionOptions.attentionCompute`;
+   * omitted = `"f32"`, the runtime default — the same precedent as `stateAttentionReduce`).
    *
-   * 効くのは融合 attention op のノード内一時（S の 1 要素の幅・i8a8 の量子化の一時の有無 — ADR 0124
-   * 決定 7）。実行が拒否する組（mask × a8・GQA × a8・states 形 × f32 以外）は、実行と同じ判定・同じ文言で
-   * fail loudly（見積りだけが数を返さない）。
-   * MUST: 綴りと組合せ（`attentionScoreStorage` との c16 × s16）は `sessionOptionsViolation` と同じ門。
+   * It affects the in-node temporaries of fused attention ops (the width of one S element, whether
+   * i8a8 quantisation temporaries exist — ADR 0124 decision 7). Combinations execution rejects (mask
+   * × a8, GQA × a8, states form × anything but f32) fail loudly with the same test and message as
+   * execution (the estimate never answers with numbers where execution would reject).
+   * MUST: spelling and combinations (c16 × s16 with `attentionScoreStorage`) go through the same
+   * check as `sessionOptionsViolation`.
    */
   readonly attentionCompute?: ComputePrecision;
   /**
-   * 融合 attention の S の格納形（`SessionOptions.attentionScoreStorage` と同じ値・省略は `"f32"`）。
-   * 適格判定（`attentionRoute`）は実行と同じ 1 本で、非適格の形は f32 格納で数える。
+   * The storage form of fused attention's S (the same value as
+   * `SessionOptions.attentionScoreStorage`; omitted = `"f32"`).
+   * Eligibility (`attentionRoute`) is the same single function as in execution; ineligible shapes
+   * are counted with f32 storage.
    */
   readonly attentionScoreStorage?: ScoreStorage;
 };
 
 /**
- * 勘定に入っていないもの（定数）。
+ * What is not accounted for (a constant).
  *
- * MUST: 「入っていない」と分かっている項目を全部書く。空欄にすると、見積りが上限であるかの
- * ように読まれる（ADR 0070 決定 5 が unaccounted 欄を要求した理由そのもの）。
+ * MUST: list every item known to be "not included". Leaving it empty would let the estimate be
+ * read as if it were an upper bound (exactly why ADR 0070 decision 5 required the unaccounted
+ * field).
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
   "行ブロック attention 以外の融合が畳んで消す中間と、その融合ルールが宣言するノード内一時（どちらも device limit と融合の成立に依存する。別名化した値と、行ブロック attention の一時は勘定に入っている）",
@@ -353,7 +408,9 @@ const UNACCOUNTED: readonly string[] = Object.freeze([
   "退役の窓（予算超過 / 計画の LRU 追い出しで退役した slot backing は、次の計画の確保より前に destroy されず flush 後の後始末まで生きるので、その run では退役分 + 新規が同時に載る）",
 ]);
 
-/** 解決済み shape を引く（planGraph が全値を載せているので、欠けは簿記の破れ）。 */
+/**
+ * Looks up a resolved shape (planGraph lists every value, so a missing one is a bookkeeping break).
+ */
 const shapeOf = (
   shapes: ReadonlyMap<string, readonly number[]>,
   name: string,
@@ -364,24 +421,27 @@ const shapeOf = (
 };
 
 /**
- * 物理 chunk 行 `M` が載る軸。
+ * The axis that carries the physical chunk rows `M`.
  *
- * MUST: 位置の正本は **op 契約**（ops/shapes.ts）。states 形の attention は
- * `q[B,H,M,D]` / `k`,`v``[B,Hkv,M,D]`（M は q / k / v で一致することも契約が見ている）、
- * `state_append` は `x[B,Hkv,M,D]` で、どちらも軸 2。ここで別の軸を書くと、estimator だけが
- * 実行と違う次元を chunk 行と見なして prefill / decode を取り違える。
+ * MUST: the source of truth for the position is **the op contract** (ops/shapes.ts). States-form
+ * attention has `q[B,H,M,D]` / `k`,`v``[B,Hkv,M,D]` (the contract also checks that M agrees across
+ * q / k / v), `state_append` has `x[B,Hkv,M,D]`; both use axis 2. Writing another axis here would
+ * make the estimator alone treat a different dimension than execution as the chunk rows and confuse
+ * prefill / decode.
  */
 const CHUNK_ROW_AXIS = 2;
 
 /**
- * 物理 chunk 行 `M` を決めている**次元宣言**（記号を含むものだけ・重複排除済み）。
+ * The **dimension declarations** that decide the physical chunk rows `M` (symbolic ones only,
+ * deduplicated).
  *
- * 判別は「states 欄が非空なノードの入力」= states 形の判別そのもの（ADR 0067 決定 4 —
- * recipe-builders/attention.ts の `buildStateAttention` / `buildStateAppend` が `states.chunkRows` へ
- * 積むのと同じノード集合）。数値次元は記号で動かない形なので拾わない — その形の decode step は
- * 物理 chunk 行を prefill と同じまま `queryLength = 1` で回るので、2 シナリオが同じ数字になるのが
- * 正しい。ただし数値の `M` が context の許す集合に入っているかは別の門で、シナリオごとに
- * {@link stateChunkRows} を照合する（`chunkLength` と一致するとは限らない）。
+ * The test is "inputs of nodes with a non-empty states field" = the states-form test itself (ADR
+ * 0067 decision 4 — the same node set that `buildStateAttention` / `buildStateAppend` in
+ * recipe-builders/attention.ts push to `states.chunkRows`). Numeric dimensions are shapes that do not
+ * move with a symbol, so they are not collected — the decode step of such a shape runs with the same
+ * physical chunk rows as prefill and `queryLength = 1`, so the two scenarios correctly give the same
+ * number. Whether a numeric `M` is in the set the context allows is a separate check:
+ * {@link stateChunkRows} is matched per scenario (it need not equal `chunkLength`).
  */
 const chunkRowDims = (graph: IrGraph): readonly string[] => {
   const declared = new Map<string, readonly IrDim[]>();
@@ -390,7 +450,8 @@ const chunkRowDims = (graph: IrGraph): readonly string[] => {
   const dims = new Set<string>();
   for (const node of graph.nodes) {
     if (Object.keys(node.states).length === 0) continue;
-    // 宣言が引けない名前（initializer だけの値など）は planGraph が落とす — ここでは飛ばす。
+    // planGraph fails names without a declaration (values that are only initializers and the like)
+    // — skip them here.
     for (const name of node.ins) {
       const dim = declared.get(name)?.[CHUNK_ROW_AXIS];
       if (typeof dim === "string") dims.add(dim);
@@ -400,12 +461,13 @@ const chunkRowDims = (graph: IrGraph): readonly string[] => {
 };
 
 /**
- * 解決済み計画の state ノードが使う物理 chunk 行数（同値は畳む）。
+ * The physical chunk row counts used by the state nodes of a resolved plan (equal values folded).
  *
- * MUST: 拾うノードと軸は実行の集積（recipe-builders/attention.ts の `buildStateAttention` が
- * `q[2]`・`buildStateAppend` が `x[2]` を `states.chunkRows` へ積む）と同じ — どちらも第 1 入力の
- * {@link CHUNK_ROW_AXIS}。readonly states 形 attention の `q` は M = 1 を shape 層が保証するので、
- * 拾っても許可集合（常に 1 を含む）の判定は動かない。
+ * MUST: the nodes and axis collected are the same as execution's collection (`buildStateAttention`
+ * in recipe-builders/attention.ts pushes `q[2]`, `buildStateAppend` pushes `x[2]`, to
+ * `states.chunkRows`) — both the {@link CHUNK_ROW_AXIS} of the first input. For readonly states-form
+ * attention the shape layer guarantees M = 1 for `q`, so collecting it does not change the test
+ * against the allowed set (which always contains 1).
  */
 const stateChunkRows = (nodes: readonly NodePlan[]): ReadonlySet<number> => {
   const rows = new Set<number>();
@@ -417,22 +479,25 @@ const stateChunkRows = (nodes: readonly NodePlan[]): ReadonlySet<number> => {
 };
 
 /**
- * 値 shape の解決に使う束縛を検査して写す。
+ * Checks and copies the bindings used to resolve value shapes.
  *
- * MUST: states 専用記号をここで受けない（`bindSymbols` と同じ分担 — 容量の正本は
- * `createGenerationContext` の側で、ここで受けると「state 容量を渡したのに 0 と出る」
- * 沈黙誤答になる）。未束縛は fail loudly（黙って 0 で埋めない）。
- * MUST: chunk 行の記号もここで受けない（束縛点は `options.generation.chunkLength` と decode 形の
- * 1 で、シナリオごとに値が変わる第 3 の束縛点）。受けて上書きすると「prefill と決め打った値を
- * 渡したのに decode の数字が返る」沈黙上書きになり、受けて優先すると 2 本のシナリオが同じ形に
- * 潰れる。
+ * MUST: do not accept states-only symbols here (the same division as `bindSymbols` — the source of
+ * truth for capacity is on the `createGenerationContext` side, and accepting them here would be a
+ * silent wrong answer, "passed a state capacity but got 0"). An unbound symbol fails loudly (no
+ * silent 0).
+ * MUST: do not accept the chunk-row symbols here either (their binding points are
+ * `options.generation.chunkLength` and the decode shape's 1 — a third binding point whose value
+ * changes per scenario). Accepting and overriding them would be a silent override, "passed a value
+ * fixed for prefill but got decode's number"; accepting and preferring them would collapse the two
+ * scenarios into the same shape.
  */
 const planBindings = (
   graph: IrGraph,
   bindings: SymbolBindings | undefined,
   chunkSymbols: ReadonlySet<string>,
 ): SymbolBindings => {
-  // 記号の実在と非負整数の検査、および null プロトタイプの器は resolveBindings が持つ。
+  // resolveBindings owns the checks that the symbol exists and is a non-negative integer, and the
+  // null-prototype container.
   const resolved = resolveBindings(graph, bindings);
   const statesOnly = statesOnlySymbols(graph);
   for (const sym of Object.keys(resolved)) {
@@ -459,11 +524,12 @@ const planBindings = (
 };
 
 /**
- * chunk 行を `rows` 行にしたシナリオの束縛（`base` の写しに chunk 記号を足す）。
+ * The bindings of a scenario with `rows` chunk rows (adds the chunk symbols to a copy of `base`).
  *
- * MUST: 逆解きは実行と同じ 1 本（{@link solveDim} — `bindSymbols` が実入力の実寸から束縛を
- * 解くのに使うのと同じ関数）。派生形（`2M`）を丸めて受けると、宣言と 1 行ずれた chunk を
- * 見積った数字が「その形で走る」顔をして返る。
+ * MUST: the inverse solve is the same single function as execution ({@link solveDim} — the one
+ * `bindSymbols` uses to solve bindings from the actual input sizes). Accepting a derived form
+ * (`2M`) with rounding would return numbers estimated for a chunk one row off the declaration,
+ * looking as if "it runs in that shape".
  */
 const bindChunkRows = (
   base: SymbolBindings,
@@ -493,10 +559,11 @@ const bindChunkRows = (
 };
 
 /**
- * device 上限欄の値域検査（省略可・与えるなら正の安全整数）。
+ * Range check of a device-limit field (optional; if given, a positive safe integer).
  *
- * MUST: 読み手（`stateAttentionTemps` / `assertSlotWithinLimits`）の内側でなく入口に置く —
- * 読まない形のグラフでだけ不正値が黙って通ると、値域門の位置が呼び手から見えない。
+ * MUST: place it at the entry, not inside the readers (`stateAttentionTemps` /
+ * `assertSlotWithinLimits`) — if an invalid value passed silently only for graphs that do not read
+ * it, the location of the range check would be invisible to the caller.
  */
 const assertLimitOption = (name: string, limit: number | undefined): void => {
   if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) {
@@ -504,7 +571,10 @@ const assertLimitOption = (name: string, limit: number | undefined): void => {
   }
 };
 
-/** state スロットの見積り（{@link GenerationContext} の確保と同じ式 — 値の複製はしない）。 */
+/**
+ * The estimate of the state slots (the same formula as {@link GenerationContext}'s allocation — no
+ * copied values).
+ */
 const stateEstimate = (
   graph: IrGraph,
   spec: GenerationContextSpec | undefined,
@@ -516,16 +586,17 @@ const stateEstimate = (
 } => {
   if (spec === undefined) return { bytes: 0, shapes: undefined, bindings: undefined };
   const names = Object.keys(graph.states);
-  // MUST: states 宣言の無いグラフで generation を受けない（`GenerationContext.create` が
-  // 拒否する形。通すと「作れない context のバイト数」を数えた見積りが返る）。
+  // MUST: do not accept generation for a graph without states declarations (a form
+  // `GenerationContext.create` rejects. Letting it through would return an estimate counting "the
+  // bytes of a context that cannot be built").
   if (names.length === 0) {
     throw new ExecutionError(
       "このグラフは states 宣言を持たない（GenerationContext は作れないので options.generation を渡さないこと）",
     );
   }
-  // MUST: 実構築（GenerationContext.create）が拒否する spec に見積りを返さない — 値域は
-  // 同じ門（assertChunkLength / assertChunkBuckets）を、スロット単体の寸法は同じ
-  // `assertSlotWithinLimits` を通す（下の走査内）。
+  // MUST: return no estimate for a spec the real construction (GenerationContext.create) rejects —
+  // ranges go through the same checks (assertChunkLength / assertChunkBuckets), per-slot sizes
+  // through the same `assertSlotWithinLimits` (in the loop below).
   assertChunkLength(spec.chunkLength);
   assertChunkBuckets(spec.chunkBuckets, spec.chunkLength);
   const bindings = resolveBindings(graph, spec.bindings);
@@ -534,30 +605,34 @@ const stateEstimate = (
   for (const name of names) {
     const shape = resolveSlotShape(name, graph.states[name].shape, bindings);
     shapes.set(name, shape);
-    // 借り物スロット（external — ADR 0096 段 2 §1.1）は借り手 context が確保しない。形は
-    // 一時（S / 行統計）の勘定に要るので解決するが、バイト数は 1 つも数えない
-    // （`GenerationContext.create` の確保と同じ分岐 = 見積りと実構築が同じ数を主張する）。
+    // A borrowing context does not allocate borrowed slots (external — ADR 0096, addendum of
+    // 2026-09-08 on stage 2). The shape is resolved because the temporaries (S / row statistics)
+    // need it, but no byte is counted (the same branch as `GenerationContext.create`'s allocation =
+    // estimate and real construction claim the same number).
     if (graph.states[name].external) continue;
     const byteLength = numel(shape) * STATE_ELEMENT_BYTES;
-    // MUST: 実構築（`GenerationContext.create`）と同じ位置・同じ門でスロット単体の上限を見る
-    // （ADR 0066 追記 5）。ここを抜くと、CLI が `--capacity` の値検査を見積りに兼ねさせている
-    // 経路（examples/shared/gemma-main.ts）で「起動時には数字が出て、最初のターンで落ちる」。
+    // MUST: check the per-slot limits at the same point and with the same check as the real
+    // construction (`GenerationContext.create`) (ADR 0066 addendum 5). Without it, a path where a
+    // CLI lets the estimate double as the value check of `--capacity` (examples/shared/gemma-main.ts,
+    // removed in 0.15) would "show numbers at startup and fail on the first turn".
     assertSlotWithinLimits(name, shape, byteLength, limits);
     bytes += byteLength;
   }
-  // 論理長 uniform は context 1 本につき 1 枚（スロット数に依らない）。
+  // One logical-length uniform per context (independent of the slot count).
   return { bytes: bytes + LENGTHS_BYTES, shapes, bindings };
 };
 
 /**
- * 重みの見積り。分類も宣言由来のバイト数も **Session 構築と同じプランナ**
- * （{@link planWeightResidency}）の結果を受け取り、席から実バッファへの展開も構築 / 上限検査と
- * 同じ 1 本（{@link planWeightBuffers}）を通す — ここで分類や展開を書き直すと、片方だけ直された
- * 実装に対して estimator が例外も警告も無く別の数を主張し続ける（モジュール doc の MUST）。
+ * The estimate of the weights. Both the classification and the declared bytes come from the result
+ * of **the same planner as Session construction** ({@link planWeightResidency}), and the expansion
+ * from residency class (`seat`) to real buffers goes through the same single function as
+ * construction / the limit check ({@link planWeightBuffers}) — rewriting the classification or
+ * expansion here would let the estimator keep claiming a different number, with no exception or
+ * warning, against an implementation fixed on one side only (the MUST of the module doc).
  *
- * ここが足すのは席ごとのカテゴリ分けだけ。整列詰め物とバッファ床（{@link toSizeClass}）は
- * `WeightBuffer.byteLength` 側が持つ — `alignF16Payload` / `alignI8Payload` の 4 バイト切り上げと
- * `allocHostWritten` の `Math.max(4, …)` を合わせた値と同じ。
+ * This only adds the categorisation per residency class. Alignment padding and the buffer floor
+ * ({@link toSizeClass}) belong to `WeightBuffer.byteLength` — equal to the 4-byte round-up of
+ * `alignF16Payload` / `alignI8Payload` combined with the `Math.max(4, …)` of `allocHostWritten`.
  */
 const weightEstimate = (
   residency: ReadonlyMap<string, WeightResidency>,
@@ -568,19 +643,22 @@ const weightEstimate = (
   for (const buffer of planWeightBuffers(residency)) {
     switch (buffer.seat) {
       case "raw":
-        // 圧縮しない格納は生バイトがそのまま GPU 表現（executor の分岐 3 本目）。
+        // Uncompressed storage: the raw bytes are the GPU representation as is (the third branch in
+        // the executor).
         uncompressed += buffer.byteLength;
         break;
       case "expanded":
-        // 適格外はロード時に CPU で f32 展開する（VRAM 削減はゼロ）。
-        // MUST: この欄だけ整列前のバイト数で数える — 診断 `storage.hostExpandedBytes` は
-        // writeBuffer した実バイトを積むので 4 バイト床を含まず、ここを確保寸法に替えると
-        // 0 要素テンソルを持つモデルで「厳密対応」が沈黙して崩れる。
+        // Ineligible weights are expanded to f32 on the CPU at load (zero VRAM saving).
+        // MUST: only this field counts bytes before alignment — the diagnostic
+        // `storage.hostExpandedBytes` sums the real bytes passed to writeBuffer and has no 4-byte
+        // floor, so switching this to the allocation size would silently break "exact
+        // correspondence" for models with zero-element tensors.
         expanded += buffer.declaredBytes;
         break;
-      // 圧縮常駐は payload と companion scale の**両方**を数える（executor の
-      // residentCompressedBytes と同じ規律 — 実際に GPU が抱えるバイト数を表す欄なので、
-      // scale を除くと実績と食い違う）。どちらも `WeightBuffer` として並んでいる。
+      // Compressed residency counts **both** the payload and the companion scale (the same rule as
+      // the executor's residentCompressedBytes — the field represents the bytes the GPU actually
+      // holds, so leaving the scale out would disagree with the measurement). Both are listed as
+      // `WeightBuffer`s.
       case "f16":
       case "bf16":
       case "i8":
@@ -589,10 +667,11 @@ const weightEstimate = (
         compressed += buffer.byteLength;
         break;
       default: {
-        // MUST: 未処理の席をここで止める。switch が素通りすると、そのバッファのバイト数が
-        // 3 欄のどれにも入らないまま `resident.weights.totalBytes` が実ロードより小さい数を
-        // 主張し続ける（見積りは実行を止めない面なので、ずれても赤くならない）。型としては
-        // 到達不能で、席を足したときの結線漏れをコンパイル時に赤くするのがこの分岐の役目。
+        // MUST: stop an unhandled residency class here. If the switch fell through, that buffer's
+        // bytes would enter none of the three fields and `resident.weights.totalBytes` would keep
+        // claiming less than the real load (the estimate does not stop execution, so a drift would
+        // not turn anything red). It is unreachable by type; this branch exists to turn a missed
+        // wiring red at compile time when a residency class is added.
         const unhandled: never = buffer.seat;
         throw new ExecutionError(`未処理の常駐席: ${JSON.stringify(unhandled)}`);
       }
@@ -602,20 +681,23 @@ const weightEstimate = (
 };
 
 /**
- * states 形 attention か（ADR 0067 決定 4 — **欄の有無が形を判別する**）。
+ * Whether it is states-form attention (ADR 0067 decision 4 — **the presence of the field decides
+ * the form**).
  *
- * MUST: 判別は recipe-builder の `#buildStep` と同じ 1 条件（op が `attention` で `states` 欄が
- * 非空）。別条件を書くと、融合 attention とは 1 バイトも共有しない別族カーネルの一時を
- * estimator だけが取り違える。
+ * MUST: the test is the same single condition as `#buildStep` in recipe-builder (op is `attention`
+ * and the `states` field is non-empty). A different condition would make the estimator alone mix up
+ * the temporaries of a separate kernel family that shares not a single byte with fused attention.
  */
 const isStateAttention = (node: NodePlan): boolean =>
   node.contract.kind === "attention" && Object.keys(node.node.states).length > 0;
 
 /**
- * 2 相形の argmax / topk(k=1)（長い行 — src/kernels/argmax.ts の「2 相分割」）が持つ部分結果の一時。
- * 経路の選択は実行相と同じ純関数 `argmaxSplitGroups` / `topkOneSplitGroups` を通す
- * — ここで閾値を書き直すと、片方だけ直された実装に対して estimator が別の数を主張し続ける。
- * 1 dispatch 形（短い行）は 0 を返す。
+ * The partial-result temporary of the two-phase argmax / topk(k=1) (long rows — the "two-phase
+ * split" section of src/kernels/argmax.ts).
+ * The path is chosen through the same pure functions as the execution phase, `argmaxSplitGroups` /
+ * `topkOneSplitGroups` — rewriting the threshold here would let the estimator keep claiming a
+ * different number against an implementation fixed on one side only.
+ * The one-dispatch form (short rows) returns 0.
  */
 const selectionSplitTempBytes = (node: NodePlan): number => {
   if (
@@ -630,22 +712,26 @@ const selectionSplitTempBytes = (node: NodePlan): number => {
 };
 
 /**
- * states 形 attention 1 ノードが出すノード内一時（スコア S と行統計）を行ブロック順に並べる。
+ * Lists, in row-block order, the in-node temporaries (scores S and row statistics) of one
+ * states-form attention node.
  *
- * 融合の成立に依存せず必ず出て、大きさは列容量（full = スロット容量 `C` / sliding = 窓の
- * resident 幅 `W−1+M`）に比例するため、可変 capacity のグラフでは中間の主役になる。
+ * They always appear regardless of whether fusion applies, and their size is proportional to the
+ * column capacity (full = the slot capacity `C` / sliding = the window's resident width `W−1+M`),
+ * so in graphs with variable capacity they dominate the intermediates.
  *
- * MUST: 算式は {@link planStateAttention}（実行計画 `buildStateAttention` と共有する 1 本）
- * だけから引く。ここで式を書き直すと、片方だけ直された実装に対して estimator が例外も警告も
- * 無く別の数を主張し続ける（モジュール doc の MUST）。ここが持つのは、見積り固有の材料
- * （記号解決済みのスロット shape）を幾何へ翻訳する部分だけ。
- * MUST: `maxStorageBufferBindingSize` が無ければ fail loudly。枚数は device の granted limit
- * （と利用者の予算）だけで決まるので、既定値で埋めると「どの device でも出ない一時の大きさ」を
- * 名乗ることになる。
- * MUST: 予算（`budget` — `EstimateOptions.attentionRowBlockMaxBytes`）は実行と同じ `rowBlockLimit` で
- * 束縛上限と合わせる（ADR 0124 決定 7）。
- * NOTE: 値域（正の安全整数）は {@link estimateGraphMemory} の入口が見る — states 形 attention を
- * 持たないグラフはここを通らないので、内側に置くと呼び手から見えない位置の門になる。
+ * MUST: take the formulas only from {@link planStateAttention} (the single function shared with the
+ * execution plan's `buildStateAttention`). Rewriting them here would let the estimator keep claiming
+ * a different number, with no exception or warning, against an implementation fixed on one side
+ * only (the MUST of the module doc). This only translates the estimate-specific material (the
+ * symbol-resolved slot shapes) into geometry.
+ * MUST: without `maxStorageBufferBindingSize`, fail loudly. The count is decided only by the
+ * device's granted limit (and the user's budget), so filling a default would claim "a temporary
+ * size that no device produces".
+ * MUST: combine the budget (`budget` — `EstimateOptions.attentionRowBlockMaxBytes`) with the binding
+ * limit through the same `rowBlockLimit` as execution (ADR 0124 decision 7).
+ * NOTE: the range (a positive safe integer) is checked at the entry of {@link estimateGraphMemory} —
+ * graphs without states-form attention do not pass through here, so placing it inside would put
+ * the check where the caller cannot see it.
  */
 const stateAttentionTemps = (
   node: NodePlan,
@@ -663,7 +749,8 @@ const stateAttentionTemps = (
     );
   }
   const [batch, heads, chunkRows] = q;
-  // k / v スロットは同形（shape 層が済ませている）ので容量は片方から引く。
+  // The k / v slots have the same shape (checked by the shape layer), so the capacity is taken from
+  // one of them.
   const slotName = node.node.states["k"];
   const slotShape = slotName === undefined ? undefined : stateShapes?.get(slotName);
   if (slotShape === undefined) {
@@ -672,9 +759,9 @@ const stateAttentionTemps = (
         "（GenerationContext を伴わない見積りでは states 形 attention を数えられない）",
     );
   }
-  // 行ブロックの枚数を明示する `forced`（テスト専用 `ROW_BLOCK_SPLIT`）は渡さない —
-  // `EstimateOptions` に受け口が無く、実運用の呼び手も使わないため（見積りは既定の等分だけを
-  // 名乗る）。
+  // `forced`, which sets the row-block count explicitly (the test-only `ROW_BLOCK_SPLIT`), is not
+  // passed — `EstimateOptions` has no field for it and production callers do not use it (the
+  // estimate claims only the default equal split).
   return planStateAttention(
     {
       batchHeads: batch * heads,
@@ -688,19 +775,24 @@ const stateAttentionTemps = (
 };
 
 /**
- * 融合計画（実行相と同じ {@link planFusions}）のうち、見積りが**融合後の形**で数えるステップを
- * 「窓の先頭ノードの添字 → ステップ」で引く（ADR 0093 追記 2026-10-10）。
+ * Looks up, among the fusion plan's steps (the same {@link planFusions} as the execution phase),
+ * those the estimate counts **in post-fusion form**, as "index of the window's first node → step"
+ * (ADR 0093 addendum of 2026-10-10).
  *
- * 対象は行ブロック attention だけ。融合前の列で数えると、融合で実体化されないスコア・mask 加算後・
- * softmax 後の全幅に束縛上限が当たり、実行できる形の見積りだけが例外になるため（ADR 0060 の需要形）。
- * 他のルールは従来どおり融合前の列で数える（`unaccounted` の側）。
+ * Only row-block attention. Counted in the pre-fusion list, the binding limit would hit the full
+ * width of the scores, mask-added scores and softmax output that fusion never materialises, and only
+ * the estimate of shapes that do run would throw (the demand shape of ADR 0060).
+ * Other rules are still counted in the pre-fusion list (the `unaccounted` side).
  *
- * MUST: 束縛上限は確保プログラムの上限検査と同じ値を渡す（行ブロックの枚数はこの値と予算だけで
- * 決まる — 別の値で割ると、見積りだけが実行と違う枚数の一時を数える）。予算（`budget`）は実行と同じく
- * 融合の文脈の `attentionRowBlockMaxBytes` として渡す（ADR 0124 決定 7）。行ブロック枚数の強制
- * （`rowBlockSplit` — テスト専用）は渡さない（{@link stateAttentionTemps} と同じ理由）。
- * NOTE: `maxComputeWorkgroupsPerDimension` は dispatch 数の上限検査にしか効かず、バイト数を動かさない。
- * 見積りは素のノードでも dispatch 数を検査しない（受ける欄も無い）ので、ここも検査しない値を渡す。
+ * MUST: pass the same binding limit as the limit check of the allocation program (the row-block
+ * count is decided only by this value and the budget — dividing by another value would make the
+ * estimate alone count temporaries with a block count different from execution). The budget
+ * (`budget`) is passed as `attentionRowBlockMaxBytes` of the fusion context, as in execution (ADR
+ * 0124 decision 7). A forced row-block count (`rowBlockSplit` — test only) is not passed (the same
+ * reason as {@link stateAttentionTemps}).
+ * NOTE: `maxComputeWorkgroupsPerDimension` only affects the limit check of dispatch counts and does
+ * not move bytes. The estimate checks no dispatch counts even for plain nodes (it has no field for
+ * it either), so a value that checks nothing is passed here too.
  */
 const rowBlockAttentionSteps = (
   nodes: readonly NodePlan[],
@@ -719,9 +811,10 @@ const rowBlockAttentionSteps = (
     ...(budget === undefined ? {} : { attentionRowBlockMaxBytes: budget }),
   });
   const found = new Map<number, FusedStep>();
-  // 走査は窓ごとに「passthrough のノード → 融合ステップ」を並べて窓幅ぶん進むので、ステップ列の
-  // ノード数の累計は常に次の窓の先頭を指す。行ブロック attention の窓は passthrough を持たない
-  // （窓 = 鎖）ので、この累計がそのまま融合前の列での先頭になる。
+  // The scan lays out "passthrough nodes → fused step" per window and advances by the window width,
+  // so the running node count of the step list always points at the start of the next window.
+  // Row-block attention windows have no passthrough (window = chain), so this running count is
+  // their start in the pre-fusion list as is.
   let index = 0;
   for (const step of steps) {
     if (step.kind === "node") {
@@ -729,8 +822,9 @@ const rowBlockAttentionSteps = (
       continue;
     }
     if (step.rule === "rowBlockAttention") {
-      // MUST: 鎖の末尾が融合ステップの出力と一致しなければ簿記の破れ（黙って別のノードを
-      // 置き換えると、見積りが実行と違う列を数える）。
+      // MUST: if the end of the chain does not match the fused step's output, bookkeeping is broken
+      // (silently replacing another node would make the estimate count a list different from
+      // execution).
       if (nodes[index + step.nodeCount - 1]?.outputs[0]?.name !== step.outputName) {
         throw new ExecutionError(
           `見積り: 行ブロック attention '${step.outputName}' の窓が融合前の列 ${index} に一致しない`,
@@ -744,18 +838,20 @@ const rowBlockAttentionSteps = (
 };
 
 /**
- * 行ブロック attention の融合ステップ 1 つの確保プログラム（recipe-builder の `#buildStep` /
- * `#buildFused` の簿記面の写し）。
+ * The allocation program of one fused row-block attention step (a copy of the bookkeeping side of
+ * `#buildStep` / `#buildFused` in recipe-builder).
  *
- * 出力は単一出力の実体（`numel × 4`）、一時はルールが宣言した寿命のまま、解放は外部入力の延べ列
- * （{@link FusedStep.ins}）。dispatch の読み書きは実行相と同じく**WGSL の storage 宣言**から採る
- * （{@link parseStorageRoles} — 手書きの表を持たない）。
+ * The output is a single-output backing (`numel × 4`), the temporaries keep the lifetimes the rule
+ * declared, and releases are the external inputs with repeats ({@link FusedStep.ins}). Dispatch reads
+ * and writes come from **the WGSL storage declarations**, as in the execution phase
+ * ({@link parseStorageRoles} — no hand-written table).
  *
- * MUST: 行ブロック attention 専用。写しているのはこのルールが使う形（全 dispatch が operands を
- * 宣言する・常駐 scale を束ねない）だけで、他のルールの形（operands 省略時の既定の並び・
- * `weightScale`）は写していない。他のルールを渡すと、見積りが実行と違う確保プログラムを
- * 黙って数えるので、ルール名と形の両方で fail loudly にする。他のルールへ広げるときは、
- * 写す形をここに足してから呼び手の対象を広げる。
+ * MUST: row-block attention only. It copies only the forms this rule uses (every dispatch declares
+ * its operands; no resident scale is bound), not the forms of other rules (the default order when
+ * operands are omitted, `weightScale`). Passing another rule would make the estimate silently count
+ * an allocation program different from execution, so it fails loudly on both the rule name and the
+ * form. To extend it to other rules, add the forms to copy here first, then widen the callers'
+ * targets.
  */
 const fusedTransientStep = (
   step: FusedStep,
@@ -769,8 +865,9 @@ const fusedTransientStep = (
   const output: TransientRef = { kind: "value", name: step.outputName };
   const bindRef = (index: number): TransientRef => {
     const name = step.binds[index];
-    // MUST: 範囲外の添字は fail loudly（実行相 recipe-builder の同じ門と揃える — 黙って名前の
-    // 無い参照を作ると、見積りだけが実行相の落ちる形を数として返す）。
+    // MUST: an out-of-range index fails loudly (matching the same check in the execution phase's
+    // recipe-builder — silently creating a reference without a name would make the estimate alone
+    // return a number for a shape on which the execution phase fails).
     if (name === undefined) {
       throw new ExecutionError(`${where}: bind 添字 ${index} が宣言 ${step.binds.length} 本の外`);
     }
@@ -797,7 +894,7 @@ const fusedTransientStep = (
           : operand.kind === "output"
             ? output
             : bindRef(operand.index);
-      // binding 0 は params なので、オペランドは binding 1 から並ぶ。
+      // Binding 0 is params, so the operands start at binding 1.
       const binding = slot + 1;
       if (roles.writes.has(binding)) writes.push(ref);
       else if (roles.reads.has(binding)) reads.push(ref);
@@ -826,24 +923,30 @@ const fusedTransientStep = (
   };
 };
 
-/** 中間の勘定が読む実行ノブ（Session と同じ値 — {@link estimateGraphMemory} の入口で値域を見た後のもの）。 */
+/**
+ * The execution options the intermediate accounting reads (the same values as the Session — after
+ * the range checks at the entry of {@link estimateGraphMemory}).
+ */
 type TransientKnobs = {
   readonly stateAttentionReduce: StateAttentionReduce;
-  /** 行ブロックの一時 1 本ごとの予算（`undefined` = 予算なし — ADR 0124）。 */
+  /** The budget per row-block temporary (`undefined` = no budget — ADR 0124). */
   readonly attentionRowBlockMaxBytes: number | undefined;
-  /** 融合 attention の計算形と S の格納形（省略値は代入済み）。 */
+  /** The compute form of fused attention and the storage form of S (defaults already filled in). */
   readonly seats: AttentionSeats;
 };
 
 /**
- * 融合 attention op 1 ノードの行ブロック（実行と同じ `planAttentionBlocks` × `rowBlockLimit`）。
+ * The row blocks of one fused attention op node (the same `planAttentionBlocks` × `rowBlockLimit` as
+ * execution).
  *
- * MUST: 束縛上限（`limit` — `EstimateOptions.maxStorageBufferBindingSize`）が渡されず、枚数が実際の
- * 束縛上限で変わりうる形は fail loudly（states 形の {@link stateAttentionTemps} と同じ理由 — core 既定で
- * 割ると、どの device でも出ない枚数を見積りだけが名乗りうる・ADR 0124 決定 7）。device の granted な
- * 束縛上限は WebGPU core 既定（128 MiB）以上なので、上限なしでも次の 2 つは全 device で枚数が同じで、
- * core 既定で数えてよい: ① core 既定で 1 枚に収まる形（どの device でも 1 枚）② 予算が core 既定以下
- * の形（上限は全 device で予算そのもの）。
+ * MUST: when no binding limit (`limit` — `EstimateOptions.maxStorageBufferBindingSize`) is passed
+ * and the count could change with the actual binding limit, fail loudly (the same reason as the
+ * states-form {@link stateAttentionTemps} — dividing by the core default could let the estimate
+ * alone claim a count that no device produces; ADR 0124 decision 7). A device's granted binding
+ * limit is at least the WebGPU core default (128 MiB), so even without a limit the following two
+ * have the same count on every device and may be counted with the core default: ① shapes that fit
+ * in one block under the core default (one block on every device) ② shapes whose budget is at most
+ * the core default (the limit is then the budget itself on every device).
  */
 const fusedAttentionBlocks = (
   extent: Parameters<typeof planAttentionBlocks>[0],
@@ -854,7 +957,8 @@ const fusedAttentionBlocks = (
   if (limit !== undefined) return planAttentionBlocks(extent, rowBlockLimit(limit, budget));
   const core = CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
   if (budget === undefined || budget > core) {
-    // 上限で割らずに全行を 1 枚にした S と行統計（1 枚に収まるかだけを見る — 枚数は下の 1 本で引く）。
+    // S and row statistics with every row in one block, undivided by a limit (only checks whether
+    // one block fits — the count comes from the single call below).
     const whole = planAttentionBlocks(extent, Number.MAX_SAFE_INTEGER);
     if (whole.length !== 1 || Math.max(whole[0].scoreBytes, whole[0].statsBytes) > core) {
       throw new ExecutionError(
@@ -868,19 +972,24 @@ const fusedAttentionBlocks = (
 };
 
 /**
- * 融合 attention op（states 欄なし — ADR 0023）1 ノードのノード内一時と dispatch の読み書き（ADR 0124
- * 決定 7）。実行（recipe-builders/attention.ts の `buildAttention`）の確保と dispatch の並びを写す:
+ * The in-node temporaries and dispatch reads / writes of one fused attention op node (no states
+ * field — ADR 0023) (ADR 0124 decision 7). It copies the allocation and dispatch order of execution
+ * (`buildAttention` in recipe-builders/attention.ts):
  *
- * 1. i8a8 の ①QK（`route.qk`）: `qq` / `qs` / `kq` / `ks` を確保し、q と k を量子化する 2 dispatch
- * 2. i8a8 の ③PV（`route.pv`）: `vt` / `vq` / `vs` を確保し、v の permute と Vᵀ の量子化の 2 dispatch
- * 3. 行ブロックごとに S と行統計を確保し、①QK → ②行統計 → ③PV の 3 dispatch の後に返す
- * 4. 量子化の一時はノード末尾（最後の ③PV の後）に返す
+ * 1. i8a8 ①QK (`route.qk`): allocate `qq` / `qs` / `kq` / `ks`, two dispatches quantising q and k
+ * 2. i8a8 ③PV (`route.pv`): allocate `vt` / `vq` / `vs`, two dispatches for v's permute and Vᵀ's
+ *    quantisation
+ * 3. Per row block, allocate S and the row statistics and release them after the three dispatches
+ *    ①QK → ②row statistics → ③PV
+ * 4. Release the quantisation temporaries at the end of the node (after the last ③PV)
  *
- * MUST: 大きさと枚数は実行と同じ純関数（`attentionRoute`・`attentionScoreElementBytes`・
- * `planAttentionBlocks`・`attentionI8a8TempBytes`・`rowBlockLimit`）だけから引く。組合せの門も同じ
- * `fusedAttentionViolation` で、実行が拒否する形には数を返さない。
- * NOTE: 束縛上限（`limit` — `EstimateOptions.maxStorageBufferBindingSize`）が無いときの扱いは
- * {@link fusedAttentionBlocks}（枚数が device に依らない形だけ数える）。
+ * MUST: take sizes and counts only from the same pure functions as execution (`attentionRoute`,
+ * `attentionScoreElementBytes`, `planAttentionBlocks`, `attentionI8a8TempBytes`, `rowBlockLimit`).
+ * The combination check is the same `fusedAttentionViolation`, and no number is returned for shapes
+ * execution rejects.
+ * NOTE: the handling when there is no binding limit (`limit` —
+ * `EstimateOptions.maxStorageBufferBindingSize`) is {@link fusedAttentionBlocks} (only shapes whose
+ * count does not depend on the device are counted).
  */
 const fusedAttentionProgram = (
   node: NodePlan,
@@ -963,28 +1072,35 @@ const fusedAttentionProgram = (
 };
 
 /**
- * 中間バッファ（ノード出力と融合ルールの一時）の GPU バイト数を、実行と**同じ計画関数**で数える
- * （ADR 0093 決定 4 — {@link planTransients} の共有。ADR 0070 決定 5「実行と同じ規則」を関数共有で
- * 満たす）。返るのは領域の総和（`totalBytes`）。
+ * Counts the GPU bytes of intermediate buffers (node outputs and fusion-rule temporaries) with **the
+ * same planning function** as execution (ADR 0093 decision 4 — sharing {@link planTransients};
+ * meets ADR 0070 decision 5's "the same rule as execution" by sharing the function). Returns the sum
+ * of regions (`totalBytes`).
  *
- * MUST: 確保プログラムは融合前ノード列から組み、行ブロック attention の窓だけを実行相と同じ
- * 融合ステップに置き換える（ADR 0093 追記 2026-10-10 — {@link rowBlockAttentionSteps}）。他の融合が
- * 畳む中間と融合ルールの一時は `unaccounted` の側。素のノードの dispatch は 1 ノード 1 本の近似
- * （読み = `ins`・書き = `outs`）で、usage scope の別領域規則が効く相手を実行相と同じ向きで与える。
- * states 形 attention と融合 attention op（states 欄なし — {@link fusedAttentionProgram}）は実行相の
- * 3 dispatch（①qk が scores を書く → ②stats が scores を読み行統計を書く → ③pv が両方を読み出力を書く）
- * を行ブロックごとに写す — 一時同士の重なりと領域の分かれ方が総和に効くため（融合 attention は i8a8 の
- * 量子化の一時と dispatch も写す — ADR 0124 決定 7）。
- * MUST: 上限超過（slot 実寸 > 束縛上限）は計画関数が**全件列挙して**落とす（ADR 0093 決定 5）。
- * 見積りの入口でも同じ検査が走るので、「この device では中間が束ねられない」形は数を返さず
- * fail loudly になる。検査が当たるのは融合後に実際に束縛するバッファ（行ブロック attention では
- * 1 枚ぶんの一時）で、融合で実体化されない中間には当てない。上限は `limit`
- * （`EstimateOptions.maxStorageBufferBindingSize` — 無指定なら WebGPU core 既定）で、領域の上限は
- * `maxBufferSize`（`EstimateOptions.maxBufferSize`）。後者が
- * 無指定のときだけ束縛上限と core 既定の大きいほうで埋める（束縛上限 ≤ `maxBufferSize` は仕様の
- * 不変条件）。渡された granted 値を使うのは、first-fit の領域の割れ方が上限で変わり、実行相
- * （granted 値で計画する）と総和が食い違うため（ADR 0093 決定 4）。
- * MUST: 簿記の単位は**値名ではなく slot**（別名は根の生存を延ばす）。
+ * MUST: build the allocation program from the pre-fusion node list and replace only the windows of
+ * row-block attention with the same fused steps as the execution phase (ADR 0093 addendum of
+ * 2026-10-10 — {@link rowBlockAttentionSteps}). Intermediates folded by other fusions and fusion-rule
+ * temporaries are on the `unaccounted` side. Plain nodes' dispatches are approximated as one per
+ * node (reads = `ins`, writes = `outs`), giving the usage-scope rule for separate regions the same
+ * counterparts in the same direction as the execution phase. States-form attention and fused
+ * attention ops (no states field — {@link fusedAttentionProgram}) copy the execution phase's three
+ * dispatches (①qk writes scores → ②stats reads scores and writes row statistics → ③pv reads both
+ * and writes the output) per row block — because the overlap between temporaries and the way regions
+ * split affect the sum (fused attention also copies the i8a8 quantisation temporaries and dispatches
+ * — ADR 0124 decision 7).
+ * MUST: the planning function **lists every overrun** (actual slot size > binding limit) and fails
+ * (ADR 0093 decision 5). The same check runs at the estimate's entry, so a shape where "this device
+ * cannot bind the intermediates" returns no number and fails loudly. The check applies to the
+ * buffers actually bound after fusion (one block's temporaries for row-block attention), not to
+ * intermediates that fusion never materialises. The limit is `limit`
+ * (`EstimateOptions.maxStorageBufferBindingSize` — the WebGPU core default when unspecified), and the
+ * region limit is `maxBufferSize` (`EstimateOptions.maxBufferSize`). Only when the latter is
+ * unspecified is it filled with the larger of the binding limit and the core default (binding limit
+ * ≤ `maxBufferSize` is an invariant of the spec). The granted values passed in are used because
+ * how first-fit splits regions changes with the limit, and the sum would disagree with the execution
+ * phase (which plans with the granted values) (ADR 0093 decision 4).
+ * MUST: the bookkeeping unit is **the slot, not the value name** (an alias extends its root's live
+ * range).
  */
 const transientSlotBytes = (
   graph: IrGraph,
@@ -1017,13 +1133,16 @@ const transientSlotBytes = (
     const temps: TransientTempSpec[] = [];
     const dispatches: TransientDispatchSpec[] = [];
     if (isStateAttention(node)) {
-      // 行ブロックごとに実行相の 2 / 3 dispatch と一時の寿命を写す。
-      // scores は QK の直前、非融合時の stats は行統計の直前に確保し、PV の直後に解放する。
-      // readonly 変種（借り手の cross-attention — ADR 0096・ins は q だけ）は K/V を external
-      // スロットから読み、今 step の k / v 入力を持たない。読みの参照は**在る入力だけ**にする
-      // （無い名前を参照に載せると transient 計画が未定義の参照で落ちる）。
+      // Copy the execution phase's 2 / 3 dispatches and temporary lifetimes per row block.
+      // scores are allocated right before QK, stats (when not fused) right before the row
+      // statistics, and both are released right after PV.
+      // The readonly variant (the borrower's cross-attention — ADR 0096; ins is q only) reads K/V
+      // from external slots and has no k / v inputs for this step. Read references cover **only the
+      // inputs that exist** (referencing a missing name would make the transient plan fail on an
+      // undefined reference).
       const [q, k, v] = reads;
-      // 数値変種 × states 形は実行が一時を取る前に拒否する（実行と同じ判定・同じ文言）。
+      // Execution rejects numeric variants × states form before taking temporaries (same test, same
+      // message as execution).
       const [qShape, kShape] = node.inputShapes;
       const readonly = stateReadonly(node.node.attrs, `nodes (${node.node.op})`);
       const variantViolation = stateAttentionVariantViolation(
@@ -1061,12 +1180,14 @@ const transientSlotBytes = (
         }
       }
     } else if (node.contract.kind === "attention") {
-      // 融合 attention op（states 欄なし）のノード内一時（S・行統計・i8a8 の量子化の一時）。
+      // In-node temporaries of a fused attention op (no states field): S, row statistics, i8a8
+      // quantisation temporaries.
       const program = fusedAttentionProgram(node, reads, outputRefs, limit, knobs);
       temps.push(...program.temps);
       dispatches.push(...program.dispatches);
     } else if (!isAlias && selectionSplitTempBytes(node) > 0) {
-      // 部分最大から最小添字へ縮約する。topkはmergeで元入力の値ビットも読む。
+      // Reduce from the partial maxima to the smallest index. topk's merge also reads the value
+      // bits of the original input.
       const partial: TransientRef = { kind: "temp", id: temps.length };
       temps.push({
         byteLength: selectionSplitTempBytes(node),
@@ -1081,7 +1202,8 @@ const transientSlotBytes = (
     } else if (!isAlias) {
       dispatches.push({ reads, writes: outputRefs });
     }
-    // 別名も入力を消費する（`uses` に数えられている）ので、解放は全ノードで入力の延べ列。
+    // Aliases consume their input too (counted in `uses`), so every node releases its inputs with
+    // repeats.
     return { outputs, temps, dispatches, releases: node.node.ins };
   };
   const fused = rowBlockAttentionSteps(
@@ -1110,65 +1232,79 @@ const transientSlotBytes = (
 };
 
 /**
- * Session 1 本ぶんの必要メモリを見積る（ADR 0070 決定 5 — GPU も device も要らない純関数）。
- * `PreparedModel.estimate` が呼ぶのもこの 1 本である。
+ * Estimates the memory one Session needs (ADR 0070 decision 5 — a pure function that needs neither
+ * the GPU nor a device). `PreparedModel.estimate` calls this same function.
  *
- * 判定はしない: 返るのはカテゴリ別のバイト数と、勘定に入っていないものの列だけ。可否の
- * 最終門は out-of-memory errorScope のままで、この見積りを超えていても実行は止まらない。
+ * It makes no decision: it returns only bytes per category and the list of what is not accounted
+ * for. The final go / no-go check remains the out-of-memory errorScope, and execution does not stop
+ * when this estimate is exceeded.
  *
- * **グラフ単位の見積り口**でもある: ロードを終えて初期化子のバイト列を手放した呼び手
- * （models のパイプラインは `PreparedModel` を捨てて `IrGraph` だけ残す）が、握っている
- * グラフと `planWeightResidency(graph)` の計画、そして `{capacity, chunkLength}` を
- * `options.generation` に載せて同じ {@link AdmissionReport} を得る。
+ * It is also **the per-graph estimate entry**: a caller that has finished loading and let go of the
+ * initializer bytes (the models pipelines discard the `PreparedModel` and keep only the `IrGraph`)
+ * passes the graph it holds, the plan from `planWeightResidency(graph)` and `{capacity,
+ * chunkLength}` in `options.generation`, and gets the same {@link AdmissionReport}.
  *
- * MUST: 常駐計画を**持っている呼び手はそれを渡す**（`PreparedModel` は prepare 時に 1 回だけ
- * 計算して構築とも共有する）。構築に使ったのと別の計画を組み直して渡すと、「見積りに使った席」
- * と「実際に上げた席」が別の計算結果になりうる形が復活する。
- * 持っていない呼び手（`PreparedModel` を捨てて `IrGraph` だけ残す models のパイプライン）は
- * `planWeightResidency(graph)` で引いてよい — グラフが同じなら計画も同じ純関数なので、席の
- * 食い違いは生じない（`mod.ts` がこの 2 本を公開している理由そのもの）。
+ * MUST: **a caller that has the residency plan passes it** (`PreparedModel` computes it once at
+ * prepare time and shares it with construction). Rebuilding a plan other than the one used for
+ * construction would bring back the form where "the residency classes used for the estimate" and
+ * "the ones actually uploaded" may be different computation results.
+ * A caller without it (a models pipeline that discards the `PreparedModel` and keeps only the
+ * `IrGraph`) may compute it with `planWeightResidency(graph)` — for the same graph the plan is the
+ * same pure function, so the residency classes cannot disagree (exactly why `mod.ts` exposes these
+ * two functions).
  *
- * MUST: 渡す `graph` は `PreparedModel.graph`（構築と同じ門 — capability 検査と契約検査 — を
- * 通った検証済みのグラフ）から取る。下の門はこの関数の中で走るが、`planWeightResidency(graph)`
- * は引数の評価で**先に**走るので、未検証のグラフでは常駐計画の内側（conv1d の attrs や payload
- * 長の検査）が先に落ち、失敗の文言が `nodes[i] (op)` を名乗らない（fail loudly 自体は保たれる）。
+ * MUST: take the `graph` passed in from `PreparedModel.graph` (a validated graph that passed the
+ * same checks as construction — the capability check and the contract checks). The checks below
+ * run inside this function, but `planWeightResidency(graph)` runs **earlier**, during argument
+ * evaluation, so with an unvalidated graph the inside of the residency plan (the conv1d attrs and
+ * payload length checks) fails first and the failure message does not name `nodes[i] (op)` (failing
+ * loudly itself is preserved).
  *
- * @param options.bindings グラフ入力側の記号次元（run に渡すのと同じ束縛）。未束縛の記号が
- *   要る形は fail loudly。物理 chunk 行 `M` の記号だけは**ここでは受けない**（束縛点は
- *   `options.generation.chunkLength` と decode 形の 1 — {@link planBindings}）。
- * @param options.generation 見積る `GenerationContext` の仕様。省略すると
- *   `resident.stateBytes` は 0・シナリオは `"run"` の 1 本（states 形グラフでは省略できない —
- *   中間ピークの計画がスロットの解決済み shape を要求する）。渡すとシナリオは
- *   `"prefill"` / `"decode"` の 2 本になり、`generation.scenarios` を足すとその後ろに宣言順で
- *   並ぶ（{@link AdmissionScenarioSpec}）。`generation.chunkBuckets` の各形はシナリオに並べず、
- *   {@link AdmissionReport.peakAccountedBytes} の最大にだけ入る。
- * @param options.maxStorageBufferBindingSize device の granted 上限。states 形 attention を
- *   持つグラフでは必須（ノード内一時の行ブロック枚数がこれだけで決まる）。融合 attention op で
- *   枚数が束縛上限に依る形（WebGPU core 既定で 1 枚に収まらず、予算も core 既定以下でない形）でも
- *   必須。全グラフの中間配置の束縛上限にも使う（無指定なら WebGPU core 既定）。
- * @param options.planBackingBudgetBytes slot backing の保持予算（`SessionOptions` と同じ値）。
- *   {@link AdmissionReport.peakAccountedBytes} の片側の項になる。
- * @param options.attentionRowBlockMaxBytes 行ブロックの一時 1 本ごとの予算（`SessionOptions` と同じ値 —
- *   ADR 0124）。行ブロックの枚数を実行と同じ導出で決め、1 行ぶんにも満たない予算は実行と同じ文言で
- *   fail loudly（予算違反を重みの読み込みの前に知る手段）。
+ * @param options.bindings symbolic dimensions on the graph-input side (the same bindings passed to a
+ *   run). A shape that needs an unbound symbol fails loudly. Only the symbols of the physical chunk
+ *   rows `M` are **not accepted here** (their binding points are `options.generation.chunkLength`
+ *   and the decode shape's 1 — {@link planBindings}).
+ * @param options.generation the spec of the `GenerationContext` to estimate. When omitted,
+ *   `resident.stateBytes` is 0 and there is one scenario, `"run"` (it cannot be omitted for
+ *   states-form graphs — the plan of the intermediate peak requires the slots' resolved shapes).
+ *   When given, there are two scenarios, `"prefill"` / `"decode"`, and `generation.scenarios`
+ *   follows them in declaration order ({@link AdmissionScenarioSpec}). The shapes of
+ *   `generation.chunkBuckets` are not listed as scenarios and enter only the maximum of
+ *   {@link AdmissionReport.peakAccountedBytes}.
+ * @param options.maxStorageBufferBindingSize the device's granted limit. Required for graphs with
+ *   states-form attention (the row-block count of the in-node temporaries depends on it alone). Also
+ *   required for fused attention ops whose count depends on the binding limit (shapes that do not
+ *   fit in one block under the WebGPU core default and whose budget is not at most the core
+ *   default). Also used as the binding limit of intermediate placement for every graph (the WebGPU
+ *   core default when unspecified).
+ * @param options.planBackingBudgetBytes the slot-backing keep budget (the same value as
+ *   `SessionOptions`). It becomes one term of {@link AdmissionReport.peakAccountedBytes}.
+ * @param options.attentionRowBlockMaxBytes the budget per row-block temporary (the same value as
+ *   `SessionOptions` — ADR 0124). The row-block count is decided by the same derivation as
+ *   execution, and a budget smaller than a single row fails loudly with the same message as
+ *   execution (the way to learn of a budget violation before the weights are loaded).
  */
 export const estimateGraphMemory = (
   graph: IrGraph,
   residency: ReadonlyMap<string, WeightResidency>,
   options: EstimateOptions,
 ): AdmissionReport => {
-  // MUST: 実構築（`createSessionFromContainer`）と**同じ門**を先に通す（見積り本体より先 —
-  // 常駐計画 `residency` は呼び手が先に計算済みなので、門の後に計画する順序を保証するのは
-  // `PreparedModel` 経由、または検証済みの `PreparedModel.graph` を渡す呼び手だけ）。
-  // 作れない構成へ見積りを返すと、格納 dtype や op が非対応のモデルに対して estimator だけが
-  // もっともらしい総量を主張する（例: 格納 `bf16` は IR の語彙にはあるが RUNTIME_SUPPORT に
-  // 無く、Session 構築は必ず落ちる）。門を共有すれば語彙が増えたときの抜けも同時に塞がる。
-  // NOTE: これは capability 検査であって空き側との比較ではないので、ADR 0070 決定 5 の
-  // 「比較をしない」規律には抵触しない（GPU にも触らず純関数のまま）。
+  // MUST: run **the same checks** as the real construction (`createSessionFromContainer`) first
+  // (before the estimate body — the caller has already computed the residency plan `residency`, so
+  // only callers going through `PreparedModel`, or passing the validated `PreparedModel.graph`,
+  // guarantee the order "check, then plan").
+  // Returning an estimate for a configuration that cannot be built would let the estimator alone
+  // claim a plausible total for a model with an unsupported storage dtype or op (e.g. a storage
+  // dtype in the IR vocabulary but missing from RUNTIME_SUPPORT makes Session construction always
+  // fail — `bf16` was such a case until ADR 0131 added it). Sharing the checks also closes the gap
+  // when the vocabulary grows.
+  // NOTE: this is a capability check, not a comparison with the free side, so it does not violate
+  // the "no comparison" rule of ADR 0070 decision 5 (it touches no GPU and stays a pure function).
   assertRuntimeSupport(graph, RUNTIME_SUPPORT);
-  // グラフ全体を見ないと決まらない契約（state_append の本数と終端・Tmax 形・slice / flip の
-  // 静的軸・cat の連結軸・入力の意味論 dtype）も同じ位置で通す。`PreparedModel.estimate` は
-  // 構築時と二重に通ることになるが、どちらも純関数・冪等でグラフ 1 走査ぶんの費用しかない。
+  // Contracts that cannot be decided without the whole graph (the count and terminal position of
+  // state_append, the Tmax shape, the static axes of slice / flip, cat's concatenation axis, the
+  // inputs' semantic dtypes) also run at this point. `PreparedModel.estimate` thus runs them a
+  // second time after construction, but both are pure, idempotent and cost one graph scan.
   validateGraphContracts(graph);
   const stateAttentionReduce = options.stateAttentionReduce ?? "sequential";
   if (typeof stateAttentionReduce !== "string") {
@@ -1181,12 +1317,14 @@ export const estimateGraphMemory = (
       "options.stateAttentionReduce '" + stateAttentionReduce + "' は未対応",
     );
   }
-  // MUST: 値域はグラフの形に依らずここで見る。stateAttentionTemps の内側だけで検査すると、
-  // states 形 attention を持たないグラフで -1 / 1.5 / NaN が黙って受理される。
+  // MUST: check the ranges here, regardless of the graph's shape. Checking only inside
+  // stateAttentionTemps would silently accept -1 / 1.5 / NaN for graphs without states-form
+  // attention.
   assertLimitOption("maxStorageBufferBindingSize", options.maxStorageBufferBindingSize);
   assertLimitOption("maxBufferSize", options.maxBufferSize);
-  // MUST: 予算の値域も**ここで**見る（`createContainerSession` と同じ検査 — ADR 0095 決定 1）。読む位置
-  // （下のピーク）だけに置くと、Session が作れない予算で見積りだけが数を返す。
+  // MUST: check the budget's range **here** too (the same check as `createContainerSession` — ADR
+  // 0095 decision 1). Placing it only where it is read (the peak below) would let the estimate alone
+  // return numbers for a budget with which no Session can be built.
   const budgetBytes = options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES;
   if (!Number.isSafeInteger(budgetBytes) || budgetBytes < 0) {
     throw new ExecutionError(
@@ -1195,8 +1333,9 @@ export const estimateGraphMemory = (
       )} は非負の安全な整数でなければならない`,
     );
   }
-  // 行ブロックの一時 1 本ごとの予算も同じ位置・同じ文言（`sessionOptionsViolation` の門 — ADR 0124
-  // 決定 5）。行ブロックで割る形を持たないグラフでも見る（値域門の位置をグラフの形に依らせない）。
+  // The budget per row-block temporary is checked at the same point with the same message (the
+  // check of `sessionOptionsViolation` — ADR 0124 decision 5). It is checked even for graphs with no
+  // row-block split (the location of the range check must not depend on the graph's shape).
   const attentionRowBlockMaxBytes = options.attentionRowBlockMaxBytes;
   if (
     attentionRowBlockMaxBytes !== undefined &&
@@ -1208,8 +1347,9 @@ export const estimateGraphMemory = (
       )} は正の安全な整数でなければならない`,
     );
   }
-  // 融合 attention の計算形と S の格納形は Session 構築と同じ門（綴り・c16 × s16 の組）で見る
-  // （ADR 0124 決定 7 — Session が作れない席で見積りだけが数を返さない）。
+  // The compute form of fused attention and the storage form of S go through the same check as
+  // Session construction (spelling, the c16 × s16 pair) (ADR 0124 decision 7 — the estimate alone
+  // returns no numbers for options with which no Session can be built).
   const seatViolation = sessionOptionsViolation({
     attentionCompute: options.attentionCompute,
     attentionScoreStorage: options.attentionScoreStorage,
@@ -1227,15 +1367,16 @@ export const estimateGraphMemory = (
 
   const chunkLength = options.generation?.chunkLength;
   if (chunkLength === undefined && chunkDims.length > 0) {
-    // states 形ノードを持つグラフは GenerationContext 無しでは走らない（ADR 0066 決定 1）。
-    // ここで落とさないと、chunk 記号が未束縛のまま planGraph の次元評価で落ちて、束縛点を
-    // 名乗らない DimError になる。
+    // A graph with states-form nodes does not run without a GenerationContext (ADR 0066 decision 1).
+    // Without failing here, it would fail in planGraph's dimension evaluation with the chunk symbol
+    // unbound, as a DimError that does not name the binding point.
     throw new ExecutionError(
       `物理 chunk 行 M の記号 [${chunkDims.join(", ")}] は options.generation.chunkLength で` +
         "しか束縛できない（states 形ノードを持つグラフは GenerationContext が要る）",
     );
   }
-  // ADR 0066 決定 4 の実行 2 形をそれぞれ独立に計算する（chunk 行だけが違う同じグラフ）。
+  // Compute the two execution shapes of ADR 0066 decision 4 independently (the same graph,
+  // differing only in chunk rows).
   const plans: [name: string, bindings: SymbolBindings][] =
     chunkLength === undefined
       ? [["run", bindings]]
@@ -1243,12 +1384,13 @@ export const estimateGraphMemory = (
           ["prefill", bindChunkRows(bindings, chunkDims, chunkLength, "prefill")],
           ["decode", bindChunkRows(bindings, chunkDims, 1, "decode")],
         ];
-  // 呼び手が足す形（ADR 0096 の verify run など）は既存 2 形の後ろに宣言順で並ぶ。計算経路は
-  // 同じ 1 本で、変わるのは物理 chunk 行と（渡されたなら）グラフ入力側の束縛だけ。
+  // Shapes added by the caller (ADR 0096's verify run and the like) follow the existing two in
+  // declaration order. The computation path is the same single one; only the physical chunk rows
+  // and (if passed) the graph-input bindings change.
   const generation = options.generation;
   if (generation?.scenarios !== undefined) {
-    // MUST: 名前の重複は fail loudly（予約名 3 つ + 追加名どうし）。同名が 2 本並ぶと、
-    // 名前で引く呼び手が黙って先頭だけを見る。
+    // MUST: duplicate names fail loudly (the three reserved names + extra names among themselves).
+    // With two entries of the same name, a caller looking up by name silently sees only the first.
     const taken = new Set<string>(["run", "prefill", "decode"] satisfies AdmissionScenarioName[]);
     for (const spec of generation.scenarios) {
       if (taken.has(spec.name)) {
@@ -1257,8 +1399,8 @@ export const estimateGraphMemory = (
         );
       }
       taken.add(spec.name);
-      // MUST: 値域は `1..chunkLength`（`queryLength ≤ chunkLength` の契約と同じ上限 —
-      // 宣言 shape に載らない行数の見積りを返さない）。
+      // MUST: the range is `1..chunkLength` (the same bound as the `queryLength ≤ chunkLength`
+      // contract — no estimate for a row count that does not fit the declared shape).
       if (
         !Number.isSafeInteger(spec.chunkLength) ||
         spec.chunkLength < 1 ||
@@ -1269,18 +1411,22 @@ export const estimateGraphMemory = (
             `1..${generation.chunkLength}（generation.chunkLength）の整数でない`,
         );
       }
-      // 束縛は既定の写しに上書きしてから、既存 2 形と同じ門（`planBindings`）を通す。
+      // Override a copy of the default bindings, then run the same check as the existing two shapes
+      // (`planBindings`).
       const base = planBindings(graph, { ...options.bindings, ...spec.bindings }, chunkSymbols);
       plans.push([spec.name, bindChunkRows(base, chunkDims, spec.chunkLength, spec.name)]);
     }
   }
 
-  // `chunkBuckets`（ADR 0066 追記〈バケット〉）の各形はピークにだけ入れる内部の計画で、公開の
-  // シナリオには並べない（名前で引く呼び手の列を動かさない — ADR 0095 追記 2026-10-10）。
-  // MUST: ピークを最大 M の prefill 形だけで代表させない。行ブロックの等分（planRowBlocks）は
-  // 枚数が 1 → 2 に変わる境界で行数の少ない形のほうが一時を多く使う（例: 1 枚 32 行の
-  // 128 MiB に対し 33 行は 17 + 16 行の 2 枚で約 68 MiB）ので、中間は M に単調でない。許される
-  // 物理行数を全て計算して最大を取れば、分割規則が変わっても仮定が崩れない。
+  // The shapes of `chunkBuckets` (ADR 0066 addendum 10, buckets) are internal plans that enter only
+  // the peak and are not listed among the public scenarios (the list callers look up by name does
+  // not move — ADR 0095 addendum of 2026-10-10).
+  // MUST: do not let the largest-M prefill shape alone represent the peak. The equal split into row
+  // blocks (planRowBlocks) makes the shape with fewer rows use more temporaries at the boundary
+  // where the block count changes from 1 to 2 (e.g. 128 MiB for one block of 32 rows vs about
+  // 68 MiB for 33 rows in two blocks of 17 + 16), so the intermediates are not monotonic in M.
+  // Computing every allowed physical row count and taking the maximum keeps the assumption intact
+  // even if the split rule changes.
   const buckets: [name: string, bindings: SymbolBindings][] = (generation?.chunkBuckets ?? []).map(
     (rows) => {
       const name = `bucket ${rows}`;
@@ -1296,17 +1442,19 @@ export const estimateGraphMemory = (
     name: string,
     bindings: SymbolBindings,
   ]): AdmissionScenario => {
-    // MUST: states と入力の両方に現れる記号は 2 つの束縛点で同じ値（run が拒否する分裂 —
-    // ADR 0066 追記 7 — に見積りだけが正常値を返さない）。シナリオごとに解決値が変わるので
-    // 照合もシナリオごと。
+    // MUST: a symbol that appears in both states and inputs has the same value at both binding
+    // points (the estimate alone returns no normal value for a split a run rejects — ADR 0066
+    // addendum 7). The resolved values change per scenario, so the check is per scenario too.
     if (state.bindings !== undefined) assertGenerationBindings(state.bindings, scenarioBindings);
     const plan = planGraph(graph, scenarioBindings, state.shapes);
-    // MUST: 解決した物理 chunk 行は run 前検査と同じ許可集合で照合する（同じ 1 本 —
-    // `assertChunkRowsAllowed`）。数値で固定した `M` や追加シナリオの行数が集合に無い形は、
-    // run が最初の 1 回で必ず拒否するので、見積りだけが正常値を返さない。
+    // MUST: match the resolved physical chunk rows against the same allowed set as the pre-run
+    // check (the same single function — `assertChunkRowsAllowed`). A numerically fixed `M` or an
+    // extra scenario's row count outside the set is always rejected by the run's first call, so the
+    // estimate alone returns no normal value.
     if (allowedRows !== undefined) assertChunkRowsAllowed(stateChunkRows(plan.nodes), allowedRows);
-    // 入力バッファと出力 readback staging は同じ床つきの式（executor の `#bindInput` /
-    // `#activateBacking` / `#stageOutputs` — `Math.max(4, numel×4)` は toSizeClass と同値）。
+    // Input buffers and output readback staging use the same floored formula (`#bindInput` /
+    // `#activateBacking` / `#stageOutputs` in the executor — `Math.max(4, numel×4)` equals
+    // toSizeClass).
     let ioBytes = 0;
     for (const spec of graph.inputs) {
       ioBytes += toSizeClass(numel(shapeOf(plan.shapes, spec.name)) * 4);
@@ -1345,7 +1493,8 @@ export const estimateGraphMemory = (
     },
     scenarios,
     planBackingBudgetBytes: budgetBytes,
-    // 保持集合は `max(予算, 最大 1 本)` を超えない（executor の `#evictBackingsFor`）。
+    // The kept set never exceeds `max(budget, largest single backing)` (`#evictBackingsFor` in the
+    // executor).
     peakAccountedBytes: weightBytes + state.bytes + Math.max(budgetBytes, peakScenarioBytes),
     unaccounted: UNACCOUNTED,
   };

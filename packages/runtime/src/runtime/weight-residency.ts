@@ -1,17 +1,21 @@
 /**
- * 重みの**常駐分類**（席）— グラフ宣言だけで決まる純関数プランナと、その結果を GPU 実体へ
- * 結び付けた Session 側の判別 union。
+ * The **residency class** of weights — a pure-function planner decided by the graph declaration
+ * alone, and the Session-side discriminated union that binds its result to GPU objects.
  *
- * MUST: 分類の正本はここ 1 本（{@link planWeightResidency}）。Session 構築（session-build.ts）と
- * 見積り（estimate.ts）が別々に「適格判定 + 格納 dtype の分岐」を書くと、片方だけ直された
- * ときに **見積りと実ロードが別のモデルを説明する**（例外も警告も出ない）。
- * MUST: 実テンソルを見ない。バイト数は宣言 shape と格納メタデータから導き、実バイトとの一致は
- * 容器の突合門（合流層の payload 長検査と、構築相の「宣言由来 N バイト」検査）が保証する。
+ * MUST: the classification has one source of truth, here ({@link planWeightResidency}). If Session
+ * construction (session-build.ts) and the estimate (estimate.ts) each wrote "eligibility + branch on
+ * storage dtype", fixing only one would make **the estimate and the real load describe different
+ * models** (with no exception and no warning).
+ * MUST: do not look at the real tensors. Byte counts are derived from the declared shape and the
+ * storage metadata; agreement with the real bytes is guaranteed by the container's matching checks
+ * (the payload-length check of the merge layer and the "N bytes from the declaration" check of the
+ * construction phase).
  *
- * 席から「実際に確保される GPU バッファ」への写像（{@link planWeightBuffers}）と、その寸法を
- * device の絶対上限と突き合わせる門（{@link assertWeightsWithinLimits}）も同じ理由でここに置く
- * — 確保する側（session-build.ts）と数える側（estimate.ts）が別々に席を展開すると、片方だけ直された
- * ときに検査・見積り・実ロードが別の寸法を主張する。
+ * The mapping from residency class to "the GPU buffers actually allocated" ({@link planWeightBuffers})
+ * and the guard that compares their sizes with the device's absolute limits
+ * ({@link assertWeightsWithinLimits}) live here for the same reason — if the allocating side
+ * (session-build.ts) and the counting side (estimate.ts) each expanded the residency classes, fixing
+ * only one would make the check, the estimate and the real load claim different sizes.
  */
 
 import {
@@ -35,34 +39,36 @@ import {
 } from "./plan.ts";
 
 /**
- * 圧縮のまま GPU 常駐した重み 1 本（Session の重み台帳と対の索引 — カーネル変種の選択と
- * 追加束縛がここだけで決まる）。
+ * One weight resident on the GPU in compressed form (the index paired with the Session's weight
+ * ledger — kernel-variant selection and extra bindings are decided from here alone).
  *
- * MUST: payload の `GPUBuffer` は持たない（重み台帳 `weightBuffers` が所有 — 二重保持にすると
- * 「どちらが本物か」が生まれる）。scale だけは重み台帳に載らない実体なのでここが所有する。
- * MUST: 席ごとの付随情報を**型で**要求する（i8 / i2 / i4 は scale 必須・i4 は group 長必須）。
- * 3 本の並列 Map で持つと「i4 なのに group 長が無い」形が型の上では作れてしまい、実行時検査
- * だけが最後の砦になる。
+ * MUST: it does not hold the payload's `GPUBuffer` (the weight ledger `weightBuffers` owns it —
+ * holding it twice raises "which one is real"). Only the scale is owned here, because it is an
+ * object the weight ledger does not carry.
+ * MUST: the extra information of each residency class is required **by the type** (i8 / i2 / i4
+ * require a scale, i4 requires a group length). Three parallel Maps would let "i4 without a group
+ * length" be built at the type level, leaving the run-time check as the last line of defence.
  */
 export type ResidentWeight =
-  // f16 と bf16 は別のメンバで持つ（1 メンバに `"f16" | "bf16"` で持つと、`!== "f16"` の絞り込みで
-  // そのメンバが残り、scale を持つ側へ narrowing できない）。
+  // f16 and bf16 are separate members (with one member of `"f16" | "bf16"`, narrowing by `!== "f16"`
+  // leaves that member in place and cannot narrow to the side that holds a scale).
   | { readonly storage: "f16" }
   | { readonly storage: "bf16" }
   | { readonly storage: "i8" | "i2"; readonly scale: GPUBuffer }
   | { readonly storage: "i4"; readonly scale: GPUBuffer; readonly groupSize: number };
 
 /**
- * initializer 1 本の常駐分類（{@link planWeightResidency} の値）。
+ * The residency class of one initializer (the value of {@link planWeightResidency}).
  *
- * 席は 7 つ:
- * - `raw` — 圧縮しない格納（f32 / i32）を生バイトのまま GPU 常駐（session-build.ts の構築相）
- * - `f16` / `bf16` / `i8` / `i2` / `i4` — 圧縮のまま常駐し dequant はカーネル内（ADR 0018 / 0131 / 0019 / 0097 / 0069）
- * - `expanded` — 適格外でロード時に CPU で f32 展開（正しさは保たれ VRAM 削減はゼロ）
- * - `shared` — 借り物の重み（ADR 0096 段 2 §1.3 — 貸し手 Session の GPU バッファを束ねる）
+ * There are eight classes:
+ * - `raw` — uncompressed storage (f32 / i32) resident on the GPU as raw bytes (construction phase of session-build.ts)
+ * - `f16` / `bf16` / `i8` / `i2` / `i4` — resident in compressed form, dequantized inside the kernel (ADR 0018 / 0131 / 0019 / 0097 / 0069)
+ * - `expanded` — ineligible, decoded to f32 on the CPU at load (correctness is kept, VRAM saving is zero)
+ * - `shared` — a borrowed weight (ADR 0096 decision 2 and its stage 2 addendum — binds the lending Session's GPU buffer)
  *
- * `payloadBytes` は**格納バイト列そのものの長さ**（整列詰め物もバッファ床も含まない）。
- * 整列は転送側（`alignF16Payload` / `alignI8Payload`）とアリーナ（`toSizeClass`）が持つ。
+ * `payloadBytes` is **the length of the stored bytes themselves** (neither alignment padding nor the
+ * buffer floor is included). Alignment is the business of the upload side (`alignF16Payload` /
+ * `alignI8Payload`) and the arena (`toSizeClass`).
  */
 export type WeightResidency =
   | { readonly seat: "raw"; readonly payloadBytes: number }
@@ -71,7 +77,7 @@ export type WeightResidency =
       readonly seat: "i8" | "i2";
       readonly payloadBytes: number;
       readonly scaleBytes: number;
-      /** 行（per-channel scale が掛かる）の軸 — 宣言 `storage.rowAxis`（消費側 op の軸と一致することは検査済み）。 */
+      /** The row axis (where the per-channel scale applies) — the declared `storage.rowAxis` (already checked to match the consuming op's axis). */
       readonly rowAxis: 0 | 1;
     }
   | {
@@ -83,56 +89,62 @@ export type WeightResidency =
   | {
       readonly seat: "expanded";
       readonly payloadBytes: number;
-      /** CPU で f32 へ展開した後のバイト数（常駐するのはこちら）。 */
+      /** Bytes after decoding to f32 on the CPU (this is what is resident). */
       readonly expandedBytes: number;
     }
   | {
       /**
-       * **借り物の重み**（ADR 0096 段 2 §1.3 の共有 initializer）。この Session は 1 バイトも
-       * 確保・転送せず、実体は貸し手 Session の GPU バッファをそのまま束ねる
-       * （`SessionOptions.sharedWeights`）。
+       * **A borrowed weight** (the shared initializer of ADR 0096 decision 2 and its stage 2
+       * addendum). This Session allocates and uploads not a single byte; it binds the lending
+       * Session's GPU buffer as is (`SessionOptions.sharedWeights`).
        */
       readonly seat: "shared";
       /**
-       * 借り手側の消費（適格判定）。借り手は格納を宣言しない（正本は貸し手の常駐重み）ので、
-       * 期待する席は貸し手の codec が分かる構築時に {@link resolveSharedWeights} が導く。
+       * The borrower-side consumption (eligibility). The borrower declares no storage (the lender's
+       * resident weight is the source of truth), so the expected residency class is derived by
+       * {@link resolveSharedWeights} at construction, when the lender's codec is known.
        */
       readonly eligible: boolean;
       readonly i4Eligible: boolean;
       readonly i2Eligible: boolean;
-      /** 消費側 op から決まる per-channel scale の軸（重みスロットで消費されないときは無い）。 */
+      /** The per-channel scale axis decided by the consuming op (absent when not consumed by a weight slot). */
       readonly consumerAxis?: 0 | 1;
     };
 
 /**
- * グラフだけから initializer ごとの常駐分類を決める（GPU も safetensors も要らない純関数）。
+ * Decides the residency class of every initializer from the graph alone (a pure function that needs
+ * neither the GPU nor safetensors).
  *
- * 分類は 3 点 — 適格判定 {@link eligibleCompressedInitializers}、i4 だけ
- * {@link i4EligibleInitializers} との積（ADR 0069 決定 5）、格納 dtype ごとの分岐。
+ * The classification has three parts — eligibility {@link eligibleCompressedInitializers}, for i4
+ * only the intersection with {@link i4EligibleInitializers} (ADR 0069 decision 5), and the branch per
+ * storage dtype.
  *
- * MUST: `graph.initializers` の**全件**を返す（宣言順）。欠けを許すと、消費側が「表に無い =
- * f32 で読む」と解釈する既定と区別できなくなる。
+ * MUST: return **every** entry of `graph.initializers` (in declaration order). Allowing gaps makes
+ * them indistinguishable from the consumers' default reading "not in the table = read as f32".
  */
 export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightResidency> => {
-  // 圧縮格納のまま上げてよい initializer（消費が重みスロットだけ — ADR 0018）。
+  // Initializers that may be uploaded in compressed storage (consumed only by weight slots — ADR 0018).
   const eligible = eligibleCompressedInitializers(graph);
-  // i4 の適格はさらに狭く「重みスロットでの消費が linear / embedding / conv1d(groups==1) だけ」
-  // （ADR 0069 決定 5 とその追補 — 展開経路を持つカーネルはこの 3 つ）。
+  // i4 eligibility is narrower: "consumed at the weight slot only by linear / embedding /
+  // conv1d(groups==1)" (ADR 0069 decision 5 and its addendum — these 3 are the kernels with a
+  // decode path).
   const i4Eligible = i4EligibleInitializers(graph);
   const i2Eligible = i2EligibleInitializers(graph);
-  // per-channel scale の軸は**宣言**（`storage.rowAxis` — container-v1 §6.1）が正本。消費側 op から
-  // 決まる軸（ADR 0019）は突合点として残す — 宣言と食い違うと GPU 常駐経路が scale を別の軸に
-  // 当てる沈黙誤値になる。
+  // The per-channel scale axis has the **declaration** (`storage.rowAxis` — container-v1 §6.1) as
+  // its source of truth. The axis decided by the consuming op (ADR 0019) stays as a cross-check — a
+  // mismatch with the declaration would make the GPU-resident path apply the scale to another axis,
+  // a silently wrong value.
   const consumerAxes = weightChannelAxes(graph);
   const plan = new Map<string, WeightResidency>();
   for (const [name, initializer] of Object.entries(graph.initializers)) {
     const where = `initializer '${name}'`;
-    // initializer の宣言 shape は数値のみ（パーサが保証 — 記号次元は拒否）。
+    // An initializer's declared shape is numeric only (guaranteed by the parser — symbolic dimensions are rejected).
     const shape = graph.values[name].shape.map(Number);
     const count = numel(shape);
-    // 共有 initializer は席だけを決める（バイト数は 1 つも数えない — 確保するのは貸し手）。
-    // 借り手は格納を宣言しないので、期待する席は貸し手の codec が分かる借り手構築時に
-    // 導く（{@link resolveSharedWeights}）— ここは借り手側の消費（適格判定）だけを持つ。
+    // A shared initializer decides only its residency class (no bytes are counted — the lender
+    // allocates). The borrower declares no storage, so the expected residency class is derived at
+    // borrower construction, when the lender's codec is known ({@link resolveSharedWeights}) — here
+    // only the borrower-side consumption (eligibility) is recorded.
     if (initializer.shared !== undefined) {
       const consumerAxis = consumerAxes.get(name);
       plan.set(name, {
@@ -153,7 +165,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
       throw new ExecutionError(cause instanceof Error ? cause.message : String(cause));
     }
     if (layout === "f32" || layout === "i32") {
-      // 圧縮しない格納は生バイトがそのまま GPU 表現。
+      // Uncompressed storage: the raw bytes are the GPU representation as is.
       plan.set(name, { seat: "raw", payloadBytes: bytes });
       continue;
     }
@@ -171,8 +183,8 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
       plan.set(name, { seat: layout, payloadBytes: bytes });
       continue;
     }
-    // 量子化 codec: rowAxis / groupSize の存在と値域は合流層が保証済み。存在は型の上で
-    // だけ optional なので、黙って読み飛ばさず言い直す。
+    // Quantized codecs: the presence and range of rowAxis / groupSize are guaranteed by the merge
+    // layer. They are optional only in the type, so restate the check rather than skip silently.
     const axis = rowAxis ?? 0;
     if (groupSize === undefined) {
       throw new ExecutionError(`${where}: 量子化 codec '${codec}' なのに groupSize が無い`);
@@ -192,7 +204,8 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
       plan.set(name, { seat: layout, payloadBytes: bytes, scaleBytes: scale, rowAxis: axis });
       continue;
     }
-    // i4 の group 形は先頭次元を行とする（展開カーネルと `decodeI4` の前提 — ADR 0069 決定 3）。
+    // The i4 group form takes the leading dimension as rows (the premise of the decode kernels and
+    // of `decodeI4` — ADR 0069 decision 3).
     if (axis !== 0) {
       throw new ExecutionError(
         `${where}: group 量子化（${codec}）の rowAxis は 0 だけ（宣言は ${axis}）`,
@@ -204,11 +217,13 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
 };
 
 /**
- * 借り手側の消費（適格判定）と貸し手の codec から、借りる実体に**期待する席**を導く。
+ * Derives the **expected residency class** of the borrowed object from the borrower-side consumption
+ * (eligibility) and the lender's codec.
  *
- * MUST: 借り手側の消費から**独立に**導き直す。貸し手が i4 常駐でも借り手の消費に展開経路が
- * 無ければ席は `expanded` になり、同じバッファが「packed i4 のバイト列」と「f32 の値」の
- * 2 通りに読まれる — 例外は 1 つも出ない。
+ * MUST: derive it again **independently** from the borrower-side consumption. Even if the lender is
+ * i4-resident, the class is `expanded` when the borrower's consumption has no decode path, and the
+ * same buffer would be read two ways, "packed i4 bytes" and "f32 values" — with not a single
+ * exception.
  */
 const expectedSharedSeat = (
   codec: CodecName,
@@ -226,51 +241,55 @@ const expectedSharedSeat = (
 };
 
 /**
- * {@link SharedWeight} のランタイム内部面（利用者が触る面ではない）。
+ * The runtime-internal surface of {@link SharedWeight} (not a surface for users).
  *
- * MUST: 貸し手の実体（バッファ・`ResidentWeight`）は**参照だけ**を持つ。写しを取ると
- * 「どちらが本物か」が生まれ、貸し手が f16 常駐から展開席へ変わったときに借り手だけが
- * 古い席で走る。
+ * MUST: the lender's objects (buffer, `ResidentWeight`) are held **by reference only**. Taking a copy
+ * raises "which one is real", and when the lender changes from f16-resident to the expanded class,
+ * only the borrower would run on the old class.
  */
 export type SharedWeightInternals = {
-  /** 貸し手の initializer 名（診断用）。 */
+  /** The lender's initializer name (for diagnostics). */
   readonly initializer: string;
-  /** 貸し手の device（借り手と同一 MUST — 別 device のバッファは束縛できない）。 */
+  /** The lender's device (MUST be the borrower's — a buffer of another device cannot be bound). */
   readonly gpu: GpuContext;
-  /** 貸し手が確保した重み本体のバッファ（借り手は所有しない）。 */
+  /** The buffer of the weight body the lender allocated (the borrower does not own it). */
   readonly buffer: GPUBuffer;
-  /** 圧縮のまま常駐している場合の席と付随実体（f32 / 生バイト席では undefined）。 */
+  /** The residency class and its objects when resident in compressed form (undefined for f32 / the raw class). */
   readonly resident: ResidentWeight | undefined;
-  /** 貸し手の常駐席（借り手の期待席と一致 MUST）。 */
+  /** The lender's residency class (MUST match the borrower's expected class). */
   readonly seat: Exclude<WeightResidency["seat"], "shared">;
-  /** i8 / i2 席の行（per-channel scale）の軸（それ以外は undefined）。 */
+  /** The row (per-channel scale) axis of the i8 / i2 classes (undefined otherwise). */
   readonly rowAxis: 0 | 1 | undefined;
-  /** 貸し手の格納 codec（借り手の期待席はこれと借り手側の消費から導く）。 */
+  /** The lender's storage codec (the borrower's expected class is derived from it and the borrower-side consumption). */
   readonly codec: CodecName;
-  /** 貸し手の宣言 shape。 */
+  /** The lender's declared shape. */
   readonly shape: readonly number[];
   /**
-   * 貸し手の**意味論** dtype（graph の宣言 — 格納 codec ではない）。圧縮常駐の重みも展開すれば
-   * f32 なので、借り手の宣言と比べるのはこちら（借り手は格納を宣言しない）。
+   * The lender's **semantic** dtype (the graph's declaration — not the storage codec). A weight
+   * resident in compressed form is f32 once decoded, so this is what is compared with the borrower's
+   * declaration (the borrower declares no storage).
    */
   readonly dtype: IrDtype;
-  /** 借用を 1 本積む（借り手 Session の構築が成功したとき）。 */
+  /** Adds one borrow (when the borrowing Session's construction succeeds). */
   retain(): void;
-  /** 借用を 1 本返す（借り手 Session の dispose / 構築の失敗）。 */
+  /** Returns one borrow (on dispose of the borrowing Session / failure of its construction). */
   release(): void;
 };
 
 /**
- * 貸し手 Session が GPU へ載せた重み 1 本への**不透明な参照**（ADR 0096 段 2 §2.2）。
+ * An **opaque reference** to one weight the lending Session put on the GPU (ADR 0096 decision 2 and
+ * its stage 2 addendum).
  *
- * `Session.exportWeight(initializerName)` だけが作り、`SessionOptions.sharedWeights` で
- * 借り手 Session へ渡す。借り手はバイトを 1 つも持たず、貸し手のバッファをそのまま束ねる。
+ * Only `Session.exportWeight(initializerName)` creates it, and it is passed to the borrowing Session
+ * through `SessionOptions.sharedWeights`. The borrower holds no bytes and binds the lender's buffer
+ * as is.
  *
- * MUST: 構築の入口は `Session.exportWeight` だけ（`ResidentTensor` と同じ流儀 — 直接
- * 構築すると席の突合と借用計数を迂回できる）。
+ * MUST: the only entry for construction is `Session.exportWeight` (the same convention as
+ * `ResidentTensor` — constructing it directly could bypass the residency-class match and the borrow
+ * counting).
  */
 export class SharedWeight {
-  /** ランタイム内部面（利用者が触る面ではない）。 */
+  /** Runtime-internal surface (not a surface for users). */
   readonly [RUNTIME_INTERNAL]: SharedWeightInternals;
 
   constructor(internals: SharedWeightInternals) {
@@ -279,26 +298,33 @@ export class SharedWeight {
 }
 
 /**
- * 借り手グラフの共有 initializer 宣言と、渡された {@link SharedWeight} を突き合わせる
- * （ADR 0096 段 2 §2.2 の門）。返すのは注入すべき組（宣言順）。
+ * Matches the borrower graph's shared-initializer declarations against the given
+ * {@link SharedWeight}s (the check of ADR 0096 decision 2 and its stage 2 addendum). Returns the
+ * pairs to inject (in declaration order).
  *
- * 見るのは 6 点（借り手は格納を宣言しないので「格納 dtype 一致」の門は無く、代わりに 5 で期待席を導く）:
- * 1. **過不足なし** — 宣言 1 本につき 1 つ（欠けは「バイトの無い重みで走る」、余りは
- *    「渡したつもりの重みが誰にも使われない」）
- * 2. **同一 device** — 別 device のバッファを束ねる bind group は validation で落ちるが、
- *    診断は真因から遠い
- * 3. **宣言 shape 一致** — バイト数だけでは `[2,3]` と `[3,2]` の取り違えが通る
- * 4. **意味論 dtype 一致** — f32 / i32 は常駐形式がどちらも `raw` で席の照合（5・6）では区別
- *    できず、通すと同じ 4 バイトが別の型として読まれる（f32 の 1.0 が i32 の 1065353216 になる）。
- *    通常の initializer は合流層（`format/container/bind.ts`）が意味論 dtype と格納 codec を
- *    突き合わせるが、shared は格納を持たないのでそこを通らない — 代わりに貸し手の宣言と比べる
- * 5. **期待席の導出** — 借り手は格納を宣言しないので、貸し手の codec と借り手側の消費（適格判定）から
- *    期待席を導く（`expectedSharedSeat`）。貸し手の実際の席と違えば同じバッファが別の読み方をされる
- * 6. **席の一致**（i8 は per-channel scale の軸まで） — 貸し手が i4 常駐でも借り手の消費に
- *    展開経路が無ければ席は `expanded` で、同じバッファが packed バイトと f32 の 2 通りに
- *    読まれる。i8 の軸違い（embedding と linear）も同じ機序で沈黙誤値になる
+ * Six points are checked (the borrower declares no storage, so there is no "storage dtype matches"
+ * check; instead point 5 derives the expected residency class):
+ * 1. **No missing, no surplus** — exactly one per declaration (a missing one is "running with a
+ *    weight that has no bytes", a surplus one is "a weight thought to be passed that nobody uses")
+ * 2. **Same device** — a bind group binding another device's buffer fails validation, but the
+ *    diagnostic is far from the real cause
+ * 3. **Declared shape matches** — byte counts alone let `[2,3]` and `[3,2]` be mixed up
+ * 4. **Semantic dtype matches** — f32 and i32 both have the resident form `raw`, so the residency
+ *    class match (5, 6) cannot tell them apart, and letting it through reads the same 4 bytes as
+ *    another type (f32 1.0 becomes i32 1065353216). Ordinary initializers have their semantic dtype
+ *    and storage codec matched by the merge layer (`format/container/bind.ts`), but shared ones have
+ *    no storage and do not pass there — they are compared with the lender's declaration instead
+ * 5. **Deriving the expected class** — the borrower declares no storage, so the expected class is
+ *    derived from the lender's codec and the borrower-side consumption (eligibility)
+ *    (`expectedSharedSeat`). If it differs from the lender's actual class, the same buffer is read
+ *    another way
+ * 6. **Residency class matches** (for i8, down to the per-channel scale axis) — even if the lender is
+ *    i4-resident, the class is `expanded` when the borrower's consumption has no decode path, and the
+ *    same buffer is read two ways, as packed bytes and as f32. A mismatched i8 axis (embedding vs
+ *    linear) becomes a silently wrong value by the same mechanism
  *
- * MUST: 全て fail loudly。6 点とも破れは例外ではなく**別の値**として出る。
+ * MUST: all fail loudly. For all six points a violation shows up as **a different value**, not as an
+ * exception.
  */
 export const resolveSharedWeights = (
   graph: IrGraph,
@@ -322,8 +348,9 @@ export const resolveSharedWeights = (
   }
   return declared.map((name) => {
     const weight = (provided ?? {})[name];
-    // MUST: 型の外から来た値（JS の呼び手）は内部面を読む前に落とす — 読むと `ExecutionError` では
-    // なく `TypeError`（`shared.initializer` の参照）や利用者の getter の例外が抜ける。
+    // MUST: a value from outside the type (a JS caller) fails before the internal surface is read —
+    // reading it would let a `TypeError` (the `shared.initializer` access) or an exception from the
+    // user's getter escape instead of an `ExecutionError`.
     if (!(weight instanceof SharedWeight)) {
       throw new ExecutionError(
         `sharedWeights['${name}']: SharedWeight でない値（${typeof weight}）— 貸し手 Session の ` +
@@ -352,8 +379,9 @@ export const resolveSharedWeights = (
     if (seat === undefined || seat.seat !== "shared") {
       throw new ExecutionError(`${where}: 常駐分類が shared でない（簿記の破れ）`);
     }
-    // 借り手は格納を宣言しない — 貸し手の codec と借り手側の消費から期待席を導き、貸し手の
-    // 実際の席（と i8 / i2 の行の軸）と突き合わせる。
+    // The borrower declares no storage — derive the expected class from the lender's codec and the
+    // borrower-side consumption, and match it against the lender's actual class (and the row axis for
+    // i8 / i2).
     const expected = expectedSharedSeat(shared.codec, seat);
     const expectedAxis =
       expected === "i8" || expected === "i2" ? (seat.consumerAxis ?? 0) : undefined;
@@ -371,34 +399,38 @@ export const resolveSharedWeights = (
 };
 
 /**
- * 席 1 つが GPU に確保させるバッファ 1 本（{@link planWeightBuffers} の要素）。
+ * One buffer that one residency class makes the GPU allocate (an element of {@link planWeightBuffers}).
  *
- * MUST: 「席のどのバイト数が GPU バッファになるか」の分岐はここ 1 本 — 上限検査
- * （{@link assertWeightsWithinLimits}）と見積り（estimate.ts の `weightEstimate`）が席の分岐を
- * 別々に書くと、適格判定が動いたときに片方だけが別の寸法を主張する。
+ * MUST: the branch "which bytes of a residency class become a GPU buffer" lives here alone — if the
+ * limit check ({@link assertWeightsWithinLimits}) and the estimate (`weightEstimate` in estimate.ts)
+ * each wrote the branch per class, a change in eligibility would make one of them claim a different
+ * size.
  */
 export type WeightBuffer = {
   readonly name: string;
   /**
-   * この確保を出した席。**借り物（`shared`）は現れない** — 型でそれを言うことで、席ごとの
-   * 網羅 switch（見積りの 3 欄振り分け）が「数えない席」を数える形にならない。
+   * The residency class that issued this allocation. **A borrowed one (`shared`) never appears** —
+   * saying so in the type keeps an exhaustive switch over classes (the estimate's split into 3
+   * fields) from counting a class that is not counted.
    */
   readonly seat: Exclude<WeightResidency["seat"], "shared">;
-  /** `payload` = 重み本体（`expanded` 席は f32 展開後）/ `scale` = companion scale。 */
+  /** `payload` = the weight body (after f32 decoding for the `expanded` class) / `scale` = companion scale. */
   readonly kind: "payload" | "scale";
-  /** `createBuffer` に渡るバイト数（`toSizeClass` = 4 バイト整列 + 4 バイト床）。 */
+  /** Bytes passed to `createBuffer` (`toSizeClass` = 4-byte alignment + 4-byte floor). */
   readonly byteLength: number;
-  /** 整列前の宣言由来バイト数（見積りの「厳密」欄が数えるのはこちら）。 */
+  /** Bytes from the declaration before alignment (what the estimate's "exact" field counts). */
   readonly declaredBytes: number;
 };
 
 /**
- * 常駐計画が GPU に確保させるバッファを宣言順に並べる（GPU も device も要らない純関数）。
+ * Lists, in declaration order, the buffers the residency plan makes the GPU allocate (a pure function
+ * that needs neither the GPU nor a device).
  *
- * 適格席（f16 / i8 / i4）と生バイト席は payload をそのまま上げ、適格外席（`expanded`）は CPU で
- * f32 展開した**後**のバイト列を上げる（配布形の圧縮バイト数は GPU に載らない）。i8 / i4 は
- * companion scale が payload とは別に**もう 1 本**確保される（session-build.ts の
- * `timedAlloc(Math.max(4, scale.bytes.byteLength))`）。
+ * The eligible classes (f16 / i8 / i4) and the raw class upload the payload as is; the ineligible
+ * class (`expanded`) uploads the bytes **after** decoding to f32 on the CPU (the compressed byte
+ * count of the distribution does not reach the GPU). i8 / i4 allocate the companion scale as **one
+ * more** buffer separate from the payload (`timedAlloc(Math.max(4, scale.bytes.byteLength))` in
+ * session-build.ts).
  */
 export const planWeightBuffers = (
   residency: ReadonlyMap<string, WeightResidency>,
@@ -413,8 +445,8 @@ export const planWeightBuffers = (
     buffers.push({ name, seat, kind, byteLength: toSizeClass(declaredBytes), declaredBytes });
   };
   for (const [name, seat] of residency) {
-    // 借り物の席は 1 本も確保しない（実体は貸し手の Session が抱えている）。上限検査からも
-    // 見積りからも外れるのはこの 1 行が唯一の分岐点。
+    // A borrowed class allocates nothing (the lending Session holds the object). This line is the
+    // only branch point that takes it out of both the limit check and the estimate.
     if (seat.seat === "shared") continue;
     add(
       name,
@@ -430,18 +462,19 @@ export const planWeightBuffers = (
 };
 
 /**
- * 上限検査が見る device limits（`GpuContext.limits` の部分集合）。
+ * The device limits the limit check looks at (a subset of `GpuContext.limits`).
  *
- * MUST: 2 本とも見る。`maxStorageBufferBindingSize ≤ maxBufferSize` は device を計画する側
- * （gpu/device.ts の `planRequiredLimits`）が保っている関係であって、外から渡された
- * `GpuContext` にまで効く保証ではない — 片方だけ見る形にすると関係が崩れた device で沈黙する。
+ * MUST: look at both. `maxStorageBufferBindingSize ≤ maxBufferSize` is a relation kept by the side
+ * that plans the device (`planRequiredLimits` in gpu/device.ts), not a guarantee that extends to a
+ * `GpuContext` passed in from outside — looking at only one stays silent on a device where the
+ * relation is broken.
  */
 export type WeightLimits = {
   readonly maxStorageBufferBindingSize: number;
   readonly maxBufferSize: number;
 };
 
-/** エラー文言の主語（席が `expanded` のときだけ「確保されるのは展開後」を明示する）。 */
+/** The subject of the error text (only the `expanded` class states "what is allocated is the decoded form"). */
 const bufferLabel = (buffer: WeightBuffer): string =>
   buffer.kind === "scale"
     ? "scale"
@@ -450,31 +483,35 @@ const bufferLabel = (buffer: WeightBuffer): string =>
       : "payload";
 
 /**
- * 重み 1 本ずつの確保寸法を device の絶対上限と突き合わせ、超過があれば**確保の前に**落とす。
+ * Compares the allocation size of each weight with the device's absolute limits, and fails **before
+ * allocation** when any is exceeded.
  *
- * 動機は「確保失敗の検出は block（item）単位 errorScope に全面依存」（ADR 0108 決定 9）の弱点 —
- * docs/known-issues.md「Metal で out-of-memory errorScope が沈黙する」が名指しした修正候補
- * （重み経路への明示サイズ門）そのもの。errorScope の網では 3 点足りない:
- * ①**実装依存** — 上限超過そのものは validation で捕まる実装が普通だが、同じ経路の
- * out-of-memory scope が黙る device は実在する（M2 実測）。網の成立を実装の報告品質に賭ける形が
- * 残るかぎり「確保失敗 = 無効バッファへの no-op writeBuffer = ゴミを読む」が通り得る。
- * ②**遅い** — 検出は重みを上げ始めた後で、数 GiB 転送してからになる。
- * ③**粒度が粗い** — 名乗れるのは失敗した block までで、どの重みが何バイト超えたのかは出ない。
- * 寸法は確保より前に宣言だけで確定している（常駐計画は prepare 相の純関数）ので、決定論的に
- * 落とせるぶんはここで落とす。
+ * The motive is the weakness of "detecting allocation failure relies entirely on the errorScope per
+ * block (item)" (ADR 0108 decision 9) — exactly the fix candidate (an explicit size check on the
+ * weight path) named by docs/known-issues.md "On Metal the out-of-memory errorScope stays silent".
+ * The errorScope net falls short in 3 ways:
+ * ① **implementation-dependent** — exceeding a limit is normally caught by validation, but devices
+ * whose out-of-memory scope on the same path stays silent exist (measured on M2). As long as the net
+ * bets on the implementation's reporting quality, "allocation failure = no-op writeBuffer into an
+ * invalid buffer = reading garbage" can slip through.
+ * ② **late** — detection comes after weight upload has begun, after several GiB were transferred.
+ * ③ **coarse** — it can name only the failed block, not which weight exceeded by how many bytes.
+ * The sizes are fixed by the declaration alone before allocation (the residency plan is a pure
+ * function of the prepare phase), so what can fail deterministically fails here.
  *
- * MUST: 見るのは**絶対上限との比較だけ**。空き VRAM とは比べない（ADR 0070 決定 5 — WebGPU は
- * 総 / 空き VRAM を露出しないので、比較の形にした瞬間に当て推量になる）。合計サイズも見ない
- * （ここが見ているのは 1 バッファ単位の device 制約で、総量の可否は最終門 = errorScope の担当）。
- * MUST: 超過は**全件列挙して 1 回で落とす**。1 本ずつ落とすと、export をやり直すたびに次の 1 本が
- * 現れる形になり、何本直せば載るのかが最後まで分からない。
+ * MUST: look **only at the comparison with absolute limits**. Do not compare with free VRAM (ADR
+ * 0070 decision 5 — WebGPU exposes neither total nor free VRAM, so turning it into a comparison
+ * makes it a guess). Do not look at the total size either (this checks a per-buffer device
+ * constraint; whether the total fits is the final check's job = the errorScope).
+ * MUST: **list every violation and fail once**. Failing one at a time makes the next one appear each
+ * time the export is redone, and how many must be fixed for it to fit stays unknown to the end.
  */
 export const assertWeightsWithinLimits = (
   residency: ReadonlyMap<string, WeightResidency>,
   limits: WeightLimits,
 ): void => {
-  // 文言が「どの上限か」を必ず名乗るための組（state 側のゲートと同じ形 —
-  // generation-context.ts の `limits`）。
+  // Pairs that make the text always name "which limit" (the same form as the state-side check —
+  // `assertSlotWithinLimits` in generation-context.ts).
   const entries = [
     ["maxStorageBufferBindingSize", limits.maxStorageBufferBindingSize],
     ["maxBufferSize", limits.maxBufferSize],

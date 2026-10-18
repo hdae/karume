@@ -1,41 +1,48 @@
-/** op 契約に反する IR（未対応 op・アリティ違反・契約外 attrs・dtype 違反・shape 不整合）。 */
+/**
+ * IR that violates an op contract (unsupported op, arity violation, attrs outside the contract,
+ * dtype violation, shape mismatch).
+ */
 export class OpContractError extends Error {
   override readonly name = "OpContractError";
 }
 
 /**
- * 単項 elementwise。
+ * Unary elementwise.
  *
- * MUST: kind が意味するのは「入力 1 本の elementwise」だけ。attrs を持つ 6 本
- * （clamp / clamp_min / leaky_relu / ge_scalar / le_scalar / gt_scalar）も、出力 dtype が
- * 入力と違う比較 3 本もここに属する — attrs スキーマと出力 dtype は契約表の別の欄が持つので、
- * その差のために kind を割らない（割ると codegen と CPU 参照の分岐が同じ理由で増える）。
+ * MUST: the kind means only "elementwise with one input". The 6 ops with attrs
+ * (clamp / clamp_min / leaky_relu / ge_scalar / le_scalar / gt_scalar) and the 3 comparisons whose
+ * output dtype differs from the input also belong here — the attrs schema and the output dtype live
+ * in other fields of the contract table, so the kind is not split for those differences (splitting
+ * it would add branches to codegen and the CPU reference for the same reason).
  */
 export const UNARY_OPS = [
   "neg",
   "abs",
   "exp",
   "log",
-  // WGSL に log1p 組込は無い（実装方針は src/codegen/elementwise.ts の LOG1P_FN）
+  // WGSL has no log1p built-in (implementation approach: LOG1P_FN in src/codegen/elementwise.ts)
   "log1p",
   "sqrt",
-  // 三角関数は sin だけ（ADR 0043 の第 1 層）。定数の RoPE 表はエクスポータが畳むので、
-  // 語彙に要るのは**実行時値**を取る形だけ — DACVAE の Snake 活性 `x + (α+1e-9)⁻¹·sin²(αx)` が
-  // 初出。`cos` は実測に出るまで足さない（「対称性のための追加をしない」）。
+  // The only trigonometric function is sin (Core ATen layer — ADR 0059; layer 1 of the superseded
+  // ADR 0043). The exporter folds constant RoPE tables, so the vocabulary needs only the form that
+  // takes a **run-time value** — first seen in DACVAE's Snake activation
+  // `x + (α+1e-9)⁻¹·sin²(αx)`. `cos` is not added until it shows up in a measurement ("no
+  // additions for symmetry").
   "sin",
   "tanh",
   "sigmoid",
   "relu",
   "gelu",
-  // torch の `approximate="tanh"` 形。erf 形の `gelu` とは値が違うので別 op で表す —
-  // attrs 空の契約に近似種別を載せる欄は無く、載せると「同じ op 名で数値が変わる」分岐が
-  // 契約の外にできる。
+  // torch's `approximate="tanh"` form. Its values differ from the erf-form `gelu`, so it is a
+  // separate op — an empty-attrs contract has no field for the approximation kind, and adding one
+  // would create, outside the contract, a branch where "the same op name changes the numbers".
   "gelu_tanh",
   "bitwise_not",
-  // attrs のスカラを params 末尾で運ぶ 6 本（{@link SCALAR_PARAM_ATTRS}）
+  // The 6 ops that carry their attrs scalar at the end of params ({@link SCALAR_PARAM_ATTRS})
   "clamp",
-  // 片側 clamp（ADR 0017）。既存 clamp の attrs を optional 化して兼ねる案は「宣言済み
-  // attrs の既定値補完はしない」（ADR 0012）を崩すので採らない — 別 op で表す。
+  // One-sided clamp (ADR 0017). Making the existing clamp's attrs optional to cover it would break
+  // "declared attrs are not filled with defaults" (ADR 0012), so that is not done — it is a
+  // separate op.
   "clamp_min",
   "leaky_relu",
   "ge_scalar",
@@ -45,120 +52,136 @@ export const UNARY_OPS = [
 export type UnaryOpName = (typeof UNARY_OPS)[number];
 
 /**
- * 二項 elementwise（torch 準拠の右詰め broadcast）。`ge` は f32 × f32 → **bool** で、
- * 出力 dtype だけが入力と違う（導出は {@link OUTPUT_DTYPES}）。
+ * Binary elementwise (right-aligned broadcast as in torch). `ge` is f32 × f32 → **bool**; only its
+ * output dtype differs from the input (derived by {@link OUTPUT_DTYPES}).
  */
 export const BINARY_OPS = ["add", "sub", "mul", "div", "ge", "bitwise_and"] as const;
 export type BinaryOpName = (typeof BINARY_OPS)[number];
 
 /**
- * 1 軸の reduce（attrs `dim`・keepdim 無し）。最終次元は行カーネル、それ以外は軸変種で
- * 実行する（設計は docs/research/2026-08-04-vae-axis-reduce-recon.md §5）。
+ * Reduce over one axis (attrs `dim`, no keepdim). The last dimension runs on the row kernel, other
+ * axes on the axis variant (design: docs/research/2026-08-04-vae-axis-reduce-recon.md §5).
  */
 export const REDUCE_OPS = ["sum", "amax", "amin"] as const;
 export type ReduceOpName = (typeof REDUCE_OPS)[number];
 
 /**
- * 最終次元の argmax（ADR 0068 決定 2）。入力 f32 → 出力 **i32** で、**rank 保存**
- * （最終次元を 1 に潰す固定形）。
+ * argmax over the last dimension (ADR 0068 decision 2). Input f32 → output **i32**,
+ * **rank-preserving** (a fixed form that collapses the last dimension to 1).
  *
- * MUST: `attrs` を持たない。軸は最終次元固定（`dim` の欄が無いことがそのまま「他の軸は
- * 語彙に無い」の宣言 — gather と同じ絞り方）で、`keepdim` の欄も作らない（rank 保存の
- * 1 形だけを表す）。needs が出たら別 op で足す規律は `gelu` / `gelu_tanh` と同じ。
- * MUST: reduce 族（{@link REDUCE_OPS}）に入れない。attrs も出力 dtype も rank の扱いも
- * 違い、カーネルも別族（identity が −inf・(値, index) 対を運ぶ — src/kernels/argmax.ts）。
- * MUST: タイブレークは**最小 index**・NaN は**最大**・全 −inf 行は **index 0**（いずれも
- * torch 準拠。実装契約の正本は src/kernels/argmax.ts と reference/ops.ts）。
+ * MUST: no `attrs`. The axis is fixed to the last dimension (the absence of a `dim` field is itself
+ * the statement "other axes are not in the vocabulary" — the same narrowing as gather), and there is
+ * no `keepdim` field either (it expresses the single rank-preserving form). If a need appears, it is
+ * added as a separate op, the same discipline as `gelu` / `gelu_tanh`.
+ * MUST: not part of the reduce family ({@link REDUCE_OPS}). The attrs, the output dtype and the rank
+ * handling all differ, and the kernel is a separate family too (identity is −inf and it carries
+ * (value, index) pairs — src/kernels/argmax.ts).
+ * MUST: ties break to the **smallest index**, NaN is the **largest**, and an all −inf row gives
+ * **index 0** (all as in torch. The source of truth for the implementation contract is
+ * src/kernels/argmax.ts and reference/ops.ts).
  */
 export const ARGMAX_OP = "argmax";
 
 /**
- * 最終次元の top-k（ADR 0068 決定 3 — **ノード多出力の最初の入居者**）。入力 f32 →
- * **出力 2 本**（slot 0 = 値 f32 の**降順**・slot 1 = 添字 i32）で、2 本とも `[…, k]`。
+ * top-k over the last dimension (ADR 0068 decision 3 — **the first op with node-level multiple
+ * outputs**). Input f32 → **two outputs** (slot 0 = values f32 in **descending order**, slot 1 =
+ * indices i32), both `[…, k]`.
  *
- * MUST: `k` は **attrs で宣言必須**（計画時定数 = static-k）。記号 k・k=0・最終次元超過は
- * 全て fail loudly（受理領域は `1 ≤ k ≤ 最終次元`）。torch の schema は `k` が SymInt だが、
- * 実行時に決まる k は静的形状の前提（ADR 0004）に載らないので受理しない。
- * MUST: 軸は最終次元固定（`dim` の欄が無いことがそのまま「他の軸は語彙に無い」の宣言）で、
- * `largest` / `sorted` の欄も作らない（**降順ソート済みの最大側だけ**が語彙 — 最小側が要れば
- * 別 op、順序無しは要求が出てから）。
- * MUST: タイブレークは**最小 index**（argmax と同族の述語）・NaN は**最大**・全 −inf 行も
- * 最小 index から k 本。**値の列は torch とビット一致**する一方、**添字の列は torch の
- * 未規定部分を karume が規定した**側（torch は同値要素の順序を保証せず、`argmax` と
- * `topk(k=1)` が同一リポ内で食い違う — 実測は src/kernels/topk.ts の NOTE）。
+ * MUST: `k` is **required in attrs** (a plan-time constant = static-k). A symbolic k, k=0 and k above
+ * the last dimension all fail loudly (accepted domain: `1 ≤ k ≤ last dimension`). torch's schema
+ * makes `k` a SymInt, but a k decided at run time does not fit the static-shape premise (ADR 0004),
+ * so it is not accepted.
+ * MUST: the axis is fixed to the last dimension (the absence of a `dim` field is itself the
+ * statement "other axes are not in the vocabulary"), and there are no `largest` / `sorted` fields
+ * (**only the largest side, sorted descending,** is in the vocabulary — the smallest side would be a
+ * separate op, and unordered output waits until it is asked for).
+ * MUST: ties break to the **smallest index** (the same predicate family as argmax), NaN is the
+ * **largest**, and an all −inf row also yields k entries from the smallest index. **The value
+ * column is bit-identical to torch**, while **the index column is where karume specifies what torch
+ * leaves unspecified** (torch does not guarantee the order of equal elements, and `argmax` and
+ * `topk(k=1)` disagree within the same repository — the measurement is in the NOTE of
+ * src/kernels/topk.ts).
  */
 export const TOPK_OP = "topk";
 
 /**
- * 三項 elementwise `out = cond ? a : b`（torch の `where`）。
+ * Ternary elementwise `out = cond ? a : b` (torch's `where`).
  *
- * MUST: 3 者とも右詰め broadcast（torch と同じ）。条件スロットが先頭なのは torch の
- * 引数順（`where(cond, a, b)`）に合わせるためで、**出力は条件ではなく値の側と同型**
- * （導出は {@link OUTPUT_DTYPES} の bool → f32）。
+ * MUST: all three broadcast right-aligned (as in torch). The condition slot comes first to match
+ * torch's argument order (`where(cond, a, b)`), and **the output has the type of the value side,
+ * not of the condition** (derived by {@link OUTPUT_DTYPES} as bool → f32).
  */
 export const WHERE_OP = "where";
 
 /**
- * 最終次元の前縁和（`out[…, j] = Σ_{i ≤ j} x[…, i]`、attrs `dim`）。
+ * Prefix sum over the last dimension (`out[…, j] = Σ_{i ≤ j} x[…, i]`, attrs `dim`).
  *
- * MUST: 軸は**最終次元のみ**受理する（softmax と同じ絞り方 — 行カーネルは縮約軸が連続で
- * あることを前提にしている）。attrs に `dim` を持つのも softmax に倣う: 負の軸表記は
- * エクスポータ境界で正規化され、ランタイムは rank が分かる shape 計算側で最終次元との
- * 一致を再検査する（宣言と実 rank の食い違いをもう 1 枚の門で止める）。
+ * MUST: only **the last dimension** is accepted as the axis (the same narrowing as softmax — the row
+ * kernel assumes the reduced axis is contiguous). Carrying `dim` in attrs also follows softmax:
+ * negative axis notation is normalised at the exporter boundary, and the runtime re-checks that it
+ * matches the last dimension in the shape computation, where the rank is known (one more check that
+ * stops a mismatch between the declaration and the actual rank).
  */
 export const CUMSUM_OP = "cumsum";
 
 export const MATMUL_OP = "matmul";
 /**
- * バッチ matmul（ADR 0012）。`[B,M,K] × [B,K,N] → [B,M,N]` の **rank-3 のみ**で、rank-2 は
- * {@link MATMUL_OP} の担当。実測（recon §2 の 8 本）は全て rank-3 で、バッチ軸は完全一致
- * （broadcast も stride 0 も出ない）。
+ * Batched matmul (ADR 0012). `[B,M,K] × [B,K,N] → [B,M,N]`, **rank-3 only**; rank-2 is the job of
+ * {@link MATMUL_OP}. The measurements (the 8 of recon §2) are all rank-3 with batch axes that match
+ * exactly (no broadcast, no stride 0).
  *
- * MUST: matmul と兼用しない。1 つの op が rank で別のカーネルへ分岐すると、契約の
- * 「入力 shape → 出力 shape」が rank に依存する多相になり、shape 検査の抜けが見えなくなる。
+ * MUST: not shared with matmul. If one op branched to a different kernel by rank, the contract's
+ * "input shapes → output shape" would become rank-dependent polymorphism, and gaps in the shape check
+ * would become invisible.
  */
 export const BMM_OP = "bmm";
 /**
- * 最終次元の gather（ADR 0012）。`out[..., j] = src[..., index[..., j]]`。
+ * gather over the last dimension (ADR 0012). `out[..., j] = src[..., index[..., j]]`.
  *
- * MUST: 軸は**最終次元固定**で attrs を持たない（実測は dim = −1 のみ — softmax と同じ絞り方。
- * 一般 dim は要求実測が出てから広げる）。
- * MUST: **最初**のスロット別 dtype 契約（src=f32 / index=i32 → out=f32）。同型は embedding /
- * masked_fill / where で、一覧の正本は契約表（ops/contracts.ts の `SlotDtypes` doc と
- * `kind: "perSlot"` の実値）— 本数はここに数え上げない（op 追加のたびに動く導出可能な事実で、
- * op 名定数の側に置くと必ず腐る）。
+ * MUST: the axis is **fixed to the last dimension** and there are no attrs (only dim = −1 was
+ * measured — the same narrowing as softmax. A general dim is widened once a measured need appears).
+ * MUST: the **first** per-slot dtype contract (src=f32 / index=i32 → out=f32). The same kind is used
+ * by embedding / masked_fill / where; the source of truth for the list is the contract table (the
+ * `SlotDtypes` doc and the actual `kind: "perSlot"` values in ops/contracts.ts) — the count is not
+ * enumerated here (it is a derivable fact that moves with every op addition, and kept next to the op
+ * name constants it is bound to go stale).
  */
 export const GATHER_OP = "gather";
-/** 意味論 dtype 変換（attrs `to` が変換先 — ADR 0009）。 */
+/** Semantic dtype conversion (attrs `to` is the target — ADR 0009). */
 export const CAST_OP = "cast";
 
 /**
- * レイアウト op（ADR 0011）。
+ * Layout ops (ADR 0011).
  *
- * - `reshape` — 要素順を変えない（view / squeeze / unsqueeze の正規化先）。**出力の宣言
- *   shape が目標形**で、契約は要素数一致のみ。実行はバッファ別名（コピー無し）。
- * - `permute` — attrs `dims` の軸並べ替え。実体化コピー。
- * - `expand` — **出力の宣言 shape へ右詰め broadcast**。拡張できるのは長さ 1 の次元だけ
- *   （長さ n → m の複製は語彙に無い）。実体化コピー。
+ * - `reshape` — does not change element order (the normal form of view / squeeze / unsqueeze).
+ *   **The output's declared shape is the target shape**, and the contract is only that element
+ *   counts match. Executed as a buffer alias (no copy).
+ * - `permute` — reorders axes by attrs `dims`. A materialising copy.
+ * - `expand` — **right-aligned broadcast to the output's declared shape**. Only dimensions of
+ *   length 1 can be expanded (replicating length n → m is not in the vocabulary). A materialising
+ *   copy.
  */
 export const RESHAPE_OP = "reshape";
 export const PERMUTE_OP = "permute";
 export const EXPAND_OP = "expand";
 
 /**
- * レイアウト op 第 2 群（ADR 0014）。full-write 不変条件（全カーネルが出力の全バイトを書く）
- * を満たす形だけを語彙に入れる。
+ * Layout ops, group 2 (ADR 0014). Only forms that satisfy the full-write invariant (every kernel
+ * writes every byte of its output) enter the vocabulary.
  *
- * - `slice` — attrs `dim` / `start` / `end` の**静的軸・静的範囲**の切り出し。実行は既存の
- *   strided **読み**コピー族の流用で、可変点は params の offset 1 語（ADR 0011 の予告どおり）。
- *   記号次元の切り出しは {@link SYM_PREFIX_SLICE_OP} の担当で、こちらは静的専業
- *   （重複させない — 記号軸の slice は plan.ts が宣言 shape を見て落とす）。
- * - `cat` — attrs `dim` の**静的軸**連結。**入力数が可変**（{@link OpContract} の `variadic`）。
- *   実行は strided **書き**コピー族で、入力ごとに出力の部分領域へ書く。単独の dispatch は
- *   部分書きでも、全入力で出力全域を覆うのでノード単位では full-write が成立する。
- * - `pad` — attrs `left` / `right` の**最終次元・定数 0** 埋め。専用カーネル 1 本が出力全域を
- *   書く（ゼロ初期化保証にも noReuse 特例にも依存しない）。
- * - `flip` — attrs `dim` の静的軸の添字反転。専用の極小カーネル。
+ * - `slice` — cuts out a **static axis and static range** given by attrs `dim` / `start` / `end`.
+ *   Executed by reusing the existing strided **read** copy family; the only variable is one offset
+ *   word in params (as ADR 0011 announced). Slicing a symbolic dimension is the job of
+ *   {@link SYM_PREFIX_SLICE_OP}; this op is static only (no overlap — a slice on a symbolic axis is
+ *   rejected by plan.ts from the declared shape).
+ * - `cat` — concatenation along the **static axis** attrs `dim`. **The number of inputs is
+ *   variable** (`variadic` of {@link OpContract}). Executed by the strided **write** copy family,
+ *   writing each input into a subregion of the output. A single dispatch writes partially, but all
+ *   inputs together cover the whole output, so full-write holds per node.
+ * - `pad` — fills the **last dimension with constant 0** by attrs `left` / `right`. One dedicated
+ *   kernel writes the whole output (it relies neither on a zero-initialisation guarantee nor on the
+ *   noReuse exception).
+ * - `flip` — reverses the indices of the static axis attrs `dim`. A dedicated tiny kernel.
  */
 export const SLICE_OP = "slice";
 export const CAT_OP = "cat";
@@ -166,95 +189,110 @@ export const PAD_OP = "pad";
 export const FLIP_OP = "flip";
 
 /**
- * 記号 prefix スライス（ADR 0010）。エクスポータが記号 T 依存の部分木を **Tmax で実評価**して
- * 焼いた定数から、束縛後の `coeff·sym+offset` 長の**先頭**を切り出す。
+ * Symbolic prefix slice (ADR 0010). From a constant that the exporter baked by **actually
+ * evaluating, at Tmax,** a subtree that depends on the symbol T, cuts out the **leading** part of
+ * length `coeff·sym+offset` after binding.
  *
- * - 入力は**記号を含まない静的 shape**の値（実際にはエクスポータが焼いた initializer）。
- *   この不変条件は plan.ts の `validateGraphContracts` が見る — 入力側が記号 shape だと
- *   「Tmax 形」という前提が崩れ、読み出し stride が実行ごとに変わる。
- * - 出力 shape は attrs（+ 束縛）から計算し、宣言と照合する（reshape / expand のような
- *   「宣言が目標形」ではない）。
- * - 実行は strided 実体化コピー（offset 0・入力側の連続 stride）— 新カーネルは無い。
+ * - The input is a value with a **static shape without symbols** (in practice an initializer the
+ *   exporter baked). This invariant is checked by plan.ts's `validateGraphContracts` — if the input
+ *   side had a symbolic shape, the "Tmax form" premise would break and the read stride would change
+ *   per run.
+ * - The output shape is computed from attrs (+ bindings) and matched against the declaration
+ *   (unlike reshape / expand, where "the declaration is the target shape").
+ * - Executed as a strided materialising copy (offset 0, contiguous stride of the input side) — no
+ *   new kernel.
  */
 export const SYM_PREFIX_SLICE_OP = "sym_prefix_slice";
 
 /**
- * 融合 op（ADR 0012 / ADR 0015 / ADR 0017）。ADR 0007 起点の「分解禁止」リスト（**現行 12 op** —
- * 台帳の正本は docs/op-vocabulary.md。`leaky_relu` で 10・`rms_norm` で 11・
- * `scaled_dot_product_attention` で 12）は全てカーネルを持つ（`conv2d` は Anima の VAE decoder で
- * 実測に出た — ADR 0017）。`rms_norm` は**保存だけでは供給しきれない** 1 本目で、手書き分解形
- * （Qwen3 / DiT）はエクスポータの畳み込みパスが 1 ノードへ合成する（供給ルート 2 系統 —
- * ADR 0016 / 0017）。12 本目の attention だけはエクスポータの**既定の保存リストに載らない**
- * （ターゲット別の opt-in — 理由は op-vocabulary.md）。
+ * Fused ops (ADR 0012 / ADR 0015 / ADR 0017). The "do not decompose" list that started with ADR
+ * 0007 (**currently 12 ops** — the ledger's source of truth is docs/op-vocabulary.md, "12 ops whose
+ * decomposition is forbidden (fusion kept)" under "Design findings carried over"; `leaky_relu` made
+ * it 10, `rms_norm` 11 and `scaled_dot_product_attention` 12) all have kernels (`conv2d` showed up in
+ * the measurements of Anima's VAE decoder — ADR 0017). `rms_norm` is the first that **preservation
+ * alone cannot fully supply**: the hand-written decomposed form (Qwen3 / DiT) is composed into one
+ * node by the exporter's folding pass (two supply routes — ADR 0016 / 0017). Only the 12th,
+ * attention, is **not on the exporter's default preservation list** (per-target opt-in — the reason
+ * is in op-vocabulary.md).
  *
- * MUST: 受理制約は IR の語彙ではなく**この契約表 + 明確な診断**で表す（ADR 0007）。
- * 「実測に出た形しか通さない」を IR スキーマ側に彫ると、形を広げるたびに配布形の非互換
- * 改訂になる。
+ * MUST: acceptance constraints are expressed **by this contract table + clear diagnostics**, not by
+ * the IR vocabulary (ADR 0007). Carving "only the measured forms pass" into the IR schema would make
+ * every widening of a form an incompatible revision of the distribution.
  *
- * - `linear` — `x[…,in] × W[out,in] + b[out]`。**bias は常時あり（arity 3 固定）**で、
- *   IR 上の bias 無し形（arity 2）は fail loudly。上流の bias 無し linear はエクスポータが
- *   ゼロ bias を合成してアリティ 3 へ正規化する（ADR 0016）。
- * - `layer_norm` — attrs `normalized_shape` / `eps`。affine（weight / bias）も常時あり。
- * - `softmax` — attrs `dim`。**最終次元のみ**受理（実測は −1 のみ — gather と同じ絞り方）。
- * - `safe_softmax` — `softmax` と同一契約 + 「行 max が −inf の行は全 0」（ADR 0044）。
- * - `embedding` — `weight f32[V,H]` を `index i32[…]` で行 gather。attrs `padding_idx`。
- * - `masked_fill` — attrs `value`（f32 スカラ）。mask は bool で**右詰め broadcast**。
- * - `conv1d` — attrs `stride` / `padding` / `dilation` / `groups`（ADR 0015 で後 2 者を追加）。
- *   「欄が無い = 1 固定」の設計価値は「欄がある = 宣言必須・既定値補完なし・不整合は
- *   fail loudly」で引き継ぐ。重みは `[Cout, Cin/groups, K]`。
- * - `conv_transpose1d` — attrs `stride` / `padding`。重みは **`[Cin, Cout, K]`**（conv1d と
- *   転置）。受理するのは出力長が `L·stride` になる形（`2·padding == K − stride`）だけで、
- *   一般形は fail loudly（ADR 0015 — 需要が出た時に広げる）。
- * - `conv2d` — attrs `stride` / `padding` / `dilation` / `groups`（空間 3 つは **H/W の
- *   2 成分**）。`x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout]`（ADR 0017）。
- * - `rms_norm` — attrs `eps`・**アリティ 2**（x, weight）。`y = x · rsqrt(mean(x², 最終次元)
- *   + eps) · weight`。layer_norm と違い bias が無く、平均を引かない（ADR 0017）。
+ * - `linear` — `x[…,in] × W[out,in] + b[out]`. **The bias is always present (arity fixed at 3)**,
+ *   and the bias-less form in the IR (arity 2) fails loudly. For an upstream linear without bias,
+ *   the exporter synthesises a zero bias and normalises to arity 3 (ADR 0016).
+ * - `layer_norm` — attrs `normalized_shape` / `eps`. The affine part (weight / bias) is always
+ *   present too.
+ * - `softmax` — attrs `dim`. **Only the last dimension** is accepted (only −1 was measured — the same
+ *   narrowing as gather).
+ * - `safe_softmax` — the same contract as `softmax` + "a row whose max is −inf is all 0" (ADR 0044).
+ * - `embedding` — row gather of `weight f32[V,H]` by `index i32[…]`. attrs `padding_idx`.
+ * - `masked_fill` — attrs `value` (f32 scalar). The mask is bool with **right-aligned broadcast**.
+ * - `conv1d` — attrs `stride` / `padding` / `dilation` / `groups` (the latter two added by ADR
+ *   0015). The design value of "no field = fixed at 1" carries over as "a field present = required,
+ *   no default filling, inconsistency fails loudly". The weight is `[Cout, Cin/groups, K]`.
+ * - `conv_transpose1d` — attrs `stride` / `padding`. The weight is **`[Cin, Cout, K]`** (transposed
+ *   relative to conv1d). Only forms whose output length is `L·stride` (`2·padding == K − stride`) are
+ *   accepted, and the general form fails loudly (ADR 0015 — widened when there is demand).
+ * - `conv2d` — attrs `stride` / `padding` / `dilation` / `groups` (the three spatial ones have **two
+ *   components, H/W**). `x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout]` (ADR 0017).
+ * - `rms_norm` — attrs `eps`, **arity 2** (x, weight). `y = x · rsqrt(mean(x², last dimension)
+ *   + eps) · weight`. Unlike layer_norm it has no bias and does not subtract the mean (ADR 0017).
  */
 export const LINEAR_OP = "linear";
 export const LAYER_NORM_OP = "layer_norm";
 /**
- * 融合 attention（ADR 0023）。`out = softmax_lastdim((q·scale) @ (k·scale)ᵀ + mask) @ v`。
+ * Fused attention (ADR 0023). `out = softmax_lastdim((q·scale) @ (k·scale)ᵀ + mask) @ v`.
  *
- * - **アリティ 3 か 4**（q / k / v + 省略可能な mask）。可変アリティ（`cat`）とは別の機構で、
- *   上限を持つ（{@link ContractBase.maxArity}）— 「何本でも」ではなく「mask 1 本だけ増える」。
- * - 入力は **rank-4 head-first**（`q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]`）で連続。
- *   出力は `[B,H,M,D]`。**D は 3 者とも同じ**（実測の全 attention がそうで、v 側だけ
- *   別の長さを許すと「D を取り違えた IR」が shape 検査を素通りする）。
- * - **GQA / MQA は整除 broadcast**（ADR 0067 決定 1）。`H % Hkv == 0` を満たす形だけを受理し、
- *   `r = H / Hkv` は**導出値**（attrs 欄を作らない）。B の完全一致・k/v 間の Hkv 一致・
- *   D 3 者同一・N=0 拒否は取り違えの検出線としてそのまま残る。
- * - **mask は f32・rank-4・shape はちょうど `[1,1,M,N]`**（加算型 — `S' = S + mask`）で、
- *   B·H の全バッチへ broadcast する。`[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 は
- *   **受理しない**（実行時マスクの需要が出た時に広げる — 欄の不存在が「語彙に無い」を構造で
- *   表す規律）。causal / dropout は依然として語彙に無い。
- * - **states 形**（ADR 0067 決定 4 — 同一 op 名の契約拡張で、**欄の有無が形を判別する**）:
- *   `states` 欄が `{ k, v }` のとき「過去分はスロットから・今 step の k/v は `ins` から」
- *   読む autoregressive 形になる。ins は `[B,Hkv,M,D]`（M = q と共有する物理 chunk 次元）で、
- *   **mask 入力は取らない**（causal 固定・述語計算で表す）。sliding は省略可能な attrs
- *   `window`（欄の不存在 = 全 context）。欄が**無い**ノードは従来契約そのままで、既存資産・
- *   既存門は 1 バイトも動かない。
+ * - **Arity 3 or 4** (q / k / v + an optional mask). A different mechanism from variable arity
+ *   (`cat`), with an upper bound ({@link ContractBase.maxArity}) — not "any number" but "only one
+ *   more input, the mask".
+ * - Inputs are **rank-4 head-first** (`q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]`) and
+ *   contiguous. The output is `[B,H,M,D]`. **D is the same for all three** (every measured attention
+ *   is like that, and allowing a different length on the v side alone would let "IR with D mixed up"
+ *   pass the shape check).
+ * - **GQA / MQA is a divisible broadcast** (ADR 0067 decision 1). Only forms with `H % Hkv == 0`
+ *   are accepted, and `r = H / Hkv` is a **derived value** (no attrs field). The exact B match, equal
+ *   Hkv between k/v, equal D for all three and the N=0 rejection stay as lines that detect mix-ups.
+ * - **The mask is f32, rank-4, with shape exactly `[1,1,M,N]`** (additive — `S' = S + mask`) and is
+ *   broadcast to all B·H batches. `[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 are **not accepted**
+ *   (widened when a demand for run-time masks appears — the discipline where a missing field
+ *   expresses "not in the vocabulary" structurally). causal / dropout are still not in the
+ *   vocabulary.
+ * - **The states form** (ADR 0067 decision 4 — a contract extension under the same op name, where
+ *   **the presence of the field decides the form**): when the `states` field is `{ k, v }`, it
+ *   becomes the autoregressive form that reads "the past from the slots, this step's k/v from
+ *   `ins`". ins are `[B,Hkv,M,D]` (M = the physical chunk dimension shared with q), and **it takes no
+ *   mask input** (causal is fixed and expressed by predicate computation). Sliding is the optional
+ *   attrs `window` (no field = the whole context). Nodes **without** the field keep the previous
+ *   contract exactly, and existing assets and existing checks do not move by a single byte.
  *
- * MUST: `scale` は **q と k の両方に掛かる（半スケール契約）**。torch の
- * `aten::_scaled_dot_product_attention_math` が `q *= √scale_factor; k *= √scale_factor` と
- * 書く形と同義で、`√` を含む見慣れない値になるのはそのため。**内積の後に 1 度だけ掛ける形
- * （全スケール）に変えてはならない** — 丸め列が変わり、分解経路（mul → permute → bmm →
- * softmax → expand → bmm）とのビット同一が失われる（ADR 0023 の設計の核）。
+ * MUST: `scale` is **applied to both q and k (the half-scale contract)**. It is equivalent to
+ * torch's `aten::_scaled_dot_product_attention_math` writing `q *= √scale_factor; k *=
+ * √scale_factor`, which is why it is an unfamiliar value containing a `√`. **Do not change it to the
+ * form applied once after the dot product (full scale)** — the rounding sequence would change
+ * and bit identity with the decomposed path (mul → permute → bmm → softmax → expand → bmm) would be
+ * lost (the core of ADR 0023's design — decision 2).
  */
 export const ATTENTION_OP = "attention";
 /**
- * 今 step の k / v を state スロットへ書く**単機能 effect op**（ADR 0067 決定 5）。
- * `ins` は `[B,Hkv,M,D]` の 1 本・`states` 欄は `{ slot }` ちょうど・**出力は 0 本**
- * （値を定義しない — ノード多出力一般化〈ADR 0068 決定 1〉の 0 本席の最初の入居者）。
+ * A **single-purpose effect op** that writes this step's k / v into a state slot (ADR 0067
+ * decision 5). `ins` is one `[B,Hkv,M,D]`, the `states` field is exactly `{ slot }`, and **it has 0
+ * outputs** (it defines no value — the first op to use the zero-output case of node-level
+ * multi-output, ADR 0068 decision 1).
  *
- * MUST: attention に内蔵しない（TVM 型を採らない）。単機能 op に閉じるからこそ
- * ①full-write / padding 行 no-op（queryLength が切る — ADR 0066 決定 4）の検証が 1 op で済み
- * ②attention 側は読み取り専用のままビット同一検証が単純で ③KV 共有層は「`state_append`
- * ノードが無い」だけで表せる（ORT の kv_empty と同じ表現力を op の不在で得る）。
- * MUST: `window` は**省略可能**（欄の不存在 = 全 context）。同一スロットに触れる全ノードで
- * 値が一致することは宣言層（`validateGraphContracts`）が見る — 論理 col → 物理 row の写像は
- * 読み書き同式 MUST（ADR 0067 決定 4）で、読み側だけ別式にすると沈黙誤読になる。
- * MUST: 論理位置（pastLength / queryLength）を attrs に持たない。毎 step 変わる実行時スカラは
- * context 所有の可変 uniform が運ぶ（ADR 0066 追記 4）。
+ * MUST: not built into attention (the TVM style is not adopted). Precisely because it stays a
+ * single-purpose op, ① the full-write / padding-row no-op check (queryLength cuts it — ADR 0066
+ * decision 4) is done in one op, ② the attention side stays read-only, which keeps bit-identity
+ * checks simple, and ③ a KV-sharing layer is expressed simply by "having no `state_append` node"
+ * (the same expressive power as ORT's kv_empty, obtained from the absence of an op).
+ * MUST: `window` is **optional** (no field = the whole context). The declaration layer
+ * (`validateGraphContracts`) checks that the value agrees across every node that touches the same
+ * slot — the mapping from logical col to physical row MUST use the same formula for reads and writes
+ * (ADR 0067 decision 4), and a different formula on the read side alone would cause silent misreads.
+ * MUST: logical positions (pastLength / queryLength) are not carried in attrs. Run-time scalars that
+ * change every step are carried by a context-owned mutable uniform (ADR 0066 addendum 4).
  */
 export const STATE_APPEND_OP = "state_append";
 
@@ -262,18 +300,20 @@ export const RMS_NORM_OP = "rms_norm";
 export const STATIC_QUANTIZE_OP = "static_quantize";
 export const SOFTMAX_OP = "softmax";
 /**
- * `softmax` + 「**行 max が −inf の行は全 0 を書く**」（ADR 0044）。契約・attrs・shape 規則は
- * `softmax` と同一で、違いはこの 1 行だけ。
+ * `softmax` + "**writes all 0 for a row whose max is −inf**" (ADR 0044). The contract, attrs and
+ * shape rules are the same as `softmax`; this one rule is the only difference.
  *
- * 出所は torch の SDPA 分解が `softmax` に被せる safe-softmax ガード
- * （`where(¬any(¬eq(src,−inf)), 0, softmax(src))`）で、マスクが実行時値だと「ガードが
- * 発火しない」証明が原理的に立たない（エクスポータの `_drop_safe_softmax_guard`）。
- * スコアが有限なら「全要素 −inf ⇔ 行 max = −inf」なので、この op はガードと**厳密に**
- * 同じ意味論を持つ。
+ * It originates in the safe-softmax guard that torch's SDPA decomposition puts over `softmax`
+ * (`where(¬any(¬eq(src,−inf)), 0, softmax(src))`); when the mask is a run-time value, a proof that
+ * "the guard never fires" cannot be made in principle (the exporter's `_drop_safe_softmax_guard`).
+ * With finite scores, "all elements −inf ⇔ row max = −inf", so this op has **exactly** the same
+ * semantics as the guard.
  *
- * MUST: `softmax` と別 op のまま保つ。素の `softmax` に空行の分岐を足すと、全 −inf 行を
- * 契約違反として扱う既存の絞り（ADR 0044 決定 3 — 融合 attention も同じ絞り）が消え、
- * 「NaN で表に出るはずの契約違反」が黙って 0 になる。
+ * MUST: keep it a separate op from `softmax`. Adding an empty-row branch to plain `softmax` would
+ * remove the existing narrowing that treats an all −inf row as a contract violation (ADR 0044
+ * decision 3; for fused attention that rule was withdrawn by the ADR 0044 addendum of 2026-08-31,
+ * which makes an all-masked row a valid input with output 0), and "a contract violation that should
+ * surface as NaN" would silently become 0.
  */
 export const SAFE_SOFTMAX_OP = "safe_softmax";
 export const EMBEDDING_OP = "embedding";
@@ -281,101 +321,116 @@ export const MASKED_FILL_OP = "masked_fill";
 export const CONV1D_OP = "conv1d";
 export const CONV2D_OP = "conv2d";
 /**
- * 3 次元畳み込み（拡張分子層 — ADR 0118 決定 1）。**unbatched**:
- * `x[Cin,T,H,W] * W[Cout,Cin/groups,Kt,Kh,Kw] + b[Cout] → [Cout,Tout,Hout,Wout]`。
+ * 3D convolution (extended composite layer — ADR 0118 decision 1). **unbatched**:
+ * `x[Cin,T,H,W] * W[Cout,Cin/groups,Kt,Kh,Kw] + b[Cout] → [Cout,Tout,Hout,Wout]`.
  *
- * - attrs `stride` / `padding` / `dilation` は **`[T, H, W]` の 3 成分**・`groups` はスカラ。
- *   4 つとも宣言必須で既定値補完をしない（conv2d の `[H, W]` と同じ規律 — ADR 0015）。
- * - **アリティ 3 固定**（bias 無しの conv はエクスポータのゼロ bias 合成で正規化 — conv 族と同じ）。
- * - 出力長は軸ごとに `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1`。padding は
- *   軸ごとに**対称**のゼロ。因果パディング（時間の片側だけ）は語彙に入れない — recipe が前の
- *   chunk の cache を時間軸の先頭へ cat して表す（ADR 0118 決定 2）。
+ * - attrs `stride` / `padding` / `dilation` have **3 components, `[T, H, W]`**; `groups` is a
+ *   scalar. All four are required and not filled with defaults (the same discipline as conv2d's
+ *   `[H, W]` — ADR 0015).
+ * - **Arity fixed at 3** (a conv without bias is normalised by the exporter's zero-bias synthesis —
+ *   as for the conv family).
+ * - The output length per axis is `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1`.
+ *   Padding is **symmetric** zeros per axis. Causal padding (one side of time only) is not in the
+ *   vocabulary — the recipe expresses it by cat-ing the previous chunk's cache onto the front of the
+ *   time axis (ADR 0118 decision 2).
  *
- * MUST: x は **rank 4（unbatched）だけ**。batched の rank 5 は周りの cat / slice が strided 族の
- * rank 上限 4 に当たるので契約に入れない（需要が出たら rank で判別して足す — ADR 0118 決定 1 の
- * 一般化の条件）。
- * NOTE: 意味論は groups 一般だが、GPU の実装済み subset は `groups == 1`（implicit GEMM）だけ。
- * `groups > 1` は Session の構築時に fail loudly（src/runtime/plan.ts の `validateGraphContracts`）。
+ * MUST: x is **rank 4 (unbatched) only**. A batched rank 5 is not in the contract because the
+ * surrounding cat / slice hit the strided family's rank limit of 4 (if demand appears, it is added
+ * by discriminating on rank — the generalisation condition of ADR 0118 decision 1).
+ * NOTE: the semantics cover general groups, but the GPU's implemented subset is only `groups == 1`
+ * (implicit GEMM). `groups > 1` fails loudly when the Session is built (`validateGraphContracts` in
+ * src/runtime/plan.ts).
  */
 export const CONV3D_OP = "conv3d";
 export const CONV_TRANSPOSE1D_OP = "conv_transpose1d";
 
 /**
- * modulated deformable convolution v2（第 1' 層の原子 — `torchvision::deform_conv2d`。
- * ADR 0055）。**アリティ 5 固定**で `x[B,Cin,H,W]` / `weight[Cout,Cin,Kh,Kw]` /
- * `offset[B,2·Kh·Kw,Hout,Wout]` / `mask[B,Kh·Kw,Hout,Wout]` / `bias[Cout]` を取る。
+ * Modulated deformable convolution v2 (an extended atomic op — `torchvision::deform_conv2d`.
+ * ADR 0055). **Arity fixed at 5**, taking `x[B,Cin,H,W]` / `weight[Cout,Cin,Kh,Kw]` /
+ * `offset[B,2·Kh·Kw,Hout,Wout]` / `mask[B,Kh·Kw,Hout,Wout]` / `bias[Cout]`.
  *
- * - `offset` のチャネル並びは `(kh, kw)` の入れ子で最内が 2 連、**偶数 = y / 奇数 = x**。
- * - `mask`（modulator）は**双線形補間の後**に掛かる（`(m · v) · w`）。
- * - 境界外は**ゼロ埋め**（中心が `(−1, in)` の外ならタップ全体 0・内側でも範囲外の隅は
- *   その隅だけ 0 — border clamp ではない）。
+ * - The channel order of `offset` nests `(kh, kw)` with pairs innermost, **even = y / odd = x**.
+ * - `mask` (the modulator) is applied **after bilinear interpolation** (`(m · v) · w`).
+ * - Out of bounds is **zero-filled** (if the centre lies outside `(−1, in)` the whole tap is 0;
+ *   even inside, an out-of-range corner alone is 0 — not a border clamp).
  *
- * MUST: `stride` / `dilation` / `groups` / `offset_groups` の**欄を作らない**（= 1 固定）。
- * 実測（BiRefNet 一族の 20 箇所）が全て 1 で、欄の不存在がそのまま「その形は語彙に無い」の
- * 宣言になる（conv_transpose1d の `output_padding` と同じ手筋 — ADR 0023 決定 4）。
- * MUST: `mask` はスロットとして必須 = **DCNv2 専業**。`use_mask=False`（DCNv1）を表す欄が
- * 無いことがそのまま fail loudly になる。
- * MUST: 出力空間は x / weight / `padding` から導き、`offset` / `mask` の空間 2 軸とは
- * **突き合わせるだけ**（同じ事実を 2 か所から取ると形の食い違いが素通りする）。
+ * MUST: **no fields** for `stride` / `dilation` / `groups` / `offset_groups` (= fixed at 1). All the
+ * measurements (20 sites across the BiRefNet family) are 1, and the absence of the field is itself
+ * the statement "that form is not in the vocabulary" (the same move as `output_padding` of
+ * conv_transpose1d — ADR 0023 decision 4).
+ * MUST: `mask` is a required slot = **DCNv2 only**. Having no field that expresses `use_mask=False`
+ * (DCNv1) is what makes it fail loudly.
+ * MUST: the output spatial size is derived from x / weight / `padding`, and the two spatial axes of
+ * `offset` / `mask` are **only matched against it** (taking the same fact from two places would let
+ * a shape mismatch slip through).
  */
 export const DEFORM_CONV2D_OP = "deform_conv2d";
 
 /**
- * NCHW の空間 2 軸の双線形 resample（第 1 層の原子 — `aten.upsample_bilinear2d.vec`）。
- * `x[B,Cin,H,W] → [B,Cin,Hout,Wout]`、attrs は `output_size`（`[Hout, Wout]`）のみ。
+ * Bilinear resample over the two spatial axes of NCHW (a Core ATen layer op —
+ * `aten.upsample_bilinear2d.vec`). `x[B,Cin,H,W] → [B,Cin,Hout,Wout]`; the only attr is
+ * `output_size` (`[Hout, Wout]`).
  *
- * MUST: **`align_corners = True` 専業**で、attrs に `align_corners` の欄を作らない
- * （欄の不存在が「語彙に無い」を構造で表す規律 — ADR 0023 決定 4）。`False` は座標式
- * （`scale·(i+0.5) − 0.5`）も端の扱いも別物なので、受理すると同じ op 名で数値が変わる。
- * 需要が出たら `gelu` / `gelu_tanh` と同じ手筋で**別 op**として足す。
- * MUST: `mode` の欄も作らない（nearest / bicubic / area / antialias は語彙に無い）。倍率は
- * `output_size` と入力から**実行時に導く** — `scale_factor` を載せる欄も持たない（同じ形に
- * 2 通りの IR ができる）。
- * NOTE: 縮小（`Hout < H`）も同じ op・同じ式で通る（torch も同一 op）。antialias を持たない
- * ぶん 2 タップしか読まないのは torch の仕様どおりで、`area` とは別物。
+ * MUST: **`align_corners = True` only**, and there is no `align_corners` field in attrs (the
+ * discipline where a missing field expresses "not in the vocabulary" structurally — ADR 0023
+ * decision 4). `False` has a different coordinate formula (`scale·(i+0.5) − 0.5`) and different edge
+ * handling, so accepting it would change the numbers under the same op name. If demand appears, it
+ * is added as a **separate op**, the same move as `gelu` / `gelu_tanh`.
+ * MUST: no `mode` field either (nearest / bicubic / area / antialias are not in the vocabulary). The
+ * scale factor is **derived at run time** from `output_size` and the input — there is no field for
+ * `scale_factor` either (it would give two IR spellings of the same form).
+ * NOTE: downscaling (`Hout < H`) also goes through the same op and formula (torch uses the same op
+ * too). Reading only 2 taps because there is no antialias is torch's specified behaviour, and
+ * differs from `area`.
  */
 export const UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d";
 
 /**
- * GRU の**隠れ側スキャン**（第 2 層 — ADR 0056）。時間方向の逐次だけを 1 ノードに畳み、
- * **入力側 GEMM は持たない**（呼び手が既存 `linear` で `gi = x·W_ihᵀ + b_ih` を用意する）。
+ * The **hidden-side scan** of a GRU (extended composite layer — ADR 0056). Folds only the sequential
+ * recurrence over time into one node and **has no input-side GEMM** (the caller prepares
+ * `gi = x·W_ihᵀ + b_ih` with the existing `linear`).
  *
- * **アリティ 4 固定**で `gi[T,N,3H]` / `h0[N,H]` / `w_hh[3H,H]` / `b_hh[3H]` を取り、
- * 出力は `y[T,N,H]`（全ステップの `h`）。3H のゲート並びは **r / z / n** の順。
+ * **Arity fixed at 4**, taking `gi[T,N,3H]` / `h0[N,H]` / `w_hh[3H,H]` / `b_hh[3H]`; the output is
+ * `y[T,N,H]` (`h` for every step). The gate order of 3H is **r / z / n**.
  *
  * ```
  * r = sigmoid(gh_r + gi_r) / z = sigmoid(gh_z + gi_z) / n = tanh(gi_n + gh_n·r)
- * h' = (h − n)·z + n            （gh = W_hh·h + b_hh）
+ * h' = (h − n)·z + n            (gh = W_hh·h + b_hh)
  * ```
  *
- * MUST: 走査方向は **op 名で分ける**（`gru_scan` / `gru_scan_reverse`）。attrs の bool 変種に
- * しない — attrs に bool を載せる前例が無く（Python の bool は int の派生で検証機構の新設が
- * 要る）、`gelu` / `gelu_tanh` と同じ「attr 変種は別 op」の手筋に揃える（ADR 0056 決定 2）。
- * MUST: 逆方向 op も**出力は順方向の時間順**で書く。`flip` は記号軸を拒否する（ADR 0014 /
- * 0046）ので、走査方向を op の中へ畳むことが記号 T を通す唯一の形。
- * MUST: 多層 / 双方向の欄を作らない。`aten.gru` の `Tensor[16]`（層 × 方向ぶんの重み列）を
- * 1 ノードに載せると op が層ループと層間 `cat` を内包する — 層と方向は**ノードを並べて**表す
- * （ADR 0056 決定 7）。
- * MUST: `h_n` を返さない — GRU は出力 `y` だけの**単一出力の契約**で表す（ADR 0056 決定 7）。
- * ノード多出力は IR として解禁済み（ADR 0068）だが、この契約は広げていない（`h_n` を要する
- * 消費側が出たら op の契約の改訂として扱う）。
- * MUST: `has_biases=False` / `batch_first` / `dropout` の欄を作らない。欄の不存在がそのまま
- * 「その形は語彙に無い」の宣言になる（ADR 0023 決定 4）。
+ * MUST: the scan direction is **split by op name** (`gru_scan` / `gru_scan_reverse`), not made a
+ * bool attrs variant — there is no precedent for bool in attrs (Python's bool derives from int, so a
+ * new validation mechanism would be needed), and it follows the same "an attr variant is a separate
+ * op" move as `gelu` / `gelu_tanh` (ADR 0056 decision 2).
+ * MUST: the reverse op also writes **its output in forward time order**. `flip` rejects symbolic axes
+ * (ADR 0014 / 0046), so folding the scan direction into the op is the only form that lets a symbolic
+ * T through.
+ * MUST: no fields for multiple layers / bidirectional. Putting `aten.gru`'s `Tensor[16]` (the weight
+ * list per layer × direction) on one node would make the op contain the layer loop and the `cat`
+ * between layers — layers and directions are expressed by **lining up nodes** (ADR 0056 decision 7).
+ * `h_n` is not returned — the GRU is expressed as a **single-output contract** with output `y` only;
+ * returning `h_n` MAY be added as a revision of the op contract once a consumer that needs it
+ * appears (re-graded 2026-10-18 — ADR 0056 decision 7). Node-level multiple outputs are allowed in
+ * the IR (ADR 0068), but this contract has not been widened.
+ * MUST: no fields for `has_biases=False` / `batch_first` / `dropout`. The absence of the field is
+ * itself the statement "that form is not in the vocabulary" (ADR 0023 decision 4).
  */
 export const GRU_SCAN_OPS = ["gru_scan", "gru_scan_reverse"] as const;
 export type GruScanOpName = (typeof GRU_SCAN_OPS)[number];
 
 /**
- * 低精度格納が**適格**になる重みスロット（op 名 → 入力スロット番号 — ADR 0018）。
+ * Weight slots for which low-precision storage is **eligible** (op name → input slot index — ADR
+ * 0018).
  *
- * 実測でサイズが支配的な 6 スロットだけを載せる（conv3d は ADR 0118 決定 1 で追加 — 重みの
- * 平坦化が implicit GEMM の A タイルそのものなので、展開経路は conv1d / conv2d と共有）。
- * ここに無い消費（bias / norm 系の weight / その他の op）が 1 つでもあれば、その initializer は
- * 適格外としてロード時に CPU で f32 展開される。
+ * Only the 6 slots whose size dominates in measurements are listed (conv3d added by ADR 0118
+ * decision 1 — the flattened weight is exactly the A tile of the implicit GEMM, so the decode path
+ * is shared with conv1d / conv2d). If an initializer has even one consumer not listed here (bias /
+ * norm-type weights / other ops), it is ineligible and decoded to f32 on the CPU at load time.
  *
- * MUST: bias を含めない。プロトタイプは bias の f32 定数が weight を道連れに降格させて
- * f16 の適格を 0MB にした（ADR 0006 が名指しした根治対象）— 「bias は常に f32」は
- * 「bias スロットを適格判定に載せない」ことでしか担保できない。
+ * MUST: bias is not included. In the prototype, the f32 constant of a bias dragged its weight down
+ * with it and made the eligible f16 bytes 0 MB (the target ADR 0006 named for a root-cause fix) —
+ * "bias is always f32" can be guaranteed only by "keeping bias slots out of the eligibility
+ * verdict".
  */
 export const WEIGHT_SLOTS: ReadonlyMap<string, number> = new Map([
   [LINEAR_OP, 1],
@@ -387,13 +442,15 @@ export const WEIGHT_SLOTS: ReadonlyMap<string, number> = new Map([
 ]);
 
 /**
- * per-channel scale の**チャネル軸**（op 名 → 重みテンソルの軸番号 — ADR 0019）。
+ * The **channel axis** of the per-channel scale (op name → axis index of the weight tensor — ADR
+ * 0019).
  *
- * 出力チャネルの軸で、linear `[out,in]` / conv1d `[Cout,Cin/g,K]` / conv2d `[Cout,Cin/g,Kh,Kw]` /
- * conv3d `[Cout,Cin/g,Kt,Kh,Kw]` / embedding `[V,H]` は 0、**conv_transpose1d だけ `[Cin,Cout,K]` の転置レイアウトで 1**。
+ * It is the output-channel axis: 0 for linear `[out,in]` / conv1d `[Cout,Cin/g,K]` / conv2d
+ * `[Cout,Cin/g,Kh,Kw]` / conv3d `[Cout,Cin/g,Kt,Kh,Kw]` / embedding `[V,H]`, and **1 for
+ * conv_transpose1d only, whose layout `[Cin,Cout,K]` is transposed**.
  *
- * MUST: キー集合は {@link WEIGHT_SLOTS} と一致させる（tests/ops_conformance_test.ts が固定）。
- * 片方だけ増えると、新しい重みスロットの i8 が「軸 0 の scale」として黙って実行される。
+ * MUST: keep the key set equal to {@link WEIGHT_SLOTS} (pinned by tests/ops_conformance_test.ts).
+ * If only one of them grows, the i8 of a new weight slot silently runs as "a scale on axis 0".
  */
 export const WEIGHT_CHANNEL_AXES: ReadonlyMap<string, number> = new Map([
   [LINEAR_OP, 0],

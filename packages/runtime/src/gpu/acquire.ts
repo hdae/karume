@@ -1,10 +1,12 @@
 /**
- * device を取って {@link GpuContext} を組み立てるまで（アダプタ取得 → limits の計画と検査 →
- * feature の計画とカナリアの実走 → adapterInfo / WGSL 言語機能の正規化）。
+ * Everything up to taking the device and assembling a {@link GpuContext} (adapter acquisition →
+ * planning and checking limits → planning features and running the canaries → normalizing
+ * adapterInfo / WGSL language features).
  *
- * MUST: 依存は acquire → context の一方向。{@link GpuContext} を構築するのはこのファイルの
- * {@link acquireGpu} だけで、器（`context.ts`）側からここへ実体を import しない。層の入口は
- * 2 ファイルの公開名を再 export する `device.ts`。
+ * MUST: the dependency is one-way, acquire → context. Only {@link acquireGpu} in this file
+ * constructs a {@link GpuContext}, and the container side (`context.ts`) does not value-import from
+ * here. The entry point of the layer is `device.ts`, which re-exports the public names of both
+ * files.
  */
 
 import {
@@ -23,36 +25,42 @@ import {
 } from "../kernels/geometry-profile.ts";
 import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
-/** navigator.gpu が無い / アダプタを取得できない。 */
+/** navigator.gpu is missing / no adapter can be obtained. */
 export class GpuUnavailableError extends Error {
   override readonly name = "GpuUnavailableError";
 }
 
-/** 要求した limit を device が満たさない（要求漏れ・仕様既定値への降格の検出）。 */
+/**
+ * The device does not meet a requested limit (detects a missed request or a demotion to the spec
+ * default).
+ */
 export class GpuLimitError extends Error {
   override readonly name = "GpuLimitError";
 }
 
 /**
- * 必須と指定した feature をアダプタが持たない（{@link AcquireGpuOptions.gpuTiming} = `true` 等）。
- * limit の不足（{@link GpuLimitError}）と分けるのは、利用者の分岐先が違うため — feature は
- * 「その環境では諦めて機能を落とす」で続行できるが、limit 不足は続行してはいけない。
+ * The adapter lacks a feature specified as required ({@link AcquireGpuOptions.gpuTiming} = `true`
+ * and the like). It is separate from a limit shortfall ({@link GpuLimitError}) because the user
+ * branches differently — with a feature one can continue by "giving up and dropping the feature in
+ * that environment", but with a limit shortfall one must not continue.
  */
 export class GpuFeatureError extends Error {
   override readonly name = "GpuFeatureError";
 }
 
 /**
- * requiredLimits に明示要求する limit。
+ * The limits requested explicitly in requiredLimits.
  *
- * MUST: 要求しなかった limit はアダプタ値ではなく**仕様既定値**に落ちる。既定は workgroup
- * ストレージ 16384 バイト / workgroup あたり 256 invocation / workgroupSize (256,256,64) で、
- * 要求しないままだとアダプタが 1024 invocation を出せてもカーネルはそこで頭打ちになる。
+ * MUST: a limit that is not requested falls to the **specification default**, not the adapter
+ * value. The defaults are 16384 bytes of workgroup storage / 256 invocations per workgroup /
+ * workgroupSize (256,256,64); without a request, kernels top out there even if the adapter could
+ * offer 1024 invocations.
  *
- * MUST: `maxComputeWorkgroupSizeX/Y/Z` は `maxComputeInvocationsPerWorkgroup` とは別の limit。
- * invocations だけ引き上げても `@workgroup_size(512)` は通らず、しかも**失敗の仕方が静か**
- * （`createComputePipeline` は throw せず、無効パイプラインへの dispatch が no-op になって
- * 出力が全て 0 になる）。この沈黙故障は {@link withPipelineScope} でのみ可視化できる。
+ * MUST: `maxComputeWorkgroupSizeX/Y/Z` are limits separate from
+ * `maxComputeInvocationsPerWorkgroup`. Raising only invocations does not let `@workgroup_size(512)`
+ * through, and **the failure is silent** (`createComputePipeline` does not throw; dispatches to the
+ * invalid pipeline become no-ops and the output is all 0). This silent failure can be made visible
+ * only with {@link withPipelineScope}.
  */
 export const REQUIRED_LIMIT_KEYS = [
   "maxBufferSize",
@@ -73,34 +81,37 @@ type RequiredLimitKey = (typeof REQUIRED_LIMIT_KEYS)[number];
 export type RequiredLimits = Readonly<Record<RequiredLimitKey, number>>;
 
 /**
- * requiredLimits の**上限を絞る**指定（キーごとに `min` を取る）。
+ * A setting that **lowers the upper bounds** of requiredLimits (takes `min` per key).
  *
- * MUST: 絞る向きにしか使えない（アダプタ値を超える要求はアダプタ値のまま）。引き上げに使えて
- * しまうと requestDevice が丸ごと失敗する経路が黙って生まれる。
+ * MUST: usable only in the lowering direction (a request above the adapter value stays at the
+ * adapter value). If it could be used for raising, a path where requestDevice fails as a whole
+ * would silently appear.
  */
 type LimitCaps = Partial<Record<RequiredLimitKey, number>>;
 
 /**
- * アダプタ実測値から requestDevice に渡す requiredLimits を組み立てる。
- * 要求値がアダプタ値そのものなら requestDevice は必ず成功する。
+ * Builds the requiredLimits passed to requestDevice from the adapter's real values.
+ * When the requested values are the adapter values themselves, requestDevice always succeeds.
  *
- * MUST: 仕様上 `maxStorageBufferBindingSize ≤ maxBufferSize`。片方だけ引き上げると
- * requestDevice が丸ごと失敗するため、両者は必ず同時に計画する。
+ * MUST: per the specification `maxStorageBufferBindingSize ≤ maxBufferSize`. Raising only one of
+ * them makes requestDevice fail as a whole, so the two are always planned together.
  *
- * `caps` は**テスト専用の絞り**（{@link LIMIT_CAPS}）。要求値を下げるだけだが、
- * `maxBufferSize` を絞る cap は `maxStorageBufferBindingSize` の clamp 元そのものを動かす。
- * MUST: `maxBufferSize` には cap を**先に**適用し、その値で束縛上限を clamp する。後から
- * 掛けると `maxBufferSize` だけを絞った caps で計画値が
- * `maxStorageBufferBindingSize > maxBufferSize` になり、「core 既定機の再現」という
- * この面の目的が黙って外れる（束縛上限が絞られないままバッファ上限だけ下がる）。
- * 残りのキーは互いに独立なので、cap の適用順に依らない。
+ * `caps` are **test-only reductions** ({@link LIMIT_CAPS}). They only lower requested values, but a
+ * cap on `maxBufferSize` moves the very value `maxStorageBufferBindingSize` is clamped to.
+ * MUST: apply the cap to `maxBufferSize` **first** and clamp the binding limit with that value.
+ * Applied afterwards, caps that lower only `maxBufferSize` would yield a plan with
+ * `maxStorageBufferBindingSize > maxBufferSize`, and the purpose of this surface, "reproducing a
+ * machine with core defaults", would silently be missed (the buffer limit drops while the binding
+ * limit is not lowered). The remaining keys are independent of each other, so the order of applying
+ * caps does not matter for them.
  */
 export const planRequiredLimits = (
   adapterLimits: GPUSupportedLimits,
   caps: LimitCaps = {},
 ): RequiredLimits => {
   const maxBufferSize = Math.min(adapterLimits.maxBufferSize, caps.maxBufferSize ?? Infinity);
-  // Record<RequiredLimitKey, number> の網羅性検査で、キー一覧との同期は型で保証される。
+  // The exhaustiveness check of Record<RequiredLimitKey, number> keeps this in sync with the key
+  // list by type.
   const planned: Record<RequiredLimitKey, number> = {
     maxBufferSize,
     maxStorageBufferBindingSize: Math.min(adapterLimits.maxStorageBufferBindingSize, maxBufferSize),
@@ -122,8 +133,9 @@ export const planRequiredLimits = (
 };
 
 /**
- * 取得した device の limits が要求以上であることを検査する。
- * 要求漏れ・実装都合の降格は「カーネルが静かに頭打ちになる」形で現れるため、ここで落とす。
+ * Checks that the acquired device's limits are at least the requested ones.
+ * A missed request or an implementation-driven demotion shows up as "kernels silently top out", so
+ * it fails here.
  */
 export const assertLimitsGranted = (planned: RequiredLimits, granted: GPUSupportedLimits): void => {
   const shortfalls = REQUIRED_LIMIT_KEYS.filter((key) => granted[key] < planned[key]).map(
@@ -135,36 +147,40 @@ export const assertLimitsGranted = (planned: RequiredLimits, granted: GPUSupport
 };
 
 /**
- * MUST NOT: 使っていない feature を要求しない。要求した feature は device の能力面を広げる
- * だけでなく、アダプタ側の実装によっては取得の失敗要因にもなる。重み格納の経路は f32 /
- * f16 / i8 とも `enable f16` を出さない（unpack2x16float — ADR 0018）ので、**無条件に要求
- * する feature は無い**。
- * NOTE: 全廃方針は ADR 0021 で「**既定では**何も要求しない」に読み替えた。条件付きで載るのは
- * GPU 側時間計測（{@link TIMESTAMP_QUERY_FEATURE} — {@link AcquireGpuOptions.gpuTiming} の
- * 三値）と f16 **計算**変種（{@link SHADER_F16_FEATURE} —
- * {@link AcquireGpuOptions.shaderF16}）と32レーンsubgroup（ADR 0100）。有効なfeatureの照会は
- * {@link GpuContext.features} で行える。
+ * MUST NOT: request features that are not used. A requested feature not only widens the device's
+ * capability surface but, depending on the adapter's implementation, can also make acquisition
+ * fail. The weight storage paths do not emit `enable f16` for f32 / f16 / i8 (unpack2x16float — ADR
+ * 0018), so **no feature is requested unconditionally**.
+ * NOTE: ADR 0021 reread the "request nothing" policy as "request nothing **by default**". The
+ * features added conditionally are GPU-side time measurement ({@link TIMESTAMP_QUERY_FEATURE} — the
+ * three values of {@link AcquireGpuOptions.gpuTiming}), f16 **compute** variants
+ * ({@link SHADER_F16_FEATURE} — {@link AcquireGpuOptions.shaderF16}) and 32-lane subgroups (ADR
+ * 0100). The enabled features can be queried with {@link GpuContext.features}.
  */
 const REQUIRED_FEATURES: readonly GPUFeatureName[] = [];
 
 /**
- * feature 集合として読む面だけを取り出した形。`adapter.features`
- * （`ReadonlySet<GPUFeatureName>`）と素の `Set<string>` の**両方**を受けるために要る
- * （前者は要素型が狭く、後者は `ReadonlySet<GPUFeatureName>` を満たさない）。
+ * The shape that takes out only the surface read as a feature set. Needed to accept **both**
+ * `adapter.features` (`ReadonlySet<GPUFeatureName>`) and a plain `Set<string>` (the former has a
+ * narrow element type, the latter does not satisfy `ReadonlySet<GPUFeatureName>`).
  */
 type GpuFeatureSet = Iterable<string> & { has(feature: string): boolean };
 
 /**
- * {@link AcquireGpuOptions.gpuTiming} の三値から「timestamp-query を要求するか」を決める。
+ * Decides "request timestamp-query or not" from the three values of
+ * {@link AcquireGpuOptions.gpuTiming}.
  *
- * MUST: `undefined` は「要求しない」（{@link planShaderF16Feature} と同じ規律）。自動判定に
- * はしない — 計測が有効な device では 1 dispatch = 1 pass に開くため、**アダプタの能力で
- * 壁時計が変わる**（実測: 1 step あたり 370〜375ms・解像度非依存で、しかも作った GPUBuffer
- * の累計に比例して単価が伸びる。`docs/research/2026-08-04-host-overhead-recon.md` §3.2/§4.2）。
- * 診断を無償で配ると「計測すると遅くなる」状態が既定になり、perf の基準そのものが歪む。
+ * MUST: `undefined` means "do not request" (the same discipline as {@link planShaderF16Feature}).
+ * No automatic decision — a device with measurement enabled opens 1 dispatch = 1 pass, so **wall
+ * time would change with the adapter's capabilities** (measured: 370 to 375 ms per step,
+ * independent of resolution, and the unit cost grows with the cumulative number of GPUBuffers
+ * created; `docs/research/2026-08-04-host-overhead-recon.md` §3.2/§4.2). Handing out diagnostics
+ * for free would make "measuring slows things down" the default and distort the perf baseline
+ * itself.
  *
- * device 取得から切り出した純関数なのは、`true` × feature 不在という分岐が**実機では作れない**
- * ため（アダプタが持つ feature は消せない）。判定だけを単体テストできる形にしてある。
+ * It is a pure function cut out of device acquisition because the branch `true` × feature missing
+ * **cannot be produced on real hardware** (a feature the adapter has cannot be removed). Only the
+ * decision is shaped to be unit-testable.
  */
 export const planTimestampFeature = (
   adapterFeatures: GpuFeatureSet,
@@ -182,14 +198,16 @@ export const planTimestampFeature = (
 };
 
 /**
- * {@link AcquireGpuOptions.shaderF16} から「shader-f16 を要求するか」を決める。
+ * Decides "request shader-f16 or not" from {@link AcquireGpuOptions.shaderF16}.
  *
- * MUST: `undefined` は「要求しない」（{@link planTimestampFeature} と同じ規律）。f16 計算変種は
- * **数値を変える**ので、アダプタの能力で有効・無効が決まる形にすると「機械を替えたら黙って
- * 出力が変わる」になる。opt-in 以外はあり得ない（ADR 0028）。
+ * MUST: `undefined` means "do not request" (the same discipline as {@link planTimestampFeature}).
+ * f16 compute variants **change the numbers**, so if the adapter's capabilities decided whether
+ * they are enabled, "change the machine and the output silently changes" would follow. Nothing but
+ * opt-in is possible (ADR 0028).
  *
- * {@link planTimestampFeature} と同じく純関数に切り出してあるのは、`true` × feature 不在と
- * いう分岐が**実機では作れない**ため（アダプタが持つ feature は消せない）。
+ * Like {@link planTimestampFeature} it is cut out as a pure function because the branch `true` ×
+ * feature missing **cannot be produced on real hardware** (a feature the adapter has cannot be
+ * removed).
  */
 export const planShaderF16Feature = (
   adapterFeatures: GpuFeatureSet,
@@ -208,35 +226,39 @@ export const planShaderF16Feature = (
 };
 
 /**
- * shader-f16 を要求して有効化された device で、**既知解を返す極小 f16 カーネルを実走**して
- * 突き合わせる（1 dispatch + 読み戻し）。
+ * On a device where shader-f16 was requested and enabled, **runs a tiny f16 kernel with a known
+ * answer** and compares (1 dispatch + readback).
  *
- * MUST: feature の列挙を「動く」の証拠にしない。`denoland/deno#23125`（open）は
- * **shader-f16 を要求した `enable f16` のコンピュートシェーダが、エラーも警告も出さずに
- * 出力全 0 になる**という報告で、同じコードが別実装では動く。列挙だけを信じると
- * 「f16 変種を選んだのに全ての attention / linear が 0 を返す」形の沈黙故障になる —
- * Karume が「無効パイプラインの沈黙 no-op」に errorScope を常設しているのと同じ思想で、
- * ここは実走の門を置く以外に検出手段が無い。
+ * MUST: do not take the list of features as evidence that it "works". `denoland/deno#23125` (open)
+ * reports that **a compute shader with `enable f16` on a device that requested shader-f16 outputs
+ * all 0 without any error or warning**, while the same code works on another implementation.
+ * Trusting the list alone would give a silent failure of the form "f16 variants were chosen, and
+ * every attention / linear returns 0" — the same thinking as Karume keeping an errorScope always on
+ * for "the silent no-op of an invalid pipeline"; here there is no way to detect it other than a
+ * check that actually runs.
  *
- * 検査は 2 点:
+ * Two checks:
  *
- * 1. `out[0] == 4.0029296875` — **実行時の値**を f16 の共有タイルへ通した往復。`lid` 由来の
- *    非定数を通すので定数畳み込みでは消えず、丸めは共有メモリの**要素型**が強制する。
- *    4 レーンの値は `1 + lid·2^-11` で、binary16 の RTNE により
- *    `1.0 / 1.0（同点→偶数側） / 1+2^-10 / 1+2^-9（同点→偶数側）` = 合計 4.0029296875。
- *    全 0（denoland/deno#23125）も、丸めが起きない実装（合計 4.00146484375）も、
- *    共有メモリを素通りさせる実装も、この 1 本で赤くなる。
- * 2. `out[1] == 1.0` — 定数式での f16 セマンティクス（`1 + 2^-11` の同点が偶数側 1.0 へ）。
- *    こちらは**コンパイル時の畳み込み**を見ている可能性が高いので、① の補助と位置づける。
+ * 1. `out[0] == 4.0029296875` — a round trip of **run-time values** through an f16 shared tile. The
+ *    non-constant derived from `lid` is not removed by constant folding, and the rounding is
+ *    enforced by the **element type** of shared memory. The 4 lanes' values are `1 + lid·2^-11`;
+ *    with binary16 RTNE they become
+ *    `1.0 / 1.0 (tie → even) / 1+2^-10 / 1+2^-9 (tie → even)` = total 4.0029296875.
+ *    All 0 (denoland/deno#23125), an implementation that does not round (total 4.00146484375), and
+ *    an implementation that bypasses shared memory all turn this one red.
+ * 2. `out[1] == 1.0` — f16 semantics in a constant expression (the tie of `1 + 2^-11` goes to the
+ *    even side, 1.0). This most likely looks at **compile-time folding**, so it is treated as an
+ *    aid to ①.
  *
- * NOTE（本波の実測・2026-08-04）: レジスタ上の `vec4<f32>(vec4<f16>(x))` という往復は、
- * この環境のコンパイラに**恒等として消される**（故障注入で確認）。丸めを保証できるのは
- * 「f16 の**格納**を経由する」形だけで、本体のカーネルが共有タイルの要素型で丸めているのは
- * この性質に乗っている。カナリアも同じ理由で共有タイル経由にしてある。
+ * NOTE (measured in this phase, 2026-08-04): a round trip in registers, `vec4<f32>(vec4<f16>(x))`,
+ * is **removed as an identity** by this environment's compiler (confirmed by fault injection).
+ * Rounding is guaranteed only by the form "going through f16 **storage**", and the main kernels
+ * rely on this property by rounding through the element type of the shared tile. The canary goes
+ * through a shared tile for the same reason.
  *
- * コストは `shaderF16: true` を渡した呼び出しにだけ乗る。
+ * The cost is paid only by calls that pass `shaderF16: true`.
  */
-const SHADER_F16_CANARY_WGSL = `// karume shader-f16 カナリア（既知解の突合 — feature 列挙は「動く」の証拠にならない）
+const SHADER_F16_CANARY_WGSL = `// karume shader-f16 canary (compare a known answer — a listed feature is no evidence that it "works")
 enable f16;
 @group(0) @binding(0) var<storage, read_write> out: array<f32>;
 
@@ -244,41 +266,48 @@ var<workgroup> tile: array<f16, 4>;
 
 @compute @workgroup_size(4)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
-  // 実行時の値（lid 由来）を f16 の共有タイルへ通す — 定数畳み込みでは消えない経路
+  // Pass run-time values (derived from lid) through the f16 shared tile — a path constant folding
+  // cannot remove
   tile[lid.x] = f16(1.0 + f32(lid.x) * 0.00048828125);
   workgroupBarrier();
   if (lid.x == 0u) {
-    // ① 共有 f16 タイルの往復 + RTNE（1.0 + 1.0 + 1.0009765625 + 1.001953125）
+    // ① round trip through the shared f16 tile + RTNE (1.0 + 1.0 + 1.0009765625 + 1.001953125)
     var acc = 0.0;
     for (var i = 0u; i < 4u; i = i + 1u) {
       acc = acc + f32(tile[i]);
     }
     out[0] = acc;
-    // ② 定数式での f16 セマンティクス（1 + 2^-11 は binary16 の同点 → 偶数側の 1.0）
+    // ② f16 semantics in a constant expression (1 + 2^-11 is a binary16 tie → the even side, 1.0)
     out[1] = f32(f16(1.0 + 0.00048828125));
   }
 }
 `;
 
-/** カナリアの期待値（① 共有 f16 タイル経由の RTNE / ② 定数式の f16 セマンティクス）。 */
+/**
+ * The canary's expected values (① RTNE through the shared f16 tile / ② f16 semantics of a constant
+ * expression).
+ */
 const SHADER_F16_CANARY_EXPECTED: readonly number[] = [4.0029296875, 1];
 
 /**
- * カナリア区間**ローカル**の消失レース。`work` の決着と `device.lost` を競わせ、消失が先なら
- * {@link GpuDeviceLostError} にする。
+ * A device-loss race **local** to the canary section. Races the settling of `work` against
+ * `device.lost`, and if the loss comes first, turns it into {@link GpuDeviceLostError}.
  *
- * MUST: カナリアの待ちは 1 つ残らずここを通す。ただし根拠は「消失後の待ちが必ずハングする」
- * ことではない —— 実測（Deno + wgpu / NVIDIA・2026-08-16）では `device.destroy()` 由来の消失後、
- * `popErrorScope` は **null で resolve**（空スタックでも同じ）し、`mapAsync` は `OperationError`
- * で reject し、消失前に発行して in-flight だった待ちも全て決着した
- * （`docs/research/2026-08-01-m0-review.md` の実測記録と同じ側）。競わせ続けるのは
- * **destroy 以外の消失（実 TDR / ドライバリセット / ブラウザ実装）が未検証**だからで、
- * ここは「解決しない実装に当たったとき `acquireGpu()` がハングで返ってこない」ための保険。
+ * MUST: every wait of the canary goes through here without exception. The ground, however, is not
+ * that "a wait after a loss always hangs" — measured (Deno + wgpu / NVIDIA, 2026-08-16), after a
+ * loss caused by `device.destroy()`, `popErrorScope` **resolves with null** (the same with an empty
+ * stack), `mapAsync` rejects with `OperationError`, and every wait issued before the loss and in
+ * flight also settled (the same side as the measurements recorded in
+ * `docs/research/2026-08-01-m0-review.md`). We keep racing because **losses other than destroy (a
+ * real TDR / driver reset / browser implementations) are unverified**; this is insurance so that
+ * `acquireGpu()` does not hang and never return when it meets an implementation that does not
+ * resolve.
  *
- * MUST NOT: この形を待ちの多い層へ持ち出さない。`device.lost.then(...)` は解除手段の無い
- * reaction なので、flush / readback のような繰り返す待ちに張ると単調増加する（購読の一本化は
- * {@link GpuContext.onLost} の責務）。カナリアは `GpuContext` 生成**前**に 1 回だけ走り、
- * 積むのは取得 1 回あたり数本なので、ここに限って直に競わせてよい。
+ * MUST NOT: carry this shape into layers with many waits. `device.lost.then(...)` is a reaction
+ * with no way to remove it, so attaching it to repeated waits such as flush / readback makes it
+ * grow monotonically (a single subscription is the responsibility of {@link GpuContext.onLost}).
+ * The canary runs only once **before** the `GpuContext` is created and adds only a few per
+ * acquisition, so here alone a direct race is allowed.
  */
 const raceCanaryDeviceLost = <T>(
   device: GPUDevice,
@@ -298,10 +327,11 @@ const raceCanaryDeviceLost = <T>(
   ]);
 
 /**
- * カナリア本体（{@link SHADER_F16_CANARY_WGSL} の実走と突合）。
+ * The canary itself (runs {@link SHADER_F16_CANARY_WGSL} and compares).
  *
- * NOTE: `export` はテストのため（不一致経路と消失経路は実 GPU では作れない）。公開面は
- * mod.ts の明示列挙なので、ここでの export は API 面を広げない（ADR 0008）。
+ * NOTE: exported for tests (the mismatch path and the loss path cannot be produced on a real GPU).
+ * The public surface is the explicit list in mod.ts, so exporting here does not widen the API
+ * surface (ADR 0008).
  */
 export const assertShaderF16Executes = async (device: GPUDevice): Promise<void> => {
   const byteLength = SHADER_F16_CANARY_EXPECTED.length * 4;
@@ -359,18 +389,22 @@ export const assertShaderF16Executes = async (device: GPUDevice): Promise<void> 
 };
 
 /**
- * MUST: `adapter.info` は実装差のある面。仕様上は必須プロパティだが、`requestAdapterInfo()`
- * 時代の古い Chromium では存在せず undefined になる。型が必須と宣言している以上、実装差は
- * 読む側で吸収するしかないため、参照はこの関数 1 箇所に閉じ込めて空値に正規化する
- * （{@link GpuContext.adapterInfo} は常に安全に読めることを保証する）。
+ * MUST: `adapter.info` is a surface that differs between implementations. The specification makes
+ * it a required property, but old Chromium from the `requestAdapterInfo()` era does not have it and
+ * it is undefined. Since the type declares it required, the difference can only be absorbed on the
+ * reading side, so access is confined to this one function and normalized to empty values (this
+ * guarantees that {@link GpuContext.adapterInfo} is always safe to read).
  */
 type AdapterInfoHost = { readonly info?: GPUAdapterInfo };
 
 /**
- * 空値に正規化した adapter 情報（全ての {@link readAdapterInfo} が共有する 1 つのオブジェクト）。
- * MUST: 凍結する — 利用者のコールバック（`geometryProfile` の関数形）と `GpuContext.adapterInfo` に渡る共有値で、
- * 1 か所の書き換えが後の全 device の adapter 情報（自動選択・照合の材料）に漏れるのを防ぐ（本物の
- * `GPUAdapterInfo` も読み取り専用の属性で、書き換えられないことは同じ）。
+ * adapter information normalized to empty values (one object shared by every
+ * {@link readAdapterInfo}).
+ * MUST: freeze it — it is a shared value that reaches user callbacks (the function form of
+ * `geometryProfile`) and `GpuContext.adapterInfo`, and freezing keeps a rewrite in one place from
+ * leaking into the adapter information of every later device (the material for automatic selection
+ * and matching) (a real `GPUAdapterInfo` has read-only attributes too, and cannot be rewritten
+ * either).
  */
 // `@webgpu/types` brands the platform interface (`__brand`); the literal carries every observable
 // field, so the cast only supplies the brand.
@@ -388,12 +422,15 @@ export const readAdapterInfo = (adapter: AdapterInfoHost): GPUAdapterInfo =>
   adapter.info ?? EMPTY_ADAPTER_INFO;
 
 /**
- * MUST: `navigator.gpu.wgslLanguageFeatures` は実装差のある面（型定義に無い実装・未提供の
- * 実装がある）。直接参照はこの関数 1 箇所に閉じ込め、欠落時は空集合に縮退する。
- * 単独ではGPU対応の証明にしない（ハードウェア対応と無関係に列挙されるため）。
- * 自動選択に使えるのは**数値が同一な変種の選択**（w8a8 の dot4I8Packed / エミュ — ADR 0025。
- * 誤った選択でも結果が 1 ビットも変わらない場合に限り、速度の分岐に使ってよい）。
- * subgroup_idは明示要求時の必要条件としてのみ検査し、device featureと実走も要求する。
+ * MUST: `navigator.gpu.wgslLanguageFeatures` is a surface that differs between implementations
+ * (some implementations lack it in their type definitions, some do not provide it). Direct access
+ * is confined to this one function, and when it is missing it degrades to an empty set.
+ * On its own it is not proof of GPU support (it is listed regardless of hardware support).
+ * What it may be used for in automatic selection is **choosing between numerically identical
+ * variants** (dot4I8Packed / emulation of w8a8 — ADR 0025. Only where a wrong choice does not
+ * change the result by a single bit may it drive a speed branch).
+ * subgroup_id is checked only as a necessary condition when explicitly requested, and the device
+ * feature and a canary run are required too.
  */
 type WgslLanguageFeatureHost = GPU & { readonly wgslLanguageFeatures?: Iterable<string> };
 
@@ -403,7 +440,10 @@ const readWgslLanguageFeatures = (gpu: GPU): ReadonlySet<string> => {
   return new Set(features ?? []);
 };
 
-/** 実行に必要な3機能を明示要求時だけ検査する。自動有効化・黙った縮退はしない。 */
+/**
+ * Checks the 3 capabilities needed for execution only when explicitly requested. No automatic
+ * enabling, no silent fallback.
+ */
 export const planSubgroup32Features = (
   adapterFeatures: GpuFeatureSet,
   languageFeatures: ReadonlySet<string>,
@@ -424,7 +464,10 @@ export const planSubgroup32Features = (
   return ["subgroups", "subgroup-size-control"];
 };
 
-/** 256レーン全てで32レーン縮約・8部分和・broadcastの既知解を実走する（ADR 0100）。 */
+/**
+ * Runs the known answer of a 32-lane reduction, 8 partial sums and a broadcast on all 256 lanes
+ * (ADR 0100).
+ */
 export const assertSubgroup32Executes = async (device: GPUDevice): Promise<void> => {
   const code = `enable subgroups, subgroup_size_control;
 @group(0) @binding(0) var<storage, read_write> out: array<f32>;
@@ -483,7 +526,8 @@ fn main(@builtin(local_invocation_index) lid: u32,
       throw new GpuFeatureError("subgroups カナリア: 32レーン縮約の既知解と一致しない");
     }
   } finally {
-    // コマンドは読み戻しより先にsubmit済み。失敗時も未投入の参照を残さない。
+    // The command was submitted before the readback. Even on failure, no reference to unsubmitted
+    // work is left behind.
     staging.destroy();
     out.destroy();
   }
@@ -498,98 +542,119 @@ export type AcquireGpuOptions = {
    * `create([])`) instead of defining `navigator.gpu` themselves; browsers and Deno leave it unset.
    */
   readonly gpu?: GPU;
-  /** requestAdapter にそのまま渡す（powerPreference 等）。 */
+  /** Passed to requestAdapter as is (powerPreference and the like). */
   readonly adapter?: GPURequestAdapterOptions;
-  /** 予期しない device 消失の通知先。`destroy()` 由来の消失では呼ばれない。 */
+  /** Where unexpected device loss is reported. Not called for a loss caused by `destroy()`. */
   readonly onDeviceLost?: DeviceLostHandler;
   /**
-   * GPU 側時間計測（op 別内訳 — ADR 0021）の要求。**三値**で、feature は device 作成時にしか
-   * 要求できないためここが唯一の opt-in 点になる:
+   * Request for GPU-side time measurement (per-op breakdown — ADR 0021). **Three values**; features
+   * can be requested only at device creation, so this is the only opt-in point:
    *
-   * - `undefined`（既定）= **要求しない**。自動判定にはしない — 計測が有効な device では
-   *   1 dispatch = 1 pass に開くので、アダプタの能力で**壁時計が変わる**（実測は
-   *   {@link planTimestampFeature} の doc）。診断は明示的に払うもの、が既定。
-   * - `true` = 必須。持たないアダプタでは {@link GpuFeatureError}。有効になったことは
-   *   {@link GpuContext.gpuTimingEnabled} と `Session.diagnostics().lastRunTiming` で観測する。
-   * - `false` = 明示的に要求しない（`undefined` と同じ挙動。計測の対照実行で「切ってある」を
-   *   表明するためにある）。
+   * - `undefined` (default) = **do not request**. No automatic decision — a device with measurement
+   *   enabled opens 1 dispatch = 1 pass, so **wall time would change** with the adapter's
+   *   capabilities (measurements in the doc of {@link planTimestampFeature}). Diagnostics are paid
+   *   for explicitly; that is the default.
+   * - `true` = required. {@link GpuFeatureError} on an adapter without it. That it was enabled is
+   *   observed through {@link GpuContext.gpuTimingEnabled} and
+   *   `Session.diagnostics().lastRunTiming`.
+   * - `false` = explicitly not requested (the same behavior as `undefined`; it exists to state "it
+   *   is off" in a control run of a measurement).
    */
   readonly gpuTiming?: boolean;
   /**
-   * f16 **計算**変種（ADR 0028）の要求。三値の形も既定の意味も
-   * {@link AcquireGpuOptions.gpuTiming} と揃えてある（どちらも `undefined` = 要求しない）:
+   * Request for f16 **compute** variants (ADR 0028). The three-value form and the meaning of the
+   * default match {@link AcquireGpuOptions.gpuTiming} (for both, `undefined` = do not request):
    *
-   * - `undefined`（既定）= **要求しない**。自動判定にはしない — f16 計算は数値を変えるので、
-   *   アダプタの能力で有効・無効が決まると「機械を替えたら黙って出力が変わる」ことになる。
-   * - `true` = 必須。持たないアダプタでは {@link GpuFeatureError}。有効化できた場合は
-   *   **既知解を返す極小 f16 カーネルを 1 dispatch 実走して突合する**（feature の列挙は
-   *   「動く」の証拠にならない — denoland/deno#23125）。
-   * - `false` = 明示的に要求しない（`undefined` と同じ挙動。意図の表明のためだけにある）。
+   * - `undefined` (default) = **do not request**. No automatic decision — f16 compute changes the
+   *   numbers, so if the adapter's capabilities decided enabled / disabled, "change the machine and
+   *   the output silently changes" would follow.
+   * - `true` = required. {@link GpuFeatureError} on an adapter without it. When it could be
+   *   enabled, **a tiny f16 kernel with a known answer is run for 1 dispatch and compared** (a
+   *   listed feature is no evidence that it "works" — denoland/deno#23125).
+   * - `false` = explicitly not requested (the same behavior as `undefined`; it exists only to state
+   *   the intent).
    *
-   * 有効化できたかどうかは {@link GpuContext.shaderF16Enabled} で観測する。
-   * `SessionOptions.attentionCompute` / `linearCompute` に `"f16"` を渡すには、ここが `true`
-   * である必要がある（Session 構築時に fail loudly）。
+   * Whether it could be enabled is observed through {@link GpuContext.shaderF16Enabled}.
+   * Passing `"f16"` to `SessionOptions.attentionCompute` / `linearCompute` requires this to be
+   * `true` (fails loudly at Session construction).
    */
   readonly shaderF16?: boolean;
   /**
-   * 32レーンsubgroupの明示要求（既定false、ADR 0100）。subgroupsとsubgroup-size-control、
-   * WGSLのsubgroup_idが必要。取得時に既知解の実走を検査し、不足・不一致は拒否する。
-   * 能力を取得するだけでは計算経路を変えない。SessionのrmsNormReduceは別途指定する。
+   * Explicit request for 32-lane subgroups (default false, ADR 0100). Requires subgroups and
+   * subgroup-size-control, and WGSL's subgroup_id. At acquisition a known-answer run is checked; a
+   * shortfall or mismatch is rejected.
+   * Acquiring the capability alone does not change the compute path. A Session's rmsNormReduce is
+   * specified separately.
    */
   readonly subgroups?: boolean;
   /**
-   * GEMM 幾何の静的なプロファイル 1 本の注入（DECIDED: ADR 0115）。未知の device で、利用者が
-   * 自分の機で回した掃引（`tools/geometry-sweep` の生成物）の表を当てるための口。
+   * Injection of one static GEMM geometry profile (DECIDED: ADR 0115). The way for a user on an
+   * unknown device to apply the table from a sweep run on their own machine (the output of
+   * `tools/geometry-sweep`, removed in 0.15).
    *
-   * - `undefined`（既定）= adapter の (vendor, architecture, description) から埋め込みの表を 1 本選ぶ
-   *   （当たらなければ既定プロファイル）。`match` を省いた埋め込みの表は自動では選ばれない（注入専用 —
-   *   `BUILTIN_GEOMETRY_PROFILES` から id で引いてここへ渡す）。
-   * - 表 = adapter を見ずに**この表を使う**。`match` は照合に使わない（別の機の表を当てて
-   *   A/B する用途があるため）。
-   * - 関数（DECIDED: ADR 0117 決定 6）= runtime が実際に選んだ adapter の情報（`GpuContext.adapterInfo`
-   *   になるのと同じ値）で表を引く口。`acquireGpu` 1 回につき 1 度、adapter を取った後・device を作る前に
-   *   呼ぶ。戻りが表ならそれを注入し（表を直接渡したときと同じ門と複製を通る）、`undefined` なら指定無しと
-   *   同じ自動選択。投げた例外はそのまま伝え、device を作らない。runtime は戻りの表を adapter と照合
-   *   しない（照合するならコールバックの中で `@karume/runtime/tune` の `geometryProfileMismatch` を呼ぶ）。
-   *   MUST: 同期の純関数であること（保存した表の読み込みなどの I/O は `acquireGpu` の前に済ませる）。
-   *   adapter は数秒〜数分で失効してよく、失効した adapter の `requestDevice` は例外ではなく生まれた時点で
-   *   lost な device を返すので、adapter を持ったまま待つ窓を作らない。Promise（thenable）を返すと
-   *   await せずに {@link GpuFeatureError} で拒む。
+   * - `undefined` (default) = pick one embedded table from the adapter's (vendor, architecture,
+   *   description) (the default profile when none matches). Embedded tables without `match` are
+   *   never picked automatically (injection only — look one up by id in
+   *   `BUILTIN_GEOMETRY_PROFILES` and pass it here).
+   * - a table = **use this table** without looking at the adapter. `match` is not used for matching
+   *   (there is a use for applying another machine's table for an A/B).
+   * - a function (DECIDED: ADR 0117 decision 6) = the way to look a table up from the information
+   *   of the adapter the runtime actually picked (the same value that becomes
+   *   `GpuContext.adapterInfo`). Called once per `acquireGpu`, after the adapter is taken and
+   *   before the device is created. If it returns a table, that table is injected (going through
+   *   the same guard and copy as a table passed directly); `undefined` means the same automatic
+   *   selection as no setting. An exception it throws is propagated as is and no device is created.
+   *   The runtime does not match the returned table against the adapter (to match, call
+   *   `geometryProfileMismatch` of `@karume/runtime/tune` inside the callback).
+   *   MUST: it is a synchronous pure function (I/O such as loading a saved table is done before
+   *   `acquireGpu`). An adapter may expire within seconds to minutes, and `requestDevice` on an
+   *   expired adapter returns a device that is lost from birth instead of throwing, so no window is
+   *   created in which we wait while holding the adapter. Returning a Promise (thenable) is
+   *   rejected with {@link GpuFeatureError} without awaiting it.
    *
-   * device の性質なので GPU 単位で渡す（`SessionOptions` には無い）。同じ device の全 Session と
-   * i8a8 attention の dp4a カナリアが同じ表を使い、実行中に選び直すことはない（ADR 0022 追記の
-   * 実行時オートチューン禁止）。幾何が変えるのは担当割りだけで K の縮約順は不変だが、出力の一致は
-   * 掃引の門（既定との出力一致）で確かめる実測命題 — 利用者が持ち込む任意の表について runtime が
-   * 保証するものではない。選ばれた表の `id` は `Session.diagnostics().geometryProfile` で観測する。
+   * It is a property of the device, so it is passed per GPU (it is not in `SessionOptions`). Every
+   * Session on the same device and the dp4a canary of i8a8 attention use the same table, and it is
+   * never re-chosen during execution (the run-time autotuning ban of the ADR 0022 addendum).
+   * Geometry changes only the work assignment and the reduction order over K is unchanged, but
+   * output identity is an empirical proposition checked by the sweep's check (output identical to
+   * the default) — it is not something the runtime guarantees for an arbitrary table a user brings.
+   * The `id` of the chosen table is observed through `Session.diagnostics().geometryProfile`.
    *
-   * 渡した表は複製して保持する（呼び手が後から書き換えても device の寿命の間の表は変わらない）。
-   * MUST: 壊れた表（欄の欠け・型違い・id が空・`match` の形の破れ・`gemmRows` の昇順 / 末尾 Infinity の破れ・
-   * 整除の破れた幾何）は **device を作る前に** {@link GpuFeatureError} で落とす（壊れた表で
-   * device を作らない — 利用者入力に起因する失敗なので公開のエラー型）。直接渡した表は adapter を
-   * 取る前に、コールバックの戻りは呼んだ直後に落とす。続けて、どちらの表も adapter の limits（計画した
-   * requiredLimits）に対して workgroup の形（スレッド数・`@workgroup_size` の成分・共有メモリ）を見て、
-   * 超える幾何があれば同じく device を作る前に {@link GpuFeatureError} で落とす（欄と幾何と上限を名指す）。
+   * The passed table is copied and kept (if the caller rewrites it later, the table does not change
+   * for the device's lifetime).
+   * MUST: a broken table (missing fields, wrong types, an empty id, a malformed `match`, `gemmRows`
+   * not ascending / not ending in Infinity, a geometry whose divisibility is broken) fails with
+   * {@link GpuFeatureError} **before the device is created** (no device is created from a broken
+   * table — the failure comes from user input, so it is a public error type). A table passed
+   * directly fails before the adapter is taken, a callback's return value right after the call.
+   * Next, for either table, the workgroup shapes (thread count, the components of
+   * `@workgroup_size`, shared memory) are checked against the adapter's limits (the planned
+   * requiredLimits), and a geometry beyond them also fails with {@link GpuFeatureError} before the
+   * device is created (naming the field, the geometry and the limit).
    */
   readonly geometryProfile?:
     | GeometryProfile
     | ((adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined);
-  /** テスト専用（{@link LIMIT_CAPS}）。requiredLimits を**絞る**方向にだけ効く。 */
+  /** Test only ({@link LIMIT_CAPS}). Works only in the direction of **lowering** requiredLimits. */
   readonly [LIMIT_CAPS]?: LimitCaps;
 };
 
 /**
- * **テスト専用の非公開面**（mod.ts からは輸出しない — executor の `I8A8_DOT` と同じ流儀）。
+ * **A non-public, test-only surface** (not exported from mod.ts — the same style as the executor's
+ * `I8A8_DOT`).
  *
- * requiredLimits を絞った device を作る。ポータビリティの門はこれでしか張れない — 手元の
- * アダプタは WebGPU core 既定（`maxStorageBufferBindingSize` = 128MiB）より遥かに大きい値を
- * 出すので、「core 既定の機で確保・束縛が通るか」は**絞った device 上で実走**する以外に
- * 確かめる手段が無い（列挙は「動く」の証拠にならない、と同じ規律）。
+ * Creates a device with lowered requiredLimits. The portability check can only be set up this way —
+ * local adapters report values far above the WebGPU core defaults (`maxStorageBufferBindingSize` =
+ * 128MiB), so "do allocation and binding pass on a machine with core defaults" can only be checked
+ * by **actually running on a lowered device** (the same discipline as "a listed feature is no
+ * evidence that it works").
  */
 export const LIMIT_CAPS: unique symbol = Symbol("karume.limitCaps");
 
 /**
- * `host`（省略時は `navigator.gpu`）からアダプタを取る（{@link acquireGpu} と {@link readAdapterLimits} の共通部）。
- * 無い環境は {@link GpuUnavailableError} — 2 つの入口で診断文言を揃えるためにここ 1 本にする。
+ * Takes the adapter from `host` (`navigator.gpu` when omitted) (shared by {@link acquireGpu} and
+ * {@link readAdapterLimits}). An environment without one gives {@link GpuUnavailableError} — kept
+ * in this one place so the two entry points share the same diagnostic wording.
  */
 const requestAdapterOrThrow = async (
   options: GPURequestAdapterOptions | undefined,
@@ -609,29 +674,34 @@ const requestAdapterOrThrow = async (
 };
 
 /**
- * アダプタ取得 → limits 引き上げ → device 取得 → 取得結果の検証、までを行う。
- * 途中の失敗は全て例外（黙って能力を落とした device を返さない）。
+ * Runs adapter acquisition → raising limits → device acquisition → validating the result.
+ * Every failure along the way is an exception (a device with silently reduced capabilities is never
+ * returned).
  */
 export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuContext> => {
   const source = options.geometryProfile;
-  // 直接渡した表の門はアダプタにも device にも触れる前（GPU に依らない入力の検査）。
-  // 複製するのは、呼び手が後から書き換えても device の寿命の間の表が変わらないようにするため
-  // （Infinity は structuredClone を通る）。
+  // The guard for a table passed directly runs before touching either the adapter or the device (a
+  // check of input that does not depend on the GPU). It is copied so that the table does not change
+  // for the device's lifetime even if the caller rewrites it later (Infinity survives
+  // structuredClone).
   const givenProfile =
     source === undefined || typeof source === "function"
       ? undefined
       : cloneCheckedGeometryProfile(source, DIRECT_PROFILE_LABEL);
   const { gpu, adapter } = await requestAdapterOrThrow(options.adapter, options.gpu);
-  // コールバックに渡す値と GpuContext.adapterInfo を同じ 1 回の読みにする（別々に読むと、コールバックが
-  // 引いた adapter と device の adapter の情報が食い違う形を作れてしまう）
+  // Read once for both the value passed to the callback and GpuContext.adapterInfo (reading twice
+  // would make it possible for the adapter the callback looked up and the device's adapter to
+  // disagree)
   const adapterInfo = readAdapterInfo(adapter);
-  // MUST: コールバックは adapter を取った後・device を作る前に 1 度だけ呼ぶ（ADR 0117 決定 6）。投げた
-  // 例外はそのまま伝え、壊れた表とともに device を作らない
+  // MUST: call the callback once, after taking the adapter and before creating the device (ADR 0117
+  // decision 6). An exception it throws is propagated as is, and no device is created along with a
+  // broken table
   const geometryProfile =
     typeof source === "function" ? profileFromCallback(source(adapterInfo)) : givenProfile;
   const limits = planRequiredLimits(adapter.limits, options[LIMIT_CAPS]);
-  // 門の順序は構造（上の複製の門）→ 上限。上限は adapter が要るので、直接渡した表もここで見る。見るのは
-  // 計画した limits（= device が持つ値 — 絞りの caps を含む）
+  // Guard order is structure (the copy guard above) → limits. Limits need the adapter, so a table
+  // passed directly is also checked here. The values checked are the planned limits (= what the
+  // device will have — including the reducing caps)
   if (geometryProfile !== undefined) {
     try {
       assertGeometryProfileWithinLimits(geometryProfile, limits);
@@ -642,7 +712,8 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
       );
     }
   }
-  // 条件付き feature の判定はここだけ（不足は例外 — 黙って能力を落とさない）。ADR 0021 / 0028。
+  // Conditional features are decided only here (a shortfall is an exception — capabilities are
+  // never silently dropped). ADR 0021 / 0028.
   const timestampQuery = planTimestampFeature(adapter.features, options.gpuTiming);
   const shaderF16 = planShaderF16Feature(adapter.features, options.shaderF16);
   const languageFeatures = readWgslLanguageFeatures(gpu);
@@ -656,14 +727,15 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
       ...REQUIRED_FEATURES,
       ...(timestampQuery ? [TIMESTAMP_QUERY_FEATURE] : []),
       ...(shaderF16 ? [SHADER_F16_FEATURE] : []),
-      // Denoの型定義に未収録のWebGPU機能。上で実機の広告を検査した境界に限定する。
+      // A WebGPU feature not in Deno's type definitions. Limited to the boundary where the
+      // adapter's advertisement was checked above.
       ...(subgroupFeatures as readonly GPUFeatureName[]),
     ],
     requiredLimits: limits,
   });
   try {
     assertLimitsGranted(limits, device.limits);
-    // MUST: 列挙ではなく実走で確かめる（denoland/deno#23125 の沈黙全 0）。
+    // MUST: confirm by running, not by the list (the silent all-0 of denoland/deno#23125).
     if (shaderF16) await assertShaderF16Executes(device);
     if (subgroupFeatures.length > 0) await assertSubgroup32Executes(device);
   } catch (cause) {
@@ -680,18 +752,25 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
   );
 };
 
-/** 注入された表の門の文言の前置（直接渡した表 / コールバックの戻り）。 */
+/**
+ * The prefix of the injected-table guard's message (a table passed directly / a callback's return
+ * value).
+ */
 const DIRECT_PROFILE_LABEL = "geometryProfile";
 const CALLBACK_PROFILE_LABEL = "geometryProfile（コールバックの戻り）";
 
 /**
- * 注入された表の門の失敗を、内部の {@link CodegenError} ではなく公開の {@link GpuFeatureError} に替える
- * （利用者入力の失敗は公開型で捌ける — `subgroups` の検査と同じ流儀）。それ以外の例外はそのまま返す。
+ * Turns a failure of the injected-table guard into the public {@link GpuFeatureError} instead of
+ * the internal {@link CodegenError} (failures from user input can be handled with a public type —
+ * the same style as the `subgroups` check). Any other exception is returned as is.
  */
 const publicProfileError = (label: string, error: unknown): unknown =>
   error instanceof CodegenError ? new GpuFeatureError(`${label}: ${error.message}`) : error;
 
-/** 注入された表の構造の門（{@link assertGeometryProfile} — unknown を表へ絞る）を通し、通った表を複製して返す。 */
+/**
+ * Runs the structural guard for an injected table ({@link assertGeometryProfile} — narrows unknown
+ * to a table) and returns a copy of the table that passed.
+ */
 const cloneCheckedGeometryProfile = (profile: unknown, label: string): GeometryProfile => {
   try {
     assertGeometryProfile(profile);
@@ -701,23 +780,31 @@ const cloneCheckedGeometryProfile = (profile: unknown, label: string): GeometryP
   return structuredClone(profile);
 };
 
-/** `then` を関数で持つ値（Promise と、Promise を名乗る自作の thenable）。 */
+/**
+ * A value that has `then` as a function (a Promise, or a home-made thenable that claims to be one).
+ */
 const isThenable = (value: unknown): boolean =>
   typeof value === "object" &&
   value !== null &&
   "then" in value &&
   typeof value.then === "function";
 
-/** 拒否が誰にも捕まらない Promise を作らないための no-op（{@link profileFromCallback}）。 */
+/**
+ * A no-op so that no Promise is created whose rejection nobody catches ({@link
+ * profileFromCallback}).
+ */
 const ignoreRejection = (): void => {};
 
 /**
- * 本物の Promise（realm を問わない）にだけ no-op の拒否ハンドラを付ける。自作の thenable の `then` は呼ばない。
+ * Attaches a no-op rejection handler only to a real Promise (from any realm). Never calls the
+ * `then` of a home-made thenable.
  *
- * `instanceof Promise` は別 realm（iframe・`node:vm`）の Promise を見逃し、`Symbol.toStringTag` は偽装できる。
- * この realm の組み込み `Promise.prototype.then` は、引数の内部スロットを見る brand check（仕様の IsPromise）で
- * 本物でない値を **then も constructor も読む前に** TypeError で拒むので、realm に依らない判定と付け外しを
- * 1 度に兼ねる。捕まえるのはその TypeError だけ（本物でない = 付けるものが無い）— それ以外は伝える。
+ * `instanceof Promise` misses Promises from another realm (an iframe, `node:vm`), and
+ * `Symbol.toStringTag` can be faked. This realm's built-in `Promise.prototype.then` rejects a value
+ * that is not a real Promise with TypeError **before reading either then or constructor**, through
+ * a brand check on the argument's internal slots (IsPromise in the specification), so it serves as
+ * a realm-independent test and the attachment in one go. Only that TypeError is caught (not real =
+ * nothing to attach to) — anything else propagates.
  */
 const ignoreRejectionIfNativePromise = (value: unknown): void => {
   try {
@@ -730,19 +817,24 @@ const ignoreRejectionIfNativePromise = (value: unknown): void => {
 };
 
 /**
- * コールバックの戻りを、直接渡した表と同じ門と複製に通す（`undefined` = 自動選択）。
+ * Passes a callback's return value through the same guard and copy as a table passed directly
+ * (`undefined` = automatic selection).
  *
- * MUST: Promise（thenable）は await せずに拒む。待つと adapter を持ったまま I/O の窓が開き、その間に
- * 失効した adapter から生まれた時点で lost な device を作る静かな失敗になる（ADR 0117 決定 6）。
- * 型（同期の関数）を外れて来る値（JS の呼び手・async 関数）の門。
+ * MUST: reject a Promise (thenable) without awaiting it. Waiting would open an I/O window while
+ * holding the adapter, and in the meantime a device lost from birth could be created from an
+ * expired adapter — a silent failure (ADR 0117 decision 6).
+ * The guard for values that arrive outside the type (a synchronous function) — JS callers, async
+ * functions.
  */
 const profileFromCallback = (
   returned: GeometryProfile | undefined,
 ): GeometryProfile | undefined => {
   if (isThenable(returned)) {
-    // async 関数の reject は、こちらが拒んだ後に誰も待たない Promise の reject として unhandled rejection に
-    // なる（Deno ではプロセスが落ちる）。本物の Promise（別 realm のものも）にだけ no-op の拒否ハンドラを付ける —
-    // 待たない・結果は使わない。自作の thenable の then は呼ばない（任意のコードを走らせない）
+    // The reject of an async function becomes an unhandled rejection — the reject of a Promise
+    // nobody waits for after we have refused it (on Deno the process dies). Attach a no-op
+    // rejection handler only to real Promises (including those from another realm) — no waiting,
+    // the result is not used. The then of a home-made thenable is never called (no arbitrary code
+    // runs)
     ignoreRejectionIfNativePromise(returned);
     throw new GpuFeatureError(
       "geometryProfile: コールバックが Promise を返した（同期の関数であること — 保存した表の読み込みは " +
@@ -755,21 +847,23 @@ const profileFromCallback = (
 };
 
 /**
- * アダプタの limits だけを読む（device は作らない）。
+ * Reads only the adapter's limits (no device is created).
  *
- * 配布形が宣言する `requiredLimits`（manifest の quant 欄）を**重みを落とす前**に突き合わせる
- * ための入口（ADR 0089 決定 5）。戻りは {@link acquireGpu} が同じ引数で計画する limits と同じ式
- * （{@link planRequiredLimits}・絞り無し）なので、呼び手は取得後の `GpuContext.limits` と同じ
- * 物差しで比較できる。
+ * The entry point for checking the `requiredLimits` a distribution declares (the quant field of the
+ * manifest) **before downloading the weights** (ADR 0089 decision 5). The return value is the same
+ * formula as the limits {@link acquireGpu} plans with the same arguments ({@link
+ * planRequiredLimits}, without reductions), so callers can compare with the same yardstick as
+ * `GpuContext.limits` after acquisition.
  *
- * MUST: アダプタは読んだら捨てる（持ち回らない）。WebGPU のアダプタは「いつでも失効しうる」
- * （仕様 §4.2 — システム状態の変化が無くても数秒〜数分で失効してよい）うえ、失効後の
- * `requestDevice` は例外ではなく生まれた時点で lost な device を返す静かな失敗になる。device は
- * 従来どおり {@link acquireGpu} が直前に取り直したアダプタから作る。
+ * MUST: discard the adapter after reading (do not carry it around). A WebGPU adapter "may expire at
+ * any time" (specification §4.2 — it may expire within seconds to minutes even without a change in
+ * system state), and `requestDevice` after expiry is a silent failure that returns a device lost
+ * from birth instead of throwing. The device is still created by {@link acquireGpu} from an adapter
+ * it has just taken again.
  *
- * NOTE: `requestAdapter` を 2 回呼んで同じ物理アダプタが選ばれる保証は仕様に無い。ここで読む
- * limits は事前検査の材料で、最終の検査は Session 構築時の実バッファ検査
- * （`assertWeightsWithinLimits`）が担う。
+ * NOTE: the specification does not guarantee that calling `requestAdapter` twice picks the same
+ * physical adapter. The limits read here are material for a preliminary check; the final check is
+ * the real buffer check at Session construction (`assertWeightsWithinLimits`).
  */
 export const readAdapterLimits = async (
   options: Pick<AcquireGpuOptions, "adapter" | "gpu"> = {},

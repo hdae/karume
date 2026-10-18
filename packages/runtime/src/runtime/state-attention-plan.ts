@@ -1,17 +1,18 @@
 /**
- * states 形 attention（ADR 0067 決定 4）のノード内一時の**算式 1 本**。
+ * The **single formula** for the node temporaries of states-form attention (ADR 0067 decision 4).
  *
- * 実行計画（recipe-builders/attention.ts の `buildStateAttention`）と見積り（estimate.ts の
- * `stateAttentionTemps`）は同じ数を出さなければならないので、両者が分け合う 3 つの式
- * — 列容量 `colCap` の 2 分岐・行ブロックの割り方（{@link planRowBlocks}）・S / 行統計の
- * バイト式 — をこのモジュールにだけ置く。
+ * The execution plan (`buildStateAttention` in recipe-builders/attention.ts) and the estimate
+ * (`stateAttentionTemps` in estimate.ts) must produce the same numbers, so the three formulas they
+ * share — the two branches of the column capacity `colCap`, the row-block split
+ * ({@link planRowBlocks}) and the byte formulas of S / row statistics — live in this module only.
  *
- * MUST: 呼び手はこの関数を迂回して式を書き直さない（規約「派生値を独立更新の欄に持たない」）。
- * 迂回すると、片方だけ直された実装に対して estimator が例外も警告も無く別の数を主張し続ける
- * （見積りは実行を止めないので、ずれても赤くならない）。
+ * MUST: callers do not bypass this function and rewrite the formulas (the convention "do not keep a
+ * derived value in an independently updated field"). Bypassing it lets the estimator keep claiming a
+ * different number, with no exception and no warning, against an implementation where only one side
+ * was fixed (the estimate does not stop execution, so a drift never turns red).
  *
- * 置き場が `runtime/` なのは {@link planRowBlocks} が `runtime/fusion-rules/`（入口は `fusion.ts`）に居るため
- * （`kernels/` へ置くと kernels → runtime の逆向き import になる）。
+ * It lives in `runtime/` because {@link planRowBlocks} lives in `runtime/fusion-rules/` (entry point
+ * `fusion.ts`) (placing it in `kernels/` would create a reverse kernels → runtime import).
  */
 
 import { STATE_STATS_STRIDE, stateSliding } from "../kernels/state-attention.ts";
@@ -19,60 +20,64 @@ import { stateStatsPvEligible } from "../kernels/state-attention-stats-pv.ts";
 import { planRowBlocks, type RowBlockLimit } from "./fusion.ts";
 
 /**
- * 1 ノードぶんの幾何（`StateAttentionGeometry` のうち、一時の大きさを決める欄だけ）。
+ * The geometry of one node (only the fields of `StateAttentionGeometry` that size the temporaries).
  *
- * `depth` / `kvRepeat` / `scale` は一時の大きさに効かないので受けない。
+ * `depth` / `kvRepeat` / `scale` do not affect the size of the temporaries, so they are not taken.
  */
 export type StateAttentionExtent = {
-  /** `B·H`（バッチと head を畳んだ軸 — S / 行統計の外側の軸）。 */
+  /** `B·H` (the axis folding batch and heads — the outer axis of S / row statistics). */
   readonly batchHeads: number;
-  /** 物理 chunk 行 `M`。 */
+  /** Physical chunk rows `M`. */
   readonly chunkRows: number;
-  /** state スロットの容量 `C`。 */
+  /** Capacity `C` of the state slot. */
   readonly capacity: number;
-  /** sliding の窓幅 `W`。full 変種は 0 か省略（判定は {@link stateSliding} の 1 本）。 */
+  /** Sliding window width `W`. The full variant is 0 or omitted (decided by {@link stateSliding} alone). */
   readonly window?: number;
-  /** parallel-fused の states 形からだけ指定する。readonly は渡さない。 */
+  /** Given only by the parallel-fused states form. Readonly does not pass it. */
   readonly fuseStatsPv?: boolean;
 };
 
-/** 行ブロック 1 枚ぶんの一時（確保順 — 解放は逆順）。 */
+/** The temporaries of one row block (allocation order — released in reverse). */
 export type StateAttentionBlock = {
-  /** ブロック先頭の局所行（`params.row_offset`）。 */
+  /** Local row at the start of the block (`params.row_offset`). */
   readonly offset: number;
-  /** ブロックの行数（`params.rows_block`）。 */
+  /** Rows in the block (`params.rows_block`). */
   readonly rows: number;
-  /** スコア S = `B·H × 行数 × colCap × 4` バイト。 */
+  /** Scores S = `B·H × rows × colCap × 4` bytes. */
   readonly scoreBytes: number;
-  /** 行統計 = `B·H × 行数 × STATE_STATS_STRIDE × 4` バイト。融合時は 0。 */
+  /** Row statistics = `B·H × rows × STATE_STATS_STRIDE × 4` bytes. 0 when fused. */
   readonly statsBytes: number;
 };
 
-/** {@link planStateAttention} の結果。 */
+/** Result of {@link planStateAttention}. */
 export type StateAttentionPlan = {
   /**
-   * S の列ストライド上限。full は容量ぶん `C`・sliding は resident 窓 `(W−1) + M`
-   * （下限式の正本は `src/kernels/state-attention.ts` の `assertStateGeometry`）。
+   * Upper bound of the column stride of S. Full: the capacity `C`; sliding: the resident window
+   * `(W−1) + M` (the source of truth for the lower-bound formula is `assertStateGeometry` in
+   * `src/kernels/state-attention.ts`).
    */
   readonly colCap: number;
-  /** 行統計の中間を持たない 2 dispatch の計画か。 */
+  /** Whether the plan is the 2-dispatch one without an intermediate for row statistics. */
   readonly fusedStatsPv: boolean;
-  /** 行ブロック（{@link planRowBlocks} の等分 — 1 枚ぶんだけが同時生存する）。 */
+  /** Row blocks (the equal split of {@link planRowBlocks} — only one block's worth is alive at a time). */
   readonly blocks: readonly StateAttentionBlock[];
 };
 
 /**
- * states 形 attention 1 ノードの列容量と行ブロックごとの一時バイト数を出す（純関数）。
+ * Computes the column capacity of one states-form attention node and the temporary bytes per row
+ * block (pure function).
  *
- * S 1 枚 = `B·H · 行数 · colCap · 4` バイトと行統計 1 枚の**両方**が `limit`（device の granted
- * `maxStorageBufferBindingSize`、予算を掛けたときは予算との小さいほう — ADR 0124）に収まる最小枚数の
- * 等分で、実行時オートチューンは持たない（ADR 0022）。1 行でも収まらない形は {@link planRowBlocks} が
- * fail loudly。
+ * The equal split into the fewest blocks such that **both** one S block = `B·H · rows · colCap · 4`
+ * bytes and one row-statistics block fit within `limit` (the device's granted
+ * `maxStorageBufferBindingSize`, or the smaller of it and the budget when a budget is set — ADR
+ * 0124); there is no run-time autotuning (ADR 0022). A shape where not even one row fits fails
+ * loudly in {@link planRowBlocks}.
  *
- * @param limit 1 本ごとの上限。数値はストレージ束縛の上限バイト数（granted 値・予算なし）として読み、
- *   予算を掛けるときは `rowBlockLimit`（fusion.ts）の結果を渡す（{@link planRowBlocks} と同じ受け方）。
- * @param forced 行ブロックの枚数を明示する（テスト専用 `ROW_BLOCK_SPLIT` の受け口 —
- *   実運用の呼び手は渡さない）。
+ * @param limit The per-temporary limit. A number is read as the storage-binding limit in bytes
+ *   (granted value, no budget); when a budget applies, pass the result of `rowBlockLimit`
+ *   (fusion.ts) (the same input as {@link planRowBlocks}).
+ * @param forced Gives the number of row blocks explicitly (the entry for the test-only
+ *   `ROW_BLOCK_SPLIT` — production callers do not pass it).
  */
 export const planStateAttention = (
   extent: StateAttentionExtent,
@@ -84,9 +89,10 @@ export const planStateAttention = (
   const colCap = stateSliding(window) ? window - 1 + chunkRows : capacity;
   const fusedStatsPv = extent.fuseStatsPv === true && stateStatsPvEligible(chunkRows, colCap);
   const statsRowBytes = fusedStatsPv ? 0 : STATE_STATS_STRIDE * 4;
-  // MUST: 枚数は行に比例する一時（S と行統計）の 1 行ぶんの**大きいほう**で決める。S だけで
-  // 決めると、列容量が行統計の語数より小さい形（colCap = 1）で S は収まるのに行統計 1 枚が
-  // 上限を超え、割れば通る形を確保の段で拒否する。
+  // MUST: the block count is decided by the **larger** per-row size of the row-proportional
+  // temporaries (S and row statistics). Deciding by S alone, a shape whose column capacity is
+  // smaller than the word count of row statistics (colCap = 1) fits S while one row-statistics block
+  // exceeds the limit, and a shape that would pass if split is rejected at allocation.
   const rowBytes = batchHeads * Math.max(colCap * 4, statsRowBytes);
   const blocks = planRowBlocks(chunkRows, rowBytes, limit, forced).map((block) => ({
     offset: block.offset,

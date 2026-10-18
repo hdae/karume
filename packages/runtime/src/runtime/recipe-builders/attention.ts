@@ -1,9 +1,9 @@
 /**
- * 族別導出 — attention の全形（融合 attention とその i8a8 補助・states 形 / readonly states 形・
- * state_append）。
+ * Per-op-family derivation — every form of attention (fused attention with its i8a8 helpers, the
+ * states form / readonly states form, state_append).
  *
- * 入口は {@link "../recipe-builder.ts"} の `RecipeBuilder` で、共有サービス（Session の状態と
- * params の書き込み）は {@link RecipeBuildFace} 経由でだけ触る。
+ * The entry is `RecipeBuilder` in {@link "../recipe-builder.ts"}; the shared services (Session
+ * state and params writes) are reached only through {@link RecipeBuildFace}.
  */
 
 import {
@@ -113,7 +113,10 @@ import type { ComputePrecision } from "../session-types.ts";
 import type { RecipeBuildFace, StateBuildContext } from "../recipe-builder.ts";
 import { PARAMS_STORAGE_USAGE, PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
 
-/** 融合 attention の解決済み形（B·H を畳んだバッチ軸 / クエリ行 M / キー列 N / head 幅 D）。 */
+/**
+ * The resolved shape of fused attention (batch axis with B·H folded / query rows M / key columns
+ * N / head width D).
+ */
 export type AttentionShape = {
   readonly batch: number;
   readonly rows: number;
@@ -121,7 +124,7 @@ export type AttentionShape = {
   readonly depth: number;
 };
 
-/** 段（①QK / ③PV）の解決済みパイプライン。 */
+/** The resolved pipeline of a stage (①QK / ③PV). */
 type AttentionStagePipeline = {
   readonly key: string;
   readonly pipeline: GPUComputePipeline;
@@ -130,9 +133,11 @@ type AttentionStagePipeline = {
 };
 
 /**
- * ①QK の実行段。**行ブロックのループより外で 1 度だけ**解決する（i8a8 の量子化は列側が
- * ブロックに依らず、行側も総量が変わらないので、ループへ入れると仕事が枚数倍になるだけ）。
- * 一時（`qq` / `qs` / `kq` / `ks`）はループを跨いで生きるので、解放はノード末尾。
+ * The execution stage of ①QK. Resolved **once, outside the row-block loop** (the i8a8 quantization
+ * of the column side does not depend on the block, and the row side's total does not change, so
+ * putting it in the loop would only multiply the work by the block count).
+ * The temporaries (`qq` / `qs` / `kq` / `ks`) live across the loop, so they are released at the
+ * end of the node.
  */
 type AttentionQkStage =
   | (AttentionStagePipeline & { readonly kind: "dense" })
@@ -145,7 +150,7 @@ type AttentionQkStage =
       readonly ks: TempSource;
     });
 
-/** ③PV の実行段（①QK と同じ規律 — `vt` / `vq` / `vs` はループを跨いで生きる）。 */
+/** The execution stage of ③PV (as for ①QK — `vt` / `vq` / `vs` live across the loop). */
 type AttentionPvStage =
   | (AttentionStagePipeline & { readonly kind: "dense" })
   | (AttentionStagePipeline & {
@@ -156,41 +161,46 @@ type AttentionPvStage =
       readonly vs: TempSource;
     });
 
-/** 通常 attention の行ブロック 1 枚ぶんの一時（確保順 — 解放は逆順）。 */
+/** The temporaries of one row block of plain attention (allocation order — released in reverse). */
 export type AttentionBlock = {
-  /** ブロック先頭のクエリ行（行窓の `row_offset`）。 */
+  /** The first query row of the block (the row window's `row_offset`). */
   readonly offset: number;
-  /** ブロックの行数。 */
+  /** The block's row count. */
   readonly rows: number;
-  /** スコア S = `B·H × 行数 × N × 格納幅` バイト。 */
+  /** Score S = `B·H × rows × N × storage width` bytes. */
   readonly scoreBytes: number;
-  /** 行統計 = `B·H × 行数 × ATTENTION_STATS_STRIDE × 4` バイト。 */
+  /** Row statistics = `B·H × rows × ATTENTION_STATS_STRIDE × 4` bytes. */
   readonly statsBytes: number;
 };
 
 /**
- * 通常 attention（states 欄なし）のクエリ行ブロックと、1 枚ぶんの一時のバイト数（純関数）。
+ * The query-row blocks of plain attention (no states field) and the bytes of one block's
+ * temporaries (a pure function).
  *
- * S 1 枚と行統計 1 枚の**両方**が `limit`（device の granted `maxStorageBufferBindingSize`、予算を
- * 掛けたときは {@link rowBlockLimit} の結果）に収まる最小枚数の等分で、実行時オートチューンは
- * 持たない（ADR 0022）。上限は 1 本ごとで、S と行統計の合計ではない（ADR 0124 決定 1）。
+ * An even split into the smallest count where **both** one S block and one row-statistics block fit
+ * `limit` (the device's granted `maxStorageBufferBindingSize`, or the result of
+ * {@link rowBlockLimit} when a budget applies); there is no run-time autotuning (ADR 0022). The
+ * limit is per temporary, not the sum of S and row statistics (ADR 0124 decision 1).
  *
- * MUST: 枚数は行に比例する一時（S と行統計）の 1 行ぶんの**大きいほう**で決める。S だけで
- * 決めると、1 行のスコアが行統計 2 語より小さい形（f32 で N = 1・f16 で N < 4）で S は収まるのに
- * 行統計 1 枚が上限を超え、割れば通る形を確保の段で拒否する。i8a8 の量子化の一時は
- * ブロックループの外で確保するので、ここには入れない。
+ * MUST: the count is decided by the **larger** of the per-row sizes of the row-proportional
+ * temporaries (S and row statistics). Deciding by S alone would, for shapes where one row of scores
+ * is smaller than two words of row statistics (N = 1 in f32, N < 4 in f16), let S fit while one
+ * row-statistics block exceeds the limit, rejecting at allocation a shape that splitting would
+ * pass. The i8a8 quantization temporaries are allocated outside the block loop, so they are not
+ * included here.
  *
- * @param forced 行ブロックの枚数を明示する（テスト専用 `ROW_BLOCK_SPLIT` の受け口）。
+ * @param forced States the row-block count explicitly (the entry point for the test-only
+ *   `ROW_BLOCK_SPLIT`).
  */
 export const planAttentionBlocks = (
   extent: {
-    /** `B·H`（バッチと head を畳んだ軸）。 */
+    /** `B·H` (the axis with batch and heads folded). */
     readonly batch: number;
-    /** クエリ行 `M`。 */
+    /** Query rows `M`. */
     readonly rows: number;
-    /** キー列 `N`。 */
+    /** Key columns `N`. */
     readonly cols: number;
-    /** S の 1 要素のバイト数。 */
+    /** Bytes per element of S. */
     readonly scoreBytes: number;
   },
   limit: number | RowBlockLimit,
@@ -208,10 +218,12 @@ export const planAttentionBlocks = (
 };
 
 /**
- * 融合 attention の S の 1 要素のバイト数（純関数）。f16 計算は S を `array<f16>` で持つ（2 B）・それ以外は
- * S の格納形（{@link attentionRoute} が決めた `route.score` — s16 なら 2 B・f32 なら 4 B）。
+ * Bytes per element of fused attention's S (a pure function). f16 compute holds S as `array<f16>`
+ * (2 B); otherwise it is S's storage form (`route.score` decided by {@link attentionRoute} — 2 B
+ * for s16, 4 B for f32).
  *
- * MUST: 実行（{@link buildAttention}）と見積り（estimate.ts — ADR 0124 決定 7）はこの 1 本から引く。
+ * MUST: execution ({@link buildAttention}) and the estimate (estimate.ts — ADR 0124 decision 7)
+ * take it from this one function.
  */
 export const attentionScoreElementBytes = (
   attentionCompute: ComputePrecision,
@@ -219,12 +231,15 @@ export const attentionScoreElementBytes = (
 ): number => (attentionCompute === "f16" ? 2 : scoreStorageBytes(route.score));
 
 /**
- * 融合 attention の i8a8 の量子化の一時のバイト数（純関数）。①QK 側が `qq` / `qs` / `kq` / `ks`、
- * ③PV 側が `vt` / `vq` / `vs`。どれも行ブロックのループの外で確保し、ノード末尾まで生きる。
+ * Bytes of fused attention's i8a8 quantization temporaries (a pure function). The ①QK side has
+ * `qq` / `qs` / `kq` / `ks`, the ③PV side `vt` / `vq` / `vs`. All are allocated outside the
+ * row-block loop and live until the end of the node.
  *
- * MUST: 実行（`prepareAttentionQkI8a8` / `prepareAttentionPvI8a8`）と見積り（estimate.ts — ADR 0124
- * 決定 7）はこの 1 本から引く（式を書き直すと、片方だけ直された実装に対して見積りが別の数を主張し
- * 続ける）。i8a8 は GQA と組めない（{@link fusedAttentionViolation}）ので、k / v 側も q 側の `B·H` で数える。
+ * MUST: execution (`prepareAttentionQkI8a8` / `prepareAttentionPvI8a8`) and the estimate
+ * (estimate.ts — ADR 0124 decision 7) take them from this one function (rewriting the formula would
+ * let the estimate keep claiming a different number against an implementation where only one side
+ * was fixed). i8a8 cannot be combined with GQA ({@link fusedAttentionViolation}), so the k / v side
+ * is also counted with the q side's `B·H`.
  */
 export const attentionI8a8TempBytes = (
   shape: AttentionShape,
@@ -239,14 +254,14 @@ export const attentionI8a8TempBytes = (
 } => {
   const { batch, rows, cols, depth } = shape;
   return {
-    // 量子化した q / k（i8 を 4 詰め）と per-token scale。
+    // The quantized q / k (four i8 packed per word) and the per-token scales.
     qk: {
       qq: Math.max(4, batch * rows * depth),
       qs: Math.max(4, batch * rows * 4),
       kq: Math.max(4, batch * cols * depth),
       ks: Math.max(4, batch * cols * 4),
     },
-    // Vᵀ（f32・permute の実体化）と、その量子化結果。
+    // Vᵀ (f32, the materialised permute) and its quantization result.
     pv: {
       vt: Math.max(4, batch * depth * cols * 4),
       vq: Math.max(4, batch * depth * cols),
@@ -256,24 +271,27 @@ export const attentionI8a8TempBytes = (
 };
 
 /**
- * 融合 attention の組合せの門（違反の文言 — 無ければ `undefined`）。実行（{@link buildAttention}）は
- * 一時を取る前に、見積り（estimate.ts — ADR 0124 決定 7）は数える前に同じ 1 本で見る（実行が拒否する
- * 組に見積りだけが数を返さないため）。
+ * The combination guard of fused attention (the violation message — `undefined` when there is
+ * none). Execution ({@link buildAttention}) checks it before taking temporaries, and the estimate
+ * (estimate.ts — ADR 0124 decision 7) before counting, through the same function (so that the
+ * estimate does not return a number for a combination execution rejects).
  *
- * - mask × a8: ①QK の i8a8 変種は mask の epilogue を持たない（ADR 0023 / docs/limitations.md）。
- * - GQA × a8: 未対応（ADR 0067 決定 3）。
- * - i8a8 の i32 縮約の門: ① は D・③ は N が {@link LINEAR_I8A8_MAX_K} を超えると i32 が巻き戻る。
+ * - mask × a8: the i8a8 variant of ①QK has no mask epilogue (ADR 0023 / docs/limitations.md).
+ * - GQA × a8: not supported (ADR 0067 decision 3).
+ * - The i8a8 i32 reduction guard: when D (for ①) or N (for ③) exceeds {@link LINEAR_I8A8_MAX_K},
+ *   the i32 wraps around.
  *
- * MUST: mask × a8 と GQA × a8 は**要求されたモード**（`i8a8`）で見る — `route`（D % 4 / N % 4 の
- * 適格判定込み）で見ると、縮退する形だけが拒否をすり抜け、f32 の ①QK と i8a8 の ③PV の混成で走る。
- * 縮約の門は実際に i8a8 を通る段（`route`）だけに掛ける。
+ * MUST: mask × a8 and GQA × a8 are checked against **the requested mode** (`i8a8`) — checking
+ * `route` (which includes the D % 4 / N % 4 eligibility) would let only the shapes that fall back
+ * slip past the rejection and run as a mix of f32 ①QK and i8a8 ③PV.
+ * The reduction guard applies only to the stages that actually take i8a8 (`route`).
  */
 export const fusedAttentionViolation = (
   where: string,
   shape: {
-    /** q 側の head 数 `H`。 */
+    /** Head count `H` on the q side. */
     readonly heads: number;
-    /** k / v 側の head 数 `Hkv`（`H` と違えば GQA）。 */
+    /** Head count `Hkv` on the k / v side (GQA when it differs from `H`). */
     readonly kvHeads: number;
     readonly depth: number;
     readonly cols: number;
@@ -294,18 +312,20 @@ export const fusedAttentionViolation = (
     );
   }
   const kvRepeat = heads / kvHeads;
-  // DECIDED: GQA × i8a8 は fail loudly で開始する（docs/decisions/0067 決定 3）。i8a8 は
-  // head 基底が 5 本（src/kernels/attention-i8a8.ts）で、K / V の量子化・確保も `B·H` 前提
-  // なので、GQA 形をそのまま流すと量子化バッファの取り違えになる。
-  // MUST: 黙って f32 経路へ落とさない（ADR 0058 決定 3 — 性能が静かに変わる）。
+  // DECIDED: GQA × i8a8 starts as fail loudly (docs/decisions/0067 decision 3). i8a8 has five
+  // head bases (src/kernels/attention-i8a8.ts), and the quantization and allocation of K / V also
+  // assume `B·H`, so passing a GQA shape through would mix up the quantization buffers.
+  // MUST: do not drop silently to the f32 path (ADR 0058 decision 3 — performance would change
+  // silently).
   if (kvRepeat > 1 && i8a8) {
     return (
       `${where}: GQA（H=${heads} / Hkv=${kvHeads} → r=${kvRepeat}）× i8a8 は未対応` +
       "（ADR 0067 決定 3・後日サポート予定 — attentionCompute を 'f32' か 'f16' にすること）"
     );
   }
-  // MUST: 縮約の門は fail loudly（黙って通すと i32 の巻き戻りで符号ごと化ける。実測形の
-  // D ≤ 384・N ≤ 16,384 に対して門は桁で余裕があるが、置かないと退行の受け皿が消える）。
+  // MUST: the reduction guard fails loudly (letting it pass would garble values, sign included,
+  // through i32 wrap-around. Against the measured shapes D ≤ 384 and N ≤ 16,384 the guard has
+  // orders of magnitude of headroom, but without it there is nothing to catch a regression).
   if (route.qk === "i8a8" && depth > LINEAR_I8A8_MAX_K) {
     return (
       `${where}: D=${depth} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
@@ -322,12 +342,14 @@ export const fusedAttentionViolation = (
 };
 
 /**
- * states 形 / readonly states 形の attention と数値変種の組の門（違反の文言 — 無ければ `undefined`）。
- * 実行（{@link buildStateAttention} / {@link buildReadonlyStateAttention}）と見積り（estimate.ts —
- * ADR 0124 決定 7）が同じ 1 本で見る。
+ * The guard for combining the states form / readonly states form of attention with numerics
+ * variants (the violation message — `undefined` when there is none). Execution
+ * ({@link buildStateAttention} / {@link buildReadonlyStateAttention}) and the estimate
+ * (estimate.ts — ADR 0124 decision 7) check it through the same function.
  *
- * DECIDED: 数値変種 × states 形は fail loudly で開始する（ADR 0058 決定 3 —「未実装の組は縮退でなく
- * fail loudly」。黙って f32 で走ると opt-in を指定した意味が診断からも数値からも消える）。
+ * DECIDED: numerics variant × states form starts as fail loudly (ADR 0058 decision 3 — "an
+ * unimplemented combination fails loudly instead of falling back". Running silently in f32 would
+ * erase the meaning of the opt-in from both the diagnostics and the numbers).
  */
 export const stateAttentionVariantViolation = (
   where: string,
@@ -352,48 +374,53 @@ export const stateAttentionVariantViolation = (
 };
 
 /**
- * 融合 attention（ADR 0023）。**1 ノード = 行ブロック 1 枚あたり 3 dispatch**（`cat` と同じ
- * 「複数 dispatch で 1 ノード」の扱い。full-write は**ノードの出力 O について**成立する）:
+ * Fused attention (ADR 0023). **One node = three dispatches per row block** (the same "one node in
+ * several dispatches" treatment as `cat`; full-write holds **for the node's output O**):
  *
- * ① QK gemm（S を実体化・scale はタイル充填時に q/k 両方へ）→ ② 行統計（m と 1/Σexp）→
- * ③ PV gemm（A タイル充填時に `exp(S−m)·inv` を評価 = P 非実体化）。
+ * ① QK gemm (materialises S; the scale is applied to both q and k when filling tiles) → ② row
+ * statistics (m and 1/Σexp) → ③ PV gemm (evaluates `exp(S−m)·inv` when filling the A tile = P is
+ * not materialised).
  *
- * ## クエリ行のブロック実行（S の実体化幅の上限対策）
+ * ## Block execution over query rows (bounding the materialised width of S)
  *
- * S は `B·H · M · N · 格納幅` バイトで、**シンボリック次元 S に対して 2 乗**で伸びる
- * （1824×1248 の DiT で S = 8892 → s16 でも 2.53GB = D3D12 の 2GiB 固定上限超え）。そこで
- * クエリ行を {@link planRowBlocks}（ADR 0060 / states 形 attention と同じ純関数）で
- * 「1 枚が `maxStorageBufferBindingSize` に収まる最小枚数」へ等分し、①②③ をブロックごとに
- * 撃つ。実行時オートチューンは持たない（ADR 0022）— 枚数は device の granted limit と
- * 解決済み shape だけから決まる。
+ * S takes `B·H · M · N · storage width` bytes and grows **quadratically in the symbolic dimension
+ * S** (on a 1824×1248 DiT, S = 8892 → 2.53GB even with s16 = beyond D3D12's fixed 2GiB limit). So
+ * the query rows are split evenly by {@link planRowBlocks} (ADR 0060 / the same pure function as
+ * the states-form attention) into "the smallest count where each block fits
+ * `maxStorageBufferBindingSize`", and ①②③ run per block. There is no run-time autotuning
+ * (ADR 0022) — the count is decided from the device's granted limit and the resolved shapes only.
  *
- * ビット同一の根拠は分解経路の行ブロック（fusion.ts の `rowBlockAttention`）と同じ:
- * ①③ は**行の担当割り**だけを変え（{@link "../../kernels/gemm.ts"} `GemmRowWindow`）、②と
- * ③の `exp(S−m)·inv` は**行内で閉じる**ので 1 行あたりの演算列も丸めの並びも動かない。
- * MUST: **n = 1 では行窓を立てない** — キー・uniform・生成 WGSL・dispatch 列が分割前と
- * 完全に同一になる（既存のスナップショットとビット同一門がその検出器）。
+ * The basis of bit identity is the same as the decomposed path's row blocks (`rowBlockAttention` in
+ * fusion.ts): ①③ change **only the assignment of rows** (`GemmRowWindow` in
+ * {@link "../../kernels/gemm.ts"}), and ② and ③'s `exp(S−m)·inv` are **closed within a row**, so
+ * neither the op sequence nor the order of rounding per row moves.
+ * MUST: **with n = 1, no row window is set** — the key, uniform, generated WGSL and dispatch list
+ * are exactly the same as before splitting (the existing snapshots and the bit-identity check are
+ * its detectors).
  *
- * 省略可能な第 4 入力 `mask[1,1,M,N]`（加算型）は **① の束縛が 1 本増えるだけ**で、
- * dispatch 数も ②③ の経路も変わらない（S が mask 済みで出てくる）。
+ * The optional fourth input `mask[1,1,M,N]` (additive) **only adds one binding to ①**; neither the
+ * dispatch count nor the paths of ②③ change (S comes out already masked).
  *
- * GQA（`H % Hkv == 0` — ADR 0067）は **①③ のキー 1 語と uniform 1 語だけ**の軸で、dispatch 数も
- * 確保も変わらない（K / V の base だけが `wid.z / r` で kv-head へ写る）。i8a8 との組は
- * 未対応で fail loudly（決定 3）。
+ * GQA (`H % Hkv == 0` — ADR 0067) is an axis of **one key word and one uniform word of ①③ only**;
+ * neither the dispatch count nor the allocation changes (only the K / V base maps to the kv-head
+ * via `wid.z / r`). Its combination with i8a8 is not supported and fails loudly (decision 3).
  *
- * i8a8 変種（opt-in）では **量子化の 4 dispatch がブロックループの外**へ出て、ループ内は
- * 3 dispatch のまま（① と ③ の GEMM が i8a8 カーネルに替わる）。**適格判定は
- * 段ごとに独立**（① は `D % 4 == 0`・③ は `N % 4 == 0`）なので、片方だけ i8a8 の**混成**が
- * 起こりうる — 満たさない段だけが f32 経路へ**沈黙で**縮退する（linear の `k % 4` と同じ
- * 流儀で、落ちたことは診断のパイプラインキーにだけ出る — 系列の門は完全適格の検査
- * `assertAttentionSeatsComplete` で検出する。ADR 0058 追記 2026-10-10）。
+ * In the i8a8 variant (opt-in) **the four quantization dispatches move outside the block loop**,
+ * and the loop keeps three dispatches (the ① and ③ GEMMs switch to i8a8 kernels). **Eligibility is
+ * decided per stage independently** (① needs `D % 4 == 0`, ③ needs `N % 4 == 0`), so a **mix**
+ * with only one of them in i8a8 can occur — only the stage that does not qualify falls back to the
+ * f32 path **silently** (the same manner as linear's `k % 4`; the fallback shows only in the
+ * diagnostic pipeline key — the family check detects it with the full-eligibility check
+ * `assertAttentionSeatsComplete`, ADR 0058 addendum of 2026-10-10).
  *
- * MUST: ① と ③ は 1 workgroup = 1 タイルなので、3 軸とも上限超過は fail loudly
- * （{@link tiledWorkgroups}）。縮退させるとタイルが欠落し、例外なしに O の一部が
- * 未書き込み（配り直しなら前の値）で残る。② だけが行方向 grid-stride。
- * MUST: 一時バッファ（S / 行統計）は**ブロックごとに**確保して返す（全ブロックぶんまとめて
- * 取ると、上限を越えない形にした意味が消える）。量子化の一時だけがループを跨ぎ、ノード末尾で
- * 確保の逆順に返る。これで計画の参照計数が閉じ、失敗経路でも `arena.destroy()` が領域ごと
- * 拾う（確保と破棄を 1 箇所へ — ADR 0004）。
+ * MUST: ① and ③ are one workgroup = one tile, so exceeding the limit fails loudly on all three axes
+ * ({@link tiledWorkgroups}). Clamping would drop tiles and leave part of O unwritten (with a
+ * reallocated buffer, the previous values) with no exception. Only ② is grid-stride over rows.
+ * MUST: the temporary buffers (S / row statistics) are allocated and returned **per block** (taking
+ * them for all blocks at once would defeat the point of staying under the limit). Only the
+ * quantization temporaries live across the loop, returned at the end of the node in reverse
+ * allocation order. That closes the plan's reference counting, and even on a failure path
+ * `arena.destroy()` collects the whole region (allocation and destruction in one place — ADR 0004).
  */
 export const buildAttention = async (
   face: RecipeBuildFace,
@@ -403,7 +430,8 @@ export const buildAttention = async (
   builder: StepRecipeBuilder,
 ): Promise<void> => {
   const [q, k, v] = step.inputShapes;
-  // B と H は 1 本のバッチ軸へ畳む（契約は rank-4 head-first で、B は 3 者一致・H は q 側）。
+  // B and H fold into one batch axis (the contract is rank-4 head-first; B matches across all
+  // three, H is the q side's).
   const batch = q[0] * q[1];
   const rows = q[2];
   const cols = k[2];
@@ -412,37 +440,43 @@ export const buildAttention = async (
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const where = `attention [${q.join(",")}] × [${k.join(",")}] × [${v.join(",")}]`;
 
-  // GQA（整除 broadcast — ADR 0067 決定 1 / 2）。`r = H / Hkv` は**導出値**（attrs 欄は無い）で、
-  // 整除は shape 検査（src/ops/shapes.ts）が保証する。確保・dispatch・S / O / 行統計は
-  // すべて q 側の `B·H` のままで、**K / V の読みだけ**が kv-head へ写る。
-  // SHOULD（2026-10-18 に MUST から再等級 — ADR 0067 決定 2）: `r = 1` では GQA ビットを立てない
-  // （キーも生成 WGSL もバイト同一）。
+  // GQA (divisible broadcast — ADR 0067 decisions 1 / 2). `r = H / Hkv` is **a derived value** (no
+  // attrs field); the shape check (src/ops/shapes.ts) guarantees divisibility. Allocation, dispatch
+  // and S / O / row statistics all keep the q side's `B·H`; **only the reads of K / V** map to the
+  // kv-head.
+  // SHOULD (re-graded 2026-10-18 from MUST — ADR 0067 decision 2): with `r = 1`, do not set the GQA
+  // bit (the key and the generated WGSL are byte-identical).
   const kvHeads = k[1];
   const kvRepeat = q[1] / kvHeads;
   const gqa = kvRepeat > 1;
 
-  // f16 計算変種（ADR 0028）。3 カーネルが**同時に**切り替わる — S の格納形が ① の書き手と
-  // ②③ の読み手で一致していなければならないので、段ごとの混成はあり得ない。
+  // The f16 compute variant (ADR 0028). The three kernels switch **together** — S's storage form
+  // has to match between ①, which writes it, and ②③, which read it, so a per-stage mix cannot
+  // occur.
   const compute: GemmCompute = face.state.attentionCompute === "f16" ? "f16" : "f32";
-  // i8a8 変種（設計 §7 の波 1 + 波 2）。**② 行統計は f32 のまま**（S の格納形も f32 の
-  // ままなので、②③ が読む S は ① がどちらの経路で書いても同型）。
-  // S の**格納形**（案 γ 波 1 — 計算形と直交する第 2 の軸）。
-  // 段ごとの適格判定（① は D・③ は N で独立）と S の格納形の適格判定（3 カーネル同時）は
-  // `attentionRoute`（src/runtime/attention-route.ts）が正本で、非適格は f32 経路へ**沈黙で**
-  // 縮退する（ADR 0058 決定 3 — 検出は系列の門の完全適格の検査）。
-  // MUST: 判定をここへ書き戻さない（受理集合のテストが同じ関数を通ることで判定がずれない）。
+  // The i8a8 variant (design §7 waves 1 + 2 — research 2026-08-04-attention-a8-design). **② row
+  // statistics stay f32** (S's storage form also stays f32, so the S that ②③ read has the same form
+  // whichever path ① wrote it with).
+  // S's **storage form** (option γ wave 1 — a second axis orthogonal to the compute form).
+  // The per-stage eligibility (① by D, ③ by N, independently) and the eligibility of S's storage
+  // form (all three kernels together) are owned by `attentionRoute`
+  // (src/runtime/attention-route.ts); ineligible stages fall back to the f32 path **silently**
+  // (ADR 0058 decision 3 — detected by the family check's full-eligibility check).
+  // MUST: do not write the decision back here (the acceptance-set tests go through the same
+  // function, so the decisions cannot drift apart).
   const i8a8 = face.state.attentionCompute === "a8";
   const route = attentionRoute(face.state, depth, cols);
   const scoreStorage = route.score;
 
-  // 加算 mask（省略可能な第 4 入力 — 契約は src/ops.ts）。① の epilogue だけの軸で、
-  // ②③ からは「S が既に mask 済み」に見える。
+  // The additive mask (an optional fourth input — the contract is in src/ops.ts). An axis of ①'s
+  // epilogue only; to ②③ it looks like "S is already masked".
   const mask = binds[3];
-  // MUST: 組合せの門（mask × a8・GQA × a8・i8a8 の i32 縮約）は**一時バッファを取る前に** fail
-  // loudly にする。i8a8 の ①QK は別カーネル（src/kernels/attention-i8a8.ts）で epilogue を持たず、
-  // 黙って f32 経路へ落とすと「i8a8 を頼んだのに効かない」沈黙になり、mask を落とすと値が壊れる。
-  // 判定は見積りと共有する 1 本（{@link fusedAttentionViolation} — 要求されたモードで見る規律も
-  // そこにある）。
+  // MUST: the combination guards (mask × a8, GQA × a8, the i8a8 i32 reduction) fail loudly **before
+  // any temporary buffer is taken**. i8a8's ①QK is a separate kernel
+  // (src/kernels/attention-i8a8.ts) without an epilogue; dropping silently to the f32 path would
+  // give the silence of "asked for i8a8 and it has no effect", and dropping the mask would break
+  // the values. The decision is the one function shared with the estimate
+  // ({@link fusedAttentionViolation} — the rule of checking the requested mode lives there too).
   const violation = fusedAttentionViolation(
     where,
     { heads: q[1], kvHeads, depth, cols },
@@ -450,13 +484,15 @@ export const buildAttention = async (
   );
   if (violation !== undefined) throw new ExecutionError(violation);
 
-  // クエリ行のブロック分割（ADR 0060 と同じ純関数 — states 形 attention と同じ流儀）。
-  // S 1 枚 = `B·H · block · N · 格納幅` バイトと行統計 1 枚が、ストレージ束縛の上限と予算
-  // （`attentionRowBlockMaxBytes` — ADR 0124）の小さいほうに収まる最小枚数の等分で
-  // （{@link planAttentionBlocks}）、実行時オートチューンは持たない（ADR 0022）。
-  // 1 行でも収まらない形は fail loudly。
-  // MUST: **n = 1 の機は分割前と完全に同一**（行窓を立てないのでキーも uniform も WGSL も
-  // dispatch 列も 1 バイト動かない）。既存のスナップショットとビット同一門がその検出器。
+  // Block split over query rows (the same pure function as ADR 0060 — the same manner as the
+  // states-form attention). An even split into the smallest count where one S block = `B·H · block
+  // · N · storage width` bytes and one row-statistics block fit the smaller of the storage binding
+  // limit and the budget (`attentionRowBlockMaxBytes` — ADR 0124) ({@link planAttentionBlocks});
+  // there is no run-time autotuning (ADR 0022).
+  // A shape where even one row does not fit fails loudly.
+  // MUST: **a machine with n = 1 is exactly the same as before splitting** (no row window, so
+  // neither the key, the uniform, the WGSL nor the dispatch list moves by a byte). The existing
+  // snapshots and the bit-identity check are its detectors.
   const scoreBytes = attentionScoreElementBytes(face.state.attentionCompute, route);
   const blocks = planAttentionBlocks(
     { batch, rows, cols, scoreBytes },
@@ -468,27 +504,32 @@ export const buildAttention = async (
   );
   const windowed = blocks.length > 1;
 
-  // 幾何はブロック行数に依らず adapter のプロファイルの欄（src/kernels/geometry-profile.ts）
-  // なので、①③ のパイプラインは全ブロックで共有する（ブロック間の差は uniform の
-  // `row_offset` / `m` だけ）。
-  // ①と③は**別の幾何でよい**（i8a8 変種が元から段ごとに別の幾何を持つのと同じ理由）: 段の間の
-  // 受け渡しは実体化した S と行統計だけで、S は ① の dispatch（①の幾何）が全要素を書き切り、
-  // ②③ は行・列の添字で読むだけ — タイル辺を段を跨いで共有するものは無い。
-  // MUST: 段ごとに 1 回引いた幾何を、その段のキー・WGSL・dispatch の 3 つへ**そのまま**通す。
+  // The geometry does not depend on the block's row count; it is a field of the adapter's profile
+  // (src/kernels/geometry-profile.ts), so the ①③ pipelines are shared by every block (blocks differ
+  // only in the uniform's `row_offset` / `m`).
+  // ① and ③ **may use different geometries** (for the same reason the i8a8 variant always had a
+  // geometry per stage): the stages exchange only the materialised S and row statistics; ①'s
+  // dispatch (with ①'s geometry) writes every element of S, and ②③ only read it by row and column
+  // index — nothing shares tile edges across stages.
+  // MUST: pass the geometry taken once per stage **unchanged** to all three of that stage's key,
+  // WGSL and dispatch.
   const qkGeometry = face.state.geometryProfile.attention.qk;
   const pvGeometry = face.state.geometryProfile.attention.pv;
   const hasMask = mask !== undefined;
   const qkV4 = gemmUsesVec4(depth, cols);
   const qkKey = attentionQkKey(qkV4, compute, scoreStorage, hasMask, gqa, windowed, qkGeometry);
-  // i8a8 の量子化（①の k / ③の Vᵀ = **列側**）はブロックに依存しないので**ループ外で 1 回**。
-  // MUST: ループ内へ入れない（値は同じまま仕事が枚数倍になる純粋な性能退行）。
-  // q 側（qq / qs）も行に比例する仕事で総量は変わらないため同じくループ外に置き、①QK が
-  // 行窓で全 M ストライドから読む（ブロックごとに量子化すると `quantize_rows` に全 M
-  // ストライドの行 gather が要り、linear と共有している 1 本を触ることになる）。
-  // NOTE: 量子化の一時がループを跨いで生きるので、n = 1 でも同時生存が増える。増分は
-  // `O(B·H·(M+N)·D)` で S の `O(B·H·M·N)` より 1 次低い（実測 = anima DiT の自己注意
-  // S=8892 で 122.8MiB 対 S 1 枚 2,413.0MiB = +5.1%）。**上限に効くのはバッファ 1 本ごとの
-  // サイズ**なので、束縛上限に対する峰は S のブロック 1 枚のまま動かない。
+  // The i8a8 quantization (①'s k / ③'s Vᵀ = **the column side**) does not depend on the block, so
+  // it runs **once, outside the loop**.
+  // MUST: do not move it into the loop (same values, work multiplied by the block count — a pure
+  // performance regression).
+  // The q side (qq / qs) is also work proportional to the rows with an unchanged total, so it too
+  // stays outside the loop, and ①QK reads it from the full-M stride through the row window
+  // (quantizing per block would need a row gather over the full-M stride in `quantize_rows`,
+  // touching the one kernel shared with linear).
+  // NOTE: the quantization temporaries live across the loop, so even with n = 1 more is alive at
+  // once. The increase is `O(B·H·(M+N)·D)`, one order lower than S's `O(B·H·M·N)` (measured = anima
+  // DiT self-attention at S=8892: 122.8MiB against 2,413.0MiB for one S = +5.1%). **What the limit
+  // sees is the size of each buffer**, so the peak against the binding limit stays one S block.
   const qk: AttentionQkStage =
     route.qk === "i8a8"
       ? await prepareAttentionQkI8a8(
@@ -527,10 +568,11 @@ export const buildAttention = async (
             attentionPvWgsl(pvV4, compute, scoreStorage, gqa, windowed, pvGeometry),
           )),
         };
-  // ② 行統計 — 1 行 = 1 workgroup で、行方向は grid-stride（softmax と同じ形）。
-  // S を 1 回だけ読む regcache 変種は dim 依存の生成なので、`epc` がキー軸に増える
-  // （値はどちらもビット同一 — src/kernels/attention.ts）。ブロック化しても**行内で閉じる**
-  // ので、S も行統計もブロック相対のまま素のカーネルがそのまま撃てる（行オフセットは要らない）。
+  // ② Row statistics — one row = one workgroup, grid-stride over rows (the same shape as softmax).
+  // The regcache variant that reads S only once is generated per dim, so `epc` adds a key axis
+  // (both give bit-identical values — src/kernels/attention.ts). Blocking keeps it **closed within
+  // a row**, so the plain kernel runs as is on block-relative S and row statistics (no row offset
+  // needed).
   const statsRegCache = attentionStatsRegCache(cols);
   const statsKey = attentionStatsKey(compute, scoreStorage, statsRegCache);
   const stats = await face.state.cache.get(
@@ -539,19 +581,21 @@ export const buildAttention = async (
   );
 
   for (const block of blocks) {
-    // S[batch, block, N] と行統計 [batch·block, 2]。O は実行相が確保済みなので、峰は
-    // O + S + 統計（分解経路の S + P + 恒等 expand の 3 枚から 1 枚ぶん減る）。
-    // f16 変種（`:c16` の array<f16> / s16 の pack2x16float）では S が半分のバイト数になる
-    // （1024px の DiT で 1,073.7MB → 536.9MB）。
-    // MUST: 一時は**ブロックごとに**確保して返す（全ブロックぶんまとめて取ると、上限を
-    // 越えない形にした意味が消える — states 形 attention と同じ規律）。
+    // S[batch, block, N] and row statistics [batch·block, 2]. O is already allocated by the
+    // execution phase, so the peak is O + S + statistics (one buffer less than the decomposed
+    // path's three: S + P + the identity expand).
+    // In the f16 variants (`:c16`'s array<f16> / s16's pack2x16float) S takes half the bytes
+    // (1,073.7MB → 536.9MB on a 1024px DiT).
+    // MUST: temporaries are allocated and returned **per block** (taking them for all blocks at
+    // once would defeat the point of staying under the limit — the same discipline as the
+    // states-form attention).
     const scores = builder.allocTemp(block.scoreBytes);
     const rowStats = builder.allocTemp(block.statsBytes);
-    // 行窓 2 語（n = 1 では渡さない = uniform のバイト列も従来どおり）。
+    // The two row-window words (not passed for n = 1 = the uniform's bytes stay as before).
     const window = windowed ? { offset: block.offset, rowsFull: rows } : undefined;
 
-    // ① QK gemm — 縮約次元は D、出力の列は N。行窓 `"a"` は q を全 M ストライドの
-    // `row_offset` 行目から読むだけで、S はブロックとして 0 行目から書く。
+    // ① QK gemm — the reduction dimension is D, the output columns are N. The row window `"a"` only
+    // reads q from row `row_offset` of the full-M stride; S is written as a block from row 0.
     if (qk.kind === "i8a8") {
       builder.dispatch({
         key: qk.key,
@@ -599,7 +643,8 @@ export const buildAttention = async (
       });
     }
 
-    // ② 行統計（ブロック相対 — 行内で閉じるので行を切っても 1 行の演算列は変わらない）。
+    // ② Row statistics (block-relative — closed within a row, so cutting rows does not change a
+    // row's op sequence).
     builder.dispatch({
       key: statsKey,
       pipeline: stats.pipeline,
@@ -616,8 +661,9 @@ export const buildAttention = async (
       workgroups: [gridStrideWorkgroups(batch * block.rows, 1, limit), 1, 1],
     });
 
-    // ③ PV gemm — 縮約次元は N、出力の列は D。行窓 `"c"` は O を全 M ストライドの
-    // `row_offset` 行目へ書くだけで、S も行統計もブロック相対のまま読む。
+    // ③ PV gemm — the reduction dimension is N, the output columns are D. The row window `"c"` only
+    // writes O to row `row_offset` of the full-M stride; S and row statistics are read
+    // block-relative.
     if (pv.kind === "i8a8") {
       builder.dispatch({
         key: pv.key,
@@ -665,14 +711,15 @@ export const buildAttention = async (
       });
     }
 
-    // MUST: ノード境界で一時バッファを返す（計画の不変条件 — 抜けると閉包検査で落ちるか、
-    // 配り直しから外れて peak が過大に出る）。確保の逆順。
+    // MUST: return the temporary buffers at the node boundary (the plan's invariant — missing it
+    // fails the closure check, or leaves them out of reallocation and overstates the peak). Reverse
+    // allocation order.
     builder.releaseTemp(rowStats);
     builder.releaseTemp(scores);
   }
 
-  // MUST: 量子化の一時も確保の逆順で返す（`#prepare*` が取ったぶんをここで閉じる — 確保と
-  // 破棄はノードの中で対になっている。ADR 0004）。
+  // MUST: the quantization temporaries are also returned in reverse allocation order (this closes
+  // what `#prepare*` took — allocation and destruction pair up inside the node. ADR 0004).
   if (pv.kind === "i8a8") {
     builder.releaseTemp(pv.vs);
     builder.releaseTemp(pv.vq);
@@ -687,11 +734,13 @@ export const buildAttention = async (
 };
 
 /**
- * `states` 欄のキーが指すスロットの名前と束縛解決済み容量形。
+ * The name of the slot a key of the `states` field points to, and its capacity shape with bindings
+ * resolved.
  *
- * 形の妥当性（`[B,Hkv,C,D]`・ins との B / Hkv / D 一致・`window ≤ C`）は shape 層
- * （src/ops/shapes.ts）が済ませているので、ここで引けないのはランタイム内部の不変条件破れ
- * （導出相が `stateShapes` 無しで state ノードに当たった経路を含む）。
+ * The shape's validity (`[B,Hkv,C,D]`, B / Hkv / D matching ins, `window ≤ C`) is settled by the
+ * shape layer (src/ops/shapes.ts), so failing to look it up here is a broken runtime-internal
+ * invariant (including the path where the derivation phase hit a state node without
+ * `stateShapes`).
  */
 const stateSlot = (
   step: NodePlan,
@@ -712,21 +761,25 @@ const stateSlot = (
 };
 
 /**
- * states 形 attention（ADR 0067 決定 4 / 6 / 7）。**1 ノード = 行ブロック 1 枚あたり 3 dispatch**
- * で、カーネル族は融合 attention と完全に別（src/kernels/state-attention.ts）。
+ * States-form attention (ADR 0067 decisions 4 / 6 / 7). **One node = three dispatches per row
+ * block**, with a kernel family completely separate from fused attention
+ * (src/kernels/state-attention.ts).
  *
- * ①QK（S を live 列だけ実体化）→ ②行統計（identity −inf・空行ガード）→ ③PV（P 非実体化）。
- * K / V の出どころは 2 つ（論理 col < `pastLength` は**スロット**・以降は今 step の `ins`）で、
- * 走査範囲は実行時値なので **①QK の dispatch 数だけが論理長から算出**される（②③ は出力側の
- * 形だけで決まり、live の走査は invocation の内側）。
+ * ①QK (materialises S for the live columns only) → ② row statistics (identity −inf, empty-row
+ * guard) → ③PV (P not materialised).
+ * K / V come from two places (logical col < `pastLength` from **the slot**, the rest from this
+ * step's `ins`), and the scan range is a run-time value, so **only ①QK's dispatch count is computed
+ * from the logical length** (②③ depend only on the output-side shape; the live scan happens inside
+ * the invocation).
  *
- * MUST: 列容量 `colCap` と行ブロックの割り方・一時のバイト式は {@link planStateAttention}
- * （見積り `estimate.ts` と共有する 1 本）だけから引く。S 1 枚 = `B·H · block · colCap · 4`
- * バイトが `maxStorageBufferBindingSize`（予算を掛けたときは予算との小さいほう — ADR 0124）に
- * 収まる最小枚数の等分で、実行時オートチューンは
- * 持たない（ADR 0022 / ADR 0060）。1 行でも収まらない形は fail loudly。
- * MUST: 一時（S / 行統計）は**ブロックごとに**確保して返す（全ブロックぶんまとめて取ると、
- * 上限を越えない形にした意味が消える）。
+ * MUST: the column capacity `colCap`, the row-block split and the temporaries' byte formulas come
+ * only from {@link planStateAttention} (the one function shared with the estimate `estimate.ts`).
+ * An even split into the smallest count where one S block = `B·H · block · colCap · 4` bytes fits
+ * `maxStorageBufferBindingSize` (with a budget, the smaller of it and the budget — ADR 0124); there
+ * is no run-time autotuning
+ * (ADR 0022 / ADR 0060). A shape where even one row does not fit fails loudly.
+ * MUST: temporaries (S / row statistics) are allocated and returned **per block** (taking them for
+ * all blocks at once would defeat the point of staying under the limit).
  */
 export const buildStateAttention = async (
   face: RecipeBuildFace,
@@ -743,17 +796,19 @@ export const buildStateAttention = async (
   const gqa = kvRepeat > 1;
   const kSlot = stateSlot(step, "k", states, where);
   const vSlot = stateSlot(step, "v", states, where);
-  // k / v スロットが同形であることは shape 層が済ませている（容量は片方から引けばよい）。
+  // The shape layer has already established that the k / v slots have the same shape (the capacity
+  // can come from either).
   const capacity = kSlot.shape[2];
   const window = stateWindow(step.node.attrs, where) ?? 0;
   const sliding = stateSliding(window);
   const scale = attentionScale(step.node.attrs, where);
-  // 数値変種 × states 形は fail loudly（ADR 0058 決定 3 — 判定は見積りと共有する
-  // {@link stateAttentionVariantViolation}）。判定は**一時バッファを取る前**（GQA × i8a8 の門と同じ位置）。
+  // Numerics variant × states form fails loudly (ADR 0058 decision 3 — the decision is
+  // {@link stateAttentionVariantViolation}, shared with the estimate). It is checked **before any
+  // temporary buffer is taken** (the same place as the GQA × i8a8 guard).
   const variantViolation = stateAttentionVariantViolation(where, "states", face.state);
   if (variantViolation !== undefined) throw new ExecutionError(variantViolation);
-  // run 前検査（ADR 0066 決定 4 / ADR 0067 決定 4 ④）の材料。sliding は ring なので容量の
-  // 検査対象にしない。
+  // Material for the pre-run check (ADR 0066 decision 4 / ADR 0067 decision 4 ④). sliding is a
+  // ring, so it is not subject to the capacity check.
   states.chunkRows.add(chunkRows);
   if (!sliding) {
     states.fullCapacities.set(kSlot.name, capacity);
@@ -762,8 +817,9 @@ export const buildStateAttention = async (
 
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const batchHeads = batch * heads;
-  // 行ブロックの枚数を明示する `rowBlockSplit`（テスト専用 `ROW_BLOCK_SPLIT`）を渡すのは
-  // 実行計画側だけ — 見積りには受け口が無く、既定の等分だけを名乗る。
+  // Only the execution plan passes `rowBlockSplit` (test-only `ROW_BLOCK_SPLIT`), which states the
+  // row-block count — the estimate has no entry point for it and claims only the default even
+  // split.
   const { colCap, fusedStatsPv, blocks } = planStateAttention(
     {
       batchHeads,
@@ -779,36 +835,44 @@ export const buildStateAttention = async (
     face.state.rowBlockSplit,
   );
 
-  // ①QK / ③PV の縮約形は**同じ** opt-in 席（ADR 0058・2026-09-06 裁定でノブは 1 つのまま）。
-  // ①' / ③' はどちらも束縛・params が参照経路と同一で、キー・WGSL・workgroup 算出の 3 点
-  // だけが替わる（キーの `:par` が census 門の目印）。
+  // The reduction forms of ①QK / ③PV share **the same** opt-in option (ADR 0058; the 2026-09-06
+  // ruling kept a single knob).
+  // ①' / ③' both have bindings and params identical to the reference path; only three things
+  // change: key, WGSL and the workgroup computation (the key's `:par` is the census check's
+  // marker).
   const parallel = face.state.stateAttentionReduce !== "sequential";
-  // ①' だけは席に**適用条件**が掛かる: この計画の `M`（= chunkRows）が 8 以下のときだけ選ぶ
-  // （decode の M=1 と投機の verify M ≤ 8）。
-  // WHY: ①' が縮めるのは 1 invocation の D 逐次の遅延で、それが律速なのは有効 invocation が
-  // 「live 列 × 1 行」しか無い decode（M=1）だけ。prefill（M=768）では ① が既に行 × 列で
-  // 埋まっており、①' は行タイル幅を 4 → 1 に落として 4 倍の workgroup と barrier を積むだけに
-  // なる。実測（2026-09-06）でも decode は ×1.55〜1.72 で効いた一方、prefill の ①QK は GPU
-  // 時間が 1.5〜1.9 倍に伸び、prefill 全体で +30〜60% 逆行した。verify（M=4）は中立（2026-09-09）。
-  // 条件は**実測した範囲に留める**（ADR 0082 決定 4 と同じ規律）。③' の側は `M < 16` の計画だけが
-  // 取る（`M ≥ 16` は席に依らず ③ₜ — 下記）ので、席 1 つで 2 段の適用範囲が違う形は続く。
-  // MUST: 判定材料は計画時に決まる静的値だけ（`chunkRows` は宣言 shape 由来）— 実行時の論理長で
-  // 分岐すると、同じ計画鍵が run ごとに違うパイプラインを指すことになる。
+  // Only ①' has an **eligibility condition** on the option: it is chosen only when this plan's `M`
+  // (= chunkRows) is 8 or less (decode's M=1 and speculative verify's M ≤ 8).
+  // WHY: ①' shortens the latency of one invocation's D-serial loop, and that is the bottleneck only
+  // in decode (M=1), where the active invocations are just "live columns × 1 row". In prefill
+  // (M=768) ① is already filled with rows × columns, and ①' only drops the row tile width from 4 to
+  // 1, stacking 4× the workgroups and barriers. Measured (2026-09-06): decode gained ×1.55–1.72,
+  // while prefill's ①QK GPU time grew 1.5–1.9× and prefill as a whole regressed by +30–60%. verify
+  // (M=4) was neutral (2026-09-09).
+  // The condition **stays inside the measured range** (the same discipline as ADR 0082 decision 4).
+  // On the ③' side only plans with `M < 16` take it (`M ≥ 16` takes ③ₜ whatever the option — see
+  // below), so one option keeps covering two stages with different ranges.
+  // MUST: the decision inputs are only static values fixed at plan time (`chunkRows` comes from the
+  // declared shape) — branching on the run-time logical length would make the same plan key point
+  // at a different pipeline per run.
   const qkParallel = parallel && stateQkParallelEligible(chunkRows);
-  // ①ₜ（GEMM 骨格の K 行タイル共有 — perf-ledger K-13）は **① とビット同一**なので席に依らず、
-  // `M ≥ 16` の計画で既定として選ぶ（適用条件と WHY は `stateQkTiledEligible`）。2 つの適用条件は
-  // 重ならない（1 < 16）ので、この優先順は読みやすさのためだけにある。
-  // MUST: ①QK の 3 経路の優先順を持つのは**この 1 箇所**（キー・WGSL・params・workgroup の
-  // 4 点がここで揃う）。分散させると「キーは ①ₜ・dispatch は ① の辺」のような組がありえて、
-  // タイルが欠落したまま例外が出ない。
+  // ①ₜ (K row-tile sharing in the GEMM skeleton — perf-ledger K-13) is **bit-identical to ①**, so
+  // it does not depend on the option and is chosen by default for plans with `M ≥ 16` (the
+  // eligibility condition and the WHY are in `stateQkTiledEligible`). The two eligibility
+  // conditions do not overlap (1 < 16), so this priority order exists only for readability.
+  // MUST: **this is the only place** that holds the priority order of the three ①QK paths (the four
+  // points key, WGSL, params and workgroups line up here). Scattering it would allow pairs like
+  // "key is ①ₜ, dispatch uses ①'s edges", with tiles missing and no exception.
   const qkTiled = !qkParallel && stateQkTiledEligible(chunkRows);
-  // ③ₜ（GEMM 骨格の V 行タイル共有 — perf-ledger K-13 段 2）も **③ とビット同一**なので
-  // 席に依らず、`M ≥ 16` の計画で既定として選ぶ。①ₜ と違って**席より優先する**のがここの
-  // 要点で、席が `"parallel"` の prefill 計画は ③' ではなく ③ₜ（= 参照経路の値）になる。
-  // WHY: ③' の利得は decode に閉じており prefill 側は K-12 の実測で誤差内だった一方、
-  // ③ₜ は traffic を削る。ビット同一の経路を既定に置ける方が数値契約が単純になる。
-  // MUST: ③PV の 3 経路の優先順を持つのも**この 1 箇所**（①QK と同文 — キー・WGSL・
-  // params・workgroup の 4 点がここで揃う）。
+  // ③ₜ (V row-tile sharing in the GEMM skeleton — perf-ledger K-13 step 2) is also **bit-identical
+  // to ③**, so it does not depend on the option and is chosen by default for plans with `M ≥ 16`.
+  // Unlike ①ₜ, the point here is that **it takes priority over the option**: a prefill plan whose
+  // option is `"parallel"` gets ③ₜ (= the reference path's values), not ③'.
+  // WHY: ③''s gain is confined to decode, and on the prefill side K-12 measured it within noise,
+  // while ③ₜ cuts traffic. Being able to put a bit-identical path as the default keeps the numeric
+  // contract simpler.
+  // MUST: **this is also the only place** that holds the priority order of the three ③PV paths (as
+  // for ①QK — the four points key, WGSL, params and workgroups line up here).
   const pvTiled = statePvTiledEligible(chunkRows);
   const pvParallel = parallel && !pvTiled;
   const qkKey = qkParallel
@@ -847,8 +911,8 @@ export const buildStateAttention = async (
   );
 
   for (const block of blocks) {
-    // 静的幾何の**唯一の出どころ**（内容アドレスキャッシュ適格 — ブロック間の差は rowOffset /
-    // rowsBlock だけ）。ここから段ごとに params を組む。
+    // **The only source** of the static geometry (eligible for the content-addressed cache — blocks
+    // differ only in rowOffset / rowsBlock). params for each stage are built from here.
     const geometry = {
       rowsBlock: block.rows,
       rowOffset: block.offset,
@@ -860,14 +924,15 @@ export const buildStateAttention = async (
       colCap,
       scale,
     };
-    // ①③ が共有する語順の params。**タイル経路の段は 1 語も読まない**ので、2 段ともタイルの
-    // 計画では 1 本も組まない（組んでも誰も束縛しない死んだ uniform になる）。
+    // The params with the word order shared by ①③. **A tiled stage reads none of its words**, so a
+    // plan with both stages tiled builds none (it would be a dead uniform nobody binds).
     let shared: GPUBuffer | undefined;
     const sharedParams = (): GPUBuffer =>
       (shared ??= face.writeParams(stateAttentionParams(geometry), PARAMS_UNIFORM_USAGE));
-    // ①ₜ / ③ₜ は骨格の `Dims`（先頭 3 語が m / n / k）を binding 0 に置くので、**同じ静的幾何を
-    // 別の語順で**組み直す（③ₜ は `neg_inf` / `scale` を読まないので語数も違う）。①③ 共有の
-    // 語順は動かさない — ③ と見積りが同じ表を読む。
+    // ①ₜ / ③ₜ put the skeleton's `Dims` (first three words m / n / k) at binding 0, so they rebuild
+    // **the same static geometry in a different word order** (③ₜ does not read `neg_inf` / `scale`,
+    // so the word count differs too). The word order shared by ①③ does not move — ③ and the
+    // estimate read the same table.
     const qkParams = qkTiled
       ? face.writeParams(stateQkTiledParams(geometry), PARAMS_UNIFORM_USAGE)
       : sharedParams();
@@ -884,8 +949,8 @@ export const buildStateAttention = async (
     const scores = builder.allocTemp(block.scoreBytes);
     const rowStats = fusedStatsPv ? undefined : builder.allocTemp(block.statsBytes);
 
-    // ①QK — **workgroup 数だけが論理長から算出**される（仕事量 ∝ Q × (有効 past + Q) の機構
-    // そのもの — ADR 0066 決定 3 の合格条件）。
+    // ①QK — **only the workgroup count is computed from the logical length** (the very mechanism of
+    // work ∝ Q × (effective past + Q) — the acceptance condition of ADR 0066 decision 3).
     builder.dispatch({
       key: qkKey,
       pipeline: qk.pipeline,
@@ -915,8 +980,9 @@ export const buildStateAttention = async (
     });
 
     if (stats !== undefined && rowStats !== undefined) {
-      // ② 行統計 — 1 行 = 1 workgroup の行方向 grid-stride（live の走査は行ループの内側）。
-      // 覆うのは有効行だけなので、workgroup 数も ① と同じく論理長から算出する。
+      // ② Row statistics — one row = one workgroup, grid-stride over rows (the live scan is inside
+      // the row loop). It covers only the active rows, so the workgroup count is computed from the
+      // logical length as for ①.
       builder.dispatch({
         key: statsKey,
         pipeline: stats.pipeline,
@@ -935,7 +1001,8 @@ export const buildStateAttention = async (
           stateStatsWorkgroups(dispatchGeometry, query, limit, `${where} ②stats`),
       });
     }
-    // ③PV — 出力は `rowOffset` からの `rowsBlock` 行**全て**（pad 行も full-write）。
+    // ③PV — the output is **all** `rowsBlock` rows from `rowOffset` (pad rows are full-written
+    // too).
     builder.dispatch({
       key: pvKey,
       pipeline: pv.pipeline,
@@ -957,30 +1024,34 @@ export const buildStateAttention = async (
           : statePvWorkgroups(dispatchGeometry, limit, `${where} ③PV`),
     });
 
-    // MUST: 確保の逆順で返す（計画の再生と同じ順）。
+    // MUST: return in reverse allocation order (the same order as the plan's replay).
     if (rowStats !== undefined) builder.releaseTemp(rowStats);
     builder.releaseTemp(scores);
   }
 };
 
 /**
- * **readonly states 形 attention**（ADR 0096 段 2 §1.2 / §2.3 — drafter が貸し手の KV だけを
- * 読む形）。`buildStateAttention` との違いは 4 点だけで、骨格（①QK → ②行統計 → ③PV の
- * 3 dispatch × 行ブロック）は同じ:
+ * **Readonly states-form attention** (ADR 0096 stage 2 §1.2 / §2.3 — the form where the drafter
+ * only reads the lender's KV). It differs from `buildStateAttention` in four points only; the
+ * skeleton (①QK → ② row statistics → ③PV, three dispatches × row blocks) is the same:
  *
- * 1. **ins が q 1 本**（今 step の k/v が無い）— 束縛が 1 本ずつ詰まった別カーネル 3 本
- * 2. `M = 1` 固定（shape 層の MUST）なので行ブロックは常に 1 枚・縮約変種の適用条件を見ない
- *    （①' / ③' が席に依らず**常に**選ばれる — `M=1` は両者の適用条件そのもの）
- * 3. **live の式が違う**（`[P−min(P,W), P)` — 今 step のぶんが足されない）ので ①②③ とも
- *    readonly 専用キー（`:ro`）
- * 4. `states.chunkRows` / `fullCapacities` を**登録しない** — 借り手には `state_append` が
- *    1 本も無く（§1.1）、書かない run に「容量に収まるか」の検査は要らない。full の
- *    `P+Q ≤ C` を借り手でも見ると、貸し手が ring で回している sliding 以外のスロットで
- *    「貸し手では正規な P」が借り手側の run だけ拒否される
+ * 1. **ins is q alone** (no k/v of this step) — three separate kernels whose bindings each shift up
+ *    by one
+ * 2. `M = 1` is fixed (a MUST of the shape layer), so there is always one row block and the
+ *    reduction variants' eligibility conditions are not consulted (①' / ③' are **always** chosen
+ *    whatever the option — `M=1` is exactly their eligibility condition)
+ * 3. **The live formula differs** (`[P−min(P,W), P)` — this step's share is not added), so ①②③ all
+ *    use readonly-only keys (`:ro`)
+ * 4. `states.chunkRows` / `fullCapacities` are **not registered** — the borrower has no
+ *    `state_append` at all (§1.1), and a run that writes nothing needs no "does it fit the
+ *    capacity" check. Checking the full `P+Q ≤ C` on the borrower too would reject, on the
+ *    borrower's run only, a "P that is legitimate for the lender" in the slots other than the
+ *    sliding ones (which the lender cycles as a ring)
  *
- * MUST: `colCap` と行ブロックの割り方は {@link planStateAttention}（見積りと共有する 1 本）
- * だけから引く（states 形と同じ規律）。`M = 1` を渡すので sliding の列容量は `W` ちょうどに
- * なり、readonly の live 上限 `min(P, W)` と一致する。
+ * MUST: `colCap` and the row-block split come only from {@link planStateAttention} (the one
+ * function shared with the estimate) (the same discipline as the states form). It is given
+ * `M = 1`, so the sliding column capacity becomes exactly `W`, matching the readonly live limit
+ * `min(P, W)`.
  */
 export const buildReadonlyStateAttention = async (
   face: RecipeBuildFace,
@@ -992,18 +1063,20 @@ export const buildReadonlyStateAttention = async (
 ): Promise<void> => {
   const q = step.inputShapes[0];
   const where = `attention (readonly) [${q.join(",")}]`;
-  // q は `[B,H,1,D]`（M = 1 は shape 層が保証済み — ADR 0096 段 2 §1.2）。
+  // q is `[B,H,1,D]` (M = 1 is guaranteed by the shape layer — ADR 0096 stage 2 §1.2).
   const [batch, heads, , depth] = q;
   const kSlot = stateSlot(step, "k", states, where);
   const vSlot = stateSlot(step, "v", states, where);
-  // k / v スロットが同形であることは shape 層が済ませている（容量は片方から引けばよい）。
+  // The shape layer has already established that the k / v slots have the same shape (the capacity
+  // can come from either).
   const capacity = kSlot.shape[2];
   const kvRepeat = heads / kSlot.shape[1];
   const gqa = kvRepeat > 1;
   const window = stateWindow(step.node.attrs, where) ?? 0;
   const sliding = stateSliding(window);
   const scale = attentionScale(step.node.attrs, where);
-  // 数値変種 × states 形は fail loudly（`buildStateAttention` と同じ門 — ADR 0058 決定 3）。
+  // Numerics variant × states form fails loudly (the same guard as `buildStateAttention` — ADR 0058
+  // decision 3).
   const variantViolation = stateAttentionVariantViolation(where, "readonly", face.state);
   if (variantViolation !== undefined) throw new ExecutionError(variantViolation);
 
@@ -1036,7 +1109,8 @@ export const buildReadonlyStateAttention = async (
       colCap,
       scale,
     };
-    // ①③ は同じ params 語順（readonly カーネルは states 形と同じ `Params` struct）。
+    // ①③ use the same params word order (the readonly kernels share the states form's `Params`
+    // struct).
     const params = face.writeParams(stateAttentionParams(geometry), PARAMS_UNIFORM_USAGE);
     const dispatchGeometry = {
       batchHeads,
@@ -1048,8 +1122,9 @@ export const buildReadonlyStateAttention = async (
     const scores = builder.allocTemp(block.scoreBytes);
     const rowStats = builder.allocTemp(block.statsBytes);
 
-    // ①'QK(ro) — 束縛は [params, q, slot_k, s, lengths]。**workgroup 数だけが論理長から
-    // 算出**される（`P = 0` は live 0 で列軸が 0 = dispatch そのものが積まれない）。
+    // ①'QK(ro) — bindings are [params, q, slot_k, s, lengths]. **Only the workgroup count is
+    // computed from the logical length** (`P = 0` means live 0 and a column axis of 0 = the
+    // dispatch itself is not recorded).
     builder.dispatch({
       key: qkKey,
       pipeline: qk.pipeline,
@@ -1066,7 +1141,8 @@ export const buildReadonlyStateAttention = async (
         stateQkParallelReadonlyWorkgroups(dispatchGeometry, past, limit, `${where} ①'QK(ro)`),
     });
 
-    // ② 行統計(ro) — 束縛は [params, s, stats, lengths]。行数は `Q = 1` 固定なので静的。
+    // ② Row statistics (ro) — bindings are [params, s, stats, lengths]. The row count is fixed at
+    // `Q = 1`, so it is static.
     builder.dispatch({
       key: statsKey,
       pipeline: stats.pipeline,
@@ -1084,8 +1160,8 @@ export const buildReadonlyStateAttention = async (
       workgroups: stateStatsReadonlyWorkgroups(dispatchGeometry, limit, `${where} ②stats(ro)`),
     });
 
-    // ③'PV(ro) — 束縛は [params, s, stats, slot_v, out, lengths]。出力は行ブロック全体を
-    // full-write（空行 = P 0 は厳密 0）。
+    // ③'PV(ro) — bindings are [params, s, stats, slot_v, out, lengths]. The output full-writes the
+    // whole row block (empty rows = P 0 are exactly 0).
     builder.dispatch({
       key: pvKey,
       pipeline: pv.pipeline,
@@ -1102,18 +1178,20 @@ export const buildReadonlyStateAttention = async (
       workgroups: statePvParallelReadonlyWorkgroups(dispatchGeometry, limit, `${where} ③'PV(ro)`),
     });
 
-    // MUST: 確保の逆順で返す（計画の再生と同じ順）。
+    // MUST: return in reverse allocation order (the same order as the plan's replay).
     builder.releaseTemp(rowStats);
     builder.releaseTemp(scores);
   }
 };
 
 /**
- * `state_append`（今 step の k / v をスロットへ書く単機能 effect op — ADR 0067 決定 5）。
- * **1 ノード = 1 dispatch・出力 0 本**（`StepRecipe.outputs` は空列）。
+ * `state_append` (a single-purpose effect op that writes this step's k / v into the slot — ADR 0067
+ * decision 5).
+ * **One node = one dispatch, zero outputs** (`StepRecipe.outputs` is an empty list).
  *
- * MUST: workgroup 数は `queryLength` から算出する（容量 `C` に比例させない — ADR 0066 決定 3）。
- * 書くのは先頭 `queryLength` 行だけで、pad 行はカーネルの添字空間に入らない。
+ * MUST: the workgroup count is computed from `queryLength` (not proportional to the capacity `C` —
+ * ADR 0066 decision 3).
+ * Only the first `queryLength` rows are written; pad rows are outside the kernel's index space.
  */
 export const buildStateAppend = async (
   face: RecipeBuildFace,
@@ -1157,25 +1235,27 @@ export const buildStateAppend = async (
 };
 
 /**
- * 融合 attention ①QK の **i8a8 変種**（opt-in — {@link SessionOptions.attentionCompute}）の
- * **前段**。① が 1 dispatch から **3 dispatch** に増える（行ブロック n 枚ならノード全体で
- * 2 + 3n）:
+ * The **front stage** of the **i8a8 variant** of fused attention's ①QK (opt-in —
+ * {@link SessionOptions.attentionCompute}). ① grows from one dispatch to **three** (with n row
+ * blocks, 2 + 3n for the whole node):
  *
- * (a) `quantize_rows`（q を per-token i8 へ）→ (b) `quantize_rows`（k を per-token i8 へ）→
- * (c) i8a8 GEMM（整数内積 + dequant — **ブロックごと**に撃つので呼び手が持つ）。
+ * (a) `quantize_rows` (q to per-token i8) → (b) `quantize_rows` (k to per-token i8) →
+ * (c) the i8a8 GEMM (integer dot product + dequant — it runs **per block**, so the caller owns it).
  *
- * 量子化カーネルは linear の w8a8 と**同じ 1 本**（`QUANTIZE_ROWS_KEY` を共有する — 縮約軸
- * D が q / k とも最内連続なので、行 = token の per-token 量子化がそのまま要求どおりの形に
- * なる）。診断では linear の活性量子化と合算されるので、内訳は E2E のキー本数検査で担保する。
+ * The quantization kernel is **the same single kernel** as linear's w8a8 (it shares
+ * `QUANTIZE_ROWS_KEY` — the reduction axis D is innermost-contiguous for both q and k, so per-token
+ * quantization with row = token gives exactly the required form). Diagnostics sum it with linear's
+ * activation quantization, so the breakdown is guaranteed by the E2E key-count check.
  *
- * MUST: (a)(b) とも**行ブロックのループ外**（= 全 M / 全 N を 1 度）。k 側はブロックに
- * 依存しないので枚数倍は純損、q 側は総量こそ変わらないが、ブロックごとに撃つには
- * `quantize_rows` が全 M ストライドの行 gather を要求する（linear と共有の 1 本を触る）。
- * 代わりに (c) が **A 側の行窓**で `qq` / `qs` を全 M ストライドから読む。
- * MUST: 一時バッファ（`qq` / `qs` / `kq` / `ks`）はここで宣言し、**ノード末尾**（呼び手）で
- * 確保の逆順に解放する。
- * NOTE: `D` の i32 縮約の門は呼び手の {@link fusedAttentionViolation} が一時を取る前に見る（見積りと
- * 共有する 1 本）。
+ * MUST: both (a) and (b) run **outside the row-block loop** (= over all M / all N once). The k side
+ * does not depend on the block, so multiplying by the block count is a pure loss; the q side's
+ * total does not change, but running it per block would need `quantize_rows` to gather rows over
+ * the full-M stride (touching the one kernel shared with linear).
+ * Instead (c) reads `qq` / `qs` from the full-M stride through **the A-side row window**.
+ * MUST: the temporary buffers (`qq` / `qs` / `kq` / `ks`) are declared here and released **at the
+ * end of the node** (by the caller) in reverse allocation order.
+ * NOTE: the i32 reduction guard on `D` is checked by the caller's {@link fusedAttentionViolation}
+ * before any temporary is taken (the one function shared with the estimate).
  */
 const prepareAttentionQkI8a8 = async (
   face: RecipeBuildFace,
@@ -1188,17 +1268,19 @@ const prepareAttentionQkI8a8 = async (
   const { batch, rows, cols, depth } = shape;
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
 
-  // 量子化した q / k（i8 を 4 詰め）と per-token scale。ノード内で閉じた一時領域で、
-  // q 側は**行** scale・k 側は**出力列**の scale になる（同じ per-token 量子化の別の読み方）。
-  // 大きさは見積りと共有する式（{@link attentionI8a8TempBytes}）から引く。
+  // The quantized q / k (four i8 packed per word) and the per-token scales. Temporary regions
+  // closed inside the node; the q side's scale is **per row** and the k side's **per output
+  // column** (two readings of the same per-token quantization).
+  // The sizes come from the formula shared with the estimate ({@link attentionI8a8TempBytes}).
   const bytes = attentionI8a8TempBytes(shape).qk;
   const qq = builder.allocTemp(bytes.qq);
   const qs = builder.allocTemp(bytes.qs);
   const kq = builder.allocTemp(bytes.kq);
   const ks = builder.allocTemp(bytes.ks);
 
-  // (a)(b) 活性の per-token 量子化（行方向 grid-stride。D が短いので 1 workgroup に複数行を
-  // 並べて畳む小 D 変種になる — `quantizeRowsGeometry`・perf-ledger P-1）
+  // (a)(b) Per-token quantization of the activations (grid-stride over rows. D is short, so this is
+  // the small-D variant that packs several rows into one workgroup — `quantizeRowsGeometry`,
+  // perf-ledger P-1)
   const quantizeGeometry = quantizeRowsGeometry(depth);
   const quantizeKey = quantizeRowsKey(quantizeGeometry);
   const {
@@ -1229,10 +1311,11 @@ const prepareAttentionQkI8a8 = async (
   quantize(binds[0], qq, qs, batch * rows);
   quantize(binds[1], kq, ks, batch * cols);
 
-  // (c) 整数内積の GEMM（半スケールは dequant 側で q / k の両方へ — 設計 §2.1）。
-  // 幾何は ③PV と**別に**選ぶ（③ だけ N = D の 1 タイル化が勝つ — 実測）。プロファイルの
-  // op 別の欄から引く（src/kernels/geometry-profile.ts）。dispatch はブロックごとなので、
-  // ここでは解決だけして呼び手へ返す。
+  // (c) The integer dot-product GEMM (the half scales go to both q and k on the dequant side —
+  // design §2.1). The geometry is chosen **separately** from ③PV (only ③ wins with a single N = D
+  // tile — measured). It comes from the per-op field of the profile
+  // (src/kernels/geometry-profile.ts). The dispatch is per block, so this only resolves it and
+  // returns it to the caller.
   const v4 = attentionQkI8a8UsesVec4(cols);
   const dp4a = face.state.attentionI8a8Dot === "dp4a";
   const geometry = face.state.geometryProfile.i8a8.attentionQk;
@@ -1245,30 +1328,34 @@ const prepareAttentionQkI8a8 = async (
 };
 
 /**
- * 融合 attention ③PV の **i8a8 変種**（opt-in — {@link SessionOptions.attentionCompute}）の
- * **前段**。③ が 1 dispatch から **3 dispatch** に増える（①も i8a8・行ブロック n 枚なら
- * ノード全体で 4 + 3n）:
+ * The **front stage** of the **i8a8 variant** of fused attention's ③PV (opt-in —
+ * {@link SessionOptions.attentionCompute}). ③ grows from one dispatch to **three** (with ① also
+ * i8a8 and n row blocks, 4 + 3n for the whole node):
  *
- * (a) `strided`（v`[B·H,N,D]` → Vᵀ`[B·H,D,N]` の permute）→ (b) `quantize_rows`
- * （Vᵀ を行 = `(b,h,d)` で量子化）→ (c) i8a8 GEMM（整数内積 + dequant — **ブロックごと**に
- * 撃つので呼び手が持つ）。
+ * (a) `strided` (the permute v`[B·H,N,D]` → Vᵀ`[B·H,D,N]`) → (b) `quantize_rows` (quantize Vᵀ
+ * with row = `(b,h,d)`) → (c) the i8a8 GEMM (integer dot product + dequant — it runs **per block**,
+ * so the caller owns it).
  *
- * **新カーネルを 1 本も作らずに per-column 量子化が得られる**のがこの並びの要点（設計 §2.3）:
- * Vᵀ の「行」は `(b,h,d)` なので `quantize_rows` の per-token 量子化がそのまま
- * **V の per-column（N 全体の amax）scale** になり、同時に dp4a が要求する **N 連続パック**も
- * 手に入る。MUST: V を転置せずに量子化してはならない — scale が縮約軸 n の上で変わり、
- * `f32(acc)·s` 形の前提（s が n に依存しない）が壊れる（例外の出ない誤値）。
+ * The point of this sequence is that **per-column quantization comes without writing a single new
+ * kernel** (design §2.3): Vᵀ's "rows" are `(b,h,d)`, so `quantize_rows`'s per-token quantization
+ * becomes **V's per-column scale (amax over all of N)** as is, and at the same time it yields the
+ * **N-contiguous packing** dp4a requires. MUST: V MUST NOT be quantized without transposing it —
+ * the scale would vary along the reduction axis n and break the premise of the `f32(acc)·s` form
+ * (s independent of n) (a wrong value with no exception).
  *
- * P̃ 側は量子化カーネルを通らない（A タイル充填が `round(127·exp(S−m))` を作る）ので、
- * dispatch も一時バッファも増えない — ②行統計は f32 のまま 1 バイトも変えない。
+ * The P̃ side does not go through the quantization kernel (filling the A tile produces
+ * `round(127·exp(S−m))`), so neither dispatches nor temporary buffers increase — ② row statistics
+ * stay f32 and do not change by a byte.
  *
- * MUST: (a)(b) は**行ブロックのループ外**（Vᵀ は列側 = ブロックに依存しないので、ループへ
- * 入れると permute と量子化が枚数倍になる純粋な性能退行）。ブロック相対なのは S と行統計
- * だけで、(c) は **C 側の行窓**で O の行だけを全 M ストライドへ書く。
- * MUST: 一時バッファ（`vt` / `vq` / `vs`）はここで宣言し、**ノード末尾**（呼び手）で
- * 確保の逆順に解放する。
- * NOTE: `N` の i32 縮約の門（|acc| ≤ N·127²）は呼び手の {@link fusedAttentionViolation} が一時を取る前に
- * 見る（見積りと共有する 1 本）。
+ * MUST: (a)(b) run **outside the row-block loop** (Vᵀ is the column side = independent of the
+ * block, so putting it in the loop would multiply the permute and the quantization by the block
+ * count — a pure performance regression). Only S and row statistics are block-relative, and (c)
+ * writes only O's rows to the full-M stride through **the C-side row window**.
+ * MUST: the temporary buffers (`vt` / `vq` / `vs`) are declared here and released **at the end of
+ * the node** (by the caller) in reverse allocation order.
+ * NOTE: the i32 reduction guard on `N` (|acc| ≤ N·127²) is checked by the caller's
+ * {@link fusedAttentionViolation} before any temporary is taken (the one function shared with the
+ * estimate).
  */
 const prepareAttentionPvI8a8 = async (
   face: RecipeBuildFace,
@@ -1281,16 +1368,18 @@ const prepareAttentionPvI8a8 = async (
   const { batch, cols, depth } = shape;
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
 
-  // Vᵀ（f32・permute の実体化）と、その量子化結果。どれもノード内で閉じた一時領域。
-  // 大きさは見積りと共有する式（{@link attentionI8a8TempBytes}）から引く。
+  // Vᵀ (f32, the materialised permute) and its quantization result. All are temporary regions
+  // closed inside the node.
+  // The sizes come from the formula shared with the estimate ({@link attentionI8a8TempBytes}).
   const bytes = attentionI8a8TempBytes(shape).pv;
   const vt = builder.allocTemp(bytes.vt);
   const vq = builder.allocTemp(bytes.vq);
   const vs = builder.allocTemp(bytes.vs);
 
-  // (a) v[B·H,N,D] → Vᵀ[B·H,D,N]（既存の strided 読みコピー族 — permute そのもの）。
-  // MUST: stride は**入力** `[B·H,N,D]` の連続 stride から組む（出力 shape から組むと
-  // D == N のときだけ一致する。実測形は D != N なので露見するが、単体テストが本来の検出器）。
+  // (a) v[B·H,N,D] → Vᵀ[B·H,D,N] (the existing strided-read copy family — the permute itself).
+  // MUST: build the strides from the contiguous strides of the **input** `[B·H,N,D]` (building them
+  // from the output shape matches only when D == N. The measured shapes have D != N, so it would
+  // show, but the unit test is the proper detector).
   const stridedSpec = { dtype: "f32" } as const;
   const permuteKey = stridedKey(stridedSpec);
   const {
@@ -1314,7 +1403,8 @@ const prepareAttentionPvI8a8 = async (
     workgroups: [gridStrideWorkgroups(batch * depth * cols, STRIDED_WORKGROUP_SIZE, limit), 1, 1],
   });
 
-  // (b) Vᵀ の量子化（行 = (b,h,d)・行長 N — per-column scale と N 連続パックが同時に出る）
+  // (b) Quantize Vᵀ (row = (b,h,d), row length N — the per-column scale and the N-contiguous
+  // packing come out together)
   const quantizeGeometry = quantizeRowsGeometry(cols);
   const quantizeKey = quantizeRowsKey(quantizeGeometry);
   const {
@@ -1336,8 +1426,9 @@ const prepareAttentionPvI8a8 = async (
     workgroups: [gridStrideWorkgroups(batch * depth, quantizeGeometry.rowsPerGroup, limit), 1, 1],
   });
 
-  // (c) 整数内積の GEMM（P̃ は A タイル充填で作る = 非実体化のまま）。幾何はプロファイルの
-  // op 別の欄。dispatch はブロックごとなので、ここでは解決だけして呼び手へ返す。
+  // (c) The integer dot-product GEMM (P̃ is produced by filling the A tile = stays unmaterialised).
+  // The geometry is the per-op field of the profile. The dispatch is per block, so this only
+  // resolves it and returns it to the caller.
   const v4 = attentionPvI8a8UsesVec4(depth);
   const dp4a = face.state.attentionI8a8Dot === "dp4a";
   const geometry = face.state.geometryProfile.i8a8.attentionPv;

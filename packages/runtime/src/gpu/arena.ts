@@ -1,56 +1,64 @@
 /**
- * 実行単位（1 run）のバッファアリーナ。確保した全バッファの**所有**と flush-before-destroy を担う。
+ * The buffer arena of one execution unit (1 run). It **owns** every buffer it allocated and carries
+ * flush-before-destroy.
  *
- * 中間バッファ（ノード出力・ノード内一時）の配置はここでは決めない — 計画（src/runtime/transient-plan.ts
- * の静的 liveness パッキング・ADR 0093）が生存区間から領域バッファの offset を決め、アリーナは
- * その**領域**（{@link RunArena.allocRegion}）を run 寿命で所有するだけ。旧「サイズクラス別プール +
- * 最終消費者解放」（ADR 0004）は ADR 0093 決定 8 で退役した。
+ * The placement of intermediate buffers (node outputs, node-internal temporaries) is not decided
+ * here — the plan (the static liveness packing of src/runtime/transient-plan.ts, ADR 0093) decides
+ * the offsets into region buffers from live intervals, and the arena only owns those **regions**
+ * ({@link RunArena.allocRegion}) for the lifetime of the run. The old "size-class pools + release
+ * at the last consumer" (ADR 0004) was retired by ADR 0093 decision 8.
  *
- * 配り直しの安全性（WebGPU 仕様に依拠）:
- * - compute pass の usage scope は dispatch 単位で、同一キューでは先行 dispatch の書き込みが
- *   後続 dispatch から可視・実行順序も submit 順。計画は「読む dispatch のエンコード後」に生存を
- *   終えた区間のバイトだけを後続へ配るので、read→write の追い越しは起きない。
- * - MUST: `queue.writeBuffer` で書くバッファ（uniform / 入力 / 重み）は領域に入れない。
- *   writeBuffer はキュー順で未 submit の先行エンコードを追い越す。領域に載るのは dispatch が
- *   書く出力ストレージと一時のみ。
- * - MUST: 配り直されたバイトはゼロ初期化されていない（ゼロ保証は新規 createBuffer のみ）。
- *   これに依存しないための不変条件が **full-write**（ADR 0014）: **全ノードは自分の束縛範囲の
- *   全バイトを書く**。1 ノードが複数 dispatch を出す形（cat）でも、ノード単位で全域が覆われる
- *   ことを呼び出し側が担保する。
- *   MUST: 「出力を部分的にしか書かない op のために領域を迂回して新品を配る」経路は**足さない**
- *   （ADR 0014 で却下）。不変条件がカーネル実装の知識に依存し、アリーナ側が op 種別を知る必要が
- *   生じるため。ゼロ埋めが要る op（pad）は、範囲外にも 0 を**書く**カーネルとして実装する。
- *   固定はフォールト注入で行う（tests/gpu_full_write_test.ts — 配り直されたバイトに毒値を書いてから
- *   cat / pad を実行し、出力に毒値が 1 語も残らないことを実 GPU で確かめる）。
+ * Why handing bytes out again is safe (resting on the WebGPU specification):
+ * - The usage scope of a compute pass is per dispatch; on the same queue a preceding dispatch's
+ *   writes are visible to later dispatches, and execution order is submit order. The plan hands
+ *   later intervals only bytes whose live interval ended "after the reading dispatch was encoded",
+ *   so a write never overtakes a read.
+ * - MUST: buffers written by `queue.writeBuffer` (uniforms / inputs / weights) do not go into a
+ *   region. writeBuffer overtakes earlier encodes that are not yet submitted in queue order. Only
+ *   output storage and temporaries written by dispatches go into regions.
+ * - MUST: bytes handed out again are not zero-initialized (zeroing is guaranteed only for a fresh
+ *   createBuffer). The invariant that keeps us from depending on it is **full-write** (ADR 0014):
+ *   **every node writes every byte of its bound range**. Even when one node issues several
+ *   dispatches (cat), the caller ensures that the whole range is covered per node.
+ *   MUST: do **not add** a path that "hands a fresh buffer around the region for ops that write
+ *   only part of their output" (rejected in ADR 0014). It would make the invariant depend on
+ *   knowledge of kernel implementations and force the arena to know op kinds. An op that needs zero
+ *   fill (pad) is implemented as a kernel that **writes** 0 outside the range too.
+ *   This is pinned by fault injection (tests/gpu_full_write_test.ts — writes poison values into the
+ *   bytes handed out again, runs cat / pad, and checks on a real GPU that not one poison word
+ *   remains in the output).
  */
 
 import { BUFFER_USAGE } from "./webgpu-constants.ts";
 
-/** アリーナの使い方の誤り（破棄後の確保・不正サイズ・usage 不足）。 */
+/** Misuse of the arena (allocation after destroy, an invalid size, a missing usage). */
 export class ArenaError extends Error {
   override readonly name = "ArenaError";
 }
 
 /**
- * 出力ストレージの usage。dispatch が書き、必要なら readback のため COPY_SRC を持つ。
- * MUST: transient の領域バッファ（run 寿命も Session 常駐の backing も）と
- * {@link ResidentTensor}（src/gpu/device.ts）も**この定数**で作る。別立てにすると、同じ役割の
- * バッファが 2 つの usage を持つ形になる。
+ * The usage of output storage. Dispatches write it, and it carries COPY_SRC for readback when
+ * needed.
+ * MUST: the transient region buffers (both run-lifetime ones and Session-resident backings) and
+ * {@link ResidentTensor} (src/gpu/context.ts) are also created with **this constant**. A separate
+ * constant would give buffers of the same role two different usages.
  */
 export const STORAGE_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST | BUFFER_USAGE.COPY_SRC;
 
 /**
- * サイズクラスは「4 バイト整列した実バイト数そのもの」とする。
+ * The size class is "the real byte count aligned to 4 bytes", nothing more.
  *
- * MUST: 束縛範囲は要求より大きくしない。runtime-sized array を束縛したときの
- * `arrayLength()` は束縛範囲のバイト数から決まるため、切り上げた大きさを束ねると要素数が
- * 静かに変わり、誤った値が例外なしで出る（領域バッファ自体は大きくてよい — 束縛 `size` を
- * この値で切る。ADR 0093 決定 2）。
- * MUST: 計画（`transient-plan.ts`）も見積り（`estimate.ts`）も**この関数**を使う。サイズクラスの
- * 定義が 2 つに分かれると、slot の大きさが実行時の束縛とずれ、同じ理由で沈黙誤値になる。
- * MUST: 値域は**安全整数**（`Number.isInteger` では足りない）。2^53 を超えた要求は
- * `Math.ceil(bytes / 4) * 4` が端数を落とした別の値を返し、要求より小さいバッファを
- * 「切り上げた」顔で配ってしまう（上の MUST が例外なしに破れる）。
+ * MUST: never make the bound range larger than requested. When a runtime-sized array is bound,
+ * `arrayLength()` is determined by the byte count of the bound range, so binding a rounded-up size
+ * silently changes the element count and wrong values come out without an exception (the region
+ * buffer itself may be larger — the bound `size` is cut to this value. ADR 0093 decision 2).
+ * MUST: the plan (`transient-plan.ts`) and the estimate (`estimate.ts`) both use **this function**.
+ * If the definition of the size class split in two, slot sizes would drift from the bindings at run
+ * time, giving silent wrong values for the same reason.
+ * MUST: the domain is **safe integers** (`Number.isInteger` is not enough). For a request beyond
+ * 2^53, `Math.ceil(bytes / 4) * 4` returns a different value that has dropped the remainder, and a
+ * buffer smaller than requested would be handed out looking "rounded up" (the MUST above breaks
+ * without an exception).
  */
 export const toSizeClass = (bytes: number): number => {
   if (!Number.isSafeInteger(bytes) || bytes < 0) {
@@ -60,36 +68,41 @@ export const toSizeClass = (bytes: number): number => {
 };
 
 /**
- * 1 run の GPU バッファ実績。`allocCount` / `allocatedBytes` はアリーナが createBuffer した実数
- * （領域 + ホスト書き込み + readback staging）。残り 3 欄は計画（ADR 0093）から executor が写す:
- * `reuseCount` = 先住の slot とバイト範囲を共有した slot の本数（`TransientPlan.sharedSlots`）、
- * `peakTransientBytes` = 中間の同時生存バイトの最大（`TransientPlan.peakLiveBytes`）、
- * `transientBytes` = run 末尾に生存している中間 = pin されたグラフ出力の総バイト数。
- * slot backing に乗った run（中間がアリーナを通らない）では 3 欄とも 0（session-types の NOTE）。
+ * GPU buffer figures of one run. `allocCount` / `allocatedBytes` are the real numbers the arena
+ * passed to createBuffer (regions + host writes + readback staging). The other 3 fields are copied
+ * by the executor from the plan (ADR 0093):
+ * `reuseCount` = number of slots that share a byte range with an earlier slot
+ * (`TransientPlan.sharedSlots`), `peakTransientBytes` = the maximum of intermediate bytes live at
+ * once (`TransientPlan.peakLiveBytes`), `transientBytes` = intermediates still live at the end of
+ * the run = total bytes of the pinned graph outputs.
+ * In a run on a slot backing (intermediates do not go through the arena) all 3 fields are 0 (the
+ * NOTE in session-types).
  */
 export type ArenaStats = {
   readonly allocCount: number;
   readonly reuseCount: number;
-  /** 実際に createBuffer したバイト数の合計。 */
+  /** Total bytes actually passed to createBuffer. */
   readonly allocatedBytes: number;
   readonly transientBytes: number;
   readonly peakTransientBytes: number;
 };
 
-/** executor が計画から写す 3 欄（{@link ArenaStats} の残り）。 */
+/** The 3 fields the executor copies from the plan (the rest of {@link ArenaStats}). */
 export type TransientStats = Pick<
   ArenaStats,
   "reuseCount" | "transientBytes" | "peakTransientBytes"
 >;
 
 /**
- * 未 submit のエンコードを**出し切る**手段（`SubmitScheduler.flush` / `submitPending`）。
+ * The means of **draining** encodes that are not yet submitted (`SubmitScheduler.flush` /
+ * `submitPending`).
  *
- * MUST: 戻った時点で未 submit のエンコードが 1 つも残っていないこと。**GPU 完了まで待つかは
- * 注入側の裁量** — {@link RunArena.destroy} が要求するのは「破棄済みバッファを参照する
- * エンコードが submit に残らない」ことだけで、submit 済みコマンドからの参照は WebGPU 的に
- * 安全（実解放は完了まで実装が遅延する）。既定は待つ側（`flush`）で、待ちを別のフェンスへ
- * 集約した経路だけが待たない側を渡す。
+ * MUST: when it returns, not one unsubmitted encode remains. **Whether it waits for GPU completion
+ * is up to the injecting side** — all {@link RunArena.destroy} requires is that "no encode that
+ * refers to a destroyed buffer remains to be submitted"; references from already-submitted commands
+ * are safe in WebGPU terms (the implementation defers the real release until completion). The
+ * default is the waiting side (`flush`); only a path that consolidated its wait onto another fence
+ * passes the non-waiting side.
  */
 export type ArenaFlush = () => Promise<void>;
 
@@ -108,10 +121,11 @@ export class RunArena {
   }
 
   /**
-   * 計画が決めた領域バッファ（中間バッファの実体）を確保する。offset / size で切って束ねるのは
-   * 計画側（src/runtime/recipe.ts）で、アリーナは所有と破棄だけを持つ。
-   * MUST: 確保は当該 run のどの dispatch のエンコードよりも前（ADR 0004 の不変条件 — 計画は
-   * run の先頭で全領域を確保する）。
+   * Allocates a region buffer decided by the plan (the backing of intermediate buffers). Cutting it
+   * by offset / size and binding is done by the plan side (src/runtime/recipe.ts); the arena only
+   * owns and destroys.
+   * MUST: allocate before the encode of any dispatch of the run (the ADR 0004 invariant — the plan
+   * allocates every region at the start of the run).
    */
   allocRegion(bytes: number): GPUBuffer {
     this.#assertUsable();
@@ -123,8 +137,9 @@ export class RunArena {
   }
 
   /**
-   * ホストが `queue.writeBuffer` で書くバッファ（uniform / 入力 / 重み）を確保する。
-   * MUST: この経路のバッファは領域に入れない（冒頭の writeBuffer 追い越しの理由）。
+   * Allocates a buffer the host writes with `queue.writeBuffer` (uniforms / inputs / weights).
+   * MUST: buffers on this path do not go into a region (the writeBuffer overtaking reason in the
+   * header).
    */
   allocHostWritten(bytes: number, usage: number): GPUBuffer {
     this.#assertUsable();
@@ -139,15 +154,18 @@ export class RunArena {
   }
 
   /**
-   * ホストが `mapAsync` で読む staging（`COPY_DST | MAP_READ`）を確保する。
-   * MUST: この経路のバッファも領域外 — MAP_READ は STORAGE と併用できない。
-   * 使い**回さない**（1 回の readback で使い捨て）のは設計判断で、仕様上の不能ではない
-   * （`unmap()` 後の再利用は可能 — 2026-08-29 実 GPU で確認済み）。使い捨てにしておくと
-   * アリーナの一括破棄が後始末の唯一の口になり、失敗経路で `mapAsync` が pending のまま
-   * 残っても次 run に汚染が持ち越されない。それでもアリーナが所有するのは「確保と破棄を
-   * 1 箇所へ」（ADR 0004）— 破棄が flush-before-destroy に自動で乗る。
-   * NOTE: 共有 staging 化（perf-ledger H-9）を採る場合は、失敗経路で pending の staging を
-   * 破棄して作り直す復帰規律が必須（無いと以後の全 readback が OperationError の恒久故障）。
+   * Allocates staging (`COPY_DST | MAP_READ`) the host reads with `mapAsync`.
+   * MUST: buffers on this path are outside the regions too — MAP_READ cannot be combined with
+   * STORAGE.
+   * **Not reusing** them (single use per readback) is a design choice, not something the
+   * specification forbids (reuse after `unmap()` works — confirmed on a real GPU on 2026-08-29).
+   * Single use makes the arena's bulk destroy the only cleanup point, so even if a `mapAsync` is
+   * left pending on a failure path, no contamination carries over to the next run. The arena still
+   * owns them to keep "allocation and destruction in one place" (ADR 0004) — destruction rides on
+   * flush-before-destroy automatically.
+   * NOTE: adopting a shared staging (perf-ledger H-9) requires a recovery discipline that destroys
+   * and recreates a pending staging on the failure path (without it every later readback fails
+   * permanently with OperationError).
    */
   allocHostRead(bytes: number): GPUBuffer {
     this.#assertUsable();
@@ -161,7 +179,10 @@ export class RunArena {
     return buffer;
   }
 
-  /** 計画から写す診断 3 欄を載せる（{@link ArenaStats} の doc — run の中間を領域で回した後に 1 度）。 */
+  /**
+   * Stores the 3 diagnostic fields copied from the plan (doc of {@link ArenaStats} — once, after
+   * the run's intermediates went through the regions).
+   */
   recordTransients(stats: TransientStats): void {
     this.#transients = stats;
   }
@@ -175,29 +196,30 @@ export class RunArena {
   }
 
   /**
-   * 所有する全バッファを破棄する。
+   * Destroys every owned buffer.
    *
-   * MUST: 未 submit のエンコードを片付けてから破棄する（discard-or-flush before destroy）。
-   * ここが待つのは注入された {@link ArenaFlush} の決着だけなので、**捨てる側（失敗経路の
-   * `SubmitScheduler.discard`）は呼び出し側の責務**。破棄済みバッファを参照するエンコードを
-   * submit するとコマンドバッファ丸ごと失敗し、同じスケジューラに相乗りしている無関係な
-   * dispatch まで実行されないまま、誤った値が静かに残る。
+   * MUST: clear unsubmitted encodes before destroying (discard-or-flush before destroy). This
+   * method waits only for the injected {@link ArenaFlush} to settle, so **the discarding side
+   * (`SubmitScheduler.discard` on a failure path) is the caller's responsibility**. Submitting an
+   * encode that refers to a destroyed buffer fails the whole command buffer, and even unrelated
+   * dispatches riding on the same scheduler never run, silently leaving wrong values behind.
    *
-   * NOTE: ここでの破棄は所有の終了。破棄したバッファの VRAM は次の device poll（`onSubmittedWorkDone`
-   * 等）で予算へ返る（B570 の実測 — docs/research/2026-09-27-h35-oom-device-lost.md §5）。device が握る
-   * 全部を返すのは `device.destroy()`。
+   * NOTE: destroying here ends ownership. The VRAM of a destroyed buffer returns to the budget at
+   * the next device poll (`onSubmittedWorkDone` and the like) (measured on the B570 —
+   * docs/research/2026-09-27-h35-oom-device-lost.md §5). Returning everything the device holds is
+   * `device.destroy()`.
    */
   destroy(): Promise<void> {
-    // MUST: 2 度目の destroy も同じ完了を待つ。先行する flush の完了前に返すと、呼び出し側が
-    // 「破棄済み」と誤認したまま次の確保へ進む。
+    // MUST: a second destroy waits for the same completion. Returning before the earlier flush
+    // completes would let the caller move on to the next allocation believing "destroyed".
     this.#destroying ??= this.#destroyOnce();
     return this.#destroying;
   }
 
   async #destroyOnce(): Promise<void> {
-    // MUST: flush が失敗（主因は device 消失）してもバッファ破棄と状態クリアは必ず行う。
-    // ここを飛ばすと 1 本も破棄されないまま `#destroying` が rejected で居座り、再試行も
-    // できなくなる。flush の失敗自体は握り潰さず、後始末を終えてから伝播させる。
+    // MUST: destroy the buffers and clear the state even if the flush fails (mainly device loss).
+    // Skipping this would leave `#destroying` stuck as rejected with not one buffer destroyed, and
+    // no retry possible. The flush failure itself is not swallowed; it propagates after cleanup.
     try {
       await this.#flush();
     } finally {
@@ -209,7 +231,8 @@ export class RunArena {
   }
 
   #assertUsable(): void {
-    // 破棄後の確保は「破棄されないバッファ」を生む（所有リストから漏れる）ので拒否する。
+    // Allocation after destroy creates "a buffer that is never destroyed" (it escapes the owned
+    // list), so it is refused.
     if (this.#destroying !== undefined) {
       throw new ArenaError("破棄済みの RunArena は使えない（run ごとに作り直す）");
     }

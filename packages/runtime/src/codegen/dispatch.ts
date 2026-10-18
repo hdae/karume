@@ -1,19 +1,22 @@
 /**
- * dispatch 数の決め方。1 次元あたりの workgroup 数には上限（仕様既定 65535）があり、
- * 実モデルで実際に超える（16 head × 4096 token = 65536 行）。カーネル族ごとに超過時の
- * 振る舞いが違うため、判断をこの 2 関数に閉じ込める。
+ * How dispatch counts are chosen. The number of workgroups per dimension has a limit (65535 by
+ * default in the spec), and real models do exceed it (16 heads × 4096 tokens = 65536 rows). Kernel
+ * families behave differently when it is exceeded, so the decision is confined to these two
+ * functions.
  */
 
 import { DispatchLimitError } from "./errors.ts";
 
 /**
- * grid-stride カーネルの dispatch 数。上限超過は縮退させる — カーネルが
- * `num_workgroups` から stride を導いて残りを回すため、少ない workgroup でも全域を覆う。
+ * Dispatch count of a grid-stride kernel. Exceeding the limit falls back to fewer workgroups — the
+ * kernel derives the stride from `num_workgroups` and loops over the rest, so fewer workgroups
+ * still cover the whole range.
  *
- * MUST: `items + stride ≤ 2^32`（stride = 返す workgroup 数 × `workgroupSize`）。カーネルは
- * `i = i + stride` を u32 で加算して `i < n` を見るので、超えると末尾の加算が折り返して
- * ループが終わらない（GPU のハングで、例外にならない）。WGSL 側を引き算の終了判定に変えると
- * 全 grid-stride カーネルの WGSL が変わるので、門はここ 1 箇所に置く。
+ * MUST: `items + stride ≤ 2^32` (stride = returned workgroup count × `workgroupSize`). The kernel
+ * adds `i = i + stride` in u32 and tests `i < n`, so beyond that the last addition wraps around and
+ * the loop never ends (a GPU hang, not an exception). Switching the WGSL side to a
+ * subtraction-based termination test would change the WGSL of every grid-stride kernel, so the
+ * check lives here in one place.
  */
 export const gridStrideWorkgroups = (
   items: number,
@@ -31,9 +34,9 @@ export const gridStrideWorkgroups = (
 };
 
 /**
- * 1 workgroup = 1 タイルで全域を覆うカーネル（matmul）の dispatch 数。
- * MUST: 上限超過は fail loudly — 縮退させるとタイルが欠落し、例外なしに出力の一部が
- * 未書き込み（配り直しなら前の値）のまま残る。
+ * Dispatch count of a kernel that covers the whole range with one workgroup = one tile (matmul).
+ * MUST: exceeding the limit fails loudly — a fallback would drop tiles, and part of the output
+ * would stay unwritten (or keep the previous value when the buffer is reused) without an exception.
  */
 export const tiledWorkgroups = (
   items: number,

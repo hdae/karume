@@ -1,20 +1,21 @@
 /**
- * elementwise（unary / binary / where / cast）カーネルの WGSL 生成。
+ * WGSL generation for elementwise kernels (unary / binary / where / cast).
  *
- * MUST: 生成は決定的 — 同一キーからバイト単位で同一の WGSL が出ること。ブラウザの暗黙
- * パイプラインキャッシュのキーは WGSL 文字列そのもので明示的な制御 API が無いため、
- * ゆらぐと同じキーに別カーネルが割り当たる。キーと WGSL は同じ正準化（{@link canonicalize}）
- * から組み立て、生成入力が同じなら両者が必ず同時に決まるようにする。
- * MUST: **要素型はキーに含める**（ADR 0009）。同じ op・同じ rank でも要素型が違えば別カーネル
- * で、載せないと i32 の dispatch に f32 のパイプラインが割り当たり、ビット列の読み替えが
- * 例外なしに通る。
- * MUST: grid-stride ループ前提。1 次元の dispatch 上限（仕様既定 65535）は実モデルで超える。
+ * MUST: generation is deterministic — the same key gives byte-identical WGSL. The key of the
+ * browser's implicit pipeline cache is the WGSL string itself and there is no explicit control API,
+ * so any wobble assigns another kernel to the same key. Key and WGSL are built from the same
+ * canonicalization ({@link canonicalize}), so the same generation input always fixes both at once.
+ * MUST: **the element type is part of the key** (ADR 0009). The same op at the same rank is a
+ * different kernel for a different element type; without it in the key an f32 pipeline is assigned
+ * to an i32 dispatch and the bit pattern is reinterpreted without an exception.
+ * MUST: grid-stride loops are assumed. Real models exceed the per-dimension dispatch limit (65535 by
+ * default in the spec).
  *
- * 出力は連続レイアウト、各入力は「右詰め broadcast 済みの stride」で読む（1 の次元は
- * stride 0）。shape は params バッファで渡すので、同じ rank ならパイプラインを使い回せる。
- * attrs のスカラ（clamp の min/max・clamp_min の min・leaky_relu の slope・比較の value）も
- * **params の末尾**で運ぶ — WGSL に焼くと値の種類だけパイプラインが増える
- * （src/kernels/masked-fill.ts と同じ規律）。
+ * The output is a contiguous layout; each input is read through "right-aligned broadcast strides"
+ * (stride 0 for a dimension of 1). The shape is passed in the params buffer, so a pipeline is
+ * reused for the same rank. The attrs scalars (clamp's min/max, clamp_min's min, leaky_relu's slope,
+ * the comparison value) also travel **at the end of params** — baking them into the WGSL would add a
+ * pipeline per value (the same discipline as src/kernels/masked-fill.ts).
  */
 
 import type { IrDtype } from "../format/ir.ts";
@@ -45,36 +46,37 @@ export const ELEMENTWISE_WORKGROUP_SIZE = 256;
 export type ElementwiseSpec =
   | {
       readonly op: UnaryOpName | BinaryOpName | typeof WHERE_OP;
-      /** 出力 rank。1 以上（rank 0 のスカラは呼び出し側が rank 1・長さ 1 に正規化する）。 */
+      /** Output rank. At least 1 (the caller normalizes a rank-0 scalar to rank 1, length 1). */
       readonly rank: number;
       /**
-       * **値スロット**の意味論 dtype。出力 dtype は契約表の写像で決まる（比較 op は bool）。
-       * where の条件スロットは常に bool なので、ここに載るのは値の側だけ。
+       * Semantic dtype of the **value slots**. The output dtype follows from the contract table's
+       * mapping (bool for comparison ops). where's condition slot is always bool, so only the value
+       * side goes here.
        */
       readonly dtype: IrDtype;
     }
   | {
       readonly op: typeof CAST_OP;
       readonly rank: number;
-      /** 変換元の意味論 dtype。 */
+      /** Semantic dtype converted from. */
       readonly dtype: IrDtype;
-      /** 変換先の意味論 dtype。 */
+      /** Semantic dtype converted to. */
       readonly to: IrDtype;
     };
 
 /**
- * 正準化の結果は kind で判別可能なユニオン。op 名の型は kind で確定するので、
- * 生成側が `op as UnaryOpName` のような取り違えの効かないキャストを書かずに済む
- * （ops.ts の OpContract と同じ方針）。`arity` は入力の個数。
+ * The canonicalization result is a union discriminated by kind. The type of the op name is fixed
+ * by kind, so the generator does not have to write an unchecked cast such as `op as UnaryOpName`
+ * (the same approach as OpContract in ops.ts). `arity` is the number of inputs.
  */
 type CanonicalSpec = {
   readonly rank: number;
-  /** 値スロットの dtype（キーに載る側）。 */
+  /** dtype of the value slots (the side that goes into the key). */
   readonly from: IrDtype;
   readonly to: IrDtype;
-  /** 入力スロットごとの要素型（bindings の `array<T>` に埋まる）。 */
+  /** Element type of each input slot (baked into the bindings' `array<T>`). */
   readonly slots: readonly IrDtype[];
-  /** params 末尾に載る f32 スカラの本数。 */
+  /** Number of f32 scalars at the end of params. */
   readonly scalars: number;
 } & (
   | { readonly kind: "unary"; readonly op: UnaryOpName; readonly arity: 1 }
@@ -87,10 +89,11 @@ const isUnary = (op: string): op is UnaryOpName => UNARY_OPS.some((name) => name
 const isBinary = (op: string): op is BinaryOpName => BINARY_OPS.some((name) => name === op);
 
 /**
- * 生成入力の dtype は契約表で照合する（表を写すと解禁範囲が 2 箇所に割れる）。
+ * The dtype of the generation input is checked against the contract table (copying the table would
+ * split the allowed range into two places).
  *
- * MUST: 受理集合の**和**ではなくスロット単位で見る。where の和は {bool, f32} なので、
- * 和で見ると条件用の bool が値スロットの生成入力として素通りする。
+ * MUST: check per slot, not against the **union** of accepted sets. where's union is {bool, f32},
+ * so checking the union lets the condition's bool pass as a value-slot generation input.
  */
 const assertSlotDtype = (op: string, slot: number, dtype: IrDtype): void => {
   const accept = slotDtypesOf(resolveOpContract(op))[slot];
@@ -101,7 +104,10 @@ const assertSlotDtype = (op: string, slot: number, dtype: IrDtype): void => {
   }
 };
 
-/** 出力 dtype は契約表の写像から取る（codegen が独自に決めない）— elementwise は単一出力。 */
+/**
+ * The output dtype comes from the contract table's mapping (codegen does not decide it on its own)
+ * — elementwise has a single output.
+ */
 const outputDtype = (op: string, slotZeroDtype: IrDtype): IrDtype =>
   outputDtypeOf(resolveOpContract(op), 0, slotZeroDtype, "elementwise codegen");
 
@@ -125,7 +131,8 @@ const canonicalize = (spec: ElementwiseSpec): CanonicalSpec => {
     };
   }
   if (op === WHERE_OP) {
-    // スロット 0 は条件（bool 固定）、1 / 2 が値。生成入力の dtype は値の側。
+    // Slot 0 is the condition (always bool), 1 / 2 are the values. The generation input's dtype
+    // is the value side.
     assertSlotDtype(op, 1, dtype);
     return {
       kind: "where",
@@ -167,14 +174,14 @@ const canonicalize = (spec: ElementwiseSpec): CanonicalSpec => {
   throw new CodegenError(`elementwise codegen: op '${op}' は elementwise 語彙に無い`);
 };
 
-/** 意味論 dtype → WGSL のスカラ型。bool の格納は u32 の 0 / 1（ADR 0009）。 */
+/** Semantic dtype → WGSL scalar type. A bool is stored as u32 0 / 1 (ADR 0009). */
 const WGSL_SCALAR: Readonly<Record<IrDtype, string>> = {
   f32: "f32",
   i32: "i32",
   bool: "u32",
 };
 
-/** dtype ごとのゼロ値リテラル（`!= 0` の真偽化で使う）。 */
+/** Zero literal per dtype (used for the `!= 0` truth test). */
 const WGSL_ZERO: Readonly<Record<IrDtype, string>> = {
   f32: "0.0",
   i32: "0",
@@ -182,18 +189,20 @@ const WGSL_ZERO: Readonly<Record<IrDtype, string>> = {
 };
 
 /**
- * Abramowitz–Stegun 7.1.26。WGSL に erf 組込は無い。
- * gelu は torch 既定の `approximate="none"`（erf 形）を実装するため必要になる。
- * CPU 参照は別式（Chebyshev fit）で erf を出す — 同じ近似式を写すと誤差が相殺して
- * テストが恒真化するため。
+ * Abramowitz–Stegun 7.1.26. WGSL has no built-in erf.
+ * gelu needs it because it implements torch's default `approximate="none"` (the erf form).
+ * The CPU reference computes erf with a different formula (a Chebyshev fit) — copying the same
+ * approximation would cancel the error and make the test vacuous.
  *
- * 誤差の勘定（3 層 — 混同しない）: ①近似式そのものの理論値 ≈1.4e-7（倍精度評価・
- * x≈0.045 で最大）②この f32 Horner + exp を f32 逐次丸めで評価した実測 ≈5.3e-7
- * （x≈0.035 で最大 — CPU の f32 エミュ掃引 2026-08-31）③WGSL 仕様の exp は 3+2|x| ULP まで
- * 許すので、仕様準拠実装の上界はさらに上（a→0 で寄与 ≈3.6e-7）。「1.5e-7」を shader の
- * 保証値として引用しない。gelu 全体では最大絶対 ≈6.8e-7（|gelu|≈4.2 で ≈1.4 ULP）だが、
- * 負側テール（x≈−3.4）は桁落ちで**相対**誤差 ≈2.2e-4 — op 別 tolerance を相対帯で切ると
- * ここが偽陽性になる。
+ * Error accounting (three layers — do not mix them up): (1) the approximation's own theoretical
+ * error ≈1.4e-7 (evaluated in double precision, largest at x≈0.045); (2) this f32 Horner + exp
+ * evaluated with f32 rounding at every step, measured ≈5.3e-7 (largest at x≈0.035 — CPU f32
+ * emulation sweep 2026-08-31); (3) the WGSL spec allows exp up to 3+2|x| ULP, so the bound for a
+ * spec-conforming implementation is higher still (contribution ≈3.6e-7 as a→0). Do not quote
+ * "1.5e-7" as the shader's guaranteed value. For gelu as a whole the maximum absolute error is
+ * ≈6.8e-7 (≈1.4 ULP at |gelu|≈4.2), but the negative tail (x≈−3.4) loses digits and has a
+ * **relative** error of ≈2.2e-4 — a per-op tolerance cut as a relative band gives false positives
+ * here.
  */
 const ERF_FN = `fn erf_approx(x: f32) -> f32 {
   let s = sign(x);
@@ -207,15 +216,18 @@ const ERF_FN = `fn erf_approx(x: f32) -> f32 {
   return s * (1.0 - p * t * exp(-a * a));
 }`;
 
-/** 級数に切り替える範囲（`|x| < LOG1P_SERIES_THRESHOLD`）。根拠は {@link LOG1P_FN} の doc。 */
+/**
+ * The range that switches to the series (`|x| < LOG1P_SERIES_THRESHOLD`). Rationale in the doc of
+ * {@link LOG1P_FN}.
+ */
 const LOG1P_SERIES_THRESHOLD = 0.25;
-/** マクローリン級数の項数（`x^1 … x^n`）。 */
+/** Number of terms of the Maclaurin series (`x^1 … x^n`). */
 const LOG1P_SERIES_TERMS = 10;
 
 /**
- * `log1p` のマクローリン級数を Horner 形 `x·(1 − x·(1/2 − x·(… ∓ x/n)))` で組み立てる。
- * 係数は `1/k` そのものなので、項数を変えれば式全体が決定的に決まる（手書きの係数表を
- * 持たない = 打ち間違いが構造的に起きない）。
+ * Builds the Maclaurin series of `log1p` in Horner form `x·(1 − x·(1/2 − x·(… ∓ x/n)))`.
+ * The coefficients are `1/k` themselves, so the term count alone determines the whole expression
+ * (no hand-written coefficient table = typos cannot happen by construction).
  */
 const log1pSeries = (): string => {
   let expr = f32Literal(1 / LOG1P_SERIES_TERMS);
@@ -226,46 +238,51 @@ const log1pSeries = (): string => {
 };
 
 /**
- * log1p（WGSL に組込が無い）。**|x| が小さい側は級数、大きい側は `log(1+x)`**。
+ * log1p (WGSL has no built-in). **The series for small |x|, `log(1+x)` for large |x|**.
  *
- * MUST: 全域を `log(1 + x)` で済ませない。f32 では x = 1e-8 の `1 + x` が厳密に 1.0 になり
- * 答えが 0（相対誤差 1.0）になるうえ、WGSL の `log` は仕様上 [0.5, 2.0] の範囲で
- * **絶対**誤差までしか保証しない（相対誤差ではない）ため、x が小さいほど当てにならない。
- * 実測（本リポジトリの検証環境）でも `log(1 + 1e-7)` は真値の約 1.94 倍だった。
+ * MUST: do not use `log(1 + x)` over the whole range. In f32, `1 + x` at x = 1e-8 is exactly 1.0
+ * and the answer is 0 (relative error 1.0); moreover the WGSL spec guarantees `log` only up to an
+ * **absolute** error on [0.5, 2.0] (not a relative error), so the smaller x is, the less it can be
+ * trusted. Measured on this repository's verification environment, `log(1 + 1e-7)` was about 1.94
+ * times the true value.
  *
- * MUST: `u = fl(1+x)` の丸め残差を `d = u − 1` で取り出す古典的な補正
- * （`log(u)·x/d`）を使わない。**シェーダコンパイラが `(1.0 + x) - 1.0` を代数的に `x` へ
- * 畳む**ことを実測で確認しており（d が常に x と一致した）、補正項が恒等 1 になって素朴形に
- * 退化する。WGSL には演算の再結合を禁じる手段が無いので、この手筋は表現できない。
+ * MUST: do not use the classic correction that extracts the rounding residual of `u = fl(1+x)` as
+ * `d = u − 1` (`log(u)·x/d`). Measurement confirmed that **the shader compiler folds
+ * `(1.0 + x) - 1.0` algebraically into `x`** (d always equalled x), so the correction factor becomes
+ * identically 1 and degenerates to the naive form. WGSL has no way to forbid reassociation, so this
+ * technique cannot be expressed.
  *
- * 打ち切り誤差の上界: 項数 n・|x| ≤ a で相対誤差 ≈ `a^n/(n+1)`。a = 0.25 / n = 10 なら
- * 8.7e-8 で f32 の eps（1.19e-7）より下。切り替え点より上は `log` の精度がそのまま出る
- * （a を上げると級数の項数が要り、下げると `log` 側の相対誤差が増える — 両者が釣り合う
- * あたりを取っている）。**実測の最悪相対誤差は 2.7e-7（x = 0.2501、log 側）**で、素朴形の
- * 1.0（x = 1e-8）とは 6 桁以上離れている。乖離は tests/gpu_ops_test.ts が CPU 参照
- * （`Math.log1p`）との突合で常設固定する。
+ * Bound of the truncation error: with n terms and |x| ≤ a the relative error is ≈ `a^n/(n+1)`.
+ * a = 0.25 / n = 10 gives 8.7e-8, below the f32 eps (1.19e-7). Above the switch point the
+ * precision of `log` shows as is (raising a needs more series terms, lowering it increases the
+ * relative error on the `log` side — the threshold sits about where the two balance). **The
+ * measured worst relative error is 2.7e-7 (x = 0.2501, log side)**, more than six orders of
+ * magnitude away from the naive form's 1.0 (x = 1e-8). tests/gpu_ops_test.ts pins the deviation by
+ * comparing against the CPU reference (`Math.log1p`).
  *
- * NOTE: 定義域は x > −1（softplus 分解形の実引数 `exp(scaled)` は常に正）。x < −1 は
- * `log` の負引数で WGSL 的に indeterminate — torch も NaN なので黙って近似はしない。
+ * NOTE: the domain is x > −1 (the actual argument `exp(scaled)` of the softplus decomposition is
+ * always positive). x < −1 is a negative argument to `log`, indeterminate in WGSL — torch gives NaN
+ * too, so nothing is silently approximated.
  */
 const LOG1P_FN = `fn log1p_series(x: f32) -> f32 {
-  // 係数は 1/k（Horner 形）。切り替え点より外は log(1+x) をそのまま使う。
+  // The coefficients are 1/k (Horner form). Outside the switch point, log(1+x) is used as is.
   let series = ${log1pSeries()};
   return select(log(1.0 + x), series, abs(x) < ${f32Literal(LOG1P_SERIES_THRESHOLD)});
 }`;
 
 /**
- * 単項の値式。第 2 引数は params 末尾のスカラ（{@link SCALAR_PARAM_ATTRS} の並び）を指す
- * WGSL 名を返す。
+ * Unary value expressions. The second argument returns the WGSL name of a scalar at the end of
+ * params (in the order of {@link SCALAR_PARAM_ATTRS}).
  *
- * MUST: `clamp` / `clamp_min` / `relu` は {@link nanGuard} で包む。torch は 3 つとも
- * NaN を伝播するが、素の式は畳み込みで NaN を飲む（機序は {@link IS_NAN_BITS_WGSL}）。
- * MUST: `clamp` は組込の `clamp(x, lo, hi)` を使わない。`lo > hi` の結果が indeterminate
- * である（契約側で min <= max を拒否してはいる）。
- * MUST: `leaky_relu` は `max` / `min` を使わず **select 形**（ADR 0015）。`relu(x) + s·min(x, 0)`
- * のような書き方は `min` が NaN を飲んで伝播が壊れる。select 形は比較が false へ落ちて
- * `s · NaN = NaN` を返すため、**両方の枝に x が現れる**この形だけは畳まれても NaN が残る
- * （tests/gpu_ops_test.ts が実 GPU で固定）。
+ * MUST: `clamp` / `clamp_min` / `relu` are wrapped in {@link nanGuard}. torch propagates NaN in
+ * all three, but the plain expressions swallow NaN through folding (mechanism in
+ * {@link IS_NAN_BITS_WGSL}).
+ * MUST: `clamp` does not use the built-in `clamp(x, lo, hi)`. Its result for `lo > hi` is
+ * indeterminate (although the contract side rejects anything but min <= max).
+ * MUST: `leaky_relu` uses **the select form**, not `max` / `min` (ADR 0015). A form such as
+ * `relu(x) + s·min(x, 0)` breaks propagation because `min` swallows NaN. In the select form the
+ * comparison falls to false and returns `s · NaN = NaN`, so **with x in both branches** this form
+ * alone keeps NaN even when folded (pinned on a real GPU by tests/gpu_ops_test.ts).
  */
 const UNARY_WGSL: Readonly<
   Record<UnaryOpName, (a: string, scalar: (index: number) => string) => string>
@@ -277,32 +294,37 @@ const UNARY_WGSL: Readonly<
   log1p: (a) => `log1p_series(${a})`,
   sqrt: (a) => `sqrt(${a})`,
   sin: (a) => `sin(${a})`,
-  // MUST: 組込 `tanh` の素通しにしない（機序と閾値は {@link TANH_STABLE_WGSL}）。この op は
-  // logits softcap（`div` → `tanh` → `mul`）の内側でも踏むので、gelu_tanh と同じ穴が空く。
+  // MUST: do not pass straight through to the built-in `tanh` (mechanism and threshold in
+  // {@link TANH_STABLE_WGSL}). This op also runs inside the logits softcap
+  // (`div` → `tanh` → `mul`), so it would open the same hole as gelu_tanh.
   tanh: (a) => `tanh_stable(${a})`,
   sigmoid: (a) => `sigmoid_stable(${a})`,
   relu: (a) => nanGuard(a, `max(${a}, 0.0)`),
   // 0.7071067811865476 = 1/√2
   gelu: (a) => `0.5 * ${a} * (1.0 + erf_approx(${a} * 0.7071067811865476))`,
-  // torch の approximate="tanh"。0.7978845608028654 = √(2/π)。式そのものが定義なので
-  // （erf 形と違い）近似の精度を上げる余地は無い。
-  // MUST: 内側は {@link TANH_STABLE_WGSL} を通す。素の `tanh` だと 3 次項が効いて
-  // 前活性 x ≳ 10.05 で内側引数が 44.36 を超え、exp 経由実装が沈黙 NaN を返す。
-  // NaN の外殻（{@link nanGuard}）は式全体には掛けない — 外側に因子 `x` が残るので
-  // `0.5 · NaN · (…)` が NaN のままで、伝播は畳み込みの有無に依らない（erf 形の gelu と同じ扱い）。
+  // torch's approximate="tanh". 0.7978845608028654 = √(2/π). The expression itself is the
+  // definition, so (unlike the erf form) there is no room to make the approximation more precise.
+  // MUST: the inner part goes through {@link TANH_STABLE_WGSL}. With the plain `tanh`, the cubic
+  // term pushes the inner argument past 44.36 at a pre-activation x ≳ 10.05, and an exp-based
+  // implementation returns a silent NaN.
+  // The NaN shell ({@link nanGuard}) is not applied to the whole expression — the factor `x` stays
+  // outside, so `0.5 · NaN · (…)` stays NaN and propagation does not depend on folding (the same
+  // treatment as the erf-form gelu).
   gelu_tanh: (a) =>
     `0.5 * ${a} * (1.0 + tanh_stable(0.7978845608028654 * (${a} + 0.044715 * ${a} * ${a} * ${a})))`,
-  // bool は u32 の 0 / 1。`1u - x` にすると格納規約が破れたときに 0/1 の外へ出る。
+  // A bool is u32 0 / 1. `1u - x` would leave 0/1 when the storage convention is broken.
   bitwise_not: (a) => `select(1u, 0u, ${a} != 0u)`,
   clamp: (a, scalar) =>
     nanGuard(
       a,
       `select(select(${a}, ${scalar(0)}, ${a} < ${scalar(0)}), ${scalar(1)}, ${a} > ${scalar(1)})`,
     ),
-  // ADR 0017 の裁定どおり select 形（`max(x, m)` は WGSL が NaN 伝播を保証しない）。
-  // NOTE: 「2 段 select なら NaN が伝播する」という ADR 0015 / op-vocabulary.md の当初の
-  // 見立ては実測で否定された（畳み込みで `max` に化ける — {@link IS_NAN_BITS_WGSL}）。
-  // 伝播を担うのは select の形ではなく、外殻のビット列判定だけ。
+  // The select form, as ruled in ADR 0017 (WGSL does not guarantee NaN propagation for
+  // `max(x, m)`).
+  // NOTE: the original assessment of ADR 0015 / op-vocabulary.md that "a two-step select
+  // propagates NaN" was refuted by measurement (folding turns it into `max` —
+  // {@link IS_NAN_BITS_WGSL}). Propagation is carried only by the shell's bit-pattern check, not
+  // by the shape of the select.
   clamp_min: (a, scalar) => nanGuard(a, `select(${a}, ${scalar(0)}, ${a} < ${scalar(0)})`),
   leaky_relu: (a, scalar) => `select(${scalar(0)} * ${a}, ${a}, ${a} >= 0.0)`,
   ge_scalar: (a, scalar) => `select(0u, 1u, ${a} >= ${scalar(0)})`,
@@ -316,18 +338,22 @@ const BINARY_WGSL: Readonly<Record<BinaryOpName, (a: string, b: string) => strin
   mul: (a, b) => `${a} * ${b}`,
   div: (a, b) => `${a} / ${b}`,
   ge: (a, b) => `select(0u, 1u, ${a} >= ${b})`,
-  // 格納規約（0 / 1）が破れても真偽の論理積になる形。`a & b` はビット演算なのでそうならない。
+  // A form that stays a logical AND of truth values even when the storage convention (0 / 1) is
+  // broken. `a & b` is a bitwise operation, so it would not.
   bitwise_and: (a, b) => `select(0u, 1u, (${a} != 0u) && (${b} != 0u))`,
 };
 
 /**
- * cast の値式。bool への変換だけは `x != 0` の真偽化で、それ以外は WGSL の型変換
- * （`i32(f32)` は仕様上 0 方向切り捨て = torch の truncate と一致）。
+ * The value expression of cast. Only the conversion to bool is the `x != 0` truth test; everything
+ * else is a WGSL type conversion (`i32(f32)` truncates toward 0 by spec = matches torch's truncate).
  */
 const castWgsl = (a: string, from: IrDtype, to: IrDtype): string =>
   to === "bool" ? `select(0u, 1u, ${a} != ${WGSL_ZERO[from]})` : `${WGSL_SCALAR[to]}(${a})`;
 
-/** 補助関数の注入順は固定（式の出現順にしない）— 同一キー → バイト同一 WGSL のため。 */
+/**
+ * The injection order of helper functions is fixed (not the order they appear in the expression)
+ * — for same key → byte-identical WGSL.
+ */
 const HELPERS: readonly (readonly [string, string])[] = [
   ["erf_approx", ERF_FN],
   ["is_nan_bits", IS_NAN_BITS_WGSL],
@@ -337,13 +363,14 @@ const HELPERS: readonly (readonly [string, string])[] = [
 ];
 
 /**
- * 値式が呼ぶ補助関数を、**補助関数どうしの依存も閉じて**選ぶ（`tanh_stable` が
- * `is_nan_bits` を呼ぶ）。
+ * Selects the helper functions the value expression calls, **closing over the dependencies between
+ * helpers too** (`tanh_stable` calls `is_nan_bits`).
  *
- * MUST: 依存表を手で持たない。本文の字面が正本で、別に持つ表は被参照側を足したり外したり
- * するたびに黙って腐る。値式の字面だけで絞ると、呼ばれている側が未定義のまま残った WGSL が
- * 出る（コンパイル時に落ちるので沈黙誤値にはならないが、生成の入口で塞ぐ）。
- * 返す順は {@link HELPERS} の並びのままで、選び方は順序に影響しない。
+ * MUST: do not keep a dependency table by hand. The text of the bodies is the source of truth; a
+ * separate table silently rots every time a callee is added or removed. Filtering by the value
+ * expression's text alone emits WGSL in which a callee is left undefined (it fails at compile time,
+ * so it is not a silent wrong value, but it is blocked at the generation entry).
+ * The returned order is that of {@link HELPERS}; the selection does not affect the order.
  */
 const usedHelpers = (value: string): readonly string[] => {
   const selected = new Set<string>();
@@ -361,18 +388,22 @@ const usedHelpers = (value: string): readonly string[] => {
 };
 
 /**
- * MUST: WGSL に埋まる生成パラメータは全てキーに載せる。workgroup サイズは
- * `@workgroup_size` と grid-stride の stride 式に埋め込まれるため、載せずに定数を変えると
- * 旧サイズでコンパイル済みのパイプラインが同じキーで再利用され、dispatch 数と食い違う。
- * 要素型も同じ理由でキーに載せる（bindings の `array<T>` に埋まる）。
+ * MUST: every generation parameter baked into the WGSL goes into the key. The workgroup size is
+ * baked into `@workgroup_size` and the grid-stride stride expression, so changing the constant
+ * without it in the key reuses a pipeline compiled with the old size under the same key, out of
+ * step with the dispatch count. The element type goes into the key for the same reason (it is baked
+ * into the bindings' `array<T>`).
  *
- * NOTE: 載るのは**値スロットの dtype と出力 dtype**だけで足りる。条件スロット（where の
- * bool）とスカラの本数は op 名から一意に決まるため、独立した軸にならない。
+ * NOTE: **the value slots' dtype and the output dtype** are all the key needs. The condition slot
+ * (where's bool) and the scalar count follow uniquely from the op name, so they are not independent
+ * axes.
  *
- * v2: clamp / clamp_min / relu に NaN 伝播の外殻が入り WGSL 本文が変わった（IS_NAN_BITS_WGSL）。
- * v3: tanh / gelu_tanh が飽和打ち切りを通るようになった（{@link TANH_STABLE_WGSL}）。
- * 版は **族ごと**に上げる（ADR 0020 決定 3）— op 別の例外表を持つと、次の改版で「どの op が
- * 今どの版か」を二重管理することになる（他の op はキーが変わるだけで生成物は同一）。
+ * v2: clamp / clamp_min / relu gained the NaN-propagating shell and their WGSL body changed
+ * (IS_NAN_BITS_WGSL).
+ * v3: tanh / gelu_tanh now go through the saturation clipping ({@link TANH_STABLE_WGSL}).
+ * The version is bumped **per family** (ADR 0020 decision 3) — a per-op exception table would mean
+ * tracking "which op is at which version now" twice at the next bump (the other ops only change
+ * their key; their generated code is identical).
  */
 export const elementwiseKey = (spec: ElementwiseSpec): string => {
   const { op, rank, from, to } = canonicalize(spec);
@@ -380,11 +411,11 @@ export const elementwiseKey = (spec: ElementwiseSpec): string => {
 };
 
 /**
- * params のレイアウト（storage, u32 配列）:
- * `[0]=要素数 n, [1..rank]=出力 dims, 続けて入力ごとに rank 本の stride, 末尾に
- * スカラ attr を f32 のビット列で（{@link SCALAR_PARAM_ATTRS} の並び）`。
- * uniform ではなく storage で渡すのは、この族に workgroupBarrier が無く
- * 一様性解析の制約を受けないため（barrier を持つ reduce / matmul は uniform を使う）。
+ * The params layout (storage, a u32 array):
+ * `[0]=element count n, [1..rank]=output dims, then rank strides per input, and at the end the
+ * scalar attrs as f32 bit patterns (in the order of {@link SCALAR_PARAM_ATTRS})`.
+ * It is passed as storage rather than uniform because this family has no workgroupBarrier and is
+ * not constrained by the uniformity analysis (reduce / matmul, which have barriers, use uniform).
  */
 export const elementwiseWgsl = (spec: ElementwiseSpec): string => {
   const canonical = canonicalize(spec);
@@ -414,7 +445,7 @@ export const elementwiseWgsl = (spec: ElementwiseSpec): string => {
     loads.push(`    let v${k} = in${k}[${terms.join(" + ")}];`);
   }
 
-  // スカラは要素ごとに読み直さず、ループの外で 1 度だけ名前に束ねる。
+  // Scalars are not re-read per element; they are bound to names once, outside the loop.
   const constants = Array.from(
     { length: scalars },
     (_, index) => `  let s${index} = bitcast<f32>(params[${scalarAt(index)}u]);`,
@@ -428,7 +459,7 @@ export const elementwiseWgsl = (spec: ElementwiseSpec): string => {
         ? UNARY_WGSL[canonical.op]("v0", scalarName)
         : canonical.kind === "binary"
           ? BINARY_WGSL[canonical.op]("v0", "v1")
-          : // torch の where(cond, a, b) = cond ? a : b。WGSL の select(f, t, cond) は引数順が逆。
+          : // torch's where(cond, a, b) = cond ? a : b. WGSL's select(f, t, cond) takes them reversed.
             `select(v2, v1, v0 != 0u)`;
   const used = usedHelpers(value);
 
@@ -457,7 +488,7 @@ export const elementwiseWgsl = (spec: ElementwiseSpec): string => {
   ].join("\n");
 };
 
-/** 右詰めで rank に揃えた shape（不足ぶんは 1 で埋める）。 */
+/** The shape right-aligned to rank (the missing part padded with 1). */
 const padShape = (shape: readonly number[], rank: number): number[] => {
   if (shape.length > rank) {
     throw new CodegenError(
@@ -468,17 +499,21 @@ const padShape = (shape: readonly number[], rank: number): number[] => {
 };
 
 /**
- * params バッファの中身を組み立てる。**生成に使った spec を渡す**のが条件で、rank / 入力の
- * 本数 / スカラの本数 / 各軸の適合の 4 点を同じ正準化（{@link canonicalize}）と照合する。
+ * Builds the contents of the params buffer. The condition is that **the spec used for generation is
+ * passed**; four points — rank, number of inputs, number of scalars, and each axis's compatibility —
+ * are checked against the same canonicalization ({@link canonicalize}).
  *
- * MUST: 4 点照合を外さない。スカラ attr の読み出し位置は WGSL 側が**生成時の `arity`** から
- * `1 + rank + arity·rank + index` で焼くので、ここで書く位置（入力の本数から導く）と食い違うと
- * params 配列の範囲外を読む — WebGPU の境界付きアクセスは例外を出さず、
- * `clamp_min(x, 1e-12)` が別の値の clamp に化けるような沈黙誤値になる。
- * MUST: 軸の適合（`1` か出力と一致）も同じ理由でここで見る。broadcast 不能な組は
- * 「1 でなければ連続 stride」の組み立てが**入力バッファの**範囲外を指す params を黙って作る。
- * MUST: スカラは f32 へ丸めて載せる。IR の attrs は JSON の f64 なので、丸めずに扱うと
- * CPU 参照（`Math.fround`）と GPU（params の f32 語）で違う値になりうる。
+ * MUST: do not drop the four-point check. The WGSL side bakes the read position of the scalar attrs
+ * from **the `arity` at generation time** as `1 + rank + arity·rank + index`, so if the position
+ * written here (derived from the number of inputs) disagrees, it reads outside the params array —
+ * WebGPU's bounded access raises no exception, and the result is a silent wrong value such as
+ * `clamp_min(x, 1e-12)` turning into a clamp with another value.
+ * MUST: axis compatibility (`1` or equal to the output) is checked here for the same reason. For a
+ * pair that cannot broadcast, building "contiguous stride unless 1" silently makes params that
+ * point outside **the input buffer**.
+ * MUST: scalars are rounded to f32 before they are stored. IR attrs are JSON f64, so without
+ * rounding the CPU reference (`Math.fround`) and the GPU (the f32 words of params) could see
+ * different values.
  */
 export const elementwiseParams = (
   spec: ElementwiseSpec,
@@ -521,14 +556,16 @@ export const elementwiseParams = (
         );
       }
     }
-    // 連続 stride を右から積む。1 の次元は stride 0 にして broadcast を吸収する。
+    // Accumulate the contiguous strides from the right. A dimension of 1 gets stride 0 to absorb
+    // the broadcast.
     let running = 1;
     const strides = new Array<number>(rank).fill(0);
     for (let d = rank - 1; d >= 0; d -= 1) {
       strides[d] = padded[d] === 1 ? 0 : running;
       running *= padded[d];
     }
-    // 長さ 0 の軸を挟むと n が 0 でも左側の stride だけ u32 を超えうる（積は 0 に潰れない）。
+    // With a length-0 axis in between, the strides to its left can exceed u32 even when n is 0
+    // (the product does not collapse to 0).
     assertU32Params(
       "elementwise params",
       Object.fromEntries(strides.map((stride, d) => [`in${k}_strides[${d}]`, stride])),
@@ -537,8 +574,9 @@ export const elementwiseParams = (
   });
   const floats = new Float32Array(params.buffer);
   scalars.forEach((value, index) => {
-    // MUST: 有限判定は **f32 として**行う（載せ先が f32 語なので、f64 で有限な `1e39` は
-    // 黙って `+Inf` に化ける — 契約層 `assertFiniteAttr` と同じ門）。
+    // MUST: the finiteness check is done **as an f32** (the destination is an f32 word, so `1e39`,
+    // finite in f64, silently turns into `+Inf` — the same check as the contract layer's
+    // `assertFiniteAttr`).
     if (!Number.isFinite(Math.fround(value))) {
       throw new CodegenError(`elementwise params: スカラ attr が f32 として有限でない（${value}）`);
     }

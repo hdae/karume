@@ -1,15 +1,19 @@
 /**
- * 数値一致の判定。GPU 実行と CPU 参照の突合（ADR 0005 の段 2）に使う。
+ * Numeric agreement checks. Used to compare GPU execution with the CPU reference (stage 2 of
+ * ADR 0005).
  *
- * MUST: 判定は常に `|x−y| ≤ atol + rtol·|ref|`。相対誤差だけを見るとゼロ近傍の参照値で
- * 発散し、絶対誤差だけを見ると大きい値で無意味に厳しくなる。
- * MUST: NaN / ±Inf はどちらの側にあっても不合格。NaN は全ての比較が false になるため、
- * 素朴な差分判定だと「差 0」に化けて全 NaN 出力が PASS になる。
+ * MUST: the check is always `|x−y| ≤ atol + rtol·|ref|`. Relative error alone diverges at reference
+ * values near zero; absolute error alone becomes pointlessly strict for large values.
+ * MUST: NaN / ±Inf on either side fail. Every comparison with NaN is false, so a naive difference
+ * check turns it into "difference 0" and an all-NaN output PASSes.
  */
 
 import type { IrDtype } from "../format/ir.ts";
 
-/** 比較対象の長さ・dtype が違う、または許容差そのものが壊れている（取り違え — 誤差の大小の問題ではない）。 */
+/**
+ * The compared lengths or dtypes differ, or the tolerance itself is broken (a mix-up — not a
+ * question of how large the error is).
+ */
 export class AllcloseError extends Error {
   override readonly name = "AllcloseError";
 }
@@ -20,30 +24,33 @@ export type Tolerance = {
 };
 
 /**
- * 省略時の既定帯。**op 語彙掃引の門ではなくなった**（2026-08-31 — M1 宿題の消化）:
- * 掃引（tests/gpu_ops_test.ts の checkAll）と GEMM 系突合は op 別の実測導出表
- * （tests/helpers/op-tolerance.ts・正本 =
- * docs/research/2026-08-31-op-tolerance-measurement.md）を明示的に使う。
- * ここに残る用途は「呼び手が独自に帯を持つまでの一時値」と配線テストの既定だけで、
- * **新しい数値門にこの既定を使わない**（表へ行を足すか、実測から明示値を渡す）。
+ * The default band when none is given. **It is no longer the check of the op vocabulary sweep**
+ * (2026-08-31 — the M1 follow-up done): the sweep (checkAll in tests/gpu_ops_test.ts) and the GEMM
+ * comparisons explicitly use the per-op table derived from measurement
+ * (tests/helpers/op-tolerance.ts; source of truth =
+ * docs/research/2026-08-31-op-tolerance-measurement.md).
+ * What remains is "a temporary value until the caller has its own band" and the default of wiring
+ * tests; **do not use this default for a new numeric check** (add a row to the table, or pass an
+ * explicit value from measurement).
  */
 export const DEFAULT_TOLERANCE: Tolerance = { atol: 1e-5, rtol: 1e-3 };
 
 /**
- * 整数系（i32 / bool）の突合に使う許容誤差 = 厳密一致（ADR 0009）。
- * 整数演算には丸め差も縮約順序も無いので、1 でもずれたら実装バグ。
+ * The tolerance for comparing integer types (i32 / bool) = exact match (ADR 0009).
+ * Integer arithmetic has neither rounding differences nor reduction-order differences, so any
+ * deviation, even by 1, is an implementation bug.
  */
 export const EXACT_TOLERANCE: Tolerance = { atol: 0, rtol: 0 };
 
 type AllcloseReport = {
   readonly pass: boolean;
-  /** 許容誤差を破った要素数。 */
+  /** Number of elements that broke the tolerance. */
   readonly failCount: number;
   readonly maxAbsError: number;
   readonly maxRelError: number;
-  /** maxAbsError（非有限があればその先頭）の位置。 */
+  /** Position of maxAbsError (of the first non-finite element when there is one). */
   readonly worstIndex: number;
-  /** どちらかの側が NaN / ±Inf だった要素数。 */
+  /** Number of elements where either side was NaN / ±Inf. */
   readonly nonFiniteCount: number;
 };
 
@@ -55,14 +62,16 @@ export const allclose = (
   if (actual.length !== expected.length) {
     throw new AllcloseError(`長さ不一致: actual ${actual.length} vs expected ${expected.length}`);
   }
-  // MUST: 許容差の NaN と負を拒む。NaN だと判定の右辺が NaN になって `abs > 右辺` が常に false
-  // （どんな誤差も合格）、負だと誤差 0 でも不合格になる。atol の +Infinity は e2e が記録専用の
-  // 帯として意図的に渡すので、atol には有限であることまでは要求しない。
+  // MUST: reject a NaN or negative tolerance. With NaN the right-hand side of the check is NaN and
+  // `abs > rhs` is always false (any error passes); with a negative value even error 0 fails. e2e
+  // tests deliberately pass atol = +Infinity as a record-only band, so atol is not required to be
+  // finite.
   if (Number.isNaN(tolerance.atol) || tolerance.atol < 0) {
     throw new AllcloseError(`許容差 atol が NaN か負である: ${tolerance.atol}`);
   }
-  // MUST: rtol は有限の非負に限る。rtol = +Infinity だと参照が 0 の要素で Infinity·0 = NaN となり、
-  // 右辺が NaN になって atol に関係なく合格する（記録専用の帯は atol 側で表す）。
+  // MUST: rtol is limited to finite non-negative values. With rtol = +Infinity an element whose
+  // reference is 0 gives Infinity·0 = NaN, the right-hand side becomes NaN and it passes whatever
+  // atol is (a record-only band is expressed on the atol side).
   if (!Number.isFinite(tolerance.rtol) || tolerance.rtol < 0) {
     throw new AllcloseError(`許容差 rtol が有限の非負でない: ${tolerance.rtol}`);
   }
@@ -95,18 +104,23 @@ export const allclose = (
   return { pass: failCount === 0, failCount, maxAbsError, maxRelError, worstIndex, nonFiniteCount };
 };
 
-/** 突合の対象（公開 Tensor と CPU 参照 RefTensor の両方が構造的に当てはまる最小の面）。 */
+/**
+ * What is compared (the smallest surface that both the public Tensor and the CPU reference's
+ * RefTensor fit structurally).
+ */
 type NumericTensor = {
   readonly dtype: IrDtype;
   readonly data: ArrayLike<number>;
 };
 
 /**
- * dtype に応じて許容誤差を選ぶ突合。f32 は丸め差・縮約順序差が構造的に出るので allclose、
- * i32 / bool は{@link EXACT_TOLERANCE}（厳密一致）。
+ * A comparison that picks the tolerance by dtype. f32 shows rounding and reduction-order
+ * differences by construction, so it uses allclose; i32 / bool use {@link EXACT_TOLERANCE} (exact
+ * match).
  *
- * MUST: dtype が食い違ったら比較しない。要素は全型 4 バイトで値も数値として読めてしまうため、
- * 突合が「たまたま通る / たまたま落ちる」になり検証の意味が消える。
+ * MUST: do not compare when the dtypes disagree. Every element type is 4 bytes and the values can
+ * still be read as numbers, so the comparison would "happen to pass / happen to fail" and the
+ * verification would lose its meaning.
  */
 export const compareTensors = (
   actual: NumericTensor,
@@ -123,6 +137,6 @@ export const compareTensors = (
   );
 };
 
-/** 失敗時のテストメッセージ用（どこがどれだけずれたかを 1 行で出す）。 */
+/** For test failure messages (shows in one line where and by how much it deviated). */
 export const formatAllclose = (report: AllcloseReport): string =>
   `fail=${report.failCount} nonFinite=${report.nonFiniteCount} maxAbs=${report.maxAbsError} maxRel=${report.maxRelError} at=${report.worstIndex}`;

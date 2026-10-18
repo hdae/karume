@@ -1,9 +1,10 @@
 /**
- * dispatch の params バッファの usage（uniform / storage の 2 通り）。
+ * The usage of a dispatch's params buffer (two kinds: uniform / storage).
  *
- * 族別導出と {@link "../recipe-builder.ts"} の融合 replay が同じ値を使うので、**値の置き場は
- * ここ 1 つ**にする。族別モジュールから `recipe-builder.ts` を値で import すると
- * 「入口 → 族別」の逆辺ができるため（型だけの参照は消去されるので逆辺にならない）。
+ * The per-op-family derivation and the fusion replay of {@link "../recipe-builder.ts"} use the
+ * same values, so **the values live here and nowhere else**. Importing `recipe-builder.ts` by
+ * value from a per-op-family module would create a back edge against "entry → per-op-family"
+ * (a type-only reference is erased, so it does not create one).
  */
 
 import { BUFFER_USAGE } from "../../gpu/webgpu-constants.ts";

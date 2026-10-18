@@ -1,20 +1,23 @@
 /**
- * カーネル実装に由来する値域上限のうち、**op 契約層も同じ門を張る**もの。
+ * Range limits that come from a kernel implementation and that **the op contract layer guards
+ * as well**.
  *
- * MUST: 置き場はここ 1 か所。上限が params 側にしか無いと「契約検査は通ったのに実行段で
- * 内部エラー」になり、どの op のどの値が域外なのかが利用者の診断に残らない（strided 族の
- * rank 上限 {@link "./strided.ts"} `STRIDED_RANK` と同じ分担）。ops → kernels の依存を作らない
- * ための中立な場所でもある（ops / kernels は双方すでに codegen へ依存している）。
+ * MUST: they live here, in one place. A limit that exists only on the params side turns into "the
+ * contract check passed, then an internal error at execution time", and the user's diagnostics do
+ * not show which value of which op is out of range (the same split as the strided family's rank
+ * limit {@link "./strided.ts"} `STRIDED_RANK`). It is also a neutral place that avoids an
+ * ops → kernels dependency (ops and kernels both already depend on codegen).
  */
 
 /**
- * gru_scan の隠れ幅 H の上限（= カーネルの workgroup サイズ）。**1 lane = 1 隠れユニット**の
- * 割り当てで、生成 WGSL の `h_shared` / `stage` はこの長さの workgroup 配列として展開される
- * （kernels/gru-scan.ts）。
+ * Upper limit of the gru_scan hidden width H (= the kernel's workgroup size). The assignment is
+ * **one lane = one hidden unit**, and the generated WGSL's `h_shared` / `stage` are workgroup
+ * arrays of this length (kernels/gru-scan.ts).
  *
- * MUST: 超過は契約層（ops/shapes.ts の gru_scan）と params（`gruScanParams`）の両方で
- * fail loudly にする — 黙って縮退させると workgroup 配列の範囲外書き込みになり、例外なしに
- * 別ユニットの状態が壊れる。上限を上げるには workgroup 内 grid-stride と `h` の二重化が要る
- * = 別の設計判断（ADR 0056 決定 5）。
+ * MUST: exceeding it fails loudly both in the contract layer (gru_scan in ops/shapes.ts) and in
+ * params (`gruScanParams`) — a silent fallback writes the workgroup arrays out of range and
+ * corrupts other units' state without an exception. Raising the limit needs a workgroup-internal
+ * grid-stride and a double-buffered `h` = a separate design decision, which MAY be made on demand
+ * (re-graded 2026-10-18 — ADR 0056 decision 5).
  */
 export const GRU_SCAN_MAX_HIDDEN = 256;

@@ -1,69 +1,84 @@
 /**
- * 融合パス（純関数）: 計画済みノード列（plan.ts の {@link NodePlan}）→ 実行ステップ列。
+ * The fusion pass (pure functions): planned node list ({@link NodePlan} from plan.ts) → execution
+ * step list.
  *
- * IR の公開語彙は 1 つも増やさない。エクスポータが出す**隣接ノードの決まった並び**を、実行時
- * にだけ private カーネル 1 本へ畳む peephole で、掴めなかった形は素のノード列にそのまま
- * 落ちる（fallback は常に正しい既存経路）。GPU に触れないのでアダプタ無し環境で検証できる。
+ * It adds nothing to the IR's public vocabulary. It is a peephole that, at run time only, folds
+ * **fixed sequences of adjacent nodes** emitted by the exporter into one private kernel; a form it
+ * does not match falls through to the plain node list unchanged (the fallback is always the correct
+ * existing path). It never touches the GPU, so it can be verified without an adapter.
  *
- * ## 置き場（融合パスの入口）
+ * ## Where things live (the entry of the fusion pass)
  *
- * **このファイルが融合パスの入口**で、実体は 3 つに分かれている: 共通型・全ルール共通の
- * 適格条件・`defineRule` が {@link "./fusion-rule.ts"}、7 ルールの実体が `fusion-rules/` 配下
- * （1 ルール = 1 ファイル）、そしてここが宣言表 {@link FUSION_RULES}・別名化
- * （{@link planAliases}）・走査（{@link planFusions}）・候補列挙
- * （{@link enumerateUnfusedWindows}）を持つ。
- * MUST: 消費側は**この綴り（`fusion.ts`）で import する** — ADR 0040 決定 1 が融合パスの
- * 置き場を「`src/runtime/fusion.ts` の純関数パス」と名指しており、3 ファイルへの分割は実装の
- * 都合にすぎない（公開型と {@link planRowBlocks} はここが再 export する）。
- * MUST: 実体の依存は **fusion-rule → fusion-rules → fusion の一方向**。ルール側から
- * `fusion.ts` を import しない（宣言表がルールを import するので循環になる）。
+ * **This file is the entry of the fusion pass**; the implementation is split three ways: the shared
+ * types, the eligibility conditions shared by every rule and `defineRule` in
+ * {@link "./fusion-rule.ts"}; the seven rules under `fusion-rules/` (one rule = one file); and here
+ * the declaration table {@link FUSION_RULES}, aliasing
+ * ({@link planAliases}), the scan ({@link planFusions}) and candidate enumeration
+ * ({@link enumerateUnfusedWindows}).
+ * MUST: consumers **import this spelling (`fusion.ts`)** — ADR 0040 decision 1 names the place of
+ * the fusion pass as "a pure-function pass in `src/runtime/fusion.ts`", and the split into three
+ * files is only an implementation convenience (this file re-exports the public types and
+ * {@link planRowBlocks}).
+ * MUST: value dependencies are **one-directional: fusion-rule → fusion-rules → fusion**. Rules do
+ * not import `fusion.ts` (the declaration table imports the rules, so that would be a cycle).
  *
- * ## 設計の約束
+ * ## Design commitments
  *
- * - MUST: matcher を executor の走査ループへ直書きしない。ここが唯一の判定点で、反例
- *   （use-count 2 / graph output / near-shape / dtype 違い / 順序違い）を GPU 無しで網羅できる。
- * - MUST: 融合ステップは外部入力の**延べ列**（{@link FusedStep.ins}）を宣言し、解放簿記は
- *   executor の既存経路（素のノードと同一）に合流させる。融合ごとに手書きの retain/release を
- *   置くと、アリーナの参照計数が融合の本数だけ別実装になり、1 本ずれても例外は出ずに
- *   沈黙誤値になる。
- * - MUST: 融合は演算列を潰すが**値は変えない**。丸め位置の保存はカーネル側の責務で、その
- *   手段（workgroup memory 往復による丸め障壁）が仕様保証でないことは各カーネルの docstring に
- *   書いてある。任意指定のrmsNormAddはADR 0099の検収範囲に限り、未検証GPUでは参照経路を残す。
- * - MUST: 掴むのは**契約の出力数が 1 本**のノードだけ（{@link windowIsSingleOutput} —
- *   ADR 0068 決定 1）。{@link FusedStep} は単一出力のままで、鎖のノードの出力は常に
- *   `outputs[0]`（多出力 op の融合は語彙に入れていない）。
+ * - MUST: do not write matchers straight into the executor's scan loop. This is the only decision
+ *   point, and the counterexamples (use-count 2 / graph output / near-shape / different dtype /
+ *   different order) can be covered exhaustively without a GPU.
+ * - MUST: a fused step declares the **total-use list** of its external inputs
+ *   ({@link FusedStep.ins}), and the release bookkeeping joins the executor's existing path (the
+ *   same as for plain nodes). A hand-written retain/release per fusion would give the arena's
+ *   reference counting one separate implementation per fusion, and a single drift would become a
+ *   silent wrong value with no exception.
+ * - MUST: fusion collapses the op sequence but **does not change values**. Preserving the rounding
+ *   points is the kernel's job, and each kernel's docstring states that the means (a rounding
+ *   barrier through a workgroup-memory round trip) is not a spec guarantee. The opt-in rmsNormAdd
+ *   is limited to the acceptance range of ADR 0099 and keeps the reference path on unverified
+ *   GPUs.
+ * - MUST: only nodes whose **contract has exactly one output** are grabbed
+ *   ({@link windowIsSingleOutput} — ADR 0068 decision 1). {@link FusedStep} stays single-output,
+ *   and the output of a chain node is always `outputs[0]` (fusion of multi-output ops is not in
+ *   the vocabulary).
  *
- * ## 畳む先は 1 dispatch とは限らない
+ * ## The fold target is not always one dispatch
  *
- * linearStaticQuantize / rmsNormAdd / silu / upsample2x / rope / adaln は「N ノード → private
- * カーネル 1 dispatch」（{@link LINEAR_STATIC_QUANTIZE_RULE} は並列 GEMV と固定再量子化を
- * 1 dispatch へ畳む）だが、
- * {@link ROW_BLOCK_ATTENTION_RULE} は**演算ではなく中間の実体化幅**を畳むので、ステップ内で
- * 閉じた一時（{@link FusedStep.temps}）を挟んだ dispatch 列になる。どちらも
- * {@link FusedStep} 1 つ = 実行ステップ 1 つで、解放簿記の合流点は変わらない。
+ * linearStaticQuantize / rmsNormAdd / silu / upsample2x / rope / adaln are "N nodes → one dispatch
+ * of a private kernel" ({@link LINEAR_STATIC_QUANTIZE_RULE} folds the parallel GEMV and the fixed
+ * requantization into one dispatch), but
+ * {@link ROW_BLOCK_ATTENTION_RULE} folds **the materialised width of an intermediate, not the
+ * ops**, so it becomes a list of dispatches with temporaries closed inside the step
+ * ({@link FusedStep.temps}) in between. Either way one {@link FusedStep} = one execution step, and
+ * the point where the release bookkeeping joins does not change.
  *
- * ## 適用順
+ * ## Application order
  *
- * {@link FUSION_RULES} の**宣言順**（linearStaticQuantize → rmsNormAdd → silu → upsample2x → rope → adaln → rowBlockAttention）。
- * 7 ルールの先頭 op は `linear` / `rms_norm` / `sigmoid` / `reshape` / `mul|slice` / `layer_norm` / `bmm` で互いに素
- * なので、この順序は結果に効かない（順序が意味を持つのは先頭 op が重なったときだけ —
- * 重なりが生じていないことは tests/runtime_fusion_test.ts が {@link FusionRule.heads} から
- * 機械的に検査する）。窓の**内側**に他ルールの先頭 op が現れる形（rowBlockAttention の窓は
- * `reshape` / `expand` を 5 本含む）は、掴めた時点で走査が窓幅ぶん進むので発火しえない。
- * MUST: {@link FUSION_RULES} は**手書きの 1 本**に保つ（ルール側の import 時自動登録へ
- * 置き換えない）。全モジュール副作用ゼロの規約が import 時実行を禁じており、先頭 op の
- * 互いに素性も tests/runtime_fusion_test.ts が**この配列**を読んで機械検査するため。
+ * The **declaration order** of {@link FUSION_RULES} (linearStaticQuantize → rmsNormAdd → silu →
+ * upsample2x → rope → adaln → rowBlockAttention).
+ * The leading ops of the seven rules are `linear` / `rms_norm` / `sigmoid` / `reshape` /
+ * `mul|slice` / `layer_norm` / `bmm`, pairwise disjoint,
+ * so the order does not affect the result (the order matters only when leading ops overlap —
+ * tests/runtime_fusion_test.ts checks mechanically from {@link FusionRule.heads} that no overlap
+ * arises). A form where another rule's leading op appears **inside** a window (rowBlockAttention's
+ * window contains five `reshape` / `expand`) cannot fire, because once grabbed the scan advances by
+ * the window width.
+ * MUST: keep {@link FUSION_RULES} as **one hand-written list** (do not replace it with automatic
+ * registration at rule import time). The rule that every module is side-effect free bans running
+ * code at import time, and tests/runtime_fusion_test.ts reads **this array** to check the
+ * disjointness of the leading ops mechanically.
  *
- * ## 窓内 passthrough
+ * ## In-window passthrough
  *
- * 鎖は**隣接しているとは限らない**。adaLN は `layer_norm` と `mul` の間にエクスポータが
- * 変調ベクトルの `reshape` を 2〜3 本挟む（実測 85 鎖すべて）。RoPE は `cat` と続く `mul` の
- * 間に cos / sin 表の `sym_prefix_slice` が挟まる形が**表の初出 1 箇所だけ**にある。
- * ルールは連続窓
- * （{@link "./fusion-rule.ts"} の `FusionMatch.window`）を宣言し、そのうち畳むノード（`chain`）以外を
- * **passthrough** として融合ステップの**前**に素のノードのまま並べる。並べ替えが合法なのは
- * passthrough が鎖の定義する値を 1 つも消費しない場合だけで、そこは
- * {@link passthroughIsIndependent} が機械的に見る。
+ * A chain is **not always contiguous**. For adaLN the exporter puts 2–3 `reshape`s of the
+ * modulation vector between `layer_norm` and `mul` (all 85 measured chains). For RoPE, a
+ * `sym_prefix_slice` of the cos / sin table sits between `cat` and the following `mul` **only at
+ * the first use of the table**.
+ * A rule declares a consecutive window
+ * (`FusionMatch.window` in {@link "./fusion-rule.ts"}) and places every node of it other than the
+ * folded ones (`chain`) as a **passthrough**, a plain node **before** the fused step. The
+ * reordering is legal only when the passthrough consumes no value the chain defines, which
+ * {@link passthroughIsIndependent} checks mechanically.
  */
 
 import { linearGemvPackedEligible } from "../kernels/linear-gemv.ts";
@@ -94,8 +109,9 @@ import {
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
 /**
- * 融合パスの公開型（実体は {@link "./fusion-rule.ts"}）。MUST: 消費側は `fusion.ts` の綴りで
- * import する — 入口を 1 つに保つための再 export で、3 ファイルへの分割は実装の都合。
+ * The public types of the fusion pass (defined in {@link "./fusion-rule.ts"}). MUST: consumers
+ * import the `fusion.ts` spelling — a re-export that keeps one entry; the split into three files
+ * is an implementation convenience.
  */
 export type {
   ExecStep,
@@ -107,14 +123,17 @@ export type {
   FusionWeightLayout,
   PackedActivations,
 } from "./fusion-rule.ts";
-/** 行ブロック分割とその上限の導出（実体は {@link "./fusion-rules/row-block-attention.ts"}）。 */
+/**
+ * Row-block splitting and the derivation of its limit (defined in
+ * {@link "./fusion-rules/row-block-attention.ts"}).
+ */
 export {
   planRowBlocks,
   type RowBlockLimit,
   rowBlockLimit,
 } from "./fusion-rules/row-block-attention.ts";
 
-/** MUST: この配列の順が適用順（冒頭「適用順」節）。 */
+/** MUST: the order of this array is the application order (the "Application order" section). */
 export const FUSION_RULES: readonly FusionRule[] = [
   LINEAR_STATIC_QUANTIZE_RULE,
   RMS_NORM_ADD_RULE,
@@ -126,9 +145,10 @@ export const FUSION_RULES: readonly FusionRule[] = [
 ];
 
 /**
- * 長さ1の軸は座標が常に0なので、移動しても平坦な要素順へ影響しない。
- * それ以外の軸は元の順を保つ必要がある。同じ長さの軸同士の交換も許さない。
- * 空テンソルは従来経路に残す。DECIDED: docs/decisions/0011-layout-strategy.md#addendum-2026-09-14--permute-that-keeps-element-order
+ * An axis of length 1 always has coordinate 0, so moving it does not affect the flat element order.
+ * Every other axis has to keep its original order. Swapping two axes of the same length is not
+ * allowed either. Empty tensors stay on the existing path.
+ * DECIDED: docs/decisions/0011-layout-strategy.md#addendum-2026-09-14--permute-that-keeps-element-order
  */
 const permuteKeepsElementOrder = (plan: NodePlan): boolean => {
   const shape = plan.inputShapes[0];
@@ -143,8 +163,9 @@ const permuteKeepsElementOrder = (plan: NodePlan): boolean => {
 };
 
 /**
- * 別名規則の唯一の判定点。新しく省くpermuteのコピーは内部で確保した実体に限る。
- * 入力や重みにまで別名を伸ばすと、従来のcopyOutputsが自己コピーとして拒否される。
+ * The only decision point of the aliasing rule. The newly skipped permute copies are limited to
+ * internally allocated storage. Extending the alias to inputs or weights would make the existing
+ * copyOutputs reject it as a self-copy.
  */
 const aliasesInput = (plan: NodePlan, internal: ReadonlySet<string>): boolean =>
   plan.contract.kind === "reshape" ||
@@ -154,8 +175,10 @@ const aliasesInput = (plan: NodePlan, internal: ReadonlySet<string>): boolean =>
   (plan.contract.kind === "expand" && sameShape(plan.inputShapes[0], plan.outputs[0].shape));
 
 /**
- * 宣言順に別名と実体の由来を導出する。入力・重みは集合の外、確保した値とその別名だけが内部値。
- * 実行相と見積り相が共有し、形状と所有権の判定を別々に書き写さない（ADR 0011）。
+ * Derives aliases and the origin of storage in declaration order. Inputs and weights are outside
+ * the set; only allocated values and their aliases are internal values. Shared by the execution
+ * phase and the estimation phase, so the shape and ownership decisions are not copied separately
+ * (ADR 0011).
  */
 export const planAliases = (nodes: readonly NodePlan[]): ReadonlySet<NodePlan> => {
   const internal = new Set<string>();
@@ -173,8 +196,9 @@ export const planAliases = (nodes: readonly NodePlan[]): ReadonlySet<NodePlan> =
 const NO_PACKED: ReadonlyMap<string, number> = new Map();
 
 /**
- * 素のノード 1 本に packed 活性の役割（ADR 0105）を付ける。生産側は固定 SRQ、消費側は
- * その値を**活性スロット**に取る linear で、どちらも `packedValues` の 1 つの決定から従う。
+ * Attaches the packed activation role (ADR 0105) to one plain node. The producer is the fixed SRQ,
+ * the consumer a linear that takes that value in its **activation slot**; both follow from the one
+ * decision in `packedValues`.
  */
 const packedRole = (
   plan: NodePlan,
@@ -190,7 +214,7 @@ const packedRole = (
   return scale === undefined ? {} : { packedActivations: { role: "read", scale } };
 };
 
-/** ノード列を 1 度走査して融合ステップへ畳む。掴めなかったノードは素のまま並ぶ。 */
+/** Scans the node list once and folds it into fused steps. Nodes not grabbed stay plain. */
 const scanFusions = (
   nodes: readonly NodePlan[],
   context: FusionContext,
@@ -221,7 +245,7 @@ const scanFusions = (
       undefined,
     );
     if (hit !== undefined) {
-      // MUST: passthrough が先（融合ステップは passthrough の出力を入力に取りうる）。
+      // MUST: passthroughs first (the fused step may take a passthrough's output as input).
       for (const plan of hit.passthrough) pushNode(plan);
       steps.push(hit.step);
       counts[hit.step.rule] += 1;
@@ -235,7 +259,8 @@ const scanFusions = (
 };
 
 /**
- * 値名 → その値を消費するノード（延べ — 同じノードが 2 度取れば 2 回入る）。
+ * Value name → the nodes consuming that value (total uses — a node that takes it twice appears
+ * twice).
  */
 const consumersByValue = (nodes: readonly NodePlan[]): ReadonlyMap<string, readonly NodePlan[]> => {
   const consumers = new Map<string, NodePlan[]>();
@@ -250,13 +275,15 @@ const consumersByValue = (nodes: readonly NodePlan[]): ReadonlyMap<string, reado
 };
 
 /**
- * この消費先が「packed 活性を受け取れる linear」か（ADR 0105 の対付けの消費側条件）。
+ * Whether this consumer is "a linear that can receive packed activations" (the consumer-side
+ * condition of the ADR 0105 pairing).
  *
- * MUST: 活性スロット（`ins[0]`）でだけ取ること。重み / bias に同じ値が来る形は f32 の語を
- * 期待する束縛なので、packed へ切り替えると黙って誤値になる。
- * MUST: 判定は {@link linearGemvPackedEligible} 1 本（recipe-builder の門と同じ述語）。
- * 並列 GEMV へ落ちるだけでは足りず、**実測で packed が効いた行**（ADR 0105 追記 1）に
- * 限る — 効かない形まで packed にすると、生産側 SRQ ごと丸損になる。
+ * MUST: take it only in the activation slot (`ins[0]`). When the same value arrives as weight /
+ * bias, that binding expects f32 words, so switching to packed gives a silent wrong value.
+ * MUST: the decision is the single {@link linearGemvPackedEligible} (the same predicate as the
+ * recipe-builder's check). Landing on the parallel GEMV is not enough; it is limited to **the rows
+ * where packed was measured to help** (ADR 0105 addendum 1) — making forms packed where it does not
+ * help is a pure loss, producer SRQ included.
  */
 const readsPackedActivation = (plan: NodePlan, name: string, context: FusionContext): boolean => {
   if (plan.node.op !== "linear" || plan.node.ins.length !== 3) return false;
@@ -273,27 +300,30 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
 };
 
 /**
- * packed int8 活性で受け渡す固定 SRQ（ADR 0105）— 値名 → その SRQ の f32 scale。
+ * The fixed SRQs handed over as packed int8 activations (ADR 0105) — value name → that SRQ's f32
+ * scale.
  *
- * 受理は 5 条件:
+ * Five conditions for acceptance:
  *
- * 1. 席（`packedStaticQuantize`）が立っており、`linearGemvReduce: parallel` /
- *    `linearCompute: f32`（packed 変種を持つのは並列 GEMV 族だけ）。
- * 2. **素のノードとして残った** `static_quantize`。linear→SRQ 融合（ADR 0103）に飲まれた
- *    SRQ は出力側エピローグで、packed 出力は本段の範囲外なので対象にしない — だから
- *    この判定は 1 度目の走査結果（`steps`）を入力に取る。
- * 3. 出力が graph output でなく、最終次元 k が 16 の倍数（束縛は `vec4<u32>` = 16 要素単位で
- *    読む）、scale が正・有限（scale 0 は恒等 SRQ で int8 コードに落とせない）。
- * 4. 消費先が 1 本以上あり、**その全てが**packed が効くと実測された形の並列 GEMV linear の
- *    活性スロット（{@link readsPackedActivation}）。1 本でも GEMM / 逐次 GEMV / 他 op /
- *    実測で効かなかった形が混ざれば f32 のまま。
- * 5. その値を消費する融合ステップが {@link LINEAR_STATIC_QUANTIZE_RULE} 以外に無いこと。
+ * 1. The option (`packedStaticQuantize`) is set, with `linearGemvReduce: parallel` /
+ *    `linearCompute: f32` (only the parallel GEMV family has packed variants).
+ * 2. A `static_quantize` **left as a plain node**. An SRQ swallowed by the linear→SRQ fusion
+ *    (ADR 0103) is an output-side epilogue, and packed output is out of scope here, so it does not
+ *    qualify — which is why this decision takes the result of the first scan (`steps`) as input.
+ * 3. The output is not a graph output, the last dimension k is a multiple of 16 (the binding reads
+ *    `vec4<u32>` = units of 16 elements), and the scale is positive and finite (scale 0 is an
+ *    identity SRQ and cannot be lowered to int8 codes).
+ * 4. There is at least one consumer, and **every one of them** is the activation slot of a
+ *    parallel-GEMV linear of a form where packed was measured to help
+ *    ({@link readsPackedActivation}). If even one GEMM / sequential GEMV / other op / form measured
+ *    not to help is mixed in, it stays f32.
+ * 5. No fused step other than {@link LINEAR_STATIC_QUANTIZE_RULE} consumes the value.
  *
- * MUST: 5 は**将来のルール**向けの不変条件。packed で読む綴りを持つのは
- * linearStaticQuantize の融合だけなので、別のルールが linear を窓へ入れた瞬間、その
- * 融合カーネルは packed の語を f32 として読む（例外なしの沈黙誤値）。現行 7 ルールの窓に
- * `linear` は 1 本も無いので今は発火しないが、受理側に置かないと追加したルールだけが
- * 黙って壊れる。
+ * MUST: 5 is an invariant for **future rules**. Only the linearStaticQuantize fusion has a
+ * spelling that reads packed, so the moment another rule puts a linear into its window, that
+ * fused kernel reads the packed words as f32 (a silent wrong value with no exception). No window of
+ * the current seven rules contains a `linear`, so it does not fire today; but without it on the
+ * accepting side, only the added rule would break, silently.
  */
 const packedStaticQuantizeValues = (
   nodes: readonly NodePlan[],
@@ -331,13 +361,13 @@ const packedStaticQuantizeValues = (
 };
 
 /**
- * ノード列を走査して融合ステップへ畳む。掴めなかったノードは素のまま並ぶ。
+ * Scans the node list and folds it into fused steps. Nodes not grabbed stay plain.
  *
- * packed 活性の席（ADR 0105）が立っているときだけ**走査を 2 度**回す。1 度目は対付けの入力
- * （どの SRQ が素のノードとして残るか）を得るためで、2 度目が結果。
- * MUST: packed の有無はどのルールの `match` 条件にも入らない（変わるのは掴んだ
- * linear→SRQ 融合が組む dispatch のキー・WGSL・params だけ）ので、2 度の走査は**同じ窓を
- * 同じルールが掴む** — 対付けの入力が 2 度目で動くことはない。
+ * Only when the packed activation option (ADR 0105) is set does it **scan twice**. The first scan
+ * obtains the input of the pairing (which SRQs stay plain nodes); the second is the result.
+ * MUST: whether packed is on enters no rule's `match` condition (only the key, WGSL and params of
+ * the dispatch built by a grabbed linear→SRQ fusion change), so both scans have **the same rule
+ * grab the same window** — the pairing's input never moves in the second scan.
  */
 export const planFusions = (nodes: readonly NodePlan[], context: FusionContext): FusionPlan => {
   const first = scanFusions(nodes, context, NO_PACKED);
@@ -346,50 +376,52 @@ export const planFusions = (nodes: readonly NodePlan[], context: FusionContext):
 };
 
 /**
- * 候補窓 1 本（{@link enumerateUnfusedWindows} の返り値）。
+ * One candidate window (the return value of {@link enumerateUnfusedWindows}).
  *
- * NOTE: これは**候補であって受理ではない**。ADR 0040 決定 2 の受理集合（各ルールの綴り・
- * shape 条件・丸め位置の保存）を 1 つも代行していない — 共通の適格条件だけを通した「ここに
- * ルールを書けば畳めるかもしれない」印。
+ * NOTE: this is **a candidate, not an acceptance**. It stands in for none of the acceptance set of
+ * ADR 0040 decision 2 (each rule's spelling, shape conditions, preservation of rounding points) —
+ * it is a marker "a rule written here might fold this" that passed only the shared eligibility
+ * conditions.
  */
 export type UnfusedWindow = {
-  /** 畳む対象になる鎖の op 名列（窓内 passthrough を除いた並び）。 */
+  /** The op names of the chain that would be folded (in-window passthroughs excluded). */
   readonly ops: readonly string[];
-  /** 連続窓のノード数。`ops.length` との差が窓内 passthrough の本数。 */
+  /** Node count of the consecutive window; the difference from `ops.length` = passthrough count. */
   readonly windowSize: number;
-  /** 窓の先頭ノードの位置（ステップ列を展開したノード順の添字）。 */
+  /** The position of the window's first node (index in node order, the step list expanded). */
   readonly nodeIndex: number;
-  /** 鎖の最終ノードの出力名（IR 側で窓を引き当てる手掛かり）。 */
+  /** The output name of the chain's last node (the clue for locating the window in the IR). */
   readonly outputName: string;
 };
 
 /**
- * 窓内のノード 1 本を鎖に入れてよいか（= その出力が「消費者ちょうど 1 本・graph output で
- * ない」か）。
+ * Whether one node in the window may join the chain (= whether its output has "exactly one
+ * consumer and is not a graph output").
  *
- * MUST: privacy の綴りをここに書き写さず、{@link internalsArePrivate} にそのまま判定させる
- * — そのノードを先頭に置いた 2 本の鎖と見なせば、判定対象は 1 本目の出力だけになる
- * （2 本目は鎖の末尾なので見られない）。別に持つと、受理集合が変わったとき候補表だけが
- * 古い基準で「畳める」と言い続ける。
+ * MUST: do not copy the privacy spelling here; let {@link internalsArePrivate} decide as is —
+ * treated as a two-node chain headed by that node, only the first node's output is checked
+ * (the second is the chain's tail, so it is not looked at). A separate copy would let the
+ * candidate table alone keep saying "foldable" by the old criterion when the accepted set changes.
  */
 const outputStaysInternal = (step: NodePlan, tail: NodePlan, context: FusionContext): boolean =>
   internalsArePrivate([step, tail], context);
 
 /**
- * 連続窓のうち**畳む部分列**（鎖）を求める。窓の最終ノードへ流れ込むノードのうち、出力が
- * 窓の内側で閉じているものだけが鎖で、残りが窓内 passthrough
- * （{@link passthroughIsIndependent} の対象）。
+ * Finds the **subsequence to fold** (the chain) of a consecutive window. Of the nodes flowing into
+ * the window's last node, only those whose outputs close inside the window form the chain; the rest
+ * are in-window passthroughs (the subject of {@link passthroughIsIndependent}).
  *
- * この分け方は窓内 passthrough を持つ現行 2 ルールの実測形と一致する:
+ * This split matches the measured forms of the current two rules with in-window passthroughs:
  *
- * - RoPE の cos / sin 表の `sym_prefix_slice` は鎖の `mul` へ流れ込むが、表は他の層でも
- *   読まれる（消費者が 2 本以上）ので鎖に入らない。
- * - adaLN の gate の `reshape` は鎖の外で消費される（窓の最終ノードへ流れ込まない）ので
- *   鎖に入らない。
+ * - RoPE's `sym_prefix_slice` of the cos / sin table flows into the chain's `mul`, but the table
+ *   is also read by other layers (two or more consumers), so it does not join the chain.
+ * - adaLN's gate `reshape` is consumed outside the chain (it does not flow into the window's last
+ *   node), so it does not join the chain.
  *
- * 鎖の先頭が窓の先頭でない窓は `undefined` — 同じ鎖を「前に無関係なノードを足した窓」から
- * 何度も数えないための足切りで、これで鎖 1 本は必ず窓 1 つ（先頭 = 鎖の先頭・末尾 = 鎖の
- * 末尾）に対応する。
+ * A window whose chain does not start at the window's first node gives `undefined` — a cut-off so
+ * that the same chain is not counted again and again from "windows with unrelated nodes added in
+ * front"; with it, one chain always corresponds to exactly one window (first = the chain's first,
+ * last = the chain's last).
  */
 const chainWithinWindow = (
   window: readonly NodePlan[],
@@ -401,8 +433,9 @@ const chainWithinWindow = (
   for (let at = window.length - 2; at >= 0; at -= 1) {
     const step = window[at];
     if (!step.outputs.some((out) => needed.has(out.name))) continue;
-    // 出力が窓の外へ出るノードは鎖に入れない（畳むと値が消える）。その入力を needed へ
-    // 足さないので、このノード経由でしか最終ノードへ届かない上流も自動的に鎖から外れる。
+    // A node whose output leaves the window does not join the chain (folding would lose the
+    // value). Its inputs are not added to needed, so upstream nodes that reach the last node only
+    // through it drop out of the chain automatically.
     if (!outputStaysInternal(step, last, context)) continue;
     chain.push(step);
     for (const name of step.node.ins) needed.add(name);
@@ -412,23 +445,28 @@ const chainWithinWindow = (
 };
 
 /**
- * **融合が掴まなかった連続窓の候補列挙**（tools/fusion-hints の 1 段目）。
+ * **Candidate enumeration of the consecutive windows fusion did not grab** (the first step of
+ * tools/fusion-hints (removed in 0.15)).
  *
- * `planFusions` が `kind: "node"` のまま残した素のノードの連続列を、長さ 2〜`maxWindow` の窓で
- * 走り、全ルール共通の適格条件を通る窓だけを返す。掛ける述語は融合と同じ 5 本:
- * 窓に {@link windowIsSingleOutput} と {@link windowTouchesState}、鎖に {@link allF32}、
- * 鎖と窓内 passthrough の分け方そのものに {@link internalsArePrivate}（{@link chainWithinWindow}
- * が 1 ノードずつ掛ける）と {@link passthroughIsIndependent}。
+ * Walks the consecutive runs of plain nodes that `planFusions` left as `kind: "node"` with windows
+ * of length 2–`maxWindow`, and returns only the windows that pass the eligibility conditions
+ * shared by every rule. The predicates are the same five as fusion:
+ * {@link windowIsSingleOutput} and {@link windowTouchesState} on the window, {@link allF32} on the
+ * chain, and on the split between chain and in-window passthroughs itself
+ * {@link internalsArePrivate} ({@link chainWithinWindow} applies it node by node) and
+ * {@link passthroughIsIndependent}.
  *
- * MUST: 述語を融合パス層（`fusion-rule.ts` / `fusion-rules/` / ここ）の外へ持ち出さない —
- * ADR 0040 決定 1 の「唯一の判定点」は融合の判定だけでなく適格条件の綴りにも掛かる。列挙器を
- * 融合パス層の外に置いて述語を持ち出すと、受理集合の変更が候補表に追随しない（表だけが古い
- * 基準で「畳める」と言い続ける）。
- * MUST: 融合ステップを跨いだ窓は作らない（既に掴めている鎖を候補として二重に数えない）。
- * 走査は素のノードの**連続する走り**ごとに閉じる。
+ * MUST: do not take the predicates outside the fusion-pass layer (`fusion-rule.ts` /
+ * `fusion-rules/` / here) — the "only decision point" of ADR 0040 decision 1 covers not just the
+ * fusion decision but also the spelling of the eligibility conditions. Putting the enumerator
+ * outside the layer and taking the predicates along would leave the candidate table behind when
+ * the accepted set changes (the table alone keeps saying "foldable" by the old criterion).
+ * MUST: do not build windows across a fused step (a chain already grabbed is not counted twice as a
+ * candidate). The scan closes per **consecutive run** of plain nodes.
  *
- * NOTE: 返るのは候補であって設計ではない。長い窓の接頭辞も別の候補として出る（n-gram 列挙の
- * 性質）ので、読むときは同じ `nodeIndex` の最長窓を見る。
+ * NOTE: what comes back is candidates, not a design. Prefixes of a long window also come out as
+ * separate candidates (a property of n-gram enumeration), so read the longest window with the same
+ * `nodeIndex`.
  */
 export const enumerateUnfusedWindows = (
   steps: readonly ExecStep[],

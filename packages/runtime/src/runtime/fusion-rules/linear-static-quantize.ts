@@ -1,7 +1,8 @@
 /**
- * 融合ルール `linearStaticQuantize`（`linear → static_quantize` を並列 GEMV 1 dispatch へ）。
- * 全ルール共通の適格条件と `defineRule` は {@link "../fusion-rule.ts"}、適用順を決める宣言表は
- * {@link "../fusion.ts"} の `FUSION_RULES`。
+ * Fusion rule `linearStaticQuantize` (`linear → static_quantize` into one parallel GEMV
+ * dispatch). The eligibility conditions shared by every rule and `defineRule` are in
+ * {@link "../fusion-rule.ts"}; the declaration table that fixes the application order is
+ * `FUSION_RULES` in {@link "../fusion.ts"}.
  */
 
 import { numel, staticQuantizeScale } from "../../ops.ts";
@@ -36,7 +37,7 @@ type LinearStaticQuantizeMatch = FusionMatch & {
   readonly n: number;
   readonly k: number;
   readonly scale: number;
-  /** packed int8 活性で受け取るときの生産側 SRQ の scale（f32 のままなら `undefined`）。 */
+  /** The producer's SRQ scale when the input arrives as packed int8 (else `undefined`). */
   readonly packedX: number | undefined;
   readonly workgroups: readonly [number, number, number];
 };
@@ -73,7 +74,8 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
     const group = weight.storage === "i4" ? weight.groupSize : undefined;
     const lanes = linearGemvParallelEligible(weight.storage, m, n, k, group);
     if (lanes === undefined) return undefined;
-    // tile型はgrid-strideへ縮退しない。通常のlinearと同じdevice上限で拒否する。
+    // The tiled form does not fall back to grid-stride; it is rejected at the same device limit
+    // as a plain linear.
     const workgroups: readonly [number, number, number] = [
       tiledWorkgroups(
         n,
@@ -102,8 +104,8 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
       n,
       k,
       scale: staticQuantizeScale(srq.node.attrs, "linear static_quantize fusion"),
-      // 活性側が packed int8 で渡ってくる形（ADR 0105）。受理は planFusions の 1 箇所で済んで
-      // おり、ここは「渡ってくるか」を読むだけ（出力側 SRQ は f32 のまま）。
+      // The activation side arrives as packed int8 (ADR 0105). Acceptance is settled in one
+      // place, planFusions; this only reads whether it arrives (the output-side SRQ stays f32).
       packedX: context.packedValues.get(linear.node.ins[0]),
       workgroups,
     };

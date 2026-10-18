@@ -1,9 +1,9 @@
 /**
- * 族別導出 — 要素の並べ替え族（strided copy = permute / expand / slice / sym_prefix_slice・
- * cat・pad・flip・gather・upsample_bilinear2d）。
+ * Per-op-family derivation — the element-reordering family (strided copy = permute / expand /
+ * slice / sym_prefix_slice, cat, pad, flip, gather, upsample_bilinear2d).
  *
- * 入口は {@link "../recipe-builder.ts"} の `RecipeBuilder` で、共有サービス（Session の状態と
- * params の書き込み）は {@link RecipeBuildFace} 経由でだけ触る。
+ * The entry is `RecipeBuilder` in {@link "../recipe-builder.ts"}; the shared services (Session
+ * state and params writes) are reached only through {@link RecipeBuildFace}.
  */
 
 import type { BindingSource, StepRecipeBuilder } from "../recipe.ts";
@@ -45,10 +45,11 @@ import type { RecipeBuildFace } from "../recipe-builder.ts";
 import { PARAMS_STORAGE_USAGE, PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
 
 /**
- * permute / 非恒等 expand / slice / sym_prefix_slice の実体化コピー（strided 読み 1 カーネル族 —
- * ADR 0011 / 0010 / 0014）。出力は常に連続で、入力側だけを stride で読む。expand の複製軸は
- * stride 0、sym_prefix_slice は **Tmax 形の入力**の連続 stride、slice は入力の連続 stride と
- * **開始位置 offset**。恒等 expand は別名化されるのでここへは来ない。
+ * The materialising copy of permute / non-identity expand / slice / sym_prefix_slice (one
+ * strided-read kernel family — ADR 0011 / 0010 / 0014). The output is always contiguous; only the
+ * input side is read with strides. The replicated axes of expand have stride 0, sym_prefix_slice
+ * uses the contiguous strides of **the Tmax-shaped input**, and slice uses the input's contiguous
+ * strides plus **a start offset**. An identity expand is aliased and never comes here.
  */
 export const buildStridedCopy = async (
   face: RecipeBuildFace,
@@ -68,18 +69,20 @@ export const buildStridedCopy = async (
         ? expandSrcStrides(srcShape, outShape)
         : kind === "slice"
           ? sliceSrcStrides(srcShape)
-          : // MUST: 束縛後の outShape ではなく **srcShape（Tmax 形）** から組む（prefixSliceSrcStrides
-            // の MUST — 送り幅を縮めると 2 行目以降が別の行を読む）。
+          : // MUST: build from **srcShape (the Tmax shape)**, not the bound outShape (the MUST of
+            // prefixSliceSrcStrides — a shrunk stride makes every row after the first read the
+            // wrong row).
             prefixSliceSrcStrides(srcShape);
-  // offset は ADR 0011 の (offset, strides[4]) モデルそのもの。permute / expand /
-  // sym_prefix_slice は入力の先頭から読むので 0 で、**slice だけが 0 以外**を取る
-  // （ADR 0011 が予告した「可変点 1 語」がここ）。
+  // offset is exactly the (offset, strides[4]) model of ADR 0011. permute / expand /
+  // sym_prefix_slice read from the start of the input, so it is 0; **only slice** takes a non-zero
+  // value (this is the "one variable word" ADR 0011 anticipated).
   let offset = 0;
   if (kind === "slice") {
     const { dim, start } = sliceAttrs(step.node.attrs, where);
     offset = sliceSrcOffset(srcShape, dim, start);
   }
-  // 要素型はキーに載る（bool マスク / i32 添字の expand が実測にある — ADR 0009）。
+  // The element type is part of the key (expands of bool masks / i32 indices are measured —
+  // ADR 0009).
   const spec = { dtype: step.outputs[0].dtype };
   const key = stridedKey(spec);
   const { pipeline, layout, roles } = await face.state.cache.get(key, stridedWgsl(spec));
@@ -107,13 +110,15 @@ export const buildStridedCopy = async (
 };
 
 /**
- * cat（strided 書きコピー族 — ADR 0014）。入力ごとに **1 dispatch** で出力の部分領域へ書く。
- * 入力は連続で読み、出力へ `(offset, 出力の連続 strides)` で書く（読み族の双対）。
+ * cat (the strided-write copy family — ADR 0014). **One dispatch** per input writes into a
+ * sub-region of the output. The input is read contiguously and written to the output with
+ * `(offset, the output's contiguous strides)` (the dual of the read family).
  *
- * MUST: 書き出し位置の総和が連結軸の長さとちょうど一致することを確かめる（full-write）。
- * 一致しなければ出力のどこかが**未書き込みのまま**残り、配り直しなら前の値がそのまま
- * 結果になる。契約の shape 規則（軸長 = 入力の軸長の総和）と同じ事実をエンコード側の
- * 積み上げからも確かめる形で、片方だけの誤りを内部矛盾として落とす。
+ * MUST: check that the write positions add up to exactly the length of the concatenation axis
+ * (full-write). Otherwise some part of the output is **left unwritten**, and with a reallocated
+ * buffer the previous value becomes the result as is. The same fact as the contract's shape rule
+ * (axis length = sum of the inputs' axis lengths) is also checked from the encoder side's
+ * accumulation, so an error on only one side fails as an internal contradiction.
  */
 export const buildCat = async (
   face: RecipeBuildFace,
@@ -165,8 +170,9 @@ export const buildCat = async (
 };
 
 /**
- * pad（最終次元の定数 0 埋め）。**1 dispatch で出力の全バイトを書く**（範囲内は転写・
- * 範囲外は 0 — ADR 0014 の full-write）。ゼロ初期化されたバッファを前提にしない。
+ * pad (constant zero padding of the last dimension). **One dispatch writes every byte of the
+ * output** (copied inside the range, 0 outside — the full-write of ADR 0014). It does not assume a
+ * zero-initialised buffer.
  */
 export const buildPad = async (
   face: RecipeBuildFace,
@@ -203,8 +209,8 @@ export const buildPad = async (
 };
 
 /**
- * flip（静的軸の添字反転）。軸の位置は `[outer, len, inner]` の 3 分割に畳んで渡す
- * （rank を params に載せない — src/kernels/flip.ts）。
+ * flip (index reversal on a static axis). The axis position is passed folded into the three parts
+ * `[outer, len, inner]` (rank is not carried in params — src/kernels/flip.ts).
  */
 export const buildFlip = async (
   face: RecipeBuildFace,
@@ -217,8 +223,9 @@ export const buildFlip = async (
   const dim = flipDim(step.node.attrs, `nodes (${step.node.op})`);
   const { pipeline, layout, roles } = await face.state.cache.get(FLIP_KEY, FLIP_WGSL);
   const params = face.writeParams(
-    // MUST: 軸の前後で分ける（`slice(0, dim)` と `slice(dim + 1)`）。境界を 1 つずらすと
-    // 反転する軸が隣にずれ、shape も要素数も変わらないまま値だけが誤る。
+    // MUST: split before and after the axis (`slice(0, dim)` and `slice(dim + 1)`). Shifting the
+    // boundary by one moves the reversed axis to its neighbour, and only the values go wrong while
+    // shape and element count stay the same.
     flipParams(numel(shape.slice(0, dim)), shape[dim], numel(shape.slice(dim + 1))),
     PARAMS_UNIFORM_USAGE,
   );
@@ -242,9 +249,9 @@ export const buildFlip = async (
 };
 
 /**
- * upsample_bilinear2d（NCHW の空間 2 軸を双線形 resample・`align_corners = True` 専業）。
- * 出力 1 要素 = 1 invocation の grid-stride で、params は空間 4 長だけ運ぶ
- * （N·C はカーネル側が平面添字へ畳む — src/kernels/upsample-bilinear2d.ts）。
+ * upsample_bilinear2d (bilinear resampling of the two spatial axes of NCHW, `align_corners = True`
+ * only). Grid-stride with one output element = one invocation; params carry only the four spatial
+ * lengths (the kernel folds N·C into a plane index — src/kernels/upsample-bilinear2d.ts).
  */
 export const buildUpsampleBilinear2d = async (
   face: RecipeBuildFace,
@@ -283,8 +290,9 @@ export const buildUpsampleBilinear2d = async (
 };
 
 /**
- * 最終次元の gather。出力は連続で、`row = i / J` から `src[row * D + index[i]]` を引く。
- * 範囲外添字の扱いは src/kernels/gather.ts の裁定（GPU は NaN 汚染 / CPU 参照は throw）。
+ * gather over the last dimension. The output is contiguous, reading `src[row * D + index[i]]` with
+ * `row = i / J`. Out-of-range indices follow the ruling in src/kernels/gather.ts (the GPU poisons
+ * with NaN / the CPU reference throws).
  */
 export const buildGather = async (
   face: RecipeBuildFace,

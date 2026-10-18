@@ -1,19 +1,22 @@
 /**
- * コンテナを開く — `BlockSource` → ヘッダ → 2 文書の検証 → parse → 合流 → block 取得 → `krg` 抽出。
- * docs/container-v1.md §7 / §8 / §9 / §11。
+ * Opens a container — `BlockSource` → header → verify the 2 documents → parse → merge → fetch blocks
+ * → extract `krg`. docs/container-v1.md §7 / §8 / §9 / §11.
  *
- * 順序（「先にグラフだけ取って admission → 重み」）:
- * 1. part 0 の先頭 24 B からヘッダを読む。
- * 2. グラフ記述 / モデル記述を**外側の期待 hash + 長さ**で先に検証してから parse する
- *    （manifest の FileRef や呼び手の pin が持つ値。descriptor 自身は自分の hash を持てない — §7）。
- * 3. 宣言だけで決まる検査（2 文書の整合・束縛の突合・payload 長）を通す。
- * 4. block は要るときに取る。取得元が未検証（{@link BlockSource.verified} が false）なら、取った
- *    block ごとに sha256 を検証する（検証済みの取得元は取得層がファイル全体を検証済み — ADR 0109
- *    決定 7）。
+ * Order ("fetch only the graph first, admission, then weights"):
+ * 1. Read the header from the first 24 B of part 0.
+ * 2. Verify the graph descriptor / model descriptor against **the outer expected hash + length**
+ *    first, then parse them (values held by the manifest's FileRef or the caller's pin. A
+ *    descriptor cannot hold its own hash — §7).
+ * 3. Pass the checks determined by declarations alone (consistency of the 2 documents, binding
+ *    checks, payload lengths).
+ * 4. Fetch blocks when needed. When the source is unverified ({@link BlockSource.verified} is false),
+ *    verify the sha256 of each fetched block (for a verified source the fetch layer has verified the
+ *    whole file — ADR 0109 decision 7).
  *
- * `BlockSource` は「単一形の全量バイト」と「part ごとのバイト列」を同じ面に揃える。単一形の part
- * 絶対 offset は書き手と共有する {@link derivePartOffsets} が導く（descriptor に絶対 offset を
- * 書かないので、単一形と分割形で descriptor がバイト同一になる — §8）。
+ * `BlockSource` puts "the whole bytes of the single form" and "the bytes per part" behind one
+ * interface. The absolute part offsets of the single form are derived by {@link derivePartOffsets},
+ * shared with the writer (the descriptor does not record absolute offsets, so the descriptor is
+ * byte-identical in the single and split forms — §8).
  */
 
 import { bindGraphs, type BoundGraph } from "./bind.ts";
@@ -39,93 +42,106 @@ import {
 import { HEADER_BYTES, MAX_SINGLE_CONTAINER_BYTES } from "./limits.ts";
 
 /**
- * part → バイト区間の引き出し口。取得層（hub / ローカルファイル / メモリ）はこの面だけを埋める。
- * `read` は**複製したバイト列**を返してよいし、取得元の器の view を返してもよい — 呼び手は返った
- * バイト列を書き換えない。
+ * The accessor from part → byte range. The fetch layer (hub / local file / memory) implements only
+ * this interface. `read` may return **copied bytes** or a view of the source's buffer — callers do
+ * not modify the returned bytes.
  */
 export type BlockSource = {
   readonly partCount: number;
   /**
-   * 取得元が part のバイト列を**検証済み**か（ADR 0109 決定 7 / container-v1 §7）。true なら
-   * {@link OpenedContainer.readBlock} は block の sha256 を掛けない（取得層がファイル全体を検証して
-   * 記録ハッシュと突き合わせた経路 — cold の 2 重 digest と warm の digest を避ける）。全量バイト /
-   * part 列 / ローカルディレクトリのように誰も検証していない取得元は false MUST — 黙って true を
-   * 名乗ると改ざんが素通りする。
+   * Whether the source has **already verified** the part bytes (ADR 0109 decision 7 / container-v1
+   * §7). When true, {@link OpenedContainer.readBlock} does not compute block sha256 (the path where
+   * the fetch layer verified the whole file and compared it with the recorded hash — avoiding the
+   * double digest on cold and the digest on warm). A source nobody verified, such as whole bytes / a
+   * part list / a local directory, MUST be false — silently claiming true lets tampering through.
    */
   readonly verified: boolean;
   partLength(index: number): number;
   read(part: number, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>>;
 };
 
-/** 入力の形。単一形（全量バイト）と分割形（part 列）を同じ入口で受ける。 */
+/**
+ * Input forms. The single form (whole bytes) and the split form (part list) share one entry point.
+ */
 export type ContainerInput =
   | { readonly kind: "bytes"; readonly bytes: Uint8Array<ArrayBuffer> }
   | { readonly kind: "parts"; readonly parts: readonly Uint8Array<ArrayBuffer>[] }
   | { readonly kind: "source"; readonly source: BlockSource };
 
 /**
- * 外側（manifest `karume/5` の `container.descriptor` / 呼び手の pin）が持つ 2 文書の期待値（§7 の①）。
- * `sha256` は小文字 16 進 64 文字（形式はここで検査する — 呼び手にブランド型を要求しない）。
+ * Expected values of the 2 documents held outside (`container.descriptor` of manifest `karume/5` /
+ * the caller's pin) (§7 step 1). `sha256` is 64 lowercase hex characters (the format is checked
+ * here — callers are not required to pass a branded type).
  */
 export type DescriptorExpectation = {
   readonly graph: { readonly length: number; readonly sha256: string };
   /**
-   * `krm` では必須、`krg` では渡してはならない（どちらも `openContainer` が ContainerFormatError で
-   * 落とす — 容器の種別はヘッダを読むまで分からないので、型ではなく開く時点で検査する）。
+   * Required for a `krm`, must not be passed for a `krg` (`openContainer` fails with a
+   * ContainerFormatError in both cases — the container kind is unknown until the header is read, so
+   * this is checked when opening, not by the type).
    */
   readonly model?: { readonly length: number; readonly sha256: string };
 };
 
 /**
- * 資産 1 本の読み口（役割の解釈は models — container-v1 §2.2。runtime は名前 → block までしか知らない）。
+ * Reader for one asset (models interprets the role — container-v1 §2.2. The runtime knows only
+ * name → block).
  */
 export type AssetReader = {
   readonly role: string;
-  /** payload のバイト数（論理長 — 宣言値。block の詰め物は含まない）。 */
+  /** Payload byte count (the logical length — the declared value; block padding not included). */
   readonly length: number;
   /**
-   * `[offset, offset + length)` を返す。検証済みの取得元では区間だけを取る（block 全体は読まない —
-   * 数百 MiB の表から数 KB の行だけを引く消費側のための面）。未検証の取得元では block を 1 度取って
-   * sha256 を検証し、この読み口が生きている間は保持してそこから切る（保持する本数は呼び手が読み口の
-   * 寿命で決める）。
+   * Returns `[offset, offset + length)`. A verified source fetches only the range (the block is not
+   * read whole — the interface for consumers that pull a few KB of rows from a table of hundreds of
+   * MiB). An unverified source fetches the block once, verifies its sha256, keeps it while this
+   * reader is alive and slices from it (how many are kept is decided by the caller through the
+   * readers' lifetimes).
    *
-   * MUST: 返りは書き換えない。検証済みの取得元では取得元の器の view がそのまま出る（hub の scan
-   * 経路なら part 全体を握る view）ので、区間より長く持つ呼び手は写す — 握り続けると区間ではなく
-   * 器全体が生き残る。未検証の取得元でも返りは保持した block の view（`subarray`）で、その block
-   * 自体が取得元の器の view でありうる（hub で位置読みを持たないローカルディレクトリは scan 経路
-   * なので、握るのは part 全体の器）— 写す理由は同じ。
+   * MUST: the result is not modified. A verified source returns a view of the source's buffer as is
+   * (on the hub's scan path, a view holding the whole part), so a caller that keeps it longer than
+   * the range copies it — holding on keeps the whole buffer alive, not just the range. With an
+   * unverified source the result is also a view (`subarray`) of the kept block, and that block can
+   * itself be a view of the source's buffer (a local directory whose adapter has no positional reads
+   * (`readFileRange`) is on the hub's scan path, so it holds the whole part's buffer) — copy for the
+   * same reason.
    */
   read(offset: number, length: number): Promise<Uint8Array<ArrayBuffer>>;
 };
 
-/** 開いたコンテナ。 */
+/** An opened container. */
 export type OpenedContainer = {
   readonly header: ContainerHeader;
   readonly graph: GraphDescriptor;
-  /** `krg` では undefined。 */
+  /** undefined for a `krg`. */
   readonly model: ModelDescriptor | undefined;
-  /** グラフ名 → 合流結果（IR v2 宣言 + initializer ごとの供給計画）。 */
+  /** Graph name → merge result (IR v2 declaration + the supply plan per initializer). */
   readonly graphs: Readonly<Record<string, BoundGraph>>;
   readonly source: BlockSource;
-  /** block 1 本の所在（part と目次の行）。 */
+  /** Location of one block (part and index row). */
   locate(id: string): {
     readonly part: number;
     readonly record: ConstBlockRecord | DataBlockRecord;
   };
   /**
-   * block を 1 本取って返す。取得元が検証済みでなければ（{@link BlockSource.verified} が false）
-   * sha256 を検証する（§7 — 未検証の取得元だけが block ごとに一括 digest）。
+   * Fetches and returns one block. When the source is not verified ({@link BlockSource.verified} is
+   * false), its sha256 is verified (§7 — only unverified sources get a single digest per block).
    */
   readBlock(id: string): Promise<Uint8Array<ArrayBuffer>>;
-  /** 資産 1 本の読み口を開く（`krg` と未宣言の名前は fail loudly）。開くだけでは 1 バイトも取らない。 */
+  /**
+   * Opens the reader for one asset (a `krg` and undeclared names fail loudly). Opening fetches no
+   * byte.
+   */
   asset(name: string): AssetReader;
   /**
-   * `[ヘッダ'][グラフ記述][詰め物][const 領域]` を組み立てて返す（`krg` のバイトコピー抽出 — §9）。
-   * 抽出元は `krm` だけで、`krg` を開いた容器では fail loudly（const 領域全体の hash が無い）。
+   * Assembles and returns `[header'][graph descriptor][padding][const region]` (byte-copy
+   * extraction of a `krg` — §9). The only extraction source is a `krm`; a container opened from a
+   * `krg` fails loudly (there is no hash of the whole const region).
    *
-   * NOTE: この口はグラフ記述のバイト列を開いた容器の寿命いっぱい握る。取得元が器の view を返す形
-   * （hub の scan 経路）では part 0 の器ごと握るが、part 0 はヘッダと 2 文書ちょうどなので、増える
-   * 量はモデル記述の長さ程度に収まる。
+   * NOTE: this function holds the graph descriptor bytes for the whole lifetime of the opened
+   * container. When the source returns views of its buffer (the hub's scan path), it holds part 0's
+   * whole buffer, but part 0 is exactly the header and the 2 documents, so the extra amount stays
+   * around the length of the model descriptor.
    */
   extractGraph(): Promise<Uint8Array<ArrayBuffer>>;
 };
@@ -144,7 +160,10 @@ const sliceExact = (
   return bytes.subarray(offset, offset + length);
 };
 
-/** 単一形（全量バイト）の `BlockSource`。part 絶対 offset は宣言 part 長 + 整列規則から導く（§8）。 */
+/**
+ * `BlockSource` of the single form (whole bytes). Absolute part offsets come from the declared part
+ * lengths + the alignment rule (§8).
+ */
 export const bytesSource = (
   bytes: Uint8Array<ArrayBuffer>,
   part0Bytes: number,
@@ -179,7 +198,7 @@ export const bytesSource = (
   };
 };
 
-/** 分割形（part ごとのバイト列）の `BlockSource`。 */
+/** `BlockSource` of the split form (bytes per part). */
 export const partsSource = (parts: readonly Uint8Array<ArrayBuffer>[]): BlockSource => {
   const partOf = (index: number): Uint8Array<ArrayBuffer> => {
     const part = parts[index];
@@ -222,7 +241,8 @@ const initialSource = (input: ContainerInput): BlockSource => {
       `単一形の全量 ${input.bytes.byteLength} バイトが上限 ${MAX_SINGLE_CONTAINER_BYTES} を超える（分割形で読む）`,
     );
   }
-  // 単一形は part 長が descriptor を読むまで分からない。先頭だけ読める暫定の面を作る。
+  // In the single form the part lengths are unknown until the descriptor is read. Build a
+  // provisional source that can read only the start.
   return {
     partCount: 1,
     verified: false,
@@ -233,10 +253,10 @@ const initialSource = (input: ContainerInput): BlockSource => {
 };
 
 /**
- * コンテナを開く。
+ * Opens a container.
  *
- * `expect` は外側が持つ期待値（§7）。省略すると 2 文書の完全性は**誰も保証しない**ので、テストと
- * ローカル読み込み以外では渡す。
+ * `expect` holds the expected values from outside (§7). When omitted, **nobody guarantees** the
+ * integrity of the 2 documents, so pass it everywhere except tests and local loading.
  */
 export const openContainer = async (
   input: ContainerInput,
@@ -261,8 +281,9 @@ export const openContainer = async (
 
   let model: ModelDescriptor | undefined;
   if (header.kind === "model") {
-    // MUST: 期待値を渡すなら 2 文書とも（§7 の①）。graph だけで通すと、束縛表と block の
-    // sha256 を持つモデル記述が未検証のまま parse される（krg 側の門と対称）。
+    // MUST: when expected values are passed, pass them for both documents (§7 step 1). Passing only
+    // graph would parse the model descriptor, which holds the binding table and the block sha256s,
+    // unverified (symmetric with the krg-side check).
     if (expect !== undefined && expect.model === undefined) {
       throw new ContainerFormatError("krm なのにモデル記述の期待値が渡されていない");
     }
@@ -279,7 +300,7 @@ export const openContainer = async (
   }
   const graphs = bindGraphs(graph, model);
 
-  // krg の part 1 は const 領域そのもの（§3）。krm は parts の宣言長。
+  // Part 1 of a krg is the const region itself (§3). For a krm, the declared lengths of parts.
   const partLengths =
     model === undefined ? [graph.const.length] : model.parts.map((part) => part.length);
   const source = input.kind === "bytes" ? bytesSource(input.bytes, part0Bytes, partLengths) : head;
@@ -289,7 +310,8 @@ export const openContainer = async (
     );
   }
   if (input.kind !== "bytes") {
-    // 分割形 / 取得層: 各 part の実長が宣言と一致すること（単一形は bytesSource が全長で見る）。
+    // Split form / fetch layer: each part's actual length must match its declaration (for the
+    // single form bytesSource checks the total length).
     if (source.partLength(0) !== part0Bytes) {
       throw new ContainerFormatError(
         `part 0 の長さ ${source.partLength(0)} が宣言 ${part0Bytes} と違う`,
@@ -347,7 +369,8 @@ export const openContainer = async (
       role: binding.role,
       length: binding.length,
       read: async (offset, length) => {
-        // NaN は全ての比較が偽になって範囲検査を素通りし、小数は subarray が黙って切り捨てる。
+        // NaN makes every comparison false and slips past the range check, and subarray silently
+        // truncates fractions.
         if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length)) {
           throw new ContainerFormatError(
             `資産 '${name}': 区間 (offset ${offset}, length ${length}) が安全整数でない`,
@@ -374,9 +397,9 @@ export const openContainer = async (
   };
 
   const extractGraph = async (): Promise<Uint8Array<ArrayBuffer>> => {
-    // §9 が定義する抽出元は krm だけ。krg には const 領域全体の hash を持つ文書が無く、抜き出す
-    // バイト列の完全性を照合できない（block ごとの hash は readBlock が見るが、block の外の詰め物は
-    // 誰も見ない）。
+    // §9 defines only a krm as the extraction source. A krg has no document holding the hash of the
+    // whole const region, so the integrity of the extracted bytes cannot be checked (readBlock checks
+    // per-block hashes, but nobody checks the padding outside the blocks).
     if (model === undefined) {
       throw new ContainerFormatError("krg 抽出は krm からだけ（krg 入力は抽出元にならない — §9）");
     }
@@ -390,7 +413,8 @@ export const openContainer = async (
         `const 領域: 取得長 ${region.byteLength} が宣言 ${regionLength} と違う`,
       );
     }
-    // part 1 の完全性はモデル記述の parts[0] が持つ。抜き出す前に検証する。
+    // The integrity of part 1 is held by parts[0] of the model descriptor. Verify it before
+    // extracting.
     const actual = await sha256Hex(region);
     if (actual !== model.parts[0].sha256) {
       throw new ContainerFormatError(

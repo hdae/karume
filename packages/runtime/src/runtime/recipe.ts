@@ -1,32 +1,37 @@
 /**
- * 実行レシピ — エンコード層の中間表現と、その汎用実行ループ。
+ * Execution recipes — the intermediate representation of the encode layer and its generic execution
+ * loop.
  *
- * 構造: 「**導出**（executor がステップ列 → レシピ列へ落とす）→ **計画**（{@link planRecipes} が
- * 中間バッファの領域と offset を決める — ADR 0093）→ **実行**（bind group を組んで dispatch を
- * 積む）」。導出相は GPU コマンドを 1 つも出さず、run 寿命の実体にも触れない — Session 常駐の
- * 実体（重み・per-channel scale・params）だけを直参照として畳み込む。
+ * Structure: "**derivation** (the executor lowers the step list → the recipe list) → **planning**
+ * ({@link planRecipes} decides the regions and offsets of intermediate buffers — ADR 0093) →
+ * **execution** (builds bind groups and queues dispatches)". The derivation phase issues not a single
+ * GPU command and touches no run-lifetime object — it folds in only Session-resident objects (weights,
+ * per-channel scales, params) as direct references.
  *
- * MUST: レシピは `GPUBindGroup` を持たない。束ねる相手（ノード出力・一時）は計画が領域の
- * offset へ配るため、レシピが持てるのは「どの位置に何を束ねるか」という**手順**だけ。焼き込んだ
- * bind group（{@link bakeBindGroups}）を持つのは **backing 側**で、レシピ自体は実体に依らないまま
- * 複数の backing から共有される。
- * MUST: 一時バッファの寿命は dispatch 境界で表す（{@link TempRecipe}）。まとめて確保 /
- * まとめて解放に均すと、入れ子の生存区間を持つ形（i8a8 attention）で計画の同時生存が変わる。
+ * MUST: a recipe holds no `GPUBindGroup`. The plan hands out the binding targets (node outputs,
+ * temporaries) to region offsets, so all a recipe can hold is the **procedure** "what is bound at
+ * which position". The baked bind groups ({@link bakeBindGroups}) are held by the **backing side**;
+ * the recipe itself stays independent of the objects and is shared by several backings.
+ * MUST: the lifetime of a temporary buffer is expressed by dispatch boundaries ({@link TempRecipe}).
+ * Flattening it to allocate-all / release-all changes the plan's simultaneous liveness for shapes
+ * with nested live intervals (i8a8 attention).
  *
- * 実行相は**計画 1 本を共有する 2 経路**。ミス run は run 寿命の領域を確保して
- * {@link bakeAllBindGroups} で全 dispatch の bind group を組み、ヒット run は Session 常駐の領域
- * （backing）に {@link bakeBindGroups} で焼き込んだ group を使う。どちらも積むのは焼き込み実行
- * （run は {@link executeBakedPlanPaced}・enqueue は {@link executeBakedPlan}）の dispatch だけで、
- * 確保・参照計数・解放は実行相から消えている（計画が再生済み）。束縛は `{ buffer: 領域, offset, size }`
- * で実寸に切る（ADR 0093 決定 2）。
+ * The execution phase is **two paths sharing one plan**. A miss run allocates run-lifetime regions
+ * and builds the bind groups of every dispatch with {@link bakeAllBindGroups}; a hit run uses the
+ * groups baked by {@link bakeBindGroups} into Session-resident regions (backing). Both only queue the
+ * dispatches of baked execution (run: {@link executeBakedPlanPaced}, enqueue:
+ * {@link executeBakedPlan}); allocation, reference counting and release are gone from the execution
+ * phase (the plan has replayed them). Bindings are cut to the exact size with
+ * `{ buffer: region, offset, size }` (ADR 0093 decision 2).
  *
- * MUST: **焼き込みの単位は束ねる相手の所有者で分ける**（ADR 0066 決定 5）。Session 所有の実体
- * （slot / 常駐入力 / 重み）だけを束ねる dispatch は {@link bakeBindGroups} が backing の構築時に
- * 1 度だけ焼き、context 所有の実体（state スロット・論理長 uniform）を束ねる dispatch は
- * {@link bakeGenerationBindGroups} が **GenerationContext ごと**に焼く。分けないと「前の context の
- * KV を束ねたまま回る」沈黙 stale 読みか、context 切替ごとの全再構築スラッシングの二択になる。
- * 判別は {@link bindsGeneration} の 1 本で、2 つの焼き込みは互いの穴（`undefined`）を埋め合う
- * （{@link BakedGroups}）。
+ * MUST: **the unit of baking is split by the owner of the binding targets** (ADR 0066 decision 5). A
+ * dispatch that binds only Session-owned objects (slots / resident inputs / weights) is baked once by
+ * {@link bakeBindGroups} when the backing is built; a dispatch that binds context-owned objects (state
+ * slots, the logical-length uniform) is baked **per GenerationContext** by
+ * {@link bakeGenerationBindGroups}. Without the split it is a choice between "running with the
+ * previous context's KV still bound", a silent stale read, and thrashing that rebuilds everything on
+ * every context switch. The discriminator is the single {@link bindsGeneration}, and the two bakes
+ * fill each other's holes (`undefined`) ({@link BakedGroups}).
  */
 
 import type { StorageRoles } from "../gpu/pipeline-cache.ts";
@@ -41,133 +46,140 @@ import {
 } from "./transient-plan.ts";
 
 /**
- * run 寿命に依らない出どころ（Session 常駐の直参照 または 値名）。別名化の元にもなる。
- * `resident` は重み / per-channel scale / params — 導出相で実体まで解決してよい。
+ * A source that does not depend on the run lifetime (a direct reference to a Session-resident object,
+ * or a value name). It can also be the origin of an alias.
+ * `resident` is a weight / per-channel scale / params — it may be resolved down to the object in the
+ * derivation phase.
  */
 export type ValueSource =
   | { readonly kind: "resident"; readonly buffer: GPUBuffer }
   | { readonly kind: "value"; readonly name: string };
 
-/** 同一ステップ内で閉じた一時領域への参照（`id` は {@link StepRecipe.temps} の添字）。 */
+/** A reference to a temporary region closed within the same step (`id` indexes {@link StepRecipe.temps}). */
 export type TempSource = { readonly kind: "temp"; readonly id: number };
 
 /**
- * {@link GenerationContext} が所有する実体（ADR 0066 決定 5 — 所有権の分離）。
+ * Objects owned by the {@link GenerationContext} (ADR 0066 decision 5 — separation of ownership).
  *
- * `state` は名前付きスロット・`lengths` は論理長 uniform（追記 4 の搬送路）で、どちらも
- * **Session 所有ではない**。レシピは名前と種別だけを持ち、実体は run ごとに
- * {@link GenerationEncoding} が配る — これが「レシピは context の識別子を知らない」
- * （計画鍵に context が載らない）の実体側の根拠になる。
+ * `state` is a named slot and `lengths` is the logical-length uniform (the carrier of the 2026-08-17
+ * addendum, item 4); **neither is owned by the Session**. A recipe holds only the name and kind, and the objects are
+ * handed out per run by {@link GenerationEncoding} — this is the object-side basis of "a recipe does
+ * not know the context's identity" (the context is not part of the plan key).
  */
 export type GenerationSource =
   | { readonly kind: "state"; readonly name: string }
   | { readonly kind: "lengths" };
 
-/** bind group の 1 スロットが指す実体の出どころ。 */
+/** The source of the object one bind group slot points at. */
 export type BindingSource = ValueSource | TempSource | GenerationSource;
 
-/** bind group の 1 エントリ。MUST: 束縛番号はカーネル側の宣言と一致させる。 */
+/** One bind group entry. MUST: the binding number matches the kernel's declaration. */
 export type BindingRecipe = {
   readonly binding: number;
   readonly source: BindingSource;
 };
 
 /**
- * dispatch の workgroup 数。**静的な 3 つ組**（既存の全ビルダ）か、**論理長から算出する
- * 純関数**（states 形 — ADR 0067 決定 4「dispatch 数はホストが論理長から算出」）のどちらか。
+ * The workgroup count of a dispatch. Either a **static triple** (every existing builder) or a **pure
+ * function computing it from the logical lengths** (states form — ADR 0067 decision 4, "the host
+ * computes dispatch counts from the logical lengths").
  *
- * MUST: 判別共用体で持つ（同じ dispatch に静的値と算出関数を並存させない）。両方持てる形に
- * すると「どちらが正本か」が dispatch ごとに割れ、片方だけ直された実装が例外なしに
- * 別の仕事量で回る。
+ * MUST: held as a discriminated union (a dispatch never carries both a static value and a function).
+ * A form that can hold both splits "which one is the source of truth" per dispatch, and an
+ * implementation where only one was fixed runs a different amount of work without an exception.
  */
 export type DispatchWorkgroups =
   | readonly [number, number, number]
   | ((past: number, query: number) => readonly [number, number, number]);
 
 /**
- * 1 dispatch ぶんのレシピ。
+ * The recipe of one dispatch.
  *
- * MUST: `params` は**全カーネル共通で binding 0**（bind group が例外なくこの形）なので、
- * {@link BindingRecipe} の列とは別枠で持つ。
+ * MUST: `params` is **binding 0 for every kernel** (bind groups have this form without exception), so
+ * it is kept apart from the list of {@link BindingRecipe}.
  */
 type DispatchRecipe = {
-  /** パイプラインキー（診断ラベルと同一）。 */
+  /** Pipeline key (identical to the diagnostic label). */
   readonly key: string;
   readonly pipeline: GPUComputePipeline;
   readonly layout: GPUBindGroupLayout;
-  /** binding 0 の params（uniform または storage）。Session 常駐（内容アドレスキャッシュ）。 */
+  /** The params at binding 0 (uniform or storage). Session-resident (content-addressed cache). */
   readonly params: GPUBuffer;
   readonly bindings: readonly BindingRecipe[];
   readonly workgroups: DispatchWorkgroups;
   /**
-   * カーネル WGSL の storage 宣言から採った束縛番号の役割（読み / 読み書き）。計画が
-   * 「同じ dispatch で読まれる値と書かれる値は同じバッファに置けない」を守るための材料
-   * （src/gpu/pipeline-cache.ts の {@link StorageRoles}）。
+   * The role of each binding number (read / read-write), taken from the kernel WGSL's storage
+   * declarations. The material the plan uses to keep "a value read and a value written in the same
+   * dispatch cannot share a buffer" ({@link StorageRoles} in src/gpu/pipeline-cache.ts).
    */
   readonly roles: StorageRoles;
 };
 
 /**
- * ノード内一時の確保仕様。**寿命は dispatch 境界の添字で表す**（モジュール doc の MUST）。
+ * The allocation spec of a node temporary. **Its lifetime is expressed by dispatch-boundary
+ * indices** (the MUST of the module doc).
  *
- * 計画では `allocBefore` の直前に生存を始め、同じ境界に複数あれば**確保の逆順**に生存を終える
- * （各 `#build*` が返す順と同じ）。
+ * In the plan it becomes alive right before `allocBefore`, and when several share a boundary they
+ * end **in reverse allocation order** (the same order each `#build*` returns them).
  */
 export type TempRecipe = {
   readonly byteLength: number;
-  /** {@link StepRecipe.dispatches} のこの添字の**直前**に確保する。 */
+  /** Allocated right **before** this index of {@link StepRecipe.dispatches}. */
   readonly allocBefore: number;
-  /** {@link StepRecipe.dispatches} のこの添字の**直後**に解放する。 */
+  /** Released right **after** this index of {@link StepRecipe.dispatches}. */
   readonly releaseAfter: number;
 };
 
 /**
- * ステップ出力の確保仕様。`alias` は入力実体をそのまま出力の実体にする形（reshape と
- * 恒等 expand — ADR 0011）で、確保も dispatch も出ない。簿記と組んだ
- * {@link StepOutput} が外向きの形（この判別ユニオン単体では消費者が居ない）。
+ * The allocation spec of a step output. `alias` makes the input's object the output's object as is
+ * (reshape and identity expand — ADR 0011), and issues neither allocation nor dispatch. Combined with
+ * the bookkeeping, {@link StepOutput} is the outward form (this discriminated union alone has no
+ * consumer).
  */
 type OutputRecipe =
   | { readonly kind: "alloc"; readonly byteLength: number }
   | { readonly kind: "alias"; readonly source: ValueSource };
 
-/** ステップ出力 1 本ぶんの確保仕様と簿記（{@link StepRecipe.outputs} の要素）。 */
+/** The allocation spec and bookkeeping of one step output (an element of {@link StepRecipe.outputs}). */
 export type StepOutput = OutputRecipe & {
   readonly name: string;
-  /** 出力値の将来の消費回数（`retain` の `uses`）。 */
+  /** Future consumption count of the output value (the `uses` of `retain`). */
   readonly uses: number;
-  /** グラフ出力（生存を末尾まで延ばし readback 可能に保つ）。 */
+  /** Graph output (its lifetime extends to the end so it stays readable for readback). */
   readonly pinned: boolean;
 };
 
-/** 実行ステップ 1 つ（素のノード または 融合ステップ）のレシピ。 */
+/** The recipe of one execution step (a plain node or a fused step). */
 export type StepRecipe = {
   /**
-   * 出力 slot 昇順の確保仕様と簿記（ADR 0068 決定 1 — 素のノードでは `node.outs` と同順・同長、
-   * 融合ステップは常に 1 本）。
+   * Allocation specs and bookkeeping in ascending output slot (ADR 0068 decision 1 — for a plain node
+   * the same order and length as `node.outs`; a fused step always has 1).
    *
-   * MUST: **確保 → retain → env 登録 → 定義ぶんの解放を、この列の昇順で**行う。順序を共有する
-   * のは 4 箇所 — 計画の再生（src/runtime/transient-plan.ts）・確保プログラム（{@link buildTransientProgram}）・
-   * 焼き込み（実体は `bakeGroups` 1 本 — 入口は {@link bakeBindGroups} /
-   * {@link bakeGenerationBindGroups}）・列の組み立て（recipe-builder の `#buildStep`）。1 箇所でも
-   * 順序が割れると例外は出ず、配り直しの相手（= 同じバイトを掴む値の組・別名判定）だけが
-   * 焼き込みと計画で食い違う。
+   * MUST: **allocate → retain → register in env → release the definition's own count, in ascending
+   * order of this list**. Four places share this order — the plan replay
+   * (src/runtime/transient-plan.ts), the allocation program ({@link buildTransientProgram}), baking
+   * (one implementation, `bakeGroups` — entries {@link bakeBindGroups} /
+   * {@link bakeGenerationBindGroups}) and the list assembly (`#buildStep` in recipe-builder). If the
+   * order splits in even one place, no exception is raised; only the reassignment partners (= the
+   * pairs of values holding the same bytes, the alias decisions) differ between baking and the plan.
    */
   readonly outputs: readonly StepOutput[];
   readonly temps: readonly TempRecipe[];
   readonly dispatches: readonly DispatchRecipe[];
-  /** ステップ末尾に解放する入力の**延べ列**（現行簿記と同一順）。 */
+  /** The **release list** of inputs released at the end of the step (same order as the current bookkeeping). */
   readonly releases: readonly string[];
   /**
-   * このステップが **state スロットへ書く**か（`state_append` を含むか — ADR 0067 決定 5）。
+   * Whether this step **writes to a state slot** (contains `state_append` — ADR 0067 decision 5).
    *
-   * MUST: 失敗時の poison 判定（ADR 0066 追記 3）の唯一の判別点。物理 ring が上書きされうる
-   * のは書き dispatch を submit した run だけなので、executor はこの真偽で「submit カウンタの
-   * スナップショットを取る位置」を決める。読むだけの states 形 attention は false。
+   * MUST: the only discriminator for the poison decision on failure (ADR 0066 addendum of 2026-08-17,
+   * item 3). The physical ring can be overwritten only by a run that submitted a writing dispatch, so
+   * the executor uses this flag to decide "where to snapshot the submit counter". States-form attention that only
+   * reads is false.
    */
   readonly writesState: boolean;
 };
 
-/** 構築中の可変な一時仕様（{@link TempRecipe} の可変版）。 */
+/** The mutable temporary spec under construction (the mutable form of {@link TempRecipe}). */
 type MutableTemp = {
   readonly byteLength: number;
   readonly allocBefore: number;
@@ -175,24 +187,25 @@ type MutableTemp = {
 };
 
 /**
- * 1 ステップぶんのレシピを組み立てる器。**dispatch を積んだ位置**から一時の寿命を導くので、
- * 各 `#build*` は一時が要る位置と読み終えた位置で
- * {@link StepRecipeBuilder.allocTemp} / {@link StepRecipeBuilder.releaseTemp} を呼べばよい。
+ * The builder of one step's recipe. It derives the temporaries' lifetimes from **the position where
+ * dispatches were queued**, so each `#build*` only needs to call
+ * {@link StepRecipeBuilder.allocTemp} / {@link StepRecipeBuilder.releaseTemp} where a temporary is
+ * needed and where it has been read for the last time.
  */
 export class StepRecipeBuilder {
   readonly #temps: MutableTemp[] = [];
   readonly #dispatches: DispatchRecipe[] = [];
 
-  /** ノード内一時を 1 本宣言する（計画では dispatch 境界で区切られた生存区間 1 本になる）。 */
+  /** Declares one node temporary (in the plan, one live interval bounded by dispatch boundaries). */
   allocTemp(byteLength: number): TempSource {
     const id = this.#temps.length;
-    // 解放位置は releaseTemp が確定させる。宣言だけで解放が来なければ宣言の受け口
-    // （validateStepRecipe）が落とす（沈黙で漏れない）。
+    // releaseTemp fixes the release position. A declaration with no release is caught by the
+    // declaration's entry point (validateStepRecipe) (it does not leak silently).
     this.#temps.push({ byteLength, allocBefore: this.#dispatches.length, releaseAfter: -1 });
     return { kind: "temp", id };
   }
 
-  /** 一時の解放位置を「ここまでに積んだ最後の dispatch の直後」に確定する。 */
+  /** Fixes the temporary's release position to "right after the last dispatch queued so far". */
   releaseTemp(temp: TempSource): void {
     this.#temps[temp.id].releaseAfter = this.#dispatches.length - 1;
   }
@@ -211,23 +224,28 @@ export class StepRecipeBuilder {
 }
 
 /**
- * 組み上がったステップレシピの**宣言**が、それ自身の dispatch 列の内側で閉じているかを見る
- * （GPU に触らない静的検査）。
+ * Checks that the **declaration** of an assembled step recipe closes within its own dispatch list (a
+ * static check that does not touch the GPU).
  *
- * MUST: 一時の寿命は `0 ≤ allocBefore ≤ releaseAfter < dispatch 数`。外れた宣言は実行相で
- * 「未確保の一時を束ねる」（`temps[id]` が `undefined` のまま createBindGroup へ渡り、真因から
- * 遠い validation エラーになる）か「解放されない一時が残る」（計画の閉包検査まで気づけない）に化ける。
- * MUST: 寿命境界と束縛が指す一時の添字は整数（`Number.isSafeInteger`）。小数は区間の内側に
- * 見え、NaN はどの大小比較も偽なので、比較だけの検査を素通りする。
- * MUST: 束縛が指す一時の添字は宣言済みの範囲内。範囲外は上と同じ `undefined` 束縛で、
- * 「どの dispatch がどの一時を読み損ねたか」が診断から消える。
- * MUST: 一時を束ねる dispatch の添字は、その一時の `[allocBefore, releaseAfter]` の内側。
- * 計画は区間の外のバイトを別の一時へ配り直すので、外で束ねると前後の持ち主が書いた値を
- * 例外なしに読む（沈黙の誤値）。
- * MUST: 呼び口は**レシピの宣言の受け口 1 箇所**（recipe-builder の `#buildStep` の戻り）。
- * 素のノードと融合再演の両方がそこを通るので、経路ごとに手書きの検査を置かずに済む
- * （融合ルールの宣言自体は src/runtime/fusion-rule.ts の `assertTempLifetimes` が受け口で落とし、
- * ここは**再演した結果**を同じ強度で見る）。
+ * MUST: a temporary's lifetime is `0 ≤ allocBefore ≤ releaseAfter < dispatch count`. A declaration
+ * outside this turns, in the execution phase, into "binding an unallocated temporary" (`temps[id]`
+ * reaches createBindGroup as `undefined` and becomes a validation error far from the real cause) or
+ * "a temporary that is never released" (unnoticed until the plan's closure check).
+ * MUST: lifetime boundaries and the temporary indices a binding points at are integers
+ * (`Number.isSafeInteger`). A fraction appears to be inside the interval, and NaN makes every
+ * comparison false, so it slips past comparison-only checks.
+ * MUST: a temporary index a binding points at is within the declared range. Out of range is the same
+ * `undefined` binding as above, and "which dispatch failed to read which temporary" vanishes from the
+ * diagnostic.
+ * MUST: the index of a dispatch that binds a temporary is inside that temporary's
+ * `[allocBefore, releaseAfter]`. The plan reassigns bytes outside the interval to other temporaries,
+ * so binding outside it reads, without an exception, the values written by the owner before or after
+ * (a silently wrong value).
+ * MUST: the caller is **the single entry point for recipe declarations** (the return of `#buildStep`
+ * in recipe-builder). Both plain nodes and fusion replays pass there, so no hand-written check per
+ * path is needed (the fusion rule's declaration itself is caught at its entry by
+ * `assertTempLifetimes` in src/runtime/fusion-rule.ts; this checks **the result of the replay** with
+ * the same strength).
  */
 export const validateStepRecipe = (recipe: StepRecipe): void => {
   const where = `ステップ '${recipe.outputs.map((output) => output.name).join(", ")}'`;
@@ -252,7 +270,8 @@ export const validateStepRecipe = (recipe: StepRecipe): void => {
     for (const entry of dispatch.bindings) {
       const { source } = entry;
       if (source.kind !== "temp") continue;
-      // 整数でない添字は宣言の本数と関係なく落ちるので、範囲外とは別の文言で原因を名指す。
+      // A non-integer index fails regardless of the declared count, so name the cause with a text
+      // separate from out-of-range.
       if (!Number.isSafeInteger(source.id)) {
         throw new ExecutionError(
           `${where}: dispatch '${dispatch.key}' の束縛 ${entry.binding} の一時の添字 ` +
@@ -277,48 +296,56 @@ export const validateStepRecipe = (recipe: StepRecipe): void => {
 };
 
 /**
- * generation run 1 回ぶんの context 側の実体と論理長（ADR 0066 決定 5 / 追記 4）。
+ * The context-side objects and logical lengths of one generation run (ADR 0066 decision 5 / addendum
+ * of 2026-08-17, item 4).
  *
- * MUST: 論理長は**エンコード時の値**（`lengths` uniform に書いた値と同じ組）。dispatch 数を
- * ここから算出する（{@link DispatchWorkgroups}）ので、uniform と食い違うと「GPU が走査する
- * 範囲」と「ホストが撃った workgroup 数」がずれ、S の一部が未書き込みのまま読まれる。
+ * MUST: the logical lengths are **the values at encode time** (the same pair written into the
+ * `lengths` uniform). Dispatch counts are computed from them ({@link DispatchWorkgroups}), so a
+ * mismatch with the uniform shifts "the range the GPU scans" against "the workgroup count the host
+ * dispatched", and part of S is read without having been written.
  */
 export type GenerationEncoding = {
-  /** スロット名 → context 所有のバッファ。 */
+  /** Slot name → context-owned buffer. */
   readonly slots: ReadonlyMap<string, GPUBuffer>;
-  /** 論理長 uniform（`{past, query}` の 8 バイト）。 */
+  /** The logical-length uniform (8 bytes of `{past, query}`). */
   readonly lengths: GPUBuffer;
   readonly past: number;
   readonly query: number;
 };
 
 /**
- * generation run の**論理長に対する**受け口（導出相が state ノードから集める — 実体は
- * src/runtime/recipe-builder.ts）。state ノードを持たないグラフでは両方とも空になる。
+ * What a generation run accepts **with respect to the logical lengths** (collected from state nodes
+ * by the derivation phase — the implementation is in src/runtime/recipe-builder.ts). For a graph
+ * without state nodes both are empty.
  *
- * MUST: 導出済み計画（executor の `PreparedPlan`）と同じ寿命で持つ。ヒット run は計画も導出も
- * 走らせないので、レシピ列と一緒に畳んでおかないと「2 run 目だけ検査が消える」形になる。
+ * MUST: held with the same lifetime as the prepared plan (the executor's `PreparedPlan`). A hit run
+ * runs neither planning nor derivation, so unless this is folded together with the recipe list, "the
+ * check disappears only from the second run on".
  */
 export type GenerationLimits = {
   /**
-   * state ノードの物理 chunk 行数 `M`（同値は畳んだ集合）。`queryLength` はこの**最小**まで
-   * — 超えた行は宣言 shape に載らない（ADR 0066 決定 4 の固定長 chunk + pad）。
+   * The physical chunk rows `M` of state nodes (equal values folded into a set). `queryLength` is
+   * allowed up to the **minimum** of these — rows beyond it are not in the declared shape (the
+   * fixed-length chunk + pad of ADR 0066 decision 4).
    */
   readonly chunkRows: ReadonlySet<number>;
   /**
-   * full スロット（attrs `window` 宣言なし）の名前 → 行容量 `C`。sliding は ring なので
-   * 対象外（ADR 0067 決定 4 ④ — 「full スロットは実行時に `pastLength + queryLength ≤ C`」）。
+   * Name of a full slot (no attrs `window` declared) → row capacity `C`. Sliding slots are rings and
+   * are excluded (ADR 0067 decision 4 ④ — "for full slots, `pastLength + queryLength ≤ C` at run
+   * time").
    */
   readonly fullCapacities: ReadonlyMap<string, number>;
 };
 
 /**
- * state ノードの物理 chunk 行数 `M` が context の許す集合（`allowedRows` — 生成は
- * src/runtime/generation-context.ts の `allowedChunkRows`）に入っているかの照合（GPU 非依存の純関数）。
+ * Checks that the physical chunk rows `M` of state nodes are in the set the context allows
+ * (`allowedRows` — produced by `allowedChunkRows` in src/runtime/generation-context.ts) (a pure
+ * function independent of the GPU).
  *
- * MUST: run 前検査（{@link assertGenerationRun}）と見積り（estimate.ts）が同じこの 1 本を通す。
- * 見積りが別の判定を持つと、run が最初の 1 回で必ず拒否する形（数値で固定した `M` が集合に
- * 無い形など）に見積りだけが正常値を返す。
+ * MUST: the pre-run check ({@link assertGenerationRun}) and the estimate (estimate.ts) go through
+ * this same function. If the estimate had its own decision, the estimate alone would return normal
+ * values for a shape the run always rejects on its first call (such as an `M` fixed as a number that
+ * is not in the set).
  */
 export const assertChunkRowsAllowed = (
   chunkRows: Iterable<number>,
@@ -336,21 +363,22 @@ export const assertChunkRowsAllowed = (
 };
 
 /**
- * generation run の**エンコード前**の検査（ADR 0066 決定 4 / ADR 0067 決定 4 ④）。
+ * The **pre-encode** check of a generation run (ADR 0066 decision 4 / ADR 0067 decision 4 ④).
  *
- * MUST: dispatch を 1 本も積む前に落とす。`queryLength > M` は q / ins の宣言 shape の外を
- * 読み書きする形で、`pastLength + queryLength > C` の full スロットは `state_append` の書きが
- * 範囲外へ落ちる（robustness で捨てられる = **静かに書かれない**）— どちらも例外も警告も
- * 出ないまま、次 step の読者が残骸を過去 KV として食う。
- * MUST: **物理 chunk 行数 `M` は context が許す集合（`allowedRows`）の中だけ** —
- * `{1}`（decode 形）∪ `chunkBuckets` ∪ `{chunkLength}`（prefill 形。ADR 0066 決定 4 の
- * 「実行形は 2 本」を追記〈バケット〉が「宣言した本数だけ」へ広げたもの）の実行時執行。任意の
- * `M` を通すと、`M` の種類ぶん別鍵の計画が増えて PreparedPlan の LRU を汚し、decode のホット
- * パスが静かに再導出へ落ちる — 集合を context の計画時定数にしてあるのは、増える本数を宣言
- * された数で頭打ちにするため。判定はこの 1 箇所で足りる。
- * MUST: `queryLength ≤ chunkLength` と u32 値域はここで重ねて見ない（`GenerationContext` の
- * `writeLengths` / `advance` が持つ — 二重簿記の禁止）。`M = 1` では `Q ≤ M` が `Q = 1` を
- * 含意するので、decode 形の `Q` 検査も別途は要らない。
+ * MUST: fail before queuing a single dispatch. `queryLength > M` reads and writes outside the
+ * declared shape of q / ins, and for a full slot with `pastLength + queryLength > C` the write of
+ * `state_append` falls out of range (discarded by robustness = **silently not written**) — neither
+ * raises an exception or a warning, and the next step's reader consumes the debris as past KV.
+ * MUST: **the physical chunk rows `M` only within the set the context allows (`allowedRows`)** —
+ * the run-time enforcement of `{1}` (decode shape) ∪ `chunkBuckets` ∪ `{chunkLength}` (prefill
+ * shapes; ADR 0066 decision 4's "two execution shapes" widened by the addendum item on buckets (item
+ * 10 of the 2026-08-17 addendum) to "as many as declared"). Letting an arbitrary `M` through adds plans with distinct keys per kind of
+ * `M`, pollutes the PreparedPlan LRU, and the decode hot path silently falls back to re-derivation —
+ * the set is a plan-time constant of the context to cap the number of plans at the declared count.
+ * This one place is enough for the decision.
+ * MUST: `queryLength ≤ chunkLength` and the u32 range are not checked again here (`writeLengths` /
+ * `advance` of `GenerationContext` own them — no double bookkeeping). With `M = 1`, `Q ≤ M` implies
+ * `Q = 1`, so the decode shape needs no separate `Q` check either.
  */
 export const assertGenerationRun = (
   limits: GenerationLimits,
@@ -378,12 +406,13 @@ export const assertGenerationRun = (
 };
 
 /**
- * 束縛先の実体 1 本。計画が配った slot は領域バッファの `(offset, size)` 区間、それ以外
- * （グラフ入力・常駐）はバッファ全体。
+ * One binding target. A slot handed out by the plan is the `(offset, size)` range of a region buffer;
+ * anything else (graph inputs, resident objects) is the whole buffer.
  *
- * `readable` は readback の適格判定 — slot でない値（入力 / 重み）と pin された slot だけが真。
- * 他の slot は run 中に別の値へ配り直され、次 run では前 run の残骸が居る（中間値 readback 拒否の
- * 規律 — 旧 `RunArena.isReadable` と同じ）。
+ * `readable` is the eligibility for readback — true only for values that are not slots (inputs /
+ * weights) and for pinned slots. Other slots are reassigned to other values during the run, and the
+ * next run finds the previous run's debris there (the rule that rejects readback of intermediates —
+ * the same as the former `RunArena.isReadable`).
  */
 export type ValueBinding = {
   readonly buffer: GPUBuffer;
@@ -392,7 +421,7 @@ export type ValueBinding = {
   readonly readable: boolean;
 };
 
-/** {@link ValueBinding} を bind group の resource へ落とす（undefined のキーを持たせない）。 */
+/** Lowers a {@link ValueBinding} to a bind group resource (without keys holding undefined). */
 const toResource = (binding: ValueBinding): GPUBufferBinding =>
   binding.offset === undefined
     ? { buffer: binding.buffer }
@@ -409,11 +438,12 @@ const resolveValue = (
 };
 
 /**
- * context 所有の実体を引く。
+ * Looks up a context-owned object.
  *
- * MUST: generation 情報が無い実行で state / 論理長を束ねようとしたら fail loudly（計画層が
- * 先に落とすので到達しない防波堤 — 通すと `undefined` を bind group へ渡して validation で
- * 落ち、真因から遠い診断になる）。
+ * MUST: binding state / logical lengths in an execution without generation information fails loudly
+ * (a breakwater that is not reached because the planning layer fails first — letting it through
+ * passes `undefined` to the bind group, which fails validation with a diagnostic far from the real
+ * cause).
  */
 const resolveGeneration = (
   source: GenerationSource,
@@ -452,10 +482,11 @@ const resolveBinding = (
 };
 
 /**
- * 論理長から算出する形（{@link DispatchWorkgroups}）を実数へ落とす。
+ * Lowers the form computed from the logical lengths ({@link DispatchWorkgroups}) to actual numbers.
  *
- * MUST: 算出は**エンコードのたび**（毎 run 論理長が変わる）。ここで畳んで持ち回ると
- * 「レシピは bindings の純関数」が崩れ、前 step の workgroup 数で回る。
+ * MUST: compute **at every encode** (the logical lengths change every run). Folding the result here
+ * and carrying it around breaks "a recipe is a pure function of the bindings" and runs with the
+ * previous step's workgroup count.
  */
 const resolveWorkgroups = (
   recipe: DispatchRecipe,
@@ -472,18 +503,20 @@ const resolveWorkgroups = (
 };
 
 /**
- * dispatch を 1 本積む。**論理長から算出した workgroup 数が 0 の軸を持つときだけ積まない**。
+ * Queues one dispatch. **It is skipped only when a workgroup count computed from the logical lengths
+ * has an axis of 0.**
  *
- * 動的形の 0 は「この行ブロックが丸ごと pad 行 = 今 step の有効行が 1 つも無い」を意味する
- * （states 形 — src/kernels/state-attention.ts の `stateEffectiveRows`）。WebGPU 的には 0 も
- * 合法な no-op だが、積むと診断（GPU 時間内訳・submit 数）に仕事量ゼロの dispatch が並び、
- * 「仕事量が queryLength に比例する」の観測が濁る。
+ * A 0 in a dynamic shape means "this row block is entirely pad rows = no valid row in this step"
+ * (states form — `stateEffectiveRows` in src/kernels/state-attention.ts). For WebGPU a 0 is a legal
+ * no-op too, but queuing it lines up zero-work dispatches in the diagnostics (GPU time breakdown,
+ * submit count) and blurs the observation that "work is proportional to queryLength".
  *
- * MUST: **静的な 3 つ組は 0 でも積む**（既存契約 — 0 要素テンソルの経路は要素数 0 の dispatch を
- * 「黙って飛ばさない」形で通っており、tests/e2e_public_api_test.ts がその dispatch 数を固定して
- * いる）。省く条件を「値が 0」にすると、非 generation 経路の挙動まで巻き添えで変わる。
- * MUST: ミス run / ヒット run で**この 1 本**を共有する。片方だけ省くと、同じレシピが
- * 経路で違う dispatch 列を積む。
+ * MUST: **a static triple is queued even when it is 0** (the existing contract — the path for
+ * zero-element tensors goes through without "silently skipping" zero-element dispatches, and
+ * tests/e2e_public_api_test.ts pins that dispatch count). Making the skip condition "the value is 0"
+ * would drag along the behavior of non-generation paths.
+ * MUST: miss runs and hit runs share **this one function**. Skipping on one side only would make the
+ * same recipe queue different dispatch lists per path.
  */
 const dispatchWithWork = (
   scheduler: SubmitScheduler,
@@ -497,17 +530,17 @@ const dispatchWithWork = (
 };
 
 /**
- * この dispatch が {@link GenerationContext} 所有の実体を束ねるか — **焼き込み単位の判別 1 本**
- * （ADR 0066 決定 5）。
+ * Whether this dispatch binds objects owned by the {@link GenerationContext} — **the single
+ * discriminator of the baking unit** (ADR 0066 decision 5).
  *
- * MUST: 判別点はここだけ。Session 側（{@link bakeBindGroups}）と context 側
- * （{@link bakeGenerationBindGroups}）が別々の条件を持つと、どちらも焼かない dispatch
- * （実行時に fail loudly = まだ安全）か、**両方が焼く** dispatch（Session 側の group が
- * context 所有の実体を掴んだまま run を跨ぎ、切替後も前の context の KV を読む沈黙 stale 読み）が
- * 生まれる。
- * NOTE: 動的 workgroups（{@link DispatchWorkgroups} の関数形）は判別に**入れない** — 束ねる実体
- * とは直交する軸で、dispatch 数はどちらの側で焼いた group でもエンコードのたびに論理長から
- * 解決される（{@link resolveWorkgroups}）。
+ * MUST: this is the only discrimination point. If the Session side ({@link bakeBindGroups}) and the
+ * context side ({@link bakeGenerationBindGroups}) had separate conditions, they would produce
+ * dispatches baked by neither (fail loudly at run time = still safe) or dispatches **baked by both**
+ * (the Session-side group holds context-owned objects across runs and keeps reading the previous
+ * context's KV after a switch — a silent stale read).
+ * NOTE: dynamic workgroups (the function form of {@link DispatchWorkgroups}) are **not** part of the
+ * discrimination — that axis is orthogonal to the bound objects, and the dispatch count is resolved
+ * from the logical lengths at every encode whichever side baked the group ({@link resolveWorkgroups}).
  */
 const bindsGeneration = (dispatch: DispatchRecipe): boolean =>
   dispatch.bindings.some(
@@ -515,11 +548,12 @@ const bindsGeneration = (dispatch: DispatchRecipe): boolean =>
   );
 
 /**
- * 1 dispatch ぶんの bind group を組む。
+ * Builds the bind group of one dispatch.
  *
- * MUST: ミス run（{@link bakeAllBindGroups}）と焼き込み（{@link bakeBindGroups}）は**この 1 本**
- * を共有する。エントリの並べ方が 2 実装に分かれると、片方だけ束縛番号や params の位置が
- * ずれても validation は通り（layout さえ満たせばよい）、値だけが静かに変わる。
+ * MUST: the miss run ({@link bakeAllBindGroups}) and baking ({@link bakeBindGroups}) share **this one
+ * function**. If the entry layout split into two implementations, a shift of binding numbers or of
+ * the params position on one side would still pass validation (it only has to satisfy the layout),
+ * and only the values would change silently.
  */
 const createBindGroup = (
   device: GPUDevice,
@@ -538,14 +572,15 @@ const createBindGroup = (
   });
 
 /**
- * レシピ列から中間バッファの確保プログラムを組む（{@link planTransients} の入力）。
+ * Builds the allocation program of intermediate buffers from the recipe list (the input of
+ * {@link planTransients}).
  *
- * MUST: 純関数（GPU 資源を作らず、レシピも変更しない）。
- * MUST: dispatch ごとの読み / 書きは {@link DispatchRecipe.roles}（WGSL 宣言）から採る。値名 /
- * 一時を束ねる束縛に役割が無ければ fail loudly — 推測で埋めると、外れた dispatch だけが
- * usage scope の validation で落ち、出力が全て 0 のまま例外にならない。
- * NOTE: state スロットと論理長 uniform は計画に**現れない**（ADR 0066 決定 5 — 所有者が
- * GenerationContext）。常駐（重み / scale）も同様。
+ * MUST: a pure function (creates no GPU resources and does not modify the recipes).
+ * MUST: reads / writes per dispatch come from {@link DispatchRecipe.roles} (the WGSL declarations).
+ * A binding of a value name / temporary without a role fails loudly — filling it by guess makes only
+ * the wrong dispatch fail usage-scope validation, and the output stays all 0 without an exception.
+ * NOTE: state slots and the logical-length uniform **do not appear** in the plan (ADR 0066 decision
+ * 5 — their owner is the GenerationContext). Neither do resident objects (weights / scales).
  */
 export const buildTransientProgram = (recipes: readonly StepRecipe[]): TransientProgram =>
   recipes.map((recipe) => ({
@@ -583,13 +618,13 @@ export const buildTransientProgram = (recipes: readonly StepRecipe[]): Transient
     releases: recipe.releases,
   }));
 
-/** レシピ列の中間バッファ計画（{@link buildTransientProgram} → {@link planTransients}）。 */
+/** The intermediate-buffer plan of a recipe list ({@link buildTransientProgram} → {@link planTransients}). */
 export const planRecipes = (
   recipes: readonly StepRecipe[],
   limits: TransientLimits,
 ): TransientPlan => planTransients(buildTransientProgram(recipes), limits);
 
-/** slot 添字 → 領域上の束縛。引けないのは計画とレシピ列の不整合（内部の不変条件破れ）。 */
+/** Slot index → binding on a region. A failed lookup is a mismatch between plan and recipe list (a broken internal invariant). */
 const resolveSlot = (
   slot: number | undefined,
   plan: TransientPlan,
@@ -609,48 +644,52 @@ const resolveSlot = (
 };
 
 /**
- * 焼き込み済み bind group の表。外側は {@link StepRecipe} 列と、内側は
- * {@link StepRecipe.dispatches} と同順・同長。
+ * The table of baked bind groups. The outer level has the same order and length as the
+ * {@link StepRecipe} list, the inner level as {@link StepRecipe.dispatches}.
  *
- * `undefined` は「この位置は**もう一方の所有者**が焼く」印（ADR 0066 決定 5 の焼き込み単位の
- * 分離）。Session 側の表と context 側の表は {@link bindsGeneration} で相補になり、実行
- * （{@link executeBakedPlan}）が 1 位置ずつ埋め合わせる。
+ * `undefined` marks "this position is baked by **the other owner**" (the separation of the baking
+ * unit in ADR 0066 decision 5). The Session-side table and the context-side table are complementary
+ * through {@link bindsGeneration}, and execution ({@link executeBakedPlan}) fills them in position by
+ * position.
  */
 export type BakedGroups = readonly (readonly (GPUBindGroup | undefined)[])[];
 
-/** 焼き込みに要る実体（両方の焼き込みが同じ束を受ける）。 */
+/** The objects baking needs (both bakes receive the same bundle). */
 export type BakeContext = {
   readonly device: GPUDevice;
-  /** 中間バッファの計画（{@link planRecipes}）。 */
+  /** The intermediate-buffer plan ({@link planRecipes}). */
   readonly plan: TransientPlan;
-  /** 領域添字 → 領域バッファ（{@link TransientPlan.regions} と同順・同長）。 */
+  /** Region index → region buffer (same order and length as {@link TransientPlan.regions}). */
   readonly regions: readonly GPUBuffer[];
-  /** グラフ入力名 → 実体（backing 所有の常駐バッファ / run 寿命の入力バッファ / 常駐入力）。 */
+  /** Graph input name → object (resident buffer owned by the backing / run-lifetime input buffer / resident input). */
   readonly inputs: ReadonlyMap<string, GPUBuffer>;
 };
 
-/** 焼き込みの結果（{@link bakeBindGroups} / {@link bakeAllBindGroups}）。 */
+/** The result of baking ({@link bakeBindGroups} / {@link bakeAllBindGroups}). */
 export type BakedPlan = {
-  /** 選ばれた dispatch の bind group（残りは `undefined` の穴）。 */
+  /** The bind groups of the selected dispatches (the rest are `undefined` holes). */
   readonly groups: BakedGroups;
   /**
-   * 全ステップを展開し終えた時点の値名 → 束縛先。グラフ出力の読み戻し先をここから引く
-   * （`readable` が真の値だけ読める）。
+   * Value name → binding target once every step has been expanded. The readback targets of graph
+   * outputs are looked up here (only values whose `readable` is true can be read).
    */
   readonly values: ReadonlyMap<string, ValueBinding>;
 };
 
 /**
- * 焼き込みの**唯一の実装**（Session 側 / context 側 / ミス run はどれもここを通る）。`select` が
- * 真の dispatch だけ bind group を組み、残りは `undefined` の穴で返す。
+ * **The only implementation** of baking (the Session side, the context side and the miss run all go
+ * through here). Builds bind groups only for dispatches where `select` is true and returns the rest
+ * as `undefined` holes.
  *
- * MUST: 値名 → 束縛先の写像は計画の再生（{@link planTransients}）と**同じ順で**展開する
- * — 出力を先に env へ載せてから当該ステップの dispatch を解決する順序が崩れると、出力を
- * 自分の入力にも束ねるステップだけが別の実体を掴む。出力が複数ある形では**出力 slot 昇順**まで
- * 揃える（{@link StepRecipe.outputs} の順序規約）。
- * MUST: 焼き込みで歩き方を分けない。context 側だけ別実装にすると、同じ dispatch の同じ
- * 束縛が「Session 側が焼いた group」と「context 側が焼いた group」で別の実体を指しうる
- * （どちらも layout は満たすので validation は通り、値だけが静かに変わる）。
+ * MUST: the value name → binding target mapping is expanded **in the same order** as the plan replay
+ * ({@link planTransients}) — if the order "put the outputs in env first, then resolve the step's
+ * dispatches" breaks, exactly the steps that also bind their output as their own input grab a
+ * different object. With several outputs the order goes down to **ascending output slot** (the
+ * ordering rule of {@link StepRecipe.outputs}).
+ * MUST: do not split how baking walks. If only the context side had its own implementation, the same
+ * binding of the same dispatch could point at different objects in "the group baked by the Session
+ * side" and "the group baked by the context side" (both satisfy the layout, so validation passes and
+ * only the values change silently).
  */
 const bakeGroups = (
   recipes: readonly StepRecipe[],
@@ -688,28 +727,30 @@ const bakeGroups = (
 };
 
 /**
- * slot backing の bind group を焼き込む（構築時に 1 度だけ）。
+ * Bakes the bind groups of a slot backing (once, at construction).
  *
- * 焼き込めるのは束縛先が run を跨いで固定だから: params / 重み / per-channel scale は
- * `resident` の直参照、ノード出力・一時は計画が配った常駐領域の区間、グラフ入力は backing が
- * 所有する常駐バッファ（`inputs`）。run ごとに変わるのは**入力バッファの中身だけ**で、
- * bind group が指す実体は 1 つも動かない。
+ * They can be baked because the binding targets are fixed across runs: params / weights /
+ * per-channel scales are `resident` direct references, node outputs and temporaries are ranges of
+ * resident regions handed out by the plan, and graph inputs are resident buffers owned by the backing
+ * (`inputs`). What changes per run is **only the contents of the input buffers**; not a single object
+ * the bind groups point at moves.
  *
- * MUST: context 所有の実体を束ねる dispatch は**焼かない**（ADR 0066 決定 5）。backing は
- * Session 所有（予算の内側なら形ごとに複数保持する — ADR 0095）で、どの GenerationContext と
- * 組むかは run のたびに変わるため、ここで焼くと切替後も前の context の KV を束ねたまま回る。その位置は
- * {@link bakeGenerationBindGroups} が埋める。
- * MUST: 呼ぶのは run の errorScope 区間の内側だけ（createBindGroup の validation 失敗は
- * 例外にならない）。
+ * MUST: dispatches that bind context-owned objects are **not baked** (ADR 0066 decision 5). The
+ * backing is Session-owned (several are kept per shape within the budget — ADR 0095), and which
+ * GenerationContext it pairs with changes every run, so baking here would keep binding the previous
+ * context's KV after a switch. Those positions are filled by {@link bakeGenerationBindGroups}.
+ * MUST: call it only inside a run's errorScope interval (a validation failure of createBindGroup does
+ * not become an exception).
  */
 export const bakeBindGroups = (recipes: readonly StepRecipe[], context: BakeContext): BakedPlan =>
   bakeGroups(recipes, context, (dispatch) => !bindsGeneration(dispatch), undefined);
 
 /**
- * ミス run の bind group を組む（run 寿命の領域に対して**全 dispatch**）。generation を伴う run は
- * その run の {@link GenerationEncoding} をそのまま束ねる（run 寿命なので分離焼き込みは要らない）。
+ * Builds the bind groups of a miss run (**every dispatch**, against run-lifetime regions). A run with
+ * generation binds that run's {@link GenerationEncoding} directly (it is run-lifetime, so no separate
+ * baking is needed).
  *
- * MUST: 呼ぶのは run の errorScope 区間の内側だけ（{@link bakeBindGroups} と同じ理由）。
+ * MUST: call it only inside a run's errorScope interval (same reason as {@link bakeBindGroups}).
  */
 export const bakeAllBindGroups = (
   recipes: readonly StepRecipe[],
@@ -718,14 +759,16 @@ export const bakeAllBindGroups = (
 ): BakedPlan => bakeGroups(recipes, context, () => true, generation);
 
 /**
- * generation run の **context 側**の bind group を焼き込む（ADR 0066 決定 5 の分離焼き込み）。
+ * Bakes the **context-side** bind groups of a generation run (the separate baking of ADR 0066
+ * decision 5).
  *
- * 束ねる相手は 2 種類混ざる: backing 所有の実体（slot / 入力 / 重み — {@link bakeBindGroups} と
- * **同じ値解決**で再現する）と、context 所有の実体（state スロット・論理長 uniform）。したがって
- * この束の寿命は **(backing, context) の組**で、どちらが入れ替わっても焼き直しが要る
- * （backing 側は世代識別子で検出する — executor の `#generationGroups`）。
+ * The binding targets are of two kinds: backing-owned objects (slots / inputs / weights — reproduced
+ * through **the same value resolution** as {@link bakeBindGroups}) and context-owned objects (state
+ * slots, the logical-length uniform). So the lifetime of this bundle is **the pair (backing,
+ * context)**, and replacing either requires re-baking (the backing side is detected by a generation
+ * token — the executor's `#generationGroups`).
  *
- * MUST: 呼ぶのは run の errorScope 区間の内側だけ（{@link bakeBindGroups} と同じ理由）。
+ * MUST: call it only inside a run's errorScope interval (same reason as {@link bakeBindGroups}).
  */
 export const bakeGenerationBindGroups = (
   recipes: readonly StepRecipe[],
@@ -733,34 +776,36 @@ export const bakeGenerationBindGroups = (
 ): BakedGroups => bakeGroups(recipes, context, bindsGeneration, context.generation).groups;
 
 /**
- * generation run の焼き込み実行面（{@link executeBakedPlan} の第 4 引数）。
+ * The baked-execution surface of a generation run (the 4th argument of {@link executeBakedPlan}).
  */
 export type BakedGeneration = {
-  /** context 側で焼いた bind group（Session 側の `undefined` の穴を埋める）。 */
+  /** The bind groups baked on the context side (they fill the Session side's `undefined` holes). */
   readonly groups: BakedGroups;
-  /** 論理長と context 所有の実体（dispatch 数の算出はこの値から）。 */
+  /** The logical lengths and context-owned objects (dispatch counts are computed from these values). */
   readonly encoding: GenerationEncoding;
   /**
-   * ステップの dispatch を積む**前**に呼ぶ（poison 判定のスナップショット点 — ADR 0066 追記 3）。
+   * Called **before** queuing a step's dispatches (the snapshot point of the poison decision — ADR
+   * 0066 addendum of 2026-08-17, item 3).
    *
-   * MUST: 呼ぶ位置はミス run と同じ「各ステップの直前」。
-   * ずらすと、同じグラフの同じ失敗が経路（ミス run / ヒット run）によって poison したりしなかったり
-   * する。
+   * MUST: called at the same position as in a miss run, "right before each step".
+   * Shifting it makes the same failure of the same graph poison or not depending on the path (miss
+   * run / hit run).
    */
   onStep(recipe: StepRecipe): void;
 };
 
 /**
- * レシピ列の**計画上の** dispatch 本数をパイプラインキー別に数える（キーの辞書順 — コード単位
- * 比較でロケール非依存）。`SessionDiagnostics.lastRunPipelines` の実体。
+ * Counts the **planned** dispatches of a recipe list per pipeline key (in key order — code-unit
+ * comparison, locale-independent). The implementation of `SessionDiagnostics.lastRunPipelines`.
  *
- * MUST: 源は run ごとのレシピ列そのもの（独立に足し引きするカウンタを持たない）。Session 累積の
- * 使用キー集合（src/gpu/pipeline-cache.ts）は導出済み計画に当たった run では更新されないので、
- * 「この run が何を積んだか」の源にならない。
- * NOTE: 論理長から workgroup 数を算出する dispatch（states 形）は仕事量ゼロの step で実際には
- * 積まれない（{@link dispatchWithWork}）が、ここはそれも 1 本と数える — 計画の census であって
- * 発行の census ではない。引数を `dispatches[].key` だけの構造型にしているのは、数えるのに
- * それ以外を読まないため（テストが GPU 実体無しで列を組める）。
+ * MUST: the source is the run's recipe list itself (no counter incremented and decremented on its
+ * own). The Session-cumulative set of used keys (src/gpu/pipeline-cache.ts) is not updated by runs
+ * that hit a prepared plan, so it cannot be the source of "what this run queued".
+ * NOTE: dispatches whose workgroup count is computed from the logical lengths (states form) are not
+ * actually queued in zero-work steps ({@link dispatchWithWork}), but this still counts them as one —
+ * it is a census of the plan, not of issuance. The argument is a structural type with only
+ * `dispatches[].key` because counting reads nothing else (tests can build the list without GPU
+ * objects).
  */
 export const pipelineCensus = (
   recipes: readonly { readonly dispatches: readonly { readonly key: string }[] }[],
@@ -775,14 +820,16 @@ export const pipelineCensus = (
 };
 
 /**
- * 焼き込み済み bind group の実行（enqueue の経路 — run は {@link executeBakedPlanPaced}）。出す GPU 操作は
- * この dispatch だけで、確保・解放も createBindGroup も出ない（ミス run は {@link bakeAllBindGroups} で
- * 組んだ group を渡す）。
+ * Executes the baked bind groups (the enqueue path — run uses {@link executeBakedPlanPaced}). The
+ * only GPU operations issued are these dispatches; neither allocation, release nor createBindGroup
+ * (a miss run passes the groups built by {@link bakeAllBindGroups}).
  *
- * MUST: 前 run の残骸が領域に残っていても正しいのは full-write（ADR 0014 — 全ノードが束縛範囲の
- * 全バイトを書く）が根拠で、配り直しの安全性と同じ 1 本の不変条件。
- * MUST: 埋まらない位置は fail loudly（generation 面を渡さずに state を束ねる dispatch へ来た形）。
- * 通すと `undefined` を `setBindGroup` へ渡して真因から遠い診断になる。
+ * MUST: being correct even with the previous run's debris left in the regions rests on full-write
+ * (ADR 0014 — every node writes every byte of its binding range), the same single invariant as the
+ * safety of reassignment.
+ * MUST: a position that stays unfilled fails loudly (a dispatch binding state reached without the
+ * generation surface). Letting it through passes `undefined` to `setBindGroup`, a diagnostic far from
+ * the real cause.
  */
 export const executeBakedPlan = (
   recipes: readonly StepRecipe[],
@@ -796,19 +843,21 @@ export const executeBakedPlan = (
 };
 
 /**
- * {@link executeBakedPlan} と同じ dispatch 列を積み、ステップの間で送り込みの先行の上限を待つ
- * （`SubmitScheduler.backpressure` — ADR 0123）。積むコマンドの中身と順序は同じで、待つ位置だけが
- * 足される。
+ * Queues the same dispatch list as {@link executeBakedPlan} and waits for the in-flight submit bound
+ * between steps (`SubmitScheduler.backpressure` — ADR 0123). The content and order of the queued
+ * commands are the same; only the waiting points are added.
  *
- * 戻りは待ちが要ったときだけ Promise（undefined なら全ステップを同期で積み終えている）。MUST: 上限に
- * 届かない run には 1 マイクロタスクも足さない — async 関数にすると、待ちが無くても呼び手の await が
- * 譲り、最後のステップの未 submit を抱えたまま他のタスクを走らせる（errorScope を張った区間の同期性も
- * 失う）。
+ * Returns a Promise only when a wait was needed (undefined means every step was queued
+ * synchronously). MUST: a run that does not reach the bound gets not a single extra microtask — as
+ * an async function the caller's await would yield even with no wait, letting other tasks run while
+ * the last step is still unsubmitted (and losing the synchronicity of the section under the
+ * errorScope).
  *
- * MUST: 呼ぶのは run（errorScope 区間ロックの中）だけ。ロックが他の run と batch を締め出すので、
- * 待ちの間に他の誰の dispatch も割り込まない。MUST NOT: enqueue からは呼ばない（同期の
- * {@link executeBakedPlan} を使い、待たない）。同じ batch の別 Session の enqueue は区間ロックでは
- * 直列化されないので、待つと後から呼んだ enqueue が先に queue へ載る（ADR 0123 決定 4）。
+ * MUST: called only from run (inside the errorScope interval lock). The lock keeps other runs and
+ * batches out, so nobody else's dispatches cut in during the wait. MUST NOT: called from enqueue (use
+ * the synchronous {@link executeBakedPlan} and do not wait). Enqueues of other Sessions in the same
+ * batch are not serialised by the interval lock, so waiting would let an enqueue called later reach
+ * the queue first (ADR 0123 decision 4).
  */
 export const executeBakedPlanPaced = (
   recipes: readonly StepRecipe[],
@@ -827,7 +876,7 @@ export const executeBakedPlanPaced = (
   return continueFrom(0);
 };
 
-/** 1 ステップぶんの dispatch を積む（{@link executeBakedPlan} と {@link executeBakedPlanPaced} が共有する 1 本）。 */
+/** Queues one step's dispatches (the single function shared by {@link executeBakedPlan} and {@link executeBakedPlanPaced}). */
 const dispatchBakedStep = (
   recipe: StepRecipe,
   index: number,

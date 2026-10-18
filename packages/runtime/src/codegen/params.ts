@@ -1,22 +1,26 @@
-// uniform の u32 域検査（1 本）。
+// The u32 range check for uniforms (a single one).
 //
-// uniform の各欄は WGSL 側で `u32` として読まれる一方、ホストの値は f64 なので、
-// `Uint32Array` への代入は 2^32 の剰余を黙って取る。検査を params ビルダごとに書くと
-// 「safe-integer だけ見る / 上限も見る / 何も見ない」の流儀に割れ、割れた側で超過値が
-// narrowing されたまま dispatch まで通る（要素数だけ別物になる沈黙誤値）ため、判定は
-// ここ 1 箇所に置く。
+// Each uniform field is read as `u32` on the WGSL side while the host value is an f64, so an
+// assignment into a `Uint32Array` silently takes the value modulo 2^32. Writing the check per
+// params builder splits into styles ("check only safe-integer / also check the upper bound /
+// check nothing"), and on the weak side an oversized value passes narrowed all the way to the
+// dispatch (a silent wrong value where only the element count differs), so the check lives here
+// in one place.
 
 import { CodegenError } from "./errors.ts";
 
 /**
- * uniform に載せる値（および載せる値の導出に使う中間値）が u32 の域に収まることを確かめる。
+ * Checks that the values put on a uniform (and the intermediate values used to derive them) fit
+ * in the u32 range.
  *
- * MUST: 非整数・負・`0xffff_ffff` 超は fail loudly。丸めても切り詰めてもいけない —
- * ここで通した値はそのまま WGSL の添字計算になる。
- * MUST: 文言にはパラメタ名と値を入れる（どの欄が溢れたのかが分からないと診断が始まらない）。
+ * MUST: a non-integer, a negative value or one above `0xffff_ffff` fails loudly. It must be neither
+ * rounded nor truncated — a value passed here becomes WGSL index arithmetic as is.
+ * MUST: the message carries the parameter name and the value (diagnosis cannot start without
+ * knowing which field overflowed).
  *
- * @param where 失敗文言の頭（例: `"gather params"`）。
- * @param values パラメタ名 → 値。名前は uniform の欄名か、導出式（例: `"4 * n"`）。
+ * @param where the head of the failure message (e.g. `"gather params"`).
+ * @param values parameter name → value. The name is a uniform field name or a derivation
+ *   (e.g. `"4 * n"`).
  */
 export const assertU32Params = (where: string, values: Readonly<Record<string, number>>): void => {
   for (const [name, value] of Object.entries(values)) {

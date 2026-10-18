@@ -1,7 +1,7 @@
 /**
- * 融合ルール `upsample2x`（VAE nearest-exact x2 の 6 ノード）。全ルール共通の適格条件と
- * `defineRule` は {@link "../fusion-rule.ts"}、適用順を決める宣言表は
- * {@link "../fusion.ts"} の `FUSION_RULES`。
+ * Fusion rule `upsample2x` (the 6 nodes of the VAE nearest-exact x2). The eligibility conditions
+ * shared by every rule and `defineRule` are in {@link "../fusion-rule.ts"}; the declaration table
+ * that fixes the application order is `FUSION_RULES` in {@link "../fusion.ts"}.
  */
 
 import { numel } from "../../ops.ts";
@@ -28,11 +28,13 @@ type Upsample2xMatch = FusionMatch & {
 };
 
 /**
- * VAE nearest-exact x2: エクスポータが出す連続 6 ノード
- * `reshape → expand(width x2) → reshape → reshape → expand(height x2) → reshape`。
+ * VAE nearest-exact x2: the 6 consecutive nodes the exporter emits
+ * `reshape → expand(width x2) → reshape → reshape → expand(height x2) → reshape`.
  *
- * 結線・解決済み shape・dtype・内部 use-count が**全て**一致した場合だけ 1 pass へ置換する。
- * MUST: f32 rank4 NCHW の各空間軸 2 倍だけ。一般の broadcast / resize へ広げない。
+ * Replaced by one pass only when the wiring, resolved shapes, dtypes and internal use counts
+ * **all** match.
+ * MUST: only f32 rank-4 NCHW, x2 on each spatial axis. Do not widen to a general broadcast /
+ * resize.
  */
 export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
   name: "upsample2x",
@@ -118,7 +120,7 @@ export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
         {
           key: UPSAMPLE_2X_KEY,
           wgsl: () => UPSAMPLE_2X_WGSL,
-          // 巨大 shape は GPU 確保より先に u32 添字の契約で fail loudly させる。
+          // A huge shape fails loudly on the u32 index contract before any GPU allocation.
           params: upsample2xParams(sourceCount, matched.width),
           workgroups: {
             kind: "gridStride",

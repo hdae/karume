@@ -36,8 +36,8 @@ export const numel = (shape: readonly number[]): number =>
   shape.reduce((count, dim) => count * dim, 1);
 
 /**
- * torch 準拠の右詰め broadcast。次元は「一致」または「片方が 1」のみ許す。
- * MUST: 結果を `max(a, b)` で決めない — 0 と 1 の組（`max` なら 1）が torch では 0 になる。
+ * Right-aligned broadcast as in torch. A dimension may only "match" or "be 1 on one side".
+ * MUST: do not decide the result with `max(a, b)` — the pair 0 and 1 (`max` gives 1) is 0 in torch.
  */
 export const broadcastShapes = (
   a: readonly number[],
@@ -63,49 +63,54 @@ export const broadcastShapes = (
 };
 
 /**
- * 出力 shape が**入力から導けない** op のための追加入力。
+ * Extra inputs for ops whose output shape **cannot be derived from the inputs**.
  *
- * reshape / expand は「出力の宣言 shape が目標形」という契約（ADR 0011）なので、宣言を
- * 渡さずには計算できない。permute は attrs の並べ替え表が要る。
+ * reshape / expand have the contract "the output's declared shape is the target shape" (ADR 0011),
+ * so they cannot be computed without the declaration. permute needs the axis permutation in attrs.
  */
 export type ShapeContext = {
-  /** 束縛解決済みの宣言 shape（reshape / expand で必須）。 */
+  /** The declared shape after binding (required for reshape / expand). */
   readonly declared?: readonly number[];
-  /** ノードの attrs（permute / layer_norm / softmax / conv1d / sym_prefix_slice で必須）。 */
+  /** The node's attrs (required for permute / layer_norm / softmax / conv1d / sym_prefix_slice). */
   readonly attrs?: Readonly<Record<string, unknown>>;
   /**
-   * シンボル束縛（sym_prefix_slice で必須）。prefix 長は `coeff·sym+offset` で、入力 shape
-   * からは導けない。
+   * Symbol bindings (required for sym_prefix_slice). The prefix length is `coeff·sym+offset` and
+   * cannot be derived from the input shape.
    *
-   * MUST: 参照は `Object.hasOwn` のみ（`bindings[sym] !== undefined` は Object.prototype 由来の
-   * `toString` 等が素通りして以後の算術が NaN 化する — 横断の不変条件）。
+   * MUST: look up with `Object.hasOwn` only (`bindings[sym] !== undefined` lets `toString` and the
+   * like from Object.prototype through, and the arithmetic after that turns into NaN — a
+   * cross-cutting invariant).
    */
   readonly bindings?: Readonly<Record<string, number>>;
   /**
-   * ノードの `states` 欄（{@link IrNode.states} — 契約が固定するキー → スロット名）。
-   * **非空であることが「states 形」の判別そのもの**（ADR 0067 決定 4 —「欄の有無が形を
-   * 判別する」）で、`attrs` と同じく「ノードの欄をそのまま渡す」側の文脈。
+   * The node's `states` field ({@link IrNode.states} — key fixed by the contract → slot name).
+   * **Being non-empty is itself what identifies "the states form"** (ADR 0067 decision 4 — "the
+   * presence of the field decides the form"); like `attrs`, it is context that "passes the node's
+   * field as is".
    */
   readonly states?: Readonly<Record<string, string>>;
   /**
-   * 束縛解決済みのスロット shape（スロット名 → 容量込みの具体形）。
+   * The slot shapes after binding (slot name → concrete shape including capacity).
    *
-   * MUST: states 参照ノードでは必須（無ければ fail loudly）。スロットの実体を確保するのは
-   * GenerationContext（ADR 0066 決定 1）なので、これが無い経路 = 1-shot 実行では state 参照
-   * ノードを実行できない — 黙って従来形として計算すると、過去 KV を読まない別の計算になる。
+   * MUST: required for state-referencing nodes (fails loudly when absent). The slots are allocated
+   * by the GenerationContext (ADR 0066 decision 1), so a path without this = one-shot execution
+   * cannot run state-referencing nodes — computing it silently as the previous form would be a
+   * different computation that does not read the past KV.
    */
   readonly stateShapes?: ReadonlyMap<string, readonly number[]>;
 };
 
 /**
- * strided コピー族（permute / expand / sym_prefix_slice / masked_fill）の rank 上限。
+ * The rank limit of the strided copy family (permute / expand / sym_prefix_slice / masked_fill).
  *
- * MUST: **契約層で見る**。カーネルの params は rank {@link STRIDED_RANK} 固定で、超過は
- * codegen 層（`stridedParams`）まで落ちて初めて CodegenError になる — 利用者から見ると
- * 「契約検査は通ったのに実行段で内部エラー」で、どの op のどの入力が悪いのか出ない。
- * ここで落とせば診断が op と入力の名前つきになり、CPU 参照（入口の `applyReferenceOpOutputs` が
- * {@link computeOutputShape} を通す）と GPU の受理範囲も揃う。sym_prefix_slice だけは束縛が要るので
- * 参照の入口はこの関数を通さない（attrs と dtype は通す）。
+ * MUST: **checked in the contract layer**. The kernel params are fixed at rank
+ * {@link STRIDED_RANK}, and an excess would only become a CodegenError once it reaches the codegen
+ * layer (`stridedParams`) — to the user, "the contract check passed but there was an internal
+ * error at execution", without saying which input of which op is wrong. Failing here gives a
+ * diagnostic with the op and input names, and aligns the accepted range of the CPU reference (whose
+ * entry `applyReferenceOpOutputs` goes through {@link computeOutputShape}) with the GPU. Only
+ * sym_prefix_slice needs bindings, so the reference entry does not go through this function for it
+ * (attrs and dtypes do go through).
  */
 const assertStridedRank = (rank: number, what: string, where: string): void => {
   if (rank < 1 || rank > STRIDED_RANK) {
@@ -129,19 +134,23 @@ const requireDeclared = (
 };
 
 /**
- * 単一出力 op の出力列（出力が 1 本であることをアームごとに明示する — ADR 0068 決定 1）。
- * 多出力 op のアームは列を直接組んで返す。
+ * The output list of a single-output op (each arm states explicitly that there is one output —
+ * ADR 0068 decision 1). Arms of multi-output ops build the list directly and return it.
  */
 const sole = (shape: number[]): number[][] => [shape];
 
-/** ノードが state スロットを参照しているか（欄の有無が形を判別する — ADR 0067 決定 4）。 */
+/**
+ * Whether the node references state slots (the presence of the field decides the form — ADR 0067
+ * decision 4).
+ */
 const referencesStates = (context: ShapeContext): boolean =>
   context.states !== undefined && Object.keys(context.states).length > 0;
 
 /**
- * `states` 欄のキーが指すスロットの**解決済み shape**を引く（ADR 0067 決定 4）。
+ * Looks up the **resolved shape** of the slot that a key of the `states` field points at (ADR 0067
+ * decision 4).
  *
- * MUST: 解決済み shape が無い経路は fail loudly（{@link ShapeContext.stateShapes}）。
+ * MUST: a path without resolved shapes fails loudly ({@link ShapeContext.stateShapes}).
  */
 const stateSlotShape = (
   context: ShapeContext,
@@ -164,14 +173,15 @@ const stateSlotShape = (
 };
 
 /**
- * state スロットの物理形（ADR 0067 決定 4 の①②③）。スロットは **`[B, Hkv, C, D]` 固定**で、
- * 今 step の chunk（`ins`）と B / Hkv / D が一致し、sliding（attrs `window`）では
- * `window ≤ C` でなければならない。
+ * The physical form of a state slot (①②③ of ADR 0067 decision 4). A slot is **fixed at
+ * `[B, Hkv, C, D]`**, its B / Hkv / D match this step's chunk (`ins`), and for sliding (attrs
+ * `window`) `window ≤ C` must hold.
  *
- * MUST: 通常値だけを見る shape 検査の**state 延長**としてここで落とす。スロット取り違え
- * （別の層のスロットを参照した形）は容量が違えば OOB、同容量なら沈黙誤読になる。
- * NOTE: full スロットの `pastLength + queryLength ≤ C` は実行時の論理長が要るので context 側
- * （ADR 0067 決定 4 の④）— ここでは見られない。
+ * MUST: fail here, as the **state extension** of the shape check that otherwise looks only at
+ * ordinary values. A slot mix-up (referencing another layer's slot) is an OOB access when the
+ * capacity differs, and a silent misread when the capacity is the same.
+ * NOTE: `pastLength + queryLength ≤ C` for a full slot needs the logical lengths at run time, so it
+ * is on the context side (④ of ADR 0067 decision 4) — it cannot be checked here.
  */
 const assertStateSlotForm = (
   slot: { readonly name: string; readonly shape: readonly number[] },
@@ -194,9 +204,10 @@ const assertStateSlotForm = (
 };
 
 /**
- * このノードが **readonly（past のみ）states 形 attention** か（ADR 0096 段 2 §1.2）。
- * 判別は「op が readonly を持てる」×「states 欄が非空」×「`attrs.readonly` が true」の 3 つで、
- * アリティ検査と shape 計算が**同じ 1 本**を読む。
+ * Whether this node is a **readonly (past-only) states-form attention** (ADR 0096 stage 2 §1.2).
+ * Decided by three things — "the op can have readonly" × "the states field is non-empty" ×
+ * "`attrs.readonly` is true" — and the arity check and the shape computation read **the same single
+ * predicate**.
  */
 const isReadonlyStateAttention = (
   found: OpContract,
@@ -208,15 +219,17 @@ const isReadonlyStateAttention = (
   stateReadonly(context.attrs ?? {}, where);
 
 /**
- * readonly states 形 attention の形（ADR 0096 段 2 §1.2）。
+ * The form of a readonly states-form attention (ADR 0096 stage 2 §1.2).
  *
- * ins は q だけなので、`[B,Hkv,C,D]` の照合相手は**スロットどうし**と q になる:
- * q は `[B,H,1,D]`（**M = 1 MUST** — 段 2 は「論理位置 P−1 の 1 行」だけ）・スロットは
- * k / v 同形で B と D が q と一致・`H % Hkv == 0`・sliding は `window ≤ C`。出力は q と同形。
+ * ins is only q, so the `[B,Hkv,C,D]` is matched **between the slots** and against q: q is
+ * `[B,H,1,D]` (**M = 1 MUST** — stage 2 reads only "the one row at logical position P−1"), the
+ * slots have the same k / v shape with B and D matching q, `H % Hkv == 0`, and for sliding
+ * `window ≤ C`. The output has q's shape.
  *
- * MUST: `M = 1` をここで落とす。M > 1 の readonly は「1 本の query 行が past 全体を見る」以外の
- * 意味論（行ごとに違う past）を要求するが、カーネルは行 0 の past だけを見る — 通すと 2 行目
- * 以降が**同じ列範囲**を読む沈黙誤値になる。
+ * MUST: reject anything but `M = 1` here. A readonly form with M > 1 requires semantics other than
+ * "one query row looks at the whole past" (a different past per row), but the kernel looks only at
+ * row 0's past — letting it through would make the second and later rows read **the same column
+ * range**, a silent wrong value.
  */
 const readonlyStateAttentionShape = (
   q: readonly number[],
@@ -237,7 +250,8 @@ const readonlyStateAttentionShape = (
         ` / slot '${vSlot.name}' [${vSlot.shape.join(",")}]`,
     );
   }
-  // MUST: k / v スロットは**同形**（states 形と同じ理由 — 容量の違う組は片方だけ先に wrap する）。
+  // MUST: the k / v slots have **the same shape** (the same reason as the states form — a pair with
+  // different capacities wraps on one side first).
   if (kSlot.shape.some((dim, axis) => dim !== vSlot.shape[axis])) {
     throw new OpContractError(
       `${where}: readonly の attention の k / v スロットが同形でない（'${kSlot.name}' [${kSlot.shape.join(
@@ -274,10 +288,11 @@ const readonlyStateAttentionShape = (
 };
 
 /**
- * 束縛解決済みの入力 shape から**出力 slot 順の shape 列**を計算する（ADR 0068 決定 1）。
- * 列の長さは契約が宣言する出力数（出力 dtype 写像の列長）と一致する — 2 本を返すのは
- * `topk`（値 + 添字 — ADR 0068 決定 3）だけ、**空列**は `state_append`（値を定義しない
- * effect op — ADR 0067 決定 5）だけで、他は全て 1 本。
+ * Computes the **list of shapes in output slot order** from the input shapes after binding (ADR
+ * 0068 decision 1). The list length equals the output count the contract declares (the list length
+ * of the output dtype mapping) — only `topk` returns 2 (values + indices — ADR 0068 decision 3),
+ * only `state_append` returns **an empty list** (an effect op that defines no value — ADR 0067
+ * decision 5), and everything else returns 1.
  */
 export const computeOutputShape = (
   found: OpContract,
@@ -285,8 +300,9 @@ export const computeOutputShape = (
   where: string,
   context: ShapeContext = {},
 ): number[][] => {
-  // readonly（past のみ）形は ins が q 1 本だけ（ADR 0096 段 2 §1.2）。契約層でも落ちるが、
-  // CPU 参照や適合表からの直呼びはここを通る（mask 拒否と同じ二重の網）。
+  // The readonly (past-only) form has only one ins, q (ADR 0096 stage 2 §1.2). The contract layer
+  // rejects it too, but direct calls from the CPU reference and the conformance table come through
+  // here (a double net, as for the mask rejection).
   if (isReadonlyStateAttention(found, context, where)) {
     if (inputShapes.length !== READONLY_ATTENTION_ARITY) {
       throw new OpContractError(
@@ -299,9 +315,10 @@ export const computeOutputShape = (
   }
   switch (found.kind) {
     case "unary":
-      // MUST: スカラ attr の値域と**キーを跨ぐ不変条件**（clamp の min <= max）をここで見る。
-      // 全ノードが必ず通る共通経路はこの計算だけで、attrs スキーマはキー単位の検査しか
-      // 表せない（src/runtime/plan.ts の planGraph が全ノードでここを呼ぶ）。
+      // MUST: check the ranges of the scalar attrs and **invariants that span keys** (clamp's
+      // min <= max) here. This computation is the only common path every node goes through, and the
+      // attrs schema can express only per-key checks (planGraph in src/runtime/plan.ts calls this
+      // for every node).
       scalarParamValues(found, context.attrs ?? {}, where);
       return sole([...inputShapes[0]]);
     case "cast":
@@ -309,7 +326,8 @@ export const computeOutputShape = (
     case "binary":
       return sole(broadcastShapes(inputShapes[0], inputShapes[1], `${where} (${found.name})`));
     case "where": {
-      // torch と同じく 3 者を右詰め broadcast する（条件も値と同じ規則で広がる）。
+      // As in torch, the three broadcast right-aligned (the condition widens by the same rule as
+      // the values).
       const [cond, a, b] = inputShapes;
       const label = `${where} (${found.name})`;
       return sole(broadcastShapes(broadcastShapes(cond, a, label), b, label));
@@ -317,14 +335,16 @@ export const computeOutputShape = (
     case "cumsum": {
       const shape = inputShapes[0];
       const dim = cumsumDim(context.attrs ?? {}, where);
-      // MUST: 最終次元以外は受理しない（softmax と同じ理由 — 行カーネルは縮約軸が連続で
-      // あることを前提にしていて、通せば黙って別の軸を畳む）。
+      // MUST: nothing but the last dimension is accepted (the same reason as softmax — the row
+      // kernel assumes the reduced axis is contiguous, and letting it through would silently fold a
+      // different axis).
       if (shape.length < 1 || dim !== shape.length - 1) {
         throw new OpContractError(
           `${where}: cumsum は最終次元のみ（attrs.dim=${dim} / 入力 [${shape.join(",")}]）`,
         );
       }
-      // 長さ 0 の軸は素通し（前縁和の identity は 0 で、空行は空行のまま）。
+      // An axis of length 0 passes through (the identity of a prefix sum is 0; an empty row stays
+      // empty).
       return sole([...shape]);
     }
     case "matmul": {
@@ -343,8 +363,8 @@ export const computeOutputShape = (
     }
     case "bmm": {
       const [a, b] = inputShapes;
-      // MUST: rank-2 を通さない（matmul の担当）。兼用にすると「バッチ軸を落とした形」が
-      // 同じ op 名で通り、B の取り違えが shape 検査を素通りする。
+      // MUST: rank-2 does not pass (it is matmul's job). Sharing would let "the form without the
+      // batch axis" pass under the same op name, and a B mix-up would slip through the shape check.
       if (a.length !== 3 || b.length !== 3) {
         throw new OpContractError(
           `${where}: bmm は rank-3 × rank-3 のみ（rank-2 は matmul）: [${a.join(",")}] × [${b.join(
@@ -366,8 +386,9 @@ export const computeOutputShape = (
     }
     case "gather": {
       const [src, index] = inputShapes;
-      // 契約は「最終次元固定」— 先行次元は src と index で完全一致し、最終次元だけが自由。
-      // torch の一般 gather（他軸の長さが src 以下でよい）より狭いが、実測形はこれで足りる。
+      // The contract is "last dimension fixed" — the leading dimensions of src and index match
+      // exactly and only the last dimension is free. Narrower than torch's general gather (other
+      // axes may be at most src's length), but enough for the measured forms.
       if (src.length === 0 || index.length !== src.length) {
         throw new OpContractError(
           `${where}: gather は src と index が同じ rank（1 以上）: [${src.join(",")}] / [${index.join(
@@ -383,8 +404,9 @@ export const computeOutputShape = (
           )}]`,
         );
       }
-      // 出力は index と同形（値は src から引く）。添字の値域は実行時データ依存なので
-      // shape 契約では見ない（方針は src/kernels/gather.ts と reference/ops.ts）。
+      // The output has index's shape (values are taken from src). The range of the indices depends
+      // on run-time data, so the shape contract does not check it (policy: src/kernels/gather.ts and
+      // reference/ops.ts).
       return sole([...index]);
     }
     case "rowReduce": {
@@ -393,14 +415,15 @@ export const computeOutputShape = (
         throw new OpContractError(`${where}: reduce の入力は rank 1 以上（スカラは縮約できない）`);
       }
       const dim = reduceDim(context.attrs ?? {}, where);
-      // MUST: 負値・rank 外は fail loudly（負の軸表記の正規化はエクスポータ境界の責務で、
-      // ここで `% rank` を補うと「宣言と実 rank の食い違い」を黙って別の軸へ吸収してしまう）。
+      // MUST: negatives and out-of-rank values fail loudly (normalising negative axis notation is
+      // the exporter boundary's responsibility; filling in `% rank` here would silently absorb "a
+      // mismatch between the declaration and the actual rank" into another axis).
       if (dim >= shape.length) {
         throw new OpContractError(
           `${where}: op '${found.name}' の attrs.dim=${dim} が rank ${shape.length} の範囲外`,
         );
       }
-      // 空軸の amax/amin は identity が定義できない（torch も同様に拒否する）。sum は 0。
+      // amax/amin over an empty axis has no definable identity (torch rejects it too). sum gives 0.
       if (shape[dim] === 0 && found.name !== "sum") {
         throw new OpContractError(`${where}: op '${found.name}' は長さ 0 の軸を縮約できない`);
       }
@@ -408,31 +431,35 @@ export const computeOutputShape = (
     }
     case "argmax": {
       const shape = inputShapes[0];
-      // reduce 族と違い軸は attrs ではなく**最終次元固定**（欄の不存在が「他の軸は語彙に
-      // 無い」の宣言 — ADR 0068 決定 2）。
+      // Unlike the reduce family, the axis is not in attrs but **fixed to the last dimension** (the
+      // absence of the field states "other axes are not in the vocabulary" — ADR 0068 decision 2).
       if (shape.length === 0) {
         throw new OpContractError(`${where}: argmax の入力は rank 1 以上（スカラは縮約できない）`);
       }
       const last = shape.length - 1;
-      // 長さ 0 の軸に「最大値の添字」は無い（torch も拒否する）。amax / amin と同じ絞りで、
-      // カーネルの番兵 index が出力へ漏れる形を契約側で止める。
+      // An axis of length 0 has no "index of the maximum" (torch rejects it too). The same narrowing
+      // as amax / amin; it stops, on the contract side, the form where the kernel's sentinel index
+      // leaks into the output.
       if (shape[last] === 0) {
         throw new OpContractError(`${where}: argmax は長さ 0 の最終次元を縮約できない`);
       }
-      // **rank 保存**（`keepdim` 相当の欄が無い固定形 — 最終次元を 1 に潰す）。
+      // **Rank-preserving** (a fixed form with no `keepdim`-like field — collapses the last
+      // dimension to 1).
       return sole([...shape.slice(0, last), 1]);
     }
     case "topk": {
       const shape = inputShapes[0];
-      // 軸は最終次元固定（argmax と同じ絞り）。多出力なので**列を直接組んで返す**唯一のアーム。
+      // The axis is fixed to the last dimension (the same narrowing as argmax). Multi-output, so the
+      // only arm that **builds the list directly and returns it**.
       if (shape.length === 0) {
         throw new OpContractError(`${where}: topk の入力は rank 1 以上（スカラは縮約できない）`);
       }
       const last = shape.length - 1;
       const k = topkK(context.attrs ?? {}, where);
-      // MUST: 受理領域は `1 ≤ k ≤ 最終次元`（ADR 0068 決定 3）。下限は attrs スキーマが、
-      // 上限はここが見る（入力 rank が無いと判定できない）。長さ 0 の最終次元は k ≥ 1 との
-      // 突合でそのまま落ちる — 「大きい順の k 本」が定義できない形を 1 本の述語で拒否する。
+      // MUST: the accepted domain is `1 ≤ k ≤ last dimension` (ADR 0068 decision 3). The attrs
+      // schema checks the lower bound and this checks the upper bound (it cannot be decided without
+      // the input rank). A last dimension of length 0 fails right here against k ≥ 1 — one predicate
+      // rejects the forms where "the k largest" cannot be defined.
       if (k > shape[last]) {
         throw new OpContractError(
           `${where}: topk の attrs.k=${k} が最終次元 ${shape[last]} を超える（入力 [${shape.join(
@@ -440,15 +467,17 @@ export const computeOutputShape = (
           )}]）`,
         );
       }
-      // 値と添字は同形（`[…, k]`）。rank は保存され、最終次元だけが k になる。
+      // Values and indices have the same shape (`[…, k]`). The rank is preserved; only the last
+      // dimension becomes k.
       const outShape = [...shape.slice(0, last), k];
       return [outShape, [...outShape]];
     }
     case "reshape": {
       const target = requireDeclared(context, found, where);
       const source = inputShapes[0];
-      // 契約は要素数一致だけ（要素順は変えない）。ここを緩めると別名化した実バッファの
-      // 大きさと宣言 shape が食い違い、readback が範囲外まで読む。
+      // The contract is only that element counts match (element order unchanged). Loosening it
+      // would make the size of the aliased real buffer disagree with the declared shape, and
+      // readback would read out of range.
       if (numel(source) !== numel(target)) {
         throw new OpContractError(
           `${where}: reshape の要素数が合わない [${source.join(",")}] → [${target.join(",")}]`,
@@ -466,7 +495,8 @@ export const computeOutputShape = (
           `${where}: expand は rank を下げられない [${source.join(",")}] → [${target.join(",")}]`,
         );
       }
-      // 右詰めで、入力の各次元は「目標と一致」か「長さ 1（stride 0 で複製）」のみ。
+      // Right-aligned; each input dimension either "matches the target" or "is length 1 (replicated
+      // with stride 0)".
       const offset = target.length - source.length;
       source.forEach((extent, index) => {
         if (extent !== 1 && extent !== target[offset + index]) {
@@ -481,7 +511,7 @@ export const computeOutputShape = (
     }
     case "slice": {
       const source = inputShapes[0];
-      // 実行は strided 読みコピー族の流用（ADR 0014）なので rank 上限も同じ。
+      // Executed by reusing the strided read copy family (ADR 0014), so the rank limit is the same.
       assertStridedRank(source.length, "slice の入力", where);
       const { dim, start, end } = sliceAttrs(context.attrs ?? {}, where);
       if (dim >= source.length) {
@@ -489,15 +519,17 @@ export const computeOutputShape = (
           `${where}: slice の dim ${dim} が入力 rank ${source.length} の外`,
         );
       }
-      // MUST: 範囲外の切り出しを通さない。GPU では例外なしに隣の値（別の行・別のバッファ）を
-      // 読む形になり、shape 検査だけが「宣言どおり」で素通りする。
+      // MUST: out-of-range slices do not pass. On the GPU they would read neighbouring values
+      // (another row, another buffer) without an exception, and only the shape check would pass "as
+      // declared".
       if (end > source[dim]) {
         throw new OpContractError(
           `${where}: slice の end ${end} が軸 ${dim} の長さ ${source[dim]} を超える`,
         );
       }
-      // MUST: キーを跨ぐ不変条件（clamp の min <= max と同じ分担）— attrs スキーマは
-      // キー単位の検査しか表せない。逆転を許すと長さが負になり、要素数だけが 0 で通る。
+      // MUST: an invariant that spans keys (the same split as clamp's min <= max) — the attrs schema
+      // can express only per-key checks. Allowing an inversion makes the length negative and only
+      // the element count passes, with 0.
       if (start > end) {
         throw new OpContractError(`${where}: slice の start ${start} が end ${end} を超える`);
       }
@@ -508,8 +540,8 @@ export const computeOutputShape = (
     case "cat": {
       const dim = catDim(context.attrs ?? {}, where);
       const first = inputShapes[0];
-      // 実行は strided 書きコピー族（ADR 0014）— 出力側の stride を params に載せるので、
-      // rank 上限は出力（= 入力と同 rank）に効く。
+      // Executed by the strided write copy family (ADR 0014) — the output-side strides go into
+      // params, so the rank limit applies to the output (= same rank as the inputs).
       assertStridedRank(first.length, "cat の入力", where);
       if (dim >= first.length) {
         throw new OpContractError(`${where}: cat の dim ${dim} が入力 rank ${first.length} の外`);
@@ -521,8 +553,9 @@ export const computeOutputShape = (
             `${where}: cat の入力 ${index} の rank ${shape.length} が入力 0 の ${first.length} と違う`,
           );
         }
-        // MUST: 連結軸**以外**は全一致を要求する（torch と同じ）。緩めると出力の一部が
-        // どの入力にも書かれないまま残り、full-write 不変条件が破れる。
+        // MUST: every axis **other than** the concatenation axis must match (as in torch). Loosening
+        // it would leave part of the output unwritten by any input, breaking the full-write
+        // invariant.
         shape.forEach((extent, axis) => {
           if (axis !== dim && extent !== first[axis]) {
             throw new OpContractError(
@@ -535,8 +568,9 @@ export const computeOutputShape = (
         total += shape[dim];
       });
       const out = [...first];
-      // 出力の軸長 = 入力の軸長の総和。この規則そのものが「全入力で出力全域を覆う」
-      // （full-write — ADR 0014）の担保で、executor 側は書き出し位置の総和をこれと突き合わせる。
+      // Output axis length = sum of the input axis lengths. This rule itself guarantees "all inputs
+      // together cover the whole output" (full-write — ADR 0014), and the executor matches the sum of
+      // the write positions against it.
       out[dim] = total;
       return sole(out);
     }
@@ -556,12 +590,13 @@ export const computeOutputShape = (
       if (source.length < 1 || dim >= source.length) {
         throw new OpContractError(`${where}: flip の dim ${dim} が入力 rank ${source.length} の外`);
       }
-      // 反転は shape を変えない（恒等 shape 規則）。
+      // Reversal does not change the shape (identity shape rule).
       return sole([...source]);
     }
     case "symPrefixSlice": {
       const source = inputShapes[0];
-      // 出力 rank は入力と同じ（各軸の先頭を切り出すだけ）なので入力側だけ見れば足りる。
+      // The output rank equals the input's (it only cuts the head of each axis), so checking the
+      // input side is enough.
       assertStridedRank(source.length, "sym_prefix_slice の入力", where);
       const { sym, slices } = symPrefixSliceAttrs(context.attrs ?? {}, where);
       const bindings = context.bindings;
@@ -579,8 +614,9 @@ export const computeOutputShape = (
           );
         }
         const length = slice.coeff * bound + slice.offset;
-        // MUST: 定数側（Tmax 形）を超える prefix を許さない。超えた分は定数バッファの
-        // 範囲外読み出しになり、GPU では例外なしに隣の値が出る。
+        // MUST: no prefix longer than the constant side (the Tmax form). The excess would read out
+        // of the constant buffer's range, and the GPU would return neighbouring values without an
+        // exception.
         if (length > source[slice.dim]) {
           throw new OpContractError(
             `${where}: sym_prefix_slice の prefix 長 ${slice.coeff}·${sym}+${slice.offset}=${length} が定数次元 ${
@@ -617,7 +653,8 @@ export const computeOutputShape = (
     case "layerNorm": {
       const [x, weight, bias] = inputShapes;
       const { normalizedShape } = layerNormAttrs(context.attrs ?? {}, where);
-      // 契約は「最終次元のみ」（attrs 検査済み）。ここでは実 shape の末尾との一致を見る。
+      // The contract is "last dimension only" (attrs already checked). Here the actual shape's tail
+      // is matched.
       if (x.length < 1 || x[x.length - 1] !== normalizedShape[0]) {
         throw new OpContractError(
           `${where}: layer_norm の normalized_shape [${normalizedShape.join(",")}] が入力 [${x.join(
@@ -644,19 +681,21 @@ export const computeOutputShape = (
       return sole([...inputShapes[0]]);
     case "rmsNorm": {
       const [x, weight] = inputShapes;
-      // MUST: eps はここでも引く（attrs スキーマを通らない経路 — CPU 参照の直呼び — でも
-      // 値域が効くようにする。unary の scalarParamValues と同じ役割）。
+      // MUST: eps is read here too (so that its range applies on the path that does not go through
+      // the attrs schema — direct calls from the CPU reference. The same role as unary's
+      // scalarParamValues).
       rmsNormEps(context.attrs ?? {}, where);
       if (x.length < 1) {
         throw new OpContractError(`${where}: rms_norm の入力は rank 1 以上（最終次元が要る）`);
       }
       const dim = x[x.length - 1];
-      // MUST: 長さ 0 の軸は縮約できない（二乗和 0 / 要素数 0 で mean が 0/0 = NaN になる —
-      // softmax と同じ絞り方）。
+      // MUST: an axis of length 0 cannot be reduced (a sum of squares 0 / element count 0 makes the
+      // mean 0/0 = NaN — the same narrowing as softmax).
       if (dim === 0) {
         throw new OpContractError(`${where}: rms_norm は長さ 0 の軸を正規化できない`);
       }
-      // 正規化長の正本は **weight の長さ**（attrs に normalized_shape の欄を作らない — ADR 0017）。
+      // The source of truth for the normalised length is **the weight's length** (no
+      // normalized_shape field in attrs — ADR 0017).
       if (weight.length !== 1 || weight[0] !== dim) {
         throw new OpContractError(
           `${where}: rms_norm の weight [${weight.join(",")}] が入力 [${x.join(
@@ -678,16 +717,16 @@ export const computeOutputShape = (
       }
       const [, channelsIn] = x;
       const [channelsOut, weightIn] = weight;
-      // MUST: conv1d と同じ規律 — 割り切れない形はカーネルの `Cin/groups` が切り捨てになり、
-      // 読む入力チャネル帯が黙ってずれる。
+      // MUST: the same discipline as conv1d — for a form that does not divide, the kernel's
+      // `Cin/groups` truncates and the band of input channels it reads silently shifts.
       if (channelsIn % groups !== 0 || channelsOut % groups !== 0) {
         throw new OpContractError(
           `${where}: conv2d の groups ${groups} が Cin ${channelsIn} / Cout ${channelsOut} を割り切らない`,
         );
       }
-      // MUST: 重みは **[Cout, Cin/groups, Kh, Kw]**。要素数が合う取り違え（[Cin/groups, Cout,
-      // Kh, Kw] や Kh/Kw の入れ替え）は shape 検査を素通りしうるので、テストは
-      // Cin ≠ Cout・Kh ≠ Kw の非対称形で固定する（conv_transpose1d の教訓 — ADR 0017）。
+      // MUST: the weight is **[Cout, Cin/groups, Kh, Kw]**. A mix-up with a matching element count
+      // ([Cin/groups, Cout, Kh, Kw], or Kh/Kw swapped) can slip through the shape check, so the tests
+      // pin asymmetric forms with Cin ≠ Cout and Kh ≠ Kw (the lesson of conv_transpose1d — ADR 0017).
       if (weightIn !== channelsIn / groups) {
         throw new OpContractError(
           `${where}: conv2d の重みは [Cout, Cin/groups, Kh, Kw]（Cin/groups = ${
@@ -700,12 +739,14 @@ export const computeOutputShape = (
           `${where}: conv2d の bias 長 ${bias[0]} が出力チャネル ${channelsOut} と違う`,
         );
       }
-      // 空間軸は H / W で独立に同じ一般形を適用する（axis は診断の主語）。
+      // The spatial axes apply the same general form to H / W independently (axis is the subject of
+      // the diagnostic).
       const spatial = (axis: 0 | 1, name: string): number => {
         const length = x[2 + axis];
         const kernel = weight[2 + axis];
-        // MUST: conv1d と同じ理由で K = 0 は出力長式より前に落とす（`dilation·(K−1)` が負に
-        // 転んで出力が入力より長くなる — params 側は正整数として落とす）。
+        // MUST: for the same reason as conv1d, K = 0 fails before the output length formula
+        // (`dilation·(K−1)` turns negative and the output becomes longer than the input — the params
+        // side rejects it as a positive integer).
         if (kernel < 1) {
           throw new OpContractError(
             `${where}: conv2d のカーネル長 K${name.toLowerCase()} は正整数（重み [${weight.join(
@@ -728,8 +769,8 @@ export const computeOutputShape = (
     case "conv3d": {
       const [x, weight, bias] = inputShapes;
       const { stride, padding, dilation, groups } = conv3dAttrs(context.attrs ?? {}, where);
-      // MUST: x は unbatched の rank 4 だけ（ADR 0118 決定 1）。rank 5 の batched を受けると
-      // 先頭軸を Cin と読む取り違えが要素数の合う形で素通りしうる。
+      // MUST: x is unbatched rank 4 only (ADR 0118 decision 1). Accepting batched rank 5 could let
+      // a mix-up that reads the leading axis as Cin slip through with a matching element count.
       if (x.length !== 4 || weight.length !== 5 || bias.length !== 1) {
         throw new OpContractError(
           `${where}: conv3d は x[Cin,T,H,W] / W[Cout,Cin/groups,Kt,Kh,Kw] / b[Cout]（rank 4 / 5 / 1 — x は unbatched）: [${x.join(
@@ -739,15 +780,16 @@ export const computeOutputShape = (
       }
       const [channelsIn] = x;
       const [channelsOut, weightIn] = weight;
-      // MUST: conv1d / conv2d と同じ規律 — 割り切れない形は `Cin/groups` が切り捨てになり、
-      // 読む入力チャネル帯が黙ってずれる。
+      // MUST: the same discipline as conv1d / conv2d — for a form that does not divide, `Cin/groups`
+      // truncates and the band of input channels read silently shifts.
       if (channelsIn % groups !== 0 || channelsOut % groups !== 0) {
         throw new OpContractError(
           `${where}: conv3d の groups ${groups} が Cin ${channelsIn} / Cout ${channelsOut} を割り切らない`,
         );
       }
-      // MUST: 重みは **[Cout, Cin/groups, Kt, Kh, Kw]**。要素数が合う取り違えは shape 検査を
-      // 素通りしうるので、テストは Cin ≠ Cout・Kt ≠ Kh ≠ Kw の非対称形で固定する。
+      // MUST: the weight is **[Cout, Cin/groups, Kt, Kh, Kw]**. A mix-up with a matching element
+      // count can slip through the shape check, so the tests pin asymmetric forms with Cin ≠ Cout
+      // and Kt ≠ Kh ≠ Kw.
       if (weightIn !== channelsIn / groups) {
         throw new OpContractError(
           `${where}: conv3d の重みは [Cout, Cin/groups, Kt, Kh, Kw]（Cin/groups = ${
@@ -760,12 +802,14 @@ export const computeOutputShape = (
           `${where}: conv3d の bias 長 ${bias[0]} が出力チャネル ${channelsOut} と違う`,
         );
       }
-      // 3 軸（T / H / W）は独立に同じ一般形を適用する（axis は attrs の成分番号・name は診断の主語）。
+      // The 3 axes (T / H / W) apply the same general form independently (axis is the attrs
+      // component index, name the subject of the diagnostic).
       const axisLength = (axis: 0 | 1 | 2, name: string): number => {
         const length = x[1 + axis];
         const kernel = weight[2 + axis];
-        // MUST: conv1d / conv2d と同じ理由で K = 0 は出力長式より前に落とす（`dilation·(K−1)` が
-        // 負に転んで出力が入力より長くなる — params 側は正整数として落とす）。
+        // MUST: for the same reason as conv1d / conv2d, K = 0 fails before the output length formula
+        // (`dilation·(K−1)` turns negative and the output becomes longer than the input — the params
+        // side rejects it as a positive integer).
         if (kernel < 1) {
           throw new OpContractError(
             `${where}: conv3d のカーネル長 K${name.toLowerCase()} は正整数（重み [${weight.join(
@@ -785,27 +829,30 @@ export const computeOutputShape = (
       };
       return sole([channelsOut, axisLength(0, "T"), axisLength(1, "H"), axisLength(2, "W")]);
     }
-    // safe_softmax は shape 規則も attrs も softmax と同一（違いは空行の値だけ — ADR 0044）。
+    // safe_softmax has the same shape rule and attrs as softmax (only the empty-row values differ —
+    // ADR 0044).
     case "softmax":
     case "safeSoftmax": {
       const shape = inputShapes[0];
       const dim = softmaxDim(context.attrs ?? {}, where);
-      // MUST: 一般 dim を「そのうち実装する」として受理しない。最終次元以外は行カーネルの
-      // 前提（縮約軸が連続）が崩れ、通せば黙って別の軸を畳む。
+      // MUST: a general dim is not accepted "to be implemented someday". Anything but the last
+      // dimension breaks the row kernel's premise (a contiguous reduced axis), and letting it through
+      // would silently fold a different axis.
       if (shape.length < 1 || dim !== shape.length - 1) {
         throw new OpContractError(
           `${where}: ${found.name} は最終次元のみ（attrs.dim=${dim} / 入力 [${shape.join(",")}]）`,
         );
       }
       if (shape[shape.length - 1] === 0) {
-        // 空軸の softmax は amax の identity が定義できない（行 reduce と同じ理由）。
+        // softmax over an empty axis has no definable amax identity (the same reason as row reduce).
         throw new OpContractError(`${where}: ${found.name} は長さ 0 の軸を縮約できない`);
       }
       return sole([...shape]);
     }
     case "attention": {
-      // MUST: scale はここでも引く（attrs スキーマを通らない CPU 参照の直呼びでも値域を効かせる
-      // ため。rms_norm の eps / unary の scalarParamValues と同じ役割）。
+      // MUST: scale is read here too (so that its range applies even to direct calls from the CPU
+      // reference that skip the attrs schema. The same role as rms_norm's eps / unary's
+      // scalarParamValues).
       attentionScale(context.attrs ?? {}, where);
       if (isReadonlyStateAttention(found, context, where)) {
         return sole(readonlyStateAttentionShape(inputShapes[0], context, where));
@@ -817,66 +864,76 @@ export const computeOutputShape = (
           `${where}: attention は q[B,H,M,D] / k[B,Hkv,N,D] / v[B,Hkv,N,D] の rank-4 のみ: ${show}`,
         );
       }
-      // MUST: B は**完全一致**（積だけを見ると B/H の取り違えが素通りする — カーネルは B·H を
-      // 1 本の軸に畳むので、値にも出ない形が作れる）。
+      // MUST: B **matches exactly** (looking only at the product lets a B/H mix-up through — the
+      // kernel folds B·H into one axis, so a form that does not even show in the values can be made).
       if (q[0] !== k[0] || q[0] !== v[0]) {
         throw new OpContractError(`${where}: attention の軸 0（B）が不一致 ${show}`);
       }
-      // MUST: `B >= 1` は 2 形共通（states 形の分岐より前）。B = 0 は上の完全一致を満たすので
-      // 素通りし、実行相の行ブロック planner が「1 行のバイト数 は正整数（0）」という
-      // **attention を名乗らない**診断で落ちる（fusion.ts の planRowBlocks）。
+      // MUST: `B >= 1` is common to both forms (before the states-form branch). B = 0 satisfies the
+      // exact match above and slips through, and then the row-block planner of the execution phase
+      // fails with a diagnostic that **does not name attention**, "bytes per row must be a positive
+      // integer (0)" (planRowBlocks in fusion.ts).
       if (q[0] < 1) {
         throw new OpContractError(`${where}: attention の B ${q[0]} が正でない ${show}`);
       }
-      // MUST: k / v の Hkv も**完全一致**（GQA で緩めるのは q との関係だけ — ADR 0067 決定 1 は
-      // 「k/v 間の Hkv 一致・D 3 者同一・N=0 拒否は取り違え検出線としてそのまま維持」）。
+      // MUST: the Hkv of k / v also **matches exactly** (GQA loosens only the relation to q — ADR
+      // 0067 decision 1: "exact B match, equal Hkv of k and v, equal D and the N = 0 rejection stay as
+      // detectors of mix-ups").
       if (k[1] !== v[1]) {
         throw new OpContractError(`${where}: attention の Hkv（k / v の軸 1）が不一致 ${show}`);
       }
-      // MUST: `Hkv ≥ 1` は下の等値短絡より**前**に見る — `(H,Hkv) = (0,0)` は `q[1] !== k[1]` を
-      // 満たさないので整除枝に落ちず、「head 軸を丸ごと落とした IR」が素通りする。`H = 0` 単独は
-      // `Hkv ≥ 1` とのペアになるので下の `H ≥ Hkv` 枝が落とす（Python 側 `_attention` と鏡像）。
+      // MUST: `Hkv ≥ 1` is checked **before** the equality short-circuit below — `(H,Hkv) = (0,0)`
+      // does not satisfy `q[1] !== k[1]`, so it never reaches the divisibility branch and "IR that
+      // dropped the whole head axis" slips through. `H = 0` alone pairs with `Hkv ≥ 1`, so the
+      // `H ≥ Hkv` branch below rejects it (the mirror of `_attention` on the Python side).
       if (k[1] < 1) {
         throw new OpContractError(
           `${where}: attention の Hkv ${k[1]} が正でない（H は Hkv の正の整数倍 — GQA は` +
             ` H % Hkv == 0 かつ H ≥ Hkv ≥ 1・ADR 0067 決定 1）${show}`,
         );
       }
-      // GQA = **整除 broadcast**（ADR 0067 決定 1）。`H % Hkv == 0` かつ `H ≥ Hkv` だけを受理し、
-      // `r = H / Hkv` は導出値（attrs 欄を作らない）。Hkv = 1 の MQA も同式で表す。
-      // MUST: `H < Hkv` を別条件で弾く — `H = 0` は `0 % Hkv == 0` を満たすので、整除だけを見ると
-      // 「H を丸ごと落とした IR」が素通りする（`Hkv = 0` は上の `Hkv ≥ 1` 枝が先に落とす）。
-      // broadcast の向きは常に kv → q で、q 側を増やす形は語彙に無い。
+      // GQA = **divisible broadcast** (ADR 0067 decision 1). Only `H % Hkv == 0` and `H ≥ Hkv` are
+      // accepted, and `r = H / Hkv` is derived (no attrs field). MQA with Hkv = 1 uses the same
+      // formula.
+      // MUST: reject `H < Hkv` by a separate condition — `H = 0` satisfies `0 % Hkv == 0`, so
+      // checking only divisibility lets "IR that dropped H entirely" through (`Hkv = 0` is rejected
+      // first by the `Hkv ≥ 1` branch above).
+      // The broadcast always goes kv → q; a form that widens the q side is not in the vocabulary.
       if (q[1] !== k[1] && (q[1] < k[1] || q[1] % k[1] !== 0)) {
         throw new OpContractError(
           `${where}: attention の H ${q[1]} が Hkv ${k[1]} の正の整数倍でない（GQA は` +
             ` H % Hkv == 0 かつ H ≥ Hkv — ADR 0067 決定 1）${show}`,
         );
       }
-      // MUST: D は 3 者とも同じ（v 側だけ別の長さを許すと、取り違えが要素数で捕まらない）。
+      // MUST: D is the same for all three (allowing a different length on the v side alone would let
+      // a mix-up escape the element count).
       if (q[3] !== k[3] || q[3] !== v[3]) {
         throw new OpContractError(`${where}: attention の D（軸 3）が不一致 ${show}`);
       }
-      // states 形（ADR 0067 決定 4）。ここまでの head / D 規則は 2 形で共通で、以降が分岐する:
-      // 従来形は k/v の N（過去 + 現在の全長）を見る一方、states 形の ins は**今 step の
-      // chunk だけ**なので M が 3 者一致し、過去分はスロットの容量 C が持つ。
+      // The states form (ADR 0067 decision 4). The head / D rules so far are common to both forms,
+      // and they branch from here: the previous form looks at the N of k/v (the full length, past +
+      // present), while the states form's ins are **only this step's chunk**, so M agrees across the
+      // three and the past is held by the slot capacity C.
       if (referencesStates(context)) {
-        // MUST: mask は取らない（causal 固定・述語計算 — mask tensor は実体化しない）。
-        // 契約層でも落ちるが、CPU 参照や適合表からの直呼びはここを通る。
+        // MUST: no mask is taken (causal is fixed and computed by predicate — no mask tensor is
+        // materialised). The contract layer rejects it too, but direct calls from the CPU reference
+        // and the conformance table come through here.
         if (mask !== undefined) {
           throw new OpContractError(
             `${where}: states 形の attention は mask を取らない（causal 固定 — ADR 0067 決定 4）` +
               ` ${show} + mask [${mask.join(",")}]`,
           );
         }
-        // MUST: M は q / k / v で**完全一致**（今 step の chunk を共有する — 従来形の自由な
-        // N と違い、ここがずれた形は「別の step の k/v を混ぜた」IR にほかならない）。
+        // MUST: M **matches exactly** across q / k / v (they share this step's chunk — unlike the free
+        // N of the previous form, a mismatch here is nothing but IR that "mixed in another step's
+        // k/v").
         if (k[2] !== q[2] || v[2] !== q[2]) {
           throw new OpContractError(
             `${where}: states 形の attention は M（軸 2）が q / k / v で一致する ${show}`,
           );
         }
-        // 空軸の softmax は amax の identity が定義できない（従来形の N=0 拒否と同じ理由）。
+        // softmax over an empty axis has no definable amax identity (the same reason as the previous
+        // form's N=0 rejection).
         if (q[2] < 1) {
           throw new OpContractError(
             `${where}: states 形の attention は M が 0 の chunk を扱えない ${show}`,
@@ -885,8 +942,8 @@ export const computeOutputShape = (
         const window = stateWindow(context.attrs ?? {}, where);
         const kSlot = stateSlotShape(context, "k", where);
         const vSlot = stateSlotShape(context, "v", where);
-        // MUST: k / v スロットは**同形**（容量の違うスロットを組にすると、片方だけ先に
-        // wrap する ring になって値が静かにずれる）。
+        // MUST: the k / v slots have **the same shape** (pairing slots with different capacities
+        // makes a ring where one side wraps first, and the values silently drift).
         if (
           kSlot.shape.length !== vSlot.shape.length ||
           kSlot.shape.some((dim, axis) => dim !== vSlot.shape[axis])
@@ -904,20 +961,23 @@ export const computeOutputShape = (
       if (k[2] !== v[2]) {
         throw new OpContractError(`${where}: attention の N（k / v の軸 2）が不一致 ${show}`);
       }
-      // 空軸の softmax は amax の identity が定義できない（softmax / 行 reduce と同じ理由）。
+      // softmax over an empty axis has no definable amax identity (the same reason as softmax / row
+      // reduce).
       if (k[2] === 0) {
         throw new OpContractError(`${where}: attention は長さ 0 の N を縮約できない ${show}`);
       }
-      // 従来形にも M >= 1 を置く（states 形は同じ形を上で明示拒否している）。M = 0 は
-      // planRowBlocks が「行数 は正整数（0）」で落とすので、attention を名乗る文言にならない。
+      // M >= 1 is required for the previous form too (the states form explicitly rejects the same
+      // form above). M = 0 would fail in planRowBlocks with "the row count must be a positive integer
+      // (0)", a message that does not name attention.
       if (q[2] < 1) {
         throw new OpContractError(`${where}: attention は M が 0 の q を扱えない ${show}`);
       }
       if (mask !== undefined) {
-        // MUST: mask は **[1,1,M,N] ちょうど**。B·H へ broadcast する加算項なので、
-        // `[B,1,M,N]` / `[1,H,M,N]` のような「一部の軸だけ実体を持つ」形を通すと、
-        // カーネル（B·H を 1 軸に畳んで先頭バッチの mask を全バッチへ配る）が黙って
-        // 別のバッチの mask を適用する。広げるなら添字算術とセットで契約を改版する。
+        // MUST: the mask is **exactly [1,1,M,N]**. It is an additive term broadcast to B·H, so letting
+        // through forms where "only some axes are materialised", such as `[B,1,M,N]` / `[1,H,M,N]`,
+        // would make the kernel (which folds B·H into one axis and hands the first batch's mask to
+        // every batch) silently apply another batch's mask. Widening it means revising the contract
+        // together with the index arithmetic.
         const shown = `${show} + mask [${mask.join(",")}]`;
         if (mask.length !== 4 || mask[0] !== 1 || mask[1] !== 1) {
           throw new OpContractError(
@@ -932,8 +992,9 @@ export const computeOutputShape = (
       }
       return sole([...q]);
     }
-    // 値を定義しない effect op（ADR 0067 決定 5）。`sole` を通らず**空列**を返すことが
-    // そのまま「出力 0 本」の宣言になる（多出力アームが列を組んで返すのと同じ流儀）。
+    // An effect op that defines no value (ADR 0067 decision 5). Returning **an empty list** without
+    // going through `sole` is itself the declaration "0 outputs" (the same style as the multi-output
+    // arm building its list).
     case "stateAppend": {
       const x = inputShapes[0];
       if (x.length !== 4) {
@@ -957,19 +1018,22 @@ export const computeOutputShape = (
           `${where}: embedding の index は rank 1 以上（スカラ添字は無い）`,
         );
       }
-      // 添字の値域 0 <= index < V は実行時データ依存なので shape 契約では見ない
-      // （範囲外の扱いは src/kernels/embedding.ts の裁定 — GPU は NaN 汚染 / CPU 参照は throw）。
+      // The index range 0 <= index < V depends on run-time data, so the shape contract does not check
+      // it (out-of-range handling is the ruling in src/kernels/embedding.ts — NaN contamination on the
+      // GPU / throw in the CPU reference).
       return sole([...index, weight[1]]);
     }
     case "maskedFill": {
       const [x, mask] = inputShapes;
-      // 出力は x と同形。mask も右詰め broadcast の stride を組むので rank 1 以上が要る
-      // （rank 0 の mask は契約を素通りして codegen 層で落ちる形になっていた）。
+      // The output has x's shape. The mask also builds right-aligned broadcast strides, so it needs
+      // rank 1 or more (a rank-0 mask used to slip through the contract and fail in the codegen
+      // layer).
       assertStridedRank(x.length, "masked_fill の x", where);
       assertStridedRank(mask.length, "masked_fill の mask", where);
-      // MUST: 出力は**常に x と同形**（mask 側は右詰め broadcast で読むだけ）。broadcastShapes を
-      // そのまま使うと mask が x を広げる形（mask [4] × x [1]）まで通り、埋め値が本来無い要素へ
-      // 漏れる。ここは「mask が x に収まる」ことだけを見る非対称な検査。
+      // MUST: the output **always has x's shape** (the mask side is only read with right-aligned
+      // broadcast). Using broadcastShapes as is would also let through forms where the mask widens x
+      // (mask [4] × x [1]), and the fill value would leak into elements that do not exist. This is an
+      // asymmetric check that only looks at "the mask fits into x".
       if (mask.length > x.length) {
         throw new OpContractError(
           `${where}: masked_fill の mask rank ${mask.length} が x rank ${x.length} を超える（mask は右詰め broadcast のみ）`,
@@ -999,9 +1063,9 @@ export const computeOutputShape = (
       }
       const [, channelsIn, length] = x;
       const [channelsOut, weightIn, kernel] = weight;
-      // MUST: グループ分割は両側で割り切れることが契約（depthwise は groups = Cin = Cout）。
-      // 割り切れない形を通すとカーネルの `Cin/groups` が切り捨てになり、読む入力チャネルが
-      // 黙ってずれる。
+      // MUST: the group split must divide on both sides; that is the contract (depthwise is groups =
+      // Cin = Cout). Letting a non-dividing form through makes the kernel's `Cin/groups` truncate,
+      // and the input channels it reads silently shift.
       if (channelsIn % groups !== 0 || channelsOut % groups !== 0) {
         throw new OpContractError(
           `${where}: conv1d の groups ${groups} が Cin ${channelsIn} / Cout ${channelsOut} を割り切らない`,
@@ -1019,15 +1083,16 @@ export const computeOutputShape = (
           `${where}: conv1d の bias 長 ${bias[0]} が出力チャネル ${channelsOut} と違う`,
         );
       }
-      // MUST: K = 0 を出力長式へ入れない（`dilation·(K−1)` が負に転び、出力が入力より**長く**
-      // なる形が導出される）。params（kernels/conv1d.ts）は正整数として落とすので、ここが
-      // 抜けていると契約層と params 層で受理集合が割れる。
+      // MUST: K = 0 is not fed into the output length formula (`dilation·(K−1)` turns negative and a
+      // form whose output is **longer** than the input is derived). The params (kernels/conv1d.ts)
+      // reject it as a positive integer, so if this check were missing, the contract layer and the
+      // params layer would split the accepted set.
       if (kernel < 1) {
         throw new OpContractError(
           `${where}: conv1d のカーネル長 K は正整数（重み [${weight.join(",")}]）`,
         );
       }
-      // dilation の一般形。K=1 でも d·(K−1) = 0 なので従来式と一致する。
+      // The general form with dilation. Even for K=1, d·(K−1) = 0, so it agrees with the old formula.
       const span = length + 2 * padding - dilation * (kernel - 1) - 1;
       if (span < 0) {
         throw new OpContractError(
@@ -1050,8 +1115,9 @@ export const computeOutputShape = (
       }
       const [, channelsIn, length] = x;
       const [weightIn, channelsOut, kernel] = weight;
-      // MUST: 重みは conv1d と**転置**の [Cin, Cout, K]。取り違えても要素数が合う形
-      // （Cin == Cout）が作れるので、テストは非対称チャネル数で固定する（ADR 0015）。
+      // MUST: the weight is [Cin, Cout, K], **transposed** relative to conv1d. A mix-up can produce a
+      // form with a matching element count (Cin == Cout), so the tests pin asymmetric channel counts
+      // (ADR 0015).
       if (weightIn !== channelsIn) {
         throw new OpContractError(
           `${where}: conv_transpose1d の重みは [Cin, Cout, K]（Cin = ${channelsIn}）のはずが [${weight.join(
@@ -1064,9 +1130,10 @@ export const computeOutputShape = (
           `${where}: conv_transpose1d の bias 長 ${bias[0]} が出力チャネル ${channelsOut} と違う`,
         );
       }
-      // MUST: 受理するのは出力長がちょうど L·stride になる形だけ（`2p == K − s`）。一般形
-      // `(L−1)·s − 2p + K` は記号長 L の一次式にはなるが、実測（dec の ups 5 本）が全て
-      // この形なので、広げるのは需要が出てから — 黙って一般形を通さない（ADR 0015）。
+      // MUST: only forms whose output length is exactly L·stride (`2p == K − s`) are accepted. The
+      // general form `(L−1)·s − 2p + K` would still be linear in the symbolic length L, but all the
+      // measurements (the 5 ups of dec) have this form, so it is widened once there is demand — the
+      // general form is not silently let through (ADR 0015).
       if (2 * padding !== kernel - stride) {
         throw new OpContractError(
           `${where}: conv_transpose1d は 2·padding == K − stride の形のみ受理（K ${kernel} / stride ${stride} / padding ${padding} — 出力長が L·stride にならない）`,
@@ -1094,11 +1161,14 @@ export const computeOutputShape = (
       }
       const [batch, channelsIn] = x;
       const [channelsOut, weightIn, kernelH, kernelW] = weight;
-      // MUST: 静的な幾何は全て正整数（params `deformConv2dParams` の positive 集合と**同じ門** —
-      // カーネル側 doc が主張する「契約検査と二重」を事実にする）。特に空間長 0 は padding 次第で
-      // 正の出力形まで導出でき、全タップが範囲外判定に落ちて **bias 一色**の沈黙誤値になる
-      // （GPU は params で落ちるが、CPU 参照はその値を有効な結果として返す）。
-      // Hout / Wout は下の `spatial` が `length < 1` で見るので、ここでは静的な入力側だけ。
+      // MUST: all static geometry is positive integers (**the same check** as the positive set of the
+      // params `deformConv2dParams` — it makes the kernel doc's claim "doubled by the contract check"
+      // a fact). In particular a spatial length of 0 can derive even a positive output shape
+      // depending on padding, every tap falls into the out-of-range branch, and the result is a
+      // silent wrong value of **the bias alone** (the GPU fails in params, but the CPU reference
+      // returns that value as a valid result).
+      // Hout / Wout are checked by `spatial` below with `length < 1`, so only the static input side
+      // is checked here.
       for (const [name, value] of [
         ["batch", batch],
         ["channels_in", channelsIn],
@@ -1116,8 +1186,9 @@ export const computeOutputShape = (
           );
         }
       }
-      // MUST: groups の欄が無い = 1 固定なので、重みの第 2 軸は Cin そのもの。取り違え
-      // （[Cin, Cout, Kh, Kw]）は要素数が合う形が作れるので、テストは Cin ≠ Cout で固定する。
+      // MUST: no groups field = fixed at 1, so the weight's second axis is Cin itself. A mix-up
+      // ([Cin, Cout, Kh, Kw]) can produce a form with a matching element count, so the tests pin
+      // Cin ≠ Cout.
       if (weightIn !== channelsIn) {
         throw new OpContractError(
           `${where}: deform_conv2d の重みは [Cout, Cin, Kh, Kw]（Cin = ${channelsIn}）のはずが [${weight.join(
@@ -1130,7 +1201,7 @@ export const computeOutputShape = (
           `${where}: deform_conv2d の bias 長 ${bias[0]} が出力チャネル ${channelsOut} と違う`,
         );
       }
-      // 空間長は stride 1 / dilation 1 の一般形（欄が無い = 1 固定）。
+      // The spatial length is the general form with stride 1 / dilation 1 (no field = fixed at 1).
       const spatial = (axis: 0 | 1, name: string): number => {
         const kernel = weight[2 + axis];
         const length = x[2 + axis] + 2 * padding[axis] - (kernel - 1);
@@ -1146,9 +1217,10 @@ export const computeOutputShape = (
       const heightOut = spatial(0, "H");
       const widthOut = spatial(1, "W");
       const taps = kernelH * kernelW;
-      // MUST: offset / mask は**突き合わせるだけ**（出力形の正本は x + weight + attrs）。
-      // offset 側から Hout を取ると「offset だけ形が違う IR」が素通りする。
-      // offset_groups の欄が無い = 1 固定なので、チャネル長は 2·Kh·Kw / Kh·Kw ちょうど。
+      // MUST: offset / mask are **only matched** (the source of truth for the output shape is x +
+      // weight + attrs). Taking Hout from the offset side would let "IR where only offset has a
+      // different shape" slip through.
+      // No offset_groups field = fixed at 1, so the channel lengths are exactly 2·Kh·Kw / Kh·Kw.
       for (const [name, shape, channels] of [
         ["offset", offset, 2 * taps],
         ["mask", mask, taps],
@@ -1176,8 +1248,9 @@ export const computeOutputShape = (
           `${where}: upsample_bilinear2d は x[B,C,H,W]（rank 4）のみ: [${x.join(",")}]`,
         );
       }
-      // MUST: 長さ 0 の空間軸を通さない。scale は `(in − 1) / (out − 1)` なので in = 0 は
-      // 負の scale になり、読み出しが入力の外へ出る（GPU では例外なしに隣の値が出る）。
+      // MUST: spatial axes of length 0 do not pass. The scale is `(in − 1) / (out − 1)`, so in = 0
+      // gives a negative scale and reads go outside the input (the GPU returns neighbouring values
+      // without an exception).
       for (const [name, axis] of [
         ["H", 2],
         ["W", 3],
@@ -1203,12 +1276,14 @@ export const computeOutputShape = (
       }
       const [time, batch, gates] = gi;
       const [initialBatch, hidden] = initial;
-      // MUST: 隠れ幅の正本は h0 の最終次元 1 か所（gi / W_hh / b_hh とは**突き合わせるだけ**）。
-      // 同じ事実を 2 か所から取ると、3H と H の取り違えが素通りする形が作れる。
-      // MUST: H の値域もここで見る（カーネルは 1 lane = 1 隠れユニットで、上限は
-      // codegen/limits.ts が正本 — docs/limitations.md が公開している by-design 制約）。
-      // 契約層に無いと H=0 / H>256 が params まで素通りし、`computeOutputShape` を通る
-      // CPU 参照だけが実行できる形になる。
+      // MUST: the single source of truth for the hidden width is h0's last dimension (gi / W_hh /
+      // b_hh are **only matched against it**). Taking the same fact from two places would allow a
+      // form where a 3H / H mix-up slips through.
+      // MUST: the range of H is checked here too (the kernel maps 1 lane = 1 hidden unit, and the
+      // limit's source of truth is codegen/limits.ts — a by-design constraint published in
+      // docs/limitations.md). Without it in the contract layer, H=0 / H>256 would slip through to
+      // the params, and only the CPU reference, which goes through `computeOutputShape`, could run
+      // the form.
       if (hidden < 1 || hidden > GRU_SCAN_MAX_HIDDEN) {
         throw new OpContractError(
           `${where}: ${found.name} の隠れ幅 H ${hidden} が 1 〜 ${GRU_SCAN_MAX_HIDDEN} の外（h0 [${initial.join(
@@ -1244,7 +1319,7 @@ export const computeOutputShape = (
     }
     case "permute": {
       const source = inputShapes[0];
-      // 出力 rank は入力と同じ（並べ替えるだけ）なので入力側だけ見れば足りる。
+      // The output rank equals the input's (it only reorders), so checking the input side is enough.
       assertStridedRank(source.length, "permute の入力", where);
       const dims = permuteDims(context.attrs ?? {}, where);
       if (dims.length !== source.length) {

@@ -81,32 +81,35 @@ import {
 } from "./names.ts";
 
 /**
- * readonly（past のみを読む）states 形 attention の入力数 — **q 1 本ちょうど**
- * （ADR 0096 段 2 §1.2）。契約層（{@link assertNodeContract}）と shape 層
- * （`computeOutputShape`）が**同じ 1 つの定数**を読む。
+ * The input count of the readonly (reads only the past) states-form attention — **exactly one, q**
+ * (ADR 0096 stage 2 §1.2). The contract layer ({@link assertNodeContract}) and the shape layer
+ * (`computeOutputShape`) read **the same single constant**.
  */
 export const READONLY_ATTENTION_ARITY = 1;
 
 /**
- * op の種別。{@link OpContract} の `kind` から**導出する**（列挙を二重に持つと、op 語彙を
- * 足したときに片方だけが古いまま型検査が緑で通る）。
+ * The op kind. **Derived** from `kind` of {@link OpContract} (holding the enumeration twice would let
+ * one copy stay stale when an op is added to the vocabulary, with the type check still green).
  */
 export type OpKind = OpContract["kind"];
 
 /**
- * 入力スロットの dtype 契約（ADR 0012 の拡張）。
+ * The dtype contract of the input slots (an extension of ADR 0012).
  *
- * - `uniform` — 全スロットが同じ受理集合を持ち、かつ**互いに同型**であることまで要求する
- *   （出力も同型）。elementwise / matmul / bmm / 行 reduce / レイアウトはこれ。
- * - `perSlot` — スロットごとに受理集合が違い、スロット間の同型は要求しない。出力は
- *   **スロット 0（値の側）と同型**。gather（src=f32 / index=i32 → out=f32）が最初の例。
+ * - `uniform` — every slot has the same accepted set, and the slots are also required to **share
+ *   one type** (the output too). Elementwise / matmul / bmm / row reduce / layout ops use this.
+ * - `perSlot` — each slot has its own accepted set, and no type agreement between slots is
+ *   required. The output has **the type of slot 0 (the value side)**. gather (src=f32 / index=i32 →
+ *   out=f32) is the first example.
  *
- * MUST: 受理集合が同じ op を `perSlot` で書かない。`uniform` は `mul(f32, i32)` のような
- * 混合を拒否する規則も担っており、perSlot に潰すとその拒否が黙って消える。
- * MUST: 出力 dtype は**スロット 0 の dtype を写像に通して**導く（{@link ContractBase.outputDtypes}）。
- * op ごとに出力元スロットを指定できる欄は作らない — `where(cond, a, b)` のように値の側が
- * 先頭でない op も、写像（bool → f32）で表せる。欄を増やすと「どのスロットから取るか」と
- * 「何に写すか」の 2 つの自由度が同じ事実を二重に持つ。
+ * MUST: an op whose slots share one accepted set is not written as `perSlot`. `uniform` also carries
+ * the rule that rejects mixes such as `mul(f32, i32)`, and collapsing it into perSlot would silently
+ * remove that rejection.
+ * MUST: the output dtype is derived **by passing slot 0's dtype through the mapping**
+ * ({@link ContractBase.outputDtypes}). There is no field to choose the source slot per op — an op
+ * whose value side is not first, like `where(cond, a, b)`, can also be expressed by the mapping
+ * (bool → f32). Adding the field would give two degrees of freedom, "which slot to take from" and
+ * "what to map to", that hold the same fact twice.
  */
 export type SlotDtypes =
   | { readonly kind: "uniform"; readonly accept: readonly IrDtype[] }
@@ -114,95 +117,108 @@ export type SlotDtypes =
 
 type ContractBase = {
   /**
-   * 受理する**入力の**意味論 dtype の**和**。capability 射影（{@link RUNTIME_SUPPORT}）と
-   * 列挙門の診断が使う射影で、スロット別契約の正本は {@link slotDtypes}。
+   * The **union** of the semantic dtypes accepted **for inputs**. A projection used by the
+   * capability projection ({@link RUNTIME_SUPPORT}) and by the diagnostics of the enumerating check;
+   * the source of truth for the per-slot contract is {@link slotDtypes}.
    *
-   * MUST: 手書きせず {@link slotDtypes} から導出する（{@link unionDtypes}）— 二重管理すると
-   * 「対応表では実行可、契約検査で落ちる」が生える。
+   * MUST: derived from {@link slotDtypes} ({@link unionDtypes}), not written by hand — double
+   * bookkeeping grows "executable per the support table, rejected by the contract check".
    */
   readonly dtypes: readonly IrDtype[];
-  /** スロット別の受理集合と出力導出の正本。 */
+  /** The source of truth for the per-slot accepted sets and for deriving outputs. */
   readonly slotDtypes: SlotDtypes;
   /**
-   * **出力 slot 別**の「スロット 0 の入力 dtype → その出力の dtype」写像の**列**（ADR 0068
-   * 決定 1）。列の長さがその op の出力数で、長さ 1 以外は `topk`（2 本）と `state_append`
-   * （**0 本** — 値を定義しない effect op・ADR 0067 決定 5）だけ。
-   * 各写像の既定は恒等（入力と同型）で、違うのは実測に出た 3 系統だけ: 比較（f32 → bool）/
-   * bool 入力の `sum`（→ i32 のカウント）/ `where`（条件 bool → 値の f32）。
+   * The **list**, **per output slot**, of mappings "slot 0's input dtype → that output's dtype" (ADR
+   * 0068 decision 1). The list length is the op's output count; only `topk` (2) and `state_append`
+   * (**0** — an effect op that defines no value, ADR 0067 decision 5) have a length other than 1.
+   * Each mapping defaults to identity (same type as the input); the exceptions are only the forms
+   * that showed up in measurements (listed in {@link OUTPUT_DTYPES}): comparisons (f32 → bool) /
+   * `sum` of bool input (→ an i32 count) / `where` (condition bool → value f32) / the index outputs
+   * of `argmax` and `topk` (f32 → i32).
    *
-   * MUST: 出力数はこの列の長さから導く（{@link outputCountOf}）— 出力数の欄を別に持たせると
-   * 「dtype 列は 2 本なのに宣言出力数は 1 本」という食い違いが書けてしまう。
-   * MUST: 各写像の定義域はスロット 0 の受理集合と**完全一致**させる（{@link slotContract} が
-   * 恒等で埋める）。部分写像にすると、スロット検査を通った dtype の出力が決まらない穴ができる。
-   * NOTE: `cast` だけはこの写像を使わない（出力は attrs.to — {@link resolveNodeDtypes}）。
+   * MUST: the output count is derived from this list's length ({@link outputCountOf}) — a separate
+   * output-count field would make it possible to write the disagreement "2 dtype columns but 1
+   * declared output".
+   * MUST: the domain of each mapping **equals** slot 0's accepted set ({@link slotContract} fills it
+   * with identity). A partial mapping would leave a hole where a dtype that passed the slot check
+   * has no defined output.
+   * NOTE: only `cast` does not use this mapping (its output is attrs.to — {@link resolveNodeDtypes}).
    */
   readonly outputDtypes: readonly ReadonlyMap<IrDtype, IrDtype>[];
   readonly attrs: AttrSchema;
   /**
-   * 入力数が可変の op（現状 `cat` のみ）。true のとき {@link OpContract} の `arity` は
-   * **下限**として読む（{@link assertArity}）。
+   * An op with a variable number of inputs (currently only `cat`). When true, `arity` of
+   * {@link OpContract} is read as a **lower bound** ({@link assertArity}).
    *
-   * MUST: 「アリティ検査を緩める」ためにこの欄を立てない。可変なのは cat の入力本数だけで、
-   * 他の op は本数そのものが契約（bias 常時ありのアリティ 3 固定など）。
-   * NOTE: capability 射影（{@link slotDtypesOf}）は下限ぶんのスロットしか作らない。uniform
-   * 契約では全スロットが同じ受理集合なので、余ったスロットを和で見る列挙門（ops/support.ts の `assertRuntimeSupport`）と
-   * 結論が一致する。
+   * MUST: this field is not set to "loosen the arity check". Only cat's input count is variable;
+   * for other ops the count itself is the contract (such as the fixed arity 3 with an always-present
+   * bias).
+   * NOTE: the capability projection ({@link slotDtypesOf}) creates slots only up to the lower bound.
+   * Under a uniform contract every slot has the same accepted set, so the conclusion agrees with the
+   * enumerating check (`assertRuntimeSupport` in ops/support.ts), which looks at surplus slots via
+   * the union.
    */
   readonly variadic?: true;
   /**
-   * **末尾に省略可能な入力**を持つ op の入力数の上限（現状 `attention` の mask だけ）。
-   * 指定時は `arity` が下限・これが上限で、受理するのはその閉区間の本数だけ。
+   * The upper bound of the input count for an op with **optional trailing inputs** (currently only
+   * the mask of `attention`). When set, `arity` is the lower bound and this the upper bound, and
+   * only counts in that closed interval are accepted.
    *
-   * MUST: `variadic` の代わりに使わない。`variadic` は「何本でも」（cat の連結）で、こちらは
-   * 「決まったスロットが 1 つ増えるだけ」— 上限を持たない表現に潰すと、余分な入力が
-   * 黙って無視される形（カーネルが読まないスロット）を契約が受理してしまう。
-   * NOTE: capability 射影（{@link slotDtypesOf}）は**上限ぶん**のスロットを作る（省略可能な
-   * スロットも dtype 契約を持つ — uniform なら本体と同じ受理集合）。
+   * MUST: not used in place of `variadic`. `variadic` means "any number" (cat's concatenation);
+   * this means "one fixed slot more" — collapsing it into an unbounded expression would let the
+   * contract accept a form where the extra input is silently ignored (a slot the kernel does not
+   * read).
+   * NOTE: the capability projection ({@link slotDtypesOf}) creates slots **up to the upper bound**
+   * (an optional slot also has a dtype contract — under uniform, the same accepted set as the rest).
    */
   readonly maxArity?: number;
   /**
-   * **省略可能な attrs**（現状 `window`〈ADR 0067 決定 4 / 5〉と `readonly`〈ADR 0096 段 2 §1.2〉の
-   * 2 本）。宣言されていれば
-   * 値域検査を通り、無ければ「欄の不存在」がそのまま意味を持つ。
+   * **Optional attrs** (currently two: `window` (ADR 0067 decisions 4 / 5) and `readonly` (ADR 0096
+   * stage 2 §1.2)). When declared they go through the range check; when absent, "the absence of the
+   * field" itself carries meaning.
    *
-   * MUST: 必須 attrs（{@link ContractBase.attrs}）を optional 化するために使わない。
-   * 「宣言済み attrs の既定値補完はしない」（ADR 0012）は不変で、ここに載るのは
-   * **不存在それ自体が別の宣言になる欄**だけ（`window` 不在 = 全 context）。
-   * MUST: 省略可能 attrs は **states 形専用**（{@link assertNodeContract}）。sliding の窓は
-   * 「論理 col → 物理 row の写像」の一部で、state を参照しないノードには意味が無い —
-   * 従来形に書けると「受理はされるが誰も読まない attr」ができる。
+   * MUST: not used to make required attrs ({@link ContractBase.attrs}) optional. "Declared attrs are
+   * not filled with defaults" (ADR 0012) is invariant, and only **fields whose absence is itself a
+   * different declaration** belong here (`window` absent = the whole context).
+   * MUST: optional attrs are **for the states form only** ({@link assertNodeContract}). The sliding
+   * window is part of the "logical col → physical row" mapping and means nothing for a node that does
+   * not reference state — if it could be written on the previous form, there would be "an attr that
+   * is accepted but read by nobody".
    */
   readonly optionalAttrs?: AttrSchema;
   /**
-   * `attrs.readonly`（ADR 0096 段 2 §1.2）を宣言した states 形の**入力数ちょうど**
-   * （現状 `attention` の 1 = q だけ）。省略 = readonly を宣言できない op。
+   * The **exact input count** of the states form that declares `attrs.readonly` (ADR 0096 stage 2
+   * §1.2) (currently 1 = q only, for `attention`). Omitted = an op that cannot declare readonly.
    *
-   * MUST: `arity` / `maxArity` の閉区間とは**別の欄**にする。readonly は「省略可能な末尾入力が
-   * 増える」のではなく「今 step の k/v が**構造ごと消える**」形で、区間で表すと `1..4` の
-   * ような穴だらけの受理集合になり、ins 2 本の壊れた IR が通る。
+   * MUST: a **separate field** from the closed interval `arity` / `maxArity`. readonly is not "one
+   * more optional trailing input" but the form where "this step's k/v **disappear structurally**";
+   * expressing it as an interval would give an accepted set full of holes like `1..4`, and broken IR
+   * with 2 ins would pass.
    */
   readonly readonlyArity?: number;
   /**
-   * `states` 欄の契約（省略 = **states 欄を持てない op**）。`keys` は欄が非空のときの
-   * キー集合**ちょうど**で、`required` は「欄そのものが必須か」。
+   * The contract of the `states` field (omitted = **an op that cannot have a states field**). `keys`
+   * is **exactly** the key set when the field is non-empty, and `required` says whether the field
+   * itself is required.
    *
-   * `attention` は `{ keys: ["k","v"], required: false }` — 欄の有無が従来形 / states 形を
-   * 判別する（ADR 0067 決定 4）。`state_append` は `{ keys: ["slot"], required: true }`。
+   * `attention` is `{ keys: ["k","v"], required: false }` — the presence of the field distinguishes
+   * the previous form from the states form (ADR 0067 decision 4). `state_append` is
+   * `{ keys: ["slot"], required: true }`.
    */
   readonly states?: StateFieldContract;
 };
 
-/** {@link ContractBase.states} — states 欄のキー集合と必須性。 */
+/** {@link ContractBase.states} — the key set of the states field and whether it is required. */
 export type StateFieldContract = {
   readonly keys: readonly string[];
   readonly required: boolean;
 };
 
 /**
- * kind と op 名を判別可能ユニオンで結ぶ。消費側（codegen 選択・CPU 参照）が
- * `op as UnaryOpName` のような取り違えの効かないキャストを書かずに済むようにするため。
- * `arity` は入力の個数で、出力の個数は {@link ContractBase.outputDtypes} の列長
- * （`topk` が 2 本・`state_append` が 0 本で、他は全て 1 本）。
+ * Ties kind and op name together as a discriminated union, so that consumers (codegen selection, CPU
+ * reference) need not write casts like `op as UnaryOpName` that cannot catch mix-ups.
+ * `arity` is the number of inputs; the number of outputs is the list length of
+ * {@link ContractBase.outputDtypes} (2 for `topk`, 0 for `state_append`, 1 for everything else).
  */
 export type OpContract =
   | (ContractBase & { readonly kind: "unary"; readonly name: UnaryOpName; readonly arity: 1 })
@@ -217,14 +233,16 @@ export type OpContract =
       readonly arity: 2;
     })
   | (ContractBase & { readonly kind: "rowReduce"; readonly name: ReduceOpName; readonly arity: 1 })
-  // 最終次元の argmax（ADR 0068 決定 2）。reduce 族と kind を分けるのは、attrs（無し）・
-  // 出力 dtype（i32）・rank の扱い（保存）・カーネル族（identity −inf + index 追跡）の
-  // 4 面が全て違い、消費側の網羅 switch に「どちらの意味論で実行するか」を必ず宣言させる
-  // ため（safe_softmax を softmax と別 kind にしたのと同じ理由）。
+  // argmax over the last dimension (ADR 0068 decision 2). The kind is separate from the reduce family
+  // because all four aspects differ — attrs (none), output dtype (i32), rank handling (preserved) and
+  // kernel family (identity −inf + index tracking) — and so that the consumers' exhaustive switches
+  // must declare "which semantics to execute" (the same reason safe_softmax is a separate kind from
+  // softmax).
   | (ContractBase & { readonly kind: "argmax"; readonly name: typeof ARGMAX_OP; readonly arity: 1 })
-  // 最終次元の top-k（ADR 0068 決定 3）。**唯一の多出力 op**（値 f32 + 添字 i32）で、出力数は
-  // 出力 dtype 写像の列長から導く（{@link outputCountOf}）。argmax と kind を分けるのは
-  // 出力本数・attrs（`k` 宣言必須）・shape 規則（最終次元 → k）が全て違うため。
+  // top-k over the last dimension (ADR 0068 decision 3). **The only multi-output op** (values f32 +
+  // indices i32); the output count is derived from the list length of the output dtype mapping
+  // ({@link outputCountOf}). The kind is separate from argmax because the output count, attrs (`k`
+  // required) and shape rule (last dimension → k) all differ.
   | (ContractBase & { readonly kind: "topk"; readonly name: typeof TOPK_OP; readonly arity: 1 })
   | (ContractBase & { readonly kind: "cast"; readonly name: typeof CAST_OP; readonly arity: 1 })
   | (ContractBase & {
@@ -243,8 +261,9 @@ export type OpContract =
       readonly arity: 1;
     })
   | (ContractBase & { readonly kind: "slice"; readonly name: typeof SLICE_OP; readonly arity: 1 })
-  // 唯一の可変アリティ op。`arity` は**下限** 2（1 本だけの cat は恒等コピーで、実測にも
-  // 出ない — 表現を持たないことがそのまま fail loudly になる）。
+  // The only variable-arity op. `arity` is the **lower bound** 2 (a cat of one input is an identity
+  // copy and does not show up in measurements either — having no representation for it is itself
+  // the fail-loudly).
   | (ContractBase & {
       readonly kind: "cat";
       readonly name: typeof CAT_OP;
@@ -264,7 +283,7 @@ export type OpContract =
       readonly name: typeof LAYER_NORM_OP;
       readonly arity: 3;
     })
-  // affine が weight だけなのでアリティ 2（bias の欄を作らない — ADR 0017）。
+  // The affine part is the weight only, so arity 2 (no bias field — ADR 0017).
   | (ContractBase & {
       readonly kind: "rmsNorm";
       readonly name: typeof RMS_NORM_OP;
@@ -280,15 +299,16 @@ export type OpContract =
       readonly name: typeof SOFTMAX_OP;
       readonly arity: 1;
     })
-  // softmax と同一契約の別 op（空行 → 全 0。ADR 0044）。kind を分けるのは、executor / CPU
-  // 参照の網羅 switch に「どちらの意味論で実行するか」を必ず宣言させるため。
+  // A separate op with the same contract as softmax (empty row → all 0. ADR 0044). The kind is
+  // separate so that the exhaustive switches of the executor / CPU reference must declare "which
+  // semantics to execute".
   | (ContractBase & {
       readonly kind: "safeSoftmax";
       readonly name: typeof SAFE_SOFTMAX_OP;
       readonly arity: 1;
     })
-  // 融合 attention（ADR 0023）。arity 3〜4（4 本目は省略可能な加算 mask）・attrs `scale`
-  // 宣言必須・rank-4 head-first。
+  // Fused attention (ADR 0023). Arity 3–4 (the 4th is the optional additive mask), attrs `scale`
+  // required, rank-4 head-first.
   | (ContractBase & {
       readonly kind: "attention";
       readonly name: typeof ATTENTION_OP;
@@ -296,9 +316,10 @@ export type OpContract =
       readonly maxArity: 4;
       readonly readonlyArity: typeof READONLY_ATTENTION_ARITY;
     })
-  // 今 step の k/v を state スロットへ書く effect op（ADR 0067 決定 5）。**出力 0 本**の
-  // 最初の入居者で、`states` 欄が必須（`{ slot }` ちょうど）。kind を attention と分けるのは、
-  // 出力本数・states 欄のキー・カーネル族（ring 書込み）が全て別だから。
+  // The effect op that writes this step's k/v into a state slot (ADR 0067 decision 5). The first op
+  // with **0 outputs**, and the `states` field is required (exactly `{ slot }`). The kind is separate
+  // from attention because the output count, the states field keys and the kernel family (ring
+  // writes) all differ.
   | (ContractBase & {
       readonly kind: "stateAppend";
       readonly name: typeof STATE_APPEND_OP;
@@ -324,7 +345,8 @@ export type OpContract =
       readonly name: typeof CONV2D_OP;
       readonly arity: 3;
     })
-  // unbatched の 3 次元畳み込み（拡張分子層 — ADR 0118 決定 1）。x / weight / bias の 3 本固定。
+  // Unbatched 3D convolution (extended composite layer — ADR 0118 decision 1). Fixed at 3 inputs:
+  // x / weight / bias.
   | (ContractBase & {
       readonly kind: "conv3d";
       readonly name: typeof CONV3D_OP;
@@ -335,91 +357,99 @@ export type OpContract =
       readonly name: typeof CONV_TRANSPOSE1D_OP;
       readonly arity: 3;
     })
-  // DCNv2（ADR 0055）。x / weight / offset / mask / bias の 5 本固定 — mask がスロットとして
-  // 必須であることが「DCNv1 は語彙に無い」を構造で表す。
+  // DCNv2 (ADR 0055). Fixed at 5 inputs: x / weight / offset / mask / bias — mask being a required
+  // slot expresses structurally that "DCNv1 is not in the vocabulary".
   | (ContractBase & {
       readonly kind: "deformConv2d";
       readonly name: typeof DEFORM_CONV2D_OP;
       readonly arity: 5;
     })
-  // 双線形 resample（第 1 層）。入力は x 1 本だけ（重みも bias も無い）で、出力空間は
-  // attrs `output_size` が宣言する。
+  // Bilinear resample (Core ATen layer). The only input is x (no weight, no bias), and the output
+  // spatial size is declared by attrs `output_size`.
   | (ContractBase & {
       readonly kind: "upsampleBilinear2d";
       readonly name: typeof UPSAMPLE_BILINEAR2D_OP;
       readonly arity: 1;
     })
-  // GRU の隠れ側スキャン（ADR 0056）。走査方向だけが違う 2 op を 1 kind で持つ（reduce 族や
-  // gelu / gelu_tanh と同じ扱い — 契約面は完全に同一で、消費側は `name` で方向を引く）。
+  // The hidden-side GRU scan (ADR 0056). One kind holds the 2 ops that differ only in scan direction
+  // (as for the reduce family and gelu / gelu_tanh — the contract is fully identical, and consumers
+  // look up the direction by `name`).
   | (ContractBase & {
       readonly kind: "gruScan";
       readonly name: GruScanOpName;
       readonly arity: 4;
     });
 
-/** f32 専業の op（実測グラフに i32 / bool 形が現れていない — 対称性のためには解禁しない）。 */
+/** f32-only ops (no i32 / bool form appeared in measured graphs — not unlocked for symmetry). */
 const F32: readonly IrDtype[] = ["f32"];
 /**
- * f32 と i32 の両方を実行できる op。根拠は DeBERTa front の実測（recon §3-8）:
- * mask 外積 `mul(i64, i64)` と `1 - attention_mask` の `sub`。いずれも入力値依存で
- * 定数畳み込みできないため実行系に必要。
+ * Ops that can execute both f32 and i32. Grounds: the DeBERTa front measurements (recon §3-8): the
+ * mask outer product `mul(i64, i64)` and the `sub` of `1 - attention_mask`. Both depend on input
+ * values and cannot be constant-folded, so the executor needs them.
  */
 const F32_I32: readonly IrDtype[] = ["f32", "i32"];
-/** bool 専業（否定・論理積は真偽値にしか意味が無い）。 */
+/** bool only (negation and logical AND mean something only for booleans). */
 const BOOL: readonly IrDtype[] = ["bool"];
 /**
- * f32 と bool の両方を実行できる op。根拠は sdp の spline（recon §2 の searchsorted 行）:
- * `sum(inputs[…,None] >= bl, dim=-1)` が **bool の行 sum**（= 真の個数）で、出力は i32
- * （{@link OUTPUT_DTYPES}）。f32 の総和と併存する。
+ * Ops that can execute both f32 and bool. Grounds: sdp's spline (the searchsorted row of recon §2):
+ * `sum(inputs[…,None] >= bl, dim=-1)` is **a row sum of bool** (= the number of trues), and the
+ * output is i32 ({@link OUTPUT_DTYPES}). It coexists with the f32 sum.
  */
 const F32_BOOL: readonly IrDtype[] = ["f32", "bool"];
-/** 整数添字専業（gather の index スロット — 実測は i32[16,T,T]）。 */
+/** Integer indices only (gather's index slot — measured as i32[16,T,T]). */
 const I32: readonly IrDtype[] = ["i32"];
-/** cast の**入力**側（出力は attrs.to）と、要素値に触れない reshape。 */
+/** cast's **input** side (the output is attrs.to), and reshape, which touches no element value. */
 const ANY_DTYPE: readonly IrDtype[] = SEMANTIC_DTYPES;
 
 const NO_ATTRS: AttrSchema = {};
 
-/** op ごとの dtype 解禁表。ここに無い op は f32 のまま。 */
+/** The per-op dtype unlock table. Ops not listed stay f32. */
 const DTYPES: ReadonlyMap<string, readonly IrDtype[]> = new Map([
   ["mul", F32_I32],
   ["sub", F32_I32],
   ["bitwise_not", BOOL],
-  // spline の `inside = (x >= -b) & (x <= b)`（recon §2）— bool の論理積。整数の bitwise_and は
-  // 意味が違うので解禁しない（bitwise_not と同じ絞り方）。
+  // spline's `inside = (x >= -b) & (x <= b)` (recon §2) — a logical AND of bools. Integer
+  // bitwise_and means something else, so it is not unlocked (the same narrowing as bitwise_not).
   ["bitwise_and", BOOL],
   ["sum", F32_BOOL],
-  // reshape は要素を 1 つも読み書きしない（別名化のみ）ので全語彙。実測も f32 の view と
-  // i32 mask の squeeze/unsqueeze、bool マスクの unsqueeze が全て出る（recon §2）。
+  // reshape reads and writes no element (aliasing only), so the whole vocabulary. The measurements
+  // also show f32 views, squeeze/unsqueeze of i32 masks and unsqueeze of bool masks (recon §2).
   [RESHAPE_OP, ANY_DTYPE],
-  // gather 添字（i32）・conv 経路の bool マスクに加え、相対位置埋め込みの 4D 化
-  // `ek.expand(...)` / `ev.expand(...)`（f32 — recon §2 の enc_p / flow 行）で f32 も解禁。
-  // strided コピー族は dtype パラメトリックなのでカーネルは共用のまま。
+  // Besides gather indices (i32) and the bool masks of the conv path, f32 is also unlocked for the
+  // 4D lift of the relative position embeddings `ek.expand(...)` / `ev.expand(...)` (f32 — the
+  // enc_p / flow rows of recon §2). The strided copy family is dtype-parametric, so the kernel stays
+  // shared.
   [EXPAND_OP, ANY_DTYPE],
-  // 焼いた定数は相対位置バケット表（i32）と位置テーブル（f32）の 2 系統。bool の
-  // initializer は語彙に無い（ir.ts の INITIALIZER_DTYPES）ので解禁しない。
+  // The baked constants come in two kinds: the relative position bucket table (i32) and the position
+  // table (f32). bool initializers are not in the vocabulary (INITIALIZER_DTYPES in ir.ts), so bool
+  // is not unlocked.
   [SYM_PREFIX_SLICE_OP, F32_I32],
 ]);
 
 const dtypesOf = (name: string): readonly IrDtype[] => DTYPES.get(name) ?? F32;
 
 /**
- * 出力 slot 別の dtype 写像の**列**を宣言する表。ここに無い op は「出力 1 本・恒等（入力と
- * 同型）」（{@link SINGLE_IDENTITY_OUTPUT}）。列の要素は「スロット 0 の入力 dtype → その
- * 出力の dtype」で、恒等な dtype は書かなくてよい（{@link slotContract} が埋める）。
+ * The table that declares the **list** of per-output-slot dtype mappings. Ops not listed have "one
+ * output, identity (same type as the input)" ({@link SINGLE_IDENTITY_OUTPUT}). Each list element is
+ * "slot 0's input dtype → that output's dtype", and identity dtypes need not be written
+ * ({@link slotContract} fills them in).
  *
- * MUST: 写像の値域は実測に出た形だけ（ADR 0009 の「op ごと実測ベース」）。
- * - 比較 4 本 — spline の `inside` 判定と searchsorted（recon §2）。真偽値なので bool。
- * - `sum` の bool 入力 — `sum(x >= bl, dim=-1)` は**真の個数**なので i32（f32 で数えると
- *   2^24 を超えた時点で静かに丸まる）。f32 入力は従来どおり f32。
- * - `where` — 条件が先頭スロットなので、写像だけが「出力は値の側」を表せる。
- * - `argmax` — 出力は**添字**なので i32（ADR 0068 決定 2）。f32 で返すと語彙 2^24 を超えた
- *   時点で隣の token に丸まる（bool の `sum` と同型の理由）。
- * - `topk` — **列の長さが 2**（ADR 0068 決定 3）。slot 0 は値なので恒等（f32 → f32・空の写像が
- *   埋める）、slot 1 は添字なので i32。**列の長さがそのまま出力数**なので、この 1 行が
- *   「topk は 2 本出す」の宣言そのものになる。
- * - `state_append` — **列が空**（ADR 0067 決定 5）。値を定義しない effect op で、この 1 行が
- *   「出力 0 本」の宣言そのもの（`outs: []` を許すのは契約がこう宣言する op だけ）。
+ * MUST: the mapping ranges cover only the forms that showed up in measurements (ADR 0009's "per op,
+ * based on measurements").
+ * - The 4 comparisons — spline's `inside` test and searchsorted (recon §2). Booleans, so bool.
+ * - `sum` with bool input — `sum(x >= bl, dim=-1)` is **the number of trues**, so i32 (counting in
+ *   f32 silently rounds once past 2^24). f32 input stays f32 as before.
+ * - `where` — the condition is the first slot, so only the mapping can express "the output is the
+ *   value side".
+ * - `argmax` — the output is **an index**, so i32 (ADR 0068 decision 2). Returned as f32 it would
+ *   round to the neighbouring token once the vocabulary exceeds 2^24 (the same reason as `sum` of
+ *   bool).
+ * - `topk` — **the list length is 2** (ADR 0068 decision 3). slot 0 is the values, so identity
+ *   (f32 → f32, filled in by the empty mapping); slot 1 is the indices, so i32. **The list length is
+ *   the output count as is**, so this one row is itself the declaration "topk outputs 2".
+ * - `state_append` — **the list is empty** (ADR 0067 decision 5). An effect op that defines no
+ *   value; this one row is itself the declaration "0 outputs" (`outs: []` is allowed only for ops
+ *   whose contract declares this).
  */
 const OUTPUT_DTYPES: ReadonlyMap<string, readonly ReadonlyMap<IrDtype, IrDtype>[]> = new Map([
   ["ge", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
@@ -441,18 +471,20 @@ const OUTPUT_DTYPES: ReadonlyMap<string, readonly ReadonlyMap<IrDtype, IrDtype>[
   [STATE_APPEND_OP, []],
 ]);
 
-/** 宣言が無い op の既定 = **出力 1 本・恒等**（空の写像は定義域全体が恒等で埋まる）。 */
+/** The default for ops without a declaration = **one output, identity** (empty map = all identity). */
 const SINGLE_IDENTITY_OUTPUT: readonly ReadonlyMap<IrDtype, IrDtype>[] = [
   new Map<IrDtype, IrDtype>(),
 ];
 
 /**
- * スカラ attr を params の並び順で取り出す（検査は {@link assertNodeContract} が済ませている
- * 前提だが、CPU 参照から直接呼ばれる経路もあるので値域はここでも見る）。
+ * Reads the scalar attrs in params order (assumes {@link assertNodeContract} has already checked
+ * them, but some paths call this directly from the CPU reference, so the ranges are checked here
+ * too).
  *
- * MUST: clamp の `min <= max` はここでしか見られない（attrs スキーマはキー単位の検査なので、
- * 2 つのキーに跨る不変条件を表せない）。逆転を許すと WGSL 側の分岐順に依存した「片方だけ
- * 効く clamp」になり、CPU 参照との差が入力の位置によって出たり出なかったりする。
+ * MUST: clamp's `min <= max` can only be checked here (the attrs schema checks per key, so it cannot
+ * express an invariant spanning two keys). Allowing an inversion would give "a clamp where only one
+ * side takes effect", depending on the branch order on the WGSL side, and the difference from the
+ * CPU reference would appear or not depending on the input's position.
  */
 export const scalarParamValues = (
   found: OpContract,
@@ -475,8 +507,9 @@ export const scalarParamValues = (
 };
 
 /**
- * スロット別の受理集合を 1 本の和へ畳む。順序は語彙の宣言順（{@link SEMANTIC_DTYPES}）で
- * 固定する — 表示と突合に使う射影なので、スロットの並びで順序が変わってはいけない。
+ * Folds the per-slot accepted sets into one union. The order is fixed to the vocabulary's
+ * declaration order ({@link SEMANTIC_DTYPES}) — it is a projection used for display and matching, so
+ * the order must not change with the slot order.
  */
 const unionDtypes = (slotDtypes: SlotDtypes): readonly IrDtype[] =>
   slotDtypes.kind === "uniform"
@@ -486,7 +519,7 @@ const unionDtypes = (slotDtypes: SlotDtypes): readonly IrDtype[] =>
 const contract = (name: string, attrs: AttrSchema = NO_ATTRS): ContractBase =>
   slotContract(name, { kind: "uniform", accept: dtypesOf(name) }, attrs);
 
-/** スロット 0 の受理集合（uniform は全スロット共通）。出力 dtype 写像の定義域になる。 */
+/** Slot 0's accepted set (every slot's under uniform) — the domain of the output dtype mapping. */
 const firstSlotAccept = (slotDtypes: SlotDtypes): readonly IrDtype[] =>
   slotDtypes.kind === "uniform" ? slotDtypes.accept : slotDtypes.slots[0];
 
@@ -496,15 +529,16 @@ const slotContract = (
   attrs: AttrSchema = NO_ATTRS,
 ): ContractBase => {
   const domain = firstSlotAccept(slotDtypes);
-  // 宣言が無い dtype は恒等写像で埋める（定義域 = スロット 0 の受理集合という不変条件を
-  // 出力 slot ごとに構造で満たす — 表の書き忘れが「出力が決まらない dtype」にならない）。
+  // dtypes without a declaration are filled with the identity mapping (the invariant "domain = slot
+  // 0's accepted set" is met structurally per output slot — forgetting a row in the table does not
+  // become "a dtype whose output is undefined").
   const outputDtypes = (OUTPUT_DTYPES.get(name) ?? SINGLE_IDENTITY_OUTPUT).map(
     (slot) => new Map<IrDtype, IrDtype>(domain.map((dtype) => [dtype, slot.get(dtype) ?? dtype])),
   );
   return { dtypes: unionDtypes(slotDtypes), slotDtypes, outputDtypes, attrs };
 };
 
-/** attrs を持つ単項 op のスキーマ（無い op は attrs 空）。 */
+/** Schemas of unary ops with attrs (ops not listed have empty attrs). */
 const UNARY_ATTRS: ReadonlyMap<string, AttrSchema> = new Map([
   ["clamp", CLAMP_ATTRS],
   ["clamp_min", CLAMP_MIN_ATTRS],
@@ -527,8 +561,8 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
     name,
     { ...contract(name, REDUCE_ATTRS), kind: "rowReduce", name, arity: 1 },
   ]),
-  // 条件 bool と値 f32 のスロット別契約。出力は**値の側**（写像 bool → f32 — 出力元
-  // スロットを指す欄は作らない規律）。
+  // A per-slot contract of condition bool and value f32. The output is **the value side** (mapping
+  // bool → f32 — the discipline of having no field that points at the source slot).
   [
     WHERE_OP,
     {
@@ -549,7 +583,8 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
   ],
   [MATMUL_OP, { ...contract(MATMUL_OP), kind: "matmul", name: MATMUL_OP, arity: 2 }],
   [BMM_OP, { ...contract(BMM_OP), kind: "bmm", name: BMM_OP, arity: 2 }],
-  // 最初のスロット別 dtype 契約: 値 f32 と添字 i32 が混在し、出力は値の側と同型。
+  // The first per-slot dtype contract: value f32 and index i32 mixed; the output has the value
+  // side's type.
   [
     GATHER_OP,
     {
@@ -559,11 +594,12 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 2,
     },
   ],
-  // 最終次元の argmax（ADR 0068 決定 2）。attrs 空・入力 f32 → 出力 i32（写像は
-  // OUTPUT_DTYPES）で、rank 保存は shape 規則が持つ。
+  // argmax over the last dimension (ADR 0068 decision 2). Empty attrs, input f32 → output i32 (the
+  // mapping is in OUTPUT_DTYPES); the shape rule holds the rank preservation.
   [ARGMAX_OP, { ...contract(ARGMAX_OP), kind: "argmax", name: ARGMAX_OP, arity: 1 }],
-  // 最終次元の top-k（ADR 0068 決定 3）。attrs `k` 宣言必須・出力 2 本（値 f32 + 添字 i32 —
-  // 写像は OUTPUT_DTYPES）で、`[…, k]` の shape 規則と受理領域は shape 計算側が持つ。
+  // top-k over the last dimension (ADR 0068 decision 3). attrs `k` required, 2 outputs (values f32 +
+  // indices i32 — the mapping is in OUTPUT_DTYPES); the shape computation holds the `[…, k]` shape
+  // rule and the accepted domain.
   [TOPK_OP, { ...contract(TOPK_OP, TOPK_ATTRS), kind: "topk", name: TOPK_OP, arity: 1 }],
   [
     CAST_OP,
@@ -585,9 +621,9 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
     },
   ],
   [EXPAND_OP, { ...contract(EXPAND_OP), kind: "expand", name: EXPAND_OP, arity: 1 }],
-  // レイアウト第 2 群（ADR 0014）。実測は全て f32（enc_p の m_p/logs_p 分割・coupling の
-  // 96/96 分割と cat・相対位置 value 側の pad・flow/sdp の Flip — recon §2）なので、
-  // dtype は解禁表に載せない = f32 専業。
+  // Layout group 2 (ADR 0014). All measurements are f32 (the m_p/logs_p split of enc_p, the 96/96
+  // split and cat of coupling, the pad on the relative-position value side, the Flip of flow/sdp —
+  // recon §2), so the dtype is not in the unlock table = f32 only.
   [SLICE_OP, { ...contract(SLICE_OP, SLICE_ATTRS), kind: "slice", name: SLICE_OP, arity: 1 }],
   [
     CAT_OP,
@@ -610,8 +646,8 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 1,
     },
   ],
-  // 融合 op（ADR 0012）。bias / affine を持つ 3 本はアリティ 3 固定 — 実測が bias 常時ありで、
-  // 「bias 無し」を表す欄を作らないことがそのまま fail loudly になる。
+  // Fused ops (ADR 0012). The 3 with bias / affine have arity fixed at 3 — the measurements always
+  // have a bias, and having no field that expresses "no bias" is itself the fail-loudly.
   [LINEAR_OP, { ...contract(LINEAR_OP), kind: "linear", name: LINEAR_OP, arity: 3 }],
   [
     LAYER_NORM_OP,
@@ -622,8 +658,8 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 3,
     },
   ],
-  // bias が無いのでアリティ 2（ADR 0017）。weight 無しの形はエクスポータが ones 合成で
-  // アリティ 2 へ正規化する — ゼロ bias 合成（ADR 0015）と同じ手筋。
+  // No bias, so arity 2 (ADR 0017). A form without weight is normalised to arity 2 by the exporter
+  // synthesising ones — the same move as the zero-bias synthesis (ADR 0015).
   [
     RMS_NORM_OP,
     {
@@ -651,8 +687,8 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 1,
     },
   ],
-  // ADR 0044。attrs スキーマは softmax と**同じ 1 本を共有**する（複製すると片方だけ
-  // 絞りが緩む形が作れる）。
+  // ADR 0044. The attrs schema **shares the same single object** with softmax (a copy would make it
+  // possible for only one of them to loosen its narrowing).
   [
     SAFE_SOFTMAX_OP,
     {
@@ -662,10 +698,11 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 1,
     },
   ],
-  // 融合 attention（ADR 0023）。q / k / v と省略可能な mask の 4 本とも f32 で同型
-  // （uniform 契約）。mask は加算型なので値の側と同じ dtype で、bool は受理しない。
-  // states 欄（ADR 0067 決定 4）は**省略可能** — 欄の有無が従来形 / states 形を判別し、
-  // 欄がある形だけが `window` を宣言できる（従来形の受理集合は 1 バイトも動かない）。
+  // Fused attention (ADR 0023). q / k / v and the optional mask, all 4 f32 of one type (uniform
+  // contract). The mask is additive, so it has the value side's dtype, and bool is not accepted.
+  // The states field (ADR 0067 decision 4) is **optional** — its presence distinguishes the previous
+  // form from the states form, and only the form with the field can declare `window` (the accepted
+  // set of the previous form does not move by a single byte).
   [
     ATTENTION_OP,
     {
@@ -674,16 +711,16 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       name: ATTENTION_OP,
       arity: 3,
       maxArity: 4,
-      // `window` と `readonly` はどちらも states 形専用の省略可能 attr（ADR 0067 決定 4 /
-      // ADR 0096 段 2 §1.2）。`state_append` が共有するのは `window` の 1 本だけ（append に
-      // readonly は無い）なので、合成はここで行い STATE_WINDOW_ATTRS 自体は動かさない。
+      // `window` and `readonly` are both optional attrs for the states form only (ADR 0067 decision
+      // 4 / ADR 0096 stage 2 §1.2). `state_append` shares only `window` (append has no readonly), so
+      // they are combined here and STATE_WINDOW_ATTRS itself stays unchanged.
       optionalAttrs: { ...STATE_WINDOW_ATTRS, ...STATE_READONLY_ATTRS },
       readonlyArity: READONLY_ATTENTION_ARITY,
       states: { keys: ["k", "v"], required: false },
     },
   ],
-  // state スロットへの書き込み（ADR 0067 決定 5）。入力 1 本・**出力 0 本**（OUTPUT_DTYPES の
-  // 空列がその宣言）・states 欄必須。
+  // Writes into a state slot (ADR 0067 decision 5). One input, **0 outputs** (the empty list in
+  // OUTPUT_DTYPES is that declaration), states field required.
   [
     STATE_APPEND_OP,
     {
@@ -695,7 +732,8 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       states: { keys: ["slot"], required: true },
     },
   ],
-  // 値 f32 と添字 i32 のスロット別契約（gather と同型 — 出力は値の側と同型）。
+  // A per-slot contract of value f32 and index i32 (the same kind as gather — the output has the
+  // value side's type).
   [
     EMBEDDING_OP,
     {
@@ -705,7 +743,8 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 2,
     },
   ],
-  // 値 f32 と条件 bool のスロット別契約。出力はスロット 0（値の側）と同型。
+  // A per-slot contract of value f32 and condition bool. The output has the type of slot 0 (the
+  // value side).
   [
     MASKED_FILL_OP,
     {
@@ -733,7 +772,7 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 3,
     },
   ],
-  // unbatched（x は rank 4）の 3 次元畳み込み（ADR 0118 決定 1）。3 スロットとも f32 で同型。
+  // Unbatched 3D convolution (x is rank 4 — ADR 0118 decision 1). All 3 slots are f32 of one type.
   [
     CONV3D_OP,
     {
@@ -743,8 +782,8 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 3,
     },
   ],
-  // bias 無し conv はエクスポータのゼロ bias 合成でアリティ 3 に正規化される（ADR 0015）—
-  // カーネルにも契約にも arity 分岐を持ち込まない。
+  // A conv without bias is normalised to arity 3 by the exporter's zero-bias synthesis (ADR 0015) —
+  // no arity branch is brought into the kernel or the contract.
   [
     CONV_TRANSPOSE1D_OP,
     {
@@ -754,8 +793,9 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 3,
     },
   ],
-  // DCNv2（第 1' 層・ADR 0055）。5 スロットとも f32 で同型（offset / mask も値の側と
-  // 同じ dtype）。重みは持つが**低精度格納の適格外**なので WEIGHT_SLOTS には載せない。
+  // DCNv2 (extended atomic layer, ADR 0055). All 5 slots are f32 of one type (offset / mask also
+  // have the value side's dtype). It has a weight but is **ineligible for low-precision storage**,
+  // so it is not in WEIGHT_SLOTS.
   [
     DEFORM_CONV2D_OP,
     {
@@ -765,7 +805,7 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 5,
     },
   ],
-  // 双線形 resample（第 1 層）。重みを持たないので WEIGHT_SLOTS には載らない。
+  // Bilinear resample (Core ATen layer). It has no weight, so it is not in WEIGHT_SLOTS.
   [
     UPSAMPLE_BILINEAR2D_OP,
     {
@@ -775,40 +815,45 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       arity: 1,
     },
   ],
-  // GRU 隠れ側スキャン 2 方向（第 2 層・ADR 0056）。4 スロットとも f32 で同型・attrs 空。
-  // `w_hh` は op 内スロットなので**低精度格納の適格外**（WEIGHT_SLOTS に載せない）— 入力側の
-  // 重みは呼び手の `linear` が持つので、そちらは従来どおり f16 / i8 が効く。
+  // The two directions of the hidden-side GRU scan (extended composite layer, ADR 0056). All 4
+  // slots are f32 of one type, empty attrs. `w_hh` is an in-op slot, so it is **ineligible for
+  // low-precision storage** (not in WEIGHT_SLOTS) — the input-side weight is held by the caller's
+  // `linear`, so f16 / i8 still apply there as before.
   ...GRU_SCAN_OPS.map((name): [string, OpContract] => [
     name,
     { ...contract(name), kind: "gruScan", name, arity: 4 },
   ]),
 ]);
 
-/** 契約が**必須**として宣言する attrs キー（全ノードが持たなければならない欄）。 */
+/** The attrs keys the contract declares as **required** (fields every node must have). */
 export const attrKeysOf = (found: OpContract): readonly string[] => Object.keys(found.attrs);
 
 /**
- * 契約が**省略可能**として宣言する attrs キー（{@link ContractBase.optionalAttrs}）。
+ * The attrs keys the contract declares as **optional** ({@link ContractBase.optionalAttrs}).
  *
- * MUST: capability 射影（{@link RUNTIME_SUPPORT}）には必須と省略可能の**和**を載せる —
- * 列挙門（ops/support.ts の `assertRuntimeSupport`）は「実装済みの attr キー」との差を「未実装 attrs」として並べるので、
- * 省略可能なぶんを落とすと states 形の正しいグラフが capability 不足で拒否される。
+ * MUST: the capability projection ({@link RUNTIME_SUPPORT}) carries the **union** of required and
+ * optional keys — the enumerating check (`assertRuntimeSupport` in ops/support.ts) lists the
+ * difference from "the implemented attr keys" as "unimplemented attrs", so dropping the optional
+ * ones would reject correct states-form graphs as missing capability.
  */
 export const optionalAttrKeysOf = (found: OpContract): readonly string[] =>
   found.optionalAttrs === undefined ? [] : Object.keys(found.optionalAttrs);
 
 /**
- * 契約が宣言する**出力の本数**。出力 dtype 写像の列長そのもの（ADR 0068 決定 1）。
+ * The **number of outputs** the contract declares. It is the list length of the output dtype
+ * mapping as is (ADR 0068 decision 1).
  *
- * MUST: 本数を独立した欄で持たない — 派生できる事実を二重に持つと、dtype 列だけ増やした
- * 契約が「宣言 1 本・写像 2 本」で通り、2 本目の出力の dtype が誰にも照合されなくなる。
+ * MUST: the count is not held in a separate field — holding a derivable fact twice would let a
+ * contract that grew only its dtype list pass as "1 declared, 2 mapped", and nobody would check the
+ * second output's dtype.
  */
 export const outputCountOf = (found: OpContract): number => found.outputDtypes.length;
 
 /**
- * 入力スロット別の受理集合（capability 射影）。uniform 契約は**受理しうるスロット数ぶん
- * 複製**する（省略可能な末尾スロットを含む — {@link ContractBase.maxArity}）。
- * 消費側（列挙門）がスロット番号で引けるようにするため。
+ * The per-input-slot accepted sets (capability projection). A uniform contract is **replicated for
+ * as many slots as it can accept** (including optional trailing slots —
+ * {@link ContractBase.maxArity}), so that consumers (the enumerating check) can look them up by slot
+ * index.
  */
 export const slotDtypesOf = (found: OpContract): readonly (readonly IrDtype[])[] => {
   const slots = found.slotDtypes;
@@ -818,16 +863,17 @@ export const slotDtypesOf = (found: OpContract): readonly (readonly IrDtype[])[]
 };
 
 /**
- * グラフ入力として転送できる意味論 dtype。要素は全型 4 バイトで、bool は u32 の 0/1
- * として運ぶ（ADR 0009）。op の dtype 集合とは別軸 — 実行器はどのノードも消費しない入力も
- * 含めて転送するため。
+ * The semantic dtypes that can be transferred as graph inputs. Every element type is 4 bytes, and
+ * bool is carried as u32 0/1 (ADR 0009). A separate axis from the op dtype sets — the executor also
+ * transfers inputs that no node consumes.
  */
 export const IO_DTYPES: readonly IrDtype[] = SEMANTIC_DTYPES;
 
 /**
- * `assertRuntimeSupport` に渡す対応表。契約表からのみ導出する MUST — 手書きの集合は
- * 表と乖離し、「宣言では対応、実行で落ちる」を作る。op 名だけでなく意味論 dtype と attrs
- * まで運ぶ（名前だけの突合が見逃す差は recon §3-9 の実バグ）。
+ * The support table passed to `assertRuntimeSupport`. MUST be derived from the contract table only
+ * — a hand-written set drifts from the table and produces "supported per the declaration, fails at
+ * execution". It carries not only op names but semantic dtypes and attrs too (the difference that
+ * name-only matching misses is the real bug of recon §3-9).
  */
 export const RUNTIME_SUPPORT: RuntimeSupport = {
   ops: new Map<string, OpSupport>(
@@ -836,8 +882,9 @@ export const RUNTIME_SUPPORT: RuntimeSupport = {
       {
         dtypes: new Set(found.dtypes),
         slotDtypes: slotDtypesOf(found).map((accept) => new Set(accept)),
-        // cast の出力は attrs.to で決まる（写像は恒等で埋まっているが値域が狭すぎる）ので、
-        // 列挙門には語彙全体を渡す。それ以外は出力 slot ごとの写像の値域そのもの。
+        // cast's output is decided by attrs.to (the mapping is filled with identity, but its range
+        // is too narrow), so the enumerating check gets the whole vocabulary. Otherwise it is
+        // exactly the range of each output slot's mapping.
         outDtypes:
           found.kind === "cast"
             ? [new Set(SEMANTIC_DTYPES)]
@@ -846,17 +893,20 @@ export const RUNTIME_SUPPORT: RuntimeSupport = {
       },
     ]),
   ),
-  // 生の int32 格納（ADR 0010）は記号依存定数の焼き込み先として実行対象。f16（ADR 0018）・
-  // i8（ADR 0019）・i4（ADR 0069）・i2（ADR 0097 追記 1）は実行経路が入った（適格な重みスロットは
-  // 圧縮のまま GPU 常駐・適格外はロード時に CPU で f32 展開）ので、**どの initializer に付いて
-  // いても実行できる**。i4 の適格だけ狭い（linear の重みスロット限定 — 適格外は CPU 展開の
-  // 受け皿）。i2 の適格は linear / embedding の重みスロット。bf16（ADR 0131）は f16 と同じ経路
-  // （適格は f16 と同じ 5 スロット・適格外は CPU 展開）。
+  // Raw int32 storage (ADR 0010) is executed as the target of baked symbol-dependent constants. f16
+  // (ADR 0018), i8 (ADR 0019), i4 (ADR 0069) and i2 (ADR 0097 addendum 1) have execution paths
+  // (eligible weight slots stay compressed and GPU-resident; ineligible ones are decoded to f32 on
+  // the CPU at load time), so **they can be executed whatever initializer they are attached to**.
+  // Only i4 eligibility is narrower (the weight slots of linear / embedding / conv1d with groups ==
+  // 1 — ADR 0069 decision 5 and its addenda, `i4EligibleInitializers` in runtime/plan.ts; ineligible
+  // ones fall back to CPU decode). i2 eligibility is the weight slots of linear / embedding. bf16
+  // (ADR 0131) uses the same path as f16 (eligible: the same 6 slots as f16, `WEIGHT_SLOTS`;
+  // ineligible ones are decoded on the CPU).
   storage: new Set(["f32", "f16", "bf16", "i8", "i4", "i2", "i32"]),
   io: new Set(IO_DTYPES),
 };
 
-/** ランタイムが実行できるものの照会用（公開 API 向けに安定した形へ整えた射影）。 */
+/** What the runtime can execute, for queries (a projection in a stable shape for the public API). */
 export type RuntimeCapabilities = {
   readonly ops: readonly string[];
   readonly storage: readonly string[];
@@ -868,19 +918,21 @@ export const capabilities = (): RuntimeCapabilities => ({
 });
 
 /**
- * 入力の本数が契約に合うか（可変アリティ op では `arity` を**下限**として読む）。
+ * Whether the input count fits the contract (for variable-arity ops, `arity` is read as a **lower
+ * bound**).
  *
- * MUST: 判定を呼び出し側に散らさない。「固定なら ===、可変なら >=」を 3 箇所（契約検査 /
- * shape 計算 / CPU 参照）で書くと、cat を足したときのように 1 箇所だけ古い判定が残る。
- * 例外の**型**は層ごとに違う（契約層は OpContractError / CPU 参照は ReferenceOpError）ので、
- * 共有するのは述語と表示だけにする。
+ * MUST: the verdict is not scattered across callers. Writing "=== if fixed, >= if variable" in 3
+ * places (contract check / shape computation / CPU reference) leaves a stale verdict in one place,
+ * as happened when cat was added. The exception **type** differs per layer (OpContractError in the
+ * contract layer, ReferenceOpError in the CPU reference), so only the predicate and the display are
+ * shared.
  */
 export const arityFits = (found: OpContract, count: number): boolean =>
   found.variadic === true
     ? count >= found.arity
     : count >= found.arity && count <= (found.maxArity ?? found.arity);
 
-/** 契約のアリティの表示形（可変なら「N 本以上」・省略可能な末尾があれば「N か M」）。 */
+/** The arity as displayed ("N or more" if variadic, "N or M" with an optional trailing input). */
 export const describeArity = (found: OpContract): string => {
   if (found.variadic === true) return `${found.arity} 本以上`;
   return found.maxArity === undefined ? `${found.arity}` : `${found.arity} か ${found.maxArity}`;
@@ -907,17 +959,19 @@ export const resolveOpContract = (op: string): OpContract => {
 };
 
 /**
- * ノードが契約に適合することを検査して契約を返す（shape は含まない — 束縛前に決まる規則だけ）。
+ * Checks that the node fits its contract and returns the contract (shapes not included — only the
+ * rules decided before binding).
  *
- * MUST: attrs の照合は `Object.hasOwn` のみで行う。スキーマは素のオブジェクトリテラルなので、
- * IR 由来のキー（`toString` 等）が prototype 経由で「既知キー」に化ける。
+ * MUST: attrs are matched with `Object.hasOwn` only. The schemas are plain object literals, so keys
+ * from the IR (`toString` and the like) would turn into "known keys" through the prototype.
  */
 export const assertNodeContract = (node: IrNode, where: string): OpContract => {
   const found = resolveOpContract(node.op);
   const stateKeys = Object.keys(node.states);
   assertStateField(found, node, stateKeys, where);
   if (assertReadonlyForm(found, node, stateKeys, where)) {
-    // readonly は ins を 1 本（q）へ絞る別形なので、下の閉区間検査は通さない。
+    // readonly is a separate form that narrows ins to 1 (q), so it skips the closed-interval check
+    // below.
     if (node.ins.length !== found.readonlyArity) {
       throw new OpContractError(
         `${where}: op '${node.op}' の readonly（past のみ）形は入力 ${found.readonlyArity} 本` +
@@ -925,9 +979,9 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
       );
     }
   } else {
-    // MUST: states 形は**省略可能な末尾入力を取らない**（ADR 0067 決定 4 —「causal 固定・
-    // mask tensor は実体化しない」）。上限を絞らないと、mask 付き states 形 attention が
-    // 「mask を誰も読まない形」として受理される。
+    // MUST: the states form **takes no optional trailing input** (ADR 0067 decision 4 — "causal is
+    // fixed and no mask tensor is materialised"). Without narrowing the upper bound, a states-form
+    // attention with a mask would be accepted as "a form whose mask nobody reads".
     if (stateKeys.length > 0 && found.maxArity !== undefined && node.ins.length > found.arity) {
       throw new OpContractError(
         `${where}: op '${node.op}' の states 形は入力 ${found.arity} 本ちょうど` +
@@ -947,11 +1001,13 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
 };
 
 /**
- * attrs の**値域**と必須キーの存在（キー集合は {@link assertAttrKeys}）。ノードの契約検査と
- * CPU 参照の入口（`reference/ops.ts` の `applyReferenceOpOutputs`）が共有する 1 本 — 参照側に
- * 無いと、契約が拒否する値（embedding の `padding_idx: "bad"` 等）に参照だけが値を返す。
+ * The **range** of attrs and the presence of required keys (the key set is {@link assertAttrKeys}).
+ * One function shared by the node contract check and the CPU reference entry
+ * (`applyReferenceOpOutputs` in `reference/ops.ts`) — without it on the reference side, the
+ * reference alone would return a value for values the contract rejects (such as embedding's
+ * `padding_idx: "bad"`).
  *
- * MUST: 照合は `Object.hasOwn` のみ（{@link assertNodeContract} と同じ理由）。
+ * MUST: match with `Object.hasOwn` only (the same reason as {@link assertNodeContract}).
  */
 export const assertAttrValues = (
   found: OpContract,
@@ -974,15 +1030,17 @@ export const assertAttrValues = (
 };
 
 /**
- * attrs の**キー集合**が契約に適合するか — 契約外キーの拒否と、省略可能キーは states 形専用
- * （{@link ContractBase.optionalAttrs}）の 2 点。値域と必須キーの存在は見ない。
+ * Whether the **key set** of attrs fits the contract — two points: rejecting keys outside the
+ * contract, and optional keys being for the states form only ({@link ContractBase.optionalAttrs}).
+ * It does not look at ranges or at the presence of required keys.
  *
- * ノードの契約検査（{@link assertNodeContract}）と CPU 参照の入口（`reference/ops.ts` の
- * `applyReferenceOpOutputs` — states を持たない）が共有する 1 本。参照側に同じ照合が無いと、
- * 契約が拒否する attrs（例: states 欄の無い attention の `window`）を参照だけが黙って無視して
- * 値を返し、オラクルが契約違反を値にする。
+ * One function shared by the node contract check ({@link assertNodeContract}) and the CPU reference
+ * entry (`applyReferenceOpOutputs` in `reference/ops.ts` — which has no states). Without the same
+ * matching on the reference side, the reference alone would silently ignore attrs the contract
+ * rejects (for example `window` on an attention without a states field) and return values, and the
+ * oracle would turn a contract violation into values.
  *
- * MUST: 照合は `Object.hasOwn` のみ（{@link assertNodeContract} と同じ理由）。
+ * MUST: match with `Object.hasOwn` only (the same reason as {@link assertNodeContract}).
  */
 export const assertAttrKeys = (
   found: OpContract,
@@ -1010,14 +1068,15 @@ export const assertAttrKeys = (
 };
 
 /**
- * `attrs.readonly`（ADR 0096 段 2 §1.2）が宣言されているかを、**アリティ検査より前に**確定する。
+ * Settles whether `attrs.readonly` (ADR 0096 stage 2 §1.2) is declared, **before the arity check**.
  *
- * 見るのは 3 点だけ（値域は {@link STATE_READONLY_ATTRS} が持つ）:
- * 契約が readonly を持つ op か・`states` 欄があるか・値が `true` か。
+ * Only three points are checked (the range is held by {@link STATE_READONLY_ATTRS}): whether the
+ * contract's op has readonly, whether there is a `states` field, and whether the value is `true`.
  *
- * MUST: 「states 欄を持つノードだけ」をここでも執行する（下の省略可能 attrs のループと同じ
- * 規則を先に掛ける）。後回しにすると、states 欄の無い readonly ノードが「入力数が 1（契約は
- * 3 か 4）」という**理由の違う**診断で落ち、直す側が readonly の綴りに辿り着けない。
+ * MUST: "only nodes with a states field" is enforced here too (the same rule as the optional-attrs
+ * loop below, applied first). Deferring it would make a readonly node without a states field fail
+ * with a diagnostic **for a different reason**, "input count 1 (contract is 3 or 4)", and whoever
+ * fixes it would not find their way to the readonly spelling.
  */
 const assertReadonlyForm = (
   found: OpContract,
@@ -1041,13 +1100,13 @@ const assertReadonlyForm = (
 };
 
 /**
- * `states` 欄が契約に適合するか（ADR 0067 決定 4 / 5）。
+ * Whether the `states` field fits the contract (ADR 0067 decisions 4 / 5).
  *
- * MUST: キー集合は契約の宣言と**完全一致**（部分集合を許すと、`v` を書き忘れた states 形
- * attention が「k だけ状態から読む」形として通る）。
- * MUST: 同一ノードが 2 つの欄から**同じスロット**を参照する形を拒否する — `k` と `v` に
- * 同じスロット名を書いた取り違えは、shape 検査を全て通ったうえで「V を K として読む」
- * 沈黙誤値になる（k/v スロットは同形なので shape では捕まらない）。
+ * MUST: the key set **equals** the contract's declaration (allowing a subset would let a
+ * states-form attention that forgot to write `v` pass as the form "reads only k from state").
+ * MUST: reject a node that references **the same slot** from two fields — a mix-up writing the same
+ * slot name for `k` and `v` passes every shape check and becomes the silent wrong value "reads V as
+ * K" (the k/v slots have the same shape, so shapes do not catch it).
  */
 const assertStateField = (
   found: OpContract,
@@ -1095,11 +1154,12 @@ const assertStateField = (
 };
 
 /**
- * スロット 0 の入力 dtype から**出力 slot `slot` の** dtype を導く
- * （{@link ContractBase.outputDtypes}）。
+ * Derives the dtype **of output slot `slot`** from slot 0's input dtype
+ * ({@link ContractBase.outputDtypes}).
  *
- * 写像の定義域はスロット 0 の受理集合と一致する（{@link slotContract} が恒等で埋める）ので、
- * スロット検査を通った dtype は必ず引ける — 引けないのはランタイム内部の不変条件破れ。
+ * The mapping's domain equals slot 0's accepted set ({@link slotContract} fills it with identity),
+ * so a dtype that passed the slot check can always be looked up — failing to look it up is a broken
+ * internal invariant of the runtime.
  */
 export const outputDtypeOf = (
   found: OpContract,
@@ -1121,8 +1181,9 @@ export const outputDtypeOf = (
 };
 
 /**
- * 受理集合の**和**との突合。スロットを跨いだ緩い検査なので、スロット別契約の op では
- * {@link assertSlotDtype} を使う（この関数は「その op が触れる dtype か」しか見ない）。
+ * Matches against the **union** of the accepted sets. A loose check across slots, so ops with a
+ * per-slot contract use {@link assertSlotDtype} (this function only checks "is it a dtype the op
+ * touches").
  */
 export const assertDtype = (found: OpContract, dtype: IrDtype, where: string): void => {
   if (!found.dtypes.includes(dtype)) {
@@ -1135,8 +1196,8 @@ export const assertDtype = (found: OpContract, dtype: IrDtype, where: string): v
 };
 
 /**
- * 入力スロット単位の dtype 検査。uniform 契約では和との突合と同義（診断文も同じ）で、
- * perSlot 契約でだけスロット番号まで見る。
+ * The per-input-slot dtype check. Under a uniform contract it is the same as matching against the
+ * union (the diagnostic text too); only under a perSlot contract does it look at the slot index.
  */
 export const assertSlotDtype = (
   found: OpContract,
@@ -1162,9 +1223,9 @@ export const assertSlotDtype = (
 };
 
 /**
- * 入力の意味論 dtype の検査（スロットごとの受理集合 + uniform 契約のスロット間の同型）。
- * ノードの dtype 検査（{@link resolveNodeDtypes}）と CPU 参照の入口が共有する 1 本。
- * `label` は入力 `index` の診断名。
+ * The check of the input semantic dtypes (per-slot accepted sets + the same type across slots under
+ * a uniform contract). One function shared by the node dtype check ({@link resolveNodeDtypes}) and
+ * the CPU reference entry. `label` is the diagnostic name of input `index`.
  */
 export const assertInputDtypes = (
   found: OpContract,
@@ -1175,8 +1236,8 @@ export const assertInputDtypes = (
   inputDtypes.forEach((dtype, index) => {
     assertSlotDtype(found, index, dtype, label(index));
   });
-  // スロットごとに受理集合が違う op は、スロット間の同型を要求しない（それが perSlot の
-  // 意味）。uniform 契約だけが混在を拒否する。
+  // Ops whose slots have different accepted sets do not require the same type across slots (that is
+  // what perSlot means). Only a uniform contract rejects mixes.
   if (found.slotDtypes.kind === "uniform") {
     const mixed = inputDtypes.findIndex((dtype) => dtype !== inputDtypes[0]);
     if (mixed >= 0) {
@@ -1188,14 +1249,17 @@ export const assertInputDtypes = (
 };
 
 /**
- * ノードの意味論 dtype を検査して**出力 dtype の列を返す**（出力 slot 順）。
+ * Checks the node's semantic dtypes and **returns the list of output dtypes** (in output slot
+ * order).
  *
- * MUST: 出力 dtype は宣言を鵜呑みにせず契約から導き、宣言と突き合わせる。宣言をそのまま
- * 信じると、`cast` の attrs.to と values{} の宣言が食い違ったグラフが「宣言どおり」に
- * 通ってしまい、readback で別の TypedArray として読まれる沈黙誤値になる。
- * 出力の導出は 2 通りだけ: cast は attrs.to、それ以外は**スロット 0 の dtype を出力 slot
- * ごとの写像に通す**（{@link ContractBase.outputDtypes} — 既定は恒等）。uniform 契約では
- * 加えてスロット間の同型も要求する（混合型の演算は語彙に無い）。
+ * MUST: the output dtypes are derived from the contract and matched against the declaration, not
+ * taken on trust. Trusting the declaration would let a graph whose cast attrs.to and values{}
+ * declaration disagree pass "as declared", and readback would read it as a different TypedArray — a
+ * silent wrong value.
+ * Outputs are derived in only two ways: cast from attrs.to, everything else **by passing slot 0's
+ * dtype through each output slot's mapping** ({@link ContractBase.outputDtypes} — identity by
+ * default). A uniform contract additionally requires the same type across slots (mixed-type
+ * arithmetic is not in the vocabulary).
  */
 export const resolveNodeDtypes = (
   found: OpContract,

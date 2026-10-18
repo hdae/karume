@@ -1,6 +1,7 @@
-// IR v2（docs/ir-v2.md）のグラフ JSON 型と構造検証。
-// 検証はここに 1 本化する: 宣言と供給の突合は container/bind.ts、次元文法は dims.ts が持ち、
-// 本ファイルはグラフ単体で決まる規則（宣言・SSA・トポロジカル順・語彙）だけを見る。
+// Graph JSON types and structural validation of IR v2 (docs/ir-v2.md).
+// Validation is consolidated here: checking declarations against supplies belongs to
+// container/bind.ts and the dimension grammar to dims.ts; this file checks only the rules determined
+// by the graph alone (declarations, SSA, topological order, vocabulary).
 
 import type { CodecName } from "./container/codecs.ts";
 import {
@@ -11,10 +12,12 @@ import {
 } from "./container/json.ts";
 import { isSymbolName, parseDim, tryParseDim } from "./dims.ts";
 
-/** 意味論 dtype。計算は常にこの型で行う（f16/bf16/i8 は格納だけの概念）。 */
+/**
+ * Semantic dtype. Computation always happens in this type (f16/bf16/i8 are storage-only concepts).
+ */
 export type IrDtype = "f32" | "i32" | "bool";
 
-/** 非負整数、または `coeff·sym+offset` の正準表記（dims.ts）。 */
+/** A non-negative integer, or the canonical spelling of `coeff·sym+offset` (dims.ts). */
 export type IrDim = number | string;
 
 type IrValueInfo = {
@@ -23,22 +26,23 @@ type IrValueInfo = {
 };
 
 /**
- * 名前付き state スロット（ADR 0066 決定 2）。shape は**容量込みの具体形**で、`values` と違い
- * スロットは値ではない — グラフの通常 input / output にはならず、実体の確保と寿命は
- * GenerationContext が持つ。
+ * Named state slot (ADR 0066 decision 2). The shape is **a concrete shape including the
+ * capacity**, and unlike `values` a slot is not a value — it never becomes an ordinary graph input /
+ * output, and the GenerationContext owns the allocation and lifetime of its backing data.
  */
 type IrStateSlot = {
   readonly dtype: IrStateDtype;
   readonly shape: readonly IrDim[];
   /**
-   * **借り物のスロット**（ADR 0096 段 2 §1.1）。真のとき実体は自分の context ではなく
-   * **借り先 context**（drafter が読む target の KV）にあり、この context は 1 バイトも
-   * 確保しない。書き手（`state_append`）は持てず、読者は readonly attention だけ
-   * （執行は `runtime/plan.ts` の `assertStateOwnership`）。
+   * **A borrowed slot** (ADR 0096, addendum of 2026-09-08 on stage 2, first item). When true, the
+   * backing data lives not in this context but in **the lender context** (the target's KV the
+   * drafter reads), and this context allocates not a single byte. It can have no writer
+   * (`state_append`), and its only readers are readonly attention (enforced by
+   * `assertStateOwnership` in `runtime/plan.ts`).
    *
-   * MUST: 常在欄にする（省略時は false）。`IrNode.states` と同じ理由 — `?:` にすると消費側が
-   * 毎回 `?? false` を書くことになり、1 箇所の書き忘れが「借り物を自分で確保して空の過去を
-   * 読む」沈黙誤値になる。
+   * MUST: an always-present field (false when omitted). The same reason as `IrNode.states` — with
+   * `?:` every consumer would have to write `?? false`, and forgetting it in one place becomes a
+   * silent wrong value that "allocates the borrowed slot itself and reads an empty past".
    */
   readonly external: boolean;
 };
@@ -50,10 +54,11 @@ type IrInput = {
 };
 
 /**
- * 合流後の格納（docs/ir-v2.md「格納」・container-v1 §6）。`codec` は台帳の登録名で、展開経路は
- * `codecLayout(codec)` から引く（`ternary` は `int2-off` と同じ i2 経路）。`groupSize` / `rowAxis` は
- * 量子化 codec のときだけ在る（per-channel なら `groupSize` = 行長）。companion scale の実体は
- * 供給計画（束縛表との合流結果）が payload と一緒に運ぶので、ここには無い。
+ * Storage after the merge (docs/ir-v2.md "Values and types", container-v1 §6). `codec` is the
+ * ledger's registered name, and the decode path is looked up with `codecLayout(codec)` (`ternary`
+ * takes the same i2 path as `int2-off`). `groupSize` / `rowAxis` exist only for quantized codecs
+ * (`groupSize` = row length for per-channel). The companion scale's data travels with the payload
+ * in the supply plan (the result of merging with the binding table), so it is not here.
  */
 export type IrStorage = {
   readonly codec: CodecName;
@@ -62,11 +67,13 @@ export type IrStorage = {
 };
 
 /**
- * ランタイムが実行するグラフの initializer。**名前が実体の鍵**（エクスポータの FQN /
- * `const.<hash>`）で、実体との対応は容器の束縛表が `(グラフ名, initializer 名)` で持つ。
+ * An initializer of the graph the runtime executes. **The name is the key of the data** (the
+ * exporter's FQN / `const.<hash>`), and the container's binding table holds the mapping to the data
+ * by `(graph name, initializer name)`.
  *
- * `shared` は貸し手 Session の重みを借りる宣言（ADR 0096 段 2 §1.3）— 名前は貸し手の
- * initializer 名と同じで、格納は持たない（正本は貸し手の常駐重み — 二重簿記の禁止）。
+ * `shared` declares borrowing the weight of a lender Session (ADR 0096, addendum of 2026-09-08 on
+ * stage 2, first item) — the name equals the lender's initializer name, and it has no storage (the
+ * source of truth is the lender's resident weight — no double bookkeeping).
  */
 export type IrInitializer =
   | { readonly shared: true; readonly storage?: undefined }
@@ -78,17 +85,19 @@ export type IrNode = {
   readonly outs: readonly string[];
   readonly attrs: Readonly<Record<string, unknown>>;
   /**
-   * state スロットの名前参照（ADR 0067 決定 4 — `ins` / `outs` と**別の欄**）。キーは op 契約が
-   * 固定する固定語（`attention` の `k` / `v`・`state_append` の `slot`）で、値は
-   * `graph.states` で宣言済みのスロット名。欄を持たないノードは空表。
+   * Name references to state slots (ADR 0067 decision 4 — **a field separate from** `ins` /
+   * `outs`). The keys are fixed words set by the op contract (`k` / `v` of `attention`, `slot` of
+   * `state_append`), and the values are slot names declared in `graph.states`. A node without the
+   * field has an empty table.
    *
-   * MUST: 常在欄にする（省略時は空表）。`?:` にすると消費側が毎回 `?? {}` を書くことになり、
-   * 1 箇所でも書き忘れると「states 欄を無視した従来形として実行」という沈黙誤りになる。
+   * MUST: an always-present field (an empty table when omitted). With `?:` every consumer would have
+   * to write `?? {}`, and forgetting it in even one place becomes a silent error of "running as the
+   * old form, ignoring the states field".
    */
   readonly states: Readonly<Record<string, string>>;
 };
 
-/** initializer 以外の節（宣言 / 合流後で共通）。 */
+/** Sections other than initializers (shared by the declaration and the merged form). */
 type IrGraphBase = {
   readonly format: typeof IR_FORMAT;
   readonly version: number;
@@ -97,27 +106,29 @@ type IrGraphBase = {
   readonly inputs: readonly IrInput[];
   readonly outputs: readonly string[];
   readonly values: Readonly<Record<string, IrValueInfo>>;
-  /** state スロット宣言（省略時は空 — 出さないグラフは無風）。 */
+  /** State slot declarations (empty when omitted — graphs without them are unaffected). */
   readonly states: Readonly<Record<string, IrStateSlot>>;
   readonly nodes: readonly IrNode[];
 };
 
 /**
- * IR v2 の initializer 宣言（docs/ir-v2.md）。格納（codec / scale / group）は持たない — 実体との
- * 対応はコンテナの束縛表が `(グラフ名, initializer 名)` で持つ。`shared` は貸し手 Session の重みを
- * 借りる宣言（名前は貸し手の initializer 名と同じ MUST）。
+ * Initializer declaration of IR v2 (docs/ir-v2.md). It has no storage (codec / scale / group) — the
+ * container's binding table holds the mapping to the data by `(graph name, initializer name)`.
+ * `shared` declares borrowing the weight of a lender Session (the name MUST equal the lender's
+ * initializer name).
  */
 export type IrDeclaredInitializer = { readonly shared: boolean };
 
 /**
- * IR v2 のグラフ = **計算契約**（格納の宣言を持たない）。コンテナのグラフ記述 `graphs[name]` の
- * 中身で、束縛表との合流（`format/container/bind.ts`）で {@link IrGraph} になる。
+ * An IR v2 graph = **a computation contract** (no storage declarations). The contents of
+ * `graphs[name]` in the container's graph descriptor; merging with the binding table
+ * (`format/container/bind.ts`) turns it into an {@link IrGraph}.
  */
 export type IrDeclaration = IrGraphBase & {
   readonly initializers: Readonly<Record<string, IrDeclaredInitializer>>;
 };
 
-/** ランタイムが実行するグラフ（initializer ごとの格納が確定した形）。 */
+/** The graph the runtime executes (with the storage of every initializer settled). */
 export type IrGraph = IrGraphBase & {
   readonly initializers: Readonly<Record<string, IrInitializer>>;
 };
@@ -146,38 +157,45 @@ const TOP_LEVEL_KEYS = [
 ] as const;
 
 /**
- * 省略可能なトップレベル節。`states` を持たないグラフ（= 既存の全モデル）が無風であることは
- * ADR 0066 決定 2 の「エクスポータは states を出す最初のモデルまで無風」の裏返し。
+ * Optional top-level sections. That graphs without `states` (= every existing model) are unaffected
+ * is the flip side of ADR 0066 decision 2's "the exporter is unaffected until the first model that
+ * emits states".
  */
 const OPTIONAL_TOP_LEVEL_KEYS = ["states"] as const;
 
-/** 意味論 dtype の全語彙（宣言としての受理集合 — 実行可否は契約表 src/ops.ts が持つ）。 */
+/**
+ * The whole vocabulary of semantic dtypes (the accepted set as declarations — whether one can run
+ * is held by the contract table, src/ops.ts).
+ */
 export const SEMANTIC_DTYPES = ["f32", "i32", "bool"] as const;
 
-/** state スロットの dtype 語彙。現状 f32 のみ（ADR 0066 決定 2）。 */
+/** dtype vocabulary of state slots. f32 only for now (ADR 0066 decision 2). */
 const STATE_DTYPES = ["f32"] as const;
 type IrStateDtype = (typeof STATE_DTYPES)[number];
 
 /**
- * 席だけが予約されている state スロットの dtype（ADR 0066 追記 5）。格納を f16 にすると
- * 数値契約が変わるので ADR 0058 流儀の opt-in が要る — それが無いうちは「語彙外」ではなく
- * **未対応**として落とす（後から来る形だと分かる診断を残す）。
+ * State slot dtypes that are only reserved (ADR 0066, addendum of 2026-08-17, item 5). f16
+ * storage changes the numerics contract and so needs an opt-in in the style of ADR 0058 — until
+ * that exists, they fail as **unsupported**, not as "outside the vocabulary" (leaving a diagnostic
+ * that says the form is coming later).
  */
 const RESERVED_STATE_DTYPES = ["f16"] as const;
 
 /**
- * state スロットの rank 上限（ADR 0066 決定 2 の「固定 rank（rank ≤ 4）」）。strided カーネルの
- * 上限（codegen/strided.ts）と同じ数値だが理由が別なので定数を共有しない。
+ * Upper bound of a state slot's rank (the "fixed rank (rank ≤ 4)" of ADR 0066 decision 2). The same
+ * number as the strided kernels' limit (codegen/strided.ts), but for a different reason, so the
+ * constant is not shared.
  */
 const MAX_STATE_RANK = 4;
 
 /**
- * initializer が宣言できる意味論 dtype（docs/ir-v2.md「値と型」）。
+ * Semantic dtypes an initializer may declare (docs/ir-v2.md "Values and types").
  *
- * MUST: bool の initializer は語彙に無い（実測に無く、1 バイト格納は 4 バイト前提の転送とも
- * 噛み合わない）。意味論 dtype と格納 codec の組（f32 の符号化 / i32 は生の int32 1 通りのみ —
- * ADR 0010）は合流層（`format/container/bind.ts`）が持つ — 交差を許すと `i32` 宣言の
- * initializer が f16 のビット列として読まれる沈黙誤値になる。
+ * MUST: bool initializers are not in the vocabulary (none in measurements, and 1-byte storage does
+ * not fit the transfers, which assume 4 bytes). The pairs of semantic dtype and storage codec (f32
+ * takes its encodings / i32 takes raw int32 only — ADR 0010) belong to the merge layer
+ * (`format/container/bind.ts`) — allowing cross pairings would read an initializer declared `i32` as
+ * f16 bits, a silent wrong value.
  */
 const INITIALIZER_DTYPES: ReadonlySet<IrDtype> = new Set<IrDtype>(["f32", "i32"]);
 
@@ -196,9 +214,10 @@ const asPlainObject = (value: unknown, where: string): Record<string, unknown> =
 };
 
 /**
- * 配列の欄の全要素。ホストが組む宣言（{@link parseIrDeclarationValue}）は疎な配列を持ちうるが、
- * `map` / `some` / `reduce` は穴を飛ばすので、穴が検査を素通りして先で undefined の次元や名前に
- * なる。ここで穴を欄の path つきで落とす（JSON.parse 経由では穴はできない）。
+ * Every element of an array field. A declaration built on the host ({@link parseIrDeclarationValue})
+ * can contain sparse arrays, but `map` / `some` / `reduce` skip holes, so a hole slips past the
+ * checks and later becomes an undefined dimension or name. Holes fail here with the field's path
+ * (JSON.parse never produces holes).
  */
 const asArray = (value: unknown, where: string): readonly unknown[] => {
   if (!Array.isArray(value)) throw new IrError(`${where}: 配列でない`);
@@ -216,7 +235,10 @@ const asNonEmptyString = (value: unknown, where: string): string => {
   return value;
 };
 
-/** 重複を許さない文字列配列（集合として扱う欄 — 重複は集合等価の判定を曖昧にする）。 */
+/**
+ * A string array without duplicates (a field treated as a set — duplicates would make the
+ * set-equality check ambiguous).
+ */
 const asUniqueStrings = (value: unknown, where: string): string[] => {
   const list = asArray(value, where).map((item, index) =>
     asNonEmptyString(item, `${where}[${index}]`),
@@ -229,7 +251,10 @@ const asUniqueStrings = (value: unknown, where: string): string[] => {
   return list;
 };
 
-/** 未リリースにつき前方互換チャネルは持たない — 未知キーは黙って無視せず fail loudly。 */
+/**
+ * Unreleased, so no forward-compatibility channel — unknown keys fail loudly instead of being
+ * ignored silently.
+ */
 const checkKeys = (
   obj: Record<string, unknown>,
   required: readonly string[],
@@ -293,13 +318,14 @@ const asStateDtype = (value: unknown, where: string): IrStateDtype => {
 };
 
 /**
- * state スロット 1 本の宣言（ADR 0066 決定 2）。
+ * Declaration of one state slot (ADR 0066 decision 2).
  *
- * MUST: shape は**容量込みの具体形**なので数値次元は正整数（`values` の非負とは違う — 容量 0 の
- * スロットは束縛できる実体を持たない）。rank は 1..{@link MAX_STATE_RANK}（容量軸を持たない
- * rank 0 は「容量込み」を満たせない）。記号次元は `symbols` 宣言済みならよく、**states の
- * shape も束縛点になる**（`createGenerationContext` が決める容量 — ADR 0066 追記 7。
- * checkSymbolBindability）。
+ * MUST: the shape is **a concrete shape including the capacity**, so numeric dimensions are positive
+ * integers (unlike the non-negative ones of `values` — a slot of capacity 0 has no backing data to
+ * bind). The rank is 1..{@link MAX_STATE_RANK} (rank 0 has no capacity axis and cannot be
+ * "including the capacity"). A symbolic dimension is fine if declared in `symbols`, and **a states
+ * shape is a binding point too** (the capacity chosen by `createGenerationContext` — ADR 0066,
+ * addendum of 2026-08-17, item 7; checkSymbolBindability).
  */
 const parseStateSlot = (
   value: unknown,
@@ -310,8 +336,9 @@ const parseStateSlot = (
   checkKeys(obj, ["dtype", "shape"], ["external"], where);
   const dtype = asStateDtype(obj["dtype"], `${where}.dtype`);
   const shape = parseShape(obj["shape"], symbols, `${where}.shape`);
-  // MUST: 書けるのは `true` だけ。`false` は「欄の不存在」と同じ宣言なので、2 通りの綴りを
-  // 許すと「external を書き忘れた」と「external を明示的に切った」が読み手から区別できない。
+  // MUST: only `true` may be written. `false` is the same declaration as "the field is absent", so
+  // allowing both spellings would make "forgot to write external" and "explicitly turned external
+  // off" indistinguishable to the reader.
   if (Object.hasOwn(obj, "external") && obj["external"] !== true) {
     throw new IrError(
       `${where}.external: ${JSON.stringify(obj["external"])} は書けない` +
@@ -333,19 +360,20 @@ const parseStateSlot = (
 };
 
 /**
- * ノードの `states` 欄（ADR 0067 決定 4）。ここで見るのは**グラフ単体で決まる 3 点**だけ:
- * plain object であること・キーと値が空でない文字列であること・値が `graph.states` で
- * 宣言済みのスロット名であること。
+ * The `states` field of a node (ADR 0067 decision 4). Only **three points determined by the graph
+ * alone** are checked here: it is a plain object, its keys and values are non-empty strings, and its
+ * values are slot names declared in `graph.states`.
  *
- * MUST: 未宣言スロットの参照は fail loudly。通すと「実体を持たない名前を読む」ノードが
- * Session 構築を抜け、確保も束縛もされないまま実行段で初めて落ちる（値側の前方参照拒否と
- * 同じ層の規則）。
- * MUST: 器は null プロトタイプ。キーはパース入力由来で、素の `{}` では `"__proto__"` の
- * 代入が [[Prototype]] 設定に化けて欄が黙って消える — 消えた参照が別ノードの参照で
- * 覆われると、参照完全性検査も契約のキー集合検査も素通りする形が作れる。
+ * MUST: a reference to an undeclared slot fails loudly. Letting it through, a node that "reads a
+ * name without backing data" gets past Session construction and fails only at execution, never
+ * allocated or bound (a rule of the same layer as rejecting forward references on the value side).
+ * MUST: the container object has a null prototype. Keys come from the parse input, and on a plain
+ * `{}` assigning `"__proto__"` turns into setting [[Prototype]] and the field silently disappears —
+ * if another node's reference covers the vanished one, a form can be built that slips past both the
+ * reference-completeness check and the contract's key-set check.
  *
- * NOTE: キー集合そのもの（`{k,v}` ちょうど / `{slot}` ちょうど）は op 契約の担当
- * （`assertNodeContract`）— パーサは op 語彙を知らない。
+ * NOTE: the key set itself (exactly `{k,v}` / exactly `{slot}`) is the op contract's job
+ * (`assertNodeContract`) — the parser does not know the op vocabulary.
  */
 const parseNodeStates = (
   obj: Record<string, unknown>,
@@ -368,9 +396,9 @@ const parseNodeStates = (
 };
 
 /**
- * NaN / Infinity は JSON リテラルに無いが、`1e999` のような指数は Infinity へ丸まる。
- * 受理集合をブラウザ JSON.parse に揃える契約（docs/ir-v2.md）を保つため、非有限数を含む
- * グラフは MUST NOT 受理。
+ * NaN / Infinity are not JSON literals, but an exponent like `1e999` rounds to Infinity.
+ * To keep the contract of aligning the accepted set with the browser's JSON.parse (docs/ir-v2.md),
+ * a graph containing non-finite numbers MUST NOT be accepted.
  */
 const parseJson = (json: string): unknown => {
   try {
@@ -387,9 +415,10 @@ const parseJson = (json: string): unknown => {
 };
 
 /**
- * グラフ JSON のパースの核。initializer の値の読み方だけを `parseInitializer` で差し替えられる
- * （現在の読み手は {@link parseIrDeclaration} = 格納を持たない IR v2 の宣言 1 種）。グラフ単体で
- * 決まる規則（宣言・SSA・トポロジカル順・語彙・states）はここ 1 本を通る。
+ * The core of graph JSON parsing. Only how initializer values are read can be swapped through
+ * `parseInitializer` (the current reader is {@link parseIrDeclaration} = the single kind of IR v2
+ * declaration without storage). The rules determined by the graph alone (declarations, SSA,
+ * topological order, vocabulary, states) all go through this one function.
  */
 const parseIrDocument = <I>(
   document: unknown,
@@ -431,15 +460,18 @@ const parseIrDocument = <I>(
 
   const outputs = asUniqueStrings(root["outputs"], "graph.outputs");
 
-  // MUST: パース入力由来のキーを蓄積する器は null プロトタイプ。素の `{}` では名前が
-  // "__proto__" のとき代入が [[Prototype]] 設定に化け、own property が作られないまま宣言が
-  // 黙って消えてグラフが受理される。Deno は既定でこの setter を無効化しているため手元では
-  // 再現しないが、ブラウザ（対象実行系の一方）では起きる。
+  // MUST: a container object that accumulates keys from the parse input has a null prototype. On a
+  // plain `{}`, when the name is "__proto__" the assignment turns into setting [[Prototype]], no own
+  // property is created, the declaration silently disappears and the graph is accepted. Deno
+  // disabled this setter by default, so it did not reproduce there, but it happens on Node and in
+  // browsers (the target runtimes).
   const values: Record<string, IrValueInfo> = Object.create(null);
   for (const [name, raw] of Object.entries(asPlainObject(root["values"], "graph.values"))) {
-    // 空の値名は states のスロット名と同じ理由で拒否する — 参照側（inputs[].name / ins / outs /
-    // outputs）はどれも空でない文字列だけを受理するので、通すと「宣言はできるが原理的に参照
-    // できない値」になる。孤立宣言検査は空名 initializer と対で書かれると素通りする。
+    // Empty value names are rejected for the same reason as states slot names — the referencing
+    // sides (inputs[].name / ins / outs / outputs) all accept only non-empty strings, so letting one
+    // through creates "a value that can be declared but in principle never referenced". The
+    // orphan-declaration check is bypassed when it is written together with an empty-named
+    // initializer.
     asNonEmptyString(name, "graph.values の値名");
     const where = `graph.values['${name}']`;
     const obj = asPlainObject(raw, where);
@@ -450,27 +482,28 @@ const parseIrDocument = <I>(
     };
   }
 
-  // MUST: values と同じ理由で null プロトタイプ（上のコメント参照）。
+  // MUST: a null prototype, for the same reason as values (see the comment above).
   const initializers: Record<string, I> = Object.create(null);
   for (const [name, raw] of Object.entries(
     asPlainObject(root["initializers"], "graph.initializers"),
   )) {
-    // 空の initializer 名も同じく拒否する（values 側のコメント参照 — 空名 value と対で書かれた
-    // 空名 initializer は宣言完全性検査の両側を満たしてしまい、参照不能な実テンソル 1 本が
-    // 配布形に居座る）。
+    // Empty initializer names are rejected likewise (see the comment on values — an empty-named
+    // initializer written together with an empty-named value satisfies both sides of the
+    // declaration-completeness check, and one unreferenceable real tensor stays in the
+    // distribution).
     asNonEmptyString(name, "graph.initializers の initializer 名");
     const where = `graph.initializers['${name}']`;
     initializers[name] = parseInitializer(asPlainObject(raw, where), where);
   }
 
-  // MUST: values と同じ理由で null プロトタイプ（上のコメント参照）。省略は空スロット集合として
-  // 扱う（節を持たないグラフが無風 — ADR 0066 決定 2）。
+  // MUST: a null prototype, for the same reason as values (see the comment above). Omission is
+  // treated as an empty slot set (graphs without the section are unaffected — ADR 0066 decision 2).
   const states: Record<string, IrStateSlot> = Object.create(null);
   if (Object.hasOwn(root, "states")) {
     for (const [name, raw] of Object.entries(asPlainObject(root["states"], "graph.states"))) {
-      // 空のスロット名は拒否する — 参照側の欄（ADR 0067）は空でない文字列だけを受理するので、
-      // 通すと「宣言はできるが原理的に参照できないスロット」になる（values は孤立宣言検査が
-      // 同じ穴を塞いでいる）。
+      // Empty slot names are rejected — the referencing field (ADR 0067) accepts only non-empty
+      // strings, so letting one through creates "a slot that can be declared but in principle never
+      // referenced" (for values, the orphan-declaration check closes the same hole).
       asNonEmptyString(name, "graph.states のスロット名");
       states[name] = parseStateSlot(raw, symbolSet, `graph.states['${name}']`);
     }
@@ -480,9 +513,10 @@ const parseIrDocument = <I>(
     const where = `graph.nodes[${index}]`;
     const obj = asPlainObject(raw, where);
     checkKeys(obj, ["op", "ins", "outs", "attrs"], ["states"], where);
-    // NOTE: `outs` の本数はここでは見ない（0 本 = 値を定義しない effect op が語彙に入った —
-    // ADR 0067 決定 5）。「0 本を許すのは契約が effect を宣言する op だけ」の執行点は契約層
-    // （assertNodeContract の出力数突合）で、パーサは本数に意味を与えない。
+    // NOTE: the number of `outs` is not checked here (zero = an effect op that defines no value is
+    // in the vocabulary — ADR 0067 decision 5). "Only ops whose contract declares an effect may have
+    // zero" is enforced in the contract layer (the output-count check of assertNodeContract); the
+    // parser gives the count no meaning.
     return {
       op: asNonEmptyString(obj["op"], `${where}.op`),
       ins: asArray(obj["ins"], `${where}.ins`).map((input, i) =>
@@ -517,25 +551,27 @@ const parseIrDocument = <I>(
 };
 
 /**
- * **IR v2**（docs/ir-v2.md）のグラフ JSON — 格納の宣言を持たない**計算契約**。実体との対応は
- * コンテナの束縛表が持ち、合流（`format/container/bind.ts`）で {@link IrGraph} になる。
+ * Graph JSON of **IR v2** (docs/ir-v2.md) — **a computation contract** without storage
+ * declarations. The container's binding table holds the mapping to the data, and the merge
+ * (`format/container/bind.ts`) turns it into an {@link IrGraph}.
  *
- * `initializers[name]` は `{}`（実体を持つ）か `{ "shared": true }`（貸し手 Session の重みを借りる —
- * 名前は貸し手の initializer 名と同じ MUST）の 2 形だけ。
+ * `initializers[name]` has only two forms: `{}` (has data) or `{ "shared": true }` (borrows the
+ * weight of a lender Session — the name MUST equal the lender's initializer name).
  */
 export const parseIrDeclaration = (json: string): IrDeclaration =>
   parseIrDeclarationValue(parseJson(json));
 
 /**
- * JSON.parse 済みの値（非有限数・深さの検査は呼び手が済ませている — descriptor の読み手）から
- * IR v2 を読む。
+ * Reads IR v2 from an already JSON.parsed value (the caller — the descriptor reader — has done the
+ * non-finite-number and depth checks).
  */
 export const parseIrDeclarationValue = (document: unknown): IrDeclaration =>
   parseIrDocument(document, IR_VERSION, (obj, where): IrDeclaredInitializer => {
     checkKeys(obj, [], ["shared"], where);
     if (!Object.hasOwn(obj, "shared")) return { shared: false };
-    // MUST: 書けるのは `true` だけ（`states[].external` と同じ規則 — `false` は欄の不存在と同じ
-    // 宣言なので、2 通りの綴りを許すと正準直列化が 1 つに決まらない）。
+    // MUST: only `true` may be written (the same rule as `states[].external` — `false` is the same
+    // declaration as the field's absence, so allowing both spellings would leave canonical
+    // serialization without a single answer).
     if (obj["shared"] !== true) {
       throw new IrError(
         `${where}.shared: ${JSON.stringify(
@@ -547,18 +583,21 @@ export const parseIrDeclarationValue = (document: unknown): IrDeclaration =>
   });
 
 /**
- * IR v2 の**正準直列化**（docs/ir-v2.md「正準直列化」）— 同じグラフは同じバイト列になる
- * （`krg` の同一性を内容ハッシュで判定する条件 — ADR 0108 決定 4）。
+ * **Canonical serialization** of IR v2 (docs/ir-v2.md "Canonical serialization") — the same graph
+ * becomes the same bytes (the condition for deciding `krg` identity by content hash — ADR 0108
+ * decision 4).
  *
- * - 固定スキーマのオブジェクトは本書の例に現れるキー順、名前をキーに持つ map（`initializers` /
- *   `values` / `states` / ノードの `attrs` と `states`）と順序に意味の無い集合（`requires.ops` /
- *   `symbols`）は code point 順。
- * - 数値の綴りは `JSON.stringify`（= ECMAScript `Number::toString`）がそのまま正準。
- * - 省略可能な節（`states` / ノードの `states` / `external`）は空・偽なら書かない。
+ * - Fixed-schema objects use the key order of the spec's examples; maps keyed by name
+ *   (`initializers` / `values` / `states` / a node's `attrs` and `states`) and sets whose order has
+ *   no meaning (`requires.ops` / `symbols`) use code point order.
+ * - The spelling of numbers is canonical as `JSON.stringify` (= ECMAScript `Number::toString`)
+ *   writes it.
+ * - Optional sections (`states` / a node's `states` / `external`) are not written when empty or
+ *   false.
  *
- * MUST: 戻り値は `canonicalJsonText` 専用 — `JSON.stringify` で綴らない。名前 map は
- * `SortedEntries`（code point 順のエントリ列）で表すので、素の `JSON.stringify` は正準形を
- * 書けない（`SortedEntries` の `toJSON` が投げる）。
+ * MUST: the return value is for `canonicalJsonText` only — do not spell it with `JSON.stringify`.
+ * Name maps are represented as `SortedEntries` (entry lists in code point order), so a plain
+ * `JSON.stringify` cannot write the canonical form (`toJSON` of `SortedEntries` throws).
  */
 export const canonicalIrDocument = (graph: IrDeclaration): Record<string, unknown> => ({
   format: IR_FORMAT,
@@ -591,11 +630,14 @@ export const canonicalIrDocument = (graph: IrDeclaration): Record<string, unknow
   })),
 });
 
-/** 正準直列化したグラフ JSON 文字列。 */
+/** The canonically serialized graph JSON string. */
 export const canonicalIrJson = (graph: IrDeclaration): string =>
   canonicalJsonText(canonicalIrDocument(graph));
 
-/** shape に現れるシンボル名を集める（次元位置の出現のみ — 要素数からの逆算はしない）。 */
+/**
+ * Collects the symbol names that appear in a shape (occurrences in dimension positions only — no
+ * inference from element counts).
+ */
 const symbolsIn = (shape: readonly IrDim[], into: Set<string>): void => {
   for (const dim of shape) {
     if (typeof dim !== "string") continue;
@@ -604,19 +646,22 @@ const symbolsIn = (shape: readonly IrDim[], into: Set<string>): void => {
 };
 
 /**
- * 宣言されたシンボルは**束縛点を持つ** MUST。束縛点は 2 つ（ADR 0066 追記 7）:
+ * A declared symbol MUST **have a binding point**. There are two binding points (ADR 0066,
+ * addendum of 2026-08-17, item 7):
  *
- * 1. **入力 shape の次元位置**（run ごとの実寸から解く — `runtime/plan.ts` の `bindSymbols`）。
- *    派生形（`2T` / `T+8`）でもよい — 1 次元 1 シンボルの一次式は実寸から解が一意に決まる
- *    （ADR 0057）。素の形を要求していた頃は、時間軸に stride 2 の conv を持つグラフ
- *    （母音検出 CRNN）が記号長を宣言できなかった。
- * 2. **states の shape の次元位置**（`createGenerationContext(spec.bindings)` が決める KV 容量 —
- *    context 生成時にユーザーが決める値なので、export 時定数に焼く形は ADR 0066 決定 3
- *    〈静的物理格納〉と矛盾する）。
+ * 1. **A dimension position of an input shape** (solved from the actual size per run —
+ *    `bindSymbols` in `runtime/plan.ts`). Derived forms (`2T` / `T+8`) are fine — a linear
+ *    expression with one symbol per dimension has a unique solution from the actual size
+ *    (ADR 0057). While the bare form was required, a graph with a stride-2 conv on its time axis
+ *    (the vowel-detection CRNN) could not declare a symbolic length.
+ * 2. **A dimension position of a states shape** (the KV capacity chosen by
+ *    `createGenerationContext(spec.bindings)` — a value the user picks when creating the context,
+ *    so baking it as an export-time constant contradicts ADR 0066 decision 3 〈static physical
+ *    storage〉).
  *
- * MUST: **states 専用記号（states にしか現れない記号）は値 shape に現れてはならない**
- * （追記 7）。通常値 shape の解決に効くのは入力由来の束縛だけなので、現れると実行時に必ず
- * 束縛不能になる — 宣言の時点で落とす。
+ * MUST: **a states-only symbol (one that appears only in states) must not appear in a value shape**
+ * (item 7). Only input-derived bindings resolve ordinary value shapes, so if it appears, binding
+ * always fails at run time — it fails at declaration time instead.
  */
 const checkSymbolBindability = (
   symbols: readonly string[],
@@ -648,7 +693,10 @@ const checkSymbolBindability = (
   }
 };
 
-/** SSA 単一代入 + トポロジカル順（前方参照拒否）+ outputs の定義済み検査。 */
+/**
+ * SSA single assignment + topological order (forward references rejected) + a check that outputs
+ * are defined.
+ */
 const checkDefinitions = (
   inputs: readonly IrInput[],
   initializerNames: readonly string[],
@@ -667,8 +715,8 @@ const checkDefinitions = (
   nodes.forEach((node, index) => {
     const where = `graph.nodes[${index}] (${node.op})`;
     for (const ref of node.ins) {
-      // nodes はトポロジカル順で格納される MUST — 前方参照は実行順を暗黙の依存解析に
-      // 依存させるので、ここで落とす。
+      // nodes MUST be stored in topological order — a forward reference would make execution
+      // order depend on implicit dependency analysis, so it fails here.
       if (!defined.has(ref)) {
         throw new IrError(`${where}: 入力 '${ref}' が未定義（前方参照または未宣言）`);
       }
@@ -682,8 +730,8 @@ const checkDefinitions = (
 };
 
 /**
- * 宣言の完全性: 入力は inputs[] が、initializer とノード出力は values{} が、
- * それぞれちょうど 1 回宣言する。孤立宣言（誰も定義しない values）も fail loudly。
+ * Declaration completeness: inputs are declared by inputs[], initializers and node outputs by
+ * values{}, each exactly once. Orphan declarations (values nobody defines) fail loudly too.
  */
 const checkDeclarations = (
   inputs: readonly IrInput[],
@@ -705,9 +753,10 @@ const checkDeclarations = (
     if (!Object.hasOwn(values, name)) {
       throw new IrError(`graph.initializers['${name}']: values に dtype/shape 宣言が無い`);
     }
-    // MUST: グラフ単体で決まる仕様規則はパーサ 1 箇所で見る — ロード経路ごとに書くと規則が
-    // 割れる。意味論 dtype と格納 codec の組は合流層（`format/container/bind.ts`）が持ち、
-    // 格納の実行可否はランタイム対応表との突合（`ops/support.ts`）が持つ。
+    // MUST: spec rules determined by the graph alone are checked in one place, the parser —
+    // writing them per load path splits the rules. Pairs of semantic dtype and storage codec belong
+    // to the merge layer (`format/container/bind.ts`), and whether a storage can run belongs to the
+    // check against the runtime's support table (`ops/support.ts`).
     if (!INITIALIZER_DTYPES.has(values[name].dtype)) {
       throw new IrError(
         `graph.values['${name}']: initializer の意味論 dtype '${
@@ -715,7 +764,8 @@ const checkDeclarations = (
         }' は語彙外（f32 / i32 のみ）`,
       );
     }
-    // initializer は束縛前に確定していなければ実体の shape と突合できない。
+    // An initializer must be settled before binding, or it cannot be checked against the data's
+    // shape.
     if (values[name].shape.some((dim) => typeof dim !== "number")) {
       throw new IrError(`graph.values['${name}']: initializer の shape に記号次元は使えない`);
     }
@@ -730,14 +780,17 @@ const checkDeclarations = (
 };
 
 /**
- * state スロット名の検査。スロットは値ではない（`ins` / `outs` で参照されず、ノードからは別の欄で
- * 名前参照する — ADR 0066 決定 1・0067 決定 4）ので**値名前空間とは別**だが、**同名は拒否する**:
- * 別名前空間の同名は「スロット名を書くべき欄に値名を書いた / その逆」を検出できなくするだけで、
- * 表現力を何も足さない。1 block ≤ 1 参照（容器の規則①）と同じ流儀。
+ * Checks of state slot names. A slot is not a value (it is not referenced by `ins` / `outs`; nodes
+ * reference it by name through a separate field — ADR 0066 decision 1, 0067 decision 4), so it is
+ * **separate from the value namespace**, but **identical names are rejected**: the same name in
+ * separate namespaces only makes "a value name written in a field meant for a slot name / or the
+ * reverse" undetectable, and adds no expressiveness. The same practice as 1 block ≤ 1 reference
+ * (the container's rule ①).
  *
- * **参照完全性**（ADR 0067 決定 4 / 5）: 宣言されたスロットは少なくとも 1 つのノードの
- * `states` 欄から参照される MUST。誰も参照しないスロットは values の孤立宣言と同じ穴で、
- * GenerationContext が確保だけして誰も読まない容量（KV なら数十 MiB 単位）が黙って残る。
+ * **Reference completeness** (ADR 0067 decisions 4 / 5): a declared slot MUST be referenced from the
+ * `states` field of at least one node. A slot nobody references is the same hole as an orphan
+ * declaration in values: capacity the GenerationContext allocates but nobody reads (tens of MiB for
+ * KV) stays behind silently.
  */
 const checkStateSlots = (
   states: Readonly<Record<string, IrStateSlot>>,
@@ -763,7 +816,7 @@ const checkStateSlots = (
   }
 };
 
-/** requires.ops ≡ nodes で実際に使われる op 集合（ランタイム突合の前提）。 */
+/** requires.ops ≡ the set of ops actually used in nodes (the premise of the runtime check). */
 const checkRequiredOps = (requiredOps: readonly string[], nodes: readonly IrNode[]): void => {
   const used = new Set(nodes.map((node) => node.op));
   const declared = new Set(requiredOps);

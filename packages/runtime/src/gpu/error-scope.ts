@@ -1,54 +1,59 @@
 /**
- * WebGPU errorScope の張り方の規律と、そこから出る型付きエラー。
+ * The discipline for pushing WebGPU errorScopes, and the typed errors that come out of it.
  *
- * WebGPU の失敗の大半は**同期例外にならない** — 無効なパイプライン / 無効なバッファが返り、
- * それを使う dispatch や writeBuffer が警告すら出さない no-op になる。この層の責務は
- * 「その沈黙を errorScope で捕まえて loud な例外に変換する」ことだけで、device の取得・能力の
- * 正規化（`device.ts`）とは独立している。
+ * Most WebGPU failures **do not become synchronous exceptions** — an invalid pipeline / invalid
+ * buffer is returned, and the dispatch or writeBuffer that uses it becomes a no-op without even a
+ * warning. The only job of this layer is "catch that silence with an errorScope and turn it into a
+ * loud exception"; it is independent of acquiring the device and normalizing its capabilities
+ * (`device.ts`).
  *
- * MUST: この層は `device.ts` を import しない。errorScope の規律は device 単位の LIFO
- * スタックという WebGPU の性質だけで閉じており、GpuContext を知る必要が無い。分離してあるのは
- * それに加えて**実行時の循環を構造的に消す**ため — `PipelineCache` はここだけに依存するので、
- * GpuContext が PipelineCache を所有しても context.ts ⇄ pipeline-cache.ts の輪ができない。
+ * MUST: this layer does not import `device.ts`. The errorScope discipline is closed over one WebGPU
+ * property alone — a per-device LIFO stack — and does not need to know GpuContext. The split also
+ * **removes a runtime cycle structurally** — `PipelineCache` depends only on this file, so
+ * GpuContext can own a PipelineCache without a context.ts ⇄ pipeline-cache.ts loop.
  *
- * NOTE: `GpuDeviceLostError` 等の device 固有のエラーは `context.ts` に残る（errorScope は device
- * 消失を捕らえない — 消失後の `popErrorScope` は null で resolve する）。
+ * NOTE: device-specific errors such as `GpuDeviceLostError` stay in `context.ts` (an errorScope
+ * does not catch device loss — `popErrorScope` after the loss resolves with null).
  */
 
-/** errorScope が捕捉した validation エラー（無効パイプライン等）。 */
+/** A validation error caught by an errorScope (an invalid pipeline and the like). */
 export class GpuValidationError extends Error {
   override readonly name = "GpuValidationError";
 }
 
 /**
- * errorScope が捕捉した out-of-memory エラー（確保要求が device の余力を超えた）。
- * validation と違い利用者のモデルサイズと実行環境で決まるため、別型で分岐可能にする。
+ * An out-of-memory error caught by an errorScope (an allocation request exceeded what the device
+ * has left). Unlike validation it is decided by the user's model size and environment, so it is a
+ * separate type that callers can branch on.
  */
 export class GpuOutOfMemoryError extends Error {
   override readonly name = "GpuOutOfMemoryError";
 }
 
 /**
- * errorScope が捕捉した internal エラー（実装側の都合で操作が失敗した — シェーダが複雑すぎて
- * コンパイルできない等）。WGSL 自体は妥当なので validation とは分岐先が違う: 利用者にとって
- * 「記述が不正」ではなく「この環境ではこの形のカーネルが通らない」であり、別型で区別できないと
- * codegen のバグと環境の限界が同じ報告に潰れる。
+ * An internal error caught by an errorScope (the operation failed for implementation reasons — a
+ * shader too complex to compile, for example). The WGSL itself is valid, so it branches differently
+ * from validation: for the user it is not "the code is invalid" but "this kernel shape does not go
+ * through in this environment", and without a separate type a codegen bug and an environment limit
+ * would collapse into the same report.
  */
 export class GpuInternalError extends Error {
   override readonly name = "GpuInternalError";
 }
 
 /**
- * internal + validation の 2 本を張って `body`（パイプライン生成）を実行し、捕捉したエラーを
- * 例外に変換する。**パイプライン生成経路はこちらを使う**（validation 1 本では internal
- * エラーが素通りする）。
+ * Pushes the two scopes internal + validation, runs `body` (pipeline creation) and turns any caught
+ * error into an exception. **Pipeline creation paths use this one** (with validation alone,
+ * internal errors pass straight through).
  *
- * 両方が要るのは失敗の出方が違うため — 上限超過や型不整合は validation、実装側の都合
- * （シェーダが複雑すぎてコンパイルできない等）は internal で、どちらも同期例外にならず
- * **無効なパイプラインが返るだけ**。囲まないと dispatch が no-op 化して出力が全て 0 になる。
+ * Both are needed because the failures show up differently — exceeding a limit or a type mismatch
+ * is validation, an implementation reason (a shader too complex to compile, for example) is
+ * internal, and neither becomes a synchronous exception; **an invalid pipeline is simply
+ * returned**. Without the scopes the dispatch becomes a no-op and the output is all 0.
  *
- * MUST NOT: `body` の中で非同期処理を待たない。errorScope はスタックで、pop は body の同期
- * 実行直後に起きるため、await 後にエンコードした操作は別のスコープに吸われる。
+ * MUST NOT: wait for asynchronous work inside `body`. errorScopes form a stack and the pop happens
+ * right after `body` runs synchronously, so an operation encoded after an await is absorbed by a
+ * different scope.
  */
 export const withPipelineScope = async <T>(
   device: GPUDevice,
@@ -61,25 +66,27 @@ export const withPipelineScope = async <T>(
   try {
     value = body();
   } catch (cause) {
-    // MUST: body が throw しても 2 本とも pop する。片方でも積み残すと後続の検証結果が誤った
-    // スコープに吸われ、以後のエラーが恒久的に見えなくなる。pop 自体の失敗は握り潰す
-    // （後始末で本体の例外を上書きしない — discardFailureScopes と同じ規律）。
+    // MUST: pop both scopes even when body throws. Leaving even one on the stack makes later
+    // validation results land in the wrong scope, and from then on errors are permanently
+    // invisible. A failure of the pop itself is swallowed (cleanup does not overwrite the body's
+    // exception — the same discipline as discardFailureScopes).
     const validation = device.popErrorScope().catch(() => null);
     const internal = device.popErrorScope().catch(() => null);
     await Promise.all([validation, internal]);
     throw cause;
   }
-  // MUST: 2 本の pop は**同一同期区間で発行**する（await するのは発行済みの promise だけ）。
-  // pop はスタック先頭を無条件に取るため、発行の間に await を挟むと、その隙に他所が push した
-  // スコープを 2 本目が取り、失敗が誤帰属する（popFailureScopes と同じ規律）。
+  // MUST: **issue** the two pops **in the same synchronous section** (only the already-issued
+  // promises are awaited). A pop takes the top of the stack unconditionally, so an await between
+  // the two issues lets the second pop take a scope pushed elsewhere in the gap, and the failure is
+  // misattributed (the same discipline as popFailureScopes).
   const validation = device.popErrorScope();
   const internal = device.popErrorScope();
   const [validationError, internalError] = await Promise.all([validation, internal]);
-  // MUST: 両方が捕捉されたときは internal を返す。internal で無効化されたパイプラインを触る
-  // 後続の操作（`getBindGroupLayout` 等）は**派生の** validation エラーを立てるため、
-  // validation を先に返すと根因の internal が捨てられ、原因の分からない「無効パイプライン」
-  // として報告される。OOM を validation より先に返すのと同型の判断
-  // （docs/research/2026-08-08-vram-oom-misreport.md）。
+  // MUST: when both caught something, return internal. Later operations that touch a pipeline
+  // invalidated by internal (`getBindGroupLayout` and the like) raise a **derived** validation
+  // error, so returning validation first would throw away the root-cause internal error and report
+  // an "invalid pipeline" with no visible cause. The same judgement as returning OOM before
+  // validation (docs/research/2026-08-08-vram-oom-misreport.md).
   if (internalError !== null) {
     throw new GpuInternalError(`${label}: ${internalError.message}`);
   }
@@ -90,13 +97,15 @@ export const withPipelineScope = async <T>(
 };
 
 /**
- * out-of-memory + validation の 2 本を張る。確保を伴う区間はこの両建てで囲む。
+ * Pushes the two scopes out-of-memory + validation. Sections that allocate are wrapped in this
+ * pair.
  *
- * 両方が要るのは失敗の出方が違うため — 上限超過の `createBuffer` は validation、device の
- * 余力切れは out-of-memory で、どちらも同期例外にはならず**無効なバッファが返るだけ**。
- * 囲まないと、そこへの `writeBuffer` が警告すら出さない no-op になり、空の重みや空の中間
- * バッファのまま処理が続く。対応する pop は必ず {@link popFailureScopes} /
- * {@link discardFailureScopes} を使う（pop の順序と同期性がここに閉じている）。
+ * Both are needed because the failures show up differently — a `createBuffer` over a limit is
+ * validation, the device running out is out-of-memory, and neither becomes a synchronous exception;
+ * **an invalid buffer is simply returned**. Without the scopes, a `writeBuffer` into it becomes a
+ * no-op without even a warning, and processing continues with empty weights or empty intermediate
+ * buffers. The matching pop always uses {@link popFailureScopes} /
+ * {@link discardFailureScopes} (the order and synchronicity of the pops are closed in there).
  */
 export const pushFailureScopes = (device: GPUDevice): void => {
   device.pushErrorScope("out-of-memory");
@@ -104,18 +113,20 @@ export const pushFailureScopes = (device: GPUDevice): void => {
 };
 
 /**
- * {@link pushFailureScopes} の 2 本を pop し、捕捉した失敗を型付き例外にして返す
- * （何も捕捉しなければ undefined）。
+ * Pops the two scopes of {@link pushFailureScopes} and returns any caught failure as a typed
+ * exception (undefined when nothing was caught).
  *
- * MUST: 2 本の pop は**同一同期区間で発行**する（await するのは発行済みの promise だけ）。
- * pop はスタック先頭を無条件に取るため、発行の間に await を挟むと、その隙に他所が push した
- * スコープを 2 本目が取り、失敗が誤帰属する。
+ * MUST: **issue** the two pops **in the same synchronous section** (only the already-issued
+ * promises are awaited). A pop takes the top of the stack unconditionally, so an await between the
+ * two issues lets the second pop take a scope pushed elsewhere in the gap, and the failure is
+ * misattributed.
  *
- * MUST: 両方が捕捉されたときは out-of-memory を返す。確保が余力切れで失敗すると `createBuffer`
- * は無効なバッファを返し、それを使う後続の `createBindGroup` / `writeBuffer` が
- * `Buffer with '' label is invalid` という**派生の** validation エラーを立てる。validation を
- * 先に返すと根因の OOM が捨てられ、区別のつかない「無効バッファ」として報告される
- * （docs/research/2026-08-08-vram-oom-misreport.md）。
+ * MUST: when both caught something, return out-of-memory. When an allocation fails because the
+ * device ran out, `createBuffer` returns an invalid buffer, and the later `createBindGroup` /
+ * `writeBuffer` that use it raise a **derived** validation error,
+ * `Buffer with '' label is invalid`. Returning validation first would throw away the root-cause OOM
+ * and report an indistinguishable "invalid buffer"
+ * (docs/research/2026-08-08-vram-oom-misreport.md).
  */
 export const popFailureScopes = async (
   device: GPUDevice,
@@ -134,17 +145,20 @@ export const popFailureScopes = async (
 };
 
 /**
- * 失敗経路の後始末。{@link pushFailureScopes} の 2 本を pop して結果を捨てる。
+ * Cleanup on a failure path. Pops the two scopes of {@link pushFailureScopes} and discards the
+ * results.
  *
- * 戻り値は「GPU 側の失敗を否定できないか」— どちらかの scope が失敗を捕捉したか、pop 自体が
- * 落ちたとき true。本体の例外は呼び手がそのまま投げるので、捕捉した失敗は例外にしない。真偽を
- * 返すのは、区間で作った資源（確保が非致命 OOM なら無効）を残すか捨てるかを、ホスト側で落ちた
- * 失敗経路でも決められるようにするため（`Session` の run の catch が読む）。
+ * The return value is "a GPU-side failure cannot be ruled out" — true when either scope caught a
+ * failure or the pop itself failed. The caller rethrows the body's exception as is, so a caught
+ * failure is not turned into an exception. It returns a boolean so that a failure path that failed
+ * on the host side can still decide whether to keep or discard the resources made in the section
+ * (an allocation that hit a non-fatal OOM is invalid) — the catch of the `Session` run reads it.
  *
- * MUST: 本体が例外で抜けてもスコープは必ず 2 本とも pop する。積み残すと以後の検証結果が
- * 誤ったスコープに吸われ、エラーが恒久的に見えなくなる。pop 自体の失敗も握り潰す
- * （後始末で本体の例外を上書きしない）。
- * MUST: 2 本の pop は同一同期区間で発行する（{@link popFailureScopes} と同じ規律）。
+ * MUST: pop both scopes even when the body exits with an exception. Leaving one on the stack makes
+ * later validation results land in the wrong scope, and errors become permanently invisible. A
+ * failure of the pop itself is swallowed too (cleanup does not overwrite the body's exception).
+ * MUST: issue the two pops in the same synchronous section (the same discipline as
+ * {@link popFailureScopes}).
  */
 export const discardFailureScopes = async (device: GPUDevice): Promise<boolean> => {
   const settle = (pop: Promise<GPUError | null>): Promise<boolean> =>

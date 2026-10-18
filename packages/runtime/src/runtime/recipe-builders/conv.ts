@@ -1,9 +1,10 @@
 /**
- * 族別導出 — 畳み込みの族（conv1d / conv2d とその igemm 変種・conv3d・conv_transpose1d・
- * deform_conv2d）と gru_scan。
+ * Per-op-family derivation — the convolution family (conv1d / conv2d and their igemm variants,
+ * conv3d, conv_transpose1d, deform_conv2d) and gru_scan.
  *
- * 入口は {@link "../recipe-builder.ts"} の `RecipeBuilder` で、共有サービス（Session の状態・
- * params の書き込み・重みの格納形と scale 束縛）は {@link RecipeBuildFace} 経由でだけ触る。
+ * The entry is `RecipeBuilder` in {@link "../recipe-builder.ts"}; the shared services (Session
+ * state, params writes, the weights' storage form and scale bindings) are reached only through
+ * {@link RecipeBuildFace}.
  */
 
 import type { BindingSource, StepRecipeBuilder } from "../recipe.ts";
@@ -73,11 +74,13 @@ import type { RecipeBuildFace } from "../recipe-builder.ts";
 import { PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
 
 /**
- * deform_conv2d（DCNv2 — ADR 0055）。出力 1 要素 = 1 invocation の grid-stride 1 本だけで、
- * 踏み分けは無い（groups / offset_groups / stride / dilation は契約に欄が無い = 1 固定）。
+ * deform_conv2d (DCNv2 — ADR 0055). A single grid-stride kernel with one output element = one
+ * invocation, no branching (groups / offset_groups / stride / dilation have no field in the
+ * contract = fixed to 1).
  *
- * MUST: Kh / Kw は**重みの第 3 / 第 4 軸**をこの順で読む（conv2d と同じ教訓）。
- * offset / mask の形は契約検査が出力空間と突き合わせ済み。
+ * MUST: Kh / Kw are read from **the weight's third / fourth axes**, in that order (the same lesson
+ * as conv2d). The contract check has already matched the offset / mask shapes against the output
+ * space.
  */
 export const buildDeformConv2d = async (
   face: RecipeBuildFace,
@@ -129,13 +132,15 @@ export const buildDeformConv2d = async (
 };
 
 /**
- * gru_scan / gru_scan_reverse（GRU の隠れ側スキャン — ADR 0056）。
+ * gru_scan / gru_scan_reverse (the hidden-side scan of a GRU — ADR 0056).
  *
- * 1 workgroup = 1 バッチ要素（バッチ方向だけ grid-stride で dispatch 上限を跨ぐ）で、
- * 時間ループはカーネル内。走査方向は **op 名**から引く（attrs に欄は無い）。
+ * One workgroup = one batch element (only the batch direction crosses the dispatch limit by
+ * grid-stride); the time loop is inside the kernel. The scan direction comes from **the op name**
+ * (attrs have no field for it).
  *
- * MUST: 幾何は h0 と W_hh から取る（T は gi の先頭・N と H は h0）。gi の最終次元 3H から
- * H を割り戻すと、契約検査が突き合わせているはずの取り違えを 1 か所で作り直すことになる。
+ * MUST: the geometry comes from h0 and W_hh (T from the head of gi, N and H from h0). Dividing H
+ * back out of gi's last dimension 3H would re-create, in one place, the mix-ups the contract check
+ * is supposed to catch.
  */
 export const buildGruScan = async (
   face: RecipeBuildFace,
@@ -168,9 +173,9 @@ export const buildGruScan = async (
 };
 
 /**
- * conv1d（groups / dilation は attrs）。**groups で 2 カーネルを踏み分ける**（conv2d と同型）:
- * `groups == 1` は implicit GEMM、`groups > 1` は直接畳み込み（1 スレッド = 1 出力要素の
- * grid-stride）。
+ * conv1d (groups / dilation from attrs). **Two kernels, chosen by groups** (same as conv2d):
+ * `groups == 1` is the implicit GEMM, `groups > 1` a direct convolution (grid-stride with one
+ * thread = one output element).
  */
 export const buildConv1d = async (
   face: RecipeBuildFace,
@@ -226,19 +231,22 @@ export const buildConv1d = async (
 };
 
 /**
- * conv1d の implicit GEMM（`C[Cout, N] = W[Cout, K] × Xcol[K, N]` — ADR 0024 の 1D 版）。
+ * conv1d's implicit GEMM (`C[Cout, N] = W[Cout, K] × Xcol[K, N]` — the 1D version of ADR 0024).
  *
- * MUST: GEMM 骨格と同じ「1 workgroup = 1 出力タイル」なので、dispatch 上限超過は
- * fail loudly（grid-stride で縮退させるとタイルが欠落し、full-write が黙って壊れる）。
- * MUST: バッチは **z 軸**（bmm / conv2d と同じ）。N 側へ畳むと出力が `[Cout][B·Lout]` に
- * なって NCL と軸が入れ替わる — B = 1 でだけ一致するので実測形では露見しない。
+ * MUST: the same "one workgroup = one output tile" as the GEMM skeleton, so exceeding the
+ * dispatch limit fails loudly (clamping onto grid-stride would drop tiles and silently break the
+ * full-write).
+ * MUST: the batch is the **z axis** (as in bmm / conv2d). Folding it into N makes the output
+ * `[Cout][B·Lout]`, swapping axes against NCL — it matches only for B = 1, so the measured forms do
+ * not reveal it.
  *
- * m タイルの述語は conv2d と**同じ 1 本**（{@link conv2dIgemmMTile} — M = Cout の関数で
- * しかないので次元に依らない）。どちらのタイル形でも出力はビット同一なので、これは純粋な
- * dispatch の割り直しで数値契約に触れない。
+ * The m-tile predicate is **the same single one** as conv2d ({@link conv2dIgemmMTile} — a function
+ * of M = Cout only, so independent of dimensionality). Either tile shape gives bit-identical
+ * output, so this is purely a redistribution of dispatches and does not touch the numeric contract.
  *
- * NOTE: i4 常駐の conv1d が着地するのは**この経路だけ**（適格判定が groups == 1 に閉じる —
- * ADR 0069 決定 5 の conv1d 追補）。group 長は WGSL に焼くのでキーにも乗せる。
+ * NOTE: an i4-resident conv1d lands **only on this path** (eligibility is closed to groups == 1 —
+ * the conv1d extension of ADR 0069 decision 5, addendum 7). The group length is baked into the
+ * WGSL, so it is also part of the key.
  */
 const buildConv1dIgemm = async (
   face: RecipeBuildFace,
@@ -253,9 +261,11 @@ const buildConv1dIgemm = async (
   const kFlat = dims.channelsIn * dims.kernel;
   const v4 = conv1dUsesVec4(kFlat, dims.lengthOut, dims.stride);
   const mTile = conv2dIgemmMTile(m);
-  // 生成・キーと同じ解決点から幾何を引く（dispatch のタイル辺が WGSL の辺と構造的に一致）。
+  // Take the geometry from the same resolution point as generation and key (the dispatch's tile
+  // edges match the WGSL's edges structurally).
   const geometry = gemmMTileGeometry(mTile);
-  // i4 は group 長を WGSL に焼く（キーの g 部と対 — linear / embedding と同じ規律・ADR 0069）。
+  // i4 bakes the group length into the WGSL (paired with the key's g part — the same discipline as
+  // linear / embedding, ADR 0069).
   const groupSize = weightStorage === "i4" ? face.weightGroupSize(step) : undefined;
   const key = conv1dIgemmKey(weightStorage, v4, mTile, groupSize);
   const { pipeline, layout, roles } = await face.state.cache.get(
@@ -285,11 +295,12 @@ const buildConv1dIgemm = async (
 };
 
 /**
- * conv2d（stride / padding / dilation は H/W の 2 成分）。**groups で 2 カーネルを踏み分ける**
- * （ADR 0024）: `groups == 1` は implicit GEMM、`groups > 1` は直接畳み込み。
+ * conv2d (stride / padding / dilation have two components, H/W). **Two kernels, chosen by
+ * groups** (ADR 0024): `groups == 1` is the implicit GEMM, `groups > 1` a direct convolution.
  *
- * MUST: Kh / Kw は**重みの第 3 / 第 4 軸**をこの順で読む。入れ替えても正方カーネルでは
- * 数値が一致するので、テストは Kh ≠ Kw の形で固定する（src/kernels/conv2d.ts）。
+ * MUST: Kh / Kw are read from **the weight's third / fourth axes**, in that order. Swapping them
+ * still matches numerically for a square kernel, so the tests pin a Kh ≠ Kw shape
+ * (src/kernels/conv2d.ts).
  */
 export const buildConv2d = async (
   face: RecipeBuildFace,
@@ -351,17 +362,21 @@ export const buildConv2d = async (
 };
 
 /**
- * conv2d の implicit GEMM（`C[Cout, N] = W[Cout, K] × Xcol[K, N]` — ADR 0024）。
+ * conv2d's implicit GEMM (`C[Cout, N] = W[Cout, K] × Xcol[K, N]` — ADR 0024).
  *
- * MUST: GEMM 骨格と同じ「1 workgroup = 1 出力タイル」なので、dispatch 上限超過は
- * fail loudly（grid-stride で縮退させるとタイルが欠落し、full-write が黙って壊れる）。
- * MUST: バッチは **z 軸**（bmm と同じ）。N 側へ畳むと出力が `[Cout][B·Hout·Wout]` になり
- * NCHW と軸が入れ替わる — B = 1 でだけ一致するので実測形では露見しない。
+ * MUST: the same "one workgroup = one output tile" as the GEMM skeleton, so exceeding the
+ * dispatch limit fails loudly (clamping onto grid-stride would drop tiles and silently break the
+ * full-write).
+ * MUST: the batch is the **z axis** (as in bmm). Folding it into N makes the output
+ * `[Cout][B·Hout·Wout]`, swapping axes against NCHW — it matches only for B = 1, so the measured
+ * forms do not reveal it.
  *
- * m タイルは形状の関数（{@link conv2dIgemmMTile}）で 64 行 / 32 行のクラスを選び（ADR 0024 隣接）、
- * クラスごとの幾何は adapter のプロファイルの欄（src/kernels/geometry-profile.ts — 既定プロファイルは
- * 従来の `gemmMTileGeometry(mTile)` のまま = 64 行クラスは 64×128・32 行クラスは 32×128 タイル）。どの幾何でも出力はビット同一なので、
- * これは純粋な dispatch の割り直しで数値契約に触れない。
+ * The m tile picks the 64-row / 32-row class as a function of the shape ({@link conv2dIgemmMTile})
+ * (next to ADR 0024), and the geometry per class is a field of the adapter's profile
+ * (src/kernels/geometry-profile.ts — the default profile keeps the earlier
+ * `gemmMTileGeometry(mTile)` = 64×128 tiles for the 64-row class and 32×128 for the 32-row class).
+ * Every geometry gives bit-identical output,
+ * so this is purely a redistribution of dispatches and does not touch the numeric contract.
  */
 const buildConv2dIgemm = async (
   face: RecipeBuildFace,
@@ -377,8 +392,9 @@ const buildConv2dIgemm = async (
   const kFlat = dims.channelsIn * dims.kernelH * dims.kernelW;
   const v4 = conv2dUsesVec4(kFlat, dims.widthOut, dims.strideW);
   const mTile = conv2dIgemmMTile(m);
-  // MUST: 1 回引いた幾何をキー・WGSL・dispatch の 3 つへ**そのまま**通す（dispatch のタイル辺が
-  // WGSL の辺と構造的に一致する — 実タイル辺の正本は幾何で、mTile はクラスの名前にすぎない）。
+  // MUST: pass the geometry taken once **unchanged** to all three of key, WGSL and dispatch (the
+  // dispatch's tile edges match the WGSL's edges structurally — the source of truth for the actual
+  // tile edges is the geometry; mTile is only the class name).
   const geometry = conv2dProfileGeometry(face.state.geometryProfile, mTile);
   const key = conv2dIgemmKey(weightStorage, v4, mTile, geometry);
   const { pipeline, layout, roles } = await face.state.cache.get(
@@ -408,18 +424,20 @@ const buildConv2dIgemm = async (
 };
 
 /**
- * conv3d（unbatched・implicit GEMM のみ — ADR 0118 決定 1）。
+ * conv3d (unbatched, implicit GEMM only — ADR 0118 decision 1).
  *
- * 時間軸は N に畳むので dispatch は `[ceil(N/tileN), ceil(M/tileM), 1]`（unbatched — z は 1）。
- * m タイルの述語は conv1d / conv2d と**同じ 1 本**（{@link conv2dIgemmMTile}）で、幾何は
- * プロファイルを引かず既定（`gemmMTileGeometry`）— conv1d と同じ扱い（ADR 0118 決定 1）。
+ * The time axis is folded into N, so the dispatch is `[ceil(N/tileN), ceil(M/tileM), 1]`
+ * (unbatched — z is 1). The m-tile predicate is **the same single one** as conv1d / conv2d
+ * ({@link conv2dIgemmMTile}), and the geometry is the default (`gemmMTileGeometry`) without a
+ * profile lookup — the same treatment as conv1d (ADR 0118 decision 1).
  *
- * MUST: GEMM 骨格と同じ「1 workgroup = 1 出力タイル」なので、dispatch 上限超過は fail loudly
- * （grid-stride で縮退させるとタイルが欠落し、full-write が黙って壊れる）。
- * MUST: Kt / Kh / Kw は**重みの第 3 / 4 / 5 軸**をこの順で読む（立方カーネルでは入れ替えても
- * 数値が一致するので、テストは Kt ≠ Kh ≠ Kw で固定する）。
- * NOTE: groups > 1 は Session の構築時（plan.ts の `validateGraphContracts`）に落ちているので
- * ここへは届かない。届いた場合も params 層（{@link conv3dIgemmParams}）が落とす。
+ * MUST: the same "one workgroup = one output tile" as the GEMM skeleton, so exceeding the
+ * dispatch limit fails loudly (clamping onto grid-stride would drop tiles and silently break the
+ * full-write).
+ * MUST: Kt / Kh / Kw are read from **the weight's third / fourth / fifth axes**, in that order (a
+ * cubic kernel still matches numerically when swapped, so the tests pin Kt ≠ Kh ≠ Kw).
+ * NOTE: groups > 1 is rejected at Session build (`validateGraphContracts` in plan.ts), so it never
+ * gets here. If it did, the params layer ({@link conv3dIgemmParams}) would reject it too.
  */
 export const buildConv3d = async (
   face: RecipeBuildFace,
@@ -462,7 +480,8 @@ export const buildConv3d = async (
   const v4 = conv3dUsesVec4(kFlat, dims.widthOut, dims.strideW);
   const mTile = conv2dIgemmMTile(dims.channelsOut);
   const key = conv3dIgemmKey(weightStorage, v4, mTile);
-  // params を先に組む: groups > 1 などの契約外の形はパイプラインを引く前に落とす。
+  // Build params first: shapes outside the contract, such as groups > 1, are rejected before the
+  // pipeline lookup.
   const paramsData = conv3dIgemmParams(dims);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,
@@ -470,8 +489,9 @@ export const buildConv3d = async (
   );
   const params = face.writeParams(paramsData, PARAMS_UNIFORM_USAGE);
   const where = `conv3d [${step.inputShapes[0].join(",")}] * [${step.inputShapes[1].join(",")}]`;
-  // dispatch の辺は生成・キーと同じ解決点（`gemmMTileGeometry(mTile)`）から導く 1 箇所
-  // （src/kernels/conv3d.ts — 単体の GPU 門も同じ関数を通る）。
+  // The dispatch edges are derived in one place from the same resolution point as generation and
+  // key (`gemmMTileGeometry(mTile)`) (src/kernels/conv3d.ts — the unit GPU check goes through the
+  // same function).
   const workgroups = conv3dIgemmWorkgroups(
     dims,
     mTile,
@@ -494,10 +514,12 @@ export const buildConv3d = async (
 };
 
 /**
- * conv_transpose1d（gather 形）。1 スレッド = 1 出力要素で出力全域を書く（ADR 0014）。
+ * conv_transpose1d (gather form). One thread = one output element writes the whole output
+ * (ADR 0014).
  *
- * MUST: Cin は**重みの第 1 軸**（`[Cin, Cout, K]`）。x[1] と一致することは契約検査済みだが、
- * ここで weight[0] を使うのは「転置レイアウトの正本は重み側」という読みを崩さないため。
+ * MUST: Cin is **the weight's first axis** (`[Cin, Cout, K]`). The contract check has already
+ * matched it against x[1], but weight[0] is used here so as not to break the reading "the source of
+ * truth for the transposed layout is the weight".
  */
 export const buildConvTranspose1d = async (
   face: RecipeBuildFace,

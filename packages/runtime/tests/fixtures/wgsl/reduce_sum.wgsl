@@ -39,7 +39,7 @@ fn main(
     if (lid == 0u) {
       out[row] = scratch[0u];
     }
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // line up the end of the scratch[0] reads before the next row overwrites scratch[lid]
     workgroupBarrier();
     row = row + nwg.x;
   }

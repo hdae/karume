@@ -1,39 +1,45 @@
 /**
- * （キー → compute pipeline）のキャッシュ。
+ * A cache of (key → compute pipeline).
  *
- * MUST: 同一キーには常にバイト単位で同一の WGSL が対応すること（codegen 決定性）。
- * ブラウザ側の暗黙パイプラインキャッシュは WGSL 文字列そのものをキーにしており、明示的な
- * 制御 API は存在しない。決定性が崩れると初回コンパイル代を毎回払うだけでなく、同じキーで
- * 別のカーネルが走る（キャッシュヒット時に古い WGSL が使われる）ため、下の実行時ガードで
- * 不一致を即座に落とす。
+ * MUST: the same key always corresponds to byte-identical WGSL (codegen determinism).
+ * The browser's implicit pipeline cache keys on the WGSL string itself, and there is no explicit
+ * control API. If determinism breaks, we not only pay the first-compile cost every time but also
+ * run a different kernel under the same key (a cache hit uses the old WGSL), so the runtime guard
+ * below fails a mismatch at once.
  *
- * **device 1 個につき 1 個**（所有者は GpuContext — `GpuContextInternals.pipelines`）。同一
- * device 上の Session はこの 1 本を共有し、Session ごとに割り直さない — パイプラインの再利用
- * 可能性は device 単位で決まるので、Session ごとに持つと同じ WGSL のコンパイルと
- * `getBindGroupLayout` の解決を Session の本数だけ払い直すことになる。device 消失後に持ち越した
- * パイプラインは使えないので、作り直しの入口は `acquireGpu()` からの GpuContext 再構築だけ。
+ * **One per device** (owned by GpuContext — `GpuContextInternals.pipelines`). Sessions on the same
+ * device share this one instance and do not get their own — whether a pipeline can be reused is
+ * decided per device, so a per-Session cache would pay the compilation of the same WGSL and the
+ * resolution of `getBindGroupLayout` once per Session. Pipelines carried over past a device loss
+ * are unusable, so the only way to rebuild is reconstructing the GpuContext from `acquireGpu()`.
  */
 
 import { GpuInternalError, GpuValidationError, withPipelineScope } from "./error-scope.ts";
 
-/** 同一キーに異なる WGSL が渡された（決定性の破れ）。 */
+/** Different WGSL was passed for the same key (determinism broken). */
 export class PipelineKeyConflictError extends Error {
   override readonly name = "PipelineKeyConflictError";
 }
 
-/** WGSL の storage 束縛宣言が矛盾している（同じ binding 番号が read と read_write の両方で現れる）。 */
+/**
+ * The WGSL storage binding declarations contradict each other (the same binding number appears as
+ * both read and read_write).
+ */
 export class StorageRoleError extends Error {
   override readonly name = "StorageRoleError";
 }
 
 /**
- * group 0 の storage 束縛の**役割**（binding 番号 → 読み / 読み書き）。WGSL の
- * `var<storage, read>` / `var<storage, read_write>` 宣言から機械的に採る（手書きの表を持たない）。
+ * The **roles** of the group 0 storage bindings (binding number → read / read-write). Taken
+ * mechanically from the WGSL `var<storage, read>` / `var<storage, read_write>` declarations (no
+ * hand-written table).
  *
- * 使い道は中間バッファの領域計画（src/runtime/transient-plan.ts — ADR 0093 決定 1）: 同じ
- * dispatch で片方が読まれ他方が書かれる 2 テンソルは同じ GPUBuffer に置けない（WebGPU の usage
- * scope 検証はバッファ単位で束縛範囲を見ない）。役割を dispatch から採らずに計画側が推測すると、
- * 推測が外れた dispatch だけが validation で落ちる（例外にならず、出力が全て 0 になる）。
+ * Used by the region plan for intermediate buffers (src/runtime/transient-plan.ts — ADR 0093
+ * decision 1): two tensors of which one is read and the other written by the same dispatch cannot
+ * share a GPUBuffer (WebGPU's usage-scope validation works per buffer and does not look at bound
+ * ranges). If the plan guessed the roles instead of taking them from the dispatch, only the
+ * dispatches where the guess is wrong would fail validation (not as an exception — the output would
+ * be all 0).
  */
 export type StorageRoles = {
   readonly reads: ReadonlySet<number>;
@@ -44,12 +50,14 @@ const STORAGE_DECLARATION =
   /@group\(0\)\s*@binding\((\d+)\)\s*var<storage\s*,\s*(read|read_write)\s*>/g;
 
 /**
- * WGSL から {@link StorageRoles} を採る（純関数）。
+ * Takes {@link StorageRoles} from WGSL (a pure function).
  *
- * MUST: 宣言の形は `@group(0) @binding(N) var<storage, read|read_write>` の 1 行（codegen / kernels の
- * 全宣言がこの形 — 2026-09-05 に 157 宣言を数えて確認）。別の書き方（`var<storage>` の既定 read や
- * 改行を挟む形）を codegen が出し始めるとここが拾えず、その dispatch は「役割不明」として
- * 計画側で fail loudly になる（{@link SessionPipelines} の消費者が束縛の全件に役割があることを検査する）。
+ * MUST: a declaration has the one-line form `@group(0) @binding(N) var<storage, read|read_write>`
+ * (every declaration in codegen / kernels has this form — confirmed on 2026-09-05 by counting 157
+ * declarations). If codegen starts emitting another spelling (`var<storage>` with its default read,
+ * or a form with a line break), this function misses it, and that dispatch fails loudly in the plan
+ * as "role unknown" (the consumer of {@link SessionPipelines} checks that every binding has a
+ * role).
  */
 export const parseStorageRoles = (wgsl: string): StorageRoles => {
   const reads = new Set<number>();
@@ -69,14 +77,14 @@ export const parseStorageRoles = (wgsl: string): StorageRoles => {
 };
 
 /**
- * {@link PipelineCache.get} が返す解決済みの組。layout はパイプラインごとに不変なので、
- * パイプライン生成解決時に `getBindGroupLayout(0)` を 1 回だけ呼んで保持する（毎 dispatch の
- * bind group 生成で呼び直さない）。
+ * The resolved pair returned by {@link PipelineCache.get}. A pipeline's layout never changes, so
+ * `getBindGroupLayout(0)` is called once when pipeline creation resolves and kept (not called again
+ * for the bind group of every dispatch).
  */
 type CachedPipeline = {
   readonly pipeline: GPUComputePipeline;
   readonly layout: GPUBindGroupLayout;
-  /** storage 束縛の役割（WGSL から 1 度だけ採る — {@link parseStorageRoles}）。 */
+  /** The roles of the storage bindings (taken once from the WGSL — {@link parseStorageRoles}). */
   readonly roles: StorageRoles;
 };
 
@@ -87,9 +95,9 @@ type PipelineCompilation =
 type CacheEntry = {
   readonly wgsl: string;
   /**
-   * **未決着の生成も込みで**共有する（解決済みの値ではなく Promise を持つ）。同じキーの
-   * 並行 get() がそれぞれシェーダモジュールとパイプラインを作ると、コンパイル代が実測で
-   * 二重に乗るうえ validation errorScope も入れ子で張られる。
+   * Shared **including a creation that has not settled yet** (holds the Promise, not the resolved
+   * value). If concurrent get() calls for the same key each created a shader module and a pipeline,
+   * the measured compile cost would double, and the validation errorScopes would also nest.
    */
   readonly resolved: Promise<CachedPipeline>;
 };
@@ -102,22 +110,25 @@ export class PipelineCache {
     this.#device = device;
   }
 
-  /** 登録済みエントリ数（生成中のものを含み、失敗したものは含まない）。 */
+  /** Number of registered entries (including those being created, excluding failed ones). */
   get size(): number {
     return this.#entries.size;
   }
 
   /**
-   * キーに対応する compute pipeline + bind group layout を返す（未生成なら生成する）。
-   * **生成中のものも同じエントリで待ち合わせる** — 登録は await の前に行う（await 後に登録
-   * すると、その間に来た同一キーの get() が全て取りこぼして重複生成になる）。
+   * Returns the compute pipeline + bind group layout for the key (creating them if needed).
+   * **A creation in progress is awaited through the same entry** — registration happens before the
+   * await (registering after the await would make every get() of the same key that arrives in the
+   * meantime miss it and create a duplicate).
    *
-   * WGSL 不一致の判定は生成の完了を待たない（キャッシュに載った瞬間から効く）。
+   * The WGSL mismatch check does not wait for creation to finish (it applies from the moment the
+   * entry is in the cache).
    *
-   * 生成は必ず errorScope（internal + validation の 2 本 = {@link withPipelineScope}）の中で
-   * 行う。無効なシェーダ / パイプラインは同期例外にならず、生成成功に見えたまま dispatch が
-   * no-op 化して出力が全て 0 になる。layout はパイプライン生成解決時に `getBindGroupLayout(0)`
-   * を 1 回だけ呼んで一緒に保持する（呼び出し側が毎 dispatch で呼び直さずに済む）。
+   * Creation always happens inside an errorScope (the two scopes internal + validation =
+   * {@link withPipelineScope}). An invalid shader / pipeline does not become a synchronous
+   * exception; creation looks successful while the dispatch becomes a no-op and the output is
+   * all 0. The layout is obtained by calling `getBindGroupLayout(0)` once when pipeline creation
+   * resolves and is kept alongside (so callers do not call it again for every dispatch).
    */
   async get(key: string, wgsl: string): Promise<CachedPipeline> {
     const cached = this.#entries.get(key);
@@ -129,10 +140,11 @@ export class PipelineCache {
       }
       return await cached.resolved;
     }
-    // MUST: 失敗したエントリは残さない（残すと同じ拒否 Promise を全員が受け取り続け、
-    // 再試行の余地が消える）。この handler は生成時に登録済みなので、待ち手が拒否を
-    // 観測するより先に走る = 削除の後に来た get() だけが作り直す。
-    // MUST: 役割は生成の前に採る（宣言の矛盾はコンパイルを待たずに落とす）。
+    // MUST: do not keep a failed entry (keeping it would hand the same rejected Promise to everyone
+    // and remove any chance of a retry). This handler is registered at creation, so it runs before
+    // any waiter observes the rejection = only a get() that arrives after the deletion recreates.
+    // MUST: take the roles before creation (a contradiction in the declarations fails without
+    // waiting for compilation).
     const roles = parseStorageRoles(wgsl);
     const resolved = (async (): Promise<CachedPipeline> => {
       let compiling: Promise<PipelineCompilation> | undefined;
@@ -141,9 +153,11 @@ export class PipelineCache {
           label: key,
           code: wgsl,
         });
-        // スコープを張った同期区間で発行し、完了は pop の後に待つ。
+        // Issue inside the synchronous section that pushed the scope; wait for completion after
+        // the pop.
         // DECIDED: docs/decisions/0042-prepared-execution-plan.md#addendum-2026-09-11--asynchronous-compilation
-        // 拒否も値にして直ちに受ける。module の検証が先に落ちても未処理の拒否を残さない。
+        // Turn a rejection into a value and receive it at once. Even if module validation fails
+        // first, no unhandled rejection is left behind.
         const pending = this.#device
           .createComputePipelineAsync({
             label: key,
@@ -157,7 +171,8 @@ export class PipelineCache {
         compiling = pending;
         return { module, pending };
       }).catch(async (cause: unknown) => {
-        // モジュールの検証失敗でも、発行済みコンパイルの決着前に再試行や破棄へ進めない。
+        // Even when module validation fails, do not move on to a retry or disposal before the
+        // already-issued compilation has settled.
         await compiling;
         throw cause;
       });
@@ -169,8 +184,9 @@ export class PipelineCache {
           "reason" in cause &&
           (cause.reason === "internal" || cause.reason === "validation")
         ) {
-          // GPUPipelineError.message だけでは診断が空になる実装がある。
-          // 補足の取得自体が落ちても、根因と拒否理由を上書きしない。
+          // Some implementations leave the diagnostics empty with GPUPipelineError.message alone.
+          // Even if fetching the supplement fails, do not overwrite the root cause and the
+          // rejection reason.
           const details = await created.module.getCompilationInfo().then(
             (info) =>
               info.messages
@@ -182,10 +198,12 @@ export class PipelineCache {
           if (cause.reason === "internal") throw new GpuInternalError(message, { cause });
           throw new GpuValidationError(message, { cause });
         }
-        // WebGPU が規定する拒否理由以外は、推測で validation に分類しない。
+        // A rejection reason other than those WebGPU specifies is not classified as validation by
+        // guesswork.
         throw cause;
       }
-      // layout 取得も別の同期スコープで囲む。待機中に他の生成のスコープを吸い込まない。
+      // Wrap the layout lookup in its own synchronous scope too, so it does not absorb the scopes
+      // of other creations while waiting.
       return await withPipelineScope(this.#device, `getBindGroupLayout(${key})`, () => ({
         pipeline: result.pipeline,
         layout: result.pipeline.getBindGroupLayout(0),
@@ -201,17 +219,18 @@ export class PipelineCache {
 }
 
 /**
- * 1 Session ぶんの使用記録を付けた {@link PipelineCache} への薄い委譲。
+ * A thin delegate to {@link PipelineCache} that records usage for one Session.
  *
- * キャッシュが device 寿命になったことで「この device に載っているパイプラインの本数」と
- * 「この Session が使ったパイプラインの本数」が別の量になった。後者は診断
- * （`SessionDiagnostics.pipelineCount`）が答える問い — グラフと opt-in の組み合わせに対して
- * 何本のカーネルが立ったかは Session ごとの事実で、同一 device に別の Session が居るかどうかで
- * 変わってはいけない。前者は `SessionDiagnostics.devicePipelineCount` が答える。
+ * Since the cache lives as long as the device, "the number of pipelines on this device" and "the
+ * number of pipelines this Session used" became different quantities. The latter is what the
+ * diagnostics (`SessionDiagnostics.pipelineCount`) answer — how many kernels a graph and its
+ * opt-ins brought up is a per-Session fact, and it is not allowed to change with whether another
+ * Session is on the same device. The former is answered by
+ * `SessionDiagnostics.devicePipelineCount`.
  *
- * MUST: 本数は使用キー集合から導出する（独立に更新するカウンタを持たない）。同じキーを
- * 複数のステップが引くのが通常形なので、加算カウンタでは「使ったキーの本数」ではなく
- * 「引いた回数」になり、しかもズレても例外も警告も出ない。
+ * MUST: derive the count from the set of used keys (no independently updated counter). Several
+ * steps fetching the same key is the normal case, so an incrementing counter would count "fetches"
+ * instead of "keys used", and a drift would raise neither an exception nor a warning.
  */
 export class SessionPipelines {
   readonly #cache: PipelineCache;
@@ -221,21 +240,22 @@ export class SessionPipelines {
     this.#cache = cache;
   }
 
-  /** この Session が使ったパイプラインキーの本数（集合から導出）。 */
+  /** Number of pipeline keys this Session used (derived from the set). */
   get usedCount(): number {
     return this.#usedKeys.size;
   }
 
-  /** 委譲先が抱える本数 = この device 上の全 Session の合計。 */
+  /** The count held by the delegate target = the total over every Session on this device. */
   get deviceCount(): number {
     return this.#cache.size;
   }
 
   /**
-   * {@link PipelineCache.get} へ委譲し、**解決したキーだけ**を使用集合へ記録する。
+   * Delegates to {@link PipelineCache.get} and records **only resolved keys** in the used set.
    *
-   * MUST: 記録は解決後（失敗したキーは数えない）。委譲先は失敗したエントリを残さないので、
-   * 発行時点で記録すると「device には無いのに Session は使ったことになっている」形が残る。
+   * MUST: record after resolution (failed keys are not counted). The delegate target does not keep
+   * failed entries, so recording at issue time would leave the state "not on the device, yet the
+   * Session counts it as used".
    */
   async get(key: string, wgsl: string): Promise<CachedPipeline> {
     const resolved = await this.#cache.get(key, wgsl);

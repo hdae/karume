@@ -1,97 +1,111 @@
 /**
- * 時間予算ベースの submit 分割。
+ * Splitting submits by a time budget.
  *
- * MUST: dispatch 列を 1 つの command buffer に積み切らない。長時間の submit は Windows TDR
- * （既定 2 秒）と Chromium の watchdog に掛かり、device lost として現れる。チャンク単位で
- * submit し、**実測から導いた 1 workgroup あたりの推定時間**でチャンクの切れ目を決める。
+ * MUST: do not put the whole dispatch sequence into one command buffer. A long submit hits Windows
+ * TDR (2 seconds by default) and the Chromium watchdog and shows up as device lost. Submit per
+ * chunk, and decide where chunks end from **the estimated time per workgroup derived from
+ * measurements**.
  *
- * ## 不変条件（ADR 0004 の実行モデル）
+ * ## Invariants (the execution model of ADR 0004)
  *
- * 1. **成長は実測の裏付けにのみ基づく**。実測 0（タイマ分解能未満）は「速い」ではなく
- *    「情報が無い」— 推定を更新しない。裏付けが無い間の上限は
- *    {@link SubmitPolicy.initialChunkSize} で据え置く。
- * 2. **1 チャンクの推定時間が時間予算を超えない**。積む前に「この dispatch を足すと超える」を
- *    判定して先にチャンクを閉じる（超えてから縮めるのではない）。単独で予算を超える
- *    dispatch は分割できないので例外（{@link SubmitPolicy.minChunkSize} も下限として効く）。
- * 3. **フィードフォワード**。推定の単位は dispatch 数ではなく **workgroup 数**で、入力長 T が
- *    変われば dispatch あたりの workgroup 数も変わる。dispatch 数で推定すると、短い入力で
- *    測った値のまま長い入力を積んで一度は予算を大きく踏み越える（記号次元を持つグラフでは
- *    同じ Session で必ず起きる形）。
+ * 1. **Growth rests only on measured evidence**. A measurement of 0 (below timer resolution) means
+ *    "no information", not "fast" — the estimate is not updated. Without evidence the upper limit
+ *    stays at {@link SubmitPolicy.initialChunkSize}.
+ * 2. **One chunk's estimated time does not exceed the time budget**. Before adding, decide "adding
+ *    this dispatch would exceed it" and close the chunk first (not shrinking after an overrun). A
+ *    dispatch that exceeds the budget on its own cannot be split and is the exception
+ *    ({@link SubmitPolicy.minChunkSize} also acts as a lower bound).
+ * 3. **Feed-forward**. The unit of the estimate is the **workgroup count**, not the dispatch count;
+ *    when the input length T changes, the workgroups per dispatch change too. Estimating per
+ *    dispatch would queue a long input with the value measured on a short one and overrun the
+ *    budget badly once (with graphs that have symbolic dimensions this always happens within the
+ *    same Session).
  *
- * ## 計測の帰属（なぜ flush の窓 1 本で推定するか）
+ * ## Attribution of measurements (why the estimate comes from the one flush window)
  *
- * MUST: `onSubmittedWorkDone` を **submit ごとに呼ばない**。実装によってはこの呼び出しの
- * 同期部分が「そこまでに submit した全作業の完了」までホストをブロックし、CPU エンコードと
- * GPU 実行が完全に直列化する（壁時計が `max(GPU, ホスト)` ではなく **GPU + ホストの足し算**
- * になる。実測と素の WebGPU での単離実験は
- * `docs/research/2026-08-04-host-overhead-recon.md` §4.1）。呼ぶのは
- * {@link SubmitScheduler.flush} の 1 回だけにする — そこの待ちは flush-before-destroy の
- * ために元から要るもので、計測のための追加コストはゼロになる。
- * 例外は run の送り込みの先行の上限の完了印（{@link SubmitScheduler.backpressure} — ADR 0123）だけで、
- * run がステップの間で問うたとき、前の印からの submit が 64 回に届いていれば 1 本置く（enqueue では置かない）。
+ * MUST: do **not call** `onSubmittedWorkDone` **per submit**. On some implementations the
+ * synchronous part of this call blocks the host until "every piece of work submitted so far has
+ * completed", fully serializing CPU encoding and GPU execution (wall time becomes **the sum of GPU
+ * + host** instead of `max(GPU, host)`; measurements and the isolation experiment on plain WebGPU
+ * are in `docs/research/2026-08-04-host-overhead-recon.md` §4.1). It is called only once, in
+ * {@link SubmitScheduler.flush} — that wait is needed anyway for flush-before-destroy, so the extra
+ * cost of measuring is zero.
+ * The only exception is the completion marker of a run's in-flight submit bound
+ * ({@link SubmitScheduler.backpressure} — ADR 0123): when a run asks between steps, one marker is
+ * placed if 64 submits have been reached since the previous marker (enqueue does not place one).
  *
- * NOTE（H-1 の追随）: 通常の run も `onSubmittedWorkDone` を張らなくなった（読み戻しの copy を
- * dispatch と同じコマンド列へ積み、**readback の `mapAsync` を唯一のフェンスにする** —
- * src/runtime/executor.ts の `singleFence`）。この経路では窓を閉じるのも
- * {@link SubmitScheduler.closeMeasurementWindowAfterFence} で、`flush` は通らない。窓の性格
- * （run 1 本 = 窓 1 本・ホスト時間込みで過大側）は変わらない。
+ * NOTE (following H-1): ordinary runs no longer set `onSubmittedWorkDone` either (the readback copy
+ * is queued in the same command stream as the dispatches and **the readback `mapAsync` is the only
+ * fence** — `singleFence` in src/runtime/executor.ts). On this path the window is also closed by
+ * {@link SubmitScheduler.closeMeasurementWindowAfterFence}, not through `flush`. The character of
+ * the window (1 run = 1 window, inflated by host time) does not change.
  *
- * 推定はその 1 回で閉じる**窓**から取る。窓 = 「窓で最初に submit した時刻 → flush の
- * `onSubmittedWorkDone` が解決した時刻」、仕事量 = 窓に積んだ全チャンクの workgroup 合計で、
- * 推定は **実測 ÷ 合計 workgroup 数**。チャンク単位の帰属は元々信用できない（完了通知は
- * 重なった submit だとほぼ同時に届き、先頭 1 本に全時間が乗って残りは 0 になる）ので、
- * 粒度を窓へ落として失う情報は無い。
+ * The estimate comes from the **window** closed by that one call. Window = "the time of the first
+ * submit in the window → the time the flush's `onSubmittedWorkDone` resolved", work = the workgroup
+ * total of every chunk in the window, and the estimate is **measured time ÷ total workgroups**.
+ * Per-chunk attribution was never trustworthy (completion notifications of overlapping submits
+ * arrive almost together, the first one takes all the time and the rest get 0), so coarsening to
+ * the window loses no information.
  *
- * NOTE: この窓はホスト側のエンコード時間も内側に含むため、推定は GPU 実時間より**過大**に
- * 出る。過大 = 同じ予算で積める workgroup が減る = **チャンクが小さくなる**向きで、TDR に
- * 対しては安全側。細りすぎの歯止めは {@link SubmitPolicy.minChunkSize}（予算で切るのは
- * これ以上積んでから）と {@link SubmitPolicy.maxChunkSize}（硬い上限）の 2 つ。
+ * NOTE: the window also contains host-side encoding time, so the estimate comes out **larger** than
+ * the real GPU time. Larger = fewer workgroups fit in the same budget = **smaller chunks**, which
+ * is the safe side for TDR. Two stops keep chunks from getting too thin: {@link
+ * SubmitPolicy.minChunkSize} (the budget cuts only after at least this many are queued) and {@link
+ * SubmitPolicy.maxChunkSize} (a hard upper limit).
  *
- * NOTE（H-5 の追随）: フェンス無しの enqueue 区間（`GpuContext.beginBatch`）では窓が
- * **run 1 本ではなく区間 1 本**になる（閉じるのは `BatchScope.finish` の 1 回 —
- * {@link SubmitScheduler.closeMeasurementWindowAfterFence}）。窓に N 本の実行が入るぶん推定は
- * さらに粗く・過大に出るが、向きは上と同じ安全側なので TDR の歯止めは効いたまま。適応制御が
- * 使うのは直近の窓 1 本だけなので、区間を抜ければ次の窓が通常の粒度へ戻す。
+ * NOTE (following H-5): in an enqueue section without fences (`GpuContext.beginBatch`) the window
+ * is **one section rather than one run** (closed once by `BatchScope.finish` —
+ * {@link SubmitScheduler.closeMeasurementWindowAfterFence}). With N executions in one window the
+ * estimate gets coarser and larger still, but in the same safe direction as above, so the TDR stop
+ * still holds. The adaptive control uses only the latest window, so after leaving the section the
+ * next window returns to the normal granularity.
  *
- * ## GPU 実時間の内訳（timestamp-query — ADR 0021）
+ * ## Breakdown of real GPU time (timestamp-query — ADR 0021)
  *
- * 上の壁時計計測はチャンク粒度で、しかも帰属が信用できない（適応制御の材料にしかならない）。
- * op 別の内訳は **pass 境界の timestamp** でしか取れないため、計測が有効な device
- * （{@link GpuContext.gpuTimingEnabled}）でだけ **1 dispatch = 1 pass** に開いて
- * `timestampWrites` を書く。同一 pass 内の連続 dispatch には元々 storage の可視性保証による
- * 暗黙の依存順序があるので、pass 分割で実行意味論は変わらない。
+ * The wall-clock measurement above is per chunk and its attribution is not trustworthy (it is only
+ * material for the adaptive control). A per-op breakdown can only be taken from **timestamps at
+ * pass boundaries**, so only on a device with measurement enabled ({@link
+ * GpuContext.gpuTimingEnabled}) the chunk is opened as **1 dispatch = 1 pass** and
+ * `timestampWrites` are written. Consecutive dispatches in one pass already have an implicit
+ * dependency order through the visibility guarantee of storage, so splitting passes does not change
+ * the execution semantics.
  *
- * MUST: 計測が無効なときはこの経路のコードを 1 行も通らない（1 チャンク = 1 pass のまま）。
+ * MUST: when measurement is disabled, not a single line of this path's code runs (1 chunk = 1 pass
+ * as before).
  */
 
 import { type GpuContext, RUNTIME_INTERNAL } from "./device.ts";
 import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
-/** SubmitPolicy の値が実行不能（ハングを含む）な構成である。 */
+/** The SubmitPolicy values form a configuration that cannot run (including a hang). */
 export class SubmitPolicyError extends Error {
   override readonly name = "SubmitPolicyError";
 }
 
 export type SubmitPolicy = {
-  /** 1 チャンクの GPU 実行がこの時間を超えないよう、推定に基づいて切れ目を決める。 */
+  /**
+   * Chunk boundaries are set from the estimate so that one chunk's GPU execution stays under this.
+   */
   readonly timeBudgetMs: number;
   /**
-   * **実測の裏付けが無い間**の 1 チャンクの dispatch 数上限（ブートストラップ）。
-   * MUST: 実測 0 が続いてもここから成長しない（不変条件 1）。
+   * The dispatch-count limit of one chunk **while there is no measured evidence** (bootstrap).
+   * MUST: no growth from here even if measurements of 0 continue (invariant 1).
    */
   readonly initialChunkSize: number;
   /**
-   * 時間予算による切り上げがこの dispatch 数を下回らないようにする下限（submit 回数の歯止め）。
-   * 単独で予算を超える dispatch があるときだけ、推定時間が予算を超えたチャンクが出る。
+   * A lower bound so that cutting by the time budget never goes below this dispatch count (a stop
+   * on the number of submits). Only when a dispatch exceeds the budget on its own does a chunk
+   * whose estimated time exceeds the budget come out.
    */
   readonly minChunkSize: number;
-  /** 実測の裏付けがあっても超えない dispatch 数の硬い上限。 */
+  /** A hard limit on the dispatch count that is not exceeded even with measured evidence. */
   readonly maxChunkSize: number;
 };
 
 /**
- * 既定の政策。凍結するのは、公開の値を書き換えると既定を使う全 Session に波及するため
- * （scheduler は構築時に写すが、写す前の既定そのものが変わる）。
+ * The default policy. Frozen because rewriting the public value would spread to every Session that
+ * uses the default (the scheduler copies it at construction, but the default itself would change
+ * before the copy).
  */
 export const DEFAULT_SUBMIT_POLICY: SubmitPolicy = Object.freeze({
   timeBudgetMs: 100,
@@ -101,10 +115,12 @@ export const DEFAULT_SUBMIT_POLICY: SubmitPolicy = Object.freeze({
 });
 
 /**
- * 政策の写し（{@link SubmitScheduler} の構築と Session の構築の入口が持つ）。
+ * A copy of the policy (held by the entry points that construct a {@link SubmitScheduler} and a
+ * Session).
  *
- * MUST: 欄は 1 つずつ通常のプロパティ読みで写す（spread にしない）。spread は自前の列挙可能な欄
- * しか写さないので、継承・非列挙の欄が落ち、写す前は通った政策が 0 の拒否に化ける。
+ * MUST: copy the fields one by one with ordinary property reads (no spread). Spread copies only own
+ * enumerable fields, so inherited or non-enumerable fields are dropped, and a policy that passed
+ * before the copy turns into a rejection for 0.
  */
 export const copySubmitPolicy = (policy: SubmitPolicy): SubmitPolicy => ({
   timeBudgetMs: policy.timeBudgetMs,
@@ -114,40 +130,47 @@ export const copySubmitPolicy = (policy: SubmitPolicy): SubmitPolicy => ({
 });
 
 /**
- * 推定時間に掛ける安全率。チャンクは grid-stride カーネルの workgroup 数で測った
- * **平均コスト**で見積もるため、チャンク内に重い dispatch が偏ったぶんの余裕をここで持つ
- * （2 倍の偏りまで予算内に収まる）。
+ * Safety factor applied to the estimated time. A chunk is estimated with the **average cost**
+ * measured in workgroups of grid-stride kernels, so this keeps headroom for heavy dispatches
+ * clustering in one chunk (a skew of up to 2× stays within the budget).
  */
 const CHUNK_TIME_SAFETY = 0.5;
 
 /**
- * 送り込みの先行の上限（DECIDED: ADR 0123）: run がステップの間で {@link SubmitScheduler.backpressure} を
- * 問うたとき、計測窓の中で前の印から submit がこの回数に届いていれば完了印（`onSubmittedWorkDone`）を 1 本置く。
+ * The in-flight submit bound (DECIDED: ADR 0123): when a run asks
+ * {@link SubmitScheduler.backpressure} between steps, one completion marker (`onSubmittedWorkDone`)
+ * is placed if the submits since the previous marker within the measurement window have reached
+ * this count.
  *
- * NOTE: 数える単位が計測窓なのは、窓が閉じるのがフェンスの直後だから（「最後にフェンスで GPU の
- * 完了を確かめてからの submit の数」がそのまま窓のチャンク数になる）。フェンスの間の submit が
- * この回数に届かない run（decode のような短い run の繰り返し）は印を 1 本も置かない。
+ * NOTE: the count is per measurement window because the window closes right after a fence ("the
+ * number of submits since a fence last confirmed GPU completion" is exactly the window's chunk
+ * count). A run whose submits between fences never reach this count (repeated short runs such as
+ * decode) places no marker at all.
  */
 export const IN_FLIGHT_MARKER_INTERVAL = 64;
 
 /**
- * 未完了のまま持ってよい完了印の数（ADR 0123）。超えたら最も古い印の完了を待つ（未完了がこの本数に戻る）
- * — 先行は約 (この値 + 1) × {@link IN_FLIGHT_MARKER_INTERVAL} 回の submit までになる。
+ * The number of completion markers that may be pending (ADR 0123). Beyond it, wait for the oldest
+ * marker to complete (pending returns to this count) — the host runs ahead by at most about
+ * (this value + 1) × {@link IN_FLIGHT_MARKER_INTERVAL} submits.
  */
 export const IN_FLIGHT_MAX_MARKERS = 2;
 
-/** 完了印 1 本（{@link IN_FLIGHT_MARKER_INTERVAL}）。 */
+/** One completion marker ({@link IN_FLIGHT_MARKER_INTERVAL}). */
 type InFlightMarker = {
   readonly work: Promise<void>;
-  /** 決着したか（拒否を含む）。完了は FIFO なので、前から順に立つ。 */
+  /**
+   * Whether it has settled (including rejection). Completion is FIFO, so it is set front to back.
+   */
   settled: boolean;
 };
 
 /**
- * 構築時の政策検査。
+ * Policy check at construction.
  *
- * MUST: チャンクサイズは 1 以上。0 だとチャンク切り出しが空配列を返し続け、`flush()` の
- * ループが永久に抜けない（誤値ではなくハングになるため、実行時ではなく構築時に落とす）。
+ * MUST: chunk sizes are at least 1. With 0, cutting chunks keeps returning an empty array and the
+ * loop in `flush()` never exits (a hang rather than a wrong value, so it fails at construction
+ * rather than at run time).
  */
 const assertPolicy = (policy: SubmitPolicy): void => {
   for (const key of ["initialChunkSize", "minChunkSize", "maxChunkSize"] as const) {
@@ -177,11 +200,12 @@ const assertPolicy = (policy: SubmitPolicy): void => {
 };
 
 /**
- * `measuredMs` に保持する直近計測の件数。
+ * The number of recent measurements kept in `measuredMs`.
  *
- * MUST: 有界であること。適応制御が使うのは直近に閉じた窓 1 本だけで、履歴は診断用にすぎない。
- * 無制限に伸ばすと長時間の推論で単調にメモリを食い、`stats` の複製代も flush 回数に比例
- * して増える（診断を読むほど遅くなる）。適応の傾向を見るには 32 件で足りる。
+ * MUST: it is bounded. The adaptive control uses only the most recently closed window; the history
+ * is for diagnostics only. Unbounded, it would eat memory monotonically during long inference, and
+ * the copy cost of `stats` would grow with the number of flushes (the more you read diagnostics,
+ * the slower it gets). 32 entries are enough to see the trend of the adaptation.
  */
 export const MEASURED_HISTORY = 32;
 
@@ -189,156 +213,194 @@ export type SubmitStats = {
   readonly submitCount: number;
   readonly dispatchCount: number;
   /**
-   * 閉じた**計測窓**の実測時間（ms）を**直近 {@link MEASURED_HISTORY} 件まで**。
-   * 全期間の件数は {@link SubmitStats.measuredCount} を見る。
+   * The measured times (ms) of closed **measurement windows**, **up to the latest
+   * {@link MEASURED_HISTORY}**. For the count over the whole lifetime see
+   * {@link SubmitStats.measuredCount}.
    *
-   * NOTE: 1 件 = 1 窓 = {@link SubmitScheduler.flush} 1 回ぶん（多くの場合 run 1 回ぶん）で、
-   * チャンク単位の値ではない。窓はホスト側のエンコード時間も含む（モジュール doc）。
+   * NOTE: 1 entry = 1 window = one {@link SubmitScheduler.flush} (in most cases one run), not a
+   * per-chunk value. The window also contains host-side encoding time (module doc).
    */
   readonly measuredMs: readonly number[];
-  /** 全期間で閉じた計測窓の件数（`measuredMs` の履歴から溢れたぶんを含む）。 */
+  /**
+   * Number of measurement windows closed over the whole lifetime (including those that overflowed
+   * the `measuredMs` history).
+   */
   readonly measuredCount: number;
   /**
-   * {@link SubmitScheduler.discard} が submit せずに捨てた dispatch の累計件数。
-   * 失敗した run の残骸なので通常は 0。0 でないことは「その回の run が途中で落ちた」の記録。
+   * Cumulative number of dispatches that {@link SubmitScheduler.discard} threw away without
+   * submitting. They are the remains of a failed run, so normally 0. A non-zero value records "a
+   * run at that time failed midway".
    */
   readonly discardedDispatches: number;
   /**
-   * 現在の 1 チャンクの **dispatch 数上限**。実測の裏付けが無い間は
-   * {@link SubmitPolicy.initialChunkSize}、裏付けがあれば {@link SubmitPolicy.maxChunkSize}。
+   * The current **dispatch-count limit** of one chunk. {@link SubmitPolicy.initialChunkSize} while
+   * there is no measured evidence, {@link SubmitPolicy.maxChunkSize} once there is.
    *
-   * NOTE: 適応の主役ではなくなった（M1-P2 で意味変更）。実際の切れ目は
-   * {@link SubmitStats.msPerWorkgroup} から決まる時間予算のほうが先に効くことが多く、この値は
-   * 「これ以上は積まない」硬い上限を表す。
+   * NOTE: no longer the main actor of the adaptation (meaning changed at M1-P2). The real
+   * boundaries are usually set first by the time budget derived from {@link
+   * SubmitStats.msPerWorkgroup}; this value is the hard limit "never queue more than this".
    */
   readonly currentChunkSize: number;
   /**
-   * 直近に閉じた窓から導いた 1 workgroup あたりの推定時間（ms）。**裏付けがまだ無ければ
-   * undefined**（実測が 0 の間はここが埋まらない = 成長しない、が不変条件 1 の観測点）。
-   * 1 チャンクの workgroup 予算は `timeBudgetMs * CHUNK_TIME_SAFETY / msPerWorkgroup`。
+   * The estimated time per workgroup (ms) derived from the most recently closed window. **undefined
+   * while there is no evidence yet** (it stays empty while measurements are 0 = no growth; this is
+   * the observation point of invariant 1).
+   * The workgroup budget of one chunk is `timeBudgetMs * CHUNK_TIME_SAFETY / msPerWorkgroup`.
    */
   readonly msPerWorkgroup?: number;
-  /** チャンクが時間予算をどれだけ使っているかの観測席（{@link ChunkBudgetStats}）。 */
+  /**
+   * Observation field for how much of the time budget the chunks use ({@link ChunkBudgetStats}).
+   */
   readonly chunkBudget: ChunkBudgetStats;
 };
 
 /**
- * チャンクの時間予算の消費具合（**診断専用** — 制御には 1 バイトも使わない）。
+ * How much of the chunk time budget is consumed (**diagnostics only** — not one byte of it is used
+ * for control).
  *
- * WHY: 時間予算の比例配分は「workgroup 数 = 仕事量」という均質仮定に乗っているが、この仮定は
- * カーネル間で最大 3 桁以上崩れる（1 workgroup あたりの実コストが桁で違う）。仮定を捨てて
- * op 別の cost proxy を推定器に入れる案は **perf-ledger 側の別起票**で、着手条件は
- * 「**予算を超えるチャンクが実際に観測されてから**」という裁定になっている（出荷 3
- * パイプラインの実測では超過は無く、安全率 {@link CHUNK_TIME_SAFETY} の枠内に収まっていた）。
- * ここはその**着手条件を判定するための観測点**であって、予算則そのものではない。
+ * WHY: the proportional allocation of the time budget rests on the homogeneity assumption
+ * "workgroup count = amount of work", and that assumption breaks by up to 3 orders of magnitude or
+ * more between kernels (the real cost per workgroup differs by orders of magnitude). Dropping the
+ * assumption and feeding a per-op cost proxy into the estimator is **a separate perf-ledger
+ * entry**, and the ruling is that it starts "**once a chunk over the budget is actually observed**"
+ * (in measurements of the 3 shipped pipelines there was no overrun; it stayed within the safety
+ * factor {@link CHUNK_TIME_SAFETY}). This is **the observation point for deciding that start
+ * condition**, not the budget rule itself.
  *
- * MUST: チャンク単位の**壁時計**の帰属をここに持ち込まない（ADR 0004 不変条件④ — 重なった submit の
- * 完了通知は先頭 1 本に集中し、チャンクごとの壁時計は意味を持たない）。載せているのは
- * ① 推定側の分布（切る側が予算をどう見積もっていたか）と ② 窓単位の平均という**帰属に
- * 依存しない**2 面と、③ 計測が有効な device でだけ埋まる **GPU 側の時計**（timestamp-query）の
- * チャンク単位の値（{@link ChunkBudgetStats.submitGpuTime}）。③ はチャンク自身の pass が書いた
- * timestamp なので帰属が崩れない（完了通知を使わない）。
+ * MUST: do not bring per-chunk **wall-clock** attribution in here (ADR 0004 adaptive-control
+ * invariant ④ — completion notifications of overlapping submits concentrate on the first one, and a
+ * per-chunk wall clock has no meaning). What is carried here: ① the distribution on the estimate
+ * side (how the cutting side estimated the budget) and ② the per-window average — two views that
+ * **do not depend on attribution** — and ③ per-chunk values of the **GPU-side clock**
+ * (timestamp-query), filled only on a device with measurement enabled
+ * ({@link ChunkBudgetStats.submitGpuTime}). ③ comes from timestamps written by the chunk's own
+ * passes, so its attribution holds (no completion notifications are used).
  */
 export type ChunkBudgetStats = {
   /**
-   * 1 チャンクを切る基準時間（ms）= `timeBudgetMs * CHUNK_TIME_SAFETY`。以下の値を読む
-   * ときの参照点（政策と安全率を突き合わせ直さずに比較できるようにするためだけの再掲）。
+   * The reference time (ms) for cutting one chunk = `timeBudgetMs * CHUNK_TIME_SAFETY`. The point
+   * of reference when reading the values below (repeated here only so they can be compared without
+   * re-deriving the policy and the safety factor).
    */
   readonly budgetMs: number;
   /**
-   * 全期間で submit したチャンクの**推定時間**（`workgroup 合計 × msPerWorkgroup`）の最大値。
-   * 実測の裏付けが無い間（`msPerWorkgroup === undefined`）に出したチャンクは推定できないので
-   * 数えない — 1 度も裏付けが付かないまま終われば undefined。
+   * The maximum **estimated time** (`workgroup total × msPerWorkgroup`) of any chunk submitted over
+   * the whole lifetime. Chunks issued while there was no measured evidence
+   * (`msPerWorkgroup === undefined`) cannot be estimated and are not counted — undefined if the
+   * evidence never arrived.
    */
   readonly maxEstimatedMs?: number;
   /**
-   * 推定時間が {@link ChunkBudgetStats.budgetMs} を超えたまま submit されたチャンクの累計件数。
+   * Cumulative number of chunks submitted while their estimated time exceeded
+   * {@link ChunkBudgetStats.budgetMs}.
    *
-   * NOTE: 不変条件 2（積む前に切る）が効いている限り、ここが増えるのは切りようが無かった
-   * ときだけ — 単独で予算を超える dispatch か、{@link SubmitPolicy.minChunkSize} の下限に
-   * 当たった場合。0 でなくなったら cost proxy 起票の着手条件が満たされたことを意味する。
+   * NOTE: as long as invariant 2 (cut before adding) holds, this grows only when there was no way
+   * to cut — a dispatch that exceeds the budget on its own, or hitting the lower bound
+   * {@link SubmitPolicy.minChunkSize}. Once it is non-zero, the start condition of the cost-proxy
+   * entry is met.
    */
   readonly overBudgetChunks: number;
   /**
-   * 閉じた窓の「実測 ÷ その窓のチャンク数」の全期間最大値（ms）。
+   * The maximum over the whole lifetime of "measured time ÷ chunk count of that window" for closed
+   * windows (ms).
    *
-   * WHY: 推定側だけを見ると、**仕事量プロキシ自体がずれている**故障が原理的に見えない
-   * （同じプロキシで見積もった値を同じ予算と比べているだけになる）。窓平均は帰属に依存せず
-   * 求まるので、そのずれを拾う**保守的な信号**として置く。
+   * WHY: looking only at the estimate side, a failure where **the work proxy itself is off** is
+   * invisible in principle (it only compares a value estimated with the same proxy against the same
+   * budget). The window mean is obtained independently of attribution, so it is kept as a
+   * **conservative signal** that catches that drift.
    *
-   * NOTE: 窓は「最初の submit → flush 後」の壁時計で、ホスト側のエンコード・停止・待ちを含む
-   * （モジュール doc）。ホストが止まれば GPU が速くても上がるので、GPU のチャンク時間の下界では
-   * なく、{@link ChunkBudgetStats.budgetMs} を超えても GPU 側の予算超過は断定できない。GPU 側の
-   * 超過は 1 submit ごとの GPU 時間（{@link ChunkBudgetStats.submitGpuTime}）で判定する。
+   * NOTE: the window is the wall clock "first submit → after the flush" and contains host-side
+   * encoding, stalls and waits (module doc). It rises when the host stalls even if the GPU is fast,
+   * so it is not a lower bound of the GPU chunk time, and exceeding {@link
+   * ChunkBudgetStats.budgetMs} does not prove a GPU-side budget overrun. A GPU-side overrun is
+   * judged by the GPU time per submit ({@link ChunkBudgetStats.submitGpuTime}).
    */
   readonly maxWindowMeanMs?: number;
   /**
-   * 1 submit（チャンク）ごとの GPU 実行時間の全期間の観測。計測が有効な device
-   * （{@link GpuContext.gpuTimingEnabled}）でだけ埋まり、無効な device と、まだ 1 本も回収して
-   * いない間は undefined。
+   * Observation over the whole lifetime of the GPU execution time per submit (chunk). Filled only
+   * on a device with measurement enabled ({@link GpuContext.gpuTimingEnabled}); undefined on a
+   * disabled device and until the first one has been collected.
    *
-   * WHY: {@link ChunkBudgetStats.maxWindowMeanMs} はホスト時間を含む窓の平均で、重い 1 本と軽い
-   * 数本が同じ窓に入ると平均に埋もれ、逆にホストの停止だけでも上がる。OS の submit 単位の
-   * タイムアウト（Linux xe の `job_timeout_ms` など — ADR 0118 決定 6）に対して言えるのは、
-   * 1 本ずつの時間の最大だけである。
+   * WHY: {@link ChunkBudgetStats.maxWindowMeanMs} is a window average that includes host time; when
+   * one heavy chunk and a few light ones share a window it is buried in the average, and conversely
+   * a host stall alone raises it. Against an OS timeout per submit (`job_timeout_ms` of Linux xe
+   * and the like — ADR 0118 decision 6), only the maximum time of individual chunks says anything.
    *
-   * 測り方: 計測モードは 1 dispatch = 1 pass で pass の begin / end を書くので、チャンク 1 本の
-   * GPU 実行の幅 = そのチャンクの timestamp の最小 → 最大（pass 間の隙間も含む）。回収は既存の
-   * {@link SubmitScheduler.flush} の待ちの後に相乗りし、**新しい待ちを足さない**（submit ごとに
-   * 完了を待つと CPU エンコードと GPU 実行が直列化する — モジュール doc の MUST）。
+   * How it is measured: measurement mode writes the begin / end of each pass with 1 dispatch = 1
+   * pass, so the span of one chunk's GPU execution = minimum → maximum of that chunk's timestamps
+   * (including the gaps between passes). Collection piggybacks after the existing wait of
+   * {@link SubmitScheduler.flush} and **adds no new wait** (waiting for completion per submit
+   * serializes CPU encoding and GPU execution — the MUST in the module doc).
    *
-   * NOTE: 単位は timestamp の値そのもの（{@link GpuTimingEntry.ns} と同じ — 仕様上は ns。Deno は
-   * wgpu の raw tick を換算せずに返す実装で、B570 では 1 tick = 52.08 ns — docs/known-issues.md
-   * 「Intel Arc B570」節）。**制御には使わない**（チャンクの切れ目はこの値で変わらない）。
+   * NOTE: the unit is the timestamp value itself (the same as {@link GpuTimingEntry.ns} — ns per
+   * the specification. Deno returns wgpu's raw ticks without conversion; on the B570 1 tick = 52.08
+   * ns — the "Intel Arc B570" section of docs/known-issues.md). **Not used for control** (chunk
+   * boundaries do not change with this value).
    */
   readonly submitGpuTime?: {
-    /** 回収したチャンクの累計本数（copy だけのチャンクは timestamp を持たないので数えない）。 */
+    /**
+     * Cumulative number of chunks collected (chunks with only copies carry no timestamps and are
+     * not counted).
+     */
     readonly submits: number;
-    /** 1 チャンクの GPU 実行の幅の最大。 */
+    /** The maximum span of one chunk's GPU execution. */
     readonly maxNs: number;
     /**
-     * そのうち実測の裏付けが付く前（`msPerWorkgroup` が undefined の間 — 上限は
-     * {@link SubmitPolicy.initialChunkSize} 本で、時間予算では切っていない）に出したチャンクの本数。
-     * 最初の run のチャンクは全部ここに入る。
+     * Of those, the number of chunks issued before measured evidence existed (while
+     * `msPerWorkgroup` is undefined — limited to {@link SubmitPolicy.initialChunkSize} and not cut
+     * by the time budget). Every chunk of the first run lands here.
      */
     readonly unbackedSubmits: number;
-    /** 裏付け前のチャンクの幅の最大（裏付け前のチャンクが 1 本も無ければ undefined）。 */
+    /** The maximum span of chunks issued before evidence (undefined if there were none). */
     readonly maxUnbackedNs?: number;
-    /** 単発 dispatch（1 pass）の GPU 時間の最大。分割できない単位の重さの目安。 */
+    /**
+     * The maximum GPU time of a single dispatch (1 pass). A gauge of the weight of the unit that
+     * cannot be split.
+     */
     readonly maxDispatchNs: number;
     /**
-     * その dispatch のパイプラインキー（{@link GpuTimingEntry.key} と同じ語彙）。正の差分を
-     * 1 度も観測していなければ undefined（どの dispatch も「最大」を名乗れない — 最初の
-     * dispatch のキーで埋めると、最大でないものを最大と表示する）。
+     * The pipeline key of that dispatch (the same vocabulary as {@link GpuTimingEntry.key}).
+     * undefined if no positive difference has ever been observed (no dispatch can claim "maximum"
+     * — filling it with the key of the first dispatch would show a non-maximum as the maximum).
      */
     readonly maxDispatchKey?: string;
   };
 };
 
-/** パイプラインキー 1 本ぶんの GPU 実時間の内訳（ADR 0021）。 */
+/** The breakdown of real GPU time for one pipeline key (ADR 0021). */
 export type GpuTimingEntry = {
-  /** 集計の単位は**パイプラインキー**（op 種 + 変種を既に一意識別する語彙）。 */
+  /**
+   * The unit of aggregation is the **pipeline key** (a vocabulary that already uniquely identifies
+   * op kind + variant).
+   */
   readonly key: string;
-  /** GPU 実時間の合計（ナノ秒）。pass の begin/end の差分の総和。 */
+  /** Total real GPU time (nanoseconds). The sum of the pass begin/end differences. */
   readonly ns: number;
   readonly dispatchCount: number;
   readonly workgroupCount: number;
 };
 
 /**
- * 直近 run の GPU 実時間内訳。計測が**無効**な device では丸ごと undefined になる
- * （空表を返すと「計測したが全部 0」と区別できない）。
- * NOTE: 有効なら run 前は空表（1 度も走っていないことは `lastRun === undefined` が表す）。
+ * The breakdown of real GPU time of the latest run. On a device with measurement **disabled** the
+ * whole value is undefined (returning an empty table could not be told apart from "measured, but
+ * all 0").
+ * NOTE: when enabled, the table is empty before a run (that nothing has run yet is expressed by
+ * `lastRun === undefined`).
  */
 export type GpuTimingStats = {
-  /** `ns` の降順（同値はキーの辞書順）。 */
+  /** Descending by `ns` (ties in lexicographic key order). */
   readonly entries: readonly GpuTimingEntry[];
   readonly totalNs: number;
-  /** 内訳に載った dispatch の総数。{@link SubmitStats.dispatchCount} との相互検算に使う。 */
+  /**
+   * Total number of dispatches in the breakdown. Used for cross-checking against {@link
+   * SubmitStats.dispatchCount}.
+   */
   readonly dispatchCount: number;
   /**
-   * begin > end（ドライバの timestamp が非単調）で **0 に丸めた**サンプル数。
-   * MUST: 黙って捨てない — 0 でないなら内訳の読みそのものが疑わしい、と気づける形にする。
+   * Number of samples **clamped to 0** because begin > end (the driver's timestamps are not
+   * monotonic).
+   * MUST: do not drop them silently — a non-zero value tells the reader that the breakdown itself
+   * is questionable.
    */
   readonly clampedNegativeSamples: number;
 };
@@ -348,15 +410,18 @@ type PendingDispatch = {
   readonly pipeline: GPUComputePipeline;
   readonly bindGroup: GPUBindGroup;
   readonly workgroups: readonly [number, number, number];
-  /** この dispatch の仕事量（workgroup 数）。時間予算の比例配分はこの単位で行う。 */
+  /**
+   * The amount of work of this dispatch (workgroup count). The time budget is allocated
+   * proportionally in this unit.
+   */
   readonly work: number;
-  /** 内訳の帰属先（{@link PipelineCache} のキーそのもの）。 */
+  /** Where the breakdown is attributed (the {@link PipelineCache} key itself). */
   readonly key: string;
 };
 
 /**
- * バッファ間コピー（{@link SubmitScheduler.copyBuffer}）。**compute pass の外**でしか
- * エンコードできないので、チャンクの中では pass を一旦閉じてから積む。
+ * A buffer-to-buffer copy ({@link SubmitScheduler.copyBuffer}). It can only be encoded **outside a
+ * compute pass**, so inside a chunk the pass is closed first and the copy is queued after it.
  */
 type PendingCopy = {
   readonly kind: "copy";
@@ -368,40 +433,48 @@ type PendingCopy = {
 };
 
 /**
- * 未 submit のコマンド 1 件。
- * MUST: 積んだ順に実行される（FIFO）。copy が直前までの dispatch の結果を読めるのはこの順序
- * だけが根拠で、並べ替える最適化を入れてはいけない。
+ * One unsubmitted command.
+ * MUST: commands run in the order they were queued (FIFO). This order is the only reason a copy can
+ * read the results of the dispatches queued before it; an optimization that reorders them is not
+ * allowed.
  */
 type PendingCommand = PendingDispatch | PendingCopy;
 
-/** timestamp 1 件のバイト数（u64 ns）。 */
+/** Bytes of one timestamp (u64 ns). */
 const TIMESTAMP_BYTES = 8;
 
 /**
- * 1 チャンクで作る querySet の容量上限。
+ * The capacity limit of the querySet created for one chunk.
  *
- * 必要数は「チャンクの dispatch 数 × 2」。2,048 は ADR 0021 の設計枠（既定政策の
- * `maxChunkSize` 1,024 の 2 倍）で、WebGPU の querySet 上限 `maxQueryCount` 4,096 より
- * 保守的に置いている。WebGPU 上は有効な 1,025〜2,048 の `maxChunkSize` もこの枠で拒否する。
- * 枠を超える政策は、エンコード前（構築時と querySet 作成時）に明示的に落とす。
+ * The need is "the chunk's dispatch count × 2". 2,048 is the design allowance of ADR 0021 (twice
+ * the default policy's `maxChunkSize` of 1,024), set more conservatively than WebGPU's querySet
+ * limit `maxQueryCount` of 4,096. A `maxChunkSize` of 1,025 to 2,048, valid as far as WebGPU is
+ * concerned, is also rejected by this allowance. A policy beyond it fails explicitly before
+ * encoding (at construction and at querySet creation).
  */
 const MAX_TIMESTAMP_QUERIES = 2048;
 
-/** submit 済み・未回収の timestamp 資源（1 チャンク 1 件）。 */
+/** Submitted, not yet collected timestamp resources (one per chunk). */
 type PendingTiming = {
   readonly querySet: GPUQuerySet;
   readonly resolveBuffer: GPUBuffer;
   readonly readBuffer: GPUBuffer;
-  /** query 対（begin, end）の並びと 1:1 で対応する帰属先。 */
+  /** The attribution targets, 1:1 with the sequence of query pairs (begin, end). */
   readonly entries: readonly { readonly key: string; readonly work: number }[];
-  /** このチャンクを実測の裏付けが付いてから出したか（{@link ChunkBudgetStats.submitGpuTime}）。 */
+  /**
+   * Whether this chunk was issued after measured evidence existed ({@link
+   * ChunkBudgetStats.submitGpuTime}).
+   */
   readonly backed: boolean;
 };
 
-/** キー別の累計（{@link GpuTimingEntry} の可変版）。 */
+/** Per-key totals (the mutable version of {@link GpuTimingEntry}). */
 type TimingTotal = { ns: number; dispatchCount: number; workgroupCount: number };
 
-/** {@link ChunkBudgetStats.submitGpuTime} の可変版（全期間の累計 — run ごとにリセットしない）。 */
+/**
+ * The mutable version of {@link ChunkBudgetStats.submitGpuTime} (lifetime totals — not reset per
+ * run).
+ */
 type SubmitGpuTime = {
   submits: number;
   maxNs: number;
@@ -412,9 +485,10 @@ type SubmitGpuTime = {
 };
 
 /**
- * timestamp 資源の解放。回収の成否によらず**必ず** 1 回通す（診断のために VRAM を積み残さない）。
- * 対象は既に submit 済みのコマンドだけが参照するので、実行中の破棄も WebGPU 的に安全
- * （実解放は実装が完了まで遅延する）。
+ * Releases timestamp resources. Runs **always** exactly once regardless of whether collection
+ * succeeded (no VRAM left behind for diagnostics). The targets are referenced only by already
+ * submitted commands, so destroying them during execution is also safe in WebGPU terms (the
+ * implementation defers the real release until completion).
  */
 const destroyTiming = (timing: PendingTiming): void => {
   timing.readBuffer.destroy();
@@ -426,62 +500,81 @@ export class SubmitScheduler {
   readonly #gpu: GpuContext;
   readonly #device: GPUDevice;
   readonly #policy: SubmitPolicy;
-  /** 計測用の時刻源（ms 単位・単調）。既定は `performance.now()`。 */
+  /** Time source for measurement (ms, monotonic). Defaults to `performance.now()`. */
   readonly #now: () => number;
   #pending: PendingCommand[] = [];
-  /** 未 submit のエンコードの仕事量合計（`#pending` の `work` の和）。 */
+  /** Total work of unsubmitted encodes (the sum of `work` over `#pending`). */
   #pendingWork = 0;
   #submitCount = 0;
   #dispatchCount = 0;
-  /** 直近 {@link MEASURED_HISTORY} 件のリング（古いものから捨てる）。 */
+  /** A ring of the latest {@link MEASURED_HISTORY} entries (the oldest are dropped first). */
   readonly #measuredMs: number[] = [];
   #measuredCount = 0;
   #discardedDispatches = 0;
   /**
-   * 開いている計測窓の起点（窓で最初に submit した時刻）。undefined = 窓が開いていない
-   * （前回の flush 以降 1 度も submit していない）。
+   * The start of the open measurement window (the time of the window's first submit). undefined =
+   * no window is open (nothing has been submitted since the last flush).
    */
   #windowStartedAt: number | undefined;
-  /** 開いている窓に積んだ workgroup の合計。 */
+  /** Total workgroups queued in the open window. */
   #windowWork = 0;
-  /** 開いている窓で submit したチャンク数（窓平均を出す分母 — {@link ChunkBudgetStats}）。 */
+  /**
+   * Number of chunks submitted in the open window (the denominator of the window mean — {@link
+   * ChunkBudgetStats}).
+   */
   #windowChunks = 0;
-  /** 開いている窓で最後に完了印を置いた時点の `#windowChunks`（窓を閉じる・捨てるときに 0 へ戻す）。 */
+  /**
+   * `#windowChunks` at the last completion marker in the open window (reset to 0 when the window is
+   * closed or discarded).
+   */
   #markedChunks = 0;
-  /** 置いた完了印のうち、前から捨てていないもの（{@link SubmitScheduler.backpressure}）。 */
+  /**
+   * Completion markers placed and not yet dropped from the front ({@link
+   * SubmitScheduler.backpressure}).
+   */
   readonly #markers: InFlightMarker[] = [];
-  /** 推定時間が最大だったチャンク（診断専用）。undefined = 裏付けの付いたチャンクがまだ無い。 */
+  /**
+   * The chunk with the largest estimated time (diagnostics only). undefined = no chunk with
+   * evidence yet.
+   */
   #maxEstimatedChunkMs: number | undefined;
-  /** 推定時間が予算を超えたまま出したチャンクの累計（診断専用）。 */
+  /**
+   * Cumulative number of chunks issued while their estimated time exceeded the budget (diagnostics
+   * only).
+   */
   #overBudgetChunks = 0;
-  /** 窓平均チャンク時間の全期間最大（診断専用）。undefined = まだ 1 窓も閉じていない。 */
+  /**
+   * The lifetime maximum of the window-mean chunk time (diagnostics only). undefined = no window
+   * closed yet.
+   */
   #maxWindowMeanMs: number | undefined;
-  /** 実測に裏付けられた 1 workgroup あたりの推定時間。undefined = 裏付けがまだ無い。 */
+  /** The estimated time per workgroup backed by measurement. undefined = no evidence yet. */
   #msPerWorkgroup: number | undefined;
-  /** GPU 側時間計測が有効か（device の feature で決まる — ADR 0021）。 */
+  /** Whether GPU-side time measurement is enabled (decided by the device's features — ADR 0021). */
   readonly #timingEnabled: boolean;
-  /** submit 済み・未回収の timestamp 資源。 */
+  /** Submitted, not yet collected timestamp resources. */
   #pendingTimings: PendingTiming[] = [];
-  /** パイプラインキー別の累計（寿命は直近 run — {@link SubmitScheduler.resetTiming}）。 */
+  /** Per-pipeline-key totals (lifetime = the latest run — {@link SubmitScheduler.resetTiming}). */
   readonly #timingTotals = new Map<string, TimingTotal>();
   #clampedNegativeSamples = 0;
   /**
-   * 1 submit ごとの GPU 時間の観測（診断専用・全期間 — {@link SubmitScheduler.resetTiming} では
-   * 消さない）。undefined = まだ 1 本も回収していない（計測が無効な device では常に undefined）。
+   * Observation of the GPU time per submit (diagnostics only, lifetime — not cleared by
+   * {@link SubmitScheduler.resetTiming}). undefined = nothing collected yet (always undefined on a
+   * device with measurement disabled).
    */
   #submitGpuTime: SubmitGpuTime | undefined;
 
   /**
-   * @param now 時刻源（ms）。差分計測の規則をテストで固定できるよう注入可能にしてある。
+   * @param now Time source (ms). Injectable so that tests can pin the rules of differential timing.
    */
   constructor(
     gpu: GpuContext,
     policy: SubmitPolicy = DEFAULT_SUBMIT_POLICY,
     now: () => number = () => performance.now(),
   ) {
-    // MUST: 政策は写してから検査し、写しだけを持つ。呼び手の object を参照のまま持つと、検査の
-    // 後の書き換え（例: initialChunkSize を Infinity へ）でチャンクの上限（TDR の門）も
-    // 0 の拒否（ハングの門）も外れる。
+    // MUST: copy the policy, then check it, and keep only the copy. Holding the caller's object by
+    // reference would let a rewrite after the check (e.g. initialChunkSize to Infinity) remove both
+    // the chunk limit (the TDR guard) and the rejection of 0 (the hang guard).
     const owned = copySubmitPolicy(policy);
     assertPolicy(owned);
     this.#gpu = gpu;
@@ -489,11 +582,12 @@ export class SubmitScheduler {
     this.#policy = owned;
     this.#now = now;
     this.#timingEnabled = gpu.gpuTimingEnabled;
-    // MUST: 計測有効時の querySet 容量（チャンクの dispatch 数 × 2）は構築時に検査する。
-    // エンコード時の門（{@link SubmitScheduler.#encodeTimedChunk}）だけだと、実測の裏付けが
-    // 付くまで #chunkSizeLimit が initialChunkSize を返すため、maxChunkSize > 1024 の政策は
-    // 最初の run では落ちず**後の run**で初めて落ちる（公開ノブ `SessionOptions.submitPolicy`
-    // の構成ミスが動作中に化ける）。既定政策（1024 → query 2048 = 上限ちょうど）は通る。
+    // MUST: check the querySet capacity with measurement enabled (the chunk's dispatch count × 2)
+    // at construction. With only the encode-time guard ({@link SubmitScheduler.#encodeTimedChunk}),
+    // #chunkSizeLimit returns initialChunkSize until measured evidence exists, so a policy with
+    // maxChunkSize > 1024 does not fail on the first run and fails only on a **later run** (a
+    // misconfiguration of the public knob `SessionOptions.submitPolicy` turns up mid-operation).
+    // The default policy (1024 → 2048 queries = exactly the limit) passes.
     if (this.#timingEnabled && owned.maxChunkSize * 2 > MAX_TIMESTAMP_QUERIES) {
       throw new SubmitPolicyError(
         `GPU 時間計測が有効な device では SubmitPolicy.maxChunkSize (${owned.maxChunkSize}) が ` +
@@ -507,14 +601,16 @@ export class SubmitScheduler {
   }
 
   /**
-   * dispatch を 1 件積む。時間予算か dispatch 数上限に達したらその場で submit する。
+   * Queues one dispatch. When the time budget or the dispatch-count limit is reached, it submits on
+   * the spot.
    *
-   * MUST: 予算判定は**積む前**に行う（不変条件 2）。積んでから「超えたので次から縮める」に
-   * すると、超過したチャンクは既に submit 済みで、予算超過を毎回 1 度は踏む形が定常になる。
+   * MUST: decide the budget **before adding** (invariant 2). With "added it, it exceeded, shrink
+   * from next time", the overrunning chunk is already submitted, and overrunning the budget once
+   * every time becomes the steady state.
    *
-   * @param key この dispatch のパイプラインキー（GPU 時間内訳の帰属先 — ADR 0021）。
-   *   MUST: `pipeline` を引いたときのキーそのものを渡す。別に組み立てると内訳だけが
-   *   静かに別の op へ寄る。
+   * @param key The pipeline key of this dispatch (where the GPU time breakdown is attributed — ADR
+   *   0021). MUST: pass exactly the key used to fetch `pipeline`. Building it separately would
+   *   silently shift only the breakdown to another op.
    */
   dispatch(
     pipeline: GPUComputePipeline,
@@ -535,14 +631,14 @@ export class SubmitScheduler {
   }
 
   /**
-   * バッファ間コピーを 1 件積む（{@link Session.enqueue} の `copyOutputs` — 出力 slot →
-   * {@link ResidentTensor}）。
+   * Queues one buffer-to-buffer copy (`copyOutputs` of {@link Session.enqueue} — output slot →
+   * {@link ResidentTensor}).
    *
-   * MUST: **dispatch と同じコマンド列**へ積む。別 encoder で先に submit すると、まだ書かれて
-   * いない slot を読む。列は FIFO なので、直前までに積んだ dispatch の結果だけがコピー元に
-   * なる。
-   * NOTE: 仕事量は 0（GPU の実行時間は無視できる）。時間予算の推定には効かず、チャンクの
-   * dispatch 数上限にだけ 1 件として数えられる。
+   * MUST: queue it in **the same command stream as the dispatches**. Submitting it first on a
+   * separate encoder would read a slot that has not been written yet. The stream is FIFO, so only
+   * the results of dispatches queued before it become the copy source.
+   * NOTE: its work is 0 (GPU execution time is negligible). It does not affect the time-budget
+   * estimate and counts as one item only toward the chunk's dispatch-count limit.
    */
   copyBuffer(
     source: GPUBuffer,
@@ -565,37 +661,41 @@ export class SubmitScheduler {
   }
 
   /**
-   * 未 submit のエンコードを submit する（**フェンスを張らない** — {@link BatchMember}）。
+   * Submits the unsubmitted encodes (**without a fence** — {@link BatchMember}).
    *
-   * 呼び出し元は 2 つ — `enqueue`（区間のフェンスは `BatchScope.finish` の 1 本）と、単一
-   * フェンスの run（フェンスは readback の `mapAsync` 1 本 — H-1）。
+   * There are two callers — `enqueue` (the section's fence is the one in `BatchScope.finish`) and a
+   * single-fence run (the fence is the one readback `mapAsync` — H-1).
    *
-   * MUST: `enqueue` はこれを末尾で必ず呼ぶ。以後に発行する `queue.writeBuffer` は queue
-   * timeline へ issue 順で載るので、**先行 dispatch を追い越さない**（追い越すのは未 submit の
-   * エンコードだけ — ADR 0004 不変条件④）。「enqueue 後に pending を残す経路」を作ると
-   * この不変条件が崩れ、次の入力書き込みが前の enqueue の dispatch に読まれる沈黙誤値になる。
+   * MUST: `enqueue` always calls this at its end. A later `queue.writeBuffer` lands on the queue
+   * timeline in issue order, so it **does not overtake earlier dispatches** (only unsubmitted
+   * encodes are overtaken — ADR 0004 buffer-management invariant ④). A path that "leaves pending
+   * work after enqueue" would break this invariant, and the next input write would be read by the
+   * previous enqueue's dispatches — a silent wrong value.
    */
   submitPending(): void {
     this.#submitChunk();
   }
 
   /**
-   * run の送り込みの歩調を合わせる（ADR 0123）。前の印からの submit が {@link IN_FLIGHT_MARKER_INTERVAL}
-   * 回に届いていれば完了印を 1 本置き、未完了の印が {@link IN_FLIGHT_MAX_MARKERS} 本を超えたら最も古い印を
-   * 待つ Promise を返す。超えていなければ undefined を返し、待ちを作らない（マイクロタスクも挟まない）。
+   * Paces a run's submissions (ADR 0123). If the submits since the previous marker have reached
+   * {@link IN_FLIGHT_MARKER_INTERVAL}, one completion marker is placed; if pending markers exceed
+   * {@link IN_FLIGHT_MAX_MARKERS}, a Promise that waits for the oldest marker is returned.
+   * Otherwise it returns undefined and creates no wait (not even a microtask).
    *
-   * 印を置くのはここだけ（1 回に 1 本）。呼び手が待ちを await する限り、待つ時点の未完了は上限 + 1 本で、
-   * 最も古い印が済めば上限の本数に戻る。
+   * Markers are placed only here (one per call). As long as the caller awaits the wait, pending
+   * markers at the time of waiting are the limit + 1, and once the oldest completes they are back
+   * to the limit.
    *
-   * MUST: 待ちを返す前に未 submit を出し切る。待ちの間に出る `queue.writeBuffer` が未 submit の
-   * dispatch を追い越さない（ADR 0004 不変条件④を待ちの間も保つ）うえ、GPU も積んだぶんを
-   * 全て受け取ってから待つ。
-   * MUST: 呼び手は待ちの間に**他の誰の dispatch も割り込ませない**位置で呼ぶ — 今は run の区間ロックの中の
-   * ステップの間（`executeBakedPlanPaced`）だけ。enqueue は呼ばない（ADR 0123 決定 4 — 待つと別 Session の
-   * enqueue が呼び出し順を追い越す。印も置かない — Deno では印が GPU の完了までホストを止め、batch の生成
-   * ループを遅くする）。
-   * MUST: 消失は {@link GpuDeviceLostError} にする（消失後の `onSubmittedWorkDone` が解決しない
-   * 実装がありうる — flush と同じ理由）。
+   * MUST: drain unsubmitted work before returning a wait. A `queue.writeBuffer` issued during the
+   * wait then does not overtake an unsubmitted dispatch (keeping ADR 0004 buffer-management
+   * invariant ④ during the wait too), and the GPU receives everything queued before we wait.
+   * MUST: the caller calls this at a point where **no one else's dispatch can cut in** during the
+   * wait — today only between steps inside a run's section lock (`executeBakedPlanPaced`). enqueue
+   * does not call it (ADR 0123 decision 4 — waiting would let another Session's enqueue overtake
+   * the call order. It places no marker either — on Deno a marker stops the host until GPU
+   * completion, slowing a batch's generation loop).
+   * MUST: turn a loss into {@link GpuDeviceLostError} (an implementation may never resolve
+   * `onSubmittedWorkDone` after a loss — the same reason as flush).
    */
   backpressure(): Promise<void> | undefined {
     if (this.#windowChunks - this.#markedChunks >= IN_FLIGHT_MARKER_INTERVAL) this.#placeMarker();
@@ -607,24 +707,28 @@ export class SubmitScheduler {
   }
 
   /**
-   * 計測窓を閉じる（`flush` を通らない経路 — batch の決着と、単一フェンス run の readback）。
+   * Closes the measurement window (paths that do not go through `flush` — settling a batch, and the
+   * readback of a single-fence run).
    *
-   * MUST: 呼び出しはその経路の**フェンスの後**（batch は `onSubmittedWorkDone`、単一フェンス
-   * run は readback の `mapAsync`）。前に呼ぶと窓が GPU 実行の途中で閉じ、実測が過小に出て
-   * チャンクが膨らむ（TDR 域へ向かう危険側）。
+   * MUST: call it **after that path's fence** (`onSubmittedWorkDone` for a batch, the readback
+   * `mapAsync` for a single-fence run). Calling it before would close the window mid-GPU-execution,
+   * the measurement would come out too small, and chunks would swell (the dangerous side, toward
+   * TDR territory).
    */
   closeMeasurementWindowAfterFence(): void {
     this.#closeMeasurementWindow();
   }
 
   /**
-   * 開いている計測窓を記録せずに捨てる（フェンスに到達しなかった経路 — batch の決着が
-   * `mapAsync` より前の errorScope 検査で落ちた場合）。
+   * Discards the open measurement window without recording it (paths that never reached the fence —
+   * when settling a batch fails at the errorScope check before `mapAsync`).
    *
-   * MUST: フェンス前に閉じる代わりに呼ぶ。GPU 実行の途中で閉じると実測が過小に出て
-   * `msPerWorkgroup` に入り、チャンク上限が `maxChunkSize` へ恒久的に切り替わる（TDR 域へ向かう
-   * 危険側 — {@link SubmitScheduler.closeMeasurementWindowAfterFence} の MUST の裏面）。捨てた窓は
-   * 情報が無いだけなので既存の推定値には触らない（実測 0 の窓と同じ扱い — 不変条件 1）。
+   * MUST: call this instead of closing before the fence. Closing mid-GPU-execution would put a
+   * too-small measurement into `msPerWorkgroup` and switch the chunk limit to `maxChunkSize`
+   * permanently (the dangerous side, toward TDR territory — the flip side of the MUST of
+   * {@link SubmitScheduler.closeMeasurementWindowAfterFence}). A discarded window only lacks
+   * information, so the existing estimate is left alone (treated like a window measuring 0 —
+   * invariant 1).
    */
   discardMeasurementWindow(): void {
     this.#windowStartedAt = undefined;
@@ -634,53 +738,60 @@ export class SubmitScheduler {
   }
 
   /**
-   * 未 submit のエンコードを submit せずに捨てる。
+   * Discards unsubmitted encodes without submitting them.
    *
-   * MUST: 失敗した run の後始末はこの経路を通す。残骸を実行する理由が無いうえ、失敗経路の
-   * submit は errorScope の外（呼び出し側が既にスコープを畳んだ後）で起きるため、その
-   * validation エラーは device 単位 LIFO の先頭にある**他人のスコープ**に帰属する。
-   * 回収待ちの計測資源の一覧には、エンコードの途中で落ちたチャンクのぶんも載っている（確保の
-   * 直後に載せるため）ので、ここを経ずに flush すると submit されていない計測の 0 が回収される。
-   * 捨てることで {@link SubmitScheduler.flush} と併せて「discard-or-flush before destroy」
-   * — 破棄済みバッファを参照するエンコードが submit に残らない — も同時に満たす。
+   * MUST: cleanup after a failed run goes through this path. There is no reason to execute the
+   * remains, and a submit on the failure path happens outside the errorScope (after the caller has
+   * already folded its scopes), so its validation error is attributed to **someone else's scope**
+   * at the top of the per-device LIFO.
+   * The list of measurement resources awaiting collection also holds those of a chunk that failed
+   * midway through encoding (they are listed right after allocation), so flushing without going
+   * through here would collect 0s for measurements that were never submitted.
+   * Discarding also satisfies, together with {@link SubmitScheduler.flush}, "discard-or-flush
+   * before destroy" — no encode that refers to a destroyed buffer remains to be submitted.
    *
-   * NOTE: 開いている計測窓には触らない。捨てたぶんは仕事量に入っていない（submit 済みの
-   * チャンクだけが積んである）ので、後始末の flush が閉じる窓は失敗の巻き戻し時間ぶん
-   * **過大**に出る — チャンクが縮む向き = 安全側で、次の窓が正しい値へ戻す。
+   * NOTE: the open measurement window is not touched. The discarded part is not in its work (only
+   * submitted chunks are counted), so the window closed by the cleanup flush comes out **too
+   * large** by the time of the failure's unwinding — chunks shrink = the safe side, and the next
+   * window restores the right value.
    */
   discard(): void {
-    // 数えるのは dispatch だけ（copy は「実行されなかった dispatch」の記録ではない）。
+    // Count only dispatches (a copy is not a record of "a dispatch that did not run").
     this.#discardedDispatches += this.#pending.filter((item) => item.kind === "dispatch").length;
     this.#pending.length = 0;
     this.#pendingWork = 0;
-    // MUST: 回収待ちの timestamp 資源も同じ経路で捨てる（discard-or-flush before destroy の
-    // query 版）。残すと、後続の後始末 flush が「失敗した run の残骸」を map しに行く。
+    // MUST: discard timestamp resources awaiting collection on the same path (the query version of
+    // discard-or-flush before destroy). Left behind, a later cleanup flush would try to map "the
+    // remains of a failed run".
     for (const timing of this.#pendingTimings) destroyTiming(timing);
     this.#pendingTimings.length = 0;
   }
 
   /**
-   * 未 submit のエンコードを全て submit し、GPU 側の完了まで待つ。
+   * Submits every unsubmitted encode and waits for GPU-side completion.
    *
-   * MUST: バッファを destroy する前に未 submit のエンコードを必ず出し切る（成功経路 —
-   * 待ちが要るならここ、待ちを別のフェンスへ集約したなら
-   * {@link SubmitScheduler.submitPending}）。未 submit のエンコードが
-   * 破棄済みのバッファを参照すると submit がコマンドバッファ丸ごと失敗し、同じスケジューラに
-   * 相乗りしている無関係な dispatch まで実行されないまま、誤った値が静かに残る。失敗経路で
-   * 残骸を出し切らずに済ませるのが {@link SubmitScheduler.discard}。
+   * MUST: always drain unsubmitted encodes before destroying buffers (success path — here when a
+   * wait is needed, {@link SubmitScheduler.submitPending} when the wait was consolidated onto
+   * another fence). If an unsubmitted encode refers to a destroyed buffer, the submit fails for the
+   * whole command buffer, and even unrelated dispatches riding on the same scheduler never run,
+   * silently leaving wrong values behind. On a failure path, {@link SubmitScheduler.discard} avoids
+   * draining the remains.
    *
-   * MUST: このスケジューラの中で `onSubmittedWorkDone` をフェンスとして呼ぶのは**ここだけ**（モジュール doc の
-   * 計測の帰属 — 送り込みの先行の上限の完了印は窓を閉じない。batch の決着のフェンスは `BatchScope` が張り、
-   * 窓は {@link SubmitScheduler.closeMeasurementWindowAfterFence} で閉じる）。
-   * 適応制御の観測点も同じ待ちに相乗りする — 窓を閉じるのは待ちの直後で、timestamp の回収
-   * （`mapAsync`）は窓の外に置く（診断の代を推定へ混ぜない）。
+   * MUST: within this scheduler, `onSubmittedWorkDone` is called as a fence **only here** (the
+   * attribution of measurements in the module doc — the in-flight bound's completion markers do not
+   * close the window. The fence that settles a batch is set by `BatchScope`, and that window is
+   * closed by {@link SubmitScheduler.closeMeasurementWindowAfterFence}).
+   * The observation point of the adaptive control piggybacks on the same wait — the window is
+   * closed right after the wait, and timestamp collection (`mapAsync`) is placed outside the window
+   * (the cost of diagnostics is not mixed into the estimate).
    */
   async flush(): Promise<void> {
-    // 残りは常に予算と上限の内側（切れ目は dispatch 時に決まっている）なので 1 回で出し切る。
+    // The rest is always within the budget and the limit (boundaries were decided at dispatch), so
+    // one submit drains it.
     this.#submitChunk();
-    // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
-    // raceCanaryDeviceLost の doc）ため消失を競わせて例外に変換する（購読は決着時に必ず
-    // 解除される — GpuContext 側の責務）。
+    // MUST: an implementation may never resolve onSubmittedWorkDone after a loss (measurements in
+    // the doc of raceCanaryDeviceLost), so race it against the loss and turn it into an exception
+    // (the subscription is always removed when it settles — GpuContext's responsibility).
     await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(
       this.#device.queue.onSubmittedWorkDone(),
       "flush",
@@ -690,17 +801,18 @@ export class SubmitScheduler {
   }
 
   /**
-   * 直近 run の GPU 時間内訳。計測が無効な device では undefined。
+   * The GPU time breakdown of the latest run. undefined on a device with measurement disabled.
    *
-   * NOTE: 表を組むのは読むたび（集計の実体はキー別の累計 Map だけ）。合計欄も derive する —
-   * 独立に更新する非正規化フィールドを持つと、丸め件数だけ増えて合計が動かない類の
-   * 食い違いが起きる。
+   * NOTE: the table is built on every read (the only aggregate state is the per-key total Map). The
+   * total fields are derived too — holding an independently updated denormalized field invites
+   * mismatches such as the clamp count growing while the total does not move.
    */
   get timing(): GpuTimingStats | undefined {
     if (!this.#timingEnabled) return undefined;
     const entries: GpuTimingEntry[] = [...this.#timingTotals]
       .map(([key, total]) => ({ key, ...total }))
-      // 降順で読む表。同値のときはキー順で並びを決定的にする（ロケール非依存の比較）。
+      // A table read in descending order. Ties are ordered by key to make it deterministic
+      // (locale-independent comparison).
       .sort((a, b) => b.ns - a.ns || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     return {
       entries,
@@ -711,8 +823,9 @@ export class SubmitScheduler {
   }
 
   /**
-   * 内訳の集計を空にする。**寿命は直近 run**（ADR 0021）なので run の開始で呼ぶ。
-   * 未回収の timestamp 資源には触らない（前の run が flush / discard で必ず出し切っている）。
+   * Empties the breakdown. **Its lifetime is the latest run** (ADR 0021), so it is called at the
+   * start of a run. Uncollected timestamp resources are not touched (the previous run always
+   * drained them with flush / discard).
    */
   resetTiming(): void {
     this.#timingTotals.clear();
@@ -720,12 +833,15 @@ export class SubmitScheduler {
   }
 
   /**
-   * 実 `queue.submit` を出した累計回数（単調増加・{@link SubmitStats.submitCount} と同じ値）。
+   * Cumulative number of real `queue.submit` calls issued (monotonically increasing; the same value
+   * as {@link SubmitStats.submitCount}).
    *
-   * generation run の失敗が state の物理 ring に届いたかの判定に使う（ADR 0066 追記 3 —
-   * executor の poison 結線）。`stats` が同じ値を持つのに別の口を置くのは、判定が run の
-   * ホットパスで 2 回引かれるため（`stats` は `measuredMs` の配列複製を伴う）。
-   * MUST: 独立に更新するカウンタを増やさない — `#submitChunk` の 1 箇所だけが動かす。
+   * Used to decide whether a failed generation run reached the state's physical ring (ADR 0066
+   * addendum of 2026-08-17, item 3 — the executor's poison wiring). There is a separate accessor
+   * although `stats` holds the same value because the decision reads it twice on the run's hot path
+   * (`stats` copies the `measuredMs` array).
+   * MUST: do not add another independently updated counter — only the one place in `#submitChunk`
+   * moves it.
    */
   get submitCount(): number {
     return this.#submitCount;
@@ -741,12 +857,14 @@ export class SubmitScheduler {
       currentChunkSize: this.#chunkSizeLimit(),
       msPerWorkgroup: this.#msPerWorkgroup,
       chunkBudget: {
-        // 独立に更新するフィールドを持たず、読むたびに政策と安全率から導く。
+        // No independently updated field; derived from the policy and the safety factor on every
+        // read.
         budgetMs: this.#chunkBudgetMs(),
         maxEstimatedMs: this.#maxEstimatedChunkMs,
         overBudgetChunks: this.#overBudgetChunks,
         maxWindowMeanMs: this.#maxWindowMeanMs,
-        // 読み手が可変の内部状態を掴まないよう、読むたびに写す（undefined の欄は書かない）。
+        // Copied on every read so readers do not grab mutable internal state (undefined fields are
+        // not written).
         ...(this.#submitGpuTime === undefined
           ? {}
           : {
@@ -767,14 +885,17 @@ export class SubmitScheduler {
     };
   }
 
-  /** 1 チャンクを切る基準時間（{@link #exceedsTimeBudget} が比べているのと同じ値）。 */
+  /**
+   * The reference time for cutting one chunk (the same value {@link #exceedsTimeBudget} compares
+   * against).
+   */
   #chunkBudgetMs(): number {
     return this.#policy.timeBudgetMs * CHUNK_TIME_SAFETY;
   }
 
   /**
-   * 現在の dispatch 数上限。実測の裏付けが無い間はブートストラップ値のまま据え置く
-   * （不変条件 1 — 実測 0 は成長の根拠にならない）。
+   * The current dispatch-count limit. While there is no measured evidence it stays at the bootstrap
+   * value (invariant 1 — a measurement of 0 is no ground for growth).
    */
   #chunkSizeLimit(): number {
     return this.#msPerWorkgroup === undefined
@@ -783,14 +904,15 @@ export class SubmitScheduler {
   }
 
   /**
-   * 仕事量 `work` のチャンクが時間予算を超える見込みか。裏付けが無ければ判定しない
-   * （false = 予算では切らない — 上限は dispatch 数側が持つ）。
+   * Whether a chunk with work `work` is expected to exceed the time budget. Without evidence no
+   * decision is made (false = no cut by budget — the limit is held by the dispatch-count side).
    */
   #exceedsTimeBudget(work: number): boolean {
     const perWorkgroup = this.#msPerWorkgroup;
     if (perWorkgroup === undefined) return false;
-    // 予算で切るのは minChunkSize 以上を積んでからにする（submit 回数の歯止め）。単独で
-    // 予算を超える dispatch はここで分割できない — チャンク 1 本ぶんとして出すしかない。
+    // Cut by budget only after at least minChunkSize are queued (a stop on the number of submits).
+    // A dispatch that exceeds the budget on its own cannot be split here — it has to go as one
+    // chunk.
     if (this.#pending.length < this.#policy.minChunkSize) return false;
     return work * perWorkgroup > this.#chunkBudgetMs();
   }
@@ -805,8 +927,9 @@ export class SubmitScheduler {
     this.#pendingWork = 0;
     const encoder = this.#device.createCommandEncoder();
     if (this.#timingEnabled) {
-      // 裏付けの有無は切れ目を決めた時点の状態（推定が動くのは窓を閉じるときだけで、閉じる経路は
-      // 先に未 submit を出し切るので、チャンクを組んでいる間には変わらない）。
+      // Whether there is evidence is the state when the boundary was decided (the estimate moves
+      // only when a window closes, and the closing paths drain unsubmitted work first, so it does
+      // not change while a chunk is being assembled).
       this.#encodeTimedChunk(encoder, chunk, this.#msPerWorkgroup !== undefined);
     } else {
       this.#encodePlainChunk(encoder, chunk);
@@ -814,8 +937,8 @@ export class SubmitScheduler {
     const submittedAt = this.#now();
     this.#device.queue.submit([encoder.finish()]);
     this.#submitCount += 1;
-    // MUST NOT: ここで onSubmittedWorkDone を呼ばない（モジュール doc — ホストと GPU の
-    // 直列化）。計測の起点だけを残し、閉じるのは flush 側。
+    // MUST NOT: call onSubmittedWorkDone here (module doc — serialization of host and GPU). Only
+    // the start of the measurement is kept; the flush side closes it.
     this.#windowStartedAt ??= submittedAt;
     this.#windowWork += chunkWork;
     this.#windowChunks += 1;
@@ -823,15 +946,18 @@ export class SubmitScheduler {
   }
 
   /**
-   * 完了印を 1 本置く（ADR 0123）。
+   * Places one completion marker (ADR 0123).
    *
-   * NOTE: Deno 2.9.6 の `onSubmittedWorkDone` は同期部分が「それまでに submit した全作業の完了」まで
-   * ホストを止める（research 2026-08-04 §4.1）。この実装では印を置いた時点で GPU が追いつき、その間 GPU は
-   * 次のチャンクを待って遊ぶ（待ちの Promise は解決済みのものを待つだけ）。消失がこの同期部分で起きると、
-   * Deno は例外ではなく panic する（flush と同じ — docs/known-issues.md の Deno の device lost の項）。
-   * NOTE: 拒否も決着として数えるだけで、ここでは投げない。待つ側は同じ Promise を
-   * `raceDeviceLost` 越しに待つので拒否はそこへ出る。待たずに捨てた印の拒否は、その run / 区間の
-   * フェンスが同じ device の状態で落とす。
+   * NOTE: on Deno 2.9.6 the synchronous part of `onSubmittedWorkDone` stops the host until "every
+   * piece of work submitted so far has completed" (research 2026-08-04 §4.1). On that
+   * implementation the GPU catches up when the marker is placed, and meanwhile the GPU idles
+   * waiting for the next chunk (the wait's Promise only waits for something already resolved). If
+   * the loss happens in this synchronous part, Deno panics instead of throwing (same as flush — the
+   * Deno device-lost entry in docs/known-issues.md).
+   * NOTE: a rejection is only counted as settled here and is not thrown. The waiting side awaits
+   * the same Promise through `raceDeviceLost`, so the rejection surfaces there. The rejection of a
+   * marker dropped without waiting is failed by the fence of that run / section on the same device
+   * state.
    */
   #placeMarker(): void {
     this.#markedChunks = this.#windowChunks;
@@ -847,30 +973,34 @@ export class SubmitScheduler {
   }
 
   /**
-   * 出したチャンク 1 本を診断へ記録する（**観測のみ** — ここから制御へ戻る線は無い）。
+   * Records one issued chunk in the diagnostics (**observation only** — no line leads from here
+   * back to control).
    *
-   * 使うのは「切った時点で効いていた推定」そのもの。閉じた後の窓で推定が動いても遡って
-   * 上書きしない — 見たいのは「その切れ目を決めた側が予算をどう見積もっていたか」で、
-   * 事後の推定で塗り直すとその情報が消える。
+   * It uses "the estimate in effect at the time of cutting" as is. If the estimate moves in a later
+   * window, it is not overwritten retroactively — what we want to see is "how the side that decided
+   * that boundary estimated the budget", and repainting with a later estimate would erase that.
    */
   #observeChunkBudget(chunkWork: number): void {
     const perWorkgroup = this.#msPerWorkgroup;
-    // 裏付けが無い間のチャンクは推定時間を持たない（予算で切ってもいない）ので数えない。
+    // Chunks from the time without evidence have no estimated time (nor were they cut by budget),
+    // so they are not counted.
     if (perWorkgroup === undefined) return;
     const estimatedMs = chunkWork * perWorkgroup;
     if (this.#maxEstimatedChunkMs === undefined || estimatedMs > this.#maxEstimatedChunkMs) {
       this.#maxEstimatedChunkMs = estimatedMs;
     }
-    // 比較は制御と同じ向き（超過は「予算より大きい」— ちょうど予算のチャンクは切らずに通る）。
+    // The comparison runs in the same direction as control (an overrun is "larger than the budget"
+    // — a chunk exactly at the budget passes uncut).
     if (estimatedMs > this.#chunkBudgetMs()) this.#overBudgetChunks += 1;
   }
 
   /**
-   * 既定（非計測）のエンコード。**チャンク 1 本 = compute pass 1 本**のままだが、copy は
-   * pass の外にしか置けないので、copy が来たら pass を閉じ、後続の dispatch で開き直す。
+   * The default (non-measuring) encode. Still **1 chunk = 1 compute pass**, but a copy can only go
+   * outside a pass, so when a copy comes the pass is closed and reopened by the next dispatch.
    *
-   * MUST: 開き直しても実行意味論は変わらない（同一キューでは submit 順・pass 順に実行され、
-   * storage の可視性は pass 境界を跨いでも保たれる）。並べ替えないことだけが不変条件。
+   * MUST: reopening does not change the execution semantics (on the same queue execution follows
+   * submit order and pass order, and storage visibility holds across pass boundaries). Not
+   * reordering is the only invariant.
    */
   #encodePlainChunk(encoder: GPUCommandEncoder, chunk: readonly PendingCommand[]): void {
     let pass: GPUComputePassEncoder | undefined;
@@ -896,23 +1026,27 @@ export class SubmitScheduler {
   }
 
   /**
-   * 計測モードのエンコード（**1 dispatch = 1 pass**）。pass の begin/end を chunk 1 本ぶんの
-   * querySet に書き、`resolveQuerySet` → COPY_SRC バッファ → MAP_READ バッファまでを同じ
-   * command buffer に積む（回収は完了後の {@link SubmitScheduler.flush} で行う）。
+   * The measurement-mode encode (**1 dispatch = 1 pass**). The begin/end of each pass is written to
+   * a querySet for one chunk, and `resolveQuerySet` → COPY_SRC buffer → MAP_READ buffer is queued
+   * in the same command buffer (collection happens in {@link SubmitScheduler.flush} after
+   * completion).
    *
-   * MUST: `writeTimestamp` は使わない（標準の WebGPU に無い — pass 境界だけが移植可能な計測点）。
+   * MUST: do not use `writeTimestamp` (not in standard WebGPU — pass boundaries are the only
+   * portable measurement points).
    */
   #encodeTimedChunk(
     encoder: GPUCommandEncoder,
     chunk: readonly PendingCommand[],
     backed: boolean,
   ): void {
-    // 計測対象は dispatch だけ（copy は pass を持たないので timestamp を書く場所が無い）。
-    // NOTE: 計測が有効な device では batch を開けない（GpuContext.beginBatch の門）ため、
-    // copy が混じったチャンクはこの経路に来ない — それでも列の順序は保って積む。
+    // Only dispatches are measured (a copy has no pass, so there is nowhere to write a timestamp).
+    // NOTE: a batch cannot be opened on a device with measurement enabled (the
+    // GpuContext.beginBatch guard), so a chunk with copies never takes this path — the stream order
+    // is kept anyway.
     const dispatches = chunk.filter((item): item is PendingDispatch => item.kind === "dispatch");
-    // 計測対象が 1 件も無いチャンク（copy だけ）に querySet を作らない（容量 0 の資源を
-    // 作って即回収する意味が無く、実装差のある面に触れる理由も無い）。
+    // Do not create a querySet for a chunk with nothing to measure (copies only) (no point creating
+    // a zero-capacity resource only to collect it at once, and no reason to touch a surface that
+    // differs between implementations).
     if (dispatches.length === 0) {
       this.#encodePlainChunk(encoder, chunk);
       return;
@@ -927,11 +1061,13 @@ export class SubmitScheduler {
       );
     }
     const byteLength = count * TIMESTAMP_BYTES;
-    // MUST: 3 資源は確保し終えた直後に回収一覧（#pendingTimings）へ載せ、エンコードはその後に
-    // する。エンコードの途中の同期例外で抜けたチャンクの資源も、失敗経路の discard が同じ一覧
-    // から破棄できる（載せる前に抜けると discard からも flush からも届かない）。確保そのものが
-    // 途中で落ちたときは、一覧に載せる前なのでここで確保済みぶんを破棄する（まだどのコマンドにも
-    // 積んでいないので、その場で破棄しても submit 済み・未 submit のエンコードを壊さない）。
+    // MUST: put the 3 resources on the collection list (#pendingTimings) right after they are
+    // allocated, and encode only after that. Then the resources of a chunk that exits with a
+    // synchronous exception midway through encoding can also be destroyed from the same list by the
+    // failure path's discard (exiting before they are listed puts them out of reach of both discard
+    // and flush). If an allocation itself fails midway, nothing is listed yet, so the allocated
+    // ones are destroyed here (they are not in any command yet, so destroying them on the spot
+    // breaks neither submitted nor unsubmitted encodes).
     const allocated: { destroy(): void }[] = [];
     let timing: PendingTiming;
     try {
@@ -989,44 +1125,52 @@ export class SubmitScheduler {
   }
 
   /**
-   * 完了済みチャンクの timestamp を回収してキー別に集計する。
+   * Collects the timestamps of completed chunks and aggregates them per key.
    *
-   * MUST: 呼び出しは `onSubmittedWorkDone` の**後**（該当チャンクの GPU 実行完了後）に限る。
-   * MUST: `mapAsync` の待ちを完了コールバック（fire-and-forget）側に載せない。待ちが run の
-   * ロック区間の外へ抜け、errorScope 直列化の外で GPU 操作を出すことになる（device 単位 LIFO
-   * の誤帰属）。flush の内側で待てば、run の GPU 操作は全てロック区間内に収まる。
+   * MUST: call only **after** `onSubmittedWorkDone` (after the GPU execution of those chunks has
+   * completed).
+   * MUST: do not put the `mapAsync` wait on the completion-callback side (fire-and-forget). The
+   * wait would escape the run's lock section, and GPU operations would be issued outside the
+   * errorScope serialization (misattribution in the per-device LIFO). Waiting inside flush keeps
+   * every GPU operation of the run inside the lock section.
    */
   async #collectTimings(): Promise<void> {
     if (this.#pendingTimings.length === 0) return;
     const pending = this.#pendingTimings;
     this.#pendingTimings = [];
     try {
-      // MUST: 消失後の mapAsync が解決しない実装がありうる（readback と同じ理由で競わせる）。
+      // MUST: an implementation may never resolve mapAsync after a loss (raced for the same reason
+      // as readback).
       await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(
         Promise.all(pending.map((item) => item.readBuffer.mapAsync(MAP_MODE.READ))),
         "timestamp の回収",
       );
       for (const item of pending) {
-        // 同期区間で読み切るのでコピーは要らない（unmap まで view は有効）。
+        // Read entirely within the synchronous section, so no copy is needed (the view is valid
+        // until unmap).
         const stamps = new BigUint64Array(item.readBuffer.getMappedRange());
         this.#accumulate(item.entries, stamps);
         this.#observeSubmitGpuTime(item, stamps);
         item.readBuffer.unmap();
       }
     } finally {
-      // MUST: 成否によらず解放する。失敗しても資源は残さない（destroy は暗黙 unmap を含む）。
+      // MUST: release regardless of the outcome. Even on failure no resources remain (destroy
+      // implies unmap).
       for (const item of pending) destroyTiming(item);
     }
   }
 
-  /** query 対の差分をキー別累計へ足す（並びは {@link PendingTiming.entries} と 1:1）。 */
+  /**
+   * Adds the differences of the query pairs to the per-key totals (order 1:1 with {@link
+   * PendingTiming.entries}).
+   */
   #accumulate(
     entries: readonly { readonly key: string; readonly work: number }[],
     stamps: BigUint64Array<ArrayBuffer>,
   ): void {
     for (const [index, entry] of entries.entries()) {
       const delta = stamps[index * 2 + 1] - stamps[index * 2];
-      // MUST: 負値は 0 に丸めたうえで**件数を残す**（黙って捨てない — ADR 0021）。
+      // MUST: clamp negatives to 0 and **keep the count** (no silent dropping — ADR 0021).
       if (delta < 0n) this.#clampedNegativeSamples += 1;
       const total = this.#timingTotals.get(entry.key) ?? {
         ns: 0,
@@ -1041,13 +1185,13 @@ export class SubmitScheduler {
   }
 
   /**
-   * チャンク 1 本の GPU 実行の幅と単発 dispatch の最大を、全期間の観測へ足す（**観測のみ** —
-   * ここから制御へ戻る線は無い）。
+   * Adds one chunk's GPU execution span and the maximum single dispatch to the lifetime observation
+   * (**observation only** — no line leads from here back to control).
    *
-   * 幅は query の最小 → 最大。pass は積んだ順に実行されるので「最初の pass の begin → 最後の pass の
-   * end」と同じで、pass 間の隙間も含む（OS の submit 単位の上限が数えるのもその区間）。最小 / 最大で
-   * 取るのは、非単調なサンプルが混じっても負の幅を作らないため（丸めの件数は
-   * {@link SubmitScheduler.#accumulate} が数える）。
+   * The span is query minimum → maximum. Passes run in queued order, so this equals "begin of the
+   * first pass → end of the last pass" and includes the gaps between passes (the same interval an
+   * OS per-submit limit counts). Minimum / maximum are used so that non-monotonic samples never
+   * produce a negative span (the clamp count is kept by {@link SubmitScheduler.#accumulate}).
    */
   #observeSubmitGpuTime(timing: PendingTiming, stamps: BigUint64Array<ArrayBuffer>): void {
     let first = stamps[0];
@@ -1082,22 +1226,25 @@ export class SubmitScheduler {
   }
 
   /**
-   * 計測窓を閉じて推定を更新する（呼び出しは flush の `onSubmittedWorkDone` 待ちの直後）。
+   * Closes the measurement window and updates the estimate (called right after flush's wait for
+   * `onSubmittedWorkDone`).
    *
-   * MUST: 実測が 0（窓全体がタイマ分解能未満）の窓では**更新しない**。0 は「速い」ではなく
-   * 「情報が無い」で、これを成長の根拠にすると分解能の粗い環境で無条件にチャンクが膨らみ、
-   * 1 submit 全積み（= TDR 域）へ行き着く。仕事量 0 の窓も同じ理由で情報が無い
-   * （0 除算で Infinity を掴むと、今度は永久に minChunkSize へ張り付く）。
+   * MUST: do **not update** for a window whose measurement is 0 (the whole window below timer
+   * resolution). 0 means "no information", not "fast"; treating it as ground for growth would make
+   * chunks swell unconditionally in environments with coarse resolution, ending in everything in
+   * one submit (= TDR territory). A window with 0 work has no information for the same reason
+   * (grabbing Infinity from a division by 0 would instead pin the size at minChunkSize forever).
    */
   #closeMeasurementWindow(): void {
     const startedAt = this.#windowStartedAt;
-    // 窓が開いていない = 前回の flush 以降 1 度も submit していない。記録するものが無い
-    // （空の flush を「実測 0 の窓」として数えると、診断の窓が中身の無い件で埋まる）。
+    // Window not open = nothing submitted since the last flush. There is nothing to record
+    // (counting an empty flush as "a window measuring 0" would fill the diagnostic windows with
+    // empty entries).
     if (startedAt === undefined) return;
     const measured = this.#now() - startedAt;
     const work = this.#windowWork;
-    // 窓の起点とチャンク数は #submitChunk で同時に立つので、窓が開いていれば必ず 1 以上
-    // （0 除算にはならない）。
+    // The window start and the chunk count are set together in #submitChunk, so with an open window
+    // the count is always at least 1 (no division by 0).
     const meanChunkMs = measured / this.#windowChunks;
     if (this.#maxWindowMeanMs === undefined || meanChunkMs > this.#maxWindowMeanMs) {
       this.#maxWindowMeanMs = meanChunkMs;

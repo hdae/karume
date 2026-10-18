@@ -1,8 +1,11 @@
-// 次元言語: shape の記号次元を表す一次式 `coeff·sym+offset`（1 次元 1 シンボル）。
-// 文法の正本は tests/fixtures/dim-grammar.json（valid / invalid / eval の 3 節）で、
-// TS 実装と将来の Python 実装は同じ表で検証する（実装を正本にすると同期が人手の規律になる）。
+// Dimension language: a linear expression `coeff·sym+offset` for a symbolic dimension of a shape
+// (one symbol per dimension). The source of truth for the grammar is
+// tests/fixtures/dim-grammar.json (three sections: valid / invalid / eval), and the TS
+// implementation and the Python one (tools/exporter/src/karume/dims.py) are both checked against
+// the same table (making an implementation the source of truth would leave syncing to manual
+// discipline).
 
-/** `coeff·sym + offset`。coeff ≥ 1・offset ≥ 0 の非負一次式のみ。 */
+/** `coeff·sym + offset`. Only non-negative linear expressions with coeff ≥ 1 and offset ≥ 0. */
 type DimExpr = {
   readonly coeff: number;
   readonly sym: string;
@@ -23,9 +26,9 @@ const DIM_RE = new RegExp(`^(\\d+)?(${SYMBOL_PATTERN})(?:\\+(\\d+))?$`);
 export const isSymbolName = (name: string): boolean => SYMBOL_RE.test(name);
 
 /**
- * 省略可能部（coeff=1 / offset=0）の明示表記と先頭ゼロは非正準として拒否する。
- * 同じ次元に 2 通り以上の表記を許すと、束縛表・キャッシュキー・shape 同一性判定が
- * 表記ゆれで割れる MUST NOT。
+ * Spelling out the optional parts (coeff=1 / offset=0) and leading zeros are rejected as
+ * non-canonical. Two or more spellings for the same dimension MUST NOT be allowed: the binding
+ * table, cache keys and shape-identity checks would split on spelling variants.
  */
 const parsePart = (text: string | undefined, min: number, omitted: number): number | undefined => {
   if (text === undefined) return omitted;
@@ -35,7 +38,10 @@ const parsePart = (text: string | undefined, min: number, omitted: number): numb
   return value;
 };
 
-/** 正準表記なら分解、非正準・非該当は undefined（判定と分解を兼ねる版）。 */
+/**
+ * Decomposes a canonical spelling; non-canonical or non-matching text gives undefined (check and
+ * parse in one).
+ */
 export const tryParseDim = (text: string): DimExpr | undefined => {
   const matched = DIM_RE.exec(text);
   if (matched === null) return undefined;
@@ -55,7 +61,10 @@ export const parseDim = (text: string): DimExpr => {
   return expr;
 };
 
-/** 正準表記へ戻す。parseDim との往復は文字列同一（適合ケース表で固定）。 */
+/**
+ * Back to the canonical spelling. A round trip with parseDim is string-identical (pinned by the
+ * conformance table).
+ */
 export const formatDim = (expr: DimExpr): string => {
   const { coeff, sym, offset } = expr;
   if (!isSymbolName(sym)) throw new DimError(`シンボル名 '${sym}' が不正`);
@@ -67,9 +76,10 @@ export const formatDim = (expr: DimExpr): string => {
 };
 
 /**
- * 束縛表を当てて具体次元にする。
- * 束縛の有無は Object.hasOwn のみで判定する MUST — `bindings[sym] !== undefined` は
- * Object.prototype 由来の toString 等が素通りし、以後の算術が黙って NaN 化する。
+ * Applies the binding table to get a concrete dimension.
+ * Whether a symbol is bound MUST be decided by Object.hasOwn only — `bindings[sym] !== undefined`
+ * lets toString and the like from Object.prototype through, and the arithmetic after it silently
+ * turns into NaN.
  */
 export const evalDim = (expr: DimExpr, bindings: Readonly<Record<string, number>>): number => {
   if (!Object.hasOwn(bindings, expr.sym)) {
@@ -87,13 +97,15 @@ export const evalDim = (expr: DimExpr, bindings: Readonly<Record<string, number>
 };
 
 /**
- * {@link evalDim} の逆 — 実寸から `sym` の束縛を解く。**解は一意**（coeff ≥ 1・offset ≥ 0 の
- * 一次式なので `(size − offset) / coeff` の 1 つきり）で、割り切れない実寸は「その宣言の形を
- * していない」= 束縛が存在しないので `undefined` を返す。
+ * The inverse of {@link evalDim} — solves the binding of `sym` from an actual size. **The solution
+ * is unique** (a linear expression with coeff ≥ 1 and offset ≥ 0 has only `(size − offset) / coeff`),
+ * and a size that does not divide evenly "does not have the declared shape" = no binding exists, so
+ * `undefined` is returned.
  *
- * MUST: 割り切れない実寸を四捨五入や切り捨てで受けない。派生次元（`2T`）の入力に半端な長さが
- * 来たとき、丸めて通すと**入力の末尾 1 要素が黙って別の意味になる**（呼び手はグラフが
- * 受理したと見なす）。呼び手は `undefined` を fail loudly に変換する責務を負う。
+ * MUST: do not accept a size that does not divide evenly by rounding or truncating it. When an input
+ * of a derived dimension (`2T`) has an odd length, rounding it through **silently changes the meaning
+ * of the input's last element** (the caller assumes the graph accepted it). The caller is
+ * responsible for turning `undefined` into a loud failure.
  */
 export const solveDim = (expr: DimExpr, size: number): number | undefined => {
   if (!Number.isSafeInteger(size) || size < 0) return undefined;

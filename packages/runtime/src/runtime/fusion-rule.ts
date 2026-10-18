@@ -1,17 +1,21 @@
 /**
- * 融合ルールの共通面: 実行ステップの型・**全ルール共通の適格条件**・`defineRule`。
+ * The shared surface of the fusion rules: execution step types, **the eligibility conditions shared
+ * by every rule**, and `defineRule`.
  *
- * ルールの実体は `fusion-rules/` 配下（1 ルール = 1 ファイル）、宣言表と走査は
- * {@link "./fusion.ts"}。MUST: 実体の依存は fusion-rule → fusion-rules → fusion の
- * **一方向**に保つ（ここから `fusion.ts` を import しない — 宣言表がルールを import するので
- * 循環になる）。
+ * The rules themselves live under `fusion-rules/` (one rule = one file); the declaration table and
+ * the scan are in {@link "./fusion.ts"}. MUST: keep the value dependencies **one-directional**:
+ * fusion-rule → fusion-rules → fusion (do not import `fusion.ts` from here — the declaration table
+ * imports the rules, so that would be a cycle).
  */
 
 import { outputCountOf } from "../ops.ts";
 import type { LinearGemvReduce } from "./session-types.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
-/** 融合ルールの識別子（{@link "./fusion.ts"} の `FUSION_RULES` の宣言順と 1 対 1）。 */
+/**
+ * Fusion rule identifiers (one-to-one with the declaration order of `FUSION_RULES` in
+ * {@link "./fusion.ts"}).
+ */
 type FusionRuleName =
   | "linearStaticQuantize"
   | "rmsNormAdd"
@@ -22,21 +26,25 @@ type FusionRuleName =
   | "rowBlockAttention";
 
 /**
- * 診断カウンタの見出し。融合ルールに加えて、0 dispatch の別名化のうち**条件付きで外れうる**
- * 恒等 expand（{@link ExecStep} の `aliasesInput`）と、packed int8 活性で受け渡す
- * 固定 SRQ の本数（ADR 0105）を数える。reshape の別名化は無条件なので数えない
- * （外れようがない = 観測する意味がない）。
+ * The diagnostic counter names. Besides the fusion rules, they count the identity expands among the
+ * zero-dispatch aliases that **can drop out conditionally** (`aliasesInput` of {@link ExecStep}),
+ * and the fixed SRQs handed over as packed int8 activations (ADR 0105). Reshape aliasing is
+ * unconditional and is not counted (it cannot drop out = nothing to observe).
  */
 export type FusionCounterName = FusionRuleName | "identityExpand" | "packedStaticQuantize";
 
-/** ルール別の適用回数。「融合が黙って外れて性能だけ落ちる」事故の唯一の観測点。 */
+/**
+ * Application count per rule. The only observation point for "a fusion silently dropped out and
+ * only performance fell".
+ */
 export type FusionCounts = Readonly<Record<FusionCounterName, number>>;
 
 /**
- * 融合ステップ内で束縛しうる実体。
+ * What a fused step may bind.
  *
- * MUST: ステップ内一時（{@link FusedStep.temps}）を指せるのはここだけで、外部入力は
- * {@link FusedStep.binds} の**添字**で指す（値名の再解決を executor に持たせない）。
+ * MUST: only this type can point at a step-internal temporary ({@link FusedStep.temps}); external
+ * inputs are pointed at by **index** into {@link FusedStep.binds} (the executor does not re-resolve
+ * value names).
  */
 export type FusedOperand =
   | { readonly kind: "bind"; readonly index: number }
@@ -45,95 +53,104 @@ export type FusedOperand =
   | { readonly kind: "output" };
 
 /**
- * dispatch の workgroup 数の決め方。
+ * How a dispatch's workgroup count is chosen.
  *
- * - `gridStride` = 要素 / 行の被覆数を割る形（elementwise・reduce・1 dispatchの融合）。上限を
- *   超えたら縮退し、カーネル側の grid-stride が残りを回す。
- * - `tiled` = **1 workgroup = 1 出力タイル**の GEMM 族。grid-stride で縮退できないので、
- *   上限超過は宣言側（`tiledWorkgroups`）が fail loudly にする。
+ * - `gridStride` = divide the element / row coverage (elementwise, reduce, single-dispatch
+ *   fusions). Beyond the limit it is clamped, and the kernel's grid-stride loop covers the rest.
+ * - `tiled` = the GEMM family with **one workgroup = one output tile**. It cannot be clamped onto a
+ *   grid-stride loop, so exceeding the limit fails loudly on the declaring side
+ *   (`tiledWorkgroups`).
  */
 type FusedWorkgroups =
   | { readonly kind: "gridStride"; readonly items: number; readonly size: number }
   | { readonly kind: "tiled"; readonly counts: readonly [number, number, number] };
 
-/** 融合カーネル 1 dispatch ぶんの生成入力（全ルール共通の形）。 */
+/** The generation input for one dispatch of a fused kernel (the shape shared by every rule). */
 export type FusedDispatch = {
   readonly key: string;
   /**
-   * MUST: 同一キーには常にバイト単位で同一の WGSL（PipelineCache の決定性契約）。
-   * thunk なのは、キャッシュ済みでも本文の突き合わせが必要な一方、計画時に全ステップぶんを
-   * 文字列で持つ必要が無いため。
+   * MUST: the same key always yields byte-identical WGSL (the PipelineCache determinism contract).
+   * It is a thunk because the body still has to be compared even when cached, while the plan does
+   * not need to hold every step's string.
    */
   readonly wgsl: () => string;
-  /** binding 0 の Params。既定は uniform（16 バイト単位の確保は各カーネル側 — ADR 0040 の共通形）。 */
+  /**
+   * Params at binding 0. Uniform by default (each kernel allocates in 16-byte units — the shared
+   * form of ADR 0040).
+   */
   readonly params: Uint32Array<ArrayBuffer>;
   /**
-   * params を **storage** で束ねる（可変長 params を持つ elementwise 族だけ — 素のノードの
-   * `buildElementwise` と同じ）。省略時は uniform。
+   * Bind params as **storage** (only the elementwise family with variable-length params — the same
+   * as `buildElementwise` for a plain node). Uniform when omitted.
    */
   readonly paramsStorage?: boolean;
   /**
-   * binding 1 以降のオペランド列。**省略できるのは 1 dispatch のルールだけ**で、そのときは
-   * 「{@link FusedStep.binds} を宣言順 → 末尾に出力」（1 dispatchの融合に共通の形）になる。
+   * The operand list from binding 1 on. **Only single-dispatch rules may omit it**; it then becomes
+   * "{@link FusedStep.binds} in declaration order → the output last" (the shape shared by
+   * single-dispatch fusions).
    */
   readonly operands?: readonly FusedOperand[];
   readonly workgroups: FusedWorkgroups;
 };
 
 /**
- * ステップ内一時の確保仕様。形も意味も recipe.ts の `TempRecipe` と同じで、**寿命は
- * dispatch 境界の添字**で表す。
+ * The allocation spec of a step-internal temporary. Shape and meaning match `TempRecipe` in
+ * recipe.ts; **the lifetime is given as dispatch-boundary indices**.
  *
- * MUST: 宣言した一時には必ず解放境界がある（`releaseAfter` が確保より前だと宣言の受け口
- * （`validateStepRecipe`）が落とす）。
+ * MUST: every declared temporary has a release boundary (when `releaseAfter` comes before the
+ * allocation, the declaration's entry point (`validateStepRecipe`) rejects it).
  */
 export type FusedTemp = {
   readonly byteLength: number;
-  /** {@link FusedStep.dispatches} のこの添字の**直前**に確保する。 */
+  /** Allocated **right before** this index of {@link FusedStep.dispatches}. */
   readonly allocBefore: number;
-  /** {@link FusedStep.dispatches} のこの添字の**直後**に解放する。 */
+  /** Released **right after** this index of {@link FusedStep.dispatches}. */
   readonly releaseAfter: number;
 };
 
 /**
- * 融合ステップ（元の連続ノード列 1 本を private カーネルの dispatch 列へ置換したもの）。
+ * A fused step (one run of consecutive original nodes replaced by a list of private-kernel
+ * dispatches).
  *
- * dispatch は**複数取りうる**。畳んだ結果が 1 dispatch にならないルール
- * （{@link "./fusion-rules/row-block-attention.ts"} の `ROW_BLOCK_ATTENTION_RULE`）は、
- * ステップ内で閉じた一時（{@link FusedStep.temps}）を
- * 挟んで数本を並べる。MUST: それでも解放簿記の根拠は {@link FusedStep.ins} の延べ列 1 本の
- * ままで、ステップ境界の外へは一時が 1 本も漏れない。
+ * A step **may have several** dispatches. A rule whose folded result is not one dispatch
+ * (`ROW_BLOCK_ATTENTION_RULE` in {@link "./fusion-rules/row-block-attention.ts"}) lines up several
+ * of them with temporaries closed inside the step ({@link FusedStep.temps})
+ * in between. MUST: even then, the release bookkeeping rests on the one total-use list
+ * {@link FusedStep.ins}, and not a single temporary leaks past the step boundary.
  */
 export type FusedStep = {
   readonly kind: "fused";
   readonly rule: FusionRuleName;
   /**
-   * 元ノード列が消費した**外部**入力の延べ列（重複込み）。内部値は 1 本も実体化しないので
-   * 含めない。MUST: 元の延べ回数と 1 つも違えてはならない（アリーナの参照計数の唯一の根拠）。
+   * The total-use list (duplicates included) of the **external** inputs the original nodes
+   * consumed. Internal values are never materialised, so they are not included. MUST: it never
+   * differs from the original total-use count by even one (the only basis of the arena's reference
+   * counting).
    */
   readonly ins: readonly string[];
-  /** bind group のオペランド順（binding 1 から。重複無し）。 */
+  /** Operand order of the bind group (from binding 1; no duplicates). */
   readonly binds: readonly string[];
   /**
-   * 畳んだノードの本数。**走査幅ではない** — 窓内 passthrough を持つルールでは
-   * 窓幅（{@link FusionHit.advance}）の方が大きい。
+   * The number of folded nodes. **Not the scan width** — for a rule with in-window passthroughs,
+   * the window width ({@link FusionHit.advance}) is larger.
    */
   readonly nodeCount: number;
   readonly outputName: string;
   readonly outputShape: readonly number[];
-  /** ステップ内で閉じた一時（{@link FusedStep.dispatches} の添字で寿命を表す）。 */
+  /** Temporaries closed inside the step (lifetime = indices into {@link FusedStep.dispatches}). */
   readonly temps: readonly FusedTemp[];
   readonly dispatches: readonly FusedDispatch[];
 };
 
 /**
- * packed int8 活性の受け渡し（ADR 0105）— 固定 SRQ の出力を u32 1 語 = int8 コード 4 個で
- * 渡す対の宣言。`role` は**このノードがどちら側か**で、`scale` はどちらの側でも
- * **生産側 SRQ の f32 scale**（消費側が `f32(code) * scale` で復元するのに要る）。
+ * Handing over packed int8 activations (ADR 0105) — the declaration of a pair that passes a fixed
+ * SRQ's output as one u32 word = four int8 codes. `role` is **which side this node is**, and
+ * `scale` is, on either side, **the producer SRQ's f32 scale** (the consumer needs it to restore
+ * with `f32(code) * scale`).
  *
- * MUST: 対の受理は {@link "./fusion.ts"} の `planFusions` の 1 箇所で決まる。
- * 生産側だけ / 消費側だけを立てると、
- * `vec4<u32>` 束縛に f32 の語が流れる形（例外なしの沈黙誤値）になる。
+ * MUST: acceptance of a pair is decided in one place, `planFusions` in {@link "./fusion.ts"}.
+ * Setting only the producer or only the consumer
+ * lets f32 words flow into a `vec4<u32>` binding (a silent wrong value with no exception).
  */
 export type PackedActivations = {
   readonly role: "write" | "read";
@@ -144,12 +161,13 @@ type NodeStep = {
   readonly kind: "node";
   readonly plan: NodePlan;
   /**
-   * 出力を入力バッファの別名にする（0 dispatch — ADR 0011）。reshapeは常に真、permuteは
-   * 要素順が変わらず、実体が内部で確保されている場合だけ。expand は
-   * 束縛後の入出力 shape が rank を含め完全一致するとき（= 複製軸を持たない恒等写像）だけ真。
+   * Make the output an alias of the input buffer (zero dispatches — ADR 0011). Always true for
+   * reshape; for permute only when the element order does not change and the storage is allocated
+   * internally. For expand, true only when the bound input and output shapes match exactly,
+   * rank included (= an identity map with no replicated axis).
    */
   readonly aliasesInput: boolean;
-  /** packed int8 活性の対（ADR 0105）。`undefined` = 従来どおり f32 で受け渡す。 */
+  /** The packed int8 activation pair (ADR 0105). `undefined` = handed over as f32, as before. */
   readonly packedActivations?: PackedActivations;
 };
 
@@ -161,45 +179,50 @@ export type FusionPlan = {
 };
 
 /**
- * 判定に要る device の能力（**granted limit の値そのもの**）。
+ * The device capabilities the decision needs (**the granted limit values themselves**).
  *
- * MUST: ここに載るのは「計画を決める入力」であって計測値ではない。実行時に測って選び直す形
- * （オートチューン）は ADR 0022 で禁じている — 同じ device・同じ束縛なら常に同じ計画が出る、
- * が prepared plan キャッシュとキーの意味の前提。
+ * MUST: what goes here is "input that decides the plan", not measurements. Measuring at run time
+ * and choosing again (autotuning) is banned by ADR 0022 — "the same device and the same bindings
+ * always give the same plan" is the premise of the prepared-plan cache and the meaning of its key.
  */
 export type FusionLimits = {
-  /** ストレージ束縛 1 本の上限。行ブロック枚数を決める唯一の device 側入力。 */
+  /** The limit of one storage binding. The only device-side input deciding the row-block count. */
   readonly maxStorageBufferBindingSize: number;
-  /** 1 軸あたりの workgroup 数の上限（タイル型 dispatch の fail loudly 用）。 */
+  /** The workgroup-count limit per axis (for failing loudly on tiled dispatches). */
   readonly maxComputeWorkgroupsPerDimension: number;
 };
 
-/** GPU実体を持たない常駐格納情報。scaleの寿命と所有権はSession側に残す。 */
+/**
+ * Resident storage info without a GPU object. The lifetime and ownership of the scale stay with the
+ * Session.
+ */
 export type FusionWeightLayout =
   | { readonly storage: "f16" | "bf16" | "i2" | "i8" }
   | { readonly storage: "i4"; readonly groupSize: number };
 
-/** 判定に要るグラフ全体の事実（executor の Session 状態から渡す）。 */
+/** Whole-graph facts the decision needs (passed from the executor's Session state). */
 export type FusionContext = {
-  /** 値名 → グラフ内の消費回数（plan.ts の countUses）。 */
+  /** Value name → consumer count in the graph (countUses in plan.ts). */
   readonly useCounts: ReadonlyMap<string, number>;
   readonly outputNames: ReadonlySet<string>;
   readonly limits: FusionLimits;
   /**
-   * 行ブロック枚数の強制（**テスト専用** — executor の `ROW_BLOCK_SPLIT`）。上限に収まる
-   * 最小枚数の代わりにこの枚数で割る。上限に収まらない枚数は fail loudly。
+   * Forces the row-block count (**test only** — the executor's `ROW_BLOCK_SPLIT`). Splits into this
+   * count instead of the smallest count that fits the limit. A count that does not fit the limit
+   * fails loudly.
    */
   readonly rowBlockSplit?: number;
   /**
-   * 行ブロックの一時 1 本ごとの予算（`SessionOptions.attentionRowBlockMaxBytes` — ADR 0124）。
-   * 枚数の上限は {@link FusionLimits.maxStorageBufferBindingSize} とこの値の小さいほう（`rowBlockLimit`）。
-   * `limits` 自体は下げない（行ブロック以外の判定は granted 値のまま）。省略 = 予算なし。
+   * The budget per row-block temporary (`SessionOptions.attentionRowBlockMaxBytes` — ADR 0124).
+   * The count's limit is the smaller of {@link FusionLimits.maxStorageBufferBindingSize} and this
+   * value (`rowBlockLimit`). `limits` itself is not lowered (decisions other than row blocks keep
+   * the granted values). Omitted = no budget.
    */
   readonly attentionRowBlockMaxBytes?: number;
-  /** 明示指定時だけRMS→addを融合する（ADR 0099）。 */
+  /** Fuse RMS→add only when explicitly requested (ADR 0099). */
   readonly fuseRmsNormAdd?: boolean;
   readonly fuseLinearStaticQuantize?: boolean;
-  /** 固定 SRQ の活性を packed int8 で並列 GEMV へ渡す（ADR 0105）。 */
+  /** Hand fixed-SRQ activations to the parallel GEMV as packed int8 (ADR 0105). */
   readonly packedStaticQuantize?: boolean;
   readonly linearGemvReduce?: LinearGemvReduce;
   readonly linearCompute?: "f32" | "f16" | "a8";
@@ -208,12 +231,12 @@ export type FusionContext = {
 };
 
 /**
- * ルールが見る文脈 = 呼び手の {@link FusionContext} + **走査の内側で決まる** packed 活性の対
- * （値名 → 生産側 SRQ の scale）。
+ * The context a rule sees = the caller's {@link FusionContext} + the packed activation pairs
+ * **decided inside the scan** (value name → the producer SRQ's scale).
  *
- * MUST: `packedValues` は呼び手が宣言するものではない（{@link "./fusion.ts"} の `planFusions` が
- * 1 度目の走査の
- * 結果から導く — 素のノードとして残った SRQ だけが対象なので、走査の前には決まらない）。
+ * MUST: the caller does not declare `packedValues` (`planFusions` in {@link "./fusion.ts"} derives
+ * it from the result of the first
+ * scan — only SRQs left as plain nodes qualify, so it cannot be decided before the scan).
  */
 export type FusionScanContext = FusionContext & {
   readonly packedValues: ReadonlyMap<string, number>;
@@ -223,33 +246,35 @@ export const sameShape = (a: readonly number[], b: readonly number[]): boolean =
   a.length === b.length && a.every((dim, index) => dim === b[index]);
 
 /**
- * 融合が扱えるのは**契約の出力数が 1 本**のノードだけ（ADR 0068 決定 1）。
+ * Fusion handles only nodes whose **contract has exactly one output** (ADR 0068 decision 1).
  *
- * MUST: 判定は窓の全ノードで行い、1 本でも外れたら窓ごと諦める（掴めなければ既存の素の
- * ノード列が必ず正しい）。{@link FusedStep} は単一出力で、内部値の畳み込み
- * （{@link externalIns} / {@link internalsArePrivate}）も末尾出力の引き継ぎ
- * （`build` の `outputName`）も「ノード 1 本 = 値 1 本」から導いている。多出力ノードが鎖に
- * 入ると畳まれなかった出力を誰も定義しないまま消え、窓内 passthrough に入ると素のノードとして
- * 前へ動かす対象になるので、どちらも matcher の綴りだけでは防げない。
- * MUST: ここが唯一の判定点（{@link defineRule} が全ルールを通す）。ルール側の match に
- * 書かせると、将来 topk / argmax の綴りに一致する窓を持つルールだけが黙って誤融合する。
+ * MUST: check every node of the window, and give up on the whole window if even one fails (if it
+ * does not match, the existing list of plain nodes is always correct). {@link FusedStep} has a
+ * single output, and both the folding of internal values ({@link externalIns} /
+ * {@link internalsArePrivate}) and the hand-over of the last output (`outputName` of `build`) are
+ * derived from "one node = one value". A multi-output node in the chain would make the unfolded
+ * outputs vanish with nobody defining them, and one in an in-window passthrough would be moved
+ * forward as a plain node; the matcher's spelling alone prevents neither.
+ * MUST: this is the only decision point ({@link defineRule} runs every rule through it). Leaving it
+ * to each rule's match would let only a rule whose window happens to match a future topk / argmax
+ * spelling fuse wrongly, silently.
  */
 export const windowIsSingleOutput = (window: readonly NodePlan[]): boolean =>
   window.every((step) => outputCountOf(step.contract) === 1);
 
 /**
- * 窓に **state を触るノード**が 1 本でも入っていないか（ADR 0067 決定 5b）。
+ * Whether the window contains even one **node that touches state** (ADR 0067 decision 5b).
  *
- * MUST: state 参照はテンソルのデータ辺を張らないため、融合が窓内 passthrough を前へ動かすと
- * `nodes` 配列順が崩れても shape 検査も参照計数も何も落ちない — 「今 step の k/v を過去として
- * 二重に読む」形が例外なしに出る。
- * MUST: ここが唯一の判定点（{@link windowIsSingleOutput} と同じ位置）。ルール側の match に
- * 書かせると、将来のルールが 1 本書き忘れただけで沈黙誤値になる。
+ * MUST: a state reference draws no tensor data edge, so when fusion moves an in-window passthrough
+ * forward and breaks the `nodes` array order, neither the shape checks nor the reference counting
+ * fail — the form "read this step's k/v twice as the past" comes out with no exception.
+ * MUST: this is the only decision point (the same place as {@link windowIsSingleOutput}). Leaving
+ * it to each rule's match would make one omission in a future rule a silent wrong value.
  */
 export const windowTouchesState = (window: readonly NodePlan[]): boolean =>
   window.some((step) => Object.keys(step.node.states).length > 0);
 
-/** 鎖の全ノードが f32 専業か（融合カーネルは全て f32 固定）。 */
+/** Whether every node of the chain is f32 only (every fused kernel is fixed to f32). */
 export const allF32 = (chain: readonly NodePlan[]): boolean =>
   chain.every(
     (step) =>
@@ -258,12 +283,13 @@ export const allF32 = (chain: readonly NodePlan[]): boolean =>
   );
 
 /**
- * 鎖の内部値（最終ノード以外の出力）が全て「消費者ちょうど 1 本・graph output でない」か。
+ * Whether every internal value of the chain (the outputs of every node but the last) has "exactly
+ * one consumer and is not a graph output".
  *
- * MUST: 融合後は内部値のバッファを 1 本も作らないので、外部 consumer や readback が 1 つでも
- * あれば値が消える。ここが全ルール共通の適格条件。
- * MUST: ノードの**全出力**を見る（{@link windowIsSingleOutput} が多出力を先に落とすかどうかに
- * 依らせない — 判定の順序を変えても結論が動かない形にしておく）。
+ * MUST: after fusion no buffer for an internal value exists, so a single external consumer or
+ * readback would lose the value. This is the eligibility condition shared by every rule.
+ * MUST: look at **every output** of a node (do not rely on whether {@link windowIsSingleOutput}
+ * rejects multi-output nodes first — keep the conclusion independent of the check order).
  */
 export const internalsArePrivate = (chain: readonly NodePlan[], context: FusionContext): boolean =>
   chain
@@ -275,8 +301,9 @@ export const internalsArePrivate = (chain: readonly NodePlan[], context: FusionC
     );
 
 /**
- * 鎖が消費した外部入力の延べ列（重複込み・元の node.ins の並び順）。
- * 内部値は畳まれて消えるので除く（ノードの全出力が内部値）。
+ * The total-use list of the external inputs the chain consumed (duplicates included, in the order
+ * of the original node.ins). Internal values are folded away and excluded (every output of those
+ * nodes is an internal value).
  */
 const externalIns = (chain: readonly NodePlan[]): readonly string[] => {
   const internal = new Set(
@@ -286,20 +313,22 @@ const externalIns = (chain: readonly NodePlan[]): readonly string[] => {
 };
 
 /**
- * 窓内 passthrough を融合ステップより**前**へ動かしてよいか。
+ * Whether the in-window passthroughs may move **in front of** the fused step.
  *
- * MUST: passthrough は鎖が定義する値（内部値も**最終出力も**）を 1 つも消費してはならない。
- * 消費していれば「まだ計算されていない値を読むノード」を先に置くことになり、順序の
- * 入れ替えが非合法になる（executor は steps を順に encode するだけなので、ここで弾かないと
- * `値 'x' のバッファが無い` か、名前が使い回されていれば沈黙誤値になる）。
+ * MUST: a passthrough consumes no value the chain defines (internal values **and the last
+ * output**). If it did, a "node that reads a value not yet computed" would be placed first and the
+ * reordering would be illegal (the executor only encodes the steps in order, so unless this rejects
+ * it, the result is a "no buffer for value 'x'" error or, if the name is reused, a silent wrong
+ * value).
  *
- * NOTE: 窓内 passthrough を持つ現行 2 ルール（adaln / rope）に限れば、passthrough が読める
- * 鎖の値は**内部値だけ**（最終出力は passthrough より後に定義されるので読めない）で、それは
- * {@link internalsArePrivate}（consumer ちょうど 1 本）が先に落とす — **反例を
- * 単独では構成できない**（tests/runtime_fusion_test.ts のフォールト注入で確認済み）。
- * ここが独立に効くのは「鎖の**最終**ノードが passthrough より前に来る」窓を持つ将来の
- * ルールで、internalsArePrivate は最終出力を見ないので代替にならない。窓の仕組み側の
- * 不変条件として `defineRule` に置く。
+ * NOTE: for the two current rules with in-window passthroughs (adaln / rope), the only chain values
+ * a passthrough can read are **internal values** (the last output is defined after the passthrough,
+ * so it cannot be read), and {@link internalsArePrivate} (exactly one consumer) rejects those first
+ * — **a counterexample cannot be built on its own** (confirmed by fault injection in
+ * tests/runtime_fusion_test.ts). This check takes effect independently only for a future rule with
+ * a window where "the **last** node of the chain comes before the passthrough"; internalsArePrivate
+ * does not look at the last output, so it is no substitute. It sits in `defineRule` as an invariant
+ * of the window mechanism.
  */
 export const passthroughIsIndependent = (
   chain: readonly NodePlan[],
@@ -310,19 +339,22 @@ export const passthroughIsIndependent = (
   return passthrough.every((step) => step.node.ins.every((name) => !defined.has(name)));
 };
 
-/** 融合ルール 1 件の適用結果（融合ステップ + 窓内 passthrough + 走査幅）。 */
+/** The result of applying one fusion rule (fused step + in-window passthroughs + scan width). */
 export type FusionHit = {
-  /** 融合ステップより**前**に素のまま並べる窓内ノード（元のノード順）。 */
+  /** In-window nodes placed as plain nodes **before** the fused step (original node order). */
   readonly passthrough: readonly NodePlan[];
   readonly step: FusedStep;
-  /** 走査を進める幅（= 窓のノード数 = passthrough + 畳んだ鎖）。 */
+  /** How far the scan advances (= the window's node count = passthroughs + the folded chain). */
   readonly advance: number;
 };
 
-/** ルールの本体（match で掴み、build で宣言的にステップへ落とす）。 */
+/** The body of a rule (match grabs, build lowers to a step declaratively). */
 export type FusionRule = {
   readonly name: FusionRuleName;
-  /** このルールが掴みうる先頭 op（適用順の互いに素性を機械検査するための宣言）。 */
+  /**
+   * The leading ops this rule can grab (declared so that the pairwise disjointness of the
+   * application order is checked mechanically).
+   */
   readonly heads: readonly string[];
   readonly apply: (
     nodes: readonly NodePlan[],
@@ -332,23 +364,24 @@ export type FusionRule = {
 };
 
 /**
- * ルールが掴んだ窓。`window` は連続ノード列、`chain` はそのうち**畳む**部分列
- * （実際のノード順）で、差分が窓内 passthrough になる。
+ * The window a rule grabbed. `window` is a run of consecutive nodes, `chain` the subsequence of it
+ * that is **folded** (actual node order); the difference is the in-window passthroughs.
  */
 export type FusionMatch = {
-  /** 連続窓（走査幅の唯一の根拠）。 */
+  /** The consecutive window (the only basis of the scan width). */
   readonly window: readonly NodePlan[];
-  /** 畳むノード列（`window` の部分列）。 */
+  /** The folded nodes (a subsequence of `window`). */
   readonly chain: readonly NodePlan[];
 };
 
 /**
- * ステップ内一時の寿命宣言が dispatch 列の内側で閉じているか。
+ * Whether the lifetime declarations of step-internal temporaries close inside the dispatch list.
  *
- * MUST: `allocBefore ≤ releaseAfter < dispatch 数`。外れた宣言は executor の replay で
- * 「未確保の一時を束ねる」か「解放されない一時が残る」になり、前者は bind 面が組めず、
- * 後者は計画の閉包検査まで気づけない。ルールの本数だけ手書きさせず、
- * 宣言の受け口 1 箇所で落とす。
+ * MUST: `allocBefore ≤ releaseAfter < dispatch count`. A declaration outside that becomes, in the
+ * executor's replay, either "bind a temporary that was never allocated" or "a temporary that is
+ * never released"; the former cannot build a bind surface, and the latter goes unnoticed until the
+ * plan's closure check. Rather than have each rule write it by hand,
+ * it is rejected at the one entry point for declarations.
  */
 const assertTempLifetimes = (
   name: FusionRuleName,
@@ -372,13 +405,16 @@ const assertTempLifetimes = (
 };
 
 /**
- * match（掴む）と build（binds / kernel key / params を宣言する）の分離を型で強制する。
+ * Enforces by type the separation of match (grab) and build (declare binds / kernel key / params).
  *
- * MUST: 解放簿記の根拠（`ins` の延べ列）・畳んだ本数（`nodeCount`）・走査幅（`advance`）・
- * passthrough は**掴んだ窓と鎖から導く**。ルール側に宣言させると、同じ事実がルールの
- * 本数だけ複製され、1 本ずれても例外は出ない。
- * MUST: 多出力ノードを含む窓は全ルールでここが落とす（{@link windowIsSingleOutput}）。
- * MUST: state を触るノードを含む窓も同じ位置で落とす（{@link windowTouchesState}）。
+ * MUST: the basis of the release bookkeeping (the total-use list `ins`), the folded count
+ * (`nodeCount`), the scan width (`advance`) and the passthroughs are **derived from the grabbed
+ * window and chain**. Having each rule declare them would copy the same fact once per
+ * rule, and a single drift would raise no exception.
+ * MUST: a window containing a multi-output node is rejected here for every rule
+ * ({@link windowIsSingleOutput}).
+ * MUST: a window containing a node that touches state is rejected at the same place
+ * ({@link windowTouchesState}).
  */
 export const defineRule = <Matched extends FusionMatch>(rule: {
   readonly name: FusionRuleName;
@@ -395,16 +431,19 @@ export const defineRule = <Matched extends FusionMatch>(rule: {
   apply: (nodes, index, context) => {
     const matched = rule.match(nodes, index, context);
     if (matched === undefined) return undefined;
-    // 多出力ノード（ADR 0068 決定 1）は融合候補にしない。matcher の op 名の綴りは受理集合を
-    // 狭めるだけで「出力が 1 本」を保証しないので、窓の全ノードを契約から見る 1 箇所を置く。
+    // Multi-output nodes (ADR 0068 decision 1) are not fusion candidates. The matcher's op-name
+    // spelling only narrows the accepted set and does not guarantee "one output", so there is one
+    // place that checks every node of the window against its contract.
     if (!windowIsSingleOutput(matched.window)) return undefined;
-    // state を触るノード（ADR 0067 決定 5b）は融合候補にしない — 並べ替えの禁止は窓の
-    // 仕組み側の不変条件で、matcher の op 名の綴りでは表せない。
+    // Nodes that touch state (ADR 0067 decision 5b) are not fusion candidates — the ban on
+    // reordering is an invariant of the window mechanism and cannot be expressed by the matcher's
+    // op-name spelling.
     if (windowTouchesState(matched.window)) return undefined;
     const folded = new Set(matched.chain);
     const passthrough = matched.window.filter((step) => !folded.has(step));
-    // MUST: 鎖は窓の部分列。外れていれば窓外のノードを畳んだ（= 走査幅が足りず二重実行）か
-    // 窓内を取りこぼした（= 未実行）ことになり、どちらも例外なしの沈黙誤値になる。
+    // MUST: the chain is a subsequence of the window. Otherwise it folded a node outside the window
+    // (= the scan width is short, so it runs twice) or missed one inside it (= never runs); both
+    // are silent wrong values with no exception.
     if (passthrough.length + matched.chain.length !== matched.window.length) {
       throw new ExecutionError(
         `融合ルール '${rule.name}': 畳んだ鎖 ${matched.chain.length} 本が窓 ${matched.window.length} 本の部分列でない`,

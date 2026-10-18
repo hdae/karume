@@ -1,16 +1,20 @@
 /**
- * op の CPU 参照実装（素朴・GPU 非依存）。カーネルの数値検証（ADR 0005 の段 2）で
- * GPU 出力と突合するオラクル。
+ * CPU reference implementations of the ops (naive, GPU-independent). The oracle that GPU output is
+ * compared against in the numeric verification of kernels (stage 2 of ADR 0005).
  *
- * 方針: 速度を一切考えない直訳で書く。f32 の elementwise は演算ごとに `Math.fround` して
- * f32 の丸めに寄せ、縮約（matmul / 行 reduce）は f64 で積んで格納時に 1 度だけ丸める
- * （GPU 側は f32 逐次累積なので完全一致はしない — だから allclose で判定する）。
- * i32 / bool は近似の余地が無いので**厳密一致**が期待値（突合側で allclose を使わない）。
+ * Approach: a literal transcription with no thought for speed. f32 elementwise ops apply
+ * `Math.fround` after every operation to follow f32 rounding; reductions (matmul / row reduce)
+ * accumulate in f64 and round once when stored (the GPU side accumulates sequentially in f32, so
+ * they do not match exactly — which is why allclose decides).
+ * i32 / bool leave no room for approximation, so **exact match** is the expectation (the comparing
+ * side does not use allclose).
  *
- * MUST: 座標→添字の計算を codegen と共有しない。stride の組み立てはまさに検証したい対象で、
- * 同じ実装を呼べばテストは stride バグを検出できなくなる（意図的な二重実装）。
- * MUST: 値式も codegen と別形にする（cast の truncate は WGSL の `i32()` に対し `Math.trunc`、
- * bool 化は `select(…)` に対し比較演算）。同じ式を写すと誤りが両側で相殺する。
+ * MUST: do not share the coordinate → index computation with codegen. Building the strides is
+ * exactly what is being verified, and calling the same implementation would leave tests unable to
+ * detect stride bugs (a deliberate double implementation).
+ * MUST: write the value expressions in a different form from codegen too (cast's truncation is
+ * `Math.trunc` against WGSL's `i32()`, conversion to bool is a comparison against `select(…)`).
+ * Copying the same expression lets an error cancel out on both sides.
  */
 
 import type { IrDtype } from "../format/ir.ts";
@@ -55,7 +59,10 @@ import {
   upsampleBilinear2dAttrs,
 } from "../ops.ts";
 
-/** 参照実装に渡された値が契約に合わない（要素数と shape の食い違いなど）。 */
+/**
+ * A value passed to a reference implementation does not meet the contract (element count and shape
+ * disagree, etc.).
+ */
 export class ReferenceOpError extends Error {
   override readonly name = "ReferenceOpError";
 }
@@ -66,19 +73,22 @@ type RefTensorOf<D extends IrDtype, A> = {
   readonly data: A;
 };
 
-/** 公開 Tensor と同じ dtype 判別ユニオン（bool は u32 の 0 / 1 — ADR 0009）。 */
+/** The same dtype-discriminated union as the public Tensor (bool is u32 0 / 1 — ADR 0009). */
 export type RefTensor =
   | RefTensorOf<"f32", Float32Array<ArrayBuffer>>
   | RefTensorOf<"i32", Int32Array<ArrayBuffer>>
   | RefTensorOf<"bool", Uint32Array<ArrayBuffer>>;
 
-/** 渡された TypedArray から dtype を決める（配列型と判別子の対応は 1 箇所に置く）。 */
+/**
+ * Decides the dtype from the given TypedArray (the mapping between array type and discriminator
+ * lives in one place).
+ */
 export const refTensor = (
   shape: readonly number[],
   data: Float32Array<ArrayBuffer> | Int32Array<ArrayBuffer> | Uint32Array<ArrayBuffer>,
 ): RefTensor => {
-  // MUST: 次元ごとに見る。積だけを見ると [-1,-1] が要素数 1 として通り、負の次元を持つ
-  // テンソルから意味の無い期待値を作る。
+  // MUST: check each dimension. Checking only the product lets [-1,-1] pass as 1 element and builds
+  // a meaningless expected value from a tensor with negative dimensions.
   const bad = shape.findIndex((dim) => !Number.isSafeInteger(dim) || dim < 0);
   if (bad >= 0) {
     throw new ReferenceOpError(
@@ -94,8 +104,8 @@ export const refTensor = (
 };
 
 /**
- * 数値列を dtype ごとの TypedArray に落とす。i32 は `Int32Array` の格納そのものが
- * 2 の補数ラップになるので、GPU 側（WGSL の i32 演算）と同じ折り返しになる。
+ * Stores a number sequence into the TypedArray of the dtype. For i32, storing into an `Int32Array`
+ * itself wraps in two's complement, so it wraps the same way as the GPU side (WGSL i32 arithmetic).
  */
 const materialize = (
   dtype: IrDtype,
@@ -113,11 +123,11 @@ const materialize = (
 };
 
 /**
- * erf のマクローリン級数（f64 で収束するまで加算）。|x| > 4 では erfc(x) < 1.6e-8 で
- * f32 の 1.0 と区別できないため ±1 に丸める。
+ * Maclaurin series of erf (summed in f64 until it converges). For |x| > 4, erfc(x) < 1.6e-8 cannot
+ * be told apart from the f32 1.0, so it rounds to ±1.
  *
- * MUST: GPU 側（Abramowitz–Stegun 7.1.26）と同じ式を写さない。同じ近似式なら誤差が相殺し、
- * gelu の突合テストが恒真になる。
+ * MUST: do not copy the GPU side's formula (Abramowitz–Stegun 7.1.26). With the same approximation
+ * the errors cancel out and gelu's comparison test becomes vacuous.
  */
 const erf = (x: number): number => {
   const a = Math.abs(x);
@@ -134,14 +144,16 @@ const erf = (x: number): number => {
 };
 
 /**
- * f32 → f32 の unary（bitwise_not は bool 専業、比較 3 本は bool を返すので別扱い）。
- * 第 2 引数は attrs 由来のスカラ（{@link scalarParamValues} の並び）。
+ * f32 → f32 unary ops (bitwise_not is bool-only and the three comparisons return bool, so they
+ * are handled separately).
+ * The second argument is the scalars from attrs (in the order of {@link scalarParamValues}).
  *
- * MUST: `log1p` は `Math.log1p` を使う（GPU 側の補正式を写さない）。同じ式を書くと
- * 「補正が外れている」ことを突合が検出できなくなる — erf / softmax と同じ規律。
- * MUST: `leaky_relu` / `clamp` も GPU 側の select 形を写さず、比較の向きを逆にした
- * 分岐で書く。NaN では全ての比較が false になるので、どちらの形でも NaN は素通りする
- * （= torch と同じ伝播）。
+ * MUST: `log1p` uses `Math.log1p` (does not copy the GPU side's corrected formula). Writing the
+ * same formula would leave the comparison unable to detect that "the correction is off" — the same
+ * discipline as erf / softmax.
+ * MUST: `leaky_relu` / `clamp` do not copy the GPU side's select form either; they are written as
+ * branches with the comparison reversed. Every comparison with NaN is false, so NaN passes through
+ * in either form (= the same propagation as torch).
  */
 const UNARY_F32: Readonly<
   Record<
@@ -155,35 +167,40 @@ const UNARY_F32: Readonly<
   log: (x) => Math.log(x),
   log1p: (x) => Math.log1p(x),
   sqrt: (x) => Math.sqrt(x),
-  // sqrt / tanh と同じく組込どうしで突合する（log1p / erf のように「片側が近似式」では
-  // ないので、写し間違いを検出する別式が存在しない）。NOTE: WGSL が `sin` の精度を保証
-  // するのは |x| ≤ π の範囲だけで、外側の一致は実装依存 — 突合は allclose で判定する。
+  // Like sqrt / tanh, compared built-in against built-in (unlike log1p / erf, neither side is an
+  // approximation, so no other formula exists to detect a copying mistake). NOTE: WGSL guarantees
+  // the accuracy of `sin` only for |x| ≤ π, and agreement outside it is implementation-dependent
+  // — the comparison is decided by allclose.
   sin: (x) => Math.sin(x),
   tanh: (x) => Math.tanh(x),
   sigmoid: (x) => 1 / (1 + Math.exp(-x)),
   relu: (x) => Math.max(x, 0),
-  // torch 既定の gelu（approximate="none"）= 0.5·x·(1 + erf(x/√2))
+  // torch's default gelu (approximate="none") = 0.5·x·(1 + erf(x/√2))
   gelu: (x) => 0.5 * x * (1 + erf(x / Math.SQRT2)),
-  // torch の approximate="tanh"。**ここは GPU 側と同じ式で書く** — erf / log1p と違い、この
-  // 式自体が torch の定義であって近似ではないので、別式にすると「別の関数」を突合すること
-  // になる（検出したいのは近似の外れではなく実装の取り違え）。0.7978845608028654 = √(2/π)。
+  // torch's approximate="tanh". **Written with the same formula as the GPU side here** — unlike
+  // erf / log1p, this formula is torch's definition, not an approximation, so a different formula
+  // would compare against "a different function" (what should be detected is an implementation
+  // mix-up, not an approximation miss). 0.7978845608028654 = √(2/π).
   gelu_tanh: (x) => 0.5 * x * (1 + Math.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x))),
   clamp: (x, [min, max]) => (x < min ? min : x > max ? max : x),
-  // MUST: 分岐の向きを `x >= min ? x : min` にしない — NaN で false へ落ちて min を返し、
-  // torch の `clamp(NaN, min) = NaN` から静かに外れる（この 1 本が向きの検出器）。
-  // GPU 側は NaN 伝播をビット列判定の外殻で担う（src/codegen/elementwise.ts）— 参照は
-  // その式を写さず独立に書く（log1p / erf と同じ規律）。
+  // MUST: do not write the branch as `x >= min ? x : min` — NaN falls to false and returns min,
+  // silently departing from torch's `clamp(NaN, min) = NaN` (this one line is the direction
+  // detector).
+  // The GPU side carries NaN propagation with the bit-pattern shell (src/codegen/elementwise.ts)
+  // — the reference does not copy that expression and is written independently (the same
+  // discipline as log1p / erf).
   clamp_min: (x, [min]) => (x < min ? min : x),
   leaky_relu: (x, [slope]) => (x < 0 ? slope * x : x),
 };
 
 /**
- * {@link UNARY_F32} を attrs スカラ無しで引くときの空表（表は clamp 族と共有しているので
- * 第 2 引数が要る — 呼び分けのために式を写さない）。
+ * The empty list for looking up {@link UNARY_F32} without attrs scalars (the table is shared with
+ * the clamp family, so the second argument is needed — the expressions are not copied just to call
+ * them differently).
  */
 const NO_SCALARS: readonly number[] = [];
 
-/** f32 → bool の比較（attrs のスカラと比べる）。bool は u32 の 0 / 1（ADR 0009）。 */
+/** f32 → bool comparisons (against a scalar from attrs). bool is u32 0 / 1 (ADR 0009). */
 const COMPARE_SCALAR: Readonly<
   Record<"ge_scalar" | "le_scalar" | "gt_scalar", (x: number, value: number) => boolean>
 > = {
@@ -192,7 +209,7 @@ const COMPARE_SCALAR: Readonly<
   gt_scalar: (x, value) => x > value,
 };
 
-/** f32 の算術（比較 / 論理は別表 — 出力 dtype が違う）。 */
+/** f32 arithmetic (comparison / logic are separate tables — their output dtype differs). */
 const BINARY_F32: Readonly<Partial<Record<BinaryOpName, (a: number, b: number) => number>>> = {
   add: (a, b) => a + b,
   sub: (a, b) => a - b,
@@ -201,30 +218,33 @@ const BINARY_F32: Readonly<Partial<Record<BinaryOpName, (a: number, b: number) =
 };
 
 /**
- * i32 の二項演算。JS の数値は f64 なので、32bit へ畳む演算を明示する
- * （`Math.imul` / `| 0`）— 素の乗算は 2^53 を超えた時点で静かに精度を失う。
- * 解禁しているのは mul / sub のみ（契約表 — 実測グラフに出る形だけ）。
+ * i32 binary ops. JS numbers are f64, so the folding into 32 bits is explicit
+ * (`Math.imul` / `| 0`) — a plain multiplication silently loses precision once it exceeds 2^53.
+ * Only mul / sub are allowed (the contract table — only the forms that appear in real graphs).
  */
 const BINARY_I32: Readonly<Partial<Record<BinaryOpName, (a: number, b: number) => number>>> = {
   sub: (a, b) => (a - b) | 0,
   mul: (a, b) => Math.imul(a, b),
 };
 
-/** f32 × f32 → bool の比較（出力は u32 の 0 / 1 — ADR 0009）。 */
+/** f32 × f32 → bool comparisons (the output is u32 0 / 1 — ADR 0009). */
 const COMPARE_F32: Readonly<Partial<Record<BinaryOpName, (a: number, b: number) => boolean>>> = {
   ge: (a, b) => a >= b,
 };
 
 /**
- * bool × bool → bool の論理演算。
- * MUST: GPU 側（`select` + `!= 0u`）と別形にする — JS の真偽値へ落としてから素の論理演算で
- * 書き、数値化は最後に 1 度だけ行う。
+ * bool × bool → bool logical ops.
+ * MUST: a different form from the GPU side (`select` + `!= 0u`) — drop to JS booleans, write the
+ * plain logical operation, and convert to a number only once at the end.
  */
 const BINARY_BOOL: Readonly<Partial<Record<BinaryOpName, (a: boolean, b: boolean) => boolean>>> = {
   bitwise_and: (a, b) => a && b,
 };
 
-/** dtype ごとの二項演算子（無い組み合わせは契約検査を通っていても参照実装が無い = 内部矛盾）。 */
+/**
+ * Binary operator per dtype (a missing combination has no reference implementation even if it
+ * passed the contract check = an internal inconsistency).
+ */
 const binaryEvaluator = (op: BinaryOpName, dtype: IrDtype): ((a: number, b: number) => number) => {
   if (dtype === "bool") {
     const logical = BINARY_BOOL[op];
@@ -250,11 +270,13 @@ export const referenceUnary = (
   assertDtype(contract, x.dtype, "reference");
   const values = new Array<number>(x.data.length);
   if (op === "bitwise_not") {
-    // bool（u32 の 0 / 1）の否定。WGSL 側の select とは別形（比較の結果を数値化する）。
+    // Negation of a bool (u32 0 / 1). A different form from the WGSL side's select (the result
+    // of a comparison converted to a number).
     for (let i = 0; i < values.length; i += 1) values[i] = x.data[i] === 0 ? 1 : 0;
     return materialize(x.dtype, [...x.shape], values);
   }
-  // MUST: スカラ attr は f32 へ丸めてから使う（GPU 側は params の f32 語で受け取る）。
+  // MUST: scalar attrs are rounded to f32 before use (the GPU side receives them as f32 words of
+  // params).
   const scalars = scalarParamValues(contract, attrs, "reference").map((value) =>
     Math.fround(value),
   );
@@ -272,16 +294,20 @@ export const referenceUnary = (
 };
 
 /**
- * 出力の平坦添字 → 入力の平坦添字（右詰め broadcast）。
+ * Flat output index → flat input index (right-aligned broadcast).
  *
- * MUST: stride 表を作らない。codegen 側（elementwise.ts の `elementwiseParams`）は
- * 「右から running product を積んで 1 の次元を 0 にする」形で stride を組むので、参照側で
- * 同じ式を書くと stride 導出の誤りが両側で相殺し、GPU との突合テストが恒真化する。
- * ここは別構造 —「出力座標を毎要素 divmod で分解 → 入力 shape を左から Horner 展開で畳む」
- * — で導く。相互検証の根拠は実装の独立性そのものなので、codegen とヘルパも式形も共有しない。
+ * MUST: do not build a stride table. The codegen side (`elementwiseParams` in elementwise.ts)
+ * builds strides as "accumulate a running product from the right and zero the dimensions of 1", so
+ * writing the same formula on the reference side lets a stride-derivation error cancel out on both
+ * sides and makes the comparison test against the GPU vacuous.
+ * Here it is derived with a different structure — "decompose the output coordinates per element
+ * with divmod → fold the input shape from the left by Horner's scheme". The basis of the
+ * cross-check is the independence of the implementations itself, so neither helpers nor
+ * expression shapes are shared with codegen.
  *
- * 右詰めで入力 rank に載らない先行次元は、入力側では常に座標 0（Horner の畳み込みに入らない）。
- * 長さ 1 の次元も同様に座標 0 へ潰れる（これが broadcast）。
+ * Leading dimensions that do not fall into the input rank under right alignment always have
+ * coordinate 0 on the input side (they do not enter the Horner fold). Dimensions of length 1 also
+ * collapse to coordinate 0 (this is the broadcast).
  */
 const broadcastIndex = (
   outIndex: number,
@@ -323,12 +349,13 @@ export const referenceBinary = (op: BinaryOpName, a: RefTensor, b: RefTensor): R
 };
 
 /**
- * where `out = cond ? a : b`（3 者とも右詰め broadcast）。
+ * where `out = cond ? a : b` (all three right-aligned broadcast).
  *
- * 添字の導出は {@link broadcastIndex} — 「出力座標を毎要素 divmod → 入力 shape を左から
- * Horner」で、codegen の stride 表とは別構造（同ファイル冒頭の MUST）。
- * MUST: 分岐の向きは torch の `where(cond, a, b)`（真なら a）。取り違えても shape も dtype も
- * 変わらないので、値でしか検出できない（テストは a / b を別の値域で埋める）。
+ * The index derivation is {@link broadcastIndex} — "divmod the output coordinates per element →
+ * Horner over the input shape from the left", a structure different from codegen's stride table
+ * (the MUST at the top of this file).
+ * MUST: the branch direction is torch's `where(cond, a, b)` (a when true). A mix-up changes neither
+ * shape nor dtype, so only the values can detect it (tests fill a / b with different value ranges).
  */
 export const referenceWhere = (cond: RefTensor, a: RefTensor, b: RefTensor): RefTensor => {
   const contract = resolveOpContract("where");
@@ -347,17 +374,18 @@ export const referenceWhere = (cond: RefTensor, a: RefTensor, b: RefTensor): Ref
 };
 
 /**
- * 最終次元の前縁和 `out[…, j] = Σ_{i ≤ j} x[…, i]`。
+ * Prefix sum over the last dimension `out[…, j] = Σ_{i ≤ j} x[…, i]`.
  *
- * MUST: **各出力を独立した内側ループの総和として**計算する（O(n²)）。カーネルは
- * 走査しながら累算器を持ち回る形なので、同じ漸化式で書くと累積方向・初期値・格納位置の
- * 誤りが両側で相殺する。行長は実測 ~10（recon §2）でテストも小さいので、素朴な二重和で
- * 十分速い。
- * MUST: 内側ループは **1 項ごとに `Math.fround` で丸める**（f32 の累算を 1 段ずつ再現する）。
- * JS の数値は f64 なので、まとめて足してから 1 回だけ丸めると参照側だけが f64 精度の
- * 総和になり、行長が伸びるほど GPU との差が「実装バグではなく丸め経路の違い」で開く
- * （行長 300 でオラクルの分解能が許容差を食い潰す）。二重和の**独立性は保ったまま**、
- * 丸め経路だけをカーネルに揃える。
+ * MUST: compute **each output as the sum of an independent inner loop** (O(n²)). The kernel
+ * carries an accumulator along its scan, so writing the same recurrence would let errors of
+ * accumulation direction, initial value and store position cancel out on both sides. Rows are ~10
+ * long as measured (recon §2) and tests are small, so the naive double sum is fast enough.
+ * MUST: the inner loop **rounds with `Math.fround` after every term** (reproducing f32
+ * accumulation step by step). JS numbers are f64, so summing everything and rounding once would
+ * give the reference alone an f64-precision sum, and the longer the row, the more the gap to the
+ * GPU opens through "a different rounding path, not an implementation bug" (at row length 300 the
+ * oracle's resolution eats up the tolerance). The double sum's **independence is kept**; only the
+ * rounding path is aligned with the kernel.
  */
 export const referenceCumsum = (
   x: RefTensor,
@@ -381,9 +409,9 @@ export const referenceCumsum = (
 };
 
 /**
- * 意味論 dtype の変換。契約（src/ops.ts）どおり
- * **f32 → 整数は 0 方向切り捨て（torch の truncate）**、**x → bool は x != 0** で、
- * bool → 数値は u32 の 0 / 1 をそのまま読む。
+ * Conversion between semantic dtypes. As in the contract (src/ops.ts),
+ * **f32 → integer truncates toward 0 (torch's truncate)**, **x → bool is x != 0**, and
+ * bool → number reads the u32 0 / 1 as is.
  */
 export const referenceCast = (x: RefTensor, to: IrDtype): RefTensor => {
   const values = new Array<number>(x.data.length);
@@ -394,7 +422,7 @@ export const referenceCast = (x: RefTensor, to: IrDtype): RefTensor => {
   return materialize(to, [...x.shape], values);
 };
 
-/** row-major の C[m,n] = A[m,k] · B[k,n]。f64 で積んで格納時に f32 へ丸める。 */
+/** Row-major C[m,n] = A[m,k] · B[k,n]. Accumulates in f64 and rounds to f32 when stored. */
 export const referenceMatmul = (a: RefTensor, b: RefTensor): RefTensor => {
   const contract = resolveOpContract("matmul");
   assertDtype(contract, a.dtype, "reference");
@@ -414,12 +442,13 @@ export const referenceMatmul = (a: RefTensor, b: RefTensor): RefTensor => {
 };
 
 /**
- * バッチ matmul `C[b,m,n] = A[b,m,k] · B[b,k,n]`。matmul と同じく f64 で積んで格納時に
- * 1 度だけ f32 へ丸める。
+ * Batched matmul `C[b,m,n] = A[b,m,k] · B[b,k,n]`. Like matmul, accumulates in f64 and rounds to
+ * f32 once when stored.
  *
- * MUST: バッチのオフセットを「行列 1 枚の要素数」から**毎バッチ独立に**組む。GPU 側は
- * dispatch の z 軸から同じ量を導くので、片方が軸を取り違えれば必ず値が食い違う形状
- * （B / M / K / N を全て違う長さにしたケース）で突合すること。
+ * MUST: build the batch offset from "the element count of one matrix" **independently per batch**.
+ * The GPU side derives the same quantity from the dispatch's z axis, so compare on shapes where an
+ * axis mix-up on either side always makes the values disagree (cases where B / M / K / N all have
+ * different lengths).
  */
 export const referenceBmm = (a: RefTensor, b: RefTensor): RefTensor => {
   const contract = resolveOpContract("bmm");
@@ -447,13 +476,16 @@ export const referenceBmm = (a: RefTensor, b: RefTensor): RefTensor => {
 };
 
 /**
- * 最終次元の gather。`out[..., j] = src[..., index[..., j]]`（先行次元は src と index で一致）。
+ * gather over the last dimension. `out[..., j] = src[..., index[..., j]]` (the leading dimensions
+ * of src and index match).
  *
- * MUST: **範囲外添字は必ず throw**。CPU 参照は契約のオラクルなので、GPU 側の裁定
- * （範囲外は NaN 汚染 — src/kernels/gather.ts）に合わせて緩めない。合わせると「契約違反の
- * グラフが両側で同じ値になる」ので突合が違反を検出できなくなる。
- * MUST: 添字の分解を codegen と別形にする。カーネルは出力の平坦添字を `i / J` で行へ割るが、
- * こちらは行と列の二重ループから平坦添字を組み立てる。
+ * MUST: **an out-of-range index always throws**. The CPU reference is the contract's oracle, so it
+ * is not relaxed to match the GPU side's ruling (out of range contaminates with NaN —
+ * src/kernels/gather.ts). Matching it would make "a contract-violating graph give the same values
+ * on both sides", and the comparison could no longer detect the violation.
+ * MUST: decompose the index in a different form from codegen. The kernel divides the flat output
+ * index into rows with `i / J`; here the flat index is built from a double loop over rows and
+ * columns.
  */
 export const referenceGather = (src: RefTensor, index: RefTensor): RefTensor => {
   const contract = resolveOpContract("gather");
@@ -480,28 +512,33 @@ export const referenceGather = (src: RefTensor, index: RefTensor): RefTensor => 
 };
 
 /**
- * f32 の最大有限値。`amax` / `amin` の縮約 identity（GPU 側は WGSL に無限大リテラルが無いため
- * この値を identity に使う — 参照もそちらへ揃える）。
+ * The largest finite f32. The reduction identity of `amax` / `amin` (WGSL has no infinity literal,
+ * so the GPU side uses this value as the identity — the reference aligns with it).
  *
- * MUST: codegen の定数を輸入しない（`src/codegen/reduce.ts` とは別に十進表記から書き下す —
- * 参照と codegen の二重実装を保つ規律）。
+ * MUST: do not import codegen's constant (written out from its decimal notation separately from
+ * `src/codegen/reduce.ts` — the discipline that keeps the reference and codegen as a double
+ * implementation).
  */
 const F32_MAX = Math.fround(3.402823466e38);
 
 /**
- * 1 軸の reduce（keepdim 無し）。縮約軸 `axis` は attrs の `dim`（既定値補完はしない）。
+ * Reduce over one axis (no keepdim). The reduced axis `axis` is the attrs' `dim` (no default is
+ * filled in).
  *
- * 走査は「出力要素ごとに縮約軸を `inner` 送りで舐める」形で、最終次元（`inner == 1`）は
- * 連続走査に退化する。GPU 側は 2 変種に分かれるが、参照は**軸を添字式で扱う 1 本**でよい
- * （f64 で積んで最後に 1 回だけ丸める性質は軸に依らない）。
+ * The scan "walks the reduced axis in steps of `inner` for each output element", which degenerates
+ * to a contiguous scan for the last dimension (`inner == 1`). The GPU side splits into two
+ * variants, but **a single version that handles the axis in the index expression** is enough for
+ * the reference (accumulating in f64 and rounding once at the end does not depend on the axis).
  *
- * bool 入力の `sum` は**真の個数**（出力 i32 — 契約表の写像）。f64 で数えてから整数配列へ
- * 落とすので、縮約長が 2^24 を超えても丸まらない。
+ * `sum` of a bool input is **the number of trues** (output i32 — the contract table's mapping). It
+ * counts in f64 before dropping to the integer array, so it does not round even when the reduced
+ * length exceeds 2^24.
  *
- * MUST: `amax` / `amin` は identity（∓{@link F32_MAX}）**始まり**で畳む。先頭要素始まりにすると
- * 縮約軸が全て −Infinity の行で参照だけが −Infinity を返し、識別子を identity として畳む GPU
- * 側（−F32_MAX）と例外なしに値が割れる（tolerance は EXACT なので吸収されない）。有限入力は
- * 全て [−F32_MAX, F32_MAX] に入るので、この始点で値は 1 ビットも動かない。
+ * MUST: `amax` / `amin` fold **starting from** the identity (∓{@link F32_MAX}). Starting from the
+ * first element, a row whose reduced axis is all −Infinity returns −Infinity in the reference
+ * alone, and the value diverges without an exception from the GPU side (−F32_MAX), which folds
+ * with the identity (the tolerance is EXACT, so it is not absorbed). Every finite input lies in
+ * [−F32_MAX, F32_MAX], so this starting point does not move a value by a single bit.
  */
 export const referenceRowReduce = (op: ReduceOpName, x: RefTensor, axis: number): RefTensor => {
   const contract = resolveOpContract(op);
@@ -514,7 +551,8 @@ export const referenceRowReduce = (op: ReduceOpName, x: RefTensor, axis: number)
   const count = numel(shape);
   const values = new Array<number>(count);
   for (let index = 0; index < count; index += 1) {
-    // 出力添字 index = outer·inner + i。縮約軸だけを外した先頭アドレスへ戻す。
+    // Output index index = outer·inner + i. Map back to the start address with only the reduced
+    // axis removed.
     const base = Math.floor(index / inner) * dim * inner + (index % inner);
     if (op === "sum") {
       let acc = 0;
@@ -536,20 +574,21 @@ export const referenceRowReduce = (op: ReduceOpName, x: RefTensor, axis: number)
 };
 
 /**
- * 最終次元の argmax（ADR 0068 決定 2）。出力は **i32 の添字**で、shape は入力の最終次元を
- * 1 に潰した形（rank 保存）。
+ * argmax over the last dimension (ADR 0068 decision 2). The output is **an i32 index**, and the
+ * shape is the input with its last dimension collapsed to 1 (rank preserved).
  *
- * 固定挙動（torch 準拠 — 実測 2026-08-17）:
+ * Fixed behaviour (following torch — measured 2026-08-17):
  *
- * - **同値は最小 index**（`[1,3,3,2]` → 1）。
- * - **全 −inf 行は index 0**（`amax` と違い identity が値ではなく添字なので、−inf の行でも
- *   答えが定義される）。
- * - **NaN は最大**（`[1,NaN,3,NaN]` → 1）。NaN が複数あれば最小 index。
+ * - **Ties go to the smallest index** (`[1,3,3,2]` → 1).
+ * - **An all −inf row gives index 0** (unlike `amax`, the identity is an index, not a value, so
+ *   the answer is defined even for a −inf row).
+ * - **NaN is the largest** (`[1,NaN,3,NaN]` → 1). With several NaNs, the smallest index.
  *
- * MUST: GPU 側（src/kernels/argmax.ts）の式を写さない。あちらは「(値, index) 対の辞書式
- * 最大元を木で畳む」形なので、こちらは**先頭から 1 要素ずつ走査して更新する素朴形**で書く
- * （NaN 判定も `Number.isNaN` で、ビット列判定を写さない）。同じ式を書くと木の結合順の
- * 誤りや NaN 判定の抜けが両側で相殺する。
+ * MUST: do not copy the GPU side's expression (src/kernels/argmax.ts). That one "folds the
+ * lexicographic maximum of (value, index) pairs in a tree", so this one is written in **the naive
+ * form that scans one element at a time from the start and updates** (NaN is detected with
+ * `Number.isNaN` too, not by copying the bit-pattern check). Writing the same expression would let
+ * an error in the tree's association order or a missing NaN check cancel out on both sides.
  */
 const referenceArgmax = (x: RefTensor): RefTensor => {
   const contract = resolveOpContract(ARGMAX_OP);
@@ -564,8 +603,9 @@ const referenceArgmax = (x: RefTensor): RefTensor => {
     for (let i = 1; i < dim; i += 1) {
       const candidate = x.data[base + i];
       const best = x.data[base + bestAt];
-      // NaN は最大（比較演算は NaN で全て false になるので、NaN 側を明示的に拾う）。
-      // 既に NaN を掴んでいるなら後続では絶対に更新しない = NaN も最小 index になる。
+      // NaN is the largest (every comparison with NaN is false, so the NaN side is picked up
+      // explicitly).
+      // Once a NaN is held, later elements never update it = NaN also gets the smallest index.
       if (Number.isNaN(best)) continue;
       if (Number.isNaN(candidate) || candidate > best) bestAt = i;
     }
@@ -575,23 +615,26 @@ const referenceArgmax = (x: RefTensor): RefTensor => {
 };
 
 /**
- * 最終次元の top-k（ADR 0068 決定 3）。返りは **2 本**（slot 0 = 値 f32 の降順・
- * slot 1 = 添字 i32）で、どちらも `[…, k]`。
+ * top-k over the last dimension (ADR 0068 decision 3). It returns **two outputs** (slot 0 = the
+ * values, f32 in descending order; slot 1 = the indices, i32), both `[…, k]`.
  *
- * 固定挙動（実測 2026-08-17 / torch 2.13.0+cpu）:
+ * Fixed behaviour (measured 2026-08-17 / torch 2.13.0+cpu):
  *
- * - **値の列は torch とビット一致**（降順・同値の多重度が同じなので、重複だらけの行でも
- *   一致する）。
- * - **添字の列は同値要素で最小 index 優先**。これは torch **準拠ではなく karume の規定**
- *   （torch は同値の順序を保証せず、`topk([5,5,5,5],1)` = 2 に対し `argmax` = 0 で
- *   自己矛盾している — 詳細は src/kernels/topk.ts の NOTE）。k=1 は argmax と同じ答え。
- * - **NaN は最大**（torch も先頭へ出す）。複数あれば最小 index。
- * - **全 −inf 行**でも答えは定義される（identity が値ではなく順位なので、最小 index から
- *   k 本）。
+ * - **The value sequence is bit-identical to torch** (descending, with the same multiplicity of
+ *   ties, so it matches even on rows full of duplicates).
+ * - **The index sequence prefers the smallest index among ties**. This is **Karume's rule, not
+ *   torch's** (torch does not guarantee the order of ties and contradicts itself with
+ *   `topk([5,5,5,5],1)` = 2 against `argmax` = 0 — details in the NOTE of src/kernels/topk.ts).
+ *   k=1 gives the same answer as argmax.
+ * - **NaN is the largest** (torch puts it first too). With several, the smallest index.
+ * - **An all −inf row** also has a defined answer (the identity is a rank, not a value, so k
+ *   entries from the smallest index).
  *
- * MUST: GPU 側（src/kernels/topk.ts）の式を写さない。あちらは「レーン局所 top-k → k ラウンドの
- * トーナメント」なので、こちらは**添字を辞書式順序で並べ替えて先頭 k 本を取る素朴形**で書く
- * （NaN 判定も `Number.isNaN`）。同じ形を書くとマージ境界の誤りや NaN の抜けが両側で相殺する。
+ * MUST: do not copy the GPU side's expression (src/kernels/topk.ts). That one is "lane-local
+ * top-k → a k-round tournament", so this one is written in **the naive form that sorts the indices
+ * in lexicographic order and takes the first k** (NaN detected with `Number.isNaN` too). Writing
+ * the same form would let an error at the merge boundaries or a missing NaN cancel out on both
+ * sides.
  */
 const referenceTopk = (
   x: RefTensor,
@@ -607,8 +650,8 @@ const referenceTopk = (
   const indices = new Array<number>(rows * k);
   for (let row = 0; row < rows; row += 1) {
     const base = row * dim;
-    // 添字を「値の降順・同値なら添字の昇順」で並べ替える（NaN は最大なので、比較の前に
-    // NaN 同士 / NaN 対数値を先に決める）。
+    // Sort the indices by "value descending, index ascending among ties" (NaN is the largest, so
+    // NaN vs NaN / NaN vs number are settled before the comparison).
     const order = Array.from({ length: dim }, (_, i) => i).sort((a, b) => {
       const va = x.data[base + a];
       const vb = x.data[base + b];
@@ -630,9 +673,9 @@ const referenceTopk = (
 };
 
 /**
- * 要素順を変えない形の付け替え（ADR 0011 の reshape）。データは連続のまま写す。
- * 実行系はここでバッファを別名化してコピーを出さないが、参照側は素直に写して
- * 「別名化しても値が変わらない」ことのオラクルになる。
+ * Reshaping that keeps the element order (ADR 0011's reshape). The data is copied contiguously as
+ * is. The execution system aliases the buffer here and makes no copy, while the reference copies it
+ * plainly and serves as the oracle that "aliasing does not change the values".
  */
 export const referenceReshape = (x: RefTensor, shape: readonly number[]): RefTensor => {
   const target = [...shape];
@@ -645,12 +688,14 @@ export const referenceReshape = (x: RefTensor, shape: readonly number[]): RefTen
 };
 
 /**
- * 軸の並べ替え。`dims[d]` = 出力の次元 d が取る入力の次元番号。
+ * Axis permutation. `dims[d]` = the input dimension that output dimension d takes.
  *
- * MUST: codegen（strided.ts）と添字計算を共有しない。あちらは「出力座標 → 入力 stride の
- * 内積」で読む gather 形なので、こちらは逆向きの scatter 形 —「**入力**の平坦添字を入力
- * 座標へ分解 → 出力座標へ並べ替え → 左からの Horner で出力添字を畳む」— で書く。
- * 同じ向きで書くと stride 表の組み立て誤りが両側で相殺し、突合テストが恒真化する。
+ * MUST: do not share the index computation with codegen (strided.ts). That one is a gather form
+ * that reads through "output coordinates → dot product with the input strides", so this one is
+ * written in the opposite scatter form — "decompose the flat **input** index into input
+ * coordinates → permute into output coordinates → fold the output index by Horner from the left".
+ * Writing it in the same direction would let an error in building the stride table cancel out on
+ * both sides and make the comparison test vacuous.
  */
 export const referencePermute = (x: RefTensor, dims: readonly number[]): RefTensor => {
   const rank = x.shape.length;
@@ -682,9 +727,10 @@ export const referencePermute = (x: RefTensor, dims: readonly number[]): RefTens
 };
 
 /**
- * 長さ 1 の次元だけを目標 shape へ複製する（右詰め）。添字の導出は
- * {@link broadcastIndex} — binary elementwise と同じ「出力座標を毎要素 divmod → 入力
- * shape を左から Horner」で、codegen の stride 表とは別構造（同ファイル冒頭の MUST）。
+ * Replicates only the dimensions of length 1 to the target shape (right-aligned). The index
+ * derivation is {@link broadcastIndex} — the same "divmod the output coordinates per element →
+ * Horner over the input shape from the left" as binary elementwise, a structure different from
+ * codegen's stride table (the MUST at the top of this file).
  */
 export const referenceExpand = (x: RefTensor, shape: readonly number[]): RefTensor => {
   const target = [...shape];
@@ -709,13 +755,15 @@ export const referenceExpand = (x: RefTensor, shape: readonly number[]): RefTens
 };
 
 /**
- * 静的軸・静的範囲の切り出し（ADR 0014）。`dim` 軸の `[start, end)` を取り出す。
+ * Slicing with a static axis and a static range (ADR 0014). Extracts `[start, end)` along axis
+ * `dim`.
  *
- * MUST: codegen（strided.ts の読み族）と添字計算を共有しない。あちらは「出力座標 → 入力
- * stride の内積 + offset」で読む gather 形なので、こちらは逆向きの scatter 形 —
- * 「**入力**の平坦添字を入力座標へ分解 → 窓の外なら捨てる → 出力座標を左からの Horner で
- * 畳む」— で書く（referenceSymPrefixSlice と同じ方針。offset の組み立て誤りを両側で
- * 相殺させないため）。
+ * MUST: do not share the index computation with codegen (the read family of strided.ts). That one
+ * is a gather form that reads through "output coordinates → dot product with the input strides +
+ * offset", so this one is written in the opposite scatter form — "decompose the flat **input**
+ * index into input coordinates → drop it when outside the window → fold the output coordinates by
+ * Horner from the left" (the same approach as referenceSymPrefixSlice, so that an error in building
+ * the offset does not cancel out on both sides).
  */
 export const referenceSlice = (
   x: RefTensor,
@@ -744,13 +792,15 @@ export const referenceSlice = (
 };
 
 /**
- * 静的軸の連結（ADR 0014）。入力を順に並べて `dim` 軸へ積む。
+ * Concatenation along a static axis (ADR 0014). Stacks the inputs in order along axis `dim`.
  *
- * MUST: 出力を**全て埋め切る**ことをオラクル側でも見る（未書き込みの穴が残ったら
- * ReferenceOpError）。GPU 側は入力ごとの部分書きで全域を覆う形なので、参照実装が
- * 「書かれなかった要素を 0 とみなす」と full-write の破れが両側で相殺する。
- * MUST: 添字は入力ごとの走査（scatter 形）で、書き出し位置は**連結軸の座標をずらす**形に
- * 組む — codegen は offset 1 語に畳んだ形なので、同じ式にはしない。
+ * MUST: the oracle side also checks that the output is **filled completely** (an unwritten hole
+ * raises ReferenceOpError). The GPU side covers the whole range with partial writes per input, so if
+ * the reference "treated unwritten elements as 0", a full-write violation would cancel out on both
+ * sides.
+ * MUST: the index comes from a scan per input (scatter form), and the write position is built by
+ * **shifting the coordinate of the concatenation axis** — codegen folds it into a single offset
+ * word, so the expression is not the same.
  */
 export const referenceCat = (
   inputs: readonly RefTensor[],
@@ -794,11 +844,12 @@ export const referenceCat = (
 };
 
 /**
- * 最終次元の定数 0 埋め（ADR 0014）。
+ * Constant zero padding of the last dimension (ADR 0014).
  *
- * MUST: **0 で埋めてから転写する**（scatter 形）。GPU 側は出力 1 要素ごとに「範囲内か」を
- * 判定して転写値か 0 を書く gather 形なので、同じ分岐を写すと境界の off-by-one が両側で
- * 相殺する。ゼロ領域が本当に 0 であること自体もこの形なら値で出る。
+ * MUST: **fill with 0, then copy** (scatter form). The GPU side is a gather form that decides "in
+ * range or not" per output element and writes the copied value or 0, so copying the same branch
+ * would let an off-by-one at the boundary cancel out on both sides. This form also shows in the
+ * values that the zero region really is 0.
  */
 export const referencePad = (x: RefTensor, attrs: Readonly<Record<string, unknown>>): RefTensor => {
   const contract = resolveOpContract("pad");
@@ -817,11 +868,12 @@ export const referencePad = (x: RefTensor, attrs: Readonly<Record<string, unknow
 };
 
 /**
- * 静的軸の添字反転（ADR 0014）。
+ * Index reversal along a static axis (ADR 0014).
  *
- * MUST: codegen（src/kernels/flip.ts）と向きを揃えない。あちらは出力添字から
- * `len - 1 - c` で入力を読む gather 形なので、こちらは**入力**を走査して反転先へ書く
- * scatter 形にする（軸の取り違えと off-by-one を両側で相殺させないため）。
+ * MUST: do not use the same direction as codegen (src/kernels/flip.ts). That one is a gather form
+ * that reads the input at `len - 1 - c` from the output index, so this one is a scatter form that
+ * scans the **input** and writes to the reversed position (so that an axis mix-up or an off-by-one
+ * does not cancel out on both sides).
  */
 export const referenceFlip = (
   x: RefTensor,
@@ -850,14 +902,16 @@ export const referenceFlip = (
 };
 
 /**
- * 記号 prefix スライス（ADR 0010）— Tmax で焼いた定数 `x` の**各軸の先頭**を `shape` へ
- * 切り出す。prefix 長そのものはランタイム側で `coeff·sym+offset` から決まるので、参照実装は
- * 決まった長さを受け取るだけ。
+ * Symbolic prefix slice (ADR 0010) — cuts **the head of each axis** of the constant `x` baked at
+ * Tmax to `shape`. The prefix length itself is decided on the runtime side from
+ * `coeff·sym+offset`, so the reference implementation only receives the decided lengths.
  *
- * MUST: codegen（strided.ts）と添字計算を共有しない。あちらは「出力座標 → 入力 stride の
- * 内積」で読む gather 形なので、こちらは逆向きの scatter 形 —「**入力**の平坦添字を Tmax 形の
- * 座標へ分解 → prefix の外なら捨てる → 出力座標を左からの Horner で畳む」— で書く
- * （referencePermute と同じ方針。stride 表の組み立て誤りを両側で相殺させないため）。
+ * MUST: do not share the index computation with codegen (strided.ts). That one is a gather form
+ * that reads through "output coordinates → dot product with the input strides", so this one is
+ * written in the opposite scatter form — "decompose the flat **input** index into Tmax-shaped
+ * coordinates → drop it when outside the prefix → fold the output coordinates by Horner from the
+ * left" (the same approach as referencePermute, so that an error in building the stride table does
+ * not cancel out on both sides).
  */
 export const referenceSymPrefixSlice = (x: RefTensor, shape: readonly number[]): RefTensor => {
   const target = [...shape];
@@ -893,11 +947,12 @@ export const referenceSymPrefixSlice = (x: RefTensor, shape: readonly number[]):
 };
 
 /**
- * linear `out[…, n] = Σ_k x[…, k] · weight[n, k] + bias[n]`（融合 op — ADR 0012）。
+ * linear `out[…, n] = Σ_k x[…, k] · weight[n, k] + bias[n]` (a fused op — ADR 0012).
  *
- * MUST: 重みの添字を `weight[n * K + k]` の**転置レイアウトのまま**組む。GPU 側も同じ
- * レイアウトを読むが、こちらは「先行次元をタイルではなく素の多重ループで走る」ので、
- * タイル境界・端数の扱いを共有しない（そこが検証したい対象）。
+ * MUST: build the weight index as `weight[n * K + k]`, **keeping the transposed layout**. The GPU
+ * side reads the same layout, but this one "runs the leading dimensions as plain nested loops, not
+ * tiles", so the handling of tile boundaries and remainders is not shared (that is what should be
+ * verified).
  */
 export const referenceLinear = (x: RefTensor, weight: RefTensor, bias: RefTensor): RefTensor => {
   const contract = resolveOpContract("linear");
@@ -920,11 +975,13 @@ export const referenceLinear = (x: RefTensor, weight: RefTensor, bias: RefTensor
 };
 
 /**
- * layer_norm（最終次元・affine あり）。分散は**母分散（N 割り、correction = 0）**で、
- * `torch.var` の既定（N−1）ではない（台帳の反例集の該当行）。
+ * layer_norm (last dimension, with affine). The variance is **the population variance (divided by
+ * N, correction = 0)**, not `torch.var`'s default (N−1) (the matching row of the counter-examples
+ * list in docs/op-vocabulary.md).
  *
- * MUST: 2 パス（平均 → 偏差平方和）で書く。`E[x²] − E[x]²` の 1 パス形は桁落ちで負の分散を
- * 出しうるうえ、GPU 側と同じ近道を写すと誤差が相殺して突合が恒真化する。
+ * MUST: written in two passes (mean → sum of squared deviations). The one-pass form
+ * `E[x²] − E[x]²` can give a negative variance through cancellation, and copying the same shortcut
+ * as the GPU side would let the errors cancel and make the comparison vacuous.
  */
 export const referenceLayerNorm = (
   x: RefTensor,
@@ -951,7 +1008,8 @@ export const referenceLayerNorm = (
       const deviation = x.data[base + i] - mean;
       squares += deviation * deviation;
     }
-    // eps は f32 語で運ばれるスカラ attr なので参照側も f32 へ丸めてから使う（他のスカラと同じ規律）
+    // eps is a scalar attr carried as an f32 word, so the reference also rounds it to f32 before
+    // use (the same discipline as the other scalars)
     const inv = 1 / Math.sqrt(squares / dim + Math.fround(eps));
     for (let i = 0; i < dim; i += 1) {
       out[base + i] = Math.fround((x.data[base + i] - mean) * inv * weight.data[i] + bias.data[i]);
@@ -961,13 +1019,16 @@ export const referenceLayerNorm = (
 };
 
 /**
- * rms_norm（最終次元・weight のみ）。`out[r, i] = x[r, i] / sqrt(mean_r(x²) + eps) · weight[i]`
+ * rms_norm (last dimension, weight only).
+ * `out[r, i] = x[r, i] / sqrt(mean_r(x²) + eps) · weight[i]`
  *
- * MUST: **平均を引かない**（layer_norm を写さない）。rms_norm は二乗の平均そのものを使う
- * ので、偏差平方和にするとゼロ平均でない入力で静かにずれる。
- * MUST: 逆数平方根は `1 / Math.sqrt(…)` で書く（GPU 側は `inverseSqrt` の 1 演算）。同じ
- * 組込みを写すと丸めの誤りが両側で相殺して突合が恒真化する — erf / softmax と同じ規律。
- * MUST: 二乗和は f64 で積んで格納時に 1 度だけ丸める（縮約は matmul / 行 reduce と同じ扱い）。
+ * MUST: **do not subtract the mean** (do not copy layer_norm). rms_norm uses the mean of the
+ * squares itself, so a sum of squared deviations silently drifts on inputs whose mean is not zero.
+ * MUST: write the reciprocal square root as `1 / Math.sqrt(…)` (the GPU side uses the single
+ * operation `inverseSqrt`). Copying the same built-in would let rounding errors cancel out on both
+ * sides and make the comparison vacuous — the same discipline as erf / softmax.
+ * MUST: the sum of squares accumulates in f64 and rounds once when stored (reductions are treated
+ * like matmul / row reduce).
  */
 export const referenceRmsNorm = (
   x: RefTensor,
@@ -985,7 +1046,8 @@ export const referenceRmsNorm = (
     const base = row * dim;
     let squares = 0;
     for (let i = 0; i < dim; i += 1) squares += x.data[base + i] * x.data[base + i];
-    // eps は f32 語で運ばれるスカラ attr なので参照側も f32 へ丸めてから使う（layer_norm と同じ）
+    // eps is a scalar attr carried as an f32 word, so the reference also rounds it to f32 before
+    // use (the same as layer_norm)
     const inv = 1 / Math.sqrt(squares / dim + Math.fround(eps));
     for (let i = 0; i < dim; i += 1) {
       out[base + i] = Math.fround(x.data[base + i] * inv * weight.data[i]);
@@ -995,14 +1057,16 @@ export const referenceRmsNorm = (
 };
 
 /**
- * softmax / safe_softmax（最終次元、safe-softmax）。
+ * softmax / safe_softmax (last dimension, safe-softmax).
  *
- * MUST: **amax を引いた形**で書く。素朴形は台帳の反例集どおり大入力で壊れ、オラクル側が
- * 同じ壊れ方をすると「カーネルの safe 化が外れている」ことを突合が検出できなくなる。
+ * MUST: written **with amax subtracted**. The naive form breaks on large inputs, as the
+ * counter-examples list in docs/op-vocabulary.md says, and if the oracle broke the same way the
+ * comparison could not detect that "the kernel's safe form is off".
  *
- * `safe` は ADR 0044 の safe_softmax（行 max が −inf の行に 0 を書く）。有限要素を持つ行の
- * 演算列は素の softmax と**同一のまま**にする MUST — 分けて書くと「変種だけが素朴形へ
- * 退化した」状態を突合が見逃す。
+ * `safe` is ADR 0044's safe_softmax (writes 0 to rows whose row max is −inf). MUST: the operation
+ * sequence of rows with finite elements stays **identical** to the plain softmax — writing them
+ * separately would let the comparison miss a state where "only the variant degenerated to the naive
+ * form".
  */
 const softmaxLike = (
   x: RefTensor,
@@ -1019,7 +1083,7 @@ const softmaxLike = (
     const base = row * dim;
     let amax = x.data[base];
     for (let i = 1; i < dim; i += 1) amax = Math.max(amax, x.data[base + i]);
-    // 全要素 −inf の行（`out` は 0 初期化済みなのでそのまま次の行へ）。
+    // A row with every element −inf (`out` is already 0-initialized, so go on to the next row).
     if (safe && amax === Number.NEGATIVE_INFINITY) continue;
     let total = 0;
     for (let i = 0; i < dim; i += 1) total += Math.exp(x.data[base + i] - amax);
@@ -1035,26 +1099,30 @@ export const referenceSoftmax = (
   attrs: Readonly<Record<string, unknown>>,
 ): RefTensor => softmaxLike(x, attrs, false);
 
-/** safe_softmax（ADR 0044）— softmax + 「行 max が −inf の行は全 0」。 */
+/** safe_softmax (ADR 0044) — softmax + "a row whose row max is −inf is all 0". */
 export const referenceSafeSoftmax = (
   x: RefTensor,
   attrs: Readonly<Record<string, unknown>>,
 ): RefTensor => softmaxLike(x, attrs, true);
 
 /**
- * 融合 attention `out = softmax_lastdim((q·scale) @ (k·scale)ᵀ + mask) @ v`（ADR 0023）。
+ * Fused attention `out = softmax_lastdim((q·scale) @ (k·scale)ᵀ + mask) @ v` (ADR 0023).
  *
- * `mask` は省略可能な第 4 入力（`[1,1,M,N]` の加算項を B·H 全体へ broadcast — src/ops.ts）。
- * 加算は **S を f32 へ丸めた後**（GPU 側 ①QK の書き出し epilogue と同じ位置）。
+ * `mask` is an optional fourth input (an additive `[1,1,M,N]` term broadcast over all of B·H —
+ * src/ops.ts). It is added **after S is rounded to f32** (the same position as the write-out
+ * epilogue of the GPU side's ①QK).
  *
- * MUST: **素直な 3 段**で書く（S を実体化 → safe-softmax で P を実体化 → PV）。GPU 側は
- * P を実体化せず A タイル充填時に `exp(S−m)·inv` を評価する（1 パスの融合）ので、参照が
- * 同じ融合形（online softmax や P 非実体化）で書かれていると、融合の段の誤りが両側で
- * 相殺して突合が検出できなくなる — `referenceSoftmax` の「amax を引く MUST」と同じ規律。
- * MUST: 縮約は f64 で積んで格納時に 1 度だけ f32 へ丸める（`referenceBmm` と同じ）。GPU の
- * f32 逐次累積とはビット一致しないのが**正しい**（だから allclose で判定する）。
- * MUST: `scale` は q と k の**両方**に掛ける（半スケール契約 — src/ops.ts）。片側だけに
- * 掛ける実装と突き合わせると値が √ 倍ずれるので、その誤りはこのオラクルが検出する。
+ * MUST: written as **three plain steps** (materialize S → materialize P with safe-softmax → PV).
+ * The GPU side does not materialize P and evaluates `exp(S−m)·inv` while filling the A tile (a
+ * one-pass fusion), so if the reference were written in the same fused form (online softmax or a
+ * non-materialized P), errors in the fused steps would cancel out on both sides and the comparison
+ * could not detect them — the same discipline as the "subtract amax" MUST of `referenceSoftmax`.
+ * MUST: reductions accumulate in f64 and round to f32 once when stored (the same as
+ * `referenceBmm`). Not matching the GPU's sequential f32 accumulation bit for bit is **correct**
+ * (which is why allclose decides).
+ * MUST: `scale` is applied to **both** q and k (the half-scale contract — src/ops.ts). Compared
+ * with an implementation that applies it to one side only, the values differ by a factor of √, and
+ * this oracle detects that error.
  */
 export const referenceAttention = (
   q: RefTensor,
@@ -1072,42 +1140,49 @@ export const referenceAttention = (
     "reference",
     { attrs },
   )[0];
-  // GPU 側は params の f32 語で運ぶので、オラクルも f32 へ丸めた値を使う（masked_fill と同じ）。
+  // The GPU side carries it as an f32 word of params, so the oracle also uses the value rounded to
+  // f32 (the same as masked_fill).
   const scale = Math.fround(attentionScale(attrs, "reference"));
   const [batches, heads, rows, depth] = shape;
   const cols = k.shape[2];
-  // GQA の繰り返し数 `r = H / Hkv`（ADR 0067 決定 1 の導出値 — 整除は shape 検査が保証する）。
+  // GQA repeat count `r = H / Hkv` (the derived value of ADR 0067 decision 1 — the shape check
+  // guarantees exact division).
   const repeat = heads / k.shape[1];
   const out = new Float32Array(numel(shape));
-  // f32 の中間（S と P）は「実体化された 3 段」を素直に表す — 段ごとに丸めが 1 回入る。
+  // The f32 intermediates (S and P) plainly represent "three materialized steps" — one rounding
+  // per step.
   const scores = new Float32Array(cols);
   const weights = new Float32Array(cols);
   for (let head = 0; head < batches * heads; head += 1) {
     const qBase = head * rows * depth;
-    // MUST: kv-head は**整数除算**で写す（GPU 側 `wid.z / r` と同一の恒等式 — ADR 0067 決定 2。
-    // `head = b·H + h` に対し `H = Hkv·r` なら `⌊head/r⌋ = b·Hkv + ⌊h/r⌋` が厳密に成立する）。
-    // 剰余（`head % Hkv`）は「Hkv = H かつ B = 1」でだけ一致する別写像で、head 対応も b 項も
-    // 壊れる（検出器は tests/helpers/gpu_op_cases.ts の GQA / MQA ケース）。
+    // MUST: the kv-head is mapped by **integer division** (the same identity as the GPU side's
+    // `wid.z / r` — ADR 0067 decision 2. For `head = b·H + h` with `H = Hkv·r`,
+    // `⌊head/r⌋ = b·Hkv + ⌊h/r⌋` holds exactly).
+    // The remainder (`head % Hkv`) is a different mapping that agrees only when "Hkv = H and
+    // B = 1", and it breaks both the head correspondence and the b term (the detectors are the
+    // GQA / MQA cases in tests/helpers/gpu_op_cases.ts).
     const kvBase = Math.floor(head / repeat) * cols * depth;
     for (let row = 0; row < rows; row += 1) {
-      // ① S[row, col] = Σ_d (q·scale)[row,d] · (k·scale)[col,d]（+ mask[row,col]）
+      // ① S[row, col] = Σ_d (q·scale)[row,d] · (k·scale)[col,d] (+ mask[row,col])
       for (let col = 0; col < cols; col += 1) {
         let acc = 0;
         for (let d = 0; d < depth; d += 1) {
           acc +=
             q.data[qBase + row * depth + d] * scale * (k.data[kvBase + col * depth + d] * scale);
         }
-        // mask は S を f32 へ丸めた**後**に足す（GPU 側の書き出し epilogue と同じ位置）。
-        // mask は [1,1,M,N] なので添字にバッチが入らない = 全 head が同じ行を読む。
+        // The mask is added **after** S is rounded to f32 (the same position as the GPU side's
+        // write-out epilogue).
+        // The mask is [1,1,M,N], so the index has no batch term = every head reads the same row.
         scores[col] =
           mask === undefined
             ? Math.fround(acc)
             : Math.fround(Math.fround(acc) + mask.data[row * cols + col]);
       }
-      // ② safe-softmax（amax を引く形 MUST — referenceSoftmax と同じ）。全列 −inf の行
-      //（全マスク行）は P を全 0 に確定する — GPU 側 attention_stats v2 の空行ガードの鏡像
-      //（ADR 0044 追記 2026-08-31）。NaN を含む行は JS の Math.max が NaN を伝播するので
-      // この分岐に入らず、NaN のまま出力へ流れる（GPU 側の nan_max と同じ分類）。
+      // ② safe-softmax (MUST: the amax-subtracted form — the same as referenceSoftmax). A row
+      // with every column −inf (a fully masked row) fixes P at all 0 — the mirror of the empty-row
+      // guard of the GPU side's attention_stats v2 (ADR 0044 addendum 2026-08-31). A row containing
+      // NaN does not enter this branch because JS's Math.max propagates NaN, and it flows to the
+      // output as NaN (the same classification as the GPU side's nan_max).
       let amax = scores[0];
       for (let col = 1; col < cols; col += 1) amax = Math.max(amax, scores[col]);
       if (amax === -Infinity) {
@@ -1133,12 +1208,14 @@ export const referenceAttention = (
 };
 
 /**
- * embedding `out[…, h] = weight[index[…], h]`。
+ * embedding `out[…, h] = weight[index[…], h]`.
  *
- * MUST: **範囲外添字は必ず throw**（gather と同じ裁定 — GPU 側は NaN 汚染）。オラクルを
- * GPU 側に合わせて緩めると「契約違反のグラフが両側で同じ値になる」ので突合が違反を
- * 検出できなくなる。
- * NOTE: attrs の `padding_idx` は forward に効かないので受け取らない（契約 — src/ops.ts）。
+ * MUST: **an out-of-range index always throws** (the same ruling as gather — the GPU side
+ * contaminates with NaN). Relaxing the oracle to match the GPU side would make "a
+ * contract-violating graph give the same values on both sides", and the comparison could no longer
+ * detect the violation.
+ * NOTE: the attrs' `padding_idx` has no effect on forward, so it is not taken (the contract —
+ * src/ops.ts).
  */
 export const referenceEmbedding = (weight: RefTensor, index: RefTensor): RefTensor => {
   const contract = resolveOpContract("embedding");
@@ -1163,11 +1240,12 @@ export const referenceEmbedding = (weight: RefTensor, index: RefTensor): RefTens
 };
 
 /**
- * masked_fill `out = mask ? value : x`（mask は右詰め broadcast）。
+ * masked_fill `out = mask ? value : x` (the mask is right-aligned broadcast).
  *
- * 添字の導出は {@link broadcastIndex} — 「出力座標を毎要素 divmod → 入力 shape を左から
- * Horner」で、codegen の stride 表とは別構造（同ファイル冒頭の MUST）。埋め値は GPU 側の
- * f32 語に合わせて `Math.fround` で丸める。
+ * The index derivation is {@link broadcastIndex} — "divmod the output coordinates per element →
+ * Horner over the input shape from the left", a structure different from codegen's stride table
+ * (the MUST at the top of this file). The fill value is rounded with `Math.fround` to match the GPU
+ * side's f32 word.
  */
 export const referenceMaskedFill = (
   x: RefTensor,
@@ -1188,10 +1266,11 @@ export const referenceMaskedFill = (
 
 /**
  * conv1d `out[b, oc, ox] = Σ_{ic,k} x[b, ic, ox·s + k·d − p] · w[oc, ic − g·Cin/groups, k] + b[oc]`
- * （`g` は `oc` が属するグループ — ADR 0015 で groups / dilation を attrs 化）。
+ * (`g` is the group `oc` belongs to — ADR 0015 made groups / dilation attrs).
  *
- * MUST: padding 域は**読み飛ばす**（0 を足す形にしない）。0 加算に潰すと、範囲外読みの
- * 分岐そのものが消えて添字が負でも通る実装を許してしまう。
+ * MUST: the padding region is **skipped** (not written as adding 0). Collapsing it into adding 0
+ * removes the out-of-range branch itself and would allow an implementation that passes even with a
+ * negative index.
  */
 export const referenceConv1d = (
   x: RefTensor,
@@ -1209,13 +1288,13 @@ export const referenceConv1d = (
   const channelsIn = x.shape[1];
   const lengthIn = x.shape[2];
   const kernel = weight.shape[2];
-  // 契約検査（computeOutputShape）で割り切れは済んでいる。
+  // The contract check (computeOutputShape) has already ensured exact division.
   const inPerGroup = channelsIn / groups;
   const outPerGroup = channelsOut / groups;
   const out = new Float32Array(numel(shape));
   for (let item = 0; item < batch; item += 1) {
     for (let oc = 0; oc < channelsOut; oc += 1) {
-      // 重みの第 2 軸は Cin/groups — 入力チャネルはグループの帯だけを走る
+      // The weight's second axis is Cin/groups — the input channels run over the group's band only
       const icBase = Math.floor(oc / outPerGroup) * inPerGroup;
       for (let ox = 0; ox < lengthOut; ox += 1) {
         let acc = bias.data[oc];
@@ -1238,14 +1317,16 @@ export const referenceConv1d = (
 /**
  * conv2d `out[b, oc, oy, ox] = Σ_{ic,kh,kw}
  *   x[b, ic, oy·sh + kh·dh − ph, ox·sw + kw·dw − pw] · w[oc, ic − g·Cin/groups, kh, kw] + b[oc]`
- * （`g` は `oc` が属するグループ — ADR 0017）。
+ * (`g` is the group `oc` belongs to — ADR 0017).
  *
- * MUST: 重みは `[Cout, Cin/groups, Kh, Kw]` で、**Kh と Kw の順**も契約。正方カーネル
- * （Kh == Kw）では入れ替えても値が一致するので、テストは Kh ≠ Kw で固定する。
- * MUST: padding 域は**読み飛ばす**（0 を足す形にしない）。0 加算に潰すと、範囲外読みの
- * 分岐そのものが消えて添字が負でも通る実装を許してしまう。
- * MUST: 添字は H / W を独立に組む（`(y·W + x)` の平坦化を先に済ませない）。1 本に潰すと
- * 「H と W を取り違えた stride」が正方入力で一致してしまう。
+ * MUST: the weight is `[Cout, Cin/groups, Kh, Kw]`, and **the order Kh, Kw** is part of the
+ * contract too. With a square kernel (Kh == Kw) swapping them gives the same values, so tests pin
+ * Kh ≠ Kw.
+ * MUST: the padding region is **skipped** (not written as adding 0). Collapsing it into adding 0
+ * removes the out-of-range branch itself and would allow an implementation that passes even with a
+ * negative index.
+ * MUST: build the H / W indices independently (do not flatten to `(y·W + x)` first). Collapsing
+ * them into one lets "a stride with H and W swapped" agree on square inputs.
  */
 export const referenceConv2d = (
   x: RefTensor,
@@ -1265,13 +1346,13 @@ export const referenceConv2d = (
   const widthIn = x.shape[3];
   const kernelH = weight.shape[2];
   const kernelW = weight.shape[3];
-  // 契約検査（computeOutputShape）で割り切れは済んでいる。
+  // The contract check (computeOutputShape) has already ensured exact division.
   const inPerGroup = channelsIn / groups;
   const outPerGroup = channelsOut / groups;
   const out = new Float32Array(numel(shape));
   for (let item = 0; item < batch; item += 1) {
     for (let oc = 0; oc < channelsOut; oc += 1) {
-      // 重みの第 2 軸は Cin/groups — 入力チャネルはグループの帯だけを走る
+      // The weight's second axis is Cin/groups — the input channels run over the group's band only
       const icBase = Math.floor(oc / outPerGroup) * inPerGroup;
       for (let oy = 0; oy < heightOut; oy += 1) {
         for (let ox = 0; ox < widthOut; ox += 1) {
@@ -1302,17 +1383,20 @@ export const referenceConv2d = (
 /**
  * conv3d `out[oc, ot, oy, ox] = Σ_{ic,kt,kh,kw}
  *   x[ic, ot·st + kt·dt − pt, oy·sh + kh·dh − ph, ox·sw + kw·dw − pw] · w[oc, ic − g·Cin/groups, kt, kh, kw]
- *   + b[oc]`（**unbatched** — `g` は `oc` が属するグループ・ADR 0118 決定 1）。
+ *   + b[oc]` (**unbatched** — `g` is the group `oc` belongs to; ADR 0118 decision 1).
  *
- * 意味論の全体（groups 一般・stride / dilation / padding 一般）を持つ。GPU の実装済み subset
- * （groups == 1 の implicit GEMM）より広いのは、このオラクルが groups > 1 の資産を CPU で
- * 検算できる唯一の経路だから（ADR 0064 軸 A — 意味論と subset を分けて持つ）。
+ * It carries the full semantics (general groups, general stride / dilation / padding). It is wider
+ * than the subset the GPU implements (implicit GEMM with groups == 1) because this oracle is the
+ * only path that can check assets with groups > 1 on the CPU (ADR 0064 axis A — semantics and
+ * subset are held separately).
  *
- * MUST: 重みは `[Cout, Cin/groups, Kt, Kh, Kw]` で、**Kt・Kh・Kw の順**も契約。立方カーネルでは
- * 入れ替えても値が一致するので、テストは Kt ≠ Kh ≠ Kw で固定する。
- * MUST: padding 域は**読み飛ばす**（0 を足す形にしない — conv1d / conv2d と同じ理由）。
- * MUST: 添字は T / H / W を独立に組む（平坦化を先に済ませると軸を取り違えた stride が
- * 立方入力で一致してしまう）。
+ * MUST: the weight is `[Cout, Cin/groups, Kt, Kh, Kw]`, and **the order Kt, Kh, Kw** is part of the
+ * contract too. With a cubic kernel swapping them gives the same values, so tests pin
+ * Kt ≠ Kh ≠ Kw.
+ * MUST: the padding region is **skipped** (not written as adding 0 — the same reason as conv1d /
+ * conv2d).
+ * MUST: build the T / H / W indices independently (flattening first lets a stride with swapped
+ * axes agree on cubic inputs).
  */
 export const referenceConv3d = (
   x: RefTensor,
@@ -1329,12 +1413,12 @@ export const referenceConv3d = (
   const [channelsOut, timeOut, heightOut, widthOut] = shape;
   const [channelsIn, timeIn, heightIn, widthIn] = x.shape;
   const [, , kernelT, kernelH, kernelW] = weight.shape;
-  // 契約検査（computeOutputShape）で割り切れは済んでいる。
+  // The contract check (computeOutputShape) has already ensured exact division.
   const inPerGroup = channelsIn / groups;
   const outPerGroup = channelsOut / groups;
   const out = new Float32Array(numel(shape));
   for (let oc = 0; oc < channelsOut; oc += 1) {
-    // 重みの第 2 軸は Cin/groups — 入力チャネルはグループの帯だけを走る
+    // The weight's second axis is Cin/groups — the input channels run over the group's band only
     const icBase = Math.floor(oc / outPerGroup) * inPerGroup;
     for (let ot = 0; ot < timeOut; ot += 1) {
       for (let oy = 0; oy < heightOut; oy += 1) {
@@ -1371,11 +1455,13 @@ export const referenceConv3d = (
 
 /**
  * conv_transpose1d `out[b, oc, ox] = Σ_{ic,k} x[b, ic, (ox + p − k)/s] · w[ic, oc, k] + b[oc]`
- * （`(ox + p − k)` が `s` で割り切れ、商が `[0, L)` に入る `(ic, k)` のみ — ADR 0015）。
+ * (only the `(ic, k)` for which `(ox + p − k)` is divisible by `s` and the quotient lies in
+ * `[0, L)` — ADR 0015).
  *
- * MUST: 重みは `[Cin, Cout, K]`（conv1d と転置）。
- * MUST: 割り切れない `k` は**読み飛ばす**（そこに入力が無い＝寄与ゼロ）。0 を足す形に
- * 潰すと、割り切れ判定そのものが消えた実装が通ってしまう。
+ * MUST: the weight is `[Cin, Cout, K]` (transposed relative to conv1d).
+ * MUST: a `k` that does not divide is **skipped** (there is no input there = zero contribution).
+ * Collapsing it into adding 0 would let an implementation pass that has lost the divisibility test
+ * itself.
  */
 export const referenceConvTranspose1d = (
   x: RefTensor,
@@ -1417,22 +1503,26 @@ export const referenceConvTranspose1d = (
 };
 
 /**
- * DCNv2（`torchvision::deform_conv2d`）の CPU 参照 — ADR 0055。
+ * CPU reference of DCNv2 (`torchvision::deform_conv2d`) — ADR 0055.
  *
  * `out[b, oc, oy, ox] = Σ_{ic,kh,kw} (m[b, kh·Kw+kw, oy, ox] · bilinear(x[b,ic], y, x)) ·
- *   w[oc, ic, kh, kw] + bias[oc]`、`y = (oy − ph) + kh + off_y` / `x = (ox − pw) + kw + off_x`
- * （stride / dilation / groups / offset_groups は欄が無い = 1 固定）。
+ *   w[oc, ic, kh, kw] + bias[oc]`, `y = (oy − ph) + kh + off_y` / `x = (ox − pw) + kw + off_x`
+ * (stride / dilation / groups / offset_groups have no field = fixed at 1).
  *
- * MUST: 縮約は `(ic, kh, kw)` 昇順で、conv2d 参照と**同じ入れ子**にする。offset を全 0・
- * mask を全 1 にした退化ケースが conv2d と一致することが本 op の主オラクルなので、
- * ループを組み替えると（意味論は同じでも）その門が丸め差で崩れる。
- * MUST: offset / mask の読みを `ic` ループの外へ巻き上げない（同上）。
- * MUST: 源座標は `Math.fround` で f32 へ丸める。**タップの採否**（`(−1, in)` の範囲判定と
- * 4 隅個別のゼロ埋め）は丸め幅で変わりうるので、ここだけは f64 のまま進めない。
- * MUST: 範囲判定は**正の形**（`> −1 && < in`）で書く。NaN は false 側へ落ちるので、
- * NaN だけを先に見て**出力へ伝播**させる（0 に落とすと沈黙誤値になる — ADR 0020 の系譜）。
- * MUST: 境界外は **border clamp ではなくゼロ埋め**（中心が範囲外ならタップ全体 0・内側でも
- * 範囲外の隅はその隅だけ 0）。torchvision の 2 段構えを逐語で写す。
+ * MUST: the reduction is in ascending `(ic, kh, kw)`, with **the same nesting** as the conv2d
+ * reference. The main oracle of this op is that the degenerate case with offset all 0 and mask all
+ * 1 matches conv2d, so reordering the loops (even with the same semantics) breaks that check
+ * through rounding differences.
+ * MUST: do not hoist the reads of offset / mask out of the `ic` loop (same reason).
+ * MUST: the source coordinates are rounded to f32 with `Math.fround`. **Whether a tap is taken**
+ * (the `(−1, in)` range test and the per-corner zero fill) can change with the rounding width, so
+ * this part alone does not proceed in f64.
+ * MUST: write the range test in **the positive form** (`> −1 && < in`). NaN falls to the false
+ * side, so NaN alone is checked first and **propagated to the output** (dropping it to 0 would be a
+ * silent wrong value — in the line of ADR 0020).
+ * MUST: outside the border is **zero fill, not border clamp** (if the center is out of range the
+ * whole tap is 0; even inside, an out-of-range corner alone is 0). torchvision's two-level scheme
+ * is copied verbatim.
  */
 export const referenceDeformConv2d = (
   x: RefTensor,
@@ -1461,7 +1551,7 @@ export const referenceDeformConv2d = (
   const kernelW = weight.shape[3];
   const taps = kernelH * kernelW;
   const out = new Float32Array(numel(shape));
-  /** `x[item, channel]` 平面の双線形サンプル（範囲外は 0・NaN は伝播）。 */
+  /** Bilinear sample of the `x[item, channel]` plane (0 out of range; NaN propagates). */
   const sample = (plane: number, sourceY: number, sourceX: number): number => {
     if (Number.isNaN(sourceY) || Number.isNaN(sourceX)) return Number.NaN;
     if (!(sourceY > -1 && sourceY < heightIn && sourceX > -1 && sourceX < widthIn)) {
@@ -1473,7 +1563,8 @@ export const referenceDeformConv2d = (
     const lx1 = Math.fround(sourceX - x0);
     const ly0 = 1 - ly1;
     const lx0 = 1 - lx1;
-    // 4 隅は**個別に**範囲を見る（clamp ではない）。y0 は範囲判定の帰結で [−1, H−1]。
+    // The four corners are range-checked **individually** (not clamped). y0 is in [−1, H−1] as a
+    // consequence of the range test.
     const at = (y: number, columnX: number): number =>
       y >= 0 && y < heightIn && columnX >= 0 && columnX < widthIn
         ? x.data[plane + y * widthIn + columnX]
@@ -1496,13 +1587,14 @@ export const referenceDeformConv2d = (
               for (let kw = 0; kw < kernelW; kw += 1) {
                 const tap = kh * kernelW + kw;
                 const pixel = oy * widthOut + ox;
-                // offset のチャネル並びは **偶数 = y / 奇数 = x**（torchvision 逐語）。
+                // The channel order of offset is **even = y / odd = x** (torchvision verbatim).
                 const offsetBase = (item * 2 * taps + 2 * tap) * heightOut * widthOut;
                 const sourceY = Math.fround(oy - padding[0] + kh + offset.data[offsetBase + pixel]);
                 const sourceX = Math.fround(
                   ox - padding[1] + kw + offset.data[offsetBase + heightOut * widthOut + pixel],
                 );
-                // modulator は**補間の後**に掛かる（`(m · v) · w` — 括り方まで torchvision と同じ）。
+                // The modulator applies **after the interpolation** (`(m · v) · w` — the same
+                // grouping as torchvision).
                 const modulated =
                   mask.data[(item * taps + tap) * heightOut * widthOut + pixel] *
                   sample(plane, sourceY, sourceX);
@@ -1520,12 +1612,13 @@ export const referenceDeformConv2d = (
 };
 
 /**
- * 1 軸ぶんの双線形タップ表（`align_corners = True`）。
- * torch の `area_pixel_compute_scale` + `compute_source_index_and_lambda` の直訳。
+ * Bilinear tap table for one axis (`align_corners = True`).
+ * A literal translation of torch's `area_pixel_compute_scale` + `compute_source_index_and_lambda`.
  *
- * MUST: scale と源座標は `Math.fround` で f32 へ丸める。**添字の決定**（`trunc` の結果と
- * 末尾特例）は丸め幅で変わりうるので、ここだけは f64 のまま進めない — 許容差では吸収
- * できない 1 ずれになる。
+ * MUST: the scale and the source coordinates are rounded to f32 with `Math.fround`. **The choice
+ * of index** (the result of `trunc` and the last-element special case) can change with the rounding
+ * width, so this part alone does not proceed in f64 — it would be an off-by-one that no tolerance
+ * absorbs.
  */
 const bilinearTaps = (
   lengthIn: number,
@@ -1534,13 +1627,14 @@ const bilinearTaps = (
   const scale = lengthOut > 1 ? Math.fround((lengthIn - 1) / (lengthOut - 1)) : 0;
   return Array.from({ length: lengthOut }, (_unused, index) => {
     const source = Math.fround(scale * index);
-    // 源座標は非負なので floor = trunc（torch の static_cast<int64_t> と同じ結果）。上限 in − 1 は
-    // torch の guard_index_and_lambda と同じ — 1 軸がおよそ 2^23 を超えると f32 の丸めで源座標が
-    // in に届き（in 8650802・out 34 で実例）、上限が無いと隣の平面を読む。
+    // The source coordinate is non-negative, so floor = trunc (the same result as torch's
+    // static_cast<int64_t>). The upper bound in − 1 is the same as torch's guard_index_and_lambda
+    // — once an axis exceeds roughly 2^23, f32 rounding lets the source coordinate reach in (an
+    // actual case with in 8650802, out 34), and without the bound it reads the next plane.
     const low = Math.min(Math.floor(source), lengthIn - 1);
     return {
       low,
-      // 末尾は 2 タップ目を持たない（`index1 = index0`）。
+      // The last element has no second tap (`index1 = index0`).
       high: low + 1 < lengthIn ? low + 1 : low,
       lambda: Math.fround(source - low),
     };
@@ -1548,12 +1642,14 @@ const bilinearTaps = (
 };
 
 /**
- * NCHW の空間 2 軸の双線形 resample（`align_corners = True` 専業 — 第 1 層）。
+ * Bilinear resample over the two spatial axes of NCHW (`align_corners = True` only — Core ATen layer).
  *
- * MUST: codegen（src/kernels/upsample-bilinear2d.ts）と添字の畳み方を共有しない。あちらは
- * N·C を 1 本の平面添字へ畳んで平坦添字から座標を復元する形なので、こちらは **4 重ループで
- * 座標を直に回す**（軸の取り違えと平面ずれを両側で相殺させないため）。タップ表を軸ごとに
- * 先に作るのも意図的な別形で、あちらは 1 要素ごとに inline で計算する。
+ * MUST: do not share the way indices are folded with codegen
+ * (src/kernels/upsample-bilinear2d.ts). That one folds N·C into a single plane index and recovers
+ * the coordinates from the flat index, so this one **loops over the coordinates directly in four
+ * nested loops** (so that an axis mix-up or a plane offset does not cancel out on both sides).
+ * Building the tap tables per axis first is also a deliberately different form; that one computes
+ * them inline per element.
  */
 export const referenceUpsampleBilinear2d = (
   x: RefTensor,
@@ -1576,7 +1672,7 @@ export const referenceUpsampleBilinear2d = (
       for (const row of rows) {
         for (const column of columns) {
           const at = (y: number, index: number): number => x.data[plane + y * widthIn + index];
-          // H が外・W が内の入れ子（torch の式木と同じ組み方）。
+          // H outside, W inside (the same nesting as torch's expression tree).
           const top =
             (1 - column.lambda) * at(row.low, column.low) +
             column.lambda * at(row.low, column.high);
@@ -1593,20 +1689,24 @@ export const referenceUpsampleBilinear2d = (
 };
 
 /**
- * GRU の隠れ側スキャン（`gru_scan` / `gru_scan_reverse` — 第 2 層・ADR 0056）。
+ * The hidden-side GRU scan (`gru_scan` / `gru_scan_reverse` — extended composite layer, ADR 0056).
  *
  * `gh = W_hh·h + b_hh` / `r = σ(gh_r + gi_r)` / `z = σ(gh_z + gi_z)` /
- * `n = tanh(gi_n + gh_n·r)` / `h' = (h − n)·z + n`。
+ * `n = tanh(gi_n + gh_n·r)` / `h' = (h − n)·z + n`.
  *
- * MUST: 更新式は `(h − n)·z + n` の**逐語**（数学的に同値な `(1 − z)·n + z·h` は f32 で別の
- * 丸め列になる — 実測で 10 万要素中 44,345 件が不一致）。ゲートの足し順と `n` の積の順も
- * torch の分解形に合わせる（ADR 0056 決定 3）。
- * MUST: ステップごとに `Math.fround` で f32 へ落とす。状態が T ステップ運ばれるので、f64 の
- * まま回すと GPU 側との差が T に比例して開き、突合の許容差が形依存になる。
- * MUST: 逆方向は**走査順だけ**を反転し、書き出しは順方向の時間添字（GPU カーネルと同じ契約）。
- * NOTE: 逐次の縮約はカーネルと同じ `k` 昇順だが、こちらは行を GEMM のタイルに割らない素の
- * 内積で、ゲート 3 本も**別々のループ**で回す（添字の畳み方を共有しない — 軸の取り違えを
- * 両側で相殺させないため）。
+ * MUST: the update formula is `(h − n)·z + n` **verbatim** (the mathematically equivalent
+ * `(1 − z)·n + z·h` is a different rounding sequence in f32 — measured: 44,345 of 100,000 elements
+ * disagree). The order of the gate additions and of the `n` product also follows torch's
+ * decomposed form (ADR 0056 decision 3).
+ * MUST: drop to f32 with `Math.fround` at every step. The state is carried over T steps, so running
+ * in f64 would open the gap to the GPU side in proportion to T and make the comparison's tolerance
+ * shape-dependent.
+ * MUST: the reverse direction reverses **only the scan order**; the output is written at the
+ * forward time index (the same contract as the GPU kernel).
+ * NOTE: the sequential reduction is in ascending `k` like the kernel, but this one is a plain dot
+ * product that does not split rows into GEMM tiles, and runs the three gates in **separate loops**
+ * (the way indices are folded is not shared — so that an axis mix-up does not cancel out on both
+ * sides).
  */
 export const referenceGruScan = (
   name: GruScanOpName,
@@ -1628,12 +1728,15 @@ export const referenceGruScan = (
   const gates = 3 * hidden;
   const out = new Float32Array(numel(shape));
   const f32 = Math.fround;
-  /** ゲート `g`（0 = r / 1 = z / 2 = n）の隠れ側 `Σ_k W_hh[g·H + j, k]·h[k] + b_hh[g·H + j]`。 */
+  /**
+   * The hidden side of gate `g` (0 = r / 1 = z / 2 = n):
+   * `Σ_k W_hh[g·H + j, k]·h[k] + b_hh[g·H + j]`.
+   */
   const hiddenGate = (state: Float32Array<ArrayBuffer>, gate: number, unit: number): number => {
     const row = (gate * hidden + unit) * hidden;
     let acc = 0;
     for (let k = 0; k < hidden; k += 1) acc += weight.data[row + k] * state[k];
-    // bias は last（GEMM の epilogue 形 — conv 系の bias-first ではない）
+    // bias last (the GEMM epilogue form — not the conv family's bias-first)
     return f32(acc + bias.data[gate * hidden + unit]);
   };
   for (let item = 0; item < batch; item += 1) {
@@ -1644,7 +1747,8 @@ export const referenceGruScan = (
       const inputBase = (t * batch + item) * gates;
       const next = new Float32Array(hidden);
       for (let unit = 0; unit < hidden; unit += 1) {
-        // ゲートの足し順は**隠れ側が第 1 引数**（torch の分解形の逐語）
+        // In the gate additions **the hidden side is the first argument** (torch's decomposed
+        // form verbatim)
         const reset = f32(
           UNARY_F32.sigmoid(
             f32(hiddenGate(state, 0, unit) + gi.data[inputBase + unit]),
@@ -1657,7 +1761,8 @@ export const referenceGruScan = (
             NO_SCALARS,
           ),
         );
-        // n = tanh(i_n + h_n·r) — 積は `h_n · r`・和は入力側が第 1 引数
+        // n = tanh(i_n + h_n·r) — the product is `h_n · r`; in the sum the input side is the first
+        // argument
         const gated = f32(hiddenGate(state, 2, unit) * reset);
         const candidate = f32(
           UNARY_F32.tanh(f32(gi.data[inputBase + 2 * hidden + unit] + gated), NO_SCALARS),
@@ -1675,15 +1780,19 @@ export const referenceGruScan = (
   return { dtype: "f32", shape, data: out };
 };
 
-/** 単一出力 op のアーム（出力が 1 本であることをアームごとに明示する — ADR 0068 決定 1）。 */
+/**
+ * The arm of a single-output op (each arm states that it has one output — ADR 0068 decision 1).
+ */
 const sole = (tensor: RefTensor): readonly RefTensor[] => [tensor];
 
 /**
- * 契約表の kind で分岐する統一入口（テストがグラフをそのまま辿れるようにするため）。
- * 返りは**出力 slot 昇順の列**で、2 本返すのは `topk`（ADR 0068 決定 3）だけ。
+ * The unified entry that branches on the contract table's kind (so that tests can walk a graph as
+ * is). It returns **the sequence in ascending output slot order**, and only `topk` (ADR 0068
+ * decision 3) returns two.
  *
- * `outShape` は「出力の宣言 shape が目標形」の op（reshape / expand — ADR 0011）で必須。
- * 入力からは導けないので、省略されたら黙って推測せず落とす。
+ * `outShape` is required for ops where "the declared output shape is the target shape" (reshape /
+ * expand — ADR 0011). It cannot be derived from the inputs, so when it is omitted the call fails
+ * instead of guessing silently.
  */
 export const applyReferenceOpOutputs = (
   op: string,
@@ -1697,14 +1806,17 @@ export const applyReferenceOpOutputs = (
       `op '${op}' の入力数が ${inputs.length}（契約は ${describeArity(contract)}）`,
     );
   }
-  // MUST: attrs のキー集合はノードの契約検査と同じ 1 本で照合する（states は常に空 — 参照は states 形を
-  // 持たない）。照合しないと、契約が拒否する attrs（states 欄の無い attention の `window` 等）を
-  // 参照だけが黙って無視し、契約違反を値にする。
+  // MUST: the attrs key set is checked with the same single check as the node contract check
+  // (states is always empty — the reference has no states form). Without it, the reference alone
+  // would silently ignore attrs the contract rejects (`window` of an attention without a states
+  // field, etc.) and turn a contract violation into values.
   assertAttrKeys(contract, attrs, false, "reference");
-  // MUST: attrs の値・入力 dtype・形（rank の上限・軸の範囲・目標形との整合）もノードの契約検査と
-  // 同じ表で見る。見ないと、契約が拒否する組み合わせ（permute の i32 入力・expand の rank 0 入力
-  // 等）に参照だけが値を返し、テストデータの契約違反を検出できない。共有するのは受理条件だけで、
-  // 添字や数値の計算は参照が独立に持つ（GPU 側と同じ誤りを抱えないため）。
+  // MUST: attrs values, input dtypes and shapes (rank limit, axis range, consistency with the target
+  // shape) are also checked with the same table as the node contract check. Without it, the
+  // reference alone would return values for combinations the contract rejects (an i32 input to
+  // permute, a rank-0 input to expand, etc.), and contract violations in test data would go
+  // undetected. Only the acceptance conditions are shared; the reference keeps its own index and
+  // numeric computations (so that it does not carry the same errors as the GPU side).
   assertAttrValues(contract, attrs, "reference");
   assertInputDtypes(
     contract,
@@ -1718,9 +1830,9 @@ export const applyReferenceOpOutputs = (
     }
     return outShape;
   };
-  // sym_prefix_slice の形の契約は束縛（`coeff·sym+offset`）が要り、参照は解決済みの出力 shape
-  // しか受けないので通さない（attrs と dtype は上で見ている）。state_append は下で
-  // 「CPU 参照を持たない」として落とす。
+  // The shape contract of sym_prefix_slice needs the bindings (`coeff·sym+offset`), and the
+  // reference only receives the resolved output shape, so it is not run through it (attrs and dtype
+  // were checked above). state_append fails below as "has no CPU reference".
   if (contract.kind !== "symPrefixSlice" && contract.kind !== "stateAppend") {
     computeOutputShape(
       contract,
@@ -1753,8 +1865,8 @@ export const applyReferenceOpOutputs = (
       return sole(referenceRowReduce(contract.name, inputs[0], reduceDim(attrs, "reference")));
     case "argmax":
       return sole(referenceArgmax(inputs[0]));
-    // 唯一の多出力アーム（値 + 添字 — ADR 0068 決定 3）。ここが `sole` を通らないことが
-    // そのまま「出力が 2 本」の宣言になる。
+    // The only multi-output arm (values + indices — ADR 0068 decision 3). Not going through
+    // `sole` here is itself the declaration that "there are two outputs".
     case "topk":
       return referenceTopk(inputs[0], attrs);
     case "cast":
@@ -1774,8 +1886,8 @@ export const applyReferenceOpOutputs = (
     case "flip":
       return sole(referenceFlip(inputs[0], attrs));
     case "symPrefixSlice":
-      // prefix 長は束縛（`coeff·sym+offset`）から決まる — 入力からは導けないので、
-      // reshape / expand と同じく呼び出し側が解決済みの出力 shape を渡す。
+      // The prefix length follows from the bindings (`coeff·sym+offset`) — it cannot be derived
+      // from the inputs, so as for reshape / expand the caller passes the resolved output shape.
       return sole(referenceSymPrefixSlice(inputs[0], declared()));
     case "linear":
       return sole(referenceLinear(inputs[0], inputs[1], inputs[2]));
@@ -1791,10 +1903,11 @@ export const applyReferenceOpOutputs = (
       return sole(referenceSafeSoftmax(inputs[0], attrs));
     case "attention":
       return sole(referenceAttention(inputs[0], inputs[1], inputs[2], attrs, inputs[3]));
-    // state を触る op は CPU 参照を持たない（値ではなく context 所有バッファへの effect で、
-    // RefTensor の入出力だけでは意味論を表せない — 実装は実行層〈波 D〉が持つ）。
-    // MUST: 素通りさせない。0 本の出力列を黙って返すと「参照と GPU が一致した」と見なす
-    // parity テストが書けてしまう。
+    // Ops that touch state have no CPU reference (they are effects on context-owned buffers, not
+    // values, and RefTensor inputs and outputs alone cannot express their semantics — the
+    // execution layer (wave D) holds the implementation).
+    // MUST: do not let them pass. Silently returning an empty output sequence would allow a parity
+    // test that counts it as "the reference and the GPU agreed".
     case "stateAppend":
       throw new ReferenceOpError(
         `op '${op}' は CPU 参照を持たない（state への effect は GenerationContext の担当）`,
@@ -1823,11 +1936,11 @@ export const applyReferenceOpOutputs = (
 };
 
 /**
- * 単一出力 op の統一入口（{@link applyReferenceOpOutputs} の slot 0）。
+ * The unified entry for single-output ops (slot 0 of {@link applyReferenceOpOutputs}).
  *
- * MUST: 多出力 op を黙って slot 0 だけ返す形にしない。`topk` を `applyReferenceOp` で呼ぶと
- * 「値だけが合っていて添字は誰も突き合わせていない」テストが書けてしまうので、本数が違えば
- * 落として複数形の入口へ誘導する。
+ * MUST: do not silently return only slot 0 of a multi-output op. Calling `topk` through
+ * `applyReferenceOp` would allow a test where "only the values match and nobody compares the
+ * indices", so a different count fails and points to the plural entry.
  */
 export const applyReferenceOp = (
   op: string,
@@ -1844,7 +1957,10 @@ export const applyReferenceOp = (
   return outputs[0];
 };
 
-/** GPU の境界表を使わず、f32 除算と偶数丸めから求める独立参照（ADR 0097）。 */
+/**
+ * An independent reference computed from f32 division and round-half-to-even, without the GPU's
+ * boundary table (ADR 0097).
+ */
 export const referenceStaticQuantize = (
   x: RefTensor,
   attrs: Readonly<Record<string, unknown>>,
@@ -1864,7 +1980,8 @@ export const referenceStaticQuantize = (
       bits[i] = value;
       continue;
     }
-    // 浮動小数演算へ渡す前に NaN を判別し、符号と payload を保って quiet にする。
+    // Detect NaN before handing it to floating-point arithmetic, and make it quiet while keeping
+    // its sign and payload.
     if (magnitude > 0x7f800000) {
       bits[i] = value | 0x00400000;
       continue;
