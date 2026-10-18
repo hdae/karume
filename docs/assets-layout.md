@@ -1,176 +1,177 @@
-# 資産の置き場（models / outputs / inputs）
+# Where assets live (models / outputs / inputs)
 
-ローカル資産 3 根の規約（outputs の 4 分割は 2026-08-30 裁定・`outputs/release/` は公開作業で
-後から生えた 5 つ目の席・`outputs/verify/` は検証結果の席として 2026-09-20 に生えた 6 つ目・`outputs/diag/` は調査の記録の席として
-2026-10-15 に明文化した 7 つ目）。
-綴りの正本は `tools/export-recipes/_shared/paths.py`（`DIST_ROOT` / `SERIES_ROOT` /
-`EXAMPLES_ROOT` / `BENCH_ROOT` / `VERIFY_ROOT` / `MISC_ROOT` / `INPUTS_ROOT` / `OUTPUTS_ROOT`）。
-**3 根とも git 追跡しない**（全て再生成可能な生成物か手置きの実重みで、リポジトリが持つのは
-作り方だけ）。
+Conventions for the three local asset roots (the four-way split of outputs is the ruling of 2026-08-30; `outputs/release/` is a fifth directory that
+grew later out of publishing work; `outputs/verify/` is a sixth that appeared on 2026-09-20 as the directory for verification results; `outputs/diag/` is a seventh, written down
+on 2026-10-15 as the directory for investigation records).
+The canonical spelling is `tools/export-recipes/_shared/paths.py` (`DIST_ROOT` / `SERIES_ROOT` /
+`EXAMPLES_ROOT` / `BENCH_ROOT` / `VERIFY_ROOT` / `MISC_ROOT` / `INPUTS_ROOT` / `OUTPUTS_ROOT`).
+**None of the three roots is tracked by git** (everything in them is either a regenerable artifact or real weights placed by hand; the repository holds
+only how to make them).
 
-| 根                                         | 中身                                                                                                                                                    | 例                                                             |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `models/`                                  | **配布形だけ**（1 ディレクトリ = 1 HF リポ・そのまま上げられる）                                                                                        | `models/karume-anima/` / `models/karume-sbv2-jvnv/`            |
-| `outputs/series/`                          | exporter の系列出力（コンテナ + golden フィクスチャ `io.*`）                                                                                            | `outputs/series/sbv2-F1-f16/`                                  |
-| `outputs/examples/<model>/`                | examples 台本の既定出力先（`<model>` = `--source` の basename）                                                                                         | `outputs/examples/karume-sbv2-jvnv/*.wav`                      |
-| `outputs/bench/<model>/<日付>_<目的>/`     | e2e ダンプ・ベンチ・視認評価（**消して安全** — 旧 `demo/` の後継）                                                                                      | `outputs/bench/karume-anima/2026-08-30_e2e-mismatch/`          |
-| `outputs/verify/<環境キー>/<日付>_<系列>/` | 検証の結果と実物（**消して安全** — `results.json` + PNG / WAV）                                                                                         | `outputs/verify/deno-intel-graphics-bmg-g21/2026-09-20_anima/` |
-| `outputs/misc/<名前>/`                     | ホスト資産（**消すと再取得・再エミットが要る**）                                                                                                        | `outputs/misc/sbv2-demo/` / `outputs/misc/corpus/`             |
-| `outputs/diag/<題>-<日付>/`                | 調査の記録（台本・probe・生データ — **再生成できないものを含む**・繰り返し回す台本は置かない — 下の bullet）                                            | `outputs/diag/deberta-w8a8-2026-10-07/`                        |
-| `outputs/release/`                         | 公開作業の作業机（**中身で 2 性格** — 下の bullet）                                                                                                     | `outputs/release/upload-karume-siglip2.log`                    |
-| `inputs/<family>/<name>/`                  | 手置きの実重み（ckpt・config — 生成物ではない）                                                                                                         | `inputs/sbv2/F1/`                                              |
-| `inputs/anima/civitai-<versionId>/`        | Civitai 取り込み（重み + `civitai.json` — ADR 0088）                                                                                                    | `inputs/anima/civitai-2983680/`                                |
-| `inputs/umt5/<名前>/`                      | 互換 text encoder の取り込み（上流のファイルをそのまま + `config.json`・機械専有の `intake.json`・人が書く `license-review.md` だけ — ADR 0122 決定 5） | `inputs/umt5/community-ft/`                                    |
-| `outputs/misc/local-dist/<名前>/`          | 手元の実験用ミラー（取り込み由来・配布形と同じ形だが公開しない — `models/` の下は実 path で拒む・ADR 0122 決定 5 / 6）                                  | `outputs/misc/local-dist/community-ft/`                        |
+| Root                                                  | Contents                                                                                                                                                                                       | Example                                                        |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `models/`                                             | **distributions only** (1 directory = 1 HF repository; can be uploaded as is)                                                                                                                 | `models/karume-anima/` / `models/karume-sbv2-jvnv/`            |
+| `outputs/series/`                                     | the exporter's series output (containers + golden fixtures `io.*`)                                                                                                                             | `outputs/series/sbv2-F1-f16/`                                  |
+| `outputs/examples/<model>/`                           | default output directory of the example scripts (`<model>` = the basename of `--source`; the CLI examples were removed in 0.15 — `bb35fe2a`)                                                   | `outputs/examples/karume-sbv2-jvnv/*.wav`                      |
+| `outputs/bench/<model>/<date>_<purpose>/`             | e2e dumps, benchmarks, visual evaluation (**safe to delete** — the successor of the old `demo/`)                                                                                               | `outputs/bench/karume-anima/2026-08-30_e2e-mismatch/`          |
+| `outputs/verify/<environment key>/<date>_<series>/`   | verification results and artifacts (**safe to delete** — `results.json` + PNG / WAV)                                                                                                           | `outputs/verify/deno-intel-graphics-bmg-g21/2026-09-20_anima/` |
+| `outputs/misc/<name>/`                                | host assets (**deleting them means re-fetching and re-emitting**)                                                                                                                             | `outputs/misc/sbv2-demo/` / `outputs/misc/corpus/`             |
+| `outputs/diag/<topic>-<date>/`                        | investigation records (scripts, probes, raw data — **includes things that cannot be regenerated**; scripts that are run repeatedly do not go here — see the bullet below)                     | `outputs/diag/deberta-w8a8-2026-10-07/`                        |
+| `outputs/release/`                                    | the workbench for publishing work (**two kinds, by content** — see the bullet below)                                                                                                           | `outputs/release/upload-karume-siglip2.log`                    |
+| `inputs/<family>/<name>/`                             | real weights placed by hand (ckpt, config — not generated)                                                                                                                                     | `inputs/sbv2/F1/`                                              |
+| `inputs/anima/civitai-<versionId>/`                   | Civitai intake (weights + `civitai.json` — ADR 0088)                                                                                                                                           | `inputs/anima/civitai-2983680/`                                |
+| `inputs/umt5/<name>/`                                 | intake of a compatible text encoder (only the upstream files as they are + `config.json`, the machine-owned `intake.json` and the human-written `license-review.md` — ADR 0122 decision 5)     | `inputs/umt5/community-ft/`                                    |
+| `outputs/misc/local-dist/<name>/`                     | local experimental mirror (from an intake; the same form as a distribution, but not published — rejected by real path under `models/`; ADR 0122 decisions 5 / 6)                              | `outputs/misc/local-dist/community-ft/`                        |
 
-- 系列出力にはコンテナ以外の**ホスト側資産**も入る（グラフを持たない compile 生成物）—
-  トークナイザは `<系列名>-tokenizer/tokenizer.json`（例
-  `outputs/series/gemma4-e2b-tokenizer/`）、umT5 は `wan2.1-umt5-tokenizer/tokenizer.json`（語彙と前処理 promptClean の表を 1 本に — ADR 0119 段 10a）、単体の umT5（`karume-umt5-xxl` の資産 `tokenizer`）は `umt5-xxl-tokenizer/tokenizer.json`（T5 の表だけで前処理の表を持たない・形式 `karume-umt5-tokenizer/1` — `python -m wan.umt5_xxl_tokenizer`）、anima のデモ用表は `anima-demo/text/`。export 系列の
-  ディレクトリへは混ぜない（`dist` の宣言外ファイル検査が拾う）。
-- Wan まわりの系列名: umT5 encoder は `umt5-xxl-i8-dyn`（出所の本家 `google/umt5-xxl` に合わせた名 — ADR
-  [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 4）、取り込み由来は `umt5-xxl-<名前>-i8-dyn`、Wan2.2 TI2V-5B の DiT は
-  `wan2.2-ti2v-5b-i8-dyn/transformer`（ADR [0121](decisions/0121-wan22-ti2v-5b.md) 段 1）、VAE（decoder first / next と I2V の encoder pre / attn / post）は
-  `wan2.2-ti2v-5b-f16-dyn`（DiT を持たない — ADR 0121 決定 7・encoder は段 9a — `python -m wan.export_vae_encoder`）。
-- gemma4 製品系列の PLE（索引 `ple_index` と `ple.values.<k>` / `ple.scales.<k>` の block）は
-  製品容器 `krm` の**資産**として part 列の中に入る（ADR
-  [0109](decisions/0109-manifest-v5-container.md) 決定 4）ので、系列ディレクトリに別ファイルを
-  持たない。トークナイザと違って独立コンポーネントではなく、製品グラフと**同じ容器の一員**なので、
-  「新しいグラフ + 古い PLE」の組は作れない。系列直下の `ple.probe.safetensors`（逆量子化の参照）は
-  `io.*` と同じ e2e のフィクスチャで、配布しない。
-- `bench/` の `<日付>_<目的>` は実行日 YYYY-MM-DD + 短い識別スラグ（`e2e-mismatch` /
-  `eval-images` / `quant-sim` 等）。ファイル取り違え防止のための規約で、機械（テスト・台本）も
-  この形で書く。
-- `verify/` の第 1 段は**環境キー**（`<ランタイム>-<アダプタ名 slug>` — 例
-  `deno-intel-graphics-bmg-g21`。`packages/runtime/tests/helpers/environment.ts` が
-  `GPUAdapterInfo` から作る）で、第 2 段が `<日付>_<系列>`（`bench/` と同じ実行日 YYYY-MM-DD）。
-  中身は `results.json`（ケースごとの決着 + 環境の素性 + チェックアウト）と実物（PNG / WAV・
-  一致した回も残す）。書き手は e2e テストで、綴りは exporter 側の `VERIFY_ROOT` と対になる
-  （現状 Python 側の書き手はいないが、結果を読む台本を足すときの正本はそちら）。
-  同じ日・同じ系列を 2 度回すと最後の走行が残る。正本は ADR
-  [0106](decisions/0106-device-keyed-references.md)。
-- `outputs/misc/corpus/` は**テスト入力の凍結コピー**（実画像 4 枚 = depth-anything / birefnet /
-  siglip2 の実画像門・golden 生成の入力。実音声 `vowel-*.wav` も同様）。正本の生成は
-  `examples/anima/eval-images.ts` / `examples/irodori/eval-audio.ts`（bench へ出る）で、採用分を
-  **人手でここへコピー**する — 生成先と凍結先を分けることで、ベンチ再実行がコーパスを黙って
-  上書きする事故を断つ。
-- `outputs/misc/yomi/` の日本語辞書（`*.jtd`）の取得: HF dataset `hdae/yomi-dict` の
-  `naist-jdic.jtd.gz` を解いて置く（無いと models の修正辞書テストは SKIP される）。
-- `outputs/release/` は**消してよいものと消せないものが同居する**ので、一括削除しない。
-  台本 `tools/release/hf-upload.zsh` が書く `upload-<repo>.log`（アップロードの実行ログ）は
-  `bench/` と同じ**消して安全**な側。同じ席に手置きされたリリースノートの下書き・上流カードの
-  原本控え・調査メモは**再生成できない**（`misc/` と同じ性格）。捨てるときはファイル単位で見る。
-  この席の綴りは台本が**手写し**で持つ（zsh から `paths.py` の定数を読めないため `RELEASE_ROOT`
-  は無い）ので、変えるなら台本と本表の 2 か所を同時に直す。
-- `outputs/diag/` は**調査の記録**（調査の台本・probe・生データ・ログ）の席で、ADR や known-issues が根拠として
-  指す。新しい調査は `<題>-<日付>/` にまとめる（それより前の平置きの台本は、記録が指す path を保つため動かさない）。
-  捨てるときはファイル単位で見る（`misc/` と同じ性格）。**繰り返し回す台本は置かない** — 手順として回させる台本は
-  追跡下の `tools/diag/` へ（例: GPU の使用中判定 `gpu-busy.zsh`・DeBERTa の崩壊上限の導出 `deberta-collapse.ts`）。
-- 旧 `outputs/series-archive/`（裁定済み系列の退避先）は 2026-08-30 の掃除裁定で**廃止**
-  （base i4 の復活レバーは `outputs/series/` の `*-i4-dyn` 系列が引き続き担う —
-  `anima/distribution.py` の NOTE）。
+- Series output also holds **host-side assets** besides containers (compile products that have no graph) —
+  a tokenizer is `<series name>-tokenizer/tokenizer.json` (for example
+  `outputs/series/gemma4-e2b-tokenizer/`), umT5 is `wan2.1-umt5-tokenizer/tokenizer.json` (the vocabulary and the promptClean preprocessing tables in one file — ADR 0119 step 10a), the standalone umT5 (the asset `tokenizer` of `karume-umt5-xxl`) is `umt5-xxl-tokenizer/tokenizer.json` (T5 tables only, no preprocessing tables; format `karume-umt5-tokenizer/1` — `python -m wan.umt5_xxl_tokenizer`), and anima's demo tables are `anima-demo/text/`. They are not mixed into an export series
+  directory (the undeclared-file check of `dist` would catch them).
+- Series names around Wan: the umT5 encoder is `umt5-xxl-i8-dyn` (named after its origin, the original `google/umt5-xxl` — ADR
+  [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) decision 4), an intake is `umt5-xxl-<name>-i8-dyn`, the Wan2.2 TI2V-5B DiT is
+  `wan2.2-ti2v-5b-i8-dyn/transformer` (ADR [0121](decisions/0121-wan22-ti2v-5b.md) stage 1), and the VAE (decoder first / next and the I2V encoder pre / attn / post) is
+  `wan2.2-ti2v-5b-f16-dyn` (it holds no DiT — ADR 0121 decision 7; the encoder is stage 9a — `python -m wan.export_vae_encoder`).
+- The PLE of the gemma4 product series (the index `ple_index` and the `ple.values.<k>` / `ple.scales.<k>` blocks) goes
+  into the part list as an **asset** of the product container `krm` (ADR
+  [0109](decisions/0109-manifest-v5-container.md) decision 4), so the series directory holds no separate file
+  for it. Unlike the tokenizer it is not an independent component but **a member of the same container** as the product graph, so
+  a "new graph + old PLE" pair cannot be made. `ple.probe.safetensors` directly under the series (the dequantization reference) is
+  an e2e fixture like `io.*` and is not distributed.
+- `<date>_<purpose>` in `bench/` is the run date YYYY-MM-DD + a short identifying slug (`e2e-mismatch` /
+  `eval-images` / `quant-sim` etc.). The convention exists to prevent mixing up files, and machines (tests, scripts) also
+  write in this form.
+- The first level of `verify/` is the **environment key** (`<runtime>-<adapter name slug>` — for example
+  `deno-intel-graphics-bmg-g21`; `packages/runtime/tests/helpers/environment.ts` builds it from
+  `GPUAdapterInfo`), and the second level is `<date>_<series>` (the run date YYYY-MM-DD, as in `bench/`).
+  It holds `results.json` (the outcome of each case + the identity of the environment + the checkout) and the artifacts (PNG / WAV;
+  kept on matching runs too). The writers are the e2e tests, and the spelling pairs with `VERIFY_ROOT` on the exporter side
+  (there is no Python writer at present, but that is the canonical spelling when a script that reads the results is added).
+  Running the same series twice on the same day keeps the last run. The canonical source is ADR
+  [0106](decisions/0106-device-keyed-references.md).
+- `outputs/misc/corpus/` is a **frozen copy of test inputs** (4 real images = the inputs of the real-image checks and the golden generation of depth-anything / birefnet /
+  siglip2; the real audio `vowel-*.wav` likewise). The canonical generators were
+  `examples/anima/eval-images.ts` (removed in 0.15) / `examples/irodori/eval-audio.ts` (removed in 0.15) (they wrote to bench), and the adopted ones are
+  **copied here by hand** — keeping the generation target separate from the frozen copy prevents a benchmark rerun from silently
+  overwriting the corpus.
+- Fetching the Japanese dictionary (`*.jtd`) under `outputs/misc/yomi/`: unpack `naist-jdic.jtd.gz` from the HF dataset `hdae/yomi-dict`
+  and place it there (without it, the corrected-dictionary tests of models are SKIPped).
+- `outputs/release/` **holds things that may be deleted next to things that cannot**, so do not delete it in bulk.
+  The `upload-<repo>.log` (the run log of an upload) written by the script `tools/release/hf-upload.zsh` is on
+  the **safe to delete** side, like `bench/`. Release-note drafts, archived copies of upstream cards and investigation notes placed by hand in the same directory
+  **cannot be regenerated** (the same nature as `misc/`). When discarding, look file by file.
+  The script holds this directory's spelling as a **hand copy** (zsh cannot read the constants of `paths.py`, so there is no `RELEASE_ROOT`),
+  so a change has to fix two places at once: the script and this table.
+- `outputs/diag/` is the directory for **investigation records** (investigation scripts, probes, raw data, logs), which ADRs and known-issues point to as
+  evidence. A new investigation goes together under `<topic>-<date>/` (older scripts placed flat are not moved, to keep the paths the records point to).
+  When discarding, look file by file (the same nature as `misc/`). **Scripts that are run repeatedly do not go here** — scripts run as part of a procedure go to
+  the tracked `tools/diag/` (for example: the GPU busy check `gpu-busy.zsh`; the derivation of DeBERTa's collapse ceiling `deberta-collapse.ts` (removed in 0.15)).
+- The old `outputs/series-archive/` (where ruled-on series were set aside) was **retired** by the clean-up ruling of 2026-08-30
+  (the revival lever for base i4 is still carried by the `*-i4-dyn` series under `outputs/series/` —
+  the NOTE in `anima/distribution.py`).
 
-## 組み立て（系列 → 配布形）
+## Assembly (series → distribution)
 
 ```sh
 cd tools/export-recipes
 uv run python dist.py --model anima-turbo-v1.1 --model anima-v1.0 \
     --model anima-aesthetic-v1.1 --model anima-turbo-v1.0 \
     --model anima-aesthetic-v1.0 \
-    --out ../../models/karume-anima                  # 公式 5 変種（既定 = Turbo v1.1 — ADR 0087）
-# 追加学習系（wai / copycat）は text stack を公式リポへ越境参照するため、公式リポの公開 SHA が
-# 要る = 組むのはリリース時（--ref-* 5 指定・手順は release-runbook「越境参照を含むリポ」節）
+    --out ../../models/karume-anima                  # the five official variants (default = Turbo v1.1 — ADR 0087)
+# The fine-tuned ones (wai / copycat) reference the text stack of the official repository across repositories, so the published SHA of the official repository
+# is required = they are assembled at release time (five --ref-* options; procedure: the release-runbook section on repositories with cross-repository references)
 # → models/karume-anima-extra/
-uv run python dist.py --pipeline umt5                # → models/karume-umt5-xxl/（umT5-XXL encoder・i8 — ADR 0119）
-uv run python dist.py --pipeline wan --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA か仮の 40 桁の 0> \
+uv run python dist.py --pipeline umt5                # → models/karume-umt5-xxl/ (umT5-XXL encoder; i8 — ADR 0119)
+uv run python dist.py --pipeline wan --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA or a placeholder of 40 zeros> \
     --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder [--allow-placeholder-ref]
-                                                     # → models/karume-wan2.1/（text_encoder は越境参照）
-uv run python dist.py --pipeline wan-ti2v --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA か仮の 40 桁の 0> \
+                                                     # → models/karume-wan2.1/ (text_encoder is a cross-repository reference)
+uv run python dist.py --pipeline wan-ti2v --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA or a placeholder of 40 zeros> \
     --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder [--allow-placeholder-ref]
-                                                     # → models/karume-wan2.2/（Wan2.2 TI2V 5B・text_encoder は越境参照 — ADR 0121）
-uv run python dist.py --pipeline umt5 --intake ../../inputs/umt5/<名前> [--allow-undeclared-license]
-                                                     # → outputs/misc/local-dist/<名前>/（手元の実験用ミラー・リポ名 umt5-xxl-<名前>-local — ADR 0122）
+                                                     # → models/karume-wan2.2/ (Wan2.2 TI2V 5B; text_encoder is a cross-repository reference — ADR 0121)
+uv run python dist.py --pipeline umt5 --intake ../../inputs/umt5/<name> [--allow-undeclared-license]
+                                                     # → outputs/misc/local-dist/<name>/ (local experimental mirror; repository name umt5-xxl-<name>-local — ADR 0122)
 uv run python dist.py --pipeline irodori             # → models/karume-irodori-v4-small/
 uv run python dist.py --pipeline irodori \
     --model v4.1-small                               # → models/karume-irodori-v4.1-small/
 uv run python dist.py --pipeline sbv2 \
-    --model F1 --model F2 --model M1 --model M2 --out ../../models/karume-sbv2-jvnv   # pipeline がファミリー単位のリポ名（karume-sbv2-jvnv）を宣言する（2026-09-25）
+    --model F1 --model F2 --model M1 --model M2 --out ../../models/karume-sbv2-jvnv   # the pipeline declares the family-level repository name (karume-sbv2-jvnv) (2026-09-25)
 uv run python dist.py --pipeline sbv2-fn \
     --model FN1 --model FN2 --model FN3 --model FN4 --model FN5 --model FN6 \
     --model FN7 --model FN8 --model FN9 --model FN10 --out ../../models/karume-sbv2-fn
-uv run python dist.py --pipeline gemma4              # → models/karume-gemma4/（約 4.0GiB）
+uv run python dist.py --pipeline gemma4              # → models/karume-gemma4/ (about 4.0GiB)
 uv run python dist.py --pipeline siglip2 \
     --model base --model so400m \
-    --out ../../models/karume-siglip2                # 1 リポ 2 モデル（既定 base — ADR 0092 決定 8）
+    --out ../../models/karume-siglip2                # one repository, two models (default base — ADR 0092 decision 8)
 uv run python dist.py --pipeline birefnet \
     --model 1024 --model 2048 \
-    --out ../../models/karume-birefnet-hr            # 1 リポ 2 モデル（モデル名 = 解像度・既定 1024 — ADR 0092 決定 9）
+    --out ../../models/karume-birefnet-hr            # one repository, two models (model name = resolution; default 1024 — ADR 0092 decision 9)
 uv run python dist.py --pipeline lucida \
     --model 1024 --model 2048 \
-    --out ../../models/karume-lucida                 # 派生 = 別リポ・同じ 2 モデル
+    --out ../../models/karume-lucida                 # a derivative = a separate repository; the same two models
 uv run python dist.py --pipeline depth-anything      # → models/karume-depth-anything-v2/
 uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-detector/
 ```
 
-- **初回公開前なのは `vowel-detector` と Wan の 3 リポ（`karume-umt5-xxl` / `karume-wan2.1` / `karume-wan2.2`）**
-  （siglip2 と depth-anything は 0.9.0 で、birefnet / lucida は 2026-09-05 に 1024² + 2048² の 2 モデル形で初公開済み）。
-  Wan の 2 リポは `karume-umt5-xxl` を越境参照するので、公開は umT5 が先（手順は [release-runbook](release-runbook.md)「家族の初公開」— runbook が書くのは
-  Wan2.1 の回で、Wan2.2 も同じ順序）。
-  `karume-sbv2-fn` はミラーを常設しない別扱い（下の bullet）。リポ名と同居の規則は ADR
-  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1 / 2 / 8 / 9 が正本。
-- 上流ライセンス（siglip2 = Apache-2.0 / birefnet 系 = MIT / depth-anything small =
-  Apache-2.0）に応じて `LICENSE.md` / `NOTICE.md` をリポ直下へ同梱する（決定 7 — 公開状態に
-  依らず効く常設ルール）。
+- **Not yet published for the first time: `vowel-detector`.** Of the three Wan repositories, `karume-umt5-xxl` and `karume-wan2.2` were first published with 0.14.0, and `karume-wan2.1` is not published (ADR [0118](decisions/0118-wan21-video-generation.md) addendum 2026-10-15)
+  (siglip2 and depth-anything were first published with 0.9.0, birefnet / lucida on 2026-09-05 in the two-model form 1024² + 2048²).
+  The two Wan repositories reference `karume-umt5-xxl` across repositories, so umT5 is published first (procedure: [release-runbook](release-runbook.md) "First publication of a family" — the runbook describes
+  the 0.14.0 round of umT5 and Wan2.2).
+  `karume-sbv2-fn` is a separate case whose mirror is not kept permanently (the bullet below). The canonical source for repository names and the rules for sharing a repository is ADR
+  [0092](decisions/0092-distribution-repos-and-sources.md) decisions 1 / 2 / 8 / 9.
+- Depending on the upstream license (siglip2 = Apache-2.0 / the birefnet line = MIT / depth-anything small =
+  Apache-2.0), `LICENSE.md` / `NOTICE.md` are bundled at the repository root (decision 7 — a standing rule that applies
+  regardless of publication state).
 
-- `karume-gemma4` は**系列 3 本**（`gemma4-e2b-product` の製品コンテナ〈PLE は容器の資産〉・
-  `gemma4-e2b-drafter` の MTP drafter コンテナ・`gemma4-e2b-tokenizer` の compile 済み資産）を
-  1 リポへ畳む。manifest の `assets` の席に載るのは tokenizer だけ（詳細は
-  `tools/export-recipes/gemma4/README.md`）。上流が Apache 2.0 なので
-  リポ直下に `LICENSE.md` / `NOTICE.md` が入る（`karume.dist` の法的テキスト席）。リポ名は
-  家族 1 リポの規則（E4B / 12B が同居する器 — ADR
-  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1）で `karume-gemma4`
-  （0.9.0 で `karume-gemma4-e2b` から改名 — 旧名は HF 側でリダイレクトされる）。**recipe の
-  `repo_name` = 上のコマンドの出力ディレクトリ名 = カードの Usage の repo 名**（後の 2 つは前から
-  導出される）ので、改名は recipe の定数 1 つで揃う。公開 revision の在処は models の対応表
-  `GEMMA4_SOURCES["gemma4"]`（同 決定 3 — docs には写さない）。
+- `karume-gemma4` folds **three series** (the product container of `gemma4-e2b-product` (the PLE is an asset of the container),
+  the MTP drafter container of `gemma4-e2b-drafter`, and the compiled assets of `gemma4-e2b-tokenizer`) into
+  one repository. Only the tokenizer goes into the manifest's `assets` (details in
+  `tools/export-recipes/gemma4/README.md`). The upstream is Apache 2.0, so
+  `LICENSE.md` / `NOTICE.md` go at the repository root (the legal-text slot of `karume.dist`). The repository name is
+  `karume-gemma4` by the one-repository-per-family rule (a repository that E4B / 12B share — ADR
+  [0092](decisions/0092-distribution-repos-and-sources.md) decision 1)
+  (renamed from `karume-gemma4-e2b` in 0.9.0 — HF redirects the old name). **The recipe's
+  `repo_name` = the output directory name of the command above = the repo name in the card's Usage** (the latter two are
+  derived from the former), so a rename takes one constant in the recipe. Where the published revision lives: the models table
+  `GEMMA4_SOURCES["gemma4"]` (the same ADR, decision 3 — not copied into docs).
 
-- `karume-sbv2-fn` のミラーは**常設しない**（2026-08-30 裁定 — e2e の門はライセンス記述が正の
-  `karume-sbv2-jvnv` を正本にする）。上のコマンドは再生成方法の記録で、系列（`inputs/sbv2/FN*`
-  からの export → `outputs/series/`）が揃っていればいつでも焼き直せる。
+- The mirror of `karume-sbv2-fn` is **not kept permanently** (ruling of 2026-08-30 — the e2e checks take `karume-sbv2-jvnv`, whose license statement is
+  in order, as canonical). The command above is a record of how to regenerate it; whenever the series (exported from `inputs/sbv2/FN*`
+  → `outputs/series/`) are present, it can be rebuilt at any time.
 
-- 仕様の正本は ADR [0041](decisions/0041-manifest-v2.md)（リポ内レイアウト = モデル別
-  サブツリー + `shared/`・**配置は常に独立コピー** — ハードリンク禁止の理由も同 ADR 追記）+
-  ADR [0075](decisions/0075-quant-presentation.md)（quant の `label` / `description`・
-  `requiredLimits`・ファイル参照の越境 `repo` / `revision`）+ ADR
-  [0109](decisions/0109-manifest-v5-container.md)（`weights.<部品>.<dtype>.container`）。
-  **現行 format は `karume/5`**（hub は単一形パース = `karume/5` 以外を読まない —
-  `packages/hub/src/manifest.ts`）。
-  `karume.json` は現物から導出（手書き禁止 — ADR 0038）。
-- 組み立ては冪等（再実行で置き換え）。`verify_dist` が宣言と現物の突合・宣言外ファイル検査まで
-  行い、モデルカード `README.md` は検証済み manifest から機械生成される（帰属は
-  `--card-profile` — exporter の README 参照）。
-- 系列を消しても配布形は壊れない（独立コピー）。逆に配布形は `dist.py` でいつでも系列から
-  再生成できる。core 単体の `karume dist` は受理集合が空で落ちる設計（ADR 0065）— family を
-  組むのは常にこのリポ driver の `dist.py`。
+- The canonical spec is ADR [0041](decisions/0041-manifest-v2.md) (layout inside a repository = per-model
+  subtrees + `shared/`; **placement is always an independent copy** — the reason hard links are forbidden is also in an addendum of that ADR) +
+  ADR [0075](decisions/0075-quant-presentation.md) (quant `label` / `description`,
+  `requiredLimits`, the cross-repository `repo` / `revision` of file references) + ADR
+  [0109](decisions/0109-manifest-v5-container.md) (`weights.<component>.<dtype>.container`).
+  **The current format is `karume/5`** (hub parses a single form = reads nothing but `karume/5` —
+  `packages/hub/src/manifest.ts`).
+  `karume.json` is derived from the actual files (hand-writing forbidden — ADR 0038).
+- Assembly is idempotent (a rerun replaces). `verify_dist` goes as far as matching the declarations against the actual files and the undeclared-file check,
+  and the model card `README.md` is generated mechanically from the verified manifest (attribution via
+  `--card-profile` — see the exporter README).
+- Deleting a series does not break a distribution (independent copies). Conversely, `dist.py` can regenerate a distribution from the series
+  at any time. The core's own `karume dist` is designed to fail with an empty acceptance set (ADR 0065) — a family is
+  always assembled by this repository's driver `dist.py`.
 
-## CLI のローカル優先
+## Local-first in the CLIs
 
-`demo:anima` と `demo:irodori` は、`--source` を省略すると上記の標準ミラー
-（`models/karume-anima` / `models/karume-irodori-v4.1-small`）を優先する。
-ミラー自体が無い場合だけファミリの `SOURCES` にある検証済み公開 revision を取得する。
-存在するディレクトリに `karume.json` が無ければ、未完成としてエラーにする。
-`--source` の明示指定が最優先で、実際の取得元は起動時に表示される。
-Gemma 4 は従来どおりローカルが既定、公開取得は `--repo` で指定する。
-SBV2 と vowel-detector は使う配布形を `--source` で明示する。
+The Deno-era CLI examples this section describes were removed in 0.15 (`bb35fe2a` — to be rebuilt as browser applications); it records their behaviour as of 0.14.0.
+When `--source` is omitted, `demo:anima` and `demo:irodori` prefer the standard mirrors above
+(`models/karume-anima` / `models/karume-irodori-v4.1-small`).
+Only when the mirror itself is missing do they fetch the verified published revision in the family's `SOURCES`.
+If an existing directory has no `karume.json`, it is an error, as an incomplete distribution.
+An explicit `--source` takes top priority, and the actual source is printed at startup.
+Gemma 4 defaults to local as before; fetching from the public repository is requested with `--repo`.
+SBV2 and vowel-detector name the distribution to use explicitly with `--source`.
 
-追加 LLM の実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) /
-[Qwen3](../examples/qwen3/README.md)。公開配布形は未作成なので、`outputs/series/` の変換済み
-系列と `inputs/` の公式 `tokenizer.json` を直接読む。GPTQ i4 → i8 → RTN i4 → f16 → f32 の順で
-既存系列を探し、同種の実験が複数ある場合は `--source` の指定を求める。新規取得・再変換はしない。
+The experimental CLIs for additional LLMs are MiniCPM5 (`examples/minicpm5/README.md` (removed in 0.15)) /
+Qwen3 (`examples/qwen3/README.md` (removed in 0.15)). No public distribution exists yet, so they read the converted
+series under `outputs/series/` and the official `tokenizer.json` under `inputs/` directly. They look for existing series in the order GPTQ i4 → i8 → RTN i4 → f16 → f32,
+and when there are several experiments of the same kind they ask for `--source`. They do no new fetching and no re-conversion.
 
-## 公開（HF へのアップロード）
+## Publishing (upload to HF)
 
-**MUST: モデルファイルを HF へ上げるときは、`tools/.venv/bin/hf`（huggingface_hub 1.27 /
-hf_xet 1.6.0）を使い、以下の env 4 本を同一シェルで必ず付ける。**
+**MUST: when uploading model files to HF, use `tools/.venv/bin/hf` (huggingface_hub 1.27 /
+hf_xet 1.6.0) and always set the four env variables below in the same shell.**
 
 ```sh
 export HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE=1000000
@@ -179,26 +180,26 @@ export HF_XET_DEDUPLICATION_NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1
 export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 ```
 
-台本 `tools/release/hf-upload.zsh upload <repo>` がこの env・shard-cache の退避・venv の hf・
-直後の断片化表までを 1 回で行う（[release-runbook](release-runbook.md) §2）。
-付けないと Xet の chunk 単位 dedup が効きすぎて**再構成が断片化し、DL が数倍遅くなる**。
-4 本目は CAS 全体への chunk 照会（global dedup）を止める — これが無いと、上げた覚えの無い
-他リポの xorb へヒットして**初回アップロードでも断片化する**（2026-09-04 の siglip2 で実測）。
-機序と実測は
-[research/2026-08-09-xet-fragmentation.md](research/2026-08-09-xet-fragmentation.md)。
+The script `tools/release/hf-upload.zsh upload <repo>` does these env variables, setting aside the shard-cache, running the venv's hf and
+printing the fragmentation table right after, in one go ([release-runbook](release-runbook.md) §2).
+Without them, Xet's chunk-level dedup works too well, **the reconstruction becomes fragmented and downloads become several times slower**.
+The fourth one stops the chunk query against the whole CAS (global dedup) — without it, the upload hits xorbs of
+other repositories you never uploaded, and **even a first upload gets fragmented** (measured with siglip2 on 2026-09-04).
+Mechanism and measurements:
+[research/2026-08-09-xet-fragmentation.md](research/2026-08-09-xet-fragmentation.md).
 
-- 上げたら**必ず検証する** — 全 krm（と資産の safetensors）について reconstruction の term 数を数え、
-  `MiB/レンジ` が 10 を下回っていないか見る（手順は同ドキュメント §9・サンプル数本では
-  ファイル間の偏りを見落とす）。健全なら 1 xorb = 1 term に近くなる。
-- アップロードの前には**毎回** `~/.cache/huggingface/xet/*/shard-cache` を退避する（初回でも
-  global dedup のヒットで取り寄せた shard が残り、次のアップロードでそこへ dedup ヒットする）。
+- **Always verify** after uploading — for every krm (and the asset safetensors), count the terms of the reconstruction and
+  check that `MiB/range` does not fall below 10 (procedure in §9 of the same document; a few sample files
+  miss the skew between files). When healthy, it comes close to 1 xorb = 1 term.
+- Before an upload, set aside `~/.cache/huggingface/xet/*/shard-cache` **every time** (even on a first upload,
+  shards fetched by a global-dedup hit remain, and the next upload dedup-hits them).
 
-**env が効く範囲は hf_xet の版に依存する。**
+**Which env variables take effect depends on the hf_xet version.**
 
-- 4 本目の `GLOBAL_DEDUP_QUERY_ENABLED` は hf_xet **1.4.3（nix の hf）には無く、1.6.0
-  （tools/.venv の hf）にはある**。効いたことは hf_xet のログの
-  `global_dedup_query_enabled = false (user set)` 行で確認できる。1.4.3 では存在しない env を
-  export しても何も起きないので、nix の hf ではアップロードしない。
-- **断片化したときの回復手順と、公開 pin のあるリポでの禁止事項の正本は
-  [release-runbook](release-runbook.md) §2「アップロード直後の断片化検証」**である。この節が正本として
-  持つのは env 4 本と hf_xet の版の条件だけで、回復の可否・2 コミット法・リポ削除の扱いは複製しない。
+- The fourth, `GLOBAL_DEDUP_QUERY_ENABLED`, **does not exist in hf_xet 1.4.3 (nix's hf) and exists in 1.6.0
+  (the hf in tools/.venv)**. That it took effect can be confirmed by the line
+  `global_dedup_query_enabled = false (user set)` in the hf_xet log. With 1.4.3, exporting an env variable that does not exist
+  does nothing, so do not upload with nix's hf.
+- **The canonical source for the recovery procedure after fragmentation and for what is forbidden on repositories with a published pin is
+  [release-runbook](release-runbook.md) §2 "Fragmentation check right after the upload"**. What this section holds as canonical
+  is only the four env variables and the hf_xet version condition; it does not duplicate whether recovery is possible, the two-commit method or how deleting a repository is handled.
