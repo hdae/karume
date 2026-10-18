@@ -413,7 +413,7 @@ This is a state that lacks the check of "consistency between the quant preset an
 [0108](decisions/0108-container-format.md) decision 19 requires of admission, and it is not by design.
 
 - Mechanism: the replaced component takes only the container from the replacement's manifest
-  (`packages/models/src/hub/components.ts:438-445` — of the return of `resolveSelection` only `containers[key]` is
+  (`packages/models/src/hub/components.ts:471-478` — of the return of `resolveSelection` only `containers[key]` is
   used). Wan's family check reads the preset of the original manifest (`packages/models/src/wan/family.ts:407-414`),
   and makes the pre-fetch check with its `requiredLimits` (same file `:320-324`).
 - Current impact: the recipe writer (`umt5_export` — including `--intake`) writes the vocabulary embedding as i8, so a

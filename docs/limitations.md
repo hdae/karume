@@ -1490,7 +1490,7 @@ Consequences).
 The acceptance conditions of replacing with a compatible umT5 (component replacement — ADR [0108](decisions/0108-container-format.md) decision 19 /
 [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) decision 7) are limited to those decided mechanically from the two manifests and the container
 declarations: the replacement's manifest has the role and the quant; the sha256 of the graph descriptor equals the original manifest's declaration;
-the container's capability and zero shortage / excess in the binding table (`packages/models/src/hub/components.ts:438-487`); and Wan's family check (the graph's input/output
+the container's capability and zero shortage / excess in the binding table (`packages/models/src/hub/components.ts:471-524`); and Wan's family check (the graph's input/output
 contract, and storage of only i8 weights and f32 tables — `umt5Contract`; `packages/models/src/wan/text-stage.ts:150-162` adds the comparison with the DiT's context to
 `umt5GraphContract` (`packages/models/src/umt5/graph-contract.ts:73-153`), which it shares with the standalone umT5). This is by-design, to keep the compatibility decision
 to a single content hash, and the following 3 are not checked (the reasons for not adopting options B / C and the option of baking the bucket configuration into the graph,
@@ -1498,14 +1498,14 @@ and the conditions for reviving them, are in ADR 0122 "Alternatives not taken").
 
 - **The prompt is silently misread**: plugging in a component trained with a different tokenizer of the same vocabulary size is accepted without an error, and generation proceeds with the prompt
   split into a wrong id sequence. Mechanism: the replacement takes only the container; the tokenizer asset stays the original manifest's
-  (`packages/models/src/hub/components.ts:499-503`). Nobody checks the combination of component and tokenizer (no real case yet).
+  (`packages/models/src/hub/components.ts:538-542`). Nobody checks the combination of component and tokenizer (no real case yet).
 - **The output silently degrades**: plugging in a umT5 with a different relative-position bucket configuration is accepted without an error and encodes
   with different positional relations than intended. Mechanism: the bucket table configuration (`numBuckets` 32, `maxDistance` 128 — `packages/models/src/umt5/relative-position.ts:38`) and
   the valid length 512 (same file `:51`) are host constants not in the graph descriptor, so the containers of umT5s with different configurations can be byte-identical (measured in
   ADR 0122's independent check). Taking in an upstream without a `config.json` copies the original's config, so the intake comparison is empty too
   (`intake.json` records "configuration estimated" — ADR 0122 decision 5, item 5).
 - **Weights of unknown licence run without warning**: the replacement's provenance and licence are neither checked nor recorded at run time
-  (`packages/models/src/hub/components.ts:432-455` looks only at the manifest and the sha256 of the graph descriptor). The generated output does not reveal which weights
+  (`packages/models/src/hub/components.ts:465-489` looks only at the manifest and the sha256 of the graph descriptor). The generated output does not reveal which weights
   were used either. The runtime does not know the provenance (ADR 0108 decision 19). Weights with an undeclared licence are stopped on the intake, conversion and
   local experimental mirror side (the explicit argument `--allow-undeclared-license`, outside `models/`, the pre-publication check — ADR 0122 decision 6), but plugging in a mirror
   assembled locally is not itself stopped.
