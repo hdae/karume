@@ -1,228 +1,155 @@
-# 0039: SBV2 の配布形（`sbv2/1`）と多話者の将来設計
+# 0039: SBV2 distribution form (`sbv2/1`) and the future multi-speaker design
 
-- Status: accepted（聴感ゲートまで**ユーザー受理** 2026-08-07「w8a8 までほぼ同じ音声に聞こえる /
-  f16 は全く劣化を感じない」）
+- Status: accepted (2026-08-07 — the maintainer accepted the listening check: "up to w8a8 the voices
+  sound almost the same; f16 shows no degradation at all"); partly superseded by
+  [0041](0041-manifest-v2.md) (manifest vocabulary and multi-model packaging: decisions 2 and 7,
+  2026-08-08), [0069](0069-packed-w4-storage.md) (2026-08-17) and
+  [0128](0128-default-preset-original-weights.md) decision 4 (2026-10-17) (decision 2),
+  [0074](0074-quant-seat-naming.md) (2026-08-25) and 0128 decision 1 (2026-10-17) (decision 5), and
+  [0079](0079-sbv2-two-layer-input.md) (decision 6, 2026-08-25). Decisions 1, 3 and 4 are in force.
 - Date: 2026-08-07
-- 改訂: ADR [0041](0041-manifest-v2.md) — manifest の語彙（`karume/1` → `karume/2`・
-  `variant` → `dtype`・`weights` / `assets` / `quants`）と、多モデル / 多話者の packaging
-  （本 ADR 決定 7 の sub-manifest / speakers 展開案への回答）を置換。SBV2 固有の資産選別・
-  実行に必要な 3 グラフ・聴感裁定は現行。
-- 関連: ADR [0038](0038-manifest-v1.md)（manifest v1 — **本 ADR はその SBV2 例を実装で確定させる**）/
-  [0013](0013-sbv2-chain-export.md)（チェーンの emit ターゲット）/
-  [0026](0026-w8a8-deberta-deployment.md)（DeBERTa i8 の受理根拠）/
-  [0027](0027-sbv2-f16-series.md)・[0029](0029-sbv2-i8-series-and-quant-quality.md)（f16 / i8 系列）/
-  [0037](0037-karume-monorepo.md)（配布形の親決定）/ [0008](0008-public-api.md)（公開面の薄さ）
+- Related: ADR [0038](0038-manifest-v1.md) (manifest v1 — this ADR settled its SBV2 example) /
+  [0013](0013-sbv2-chain-export.md) (emit targets of the chain) /
+  [0026](0026-w8a8-deberta-deployment.md) (why DeBERTa i8 was accepted) /
+  [0027](0027-sbv2-f16-series.md) and [0029](0029-sbv2-i8-series-and-quant-quality.md) (f16 / i8
+  series) / [0037](0037-karume-monorepo.md) (parent decision on the distribution form) /
+  [0008](0008-public-api.md) (thin public surface)
 
 ## Context
 
-SBV2 の TS 側実装が本リポへ移り、実重みで e2e が全緑になった（`packages/runtime/tests/e2e_sbv2_test.ts`
-= 3 系列 × 5 ターゲット × 5 ケースが実 GPU で 78 passed）。配布形を組む段になったが、ADR 0038 が
-書いた SBV2 の manifest 例は自ら「本家慣例値のサンプル — export 時に実測系列から確定する」と
-断っている（0038 の SBV2 例の注記）。ここで確定させる。
+The TypeScript SBV2 implementation moved into this repository and the real-weight end-to-end tests
+passed on a real GPU. ADR 0038's SBV2 manifest example said it was a sample "to be settled from the
+measured series at export"; this ADR settles it.
 
-対象の実重みは HF `rufflet17/voice_models` の `FN/FN4/`（Style-Bert-VITS2 JP-Extra・
-`version: 2.6.1-JP-Extra`・`n_speakers: 1`・**4 スタイル**・44.1kHz）。ユーザー裁定により「公開者が
-改変自由としているものを引用し、Anima と同じ形で公開する」方針。
+The weights were `FN/FN4/` of Hugging Face `rufflet17/voice_models` (Style-Bert-VITS2 JP-Extra,
+`2.6.1-JP-Extra`, one speaker, four styles, 44.1 kHz). Its `state_dict` matches the checkpoint used in
+the earlier experiment tensor for tensor (1,165 tensors, same shapes), so the `style-bert-vits2==2.5.0`
+pin stayed. The style set differs (4 against 7); that difference motivates decision 3.
 
-**この ckpt は先行実装で使っていた別の ckpt と state_dict がテンソル 1165 本・shape とも完全一致**
-（実測）だったため、`style-bert-vits2==2.5.0` のピンを動かさずに読めた。一方で**スタイルの構成は
-別物**（4 対 7）で、この差が決定 3 の動機になっている。
+Since then the published SBV2 distribution is `karume-sbv2-jvnv` (licence `cc-by-sa-4.0` with
+`LICENSE.md` / `NOTICE.md`, ADR 0092 decision 7). `karume-sbv2-fn` is not published on Hugging Face
+and has no permanent local mirror (rulings of 2026-08-20 and 2026-08-30; `docs/backlog.md`, parked
+item "karume-sbv2-fn"; `docs/assets-layout.md`).
 
 ## Decision
 
-### 1. components は実行に要るものだけ（3 グラフ + 4 資産）
+### 1. Only the components needed at run time (3 graphs + 4 assets)
 
-ADR 0038 の例は emit ターゲット 6 本（`dp` / `front` / `flow` / `dec` / `voice` + text_encoder）を
-並べていたが、**実行に要るのは 3 本**である。`voice` は flow + dec の融合、`front` は enc_p + dp +
-sdp を含む（ADR 0013）。`dp` / `flow` / `dec` は golden 検証専用なので配布しない — 載せると
-flow 155MB + dec 59MB がそのまま無駄になる。
+ADR 0038's example listed six emit targets (`dp` / `front` / `flow` / `dec` / `voice` plus
+`text_encoder`), but only three are needed at run time: `voice` fuses flow and dec, and `front`
+contains enc_p, dp and sdp (ADR 0013). `dp` / `flow` / `dec` serve only golden verification and are
+not distributed; shipping them would waste flow 155 MB and dec 59 MB.
 
-| component            | 形                    | 実サイズ                   |
-| -------------------- | --------------------- | -------------------------- |
-| `text_encoder`       | `{file}`（i8 のみ）   | 334,545,336 B              |
-| `front`              | `variants: {f16, i8}` | 17,956,780 / 10,326,768 B  |
-| `voice`              | `variants: {f16, i8}` | 109,371,348 / 55,524,872 B |
-| `tokenizer`          | `{file}`              | 122,035 B                  |
-| `symbols`            | `{file}`              | 1,574 B                    |
-| `style_vectors`      | `{file}`              | 4,184 B                    |
-| `speaker_embeddings` | `{file}`              | 2,136 B                    |
+The components are `text_encoder`, `front`, `voice` (graphs) and `tokenizer`, `symbols`,
+`style_vectors`, `speaker_embeddings` (assets). The sizes recorded on 2026-08-07 (FN4, 504 MiB in
+total) predate the layer trim of ADR [0045](0045-deberta-layer-trim.md) (2026-08-11: the text encoder
+drops its last two layers, WAV sha256 unchanged) and the `krm` container.
 
-配布形 `models/sbv2-FN4/` は 11 ファイル・504MiB。取得量は preset `f16` で 462,003,393 B、
-`w8` / `w8a8` で 400,526,905 B。
+### 2. `text_encoder` is i8 only (no variants)
 
-> 更新（2026-08-11・ADR [0045](0045-deberta-layer-trim.md)）: `text_encoder` は **22 層カット後の
-> 309,167,272 B** になった（SBV2 が読む `hidden_states[-3]` は layer 21 の出力なので末尾 2 層は
-> 死重み — WAV sha256 は不変のまま）。`w8` の取得量は **375,148,841 B**。この表の値は 24 層時点の
-> 記録として残す。
+(Superseded by ADR 0041 decision 3 (2026-08-08), ADR 0069 (2026-08-17) and ADR 0128 decision 4
+(2026-10-17): weights always carry a dtype key and the `{file}` form is gone; the `i8+bert4` and
+`i4` presets carry the text encoder in i4; an original-weights preset is best effort and is not
+ruled out by size.) The original rule: `export_deberta.py` had only f32 and i8, the f32 encoder
+(1.32 GB) was not distributed, and i8 was accepted by ADR 0026 with a listening check (hidden[-3]
+SNR 20.7 to 23.3 dB), so there was no reason for f16. The `f16` preset was therefore asymmetric
+(generator nets f16, text encoder i8), which is why ADR 0038 made `weights` a per-component record.
+A `{file}`-form component MUST NOT appear in a preset's `weights`.
 
-### 2. `text_encoder` は i8 単体（variant を持たない）
+### 3. `styles` / `speakers` are derived from the assets (MUST — never hard-code the tables)
 
-`export_deberta.py` は f32 と i8 しか持たず、f32 は 1.32GB で配布に載らない。i8（319MiB）は
-**ADR 0026 が聴感ゲート込みでユーザー受理済み**（hidden[-3] の SNR 20.7〜23.3dB）なので、f16 を
-新設する動機が無い。
+`pipelineConfig.styles` / `speakers` copy `data.style2id` / `data.spk2id` from `config.json`. The
+default knobs come from `style_bert_vits2.constants` (`DEFAULT_STYLE`, `DEFAULT_SDP_RATIO`, ...)
+(`tools/export-recipes/sbv2/distribution.py`).
 
-結果として preset `f16` は「生成ネットだけ f16・text_encoder は i8」という非対称になるが、これは
-ADR 0038 が `weights` を単一文字列でなく `Record<component, label>` にした動機そのもの
-（コンポーネント別の量子化混在）。`{file}` 形の component は preset の `weights` に**現れてはならない**
-（hub が `ManifestReferenceError` で落とす）。
+**The tables MUST NOT be hard-coded.** When the checkpoint changes, the style names and their order
+change too (FN4 has 4 styles, the earlier checkpoint 7). A copied table keeps the shapes valid and
+silently produces the voice of another style. Assembly also checks `defaults.style ∈ keys(styles)`
+and `defaults.speaker ∈ keys(speakers)`; otherwise a distribution with a non-existent default fails
+only at start-up.
 
-### 3. `styles` / `speakers` は資産から導出する（MUST — 表を焼き込まない）
+### 4. Styles and speakers: ship the tables, pick the row at run time
 
-`pipelineConfig.styles` / `speakers` は `config.json` の `data.style2id` / `data.spk2id` をそのまま
-写す。既定ノブも `style_bert_vits2.constants` から引く（`DEFAULT_STYLE` / `DEFAULT_SDP_RATIO` …）。
+`style_vectors` (`[styles, 256]`) and `speaker_embeddings` (`[speakers, gin_channels]`) are shipped as
+tables, and the pipeline resolves name → row → vector. Styles are mixed as
+`mean + (picked - mean) * weight`, where **`mean` is row 0** (the same formula as
+`TTSModel.__get_style_vector`; `packages/models/src/sbv2/style.ts`).
 
-**表を焼き込んではならない。** ckpt が変わればスタイルの名前も並びも変わり（FN4 は
-Neutral / high / low / NSFW の 4、先行実装で使っていた別 ckpt は Neutral / Angry / Disgust / … の 7）、
-写した表を配ると **shape は合ったまま別のスタイルの声が出る**。組み立て時に `defaults.style ∈
-keys(styles)` / `defaults.speaker ∈ keys(speakers)` も検査する（存在しないスタイル名を既定に据えた
-配布形は、起動して初めて落ちる）。
+The speaker embedding was missing from the first distribution: `front` and `voice` both take
+`g[1,512,1]` as a graph input, but the demo path passed a `g` baked into an asset, so the gap
+appeared only when the distribution was read through hub. Baking one selected speaker would leave
+`pipelineConfig.speakers` mapping names to rows that cannot be selected, so speakers ship as a table
+like `style_vectors`.
 
-### 4. スタイルと話者は「表を配って実行時に行を引く」
+Checks (assembly stops with `DistError`):
 
-`style_vectors`（`[スタイル数, 256]`）と `speaker_embeddings`（`[話者数, gin_channels]`）を
-safetensors で配り、パイプラインが名前 → 行番号 → ベクトルと解決する。スタイルの混合式は
-`mean + (picked - mean) * weight`（**`mean` は行 0** — `TTSModel.__get_style_vector` と同式）。
+- rows of `style_vectors` == `data.num_styles` == `len(data.style2id)`
+- rows of `speaker_embeddings` == `data.n_speakers` == `len(data.spk2id)`, columns ==
+  `model.gin_channels`
+- the values of `styles` / `speakers` are a permutation of `0..rows-1` (also checked when
+  `pipelineConfig` is parsed, `packages/models/src/sbv2/config.ts`)
 
-**話者埋め込みは最初に組んだ配布形で欠落していた。** `front` と `voice` はどちらも `g[1,512,1]` を
-グラフ入力に取るのに出所が無く、デモ経路が `assets.safetensors` に焼いた `g` を渡していたため、
-**配布形を hub 経由で読むまで露見しなかった**。選択済みの 1 本を焼く形（当初案）では
-`pipelineConfig.speakers` が名前 → 行を持つのに話者だけ選べない非対称になるので、`style_vectors`
-と同じ表配布へ揃えた。
+**An ID is the row number, so a mismatch loads and runs and only produces another style's or
+speaker's voice.** Matching the row counts is the only way to detect it, hence these three checks.
 
-門（組み立て時に `DistError` で止める）:
+### 5. Presets `f16` / `w8` / `w8a8`, default `w8`
 
-- `style_vectors` の行数 == `data.num_styles` == `len(data.style2id)`
-- `speaker_embeddings` の行数 == `data.n_speakers` == `len(data.spk2id)`、列数 == `model.gin_channels`
-- `styles` / `speakers` の値が `0..rows-1` の順列であること（manifest の parse 時にも検査）
+(Superseded by ADR 0074 (preset names, 0.5.0, 2026-08-25) and ADR 0128 decision 1 (how the default
+preset is chosen, 2026-10-17); the current default is `i8+bert4`, `SBV2_DEFAULT_QUANT` in
+`tools/export-recipes/sbv2/distribution.py`.) The original rule: only `w8a8` set
+`session.linearCompute = "i8a8"`. Conv1d dominates SBV2 and linear is close to zero GFLOP (ADR 0025
+decision 5), so `w8a8` was offered as a choice, not for speed. `w8` was the default because it was the
+smallest download (400 MB) and listening allowed it.
 
-**ID は行番号そのものなので、ずれてもロードも実行も通り、別のスタイル・別の話者の声が出るだけで
-沈黙する。** 行数を合わせる以外に検出手段が無いため、この 3 つを門にしている。
+### 6. The Japanese dictionary is not part of the distribution (provisional)
 
-### 5. preset は `f16` / `w8` / `w8a8`、既定は `w8`
+(Superseded by ADR 0079 on 2026-08-25: the yomi dependency and the dictionary fetch were removed from
+models together with the `dictionary` injection option; the caller analyses the text with yomi.) The
+original rule: the `@hdae/yomi` dictionary is tied to the yomi version, not to the model, so mixing it
+into the distribution would force re-uploads on yomi updates and duplicate it per speaker. As a test
+version, `packages/models` called `fetchDictionaryBytes` directly — the only path where models reached
+the network without hub — with a `Sbv2PipelineOptions.dictionary` injection option. Declaring
+`@hdae/yomi` in models also installed yomi for users who wanted only Anima.
 
-`w8a8` だけ `session.linearCompute = "i8a8"`。SBV2 は 5 ターゲットとも conv1d が 86〜90% を占め
-linear は実質 0 GFLOP（ADR 0025 決定⑤）なので、`w8a8` は速度のためではなく**選択肢として**置く。
-既定を `w8` にしたのは取得量が最小（400MB）で、聴感がこれを許すため（下の Consequences）。
+### 7. No multi-speaker support now (options recorded)
 
-> 精密化（2026-08-10・TS ランタイム実測）: 「conv1d 86〜90%」は GFLOP 集計（exporter 側）
-> 由来の値で、GPU 実時間では **conv1d 単体 70.2% / conv 族（+ conv_transpose1d）86.5% /
-> front+voice に限れば conv 族 96.7%**（FN4/w8）。「linear 実質 0」も front+voice では成立
-> するが、DeBERTa text_encoder（linear 87.7%・全体の 9.4%）を含めた全体では成立しない。
-> 決定への影響は無い（w8a8 を速度目的にしない根拠はむしろ強まる）。実測は
-> [research/2026-08-10-op-timing-stats.md](../research/2026-08-10-op-timing-stats.md) §3。
-
-> 更新（2026-08-20・ユーザー裁定）: quant 表に `w8-bert4`（text_encoder だけ i4 混成）と
-> `w4`（3 席とも i4 混成）が加わり（ADR 0069 / perf-ledger Q-1・Q-5）、**既定は `w4` へ変更**。
-> 根拠 = GPTQ 校正付き丸めの出荷結線（perf-ledger Q-6）後の聴感が「ほぼ違いが分からない」+
-> 速度勝利（取得 −30%・ロード 1.7 倍速・温間合成 ~4% 速 —
-> [research/2026-08-20-gptq-awq-calibrated-rounding.md](../research/2026-08-20-gptq-awq-calibrated-rounding.md)
-> §7）。`w8` は opt-in の参照系（WAV 参照門の不変アンカー）として残す。
-
-> 再裁定（2026-08-20・ユーザー — HF 公開準備時）: **既定は `w8-bert4` へ変更**（`w4` 既定を
-> 撤回）。根拠 = 聴感の最終整理で `w8-bert4` は f32 とほぼ同一・`w4` は f32 比で「テンション
-> 少し低め」が残る（net_g の素の RTN i4 由来 — conv は GPTQ 不適で校正の経路が無く、縮む
-> 見込みは J-3 の g 軸次第）。公開の既定は品質を最優先し、`w4` は速度/サイズ優先の opt-in
-> として残す。丸め方式の内訳はモデルカードの quant 備考に記載（w4 の名は格納形の語彙のまま
-> とし、方式は名に入れない — 2026-08-20 命名裁定）。
-
-> 改名（0.5.0）: 席名は ADR [0074](0074-quant-seat-naming.md) の移行表で改名した（`w8` → `i8`・
-> `w8a8` → `i8-a8`・既定 `w8-bert4` → `i8+bert4`・`w4` → `i4`・`f16` → `f16+bert8`）。上の本文の
-> 旧名は当時の記録として残す。
-
-### 6. 日本語辞書は配布形に載せない（**暫定** — リファクタで再検討）
-
-> 解消（2026-08-25・ADR [0079](0079-sbv2-two-layer-input.md)）: yomi 依存と辞書取得は models から
-> 撤去した（`dictionary` 注入席も廃止）。辞書は呼び手が yomi で解析して渡す。下の本文は当時の記録。
-
-`@hdae/yomi` の辞書はモデル資産ではなく yomi のバージョンに結びつくため、配布形に混ぜると
-「モデルは不変なのに yomi 更新で再アップ」が起きる。かつ多話者では同じ辞書が話者ぶん複製される。
-
-一方で取得経路は**現状 `packages/models` が `fetchDictionaryBytes` を直接呼ぶ**形にした
-（ユーザー裁定 2026-08-07「一旦テスト版として組んでいるだけ、詳細はリファクタリング時に検討」）。
-**これは ADR 0038 が資産取得を hub に一元化した設計との緊張**であり、`packages/models` が hub を
-経由せずネットワークへ出る唯一の経路である。`Sbv2PipelineOptions.dictionary` の注入席を置いてあり、
-渡された場合は 1 度も取得に出ない。
-
-**関連する未解決の課題**（ユーザー指摘・2026-08-07）: `packages/models/deno.json` に `@hdae/yomi` を
-足すと、**anima 目的で `@karume/models` を入れた利用者にも yomi が降る**。全モジュール副作用ゼロに
-よる tree-shaking はコードを削るが、依存宣言そのものは削れない。ファミリ別パッケージ分割
-（`@karume/models-sbv2` 等）が候補で、ADR 0037 §4 の「barrel + サブパス両建て」を見直す材料になる。
-
-### 7. 多話者は今回やらない（選択肢だけ残す）
-
-FN4 は 1 話者なので、`speakers` map は 1 エントリで閉じている。10 話者を 1 リポジトリにまとめたい
-という要求（ユーザー・2026-08-07）に対しては、**既存 variant の流用では解けない**:
-
-- variant ラベルは「格納 dtype 語彙と 1 対 1」を優先する規約（ADR 0038）で、話者は別の軸
-- 話者をラベルに載せると preset が話者 × dtype の直積になり、`presets ≤ 32` / `components ≤ 64` の
-  上限に 10 話者で当たる
-
-選択肢（どちらも未着手）:
-
-- **(a) リポ内サブ manifest**: `FN4/karume.json` … を並べ、hub が `repo + subpath` で引く。manifest の
-  形は無傷で、`text_encoder`（319MB・全話者で同一）を共有パスに置ける
-- **(b) `pipelineConfig.speakers` の実体化**: 決定 4 の表配布を多話者へ広げる。ただし FN1〜FN10 は
-  **別 ckpt** なので `front` / `voice` の重みも話者ぶん要り、components 分割が避けられない
-
-`text_encoder` が配布形の 63% を占めることが、多話者を 1 リポにまとめる技術的な動機を強めている
-（1 話者 1 リポだと 319MB が話者ぶん複製される）。
+(Superseded by ADR 0041 decisions 1 and 2 on 2026-08-08: one root manifest holds `models` plus
+`defaultModel`, and the sub-manifest option was not adopted; `karume-sbv2-jvnv` holds F1 / F2 / M1 /
+M2 with `shared/`.) The original analysis: speakers are a separate axis from the dtype labels, and
+putting them into labels would make presets a speakers × dtypes product that hits the manifest v1
+limits (`presets ≤ 32`, `components ≤ 64`) at ten speakers. Options were (a) sub-manifests inside the
+repository with a shared `text_encoder` (63% of the distribution) and (b) expanding the speaker table,
+which still needs per-speaker `front` / `voice` weights.
 
 ## Consequences
 
-### 検証 — 段 1 経路と段 2 経路の WAV がビット一致
+- Listening and the measured numbers disagree: `w8a8` has LSD 4.81 dB against f32, yet the maintainer
+  could not tell it apart in normal playback. Numbers alone cannot choose a distribution preset.
 
-配布形 + `w8` preset で出した WAV と、`outputs/series/` を直接読む段 1 の経路（i8 構成）で出した
-WAV が **sha256 完全一致**（`a82f72e2c18956ec725a3f692182e8c9a7dad4011e760dab9fb3d051653db2f4`）。
-配布形の i8 資産 3 本が系列の実体と sha256 同一であることも確認済みなので、「同じ資産・同じ計算」が
-配布形の組み立てとパイプライン化を通しても保たれている。dump の 11 テンソルもバイト一致。
+## Addendum (2026-08-07) — verification and measurements
 
-torch 参照との突合（f32 構成・`sbv2_demo.py reference`）: **`w_ceil` 整数完全一致**・
-`length_match: true`・波形 maxAbs **5.16e-5**（値域上端 0.396）・rmse 3.19e-6。`maxRel` は零交差で
-発散するので判定に使わない（golden E2E の dec / voice tolerance と同じ事情）。
+- The WAV from the distribution with `w8` matched the step-1 path that reads `outputs/series/` bit for
+  bit (FN4); torch parity on f32 matched `w_ceil` exactly with waveform maxAbs 5.16e-5. The current
+  WAV regression check is the per-environment row of jvnv F1 (`packages/e2e/tests/e2e_sbv2_wav_test.ts`).
+- Quantization measured with torch simulation: SNR against f32 was f16 35.87 dB, w8 9.01 dB, w8a8
+  7.83 dB; the degradation comes mainly from `front` (as in ADR 0029).
+- GPU timing on 2026-08-10 refined "conv1d 86–90%": conv family 86.5% overall, 96.7% within
+  front+voice; no effect on decision 5 ([research](../research/2026-08-10-op-timing-stats.md) §3).
 
-ゲート: `deno task verify` 687 passed / 0 failed / 4 ignored、pytest 2030 passed / 3 skipped。
+## Addendum (2026-08-20) — default preset changes
 
-### 量子化 — 測定値と聴感の乖離
+- The quant table gained `w8-bert4` and `w4` (ADR 0069); the default moved to `w4` and, on the same
+  day at the Hugging Face publishing check, to `w8-bert4` for quality
+  ([research](../research/2026-08-20-gptq-awq-calibrated-rounding.md) §7). Renamed in 0.5.0 by ADR 0074
+  (`w8-bert4` → `i8+bert4`).
 
-`measure_quant_sbv2.py`（torch シミュレーション・同一発話 / 同一乱数）の実測:
+## Addendum (2026-08-07 to 2026-09-24) — open items closed
 
-| 構成  | SNR vs f32 | LSD（主指標） | 発話長（自前 `w_ceil`） |
-| ----- | ---------: | ------------: | ----------------------- |
-| f16   |   35.87 dB |       0.61 dB | 一致（229/229）         |
-| w8    |    9.01 dB |       2.99 dB | 割れ（229/229）         |
-| w8a16 |    8.98 dB |       2.99 dB | 割れ（229/229）         |
-| w8a8  |    7.83 dB |       4.81 dB | **割れ（228/229）**     |
-
-直交分解でも ADR 0029 と同じ傾向（劣化の主因は front 側 — `w8-front-only` 7.22dB /
-`w8-voice-only` 15.83dB）。
-
-**ユーザー聴感（2026-08-07）は「w8a8 までほぼ同じ音声に聞こえる」「f16 は全く劣化を感じない」。**
-LSD 4.81dB でも通常再生では聞き分けられないという実測で、**数値だけでは配布 preset を決められない**
-ことの記録として残す。ADR 0029 が f16 を「この表のスケールの校正点」に据えた前提は、この ckpt でも
-成立した（ただし f16 の SNR は 35.87dB で、別 ckpt の 40.5dB より 4.6dB 低い）。
-
-### ライセンス — 配布形に条件の違うものが同居する（**公開前に裁定が要る**）
-
-実地確認（2026-08-07）:
-
-- **声の重み** `rufflet17/voice_models`: **HF 上にライセンス宣言も README も無い**（API の `tags` は
-  `region:us` のみ・`cardData` なし）。「公開者が改変自由としている」はユーザーからの情報で、
-  リポジトリ上に根拠が無い。モデルカードは `license: other` + リポジトリへの `license_link` とした。
-- **text_encoder** `ku-nlp/deberta-v2-large-japanese-char-wwm`: **cc-by-sa-4.0（ShareAlike）**。
-  配布形の 63%（319MiB / 504MiB）を占め、i8 へ変換して**再配布**している。
-
-モデルカード本文には両方の帰属を書いたが、**ShareAlike が配布形全体に及ぶかは法務判断**であり、
-frontmatter の単一 `license` 欄でどう表すかを含めて公開前にユーザーの裁定が要る。決定 7 の (a)
-（text_encoder を別リポへ分ける）を採ると、この同居自体が解消する副次効果がある。
-
-### 積み残し
-
-- `symbols.json` の `defaults` と `pipelineConfig.defaults` が配布形に**二重に並ぶ**。パイプラインは
-  後者だけを読み（`parseJpExtraRules` の `defaults` は任意に降格済み）、組み立て時に両者の一致を
-  検査して食い違えば止める門を置いてあるが、配布形から落とすのが根治。
-- `symbols.json` には exporter が焼いた `style` / `speaker` の**選択結果**も残っており、こちらは門の
-  対象外（決定 4 で表配布にしたため、選択結果は記録以上の意味を持たない）。
-- DeBERTa の実重み e2e（`e2e_deberta_test.ts`）は未移植のまま。`export_deberta.py` の `main()` も
-  `argv` を取らず、`karume` CLI から届かない。（2026-08-16 追記: e2e は移植済み。export 側は
-  ADR 0065 で `tools/export-recipes/deberta/export.py` の `-m` 起動へ再編され、CLI 非搭載は
-  by-design になった。）
+- Licence: the open question about ShareAlike on the FN4 distribution is moot; the published jvnv
+  distribution is `cc-by-sa-4.0` (ADR 0092 decision 7) and FN is not published (Context).
+- The duplicated `defaults` in `symbols.json` and its consistency check were removed on 2026-09-24
+  (review W-RC5-1); `pipelineConfig.defaults` is the only source (`sbv2_knob_defaults` in
+  `tools/export-recipes/sbv2/distribution.py`; `defaults` is optional in
+  `packages/models/src/sbv2/text/symbols.ts`).
+- The DeBERTa end-to-end test was ported (2026-08-16); the export is launched with `-m` from
+  `tools/export-recipes/deberta/export.py` (ADR 0065), and having no `karume` CLI entry is by design.

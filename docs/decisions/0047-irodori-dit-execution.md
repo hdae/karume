@@ -1,96 +1,95 @@
-# 0047: Irodori DiT の実行形 — B=1 × 選択実行・G4 は当面 G5 へ畳む・uncond はマスクで表す
+# 0047: Irodori DiT execution form — B=1 with selective runs, uncond expressed by the mask
 
-- Status: accepted（ユーザー裁定 2026-08-11 — recon の推奨どおり）
+- Status: accepted (2026-08-11; the maintainer's ruling, as the recon recommended); partly
+  superseded by [0114](0114-irodori-dit-context-split.md) (decision 3: the context-KV projection is a
+  separate graph `dit_context`, 2026-09-27)
 - Date: 2026-08-11
-- 関連: ADR [0046](0046-cat-symbolic-axis.md)（記号軸 cat）/
-  [0044](0044-runtime-attention-mask.md)（実行時 bool マスク）/
-  [0042](0042-prepared-execution-plan.md)（prepared — G4 切り出しの分岐点）/
-  実測 = [research/2026-08-11-dit-export-recon.md](../research/2026-08-11-dit-export-recon.md)
+- Related: [0046](0046-cat-symbolic-axis.md) (symbolic-axis cat) /
+  [0044](0044-runtime-attention-mask.md) (runtime bool mask) /
+  [0042](0042-prepared-execution-plan.md) (prepared plans) /
+  [0054](0054-resident-loop-and-fence.md) (resident tensors and the resident loop) /
+  [0060](0060-row-block-attention.md) (row-block attention) / measurements:
+  [research/2026-08-11-dit-export-recon.md](../research/2026-08-11-dit-export-recon.md)
 
 ## Context
 
-Irodori の Euler ループは 40 step・CFG は前半 t∈[0.5,1.0] のみ・variant は
-independent 3 本（text / speaker / caption の各 uncond）+ cond の計 4 本。上流実装は
-バッチ 4 でまとめて forward し、uncond 用に「state を 0 にした context KV」をもう一組作る。
+Irodori's Euler loop has 40 steps; CFG applies only in the first half, t ∈ [0.5, 1.0]; the variants
+are three independent uncond passes (text / speaker / caption) plus cond, four in total. Upstream
+runs a forward with batch 4 and builds a second set of context KV "with the state set to 0" for the
+uncond passes.
 
 ## Decision
 
-### 1. uncond は「cond の context KV + マスク全 0」で表す
+### 1. uncond is expressed as "cond's context KV + an all-zero mask"
 
-3 変種とも **cond の KV をそのまま使いマスクだけ 0 にした結果とビット一致**（recon §3-1 の
-実測 — マスク済み要素の寄与は `exp(−inf)=0` で厳密に 0）。よって G4 相当の射影は
-**cond の 1 組だけ**計算し、CFG 4 変種の違いは bool マスク 1 本に還元する。上流の
-「バッチ 4 倍の context KV」（712MB 相当）は持たない。
+All three variants are **bit-identical to using cond's KV unchanged and zeroing only the mask**
+(recon §3-1 — a masked element contributes exactly 0 through `exp(−inf) = 0`). The projection that
+corresponds to G4 is therefore computed **for cond only**, and the four CFG variants differ only by
+one bool mask. Upstream's "4 × batch context KV" (about 712 MB) is not held.
 
-入力契約（fail loudly）: `speaker_uncond_mode="mask"`（既定）と
-`cfg_guidance_mode="independent"` のみ対応。`"noise"` / `joint` / `alternating` は
-この同値が成り立たないため、パイプライン層で明示拒否する。
+Input contract (fail loudly): only `speaker_uncond_mode="mask"` (default) and
+`cfg_guidance_mode="independent"` are supported. `"noise"`, `joint` and `alternating` break this
+equivalence and are rejected explicitly in the pipeline layer (`docs/limitations.md`, section
+"Irodori DiT").
 
-### 2. B=1 グラフ × 選択実行（B=4 グラフは持たない）
+### 2. A B=1 graph with selective runs (no B=4 graph)
 
-- CFG が要る step だけ 4 回 forward（≈100 forward）。B=4 常時（160 forward）より演算 −37%。
-- 中間 `scores[1,20,S,S+1519]` は S=750 で 130MB — B=4 の 519MB は本機
-  `maxStorageBufferBindingSize`（実測 2048MiB）でも重く、案 c の記号軸 cat は B=4 だと
-  context KV の 4 倍展開（712MB）を強制する。
-- 代償: run 固定費（~38ms/run — EmbeddingGemma での帰属値）× 100 run ≈ 3.8s。ホスト固定費の
-  分解（独立将来波）が効けば B=1 の優位が確定する。B=4 は再訪しない（上記の構造的な代償）。
+- Only the steps that need CFG run four forwards (about 100 forwards), 37% less compute than B=4 on
+  every step (160 forwards).
+- At design time the B=4 shape was heavy: the intermediate `scores[1,20,S,S+1519]` is 130 MB at
+  S = 750 and 519 MB at B=4, and the symbolic-axis cat (option c of ADR 0046) would force a 4 ×
+  expansion of the context KV (712 MB) at B=4.
+- Cost at design time: a fixed run cost (about 38 ms/run, attributed on EmbeddingGemma) × 100 runs ≈
+  3.8 s. (Since ADR 0054's resident loop, Irodori is almost GPU-bound: generation wall time 8.593 →
+  4.896 s, all GPU about 4.2 s — ADR 0054 acceptance.)
+- B=4 SHOULD NOT be revisited without a new measurement. (Re-graded 2026-10-18 to SHOULD: B=1 still
+  saves 37% of the compute, but the allocation ceiling and the 4 × expansion that ruled out B=4 have
+  changed shape — ADR 0060 splits the scores by row blocks, ADR 0114 makes the context K/V resident
+  once per generation.)
 
-### 3. G4（context-KV 事前射影）は**当面 G5 へ畳んで 1 グラフ**にする
+### 3. G4 (context-KV pre-projection) is folded into G5 as one graph for now
 
-現行の実行相はグラフ入力を**毎 run `writeBuffer`** する（入力値の Session 常駐は未実装 —
-タスク #7 保留の「Session 常駐 opt-in」が該当）。G4 を別グラフにすると出力 178MB
-（24 本 × [1,1519,20,64]）の毎 run アップロード ≈30ms が新しい固定費として乗る
-（100 run で 3.0s — 実測 recon §4-2）。畳めば入力は条件 state 3 本 = 3.6MB / run で、
-再計算 59.6 GFLOP/forward ≈ 0.56s を払っても**差し引き 2.4s の得**。
+(Superseded by ADR [0114](0114-irodori-dit-context-split.md) on 2026-09-27: G4 is exported as a
+separate graph `dit_context`, run once per generation, and its 24 K/V outputs reach `dit` as
+resident tensors. The inputs of `dit` are `x_t` / `t_embed` / `mask` and the 24 K/V tensors; the
+three condition states moved to the inputs of `dit_context`.)
 
-**分岐点（DECIDED: 本 ADR）**: タスク #7 の「入力値の Session 常駐」が入ったら G4 を
-切り出す — その時点で再計算 0.56s の節約に転じる。それまで G5' は
-`x_t[1,S,32]` / `t_embed[1,512]` / `mask bool[1,1,1,S+1519]` / 条件 state 3 本
-（text[1,256,512] / speaker[1,751,768] / caption[1,512,512] — Tmax 右 pad）を入力に取る。
+Original decision: the execution phase wrote graph inputs with `writeBuffer` on every run (no
+Session-resident input values yet). A separate G4 graph would add an upload of its 178 MB output
+(24 × [1,1519,20,64]) of about 30 ms per run as a new fixed cost (3.0 s over 100 runs — recon §4-2).
+Folded, the inputs are the three condition states, 3.6 MB per run; paying the recomputation of
+59.6 GFLOP/forward ≈ 0.56 s still **saves 2.4 s net**. Branch point (DECIDED: this ADR): split G4
+once Session-resident input values exist. Until then G5' takes `x_t[1,S,32]` / `t_embed[1,512]` /
+`mask bool[1,1,1,S+1519]` and the three condition states (text[1,256,512] / speaker[1,751,768] /
+caption[1,512,512], right-padded to Tmax).
 
-### 4. ホスト残置
+### 4. Left on the host
 
-Euler 更新（`x += v·Δt`・[1,S,32] ≤ 24k 要素）と CFG 合成
-（`v + Σ scale·(v_cond − v_k)`）・t_embed の生成（sin/cos 3 行 — `cos` を語彙に足さない）・
-条件 state の Tmax 右 pad とセグメントマスク構築。
+The Euler update (`x += v·Δt`, [1,S,32] ≤ 24k elements), the CFG combination
+(`v + Σ scale·(v_cond − v_k)`), the generation of `t_embed` (three lines of sin/cos — `cos` is not
+added to the vocabulary), the Tmax right-padding of the condition states, and building the segment
+mask.
 
 ## Consequences
 
-- 条件 pad により**上流の「詰めた」計算とのビット一致は成立しない**（rel 7.5e-07 — SDPA が
-  縮約長でカーネルを選ぶため、方式によらず不可避。recon §1-6）。golden 門は「export した
-  グラフを torch で回した値」基準なので厳格さ（atol 0 起点の実測導出）は維持できる。
-  文書で「上流とビット一致」を主張しないこと。
-- S=750 の scores 130MB は **WebGPU 既定の `maxStorageBufferBindingSize`（128MiB）を超える**。
-  本機は 2048MiB で問題ないが、配布時のポータビリティ課題として limitations に起票する
-  （解の候補 = 融合 attention の実行時マスク対応〈ADR 0023 の将来枠〉か S 上限）。
-- U7（概算）: 10s 発話 ≈2s / 30s 発話 ≈6.5s の GPU 実時間 + ホスト固定費 3.8s（recon §6 —
-  attention は分解経路なので楽観側。実測は G5' 着地後）。
+- Because of the condition padding, **bit identity with upstream's packed computation does not
+  hold** (rel 7.5e-07 — SDPA picks its kernel by the reduction length, so this is unavoidable
+  whatever the method; recon §1-6). The golden check uses "the exported graph run in torch" as its
+  basis, so its strictness (tolerances derived from measurements starting at atol 0) is kept.
+  Documents MUST NOT claim bit identity with upstream.
+- The 130 MB `scores` at S = 750 exceeded WebGPU's default `maxStorageBufferBindingSize`
+  (128 MiB). Resolved by the row-block execution of ADR 0060; the remaining limit is a single query
+  row that does not fit the binding limit (`docs/limitations.md`, section "Irodori DiT").
+- The U7 estimate of 2026-08-11 (about 2 s GPU time for a 10 s utterance, 6.5 s for 30 s, recon §6)
+  is superseded by the measurements of ADR 0054.
 
-## 追記（2026-09-25）— 決定 3 の分岐点の条件は ADR 0054 で成立した
+## Addendum (2026-09-25) — the branch-point condition of decision 3 was met by ADR 0054
 
-決定 3 の分岐点「タスク #7 の『入力値の Session 常駐』が入ったら G4 を切り出す」の条件は、ADR
-[0054](0054-resident-loop-and-fence.md)（2026-08-13）で仕組みとして成立した。ResidentTensor（GpuContext が
-持つ常駐バッファ）と batch enqueue が入り、DiT ループは条件 state 3 本をループの前に 1 度だけ常駐テンソルへ
-書く（`packages/models/src/irodori/dit-loop.ts` — 毎 forward の writeBuffer が消えた）。G4 を別グラフに
-しても、出力 178MB は出力 slot から常駐テンソルへの GPU コピー（0054 決定 3 の `copyOutputs`）で DiT へ渡せる。
-決定 3 が畳む理由にした「毎 run アップロード ≈30ms」は払わずに済む形になった。
+ADR 0054 (2026-08-13) provided the mechanism (ResidentTensor, batch enqueue, `copyOutputs`), so the
+condition "Session-resident input values" of decision 3 was met; the decision whether to split was
+deferred to a measurement and made by ADR 0114 (next addendum).
 
-ここでいう条件は [perf-ledger](../perf-ledger.md) の H-4（pipeline 単位の Session 常駐 — generate をまたいで
-Session を持ち続ける）とは別物と読む。H-4 の行は本 ADR の決定 3 を引いているが、決定 3 が要るのは「1 回の
-生成の中で、入力値が run をまたいで GPU に残る」ことで、それは ResidentTensor で満たされた。H-4 が未着手の
-ままでも、G4 の切り出しの前提は欠けていない。
+## Addendum (2026-09-27) — decision 3 replaced by ADR 0114
 
-それでも G4 は今も DiT グラフに畳まれたまま（`tools/export-recipes/irodori/export.py` の
-`project_context_kv`）で、forward ごとに再計算している。**切り出すか見送るかはここでは決めない**。決め手の
-数字（決定 3 の再計算 59.6 GFLOP/forward・生成 1 回で ≈0.56 s と、切り出したときの常駐 +178MB の VRAM）は
-K-4a と常駐ループより前の実行形で採ったものである。0054 の検収で irodori はほぼ GPU 律速（全 GPU ≈4.2 s）に
-なったので、今は再計算がそのまま壁に効く側にいる可能性がある（推測・未計測）。現行の実行形で G4 の GPU 時間と
-VRAM を測り直してから決める。切り出すなら新 ADR で決定 3 を置き換える（irodori の再 export・配布形の
-再アップロード・pin の更新を伴う）。
-
-## 追記（2026-09-27）— 決定 3 は ADR 0114 で置き換え
-
-決定 3（G4 = 条件側 K/V 射影を当面 `dit` に畳む）は ADR [0114](0114-irodori-dit-context-split.md) で置き換えた
-（2026-09-27）。G4 は別グラフ `dit_context` として export し、生成 1 回だけ回して出力の K / V 24 本を常駐テンソルで
-`dit` へ渡す。`dit` の入力は `x_t` / `t_embed` / `mask` と K / V 24 本になり、条件 state 3 本は `dit_context` の入力へ
-移った。決定 1・2・4 は変わらない。
+Decision 3 (fold G4 = the condition-side K/V projection into `dit` for now) was replaced by ADR
+[0114](0114-irodori-dit-context-split.md). Decisions 1, 2 and 4 do not change.

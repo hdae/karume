@@ -1,128 +1,111 @@
-# 0031: attention スコア S の f16 格納軸（attentionScoreStorage・pack2x16float）
+# 0031: f16 storage of the attention score S (`attentionScoreStorage`, `pack2x16float`)
 
-- Status: accepted（目視ゲートも**ユーザー受理** 2026-08-04「変化はほとんど感じません、OK
-  だと思います」= 品質込みで確定）
+- Status: accepted (2026-08-04; visual check accepted by the maintainer); partly superseded by
+  [0058](0058-numerics-opt-in-contract.md) (decision 1 with [0128](0128-default-preset-original-weights.md):
+  runtime default vs distributed default preset; decision 3's detector, addendum 2026-10-10)
 - Date: 2026-08-04
-- 検出器の現況（2026-08-15 追記）: 下の E2E 節が指定する
-  `packages/runtime/tests/e2e_anima_s16_test.ts` は models 移行（旧構成の廃止）で**削除済み**。
-  現行の検出器は `packages/models/tests/e2e_anima_test.ts` の PNG sha256 完全一致門 +
-  `packages/runtime/tests/gpu_attention_s16_test.ts`。**旧 E2E の tolerance / 床の記録は歴史値**
-  として読むこと。
-- 関連: ADR 0006（**決定「活性 f16 は不採用」を S の格納に限定して上書き** — 本 ADR 決定 7）/
-  0018（unpack2x16float 部品の先例 — ただし「無料」は継承できない: 決定 2）/ 0023（融合
-  attention 3 dispatch — S の書き手と読み手）/ 0028（f16 計算変種 `:c16` — S 軸の読み替えは
-  決定 6）/ 0030（attention i8a8 — 決定 1「shader-f16 を要求しない」は**無傷**）/ 設計 recon =
-  [2026-08-04-intermediate-f16-design.md](../research/2026-08-04-intermediate-f16-design.md)
-  （案γ の初出裁定・帯域モデル・pack2x16float の書き側 RMW ハザードの発見）
+- Related: [0006](0006-quantization.md) (its "activation f16: not adopted" is overridden for the
+  storage of S only — decision 7) / [0018](0018-f16-weight-execution.md) (the `unpack2x16float`
+  precedent; its "free" does not carry over — decision 2) / [0023](0023-fused-attention.md) (fused
+  attention, the writer and readers of S) / [0028](0028-f16-compute-variants.md) (`:c16` compute
+  variants; the reading of the storage axis is decision 6) / [0030](0030-attention-a8-execution.md)
+  (attention a8; its decision 1, no `shader-f16`, is untouched) / design recon:
+  [2026-08-04-intermediate-f16-design.md](../research/2026-08-04-intermediate-f16-design.md) (the
+  first ruling on f16 intermediate buffers, the bandwidth model, the discovery of the write-side
+  read-modify-write hazard of `pack2x16float`)
+- Checks (as of 2026-10-18): `packages/runtime/tests/gpu_attention_s16_test.ts` and the sha256
+  regression checks of `packages/e2e/tests/e2e_anima_test.ts` (its default-preset cases use s16).
+  The original e2e check (`packages/runtime/tests/e2e_anima_s16_test.ts`) was deleted on 2026-08-15;
+  its tolerances and floor are historical.
 
 ## Context
 
-案γ（中間バッファの f16 格納）の recon で、1024px turbo w8a8+attn-a8 の DiT transient
-1,224.5MiB のうち **S（attention スコア）単独が 1,024.0MiB = 83.6%** を占めると実測された。
-一方、時間の期待は控えめ（帯域律速群は DiT GPU の 21.48% のみ）。ユーザー裁定 2026-08-04 =
-**案 A 縮小着手**（S の格納軸だけを波 1 として切り出し、全面 f16〈波 2 以降〉は実測後に
-VAE tiling と再優先度付け）。波 0 の Q0 シムは 1024px で門通過（S f16 の上乗せ劣化は
-雑音レベル — `w8a8-qkpv-s16` 1.043× < 対照 `w8a8-qkpv` 1.066×・S 単独 1.015×）。
+The recon of f16 intermediate buffers measured that, in 1024 px turbo w8a8 + attention a8, **S (the
+attention score) alone takes 1,024.0 MiB of the 1,224.5 MiB DiT transient memory (83.6%)**. The
+expected time gain was small (bandwidth-bound kernels are only 21.48% of DiT GPU time). The
+maintainer ruled on 2026-08-04 to start small: the storage of S only, as the first phase; full f16
+intermediates wait for measurements and are re-prioritised against VAE tiling. The Q0 simulation
+passed at 1024 px (the extra degradation of S in f16 is at noise level: `w8a8-qkpv-s16` 1.043 × vs
+the control `w8a8-qkpv` 1.066 ×, S alone 1.015 ×).
 
 ## Decision
 
-1. **opt-in `SessionOptions.attentionScoreStorage?: "f32" | "f16"`**（既定 `"f32"` 不変）。
-   `attentionCompute`（計算形）と**直交する第 2 の軸** — S は中間バッファなので「どの精度で
-   計算するか」と「どの精度で置くか」を別々に選べる。本命は `i8a8 × s16` の組。デモは
-   `--attention-score-storage f16`（出力名 `-s16`）。
-2. **エンコードは pack2x16float（`array<u32>` に 2 要素/語・core WGSL）** — `shader-f16` を
-   要求せず、**ADR 0030 決定 1 は無傷のまま** i8a8 と組める。ADR 0018 の重み f16 と同じ機序
-   だが「無料」は継承できない: 重みは読み専用だったのに対し **S は書き側を持つ**。u32 に
-   2 要素を詰めると、スカラ経路の部分書き（`if (ocol + k < dims.n)`）が同じ語への非アトミック
-   read-modify-write になる。**したがって s16 は v4 経路専用**（1 スレッドが 4 連続列 =
-   2 語ちょうどを排他に書く）で、生成の入口が `!v4` を fail loudly で落とす
-   （packages/runtime/src/kernels/score-storage.ts が部品の正本）。
-3. **適格判定 = `D % 4 == 0 && N % 4 == 0`**・非適格は f32 格納へ**沈黙縮退**（linear の
-   `k % 4`・ADR 0030 決定 5 の流儀）。この定義だと適格時は f32 / i8a8 の全書き手・読み手が
-   必然的に v4 になり、**s16 のスカラ変種は 1 つも存在しない**。3 カーネル（①QK 書き /
-   ②行統計・③PV 読み）は**同時に**切り替わる（格納形の混成は構造的に不能）。実測形
-   （D=64/128・N=512/4096）は全ノード適格。
-4. **数値契約は atol=0**: 丸めは pack2x16float の格納 1 点だけ（読み側 unpack は厳密）なので、
-   「**s16 変種 ≡ S をホストで `Math.f16round` した f32 変種**」が定義上の恒等式になる
-   （ADR 0028 の f16 タイル計算より強い契約 — あちらは内積の途中に丸めが入る）。5 形状で
-   ビット一致・pack2x16float の丸めは同点 22 値で `Math.f16round` と全一致（RTE）。
-   i8a8 ③PV の qP 門（±1 段 + 不一致率 <2%）は丸め済み S で再導出 — **不一致 0/27,200**
-   （f32 版の 0/62,088 と同じく本機では率が動かない）。
-5. **キーは第 3 の語 `:s16` を末尾に付ける**（格納重み `wf16` / 計算 `c16` と衝突しない語彙・
-   並び順はキー生成 1 箇所で固定）。f32 は空文字 = 既存キー・既存 WGSL スナップショット
-   93 本はバイト不変（新変種 7 本を追加し 100 本）。
-6. **`attentionCompute: "f16"`（`:c16`）との併用は fail loudly**。`:c16` は S を `array<f16>`
-   で持つ別の格納形で、黙ってどちらかに解釈すると丸め列がどちらの契約か診断から見えなくなる。
-   ADR 0028 の「直積は存在しない」は q/k/v が全て活性であることの帰結であり、**S は中間
-   バッファなので格納軸を持ちうる** — 本 ADR がその読み替えの正本。
-7. **ADR 0006 の「活性 f16: 不採用」を S の格納に限定して上書きする**。「格納のみ量子化・
-   計算は f32」という骨格は維持（S の格納を落とすだけで、縮約・exp は f32 のまま）。
-   S 以外の中間バッファ（案γ 波 2 以降: strided / ew / quantize_rows 入力）は**未着手のまま
-   保留** — 波 1 の実測（下表: 時間 −2% 級）を踏まえ、VAE tiling と再優先度付けしてから
-   決める（ACTIVE_DESIGN の案γ エントリが管理）。
-   **但し書き（2026-09-22）**: 管理席は [backlog](../backlog.md) の parked 節
-   （「全面 f16（案γ）」）。
+1. **Opt-in `SessionOptions.attentionScoreStorage?: "f32" | "f16"`**, default `"f32"`. It is
+   **a second axis orthogonal to `attentionCompute`**: S is an intermediate buffer, so "at which
+   precision to compute" and "at which precision to store" are chosen separately. The intended pair
+   is `a8 × s16`. (Superseded by ADR 0058 decision 2 on 2026-08-14 and ADR 0128 on 2026-10-17: the
+   runtime default — every knob omitted — is the reference path and resolves to `"f32"`
+   (`packages/runtime/src/runtime/session-options-check.ts:123`); the distributed default presets of
+   anima and wan, `f16+dit8-a8-attn8-s16`, declare `attentionScoreStorage: "f16"`.)
+2. **The encoding is `pack2x16float`** (two elements per word in `array<u32>`, core WGSL). It does
+   not request `shader-f16`, so it combines with a8 and **ADR 0030 decision 1 stays untouched**. The
+   mechanism is that of the f16 weights of ADR 0018, but "free" does not carry over: weights are
+   read-only, while **S has a writer**. Packing two elements into a u32 turns the partial write of
+   the scalar path (`if (ocol + k < dims.n)`) into a non-atomic read-modify-write of a shared word.
+   **s16 is therefore v4-only** (one thread writes four consecutive columns, exactly two words,
+   exclusively), and generation fails loudly on `!v4` (`assertScoreStorageSupported` in
+   `packages/runtime/src/kernels/score-storage.ts`, which owns the parts).
+3. **Eligibility is `D % 4 == 0 && N % 4 == 0`**; an ineligible shape falls back to f32 storage
+   silently (as linear's `k % 4` and ADR 0030 decision 5). With this definition every f32 / a8
+   writer and reader is v4 whenever the shape qualifies, so **no scalar s16 variant exists**. The
+   three kernels (① QK write, ② row statistics, ③ PV read) switch **together**; mixed storage forms
+   are structurally impossible. The measured shapes (D = 64 / 128, N = 512 / 4096) all qualify.
+   (Superseded by ADR 0058, addendum 2026-10-10: the route is decided by the pure function
+   `attentionRoute` (`packages/runtime/src/runtime/attention-route.ts:56`), and the series checks
+   test full eligibility as a ratio — `assertAttentionSeatsComplete`,
+   `packages/runtime/tests/helpers/pipeline-census.ts` — instead of a key count of one or more.)
+4. **The numeric contract is atol = 0.** The only rounding is the `pack2x16float` store (the
+   `unpack` read is exact), so "**the s16 variant ≡ the f32 variant with S rounded on the host by
+   `Math.f16round`**" holds by definition. This is a stronger contract than the f16 tile compute of
+   ADR 0028, where rounding happens inside the dot product. Bit-identical on 5 shapes; the
+   `pack2x16float` rounding matched `Math.f16round` on all 22 tie values (round to nearest even).
+   The a8 ③PV qP check (±1 step, mismatch rate < 2%) was re-derived with rounded S: 0 / 27,200
+   mismatches.
+5. **The key gets a third suffix `:s16` at its end** (no clash with the weight storage suffix
+   `:wf16` or the compute suffix `:c16`; the order is fixed in one key builder, `scoreKeyPart`).
+   f32 is the empty string, so existing keys and WGSL snapshots stay byte-identical.
+6. **Combining with `attentionCompute: "f16"` (`:c16`) fails loudly.** `:c16` holds S as
+   `array<f16>`, a different storage form; silently choosing either would hide from the diagnostics
+   which contract the rounding sequence follows. ADR 0028's "no product exists" follows from q / k /
+   v all being activations; **S is an intermediate buffer and can have a storage axis** — this ADR
+   is the reference for that reading.
+7. **ADR 0006's "activation f16: not adopted" is overridden for the storage of S only.** The
+   skeleton "quantize the storage only, compute in f32" stays: S is stored narrower, and the
+   reductions and `exp` stay f32. Intermediate buffers other than S (strided / elementwise /
+   `quantize_rows` inputs) are not started; the first-phase measurement (time about −2%) is the
+   input for re-prioritising them against VAE tiling. They are parked in the
+   [backlog](../backlog.md) ("parked" section, full f16 intermediates).
 
-## E2E（packages/runtime/tests/e2e_anima_s16_test.ts・tolerance は素の実測から導出）
+## Measurements (2026-08-04, 1024 px turbo, `--dit i8`, linear and attention a8, A/B/A/B)
 
-- **単独形（ケース A・s16 のみ）**: f32 対照と **58.7 倍**離れる（step1 noise 4.5315e-3 対
-  7.7248e-5）→ **下限の床 6e-4**（幾何中点）が opt-in 沈黙失効の数値検出器として立つ。
-- **実運用形(ケース C・w8a8 + attn a8 + s16)**: 対照と **1.16 倍**しか離れず**床は構造的に
-  置けない**（ADR 0030 と同型 — 先行する量子化雑音に埋もれる）。検出はキー本数検査 1 本
-  （s16 の attention キー 56×3 本 / f32 格納キー 0 本）。
-- 対照 8 値は既存 attention a8 E2E の記録と完全一致（独立再現）。
+DiT transient memory 1,224.5 → 712.5 MiB (−512.0 MiB, exactly the design value of halving S); DiT
+GPU time −2.0%; dispatches per step unchanged (3,311, no conversion dispatch). Row statistics gained
+1.13–1.39 ×, PV nothing (the a8 integer GEMM is instruction-bound). The default-path sha256 checks
+were unchanged. Full record: commit `99a3c649`, this file.
 
-## 実測（2026-08-04・1024px turbo `--dit i8 --linear-compute i8a8 --attention-compute i8a8`・A/B/A/B）
+## Detection limits
 
-| 指標                             |        s16 なし |        s16 あり |                                        差 |
-| -------------------------------- | --------------: | --------------: | ----------------------------------------: |
-| **transient（RunArena peak）**   |      1,224.5MiB |    **712.5MiB** | **−512.0MiB（S 半減の設計値と厳密一致）** |
-| DiT GPU / linear（時計プロキシ） | 1.6963 / 1.6409 | 1.6341 / 1.6371 |                                 **−2.0%** |
-| stats / linear                   | 0.0981 / 0.0802 | 0.0704 / 0.0709 |                           **1.13〜1.39×** |
-| qk / linear                      | 0.1627 / 0.1682 | 0.1602 / 0.1608 |                                     1.03× |
-| pv / linear                      | 0.1741 / 0.1671 | 0.1720 / 0.1728 |                    **≈1.00×（利得なし）** |
-| dispatch / step                  |           3,311 |           3,311 |               **0（変換 dispatch なし）** |
-
-- **案γ は「メモリの案」という recon の結論どおり**: transient −512MiB は設計値で確実、
-  時間は DiT GPU −2% 級・壁時計は熱順序に埋もれて誤差レベル・512px は測定限界以下
-  （attention 3 段の比差 0.0008·linear）。
-- stats の倍率が ADR 0028 の `:c16` 実測（1.45〜1.58×）に届かないのは、パック格納のスカラ
-  読み（`score_at` = unpack + select / 要素）の命令オーバーヘッドと読む（`:c16` は
-  `array<f16>` のネイティブロード）。pv は i8a8 の整数 GEMM が命令律速（実効 249GB/s）で
-  読みバイト半減が効かない — recon の「推測 1.05〜1.15×」は上振れだった。
-- a8 側の対の開き（stats 0.0981/0.0802）は run3 の強スロットリング（linear 1,446ms 対
-  805ms）による — 帯域律速カーネルと計算律速カーネルでクロック感度が違い、時計プロキシの
-  精度が落ちる（s16 側の対は <0.7% で一致）。
-- **既定経路: PNG sha256 門 2 系列（512 f16 / 1024 i8）とも実行前後で完全一致**・
-  スナップショット 93 本不変・verify 667/0/4（メイン自己実測）。
-
-## 検出限界・知見（本タスクの新記録）
-
-1. **②行統計のスカラ読み `score_at` の偶奇取り違えは数値網で検出不能**。適格条件
-   `N % 4 == 0` により行頭が必ず偶数添字になり、偶奇反転は「行内の対ごとの置換」にしか
-   ならない（amax は置換不変・Σexp も最終 ulp まで一致を実測）。ADR 0018 の「行内相対添字の
-   罠」が適格条件で**無害化されている**形。実働の検出器は WGSL スナップショット 1 本。
-2. **書き側を持つ u32 パック格納は「1 スレッド 2 要素・偶数境界」を全カーネルに強制する**
-   （決定 2）— 案γ を ew / strided 族へ広げる場合の主要コスト。S は書き手が 1 箇所 + v4 で
-   例外的に安全だった。
-3. 実運用形の床不能（E2E 節）は ADR 0030 検出限界の再演 — opt-in 積層の後段ほど数値検出器が
-   立たなくなる構造。
+1. **Swapping even and odd elements in the scalar read `score_at` of ② row statistics cannot be
+   detected numerically.** Eligibility `N % 4 == 0` makes every row start at an even index, so the
+   swap only permutes pairs inside a row (amax is permutation-invariant; Σexp matched to the last
+   ulp in measurement). The "row-relative index" trap of ADR 0018 is neutralised by the eligibility
+   condition. The working detector is one WGSL snapshot.
+2. **u32-packed storage with a writer forces "one thread, two elements, even boundary" on every
+   kernel** (decision 2) — the main cost of extending f16 storage to the elementwise / strided
+   families. S was safe because it has one writer and is v4.
+3. In the production form (w8a8 + attention a8 + s16) no numeric floor fits (the s16 effect is
+   buried in the earlier quantization noise, as in ADR 0030); the later an opt-in sits in the stack,
+   the less a numeric detector can see it.
 
 ## Consequences
 
-- **1024px の DiT transient が 712.5MiB へ**（i8a8 運用で S 半減が初めて使える形になった —
-  ADR 0030 Consequences のギャップ解消）。1024px チェーンの VRAM ピークは VAE decode
-  （transient 1,536MiB）側が残る — 案γ 波 2 以降 or VAE tiling の領分。
-- 時間の勝ちは小さい（−2% 級）。**案γ 波 2 以降（全面 f16・22 族）は本実測を判断材料に
-  VAE tiling と再優先度付け**してから着手を決める。
-- 画像は f32 / w8a8+a8 と別物（軌道分岐）だが、**目視ゲートはユーザー受理**（2026-08-04
-  「変化はほとんど感じません」— 512/1024px の before/after 4 枚で裁定）。Q0 の相対測定
-  「s16 上乗せは雑音レベル（対照より僅かに良い測定値）」と知覚が整合。
-- 非 GPU 固定費の実測が 695〜704ms/step（1024px・単発冷機）と、ADR 0030 記録の
-  「~350ms/step」（512px・A/B/A/B 排他中）の約 2 倍で観測された。測定条件差（排他実測は
-  プロセス連続でウォーム）と推測されるが、**どちらも「解像度非依存・dispatch 数支配」という
-  性質は一致** — 数値を引く際は測定条件を併記すること。
-  **但し書き（2026-08-04・ADR 0032）**: 帰属 recon で 2 倍差の正体は「step 番号と装置代の
-  有無」と判明（「固定費」という理解自体が不正確 — GPU 時間診断の装置代は作成済みバッファ
-  累計で step とともに成長する）。ADR 0032 が装置代（gpuTiming 既定 off）と直列化
-  （onSWD 廃止）を解消し、本表の運用形の壁は 2,131〜2,299 → **1,502〜1,512ms/step** へ。
+- The 1024 px DiT transient memory drops to 712.5 MiB; halving S is now usable with a8 (closing the
+  gap noted in ADR 0030's consequences). The 1024 px peak then sits in the VAE decode (transient
+  1,536 MiB), which [ADR 0033](0033-vae-fixed-tile-decode.md) addresses.
+- The time gain is small (about −2%); full f16 intermediates are judged on this measurement.
+- Images differ from f32 / w8a8 + a8 (trajectory divergence), but the **visual check was accepted by
+  the maintainer** (2026-08-04, "I hardly feel any change"; four before/after images at 512 and
+  1024 px), consistent with Q0's "s16 adds noise-level degradation".
+- The "non-GPU fixed cost" measured here (695–704 ms per step) was later attributed by
+  [ADR 0032](0032-deserialize-submit-and-optin-timing.md) to timing overhead and CPU/GPU
+  serialisation, and removed there.

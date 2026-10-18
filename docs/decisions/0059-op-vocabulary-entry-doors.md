@@ -1,87 +1,84 @@
-# 0059 — op 語彙の入場門モデル（層番号の退役と Core ATen 1 判定への一本化）
+# 0059: Entry-door model for the op vocabulary (layer numbers retired; one Core ATen test decides)
 
-- Status: accepted（2026-08-14・ユーザー裁定「第 1' 層が出た時点で微妙 — 現状把握からの
-  再分類」→ 入場門モデル・名前制で承認）
-- 改訂: ADR [0064](0064-entry-door-generality-axes.md) が判定に 2 軸を追加（意味論の射程の
-  明示 / 実行モデル不変条件を壊す追加は core でも ADR 必須）。決定 6 の在庫表は**時点記録**
-  として読む — 融合ルールの現在値の正本は `fusion.ts` の `FUSION_RULES` と融合門テスト。
-- 対象: op 追加の判定手続き（docs のみ）。**実装・既存資産・既存 op の語彙上の席は全て
-  不変** — 変わるのは今後の追加の紙のルールだけ。
-- 置換: [ADR 0043](0043-op-addition-layers.md) の層定義・判定手順（同 ADR 本文は当時の
-  記録として保存・冒頭に本 ADR への注記のみ）。
-  [known-issues](../known-issues.md) に起票されていた層分類の 2 穴はこれでクローズ。
+- Status: accepted (2026-08-14); amended by [0064](0064-entry-door-generality-axes.md) (two more
+  axes; the inventory of decision 6 is a snapshot), inventory table of decision 6 withdrawn
+  2026-10-18
+- Date: 2026-08-14
+- Related: supersedes [0043](0043-op-addition-layers.md) (layer definitions and procedure) /
+  [op-vocabulary.md](../op-vocabulary.md) (the procedure) / [0012](0012-attrs-and-fused-ops.md) /
+  [0015](0015-conv-family-extension.md) / [0040](0040-fusion-pass.md)
 
 ## Context
 
-ADR 0043（+ 2026-08-12 追記）の層は、ADR 要否を「原子/分子 × Core ATen 内/外 × 要求元」の
-合成で決めていた。原子/分子の境界（「厳密同値で書けるが容量・性能で非成立」）は桁の判断で
-割れうるのに、その答えが紙の手続きを左右する。第 1' 層はその歪みを要求元軸で塞いだ
-パッチで、モデル拡充波の recon で 2 穴（Core ATen 外・モデル由来の原子の行き場 /
-「非成立」の線引きが 2 文書で非等価）が顕在化した。
+ADR 0043 decided whether an op needs an ADR from atomic / composite × inside / outside Core ATen ×
+requester. The atomic / composite boundary ("exactly expressible, but does not hold up in memory or
+speed") can split on a judgement of magnitude, yet it changed the procedure. Layer 1' patched this
+with the requester axis, and the recon for new models found two holes: no place for a model's
+atomic op outside Core ATen, and two documents drawing "does not hold up" differently. This ADR
+changes only the written rule for future additions (implementations, assets and the place of
+existing ops do not change) and closes both holes.
 
-## 決定
+## Decision
 
-1. **層は番号でなく名前で呼ぶ**: export 消滅層 / Core ATen 層 / 拡張原子層 / 拡張分子層 /
-   融合層。旧番号との対応: 第 0 = export 消滅層・第 1 = Core ATen 層・第 1' = 拡張原子層・
-   第 2 = Core ATen 層（core の attr 変種）と拡張分子層（非 core）に分属・第 3 = 融合層。
-   旧番号は過去の ADR / 台帳 NOTE の時点記録に残るが、新規記述では使わない。
-2. **ADR 要否の軸は「Core ATen 帰属」の 1 判定だけ**: 入場券 = `torch.Tag.core in op.tags`
-   の実測（機械判定 — 台帳に実測コマンドを記す）。core の op と、その attr 変種の別 op 名
-   （`gelu_tanh` 前例 — attrs 空契約 ADR 0012 の帰結）は **Core ATen 層 = 台帳 NOTE のみ**。
-   core op 由来の IR 名には overload 変種の別名（`ge.Scalar` → `ge_scalar` 等）と純改名
-   （`_to_copy` → `cast`・`mm` → `matmul`・`view` → `reshape`）も含む
-   （ADR 0015 の「語彙追加の残り = ADR 対象外」裁定を継承）。
-   NOTE には従来どおり「手順 1/2（畳み込み・分解）を却下した実測」を書く（様式の前例 =
-   `upsample_bilinear2d` の NOTE）。コミットメント上限の根拠は有限収束（Core ATen 160 +
-   その attr 面）。**それ以外（非 core の aten・torchvision・karume 独自名）= ADR 必須**。
-3. **原子/分子は層でなく、ADR 内の証明の型に降格する**: 拡張原子層 = 語彙内の他 op の
-   合成で厳密同値に**書けない**ことの証明（`deform_conv2d` 型）。拡張分子層 = 書けるが
-   保存する実測根拠 — 入場条件は旧第 2 層の①〜④（復元が脆い・意味が落ちる / 中間実体化が
-   非成立 / 再出現率 / attr 変種分離）を継承（`gru_scan` 型）。**要求元（IR 機構かモデルか）
-   は層を分けない**（`sym_prefix_slice` と `deform_conv2d` は同じ門 — 区別は ADR 内の
-   一文で足りる）。
-4. **「容量・性能で非成立」の判定は紙の手続きを左右しない**: Core ATen 内なら答えが
-   どちらでも同じ門に落ちる。分解で逃げるか op を足すかの工学判断には拘束的閾値を
-   置かず、**前例ガイド**を手順に添える — 合成が中間・FLOP をほぼ増やさない書き換え
-   （reciprocal → 除算形・softplus 分解・RoPE 実数化型）は分解側が既定。中間が膨らむ
-   場合は **1.5〜2 倍の時点で既に保存側の前例がある**（leaky_relu — ADR 0015・メモリ
-   見積の前提が崩れるとして保存リスト入り）。桁で膨れる合成（upsample_bilinear2d の
-   FLOP 184 倍・batch_norm の 537MB — 台帳の反例集）は**分解の却下材料**であって、
-   op を足すか否かは需要側（再出現率・入場条件）で決める。
-5. **記録の訂正（torch 2026-08-14 実測）**: ADR 0043 追記の「分解禁止 12 op のうち 9 本は
-   Core ATen 由来」は意味面の対応（conv1d → convolution 等）で数えた値で、厳密な
-   `Tag.core` は **12 中 3**（embedding / gelu / leaky_relu）。非 core の保存 9 本（conv1d /
-   conv2d / conv_transpose1d / layer_norm / linear / masked_fill / rms_norm / softmax /
-   attention〈SDPA・ターゲット別〉）は「エクスポータが分解を止める選択をした分子」
-   そのものであり、**拡張分子層**に置く（根拠は既存 ADR・台帳 — 遡及手続きなし）。
-   この帰結として機序が一貫する: **非 core の op（`Tag.core` 実測で判定 — IR 名の綴り
-   ではない）が IR に現れるのは karume が意図して選んだときだけ**（保存 or 発明）—
-   選択には記録（ADR）が伴う。
-6. **既存 op の再配置**（席・実装・資産・ADR 要否の遡及は全てなし）:
+1. **Layers have names, not numbers**: export-eliminated layer / Core ATen layer / extended atomic
+   layer / extended composite layer / fusion layer. Old numbers: 0 = export-eliminated; 1 = Core
+   ATen; 1' = extended atomic; 2 = split between Core ATen (attr variants of core ops) and extended
+   composite (non-core); 3 = fusion. Old numbers stay in past ADRs and ledger NOTEs as snapshots and
+   are not used in new text.
+2. **Whether an ADR is needed depends on one test: Core ATen membership.** The ticket is the
+   measured `torch.Tag.core in op.tags` (a machine test; the ledger records the command). Core ops
+   and attr variants of them under another op name (`gelu_tanh` — a consequence of the empty-attrs
+   contract, ADR 0012) belong to the **Core ATen layer: a ledger NOTE only**. IR names derived from
+   core ops include overload variants (`ge.Scalar` → `ge_scalar` and the like) and pure renames
+   (`_to_copy` → `cast`, `mm` → `matmul`, `view` → `reshape`) (inherits ADR 0015: the rest of the
+   vocabulary additions need no ADR). The NOTE records, as before, the measurement that rejected
+   steps 1 and 2 (folding, decomposition) (template: the `upsample_bilinear2d` NOTE). The commitment
+   is bounded because it converges (160 Core ATen ops plus their attr surface). **Everything else
+   (non-core aten, torchvision, Karume's own names) MUST have an ADR.**
+3. **Atomic / composite is no longer a layer but the type of proof inside the ADR.** Extended
+   atomic: proof that the op **cannot** be written as an exact equivalent from other ops of the
+   vocabulary (`deform_conv2d`). Extended composite: it can be written, with the measured reason to
+   keep it; the entry conditions inherit ① to ④ of the old layer 2 (reconstruction is fragile or
+   loses meaning / materialising the intermediate does not hold up / recurrence / attr-variant
+   separation) (`gru_scan`). **The requester (IR mechanism or model) does not split layers**
+   (`sym_prefix_slice` and `deform_conv2d` go through the same door; one sentence in the ADR states
+   the difference).
+4. **"Does not hold up in memory or speed" does not change the procedure.** Inside Core ATen either
+   answer lands at the same door. The engineering choice between decomposing and adding an op has
+   no binding threshold; the procedure carries a **precedent guide**. Rewrites that barely add
+   intermediates or FLOPs (reciprocal → division, softplus decomposition, real-valued RoPE)
+   decompose by default. When intermediates grow, **there is already a precedent for keeping the op
+   at 1.5–2×** (leaky_relu — ADR 0015, kept because the memory estimate breaks). Compositions that
+   grow by orders of magnitude (upsample_bilinear2d FLOPs ×184, batch_norm 537 MB — the ledger's
+   counter-examples) are grounds to **reject the decomposition**; whether to add the op is decided
+   by demand (recurrence, entry conditions).
+5. **Non-core ops kept from decomposition sit in the extended composite layer.** Of the 12 ops whose
+   decomposition is forbidden, strictly 3 carry `Tag.core` (embedding / gelu / leaky_relu; torch,
+   measured 2026-08-14). The 9 non-core ones (conv1d / conv2d / conv_transpose1d / layer_norm /
+   linear / masked_fill / rms_norm / softmax / attention (SDPA, per target)) are composites whose
+   decomposition the exporter chose to stop; they belong to the extended composite layer (grounds in
+   existing ADRs and the ledger; no retroactive procedure). Consequence: **a non-core op (by the
+   measured `Tag.core`, not by the spelling of its IR name) appears in the IR only when Karume
+   chose it on purpose** (kept or invented), and the choice comes with an ADR. (Corrects the count
+   "9 of 12 come from Core ATen" in the ADR 0043 addendum, which matched by meaning, such as conv1d
+   → convolution.)
+6. **Existing ops are re-placed without retroactive change** (no change to their place,
+   implementation, assets or ADR requirement). Fused attention (ADR 0023) is not in the fusion
+   layer: it is a run-time kernel variant of the IR op `attention`, and execution variants play no
+   part in the vocabulary doors. Withdrawn 2026-10-18: the inventory table of 2026-08-14 (for
+   example "the fusion layer is exactly four rules"); the current inventory lives in the source and
+   the ledger (ADR 0064 decision 3) — `FUSION_RULES` in `packages/runtime/src/runtime/fusion.ts`
+   holds seven rules today.
+7. **Inherited unchanged**: the "better not to do" list (no additions for symmetry; filling the 160
+   is not a goal) overrides every door; the fusion layer MUST have observation points (ADR 0040);
+   the no-decomposition list is an axis independent of layers (ADR 0043 addendum, decision 3); the
+   contract set of the Core ATen layer (`OP_CONTRACTS`, `ops.py`, `shapes.py`, fixtures, CPU
+   reference, golden `COVERAGE` in `tools/exporter/src/karume/goldens.py`).
 
-   | 門           | 現在の在庫                                                                                                                                                                                                                                             |
-   | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-   | Core ATen 層 | 実装済みの core 群（sin / upsample_bilinear2d / embedding / gelu を含む）+ core 由来の別名・overload 変種（cast / ge_scalar / gt_scalar / le_scalar / matmul / reshape 等）+ leaky_relu・gelu_tanh（旧第 2 層 — ADR 0015 / 0043 は歴史記録として残置） |
-   | 拡張原子層   | sym_prefix_slice（ADR 0010）・deform_conv2d（ADR 0055）                                                                                                                                                                                                |
-   | 拡張分子層   | safe_softmax（ADR 0044・`aten._safe_softmax` は非 core）・gru_scan / gru_scan_reverse（ADR 0056）・非 core の保存 9 本（決定 5）                                                                                                                       |
-   | 融合層       | fusion.ts の silu / rope / upsample2x / adaln の **4 ルールちょうど**（ADR 0040）。融合 attention（ADR 0023）はここではない — IR op `attention` の**実行時カーネル変種**で、実行変種は語彙の門に関与しない                                             |
+## Consequences
 
-7. **不変のまま継承**: 「やらない方がよいこと」（対称性追加・160 埋めの目標化の禁止）は
-   全門に優先 / 融合層の観測点必須（ADR 0040）/ 分解禁止リストは層と独立の軸
-   （ADR 0043 追記 決定 3）/ Core ATen 層の契約 1 セット（OP_CONTRACTS + ops.py +
-   shapes.py + fixtures + CPU 参照 + golden COVERAGE）。
-
-## 帰結
-
-- [op-vocabulary.md](../op-vocabulary.md) の判定手順節を本 ADR の門表・機械判定・
-  前例ガイドへ全面改訂（旧番号の対応表つき）。過去の日付つき NOTE は時点記録として
-  残置し、対応表で読む。
-- known-issues の該当エントリは記録節へ移設（解消）。**（済 — 移設先の記録節は
-  known-issues の置き場規約「解決したら該当節を削除」に従って削除済み。層分類 2 穴の履歴は
-  本 ADR が持つ）**
-- 次の適用対象: 波③ K-5（online attention の実行変種 = 融合層ではなく**既存 op の実行時
-  変種** — 門の新設なし・opt-in 席は ADR 0058）・モデル拡充の次候補（Kokoro-82M の LSTM
-  拡張は拡張分子層の ADR 1 本）。
-  **Follow-up（2026-08-15）**: 波③ K-5 は**消化済み** — 行ブロック実行
-  （[ADR 0060](0060-row-block-attention.md)）が既存 op `attention` の実行時変種として着地し、
-  予告どおり**門の新設は無し**（ビット同一のため ADR 0058 の opt-in 席も使っていない）。
+- The procedure in [op-vocabulary.md](../op-vocabulary.md) follows this model (door table, machine
+  test, precedent guide, old-number mapping); dated NOTEs stay as snapshots.
+- The two holes left known-issues (2026-08-14); this ADR holds their history. K-5 landed as a
+  run-time variant of `attention` with no new door ([ADR 0060](0060-row-block-attention.md),
+  2026-08-15).

@@ -1,58 +1,58 @@
-# 0052: exporter 成果物の transactional な公開（temp→verify→replace / staging→swap）
+# 0052: Transactional publication of exporter artifacts (temp → verify → replace / staging → swap)
 
-- Status: accepted
+- Status: accepted (2026-08-13); decision 1 superseded by the addendum of 2026-09-24
 - Date: 2026-08-13
-- 関連: ADR [0005](0005-verification.md)（fail loudly / 検証門）/
-  [0041](0041-manifest-v2.md)（dist の組み立てと検証）。起票 = 外部レビュー EXPORTER-004 /
-  EXPORTER-002 / B2-stale（`.claude/reviews/2026-08-13_chatgpt-reviews/TRIAGE.md` —
-  git 追跡外）。
+- Related: [0005](0005-verification.md) (fail loudly, verification) /
+  [0041](0041-manifest-v2.md) (dist assembly and verification). Raised by external review
+  EXPORTER-004 / EXPORTER-002 / B2-stale (`.claude/reviews/2026-08-13_chatgpt-reviews/TRIAGE.md`,
+  untracked).
 
 ## Context
 
-`export_to_file` は final path を直接 truncate してから書き、検証（`verify_model`）は書いた
-**後**だった — 書き込み途中の故障・検証失敗のどちらでも、手元の正常な成果物が失われ、不正な
-新ファイルが final path に残る（docstring の「書けたが読めないファイルを配布物として残さない」
-契約が commit の形で担保されていなかった）。`karume dist` の組み立ても既存 destination を
-in-place 更新（unlink → copy・`karume.json` は最後）しており、I/O 故障で「旧 manifest +
-新旧混在ツリー」が残り得た。さらに A+B を組んだ出力へ A だけを再組み立てすると B の残骸が
-残り、GB 級のコピーを終えた後の `verify_dist` で宣言外ファイルとしてようやく落ちていた。
+`export_to_file` truncated the final path, wrote it, and only **then** ran `verify_model`: a crash
+or a failed check lost the good artifact and left an invalid file at the final path.
+`karume dist` also updated an existing destination in place (unlink → copy, `karume.json` last), so
+an I/O failure could leave "old manifest + mixed tree". Rebuilding A only into an output that held
+A+B left B's files behind, caught only by `verify_dist` as undeclared files after GB of copying.
 
 ## Decision
 
-1. **単体 export**: `export_to_file` は同一ディレクトリの一時ファイル
-   （`<final 名>.<uuid>.partial`）へ `write_model` → `verify_model(temp)` →
-   `os.replace(temp, final)`。失敗時は temp を捨て、既存 final は 1 バイトも変えない。
-   原子化はこの層のもの — `emit.write_model` 直呼びは「与えられた path へ書く」下層のまま。
-2. **dist 組み立て**: `assemble_family` は staging（`<出力名>.staging`・同じ親 = 同一 FS で
-   rename が原子的）へ全て生成（配置 → 共有畳み込み → `karume.json` → `verify_dist` →
-   `README.md`）し、通ってから rename 2 回（既存を `.old` へ退避 → staging を据える →
-   `.old` 破棄）で差し替える。失敗（Ctrl-C 含む）は staging だけを消し、既存配布形は不変。
-   前回の中断が残した staging / `.old` は黙って捨てて作り直す。
-3. **再組み立ては丸ごと置換**: `out_dir` の元の中身は 1 つも引き継がない — A+B → A の
-   再組み立ては B が消える（宣言外ファイルで遅く落ちる従来挙動は削除）。モデルカードも
-   staging の中で「検証を通った manifest」から描くので、据わった配布形はカードまで揃う。
+1. **Single export**: `export_to_file` writes a temporary file in the same directory
+   (`<final>.<uuid>.partial`) with `write_model` → `verify_model(temp)` → `os.replace(temp, final)`;
+   on failure the temp file is dropped and an existing final is left untouched. `emit.write_model`
+   stays the lower layer that writes to the given path. (Superseded by the addendum of 2026-09-24.)
+2. **dist assembly**: `assemble_family` (`tools/exporter/src/karume/dist.py:1389`) builds everything
+   in a staging directory (`<output>.staging`, same parent = same file system, so rename is atomic):
+   placement → shared-weight folding → `karume.json` → `verify_dist` → `README.md`. Only then two
+   renames swap it in (existing → `.old`, staging → final, then `.old` removed). A failure (Ctrl-C
+   included) removes only the staging directory; the existing distribution is unchanged. Leftovers
+   of an interrupted run are cleared before rebuilding — except that a `.old` with no final is the
+   last-known-good and is moved back to final (`_reclaim_superseded`,
+   `tools/exporter/src/karume/artifacts.py:54-65`).
+3. **A rebuild replaces the whole output**: nothing from the old `out_dir` is carried over — an
+   A+B → A rebuild drops B. The model card is also drawn inside staging from the verified manifest,
+   so a swapped-in distribution always has a matching card.
 
 ## Consequences
 
-- dist のディスクピークは swap の瞬間まで新旧ツリーが併存するぶん**約 2 倍**
-  （docs/limitations.md に記載 — by-design のトレードオフ）。
-- 出力先の親に一時的に `<名前>.staging` / `<名前>.old` が現れる（models/ は git 追跡外）。
-- `place_file` 等の `dest.unlink(missing_ok=True)` は staging が常に空から作られるため
-  実質到達しない防御になった（撤去は別コミット候補）（2026-08-16 撤去済み）。
+- Peak disk use of dist is **about twice** the distribution until the swap (`docs/limitations.md`,
+  by-design trade-off).
+- `<name>.staging` / `<name>.old` appear temporarily next to the output (`models/` is untracked).
+  The now-unreachable `dest.unlink` guards in `place_file` were removed on 2026-08-16.
 
-## 追記（2026-09-24）— 単体 export の原子性は作業席へ移った
+## Addendum (2026-09-24) — single-export atomicity moved to the workspace
 
-決定 1 の「`export_to_file` 単体で temp → verify → replace・既存 final は 1 バイトも変えない」は、
-現行の `export_to_file` 単体では**保証しない**。`export_to_file` → `publish_model` →
-`publish_container`（`tools/exporter/src/karume/{pipeline,publish}.py`）は、一時名で書いて読み戻し
-検査を通した後、`krg` と `krm` の part を 1 本ずつ `os.replace` で据える。途中で落ちた回はこの
-呼び出しが据えた現物を消して閉じるので、`final` が前回の成果物の置き場だと**前回の
-last-known-good が消える**（`publish_container` の docstring の MUST）。
+The current `export_to_file` alone **does not** give decision 1's guarantee. `export_to_file` →
+`publish_model` → `publish_container` (`tools/exporter/src/karume/{pipeline,publish}.py`) writes
+under a temporary name (`{stem}.{uuid}.partial{suffix}`, `publish.py:207`), checks it by reading
+back, then moves the `krg` and `krm` parts into place one `os.replace` at a time. A failure part-way
+removes what this call placed, so if `final` held the previous artifact, **the previous
+last-known-good is lost** (the MUST in the `publish_container` docstring).
 
-原子性の単位はディレクトリになった。保証は決定 2 と同じ staging → swap を 1 ファイルの書き手にも
-開いた作業席 `karume.artifacts.staged_publication`（`with` を例外なく抜けたときだけ `final` へ
-据える）が持ち、全 recipe の書き出しが作業席の内側にあることを
-`tools/export-recipes/tests/test_staged_publication.py` が AST で機械検査する。移転は
-`45e75120`（成果物公開を作業席の原語へ 1 本化）と `8086ed37`（配布形の書き手を `krm` へ切り替え
-— 分割形の part 単位の据え替えが入った）。新しい recipe の書き手は `export_to_file` を作業席の
-外で呼ばない MUST。決定 2 / 3（dist の staging → swap・丸ごと置換）は不変。
+The unit of atomicity is now the directory: the workspace `karume.artifacts.staged_publication`
+(`artifacts.py:102`) opens decision 2's staging → swap to single-file writers (`final` is placed
+only when the `with` block exits cleanly), and an AST check
+(`tools/export-recipes/tests/test_staged_publication.py`) keeps every recipe writing inside it.
+The move landed in `45e75120` (one publication primitive) and `8086ed37` (writers switched to
+`krm`). Recipe writers MUST NOT call `export_to_file` outside the workspace. Decisions 2 and 3
+are unchanged.

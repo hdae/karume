@@ -1,100 +1,91 @@
-# 0037: Karume monorepo — ブランド・パッケージ構成・配布方式
+# 0037: Karume monorepo — brand, package layout and distribution approach
 
-- Status: accepted
+- Status: accepted (2026-08-05); partly superseded by [0065](0065-exporter-core-recipe-split.md)
+  (§2.5, the scope of PyPI `karume`, 2026-08-15), by [0041](0041-manifest-v2.md) §2 and
+  [0108](0108-container-format.md) (§3, the distribution form, 2026-08-08 and 2026-09-24), and by
+  [0127](0127-node-dawn-toolchain.md) decisions 1 and 3 (§1, the workspace, 2026-10-16)
 - Date: 2026-08-05
-- 関連: ADR [0001](0001-scope-and-non-goals.md)（フラット構成の 1 点を本 ADR で改める）/
-  ADR [0003](0003-ir-v1.md)（IR コンテナ規約）/ ADR [0008](0008-public-api.md)（公開 API 面）
+- Related: ADR [0001](0001-scope-and-non-goals.md) (this ADR changes one point of its flat layout) /
+  ADR [0003](0003-ir-v1.md) (IR container conventions) / ADR [0008](0008-public-api.md) (public API
+  surface)
 
 ## Context
 
-パッケージとして公開するにあたり、ランタイム・エクスポータ・パイプライン配線を 1 つの
-傘ブランドの下に複数パッケージとして編成する。名前・パッケージ分割・モデル資産の運び方を
-まとめて裁定する。
+To publish the project, the runtime, the exporter and the pipeline wiring are organised as several
+packages under one umbrella brand. This ADR decides the name, the package split and how model assets
+are delivered.
 
 ## Decision
 
-### 1. 傘ブランドは **Karume**
+### 1. The umbrella brand is **Karume**
 
-- JSR: `@karume/runtime`（IR 実行）/ `@karume/hub`（モデルの resolve・DL・cache・variant
-  解決）/ `@karume/models`（パイプライン・tokenizer）。
-- PyPI: `karume`（エクスポータ CLI）。
-- リポジトリ: `hdae/karume` の monorepo（Deno workspace）。ADR 0001 の「フラット構成・
-  workspace 機構は使わない」はこの 1 点だけ改める。
+- JSR: `@karume/runtime` (IR execution) / `@karume/hub` (model resolve, download, cache and variant
+  resolution) / `@karume/models` (pipelines and tokenizers).
+- PyPI: `karume` (the exporter; its scope is narrowed by §2.5).
+- Repository: the `hdae/karume` monorepo (Deno workspace). This changes only one point of ADR 0001
+  ("flat layout, no workspace mechanism"). (Superseded by ADR 0127 decisions 1 and 3 on 2026-10-16:
+  development runs on a pnpm workspace over `packages/*` and `tools/*` (`pnpm-workspace.yaml`); the
+  Deno workspace in the root `deno.json` remains only for publishing the three packages to JSR.)
 
-空き実測（2026-08-05 時点）: **karume は JSR / PyPI / npm すべて空き**。候補比較は次のとおり。
+The name was chosen on 2026-08-05 because `karume` was free on JSR, PyPI and npm and carries no
+technical claim. `Zarame` is reserved for a possible future project with TypeScript-native model
+definitions (see §2).
 
-| 候補     | 判定 | 理由                                                                     |
-| -------- | ---- | ------------------------------------------------------------------------ |
-| `karume` | 採用 | 3 レジストリすべて空き。特定の技術的主張を名前に負わせない               |
-| `zarame` | 却下 | PyPI に先客                                                              |
-| `kasoku` | 却下 | 空きは同点だが、**速度で ONNX と勝負する看板を避ける**ポジショニング判断 |
-| `mokei`  | 却下 | PyPI / npm ともに先客                                                    |
+### 2. The approach is **converted artefacts**
 
-`Zarame` は将来の **TS ネイティブモデル定義**プロジェクトの名前として温存する（下の 2 を参照）。
+The Python exporter produces the assets, `@karume/hub` loads them and the `@karume/models` pipelines
+run them. **Model definitions are managed on the Python side**; the TypeScript side only runs the
+exported graphs.
 
-### 2. 方式は **変換アーティファクト方式**
+- The purpose is to shrink the wiring: plain host wiring grew past 1,100 lines (measured). Reducing
+  it to `AnimaPipeline.fromPretrained(...)` plus `generate(...)` on one screen is why hub and models
+  exist.
+- TypeScript-native model definitions that run the original Hugging Face safetensors directly are
+  out of scope for this project (a possible separate project, `Zarame`).
 
-エクスポータ（Python）で焼いた資産を `@karume/hub` がロードして `@karume/models` の
-パイプラインが実行する。**モデル定義の管理は Python 側**に置き、TS 側は「焼かれたグラフを
-実行する」責務に絞る。
+### 2.5 Scope of PyPI `karume` — revised by ADR 0065
 
-- 目的は配線の縮退 — 素朴なホスト配線は 1,100 行超に達する（実測）。これを
-  `AnimaPipeline.fromPretrained(...)` + `generate(...)` の**1 画面**に縮めるのが
-  hub / models の存在意義。
-- 着手は **Anima 先行**（SBV2 はモデルライセンス都合で後回し）。
-- HF の素の safetensors を直接動かす **TS ネイティブなモデル定義**は本プロジェクトの
-  スコープ外（将来の別プロジェクト = `Zarame`）。
+**Revised (2026-08-15, ADR [0065](0065-exporter-core-recipe-split.md)):** PyPI `karume` is a generic
+exporter and IR tooling package. Model-specific recipes (patches, reference scripts, dist recipes,
+model cards) live outside the wheel in `tools/export-recipes/`.
 
-### 2.5 PyPI `karume` の性格 — ADR 0065 が改訂
+### 3. Distribution form: one Hugging Face repository per model, several safetensors
 
-**改訂（2026-08-15・ADR [0065](0065-exporter-core-recipe-split.md)）**: 「エクスポータ CLI」
-としていた PyPI `karume` は**汎用 exporter / IR tooling** へ — モデル別 recipe（patch /
-台本 / dist recipe / カード）は wheel の外（`tools/export-recipes/`）に住む。
+(Superseded by ADR [0041](0041-manifest-v2.md) §2 on 2026-08-08 — a family repository holds several
+models, and `models` plus `defaultModel` in the manifest are the source of truth — and by ADR
+[0108](0108-container-format.md) on 2026-09-24 — the distribution uses the dedicated container
+`krm`, so "one graph = one safetensors" and "no `.krm` extension" no longer hold.) The part still in
+force:
 
-### 3. 配布形は **HF 1 モデル 1 リポ・複数 safetensors**
+- The exporter output directory can be uploaded as a Hugging Face repository as is, and it carries a
+  model card `README.md` (YAML front matter: `library_name` / `base_model` / `license` / `tags` /
+  `pipeline_tag`), written today by `karume dist`.
 
-**Superseded by ADR [0041](0041-manifest-v2.md) §2**（2026-08-08 — family repo に複数 model を
-置く形へ。`models` + `defaultModel` が manifest v2 の正本）。本節の他の判断（1 グラフ =
-1 safetensors・`.krm` 不採用・モデルカード同梱）は現行。1 / 2 / 4 節は無改訂。
+### 4. `@karume/models` offers a barrel and subpath exports; zero side effects becomes an invariant
 
-- 1 グラフ = 1 safetensors。IR JSON は `__metadata__` 埋め込みの現行形を維持する
-  （当時の `docs/ir-v1.md`（現 [docs/ir-v2.md](../ir-v2.md) の前身・`2960ce37^` の版）のコンテナ規約は不変）。
-- **独自拡張子 `.krm` は不採用** — 素の safetensors のままにして、HF のプレビューや既存
-  ツールで開ける性質を捨てない。
-- エクスポータの出力ディレクトリは**そのまま HF リポとしてアップロードできる形**にする —
-  変換モデル配布の習慣に従い、モデルカード `README.md`（YAML frontmatter:
-  `library_name` / `base_model` / `license` / `tags` / `pipeline_tag`）を同梱する。
-- 配布用 manifest（variant 解決表）は**別 ADR** を起票する。本 ADR では決めない。
-
-### 4. `@karume/models` は barrel + サブパスの両建て / 副作用ゼロを不変条件へ昇格
-
-- `mod.ts` の barrel と、ファミリ別サブパス export（`deno.json` の exports マップ）を両方
-  提供する。使う側は「1 ファミリだけ import」も「barrel から import して tree-shaking に
-  任せる」も選べる。
-- その成立条件として **全モジュール副作用ゼロ**（top-level 登録・グローバル可変状態・
-  import 時実行の禁止）を**横断の不変条件へ昇格**する（`CLAUDE.md` に記載）。崩れると
-  barrel 経由の shake が静かに死ぬ。
-- **未検証**: JSR の npm 互換層が生成する `package.json` に `sideEffects: false` が出るかは
-  実測していない。無くても ESM の副作用解析でおおむね shake されるが、フラグ有りが確実。
-  hub / models の整備時に実測して結果を記録する。
+- The package provides both the `mod.ts` barrel and one subpath export per family (the `exports` map
+  of `packages/models/package.json`, mirrored in `packages/models/deno.json` for JSR). A consumer can
+  import one family or import from the barrel and rely on tree-shaking.
+- As the condition for that, **every module MUST be free of side effects** (no top-level
+  registration, no global mutable state, no execution at import). This is promoted to a cross-cutting
+  invariant in `CLAUDE.md`. If it breaks, tree-shaking through the barrel fails silently.
+- Not verified: whether the `package.json` that JSR's npm compatibility layer generates carries
+  `sideEffects: false`. Without it, ESM side-effect analysis still shakes most code, but the flag is
+  the reliable form. As of 2026-10-18 this is still not measured, and no `packages/*/package.json`
+  declares `sideEffects`.
 
 ## Consequences
 
-- 立ち上げは段階制: hub（manifest ADR + 実装）→ models の anima（`AnimaPipeline` 再編）→
-  エクスポータ CLI 化（PyPI `karume`・サブコマンド式）→ HF 実網通し・公開。README の
-  本記述は最後に書く（それまで WIP スタブ）。
-- モデル e2e（anima / sbv2 / deberta の実重み系）はパイプライン整備と同時に入る — それまで
-  本リポのテストカバレッジは**ランタイム核のみ**（意図的な過渡状態）。
-- `models/` の大型資産は untracked（エクスポータで再生成可能）。
+- Large assets under `models/` are not tracked by git (the exporter regenerates them).
 
-## 追記（2026-09-22）— §3 の配布形の決定は ADR 0108（proposed）が上書きする
+## Addendum (2026-08-05) — bootstrap
 
-§3 の「独自拡張子 `.krm` は不採用」「1 グラフ = 1 safetensors」は、ADR
-[0108](0108-container-format.md) が専用コンテナ `krm` / `krg` を採る決定で上書きする（量子化席では
-safetensors 互換の利得が既に失われている、というのが撤回の理由 — 0108 の Context）。0108 は
-**proposed** で実装は未着手なので、**実装が入るまでは現行のまま**であり、本文は書き換えていない。
-monorepo の構成・barrel + サブパス export・全モジュール副作用ゼロの決定は本 ADR のまま有効。
+- The packages were brought up in stages (hub, then the Anima pipeline, then the exporter CLI, then
+  publishing); Anima came first and SBV2 later for model-licence reasons. Until the model end-to-end
+  tests landed, test coverage was limited to the runtime core.
 
-**2026-09-24**: ADR 0108 は accepted となり、段 3d（`9e905d9f`）で旧配布形の読み手が消えたので、上の
-上書きは発効した。配布形は容器 `krm` だけで、「1 グラフ = 1 safetensors」を読む処理は
-移行 CLI（`karume migrate`）にしか残っていない。
+## Addendum (2026-09-22) — §3 replaced by ADR 0108
+
+- ADR 0108 replaces the "one graph = one safetensors" and "no `.krm`" points of §3 with the dedicated
+  `krm` / `krg` container; it took effect on 2026-09-24 when step 3d (`9e905d9f`) removed the reader
+  of the old form. Only `karume migrate` still reads the old safetensors form.

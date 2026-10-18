@@ -1,201 +1,200 @@
-# 0058 — numerics opt-in の一般契約（個別 named option・既定 = 参照経路）
+# 0058: General contract for numerics opt-ins (one named option each; the default is the reference path)
 
-- Status: accepted（2026-08-14・ユーザー承認「このまま承認できます」。骨子 = 案 a〈個別
-  named option〉と「一括フラグは将来課題」は 2026-08-13 の先行裁定）
-- 対象: runtime の `SessionOptions` 実行変種面。既存 3 軸（`linearCompute` /
-  `attentionCompute` / `attentionScoreStorage`）の流儀を契約へ昇格し、以後の「数値契約を
-  割る最適化」（直近 = perf-ledger K-5 / K-2）が従う席の作り方を 1 本に固定する。
-  配布資産側の quant 席（用語は [glossary](../glossary.md)・命名規則は
-  [ADR 0074](0074-quant-seat-naming.md)・先例は [ADR 0050](0050-irodori-quant-series.md)）は
-  **格納形の軸**で本 ADR の対象外（交差の規約のみ決定 7）。
-- 背景方針: ビット同一門は「実装が正しいことの指標であって目的ではない」
-  （ユーザー方針 2026-08-13 — 正本は [perf-ledger](../perf-ledger.md) ヘッダ）。
+- Status: accepted (2026-08-14); partly superseded by [0110](0110-practical-tier-numerics-contract.md)
+  (decision 4 ② and ③, 2026-09-26) and by the addendum of 2026-09-13 with 0110 decision 8
+  (decisions 5 and 6, marked 2026-10-18); [0128](0128-default-preset-original-weights.md)
+  (proposed) takes over decision 6 and the same-weights bullet of the 2026-09-13 addendum once
+  accepted; decision 8 withdrawn 2026-10-18. Decision 2 stands: [0126](0126-numerics-profiles.md),
+  which would amend it, is deferred (2026-10-18)
+- Date: 2026-08-14
+- Related: [0028](0028-f16-compute-variants.md) (decision 1, "no auto", generalised here) /
+  [0074](0074-quant-seat-naming.md) (preset naming) / [0050](0050-irodori-quant-series.md) (first
+  storage presets) / [0110](0110-practical-tier-numerics-contract.md) (numerics contract of the
+  practical presets) / [0128](0128-default-preset-original-weights.md) (how a distribution chooses
+  its default preset) / [perf-ledger](../perf-ledger.md) / [glossary](../glossary.md)
 
-## 決定
+## Context
 
-1. **数値を変える最適化は、1 最適化 = 1 個の named option として `SessionOptions` に席を
-   持つ（案 a）**。型は string literal union で、参照経路を表す値（`"f32"` 等）が既定。
-   命名は `<対象><軸>` の既存流儀（`linearCompute` と同型）。boolean は採らない —
-   同一対象に第 2 変種が来た時に軸ごと作り直しになる（`attentionCompute` が f16 の後から
-   i8a8 を受けた実績が根拠）。
-2. **既定 = 参照経路 MUST**（[ADR 0028](0028-f16-compute-variants.md) 決定 1「auto 禁止」の
-   一般化）。アダプタ能力・資産の格納形・グラフの形から数値を変える経路を自動選択しない —
-   機械や資産を替えたら黙って出力が変わる事態を禁じる。sha256 門（PNG / WAV / golden）は
-   参照経路で凍結し、実装の正しさ・非破壊の機械検証器として温存する。
-3. **沈黙縮退は「形・limit の適格判定」に限る**（linear の `k % 4`・attention の
-   `D % 4`/`N % 4` と同じ流儀）。opt-in を指定したのに適格外で参照経路へ落ちる場合、縮退は
-   許すが**診断のパイプラインキーに必ず出す**。未実装の組合せ（例: `linearCompute: "f16"`
-   × i8 常駐）は縮退でなく fail loudly — 「指定が黙って無視される」と「形が適格でない」を
-   混同しない。
-4. **各席の検証門は 3 点セット MUST**: ①参照経路の既存 sha 門が無変更で緑（凍結の証明）
-   ②opt-in 経路の A/B 帯門（参照経路との誤差帯 — 実測ドリフト × マージンで導出し、導出表を
-   テスト定数の docstring に残す既存流儀。latent 門 w8 席 1e-2 が前例）③census 門（席を
-   指定した時に変種が実際に効いたことの検査 — 全 dispatch が縮退していたら赤。
-   `assets_fusion_counts_test` と同じ「性能だけ黙って落ちる」対策）。
-5. **品質管理の分担**（ユーザー方針 2026-08-13 の ADR 化）: 実装の正しさ・非破壊は
-   ビット同一で機械検証し、ビット同一が保証されない opt-in 席の品質は**人間レビュー
-   （聴感・視認）で管理する**。数値指標（LSD 等）は助言的 — 数値が大幅に悪化していても
-   生成結果が崩壊していないことは多い（w8a8 既定化の「LSD 5.64 より聴感が正」が前例 —
-   ADR 0050）。
-6. **既定への昇格は品質裁定とセット**: opt-in 席を既定へ昇格させる時だけ人間品質裁定を
-   行い、sha 門の参照 digest 更新と既定値変更を**同一コミット**で行う（ばらすと門と既定が
-   食い違う窓ができる）。前例 = w8a8 既定化（ADR 0050・ユーザー聴感裁定）。
-7. **quant 席（格納形）との交差**: 実行席は格納形と直交し、組の適否は各席が自分で宣言する
-   （`linearCompute: "a8"` × i8 常駐が実例 — 値は 0.5.0 で `"i8a8"` から改名〈ADR 0074 決定 3〉・不能な組は決定 3 の fail loudly）。品質裁定が
-   要るのは実行席・格納席それぞれの導入時と昇格時で、組ごとの全数裁定はしない（組が積に
-   なって爆発する — 帯門と census が組の健全性を機械側で持つ）。
-8. **最初の入居者 = K-5 / K-2**（席の命名と変種設計は各実装の設計提案で確定 — 本 ADR は
-   契約のみ）。K-5 = Irodori DiT の masked online attention（目的は**ポータビリティ** —
-   S=750 の中間 `scores[1,20,750,2269]` = 136,140,000 B ≈ 129.8MiB が WebGPU core 既定の
-   maxStorageBufferBindingSize 128MiB を超える。一次出典 =
-   [dit-export-recon](../research/2026-08-11-dit-export-recon.md) と
-   [limitations](../limitations.md) の DiT 項。online 化は加算順が
-   変わるため opt-in 席。[ADR 0044](0044-runtime-attention-mask.md) の safe_softmax 意味論の
-   online 形への再導出が設計課題）。K-2 = VAE conv2d の Winograd / i8a8（kill 基準 =
-   参照比 1.3 倍未満 — perf-ledger K-2 行）。
+The runtime already had three execution knobs in `SessionOptions` (`linearCompute`,
+`attentionCompute`, `attentionScoreStorage`). This ADR makes their pattern the contract for every
+later optimisation that breaks the numeric contract. Presets of a distribution (storage dtype;
+naming in ADR 0074) are another axis and out of scope, apart from how the axes cross (decision 7).
+Background policy (the maintainer, 2026-08-13; [perf-ledger](../perf-ledger.md) header):
+bit-identity checks indicate that the implementation is correct; they are not the goal.
 
-   **Follow-up（2026-08-15）**: 決定 8 の見込みどおりには入居していない。K-5 の目的
-   （ポータビリティ）は前段 **K-5a = 行ブロック実行（[ADR 0060](0060-row-block-attention.md)）が
-   ビット同一・既定経路で達成**したため本 ADR の席を使わずに閉じ、後段 K-5b（online / 鎖融合）は
-   **スパイク実測で棄却**（[perf-ledger](../perf-ledger.md) K-5b 行 — online は LLM 波へ保留）。
-   K-2 は整理整頓波の後。**本 ADR の契約自体は次の入居者を待つ状態で有効**。
+## Decision
 
-## 追記（2026-08-29）— 決定 2 の例外条項: ビット同一主張の自動選択は機械検証つきに限る
+1. **One numerics-changing optimisation = one named option in `SessionOptions`.** The type is a
+   string-literal union whose reference value (`"f32"` and the like) is the default. Names follow
+   `<target><axis>` (as `linearCompute`). Booleans are not used: a second variant for the same
+   target would force the axis to be redesigned (`attentionCompute` took `"a8"` after `"f16"`).
+2. **The default is the reference path (MUST).** No numerics-changing path is chosen automatically
+   from adapter capability, the storage dtype of the assets or the graph shape: a different machine
+   or asset must not silently change the output. The sha256 regression checks (PNG / WAV / golden)
+   of the reference path stay frozen as the machine check of correctness. (Since 2026-09-26 this
+   covers the reference values recorded on a preset with an empty `session` — ADR 0110 decision 7
+   and the addendum of 2026-09-26.)
+3. **Silent fallback only for shape and limit eligibility** (as linear `k % 4` and attention
+   `D % 4` / `N % 4`). When an opt-in is requested but the shape is not eligible, falling back to
+   the reference path is allowed, and the fallback MUST appear in the diagnostic pipeline key. An
+   unimplemented combination (for example `linearCompute: "f16"` with i8 resident weights) is not a
+   fallback; it fails loudly. "The option was silently ignored" and "the shape is not eligible"
+   are different things.
+4. **Checks for each option (MUST).** ① The existing sha256 regression checks of the reference
+   path pass unchanged (proof that the default is frozen). ② An A/B tolerance-band check of the
+   opt-in path against the reference path, the band derived from measured drift times a margin,
+   with the derivation table in the docstring of the test constant (precedent: the w8 latent band
+   of 1e-2, `packages/e2e/tests/e2e_irodori_latent_test.ts`). ③ A census check that the variant
+   actually ran when the option is set; the check is red when every dispatch fell back (the same
+   defence against "only the speed silently drops" as the fusion-count checks,
+   `packages/e2e/tests/e2e_*_fusion_counts_test.ts`). (② and ③ superseded by ADR 0110 decisions
+   3–5 on 2026-09-26 and by the addendum of 2026-10-10 — see the addenda of both dates.)
+5. **Division of quality control.** Correctness and non-regression are machine-checked by bit
+   identity; the quality of opt-in options without bit identity is managed by human review
+   (listening, viewing). Numeric metrics (LSD and the like) are advisory: a large numeric drop
+   often leaves the output intact (precedent: w8a8 became the default because listening won over
+   LSD 5.64 — ADR 0050). (Superseded by the addendum of 2026-09-13 and ADR 0110 decision 8, marked
+   2026-10-18: adoption is decided from automatic evaluation and reading the generated output; a
+   human quality check is required only when a preset becomes `defaultQuant`, a procedure ADR 0128
+   decision 1 inherits.)
+6. **Promotion to the default goes with a quality ruling.** Only when an opt-in option is promoted
+   to the default is a human quality ruling made, and the sha256 reference digests and the default
+   value change in the same commit (splitting them opens a window where the check and the default
+   disagree; precedent: w8a8, ADR 0050). (Superseded by the addendum of 2026-09-13, ADR 0110
+   decision 8 and ADR 0128 decision 1 (proposed), marked 2026-10-18: the runtime default is not
+   promoted; models choose their default through `defaultQuant`; sha256 reference values are kept
+   per preset and per environment key (ADR 0106), so changing `defaultQuant` moves no value and the
+   window does not arise.)
+7. **Crossing with storage presets.** Execution options are orthogonal to the storage dtype; each
+   option declares which combinations it accepts (`linearCompute: "a8"` with i8 resident weights is
+   the example — renamed from `"i8a8"` in 0.5.0, ADR 0074 decision 3; an unsupported combination
+   fails loudly per decision 3). Quality is ruled on when an execution option or a storage dtype is
+   introduced or promoted, not for every combination (combinations multiply; band checks and census
+   keep the combinations healthy by machine).
+8. Withdrawn 2026-10-18: it named K-5 / K-2 as the first users, which was a plan. K-5 closed
+   without an option (row-block execution is bit-identical — [ADR 0060](0060-row-block-attention.md)),
+   and K-5b was rejected after a spike (perf-ledger K-5b). The first option under this contract is
+   `stateAttentionReduce` (addendum of 2026-09-06).
 
-`i8a8Dot`（`dot4I8Packed` / エミュの変種選択）は「両変種はビット同一 = 数値を変えない速度
-選択」を根拠に決定 2 の対象外とし、アダプタの言語機能列挙から自動選択していた。この前提が
-**融合 attention だけ Apple M2 で反証**された（[known-issues](../known-issues.md) — linear は
-通る・同じ `idot` 生成を共有するため、故障は変種単体ではなくカーネル文脈〈幾何・タイル充填〉
-との相互作用）。裁定:
+## Addendum (2026-08-29) — exception to decision 2: automatic selection that claims bit identity needs a machine check
 
-1. **knob を族で分離**: `linearI8a8Dot` / `attentionI8a8Dot`（`SessionState`）。linear は
-   従来どおり列挙で決める（反証が無い）。テスト専用 `I8A8_DOT` は両族を強制する意味を維持。
-2. **attention は実走カナリアで決める**（`src/gpu/attention-dp4a-canary.ts`）: production
-   幾何で 1 タイル全域 + K 2 タイルの固定入力を、生成されうる全 6 変種ぶん 1 submit で撃ち、
-   TS 参照（`src/reference/i8a8.ts`）の既知解と突合する。**判定則 v2（2026-08-29 M2 実機で
-   改訂）**: ①dp4a が既知解と厳密一致 → dp4a（健全機は 1 submit で終了） ②emu が厳密一致 →
-   emu（片腕故障） ③どちらも厳密不一致なら sanity 帯（相対 1e-5 — 共有エピローグの丸め差
-   ≈1.2e-7 の 2 桁上・実測した故障注入 9.5e-5 の下）で裁く: 片腕だけ帯内 → その腕 /
-   **両腕帯内かつ腕同士ビット同一 → dp4a**（変種選択は数値に無関係 = 決定 2 を機械検証で
-   充足。Apple M2 がこの経路 — GPU と TS 参照の 1 ULP 差は known-issues）/ 帯内で相違 →
-   誤差の小さい腕 ④両腕帯外 → `GpuFeatureError`。厳密一致でない決定は警告 1 回を出して
-   実行継続。縮退は決定 3 どおりパイプラインキー `:dp4aEmu` に出る。判定は device 単位 1 回
-   （Promise メモ化）・`attentionCompute: "a8"` を要求した最初の Session 構築時のみ走る。
-   初版（厳密一致のみ・両不一致 = 即 GpuFeatureError）は M2 で「両腕同一の 1 ULP 差」を
-   故障と誤判定し a8 を起動不能にしたため 1 日で改訂。
-3. **一般則**: 「ビット同一だから決定 2 の対象外」を主張する自動選択は、その同一性を**当該
-   device で機械検証できている**（実走カナリア等）場合に限る。列挙・仕様上の主張だけでは
-   足りない — 本件が反例。
+`i8a8Dot` (`dot4I8Packed` or its emulation) was chosen from the adapter's language features,
+outside decision 2, on the claim that both variants are bit-identical. Apple M2 refuted the claim
+for fused attention only ([known-issues](../known-issues.md); linear shares the `idot` code and
+passes). Ruling:
 
-M2 実機検証（2026-08-29）: カナリアは発火した — ただし検出したのは「変種間の不一致」ではなく
-**両変種共通のエピローグ丸めが TS 参照と 1 ULP ずれる**現象で、known-issues の旧推論
-（変種間不一致）はこの検証で撤回された。判定則 v2 はこの知見の反映。原因確定
-（FMA 契約差仮説の検証 — backlog later）とは独立の封じ込め。
+1. **Separate knobs per family**: `linearI8a8Dot` / `attentionI8a8Dot` (`SessionState`,
+   `packages/runtime/src/runtime/session-build.ts`). Linear keeps choosing by enumeration (no
+   counter-example). The test-only `I8A8_DOT` still forces both.
+2. **Attention decides by a run-time canary** (`packages/runtime/src/gpu/attention-dp4a-canary.ts`).
+   It runs a fixed input (one full tile plus two K tiles, production geometry) through all six
+   variants that can be generated, in one submit, and compares with the known answer of the TS
+   reference (`packages/runtime/src/reference/i8a8.ts`). Decision rule v2 (revised on M2 on
+   2026-08-29): ① dp4a matches exactly → dp4a; ② the emulation matches exactly → emulation;
+   ③ otherwise a sanity band (relative 1e-5) decides: one arm inside → that arm; both inside and
+   bit-identical to each other → dp4a (the variant choice does not affect the numbers, so decision
+   2 is met by a machine check); both inside but different → the arm with the smaller error;
+   ④ both outside → `GpuFeatureError`. A decision without an exact match prints one warning and
+   continues. The fallback shows as `:dp4aEmu` in the pipeline key (decision 3). The canary runs
+   once per device (memoised Promise), at the first Session built with `attentionCompute: "a8"`.
+3. **General rule.** An automatic selection that claims "bit-identical, so outside decision 2" is
+   allowed only when the identity is machine-checked on that device (for example a run-time canary).
+   Enumeration or a specification claim is not enough.
 
-追記（2026-08-30・RC1-1）: ①QK の**固定入力**を f16 格子へ載せ直した（倍率を 2 の冪に閉じ
-`acc` の有効桁を f16 仮数に収める — 既知解 8,192 要素が全て f16 ちょうど・境界余裕は帯の
-24.4 倍）。判定則そのものは v2 のまま。動機は s16 変種の増幅 — 旧固定入力の最小余裕は帯の
-0.018 倍しかなく、f32 で帯内の差でも f16 の丸め境界を跨げば差が帯の 55 倍へ増幅されて
-**両腕帯外 → `GpuFeatureError` で a8 が丸ごと死ぬ**余地があった。副作用としてエピローグの
-丸めが①QK から消えるため、上の 1 ULP 差が今後出るのは③PV 側だけになり、M2 の判定は
-band-both-identical から dp4a 厳密一致へ移る見込み（**M2 実機での再確認は未了** —
-known-issues の Metal 節）。
+History: on M2 the canary caught a 1-ULP epilogue difference against the TS reference, not a
+variant mismatch (2026-08-29, rule v2). The fixed QK input moved to the f16 grid (2026-08-30,
+RC1-1); M2 now decides by an exact dp4a match (2026-09-01; known-issues, Metal section).
 
-## 将来課題（記録のみ・着手未定）
+## Addendum (2026-09-06) — the first option: `stateAttentionReduce`
 
-- **一括フラグ**（「opt-in の高速化を全て使う」— ユーザー要望 2026-08-13）: 個別席が
-  数個溜まってから設計する。宿題は ①明示の個別指定との合成規則（明示が勝つ）②意味が
-  バージョン間で動く問題（新しい席が入るたび「全て」の中身が変わる — 再現性を求める
-  利用者には個別指定を案内する等の線引き）③帯門の組合せの持ち方。
+`SessionOptions.stateAttentionReduce` (states-shaped attention; `"sequential"` is the reference
+path; `"parallel"`, and `"parallel-fused"` since ADR
+[0102](0102-state-attention-stats-pv-fusion.md)) carries K-12 (KV-parallel PV reduction) and K-14
+(D-parallel QK reduction, M=1 plans only) — ADR [0067](0067-autoregressive-attention-vocabulary.md)
+addendum. The option declares only that a numerics-changing path is selected; the implementation
+decides by measurement which plans use it.
+The code default of `Gemma4Pipeline` (2026-09-03) was removed on 2026-09-26; the preset's manifest
+declaration (`session.stateAttentionReduce`) now decides, since a family default in models code
+conflicts with ADR 0110 decision 1. `i4` (no declaration) and `fromAssets` run `"sequential"`.
 
-## 追記（2026-09-06）— 席 `stateAttentionReduce` の入居者
+## Addendum (2026-09-13) — the runtime's reference default versus the models' performance default
 
-決定 8 の「次の入居者」は states 形 attention の縮約形の席 `SessionOptions.stateAttentionReduce`
-（`"sequential"` = 参照経路 / `"parallel"`）に入った: **K-12 = ③PV の KV 並列縮約 ③′**（2026-09-03・ADR
-[0067](0067-autoregressive-attention-vocabulary.md) 追記）と **K-14 = ①QK の D 並列縮約 ①′**（2026-09-06・
-同追記）。1 つのノブで 2 段が切り替わり、①′ だけは M=1 の計画に限る（適用範囲の違いは各段の実測に
-従う — 席は「数値を変える経路を選ぶ」ことだけを宣言し、どの計画で効かせるかは実装が実測で決める）。
-検証門は決定 4 の 3 点セット（参照経路の門は無変更・A/B 帯門・census 門）を段ごとに持つ。既定への昇格は
-`Gemma4Pipeline` で済（決定 6 の品質裁定 2026-09-03）で、runtime の既定は `"sequential"` のまま。
+The maintainer confirmed both goals (a verified path that agrees numerically; a model default as
+fast as possible) and delegated adoption decisions. Decisions 2, 5 and 6 apply as follows:
 
-**2026-09-26 追補**: `Gemma4Pipeline` のコード既定（`"parallel"`）は撤去し、席の値は quant 席の manifest
-宣言（`session.stateAttentionReduce` — 語彙へ昇格）が決めるようにした（[ADR 0104](0104-gemma-fast-quant.md)
-追記 2026-09-26）。家族の既定を models のコードに持つと `session` が空の席まで参照経路でなくなり、
-[ADR 0110](0110-practical-tier-numerics-contract.md) 決定 1（実用層の束の正本は manifest の quant 席だけで、
-models 側に値の既定表を持たない）と衝突するため。
-宣言の無い席（`i4`）と `fromAssets` は runtime の参照経路 `"sequential"` で走り、高速な縮約形は
-`i4-gemvpar` / `i4-fast` の宣言で選ばれる。
+- Runtime and kernel defaults are the reference path. Numerics-changing speed-ups stay individual
+  opt-ins.
+- Models use the speed-ups in the selected preset's `session`; the caller's explicit options win.
+  Models do not pick a parallel form from the model shape; the distribution names a preset with
+  speed-ups as `defaultQuant`.
+- Keep a preset with the same weights on the reference path (superseded on 2026-10-18 by ADR 0128
+  decision 2 (C2) and decision 4, effective when 0128 is accepted: a preset that declares
+  activation quantization MUST have a sibling with the same weights and no a8, checked by
+  `packages/runtime/tests/distribution_gate_test.ts`).
+- Bit or token differences alone are no reason to reject. Speed gain and the absence of large
+  quality loss are judged from fixed evaluations, real output and evidence on the target devices;
+  unmeasured ranges are stated.
+- Where a human quality check is needed, the record says whether it was done. Within the delegated
+  scope, decisions rest on automatic evaluation and on reading the output; a human evaluation that
+  did not happen is never recorded as done.
+- Decision 6's same-commit rule does not apply to model defaults. The frozen reference
+  configuration and its digests are kept and named in the checks. A new model default is checked
+  separately for: the variant actually applies, it matches the explicit options, and quality and
+  speed. Invariants within one execution configuration (such as MTP agreement) still hold.
 
-## 追記（2026-09-13）— runtimeの参照既定とmodelsの性能既定を区別する
+Applied to the parallel GEMV summation of Gemma E2B (ADR [0098](0098-linear-gemv-parallel.md))
+and on 2026-09-15 to the RMS→add and linear→SRQ fusion declarations (ADR 0104).
 
-利用者は「数値的に一致する検証済み経路」と「できるだけ高速なモデル既定」の両立を再確認し、
-速度・品質に基づく採否判断を委任した。決定2・5・6の適用範囲を次のように明確化する。
+## Addendum (2026-09-26) — reference path and practical presets; pointers to ADR 0110
 
-- runtime / カーネルの省略値は参照経路。数値を変える高速化は個別の任意指定として残す。
-- models は選択されたquant定義の `session` にある高速化を使い、呼び手の個別指定を優先する。
-  モデル形状から黙って並列化を選ぶのでなく、配布側で高速化付きquantを `defaultQuant` に選ぶ。
-  同じ重みを使う参照用quantも保持する。
-  bitや生成列の相違だけで不採用にしない。速度の利得と、大幅な品質劣化が無いかを、
-  固定評価・実際の生成結果・対象機種の証拠から判断する。未測定範囲は明記する。
-- 人による品質確認が必要な評価はその事実を残す。採否判断を委任された範囲では、
-  自動評価と担当による生成結果の読解を根拠に判断を進め、未実施の人間評価を実施済みとしない。
-- 決定6の「既定変更と参照digest更新を同一コミット」は、modelsの性能既定化には要求しない。
-  **凍結した参照設定とdigestは保持**し、その設定を検証で明示する。新しいモデル既定については、
-  変種が実際に適用されること、明示指定と対応すること、品質と速度を別に検証する。
-  複数の高速化の組合せが変わる場合も、同じ実行設定内のMTP一致などの不変条件は維持する。
+The maintainer's ruling of 2026-09-25 separated the numeric paths into the reference path (runtime
+defaults, strict oracle, sha256 regression checks) and the practical presets (opt-in paths bundled
+by a preset's `session`). The contract lives in ADR 0110; this ADR reads as follows:
 
-今回の適用はGemma通常/QAT E2BのGEMV並列加算（[ADR 0098](0098-linear-gemv-parallel.md)）。
-2026-09-15の適用はRMS→addとlinear→SRQ融合の宣言（[ADR 0104](0104-gemma-fast-quant.md)）で、
-上の3条件（変種が実際に適用される・明示指定と対応する・品質と速度を別に検証する）がその検収項目にあたる。
+- **Decision 2.** "sha256 frozen on the reference path" applies to values recorded on a preset with
+  an empty `session`. Values recorded on a preset with opt-in options stay as regression and
+  determinism detectors of that preset (0110 decision 7; the class is derived from the preset's
+  `session`, not kept in a separate table).
+- **Decision 4 ② and ③.** Band derivation and the defence against vacuous checks are 0110 decisions
+  3–5 (at E2E level: census, a difference floor against the reference path on the same machine, and
+  a collapse ceiling). The census reads `SessionDiagnostics.lastRunPipelines` (derived from the
+  recipe of the last run, independent of timing); the table of predicates (numerics-changing
+  option × non-reference value → key predicate) lives in
+  `packages/runtime/tests/helpers/pipeline-census.ts`.
+- **Decision 6, extended.** In-device determinism MUST holds for practical presets too (0110
+  decision 6). A host-side adaptive policy that picks paths by wall-clock time is allowed only when
+  the identity of those paths is machine-checked on that device (an extension of rule 3 of the
+  2026-08-29 addendum).
+- **The bulk flag** (a request of 2026-08-13 to "use every opt-in speed-up"). ① Composition is one
+  rule for every family: explicit option > preset declaration > runtime default. The runtime has no
+  bulk axis such as `numerics: "practical"`; the bundle differs per family and storage dtype, and
+  only a manifest preset can express it. ② A caller that pins (`*_SOURCES`) gets a stable meaning
+  across versions; a caller that follows main (`fromPretrained` with a string ref) does not —
+  whether an operating rule is needed (for example never changing a published preset's content) is
+  not decided. ③ Band checks exist per knob (decision 4) and per bundle (0110 decision 5, only for
+  distributed bundles), never for every combination (decision 7 stands).
 
-## 追記（2026-09-22）— ①QK の f16 格子化後の M2 判定
+## Addendum (2026-10-10) — decision 3: checking that every attention dispatch of a family took the declared variant
 
-M2 実機の判定は **dp4a 厳密一致**（カナリア 16 本すべて緑・素の判定が dp4a を選び、分岐と厳密
-一致フラグが整合 — known-issues の Metal 節に 2026-09-01 の実測として記録）。2026-08-30 の追記が
-残した「M2 実機での再確認は未了」はこれで解消している。
+The key of decision 3 shows a fallback only to someone who reads it, and the census of decision 4 ③
+("at least one variant") stays green on a partial fallback, where self-attention falls back and
+cross-attention keeps the variant (Anima's default preset at resolutions whose sides are not
+multiples of 32 px — [limitations](../limitations.md), the section on a8 / s16 fused attention).
 
-## 追記（2026-09-26）— 参照層 / 実用層の 2 層と ADR 0110 への指し先
+- **One pure function decides.** The per-stage route of fused attention (QK / PV i8a8 and the
+  storage of S) is decided by `attentionRoute` (`packages/runtime/src/runtime/attention-route.ts`);
+  recipe derivation and the acceptance-table tests go through the same function. It is not public
+  (ADR 0008).
+- **Family checks test completeness as a ratio.** For a Session that declares a8 / s16, the census
+  checks per fused-attention family that all dispatches equal the variant dispatches
+  (`assertAttentionSeatsComplete`, `packages/runtime/tests/helpers/pipeline-census.ts`). Row-block
+  counts multiply both sides alike, so the check does not depend on the device. It is kept apart
+  from the "at least one" check (`assertSeatsApplied`), which runtime tests that deliberately hit
+  fallback shapes call.
+- **Host tests pin the acceptance table.** Every accepted shape of a family goes through
+  `attentionRoute`; per self / cross attention the test asserts the declared route (Wan2.1 /
+  Wan2.2: a new fallback shape turns it red) or the fallback subset fixed by a predicate (Anima: a
+  changed acceptance set breaks the shape count).
 
-利用者裁定（2026-09-25）で、数値経路を**参照層**（runtime の省略値 + 厳密オラクル + sha 門）と
-**実用層**（quant 席の `session` が束ねた opt-in 経路）に分けた。契約の本文は
-[ADR 0110](0110-practical-tier-numerics-contract.md) が持ち、本 ADR の決定は次のように読み替える。
-
-- **決定 2 の適用範囲**: 「sha256 門は参照経路で凍結」は**参照行**（`session` が空の quant 席で焼いた行）に
-  掛かる。opt-in 席で焼いた行は**実用行**で、実用層の退行と決定性の検出器として残す（0110 決定 7 —
-  行のクラスは quant 席の `session` から導出し、別表に持たない）。anima の 11 ケース中 10 ケースが実用行。
-- **決定 4 ②③の読み替え**: 帯門の導出規則と恒真化対策は 0110 決定 3〜5（カーネル門の 4 点型・帯の導出・
-  E2E は census + 同機参照層との床 + 崩壊上限）。census の源は計測に依らない診断欄
-  （`SessionDiagnostics.lastRunPipelines` — 直近 run の recipe 列から導く）へ移す。決定 4 ③の census の
-  源は `lastRunPipelines` へ移し終え、述語の網羅表（数値を変える席 × 非参照値 → キーの判別述語）は
-  テスト helper（`packages/runtime/tests/helpers/pipeline-census.ts`）が持つ。
-- **決定 6 の拡張**: デバイス内決定性 MUST は実用層にも掛かる（0110 決定 6）。壁時計で経路を選ぶホスト側の
-  適応方針は、選べる経路の同一性が当該 device で機械検証済みの場合に限る（追記 2026-08-29 一般則 3 の拡張）。
-- **将来課題①②③の解き方**: ① 合成規則は「明示指定 > quant 席の宣言 > runtime 既定」を全 family 共通の
-  1 本にする（実装の ADR は別途）。runtime に `numerics: "practical"` のような一括軸は**置かない** —
-  束の中身は family と格納型ごとに違い、manifest の quant 席だけが表せる。② 版間の意味変動は、pin
-  （`*_SOURCES`）を選んだ呼び手では閉じている。pin を使わない呼び手（`fromPretrained` の文字列 ref・
-  モデルカードどおりの呼び手）は main を追うので閉じていない — 運用規則（公開済み席名の中身を変えず新席を
-  切る等）の要否は未裁定。③ 帯門はノブ単位（本 ADR 決定 4）と束単位（0110 決定 5・配布する束だけ）の
-  両方で持ち、組合せの全数は持たない（決定 7 を維持）。
-
-## 追記（2026-10-10）— 決定 3 の検出器を「系列の門の完全適格の検査」へ強める
-
-決定 3 の「縮退は許すが診断のパイプラインキーに必ず出す」は、キーを**読めば**分かるだけで、どの門も
-読まない。決定 4 ③の census は「変種が 1 本以上」なので、self-attention だけが落ちて cross-attention が
-変種のまま走る**部分縮退**では緑のまま通る（Anima の既定席で、辺が 32 px の倍数でない解像度が該当 —
-docs/limitations.md の融合 attention の a8 / s16 の節）。そこで次のように決める。
-
-- **判定の正本は純関数 1 本**: 融合 attention の段ごとの経路（①QK / ③PV の i8a8・S の格納形）は
-  `attentionRoute`（`packages/runtime/src/runtime/attention-route.ts`）が決め、レシピ導出と系列の
-  受理集合のテストが同じ関数を通る。公開面には出さない（ADR 0008）。
-- **系列の門は完全適格を比で検査する**: a8 / s16 を宣言した Session の census で、融合 attention の
-  族ごとに「全 dispatch 本数 == 変種の本数」を見る（`assertAttentionSeatsComplete` —
-  `packages/runtime/tests/helpers/pipeline-census.ts`）。行ブロックの枚数は両辺に同じだけ掛かるので
-  device に依らない。「1 本以上」の検査（`assertSeatsApplied`）には混ぜない — 縮退する形を意図して
-  踏む runtime のテストもそちらを呼ぶ。
-- **受理集合の全形をホストテストで固定する**: 系列ごとに受理する全形を `attentionRoute` に通し、
-  self / cross 別に宣言どおりか（または縮退する部分集合）を断言する。宣言どおりを断言する系列
-  （Wan2.1 / Wan2.2）では、縮退する形を受理に足すとそのテストが赤になる。縮退する部分集合を述語で
-  固定する系列（Anima）では、受理集合を変えると形の件数の断言が赤になる。
-
-縮退そのもの（決定 3）は変えない。端数を宣言どおりの経路で扱う変更は backlog の later 節に置く。
+Decision 3 itself does not change; handling the remainder on the declared route is a later item
+of the backlog.

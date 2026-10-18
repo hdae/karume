@@ -1,287 +1,282 @@
-# 0056 — 語彙拡張: gru_scan / gru_scan_reverse（GRU 隠れ側スキャン・第 2 層）
+# 0056: Vocabulary extension: gru_scan / gru_scan_reverse (the hidden-side GRU scan, an extended composite op)
 
-- Status: accepted（2026-08-14）
-- 対象: `gru_scan` / `gru_scan_reverse` op 新設（契約 56・57 op 目）+
-  packages/runtime/src/kernels/gru-scan.ts + tools/exporter/karume/custom_ops.py +
-  エクスポータハンドラ 1 本
-- 関連: ADR [0043](0043-op-addition-layers.md)（層の定義と判定手順 — 本 ADR は第 2 層）/
-  [0023](0023-fused-attention.md)（ビット同一を設計の核に据える形と、決定 4「欄の不存在が
-  語彙に無いことを構造で表す」）/ [0055](0055-deform-conv2d.md)（直近の op 追加。あちらは
-  A/B の相手がいない新規原子なので**退化オラクル**に逃げた — 本 op は逃げない）/
-  [0046](0046-cat-symbolic-axis.md)（記号軸の緩和は `cat` だけ・`slice` / `flip` は静的専業
-  据え置き）/ [0014](0014-layout-ops-full-write.md)（`flip` の静的軸）/
-  [0022](0022-gemm-register-blocking.md)（実行時オートチューン禁止 = codegen 決定性）/
-  [0024](0024-conv2d-implicit-gemm.md)（conv 系の bias-first と GEMM の bias-last の分岐点）
-- 需要の実測: vowel-detector（`Crnn` = conv 2 段 → **2 層 BiGRU** → linear）の
-  `aten.gru.input` は `run_decompositions` が**時間方向へ完全展開**する。分解ノード数は
-  T10 = 20 / 40 / 200 で **874 / 1,714 / 8,434**（call_function・T に線形）で、`torch.export`
-  は長さ軸を specialize する（`Specializations unexpectedly required (T)`）ため
-  **長さごとに別のグラフ**が要る。本 op を通すと **T に依存しない 19 ノード**になる。
-  再出現先として Kokoro-82M の双方向 LSTM 6 本があるが、**本 ADR では LSTM を入れない**
-  （決定 8）。
+- Status: accepted (2026-08-14); on 2026-10-18 the low-precision ineligibility of `w_hh` (decision 1),
+  the `H ≤ 256` geometry (decision 5) and the single output without `h_n` (decision 7) were re-graded
+  to MAY. The layer numbers used here were replaced by the entry doors of
+  [0059](0059-op-vocabulary-entry-doors.md) on 2026-08-14 ("layer 2" = extended composite layer for an
+  op outside Core ATen).
+- Date: 2026-08-14
+- Scope: the new ops `gru_scan` / `gru_scan_reverse` (the 56th and 57th contracts), the kernel
+  `packages/runtime/src/kernels/gru-scan.ts`, the custom ops `tools/exporter/src/karume/custom_ops.py`
+  and one exporter handler.
+- Related: [0043](0043-op-addition-layers.md) (layers of the time) / [0023](0023-fused-attention.md)
+  (bit identity at the core; decision 4) / [0055](0055-deform-conv2d.md) (the previous op) /
+  [0046](0046-cat-symbolic-axis.md) (only `cat` got a symbolic axis) / [0014](0014-layout-ops-full-write.md)
+  / [0022](0022-gemm-register-blocking.md) (no runtime autotuning) / [0024](0024-conv2d-implicit-gemm.md).
+- Demand: in vowel-detector (`Crnn`: two convs → **two-layer BiGRU** → linear), `run_decompositions`
+  **fully unrolls** `aten.gru.input` along time: 874 / 1,714 / 8,434 nodes for T10 = 20 / 40 / 200
+  (linear in T), and `torch.export` specialises the length axis, so **every length needs its own
+  graph**. With this op the graph has **19 nodes independent of T**. Kokoro-82M's six bidirectional
+  LSTMs would be the next user, but **LSTM is not added here** (decision 8).
 
 ## Context
 
-`aten.gru.input` は Core ATen の分解表にあり、`curated_decompositions()` を通すと Python
-ループで T 回展開される。展開後のグラフは**語彙内の既存 op（`linear` / `slice` / `sigmoid` /
-`tanh` / `mul` / `sub` / `add` / `cat`）だけで厳密に書けている** — つまり GRU は原子ではなく
-**分子**で、ADR 0043 追記 決定 1 の判定軸（「語彙内の他 op の合成で厳密同値に書けるか」）は
-第 1 層／第 1' 層のどちらでもないと答える。
+`aten.gru.input` is in the Core ATen decomposition table and `curated_decompositions()` unrolls it T
+times in a Python loop. The unrolled graph is **written exactly with existing ops** (`linear` /
+`slice` / `sigmoid` / `tanh` / `mul` / `sub` / `add` / `cat`), so GRU is a **molecule**, not an atom:
+the test of ADR 0043 addendum decision 1 ("can it be written exactly as a composition?") places it in
+neither layer 1 nor layer 1′.
 
-分子でありながら語彙へ入れる根拠は、`docs/op-vocabulary.md` の第 2 層入場条件のうち 2 つ:
+It enters the vocabulary on two of the layer-2 entry conditions of `docs/op-vocabulary.md`:
 
-- **① 分解形からの復元で意味情報が落ちる**（該当）。T 回展開されたグラフから「これは GRU
-  だ」を第 3 層 matcher で復元するのは、T ごとに違うノード列を exact-match することになり
-  成立しない。落ちる意味情報は「**時間軸は実行時に決まる**」という事実そのもので、これは
-  ADR 0046 が「Irodori DiT が export できない」を解いたのと同型の、機能の開通にあたる。
-- **③ 再出現率が恒久コミットを正当化する**（該当）。vowel-detector の BiGRU に加え、
-  RNN 系列モデルの隠れ側スキャンは構造がこの 1 形しかない。
+- **(1) Semantic information is lost when restoring from the decomposition** (applies). Restoring "this
+  is a GRU" with a layer-3 matcher would need an exact match of a node sequence that differs per T. The
+  lost information is that **the time axis is decided at run time**; restoring it opens a capability,
+  as ADR 0046 did for exporting the Irodori DiT.
+- **(3) Recurrence justifies the permanent commitment** (applies). Besides vowel-detector's BiGRU, the
+  hidden-side scan of RNN models has only this one form.
 
-② 中間実体化の容量は部分的にしか当たらない（T=200 で 8,434 ノードぶんの transient と
-dispatch は重いが、本件の主要因ではない）。④ attr 変種は非該当。
+(2) The capacity of intermediates applies partly (8,434 nodes at T = 200 cost transients and
+dispatches, but that is not the main reason). (4) Attr variants do not apply. `aten.gru.input` is
+outside Core ATen, but **the layer test is not "does it come from Core ATen"** (ADR 0043 addendum
+decision 1).
 
-なお `aten.gru.input` は Core ATen 外だが、**層の判定軸は「Core ATen 由来かどうか」ではない**
-（ADR 0043 追記 決定 1 — Core ATen 由来は第 1 層の母集団の説明であって判定軸ではない）。
+## Decision
 
-## 決定
+### 1. The input-side GEMM is not part of the op — the contract is the hidden-side scan only (option S)
 
-### 1. 入力側 GEMM は op に含めない — 契約は「隠れ側スキャンだけ」（案 S）
+torch's decomposition already splits into an **input-side linear (all time steps at once, output
+`[T,N,3H]`) and a hidden-side linear (per step, output `[N,3H]`)** (measured). That cut is the
+contract boundary:
 
-torch の分解は既に **入力側 linear（時間一括・出力 `[T,N,3H]`）+ 隠れ側 linear（毎ステップ・
-出力 `[N,3H]`）** に分かれている（実測）。この切れ目をそのまま契約の境界にする:
+`gru_scan` / `gru_scan_reverse`, **fixed arity 4**, uniform f32, **empty attrs**.
 
-`gru_scan` / `gru_scan_reverse`・**アリティ 4 固定**・uniform f32・**attrs 空**。
+| Tensor | Contract                                           |
+| ------ | -------------------------------------------------- |
+| `gi`   | `[T, N, 3H]` (the input side `x·W_ihᵀ + b_ih`)     |
+| `h0`   | `[N, H]`                                           |
+| `w_hh` | `[3H, H]`                                          |
+| `b_hh` | `[3H]`                                             |
+| output | `[T, N, H]` (`h` of every step)                    |
 
-| 形     | 契約                                           |
-| ------ | ---------------------------------------------- |
-| `gi`   | `[T, N, 3H]`（入力側 `x·W_ihᵀ + b_ih` の結果） |
-| `h0`   | `[N, H]`                                       |
-| `w_hh` | `[3H, H]`                                      |
-| `b_hh` | `[3H]`                                         |
-| 出力   | `[T, N, H]`（全ステップの `h`）                |
+The gate order is **r / z / n** (torch's `weight_hh_l{k}` verbatim).
 
-ゲートの並びは **r / z / n**（torch の `weight_hh_l{k}` の並びの逐語）。
+Including the input side (an op `gru` with arity 6, option G) is rejected on four counts:
 
-入力側を内包する案（op 名 `gru`・アリティ 6）を却下した理由は 4 軸すべてで劣るため:
+- **Contract size**: option S has arity 4 and empty attrs, and "the input side is not in the
+  vocabulary" shows in its structure (ADR 0023 decision 4). Option G would gain a second slot axis with
+  `has_biases=False`, needing variable arity or a synthesised bias.
+- **Existing linear optimisations apply**: in option S the input side is a plain `linear` node in
+  `WEIGHT_SLOTS`, so f16 / i8 storage and `linearCompute: "i8a8"` work as is. vowel-detector's `w_ih`
+  (`[384,160]`×2 + `[384,256]`×2) is most of its weights; in option G it would become an op-internal slot.
+- **Half the bit-identity proof**: the input-side linear is the same node as in the decomposition, so
+  its bits match trivially; only the hidden-side recurrence needs proof (decision 3).
+- **LSTM extends naturally**: 4 gates and a cell state change only the op's internal formula; the input
+  side stays the same `linear` (`[T,N,4H]`).
 
-- **契約の大きさ**: 案 S はアリティ 4・attrs 空で、「入力側は語彙に無い」が構造で表れる
-  （ADR 0023 決定 4）。案 G は将来 `has_biases=False` を足すと**スロットの有無**が 2 軸になり、
-  可変アリティか合成 bias が要る。
-- **既存 linear の最適化が効く**: 案 S では入力側が素の `linear` ノードなので
-  `WEIGHT_SLOTS` に載り、f16 / i8 格納も `linearCompute: "i8a8"` もそのまま効く。
-  vowel-detector の `w_ih` は 2 層双方向で `[384,160]`×2 + `[384,256]`×2 = 重みの過半。
-  案 G ではそれが op 内スロットになり適格から外れる。
-- **ビット同一の証明対象が半分になる**: 入力側 linear が分解形と同一ノードなのでビットは
-  自明に一致し、証明が要るのは隠れ側の逐次だけ（決定 3）。
-- **LSTM への拡張が素直**: ゲート数 3 → 4 と cell state の追加は「op 内部の式」だけの差で、
-  入力側は LSTM でも同じ `linear`（`[T,N,4H]`）。
+The op is named `gru_scan`, not `gru` (a permanent public commitment burnt into IR files): the name
+says it is the hidden-side scan of a GRU, not the whole GRU.
 
-**op 名が `gru` ではなく `gru_scan` になる**（IR ファイルに焼かれる恒久の公開コミットメント）
-のはこの帰結で、「これは GRU そのものではなく GRU の隠れ側スキャン」という意味が名前に出る。
+- `w_hh` is **not enabled** for low-precision storage (not in `WEIGHT_SLOTS` / `WEIGHT_CHANNEL_AXES`);
+  adding it MAY be done when there is demand. The input-side weights belong to the caller's `linear`,
+  which is where the distribution size shrinks. (Re-graded 2026-10-18 to MAY: the reason was the
+  silent i8 scale-axis mix-up of op-internal slots recorded in ADR 0024 decision 6, and the key match
+  of the two tables is now checked (`packages/runtime/src/ops/names.ts`, `WEIGHT_CHANNEL_AXES`);
+  ruling: accepted as proposed.)
 
-- **`w_hh` は低精度格納の適格外**（`WEIGHT_SLOTS` / `WEIGHT_CHANNEL_AXES` に載せない）。
-  op 内スロットの i8 は scale 軸の取り違えが沈黙誤値になる（ADR 0024 決定 6 が記録した
-  バグクラス）ので、需要が出るまで足さない — 入力側の重みは呼び手の `linear` が持つので、
-  配布サイズの主成分はそちらで縮む。
+### 2. The reverse direction is a **separate op name** (`gru_scan_reverse`), not an attr
 
-### 2. 逆方向は attr ではなく**別 op 名**（`gru_scan_reverse`）
+Of the three ways to express the reverse direction of a bidirectional GRU, the third is taken:
 
-双方向 GRU の逆方向を IR で表す形は 3 つあり、採ったのは 3 番目:
+- **Wrapping with `flip` does not work.** torch's decomposition flips `linear(x)` along `[0]` before
+  the recurrence and reverses the `cat` order on output (no output flip). Karume's `flip` **rejects a
+  symbolic axis on both sides** (Python: `_flip` → `_static_axis` in `shapes.py`; TS:
+  `assertStaticLayoutAxis` in `plan.ts`), and ADR 0046 keeps `slice` / `flip` static; overturning that
+  is a separate ADR. `flip` would also add a materialised `[T,N,3H]` copy (307 KB × 4 at T = 200,
+  H = 128). → **The op must know the scan direction.**
+- **A bool attr (`reverse: true`) is rejected.** Existing attrs are int / int list / f32 scalar /
+  string; **there is no bool precedent**, and Python's `_assert_integer_attr` (`ops.py`) explicitly
+  rejects bool ("Python's bool derives from int, so `True` would pass as 1"). Accepting it would mean
+  new bool validators on both sides (an extension of the contract-check machinery).
+- **Taken: "an attr variant is a separate op", as `gelu` / `gelu_tanh`** (first applied in ADR 0043).
+  One more permanent op name, no added contract-check code.
 
-- **`flip` を挟む形は成立しない**。torch の分解は `linear(x)` の結果を `flip(·,[0])` してから
-  逐次し、出力は `cat` のリスト順を逆にする（出力側 `flip` は無い）。しかし karume の `flip` は
-  **記号軸を両側で拒否する**（Python: `shapes.py` の `_flip` が `_static_axis` /
-  TS: `plan.ts` の `assertStaticLayoutAxis`）。ADR 0046 が「`slice` / `flip` は静的専業のまま
-  据え置く」と明示的に裁定しており、それを覆すのは独立の ADR 1 本ぶんの判断になる。しかも
-  `flip` は `[T,N,3H]` の実体化コピーを 1 本増やす（T=200・H=128 で 307KB × 4 本）。
-  → **走査方向は op が知る**しかない。
-- **attrs の bool（`reverse: true`）は採らない**。karume の既存 attrs は int / int リスト /
-  f32 スカラ / 文字列だけで、**bool を載せた前例が無い**。それどころか Python 側の
-  `_assert_integer_attr` は「Python の bool は int の派生で `True` が 1 として素通りする」と
-  明記して bool を**明示的に弾いて**おり、受け入れるには両側に bool 用の検証関数を新設する
-  ことになる（= 契約検査機構の拡張）。
-- **採用: `gelu` / `gelu_tanh` と同じ「attr 変種は別 op」の手筋**（ADR 0043 の初適用例）。
-  恒久コミットが 1 本増える代わりに、契約検査機構は 1 行も増えない。
+**MUST: the reverse op also writes its output in forward time order** (only the scan order is
+reversed). Requiring an output `flip` would run into the symbolic-axis rejection above.
 
-**MUST: 逆方向 op も出力は順方向の時間順で書く**（走査順だけが逆）。出力側に `flip` を
-要求する形にすると、`flip` が記号軸を拒否するという上の事実に正面から戻る。
+### 3. Bit identity is a **permanent check** (exact Uint32 match with the decomposition)
 
-### 3. ビット同一を**恒久の門**にする（分解形との Uint32 完全一致）
+ADR 0055 (deform_conv2d) had no A/B partner and fell back to a degenerate oracle. **GRU does not need
+to**: with T fixed, torch's decomposed graph is a complete reference, so the strong form of ADR 0023
+decision 2 applies.
 
-ADR 0055（deform_conv2d）は新規原子で A/B の相手がいないため退化オラクル（offset 全 0・
-mask 全 1 → conv2d）という弱い形に逃げた。**GRU は逃げる必要がない** — T を固定すれば
-torch の分解グラフがそのまま完全な参照実装になるので、ADR 0023 決定 2 と同じ強い形が採れる。
+Check: `packages/runtime/tests/gpu_gru_scan_parity_test.ts`. On the same input and the **same GPU** it
+runs (1) the decomposed graph built from existing ops (`linear → slice → add → sigmoid` /
+`mul → add → tanh` / `sub → mul → add` T times + `cat`) and (2) one `gru_scan` node, and asserts that
+the **f32 bit patterns** match exactly.
 
-門: `packages/runtime/tests/gpu_gru_scan_parity_test.ts`。同一入力に対し ①既存語彙で組んだ
-分解グラフ（`linear → slice → add → sigmoid` / `mul → add → tanh` / `sub → mul → add` を
-T 回 + `cat`）と ②`gru_scan` 1 ノードを**同じ実 GPU**で流し、出力の **f32 ビット列**が
-完全一致することを assert する。
+Four conditions make it hold; breaking any one changes the rounding sequence:
 
-成立根拠は 4 点。どれか 1 つでも崩すと丸め列が変わる:
+**(a) The hidden-side reduction has the order of the `linear` GEMM** — sequential in ascending `k`,
+written `acc = acc + w * h` (the form of `accumulatorUpdate` in `gemm.ts`). The GEMM splits K into
+tiles of 16, but each output element still adds in ascending k, and zero padding of the edge tile is
+`acc + a·0`, an exact identity in f32. **Confirmed by measurement**, including H = 19 (not a multiple
+of 16).
 
-**(a) 隠れ側縮約が `linear` の GEMM と同一順** — 縮約は `k` 昇順の逐次で、字面も
-`acc = acc + w * h`（`gemm.ts` の `accumulatorUpdate` と同じ形）。GEMM は K タイル 16 で
-分割するが 1 出力要素あたりの加算順は k 昇順のままで、端タイルのゼロ詰めは `acc + a·0` が
-f32 で厳密恒等。**実測で成立を確認**（H = 19 = タイル 16 の倍数でないケースを含む）。
+**(b) bias last** — the hidden side of the decomposition is `linear` = GEMM, which **adds bias at the
+store**, so the kernel writes `(Σ W·h) + b`. Reusing conv's bias-first (ADR 0024) would give
+`bias + Σ` and a different rounding sequence (the same trap `gemm.ts` records as the design's largest
+branch point).
 
-**(b) bias は last** — 分解経路の隠れ側は `linear` = GEMM = **store で最後に足す**形なので、
-カーネルも `(Σ W·h) + b` と書く。conv 系の bias-first（ADR 0024 の MUST ①）を流用すると
-`bias + Σ` の順になり丸めの並びが変わる（`gemm.ts` が「本設計で最大の分岐点」と記録している
-のと同じ罠）。
+**(c) The WGSL body of `sigmoid` is shared with the plain elementwise op** — `SIGMOID_STABLE_WGSL`
+is imported from `codegen/numerics-wgsl.ts` (moved there from `codegen/elementwise.ts` on 2026-09-05;
+same rule as `silu.ts`). A copy could split the rounding of the primitive and the fused version. `tanh`
+is a WGSL builtin, so there is nothing to share.
 
-**(c) `sigmoid` の WGSL 本体を素の elementwise と共有する** — `SIGMOID_STABLE_WGSL` を
-`codegen/numerics-wgsl.ts` から import する（置き場は 2026-09-05 に `codegen/elementwise.ts` から
-共有 WGSL 断片のファイルへ移した — 規律は同じ。silu.ts と同じ規律。書き写すと primitive と
-融合版で丸め列が割れうる）。`tanh` は WGSL 組込なので共有の問題は無い。
+**(d) The order and bracketing of operations follow the decomposition verbatim** — the update is
+**`h' = (h − n)·z + n`**. The mathematically equal `(1 − z)·n + z·h` is **a different rounding
+sequence**: **44,345 of 100,000** f32 elements differed (maxdiff 4.77e-07). The gate sums put the
+hidden side first (`gh + gi`); the `n` product is `gh_n · r` (**the reset gate multiplies the hidden
+product including b_hh** — moving the bias out of the reset is off by maxdiff 0.196); the `n` sum puts
+the input side first (`gi_n + (gh_n·r)`). For finite f32, addition and multiplication commute, but this
+sequence is the source of truth for rounding, and NaN payloads may differ by backend (the same reason
+`silu.ts` keeps `SiluMulOrder` in its key).
 
-**(d) 演算の並びと括り方を分解形の逐語にする** — 更新式は **`h' = (h − n)·z + n`**。
-数学的に同値な `(1 − z)·n + z·h` は**別の丸め列**で、f32 の 10 万要素中 **44,345 件が
-ビット不一致**（maxdiff 4.77e-07）という実測がある。ゲートの足し順は隠れ側が第 1 引数
-（`gh + gi`）、`n` の積は `gh_n · r`（**reset ゲートは b_hh 込みの隠れ側積に掛かる** —
-bias を reset の外へ出す誤り形は maxdiff 0.196 で外れる）、`n` の和は入力側が第 1 引数
-（`gi_n + (gh_n·r)`）。有限 f32 では加算・乗算は可換だがこの列が丸め列の正本で、
-NaN payload はバックエンド差がありうる（`silu.ts` が `SiluMulOrder` をキーに残しているのと
-同型の理由）。
+### 4. A rounding barrier (a workgroup-memory round trip) is **needed here too** — measured
 
-### 4. 丸め障壁（workgroup memory 往復）は**この op でも必要**だった — 実測で確定
+Written as one expression, `a * b + c` **is contracted into an fma**. On a real GPU:
 
-`a * b + c` を 1 式で書くと **fma へ縮約される**。本ワークツリーの実 GPU で測った結果:
+| Form                                              | Bit mismatches against mul / add in 2 dispatches |
+| ------------------------------------------------- | ------------------------------------------------ |
+| `o[i] = a[i] * b[i] + c[i]` (one expression)      | **15,371 / 65,536**                              |
+| `let p = a[i] * b[i]; o[i] = p + c[i];`           | **15,371 / 65,536** (naming does not help)       |
+| `bitcast<f32>(bitcast<u32>(a[i]*b[i])) + c`       | **15,371 / 65,536** (bitcast does not stop it)   |
+| write to workgroup memory, read back after barrier | **0 / 65,536**                                   |
 
-| 形                                             | mul / add 2 dispatch とのビット不一致         |
-| ---------------------------------------------- | --------------------------------------------- |
-| `o[i] = a[i] * b[i] + c[i]`（1 式）            | **15,371 / 65,536**                           |
-| `let p = a[i] * b[i]; o[i] = p + c[i];`        | **15,371 / 65,536**（名前を付けても同じ）     |
-| `bitcast<f32>(bitcast<u32>(a[i]*b[i])) + c`    | **15,371 / 65,536**（bitcast では止まらない） |
-| workgroup memory へ書いて barrier 後に読み戻す | **0 / 65,536**                                |
+The decomposition runs `mul` and `add` as **separate dispatches** (a storage round trip), so nothing is
+contracted. The kernel therefore **writes the product to workgroup memory and reads it back after a
+barrier** (the `silu.ts` technique) at two places:
 
-分解経路は `mul` と `add` が**別 dispatch** = storage 往復なので縮約されない。したがって
-**積を workgroup memory へ書いて barrier 後に読み戻す**（silu.ts の技法）で明示的な
-materialization 点を残す。必要な箇所は 2 つ:
+1. the product `gh_n · r` in `n = tanh(gi_n + gh_n·r)`;
+2. the product `(h − n)·z` in `h' = (h − n)·z + n`.
 
-1. `n = tanh(gi_n + gh_n·r)` の積 `gh_n · r`
-2. `h' = (h − n)·z + n` の積 `(h − n)·z`
+**Fault injection showed both are load-bearing** (removing the barrier and writing the fused form gives
+205 / 512 and 294 / 512 mismatching elements at T4 / N1 / H128, and the check turns red).
 
-**どちらも門にとって load-bearing であることを故障注入で確認した**（barrier を外して
-融合式へ書き換えると、①は T4/N1/H128 で 205/512 要素・②は 294/512 要素がビット不一致に
-なり門が赤くなる）。
+**The barrier is not guaranteed by the WGSL spec** — the spec allows fusion and does not require a
+workgroup-memory round trip to act as an optimisation barrier. Bit identity of finite values is **a
+measured fact adopted as a check per backend**, like `silu.ts` and the RoPE fusion (if a backend update
+splits the check, suspect this first). Metal has already split the conv2d parity
+([known-issues.md](../known-issues.md)), so this check is a fact established on the reference
+environment (Vulkan).
 
-**この丸め障壁は WGSL 仕様の保証ではない** — 仕様は fusion を許すだけで、workgroup memory
-往復を最適化障壁として尊重することは要求していない。有限値のビット一致は**バックエンドごとの
-実 GPU A/B で採用門にした実測事実**であり、`silu.ts` / RoPE 融合と同じ扱い（バックエンド更新で
-門が割れたら、まずここを疑う）。Metal では conv2d parity が既に割れた実績がある
-（[known-issues.md](../known-issues.md)）ので、この門も参照環境（Vulkan）で成立した事実として
-読む。
+### 5. The kernel is "one workgroup = one batch element / one lane = one hidden unit" — `H ≤ 256`
 
-### 5. カーネルは「1 workgroup = 1 バッチ要素 / 1 lane = 1 隠れユニット」— `H ≤ 256`
+- **The workgroup size is the compile-time constant `256`**, and the codegen key carries it, so the
+  same key gives byte-identical WGSL (codegen determinism; ADR 0022 forbids runtime autotuning).
+- Recurrences of different batch elements are independent, so **one workgroup = one batch element**;
+  the batch direction crosses the dispatch limit (65,535 by default) with layer-norm's grid-stride. No
+  synchronisation between workgroups.
+- **One lane = one hidden unit**; shapes above `GRU_SCAN_MAX_HIDDEN = 256`
+  (`packages/runtime/src/codegen/limits.ts`) fail loudly in the contract check (`OpContractError`) and
+  in `gruScanParams` (`CodegenError`) (silently degrading would write `h_shared` out of range and corrupt other units'
+  state). The only measured shape is **H = 128** (vowel-detector). Raising the limit needs a
+  workgroup-internal grid-stride and a double-buffered `h`; it MAY be done when there is demand, with a
+  geometry that stays in the key. (Re-graded 2026-10-18 to MAY: the original argument that no kernel
+  reads device limits no longer holds — ADR [0115](0115-geometry-profiles.md) chooses GEMM
+  geometry from a static shape × adapter profile and keeps determinism by putting the geometry in the
+  key; the fail-loudly limit stays. Ruling: accepted as proposed.)
+- Workgroup memory holds only **the H elements of `h`** and **a 256-word relay for the rounding
+  barriers** (`W_hh` is `[3H,H]`, 196 KB at H = 128, more than the default 16,384 B, so it is read from
+  storage every step). The time loop and the barriers sit only in **workgroup-uniform control flow**
+  (`dims` is uniform — the MUST of `layer-norm.ts`; loads from storage are not proven uniform).
 
-- **workgroup サイズは `256` のコンパイル時定数**。device limits を読んで幾何を変える
-  カーネルは karume に 1 本も無く、読むと「同一キー → バイト単位同一 WGSL」（codegen 決定性・
-  ADR 0022 が実行時オートチューンを禁止した帰結）が崩れる。
-- バッチ要素どうしの再帰は独立なので **1 workgroup = 1 バッチ要素**。バッチ方向は
-  layer-norm と同じ grid-stride で dispatch 上限（既定 65,535）を跨ぐ。workgroup 間の同期は不要。
-- **1 lane = 1 隠れユニット**に固定し、`GRU_SCAN_MAX_HIDDEN = 256`（= workgroup サイズ）を
-  超える形は `gruScanParams` が `CodegenError` で落とす（黙って縮退させない — 縮退させると
-  `h_shared` の範囲外書き込みで別ユニットの状態が例外なしに壊れる）。
-  実測に出ている形は **H = 128**（vowel-detector）だけで、上限を上げるには workgroup 内
-  grid-stride と `h` の二重化（読み終わる前に書けないため）が要る = 別の設計判断。
-  「実測に出た形だけ」（ADR 0023 決定 4）に従い、需要が出てから広げる。
-- workgroup 共有は **`h` の H 要素**と**丸め障壁の中継 256 語**だけ（`W_hh` は `[3H,H]` =
-  H=128 で 196KB なので仕様既定の 16,384 B に載らず、毎ステップ storage から読む）。
-  時間ループと barrier 群は**workgroup 一様な制御流**の中だけに置く（`dims` は uniform —
-  layer-norm.ts の MUST と同じ。storage からのロードは一様性解析で保証されない）。
+### 6. The exporter keeps T symbolic with `torch.library.custom_op`
 
-### 6. エクスポータは `torch.library.custom_op` で記号 T を保つ
+`karume::gru_scan` / `karume::gru_scan_reverse` are defined with `torch.library.custom_op` +
+`register_fake` (`tools/exporter/src/karume/custom_ops.py`). The body hides behind the fake, so tracing
+does not enter the Python loop and **the time axis T stays symbolic in one node**. `karume::` is not in
+the Core ATen decomposition table, so `run_decompositions(curated_decompositions())` does not unroll it
+(as with `torchvision::deform_conv2d`). Measured: `karume.gru_scan.default (s77, 1, 5)`.
 
-`karume::gru_scan` / `karume::gru_scan_reverse` を `torch.library.custom_op` +
-`register_fake` で定義する（`tools/exporter/karume/custom_ops.py`）。本体が fake の裏へ
-隠れるのでトレースが Python ループへ入らず、**時間軸 T は記号のまま単一ノードで残る**。
-`karume::` は Core ATen の分解表に無いので `run_decompositions(curated_decompositions())` を
-通しても展開されない（`torchvision::deform_conv2d` と同じ理由）。実測で確認済み:
-`karume.gru_scan.default (s77, 1, 5)`。
+- **The eager implementation is torch's GRU decomposition verbatim.** Golden expectations come from it,
+  so a drift would let "exporter and runtime agree and are both wrong" pass. It matches single-layer
+  unidirectional `nn.GRU` **bit for bit under `torch.equal`** (forward and reverse, maxdiff 0.0).
+- The handler key (`torch.ops.karume.gru_scan.default`) requires registration, so
+  `tools/exporter/src/karume/aten_handlers.py` imports `karume.custom_ops` at the top. **The import is a
+  process-wide side effect**, but the zero-side-effect rule of `CLAUDE.md` is an invariant of
+  `packages/*` (TS tree-shaking) and does not cover the Python exporter (the same module imports
+  `torchvision` for the same reason — ADR 0055 decision 7).
+- **Several layers and directions are separate nodes placed by exporter normalisation** (decision 7).
+  `aten.gru`'s `Tensor[16]` (16 weights) does not fit the IR, so one node is emitted per layer and
+  direction, joined with the existing `cat` (dim 2, static axis). This ADR defines only the op
+  contract; **the patch that splits `nn.GRU` belongs to the model port** (out of scope).
 
-- **eager 実装は torch の GRU 分解の逐語**にする。golden の期待値はこの実装を eager で回して
-  採るので、ここがずれると「エクスポータとランタイムが一致して両方間違っている」状態が緑に
-  なる。単方向 1 層の `nn.GRU` と **`torch.equal` でビット完全一致**することを実測で確認した
-  （順方向・逆方向とも maxdiff 0.0）。
-- ハンドラのキー（`torch.ops.karume.gru_scan.default`）を書くには登録済みである必要があるので、
-  `convert.py` が `karume.custom_ops` を先頭で import する。**この import はプロセス全域の
-  グローバル副作用**だが、CLAUDE.md の「全モジュール副作用ゼロ」は `packages/*`（TS 側の
-  tree-shaking 成立条件）の不変条件で、Python 側 exporter には掛からない（`convert.py` が
-  `torchvision` を同じ理由で素に import しているのと同型 — ADR 0055 決定 7）。
-- **多層・双方向は exporter 側の正規化でノードを並べて表す**（決定 7 の帰結）。`aten.gru` の
-  `Tensor[16]`（16 本の重み）は IR に載らないので、層と方向ごとに 1 ノードずつ発行し、層間の
-  結合は既存 `cat`（dim 2・静的軸）で行う。本 ADR はこの op の契約だけを定義し、
-  **`nn.GRU` を割るパッチ層はモデル移植側の仕事**として扱う（範囲外）。
+### 7. Fields **left out** of the contract (a missing field states that the form is not in the vocabulary)
 
-### 7. 契約から**欄を落とす**もの（欄の不存在が「語彙に無い」を表す）
+| Axis                   | Treatment                                                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------ |
+| layers (`num_layers`)  | No field. One node per layer (`num_layers` would make the op contain the layer loop and the `cat` between)   |
+| bidirectional          | No field. A separate op name per direction (decision 2)                                                      |
+| `has_biases=False`     | No field = **bias required, fixed arity 4**, as in `linear` ("bias always present")                         |
+| `batch_first`          | No field. `gi` in the IR is fixed to `[T,N,3H]` (time first) — torch's decomposition normalises with `permute` |
+| `dropout` / `train`    | No field (inference only — as dropout in ADR 0023 decision 4)                                               |
+| omitted `h0`           | No field = **a required input slot**. A zero `h0` from `aten.full` becomes an initializer by constant folding (measured) |
+| output `h_n`           | **Not returned** (see below)                                                                                 |
 
-| 軸                   | 扱い                                                                                                                                                                 |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 多層（`num_layers`） | 欄を作らない。層ごとに 1 ノード（`num_layers` を持つと op が層ループと層間 `cat` を内包する）                                                                        |
-| 双方向               | 欄を作らない。方向ごとに別 op 名（決定 2）                                                                                                                           |
-| `has_biases=False`   | 欄を作らない = **bias 必須のアリティ 4 固定**。既存 `linear` の「bias は常時あり」と同じ手筋                                                                         |
-| `batch_first`        | 欄を作らない。IR 上の `gi` は `[T,N,3H]`（time-first）固定 — torch の分解自身が `permute` で正規化している                                                           |
-| `dropout` / `train`  | 欄を作らない（推論専業 — ADR 0023 決定 4 の dropout と同じ）                                                                                                         |
-| `h0` の省略          | 欄を作らない = **入力スロットで必須**。ゼロ `h0` は `aten.full` が第 0 層の定数畳み込みで initializer にする（実測）                                                 |
-| 出力 `h_n`           | **返さない**。IR v1 は実質単一出力（`convert.py` は常に `outs=[out_name]` を書き、TS 側 `plan.ts` も `node.outs[0]` しか読まない）。vowel-detector は `h_n` を捨てる |
+`h_n` is not returned: the contract is single-output with `y` only. Returning `h_n` MAY be added as a
+revision of the op contract once a consumer appears (re-graded 2026-10-18 to MAY: the technical reason
+— IR nodes were effectively single-output — is gone since node-level multiple outputs were allowed by
+ADR [0068](0068-decode-exit-multi-output.md) decision 1; vowel-detector discards `h_n`; ruling:
+accepted as proposed). The code comment in `packages/runtime/src/ops/names.ts` (`GRU_SCAN_OPS`) still
+states the single-output rule as MUST.
 
-### 8. LSTM は入れない（対称性のための追加をしない）
+### 8. LSTM is not added (no additions for symmetry)
 
-`docs/op-vocabulary.md` の「やらない方がよいこと」と ADR 0043 Consequences が優先する。
-将来 `lstm_scan` を足すときの棚卸しを記録しておく:
+"Things better not done" in `docs/op-vocabulary.md` and the Consequences of ADR 0043 take precedence.
+The inventory for a future `lstm_scan`:
 
-- **そのまま再利用できる**: 入力側 linear が時間一括という構造 / 時間ループ + barrier の
-  WGSL 骨格 / 走査方向を op 名で分ける形 / ビット同一門の作り方（T 固定の分解形との Uint32
-  突合）/ 決定 3 の (b)(c)(d) と決定 4 の丸め障壁。
-- **別物になる**: cell state `c` が増えるので workgroup 共有が 2 本になり、決定 5 の
-  `GRU_SCAN_MAX_HIDDEN` に相当する上限が半分になる。入力スロットも `c0` が増えてアリティ 5。
-- **正面衝突する論点**: LSTM の `(y, h_n, c_n)` は 3 出力で、**決定 7 の単一出力制約と
-  正面から衝突する**。`y` だけで足りるモデルなら本 ADR の形がそのまま写せるが、`h_n` / `c_n` を
-  消費するモデルは別の設計（IR v1 の多出力化、または状態返し版の別 op）が要る。
-  Kokoro-82M の双方向 LSTM が `h_n` / `c_n` を消費するかは**未検証**なので、LSTM に着手する
-  前にそこを確かめること（契約の形が手戻りする唯一の分岐）。
-  （追記: ノードレベル多出力は ADR [0068](0068-decode-exit-multi-output.md) 決定 1 で解禁済み —
-  残る壁は exporter の `operator.getitem` 結線〈0068 追記 2 の 3〉。）
-- ゲート数を attrs にして GRU と兼ねる形は採れない（`gelu` / `gelu_tanh` と同じ attr 変種問題 —
-  決定 2 と同じ理由で別 op が正）。
+- **Reusable as is**: the all-at-once input-side linear; the WGSL skeleton of time loop + barriers;
+  direction by op name; the bit-identity check (Uint32 against the T-fixed decomposition); (b)(c)(d) of
+  decision 3 and the barrier of decision 4.
+- **Different**: the cell state `c` adds a second workgroup buffer, halving the equivalent of
+  `GRU_SCAN_MAX_HIDDEN`; `c0` adds an input slot (arity 5).
+- **Open conflict**: LSTM's `(y, h_n, c_n)` has three outputs. A model that needs only `y` can copy this
+  ADR's form; a model consuming `h_n` / `c_n` needs a multi-output contract. Node-level multiple outputs
+  are allowed by ADR 0068 decision 1; the remaining wall is the exporter's `operator.getitem` wiring
+  (ADR 0068 addendum 2, item 3). Whether Kokoro-82M's LSTMs consume `h_n` / `c_n` is **unverified** —
+  check it before starting LSTM (the one branch that could rework the contract).
+- Gate count as an attr shared with GRU is not possible (the attr-variant problem of `gelu` /
+  `gelu_tanh`; a separate op, for the reason of decision 2).
 
 ## Consequences
 
-- 契約 1 セット（TS `OP_CONTRACTS` + `karume/ops.py` の `OP_CONTRACTS` + `shapes.py` の
-  shape 規則 + `fixtures/op-contracts.json` + CPU 参照 + golden `gru_scan_block`）+
-  カーネル 1 本（2 方向）+ エクスポータハンドラ 1 本 + custom op 定義。
-  **既存 IR・既存資産への影響はゼロ**（新しい op 名が 2 つ増えるだけ）。
-- 契約表は 55 → **57 op**。固定アリティ 4 は `deform_conv2d` の 5 に次ぐ多さ。
-- **`gru_scan` は attrs 空の第 2 層 op** で、走査方向という唯一の自由度を op 名が持つ。
-  この形が increment されるたびに op 名が増えることは承知の上の対価（決定 2）。
-- 性能は**一切測っていない**（ユーザー方針が「正しい結果が目的・速度は後回し」）。
-  `W_hh` が毎ステップ storage 読みになる帯域影響、1 workgroup = 1 バッチ要素で N=1 のとき
-  GPU が 1 workgroup しか使わない占有率、H=128 で 256 lane の半分が遊ぶ点はいずれも
-  性能候補であって本 ADR の範囲ではない（要求が出たら [perf-ledger](../perf-ledger.md) 起票）。
-- **vowel-detector の移植そのものは本 ADR の範囲外**。長さ軸を記号にするには先頭
-  `Conv1d(stride=2)` のせいで `2*Dim("T")` の派生次元宣言が要る（素の `Dim("T")` だと出力
-  extent が `((T−1)//2)+1` の床除算になり karume の次元言語 `coeff·sym+offset` に載らない —
-  実測）。現行の `LENGTH_MULTIPLE = 2` 制約と要求が一致するので実運用の制約は増えないが、
-  「グラフ入力の長さは常に偶数」がランタイム側の契約になる点は移植時に裁定が要る
-  （**右ゼロ pad による回避は禁じ手** — 逆方向 GRU が pad から状態を持ち帰る）。
+- One contract set (TS `OP_CONTRACTS` + `OP_CONTRACTS` of `karume/ops.py` + the shape rule in
+  `shapes.py` + `fixtures/op-contracts.json` + CPU reference + golden `gru_scan_block`), one kernel
+  (both directions), one exporter handler and the custom op definitions. **No effect on existing IR or
+  assets** (two new op names).
+- The contract table went from 55 to **57 ops** at the time. Fixed arity 4 is second only to
+  `deform_conv2d`'s 5.
+- **`gru_scan` is an op with empty attrs** whose only freedom, the scan direction, lives in the op name;
+  every such increment adds an op name (the accepted cost of decision 2).
+- Performance was **not measured** (the maintainer's policy: correct results first, speed later). Reading
+  `W_hh` from storage every step, one workgroup per batch element (one workgroup busy at N = 1) and half
+  of the 256 lanes idle at H = 128 are performance candidates for [perf-ledger](../perf-ledger.md) when
+  demand appears.
+- Porting vowel-detector itself was out of scope; its two open points are settled in the addendum.
+  **Right zero padding is not allowed as a workaround** (the reverse GRU would carry state back from the
+  padding).
 
-## 追記（2026-08-14）— vowel-detector の移植で着地
+## Addendum (2026-08-14) — landed with the vowel-detector port
 
-Consequences 末尾の「移植時に裁定が要る」2 点はどちらも決着した。
-
-- **長さ軸は `2*Dim("T")`**（記号は出力の 20ms 格子側）。派生次元だけを持つ入力からシンボルを
-  束縛できるようにする IR v1 の緩和が要り、**ADR [0057](0057-derived-dim-binding.md)** で
-  裁定した（`solveDim` は一意・割り切れない実寸は fail loudly）。
-- **「10ms フレーム数は偶数」はランタイム契約**になった。奇数フレームは**末尾 1 本を切り捨て**
-  （既存の実重み E2E とホスト後処理が元から採っていた規約）で、右ゼロ pad は入れていない。
-- 差し替え層は `karume/patch_vowel_detector.py`（`nn.GRU` → 単方向 1 層 × 4 + `cat` 2 本）。
-  **`nn.GRU` とビット一致**することは pytest（5 長 × 多層 × N>1）と、実重みの emit ごとの
-  常設門（期待値は参照経路から採り、差し替え経路と `torch.equal`）と `--verify`（5 長）で
-  三重に踏む。
-- 実測: IR ノード **8,434（T10=200 の展開列）→ 18（T 非依存）**・`model.safetensors`
-  3,892,256 → 2,668,608 B・export 8.1 → 0.6 s。**実音声 4 本の `.lab` は展開列経路と
-  ビット完全一致**（f32 全要素・4 本とも差 0）なので、実重み E2E の期待 `.lab` は 1 行も
-  変えていない。配布形は長さバケット 4 本 34,088,454 B → 1 本 2,759,461 B（−91.9%）。
-- 副産物: バケット + 右ゼロ pad をやめたことで、**配布形経路と実長経路の `.lab` の差が消えた**
-  （実測: 旧経路は 4 本中 3 本で割れていた — 20ms の境界ずれ・末尾 40ms の `pau`・発話中間の
-  40ms `pau`）。一致は `packages/models/tests/e2e_vowel_detector_lab_test.ts` が毎回踏む。
+- **The length axis is `2*Dim("T")`** (the symbol is on the 20 ms output grid). Binding a symbol from an
+  input that has only the derived dimension needed an IR relaxation, decided in
+  **ADR [0057](0057-derived-dim-binding.md)** (`solveDim` is unique; a size that does not divide fails
+  loudly).
+- **"The number of 10 ms frames is even" is a runtime contract.** An odd frame count **drops the last
+  frame** (the convention the real-weight E2E and the host post-processing already used); no right zero
+  padding.
+- Measured on landing: IR nodes 8,434 → 18, distribution 4 length buckets 34,088,454 B → one graph
+  2,759,461 B (−91.9%), and the `.lab` output of the distribution route now matches the real-length
+  route (`packages/e2e/tests/e2e_vowel_detector_chain_test.ts`). The `nn.GRU` split lives in
+  `tools/export-recipes/vowel_detector/patch.py`.

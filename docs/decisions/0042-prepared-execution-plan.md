@@ -1,177 +1,160 @@
-# 0042: 実行計画は 2 相分離し、導出済みレシピを bindings キーで Session 常駐する
+# 0042: Two-phase execution plan; derived recipes resident in the Session, keyed by bindings
 
-- Status: accepted（PNG sha256 門 4 本 + WAV 門が不変・fixture 0 diff・verify 749/0）
+- Status: accepted (2026-08-10; PNG and WAV sha256 checks unchanged, 0 fixture diffs, verify 749/0);
+  partly superseded by [0093](0093-transient-liveness-packing.md) (decision 4, slot packing,
+  2026-09-05) and [0095](0095-plan-backing-budget.md) (decision 4, backing capacity, 2026-09-07)
 - Date: 2026-08-10
-- 関連: ADR [0004](0004-execution-model.md)（アリーナ不変条件・flush-before-destroy — 本 ADR の
-  実行相はこの簿記を 1 箇所へ引き継ぐ）/ [0040](0040-fusion-pass.md)（融合の純関数パスと常設
-  カウンタ — ヒット run の報告義務は §3 を継承）/ [0021](0021-gpu-timing-diagnostics.md)
-  （常設診断の流儀）/ [0022](0022-gemm-register-blocking.md)（f32 実行時オートチューン禁止 —
-  本キャッシュは変種選択を一切変えない）
-- recon と実測: [research/2026-08-10-op-timing-stats.md](../research/2026-08-10-op-timing-stats.md)
-  §7〜§8・先行設計 = [research/2026-08-06-kernel-triage/large-designs.md](../research/2026-08-06-kernel-triage/large-designs.md) C/D/E
+- Related: [0004](0004-execution-model.md) (arena invariants, flush-before-destroy) /
+  [0040](0040-fusion-pass.md) (fusion pass and its counters, §3) /
+  [0021](0021-gpu-timing-diagnostics.md) (resident diagnostics) /
+  [0022](0022-gemm-register-blocking.md) (no f32 runtime autotuning — this cache never changes
+  variant selection) / recon: [research/2026-08-10-op-timing-stats.md](../research/2026-08-10-op-timing-stats.md)
+  §7 to §8, [large-designs](../research/2026-08-06-kernel-triage/large-designs.md) C/D/E
 
 ## Context
 
-HOST-006 第 1 波（params 内容アドレスキャッシュ + layout 保持）後も、定常 run のホスト露出は
-≈1.1s ≈ 壁の 11%（w8a8-1024）残った。内訳は createBindGroup 44.4ms/step・plan/fusion の毎 run
-再計算・WGSL 文字列の毎 dispatch 再生成・params キー文字列・encode ループの JS 残差。
-
-recon（3 レッグ・2026-08-10）の中核事実:
-
-- 計画（bindSymbols → planGraph → planFusions）とレシピ導出（params 内容・パイプラインキー・
-  workgroups・束縛構成）は **graph と解決済み bindings だけの純関数**。graph は Session 構築時に
-  固定され、run 経路に外部状態への参照は無い。
-- 計画の生成物は GPUBuffer 参照を一切含まない（名前 → バッファは env 経由で解決）。
-- 入力 shape は bindSymbols の 2 巡目で bindings との全一致が強制される — つまり
-  **解決済み bindings がキャッシュキーとして必要十分**。
+After the first HOST-006 wave, a steady-state run still exposed about 1.1 s of host time (11% of
+the wall time, w8a8-1024): createBindGroup at 44.4 ms/step, plan and fusion recomputed every run,
+WGSL strings regenerated per dispatch, params key strings, and the encode loop. The recon of
+2026-08-10 showed that planning (bindSymbols → planGraph → planFusions) and recipe derivation are
+pure functions of the graph and the resolved bindings, that the plan holds no GPUBuffer, and that
+bindSymbols forces input shapes to match the bindings: the resolved bindings are a necessary and
+sufficient cache key.
 
 ## Decision
 
-### 1. エンコード層は「導出相 / 実行相」の 2 相（`src/runtime/recipe.ts`）
+### 1. The encode layer has two phases: derivation and execution (`packages/runtime/src/runtime/recipe.ts`)
 
-導出相は GPU コマンドを出さず run 寿命の状態（RunArena・env）に触れない。成果物は
-StepRecipe 列 — dispatch ごとに pipeline / layout / params（いずれも Session 常駐の直参照）と
-束縛の**手順**（値名 / ノード内一時 id）、ステップごとに出力確保仕様・一時の寿命
-（dispatch 境界の添字・同一境界は確保の逆順で解放）・解放する値名の延べ列を持つ。
-実行相（executeStepRecipe）は簿記 1 本でこれを再生する（ADR 0004 の不変条件を引き継ぐ）。
+The derivation phase issues no GPU commands and touches no run-lifetime state. It produces a
+StepRecipe list: per dispatch the pipeline, layout and params (direct references to
+Session-resident objects) and the binding *procedure* (value names, node-local temp ids); per step
+the output allocation spec, temp lifetimes and the value names to release. The execution phase
+replays it through one bookkeeping path (today `executeBakedPlan` in the same file), keeping the
+invariants of ADR 0004.
 
-MUST: レシピは GPUBindGroup と run 寿命バッファを持たない。持てるのは Session 常駐の実体と
-「どの位置に何を束ねるか」だけ（これが破れると本 ADR §2 のキャッシュが成立しない）。
+MUST: a recipe holds no GPUBindGroup and no run-lifetime buffer, only Session-resident objects and
+"what to bind where". Otherwise the cache of decision 2 cannot hold.
 
-### 2. 導出済み計画（PreparedPlan）は解決済み bindings をキーに Session 常駐（LRU — 上限は追記 2026-09-07）
+### 2. The prepared plan (PreparedPlan) is resident in the Session, keyed by the resolved bindings (LRU)
 
-- キー = graph.symbols 宣言順の bindings 値の連結。シンボル無しグラフはキー "" の 1 本。
-- 器は SessionState（モジュールスコープ禁止 — 副作用ゼロ不変条件）。持つのは後段が実際に
-  読む 3 欄のみ（shapes / recipes / fusions）。
-- **登録は導出相の完走後のみ**。途中 throw した run の部分レシピは載せない（載せると次の
-  同一 bindings run が欠けたステップ列を沈黙実行する）。完走して登録した計画も、その実行で
-  GPU 側の失敗が判明したら（run は errorScope が失敗を報告したとき・pop 自体が落ちたとき・
-  device 消失、enqueue は batch の `finish()` で区間本体が失敗したとき）登録を外し、その実行が新しく
-  載せた params もキャッシュから外す（非致命 OOM の無効バッファを直参照したまま残さない）。
-  ホスト側の失敗では外さない（作れた計画と params は有効）— ADR [0095](0095-plan-backing-budget.md)
-  追記 2026-10-10「GPU 側の失敗で、その実行単位が足した params と計画を巻き戻す」。
-- ヒット run は planGraph / planFusions / レシピ導出を丸ごと飛ばす。**bindSymbols
-  （入力 shape 検証）は毎 run 走らせる**。契約検査を飛ばせる根拠は「キーが解決済み bindings の
-  完全一致なら、同じ入力に対する同じ検査の再実行を省くだけ」— fail loudly は緩まない。
-- LRU 上限は定数（設定ノブにしない — 初版 4・**2026-09-07 に 8 へ**: ADR 0066 追記 10 の prefill バケットで
-  定常する実行形が prefill 形 + decode 形 + バケット数本になったため。「連続する run が同じ bindings を
-  使い回す局所性だけを拾う器」という位置づけは不変で、増やしても効かない形〈run ごとに shape が変わる〉は
-  1 本目から効かない）。追い出しはホストオブジェクトのみ（GPU 資源は
-  paramsCache / PipelineCache が所有 — ここで destroy すると別計画の直参照が破棄済みを掴む）。
-  追記: 2026-09-08 に 12 へ（ADR [0096](0096-speculative-decoding.md)・根拠は
-  `packages/runtime/src/runtime/executor.ts` の `PREPARED_PLAN_CAPACITY` の doc）。
+- Key = the bindings values in `graph.symbols` declaration order; a graph without symbols has the
+  key "". The container is the SessionState (no module scope). It holds only what later stages
+  read: `shapes`, `recipes`, `fusions` and `generation` (added with ADR
+  [0066](0066-generation-context-state-slots.md); `packages/runtime/src/runtime/session-build.ts:242`).
+- **A plan is registered only after the derivation phase completes**; a partial recipe would make
+  the next run with the same bindings silently execute a truncated step list. A registered plan,
+  and the params its execution added, are removed again when that execution reveals a GPU-side
+  failure (error scope failure, failed pop or device loss for a run; a failed batch body in
+  `finish()` for enqueue), so no reference to an invalid buffer from a non-fatal OOM survives. A
+  host-side failure removes nothing — ADR [0095](0095-plan-backing-budget.md), addendum 2026-10-10.
+- A hit run skips planGraph, planFusions and recipe derivation. **bindSymbols (input shape
+  validation) still runs on every run**; an exact key match only skips repeating the same check on
+  the same input, so fail loudly is not weakened.
+- The LRU capacity is a constant, not a setting: 4 at first, 8 on 2026-09-07 (prefill buckets of
+  ADR 0066 addendum 10), 12 on 2026-09-08 (ADR [0096](0096-speculative-decoding.md);
+  `PREPARED_PLAN_CAPACITY`, `packages/runtime/src/runtime/executor.ts:465`). The cache only exploits
+  consecutive runs that reuse bindings. Eviction drops host objects only: GPU resources belong to
+  the params cache and the PipelineCache (destroying them here would hand another plan a destroyed
+  reference).
 
-### 3. 常設診断 `lastRunPrepared {hit, cachedPlans}`
+### 3. Resident diagnostic `lastRunPrepared {hit, cachedPlans}`
 
-キャッシュが外れても値は正しいまま性能だけ静かに戻る — ここが唯一の観測点（lastRunFusions と
-同格）。ヒット run でも lastRunFusions はキャッシュ済み counts を報告する（ADR 0040 §3）。
-lastRunParams はヒット run で {0,0} になる（導出相が走らない事実の報告 — 値の意味は不変）。
+A miss keeps the values correct and only loses performance silently, so this is the only
+observation point (on a par with `lastRunFusions`). A hit run reports the cached counts in
+`lastRunFusions` (ADR 0040 §3) and `{0, 0}` in `lastRunParams` (the derivation did not run).
 
 ## Consequences
 
-- **WGSL バイト突合の被覆縮小（承認済みトレードオフ）**: ヒット run は WGSL を再生成しないため
-  PipelineCache の「同一キー → バイト同一」常設突合はミス経路（初回導出）でのみ走る。決定性の
-  担保は codegen スナップショット（fixture 109 本）+ 初回突合に寄せる。
-- **失敗 run の discard 統合カバレッジ縮小**: dispatch 発行が実行相に一本化された結果、
-  「エンコード途中で落ちて pending が残る」を外から誘発する経路が消えた（導出相の throw は
-  1 件も積む前に落ちる）。SubmitScheduler.discard 単体テストは残存。
-- params キャッシュの再利用観測は「同一 bindings の 2 run 目」から「同一 run 内の重複 +
-  prepared 追い出し後の再導出 run」へ移設（gpu_params_cache_test — 2 キャッシュの寿命独立性を
-  固定）。
-- 初回 run はパイプライン生成が最初の submit より前に直列化するため、cold Session の 1 run 目
-  だけ僅かに伸びうる（2 run 目以降は無関係）。
-- 波 2（transient slot 固定 + bind group のレシピ焼き込み）は recipes に欄を足す形で載る。
-  ヒット run の残存ホスト費用は createBindGroup とアリーナ簿記に一本化された。
+- **Narrower WGSL byte check (accepted trade-off).** A hit run regenerates no WGSL, so the
+  PipelineCache check "same key → same bytes" runs only on a miss. Determinism rests on the codegen
+  snapshots (279 fixtures in `packages/runtime/tests/fixtures/wgsl/` on 2026-10-18) plus that check.
+- **Narrower integration coverage of discard.** A derivation throw happens before anything is
+  queued, so "failure mid-encode leaves pending work" can no longer be provoked from outside; the
+  `SubmitScheduler.discard` unit tests remain (`packages/runtime/tests/gpu_submit_test.ts`).
+- Params-cache reuse is observed on "duplicates within one run, plus re-derivation after an
+  eviction" (`gpu_params_cache_test.ts` pins the independent lifetimes of the two caches).
+- Pipeline creation is serialized before the first submit, so the first run of a cold Session may
+  get slightly longer.
 
-## 波 2 の追記（同日）: transient slot 固定と bind group 焼き込み
+## Addendum (2026-08-10) — wave 2: fixed transient slots and baked bind groups
 
-### 4. transient slot の GPU backing（容量 1・初ヒットで遅延構築）
+### 4. GPU backing of transient slots (lazy build on the first hit)
 
-> 追記（2026-09-07）: 容量 1 は ADR [0095](0095-plan-backing-budget.md) で**バイト予算つきの LRU 集合**（既定
-> 256 MiB・予算 0 = 容量 1）に改めた。遅延構築・退役 → flush 後 destroy・footprint 不変は不変。
+(Superseded by ADR [0093](0093-transient-liveness-packing.md) decision 1 on 2026-09-05 and ADR
+[0095](0095-plan-backing-budget.md) on 2026-09-07: slots are placed by liveness intervals and
+first-fit offsets (`packages/runtime/src/runtime/transient-plan.ts`); `derivePlanSlots` and the
+RunArena pools are retired; the backing is a byte-budgeted LRU set, default 256 MiB, budget 0 =
+capacity 1. Lazy build, retirement → destroy after flush and the footprint invariant still hold.)
 
-`derivePlanSlots` がレシピ列から **RunArena のサイズクラス LIFO を仮想再生**して slot 表を導く
-（独自パッキング禁止 — footprint 一致がテストで固定され、常駐化しても VRAM の新ピークは
-生まれない）。backing（slot + 入力バッファ + 焼き込み bind group）は**初ヒット run で遅延構築**
-し、容量は活性 1 signature のみ（DiT で ~1GiB 規模のため本数倍にしない）。単発 run は slot
-メモリを一切払わない。破棄は退役キュー + flush 後の 1 箇所（切替 / LRU 追い出し / dispose
-相乗り）。新規構築した run が失敗したら backing を退役（一過性 OOM から次ヒットで回復・
-既存 backing は据え置き = スラッシング回避）。
+Original decision: `derivePlanSlots` replayed the **size-class LIFO of the RunArena** over the
+recipes (custom packing forbidden, so no new VRAM peak); capacity one active signature. The backing
+(slots, input buffers, baked bind groups) is **built lazily on the first hit run**, so a one-off run
+pays no slot memory. Destruction goes through the retirement queue after flush. A newly built
+backing whose run fails is retired (recovery from a transient OOM; an existing backing stays).
 
-### 5. bind group 焼き込みと入力固定
+### 5. Baked bind groups and fixed inputs
 
-束縛先が全て run 跨ぎで固定（resident / slot / 常駐入力）なので、構築時に全 dispatch の
-GPUBindGroup を焼き込み、backed run は dispatch を積むだけ。入力は backing 所有バッファへ
-毎 run writeBuffer — 追い越し安全性は「#chain 直列化 + run は flush/readback 完了後にしか
-返らない + run 内では入力書き込みが全エンコードに先行」で論証（並行 run テストで固定）。
-残骸上書きの正しさは full-write（ADR 0014）1 本。診断 `planBacking {residentBytes, buildCount}`
-（signature 交互切替による毎 run 再構築が唯一の沈黙劣化 — buildCount が観測点）。
+Every binding target is fixed across runs (resident, slot, resident input), so all GPUBindGroups
+are baked at build time and a backed run only queues dispatches. Inputs are written into
+backing-owned buffers with `writeBuffer` each run; overtaking is safe because of #chain
+serialization, runs returning only after flush/readback, and input writes preceding all encoding
+(pinned by a concurrent-run test). Leftovers are overwritten correctly by full-write (ADR 0014).
+Diagnostic `planBacking {residentBytes, buildCount}`: rebuilding on every run when signatures
+alternate is the only silent regression, and `buildCount` shows it.
 
-## 実測（検収 ABBA・回文・冷却規約・PNG 門込み・2026-08-10）
+## Addendum (2026-08-10) — measurements
 
-段ごとにコミットを切り替えた ABBA（e2e_anima 全 4 本 = 1 走・各側 2 走・代表値 min）:
+ABBA over the four e2e_anima cases (commits `d7626c8` → `1751f3c`): wave 1 and the baked bind
+groups were neutral, fixed slots gained ×1.02 to ×1.04; the rest of the host cost overlapped with
+GPU work, so staged execution (large-designs D/E) would gain almost no wall time. Details:
+[research/2026-08-10-op-timing-stats.md](../research/2026-08-10-op-timing-stats.md).
 
-| 区間                                                           | w8a8-1024                                | f16-1024                       | 判定     |
-| -------------------------------------------------------------- | ---------------------------------------- | ------------------------------ | -------- |
-| `d7626c8` → `b2e6ce0`（波 1 = 2 相分離 + 計画キャッシュ）      | 10.3-10.4 → 10.4-10.5s                   | 19.9 → 19.9-20.0s              | **中立** |
-| `b2e6ce0` → `339fc0c`（段 C = slot 固定）                      | 10.4-10.5 → **10.1/10.1s（×1.03-1.04）** | 20.0 → **19.6/19.6s（×1.02）** | **利得** |
-| `339fc0c` → `1751f3c`（段 D = bind group 焼き込み + 入力固定） | 10.1 → 10.1s（4 走同値）                 | 19.6 → 19.6s                   | **中立** |
+## Addendum (2026-08-18) — wave D: separate bake units and a backing generation id
 
-PNG 門は全 12 走緑。**帰属の確定（2 度の見積り訂正）**: 露出していたホスト費用は
-アリーナ簿記 + createBuffer/destroy（段 C が削除）だけで、導出相（波 1）も
-createBindGroup 44.4ms/step（段 D）も **GPU 実行と完全に重畳しており壁に出ていなかった**。
-段 D の価値は将来の dispatch 数増加への耐性と、E 系（prepared 値の常駐）の土台に限られる。
+The implementation of ADR [0066](0066-generation-context-state-slots.md) decision 5 (`22b5f64`)
+revised the backing (a run without generation does not change by one byte):
 
-**staged execution（large-designs D/E）への含意**: dispatch 削減系の候補（E = 392/predict・
-timestep-only stage = 772/predict）が狙っていたホスト費用は重畳側にあり、GPU 側の利得も
-E ≈ 0.60% / timestep ≈ 0.12% しかない。この環境では**壁時計の利得はほぼゼロ**と結論できる
-（採否の裁定は research 側の記録とともにユーザーへ）。
+1. **The bake unit follows the owner of what is bound.** `bakeBindGroups` bakes the dispatches
+   that bind Session-owned objects; those that bind GenerationContext-owned objects (state slots,
+   the logical-length uniform) are baked by the context (`bakeGenerationBindGroups`) per (context,
+   backing) pair. Both share `bindsGeneration` and `bakeGroups`.
+2. **ActiveBacking carries a monotonic generation id (`build`).** The context side MUST match it
+   before using its bind groups: a retired backing's buffers live until the run's cleanup, so a
+   stale bind group passes validation while **the values silently change** (fault injection in wave
+   D-4: every output wrong, no exception). Diagnostic: `stateBacking.rebindCount`.
 
-## 追記（2026-08-18・波 D — 焼き込み単位の分離と backing 世代識別子）
+## Addendum (2026-08-29) — new owner of the PipelineCache
 
-ADR [0066](0066-generation-context-state-slots.md) 決定 5 の実装（`22b5f64`）で backing 節が
-次の 2 点の改訂を受けた（本文の機構は不変 — generation を伴わない run は 1 バイトも変わらない）:
+The PipelineCache moved to **GpuContext ownership (one per device)**; Sessions on a device share
+it, and `PipelineKeyConflictError` (same key, different WGSL) applies across Sessions. The params
+cache stays in the Session. Diagnostics: `pipelineCount` (keys this Session used) and
+`devicePipelineCount` (device total).
 
-1. **焼き込みの単位は束ねる相手の所有者で分ける**: `bakeBindGroups` が焼くのは Session 所有の
-   実体だけを束ねる dispatch で、GenerationContext 所有の実体（state スロット・論理長 uniform）を
-   束ねる dispatch は **context 側**（`bakeGenerationBindGroups`）が (context, backing 実体) の
-   組ごとに焼く。判別は `bindsGeneration` の 1 本・歩きは `bakeGroups` の 1 本を両側で共有。
-2. **ActiveBacking は世代識別子（`build`）を持つ**: 同じ計画鍵で作り直した backing も必ず別値に
-   なる単調採番。context 側の束はこの識別子で照合してから使う MUST — **退役した backing の
-   バッファは当該 run の後始末（flush 後の destroy）まで生存する**ため、照合を欠いた古い束は
-   validation を通ったまま**値だけが静かに変わる**（波 D-4 の故障注入で実測: 出力全要素不一致・
-   例外ゼロ）。診断は `stateBacking.rebindCount`（run 数に比例しないことが分離の観測点）。
+## Addendum (2026-09-11) — asynchronous compilation
 
-## 追記（2026-08-29）— PipelineCache の所有者変更
+`PipelineCache` uses `createComputePipelineAsync` (`packages/runtime/src/gpu/pipeline-cache.ts:148`)
+and `RecipeBuilder` derives all steps concurrently. API, WGSL, pipeline keys, recipe order and
+dispatch order do not change; a run that hits a prepared plan does no extra work.
 
-決定 2 の「GPU 資源は paramsCache / PipelineCache が所有」のうち PipelineCache は
-**GpuContext 所有（device 寿命・device 1 個につき 1 本）**へ移した。同一 device 上の Session が
-キャッシュを共有し、`PipelineKeyConflictError`（同一キー・異 WGSL の即死）は Session を跨いで
-効くようになる。paramsCache は従来どおり Session 常駐。診断は `pipelineCount` = その Session の
-**使用**キー本数 / `devicePipelineCount` = device 合計、の 2 席に分離（外部レビュー消化波 —
-経緯は backlog 2026-08-29）。
+- Input names are resolved and output names registered in step order before the first `await`.
+  Registering all output names up front MUST NOT be done (it would accept forward and self
+  references).
+- Module creation and the issue of the compilation share one error scope, popped before the wait;
+  the layout fetch has its own scope. One push/pop pair MUST NOT span the wait.
+- A rejection handler is attached at once; an issued compilation is awaited to settlement even when
+  module validation fails first. A pending creation is shared by key and deleted only on failure.
+- `GPUPipelineError.reason` `internal` / `validation` map to the existing typed errors with the
+  cause and `getCompilationInfo()` diagnostics kept; other reasons are not guessed into validation.
+  A failure to fetch the diagnostics is recorded as a supplement and does not overwrite the
+  compilation cause.
+- Recipes are returned after `Promise.allSettled`; failures are chosen in step order, no params
+  write outlives the run's cleanup, and a partial recipe is not cached.
 
-## 非同期コンパイル（2026-09-11）
+Measured ([research/2026-09-10-codex-mtp-optimization.md](../research/2026-09-10-codex-mtp-optimization.md),
+section on async compilation, 2026-09-11): first response of QAT E2B on Chrome / RTX 37 to 43%
+shorter; parallel recipes alone did not help; Deno about flat; Apple M2 not measured.
 
-初回 run の待ちを短縮するため、`PipelineCache` は `createComputePipelineAsync` を使い、
-`RecipeBuilder` は各ステップの導出を並行して発行する。公開API、WGSL、パイプラインキー、
-レシピの並び、GPUのdispatch順序は変えない。暖機用のダミー生成や新しい設定項目は追加しない。
-この最適化は初回の導出経路に限り、導出済み計画へ当たる通常のrunには処理を追加しない。
-
-- 入力の名前解決と出力名の登録は、最初のawaitより前に元のステップ順で行う。
-  前方参照や自己参照を受理するために、全出力名を先に登録してはならない。
-- シェーダーモジュール生成と非同期コンパイルの発行は、同一の同期スコープで囲む。
-  スコープのpopを発行してから完了を待ち、layout取得は別の同期スコープで囲む。
-  非同期待ちの前後を1組のpush/popで囲んで、別の生成のエラーを取り込む形にしない。
-- 非同期コンパイルの拒否は直ちにハンドラーを登録する。モジュールの検証が先に失敗しても、
-  発行済みコンパイルの決着を待つ。同じキーは未決着の生成も共有し、失敗後にだけ削除する。
-- `GPUPipelineError.reason` の `internal` / `validation` を既存の型付きエラーへ写し、
-  元の原因と `getCompilationInfo()` の診断を保持する。診断取得自体の失敗は補足へ記し、
-  コンパイルの原因を上書きしない。規定の拒否理由以外を推測でvalidationへ分類しない。
-- レシピ列は `Promise.allSettled` で全件を待ってから返す。失敗も元のステップ順で選び、
-  後続のparams書き込みをrunの後始末より後に残さない。部分レシピはキャッシュへ登録しない。
-
-[実測](../research/2026-09-10-codex-mtp-optimization.md#公開カーネル調査と非同期コンパイル2026-09-11)では、
-Chrome / RTXのQAT E2Bの初回応答が約37〜43%短縮した。レシピ並列化だけでは改善しなかった。
-Denoではほぼ横ばいであり、Apple M2での効果は未計測。逐次待機を残す案はChromeの初回費用が残り、
-明示的なprewarm APIを設ける案は利用者側の手順と公開面を増やすため、今回は採らない。
+A dummy warm-up, a new option or an explicit prewarm API SHOULD NOT be added for this (they add
+user steps and public surface). (Re-graded 2026-10-18 to SHOULD: the decision rests on measurements
+of that time; a first-run cost left on the browser targets, Node + Dawn (ADR 0127) or M2 may reopen
+it.)

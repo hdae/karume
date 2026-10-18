@@ -1,83 +1,77 @@
-# 0057 — 入力 shape の派生次元からシンボルを束縛する
+# 0057: Binding symbols from derived dimensions of input shapes
 
-- Status: accepted（2026-08-14）
-- 関連: ADR [0010](0010-symbolic-constant-folding.md)（次元言語 `coeff·sym+offset`）/
-  [0014](0014-layout-ops-full-write.md)（記号軸を要求実測が出るまで広げない規律）/
-  [0046](0046-cat-symbolic-axis.md)（同じ規律で `cat` の連結軸だけを緩めた前例。`slice` /
-  `flip` は静的専業のまま据え置くと明記）/ [0056](0056-gru-scan.md)（`gru_scan` — 本 ADR の
-  要求元）。仕様の正本は [ir-v2.md](../ir-v2.md) の「shape と次元言語」。
-- 要求の実測: 母音検出 CRNN（`export_vowel_detector.py`）。先頭が
-  `Conv1d(kernel=5, stride=2, padding=2)` なので、入力の長さ軸を素の `Dim("T")` で宣言すると
-  出力 extent が **`((T−1)//2)+1`**（床除算）になり次元言語に載らない。`2*Dim("T")` で
-  宣言すると conv 出力はちょうど `T` になるが、**入力側には `T` が素の形で 1 度も現れない**。
+- Status: accepted (2026-08-14); states shapes became a second binding source later (ADR
+  [0066](0066-generation-context-state-slots.md), addendum of 2026-08-17, item 7).
+- Date: 2026-08-14
+- Related: [0010](0010-symbolic-constant-folding.md) (dimension language `coeff·sym+offset`) /
+  [0014](0014-layout-ops-full-write.md) (no symbolic axes before measured demand) /
+  [0046](0046-cat-symbolic-axis.md) (relaxed only `cat`; `slice` / `flip` stay static) /
+  [0056](0056-gru-scan.md) (`gru_scan`, which needed this). Specification: "shape and dimension
+  language" in [ir-v2.md](../ir-v2.md).
+- Demand: the vowel-detector CRNN (`tools/export-recipes/vowel_detector/export.py`) starts with
+  `Conv1d(kernel=5, stride=2, padding=2)`. A plain `Dim("T")` length gives the extent
+  **`((T−1)//2)+1`** (floor division), outside the dimension language; `2*Dim("T")` makes the conv
+  output exactly `T`, but **`T` never appears plain in an input**.
 
 ## Context
 
-IR v1 は「宣言されたシンボルは少なくとも 1 つの入力 shape に**係数 1・オフセット 0 の素の
-形**で現れなければならない」を受理規則にしていた。理由は「束縛は入力 shape の次元位置から
-直接取る（要素数からの逆算はしない）」で、逆算が禁じられているのは**解が一意でないから**
-（`[T, S]` の要素数から T と S は決まらない）。
+IR v1 accepted a declared symbol only if it appeared **plain (coefficient 1, offset 0)** in some input
+shape: a binding is taken from a dimension position of an input, never solved from an element count,
+because **that solution is not unique** (the element count of `[T, S]` does not determine T and S).
 
-母音検出 CRNN はこの規則に当たる。`gru_scan`（ADR 0056）で時間方向の展開は消えたが、
-長さ軸を宣言しようとすると:
+The vowel-detector CRNN hits this rule. With plain `Dim("T")` **`convert` fails** (floor division);
+with `2*Dim("T")` the only input is `[1, 2T, 83]` and the exporter's IR verification **fails because
+'T' does not appear plain in an input shape** (measured). Both workarounds are poor: a rank-4 input
+`[1, T, 2, 83]` reshaped to `2T` adds a meaningless axis to the public API; binding only through an
+explicit seed to `session.run` leaves the graph alone unable to bind, failing the IR acceptance rule.
 
-- 素の `Dim("T")` → conv 出力が床除算になり **`convert` が落ちる**（次元言語に載らない）。
-- `2*Dim("T")` → conv 出力はちょうど `T`。しかし入力は `[1, 2T, 83]` だけなので、
-  `verify_model` が **「'T' が入力 shape に素の形で現れない」で落ちる**（実測）。
+## Decision
 
-回避形は 2 つとも筋が悪い: ①入力を `[1, T, 2, 83]` の rank 4 にして `reshape` で `2T` を
-作る（公開 API に意味の無い軸が 1 本増える）②`session.run` の明示 seed だけで束縛する
-（グラフ単体では「束縛が取れない」ままで、IR の受理規則を満たさない）。
+### 1. Binding sources widen from "plain" to "a linear expression at a dimension position"
 
-## 決定
-
-### 1. 束縛源を「素の形」から「次元位置に現れる一次式」へ広げる
-
-`coeff·sym+offset`（1 次元 1 シンボル・coeff ≥ 1・offset ≥ 0）の**次元位置**からは、実寸
-`size` に対して解が
+At a **dimension position** holding `coeff·sym+offset` (one symbol, coeff ≥ 1, offset ≥ 0), the size
+gives **exactly one** solution
 
     sym = (size − offset) / coeff
 
-の**1 つきり**に決まる。「要素数からの逆算はしない」という禁止は 1 次元に複数シンボルが
-混ざる形（`[T·S]`）の話で、次元位置ごとの一次式には掛からない — 禁止の理由（非一意性）が
-ここには存在しない。したがって規則は「**入力 shape の次元位置に現れる**」へ緩める。
+The ban on solving from element counts concerns several symbols in one dimension (`[T·S]`); its reason,
+non-uniqueness, is absent for a linear expression per dimension position. The rule becomes
+"**appears at a dimension position of an input shape**". The static `slice` / `flip` axes stay (ADR
+0046); only how bindings are taken changes, not the dimension language or any op contract.
 
-`slice` / `flip` の対象軸が静的専業なのは据え置く（ADR 0046 の裁定）。本 ADR が触るのは
-**束縛の取り方 1 点**で、次元言語そのものにも op 契約にも変更は無い。
+### 2. A size that does not divide fails loudly (no rounding)
 
-### 2. 割り切れない実寸は fail loudly（丸めない）
+If `(size − offset)` is negative or not divisible by `coeff`, the input does not have the declared
+form and no binding exists. **No rounding or truncation**: the run fails with an `ExecutionError` naming
+the input, the dimension, the measured size, the declared form and the requirement (for example 285
+against `2T` needs a length ≥ 0 divisible by 2 — `bindSymbols` in `packages/runtime/src/runtime/plan.ts`).
+Rounding would let an odd length run through a `2T` graph with a last element that means something
+else, while the caller believes the graph accepted it. For vowel-detector this is what the runtime
+contract "the number of 10 ms frames is even" rests on.
 
-`(size − offset)` が負、または `coeff` で割り切れない実寸は「その宣言の形をしていない」＝
-束縛が存在しない。**四捨五入も切り捨てもしない**で `ExecutionError` にする:
+### 3. Implementation: three places and one inverse function
 
-    入力 'features' の次元 1: 実測 285 が宣言 '2T' の形をしていない（2 で割り切れる 0 以上の長さが要る）
+- `packages/runtime/src/format/dims.ts` — `solveDim(expr, size)`, the inverse of `evalDim`
+  (`undefined` when there is no solution).
+- `packages/runtime/src/runtime/plan.ts` — `bindSymbols` solves with `solveDim`. The existing checks
+  stay: conflicting bindings of one symbol fail, and the second pass re-evaluates every declared
+  dimension (derived ones included) against the actual inputs.
+- `packages/runtime/src/format/ir.ts` / `tools/exporter/src/karume/verify.py` — the acceptance rule
+  becomes "appears at a dimension position". **A symbol that appears only in values is still rejected**
+  (no binding source at run time). States-shape dimension positions are now a second binding source
+  (`_check_symbol_bindability` in `verify.py` — ADR 0066).
 
-丸めて通すと、`2T` を宣言したグラフに奇数長を渡した run が「末尾 1 要素だけ意味の違う
-入力」として最後まで走る（呼び手はグラフが受理したと見なす）。母音検出ではこれが
-「10ms フレーム数は偶数」というランタイム契約の実体になる。
-
-### 3. 実装は 3 か所 + 逆関数 1 本
-
-- `packages/runtime/src/format/dims.ts` — `solveDim(expr, size)`（`evalDim` の逆・
-  解が無ければ `undefined`）。
-- `packages/runtime/src/runtime/plan.ts` — `bindSymbols` が `solveDim` で解く。既存の
-  「同じシンボルの束縛が衝突したら落とす」検査と、2 巡目の「宣言 shape を評価し直して
-  実入力と全一致」検査はそのまま（後者は派生次元も含めて元から全次元を見ている）。
-- `packages/runtime/src/format/ir.ts` / `tools/exporter/karume/verify.py` — 受理規則を
-  「次元位置に現れる」へ。**値にしか現れないシンボルは従来どおり拒否**（ランタイムが
-  束縛源を持たない）。
-
-明示 seed（`session.run(inputs, bindings)`）は従来どおり優先され、入力 shape から解いた値と
-食い違えば落ちる。配布形パイプライン（`VowelDetectorPipeline`）はホストが数えた 20ms
-フレーム数を明示で渡し、実重み E2E は**渡さず解かせる** — 経路を両方とも門に載せるため。
+An explicit seed (`session.run(inputs, bindings)`) still takes precedence and fails if it disagrees
+with the solved value. The distribution pipeline (`VowelDetectorPipeline`) passes the host-counted
+20 ms frame count, and the real-weight E2E (`packages/e2e/tests/e2e_vowel_detector_chain_test.ts`)
+**passes none and lets the runtime solve it** — both routes are checked.
 
 ## Consequences
 
-- 母音検出 CRNN が**任意長 1 グラフ**で通る（ADR 0056 と対で、この波の目的そのもの）。
-  配布形は長さバケット 4 本 34,088,454 B → 1 本 2,759,461 B（−91.9%）。
-- 「グラフ入力の長さが偶数でない」は、以前は**どこにも門が無かった**（バケット時代は
-  右ゼロ pad で丸めていた）。今は束縛の段で落ちる。
-- 受理集合が広がるので、**これまで拒否されていたグラフが通るようになる**（例:
-  入力が `2T` だけのグラフ）。逆向きの互換性の問題は無い（素の形を持つグラフは従来どおり）。
-- 未検証: `coeff` が大きい形（`16T` 等）での実運用。実測に出ているのは `2T` だけで、
-  一般性は式のうえの話。
+- The vowel-detector CRNN runs **any length with one graph** (with ADR 0056, the goal of that work);
+  the distribution went from 4 length buckets, 34,088,454 B, to one graph, 2,759,461 B (−91.9%).
+- An odd graph input length **had no check anywhere** before (the bucket era padded zeros on the
+  right); it now fails at binding.
+- **Graphs that were rejected now pass** (for example an input with only `2T`); graphs with a plain
+  form behave as before, so there is no compatibility problem.
+- Unverified: large `coeff` (`16T` and the like) in practice; only `2T` is measured.

@@ -1,157 +1,145 @@
-# 0054 — 実行ループの GPU 常駐化とフェンス集約（resident / batch enqueue / 単一フェンス run）
+# 0054: GPU-resident execution loop and fence consolidation (resident tensors / batch enqueue / single-fence run)
 
-- Status: accepted（2026-08-13・波②〈H-5 案 A + H-1〉のユーザー承認下でメイン裁定）
-- 対象: runtime（gpu/device.ts・gpu/submit.ts・runtime/executor.ts）+ models（irodori
-  pipeline）。IR 仕様・エクスポータ・配布資産は無変更（再 emit 不要）。
-- 需要の実測: [research/2026-08-13-host-cost-decomposition.md](../research/2026-08-13-host-cost-decomposition.md)
-  — run 境界の**フェンス待ちが壁の支配項**（待ちの床 ≈11ms/本・EG bare 54ms 中 51ms・
-  irodori はフェンス関連 7.5s / run 壁 8.2s・二段待ち vs 単一待ちの素の価格差 12ms/run）。
+- Status: accepted (2026-08-13 — main-session decision under the maintainer's approval of
+  performance phase 2, H-5 option A + H-1); the decode-only scope of the 2026-09-20 addendum
+  re-graded to SHOULD on 2026-10-18.
+- Date: 2026-08-13
+- Scope: runtime (`gpu/context.ts`, `gpu/submit.ts`, `runtime/executor.ts`) and models (Irodori,
+  `packages/models/src/irodori/dit-loop.ts`). IR, exporter and assets unchanged (no re-export).
+- Related: [0004](0004-execution-model.md) (invariant 4) / [0021](0021-gpu-timing-diagnostics.md).
 
-## 決定
+## Context
 
-1. **ResidentTensor — GpuContext 所有の第 4 の寿命クラス**（既存 3 クラス = 重みアリーナ /
-   slot backing / run アリーナはどれも Session に閉じ、Session を跨ぐ受け渡しは必ずホスト
-   経由 = フェンス 2 本だった）。**バイト列と大きさだけを持つ**（dtype / shape なし — 持って
-   いない情報を捏造しない）。構築は `GpuContext.createResident` のみ（errorScope の門 —
-   確保失敗は沈黙の無効バッファになるため async で囲む）。破棄は焼き込み bind group からの
-   参照 0 本が条件（fail loudly — 黙って破棄すると無関係な dispatch まで巻き添えで沈黙誤値）。
-2. **BatchScope + Session.enqueue — フェンス無し実行区間**。errorScope（out-of-memory +
-   validation）を区間 1 対に束ね、フェンスは `finish()` の 1 本だけ。
-   **追い越し不変条件の新形（ADR 0004 不変条件④の拡張）**: enqueue は末尾で必ず eager
-   submit する。`queue.writeBuffer` は issue 順で queue timeline に載るため、submit 済みの
-   先行 dispatch を追い越さない — フェンス無しで不変条件が保存される。受容したトレードオフ:
-   失敗の帰属は batch 単位・device 消失の検出は finish まで遅延。gpuTiming とは非両立
-   （fail loudly — 1 dispatch = 1 pass の timestamp が区間ぶん未回収で溜まる）。
-3. **resident への書き込みは GPU copy 経由**（`copyOutputs`: 出力 slot → resident を dispatch
-   と同一コマンド列へ FIFO で積む）。出力リダイレクトを採らない理由: リダイレクトは
-   ping-pong（読み書き別名の validation 回避）→ 束縛識別の交代 → backing 多面化を連鎖的に
-   要求する。copy 経由なら束縛識別が安定し**単一 backing でヒットし続け**、追加機構ゼロで
-   閉じる（copy の GPU 代は µs 級で無視できる）。
-4. **irodori DiT ループの常駐化**: 潜在・速度場・CFG 途中結果・条件 3 本を resident に置き、
-   ループ全体（40 step × 1+V forward）を 1 batch へ。CFG 合成と Euler 更新は**ホストで
-   組んだ小 IR グラフ**（3 + 2 ノード・エクスポータ非経由 — models/src/irodori/host/
-   sampler-graph.ts）を別 Session で enqueue。**演算の結合順・変種順・引数順は TS 正本
-   （host/sampler.ts）と 1 演算ずつ同型**（f32 加算は非結合 — ずれれば WAV sha256 が割れる）。
-   ループが完全に静的（CFG 窓も変種集合も step 添字だけの関数）であることが成立根拠。
-   gpuTiming 有効 device はホストループへ分岐（決定 2 の非両立・出力は同一 digest を実測）。
-5. **数値の席 = 既定経路**（ユーザー承認済み分岐の帰結）。parity probe（135,936 要素・
-   denormal / 符号付きゼロ / fma 感応系込み）: fma 収縮 0 件（op 別 dispatch で構造的に
-   収縮余地なし）・符号付きゼロ完全一致・唯一の差分は「**最終出力が denormal の要素**の
-   FTZ」5,670 件（GPU シェーダ算術側・実データでは実質到達不能）。実パイプラインの
-   **WAV sha256 門 2 本が digest 完全一致** = 参照ケース上のビット同一を機械証明。
-   denormal caveat は limitations に記録し、WAV 門が恒久の検出器。
-6. **H-1 — 通常 run の単一フェンス化**: gpuTiming OFF かつグラフ出力 ≥1 の run は、readback
-   copy を run 本体のコマンド列へ積み（FIFO — mapAsync の解決 = 積んだ copy の完了 = 先行
-   dispatch 完了の含意）、`mapAsync` を唯一のフェンスにする。flush の onSubmittedWorkDone と
-   arena.destroy の再 flush の**フェンス 2 本が消える**。arena の後始末は submit-only
-   （flush-before-destroy の実体 = 未 submit のエンコードを残さない）。gpuTiming ON
-   （ADR 0021 — timestamp 回収が flush に依存）と出力 0 本のグラフ（待つ相手が無い —
-   無フェンスで返さない）は二段待ちを据え置き。
-7. **観測面の劣化（by-design・limitations 記載）**: 常駐経路の enqueue は run アリーナも
-   計測窓も作らないため `lastRun` / `lastRunTiming` が `undefined`。op 別内訳が要るときは
-   gpuTiming を有効にする = ホストループで回る（壁 ≈2 倍 — 計測モードの代価）。
+[research/2026-08-13-host-cost-decomposition.md](../research/2026-08-13-host-cost-decomposition.md)
+showed that **waiting on fences at run boundaries dominated wall time**: about 11 ms per wait, 51 of
+the 54 ms of a bare EG run, 7.5 s of an 8.2 s Irodori run, and 12 ms per run between a two-stage and a
+single wait.
 
-## 検収（2026-08-13・RTX 3080 Ti / Vulkan・全て自己実測）
+## Decision
 
-- `deno task verify` 1070 passed / 0 failed（実 GPU・PNG 門 4 + WAV 門 3 + golden/latent 込み
-  — **digest 全て不変**）。フェンス数・追い越し・寿命の門 15 本を新設（故障注入 5 件で
-  検出力を実証: submitPending 除去 / flush 退避 / singleFence 恒真化ほか全て赤化を確認）。
-- 性能（H-2 と同一ドライバ・off モード・A/B・クールダウン規約・ベースラインは `34a3e18`
-  時点 = K-4a 後）: EG bare per-run **52.54 → 28.15 / 28.60ms（×1.86）** — H-1 の kill 基準
-  43.8ms を大幅超過。irodori voice-clone 素の生成壁 **8.593 → 4.896 / 4.860s（×1.76）**・
-  WAV sha256 は全走 `e7846ac1…` で不変。irodori はほぼ GPU 律速へ到達（全 GPU ≈4.2s —
-  露出ホストの主部だったフェンス構造が解消）。数値の正本 =
-  [research/2026-08-13-host-cost-decomposition.md](../research/2026-08-13-host-cost-decomposition.md) §6。
-- コミット列: R1 = `c90bd43`（runtime 基盤）→ M1 = `8ab141a`（irodori ループ）→ H-1 =
-  `e339cc0`（単一フェンス run）。
+1. **ResidentTensor — a fourth lifetime class, owned by GpuContext.** The other three (weight arena,
+   slot backing, run arena) are closed inside a Session, so passing data between Sessions went
+   through the host at two fences. A resident tensor **holds only bytes and a size** (no dtype or
+   shape it would have to invent). It is built only by `GpuContext.createResident` (async, inside an
+   error scope — a failed allocation is otherwise a silently invalid buffer) and MUST be destroyed only
+   when no baked bind group refers to it (fail loudly — a silent destroy corrupts unrelated dispatches).
+2. **BatchScope + Session.enqueue — a fence-free span.** One pair of error scopes (out-of-memory +
+   validation) wraps the span; the only fence is `finish()`. **The no-overtaking invariant in a new form
+   (extends ADR 0004 invariant 4)**: enqueue MUST end with an eager submit; `queue.writeBuffer` lands on
+   the queue timeline in issue order, so it cannot overtake a submitted dispatch. Accepted trade-offs:
+   failures are attributed per batch, and device loss is seen only at `finish`. Incompatible with
+   gpuTiming (fails loudly — per-dispatch timestamps would pile up unread).
+3. **Writes into a resident tensor are GPU copies** (`copyOutputs`: output slot → resident, FIFO in the
+   dispatch's command stream). Output redirection is rejected: it needs ping-pong buffers, then
+   alternating binding identities, then several backings. A copy keeps the binding identity stable and
+   **a single backing hitting**, with no extra mechanism (microseconds of GPU time).
+4. **The Irodori DiT loop runs resident**: latent, velocity, CFG intermediates and the three conditions
+   are resident, and the loop (40 steps × 1+V forwards) is one batch. CFG combination and the Euler
+   update are **small IR graphs built on the host** (3 + 2 nodes,
+   `packages/models/src/irodori/host/sampler-graph.ts`) on a separate Session. **Their association,
+   variant and argument order MUST match the TS source of truth (`host/sampler.ts`) op by op** (f32
+   addition is not associative; a mismatch splits the WAV sha256). This works because the loop is fully
+   static (CFG window and variant set depend only on the step index). A device with gpuTiming takes the
+   host loop (decision 2); the digest is the same.
+5. **Numerics: the reference path** (the branch the maintainer approved). A parity probe over 135,936
+   elements (denormals, signed zeros, fma-sensitive cases) found no fma contraction (one op per
+   dispatch), identical signed zeros, and one difference: flush-to-zero of 5,670 elements **whose final
+   output is denormal** (practically unreachable with real data). The **two WAV sha256 checks of the
+   real pipeline match** — bit identity on the reference cases. The denormal caveat is in
+   `docs/limitations.md`; the WAV checks are its permanent detector.
+6. **H-1 — one fence for an ordinary run**: with gpuTiming off and at least one graph output, the
+   readback copy goes into the run's own command stream (FIFO: `mapAsync` resolving implies the copy
+   and every earlier dispatch finished), and `mapAsync` is the only fence. The fences of flush
+   `onSubmittedWorkDone` and of the re-flush in `arena.destroy` go away; arena cleanup only submits
+   (flush-before-destroy = no unsubmitted encoding left). gpuTiming on (ADR 0021 — timestamp readback
+   needs the flush) and graphs with no outputs (nothing to wait on) keep the two-stage wait
+   (`singleFence` in `packages/runtime/src/runtime/executor.ts`).
+7. **Reduced observability (by design, `docs/limitations.md`)**: resident-path enqueue creates no run
+   arena and no timing window, so `lastRun` / `lastRunTiming` are `undefined`. A per-op breakdown needs
+   gpuTiming, which runs the host loop (about 2× wall time). Pipeline keys are readable without timing
+   through `lastRunPipelines`.
 
-## 追記（2026-08-16・レビュー修正波 B1: in-flight リース）
+## Acceptance (2026-08-13)
 
-`BatchScope` に **in-flight リース**を導入した。`Session.enqueue` の**同期区間**（`#chain` に
-積む前）でリースを 1 本取り、enqueue 本体の `finally` で返す。`finish()` は「新規 enqueue の
-拒否 → 未返却リースの全返却を待つ → 未 submit を出し切る → フェンス 1 本」の順で進む。
+RTX 3080 Ti / Vulkan, full suite green with every digest unchanged; 15 new checks for fence count,
+overtaking and lifetime, proven by fault injection. Bare EG run 52.54 → 28.15 ms (×1.86); Irodori
+voice-clone 8.593 → 4.896 s (×1.76), WAV sha256 unchanged. Numbers: host-cost research §6; commits
+`c90bd43` (runtime), `8ab141a` (Irodori loop), `e339cc0` (single-fence run).
 
-理由: `enqueue()` はマイクロタスクを 1 段挟んでから本体が走るのに対し `finish()` は同期で決着
-フラグを立てるため、**戻り Promise を await せずに finish を呼ぶと** ①まだ本体が走っていない
-enqueue が全て `BatchScopeError` で reject し、区間は 0 dispatch のまま「成功」で決着する
-（未 await の reject は unhandled へ流れ、観測点が無い）②走り出していた enqueue はフェンスと
-errorScope pop の後に submit し、未完了の GPU 実行を残したまま finish が返る。①は実 GPU で
-完全再現済み（レビュー Pass2 V-1）。
+## Addendum (2026-08-16) — in-flight lease
 
-このリポは同種の順序契約を全て機構で閉じている（`Session.#chain` / errorScope 区間ロック /
-焼き込み参照計数）ので、ここも散文契約にせず機構で閉じた。外形は不変・リース 0 の通常経路
-（リポ内の全利用は await 済み）では待ちが 1 マイクロタスクも増えない。irodori 常駐経路の
-WAV sha256 は不変を確認済み。
+`BatchScope` takes an **in-flight lease** in the synchronous part of `Session.enqueue` (before
+`#chain`) and returns it in the body's `finally`. `finish()` rejects new enqueues, waits for every
+lease, submits everything pending, then waits on one fence. Without it, `finish()` called without
+awaiting the enqueue promises (1) rejected every enqueue whose body had not yet run (the body runs one
+microtask later), settling a zero-dispatch span as a success with unhandled rejections — reproduced on
+a real GPU (review pass 2, V-1) — and (2) let running enqueues submit after the fence, returning with
+GPU work in flight. Like the repository's other ordering contracts (`Session.#chain`, the error-scope
+span lock, baked reference counts) this is closed by a mechanism, not prose. The surface is unchanged,
+and with no outstanding lease no microtask is added; the Irodori WAV sha256 is unchanged.
 
-## 追記（2026-08-16・同修正波: onEvent はホスト経路）
+## Addendum (2026-08-16) — onEvent takes the host path
 
-生成イベント購読（`onEvent`）は本 ADR の常駐経路と構造的に非両立（1 batch + 単一フェンスの
-区間は step の完了をホストから観測できない）。購読時は gpuTiming と同じ機構でホストループへ
-分岐する — 出力はビット同一・壁時計の実測は生成全体で 7.2 → 8.6 秒（S 170）。
-[limitations](../limitations.md) の該当節を参照。
+Generation events (`onEvent`) cannot be observed inside one batch with one fence, so a subscription
+switches to the host loop, as gpuTiming does. Output is bit-identical; wall time 7.2 → 8.6 s (S 170).
+See [limitations](../limitations.md).
 
-## 追記（2026-08-30・レビュー修正波 A: 失敗帰属にホスト側の 1 件を加える）
+## Addendum (2026-08-30) — failure attribution includes one host-side failure
 
-in-flight リース（上の追記）は「本体が走っていない enqueue が区間から漏れる」ことは塞いだが、
-**本体が走って落ちた**場合は塞がなかった。`enqueue` の本体（ホスト側の検査・レシピ構築）が
-throw すると、リースは `finally` で返り、区間は `finish()` まで進んで**成功で決着**する —
-errorScope に載るのは GPU 側の失敗だけで、ホスト側の throw は enqueue の戻り Promise にしか
-出ないためである。非 await で積む用途（この ADR が想定する常駐ループそのもの）ではその
-Promise を握っていないので、実態は「dispatch を 1 本落とした区間が成功を名乗り、失敗は未処理
-拒否として抜ける」。
+The lease did not cover an enqueue body that **ran and threw** (host-side checks, recipe building):
+the lease returned in `finally`, the error scope saw only GPU failures, and the span settled **as a
+success** while the throw escaped as an unhandled rejection — exactly the unawaited use this ADR is
+for. `BatchScope` now records the **first** host-side failure of the span and `finish()` throws it.
+When the error scope also failed, that failure is thrown (not rewrapped) with the record as `cause`.
+Later failures are dropped: derived failures hide the root cause (as the error scope prefers internal /
+out-of-memory). `finish()` throwing `ExecutionError` and similar is a **breaking change** relative to
+0.7.0 ([limitations](../limitations.md)). The failure still appears on the enqueue's promise as well.
 
-そこで `BatchScope` は区間で**最初に**起きたホスト側の失敗を 1 件だけ記録し、`finish()` が
-それを投げる。errorScope 側の失敗もあるときは errorScope 側を（包み直さず）投げて、記録は
-`cause` へ載せる。2 件目以降を捨てるのは、1 件目に引きずられた派生失敗が並ぶと根因が読めなく
-なるため（errorScope が internal / out-of-memory を優先するのと同じ判断）。
+## Addendum (2026-09-12) — batch-end readback of resident tensors
 
-`finish()` から `ExecutionError` 等が出るのは 0.7.0 までに対する**破壊的な挙動変更**で、
-[limitations](../limitations.md) に節を持つ。同じ失敗は enqueue の戻り Promise 側にも従来どおり
-出る（1 つの事実が 2 経路で見えるのは `run` と同じ）。区間の外形・待ちの増減は不変。
+- `BatchScope.finishAndRead(outputs)` (to cut Gemma / QAT output transfers) takes resident tensors of
+  the same device by name and returns caller-owned `ArrayBuffer`s. `finish(): Promise<void>` and
+  `ResidentTensor.read()` are unchanged.
+- The member set is fixed at the call and use reservations are taken synchronously; the data is
+  borrowed and nothing writes it until settlement. Aliases of one tensor are allowed. An invalid,
+  destroyed or foreign-device member, or a total over the limit, releases the partial reservations and
+  rejects the call without ending the batch.
+- After every enqueue has encoded, pending work is submitted and the outputs are copied, 4-byte
+  aligned, into one staging buffer; the error scope is checked after the copy's submit, the map is the
+  fence, and the result returns only after merging host-side failures. An empty set closes with the
+  ordinary queue fence. A total above `maxBufferSize` is rejected; there is no silent switch to split
+  staging or several maps.
+- A readback can be requested once, on a batch neither finished nor settling; `finish` /
+  asyncDispose then wait for the same settlement; a request after `finish` or a second one is rejected.
+  Reservations are returned before `finish` settles; the staging buffer is destroyed on every outcome.
+- A copy or allocation GPU error behind a map rejection takes precedence and is checked before the map;
+  enqueue failures stay as `cause`; a map pending at device loss races the loss notification (a failure,
+  not a hang).
+- The later stages (generation-context wiring, the greedy path of models) were accepted separately;
+  Gemma's greedy output reads through `finishAndRead` (`packages/models/src/gemma/greedy-output.ts:202`).
 
-## バッチ終端の一括読み戻し（2026-09-12）
+## Addendum (2026-09-20) — batch readback of graph outputs
 
-- Gemma/QATの出力転送削減に向け、`BatchScope.finishAndRead(outputs)`を追加する。
-  同じdeviceの常駐テンソルを名前で指定し、呼び手が所有する`ArrayBuffer`の対応表を返す。
-  `finish(): Promise<void>`と既存`ResidentTensor.read()`の動作は変えない。
-- 発行時にmember構成を固定し、同期区間で常駐テンソルの使用予約を取る。
-  データは借用で、呼び出しから決着までwriteしない。同一テンソルの別名指定は許す。
-  途中の不正member・破棄済み・別device・合計上限超過は部分予約を返し、バッチを終了させず拒否する。
-- 全enqueueのエンコードが決着した後、未submitを出し切り、1個のstagingへ4byte境界で
-  出力を連結コピーする。copyのsubmit後にエラースコープを検査し、map完了をフェンスにして、ホスト側の失敗と合流した後だけ結果を返す。
-  空集合は従来のqueueフェンスで閉じる。合計が`maxBufferSize`を超える場合は明示拒否する。
-  分割stagingや複数mapへ黙って切り替えない。
-- 読み戻しの指定は未終了・settle中でないバッチへ1回だけ。指定後の`finish` / asyncDisposeは
-  同じ最終決着を待つ。`finish`先行後の指定・読み戻しの重複指定は拒否する。
-  使用予約は`finish`の決着前に必ず返し、stagingも成功・失敗の両方で破棄する。
-- copy/確保のGPUエラーがmap拒否を引き起こした場合はGPUエラーを優先する。
-  copyのGPUエラーはmap前に判定する。enqueue側の失敗もあれば、従来どおりcauseへ保持する。
-  デバイス消失時の未決着mapは既存の消失通知と競わせ、ハングを失敗へ変える。
-  GPU側の失敗とenqueue側の失敗がともに存在する場合の優先規則は従来どおり。
-- この追加だけで会話用の`Session.enqueue`やGemmaの小出力化を有効にしたとはしない。
-  GenerationContextの使用予約・長さの確定・失敗時のpoisonをバッチ最終決着へ接続する段階、
-  modelsのgreedy能力を接続する段階を別々に検収する。IR・保存資産・既存の数値契約は変更しない。
-
-## グラフ出力の一括読み戻し（2026-09-20）
-
-- GPU 常駐の側入力（PLE の GPU gather — [0085 追記](0085-ple-host-gather.md#追記2026-09-19--gpu-常駐席-opt-in-で-sidecar-を-gpu-に置きgather-も-gpu-内で行う)）を
-  同じ区間に積む**通常 run**（温度 > 0 の decode・診断付き decode）がフェンスを 1 本余分に払っていた。
-  `run` は device 単位の errorScope 区間ロックを取りに行き、開いている batch がそれを finish まで握るので
-  同じ区間に相乗りできない（自己デッドロック）。根は「batch の中でグラフ出力をホストへ受け取る面が無い」ことなので、
-  上の常駐テンソルの一括読み戻しを**グラフ出力**まで広げる。
-- `Session.enqueueRead(inputs, options): { admitted, outputs }` を追加する。積むコマンド列は `enqueue` と同一で、
-  グラフ出力の写し元（slot backing）を区間へ登録し、決着時に `finishAndRead` の常駐と**同じ 1 本の staging** へ
-  連結コピーして 1 回の map で読み戻す。1 staging / 1 map・`maxBufferSize` の合計検査・GPU 失敗とホスト側失敗の
-  優先規則・使用予約の返却は常駐の読み戻しと同じ規則をそのまま使う。`admitted` は `enqueue` の戻りと同じ意味、
-  `outputs` は区間が例外なく決着した後にだけ解決し、失敗では同じ理由で拒否する（成功データを持ったまま finish が
-  失敗する形は作らない）。
-- 写しは積んだ時点でなく決着時に読む。したがって **enqueueRead を積んだ batch には、その決着まで同じ Session の
-  後続 enqueue を拒否する**（後続が同じ出力 slot を上書きすると読む値が変わる沈黙誤値になる）。解除は決着の
-  finalizer（成否によらず）。区間中の Session / context の dispose が禁止なのは従来どおり。
-- 論理長の advance / defer は `enqueue` と同じく決着時。`lastRun`（アリーナ実績）は enqueue と同じく undefined。
-  gpuTiming 有効な device では batch が開けないので、この面も同じ門の内側にある（ADR 0021 は改訂しない）。
-- 適用は decode 形（M = 1）だけ。prefill を enqueue 系に移すと初回から chunk 形の slot backing を払う
-  （生成面の prefill が run に留まる理由と同じ）ので、prefill は従来の「gather 用 batch を先に閉じる」経路に残す。
-  検収: `gpu_batch_enqueue_read_test.ts`（run と同値・決着前に解決しない・staging 1 本・後続 enqueue の拒否・受理失敗と
-  GPU 失敗の伝播）・`gpu_batch_generation_test.ts`（決着でだけ論理長が進む・u32 一致）・`e2e_gemma4_ple_gpu_test.ts`
-  （サンプラー経路の id 列が host と一致し、余分なフェンスは prefill ぶんだけ）。
+- An **ordinary run** sharing a span with a GPU-resident side input (the GPU gather of PLE —
+  [0085](0085-ple-host-gather.md), addendum of 2026-09-19), such as decode with temperature > 0 or with
+  diagnostics, paid an extra fence: `run` takes the device's error-scope span lock, which an open batch
+  holds until `finish` (self-deadlock). The root cause — a batch could not hand graph outputs to the
+  host — is fixed by extending the readback above to **graph outputs**.
+- `Session.enqueueRead(inputs, options): { admitted, outputs }` queues what `enqueue` queues, registers
+  the graph outputs' slot backing with the span, and at settlement copies them into **the same staging
+  buffer** as `finishAndRead`'s residents, read with one map, under the same rules (one staging / one
+  map, `maxBufferSize`, failure precedence, reservations). `admitted` means what `enqueue` returns;
+  `outputs` resolves only after an error-free settlement and otherwise rejects with the same reason.
+- The copy reads at settlement, so a batch holding an enqueueRead **rejects further enqueues on the
+  same Session until it settles** (a later enqueue overwriting the slot would be a silent wrong value);
+  the settlement finalizer lifts this on any outcome. Disposing the Session or context during the span
+  stays forbidden. Logical-length advance / defer happen at
+  settlement and `lastRun` is undefined, as with `enqueue`. gpuTiming devices cannot open a batch, so
+  this surface sits behind the same check (ADR 0021 unchanged).
+- The surface SHOULD be used for the decode shape (M = 1) only; prefill keeps the route that closes the
+  gather batch first, because enqueue would pay a chunk-shaped slot backing from the first call (re-graded
+  2026-10-18 to SHOULD: a cost judgement, not a correctness constraint, which a new measurement may widen;
+  ruling: accepted as proposed).
+- Checks: `packages/runtime/tests/gpu_batch_enqueue_read_test.ts`,
+  `packages/runtime/tests/gpu_batch_generation_test.ts`, `packages/e2e/tests/e2e_gemma4_ple_gpu_test.ts`
+  (the sampler route's id sequence matches the host route; the only extra fences are prefill's).

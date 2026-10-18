@@ -1240,7 +1240,7 @@ export class BatchScope {
    * 呼び出しから決着まではwriteしない。返したArrayBufferは呼び手の所有物。
    * 指定できるのは未終了・settle中でないbatchへ1回だけ。以後のfinishは同じ決着を待つ。
    * 出力の合計はdeviceのmaxBufferSize以下とし、別device・破棄済みは受け付けない。
-   * DECIDED: docs/decisions/0054-resident-loop-and-fence.md#バッチ終端の一括読み戻し2026-09-12
+   * DECIDED: docs/decisions/0054-resident-loop-and-fence.md#addendum-2026-09-12--batch-end-readback-of-resident-tensors
    */
   finishAndRead(
     outputs: Readonly<Record<string, ResidentTensor>>,

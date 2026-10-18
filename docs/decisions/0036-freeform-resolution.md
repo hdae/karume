@@ -1,73 +1,70 @@
-# 0036: 任意解像度・非正方形の配線（--resolution WxH・S 形 DiT + タイル VAE の合流点）
+# 0036: Arbitrary and non-square resolutions (`WxH`, S-shaped DiT plus tiled VAE)
 
-- Status: accepted（4 パターンの目視ゲートも**ユーザー受理** 2026-08-05「4 枚とも OK、
-  綺麗に出力できています」— 品質込みで確定）
+- Status: accepted (2026-08-05 — the maintainer accepted the four-pattern visual check: "all four
+  images are fine"); partly superseded by [0038](0038-manifest-v1.md) §4 (decision 2, 2026-08-05 —
+  the distribution keeps only S-shaped graphs and always tiles, so the two opt-in knobs are gone)
 - Date: 2026-08-05
-- 関連: ADR 0033（タイル VAE）+ 0034（S 形 DiT）の**合流点** — 両ノブが揃って初めて資産が
-  解像度から独立する / 0034 検出限界①（rope 素表の h↔w）に**検出器がついた**（下の検証 1）/
-  ユーザー指示 2026-08-04「16:9 や 3:4 で縦横の 4 パターンをテスト」
+- Related: [0033](0033-vae-fixed-tile-decode.md) (tiled VAE decode) and
+  [0034](0034-dit-dynamic-tokens.md) (S-shaped DiT) — this ADR is where they meet: only with both
+  do the assets become independent of the resolution. It also closes detection limit 1 of ADR 0034
+  (the h↔w swap of the rope base table; see Findings). The maintainer asked on 2026-08-04 for tests
+  of 16:9 and 3:4 in both orientations.
+
+## Context
+
+Before this ADR the Anima pipeline generated only square images (512 or 1024), and the image side
+was recovered from the pixel count. With an S-shaped DiT graph (ADR 0034) and tiled VAE decode
+(ADR 0033) one asset set can serve any size within the limits of the rope table and the tile
+decoder.
 
 ## Decision
 
-1. **デモの `--resolution` を WxH 形へ拡張**（`1344x768`・正方は従来どおり略記 `512`）。
-   受理集合 4 条件を入口で名指しして落とす（examples/anima/host/resolution.ts が正本）:
-   各辺 16 の倍数（= 空間圧縮 8 × patch 2）・各辺 512〜2048px（下限 = VAE タイル latent 64・
-   上限 = rope 素表天井 latent 256）・S = (W/16)(H/16) ≤ 16,384（Dim("S")）。
-2. **非標準解像度（512/1024 の正方以外）は `--dit-graph dyn` と `--vae-tiling` の両方を
-   要求**し、欠けたノブを名指しで拒否（黙って readModel の「資産が無い」に化けさせない）。
-   既定経路（静的資産・両ノブなし）はバイト不変（PNG 門で実測）。
-   **→ 本決定は ADR [0038](0038-manifest-v1.md) §4 が superseded**（配布経路は S 形のみ +
-   常時 tiling へ一本化され、両ノブ自体が消えた）。**決定 1 / 3 / 4 は現行** — 受理集合は
-   `packages/models/src/anima/resolution.ts` がそのまま持つ。
-3. **寸法は値と一緒に運ぶ**（画素数から正方を逆算する `squareSideOf` は削除）。非タイルの
-   寸法はグラフ出力形が正本・タイル経路は幾何が正本・「出た画像の寸法 == --resolution」の
-   末尾検査が取り違えを閉じる。
-4. **綴りは参照台本と共有**（karume/resolution.py — 但し受理集合の正本はデモ側
-   だけに置き、Python は構造条件のみ。両側に同じ受理集合を書くと片方だけ動かした時に
-   静かに割れる）。anima_pipeline.py / anima_tiling.py も WxH を受ける。
+1. **The resolution is spelled `WxH`** (`1344x768`; a square keeps the short form `512`). The
+   entry point rejects a size outside the acceptance set and names the condition it breaks. The
+   acceptance set is: each side a multiple of 16 (spatial compression 8 × patch 2); each side 512 to
+   2048 px (lower bound: one VAE decoder tile of latent 64; upper bound: the rope base table of 128
+   rows = latent 256); S = (W/16)(H/16) ≤ 16,384 (`Dim("S")` at export). The acceptance set lives in
+   `packages/models/src/anima/resolution.ts` (`parseResolution`, `assertAcceptableResolution`),
+   exported from `@karume/models/anima`. The CLI demo that first carried `--resolution` was removed
+   in `bb35fe2a`; the export recipes keep the same spelling for `--resolution`.
+2. **A non-standard resolution required both `--dit-graph dyn` and `--vae-tiling`**, and a missing
+   knob was rejected by name instead of surfacing as a missing asset in `readModel`. The default path
+   (static assets, no knobs) stayed byte-identical. (Superseded by ADR 0038 §4 on 2026-08-05: the
+   distribution has only S-shaped graphs and always tiles, so both knobs no longer exist.)
+3. **Dimensions travel with the value.** `squareSideOf`, which recovered a square side from the pixel
+   count, is deleted. Without tiling the graph output shape is the source of truth; with tiling the
+   tile geometry is. A final check that the decoded image size equals the requested resolution closes
+   any swap (`packages/models/src/anima/pipeline.ts`, the size check after decode).
+4. **The spelling is shared with the Python reference scripts**
+   (`tools/export-recipes/anima/resolution.py`, used by `pipeline_ref.py` and `tiling.py`). The
+   acceptance set is defined only on the TypeScript side; Python checks only the structural
+   conditions. Rationale: writing the same set on both sides lets one side drift silently.
 
-## 検証（新規 3 層 + 単体）
+## Findings
 
-1. **rope 表の非正方パリティ（4 幾何・Uint32 完全一致）**: ホスト再構成 ≡ torch の焼き表を
-   1344×768 / 768×1344 / 1152×896 / 896×1152（latent 96×168 等）で突合 + 縦横の対が
-   **別表**であることの非空虚性検査。**ADR 0034 検出限界①「素表の h↔w 取り違えは正方では
-   原理的に検出不能」への解** — 非正方の対では位置の取り違えが割れる（故障注入で赤を実測）。
-2. **非正方の通し参照**（1344×768・turbo f16・ref-steps 2）: 段②（S 形 DiT・S=4,032）と
-   段③（2×3 = 6 タイル decode・行 stride 32 / 列 stride 52 の軸独立）を torch と突合。
-   tolerance は素の実測から独立導出（step1 atol 7e-4〈実測 9.269e-5〉/ step2 7e-3
-   〈9.763e-4〉/ tiled decode 6e-5〈8.022e-6〉— いずれも 7〜7.6 倍・既存値の流用なし）。
-3. 単体: parseResolution の受理集合・往復恒等・非正方 imageToRgba（転置検出）・
-   pytest 21 + 4 ケース。
-
-## 実測（2026-08-05）
-
-- **既定経路の PNG 門 2 系列とも実行前後で完全一致**（バイト不変）。
-- 4 パターン生成（運用形 i8+w8a8+attn a8+s16 × dyn × タイル・seed 42・クールダウン適用）:
-  全て S=4,032・DiT 1,476〜1,487ms/step（1024px 正方と同水準 — S が同じため）・VAE
-  6 タイル 2.2〜2.3s・中間ピーク 384MiB・生成全体 22.7〜23.5s。タイル幾何は軸独立
-  （1344×768 = 2×3 / stride 32,52 / ブレンド 256,96px・1152×896 = 2×3 / stride 48,40 /
-  ブレンド 128,192px 等 — 最小本数則どおり）。画像 4 枚はユーザー目視ゲートへ。
-- verify 709/0/4・pytest 1,977（メイン自己実測）。故障注入 5 件 + CLI 手動 4 件。
-- 段②の 1→2 step 誤差増幅 10.5 倍（512px 同区間の 1.54 倍より 1 桁大 — 入口の裸の誤差は
-  同等。10 step 完走の非正方フィクスチャは未取得で、実務判定は 4 パターンの目視に委ねる）。
-- torch 同士のタイル近似差（1344×768）: maxAbs 9.97e-2（1024px の 5.07e-2 より大 —
-  ブレンド幅が列側 96px と狭いことと整合・観測のみ）。
-
-## 検出限界・知見
-
-1. ADR 0034 検出限界①は**非正方の対で解けた**（正方では cos_h == cos_w で不可視だった
-   位置取り違えが、H'≠W' では別表になるため割れる）。「モデル構成依存の検出限界は、
-   構成を変えたテストデータで戻せることがある」の実例。
-2. rope.max_size の宣言は h/w = 120（= 1920px）で、受理上限 2048px（素表行数 128 由来）
-   との間の 1920〜2048px は「素表は組めるがモデル宣言の外」。docs/limitations.md 行きの
-   by-design 制約として記録（実用上は S 上限と VRAM が先に効く）。記録先は
-   [limitations.md](../limitations.md) の項「anima: 1920px 超〜2048px の解像度は rope の
-   モデル宣言外の位置を使う（受理する・品質は未実測）」（2026-09-04 裁定 — 受理集合はこの理由では
-   狭めない。コード側の記録は `packages/models/src/anima/resolution.ts` の `MAX_LATENT_SIDE` の NOTE）。
+1. Detection limit 1 of ADR 0034 is solved by non-square pairs. In a square, cos_h equals cos_w, so
+   a position swap between the axes is invisible; with H' ≠ W' the two tables differ and a swap
+   fails. A detection limit that depends on the model configuration can sometimes be recovered by
+   test data with a different configuration.
+2. The model declares `rope.max_size` h/w = 120 tokens (1920 px), below the accepted upper bound of
+   2048 px (128 table rows, set by the t axis). Requests between 1920 and 2048 px use positions
+   outside the trained range; they are accepted and their quality is not measured. Recorded as a
+   by-design limitation in [limitations.md](../limitations.md) (ruling of 2026-09-04: the acceptance
+   set is not narrowed for this reason); the code note is on `MAX_LATENT_SIDE` in
+   `packages/models/src/anima/resolution.ts`.
 
 ## Consequences
 
-- **1 資産セット（-dyn DiT + 512 VAE + テキスト 2 本）で 512〜2048px・任意アスペクト比**の
-  生成が配線された。4 パターンの画像はユーザー目視ゲートへ（裁定後に Status 更新）。
-- #22 最終ベンチは仕様どおり 1024×1024 正方（本 ADR の経路はベンチ対象外・tiling 比較行
-  のみ）。
+- One asset set (S-shaped DiT, 512 VAE tile decoder, two text encoders) generates any aspect ratio
+  from 512 to 2048 px.
+
+## Addendum (2026-08-05) — verification and measurements
+
+- New checks: rope tables for four non-square geometries match torch bit for bit (fault injection
+  turns them red), a non-square end-to-end reference at 1344×768 with tolerances derived from the
+  measured error, and unit tests of the acceptance set
+  (`packages/models/tests/anima_resolution_test.ts`). The default-path PNG checks stayed
+  byte-identical.
+- All four patterns run at S = 4,032 with DiT time per step at the 1024 px square level. The final
+  benchmark of the time stays 1024×1024 square
+  ([research](../research/2026-08-05-final-perf-bench.md)).

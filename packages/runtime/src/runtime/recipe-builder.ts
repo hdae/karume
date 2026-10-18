@@ -307,7 +307,7 @@ export class RecipeBuilder {
     };
     const recipes: StepRecipe[] = [];
     // 名前は元の順に解決し、各ステップのコンパイル待ちだけを重ねる。
-    // DECIDED: docs/decisions/0042-prepared-execution-plan.md#非同期コンパイル2026-09-11
+    // DECIDED: docs/decisions/0042-prepared-execution-plan.md#addendum-2026-09-11--asynchronous-compilation
     const pending = steps.map((step) => this.#buildStep(step, defined, states));
     // 途中の失敗で先に抜けると、後続の params 書き込みが run の後始末を追い越す。
     // 全件を待ち、失敗も元のステップ順で返す。GPU コマンドの順序はレシピ列が保つ。

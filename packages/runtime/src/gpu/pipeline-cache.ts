@@ -142,7 +142,7 @@ export class PipelineCache {
           code: wgsl,
         });
         // スコープを張った同期区間で発行し、完了は pop の後に待つ。
-        // DECIDED: docs/decisions/0042-prepared-execution-plan.md#非同期コンパイル2026-09-11
+        // DECIDED: docs/decisions/0042-prepared-execution-plan.md#addendum-2026-09-11--asynchronous-compilation
         // 拒否も値にして直ちに受ける。module の検証が先に落ちても未処理の拒否を残さない。
         const pending = this.#device
           .createComputePipelineAsync({

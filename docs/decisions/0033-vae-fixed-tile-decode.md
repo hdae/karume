@@ -1,148 +1,131 @@
-# 0033: VAE decode の固定タイル化（--vae-tiling・ホストグルーのみ）
+# 0033: Fixed-tile VAE decode (host glue only)
 
-- Status: accepted（継ぎ目の目視ゲートも**ユーザー受理** 2026-08-04「特に継ぎ目は
-  感じない」— 1024px 運用形の非タイル/タイル画像対で裁定・品質込みで確定）
+- Status: accepted (2026-08-04; the seam visual check was accepted by the maintainer); partly
+  superseded by [0038](0038-manifest-v1.md) §4, which is still canonical (decisions 1 and 6: the
+  distribution has one VAE decoder file and always tiles), by this ADR's addendum of 2026-09-02
+  (P-3: decision 2 replaced) and, for decision 5, by its addendum of 2026-09-05 (ruling 9a) and
+  [0129](0129-test-layout-and-lanes.md) addendum 2026-10-17 (2) (upstream parity is opt-in).
+  Decisions 3 and 4 and the detection limits are in force.
 - Date: 2026-08-04
-- 改訂: **配布パイプラインでは ADR [0038](0038-manifest-v1.md) §4 が「デモの opt-in ノブ
-  `--vae-tiling`・既定 off」を置換**（VAE decoder は 1 ファイル + **常時 tiling**）。
-  決定 2〜3 のタイル幾何・ブレンドは引き続き正本。
-- 関連: recon = [2026-08-03-dynres-vae-tiling.md](../research/2026-08-03-dynres-vae-tiling.md)
-  （§1.2 グラフの構造不変性・§4 タイル化の設計・§4.2 走査の意図的逸脱の予告）/
-  ADR 0016（解像度焼き込みの静的グラフ — 本 ADR はその**外側**で解像度を跨ぐ）/
-  0004（run ごとアリーナ — タイルごとのピークが独立に測れる根拠）
+- Related: recon: [2026-08-03-dynres-vae-tiling.md](../research/2026-08-03-dynres-vae-tiling.md)
+  (§1.2 structural invariance of the graph, §4 tiling design, §4.2 the announced deliberate
+  deviation in the scan) / [0016](0016-anima-chain-export.md) (resolution-baked static graphs — this
+  ADR crosses resolutions **outside** them) / [0004](0004-execution-model.md) (per-run arena — the
+  reason a per-tile peak can be measured on its own)
 
 ## Context
 
-1024px チェーンの VRAM ピークは DiT でなく VAE decode（transient 1,536MiB・VRAM 6,725MiB）
-が決めており、2048px は非タイルでは attention の `[1,65536,65536]` バッファが原理的に
-載らない。recon で「VAE decoder のグラフは解像度に対して構造不変（512px 用と 1024px 用の
-model.safetensors はノード列・重みバイトまで完全一致・差は中間値の宣言 shape 536 バイトだけ）」
-と実測されており、**512px 用資産をそのまま latent 64×64 のタイル decoder として使える**。
+The VRAM peak of the 1024 px chain was set by the VAE decode (transient 1,536 MiB, VRAM 6,725 MiB),
+not the DiT, and at 2048 px a non-tiled decode cannot hold the attention buffer `[1,65536,65536]` at
+all. The recon measured that the VAE decoder graph is structurally invariant in resolution: the
+512 px and 1024 px `model.safetensors` match in node list and weight bytes, and differ only in the
+536 bytes of declared intermediate shapes. **The 512 px asset can be used as is as a tile decoder
+for 64 × 64 latents.**
 
 ## Decision
 
-1. **ホストグルーのみで実装する**（examples/anima/host/tiling.ts）。packages/runtime/src/（ランタイム）と
-   IR には 1 行も足さない。デモの opt-in ノブ `--vae-tiling`（既定 off — 既定経路は
-   PNG 門込みバイト不変）。
-2. ~~**タイル幾何は等間隔スナップ配置**: 開始位置は 0 から等間隔・最後のタイルの開始を
-   `extent − tile` にスナップ。「重なり ≥ latent 8（= sample 64px）」を満たす**最小タイル
-   本数**を選び、本数から stride を導く（`(extent − tile) % stride == 0` が構成上常に成立）。
-   1024px（latent 128）= 3×3 = 9 タイル / stride 32 / ブレンド 256px。512px は 1 タイルに縮退。
-   diffusers の `range(0, H, stride)` 走査（最後が短いタイル）は固定形グラフでは食えないため
-   **意図的に逸脱**（recon §4.2 の予告どおり）。~~ →
-   **下記の「追記（2026-09-02・P-3）」で差し替え**（整除制約の撤廃 — 逸脱の理由と末端スナップ
-   そのものは引き継ぐ）。
-3. **ブレンドは diffusers `blend_v`/`blend_h` と同型の線形ランプ**（sample 空間・縦→横の順・
-   in-place・f32 丸め位置まで一致）。**貼り付けは領域割り当て**（タイル i の担当 =
-   `[starts[i], starts[i+1])`・最後だけ末端まで）— 上流の「stride 幅へ切り詰め + 全体 crop」を
-   等間隔スナップへ持ち込むと**末端 256px が欠ける**（故障注入で実測赤・実装波が指示文の
-   誤りを検出して修正）。
-4. **縮退の門: 1 タイル（latent 64）はタイル経路 ≡ 非タイル経路の Uint32 完全一致 MUST**。
-   数値でなく構造で恒等性を固定する（tolerance では 1 ULP の混入を見逃す）。デモ通しでも
-   PNG sha256 一致を実測。
-5. **参照は torch 側に同一幾何を自前実装して突合**（tools/exporter/anima_tiling.py —
-   `vae.enable_tiling()` は使わず `use_tiling` 真は fail loudly。ブレンド式は上流の逐語移植で
-   本物とのビット一致を pytest が固定）。幾何メタ（開始位置列/stride/ブレンド幅）を
-   tiling.json に出し、TS 側が数値だけでなく**幾何そのもの**を突合する。
+1. **Host glue only.** Nothing is added to the runtime (`packages/runtime/src/`) or the IR; the
+   tiling lives in `packages/models/src/anima/tiling.ts`. It was introduced as an opt-in demo knob
+   (default off, so the default path stayed byte-identical). (Superseded by ADR 0038 §4 on
+   2026-08-05: the distribution and the models pipeline always tile; there is no knob.)
+2. ~~**Tile geometry: evenly spaced, snapped placement.** Starts are evenly spaced from 0 and the
+   last start snaps to `extent − tile`. The smallest tile count meeting "overlap ≥ 8 latents
+   (64 sample px)" is chosen and the stride derived from it (`(extent − tile) % stride == 0` holds by
+   construction). 1024 px (latent 128) = 3 × 3 = 9 tiles, stride 32, blend 256 px; 512 px
+   degenerates to one tile. diffusers' `range(0, H, stride)` scan (short last tile) cannot be fed
+   to a fixed-shape graph, so this **deviates on purpose** (as announced in recon §4.2).~~
+   (Replaced by the addendum of 2026-09-02, P-3: the divisibility constraint is removed; the reason
+   for the deviation and the snap of the last tile carry over.)
+3. **The blend is the linear ramp of diffusers' `blend_v` / `blend_h`** (sample space, vertical then
+   horizontal, in place, matching f32 rounding positions). **Pasting is by region assignment**
+   (tile i owns `[starts[i], starts[i+1])`, the last one up to the end). Carrying upstream's
+   "truncate to stride width, then crop the whole" into snapped placement **loses the last 256 px**
+   (fault injection turned red; the implementation leg caught the error in its instructions).
+4. **Degenerate check: with one tile (latent 64) the tiled path MUST be Uint32-identical to the
+   non-tiled path.** The identity is fixed by structure, not by a tolerance (a tolerance would miss
+   one ULP). Current check: `packages/models/tests/anima_tiling_test.ts:269-277`.
+5. **The reference is a torch implementation of the same geometry** (now
+   `tools/export-recipes/anima/tiling.py`; `vae.enable_tiling()` is not used and `use_tiling`
+   being true fails loudly; the blend formula is a verbatim port, and pytest fixes its bit match
+   with the real one). The geometry metadata (starts / blend widths) is written to `tiling.json`,
+   and the TS side was to check the geometry itself, not only the numbers. (Superseded by the
+   addendum below and ADR 0129 addendum 2026-10-17 (2): numeric comparison with upstream is
+   opt-in.)
 
-   > **追記（2026-09-05 裁定 9a）**: **TS 側の幾何突合は未実装**。TS は資産の入出力 shape から
-   > 幾何を再導出し（`packages/models/src/anima/tiling.ts` の `planTileAxis` /
-   > `blendExtentAt`）、Python の `MIRRORED_STARTS`
-   > （`tools/export-recipes/anima/tests/test_tiling.py`）と TS の受理集合 97 辺 literal 表
-   > （`packages/models/tests/anima_tiling_test.ts` の `AXIS_STARTS`）の**二重凍結**で一致を
-   > 守る（2026-09-03 レビュー 1-13）。`tiling.json` の突合経路は作らない。
-   > 併せて上の Python 側パスの綴りを訂正: `tools/exporter/anima_tiling.py` は ADR
-   > [0065](0065-exporter-core-recipe-split.md) の core / recipe 分離で
-   > `tools/export-recipes/anima/tiling.py` へ移動している。
-6. タイル時は解像度に依らず **512 用 vae_decoder 資産（f16 系列）を開く**（資産選択は
-   デモ側 — タイルの形は開いた資産の入出力 shape から引き、literal の 8 や 64 を
-   デモに置かない）。
+   > **Addendum (2026-09-05, ruling 9a).** The TS-side geometry check is not implemented and will
+   > not be. TS re-derives the geometry from the asset's input / output shapes (`planTileAxis` /
+   > `blendExtentAt` in `packages/models/src/anima/tiling.ts`), and agreement is held by a double
+   > freeze: Python's `MIRRORED_STARTS` (`tools/export-recipes/anima/tests/test_tiling.py`) and TS's
+   > literal table of the 97 accepted sides (`AXIS_STARTS` in
+   > `packages/models/tests/anima_tiling_test.ts`) (review item 1-13 of 2026-09-03). The Python
+   > module moved from `tools/exporter/anima_tiling.py` to `tools/export-recipes/anima/tiling.py`
+   > with the core / recipe split of ADR [0065](0065-exporter-core-recipe-split.md).
+6. When tiling, the **512 px `vae_decoder` asset (f16 series) is opened** whatever the resolution;
+   the demo chooses the asset, and the tile shape comes from the opened asset's input / output
+   shapes — no literal 8 or 64 in the demo. (Superseded by ADR 0038 §4 on 2026-08-05: there is one
+   VAE decoder file and no per-resolution or per-dtype series to choose. Still in force: the tile
+   shape is read from the asset's input / output shapes, `planVaeTiling`.)
 
-## 実測（2026-08-04・1024px・運用形 latent）
+## Measurements (2026-08-04, 1024 px, production latents)
 
-| 指標                 | 非タイル（1024 資産） | タイル（512 資産 ×9） |              比 |
-| -------------------- | --------------------: | --------------------: | --------------: |
-| decode 時間          |             1,451.2ms |             3,467.8ms | **2.39×（損）** |
-| 中間バッファのピーク |            1,536.0MiB |          **384.0MiB** |         **1/4** |
+Decode time 1,451.2 → 3,467.8 ms (2.39 ×, slower); intermediate-buffer peak 1,536.0 → 384.0 MiB
+(1/4) with 9 tiles (still 3 × 3 under the P-3 rule). **A memory lever, not a time lever** (the
+2.25 × pixel redundancy shows up almost entirely as time); above 2048 px it is the only way.
+Tiling itself is an approximation (attention's receptive field ends at the tile, as in upstream
+`tiled_decode`): torch tiled vs non-tiled maxAbs 5.07e-2, three orders above the implementation
+error against torch (maxAbs 1.642e-5). The default-path sha256 checks were unchanged. Full record:
+commit `99a3c649`, this file.
 
-- **メモリの手であって時間の手ではない**（画素冗長 2.25 倍がほぼそのまま時間に乗る）。
-  2048px 以上は非タイルでは原理的に不可能なので、そちらでは唯一の道。
-- タイル 1 枚のピークは 512px 単体 decode と**完全同値**（ratio 1.000 — E2E が 5% 帯で常設）。
-- torch 参照との実装誤差 maxAbs 1.642e-5 → tolerance atol 1.15e-4（7.0×・独立導出。
-  1024 単発 decode の 1.2e-4 とは別導出 — 値が近いのは偶然）。
-- **タイル化そのものは近似**（attention の受容野がタイル内に閉じる — 上流 tiled_decode と
-  同じ）: torch 同士で非タイルとの差 maxAbs 5.07e-2 / mean 9.82e-4。実装誤差より 3 桁大きい。
-- 既定経路の PNG 門 2 系列: 実行前後で完全一致（20990ae4… / ce6c950f… — main.ts の VAE 段リファクタ込みで既定経路バイト不変を実測 2026-08-04）
-- verify 683/0/4・pytest 1,910。故障注入 TS 7 件 + Python 2 件（全て注入→赤→復元）。
+## Detection limits
 
-## 検出限界・知見（本タスクの新記録）
-
-1. **貼り付けの担当領域を「過大」にする誤り（常にタイル全幅）は数値網で原理的に検出不能** —
-   行優先の走査で後続タイルが余剰を上書きし、最終画像が 1 ビットも変わらない（故障注入
-   I5 が緑）。無害さが走査順に依存するため、**貼り付けを並列化・逆順化した瞬間に沈黙誤値へ
-   変わる** — assembleTiles の担当領域コメントに MUST として固定。過小側（末端欠け）は
-   検出できる（I4 赤）。
-2. **縮退門は「恒等性の検出器」であって「幾何の検出器」ではない** — 幾何・ブレンドの誤り
-   （I1〜I4）は 1 タイルでは自明に恒等なので踏まない。切り出し・貼り付けの恒等性を壊す
-   誤り（I6/I7）だけを名指しで捕る（非空虚性は注入で実証）。幾何の検出器は解析解テスト
-   （タイル内位置依存の合成 decoder）と幾何メタ突合。
-3. ブレンドの検証データは「タイルごとに重なりの値が違う」形が MUST — 同じ値が重なる作りだと
-   向き反転が緑のまま通る（テスト doc に固定）。
+1. **Making the pasted region too large (always the full tile width) cannot be detected
+   numerically.** In row-major order the following tile overwrites the excess and the final image
+   does not change by one bit (injection I5 stayed green). The harmlessness depends on the scan
+   order, so **pasting in parallel or in reverse turns it into silent wrong values**; the region
+   comment of `assembleTiles` fixes it as a MUST. Too small (missing edge) is detected (I4 red).
+2. **The degenerate check detects identity, not geometry.** Geometry and blend errors (I1–I4) are
+   trivially identical with one tile, so it does not reach them; it catches only errors that break
+   the identity of cutting and pasting (I6 / I7; shown non-vacuous by injection). The geometry
+   detectors are the analytic tests (a synthetic decoder that depends on the position inside the
+   tile) and the double freeze of decision 5's addendum.
+3. Blend test data MUST give each tile different values in the overlap — with identical overlapping
+   values a reversed ramp stays green (fixed in the test docs).
 
 ## Consequences
 
-- 1024px の decode VRAM ピークが 512px 相当へ（transient 1,536→384MiB）。2048px への道が
-  開く — ただし **DiT 側は解像度焼き込みのまま**なので、2048px 生成には DiT の S 化
-  （トークン長 1 シンボル・#21 後半）と 2048 用資産の成立が別途要る。
-- 時間は 1024px で +2.0s 級の損。既定 off の opt-in なので通常運用には影響しない。
-  最終 perf ベンチ（#22）ではタイル有無を別行で報告する。
-- 画像は非タイルと別物（近似）だが、**目視ゲートはユーザー受理**（2026-08-04
-  「特に継ぎ目は感じない」— 1024px 運用形・同一 seed の画像対で裁定）。torch 同士の
-  差 maxAbs 5.07e-2 が知覚に出ないことと整合。
+- The 1024 px decode VRAM peak drops to the 512 px level (transient 1,536 → 384 MiB), opening the
+  way to 2048 px; the DiT side was made resolution-independent by
+  [ADR 0034](0034-dit-dynamic-tokens.md).
+- Time costs about +2.0 s at 1024 px; the final benchmark reported tiled and non-tiled separately
+  ([2026-08-05-final-perf-bench.md](../research/2026-08-05-final-perf-bench.md)).
+- Images differ from non-tiled (approximation), but the **visual check was accepted by the
+  maintainer** (2026-08-04, "I don't notice any seams"; 1024 px production form, same seed), in line
+  with the torch-to-torch difference of maxAbs 5.07e-2 not being visible.
 
-## 追記（2026-09-02・P-3）: 決定 2 の差し替え — 整除制約の撤廃
+## Addendum (2026-09-02) — P-3: decision 2 replaced, no divisibility constraint
 
-**何が問題だったか**: 決定 2 は開始位置を「厳密に等間隔」に取ることまで課していた。等間隔は
-`(extent − tile) % 間隔 == 0` を要求するので、本数は `span = extent − tile` の**約数**からしか
-選べない。約数の乏しい辺では本数が跳ねる — 1456px（latent 182・span 118 = 2·59）は 60 本、
-1680px（span 146 = 2·73）は 74 本。`decodeTiled` は decode 出力を全枚数ぶん抱えるので両辺が
-跳ねると枚数の積で効き（1680² で 5,476 枚 ≈ 17GiB）実行不能だった。対症として入口の受理集合に
-「1 辺 10 本まで」を足し、8 通りの解像度（1456 / 1488 / 1584 / 1648 / 1680 / 1776 / 1840 /
-1936px）を名指しで拒否していた。
+Old decision 2 required strictly even spacing, so the count could only come from divisors of
+`span = extent − tile`; sides with few divisors jumped to tens of tiles (1680 px: 74) and eight
+resolutions had to be rejected by a "10 tiles per side" rule.
 
-**新しい決定 2（丸め等間隔スナップ配置）**:
+**New decision 2 (rounded evenly spaced, snapped placement):**
 
-- 本数 = `ceil(span / (tile − minOverlap)) + 1`（span ≤ 0 は 1 枚に縮退）。制約は**重なりの
-  下限だけ**で、間隔が整数に割り切れることは要求しない。
-- 開始位置 = `round(i · span / (本数 − 1))`（i = 0..本数−1）。末尾はちょうど `extent − tile`。
-- ブレンド幅は**対ごと**（`blendExtentAt(axis, scale, index)`）。`TileAxis` から `stride` 欄を
-  廃止した — 対ごとに 1 latent まで動く量を 1 つの数に畳むと配置と黙って食い違う。
-- 幾何の均一性は「全対で同じ間隔」ではなく「**どの対も重なりが下限以上・間隔の差は高々
-  1 latent**」で保つ。丸めの誤差が ±0.5 に収まることから、間隔は `floor` と `ceil` の 2 値に
-  しかならず、`ceil(span / (本数 − 1)) ≤ tile − minOverlap` なので下限は構成上満たされる
-  （導出が目で追えないので実装は下限を assert して落とす）。
+- Count = `ceil(span / (tile − minOverlap)) + 1` (span ≤ 0 degenerates to one tile). The only
+  constraint is **the lower bound on overlap**; the spacing need not divide evenly.
+- Start i = `round(i · span / (count − 1))` for i = 0 … count − 1; the last is exactly
+  `extent − tile`.
+- The blend width is **per pair** (`blendExtentAt(axis, scale, index)`); `TileAxis` has no `stride`
+  field — folding a per-pair quantity that varies by up to one latent into one number would silently
+  disagree with the placement.
+- Uniformity means "**every pair overlaps at least the lower bound and spacings differ by at most
+  one latent**". Rounding error stays within ±0.5, so the spacing takes only the `floor` and `ceil`
+  values, and `ceil(span / (count − 1)) ≤ tile − minOverlap` satisfies the bound by construction;
+  the implementation asserts the bound anyway (`planTileAxis`).
 
-**帰結**（スパイクで全 97 辺 × 両軸を機械検査）:
-
-| 観点                                        |                          旧規則 |          新規則 |
-| ------------------------------------------- | ------------------------------: | --------------: |
-| 1 辺あたりの最大本数（512–2048px の 97 辺） | 90 本（拒否側）/ 8 本（受理側） |            5 本 |
-| 入口で拒否する辺                            |                          8 通り |   0（全て受理） |
-| 1824×1248 の枚数                            |                     5×3 = 15 枚 | 4×3 = **12 枚** |
-| 受理 89 辺のうち本数が変わる辺              |                               — |         16 通り |
-| 2D 平均の画素冗長度（受理 89² 対）          |                          1.9740 |          1.7587 |
-
-- **本数が変わらない辺は配置も同一** = 出荷バイト不変。1024² / 512² / 1344×768 系 / 2048² は
-  1 ビットも動かない（受理 89² のうち 67.3% の対がバイト不変）。
-- 拒否していた 8 通りは全て受理へ戻る（対症の門ごと撤廃 — `MAX_TILES_PER_AXIS` と近傍案内を
-  削除して受理集合は 4 条件へ）。
-- 決定 3（ブレンドの式・順序・領域割り当て）と決定 4（縮退のビット同一）はそのまま成立する。
-  縮退は「対が 0 個」になるだけでブレンドは 1 度も走らない。
-- 決定 5 の幾何メタ（`tiling.json`）も欄が動く: `stride` を廃止し、`blend_sample` は
-  単一の数から**対ごとの配列**（`本数 − 1` 個）になった。参照フィクスチャを作り直すときに
-  読み替えること — `outputs/series/` 下のローカル資産だけで、配布物（manifest /
-  pipelineConfig / ミラー）には 1 バイトも載っていない。
-
-**未測定**: 1824×1248 の実 GPU での VAE decode 時間（枚数比 12/15 = −20% の外挿に対する実測）
-と、本数が変わる辺の視認 A/B（seed 4 本以上 × プロンプト 2–3 種）。kill 基準込みで
-[perf-ledger](../perf-ledger.md) P-3 に起票してある。
+Sides whose count does not change keep their placement (1024², 512², 2048² and 67.3% of accepted
+pairs are byte-identical); the eight rejected resolutions are accepted again
+(`MAX_TILES_PER_AXIS` removed); decisions 3 and 4 still hold; `tiling.json` drops `stride` and
+`blend_sample` becomes per pair. Measured 2026-09-03: VAE decode −22% at 1824 × 1248 (12 vs 15
+tiles), visual check OK — [perf-ledger](../perf-ledger.md) P-3,
+[2026-09-03-perf-spikes-p1-p3.md](../research/2026-09-03-perf-spikes-p1-p3.md); full addendum in
+commit `95917831`.

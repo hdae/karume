@@ -2148,7 +2148,7 @@ Denoの定常速度はほぼ横ばい。Chromeの定常値は揺れがあり、�
 採用する変更は共通runtimeの初回準備だけ。公開API・WGSL・キー・GPUのdispatch順序は維持する。
 失敗したコンパイルを待ち切る、原因を保持する、逆順完了でもレシピ順を維持するテストを追加した。
 シェーダー診断の補完は、既存L-7の調査で必要とされていた条件を維持する。
-詳細の決定は [ADR 0042](../decisions/0042-prepared-execution-plan.md#非同期コンパイル2026-09-11)。
+詳細の決定は [ADR 0042](../decisions/0042-prepared-execution-plan.md#addendum-2026-09-11--asynchronous-compilation)。
 
 比較5組・合計45生成のtoken列と、キーごとのWGSL全文が一致した（`async-summary.json`）。
 製品へ反映した後のキャッシュ・依存順・error scope・計画キャッシュの重点検証は
@@ -2553,7 +2553,7 @@ INT4・INT8への融合やM2の速度は、この実験では評価していな�
 1個のstagingへコピーし、mapを唯一の完了フェンスにする。既存の`finish(): Promise<void>`と
 `ResidentTensor.read()`は維持する。指定は発行時に固定し、使用予約はバッチの最終決着まで保つ。
 空の集合は既存のqueueフェンス、別device・破棄済み・合計上限超過・重複指定は明示拒否する。
-決定は[ADR 0054](../decisions/0054-resident-loop-and-fence.md#バッチ終端の一括読み戻し2026-09-12)。
+決定は[ADR 0054](../decisions/0054-resident-loop-and-fence.md#addendum-2026-09-12--batch-end-readback-of-resident-tensors)。
 
 `batch-read-bench.ts`は、2個の既存residentを`finish→並行read`で読む経路と、一括読み戻しを比較する。
 4回の準備後、8試料×各10回を順序交替で測定した。計測器で全試料の

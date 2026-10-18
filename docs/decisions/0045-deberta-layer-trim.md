@@ -1,200 +1,153 @@
-# 0045: DeBERTa text_encoder は 22 層 × 出力 1 本 × 添字表は入力で配る
+# 0045: DeBERTa text_encoder: 22 layers, one output, relative-position index tables as inputs
 
-- Status: accepted（波 1 = 層カット / 波 2 = 出力絞り / 波 3 = 相対位置の添字表をグラフ入力へ。
-  **3 波とも WAV sha256 門が不変のまま緑** 2026-08-11 — 下の Consequences）
+- Status: accepted (2026-08-11; wave 1 = layer cut, wave 2 = single output, wave 3 = relative-position
+  index tables as graph inputs; all three waves kept the WAV sha256 check green and unchanged)
 - Date: 2026-08-11
-- 関連: [0026](0026-w8a8-deberta-deployment.md)（i8 資産と聴感ゲート）/
-  [0039](0039-sbv2-distribution.md)（SBV2 の配布形 — 本 ADR はそのサイズ表を更新する）/
-  [0013](0013-sbv2-chain-export.md)（相対位置表をグラフ入力へ昇格した前例）/
-  [research/2026-08-11-deberta-size-recon.md](../research/2026-08-11-deberta-size-recon.md)（実測の正本）
+- Related: [0026](0026-w8a8-deberta-deployment.md) (i8 assets and listening check) /
+  [0039](0039-sbv2-distribution.md) (SBV2 distribution — this ADR updates its size table) /
+  [0013](0013-sbv2-chain-export.md) (precedent for promoting a relative-position table to a graph
+  input) / [research/2026-08-11-deberta-size-recon.md](../research/2026-08-11-deberta-size-recon.md)
+  (canonical measurements)
 
 ## Context
 
-SBV2 が DeBERTa から読むのは `hidden_states[-3]` **1 本だけ**である（参照実装
-`nlp/japanese/bert_feature.py` の `res["hidden_states"][-3:-2]`）。`hidden_states` は
-`[0]` = embedding 出力・`[i+1]` = layer i の出力という並びで長さ 25 なので、`[-3]` は
-**index 22 = layer 21 の出力**を指す。つまり `encoder.layer.22` / `.23` の重みは配布形で
-一度も参照されない — i8 資産 334,545,336 B のうち 25,346,048 B（7.6%）が死重みだった。
+SBV2 reads **only one** tensor from DeBERTa, `hidden_states[-3]` (upstream
+`nlp/japanese/bert_feature.py`: `res["hidden_states"][-3:-2]`). `hidden_states` has length 25 with
+`[0]` = embedding output and `[i+1]` = output of layer i, so `[-3]` is **index 22 = the output of
+layer 21**. The weights of `encoder.layer.22` and `.23` are never used by the distribution: 25,346,048
+B (7.6%) of the 334,545,336 B i8 asset were dead weights.
 
-発端は「SBV2 の ONNX 推論で使われる `tsukumijima/deberta-v2-large-japanese-char-wwm-onnx` は
-hidden[-3] だけを出す変換だが、サイズを縮める材料になるか」という問い（ユーザー・2026-08-11）。
-実測すると **ONNX 版のグラフは確かに 22 層だがファイルは 1.03% しか小さくない**（onnxsim の
-定数畳み込みが位置射影を各層 `[16,512,64]` fp32 ×2 本 = +92.3MB として焼き込み、2 層削除の
-−100.8MB をほぼ相殺している）。**参考にすべきは「22 層で足りる」という事実だけ**で、成果物と
-しての ONNX 版に寄せる動機は無い（karume の i8 は ONNX fp16 版の約半分）。
+The trigger was the maintainer's question (2026-08-11) whether the ONNX conversion
+`tsukumijima/deberta-v2-large-japanese-char-wwm-onnx`, which exports only hidden[-3], could help
+shrink the size. Measured: **the ONNX graph does have 22 layers, but the file is only 1.03%
+smaller** (onnxsim's constant folding bakes the position projections into each layer, `[16,512,64]`
+fp32 × 2 = +92.3 MB, almost cancelling the −100.8 MB of the two removed layers). **Only the fact
+"22 layers are enough" is worth taking**; there is no reason to align with the ONNX artefact (the
+Karume i8 is about half of the ONNX fp16 version).
 
 ## Decision
 
-### 1. 配布形の text_encoder は 22 層 variant（`sbv2-22layer`）
+### 1. The distributed text_encoder is the 22-layer variant (`sbv2-22layer`)
 
-`export_deberta.py` の `VARIANTS` に 22 を足し、`dist.py` の `SBV2_TEXT_ENCODER_VARIANT` を
-そこへ向ける。`full-24layer` は**残す** — 層別の誤差の伸びを golden から読む用途（ADR 0026
-決定 2 の tolerance 導出の根拠）は 24 層でしか成立しない。
+`VARIANTS` in `tools/export-recipes/deberta/export.py` gains 22, and `SBV2_TEXT_ENCODER_VARIANT` in
+`tools/export-recipes/sbv2/distribution.py:110` points at it. The `full-24layer` variant MAY be
+kept: reading per-layer error growth from the golden (the basis of the tolerance derivation in ADR
+0026 decision 2) works only with 24 layers. (Re-graded 2026-10-18 to MAY: that use is now limited
+to the opt-in upstream comparison and a tolerance re-derivation — `packages/e2e/tests/e2e_deberta_test.ts`
+compares with the torch goldens only with `KARUME_UPSTREAM_PARITY=1`, ADR 0129 decision 4; the
+default verification does not need it.)
 
-切り詰めは `load_model` が既に持っていた実装（`model.encoder.layer[:num_layers]`）で、
-新規のコードは無い。
+The trim reuses the implementation `load_model` already had (`model.encoder.layer[:num_layers]`);
+no new code.
 
-### 2. 取り出し位置は「参照側」と「配布グラフ側」を別の定数に分ける
+### 2. The extraction position is kept in separate constants for the reference side and the distributed graph
 
-`sbv2_demo.py` の `BERT_HIDDEN_FROM_END = 3` は**参照実装の定義そのもの**（torch の全 24 層
-モデルに対する位置）なので動かさない。配布グラフから同じテンソルを引く位置は
-`BERT_GRAPH_HIDDEN_FROM_END = 1`（22 層グラフの最終出力）として別に持ち、`symbols.json` へは
-後者を書く。
+`BERT_HIDDEN_FROM_END = 3` in `tools/export-recipes/sbv2/demo.py` is **the definition of the
+upstream reference** (a position in the full 24-layer torch model) and does not move. The position
+of the same tensor in the distributed graph is a separate constant, `BERT_GRAPH_HIDDEN_FROM_END = 1`
+(the last output of the 22-layer graph), and that one is written to `symbols.json`.
 
-**1 つの定数で兼ねてはならない。** 参照計算（`sbv2_demo.py` / `measure_quant_sbv2.py`）が
-`symbols.json` の値を読んでいた実装のままだと、層を削った瞬間に**参照だけが別の層を指し**、
-パリティ台本が「合っている / ずれている」を反転して報告する。
+**One constant MUST NOT serve both.** If the reference computation (`sbv2/demo.py`,
+`sbv2/measure_quant.py`) read the value from `symbols.json`, then the moment layers are cut **only
+the reference would point at a different layer**, and the parity scripts would report match and
+mismatch inverted.
 
-### 3. 配布グラフは hidden_states を 1 本だけ出す（波 2）
+### 3. The distributed graph outputs a single hidden state (wave 2)
 
-ランタイムは `graph.outputs` を**全部** readback する（`executor.ts` の `#readOutputs`）。
-全層出しのまま配ると、1 本しか使わない SBV2 でも毎 run で 22 本ぶんの staging + mapAsync を
-払う。層を切り詰めた variant では最終層 = SBV2 が使う層なので、絞っても情報は落ちない。
+The runtime reads back **every** entry of `graph.outputs` (`#readOutputs` in
+`packages/runtime/src/runtime/executor.ts`). Shipping all layers as outputs would make SBV2, which
+uses one, pay staging + mapAsync for 22 outputs on every run. In the trimmed variant the last layer
+is the one SBV2 uses, so narrowing loses nothing.
 
-出力形は層数と一緒に `export_deberta.py` の `VARIANTS`（`Variant` dataclass）が持つ。**配布形
-（1 本出し）と検証用（全層出し）は同じ shape のテンソルを出すので、取り違えても実行が通る** —
-だから綴りと出力形を 1 箇所に並べて書く。24 層 variant は全層出しのまま残す（層別の誤差の
-伸びを golden から読む用途は全層出しでしか成立しない — ADR 0026 決定 2）。
+The output shape is kept together with the layer count in `VARIANTS` (`Variant` dataclass) of
+`deberta/export.py`. **The distribution form (one output) and the verification form (all layers)
+emit tensors of the same shape, so a mix-up still runs**; that is why the name and the output shape
+are written in one place. The 24-layer variant MAY keep all-layer outputs, for the same opt-in use
+as decision 1 (re-graded 2026-10-18 to MAY, same reason).
 
-### 4. 組み立て門: 22 層 × 出力 1 本 × `bertHiddenFromEnd` 1（MUST）
+### 4. Assembly check: 22 layers × one output × `bertHiddenFromEnd` 1 (MUST)
 
-層数と出力形は `export_deberta.py` の variant が、取り出し位置は `sbv2_demo.py` の定数が持つ
-**別々の台本**なので、片方だけ動かした配布形が普通に組み上がる。ずれても shape は合ったまま
-ロードも実行も通り、**別の層の BERT 特徴で音が出るだけで沈黙する**（スタイル表・話者表の
-行数門と同じ機序）。
+The layer count and output shape live in the variant of `deberta/export.py`, the extraction position
+in a constant of `sbv2/demo.py` — **separate scripts**, so a distribution where only one of them
+moved assembles normally. The shapes still match, it loads and runs, and **it silently produces
+audio from the BERT features of another layer** (the same mechanism as the row-count checks of the
+style and speaker tables).
 
-`dist.py` の `assert_bert_hidden` が 3 つを別々に検査する — それぞれ別の取り違えを捕まえる:
+`assert_bert_hidden` (`tools/export-recipes/sbv2/distribution.py:662`) checks three things
+separately; each catches a different mix-up:
 
-| 検査                               | 捕まえる取り違え                                                |
-| ---------------------------------- | --------------------------------------------------------------- |
-| initializer 名から数えた層数 == 22 | 切り詰め忘れ（24 層の最終出力は layer 23 = 別の層）             |
-| `graph.outputs` == 1 本            | 検証用の全層出し資産が配布経路に混ざった                        |
-| `bertHiddenFromEnd` == 1           | `symbols.json` だけ古い（`sbv2_demo.py assets` の採り直し忘れ） |
+| Check                                        | Mix-up it catches                                                     |
+| -------------------------------------------- | --------------------------------------------------------------------- |
+| layer count from initializer names == 22     | trim forgotten (the last output of 24 layers is layer 23, another one) |
+| `graph.outputs` == 1                         | an all-layer verification asset slipped into the distribution path    |
+| `bertHiddenFromEnd` == 1                     | only `symbols.json` is stale (`python -m sbv2.demo assets` not re-run) |
 
-層数を initializer 名（`p_model_encoder_layer_<i>_…`）から数えるのは、**出力を 1 本に絞ると
-「どの層の出力か」がグラフの `outputs` から読めなくなる**ため。波 1 時点の門は
-「出力本数 − 位置 == 22」だったが、波 2 でこの式が成立しなくなったので作り直した。
+The layer count is taken from initializer names (`p_model_encoder_layer_<i>_…`) because **with a
+single output the graph's `outputs` no longer tell which layer it is**. The wave-1 check was
+"outputs − position == 22"; wave 2 broke that formula, so the check was rebuilt.
 
-波 3 で**グラフ入力の並び**（`input_ids` / `attention_mask` / `c2p_pos` / `p2c_pos`）の検査も
-足した。表が入力から外れると 2MiB の定数が焼き戻るが、**値は正しいままなので E2E では
-捕まらない**（容量だけが静かに戻る類）。
+Wave 3 added a check of the **graph input order** (`input_ids` / `attention_mask` / `c2p_pos` /
+`p2c_pos`). If the tables drop out of the inputs, the 2 MiB constants are baked back in, but **the
+values stay correct, so e2e cannot catch it** (only the size silently regresses).
 
-### 5. 相対位置の添字表はグラフ入力（波 3）
+### 5. The relative-position index tables are graph inputs (wave 3)
 
-`disentangled_attention_bias` が使う `c2p_pos` / `p2c_pos` は **T だけで決まる定数**なので、
-torch.export は Tmax=512 で `[1,512,512]` の i32 を 2 本焼き込んでいた（2,097,152 B）。実測すると
-中身は Toeplitz で、しかも互いに**転置**（`p2c[i,j] = c2p[j,i]` — バケット化が奇関数だから）。
-相異値は 511 個しかなく、**実体は 1,023 要素の i32 ベクトルに等しい**。
+`c2p_pos` / `p2c_pos` used by `disentangled_attention_bias` are **constants determined by T alone**,
+so torch.export baked two `[1,512,512]` i32 tables at Tmax = 512 (2,097,152 B). They are Toeplitz
+and **transposes of each other** (`p2c[i,j] = c2p[j,i]`, because the bucketing is odd), with only
+511 distinct values: **in substance a 1,023-element i32 vector**.
 
-ADR 0013 が flow / voice の `(T,T)` 表で採ったのと同じ理由でこれを外部供給へ移す。実装は
-3 点:
+For the same reason as ADR 0013 for the `(T,T)` tables of flow / voice, they move to external
+supply. Three parts:
 
-- `karume/patch_deberta.py` が `DisentangledSelfAttention.disentangled_attention_bias` を差し替え、
-  表をタプルで受ける（**fallback を持たない** — 元の実装へ黙って落ちると「2MiB を焼いたまま
-  緑」になり、パッチが外れたことが誰にも見えなくなる）
-- `HiddenStatesWrapper` は `DebertaV2Model.forward` を使わず embeddings + encoder を直接呼ぶ
-  （前者は `relative_pos` を encoder へ渡す口を持たない）
-- ホスト側は `packages/models/src/sbv2/text/rel-pos-tables.ts` が同じ式で作り、バケット規則
-  （`positionBuckets` / `maxPosition`）は `symbols.json` の `bertRelPos` から引く（DeBERTa の
-  config 由来の値をホストへ写経しない — ADR 0039 決定 3 と同じ規律）
+- `tools/export-recipes/deberta/patch.py` replaces
+  `DisentangledSelfAttention.disentangled_attention_bias` and takes the tables as a tuple (**no
+  fallback** — silently falling back to the original would stay green with 2 MiB baked, and nobody
+  would see that the patch came off; a mismatch raises `TypeError`).
+- `HiddenStatesWrapper` calls embeddings + encoder directly instead of `DebertaV2Model.forward`
+  (which has no way to pass `relative_pos` to the encoder).
+- The host builds the tables with the same formula in
+  `packages/models/src/sbv2/text/rel-pos-tables.ts`, taking the bucket rule (`positionBuckets` /
+  `maxPosition`) from `bertRelPos` in `symbols.json` (DeBERTa config values are not copied into
+  the host — the same discipline as ADR 0039 decision 3).
 
-**ホストは float64・torch は float32** で計算するが、T = 11 / 35 / 128 / 300 / 512 の全点で
-一致することを実測した。これは実測命題なので、`bucketSize` / `maxPosition` を変える時は測り直す。
-バイト一致は `packages/models/tests/sbv2_rel_pos_parity_test.ts` が golden io との突合で固定する
-（式が割れても shape は合うので、**別の位置埋め込みを gather する**沈黙誤値になる）。
+**The host computes in float64, torch in float32**; equality was measured at T = 11 / 35 / 128 /
+300 / 512. This is an empirical claim: re-measure when the bucket parameters change. Byte identity
+is pinned by `packages/models/tests/sbv2_rel_pos_parity_test.ts` against the golden io (a wrong
+formula keeps the shape, so the failure would be a silent wrong value — **gathering another
+position embedding**).
 
 ## Consequences
 
-### サイズ（実測）
+- **Size.** The text_encoder went 334,545,336 → 307,068,768 B (−8.21%); graph 1,230 → 1,128 nodes,
+  2 → 4 inputs, 25 → 1 output. Details: research
+  [2026-08-11-deberta-size-recon.md](../research/2026-08-11-deberta-size-recon.md).
+- **Speed.** Wave 2 cut readback to 1/23 and gained 4 to 8% on the BERT stage (RTX 3080 Ti); the
+  wall-time effect for SBV2 is about 0.3%. Wave 3 was neutral (host table cost 1.2 ms at T = 512).
+  Numbers measured while other CPU-heavy work runs are not used (a first A/B taken alongside pytest
+  showed a false +73% regression).
+- **Numerics.** The WAV sha256 check stayed green through all three waves without changing the
+  reference value; the 24- and 22-layer `output.22` matched byte for byte in the golden io, and the
+  torch stage showed `max abs diff 0.0` (research §4). The WAV check now runs on the public
+  `karume-sbv2-jvnv` mirror with per-environment rows (`packages/e2e/tests/e2e_sbv2_wav_test.ts:15-19`;
+  moved from the FN4 mirror on 2026-08-30).
+- **Scope of the bit identity.** It is a claim about the f32-weight, f32-compute torch stage and the
+  WAV in the measurement environment of that time. It MUST NOT be extended to the f16 path or other
+  backends (the same nature as ADR 0022's "bit identity is an empirical claim").
+- **Debt of wave 3.** One internal transformers function was copied and modified for 2 MiB (0.68% of
+  the distribution). The `==` pin of transformers (`tools/export-recipes/pyproject.toml`) keeps it
+  working; when the pin moves, the diff of `disentangled_attention_bias` must be followed. Related
+  measures that were rejected or put on hold: research §3.
+- The licence character does not change (cc-by-sa-4.0 ShareAlike already applied with the i8
+  quantization). The published SBV2 distribution is `cc-by-sa-4.0` (ADR
+  [0092](0092-distribution-repos-and-sources.md) decision 7).
+- On 2026-08-11 the Hugging Face `hdae/karume-sbv2-jvnv` still carried the 24-layer encoder; every
+  distribution built since passes `assert_bert_hidden` (decision 4).
 
-|                              | 起点（24 層・25 出力） | 波 1+2（22 層・1 出力） | 波 3（表を入力へ） |                  累計 |
-| ---------------------------- | ---------------------: | ----------------------: | -----------------: | --------------------: |
-| `text_encoder`               |            334,545,336 |             309,166,896 |    **307,068,768** | −27,476,568（−8.21%） |
-| `w8` の取得量（FN4）         |            400,526,905 |             375,148,465 |    **373,050,337** | −27,476,568（−6.86%） |
-| 配布形 `karume-sbv2-fn` 全体 |          2,266,418,460 |           2,241,040,020 |      2,238,941,960 |                −1.21% |
+## Addendum (2026-08-16) — DeBERTa numeric golden check
 
-波 1+2 の削減が層 2 枚ぶん（25,346,048 B）より 32,392 B 多いのは、safetensors ヘッダも縮んだため
-（391,616 → 359,224 B — テンソル 44 本ぶんのエントリと、IR ノード記述・出力名 22 本ぶんが減る）。
-波 3 は表 2 本（2,097,152 B）+ ヘッダ 976 B。グラフは **1,128 ノード / 4 入力 / 1 出力**
-（起点は 1,230 ノード / 2 入力 / 25 出力）。golden io も 1,038,360 → 45,392 B（case0）に縮んだ。
+`packages/e2e/tests/e2e_deberta_test.ts` was ported, including an `i8/sbv2-22layer` case; it
+corroborates on the runtime side that the layer cut keeps bit identity.
 
-取得量で見ると text_encoder は依然として `w8` の **82.3%** を占める。
-
-### 速度（波 2 — 実測・RTX 3080 Ti・warmup 2 + 8 run の中央値）
-
-出力絞りは重みを動かさないので**サイズはほぼ変わらない**（−376 B）。狙いは readback である。
-A/B は同一プロセスで順序を入れ替えても同傾向:
-
-| T   | 23 出力 |  1 出力 |  改善 |           readback |
-| --- | ------: | ------: | ----: | -----------------: |
-| 15  |  69.3ms |  66.3ms | −4.5% |     1,380 → 60 KiB |
-| 35  |  71.6ms |  68.7ms | −4.1% |    3,220 → 140 KiB |
-| 128 |  81.8ms |  77.9ms | −4.8% |   11,776 → 512 KiB |
-| 512 | 150.1ms | 138.6ms | −7.7% | 47,104 → 2,048 KiB |
-
-**壁時計への寄与は小さい** — SBV2 の実用は T=15〜35 なので bert 段で 3〜4ms、パイプライン
-全体（壁 1.08s）では 0.3% 程度。採ったのは退行が無く、readback が 23 分の 1 になり、
-「1 本しか使わないのに 23 本読み戻す」という設計上の無駄が消えるため。ADR 0026 が
-「出力を絞る用途なら GPU 比がそのまま出る」と書いた期待には**届いていない**（あれは T=512 で
-読み戻し 52MB が支配する前提の話で、SBV2 の実用 T では成立しない）。
-
-### 速度（波 3 — 中立）
-
-表を外部供給にすると、ホストが毎 run で表を作って GPU へ送る（T=512 なら 2MB）。**退行を
-疑って測ったが、系統差は出なかった**（順序を入れ替えた 2 回の A/B で、焼き込み 153.4 / 171.2ms
-に対し外部供給 159.5 / 164.3ms @ T=512 — 順序によるばらつきの方が大きい）。表生成のホスト費用は
-T=512 で 1.2ms、実用の T=15〜35 では 0.02ms 未満。
-
-> 測定の注意: 最初の A/B は pytest（CPU 全開）と並走させてしまい、外部供給が +73% という
-> 大きな退行に見えた（median と min が 2 倍近く乖離していた）。**並走下の数字は採らない。**
-
-### 数値 — WAV は 1 bit も動かない
-
-**移植の門 `e2e_sbv2_wav_test.ts` は参照 sha256 `a82f72e2…` のまま緑**（FN4 / w8 / seed 0 /
-WAV 234,540 B）。参照値の差し替えも tolerance 化も行っていない — この門が**不変のまま通ること
-自体が無害性の証明**である。**波 1（重みが変わる）・波 2（出力形が変わる）・波 3（入力が
-増え、attention の実装が差し替わる）で別々に確認した** — 波 2 で動いていたら融合パスか出力 pin、
-波 3 で動いていたら差し替えた `disentangled_attention_bias` の同値性を疑う手筈だったが、
-どちらも数値に触らなかった。
-
-golden io でも 24 層の `output.22` と 22 層の `output.22` が 4 ケース全部でバイト完全一致
-（case0 45,056 B / case1 106,496 B / case2 143,360 B / padded 65,536 B）。
-
-torch 段では f32 / i8 fake-quant / i8+a8 の 3 構成で `max abs diff 0.0` を実測済み
-（research §4）。ビット一致が壊れない根拠は 5 点あり、最大の弱点候補だった `encoder.LayerNorm`
-は **hidden_states に掛からない**（`get_rel_embedding()` の中で相対位置テーブルにだけ適用される）
-ことで潰れている。
-
-### 適用範囲の限定
-
-ビット一致は **f32 重み・f32 計算の torch 段**と、**今回の実測環境での WAV** についての命題で
-ある。f16 経路や別バックエンドへ横滑りさせない（ADR 0022 の「ビット同一は実測命題」と同じ
-性格）。
-
-### 波 3 の自己評価（負債の側）
-
-2MiB（配布形の 0.68%）のために **transformers の内部関数 1 本をコピー改変**した。ピン
-（5.14.1）があるので動くが、版を上げるときは `disentangled_attention_bias` の差分を追う必要が
-ある。パッチが外れたら fallback せずに `TypeError` で落ちるので**沈黙はしない**が、追随の手間は
-残る。得たものはサイズ 0.68% と、Tmax に比例した焼き込みが消えたこと（表は実長ぶんだけになった）。
-
-同じ理由で見送った施策との比較は
-[research/2026-08-11-deberta-size-recon.md](../research/2026-08-11-deberta-size-recon.md) §3 —
-`rel_embeddings` の i8 化（−1.6MB）は emit の適格判定という**全モデル共通の不変条件**に触るので
-却下、語彙の刈り込み（−1.0MB）は tokenizer 資産との ID 再採番が要るので保留のまま。
-
-### 積み残し
-
-- **HF の `hdae/karume-sbv2-jvnv` が未更新。** ローカルの配布形は fn / jvnv の両方を作り直したが、
-  HF へ公開しているのは **jvnv だけ**（FN1〜FN10 は内部検証用でクローズド — ユーザー裁定
-  2026-08-08）。上げ直すまで HF 上の text_encoder は 24 層・25 出力・表焼き込みのままになる。
-- **ローカルの 2 リポは必ず対で組み直す。** `karume-sbv2-fn` と `karume-sbv2-jvnv` は同一バイトの
-  text_encoder を独立コピーで持つので、片方だけ `karume dist` を回すと、放置側は「旧資産 +
-  旧 sha256」で整合したまま沈黙する（hub の検証は通ってしまう）。
-- ライセンス上の性格は変わらない（cc-by-sa-4.0 の ShareAlike は i8 量子化の時点で既に改変物の
-  再配布であり、層カットで新たな条件は増えない）。ADR 0039 の「公開前に裁定が要る」は未解決の
-  まま持ち越し。
-- DeBERTa の数値 golden 門（`e2e_deberta_test.ts`）は依然としてリポに無い。text_encoder の
-  回帰を捉える網は WAV sha256 の 1 本だけで、原因の局在ができない状態が続く。
-  （2026-08-16 解消: `e2e_deberta_test.ts` を移植 — `i8/sbv2-22layer` の門も持ち、本 ADR の
-  層カットのビット一致がランタイム側でも保たれていることを 4 ケースの maxAbs 一致で傍証。）
+Withdrawn 2026-10-18: the rule "always rebuild the local `karume-sbv2-fn` and `karume-sbv2-jvnv`
+together" — the FN mirror is no longer kept (`docs/assets-layout.md`, ruling of 2026-08-30).
