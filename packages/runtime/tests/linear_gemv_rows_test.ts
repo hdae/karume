@@ -362,7 +362,7 @@ describe("M=1 GEMVの形状選択", () => {
     assertEquals(
       linearGemvWgsl("i8", undefined, selected),
       linearGemvWgsl("i8")
-        .replace("32 列 / wg", "16 列 / wg")
+        .replace("32 cols / wg", "16 cols / wg")
         .replace("@workgroup_size(32)", "@workgroup_size(16)"),
     );
   });
