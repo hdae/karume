@@ -229,8 +229,8 @@ the Core ATen decomposition table, so `run_decompositions(curated_decompositions
 revision of the op contract once a consumer appears (re-graded 2026-10-18 to MAY: the technical reason
 — IR nodes were effectively single-output — is gone since node-level multiple outputs were allowed by
 ADR [0068](0068-decode-exit-multi-output.md) decision 1; vowel-detector discards `h_n`; ruling:
-accepted as proposed). The code comment in `packages/runtime/src/ops/names.ts` (`GRU_SCAN_OPS`) still
-states the single-output rule as MUST.
+accepted as proposed). The code comment in `packages/runtime/src/ops/names.ts` (`GRU_SCAN_OPS`) stated the
+single-output rule as MUST until the comment translation of 2026-10-18 (step 2-9d) re-graded it to MAY.
 
 ### 8. LSTM is not added (no additions for symmetry)
 
