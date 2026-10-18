@@ -78,7 +78,7 @@ MTPの導入、`readPleShard`から`openPleShard`への公開面変更、既存�
 
 f16/f32は**重み格納**と**計算精度**を区別する。parallelの追加はf32計算に限り、f16/a8計算との組合せは拒否する。
 RMS subgroupは加算順が変わる。GEMV subgroupは既存parallelの配分・木を保つが、未検証GPUのビット一致保証ではない。
-両subgroupは必要featureと32レーン既知解を要求し、黙って別経路へ戻らない。[提供制限](../limitations.md#rms融合とsubgroup最適化の提供範囲2026-09-14整理)を参照。
+両subgroupは必要featureと32レーン既知解を要求し、黙って別経路へ戻らない。[提供制限](../limitations.md#scope-of-rms-fusion-and-the-subgroup-optimizations-organized-2026-09-14)を参照。
 
 既存のruntime tiny goldenは変更せず、`static_quantize_block`の2ファイルを追加した。
 WGSL snapshotは端チャネル保護や行ブロックの生成形変更で更新されているため、「snapshotが変わった」だけで許容誤差の緩和とは判断しない。

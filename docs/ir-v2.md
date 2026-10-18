@@ -1,117 +1,117 @@
-# IR v2 仕様
+# IR v2 specification
 
-Karume のグラフフォーマット。ADR [0003](decisions/0003-ir-v1.md)（v1）と
-ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコンテナの束縛表へ外出し）の
-具体化。プロトタイプ IR（v0）の実証済み構造を土台に、バージョニング・capability 宣言を加えた
-非互換改訂。確定範囲を定義し、拡張は本書を改訂して行う。グラフを載せる**物理形式**（`krm` /
-`krg`・block / part・codec 台帳）は [container-v1](container-v1.md) が正本で、本書はグラフ JSON
-だけを定める。
+Karume's graph format. It makes ADR [0003](decisions/0003-ir-v1.md) (v1) and
+ADR [0108](decisions/0108-container-format.md) (v2 — the storage declaration moved out to the container's binding table)
+concrete. An incompatible revision that builds on the proven structure of the prototype IR (v0) and adds
+versioning and capability declarations. It defines the settled scope; extensions are made by revising this
+document. The **physical format** that carries the graph (`krm` / `krg`, block / part, the codec ledger) is
+specified canonically in [container-v1](container-v1.md); this document specifies only the graph JSON.
 
-改訂履歴（0.x の間は両読みもシムも作らない — 旧形式は移行 CLI で変換する〈[container-v1](container-v1.md) §12〉。
-根拠は ADR [0108](decisions/0108-container-format.md) の Consequences と決定 18〈版の分岐〉・改訂の手順は ADR 0003）:
+Revision history (during 0.x there is neither dual reading nor a shim — old formats are converted with the migration CLI ([container-v1](container-v1.md) §12).
+Grounds: the Consequences of ADR [0108](decisions/0108-container-format.md) and decision 18 (version branching); the revision procedure is in ADR 0003):
 
-- M0: 初版。
-- M1-P2: 意味論 dtype に i32 / bool（ADR [0009](decisions/0009-dtype-i32-bool.md)）、
-  レイアウト op（ADR [0011](decisions/0011-layout-strategy.md)）、attrs 語彙と融合 op
-  （ADR [0012](decisions/0012-attrs-and-fused-ops.md)）、**i32 initializer / 格納 `i32` /
-  `sym_prefix_slice`**（ADR [0010](decisions/0010-symbolic-constant-folding.md)）。
-- M1-P3（波 3）: 数理 op 群 10 種 — `where` / `clamp` / `ge_scalar` / `le_scalar` /
-  `gt_scalar` / `ge` / `bitwise_and` / `log1p` / `cumsum` / `leaky_relu`（sdp の spline と
-  dec が要求。`leaky_relu` の設計裁定は ADR
-  [0015](decisions/0015-conv-family-extension.md)）。あわせて **`sum` の bool 入力 → i32**
-  と **`expand` の f32** を解禁し、契約表に**出力 dtype 写像**（スロット 0 → 出力、恒等が
-  既定）の欄を追加した。
-- M1-P3（波 4・5）: レイアウト第 2 群 `slice` / `cat`（**IR v1 で唯一の可変アリティ op**）/ `pad` /
-  `flip`（ADR [0014](decisions/0014-layout-ops-full-write.md)）。conv 族の拡張 —
-  `conv1d` の attrs に `dilation` / `groups` を追加（**宣言必須・既定値補完なし**）、
-  `conv_transpose1d` を新設（ADR [0015](decisions/0015-conv-family-extension.md)）。
-- M1-P4（波 1）: `rms_norm` / `conv2d` / `clamp_min` を追加（ADR
-  [0017](decisions/0017-rms-norm-conv2d-clamp-min.md)）。`conv2d` は保存リストにあったが
-  カーネルが無かった op で、Anima の VAE decoder で実測に出たので**実行できるようになった**。
-  attrs に **`[H, W]` の 2 成分**（`conv2d` の `stride` / `padding` / `dilation`）という
-  新しい値の形が入る。
-- perf-a: 融合 `attention` を追加（ADR [0023](decisions/0023-fused-attention.md)）。
-  **アリティ 3 か 4・rank-4 head-first・attrs `scale` は半スケール**（q と k の両方に掛かる
-  `√scale_factor`）。省略可能な第 4 入力は**加算 mask**（f32・`[1,1,M,N]` ちょうど・B·H へ
-  broadcast — 2026-08-11 の改訂・ADR 0023 追記）。bool mask / `[B,1,M,N]` 等・causal /
-  dropout は語彙に無く、エクスポータ境界で全件 fail loudly（GQA / MQA は 2026-08-17 の改訂
-  〈ADR 0067 決定 1〉で整除 broadcast として受理 — 下の `attention` 項）。SDPA の保存は
-  **ターゲット別**なので、既存の分解形 IR はそのまま有効。
-- モデル拡充（2026-08-13）: `upsample_bilinear2d` を**第 1 層**として追加（ADR 0043 の
-  判定手順 3 — Core ATen 内の原子。当時の暫定運用は 2026-08-14 の入場門モデル
-  〈ADR [0059](decisions/0059-op-vocabulary-entry-doors.md)・現 Core ATen 層〉で解消）。attrs は `output_size` の 1 本だけで、
-  **`align_corners = True` 以外は欄を持たない**。既存 IR への影響はゼロ（新しい op 名が
-  増えるだけ）。
-- モデル拡充（2026-08-13）: `deform_conv2d` を**第 1' 層**として追加（ADR
-  [0055](decisions/0055-deform-conv2d.md) — Core ATen 外の原子で、要求元は BiRefNet 一族）。
-  **アリティ 5**（x / weight / offset / mask / bias）— 固定アリティでは最多
-  （従来は `where` / conv 族の 3 と `attention` の 3〜4）。
-  attrs は `padding` の 1 本だけで、`stride` / `dilation` / `groups` / `offset_groups` は
-  欄を持たない（= 1 固定）。既存 IR への影響はゼロ。
-- モデル拡充（2026-08-14）: `gru_scan` / `gru_scan_reverse` を**第 2 層**〈現 拡張分子層 —
-  ADR 0059〉として追加（ADR
-  [0056](decisions/0056-gru-scan.md) — 分子だが「時間軸が実行時に決まる」意味情報が分解形で
-  失われる。要求元は vowel-detector の 2 層 BiGRU）。**アリティ 4 固定・attrs 空**で、
-  op が受け持つのは**隠れ側の逐次だけ**（入力側 GEMM は呼び手の `linear`）。走査方向は
-  attrs ではなく **op 名**が持つ（`gelu` / `gelu_tanh` と同じ手筋）。既存 IR への影響はゼロ。
-- autoregressive（2026-08-17）: `argmax` を **Core ATen 層**として追加（ADR
-  [0068](decisions/0068-decode-exit-multi-output.md) 決定 2 — greedy デコードの出口。
-  `torch.Tag.core` の実測で core・台帳 NOTE のみが要件〈ADR 0059〉だが、決定 2 は
-  多出力解禁と同じ ADR に載っている）。**attrs 空・アリティ 1・入力 f32 → 出力 i32**（添字）で、
-  **rank 保存**（最終次元を 1 に潰す）は shape 規則が持つ。既存 IR への影響はゼロ。
-- autoregressive（2026-08-17）: `topk` を **Core ATen 層**として追加（ADR
-  [0068](decisions/0068-decode-exit-multi-output.md) 決定 3 — top-k sampling の出口。
-  `torch.Tag.core` の実測で core・core decomposition にも載らない）。**ノードレベル
-  多出力の最初の入居者**で、`outs` が 2 本（値 f32 + 添字 i32）の IR が初めて実在する
-  — スキーマは元から `outs` 長さ 1 以上を許可しているので**仕様は無改訂**（ADR 0068
-  決定 1。0 本の解禁は別波）。**attrs `k` 宣言必須・アリティ 1**で、受理領域
-  `1 ≤ k ≤ 最終次元`。既存 IR への影響はゼロ。
-- autoregressive（2026-08-17）: **省略可能なトップレベル節 `states{}`** を追加（ADR
-  [0066](decisions/0066-generation-context-state-slots.md) 決定 2 — 生成 1 本ぶんの可変 state を
-  持つ名前付きスロット）。**節を持たないグラフは無風**（既存 IR への影響はゼロ・エクスポータは
-  まだ出さない）。**ノードからスロットを参照する欄（`states` 欄 / `state_append`）はまだ無い** —
-  この改訂で入るのは宣言と検査だけ（下の「state スロット」節）。
-- autoregressive（2026-08-18）: **ノードの省略可能な `states` 欄**と effect op
-  `state_append`、省略可能な attrs `window` を追加（ADR
-  [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 / 5 / 5b）。同時に 3 点が
-  緩む / 締まる: ①`outs` の**長さ 0 を許可**（値を定義しない effect op — 許すのは契約が
-  そう宣言する op だけで、執行点はパーサでなく契約テーブル）②記号の**束縛点が 2 つ**になる
-  （入力 shape ∪ states shape — ADR 0066 追記 7。states 専用記号が値 shape に現れたら
-  fail loudly）③**参照完全性**（宣言したスロットは 1 つ以上のノードから参照される MUST）。
-  `states` 欄を持たないグラフ（= 既存の全モデル）の受理集合は 1 バイトも動かない。
-- MTP（2026-09-08）: **借り物の宣言 3 種**を追加（ADR
-  [0096](decisions/0096-speculative-decoding.md) 段 2 — drafter が target の KV と重みを読む形）:
-  ①`states[].external`（省略可能・`true` のみ — 実体は借り先 context にあり自分では確保しない）
-  ②`attention` の省略可能 attrs **`readonly`**（`true` のみ — states 形が **ins を q 1 本**に
-  絞り、今 step の k/v を取らない past-only 形になる）③`initializers[].shared`（`tensor` の
-  代わりに書く借り物宣言 — バイトを配布形に持たない）。3 つとも**欄を持たないグラフは無風**で、
-  既存 IR への影響はゼロ。
-- **v2**（2026-09-22・ADR [0108](decisions/0108-container-format.md) 決定 11 / 17）:
-  **非互換改訂**。①`initializers[].storage` と `initializers[].tensor` を IR から外し、格納の
-  宣言はコンテナの束縛表へ移す（`initializers[name]` は `{}` か `{ "shared": true }`）
-  ②initializer 名を**実体の鍵**にする（エクスポータは FQN / `const.<hash>` で付ける）
-  ③scale は rank 2 group 形に統一し `rowAxis` を宣言に出す（束縛表側 —
-  [container-v1](container-v1.md) §6.1）④**正準直列化**の規則を定める（下の節 — `krg` の
-  同一性を内容ハッシュで判定する条件）。`version` は `2`。v1 との両読みは作らない（旧資産の
-  移行は container-v1 §12 の CLI）。
-- 動画生成（2026-10-02）: `conv3d` を**拡張分子層**として追加（ADR
-  [0118](decisions/0118-wan21-video-generation.md) 決定 1 — Core ATen 外・要求元は Wan2.1 の
-  causal 3D VAE）。**unbatched**（x は rank 4 の `[Cin,T,H,W]`）で、attrs に **`[T, H, W]` の
-  3 成分**（`stride` / `padding` / `dilation`）という新しい値の形が入る。重みの initializer に
-  **rank 5** が初めて現れる（strided 族の rank 上限 4 は値に掛かり、initializer には掛からない）。
-  既存 IR への影響はゼロ。
+- M0: first edition.
+- M1-P2: semantic dtypes i32 / bool (ADR [0009](decisions/0009-dtype-i32-bool.md)),
+  layout ops (ADR [0011](decisions/0011-layout-strategy.md)), the attrs vocabulary and fused ops
+  (ADR [0012](decisions/0012-attrs-and-fused-ops.md)), **i32 initializers / storage `i32` /
+  `sym_prefix_slice`** (ADR [0010](decisions/0010-symbolic-constant-folding.md)).
+- M1-P3 (wave 3): a group of 10 math ops — `where` / `clamp` / `ge_scalar` / `le_scalar` /
+  `gt_scalar` / `ge` / `bitwise_and` / `log1p` / `cumsum` / `leaky_relu` (required by sdp's spline and
+  dec. The design ruling on `leaky_relu` is in ADR
+  [0015](decisions/0015-conv-family-extension.md)). Alongside, **bool input to `sum` → i32**
+  and **f32 for `expand`** were allowed, and an **output dtype mapping** column (slot 0 → output, identity by
+  default) was added to the contract table.
+- M1-P3 (waves 4 and 5): the second layout group `slice` / `cat` (**the only variable-arity op in IR v1**) / `pad` /
+  `flip` (ADR [0014](decisions/0014-layout-ops-full-write.md)). Extension of the conv family —
+  `dilation` / `groups` added to the attrs of `conv1d` (**required, no default filled in**), and
+  `conv_transpose1d` newly added (ADR [0015](decisions/0015-conv-family-extension.md)).
+- M1-P4 (wave 1): added `rms_norm` / `conv2d` / `clamp_min` (ADR
+  [0017](decisions/0017-rms-norm-conv2d-clamp-min.md)). `conv2d` was an op on the preserved list
+  without a kernel; it showed up in measurement in Anima's VAE decoder, so it **became executable**.
+  A new value shape enters attrs: **two components `[H, W]`** (`stride` / `padding` / `dilation` of
+  `conv2d`).
+- perf-a: added the fused `attention` (ADR [0023](decisions/0023-fused-attention.md)).
+  **Arity 3 or 4, rank-4 head-first, and the attrs `scale` is a half scale** (`√scale_factor`, applied to
+  both q and k). The optional fourth input is an **additive mask** (f32, exactly `[1,1,M,N]`, broadcast
+  to B·H — the 2026-08-11 revision, ADR 0023 addendum). A bool mask / `[B,1,M,N]` and the like, causal /
+  dropout are not in the vocabulary and all fail loudly at the exporter boundary (GQA / MQA are accepted as an
+  evenly-dividing broadcast by the 2026-08-17 revision (ADR 0067 decision 1) — the `attention` entry below). SDPA preservation is
+  **per target**, so existing IR in decomposed form stays valid as it is.
+- Model expansion (2026-08-13): added `upsample_bilinear2d` as **layer 1** (step 3 of the decision procedure
+  of ADR 0043 — an atom inside Core ATen. The provisional practice of that time was resolved by the entry-door model of 2026-08-14
+  (ADR [0059](decisions/0059-op-vocabulary-entry-doors.md), now the Core ATen layer)). attrs has only `output_size`, and
+  **there is no field for anything other than `align_corners = True`**. No effect on existing IR (only a new op name
+  is added).
+- Model expansion (2026-08-13): added `deform_conv2d` as **layer 1'** (ADR
+  [0055](decisions/0055-deform-conv2d.md) — an atom outside Core ATen, requested by the BiRefNet family).
+  **Arity 5** (x / weight / offset / mask / bias) — the largest among fixed arities
+  (previously 3 for `where` / the conv family and 3 to 4 for `attention`).
+  attrs has only `padding`; `stride` / `dilation` / `groups` / `offset_groups` have no
+  field (= fixed at 1). No effect on existing IR.
+- Model expansion (2026-08-14): added `gru_scan` / `gru_scan_reverse` as **layer 2** (now the extended composite layer —
+  ADR 0059) (ADR
+  [0056](decisions/0056-gru-scan.md) — composite, but the semantic information "the time axis is decided at run time" is lost in
+  the decomposed form. Requested by the two-layer BiGRU of vowel-detector). **Arity fixed at 4, empty attrs**;
+  the op handles **only the hidden-side recurrence** (the input-side GEMM is the caller's `linear`). The scan direction is carried
+  not by attrs but by the **op name** (the same approach as `gelu` / `gelu_tanh`). No effect on existing IR.
+- autoregressive (2026-08-17): added `argmax` as the **Core ATen layer** (ADR
+  [0068](decisions/0068-decode-exit-multi-output.md) decision 2 — the exit of greedy decoding.
+  Measured as core by `torch.Tag.core`, so only a ledger NOTE is required (ADR 0059), but decision 2 sits in
+  the same ADR as allowing multiple outputs). **Empty attrs, arity 1, input f32 → output i32** (indices), and
+  **rank preservation** (the last dimension collapsed to 1) is held by the shape rule. No effect on existing IR.
+- autoregressive (2026-08-17): added `topk` as the **Core ATen layer** (ADR
+  [0068](decisions/0068-decode-exit-multi-output.md) decision 3 — the exit of top-k sampling.
+  Measured as core by `torch.Tag.core`, and not in the core decompositions either). **The first occupant of
+  node-level multiple outputs**: IR with two `outs` (values f32 + indices i32) exists for the first time
+  — the schema has allowed `outs` of length 1 or more from the start, so **the specification is unrevised** (ADR 0068
+  decision 1. Allowing zero is a separate change). **attrs `k` is required, arity 1**, with the accepted domain
+  `1 ≤ k ≤ last dimension`. No effect on existing IR.
+- autoregressive (2026-08-17): added the **optional top-level section `states{}`** (ADR
+  [0066](decisions/0066-generation-context-state-slots.md) decision 2 — named slots that hold the mutable state of
+  one generation). **A graph without the section is unaffected** (no effect on existing IR; the exporter
+  does not emit it yet). **There is no field yet for a node to reference a slot (the `states` field / `state_append`)** —
+  this revision brings in only the declaration and its checks (the "State slots" section below).
+- autoregressive (2026-08-18): added the **optional `states` field of a node**, the effect op
+  `state_append` and the optional attrs `window` (ADR
+  [0067](decisions/0067-autoregressive-attention-vocabulary.md) decisions 4 / 5 / 5b). At the same time three points
+  loosen / tighten: ① **length 0 is allowed** for `outs` (an effect op that defines no value — allowed only for an op whose contract
+  declares it, and the point of enforcement is the contract table, not the parser) ② symbols get **two binding points**
+  (input shapes ∪ states shapes — ADR 0066 addendum item 7. A states-only symbol appearing in a value shape
+  fails loudly) ③ **reference completeness** (a declared slot MUST be referenced by one or more nodes).
+  For a graph without the `states` field (= every existing model) the accepted set does not move by a single byte.
+- MTP (2026-09-08): added **three borrowing declarations** (ADR
+  [0096](decisions/0096-speculative-decoding.md) stage 2 — the form in which the drafter reads the target's KV and weights):
+  ① `states[].external` (optional, `true` only — the backing data lives in the lending context and is not allocated by itself)
+  ② the optional attrs **`readonly`** of `attention` (`true` only — the states form narrows **ins to q alone**
+  and becomes a past-only form that does not take the current step's k/v) ③ `initializers[].shared` (a borrowing declaration written
+  in place of `tensor` — its bytes are not carried in the distribution). For all three, **a graph without the field is unaffected**, and
+  there is no effect on existing IR.
+- **v2** (2026-09-22, ADR [0108](decisions/0108-container-format.md) decisions 11 / 17):
+  **an incompatible revision**. ① `initializers[].storage` and `initializers[].tensor` are removed from the IR, and the
+  storage declaration moves to the container's binding table (`initializers[name]` is `{}` or `{ "shared": true }`)
+  ② the initializer name becomes **the key of the backing data** (the exporter assigns FQNs / `const.<hash>`)
+  ③ scales are unified to the rank-2 group form and `rowAxis` is put in the declaration (on the binding-table side —
+  [container-v1](container-v1.md) §6.1) ④ the rules of **canonical serialization** are defined (the section below — the condition for
+  judging the identity of a `krg` by content hash). `version` is `2`. No dual reading with v1 (migrating old
+  assets is the CLI of container-v1 §12).
+- Video generation (2026-10-02): added `conv3d` as the **extended composite layer** (ADR
+  [0118](decisions/0118-wan21-video-generation.md) decision 1 — outside Core ATen, requested by Wan2.1's
+  causal 3D VAE). **unbatched** (x is the rank-4 `[Cin,T,H,W]`), and a new value shape enters attrs: **three
+  components `[T, H, W]`** (`stride` / `padding` / `dilation`). **Rank 5** appears for the first time in a weight
+  initializer (the rank limit of 4 for the strided family applies to values, not to initializers).
+  No effect on existing IR.
 
-## コンテナ
+## Container
 
-- グラフ JSON はコンテナ（`krm` / `krg`）の**グラフ記述**に `graphs[<グラフ名>]` として載る
-  （[container-v1](container-v1.md) §2.1）。1 コンテナに複数グラフを持てる。実体（重み・定数）は
-  同じコンテナの block にあり、グラフとの対応は束縛表（§5）が持つ。
-- JSON に NaN / Infinity リテラルを含めてはならない（エクスポータは `allow_nan=False`
-  相当で書く。パーサは検出したら fail loudly）。
-- 同じオブジェクト内の重複キーは**後勝ちで受理**する（[container-v1](container-v1.md) §0 と同じ —
-  重複を書かないのは書き手の責務）。
+- The graph JSON is carried as `graphs[<graph name>]` in the **graph descriptor** of the container (`krm` / `krg`)
+  ([container-v1](container-v1.md) §2.1). One container can hold multiple graphs. The backing data (weights and constants) lives in
+  blocks of the same container, and the binding table (§5) holds the correspondence with the graph.
+- The JSON must not contain NaN / Infinity literals (the exporter writes with the equivalent of `allow_nan=False`;
+  the parser fails loudly when it detects one).
+- Duplicate keys within the same object are **accepted, last one wins** (the same as [container-v1](container-v1.md) §0 —
+  not writing duplicates is the writer's responsibility).
 
-## グラフ JSON
+## Graph JSON
 
 ```jsonc
 {
@@ -132,128 +132,128 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
 }
 ```
 
-- `format` は固定文字列 `"karume-ir"`、`version` は整数 `2`。不一致は fail loudly。
-- **未知のトップレベルキーは fail loudly**（前方互換チャネルは持たない。
-  必要になったら本書の改訂で導入する）。上の 9 キーは**全て必須**で、省略可能な節は
-  **`states` の 1 本だけ**（下の「state スロット」）。
-- `requires.ops` は nodes で実際に使われる op 名の集合と一致しなければならない（パーサが
-  検証）。ランタイムは自分の対応表と突合し、非対応 op を**列挙して** fail loudly する。
+- `format` is the fixed string `"karume-ir"`, and `version` is the integer `2`. A mismatch fails loudly.
+- **An unknown top-level key fails loudly** (there is no forward-compatibility channel;
+  if one is needed, it is introduced by revising this document). The 9 keys above are **all required**, and the only optional section is
+  **`states`** (the "State slots" section below).
+- `requires.ops` must equal the set of op names actually used in nodes (the parser
+  checks it). The runtime matches it against its own support table and fails loudly **listing** the unsupported ops.
 
-## 正準直列化
+## Canonical serialization
 
-グラフ JSON は**バイト列として一意**でなければならない（同じグラフを再 export するとグラフ記述が
-バイト同一になる — ADR 0108 決定 4・container-v1 §13.5。`krg` の同一性を内容ハッシュで判定する
-条件）。書き手（Python の exporter・移行 CLI・TS のテスト補助）は次の規則で直列化し、読み手は
-`parse → 正準化 → serialize` が入力バイト列と一致することをテストで確かめる。
+The graph JSON must be **unique as a byte sequence** (re-exporting the same graph yields a byte-identical graph
+descriptor — ADR 0108 decision 4, container-v1 §13.5; the condition for judging the identity of a `krg` by content
+hash). Writers (the Python exporter, the migration CLI, the TS test helpers) serialize by the following rules, and readers
+check in tests that `parse → canonicalize → serialize` matches the input byte sequence.
 
-- **UTF-8・空白なし**（`,` と `:` の後に空白を置かない・改行を置かない）。
-- **オブジェクトのキー順**: 固定スキーマのオブジェクト（トップレベル・`inputs[]` の要素・
-  `values{}` の値・`states{}` の値・ノード）は**本書の例に現れる順**（トップレベルは `format` /
+- **UTF-8, no whitespace** (no space after `,` and `:`, no line breaks).
+- **Object key order**: objects of a fixed schema (top level, elements of `inputs[]`,
+  values of `values{}`, values of `states{}`, nodes) use **the order in which keys appear in this document's examples** (top level is `format` /
   `version` / `requires` / `symbols` / `inputs` / `outputs` / `initializers` / `values` /
-  `states` / `nodes`、ノードは `op` / `ins` / `outs` / `attrs` / `states`、`states{}` の値は
-  `dtype` / `shape` / `external`）。**名前をキーに持つ map**（`initializers` / `values` /
-  `states` / ノードの `attrs` / ノードの `states`）は**キーの code point 順**（UTF-16 単位の順では
-  ない — 非 BMP 文字で順序が変わる。名前は実測で全て ASCII なので両者は一致する）。
-- **配列は宣言順のまま**（`inputs` / `outputs` / `nodes` / `ins` / `outs` / `shape` は順序が意味を
-  持つ）。順序に意味の無い集合（`requires.ops` / `symbols`）は **code point 順**に並べる。
-- **数値の綴りは ECMAScript の `Number::toString`**（ECMA-262 §6.1.6.1.20）に固定する。整数値は
-  小数点も指数も付けず（`1`・`10000` — `10000.0` とは書かない）、非整数は最短往復桁で、
-  指数表記になるのは `|x| < 1e-6` または `|x| ≥ 1e21` のときだけ（`1e-7`・`1e+21` — 指数の
-  ゼロ詰めをしない・`0.000001` は指数にしない）。`-0` は `0` と書く。NaN / Infinity は書けない
-  （値レベルで拒否 — 上の節）。JS 側は `JSON.stringify` がこの綴りそのものなので、**Python 側が
-  これを実装する**（`repr(1e-6)` = `1e-06`・`repr(10000.0)` = `10000.0` は正準ではない）。
-- **文字列のエスケープ**は JSON の最小形（`"` / `\` / 制御文字 U+0000〜U+001F だけをエスケープし、
-  `\b` `\f` `\n` `\r` `\t` は短縮形、他は `\u00XX` の小文字 hex。非 ASCII は生の UTF-8）。
-  JS `JSON.stringify` と Python `json.dumps(ensure_ascii=False)` の共通部分で、両者は一致する。
-- **省略可能な節**（`states` / ノードの `states` / `states[].external`）は**空・偽なら書かない**
-  （欄の不存在がそのまま宣言 — 常に出すと同じグラフが 2 通りの綴りを持つ）。
+  `states` / `nodes`; nodes are `op` / `ins` / `outs` / `attrs` / `states`; values of `states{}` are
+  `dtype` / `shape` / `external`). **Maps keyed by name** (`initializers` / `values` /
+  `states` / a node's `attrs` / a node's `states`) use **code point order of the keys** (not the order of UTF-16
+  units — the order changes for non-BMP characters. Names are all ASCII in measurement, so the two agree).
+- **Arrays stay in declaration order** (`inputs` / `outputs` / `nodes` / `ins` / `outs` / `shape` carry meaning in
+  their order). Sets whose order carries no meaning (`requires.ops` / `symbols`) are sorted in **code point order**.
+- **The spelling of numbers is fixed to ECMAScript's `Number::toString`** (ECMA-262 §6.1.6.1.20). Integer values
+  carry neither a decimal point nor an exponent (`1`, `10000` — not `10000.0`), non-integers use the shortest round-trip digits,
+  and exponent notation is used only when `|x| < 1e-6` or `|x| ≥ 1e21` (`1e-7`, `1e+21` — no zero padding of the
+  exponent; `0.000001` is not written with an exponent). `-0` is written as `0`. NaN / Infinity cannot be written
+  (rejected at the value level — the section above). On the JS side `JSON.stringify` is exactly this spelling, so **the Python side
+  implements it** (`repr(1e-6)` = `1e-06` and `repr(10000.0)` = `10000.0` are not canonical).
+- **String escaping** is JSON's minimal form (escape only `"` / `\` / the control characters U+0000 to U+001F;
+  `\b` `\f` `\n` `\r` `\t` use the short forms, the rest `\u00XX` with lowercase hex. Non-ASCII is raw UTF-8).
+  It is the common subset of JS `JSON.stringify` and Python `json.dumps(ensure_ascii=False)`, and the two agree.
+- **Optional sections** (`states` / a node's `states` / `states[].external`) are **not written when empty or false**
+  (the absence of the field is itself the declaration — always emitting them would give the same graph two spellings).
 
-読み手が空白や `\u` エスケープを含む**非正準の JSON を拒否するかどうか**は読み手の契約に属する
-（TS の `parseIrDeclaration` は JSON として受理し、正準性は書き手側の規則と往復テストで守る）。
+Whether a reader **rejects non-canonical JSON** containing whitespace or `\u` escapes belongs to the reader's contract
+(TS `parseIrDeclaration` accepts it as JSON; canonical form is protected by the writer-side rules and round-trip tests).
 
-## 値と型
+## Values and types
 
-- **意味論 dtype**（`inputs[].dtype` / `values[].dtype`）: `"f32" | "i32" | "bool"`。
-  計算は常にこの型で行う（f16/bf16/i8 は意味論 dtype に存在しない）。
-  実行時格納は i32 = 32bit、bool = **u32 の 0 / 1**（ストレージバッファに 1bit 型が無いため
-  — ADR [0009](decisions/0009-dtype-i32-bool.md)）。要素は 3 型とも 4 バイト。
-- **op ごとに実行できる意味論 dtype は違う**（一括ではない）。受理集合の正本は契約テーブル
-  （`packages/runtime/src/ops.ts` / `karume/ops.py`）で、ランタイムは非対応を列挙して fail loudly。
-  グラフ入力の転送は 3 型とも可能。torch 既定の整数 i64 は **エクスポータ境界で i32 へ
-  正規化**する（値域外は fail loudly）— IR に i64 は無い。
-- **格納（codec）は IR に書かない**。initializer の実体の格納形はコンテナの**束縛表**
-  （[container-v1](container-v1.md) §5 — `binding[<グラフ名>][<initializer 名>].encoding`）が
-  持ち、IR が持つのは意味論 dtype と宣言 shape だけである（「1 アーキ・1 量子化方式・1 グラフ」—
-  ADR [0108](decisions/0108-container-format.md) 決定 17）。codec の語彙は台帳（container-v1
-  §6.3）: `f32` / `f16` / `bf16` / `i32` と量子化 4 種 `int8-sym` / `int4-sym-g` / `int2-off` /
-  `ternary`。`i32` 以外は**意味論 f32 の符号化**で、`i32` だけが**生の int32**（記号依存定数の
-  焼き込み先 — ADR [0010](decisions/0010-symbolic-constant-folding.md)。「格納語彙は f32 の
-  符号化」の明示的な例外）。**台帳の全 codec をランタイムが実行できる**（bf16 は 2026-10-17 まで
-  「宣言としては valid、実行は fail loudly」だったが、ADR [0131](decisions/0131-bf16-weight-execution.md)
-  で f16 と同じ経路に乗った）。台帳が持つのは格納形式だけで、実行できるかの
-  正本は runtime の `RUNTIME_SUPPORT.storage`（`packages/runtime/src/ops/contracts.ts` — 展開経路の集合）である
-  （container-v1 §6.2・ADR 0108 追記 12）。
-- **合流層**（container-v1 §13.3）: グラフと束縛表を**重み取得前に合流**し、合流後表現に対して
-  格納の規則を掛ける（置き場は runtime `format/` の 1 箇所 — Python 側も同じ規則を鏡像で持ち、
-  二重実装しない）:
-  - 量子化 codec は `encoding.scale` が**必須**（既定 1.0 で補完しない — 書き忘れが
-    「量子化前の 1/127 倍の重み」で静かに走るのを塞ぐ・ADR 0019 / 0069）
-  - `int4-sym-g` の `groupSize` は **2 冪かつ 16 以上**で、行長（`numel / shape[rowAxis]`）を
-    割り切る MUST（端数 group を作らない制約が、行境界・group 境界のバイト整列を保証する —
-    ADR 0069 決定 2）。`int8-sym` / `int2-off` / `ternary` は per-channel（`groupSize` = 行長）
-  - scale の形は **rank 2 group 形 `[shape[rowAxis], 行長 / groupSize]`** に統一する
-    （container-v1 §6.1 — v1 の i8 が使っていた keepdim broadcast 形は廃止）。`rowAxis` は
-    宣言に出る（`conv_transpose1d` の重み `[Cin,Cout,K]` だけ 1・他は 0）
-  - 意味論と格納の組は**次の 2 通りだけ**（交差は fail loudly — i32 宣言が f16 のビット列として
-    読まれる沈黙誤値を塞ぐ）: 意味論 `f32` × `f32` / `f16` / `bf16` / 量子化 4 種、
-    意味論 `i32` × `i32`
-- **適格判定と 2 経路**（ADR [0018](decisions/0018-f16-weight-execution.md) /
-  [0019](decisions/0019-i8-weight-execution.md) / [0069](decisions/0069-packed-w4-storage.md)）:
-  意味論はあくまで f32（「格納のみ量子化・計算は f32」— ADR 0006）で、圧縮格納の initializer は
-  **適格判定**で経路が 2 つに分かれる。
-  - **適格**（その initializer の消費が `linear` / `conv1d` / `conv2d` / `conv3d` /
-    `conv_transpose1d` / `embedding` の**重みスロットだけ**）: 圧縮 payload のまま GPU 常駐し、dequant はカーネル内。
-    codec ごとの適格 op は台帳ではなく runtime の判定が持つ（`packages/runtime/src/runtime/plan.ts` の
-    `eligibleCompressedInitializers` / `i4EligibleInitializers` / `i2EligibleInitializers` と
-    `runtime/weight-residency.ts` の `planWeightResidency` が正本 — container-v1 §6.2・ADR 0108 追記 12）。
-    `int4-sym-g` は linear / embedding / conv1d（`groups == 1`）、`int2-off` / `ternary` は linear / embedding。
-  - **適格外**（bias / norm 系の weight / その他の op / 重みスロットと他スロットの混在消費 /
-    消費ゼロ / `graph.outputs` に載った initializer）: **ロード時に CPU で f32 へ展開**する。
-    正しさは保たれるが VRAM 削減はゼロで、縮むのは配信サイズだけ。bias が適格にならないのは
-    ADR 0006 の「bias は常に f32」規則そのもの（低精度適格判定に bias を含めない）。
-  - 内訳は `Session.diagnostics().storage`（GPU 常駐圧縮バイト数 / CPU 展開バイト数）で
-    取得できる — 「圧縮指定なのに適格 0MB」を沈黙させないための常設診断（ADR 0006）。
-- **`f16`**: GPU 常駐時は `unpack2x16float` で 2 要素/語を展開する（添字 `i` の値は
-  `unpack2x16float(w[i / 2])[i % 2]`）。VRAM は f32 比 ≈ 1/2。要素数が奇数のときの末尾詰め物は
-  **書き手が block に焼く**（container-v1 §4.1 — 読み手側の整列分岐は無い）。
-- **`int8-sym`**（ADR 0019）: **per-channel symmetric int8**（zero-point なし・`q ∈ [−127, 127]`）。
-  GPU 常駐時は **4 要素を 1 語（u32）へリトルエンディアン順**に詰めた並びとして `array<u32>` で
-  束縛し、`unpack4xI8` で展開する（語 = `w[i / 4]`、レーン = `i % 4` を**平坦添字**から割り出す）。
-  **scale の適用位置は「要素ごと」**（読み出し時 dequant — `out = Σ x·(q·s) + bias`）。縮約の外で
-  掛ける形（`(Σ x·q)·s`）は乗算が減るが、CPU 展開とのビット一致を失うので採らない。この形の
-  おかげで**適格経路（GPU）と適格外経路（CPU 展開）はビット単位で同じ値**を出す（`q·s` の f32
-  丸めが両側とも 1 回）。VRAM は f32 比 ≈ 1/4（+ scale のオーバヘッド 1% 未満）。診断の
-  `residentCompressedBytes` には**scale バッファのバイト数も加算**する。
-- **`int4-sym-g`**（ADR 0069 決定 2 / 3）: 行方向 group の対称量子化を packed 4bit で持つ
-  （`q ∈ [−7, 7]`・`u = q + 8`・バイト内で要素 `2i` = 下位 nibble）。宣言 shape は**論理形の
-  まま**で、payload は `numel / 2` バイト（要素数が奇数の宣言は bit 総量が byte 境界に乗らないので
-  fail loudly）。展開カーネルは `array<u32>` で束縛する。
-- **`int2-off`**（ADR [0097](decisions/0097-gemma4-qat-integration.md#addendum-1-2026-09-11--int2-storage-and-execution-contract)）:
-  論理形は正整数の rank 2 `[N,K]`、K は 16 の倍数。1 バイトに 4 要素を下位 2bit から `u = q + 2`
-  で詰め、整数 `[−2, 1]` を保持する。復元は要素ごとの `fround(q·scale)`。linear の計算は f32
-  のみで、a8 / f16 は明示拒否する。**`ternary`** は値域 `{−1, 0, +1}` を主張する別名 codec で、
-  詰め方・復元・カーネルは `int2-off` と同一（container-v1 §6.3）。
-- **initializer 名は実体の鍵**である。v1 の `initializers[].tensor`（safetensors のテンソル
-  キー）は無く、束縛表が `(グラフ名, initializer 名)` で実体を指す（container-v1 §5）。
-  `initializers[name]` の値は **`{}`**（実体を持つ）か **`{ "shared": true }`**（下）の 2 形だけで、
-  他のキーは未知キーとして fail loudly。エクスポータは名前を**パラメータの FQN**
-  （`model.layers.0.mlp.gate_proj.weight`）と **`const.<sha256 先頭 16 hex>`**（定数 — 内容で
-  重複除去）で付ける。上流 checkpoint の取り込み（ADR 0108 決定 19）と LoRA の対象解決は、
-  この名前を鍵にする。宣言 shape / 意味論 dtype と実体は束縛の突合で一致しなければならない
-  （ロード時検証・不足も余剰も全件列挙で拒否）。
-- **共有 initializer（`shared`）**（ADR [0096](decisions/0096-speculative-decoding.md) 段 2 §1.3）:
-  `{ "shared": true }` と書くと、バイトをコンテナに持たない宣言になる（実体は貸し手 Session が
-  既に GPU へ載せた重み）。
+- **Semantic dtypes** (`inputs[].dtype` / `values[].dtype`): `"f32" | "i32" | "bool"`.
+  Computation is always done in these types (f16/bf16/i8 do not exist as semantic dtypes).
+  Run-time storage is i32 = 32 bit, bool = **u32 0 / 1** (because storage buffers have no 1-bit type
+  — ADR [0009](decisions/0009-dtype-i32-bool.md)). Elements are 4 bytes for all three types.
+- **The semantic dtypes an op can execute differ per op** (not one uniform set). The canonical accepted set is the contract table
+  (`packages/runtime/src/ops.ts` / `karume/ops.py`), and the runtime fails loudly listing what is unsupported.
+  Graph inputs can be transferred for all three types. torch's default integer i64 is **normalized to i32
+  at the exporter boundary** (out-of-range values fail loudly) — there is no i64 in the IR.
+- **Storage (codec) is not written in the IR**. The storage form of an initializer's backing data is held by the container's **binding table**
+  ([container-v1](container-v1.md) §5 — `binding[<graph name>][<initializer name>].encoding`),
+  and the IR holds only the semantic dtype and the declared shape ("one architecture, one quantization scheme, one graph" —
+  ADR [0108](decisions/0108-container-format.md) decision 17). The codec vocabulary is the ledger (container-v1
+  §6.3): `f32` / `f16` / `bf16` / `i32` and the four quantized ones `int8-sym` / `int4-sym-g` / `int2-off` /
+  `ternary`. Everything but `i32` is **an encoding of semantic f32**; only `i32` is **raw int32** (the target that
+  symbol-dependent constants are baked into — ADR [0010](decisions/0010-symbolic-constant-folding.md). The explicit exception to
+  "the storage vocabulary is an encoding of f32"). **The runtime can execute every codec in the ledger** (until 2026-10-17 bf16 was
+  "valid as a declaration, fails loudly on execution", but with ADR [0131](decisions/0131-bf16-weight-execution.md)
+  it joined the same path as f16). The ledger holds only the storage format; the canonical source for whether it can be executed
+  is the runtime's `RUNTIME_SUPPORT.storage` (`packages/runtime/src/ops/contracts.ts` — the set of decode paths)
+  (container-v1 §6.2, ADR 0108 addendum item 12).
+- **Merge layer** (container-v1 §13.3): the graph and the binding table are **merged before the weights are fetched**, and
+  the storage rules are applied to the merged representation (it lives in one place, the runtime's `format/` — the Python side mirrors the
+  same rules; they are not implemented twice):
+  - A quantized codec **requires** `encoding.scale` (no default of 1.0 is filled in — this blocks a forgotten entry from silently
+    running as "weights at 1/127 of their pre-quantization value", ADR 0019 / 0069)
+  - The `groupSize` of `int4-sym-g` MUST be **a power of 2 and at least 16**, and MUST divide the row length (`numel / shape[rowAxis]`)
+    (the constraint of not creating fractional groups guarantees byte alignment at row and group boundaries —
+    ADR 0069 decision 2). `int8-sym` / `int2-off` / `ternary` are per-channel (`groupSize` = row length)
+  - The scale shape is unified to the **rank-2 group form `[shape[rowAxis], row length / groupSize]`**
+    (container-v1 §6.1 — the keepdim broadcast form used by v1's i8 is retired). `rowAxis` appears in the
+    declaration (1 only for the weight `[Cin,Cout,K]` of `conv_transpose1d`, 0 otherwise)
+  - Semantic and storage pairs are **only the following two** (any cross pairing fails loudly — this blocks the silent wrong value of an i32 declaration
+    being read as an f16 bit pattern): semantic `f32` × `f32` / `f16` / `bf16` / the four quantized ones,
+    semantic `i32` × `i32`
+- **Eligibility and the two paths** (ADR [0018](decisions/0018-f16-weight-execution.md) /
+  [0019](decisions/0019-i8-weight-execution.md) / [0069](decisions/0069-packed-w4-storage.md)):
+  the semantics are f32 throughout ("quantized storage only, computation in f32" — ADR 0006), and an initializer with compressed storage
+  splits into two paths by **eligibility**.
+  - **Eligible** (the initializer is consumed **only in the weight slot** of `linear` / `conv1d` / `conv2d` / `conv3d` /
+    `conv_transpose1d` / `embedding`): it stays GPU-resident as the compressed payload, and dequantization happens in the kernel.
+    The eligible ops per codec are decided not by the ledger but by the runtime's eligibility check (canonical: `eligibleCompressedInitializers` /
+    `i4EligibleInitializers` / `i2EligibleInitializers` in `packages/runtime/src/runtime/plan.ts` and
+    `planWeightResidency` in `runtime/weight-residency.ts` — container-v1 §6.2, ADR 0108 addendum item 12).
+    `int4-sym-g` is linear / embedding / conv1d (`groups == 1`); `int2-off` / `ternary` are linear / embedding.
+  - **Ineligible** (bias / norm weights / other ops / consumption mixing the weight slot with other slots /
+    zero consumers / an initializer listed in `graph.outputs`): **expanded to f32 on the CPU at load time**.
+    Correctness holds, but the VRAM saving is zero; only the delivery size shrinks. Bias not being eligible is
+    ADR 0006's "bias is always f32" rule itself (bias is not included in the low-precision eligibility check).
+  - The breakdown is available from `Session.diagnostics().storage` (GPU-resident compressed bytes / CPU-expanded bytes)
+    — a permanent diagnostic so that "compression requested but 0 MB eligible" does not go unnoticed (ADR 0006).
+- **`f16`**: when GPU-resident, two elements per word are unpacked with `unpack2x16float` (the value at index `i` is
+  `unpack2x16float(w[i / 2])[i % 2]`). VRAM is ≈ 1/2 of f32. The trailing padding for an odd element count is
+  **baked into the block by the writer** (container-v1 §4.1 — there is no alignment branch on the reader side).
+- **`int8-sym`** (ADR 0019): **per-channel symmetric int8** (no zero-point, `q ∈ [−127, 127]`).
+  When GPU-resident it is bound as `array<u32>`, packed as **four elements per word (u32) in little-endian order**,
+  and unpacked with `unpack4xI8` (word = `w[i / 4]`, lane = `i % 4`, derived from the **flat index**).
+  **The scale is applied "per element"** (dequantization on read — `out = Σ x·(q·s) + bias`). The form that applies it outside
+  the reduction (`(Σ x·q)·s`) has fewer multiplications but loses bit equality with CPU expansion, so it is not used. Thanks to this form
+  **the eligible path (GPU) and the ineligible path (CPU expansion) produce bit-identical values** (the f32
+  rounding of `q·s` happens once on both sides). VRAM is ≈ 1/4 of f32 (+ under 1% of scale overhead). The diagnostic's
+  `residentCompressedBytes` **also adds the bytes of the scale buffer**.
+- **`int4-sym-g`** (ADR 0069 decisions 2 / 3): symmetric quantization with row-wise groups, held as packed 4 bit
+  (`q ∈ [−7, 7]`, `u = q + 8`, element `2i` = the low nibble within a byte). The declared shape **stays the logical
+  shape**, and the payload is `numel / 2` bytes (a declaration with an odd element count fails loudly because the total bits
+  do not land on a byte boundary). The decode kernel binds it as `array<u32>`.
+- **`int2-off`** (ADR [0097](decisions/0097-gemma4-qat-integration.md#addendum-1-2026-09-11--int2-storage-and-execution-contract)):
+  the logical shape is a rank-2 `[N,K]` of positive integers, with K a multiple of 16. Four elements per byte are packed from the low 2 bits
+  as `u = q + 2`, holding the integers `[−2, 1]`. Restoration is the per-element `fround(q·scale)`. linear computes in f32
+  only, and a8 / f16 are explicitly rejected. **`ternary`** is an alias codec that claims the value range `{−1, 0, +1}`;
+  its packing, restoration and kernels are identical to `int2-off` (container-v1 §6.3).
+- **The initializer name is the key of the backing data**. v1's `initializers[].tensor` (the safetensors tensor
+  key) is gone, and the binding table points at the backing data by `(graph name, initializer name)` (container-v1 §5).
+  The value of `initializers[name]` takes only two forms, **`{}`** (has backing data) or **`{ "shared": true }`** (below);
+  any other key fails loudly as an unknown key. The exporter names them by **the parameter FQN**
+  (`model.layers.0.mlp.gate_proj.weight`) and **`const.<first 16 hex of sha256>`** (constants — deduplicated by
+  content). Importing upstream checkpoints (ADR 0108 decision 19) and resolving LoRA targets use
+  this name as the key. The declared shape / semantic dtype and the backing data must agree when the bindings are reconciled
+  (checked at load time; both missing and surplus entries are rejected with a full listing).
+- **Shared initializers (`shared`)** (ADR [0096](decisions/0096-speculative-decoding.md) stage 2 §1.3):
+  writing `{ "shared": true }` makes a declaration whose bytes are not in the container (the backing data is the weight the lending Session
+  has already put on the GPU).
 
   ```jsonc
   "initializers": {
@@ -261,52 +261,52 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
   }
   ```
 
-  - **名前は貸し手グラフの initializer 名と同じ** MUST。借り手はこの名前で
-    `SessionOptions.sharedWeights` から実体を受け取り、models 側は同名で貸し手の
-    `exportWeight` を引く（v1 の `shared.tensor` は要らない — 名前が鍵なので）。
-  - `values{}` の dtype / shape 宣言は従来どおり**必須**。格納（codec / scale / group）は
-    **書かない** — 貸し手の常駐重みが正本で、写すと同じ事実が 2 箇所に生える。
-  - 束縛表の突合集合から**外れる**（束縛表に載らない — container-v1 §5）。実体の
-    素性はロード側の門が見る（同一 device・宣言 shape・意味論 dtype・消費席・チャネル軸 — 貸し手の
-    codec が借り手の消費 op で実行できること）。意味論 dtype は貸し手の宣言と一致 MUST（f32 / i32 は
-    常駐形式が同じで、席では区別できない）。
-- **宣言完全性**: 全ての値（inputs・initializers・全ノード出力）はちょうど 1 箇所で宣言される
-  — inputs は `inputs[]` で、**initializer と中間値・出力は `values{}` で**。実行時に毎ノード、
-  宣言 shape/dtype と照合する。
-- initializer の宣言は**数値次元のみ**（記号次元不可）。意味論 dtype は **f32 / i32**
-  （格納との組は上の合流層の規則）。bool の initializer は語彙に無い（実測に無く、1 バイト格納は
-  4 バイト前提の転送と噛み合わない）。
-- 非有限数の拒否はリテラルだけでなく**値レベル**で行う（`1e999` は JSON として構文有効だが
-  Infinity に丸まるため、パース時 reviver で拒否）。descriptor 側（束縛表・block 目次）の規則は
-  container-v1 §0 が持つ — こちらも未知キーは fail loudly。
+  - **The name MUST be the same as the initializer name in the lending graph**. The borrower receives the backing data from
+    `SessionOptions.sharedWeights` under this name, and the models side looks up the lender's
+    `exportWeight` by the same name (v1's `shared.tensor` is not needed — because the name is the key).
+  - The dtype / shape declaration in `values{}` is **required** as before. Storage (codec / scale / group) is
+    **not written** — the lender's resident weight is canonical, and copying it would grow the same fact in two places.
+  - It is **outside** the set reconciled against the binding table (it is not in the binding table — container-v1 §5). The provenance of the
+    backing data is examined by the load-side checks (same device, declared shape, semantic dtype, consuming slot, channel axis — the lender's
+    codec must be executable by the borrower's consuming op). The semantic dtype MUST match the lender's declaration (f32 / i32 have the
+    same resident format, and the slot cannot tell them apart).
+- **Declaration completeness**: every value (inputs, initializers, every node output) is declared in exactly one place
+  — inputs in `inputs[]`, and **initializers, intermediate values and outputs in `values{}`**. At run time every node is
+  checked against the declared shape/dtype.
+- Initializer declarations use **numeric dimensions only** (no symbolic dimensions). The semantic dtype is **f32 / i32**
+  (pairing with storage follows the merge-layer rules above). bool initializers are not in the vocabulary (none in measurement, and 1-byte storage
+  does not fit the transfer that assumes 4 bytes).
+- Non-finite numbers are rejected not only as literals but **at the value level** (`1e999` is syntactically valid JSON but
+  rounds to Infinity, so it is rejected by a reviver at parse time). The rules on the descriptor side (binding table, block index) are held by
+  container-v1 §0 — there too, unknown keys fail loudly.
 
-## shape と次元言語
+## Shapes and the dimension language
 
-- shape 要素は「非負整数」または「次元式文字列」。
-- 次元式の正準文法: **`coeff·sym + offset` の一次式・1 次元 1 シンボル**。
-  文字列表現は `"T"` / `"8T"` / `"T+8"` / `"8T+2"`（coeff は 2 以上のとき前置、
-  offset は 1 以上のとき `+` 後置。`"1T"` や `"+0"` は非正準として拒否。負の係数・
-  負のオフセット・複数シンボルは拒否）。
-- シンボル名は `[A-Za-z_][A-Za-z0-9_]*`。`symbols` に列挙され、かつ**少なくとも 1 つの
-  入力 shape または states shape の次元位置に出現**しなければならない（束縛は shape の次元位置
-  から直接取る。要素数からの逆算はしない）。束縛点が 2 つに分かれる規則と、states 専用記号を
-  `values{}` に書けない制約は後述の「state スロット（`states{}`）」節が正本 — 通常値の解決に
-  効くのは入力由来の束縛だけ。出現は**派生形でよい** — `"2T"` や `"T+8"` の実寸からは
-  `(size − offset) / coeff` で解が一意に決まり、割り切れない実寸は fail loudly
-  （[ADR 0057](decisions/0057-derived-dim-binding.md)。母音検出 CRNN は先頭 conv の stride 2
-  のせいで `2T` でしか長さ軸を宣言できない）。
-- 文法の正本は 1 箇所: 適合ケース表 `packages/runtime/tests/fixtures/dim-grammar.json`（valid / invalid /
-  束縛評価の 3 節）。TS 実装と（M1 の）Python 実装は同じ表で検証する。
+- A shape element is either "a non-negative integer" or "a dimension expression string".
+- The canonical grammar of dimension expressions: **a linear expression `coeff·sym + offset`, one symbol per dimension**.
+  The string forms are `"T"` / `"8T"` / `"T+8"` / `"8T+2"` (coeff is prefixed when 2 or more,
+  offset is suffixed with `+` when 1 or more. `"1T"` and `"+0"` are rejected as non-canonical. Negative coefficients,
+  negative offsets and multiple symbols are rejected).
+- A symbol name is `[A-Za-z_][A-Za-z0-9_]*`. It must be listed in `symbols` and **appear in a dimension position
+  of at least one input shape or states shape** (the binding is taken directly from the dimension position of the shape;
+  it is not back-computed from element counts). The rule that splits binding points in two and the constraint that a states-only symbol
+  cannot be written in `values{}` are canonical in the "State slots (`states{}`)" section below — only bindings from inputs
+  take part in resolving ordinary values. The appearance **may be a derived form** — from the actual size of `"2T"` or `"T+8"`
+  the solution is uniquely determined by `(size − offset) / coeff`, and a size that does not divide fails loudly
+  ([ADR 0057](decisions/0057-derived-dim-binding.md). The vowel-detection CRNN can declare its length axis only as `2T`
+  because of the stride 2 of its first conv).
+- The grammar has a single canonical source: the conformance case table `packages/runtime/tests/fixtures/dim-grammar.json` (three sections: valid / invalid /
+  binding evaluation). The TS implementation and the Python implementation (from M1) are checked against the same table.
 
-## state スロット（`states{}`）
+## State slots (`states{}`)
 
-生成 1 本ぶんの可変 state（自己回帰の KV など）を置く**名前付きスロット**の宣言
-（ADR [0066](decisions/0066-generation-context-state-slots.md) 決定 2）。**省略可能な節**で、
-持たないグラフ（= 既存の全モデル）の受理集合は一切変わらない。
+The declaration of **named slots** that hold the mutable state of one generation (such as the autoregressive KV)
+(ADR [0066](decisions/0066-generation-context-state-slots.md) decision 2). **An optional section**; for
+a graph without it (= every existing model) the accepted set does not change at all.
 
 ```jsonc
 {
-  // …（他のトップレベル節は上と同じ）
+  // … (the other top-level sections are the same as above)
   "symbols": ["T"],
   "states": {
     "layer0.k": { "dtype": "f32", "shape": [1, 2, 512, 128] },
@@ -315,75 +315,75 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
 }
 ```
 
-- 形は `name → { dtype, shape }` の 2 キー + **省略可能な `external`**（未知キーは fail loudly）。
-  空オブジェクトも節の省略も同義（= スロット 0 本）。スロット名は**空文字列でない**（参照側の欄が
-  受理しない名前を宣言できると、原理的に参照不能なスロットになる）。
-- **`external`**（ADR [0096](decisions/0096-speculative-decoding.md) 段 2 §1.1・**`true` のみ**・
-  欄の不存在 = 自分で確保する）: 実体を**借り先の context** が持つスロット。`false` は書けない
-  （欄の不存在と同義の綴りを 2 つ持たない）。規律は 4 点で、どれも破れは例外ではなく
-  「未初期化の過去を読む」「貸し手が確定した KV を上書きする」という別の値として出る:
-  - `state_append` は **0 本**（借り物へ書けるのは貸し手だけ）
-  - 読者は **`attrs.readonly` の attention だけ**（今 step の k/v を足す形は自分で書いた行を
-    読む前提なので、書き手の居ないスロットでは必ず未初期化行を読む）
-  - `readonly` の読者が参照するスロットは **external だけ**（上の対）
-  - external が 1 本でもあれば**全スロットが external**（借り手 context は自前スロットを持たない）
-- `shape` は**固定 rank の容量込み具体形**: rank は **1..4**（ADR 0066 決定 2 の「固定 rank
-  （rank ≤ 4）」）、数値次元は**正整数**（`values` の非負とは違う — 容量 0 のスロットは実体を
-  持てない）。次元式は値と同じ次元言語で、`symbols` に宣言済みの記号なら使える。**記号の
-  束縛点は 2 つ**（ADR 0066 追記 7）: 入力 shape の次元位置（従来どおり — 値 shape の解決に
-  効くのはこちらだけ）と、**states の shape に現れる記号は
-  `createGenerationContext(spec.bindings)`**（KV 容量のように context 生成時に決める値）。
-  束縛可能性検査は「入力 shape **∪** states shape のどこかに現れる」で、**states 専用記号
-  （states にしか現れない記号）が `values{}` の宣言 shape に現れたら fail loudly** — 通常値の
-  解決に効くのは入力由来の束縛だけなので、現れれば実行時に必ず束縛不能になる（宣言の時点で
-  落とす）。実行時も同じ分担: states 専用記号は `run` / `enqueue` の bindings では
-  **要求されず、渡したら fail loudly**（束縛点は `createGenerationContext` の 1 箇所 —
-  context が持つ容量との二重簿記を作らない）。
-- `dtype` は **`f32` のみ**。`f16` は**席の予約だけ**があり（ADR 0066 追記 5 — state 格納の
-  低精度化は数値契約が変わるので ADR [0058](decisions/0058-numerics-opt-in-contract.md) 流儀の
-  opt-in が要る）、宣言されたら「**未対応**」として fail loudly する（「語彙外」とは別の診断）。
-  それ以外（`i32` / `bool` / 未知の名前）は語彙外。
-- **スロットは値ではない**: `inputs` / `values` に宣言を持たず、`ins` / `outs` からも参照されない
-  （state をグラフの通常 input / output にしないのが ADR 0066 決定 1 の MUST）。実体の確保・寿命・
-  論理長は GenerationContext が持つ。
-- 名前空間は値と別だが、**値名（inputs / initializers / ノード出力 / `values` の宣言）と同名の
-  スロットは拒否する** — 別名前空間の同名は「スロット名の欄に値名を書いた / その逆」を検出
-  できなくするだけで表現力を足さない（束縛表が scale の block を他 initializer の実体と衝突させ
-  ない規則①〈container-v1 §5〉と同じ流儀）。
-- **「層 × 均一 KV」の前提は無い**: スロットは「KV」を知らない汎用の器で、sliding 層と full 層は
-  容量の違う別スロット、KV 共有層は**同一スロット名の参照**で表す（層数・レイアウトの欄は
-  作らない）。
-- **参照完全性**: 宣言したスロットは**少なくとも 1 つのノードの `states` 欄から参照される**
-  MUST（`values` の孤立宣言と同じ穴 — 誰も読まないスロットは GenerationContext が確保だけして
-  黙って容量を食う）。読者だけ / 書き手だけのスロットはどちらも正規（KV 共有層は
-  `state_append` を持たない — ADR 0067 決定 5）。
-- ノードからの参照は下の「state 参照ノード」節（`attention` の states 形 / `state_append`）。
-  スロットの物理形（`[B, Hkv, C, D]`）と `window ≤ C` はそちらが持つ。
+- The form is `name → { dtype, shape }`, two keys + **an optional `external`** (unknown keys fail loudly).
+  An empty object and omitting the section mean the same (= zero slots). A slot name is **not the empty string** (if a name that the
+  referencing fields do not accept could be declared, the slot would be unreferenceable in principle).
+- **`external`** (ADR [0096](decisions/0096-speculative-decoding.md) stage 2 §1.1, **`true` only**,
+  absence of the field = allocated by itself): a slot whose backing data is held by **the lending context**. `false` cannot be written
+  (no two spellings of the same meaning as the absence of the field). There are four rules, and breaking any of them does not raise an exception but
+  produces a different value — "reading an uninitialized past" or "overwriting KV the lender has committed":
+  - **zero** `state_append` (only the lender can write to a borrowed slot)
+  - the only readers are **attention with `attrs.readonly`** (the form that adds the current step's k/v assumes it reads rows it
+    wrote itself, so in a slot with no writer it always reads uninitialized rows)
+  - the slots that a `readonly` reader references are **external only** (the counterpart of the above)
+  - if even one slot is external, **every slot is external** (a borrowing context has no slots of its own)
+- `shape` is **a concrete shape of fixed rank including capacity**: rank is **1..4** ("fixed rank
+  (rank ≤ 4)" of ADR 0066 decision 2), and numeric dimensions are **positive integers** (unlike the non-negative ones of `values` — a slot of capacity 0 cannot
+  hold backing data). Dimension expressions use the same dimension language as values, and symbols already declared in `symbols` can be used. **Symbols
+  have two binding points** (ADR 0066 addendum item 7): the dimension positions of input shapes (as before — only these take part
+  in resolving value shapes), and **symbols that appear in states shapes are bound by
+  `createGenerationContext(spec.bindings)`** (values decided when the context is created, such as the KV capacity).
+  The bindability check is "appears somewhere in input shapes **∪** states shapes", and **a states-only symbol
+  (a symbol that appears only in states) appearing in a declared shape in `values{}` fails loudly** — only bindings from inputs take
+  part in resolving ordinary values, so if one appeared it would certainly be unbindable at run time (it is rejected at
+  declaration time). The same division holds at run time: states-only symbols are **not required** in the bindings of `run` / `enqueue`,
+  **and passing one fails loudly** (the binding point is the single place `createGenerationContext` —
+  no double bookkeeping against the capacity the context holds).
+- `dtype` is **`f32` only**. `f16` is **only reserved** (ADR 0066 addendum item 5 — lowering the precision of state
+  storage changes the numeric contract, so it needs an opt-in in the style of ADR [0058](decisions/0058-numerics-opt-in-contract.md)),
+  and when declared it fails loudly as "**unsupported**" (a different diagnostic from "outside the vocabulary").
+  Anything else (`i32` / `bool` / unknown names) is outside the vocabulary.
+- **A slot is not a value**: it has no declaration in `inputs` / `values` and is not referenced from `ins` / `outs` either
+  (not making state an ordinary graph input / output is the MUST of ADR 0066 decision 1). Allocation, lifetime and
+  logical length of the backing data are held by the GenerationContext.
+- The namespace is separate from values, but **a slot with the same name as a value name (inputs / initializers / node outputs / declarations in `values`)
+  is rejected** — the same name in separate namespaces only makes it impossible to detect "a value name written in a slot-name field / or the reverse"
+  and adds no expressiveness (the same style as rule ① by which the binding table does not let a scale's block collide with
+  another initializer's backing data (container-v1 §5)).
+- **There is no "layers × uniform KV" assumption**: a slot is a general-purpose container that knows nothing about "KV"; sliding layers and full layers are
+  separate slots with different capacities, and KV-sharing layers are expressed by **referencing the same slot name** (no fields for layer count or
+  layout are created).
+- **Reference completeness**: a declared slot MUST be **referenced from the `states` field of at least one node**
+  (the same hole as an orphaned declaration in `values` — a slot no one reads is only allocated by the GenerationContext and
+  silently eats capacity). Slots with only readers or only writers are both valid (KV-sharing layers
+  have no `state_append` — ADR 0067 decision 5).
+- References from nodes are in the "State-referencing nodes" section below (the states form of `attention` / `state_append`).
+  The physical form of a slot (`[B, Hkv, C, D]`) and `window ≤ C` are held there.
 
-## ノード
+## Nodes
 
-- SSA・単一代入: 各値名は inputs / initializers / いずれかのノードの `outs` のうち
-  **ちょうど 1 箇所**で定義される。`ins` は定義済みの名前のみ参照。`outputs` は定義済み
-  名の部分集合。`outs` の本数は **op 契約が決める**（**複数出力**は `topk` の 2 本〈値 f32 +
-  添字 i32・ADR [0068](decisions/0068-decode-exit-multi-output.md) 決定 3〉、**0 本**は
-  `state_append`〈値を定義しない effect op・ADR
-  [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 5〉で、他は全て単一出力）。
-  **0 本を許すのは契約が effect を宣言する op だけ** — パーサは本数に意味を与えず、執行点は
-  契約テーブルの出力数突合（他の op に `outs: []` を書くと本数不一致で落ちる）。
-- `nodes` は**トポロジカル順**で格納される（パーサが検証。前方参照は fail loudly）。
-- `attrs` は op ごとの契約テーブルで検証する。未知の attr・契約外の値は fail loudly
-  （近似実行しない）。**省略可能な attrs は `window` と `readonly` の 2 本だけ**（どちらも
-  states 形専用 — 下の「state 参照ノード」）。欄の不存在それ自体が別の宣言（`window` 不在 =
-  全 context / `readonly` 不在 = 今 step の k/v も読む形）になる欄で、他の attrs は従来どおり
-  「宣言済みキーは全て必須・既定値補完なし」。
-- **`states` 欄**（省略可能・下の「state 参照ノード」）: `ins` / `outs` と別の欄で state
-  スロットを名前参照する。キーは op 契約が固定し、値は `states{}` で宣言済みのスロット名
-  （未宣言参照は fail loudly）。
+- SSA, single assignment: each value name is defined in **exactly one place** among inputs / initializers / the `outs` of some
+  node. `ins` references only defined names. `outputs` is a subset of defined
+  names. The number of `outs` is **decided by the op contract** (**multiple outputs** are the two of `topk` (values f32 +
+  indices i32, ADR [0068](decisions/0068-decode-exit-multi-output.md) decision 3), **zero** is
+  `state_append` (an effect op that defines no value, ADR
+  [0067](decisions/0067-autoregressive-attention-vocabulary.md) decision 5), and all others have a single output).
+  **Zero is allowed only for an op whose contract declares an effect** — the parser gives the count no meaning, and the point of enforcement is
+  matching the output count in the contract table (writing `outs: []` for another op fails on the count mismatch).
+- `nodes` are stored in **topological order** (the parser checks it; a forward reference fails loudly).
+- `attrs` are checked against the per-op contract table. Unknown attrs and values outside the contract fail loudly
+  (no approximate execution). **The only optional attrs are `window` and `readonly`** (both
+  exclusive to the states form — "State-referencing nodes" below). They are fields whose absence is itself a different declaration (no `window` =
+  the whole context / no `readonly` = the form that also reads the current step's k/v); all other attrs are as before:
+  "every declared key is required, no default filled in".
+- **The `states` field** (optional, "State-referencing nodes" below): a field separate from `ins` / `outs` that references state
+  slots by name. The keys are fixed by the op contract, and the values are slot names declared in `states{}`
+  (a reference to an undeclared slot fails loudly).
 
-## state 参照ノード（`attention` の states 形 / `state_append`）
+## State-referencing nodes (`attention` states form / `state_append`)
 
-state スロットを読み書きするノードの契約（ADR
-[0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 / 5 / 5b）。
+The contract of nodes that read and write state slots (ADR
+[0067](decisions/0067-autoregressive-attention-vocabulary.md) decisions 4 / 5 / 5b).
 
 ```jsonc
 {
@@ -413,20 +413,20 @@ state スロットを読み書きするノードの契約（ADR
 }
 ```
 
-- **欄の有無が形を判別する**: `states` 欄を持たない `attention` は従来契約そのまま。欄が
-  `{ k, v }`（**キーはちょうどこの 2 つ**・k と v に**同じスロット名は書けない**）のとき
-  states 形になり、`ins` の k / v は**今 step の chunk**（`[B,Hkv,M,D]`・M は q と共有）、
-  過去分はスロットが持つ。states 形は **mask 入力を取らない**（causal 固定 — 述語で表し
-  mask tensor は実体化しない）。
-- `state_append`（f32・**アリティ 1**・**出力 0 本**・`states` 欄は `{ slot }` ちょうど・
-  必須 attrs 無し）— 今 step の k / v をスロットへ書く単機能 effect op。入力は
-  `[B,Hkv,M,D]`。KV 共有層は「このノードが無い」だけで表せる（ORT の kv_empty と同じ表現力を
-  op の不在で得る）。
-- **スロットの物理形は `[B, Hkv, C, D]` 固定**（C = 容量）。参照するノードの `ins` と
-  **B / Hkv / D が一致**し、`attention` の k / v スロットは**互いに同形**でなければならない。
-- **readonly 形**（ADR [0096](decisions/0096-speculative-decoding.md) 段 2 §1.2）: states 形の
-  attention が省略可能 attrs **`readonly`**（`true` のみ）を宣言すると、`ins` は **q 1 本
-  ちょうど**（今 step の k / v を取らない past-only 形）になる。
+- **The presence of the field determines the form**: `attention` without a `states` field is the existing contract unchanged. When the field
+  is `{ k, v }` (**exactly these two keys**, and **the same slot name cannot be written** for k and v) it becomes
+  the states form; the k / v in `ins` are **the current step's chunk** (`[B,Hkv,M,D]`, M shared with q),
+  and the past is held by the slot. The states form **takes no mask input** (causal is fixed — expressed by a predicate,
+  with no mask tensor materialized).
+- `state_append` (f32, **arity 1**, **zero outputs**, the `states` field is exactly `{ slot }`,
+  no required attrs) — a single-purpose effect op that writes the current step's k / v into the slot. The input is
+  `[B,Hkv,M,D]`. A KV-sharing layer is expressed simply by "this node not being there" (the same expressiveness as ORT's kv_empty
+  obtained through the absence of the op).
+- **The physical form of a slot is fixed at `[B, Hkv, C, D]`** (C = capacity). **B / Hkv / D must match**
+  the `ins` of the referencing node, and the k / v slots of `attention` must **have the same shape as each other**.
+- **readonly form** (ADR [0096](decisions/0096-speculative-decoding.md) stage 2 §1.2): when a states-form
+  attention declares the optional attrs **`readonly`** (`true` only), `ins` becomes **exactly q
+  alone** (a past-only form that does not take the current step's k / v).
 
   ```jsonc
   {
@@ -438,302 +438,300 @@ state スロットを読み書きするノードの契約（ADR
   }
   ```
 
-  - q は `[B, H, M, D]` で **M = 1 MUST**（読むのは論理位置 P−1 の 1 行だけ — M > 1 は
-    2 行目以降が同じ列範囲を読む沈黙誤値になる）。スロット `[B, Hkv, C, D]` とは
-    **B / D が一致**・`H % Hkv == 0` かつ `H ≥ Hkv`・sliding なら `window ≤ C`。出力は
-    `[B, H, 1, D]`（q と同形）。
-  - 意味論: 列 `[column_base, P)` への attention（`column_base` = sliding なら `P − min(P, W)` /
-    full なら `0`）。今 step の `ins` は**無い**ので、live 列数は `min(P, W)` / `P`。
-    softmax の数値契約（半スケール・−inf identity・②統計）は states 形と同じで、**P = 0
-    （列 0 本）は空行 → 出力 0**。
-  - `readonly` は **states 欄を持つノードでのみ**宣言でき、参照先は **external スロットだけ**
-    （上の「state スロット」節）。`state_append` には書けない。
-- 省略可能 attrs **`window`**（正の整数・欄の不存在 = 全 context）= sliding window の幅。
-  **`window ≤ C`** MUST。**同一スロットに触れる全ノードで存在有無も値も一致**する MUST
-  （論理 col → 物理 row の写像は読み書き同式 — 読み側だけ別式にすると沈黙誤読になる）。
-  `window` は **states 欄を持つノードでのみ宣言できる**（従来形に書くと「受理はされるが
-  誰も読まない attr」になる）。
-- **順序は `nodes` 配列順**（決定 5b）: state 参照はテンソルのデータ辺を張らないので
-  トポロジ順では決まらない。①`state_append` は 1 スロットにつき 1 本まで ②append があるなら
-  **そのスロットに触れる最後のノード**（append より後に読者を置けない）。エクスポータは
-  「全読者 → append」の順で発行する。
-- 論理長（`pastLength` / `queryLength`）は attrs にも shape にも載らない — 毎 step 変わる
-  実行時スカラで、GenerationContext 所有の可変 uniform が運ぶ（ADR 0066 決定 3・追記 4）。
-  full スロットの `pastLength + queryLength ≤ C` は実行時検査（context 側）。
+  - q is `[B, H, M, D]` with **M = 1 MUST** (only the single row at logical position P−1 is read — with M > 1 the
+    second and later rows would read the same column range, a silent wrong value). Against the slot `[B, Hkv, C, D]`,
+    **B / D match**, `H % Hkv == 0` and `H ≥ Hkv`, and for sliding `window ≤ C`. The output is
+    `[B, H, 1, D]` (the same shape as q).
+  - Semantics: attention over the columns `[column_base, P)` (`column_base` = `P − min(P, W)` for sliding /
+    `0` for full). There are **no** `ins` for the current step, so the number of live columns is `min(P, W)` / `P`.
+    The numeric contract of softmax (half scale, −inf identity, ② statistics) is the same as the states form, and **P = 0
+    (zero columns) is an empty row → output 0**.
+  - `readonly` can be declared **only on a node with a states field**, and it references **only external slots**
+    (the "State slots" section above). It cannot be written on `state_append`.
+- The optional attrs **`window`** (a positive integer; absence of the field = the whole context) = the width of the sliding window.
+  **`window ≤ C`** MUST. **Presence and value MUST match across every node that touches the same slot**
+  (the logical col → physical row mapping uses the same formula for reads and writes — a different formula on the read side alone would be a silent misread).
+  `window` **can be declared only on a node with a states field** (written on the existing form it would become "an attr that is accepted but
+  read by no one").
+- **The order is the `nodes` array order** (decision 5b): state references do not create data edges between tensors, so
+  topological order does not decide it. ① at most one `state_append` per slot ② if there is an append, it is
+  **the last node that touches that slot** (no reader can be placed after the append). The exporter emits them
+  in the order "all readers → append".
+- The logical lengths (`pastLength` / `queryLength`) appear in neither attrs nor shapes — they are run-time scalars that change every step,
+  carried by a mutable uniform owned by the GenerationContext (ADR 0066 decision 3, addendum item 4).
+  `pastLength + queryLength ≤ C` for a full slot is a run-time check (on the context side).
 
-## op セット（契約は実装の契約テーブルが正本、ここは一覧のみ）
+## Op set (the implementation's contract table is canonical; this is only a list)
 
-> 実装は 2 つある（TS `packages/runtime/src/ops.ts` とエクスポータ `karume/ops.py` +
-> `karume/shapes.py`）。両者が同じ契約を持つことの正本は適合ケース表
-> `packages/runtime/tests/fixtures/op-contracts.json` で、op 名の全集合 / アリティ / スロット dtype /
-> attrs キー集合と値域 / 出力 shape 規則（rank 上限を含む）を両側のテストが同じ表へ
-> 突き合わせる（次元文法と `dim-grammar.json` の関係と同じ）。
+> There are two implementations (TS `packages/runtime/src/ops.ts` and the exporter's `karume/ops.py` +
+> `karume/shapes.py`). The canonical source for both holding the same contract is the conformance case table
+> `packages/runtime/tests/fixtures/op-contracts.json`: the tests on both sides match the full set of op names / arity / slot dtypes /
+> attrs key sets and value ranges / output shape rules (including rank limits) against the same table
+> (the same relation as the dimension grammar and `dim-grammar.json`).
 
 - unary elementwise: `neg, abs, exp, log, log1p, sqrt, sin, tanh, sigmoid, relu, gelu, gelu_tanh`
-  （f32）/ `bitwise_not`（bool）
-  - `gelu_tanh` は torch の `gelu(approximate="tanh")`。erf 形の `gelu` と数値が違うため
-    **別 op** で運ぶ（attrs 空の契約に近似種別の欄は無い — ADR
-    [0043](decisions/0043-op-addition-layers.md) 初適用・現行の門 = Core ATen 層の
-    attr 変種〈ADR 0059〉）
-  - `sin` は語彙で**唯一の三角関数**（Core ATen 層〈旧第 1 層〉）。RoPE のような定数表は
-    エクスポータが initializer へ畳むので、語彙に要るのは実行時値を取る形だけ
-    （初出は DACVAE の Snake 活性）。`cos` は実測に出るまで足さない
-  - `clamp`（f32、attrs `min` / `max`）— 両端とも**必須**の有限 f32 で `min <= max`
-    （逆転は WGSL の `clamp` が未定義になる向き）
-  - `clamp_min`（f32、attrs `min`）— **片側 clamp**（ADR
-    [0017](decisions/0017-rms-norm-conv2d-clamp-min.md)）。上限の欄は持たない（「欠けた側を
-    ±有限最大値で補う」近似を構造的に潰す）。既存 `clamp` の attrs を optional にして
-    兼ねる案は「宣言済み attrs の既定値補完はしない」（ADR 0012）を崩すため採らない
-  - `leaky_relu`（f32、attrs `negative_slope`）— **既定値補完はしない**（ADR
-    [0015](decisions/0015-conv-family-extension.md)。実測は 0.1 と 0.01 の混在で、既定に
-    頼ると片方が黙って誤る）
-  - `ge_scalar` / `le_scalar` / `gt_scalar`（f32 → **bool**、attrs `value`）— 有限 f32 との比較
-- binary elementwise: `add, div`（f32）/ `mul, sub`（f32・i32）/ `ge`（f32 → **bool**）/
-  `bitwise_and`（bool）— いずれも torch 準拠の右詰め broadcast
-- `where`（**三項**、attrs 無し）— `out = cond ? a : b`。スロット別 dtype
-  （cond: bool / a, b: f32 → 出力 f32）で、**3 者とも右詰め broadcast**（条件も値と同じ規則で
-  広がる）。出力は条件ではなく**値の側**と同型
-- `cumsum`（f32、attrs `dim`）— 最終次元の前縁和 `out[…, j] = Σ_{i ≤ j} x[…, i]`。
-  **最終次元のみ**受理（`dim` は非負表記 — softmax と同じ絞り方）。長さ 0 の軸は素通し
-- `cast`（f32 / i32 / bool 間。attrs `to` が変換先）
-- `matmul`（rank-2 × rank-2、f32）
-- `bmm`（**rank-3 × rank-3** のバッチ matmul `[B,M,K] × [B,K,N] → [B,M,N]`、f32、attrs 無し）
-  — バッチ次元は完全一致（broadcast も stride 0 も無い）。rank-2 は `matmul` の担当で、
-  兼用しない
-- `gather`（**最終次元固定**、attrs 無し）— `out[..., j] = src[..., index[..., j]]`。
-  src と index は同じ rank で先行次元が完全一致し、最終次元だけが自由。**入力スロットごとに
-  dtype が違う唯一の op**（src: f32 / index: i32 → 出力 f32）。添字の値域 `0 <= index < D`
-  は実行時データ依存なので shape 契約では見ない（範囲外の扱いは実装契約 —
-  GPU は該当要素のみ NaN 汚染 / CPU 参照は throw）
-- reduce（**1 軸**、attrs `dim`、keepdim 無し）: `sum`（f32 → f32 / **bool → i32** の真の個数）/
-  `amax, amin`（f32）— `dim` は**宣言必須**の非負軸番号（既定値補完をしない。省略を許すと
-  チャネル軸の縮約を書いたつもりの IR が黙って最終次元を畳んだ別の計算として実行される）。
-  最終次元は行カーネル、それ以外は軸変種で実行するが、**縮約順序は両変種で厳密に一致**する
-  （設計と記号検証は research/2026-08-04-vae-axis-reduce-recon.md §5.2）
-- `argmax`（f32 → **i32**、**attrs 無し** — ADR
-  [0068](decisions/0068-decode-exit-multi-output.md) 決定 2）— 最終次元の argmax で、出力は
-  **rank 保存**（最終次元を 1 に潰した固定形）。reduce 族とは別の契約: 軸は最終次元固定
-  （`dim` の欄が無い）・`keepdim` の欄も無い（rank が下がる形は語彙に無い）・長さ 0 の最終
-  次元は拒否。固定挙動は 3 点とも torch 準拠で、**タイブレークは最小 index** / **NaN は最大**
-  （複数なら最小 index）/ **全 −inf 行は index 0**（行 max の identity は −inf MUST — 有限
-  sentinel だと番兵 index が出力へ漏れる）。llama.cpp は GPU 側 = 最大 index・CPU sampler =
-  最小 index で同一リポ内でも食い違っており、明文化しないと greedy の再現性が実装差で割れる
-- `topk`（f32 → **値 f32 + 添字 i32 の 2 出力**、attrs `k` — ADR
-  [0068](decisions/0068-decode-exit-multi-output.md) 決定 3）— 最終次元の top-k で、出力は
-  2 本とも `[…, k]`（rank 保存）。**唯一の多出力 op**。`k` は**計画時定数**（attrs 宣言必須 =
-  static-k。torch の schema は SymInt だが実行時に決まる k は静的形状の前提に載らない）で、
-  受理領域は **`1 ≤ k ≤ 最終次元`** — k=0（torch は受理する）・k > 最終次元・記号 k は
-  全て fail loudly。軸は最終次元固定（`dim` の欄が無い）・`largest` / `sorted` の欄も無い
-  （**降順ソート済みの最大側**の 1 形だけが語彙）。固定挙動は **タイブレーク = 最小 index** /
-  **NaN は最大**（複数なら最小 index）/ 全 −inf 行も最小 index から k 本。**値の列は torch と
-  ビット一致**する一方、**添字の列は torch の未規定部分を karume が規定した**側（torch は
-  同値要素の順序を保証せず、`topk([5,5,5,5],1)` = 2 に対し `argmax` = 0 で自己矛盾している —
-  実測 2026-08-17。k=1 は karume では argmax と一致する）。実装は「レーン局所 top-k →
-  トーナメント merge」で全語彙 argsort を経由せず、**k の実装上限**が workgroup storage の
-  device limit から静的に決まる（WebGPU 既定 16384 バイトで **k ≤ 63**。超過は縮退させず
-  上限値つきで `CodegenError`）
-- レイアウト（ADR [0011](decisions/0011-layout-strategy.md)）— いずれも単項:
-  - `reshape`（f32 / i32 / bool）— **出力の宣言 shape が目標形**。契約は要素数一致のみで、
-    要素順は変えない。attrs 無し（目標形を attrs に持たせると宣言と二重管理になる）
-  - `permute`（f32、attrs `dims`）— `dims[d]` = 出力の次元 d が取る入力の次元番号。
-    **非負整数の全単射**のみ（負の軸表記はエクスポータ境界で正規化する）
-  - `expand`（f32 / i32 / bool）— 出力の宣言 shape へ右詰め broadcast。**拡張できるのは
-    長さ 1 の次元だけ**（長さ n → m の複製は語彙に無い）。attrs 無し
-- レイアウト第 2 群（ADR [0014](decisions/0014-layout-ops-full-write.md)）— 全カーネルが
-  **出力の全バイトを書く**（full-write）形だけを語彙に入れる:
-  - `slice`（f32、attrs `dim` / `start` / `end`）— **静的軸・静的範囲**の切り出し
-    `x[…, start:end, …]`。3 つとも非負整数（負の軸・負の添字表記はエクスポータ境界で正規化）、
-    `start ≤ end ≤ 入力の軸長`。**対象軸は宣言レベルで静的**（記号軸の切り出しは
-    `sym_prefix_slice` の担当 — 重複させない）。実行は strided 読みコピー族の流用で、
-    可変点は params の offset 1 語
-  - `cat`（f32、attrs `dim`）— **唯一の可変アリティ op**（入力 2 本以上）で、連結軸以外の
-    次元は全入力で一致、出力の軸長は入力の軸長の総和。連結軸は〈定数〉または〈**同一**
-    シンボルの一次式〉で、総和が次元言語 `coeff·sym+offset` に載るときに限り記号でよい
-    （`S`+1519 → `S+1519`、`S`+`S` → `2S` — ADR
-    [0046](decisions/0046-cat-symbolic-axis.md)）。異なるシンボルの混在は表現が無い。実行は
-    strided **書き**コピー族で、入力ごとに出力の部分領域へ書く（全入力で出力全域を覆う）
-  - `pad`（f32、attrs `left` / `right`）— **最終次元の定数 0 埋め**。幅は非負整数（負幅の
-    切り詰めは語彙に無い）、埋め値の欄は持たない（実測は 0 のみ）。専用カーネル 1 本が
-    範囲内を転写し**範囲外にも 0 を書く**（ゼロ初期化されたバッファを前提にしない）
-  - `flip`（f32、attrs `dim`）— 静的軸の添字反転（shape は恒等）。対象軸は宣言レベルで静的
-- **記号 prefix スライス**（ADR [0010](decisions/0010-symbolic-constant-folding.md)）:
-  - `sym_prefix_slice`（f32 / i32、attrs `sym` / `slices`）— エクスポータが記号 T 依存の
-    部分木を **Tmax で実評価して焼いた定数**から、束縛後の長さの**先頭**を切り出す単項 op。
-    `slices` は `[{ dim, coeff, offset }, …]` で、`dim` 軸の出力長は次元言語と同じ
-    `coeff·sym+offset`（`coeff ≥ 1` / `offset ≥ 0` / 同じ `dim` の重複は不可 / 空配列は不可）。
-    `slices` に無い軸は入力のまま残る。
-    - **入力は記号を含まない静的 shape**（= Tmax 形。実際はエクスポータが焼いた initializer）。
-      入力側に記号次元があると「Tmax 形」の前提が崩れ、読み出し stride が実行ごとに変わる。
-    - `sym` は `symbols` に宣言済みでなければならない（束縛が取れないと prefix 長が決まらない）。
-    - 出力 shape は attrs と束縛から**計算**し、宣言と照合する（reshape / expand のような
-      「宣言が目標形」ではない）。`coeff·sym+offset` が入力の当該次元を超えたら fail loudly。
-    - 実行はレイアウト op と同じ strided 実体化コピー（開始位置 0・入力側の連続 stride）
-- 融合 op（ADR [0012](decisions/0012-attrs-and-fused-ops.md) / ADR
+  (f32) / `bitwise_not` (bool)
+  - `gelu_tanh` is torch's `gelu(approximate="tanh")`. Its numbers differ from the erf form `gelu`, so it is carried as
+    **a separate op** (a contract with empty attrs has no field for the approximation kind — ADR
+    [0043](decisions/0043-op-addition-layers.md) first application; current door = an attr variant in the
+    Core ATen layer (ADR 0059))
+  - `sin` is **the only trigonometric function** in the vocabulary (Core ATen layer (formerly layer 1)). Constant tables such as RoPE are
+    folded into initializers by the exporter, so the vocabulary needs only the form that takes run-time values
+    (first appeared in DACVAE's Snake activation). `cos` is not added until it shows up in measurement
+  - `clamp` (f32, attrs `min` / `max`) — both ends are **required** finite f32 with `min <= max`
+    (an inversion is the direction in which WGSL's `clamp` is undefined)
+  - `clamp_min` (f32, attrs `min`) — **one-sided clamp** (ADR
+    [0017](decisions/0017-rms-norm-conv2d-clamp-min.md)). It has no field for the upper bound (structurally ruling out the approximation
+    "fill the missing side with ± the largest finite value"). Making the attrs of the existing `clamp` optional to
+    cover it is not adopted because it would break "no defaults are filled in for declared attrs" (ADR 0012)
+  - `leaky_relu` (f32, attrs `negative_slope`) — **no default is filled in** (ADR
+    [0015](decisions/0015-conv-family-extension.md). Measurement shows a mix of 0.1 and 0.01, and relying on a default
+    would make one of them silently wrong)
+  - `ge_scalar` / `le_scalar` / `gt_scalar` (f32 → **bool**, attrs `value`) — comparison with a finite f32
+- binary elementwise: `add, div` (f32) / `mul, sub` (f32, i32) / `ge` (f32 → **bool**) /
+  `bitwise_and` (bool) — all with torch-style right-aligned broadcast
+- `where` (**ternary**, no attrs) — `out = cond ? a : b`. dtype per slot
+  (cond: bool / a, b: f32 → output f32), with **right-aligned broadcast across all three** (the condition broadcasts by the same
+  rule as the values). The output has the same type as **the value side**, not the condition
+- `cumsum` (f32, attrs `dim`) — the prefix sum over the last dimension `out[…, j] = Σ_{i ≤ j} x[…, i]`.
+  **Only the last dimension** is accepted (`dim` in non-negative notation — the same narrowing as softmax). An axis of length 0 passes through
+- `cast` (between f32 / i32 / bool; attrs `to` is the target)
+- `matmul` (rank-2 × rank-2, f32)
+- `bmm` (batched matmul of **rank-3 × rank-3** `[B,M,K] × [B,K,N] → [B,M,N]`, f32, no attrs)
+  — the batch dimensions match exactly (neither broadcast nor stride 0). rank-2 is `matmul`'s job, and the two are not
+  combined
+- `gather` (**last dimension fixed**, no attrs) — `out[..., j] = src[..., index[..., j]]`.
+  src and index have the same rank, the leading dimensions match exactly, and only the last dimension is free. **The only op whose
+  dtype differs per input slot** (src: f32 / index: i32 → output f32). The index range `0 <= index < D`
+  depends on run-time data, so the shape contract does not check it (out-of-range handling is the implementation contract —
+  the GPU contaminates only the affected elements with NaN / the CPU reference throws)
+- reduce (**one axis**, attrs `dim`, no keepdim): `sum` (f32 → f32 / **bool → i32**, the true count) /
+  `amax, amin` (f32) — `dim` is a **required** non-negative axis number (no default is filled in. If omission were allowed,
+  IR meant to reduce the channel axis would silently run as a different computation that collapses the last dimension).
+  The last dimension runs on the row kernel and others on the axis variant, but **the reduction order matches exactly between the two variants**
+  (design and symbolic verification in research/2026-08-04-vae-axis-reduce-recon.md §5.2)
+- `argmax` (f32 → **i32**, **no attrs** — ADR
+  [0068](decisions/0068-decode-exit-multi-output.md) decision 2) — argmax over the last dimension; the output
+  **preserves rank** (a fixed form with the last dimension collapsed to 1). A contract separate from the reduce family: the axis is fixed at the last dimension
+  (no `dim` field), there is no `keepdim` field either (forms that lower the rank are not in the vocabulary), and a last dimension of length 0
+  is rejected. The fixed behaviour follows torch on all three points: **ties break to the smallest index** / **NaN is the maximum**
+  (the smallest index if several) / **an all −inf row gives index 0** (the identity of the row max MUST be −inf — with a finite
+  sentinel the sentinel index leaks into the output). llama.cpp disagrees even within one repository, GPU side = largest index, CPU sampler =
+  smallest index, and without writing this down greedy reproducibility splits on implementation differences
+- `topk` (f32 → **two outputs, values f32 + indices i32**, attrs `k` — ADR
+  [0068](decisions/0068-decode-exit-multi-output.md) decision 3) — top-k over the last dimension; both outputs
+  are `[…, k]` (rank preserved). **The only multi-output op**. `k` is **a plan-time constant** (attrs required =
+  static-k. torch's schema is SymInt, but a k decided at run time does not fit the static-shape premise), and
+  the accepted domain is **`1 ≤ k ≤ last dimension`** — k=0 (which torch accepts), k > last dimension and symbolic k
+  all fail loudly. The axis is fixed at the last dimension (no `dim` field), and there are no `largest` / `sorted` fields either
+  (only one form, **the largest side sorted in descending order**, is in the vocabulary). The fixed behaviour is **ties = smallest index** /
+  **NaN is the maximum** (the smallest index if several) / an all −inf row also yields k entries from the smallest index. **The value column is bit-identical
+  to torch**, while **the index column is the side where karume specified what torch leaves unspecified** (torch does not
+  guarantee the order of equal elements, and contradicts itself with `topk([5,5,5,5],1)` = 2 against `argmax` = 0 —
+  measured 2026-08-17. In karume, k=1 matches argmax). The implementation is "lane-local top-k →
+  tournament merge" without going through an argsort of the whole vocabulary, and **the implementation limit on k** is decided statically by the
+  device limit of workgroup storage (with the WebGPU default of 16384 bytes, **k ≤ 63**. Exceeding it does not degrade but raises
+  `CodegenError` carrying the limit)
+- Layout (ADR [0011](decisions/0011-layout-strategy.md)) — all unary:
+  - `reshape` (f32 / i32 / bool) — **the declared shape of the output is the target shape**. The contract is only a matching element count,
+    and the element order does not change. No attrs (holding the target shape in attrs would duplicate the declaration)
+  - `permute` (f32, attrs `dims`) — `dims[d]` = the input dimension number taken by output dimension d.
+    **Only a bijection of non-negative integers** (negative axis notation is normalized at the exporter boundary)
+  - `expand` (f32 / i32 / bool) — right-aligned broadcast to the declared shape of the output. **Only dimensions of length 1
+    can be expanded** (replicating length n → m is not in the vocabulary). No attrs
+- Second layout group (ADR [0014](decisions/0014-layout-ops-full-write.md)) — only forms in which every kernel
+  **writes every byte of the output** (full-write) enter the vocabulary:
+  - `slice` (f32, attrs `dim` / `start` / `end`) — a slice over **a static axis and static range**
+    `x[…, start:end, …]`. All three are non-negative integers (negative axis and negative index notation are normalized at the exporter boundary),
+    `start ≤ end ≤ the input's axis length`. **The target axis is static at the declaration level** (slicing a symbolic axis is
+    `sym_prefix_slice`'s job — no duplication). Execution reuses the strided read-copy family, and
+    the only variable is one params word for the offset
+  - `cat` (f32, attrs `dim`) — **the only variable-arity op** (2 or more inputs); dimensions other than the concatenation axis
+    match across all inputs, and the output's axis length is the sum of the inputs' axis lengths. The concatenation axis may be symbolic when it is (a constant) or (a linear expression in **the same**
+    symbol) and the sum fits the dimension language `coeff·sym+offset`
+    (`S`+1519 → `S+1519`, `S`+`S` → `2S` — ADR
+    [0046](decisions/0046-cat-symbolic-axis.md)). A mix of different symbols has no representation. Execution is the
+    strided **write**-copy family, writing each input into a sub-region of the output (all inputs together cover the whole output)
+  - `pad` (f32, attrs `left` / `right`) — **constant zero padding of the last dimension**. Widths are non-negative integers (cropping by
+    negative widths is not in the vocabulary), and there is no field for the fill value (only 0 in measurement). One dedicated kernel
+    copies the in-range part and **also writes 0 out of range** (it does not assume a zero-initialized buffer)
+  - `flip` (f32, attrs `dim`) — index reversal along a static axis (shape is identity). The target axis is static at the declaration level
+- **Symbolic prefix slice** (ADR [0010](decisions/0010-symbolic-constant-folding.md)):
+  - `sym_prefix_slice` (f32 / i32, attrs `sym` / `slices`) — a unary op that cuts the **prefix** of the bound length out of
+    **a constant that the exporter baked by actually evaluating** the symbolic-T-dependent subtree **at Tmax**.
+    `slices` is `[{ dim, coeff, offset }, …]`, and the output length of axis `dim` is `coeff·sym+offset`, the same as the dimension
+    language (`coeff ≥ 1` / `offset ≥ 0` / no duplicate `dim` / no empty array).
+    Axes not in `slices` stay as in the input.
+    - **The input is a static shape without symbols** (= the Tmax shape; in practice an initializer baked by the exporter).
+      A symbolic dimension on the input side would break the "Tmax shape" premise and change the read stride on every run.
+    - `sym` must be declared in `symbols` (without a binding the prefix length is not determined).
+    - The output shape is **computed** from attrs and the bindings and checked against the declaration (not "the declaration is the
+      target shape" as with reshape / expand). If `coeff·sym+offset` exceeds the input's dimension, it fails loudly.
+    - Execution is the same strided materializing copy as the layout ops (start position 0, contiguous strides on the input side)
+- Fused ops (ADR [0012](decisions/0012-attrs-and-fused-ops.md) / ADR
   [0015](decisions/0015-conv-family-extension.md) / ADR
-  [0017](decisions/0017-rms-norm-conv2d-clamp-min.md)）— エクスポータが分解を止めて 1 ノードの
-  まま運ぶ高位 op。ADR [0007](decisions/0007-op-vocabulary.md) の保存 op は M1-P3 で
-  `leaky_relu`、M1-P4 で `conv2d` / `rms_norm` を足して **11 本**（ADR 0017）、拡張分子層の `conv3d`（ADR 0118）で
-  **12 本**になり、いずれも
-  **カーネルを持つ**（`conv2d` は Anima の VAE decoder で実測に出た）。`rms_norm` だけは
-  **供給ルートが 2 系統**ある: ①diffusers `nn.RMSNorm` 由来の `aten.rms_norm` は保存リスト
-  経由でそのまま 1 ノードになる ②Qwen3 / DiT の手書き分解形は保存では畳めないので、
-  エクスポータの畳み込みパス（`_fold_rms_norm`）が 1 ノードへ合成する（ADR 0016 / 0017）。
-  **融合 `attention`（perf-a）は既定の保存リスト（12 本）に入らない**: SDPA の保存はグローバルに掛けると
-  契約外のマスクを持つ形まで拾って export できなくなるため、**ターゲット別の opt-in**にして
-  ある（ADR 0023 追記）:
-  - `linear`（f32、attrs 無し、**アリティ 3 固定**）— `x[…,in] × W[out,in] + b[out]`。
-    重みは `[out, in]` の転置レイアウトのまま。bias 無しの形は語彙に無い
-  - `layer_norm`（f32、attrs `normalized_shape` / `eps`、**アリティ 3 固定**）— 最終次元のみ
-    （`normalized_shape` は長さ 1）、affine 常時あり。分散は**母分散（correction = 0）**、
-    `eps` は有限の正数
-  - `attention`（f32、attrs `scale`、**アリティ 3 か 4**）— `out = softmax_lastdim((q·scale) @
-    (k·scale)ᵀ + mask) @ v`（ADR [0023](decisions/0023-fused-attention.md)）。入力は
-    **rank-4 head-first**（`q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]`・連続）で出力は
-    `[B,H,M,D]`。**H と Hkv は整除 broadcast**（`H % Hkv == 0` かつ `H ≥ Hkv ≥ 1` — GQA / MQA・
-    ADR [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 1。
-    `r = H / Hkv` は導出値で attrs 欄を持たない。B は完全一致・k/v 間の Hkv も完全一致）。
-    **D は 3 者とも同じ**（v 側だけ別の長さを許すと「D を取り違えた IR」が
-    shape 検査を素通りする）。**`scale` は半スケール** = q と k の**両方**に掛かる
-    `√scale_factor`（torch の `_scaled_dot_product_attention_math` と同じ形。内積の後に
-    1 度だけ掛ける形へ変えると丸め列が変わり、分解経路とのビット同一が失われる）。
-    省略可能な第 4 入力は**加算 mask**（f32・rank-4・shape はちょうど `[1,1,M,N]`）で、
-    B·H の全バッチへ broadcast する。`[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 は受理せず、
-    causal / dropout は語彙に無い。行が全て −inf になるマスクは**出力 0 の正規入力**（ADR
-    [0044](decisions/0044-runtime-attention-mask.md) 追記 2026-08-31 — 決定 3 のうち融合
-    attention 側を撤回した）。全 −inf 行が契約違反（NaN 汚染）になるのは分解経路の plain
-    `softmax` だけ。
-    省略可能な **`states` 欄**を持つと autoregressive の states 形になる（上の
-    「state 参照ノード」節 — 同一 op 名の契約拡張で、欄の有無が形を判別する）。
-    states 形がさらに省略可能 attrs **`readonly`** を宣言すると **アリティ 1**（q だけの
-    past-only 形 — ADR [0096](decisions/0096-speculative-decoding.md) 段 2 §1.2）になる
-  - `state_append`（f32、**アリティ 1・出力 0 本**、省略可能 attrs `window`、`states` 欄
-    `{ slot }` 必須 — ADR
-    [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 5）— 今 step の k / v を
-    state スロットへ書く effect op（上の「state 参照ノード」節）。**値を定義しない唯一の op**で、
-    torch から出す経路は持たない（aten に対応物が無く、発行するのは decode グラフ台本だけ）
-  - `rms_norm`（f32、attrs `eps`、**アリティ 2 固定**）—
-    `y = x · rsqrt(mean(x², 最終次元) + eps) · weight`。**bias が無く、平均も引かない**
-    （layer_norm との差はこの 2 点）。正規化長の正本は **weight の長さ**で、
-    `normalized_shape` の欄は持たない（同じ事実を attrs と入力で二重に持たない）。
-    `weight` は最終次元長の rank1・`eps` は有限の正数。weight 無しの形はエクスポータが
-    ones を合成してアリティ 2 へ正規化する
-  - `softmax`（f32、attrs `dim`）— **最終次元のみ**（`dim` は非負表記）。**safe-softmax**
-    （行の最大値を引く）で計算する
-  - `safe_softmax`（f32、attrs `dim`）— `softmax` と**同一契約** + 「**行 max が −inf の行は
-    全 0**」（ADR [0044](decisions/0044-runtime-attention-mask.md) — 拡張分子層
-    〈旧第 2 層〉）。torch の SDPA
-    分解が `softmax` に被せる safe-softmax ガードと同じ意味論で、マスクが実行時値でガードの
-    不活性を証明できない形だけに現れる。有限要素を持つ行の値は `softmax` と**ビット同一**
-  - `embedding`（attrs `padding_idx`）— `weight f32[V,H] × index i32[…] → f32[…,H]` の行
-    gather。**入力スロットごとに dtype が違う**（weight: f32 / index: i32 → 出力 f32）。
-    `padding_idx` は**受理するが forward には効かない**（勾配側の欄）。範囲外添字の扱いは
-    `gather` と同じ（GPU は該当行のみ NaN 汚染 / CPU 参照は throw）
-  - `masked_fill`（attrs `value`）— `out = mask ? value : x`。スロット別 dtype
-    （x: f32 / mask: bool → 出力 f32）で、**出力は常に x と同形**（mask だけが右詰め
-    broadcast で読まれる）。`value` は有限の f32 スカラ
-  - `conv1d`（f32、attrs `stride` / `padding` / `dilation` / `groups`、**アリティ 3 固定**）—
-    `x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout]`。出力長は
-    `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1`。**4 つの attrs は全て宣言必須で
-    既定値補完をしない**（省略を許すと depthwise の IR が黙って通常畳み込みとして実行される）。
-    `groups` は `Cin` / `Cout` の両方を割り切ること・重みの第 2 軸が `Cin/groups` である
-    ことが契約
-  - `conv2d`（f32、attrs `stride` / `padding` / `dilation` / `groups`、**アリティ 3 固定**）—
-    `x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout]`。**空間 3 つの attrs は `[H, W]` の
-    長さ 2 の配列**（スカラ表記は受理しない — 同じ畳み込みに 2 通りの IR ができる。正規化は
-    エクスポータ境界の仕事）。`groups` だけがスカラ。出力長は H / W それぞれ
-    `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1`。`groups` が `Cin` / `Cout` の
-    両方を割り切ること・重みの第 2 軸が `Cin/groups` であること・**`Kh` と `Kw` の順**が契約
-    （4 つの attrs は conv1d と同じく全て宣言必須で既定値補完をしない）
-  - `conv_transpose1d`（f32、attrs `stride` / `padding`、**アリティ 3 固定**）—
-    `x[B,Cin,L] ⊛ᵀ W[Cin,Cout,K] + b[Cout]`。**重みは conv1d と転置の `[Cin, Cout, K]`**。
-    `stride ≥ 1` は MUST（0 はカーネルのゼロ除算・ハング）。受理するのは出力長がちょうど
-    `L·stride` になる形、すなわち `2·padding == K − stride` が成立する形**だけ**で、一般形
-    `(L−1)·stride − 2·padding + K` は fail loudly（需要が出たら本書の改訂で広げる）。
-    `output_padding` / `dilation` / `groups` は attrs に欄が無い = 0 / 1 / 1 固定
+  [0017](decisions/0017-rms-norm-conv2d-clamp-min.md)) — high-level ops the exporter stops decomposing and carries as
+  a single node. The preserved ops of ADR [0007](decisions/0007-op-vocabulary.md) became **11** with
+  `leaky_relu` in M1-P3 and `conv2d` / `rms_norm` in M1-P4 (ADR 0017), and **12** with `conv3d` of the extended composite layer (ADR 0118);
+  all of them
+  **have kernels** (`conv2d` showed up in measurement in Anima's VAE decoder). Only `rms_norm` has
+  **two supply routes**: ① `aten.rms_norm` from diffusers' `nn.RMSNorm` becomes one node as is via the preserved
+  list ② the hand-written decomposed form of Qwen3 / DiT cannot be folded by preservation, so
+  the exporter's folding pass (`_fold_rms_norm`) composes it into one node (ADR 0016 / 0017).
+  **The fused `attention` (perf-a) is not in the default preserved list (12 ops)**: applying SDPA preservation globally would
+  also pick up forms with masks outside the contract and make them impossible to export, so it is **an opt-in per target**
+  (ADR 0023 addendum):
+  - `linear` (f32, no attrs, **arity fixed at 3**) — `x[…,in] × W[out,in] + b[out]`.
+    The weight stays in the transposed layout `[out, in]`. A form without bias is not in the vocabulary
+  - `layer_norm` (f32, attrs `normalized_shape` / `eps`, **arity fixed at 3**) — last dimension only
+    (`normalized_shape` has length 1), affine always present. The variance is **the population variance (correction = 0)**,
+    and `eps` is a finite positive number
+  - `attention` (f32, attrs `scale`, **arity 3 or 4**) — `out = softmax_lastdim((q·scale) @
+    (k·scale)ᵀ + mask) @ v` (ADR [0023](decisions/0023-fused-attention.md)). The inputs are
+    **rank-4 head-first** (`q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]`, contiguous) and the output is
+    `[B,H,M,D]`. **H and Hkv are an evenly-dividing broadcast** (`H % Hkv == 0` and `H ≥ Hkv ≥ 1` — GQA / MQA,
+    ADR [0067](decisions/0067-autoregressive-attention-vocabulary.md) decision 1.
+    `r = H / Hkv` is a derived value with no attrs field. B matches exactly, and Hkv also matches exactly between k/v).
+    **D is the same for all three** (allowing a different length on the v side alone would let "IR with D mixed up" slip
+    through the shape check). **`scale` is a half scale** = `√scale_factor`, applied to **both** q and k
+    (the same form as torch's `_scaled_dot_product_attention_math`. Changing it to a form applied once after the dot product
+    changes the rounding sequence and loses bit identity with the decomposed path).
+    The optional fourth input is an **additive mask** (f32, rank-4, shape exactly `[1,1,M,N]`),
+    broadcast to every batch of B·H. `[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 are not accepted, and
+    causal / dropout are not in the vocabulary. A mask whose row is all −inf is **a valid input with output 0** (ADR
+    [0044](decisions/0044-runtime-attention-mask.md) addendum 2026-08-31 — the fused-attention part of decision 3
+    was withdrawn). An all −inf row is a contract violation (NaN contamination) only for the plain
+    `softmax` of the decomposed path.
+    With the optional **`states` field** it becomes the autoregressive states form (the
+    "State-referencing nodes" section above — a contract extension under the same op name, where the presence of the field determines the form).
+    When the states form further declares the optional attrs **`readonly`**, it becomes **arity 1** (the q-only
+    past-only form — ADR [0096](decisions/0096-speculative-decoding.md) stage 2 §1.2)
+  - `state_append` (f32, **arity 1, zero outputs**, optional attrs `window`, `states` field
+    `{ slot }` required — ADR
+    [0067](decisions/0067-autoregressive-attention-vocabulary.md) decision 5) — an effect op that writes the current step's k / v into
+    a state slot (the "State-referencing nodes" section above). **The only op that defines no value**;
+    there is no path to emit it from torch (aten has no counterpart, and only the decode graph scripts emit it)
+  - `rms_norm` (f32, attrs `eps`, **arity fixed at 2**) —
+    `y = x · rsqrt(mean(x², last dimension) + eps) · weight`. **No bias, and no mean subtraction**
+    (these two points are the difference from layer_norm). The canonical normalized length is **the length of weight**, and there is
+    no `normalized_shape` field (the same fact is not held twice, in attrs and in an input).
+    `weight` is rank 1 with the last dimension's length, and `eps` is a finite positive number. For a form without weight the exporter
+    composes ones and normalizes it to arity 2
+  - `softmax` (f32, attrs `dim`) — **last dimension only** (`dim` in non-negative notation). Computed as **safe-softmax**
+    (subtracting the row maximum)
+  - `safe_softmax` (f32, attrs `dim`) — **the same contract** as `softmax` + "**a row whose max is −inf is
+    all 0**" (ADR [0044](decisions/0044-runtime-attention-mask.md) — extended composite layer
+    (formerly layer 2)). The same semantics as the safe-softmax guard that torch's SDPA
+    decomposition puts over `softmax`; it appears only in forms where the mask is a run-time value and the guard cannot be proven
+    inactive. Values of rows that have finite elements are **bit-identical** to `softmax`
+  - `embedding` (attrs `padding_idx`) — a row gather `weight f32[V,H] × index i32[…] → f32[…,H]`.
+    **The dtype differs per input slot** (weight: f32 / index: i32 → output f32).
+    `padding_idx` is **accepted but has no effect on forward** (a gradient-side field). Out-of-range indices are handled
+    as in `gather` (the GPU contaminates only the affected rows with NaN / the CPU reference throws)
+  - `masked_fill` (attrs `value`) — `out = mask ? value : x`. dtype per slot
+    (x: f32 / mask: bool → output f32), and **the output always has the same shape as x** (only mask is read with right-aligned
+    broadcast). `value` is a finite f32 scalar
+  - `conv1d` (f32, attrs `stride` / `padding` / `dilation` / `groups`, **arity fixed at 3**) —
+    `x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout]`. The output length is
+    `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1`. **All four attrs are required, and
+    no default is filled in** (if omission were allowed, depthwise IR would silently run as an ordinary convolution).
+    The contract is that `groups` divides both `Cin` / `Cout` and that the weight's second axis is `Cin/groups`
+  - `conv2d` (f32, attrs `stride` / `padding` / `dilation` / `groups`, **arity fixed at 3**) —
+    `x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout]`. **The three spatial attrs are arrays of length 2,
+    `[H, W]`** (scalar notation is not accepted — it would give two IRs for the same convolution. Normalization is the
+    exporter boundary's job). Only `groups` is a scalar. The output length for each of H / W is
+    `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1`. The contract is that `groups` divides both
+    `Cin` / `Cout`, that the weight's second axis is `Cin/groups`, and **the order `Kh` then `Kw`**
+    (as with conv1d, all four attrs are required and no default is filled in)
+  - `conv_transpose1d` (f32, attrs `stride` / `padding`, **arity fixed at 3**) —
+    `x[B,Cin,L] ⊛ᵀ W[Cin,Cout,K] + b[Cout]`. **The weight is `[Cin, Cout, K]`, transposed relative to conv1d**.
+    `stride ≥ 1` MUST hold (0 divides by zero in the kernel and hangs). **Only** forms whose output length is exactly
+    `L·stride` are accepted, that is, forms where `2·padding == K − stride` holds; the general form
+    `(L−1)·stride − 2·padding + K` fails loudly (widened by revising this document if demand appears).
+    `output_padding` / `dilation` / `groups` have no field in attrs = fixed at 0 / 1 / 1
 
-  bias 無しの conv（実測は dec の `conv_post` 1 本）は**エクスポータがゼロ bias initializer を
-  合成**してアリティ 3 へ正規化する — IR にも契約にもカーネルにも arity 分岐は無い。
+  A conv without bias (one in measurement, dec's `conv_post`) is normalized to arity 3 by **the exporter composing a zero bias initializer**
+  — there is no arity branch in the IR, the contract or the kernels.
 
-- **3 次元畳み込み**（拡張分子層 — ADR [0118](decisions/0118-wan21-video-generation.md) 決定 1。
-  Core ATen 外の `aten.conv3d` をエクスポータが保存する）:
-  - `conv3d`（f32、attrs `stride` / `padding` / `dilation` / `groups`、**アリティ 3 固定**）—
-    `x[Cin,T,H,W] * W[Cout,Cin/groups,Kt,Kh,Kw] + b[Cout] → [Cout,Tout,Hout,Wout]`。x は
-    **unbatched の rank 4 だけ**（batched の rank 5 は契約に無い — 周りの cat / slice が strided 族の
-    rank 上限 4 に当たる。エクスポータ境界で fail loudly）。**空間 3 つの attrs は `[T, H, W]` の
-    長さ 3 の配列**（スカラ表記・2 成分は受理しない — conv2d の `[H, W]` と同じ規律）で、
-    `groups` だけがスカラ。4 つとも宣言必須で既定値補完をしない。出力長は T / H / W それぞれ
-    `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1`（K = 0 と窓が入力に届かない形は
-    fail loudly）。padding は軸ごとの**対称ゼロ**で、因果（片側）の時間 padding は語彙に無い
-    （recipe が前の chunk の cache を時間軸の先頭へ cat して表す）。`groups` が `Cin` / `Cout` の
-    両方を割り切ること・重みの第 2 軸が `Cin/groups` であること・**`Kt, Kh, Kw` の順**が契約。
-    意味論は groups 一般（CPU 参照が全体を持つ）だが、**GPU の実装済み subset は groups == 1**
-    （implicit GEMM）で、groups > 1 は Session の構築時に fail loudly（ADR 0064 軸 A）。重みは
-    f16 / i8 の適格（重みスロット 1・per-channel scale の軸 0）
+- **3D convolution** (extended composite layer — ADR [0118](decisions/0118-wan21-video-generation.md) decision 1.
+  The exporter preserves `aten.conv3d`, which is outside Core ATen):
+  - `conv3d` (f32, attrs `stride` / `padding` / `dilation` / `groups`, **arity fixed at 3**) —
+    `x[Cin,T,H,W] * W[Cout,Cin/groups,Kt,Kh,Kw] + b[Cout] → [Cout,Tout,Hout,Wout]`. x is
+    **unbatched rank 4 only** (batched rank 5 is not in the contract — the surrounding cat / slice hit the strided family's
+    rank limit of 4. It fails loudly at the exporter boundary). **The three spatial attrs are arrays of length 3,
+    `[T, H, W]`** (scalar notation and two components are not accepted — the same rule as conv2d's `[H, W]`), and
+    only `groups` is a scalar. All four are required and no default is filled in. The output length for each of T / H / W is
+    `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1` (K = 0 and forms whose window does not reach the input
+    fail loudly). Padding is **symmetric zeros** per axis; causal (one-sided) temporal padding is not in the vocabulary
+    (the recipe expresses it by cat-ing the previous chunk's cache onto the start of the time axis). The contract is that `groups` divides both
+    `Cin` / `Cout`, that the weight's second axis is `Cin/groups`, and **the order `Kt, Kh, Kw`**.
+    The semantics are general in groups (the CPU reference holds all of it), but **the GPU's implemented subset is groups == 1**
+    (implicit GEMM), and groups > 1 fails loudly when the Session is built (ADR 0064 axis A). The weight is
+    eligible for f16 / i8 (weight slot 1, per-channel scale along axis 0)
 
-- **変形畳み込み**（拡張原子層〈旧第 1' 層〉の原子 — `torchvision::deform_conv2d`。ADR
-  [0055](decisions/0055-deform-conv2d.md)・門の定義は
-  [0059](decisions/0059-op-vocabulary-entry-doors.md)）:
-  - `deform_conv2d`（f32、attrs `padding`、**アリティ 5 固定**）—
-    `x[B,Cin,H,W]` / `W[Cout,Cin,Kh,Kw]` / `offset[B,2·Kh·Kw,Hout,Wout]` /
-    `mask[B,Kh·Kw,Hout,Wout]` / `b[Cout]` → `[B,Cout,Hout,Wout]` の DCNv2。
-    出力空間は `Hout = H + 2·padH − (Kh−1)` / `Wout = W + 2·padW − (Kw−1)` で、`offset` /
-    `mask` の空間 2 軸はこれと**一致することが契約**（出力形の正本は x + weight + attrs 側）。
-    サンプル座標は `y = (oy − padH) + kh + off_y` / `x = (ox − padW) + kw + off_x` で、
-    **offset のチャネル並びは `(kh, kw)` の入れ子・最内が偶数 = y / 奇数 = x**。
-    `mask`（modulator）は**双線形補間の後**に掛かり、境界外は **border clamp ではなく
-    ゼロ埋め**（中心が `(−1, in)` の外ならタップ全体 0・内側でも範囲外の隅はその隅だけ 0）。
-    `stride` / `dilation` / `groups` / `offset_groups` は attrs に**欄が無い = 1 固定**、
-    `mask` はスロットとして必須 = **DCNv2 専業**（`use_mask=False` の DCNv1 は表現を持たない
-    = エクスポータ境界で fail loudly）。**offset の NaN は 0 に落とさず出力へ伝播する**
-    （範囲外の 0 とは別扱い — ADR 0055 決定 5）
+- **Deformable convolution** (an atom of the extended atomic layer (formerly layer 1') — `torchvision::deform_conv2d`. ADR
+  [0055](decisions/0055-deform-conv2d.md); the doors are defined in
+  [0059](decisions/0059-op-vocabulary-entry-doors.md)):
+  - `deform_conv2d` (f32, attrs `padding`, **arity fixed at 5**) —
+    DCNv2 with `x[B,Cin,H,W]` / `W[Cout,Cin,Kh,Kw]` / `offset[B,2·Kh·Kw,Hout,Wout]` /
+    `mask[B,Kh·Kw,Hout,Wout]` / `b[Cout]` → `[B,Cout,Hout,Wout]`.
+    The output space is `Hout = H + 2·padH − (Kh−1)` / `Wout = W + 2·padW − (Kw−1)`, and **it is the contract that** the two spatial axes of `offset` /
+    `mask` **match it** (the canonical output shape is on the x + weight + attrs side).
+    The sample coordinates are `y = (oy − padH) + kh + off_y` / `x = (ox − padW) + kw + off_x`, and
+    **the channel order of offset is nested `(kh, kw)`, innermost even = y / odd = x**.
+    `mask` (the modulator) is applied **after bilinear interpolation**, and out of bounds is **zero-filled, not border
+    clamped** (if the centre is outside `(−1, in)` the whole tap is 0; even inside, only an out-of-range corner is 0).
+    `stride` / `dilation` / `groups` / `offset_groups` **have no field** in attrs = fixed at 1, and
+    `mask` is required as a slot = **DCNv2 only** (DCNv1 with `use_mask=False` has no representation
+    = fails loudly at the exporter boundary). **NaN in offset is not dropped to 0 but propagates to the output**
+    (treated separately from the out-of-range 0 — ADR 0055 decision 5)
 
-- **空間 resample**（Core ATen 層〈旧第 1 層〉の原子 — `aten.upsample_bilinear2d.vec`）:
-  - `upsample_bilinear2d`（f32、attrs `output_size`、**アリティ 1 固定**）—
-    `x[B,C,H,W] → [B,C,Hout,Wout]` の双線形補間。**`align_corners = True` 専業**で、
-    `align_corners` / `mode` / `scale_factor` は attrs に**欄が無い**（`False` も nearest /
-    bicubic / area / antialias も表現を持たない = エクスポータ境界で fail loudly。`False` の
-    需要が出たら `gelu` / `gelu_tanh` と同じ手筋で別 op として足す）。`output_size` は conv2d と
-    同じ `[Hout, Wout]` の長さ 2 の配列で、宣言必須・既定値補完なし。
-    源座標は `((in−1)/(out−1)) · 出力添字`（出力長 1 の軸は倍率 0）、タップは
-    `index0 = trunc(源座標)` と `index1 = index0 + (index0 < in−1 ? 1 : 0)`、重みは
-    `λ1 = 源座標 − index0` / `λ0 = 1 − λ1` で、**式木は H が外・W が内**の入れ子
-    （torch の `aten/src/ATen/native/UpSample.h` と同じ順）。倍率は非整数でよく、
-    **縮小（`Hout < H`）も同じ op**（2 タップしか読まないのは torch と同じ仕様で `area` とは
-    別物）。空間軸の長さ 0 は受理しない
+- **Spatial resample** (an atom of the Core ATen layer (formerly layer 1) — `aten.upsample_bilinear2d.vec`):
+  - `upsample_bilinear2d` (f32, attrs `output_size`, **arity fixed at 1**) —
+    bilinear interpolation `x[B,C,H,W] → [B,C,Hout,Wout]`. **`align_corners = True` only**;
+    `align_corners` / `mode` / `scale_factor` **have no field** in attrs (`False`, nearest /
+    bicubic / area / antialias have no representation = fail loudly at the exporter boundary. If demand for `False`
+    appears, it is added as a separate op by the same approach as `gelu` / `gelu_tanh`). `output_size` is an array of length 2,
+    `[Hout, Wout]`, as in conv2d; required, no default filled in.
+    The source coordinate is `((in−1)/(out−1)) · output index` (an axis of output length 1 has factor 0), the taps are
+    `index0 = trunc(source coordinate)` and `index1 = index0 + (index0 < in−1 ? 1 : 0)`, the weights are
+    `λ1 = source coordinate − index0` / `λ0 = 1 − λ1`, and **the expression tree nests H outside and W inside**
+    (the same order as torch's `aten/src/ATen/native/UpSample.h`). The factor may be non-integer, and
+    **downscaling (`Hout < H`) is the same op** (reading only two taps is the same specification as torch, and is different from
+    `area`). A spatial axis of length 0 is not accepted
 
-- **固定活性量子化**（ADR [0097](decisions/0097-gemma4-qat-integration.md#addendum-2-2026-09-11--fixed-srq-op-contract)）:
-  - `static_quantize`（f32、アリティ 1、attrs `scale`）— shape は不変。scale は非負・有限で厳密な f32 値。
-    f32 除算 → 最近接の偶数への整数丸め → `[-128,127]` への飽和 → f32 乗算を行う。
-    scale=0 は全ビットを保つ恒等動作。符号付きゼロと NaN の符号・payload を保持し、
-    scale > 0 の NaN は quiet 化する。±Inf は飽和し、出力の overflow は ±Inf。
-    GPU の除算精度や非正規化数の flush に依存せず、境界・出力表を整数で読む。
+- **Fixed activation quantization** (ADR [0097](decisions/0097-gemma4-qat-integration.md#addendum-2-2026-09-11--fixed-srq-op-contract)):
+  - `static_quantize` (f32, arity 1, attrs `scale`) — the shape does not change. scale is non-negative, finite and an exact f32 value.
+    It performs f32 division → integer rounding to nearest even → saturation to `[-128,127]` → f32 multiplication.
+    scale=0 is an identity that keeps all bits. It keeps the sign of signed zeros and the sign and payload of NaN,
+    and NaN with scale > 0 is quieted. ±Inf saturates, and output overflow is ±Inf.
+    It does not depend on the GPU's division precision or on flushing of denormals; boundaries and the output table are read as integers.
 
-- **RNN スキャン**（拡張分子層〈旧第 2 層〉の分子 — ADR [0056](decisions/0056-gru-scan.md)）:
-  - `gru_scan` / `gru_scan_reverse`（f32、**attrs 空**、**アリティ 4 固定**）—
-    `gi[T,N,3H]` / `h0[N,H]` / `W_hh[3H,H]` / `b_hh[3H]` → `y[T,N,H]` の GRU 隠れ側スキャン。
-    **時間軸 T は記号でよい**（この op の存在理由 — 分解形は T 回展開されて記号を失う）。
-    op が受け持つのは隠れ側の逐次だけで、**入力側 GEMM（`x·W_ihᵀ + b_ih`）は呼び手が既存
-    `linear` で用意する**（`gi` がその結果）。1 ステップの式は
+- **RNN scan** (a composite of the extended composite layer (formerly layer 2) — ADR [0056](decisions/0056-gru-scan.md)):
+  - `gru_scan` / `gru_scan_reverse` (f32, **empty attrs**, **arity fixed at 4**) —
+    the GRU hidden-side scan `gi[T,N,3H]` / `h0[N,H]` / `W_hh[3H,H]` / `b_hh[3H]` → `y[T,N,H]`.
+    **The time axis T may be symbolic** (the reason this op exists — the decomposed form is unrolled T times and loses the symbol).
+    The op handles only the hidden-side recurrence; **the input-side GEMM (`x·W_ihᵀ + b_ih`) is prepared by the caller with the existing
+    `linear`** (`gi` is its result). The formula for one step is
     `gh = W_hh·h + b_hh` / `r = σ(gh_r + gi_r)` / `z = σ(gh_z + gi_z)` /
-    `n = tanh(gi_n + gh_n·r)` / `h' = (h − n)·z + n` で、**この演算の並びと括り方が契約**
-    （数学的に同値な `(1 − z)·n + z·h` は別の丸め列 — f32 の 10 万要素中 44,345 件が
-    ビット不一致）。3H のゲート並びは **r / z / n**、`b_hh` は **last**（`(Σ W·h) + b`）、
-    reset ゲートは **b_hh 込みの隠れ側積**に掛かる。
-    `gru_scan_reverse` は**走査順だけ**が逆で、**出力は順方向の時間順**（`flip` を挟まない —
-    `flip` は記号軸を受理しないため）。
-    多層 / 双方向 / `has_biases=False` / `batch_first` / `dropout` は attrs に**欄が無い**
-    （層と方向は**ノードを並べて**表す — `aten.gru` の `Tensor[16]` は IR に載らない）。
-    出力は `y` だけで **`h_n` を返さない**（IR の単一出力前提）。`h0` は入力スロットで
-    必須（ゼロ `h0` はエクスポータの定数畳み込みで initializer になる）。
-    隠れ幅は **`H ≤ 256`**（1 lane = 1 隠れユニットの割り当て — 超過は `CodegenError`）
+    `n = tanh(gi_n + gh_n·r)` / `h' = (h − n)·z + n`, and **this order of operations and grouping is the contract**
+    (the mathematically equivalent `(1 − z)·n + z·h` is a different rounding sequence — 44,345 of 100,000 f32 elements
+    differ in bits). The gate order within 3H is **r / z / n**, `b_hh` is **last** (`(Σ W·h) + b`), and the
+    reset gate applies to **the hidden-side product including b_hh**.
+    `gru_scan_reverse` differs **only in scan order**, and **its output is in forward time order** (no `flip` in between —
+    because `flip` does not accept a symbolic axis).
+    Multi-layer / bidirectional / `has_biases=False` / `batch_first` / `dropout` **have no field** in attrs
+    (layers and directions are expressed **by placing nodes in sequence** — `aten.gru`'s `Tensor[16]` does not fit the IR).
+    The output is `y` only, and **`h_n` is not returned** (the IR's single-output premise). `h0` is an input slot and is
+    required (a zero `h0` becomes an initializer through the exporter's constant folding).
+    The hidden width is **`H ≤ 256`** (one lane = one hidden unit — exceeding it raises `CodegenError`)
 
-出力 dtype は「**スロット 0 の入力 dtype → 出力 dtype**」の写像で決まる（既定は恒等）。写像は
-**出力 slot 別の列**で、列の長さがその op の出力数（ADR 0068 決定 1）。恒等でないのは比較 4 本
-（→ bool）・bool 入力の `sum`（→ i32）・`where`（bool → f32）・`argmax`（→ 添字の i32）・
-`topk` の slot 1（→ 添字の i32・slot 0 の値は恒等）だけで、`cast` だけが例外的に attrs.to で
-決まる。
+The output dtype is decided by the mapping "**input dtype of slot 0 → output dtype**" (identity by default). The mapping is
+**a column per output slot**, and the column's length is the op's output count (ADR 0068 decision 1). The only non-identity cases are the four comparisons
+(→ bool), `sum` with bool input (→ i32), `where` (bool → f32), `argmax` (→ i32 indices) and
+slot 1 of `topk` (→ i32 indices; slot 0's values are identity), and only `cast` is the exception decided by attrs.to.
 
-dtype ごとの受理集合（**入力スロット別**の受理集合と出力 dtype の導出を含む）・attrs の値域
-（`cast` の丸め規約・`permute` の `dims`・融合 op の各 attr を含む）は契約テーブルが正本。
+The accepted set per dtype (including the accepted set **per input slot** and the derivation of the output dtype) and the value ranges of attrs
+(including `cast`'s rounding convention, `permute`'s `dims` and each attr of the fused ops) are canonical in the contract table.
 
-拡張順序は [op-vocabulary.md](op-vocabulary.md) の実装順序に従う。
+The order of extension follows the implementation order in [op-vocabulary.md](op-vocabulary.md).

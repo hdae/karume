@@ -1,479 +1,567 @@
-# Known issues — 未解決バグ
+# Known issues — open bugs
 
-> 置き場の規約: 未解決のバグ（意図した設計制約は [limitations.md](limitations.md)）。
-> 解決したら該当節を削除し、修正コミットへのポインタを残さない（履歴は git が持つ）。
+> Placement rule: open bugs (intended design constraints go to [limitations.md](limitations.md)).
+> When a bug is resolved, delete its section and leave no pointer to the fixing commit (git holds the history).
 
-## 疑似HFサーバーの固定revisionで古いmanifestが再利用される
+## A fixed revision on the pseudo-HF server reuses a stale manifest
 
-HTTP疎通テスト用の`examples/shared/local-dist-server.ts`はrepoとrevisionを固定している。
-manifestのキャッシュキーはresolve URLなので、過去に使ったポートへ再び割り当てられた場合、
-現在のディレクトリと異なる世代のmanifestがヒットし得る。旧1出力Gemmaグラフを指すエントリが残存し、
-同じURL・revisionで内容だけを更新する再現実験では旧manifestが返った。
-[調査と再現手順](research/2026-09-13-rms-subgroup-reduction.md#全体検証の切り分け)。
+The HTTP connectivity test server `packages/test-support/src/local-dist-server.ts` fixes the repo and the revision.
+The manifest cache key is the resolve URL, so when a previously used port is assigned again, a manifest of a different
+generation from the current directory can be hit. An entry pointing at the old one-output Gemma graph remained, and in a
+reproduction experiment that updated only the content under the same URL and revision, the old manifest was returned.
+[Investigation and reproduction steps](research/2026-09-13-rms-subgroup-reduction.md#%E5%85%A8%E4%BD%93%E6%A4%9C%E8%A8%BC%E3%81%AE%E5%88%87%E3%82%8A%E5%88%86%E3%81%91).
 
-2026-09-13の全体verifyで1出力として拒否され、単独実行は成功した事象の原因候補。
-失敗時のポートを保存していないため、この事象との因果は未確定。GPUのフレークと同一視しない。
-修正候補はテスト用サーバーのrevisionを配布内容に結びつけ、ポート再利用でも世代を区別すること。
-通常のローカルCLI・ブラウザ比較はこの疑似HFサーバーを使用しない。
+A candidate cause of the event in the full verify of 2026-09-13 where the graph was rejected as one-output while a
+standalone run succeeded. The port at the time of the failure was not saved, so the causal link to this event is
+unconfirmed. Do not equate it with the GPU flakes.
+The fix candidate is to tie the test server's revision to the distribution content, so that generations are distinguished
+even when a port is reused.
+Ordinary local CLI and browser comparisons do not use this pseudo-HF server.
 
-## フル走行の `deno task verify` が GPU VRAM 圧で稀にフレークする
+## Full `deno task verify` runs rarely flake under GPU VRAM pressure
 
-VRAM に対してモデルが大きい機では GB 級モデルの連続投入で **`GpuOutOfMemoryError` /
-`GpuDeviceLostError` が稀に出る**。落ちるテストは毎回違い（特定の 1 本に固有の欠陥ではない）、
-**失敗したファイルを単独で再走すると緑**になる。フル走行だけでなく、**レーンを間隔なしに
-連続実行したとき**にも同じ形で出る（解放が次の device poll まで遅れる機がある —
-下の「Intel Arc B570」節）。
+On machines where the models are large relative to VRAM, feeding GB-class models in succession **rarely produces
+`GpuOutOfMemoryError` / `GpuDeviceLostError`**. The failing test differs every time (not a defect specific to one test),
+and **re-running the failed file alone is green**. It appears in the same form not only in full runs but also **when lanes
+are run back to back without a gap** (on some machines the release is delayed until the next device poll — the
+"Intel Arc B570" section below).
 
-運用の回避 = **レーンの間に数分の間隔を置く**か、**失敗したファイルを単独で再走して確認する**
-（緑ならフレーク）。ただし device lost を例外にせず panic する環境（Deno 2.9.6 — 同節）では
-プロセスごと消えるので、単独再走の前にそこで走行自体が止まる。
+Operational workaround = **leave a few minutes between lanes**, or **re-run the failed file alone to confirm**
+(green means a flake). However, in an environment that panics instead of raising an exception on device lost
+(Deno 2.9.6 — same section), the whole process disappears, so the run itself stops there before any standalone re-run.
 
-## Metal（Apple GPU）で attention i8a8 の GPU 出力が TS 参照と 1 ULP ずれる（+ conv1d/conv2d parity 4 本 + gru_scan parity 2 本 + linear GEMV u32 門 1 本）
+## On Metal (Apple GPU), the GPU output of attention i8a8 is 1 ULP off the TS reference (+ 4 conv1d/conv2d parity tests + 2 gru_scan parity tests + 1 linear GEMV u32 check)
 
-実機 **Apple M2**（初出 Deno 2.9.4・2026-08-29 に 2.9.6 で再検証・2026-08-31 フル verify で
-節の対象を棚卸し・**2026-09-02 にメモリ管理波 Phase A 後の HEAD `2b096c4` を Deno 2.9.4 で
-再実測 = 計 12 本が同一署名で再現・新規 0**・**2026-09-03 にレビュー修正波後の HEAD `b7e32c1` を
-macOS 26 で再実測 = 同じ 12 本が同一署名で再現。フル verify は 1856 passed / 13 failed /
-139 ignored で、13 本目は本節の対象ではなく下の `--diagnostics` 節**）で attention i8a8 系 4 本
-（`gpu_attention_pv_i8a8_test.ts` 3 本 + `gpu_attention_pv_i8a8_test.ts` 1 本）+
-**conv1d parity 2 本 + conv2d parity 2 本**
-（旧記述は conv2d のみ — conv1d の 2 本が記載から漏れていた・症状は同型）+
-**gru_scan / gru_scan_reverse の分解 parity 2 本**（下の節）+ GEMV u32 門 1 本 + OOM 門 1 本
-（次節）が赤（Linux / Vulkan は全緑）。
-**2026-08-29 のカナリア実機検証で機序の理解が更新された**:
+On real **Apple M2** hardware (first seen on Deno 2.9.4; re-verified on 2.9.6 on 2026-08-29; the section's targets
+inventoried in the full verify of 2026-08-31; **re-measured on 2026-09-02 at HEAD `2b096c4` after memory management
+phase A on Deno 2.9.4 = 12 tests in total reproduce with the same signature, 0 new**; **re-measured on 2026-09-03 at
+HEAD `b7e32c1` after the review-fix phase on macOS 26 = the same 12 reproduce with the same signature. The full verify is
+1856 passed / 13 failed / 139 ignored, and the 13th is not a target of this section but of the `--diagnostics` section
+below**), 4 attention i8a8 tests
+(3 in `gpu_attention_pv_i8a8_test.ts` + 1 in `gpu_attention_pv_i8a8_test.ts`) +
+**2 conv1d parity + 2 conv2d parity tests**
+(the old text listed conv2d only — the 2 conv1d tests were missing from the record; same symptom) +
+**2 decomposition parity tests of gru_scan / gru_scan_reverse** (below) + 1 GEMV u32 check + 1 OOM check
+(next section) are red (Linux / Vulkan are all green).
+**The canary hardware verification of 2026-08-29 updated the understanding of the mechanism**:
 
-- **dp4a とエミュの両変種は M2 でもビット同一**（カナリア両腕が同値・PV の相互一致テスト緑・
-  qP 整数段 62,088 要素で不一致 0%）。旧記述「整数演算に丸め差が無い以上 QK / PV では実際に
-  違う値が出ている」（変種間不一致という推論）は**誤りだった** — 落ちていた比較は
-  **GPU vs TS 参照**で、旧観測も同じ形だった可能性が高い（撤回 2026-08-29）。
-- 実態は**両変種が共有する f32 エピローグ（scale 適用）の出力が TS 参照とちょうど 1 ULP
-  ずれる**（QK 28.4 近傍で 1.9e-6・12.0 近傍で 9.5e-7・PV 0.2 近傍で 1.5e-8）。整数段は厳密
-  一致。仮説（未確定）: naga → MSL の FMA 契約差で乗算連鎖の丸めが変わる。
-- 実害は **atol=0 のクロスプラットフォーム parity 門が Metal で立たない**ことのみ。品質影響は
-  1 ULP で無視できる（Mac で正常な画像が生成できている実績どおり）。ブラウザ実行は
-  Dawn / Tint 系で naga を通らないため同じ症状とは限らない（未検証）。
-- 変種選択は実走カナリア（ADR [0058](decisions/0058-numerics-opt-in-contract.md) 追記）の
-  **判定則 v2** が扱う — 「両腕ビット同一・参照とは帯内（rtol 1e-5）の差」は dp4a を選び
-  警告 1 回で実行継続（a8 は動く）。帯外だけが `GpuFeatureError`。
-- **カナリア①QK の固定入力は f16 格子へ載せ直した**（2026-08-30・RC1-1）: 倍率を 2 の冪に閉じ
-  `acc` の有効桁を f16 仮数に収めることで、既知解 8,192 要素が全て f16 ちょうどになり、
-  エピローグに**丸めが 1 度も起きない**。よって①QK は健全な device でも M2 でも既知解と厳密
-  一致する見込みで、**この 1 ULP 差が今後観測されるのは③PV 側だけ**になる（③PV は
-  `qP = round(127·exp(S−m))` を GPU が作るため丸めが残る）。**M2 実機で再確認済み
-  （2026-09-01）**: 当時のカナリア 16 本すべて緑 — 素の判定が dp4a を選び分岐と厳密一致
-  フラグが整合・故障注入系も想定どおり（現行の本数は 17 本で、後から足した 1 本は M2 未実測）。
-  軸 reduce パリティ（`gpu_reduce_axis_parity_test.ts` 2 本）も M2 緑。
-- **conv1d / conv2d parity 4 本**（implicit GEMM ↔ 直接カーネルのビット一致・golden の
-  tolerance 判定は緑）は従来どおり原因未特定 — 同種のエピローグ丸め差の可能性が高いが未検証。
-- **gru_scan / gru_scan_reverse の分解 parity 2 本が M2 で赤（2026-08-31 実測）**:
-  `gpu_gru_scan_parity_test.ts` の T4 N1 H128 で 158/512・71/512 要素が 1〜64 ULP 不一致
-  （NaN なし・小さい H のケースは緑・Linux / Vulkan は全緑）。**tanh_stable 化（gru_scan v2）
-  の regression ではない** — 変更前 HEAD `b35cf5c` で同一署名（同ケース・同件数・同ビット列）の
-  赤を実測 = 既存かつ v2 が Metal でも in-band ビット不変であることの実証。機序の見立て =
-  本節冒頭と同一クラス: fused 側の縮約 / 更新式を MSL の contraction が跨ぎ、workgroup memory
-  往復の**丸め障壁が Metal では障壁として機能していない**（src/kernels/gru-scan.ts の doc が
-  予告していた形 — 「丸め障壁は WGSL 仕様の保証ではない」）。H=128 = 縮約長が伸びると顕在化。
-  実害は他と同じく「クロス経路の atol=0 門が Metal で立たない」ことのみ — 実品質は
-  vowel-detector golden（tolerance 門）が M2 緑で担保。根治候補 = 丸め障壁の式形強化
-  （bitcast 往復は無効と実測済みなので別手段 — 下の根治候補と同席・M2 実機ループ要・未着手）。
-- **linear の GEMV 族（M=1 × i4 — ADR [0082](decisions/0082-linear-gemv-decode.md)）の u32
-  完全一致門が M2 で 1 ULP 赤（2026-09-01 実測）**: `gpu_linear_gemv_test.ts` の門キー検査は
-  緑・既定経路との u32 突合が整除形 k128 n64 g32 の列 1 で `0x414b3249` vs `0x414b3248`
-  （12.699776… vs 12.699775… = 1 ULP）。Linux / Vulkan は緑。見立て = 本節冒頭と同一クラス
-  （naga → MSL の FMA 契約差で乗算連鎖の丸めが変わる — 未確定）。**撤回（2026-09-01）**: 旧記述
-  「chat e2e が M2 で golden 完走 = 動作・品質は健全」は**実走の裏付けが無いまま書かれていた**
-  （M2 で実測されたのはカナリア / reduce parity / skinny / gemv 門のみ — ユーザー指摘で発覚）。
-  当時 chat e2e は M2 で gemma4 prefill NaN（gemv とは独立・`gelu_tanh` の Metal fast-math
-  オーバーフロー — `tanh_stable` で解消済み・対話実走は M2 確認済み）により走り切れなかった。
-  margin 門が 1 ULP を吸収するという命題は **M2 で成立を実測（2026-09-02）**: NaN 解消後の
-  `e2e_gemma4_chat_test.ts`（温度 0 の greedy golden と文字単位一致 — 6 門）が M2 で全緑
-  （ADR [0082](decisions/0082-linear-gemv-decode.md) 追記 3 — 追記 2 で保留した根拠 1 の
-  立て直し）。既知の実害は attention i8a8 と
-  同じく「クロス経路の atol=0 門が Metal で立たない」こと。**切り分け済み（2026-09-01）**: `gpu_gemm_skinny_test.ts` の
-  バケット跨ぎ u32 門は M2 で緑 — **GEMV 固有**（一般則説は棄却）。**裁定 = 既定経路維持**
-  （ADR [0082](decisions/0082-linear-gemv-decode.md) 追記 1 — 機序の見立て: GEMM は逆量子化を
-  共有タイルへ格納してから読む = 丸め障壁あり / GEMV は 1 式インライン = MSL の contraction が
-  跨げる）。根治候補 = GEMV に明示の丸め点を入れる式形の探索（M2 実機ループ要・下の根治候補と
-  同席・未着手）。
-  **i8 変種（K-16・2026-09-06・`5ddd186`）は M2 未実測** — 同じ 1 式インラインなので同帯（1 ULP）の
-  見込み。Linux / Vulkan の u32 門は i8 6 形とも緑。**states 形 attention のタイル経路 ①ₜ / ③ₜ（K-13・
-  2026-09-06）も M2 未実測** — GEMM 骨格（共有タイル経由 = 丸め障壁あり）なので i4 GEMV とは機序が違い、
-  ① / ③ との u32 一致は同じバックエンドで同じ字面を回す限り揃う見込み。
-  **行ブロック変種（K-21・2026-09-07・`5701262`・1 ≤ M ≤ 64）も M2 未実測** — 同じ 1 式インライン
-  （逆量子化を `let` に置いて行間で共有）なので同帯（1 ULP）の見込み。同時に u32 門の比較相手が
-  M=2（幾何 M16N16）から M=65（幾何 M64N32・門の外）へ移ったので、上の署名（`0x414b3249` vs
-  `0x414b3248`）は M2 で採り直すと変わりうる。Linux / Vulkan は M=1 の 12 形 + 行ブロック 13 形とも緑。
-  **動作は M2 で確認済み（2026-09-07 ユーザー実走 — K-21 の行ブロック変種 + H-15 の予算つき backing を含む
-  最新 main）**。u32 完全一致門の赤 / 緑は未報告（上の 1 ULP 帯の見込みのまま）。
-- **sha256 の突合（anima PNG 9 本 / sbv2 WAV 6 本 / irodori WAV 2 本〈no-ref / voice-clone〉）は
-  Metal で明示 SKIP + 参照門 3 本が赤**:
-  参照値 fixture に Metal の環境キーの行が無いので 17 件は突き合わせずに SKIP され、系列ごとの
-  参照門（anima / sbv2 / irodori）が「この環境の行が 1 件も無い」で赤くなる（ADR
-  [0106](decisions/0106-device-keyed-references.md)・limitations「sha256 参照門は参照環境専用」節の
-  仕様どおり）。本節の対象には数えない。行は `KARUME_REFERENCE=write` で同じレーンを回せば作れるが、
-  その回の実測を正とする操作なので健全性を別途確かめてから作る。別経路同士の実測 sha は一致
-  （base CFG の fromPretrained と fromAssets 分割形・512 euler と fromPretrained-512・1024 と
-  onEvent-1024）= Metal 上で決定的で、ロード経路は出力バイトを変えていない。出力はユーザーが
-  目視 / 聴感で健全を確認済み。
+- **The dp4a and emulation variants are bit-identical on M2 too** (both canary arms equal; the PV mutual-agreement
+  test green; 0% mismatches over 62,088 elements of the qP integer stage). The old text "since integer arithmetic has no
+  rounding difference, QK / PV actually produce different values" (an inference of an inter-variant mismatch)
+  **was wrong** — the failing comparison was **GPU vs the TS reference**, and the old observation was most likely of
+  the same form (withdrawn 2026-08-29).
+- What actually happens is that **the output of the f32 epilogue (applying the scale) shared by both variants is exactly
+  1 ULP off the TS reference** (1.9e-6 near QK 28.4, 9.5e-7 near 12.0, 1.5e-8 near PV 0.2). The integer stage matches
+  exactly. Hypothesis (unconfirmed): a difference in FMA contraction from naga → MSL changes the rounding of the
+  multiplication chain.
+- The only real harm is that **the atol=0 cross-platform parity check does not hold on Metal**. The quality impact is
+  negligible at 1 ULP (as the track record of the Mac generating correct images shows). Browser execution goes through
+  Dawn / Tint, not naga, so the same symptom is not guaranteed (unverified).
+- Variant selection is handled by **decision rule v2** of the run-time canary (ADR
+  [0058](decisions/0058-numerics-opt-in-contract.md) addendum) — "both arms bit-identical, inside the band (rtol 1e-5)
+  against the reference" picks dp4a and continues with one warning (a8 runs). Only outside the band is `GpuFeatureError`.
+- **The fixed input of canary ① QK was moved onto the f16 grid** (2026-08-30, RC1-1): by restricting the multiplier to
+  powers of 2 and keeping the significant digits of `acc` within the f16 mantissa, all 8,192 elements of the known answer
+  are exact f16 values, and **no rounding occurs even once** in the epilogue. Hence ① QK is expected to match the known
+  answer exactly both on a healthy device and on M2, and **this 1-ULP difference will from now on be observed only on the
+  ③ PV side** (③ PV retains rounding because the GPU produces `qP = round(127·exp(S−m))`). **Re-confirmed on real M2
+  hardware (2026-09-01)**: all 16 canary tests of the time green — the plain decision picks dp4a, and the branch and the
+  exact-match flag are consistent; the fault-injection tests behave as expected (the current count is 17, and the one
+  added later has not been measured on M2).
+  The axis reduce parity tests (2 in `gpu_reduce_axis_parity_test.ts`) are also green on M2.
+- **The 4 conv1d / conv2d parity tests** (bit agreement implicit GEMM ↔ direct kernel; the golden tolerance judgement
+  is green) remain without an identified cause — most likely the same kind of epilogue rounding difference, but unverified.
+- **The 2 decomposition parity tests of gru_scan / gru_scan_reverse are red on M2 (measured 2026-08-31)**:
+  in `gpu_gru_scan_parity_test.ts`, T4 N1 H128 has 158/512 and 71/512 elements disagreeing by 1–64 ULP
+  (no NaN; the cases with small H are green; Linux / Vulkan all green). **Not a regression of the tanh_stable change
+  (gru_scan v2)** — the same signature (same cases, same counts, same bit patterns) was measured red at `b35cf5c`, the
+  HEAD before the change = pre-existing, and a demonstration that v2 is in-band bit-invariant on Metal too. Suspected
+  mechanism = the same class as the head of this section: MSL contraction spans the reduction / update expressions on the
+  fused side, and **the rounding barrier of the workgroup memory round trip does not act as a barrier on Metal** (the
+  form that the doc of src/kernels/gru-scan.ts anticipated — "the rounding barrier is not a guarantee of the WGSL
+  specification"). It surfaces when H=128 = the reduction length grows.
+  The real harm, as elsewhere, is only that "the cross-path atol=0 check does not hold on Metal" — the actual quality is
+  ensured by the vowel-detector golden (a tolerance check) being green on M2. Root-cause candidate = strengthening the
+  expression form of the rounding barrier
+  (a bitcast round trip was measured to be ineffective, so another means — grouped with the root-cause candidate below;
+  needs a real-M2 loop; not started).
+- **The exact u32 check of linear's GEMV family (M=1 × i4 — ADR [0082](decisions/0082-linear-gemv-decode.md)) is red
+  by 1 ULP on M2 (measured 2026-09-01)**: the check-key test of `gpu_linear_gemv_test.ts` is
+  green; the u32 comparison against the default path fails at column 1 of the divisible shape k128 n64 g32 with
+  `0x414b3249` vs `0x414b3248` (12.699776… vs 12.699775… = 1 ULP). Linux / Vulkan are green. Suspected mechanism = the
+  same class as the head of this section (a difference in FMA contraction from naga → MSL changes the rounding of the
+  multiplication chain — unconfirmed). **Withdrawn (2026-09-01)**: the old text
+  "chat e2e completes golden on M2 = behaviour and quality are sound" **had been written without the backing of an
+  actual run** (what had been measured on M2 was only the canary / reduce parity / skinny / gemv checks — discovered
+  through a remark by the user). At the time chat e2e could not run to completion on M2 because of gemma4 prefill NaN
+  (independent of gemv; Metal fast-math overflow of `gelu_tanh` — resolved by `tanh_stable`; interactive runs confirmed
+  on M2). The proposition that the margin check absorbs 1 ULP **was measured to hold on M2 (2026-09-02)**: after the NaN
+  fix, `e2e_gemma4_chat_test.ts` (character-level agreement with the temperature-0 greedy golden — 6 checks) is all
+  green on M2 (ADR [0082](decisions/0082-linear-gemv-decode.md) addendum 3 — re-establishing ground 1 that addendum 2
+  had put on hold). The known real harm is, as with attention i8a8,
+  that "the cross-path atol=0 check does not hold on Metal". **Isolated (2026-09-01)**: the cross-bucket u32 check of
+  `gpu_gemm_skinny_test.ts` is green on M2 — **specific to GEMV** (the general-rule hypothesis rejected). **Ruling =
+  keep the default path** (ADR [0082](decisions/0082-linear-gemv-decode.md) addendum 1 — suspected mechanism: GEMM
+  stores the dequantization in a shared tile before reading it = a rounding barrier exists / GEMV inlines it in one
+  expression = MSL contraction can span it). Root-cause candidate = searching for an expression form that puts an
+  explicit rounding point in GEMV (needs a real-M2 loop; grouped with the root-cause candidate below; not started).
+  **The i8 variant (K-16, 2026-09-06, `5ddd186`) has not been measured on M2** — the same single inline expression, so
+  it is expected in the same band (1 ULP). On Linux / Vulkan the u32 check is green for all 6 i8 shapes. **The tiled
+  paths ①ₜ / ③ₜ of states-shaped attention (K-13, 2026-09-06) have not been measured on M2 either** — they use the GEMM
+  skeleton (through a shared tile = a rounding barrier exists), so the mechanism differs from i4 GEMV, and u32 agreement
+  with ① / ③ is expected to hold as long as the same text runs on the same backend.
+  **The row-block variant (K-21, 2026-09-07, `5701262`, 1 ≤ M ≤ 64) has not been measured on M2 either** — the same
+  single inline expression (the dequantization is put in a `let` and shared across rows), so it is expected in the same
+  band (1 ULP). At the same time, the comparison partner of the u32 check moved from M=2 (geometry M16N16) to M=65
+  (geometry M64N32, outside the check), so the signature above (`0x414b3249` vs `0x414b3248`) may change when re-taken
+  on M2. Linux / Vulkan are green for the 12 shapes of M=1 + the 13 row-block shapes.
+  **Behaviour has been confirmed on M2 (user run on 2026-09-07 — the latest main including the K-21 row-block variant +
+  the budgeted backing of H-15)**. Red / green of the exact u32 check has not been reported (still expected within the
+  1-ULP band above).
+- **The sha256 comparisons (anima PNG 9 / sbv2 WAV 6 / irodori WAV 2 (no-ref / voice-clone)) are explicitly SKIPped on
+  Metal + 3 reference guards are red**:
+  the reference-value fixtures have no row for Metal's environment key, so the 17 cases are SKIPped without comparison,
+  and the per-family reference guards (anima / sbv2 / irodori) go red with "there is not a single row for this
+  environment" (as specified by ADR [0106](decisions/0106-device-keyed-references.md) and the limitations section
+  "The sha256 reference check is for the reference environment only"). Not counted among this section's targets. The rows
+  can be created by running the same lane with `KARUME_REFERENCE=write`, but that operation takes the run's measurement as
+  correct, so soundness is confirmed separately before creating them. Measured sha values agree across different paths
+  (the base CFG with fromPretrained vs the split fromAssets form, 512 euler vs fromPretrained-512, 1024 vs
+  onEvent-1024) = deterministic on Metal, and the load path does not change the output bytes. The user has confirmed by
+  eye / ear that the outputs are sound.
 
-Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36257 = mapped range の
-み）。根治候補 = WGSL 側で丸めを固定する手段は明示 `fma()` が有効と判明（ADR
-[0105](decisions/0105-packed-static-quantize-activations.md) 追記 4 — bitcast 往復 + XOR 0 の
-丸め障壁は M2 で無効と実測し撤回）。適用済みは並列 GEMV 族と subgroup32 変種（2026-09-25・M2 の再検収は
-[0101 追記](decisions/0101-linear-gemv-subgroup.md)）で、逐次 GEMV・行ブロック・conv・gru・attention エピローグは未適用。TS 参照の FMA 許容化は未着手。記録 =
+Deno 2.9.5 / 2.9.6 contain no Metal / naga / wgpu updates (denoland/deno#36257 = mapped range
+only). Root-cause candidate = an explicit `fma()` was found effective as a means of fixing the rounding on the WGSL side
+(ADR [0105](decisions/0105-packed-static-quantize-activations.md) addendum 4 — the bitcast round trip + XOR 0 rounding
+barrier was measured ineffective on M2 and withdrawn). It is applied to the parallel GEMV family and the subgroup32
+variant (2026-09-25; the M2 re-acceptance is in
+[the 0101 addendum](decisions/0101-linear-gemv-subgroup.md)); the sequential GEMV, row block, conv, gru and attention
+epilogue do not have it yet. Making the TS reference FMA-tolerant has not been started. Records =
 [research/2026-08-06-metal-silent-miscompute.md](research/2026-08-06-metal-silent-miscompute.md)
-（時点）と
+(snapshot) and
 [research/2026-08-29-chatgpt-review-verification.md](research/2026-08-29-chatgpt-review-verification.md)
-（M2 再検証）。
+(M2 re-verification).
 
-## Metal で out-of-memory errorScope が沈黙する — fail loudly 門が不発（独立バグ）
+## On Metal the out-of-memory errorScope stays silent — the fail-loudly check does not fire (an independent bug)
 
-実機 **M2（24GB / maxBufferSize 14.3GB）**で `gpu_generation_context_test.ts` の
-「state 確保の失敗は out-of-memory errorScope で fail loudly」が
-**Expected function to reject** で赤（2026-09-01）= **64GiB の state スロット確保が黙って成功
-する**（Metal の遅延確保 — wgpu の Metal backend は総量予算を持たず、`newBufferWithLength:` が
-物理超過でも nil を返さない形）。バッファ層自体は M2 実測で健全
-（Metal NaN 調査時のプローブ実測 — 単一 64〜640MiB・実プロファイル 835 本累積とも全一致。
-プローブ群は役目を終え 2026-08-31 に削除済み — 復元は git 履歴から）。
+On real **M2 (24GB / maxBufferSize 14.3GB)** hardware, the test in `gpu_generation_context_test.ts`
+"state allocation failure fails loudly via the out-of-memory errorScope" is
+red with **Expected function to reject** (2026-09-01) = **the allocation of a 64GiB state slot silently
+succeeds** (Metal's lazy allocation — wgpu's Metal backend has no total budget, and `newBufferWithLength:` does not
+return nil even when physical memory is exceeded). The buffer layer itself is sound as measured on M2
+(probe measurements during the Metal NaN investigation — single buffers of 64–640MiB and a cumulative 835 buffers of a
+real profile all matched. The probes have served their purpose and were deleted on 2026-08-31 — restore them from git
+history).
 
-**部分消化（2026-09-01・ADR 0089 = メモリ管理波 Phase A）**: 重み・state とも**単発バッファの
-絶対上限超過は確保前の明示検査で決定論的に落ちる**ようになった（`assertWeightsWithinLimits` /
-state 側の 2 上限化 — 修正候補だった「明示サイズ門」は消化）。残るのは**複数バッファ合計の
-物理超過**で、これは WebGPU が空き容量を露出しないため事前検査できず（ADR 0070 決定 5）、
-Metal では errorScope 沈黙のまま — by-design 制約として limitations「GPU メモリの事前検査は
-絶対上限まで」節に移管。`requiredLimits` のロード時実効化（DL 前拒否）は波 2 で結線済み
-（`335ad7a` — ADR 0089 追記 2026-09-01）。
+**Partly resolved (2026-09-01, ADR 0089 = memory management phase A)**: for both weights and state, **exceeding the
+absolute limit for a single buffer now fails deterministically through an explicit check before allocation**
+(`assertWeightsWithinLimits` / the two limits on the state side — the fix candidate "explicit size check" is done).
+What remains is **the physical overrun by the sum of several buffers**, which cannot be checked in advance because
+WebGPU does not expose free capacity (ADR 0070 decision 5), and stays errorScope-silent on Metal — moved as a by-design
+constraint to the limitations section "GPU memory pre-checks go up to \"the device's absolute limits\"". Making
+`requiredLimits` effective at load time (rejection before download) was wired in wave 2
+(`335ad7a` — ADR 0089 addendum 2026-09-01).
 
-**Phase A 後の M2 再実測（2026-09-02・Deno 2.9.4）**: 本門は予告どおり赤のまま（1GiB × 64 本は
-各バッファが上限内で、合計超過は検査対象外）。DL 前検査は gemma4（宣言 384MiB）/ anima
-（宣言 311,164,928B）の配布形ミラーが M2 のアダプタ値（maxBufferSize 14,302,248,960 /
-maxStorageBufferBindingSize 4,294,967,292）で誤拒否なく通過し、生成まで完走。
+**Re-measurement on M2 after phase A (2026-09-02, Deno 2.9.4)**: this check remains red as predicted (1GiB × 64
+buffers are each within the limit, and the total overrun is outside the check). The pre-download check passed without
+false rejection for the distribution mirrors of gemma4 (declared 384MiB) / anima (declared 311,164,928B) at the M2
+adapter values (maxBufferSize 14,302,248,960 / maxStorageBufferBindingSize 4,294,967,292), and generation ran to
+completion.
 
-## Metal で `--diagnostics`（`gpuTiming: true`）が device ごと落ちる — 切り分け実験は未着手（M2 実機が要る）
+## On Metal, `--diagnostics` (`gpuTiming: true`) takes the device down — the isolation experiment has not been started (needs real M2 hardware)
 
-実機 **Apple M2 / macOS 26 / Deno 2.9.x** で `examples/gemma4` を `--diagnostics` 付きで走らせると、
-最初のターンで device が消失して落ちる。機序と確定事実は
-[limitations](limitations.md)「Metal（Apple GPU）では GPU 側 timestamp 計測が実用にならない」節に
-書いた（`createQuerySet` の失敗 → `DeviceError::Unexpected` → device lost・errorScope には入らない）。
-**未確定なのは資源の軸**で、①初回 run で同時に生きる query set の本数（1 チャンク 16 dispatch 固定
-なので gemma4 prefill ≈1,500 dispatch で約 100 本）②Deno の `GPUQuerySet.destroy()` が no-op で
-GC まで滞留する量、のどちらが支配的か切り分けられていない。両者は排他ではない。実機は
-**macOS 26（Metal 4）と確認済み（2026-09-03）**なので、確保に成功しても timestamp が全ゼロになる
-別の未修正問題（[wgpu#9414](https://github.com/gfx-rs/wgpu/issues/9414)）の射程にも入る — 下の修正
-候補を入れても、この機体で op 別内訳が読めるようになるとは限らない。
+On real **Apple M2 / macOS 26 / Deno 2.9.x** hardware, running `examples/gemma4` (removed in 0.15) with
+`--diagnostics` loses the device on the first turn and fails. The mechanism and the established facts are written in
+the [limitations](limitations.md) section "On Metal (Apple GPU), GPU-side timestamp measurement is not practical"
+(`createQuerySet` fails → `DeviceError::Unexpected` → device lost; it does not enter the errorScope).
+**What is unconfirmed is the resource axis**: it has not been isolated which dominates, ① the number of query sets alive
+at the same time in the first run (one chunk is fixed at 16 dispatches, so about 100 for gemma4 prefill ≈1,500
+dispatches) or ② the amount that stays until GC because Deno's `GPUQuerySet.destroy()` is a no-op. The two are not
+exclusive. The hardware was **confirmed to be macOS 26 (Metal 4) (2026-09-03)**, so it also falls within the range of a
+separate unfixed problem where timestamps are all zero even when allocation succeeds
+([wgpu#9414](https://github.com/gfx-rs/wgpu/issues/9414)) — even with the fix candidate below, op-level breakdowns may
+not become readable on this machine.
 
-**フル verify でも同じ形で 1 本赤になる（2026-09-03・M2 / macOS 26 実測）**: `--diagnostics` を
-渡さない `deno task verify` でも、`packages/models/tests/e2e_gemma4_pretrained_test.ts:208` の
-census 門（「gemma4 配布形: パイプラインの既定は ③' 並列縮約で走り…」）が `acquireGpu({ gpuTiming:
-true })` で実重み gemma4 の prefill を走らせるため、parallel / sequential の 2 step とも赤になる
-（フル verify 1856 passed / 13 failed / 139 ignored の **13 本目** — 上の 1 ULP 節が数える 12 本
-とは別クラス）。Metal でも **`ignore` 条件に掛からない**: 判定は `adapter.features` の列挙だけで
-（`packages/models/tests/helpers/gpu.ts` の `TIMESTAMP_QUERY_AVAILABLE`）、Metal は
-`timestamp-query` を申告する。「Metal は広告しないので計測テストは skip される」という理解は誤り。
-観測されたエラーは逐語で
+**The full verify also has 1 red in the same form (2026-09-03, measured on M2 / macOS 26)**: even in
+`deno task verify`, which does not pass `--diagnostics`, the census check at
+`packages/models/tests/e2e_gemma4_pretrained_test.ts:208` ("gemma4 distribution: the pipeline default runs with ③'
+parallel reduction…") runs the real-weight gemma4 prefill with `acquireGpu({ gpuTiming:
+true })`, so both the parallel and the sequential steps are red
+(the **13th** of full verify 1856 passed / 13 failed / 139 ignored — a different class from the 12 counted by the
+1 ULP section above). On Metal too, it **does not fall under the `ignore` condition**: the decision is only the
+enumeration of `adapter.features` (`TIMESTAMP_QUERY_AVAILABLE` in `packages/models/tests/helpers/gpu.ts`), and Metal
+declares `timestamp-query`. The understanding "Metal does not advertise it, so the timing tests are skipped" is wrong.
+The observed error, verbatim:
 
 ```
 GpuDeviceLostError: flush 中に device が失われた（再構築が必要） — reason: unknown / device was lost
 ```
 
-（スタックは `SubmitScheduler.flush`〈`submit.ts:532`〉→ `RunArena.destroy`〈`arena.ts:189`〉→
-`GpuContext.onLost`〈`context.ts:351`〉）。**`reason` に載ったのは Metal 側の汎用文言「device was lost」だけで、
-`createQuerySet` の真因文字列は届かなかった** — limitations の「バックエンドが入れた真因文字列が
-初めて呼び手まで届く」は本経路では成立しない。したがって「query set 約 100 本の同時生存が原因」は
-**見立てのまま**（逐語の裏付けはまだ無い）。傍証として、単一 query set の
-`packages/runtime/tests/gpu_timing_test.ts` は同じ M2 で緑 = 失敗は本数依存であって無条件ではない。
-wgpu#9414 の「timestamp 全ゼロ」はこの構成では観測されていない。
-**2026-09-26**: census を計測非依存化した（源を `lastRunPipelines` へ移し、census テストから
-`gpuTiming: true` と `TIMESTAMP_QUERY_AVAILABLE` 判定を外した）ので、query set 本数依存のこの赤
-（13 本目）は消える見込み — M2 での確認待ち。
+(The stack is `SubmitScheduler.flush` (`submit.ts:532`) → `RunArena.destroy` (`arena.ts:189`) →
+`GpuContext.onLost` (`context.ts:351`).) **What was carried in `reason` was only Metal's generic wording "device was
+lost"; the true-cause string of `createQuerySet` did not arrive** — the limitations statement "the true-cause string
+put in by the backend reaches the caller for the first time" does not hold on this path. Therefore "about 100 query sets
+alive at the same time is the cause" **remains a hypothesis** (no verbatim backing yet). As circumstantial evidence,
+`packages/runtime/tests/gpu_timing_test.ts` with a single query set is green on the same M2 = the failure depends on the
+count and is not unconditional.
+The "all-zero timestamps" of wgpu#9414 has not been observed in this configuration.
+**2026-09-26**: the census was made independent of timing (its source moved to `lastRunPipelines`, and
+`gpuTiming: true` and the `TIMESTAMP_QUERY_AVAILABLE` decision were removed from the census test), so this red that
+depends on the query set count (the 13th) is expected to disappear — awaiting confirmation on M2.
 
-切り分け実験（実機が要る・1 ターンだけ走らせる）:
+Isolation experiment (needs the hardware; run only one turn):
 
-1. `SubmitPolicy.initialChunkSize` を 16 → 256 にして本数を約 1/16 に落とす A/B。落ちなくなれば
-   同時生存本数が支配（①）。
-2. `deno --v8-flags=--expose-gc` で run ごとに GC を強制する。落ちなくなれば滞留が支配（②）。
-3. ~~実機の macOS バージョン確認~~ **確認済み（2026-09-03）= macOS 26（Metal 4）**。上記のとおり
-   wgpu#9414 の射程に入るので、修正の投資判断はその前提で行う。
+1. An A/B that raises `SubmitPolicy.initialChunkSize` from 16 to 256 to cut the count to about 1/16. If it no longer
+   fails, the number alive at the same time dominates (①).
+2. Force GC per run with `deno --v8-flags=--expose-gc`. If it no longer fails, the retention dominates (②).
+3. ~~Confirm the hardware's macOS version~~ **Confirmed (2026-09-03) = macOS 26 (Metal 4)**. As above, it falls within
+   the range of wgpu#9414, so the investment decision on the fix is made on that premise.
 
-修正候補: **query set を 1 本だけ持って使い回す**（容量は per-set 上限固定・Dawn の counter sample
-buffer プールと同じ発想）。同一 queue の実行順序保証があるので、チャンクごとにホストで待つ形へ
-落とす必要は無い見込み（`resolveBuffer` / `readBuffer` はチャンクごとに要るが、こちらは Deno でも
-`destroy()` が効く）。逆方向（刻みを小さくする）は総サンプル数が変わらず本数だけ増えるので採らない。
+Fix candidate: **keep only one query set and reuse it** (capacity fixed at the per-set limit; the same idea as Dawn's
+counter sample buffer pool). Since execution order within the same queue is guaranteed, there is expected to be no need
+to drop to a form that waits on the host per chunk (`resolveBuffer` / `readBuffer` is needed per chunk, but there
+`destroy()` works even on Deno). The opposite direction (smaller steps) is not taken, since the total number of samples
+does not change and only the count grows.
 
-**現状**: 切り分け実験（①②）も上の修正候補も**未着手**（実験には M2 実機が要る — backlog の
-now 節「Metal `--diagnostics` の切り分け実験」）。実機が macOS 26 と確定し、query set を使い回して
-確保に成功しても wgpu#9414 で timestamp が全ゼロになる可能性があるため、改修より先に実験で
-見極める（2026-09-03 裁定）。リリース判定では **verify の census 門 1 本が
-M2 で赤のまま残ることを受容する**（Linux / Vulkan は緑・parallel と sequential の等価性は計測を
-要求しない `packages/models/tests/e2e_gemma4_reduce_parity_test.ts` が担保する）。
+**Current state**: neither the isolation experiment (① ②) nor the fix candidate above **has been started** (the
+experiment needs real M2 hardware — backlog now section "Isolation experiment for Metal `--diagnostics`"). Since the
+hardware is confirmed to be macOS 26 and timestamps may be all zero due to wgpu#9414 even if reusing the query set makes
+allocation succeed, the experiment comes before the change (ruling of 2026-09-03). For the release decision, **it is
+accepted that 1 census check of verify stays red on M2** (Linux / Vulkan green; the equivalence of parallel and
+sequential is ensured by `packages/e2e/tests/e2e_gemma4_reduce_parity_test.ts`, which does not require timing).
 
-## Intel Arc B570（Linux / Vulkan ANV / xe）で OOM 門が赤 + Deno の timestamp 単位と device lost の panic（2026-09-20 実測・記録のみ）
+## Intel Arc B570 (Linux / Vulkan ANV / xe): the OOM check is red + Deno's timestamp unit and the device-lost panic (measured 2026-09-20, recorded only)
 
-開発機の GPU を RTX 3080 Ti から **Intel Arc B570**（BMG G21・VRAM 9.93 GiB・Mesa 25.0.7・Linux xe
-ドライバ・Deno 2.9.6）へ載せ替えてフル verify を回した結果のうち、未解決のまま**記録だけ**に
-とどめたもの（裁定 2026-09-20）。sha256 参照門 16 本の不一致は limitations「sha256 参照門は
-参照環境専用」の by-design で、**参照値を環境キーごとの行に替えて消化した**（ADR
-[0106](decisions/0106-device-keyed-references.md) — B570 の行 `deno-intel-graphics-bmg-g21` は
-作成済みなので、この機の門は再び「この機での退行」だけを指す）。BiRefNet 2048² の device lost は
-この機の環境キーの held 行で明示 SKIP する（`e2e_birefnet_test.ts` の `HELD_SERIES` — フル走行はこの系列で
-止まらない・limitations「BiRefNet 系」節）、
-golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化（`e2e_golden_test.ts` の
-`OUTPUT_TOLERANCE`）、`createResident` 上限門はテスト前提（`maxBufferSize` が 4 の倍数）の穴で
-修正済み。
+Of the results of running the full verify after swapping the development machine's GPU from RTX 3080 Ti to
+**Intel Arc B570** (BMG G21, VRAM 9.93 GiB, Mesa 25.0.7, Linux xe driver, Deno 2.9.6), these are the ones kept **as
+records only** while unresolved (ruling 2026-09-20). The mismatches of 16 sha256 reference checks are the by-design case
+of the limitations section "The sha256 reference check is for the reference environment only", and **were resolved by
+changing the reference values to rows per environment key** (ADR
+[0106](decisions/0106-device-keyed-references.md) — the B570 row `deno-intel-graphics-bmg-g21` has been created, so
+the checks on this machine again point only at "a regression on this machine"). The BiRefNet 2048² device lost is
+explicitly SKIPped by the held row of this machine's environment key (`HELD_SERIES` in `e2e_birefnet_test.ts` — the
+full run does not stop at this family; limitations section "BiRefNet"),
+`sin` of golden `activations` was resolved by moving the tolerance toward the WGSL specification band
+(`OUTPUT_TOLERANCE` in `e2e_golden_test.ts`), and the `createResident` limit check was a hole in a test premise
+(`maxBufferSize` being a multiple of 4) and is fixed.
 
-- **OOM 門（`gpu_generation_context_test.ts`「state 確保の失敗は out-of-memory errorScope で fail
-  loudly」）が赤**: 64 GiB の state 確保は期待どおり `GpuOutOfMemoryError` で落ちるが、その直後の
-  survivor（1 GiB）も `not enough memory left` で落ちる。**karume 側の漏れではない** — 素の WebGPU
-  だけの probe で再現した（1 GiB × 9 本で OOM → 全 `destroy()` 直後の 1 GiB は OOM →
-  `onSubmittedWorkDone` + 200 ms 後の 1 GiB は成功）。Intel / wgpu では `destroy()` の解放が次の
-  device poll まで遅延する。テストは変えない（survivor を poll 後に取る形は「解放を返し損ねた
-  実体を検出する」門の意味を弱める）。Metal の「errorScope 沈黙」とは別種（こちらは落ちる側）。
-  **赤になるのは全走行の中だけで、単独実行では緑**（2026-09-27 のフル verify で再確認・12 回中 10 回が赤）。
-  赤になるかは、その時点の VRAM の余力に依る。
-  **2026-10-01**: `deno task test:core` でも、このテストファイル単独の走行（`--filter` 無し・26 本）でも 4 / 4 回赤
-  （HEAD `feb6d8fe` と、フル verify が緑だった `7c2c22e` の両方 — コードの退行ではない）。`--filter` で 1 本だけなら緑。
-  同じ遅延解放は**レーンを間隔なしに連続実行したときのフレーク**としても出る（2026-09-21: anima レーン
-  〈9 分〉の直後に sbv2 レーンを回すと、runtime の golden `i8 / flow / p512` から後の 12 本が OOM —
-  後続は `requestDevice` 自体が `Not enough memory left`。20 秒では足りないことがあり、数分空けて単独で回すと 198 本すべて緑）。
-  **レーンをまたがなくても同じ形が出る**（2026-09-22 実測）: 1 プロセス内で device の取得と破棄を
-  30 回超繰り返す tiny golden（`e2e_golden_test.ts` の 32 モデル）でも、末尾のケースが
-  `requestDevice` の `Not enough memory left` か重みアップロードの `GpuOutOfMemoryError` で赤になる
-  ことがあり、同じファイルを続けて回すと赤の本数が増える（1 回目 2 本・直後の 2 回目 7 本）。
-  単独実行（`--filter`）は緑で、数分置くと戻る。**ここまでが観測**。
-  **推定（切り分け未了）**: 赤の本数はその走行までに積んだ解放の遅れの量で、退行の大きさでは
-  ない。ただしこの観測を採った時点のテストには `acquireGpu` から `gpu.destroy()` までを
-  try/finally で守っていない経路があり（Session 構築が投げると破棄に届かず、その走行の残りが
-  破棄されない device を抱えたまま進む）、**同じ走行の中で本数を増やす別経路**として混ざっていた。
-  破棄漏れ自体は塞いだ（`e2e_golden` / `e2e_sbv2` / `e2e_gemma4` / `e2e_minicpm5`）ので、次に同じ
-  形が出たら本数の出方を測り直して原因を 1 つへ寄せる。
-  運用の回避は上の「フル走行が稀にフレークする」節が正本。
-- **Deno は timestamp-query の値を ns へ換算しない**（ext/webgpu は wgpu の raw tick をそのまま
-  返す。WebGPU 仕様は ns）。B570 の Vulkan `timestampPeriod` は 52.0833 ns なので、Deno での
-  `lastRunTiming` / `--diagnostics` の内訳は **×52 過小**（BiRefNet 1024² の GPU 総和 raw 64.8 ms
-  × 52.08 ≒ 3,375 ms、壁時計の計測窓 3,452 ms と一致）。RTX は period 1 ns で表面化しなかった。
-  **2026-10-06・RTX 3080 Ti（NVIDIA ドライバ 615.71）で実測**: 1 tick = 1 ns（133〜153 ms の pass で raw tick が壁時計 − submit の固定費
-  〈約 11 ms〉と 1% 以内で一致・query set の使い捨てと使い回しの両方）→ `TIMESTAMP_UNIT_NS` に行を足した。probe =
-  `tools/diag/timestamp-period-probe.ts`。
-  Chrome（Dawn）は換算する。karume 側で補正できない（WebGPU API は period を露出しない）ので、
-  Deno で GPU 内訳を読むときは period ≠ 1 の GPU に注意する。Deno への issue 起票は未。
-- **Deno 2.9.6 は device lost を例外にせず panic する**（ext/webgpu の `device_poll(...).unwrap()`
-  — buffer.rs:247〈mapAsync〉/ queue.rs:109〈onSubmittedWorkDone〉が `Err(Device(Lost))` で落ちる）。
-  karume の `GpuDeviceLostError` 経路に到達する前にプロセスごと消えるので、verify のフル走行中に
-  device lost が起きるとそこで走行が止まる（上の「フル走行が稀にフレークする」節の症状が
-  「テスト 1 本の赤」ではなく「プロセス消滅」になる環境）。送り込みの先行の上限の完了印（ADR 0123 — フェンスの間の
-  submit 64 回ごとの `onSubmittedWorkDone` — run だけが置く）もこの経路に入るので、長い run では、消失が印の同期
-  部分で表に出て panic する。
-- **device を破棄して作り直すと、次の device で確保できる総量が減る**（2026-09-26 観測のみ・原因未調査）。素の
-  WebGPU の probe で、device を満杯まで埋めては destroy して 500 ms 待つのを繰り返すと、次の device で確保できた
-  総量が 9 → 8 → 7 → 6 GiB と減った（[research 2026-09-26](research/2026-09-26-anima-residency-bench.md)）。上の
-  「`requestDevice` 自体が `Not enough memory left`」のフレークと同じ系統の可能性がある（推測）。
+- **The OOM check (`gpu_generation_context_test.ts` "state allocation failure fails loudly via the out-of-memory
+  errorScope") is red**: the 64 GiB state allocation fails with `GpuOutOfMemoryError` as expected, but the
+  survivor (1 GiB) right after it also fails with `not enough memory left`. **Not a leak on the karume side** —
+  reproduced with a probe of plain WebGPU only (OOM at 1 GiB × 9 → a 1 GiB allocation right after `destroy()` of all of
+  them is OOM → a 1 GiB allocation after `onSubmittedWorkDone` + 200 ms succeeds). On Intel / wgpu, the release of
+  `destroy()` is delayed until the next device poll. The test is not changed (taking the survivor after a poll would
+  weaken the meaning of the check, "detect an implementation that failed to return the release"). A different kind from
+  Metal's "errorScope silence" (here it is the side that fails).
+  **It is red only inside a full run and green when run alone** (re-confirmed in the full verify of 2026-09-27; red 10
+  times out of 12). Whether it turns red depends on the VRAM headroom at that moment.
+  **2026-10-01**: red 4 / 4 times both in `deno task test:core` and in a run of this test file alone (no `--filter`,
+  26 tests) (both at HEAD `feb6d8fe` and at `7c2c22e`, where the full verify was green — not a code regression). Green
+  when only 1 test is selected with `--filter`.
+  The same delayed release also appears as **a flake when lanes are run back to back without a gap** (2026-09-21:
+  running the sbv2 lane right after the anima lane (9 minutes), the 12 tests from the runtime golden `i8 / flow / p512`
+  on are OOM — the later ones fail in `requestDevice` itself with `Not enough memory left`. 20 seconds is sometimes not
+  enough; running alone after a gap of a few minutes, all 198 tests are green).
+  **The same form appears without crossing lanes** (measured 2026-09-22): even the tiny golden (the 32 models of
+  `e2e_golden_test.ts`), which repeats acquiring and destroying a device more than 30 times within one process,
+  sometimes has its last cases go red with `Not enough memory left` from `requestDevice` or `GpuOutOfMemoryError` on
+  weight upload, and running the same file again in succession increases the number of reds (2 on the 1st run, 7 on the
+  2nd right after). Standalone runs (`--filter`) are green, and it recovers after a few minutes. **Up to here is
+  observation**.
+  **Inference (isolation not finished)**: the number of reds is the amount of release delay accumulated by that run,
+  not the size of a regression. However, at the time this observation was taken, the tests had paths that did not guard
+  the span from `acquireGpu` to `gpu.destroy()` with try/finally (if Session construction throws, destruction is never
+  reached, and the rest of that run proceeds holding a device that is never destroyed), which was mixed in as **a
+  separate path that increases the count within the same run**. The destruction leak itself is closed (`e2e_golden` /
+  `e2e_sbv2` / `e2e_gemma4` / `e2e_minicpm5`), so the next time the same form appears, the pattern of counts is measured
+  again to narrow the cause to one.
+  The operational workaround is canonical in the section above on full runs that rarely flake.
+- **Deno does not convert timestamp-query values to ns** (ext/webgpu returns wgpu's raw ticks as is; the WebGPU
+  specification says ns). The B570's Vulkan `timestampPeriod` is 52.0833 ns, so the breakdowns of
+  `lastRunTiming` / `--diagnostics` on Deno are **×52 too small** (BiRefNet 1024² GPU total raw 64.8 ms
+  × 52.08 ≒ 3,375 ms, matching the wall-clock measurement window of 3,452 ms). On RTX the period is 1 ns, so it did not
+  surface.
+  **2026-10-06, measured on RTX 3080 Ti (NVIDIA driver 615.71)**: 1 tick = 1 ns (in passes of 133–153 ms, raw ticks
+  matched wall clock − the fixed cost of submit (about 11 ms) within 1%; with both disposable and reused query sets) → a
+  row was added to `TIMESTAMP_UNIT_NS`. Probe =
+  `tools/diag/timestamp-period-probe.ts` (removed in 0.15).
+  Chrome (Dawn) converts. karume cannot correct it (the WebGPU API does not expose the period), so
+  when reading the GPU breakdown on Deno, beware of GPUs with period ≠ 1. No issue has been filed with Deno yet.
+- **Deno 2.9.6 panics on device lost instead of raising an exception** (`device_poll(...).unwrap()` of ext/webgpu
+  — buffer.rs:247 (mapAsync) / queue.rs:109 (onSubmittedWorkDone) crash on `Err(Device(Lost))`).
+  The whole process disappears before reaching karume's `GpuDeviceLostError` path, so when a device lost occurs during a
+  full verify run, the run stops there (an environment where the symptom of the section above on full runs that rarely
+  flake is "the process disappears" rather than "one red test"). The completion marker of the in-flight submit bound
+  (ADR 0123 — an `onSubmittedWorkDone` every 64 submits between fences — placed only by run) also goes through this path,
+  so in a long run the loss surfaces in the synchronous part of the marker and panics.
+- **Destroying a device and creating a new one reduces the total that can be allocated on the next device** (observed
+  only, 2026-09-26; cause not investigated). In a probe of plain WebGPU, repeating "fill the device up, destroy it,
+  wait 500 ms" reduced the total allocatable on the next device as 9 → 8 → 7 → 6 GiB
+  ([research 2026-09-26](research/2026-09-26-anima-residency-bench.md)). It may be the same lineage as the flake
+  "`requestDevice` itself fails with `Not enough memory left`" above (speculation).
 
-## EmbeddingGemma の batch>1 export が変換段で通らない
+## EmbeddingGemma batch>1 export does not pass the conversion stage
 
-`python -m embeddinggemma.export --batch N`（N>1・tools/export-recipes 側 — 起動形は
-ADR 0065 の recipe 分離どおり）は core 側 `karume/convert.py` で fail loudly する
-（B=1 は従来どおり成功）。機序は 2 段:
+`python -m embeddinggemma.export --batch N` (N>1, on the tools/export-recipes side — the launch form follows the
+recipe separation of ADR 0065) fails loudly in core's `karume/convert.py`
+(B=1 succeeds as before). The mechanism has 2 stages:
 
-1. transformers（5.14 系）の `masking_utils.find_packed_sequence_indices` が、
-   `Gemma3TextModel` 内部の `position_ids [1,T]` と `batch_size=N` の不一致で trace 中に
-   packed-sequence 分岐へ入り、`aten.eq.Tensor` / `aten.index.Tensor` / `aten.ne.Scalar` が
-   IR まで生き残る（B=1 ではこの不一致が起きず、既存の Tmax 定数 + `sym_prefix_slice`
-   畳み込みに吸収される）。
-2. この分岐を monkeypatch で外すと、今度は帯マスクの `aten.bitwise_or.Tensor` が
-   **bool 定数を IR v1 の initializer にできない**制約（f32 / i32 のみ）に当たる。しかも
-   同 patch は **B=1 でも同じエラーを誘発する** — packed-sequence 分岐の存在自体が現行の
-   帯マスク定数畳み込みパターン成立の前提になっており、eager 同値のつもりの patch でも
-   安全ではない（実測 A/B・2026-08-11）。
+1. transformers (the 5.14 line) `masking_utils.find_packed_sequence_indices` enters the packed-sequence branch during
+   tracing because of the mismatch between `position_ids [1,T]` inside `Gemma3TextModel` and `batch_size=N`, and
+   `aten.eq.Tensor` / `aten.index.Tensor` / `aten.ne.Scalar` survive into the IR (at B=1 this mismatch does not occur,
+   and it is absorbed by the existing Tmax constant + `sym_prefix_slice` folding).
+2. Removing this branch with a monkeypatch then hits, for the band mask's `aten.bitwise_or.Tensor`, the constraint that
+   **a bool constant cannot be an IR v1 initializer** (f32 / i32 only). Moreover, the same
+   patch **triggers the same error even at B=1** — the existence of the packed-sequence branch itself is a premise of the
+   current band-mask constant-folding pattern, and even a patch meant to be eager-equivalent is not
+   safe (measured A/B, 2026-08-11).
 
-根治は convert/normalize 側の一般化（bool 定数の f32/i32 化 or initializer dtype の拡張 +
-batch>1 のマスク畳み込み対応）で、コア変換基盤への設計判断が要る。`--batch` フラグ自体は
-一般化が入ればそのまま使える形で維持している。
+The root fix is a generalisation on the convert/normalize side (turning bool constants into f32/i32, or extending
+initializer dtypes + supporting mask folding for batch>1), which needs a design decision on the core conversion
+foundation. The `--batch` flag itself is kept in a form that can be used as is once the generalisation lands.
 
-## Pixel（8GB 級 Android Chrome）で anima turbo i4 のロードが失敗する — 真因未特定
+## On Pixel (8GB-class Android Chrome), loading anima turbo i4 fails — true cause not identified
 
-実機報告のエラー文言 "BodyStreamBuffer was aborted" は Chrome が巻き添え中断の reason を
-差し替えた固定文言で、真因ではない（hub が巻き添え側を表面化させていた診断バグは
-2026-08-25 に修正済み — 真因復元 + バイト予算 + 検証直列化。**0.7.0 でリリース済み**）。
-最有力仮説はメモリ逼迫（turbo i4 でも完走時常駐 ~2.56GiB + 検証一時。i8 ではブラウザ強制
-終了の報告あり）だが、回線切断・アプリ側 abort と見え方が同一のため、修正版で `err.cause`
-を実機観測するまで確定できない。常駐そのものの削減は 0.7.0 の shard 分割配布（R1 統合波）で入り、
-現行はコンテナの block 単位の取得と Session 構築に置き換わった（ブラウザの取得元は seek 型 —
-ADR [0108](decisions/0108-container-format.md) 追記 5）。anima の HF 配布は `karume/5` で
-上げ直し済み（0.13.0 の再アップロード・2026-09-24）。残タスク = 実機再観測のみ（[backlog](backlog.md) now の
-「ユーザー実機」の Pixel 項）。
+The error text of the hardware report "BodyStreamBuffer was aborted" is a fixed text that Chrome substitutes for the
+reason of a collateral abort, not the true cause (the diagnostic bug where hub surfaced the collateral side was fixed on
+2026-08-25 — restoring the true cause + byte budget + serialising verification. **Released in 0.7.0**).
+The leading hypothesis is memory pressure (even turbo i4 is ~2.56GiB resident at completion + verification temporaries;
+with i8 a forced browser termination was reported), but it looks identical to a connection drop or an app-side abort, so
+it cannot be confirmed until `err.cause` is observed on the hardware with the fixed version. Reducing residency itself
+came with the shard-split distribution of 0.7.0 (the R1 integration phase), and is currently replaced by block-level
+fetching of containers and Session construction (the browser source is seek-type —
+ADR [0108](decisions/0108-container-format.md) addendum 5). anima's HF distribution has been re-uploaded as
+`karume/5` (the 0.13.0 re-upload, 2026-09-24). Remaining task = re-observation on the hardware only (the Pixel item of
+"User hardware" in the [backlog](backlog.md) now section).
 
-## Pixel（Mali-G715・Android Chrome 154）で Anima の段ごとの GPU 時間が壁時計を超える — timestamp の読みが壊れている疑い（2026-10-01 観測・記録のみ）
+## On Pixel (Mali-G715, Android Chrome 154), Anima's per-stage GPU time exceeds the wall clock — suspected broken timestamp reads (observed 2026-10-01, recorded only)
 
-利用者の Pixel 10a（adapter `arm` / `valhall` / `Mali-G715`・gpu-lab の Anima タブ・512²・`residency: transformer`）の記録
-`outputs/bench-browser/anima-residency-browser-f16-2026-10-01T10-43-00.425Z.json` で、段の `gpu.totalNs` が壁時計を大きく超える:
-text_encoder 186.7 s 対 49.8 s（3.7 倍）・transformer 94,533 s 対 234 s（400 倍）・vae_decoder 1,295 s 対 20 s（64 倍）。
-内訳では strided / elementwise の 1 dispatch が 4〜5 秒と出る（ありえない）。同じ端末の幾何掃引（1 pass = 1 dispatch の反復・
-`…geometry-sweep-browser-2026-10-01T09-37-40.824Z.json`）では GPU 時間と壁時計が一致する（例: 89.8 ms 対 92.6 ms）ので、
-掃引の経路は正しく、多数の timestamp query を 1 run にまとめる Anima の診断の経路でだけ壊れる。`clampedNegativeSamples` は 0。
-**この端末の段ごとの GPU 時間（`lastRunTiming` / gpu-lab の GPU 列）は信用できず、壁時計だけを見る。**
-推定（切り分け未了）: Mali の timestamp の桁あふれか、query の数が多いときの Dawn / ドライバ側の解決の誤り。切り分けには
-同じ端末で query 本数を変えた最小再現が要る（M2 / RTX / B570 では出ない）。
+In the user's Pixel 10a record (adapter `arm` / `valhall` / `Mali-G715`, gpu-lab's Anima tab, 512²,
+`residency: transformer`)
+`outputs/bench-browser/anima-residency-browser-f16-2026-10-01T10-43-00.425Z.json`, the per-stage `gpu.totalNs` far
+exceeds the wall clock:
+text_encoder 186.7 s vs 49.8 s (3.7×), transformer 94,533 s vs 234 s (400×), vae_decoder 1,295 s vs 20 s (64×).
+In the breakdown, a single strided / elementwise dispatch shows 4–5 seconds (impossible). On the same device the
+geometry sweep (repeating 1 pass = 1 dispatch;
+`…geometry-sweep-browser-2026-10-01T09-37-40.824Z.json`) has GPU time matching the wall clock (e.g. 89.8 ms vs 92.6 ms),
+so the sweep path is correct, and it breaks only on Anima's diagnostic path, which gathers many timestamp queries into
+one run. `clampedNegativeSamples` is 0.
+**This device's per-stage GPU time (`lastRunTiming` / gpu-lab's GPU column) cannot be trusted; look at the wall clock
+only.**
+Inference (isolation not finished): Mali timestamp overflow, or a resolve error on the Dawn / driver side when the
+number of queries is large. Isolation needs a minimal reproduction on the same device that varies the query count (does
+not occur on M2 / RTX / B570).
 
-## hub: `evictCachedAssets` で weights を `drafter` だけに絞っても共通 assets（tokenizer）が消える
+## hub: narrowing weights to `drafter` only in `evictCachedAssets` still deletes the shared assets (tokenizer)
 
-`evictCachedAssets(loaded, { model, quant, weights: ["drafter"] })` は「本体は残して drafter だけ
-消す」意図で書けるが、**残るのは本体 weights だけで、tokenizer などの assets は消える** —
-その (model, quant) は「そのまま使える在庫」ではなくなる（次の起動で assets が再 DL される）。
-2026-09-09 にコードを読んで導いた（実機での再現は未観測）。
+`evictCachedAssets(loaded, { model, quant, weights: ["drafter"] })` can be written with the intent "keep the main model,
+delete only the drafter", but **only the main weights remain, and assets such as the tokenizer are deleted** —
+that (model, quant) is no longer "stock that can be used as is" (the assets are downloaded again on the next start).
+Derived by reading the code on 2026-09-09 (reproduction on hardware not observed).
 
-機序は 2 段:
+The mechanism has 2 stages:
 
-1. `resolveSelection`（`packages/hub/src/resolve.ts`）は **weights の絞り込みに関わらず assets を
-   全数展開する**（コメント「assets は常に全数」）。絞った選択の参照集合 = drafter の weights
-   ファイル + assets 全数になり、assets が削除候補に入る。
-2. `packages/hub/src/inventory.ts` の参照勘定は「**対象と同じ (model, quant) は守る側に数えない**」
-   （同じ label の別の部分集合は候補に上がらない — `protect` に渡しても対象自身は無視される）。
-   よって「絞らない本体の選択が assets を使っている」ことでは守られず、他の model / quant が
-   在庫として揃っているミラーでしか assets は残らない。
+1. `resolveSelection` (`packages/hub/src/resolve.ts`) **expands all assets regardless of the narrowing of
+   weights** (comment "assets are always complete"). The reference set of the narrowed selection = the drafter's weights
+   files + all assets, and the assets enter the deletion candidates.
+2. The reference accounting of `packages/hub/src/inventory.ts` "**does not count the same (model, quant) as the target
+   on the protecting side**" (another subset of the same label does not become a candidate — even if passed to
+   `protect`, the target itself is ignored). Hence they are not protected by "the unnarrowed main selection uses the
+   assets", and assets survive only in a mirror where another model / quant is complete in stock.
 
-結果は静かで、`EvictedAssets.alsoEvicted` は**他の (model, quant)** しか名乗らない（同じ選択が
-部分在庫に落ちたことは載らない）。確認するには `listCachedAssets` を絞らずに引き直すしかない。
+The result is silent, and `EvictedAssets.alsoEvicted` names **only other (model, quant)** pairs (that the same
+selection fell to partial stock is not listed). The only way to confirm is to query `listCachedAssets` again without
+narrowing.
 
-運用の回避 = **drafter だけを消したいときは evict を使わず、drafter の容器の part を手で消す**
-（`protect` では回避できない）。修正案 = 部分 weights の evict では共通 assets を既定で保持する
-（「絞った選択」の参照集合から assets を外す / 対象と同じ label の残りを守る側に数える、のどちらか）。
-どちらも「選択単位の削除」の粒度の定義を変えるので設計裁定が要る — ここは起票のみ。
+Operational workaround = **to delete only the drafter, do not use evict; delete the parts of the drafter's container by
+hand** (`protect` cannot work around it). Fix proposal = keep the shared assets by default when evicting partial weights
+(either remove the assets from the reference set of the "narrowed selection", or count the rest of the same label as the
+target on the protecting side). Both change the definition of the granularity of "deletion per selection", so a design
+ruling is needed — filed only here.
 
-## Intel Arc B570: Wan DiT 実寸の「1 submit の GPU 時間 ≤ 1 s」の門が、長時間の連続負荷の後に 1 回だけ超えた（2026-10-03・記録のみ）
+## Intel Arc B570: the "GPU time per submit ≤ 1 s" check at Wan DiT full size exceeded once after a long continuous load (2026-10-03, recorded only)
 
-ADR [0118](decisions/0118-wan21-video-generation.md) 段 8 の受け入れで `deno task test:models:wan` を回したところ、
-S = 32,760 の計測モードで **1 submit の GPU 時間の最大 1,268.6 ms**（門 1,000 ms）が出て赤になった
-（`e2e_wan_dit_test.ts`）。超えたのは 28,410 本の submit のうち 1 本で、中身は linear の dispatch 1 本
-（`linear:v2:f32:reg128x128r8x8w16v4:wf16`）。同じ dispatch は同じ走行の他の 13 forward で 192 ms、裏付け前の
-255 本の最大は 458.6 ms と直前の走行と同じ、その forward だけ GPU 68 s → 80 s。直前（GPU 約 10 時間の連続負荷の後）
-の sysfs は `freq0/throttle/reasons = thermal` を示していた。同じテストを単独で再走すると 459.3 ms（7 passed）で、
-再走中の 5 秒ごとの記録（332 本）は act_freq 2,683〜2,750 MHz・最高温度 68 ℃・throttle 理由は `pl`（電力上限）のみ。
+Running `deno task test:models:wan` for the acceptance of ADR [0118](decisions/0118-wan21-video-generation.md) step 8,
+the timing mode at S = 32,760 produced **a maximum GPU time per submit of 1,268.6 ms** (check 1,000 ms) and went red
+(`e2e_wan_dit_test.ts`). The one exceeding was 1 of 28,410 submits, containing a single linear dispatch
+(`linear:v2:f32:reg128x128r8x8w16v4:wf16`). The same dispatch took 192 ms in the other 13 forwards of the same run, the
+maximum of the 255 unbacked submits was 458.6 ms, the same as the previous run, and only that forward went from 68 s to
+80 s of GPU time. Just before (after about 10 hours of continuous GPU load),
+sysfs showed `freq0/throttle/reasons = thermal`. Re-running the same test alone gave 459.3 ms (7 passed), and the
+records every 5 seconds during the re-run (332 records) showed act_freq 2,683–2,750 MHz, max temperature 68 ℃, and only
+`pl` (power limit) as the throttle reason.
 
-- 帰属（推定）: 計画（chunk の切り方）の問題ではなく、GPU 側の一過性の stall（熱か電力のクロック低下・
-  コンテキスト切り替え）。計画の問題なら裏付け前の最大が動くはずで、動いていない。
-- 運用の回避 = 時間門が外れた走行は、`tools/diag/gpu-busy.zsh`（`throttle=` 欄を 2026-10-03 に追加）で
-  スロットリング理由と温度を見て、冷めてから単独で再走する（緑ならフレーク）。レーンを連続で回すときは
-  重い GPU ジョブ（50 ステップの通し・目視の量産）の直後を避ける。
-- 門の統計量（裏付け前の最大 + 裏付け後の窓平均、など）へ替えるかは設計裁定 — ここは起票のみ。
+- Attribution (inference): not a problem of the plan (how chunks are cut) but a transient stall on the GPU side (clock
+  drop from heat or power, context switch). If it were a plan problem the unbacked maximum would move, and it did not.
+- Operational workaround = for a run where the timing check failed, look at the throttling reason and temperature with
+  `tools/diag/gpu-busy-xe.zsh` (`throttle=` field added on 2026-10-03), and re-run alone after cooling (green means a
+  flake). When running lanes in succession, avoid doing so right after heavy GPU jobs (a 50-step full run, mass
+  production for visual checks).
+- Whether to change the check's statistic (the unbacked maximum + the window mean after backing, etc.) is a design
+  ruling — filed only here.
 
-## 部品差し替え: 大きい部品へ差し替えると、`fromPretrained` は成功し最初の `generate()` で落ちる（ADR 0122 決定 7 の 5・起票のみ）
+## Component replacement: replacing a component with a larger one makes `fromPretrained` succeed and the first `generate()` fail (ADR 0122 decision 7, item 5; filed only)
 
-差し替え先が元より大きいバッファを要すると、**`fromPretrained` は数 GiB の重みを取り終えて成功し、最初の `generate()`
-（Wan なら text 段の Session の構築）で落ちる**（推測・実例はまだ無い）。`fromPretrained` の `components` で部品を差し替えると、
-差し替え先の quant 席の `session` / `gpuFeatures` / `requiredLimits` は使われず、**元の manifest の席の値で事前判定する**ので、
-重みを取る前の判定（`requiredLimits` の照合）を通ってしまう。構築は Session を 1 本も張らず
-（`packages/models/src/wan/family.ts:489`）、text 段は generate ごとに Session を張る（`encodeWanPrompts` の中 — `packages/models/src/wan/text-stage.ts:371`）ので、落ちるのは構築の後に
-なる。ADR [0108](decisions/0108-container-format.md) 決定 19 が admission に求める「quant 席と実行設定の整合」の検査が
-無い状態で、by-design ではない。
+When the replacement needs a larger buffer than the original, **`fromPretrained` finishes fetching several GiB of weights
+and succeeds, and the first `generate()` (for Wan, the construction of the text stage's Session) fails** (speculation;
+no actual case yet). When a component is replaced through `components` of `fromPretrained`, the replacement preset's
+`session` / `gpuFeatures` / `requiredLimits` are not used, and **the pre-check uses the values of the original
+manifest's preset**, so it passes the check before fetching weights (the `requiredLimits` comparison). Construction
+creates no Session at all (`packages/models/src/wan/family.ts:493`), and the text stage creates a Session per generate
+(inside `encodeWanPrompts` — `packages/models/src/wan/text-stage.ts:369`), so the failure comes after construction.
+This is a state that lacks the check of "consistency between the quant preset and the execution settings" that ADR
+[0108](decisions/0108-container-format.md) decision 19 requires of admission, and it is not by design.
 
-- 機序: 差し替え席は差し替え先の manifest から容器だけを引く（`packages/models/src/hub/components.ts:422-427` — `resolveSelection`
-  の戻りから `containers[key]` だけを使う）。Wan の家族の門は元の manifest の席を引き（`packages/models/src/wan/family.ts:404-411`）、
-  その `requiredLimits` で取得前の判定をする（同 `:317-321`）。
-- 今の影響: recipe の書き手（`umt5_export` — `--intake` を含む）は語彙埋め込みを i8 で書くので、recipe で作った互換の
-  umT5 への差し替えでは起きない（グラフ記述が同じならバッファの大きさも同じ）。ただし `umt5Contract` の共有の門
-  （`umt5GraphContract` — `packages/models/src/umt5/graph-contract.ts:128-150`）が求めるのは「格納は i8 か f32 で、i8 が 1 本以上」までなので、語彙埋め込みを
-  f32 で持つ部品（埋め込みのバッファが約 4 倍）は門を通り、この形で落ちうる。
-- 直し方の候補（裁定が要る）: 差し替え先の席の `requiredLimits` / `gpuFeatures` を元の席と合わせて判定する（大きい方を取る）か、
-  席が食い違う差し替えを admission で拒む。
+- Mechanism: the replaced component takes only the container from the replacement's manifest
+  (`packages/models/src/hub/components.ts:438-445` — of the return of `resolveSelection` only `containers[key]` is
+  used). Wan's family check reads the preset of the original manifest (`packages/models/src/wan/family.ts:407-414`),
+  and makes the pre-fetch check with its `requiredLimits` (same file `:320-324`).
+- Current impact: the recipe writer (`umt5_export` — including `--intake`) writes the vocabulary embedding as i8, so a
+  replacement with a compatible umT5 made by the recipe does not trigger it (if the graph descriptor is the same, the
+  buffer sizes are the same too). However, the shared check of `umt5Contract`
+  (`umt5GraphContract` — `packages/models/src/umt5/graph-contract.ts:129-151`) only requires "storage is i8 or f32,
+  with at least one i8", so a component that holds the vocabulary embedding in
+  f32 (the embedding buffer about 4×) passes the check and can fail in this way.
+- Fix candidates (ruling needed): check the replacement preset's `requiredLimits` / `gpuFeatures` together with the
+  original preset's (take the larger), or reject in admission a replacement whose preset differs.
 
-## Deno: `GPUDevice.destroy()` が VRAM を返さず、device を作って捨てるテストの列で残りが積む — Wan のレーンで実用席 S = 32,760 が OOM（2026-10-04〜05・原因は確定・テスト側の対症療法を入れた・根本の対処は未）
+## Deno: `GPUDevice.destroy()` does not return VRAM, and the remainder accumulates over a sequence of tests that create and discard devices — the practical preset at S = 32,760 OOMs in the Wan lane (2026-10-04 to 05; cause established; a test-side symptomatic fix is in; the root fix is not done)
 
-`deno task test:models:wan` の中で、`e2e_wan_dit_test.ts` の「実用席 `f16+dit8-a8-attn8-s16`・通常モード・S = 32,760」の step が
-**`GpuOutOfMemoryError: run のエンコードと readback: not enough memory left`** で落ちる。レーンでは 2 回中 2 回（385 passed・1 failed /
-394 passed・1 failed）、同じファイルを `--filter 実用席` で単独に回すと 2 回中 2 回緑。落ちるのは所要と確保を記録するだけの step で、
-sha 行と帯の照合は全て通る。
+In `deno task test:models:wan`, the step of `e2e_wan_dit_test.ts` "practical preset `f16+dit8-a8-attn8-s16`, normal
+mode, S = 32,760" fails with
+**`GpuOutOfMemoryError: run のエンコードと readback: not enough memory left`**. In the lane it failed 2 times out of 2
+(385 passed, 1 failed / 394 passed, 1 failed); running the same file alone with `--filter 実用席` is green 2 times out
+of 2. The failing step only records time and allocation, and all sha row and band comparisons pass.
 
-- **原因（上流のソースと実測で確定）**: 換装前の開発機（B570）の Deno 2.9.6（wgpu-core 29）では、`GPUDevice.destroy()` は device に無効の印を立てるだけで、
-  何も解放しない。device とその資源（アロケータが抱えたままのブロック・zero buffer・ドライバのプール・query set）が返るのは、V8 の GC が
-  device のラッパを回収したとき。テストは 1 本ごとに `acquireGpu` → `settleReleases` → `destroy()` を繰り返すので、破棄済みの device が
-  GC まで残り、同じ process の VRAM の上限（B570 で約 9.6 GiB）を食い続ける。`settleReleases` が返すのは明示的に destroy したバッファだけで、
-  device 単位の残りには効かない。ファイルの中で `gc()` の後も残るのは、ランナーが step に渡した関数を保持するため（下の「残っていること」の
-  「残る理由」）。
-- **実測**（`outputs/bench/2026-10-05_dead-device/`・B570）:
-  - 素の WebGPU で device を 5 回作って捨てる probe: 何もしていない破棄済みの device 1 つにつき、DRM クライアントが 1 本残り、vram0 0.192 GiB と
-    gtt 64 MiB を抱え続ける（5 回で 1.15 GiB / 384 MiB）。`gc()` を 1 回呼んでも減らず、**2 回目で全部返る**（クライアントは物理デバイスの
-    fd の 1 本だけに戻る）。破棄の前に待つ（settle）かどうかでは変わらない。
-  - `e2e_wan_dit_test.ts` の 3 本（実寸の通常モード → 実用席の計測モード → 実用席の通常モード）を、外から DRM クライアントごとに記録した走行:
-    実用席の通常モードの S = 32,760 が走っている間、**破棄済みの 2 つの device が 0.64 GiB と 1.54 GiB を抱えたまま**だった
-    （合計の山 8.34 GiB = 0.64 + 1.54 + 自分の 6.16）。この step の開始時点の確保は 2.37 GiB で、単独の走行（1.73 GiB）より多い。
-    レーンではこの前に捨てた device がさらに多く、上限を越える。
-  - 計測モードの query set は 1 本あたり約 4.1 KiB（10,000 本で 41 MiB）。`GPUQuerySet.destroy()` は Deno では何もせず、GC で返る。
-- **入れた対症療法**（利用者の裁定 2026-10-05 — 対症療法で可・深い調査と上流への報告は後回し）: テストの GPU の取得口
-  `acquireTestGpu`（`packages/models/tests/helpers/gpu.ts`）が、`acquireGpu` の前に `collectDestroyedDevices`
-  （`packages/models/tests/helpers/collect-destroyed-devices.ts`）を待つ。中身は `gc()` → 100 ms → `gc()` → 100 ms で、回数と待ちは
-  上の probe の実測（2 回目の後の 100 ms で全部返った）に合わせた。`gc` が要るので、deno.json の `deno test` を回す task は全て
-  `--v8-flags=--expose-gc` を渡す（渡していない task は `packages/runtime/tests/verify_lanes_test.ts` が落とす）。通すのは Wan のレーン
-  （`test:models:wan` / `test:models:wan-ti2v`）の e2e の `acquireGpu` だけ。
-  回収されたかは検査しない。
-- **残っていること**:
-  - 根本の対処: 上流（Deno）への報告と、破棄済みの device の DRM クライアントが消えたことを取得の前に検査する門（残っていれば名指しして
-    落とす）は後回し。テスト側の候補 = 中継の step（下の実験 E4 で B570 で効いた・提案は保留 — 下の裁定）。GC の時点は V8 / cppgc の実装の
-    挙動で、仕様の保証ではない。
-  - フラグ無しで直に `deno test` を回した走行には `gc` が無く、緩和は何もしない。
-  - Wan のレーンの外のテストと、パイプラインが内部で取る device（`gpu` を渡さない読み込み）は取得口を通らない（次に取得口を通る
-    取得の前の GC では、それまでに捨てた分もまとめて回収される）。
-  - 製品の側: `GpuContext.destroy()` の後に device を作り直す使い方（device lost からの復帰など）でも同じ残りが出る。手当ては無い。
-  - 緩和つきのレーンの再走（2026-10-05・`outputs/bench/karume-wan2.1/2026-10-05_stage3-gpu-rerun/`）は 395 passed・0 failed。ただし
-    **余裕は約 0.15 GiB しか無い**: 落ちていた step の開始時点の確保は 3.48 GiB、山は 9.44 GiB（上限 約 9.6 GiB）。外からの記録では、
-    緩和が回収したのは前のファイルの device と、同じファイルの中の破棄済みの device 1 つだけ。計測モードの device 以降の 3 つは `gc()` の
-    後も残り（山の時点で 1.62 + 0.64 + 1.03 = 3.29 GiB）、ファイルの終わりにまとめて消えた。
-  - 残る理由（素の WebGPU の probe で確定・2026-10-05）: `deno test` のランナーは `t.step` に渡した関数をファイルが終わるまで
-    保持する。その関数がテストのスコープの `gpu` を掴んでいると、破棄済みの device のラッパは `gc()` を何回呼んでも回収されず、VRAM が
-    ファイルの終わりまで残る。probe = `outputs/diag/step-retention-probe_test.ts`・ログ =
-    `outputs/bench/karume-wan2.2/2026-10-05_stage6-close/step-retention-probe2.log`（A: step 無し → `gc()` 2 回で DRM クライアントが
-    消える / B: step の closure が device を掴む → 4 回でも残る / E: 中継の step〈ランナーへは中継の関数だけ渡し、本体は step の終了時に
-    手放す〉→ 回収される）。今の対症療法（取得の前の `gc()` 2 回）が、step に渡した関数が掴む device に効かないのはこのため。
-  - **緩和つきでも再発した**（2026-10-05・ADR 0121 段 5 / 6 の最終状態 `128b511e`・`outputs/bench/karume-wan2.2/2026-10-05_stage6-close/`）:
-    `test:models:wan` は 403 passed・1 failed で、落ちたのは同じ step・同じ例外。同じ凍結コピーで `--filter 実用席` の単独の再走は 2 passed・0 failed
-    （S = 32,760 の通常モードは確保 5.46 GiB）。余裕の薄さが再確認された。同じ凍結コピーでのレーンの再走も 403 passed・1 failed・78 分 59 秒
-    （同じ step・同じ例外 — 2 回中 2 回）。`e2e_wan_dit_test.ts` だけを回しても 12 passed・1 failed（同じ step）で、B570 ではファイル単位の
-    分割では足りない。
-  - **実験**（B570・凍結コピー・同じ置き場の `oom-e2/` / `oom-e4/`）: E2（縮小版 3 本 + 今の対症療法）では破棄済みの device 2 つ（0.64 /
-    1.54 GiB）がファイルの終わりまで残った。E4（`e2e_wan_dit_test.ts` の 8 か所の `t.step` を中継の step に替えた実験用の版）では
-    ファイル全体が 13 passed・0 failed・36 分 17 秒。落ちていた step の開始時点の VRAM は 0.192 GiB（手当て前 2.38〜4.15 GiB）、山は
-    5.883 GiB（上限 9.375 GiB）で、破棄済みの device は次の取得の前に毎回消えた。
-- **利用者の裁定（2026-10-05・B570 のレーン）**: B570 の環境でレーンを通す手当てはやらない。中継の step の提案（helper + Wan の e2e 10 ファイル・72 か所の
-  置き換え + 直書きを落とす検査）は承認されていない（保留 — 却下ではない）。レーンは開発機の換装の後の RTX 3080 Ti で通し、新しい GPU の sha 行は
-  凍結コピー `128b511e` で `KARUME_REFERENCE=write` で作ってから HEAD で照合する（B570 の行は残す — 裁定 2026-10-06・ADR 0121 追記「開発機の換装」）。換装は 2026-10-06 に完了した（RTX 3080 Ti 12,288 MiB・
-  環境キー `deno-nvidia-geforce-rtx-3080-ti`）。**2026-10-06 に RTX 3080 Ti で回し、手当て無しで通った**（凍結コピー `128b511e` の 2.1 = 401 passed・2.2 = 40 passed〈赤は時間門の
-  換算表の行の欠けだけ〉・HEAD `b744a9fd` のフル verify で Wan の 2 レーンは全緑 — ADR 0121 追記「RTX 3080 Ti のレーンとフル verify」）。
-  NVIDIA のドライバでの破棄済みの device の残り方は測っていない。
-- **運用の回避**: 緩和の後もこの step だけが OOM で落ちた走行は、`e2e_wan_dit_test.ts` を `--filter 実用席` で単独に再走する。直に
-  `deno test` で回すときは `--v8-flags=--expose-gc` を付ける（付けないと緩和が効かない）。換装の後の機では、まず手当て無しでレーンを
-  回して結果を見る。NVIDIA のドライバは DRM fdinfo の `drm-total-*` を出さないので、テストの VRAM の観測（`helpers/drm-usage.ts`）は
-  `n/a` になる（門ではなく観測 — 赤にはならない）。VRAM は `nvidia-smi` で外から見る。
-- **同じ機序で説明がつく既存の項目（推測・未検証）**: 上の B570 の節の「device を破棄して作り直すと、次の device で確保できる総量が減る」と
-  「tiny golden の取得と破棄を重ねた末尾の OOM」。
-- 調査の記録は `.claude/reviews/2026-10-05_wan-lane-oom-investigation.json`（git 追跡外）、実験の手順は `outputs/diag/dead-device-README.md`。
+- **Cause (established from the upstream source and measurements)**: on the development machine before the hardware
+  swap (B570), with Deno 2.9.6 (wgpu-core 29), `GPUDevice.destroy()` only marks the device invalid and releases
+  nothing. The device and its resources (blocks the allocator keeps, the zero buffer, the driver pools, query sets)
+  are returned when V8's GC collects the device's wrapper. The tests repeat `acquireGpu` → `settleReleases` →
+  `destroy()` per test, so destroyed devices remain until GC and keep eating the VRAM limit of the same process (about
+  9.6 GiB on the B570). `settleReleases` returns only explicitly destroyed buffers and has no effect on per-device
+  remains. That they remain after `gc()` within a file is because the runner keeps the function passed to a step ("Why
+  it remains" under "What remains" below).
+- **Measurements** (`outputs/bench/2026-10-05_dead-device/`, B570):
+  - A probe that creates and discards a device 5 times in plain WebGPU: per destroyed device that did nothing, one DRM
+    client remains and keeps holding vram0 0.192 GiB and gtt 64 MiB (1.15 GiB / 384 MiB after 5 times). One `gc()` call
+    does not reduce it, and **everything returns on the second** (the clients go back to the single fd of the physical
+    device). Waiting (settle) before the destruction makes no difference.
+  - A run of the 3 tests of `e2e_wan_dit_test.ts` (full-size normal mode → practical-preset timing mode →
+    practical-preset normal mode), recorded per DRM client from outside: while S = 32,760 of the practical-preset normal
+    mode was running, **2 destroyed devices kept holding 0.64 GiB and 1.54 GiB**
+    (peak total 8.34 GiB = 0.64 + 1.54 + its own 6.16). The allocation at the start of this step was 2.37 GiB, more than
+    in a standalone run (1.73 GiB). In the lane, more devices had been discarded before this, and it exceeds the limit.
+  - A query set in timing mode is about 4.1 KiB each (41 MiB for 10,000). `GPUQuerySet.destroy()` does nothing on Deno,
+    and it is returned by GC.
+- **Symptomatic fix applied** (user ruling 2026-10-05 — a symptomatic fix is acceptable; deep investigation and an
+  upstream report are postponed): the tests' GPU acquisition entry point
+  `acquireTestGpu` (`packages/models/tests/helpers/gpu.ts`) awaits `collectDestroyedDevices`
+  (`packages/models/tests/helpers/collect-destroyed-devices.ts`) before `acquireGpu`. It does `gc()` → 100 ms → `gc()`
+  → 100 ms, with the count and the waits matched to the probe measurement above (everything returned within the 100 ms
+  after the second). Since `gc` is needed, the Vitest configuration passes `--expose-gc` to its workers (`execArgv` in
+  `vite.config.ts`; `packages/runtime/tests/verify_lanes_test.ts` fails if it does not). Only `acquireGpu` of the e2e
+  tests of the Wan lanes (`models:wan` / `models:wan-ti2v`) goes through it.
+  Whether collection happened is not checked.
+- **What remains**:
+  - Root fix: the upstream (Deno) report and a check before acquisition that the DRM clients of destroyed devices have
+    gone (naming and failing if any remain) are postponed. Test-side candidate = the relay step (worked on the B570 in
+    experiment E4 below; proposal on hold — ruling below). The GC timing is the behaviour of the V8 / cppgc
+    implementation, not a guarantee of a specification.
+  - A run started without `--expose-gc` (outside the Vitest configuration) has no `gc`, and the mitigation does
+    nothing.
+  - Tests outside the Wan lanes and devices that the pipeline takes internally (loads that do not pass `gpu`) do not go
+    through the entry point (the GC before the next acquisition through the entry point collects what was discarded
+    until then together).
+  - Product side: the same remains appear in usage that recreates a device after `GpuContext.destroy()` (recovery from
+    device lost, etc.). No remedy.
+  - The re-run of the lane with the mitigation (2026-10-05, `outputs/bench/karume-wan2.1/2026-10-05_stage3-gpu-rerun/`)
+    was 395 passed, 0 failed. However,
+    **the headroom is only about 0.15 GiB**: the allocation at the start of the step that used to fail was 3.48 GiB, the
+    peak 9.44 GiB (limit about 9.6 GiB). In the external record, the mitigation collected only the devices of the
+    previous file and one destroyed device within the same file. The 3 devices from the timing-mode device on remained
+    after `gc()` (1.62 + 0.64 + 1.03 = 3.29 GiB at the peak) and disappeared together at the end of the file.
+  - Why it remains (established with a plain-WebGPU probe, 2026-10-05): the `deno test` runner keeps the function
+    passed to `t.step` until the file ends. If that function holds the test scope's `gpu`, the destroyed device's
+    wrapper is not collected however many times `gc()` is called, and the VRAM remains until the end of the file.
+    Probe = `outputs/diag/step-retention-probe_test.ts`, log =
+    `outputs/bench/karume-wan2.2/2026-10-05_stage6-close/step-retention-probe2.log` (A: no step → the DRM client
+    disappears after 2 `gc()` calls / B: the step closure holds the device → remains even after 4 / E: relay step (only
+    the relay function is passed to the runner, and the body is released at the end of the step) → collected). This is
+    why the current symptomatic fix (2 `gc()` calls before acquisition) does not work for devices held by the function
+    passed to a step.
+  - **It recurred even with the mitigation** (2026-10-05, the final state of ADR 0121 stages 5 / 6 `128b511e`,
+    `outputs/bench/karume-wan2.2/2026-10-05_stage6-close/`):
+    `test:models:wan` was 403 passed, 1 failed, failing at the same step with the same exception. On the same frozen
+    copy, a standalone re-run with `--filter 実用席` was 2 passed, 0 failed
+    (S = 32,760 normal mode allocated 5.46 GiB). The thinness of the headroom was re-confirmed. A re-run of the lane on
+    the same frozen copy was also 403 passed, 1 failed, 78 min 59 s
+    (same step, same exception — 2 out of 2). Running only `e2e_wan_dit_test.ts` gave 12 passed, 1 failed (same step);
+    on the B570, splitting by file is not enough.
+  - **Experiments** (B570, frozen copy, `oom-e2/` / `oom-e4/` in the same location): in E2 (3 reduced tests + the
+    current symptomatic fix), 2 destroyed devices (0.64 / 1.54 GiB) remained until the end of the file. In E4 (an
+    experimental version of `e2e_wan_dit_test.ts` with its 8 `t.step` sites replaced by relay steps), the whole file was
+    13 passed, 0 failed, 36 min 17 s. The VRAM at the start of the step that used to fail was 0.192 GiB (2.38–4.15 GiB
+    before the remedy), the peak 5.883 GiB (limit 9.375 GiB), and the destroyed devices disappeared every time before
+    the next acquisition.
+- **User ruling (2026-10-05, the B570 lane)**: no remedy to make the lane pass on the B570 environment. The relay-step
+  proposal (helper + replacing 72 sites in the 10 Wan e2e files + a check that fails direct writes) has not been approved
+  (on hold — not rejected). The lane is to be run on the RTX 3080 Ti after the development-machine swap, and the sha rows
+  of the new GPU are created with `KARUME_REFERENCE=write` on the frozen copy `128b511e` and then compared at HEAD (the
+  B570 rows are kept — ruling 2026-10-06, ADR 0121 addendum "the development machine changed"). The swap was completed on
+  2026-10-06 (RTX 3080 Ti 12,288 MiB,
+  environment key `deno-nvidia-geforce-rtx-3080-ti`). **On 2026-10-06 it was run on the RTX 3080 Ti and passed without
+  the remedy** (frozen copy `128b511e`: 2.1 = 401 passed, 2.2 = 40 passed (the only red was a missing row in the
+  conversion table of the timing check); in the full verify at HEAD `b744a9fd`, both Wan lanes all green — ADR 0121
+  addendum "RTX 3080 Ti lanes and full verify").
+  How destroyed devices remain on the NVIDIA driver has not been measured.
+- **Operational workaround** (Deno era; the practical-preset normal-mode case it re-runs was dropped on 2026-10-17 by `466b7196`): for a run where only this step still fails with OOM after the mitigation, re-run
+  `e2e_wan_dit_test.ts` alone with the test-name filter `-t 実用席`. When running outside the Vitest configuration,
+  pass `--expose-gc` (the configuration does it through `execArgv` in `vite.config.ts`; without it the mitigation does
+  not work). On machines after the swap, first run the lane without the remedy and look at the result. The NVIDIA driver
+  does not emit `drm-total-*` in DRM fdinfo, so the tests' VRAM observation (`helpers/drm-usage.ts`) becomes
+  `n/a` (an observation, not a check — it does not turn red). VRAM is watched from outside with `nvidia-smi`.
+- **Existing items the same mechanism could explain (speculation, unverified)**: "destroying a device and creating a
+  new one reduces the total that can be allocated on the next device" and
+  "the OOM at the end of the tiny golden that piles up acquisitions and destructions" in the B570 section above.
+- The investigation record is `.claude/reviews/2026-10-05_wan-lane-oom-investigation.json` (not tracked by git), and the
+  experiment procedure is `outputs/diag/dead-device-README.md`.
 
-## RTX 3080 Ti（Deno）: 一部の e2e の所要が 2 つの山に分かれる（2026-10-07 観測・原因未調査）
+## RTX 3080 Ti (Deno): the duration of some e2e tests splits into two peaks (observed 2026-10-07, cause not investigated)
 
-ADR 0123 の速度の前後比較で見つけた。値（sha256・帯）は変わらず、所要だけが回によって 2〜3 倍に跳ぶ。
+Found in the before/after speed comparison of ADR 0123. Values (sha256, bands) do not change; only the duration jumps
+2–3× depending on the run.
 
-- Wan2.1 の VAE タイルの e2e（`packages/models/tests/e2e_wan_vae_tiles_test.ts`）の縦長 9 フレーム（`accept`）の decode が
-  12 s 前後と 20〜37 s に分かれる。横長 33 フレーム（`band`）は分かれない。
-- Gemma 4 の sequence の e2e（`packages/models/tests/e2e_gemma4_sequence_test.ts`）の 598 トークンの prefill（`context-en`）が
-  8 s 前後と 13 s 台に分かれる（テスト全体で 34 s 対 55 s）。
-- どちらも ADR 0123 の前のコード（`b3fa0d34`）でも出る（VAE は 4 回中 1 回・Gemma は 9 回中 1 回）。ADR 0123 の完了印とは関係しない
-  （VAE の経路は enqueue で印を置かない・Gemma のテスト全体で印は 1 本・待ちは 0 回）。
-- 見立て（推測・未確認）: submit の時間予算分割の推定（計測窓の実測 ÷ workgroup 数）のぶれで、チャンクの切り方が回ごとに変わる。
-  熱制限（この GPU は冷却が弱く 93 ℃ 前後で回る）との交絡もありうる。
-- 記録: `.claude/reviews/2026-10-07_submit-inflight/ab-vae-tiles.log`・`ab-gemma.log`（git 追跡外）。
+- The decode of the tall 9 frames (`accept`) of the Wan2.1 VAE tile e2e (`packages/e2e/tests/e2e_wan_vae_tiles_test.ts`)
+  splits into around 12 s and 20–37 s. The wide 33 frames (`band`) do not split.
+- The prefill of 598 tokens (`context-en`) of the Gemma 4 sequence e2e
+  (`packages/e2e/tests/e2e_gemma4_sequence_test.ts`) splits into around 8 s and the 13 s range (34 s vs 55 s for the
+  whole test).
+- Both also appear with the code before ADR 0123 (`b3fa0d34`) (VAE 1 in 4 runs, Gemma 1 in 9). Unrelated to ADR 0123's
+  completion marker (the VAE path does not place markers with enqueue; in the whole Gemma test there is 1 marker and 0
+  waits).
+- Working hypothesis (speculation, unconfirmed): fluctuation in the estimate of the submit time-budget split (measured
+  window ÷ workgroup count) changes how chunks are cut from run to run.
+  Confounding with thermal limiting (this GPU has weak cooling and runs around 93 ℃) is also possible.
+- Record: `.claude/reviews/2026-10-07_submit-inflight/ab-vae-tiles.log`, `ab-gemma.log` (not tracked by git).
 
-## 参照値のアダプタ照合: パイプラインが内部で GPU を取る 4 系列は、実走の GPU を照合していない（複数 GPU の機に限る・起票のみ）
+## Adapter matching of reference values: the 4 families whose pipeline acquires the GPU internally do not match the GPU of the actual run (only on multi-GPU machines; filed only)
 
-sha256 の参照値は環境キー（アダプタ名）ごとの行で持つ（ADR [0106](decisions/0106-device-keyed-references.md)）。
-gemma4 / anima / sbv2 / irodori の e2e は、パイプラインが内部で device を取るので、照合に
-`assertRunningAdapter`（`packages/runtime/tests/helpers/environment.ts`）を使う。これは検査用に別の GPU を 1 度取って照合し、
-結果をプロセス内でキャッシュする。実走の取得は照合されない。
+sha256 reference values are held as rows per environment key (adapter name) (ADR
+[0106](decisions/0106-device-keyed-references.md)). The e2e tests of gemma4 / anima / sbv2 / irodori use
+`assertRunningAdapter` (`packages/runtime/tests/helpers/environment.ts`) for matching, because the pipeline acquires the
+device internally. It acquires a separate GPU once for the check, matches it, and caches the result within the process.
+The acquisition of the actual run is not matched.
 
-- 2 回の `requestAdapter` が同じ物理アダプタを返す保証は無い（[limitations.md](limitations.md) の「DL 前の GPU 適合チェック」節）。
-  複数 GPU の機で実走だけが別のアダプタを選ぶと、そのアダプタの出力を照合済みのキーの行と突き合わせる（偽の不一致）か、
-  `KARUME_REFERENCE` の書き込みでその行へ別のアダプタの出力を記録しうる。単一 GPU の機では起きない。
-- sha256 の行を持つ e2e のうち GPU を自分で取るもの（Wan の pipeline / swap 系の 4 ファイル・runtime 側の実資産 e2e・
-  models 側の depth_anything / birefnet / vowel_detector の実資産 e2e）は、取得の直後に実走の GPU そのものを照合している
-  （`verifyRunningGpu` / `assertAdapterMatchesEnvironment`）。sha256 の行を持たない Wan の e2e（dit / umt5 / ab / vae 系）も同じく照合している。
-- 直し方の候補: テストから GPU を注入する（パイプラインが自前で要求するのと同じ feature で取る必要がある）か、
-  パイプラインが実際に使ったアダプタの情報を読めるようにする（公開面の変更）。
-- **利用者の裁定（2026-10-11）: 起票のまま直さない**（Codex 深掘りレビュー R8-003 の残り）。理由: 起きるのは複数 GPU の機だけ。
-  注入はパイプラインの内部の取り方とずれると sha の行が動く恐れがある。アダプタを読む口は、この問題のためだけに公開面を増やすことになる。
+- There is no guarantee that two `requestAdapter` calls return the same physical adapter (the [limitations.md](limitations.md)
+  section "The GPU fit check before download"). On a multi-GPU machine, if only the actual run picks a different adapter,
+  that adapter's output is compared with the row of the matched key (a false mismatch), or writing with
+  `KARUME_REFERENCE` can record another adapter's output into that row. It does not happen on single-GPU machines.
+- Of the e2e tests with sha256 rows, those that acquire the GPU themselves (the 4 Wan pipeline / swap files, the
+  runtime-side real-asset e2e, the real-asset e2e of depth_anything / birefnet / vowel_detector in `packages/e2e`) match
+  the actual GPU itself right after acquisition (`verifyRunningGpu` / `assertAdapterMatchesEnvironment`). The Wan e2e
+  tests without sha256 rows (the dit / umt5 / ab / vae files) match it too.
+- Fix candidates: inject the GPU from the test (it must be acquired with the same features the pipeline requests
+  itself), or make the adapter actually used by the pipeline readable (a change to the public surface).
+- **User ruling (2026-10-11): filed, not fixed** (the remainder of Codex deep review R8-003). Reasons: it happens only on
+  multi-GPU machines. Injection risks moving the sha rows if it diverges from the pipeline's internal acquisition. An
+  adapter-reading entry point would add public surface for this problem alone.

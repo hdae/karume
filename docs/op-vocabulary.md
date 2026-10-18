@@ -1,447 +1,539 @@
-# op 語彙台帳 — Core ATen 160（プロトタイプからの引き継ぎ）
+# Op vocabulary ledger — Core ATen 160 (carried over from the prototype)
 
-出自: 先行実験プロジェクト（以下プロトタイプ）の `docs/op-vocabulary.md`（2026-08-01 時点）
-の引き継ぎ。ユーザー指示によりプロトタイプで進行中だった「必要な OP の検討」を
-Karume が継続する。以後の正本は本ファイル。
+Origin: carried over from `docs/op-vocabulary.md` of the preceding experimental project (hereafter
+the prototype), as of 2026-08-01. At the user's instruction, Karume continues the "study of the ops
+we need" that was in progress in the prototype. From here on this file is the source of truth.
 
-NOTE: 25/15 の個別列挙は本書に取り込み済み。75/38/7 の箱の per-op 割当はどこにも存在せず、
-M1-P2 以降のエクスポート実測（未対応 op の全件列挙）で確定していく。
+NOTE: The individual lists of the 25 and the 15 are included in this document. No per-op assignment
+of the 75 / 38 / 7 boxes exists anywhere; it is fixed by export measurements from M1-P2 onward
+(listing every unsupported op).
 
-## 母集団の確定（引き継ぐ結論）
+## Fixing the population (conclusions carried over)
 
-- 母集団は **Core ATen IR の 160 op**（`torch.Tag.core`）。aten overload 2879・関数名 1302・
-  decomp テーブル 943 に対し、torch.export の `run_decompositions` がここまで潰す。**ここが
-  上限**であって TODO リストではない。160 を埋めること自体は目標にしない。
-- 逆に潰されすぎると困る 12 op（下記「分解禁止 12 op」）はエクスポータ側で分解を止めている —
-  融合カーネル 1 本の方が速いから。この非対称は正しい状態で、プロトタイプの
-  `attention` / `rms_norm` / `silu` が 160 に含まれないのも同じ理由（`attention` は
-  ADR 0023 で Karume 側の語彙に入った — 保存対象はターゲット別）。
+- The population is **the 160 ops of Core ATen IR** (`torch.Tag.core`). Out of 2879 aten overloads,
+  1302 function names and 943 decomp table entries, torch.export's `run_decompositions` reduces
+  everything down to these. **This is an upper bound**, not a TODO list. Filling the 160 is not a
+  goal in itself.
+- Conversely, for 12 ops that would hurt if decomposed too far ("12 ops whose decomposition is
+  forbidden" below) the exporter stops the decomposition — because one fused kernel is faster. This
+  asymmetry is the correct state, and the prototype's `attention` / `rms_norm` / `silu` being absent
+  from the 160 has the same reason (`attention` entered Karume's vocabulary in ADR 0023 —
+  preservation is per target).
 
-## 5 分類（160 の全割当）
+## Five classes (assignment of all 160)
 
-| 分類             | 数 | 内容                                              |
-| ---------------- | -- | ------------------------------------------------- |
-| 実装しなくてよい | 25 | backward / 乱数（ホスト側責務）/ 形状メタ / 3D 系 |
-| 必須プリミティブ | 75 | プロトタイプ実装済 ≈45。残りが実装作業の本体      |
-| 組み合わせで済む | 38 | 新カーネル 0。既存 op への分解・正規化で吸収      |
-| あったら嬉しい   | 7  | 優先度低                                          |
-| 難しい・遅い     | 15 | 下記 3 系統（個別 ADR 前提）                      |
+| Class                   | Count | Contents                                                                    |
+| ----------------------- | ----- | --------------------------------------------------------------------------- |
+| Need not be implemented | 25    | backward / random (host responsibility) / shape meta / 3D ops               |
+| Required primitives     | 75    | ≈45 implemented in the prototype. The rest is the bulk of the work          |
+| Covered by composition  | 38    | 0 new kernels. Absorbed by decomposition / normalisation into existing ops  |
+| Nice to have            | 7     | Low priority                                                                |
+| Hard / slow             | 15    | The three groups below (each presumes its own ADR)                          |
 
-実装対象は 120（= 75 + 38 + 7）。
+The implementation target is 120 (= 75 + 38 + 7).
 
-### 実装しなくてよい（25）の内訳
+### Breakdown of the 25 that need not be implemented
 
-- **学習専用（7）**: `*_backward` 系。forward-only export には出ない。
-- **乱数（4）**: `rand` / `randn` / `randperm` / `native_dropout`。diffusion の初期ノイズは
-  **ホスト生成が正しい**（呼び出し側アプリの責務であり、推論ランタイムの責務外）。
-- **形状メタ・別名（9）**: `sym_size` / `sym_numel` / `sym_stride` / `sym_storage_offset` は
-  エクスポータが SymInt 式を評価して記号次元（`T`, `8T+2` 等）へ畳むためノードを出さない。
-  `alias` はプロトタイプ側のスキップ対象語彙で処理済み。`_local_scalar_dense` /
-  `as_strided` / `empty` / `empty_strided` は受理集合外 — 出たら fail loudly が正しい
-  （黙って近似しない、という横断の不変条件どおり）。
-- **3D・動画専用（5）**: 2D 版が固まってから同型で足せる。
+- **Training only (7)**: the `*_backward` ops. They do not appear in a forward-only export.
+- **Random (4)**: `rand` / `randn` / `randperm` / `native_dropout`. For diffusion, **generating the
+  initial noise on the host is correct** (it is the calling application's responsibility, outside
+  the inference runtime's).
+- **Shape meta / aliases (9)**: `sym_size` / `sym_numel` / `sym_stride` / `sym_storage_offset` emit
+  no node, because the exporter evaluates SymInt expressions and folds them into symbolic dimensions
+  (`T`, `8T+2` and so on). `alias` is handled as a skipped vocabulary entry on the prototype side.
+  `_local_scalar_dense` / `as_strided` / `empty` / `empty_strided` are outside the accepted set —
+  failing loudly when they appear is correct (as the cross-cutting invariant "never approximate
+  silently" says).
+- **3D / video only (5)**: can be added in the same shape once the 2D versions are settled.
 
-## 難しい・遅い（15）の 3 系統 — 個別列挙
+## The three groups of the 15 hard / slow ops — listed one by one
 
-1. **散布（scatter_add / index_put / scatter / scatter_reduce / masked_scatter / col2im）** —
-   WGSL に `atomic<f32>` が無く、CAS 実装は加算順が非決定になり codegen/実行の決定性
-   （同一入力 → 同一出力）を静かに壊す。添字が export 時に静的なら **gather へ反転**
-   （逆写像を定数化）する方が噛み合う。
-2. **データ依存出力形状（nonzero / bool マスク index / _embedding_bag）** — executor は
-   全ノードの出力 shape を実行前に確定させる静的形状前提を持ち、記号次元は入力の要素数
-   からしか束縛されない。**GPU 結果を読み戻して形状を決める経路が存在しない**。対応する
-   なら「固定上限形状 + マスク」か、実行モデル自体の設計裁定が要る。
-3. **値依存の並べ替え・その他（sort / topk / grid_sampler_2d / _cdist_forward /
-   _pdist_forward / _fft_r2c / _fft_c2r）** — 保留。`topk` は k=1 なら `argmax` で代替できる。
-   **訂正（2026-08-17）**: `topk` は**保留を解いた**（ADR 0068 決定 3 — static-k・出力 2 本。
-   下の `topk` の NOTE）。解けた条件は 2 つで、①k が attrs の**計画時定数**なので出力形が
-   静的に決まる（値依存なのは中身だけ）②「レーン局所 top-k → トーナメント merge」で全語彙
-   argsort を経由しない。`sort`（全語彙の並べ替え）と `grid_sampler_2d` / fft 系は保留のまま。
+1. **Scatter (scatter_add / index_put / scatter / scatter_reduce / masked_scatter / col2im)** —
+   WGSL has no `atomic<f32>`, and a CAS implementation makes the summation order nondeterministic,
+   silently breaking the determinism of codegen / execution (same input → same output). When the
+   indices are static at export time, **inverting into a gather** (making the inverse mapping a
+   constant) fits better.
+2. **Data-dependent output shapes (nonzero / bool-mask index / _embedding_bag)** — the executor
+   assumes static shapes and fixes the output shape of every node before execution, and symbolic
+   dimensions are bound only from the element counts of inputs. **No path exists that reads GPU
+   results back to decide a shape.** Supporting them needs either "fixed upper-bound shape + mask"
+   or a design ruling on the execution model itself.
+3. **Value-dependent reordering and others (sort / topk / grid_sampler_2d / _cdist_forward /
+   _pdist_forward / _fft_r2c / _fft_c2r)** — on hold. `topk` can be replaced by `argmax` when k=1.
+   **Correction (2026-08-17)**: `topk` is **off hold** (ADR 0068 decision 3 — static-k, two
+   outputs; see the `topk` NOTE below). Two conditions unlocked it: ① k is a **plan-time constant**
+   in attrs, so the output shape is static (only the contents depend on values) ② "lane-local top-k
+   → tournament merge" avoids an argsort over the whole vocabulary. `sort` (reordering the whole
+   vocabulary) and `grid_sampler_2d` / the fft ops remain on hold.
 
-NOTE: 個別列挙の合計は 16（6+3+7）で箱の計 15 と 1 件合わない。この不整合はプロトタイプ
-原本由来（どの op が二重計上かは原本にも記録が無い）。per-op 割当を実測で確定する
-M1-P2 以降に解消する。
+NOTE: The individual lists add up to 16 (6+3+7), one more than the box total of 15. The mismatch
+comes from the prototype's original (the original does not record which op is double-counted
+either). It will be resolved from M1-P2 on, when the per-op assignment is fixed by measurement.
 
-## 引き継ぐ設計知見
+## Design findings carried over
 
-- **最大の穴 = 値の max reduce 族**: amax / amin / max / min / argmax / argmin が皆無
-  だった。これが無いと safe-softmax・max-pool・logsumexp・greedy デコードが組めず、
-  Transformers 系を汎用に扱えない。実装は sum 用の行カーネルと同型の複製 ≈20 行で済む
-  ため最初期に実装する。**訂正（2026-08-17）**: 「≈20 行の複製」は値だけを畳む 2 本
-  （amax / amin）には当たったが、**argmax には当たらない** — (値, index) 対を運ぶぶん
-  identity・比較式・scratch が別物になり、既存 reduce 族への相乗りは既定経路のキーを動かす
-  （実装は別族 = src/kernels/argmax.ts。下の argmax の NOTE）。
-- **分解禁止（融合維持）12 op**: linear, layer_norm, rms_norm, softmax, gelu, leaky_relu,
-  conv1d, conv2d, conv_transpose1d, embedding, masked_fill, **scaled_dot_product_attention**
-  （`leaky_relu` は ADR 0015 で 9 → 10。分解形 `gt_scalar + mul + where` は中間バッファが
-  1.5〜2 倍に膨らむ。`rms_norm` は ADR 0017 で 10 → 11 — こちらは**保存だけでは足りず**、
-  手書き分解形を拾う畳み込みパスと 2 系統で供給する。`scaled_dot_product_attention` は
-  ADR 0023 で 11 → 12）。
-  **SDPA（12 本目）だけは既定の保存リストに載らない**（`PRESERVED_OP_PREFIXES` の中身は、上の 11 本から SDPA を除いた
-  10 本 + `leaky_relu` 等を含む従来の 11 本に、拡張分子層の `conv3d`〈ADR 0118〉を足した 12 本 — 本数が同じ 12 でも集合は別）—
-  SDPA は mask / causal を引数で表せてしまい、グローバルに保存すると契約外の形
-  （kwargs 渡しの bool mask・`[B,1,M,N]` 等）が `_h_attention` の fail loudly に当たって
-  export できなくなる。加算型 f32 `[1,1,M,N]` の mask だけは 2026-08-11 の改訂（ADR 0023
-  追記）で語彙に入った。保存は `curated_decompositions(preserved=…)` を通した
-  **ターゲット別の opt-in**（`PRESERVED_OP_PREFIXES_WITH_ATTENTION` — Anima の transformer /
-  vae_decoder と EmbeddingGemma）。
-  エクスポータ側で分解を止める — 融合カーネル
-  1 本の方が分解後の複数 dispatch より速いという判断で、この非対称は正しい状態。
-  プロトタイプの attention / rms_norm / silu が Core ATen 160 に含まれないのも同根。
-  分解禁止リストは速度に直結し、後付けはグラフ層の再設計になる。
-- **「分解できる」の反例集**（プロトタイプの敵対検証で判明。分解案は torch 突合ゲート必須）:
+- **The biggest hole = the value max-reduce family**: amax / amin / max / min / argmax / argmin were
+  entirely missing. Without them safe-softmax, max-pool, logsumexp and greedy decoding cannot be
+  built, and Transformers models cannot be handled generically. The implementation is a ≈20-line
+  copy of the row kernel for sum, so it is done first. **Correction (2026-08-17)**: "a ≈20-line
+  copy" held for the two that fold values only (amax / amin), but **not for argmax** — because it
+  carries (value, index) pairs, its identity, comparison expression and scratch are different, and
+  riding on the existing reduce family would move the keys of the default path (the implementation
+  is a separate family = src/kernels/argmax.ts; see the argmax NOTE below).
+- **12 ops whose decomposition is forbidden (fusion kept)**: linear, layer_norm, rms_norm, softmax,
+  gelu, leaky_relu, conv1d, conv2d, conv_transpose1d, embedding, masked_fill,
+  **scaled_dot_product_attention** (`leaky_relu` took the count from 9 to 10 in ADR 0015. Its
+  decomposition `gt_scalar + mul + where` swells the intermediate buffers 1.5–2×. `rms_norm` took it
+  from 10 to 11 in ADR 0017 — here **preservation alone is not enough**, and it is supplied by two
+  routes, together with a folding pass that picks up the hand-written decomposition.
+  `scaled_dot_product_attention` took it from 11 to 12 in ADR 0023).
+  **Only SDPA (the 12th) is not on the default preservation list** (`PRESERVED_OP_PREFIXES` holds
+  the 12 above without SDPA (the earlier 11, `leaky_relu` among them) plus `conv3d` of the
+  extended composite layer(ADR 0118), 12 in all — the same count of 12, but a different set) —
+  SDPA can express mask / causal through its arguments, so preserving it globally would make shapes
+  outside the contract (a bool mask passed by kwargs, `[B,1,M,N]` and so on) hit the fail-loudly of
+  `_h_attention`, and the export would no longer work. Only an additive f32 `[1,1,M,N]` mask entered
+  the vocabulary, with the revision of 2026-08-11 (ADR 0023 addendum). Preservation is a
+  **per-target opt-in** through `curated_decompositions(preserved=…)`
+  (`PRESERVED_OP_PREFIXES_WITH_ATTENTION` — first Anima's transformer / vae_decoder and
+  EmbeddingGemma; the current users are the recipes under `tools/export-recipes/` that pass it, the
+  Gemma 4, MiniCPM5 and Wan recipes among them).
+  The exporter stops the decomposition — the judgement is that one fused kernel is faster than the
+  several dispatches after decomposition, and this asymmetry is the correct state. The prototype's
+  attention / rms_norm / silu being absent from Core ATen 160 has the same root. The
+  no-decomposition list maps directly onto speed, and adding to it later means redesigning the graph
+  layer.
+- **Counter-examples to "it can be decomposed"** (found by the prototype's adversarial verification;
+  a decomposition proposal requires a check against torch):
 
-  | 主張                                       | 判定 | 理由                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-  | ------------------------------------------ | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | `log` = `log1p(x−1)`                       | 誤り | `log1p` は WGSL 組込みでなく `log(1+a)` を生成するので、`x−1` の丸めがそのまま戻る。x=1e-6 で約 6% ずれる。単項 log 用の codegen 分岐は既にあり executor に 1 枝足すだけ                                                                                                                                                                                                                                                                                                                                                                                                                            |
-  | `_log_softmax` = `log(softmax(x))`         | 誤り | 上の誤差を y≪1 の領域で踏む。underflow した要素が `log(0)=−inf` になり torch の有限値と不一致。**op の存在理由を消している**                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-  | `pow` は WGSL 組込みで 1 行                | 誤り | WGSL の `pow` は**負の底が未定義**。`torch.pow(-2,3) = -8` と不一致。整数指数は繰り返し `mul` へ（実装済み）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-  | `maximum`/`amax` は内部の `max` を公開     | 誤り | 「WGSL の `max` は NaN 伝播を保証しない」ため `leaky_relu` は select 形（ADR 0015・M1-P3 波3 で実装）。**実測（2026-08-02）**: select 形でもコンパイラが max イディオムへ畳み、ドライバの `max` が NaN を飲む（`clamp(NaN,-1,1) = -1` / `clamp_min(NaN,0) = 0` / `relu(NaN) = 0`。比較単体は仕様どおり false になる）。**根治済み（2026-08-03）**: `clamp` / `clamp_min` / `relu` / `amax` / `amin` は**ビット列 NaN 判定**（`(bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u`）の外殻で伝播させる — 整数比較なので畳み込みの対象にならない。`leaky_relu` だけは両枝に x が現れるため select 形のまま |
-  | `mean`/`var`/`group_norm` = 素の `sum`     | 誤り | sum のリファレンス実装は 1 スレッド=1 行の逐次走査。group_norm は行数 32・行長数百万という真逆の形状で、32 スレッドが数百万回ループする。**2 段縮約なら成立**                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-  | `var` = `sum((x−mean)²)/N`                 | 誤り | `torch.var` の既定は `correction=1`（N−1）。N 割りは norm 系の内部分散だけ                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-  | `group_norm` → `layer_norm` へ委譲         | 一部 | 正規化は合うが **affine が合わない** — layer_norm の weight 長は最終次元前提のため、解像度依存の巨大 ones/zeros が要る。別途 `[1,C,1,1]` broadcast の 2 パスが必要                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-  | tensor 比較 = `sub` + `*_scalar` 比較      | 誤り | `a=b=+inf` で `a−b=NaN` となり `eq` が false（torch は true）。attention の −inf ガードで現実に出る                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-  | `floor`/`ceil`/`round`/`trunc` = cast 往復 | 誤り | WGSL 組込みがあり **1 行の codegen 追加**。cast 経路は `\|x\| ≥ 2^31` で壊れる。丸め規約は ties-to-even で torch と一致                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-  | `fmod` は手書きが要る                      | 誤り | WGSL の `%` は `e1 − e2·trunc(e1/e2)` = `torch.fmod`。**`remainder` の方**が floor 除算で符号補正が要る。整数型は両方とも封じられている                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-  | `expm1` = `exp(x)−1` は厳密                | 誤り | x≲1e-8 で `exp(x)` が 1.0 に丸まり結果 0。torch は x を返すので相対誤差 100%                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-  | 非 1 軸 `repeat` = unsqueeze+expand+view   | 誤り | rank4 入力で中間が rank5 になり strided 表現の rank 上限（4）を超える。使えるのは rank≤3 まで                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-  | `select_scatter`/`slice_scatter` = `cat`   | 未確 | 境界（index 0 / 末尾）で長さ 0 のスライスが出て、WebGPU の storage binding が size>0 を要求するため落ちうる（未実測）。空オペランドを畳む分岐が必須                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-  | `batch_norm` の 6 ステップ展開             | 成立 | 数値は同値。ただし elementwise 融合が無い前提だと 1 ノード = 1 dispatch + フルサイズ中間 1 本になる。1024px VAE の `[1,128,1024,1024]` = 537MB では容量が問題になる                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  | Claim                                          | Verdict     | Reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+  | ---------------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `log` = `log1p(x−1)`                           | Wrong       | `log1p` is not a WGSL built-in and generates `log(1+a)`, so the rounding of `x−1` comes straight back. At x=1e-6 it is off by about 6%. A codegen branch for unary log already exists; the executor needs only one more branch                                                                                                                                                                                                                                                                                                                                                                                         |
+  | `_log_softmax` = `log(softmax(x))`             | Wrong       | Hits the error above in the y≪1 region. Underflowed elements become `log(0)=−inf`, disagreeing with torch's finite values. **It erases the op's reason to exist**                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+  | `pow` is a one-line WGSL built-in              | Wrong       | WGSL `pow` is **undefined for a negative base**. Disagrees with `torch.pow(-2,3) = -8`. Integer exponents go to repeated `mul` (implemented)                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+  | `maximum`/`amax` expose the internal `max`     | Wrong       | "WGSL `max` does not guarantee NaN propagation", so `leaky_relu` uses the select form (ADR 0015, implemented in M1-P3 wave 3). **Measured (2026-08-02)**: even the select form is folded by the compiler into the max idiom, and the driver's `max` swallows NaN (`clamp(NaN,-1,1) = -1` / `clamp_min(NaN,0) = 0` / `relu(NaN) = 0`. A comparison alone yields false, as the spec says). **Fixed at the root (2026-08-03)**: `clamp` / `clamp_min` / `relu` / `amax` / `amin` propagate NaN through an outer shell of **bit-pattern NaN detection** (`(bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u`) — an integer comparison is not subject to that folding. Only `leaky_relu` keeps the select form, because x appears in both branches |
+  | `mean`/`var`/`group_norm` = plain `sum`        | Wrong       | The reference implementation of sum scans sequentially, one thread = one row. group_norm has the opposite shape — 32 rows, each millions of elements long — so 32 threads loop millions of times. **A two-stage reduction works**                                                                                                                                                                                                                                                                                                                                                                                   |
+  | `var` = `sum((x−mean)²)/N`                     | Wrong       | `torch.var` defaults to `correction=1` (N−1). Division by N is only for the internal variance of the norm ops                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+  | `group_norm` → delegate to `layer_norm`        | Partly      | The normalisation matches but **the affine does not** — layer_norm's weight length assumes the last dimension, so huge resolution-dependent ones/zeros would be needed. A separate two-pass `[1,C,1,1]` broadcast is required                                                                                                                                                                                                                                                                                                                                                                                         |
+  | tensor comparison = `sub` + `*_scalar` compare | Wrong       | With `a=b=+inf`, `a−b=NaN` and `eq` is false (torch says true). This really occurs in attention's −inf guard                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+  | `floor`/`ceil`/`round`/`trunc` = cast round trip | Wrong     | WGSL has built-ins, so it is **a one-line codegen addition**. The cast route breaks at `\|x\| ≥ 2^31`. The rounding rule is ties-to-even, matching torch                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+  | `fmod` needs hand-written code                 | Wrong       | WGSL `%` is `e1 − e2·trunc(e1/e2)` = `torch.fmod`. **`remainder`** is the one that needs a sign correction for floor division. Both are sealed off for integer types                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  | `expm1` = `exp(x)−1` is exact                  | Wrong       | For x≲1e-8, `exp(x)` rounds to 1.0 and the result is 0. torch returns x, so the relative error is 100%                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  | non-unit-axis `repeat` = unsqueeze+expand+view | Wrong       | With a rank-4 input the intermediate is rank 5, exceeding the rank limit (4) of the strided representation. Usable only up to rank≤3                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+  | `select_scatter`/`slice_scatter` = `cat`       | Unconfirmed | At the boundaries (index 0 / end) a zero-length slice appears, and since WebGPU storage bindings require size>0 it may fail (not measured). A branch that drops empty operands is required                                                                                                                                                                                                                                                                                                                                                                                                                             |
+  | 6-step expansion of `batch_norm`               | Holds       | Numerically equivalent. But without elementwise fusion, one node = one dispatch + one full-size intermediate. For a 1024px VAE, `[1,128,1024,1024]` = 537MB, so capacity becomes the problem                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
-  NOTE（2026-08-11）: 表の「tensor 比較」行が指す **attention の −inf ガード**は、ガード部分木を
-  op 化する案（`eq(−inf)` 等を語彙へ）を却下したまま **`safe_softmax` 1 op** で決着した — ADR
-  [0044](decisions/0044-runtime-attention-mask.md)。ガードの**意味論**（全 −inf 行 → 0）だけを
-  `softmax` の変種として持つので、非有限値を扱う比較 op は語彙に入らない。
+  NOTE (2026-08-11): The **−inf guard of attention** that the "tensor comparison" row refers to was
+  settled with **one op, `safe_softmax`**, while the proposal to turn the guard subtree into ops
+  (`eq(−inf)` and the like in the vocabulary) stayed rejected — ADR
+  [0044](decisions/0044-runtime-attention-mask.md). Only the guard's **semantics** (an all −inf row
+  → 0) is held, as a variant of `softmax`, so no comparison op that handles non-finite values enters
+  the vocabulary.
 
-## やらない方がよいこと
+## Things better not done
 
-- **汎用 reduce フレームワークを先に作らない。** amax は sum 用行カーネルの複製約 20 行が
-  正解。抽象化の元になる実装がまだ 2 つ（sum / cumsum）しかない段階で先に一般化すると、
-  形状が定まる前の抽象化になり手戻りが大きい。
-- **torch の decomposition テーブルを移植しない。** 943 エントリあるが、実際に書く分解は
-  38 op ぶんで大半が数行。プロトタイプの前例（select / split_with_sizes / pow(2) 相当）と
-  同じ粒度で個別に足す。
-- **Core ATen に無い op を「対称性のため」足さない。**
-- **160 全部を埋めることを目標にしない。**
-- **`scatter_add` を `atomic<f32>` の CAS ループで安易に入れない** — 加算順が非決定になり
-  「同一入力 → 同一出力」を静かに壊す。
+- **Do not build a generic reduce framework first.** For amax, a copy of about 20 lines of the sum
+  row kernel is the right answer. With only two implementations (sum / cumsum) to abstract from,
+  generalising first means abstracting before the shapes have settled, and the rework is large.
+- **Do not port torch's decomposition table.** It has 943 entries, but the decompositions actually
+  written cover 38 ops and most are a few lines. Add them one by one, at the same granularity as the
+  prototype's precedents (select / split_with_sizes / the equivalent of pow(2)).
+- **Do not add ops absent from Core ATen "for symmetry".**
+- **Do not make filling all 160 a goal.**
+- **Do not casually add `scatter_add` with an `atomic<f32>` CAS loop** — the summation order becomes
+  nondeterministic and silently breaks "same input → same output".
 
-## op 追加の判定手順（入場門モデル — 名前制）
+## Procedure for adding an op (entry-door model — named layers)
 
-DECIDED: [0059](decisions/0059-op-vocabulary-entry-doors.md)（入場門モデル・層番号の退役。
-旧 0〜3 層の定義は [0043](decisions/0043-op-addition-layers.md) — 歴史記録）+
-[0064](decisions/0064-entry-door-generality-axes.md)（意味論の射程・実行モデル不変条件の
-2 軸を追加）。未対応 op が
-`UnsupportedAtenOpsError` に出たら、上から順に**安い門**へ落とす。実行の実体は全門カーネル。
-**ADR 要否を決める軸は「Core ATen 帰属」の 1 判定**（入場券 = `torch.Tag.core in
-op.tags` の実測）**+ 例外 1 本**（実行モデルの不変条件を壊す追加は core でも ADR 必須 —
-0064 軸 B）。原子/分子は門を分ける軸ではなく、ADR 内の証明の型
-（書けないことの証明 / 保存する実測根拠）。
-`UnsupportedAtenOpsError` は op ごとにこの入場券の判定（`[Core ATen]` / `[Core ATen 外]` /
-`[aten 外]`）・由来モジュール（`nn_module_stack` の最内側のクラスと最初のパス）・出現数を
-添えて出す（判定は使っている torch の `Tag.core` から取り、名簿は持たない）。
+DECIDED: [0059](decisions/0059-op-vocabulary-entry-doors.md) (entry-door model, layer numbers
+retired. The old definitions of layers 0 to 3 are in [0043](decisions/0043-op-addition-layers.md) —
+a historical record) + [0064](decisions/0064-entry-door-generality-axes.md) (adds two axes: semantic
+scope and execution-model invariants). When an unsupported op shows up in
+`UnsupportedAtenOpsError`, drop it to the **cheapest door**, trying from the top down. At every door,
+what actually executes is a kernel.
+**The axis that decides whether an ADR is needed is one test, "Core ATen membership"** (the entry
+test = a measurement of `torch.Tag.core in op.tags`) **+ one exception** (an addition that breaks an
+execution-model invariant needs an ADR even in core — 0064 axis B). Atomic / composite is not an
+axis that splits doors but the type of proof inside the ADR (proof that it cannot be written /
+measured grounds for keeping it).
+`UnsupportedAtenOpsError` reports, for each op, this entry test (`[Core ATen]` / `[Core ATen 外]`
+(outside Core ATen) / `[aten 外]` (outside aten) — the labels as the exporter prints them today),
+the originating module (the innermost class and the first path of `nn_module_stack`) and the
+occurrence count (the test is taken from the `Tag.core` of the torch in use; no list is kept).
 
-| 門（旧番号）                             | 置き場                                                                                | 手続き・コミットメント                                                                    |
-| ---------------------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| **export 消滅層**（旧第 0）              | `FOLDABLE_OPS` 定数畳み込み / normalize・convert の分解パス                           | なし（ランタイムに届かない）。最優先の逃げ道                                              |
-| **Core ATen 層**（旧第 1 + 第 2 の一部） | IR 語彙。`Tag.core` の op と、その attr 変種の別 op 名（gelu_tanh）                   | **台帳 NOTE のみ（ADR 不要）** — NOTE に手順 1/2 却下の実測を書く。天井 = 160 + attr 面   |
-| **拡張原子層**（旧第 1'）                | IR 語彙。非 core で、語彙内合成で厳密同値に**書けない**                               | **ADR 必須** = 回避不能の証明（deform_conv2d 型）。要求元（IR 機構/モデル）は門を分けない |
-| **拡張分子層**（旧第 2 の残り）          | IR 語彙。非 core で、書けるが性能・意味で**保存**する                                 | **ADR 必須** = 入場条件①〜④の実測（gru_scan 型）                                          |
-| **融合層**（旧第 3）                     | `fusion.ts` の隣接 matcher（現在の在庫の正本 = `FUSION_RULES` と融合門テスト — 0064） | ゼロ（撤回自由）。exact-match が外れると黙って遅くなる — **観測点が必須**                 |
+| Door (old number)                            | Location                                                                                                  | Procedure / commitment                                                                                                       |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| **Export-eliminated layer** (old 0)          | `FOLDABLE_OPS` constant folding / the decomposition passes of normalize / convert                         | None (never reaches the runtime). The top-priority way out                                                                          |
+| **Core ATen layer** (old 1 + part of old 2)  | IR vocabulary. `Tag.core` ops and their attr variants under separate op names (gelu_tanh)                 | **Ledger NOTE only (no ADR)** — the NOTE records the measurements that rejected steps 1/2. Ceiling = 160 + the attr surface   |
+| **Extended atomic layer** (old 1')           | IR vocabulary. Non-core, and **cannot** be written as an exact equivalent by composition in the vocabulary | **ADR required** = proof that it cannot be avoided (the deform_conv2d pattern). The requester (IR mechanism / model) does not split doors |
+| **Extended composite layer** (rest of old 2) | IR vocabulary. Non-core, can be written but is **kept** for performance or meaning                        | **ADR required** = measurements for entry conditions ① to ④ (the gru_scan pattern)                                          |
+| **Fusion layer** (old 3)                     | Adjacent matchers in `fusion.ts` (the current inventory lives in `FUSION_RULES` and the fusion tests — 0064) | None (free to withdraw). When the exact match misses, things get slower silently — **observation points are required**     |
 
-判定（上から順に）:
+The test (from the top down):
 
-1. **値が export 時定数か**（依存の葉が arange / lifted 定数のみ）→ export 消滅層 FOLDABLE。
-   条件: 記号を値位置で消費せず、記号軸上の位置も参照せず、動的 view は単位軸の増減に限る
-   こと（構造検査 — ADR 0010 の 2026-08-13 / 2026-09-10 / 2026-10-10 追記）・
-   `_check_prefix_commutes` の 2 点評価を通ること・initializer にできるのは f32/i32 のみ。
-2. **既存プリミティブの合成で厳密同値か** → export 消滅層の分解パス。**torch 突合ゲート必須**
-   （上の反例集のとおり、丸め・NaN・境界で壊れる分解が多い）。分解で逃げるか op を足すかは
-   拘束的閾値でなく**前例ガイド**で判断する: 合成が中間・FLOP をほぼ増やさない書き換え
-   （reciprocal → 除算形・softplus 分解〈中間破綻の守りは torch 分解が threshold=20 の
-   where ごと IR に乗ること — select は不選択腕の NaN を伝播しない〉・RoPE 実数化型）→
-   分解側が既定 / 中間が膨らむなら
-   **1.5〜2 倍の時点で既に保存側の前例がある**（leaky_relu — ADR 0015 で保存リスト入り）/
-   桁で膨れる合成（upsample_bilinear2d の FLOP 184 倍・batch_norm の 537MB — 上の反例集）は
-   **分解の却下材料**で、op を足すか否かは需要側で決める。どちらに転んでも次の門判定
-   （ADR 要否）は変わらない。
-3. **Core ATen 帰属の実測** — `uv run python -c "import torch;
-   print(torch.Tag.core in torch.ops.aten.<name>.<overload>.tags)"`（tools/exporter で）。
-   core（+ その attr 変種の別 op 名）→ **Core ATen 層** = 台帳 NOTE のみ。契約 1 セット
-   （`OP_CONTRACTS` + `karume/ops.py` + `shapes.py` + fixtures/op-contracts.json +
-   CPU 参照 + golden COVERAGE）。**例外（0064 軸 B）**: 実行モデルの不変条件（単一出力 /
-   静的形状 / full-write / 4 バイト格納 + 意味論 dtype 3 種 / resident 全域書き）を壊す
-   追加は core でも **ADR 必須** — 影響範囲（planner / executor / recipe / IR …）の先出しが
-   必須節（`topk` / `sort` / `argmax` の 2 出力が典型 — **`topk` はこの経路で消化済み**:
-   ADR [0068](decisions/0068-decode-exit-multi-output.md) が多出力の影響範囲を 8 面で先出しし、
-   決定 3 で入居した。`argmax` は単一出力なのでこの例外には当たらず台帳 NOTE のみ）。
-4. **非 core**（非 core の aten・torchvision・karume 独自名）→ ADR とセットで:
-   語彙内合成で厳密同値に**書けない** → **拡張原子層**（ADR = 回避不能の証明）。
-   **書けるが保存したい** → **拡張分子層**（ADR = 入場条件のいずれかの実測:
-   ①分解形からの実行時復元が脆い / 意味情報が落ちる〈attention の有限マスク値・rms_norm の
-   weight 長・gru_scan の実行時長さ軸〉②中間実体化が容量・帯域で受け入れ不能 ③再出現率が
-   恒久コミットを正当化する ④attrs 空契約（ADR 0012）維持のため attr 変種を別 op に
-   分ける〈非 core の場合〉）。**非 core の op（`Tag.core` 実測で判定 — IR 名の綴りでは
-   ない。core 由来の別名 cast / ge_scalar 等は Core ATen 層）が IR に現れるのは karume が
-   意図して選んだときだけ**（保存 or 発明）— 選択には記録が伴う、が門の機序
-   （ADR 0059 決定 5）。ADR / NOTE は **semantic surface と実装済み subset を区別して書き**、
-   観測 subset を意味論として焼く場合はその旨 + 一般化の条件を 1 行残す（0064 軸 A）。
-   機構不足（bool attr 等）を op 名の分裂で埋める場合はその旨と統合条件を明記する。
-5. **正しく動く分解形が既にあり、性能だけ回収したい** → 融合層のルール。観測点
-   （`lastRunFusions` / assets_fusion_counts_test）を持つことが入場条件（ADR 0040）。
+1. **Is the value an export-time constant?** (the leaves of its dependencies are only arange / lifted
+   constants) → export-eliminated layer, FOLDABLE. Conditions: it does not consume a symbol in a
+   value position, does not refer to a position on a symbolic axis, and dynamic views are limited to
+   adding or removing unit axes (structural check — the 2026-08-13 / 2026-09-10 / 2026-10-10
+   addenda of ADR 0010); it passes the two-point evaluation of `_check_prefix_commutes`; only f32/i32
+   can become an initializer.
+2. **Is it an exact equivalent of a composition of existing primitives?** → the decomposition pass
+   of the export-eliminated layer. **A check against torch is required** (as the counter-examples
+   above show, many decompositions break on rounding, NaN or boundaries). Whether to escape by
+   decomposition or to add an op is judged by a **precedent guide**, not a binding threshold:
+   rewrites whose composition barely adds intermediates or FLOPs (reciprocal → division form, the
+   softplus decomposition(the guard against intermediate breakdown is that torch's decomposition
+   carries its threshold=20 where into the IR as is — select does not propagate NaN from the
+   unselected arm), the real-valued RoPE type) → decomposition is the default / when intermediates
+   grow, **there is already a precedent for keeping the op at 1.5–2×** (leaky_relu — put on the
+   preservation list in ADR 0015) / compositions that grow by orders of magnitude
+   (upsample_bilinear2d FLOPs ×184, batch_norm 537MB — the counter-examples above) are **grounds to
+   reject the decomposition**, and whether to add the op is decided by demand. Either way, the next
+   door test (whether an ADR is needed) does not change.
+3. **Measure Core ATen membership** — `uv run python -c "import torch;
+   print(torch.Tag.core in torch.ops.aten.<name>.<overload>.tags)"` (in tools/exporter).
+   Core (+ its attr variants under separate op names) → **Core ATen layer** = ledger NOTE only. One
+   contract set (`OP_CONTRACTS` + `karume/ops.py` + `shapes.py` + fixtures/op-contracts.json + CPU
+   reference + golden COVERAGE). **Exception (0064 axis B)**: an addition that breaks an
+   execution-model invariant (single output(superseded by ADR 0068 decision 1 on 2026-08-17 —
+   node-level multi-output is allowed) / static shapes / full-write / 4-byte storage + three semantic
+   dtypes / full-range write of resident tensors) **needs an ADR** even in core — stating the impact
+   (planner / executor / recipe / IR …) up front is a required section (the two outputs of `topk` /
+   `sort` / `argmax` are the typical case — **`topk` has gone through this route**: ADR
+   [0068](decisions/0068-decode-exit-multi-output.md) stated the impact of multi-output up front on
+   eight surfaces, and it moved in with decision 3. `argmax` has a single output, so this exception
+   does not apply to it and a ledger NOTE alone suffices).
+4. **Non-core** (non-core aten, torchvision, Karume's own names) → together with an ADR:
+   **cannot be written** as an exact equivalent by composition in the vocabulary → **extended atomic
+   layer** (ADR = proof that it cannot be avoided).
+   **Can be written but should be kept** → **extended composite layer** (ADR = a measurement for one
+   of the entry conditions: ① runtime reconstruction from the decomposed form is fragile / semantic
+   information is lost(attention's finite mask value, rms_norm's weight length, gru_scan's runtime
+   length axis) ② materialising the intermediate is unacceptable in capacity or bandwidth ③ the
+   recurrence rate justifies a permanent commitment ④ attr variants are split into separate ops to
+   keep the empty-attrs contract (ADR 0012)(when non-core)). **A non-core op (decided by the
+   measured `Tag.core` — not by the spelling of the IR name; aliases derived from core ops such as
+   cast / ge_scalar are in the Core ATen layer) appears in the IR only when Karume chose it on
+   purpose** (kept or invented) — the choice comes with a record; that is how the door works
+   (ADR 0059 decision 5). ADRs / NOTEs **write the semantic surface and the implemented subset
+   separately**, and when an observed subset is fixed as the semantics, they leave one line saying
+   so + the condition for generalising (0064 axis A).
+   When a missing mechanism (bool attrs and the like) is covered by splitting the op name, this is
+   stated together with the condition for merging.
+5. **A correctly working decomposed form already exists and only performance is to be recovered** →
+   a fusion-layer rule. Having observation points (`lastRunFusions` /
+   `packages/e2e/tests/e2e_*_fusion_counts_test.ts`) is the entry condition (ADR 0040).
 
-「やらない方がよいこと」（下節）は全門に優先する。分解禁止リストは門と独立の軸
-（エクスポータの畳み込み方針 — ADR 0043 追記 決定 3・0059 決定 7）。以下の日付つき NOTE は
-**時点記録**（旧番号のまま残す — 対応は上の門表の（旧番号）列で読む）。
+"Things better not done" (the section above) takes precedence over every door. The no-decomposition
+list is an axis independent of the doors (the exporter's folding policy — ADR 0043 addendum decision
+3, 0059 decision 7). The dated NOTEs below are **snapshots** (they keep the old numbers — read the
+mapping from the (old number) column of the door table above).
 
-NOTE: 2026-08-11 `gelu_tanh` を第 2 層に追加（ADR 0043 の初適用 — Gemma 系の
-`approximate="tanh"`。EmbeddingGemma / Gemma 4 E2B の config で使用を確認）。
+NOTE: 2026-08-11 added `gelu_tanh` to layer 2 (the first application of ADR 0043 — Gemma's
+`approximate="tanh"`. Its use is confirmed in the configs of EmbeddingGemma / Gemma 4 E2B).
 
-NOTE: 2026-08-11 `sin`（f32 unary）を**第 1 層**に追加。根拠 = DACVAE の Snake 活性
-`x + (α+1e-9)⁻¹·sin²(αx)`（Irodori-TTS v4 の codec）。手順 1 で止まらない理由は
-**x が実行時値**だから — 定数の RoPE 表は従来どおり `FOLDABLE_OPS` の `aten.sin.default`
-が畳み、両経路が同時に成立する（畳み込みを外すと実行時 dispatch が増える）。手順 2 の
-合成も不可（`sin` を既存プリミティブで厳密に表す式が無い）。`aten.sin.default` は
-Core ATen 内なので第 1 層。**`cos` は足さない** — 実行時値を取る `cos` は実測に無く、
-「対称性のための追加をしない」が優先する。ADR は書かない（第 1 層は台帳のみ）。
+NOTE: 2026-08-11 added `sin` (f32 unary) to **layer 1**. Grounds = DACVAE's Snake activation
+`x + (α+1e-9)⁻¹·sin²(αx)` (the codec of Irodori-TTS v4). It does not stop at step 1 because
+**x is a runtime value** — constant RoPE tables are folded by `aten.sin.default` in `FOLDABLE_OPS`
+as before, and both routes hold at once (removing the folding would add runtime dispatches). The
+composition of step 2 is not possible either (no expression represents `sin` exactly with existing
+primitives). `aten.sin.default` is inside Core ATen, so layer 1. **`cos` is not added** — no
+measured case takes `cos` of a runtime value, and "no additions for symmetry" takes precedence. No
+ADR is written (layer 1 is ledger only).
 
-NOTE: 2026-08-12 判定軸を**原子/分子**へ一本化（ADR 0043 追記）。境界の確定: `gelu` は
-原子（erf 不在 → 第 1 層 — 分解禁止リストの所属は不変で、分解禁止は層と独立の軸）/
-`leaky_relu` は分子（第 2 層・根拠 ADR 0015）/ `sym_prefix_slice` は**第 1' 層**の初例。
-導入済み op の再割当はしない（層は今後の追加手続きだけを支配する）。
+NOTE: 2026-08-12 the decision axis was unified into **atomic / composite** (ADR 0043 addendum).
+Boundaries fixed: `gelu` is atomic (no erf → layer 1 — its membership in the no-decomposition list is
+unchanged; no-decomposition is an axis independent of the layers) / `leaky_relu` is composite
+(layer 2, grounds ADR 0015) / `sym_prefix_slice` is the first case of **layer 1'**.
+Ops already introduced are not reassigned (the layers govern only the procedure for future
+additions).
 
-NOTE: 2026-08-13 `upsample_bilinear2d` を**第 1 層**に追加。根拠 = BiRefNet_HR / Lucida /
-Depth Anything V2 が共通で使う `F.interpolate(..., size=(H,W), mode="bilinear",
-align_corners=True)`（BiRefNet_HR だけで推論グラフに 22 本・`scale_factor` 指定は
-アクティブ経路に 0 件・倍率は非整数）。手順 1 で止まらない理由は **size も倍率も静的だが
-値が実行時**だから。手順 2 の合成は**書けるが成立しない** — ①定数行列 2 本の matmul
-（分離可能形）は厳密同値だが **FLOP が直接カーネルの約 184 倍**（BiRefNet_HR の最終段
-`[1,192,512,512] → [1,192,2048,2048]` で 1.03 TFLOP 対 5.6 GFLOP）②gather 形は `gather` の
-契約（index の先行次元が src と完全一致）から index を broadcast できず、**805MB〜3.22GB**
-の添字テンソルが要る（反例集の `batch_norm` 537MB 行と同型で、桁が 1 つ上）。
-`aten.upsample_bilinear2d.vec` は Core ATen 内なので第 1 層 = **台帳のみ・ADR は書かない**
-（層分類の暫定運用は下の NOTE が指す known-issues の節・ユーザー裁定 2026-08-13
-〔追記 2026-08-14: 暫定運用は入場門モデル ADR 0059 で解消 — 本 op の帰結は Core ATen 層で
-不変〕）。
-**`align_corners=False` は受理しない** — 座標式（`scale·(i+0.5) − 0.5`）も端の扱いも別物で、
-attrs に欄を作らないことがそのまま fail loudly になる（ADR 0023 決定 4 の規律）。需要
-（SAM / RMBG-1.4 / IS-Net / MODNet）が出たら
-`gelu` / `gelu_tanh` と同じ手筋で**別 op**として足す。**訂正（2026-08-14）**: この一覧に
-あった Depth Anything V2 の HF port は**需要元にならない** — 移植時の実測でグラフに出る
-`upsample_bilinear2d` は 5 本とも `align_corners=True` で、`False` を使う融合層の残差 resize
-枝は構造的に到達不能だった。`upsample_nearest2d` は足さない
-（Anima の nearest-exact ×2 は第 3 層の融合ルール `upsample2x` が既に持っており、
-「対称性のための追加をしない」が優先する）。
+NOTE: 2026-08-13 added `upsample_bilinear2d` to **layer 1**. Grounds = `F.interpolate(...,
+size=(H,W), mode="bilinear", align_corners=True)`, used in common by BiRefNet_HR / Lucida / Depth
+Anything V2 (22 in the inference graph of BiRefNet_HR alone; 0 uses of `scale_factor` on the active
+path; the scale factors are non-integer). It does not stop at step 1 because **size and scale are
+static but the values are runtime values**. The composition of step 2 **can be written but does not
+hold up** — ① the matmul of two constant matrices (separable form) is exactly equivalent but **about
+184× the FLOPs of a direct kernel** (at the last stage of BiRefNet_HR,
+`[1,192,512,512] → [1,192,2048,2048]`: 1.03 TFLOP against 5.6 GFLOP) ② the gather form cannot
+broadcast the index under the contract of `gather` (the leading dimensions of index match src
+exactly), and needs an index tensor of **805MB–3.22GB** (the same shape as the `batch_norm` 537MB row
+of the counter-examples, one order of magnitude up).
+`aten.upsample_bilinear2d.vec` is inside Core ATen, so layer 1 = **ledger only, no ADR**
+(the interim handling of the layer classification is in the known-issues section that the NOTE
+below points to, user ruling 2026-08-13
+〔addendum 2026-08-14: the interim handling was resolved by the entry-door model, ADR 0059 — this
+op's outcome, the Core ATen layer, is unchanged〕).
+**`align_corners=False` is not accepted** — both the coordinate formula (`scale·(i+0.5) − 0.5`) and
+the edge handling differ, and not creating a field for it in attrs is itself the fail-loudly (the
+discipline of ADR 0023 decision 4). When demand appears
+(SAM / RMBG-1.4 / IS-Net / MODNet), it is added as a **separate op**, the same way as `gelu` /
+`gelu_tanh`. **Correction (2026-08-14)**: the HF port of Depth Anything V2 that was on this list
+**is not a source of demand** — measured during the port, all five `upsample_bilinear2d` in the
+graph are `align_corners=True`, and the residual resize branch of the fusion layers, which
+uses `False`, was structurally unreachable. `upsample_nearest2d` is not added
+(Anima's nearest-exact ×2 is already covered by the layer-3 fusion rule `upsample2x`, and "no
+additions for symmetry" takes precedence).
 
-NOTE: 2026-08-13 `deform_conv2d`（DCNv2）を**第 1' 層**に追加。ADR
-[0055](decisions/0055-deform-conv2d.md) が正本。根拠 = BiRefNet 一族（公式 8 + Lucida）が
-全て `dec_att='ASPPDeformable'` で、1 forward に `torchvision.ops.deform_conv2d` が **20 回**。
-手順 1 で止まらない理由は offset が学習済み conv の**実行時出力**（クランプも無効）だから。
-手順 2 の合成も不可 — `floor` が語彙に無く（`cast` は trunc）、`gather` は最終次元固定で
-2 軸の値依存 gather を書けない。`torchvision::deform_conv2d` は **Core ATen 外**（実測でも
-`run_decompositions(curated_decompositions())` 後に 1 ノードで残る）なので、下の暫定運用
-（Core ATen 外の原子 = 第 1' 層〔追記 2026-08-14: 現行の門 = 拡張原子層・ADR 0059 —
-帰結不変〕）に従い **ADR 必須**。却下案は `grid_sampler_2d` 経由の分解
-（厳密同値・Core ATen 内という手続き上の利点があるが、中間が im2col そのもので
-**k=7 / 512² で 3.29GB** — ADR 0024 が im2col を却下した 3.62GB と同水準）。**`grid_sampler_2d`
-の保留は解除していない**（下の系統 3 の箱はそのまま — 需要が出た時に独立に判断する）。
+NOTE: 2026-08-13 added `deform_conv2d` (DCNv2) to **layer 1'**. ADR
+[0055](decisions/0055-deform-conv2d.md) is the source of truth. Grounds = the whole BiRefNet family
+(8 official + Lucida) uses `dec_att='ASPPDeformable'`, calling `torchvision.ops.deform_conv2d`
+**20 times** per forward. It does not stop at step 1 because the offset is the **runtime output** of
+a trained conv (and clamping is disabled). The composition of step 2 is not possible either — `floor`
+is not in the vocabulary (`cast` truncates), and `gather` is fixed to the last dimension and cannot
+express a value-dependent gather over two axes. `torchvision::deform_conv2d` is **outside Core ATen**
+(measured: it also remains one node after `run_decompositions(curated_decompositions())`), so under
+the interim handling below (an atomic op outside Core ATen = layer 1' 〔addendum 2026-08-14: the
+current door = extended atomic layer, ADR 0059 — outcome unchanged〕) **an ADR is required**. The
+rejected alternative is a decomposition via `grid_sampler_2d`
+(exactly equivalent, with the procedural advantage of being inside Core ATen, but its intermediate is
+im2col itself, **3.29GB at k=7 / 512²** — on the level of the 3.62GB for which ADR 0024 rejected
+im2col). **The hold on `grid_sampler_2d` is not lifted** (the box of group 3 in the section on the 15
+hard / slow ops stays as it is — it is decided independently when demand appears).
 
-NOTE: 2026-08-14 `gru_scan` / `gru_scan_reverse` を**第 2 層**に追加。ADR
-[0056](decisions/0056-gru-scan.md) が正本。根拠 = vowel-detector（2 層 BiGRU）の
-`aten.gru.input` が分解で**時間方向へ完全展開**され（T10 = 20/40/200 で 874/1,714/8,434
-call_function ノード）、`torch.export` が長さ軸を specialize してしまう — 本 op を通すと
-**T に依存しない 19 ノード**になる。手順 2 で止まらない理由は「**書けるが意味情報が落ちる**」
-から: 分解形は語彙内の既存 op で**厳密同値**に書けている（= 原子ではなく分子）が、T 回展開
-されたノード列から「これは GRU だ」を第 3 層 matcher で復元することは成立せず、落ちるのは
-「**時間軸は実行時に決まる**」という事実そのもの。第 2 層の入場条件 ①（意味情報が落ちる）と
-③（再出現率）を満たす。**入力側 GEMM は含めない**（呼び手の `linear` に任せる — 既存の
-f16 / i8 格納がそのまま効き、ビット同一の証明対象が隠れ側だけに縮む）。**逆方向は attrs の
-bool ではなく別 op 名**（`gelu` / `gelu_tanh` と同じ手筋 — 既存の attr 検査関数はどれも bool を
-明示的に弾いており、受理には検証機構の新設が要る）。**LSTM は足さない**（「対称性のための
-追加をしない」— 拡張時の論点は ADR 0056 決定 8）。
+NOTE: 2026-08-14 added `gru_scan` / `gru_scan_reverse` to **layer 2**. ADR
+[0056](decisions/0056-gru-scan.md) is the source of truth. Grounds = in vowel-detector (a 2-layer
+BiGRU), decomposition **fully unrolls** `aten.gru.input` **along time** (874/1,714/8,434
+call_function nodes at T10 = 20/40/200), and `torch.export` specialises the length axis — through
+this op it becomes **19 nodes independent of T**. It does not stop at step 2 because "**it can be
+written, but semantic information is lost**": the decomposed form is written as an **exact
+equivalent** with existing ops of the vocabulary (= composite, not atomic), but recovering "this is a
+GRU" with a layer-3 matcher from the node sequence unrolled T times does not work, and what is lost
+is the very fact that "**the time axis is decided at run time**". It meets entry conditions ①
+(semantic information is lost) and ③ (recurrence rate) of layer 2. **The input-side GEMM is not
+included** (left to the caller's `linear` — the existing f16 / i8 storage applies as is, and the
+target of the bit-identity proof shrinks to the hidden side only). **The reverse direction is a
+separate op name, not a bool in attrs** (the same approach as `gelu` / `gelu_tanh` — every existing
+attr validation function explicitly rejects bools, and accepting one would need a new validation
+mechanism). **LSTM is not added** ("no additions for symmetry" — the points for an extension are in
+ADR 0056 decision 8).
 
-NOTE: 2026-08-17 `argmax` を **Core ATen 層**に追加。契約の正本は ADR
-[0068](decisions/0068-decode-exit-multi-output.md) 決定 2（多出力解禁と同じ ADR に載っているが、
-**argmax 自体は単一出力**なので 0064 軸 B の例外〈実行モデル不変条件を壊す追加〉には当たらない
-— 門としては台帳 NOTE のみで足りる）。根拠 = greedy デコードの出口。全語彙 logits をホストへ
-readback する形は参照実装で既に少数派で（調査 §2）、GPU 側に greedy を置くには本 op が要る。
-入場券の実測（2026-08-17 / torch 2.13・tools/exporter で実行）:
+NOTE: 2026-08-17 added `argmax` to the **Core ATen layer**. The contract's source of truth is ADR
+[0068](decisions/0068-decode-exit-multi-output.md) decision 2 (it sits in the same ADR as the
+unlocking of multi-output, but **argmax itself has a single output**, so it does not fall under the
+exception of 0064 axis B(an addition that breaks an execution-model invariant) — as a door, a ledger
+NOTE alone suffices). Grounds = the exit of greedy decoding. Reading the logits of the whole
+vocabulary back to the host is already a minority form among the reference implementations (survey
+§2), and putting greedy on the GPU side needs this op.
+Measurement of the entry test (2026-08-17 / torch 2.13, run in tools/exporter):
 
 ```sh
 uv run python -c "import torch; print(torch.Tag.core in torch.ops.aten.argmax.default.tags)"
 # → True
 ```
 
-手順 1 で止まらない理由は **logits が実行時値**だから。手順 2 の合成も不可 — 語彙に「値と添字を
-同時に畳む縮約」も `arange` 相当の実行時添字生成も無く、`amax` + `ge` + `where` 系で書こうとすると
-①最大値と一致する要素が複数ある行で複数の添字が残り「最小 index」を選ぶ縮約がもう 1 段要る
-②その段が結局 argmax そのもの、という循環になる（添字 min の reduce が語彙に無い）。
-`sum` を使う数え上げ形も、bool の行 sum は個数しか返さないので添字にならない。
+It does not stop at step 1 because **the logits are runtime values**. The composition of step 2 is
+not possible either — the vocabulary has neither "a reduction that folds value and index together"
+nor runtime index generation equivalent to `arange`, and an attempt with `amax` + `ge` + `where`
+and the like becomes circular: ① in a row where several elements equal the maximum, several indices
+remain, and one more reduction stage that picks "the smallest index" is needed ② that stage is
+argmax itself (no index-min reduce exists in the vocabulary).
+A counting form with `sum` does not give an index either, since a row sum of bools returns only a
+count.
 
-契約は**最終次元固定・attrs 空・rank 保存**（`keepdim` の欄を作らない — 欄の不存在がそのまま
-「rank が下がる形は語彙に無い」の宣言。ADR 0023 決定 4 の規律）。**reduce 族には入れない** —
-attrs（無し）・出力 dtype（i32）・rank の扱い（保存）・カーネル族（identity が −inf で
-(値, index) 対を運ぶ）の 4 面が全て違い、相乗りさせると既存 3 本のキー版数が動いて WAV / PNG 門が
-丸ごと動く。固定挙動 3 点は torch 準拠の実測（同上）: **タイブレーク = 最小 index** /
-**NaN は最大**（複数なら最小 index — `amax` の NaN 伝播と族内で整合する側）/ **全 −inf 行は
-index 0**。**`argmin` は足さない**（「対称性のための追加をしない」— greedy に要らない）。
-`max` / `min`（値と添字の 2 出力）も依然として未実装だが、**多出力機構は入った**（下の
-`topk` の NOTE）ので判断材料は揃っている — 足すかどうかは実測の要求が出てから。
+The contract is **last dimension fixed, empty attrs, rank preserved** (no `keepdim` field is created
+— the absence of the field is itself the declaration that "a rank-reducing form is not in the
+vocabulary"; the discipline of ADR 0023 decision 4). **It is not put in the reduce family** — the
+attrs (none), the output dtype (i32), the rank handling (preserved) and the kernel family (identity is
+−inf and it carries (value, index) pairs) differ on all four counts, and making it ride along would
+move the key versions of the existing three and move the WAV / PNG checks wholesale. Three fixed
+behaviours, measured to follow torch (same as above): **tie-break = smallest index** /
+**NaN is the maximum** (smallest index if several — the side consistent within the family with the
+NaN propagation of `amax`) / **an all −inf row gives index 0**. **`argmin` is not added** ("no
+additions for symmetry" — greedy does not need it).
+`max` / `min` (two outputs: value and index) are still not implemented either, but **the
+multi-output mechanism has landed** (the `topk` NOTE below), so the material for the decision is
+there — whether to add them waits until a measured need appears.
 
-NOTE: 2026-08-17 `topk` を **Core ATen 層**に追加。契約の正本は ADR
-[0068](decisions/0068-decode-exit-multi-output.md) 決定 3（**ノードレベル多出力の最初の入居者** —
-実行モデルの不変条件「単一出力」を壊す追加なので 0064 軸 B の例外に当たり、**ADR 必須**の側。
-影響範囲の先出しは ADR 0068 決定 1 が持つ）。根拠 = top-k sampling の出口（温度・top-p・乱数は
-ホスト維持なので、GPU 側は topk までで足りる — 決定 4）。入場券の実測（2026-08-17 / torch 2.13・
-tools/exporter で実行）:
+NOTE: 2026-08-17 added `topk` to the **Core ATen layer**. The contract's source of truth is ADR
+[0068](decisions/0068-decode-exit-multi-output.md) decision 3 (**the first occupant of node-level
+multi-output** — it breaks the execution-model invariant "single output", so it falls under the
+exception of 0064 axis B, on the **ADR required** side. The impact stated up front is in ADR 0068
+decision 1). Grounds = the exit of top-k sampling (temperature, top-p and random numbers stay on the
+host, so the GPU side only needs to go as far as topk — decision 4). Measurement of the entry test
+(2026-08-17 / torch 2.13, run in tools/exporter):
 
 ```sh
 uv run python -c "import torch; print(torch.Tag.core in torch.ops.aten.topk.default.tags)"
-# → True（core decomposition にも載らない = curated decomp 後も 1 ノードで残る）
+# → True (not in the core decomposition table either = it remains one node after the curated decomp)
 ```
 
-手順 1 で止まらない理由は **logits が実行時値**だから。手順 2 の合成も不可 — 語彙に「値と添字を
-同時に畳む縮約」が無く、`argmax` の反復で書こうとすると①選んだ要素を除いて次を探す機構
-（masked_fill 相当の実行時マスク更新）が要り②その反復が k 回の行 reduce = 行を k 回読む形で、
-ADR が避けている高コスト側そのものになる。
+It does not stop at step 1 because **the logits are runtime values**. The composition of step 2 is
+not possible either — the vocabulary has no "reduction that folds value and index together", and an
+attempt by repeating `argmax` ① needs a mechanism to exclude the chosen element and find the next
+(a runtime mask update equivalent to masked_fill) ② that repetition is k row reduces = reading the
+row k times, exactly the high-cost side the ADR avoids.
 
-契約は**最終次元固定・attrs `k` 宣言必須（static-k）・出力 2 本**（値 f32 の降順 + 添字 i32・
-2 本とも `[…, k]`）。受理領域は **`1 ≤ k ≤ 最終次元`** で、k=0（torch は受理する）・
-k > 最終次元・記号 k は全て fail loudly。`largest` / `sorted` の欄は作らない（降順の最大側 1 形
-だけ — `keepdim` の欄を作らなかった argmax と同じ規律）。**実装上限**は workgroup storage の
-device limit から静的に決まり（1 行 32 レーン × `8·W·(k+1)` バイト → WebGPU 既定 16384 で
-**k ≤ 63**）、超えたら縮退させず上限値つきで落ちる。
+The contract is **last dimension fixed, attrs `k` required to declare (static-k), two outputs**
+(values f32 in descending order + indices i32, both `[…, k]`). The accepted range is
+**`1 ≤ k ≤ last dimension`**; k=0 (which torch accepts), k > last dimension and a symbolic k all
+fail loudly. No `largest` / `sorted` field is created (only the one form, the largest side in
+descending order — the same discipline as argmax, which got no `keepdim` field). The
+**implementation limit** is fixed statically by the device limit of workgroup storage (32 lanes per
+row × `8·W·(k+1)` bytes → with the WebGPU default of 16384, **k ≤ 63**); beyond it, it fails with
+the limit value instead of falling back.
 
-固定挙動: **タイブレーク = 最小 index**（argmax と同族の述語）/ **NaN は最大**（複数なら最小
-index）/ 全 −inf 行も最小 index から k 本。**値の列は torch とビット一致**（降順・多重度が同じ）
-だが、**添字の列は torch 準拠ではなく karume の規定**である点が argmax と違う — 実測
-（2026-08-17 / torch 2.13.0+cpu）で torch の `topk` は同値要素の順序を保証せず、
-`topk([5,5,5,5], 1)` が index **2** を返すのに `argmax([5,5,5,5])` は **0** を返す（同一リポ内の
-自己矛盾。7 行のタイ表で k=1 の 3 行が食い違う）。karume は argmax と揃えて最小 index に規定し、
-**k=1 の topk が argmax と一致すること**を門で突き合わせている。
+Fixed behaviour: **tie-break = smallest index** (the same predicate family as argmax) / **NaN is the
+maximum** (smallest index if several) / an all −inf row also gives k entries from the smallest index.
+**The value column matches torch bit for bit** (descending order, same multiplicity), but **the index
+column is Karume's own specification, not torch-conformant**, which is where it differs from argmax —
+measured (2026-08-17 / torch 2.13.0+cpu), torch's `topk` does not guarantee the order of equal
+elements: `topk([5,5,5,5], 1)` returns index **2** while `argmax([5,5,5,5])` returns **0** (a
+self-contradiction within the same repository. In a 7-row tie table, the 3 rows with k=1 disagree).
+Karume specifies the smallest index, in line with argmax, and a check verifies **that topk with k=1
+matches argmax**.
 
-**`sort` は足さない**（全語彙の並べ替えは k 幅に絞れず、保留の理由がそのまま残る）。
-**エクスポータ側の aten ハンドラは無い** — 多出力 aten のタプル meta + `operator.getitem` の
-スロット結線が新機構で、sampling の実需まで先送りした（ADR 0068 追記）。実測で止まるのは
-`aten.topk.default` ではなく **`operator.getitem`** なので、ハンドラだけ足しても道は開かない。
-現状の topk ノードは**ランタイム側の手書き IR / 将来の decode 台本**からのみ現れる。
+**`sort` is not added** (reordering the whole vocabulary cannot be narrowed to a width of k, so the
+reason for the hold remains as it is).
+**There is no aten handler on the exporter side** — the tuple meta of a multi-output aten op and the
+slot wiring of `operator.getitem` are a new mechanism, deferred until sampling is actually needed
+(ADR 0068 addendum). What the measurement stops at is **`operator.getitem`**, not
+`aten.topk.default`, so adding only a handler does not open the way.
+Today topk nodes appear only from **hand-written IR on the runtime side / a future decode graph
+script**.
 
-NOTE: 2026-08-18 `state_append` を**拡張原子層**（Core ATen 外）に追加し、`attention` に
-**states 形**（省略可能な `states` 欄 — 同一 op 名の契約拡張で欄の有無が形を判別）を足した。
-契約の正本は ADR [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 / 5。
-`state_append` は **aten に対応物が無い** effect op（**出力 0 本**の最初の入居者 — ADR 0068
-決定 1 の列化が 0 本席を受ける）で、torch.export の経路からは原理的に出ない
-（`NON_EMITTABLE_OPS` — 発行は decode グラフ台本の担当）。attention に内蔵しない理由・
-`window` attrs・nodes 配列順の効果順序は ADR 決定 5 / 5b が持つ。
+NOTE: 2026-08-18 added `state_append` to the **extended atomic layer** (outside Core ATen), and added
+the **states form** to `attention` (an optional `states` field — a contract extension under the same
+op name, where the presence of the field identifies the form).
+The contract's source of truth is ADR [0067](decisions/0067-autoregressive-attention-vocabulary.md)
+decisions 4 / 5.
+`state_append` is an effect op with **no counterpart in aten** (the first occupant with **zero
+outputs** — the list form of ADR 0068 decision 1 accommodates the zero-output case), and in principle
+never comes out of the torch.export path
+(`NON_EMITTABLE_OPS` — emitting it is the job of the decode graph script). Why it is not built into
+attention, the `window` attrs and the effect ordering by the order of the nodes array are in ADR
+decisions 5 / 5b.
 
-NOTE: 2026-09-08 `attention` の states 形に **readonly 形**（省略可能 attrs `readonly` —
-`true` のみ）を足した。契約の正本は ADR
-[0096](decisions/0096-speculative-decoding.md) 段 2 §1.2。**op 名も語彙も増えない**（states 形と
-同じ「欄の有無が形を判別する」拡張の 2 段目）が、`ins` が **q 1 本ちょうど**になる点だけが
-既存の 2 形と違う: 今 step の k / v を持たず、読むのは借り物スロットの列 `[P−min(P,W), P)`
-（full は `[0, P)`）だけ。q は `[B,H,1,D]` で **M = 1 MUST**、参照先は **external スロット限定**
-（`states[].external` — 書き手は貸し手 context の側に居る）。torch.export の経路からは出ない
-（`scaled_dot_product_attention` の分解には「今 step の k/v が無い」形が無い）— 発行は
-エクスポータの手術（`states.to_external_states_form`）の担当。
+NOTE: 2026-09-08 added the **readonly form** to the states form of `attention` (optional attrs
+`readonly` — `true` only). The contract's source of truth is ADR
+[0096](decisions/0096-speculative-decoding.md) stage 2 §1.2. **Neither op names nor the vocabulary
+grow** (it is the second step of the same "the presence of a field identifies the form" extension as
+the states form), but it differs from the existing two forms in one point only, that `ins` is
+**exactly one q**: it has no k / v of the current step, and reads only the rows `[P−min(P,W), P)` of
+the borrowed slot (`[0, P)` for full). q is `[B,H,1,D]` with **M = 1 MUST**, and the referenced slots
+are **external slots only** (`states[].external` — the writer sits on the lending context's side).
+It does not come out of the torch.export path (the decomposition of `scaled_dot_product_attention`
+has no form "without the current step's k/v") — emitting it is the job of the exporter's surgery
+(`states.to_external_states_form`).
 
-NOTE: 2026-08-13 に起票した層表の 2 穴（Core ATen 外・モデル由来の原子の行き場 /
-「容量・性能で非成立」の線引きの非等価）は、**2026-08-14 の入場門モデルへの改訂
-（[ADR 0059](decisions/0059-op-vocabulary-entry-doors.md)）で解消済み** — 要求元軸の廃止と
-「非成立判定が ADR 要否を左右しない」構造化による。上の日付つき NOTE 群の旧番号
-（第 1 層・第 1' 層・第 2 層）は当時の記録のまま — 門表の（旧番号）列で読み替える。
+NOTE: The two holes of the layer table filed on 2026-08-13 (no place for a model-derived atomic op
+outside Core ATen / non-equivalent lines drawn for "does not hold up in capacity or performance") were
+**resolved by the revision to the entry-door model on 2026-08-14
+([ADR 0059](decisions/0059-op-vocabulary-entry-doors.md))** — by retiring the requester axis and by
+structuring things so that "a does-not-hold-up judgement does not affect whether an ADR is needed".
+The old numbers in the dated NOTEs above (layer 1, layer 1', layer 2) remain as recorded at the time
+— read them through the (old number) column of the door table.
 
-NOTE: 2026-09-11 `static_quantize` を固定活性量子化の拡張分子として追加した（[ADR 0097](decisions/0097-gemma4-qat-integration.md#addendum-2-2026-09-11--fixed-srq-op-contract)）。
-QAT mobile の固定 scale と f32 中間丸めを保存するため、単純な除算・丸め・乗算の分解には落とさない。
-GPU 除算の許容誤差が整数丸めの境界を越すことを実測し、整数の境界表と出力表で再現した。
-供給は `karume::static_quantize` → 同名 IR op。既存グラフへの自動挿入は行わない。
+NOTE: 2026-09-11 added `static_quantize` as an extended composite op for fixed activation quantization ([ADR 0097](decisions/0097-gemma4-qat-integration.md#addendum-2-2026-09-11--fixed-srq-op-contract)).
+To preserve QAT mobile's fixed scale and its f32 intermediate rounding, it is not lowered to a plain decomposition of division, rounding and multiplication.
+We measured that the tolerance of GPU division crosses integer rounding boundaries, and reproduced it with tables of integer boundaries and outputs.
+It is supplied as `karume::static_quantize` → the IR op of the same name. It is not inserted automatically into existing graphs.
 
-NOTE: 2026-10-02 `conv3d` を**拡張分子層**（Core ATen 外 — `torch.Tag.core` 実測）に追加。ADR
-[0118](decisions/0118-wan21-video-generation.md) 決定 1 が正本（本 ADR がこの門の ADR を兼ねる）。
-根拠 = Wan2.1 の causal 3D VAE（時間カーネル 3 の CausalConv3d）。手順 2 の合成（時間軸を
-conv2d のバッチへ置いた `Σ_kt conv2d`）は**書けるが**、出力サイズの中間が kt = 3 倍になり slice の
-実体化コピーと add も増える — 前例ガイドの「1.5〜2 倍で保存側の前例」を超える（入場条件 ②
-中間実体化）。kt ごとの部分和は縮約順が平坦 K と変わるので、後から op を足しても同じビットに
-ならない。需要側（③再出現率）は Wan2.2 の VAE と他の動画モデルの causal 3D VAE（推測）。
-**意味論の射程と実装済み subset**（0064 軸 A）: 契約は **unbatched** `x[Cin,T,H,W]`・重み
-`[Cout,Cin/groups,Kt,Kh,Kw]`・attrs `stride` / `padding` / `dilation` は `[T,H,W]` の 3 成分・
-`groups` スカラ（4 つとも宣言必須）・アリティ 3 固定・padding は軸ごとの対称ゼロ。CPU 参照は
-意味論の全体（groups 一般）を持ち、GPU は **groups == 1 の implicit GEMM**（ADR 0024 の骨格を
-共有 — 平坦 K 昇順・K タイル 16・bias-first・範囲外 0 のビット同一の土台を継ぐ）だけで、
-groups > 1 は計画時（Session の構築時）に fail loudly。一般化の条件: batched の rank 5 は
-strided 族の rank 上限を上げるか B > 1 の需要が出たら rank で判別して足す / groups > 1 は
-depthwise 等の需要が出たら直接カーネルか骨格の拡張を足す / 因果（非対称）padding は語彙に
-入れない（recipe が前 chunk の cache を時間軸の先頭へ cat して表す）。重み格納は f32 / f16 / i8
-（A タイルの充填が conv1d / conv2d と共有なので i8 も実行経路を持つ — 適格の席は recipe の quant
-席が決める）、i4 / i2 は生成の入口で落とす。幾何プロファイルは引かない（conv1d と同じ既定幾何）。
-**軸 B**（0064）: 単一出力・静的形状・full-write・4 バイト格納・常駐の全域書きのどれも壊さない
-（rank 5 の initializer は初出だが、strided 族の rank 上限は値に掛かり initializer には掛からない）。
+NOTE: 2026-10-02 added `conv3d` to the **extended composite layer** (outside Core ATen — measured
+with `torch.Tag.core`). ADR [0118](decisions/0118-wan21-video-generation.md) decision 1 is the source
+of truth (that ADR doubles as the ADR of this door).
+Grounds = the causal 3D VAE of Wan2.1 (CausalConv3d with a time kernel of 3). The composition of
+step 2 (`Σ_kt conv2d`, putting the time axis into the batch of conv2d) **can be written**, but the
+output-sized intermediate becomes kt = 3 times larger, and the materialising copies of slices and the
+adds increase too — beyond the precedent guide's "precedent for keeping at 1.5–2×" (entry condition
+② materialising the intermediate). Partial sums per kt change the reduction order from flat K, so
+adding the op later would not give the same bits. On the demand side (③ recurrence rate): the VAE of
+Wan2.2 and the causal 3D VAEs of other video models (speculation).
+**Semantic scope and implemented subset** (0064 axis A): the contract is **unbatched**
+`x[Cin,T,H,W]`, weights `[Cout,Cin/groups,Kt,Kh,Kw]`, attrs `stride` / `padding` / `dilation` with
+three components `[T,H,W]` and `groups` a scalar (all four required to declare), arity fixed at 3,
+padding symmetric zeros per axis. The CPU reference holds the full semantics (general groups), while
+the GPU has only the **groups == 1 implicit GEMM** (sharing the skeleton of ADR 0024 — inheriting the
+bit-identity basis of ascending flat K, K tile 16, bias first and 0 out of range), and groups > 1
+fails loudly at plan time (when the Session is built). Conditions for generalising: batched rank 5 is
+added, distinguished by rank, when the rank limit of the strided family is raised or demand for
+B > 1 appears / groups > 1 gets a direct kernel or an extension of the skeleton when demand such as
+depthwise appears / causal (asymmetric) padding is not put in the vocabulary (the recipe expresses it
+by cat-ing the previous chunk's cache onto the front of the time axis). Weight storage is f32 / f16 /
+i8 (filling the A tile is shared with conv1d / conv2d, so i8 has an execution path too — the eligible
+preset is decided by the recipe's quant presets); i4 / i2 are rejected at the entry of generation.
+No geometry profile is looked up (the same default geometry as conv1d).
+**Axis B** (0064): it breaks none of single output, static shapes, full-write, 4-byte storage and
+full-range write of resident tensors (a rank-5 initializer is a first, but the rank limit of the
+strided family applies to values, not to initializers).
 
-## 数値危険クラスの門（op 追加時の必須チェック — 2026-08-31 規約化）
+## Check for numerically hazardous classes (mandatory when adding an op — made a rule on 2026-08-31)
 
-f64 オラクルの CPU 参照は式全体を f64 で評価して最後に 1 度だけ丸めるため、**「f32 では
-中間がオーバーフロー / アンダーフローするが数学的な最終値は有限」というクラスを参照突合では
-構造的に検出できない**（gelu_tanh の Metal 沈黙 NaN が op 語彙掃引を素通りして出荷まで
-生き残った機序 — [research/2026-08-31-op-numerics-review.md](research/2026-08-31-op-numerics-review.md)）。
-掃引の一般入力（±4.5 級）も危険帯に届かない。そこで:
+The CPU reference of the f64 oracle evaluates the whole expression in f64 and rounds only once at the
+end, so **comparison against the reference structurally cannot detect the class "in f32 the
+intermediate overflows / underflows, but the mathematical final value is finite"** (the mechanism by
+which gelu_tanh's silent NaN on Metal slipped through the op vocabulary sweep and survived until it
+shipped — [research/2026-08-31-op-numerics-review.md](research/2026-08-31-op-numerics-review.md)).
+The general inputs of the sweep (around ±4.5) do not reach the hazard band either. Therefore:
 
-- MUST: **超越関数（exp / log / sqrt / pow / tanh / erf 系）・除算・逆数平方根を含む op を
-  追加するときは、中間式の f32 破綻域を doc に導出し、破綻域を踏む専用カナリア入力
-  （飽和域・±Inf・NaN 伝播の対）を GPU テストへ常設する**。前例 =
-  tests/gpu_ops_test.ts の tanh / gelu_tanh 飽和域カナリア（厳密 ±1.0 / x / −0.0 門つき）。
-- 守りの型は 3 つ（強い順）: ①式変形で危険域を構造的に消す（sigmoid_stable の −|x| 固定・
-  softmax の max 減算）②非 NaN の値をビット単位で変えない打ち切り（tanh_stable — 境界の
-  導出必須）③torch 分解の分岐ごと IR に乗せる（softplus の threshold-where）。
-  ①が使えるなら②を選ばない。裸の組込関数の素通しは、危険域が到達不能であることの導出を
-  doc に書けるときだけ許す。
+- MUST: **when adding an op that contains transcendental functions (exp / log / sqrt / pow / tanh /
+  erf family), division or reciprocal square root, derive the f32 breakdown range of its intermediate
+  expressions in the doc, and keep dedicated canary inputs that step into that range (saturation
+  range, ±Inf, NaN-propagation pairs) permanently in the GPU tests**. Precedent =
+  the tanh / gelu_tanh saturation-range canaries in tests/gpu_ops_test.ts (with exact ±1.0 / x /
+  −0.0 checks).
+- Three types of guard (strongest first): ① eliminate the hazard range structurally by rewriting the
+  expression (sigmoid_stable's fixed −|x|, softmax's max subtraction) ② a cutoff that does not change
+  any non-NaN value bit for bit (tanh_stable — the boundary must be derived) ③ carry torch's
+  decomposition into the IR branch by branch (softplus's threshold-where).
+  If ① can be used, do not choose ②. Passing a bare built-in function through is allowed only when
+  the doc can carry a derivation that the hazard range is unreachable.
 
-## 実装順序（プロトタイプ裁定のまま引き継ぎ — Karume での再裁定は ADR にて）
+## Implementation order (carried over as the prototype ruled — a Karume re-ruling goes in an ADR)
 
-1. 行 reduce 族（amax/amin/max/min/argmax/argmin）— **部分消化（2026-08-17 更新）**:
-   実装済みは sum / amax / amin（safe-softmax の前提分）+ **argmax**（greedy デコードの出口 —
-   ADR 0068 決定 2。予告どおり LLM 波で再訪した）の 4 本。max / min（値と添字の 2 出力）と
-   argmin は未実装 — 前 2 者は多出力機構が入ってからの別判断で、argmin は「対称性のための
-   追加をしない」が優先する。**argmax は reduce 族の席ではない**（別 kind・別カーネル族 —
-   上の NOTE）。
-2. elementwise 一括（WGSL 組込みパススルー）
-3. tensor-tensor 比較の一般化
-4. 軸の一般化（slice の step、pad 任意軸、~~sum/amax の dim~~ → **実装済み（2026-08-04）**:
-   reduce 族（sum/amax/amin）は attrs `dim` を**宣言必須**で持ち、最終次元は行カーネル・
-   それ以外は軸変種で実行する。縮約順序は両変種で厳密一致 =
-   出力ビット同一（research/2026-08-04-vae-axis-reduce-recon.md））
-5. エクスポータ分解パス集中投入（≈25 op、新カーネル 0）
-6. native_group_norm 専用カーネル
-7. conv 契約拡張（B=1 等の緩和）
+1. Row reduce family (amax/amin/max/min/argmax/argmin) — **partly done (updated 2026-08-17)**:
+   implemented are sum / amax / amin (what safe-softmax needs) + **argmax** (the exit of greedy
+   decoding — ADR 0068 decision 2; revisited in the LLM wave, as announced), four in all. max / min
+   (two outputs: value and index) and argmin are not implemented — the former two are a separate
+   judgement after the multi-output mechanism lands, and for argmin "no additions for symmetry"
+   takes precedence. **argmax is not a member of the reduce family** (a separate kind, a separate
+   kernel family — the NOTE above).
+2. Bulk elementwise (WGSL built-in passthrough)
+3. Generalise tensor-tensor comparison
+4. Generalise axes (slice step, pad on any axis, ~~sum/amax dim~~ → **implemented (2026-08-04)**:
+   the reduce family (sum/amax/amin) carries attrs `dim` as **required to declare**; the last
+   dimension runs on the row kernel and the others on the axis variant. The reduction order matches
+   exactly between the two variants =
+   bit-identical output (research/2026-08-04-vae-axis-reduce-recon.md))
+5. Concentrated exporter decomposition passes (≈25 ops, 0 new kernels)
+6. Dedicated native_group_norm kernel
+7. Extend the conv contract (relax B=1 and the like)
 8. pooling / upsample
-9. scatter_add（ADR 前提）
-10. 保留（sort/fft/データ依存形状）— **`topk` は 2026-08-17 に消化**（ADR 0068 決定 3・
-    static-k の多出力 op）
+9. scatter_add (presumes an ADR)
+10. On hold (sort/fft/data-dependent shapes) — **`topk` done on 2026-08-17** (ADR 0068 decision 3,
+    a static-k multi-output op)
 
-## 未決・未検証（着手前に潰す）
+## Open and unverified (settle before starting)
 
-- ~~WGSL の NaN 比較が IEEE754 どおり false になるか~~ → **実測済み（2026-08-02）**: 比較単体は
-  仕様どおり false。ただし `select(x, m, x < m)` は max イディオムへ畳まれてドライバの `max` が
-  NaN を飲むため、NaN 判定はビット列で行う（根治済み — 上の反例集）
-- WGSL `sign(NaN)` と torch の乖離（NaN を返す） — 分解でも組込みでも残る
-- select_scatter 分解の長さ 0 スライスが WebGPU の size>0 binding 要求で落ちるか
-- ~~（プロトタイプ残課題）silu が UnaryOp にあるが executor から到達不能の死枝疑い~~ →
-  **解消（2026-08-08）**: 公開 op は足さず、`sigmoid → mul` の隣接 2 ノードを実行時にだけ畳む
-  executor 内部の融合ルールにした（`src/runtime/fusion.ts`）
+- ~~Whether WGSL NaN comparisons yield false as IEEE754 says~~ → **measured (2026-08-02)**: a
+  comparison alone yields false, as the spec says. But `select(x, m, x < m)` is folded into the max
+  idiom and the driver's `max` swallows NaN, so NaN detection is done on the bit pattern (fixed at
+  the root — the counter-examples above)
+- The gap between WGSL `sign(NaN)` and torch (which returns NaN) — remains with both the
+  decomposition and the built-in
+- Whether the zero-length slice of the select_scatter decomposition fails on WebGPU's size>0 binding
+  requirement
+- ~~(prototype leftover) silu is in UnaryOp but is suspected to be a dead branch unreachable from the
+  executor~~ →
+  **resolved (2026-08-08)**: no public op was added; instead it became an executor-internal fusion
+  rule that folds the adjacent two nodes `sigmoid → mul` at run time only (`src/runtime/fusion.ts`)
 
-## 隣接で気づいた点（プロトタイプ側の観察）
+## Adjacent observations (on the prototype side)
 
-- プロトタイプのエクスポータには定数畳み込み専用の処理経路（FOLDABLE 経路）があり、
-  `arange` / `full` / `sin` / `cos` / `sign` / `ceil` / `reciprocal` 等は既にここで処理
-  済みだった。「新カーネルを書く」「既存 op へ分解する」に次ぐ**第 3 の逃げ道**として、
-  新しい op を足す前に必ずこの経路（Karume なら定数畳み込みパスの有無）を確認する。
-- cumsum と sum は 1 スレッド=1 行の逐次走査で dim 方向の並列度がゼロ、という設計を
-  プロトタイプは踏襲していた。行 reduce 族を増やす**前に**、テンプレートを逐次のまま
-  複製してよいか一度裁定しておくと、後で並列化に切り替える際の書き換えが減る
-  （プロトタイプはこの裁定を先送りしたまま実装を進めていた）。
+- The prototype's exporter had a processing path dedicated to constant folding (the FOLDABLE path),
+  and `arange` / `full` / `sin` / `cos` / `sign` / `ceil` / `reciprocal` and others were already
+  handled there. As a **third way out** after "write a new kernel" and "decompose into existing ops",
+  always check this path (in Karume, whether a constant-folding pass exists) before adding a new op.
+- The prototype kept the design in which cumsum and sum scan sequentially, one thread = one row,
+  with zero parallelism along dim. Ruling once, **before** growing the row reduce family, whether the
+  template may be copied while staying sequential reduces the rewriting when switching to parallel
+  later (the prototype went on implementing with this ruling deferred).
 
-NOTE: 2026-08-19 波 H（Gemma 4 E2B）で第 2 層に **op 追加ゼロ**のまま 3 形を受理拡張
-（いずれも normalize の同値書換 — 台帳 NOTE のみ・ADR 0043 の手順 2 側）:
-`pow(x,-0.5)` → rsqrt 寄せ（Gemma4RMSNorm の pow 形）・weight 無し RMSNorm の畳み込み
-（`v_norm` = with_scale=False・ones 合成はハンドラ側）・静的 `select.int` → `slice+squeeze`
-合成（PLE の層別スライス）。token-only 出口（ADR 0068 追記 4）の実行時行選択も既存
-`embedding` の合成で成立（新 op なし）。token-only 出口そのものは 2026-10-17 に削除した
-（同じ行選択は製品グラフの `last_row[R]` が引き継ぐ）。
+NOTE: 2026-08-19 in wave H (Gemma 4 E2B), layer 2 extended acceptance to three forms with **zero op
+additions** (all equivalent rewrites in normalize — ledger NOTE only, the step-2 side of ADR 0043):
+`pow(x,-0.5)` → folded to rsqrt (the pow form of Gemma4RMSNorm), folding of RMSNorm without weight
+(`v_norm` = with_scale=False, the ones composed on the handler side), static `select.int` →
+`slice+squeeze` composition (per-layer slicing of PLE). The runtime row selection of the token-only
+exit (ADR 0068 addendum 4) also works by composition with the existing `embedding` (no new op). The
+token-only exit itself was removed on 2026-10-17 (the same row selection is taken over by
+`last_row[R]` of the product graph).

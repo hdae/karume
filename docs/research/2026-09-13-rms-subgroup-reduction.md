@@ -149,7 +149,7 @@ GPUメモリ不足や新しい縮約の誤差を原因とする証拠はない�
 同じポートが再利用される条件をメモリ内のキャッシュと模擬fetchで再現すると、配信内容を更新しても旧manifestを読み、
 別ポートでは新manifestを取得した。GPUや実キャッシュの更新は使っていない。
 **当該失敗のポートは未記録なので、今回の原因への帰属は推測**。テスト用サーバーの世代識別の別件として
-[known issues](../known-issues.md#疑似hfサーバーの固定revisionで古いmanifestが再利用される)へ残す。
+[known issues](../known-issues.md#a-fixed-revision-on-the-pseudo-hf-server-reuses-a-stale-manifest)へ残す。
 最適化の実装へキャッシュ削除・自動再試行・admission緩和を混ぜない。
 
 - 初回全体: `2026-09-13_rms-subgroup-verify-a4sat_jg/verify.log`

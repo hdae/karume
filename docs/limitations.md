@@ -1,70 +1,79 @@
-# limitations — by-design の制約
+# limitations — by-design constraints
 
-意図的な設計制約の台帳（バグは known-issues.md、設計判断の経緯は decisions/）。
-「いつ解けるか」が決まっているものは解除予定を添える。
+A ledger of intentional design constraints (bugs are in known-issues.md, the history of design decisions in decisions/).
+Where "when it can be lifted" is decided, the planned lifting is noted.
 
-## 同一 device 上の複数 Session の run は直列実行される
+## Runs of several Sessions on the same device execute serially
 
-WebGPU の errorScope は device 単位の LIFO スタックで「誰のスコープか」の概念が無く、
-並行に重なると失敗の誤帰属と沈黙全 0 を生む（実測記録は
-[research/2026-08-01-m0-review.md](research/2026-08-01-m0-review.md)）。このため run 1 本の
-GPU 操作全体（エンコード〜readback〜アリーナ破棄）を device 単位ロックで直列化している
-（`GpuContext.withScopeLock` の doc にトレードオフの根拠）。並行スループットが必要な場合は
-device（= `acquireGpu()`）を分けること。解除は WebGPU 側に「スコープ付き submit」相当が
-入らない限り予定なし。
+WebGPU's errorScope is a per-device LIFO stack with no notion of "whose scope it is";
+overlapping scopes cause misattributed failures and silent all-zero results (measurement record in
+[research/2026-08-01-m0-review.md](research/2026-08-01-m0-review.md)). For this reason the whole
+GPU work of one run (encode through readback through arena destruction) is serialized by a
+per-device lock (the doc of `GpuContext.withScopeLock` gives the rationale for the trade-off). If
+concurrent throughput is needed, use separate devices (= `acquireGpu()`). No lifting is planned
+unless WebGPU gains something like a "scoped submit".
 
-## 同一 `GenerationContext` への run は 1 本ずつ（未決着のまま 2 本目を発行すると拒否される）
+## Runs on the same `GenerationContext` go one at a time (issuing a second while the first is unsettled is rejected)
 
-`Session.run` は「戻り Promise を await せずに次を発行してよい」を公開契約に持つが、**第 3 引数
-`generation` の `context` が同じ run だけは例外**で、未決着の 1 本目がある間の 2 本目は
-`ExecutionError` で落ちる（`GenerationContext` の run リースが 1 本上限）。理由は沈黙誤値:
-2 本目は 1 本目が進めた論理長で uniform と dispatch を組む一方、位置を運ぶ入力（gemma4 なら
-RoPE の cos / sin 派生入力 — ホストが位置から組む）は**呼び出し側が発行時に組んだ普通のグラフ
-入力**でランタイムは中身を見ない — KV の論理長は正しいまま位置だけが静かにずれる。並行させたい生成は **context を分ける**
-（別 context 同士と、generation 面を持たない 1-shot run の並行発行は従来どおり通る）。
+`Session.run` has "you may issue the next run without awaiting the returned Promise" as part of its
+public contract, but **runs with the same `context` in the third argument `generation` are the
+exception**: a second run issued while a first one is unsettled fails with `ExecutionError` (the run
+lease of a `GenerationContext` is limited to one). The reason is a silent wrong value: the second run
+builds its uniforms and dispatches from the logical length advanced by the first, while the inputs that
+carry positions (for gemma4, the RoPE cos / sin derived inputs — the host builds them from the position)
+are **ordinary graph inputs that the caller built at issue time**, and the runtime does not look at
+their contents — the KV logical length stays correct while only the positions silently shift. For
+generations you want to run concurrently, **use separate contexts** (concurrent issue between
+different contexts, and of 1-shot runs without a generation surface, works as before).
 
-なお第 3 引数の 2 欄（`context` / `queryLength`）は `inputs` / `bindings` / `copyOutputs` と同じく
-**発行の同期区間で写し取る**ので、発行後にそのオブジェクトを書き換えても実行中の run には効かない。
+Note also that the two fields of the third argument (`context` / `queryLength`), like `inputs` /
+`bindings` / `copyOutputs`, are **copied during the synchronous part of the issue**, so rewriting that
+object after issuing has no effect on the run in flight.
 
-## `BatchScope.finish()` は区間の最初の**ホスト側**失敗も投げる
+## `BatchScope.finish()` also throws the first **host-side** failure of the scope
 
-`Session.enqueue` を非 await で積む区間では、enqueue 本体（ホスト側の検査・レシピ構築）の失敗は
-戻り Promise にしか出ない — 握っていなければ未処理拒否として抜け、区間は「dispatch が 1 本
-少ないまま成功」で決着していた。現在は `BatchScope` が区間の**最初の 1 件**を記録し、
-`finish()` がそれを投げる（errorScope 側の失敗もあるときは errorScope 側を投げて記録を `cause` に
-載せる。2 件目以降は捨てる — 派生失敗が並ぶと根因が読めなくなるため）。
+In a scope that queues `Session.enqueue` without awaiting, a failure in the enqueue body (host-side
+checks, recipe building) showed up only in the returned Promise — if nobody held it, it escaped as an
+unhandled rejection, and the scope settled as "succeeded with one dispatch missing". Now
+`BatchScope` records the **first one** of the scope and `finish()` throws it (when there is also an
+errorScope-side failure, the errorScope one is thrown with the record in `cause`. The second and later
+ones are dropped — a row of derived failures makes the root cause unreadable).
 
-同じ失敗は enqueue の戻り Promise にも従来どおり出る（1 つの事実が 2 経路で見えるのは `run` と
-同じ）。`finish()` から `ExecutionError` 等が出るのは 0.7.0 までに対する**破壊的な挙動変更**。
+The same failure still also shows up in the enqueue's returned Promise as before (one fact visible
+through two paths, the same as `run`). `ExecutionError` and the like coming out of `finish()` is a
+**breaking behaviour change** relative to 0.7.0 and earlier.
 
-## `generateGreedy` は公開面から外れた（parity 検収用の内部ヘルパへ格下げ）
+## `generateGreedy` left the public surface (demoted to an internal helper for parity acceptance)
 
-`@karume/models` の barrel（`mod.ts`）が出していた `generateGreedy` と `GreedySpec` は
-**削除した**（ADR [0083](decisions/0083-generation-api-surface.md) 決定 9 — 0.7.0 までの公開面に
-対する**破壊的変更**）。実装は `src/generation/greedy.ts` に残っており、既存 golden の token 列を
-突き合わせる parity 門は経路として生き続けるが、**パッケージの外からは import できない**。
+`generateGreedy` and `GreedySpec`, which the `@karume/models` barrel (`mod.ts`) exported, were
+**removed** (ADR [0083](decisions/0083-generation-api-surface.md) decision 9 — a **breaking change**
+to the public surface of 0.7.0 and earlier). The implementation remains in
+`src/generation/greedy.ts`, and the parity check that compares the token sequences of the existing
+goldens lives on as a path, but **it cannot be imported from outside the package**.
 
-理由は面の性格で、この関数は「固定 token id 列での検収」のための決定的な 1 本である
-（sampling も EOS 停止も**載せない** MUST がある）。静的配線とリクエストが 1 つの型に同居し、
-`GenerationContext` の寿命が呼び手へ漏れるので、多ターンの chat をこの面の上に組むと
-「直前 assistant の最後の token が落ちる」事故を消費側で再生産する（ADR 0083 Context / 決定 4）。
-「当面は公開のまま残して次の breaking 波で外す」は採らなかった。
+The reason is the nature of the surface: this function is the one deterministic path for "acceptance
+against a fixed token id sequence" (there is a MUST that it carries **neither** sampling nor EOS
+stopping). Static wiring and the request live in one type, and the lifetime of the
+`GenerationContext` leaks to the caller, so building a multi-turn chat on top of this surface
+reproduces on the consumer side the accident of "the last token of the previous assistant turn is
+dropped" (ADR 0083 Context / decision 4). "Keep it public for now and remove it in the next breaking
+wave" was not adopted.
 
-代替は生成 API 波の `GenerationSequence`（ADR 0083 決定 1〜5 — `AsyncIterable<GenerationEvent>` /
-`AbortSignal` / 多ターン）で、ホスト側 sampling は `src/generation/sampler.ts`（同 決定 7〜8）。
-`GenerationSequence` は `@karume/models` の barrel が型として出しており、実装は
-`Gemma4Pipeline.sequence()` が返す。
+The replacement is `GenerationSequence` from the generation API wave (ADR 0083 decisions 1–5 —
+`AsyncIterable<GenerationEvent>` / `AbortSignal` / multi-turn), and host-side sampling is
+`src/generation/sampler.ts` (the same ADR, decisions 7–8). The `@karume/models` barrel exports
+`GenerationSequence` as a type, and the implementation is returned by `Gemma4Pipeline.sequence()`.
 
-## pin 定数 `*_CURRENT` は公開面から消えた（家族ごとの取得元対応表へ置き換え・0.9.0）
+## The pin constants `*_CURRENT` are gone from the public surface (replaced by per-family source tables, 0.9.0)
 
-`@karume/models` が出していた `ANIMA_CURRENT` / `ANIMA_EXTRA_CURRENT` /
-`IRODORI_V4_SMALL_CURRENT` / `IRODORI_V4_1_SMALL_CURRENT` / `SBV2_JVNV_CURRENT` /
-`GEMMA4_CURRENT` は**削除した**（0.8.0 までの公開面に対する**破壊的変更** — ADR
-[0092](decisions/0092-distribution-repos-and-sources.md)。互換の
-re-export は置いていない）。置換は家族ごとの対応表で、キーは HF リポ名の basename から
-`karume-` を落とした綴りである:
+`ANIMA_CURRENT` / `ANIMA_EXTRA_CURRENT` / `IRODORI_V4_SMALL_CURRENT` /
+`IRODORI_V4_1_SMALL_CURRENT` / `SBV2_JVNV_CURRENT` / `GEMMA4_CURRENT`, which `@karume/models`
+exported, were **removed** (a **breaking change** to the public surface of 0.8.0 and earlier — ADR
+[0092](decisions/0092-distribution-repos-and-sources.md). No compatibility re-export is kept). The
+replacement is a per-family table whose key is the basename of the HF repository name with `karume-`
+dropped:
 
-| 0.8.0 まで                   | 0.9.0 から                              |
+| Up to 0.8.0                  | From 0.9.0                              |
 | ---------------------------- | --------------------------------------- |
 | `ANIMA_CURRENT`              | `ANIMA_SOURCES["anima"]`                |
 | `ANIMA_EXTRA_CURRENT`        | `ANIMA_SOURCES["anima-extra"]`          |
@@ -73,2122 +82,2400 @@ re-export は置いていない）。置換は家族ごとの対応表で、キ�
 | `SBV2_JVNV_CURRENT`          | `SBV2_SOURCES["sbv2-jvnv"]`             |
 | `GEMMA4_CURRENT`             | `GEMMA4_SOURCES["gemma4"]`              |
 
-gemma4 のエントリは**リポ名も改名した** — `karume-gemma4-e2b` → `karume-gemma4`（E4B / 12B が
-同居する器にするため — ADR 0092 決定 1。0.9.0 の公開時に実施）。HF の rename は旧名を
-リダイレクトするので（API / resolve とも HTTP 307）、0.8.0 までの `GEMMA4_CURRENT` に焼かれた
-pin は解決し続ける。
-
-値（`{ repo, revision }`）は従来と同じ形で、`fromPretrained` の第 1 引数へそのまま渡せる。
-barrel（`@karume/models`）はさらに全家族を畳んだ `KARUME_SOURCES` を出す（**同じキー・同じ
-値**）— 公開リポを全部なめる側のための面で、1 家族しか使わない消費者はサブパスの家族表を引く。
-
-`*_CURRENT` は「1 定数 = 1 リポ」で、リポが増えるたびに定数名を発明する必要があり（`_V4_1_` の
-ような版の綴りが識別子に混ざる）、「この家族が公開しているリポの一覧」をコードから引く手段が
-無かった。表にすると一覧は `Object.entries` で引け、キーがリポ名から機械的に導ける
-（`"karume-" + key` が repo の basename に戻る — 門は `packages/models/tests/sources_test.ts`）。
-既定の席は引き続き**無い**（どのエントリを使うかは呼び手が綴る — ADR 0073 の 2026-08-25 撤回）。
-
-## 生成 API は公開前に 7 点変わった（ADR 0083 / 0084 の初版記述に対する破壊的変更）
-
-生成 API（`GenerationSequence` / `Gemma4Pipeline`）が JSR へ出たのは **0.9.0 が初めて**（0.8.0 の
-`@karume/models` は `./gemma` を export していない）。ADR・examples・デモ台本は波の途中の面で
-書かれているので、公開面レビュー（2026-08-31 / 第 2 波 2026-09-02）の消化で**公開前に**変わった
-7 点をここに残す。
-追記の正本は ADR
-[0083](decisions/0083-generation-api-surface.md) / [0084](decisions/0084-gemma-tokenizer-chat.md)。
-
-- **`dispose()` 後の `generate` は同期に throw する**（従来は最初の反復で `GenerationContext` 側の
-  汎用文言になり、真因〈自分が dispose した〉が読み取れなかった）。寿命の検査だけが同期で、予算の
-  検査（位置表・容量）は従来どおり反復側で `GenerationCapacityError` になる。
-- **`GenerationStop` に `tokens` 欄が増えた**（そのターンが生成した token 数・`eos` の停止 token も
-  1 個）。`done` の一致アサーションを書いていたコードは欄の追加ぶん追随が要る。
-- **`GenerationCapacityError` のコンストラクタが 2 引数**になり、構造化欄（`constraint` /
-  `pastLength` / `promptLength` / `requestedNewTokens` / `limit` / `maxNewTokens`）を持つ。
-- **公開 `GenerationProgram` から配線欄が消えた**（グラフ入出力の名前・記号束縛・`derivedInputs` は
-  内部型 `GenerationWiring` へ分離）。残るのは `chunkLength` / `capacity` / `maxPosition` /
-  `vocabSize` / `stopTokens` で、面は凍結・`stopTokens` は凍結コピーである（消費側の `sort()` /
-  `length = 0` が生成ループの停止集合を書き換える口を塞いだ）。
-- **`SamplerSpec.logitBias` が `Map` からタプルの配列へ**（`readonly [token, bias][]` —
-  2026-09-02）。`new Map([[id, bias]])` を書いていたコードは `[[id, bias]]` へ書き換える。`Map` は
-  `JSON.stringify` が `{}` へ潰すので、設定として保存・復元した指定が**黙って空の bias** になって
-  いた。あわせて**同じ token を 2 度書いたら `ModelInputError`**（`Map` の後勝ちの畳み込みは
-  無くなった）。
-- **`Gemma4Pipeline.sampler` → `defaultSampler` へ改名**し、`Gemma4PipelineConfig.sampler` の型が
-  `SamplerSpec` から `Gemma4DefaultSampler`（`temperature` / `topK` / `topP` の 3 欄必須）へ縮小
-  された。あわせて `fromAssets` も `fromPretrained` と同じ門（未知キー・値域・
-  `chunkLength ≤ maxChunkLength`・`chunkLength ≤ capacity ≤ maxPosition`）をバイト列を開く前に
-  通すので、**不正な宣言は
-  3.7GiB のロードが終わる前に落ちる**（従来は初回 `generate` で初めて `RangeError` になった）。
-- **停止理由の union に `stop-token` が増え、`Gemma4ChatStream.done` の型が `Gemma4ChatStop` へ
-  広がった**（2026-09-02 — 要求ごとの停止条件）。`switch (stop.reason)` を網羅で書いていたコードは
-  枝の追加ぶん追随が要る（`chat` 側はさらに `stop-string` が増える）。あわせて
-  `Gemma4ChatStream` に `text()` が生えたので、**1 つのストリームは 1 通りにしか消費できない**
-  （反復と `text()` の併用・2 度の反復は同期に throw する — 従来は 2 度目の `for await` が
-  黙って 0 反復で終わっていた）。
-
-## 停止**文字列**で止められるのは `chat` だけ（`sequence()` は token で止める）
-
-`Gemma4ChatOptions.stopStrings`（復号後の本文に現れたら止める）は **chat 層のノブ**である。
-低レベル面（`Gemma4Pipeline.sequence()` → `GenerationSequence.generate`）には無く、そちらで
-止めるなら `GenerationRequest.stopTokens`（token id・配布形の EOS 集合との和集合）を使う。
-`GenerationSequence` は token id しか扱わない（tokenizer も配布形も知らない）ので、文字列の判定は
-復号器を持つ層にしか置けない — ADR [0083](decisions/0083-generation-api-surface.md) 追記
-2026-09-02 の 2 層である。自分で `sequence()` を回しながら文字列で止めたい場合は、復号した本文を
-自分で見て `break` する（会話は「成功した run のぶんだけ」進み、最後の token は未 commit の
-frontier に残る = `chat` の停止文字列と同じ状態になる）。
-
-## sampler: top-k は同率の境界で HF と候補集合が違う（by-design）
-
-`SamplerSpec.topK`（`packages/models/src/generation/sampler.ts`）は、同率なら id の小さい側を残して
-**厳密に k 件**へ絞る。HF の `TopKLogitsWarper` は k 番目と同じ値の候補を全て残すので、k 番目の
-境界に同率が並ぶ logits では候補集合と確率が違う。id の小さい側を残すのは greedy（`argmax` の
-先勝ち）と同じ tie-break で、`topK: 1` が温度に依らず greedy と一致する側を採るため。HF の
-sampling とは RNG が別物で token 列の parity をそもそも取らない（ADR
-[0083](decisions/0083-generation-api-surface.md) 決定 7）ので、HF に合わせる変更はしない。
-
-## params キャッシュは Session 寿命で無界（by-design）
-
-params バッファの内容アドレスキャッシュ（`RecipeBuilder.#writeParams`）には追い出しが無く、
-解放は `Session.dispose()` だけ。記号次元を持つグラフを「run ごとに違う束縛」で回すと、run の
-たびに（ノード種ぶんの）小バッファが新規確保され、二度と当たらないまま Session の寿命
-いっぱい積み上がる（例外も警告も出ず、`diagnostics().weights.allocCount` が単調増加するだけ）。
-1 本は数十バイト程度なので、可変長 TTS / 系列長可変の埋め込みでも実害の記録は無いが、上限は
-無い。
-
-- 追い出しを LRU 化しない理由: params の実体は生きている導出済み計画（prepared plan）が
-  **直参照で畳み込んでいる**ため、追い出し = 破棄にすると破棄済みバッファを掴む。安全にやるには
-  参照計数という別の簿記が要る（実需が出るまで作らない）。
-- 回避策: 可変 shape を長時間回す用途では `diagnostics().weights.allocCount` の伸びを見て
-  Session を切り直すこと。
-- GPU 側の失敗で決着した run / batch が新しく載せた params はキャッシュから外れる（確保が非致命
-  OOM で無効だった可能性があるため — ADR [0095](decisions/0095-plan-backing-budget.md) 追記
-  2026-10-10）が、実体は破棄されず `Session.dispose()` まで残る。再試行はその内容を新しく確保する
-  ので、そうした失敗を繰り返すたびに失敗した実行ぶんの小バッファが積もる。ホスト側の失敗（入力の
-  誤り・run 前検査の失敗等 — run / enqueue とも）では外さないので積もらない。
-- 無界であること自体は `packages/runtime/tests/gpu_params_cache_test.ts` が門にしている
-  （追い出しを入れるとこの門が赤くなる）。
-
-## `__proto__` という名前をオブジェクトリテラルで渡せない（JS の記法の制約）
-
-Karume 側の Record は null プロトタイプで `"__proto__"` キーを保全するが、**呼び出し側**が
-`{ __proto__: tensor }` と書くと、JS の文法上それはプロパティ定義ではなく [[Prototype]] 指定に
-なり、キーが生成されないまま Karume に届かない。`"__proto__"` を入出力名・シンボル名に使う
-モデルでは、計算キー `{ ["__proto__"]: tensor }` か `Object.assign(Object.create(null), ...)` を
-使うこと。Karume 側では検出できない（届いていないことを知り得ない）。
-
-## 非有限値（NaN / ±Infinity）は検査しない
-
-入力・重みの非有限値はコストの理由で検査せず、そのまま演算に流れる。**GPU と CPU 参照の
-伝播一致が担保されるのは下の NOTE に列挙した op だけ**で、全称の保証ではない。付随して
-`amax` / `amin` の縮約 identity は **GPU・CPU 参照とも** ±F32_MAX で、全要素が -Infinity の行の
-`amax` は -Infinity ではなく -F32_MAX を返す（torch は -Infinity を返すので、そこは by-design の
-不一致）。非有限値を含むモデルを扱う場合は呼び出し側で事前検査すること。
-
-NOTE: 伝播一致の保証は `clamp` / `clamp_min` / `relu` / `amax` / `amin` に加え、
-**softmax / safe_softmax / attention の行統計（融合・states 形とも）**もビット列 NaN 判定
-（`nan_max`）で担保している（2026-08-31 の v2 で統一 — それ以前は WGSL の `max` が仕様レベルで
-NaN を落とすため、全要素 NaN の行が safe 系の空行判定に化けて厳密 0 になり NaN が黙って
-消えていた）。機序と裁定は
-[decisions/0020](decisions/0020-nan-propagation-bitwise.md) と
-[decisions/0044](decisions/0044-runtime-attention-mask.md) 追記 2026-08-31。
-
-NOTE: states 形 attention の PV は、述語（causal・窓）の外の列で GPU と CPU 参照の扱いが違う。
-GPU は live 範囲の述語外の列にも重み 0 × V を足し、CPU 参照はその列の V を読まない（数式どおり）。
-有限の V ではどちらも述語外の寄与が 0 で値は変わらないが、述語外の V に NaN / ±Infinity があると
-GPU の行だけが NaN になる。
-
-## 融合 attention の加算 mask は −inf を**値として**運ぶ（Finite Math Assumption 依存）
-
-exporter が焼く加算 mask 定数は帯外を literal −Infinity で表し（`masked_fill` の有限
-sentinel −3.4028e38 とは別方式）、融合 attention の f32 経路はそれをそのまま加算して
-`exp(S−m)` で 0 に落とす。WGSL の Finite Math Assumption（実装は実行中に ∞ / NaN が現れない
-と仮定してよい — §15.7.2）の下では、∞ を値として運ぶこと自体が実装の自由度に晒されるが、
-実測（Vulkan / Metal の出荷資産）では期待どおり動作している。全列が −inf の行（全マスク行）
-は **attention_stats v2 の空行ガードで出力 0 の正規入力**（2026-08-31 — それ以前は
-`1/0` = indeterminate の契約違反だった。[decisions/0044](decisions/0044-runtime-attention-mask.md)
-追記）。
-
-## `attentionCompute: "a8"` の PV は attention 重みを 1/127 格子で量子化する（1:254 打ち切り）
-
-a8 の ③PV は `qP = round(127·exp(S−m))` の固定格子（clamp なし・行最大からの相対）で、
-`S − m < −ln 254 ≈ −5.537` のスコアは**厳密に 0** に落ちる — 行内の最大値の 1/254 未満の
-attention 重みは消える（f32 経路は保持する）。落ちた質量は逆数和 `inv` が補償しない設計
-（[decisions/0044](decisions/0044-runtime-attention-mask.md) の契約系・opt-in 席）。CPU 参照も
-同一格子なので突合はこの打ち切りを検出しない — 精度影響の裁定は E2E の実測 tolerance が担う。
-
-## 融合 attention の a8 / s16 は、キー長 N が 4 の倍数でない形で ③PV と S の格納が f32 になる（Anima では辺が 32 px の倍数でない解像度）
-
-`attentionCompute: "a8"` と `attentionScoreStorage: "f16"`（S の半精度格納）は、形の条件を満たす段で
-だけ宣言どおりに走る。条件は ①QK の i8a8 が `D % 4 == 0`・③PV の i8a8 が `N % 4 == 0`・S の f16 格納が
-`D % 4 == 0 && N % 4 == 0`。満たさない段は f32 経路へ落ちる — 例外も警告も出ない
-（[ADR 0058](decisions/0058-numerics-opt-in-contract.md) 決定 3 が許す縮退）。落ちた段は宣言どおりの
-経路ではない: ③PV は整数内積を使わず、VRAM 上の S は f32 幅になる。判定の正本は 1 本の純関数
-（`packages/runtime/src/runtime/attention-route.ts` の `attentionRoute`）。
-
-- **Anima**: 既定席 `f16+dit8-a8-attn8-s16`（と `f16+dit4-attn8-s16`）では、self-attention の
-  N = (W/16)·(H/16) が 4 の倍数でない解像度で、self の ③PV と S の格納が f32 になる。受理する
-  9,409 形のうち 4,608 形（例 528×528 = N 1,089）が該当し、**両辺が 32 px の倍数なら起きない**。
-  `f16+dit8-a8-attn8` 席では ③PV だけが落ちる。cross-attention（N = 512）と ①QK（D = 128）は常に
-  宣言どおり。受理集合は狭めない。
-- **Wan2.1 / Wan2.2**: 受理する全形（寸法 × フレーム数）で self / cross とも宣言どおり。
-- **検出**: 系列の A/B 門が census に完全適格の検査（`assertAttentionSeatsComplete` — 融合 attention の
-  全 dispatch が i8a8 / `:s16` の変種であること。比で見るので device に依らない）を掛ける。受理集合の
-  全形はホストテスト（`packages/runtime/tests/attention_route_test.ts` /
-  `wan_attention_route_test.ts`）が `attentionRoute` に通して固定する。runtime を直接使う場合は、
-  診断のパイプラインキーに dense の `attention_pv:v1:f32` などが混ざるかで見分ける。
-- 端数を宣言どおりの経路で扱う変更は backlog の later 節にある。
-
-## dp4a の無い device では a8 は速くならない（警告のみ・フォールバック無し）
-
-int8 活性（`linearCompute` / `attentionCompute: "a8"`）の整数内積は、WGSL 言語機能
-`packed_4x8_integer_dot_product`（dp4a）の無い device ではエミュレーションで走る。数値は dp4a 版と同一
-（ADR [0025](decisions/0025-w8a8-linear-execution.md)）だが f32 の経路より速くならず、Apple の Metal では遅い
-（ADR [0115](decisions/0115-geometry-profiles.md) Context）。runtime は黙って f32 へも a8 無しの兄弟プリセットへも
-落とさず、Session 構築で device ごとに 1 回 `console.warn` で知らせる（何が起きたか・逃げ先 = 同じ重みで a8
-無しのプリセット〈配布形は必ず持つ — 配布門番の検査〉か `"f32"`）— ADR
-[0128](decisions/0128-default-preset-original-weights.md) 決定 5。既定に a8 を持つ配布形（anima / irodori /
-wan2.1 / wan2.2）を dp4a の無い GPU で既定のまま使うと、この警告が出る。
-
-## w8a8（`linearCompute: "a8"`）では非有限値の伝播粒度は同じだが Inf の符号が f32 経路と一致しない
-
-活性 per-token i8 の実行経路（opt-in — 設計は
-[research/2026-08-03-dp4a-w8a8-design.md](research/2026-08-03-dp4a-w8a8-design.md)）では、
-整数内積そのものに非有限値の概念が無く、伝播は**行 scale `xs[row]` 経由**で成立する:
-
-- **NaN**: 行内に 1 つでも NaN があると `xs[row] = NaN`（ビット列判定で伝播 — ADR 0020）に
-  なり、`out = f32(acc)·(xs·wscale) + bias` が行の全列で NaN になる。f32 経路も行全体を縮約
-  するので**伝播の粒度は劣化しない**。
-- **±Inf**: 行内の Inf は `xs[row] = +Inf` になる（絶対値最大なので**符号は残らない**）。
-  出力は `f32(acc)·(+Inf·wscale) + bias` で、`acc` と `wscale` の符号で ±Inf / NaN が決まる —
-  **f32 経路が出す Inf の符号とは一致しない**。ADR 0020 の不変条件（「NaN が黙って消えない」）
-  は満たすが、符号まで同じであることは保証しない。
-
-量子化値 `xq` そのものも、行 scale が非有限のときは `vec4<i32>(NaN)` が不定値になるため
-**契約の外**（突合の対象は行 scale と最終出力だけ）。非有限値を含むモデルは、この経路でも
-呼び出し側の事前検査が前提になる（上の「非有限値は検査しない」と同じ立場）。
-
-加えて、**WGSL の f32 除算は正しく丸められない**（仕様の許容 2.5 ULP。本機実測でも `a / b` が
-IEEE 除算と 200,000 サンプル中 55,605 件で 1 ULP 割れた）。`q = round(x / s)` は `x/s` が
-半整数の近傍に来る要素で **±1 段揺れうる** — GPU と CPU 参照の atol=0 突合は「丸め境界から
-十分離れたデータ」でのみ成立する契約で、実モデルではこの ±1 段が数値差として乗る
-（E2E の tolerance を w8a8 系列で取り直す理由の 1 つ）。scale の側は `amax · (1/127)` の
-**乗算**で作るので厳密に一致する。
-
-## conv2d（groups==1）は dispatch 上限で fail loudly になる（Hout·Wout > 8,388,480）
-
-implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1 workgroup =
-1 出力タイルで縮退できないため、n = Hout·Wout のタイル数（tileN=128）が 1 次元の dispatch 上限
-（65,535）を超える形 — **Hout·Wout > 8,388,480**（正方出力なら 2,897² 以上）— は
-`DispatchLimitError` になる。旧・直接カーネル（grid-stride）は走れた形なので意図的な機能の
-絞りだが、沈黙誤値ではなく例外で止まる。**この閾値は既定 GEMM 幾何から導かれる**（n の辺 =
-`gemmTileN` = regN·wgX）ので、既定を動かすと一緒に動く — 現行値は M128N128 になった `d0afc22`
-（2026-08-10）以降のもので、ADR 0024 が書いた「2048² で上限を 1 超える」は辺 64 前提の旧値。
-上の値は既定プロファイルのもので、上限は Session が選んだ幾何プロファイルの tileN に依る
-（[decisions/0115](decisions/0115-geometry-profiles.md)）。`apple-metal-3`（M2 — フラグ有りの Chrome で自動・無しなら
-`acquireGpu({ geometryProfile })` で注入したとき〈追記決定 7〉）の conv2d は tileN 64 なので、上限は
-**Hout·Wout ≤ 4,194,240**（約 2047×2048）になる。
-解消は動的解像度 recon の「固定タイル VAE」（研究記録
-[2026-08-03-dynres-vae-tiling](research/2026-08-03-dynres-vae-tiling.md)）side で行う想定。
-枚数の固定は `packages/runtime/tests/codegen_dispatch_test.ts`。
-
-`conv3d`（ADR [0118](decisions/0118-wan21-video-generation.md) 決定 1）も同じ骨格で、`Tout·Hout·Wout > 8,388,480`（既定の
-tileN 128 × 65,535）で `DispatchLimitError` になる。Wan2.1 の VAE の chunk グラフ（タイル 32）の最大は 4 × 256 × 256 = 262,144 で
-届かない。
-
-GPU 実行の座標演算は i32 なので、軸ごとに `入力長 + 2·padding ≤ 2^31 − 1` を超える `conv1d` / `conv2d` / `conv3d` は Session 構築時に
-`CodegenError` になる（折り返した座標が範囲外 0 の門を通り抜けて誤値になるため — ADR 0118 追記 2026-10-03。conv1d / conv2d は
-direct 版と暗黙 GEMM 版が同じ門を通る）。CPU 参照の意味論は変えない。実在の資産では起きない（padding / dilation が約 2^30 以上の IR だけ）。
-`conv_transpose1d` も同じ理由で、kernel・入力長・`出力長 + padding` のどれかが 2^31 − 1 を超える形は `CodegenError` になる
-（有効 tap の範囲を i32 で閉じるため）。
-
-## 幾何プロファイル: フラグ無しの Chrome では `description` で照合する表が自動では当たらない（外部制約）
-
-Chrome は開発者向けフラグ（`chrome://flags/#enable-webgpu-developer-features`）無しでは adapter の `description` を空にするので、
-`apple-metal-3`（`description: "Apple M2"` で照合）は自動では当たらず Apple は既定の幾何になる（M2 の DiT は ×1.75 を失う・M5 は既定が最良）。
-アプリは `BUILTIN_GEOMETRY_PROFILES` から引いて `acquireGpu({ geometryProfile })` で注入できる（[decisions/0115](decisions/0115-geometry-profiles.md) 追記決定 7）。
-
-## BiRefNet 系の配布形は 1024² と 2048² の 2 モデル（モデル名 = 解像度・既定 1024²）
-
-`karume dist --pipeline birefnet` は `--model 1024` / `--model 2048` の 2 モデルを 1 リポに
-畳む（ADR [0092](decisions/0092-distribution-repos-and-sources.md) 決定 9 — モデル名が名乗る
-解像度と系列の入力寸法が食い違えば `DistError`）。他の解像度は配らない（export 段
-`python -m birefnet.export --resolution <64 の倍数>` は通るので、系列を作ること自体はできる —
-配るには受理集合 `BIREFNET_MODELS` と実測の追加が要る）。
-
-2048² は **2026-09-05 に実行段が通るようになった**（それまでは decoder 末尾の bilinear upsample 出力
-`[1,192,2048,2048]` 3.2GB と cat 出力 `[1,240,2048,2048]` 4.03GB の 2 本が NVIDIA の束縛上限 2GiB を
-超え、Session の計画時 preflight〈ADR 0093 決定 5〉がノード名つきで落としていた）。解消したのは
-recipe 側のパッチ ⑨（`birefnet.patch` — 1×1 conv と bilinear upsample の順序交換で `cat` を消す）と
-runtime 側の静的 liveness パッキング（ADR 0093）の組で、f32 席（Lucida の既定）の実測（RTX 3080 Ti 12 GiB・
-2026-10-16）は重み 843MiB + 中間の領域 2,948MiB（生存ピーク 2,560MiB）+ 入力と出力の readback 64MiB =
-**GPU 総確保 3,854MiB（約 3.8GiB — 1 GiB = 1,024 MiB）・run 6.7〜6.9 s**。2048² は 2026-09-05 に
-1024² との同居（既定 1024²）で配布形へ入った。
-（かつては「上の conv2d dispatch 上限に decoder の 1×1 conv が当たる」も理由に挙げていたが、
-既定幾何が M128N128 になった `d0afc22` 以降は 2048² の n タイルが 32,768 で上限の内側 —
-残る理由は資源側だけだった。）
-配っている 1024² も軽くはない: f32 席（Lucida の既定）の実測で重み 843MiB + 中間の領域 751MiB（ADR 0093 の
-パッキングとパッチ ⑨ の後。旧プール + 旧末尾では 6,283MiB）+ 入力と出力の readback 16MiB = **GPU 総確保
-1,609MiB（約 1.6GiB）・run 約 1.4 s**（2026-10-16 実測）を要し、
-最大の binding は decoder の `cat_211` `[1,1280,256,256]` 320MiB（次いで ipt 枝内部の `[1,64,1024,1024]` 256MiB と attention のスコア S 230MiB）なので、
-実質**デスクトップ級 GPU 限定**である。配布形の `requiredLimits` **欄が空でも既定スペックの
-device では走らない** — 欄が名乗るのは常駐分（重み・state）だけで、中間は 128MiB を超える
-（宣言の意味論は下の「DL 前の GPU 適合チェック」節）。
-分解 attention の**行ブロック融合はこの家族では 96 サイト全てで外れる**（mask `[1,6,144,144]` と
-`softmax` の形が matcher の実測形と合わない）。したがってスコア S は 1 本の binding になり、
-1024² で 230MiB・2048² で 878MiB を要求する。最大の binding はそれでもなく decoder の `cat_211`（1024² で 320MiB・2048² で 1280MiB — DL 前の適合チェックはこの値で作る）— **128MiB 既定の device はこの家族の対象外**
-（1024² では S 以外にも 128MiB を超える中間が 24 本ある）。
-本家（同梱 `handler.py` の General-HR）の推論解像度は 2048² なので、**上流と同じ設定では
-ない**点は配布形の制約として明示しておく。回避策は入れていない（実測して判断する側の話）。
-
-**重みの常駐は quant 席 `f16` で減るが、半分にはならない**（ADR [0113](decisions/0113-birefnet-weight-series.md)・
-2026-09-26）。f16 系列の重み常駐は **431 MiB**（f32 は 843 MiB — どちらも 1024² と 2048² でほぼ同じ）。
-f16 で格納されるのは適格な重み（linear / conv / 相対位置表 — 205 本・820 MiB → 410 MiB と、窓マスクの表 8 本）
-だけで、deform_conv2d の重み（19 MiB — 重みスロットを持たない）・bias / norm / α β は f32 のまま残るため。
-窓マスクとゼロ pad は常駐の重みに入らない（2026-10-16 から — 窓マスクは窓 4 種の表と窓ごとの添字から実行時に
-組む中間、ゼロ pad は 1 要素のゼロの `expand`。それまでは窓マスク〈1024² で 65 MiB・2048² で 248 MiB〉と
-ゼロ pad の定数〈14 / 28 MiB〉を f32 で常駐させていた — ADR 0113 追記 2026-10-16）。2048² は中間の領域
-（2,948 MiB）が支配項なので、総確保に対する効きは小さい。quant 席は checkpoint ごとに上流の格納の型から導く（ADR 0113 追記 2026-10-11）:
-BiRefNet_HR は `f16` 席だけ（上流の重みが f16 — f32 席は同じ値を倍の常駐で持つだけなので出さない）、Lucida は
-`f32` 既定 + `f16`。HR の `f16` 席の GPU 総確保（重み + 中間の領域 + 入力 + 出力の readback）は 1024² で
-1,198 MiB（約 1.2 GiB）・2048² で 3,443 MiB（約 3.4 GiB）（2026-10-16 実測・RTX 3080 Ti・1 GiB = 1,024 MiB。
-中間の領域と最大の binding は f32 席と同じ — 活性値は f16 席でも f32）。
-
-**2048² は Intel Arc B570（Linux xe ドライバ）では走らない — 1 dispatch がジョブ制限 5 秒を超える**
-（2026-09-20 実測・裁定 2026-09-26 = その機の環境キーで明示 SKIP）。xe ドライバは compute ジョブ（= `queue.submit` 1 回）に
-`job_timeout_ms` = 5,000 の上限を持ち（root 以外は変更不可・上限でも 10,000）、超えたジョブを殺して
-device lost にする。BiRefNet 2048² では decoder 末尾の `deform_conv2d`（dispatch #2276・出力
-`[1,256,1024,1024]`）1 本がこれを踏む — 二分探索で dispatch 単位に確定し、1 dispatch = 1 submit に
-しても再現（submit の時間予算分割〈ADR 0004〉は「単独で予算を超える dispatch は分割できない」ので
-効かない）。同じ dispatch は 1024²（出力 `[1,256,512,512]`）で 1.66 s なので、要素数 4 倍の 2048² は
-≈ 6.6 s の見込み。1024² の 2 系列（birefnet-hr / lucida）は B570 でも全緑。Deno はこの device lost を
-例外にせず panic し、後続のテストまでプロセスごと止まる（known-issues「Intel Arc B570」節）。そのため
-`packages/runtime/tests/e2e_birefnet_test.ts` の `HELD_SERIES` に 2048² の 3 系列（birefnet-hr の f16・lucida の f32 / f16）× B570 の環境キー
-（`deno-intel-graphics-bmg-g21`）の行を置き、この機では GPU を使うテスト（golden 突合・幾何判別）を明示 SKIP する
-（登録時に warn・資産の完全性テストは走る・他の機には効かない — ADR
-[0106](decisions/0106-device-keyed-references.md) 追記 2026-09-26 その 3 の held 行）。解除条件は kernel 側で
-`deform_conv2d` を複数 dispatch に分割するか高速化して 1 dispatch を上限内に収めること
-（[perf-ledger](perf-ledger.md) K-63）で、そのとき行を消す。
-
-## BiRefNet 系の α マット: HR の上流の半精度のモデルの出力とは一致しない・上流の切り捨ては写さない
-
-後処理（logit → 入力画像の寸法の 8bit α）は、系列ごとの上流の**補間のカーネルと段の順序**を写す（配布形の
-`pipelineConfig.postprocess` — HR = `u8-pil-bicubic`・Lucida = `float-bilinear`。ADR
-[0125](decisions/0125-birefnet-matte-postprocess.md)）。契約は「karume の logit に系列ごとの上流の手順を当てた値」
-まで（golden の門 — `packages/models/tests/birefnet_matte_test.ts`）で、次の 3 点は by-design である。
-
-- **上流の半精度のモデルの出力とは一致しない**: HR の上流（同梱 `handler.py`）はモデル全体を半精度で回す
-  （重みも活性も f16）。HR の karume の席はどちらも計算が f32 なので、logit が初めから上流と違う。後処理の最後の段
-  だけ半精度を真似ても上流には近づかないので、写さない（ADR 0125 決定 5）。
-- **上流の切り捨ては写さない**: 8bit への量子化はどの手順も四捨五入（0.5 は切り上げ）。上流はどちらの系列も
-  切り捨てで、f32 の切り捨てでは確信度 1 の前景の 60〜85% が 255 ではなく 254 になる（実画像の実測）。karume
-  では logit 6.23 以上の画素が 255 になる（ADR 0125 決定 4）。
-- 手順はアプリからは選べない（配布形の宣言だけ）。上流の手順に回避の要る問題が無かったので、選択の
-  オプションを足していない（ADR 0125 の「結果」の節・ADR [0005](decisions/0005-verification.md) の追記
-  2026-10-11）。
-
-## conv1d（groups==1）も同じ dispatch 上限で fail loudly になる（Lout ≈ 8.39M）
-
-conv1d の implicit GEMM（[decisions/0053](decisions/0053-conv1d-implicit-gemm.md)）も
-1 workgroup = 1 出力タイルで、n = Lout のタイル数（tileN=128）が 65,535 を超える形 —
-**Lout > 8,388,480 サンプル ≈ 175 秒 @48kHz** — は `DispatchLimitError` になる。実運用では
-dacvae decoder はタイル分割（halo 8）で、SBV2 は運用上限（pipelineConfig）で先に区切られる
-ため到達しないが、カーネル直呼びの長尺形は例外で止まる（沈黙誤値ではない）。
-
-## Deno では GPUBuffer の総確保がドライバ申告予算の 97% で頭打ちになる（外部制約）
-
-Deno の WebGPU 実装は wgpu の**メモリ予算しきい値**をハードコードしている
-（`ext/webgpu/lib.rs` の `MemoryBudgetThresholds { for_resource_creation: 97,
-for_device_loss: 99 }` — wgpu 自体の既定は「しきい値なし」）。判定式は
-「`heap 使用量 + 要求サイズ ≥ heapBudget × 97%`」（wgpu-hal vulkan の
-`error_if_would_oom_on_resource_allocation`）で、`heapBudget` は
-`VK_EXT_memory_budget` でドライバが申告する動的な値。**バッファ本数・アップロード経路・
-flush 頻度をどう変えても天井は動かない**（判定に入るのは合計量と要求サイズだけ —
-6 通りの書き方で同値だった実測と整合）。97% 線を越える `createBuffer` は OOM を返し、
-99% 線は submit / poll のたびに判定されて **device 消失**になる（Session 構築途中の
-消失が同一プロセスの後続を道連れにする実測の説明もこれ）。
-
-- 実測（RTX 3080 Ti 12,288MiB・Deno 2.9.4 / wgpu 29.0.1・2026-08-03 時点）: 総確保 7,280MiB で
-  頭打ち（= 0.97 × 逆算 budget ≈ 7.5GiB。**budget が総量の 61% しか申告されない理由は未特定**
-  — ドライバ実装依存の可能性が高い）。f32 の Anima DiT（重み 7,465MiB）はこのため載らず、
-  該当 E2E 2 本は ignored（f16 3.7GiB / i8 1.9GiB 系列は影響なし）。
-- **天井は固定値ではなく時点値**: 判定に入る `heapBudget` はドライバが動的に申告するため、
-  同じ機械でも測るたびに動く。同機での 2026-08-08 の再実測は **11,136〜11,264MiB**
-  （`tools/diag/hold-vram.ts` で 256MiB 刻みに確保 → `not enough memory left`。同日 2 回の
-  サンプルでこの幅が出た）。上の 7,280MiB と矛盾するのではなく、どちらもその時点の申告
-  budget の 97% を映しているだけ。
-- 実測（Intel Arc B570 10,172MiB = 9.93GiB・Linux xe・Deno 2.9.6・2026-10-02 時点）: 天井 **9,600〜9,631MiB**
-  （3 系列で揺れなし）。申告予算（天井 ÷ 0.97）は 9,897〜9,930MiB で総量の 97.3〜97.6%、天井は総量の約 94.4〜94.7%。
-  RTX 3080 Ti の 61% の前例より申告がずっと高い。手順と表は
-  [research/2026-10-02-b570-vram-budget.md](research/2026-10-02-b570-vram-budget.md) §3。
-- **天井付近では OOM ではなく device 消失になる境界がある**: 97% 線は `createBuffer` の OOM、
-  99% 線は submit / poll のたびに判定される **device lost**。圧が少し高いだけで症状が
-  「間欠の device 消失」に化けるので、確保失敗だけを見張っても取りこぼす。
-- **97% 線の OOM にも 2 種類あり、JS からは区別できない**（2026-09-27 調査 —
-  [research/2026-09-27](research/2026-09-27-h35-oom-device-lost.md)）: `createBuffer` の OOM は非致命で device は
-  生きている。`queue.writeBuffer` が内部で作る staging（`writeTexture`・MAP_WRITE を持たない `mappedAtCreation`
-  も同じ）・submit・bind group 生成の OOM は、wgpu が device をその場で失わせる。どちらも同じ
-  `GPUOutOfMemoryError`（文言 `not enough memory left`）として out-of-memory errorScope へ届く。
-- **Deno では `device.lost` が遅れて解決する**: Deno は wgpu の device lost コールバックを登録していないので、
-  `device.lost` は次に検証を通る呼び出し（submit / writeBuffer / createBuffer / mapAsync）まで解決しない
-  （`onSubmittedWorkDone` では解決しない）。errorScope で捕まえた OOM の時点で、device が既に死んでいることがある。
-- **ReBAR の GPU（Arc B570）では staging が VRAM の heap に載る**: VRAM の heap が host-visible を兼ね、割り当て器
-  （gpu-allocator）が staging をそこへ置くので、VRAM が尽きると staging 側の OOM（= device を失う側）として出る。
-- **Chrome（Dawn）も規則は同じ**（OOM を errorScope へ通すのは createBuffer / createTexture / createQuerySet だけ・
-  staging / submit の OOM は device lost）だが、staging を最大の heap（この機ではシステム RAM）に置く
-  （ソースからの推論・未実測）。
-- **帰結: 「OOM を踏んでから解放してやり直す」設計は Deno では当てにできない**。karume は非致命な `createBuffer` の
-  試し確保（runtime の `fitsHeadroom`）で空きを先に測り、入らなければ OOM を踏む前に手放す（anima の DiT 常駐 —
-  ADR [0112](decisions/0112-anima-transformer-residency.md) の 2026-09-27 追記）。
-- f16-1024 の PNG 門は**初回 run で瞬間 8,391MiB**（定常 5,723MiB）まで上がり、天井
-  11,136MiB に対する余裕が 2.7GiB しか残らなかった。瞬間ピークの正体は重み staging の二重
-  計上で、Session 生成時に submit を 1 回入れて解消済み（実測ピーク 5,723MiB・余裕 5.4GiB。
-  機序と実測は [research/2026-08-08](research/2026-08-08-vram-oom-misreport.md)）。
-- **Karume 側では回避不能**: しきい値を変える wgpu API はあるが Deno がハードコードして
-  おり、環境変数も CLI フラグも無い。実質の選択肢は Deno のパッチビルドか、より大きい
-  VRAM の機械で回すことだけ。上限は VRAM 総量ではなく「ドライバ申告 budget」比例なので、
-  24GiB 機なら f32 DiT が載る見込み（未実証）。
-- 出所の file:line・既知の上流報告（denoland/deno#35195 等）・逆算の根拠は
-  [research/2026-08-03-wgpu-memory-ceiling.md](research/2026-08-03-wgpu-memory-ceiling.md)。
-
-## Deno CLI の decode は 1 token あたり 10 ms の待ちを含む（外部制約・deno_webgpu の poll ループ）
-
-Deno 2.9.6 の `ext/webgpu/buffer.rs`（`mapAsync`）と `queue.rs`（`onSubmittedWorkDone`）は
-`while !done { device_poll(wait_indefinitely); sleep(10 ms) }` の形で完了を待ち、GPU が終わった後にも
-必ず 1 回 10 ms 寝る。decode は 1 token = フェンス 1 本なので Deno の壁には 10 ms/token の定数が乗る
-（RTX 3080 Ti で 23.8 ms/token のうち 10 ms）。同じ資産を Chrome で回すと壁 10〜11 ms/token。
-
-- **Karume 側では回避不能**（`pop_error_scope` にはこの待ちが無いが、読み戻しには `mapAsync` が要る）。
-  選択肢は Deno のパッチビルドか、1 フェンスあたりの token 数を増やす先行投入（perf-ledger H-27）。
-- **Deno CLI の tok/s は製品の性能指標に使わない** — 採否判定は Chrome の壁と GPU 時間で行う。
-  根因と実測は [decode 速度調査](research/2026-09-19-qat-speed-recon.md) §3.2。
-
-## 圧縮格納の実行経路と適格 — VRAM が縮むのは適格な重みスロットだけ
-
-codec 台帳の全 codec を実行できる（bf16 は 2026-10-17 まで「宣言のみ受理・実行は fail loudly」だったが、
-[decisions/0131](decisions/0131-bf16-weight-execution.md) で f16 と同じ経路に乗った）。実行できるかの正本は
-`RUNTIME_SUPPORT.storage`（[ir-v2](ir-v2.md)「値と型」）。
-
-group 量子化（w4）は [decisions/0069](decisions/0069-packed-w4-storage.md) で**解禁・実行
-経路も実装済み**（2026-08-18）— codec `int4-sym-g`（格納型 `i4`・packed 4bit・K 方向 group の
-対称量子化）。制約は `groupSize` が 2 冪かつ 16 以上・量子化軸（先頭次元を行とした平坦行長 — rank2 では
-最終次元そのもの）が `groupSize` で割り切れること・scale companion（f32・rank2
-`[行数, 行長/groupSize]`）が必須の 3 点。**適格は f16 / i8 より狭く「消費が linear /
-embedding / conv1d（`groups == 1`）の重みスロットのみ」**（0069 決定 5 と追記 6 / 7 —
-conv2d / conv_transpose1d への追補は需要が出た op から）で、適格外はロード時 CPU 展開
-（VRAM 削減ゼロ）。per-channel の codec（`int8-sym` /
-`int2-off` / `ternary`）の `groupSize` は行長に等しい MUST で、違えば合流層が落とす（黙って
-per-channel として読むと沈黙誤値になるため）。
-
-**f16 は 2026-08-03 に解禁**（[decisions/0018](decisions/0018-f16-weight-execution.md)）、
-**i8（per-channel symmetric int8）も同日に解禁**
-（[decisions/0019](decisions/0019-i8-weight-execution.md)）、**bf16 は 2026-10-17 に解禁**
-（[decisions/0131](decisions/0131-bf16-weight-execution.md) — f16 と同じ適格・展開は bitcast）— ただしいずれも VRAM が縮むのは
-**適格な重みスロットだけ**。適格外（bias / norm 系 weight / その他の op / 混在消費 /
-消費ゼロ）はロード時に CPU で f32 展開され、**VRAM 削減はゼロ**で縮むのは配信サイズのみ。
-内訳は `Session.diagnostics().storage` で観測する（ADR 0006 の常設診断。i8 の
-`residentCompressedBytes` には scale バッファのバイト数も入る）。
-
-i8 は `encoding.scale`（rank 2 `[shape[rowAxis], 1]`・f32）の**宣言が必須**で、行の軸
-`rowAxis` は出力チャネル（`conv_transpose1d` だけ軸 1）。scale の欠落・dtype 違い・長さ違いは
-重みを取る前に合流層で落ちる。`rowAxis` と消費 op のチャネル軸の突き合わせは GPU 常駐の席の
-initializer にだけ掛かり、食い違えば重みを取る前に `prepareContainer` の常駐計画で落ちる。
-適格外で f32 へ展開する席は宣言の `rowAxis` で復元するので、突き合わせなしでも値はずれない。
-
-## hub: 相 1（streaming prefetch）は CacheStorage 必須で fail loud
-
-`prefetchAssets` の相 1 はバイト列を手元に持たない面なので、CacheStorage が使えない環境で
-素 fetch へ縮退する余地が構造的に無く、fail loud で落ちる（ADR
-[0070](decisions/0070-shard-loading-admission.md) 追記）。`onCacheError` 診断が届くのは相 2 のみ。
-Node には Cache Storage が無いので、`@karume/hub/node` の `nodeCacheStorage(dir)` を `caches` で渡す
-（渡さなければ同じく fail loud — 2026-10-17）。
-
-## hub: 別々のロードが同じファイルを同時に温めると、両方がダウンロードする（by-design）
-
-`prefetchAssets`（相 1）は、取得層の同時取得の合流（single-flight — 同じキーへの並行取得を 1 本に
-束ねる仕組み）の対象外である。合流は「先に走った取得が受け取ったバイト列を後発へ渡す」契約で、
-バイト列を手元に持たない温めには渡すものが無い（取得層 `@hdae/fetch-cache` 0.8.0 の by-design）。
-そのため、別々のロード（別の `loadManifest` から始まる 2 本のロード）が同じファイルを同時に温めると、
-両方が network に出る。キャッシュへの格納は同じ内容の上書きなので正しさは壊れず、増えるのは帯域
-だけである。1 回のロードの中では取得計画を一意化するので重複しない。ロードを跨いで温めを共有する
-仕組みは、実需が出てから足す。
-
-## 見積り（`PreparedModel.estimate` / `estimateGraphMemory`）の `workspaceBytes` は近似（非勘定は `unaccounted` が列挙する）
-
-`scenarios[].workspaceBytes` は融合**前**のノード列に対する生存区間シミュレーションで、実構築が
-畳む / 割る形は勘定に入らない。例外は**行ブロック attention**（分解 attention の 9 ノード窓 — ADR
-[0060](decisions/0060-row-block-attention.md)）で、実行相と同じ融合計画が掴んだ窓は融合後の形（行ブロック 1 枚ぶんの
-一時と出力）で数え、束縛上限の検査もそのバッファにだけ当たる（ADR [0093](decisions/0093-transient-liveness-packing.md)
-追記 2026-10-10）。非勘定は `unaccounted` 欄が逐語で列挙する — ①行ブロック attention 以外の融合が畳んで消す
-中間とその融合ルールが宣言するノード内一時 ②linear i8a8 の量子化中間 ③params バッファ
-④`queue.writeBuffer` の実装 staging ⑤退役の窓（予算超過 / 計画の LRU 追い出しで退役した slot
-backing は flush 後の後始末まで生きる）。**attention のノード内一時は勘定に入っている** — states 形の
-スコア S と行統計（行統計は `stateAttentionReduce` が要求する計画だけで、stats/PV 融合が成立する計画では
-0 バイト）と、融合 attention op のスコア S・行統計・i8a8 の量子化中間（ADR
-[0124](decisions/0124-attention-row-block-budget.md) 決定 7）。融合 attention op の席は `EstimateOptions` の
-`attentionCompute` / `attentionScoreStorage` で渡し、省略すると runtime 既定の f32 で数える（Anima の段ごとの
-見積りは席を渡していない — 実用席の s16 では過大側・a8 では量子化の一時のぶん過小側）。
-融合 attention op の行ブロックの枚数は束縛上限で決まるので、`EstimateOptions.maxStorageBufferBindingSize` を渡さない
-見積りは、枚数がどの device でも同じ形（WebGPU core 既定 128 MiB で 1 枚に収まる形・`attentionRowBlockMaxBytes` が
-core 既定以下の形）だけを数え、それ以外は上限を名指して fail loudly（states 形と同じ理由 — core 既定で割ると、
-どの device でも出ない枚数を見積りだけが名乗りうる）。
-`unaccounted` に載らない差がもう 1 つある: **領域境界の padding** で、見積りの配置は実構築の
-パッカーと数百バイト単位でずれる。`EstimateOptions.maxBufferSize` は state スロット単体の上限検査と
-中間パッキングの領域の上限の両方に効き、`workspaceBytes` を動かしうる（first-fit の領域の割れ方が上限で
-変わる）。残る差は offset 整列で、device 値を受ける欄が無く WebGPU core 既定の 256 で詰める（`estimate.ts`
-の JSDoc）。
-可否の最終門はこれまでどおり out-of-memory errorScope で、`peakAccountedBytes` も名前どおり
-「勘定に入れた分のピーク」= 上限保証ではない。
-
-**slot backing の予算は下限として載る**: `peakAccountedBytes` は `weights + state + max(予算, 最大シナリオ)`
-（ADR [0095](decisions/0095-plan-backing-budget.md) 決定 4・最大シナリオは `generation.chunkBuckets` のバケット形を
-含む — 同 追記 2026-10-10）で、既定 256 MiB の予算がシナリオより大きい小さなモデルでは、実際に保持する量が数 MiB でも
-256 MiB が勘定に載る（過大側）。報告の `planBackingBudgetBytes` で引き算できる・`planBackingBudgetBytes: 0` なら従来の `max(シナリオ)` に戻る。
-
-## attention の行ブロックの予算（`attentionRowBlockMaxBytes`）は一時 1 本ごとの上限で、合計ではない・予算違反は run の計画導出で落ちる
-
-`SessionOptions.attentionRowBlockMaxBytes`（ADR [0124](decisions/0124-attention-row-block-budget.md)）は、スコア S を
-実体化する attention（融合 attention op・states 形・分解 attention の行ブロック）の行ブロックを、device の束縛上限
-（`maxStorageBufferBindingSize`）とこの値の**小さいほう**に収まるように割るノブ。出力のビットは予算なしと同じで、
-省略すると今までと同じ（束縛上限だけで割る）。by-design の性質は次のとおり。
-
-- **一時 1 本ごとの上限で、合計の上限ではない**: S 1 枚と行統計 1 枚はそれぞれこの値以下になるが、同時に生きる合計は
-  この値を超えうる。i8a8 の量子化の一時（行ブロックのループの外）と、FFN の中間のような他の中間はこの値で縛らない
-  （中間の配置の上限検査は束縛上限のまま）。VRAM の総量の予算ではない。
-- **1 行ぶんに満たない予算は run の計画導出で落ちる**（fail loudly — 予算を名指す）: Session の構築時には形が記号のままで
-  枚数が決まらないので、構築時に落ちるのは値域の外（0・負・非整数・NaN・数値でない値）だけ。Wan の DiT なら重みの
-  読み込みの後に落ちる。事前に知る手段は見積り（`EstimateOptions.attentionRowBlockMaxBytes` に同じ値を渡す）。
-- **山は予算なしより下がりうるが、小さくするほど下がるとは限らない**: 予算で縮むのは行ブロック 1 枚ぶんの一時で、中間
-  全体の山は中間の配置の割れ方に依る（見積りの計算値で、Wan2.2 の DiT の実用席・121 フレームでは 256 MiB が 512 MiB より
-  大きい — [research 2026-10-11（見積りの前後）](research/2026-10-11-fused-attention-estimate-before-after.md)。同じ形の実寸の backing は 1 GiB →
-  512 MiB → 256 MiB で単調に下がり、見積りの形は出なかった — 開発機の実測 2026-10-11・
-  [research 2026-10-11（段 4b の実測）](research/2026-10-11-row-block-budget-stage-4b.md)。測ったのはこの 1 形だけ）。
-- **速度の代価は形と機に依る**: 増えた枚数 × 1 枚あたりの dispatch 数（融合 attention 3・分解 attention 4・states 形 2〜3）
-  だけ dispatch が増える。小さい形では分割で遅くなった実測があり、分割の方が速かった例もある（ADR 0124 Context）。Wan2.2 の
-  DiT の実用席・121 フレーム（開発機の RTX 3080 Ti・Deno）では、計測モードの GPU 時間の合計が予算 1 GiB / 512 MiB で予算なしと
-  揺れの内、256 MiB で +24.9% だった（実測 2026-10-11・[research 2026-10-11（段 4b の実測）](research/2026-10-11-row-block-budget-stage-4b.md)）。
-- **models の pipeline と gpu-lab には口が無い**: runtime の `SessionOptions` だけの欄で、`WanTi2vPipeline` などや gpu-lab の
-  Wan タブからは渡せない。Wan の既定にも入れない（裁定 39 = a・利用者 2026-10-11 — ADR 0124 の段 4b の結果の節）。解決すべき問題が
-  出たら口を足す（ADR 0005 の追記 2026-10-11 の方針）。runtime を直に使う呼び手は `SessionOptions.attentionRowBlockMaxBytes` を使える。
-
-## slot backing の予算つき保持: 予算に収まらない形は 1 本だけ保持する・常駐入力の破棄は保持中は拒否される
-
-slot backing は予算（既定 256 MiB・`SessionOptions.planBackingBudgetBytes` / `Gemma4Pipeline` の options）の
-内側で複数保持する（ADR [0095](decisions/0095-plan-backing-budget.md)）。by-design の制約 3 点:
-
-- **予算より大きい形は 1 本だけ**（他を全て退役させて持つ = 従来の容量 1）。gemma4 の chunk 768 形は
-  capacity 16K で ≈ 528 MiB・capacity 2K で 192 MiB なので、既定では 768 token 以上のプロンプトを含む
-  ターンで 768 形 ↔ バケット形 ↔ decode 形の作り直し（≈ 40 ms/回）が従来どおり起きる。短いターン
-  （バケット形 ↔ decode 形）の往復だけが消える。長い prompt を毎ターン流すなら予算を上げる。
-- **常駐入力（`ResidentTensor`）を焼き込んだ backing が保持されている間、その `dispose()` は fail loudly**。
-  容量 1 のときは別の形へ切り替えれば解けた窓が、予算内では Session の `dispose()` か予算超過による
-  退役まで続く。`planBackingBudgetBytes: 0` で従来の挙動に戻る。
-- **他家族の透過は未**: gemma4 以外は manifest の `session` から Session options を組むため予算を変える口が
-  無く、既定 256 MiB が効く（形が予算より小さい家族は複数保持側・最大 +256 MiB は見積りに載る）。
-
-## prefill バケット（`chunkBuckets`）: 見積りの非勘定窓が広がる・16 未満は tiled 経路に乗らない
-
-gemma4 の prefill は chunk ごとに「`queryLength` 以上の最小バケット」の物理行数で走る（ADR
-[0066](decisions/0066-generation-context-state-slots.md) 追記 10・既定 `GEMMA4_CHUNK_BUCKETS`）。by-design の
-制約 2 点:
-
-- **VRAM の瞬間ピークは見積りの外側で広がる**: slot backing（run の中間バッファ束）はヒット run にしか作られないため、
-  末尾 chunk のバケット run の**初回**（ミス run）は保持中の backing が載ったまま arena に一時を確保する。backing は
-  バイト予算つきで複数保持する（ADR [0095](decisions/0095-plan-backing-budget.md)・既定 256 MiB）ので、勘定側は
-  `max(予算, 最大シナリオ)`、非勘定側の窓は「退役（予算超過 / LRU 追い出し）から destroy まで」と「ミス run の arena 一時（最大でバケット形 1 本ぶん）」。見積りのシナリオ自体は
-  prefill / decode の 2 本のまま。2 ターン目以降はバケット形も decode 形も保持されるので作り直しは起きない（予算内なら）。
-  見積りに `generation.chunkBuckets` を渡すと、バケット形は**シナリオに列挙しないままピークの最大に入る**（行ブロックの
-  等分は枚数の境界で行数の少ない形のほうが一時を多く使うので、prefill 形が最大とは限らない — ADR
-  [0095](decisions/0095-plan-backing-budget.md) 追記 2026-10-10）。gemma4 の `estimateSessionMemory` はバケットを渡す。
-- **16 未満のバケットは K-13 の tiled 経路に乗らない**: states 形 attention の ①ₜ / ③ₜ は M ≥ 16 の計画にしか
-  選ばれず、それ未満は参照経路 ① / ③ に落ちる（`stateAttentionReduce: "parallel"` なら ③′・M ≤ 8 なら ①′ も —
-  K-14）。値は正しいが遅く、`parallel` × M ∈ [2, 16) で実測があるのは投機の verify 形（M = 4 / 8）だけ。
-  gemma4 の既定バケット（`GEMMA4_CHUNK_BUCKETS` = 4 / 8 / 32 / 64 / 128 / 256）のうち 4 と 8 がこの域に入る。
-
-## linear の GEMV 族（1 ≤ M ≤ 64）: 行ブロックの高さは参照 device の定数で選ぶ・初回ターンにシェーダ解析費が乗る
-
-i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [0082](decisions/0082-linear-gemv-decode.md)
-追記 5）が受け、既定の GEMM 骨格と u32 完全一致のまま M=8 で ×6・M=32 で ×3 速い。by-design の制約 2 点:
-
-- **行ブロックの高さ `rows` は (格納, m, n) の純関数で、並列度の目標 16384 スレッドは参照 device
-  （RTX 3080 Ti）の飽和点を焼いた値**。飽和点が 1 桁小さい GPU（内蔵 GPU・Apple M 系）では y タイルを
-  買いすぎて重みの読み直しが最適より増えるが、値は正しく、選択は device で変えない — 純関数で選ぶことが
-  「同一キー → バイト同一 WGSL」と実行時オートチューン禁止（ADR 0022）の前提。他 device では
-  `SessionOptions.linearGemvRowsThreadTarget`（静的・Session 生成時に固定）で差し替える。
-  device での自動選択はしない。
-- **初回ターンにシェーダの解析費が乗る**: 行ブロック変種は行数ぶん展開した WGSL で、解析・検証費が
-  テキスト量に超線形。天井（256 要素/語）でも i4 8 行 / i8 16 行が 1 本 ≈ 55〜60 ms、gemma4 E2B の M=32
-  バケット prefill が初回に作る 5 本で合計 ≈ 150 ms（Deno / naga 実測）。パイプラインは device ごとに
-  1 度だけ作られるので 2 ターン目以降には乗らない。ブラウザ（Tint）の解析費は未測。
-
-## 投機デコードの足場（MTP 段 1・ADR 0096）: deferred run は sliding の余裕まで・gemma4 の配布形は焼き直しが要る
-
-- `GenerationRun.commit: "deferred"` で発行した run は **`queryLength ≤ context.slidingSlack`**
-  （gemma4 の配布形は余裕 8 なので 8 行まで — 段 3 で `+ 1` から 1 列締めた: 借り手〈readonly 読者〉は
-  貸し手より 1 列古い列 `P−W` まで読むので、`commit(0)` を含む全ケースで棄却行が窓に入らない条件が
-  `Q ≤ 余裕`。借り手の有無で分岐しない）。超える発行は同期区間で fail loudly — 棄却行が sliding ring の
-  live 窓を潰す条件で、通すと例外も NaN も出ずに過去 KV が壊れる。
-  immediate な run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま。
-  保留（`pendingCommit`）が残る間は次の run と `rewind` を拒否する（`commit(rows)` で畳む）。
-- gemma4 の配布形（product 系列）は **sliding スロットの物理行数が `window + 8`・出口が 2 本
-  （出力 0 = logits `[1,R,V]`・出力 1 = 最終 norm 後 hidden `[1,R,H]`）・`last_row` が `[R]`** に
-  変わった。出口 1 本の旧配布形は `Gemma4Pipeline` が fail loudly（互換分岐は書かない — 未リリース）。
-  手元のミラー（`models/karume-gemma4`）は `dist.py --pipeline gemma4` で焼き直す。decode / token の
-  検収系列は不変（runtime は sliding 容量 = window の資産も従来どおり読む — 法が capacity なので
-  値は変わらない）。
-- decode 1 step ごとに hidden `[1,1,1536]` f32（6 KB）の readback が増える（段 3 で drafter が読む —
-  段 1 の生成ループは読まない）。R 行 verify の readback は logits R MiB + hidden R × 6 KB。
-- PreparedPlan の LRU は 12 本。gemma4 の既定バケット 6 本（4 / 8 / 32 / 64 / 128 / 256）+ prefill 形
-  - decode 形 = **1 容量あたり 8 形**。容量の違う sequence を交互に回すと 16 形で溢れ、decode が
-    静かに再導出へ落ちる（例外は出ない — 観測点は `SessionDiagnostics.lastRunPrepared.hit`）。
-- verify 形（M = 4 / 8）の attention は ①′ + ③′（①′ は M ≤ 8 の計画 = decode と verify・
-  ①ₜ / ③ₜ は M ≥ 16 のまま）。T(4) = 27.6 / T(8) = 37.2 ms（P ≈ 14.7K・GPU 実時間）がこの帯の
-  値で、詰めるのは段 4。
-- R の torch 側 trace 上限は 9（draft 8 + bonus 1）。IR は記号の範囲を持たないので runtime の
-  束縛を縛らない — runtime 側の上限は上の `slidingSlack`。
-
-## 投機デコードの入口（MTP 段 2・ADR 0096）: drafter は借り手で貸し手より先に畳む・読み専用の sliding は 512 列・k は 1..3
-
-- **借り手 context**（`createGenerationContext({ chunkLength: 1, borrow: 貸し手 })`）の run は
-  **貸し手の run リースを取る** — 貸し手に進行中の run・未 commit の deferred run・poison があれば
-  同期区間で fail loudly。借り手は論理長を進めない（external スロットは読むだけで append を持てない）
-  し、deferred な run も発行できない。同じ context に借り手は複数張れる。
-- **寿命は借り手 → 貸し手の順が MUST**: 借り手 context が生きている間の貸し手 context の
-  `dispose()`、借り手 Session が生きている間の貸し手 Session の `dispose()` は **Promise.reject**
-  （dispose の冪等契約からの意図的な逸脱 — 借り手の bind group が貸し手のバッファを掴んでいる）。
-  `Gemma4Pipeline.dispose()` は drafter Session → target Session の順で畳む。貸し手側の重みの貸し出しは
-  `Session.exportWeight` の借用計数で数える。
-- **readonly attention（drafter の cross-attention）が読む sliding の列は `[P−W, P)` の 512 列**。HF の
-  drafter は bidirectional SWA が inclusive で 513 列を見るが、513 列目（位置 P−513）は余裕 8 の ring で
-  kmax = 8 の棄却が起きると潰されうる行なので採らない。受理率への影響は未計測（同一入力の draft 突合は
-  3 ケース × 200 サイクル × 3 段で 100% 一致）。
-- **`speculative.k` は 1..3**（配布形の drafter が 3 段展開で焼かれている — k を増やすのは再 export・動的 k は
-  段 4）。`fromAssets` は `speculative` を受けない（`Gemma4Assets` に drafter の席が無い）。
-- **`estimateSessionMemory`** は target の prefill / decode に verify 形（M = R = k+1）を足し、drafter の常駐重み
-  （借りる埋め込み表を除く）と借り手 context の lengths 8 バイトを合算する（段 3）。
-- **drafter の格納は i8 単一**（linear まで i8 per-channel）。linear を i4 g32 に落とした資産は
-  `dist.py` が拒否する（受理数 E[a] が丸め無し比 −15〜−33% 落ちる — ADR 0096 追記 2026-09-08）。
-  ただしこの門（`tools/export-recipes/gemma4/distribution.py`）は容器の束縛表の格納を
-  「i8 が在る / f16・i4 が無い」で見る **混入検出**であって、「全 linear が i8」の保証ではない
-  （norm 用の f32 が要るので f32 の全禁止では塞げず、i8 が 1 本でも在れば存在検査は満たされる —
-  一部の linear だけ f32 で焼いた資産は通る）。
-- **admission が照合するのは構造だけ**（`packages/models/src/gemma/speculative.ts`）— drafter グラフの
-  入力・出口・external スロット・共有 initializer を形・名前・格納 dtype で突合するが、target と
-  drafter が**同じ資産世代**（同じ checkpoint から焼いたもの）かは見ない。同形の別 checkpoint の
-  drafter は admission を通り、受理率が落ちるだけで誤った token 列は出ない（確定するのは target の
-  logits と `sampler.next`）。世代の対を合わせるのは配布形（ミラー）を組む側の責務。
-- **hub の `ResolveOptions.weights: []` は assets だけを解決する**（weights を 1 本も取らない形）。
-  意味のある用途は無いが、空を「全数」に読み替えると `speculative` の絞り込みの退行が黙って通るので
-  空は空のまま。
-
-## 投機デコード（MTP 段 3・ADR 0096）: 投機は温度に依らず張る・M=1 / M=4 の同一は device ごとの門で保証・drafter Session は pipeline に 1 本
-
-- **投機は温度に依らず張られ、token 列は非投機と同一**（受理の抽選は行ごとに `sampler.next` を非投機と同じ
-  logits・history・順序で 1 回ずつ呼ぶので RNG の消費列まで一致する）。受理率は温度で変わる — 配布形の
-  推奨 sampler（温度 1.0）での値は未計測（段 4）。
-- **「投機あり = 非投機」の厳密一致は、既定席を含めて e2e の門で固定している**（2026-09-26 に「既定席では
-  稀に割れうる」の主張を撤回）。gemma4 の既定席 `"parallel"` でも attention の縮約順は M=1 と M=4 で揃う
-  （①′ の適用条件が M ≤ 8・③′ は M < 16 なので、decode も verify も ①′ + ③′）。M で形が変わる他経路（GEMV 族の
-  行ブロックなど）を含めた同一は `e2e_gemma4_speculative_test.ts` が 2 段で門にしている — 投機⑤ = verify 行 0 と
-  decode の logits の u32 一致（attention 3 変種 × `linearGemvReduce: "parallel"`・attention `"sequential"` /
-  `"parallel"` × GEMV `"sequential"`・RMS→add 融合〈と linear→SRQ 指定〉の組）、投機① / ② = 生成 token 列の
-  一致（① = `"sequential"` 席・② = 通常版 E2B の配布形の既定席 `i4-fast` の 3 ケース × 200 token と
-  ゲート付き = always。下の B570 実測時点の attention は `"parallel"`（旧家族既定）で、同日 `i4-fast` の宣言は
-  `"parallel-fused"` へ移った — 新しい宣言での再測定は未了）。2026-09-26 の Intel Arc B570 実測で全組一致・既定席の相違 0/200 × 3 ケース
-  （[research 2026-09-26](research/2026-09-26-gemma4-speculative-determinism.md)）。u32 の門は attention 3 変種 × GEMV 2 種 × RMS→add 融合の全 12 組（+ linear→SRQ 指定）を覆う（2026-09-26 に全組へ広げた）。
-- **保証は device ごとである**。門が確かめるのは gemma4 レーンを回した機の device だけで、門が赤の機では M=1 と M=4 の
-  相違が実在する（縮約の実行順は grid-stride の分割が device の限界値で変わるので、機を跨いだ主張はしない）。
-  そうした機で厳密な再現性が要るなら `speculative: "always"`（ゲート無し）か `stateAttentionReduce: "sequential"`
-  （runtime の参照経路で M=1 と M=4 が同じ縮約カーネル）を選ぶ。利用者の device で実行時に同一を確かめる
-  カナリアは無い。
-- **自己採算ゲートは既定 on で、切るのは壁時計である**（段 4-B ④・`speculative: true` の既定）。ゲートは cycle の壁と
-  decode 1 step の壁を実行時に測り、投機が負けている間は M=1 の decode 形へ落ちる（判定は 16 cycle のブロック集計を
-  2 本連続で見てから・戻るのは 8 cycle のバースト集計で〈強い負けのバーストは 4 cycle 目以降で打ち切る〉—
-  1 サンプルでは受理数のばらつきに負ける。取り分は課題と host で決まり、
-  採算閾値も RTX 1.72〜1.88 / M2 2.17〜2.6 と動くので固定値に焼けない — research 2026-09-09）。壁時計は走行ごとに
-  揺れるが、選ばれる 2 経路（落ちた step の M=1・投機の cycle の M=4）は上の項の門でビット同一なので、**門が緑の
-  device では壁時計の選択は出力を変えない**（ADR 0058 追記 2026-08-29 の一般則 3・ADR 0096 追記 2026-09-26）。
-  e2e の投機② はゲート付きの列が always と一致することも既定席で門にしている。門が赤の device の扱いは上の項のとおり。
-  落ちた step 数は `GenerationStop.speculation.plainSteps`・切替回数は `switches`（どちらも `"always"` では欄ごと無い）。
-- **`stateAttentionReduce` は drafter の readonly attention（①′ ③′）には効かない — parallel 固定**
-  （席が効くのは target の states 形 attention だけ）。上の厳密一致は target の同一性の門なので
-  これで崩れない: drafter の縮約順は draft の中身（= 受理率 = 速度）にしか効かず、確定する token 列は
-  行ごとの target の logits と `sampler.next` が決める。
-- **verify の commit は「配送した token の frontier まで」**。消費者が `break` すると受理済みでも未配送の token は
-  会話に入らない（frontier 1 個だけが残る — 非投機と同じ形）。verify 戻り〜配送の同期区間で例外が出た場合は
-  `commit(0)`（frontier は未投入のまま・棄却行は次の run が上書き）で、sequence はその後も使える。
-- **`k + 1 ≤ slidingSlack`**（gemma4: 4 ≤ 8）を sequence 生成時に検査する。verify の `last_row` は k′ が縮んでも
-  R = k+1 に pad する（PreparedPlan の形を増やさない）。
-- **drafter Session は pipeline に 1 本**で、同じ pipeline の 2 本の会話を同時に回すと draft run が直列化される
-  （head-of-line 待ち）。借り手 context は sequence ごと（`chat()` はターンごと）に開閉するので、drafter Session の
-  `stateBacking.rebindCount` はターン数に比例して伸びる。
-- **公開型 `Gemma4RunPhase` の枝が 2 → 4**（`draft` / `verify` — 未リリースの破壊的変更）。`onRunDiagnostics` は
-  run 1 本につき 1 通のまま（draft は drafter Session の診断・他は target の診断）。
-- **配送の粒度**: 1 verify で最大 k+1 個の `token` イベントが続けて届く（position は `pastLength + 1 + i`）。
-  `GenerationStop.tokens` は配送した数（停止 token 含む）で、run 数は `speculation.cycles + draftRuns`。
-
-## gemma4 `fromAssets`: `Gemma4Assets` は `config` / `model`（part 列）/ `tokenizer` の 3 欄 — PLE の読み口は渡さない（次のリリース・破壊的変更）
-
-PLE は索引（`ple_index`・schema 3）と行列の block ごと `model` 容器の資産に入ったので（ADR
-[0109](decisions/0109-manifest-v5-container.md) 決定 4）、`fromAssets` の呼び手が PLE の読み口を別に渡す席は
-無くなった（公開版の `Gemma4Assets` の `pleIndex` / `readPleShard` は削除 —
-[CHANGELOG](../CHANGELOG.md) の Unreleased の Breaking）。`model` は part 0 から添字順の part 列で渡す — 長さ 0 の
-part も飛ばさない（添字が part の id そのもので、飛ばすと以降が別の part として読まれる —
-`packages/models/src/gemma/pipeline.ts` の `Gemma4Assets`）。decode の PLE は容器の資産の区間読み
-（`AssetReader.read`）で行を引く（`packages/models/src/gemma/ple.ts`）。
-
-## `fromAssets`（全量面）に分割形の容器を渡すと、全 part がホスト RAM に同時常駐する
-
-`fromPretrained` で読める配布形は `fromAssets` でも読める（取得キーが `<役割>[i]` の part 列は
-連結せず、part 列のまま容器として開く — `packages/models/src/hub/components.ts` の
-`assetComponentOpener`）。ただし全量面の入口は**取得済みバイト列の Record** なので、呼び出し側が
-Record を組んだ時点で**全 part がホスト RAM へ同時に載っている**。ホスト RAM のピークを取得元の型ごとの
-上限に抑える性質（下の節）が成り立つのは取得層を通る面（`fromPretrained`）だけで、全量面で縮むのは
-**単一 ArrayBuffer の大きさ**（Chromium の壁 — 下記）であって合計の常駐量ではない。ローカルの
-デバッグ・`examples/` 用途を想定した面という位置づけは変わらない。
-
-添字が `[0]` から始まらない・連続しない列や、素キー（`transformer`）と分割キー（`transformer[0]`）の
-混在は **部品名と part 添字を名乗る診断**で fail loudly（黙って片方を採らない）。
-
-## ロード時のホスト RAM ピークは取得元の型で決まる（seek 型は item 1 本・scan 型は part 1 本 + GC 待ち）
-
-Session 構築は block を 1 本読んでは GPU へ上げて手放す（`queue.writeBuffer` は呼んだ時点でバイト列を写すので、
-CPU 側の解放はフェンスを待たない）。取得元が位置読みできる **seek 型**（ローカルの `denoDirectory`・ブラウザの
-遅延 Blob — Chrome は未実測）では、JS 側に生きる重みは item 1 本（block 32 MiB 以下 + 同乗 scale + 展開席の
-f32 展開結果と持ち越し scale の写し）で、part 長に依らない。位置読みできない **scan 型**（Deno の HF 経由）は
-hub が part を全量読みして保持枠に置き、block をその器の view として切り出すので、ピークはおおむね part 長と
-ともに伸び、GC を待つ器の本数は宣言からは決まらない（実測で external の最大は最大 part の約 1.5〜4.4 本）。
-外部実装の `DistributionSource` がどちらになるかは `openFile` の有無と、返す読み口の `cost`（`seek` /
-`scan`）で決まる（`packages/hub/src/container.ts`）。数え方の正本は [container-v1](container-v1.md) §11、
-実測は ADR [0108](decisions/0108-container-format.md) 追記 5 と
-[研究記録](research/2026-09-24-part-length-ram-peak.md)。
-
-## MoE は全エキスパート VRAM 常駐が前提（エキスパート単位の動的ロード/退避はしない）
-
-by-design（2026-08-31 裁定）。MoE モデルの VRAM 予算は **active でなく総パラメータ**で組む —
-「使う expert だけロードする」動的常駐は提供しない。根拠は 3 層の構造衝突（実測記録 =
-[research/2026-08-31-freetoken-moe-over-arraybuffer.md](research/2026-08-31-freetoken-moe-over-arraybuffer.md)）:
-①容器の束縛表は宣言された全 initializer の供給を要求する（`krm` では 2 文書の突合
-`validateAgainstGraph`、メモリ内容器では `openMemoryContainer` の対応検査が不足と余剰を fail loudly で
-落とす — 穴を開けると受理集合の一本化が崩れる）②重み常駐は Session 構築時
-1 回組みで退避/再ロードの席が無い ③IR に値依存の実行選択（動的な expert の転送・スキップ）が
-無い（op-vocabulary の意図的保留・`topk` も static-k）。固定 k の選択演算そのものは既存 op
-（expand → gather → permute / reshape → bmm）で形を静的に保ったまま k 本分だけ積和できるが、
-圧縮常駐の expert を直接引く kernel は無く、gather 経由では f32 展開とコピーが要る。
-さらに外部要因として、expert キャッシュ系の先行手法（FreeToken ほか）が前提にする
-「device 起動の host メモリ転送」が WebGPU に存在しないので、その同期無しの機構は直接移植できない。
-ホスト制御の miss 処理（ホストが router の結果を読み、不足 expert を書き込む）はリポ外の PoC で
-機構が成立したが、性能と実用可否は未確定（[backlog](backlog.md) later「MoE page-fault」）。
-復活条件つきの再検討席は [backlog](backlog.md) parked。
-
-## 付帯資産の safetensors はデータ節の被覆と要素整列を要求する（公式の `safe_open` が読めても拒否しうる）
-
-容器でない付帯資産（sbv2 のスタイル表・anima の rope 素表・vowel-detector の表など）を読む厳格リーダ
-`parseSafetensors` は、データ節を「隙間なく覆う・各テンソルの絶対 offset が dtype の要素サイズに整列する」
-ことを要求し、違反は `SafetensorsError` で落とす（裁定の正本は ADR
-[0063](decisions/0063-safetensors-physical-layout.md)）。要素数が奇数の f16 の直後に 4 バイト型を置いた
-ファイルはこの整列を破る。HF の `safe_open` は整列違反を読めてしまうので、そちらを通すだけでは検出できない
-（exporter 側の同じ規則の検査は `karume.verify.assert_reader_layout`）。重みの容器（`krm`）にこの制約は
-無い — block の先頭は 64 B 整列で、並び順は書き手の配置が決める（[container-v1](container-v1.md) §4.1）。
-
-## 量子化格納（`i4` / `i2`）は Karume の容器でだけ配る（汎用の safetensors ツールでは読めない）
-
-packed int4 / int2（ADR [0069](decisions/0069-packed-w4-storage.md) /
-[0097](decisions/0097-gemma4-qat-integration.md)）は容器 `krm` の codec（`int4-sym-g` / `int2-off`）として
-焼く。容器は Karume 専用の形式なので、読めるのは Karume のランタイムと exporter（`karume.container`）
-だけである（HF へのアップロード・DL は内容非依存なので通る）。付帯資産の safetensors は公式の dtype 語彙の
-部分集合しか受理せず、旧配布形が使っていた方言 dtype `I4` / `I2` は拒否する
-（`packages/runtime/src/format/safetensors.ts`）。
-
-INT2 の実行は行ごとの scale で、linear / embedding の packed 実行に対応し、`linearCompute` は f32 に限る
-（[ADR 0097](decisions/0097-gemma4-qat-integration.md) 追記 1）。
-
-linear の重み `[N, K]` と embedding の重み `[V, H]` の論理要素数（N·K・V·H）の上限は、GPU が重みの行頭を作る単位で
-経路ごとに違う。linear の経路は実行の形（M）と量子化の設定で決まるので、同じ重みでも拒否されるかは経路しだいになる。
-
-- 行頭を**論理要素の番号**で作る経路は、論理要素数が 2^32 − 1 を超える形を Session 構築時に `CodegenError` で拒否する。
-  対象は linear の GEMM 経路（格納形を問わない）・i8a8 経路のうち i4 重みの w4a8・embedding。packed のローダが論理要素
-  番号を語位置へ変えるので、積が折り返すと別の行の重みを例外なしに読む。i2 では格納が約 1 GiB で届くため、binding
-  上限の検査では止まらない。
-- 行頭を**語の番号**で作る経路（linear の GEMV 族〈1 ≤ M ≤ 64〉と i8 重みの i8a8）には、この門を掛けない。折り返すには
-  格納が 16 GiB 以上要る。
-
-- 公式 safetensors 仕様への追随提案（upstream への I4/U4 追加要望）はしない — 2026-09-01 ユーザー裁定。
-  目指す方向が違うため、配布形は専用コンテナ（ADR [0108](decisions/0108-container-format.md)）へ移った。
-
-## gather / embedding の範囲外添字は GPU で NaN 汚染になる（例外にならない）
-
-裁定の正本は ADR [0061](decisions/0061-index-oob-semantics.md)。契約は「添字は範囲内」。
-違反時、GPU カーネルは該当要素（embedding は該当行）にだけ quiet NaN を書いて実行を継続し、
-該当カーネルの出力を NaN にする。算術の後段へは NaN 伝播（ADR 0020）で伝わるが、比較・where・int への cast など
-NaN を落とす後段では消えうる。CPU 参照は範囲外で throw（意図的非対称）。
-
-## f32 → i32 cast の値域外・NaN は未定義
-
-裁定の正本は ADR [0062](decisions/0062-f32-i32-cast-contract.md)。値域内は torch 準拠の
-truncate（0 方向切り捨て）で一致保証・値域外と NaN は未定義。要素ごとの値域検査は意図的に
-入れない — 範囲外になりうる値は呼び出し側・モデル側で先に clamp すること。
-
-## IR の i32 算術は 2 の補数ラップ（int64 中間の縮小は未防護）
-
-exporter は torch の int64 を境界（グラフ入出力・具体境界テンソル）で値域検査つきの i32 へ
-正規化する（ADR 0009）が、**emit された i32 演算（mul / sub）の中間値には防護が無い** —
-2³¹ を跨ぐ中間は例外にならず 2 の補数でラップする（実測: int64 x=50000 の `(x*x).float()` は
-診断ゼロで export され、参照実装の `Math.imul` が −1794967296 を返す）。実配布 10 ファミリの
-i32 算術 99 本は全て mask 由来の構造的有界値で該当ゼロ（189 コンテナ走査・2026-08-16）。
-中間値域の静的証明は一般に不可能なので境界検査 + golden 突合（実入力に対する事実上の門）を
-契約とし、i64 級の中間演算が要るモデルは export 時の設計（値域を保つ分解）で対処する。
-
-## exporter: `x + 0` の恒等除去は −0 入力で torch と乖離しうる（div / sqrt の下流）
-
-`normalize._drop_identity_add` は `add(x, 0)`（加数が Python スカラの 0）を x へ畳む。f32 で
-値が変わるのは x = −0.0 のときだけで、`x + 0.0` は +0.0 を返す。IR v2 には**符号付きゼロを
-区別する op が実在する** — `div` は `1/(+0) = +∞` / `1/(−0) = −∞`、`sqrt` は `sqrt(±0) = ±0`
-（参照実装も素の除算と `Math.sqrt`）— ので、消した add の下流が div の分母や sqrt の引数へ
-届く形では torch と符号が反転しうる（最小反例は 2026-08-16 レビューで実証済み:
-`num / (x + 0.0)` が torch +∞ / IR −∞）。実測 10 ファミリでは到達経路が無く、消費側を見て
-書き換えを制限する形は全系列の再エクスポートを誘発するため、乖離の可能性を**受容**して
-書き換えを残している。消費側に −0.0 が出うる形を足すときは、このパスの適用条件を先に
-見直すこと（`karume/normalize.py` の `_drop_identity_add` docstring に同じ注記）。
-
-## 意味論 dtype の実行可否は op ごと（一括解禁しない）
-
-契約表（`packages/runtime/src/ops.ts` / `karume/ops.py`）が正本。i32 / bool を実行できるのは実測
-グラフに現れた形と、そのために新設した op だけ（例: mul / sub は f32+i32、div は f32 のみ、
-bitwise_not は bool のみ）。語彙 allowlist 凍結（ADR 0007）の dtype 版で、拡張は実測 +
-契約表 + golden の 1 セットが条件。
-
-## bool の実表現は u32 の 0 / 1・bool initializer は語彙に無い
-
-WebGPU のストレージバッファに 1bit 型が無いため、bool は GPU 格納・入出力
-（`Tensor.data` = Uint32Array）とも u32 の 0 / 1（ADR 0009）。safetensors の `BOOL`
-（1 バイト格納）は 4 バイト前提の転送と噛み合わないため、bool の initializer は IR v2 の
-語彙に無い（必要になったら格納規約ごと改訂）。
-
-## strided コピー族（permute / expand / slice / cat / sym_prefix_slice / masked_fill の mask）は rank ≤ 4
-
-`STRIDED_RANK = 4` を契約層で検査する（DeBERTa front は全値 rank ≤ 4 — ADR 0011。
-slice / cat は読み族・書き族としてこの上限を共有する — ADR 0014）。
-rank ≥ 5 を落とすのは**エクスポータ側の仕事**で、`_lower_unit_expand` /
-`_lower_split_unbind` / `_lower_reshape_permute` の鎖 3 パスが**実装済み**
-（`karume/normalize.py`・発火は rank > `STRIDED_RANK` の値を含む形に限る — ADR 0016）。
-受理したパターンは rank ≤ 4 の列へ落とし、これらで正規化できない高 rank 形は export 時に
-fail loudly（実行上限そのものは緩めない）。
-
-## レイアウト第 2 群は実測形だけを受理する（slice / cat / pad / flip — ADR 0014）
-
-「表現が無い軸は黙って既定で実行されない」を保つため、実測に出た形だけを語彙に入れている。
-広げるときは契約 4 点セット（TS 契約表 / WGSL カーネル / CPU 参照 / Python 契約 + shape 規則）
-と適合表・golden を 1 セットで動かす。
-
-- `slice`: **step は 1 固定**（飛ばし読みは strided 族の可変点 1 語では表せない）。切り出す軸は
-  **静的**（記号軸は `sym_prefix_slice` の担当 — 重複させない）。負の添字と省略された `end` は
-  エクスポータ境界で軸長へ詰める。
-- `cat`: 連結軸は〈定数〉または〈**同一シンボルの一次式**〉。総和が次元言語 `coeff·sym+offset`
-  に載る形（`S`+1 → `S+1`、`S`+`S` → `2S`）を受理し、異なるシンボルの混在は fail loudly
-  （ADR [0046](decisions/0046-cat-symbolic-axis.md)）。入力は 2 本以上（1 本の cat は恒等
-  コピーで語彙に無い）。
-- `pad`: **最終次元・定数 0・非負幅**のみ。埋め値の欄を持たないので「0 以外を黙って 0 で
-  実行する」経路が構造的に無い。負幅（切り詰め）は slice の意味なので受理しない。
-- `flip`: **静的軸 1 本**のみ（多軸 flip はエクスポータ境界で落とす。動的軸の反転はカーネル上は
-  書けるが、要求実測が出るまで広げない）。
-
-## conv 族も実測形だけを受理する（ADR 0015）
-
-- `conv1d` の attrs は `stride` / `padding` / `dilation` / `groups` の **4 つとも宣言必須**で、
-  **既定値の補完をしない**。省略を許すと depthwise（`groups = C`）の IR が黙って通常畳み込みに
-  なり、shape も要素数も変わらないまま別チャネルの値が混ざる。IR を手で書く側にとっては
-  冗長だが、沈黙誤値を消すための意図的な冗長性。
-- `conv_transpose1d` は **`2·padding == K − stride`** の形だけを受理する（= 出力長がちょうど
-  `L·stride`）。一般形は表現としては書けるが、出力長が次元言語の一次式（`coeff·sym+offset`）に
-  収まらない組が出るため、需要が出るまで広げない。重みは **`[Cin, Cout, K]`**（conv1d の
-  `[Cout, Cin/groups, K]` と転置）で、`output_padding` / `groups` / `dilation` は attrs に欄が
-  無く既定以外は fail loudly。
-- bias 無しの conv は**落とさず**、エクスポータが**ゼロ bias を合成**してアリティ 3 へ
-  正規化する（カーネルと契約に arity 分岐を持ち込まないため）。`linear` も同じ手筋で、
-  **IR の `linear` は 3 入力を要求する**一方、**export 入口は bias 無しを受理してゼロ bias を
-  合成する**（`aten_handlers.py` の `_h_linear`・合成は `+0` の厳密恒等）。bias 無しが少数の
-  例外という前提ではない — ADR [0016](decisions/0016-anima-chain-export.md) の実測は linear
-  711 本中 698 本が bias 無しである。
-
-## upsample_bilinear2d（align_corners=True）の端点は「厳密一致」を保証しない
-
-`align_corners = True` でも、出力の端が入力の端と**ビット単位で一致するとは限らない**。源座標は
-ホストで f32 に丸めた `scale = fl((in−1)/(out−1))` に出力添字を掛けて作るので、
-`fl(scale · (out−1))` が `in−1` をわずかに下回る形が実在する（実測: in=2 → out=42 の末尾は
-0.9999999403953552）。
-
-これは by-design で、**torch 自身が同じ値を出す**（`area_pixel_compute_scale` を float で評価し
-`scale · dst_index` を float で掛ける）。カーネルの数値契約は「torch の `UpSample.h` に合わせる」
-なので、端点をクランプして厳密化すると逆に torch とビットが割れる（ADR 0058 の opt-in 契約に
-照らして既定経路では不可）。発火範囲の実測（2026-08-16）: `2 ≤ I ≤ 64` × `2 ≤ O ≤ 2048` の
-128,961 組のうち 11.6% が非厳密。ただし `O = 2I` / `O = 2I−1`（I ≤ 4096）は 0 件で、配布モデルの
-実形状 47 サイトは H・W とも全て厳密成立側にある。
-
-## layer_norm / adaLN は定数行（とほぼ定数の行）を厳密な 0 にしない
-
-GPU の layer_norm（と同じ統計の文字列を共有する adaLN 融合）は、行の合計を f32 の逐次和と木状の縮約で作り、平均を
-`合計 × (1/dim)` で 1 回だけ丸める。合計の丸めと、dim が 2 の冪でないときの `1/dim` の丸めで、平均が真の値から ULP 単位で
-ずれる。定数行（分散 0）では偏差が全要素で同じ符号に寄り、`1/sqrt(eps)` 倍に拡大されて出力に残る。torch は Welford 法で
-厳密な 0 を返すので、食い違うのはこの退化した入力（分散が平均の ulp² 程度の「ほぼ定数の行」）に限られる。
-
-実測（RTX 3080 Ti・2026-10-11・eps 1e-5・weight 1・bias 0）: dim 7 で全要素 3 の行は −7.54e-5、全要素 12288 の行は −0.295。
-dim 8 と dim 5120 の全要素 3 の行は 0。ただし 0 になるかは dim だけでなく定数の値しだいで、実寸の隠れ次元でも安全とは
-言えない。CPU で GPU の縮約順を模擬すると（dim 7 の 2 値は上の GPU 実測と一致）、dim 4096（2 の冪）でも定数 0.1 / 1.7 /
-123.456 は非ゼロ（123.456 で −7.2e-3）になり、dim 5120 も多くの定数で非ゼロで、大きさは定数しだい（定数 7282.34 で 0.61）。
-模擬の手順: 256 レーンの各レーンが要素 i, i + 256, … を `Math.fround` で逐次に足し、256 個の部分和を半分ずつ畳む木で足して
-`× fround(1/dim)` で平均を作る（分散も同じ順）。
-
-直すなら各行の先頭要素を引いてから縮約する方式（shifted data）だが、縮約順が変わって
-layer_norm と adaLN 融合の出力ビットと sha の参照行が変わる。**利用者の裁定（2026-10-11）: 直さず、この節の記録だけにする**
-（Codex 深掘りレビュー R2B-001）。
-
-## GRU スキャンは隠れ幅 256 まで・入力側 GEMM を含まない・`h_n` を返さない（ADR 0056）
-
-- `gru_scan` / `gru_scan_reverse` の隠れ幅は **`H ≤ 256`**（1 lane = 1 隠れユニットの割り当て。
-  黙って縮退させると workgroup 共有の範囲外書き込みで別ユニットの状態が例外なしに壊れるので
-  fail loudly）。門は**二重**で、値域外は契約層が `OpContractError`（`ops/shapes.ts`）、
-  カーネル直呼びの経路は params が `CodegenError`（`kernels/gru-scan.ts`）で落とす — 上限定数の
-  置き場は `codegen/limits.ts` の `GRU_SCAN_MAX_HIDDEN` 1 か所。実測に出ている形は H = 128 だけで、
-  上限を上げるには workgroup 内 grid-stride と状態の二重化が要る = 別の設計判断。
-- op が持つのは**隠れ側の逐次だけ**。入力側 GEMM（`x·W_ihᵀ + b_ih`）は**呼び手が既存 `linear`
-  で用意する**（IR 上は別ノード）。この分割のおかげで入力側の重みは f16 / i8 格納の適格の
-  ままだが、**`W_hh` は op 内スロットなので低精度格納の適格外**（`WEIGHT_SLOTS` に載らない）。
-- 出力は `y[T,N,H]` **だけで `h_n` を返さない**（op 契約の出力は 1 本）。最終状態を消費する
-  モデルは現状表現できない。
-- **多層 / 双方向 / `has_biases=False` / `batch_first` / `dropout` の欄が無い**。層と方向は
-  エクスポータがノードを並べて表す（`aten.gru` の `Tensor[16]` は IR に載らない）。
-- **LSTM は語彙に無い**（`aten.lstm` は未対応 op として fail loudly）。拡張時の論点は
-  ADR [0056](decisions/0056-gru-scan.md) 決定 8。
-
-## 母音検出: 入力の 10ms フレーム数は**偶数**・上限は配布形の宣言（ADR 0056 / 0057）
-
-- グラフ入力の時間軸は `2T`（記号 `T` は出力の 20ms 格子）。**奇数長は受理しない** —
-  `bindSymbols` が「実測 285 が宣言 '2T' の形をしていない」で落ちる（丸めない）。呼び手は
-  末尾 1 本を**切り捨てて**渡す（`VowelDetectorPipeline.detect` と実重み E2E がそうしている）。
-  右ゼロ pad で長さを合わせるのは**禁じ手**（逆方向 GRU が pad から状態を持ち帰り、`.lab` が
-  発話のどこででも変わる — 実測は ADR 0056 追記）。
-- 長さの範囲は `pipelineConfig.minFrames` / `maxFrames`（配布形の宣言 = 焼いたときの記号次元
-  `T` の値域を、入力側の 10ms フレーム単位へ直したもの — `Dim(min, max)` の数そのものではなく
-  **2 倍**）。**IR は記号の値域を持たない**ので、範囲外を止められるのはパイプラインのこの門
-  だけ。上限超過も**下限未満も** fail loudly（切り詰めない — 末尾が黙って落ちた `.lab` は正常な
-  結果と区別できない。下限側を右ゼロ pad で埋めるのも同じ理由で禁じ手 — 逆方向 GRU が pad から
-  状態を持ち帰る）。現在の配布形は 60,000 フレーム = 10 分で、根拠は最大中間テンソル =
-  GRU 入力側の gates `[T,1,384]` f32 = 1,536 B/20ms フレーム → 46.1MB（仕様既定の
-  `maxStorageBufferBindingSize` 128MiB = 134.2MB に対し 2.9 倍の余裕）。**それ以上の長さは
-  未実測**。
-- 上限内でも実行時間は長さに比例する（時間ループは 1 workgroup 内の逐次 — 性能は未計測）。
-
-## flow / voice の相対位置表はグラフ入力 — 生成はホスト側の責務
-
-SBV2 の `flow` / `voice` は相対位置注意の `(T,T)` 表（`idx_k` / `valid`）を**グラフ入力**として
-要求する（Tmax = 4096 で焼き込むと 134MB — ADR 0013）。したがって**呼び出し側が T ごとに表を
-生成して渡す**必要があり、ランタイムはこの表の正しさを検査しない（値としては単なる i32 添字と
-f32 マスクで、1 ずれても shape エラーにならない沈黙誤値クラス）。
-
-- 式の正本は Python 側 `tools/export-recipes/sbv2/patch.py` の `build_relattn_tables`
-  （front の in-graph 構築も同じ関数を呼ぶ）。
-- ホスト側の正本は `packages/models/src/sbv2/relattn-tables.ts`（SBV2 固有なので
-  `packages/runtime/src/` には置かない — モデル側の知識を持つ models パッケージが持ち、
-  `Sbv2Pipeline` が T ごとに呼ぶ）。Python 側とのバイト一致は
-  `packages/models/tests/sbv2_relattn_parity_test.ts` が golden の実データで固定する。
-- 窓幅（実測 4）の食い違いも同じ沈黙誤値クラスなので、Python 側は ckpt ロード時の
-  `_assert_window_size`（net_g 全体を走査）、TS 側はパリティテストがコンテナに焼き込まれた
-  `idx_v` の幅 `2w+1` と突き合わせて落とす。
-
-## SBV2 ホスト糊は f64 で評価する — `w_ceil` は torch とビット同一でない
-
-`durationsToFrames` / `buildZp`（`packages/models/src/sbv2/host/`）は式全体を JS の f64 で評価し、
-`Int32Array` / `Float32Array` 代入で 1 度だけ丸める（同ディレクトリの `random.ts` と同じ家風）。
-参照側は f32 逐次なので、以下は by-design の既知差:
-
-- **`w_ceil` の 1 フレームずれ**: `f32(exp_f32(x))` と `exp_f64(x)` の f32 半 ulp（相対 6e-8）が
-  `ceil` の閾値を跨ぐと 1 フレーム動く（実測: 音素あたり 5.5e-7・229 音素の 1 発話で
-  P ≈ 1.3e-4）。`Math.fround` 逐次へ揃えても **torch 一致は決定的にならない** — front 出力
-  自体の GPU/CPU 差 1e-5 が同じ閾値跨ぎを 2 桁以上高い率で起こし、支配項は上流に残る
-  （`tools/export-recipes/sbv2/README.md` が設計として許容し、割れた位置を `w_ceil_diffs` に
-  載せる）。
-- **`z_p` の 1 ulp 差**: 要素の約 4 割で常に生じる。この経路を測る波形突合の実測
-  maxAbs 5.16e-5 に対して 3 桁下で、離散化を挟まないので形状には増幅しない。
-
-どちらも karume 単体の再現性（WAV sha256 門・段 1 / 段 2 経路の一致）には影響しない — f64 経路は
-決定的で、差は torch 参照との相対でのみ現れる。
-
-## SBV2: 発話の編集で受けるのは「音素列を変えない範囲」（音素数が変わる編集は落とす）
-
-0.6.0（ADR [0079](decisions/0079-sbv2-two-layer-input.md)）以降、テキスト解析は**呼び手の責務**で、
-`generate` が受けるのは解析済みの発話 `Sbv2Utterance`（モーラ層）1 本。編集面は 2 つあり、門は
-**`moras` から組み上がった音素列が `words` の音素列と位置ごとに一致するか**だけを見る
-（`packages/models/src/sbv2/text/model-input.ts` の `assertWordPhones`）。したがって:
-
-- **通る**: フレーズ層 `Sbv2Phrases` 側の `result.accentPhrases[i].accentNucleus` の変更と**句の
-  再分割・結合**（`toSbv2Utterance` で再変換するだけ — VOICEVOX 互換のアクセント句編集はここ）、
-  およびモーラ層 `Sbv2Utterance` の **`tone` 直編集**（核で書けない任意の 0/1 パターン）。
-  句 / モーラの境界そのものは門が見ていないため。
-- **落ちる**（`Sbv2InputError`）: モーラの読み替え（`vowel` / `consonant` の書き換え）・記号の
-  増減など、音素列が変わる編集。`moras` と `words` を別々の解析から採って混ぜた発話もここで止まる。
-
-NOTE: 句 / モーラの組み替えは、1 モーラの子音と母音に**別のトーンが載る**列を作れる（通常の解析
-経路では起きない形）。不変条件は破れず（`sum(word2ph) === P` は保たれ、BERT 入力と word2ph は
-`words` 由来のまま）、影響は出力音のみ。
-
-読みを変えたいときは**呼び手の解析器側で修正辞書を当てて解析からやり直す**（`@hdae/yomi` の
-`analyzeWithWords(dict, text, overlay?)` 等）— BERT 入力テキストと word2ph が正しく作り直されるので、
-音素だけ差し替える経路より品質が上。karume 側に修正辞書の席は無い（0.6.0 で撤去 — 辞書の取得も
-解析も models の外）。参照実装が持つ `adjust_word2ph`（LCS で word2ph を再配分する互換ハック）は
-移植しない: あちらでも BERT 特徴は元テキスト由来のままで、不整合は解消しない（ADR 0072 決定 8 の
-原則は 0079 でも存続）。
-
-受けられない編集は 1 つだけ — **語境界に一致しない読みの差し替え**（句内の一部モーラだけを別の
-読みへ）。VOICEVOX 系の `/accent_phrases?is_kana=true` に相当する「句ごと読みを差し替える」操作は
-これに当たる。
-
-## SBV2: 疑問形の「末尾だけ上げる」は表現できない（トーンは 0/1 の 2 値）
-
-SBV2 の `tone` はアクセント句内の高低を表す **0/1 の 2 値**で、`front` の tone 埋め込みの行を
-引くだけの離散入力（`packages/models/src/sbv2/text/symbols.ts` の `toneStart` / `numTones`）。
-VOICEVOX 系の `is_interrogative` / `enable_interrogative_upspeak` は AudioQuery のモーラ f0 を
-後段で持ち上げる操作なので、この離散トーンには写像先が無い。JP のトーン基点の外へ出た値は
-**別言語のトーン行**を引くだけで、上げにはならない（だから `toSbv2PhoneTone` は
-`Sbv2Mora.tone` が 0/1 以外なら `Sbv2InputError` で落とす — 型は `0 | 1` だが JS からの
-呼び出しには効かない）。
-
-疑問形が音に出る経路は 1 本だけ — テキストに実在した `?` が**音素として 1 個入る**こと
-（`toSbv2PhoneTone` が実在記号を tone 0 の音素にする）。上げ調子はモデルが学習済みの韻律として
-出す。参照実装も同じで、上げの機構は持たない（`?` を音素表の 1 記号として扱うだけ）。
-
-したがって:
-
-- 呼び手が疑問形を足したいなら、**読み上げテキストの側に `?` を入れて解析からやり直す**
-  （解析器を呼ぶ段）。解析済みの発話の `punctuations` へ後から足す経路は、`words` 側の音素列が
-  追随しないので門（`assertWordPhones`）で落ちる。
-- VOICEVOX 互換 API を模す層では `enable_interrogative_upspeak` は**受けて無視する**のが実態に
-  合う（AivisSpeech Engine も同じ扱い — 2026-08-21 のソース調査）。ただし
-  「`？` をモーラから剥がして `is_interrogative` フラグへ畳む」正規化を入れると疑問形の情報が
-  完全に消えるので、そちらは入れないこと。
-
-## Anima: `pipelineConfig.scheduler.shift` は sigma 梯子が成立する値しか受けない
-
-配布形が宣言する `shift` は「正の有限数」を通るだけでなく、そこから作った sigma 梯子そのものが
-`sigmaSchedule` の構造検査を通らなければ fail loudly になる — **先頭が f32 で 1 を超える値**
-（1 ulp でも）と、**先頭が 1 から下へ 4 ulp を超えて離れる値**と、**狭義単調減少にならない値**は
-拒否する（受理集合を 2 箇所へ書くと片方が必ず緩むので、門は梯子側の 1 か所だけが持つ）。下流の
-`dpm-solver-multistep` が「先頭 = 1・末尾 = 0」を明文の前提に置いているためで、通すと NaN や
-別軌道が真因不明のまま走る。先頭が 1 を超えると DPM++ 2M の `log(1 − σ₀)` が負数の log で NaN に
-なるので、上側は Euler で使う場合も含めて拒否する。このため `shift = 1.32` / `1.57` などの小数
-（`[1,20]` の 2 桁小数 1,901 通りのうち 55 通り）は受けない。下側へ 1〜2 ulp ずれる小数（例
-`1.18`）は受ける。実配布の shift = 3 系は先頭がちょうど 1 なので通る。
-
-## Anima: steps は 2 以上 1,000 以下の整数だけを受ける
-
-`generate` の `steps` と manifest の `pipelineConfig.defaults.steps` は、2 以上 1,000 以下の整数だけを受ける
-（門は `packages/models/src/anima/sampler.ts` の `assertAcceptableSteps` 1 本で、manifest の門もこれを呼ぶ。
-`generate` では超えると sigma 梯子を確保する前に `ModelInputError`、manifest では資産の齟齬として `Error` — 元の
-`ModelInputError` は `cause` に残る）。上限は Wan（`num_train_timesteps` の 1,000）に揃えた実用上の値で、
-Wan の「超えると整数の timestep が重複する」という根拠は Anima には当てはまらない — Anima の timestep 埋め込みは
-σ の連続値をそのまま使う。上限の目的は、巨大な steps で梯子の確保と中断の効かない同期ループを走らせる前に入口で
-止めること。
-
-## Anima: 生成中のプレビュー画像は出せない（途中結果は生 latent のみ）
-
-`AnimaGenerateRequest.onEvent` の `denoise-step` が渡せる途中結果は **latent の写し**
-（`copyLatents()`）だけで、毎 step のプレビュー画像は by-design で提供しない。既定の段ごと運転では VAE decoder は
-DiT を解放した**後**にしかロードできない（4 本同時常駐は VRAM で不成立 — ADR 0016 /
-`anima/pipeline.ts` のモジュール doc）ため、denoise ループの途中で VAE を回す経路が構造的に
-存在しない。プレビューが要る消費側は latent から近似する — そのための公開ヘルパが
-`approximatePreview`（`@karume/models/anima`）で、`copyLatents()` の 2 欄を**そのまま**
-（逆正規化せずに）渡すと latent 解像度の RGBA が返る。係数は**正規化空間**で較正されている
-（2026-08-24 実測）ので、`animaLatents()` の mean / std で逆正規化した値を渡すと白飛びした
-別物になる。係数自体は `export` しない MUST なので、消費側が自前で写し取る経路は無い
-（16ch → 3ch の線形射影であって厳密な decode ではない — 詳細は実装 doc が正本）。
-`stage` イベント（段の開始 / 終了 — 段ごと運転では Session 構築前 / 解放後）と `vae-tile` イベント（タイル 1 枚ごと）で
-GB 級ロードとタイル decode の進捗は観測できる。
-
-## Anima: DiT 常駐（`residency: "transformer"`）は VRAM の上限を上げる・4 GB 級では使えない
-
-`AnimaPipelineOptions.residency` / `AnimaGenerateRequest.residency` の `"transformer"` は DiT の Session を
-generate を跨いで持ち続ける opt-in で（ADR [0112](decisions/0112-anima-transformer-residency.md)）、既定の
-`"per-stage"` とは VRAM の前提が違う。by-design の制約:
-
-- **チェーン最大が上がる**。text 段と VAE 段が常駐 DiT の**上に**乗る。既定席（`f16+dit8-a8-attn8-s16`）の
-  1024² で常駐ぶんは +2,646 MiB（重み 1,871 + backing 768 + 入力 7 MiB — 2026-09-10 runtime 集計）、常駐時の
-  チェーン最大は約 3.9〜4.1 GiB（推測 — text 段の runtime 集計が無い）。段ごと運転のチェーン最大（DiT 段
-  2,647 MiB）より約 1.3〜1.5 GiB 高い。**4 GB 級の GPU では使えない**。
-- **quant 席で倍違う**。DiT の重みは既定席 1,875 MiB・`f16` 席 3,733 MiB（f32 計算 — 2026-08-05 final-perf-bench の
-  VRAM 表。上の 1,871 MiB は 2026-09-10 の runtime 集計で、同じ量の出典違い）。`f16` 席の常駐は text 段で
-  +3.7 GB を超えるので、8 GB 級でも余裕が薄い（未計測）。
-- **VRAM が足りなければ常駐 DiT を手放し、以後は常駐しない**（格下げ）。text 段の前と VAE 段の前に次の段の
-  必要量を試し確保で量り、入らなければ段を張る前に手放す（`evicted` / `headroom`）。量りが外れて段が OOM したら
-  退避して段をやり直す（`evicted` / `out-of-memory`）。遅い経路へ落ちたことは
-  `residency` イベント（`evicted` → 以後 `released` / `downgraded`）でしか分からない —
-  購読しないと、速度でしか気付けない。格下げは pipeline の寿命の間は戻らない（組み直すと戻る）。DiT 段で退避
-  するのは前の generate から持ち越した DiT だけで、同じ generate で作った DiT の OOM は段ごと運転と同じ VRAM 構成
-  なので退避せずにそのまま投げる（ADR 0112 決定 3）。
-- **退避は OOM を型（`GpuOutOfMemoryError`）で報告する環境でだけ働く**（先回りの試し確保も同じ out-of-memory
-  errorScope で判定する）。Metal の out-of-memory errorScope が沈黙
-  する環境（known-issues「Metal で out-of-memory errorScope が沈黙する」節）では、常駐が VRAM を超えても退避も
-  格下げもイベントも起きない。実測（2026-09-27・利用者の M2 24 GB / Chrome 153 / metal-3・確認ページ）: 1 GiB の
-  STORAGE ダミーを **80 本（80 GiB）**作っても OOM は 1 度も出ず、その上で常駐 DiT の generate（512²）も退避なしで
-  通った — Metal は確保時に物理メモリを裏付けないので、試し確保もダミーも「入る」としか答えない
-  （[research 2026-09-27](research/2026-09-27-h35-oom-device-lost.md) §6）。
-- **OOM を踏んでからの退避（第二線）は、踏んだ OOM が重みアップロードの staging 側だと成り立たない**。Deno では
-  その OOM で device が既に無効になっており、やり直しの段が `GpuDeviceLostError` で失敗する（黙っては落ちない —
-  本ファイルの「Deno では GPUBuffer の総確保がドライバ申告予算の 97% で頭打ちになる」節）。主線は先回りの退避で、
-  Arc B570 の再現（常駐 DiT + ダミー 6 GiB）は先回りの退避で通る（ADR 0112 の 2026-09-27 追記）。他機は未計測。
-- **退避した段は最初からやり直す**。DiT 段なら denoise を step 1 から回し直す（出る画素は同じ）ので、その
-  generate の `denoise-step` / `vae-tile` は 1 から出直し、壁時計は段 1 本ぶん延びる。
-- **解像度を変えても定常状態の常駐量は「重み + 最大の backing 1 本」まで**（予算 256 MiB を超える backing は
-  1 本だけ保持 — ADR 0095）。切り替えた直後の run では退役した古い backing が flush の後まで生きるので、一時的な
-  ピークはこれを超える。導出済み計画はホストのオブジェクトとして 12 本まで残る。
-- **利得は同じ pipeline で generate を繰り返す使い方にしか出ない**（`examples/anima/main.ts` のような 1 プロセス
-  1 生成では 0）。Arc B570 の 1024² turbo では 2 回目以降 2.45 s / 生成（壁の 10.4% —
-  [research 2026-09-26](research/2026-09-26-anima-residency-bench.md)）。他機と Chrome は未計測。
-
-## anima: 1920px 超〜2048px の解像度は rope のモデル宣言外の位置を使う（受理する・品質は未実測）
-
-各辺の受理上限 2048px は rope の軸別素表の行数 128（= latent 256）から来ている。素表の行数を決めているのは
-t 軸の上限で、モデルが宣言する h / w 軸の範囲（`rope.max_size` = 120 トークン = 1920px）はそれより低い。
-そのため 1920px を超え 2048px までの要求は、表の行としては引けるが、モデルが学習時に宣言した範囲の**外側の位置**を使う。
-位置の値は上流と同じ式で決まるので、静的形とのビット一致は保たれる。差が出るとすれば学習分布の外の位置に由来する
-**品質だけ**で、これは実測していない。受理集合はこの理由では狭めない（2026-09-04 裁定 — 実測なしに配布形の自由度を削らない）。
-実用上は S の上限と VRAM が先に効く。経緯は [ADR 0036](decisions/0036-freeform-resolution.md) の検出限界 2、
-コード側の記録は `packages/models/src/anima/resolution.ts` の `MAX_LATENT_SIDE` の NOTE。
-
-## Wan2.1: 受ける寸法は 832×480 / 480×832、フレーム数は 4n+1 の 5〜81 だけ（プロンプトの受理はテキストエンコーダの経路による — ADR 0118 / 0119）
-
-`@karume/models/wan` の `WanPipeline` の by-design の制約。入力起因の拒否は全部 `generate` の入口
-（`planWanGeneration` — GPU に触る前）で `ModelInputError` になる（ADR [0118](decisions/0118-wan21-video-generation.md)
-Consequences）。
-
-- **受理集合**: 寸法は 832×480 / 480×832、フレーム数は 4n+1 の 5〜81（既定 33）。steps は 1 以上 1,000 以下の整数（上限は
-  `num_train_timesteps` — 整数の timestep は `trunc(σ·1000)` の 0〜999 しか無いので、超えると timestep が必ず重複する。
-  σ 列を作る前に拒む。manifest の `defaults.steps` も同じ値域）、guidance は
-  1 以上の有限の数（1 で CFG を回さない — 上流の `guidance_scale > 1` と同じ。guidance 1 で `negativePrompt` を渡すと
-  拒む）、shift は正の有限の数。検収したのは 832×480 の 33 / 81 フレームと 480×832 の VAE（ADR 0118 段 5 / 6 / 8）。
-  寸法とフレーム数はモデルカードと fixture が写しを持つ（`packages/models/src/wan/descriptor.ts` の
-  `WAN21_GENERATION` の doc）。
-- **プロンプトの受理は経路で決まる**: 既定の `textEncoder: "gpu"` は任意の文を受ける（umT5 を GPU で回す — 受理の条件は下の
-  「テキストエンコーダの経路」）。`"precomputed"` は事前計算した 4 本（正 3 本 + negative 1 本）だけで、テキスト埋め込み資産の
-  原文か正規化後の文字列に完全一致するものだけを受ける（`WanPipeline.prompts` で引ける）。
-- **計測（`gpuTiming`）の device は構築時に拒む**: runtime は計測の device で batch を開かないので、VAE の段
-  （1 タイル = 1 batch）が回らない。GPU 時間は診断に出ないので、所要・VRAM（fdinfo と診断）・submit 統計で見る。
-- **DiT 段と VAE 段は同時に常駐しない**: 段ごとに Session を張って畳み、DiT を閉じてから VAE を開く（ADR
-  [0112](decisions/0112-anima-transformer-residency.md) の既定 `"per-stage"` と同じ）。Anima の DiT 常駐のような
-  opt-in は無いので、generate のたびに DiT の重みを GPU へ上げ直す。VRAM の山は DiT 段（B570 で 33 フレーム
-  6.19 GiB / 81 フレーム 7.31 GiB — ADR 0118 段 6 / 8）。
-- **VAE は常にタイルで decode する**（潜在 32 の固定タイル — ADR 0118 裁定 1）: 公式の非タイル decode とは近似の差が
-  出る（段 5 の観測で比 8.2e-2）。
-- **seed の初期ノイズは torch の `randn` とは別の列**（Anima と同じ splitmix64 + Box–Muller — ADR 0118 決定 5）:
-  公式実装と同じ seed でも同じ動画にはならない。参照に揃えるときは `latents` で外から渡す。
-- 中断（`signal`）: 構築（`WanPipelineOptions.signal` — 取得層へ）と生成（`WanGenerateRequest.signal` — 段の境目・DiT の各 step・VAE の各タイルで
-  見る。開いている Session を畳んでから `signal.reason` を包まず投げる）の両方で受ける（ADR 0119 決定 9・2026-10-03）。1 段の中（1 回の run）は
-  不可分で、中断は次の境目で効く。
-- **sha256 の参照値は環境ごとの行**（ADR [0106](decisions/0106-device-keyed-references.md)）: 今ある行は B570
-  （`deno-intel-graphics-bmg-g21`）と RTX 3080 Ti（`deno-nvidia-geforce-rtx-3080-ti` — ADR 0121 追記「開発機の換装」の裁定で凍結コピー `128b511e` から書いた）。行が無い機では sha の照合が明示 SKIP になり、参照門が赤になる
-  （`KARUME_REFERENCE=write` で自分の機の行を作る）。50 ステップの行は opt-in（`KARUME_WAN_FULL_PIPELINE=1`）の
-  ときだけ照合する。
-
-- DiT の i8 席（ADR [0120](decisions/0120-wan-dit-w8a8-seat.md)・2026-10-03）: 参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16` を配布形に足した。GPU の数値の門（r 門・自機 A/B 門）と視認 A/B（段 3〜6）は済み（2026-10-03〜04）。既定は実用席（2026-10-04 の裁定 — `f16` は `quant: "f16"` の明示で選ぶ）。実用席の a8 は Metal（M2）では速くならない（K-70 の実測 — 品質だけを払う席になる）。〈→ 2026-10-17: dp4a の無い device で a8 を要求すると runtime が device ごとに 1 回警告する — ADR 0128 決定 5〉
-- Chrome（段 9 ✅ — 確かめた範囲は事前計算の経路〈`textEncoder: "precomputed"`〉・`f16` 席・832×480・81 フレーム・50 ステップ。RTX 5070 Ti・ADR 0118 追記 2026-10-04「段 9 の結果」。同じ追記の時点で、Chrome での GPU 経路と実用席は未実走）: 既定の束縛上限 128 MiB では VAE の最大の値 192 MiB にも足りない。`acquireGpu` はアダプタ値を要求する
-  ので実際の上限はアダプタ次第で、必要な下限は FFN 中間 503,193,600 B（33 フレーム）/ 1,174,118,400 B（81 フレーム）。環境キーは
-  WebGPU Developer Features フラグの有無で変わる（sha 行は別）。確認ページは tools/gpu-lab の Wan タブ。
-- テキストエンコーダの経路（ADR 0119・2026-10-03）: 既定 `textEncoder: "gpu"` は umT5-XXL を GPU で回し任意のプロンプトを受ける（2〜512 トークン・
-  語彙外と本文中の特殊トークン・HTML entity の候補〈`R&D` → `R & D`〉・mojibake・C1・Unicode 16.0.0 で未割り当ての文字は `ModelInputError` で拒む）。
-  `"precomputed"` は埋め込み資産の 4 本だけを受け umT5 の部品を取らない。umT5 の部品は別リポ `karume-umt5-xxl` への越境参照で、ローカルでは
-  `crossRepo` の mapping が要る（`text_encoder` を差し替えた構築では要らない — ADR
-  [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 追記「段 d の結果」）。全 quant 席の `requiredLimits` は語彙埋め込み
-  1,050,148,864 B の束縛 / バッファ上限を宣言する（precomputed でも同じ）。
-
-## Wan2.1: umT5 の差し替え（`components: { text_encoder }`）が検査しないもの（ADR 0122 決定 7）
-
-互換の umT5 へ差し替える席（部品差し替え席 — ADR [0108](decisions/0108-container-format.md) 決定 19・
-[0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 7）の受理の条件は、どれも 2 つの manifest と容器の宣言から
-機械で決まるものに限る: 差し替え先の manifest に役割と quant があること・グラフ記述の sha256 が元の manifest の宣言と同じこと・
-容器の capability と束縛表の不足 / 余剰 0（`packages/models/src/hub/components.ts:422-470`）・Wan の家族の門（グラフの入出力の
-取り決めと、i8 の重みと f32 の表だけの格納 — `umt5Contract`、`packages/models/src/wan/text-stage.ts:150-162` が単体の umT5 と共有の
-`umt5GraphContract`〈`packages/models/src/umt5/graph-contract.ts:75-152`〉に DiT の文脈との突き合わせを足す）。互換の判定を
-内容ハッシュ 1 つに保つための by-design で、次の 3 つは検査しない（案 B / C とバケットの構成をグラフへ焼く案を採らなかった
-理由と復活の条件は ADR 0122「採らなかった案」）。
-
-- **プロンプトが黙って誤読される**: 語彙数が同じで別のトークナイザで学習した部品を差すと、エラーなく受理され、プロンプトが
-  誤った id 列に区切られたまま生成が進む。仕組み: 差し替えで取るのは容器だけで、トークナイザ資産は元の manifest のまま
-  （`packages/models/src/hub/components.ts:486-489`）。部品とトークナイザの組み合わせは誰も検査しない（実例はまだ無い）。
-- **出力が黙って劣化する**: 相対位置のバケットの構成が違う umT5 を差しても、エラーなく受理され、本来と違う位置関係で encode
-  される。仕組み: バケット表の構成（`numBuckets` 32・`maxDistance` 128 — `packages/models/src/umt5/relative-position.ts:38`）と
-  有効長 512（同 `:51`）はホストの定数でグラフ記述に入らず、構成の違う umT5 でも容器がバイト同一になりうる（ADR 0122 の
-  独立検証の実測）。`config.json` を持たない上流を取り込むと本家の config を写すので、取り込みの照合も空になる
-  （`intake.json` が「構成は推定」と記録する — ADR 0122 決定 5 手順 5）。
-- **ライセンス不明の重みが警告なく動く**: 差し替え先の出所とライセンスは実行時に検査も記録もしない
-  （`packages/models/src/hub/components.ts:416-438` が見るのは manifest とグラフ記述の sha256 だけ）。生成物からも、どの重みを
-  使ったかは分からない。runtime は出所を知らない（ADR 0108 決定 19）。ライセンス未宣言の重みは取り込み・変換・実験用ミラーの
-  側で止める（明示の引数 `--allow-undeclared-license`・`models/` の外・公開前の門 — ADR 0122 決定 6）が、手元に組んだミラーを
-  差すこと自体は止めない。
-
-## Wan2.2: 受ける寸法は 1280×704 / 704×1280、フレーム数は 4n+1 の 5〜121・I2V も同じ 2 寸法・121 フレームは 12 GiB 級で完走を確認（10 GB 級で確かめたのは 57 フレームまで — ADR 0121）
-
-`@karume/models/wan` の `WanTi2vPipeline`（Wan2.2 TI2V-5B）の by-design の制約。入力起因の拒否は Wan2.1 と同じ入口（GPU に触る前）で
-`ModelInputError` になる（受理の外は fail loudly）。
-
-- **受理集合**: 寸法は 1280×704 / 704×1280、フレーム数は 4n+1 の 5〜121（既定 1280×704・33 フレーム — 2026-10-09 に確定）。寸法とフレーム数は
-  `packages/models/src/wan/descriptor.ts` の `WAN22_TI2V_GENERATION`（ADR [0121](decisions/0121-wan22-ti2v-5b.md) 追記（2026-10-05）
-  「受理寸法を公式の 2 寸法へ」・上限 121 は追記（2026-10-07）「段 10 — 121 フレームの受理」）。
-- **既定の shift は 5.0 と決めた**（pin の scheduler の `flow_shift` = 公式の 720P の値）。コードは shift の既定を持たず、manifest の
-  `pipelineConfig.scheduler.shift` から読む。5.0 は配布形 `karume-wan2.2`（段 8a）の `pipelineConfig` が宣言する値で、`fromAssets` では渡す
-  manifest が決める。
-- **832×480 / 480×832 は受理しない**: 公式実装の対応寸法（1280×704 / 704×1280）の外。B570 で生成すると、席と shift を変えても絵が崩れた
-  （太い輪郭線とベタ塗り）。1280×704 は同じコード・同じ重みで写実に出た。上流（diffusers・CPU f32・元の重み）でも 832×480 が同じ見え方に
-  なるかは確かめていない。
-- **フレーム数の上限 121**（公式実装の既定）は、開発機の RTX 3080 Ti（12,288 MiB・Deno 2.9.6）で 1280×704・50 ステップが実用席で完走した値
-  （2026-10-06・非有限 0）。DiT の段の VRAM の山は 11,361 MiB（`nvidia-smi` の GPU 全体）で、物理容量との差は約 0.9 GiB。DiT の診断値（重み + backing）は
-  4.67 + 5.97 = 10.64 GiB。RTX 5070 Ti の Chrome でも同じ要求が完走した（DiT の診断値 9.47 GiB）。実測は ADR 0121 追記（2026-10-06）
-  「RTX 5070 Ti の Chrome」と「RTX 3080 Ti のレーンとフル verify」。参照席も開発機で 1280×704×121（2 ステップ）が完走し（VRAM の山
-  10,233 MiB〈`nvidia-smi` の GPU 全体〉）、開発機の sha 行を持つ（ADR 0121 追記（2026-10-07）「段 10 — 121 フレームの受理」）。
-  12 GiB でも余裕は薄く、GPU を他のプロセスと共有していると入らないことがある（推測 — 回していない）。
-  - **Deno での実際の余裕は約 0.9 GiB より薄いことがある**（推測）: 0.9 GiB は GPU 全体の山と物理容量の差。Deno で先に効くのは上の「Deno では
-    GPUBuffer の総確保が…」の節の総確保の天井（ドライバが申告する予算の 97%・時点ごとに動く）で、この機では 7,280 MiB と 11,136〜11,264 MiB が
-    測られている。121 の走行のときの天井は測っていない（完走したので、そのときの確保はそのときの天井の内だった）。DiT の診断値 10.64 GiB
-    （約 10,895 MiB）は、11,136 MiB の天井と数百 MiB しか離れていない（診断値は wgpu の heap の使用量そのものではない）。
-- **10 GB 級（例: 前の開発機 Intel Arc B570・Deno の総確保の天井 約 9.4 GiB〈9,600 MiB〉— 上の「Deno では GPUBuffer の総確保が…」の節）で
-  確かめた長さは 57 フレームまで**。B570 で 2 席とも 50 ステップを完走した最大は 49 フレーム（実用席だけは 57 も完走 — 天井から山を引いた
-  余裕 0.63 GiB・ADR 0121 追記（2026-10-05）の試走の表）。**それを超える長さ（61〜121 フレーム）は 10 GB 級では非対応**。どれも B570 では
-  回していない。非対応とするのは確かめていないからで、入るかどうかの見込みは長さで違う（どれも推測）:
-  - 81 フレームと 121 フレーム: ADR 0121 Context「容量と時間の見積り」の表が見積った 2 点。1280×704×81（S = 18,480）は参照席が楽観側
-    だけ入り、実用席は入らない。1280×704×121（S = 27,280）は 2 席とも入らない。121 は開発機（RTX 3080 Ti）の実用席の DiT の診断値
-    10.64 GiB も天井を超える。
-  - 61〜77 フレームと 85〜117 フレーム: 容量の見積りも無く、入るかどうかは分からない（57 フレームの余裕は 0.63 GiB と薄い）。
-
-  受理集合は機ごとではないので、その機からも 57 フレームを超える長さを要求できる。そのときの見え方:
-  - **admission では拒まれない**。admission は device の絶対上限（`maxBufferSize` / `maxStorageBufferBindingSize`）とだけ比べ、空き VRAM や
-    確保の合計とは比べない（ADR 0089 決定 1 / 3・ADR 0070 決定 5）。1280×704 系の束縛は 121 フレームでも全て 2 GiB に収まる（FFN の中間
-    最大 1.46 GiB・スコアの行ブロック 最大 1.96 GiB — ADR 0121 決定 8）。束縛上限がそれより小さい adapter では、計画時の preflight（ADR 0093 決定 5）が確保の
-    前に超える slot を全て挙げて落とす設計（1280×704×121 で確かめてはいない）。
-  - **総量の超過は実行の途中で落ちる**（fail loudly — 黙って縮めたり近似したりしない）。最終門は out-of-memory の errorScope
-    （`GpuOutOfMemoryError`）。天井の付近では確保の失敗ではなく device lost になりうる（上の「Deno では GPUBuffer の総確保が…」の節）。
-    超えるのは DiT の段の見込みで（推測）、それまでの段の時間は無駄になる。B570 では確かめていない。
-  - **1 submit の時間の懸念**（B570 では S ≥ 18,480〈1280×704 の 81 フレーム以上〉で裏付け前の 16 dispatch が 5 s を超えうるという見積り —
-    ADR 0121 Context「容量と時間の見積り」）は、10 GB 級は 57 フレームを超える長さを非対応とするので当たらない（懸念は 81 フレーム以上・
-    B570 で回ったのは 57 フレーム〈S = 13,200〉まで）。submit を短くする runtime 側の手は採っていない。
-- **行ブロックの予算（ADR [0124](decisions/0124-attention-row-block-budget.md)）はこの非対応の範囲を変えない**: runtime の
-  `SessionOptions.attentionRowBlockMaxBytes` は attention の瞬間の一時を縮めるが、`WanTi2vPipeline` には口が無く、
-  10 GB 級で 61 フレーム以上が入るかを確かめる機も無い。12 GiB 級の開発機（RTX 3080 Ti・Deno）の 1280×704×121 の実用席では、予算
-  512 MiB で DiT の backing が 5.97 → 4.51 GiB、DiT だけを回したときの GPU 全体の VRAM の山が 11,308 → 9,811 MiB に下がった（実測
-  2026-10-11・出力は予算なしとビット同一・[research 2026-10-11（段 4b の実測）](research/2026-10-11-row-block-budget-stage-4b.md)）。
-- **席は参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16`（既定）の 2 つ**（f16 席は無い — ADR 0121 決定 2）。既定の実用席は
-  利用者の視認（1280×704×33・50 ステップの 12 本 — 2026-10-06）で採った席。参照席との自機 A/B 門（ADR 0121 の段 7）では、step 1 の潜在の
-  relRMS が 33 フレーム 4.39e-2・121 フレーム 4.92e-2（帯 8.8e-2 / 9.9e-2・121 フレームの門は opt-in `KARUME_WAN_TI2V_121F=1`）。
-  視認（参照席 12 本と実用席 12 本の対 — 2026-10-09）でも目立つ劣化は無い。
-- **sha256 の参照値は環境ごとの行**（ADR [0106](decisions/0106-device-keyed-references.md)）: 2 ステップの通しの 6 ケース（参照席・
-  1280×704 / 704×1280・17 フレーム）は B570（`deno-intel-graphics-bmg-g21`）と RTX 3080 Ti（`deno-nvidia-geforce-rtx-3080-ti`）の行を
-  持つ。実用席の同じ要求の 1 本（1280×704）は RTX 3080 Ti の行だけ。2 ステップ × 121 フレームのケースは opt-in（`KARUME_WAN_TI2V_121F=1`）で、行は RTX 3080 Ti だけ。50 ステップの通し（opt-in
-  `KARUME_WAN_TI2V_FULL_PIPELINE=1`・1280×704・33 フレーム）は 2 席とも行を持ち、行は RTX 3080 Ti だけ。I2V の 2 ステップ × 9 フレームの
-  通しは RTX 3080 Ti の行だけ: 既定のレーン = 2 席の boxing-cats（1280×704）・opt-in（`KARUME_WAN_TI2V_I2V_FULL=1`）= 参照席の
-  cat-dog-baking / ferret と 704×1280。I2V の 50 ステップの通し（同じ opt-in・1280×704・33 フレーム・fit crop）は 2 席とも行を持ち
-  （実用席の行は同じ要求の参照席と 1 bit 以上違う床つき）、行は RTX 3080 Ti だけ。
-- **VAE は常にタイルで decode する**（潜在 16 のタイル・重なり 潜在 4・patchify 空間でブレンドしてから unpatchify — ADR 0121 決定 6。
-  1280×704 は 28 枚）: 公式の非タイル decode とは近似の差が出る（段 5 の照合ケース 480×832×9 の観測で比 1.2e-1）。
-- **Wan2.1 と同じもの**: 計測（`gpuTiming`）の device を構築時に拒むこと・DiT 段と VAE 段を同時に常駐させないこと・seed の初期ノイズが
-  torch の `randn` と別の列であること・中断（`signal`）の効き方・テキストエンコーダの経路（`"precomputed"` が受けるのは 2.1 と同じ 4 本 —
-  埋め込み資産は 2.1 の系列とバイト同一・`"gpu"` の umT5 は `karume-umt5-xxl` への越境参照）・umT5 の差し替え（`components: { text_encoder }`）と
-  それが検査しない 3 つは上の Wan2.1 の節のとおり（構築と生成の本体は
-  `packages/models/src/wan/family.ts` を 2.1 と共有する）。
-- **I2V（`image` / `fit` — ADR 0121 決定 11・段 9）の制約**:
-  - 寸法は T2V と同じ受理集合の 2 寸法だけ。`width` / `height` を省くと画像の縦横比に近い方（幅 ≥ 高さなら 1280×704）を選ぶ。公式は
-    面積の上限の内で自由な寸法を選ぶ（16:9 の画像なら 1248×704）ので、同じ画像でもここの方が `fit: "crop"` で切られる量が多いことがある。
-  - 画像ファイルのデコードはしない（ランタイム依存ゼロ）。受けるのはデコード済みの RGB8 で、色空間の変換もしない。前処理（LANCZOS の縮小と
-    切り出し）は Pillow 12.3.0 とビット一致だが、ファイルから RGB8 を作る段は呼び手のもので、参照と同じ入力になるかはそこで決まる
-    （`examples/wan` は PNG を Pillow と画素一致で読み、JPEG は復号器の差で少しずれる・EXIF の向きは適用する〈上流の `generate.py` とは意図して違える — ADR 0121 の追記 2026-10-11〉 — `examples/wan/README.md`）。
-  - Deno で確かめた範囲は RTX 3080 Ti の事前計算の経路（`textEncoder: "precomputed"`）だけ: 2 ステップ × 9 フレーム（1280×704 で 3 画像・
-    704×1280 で 1 画像）と、50 ステップ × 1280×704×33（2 席とも sha 行 — 上の sha256 の項）。RTX 3080 Ti 以外の GPU の Deno では回していない。
-    GPU の umT5 の経路との組は、RTX 5070 Ti の Chrome（gpu-lab・2026-10-10）で完走した組だけ: 条件画像 896×1152（縦長）→ 704×1280・fit crop・
-    実用席・20 ステップ・shift 7・自由プロンプトで、33 フレーム（壁 390.0 s・1 ステップ 5.99 s）と 121 フレーム（壁 1,346.5 s・1 ステップ
-    36.05 s）・encoder の段 1.6〜1.7 s。gpu-lab は I2V の行を参照ケースと照合しないので、品質は主張しない。
-  - 上流（diffusers の CPU f32）との帯は T2V より広い（step 2 の潜在で 3.5e-3 — T2V は 9.5e-4）。encoder の出口の小さな差を DiT が
-    条件のトークンで約 250 倍に増幅するため（参照の条件の潜在に差し替えると T2V の桁に戻る — ADR 0121 追記「段 9b の結果」）。
-  - 実用席の品質（上の A/B 門と視認）は T2V で測った値。I2V の自機 A/B 門（opt-in `KARUME_WAN_TI2V_I2V_FULL=1`・ケース i2v-33f = 1280×704×33・
-    S = 7,920・条件画像 boxing-cats・fit crop — `packages/models/tests/e2e_wan_ti2v_ab_test.ts`）は step 1 の潜在の relRMS 4.6146e-2
-    （2026-10-10・RTX 3080 Ti）・帯 9.3e-2（実測の × 2 を有効数字 2 桁へ切り上げ・床 = 1 bit 以上違う）で、T2V の 33 フレーム（4.39e-2 /
-    帯 8.8e-2）の 1.05 倍。maxAbs（T2V の 2.6 倍）は条件で置き換える前の潜在フレーム 0（出力に届かないフレーム）にある。I2V で 2 席を
-    視認で比べるのは段 9d。
-- **配布形（`karume-wan2.2`）は Hugging Face に未公開**（ADR 0121 の段 8a でローカルミラー `models/karume-wan2.2` を組む recipe ができた —
-  `dist.py --pipeline wan-ti2v`）。入口は `WanTi2vPipeline.fromPretrained`（ミラーを渡す）と、系列の容器から組んだ manifest と資産を渡す
-  `WanTi2vPipeline.fromAssets`。
-
-## EmbeddingGemma: 実行時 attention_mask（バッチ内パディング）は非対応 — 単一シーケンス前提
-
-export 済みグラフ（台本 `tools/export-recipes/embeddinggemma/export.py`）は `attention_mask` を
-入力に持たない。双方向 + sliding window の帯マスクは **Tmax=512 の定数**として焼かれ
-（`sym_prefix_slice` で先頭 T を切り出す）、パディングを注意から隠す経路は無い。
-パディングを含む列は**呼び出し側が詰めて T を短くする**（単一シーケンスなら torch eager と
-厳密同値）。
-
-機序: ADR 0016 の safe-softmax ガード不活性証明はマスクの実値評価を要求し、実行時入力の
-placeholder では成立しない（`_eval_static` が拒否する — 「単一シーケンス前提」は回避では
-なく設計帰結）。グラフ入力の `pool_mask` は **pooling 専用**で注意には配線されない
-（0 を混ぜると「モデルは見ているのにプールでは捨てる」という eager に無い形になる —
-常に全 1 で渡す）。
-
-付随: `SYM_MAX = 512` なので T > 512 は Session 構築で落ちる（config の
-max_position_embeddings は 2048）。上げる場合は帯マスク定数が Tmax² で膨らむ
-（512 → 2MB / 2048 → 32MB）ことの裁定とセットで行う。
-
-解除（実行時マスク対応）の設計は
-[decisions/0044](decisions/0044-runtime-attention-mask.md)（accepted）で確定済みで、**機構は
-実装済み**（`safe_softmax` op + `_drop_safe_softmax_guard` の 2 段化 — 2026-08-11）。残るのは
-EG 台本の配線だけ（bool マスク入力を受けて帯定数と加算合成し、SDPA を保存のままにするか
-分解へ落とすかの裁定 — ADR 0044 の Consequences）。
-
-## Irodori テキスト系（backbone / projector）: 実行時 attention_mask 非対応・空 caption と T=1 は非表現
-
-EmbeddingGemma と同じ静的方式（B=1・呼び出し側が列を詰める）。「右詰め pad + マスク」との
-同値は export 台本の常設門が毎 emit 実測する（`tools/export-recipes/irodori/export.py` の
-`_static_scheme_evidence` — 実測 8.3e-6 以下・門 1e-3。崩れれば export ごと落ちる）。付随:
-
-- **空 caption（マスク全 0）は graph で表現しない** — eager では projector 出力が厳密に全 0
-  になる形なので、ホストがゼロを直接作る（CFG uncond と同じ扱い — ADR 0044 の管轄）。
-- **T = 1（BOS のみ）は表現できない**（記号次元は `Dim(min=2)` — 0/1 特殊化を避ける既定）。
-  空 caption 以外で T = 1 になる実入力は無い。
-
-## Irodori speaker / duration: 参照なしと平均トークン前置はホスト・条件ベクトルもホスト供給
-
-テキスト系と同じ静的方式（B=1・呼び出し側が列を詰める）を speaker encoder（`[1,S,128]` →
-`[1,S,768]`）と duration predictor（`[1,T,512]` ほか → `[1]`）にも適用した帰結。いずれも
-「グラフに載らない」という by-design の線引きで、値の近似や無音のフォールバックはしない:
-
-- **参照なし（`no_ref` — 参照マスク全 0）はグラフを呼ばない**。eager 側の出力が
-  **厳密に全 0** になる形（SDPA の safe-softmax が全マスク行に 0 を返し、末尾の `x * mask_f`
-  が全体を 0 にする）なので、ホストがゼロ行列を置けば同値。**恒真化しないよう同 export
-  台本の `_no_reference_evidence` が毎 emit 実測する**（非ゼロ latent を
-  全 0 マスクで通し、出力の最大絶対値が 0 でなければ export ごと落ちる）。
-- **平均トークンの前置（`_prepend_masked_mean_token`）は現行パイプラインではホスト**。IR v2 の
-  `cat` は `1 + S → S+1` を受理する（ADR [0046](decisions/0046-cat-symbolic-axis.md)）ので、
-  残置の理由を「記号軸 `cat` 非対応」とはしない。ホスト側の作業は軸 1 の平均と concat だけで、
-  モデル計算（重みを使う演算）は残らない。GPU 側へ移すかは別途の設計判断。
-- **duration の `speaker_vec` / `caption_vec` はホスト供給**。前者は上の平均トークンの
-  切り出し、後者は **caption 系列に `caption_norm`（RMSNorm 512）を掛けた masked mean** で、
-  `caption_norm` は `caption-proj` グラフの**第 2 出力**として出る（ADR
-  [0048](decisions/0048-irodori-host-port.md) 決定 1）ので、**ホストに残るのは行平均だけ**
-  — 重みを使う演算は 1 本も残らない。caption 系列をグラフ入力にすると記号次元が
-  2 本（T と caption 長）になるため採らなかった（多記号グラフは未実測 — recon の U3）。
-  **0/0 の危険は無い**（実装が `denom = clamp_min(sum, 1.0)` で割るため — recon が挙げた
-  「caption 全 0 の masked_mean」は上流で既に閉じている）。
-- 参照なし / caption なしの選択（`null_speaker` / `null_caption`）は **`has_speaker` /
-  `has_caption` の bool 入力 + グラフ内の `where`** で表現する。2 本の学習済みベクトルを
-  ホストへ配らずに済ませるため（ADR 0010 が「ホスト事前計算 + 追加入力」を却下したのと同じ理由）。
-- **S = 1 と T = 1 は表現できない**（記号次元は `Dim(min=2)`）。参照 latent は
-  `speaker_patch_size` = 4 の patch 後で、実入力が 1 トークンになるのは `no_ref` の形だけ
-  （上のとおりグラフを呼ばない）。**patch 後 2 トークン（codec の 8 フレーム）に届かない参照は受けない**:
-  参照 latent なら 8 フレーム未満、参照音声なら 48kHz で 13,441 サンプル（7 × hop 1920 + 1 — 末尾は
-  reflect pad で hop の倍数へ切り上がる）未満を、生成の入口（GPU を回す前）で `ModelInputError` にする
-  （`packages/models/src/irodori/conditioning.ts` の `assertSpeakerReference`）。1 トークンへ黙って 0 pad を
-  足す対応はしない。
-- 記号次元の上限は **S ≤ 750**（`ref_max_seconds` 120s × 25Hz ÷ patch 4 — チェックポイントの
-  config から導出）。超える参照長は束縛検査で fail loudly。
-
-## Irodori DiT: 行ブロックでも分割不能な 1 クエリ行上限・CFG は既定 2 モードのみ
-
-DiT 1 step（`dit` ターゲット）は ADR [0047](decisions/0047-irodori-dit-execution.md) の実行形
-（B=1 × 記号 S × G4 の畳み込み × uncond をマスクで表現）で export してある。その帰結として
-次の 2 点は by-design の制約で、近似や無音のフォールバックはしない:
-
-- **クエリ 1 行ぶんのスコア（`H·C·4` バイト）が束縛上限を超える形は fail loudly**。分解
-  attention は 9 ノード窓を、granted limit から静的に決めた最小枚数の行ブロックで回す
-  （ADR [0060](decisions/0060-row-block-attention.md) = 行ブロック実行。ビット同一・既定経路
-  — 上限に余裕のある機では 1 枚 = コストゼロ）ので、S=750 の中間 `scores` が 128MiB を超える
-  かつての制約は解消済みだが、1 行すら上限に入らない形は行ブロックでは分割しきれない。
-- **CFG は `speaker_uncond_mode="mask"`（既定）と `cfg_guidance_mode="independent"`（既定）
-  以外を表現しない**。uncond をマスクだけで表せるのは「state を 0 にした context KV の寄与が
-  マスク越しに厳密 0」だからで、`"noise"`（speaker の uncond を乱数 state にする）はこの
-  同値が成り立たない。`joint` / `alternating` は変種の組み方そのものが違う。**既定外は
-  パイプライン層で fail loudly**（グラフ側は 4 変種の差をマスク 1 本に還元してしまうので、
-  ここで拒まないと黙って別のモデルを回すことになる）。
-
-## Irodori DiT ループの GPU 常駐経路: denormal 出力の FTZ・診断の縮退・計測 / onEvent 時はホスト経路
-
-DiT ループは既定で GPU 常駐（[ADR 0054](decisions/0054-resident-loop-and-fence.md) — CFG 合成
-と Euler 更新を GPU の elementwise で実行・フェンスは batch 1 本）。by-design の制約 3 点:
-
-- **最終出力がちょうど denormal（|x| < 2⁻¹²⁶）になる要素は、ホスト実装が denormal を保つのに
-  対し GPU シェーダ算術が同符号の ±0 へ潰しうる**（parity probe 実測: 差分はこの機序のみ・
-  fma 収縮 0・符号付きゼロ一致）。実データの潜在／速度場（単位分散級）では実質到達しない
-  領域で、参照ケースの WAV sha256 門 2 本は digest 完全一致 — 門が恒久の検出器。
-- **常駐経路では `lastRun`（run アリーナ実績）と `lastRunTiming` が `undefined`**（enqueue は
-  アリーナも計測窓も作らない）。`planBacking` / `submit` / `lastRunPrepared` は従来どおりで、パイプライン
-  キーの一覧は計測に依らない `lastRunPipelines`（直近 run の計画上のキー別 dispatch 本数）で読める。
-- **gpuTiming 有効の device、および `generate` / `generateLatent` へ `onEvent` を渡した生成は
-  従来のホストループへ分岐**（計測: batch と非両立で `beginBatch` が拒否 / onEvent: 1 batch +
-  単一フェンスの区間は step の完了そのものをホストから観測できず、`enqueue` 時点の発火は
-  「進捗」として嘘になる）。出力は同一 digest（`e2e_irodori_wav_test.ts` の onEvent 段が
-  voice-clone と同じ sha256 で常設の門にしている）だが壁時計は伸びる（同一ケースの実測
-  7.2 → 8.6 秒 / S 170・参照環境 2026-08-16）。op 別内訳を採るとき・進捗を出すとき以外は
-  既定（常駐経路）のまま使うこと。
-
-## Irodori パイプライン（ホスト層）: 上流の任意ノブは既定値相当のみ・参照音声は 48kHz
-
-`IrodoriPipeline` は第 3〜4 波の範囲（ADR [0048](decisions/0048-irodori-host-port.md) /
-[0049](decisions/0049-irodori-codec-integration.md)）で、以下は by-design の制約。近似や
-無音のフォールバックはしない:
-
-- **上流の推論ノブは既定値で死んでいるものを移植しない**: LoRA 動的ロード /
-  speaker_kv_scale 系 / truncation_factor / temporal_score_rescale / sway スケジュール /
-  num_candidates>1・decode_mode="batch"。CFG のモード制約（mask / independent のみ）は
-  上の DiT 節のとおりで、**パイプラインは pipelineConfig のパース時に拒否**する。
-  末尾トリムのしきい値（窓 20 / std 0.05 / mean 0.1）と参照音声の目標 −16 LUFS も上流既定の
-  固定値（実行時ノブとしては持たない）。
-- **`cfgScales` は f32 で厳密に表せる値だけを受理する**（非厳密値は `pipelineConfig` の
-  パース時に fail loudly）。DiT ループはホスト経路（f64 のまま乗算）と GPU 常駐経路（f32 へ
-  丸めてから乗算）の 2 本があり、強さが f32 非厳密だと同じ入力で最終桁が 1〜2 ulp 割れる
-  （実測: s=1.3 で分岐）。「2 経路の出力は同じ」という MUST を配布形に依らず無条件に成立
-  させるため、宣言側で落とす。実配布の 3.0 / 5.0 / 3.0 は全て f32 厳密で影響なし。
-- **参照音声（`speaker: { audio }`）は配布形の `sampleRate`（48kHz）のみ** — リサンプルは
-  持たず fail loudly（ADR 0049 決定 6。変換は呼び出し側の責務）。`decodeWav` が受けるのは
-  PCM 16bit と IEEE float 32bit だけで、`WAVE_FORMAT_EXTENSIBLE`（0xFFFE）等は明示拒否。
-- **`codec_encoder` はタイル分割しない**（decoder と非対称 — ADR 0049 決定 1）。長い参照
-  （120 秒で中間 1.47GB×2）は `maxStorageBufferBindingSize` が既定 128MiB の機で確保に
-  失敗する。decoder 側は halo 8 のタイル分割で既定上限機でも S=750 が通る（ビット一致門付き）。
-- **生成音声に透かし（SilentCipher）は入らない**（wm 枝はバイパス形で焼かれている —
-  2026-08-11 裁定で公開前の波まで保留・ADR 0049 決定 2）。
-- **seed は上流と互換でない**（torch generator のビット再現は非目標 — ADR 0048 決定 5）。
-  同 seed → 同波形の自己決定論のみ保証し、torch との突合は `initialNoise` 注入口で行う。
-- 前処理の `strip` は JS の `String.prototype.trim` で、Python `str.strip` とは空白集合の
-  端（U+001C〜1F・U+0085 は Python のみ / U+FEFF は JS のみ）が違う。caption がこれらの文字だけの
-  ときは、caption の有無（caption 条件と CFG の分岐）まで上流と反転する（U+0085 だけなら上流は
-  「なし」・karume は「あり」、U+FEFF だけならその逆）。実用のテキスト入力では発生しない差として
-  受容する（golden の normalize 33 ケースはこの領域を含まない）。
-- WAV の読み（/32768）と書き（×32767）は非対称のまま固定（それぞれ外部との一致が正 —
-  `src/audio/wav.ts` の MUST。往復は 1LSB 級でずれる）。
-- **要求ノブ（`codecTileFrames` / `seed` / `durationSeconds`）は呼び出し時点で検査する**（段の
-  途中まで進んでから落ちない）。公開面の挙動として①codec を回さない `generateLatent` でも
-  `codecTileFrames` の不正値で落ちる ②`initialNoise` を渡した生成でも `seed` の値域が検査される
-  （従来はその経路が乱数を引かないので黙って無視されていた）。
-- **配布形の宣言側の要件が 2 つ増えた**: `speakerRows` は 2 以上（平均トークン 1 本 + 参照
-  latent）、`maxSeconds` から到達しうる latent 長（duration 経路の floor と手動秒経路の ceil の
-  大きいほう）が `ditSymMax` を超えないこと。どちらも `pipelineConfig` のパース時に落ちる。
-
-## 融合 attention の加算 mask: 静的 `[1,1,M,N]` のみ・a8 と非併用・ビット同一門は f32 経路
-
-`attention` の第 4 入力 mask（ADR 0023 追記 2026-08-11）は意図的に狭い:
-
-- 受理は **f32・加算型・`[1,1,M,N]` ちょうど**（B·H へ broadcast）。実行時 bool マスク・
-  `[B,1,M,N]`（バッチ別）・`[1,H,M,N]`（head 別）は fail loudly — Irodori CFG の裁定
-  「実行時 bool マスク（案 a）」の波で、ADR 0016 のガード不活性証明の再設計とセットで広げる。
-- **mask × `attentionCompute:'a8'` は fail loudly**（i8a8 族の ①QK に epilogue が無い —
-  黙って f32 へ縮退させない）。対応するかは別波の設計判断。
-- 分解経路とのビット同一の恒久門（parity）は **f32 経路のみ**。s16 / c16 × mask は WGSL
-  生成・パイプライン作成・実 GPU 実行の確認まで（門を足すか ADR に f32 限定と明記し続けるかは
-  そのケースが実資産に現れた時に判断）。
-
-## 融合 attention の GQA × `attentionCompute:'a8'` は fail loudly（暫定）
-
-GQA / MQA 形（`H % Hkv == 0`・ADR
-[0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 1）は f32 / f16 経路のみ。
-a8 経路は head 基底が 5 本（`attention-i8a8.ts`）で K / V の量子化・確保も `B·H` 前提のため、
-GQA 形は**縮退せず fail loudly**（黙って f32 へ落とすと性能が静かに変わる — ADR 0058
-決定 3）。**拒否は暫定で後日サポート前提**（ADR 0067 決定 3 — 追補面は確定済み: K/scale・
-V/scale 基底のみ kv-head 写像 + recipe-builder の Hkv 化。検証は f32 経路の repeat_kv
-parity 資産を流用）。
-
-## topk の k 実装上限は device 依存（WebGPU 既定 limits で k ≤ 63）
-
-`topk`（ADR [0068](decisions/0068-decode-exit-multi-output.md) 決定 3）の scratch は
-workgroup storage に閉じるため、k の上限は `8·32·(k+1) ≤ maxComputeWorkgroupStorageSize`
-で決まる（`src/kernels/topk.ts` の `topkMaxK`）。WebGPU 既定の 16384B では **k ≤ 63**・
-本開発機（49152B）では 191。超過は上限値つきで fail loudly（縮退しない — ADR 0058
-決定 3）。top-k sampling の実用域（k ≤ 50 級)は既定の機でも収まる。上限を上げる設計
-（多段 merge 等）は実需が出た時の perf-ledger 起票。
-
-## ストリーミング慣習の WAV（riffSize プレースホルダ）は受理しない
-
-`decodeWav`（`packages/models/src/audio/wav.ts`）の走査境界は RIFF が offset 4 で宣言する
-論理終端で、宣言の外の物理バイトは読まない（仕様どおりの無視 — `encodeWav` が書く欄が正）。
-このため、ストリーミング書き出しの慣習である riffSize プレースホルダ宣言は by-design で
-受理しない:
-
-- `riffSize=0` は論理終端がヘッダ直後になりチャンク走査が 1 つも回らず、
-  `decodeWav: 'fmt ' チャンクが無い` で落ちる。
-- `riffSize=0xFFFFFFFF` は切り詰められた器として
-  `decodeWav: RIFF が 4294967295 バイトを宣言しているが、残りは … バイトしかない` で落ちる。
-
-入力は完全なファイルとしての WAV 前提（参照音声・検出器入力とも）。ストリーミング WAV を
-食わせる実需が出たら受理形をその時に裁定する（黙って物理長へフォールバックしない — fail
-loudly の横断規約）。
-
-## hub: 並行取得のキャンセル粒度は single-flight の leader 単位
-
-取得層（`@hdae/fetch-cache`）の single-flight では、同一の**内容キー**
-（`["hf", kind, repo, path, sha256]`）への 2 本目以降の呼び出しは先行フライトへ合流し、
-合流者に渡した `AbortSignal` は効かない（leader を abort すると合流者も巻き添えで落ちる）。
-同一資産を並行に取る複数の `fetchAssets` では、キャンセルはこの粒度でしか働かない
-（ADR 0038 §5）。単一呼び出しの abort は全ワーカーへ正しく透過する。
-
-## 0 要素次元を持つ gemm 系の形は GPU 束縛の最小サイズで落ちる（未対応の退化域）
-
-`linear` の `in=0` など 0 要素次元は op 契約上は valid だが、0 要素バッファの確保下限
-（4 バイト — arena / executor の `Math.max(4, …)`）が vec4 変種の最小束縛サイズ（16 バイト）を
-割るため、実行は `GpuValidationError`（Binding size … less than minimum）で fail loudly に
-落ちる（`linearCompute` に依らない — 2026-08-13 実測）。沈黙誤値にはならない。解除するなら
-確保下限を 16 へ統一する（全 op 共通の確保方針の変更 — 需要が出たら別波）。
-
-NOTE: `attention` だけは例外で、退化した軸（B = 0 / M = 0 / N = 0）を**契約層で明示拒否**する
-（`OpContractError`）。行ブロック planner（`planRowBlocks`）が正整数を要求するので、通しても
-attention を名乗らない `ExecutionError` になってしまうのが理由。0 要素次元が契約 valid なのは
-linear 族など残りの op の話。
-
-## 公開面: 0.9.0 の後に拒否集合が増えた 3 点（受理集合は不変）
-
-いずれも「今まで黙って別のものへ縮退・または遅れて落ちていた」入力を、入口で fail loudly に
-した変更。正しい呼び出しの挙動は 1 ビットも変わらない。
-
-- **`SessionOptions` の実行形 4 ノブ**（`linearCompute` / `attentionCompute` /
-  `attentionScoreStorage` / `stateAttentionReduce`）は union 外の綴りを `Session` 構築時に拒否する
-  （全件を列挙した 1 つの `ExecutionError`）。従来は既定（f32 / sequential）へ黙って縮退していた
-  ため、`linearCompute: "i8a8"`（0.5.0 で `"a8"` へ改名した旧綴り）が例外も警告も無く f32 で
-  走っていた。
-- **`EstimateOptions.maxStorageBufferBindingSize` の値域検査**（正の安全整数）は
-  `estimateGraphMemory`（`PreparedModel.estimate` も同じ実装）の**入口**で走る。従来は states 形 attention の
-  一時を数える経路の内側にしか無く、states 形を持たないグラフでは −1 / 1.5 / NaN が黙って
-  受理されていた（読まないので数字は変わらなかった）。
-- **`SubmitPolicy.maxChunkSize` の実効上限は gpuTiming 有効な device で 1,024**（query 2,048 =
-  querySet 容量）。超える政策は Session 構築時（`SubmitScheduler` の構築）に `SubmitPolicyError`
-  で落ちる（0.9.0 までは run の途中で落ちていた）。
-
-## GitHub CI はローカル資産（`outputs/`）依存のテストを踏まない（検証範囲の制約）
-
-`outputs/` は git 追跡外のため、実系列資産を golden に使うテスト群 — GPU e2e に加え、
-**CPU-only の upstream parity**（irodori の codec / reference / t-embed、sbv2 の rel-pos /
-relattn / demo 資産、wav の実資産 scale）— は GitHub Actions では資産不在で ignore になる。
-これらの門はローカル / self-hosted の `deno task verify`（資産あり）が担い、リリース判定は
-実資産 + 実 GPU の緑を必須とする（ADR 0005）。CI 側へ寄せるなら golden の fixture 昇格
-（リポ肥大とのトレードオフ）か release gate での資産取得が要る — リリース準備波で再訪。
-
-**資産不在の全 SKIP は `packages/runtime/tests/e2e_assets_gate_test.ts` が FAIL にする**（GPU 不在の
-`gpu_gate_test.ts` と同形の門番）。CI は資産を持てないので `KARUME_ALLOW_NO_ASSETS=1` を
-意図表明として設定して抜ける。この env を設定した環境の緑は**リリース判定には使えない**。
-
-## `karume dist` はディスクピークが配布形の約 2 倍（staging→swap の代償）
-
-組み立ては staging ディレクトリへ全て作ってから rename で据える（ADR 0052 — 途中の故障で
-既存の配布形を壊さないための by-design）。swap の瞬間まで新旧ツリーが併存するため、出力先の
-ファイルシステムには配布形サイズの約 2 倍の空きが要る。据え替え後は `.staging` / `.old` とも
-残らない。
-
-## exporter: モデル別 recipe はリポ専用（wheel に入るのは汎用 core だけ）
-
-PyPI `karume` は汎用 exporter core のみ（ADR
-[0065](decisions/0065-exporter-core-recipe-split.md) — 配布境界とライセンス境界を一致させる
-ための by-design）。既知モデルの export 台本・dist recipe・カードテンプレートは
-`tools/export-recipes/`（uv workspace・wheel 外）にあり、実重み export の依存
-（diffusers 等）も同プロジェクトの dependency-groups が持つ。このためインストール版の
-`karume dist` は pipeline 表が空で fail loudly する（受理集合の正本はリポの
-`tools/export-recipes/dist.py`）。`karume verify` はインストール版でも動く。
-
-## Metal（Apple GPU）では GPU 側 timestamp 計測が実用にならない（外部制約）
-
-`gpuTiming: true`（ADR 0021）は 1 dispatch = 1 pass に開いて pass 境界の timestamp を取るため、
-チャンクごとに query set を 1 本作る。Metal ではその query set を作る `createQuerySet` が失敗し
+The gemma4 entry **also renamed the repository** — `karume-gemma4-e2b` → `karume-gemma4` (to make it
+a container that E4B / 12B can share — ADR 0092 decision 1. Done at the 0.9.0 publication). HF's
+rename redirects the old name (HTTP 307 for both the API and resolve), so pins baked into
+`GEMMA4_CURRENT` up to 0.8.0 keep resolving.
+
+The value (`{ repo, revision }`) has the same shape as before and can be passed as is as the first
+argument of `fromPretrained`. The barrel (`@karume/models`) additionally exports `KARUME_SOURCES`,
+which folds all families together (**same keys, same values**) — a surface for callers that walk all
+public repositories; a consumer that uses only one family takes the family table of its subpath.
+
+`*_CURRENT` was "one constant = one repository": every new repository required inventing a constant
+name (version spellings like `_V4_1_` leaked into identifiers), and there was no way to get "the list
+of repositories this family publishes" from code. As a table, the list comes from `Object.entries`,
+and the key derives mechanically from the repository name (`"karume-" + key` gives back the repo
+basename — checked by `packages/models/tests/sources_test.ts`).
+There is still **no** default entry (the caller spells out which entry to use — the 2026-08-25
+withdrawal in ADR 0073).
+
+## The generation API changed in 7 points before publication (breaking changes to the first-edition text of ADR 0083 / 0084)
+
+The generation API (`GenerationSequence` / `Gemma4Pipeline`) reached JSR **for the first time in
+0.9.0** (`@karume/models` of 0.8.0 does not export `./gemma`). The ADRs, examples and demo scripts
+were written against the surface mid-wave, so the 7 points that changed **before publication** while
+working through the public surface review (2026-08-31 / second wave 2026-09-02) are kept here.
+The canonical record of the addenda is ADR
+[0083](decisions/0083-generation-api-surface.md) / [0084](decisions/0084-gemma-tokenizer-chat.md).
+
+- **`generate` after `dispose()` throws synchronously** (previously the first iteration produced a
+  generic message from the `GenerationContext` side, and the real cause (you disposed it yourself)
+  could not be read). Only the lifetime check is synchronous; the budget checks (position table,
+  capacity) still become `GenerationCapacityError` on the iteration side as before.
+- **`GenerationStop` gained a `tokens` field** (the number of tokens that turn generated; the stop
+  token of `eos` counts as 1). Code that wrote equality assertions on `done` has to follow the added
+  field.
+- **The constructor of `GenerationCapacityError` takes 2 arguments** and carries structured fields
+  (`constraint` / `pastLength` / `promptLength` / `requestedNewTokens` / `limit` / `maxNewTokens`).
+- **The wiring fields left the public `GenerationProgram`** (graph input / output names, symbol
+  bindings and `derivedInputs` were split off into the internal type `GenerationWiring`). What remains
+  is `chunkLength` / `capacity` / `maxPosition` / `vocabSize` / `stopTokens`; the surface is frozen
+  and `stopTokens` is a frozen copy (this closed the hole through which a consumer's `sort()` /
+  `length = 0` rewrote the stop set of the generation loop).
+- **`SamplerSpec.logitBias` went from a `Map` to an array of tuples** (`readonly [token, bias][]` —
+  2026-09-02). Code that wrote `new Map([[id, bias]])` is rewritten to `[[id, bias]]`. `JSON.stringify`
+  collapses a `Map` to `{}`, so a setting saved and restored as configuration had **silently become an
+  empty bias**. In addition, **writing the same token twice is a `ModelInputError`** (the
+  last-one-wins folding of `Map` is gone).
+- **`Gemma4Pipeline.sampler` was renamed to `defaultSampler`**, and the type of
+  `Gemma4PipelineConfig.sampler` shrank from `SamplerSpec` to `Gemma4DefaultSampler` (the 3 fields
+  `temperature` / `topK` / `topP` required). In addition, `fromAssets` now runs the same checks as
+  `fromPretrained` (unknown keys, value ranges, `chunkLength ≤ maxChunkLength`,
+  `chunkLength ≤ capacity ≤ maxPosition`) before opening the bytes, so **an invalid declaration
+  fails before the 3.7GiB load finishes** (previously it first became a `RangeError` at the first
+  `generate`).
+- **The union of stop reasons gained `stop-token`, and the type of `Gemma4ChatStream.done` widened to
+  `Gemma4ChatStop`** (2026-09-02 — per-request stop conditions). Code that wrote
+  `switch (stop.reason)` exhaustively has to follow the added branch (the `chat` side additionally
+  gains `stop-string`). In addition, `Gemma4ChatStream` gained `text()`, so **one stream can be
+  consumed only one way** (mixing iteration with `text()`, or iterating twice, throws synchronously —
+  previously the second `for await` silently ended after 0 iterations).
+
+## Only `chat` can stop on a stop **string** (`sequence()` stops on tokens)
+
+`Gemma4ChatOptions.stopStrings` (stop when it appears in the decoded text) is **a knob of the chat
+layer**. The low-level surface (`Gemma4Pipeline.sequence()` → `GenerationSequence.generate`) does not
+have it; to stop there, use `GenerationRequest.stopTokens` (token ids, unioned with the
+distribution's EOS set). `GenerationSequence` handles only token ids (it knows neither the tokenizer
+nor the distribution), so string matching can live only in a layer that owns the decoder — the two
+layers of the ADR [0083](decisions/0083-generation-api-surface.md) addendum of 2026-09-02. If you
+drive `sequence()` yourself and want to stop on a string, look at the decoded text yourself and
+`break` (the conversation advances "only by the successful runs", and the last token stays in the
+uncommitted frontier = the same state as a `chat` stop string).
+
+## sampler: top-k differs from HF in its candidate set at a tie on the boundary (by-design)
+
+`SamplerSpec.topK` (`packages/models/src/generation/sampler.ts`) narrows to **exactly k entries**,
+keeping the smaller id on a tie. HF's `TopKLogitsWarper` keeps every candidate equal to the k-th
+value, so for logits with ties lined up on the k-th boundary the candidate set and the probabilities
+differ. Keeping the smaller id is the same tie-break as greedy (first wins in `argmax`), chosen so
+that `topK: 1` matches greedy regardless of temperature. The RNG differs from HF's sampling, and
+token-sequence parity with it is not pursued in the first place (ADR
+[0083](decisions/0083-generation-api-surface.md) decision 7), so no change is made to match HF.
+
+## The params cache is unbounded for the lifetime of the Session (by-design)
+
+The content-addressed cache of params buffers (`RecipeBuilder.#writeParams`) has no eviction; they
+are released only by `Session.dispose()`. Driving a graph with symbolic dimensions with "different
+bindings on every run" allocates new small buffers (one per node kind) on each run, which never hit
+again and pile up for the whole lifetime of the Session (no exception and no warning;
+`diagnostics().weights.allocCount` just grows monotonically). Each is a few tens of bytes, so there is
+no recorded actual harm even for variable-length TTS or embeddings with variable sequence length,
+but there is no upper bound.
+
+- Why eviction is not made LRU: the params buffers are **referenced directly and folded in** by live
+  derived plans (prepared plans), so making eviction = destruction would leave them holding destroyed
+  buffers. Doing it safely needs separate bookkeeping, reference counting (not built until there is a
+  real need).
+- Workaround: for use cases that drive variable shapes for a long time, watch the growth of
+  `diagnostics().weights.allocCount` and recreate the Session.
+- Params newly uploaded by a run / batch that settled with a GPU-side failure are dropped from the
+  cache (the allocation may have been invalid because of a non-fatal OOM — ADR
+  [0095](decisions/0095-plan-backing-budget.md) addendum 2026-10-10), but the buffers themselves are
+  not destroyed and remain until `Session.dispose()`. A retry allocates that content anew, so each
+  repetition of such a failure piles up the small buffers of the failed execution. Host-side failures
+  (wrong input, a failed pre-run check and so on — for both run and enqueue) do not drop them, so
+  nothing piles up.
+- Being unbounded is itself pinned by a check in `packages/runtime/tests/gpu_params_cache_test.ts`
+  (adding eviction turns this check red).
+
+## The name `__proto__` cannot be passed in an object literal (a constraint of JS syntax)
+
+Karume's Records use a null prototype and preserve a `"__proto__"` key, but when **the caller** writes
+`{ __proto__: tensor }`, JS grammar makes it a [[Prototype]] specification rather than a property
+definition, and the key never reaches Karume because it is not created. For models that use
+`"__proto__"` as an input / output name or symbol name, use a computed key `{ ["__proto__"]: tensor }`
+or `Object.assign(Object.create(null), ...)`. Karume cannot detect this (it cannot know what did not
+arrive).
+
+## Non-finite values (NaN / ±Infinity) are not checked
+
+Non-finite values in inputs and weights are not checked, for cost reasons, and flow straight into
+the computation. **Matching propagation between the GPU and the CPU reference is guaranteed only for
+the ops listed in the NOTE below**; it is not a universal guarantee. Relatedly, the reduction identity
+of `amax` / `amin` is ±F32_MAX **on both the GPU and the CPU reference**, and `amax` of a row whose
+elements are all -Infinity returns -F32_MAX, not -Infinity (torch returns -Infinity, so that is a
+by-design mismatch). When handling models that contain non-finite values, check beforehand on the
+caller side.
+
+NOTE: matching propagation is guaranteed for `clamp` / `clamp_min` / `relu` / `amax` / `amin`, and
+also, by bitwise NaN detection (`nan_max`), for **softmax / safe_softmax / the row statistics of
+attention (both fused and states form)** (unified in v2 on 2026-08-31 — before that, WGSL's `max` drops
+NaN at the spec level, so a row of all-NaN elements was mistaken for an empty row by the safe variants,
+became exactly 0, and the NaN silently disappeared). Mechanism and ruling:
+[decisions/0020](decisions/0020-nan-propagation-bitwise.md) and the
+[decisions/0044](decisions/0044-runtime-attention-mask.md) addendum of 2026-08-31.
+
+NOTE: the PV of states-form attention treats the columns outside the predicate (causal, window)
+differently on the GPU and on the CPU reference. The GPU also adds weight 0 × V for the columns outside
+the predicate within the live range, while the CPU reference does not read V for those columns (as the
+formula says). With finite V both contribute 0 outside the predicate and the value does not change, but
+if V outside the predicate contains NaN / ±Infinity, only the GPU row becomes NaN.
+
+## The additive mask of fused attention carries −inf **as a value** (relies on the Finite Math Assumption)
+
+The additive mask constants that the exporter bakes represent out-of-band positions with a literal
+−Infinity (a different scheme from the finite sentinel −3.4028e38 of `masked_fill`), and the f32 path
+of fused attention adds it as is and drops it to 0 through `exp(S−m)`. Under WGSL's Finite Math
+Assumption (an implementation may assume that ∞ / NaN do not appear during execution — §15.7.2),
+carrying ∞ as a value is itself exposed to the implementation's latitude, but in measurements
+(shipped assets on Vulkan / Metal) it behaves as expected. A row whose columns are all −inf (a fully
+masked row) is **a regular input that yields output 0 through the empty-row guard of
+attention_stats v2** (2026-08-31 — before that, it was a contract violation of
+`1/0` = indeterminate. [decisions/0044](decisions/0044-runtime-attention-mask.md)
+addendum).
+
+## The PV of `attentionCompute: "a8"` quantizes attention weights on a 1/127 grid (1:254 cut-off)
+
+The ③PV of a8 is the fixed grid `qP = round(127·exp(S−m))` (no clamp, relative to the row maximum),
+and scores with `S − m < −ln 254 ≈ −5.537` drop to **exactly 0** — attention weights below 1/254 of
+the row maximum vanish (the f32 path keeps them). By design, the reciprocal sum `inv` does not
+compensate for the dropped mass (the contract family of [decisions/0044](decisions/0044-runtime-attention-mask.md),
+an opt-in option). The CPU reference uses the same grid, so comparison does not detect this cut-off —
+the ruling on the accuracy impact rests on the measured tolerance of the E2E tests.
+
+## Fused attention a8 / s16 store ③PV and S in f32 for shapes whose key length N is not a multiple of 4 (in Anima, resolutions whose sides are not multiples of 32 px)
+
+`attentionCompute: "a8"` and `attentionScoreStorage: "f16"` (half-precision storage of S) run as
+declared only in the stages that meet the shape conditions. The conditions are: the i8a8 of ①QK needs
+`D % 4 == 0`, the i8a8 of ③PV needs `N % 4 == 0`, and f16 storage of S needs
+`D % 4 == 0 && N % 4 == 0`. A stage that does not meet them falls back to the f32 path — with no
+exception and no warning (the fallback that [ADR 0058](decisions/0058-numerics-opt-in-contract.md)
+decision 3 permits). A stage that fell back is not on the declared path: ③PV does not use the integer
+dot product, and S in VRAM has f32 width. The canonical source of the decision is one pure function
+(`attentionRoute` in `packages/runtime/src/runtime/attention-route.ts`).
+
+- **Anima**: with the default preset `f16+dit8-a8-attn8-s16` (and `f16+dit4-attn8-s16`), at
+  resolutions where the self-attention N = (W/16)·(H/16) is not a multiple of 4, the self ③PV and the
+  storage of S become f32. Of the 9,409 accepted shapes, 4,608 are affected (e.g. 528×528 = N 1,089),
+  and **it does not happen when both sides are multiples of 32 px**. With the `f16+dit8-a8-attn8`
+  preset only ③PV falls back. Cross-attention (N = 512) and ①QK (D = 128) are always as declared.
+  The accepted set is not narrowed.
+- **Wan2.1 / Wan2.2**: for every accepted shape (dimensions × frame count), both self and cross run as
+  declared.
+- **Detection**: each family's A/B check applies the full-eligibility check
+  (`assertAttentionSeatsComplete` — every dispatch of fused attention is an i8a8 / `:s16` variant;
+  it looks at ratios, so it does not depend on the device) to the census. Host tests
+  (`packages/runtime/tests/attention_route_test.ts` /
+  `packages/models/tests/wan_attention_route_test.ts`) pass every shape of the accepted set through
+  `attentionRoute` and pin the result. When using the runtime directly, tell them apart by whether the
+  diagnostic pipeline keys contain dense ones such as `attention_pv:v1:f32`.
+- A change that handles the remainders on the declared path is in the later section of the backlog.
+
+## On devices without dp4a, a8 does not get faster (a warning only, no fallback)
+
+The integer dot products of int8 activations (`linearCompute` / `attentionCompute: "a8"`) run emulated
+on devices without the WGSL language feature `packed_4x8_integer_dot_product` (dp4a). The numbers are
+identical to the dp4a version (ADR [0025](decisions/0025-w8a8-linear-execution.md)), but it gets no
+faster than the f32 path, and on Apple's Metal it is slower (ADR
+[0115](decisions/0115-geometry-profiles.md) Context). The runtime silently drops neither to f32 nor to
+the sibling preset without a8; it reports once per device with `console.warn` at Session construction
+(what happened, and the ways out = the preset with the same weights and no a8 (every distribution
+has one — checked by the distribution gate test) or `"f32"`) — ADR
+[0128](decisions/0128-default-preset-original-weights.md) decision 5. Using a distribution that has a8
+in its default (anima / irodori / wan2.1 / wan2.2) with its default on a GPU without dp4a produces
+this warning.
+
+## With w8a8 (`linearCompute: "a8"`) the propagation granularity of non-finite values is the same, but the sign of Inf does not match the f32 path
+
+On the per-token i8 activation execution path (opt-in — design in
+[research/2026-08-03-dp4a-w8a8-design.md](research/2026-08-03-dp4a-w8a8-design.md)), the integer dot
+product itself has no notion of non-finite values, and propagation happens **through the row scale
+`xs[row]`**:
+
+- **NaN**: a single NaN in a row makes `xs[row] = NaN` (propagated by bitwise detection — ADR 0020),
+  and `out = f32(acc)·(xs·wscale) + bias` becomes NaN in every column of the row. The f32 path also
+  reduces over the whole row, so **the propagation granularity does not degrade**.
+- **±Inf**: an Inf in a row makes `xs[row] = +Inf` (it is the largest absolute value, so **the sign
+  is not kept**). The output is `f32(acc)·(+Inf·wscale) + bias`, and the signs of `acc` and `wscale`
+  decide between ±Inf / NaN — **it does not match the sign of the Inf the f32 path produces**. The
+  invariant of ADR 0020 ("NaN does not silently disappear") holds, but sameness down to the sign is
+  not guaranteed.
+
+The quantized value `xq` itself is also **outside the contract** when the row scale is non-finite,
+because `vec4<i32>(NaN)` is an indeterminate value (only the row scale and the final output are
+compared). For models that contain non-finite values, this path too assumes a check beforehand on the
+caller side (the same position as "non-finite values are not checked" above).
+
+In addition, **WGSL's f32 division is not correctly rounded** (the spec allows 2.5 ULP; on this
+machine `a / b` was also measured to differ from IEEE division by 1 ULP in 55,605 of 200,000 samples).
+`q = round(x / s)` **can wobble by ±1 step** for elements where `x/s` comes close to a half-integer —
+an atol=0 comparison between the GPU and the CPU reference is a contract that holds only on "data
+sufficiently far from the rounding boundary", and on real models this ±1 step adds up as a numeric
+difference (one of the reasons the E2E tolerance is re-measured for the w8a8 series). The scale side
+is built by the **multiplication** `amax · (1/127)`, so it matches exactly.
+
+## conv2d (groups==1) fails loudly at the dispatch limit (Hout·Wout > 8,388,480)
+
+Implicit GEMM ([decisions/0024](decisions/0024-conv2d-implicit-gemm.md)) cannot degrade because
+1 workgroup = 1 output tile, so shapes whose tile count over n = Hout·Wout (tileN=128) exceeds the
+one-dimensional dispatch limit (65,535) — **Hout·Wout > 8,388,480** (2,897² or more for a square
+output) — become `DispatchLimitError`. The old direct kernel (grid-stride) could run these shapes, so
+this is an intentional narrowing of capability, but it stops with an exception rather than a silent
+wrong value. **This threshold derives from the default GEMM geometry** (the n side =
+`gemmTileN` = regN·wgX), so it moves when the default moves — the current value dates from `d0afc22`
+(2026-08-10), when the default became M128N128, and the "2048² exceeds the limit by 1" that ADR 0024
+wrote is the old value that assumed a side of 64.
+The value above is for the default profile; the limit depends on the tileN of the geometry profile
+the Session selected ([decisions/0115](decisions/0115-geometry-profiles.md)). With `apple-metal-3`
+(M2 — automatic on Chrome with the flag; without it, when injected through
+`acquireGpu({ geometryProfile })` (addendum decision 7)) conv2d has tileN 64, so the limit becomes
+**Hout·Wout ≤ 4,194,240** (about 2047×2048).
+The resolution is expected on the side of the "fixed-tile VAE" of the dynamic-resolution recon
+(research record [2026-08-03-dynres-vae-tiling](research/2026-08-03-dynres-vae-tiling.md)).
+The counts are pinned by `packages/runtime/tests/codegen_dispatch_test.ts`.
+
+`conv3d` (ADR [0118](decisions/0118-wan21-video-generation.md) decision 1) has the same skeleton and
+becomes `DispatchLimitError` at `Tout·Hout·Wout > 8,388,480` (the default tileN 128 × 65,535). The
+maximum of Wan2.1's VAE chunk graphs (tile 32) is 4 × 256 × 256 = 262,144, which does not reach it.
+
+GPU-side coordinate arithmetic is i32, so `conv1d` / `conv2d` / `conv3d` that break
+`input length + 2·padding ≤ 2^31 − 1` on any axis become `CodegenError` at Session construction (a wrapped coordinate would
+slip through the out-of-range-is-0 check and produce a wrong value — ADR 0118 addendum 2026-10-03. For
+conv1d / conv2d the direct and the implicit GEMM versions go through the same check). The semantics of
+the CPU reference are unchanged. Real assets never hit this (only IR with padding / dilation of about
+2^30 or more). `conv_transpose1d`, for the same reason, becomes `CodegenError` for shapes where any of
+the kernel, the input length or `output length + padding` exceeds 2^31 − 1 (to close the range of
+valid taps in i32).
+
+## Geometry profiles: on Chrome without the flag, tables matched by `description` do not apply automatically (external constraint)
+
+Without the developer flag (`chrome://flags/#enable-webgpu-developer-features`), Chrome leaves the
+adapter's `description` empty, so `apple-metal-3` (matched by `description: "Apple M2"`) does not
+apply automatically and Apple gets the default geometry (the M2 DiT loses its ×1.75; on M5 the default
+is the best). Applications can take it from `BUILTIN_GEOMETRY_PROFILES` and inject it with
+`acquireGpu({ geometryProfile })` ([decisions/0115](decisions/0115-geometry-profiles.md) addendum decision 7).
+
+## The BiRefNet family's distribution has 2 models, 1024² and 2048² (model name = resolution, default 1024²)
+
+`karume dist --pipeline birefnet` folds the 2 models `--model 1024` / `--model 2048` into 1 repository
+(ADR [0092](decisions/0092-distribution-repos-and-sources.md) decision 9 — if the resolution the
+model name claims and the input size of the series disagree, `DistError`). Other resolutions are not
+distributed (the export step `python -m birefnet.export --resolution <multiple of 64>` passes, so
+making a series is possible — distributing it needs an addition to the accepted set
+`BIREFNET_MODELS` and measurements).
+
+2048² **started passing the execution stage on 2026-09-05** (until then, the 2 outputs of the
+bilinear upsample at the end of the decoder, `[1,192,2048,2048]` 3.2GB, and of cat,
+`[1,240,2048,2048]` 4.03GB, exceeded NVIDIA's binding limit of 2GiB, and the Session's plan-time
+preflight (ADR 0093 decision 5) failed them with the node name). What resolved it was the combination
+of recipe-side patch ⑨ (`birefnet.patch` — swapping the order of the 1×1 conv and the bilinear
+upsample removes `cat`) and runtime-side static liveness packing (ADR 0093); the measurement for the
+f32 preset (Lucida's default) (RTX 3080 Ti 12 GiB, 2026-10-16) is weights 843MiB + intermediate
+region 2,948MiB (live peak 2,560MiB) + input and output readback 64MiB =
+**total GPU allocation 3,854MiB (about 3.8GiB — 1 GiB = 1,024 MiB), run 6.7–6.9 s**. 2048² entered the
+distribution on 2026-09-05, alongside 1024² (default 1024²).
+(It used to also be listed as a reason that "the decoder's 1×1 conv hits the conv2d dispatch limit
+above", but since `d0afc22`, when the default geometry became M128N128, the n tiles of 2048² are
+32,768, inside the limit — the only remaining reason was on the resource side.)
+The distributed 1024² is not light either: the measurement for the f32 preset (Lucida's default) needs
+weights 843MiB + intermediate region 751MiB (after ADR 0093's packing and patch ⑨; 6,283MiB with the
+old pool + old tail) + input and output readback 16MiB = **total GPU allocation
+1,609MiB (about 1.6GiB), run about 1.4 s** (measured 2026-10-16),
+and the largest binding is the decoder's `cat_211` `[1,1280,256,256]` 320MiB (followed by
+`[1,64,1024,1024]` 256MiB inside the ipt branch and the attention score S at 230MiB), so it is in
+practice **limited to desktop-class GPUs**. **Even when the distribution's `requiredLimits` field is
+empty, it does not run on a device with default specs** — the field states only the resident part
+(weights, state), and the intermediates exceed 128MiB
+(for the semantics of the declaration see the section "the GPU fit check before download" below).
+**Row-block fusion of decomposed attention misses at all 96 sites in this family** (the shapes of the
+mask `[1,6,144,144]` and of `softmax` do not match the measured shapes of the matcher). The score S
+therefore becomes a single binding, requiring 230MiB at 1024² and 878MiB at 2048². Even so, the
+largest binding is not that but the decoder's `cat_211` (320MiB at 1024² and 1280MiB at 2048² — the
+fit check before download is built from this value) — **devices with the 128MiB default are outside
+this family's scope** (at 1024², 24 intermediates besides S exceed 128MiB).
+The inference resolution of the original (General-HR in the bundled `handler.py`) is 2048², so the
+fact that this is **not the same setting as upstream** is stated explicitly as a constraint of the
+distribution. No workaround is included (a matter for whoever measures and decides).
+
+**Weight residency drops with the quant preset `f16`, but not by half** (ADR
+[0113](decisions/0113-birefnet-weight-series.md), 2026-09-26). The resident weights of the f16 series
+are **431 MiB** (f32 is 843 MiB — both nearly the same at 1024² and 2048²). Only eligible weights are
+stored in f16 (linear / conv / relative-position tables — 205 tensors, 820 MiB → 410 MiB, plus 8
+window-mask tables); the weights of deform_conv2d (19 MiB — they have no weight slot), bias / norm /
+α β stay f32. The window masks and the zero pads are not part of the resident weights (since
+2026-10-16 — the window masks are intermediates built at run time from tables for the 4 window kinds
+and per-window indices, and the zero pad is an `expand` of a single zero element. Until then the
+window masks (65 MiB at 1024², 248 MiB at 2048²) and the zero-pad constants (14 / 28 MiB) were kept
+resident in f32 — ADR 0113 addendum 2026-10-16). At 2048² the intermediate region (2,948 MiB) is the
+dominant term, so the effect on the total allocation is small. The quant presets are derived per
+checkpoint from the upstream storage type (ADR 0113 addendum 2026-10-11): BiRefNet_HR has only the
+`f16` preset (the upstream weights are f16 — an f32 preset would only hold the same values at twice
+the residency, so it is not offered), and Lucida has the `f32` default + `f16`. The total GPU
+allocation of HR's `f16` preset (weights + intermediate region + input + output readback) is
+1,198 MiB (about 1.2 GiB) at 1024² and 3,443 MiB (about 3.4 GiB) at 2048² (measured 2026-10-16,
+RTX 3080 Ti, 1 GiB = 1,024 MiB. The intermediate region and the largest binding are the same as for
+the f32 preset — activations are f32 even with the f16 preset).
+
+**2048² does not run on the Intel Arc B570 (Linux xe driver) — one dispatch exceeds the 5-second job
+limit** (measured 2026-09-20, ruling 2026-09-26 = explicit SKIP under that machine's environment key).
+The xe driver puts a limit of `job_timeout_ms` = 5,000 on a compute job (= one `queue.submit`) (not
+changeable by non-root; at most 10,000 even then), kills jobs that exceed it and turns them into
+device lost. In BiRefNet 2048², the single `deform_conv2d` at the end of the decoder (dispatch #2276,
+output `[1,256,1024,1024]`) hits this — pinned down to the dispatch by bisection, and it reproduces
+even with 1 dispatch = 1 submit (splitting submits by time budget (ADR 0004) does not help because
+"a dispatch that exceeds the budget on its own cannot be split"). The same dispatch takes 1.66 s at
+1024² (output `[1,256,512,512]`), so 2048² with 4 times the elements is expected at ≈ 6.6 s. The two
+1024² series (birefnet-hr / lucida) are all green even on the B570. Deno does not turn this device
+lost into an exception but panics, stopping the following tests along with the whole process
+(known-issues, "Intel Arc B570" section). For this reason, `HELD_SERIES` in
+`packages/e2e/tests/e2e_birefnet_test.ts` has rows for the 3 series of 2048² (birefnet-hr's f16,
+lucida's f32 / f16) × the B570 environment key (`deno-intel-graphics-bmg-g21`), and on this machine
+the tests that use the GPU (golden comparison, geometry discrimination) are explicitly SKIPped
+(a warn at registration; the asset integrity tests still run; no effect on other machines — the held
+rows of ADR [0106](decisions/0106-device-keyed-references.md) addendum 2026-09-26, part 3). The
+condition for lifting it is to split `deform_conv2d` into several dispatches on the kernel side, or
+to speed it up so that one dispatch fits within the limit ([perf-ledger](perf-ledger.md) K-63);
+the rows are removed then.
+
+## The BiRefNet family's α matte: it does not match the output of HR's upstream half-precision model, and upstream's truncation is not copied
+
+Post-processing (logit → 8-bit α at the size of the input image) copies each series' upstream
+**interpolation kernel and order of steps** (the distribution's `pipelineConfig.postprocess` —
+HR = `u8-pil-bicubic`, Lucida = `float-bilinear`. ADR
+[0125](decisions/0125-birefnet-matte-postprocess.md)). The contract goes as far as "the value obtained
+by applying each series' upstream procedure to karume's logit" (the golden check —
+`packages/models/tests/birefnet_matte_test.ts`), and the following 3 points are by-design.
+
+- **It does not match the output of the upstream half-precision model**: HR's upstream (the bundled
+  `handler.py`) runs the whole model in half precision (both weights and activations f16). Both of
+  karume's HR presets compute in f32, so the logit differs from upstream from the start. Imitating half
+  precision only in the last post-processing step would not bring it closer to upstream, so it is not
+  copied (ADR 0125 decision 5).
+- **Upstream's truncation is not copied**: quantization to 8 bits rounds half up (0.5 rounds up) in
+  every procedure. Upstream truncates in both series, and f32 truncation turns 60–85% of the
+  foreground with confidence 1 into 254 instead of 255 (measured on real images). In karume, pixels
+  with logit 6.23 or more become 255 (ADR 0125 decision 4).
+- Applications cannot choose the procedure (only the distribution declares it). The upstream
+  procedure had no problem that needed a workaround, so no option to choose it was added (the
+  "Consequences" section of ADR 0125, the ADR [0005](decisions/0005-verification.md) addendum
+  2026-10-11).
+
+## conv1d (groups==1) also fails loudly at the same dispatch limit (Lout ≈ 8.39M)
+
+conv1d's implicit GEMM ([decisions/0053](decisions/0053-conv1d-implicit-gemm.md)) is also
+1 workgroup = 1 output tile, and shapes whose tile count over n = Lout (tileN=128) exceeds 65,535 —
+**Lout > 8,388,480 samples ≈ 175 seconds @48kHz** — become `DispatchLimitError`. In real use the
+dacvae decoder is tiled (halo 8) and SBV2 is cut first by its operating limit (pipelineConfig), so
+this is not reached, but long shapes calling the kernel directly stop with an exception (not a silent
+wrong value).
+
+## On Deno, the total GPUBuffer allocation tops out at 97% of the driver-reported budget (external constraint)
+
+Deno's WebGPU implementation hard-codes wgpu's **memory budget thresholds**
+(`MemoryBudgetThresholds { for_resource_creation: 97,
+for_device_loss: 99 }` in `ext/webgpu/lib.rs` — wgpu's own default is "no thresholds"). The test is
+"`heap usage + requested size ≥ heapBudget × 97%`" (`error_if_would_oom_on_resource_allocation` in
+wgpu-hal vulkan), and `heapBudget` is a dynamic value the driver reports through
+`VK_EXT_memory_budget`. **No change to the number of buffers, the upload path or the
+flush frequency moves the ceiling** (only the total and the requested size enter the test —
+consistent with the measurement where 6 ways of writing it gave the same value). A `createBuffer`
+that crosses the 97% line returns OOM, and the 99% line is checked on every submit / poll and becomes
+**device loss** (this also explains the measurement where a loss in the middle of Session
+construction took the rest of the same process down with it).
+
+- Measurement (RTX 3080 Ti 12,288MiB, Deno 2.9.4 / wgpu 29.0.1, as of 2026-08-03): tops out at a total
+  allocation of 7,280MiB (= 0.97 × back-computed budget ≈ 7.5GiB. **Why the budget is reported as only
+  61% of the total is not identified** — most likely it depends on the driver implementation). The f32
+  Anima DiT (weights 7,465MiB) therefore does not fit, and the 2 E2E tests concerned are ignored (the
+  f16 3.7GiB / i8 1.9GiB series are unaffected).
+- **The ceiling is a point-in-time value, not a fixed one**: the `heapBudget` in the test is reported
+  dynamically by the driver, so it moves with every measurement even on the same machine. The
+  re-measurement on the same machine on 2026-08-08 gave **11,136–11,264MiB**
+  (allocating in 256MiB steps with `tools/diag/hold-vram.ts` (removed in 0.15) → `not enough memory left`;
+  two samples on the same day showed this spread). This does not contradict the 7,280MiB above; both
+  simply reflect 97% of the budget reported at that time.
+- Measurement (Intel Arc B570 10,172MiB = 9.93GiB, Linux xe, Deno 2.9.6, as of 2026-10-02): ceiling
+  **9,600–9,631MiB** (no wobble across 3 series). The reported budget (ceiling ÷ 0.97) is 9,897–9,930MiB,
+  97.3–97.6% of the total, and the ceiling is about 94.4–94.7% of the total. The report is much higher
+  than the 61% precedent of the RTX 3080 Ti. Procedure and table in
+  [research/2026-10-02-b570-vram-budget.md](research/2026-10-02-b570-vram-budget.md) §3.
+- **Near the ceiling there is a boundary where the result is device loss, not OOM**: the 97% line is
+  the OOM of `createBuffer`; the 99% line is **device lost**, checked on every submit / poll. Slightly
+  higher pressure turns the symptom into "intermittent device loss", so watching only allocation
+  failures misses it.
+- **There are also 2 kinds of OOM at the 97% line, and JS cannot tell them apart** (investigation of
+  2026-09-27 — [research/2026-09-27](research/2026-09-27-h35-oom-device-lost.md)): the OOM of
+  `createBuffer` is non-fatal and the device stays alive. An OOM in the staging that
+  `queue.writeBuffer` creates internally (the same for `writeTexture` and `mappedAtCreation` without
+  MAP_WRITE), in submit or in bind group creation makes wgpu lose the device on the spot. Both reach
+  the out-of-memory errorScope as the same `GPUOutOfMemoryError` (message `not enough memory left`).
+- **On Deno, `device.lost` resolves late**: Deno does not register wgpu's device-lost callback, so
+  `device.lost` does not resolve until the next call that goes through validation (submit / writeBuffer
+  / createBuffer / mapAsync) (it does not resolve on `onSubmittedWorkDone`). At the moment an OOM is
+  caught by the errorScope, the device may already be dead.
+- **On a ReBAR GPU (Arc B570), staging lands on the VRAM heap**: the VRAM heap doubles as
+  host-visible and the allocator (gpu-allocator) puts staging there, so when VRAM runs out it shows up
+  as an OOM on the staging side (= the side that loses the device).
+- **Chrome (Dawn) follows the same rule** (only createBuffer / createTexture / createQuerySet pass OOM
+  to the errorScope; an OOM in staging / submit is device lost), but places staging on the largest heap
+  (system RAM on this machine) (inferred from the source, not measured).
+- **Consequence: a design of "hit the OOM, then release and retry" cannot be relied on under Deno**.
+  karume measures the headroom first with a non-fatal trial allocation through `createBuffer`
+  (the runtime's `fitsHeadroom`) and lets go before hitting the OOM if it does not fit (anima's DiT
+  residency — ADR [0112](decisions/0112-anima-transformer-residency.md) addendum of 2026-09-27).
+- The f16-1024 PNG check **briefly reached 8,391MiB on the first run** (steady state 5,723MiB),
+  leaving only 2.7GiB of margin against the ceiling of 11,136MiB. The transient peak was the
+  double counting of weight staging, resolved by inserting one submit at Session creation (measured
+  peak 5,723MiB, margin 5.4GiB. Mechanism and measurements in
+  [research/2026-08-08](research/2026-08-08-vram-oom-misreport.md)).
+- **It cannot be worked around on Karume's side**: wgpu has an API that changes the thresholds, but
+  Deno hard-codes them, and there is neither an environment variable nor a CLI flag. The only real
+  options are a patched build of Deno or running on a machine with more VRAM. The limit is
+  proportional to the "driver-reported budget", not to the total VRAM, so a 24GiB machine is expected
+  to fit the f32 DiT (not demonstrated).
+- The file:line sources, the known upstream reports (denoland/deno#35195 and others) and the basis of
+  the back-computation are in
+  [research/2026-08-03-wgpu-memory-ceiling.md](research/2026-08-03-wgpu-memory-ceiling.md).
+
+## Decode on the Deno CLI includes a 10 ms wait per token (external constraint, deno_webgpu's poll loop)
+
+`ext/webgpu/buffer.rs` (`mapAsync`) and `queue.rs` (`onSubmittedWorkDone`) of Deno 2.9.6 wait for
+completion in the form `while !done { device_poll(wait_indefinitely); sleep(10 ms) }`, and always
+sleep 10 ms once even after the GPU has finished. Decode is 1 token = 1 fence, so a constant of
+10 ms/token rides on Deno's wall time (10 ms of 23.8 ms/token on the RTX 3080 Ti). Running the same
+assets on Chrome gives a wall time of 10–11 ms/token.
+
+- **It cannot be worked around on Karume's side** (`pop_error_scope` does not have this wait, but
+  reading back needs `mapAsync`). The options are a patched build of Deno, or run-ahead that increases
+  the tokens per fence (perf-ledger H-27).
+- **tok/s on the Deno CLI is not used as a product performance metric** — adoption decisions are made
+  on Chrome's wall time and GPU time. Root cause and measurements in the
+  [decode speed investigation](research/2026-09-19-qat-speed-recon.md) §3.2.
+
+## Execution paths and eligibility of compressed storage — VRAM shrinks only for eligible weight slots
+
+Every codec in the codec ledger can be executed (bf16 was "declaration accepted, execution fails
+loudly" until 2026-10-17, but with [decisions/0131](decisions/0131-bf16-weight-execution.md) it moved
+onto the same path as f16). The canonical source for what can be executed is
+`RUNTIME_SUPPORT.storage` ([ir-v2](ir-v2.md) "Values and types").
+
+Group quantization (w4) was **enabled, with its execution path implemented**, by
+[decisions/0069](decisions/0069-packed-w4-storage.md) (2026-08-18) — codec `int4-sym-g` (storage
+dtype `i4`, packed 4-bit, symmetric quantization with groups along K). The constraints are 3 points:
+`groupSize` is a power of 2 and at least 16; the quantization axis (the flattened row length with the
+leading dimension as rows — for rank 2, the last dimension itself) is divisible by `groupSize`; and a
+scale companion (f32, rank 2 `[rows, row length/groupSize]`) is required. **Eligibility is narrower
+than for f16 / i8: "only weight slots consumed by linear / embedding / conv1d (`groups == 1`)"**
+(0069 decision 5 and addenda 6 / 7 — additions for conv2d / conv_transpose1d come op by op as demand
+appears), and ineligible weights are expanded on the CPU at load time (zero VRAM reduction). For the
+per-channel codecs (`int8-sym` / `int2-off` / `ternary`), `groupSize` MUST equal the row length, and if
+it differs the merge layer rejects it (silently reading it as per-channel would be a silent wrong
+value).
+
+**f16 was enabled on 2026-08-03** ([decisions/0018](decisions/0018-f16-weight-execution.md)),
+**i8 (per-channel symmetric int8) was enabled the same day**
+([decisions/0019](decisions/0019-i8-weight-execution.md)), and **bf16 was enabled on 2026-10-17**
+([decisions/0131](decisions/0131-bf16-weight-execution.md) — the same eligibility as f16, expanded by
+bitcast) — but in every case VRAM shrinks **only for eligible weight slots**. Ineligible ones (bias /
+norm-type weight / other ops / mixed consumption / no consumer) are expanded to f32 on the CPU at load
+time, the **VRAM reduction is zero**, and only the delivery size shrinks.
+The breakdown is observed with `Session.diagnostics().storage` (the standing diagnostics of ADR 0006.
+For i8, `residentCompressedBytes` also includes the bytes of the scale buffer).
+
+i8 **requires a declaration** of `encoding.scale` (rank 2 `[shape[rowAxis], 1]`, f32), and the row
+axis `rowAxis` is the output channel (axis 1 only for `conv_transpose1d`). A missing scale, a wrong
+dtype or a wrong length fails in the merge layer before the weights are fetched. Matching `rowAxis`
+against the channel axis of the consuming op applies only to initializers in GPU-resident slots, and a
+mismatch fails in the residency plan of `prepareContainer` before the weights are fetched.
+Slots that are ineligible and expanded to f32 are restored with the declared `rowAxis`, so the values
+do not shift even without the matching.
+
+## hub: phase 1 (streaming prefetch) requires CacheStorage and fails loudly
+
+Phase 1 of `prefetchAssets` is a surface that does not hold the bytes in hand, so in an environment
+where CacheStorage is unavailable there is structurally no room to fall back to a plain fetch, and it
+fails loudly (ADR [0070](decisions/0070-shard-loading-admission.md) addendum). The `onCacheError`
+diagnostic arrives only in phase 2.
+Node has no Cache Storage, so pass `nodeCacheStorage(dir)` from `@karume/hub/node` as `caches`
+(if it is not passed, it fails loudly in the same way — 2026-10-17).
+
+## hub: when separate loads warm the same file at the same time, both download it (by-design)
+
+`prefetchAssets` (phase 1) is outside the merged concurrent fetches of the fetch layer (single-flight —
+the mechanism that bundles concurrent fetches of the same key into one). Merging is a contract of
+"hand the bytes the earlier fetch received to the later one", and warming, which does not hold the
+bytes in hand, has nothing to hand over (by-design in the fetch layer `@hdae/fetch-cache` 0.8.0).
+So when separate loads (2 loads starting from different `loadManifest` calls) warm the same file at
+the same time, both go out to the network. Storing into the cache overwrites with the same content,
+so correctness is not broken; only bandwidth increases. Within one load the fetch plan is
+deduplicated, so nothing is duplicated. A mechanism to share warming across loads will be added once
+there is a real need.
+
+## The `workspaceBytes` of estimates (`PreparedModel.estimate` / `estimateGraphMemory`) is approximate (`unaccounted` lists what is not counted)
+
+`scenarios[].workspaceBytes` is a live-interval simulation over the node sequence **before** fusion,
+and the shapes that the real build folds / splits are not counted. The exception is **row-block
+attention** (the 9-node window of decomposed attention — ADR
+[0060](decisions/0060-row-block-attention.md)): windows caught by the same fusion plan as the
+execution phase are counted in their post-fusion shape (the temporaries and output of one row block),
+and the binding-limit check also applies only to that buffer (ADR [0093](decisions/0093-transient-liveness-packing.md)
+addendum 2026-10-10). The `unaccounted` field lists what is not counted, verbatim — ① intermediates
+that fusions other than row-block attention fold away, and the in-node temporaries their fusion rules
+declare ② the quantization intermediates of linear i8a8 ③ params buffers
+④ the implementation staging of `queue.writeBuffer` ⑤ the window of retirement (slot backings
+retired by budget overrun / LRU eviction of plans stay alive until the cleanup after flush).
+**The in-node temporaries of attention are counted** — the score S and the row statistics of the
+states form (the row statistics only for plans that `stateAttentionReduce` requires; 0 bytes for
+plans where the stats/PV fusion holds), and the score S, row statistics and i8a8 quantization
+intermediates of the fused attention op (ADR
+[0124](decisions/0124-attention-row-block-budget.md) decision 7). The options of the fused attention
+op are passed through `attentionCompute` / `attentionScoreStorage` of `EstimateOptions`; if omitted,
+they are counted with the runtime default f32 (Anima's per-stage estimate does not pass the options —
+an overestimate for s16 of the practical preset, and an underestimate by the quantization temporaries
+for a8).
+The number of row blocks of the fused attention op is decided by the binding limit, so an estimate
+that does not pass `EstimateOptions.maxStorageBufferBindingSize` counts only shapes whose block count
+is the same on every device (shapes that fit in 1 block at the WebGPU core default of 128 MiB, and
+shapes whose `attentionRowBlockMaxBytes` is at most the core default), and fails loudly naming the
+limit for everything else (the same reason as for the states form — dividing by the core default would
+let the estimate alone claim a block count that no device produces).
+There is one more difference not listed in `unaccounted`: **padding at region boundaries** — the
+estimate's placement drifts from the real build's packer by a few hundred bytes.
+`EstimateOptions.maxBufferSize` affects both the limit check of a single state slot and the limit of
+the intermediate packing regions, and can move `workspaceBytes` (how first-fit splits regions changes
+with the limit). The remaining difference is offset alignment: there is no field that receives the
+device value, and it packs with the WebGPU core default of 256 (the JSDoc of `estimate.ts`).
+The final check of feasibility remains the out-of-memory errorScope as before, and
+`peakAccountedBytes` is, as its name says, "the peak of what was counted" = not an upper-bound
+guarantee.
+
+**The slot backing budget appears as a lower bound**: `peakAccountedBytes` is
+`weights + state + max(budget, largest scenario)` (ADR [0095](decisions/0095-plan-backing-budget.md)
+decision 4; the largest scenario includes the bucket shapes of `generation.chunkBuckets` — the same
+ADR, addendum 2026-10-10), so for small models where the default budget of 256 MiB is larger than the
+scenarios, 256 MiB is counted even when the amount actually held is a few MiB (an overestimate). It
+can be subtracted using the reported `planBackingBudgetBytes`; with `planBackingBudgetBytes: 0` it
+returns to the former `max(scenarios)`.
+
+## The attention row-block budget (`attentionRowBlockMaxBytes`) is a per-temporary limit, not a total, and a budget violation fails when the run's plan is derived
+
+`SessionOptions.attentionRowBlockMaxBytes` (ADR [0124](decisions/0124-attention-row-block-budget.md))
+is a knob that splits the row blocks of attention that materializes the score S (the fused attention
+op, the states form, row blocks of decomposed attention) so that they fit in **the smaller** of the
+device's binding limit (`maxStorageBufferBindingSize`) and this value. The output bits are the same as
+without a budget, and omitting it is the same as before (split by the binding limit only). Its
+by-design properties are as follows.
+
+- **It is a per-temporary limit, not a limit on the total**: one S block and one row-statistics block
+  are each at most this value, but the total of what is alive at the same time can exceed it. The
+  i8a8 quantization temporaries (outside the row-block loop) and other intermediates such as the FFN
+  intermediate are not bound by this value (the limit check of the intermediate placement stays at the
+  binding limit). It is not a budget for total VRAM.
+- **A budget smaller than one row fails when the run's plan is derived** (fails loudly, naming the
+  budget): at Session construction the shapes are still symbolic and the block count is not known, so
+  construction rejects only values out of range (0, negative, non-integer, NaN, non-numbers). For Wan's
+  DiT, it fails after the weights are loaded. The way to know beforehand is the estimate (pass the same
+  value to `EstimateOptions.attentionRowBlockMaxBytes`).
+- **The peak can drop below the no-budget case, but a smaller budget does not necessarily lower it
+  further**: what the budget shrinks is the temporaries of one row block, and the peak of the
+  intermediates as a whole depends on how the intermediate placement splits (in the estimate's
+  computed values, for Wan2.2's DiT with the practical preset at 121 frames, 256 MiB is larger than
+  512 MiB — [research 2026-10-11 (estimate before and after)](research/2026-10-11-fused-attention-estimate-before-after.md).
+  The real-size backing of the same shape decreased monotonically 1 GiB → 512 MiB → 256 MiB, and the
+  shape of the estimate did not appear — measured on the development machine 2026-10-11,
+  [research 2026-10-11 (measurements of step 4b)](research/2026-10-11-row-block-budget-stage-4b.md).
+  Only this one shape was measured).
+- **The speed cost depends on the shape and the machine**: dispatches increase by the added block
+  count × the dispatches per block (fused attention 3, decomposed attention 4, states form 2–3).
+  There are measurements where splitting made small shapes slower, and examples where splitting was
+  faster (ADR 0124 Context). For Wan2.2's DiT with the practical preset at 121 frames (the development
+  machine's RTX 3080 Ti, Deno), the total GPU time in timing mode was within the wobble of the
+  no-budget case at budgets of 1 GiB / 512 MiB, and +24.9% at 256 MiB (measured 2026-10-11,
+  [research 2026-10-11 (measurements of step 4b)](research/2026-10-11-row-block-budget-stage-4b.md)).
+- **The models pipelines have no knob for it (nor did gpu-lab, removed in 0.15)**: it is a field of
+  the runtime's `SessionOptions` only, and cannot be passed from `WanTi2vPipeline` and the like, or
+  from the Wan tab of gpu-lab. It is not put into Wan's default either (ruling 39 = a, the maintainer
+  2026-10-11 — the results section of step 4b in ADR 0124). A knob will be added once a problem that
+  needs solving appears (the policy of the ADR 0005 addendum of 2026-10-11). Callers that use the
+  runtime directly can use `SessionOptions.attentionRowBlockMaxBytes`.
+
+## Budgeted retention of slot backings: a shape that does not fit in the budget is held alone, and disposing a resident input is rejected while it is held
+
+Slot backings are kept several at a time within a budget (default 256 MiB,
+`SessionOptions.planBackingBudgetBytes` / the options of `Gemma4Pipeline`) (ADR
+[0095](decisions/0095-plan-backing-budget.md)). 3 by-design constraints:
+
+- **A shape larger than the budget is held alone** (held by retiring all the others = the former
+  capacity of 1). gemma4's chunk-768 shape is ≈ 528 MiB at capacity 16K and 192 MiB at capacity 2K,
+  so by default, turns that include a prompt of 768 tokens or more still rebuild
+  768 shape ↔ bucket shape ↔ decode shape (≈ 40 ms each) as before. Only the round trips of short turns
+  (bucket shape ↔ decode shape) disappear. If you feed a long prompt every turn, raise the budget.
+- **While a backing that has a resident input (`ResidentTensor`) baked in is held, that input's
+  `dispose()` fails loudly**. With capacity 1 the window could be closed by switching to another
+  shape; within the budget it lasts until the Session's `dispose()` or until retirement by budget
+  overrun. `planBackingBudgetBytes: 0` returns to the former behaviour.
+- **Not yet passed through for other families**: families other than gemma4 build their Session
+  options from the manifest's `session`, so there is no way to change the budget and the default of
+  256 MiB applies (families whose shapes are smaller than the budget are on the multiple-retention
+  side; the maximum of +256 MiB appears in the estimate).
+
+## prefill buckets (`chunkBuckets`): the uncounted window of the estimate widens, and buckets below 16 do not take the tiled path
+
+gemma4's prefill runs each chunk with the physical row count of "the smallest bucket ≥ `queryLength`"
+(ADR [0066](decisions/0066-generation-context-state-slots.md) addendum 10, default
+`GEMMA4_CHUNK_BUCKETS`). 2 by-design constraints:
+
+- **The transient VRAM peak widens outside the estimate**: slot backings (the bundle of a run's
+  intermediate buffers) are built only for hit runs, so the **first** bucket run of the last chunk
+  (a miss run) allocates its temporaries in the arena while the held backings are still loaded.
+  Backings are kept several at a time under a byte budget (ADR [0095](decisions/0095-plan-backing-budget.md),
+  default 256 MiB), so the counted side is `max(budget, largest scenario)`, and the windows on the
+  uncounted side are "from retirement (budget overrun / LRU eviction) to destroy" and "the arena
+  temporaries of a miss run (at most one bucket shape)". The estimate's scenarios themselves remain the
+  2 of prefill / decode. From the second turn on, both the bucket shapes and the decode shape are held,
+  so no rebuild happens (within the budget).
+  When `generation.chunkBuckets` is passed to the estimate, the bucket shapes **enter the maximum of
+  the peak without being listed as scenarios** (with row-block equal splitting, a shape with fewer rows
+  at a block-count boundary uses more temporaries, so the prefill shape is not necessarily the
+  maximum — ADR [0095](decisions/0095-plan-backing-budget.md) addendum 2026-10-10). gemma4's
+  `estimateSessionMemory` passes the buckets.
+- **Buckets below 16 do not take K-13's tiled path**: ①ₜ / ③ₜ of states-form attention are chosen
+  only for plans with M ≥ 16, and below that they fall to the reference path ① / ③ (with
+  `stateAttentionReduce: "parallel"`, ③′, and for M ≤ 8 also ①′ — K-14). The values are correct but
+  slow, and for `parallel` × M ∈ [2, 16) the only measured shapes are the speculative verify shapes
+  (M = 4 / 8). Of gemma4's default buckets (`GEMMA4_CHUNK_BUCKETS` = 4 / 8 / 32 / 64 / 128 / 256),
+  4 and 8 fall into this range.
+
+## The linear GEMV family (1 ≤ M ≤ 64): the row-block height is chosen with constants of the reference device, and the first turn pays the shader parsing cost
+
+linear with i4 / i8 storage × f32 compute is taken by the GEMV family for 1 ≤ M ≤ 64 (ADR
+[0082](decisions/0082-linear-gemv-decode.md) addendum 5), which stays a full u32 match with the default
+GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 2 by-design constraints:
+
+- **The row-block height `rows` is a pure function of (storage, m, n), and the parallelism target of
+  16384 threads is the saturation point of the reference device (RTX 3080 Ti) baked in**. On GPUs whose
+  saturation point is an order of magnitude smaller (integrated GPUs, the Apple M series) it buys too
+  many y tiles and re-reads the weights more than is optimal, but the values are correct, and the
+  choice does not change per device — choosing by a pure function is the premise of "same key →
+  byte-identical WGSL" and of the ban on run-time autotuning (ADR 0022). For other devices, replace it
+  with `SessionOptions.linearGemvRowsThreadTarget` (static, fixed at Session creation).
+  There is no automatic selection per device.
+- **The first turn pays the shader parsing cost**: a row-block variant is WGSL unrolled over its rows,
+  and the parse and validation cost is superlinear in the amount of text. Even at the ceiling
+  (256 elements/word), i4 with 8 rows / i8 with 16 rows cost ≈ 55–60 ms each, and the 5 pipelines that
+  the M=32 bucket prefill of gemma4 E2B creates on the first turn total ≈ 150 ms (measured on
+  Deno / naga). Pipelines are created only once per device, so this does not apply from the second turn
+  on. The parsing cost in the browser (Tint) is not measured.
+
+## Scaffolding for speculative decoding (MTP stage 1, ADR 0096): deferred runs are limited to the sliding slack, and gemma4's distribution has to be rebuilt
+
+- A run issued with `GenerationRun.commit: "deferred"` is limited to
+  **`queryLength ≤ context.slidingSlack`** (gemma4's distribution has a slack of 8, so up to 8 rows —
+  tightened by one column from `+ 1` at stage 3: a borrower (readonly reader) reads up to column
+  `P−W`, one column older than the lender, so the condition under which rejected rows never enter the
+  window in every case, including `commit(0)`, is `Q ≤ slack`. It does not branch on whether a
+  borrower exists). An issue beyond it fails loudly in the synchronous part — it is the condition under
+  which rejected rows would clobber the live window of the sliding ring, and letting it through would
+  corrupt past KV with neither an exception nor a NaN.
+  Immediate runs (prefill / decode) commit all rows, so their limit stays `chunkLength`.
+  While a pending commit (`pendingCommit`) remains, the next run and `rewind` are rejected (fold it with
+  `commit(rows)`).
+- gemma4's distribution (the product series) changed to **a physical row count of `window + 8` for the
+  sliding slots, 2 outputs (output 0 = logits `[1,R,V]`, output 1 = the hidden state after the final
+  norm `[1,R,H]`), and `last_row` of `[R]`**. An old distribution with 1 output makes `Gemma4Pipeline`
+  fail loudly (no compatibility branch is written — unreleased).
+  The local mirror (`models/karume-gemma4`) is rebuilt with `dist.py --pipeline gemma4`. The decode /
+  token acceptance series are unchanged (the runtime still reads assets with sliding capacity = window
+  as before — the modulus is the capacity, so the values do not change).
+- Each decode step adds a readback of the hidden state `[1,1,1536]` f32 (6 KB) (the drafter reads it at
+  stage 3 — the generation loop of stage 1 does not read it). The readback of an R-row verify is logits
+  R MiB + hidden R × 6 KB.
+- The PreparedPlan LRU holds 12. gemma4's 6 default buckets (4 / 8 / 32 / 64 / 128 / 256) + the prefill shape
+  - the decode shape = **8 shapes per capacity**. Alternating sequences with different capacities
+    overflows at 16 shapes, and decode silently falls back to re-derivation (no exception — the
+    observation point is `SessionDiagnostics.lastRunPrepared.hit`).
+- The attention of the verify shapes (M = 4 / 8) is ①′ + ③′ (①′ is for plans with M ≤ 8 = decode and
+  verify; ①ₜ / ③ₜ stay at M ≥ 16). T(4) = 27.6 / T(8) = 37.2 ms (P ≈ 14.7K, GPU wall time) are the
+  values in this band, and tightening them is stage 4.
+- The torch-side trace limit of R is 9 (draft 8 + bonus 1). The IR does not carry symbol ranges, so it
+  does not constrain the runtime's bindings — the runtime-side limit is the `slidingSlack` above.
+
+## The entry to speculative decoding (MTP stage 2, ADR 0096): the drafter is a borrower and is folded before the lender, read-only sliding is 512 columns, k is 1..3
+
+- A run of a **borrowing context** (`createGenerationContext({ chunkLength: 1, borrow: lender })`)
+  **takes the lender's run lease** — if the lender has a run in progress, an uncommitted deferred run
+  or poison, it fails loudly in the synchronous part. A borrower does not advance the logical length
+  (an external slot is only read and cannot carry an append), and cannot issue deferred runs either.
+  Several borrowers can attach to the same context.
+- **The lifetime order borrower → lender is a MUST**: `dispose()` of a lender context while a borrowing
+  context is alive, and `dispose()` of a lender Session while a borrowing Session is alive, are a
+  **Promise.reject** (an intentional departure from the idempotence contract of dispose — the
+  borrower's bind groups hold the lender's buffers).
+  `Gemma4Pipeline.dispose()` folds the drafter Session first and then the target Session. Weight lending
+  on the lender side is counted by the borrow count of `Session.exportWeight`.
+- **The sliding columns that readonly attention (the drafter's cross-attention) reads are the 512
+  columns `[P−W, P)`**. HF's drafter sees 513 columns because its bidirectional SWA is inclusive, but
+  the 513th column (position P−513) is a row that can be clobbered in the ring with a slack of 8 when a
+  rejection with kmax = 8 happens, so it is not taken. The impact on the acceptance rate is not measured
+  (comparing drafts on identical inputs matched 100% over 3 cases × 200 cycles × 3 steps).
+- **`speculative.k` is 1..3** (the distribution's drafter is baked with a 3-step unroll — increasing k
+  means re-exporting; a dynamic k is stage 4). `fromAssets` does not accept `speculative` (`Gemma4Assets`
+  has no field for the drafter).
+- **`estimateSessionMemory`** adds the verify shape (M = R = k+1) to the target's prefill / decode, and
+  sums in the drafter's resident weights (excluding the borrowed embedding table) and the 8 bytes of
+  lengths of the borrowing context (stage 3).
+- **The drafter's storage is i8 only** (linear too is i8 per-channel). Assets that drop linear to
+  i4 g32 are rejected by `dist.py` (the number of accepted tokens E[a] drops −15 to −33% against
+  the unrounded ratio — ADR 0096 addendum 2026-09-08).
+  However, this check (`tools/export-recipes/gemma4/distribution.py`) is **contamination detection**
+  that looks at the storage in the container's binding table as "i8 is present / f16 and i4 are
+  absent", not a guarantee that "every linear is i8"
+  (norm needs f32, so banning f32 entirely cannot close it, and a single i8 tensor satisfies the
+  presence check — assets that baked only some linears in f32 pass).
+- **Admission matches only the structure** (`packages/models/src/gemma/speculative.ts`) — it compares
+  the drafter graph's inputs, outputs, external slots and shared initializers by shape, name and storage
+  dtype, but does not check whether the target and the drafter are of **the same asset generation**
+  (baked from the same checkpoint). A drafter of a different checkpoint with the same shapes passes
+  admission; only the acceptance rate drops and no wrong token sequence comes out (what decides is the
+  target's logits and `sampler.next`). Pairing the generations is the responsibility of whoever
+  assembles the distribution (mirror).
+- **hub's `ResolveOptions.weights: []` resolves only the assets** (a form that fetches no weights at
+  all). It has no meaningful use, but reading empty as "all" would let a regression in the narrowing
+  of `speculative` pass silently, so empty stays empty.
+
+## Speculative decoding (MTP stage 3, ADR 0096): speculation runs regardless of temperature, M=1 / M=4 identity is guaranteed per device by checks, one drafter Session per pipeline
+
+- **Speculation runs regardless of temperature, and the token sequence is identical to non-speculative
+  decoding** (the acceptance draw calls `sampler.next` once per row with the same logits, history and
+  order as non-speculative decoding, so even the consumed RNG sequence matches). The acceptance rate
+  varies with temperature — the value with the distribution's recommended sampler (temperature 1.0) is
+  not measured (stage 4).
+- **The exact match "with speculation = without speculation" is pinned by e2e checks, including the
+  default preset** (on 2026-09-26 the claim that "it can rarely split with the default preset" was
+  withdrawn). Even with gemma4's default `"parallel"`, the reduction order of attention is the same for
+  M=1 and M=4 (①′ applies for M ≤ 8 and ③′ for M < 16, so both decode and verify are ①′ + ③′).
+  Identity including the other paths whose shape changes with M (the row blocks of the GEMV family and
+  so on) is checked in 2 tiers by `e2e_gemma4_speculative_test.ts` — speculation ⑤ = u32 equality of
+  verify row 0 and the decode logits (the combinations of 3 attention variants ×
+  `linearGemvReduce: "parallel"`, attention `"sequential"` / `"parallel"` × GEMV `"sequential"`, and
+  RMS→add fusion (with the linear→SRQ setting)), and speculation ① / ② = equality of the generated
+  token sequences (① = the `"sequential"` setting, ② = 3 cases × 200 tokens with the default preset
+  `i4-fast` of the regular E2B distribution, gated = always. The attention at the time of the B570
+  measurement below was `"parallel"` (the old family default), and on the same day the declaration of
+  `i4-fast` moved to `"parallel-fused"` — re-measurement with the new declaration is not done). The
+  Intel Arc B570 measurement of 2026-09-26 matched for every combination, with 0/200 × 3 cases
+  differing for the default preset
+  ([research 2026-09-26](research/2026-09-26-gemma4-speculative-determinism.md)). The u32 check covers
+  all 12 combinations of 3 attention variants × 2 GEMV kinds × RMS→add fusion (+ the linear→SRQ
+  setting) (widened to all combinations on 2026-09-26).
+- **The guarantee is per device**. The checks confirm only the device of the machine that ran the
+  gemma4 lane, and on a machine where the check is red, differences between M=1 and M=4 really exist
+  (the execution order of reductions changes because the grid-stride split depends on the device's
+  limits, so no claim is made across machines).
+  If exact reproducibility is needed on such a machine, choose `speculative: "always"` (no gate) or
+  `stateAttentionReduce: "sequential"` (the runtime's reference path, where M=1 and M=4 use the same
+  reduction kernel). There is no canary that confirms identity at run time on the user's device.
+- **The self-tuning gate is on by default, and what switches it is wall-clock time** (stage 4-B ④, the
+  default of `speculative: true`). The gate measures the wall time of a cycle and of one decode step at
+  run time, and while speculation is losing it falls back to the M=1 decode shape (it decides after
+  seeing 2 consecutive block aggregates of 16 cycles, and returns on a burst aggregate of 8 cycles
+  (a burst that loses badly is cut off from the 4th cycle on) —
+  a single sample loses to the variance of the accepted count. The gain depends on the task and the
+  host, and the break-even threshold also moves, RTX 1.72–1.88 / M2 2.17–2.6, so it cannot be baked as a
+  fixed value — research 2026-09-09). The wall clock wobbles per run, but the 2 paths that can be chosen
+  (M=1 for a step that fell back, M=4 for a speculative cycle) are bit-identical by the checks of the
+  item above, so **on a device where the checks are green, the wall-clock choice does not change the
+  output** (general rule 3 of the ADR 0058 addendum of 2026-08-29, ADR 0096 addendum 2026-09-26).
+  Speculation ② of the e2e also checks, with the default preset, that the gated sequence matches
+  always. The handling of devices where the check is red is as in the item above.
+  The number of steps that fell back is `GenerationStop.speculation.plainSteps` and the number of
+  switches is `switches` (with `"always"`, neither field exists).
+- **`stateAttentionReduce` does not affect the drafter's readonly attention (①′ ③′) — it is fixed to
+  parallel** (the option affects only the target's states-form attention). The exact match above is a
+  check of the target's identity, so this does not break it: the drafter's reduction order affects only
+  the content of the draft (= the acceptance rate = speed), and the committed token sequence is decided
+  by the target's per-row logits and `sampler.next`.
+- **The commit of a verify goes "up to the frontier of the delivered tokens"**. If the consumer
+  `break`s, tokens that were accepted but not delivered do not enter the conversation (only one
+  frontier remains — the same shape as non-speculative decoding). If an exception occurs in the
+  synchronous part between the verify returning and delivery, it is `commit(0)` (the frontier stays
+  unfed; the next run overwrites the rejected rows), and the sequence remains usable afterwards.
+- **`k + 1 ≤ slidingSlack`** (gemma4: 4 ≤ 8) is checked at sequence creation. The `last_row` of a verify
+  is padded to R = k+1 even when k′ shrinks (so as not to add PreparedPlan shapes).
+- **There is one drafter Session per pipeline**, and running 2 conversations of the same pipeline at
+  the same time serializes their draft runs (head-of-line waiting). A borrowing context is opened and
+  closed per sequence (per turn for `chat()`), so `stateBacking.rebindCount` of the drafter Session
+  grows in proportion to the number of turns.
+- **The public type `Gemma4RunPhase` went from 2 → 4 branches** (`draft` / `verify` — an unreleased
+  breaking change). `onRunDiagnostics` still delivers 1 message per run (draft carries the drafter
+  Session's diagnostics; the others the target's).
+- **Delivery granularity**: one verify delivers up to k+1 `token` events in a row (position is
+  `pastLength + 1 + i`). `GenerationStop.tokens` is the number delivered (including the stop token), and
+  the number of runs is `speculation.cycles + draftRuns`.
+
+## gemma4 `fromAssets`: `Gemma4Assets` has the 3 fields `config` / `model` (part sequence) / `tokenizer` — no PLE reader is passed (breaking change in 0.13.0)
+
+The PLE moved, index (`ple_index`, schema 3) and matrix blocks alike, into the assets of the `model`
+container (ADR [0109](decisions/0109-manifest-v5-container.md) decision 4), so there is no longer a
+place for the caller of `fromAssets` to pass a PLE reader separately (`pleIndex` / `readPleShard` of
+the published `Gemma4Assets` were removed — the Breaking entries of 0.13.0 in the
+[CHANGELOG](../CHANGELOG.md)). `model` is passed as a part sequence in index order from part 0 — parts
+of length 0 are not skipped either (the index is the id of the part itself, and skipping one makes the
+following ones read as different parts — `Gemma4Assets` in
+`packages/models/src/gemma/pipeline.ts`). Decode's PLE fetches rows by range reads of the container's
+assets (`AssetReader.read`) (`packages/models/src/gemma/ple.ts`).
+
+## Passing a split-form container to `fromAssets` (the whole-bytes surface) keeps every part resident in host RAM at once
+
+A distribution readable with `fromPretrained` is also readable with `fromAssets` (a part sequence whose
+fetch keys are `<role>[i]` is not concatenated but opened as a container as a part sequence —
+`assetComponentOpener` in `packages/models/src/hub/components.ts`). However, the entry of the
+whole-bytes surface is **a Record of already-fetched bytes**, so by the time the caller has assembled
+the Record, **every part is in host RAM at once**. The property that holds the host RAM peak to a limit
+per source type (the section below) holds only for the surface that goes through the fetch layer
+(`fromPretrained`); what the whole-bytes surface shrinks is **the size of a single ArrayBuffer**
+(Chromium's wall — below), not the total resident amount. Its positioning as a surface meant for local
+debugging and `examples/` (removed in 0.15) is unchanged.
+
+A sequence whose indices do not start at `[0]` or are not contiguous, or a mix of plain keys
+(`transformer`) and split keys (`transformer[0]`), fails loudly **with a diagnostic that names the
+component and the part index** (it does not silently take one of them).
+
+## The host RAM peak at load time is decided by the source type (seek type: one item; scan type: one part + waiting for GC)
+
+Session construction reads one block at a time, uploads it to the GPU and lets it go
+(`queue.writeBuffer` copies the bytes at the moment it is called, so the CPU-side release does not wait
+for a fence). For **seek-type** sources that can read by position (the local `denoDirectory` /
+`nodeDirectory`, the browser's lazy Blob — Chrome not measured), the weights alive on the JS side are
+one item (a block of 32 MiB or less + its accompanying scale + the f32 expansion result of an expanded
+slot and a copy of the carried-over scale), independent of the part length. For **scan-type** sources
+that cannot read by position (via HF on Deno / Node), hub reads the whole part into a holding buffer and cuts
+blocks out as views of that buffer, so the peak grows roughly with the part length, and the number of
+buffers waiting for GC is not decided by the declaration (in measurements, the maximum of external was
+about 1.5–4.4 times the largest part).
+Which of the two an externally implemented `DistributionSource` becomes is decided by whether it has
+`openFile` and by the `cost` (`seek` / `scan`) of the reader it returns
+(`packages/hub/src/container.ts`). The canonical counting is [container-v1](container-v1.md) §11;
+the measurements are ADR [0108](decisions/0108-container-format.md) addendum 5 and the
+[research record](research/2026-09-24-part-length-ram-peak.md).
+
+## MoE assumes every expert is resident in VRAM (no per-expert dynamic loading / eviction)
+
+By-design (ruling of 2026-08-31). The VRAM budget of an MoE model is built from **the total
+parameters, not the active ones** — dynamic residency that "loads only the experts in use" is not
+offered. The basis is a structural conflict across 3 layers (measurement record =
+[research/2026-08-31-freetoken-moe-over-arraybuffer.md](research/2026-08-31-freetoken-moe-over-arraybuffer.md)):
+① the container's binding table requires a supply for every declared initializer (for `krm`, the
+comparison of the 2 documents `validateAgainstGraph`, and for the in-memory container, the
+correspondence check of `openMemoryContainer`, reject both shortfall and surplus by failing loudly —
+opening a hole would break the single accepted set) ② weight residency is assembled once at Session
+construction and has no place for eviction / reload ③ the IR has no value-dependent execution choice
+(dynamic transfer / skipping of experts) (an intentional hold in op-vocabulary; `topk` is static-k too).
+The fixed-k selection itself can be computed with existing ops (expand → gather → permute / reshape →
+bmm), multiplying and accumulating only k of them while keeping shapes static, but there is no kernel
+that reads compressed-resident experts directly, and going through gather needs f32 expansion and
+copies.
+Furthermore, as an external factor, the "device-initiated host memory transfer" that prior expert-cache
+methods (FreeToken and others) assume does not exist in WebGPU, so their sync-free mechanism cannot be
+ported directly.
+Host-controlled miss handling (the host reads the router's result and writes the missing experts) was
+shown to work as a mechanism in a PoC outside the repository, but its performance and practicality are
+not settled ([backlog](backlog.md) later, "MoE page-fault").
+The revisit entry with its revival conditions is in [backlog](backlog.md) parked.
+
+## Auxiliary-asset safetensors require coverage of the data section and element alignment (may be rejected even when the official `safe_open` reads them)
+
+The strict reader `parseSafetensors`, which reads auxiliary assets that are not containers (sbv2's
+style table, anima's rope base table, vowel-detector's tables and so on), requires that the data
+section be "covered with no gaps, and the absolute offset of each tensor aligned to the element size of
+its dtype", and rejects violations with `SafetensorsError` (the canonical ruling is ADR
+[0063](decisions/0063-safetensors-physical-layout.md)). A file that places a 4-byte type right after
+an f16 with an odd element count breaks this alignment. HF's `safe_open` can read alignment
+violations, so passing through it alone does not detect them
+(the exporter-side check of the same rule is `karume.verify.assert_reader_layout`). The weight
+container (`krm`) does not have this constraint — block starts are 64 B aligned, and the order is
+decided by the writer's placement ([container-v1](container-v1.md) §4.1).
+
+## Quantized storage (`i4` / `i2`) is distributed only in Karume's container (general-purpose safetensors tools cannot read it)
+
+packed int4 / int2 (ADR [0069](decisions/0069-packed-w4-storage.md) /
+[0097](decisions/0097-gemma4-qat-integration.md)) are baked as codecs (`int4-sym-g` / `int2-off`) of
+the `krm` container. The container is a Karume-specific format, so only Karume's runtime and the
+exporter (`karume.container`) can read it (uploading to and downloading from HF are content-agnostic,
+so they work). Auxiliary-asset safetensors accept only a subset of the official dtype vocabulary, and
+reject the dialect dtypes `I4` / `I2` that the old distribution used
+(`packages/runtime/src/format/safetensors.ts`).
+
+INT2 execution uses a per-row scale, supports packed execution of linear / embedding, and limits
+`linearCompute` to f32
+([ADR 0097](decisions/0097-gemma4-qat-integration.md) addendum 1).
+
+The upper limit on the logical element count (N·K, V·H) of linear weights `[N, K]` and embedding
+weights `[V, H]` differs by path, according to the unit in which the GPU forms the start of a weight
+row. A linear's path is decided by the execution shape (M) and the quantization settings, so whether
+the same weights are rejected depends on the path.
+
+- Paths that form the row start **by logical element index** reject shapes whose logical element count
+  exceeds 2^32 − 1 with `CodegenError` at Session construction. They are the GEMM path of linear (any
+  storage form), the w4a8 of i4 weights among the i8a8 paths, and embedding. The packed loader turns
+  the logical element index into a word position, so if the product wraps it reads another row's
+  weights without an exception. For i2 the storage reaches it at about 1 GiB, so the binding-limit
+  check does not stop it.
+- Paths that form the row start **by word index** (the GEMV family of linear (1 ≤ M ≤ 64) and the
+  i8a8 of i8 weights) do not get this check. Wrapping would need 16 GiB or more of storage.
+
+- No proposal to follow the official safetensors spec (a request upstream to add I4/U4) will be made —
+  user ruling of 2026-09-01. Because the directions differ, the distribution moved to a dedicated
+  container (ADR [0108](decisions/0108-container-format.md)).
+
+## Out-of-range indices in gather / embedding contaminate with NaN on the GPU (no exception)
+
+The canonical ruling is ADR [0061](decisions/0061-index-oob-semantics.md). The contract is "indices
+are in range".
+On a violation, the GPU kernel writes quiet NaN only to the affected elements (for embedding, the
+affected rows) and continues, making the kernel's output NaN. Downstream arithmetic carries it through
+NaN propagation (ADR 0020), but downstream steps that drop NaN, such as comparisons, where and casts to
+int, can make it disappear. The CPU reference throws when out of range (an intentional asymmetry).
+
+## f32 → i32 casts out of range or of NaN are undefined
+
+The canonical ruling is ADR [0062](decisions/0062-f32-i32-cast-contract.md). Within range, truncation
+following torch (rounding toward 0) is guaranteed to match; out of range and NaN are undefined.
+A per-element range check is intentionally not added — clamp values that can go out of range
+beforehand on the caller side or in the model.
+
+## The IR's i32 arithmetic wraps as two's complement (narrowing of int64 intermediates is unguarded)
+
+The exporter normalizes torch's int64 to i32 with a range check at the boundaries (graph inputs /
+outputs, concrete boundary tensors) (ADR 0009), but **the intermediate values of emitted i32 operations
+(mul / sub) are not guarded** — intermediates that cross 2³¹ do not raise but wrap as two's complement
+(measured: `(x*x).float()` with int64 x=50000 is exported with zero diagnostics, and the reference
+implementation's `Math.imul` returns −1794967296). The 99 i32 arithmetic ops in the 10 distributed
+families are all structurally bounded values derived from masks, with zero affected (189 containers
+scanned, 2026-08-16).
+Statically proving intermediate value ranges is impossible in general, so the contract is boundary
+checks + golden comparison (the de facto check on real inputs), and models that need i64-class
+intermediate operations are handled by design at export time (a decomposition that keeps the range).
+
+## exporter: removing the identity `x + 0` can diverge from torch for −0 inputs (downstream of div / sqrt)
+
+`normalize._drop_identity_add` folds `add(x, 0)` (the addend is the Python scalar 0) into x. In f32 the
+value changes only when x = −0.0, where `x + 0.0` returns +0.0. IR v2 **does have ops that distinguish
+signed zeros** — `div` gives `1/(+0) = +∞` / `1/(−0) = −∞`, and `sqrt` gives `sqrt(±0) = ±0`
+(the reference implementation too uses plain division and `Math.sqrt`) — so in shapes where the
+downstream of the removed add reaches the denominator of div or the argument of sqrt, the sign can be
+flipped relative to torch (a minimal counterexample was demonstrated in the review of 2026-08-16:
+`num / (x + 0.0)` is torch +∞ / IR −∞). In the 10 measured families there is no path that reaches it,
+and restricting the rewrite by looking at the consumers would trigger a re-export of every series, so
+the possibility of divergence is **accepted** and the rewrite stays. When adding a shape where −0.0 can
+reach a consumer, revisit the conditions under which this pass applies first (the same note is in the
+docstring of `_drop_identity_add` in `karume/normalize.py`).
+
+## Whether a semantic dtype can execute is decided per op (no blanket enabling)
+
+The contract table (`packages/runtime/src/ops.ts` / `karume/ops.py`) is canonical. i32 / bool can
+execute only in the shapes that appeared in measured graphs and in the ops newly created for them
+(e.g. mul / sub are f32+i32, div is f32 only, bitwise_not is bool only). It is the dtype version of the
+frozen vocabulary allowlist (ADR 0007), and an extension requires one set of measurements + the
+contract table + golden.
+
+## bool is represented as u32 0 / 1, and bool initializers are not in the vocabulary
+
+WebGPU storage buffers have no 1-bit type, so bool is u32 0 / 1 both in GPU storage and in inputs /
+outputs (`Tensor.data` = Uint32Array) (ADR 0009). safetensors' `BOOL` (1-byte storage) does not mesh
+with transfers that assume 4 bytes, so bool initializers are not in the vocabulary of IR v2 (if they
+become necessary, the storage convention is revised along with them).
+
+## The strided copy family (permute / expand / slice / cat / sym_prefix_slice / the mask of masked_fill) is rank ≤ 4
+
+`STRIDED_RANK = 4` is checked in the contract layer (all values of the DeBERTa front are rank ≤ 4 —
+ADR 0011. slice / cat share this limit as members of the read family / write family — ADR 0014).
+Lowering rank ≥ 5 is **the exporter's job**, and the chain of 3 passes `_lower_unit_expand` /
+`_lower_split_unbind` / `_lower_reshape_permute` is **implemented**
+(`karume/normalize.py`; it fires only for shapes that contain values of rank > `STRIDED_RANK` — ADR 0016).
+Accepted patterns are lowered into sequences of rank ≤ 4, and high-rank shapes that these cannot
+normalize fail loudly at export time (the execution limit itself is not relaxed).
+
+## The second layout group accepts only measured shapes (slice / cat / pad / flip — ADR 0014)
+
+To keep "an axis with no representation is not silently executed with a default", only shapes that
+appeared in measurements are in the vocabulary.
+Widening moves the 4-piece contract set (TS contract table / WGSL kernel / CPU reference / Python
+contract + shape rule) together with the conformance table and golden as one set.
+
+- `slice`: **step is fixed to 1** (strided reads cannot be expressed with the single variable word of
+  the strided family). The sliced axis is **static** (symbolic axes are handled by
+  `sym_prefix_slice` — no overlap). Negative indices and an omitted `end` are clamped to the axis
+  length at the exporter boundary.
+- `cat`: the concatenation axis is (a constant) or (**a linear expression in a single symbol**).
+  Shapes whose sum fits the dimension language `coeff·sym+offset` (`S`+1 → `S+1`, `S`+`S` → `2S`) are
+  accepted, and a mix of different symbols fails loudly
+  (ADR [0046](decisions/0046-cat-symbolic-axis.md)). There are 2 or more inputs (a cat of one is an
+  identity copy and is not in the vocabulary).
+- `pad`: **last dimension, constant 0, non-negative widths** only. It has no field for the fill value,
+  so there is structurally no path that "silently executes something other than 0 as 0". A negative
+  width (truncation) means slice and is not accepted.
+- `flip`: **one static axis** only (multi-axis flip is rejected at the exporter boundary. Flipping a
+  dynamic axis can be written in the kernel, but it is not widened until a measured need appears).
+
+## The conv family also accepts only measured shapes (ADR 0015)
+
+- The attrs of `conv1d` — `stride` / `padding` / `dilation` / `groups` — **must all 4 be declared**,
+  and **no default values are filled in**. Allowing omission would let the IR of a depthwise
+  (`groups = C`) silently become an ordinary convolution, mixing in values of other channels while
+  neither shape nor element count changes. For those writing IR by hand this is redundant, but it is an
+  intentional redundancy to eliminate silent wrong values.
+- `conv_transpose1d` accepts only shapes with **`2·padding == K − stride`** (= the output length is
+  exactly `L·stride`). The general form could be written as a representation, but some combinations
+  give output lengths that do not fit a linear expression of the dimension language
+  (`coeff·sym+offset`), so it is not widened until there is demand. The weight is **`[Cin, Cout, K]`**
+  (transposed from conv1d's `[Cout, Cin/groups, K]`), and `output_padding` / `groups` / `dilation`
+  have no field in attrs; anything other than the default fails loudly.
+- A conv without bias is **not rejected**; the exporter **synthesizes a zero bias** and normalizes to
+  arity 3 (so as not to bring arity branches into the kernels and the contract). `linear` follows the
+  same approach: **the IR's `linear` requires 3 inputs**, while **the export entry accepts no bias and
+  synthesizes a zero bias** (`_h_linear` in `aten_handlers.py`; the synthesis is the exact identity
+  `+0`). Bias-less is not assumed to be a rare exception — in the measurements of ADR
+  [0016](decisions/0016-anima-chain-export.md), 698 of 711 linears have no bias.
+
+## upsample_bilinear2d (align_corners=True) does not guarantee "exact match" at the end points
+
+Even with `align_corners = True`, the edges of the output **do not necessarily match the edges of the
+input bit for bit**. The source coordinate is made by multiplying the output index by
+`scale = fl((in−1)/(out−1))` rounded to f32 on the host, so shapes really exist where
+`fl(scale · (out−1))` falls slightly below `in−1` (measured: the last element for in=2 → out=42 is
+0.9999999403953552).
+
+This is by-design, and **torch itself produces the same value** (it evaluates
+`area_pixel_compute_scale` in float and multiplies `scale · dst_index` in float). The numeric contract
+of the kernel is "match torch's `UpSample.h`", so clamping the end points to make them exact would
+instead split the bits from torch (not allowed on the default path in light of ADR 0058's opt-in
+contract). Measured extent of occurrence (2026-08-16): of the 128,961 pairs `2 ≤ I ≤ 64` ×
+`2 ≤ O ≤ 2048`, 11.6% are inexact. However, `O = 2I` / `O = 2I−1` (I ≤ 4096) have 0 cases, and the
+47 real-shape sites of the distributed models are all on the exact side for both H and W.
+
+## layer_norm / adaLN do not make constant rows (and nearly constant rows) exactly 0
+
+The GPU layer_norm (and the adaLN fusion, which shares the same statistics code) builds the row sum
+with an f32 sequential sum and a tree reduction, and rounds the mean only once as
+`sum × (1/dim)`. The rounding of the sum, and of `1/dim` when dim is not a power of 2, shifts the mean
+from the true value by a few ULP. For a constant row (variance 0) the deviation leans to the same sign
+on every element, is amplified by a factor of `1/sqrt(eps)`, and remains in the output. torch returns
+an exact 0 with Welford's method, so the disagreement is limited to this degenerate input (a "nearly
+constant row" whose variance is on the order of ulp² of the mean).
+
+Measured (RTX 3080 Ti, 2026-10-11, eps 1e-5, weight 1, bias 0): with dim 7, a row of all 3 gives
+−7.54e-5, and a row of all 12288 gives −0.295. Rows of all 3 with dim 8 and dim 5120 give 0. However,
+whether it becomes 0 depends not only on dim but also on the constant's value, and even real hidden
+dimensions cannot be called safe. Simulating the GPU's reduction order on the CPU (the 2 values for
+dim 7 match the GPU measurements above), even dim 4096 (a power of 2) gives non-zero results for the
+constants 0.1 / 1.7 / 123.456 (−7.2e-3 for 123.456), dim 5120 is also non-zero for many constants, and
+the magnitude depends on the constant (0.61 for the constant 7282.34).
+The simulation procedure: each of 256 lanes sums elements i, i + 256, … sequentially with
+`Math.fround`, the 256 partial sums are added by a tree that folds them in halves, and the mean is
+made with `× fround(1/dim)` (the variance in the same order).
+
+The fix would be to subtract the first element of each row before reducing (shifted data), but that
+changes the reduction order and with it the output bits of layer_norm and of the adaLN fusion and the
+sha reference rows. **The maintainer's ruling (2026-10-11): do not fix it; keep only the record in this
+section** (Codex deep review R2B-001).
+
+## The GRU scan supports hidden width up to 256, does not include the input-side GEMM, and does not return `h_n` (ADR 0056)
+
+- The hidden width of `gru_scan` / `gru_scan_reverse` is **`H ≤ 256`** (1 lane = 1 hidden unit.
+  Degrading silently would corrupt other units' states without an exception through out-of-range
+  writes to workgroup-shared memory, so it fails loudly). The check is **double**: out-of-range values
+  fail with `OpContractError` in the contract layer (`ops/shapes.ts`), and the path that calls the
+  kernel directly fails with `CodegenError` from its params (`kernels/gru-scan.ts`) — the limit
+  constant lives in one place, `GRU_SCAN_MAX_HIDDEN` in `codegen/limits.ts`. The only measured shape is
+  H = 128, and raising the limit needs grid-stride within the workgroup and double-buffered state = a
+  separate design decision.
+- The op carries **only the sequential hidden-side part**. The input-side GEMM
+  (`x·W_ihᵀ + b_ih`) **is prepared by the caller with the existing `linear`** (a separate node in the
+  IR). Thanks to this split, the input-side weights stay eligible for f16 / i8 storage, but **`W_hh` is
+  an in-op slot and is ineligible for low-precision storage** (it is not in `WEIGHT_SLOTS`).
+- The output is **only `y[T,N,H]`; it does not return `h_n`** (the op contract has one output). Models
+  that consume the final state cannot be expressed at present.
+- **There are no fields for multi-layer / bidirectional / `has_biases=False` / `batch_first` /
+  `dropout`**. Layers and directions are expressed by the exporter lining up nodes (the `Tensor[16]` of
+  `aten.gru` does not fit in the IR).
+- **LSTM is not in the vocabulary** (`aten.lstm` fails loudly as an unsupported op). The points for an
+  extension are in ADR [0056](decisions/0056-gru-scan.md) decision 8.
+
+## Vowel detection: the input's 10ms frame count is **even**, and the limit is the distribution's declaration (ADR 0056 / 0057)
+
+- The time axis of the graph input is `2T` (the symbol `T` is the 20ms grid of the output). **Odd
+  lengths are not accepted** — `bindSymbols` fails with `実測 285 が宣言 '2T' の形をしていない`
+  (no rounding). The caller **truncates** the last frame before passing it
+  (`VowelDetectorPipeline.detect` and the real-weight E2E do so).
+  Matching the length with right zero padding is **forbidden** (the backward GRU carries state back
+  from the pad, and the `.lab` changes anywhere in the utterance — measurements in the ADR 0056
+  addendum).
+- The length range is `pipelineConfig.minFrames` / `maxFrames` (the distribution's declaration = the
+  range of the symbolic dimension `T` at bake time, converted to input-side 10ms frame units — **twice**
+  the numbers of `Dim(min, max)`, not those numbers themselves). **The IR does not carry symbol
+  ranges**, so this check in the pipeline is the only thing that can stop out-of-range values. Both
+  exceeding the upper limit **and falling below the lower limit** fail loudly (no truncation — a
+  `.lab` whose tail was silently dropped cannot be told apart from a normal result. Filling the lower
+  side with right zero padding is forbidden for the same reason — the backward GRU carries state back
+  from the pad). The current distribution is 60,000 frames = 10 minutes, based on the largest
+  intermediate tensor = the gates on the GRU input side `[T,1,384]` f32 = 1,536 B/20ms frame → 46.1MB
+  (a 2.9× margin against the spec default `maxStorageBufferBindingSize` of 128MiB = 134.2MB).
+  **Longer lengths are not measured**.
+- Even within the limit, execution time is proportional to the length (the time loop is sequential
+  within one workgroup — performance not measured).
+
+## The relative-position tables of flow / voice are graph inputs — generating them is the host's responsibility
+
+SBV2's `flow` / `voice` require the `(T,T)` tables of relative-position attention (`idx_k` / `valid`)
+**as graph inputs** (baking them at Tmax = 4096 would be 134MB — ADR 0013). Therefore **the caller
+must generate and pass the tables for each T**, and the runtime does not check their correctness (as
+values they are just i32 indices and an f32 mask, in the silent-wrong-value class where an off-by-one
+does not cause a shape error).
+
+- The canonical formula is `build_relattn_tables` in the Python-side `tools/export-recipes/sbv2/patch.py`
+  (the in-graph construction of front calls the same function).
+- The canonical host side is `packages/models/src/sbv2/relattn-tables.ts` (SBV2-specific, so it is
+  not placed in `packages/runtime/src/` — the models package, which holds model-side knowledge, owns
+  it, and `Sbv2Pipeline` calls it for each T). Byte equality with the Python side is pinned by
+  `packages/models/tests/sbv2_relattn_parity_test.ts` with the golden's real data.
+- A mismatch in the window width (measured 4) is in the same silent-wrong-value class, so the Python
+  side rejects it with `_assert_window_size` at ckpt load (scanning all of net_g), and on the TS side
+  the parity test compares it with the width `2w+1` of `idx_v` baked into the container.
+
+## SBV2 host glue is evaluated in f64 — `w_ceil` is not bit-identical to torch
+
+`durationsToFrames` / `buildZp` (`packages/models/src/sbv2/host/`) evaluate whole expressions in JS
+f64 and round only once on assignment to `Int32Array` / `Float32Array` (the same house style as
+`random.ts` in the same directory).
+The reference side is sequential f32, so the following are known by-design differences:
+
+- **`w_ceil` off by one frame**: when the f32 half ulp (relative 6e-8) between `f32(exp_f32(x))` and
+  `exp_f64(x)` crosses the threshold of `ceil`, it moves by 1 frame (measured: 5.5e-7 per phoneme,
+  P ≈ 1.3e-4 for one utterance of 229 phonemes). Even aligning to sequential `Math.fround` **does not
+  make the torch match deterministic** — the GPU/CPU difference of 1e-5 in the front output itself
+  causes the same threshold crossing at a rate more than 2 orders of magnitude higher, and the dominant
+  term remains upstream (`tools/export-recipes/sbv2/README.md` allows it by design, and the positions
+  that split are put in `w_ceil_diffs`).
+- **1 ulp difference in `z_p`**: it always occurs in about 40% of the elements. It is 3 orders of
+  magnitude below the measured maxAbs 5.16e-5 of the waveform comparison that measures this path, and
+  since there is no discretization in between, it is not amplified in shape.
+
+Neither affects the reproducibility of karume on its own (the WAV sha256 check, the match of the
+stage 1 / stage 2 paths) — the f64 path is deterministic, and the differences appear only relative to
+the torch reference.
+
+## SBV2: utterance editing accepts only "the range that does not change the phoneme sequence" (edits that change the phoneme count are rejected)
+
+Since 0.6.0 (ADR [0079](decisions/0079-sbv2-two-layer-input.md)), text analysis is **the caller's
+responsibility**, and `generate` accepts one analysed utterance `Sbv2Utterance` (the mora layer). There
+are 2 editing surfaces, and the check looks only at **whether the phoneme sequence assembled from
+`moras` matches the phoneme sequence of `words` position by position**
+(`assertWordPhones` in `packages/models/src/sbv2/text/model-input.ts`). Therefore:
+
+- **Passes**: changes to `result.accentPhrases[i].accentNucleus` on the phrase layer `Sbv2Phrases`
+  side and **re-splitting / joining phrases** (just convert again with `toSbv2Utterance` — this is where
+  VOICEVOX-compatible accent phrase editing goes), and **direct editing of `tone`** on the mora layer
+  `Sbv2Utterance` (arbitrary 0/1 patterns that cannot be written with a nucleus).
+  The check does not look at the phrase / mora boundaries themselves.
+- **Rejected** (`Sbv2InputError`): edits that change the phoneme sequence, such as rereading a mora
+  (rewriting `vowel` / `consonant`) or adding / removing symbols. Utterances that mix `moras` and
+  `words` taken from different analyses also stop here.
+
+NOTE: rearranging phrases / moras can produce sequences where **different tones ride** on the
+consonant and the vowel of one mora (a shape that does not arise on the normal analysis path). No
+invariant breaks (`sum(word2ph) === P` holds, and the BERT input and word2ph still derive from
+`words`); the impact is on the output sound only.
+
+To change a reading, **apply a correction dictionary in the caller's analyser and redo the analysis**
+(`analyzeWithWords(dict, text, overlay?)` of `@hdae/yomi` and the like) — the BERT input text and
+word2ph are rebuilt correctly, so the quality is higher than a path that swaps only phonemes. Karume
+has no place for a correction dictionary (removed in 0.6.0 — both fetching the dictionary and analysis
+are outside models). `adjust_word2ph` of the reference implementation (a compatibility hack that
+redistributes word2ph by LCS) is not ported: there too the BERT features still derive from the original
+text, so the inconsistency is not resolved (the principle of ADR 0072 decision 8 survives in 0079).
+
+Only one kind of edit cannot be accepted — **replacing a reading in a way that does not match word
+boundaries** (only some moras within a phrase to a different reading). The "replace the reading of a
+whole phrase" operation equivalent to VOICEVOX's `/accent_phrases?is_kana=true` falls under this.
+
+## SBV2: the interrogative "raise only the end" cannot be expressed (tone is binary 0/1)
+
+SBV2's `tone` is **binary 0/1** representing high / low within an accent phrase, a discrete input that
+just looks up a row of `front`'s tone embedding (`toneStart` / `numTones` in
+`packages/models/src/sbv2/text/symbols.ts`).
+VOICEVOX's `is_interrogative` / `enable_interrogative_upspeak` are operations that raise the mora f0 of
+an AudioQuery afterwards, so this discrete tone has nothing to map them to. A value that goes outside
+the JP tone base only looks up **a tone row of another language** and does not raise anything (which is
+why `toSbv2PhoneTone` rejects `Sbv2Mora.tone` other than 0/1 with `Sbv2InputError` — the type is
+`0 | 1`, but that has no effect on calls from JS).
+
+There is only one path by which the interrogative shows in the sound — a `?` actually present in the
+text **enters as one phoneme** (`toSbv2PhoneTone` turns real symbols into phonemes with tone 0). The
+rising intonation is produced by the model as learned prosody. The reference implementation is the
+same and has no raising mechanism (it only treats `?` as one symbol of the phoneme table).
+
+Therefore:
+
+- If the caller wants to add an interrogative, **put a `?` into the text to be read and redo the
+  analysis** (the step that calls the analyser). A path that adds it later to the `punctuations` of an
+  analysed utterance fails the check (`assertWordPhones`) because the phoneme sequence on the `words`
+  side does not follow.
+- In a layer that imitates the VOICEVOX-compatible API, **accepting and ignoring**
+  `enable_interrogative_upspeak` matches reality (AivisSpeech Engine treats it the same way — source
+  investigation of 2026-08-21). However, a normalization that "strips `？` from the moras and folds it
+  into the `is_interrogative` flag" erases the interrogative information completely, so do not add
+  that.
+
+## Anima: `pipelineConfig.scheduler.shift` accepts only values for which the sigma ladder holds
+
+The `shift` a distribution declares must not only pass "a positive finite number"; the sigma ladder
+built from it must itself pass the structural check of `sigmaSchedule`, otherwise it fails loudly —
+**values whose first entry exceeds 1 in f32** (even by 1 ulp), **values whose first entry is more than
+4 ulp below 1**, and **values that are not strictly decreasing** are rejected (writing the accepted set
+in 2 places makes one of them inevitably drift looser, so only the ladder side holds the check). The
+reason is that the downstream `dpm-solver-multistep` has "first = 1, last = 0" as a stated premise, and
+letting such values through would run NaN or a different trajectory with an unknown root cause. When
+the first entry exceeds 1, DPM++ 2M's `log(1 − σ₀)` becomes NaN as the log of a negative number, so the
+upper side is rejected including when used with Euler. For this reason decimals such as
+`shift = 1.32` / `1.57` (55 of the 1,901 two-decimal values in `[1,20]`) are not accepted. Decimals that
+shift 1–2 ulp downward (e.g. `1.18`) are accepted. The shift = 3 family of the real distribution has a
+first entry of exactly 1, so it passes.
+
+## Anima: steps accepts only integers from 2 to 1,000
+
+`steps` of `generate` and `pipelineConfig.defaults.steps` of the manifest accept only integers from 2
+to 1,000 (the check is the single `assertAcceptableSteps` in `packages/models/src/anima/sampler.ts`,
+and the manifest check calls it too. In `generate`, exceeding it is a `ModelInputError` before the sigma
+ladder is allocated; in the manifest, it is an `Error` as an asset inconsistency — the original
+`ModelInputError` is kept in `cause`). The upper limit is a practical value aligned with Wan (1,000 of
+`num_train_timesteps`), and Wan's rationale that "beyond it the integer timesteps repeat" does not apply
+to Anima — Anima's timestep embedding uses the continuous value of σ as is. The purpose of the limit is
+to stop huge steps at the entrance before they allocate the ladder and run a synchronous loop that
+cannot be interrupted.
+
+## Anima: preview images during generation are not available (intermediate results are raw latents only)
+
+The only intermediate result the `denoise-step` of `AnimaGenerateRequest.onEvent` can hand over is **a
+copy of the latents** (`copyLatents()`); per-step preview images are not offered, by design. In the
+default per-stage mode the VAE decoder can be loaded only **after** the DiT is released (keeping all 4
+resident at once does not fit in VRAM — ADR 0016 / the module doc of `anima/pipeline.ts`), so there is
+structurally no path that runs the VAE in the middle of the denoise loop. Consumers that need a preview
+approximate it from the latents — the public helper for that is `approximatePreview`
+(`@karume/models/anima`): passing the 2 fields of `copyLatents()` **as they are** (without
+denormalizing) returns RGBA at latent resolution. The coefficients are calibrated **in the normalized
+space** (measured 2026-08-24), so passing values denormalized with the mean / std of `animaLatents()`
+gives a different, blown-out image. The coefficients themselves MUST NOT be `export`ed, so there is no
+path for the consumer to copy them on its own
+(it is a linear projection 16ch → 3ch, not an exact decode — the implementation doc is canonical for
+the details).
+The `stage` event (start / end of a stage — in per-stage mode, before Session construction / after
+release) and the `vae-tile` event (once per tile) let you observe the progress of GB-class loads and
+of tiled decode.
+
+## Anima: DiT residency (`residency: "transformer"`) raises the VRAM ceiling and cannot be used on 4 GB-class GPUs
+
+`"transformer"` in `AnimaPipelineOptions.residency` / `AnimaGenerateRequest.residency` is an opt-in that keeps the DiT
+Session across generate calls (ADR [0112](decisions/0112-anima-transformer-residency.md)); its VRAM assumption differs from the
+default `"per-stage"`. By-design constraints:
+
+- **The chain peak goes up**. The text stage and the VAE stage sit **on top of** the resident DiT. With the default preset
+  (`f16+dit8-a8-attn8-s16`) at 1024², the resident part is +2,646 MiB (weights 1,871 + backing 768 + inputs 7 MiB — runtime
+  accounting of 2026-09-10), and the chain peak while resident is about 3.9–4.1 GiB (speculation — there is no runtime
+  accounting of the text stage). That is about 1.3–1.5 GiB higher than the chain peak of per-stage operation (DiT stage
+  2,647 MiB). **It cannot be used on 4 GB-class GPUs**.
+- **The quant preset doubles it**. The DiT weights are 1,875 MiB for the default preset and 3,733 MiB for the `f16` preset
+  (f32 compute — VRAM table of the 2026-08-05 final-perf-bench. The 1,871 MiB above is the runtime accounting of
+  2026-09-10, the same quantity from a different source). Residency of the `f16` preset exceeds +3.7 GB in the text stage,
+  so even an 8 GB-class GPU has little headroom (not measured).
+- **When VRAM is short, the resident DiT is released and residency stops from then on** (downgrade). Before the text stage
+  and before the VAE stage, the next stage's requirement is measured with a trial allocation, and if it does not fit the
+  DiT is released before the stage is set up (`evicted` / `headroom`). If the measurement is wrong and the stage hits OOM,
+  the DiT is evicted and the stage is re-run (`evicted` / `out-of-memory`). That it fell to the slow path is visible only
+  through the `residency` event (`evicted` → then `released` / `downgraded`) —
+  without subscribing, you notice it only from the speed. A downgrade does not revert for the lifetime of the pipeline
+  (rebuilding it reverts it). In the DiT stage only a DiT carried over from an earlier generate is evicted; an OOM of a DiT
+  created in the same generate has the same VRAM layout as per-stage operation, so it is not evicted and is thrown as is
+  (ADR 0112 decision 3).
+- **Eviction works only in environments that report OOM by type (`GpuOutOfMemoryError`)** (the pre-emptive trial
+  allocation is judged by the same out-of-memory errorScope). In environments where Metal's out-of-memory errorScope is
+  silent (the known-issues section on Metal's silent out-of-memory errorScope), neither eviction nor downgrade nor any
+  event happens even when residency exceeds VRAM. Measured (2026-09-27, the maintainer's M2 24 GB / Chrome 153 / metal-3, check
+  page): creating **80 (80 GiB)** STORAGE dummies of 1 GiB never produced an OOM, and on top of that a generate with a
+  resident DiT (512²) also passed without eviction — Metal does not back allocations with physical memory, so both the
+  trial allocation and the dummies only ever answer "it fits"
+  ([research 2026-09-27](research/2026-09-27-h35-oom-device-lost.md) §6).
+- **Eviction after hitting OOM (the second line) does not hold when the OOM hit is on the staging side of the weight
+  upload**. On Deno that OOM has already invalidated the device, and the re-run stage fails with `GpuDeviceLostError` (it
+  does not fail silently — the section of this file on Deno capping total GPUBuffer allocation at 97% of the driver-reported budget). The
+  main line is pre-emptive eviction, and the Arc B570 reproduction (resident DiT + 6 GiB dummy) passes with pre-emptive
+  eviction (ADR 0112 addendum of 2026-09-27). Other machines are not measured.
+- **An evicted stage is re-run from the start**. For the DiT stage, denoise is re-run from step 1 (the pixels produced are
+  the same), so that generate's `denoise-step` / `vae-tile` start over from 1 and the wall time grows by one stage.
+- **Even when the resolution changes, the steady-state resident amount is at most "weights + the single largest backing"**
+  (only one backing over the 256 MiB budget is retained — ADR 0095). In the run right after a switch, the retired old
+  backing lives until after the flush, so the transient peak exceeds this. Up to 12 derived plans remain as host objects.
+- **The gain appears only when generate is repeated on the same pipeline** (0 for one generation per process, like
+  `examples/anima/main.ts` (removed in 0.15)). On the Arc B570 with 1024² turbo, 2.45 s per generation from the second one
+  on (10.4% of wall time — [research 2026-09-26](research/2026-09-26-anima-residency-bench.md)). Other machines and Chrome
+  are not measured.
+
+## anima: resolutions above 1920px up to 2048px use rope positions outside the model's declaration (accepted; quality not measured)
+
+The accepted upper limit of 2048px per side comes from the 128 rows (= latent 256) of the per-axis base table of the rope.
+What sets the number of rows of the base table is the upper limit of the t axis, and the range of the h / w axes the model
+declares (`rope.max_size` = 120 tokens = 1920px) is lower than that.
+So a request above 1920px up to 2048px can be looked up as table rows, but uses **positions outside** the range the model
+declared at training time. The position values follow the same formula as upstream, so bit identity with the static shape
+is kept. Any difference would be **quality only**, stemming from positions outside the training distribution, and this is
+not measured. The accepted set is not narrowed for this reason (ruling of 2026-09-04 — do not cut the distribution's
+freedom without a measurement). In practice the upper limit of S and VRAM bind first. The history is detection limit 2 of
+[ADR 0036](decisions/0036-freeform-resolution.md); the record on the code side is the NOTE on `MAX_LATENT_SIDE` in
+`packages/models/src/anima/resolution.ts`.
+
+## Wan2.1: accepted sizes are 832×480 / 480×832 only, and frame counts only 4n+1 from 5 to 81 (prompt acceptance depends on the text encoder route — ADR 0118 / 0119)
+
+By-design constraints of `WanPipeline` in `@karume/models/wan`. Every input-caused rejection becomes a `ModelInputError` at
+the entry of `generate` (`planWanGeneration` — before touching the GPU) (ADR [0118](decisions/0118-wan21-video-generation.md)
+Consequences).
+
+- **Accepted set**: sizes 832×480 / 480×832, frame counts 4n+1 from 5 to 81 (default 33). steps is an integer from 1 to
+  1,000 (the upper limit is `num_train_timesteps` — integer timesteps are only `trunc(σ·1000)` from 0 to 999, so beyond it
+  timesteps necessarily repeat. Rejected before the σ sequence is built. The manifest's `defaults.steps` has the same
+  range), guidance is a finite number of at least 1 (1 means CFG is not run — the same as upstream's `guidance_scale > 1`.
+  Passing `negativePrompt` with guidance 1 is rejected), shift is a positive finite number. Accepted were 33 / 81 frames at
+  832×480 and the VAE at 480×832 (ADR 0118 steps 5 / 6 / 8). The model card and the fixture hold copies of the sizes and
+  frame counts (the doc of `WAN21_GENERATION` in `packages/models/src/wan/descriptor.ts`).
+- **Prompt acceptance depends on the route**: the default `textEncoder: "gpu"` accepts any sentence (umT5 runs on the GPU —
+  the acceptance conditions are in "text encoder route" below). `"precomputed"` accepts only the 4 precomputed ones (3
+  positive + 1 negative), and only a string that exactly matches the original text or the normalized string of the text
+  embedding asset (listed by `WanPipeline.prompts`).
+- **A timing (`gpuTiming`) device is rejected at construction**: the runtime does not open a batch on a timing device, so
+  the VAE stage (1 tile = 1 batch) cannot run. GPU time does not appear in the diagnostics, so look at the elapsed time,
+  VRAM (fdinfo and diagnostics) and the submit statistics.
+- **The DiT stage and the VAE stage are not resident at the same time**: each stage sets up a Session and folds it, and the
+  VAE is opened after the DiT is closed (the same as the default `"per-stage"` of ADR
+  [0112](decisions/0112-anima-transformer-residency.md)). There is no opt-in like Anima's DiT residency, so the DiT weights
+  are uploaded to the GPU again on every generate. The VRAM peak is the DiT stage (on the B570, 6.19 GiB at 33 frames /
+  7.31 GiB at 81 frames — ADR 0118 steps 6 / 8).
+- **The VAE always decodes in tiles** (fixed tiles of latent 32 — ADR 0118 ruling 1): there is an approximation difference
+  from the official non-tiled decode (a ratio of 8.2e-2 observed at step 5).
+- **The initial noise of a seed is a different sequence from torch's `randn`** (the same splitmix64 + Box–Muller as Anima —
+  ADR 0118 decision 5): the same seed as the official implementation does not give the same video. To match a reference,
+  pass `latents` from outside.
+- Abort (`signal`): accepted both at construction (`WanPipelineOptions.signal` — passed to the fetch layer) and in generation
+  (`WanGenerateRequest.signal` — checked at stage boundaries, at every DiT step and at every VAE tile. The open Session is
+  folded and then `signal.reason` is thrown unwrapped) (ADR 0119 decision 9, 2026-10-03). Within one stage (one run) the
+  work is indivisible, and an abort takes effect at the next boundary.
+- **sha256 reference values are rows per environment** (ADR [0106](decisions/0106-device-keyed-references.md)): the rows
+  that exist today are the B570 (`deno-intel-graphics-bmg-g21`) and the RTX 3080 Ti (`deno-nvidia-geforce-rtx-3080-ti` — written from the frozen copy `128b511e` by the ruling of the ADR 0121 addendum "the development machine changed"). On a machine without a row the sha comparison SKIPs explicitly and the reference guard turns red
+  (`KARUME_REFERENCE=write` creates your machine's rows). The 50-step rows are compared only with the opt-in
+  (`KARUME_WAN_FULL_PIPELINE=1`).
+
+- The DiT's i8 presets (ADR [0120](decisions/0120-wan-dit-w8a8-seat.md), 2026-10-03): the reference preset `f16+dit8` and the practical preset `f16+dit8-a8-attn8-s16` were added to the distribution. The GPU numeric checks (r check, self A/B check) and the visual A/B (steps 3–6) are done (2026-10-03 to 04). The default is the practical preset (ruling of 2026-10-04 — `f16` is chosen explicitly with `quant: "f16"`). The practical preset's a8 is not faster on Metal (M2) (measured in K-70 — it becomes a preset that only costs quality). (→ 2026-10-17: when a8 is requested on a device without dp4a, the runtime warns once per device — ADR 0128 decision 5)
+- Chrome (step 9 ✅ — the range confirmed is the precomputed route (`textEncoder: "precomputed"`), the `f16` preset, 832×480, 81 frames, 50 steps. RTX 5070 Ti, ADR 0118 addendum 2026-10-04 "step 9: 81 frames × 50 steps complete in Chrome on the RTX 5070 Ti". As of the same addendum, the GPU route and the practical preset had not been run in Chrome): the default binding limit of 128 MiB is not enough even for the VAE's largest value of 192 MiB. `acquireGpu` requests the adapter values,
+  so the actual limit depends on the adapter, and the required minimum is the FFN intermediate of 503,193,600 B (33 frames) / 1,174,118,400 B (81 frames). The environment key
+  changes with the WebGPU Developer Features flag (separate sha rows). The check page is the Wan tab of tools/gpu-lab (removed in 0.15).
+- Text encoder route (ADR 0119, 2026-10-03): the default `textEncoder: "gpu"` runs umT5-XXL on the GPU and accepts any prompt (2–512 tokens;
+  out-of-vocabulary and in-text special tokens, HTML entity candidates (`R&D` → `R & D`), mojibake, C1 and characters unassigned in Unicode 16.0.0 are rejected with `ModelInputError`).
+  `"precomputed"` accepts only the 4 of the embedding asset and does not fetch the umT5 component. The umT5 component is a cross-repository reference to the separate repository `karume-umt5-xxl`, and locally it
+  needs the `crossRepo` mapping (not needed for a construction that replaces `text_encoder` — ADR
+  [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) addendum "step d: replacing a cross-repository slot needs no `crossRepo` mapping"). The `requiredLimits` of every quant preset declare a binding / buffer limit of
+  1,050,148,864 B for the vocabulary embedding (the same for precomputed).
+
+## Wan2.1: what the umT5 replacement (`components: { text_encoder }`) does not check (ADR 0122 decision 7)
+
+The acceptance conditions of replacing with a compatible umT5 (component replacement — ADR [0108](decisions/0108-container-format.md) decision 19 /
+[0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) decision 7) are limited to those decided mechanically from the two manifests and the container
+declarations: the replacement's manifest has the role and the quant; the sha256 of the graph descriptor equals the original manifest's declaration;
+the container's capability and zero shortage / excess in the binding table (`packages/models/src/hub/components.ts:438-487`); and Wan's family check (the graph's input/output
+contract, and storage of only i8 weights and f32 tables — `umt5Contract`; `packages/models/src/wan/text-stage.ts:150-162` adds the comparison with the DiT's context to
+`umt5GraphContract` (`packages/models/src/umt5/graph-contract.ts:73-153`), which it shares with the standalone umT5). This is by-design, to keep the compatibility decision
+to a single content hash, and the following 3 are not checked (the reasons for not adopting options B / C and the option of baking the bucket configuration into the graph,
+and the conditions for reviving them, are in ADR 0122 "Alternatives not taken").
+
+- **The prompt is silently misread**: plugging in a component trained with a different tokenizer of the same vocabulary size is accepted without an error, and generation proceeds with the prompt
+  split into a wrong id sequence. Mechanism: the replacement takes only the container; the tokenizer asset stays the original manifest's
+  (`packages/models/src/hub/components.ts:499-503`). Nobody checks the combination of component and tokenizer (no real case yet).
+- **The output silently degrades**: plugging in a umT5 with a different relative-position bucket configuration is accepted without an error and encodes
+  with different positional relations than intended. Mechanism: the bucket table configuration (`numBuckets` 32, `maxDistance` 128 — `packages/models/src/umt5/relative-position.ts:38`) and
+  the valid length 512 (same file `:51`) are host constants not in the graph descriptor, so the containers of umT5s with different configurations can be byte-identical (measured in
+  ADR 0122's independent check). Taking in an upstream without a `config.json` copies the original's config, so the intake comparison is empty too
+  (`intake.json` records "configuration estimated" — ADR 0122 decision 5, item 5).
+- **Weights of unknown licence run without warning**: the replacement's provenance and licence are neither checked nor recorded at run time
+  (`packages/models/src/hub/components.ts:432-455` looks only at the manifest and the sha256 of the graph descriptor). The generated output does not reveal which weights
+  were used either. The runtime does not know the provenance (ADR 0108 decision 19). Weights with an undeclared licence are stopped on the intake, conversion and
+  local experimental mirror side (the explicit argument `--allow-undeclared-license`, outside `models/`, the pre-publication check — ADR 0122 decision 6), but plugging in a mirror
+  assembled locally is not itself stopped.
+
+## Wan2.2: accepted sizes are 1280×704 / 704×1280, frame counts 4n+1 from 5 to 121; I2V uses the same 2 sizes; 121 frames confirmed to complete on the 12 GiB class (the 10 GB class was confirmed up to 57 frames — ADR 0121)
+
+By-design constraints of `WanTi2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/wan`. Input-caused rejections become `ModelInputError` at the same entry as Wan2.1 (before touching the GPU)
+(outside the accepted set fails loudly).
+
+- **Accepted set**: sizes 1280×704 / 704×1280, frame counts 4n+1 from 5 to 121 (default 1280×704, 33 frames — fixed on 2026-10-09). The sizes and frame counts are
+  `WAN22_TI2V_GENERATION` in `packages/models/src/wan/descriptor.ts` (ADR [0121](decisions/0121-wan22-ti2v-5b.md) addendum (2026-10-05)
+  "accepted sizes moved to the two official sizes"; the upper limit 121 is the addendum (2026-10-07) "stage 10: 121 frames accepted with development-machine sha rows").
+- **The default shift was set to 5.0** (the pinned scheduler's `flow_shift` = the official 720P value). The code holds no default for shift and reads it from the manifest's
+  `pipelineConfig.scheduler.shift`. 5.0 is the value the `pipelineConfig` of the distribution `karume-wan2.2` (stage 8a) declares; with `fromAssets` the manifest passed
+  decides it.
+- **832×480 / 480×832 are not accepted**: they are outside the official implementation's supported sizes (1280×704 / 704×1280). Generating at them on the B570 broke the picture even with other presets and shifts
+  (thick outlines and flat fills). 1280×704 came out photorealistic with the same code and the same weights. Whether upstream (diffusers, CPU f32, the original weights) looks the same at 832×480
+  is not confirmed.
+- **The frame count upper limit of 121** (the official implementation's default) is the value at which 1280×704 with 50 steps completed with the practical preset on the development machine's RTX 3080 Ti (12,288 MiB, Deno 2.9.6)
+  (2026-10-06, 0 non-finite values). The VRAM peak of the DiT stage was 11,361 MiB (whole GPU per `nvidia-smi`), about 0.9 GiB short of the physical capacity. The DiT's diagnostic values (weights + backing) are
+  4.67 + 5.97 = 10.64 GiB. The same request also completed in Chrome on an RTX 5070 Ti (DiT diagnostic value 9.47 GiB). The measurements are the ADR 0121 addendum (2026-10-06)
+  "RTX 5070 Ti Chrome: 1280×704 × 121 with the practical preset completed" and "RTX 3080 Ti lanes and full verify; 1280×704 × 121 on the development machine". The reference preset also completed 1280×704×121 (2 steps) on the development machine (VRAM peak
+  10,233 MiB (whole GPU per `nvidia-smi`)) and has a development-machine sha row (ADR 0121 addendum (2026-10-07) "stage 10: 121 frames accepted with development-machine sha rows").
+  Even at 12 GiB the headroom is thin, and when the GPU is shared with other processes it may not fit (speculation — not run).
+  - **On Deno the actual headroom can be thinner than about 0.9 GiB** (speculation): 0.9 GiB is the difference between the whole-GPU peak and the physical capacity. What binds first on Deno is the ceiling on total allocation
+    of the section above on Deno capping total GPUBuffer allocation (97% of the budget the driver reports; it moves over time), and on this machine 7,280 MiB and 11,136–11,264 MiB have been
+    measured. The ceiling during the 121 run was not measured (it completed, so the allocation at that time was within the ceiling at that time). The DiT diagnostic value of 10.64 GiB
+    (about 10,895 MiB) is only a few hundred MiB away from the 11,136 MiB ceiling (the diagnostic value is not wgpu's heap usage itself).
+- **On the 10 GB class (e.g. the previous development machine, Intel Arc B570; Deno's total-allocation ceiling of about 9.4 GiB (9,600 MiB) — the section above on Deno capping total GPUBuffer allocation), the length
+  confirmed is up to 57 frames**. The largest at which both presets completed 50 steps on the B570 is 49 frames (only the practical preset also completed 57 — headroom of 0.63 GiB from the ceiling minus the peak,
+  the trial-run table of the ADR 0121 addendum (2026-10-05)). **Longer lengths (61–121 frames) are not supported on the 10 GB class**. None of them was
+  run on the B570. They are unsupported because they are not confirmed, and the outlook for fitting differs by length (all speculation):
+  - 81 frames and 121 frames: the 2 points estimated by the table in ADR 0121 Context "Capacity and time estimates". 1280×704×81 (S = 18,480) fits only on the optimistic side for the reference preset,
+    and the practical preset does not fit. 1280×704×121 (S = 27,280) fits for neither preset. At 121, even the practical preset's DiT diagnostic value on the development machine (RTX 3080 Ti) of
+    10.64 GiB exceeds the ceiling.
+  - 61–77 frames and 85–117 frames: there is not even a capacity estimate, and whether they fit is unknown (the headroom at 57 frames is a thin 0.63 GiB).
+
+  The accepted set is not per machine, so lengths over 57 frames can be requested from such a machine too. What it looks like then:
+  - **admission does not reject it**. admission compares only against the device's absolute limits (`maxBufferSize` / `maxStorageBufferBindingSize`), not against free VRAM or
+    the total of allocations (ADR 0089 decisions 1 / 3, ADR 0070 decision 5). Every binding of the 1280×704 family fits in 2 GiB even at 121 frames (FFN intermediate
+    at most 1.46 GiB, score row block at most 1.96 GiB — ADR 0121 decision 8). On an adapter whose binding limit is smaller than that, the plan-time preflight (ADR 0093 decision 5) is designed to list every slot that exceeds it
+    and fail before allocation (not confirmed at 1280×704×121).
+  - **Exceeding the total fails in the middle of execution** (fail loudly — no silent shrinking or approximation). The final check is the out-of-memory errorScope
+    (`GpuOutOfMemoryError`). Near the ceiling it can become a device loss rather than an allocation failure (the section above on Deno capping total GPUBuffer allocation).
+    The DiT stage is where it is expected to exceed (speculation), and the time of the stages before it is wasted. Not confirmed on the B570.
+  - **The concern about the time of one submit** (on the B570, the estimate that at S ≥ 18,480 (1280×704 at 81 frames or more) the 16 dispatches before backing can exceed 5 s —
+    ADR 0121 Context "Capacity and time estimates") does not apply, because the 10 GB class does not support lengths over 57 frames (the concern is at 81 frames or more;
+    what ran on the B570 is up to 57 frames (S = 13,200)). No runtime-side measure to shorten submits was adopted.
+- **The row-block budget (ADR [0124](decisions/0124-attention-row-block-budget.md)) does not change this unsupported range**: the runtime's
+  `SessionOptions.attentionRowBlockMaxBytes` shrinks attention's momentary temporaries, but `WanTi2vPipeline` has no option for it, and
+  there is no machine to confirm whether 61 frames or more fit on the 10 GB class. With the practical preset at 1280×704×121 on the 12 GiB-class development machine (RTX 3080 Ti, Deno), a budget of
+  512 MiB lowered the DiT's backing from 5.97 → 4.51 GiB, and the whole-GPU VRAM peak when running only the DiT from 11,308 → 9,811 MiB (measured
+  2026-10-11; output bit-identical to no budget; [research 2026-10-11 (step 4b measurements)](research/2026-10-11-row-block-budget-stage-4b.md)).
+- **There are 2 presets: the reference preset `f16+dit8` and the practical preset `f16+dit8-a8-attn8-s16` (default)** (there is no f16 preset — ADR 0121 decision 2). The default practical preset is
+  the preset adopted from the maintainer's visual review (1280×704×33, 12 videos at 50 steps — 2026-10-06). In the self A/B check against the reference preset (ADR 0121 stage 7), the relRMS of the step-1 latent
+  is 4.39e-2 at 33 frames and 4.92e-2 at 121 frames (bands 8.8e-2 / 9.9e-2; the 121-frame check is opt-in `KARUME_WAN_TI2V_121F=1`).
+  The visual review (pairs of 12 reference-preset and 12 practical-preset videos — 2026-10-09) also shows no noticeable degradation.
+- **sha256 reference values are rows per environment** (ADR [0106](decisions/0106-device-keyed-references.md)): the 6 cases of the 2-step end-to-end run (reference preset,
+  1280×704 / 704×1280, 17 frames) have rows for the B570 (`deno-intel-graphics-bmg-g21`) and the RTX 3080 Ti (`deno-nvidia-geforce-rtx-3080-ti`).
+  The one practical-preset case of the same request (1280×704) has only an RTX 3080 Ti row. The 2-step × 121-frame case is opt-in (`KARUME_WAN_TI2V_121F=1`), with a row only for the RTX 3080 Ti. The 50-step end-to-end run (opt-in
+  `KARUME_WAN_TI2V_FULL_PIPELINE=1`, 1280×704, 33 frames) has rows for both presets, only for the RTX 3080 Ti. The I2V 2-step × 9-frame
+  end-to-end runs have only RTX 3080 Ti rows: default lane = boxing-cats (1280×704) for both presets; opt-in (`KARUME_WAN_TI2V_I2V_FULL=1`) = the reference preset's
+  cat-dog-baking / ferret and 704×1280. The I2V 50-step end-to-end run (same opt-in, 1280×704, 33 frames, fit crop) has rows for both presets
+  (the practical preset's row comes with the floor of differing by at least 1 bit from the reference preset on the same request), only for the RTX 3080 Ti.
+- **The VAE always decodes in tiles** (tiles of latent 16, overlap of latent 4, blended in patchify space and then unpatchified — ADR 0121 decision 6;
+  28 tiles at 1280×704): there is an approximation difference from the official non-tiled decode (a ratio of 1.2e-1 observed on the stage-5 comparison case 480×832×9).
+- **Same as Wan2.1**: rejecting a timing (`gpuTiming`) device at construction; not keeping the DiT stage and the VAE stage resident at the same time; the seed's initial noise being
+  a different sequence from torch's `randn`; how abort (`signal`) takes effect; the text encoder route (`"precomputed"` accepts the same 4 as 2.1 —
+  the embedding asset is byte-identical to the 2.1 series; the `"gpu"` umT5 is a cross-repository reference to `karume-umt5-xxl`); replacing umT5 (`components: { text_encoder }`) and
+  the 3 things it does not check are as in the Wan2.1 section above (the body of construction and generation is
+  shared with 2.1 in `packages/models/src/wan/family.ts`).
+- **Constraints of I2V (`image` / `fit` — ADR 0121 decision 11, stage 9)**:
+  - The sizes are only the 2 sizes of the same accepted set as T2V. When `width` / `height` are omitted, the one closer to the image's aspect ratio is chosen (1280×704 if width ≥ height). The official implementation
+    chooses a free size within an area limit (1248×704 for a 16:9 image), so with the same image `fit: "crop"` can cut more here.
+  - Image files are not decoded (zero runtime dependencies). What is accepted is decoded RGB8, and no colour-space conversion is done either. The preprocessing (LANCZOS downscale and
+    crop) is bit-identical to Pillow 12.3.0, but producing RGB8 from a file is the caller's job, and whether the input matches the reference is decided there
+    (`examples/wan` (removed in 0.15) read PNG pixel-identically to Pillow, JPEG drifts slightly due to decoder differences, and the EXIF orientation is applied (deliberately different from upstream's `generate.py` — ADR 0121 addendum 2026-10-11) — `examples/wan/README.md` (removed in 0.15)).
+  - The range confirmed on Deno is only the precomputed route (`textEncoder: "precomputed"`) on the RTX 3080 Ti: 2 steps × 9 frames (3 images at 1280×704,
+    1 image at 704×1280) and 50 steps × 1280×704×33 (sha rows for both presets — the sha256 item above). It was not run on Deno on GPUs other than the RTX 3080 Ti.
+    The combination with the GPU umT5 route is only the one that completed in Chrome on an RTX 5070 Ti (gpu-lab, 2026-10-10): condition image 896×1152 (portrait) → 704×1280, fit crop,
+    practical preset, 20 steps, shift 7, free prompt, at 33 frames (wall 390.0 s, 5.99 s per step) and 121 frames (wall 1,346.5 s, 36.05 s
+    per step), encoder stage 1.6–1.7 s. gpu-lab did not compare I2V rows with reference cases, so no claim is made about quality.
+  - The band against upstream (diffusers on CPU f32) is wider than for T2V (3.5e-3 on the step-2 latent — T2V is 9.5e-4). This is because the DiT amplifies small differences at the encoder's exit
+    by about 250× through the condition tokens (replacing with the reference condition latent brings it back to T2V's order — ADR 0121 addendum "stage 9b results").
+  - The practical preset's quality (the A/B check and visual review above) is the value measured on T2V. The I2V self A/B check (opt-in `KARUME_WAN_TI2V_I2V_FULL=1`, case i2v-33f = 1280×704×33,
+    S = 7,920, condition image boxing-cats, fit crop — `packages/e2e/tests/e2e_wan_ti2v_ab_test.ts`) gives a relRMS of 4.6146e-2 on the step-1 latent
+    (2026-10-10, RTX 3080 Ti), band 9.3e-2 (the measurement × 2 rounded up to 2 significant digits; floor = differs by at least 1 bit), 1.05× T2V's 33 frames (4.39e-2 /
+    band 8.8e-2). maxAbs (2.6× T2V) is in latent frame 0 before replacement by the condition (a frame that does not reach the output). The visual comparison of the 2 presets on I2V
+    is stage 9d.
+- **The distribution (`karume-wan2.2`) is not published on Hugging Face** (ADR 0121 stage 8a produced the recipe that assembles the local mirror `models/karume-wan2.2` —
+  `dist.py --pipeline wan-ti2v`). The entries are `WanTi2vPipeline.fromPretrained` (pass the mirror) and `WanTi2vPipeline.fromAssets`, which takes a manifest and assets
+  assembled from the series containers.
+
+## EmbeddingGemma: a run-time attention_mask (in-batch padding) is not supported — single sequence assumed
+
+The exported graph (script `tools/export-recipes/embeddinggemma/export.py`) has no `attention_mask`
+input. The bidirectional + sliding-window band mask is baked in as **a constant of Tmax=512**
+(the first T is cut out with `sym_prefix_slice`), and there is no path that hides padding from attention.
+For a sequence with padding, **the caller packs it to shorten T** (for a single sequence this is strictly
+equivalent to torch eager).
+
+Mechanism: ADR 0016's proof that the safe-softmax guard is inactive requires evaluating the actual mask values, which does
+not hold for a run-time input placeholder (`_eval_static` rejects it — "single sequence assumed" is not a workaround
+but a consequence of the design). The graph input `pool_mask` is **for pooling only** and is not wired to attention
+(mixing in 0 would give a shape eager does not have, "the model sees it but the pooling discards it" —
+always pass all ones).
+
+Related: since `SYM_MAX = 512`, T > 512 fails at Session construction (the config's
+max_position_embeddings is 2048). Raising it is to be done together with a ruling on the band mask constant growing with Tmax²
+(512 → 2MB / 2048 → 32MB).
+
+The design for lifting it (run-time mask support) is settled in
+[decisions/0044](decisions/0044-runtime-attention-mask.md) (accepted), and **the mechanism is
+implemented** (the `safe_softmax` op + the two-step `_drop_safe_softmax_guard` — 2026-08-11). What remains is
+only the wiring of the EG script (taking a bool mask input, combining it additively with the band constant, and ruling whether SDPA
+is kept as is or lowered to its decomposition — ADR 0044 Consequences).
+
+## Irodori text side (backbone / projector): no run-time attention_mask; an empty caption and T=1 are not representable
+
+The same static scheme as EmbeddingGemma (B=1, the caller packs the sequence). Equivalence with "right-padded + mask"
+is measured on every emit by a standing check in the export script (`_static_scheme_evidence` in
+`tools/export-recipes/irodori/export.py` — measured at most 8.3e-6, check 1e-3. If it breaks, the whole export fails). Related:
+
+- **An empty caption (all-zero mask) is not represented in the graph** — in eager the projector output is strictly all
+  zeros in that shape, so the host produces the zeros directly (the same treatment as CFG uncond — under ADR 0044).
+- **T = 1 (BOS only) cannot be represented** (the symbolic dimension is `Dim(min=2)` — the default that avoids 0/1 specialization).
+  No real input other than an empty caption gives T = 1.
+
+## Irodori speaker / duration: no-reference and the mean-token prepend are on the host; the condition vectors are also host-supplied
+
+A consequence of applying the same static scheme as the text side (B=1, the caller packs the sequence) to the speaker encoder (`[1,S,128]` →
+`[1,S,768]`) and the duration predictor (`[1,T,512]` and others → `[1]`). Each is
+a by-design line of "it does not go into the graph", and there is no value approximation or silent fallback:
+
+- **No reference (`no_ref` — all-zero reference mask) does not call the graph**. The eager output is
+  **strictly all zeros** in that shape (SDPA's safe-softmax returns 0 for fully masked rows, and the trailing `x * mask_f`
+  makes everything 0), so the host placing a zero matrix is equivalent. **So that this does not become vacuous, `_no_reference_evidence` in the same export
+  script measures it on every emit** (it passes a non-zero latent through
+  an all-zero mask, and if the maximum absolute value of the output is not 0 the whole export fails).
+- **The mean-token prepend (`_prepend_masked_mean_token`) is on the host in the current pipeline**. IR v2's
+  `cat` accepts `1 + S → S+1` (ADR [0046](decisions/0046-cat-symbolic-axis.md)), so
+  the reason for leaving it is not "`cat` on a symbolic axis is unsupported". The host-side work is only the mean over axis 1 and the concat, and
+  no model computation (operations that use weights) remains. Whether to move it to the GPU is a separate design decision.
+- **duration's `speaker_vec` / `caption_vec` are host-supplied**. The former is the slice of the mean token above,
+  the latter is **a masked mean over the caption sequence after `caption_norm` (RMSNorm 512)**, and
+  `caption_norm` comes out as the **second output** of the `caption-proj` graph (ADR
+  [0048](decisions/0048-irodori-host-port.md) decision 1), so **only the row mean remains on the host**
+  — not a single operation that uses weights remains. Making the caption sequence a graph input would give
+  2 symbolic dimensions (T and the caption length), so it was not adopted (multi-symbol graphs are not measured — recon U3).
+  **There is no 0/0 risk** (the implementation divides by `denom = clamp_min(sum, 1.0)` — the
+  "masked_mean of an all-zero caption" that recon raised is already closed upstream).
+- The choice of no reference / no caption (`null_speaker` / `null_caption`) is represented by **the bool inputs `has_speaker` /
+  `has_caption` + a `where` inside the graph**. This avoids distributing the 2 learned vectors
+  to the host (the same reason ADR 0010 rejected "host precomputation + extra input").
+- **S = 1 and T = 1 cannot be represented** (the symbolic dimension is `Dim(min=2)`). The reference latent is
+  after the patch of `speaker_patch_size` = 4, and the only shape where the real input becomes 1 token is `no_ref`
+  (which does not call the graph, as above). **A reference that does not reach 2 tokens after the patch (8 codec frames) is not accepted**:
+  less than 8 frames for a reference latent, or less than 13,441 samples at 48kHz for a reference audio (7 × hop 1920 + 1 — the tail is
+  rounded up to a multiple of the hop by the reflect pad), becomes a `ModelInputError` at the entry of generation (before running the GPU)
+  (`assertSpeakerReference` in `packages/models/src/irodori/conditioning.ts`). Silently zero-padding to 1 token
+  is not done.
+- The upper limit of the symbolic dimension is **S ≤ 750** (`ref_max_seconds` 120s × 25Hz ÷ patch 4 — derived from the checkpoint's
+  config). A longer reference fails loudly at the binding check.
+
+## Irodori DiT: the per-query-row limit that row blocks cannot split; CFG supports only the 2 default modes
+
+One DiT step (the `dit` target) is exported in the execution form of ADR [0047](decisions/0047-irodori-dit-execution.md)
+(B=1 × symbolic S × G4 convolution × uncond expressed by a mask). As a consequence,
+the following 2 points are by-design constraints, with no approximation or silent fallback:
+
+- **A shape whose scores for one query row (`H·C·4` bytes) exceed the binding limit fails loudly**. Decomposed
+  attention runs the 9-node window with the minimum number of row blocks determined statically from the granted limit
+  (ADR [0060](decisions/0060-row-block-attention.md) = row-block execution. Bit-identical, the default path
+  — on a machine with room under the limit, 1 block = zero cost), so the former constraint of the intermediate `scores` at S=750 exceeding 128MiB
+  is resolved, but a shape where not even one row fits the limit cannot be split by row blocks.
+- **CFG represents nothing other than `speaker_uncond_mode="mask"` (default) and `cfg_guidance_mode="independent"` (default)**.
+  uncond can be expressed by a mask alone because "the contribution of the context KV with state set to 0 is strictly 0
+  through the mask", and `"noise"` (speaker's uncond as a random state) does not satisfy this
+  equivalence. `joint` / `alternating` differ in how the variants are combined in the first place. **Non-default values
+  fail loudly in the pipeline layer** (the graph side reduces the difference of the 4 variants to a single mask, so
+  without rejecting here a different model would silently run).
+
+## The GPU-resident path of the Irodori DiT loop: FTZ of denormal outputs, degraded diagnostics, host path when timing / onEvent
+
+The DiT loop is GPU-resident by default ([ADR 0054](decisions/0054-resident-loop-and-fence.md) — CFG combination
+and the Euler update run as GPU elementwise ops; one batch per fence). 3 by-design constraints:
+
+- **Elements whose final output is exactly denormal (|x| < 2⁻¹²⁶) are kept denormal by the host implementation,
+  whereas GPU shader arithmetic can flush them to ±0 of the same sign** (measured by the parity probe: the difference comes only from this mechanism,
+  0 fma contractions, signed zeros match). Real latents / velocity fields (unit-variance class) practically never reach this
+  region, and the 2 WAV sha256 checks of the reference cases match the digest exactly — the checks are the permanent detector.
+- **On the resident path `lastRun` (run arena record) and `lastRunTiming` are `undefined`** (enqueue creates neither
+  an arena nor a timing window). `planBacking` / `submit` / `lastRunPrepared` are as before, and the list of pipeline
+  keys can be read from `lastRunPipelines` (the planned dispatch count per key of the latest run), which does not depend on timing.
+- **A device with gpuTiming enabled, and generation that passes `onEvent` to `generate` / `generateLatent`, branch to
+  the former host loop** (timing: incompatible with batch, so `beginBatch` rejects it / onEvent: in a section of 1 batch +
+  a single fence the completion of each step cannot be observed from the host, and firing at `enqueue` time would be a lie
+  as "progress"). The output has the same digest (the onEvent step of `e2e_irodori_wav_test.ts` makes it a standing check with the
+  same sha256 as voice-clone), but the wall time grows (measured on the same case:
+  7.2 → 8.6 s / S 170, reference environment 2026-08-16). Except when taking a per-op breakdown or reporting progress,
+  use the default (resident path).
+
+## Irodori pipeline (host layer): upstream optional knobs only at their default-equivalent values; reference audio is 48kHz
+
+`IrodoriPipeline` covers the range of phases 3–4 (ADR [0048](decisions/0048-irodori-host-port.md) /
+[0049](decisions/0049-irodori-codec-integration.md)), and the following are by-design constraints. There is no approximation
+or silent fallback:
+
+- **Upstream inference knobs that are dead at their default values are not ported**: dynamic LoRA loading /
+  the speaker_kv_scale family / truncation_factor / temporal_score_rescale / the sway schedule /
+  num_candidates>1 / decode_mode="batch". The CFG mode constraint (mask / independent only) is
+  as in the DiT section above, and **the pipeline rejects it when parsing pipelineConfig**.
+  The tail-trim thresholds (window 20 / std 0.05 / mean 0.1) and the reference audio target of −16 LUFS are also upstream default
+  fixed values (not held as run-time knobs).
+- **`cfgScales` accepts only values exactly representable in f32** (an inexact value fails loudly when parsing
+  `pipelineConfig`). The DiT loop has 2 paths, the host path (multiplying in f64) and the GPU-resident path (rounding to f32
+  before multiplying), and when the strength is not exact in f32 the last digit splits by 1–2 ulp on the same input
+  (measured: diverges at s=1.3). To make the MUST "the outputs of the 2 paths are the same" hold unconditionally regardless of the distribution,
+  it is rejected on the declaration side. The real distribution's 3.0 / 5.0 / 3.0 are all exact in f32 and unaffected.
+- **Reference audio (`speaker: { audio }`) only at the distribution's `sampleRate` (48kHz)** — there is no resampling;
+  it fails loudly (ADR 0049 decision 6. Conversion is the caller's responsibility). `decodeWav` accepts only
+  PCM 16bit and IEEE float 32bit, and `WAVE_FORMAT_EXTENSIBLE` (0xFFFE) and the like are explicitly rejected.
+- **`codec_encoder` is not split into tiles** (asymmetric with the decoder — ADR 0049 decision 1). A long reference
+  (intermediates of 1.47GB×2 at 120 s) fails to allocate on a machine where `maxStorageBufferBindingSize` is the default
+  128MiB. The decoder side is split into tiles with halo 8, so S=750 passes even on a machine with the default limit (with a bit-identity check).
+- **Generated audio carries no watermark (SilentCipher)** (the wm branch is baked in its bypass form —
+  deferred to the pre-publication phase by the ruling of 2026-08-11, ADR 0049 decision 2).
+- **The seed is not compatible with upstream** (bit reproduction of the torch generator is a non-goal — ADR 0048 decision 5).
+  Only self-determinism, same seed → same waveform, is guaranteed; comparison with torch is done through the `initialNoise` injection point.
+- The preprocessing `strip` is JS's `String.prototype.trim`, and its whitespace set differs from Python's `str.strip` at the
+  edges (U+001C–1F and U+0085 are Python only / U+FEFF is JS only). When a caption consists only of these characters,
+  even whether there is a caption (the caption condition and the CFG branch) is inverted against upstream (with only U+0085, upstream says
+  "none" and karume says "present"; with only U+FEFF, the reverse). Accepted as a difference that does not occur with practical text input
+  (the 33 normalize cases of the golden do not include this region).
+- WAV reading (/32768) and writing (×32767) stay asymmetric (each is correct in matching the outside world —
+  the MUST in `src/audio/wav.ts`. A round trip drifts at the 1 LSB level).
+- **Request knobs (`codecTileFrames` / `seed` / `durationSeconds`) are checked at call time** (it does not fail after
+  proceeding partway through the stages). As public-surface behaviour, ① even `generateLatent`, which does not run the codec,
+  fails on an invalid `codecTileFrames` ② even generation that passes `initialNoise` has the range of `seed` checked
+  (previously that path drew no random numbers, so it was silently ignored).
+- **The distribution's declaration side gained 2 requirements**: `speakerRows` is at least 2 (1 mean token + the reference
+  latent), and the latent length reachable from `maxSeconds` (the larger of the floor of the duration path and the ceil of the manual-seconds path)
+  does not exceed `ditSymMax`. Both fail when parsing `pipelineConfig`.
+
+## Additive mask of fused attention: static `[1,1,M,N]` only, not combined with a8, the bit-identity check is on the f32 path
+
+The fourth input of `attention`, the mask (ADR 0023 addendum 2026-08-11), is deliberately narrow:
+
+- Accepted is **f32, additive, exactly `[1,1,M,N]`** (broadcast to B·H). A run-time bool mask,
+  `[B,1,M,N]` (per batch) and `[1,H,M,N]` (per head) fail loudly — to be widened in the phase of the Irodori CFG ruling
+  "run-time bool mask (option a)", together with a redesign of ADR 0016's proof that the guard is inactive.
+- **mask × `attentionCompute:'a8'` fails loudly** (①QK of the i8a8 family has no epilogue —
+  it does not silently fall back to f32). Whether to support it is a design decision for a separate phase.
+- The permanent bit-identity check (parity) against the decomposed path is **on the f32 path only**. s16 / c16 × mask is confirmed only up to WGSL
+  generation, pipeline creation and execution on a real GPU (whether to add a check or keep stating f32-only in the ADR
+  is decided when such a case appears in real assets).
+
+## GQA × `attentionCompute:'a8'` in fused attention fails loudly (provisional)
+
+The GQA / MQA shape (`H % Hkv == 0`, ADR
+[0067](decisions/0067-autoregressive-attention-vocabulary.md) decision 1) is on the f32 / f16 paths only.
+The a8 path has 5 head bases (`attention-i8a8.ts`), and the quantization and allocation of K / V also assume `B·H`, so
+the GQA shape **fails loudly without fallback** (silently dropping to f32 would quietly change performance — ADR 0058
+decision 3). **The rejection is provisional and support is planned later** (ADR 0067 decision 3 — the supplementary surface is settled: kv-head mapping
+for the K/scale and V/scale bases only + Hkv in the recipe builder. Verification reuses the repeat_kv
+parity assets of the f32 path).
+
+## The implementation limit of topk's k depends on the device (k ≤ 63 with the WebGPU default limits)
+
+The scratch of `topk` (ADR [0068](decisions/0068-decode-exit-multi-output.md) decision 3) stays within
+workgroup storage, so the upper limit of k is set by `8·32·(k+1) ≤ maxComputeWorkgroupStorageSize`
+(`topkMaxK` in `src/kernels/topk.ts`). With WebGPU's default of 16384B, **k ≤ 63**;
+on this development machine (49152B), 191. Exceeding it fails loudly with the limit value (no fallback — ADR 0058
+decision 3). The practical range of top-k sampling (k ≤ 50 class) fits even on a machine with the defaults. A design to raise the limit
+(multi-stage merge and the like) is to be filed in the perf-ledger when there is real demand.
+
+## WAVs with the streaming convention (riffSize placeholder) are not accepted
+
+The scan boundary of `decodeWav` (`packages/models/src/audio/wav.ts`) is the
+logical end that RIFF declares at offset 4, and physical bytes outside the declaration are not read (ignored as the spec says — the fields `encodeWav` writes are authoritative).
+So the riffSize placeholder declaration, a convention of streaming writers, is by design
+not accepted:
+
+- `riffSize=0` puts the logical end right after the header, so not a single chunk is scanned, and it fails with
+  `decodeWav: 'fmt ' チャンクが無い`.
+- `riffSize=0xFFFFFFFF` fails as a truncated container with
+  `decodeWav: RIFF が 4294967295 バイトを宣言しているが、残りは … バイトしかない`.
+
+The input is assumed to be a WAV as a complete file (both for reference audio and for detector input). If a real need arises to
+feed streaming WAVs, the accepted form will be ruled on then (no silent fallback to the physical length — the cross-cutting
+fail-loudly convention).
+
+## hub: the cancellation granularity of concurrent fetches is the single-flight leader
+
+In the single-flight of the fetch layer (`@hdae/fetch-cache`), the second and later calls for the same **content key**
+(`["hf", kind, repo, path, sha256]`) join the earlier flight, and
+an `AbortSignal` given by a joiner has no effect (aborting the leader takes the joiners down with it).
+With several `fetchAssets` fetching the same asset concurrently, cancellation works only at this granularity
+(ADR 0038 §5). The abort of a single call propagates correctly to all workers.
+
+## gemm-family shapes with a zero-element dimension fail on the GPU binding's minimum size (unsupported degenerate region)
+
+A zero-element dimension such as `in=0` of `linear` is valid under the op contract, but the lower bound on allocating a zero-element buffer
+(4 bytes — `Math.max(4, …)` in the arena / executor) is below the minimum binding size of the vec4 variant (16 bytes),
+so execution fails loudly with `GpuValidationError` (Binding size … less than minimum)
+(independent of `linearCompute` — measured 2026-08-13). It does not become a silent wrong value. Lifting it would mean unifying the
+allocation lower bound to 16 (a change to the allocation policy shared by all ops — a separate phase if demand appears).
+
+NOTE: only `attention` is an exception: degenerate axes (B = 0 / M = 0 / N = 0) are **explicitly rejected in the contract layer**
+(`OpContractError`). The reason is that the row-block planner (`planRowBlocks`) requires positive integers, so letting them through would give
+an `ExecutionError` that does not name attention. That zero-element dimensions are contract-valid applies to
+the remaining ops, such as the linear family.
+
+## Public surface: 3 points where the rejected set grew after 0.9.0 (the accepted set is unchanged)
+
+Each is a change that makes inputs which "until now silently fell back to something else or failed late" fail loudly at the
+entry. The behaviour of correct calls does not change by a single bit.
+
+- **The 4 execution-form knobs of `SessionOptions`** (`linearCompute` / `attentionCompute` /
+  `attentionScoreStorage` / `stateAttentionReduce`) reject spellings outside the union at `Session` construction
+  (one `ExecutionError` that lists them all). Previously they silently fell back to the default (f32 / sequential),
+  so `linearCompute: "i8a8"` (the old spelling renamed to `"a8"` in 0.5.0) ran on f32 without any exception or warning.
+- **The range check of `EstimateOptions.maxStorageBufferBindingSize`** (a positive safe integer) runs at the
+  **entry** of `estimateGraphMemory` (`PreparedModel.estimate` is the same implementation). Previously it existed only inside the path that counts
+  the temporaries of states-form attention, and in graphs without the states form −1 / 1.5 / NaN were silently
+  accepted (they were not read, so the numbers did not change).
+- **The effective upper limit of `SubmitPolicy.maxChunkSize` is 1,024 on a device with gpuTiming enabled** (query 2,048 =
+  querySet capacity). A policy that exceeds it fails at Session construction (construction of the `SubmitScheduler`) with `SubmitPolicyError`
+  (up to 0.9.0 it failed in the middle of a run).
+
+## GitHub CI does not exercise tests that depend on local assets (`outputs/`) (a constraint on verification coverage)
+
+`outputs/` is not tracked by git, so the tests that use real series assets as goldens — in addition to the GPU e2e tests,
+**the CPU-only upstream parity tests** (irodori's codec / reference / t-embed, sbv2's rel-pos /
+relattn / demo assets, wav's real-asset scale) — are skipped on GitHub Actions because the assets are absent.
+These checks are carried by the local / self-hosted `vp test` (with assets), and a release requires
+green on real assets + a real GPU (ADR 0005). Moving them to CI would need promoting the goldens to fixtures
+(a trade-off with repository bloat) or fetching assets in a release gate — to be revisited in the release-preparation phase.
+
+**`packages/e2e/tests/e2e_assets_gate_test.ts` turns an all-SKIP for missing assets into a FAIL** (an all-skip guard of the same
+shape as `gpu_gate_test.ts` for a missing GPU). CI cannot hold the assets, so it sets `KARUME_ALLOW_NO_ASSETS=1`
+as a statement of intent and passes. Green from an environment with this env set **cannot be used for a release decision**.
+
+## `karume dist` peaks at about twice the distribution size on disk (the cost of staging→swap)
+
+Assembly builds everything in a staging directory and then puts it in place with rename (ADR 0052 — by-design, so that a failure
+midway does not break the existing distribution). The old and new trees coexist until the moment of the swap, so the destination
+file system needs free space of about twice the distribution size. After the swap neither `.staging` nor `.old`
+remains.
+
+## exporter: per-model recipes are repository-only (only the general-purpose core goes into the wheel)
+
+PyPI `karume` is the general-purpose exporter core only (ADR
+[0065](decisions/0065-exporter-core-recipe-split.md) — by-design, to make the distribution boundary coincide with the licence
+boundary). The export scripts, dist recipes and card templates of known models are in
+`tools/export-recipes/` (uv workspace, outside the wheel), and the dependencies of real-weight export
+(diffusers and the like) are held by the dependency-groups of that project. So the installed
+`karume dist` has an empty pipeline table and fails loudly (the source of truth of the accepted set is the repository's
+`tools/export-recipes/dist.py`). `karume verify` works with the installed version too.
+
+## On Metal (Apple GPU), GPU-side timestamp measurement is not practical (external constraint)
+
+`gpuTiming: true` (ADR 0021) opens 1 dispatch = 1 pass and takes timestamps at the pass boundaries, so
+it creates one query set per chunk. On Metal the `createQuerySet` that creates that query set fails and
 
 ```
 Failed to create counter sample buffer: Cannot allocate sample buffer (MTLCounterErrorDomain)
 ```
 
-を返す。NSError の code 0 = `MTLCounterSampleBufferError.outOfMemory`（Metal ドライバが counter
-sample buffer を確保できない）で、wgpu-hal はこれを `DeviceError::Unexpected` に潰し、wgpu-core が
-致命扱いして device を lost にする。**errorScope には入らない**（消失済み device のエラーは Deno の
-error handler の入口で捨てられる）ので、`pushErrorScope('validation')` では捕まらない。
+is returned. NSError code 0 = `MTLCounterSampleBufferError.outOfMemory` (the Metal driver cannot allocate the counter
+sample buffer); wgpu-hal flattens this to `DeviceError::Unexpected`, and wgpu-core
+treats it as fatal and loses the device. **It does not enter an errorScope** (errors of an already lost device are discarded at the entry of Deno's
+error handler), so `pushErrorScope('validation')` does not catch it.
 
-失敗の軸は「1 本のサンプルバッファが大きすぎる」ではない。初回の run は 1 チャンク 16 dispatch に
-固定される（壁時計の実測がまだ無く時間予算を引けない）ため、gemma4 の prefill ≈1,500 dispatch では
-query set が約 100 本**同時に生きた状態**になる。1 本あたりは 32 query（総量でも数十 KB）で、Chrome
-の Dawn が Metal 上で常用する 4,096 サンプルより小さい。さらに Deno 2.9.x の
-`GPUQuerySet.destroy()` は **no-op**（wgpu 29.0.1 pin・実装は wgpu v30 で入った）なので、karume が
-`destroy()` を呼んでも実解放は V8 の GC 任せで滞留する。したがって「anima の 3,301 dispatch が
-大きすぎる」という以前の帰属は誤りで、dispatch 数のより少ない gemma4 でも起きる。
+The axis of the failure is not "a single sample buffer is too large". The first run is fixed at 16 dispatches per chunk
+(there is no wall-time measurement yet, so no time budget can be drawn), so with gemma4's prefill of ≈1,500 dispatches
+about 100 query sets are **alive at the same time**. Each has 32 queries (even in total, tens of KB), smaller than the 4,096 samples that Chrome's
+Dawn routinely uses on Metal. Moreover, Deno 2.9.x's
+`GPUQuerySet.destroy()` is a **no-op** (wgpu 29.0.1 pinned; the implementation landed in wgpu v30), so even when karume
+calls `destroy()` the real release is left to V8's GC and piles up. So the earlier attribution "anima's 3,301 dispatches are
+too many" was wrong, and it also happens with gemma4, which has fewer dispatches.
 
-「`GpuDeviceLostError` として可視化されるので沈黙はしない」も**撤回**する。トップレベルの
-`await using` で資源を掴む台本では、本体の例外と解放時の例外が `SuppressedError` に畳まれ、Deno は
-その外皮しか印字しないため型も文言も読めない。**この 2 点は 2026-09-03 に埋めた** — 例示台本
-（`examples/gemma4/main.ts`）は本体を関数に包み、最上位で `SuppressedError`（`.error` /
-`.suppressed`）・`AggregateError`・`cause` 連鎖を再帰で全て stderr へ展開して exit 1 する。
-`device.ts` は消失理由（`GPUDeviceLostInfo` の `reason` / `message`）を `GpuDeviceLostError` の
-文言へ載せる。ただし**この経路では真因文字列は届かなかった**（2026-09-03 M2 実測）— 実際に出た
-のは `GpuDeviceLostError: flush 中に device が失われた（再構築が必要） — reason: unknown /
-device was lost` で、`message` は Metal 側の汎用文言だけ。`Device::create_query_set: …` 相当の
-文字列が呼び手まで届くという期待は、少なくともこの消失の出方では成立しない。
+"It is visible as `GpuDeviceLostError`, so it is not silent" is also **retracted**. In a script that grabs resources with a top-level
+`await using`, the body's exception and the exception at release are folded into a `SuppressedError`, and Deno
+prints only its outer shell, so neither the type nor the message can be read. **These 2 points were filled on 2026-09-03** — the example script
+(`examples/gemma4/main.ts` (removed in 0.15)) wrapped its body in a function and at the top level recursively expanded `SuppressedError` (`.error` /
+`.suppressed`), `AggregateError` and the `cause` chain to stderr in full, and exited 1.
+`device.ts` puts the loss reason (`reason` / `message` of `GPUDeviceLostInfo`) into the message of
+`GpuDeviceLostError`. However, **on this path the string of the real cause did not arrive** (measured on the M2, 2026-09-03) — what actually came out
+was `GpuDeviceLostError: flush 中に device が失われた（再構築が必要） — reason: unknown /
+device was lost`, and `message` was only Metal's generic wording. The expectation that a string like
+`Device::create_query_set: …` reaches the caller does not hold, at least for this way of losing the device.
 
-観測は Apple M2 / Deno 2.9.x の 3 経路（anima の DiT 1 step = 3,301 dispatch・gemma4 の対話台本・
-フル verify の census 門 `packages/models/tests/e2e_gemma4_pretrained_test.ts`）。3 経路目の観測は
-**macOS 26 実機・2026-09-03 のフル verify**（赤 1 本 — アダプタが `timestamp-query` を列挙するので
-Metal でも skip されない）。先行 2 経路の macOS 版は記録が無いので、この版を 3 経路すべてへ被せない。
-アダプタが列挙する以上、**`KARUME_ALLOW_NO_TIMESTAMP_QUERY`（列挙しない機で全 SKIP を許す
-opt-out）は Metal では発火しない** — 発火先はソフトウェアアダプタや timestamp-query を持たない機。
+Observed on Apple M2 / Deno 2.9.x on 3 paths (anima's DiT 1 step = 3,301 dispatches, gemma4's interactive script, and
+the census check of the full verify, `packages/e2e/tests/e2e_gemma4_pretrained_test.ts`). The third path was observed on
+**a real macOS 26 machine, full verify of 2026-09-03** (1 red — the adapter enumerates `timestamp-query`, so it is not skipped
+even on Metal). There is no record of the macOS version for the first 2 paths, so this version is not applied to all 3 paths.
+Since the adapter enumerates it, **`KARUME_ALLOW_NO_TIMESTAMP_QUERY` (the opt-out that allows an all-SKIP on machines that do not enumerate it)
+does not fire on Metal** — it fires for software adapters and machines without timestamp-query.
 
-**現状の Deno では回避策が無い**（query set を 1 本に固定して使い回す案は未実験 —
-[known-issues](known-issues.md) 参照）。op 別の内訳が要る計測は Linux / Vulkan 機で行う。
-壁時計だけなら計測を切って（既定）測れる。**本節の観測に使っている参照 Mac は macOS 26（Metal 4）
-と確認済み（2026-09-03）**で、確保に成功しても timestamp が全ゼロになる別の未修正問題
-（[wgpu#9414](https://github.com/gfx-rs/wgpu/issues/9414)）の射程に入る — query set を 1 本へ畳む
-改修を入れても、この機体で op 別内訳が読めるようになるとは限らない。なお本機で観測されているのは
-確保そのものの失敗（device lost）で、全ゼロの側は未観測。
+**On Deno today there is no workaround** (the idea of fixing the query set to one and reusing it is untested — see
+[known-issues](known-issues.md)). Measurements that need a per-op breakdown are done on Linux / Vulkan machines.
+Wall time alone can be measured with timing off (the default). **The reference Mac used for the observations in this section is confirmed
+to be macOS 26 (Metal 4) (2026-09-03)**, which falls within the reach of another unfixed issue where timestamps are all zero even when allocation succeeds
+([wgpu#9414](https://github.com/gfx-rs/wgpu/issues/9414)) — even with a change that folds the query sets into one,
+a per-op breakdown may not become readable on this machine. Note that what is observed on this machine is
+the failure of the allocation itself (device lost); the all-zero side is not observed.
 
-なお同じ理由で本ファイルの「Deno では GPUBuffer の総確保がドライバ申告予算の 97% で頭打ちになる」
-節の制約は **Metal には効かない** — wgpu の `MemoryBudgetThresholds` は D3D12 と Vulkan のみ対応で、
-wgpu-hal metal の `check_if_oom()` は `Ok(())` を返す no-op（[wgpu#7460](https://github.com/gfx-rs/wgpu/issues/7460)
-の TODO 付き）。Metal では予算超過が例外にならず、遅くなるだけで進む。
+For the same reason, the constraint of the section of this file on Deno capping total GPUBuffer allocation at 97% of the driver-reported budget
+**does not apply to Metal** — wgpu's `MemoryBudgetThresholds` supports only D3D12 and Vulkan, and
+wgpu-hal metal's `check_if_oom()` is a no-op that returns `Ok(())` (with a TODO, [wgpu#7460](https://github.com/gfx-rs/wgpu/issues/7460)).
+On Metal exceeding the budget does not raise an exception; it just gets slower and proceeds.
 
-## 未保護の `popErrorScope` 待ちは device 消失と競わせない（by-design — 未検証範囲あり）
+## Unprotected `popErrorScope` waits are not raced against device loss (by-design — with an unverified range)
 
-`pushErrorScope` / `popErrorScope` の待ちは device 消失の購読（`raceDeviceLost`）へ接続していない
-箇所がある。Deno + wgpu / NVIDIA の実測では in-flight の `popErrorScope` は消失後も `null` で決着し、
-ハングは 1 件も観測されなかった（[research 2026-08-16](research/2026-08-16-device-lost-wait-settlement.md)
-— WebGPU 仕様の「lost な device の `popErrorScope` は null で resolve」とも一致）。
-**未検証で残るのは実 TDR / ドライバリセットによる消失と、ブラウザ（Dawn）**。決着しない実装に当たると
-finish・使用予約・staging・区間ロックが取り残されるので、そこで永久 pending を観測したら消失と
-競わせる包み込みを入れる。
+Some waits on `pushErrorScope` / `popErrorScope` are not connected to the device-loss subscription (`raceDeviceLost`).
+Measured on Deno + wgpu / NVIDIA, an in-flight `popErrorScope` settles with `null` even after the loss, and
+not a single hang was observed ([research 2026-08-16](research/2026-08-16-device-lost-wait-settlement.md)
+— also consistent with the WebGPU spec's "`popErrorScope` of a lost device resolves with null").
+**What remains unverified is loss through a real TDR / driver reset, and browsers (Dawn)**. Hitting an implementation that does not settle
+would leave finish, use reservations, staging and the section lock stranded, so if a permanent pending is observed there, a wrapper that
+races it against the loss is to be added.
 
-## DL 前の GPU 適合チェックは quant が宣言した feature と limits まで（合計・空きは見ない）
+## The GPU fit check before download covers the features and limits the quant declares (it does not look at totals or free memory)
 
-quant が宣言する GPU 前提のうち、重みの part を取る前（家族 admission）に突き合わせるのは
-`gpuFeatures` に実効設定が要る feature（f16 計算 → shader-f16 — `sessionGpuFeatures`・全系列 —
-ADR 0111 追記 2026-09-26）を足したもの（共有 GPU を渡された経路のみ — 自前で device を取る経路は
-要求として `acquireGpu` へ渡す）と `requiredLimits`（ADR 0089 決定 5・2026-09-01 結線）。limits の突き合わせ相手は、
-共有 GPU なら `GpuContext.limits`、自前で取る経路なら直前に読んだアダプタ実測値
-（`readAdapterLimits` — アダプタは読んで捨てる）。残る限界:
+Of the GPU prerequisites a quant declares, what is compared before fetching the weight parts (family admission) is
+`gpuFeatures` plus the features that need an effective setting (f16 compute → shader-f16 — `sessionGpuFeatures`, all families —
+ADR 0111 addendum 2026-09-26) (only on the path given a shared GPU — the path that acquires its own device passes them to `acquireGpu`
+as a requirement) and `requiredLimits` (ADR 0089 decision 5, wired on 2026-09-01). The limits are compared against
+`GpuContext.limits` for a shared GPU, and for the path that acquires its own, against the adapter values read just before
+(`readAdapterLimits` — the adapter is read and discarded). The remaining limits:
 
-- **DL 前に読んだアダプタと device を作るアダプタが同一である保証は WebGPU 仕様に無い**
-  （`requestAdapter` は呼ぶたび別オブジェクトを返し、同じ物理アダプタを選ぶとは定めない）。
-  DL 前検査は事前判定で、最終の検査は Session 構築時の実バッファ検査（ADR 0089 決定 1）。
-- `requiredLimits` は**常駐前提の寸法**（既定超過分だけ — ADR 0089 決定 3）。実行時の一時確保や
-  f32 展開のワーストは含まない（そちらは構築時・実行時の検査が担う）。つまり**欄が空でも
-  「既定スペックの device で走る」ことは保証しない** — 保証するのは常駐分（格納テンソルと state
-  スロット）が既定内に収まることだけ。中間テンソルを数えないのは、融合後の実需要が device の
-  granted limit に依存する（行ブロックの刻みがそこで決まる）ため配布形からは原理的に決まらず、
-  融合前の最大を焼くと「行ブロックで走る device」を取得の前に誤って拒否するから。中間が既定を
-  超える現物 = BiRefNet 1024²（1 binding 320MiB・GPU 総確保 約 1.6GiB〈f32 席〉/ 約 1.2GiB〈HR の f16 席〉—
-  上の BiRefNet 節）。
-  中間の上限超過（slot 実寸 > `maxStorageBufferBindingSize` / 領域 > `maxBufferSize`）は ADR
-  [0093](decisions/0093-transient-liveness-packing.md) 決定 5 の計画時 preflight が、Session 構築時と
-  見積り（`estimateGraphMemory` — `PreparedModel.estimate` も同じ実装）の**両方で確保の前にノード名つきで
-  全件列挙して落とす**（2026-09-05 結線）。
-- gemma4 の `fromAssets` は manifest を受け取らない（`Gemma4Assets` はバイト列と config だけ）
-  ため宣言に到達できず、この面の守りは構築時検査のみ。`fromAssets` 一般は DL が無いので
-  事前判定の席自体が無い（共有 GPU を渡した場合だけ admission で見る）。
-- 合計 vs 物理空き容量は見ない（下の「GPU メモリの事前検査は…」節）。
+- **The WebGPU spec does not guarantee that the adapter read before the download is the same as the adapter that creates the device**
+  (`requestAdapter` returns a different object on every call and does not specify that the same physical adapter is chosen).
+  The pre-download check is a prior judgement; the final check is the real buffer check at Session construction (ADR 0089 decision 1).
+- `requiredLimits` are **the dimensions of the resident part** (only the excess over the defaults — ADR 0089 decision 3). They do not include run-time temporary allocations or
+  the worst case of f32 expansion (construction-time and run-time checks carry those). In other words, **even when the field is empty, it does not
+  guarantee "it runs on a device with the default spec"** — what it guarantees is only that the resident part (stored tensors and state
+  slots) fits within the defaults. Intermediate tensors are not counted because their real demand after fusion depends on the device's
+  granted limit (the row-block stride is decided there), so it cannot in principle be determined from the distribution, and baking the
+  pre-fusion maximum would wrongly reject "a device that runs with row blocks" before the fetch. A real case whose intermediates exceed the defaults
+  = BiRefNet 1024² (1 binding 320MiB, total GPU allocation about 1.6GiB (f32 preset) / about 1.2GiB (HR's f16 preset) —
+  the BiRefNet section above).
+  An intermediate over the limit (slot actual size > `maxStorageBufferBindingSize` / region > `maxBufferSize`) is caught by the plan-time preflight of ADR
+  [0093](decisions/0093-transient-liveness-packing.md) decision 5, which **lists all of them with node names and fails before allocation, both at Session construction and in
+  the estimate** (`estimateGraphMemory` — `PreparedModel.estimate` is the same implementation) (wired on 2026-09-05).
+- gemma4's `fromAssets` does not take a manifest (`Gemma4Assets` is only byte sequences and the config),
+  so it cannot reach the declaration, and the only guard on this surface is the construction-time check. `fromAssets` in general has no download, so
+  there is no place for a prior judgement at all (only when a shared GPU is passed does admission look at it).
+- Totals vs. physical free capacity are not looked at (the section below, "GPU memory pre-checks go up to…").
 
-## ブラウザ: 非表示タブでは生成が timer throttling の刻みに釘付けになる（外部制約・by-design の選択）
+## Browser: in a hidden tab, generation is pinned to the timer-throttling tick (external constraint, by-design choice)
 
-構築と生成の段境界に置く中断検査（`packages/models/src/concurrency/abort.ts` の `settleAbort`）は
-**`setTimeout(0)` でイベントループへ 1 度譲る**。Chrome の非表示タブはタイマーを 1 秒間隔へ、
-5 分以上非表示なら 1 分に 1 回へ落とすので、1 段（生成なら 1 token）ごとに 1 タイマーを踏む
-処理はその刻みまで遅くなる。
+The abort check placed at the stage boundaries of construction and generation (`settleAbort` in `packages/models/src/concurrency/abort.ts`)
+**yields to the event loop once with `setTimeout(0)`**. Chrome's hidden tabs drop timers to 1-second intervals,
+and to once a minute when hidden for 5 minutes or more, so processing that hits one timer per stage (one token for generation)
+slows down to that tick.
 
-譲り先を `MessageChannel`（throttling の対象外）へ替えれば速度は戻るが、**採らない** — message
-タスクは先に仕掛けた timer より先に配送されうるため、timer で届く中断（`setTimeout(() =>
-abort())` / `AbortSignal.timeout`）との順序が失われ、「実行開始後に届いた中断は最初の段境界で
-効く」という門が負荷次第で破れる（2026-09-05 実測）。中断を確実に観測できることを速度より優先する。
+Switching the yield target to `MessageChannel` (not subject to throttling) would restore the speed, but **it is not adopted** — message
+tasks can be delivered before a timer set earlier, so the ordering with aborts arriving through a timer (`setTimeout(() =>
+abort())` / `AbortSignal.timeout`) is lost, and the check "an abort that arrives after execution starts takes effect at the first stage
+boundary" breaks depending on load (measured 2026-09-05). Being able to observe aborts reliably takes priority over speed.
 
-## ブラウザ: Chromium は単一 ArrayBuffer を 2,145,386,496 バイトで打ち切る（単一形の容器を全量で渡す口だけに掛かる）
+## Browser: Chromium caps a single ArrayBuffer at 2,145,386,496 bytes (applies only to the entry that passes a single-form container in full)
 
-Chromium（Chrome / Edge — 全 OS 共通・Mac も同じ）は PartitionAlloc の意図的なセキュリティ
-設計として 2³¹ − 2MiB = 2,145,386,496 バイトを超える単一 ArrayBuffer の確保を必ず失敗させる
-（フラグで緩和不可・実測は 2026-08-25 調査 — 経緯は git）。
+Chromium (Chrome / Edge — common to all OSes, Mac included) always fails the allocation of a single ArrayBuffer over
+2³¹ − 2MiB = 2,145,386,496 bytes, as a deliberate security design of PartitionAlloc
+(cannot be relaxed with a flag; measured in the 2026-08-25 investigation — the history is in git).
 
-配布形はこの壁の内側に収まる。HF の公式配布は分割形の容器で part 長の天井は 1024 MiB、Session 構築が
-一度に扱うのは block（32 MiB 以下）である（ADR [0108](decisions/0108-container-format.md) 決定 5 / 6）。
-壁が残るのは**単一形の容器を全量の ArrayBuffer で渡す口**（`openContainer({ kind: "bytes" })`・全量面の
-単一キー）だけで、上限を超える単一形は `openContainer` が「分割形で読む」よう促して fail loudly で落とす
-（`packages/runtime/src/format/container/limits.ts` の `MAX_SINGLE_CONTAINER_BYTES`）。
+The distributions fit inside this wall. HF's official distributions are split-form containers with a part length ceiling of 1024 MiB, and Session construction
+handles a block (32 MiB or less) at a time (ADR [0108](decisions/0108-container-format.md) decisions 5 / 6).
+The wall remains only for **the entry that passes a single-form container as a full ArrayBuffer** (`openContainer({ kind: "bytes" })`, the single
+key of the full-read surface), and a single-form container over the limit fails loudly with `openContainer` prompting to "read it in split form"
+(`MAX_SINGLE_CONTAINER_BYTES` in `packages/runtime/src/format/container/limits.ts`).
 
-2026-08-28（fetch-cache 0.5.0 追従 — ADR 0080）から、この壁は**ダウンロード前に**落ちる: hub が
-`expectedBytes`（manifest `size`）を渡すため、受信バッファの確保に失敗する大きさは 1 バイトも受信せず
-throw される（`cause` = RangeError — 帯域と時間を捨てた後に落ちる事故が消えた）。
+Since 2026-08-28 (following fetch-cache 0.5.0 — ADR 0080), this wall fails **before the download**: hub
+passes `expectedBytes` (manifest `size`), so a size whose receive-buffer allocation would fail is thrown without receiving
+a single byte (`cause` = RangeError — the accident of failing after wasting bandwidth and time is gone).
 
-## 配布形: 1 行が block 上限（32 MiB）を超えるテンソルと、32 MiB を超える const は配布できない（by-design — ADR 0108 決定 5）
+## Distribution: tensors with one row over the block limit (32 MiB) and consts over 32 MiB cannot be distributed (by-design — ADR 0108 decision 5)
 
-piece（テンソルの分割）は先頭次元（行）の境界でしか切らない — 各 piece の範囲は束縛表の `pieces[].rows` で、
-読み手・書き手・検査が同じ行の規則を共有できる（[container-v1](container-v1.md) §5 の規則④）。したがって次の
-形は配布できず、export が fail loudly で落とす（`karume.container`）: 1 行（先頭次元 1 つぶんのバイト列）が
-block 上限を超えるテンソル（例: shape `[2, 2^24]` の f32 — 1 行 64 MiB）、`rowAxis` が 1 で 32 MiB を超える
-initializer（scale の行範囲が piece の行範囲に対応しないので分割できない）、32 MiB を超える const（const は
-piece の機構を持たない — container-v1 §10）。1 block で持つ scale が 32 MiB を超える量子化 initializer も
-配布できない。これを落とすのは書き手ではなく、publish が書いた容器を読み直すときの block 長の検査
-（`karume.container` の `read_container`）で、recipe と `karume migrate` はどちらも publish を通る。
-実資産に該当は無い。
+A piece (a split of a tensor) is cut only at boundaries of the leading dimension (rows) — each piece's range is `pieces[].rows` in the binding table, so
+reader, writer and checks can share the same row rule (rule ④ of [container-v1](container-v1.md) §5). So the following
+shapes cannot be distributed, and export fails loudly (`karume.container`): a tensor where one row (the bytes of one entry of the leading dimension) exceeds
+the block limit (e.g. an f32 of shape `[2, 2^24]` — 64 MiB per row), an initializer with `rowAxis` 1 over 32 MiB
+(the scale's row range does not correspond to the piece's row range, so it cannot be split), and a const over 32 MiB (consts have no
+piece mechanism — container-v1 §10). A quantized initializer whose scale held in 1 block exceeds 32 MiB cannot be
+distributed either. What rejects this is not the writer but the block length check when publish re-reads the container it wrote
+(`read_container` in `karume.container`), and both the recipes and `karume migrate` go through publish.
+No real asset is affected.
 
-## 配布形: 旧配布形（safetensors 1 ファイル / shard 列・manifest `karume/4` 以前）は読めない — 移行は `karume migrate`（`karume/4` はリポ丸ごとの `--manifest`・それ以前は部品単位の位置引数 — ADR 0108 決定 18）
+## Distribution: the old distribution form (one safetensors file / a list of shards, manifest `karume/4` or earlier) cannot be read — migrate with `karume migrate` (`--manifest` for a whole repository for `karume/4`, positional arguments per component before that — ADR 0108 decision 18)
 
-現行のパッケージが読むのは manifest `karume/5` とコンテナ（`krm` / `krg`）だけで、両読みはしない。旧 manifest は
-hub が「未対応の major」として落とし（`packages/hub/src/manifest.ts`）、旧 safetensors を容器として渡すと runtime が
-「未知の magic」で落とす（`packages/runtime/src/format/container/header.ts`）。旧形式を読む処理は移行 CLI
-（`tools/exporter` の `uv run karume migrate` — 部品単位の位置引数か、`--manifest` のリポ丸ごとモード）にだけ置き、
-入力は読むだけで消さない。旧版のパッケージは旧 revision（40 桁 SHA）を pin しているので、旧版のまま使う限り
-旧配布形は動き続ける。HF の公開リポは全 10 本を `karume/5` へ上げ直し済みで（0.13.0 の再アップロード・
-2026-09-24）、現行のパッケージの pin はその revision を指す。
+The current packages read only manifest `karume/5` and containers (`krm` / `krg`), with no dual reading. An old manifest
+is rejected by hub as "unsupported major" (`packages/hub/src/manifest.ts`), and passing an old safetensors as a container makes the runtime
+fail with "unknown magic" (`packages/runtime/src/format/container/header.ts`). The processing that reads old formats lives only in the migration CLI
+(`uv run karume migrate` of `tools/exporter` — positional arguments per component, or the whole-repository mode of `--manifest`),
+which only reads its input and does not delete it. Old package versions pin old revisions (40-digit SHA), so as long as the old versions are used,
+the old distribution form keeps working. All 10 public HF repositories have been re-uploaded as `karume/5` (the 0.13.0 re-upload,
+2026-09-24), and the pins of the current packages point to those revisions.
 
-## hub: キャッシュは credential で隔離しない（by-design — 2026-08-28 裁定）
+## hub: the cache is not isolated by credential (by-design — ruling of 2026-08-28)
 
-資産キャッシュのキーは内容キー（`Authorization` を含まない）で、名前空間も取得層の固定
-1 個。認証付きで取得した gated 資産の写しは、同一端末・同一 origin の無認証呼び出しにも
-ヒットする。gated 資産の運用予定が無く、credential 別の名前空間隔離は過剰防御だったため
-撤去した（ADR [0080](decisions/0080-hub-fetch-cache-050.md) 決定 3）。
+The key of the asset cache is the content key (without `Authorization`), and the namespace is also the fetch layer's single fixed
+one. A copy of a gated asset fetched with authentication is also hit by unauthenticated calls from the same device and the same
+origin. There are no plans to operate gated assets, and per-credential namespace isolation was excessive defence, so it was
+removed (ADR [0080](decisions/0080-hub-fetch-cache-050.md) decision 3).
 
-将来 gated 運用を始める場合、**custom `caches` ラッパだけでは隔離にならない**。取得層は
-プロセス内の同時取得を内容キーだけで合流させ（single-flight）、合流した後発の取得には先に走った
-取得のバイト列を渡す — 後発が渡した `caches`・認証ヘッダ・`fetch` は使われない（取得層
-`@hdae/fetch-cache` 0.8.0 の by-design）。認証付きの取得が走っている間に同じファイルを無認証で
-要求すると、キャッシュを分けていても認証付きのバイト列が届く。隔離には、合流キーを認証ごとに
-分けること（取得層の変更）か、実行環境（origin・プロセス）を分けることが要る（ADR 0080 追記
-2026-10-10）。
+If gated operation starts in the future, **a custom `caches` wrapper alone does not give isolation**. The fetch layer
+joins concurrent fetches in the process by the content key alone (single-flight), and gives a joining later fetch the bytes of the fetch
+that started first — the `caches`, authentication header and `fetch` passed by the later one are not used (by-design in the fetch layer
+`@hdae/fetch-cache` 0.8.0). If the same file is requested without authentication while an authenticated fetch is running,
+the authenticated bytes arrive even with separate caches. Isolation needs either joining keys separated per authentication
+(a change to the fetch layer) or separate execution environments (origin, process) (ADR 0080 addendum
+2026-10-10).
 
-## hub: ローカル取得元はファイル全体の sha256 を照合しない（照合するのはコンテナの descriptor と読んだ block）
+## hub: a local source does not verify the sha256 of whole files (it verifies the container descriptor and the blocks read)
 
-`localDirectory` / `denoDirectory`（`@karume/hub/deno`）で手元のディレクトリを取得元にした場合、
-ホスト（hub）は**ファイル全体の sha256 を照合しない**（記録を信頼する）。照合の範囲は読み方で
-3 つに分かれる:
+When a local directory is the source via `localDirectory` / `nodeDirectory` (`@karume/hub/node`) / `denoDirectory` (`@karume/hub/deno`),
+the host (hub) **does not verify the sha256 of whole files** (it trusts the record). The scope of verification splits into
+3 by how the file is read:
 
-1. **manifest の `assets` を全量で読むファイル**（tokenizer 等 — `fetchAssets`）: 門は
-   `karume.json` が宣言する `size` との厳密一致だけ。途中で切れたコピー・別 quant / 別モデルの
-   ファイルの取り違え・欠損（読めなければ実体のパスを名乗って fail loudly）は検出し、バイト数が
-   変わらない書き換え（改竄・ディスク上のサイレントなビット腐敗）は検出しない。`openAsset` の
-   区間読みが見るのは宣言 `size` の境界だけ。
-2. **コンテナ（`krm` の part）の descriptor と、読んだ block**: ローカル取得元は未検証の取得元と
-   して扱われ（`packages/hub/src/container.ts` の `verified`）、runtime の `openContainer` が
-   descriptor の 2 文書を manifest の期待値（長さ + sha256）と照合し、block を読むたびにその
-   sha256 を照合する（`packages/runtime/src/format/container/open.ts` の `readBlock`）。読んだ
-   block の改竄はここで検出する。
-3. **照合しないもの**: コンテナの読まれなかった領域と、どのファイルについてもファイル全体の
-   ハッシュ。
+1. **Files of the manifest's `assets` read in full** (tokenizer and the like — `fetchAssets`): the only check is
+   exact equality with the `size` that `karume.json` declares. A copy truncated midway, a mix-up with a file of another quant / another model,
+   and a missing file (if it cannot be read, it fails loudly naming the actual path) are detected; a rewrite that does not change the byte count
+   (tampering, silent bit rot on disk) is not detected. A range read of `openAsset` looks only at the
+   boundary of the declared `size`.
+2. **The descriptor of a container (a `krm` part) and the blocks read**: a local source is treated as an unverified source
+   (`verified` in `packages/hub/src/container.ts`), the runtime's `openContainer`
+   verifies the 2 descriptor documents against the manifest's expected values (length + sha256), and verifies the sha256 of every block
+   it reads (`readBlock` in `packages/runtime/src/format/container/open.ts`). Tampering with a block that is read
+   is detected here.
+3. **Not verified**: the regions of a container that are not read, and, for any file, the hash of the
+   whole file.
 
-by-design の理由は取得物と資産の違いで、**手元の配布形は利用者の管理物**という前提に立っている
-（配布元から取得したバイト列ではない）。毎起動の全量ハッシュ（gemma4 E2B なら 3.8GiB）に見合う
-脅威が無く、ADR [0080](decisions/0080-hub-fetch-cache-050.md) 決定 1 が network 経路から消した
-コストをローカルで買い戻すことになる。`size` は読み終えた時点でタダで分かるので門として残す。
+The by-design reason is the difference between fetched data and assets: it rests on the premise that **a local distribution is managed by the user**
+(not bytes fetched from the distributor). There is no threat worth hashing everything on every start (3.8GiB for gemma4 E2B),
+and it would buy back locally the cost that ADR [0080](decisions/0080-hub-fetch-cache-050.md) decision 1 removed from the network
+path. `size` is known for free once reading finishes, so it stays as a check.
 
-**ファイル全体の改竄検出が要る運用は HF 経路（`HubRepoRef`）を使うこと** — そちらは取得時に
-ファイル全体の sha256 を検証して記録を焼き、記録との不一致は自動 evict + 取り直し（self-heal）に
-なる（格納後のサイレントなビット腐敗は検出しない — ADR [0080](decisions/0080-hub-fetch-cache-050.md)
-決定 1）。設計の正本は ADR [0086](decisions/0086-distribution-source.md) 決定 2 とその追記。
+**For operation that needs tamper detection of whole files, use the HF path (`HubRepoRef`)** — it verifies the sha256 of the
+whole file at fetch time and burns in a record, and a mismatch with the record becomes an automatic evict + re-fetch (self-heal)
+(silent bit rot after storage is not detected — ADR [0080](decisions/0080-hub-fetch-cache-050.md)
+decision 1). The design's source of truth is ADR [0086](decisions/0086-distribution-source.md) decision 2 and its addenda.
 
-## sha256 参照門は参照環境専用 — クロスデバイスのビット同一は保証しない
+## The sha256 reference check is for the reference environment only — cross-device bit identity is not guaranteed
 
-> **2026-09-20 以降、「参照環境」= その機の行を参照値 fixture に持っている環境**（ADR
-> [0106](decisions/0106-device-keyed-references.md)）。参照値は単一の機で焼いた定数ではなく、
-> **環境キーごとの行**になった。節の題は既存のポインタ（コード側のコメントが名前で指す）を
-> 保つために据え置いている。
+> **Since 2026-09-20, "reference environment" = an environment whose row is in the reference value fixture** (ADR
+> [0106](decisions/0106-device-keyed-references.md)). Reference values are no longer constants recorded on a single machine but
+> **rows per environment key**. The section title is kept as is to preserve existing pointers (comments on the code side
+> refer to it by name).
 
-e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test` / `e2e_irodori_wav_test`）は
-**その環境で焼いた値**で、`packages/models/tests/fixtures/references/<系列>.json` に環境キー
-（`<ランタイム>-<アダプタ名 slug>`・例 `deno-intel-graphics-bmg-g21`）ごとの行として入っている。
-**行を持たない環境では突き合わせずに明示 SKIP する**（Metal 等）— これは仕様であり、門は
-「**その機**での移植・退行検出器」として機能する。SKIP が無音の緑にならないよう、登録した
-ケースの 1 本でもその環境の行が無ければ**系列ごとの参照門が赤**になる（行の無い id は呼び手の held で明示できる — ADR 0106 追記
-2026-10-03・`KARUME_ALLOW_NO_REFERENCE` で opt-out）。
-**同じ Linux / Vulkan でもベンダが違えば一致しない**（2026-09-20・Intel Arc
-B570 / Mesa ANV でフル verify: 当時の定数 1 本に対して 16 本すべて不一致・出力の PNG は目視で正常 =
-数値の微小差）。この実測が環境別の行へ移した直接の動機で、B570 の行
-（`deno-intel-graphics-bmg-g21`）は作成済み。行の作り方・参照門（`KARUME_ALLOW_NO_REFERENCE` で opt-out）・結果の席
-（`outputs/verify/`）は ADR [0106](decisions/0106-device-keyed-references.md) が正本。
+The PNG / WAV reference sha256 of the e2e tests (`e2e_anima_test` / `e2e_sbv2_wav_test` / `e2e_irodori_wav_test`) are
+**values recorded in that environment**, stored in `packages/models/tests/fixtures/references/<series>.json` as rows per environment key
+(`<runtime>-<adapter name slug>`, e.g. `deno-intel-graphics-bmg-g21`).
+**An environment without a row SKIPs explicitly without comparing** (Metal and the like) — this is the specification, and the check
+works as "a port and regression detector **on that machine**". So that a SKIP does not become a silent green, if even one registered
+case lacks a row for the environment, **the reference guard of that series turns red** (an id without a row can be stated explicitly through the caller's held list — ADR 0106 addendum
+2026-10-03; opt-out with `KARUME_ALLOW_NO_REFERENCE`).
+**Even on the same Linux / Vulkan, different vendors do not match** (2026-09-20, full verify on an Intel Arc
+B570 / Mesa ANV: against the then single constant, all 16 mismatched; the output PNGs looked normal =
+tiny numeric differences). This measurement was the direct motivation for moving to rows per environment, and the B570 row
+(`deno-intel-graphics-bmg-g21`) has been created. How rows are made, the reference guard (opt-out with `KARUME_ALLOW_NO_REFERENCE`) and the results
+directory (`outputs/verify/`) are defined by ADR [0106](decisions/0106-device-keyed-references.md).
 
-行を持つ系列は 9 系列（2026-09-26 — ADR 0106 追記その 3）: anima / sbv2 / irodori の PNG / WAV に加え、siglip2 /
-gemma4 の golden（runtime 側 e2e — 行は `packages/runtime/tests/fixtures/references/<系列>-golden.json`）・
-birefnet / depth-anything の実画像・vowel-detector の全鎖の f32 出力（safetensors）と、gemma4 / gemma4-qat の
-quant 席の token id 列（JSON）。PNG を実物に持つ anima の行は圧縮前の画素列（RGB8）の sha で、PNG のバイト列
-（IDAT の deflate はランタイムの zlib 実装に依存する）は行に乗らない（2026-10-17・ADR 0106 追記）。
+9 series have rows (2026-09-26 — ADR 0106 third addendum): besides the PNG / WAV of anima / sbv2 / irodori, the goldens of siglip2 /
+gemma4 (runtime-side e2e — rows in `packages/runtime/tests/fixtures/references/<series>-golden.json`),
+the real images of birefnet / depth-anything, the f32 output of the whole chain of vowel-detector (safetensors), and the
+token id sequences (JSON) of the quant presets of gemma4 / gemma4-qat. The rows of anima, whose artifact is a PNG, are the sha of the pixels before compression (RGB8); the bytes of the PNG
+(the IDAT deflate depends on the runtime's zlib implementation) are not in the rows (2026-10-17, ADR 0106 addendum).
 
-機序: IEEE 754 の加減乗除はデバイス間でも完全同一だが、①超越関数（`exp` 等）の実装が
-ドライバ / コンパイラ依存 ②シェーダコンパイラの fma 融合判断（積和を 1 命令に融合すると
-丸めが 1 回減る）③コンパイル経路の違い（ブラウザ Tint / Deno naga）により、カーネル側で
-縮約順序を固定してもクロスデバイスの同一は成立しない。なお attention の i8a8 経路には、Metal で
-**TS 参照とちょうど 1 ULP ずれる**差が別途ある（整数段は厳密一致で、ずれるのは dp4a / エミュの
-両変種が共有する f32 エピローグ側 — [known-issues.md](known-issues.md) の Metal 節）。
+Mechanism: IEEE 754 addition, subtraction, multiplication and division are exactly identical across devices too, but because of ① transcendental function (`exp` and the like) implementations
+depending on the driver / compiler ② the shader compiler's fma fusion decisions (fusing a multiply-add into one instruction
+removes one rounding) ③ differences in the compilation path (Tint in browsers / naga on Deno), cross-device identity does not hold
+even when the kernels fix the reduction order. In addition, the i8a8 path of attention has a separate difference on Metal of
+**exactly 1 ULP from the TS reference** (the integer stages match exactly; what drifts is the f32 epilogue shared by both
+the dp4a / emulated variants — the Metal section of [known-issues.md](known-issues.md)).
 
-保証するのは次の 2 つ（いずれも実測データ点は Vulkan と Metal — Apple M2 の実測は
+What is guaranteed is the following 2 (both with measured data points on Vulkan and Metal — the Apple M2 measurements are
 [research/2026-08-10-f32-geometry-probe.md](research/2026-08-10-f32-geometry-probe.md)
-§Apple M2）:
+§Apple M2):
 
-- **デバイス内決定性**: 同一キー → バイト同一 WGSL → 同一出力（M2 で独立 2 セッションの
-  出力 sha 一致を実証）。
-- **幾何変更のビット不変**: タイル幾何は担当割りだけを変える（M2 で幾何 2 種の出力 sha
-  一致を実証）。
+- **In-device determinism**: same key → byte-identical WGSL → identical output (shown on the M2 by matching output sha across 2 independent
+  sessions).
+- **Bit invariance under geometry changes**: tile geometry changes only the assignment of work (shown on the M2 by matching output sha across 2
+  geometries).
 
-別バックエンドでの健全性検証は参照 sha との一致ではなく**自己 A/B**（同一入力・幾何 2 種
-または新旧 2 版の出力 sha が互いに一致するか）で行う。
+Soundness checks on other backends are done not by matching the reference sha but by **self A/B** (whether the output sha of the same input with 2 geometries
+or with 2 versions, old and new, match each other).
 
-**CPU 側にも同じ原則が掛かる**: tiny golden の io（torch CPU の期待出力）のバイト一致検査
-（`tools/exporter/tests/test_goldens.py` の再生成突合）も参照環境専用 — oneDNN が CPU の
-ISA で gemm / conv の kernel を出し分けるため、計算結果の最終 bit はマシン依存になる
-（実測 2026-08-16: GitHub CI runner で 30 spec 中 activations / conv2d_block の 2 spec だけ
-±1〜2 ulp）。CI では io のバイト突合を明示 SKIP し、model（グラフ + 固定 seed の重み —
-torch の CPU RNG はクロスマシンで決定的）のバイト突合だけを要求する。golden を消費する
-Deno 側の実 GPU テストはもともと tolerance 判定なので影響しない。参照環境 = 開発機。CPU を換えたら門を
-緩めずに io を撮り直す（2026-10-06 に Ryzen 5 7600 へ換装して撮り直し — 旧参照との差は `activations` /
-`dilated_conv` の 2 spec・絶対差 ≤ 2.4e-7）。
+**The same principle applies on the CPU side**: the byte-equality check of the tiny golden io (torch CPU expected outputs)
+(the regenerate-and-compare of `tools/exporter/tests/test_goldens.py`) is also for the reference environment only — oneDNN dispatches gemm / conv kernels
+by the CPU's ISA, so the last bit of the results depends on the machine
+(measured 2026-08-16: on the GitHub CI runner, only the 2 specs activations / conv2d_block of 30 specs differed by
+±1–2 ulp). CI SKIPs the io byte comparison explicitly and requires only the byte comparison of the model (graph + weights from a fixed seed —
+torch's CPU RNG is deterministic across machines). The TS-side real-GPU tests
+that consume the goldens are tolerance-based to begin with, so they are unaffected. Reference environment = the development machine. When the CPU changes, re-record the io without
+loosening the check (re-recorded on 2026-10-06 after switching to a Ryzen 5 7600 — the difference from the old reference was 2 specs, `activations` /
+`dilated_conv`, absolute difference ≤ 2.4e-7).
 
-BiRefNet の α マットの後処理の fixture（`birefnet/tests/test_matte_fixture.py` の再生成突合）も同じ
-扱い: lucida（torch の CPU の f32 の σ と resize）の期待値は torch が選ぶ SIMD の kernel で最終 bit が
-変わる（実測 2026-10-15: AVX2 で `disc.up.lucida` の 3 要素・最大 7.5e-9、SIMD なしで 40 ケース・最大
-4.6e-5 — TS 側の ε 1e-2 には効かない）。CI では lucida のバイト突合だけを明示 SKIP し、JSON と hr
-（Pillow の経路 — 3 つの命令セットで一致を実測）はどの環境でもバイト一致を要求する。
+The fixture of BiRefNet's α-matte post-processing (the regenerate-and-compare of `birefnet/tests/test_matte_fixture.py`) is treated
+the same way: the last bit of the expected values of lucida (torch's CPU f32 σ and resize) changes with the SIMD kernel torch chooses
+(measured 2026-10-15: on AVX2, 3 elements of `disc.up.lucida` with a maximum of 7.5e-9; without SIMD, 40 cases with a maximum of
+4.6e-5 — no effect on the TS side's ε of 1e-2). CI SKIPs only the byte comparison of lucida explicitly, and requires byte equality of the JSON and hr
+(the Pillow path — measured to match on 3 instruction sets) in every environment.
 
-## states 形 attention は f32 経路のみ（数値変種と組めない）・sliding rewind 全拒否
+## states-form attention is f32-path only (cannot be combined with numeric variants); sliding rewind is always rejected
 
-`states` 欄つき attention / `state_append`（ADR
-[0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 / 5）の意図的な制約:
+Deliberate constraints of attention with the `states` field / `state_append` (ADR
+[0067](decisions/0067-autoregressive-attention-vocabulary.md) decisions 4 / 5):
 
-- **`attentionCompute: 'a8' / 'f16'` × states 形は fail loudly**（別族カーネルは f32 のみ —
-  縮退せず拒否・ADR 0058 決定 3。opt-in の席は実需が出た時に ADR 0058 流儀で起こす）。
-  **`attentionScoreStorage: 'f16'` × states 形も同様**（S の格納は f32 のみ）。
-- **sliding スロットを 1 本でも含む GenerationContext の `rewind` は全拒否**（ADR
-  [0066](decisions/0066-generation-context-state-slots.md) 追記 2 — ring はエビクト後に物理配置と
-  論理範囲が一致せず、左詰め compaction を持たない。緩和は compaction 実装と対）。
-- `enqueue.generation`はcontextの使用予約をbatchの最終決着まで保つ（2026-09-12追加・
-  [ADR 0066](decisions/0066-generation-context-state-slots.md#addendum-2026-09-12--generationcontext-in-batched-execution)）。
-  同じcontextの未確定実行を複数積むこと、予約中のcontext/所有Sessionのdisposeは拒否する。
-  `finish` / `finishAndRead`後に次の実行・破棄へ進む。通常runの破棄待ち契約は変わらない。
-- state スロットの dtype は f32 のみ（f16 は席予約 — ADR 0066 追記 5）・複数シーケンス /
-  batch>1 の生成・paged KV は ADR 0066 決定 8 のスコープ外。
+- **`attentionCompute: 'a8' / 'f16'` × the states form fails loudly** (the kernels of the other families are f32 only —
+  rejected without fallback, ADR 0058 decision 3. An opt-in option is to be raised in the ADR 0058 manner when there is real demand).
+  **`attentionScoreStorage: 'f16'` × the states form likewise** (S is stored in f32 only).
+- **`rewind` of a GenerationContext that contains even one sliding slot is always rejected** (ADR
+  [0066](decisions/0066-generation-context-state-slots.md) addendum 2 — after eviction the ring's physical layout and
+  logical range no longer coincide, and it has no left-packing compaction. Relaxing it goes together with implementing compaction).
+- `enqueue.generation` keeps the context's use reservation until the batch's final settlement (added 2026-09-12;
+  [ADR 0066](decisions/0066-generation-context-state-slots.md#addendum-2026-09-12--generationcontext-in-batched-execution)).
+  Queuing several unsettled executions of the same context, and disposing a reserved context / its owning Session, are rejected.
+  Proceed to the next execution or disposal after `finish` / `finishAndRead`. The dispose-wait contract of normal runs is unchanged.
+- The dtype of state slots is f32 only (f16 is reserved — ADR 0066 addendum 5); multiple sequences /
+  batch>1 generation and paged KV are outside the scope of ADR 0066 decision 8.
 
-## gemma4: capacity / chunkLength は実行時ノブ — 値を変えると token 列が動きうる
+## gemma4: capacity / chunkLength are run-time knobs — changing their values can move the token sequence
 
-配布形の `pipelineConfig.capacity` / `chunkLength` は**既定値**で、呼び手が
-`Gemma4Pipeline.sequence({ capacity })` / `Gemma4ChatSession` の `capacity`（1 会話 = 1 容量）と
-`Gemma4PipelineOptions.chunkLength`（pipeline 単位）で上書きできる（ADR
-[0091](decisions/0091-gemma4-host-rope-variable-capacity.md) 決定 4）。門は 2 本 —
-`chunkLength ≤ maxChunkLength`（記号 `M` の trace 上限の宣言・E2B は 768）と
-`chunkLength ≤ capacity ≤ maxPosition`（位置の排他的上限の宣言・E2B は 131,072）。
-`Gemma4ChatSession` はこの 2 本の関係を**構築時にも**見る（この層は `capacity` を溢れ判定の
-物差しとして sequence の確保より前に使うので、sequence 側だけに任せると長いターンで履歴を
-切り詰めてから容量エラーになり、真因が出ない）。
-VRAM は容量に比例して伸びる（full 層 KV
-12,288 B/token + states 形 attention の一時 S = `8 × 行ブロック行数 × capacity × 4 B`）ので、
-`Gemma4Pipeline.estimateSessionMemory({ capacity, chunkLength })` で確保前に見積もれる（必要側の
-合計だけ — 空き側との比較はしない）。
+The distribution's `pipelineConfig.capacity` / `chunkLength` are **defaults**, and the caller can override them with
+`Gemma4Pipeline.sequence({ capacity })` / the `capacity` of `Gemma4ChatSession` (1 conversation = 1 capacity) and
+`Gemma4PipelineOptions.chunkLength` (per pipeline) (ADR
+[0091](decisions/0091-gemma4-host-rope-variable-capacity.md) decision 4). There are 2 checks —
+`chunkLength ≤ maxChunkLength` (the declaration of the trace limit of the symbol `M`; 768 for E2B) and
+`chunkLength ≤ capacity ≤ maxPosition` (the declaration of the exclusive upper limit of positions; 131,072 for E2B).
+`Gemma4ChatSession` checks the relation of these 2 **at construction too** (this layer uses `capacity` as the yardstick for
+overflow before the sequence allocates, so leaving it to the sequence side alone would truncate the history on a long turn
+and then give a capacity error, hiding the real cause).
+VRAM grows in proportion to the capacity (full-layer KV
+12,288 B/token + the temporary S of states-form attention = `8 × row-block rows × capacity × 4 B`), so
+`Gemma4Pipeline.estimateSessionMemory({ capacity, chunkLength })` can estimate it before allocation (only the
+required total — it does not compare with the free side).
 
-- **`chunkLength` を変えると greedy の token 列が動きうる**: sliding 層の行統計は S の列を 256
-  レーンへ `past` 依存の原点で割り当てるので、chunk の刻み（= `past` の系列）が変わると f32 の
-  部分和の畳み方が変わる（full 層と linear は不変）。実測（RTX 3080 Ti・P=4,096・24 token）では
-  32 / 256 / 512 / 768 で一致したが、余裕の小さい step では反転しうる。検収の golden は配布形の
-  宣言値で採る。
-- **`capacity` は token 列に効かない**（仕事量は論理長で切られ、値は容量非依存 — ビット門あり）。
-- **decode の attention の縮約形は quant 席の宣言で決まる**（2026-09-26 に models のコード既定 `"parallel"` を撤去し
-  manifest 語彙へ昇格 — [ADR 0104 追記](decisions/0104-gemma-fast-quant.md)）: `i4-gemvpar` と QAT E2B の `i4-fast` は
-  並列縮約 `"parallel"`（③PV の KV 並列 = perf-ledger K-12〈M < 16 の計画〉・①QK の D 並列 = K-14〈M ≤ 8 の計画 —
-  decode と投機の verify・2026-09-09 に M=1 から広げた〉）、通常 gemma4 の `i4-fast` は `"parallel-fused"`（同じ加算順で
-  行統計と PV を融合 — 下の「行統計/PV融合」節）、宣言の無い `i4` と `fromAssets` は runtime の参照経路 `"sequential"`。
-  prefill 計画（M ≥ 16）は席に依らず GEMM 骨格のタイル経路
-  ①ₜ / ③ₜ（K-13・参照経路とビット同一 — [research 2026-09-06](research/2026-09-06-state-attention-tiled-k13.md)）。①′ の帯は ① との差
-  3.58e-7 / f64 参照との差 4.17e-7（帯 5e-6・[research 2026-09-06](research/2026-09-06-state-qk-parallel-k14.md)）。
-  ③′ について:runtime の参照経路 `"sequential"` とは縮約順が
-  違い（A/B 帯 5e-6・実測は ③ との差 2.4e-7・f64 参照との差 3.99e-7）、gemma4 の golden は両者で同一。
-  帯の実測範囲は縮約長 live 1〜16,384（`gpu_state_attention_parallel_test.ts` の門 — 最悪値は live が
-  小さい側で出る）+ 65,536（手実測）: live 4,096 / 16,384 / 65,536 で ③' vs f64 = 8.6e-9 / 1.5e-8 /
-  1.8e-8（帯の 1/100・2026-09-03 レビュー実測）。
-  `Gemma4PipelineOptions.stateAttentionReduce: "sequential"`（または quant `i4`）で参照経路へ戻せる。
-  低レベル面（`createSessionFromContainer` / `createContainerSession` を自分で呼ぶ消費者）の既定は runtime のまま `"sequential"`。
-- `chunkLength` の上限は焼いた記号 `M` の trace 上限で、配布形が `pipelineConfig.maxChunkLength`
-  として宣言する（E2B は 768）。超える値は宣言の門で落ちる（2026-09-03 実測: 宣言が無かった頃は
-  `chunkLength: 1024` が黙って通り、prefill が 2 chunk に割れて token 列も 768 と同一だった）。
-- **未公開面の破壊的変更**: `Gemma4PipelineConfig` に `maxChunkLength` が**必須欄**として増えた。
-  `fromAssets` へ `config` を手書きで渡す呼び手は 1 欄追加が要る（配布形ミラーは `dist.py` の
-  再発行で宣言済み・重み shard は sha 不変）。
-- 上流の RoPE 表とはビット同一でない（TS が f64 で計算し f32 へ丸める — 上流は全経路 f32）。
-  差は位置比例で、位置 0..131,071 の全掃引の最大は 9.4e-3（許容差の帯は同じく位置比例で最上位
-  131,071 では 1.57e-2・帯に対する最悪比は全位置で 0.76）。golden はこの表で採り直してある（同 ADR 決定 2）。
+- **Changing `chunkLength` can move the greedy token sequence**: the row statistics of the sliding layers assign the columns of S to 256
+  lanes with an origin that depends on `past`, so when the chunk stride (= the sequence of `past` values) changes, the way the f32
+  partial sums are folded changes (the full layers and linear are unchanged). Measured (RTX 3080 Ti, P=4,096, 24 tokens),
+  32 / 256 / 512 / 768 matched, but a step with a small margin can flip. Acceptance goldens are taken with the distribution's
+  declared values.
+- **`capacity` does not affect the token sequence** (the work is cut by the logical length, and the values do not depend on the capacity — with a bit-identity check).
+- **The reduction form of decode attention is decided by the quant preset's declaration** (on 2026-09-26 the models code default `"parallel"` was removed
+  and promoted to the manifest vocabulary — [ADR 0104 addendum](decisions/0104-gemma-fast-quant.md)): `i4-gemvpar` and QAT E2B's `i4-fast` use
+  the parallel reduction `"parallel"` (KV-parallel ③PV = perf-ledger K-12 (plans with M < 16), D-parallel ①QK = K-14 (plans with M ≤ 8 —
+  decode and speculative verify; widened from M=1 on 2026-09-09)), regular gemma4's `i4-fast` uses `"parallel-fused"` (fuses the row statistics
+  and PV in the same addition order — the "row-statistics/PV fusion" section below), and `i4` without a declaration and `fromAssets` use the runtime's reference path `"sequential"`.
+  Prefill plans (M ≥ 16) use the tiled paths of the GEMM skeleton
+  ①ₜ / ③ₜ regardless of the preset (K-13, bit-identical to the reference path — [research 2026-09-06](research/2026-09-06-state-attention-tiled-k13.md)). The band of ①′ is a difference from ①
+  of 3.58e-7 / a difference from the f64 reference of 4.17e-7 (band 5e-6, [research 2026-09-06](research/2026-09-06-state-qk-parallel-k14.md)).
+  About ③′: its reduction order differs from the runtime's reference path `"sequential"`
+  (A/B band 5e-6; measured difference from ③ 2.4e-7, difference from the f64 reference 3.99e-7), and gemma4's golden is identical for both.
+  The measured range of the band is reduction lengths live 1–16,384 (the check in `gpu_state_attention_parallel_test.ts` — the worst value appears on the side
+  of small live) + 65,536 (measured by hand): at live 4,096 / 16,384 / 65,536, ③' vs f64 = 8.6e-9 / 1.5e-8 /
+  1.8e-8 (1/100 of the band, measured in the 2026-09-03 review).
+  `Gemma4PipelineOptions.stateAttentionReduce: "sequential"` (or quant `i4`) returns to the reference path.
+  The default of the low-level surface (consumers who call `createSessionFromContainer` / `createContainerSession` themselves) stays the runtime's `"sequential"`.
+- The upper limit of `chunkLength` is the trace limit of the baked symbol `M`, which the distribution declares as `pipelineConfig.maxChunkLength`
+  (768 for E2B). A larger value fails at the declaration check (measured 2026-09-03: before the declaration existed,
+  `chunkLength: 1024` passed silently, the prefill was split into 2 chunks, and the token sequence was identical to 768).
+- **Breaking change on an unpublished surface**: `Gemma4PipelineConfig` gained `maxChunkLength` as a **required field**.
+  A caller that writes the `config` passed to `fromAssets` by hand needs to add 1 field (the distribution mirror declares it through a
+  re-issue by `dist.py`; the weight shards' sha is unchanged).
+- It is not bit-identical to the upstream RoPE table (TS computes in f64 and rounds to f32 — upstream is f32 on every path).
+  The difference is proportional to the position; the maximum over a full sweep of positions 0..131,071 is 9.4e-3 (the tolerance band is likewise proportional to the position, 1.57e-2 at the top
+  position 131,071; the worst ratio to the band over all positions is 0.76). The goldens were re-taken with this table (decision 2 of the same ADR).
 
-## 生成 sequence: 会話の切り詰めは低レベル面ではホストの責務（容量超過は専用型で落とす）
+## Generation sequence: truncating the conversation is the host's responsibility on the low-level surface (exceeding capacity fails with a dedicated type)
 
-`GenerationSequence`（`packages/models/src/generation/sequence.ts`・ADR
-[0083](decisions/0083-generation-api-surface.md) 決定 10・改訂は同 追記 2026-09-02）は会話を
-**自動で切り詰めない**。
-2 つの上限 — その会話が確保した full スロットの容量（`pastLength + queryLength ≤ C` — ADR
-[0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 4 ④・sequence 生成時に選ぶ
-実行時ノブで既定は配布形の宣言 `capacity`）とモデルが宣言する位置の排他的上限（`maxPosition` —
-ADR [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)）— を超えるターンは、run を
-1 本も出す前に `GenerationCapacityError` で落ちる。どちらも同じ型なのは、呼び手にとって「この
-会話はもう入らない」という同じ事実で、打つ手も同じだから。
+`GenerationSequence` (`packages/models/src/generation/sequence.ts`, ADR
+[0083](decisions/0083-generation-api-surface.md) decision 10, revised in the addendum 2026-09-02 of the same ADR) does **not truncate**
+the conversation **automatically**.
+A turn that exceeds either of 2 limits — the capacity of the full slots that the conversation allocated (`pastLength + queryLength ≤ C` — ADR
+[0067](decisions/0067-autoregressive-attention-vocabulary.md) decision 4 ④; a run-time knob chosen when the sequence is created, defaulting to
+the distribution's declared `capacity`) and the exclusive upper limit of positions the model declares (`maxPosition` —
+ADR [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)) — fails with `GenerationCapacityError` before
+a single run is issued. Both use the same type because for the caller they are the same fact, "this
+conversation no longer fits", and the remedy is the same.
 
-打つ手は**ホスト側**にある: 古い turn を落として新しい context へ token transcript を replay する
-（`rewind` は sliding スロットを含む context では全拒否 — ADR
-[0066](decisions/0066-generation-context-state-slots.md) 追記 2）か、prompt を短くするか、
-`maxNewTokens` を下げる。ランタイム側も同じ超過を拒否するが、それは run のエンコード直前の汎用
-メッセージで、「切り詰めれば通る」のか「配線が壊れている」のかを文言から読み分けることになる —
-専用型はその 1 件だけを分ける。
+The remedy is **on the host side**: drop old turns and replay the token transcript into a new context
+(`rewind` is always rejected for a context containing sliding slots — ADR
+[0066](decisions/0066-generation-context-state-slots.md) addendum 2), shorten the prompt, or
+lower `maxNewTokens`. The runtime side also rejects the same overflow, but that is a generic message just before encoding the run,
+and one would have to tell from the wording whether "truncating would let it pass" or "the wiring is broken" —
+the dedicated type separates out that one case.
 
-**この制約が掛かるのは低レベル面（`Gemma4Pipeline.sequence()` / `chat()`）だけ**である。高レベル
-面の `Gemma4ChatSession` は同じ打ち手を**既定ポリシーとして持つ** — 各ターンを送る**前**に
-`used + prompt + maxNewTokens - 1` を上限と比べ、超えていれば `onOverflow`（既定
-`dropOldestTurns` = 最古の user / assistant の対を落とし system は残す）で履歴を作り直してから
-撃つ。ポリシーは丸ごと差し替えられ、throw する関数を渡せば従来どおりホスト側で扱える。落とせる
-ものが尽きた場合（と、ポリシーが履歴を縮めなかった場合）は同じ `GenerationCapacityError` で
-落ちる。**モデルに要約させる compact は持たない**（窓拡大の後に再検討 — ADR 0083 追記
-2026-09-02）。
+**This constraint applies only to the low-level surface (`Gemma4Pipeline.sequence()` / `chat()`)**. The high-level
+surface `Gemma4ChatSession` **has the same remedy as its default policy** — **before** sending each turn it compares
+`used + prompt + maxNewTokens - 1` with the limit, and if it exceeds it, rebuilds the history with `onOverflow` (default
+`dropOldestTurns` = drop the oldest user / assistant pair, keep system) before
+firing. The policy can be replaced wholesale, and passing a function that throws lets the host side handle it as before. When there is nothing
+left to drop (and when the policy did not shrink the history), it fails with the same `GenerationCapacityError`.
+**There is no compact that has the model summarize** (to be reconsidered after the window is widened — ADR 0083 addendum
+2026-09-02).
 
-同じ「ホストの責務」の線に乗る制約が 2 つある（1 つ目はセッションが会話の側で吸収する — 中断した
-ターンは出た本文だけを履歴へ残し、KV との対応が読めない sequence は捨てる。2 つ目はセッションの
-`send` にも同じ規律で掛かる）:
+There are 2 constraints on the same "host's responsibility" line (the session absorbs the first on the conversation side — an aborted
+turn keeps only the text that came out in the history, and a sequence whose correspondence with the KV cannot be read is discarded. The second also applies to the session's
+`send` with the same discipline):
 
-- **中断は「成功した run のぶんだけ会話が進んだ状態」で閉じる**（`break` / `return()` /
-  `AbortSignal` のいずれも）。token を 1 つも受け取っていない中断（= prefill の途中）は prompt が
-  途中まで会話へ入った状態で、`prefill` イベントの `chunk` が commit 済み chunk 数を表す。続きを
-  送るか sequence を捨てるかは呼び手が決める。
-  - **最終 prefill の後に届いた中断でも token が 1 個届く**（中断は run を発行する前の段の境目でだけ
-    見る — ADR 0083 決定 5）。最終 prefill の run は既に logits を返しているので、その `prefill`
-    イベントの後に中断しても、最初の token は計算済みの logits から抽選されて届き、新しい run は
-    走らない。`maxNewTokens: 1` ならそのまま `max-tokens` で正常に完了し、残りがあれば次の
-    decode の run の前で `aborted` になる（`generation_sequence_test.ts` が固定）。
-- **要求は発行時のスナップショットで走る**（`generate` / `Gemma4Pipeline.chat` — ADR 0083 追記
-  2026-09-02）。`prompt` 配列・`maxNewTokens` / `signal`・sampler の指定（`logitBias` の中身まで）は
-  発行の同期部分で写されるので、返った列を汲み始めた後に要求 object を書き換えても**走行中の
-  生成は変わらない** — 次のターンに効かせるなら次の要求として渡す。中断は発行時に `signal` を
-  渡した場合だけ効く（後から挿した signal は読まれない）。
-- **repetition penalty が見る履歴は今ターンぶんだけ**（そのターンの prompt + 生成した token）。
-  sequence は会話全体の token transcript を持たない（可変状態は context と `pendingToken` の
-  2 つだけ — ADR 0083 決定 1）ので、過去 turn の token は penalty の対象にならない。会話全体へ
-  掛けたい場合は、そのターンの `prompt` に効かせたい範囲を含めるのが今の唯一の手である。
+- **An abort closes in "the state where the conversation advanced only by the successful runs"** (`break` / `return()` /
+  `AbortSignal` alike). An abort before any token was received (= in the middle of prefill) leaves the prompt
+  partway into the conversation, and the `chunk` of the `prefill` event gives the number of committed chunks. Whether to send the rest
+  or discard the sequence is up to the caller.
+  - **Even an abort that arrives after the final prefill delivers 1 token** (aborts are checked only at stage boundaries before a run is issued
+    — ADR 0083 decision 5). The final prefill run has already returned logits, so even when aborted after that `prefill`
+    event, the first token is sampled from the computed logits and delivered, and no new run
+    runs. With `maxNewTokens: 1` it completes normally with `max-tokens` as is; if there is more, it becomes `aborted` before the next
+    decode run (pinned by `generation_sequence_test.ts`).
+- **A request runs on a snapshot taken at issue time** (`generate` / `Gemma4Pipeline.chat` — ADR 0083 addendum
+  2026-09-02). The `prompt` array, `maxNewTokens` / `signal`, and the sampler specification (down to the contents of `logitBias`) are
+  copied in the synchronous part of issuing, so rewriting the request object after starting to draw from the returned sequence **does not change
+  the generation in progress** — to affect the next turn, pass it as the next request. An abort takes effect only when a `signal` is
+  passed at issue time (a signal plugged in later is not read).
+- **The history that the repetition penalty looks at is the current turn only** (that turn's prompt + the generated tokens).
+  The sequence does not hold the token transcript of the whole conversation (its mutable state is only the context and `pendingToken`
+  — ADR 0083 decision 1), so the tokens of past turns are not penalised. To apply it to the whole
+  conversation, including the range to be affected in that turn's `prompt` is currently the only way.
 
-## 会話の分岐（`fork`）: 分岐 1 本ごとに KV が丸ごと増える・一致の保証は数値経路の門に従う
+## Conversation fork (`fork`): each branch adds a whole KV; matching guarantees follow the numeric path's checks
 
-`GenerationContext.fork` / `GenerationSequence.fork` / `Gemma4ChatSession.fork`（ADR
-[0066](decisions/0066-generation-context-state-slots.md) と
-[0083](decisions/0083-generation-api-surface.md) の追記 2026-10-11・裁定 8）は、同じ容量の KV を
-丸ごと複製して独立の続きを返す。意図的な制約と性質:
+`GenerationContext.fork` / `GenerationSequence.fork` / `Gemma4ChatSession.fork` (ADR
+[0066](decisions/0066-generation-context-state-slots.md) and
+[0083](decisions/0083-generation-api-surface.md) addenda 2026-10-11, ruling 8) duplicate the KV of the same capacity
+wholesale and return an independent continuation. Deliberate constraints and properties:
 
-- **VRAM は分岐 1 本ごとに state 1 本ぶん増える**（容量を縮めた複製・差分だけの複製・prefix の
-  共有は持たない — ADR 0066 決定 8 の範囲外のまま）。1 本ぶんの正確な値は見積もり
-  （`estimateSessionMemory` の `resident.stateBytes`）で、同時に生かす本数 × その値が呼び手の
-  勘定になる。見積もりも admission も分岐の本数を知らず、空き VRAM とも比べないので、足りない
-  ときは複製の確保で `GpuOutOfMemoryError` になって初めて分かる（元は無傷のまま残る）。
-  gemma4 E2B の full 層だけで 12,288 B/token なので、既定の容量 4,096 では full 層ぶんが
-  48 MiB・容量 131,072 では 1,536 MiB（掛け算で導いた値 — sliding 層のぶんは別に乗る）。
-  投機の借り手 context が分岐ごとに増やすのは論理長 uniform の 8 バイトだけ。
-- **分岐できない状態がある**: 走行中の run（借り手の run が走っている間を含む）・batch の
-  使用予約中・deferred commit の確定待ち・借り手 context・dispose / 汚染 / device 消失の後・
-  dispose 済みの Session。`GenerationSequence.fork` と `Gemma4ChatSession.fork` は dispose 済み
-  （ChatSession は走行中のターンも）を同期に throw し、sequence の分岐は走行中の生成の**後**に
-  走る（汲んでいる途中の stream を閉じずに `fork()` を await すると返らない）。
-- **分岐した後の token 列が「fork を使わない同じ操作列」と一致するかは、数値経路の決定性に従う**。
-  複製は KV のバイトを丸ごと写すので分岐の起点はビット同一だが、その後の一致を約束するのは
-  投機なしと `speculative: "always"` の場合と、自己採算ゲートつきで投機⑤の門が緑の device
-  だけである（ゲートの観測状態は分岐へ写すが、壁時計は分岐ごとに揺れる — 門が赤の device の
-  扱いは上の投機の節と同じ）。
-- **複製の GPU 時間は scheduler の統計（`submitCount`・時間予算・GPU 時間の内訳）に載らない**。
-  複製は Session の直列化鎖の外で、`fork()` を呼んだ同期区間に自前の encoder で submit する
-  （同じ Session の別 context の長い run に待たされない代わり）。巨大な容量の複製が同じ device の
-  別の run の計測窓に混ざることがある（未計測）。
-- **編集（途中の発話の書き換え）と容量の変更は分岐では表せない** — 従来どおり新しい sequence へ
-  履歴を流し直す（sliding スロットを含む context の `rewind` は全拒否のまま）。
+- **VRAM grows by one state per branch** (copies with reduced capacity, delta-only copies and prefix
+  sharing are not provided — still outside the scope of ADR 0066 decision 8). The exact value per branch is the estimate
+  (`resident.stateBytes` of `estimateSessionMemory`), and the number kept alive at once × that value is the caller's
+  accounting. Neither the estimate nor admission knows the number of branches, and they do not compare with free VRAM, so a shortage
+  is first noticed when the copy's allocation throws `GpuOutOfMemoryError` (the original stays intact).
+  gemma4 E2B's full layers alone take 12,288 B/token, so at the default capacity of 4,096 the full-layer part is
+  48 MiB, and at capacity 131,072 it is 1,536 MiB (values derived by multiplication — the sliding layers' part comes on top).
+  A speculative borrowing context adds only the 8 bytes of the logical-length uniform per branch.
+- **There are states that cannot be forked**: a run in progress (including while a borrower's run is running), during a batch's
+  use reservation, while waiting for a deferred commit to settle, a borrowing context, after dispose / contamination / device loss, and
+  a disposed Session. `GenerationSequence.fork` and `Gemma4ChatSession.fork` throw synchronously when disposed
+  (ChatSession also during a running turn), and a sequence's fork runs **after** the generation in progress
+  (awaiting `fork()` without closing a stream that is being drained never returns).
+- **Whether the token sequence after a fork matches "the same sequence of operations without fork" follows the determinism of the numeric path**.
+  The copy duplicates the KV bytes wholesale, so the branch point is bit-identical, but matching afterwards is promised only
+  without speculation and with `speculative: "always"`, and on devices where speculative check ⑤ is green with the self-tuning gate
+  (the gate's observed state is copied to the branch, but the wall time fluctuates per branch — devices where the check is red are
+  treated as in the speculative section above).
+- **The GPU time of the copy does not show up in the scheduler's statistics (`submitCount`, time budget, GPU time breakdown)**.
+  The copy is outside the Session's serialization chain and is submitted with its own encoder in the synchronous section that called `fork()`
+  (in exchange for not waiting for long runs of other contexts of the same Session). A copy with a huge capacity can mix into the timing window of
+  another run on the same device (not measured).
+- **Editing (rewriting an utterance midway) and changing capacity cannot be expressed by forking** — as before, stream the history into a new
+  sequence again (`rewind` of a context containing sliding slots stays always rejected).
 
-## 実装間パリティ検証の厳しさは軌道の誤差増幅率に上限される（by-design）
+## The strictness of cross-implementation parity checks is bounded by the trajectory's error amplification (by-design)
 
-拡散系パイプライン（Irodori 等）の「参照実装との最終出力突合」は、反復ステップが浮動小数の
-演算順差（~1e-7 級・構造的に不可避）を**モデル × 入力 × 格納丸め依存の倍率**で蓄積・増幅した
-後の値を比べている。この倍率は数百〜数万倍まで実測で振れる（v4.1-small f16 の case.full で
-37,107 倍 — [research](research/2026-09-01-irodori-v41-euler-sensitivity.md)）ため、増幅の
-激しい軌道では固定の厳しい許容は原理的に成立しない。Irodori の full-loop 検証は 2 段判定
-（固定 1e-3 → 超過時は増幅率実測で正規化 + 絶対上限）でこれを吸収する — 恒久ロジックは
-`tools/export-recipes/irodori/pipeline_ref.py`。配布物のビット同一性（同一バイト + 同一実装 =
-同一出力）はこの制約と無関係に成立する。
+The "final-output comparison with the reference implementation" of diffusion pipelines (Irodori and others) compares values after
+the iteration steps have accumulated and amplified floating-point operation-order differences (~1e-7 class, structurally unavoidable) by **a factor that depends on
+model × input × storage rounding**. This factor swings by measurement from hundreds to tens of thousands (37,107× for case.full of v4.1-small f16
+— [research](research/2026-09-01-irodori-v41-euler-sensitivity.md)), so on trajectories with
+strong amplification a fixed strict tolerance cannot hold in principle. Irodori's full-loop check absorbs this with a two-stage judgement
+(fixed 1e-3 → when exceeded, normalised by the measured amplification + an absolute upper limit) — the permanent logic is
+`tools/export-recipes/irodori/pipeline_ref.py`. Bit identity of the distributed artifacts (same bytes + same implementation =
+same output) holds regardless of this constraint.
 
-## GPU メモリの事前検査は「デバイスの絶対上限」まで — 合計 vs 物理空き容量は検査しない（by-design）
+## GPU memory pre-checks go up to "the device's absolute limits" — totals vs. physical free capacity are not checked (by-design)
 
-メモリ管理波（2026-09-01 裁定）で入る事前検査が決定論的に見られるのは、**個々のバッファ寸法と
-デバイスの絶対上限（`maxBufferSize` / `maxStorageBufferBindingSize`）の比較まで**。確保の
-**合計**が物理メモリを超えるかは検査しない — WebGPU は総量・空き容量を露出せず（ADR 0070
-決定 5 の「予算が取れない環境で当て推量しない」）、当て推量の閾値は健全な環境で誤拒否を作る。
-合計超過の最終検出は out-of-memory errorScope のままで、**Metal ではそれが沈黙する既知環境が
-ある**（上の「Metal には効かない」注記 — wgpu-hal metal の `check_if_oom()` は no-op。
-known-issues「Metal で out-of-memory errorScope が沈黙する」）。つまり Metal では
-「単発上限は事前に確実に落ちる・合計の物理超過は依然黙って進み得る」が残る。緩和候補は必要量の
-事前見積り（`PreparedModel.estimate` / `estimateGraphMemory`、gemma4 は `Gemma4Pipeline.estimateSessionMemory`）を
-呼び手へ渡すことだが、見積りはグラフ入力の記号次元が全て
-束縛されていることを要し、ロード時に束縛値を持つ家族は gemma4 だけなので、席の設計は Phase B の
-実測後に行う（ADR 0089 追記 2026-09-01 — 未実装）。
+What the pre-checks introduced in the memory-management phase (ruling of 2026-09-01) can see deterministically is **up to comparing each buffer's dimensions with
+the device's absolute limits (`maxBufferSize` / `maxStorageBufferBindingSize`)**. Whether the **total** of allocations
+exceeds physical memory is not checked — WebGPU does not expose the total or free capacity (ADR 0070
+decision 5's "do not guess in environments where the budget cannot be obtained"), and a guessed threshold creates false rejections in healthy environments.
+The final detection of exceeding the total remains the out-of-memory errorScope, and **on Metal there is a known environment where it is
+silent** (the "does not apply to Metal" note above — wgpu-hal metal's `check_if_oom()` is a no-op;
+the known-issues section on Metal's silent out-of-memory errorScope). So on Metal,
+"single limits reliably fail in advance; physical overruns of the total can still proceed silently" remains. A mitigation candidate is passing the
+pre-estimate of the requirement (`PreparedModel.estimate` / `estimateGraphMemory`, and `Gemma4Pipeline.estimateSessionMemory` for gemma4)
+to the caller, but the estimate needs every symbolic dimension of the graph inputs to be
+bound, and gemma4 is the only family that has the bound values at load time, so the design of that option comes after the measurements of Phase B
+(ADR 0089 addendum 2026-09-01 — not implemented).
 
-## hub: キャッシュ在庫の照会と選択単位の削除は manifest 1 本の中でしか勘定しない（by-design — 2026-09-05 裁定）
+## hub: cache inventory queries and per-selection deletion count only within a single manifest (by-design — ruling of 2026-09-05)
 
-`listCachedAssets` / `evictCachedAssets`（ADR
-[0094](decisions/0094-hub-cache-inventory-and-eviction.md)）の参照勘定は、渡した `LoadedManifest`
-1 本の (model, quant) の組だけを数える。
+The reference accounting of `listCachedAssets` / `evictCachedAssets` (ADR
+[0094](decisions/0094-hub-cache-inventory-and-eviction.md)) counts only the (model, quant) pairs of the single `LoadedManifest`
+passed.
 
-- **越境参照は参照元からは消さない**（`kept: "cross-repo"`）。逆向きに、参照先 repo の選択を消すと
-  それを借りている別 repo の選択（例: anima-extra が anima の text stack を参照する形）は部分在庫に
-  戻る — hub は参照元の manifest を知らないので守れない。壊れはしない: 次のロードで足りない分だけ
-  再取得になる（キャッシュは最適化であって正しさの要件ではない）。
-- **同じ越境先 repo の別 revision に同じ path・同じ sha256 を置くと、参照は 2 本・キャッシュの実体は
-  1 つになる**（2026-10-11 確認）。参照の同一性（`fileRefKey`）は revision を含むが、HF のキャッシュの
-  実体キー（`[hf, model, repo, path, sha256]`）は含まない。この形は manifest の parse を通る（parse が
-  拒否するのは越境先が読み込んだ repo 自身のときだけ — ADR [0038](decisions/0038-manifest-v1.md) 追記
-  2026-10-11）。今の削除は越境参照を参照元からは消さないので、保護と巻き添え（`alsoEvicted`）の判定は
-  この形でずれない。今の帰結は取得の側だけで、同じバイト列を別の 2 本として取る（同時に取れば 2 回
-  ダウンロードしうる）。照合を実体キーへ寄せる・削除が越境参照も消すように変えるときは、自リポの別
-  revision を越境で指す形と同じずれ（片方の削除がもう片方の実体を消す）が出るので、先にこの形の扱いを
-  決める（backlog の later 節）。
-- **部分在庫の選択は共有ファイルを守らない**。守るのは全参照が在庫にある選択だけ（アプリが
-  「ダウンロード済み」と表示する選択と一致させる）。
-- **対象と参照集合が同一の選択（重みは同じで session 設定だけ違う quant）は既定では守らない**
-  （ADR 0094 追記 2026-09-06）。キャッシュの粒度では区別できないので、対象を消すと兄弟は部分在庫に
-  落ちる — どれが落ちたかは `alsoEvicted` が名乗る。兄弟も守りたいアプリは `protect` で名指しする
-  （指定時は一覧だけが候補で、同一集合の除外はしない）。
-- **`weights` で役割を絞った選択は、同じ (model, quant) の残りと勘定を共有しない**（ADR
-  [0096](decisions/0096-speculative-decoding.md) 段 2 で入った `ResolveOptions.weights`）。守る側の
-  候補は「label（`<model>/<quant>`）が対象と違う選択」なので、同じ label の別の部分集合は守らないし
-  `alsoEvicted` にも載らない。帰結は 3 点:
-  - **「本体は残して drafter だけ消す」はそのまま書けない**。`resolveSelection` は weights を絞っても
-    assets を全数展開するので、絞った選択の参照集合に tokenizer などの共通 assets が入り、
-    **残るのは本体 weights だけ**になる（その (model, quant) は部分在庫に落ちる — 詳細と回避は
-    [known-issues](known-issues.md) の該当節）。
-  - **対象と同じ label の `protect` は無視される**（守る側の候補が「label が違う選択」だけなので）。
-    `inventory_test.ts` が「`protect` に対象自身を混ぜても無視される」を固定している。
-  - **`protect` に部分集合を複数並べて守れるのは、対象と label が違う選択**だけ。同じ label の残りが
-    部分在庫に落ちたかどうかは `listCachedAssets` をもう一度引いて見る（label に部分集合を名乗る欄は無い）。
-- **ローカル取得元は「全て在庫あり」と答え、削除は `HubError` で断る**。実体の欠損は読む時に
-  落ちる（照会のたびにディレクトリを舐める I/O は払わない）。ディレクトリの中身は取得物ではなく
-  利用者の資産なので、hub が消してよいものが無い。
-- **`CacheStorage` が無い環境では、キャッシュを持つ取得元（HF）が全て `missing`・削除は空**
-  （取得層の契約どおり）。ローカル取得元は上のとおりキャッシュを介さないので、`CacheStorage` の
-  有無に関わらず「全て在庫あり」と答える。`Cache.keys()` 未実装のランタイム（Deno 2.8 以前）では
-  取得層が fail loud に throw する。
+- **Cross-repository references are not deleted from the referring side** (`kept: "cross-repo"`). Conversely, deleting a selection in the referenced repo
+  makes the selection of another repo that borrows it (e.g. anima-extra referring to anima's text stack) fall back to partial inventory
+  — hub does not know the referring manifest, so it cannot protect it. Nothing breaks: the next load re-fetches only what is
+  missing (the cache is an optimization, not a requirement for correctness).
+- **Placing the same path with the same sha256 in another revision of the same cross-repository target gives 2 references but 1 cache
+  entity** (confirmed 2026-10-11). Reference identity (`fileRefKey`) includes the revision, but HF's cache
+  entity key (`[hf, model, repo, path, sha256]`) does not. This shape passes the manifest parse (the parse
+  rejects only when the cross-repository target is the loaded repo itself — ADR [0038](decisions/0038-manifest-v1.md) addendum
+  2026-10-11). Today's deletion does not delete cross-repository references from the referring side, so the protection and collateral (`alsoEvicted`) decisions
+  do not drift with this shape. The only consequence today is on the fetch side: the same bytes are fetched as 2 separate entries (fetched at once, they may be
+  downloaded twice). When matching is moved to the entity key, or deletion is changed to also delete cross-repository references, the same drift as the shape that points to
+  another revision of one's own repository across repositories (deleting one deletes the other's entity) appears, so decide how this shape is treated
+  first (the later section of the backlog).
+- **A selection with partial inventory does not protect shared files**. Only selections whose references are all in inventory are protected (to match the selections an app
+  shows as "downloaded").
+- **Selections whose target and reference set are identical (same weights, different session settings only — quants) are not protected by default**
+  (ADR 0094 addendum 2026-09-06). The cache's granularity cannot tell them apart, so deleting the target makes the siblings fall to partial inventory
+  — which ones fell is named by `alsoEvicted`. An app that also wants to protect the siblings names them in `protect`
+  (when given, only the list is candidates, and same-set exclusion is not applied).
+- **A selection narrowed by role with `weights` does not share accounting with the rest of the same (model, quant)** (ADR
+  [0096](decisions/0096-speculative-decoding.md) `ResolveOptions.weights`, added at stage 2). The protecting
+  candidates are "selections whose label (`<model>/<quant>`) differs from the target", so another subset with the same label is not protected and
+  does not appear in `alsoEvicted` either. 3 consequences:
+  - **"Keep the main model, delete only the drafter" cannot be written as is**. `resolveSelection` expands all
+    assets even when weights are narrowed, so the reference set of the narrowed selection includes common assets such as the tokenizer, and
+    **only the main weights remain** (that (model, quant) falls to partial inventory — details and the workaround are in
+    the relevant section of [known-issues](known-issues.md)).
+  - **`protect` with the same label as the target is ignored** (because the protecting candidates are only "selections with a different label").
+    `inventory_test.ts` pins "mixing the target itself into `protect` is ignored".
+  - **What listing several subsets in `protect` can protect is only selections whose label differs from the target**. Whether the rest of the same label
+    fell to partial inventory is seen by calling `listCachedAssets` again (there is no field in the label that names the subset).
+- **A local source answers "everything in inventory" and refuses deletion with `HubError`**. A missing entity fails when it is
+  read (the I/O of scanning the directory on every query is not paid). The directory's contents are not fetched data but
+  the user's assets, so there is nothing hub may delete.
+- **In an environment without `CacheStorage`, every source with a cache (HF) is `missing` and deletion is empty**
+  (as the fetch layer's contract says). A local source does not go through the cache, as above, so it answers "everything in inventory" regardless of whether
+  `CacheStorage` exists. On runtimes without `Cache.keys()` (Deno 2.8 and earlier) the
+  fetch layer throws, failing loudly.
 
-## hub: HF 取得元の受信上限は取得層の `expectedBytes`（`karume.json` だけは全量受信後の判定・content-length の事前突合はしない — 2026-09-06）
+## hub: the receive limit of the HF source is the fetch layer's `expectedBytes` (only `karume.json` is judged after full receipt; content-length is not checked in advance — 2026-09-06)
 
-fetch-cache 0.7.0 への追従（ADR [0094](decisions/0094-hub-cache-inventory-and-eviction.md) 決定 4）で
-hub 自前の受信バイトの門（`fetch` ラッパ）を撤去した。HF 取得元でバイト数に掛かる門は次のとおり:
+Following fetch-cache 0.7.0 (ADR [0094](decisions/0094-hub-cache-inventory-and-eviction.md) decision 4),
+hub's own received-byte check (the `fetch` wrapper) was removed. The checks on byte counts for the HF source are as follows:
 
-- **資産**: 取得層 HF 層の `expectedBytes`（manifest の `size`）が受信の上限で、宣言を超えた時点で
-  打ち切る。全量面（`fetchAssets`）では全量受信後の厳密一致と sha256 の照合は従来どおり。どちらの
-  不一致も hub からは `HubFetchError`（`cause` に取得層のエラー）として上がる — `IntegrityError` を
-  投げるのはローカル取得元だけ。
-- **温め面（`prefetchAssets` と、`openAsset` / 容器面が在庫の無い参照に挟む温め）は不足を検出しない**:
-  取得層の prefetch は `expectedBytes` を受信の上限にしか使わない。「sha256 は正しいが宣言 `size`
-  より短い」実体（書き手側の欠陥 manifest）は温めが成功し、進捗は宣言 `size` の complete を出す。
-  キャッシュに載るのは sha256 どおりの正しいバイト列で、宣言の範囲のうち実体の外を読むと後段の
-  読み（容器の block・`openAsset` の区間）が温めとは別の文言のエラーで落ちる（黙って 0 埋めの値は
-  返らない）。同じ参照を全量面で取ると `HubFetchError` になる。温め面で不足を捕まえるには、取得層が
-  受信の終端で受信長と `expectedBytes` の一致を見る変更（超過の打ち切りと対称）が要り、取得層との
-  合意が前提。
-- **`karume.json`**: 事前の期待 sha256 も size も持てないので、1 MiB の上限は**全量受信後**に
-  `parseManifest` が見る（取得層に「厳密一致なしの上限」が無い）。上限超の応答を返すミラーに対しては、
-  その応答を受信し切るまでのメモリを払う。
-- **content-length の事前突合はしない**（by-design）: Fetch 仕様上 Content-Length は信頼できず、
-  Content-Encoding 越しでは宣言と実受信が食い違うのが正常なので、汎用の取得層に入れると誤検知になる。
-  size の食い違いは受信で捕まる（超過はどの面でも途中で・不足は全量面だけが全量受信後に — 温め面の
-  不足は上の項）。
+- **Assets**: the fetch layer HF layer's `expectedBytes` (the manifest's `size`) is the receive limit, and receipt is cut off as soon as the declaration is
+  exceeded. On the full-read surface (`fetchAssets`), exact equality after full receipt and the sha256 verification are as before. Either
+  mismatch surfaces from hub as `HubFetchError` (with the fetch layer's error in `cause`) — only the local source throws
+  `IntegrityError`.
+- **The warm-up surface (`prefetchAssets`, and the warm-up that `openAsset` / the container surface insert for references not in inventory) does not detect shortfalls**:
+  the fetch layer's prefetch uses `expectedBytes` only as the receive limit. An entity that "has the right sha256 but is shorter than the declared `size`"
+  (a defective manifest on the writer's side) warms up successfully, and the progress reports complete at the declared `size`.
+  What goes into the cache is the correct bytes per the sha256, and reading the part of the declared range outside the entity makes the later
+  read (a container block, a range of `openAsset`) fail with an error worded differently from the warm-up (no silently zero-filled values
+  are returned). Fetching the same reference on the full-read surface gives `HubFetchError`. Catching shortfalls on the warm-up surface needs a change in which the fetch layer
+  checks at the end of receipt that the received length equals `expectedBytes` (symmetric with cutting off excess), and presupposes agreement with
+  the fetch layer.
+- **`karume.json`**: neither an expected sha256 nor a size can be known in advance, so the 1 MiB limit is checked by `parseManifest` **after full receipt**
+  (the fetch layer has no "limit without exact equality"). Against a mirror that returns a response over the limit,
+  the memory to receive that response in full is paid.
+- **content-length is not checked in advance** (by-design): under the Fetch spec Content-Length cannot be trusted, and
+  through Content-Encoding a mismatch between the declaration and the actual receipt is normal, so putting it in a general-purpose fetch layer would give false positives.
+  A size mismatch is caught on receipt (an excess midway on every surface; a shortfall only on the full-read surface after full receipt — the warm-up surface's
+  shortfall is the item above).
 
-## Gemma 4 QAT: 実験段階の固定 mobile 形式
+## Gemma 4 QAT: a fixed mobile format at the experimental stage
 
-`gemma4-qat` は通常 `gemma4` とは別ファミリで、公式 mobile Transformers 形式の E2B / E4B の text 生成だけを扱う。
-固定 INT2 / INT4 / INT8、SRQ、packed PLE を保持する。MTP、vision、audio、公開 source pin は未対応。
-ローカルの利用例は [QAT CLI](../examples/gemma4-qat/README.md)、数値契約は [ADR 0097](decisions/0097-gemma4-qat-integration.md)、
-用語は [glossary](glossary.md)、実測の出所は [QAT レビューの実測記録](research/2026-09-19-qat-review.md)。
+`gemma4-qat` is a separate family from regular `gemma4` and handles only the text generation of the official mobile Transformers format E2B / E4B.
+It keeps fixed INT2 / INT4 / INT8, SRQ and packed PLE. MTP, vision, audio and a public source pin are not supported.
+The local usage example is the QAT CLI (`examples/gemma4-qat/README.md` (removed in 0.15)), the numeric contract is [ADR 0097](decisions/0097-gemma4-qat-integration.md),
+the terms are in the [glossary](glossary.md), and the source of the measurements is the [measurement record of the QAT review](research/2026-09-19-qat-review.md).
 
-**活性は「丸めるだけ」で公式 mobile の整数内積ではない**。
-公式 mobile ランタイムは SRQ で丸めた int8 をそのまま整数内積（int32 累算）に渡すが、karume は上流
-transformers と同じく f32 へ復元して float で縮約する（[ADR 0097](decisions/0097-gemma4-qat-integration.md) 追記 1・8）。
-これが CPU / GPU で token 列が分岐する根本で、縮約順の小さな差が SRQ の丸め境界をまたぐと列が割れる。
-同じ理由で chunk 長を変えても列は変わりうる（E4B の短文比較に実例がある）。「変わる = バグ」ではない。
-整数内積の実装は今回の範囲に含めず [perf-ledger](perf-ledger.md) K-45 に起票した。
+**Activations are "only rounded", not the official mobile integer dot product**.
+The official mobile runtime passes the int8 rounded by SRQ as is to the integer dot product (int32 accumulation), but karume, like upstream
+transformers, restores them to f32 and reduces in float ([ADR 0097](decisions/0097-gemma4-qat-integration.md) addenda 1 and 8).
+This is the root of the token sequence diverging between CPU / GPU: when a small difference in reduction order crosses an SRQ rounding boundary, the sequence splits.
+For the same reason, changing the chunk length can also change the sequence (there is a real case in the short-text comparison of E4B). "It changed = a bug" does not hold.
+Implementing the integer dot product is outside this scope and was filed as [perf-ledger](perf-ledger.md) K-45.
 
-**KV cache は f32 で、公式の量子化 scale を使わない**。
-公式 checkpoint は層ごとに `k_cache_scale` / `v_cache_scale`（text 計 70 本）を持つが、
-karume は上流 transformers と同じくこれを読まない。
-1 位置あたりの full 層 KV は E2B 12,288 B / E4B 32,768 B で、sliding 層は窓 512 の固定バッファなので
-capacity に依らない。int8 化は [perf-ledger](perf-ledger.md) K-46 に起票した。
+**The KV cache is f32 and does not use the official quantization scales**.
+The official checkpoint holds `k_cache_scale` / `v_cache_scale` per layer (70 in total for text), but
+karume, like upstream transformers, does not read them.
+The full-layer KV per position is 12,288 B for E2B / 32,768 B for E4B, and the sliding layers are fixed buffers with a window of 512, so they
+do not depend on capacity. int8 conversion was filed as [perf-ledger](perf-ledger.md) K-46.
 
-**既定は capacity 4096・chunkLength 768・trace 上限 768・対話 CLI の `--max-new-tokens` 256**（通常 Gemma と同じ）。
-prefill バケットも通常 Gemma と同じ梯子を使う（QAT 専用に測り直した列ではない）。
-**512 超の文脈での出力品質は未検収**で、これが容量を使い込むときの唯一の実質的な前提条件。
-動くこと自体は確認済みで、capacity 8192 の実行は
-[prefill バケット調査](research/2026-09-13-prefill-buckets.md)（ただし最長入力は 65 token）、
-1,024 長の生成は [WebML 比較の速度ベンチ](research/2026-09-12-webml-browser-speed.md)にある。
-どちらも品質は見ていない。RTX の Deno / Chrome が一致した短文比較も、広い品質や M2 の同値性の証明ではない。
+**The defaults are capacity 4096, chunkLength 768, trace limit 768, and `--max-new-tokens` 256 for the interactive CLI (removed in 0.15)** (the same as regular Gemma).
+The prefill buckets also use the same ladder as regular Gemma (not a sequence re-measured specifically for QAT).
+**Output quality in contexts over 512 is not accepted**, and this is the only substantive precondition when using up the capacity.
+That it runs at all is confirmed: a run at capacity 8192 is in the
+[prefill bucket investigation](research/2026-09-13-prefill-buckets.md) (though the longest input is 65 tokens), and
+generation of length 1,024 is in the [speed bench of the WebML comparison](research/2026-09-12-webml-browser-speed.md).
+Neither looked at quality. The short-text comparison where RTX Deno / Chrome matched is not a proof of broad quality or of equivalence on the M2 either.
 
-**thinking モードは非対応**。公式 `chat_template.jinja` の `enable_thinking` 相当の経路が無く、
-会話の `reasoning` 欄は fail loudly で拒否する（[ADR 0084](decisions/0084-gemma-tokenizer-chat.md) 決定 5 の射程どおり）。
+**Thinking mode is not supported**. There is no path equivalent to `enable_thinking` of the official `chat_template.jinja`, and
+the conversation's `reasoning` field is rejected, failing loudly (within the reach of [ADR 0084](decisions/0084-gemma-tokenizer-chat.md) decision 5).
 
-**checkpoint の 1,179 テンソルを丸ごと使っていない**（vision_tower 546・audio_tower 631・
-embed_vision 1・embed_audio 1）。vision / audio に着手する波の規模はこの本数が目安になる。
+**Not all 1,179 tensors of the checkpoint are used** (vision_tower 546, audio_tower 631,
+embed_vision 1, embed_audio 1). This count is a guide to the size of the phase that takes on vision / audio.
 
-## GEMVの並列加算（2026-09-12）
+## Parallel addition in GEMV (2026-09-12)
 
-`linearGemvReduce: "parallel"` は[ADR 0098](decisions/0098-linear-gemv-parallel.md)の任意指定。
-対象は実測した量子化行列と物理 M=1..8、f32 演算のみ。既定の逐次加算と bit 同一ではなく、QAT は生成列も変わり得る。
-M>8 と対象外形状は従来経路で、診断キーで適用範囲を確認できる。E4B・他モデルの全面的な高速化を意味しない。
-対象形の表は allowlist で、載っていない形は `parallel` を指定しても黙って逐次加算へ縮退する。E4B の行（2026-09-26）は E2B の同じ役割の行の lanes を写した未実測の暫定で、QAT E4B の i2 lm_head は載っていない（[ADR 0098 追記 2026-09-26](decisions/0098-linear-gemv-parallel.md)）。
-[M2での速度改善と短文出力](research/2026-09-13-m2-gemv-adoption.md)は確認済み。広い品質評価は残る。
-通常E2BとQAT E2B / E4Bの新しい配布recipeは、parallelとRMS→add融合（QATはさらにlinear→SRQ融合とpacked int8活性）を宣言した `i4-fast` を既定quantに選ぶ（[ADR 0104](decisions/0104-gemma-fast-quant.md)）。parallelだけの `i4-gemvpar` も保持する。
-従来の `i4`・runtime・fromAssetsの逐次既定は維持する。既存の配布形や公開pinは自動で変更しない。
-gemma4 E2B の drafter（i8・`[256,3072]` / `[262144,256]` 等）の形は表に無く、`i4-fast` でも 68 本中 66 本の linear が逐次のまま走る（束の census 表が参照 66 で固定 — perf-ledger K-59）。
+`linearGemvReduce: "parallel"` is an optional setting of [ADR 0098](decisions/0098-linear-gemv-parallel.md).
+It covers the measured quantized matrices and physical M=1..8, with f32 arithmetic only. It is not bit-identical to the default sequential addition, and for QAT the generated sequence can change too.
+M>8 and shapes outside the targets use the former path, and the diagnostic keys show the range it applies to. It does not mean an across-the-board speed-up of E4B or other models.
+The table of target shapes is an allowlist, and shapes not on it silently fall back to sequential addition even when `parallel` is specified. The E4B rows (2026-09-26) are an unmeasured provisional copy of the lanes of the E2B rows of the same role, and QAT E4B's i2 lm_head is not on it ([ADR 0098 addendum 2026-09-26](decisions/0098-linear-gemv-parallel.md)).
+[The speed improvement and short-text output on the M2](research/2026-09-13-m2-gemv-adoption.md) are confirmed. A broad quality evaluation remains.
+The new distribution recipes of regular E2B and QAT E2B / E4B choose as the default quant `i4-fast`, which declares parallel and RMS→add fusion (QAT additionally linear→SRQ fusion and packed int8 activations) ([ADR 0104](decisions/0104-gemma-fast-quant.md)). The parallel-only `i4-gemvpar` is also kept.
+The sequential default of the former `i4`, the runtime and fromAssets is kept. Existing distributions and public pins are not changed automatically.
+The shapes of gemma4 E2B's drafter (i8, `[256,3072]` / `[262144,256]` and so on) are not in the table, and even with `i4-fast` 66 of its 68 linears run sequentially (the bundle's census table pins 66 for the reference — perf-ledger K-59).
 
-## packed int8 活性（`packedStaticQuantize`・2026-09-19）
+## packed int8 activations (`packedStaticQuantize`, 2026-09-19)
 
-`packedStaticQuantize` は[ADR 0105](decisions/0105-packed-static-quantize-activations.md)の任意指定で、固定SRQが出すint8コード4個をu32 1語に詰めて並列GEMVへ渡す。
-QAT E2Bの `i4-fast` は既定でこれを宣言する（通常Gemma 4は `static_quantize` を持たないので宣言しない）。by-designの制約4点:
+`packedStaticQuantize` is an optional setting of [ADR 0105](decisions/0105-packed-static-quantize-activations.md) that packs 4 int8 codes produced by fixed SRQ into one u32 word and passes them to the parallel GEMV.
+QAT E2B's `i4-fast` declares it by default (regular Gemma 4 has no `static_quantize`, so it does not declare it). 4 by-design constraints:
 
-- **packedになるのは実測で効いた4形状と、それを写したE4Bの3形状だけ**（`PARALLEL_SHAPES` の `packedActivations` が true の行 = K が長くlanes 32の形。E4Bの3形状は未実測）。消費先が1本でもtrueでない行へ落ちるSRQはf32のまま残り、他40行（g32の23行を含む）は対象外。
-- **非有限値の扱いがf32経路と違う**。`NaN` は境界表の外側として ±127 / -128 へ飽和し（f32経路はNaNをそのまま流す）、`-0.0` はコード0 = `+0.0` へ落ちる。`±Inf` はf32経路も同じ表で飽和するので一致する。数値opt-inの射程（[ADR 0058](decisions/0058-numerics-opt-in-contract.md)）として受け入れる。
-- **確保量は1/4にならない**。出力テンソルの実体は宣言shapeのまま確保し、実際に書くのはその1/4。アリーナのバケットを動かさないための選択で、VRAMの節約ではない。
-- **`linearGemvReduce: "parallel"` かつ `linearCompute: "f32"` の組だけを受理する**。他の組合せとboolean以外の値はSession構築時に拒否し、黙ってf32経路へ落とさない。
+- **Only the 4 shapes where it measurably helped, and the 3 E4B shapes copied from them, become packed** (rows of `PARALLEL_SHAPES` whose `packedActivations` is true = shapes with a long K and lanes 32. The 3 E4B shapes are not measured). An SRQ whose consumers include even one row that is not true stays f32, and the other 40 rows (including the 23 g32 rows) are outside the targets.
+- **The handling of non-finite values differs from the f32 path**. `NaN` saturates to ±127 / -128 as outside the boundary table (the f32 path passes NaN through as is), and `-0.0` becomes code 0 = `+0.0`. `±Inf` saturates with the same table on the f32 path too, so they match. Accepted as within the reach of the numeric opt-in ([ADR 0058](decisions/0058-numerics-opt-in-contract.md)).
+- **The allocation does not become 1/4**. The output tensor's storage is allocated at the declared shape, and only 1/4 of it is actually written. This is a choice to keep the arena buckets unchanged, not a VRAM saving.
+- **Only the combination of `linearGemvReduce: "parallel"` and `linearCompute: "f32"` is accepted**. Other combinations and non-boolean values are rejected at Session construction, without silently dropping to the f32 path.
 
-## RMS融合とsubgroup最適化の提供範囲（2026-09-14整理）
+## Scope of RMS fusion and the subgroup optimizations (organized 2026-09-14)
 
-`fuseRmsNormAdd`は既定falseで、投入上限とは独立した指定（[ADR 0099](decisions/0099-rms-norm-add-fusion.md)）。
-比較画面の融合＋投入768が、モデル・CLI・quantの既定になったことは意味しない。
+`fuseRmsNormAdd` defaults to false and is a setting independent of the submission limit ([ADR 0099](decisions/0099-rms-norm-add-fusion.md)).
+That the comparison page's fusion + submission of 768 was used does not mean it became the default of the models, the CLI or the quants.
 
-`rmsNormReduce: "subgroup32"`と`linearGemvReduce: "parallel-subgroup32"`は任意指定。
-外部GPUを渡す場合は`acquireGpu({ subgroups: true })`で必要機能を要求する。
-WebGPUのsubgroups / subgroup-size-control、WGSLのsubgroup_id、32レーンの既知解検査が必要で、不足時は拒否する。
-Deno 2.9.6では必要機能が未提供。Chromeでの実走とM2の追試は済みだが、M2の既定採用は見送っている。
-これらはquant.sessionの保存語彙には含めない。既存のworkgroup / parallelを選び直せる。
-数値・対象形状・未検収範囲は[ADR 0100](decisions/0100-rms-subgroup-reduction.md)と[0101](decisions/0101-linear-gemv-subgroup.md)を参照する。
+`rmsNormReduce: "subgroup32"` and `linearGemvReduce: "parallel-subgroup32"` are optional settings.
+When an external GPU is passed, request the required features with `acquireGpu({ subgroups: true })`.
+They need WebGPU's subgroups / subgroup-size-control, WGSL's subgroup_id and the 32-lane known-answer check, and are rejected when anything is missing.
+Deno 2.9.6 did not provide the required features; on Node + Dawn (0.15) they are exposed and the variants run in the core lane ([research 2026-10-16](research/2026-10-16-node-port-results.md) item 12). Running in Chrome and the follow-up test on the M2 are done, but adopting them as the M2 default is deferred.
+They are not included in the stored vocabulary of quant.session. The existing workgroup / parallel can be chosen again.
+For the numbers, target shapes and the range not yet accepted, see [ADR 0100](decisions/0100-rms-subgroup-reduction.md) and [0101](decisions/0101-linear-gemv-subgroup.md).
 
-## subgroup 変種の実走検査は自動では走らない（Chrome の /check.html と往復比較が手動の門）
+## The real-execution checks of the subgroup variants do not run automatically (Chrome's /check.html and the round-trip comparison are the manual check)
 
-`rmsNormReduce: "subgroup32"` と `linearGemvReduce: "parallel-subgroup32"` の実走検査
-（`gpu_rms_norm_subgroup_test.ts` / `gpu_linear_gemv_subgroup_test.ts` の「subgroups 実走」step）は、
-必要機能が揃わない device では明示 SKIP になる。Deno 2.9.6 は `subgroups` を提供しないので、`deno task verify` と CI では
-**どの走行でも実行されない**。SKIP を赤にする門番（GPU アダプタ無しを赤にする `gpu_gate_test.ts` に当たるもの）も無い。
-自動の検査が見るのは WGSL の生成（スナップショット）と受理・拒否の分岐までで、subgroup 命令を実際に撃った数値は見ない。
-実走の門は手動で、Chrome で次の 2 つを回す（手順は `tools/llm-speed/browser/README.md`）。
+> Resolved in 0.15 (2026-10-16): on Node + Dawn the development machine exposes `subgroups`, so the real-execution cases below run in the core lane ([research 2026-10-16](research/2026-10-16-node-port-results.md) item 12). The text below records the Deno-era state; the manual check still applies to a machine whose adapter lacks the features.
 
-- GEMV: 計測ページの `/check.html` が、並列と `parallel-subgroup32` の u32 一致を検査して `PASS` / `FAIL` を出す
-  （`packages/runtime/tests/helpers/gemv-subgroup-check.ts` と同じ検査）。
-- RMS: `/check.html` の対象外。計測ページの「RMSの2経路を往復比較」（`fused → subgroup32 → subgroup32 → fused`）で
-  生成が崩れないことを見る。縮約順が変わるので生成文は変わりうる。
+The real-execution checks of `rmsNormReduce: "subgroup32"` and `linearGemvReduce: "parallel-subgroup32"`
+(the cases of `gpu_rms_norm_subgroup_test.ts` / `gpu_linear_gemv_subgroup_test.ts` that actually run the subgroup instructions) SKIP explicitly
+on a device without the required features. Deno 2.9.6 did not provide `subgroups`, so in the Deno-era full verify and in CI they
+**were not executed in any run**. There is no all-skip guard that turns the SKIP red either (something like `gpu_gate_test.ts`, which turns a missing GPU adapter red).
+What the automatic checks see is only WGSL generation (snapshots) and the accept / reject branches; they do not look at the numbers from actually issuing subgroup instructions.
+The real-execution check is manual: run the following 2 in Chrome (the procedure is `tools/llm-speed/browser/README.md` (removed in 0.15)).
 
-subgroup 変種の WGSL や選択条件を変えたときは、この 2 つを回すまで実走は未検証として扱う。
+- GEMV: the measurement page's `/check.html` checks u32 equality of parallel and `parallel-subgroup32` and outputs `PASS` / `FAIL`
+  (the same check as `packages/runtime/tests/helpers/gemv-subgroup-check.ts`).
+- RMS: outside the scope of `/check.html`. Use the measurement page's "round-trip comparison of the 2 RMS paths" (`fused → subgroup32 → subgroup32 → fused`) to
+  see that generation does not break. The reduction order changes, so the generated text can change.
 
-## 公開面のスナップショット門は export の増減だけを見る — シグネチャの互換は保証しない
+When the WGSL or the selection conditions of the subgroup variants change, treat real execution as unverified until these 2 have been run.
 
-`packages/<pkg>/tests/public_surface_test.ts` は、`deno doc --json` の各宣言から `{ name, kind }` の集合だけを採って
-fixture と比べる（実体は `packages/runtime/tests/helpers/public-surface.ts`）。overload は 1 組に畳まれる。
-引数・戻り値・型の中身の変更は、名前と種類が同じなら通る。この門の役割は「export の増減の検出」で
-（ADR [0008](decisions/0008-public-api.md) の 2026-09-20 追記）、シグネチャの互換は門の対象外である。
-`deno task check` が型検査する examples / tools が使っている範囲だけは、壊れると間接に落ちる。
+## The public-surface snapshot check looks only at exports added or removed — signature compatibility is not guaranteed
 
-## states attention の行統計/PV融合（2026-09-15）
+`packages/<pkg>/tests/public_surface_test.ts` takes only the set of `{ name, kind }` of the declarations exported by each entry (read through the TypeScript 7 synchronous API; the kind vocabulary carried over from `deno doc --json`) and
+compares it with a fixture (the body is `packages/runtime/tests/helpers/public-surface.ts`). Overloads are folded into one pair.
+Changes to arguments, return values and the contents of types pass as long as the name and kind are the same. The role of this check is "detecting exports added or removed"
+(the 2026-09-20 addendum of ADR [0008](decisions/0008-public-api.md)), and signature compatibility is outside the check.
+Only the range used by the code that `vp check` type-checks fails indirectly when broken.
 
-`stateAttentionReduce: "parallel-fused"` は[ADR 0102](decisions/0102-state-attention-stats-pv-fusion.md)の任意指定。
-M<=8・静的列上限<=1024のstates形だけを融合し、対象外とreadonlyは従来parallel経路を維持する。
-RTX/Chromeとカーネル数値の検収を行い、M2の性能検収は残る。2026-09-26 に通常 gemma4 の `i4-fast` が宣言した
-（B570 の実測で参照比の速度低下なし・parallel とほぼ同等 — [ADR 0104 追記](decisions/0104-gemma-fast-quant.md)）。M2 と他の席は未変更。
+## Row-statistics/PV fusion of states attention (2026-09-15)
 
-## gemma4: PLE の GPU 常駐席が要るもの（2026-09-19・opt-in）
+`stateAttentionReduce: "parallel-fused"` is an optional setting of [ADR 0102](decisions/0102-state-attention-stats-pv-fusion.md).
+It fuses only the states form with M<=8 and a static column limit <=1024; out-of-scope shapes and readonly keep the former parallel path.
+Acceptance of RTX/Chrome and of the kernel numbers was done; performance acceptance on the M2 remains. On 2026-09-26 regular gemma4's `i4-fast` declared it
+(B570 measurements show no slowdown against the reference, about the same as parallel — [ADR 0104 addendum](decisions/0104-gemma-fast-quant.md)). The M2 and the other presets are unchanged.
 
-`pleResidency: "gpu"` は PLE（`model` 容器の資産）の量子化バイト列を**単一の storage 束縛**として GPU に置く
-（[ADR 0085 追記](decisions/0085-ple-host-gather.md)）。既定は `"host"` で、従来の挙動・数値・
-token 列は 1 つも変わらない。
+## gemma4: what the GPU-resident PLE option needs (2026-09-19, opt-in)
 
-必要な束縛上限は配布形で決まる。E2B は QAT（i4）1,174,405,120 B・通常 Gemma 4（i8）
-2,348,810,240 B、E4B QAT（i2）は 704,643,072 B で、`maxStorageBufferBindingSize` と
-`maxBufferSize` の**どちらか**が足りない device ではロードが不足バイト数を添えて失敗する。
-黙ってホスト経路へ退避しない。参照機（RTX 3080 Ti / Vulkan）の上限は 2,147,483,644 B なので、
-**通常 Gemma 4 E2B はこの機ではこの席を使えない**（QAT E2B / E4B は載る）。
+`pleResidency: "gpu"` puts the quantized bytes of PLE (an asset of the `model` container) on the GPU as **a single storage binding**
+([ADR 0085 addendum](decisions/0085-ple-host-gather.md)). The default is `"host"`, and the former behaviour, numbers and
+token sequences do not change at all.
 
-併用できないノブが 3 つある（どれもロード時に拒否する）。`maxResidentPleBytes` は GPU 常駐では
-1 度も引かれない予算、投機デコード（`speculative`）は drafter の per-layer 入力がこの席の範囲外、
-`acquireGpu({ gpuTiming: true })` は計測中に batch を開けないためである。
+The required binding limit is decided by the distribution. For E2B it is 1,174,405,120 B for QAT (i4) and 2,348,810,240 B for regular Gemma 4 (i8),
+and 704,643,072 B for E4B QAT (i2); on a device where **either** `maxStorageBufferBindingSize` or
+`maxBufferSize` is short, loading fails with the number of missing bytes.
+It does not silently fall back to the host path. The reference machine's (RTX 3080 Ti / Vulkan) limit is 2,147,483,644 B, so
+**regular Gemma 4 E2B cannot use this option on this machine** (QAT E2B / E4B fit).
 
-単独では速くならない（[research §15](research/2026-09-19-qat-speed-recon.md)）: Chrome の greedy decode で壁 0〜−7%・
-GPU +0.08 ms/token、Deno は温度 0 で中立。Chrome では**同じページで 8 世代目以降の prefill が回を追って遅くなる**（TTFT 60 → 180 ms で
-頭打ち・[research §15.2](research/2026-09-19-qat-speed-recon.md)）— gather や GPU 時間でなく prefill run のホスト側で、VRAM 占有が大きいときに
-出る Chrome（Dawn）側の現象（`planBackingBudgetBytes` を上げた host 経路でも再現・Deno では出ない）。温度 > 0 や診断付きの decode（通常 run）は
-2026-09-20 から gather と同じ batch に積んで終端フェンスで読み戻す（`Session.enqueueRead`・[ADR 0054 追記](decisions/0054-resident-loop-and-fence.md#addendum-2026-09-20--batch-readback-of-graph-outputs)）
-ので、フェンスは greedy と同じ 1 本。**prefill だけは gather 用の batch を chunk ごとに 1 本先行させる**（Deno では
-chunk あたり +10 ms の TTFT）。席は先行投入（perf-ledger H-27）の前提として置いたもので、既定にはしない。
+There are 3 knobs that cannot be combined with it (all rejected at load time). `maxResidentPleBytes` is a budget that is never drawn on
+with GPU residency, speculative decoding (`speculative`) has the drafter's per-layer inputs outside the range of this option, and
+`acquireGpu({ gpuTiming: true })` cannot open a batch while timing.
+
+On its own it is not faster ([research §15](research/2026-09-19-qat-speed-recon.md)): in Chrome's greedy decode, wall 0 to −7%,
+GPU +0.08 ms/token; on Deno it is neutral at temperature 0. In Chrome, **prefill gets slower with each round from the 8th generation on in the same page** (TTFT 60 → 180 ms, then
+levels off, [research §15.2](research/2026-09-19-qat-speed-recon.md)) — not gather or GPU time but the host side of the prefill run, a phenomenon
+on the Chrome (Dawn) side that appears when VRAM occupancy is large (reproduced on the host path with a raised `planBackingBudgetBytes` too; does not appear on Deno). Decode with temperature > 0 or with diagnostics (normal runs)
+has since 2026-09-20 been queued in the same batch as the gather and read back at the final fence (`Session.enqueueRead`, [ADR 0054 addendum](decisions/0054-resident-loop-and-fence.md#addendum-2026-09-20--batch-readback-of-graph-outputs)),
+so there is one fence, the same as greedy. **Only prefill issues the batch for the gather one ahead per chunk** (on Deno
++10 ms of TTFT per chunk). The option was put in place as a prerequisite for run-ahead (perf-ledger H-27) and is not made the default.
