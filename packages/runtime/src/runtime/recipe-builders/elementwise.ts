@@ -234,7 +234,7 @@ export const buildArgmax = async (
 
 /**
  * 部分最大と最小添字の縮約を共有し、topk(k=1)だけ元入力の値ビットも写す。
- * DECIDED: docs/decisions/0068-decode-exit-multi-output.md#追記-92026-09-11-topk-k1-の長い行も-2-dispatch-へ分割する
+ * DECIDED: docs/decisions/0068-decode-exit-multi-output.md#addendum-9-2026-09-11--topk-k1-over-long-rows-also-uses-two-dispatches
  */
 const buildMaxIndexSplit = async (
   face: RecipeBuildFace,

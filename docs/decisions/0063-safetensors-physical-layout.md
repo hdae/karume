@@ -1,57 +1,56 @@
-# 0063: safetensors 物理配置の契約 — 隙間なし・要素整列・固定書き出し順
+# 0063: safetensors physical layout — no gaps, element alignment, fixed write order
 
-- Status: accepted（2026-08-15 — 既存裁定の正本化。ランタイム・エクスポータ双方に実装済みで、
-  これまで cross-package 不変条件の正本が `docs/limitations.md` にあった）
-- 関連: ADR [0003](0003-ir-v1.md)（コンテナ形式）/ [0018](0018-f16-weight-execution.md)（f16
-  格納 — 偶奇問題の発生元）/ [0019](0019-i8-weight-execution.md)（i8 格納 — 1 バイト要素）/
-  [0069](0069-packed-w4-storage.md)（packed 4bit — 本 ADR とセットで改訂）/
-  実装 = `packages/runtime/src/format/safetensors.ts`（リーダ）・
-  `tools/exporter/karume/emit.py`（ライタ）・`karume/verify.py` の `assert_reader_layout`
+- Status: accepted (2026-08-15 — records a ruling already implemented on both sides); partly
+  superseded by [0108](0108-container-format.md) (the writer's fixed order and the rule for new storage
+  dtypes, effective 2026-09-24); the reader rules stay in force for auxiliary assets.
+- Date: 2026-08-15
+- Related: [0003](0003-ir-v1.md) (container format) / [0018](0018-f16-weight-execution.md) (f16
+  storage — origin of the odd/even problem) / [0019](0019-i8-weight-execution.md) (i8 storage) /
+  [0069](0069-packed-w4-storage.md) (packed 4-bit — revised together with this ADR) /
+  implementation: reader `packages/runtime/src/format/safetensors.ts`, Python copy of its rules
+  `assert_reader_layout` in `tools/exporter/src/karume/verify.py`
 
 ## Context
 
-- safetensors 仕様自体はテンソルの並び順・整列を規定しない。しかし Karume のリーダは
-  TypedArray ビューをファイル buffer 上に直接張るため、**各テンソルの絶対 offset が要素
-  サイズに整列していること**が必要になる。要素数が奇数の F16（バイト長 ≡ 2 mod 4）の直後に
-  F32 / I32 を置くと offset が 4 の倍数から外れる。
-- HF の `safe_open` は整列違反のファイルを**読めてしまう**ので、上流ツールを通すだけでは
-  この違反を検出できない — 検出器は自前で持つしかない。
+- The safetensors specification fixes neither the order nor the alignment of tensors. The Karume
+  reader maps TypedArray views directly onto the file buffer, so **the absolute offset of each tensor
+  must be aligned to its element size**. An F16 tensor with an odd element count (byte length ≡ 2 mod
+  4) followed by F32 / I32 moves the offset off a multiple of 4.
+- The HF `safe_open` **does read** such files, so upstream tools do not detect the violation. The
+  detector has to be our own.
 
 ## Decision
 
-- **リーダ（runtime）**: データ節を「隙間なく・要素サイズに整列して」覆うことを要求し、
-  違反は `SafetensorsError` で fail loudly（gap・整列・宣言バイト数の厳密一致）。
-- **ライタ（exporter）**: 書き出し順を「**F32 → I32 → I4 → 偶数要素 F16 → 奇数要素 F16 →
-  I8**」に固定する（`emit.py` — `safetensors.torch.save_file` は使わない）。奇数要素の F16・
-  要素数が 4 の倍数でない I8 は末尾側へ寄る配置で、後続テンソルの整列を崩さない。並びは
-  **整列単位の降順**で、`I4` は要素整列の概念を持たないかわりに「テンソル先頭が 4 バイト
-  整列」を要求する（展開カーネルが `array<u32>` で束縛する — ADR 0069 決定 2）ので F32 / I32
-  と同じ群に入る。`I4` の節のバイト長は必ず 8 の倍数（量子化軸が 2 冪 ≥ 16 の `group_size` で
-  割り切れる ⇒ 論理要素数は 16 の倍数）なので、前置しても後続の整列も F16 の偶奇規則も
-  変えない（ADR 0069 追記 2 — 決定 2 の「I8 の後ろ末尾」からの訂正）。
-- **emit 直後の自己検査**: `verify.assert_reader_layout` がリーダ規則を写した検査を通す
-  （書けたのに読めないファイルを配布形に混入させない）。
-- GPU 常駐時のゼロ詰め（ADR 0018 / 0019）は**バッファ内**の話で、ファイル上のバイト列は
-  詰めない（本契約と独立）。
+- **Reader (runtime).** The reader requires that the tensors cover the data section without gaps and
+  that every tensor is aligned to its element size. A violation fails loudly with `SafetensorsError`
+  (gap, alignment, exact match of the declared byte length).
+- **Writer (exporter).** The write order is fixed as **`F32 → I32 → I4 → even-element F16 →
+  odd-element F16 → I8`** (`emit.py`, without `safetensors.torch.save_file`): descending by alignment
+  unit, so odd-element F16 and I8 tensors sit at the end and break no later alignment. `I4` requires a
+  4-byte-aligned start (bound as `array<u32>` — ADR 0069 decision 2) and its section is always a
+  multiple of 8 bytes, so it joins the F32 / I32 group (ADR 0069 addendum 2). (Superseded by ADR 0108
+  decision 7 on 2026-09-22, effective 2026-09-24 when step 3d `9e905d9f` removed the old reader: the
+  container writer bakes 64-byte block alignment and block lengths that are multiples of 4. `emit.py`
+  now writes containers; auxiliary assets are single-tensor safetensors written with
+  `safetensors.numpy.save` (`table_payload` in `tools/exporter/src/karume/dist.py`), where order does
+  not matter.)
+- **Self-check after writing.** `verify.assert_reader_layout` applies a copy of the reader rules, so a
+  file that was written but cannot be read never reaches a distribution. Today it runs on the input
+  of the migration CLI (`karume migrate`, the only caller that accepts the dialect dtypes `I4` / `I2`)
+  and right after a recipe writes an asset safetensors (e.g. `tools/export-recipes/irodori/dacvae`).
+- Zero padding at GPU residency (ADR 0018 / 0019) is **inside the buffer**; file bytes are not padded.
 
 ## Consequences
 
-- リーダ規則とライタ規則は**対**で変える（cross-package 不変条件 — 片側だけの変更は
-  `assert_reader_layout` が落とす）。
-- 新しい格納 dtype（例: 将来の packed 4bit）を足すときは、整列・並び順・端数の契約を
-  **本 ADR の改訂として**先に決める — 1 要素 = 1 payload 要素の前提を破る格納形は、shape と
-  バイト数の対応も含めて別 ADR 級（backlog next の packed weight storage）。
-- `docs/limitations.md` の該当節は本 ADR を指す要約になる。
+- The reader rules and the writer rules change **as a pair** (a cross-package invariant: a written
+  file that breaks the reader rules fails `assert_reader_layout`).
+- A new storage dtype is first decided **as a revision of this ADR** (superseded by ADR 0108 on
+  2026-09-22: storage dtypes are decided on the container — bf16, for example, by
+  [0131](0131-bf16-weight-execution.md); the safetensors reader accepts no quantized dialect dtype).
+- The asset safetensors section of `docs/limitations.md` is a summary that points to this ADR.
 
-## 追記（2026-09-22）— 物理配置と書き出し順の契約は ADR 0108（proposed）が上書きする
+## Addendum (2026-09-22) — ADR 0108 replaces the weight layout contract
 
-本 ADR の safetensors 物理配置の契約（隙間なし・要素整列・固定書き出し順
-`F32 → I32 → I4 → 偶数要素 F16 → 奇数要素 F16 → I8`）は、ADR [0108](0108-container-format.md) の
-コンテナが上書きする。0108 では block 先頭 64 B 整列と block 長 4 の倍数を**書き手が焼く**ので、
-書き出し順で整列を作る必要が無くなる（0108 決定 7・Consequences の「退役するもの」）。0108 は
-**proposed** で実装は未着手なので、**実装が入るまでは現行のまま**であり、本文は書き換えていない。
-
-**2026-09-24**: ADR 0108 は accepted となり、段 3d（`9e905d9f`）で旧配布形の読み手が消えたので、上の
-上書きは発効した。重みの配布形としての書き出し順の契約は使われない。safetensors の読み手
-（`packages/runtime/src/format/safetensors.ts`）は付帯資産を読むために残り、データ節の被覆と要素整列の
-検査はそちらに掛かり続ける。量子化の方言 dtype `I4` / `I2` は受理しない。
+ADR 0108 decision 7 replaces the layout and write-order contract for weights; it took effect on
+2026-09-24 (step 3d, `9e905d9f`). The safetensors reader stays for auxiliary assets, with the
+coverage and alignment checks, and rejects `I4` / `I2`.

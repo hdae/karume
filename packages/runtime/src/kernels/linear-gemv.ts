@@ -576,7 +576,7 @@ ${products}`;
 /**
  * INT2 の行ブロックだけを関数にまとめ、語・行ごとの展開による初回の解析費を減らす。
  * 1 出力の K 昇順、成分の静的添字、復元と積和の丸め点は M=1 と同じ。
- * DECIDED: docs/decisions/0082-linear-gemv-decode.md#追記-82026-09-11-int2-行ブロックのシェーダーを縮小するk-30
+ * DECIDED: docs/decisions/0082-linear-gemv-decode.md#addendum-8-2026-09-11--smaller-int2-row-block-shaders-k-30
  */
 const i2WordWgsl = (): string => `
 fn linear_i2_word(pwa: vec4<u32>, xqa: u32, wscale_v: f32, initial: f32) -> f32 {
@@ -609,7 +609,7 @@ const unitMacs = (storage: WeightStorage, slot: string, packed = false, fma = fa
 /**
  * I4/I8も行ごとの積和を小さな関数へまとめる。K昇順とf32の丸め点はM=1と同じ。
  * 逆量子化の式を行ごとに複製する代わりに関数を呼び、WGSLの解析・コンパイル量を減らす。
- * DECIDED: docs/decisions/0082-linear-gemv-decode.md#追記-92026-09-11-int4int8-行ブロックにも関数化を適用する
+ * DECIDED: docs/decisions/0082-linear-gemv-decode.md#addendum-9-2026-09-11--the-function-form-for-int4-and-int8-row-blocks-too
  */
 const rowsWordCall = (storage: "i4" | "i8", slot: string, rows: number): string =>
   Array.from({ length: rows }, (_, row) => {

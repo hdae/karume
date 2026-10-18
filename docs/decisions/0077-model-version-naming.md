@@ -1,60 +1,59 @@
-# 0077: モデル名に上流のバージョンを載せる
+# 0077: Model names carry the upstream version
 
-- Status: accepted（2026-08-22 — ユーザー裁定「その命名で進めてください」。anima の base 系
-  リポで即適用。他ファミリへの遡及は行わない）
+- Status: accepted (2026-08-22, the maintainer's ruling; applied at once to the anima base
+  repository); partly superseded by [0088](0088-civitai-air-intake.md) ("not normalized" revised
+  for Civitai intake, 2026-09-01); the non-retroactivity clause re-graded to MAY on 2026-10-18
 - Date: 2026-08-22
-- 関連: ADR [0041](0041-manifest-v2.md)（`models` マップとモデル別サブツリー）/
-  [0073](0073-models-source-pin.md)（既定ソースの pin）/
-  [0074](0074-quant-seat-naming.md)（quant 席の命名 — 軸が違うので同乗しない）/
-  [0088](0088-civitai-air-intake.md)（**追記 2026-09-01**: 下の「表記を正規化しない」を改訂 —
-  Civitai 取り込みでは機械正規化した名前を既定にする。逐語表記は provenance が保持）
+- Related: [0041](0041-manifest-v2.md) (`models` map, per-model subtrees) /
+  [0073](0073-models-source-pin.md) (default source pin) / [0074](0074-quant-seat-naming.md) (preset
+  naming — another axis) / [0088](0088-civitai-air-intake.md) (Civitai intake defaults to a
+  machine-normalized name; the provenance keeps the verbatim spelling)
 
 ## Context
 
-第三者 fine-tune のモデルは**複数バージョンが並行して配布され、最新版が常に優れているとは
-限らない**（2026-08-22 ユーザー指摘）。実例として copycat-anima は 2026-02-16 から 06-10 まで
-6 版が civitai に並んでおり、WAI-ANIMA も `v1.0` と `PW3` という**順序の付かない 2 系統**を
-同時に配っている。
+Third-party fine-tunes ship several versions side by side, and the newest is not always the best
+(the maintainer, 2026-08-22). copycat-anima had six versions on Civitai from 2026-02-16 to 06-10;
+WAI-ANIMA ships `v1.0` and `PW3`, two lines with no order between them.
 
-一方、配布 manifest（ADR 0041）のモデル名は `models` マップのキーであり、同時にリポ内の
-サブツリー名でもある。名前にバージョンが無いと、新版を出す手は「**同じ名前の重みを差し替える**」
-しかない。このとき:
+A model name in the distribution manifest (ADR 0041) is a key of the `models` map and also the name
+of the subtree in the repository. Without a version in the name, the only way to ship a new version
+is to replace the weights under the same name. Then:
 
-- `revision: "main"` で追従している利用者は、**黙って別の重みに乗り換わる**。
-- pin（ADR 0073）は pin 済みの利用者を守るが、**リポから旧バイト列が消えること自体は防げない** —
-  「前の版のほうが好みだった」利用者に戻る先が無くなる。
-- カードは既に `Converted from: copycatAnima_20260610.safetensors` と**版まで書いている**ので、
-  版を持たないモデル名とその場で食い違う。
+- Users who follow `revision: "main"` silently switch to different weights.
+- A pin (ADR 0073) protects pinned users, but the old bytes still leave the repository; a user who
+  preferred the previous version cannot go back.
+- The card already says `Converted from: copycatAnima_20260610.safetensors`, a version, and so
+  disagrees with an unversioned model name.
 
 ## Decision
 
-**モデル名は `<ファミリ>-<上流のバージョン表記>` にする。** 表記は上流が自分で名乗っている
-ものをそのまま使い、`[A-Za-z0-9._-]`（`assert_model_name` の受理集合）へ落とすだけにする。
+**A model name is `<family>-<upstream version>`.** The version is the one the upstream uses for
+itself, reduced only to `[A-Za-z0-9._-]` (the set `assert_model_name` in
+`tools/exporter/src/karume/dist.py` accepts).
 
-| モデル名                 | 上流の名乗り                 |
+| Model name               | Upstream name                |
 | ------------------------ | ---------------------------- |
 | `anima-v1.0`             | Anima Base **v1.0**          |
 | `anima-wai-v1.0`         | WAI-ANIMA **v1.0**(base 1.0) |
 | `anima-copycat-20260610` | copycat-anima **20260610**   |
 
-- **表記を正規化しない。** 上流が semver 風で名乗る版と日付で名乗る版が混在するが、こちらで
-  日付へ揃えたりすると出所ページとの突き合わせができなくなる。順序の付かない系統
-  （WAI の `PW3` など）も同じ規則で `anima-wai-pw3` と置ける。
-- **どれが推奨かは `defaultModel` が持つ。** 新版を足しても既定は自動では動かない — 動かすのは
-  裁定であって、版が新しいことではない。
-- **系列ディレクトリ名もモデル名から導かれる**（`{model}-{dtype}-dyn`）ので、版を跨いだ
-  取り違えは系列の段階で起きなくなる。
+- **The spelling is not normalized.** Upstreams mix semver-like and date versions; rewriting them
+  (for example into dates) would break the match with the source page. Unordered lines follow the
+  same rule (WAI's `PW3` becomes `anima-wai-pw3`). (Revised by ADR 0088 for Civitai intake.)
+- **`defaultModel` holds the recommendation.** A ruling moves the default, not a newer version.
+- **The series directory name derives from the model name** (`{model}-{dtype}-dyn`), so series
+  of two versions cannot be mixed up.
 
 ## Consequences
 
-- 版を 1 つ足すコストは、その版の transformer + text_conditioner だけ（anima で 6.14GB）。
-  text_encoder / VAE / tokenizer は `shared/` に畳まれるので増えない（ADR 0041 §5）。
-  利用者は選んだモデルしか落とさないので、リポが太っても取得量は変わらない。
-- **古い版をいつ落とすかの方針は決めていない**。リポは版の数だけ線形に太るので、上限が要ると
-  判断した時点で改めて裁く（今は 3 モデル 19GB で、判断を要する規模ではない）。
-- 遡及しない: sbv2 の `F1` / `FN4` などは**話者の識別子**であって版ではないので、この規則の
-  対象外。irodori も現状 1 モデルなので据え置く。
-- 既に公開済みの `anima-turbo` は改名しない（pin と JSR 公開済みパッケージの既定ソースが
-  そこを指しているため — 改名は 0.5.0 の breaking 波でしか動かせない）。その後 ADR
-  [0087](0087-anima-official-extra-repos.md)（2026-09-01）で `anima-turbo` モデルと
-  `hdae/karume-anima-turbo` リポごと退役した。
+- One more version costs only its transformer and text_conditioner (6.14 GB for anima); the text
+  encoder, VAE and tokenizer sit in `shared/` (ADR 0041 §5). Users fetch only the model they choose.
+- **No policy yet for dropping old versions**; it is ruled when a limit becomes necessary (the
+  repository grows linearly; 3 models, 19 GB on 2026-08-22).
+- Not applied retroactively: SBV2's `F1` / `FN4` are speaker identifiers, not versions. A family
+  that publishes one model per repository MAY carry the version in the repository name instead
+  (re-graded 2026-10-18 to MAY: irodori, kept as is when it had one model, now ships v4-small and
+  v4.1-small as separate repositories — `IRODORI_SOURCES` in `packages/models/src/irodori/config.ts`
+  — and Wan2.2 has its own repository `hdae/karume-wan2.2`).
+- The published `anima-turbo` was not renamed (pins pointed at it); ADR
+  [0087](0087-anima-official-extra-repos.md) retired it with its repository on 2026-09-01.

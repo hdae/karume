@@ -1,52 +1,52 @@
-# 0064: 入場門に「意味論の射程」と「実行モデル不変条件」の 2 軸を追加する
+# 0064: Two more axes at the op entry door — semantic scope and execution-model invariants
 
-- Status: accepted（2026-08-15 — 外部レビュー〈汎用性監査・全件照合済み〉の裁定。
-  ADR [0059](0059-op-vocabulary-entry-doors.md) の**改訂（追加）** — Core ATen 1 判定
-  〈ADR 要否 = 手続きの重さ〉は不変で、門を通るときに答える軸を 2 本足す）
-- 関連: ADR [0055](0055-deform-conv2d.md) / [0056](0056-gru-scan.md)（軸 A の実例）/
-  [0060](0060-row-block-attention.md)（在庫ずれの実例）/ [0012](0012-attrs-and-fused-ops.md)
-  （attrs 空契約 — 軸 A の背景機構）
+- Status: accepted (2026-08-15 — ruling on an external generality audit; amends
+  [0059](0059-op-vocabulary-entry-doors.md) by addition, its single Core ATen test unchanged); "single
+  output" in decision 2 superseded by [0068](0068-decode-exit-multi-output.md) (2026-08-17); decision
+  1's no-retroactivity clause withdrawn 2026-10-18
+- Date: 2026-08-15
+- Related: [0055](0055-deform-conv2d.md) / [0056](0056-gru-scan.md) (axis A examples) /
+  [0060](0060-row-block-attention.md) / [0012](0012-attrs-and-fused-ops.md) (empty-attrs contract)
 
 ## Context
 
-- ADR 0059 の門は「ADR を書く必要があるか」を決める。しかし ADR さえ書けば、**1 モデルの
-  観測 subset をそのまま op の意味論として**公開語彙に入れられる。実例: `deform_conv2d` は
-  stride / dilation / groups / offset_groups を「欄の不在」で 1 に固定した DCNv2 専業 subset
-  が意味論そのもの（ADR 0055）。`gru_scan_reverse` は bool attr の検証機構が無いことを理由に
-  **op 名の分裂**で方向を表した（ADR 0056）。どちらも fail loudly で正しさは保たれているが、
-  「実装 capability を狭くする」と「op の意味論を狭くする」の同一化が慣行になると、新モデル
-  流入時に variant 爆発と公開契約の負債になる。
-- Core ATen 層は台帳 NOTE のみで入るが、**Core op でも既存実行モデルの不変条件を壊すものが
-  ある**。典型 = `topk` / `sort` / `argmax`（いずれも `Tag.core=True` — torch 2.13.0 実測）:
-  values + indices の 2 出力は「全 op 単一出力」（ops.ts の契約検査・NodePlan の 1 本持ち）を
-  壊し、追加は kernel 1 枚でなく planner / dtype / shape / recipe / executor の横断改修に
-  なる。現行の門はこれを NOTE 1 本で通してしまう。
-- ADR 0059 決定 6 の在庫表（融合層「4 ルールちょうど」）は ADR 0060 の追加で即 stale に
-  なった — ADR 内に「現在の在庫」を書く方式は保守されない。
+- The door of ADR 0059 decides whether an ADR is needed, but once an ADR exists **the subset one model
+  uses can enter the public vocabulary as the op's semantics**. `deform_conv2d` fixes stride /
+  dilation / groups / offset_groups to 1 by leaving the fields out (ADR 0055); `gru_scan_reverse`
+  expresses direction by **a split op name** because no mechanism validates a bool attr (ADR 0056).
+  Both fail loudly, but if narrowing the implemented capability and narrowing the semantics become
+  one habit, new models bring a variant explosion and debt in the public contract.
+- Core ATen ops enter with a ledger NOTE only, yet **some break execution-model invariants**: `topk` /
+  `sort` (`Tag.core=True` on torch 2.13.0) return values + indices, which broke "every op has a
+  single output" (then checked in `ops.ts`, one output per NodePlan) and need changes across
+  planner, dtype, shape, recipe and executor. The door let this through with one NOTE.
+- ADR 0059 decision 6 ("exactly four" fusion rules) went stale with ADR 0060: inventories in ADRs rot.
 
-## 決定
+## Decision
 
-1. **軸 A — 意味論の射程の明示**: 新規 op（および既存 op の契約拡張）の ADR / 台帳 NOTE は、
-   **semantic surface（op が約束する意味論）と実装済み subset（現在のカーネルが受ける形）を
-   区別して書く**。観測 subset を意味論として焼く場合はその旨を明示し、一般化の条件
-   （どの需要が来たら欄を足すか）を 1 行書く —「欄の不在 = 語彙に無い」を暗黙にしない。
-   既存 op への遡及適用はしない（公開前の統一再裁定は backlog release の別項目）。
-2. **軸 B — 実行モデルの不変条件を壊す追加は Core ATen 帰属でも ADR 必須**: 対象の
-   不変条件 = 単一出力 / 静的形状（データ依存出力形状なし）/ full-write / 4 バイト格納 +
-   意味論 dtype 3 種 / resident の全域書き。壊す追加は、影響範囲（planner / executor /
-   recipe / IR …）の先出しを ADR の必須節にする。判定手順 3（core → 台帳 NOTE のみ）の
-   例外として挿入する。
-3. **語彙・ルールの「現在の在庫」の正本は台帳と source に一本化**: ADR には時点の在庫を
-   書かない（書く場合は時点記録と明示する）。融合ルールの現在値の正本 = `fusion.ts` の
-   `FUSION_RULES` と融合門テスト（ADR 0059 決定 6 の表は時点記録として読む）。
-4. **機構不足を op 名の分裂で埋めるときは明示する**（SHOULD）: 汎用 attr 機構（bool attr 等）
-   の不足が理由で別 op 名を切る場合、ADR にその旨と「機構が入ったときの統合条件」を書く
-   （`gru_scan_reverse` を前例として繰り返さないための記録義務 — 分裂自体の禁止ではない）。
+1. **Axis A — state the semantic scope.** The ADR or ledger NOTE of a new op (or of a contract
+   extension of an existing op) **separates the semantic surface (what the op promises) from the
+   implemented subset (what the current kernels accept)**. When an observed subset is fixed as the
+   semantics, it says so and gives in one line the condition for generalising (which demand adds the
+   field); "field absent = not in the vocabulary" is never implicit.
+   Withdrawn 2026-10-18: "not applied retroactively; a re-ruling before publication is a release item"
+   — the packages are published; the re-ruling stays open in `docs/backlog.md` (release section).
+2. **Axis B — an addition that breaks an execution-model invariant MUST have an ADR, even when it
+   belongs to Core ATen.** The invariants: single output (superseded by ADR 0068 decision 1 on
+   2026-08-17: node-level multi-output is allowed through the six surfaces of 0068) / static shapes (no
+   data-dependent output shape) / full-write / 4-byte storage with three semantic dtypes / full-range
+   write of resident tensors. The ADR states the impact (planner / executor / recipe / IR …) up front
+   as a required section. This is an exception to step 3 of the procedure (core → ledger NOTE only).
+3. **The current inventory of vocabulary and rules lives in the ledger and the source.** An ADR does
+   not record one (or marks it as a snapshot). Fusion rules: `FUSION_RULES` in
+   `packages/runtime/src/runtime/fusion.ts` and the fusion tests; ADR 0059 decision 6 is a snapshot.
+4. **Splitting an op name to cover a missing mechanism is stated** (SHOULD). When a missing generic
+   attr mechanism (bool attrs and the like) is the reason for a separate op name, the ADR says so and
+   gives the condition for merging once the mechanism exists — a duty to record so that
+   `gru_scan_reverse` is not repeated, not a ban on splitting.
 
-## 帰結
+## Consequences
 
-- [op-vocabulary.md](../op-vocabulary.md) の判定手順に軸 A / B を反映（手順 3 に例外・
-  手順 4 の ADR 必須節に射程の明示を追加）。門表の融合層在庫は source を指す形へ。
-- ADR 0059 は冒頭に本 ADR の改訂注記を付す（本文は不変）。
-- **LLM 波の `topk` / runtime multi-output（backlog next）は軸 B の最初の適用対象** —
-  multi-output の横断改修はその ADR で影響範囲を先出しする。
+- [op-vocabulary.md](../op-vocabulary.md) carries axes A and B (exception in step 3, scope statement in
+  step 4) and points at the source for fusions; ADR 0059 carries an amendment note (body unchanged).
+- `topk` and runtime multi-output were the first application of axis B (ADR 0068, 2026-08-17).

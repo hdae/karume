@@ -1,120 +1,121 @@
-# 0090: shard 仕様 v3 — テンソル分割（piece）・上限 256MiB 1 本・ファイル長で測る
+# 0090: Shard spec v3 — tensor pieces, a single 256 MiB limit measured by file length
 
-- Status: 一部 superseded by [0108](0108-container-format.md)（2026-09-24 発効 — 決定 2 の上書き。
-  末尾の追記）/ accepted（2026-09-02 — ユーザー裁定「この方針で進めてください」。実装前の成立性は
-  [research/2026-09-02-tensor-piece-split.md](../research/2026-09-02-tensor-piece-split.md)）
+- Status: accepted (2026-09-02); superseded by [0108](0108-container-format.md) except decision 4:
+  decision 2 on 2026-09-24 (0108 step 3d); decisions 1, 3 and 5 marked superseded on 2026-10-18 (the
+  shard layout they govern was retired by the same step). Decision 4 (runtime consumption of pieces)
+  stands, restated in 0108 decision 9 and [container-v1](../container-v1.md) §5. Feasibility study:
+  [research/2026-09-02-tensor-piece-split.md](../research/2026-09-02-tensor-piece-split.md)
 - Date: 2026-09-02
-- 関連: ADR [0081](0081-shard-spec-v2.md)（shard 仕様 v2 — **決定 2 の上限 1GiB と追記 2026-09-02 の
-  「書き手の目標 256MiB / 実効目標 = max(目標, 最大単位)」を本 ADR が置換**。決定 1 / 3 / 4 / 5 は
-  据え置き）/ [0070](0070-shard-loading-admission.md)（決定 1 の co-shard を「scale は piece 1 と
-  同居」へ拡張・決定 3 の逐次消費は不変・追記 2026-09-02 の器の使い回しが上限の根拠）/
-  [0089](0089-memory-limits-preflight.md)（読み手側の shard 上限検査 — 値と測り方が変わる）/
-  [0063](0063-safetensors-physical-layout.md)（shard 単体の物理配置は不変 — piece は普通のテンソル
-  として並ぶ）/ [0069](0069-packed-w4-storage.md)（i4 の group scale は先頭次元が行 — piece の切り方と
-  一致）
+- Related: [0081](0081-shard-spec-v2.md) (this ADR replaced its decision 2, the 1 GiB limit, and the
+  writer target of its 2026-09-02 addendum; decisions 1 / 3 / 4 / 5 unchanged) /
+  [0070](0070-shard-loading-admission.md) (co-shard rule of decision 1 extended to pieces; decision 3
+  unchanged) / [0089](0089-memory-limits-preflight.md) (reader-side shard-limit check) /
+  [0063](0063-safetensors-physical-layout.md) (a piece is an ordinary tensor in a shard) /
+  [0069](0069-packed-w4-storage.md) (the i4 group scale is cut along rows like pieces)
 
 ## Context
 
-ADR 0081 追記（2026-09-02）で書き手の目標を 256MiB にしたが、**テンソルは割れない**ため「目標より
-大きい単位を持つコンポーネントはその単位まで持ち上げる」（実効目標 = max(目標, 最大単位)）という式が
-残り、受理上限（1GiB）と目標（256MiB）の 2 値が併存していた。実資産では 3 本の埋め込み表
-（gemma4 `lm_head` 384MiB / irodori `tok_embeddings` 300MiB / anima `embed_tokens` 297MiB）だけが
-該当し、そのコンポーネントの shard は 385 / 300 / 297MiB に持ち上がっていた。ロード時ホスト RAM
-ピークは「定数 + 最大 shard 1 本」（ADR 0070 追記）なので、この持ち上がりがそのままピークに乗る。
+ADR 0081's addendum (2026-09-02) set the writer target to 256 MiB, but **tensors could not be
+split**, so a component holding a unit larger than the target raised its target to that unit
+(effective target = max(target, largest unit)). Two values coexisted: the acceptance limit (1 GiB)
+and the target (256 MiB). Three embedding tables were affected (gemma4 `lm_head` 384 MiB, irodori
+`tok_embeddings` 300 MiB, anima `embed_tokens` 297 MiB), raising their components' shards to 385 /
+300 / 297 MiB. The host RAM peak at load is "constant + one largest shard" (ADR 0070 addendum), so the
+raise went straight into the peak.
 
-加えて、上限を数える量が両側で違っていた: exporter はデータ節、hub は manifest の `size`
-（ヘッダ込みファイル長）。1GiB に対して 256MiB を詰める前提では余裕で吸収できたが、上限を 1 本に
-戻すと「データ節ちょうど上限 + ヘッダ」が hub で落ちる。
+The two sides also measured the limit differently: the exporter counted the data section, the hub the
+manifest `size` (file length including the header). With a single limit, "data section exactly at the
+limit + header" would fail in the hub.
 
 ## Decision
 
-### 1. 読み手契約: piece（先頭次元の行範囲で割ったテンソル）
+### 1. Reader contract: pieces (a tensor split along row ranges of its leading dimension)
 
-- **キー**: `<親名>#NNNNN-of-NNNNN`（5 桁・index 1 始まり・count ≥ 2）。この形に一致し、親名が
-  宣言（`initializer.tensor`）に在るときだけ piece と解釈する。karume が書く通常のテンソル名に `#`
-  は現れない。
-- **形**: piece は親の**先頭次元（行）の連続範囲**。dtype は親と同一、shape は
-  `[rows_i, *親.shape[1:]]`（`rows_i ≥ 1`）。piece 1..n は行 `[0, 親.shape[0])` を順に隙間なく覆う。
-  各 shard は引き続き独立に整合な safetensors で、piece はその中の普通のテンソル（ADR 0063 の並び規約
-  もそのまま掛かる）。
-- **配置**: piece は**連続する shard に 1 本ずつ**、index は shard 順に増える。piece 1 の shard には
-  前のテンソルが、piece n の shard には後のテンソルが同居してよい。同じ shard に同じ親の piece 2 本・
-  index の飛び・逆行・count の食い違い・「丸ごと」と piece の混在は違反。
-- **scale**: companion scale（`storage.scale`）は割らず、**piece 1 と同じ shard**に置く（ADR 0070
-  決定 1 の co-shard の piece 版）。
-- **整列**: 末尾以外の piece はバイト長が 4 の倍数 MUST（ランタイムが `queue.writeBuffer` で
-  オフセット書きするため）。末尾 piece は任意長で、ランタイムの末尾詰め物（f16 / i8）が整列する。
-- **完全性**: 途中までしか来なかった piece 列は読了時に欠けとして列挙する。
+(The key spelling, the placement rules and the 4-byte rule were superseded by ADR 0108 on 2026-09-24:
+pieces are now the `pieces[]` row ranges of the binding table — 0108 decision 18 and container-v1 §5;
+the 4-byte rule for middle pieces is generalised to every block by 0108 decision 7. Only the
+migration CLI still parses the old key, `parse_piece_key` in `tools/exporter/src/karume/legacy.py`.)
 
-### 2. 読み手契約: 上限は `SHARD_BYTE_LIMIT` = 256MiB 1 本・**ファイル長**で測る
+- **Key**: `<parent>#NNNNN-of-NNNNN` (five digits, index from 1, count ≥ 2), read as a piece only when
+  the parent is declared (`initializer.tensor`). Tensor names written by Karume never contain `#`.
+- **Shape**: a contiguous range of the parent's leading dimension (rows); same dtype, shape
+  `[rows_i, *parent.shape[1:]]` with `rows_i ≥ 1`; pieces 1..n cover rows `[0, parent.shape[0])` in
+  order without gaps. Each shard stays a self-consistent safetensors file.
+- **Placement**: one piece per **consecutive shard**, index increasing with shard order; other tensors
+  may share the shards of piece 1 and piece n. Two pieces of one parent in one shard, skipped or
+  reversed indices, count mismatches and mixing whole tensor and pieces are violations.
+- **Scale**: the companion scale (`storage.scale`) is not split and sits **in the shard of piece 1**.
+- **Alignment**: every piece but the last MUST have a byte length that is a multiple of 4 (the runtime
+  writes at an offset with `queue.writeBuffer`). The last piece may have any length; the runtime's
+  tail padding (f16 / i8) aligns it.
+- **Completeness**: an incomplete piece sequence is listed as missing at end of read.
 
-- 全 shard の**ファイル長**（ヘッダ込み）≤ 256MiB。hub は manifest の `size`、exporter の verify は
-  実ファイル長で見る — 両側が同じ量を見る。
-- 定数は 1 本（`karume.shards.SHARD_BYTE_LIMIT` = hub `MAX_SHARD_BYTES` = 2^28）。ADR 0081 追記の
-  `SHARD_TARGET_BYTES` と実効目標の式は**廃止**。「上限超えの単位」は piece で割れるので、上限から
-  派生する制約は「**1 行**（先頭次元 1 つぶんのバイト列）が容量を超えるテンソルは配布できない」だけに
-  なる（実資産の行は最大数 KB）。
-- 根拠: ロード時ホスト RAM ピーク = 定数 + 最大 shard 1 本（ADR 0070 追記 2026-09-02・器の使い回し）
-  なので、上限がそのままピークの上乗せ分。256MiB は「ファイル数・リクエスト数の増加が hub の 4 並列
-  取得と読み手上限 1024 本の内側」の下限側（ADR 0081 追記の裁定を引き継ぐ）。
+### 2. Reader contract: one limit `SHARD_BYTE_LIMIT` = 256 MiB, measured by **file length**
 
-### 3. 書き手ポリシー（`karume.shards`）
+(Superseded by ADR 0108 on 2026-09-24: the ceiling for host RAM peak and for Chromium's single
+ArrayBuffer moved to the 32 MiB block, decision 5; file and request counts moved to the part,
+decision 6.)
 
-- 詰める容量 = `SHARD_DATA_CAPACITY` = 上限 − ヘッダ余裕 `SHARD_HEADER_ALLOWANCE`（1MiB）。
-  weight shard のヘッダはテンソル 1 本あたり 100〜150 バイトで、1MiB は 7,000 本ぶん（実資産の
-  最大は 1 コンポーネント全体で約 1,500 本）。余裕を超える形は verify のファイル長門が fail loudly で
-  受ける — 書き手側で黙って縮めない（ヘッダ長を決めるには所属が要り、所属を決めるにはヘッダ長が
-  要る循環を、固定余裕 + 読み返し検査で切る）。
-- 容量を超える単位（テンソル、または weight + scale の対）の重みだけを **1MiB の行ブロック**
-  （`SPLIT_BLOCK_BYTES`・4 バイト整列になる行数へ切り上げ）に砕き、既存の packer（最小本数 → 均し —
-  ADR 0081 決定 4）へ通常の単位として流す。同じ shard に落ちた連続ブロックを 1 piece に畳む。
-  容量以下の単位は従来どおり割らない（小さいテンソルが shard 境界で piece になる形を作らない）。
-- **鎖の引き寄せ**: 対の引き寄せは「scale + 全ブロック」を連続した単位列として、対の片方に最初に
-  到達した位置へ置く。scale だけを引き寄せる現行規則をブロックに素直に適用すると、F32 の scale が
-  並びの先頭群に居るためブロック 1 だけが前へ移り、残りが末尾群に取り残されて piece が非連続の shard
-  に散る（スパイクで実測）。
-- 決定的（同入力 → 同分割 → 同バイト）。分割の判定と詰めは実データを読まずに宣言だけで行う。
+- Every shard's file length (header included) ≤ 256 MiB; the hub checks the manifest `size`, the
+  exporter's verify the real file length.
+- One constant (`karume.shards.SHARD_BYTE_LIMIT` = hub `MAX_SHARD_BYTES` = 2^28). The
+  `SHARD_TARGET_BYTES` and the effective-target formula of ADR 0081 are abolished. The only derived
+  restriction is that a tensor whose **single row** exceeds the capacity cannot be distributed.
+- Rationale: the limit is exactly what it adds to the host RAM peak; 256 MiB is the low end that keeps
+  file and request counts within the hub's four parallel fetches and the reader's 1024-file cap.
 
-### 4. ランタイム（読み手の消費）
+### 3. Writer policy (`karume.shards`)
 
-- piece は届いた順に**親 1 本ぶんの GPU バッファ**へ行オフセット × 行バイト長の位置に
-  `queue.writeBuffer` する。バッファ確保・常駐簿記・scale のアップロードは piece 1 で、末尾詰め物は
-  最後の piece でだけ。GPU 上の配置・カーネル・診断の意味は変わらず、出力は分割前とビット同一。
-- CPU 展開席（圧縮格納だが消費が重みスロット以外で、f32 へ展開して上げる席）も piece 単位で展開する
-  （piece の shape と、先頭次元で切った scale を渡す — 展開関数は無改変）。ホストで再結合しない
-  （再結合すると生バイト全体がもう 1 本ピークに乗る）。
-- shard 単位の errorScope / フェンス / 参照を手放す契約（ADR 0070 決定 3）は不変。
+(Superseded by ADR 0108 on 2026-09-24: `shards.py` no longer exists; the writer packs 32 MiB blocks,
+`BLOCK_MAX_BYTES` in `tools/exporter/src/karume/container.py`, into parts — 0108 decisions 5 and 6.)
 
-### 5. `requiredLimits` の導出
+- Packing capacity `SHARD_DATA_CAPACITY` = limit − header allowance `SHARD_HEADER_ALLOWANCE` (1 MiB).
+  A header that exceeds the allowance fails the file-length check of verify; the writer does not
+  shrink silently.
+- Only units above the capacity (a tensor, or a weight + scale pair) are cut into **1 MiB row blocks**
+  (`SPLIT_BLOCK_BYTES`, rounded up to a row count that keeps 4-byte alignment) and fed to the existing
+  packer; consecutive blocks in one shard fold into one piece. Units within capacity are never split.
+- **Chain pulling**: a pair moves as "scale + all blocks", a contiguous run placed where either half
+  is first reached. Pulling only the scale scattered pieces over non-consecutive shards in the spike.
+- Deterministic (same input → same split → same bytes), decided from declarations without reading data.
 
-piece 化した shard ヘッダの最大テンソル長は親の全体長より小さいので、`karume.limits.max_tensor_payload`
-は piece を親名で**合算**して需要にする（1 テンソル = 1 GPU バッファ = 1 binding は不変）。
+### 4. Runtime (reader-side consumption)
+
+- Pieces are written as they arrive into **one GPU buffer for the parent**, at row offset × row byte
+  length, with `queue.writeBuffer`. Buffer allocation, residency bookkeeping and the scale upload
+  happen at piece 1; tail padding only at the last piece. GPU layout, kernels and diagnostics are
+  unchanged; output is bit-identical to the unsplit tensor.
+- Weights expanded to f32 on the CPU (compressed storage consumed outside a weight slot) are expanded
+  per piece (the piece shape plus the scale cut along the leading dimension; the expansion function is
+  unchanged). They are not re-joined on the host, which would add the whole raw tensor to the peak.
+- The per-shard errorScope / fence / release contract (ADR 0070 decision 3) was unchanged at the time.
+  ADR 0108 decision 9 later split it into an errorScope per block and a fence per part, and its
+  addendum of 2026-09-24 freed the CPU-side release from waiting on the fence; shards no longer exist.
+
+### 5. Deriving `requiredLimits`
+
+(Superseded by ADR 0108 on 2026-09-24: the demand comes from the merged supply plan,
+`component_demand_bytes` in `tools/exporter/src/karume/dist.py`, under container-v1 §5 rule ④; a
+piece sequence still counts as one parent buffer.)
+
+`karume.limits.max_tensor_payload` sums pieces by parent name (one tensor = one GPU buffer = one
+binding).
 
 ## Consequences
 
-- 実資産で変わるのは上限超えの 4 コンポーネント（gemma4 model / anima text_encoder / irodori v4・v4.1
-  backbone）。gemma4 は 6 → 7 本（最大 385 → 254MiB）、anima text_encoder は 6 本のまま（297 →
-  233MiB）、irodori backbone は 7 → 6 本（300 → 252MiB）。他は既に容量以下で不変（verify の
-  ファイル長門で確認する）。HF 再アップロードはリリース時（既定方針）。
-- 旧ランタイムは piece を「余剰 + 不足」として fail loudly で拒否する。未リリースなので互換層は
-  作らない。
-- 配布形を鍵で読み返す recipes 側の読み手（irodori の参照パイプライン・vowel_detector の往復検査）は
-  piece を親へ畳む必要がある。
-- 「1 行が容量を超えるテンソル」は配布できない（limitations に記載）。
-- ADR 0081 §5 の扉（cut 位置の選好）は据え置き。層割り・MoE 割りは引き続き書き手ポリシーの拡張で
-  足せる。
+- Of the real assets only the four components above the limit changed (gemma4 model, anima
+  text_encoder, irodori v4 and v4.1 backbone): gemma4 6 → 7 shards (largest 385 → 254 MiB), anima
+  text_encoder 6 shards (297 → 233 MiB), irodori backbone 7 → 6 shards (300 → 252 MiB).
+- Older runtimes reject pieces loudly; no compatibility layer (unreleased).
+- Recipe-side readers that read distributions by key (irodori reference pipeline, vowel_detector
+  round-trip check) fold pieces back into the parent.
+- ADR 0081 §5 (preferred cut positions) stays open; layer-wise and MoE-wise splits remain writer
+  policy extensions.
 
-## 追記（2026-09-22）— 決定 2 は ADR 0108（proposed）が上書きする
+## Addendum (2026-09-22) — ADR 0108 overrides decision 2
 
-決定 2（受理上限 `SHARD_BYTE_LIMIT` = 256 MiB 1 本・ファイル長で測る）は、ADR
-[0108](0108-container-format.md) が上書きする。0108 では上限が 2 つに割れ、根拠 R1（ホスト RAM
-ピーク）と R3（Chromium の単一 ArrayBuffer 上限）は **block 上限 32 MiB** へ、R2（ファイル数・
-リクエスト数）は **part** へ移る（0108 決定 5 / 6）。piece 自体は残るが、テンソル名の綴り
-`<名前>#00002-of-00003` は消えて**束縛表の `pieces[]`（行範囲）**になる。0108 は **proposed** で
-実装は未着手なので、**実装が入るまでは現行のまま**であり、本文は書き換えていない。
-
-**2026-09-24**: ADR 0108 は accepted となり、段 3d（`9e905d9f`）で旧読み手が消えたので、上の上書きは
-発効した。`SHARD_BYTE_LIMIT` の受理上限は読み手ごと無くなり、上限は block 32 MiB（0108 決定 5）と
-part 長（決定 6）へ移った。piece は束縛表の `pieces[]`（行範囲）として残り、旧綴り
-`<名前>#NNNNN-of-NNNNN` を解釈するのは移行 CLI の `parse_piece_key`
-（`tools/exporter/src/karume/legacy.py`）だけである。
+ADR 0108 (accepted 2026-09-22) overrides decision 2; it took effect on 2026-09-24 when step 3d
+(`9e905d9f`) removed the old reader. The acceptance limit `SHARD_BYTE_LIMIT` disappeared with that
+reader; the limits are now the 32 MiB block (0108 decision 5) and the part length (decision 6). Pieces
+remain as `pieces[]` row ranges of the binding table; only the migration CLI's `parse_piece_key`
+(`tools/exporter/src/karume/legacy.py`) reads the old `<name>#NNNNN-of-NNNNN` spelling.

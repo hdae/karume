@@ -1,426 +1,421 @@
-# 0066: autoregressive 実行モデル — GenerationContext と名前付き state スロット
+# 0066: Autoregressive execution model — GenerationContext and named state slots
 
-- Status: accepted（2026-08-17 ユーザー承認「OK」— 確認ポイント 3 点〈states の分界・固定長
-  chunk・所有権分離と rewind〉込み。方向は同日の裁定 1〜4〈条件込み〉で先行承認）
-- 関連: ADR [0042](0042-prepared-execution-plan.md)（PreparedPlan の bindings 鍵と backing —
-  本 ADR 決定 5 が所有権を分離）/ [0054](0054-resident-loop-and-fence.md)（resident / batch
-  enqueue — state バッファは第 4 の寿命クラスの延長）/
-  [0004](0004-execution-model.md)（アリーナ不変条件・flush-before-destroy）/
-  [0008](0008-public-api.md)（公開面は薄く）/
-  [0058](0058-numerics-opt-in-contract.md)（数値契約の席の作り方 — 本 ADR は数値変種を作らない）
-- 根拠:
-  [research/2026-08-17-autoregressive-references.md](../research/2026-08-17-autoregressive-references.md)
-  （参照実装 8 リポの一次調査 + 敵対検証 2 巡。以下「調査 §n」）。波順の正本は
-  [backlog](../backlog.md) next 節（ADR ① に当たる）。
+- Status: accepted (2026-08-17 — the maintainer's approval, covering the states boundary,
+  fixed-length chunks, ownership split and rewind); partly superseded: decision 4's "two execution
+  shapes" by addendum 10 (2026-09-07) and [0096](0096-speculative-decoding.md) (2026-09-08), addendum
+  9's "sliding capacity = window" by 0096 decision 4 (2026-09-08), the deferred-run limit of
+  2026-09-08 by the addendum of 2026-09-09, addendum 10's LRU bound by
+  [0042](0042-prepared-execution-plan.md) decision 2 (2026-09-08); the addendum of 2026-09-13 withdrawn 2026-10-18
+- Date: 2026-08-17
+- Related: [0042](0042-prepared-execution-plan.md) (PreparedPlan key and backing — decision 5 splits
+  ownership) / [0054](0054-resident-loop-and-fence.md) (resident / batch enqueue) /
+  [0004](0004-execution-model.md) / [0008](0008-public-api.md) / [0058](0058-numerics-opt-in-contract.md)
+  (this ADR adds no numerics variant) / follow-ups named in the text: [0067](0067-autoregressive-attention-vocabulary.md)
+  (attention vocabulary), [0068](0068-decode-exit-multi-output.md) (decode exit, multi-output),
+  [0069](0069-packed-w4-storage.md) (packed storage), [0070](0070-shard-loading-admission.md) (admission)
+- Basis: [research/2026-08-17-autoregressive-references.md](../research/2026-08-17-autoregressive-references.md)
+  (eight reference implementations, two adversarial passes; "research §n" below)
 
 ## Context
 
-現行の Session は「不変重み + 1-shot 実行」で、生成状態を持つ席が無い。検収モデル
-（Gemma 4 E2B / MiniCPM5-1B — 調査 §6）を動かすには、①KV state の寿命と置き場 ②容量と
-論理長の分離 ③prefill / decode の実行形 ④PreparedPlan（ADR 0042）との整合、の 4 点を
-先に確定する必要がある。参照実装の確定事実（調査 §1）:
+The Session was "immutable weights + one-shot run" with no place for generation state. Running the
+target models (Gemma 4 E2B / MiniCPM5-1B — research §6) needs four things settled first: ① lifetime
+and placement of the KV state ② capacity versus logical length ③ the prefill / decode execution
+shapes ④ consistency with PreparedPlan (ADR 0042). Established facts from the references (research
+§1):
 
-- どの実装も plan/graph 再利用の鍵は「トポロジを決めるパラメータ集合」で、論理長を
-  shape symbol にする実装は無い（渡し方は 3 方式に分かれる — 調査 §1.1）。
-- KV を通常の tensor I/O にする形（transformers.js）は毎 step の出力再配線・rewind 不能・
-  capture 系最適化と非両立の三重苦で、避けるべき実物として確認済み（調査 §1.2・§1.4-2）。
-- state は層均一ではない — Gemma 4 E2B は「sliding 512 × 28 層 / full × 7 層 / 自前 KV を
-  持たない 20 層」の 3 種混在で、per-layer shape 差 + KV 共有層は ORT にも席がある
-  （調査 §1.5・§6.1）。
+- Every implementation keys plan / graph reuse on "the parameters that fix the topology"; none makes
+  the logical length a shape symbol (three ways to pass it — research §1.1).
+- KV as ordinary tensor I/O (transformers.js) means rewiring outputs every step, no rewind, and no
+  capture-style optimisation — confirmed as the shape to avoid (research §1.2, §1.4-2).
+- State is not uniform across layers: Gemma 4 E2B mixes "sliding 512 × 28 layers / full × 7 layers /
+  20 layers without their own KV"; ORT also has a place for per-layer shapes and KV-sharing layers
+  (research §1.5, §6.1).
 
 ## Decision
 
-### 1. 寿命の分離: Session は不変・GenerationContext が 1 生成の可変 state を所有する
+### 1. Separate lifetimes: the Session is immutable, a GenerationContext owns one generation's mutable state
 
-`Session`（不変重み・計画キャッシュ — 現行のまま）から `GenerationContext` を生成する。
-context は**単一シーケンス**の生成 1 本ぶんの可変 state（state スロットの物理バッファ +
-論理長）を所有し、`dispose()` で返す（flush-before-destroy — ADR 0004）。
+A `GenerationContext` is created from the `Session` (immutable weights, plan cache — unchanged). The
+context owns the mutable state of **one sequence** (the physical buffers of the state slots and the
+logical length) and releases it with `dispose()` (flush-before-destroy — ADR 0004).
 
-MUST: **state をグラフの通常 input / output にしない**（past 入力・present 出力の欄を IR に
-作らない）。state はノードが名前で参照する不透明スロットであり、実体の確保・寿命・進行は
-context が持つ（MLC の `nn.spec.Object` 型 — 調査 §1.2）。
+MUST: **state is not an ordinary graph input / output** (no past-input / present-output fields in the
+IR). State is an opaque slot that nodes reference by name; the context owns its allocation, lifetime
+and progress (the MLC `nn.spec.Object` shape — research §1.2).
 
-### 2. 名前付き state スロット（R3）
+### 2. Named state slots (R3)
 
-IR v1 に **`states{}` セクション**を追加する: `name → { dtype, shape }`。shape は
-**固定 rank（rank ≤ 4）の容量込み具体形**（記号は Session の symbols で解決可）。
+The IR gets a **`states{}` section**: `name → { dtype, shape }`. The shape is **concrete, of fixed
+rank (rank ≤ 4) and includes the capacity** (symbols resolve through the Session's symbols). Added
+to IR v1 at the time; today the section is specified in [docs/ir-v2.md](../ir-v2.md).
 
-- **「層 × 均一 KV」の前提を作らない**。sliding 層と full 層は**容量の違う別スロット**、
-  KV 共有 20 層は**同一スロット名の参照**で表す（欄の追加なし）。KV 以外の逐次 state
-  （将来の LSTM h_n / conv state）も同じ器に載る — スロットは「KV」を知らない。
-- ノードからの参照方法（attention の読み書き欄・op 語彙）は **ADR ⑤ が決める**。本 ADR は
-  「スロットは `ins` / `outs` と別の欄で名前参照する」という原則までを固定する。
-- エクスポータは `states` を出す最初のモデルまで無風（未知キー fail loudly の流儀どおり、
-  本書改訂と同時にパーサへ入れる — 未リリースにつきシム無し）。
+- **No "layers × uniform KV" assumption.** Sliding and full layers are **separate slots with
+  different capacities**; the 20 KV-sharing layers **reference the same slot name** (no extra field).
+  Other sequential state (a future LSTM h_n / conv state) uses the same container — a slot does not
+  know it holds KV.
+- How nodes reference slots (attention read / write fields, op vocabulary) is decided by ADR 0067.
+  This ADR fixes only the principle: slots are referenced by name in a field separate from
+  `ins` / `outs`.
+- The exporter is unaffected until the first model that emits `states` (unknown keys fail loudly; the
+  parser took the section with this spec revision).
 
-### 3. shape 不変条件の再宣言（R2）と論理長の契約
+### 3. Shape invariants restated (R2) and the logical-length contract
 
-恒久不変条件は次の 3 つ**まで**とする: **静的物理格納**（スロット容量は context 生成時に
-確定・実行中に再確保しない）・**固定 rank**・**計画キャッシュの鍵は容量**（論理長を鍵に
-入れない）。
+The permanent invariants are **at most** these three: **static physical storage** (slot capacity is
+fixed at context creation and never reallocated during execution), **fixed rank**, and **the plan
+cache key is the capacity** (the logical length is not part of the key).
 
-- 「鍵は容量」は**トレードオフの選択であって業界の既定ではない**と明記する — llama.cpp は
-  逆に「256 境界へ量子化した論理 extent」を鍵に入れて成立している（調査 §1.1 (a)）。karume
-  が容量鍵を選ぶ理由は、PreparedPlan（ADR 0042）が bindings 完全一致鍵 + LRU（上限は `PREPARED_PLAN_CAPACITY` — 0042 決定 2）であり、
-  extent を鍵に入れると decode が毎 token 別計画になるため。
-- **論理長は「値」**: `pastLength`（確定済み KV の論理長）と `queryLength`（今回 step の
-  実 token 数）は**独立の実行時スカラ**として渡す。shape symbol にも attrs にもしない
-  （symbol は計画鍵に入り〈ADR 0042〉、attrs は IR に焼き付くため。ORT の
-  seqlens_k / total_sequence_length 分割と同型 — 調査 §1.1 (c)・§3.1）。
-- **容量 − 論理長の差は「遮蔽された key / 無効な行」**として扱い、shape で表さない
-  （調査 §3.4）。
-- **仕事量の合格条件**: attention 系 dispatch は「workgroup 数または総反復回数が
-  `pastLength × queryLength` に比例」しなければならない（容量比例は 131K 容量 ×
-  短系列で 3 桁の無駄 — 調査 §1.1）。満たす機構（`dispatchWorkgroupsIndirect` は core
-  WebGPU・またはホスト既知の論理長から dispatch 数を算出）の選定は ADR ⑤ の実装設計。
-- **有界論理 extent の席予約**（宣言のみ・実装は最初の実需モデルまで先送り）:
-  将来の data-dependent shape は「compact-prefix 軸 1 本の有界論理 extent」として
-  `states` / 値宣言に載せられる形を予約する。DDS op は payload + extent の複数出力
-  （ADR ④ の multi-output が前提）・extent は計画鍵に入れない・admission は容量課金。
-  上限超えと動的 rank は従来どおりホスト介在のグラフ分割で扱う。
+- "The key is the capacity" is **a trade-off, not the industry default**: llama.cpp keys on a logical
+  extent quantized to 256 boundaries (research §1.1 (a)). Karume keys on capacity because PreparedPlan
+  (ADR 0042) is an exact bindings key with an LRU (bound: `PREPARED_PLAN_CAPACITY` — 0042 decision 2);
+  with the extent in the key, decode would take a new plan every token.
+- **The logical length is a value.** `pastLength` (logical length of committed KV) and `queryLength`
+  (real tokens this step) are **independent runtime scalars** — neither shape symbols nor attrs
+  (symbols enter the plan key (ADR 0042) and attrs are baked into the IR; same split as ORT's
+  seqlens_k / total_sequence_length — research §1.1 (c), §3.1).
+- **Capacity minus logical length is "masked keys / invalid rows"**, not expressed in shapes
+  (research §3.4).
+- **Workload condition.** Attention dispatches MUST have a workgroup count or total iteration count
+  proportional to `pastLength × queryLength` (formula corrected by addendum 1); proportional to
+  capacity wastes three orders of magnitude at 131K capacity with short sequences (research §1.1).
+  The mechanism (core WebGPU `dispatchWorkgroupsIndirect`, or dispatch counts computed from the
+  host-known logical length) is ADR 0067's implementation design.
+- **Reserved place for a bounded logical extent** (declared only; implementation waits for the first
+  model that needs it): a future data-dependent shape fits `states` / value declarations as "one
+  compact-prefix axis with a bounded logical extent". A DDS op returns payload + extent (needs the
+  multi-output of ADR 0068); the extent stays out of the plan key; admission charges the capacity.
+  Beyond the bound and for dynamic rank, host-mediated graph splitting stays.
 
-### 4. 実行形は 2 本: 固定長 prefill-chunk と decode
+### 4. Two execution shapes: fixed-length prefill chunks and decode
 
-- **prefill**: プロンプトを**固定長 chunk**（`chunkLength` — context 生成時に確定する計画時
-  定数）へ分割し、末尾 chunk は pad する。**padding 行の no-op 契約が本体**: pad 行は
-  KV へ書かれず・出力に現れず・（決定 3 の合格条件の下で）仕事量にも比例しない。切るのは
-  `queryLength`。
-- **decode**: `queryLength = 1` 固定形。
-- 採らなかった形と理由: 可変長 chunk（web-llm / MLC 型 — 調査 §1.3）は記号コンパイル 1 本で
-  済む処理系の解で、karume では chunk 長ごとに PreparedPlan が増えて LRU を汚す（→ 追記 10 は
-  「宣言した本数だけ」の固定集合で計画を増やす形にし、可変長そのものは採らないまま）。
-  全 prompt 一括（ORT GenAI 既定）は長 prompt で計画・transient が prompt 長に比例して
-  単発化する。固定長 chunk + pad は ORT Windowed / vLLM バケット型の選択（調査 §1.3）。
-- 結果として **PreparedPlan は prefill-chunk / decode の 2 本が定常**（+既存の 1-shot 面）。
-  動的形状 KV が capture 系最適化と非両立という二重の一次証拠（調査 §1.4-2）を、固定容量
-  resident state を再利用系の前提条件とする形で先取りする。
+(Superseded by addendum 10 on 2026-09-07 and ADR 0096 on 2026-09-08: the physical row counts are the
+set `{1} ∪ chunkBuckets ∪ {chunkLength}` declared at context creation, which also carries the verify
+shape of speculative decoding.)
 
-### 5. PreparedPlan との所有権分離（レシピは Session・state backing は context）
+- **prefill**: the prompt is split into **fixed-length chunks** (`chunkLength`, a plan-time constant
+  fixed at context creation) and the last chunk is padded. **The no-op contract of padding rows is the
+  core**: pad rows are not written to KV, do not appear in outputs and (under the workload condition
+  of decision 3) add no work. `queryLength` cuts them off.
+- **decode**: fixed `queryLength = 1`.
+- Rejected: variable-length chunks (web-llm / MLC — research §1.3) suit one symbolic compilation; in
+  Karume each length adds a PreparedPlan and pollutes the LRU (addendum 10 still rejects them). The
+  whole prompt at once (ORT GenAI default) scales plans and transients with prompt length. Fixed
+  chunks + padding is the ORT Windowed / vLLM bucket choice (research §1.3).
+- Consequently **PreparedPlan has two steady plans, prefill chunk and decode** (+ the one-shot
+  surface); fixed-capacity resident state is the precondition for reuse-style optimisations
+  (research §1.4-2).
 
-- **レシピ / 計画（bindings の純関数 — ADR 0042 §1-2）は Session 共有のまま**。
-  MUST: **context の識別子を計画鍵に入れない**（入れると context 切替のたびに導出と
-  backing 構築が全滅する）。
-- **state スロットの物理バッファと、それを束ねる bind group は GenerationContext が所有**
-  する。ADR 0042 §5 の「焼き込み bind group」は「Session 所有の slot / 常駐入力」と
-  「context 所有の state」で束ねる相手の寿命が異なるため、**焼き込みの単位を分離**する
-  （state を含む bind group は context 側に持つ / state を含まない dispatch は従来どおり）。
-  分離しないと「前の context の KV を束ねたまま回る」沈黙 stale 読みか、切替ごとの全再構築
-  スラッシングの二択になる（調査 §1.6 — 第 2 巡 high 指摘）。
-- 診断席を置く（`planBacking` と同格 — state backing の常駐バイト数・再束縛回数。
-  沈黙劣化の唯一の観測点になる設計は ADR 0042 §3 の流儀を踏襲）。
+### 5. Ownership split with PreparedPlan (recipes in the Session, state backing in the context)
 
-### 6. 寿命操作の API 面（薄く — ADR 0008）
+- **Recipes / plans (pure functions of the bindings — ADR 0042 decisions 1–2) stay shared in the Session.**
+  MUST: **the context identifier is not part of the plan key** (otherwise every context switch throws
+  away derivation and backing).
+- **The physical state buffers and the bind groups that bind them belong to the GenerationContext.**
+  The baked bind groups of ADR 0042 decision 5 bind resources with different lifetimes ("Session-owned slots /
+  resident inputs" versus "context-owned state"), so **the bake unit is split** (bind groups with state
+  live on the context side; dispatches without state are unchanged). Without the split the choice is
+  silent stale reads of the previous context's KV or a full rebuild on every switch (research §1.6 —
+  a high finding of the second review).
+- A diagnostic on the level of `planBacking` (resident bytes of state backing, rebind count), following
+  ADR 0042 decision 3: it is the only observation point for silent degradation.
 
-- `session.createGenerationContext(spec)`: スロット容量・`chunkLength` を確定し物理確保。
-  確保失敗は out-of-memory errorScope で fail loudly（admission の estimator は ADR ③）。
-- `context.pastLength`（読み取り）: 論理長の進行は **context が所有**し、run の成功で進む。
-  ホスト側の手動加算を API にしない（二重簿記の禁止）。
-- `context.rewind(position)`: 論理位置の切詰め。**sliding スロットでエビクト済みの範囲へは
-  fail loudly**（巻き戻し可能範囲は容量方式から導出 — ORT GenAI 型・調査 §1.2）。
-- `context.dispose()`: flush-before-destroy 遵守で物理バッファを返す。
-- prefill / decode の呼び出し形（メソッド名・入出力型）は実装設計で確定する — 本 ADR は
-  「論理長の進行と巻き戻しは context の所有」という契約までを固定する。
+### 6. Lifetime API (thin — ADR 0008)
 
-### 7. device-loss 契約
+- `session.createGenerationContext(spec)`: fixes slot capacities and `chunkLength` and allocates. An
+  allocation failure fails loudly through the out-of-memory error scope (the admission estimator is
+  ADR 0070's).
+- `context.pastLength` (read-only): **the context owns** the progress of the logical length, which
+  advances on a successful run. Manual host-side addition is not part of the API (no double
+  bookkeeping).
+- `context.rewind(position)`: truncates the logical position. **Rewinding into a range already evicted
+  from a sliding slot fails loudly** (the rewindable range follows from the capacity scheme — ORT GenAI
+  style, research §1.2). Tightened by addendum 2.
+- `context.dispose()`: returns the physical buffers, flush-before-destroy.
+- The call shape of prefill / decode (method names, I/O types) is implementation design; this ADR fixes
+  only that the context owns progress and rewind of the logical length.
 
-device lost 後の GenerationContext は**無効**であり、全操作は `GpuDeviceLostError` 系で
-fail loudly する（WebGPU 仕様上、lost device 由来の GPU 資源は回復不能 — 調査 §1.4-4）。
-生成は失われる。ホスト側 state の dump / restore（llama.cpp 型 = state バイト + メタのみ・
-RNG / sampler を含まない）は**席の予約だけ**行い、実装は実需まで先送り。
+### 7. Device-loss contract
 
-### 8. スコープ外（本 ADR で決めないこと）
+After device loss a GenerationContext is **invalid**; every operation fails loudly with the
+`GpuDeviceLostError` family (WebGPU resources of a lost device cannot be recovered — research §1.4-4).
+The generation is lost. Host-side dump / restore of state (llama.cpp style: state bytes + metadata,
+without RNG / sampler) is **reserved only**; implementation waits for a real need.
 
-batch > 1・複数シーケンス・paged / block table 間接参照（KV は連続容量 — 調査 §1.4-1 の
-明示選択）・prefix cache・attention / GQA / mask の op 語彙（ADR ⑤）・decode 出口と
-multi-output（ADR ④）・packed 格納（ADR ②）・shard ロードと admission（ADR ③）・
-sampling / RNG（ホスト維持 — op-vocabulary 裁定済み）。
+### 8. Out of scope
 
-注記（2026-10-11）: このうち「同じ Session・同じ容量の context を丸ごと複製する」1 点だけは、
-末尾の「追記（2026-10-11）— 会話状態の分岐（fork・裁定 8）」で範囲に入れた。prefix cache
-（内容アドレスでの再利用）と他の項目は範囲外のまま。
+batch > 1, multiple sequences, paged / block-table indirection (KV is contiguous capacity — the
+explicit choice of research §1.4-1), prefix cache, the attention / GQA / mask vocabulary (ADR 0067),
+the decode exit and multi-output (ADR 0068), packed storage (ADR 0069), shard loading and admission
+(ADR 0070), sampling / RNG (stays on the host — settled in the op vocabulary).
+
+Note (2026-10-11): one item, "duplicate a whole context of the same Session and capacity", entered the
+scope with the addendum of 2026-10-11 (fork). Prefix cache (content-addressed reuse) and the other
+items stay out of scope.
 
 ## Consequences
 
-- 既存の 1-shot 面（Session.run / enqueue・全既存モデル・全 sha 門）は**無風** — 本 ADR は
-  席を足すだけで既定経路を変えない。
-- IR v1 は `states{}` の追加で本書改訂を受ける（version は 1 のまま — 未リリース改訂手順）。
-- ADR 0042 の backing 節（§4-5）は決定 5 の分離を受けて実装時に追記改訂される。
-- 受入条件（実装波のゲート・第 2 巡レビュー由来）: ①`queryLength` が `pastLength` と
-  独立の実行時スカラとして実装されること ②padding 行 no-op が機械検証されること
-  （pad あり / なしで KV バイト同一 + 出力同一）③context 切替で「stale 読みゼロ +
-  レシピ再導出ゼロ」が同時に成立すること（切替 A/B テスト）④仕事量合格条件
-  （追記 1 の訂正式）が attention 実装（ADR ⑤）で満たされること。
-- 「鍵は容量」の反例（llama.cpp の量子化 extent）を明記したことで、将来 decode 性能が
-  容量鍵で頭打ちになった場合の転換先が記録に残る（その時は本 ADR の supersede）。
+- The existing one-shot surface (Session.run / enqueue, all existing models, all sha256 checks) is
+  **unaffected**: this ADR adds places and does not change the default path.
+- The backing sections of ADR 0042 (decisions 4–5) were amended for decision 5 (ADR 0042 addendum of
+  2026-08-18 — separate bake units).
+- The implementation acceptance conditions (independent `queryLength`, machine-checked no-op pad rows,
+  context switch with no stale read and no re-derivation, the workload condition) were met by the
+  implementation waves of 2026-08.
+- Recording the counter-example to "the key is the capacity" (llama.cpp's quantized extent) keeps the
+  way out if decode performance ever stalls on the capacity key (that would supersede this ADR).
 
-## 追記（2026-08-17・第 3 巡レビュー反映 — 訂正 2 点・補強 3 点）
+## Addendum (2026-08-17) — corrections and reinforcements after review
 
-accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）で確定した訂正と未決の閉鎖。
-いずれも一次ソースで再確認済み（調査 doc §7 に台帳追記）。
+1. **Workload formula of decision 3 corrected.** "∝ pastLength × queryLength" is wrong because the
+   causal triangle inside the chunk is non-zero at pastLength = 0. Correct: **∝ queryLength ×
+   (effective pastLength + queryLength)** (sliding limits the effective past to the window).
+2. **Rewind contract of decision 6 replaced.** Rejecting only evicted ranges is not enough: after an
+   eviction, **even a rewind to a resident position leaves physical layout and logical range out of
+   step** (ORT GenAI rejects every rewind below current for this reason — comment in
+   windowed_kv_cache.cpp:67-80; it has no left compaction). Contract: **a positional rewind of a context
+   that contains a sliding slot fails loudly** (valid only when no slot is sliding). Relaxing it needs a
+   revision of this ADR together with compaction.
+3. **Failure atomicity (reinforces decision 6).** If a run fails after a state-changing dispatch (a run
+   with `state_append`) was submitted, the logical length does not advance but the physical ring may
+   be overwritten — **the context is poisoned (invalid, every later operation fails loudly)**. No
+   rollback or staging; recovery = new context + host-side rebuild.
+4. **Carrier of the logical-length scalars (reinforces decision 3).** `pastLength` / `queryLength` are
+   **not put into params** (the content-addressed cache — ADR 0042): a value that changes every step
+   would grow that cache without bound (a known limitation) and could not be updated on a PreparedPlan
+   hit, where derivation does not run. They travel in **one mutable uniform buffer owned by the
+   context** (written with writeBuffer before each run's encode; recipes bind it fixedly).
+5. **Capacity and binding limit (reinforces decisions 1 / 6).** A capacity whose single-slot binding
+   exceeds `maxStorageBufferBindingSize` fails loudly in `createGenerationContext` (131K capacity × f32
+   on Gemma 4 E2B's full layers can exceed the default 128 MiB; practical capacity is diagnosed by the
+   ADR 0070 estimator). An f16 state storage option (an opt-in in the ADR 0058 style, since it changes
+   the numerics contract) is **reserved only** (`RESERVED_STATE_DTYPES` in `format/ir.ts`).
+6. **Physical shape of fixed chunks and the value contract of padding (reinforces decision 4).** The
+   declared tensor shape of the prefill-chunk family is **fixed at chunkLength** (plan / prepared
+   backing allocate the whole declared shape and write it fully — unchanged). Valid data is the
+   **compact prefix of the first queryLength rows**. **Input values in the pad region MUST be
+   zero-filled** (by the host: non-finite k/v in pad rows would leak NaN into valid rows through the
+   "−inf add + exp" path; the value contract blocks it). Pad rows cannot contaminate valid rows by
+   **row locality**: linear / pointwise / norm stay inside a row; the causal predicate keeps valid
+   rows off pad columns (`col ≥ pastLength + queryLength`); `state_append` writes only queryLength
+   rows; the exit (ADR 0068) reads only the real last row. **Full-write still holds** (ADR 0014): pad
+   rows are written, with values that carry no meaning. Only **state slots** are written for
+   queryLength rows alone (context-owned, outside the transient full-write rule; leftovers are
+   overwritten by the next append with the same formula, and no reader reads outside the resident
+   range).
+7. **Bindability of states-only symbols (reinforces decision 2; 2026-08-17).** `checkSymbolBindability`
+   (`format/ir.ts`) required every symbol to appear in an input shape, so **a symbol that appears only
+   in states (the KV capacity `C`) could not be declared**. The capacity is chosen at context creation
+   (decision 3), so baking it at export contradicts this ADR. Contract: **a symbol in a states shape is
+   a valid declaration bound at `createGenerationContext(spec.bindings)`**; the bindability check
+   accepts "appears in input shapes ∪ states shapes". Ordinary value shapes are still resolved from
+   input bindings only (states-only symbols do not appear in value shapes), but **the key of a
+   PreparedPlan that references state contains the resolved capacity** (decision 3 itself — the
+   capacity value, not the context identity; contexts with C=512 and C=131072 in one Session get
+   different keys for their state-referencing plans).
+8. **Pad-row output fixed at 0 (narrows item 6; 2026-08-18).** "Pad rows are written with meaningless
+   values" becomes **exact 0**. Reason: if pad rows scanned live columns, work would scale with the
+   physical chunk rows M; so ① QK / ② row statistics cover only valid rows (`row < queryLength`) and
+   ③ PV writes 0.0 to all of D for pad rows without scanning live columns (full-write unchanged).
+   ① **Empty row → 0 (ADR 0067 decision 6) is contained** in this zero write (empty rows ⊂ pad rows; a
+   valid row always has its causal self-reference); ② the row-statistics guard (amax = −inf → (0,0)) is
+   **defensive only**, kept to detect a dispatch / kernel row-range mismatch. Non-finite V can no longer
+   turn an empty-row output into `0 · NaN`.
+9. **Sliding slot capacity baked as the real window (scope of decision 3; 2026-08-30).** Choosing the
+   capacity at context creation is needed **only for full slots**, which keep the whole context. A
+   sliding slot's ring closes at exactly the window, so a capacity symbol leaves `C − window` rows dead
+   (Gemma 4 E2B: 24 slots × 256 × 4 B — about 180 MiB at C=8192). States-form recipes give sliding
+   slots a numeric `capacity = window` (`StateAttentionSpec.capacity`), and the form check splits by
+   layer kind: "full = symbol / sliding = number" (`export_decode.assert_ir_form_decode`). Function
+   unchanged (token-sequence parity, three Gemma 4 cases). (Superseded by the addendum of 2026-09-08
+   and ADR 0096 decision 4 on 2026-09-08: the sliding capacity is `window + slack`
+   (`SLIDING_SLACK_ROWS = 8` in `tools/export-recipes/gemma4/export_decode.py`); the symbol / number
+   split of the form check stays.)
+10. **Prefill physical rows widened to a declared set (relaxes decision 4; buckets, 2026-09-07).** The
+    physical row counts become **the set `{1} ∪ chunkBuckets ∪ {chunkLength}` declared at context
+    creation** (`GenerationContextSpec.chunkBuckets` — strictly increasing integers in
+    [2, chunkLength); omitted = none). The caller (`physicalChunkRows` in
+    `packages/models/src/generation/sequence.ts`) takes the **smallest** value ≥ `queryLength` per
+    chunk (one valid row still uses the decode shape). The chunk **split** stays `chunkLength`; only
+    the rows that carry the last chunk change. Long prompts are fastest at 768 in one go, so the
+    default is not lowered and variable length stays rejected: the declared set caps the number of
+    PreparedPlans, and the pre-run check `assertGenerationRun` rejects M outside the set. Consequences:
+    (a) PreparedPlan LRU bound 4 → 8 per capacity (superseded by ADR 0042 decision 2 on 2026-09-08:
+    the bound is `PREPARED_PLAN_CAPACITY` in `packages/runtime/src/runtime/executor.ts`, 12 since ADR
+    0096 added the verify shape); (b) buckets with M ≥ 16 take the tiled path (①ₜ / ③ₜ, perf-ledger
+    K-13) and add one WGSL variant each (the PipelineCache does not evict; compiled at first use);
+    below 16 they fall to ① / ③; (c) **numerics**: row-local ops and tiled attention use the same
+    formula and summation order for every M, but the GEMM geometry (`gemm-geometry.ts`) depends on M,
+    so **bucket shapes and the 768 shape do not guarantee bit-identical logits** (bound by the
+    token-sequence golden, `e2e_gemma4_sequence_test.ts`); (d) **VRAM**: the unaccounted window of the
+    estimate (ADR 0089) widens from "decode + prefill shape" to "largest bucket + prefill shape"
+    (`docs/limitations.md`); backing is held under a budget since ADR
+    [0095](0095-plan-backing-budget.md). The default ladder is `GEMMA4_CHUNK_BUCKETS`, measured in
+    [research 2026-09-07](../research/2026-09-07-codex-perf-review-followup.md) §5 (prompted by
+    performance finding F-02: a 32-token turn fell from 385 to 106 ms).
 
-1. **決定 3 の仕事量式を訂正**: 「∝ pastLength × queryLength」は pastLength=0 の causal
-   三角（chunk 内自己参照）が非ゼロであるため誤り。正 = **∝ queryLength ×
-   （有効 pastLength + queryLength）**（sliding は有効 past を窓で制限）。受入条件④は
-   この式で読む。
-2. **決定 6 の rewind 契約を差し替え**: sliding スロットは「エビクト済み範囲のみ拒否」では
-   足りない — エビクト発生後は **resident な位置への rewind も物理配置と論理範囲が一致
-   しない**（ORT GenAI は同理由で current 未満への rewind を全拒否 —
-   windowed_kv_cache.cpp:67-80 のコメントが一次根拠。左詰め compaction は持たない）。
-   契約: **sliding スロットを含む context の位置指定 rewind は fail loudly**（全スロット
-   非 sliding の context でのみ有効）。緩和は compaction 実装時の本 ADR 改訂。
-3. **失敗の原子性（決定 6 の補強）**: state 変更 dispatch（`state_append` を含む run）を
-   提出した後に run が失敗した場合、論理長は進まないが物理 ring は上書きされ得る —
-   **context は poison（無効化・以後の全操作 fail loudly）**とする。rollback / staging は
-   持たない（復旧 = 新 context + ホスト側再構築）。
-4. **論理長スカラの搬送路（決定 3 の補強）**: `pastLength` / `queryLength` は params
-   （内容アドレスキャッシュ — ADR 0042）に**載せない**。毎 step 値が変わるものを内容
-   アドレスに載せると「キャッシュ無界成長（limitations 既知）」と「PreparedPlan ヒット時に
-   導出相が走らず更新不能」の両方を踏む。搬送は **context 所有の可変 uniform バッファ
-   1 本**（毎 run の encode 前に writeBuffer・レシピからは固定束縛で参照）。
-5. **容量と binding 上限（決定 1 / 6 の補強）**: スロット単体の binding バイト数が
-   `maxStorageBufferBindingSize` を超える容量指定は `createGenerationContext` で
-   fail loudly（Gemma 4 E2B の full 層 131K 容量 × f32 は既定 128MiB を超えうる —
-   実用容量の診断は ADR ③ の estimator）。state 格納の f16 席（数値契約が変わるため
-   ADR 0058 流儀の opt-in）は**予約のみ**。
-6. **固定 chunk の物理 shape と pad の値契約（決定 4 の補強・第 4 巡）**: prefill-chunk 系の
-   テンソル宣言 shape は **chunkLength 固定**（plan / prepared backing は従来どおり宣言
-   shape の全量確保 + full-write — 機構は不変）。有効データは**先頭 queryLength 行の
-   compact-prefix**。**pad 領域の入力値は 0 埋め MUST**（ホストが埋める — pad 行の k/v が
-   NaN / 非有限だと「−inf 加算 + exp」経路で valid 行へ NaN が漏れるため、値契約で遮断）。
-   pad 行が valid 行を汚染しないことは**行局所性**で保証する: linear / pointwise / norm は
-   行内で閉じ、attention は causal 述語により valid 行が pad 列（`col ≥ pastLength +
-   queryLength` 相当）を見ず、`state_append` は queryLength 行しか書かず、出口（ADR ④）は
-   実末尾行しか読まない。**full-write 不変条件との整合（第 5 巡で明確化）**: pad 行も
-   通常出力としては**書かれる**（各カーネルは宣言 shape の全バイトを書く — ADR 0014 系の
-   不変条件は不変。「不定」は**値が契約上無意味**という意味であって未書込みではない）。
-   書込みが queryLength 行に限られるのは **state スロットだけ**（context 所有バッファで、
-   transient slot の full-write 対象外 — 残骸は次 step の append が同じ式で上書きし、
-   読者は resident 範囲外を読まない）。
+## Addendum (2026-09-08) — deferred commit and slack in the sliding ring (ADR 0096 decisions 3 / 4)
 
-7. **states 専用記号の束縛可能性（決定 2 の補強・実装波 C で判明 — 2026-08-17）**: 現行の
-   `checkSymbolBindability`（format/ir.ts）は「全 symbols が**入力 shape の次元位置**に
-   現れる」ことを要求するため、**states にしか現れない記号（KV 容量 `C` 等）が宣言できない**。
-   容量は context 生成時にユーザーが決める値（決定 3 の R2 — 静的物理格納）なので、export 時
-   定数に焼く形は本 ADR の前提と矛盾する。契約: **states の shape に現れる記号は
-   `createGenerationContext(spec.bindings)` を束縛点とする有効な宣言**とし、束縛可能性検査は
-   「入力 shape ∪ states shape のどこかに現れる」へ緩める。効く範囲の分担（第 2 巡指摘で
-   精密化 — 決定 3 との整合）: **通常値 shape の解決には従来どおり入力由来の束縛だけが効く**
-   （states 専用記号は値 shape に現れない）が、**state を参照する PreparedPlan の鍵には
-   解決済み容量が入る**（決定 3 の「鍵は容量」そのもの — context の識別子ではなく容量の値。
-   同一 Session で C=512 と C=131072 の context を作れば、state 参照計画は容量ごとに別鍵に
-   なるのが正しい）。実装は波 D。
+- **"The logical length advances on a successful run" (decision 6) now has two forms**:
+  `GenerationRun.commit` `"immediate"` (default — advances `queryLength` rows when the run returns
+  without an exception) and `"deferred"` (progress is held; the host reads back, decides the accepted
+  rows and calls `GenerationContext.commit(rows)` with `0 ≤ rows ≤ queryLength`). While a commit is
+  pending (`pendingCommit`), the next run and `rewind` are rejected, and dispose folds the pending
+  commit. A failed run creates no pending commit (the poison of item 3 is unchanged). Only one path
+  moves the logical length at a time, so double bookkeeping stays excluded.
+- **The physical rows of a sliding slot are `window + slack`** (baked by the distribution; slack 8 for
+  Gemma 4). The ring modulus is capacity, not window (ADR 0067 addendum of 2026-09-08), so rows written
+  ahead of the logical length (rejected rows of a deferred run) land only on columns outside the live
+  window. The context exposes `slidingSlack` (minimum of capacity − window) and enforces **`queryLength
+  ≤ slidingSlack + 1` for deferred runs** in the synchronous section of run issue (superseded by the
+  addendum of 2026-09-09 on 2026-09-09: tightened to `queryLength ≤ slidingSlack`). Beyond the limit, a
+  zero-accept would let rejected rows overwrite the live window — silent corruption, no exception, no
+  NaN. Immediate runs (prefill / decode) commit all rows, so their limit stays `chunkLength`.
+- Item 2 (rewind rejected for contexts with sliding slots) is unchanged: speculation handles rejection
+  by "write, then advance by the accepted rows", not by rewind.
 
-8. **pad 行の出力値を 0 に固定（追記 6 の narrowing・実装波 D-7 — 2026-08-18）**: 追記 6 の
-   「pad 行も通常出力としては書かれる（値が契約上無意味）」を、**厳密 0 を書く**へ狭める。
-   きっかけは仕事量合格条件（追記 1 の訂正式）の独立レビュー指摘 — pad 行が live 列を走査すると
-   仕事が物理 chunk 行数 M に比例してしまうため、①QK / ②行統計は有効行（`row < queryLength`）
-   だけを覆い、③PV は pad 行で live を 1 列も走査せず全 D に 0.0 を書いて返す（full-write
-   不変条件は不変 — 「不定」だった値を 0 に固定しただけ）。帰結 2 つ: ①**空行 → 0（ADR 0067
-   決定 6）は「空行 ⊂ pad 行」によりこの 0 書きが構造的に包含する**（valid 行は causal
-   自己参照を必ず含むので非空）。②行統計の空行ガード（amax = −inf → (0,0)）は**防御専用**に
-   なった（有効行しか覆わない現行構成では発火経路を持たない — dispatch とカーネルの行範囲が
-   割れた実装バグの検出線として温存）。非有限な V が空行出力を `0 · NaN` で汚す残穴も同時に
-   閉じている。
-9. **sliding スロットの容量は window 実数で焼く（決定 3 の適用範囲の精密化 — 2026-08-30
-   LLM 先行波）**: 「容量は context 生成時に選ぶ」（決定 3）が要るのは**全 context を保持する
-   full スロットだけ**で、sliding スロットは ring が window ちょうどで閉じる（ADR 0067
-   決定 4 — 全読者が past を読み終えてから append するので slack 不要）ため、容量記号のまま
-   だと `C − window` 行が常に死蔵になる（gemma4 E2B: 24 スロット × 256 × 4B — C=8192 で
-   約 180MiB）。以後の states 形 recipe は sliding スロットに `capacity = window` を数値で
-   与える（`StateAttentionSpec.capacity` の既存席）。決定 1 の「sliding と full は容量の違う
-   別スロット」の実適用で、機能は不変（token 列 parity が検収 — gemma4 で 3 ケース不変を
-   実測）。form 検査は「full = 記号 / sliding = window 実数」の層種別で分ける（一色に緩めると
-   どちらかの退行が素通りする — `export_decode.assert_ir_form_decode`）。
+## Addendum (2026-09-09) — the deferred limit tightened by one column (`queryLength ≤ slidingSlack`)
 
-10. **prefill 形の物理 chunk 行数を「宣言した集合」へ広げる（決定 4 の narrowing の緩和 — バケット・
-    2026-09-07）**: 決定 4 の「実行形は 2 本（prefill 形 M = chunkLength / decode 形 M = 1）」を、
-    **context 生成時に宣言した集合 `{1} ∪ chunkBuckets ∪ {chunkLength}`** へ広げる
-    （`GenerationContextSpec.chunkBuckets` — 2 以上 chunkLength 未満の整数の狭義昇順・省略 = 追加なし）。
-    呼び出し側（`generation/sequence.ts` の `physicalChunkRows`）は chunk ごとに `queryLength` 以上の
-    **最小**の値を物理行数に選ぶ（有効行 1 本は従来どおり decode 形）。chunk の**割り方**は
-    `chunkLength` のまま — 変えるのは末尾 chunk（短い prompt では唯一の chunk）を載せる行数だけ。
-    きっかけは 2026-09-06 の性能調査 F-02（`.claude/reviews/2026-09-06_performance-investigation/`
-    — git 追跡外）: 32 token の発話 1 本 + 1 token 生成の壁が chunk 768 → 32 で 385 → 106 ms（linear
-    −73%）。chat の user 発話は短いのに context の chunkLength は途中で変えられず、多ターンでは毎ターン
-    pad 行の linear を払っていた。一方で長い prompt は 768 一括が最速（research 2026-09-03 §2）なので
-    「既定を下げる」は採らず、可変長 chunk（決定 4 が退けた形）も採らない — 集合を宣言で固定するのは、
-    増える PreparedPlan を宣言された本数で頭打ちにするため（run 前検査 `assertGenerationRun` が集合外の
-    M を拒否する形は不変）。帰結: ①PreparedPlan の LRU 上限を 4 → 8（ADR 0042 決定 2 追記 — 定常本数 =
-    prefill 形 + decode 形 + バケット本数、**1 つの容量あたり**）②M ≥ 16 のバケットは K-13 の tiled 経路
-    （①ₜ / ③ₜ）に乗り、chunkRows で特殊化した WGSL バリアントが本数ぶん増える（PipelineCache は追い出し
-    無し・初回使用時にコンパイル）。16 未満は tiled 経路に乗らず ① / ③ に落ちる ③**数値**: 行局所な op と
-    tiled attention は M によらず同じ式・同じ加算順だが、GEMM の幾何（`gemm-geometry.ts` — ≤64 / ≤512 /
-    上）は M で変わるので、**バケット形と 768 固定で logits のビット一致は保証しない**（K-13 と同じく
-    token 列 golden で縛る — `e2e_gemma4_sequence_test.ts` ⑤）④**VRAM**（ADR [0095](0095-plan-backing-budget.md) で backing は予算つき保持へ — 以下は容量 1 当時の記述）: slot backing は容量 1 でヒット
-    run にしか作られないため、末尾 chunk のバケット run は chunkLength 形の backing が載ったまま arena に
-    一時を確保する。見積り（ADR 0089）の unaccounted 側の窓が「decode 形と prefill 形の和」から「最大バケット形と prefill 形の和」へ広がる（limitations に記載）。複数 chunk のターンでは backing の作り直しが 1 回増える（2 → 3 回/ターン）。gemma4 の既定の梯子（`GEMMA4_CHUNK_BUCKETS`）は実測で確定する（research 2026-09-07）。
+The implementation of step 3 (ADR [0096](0096-speculative-decoding.md) addendum, 2026-09-08) tightened
+the limit to **`queryLength ≤ slidingSlack`**; this is the enforced value.
 
-## 追記（2026-09-08）— deferred commit と sliding ring の余裕（ADR 0096 決定 3 / 4・MTP 段 1）
+- Reason: a borrowing context (the drafter's readonly attention) reads down to column `P−W`, one
+  column older than the lender. Rejected row j overwrites logical column `P+j−capacity`,
+  which stays outside the borrower's window when `j − m < capacity − window = slidingSlack` (m = rows
+  committed, including `commit(0)`) ⟺ **`Q ≤ slidingSlack`**. The same limit applies with no borrower
+  (a borrower can open after deferred + `commit(0)`; branching on its presence would let a late
+  borrower read a broken window).
+- Immediate runs (prefill / decode) keep `chunkLength`. With slack 8 the drafter runs at most 7 steps
+  (the distributed drafter uses 3); a context with slack 0 cannot issue a deferred run at all.
 
-- **決定 6 の「論理長は run の成功で進む」は 2 形になった**: `GenerationRun.commit`（既定
-  `"immediate"` = 従来 — run が例外なく返った時点で `queryLength` 行進む）と `"deferred"`（進行を
-  保留し、ホストが readback で受理行数を決めてから `GenerationContext.commit(rows)`〈`0 ≤ rows ≤
-  queryLength`〉で進める）。保留（`pendingCommit`）がある間は次の run と `rewind` を拒否し、dispose は
-  保留ごと畳む。失敗した run は保留を作らない（追記 3 の poison は不変）。論理長を動かす経路は
-  依然として同時に 1 本なので、二重簿記の禁止は保たれる。
-- **sliding スロットの物理行数は `window + 余裕`**（配布形が焼く — gemma4 は余裕 8）。ring の法は
-  window ではなく capacity（ADR 0067 追記 2026-09-08）で、論理長より先に書かれた行（deferred run の
-  棄却行）は live 窓の外の列にしか当たらない。context は `slidingSlack`（capacity − window の最小）を
-  公開し、**deferred run の `queryLength ≤ slidingSlack + 1`** を run 発行の同期区間で執行する
-  （超えると受理 0 行のとき棄却行が live 窓を潰す — 例外も NaN も出ない沈黙破壊）。immediate な
-  run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま。
-- 追記 2（sliding を含む context の rewind 全拒否）は不変 — 投機は rewind ではなく「書いてから
-  受理行数だけ進める」形で棄却を扱う。
+## Addendum (2026-09-12) — GenerationContext in batched execution
 
-## 追記（2026-09-09）— deferred の門を 1 列締めた（`queryLength ≤ slidingSlack`）
+- `EnqueueOptions.generation` takes the same context, queryLength and commit as an ordinary run.
+  Context ownership, bindings, allowed rows, capacity, the deferred sliding slack and the borrower
+  constraints are those of a run. IR, stored assets and the numerics / length contract of Session.run
+  are unchanged.
+- The use reservation is taken when the enqueue is issued and held until the batch is finally settled.
+  The enqueue Promise means only that encoding finished; the length does not advance then. On success
+  of the section the context advances / defers, and the commit and the release of the reservation
+  complete before `finish` / `finishAndRead` return. `settle()` is an intermediate fence, not a length
+  commit.
+- Several unsettled executions on one context are rejected; different contexts may share a batch. A
+  borrower's reservation kind is passed to the lender to keep reads and writes exclusive; a borrower
+  never advances the logical length.
+- A failure of a later Session or of a readback fails the whole section. An execution that wrote state
+  and was submitted poisons its context by the same snapshot rule as a run, and reuse is rejected.
+  Input / compile failures before any write do not poison. If an internal failure happens midway
+  through committing several contexts, every context that was written is poisoned.
+- `context.dispose` and `Session.dispose` of the owning Session are rejected while a batch reservation
+  is held, until acceptance closes; after finish they can be retried. The two-step dispose of ordinary
+  runs (close to new work, dispose after accepted runs) stays. Queuing the batch wait on the Session's
+  serialisation chain is rejected: it creates the cycle enqueue → dispose → batch → enqueue.
+- The existing rule for external batches remains: enqueue is rejected while an ordinary run of the
+  same Session is unsettled, so callers align the order of ordinary runs and batch opening.
 
-直前の追記（2026-09-08）が置いた **`queryLength ≤ slidingSlack + 1`** は、段 3 の実装
-（ADR [0096](0096-speculative-decoding.md) 追記〈段 3〉・2026-09-08）で
-**`queryLength ≤ slidingSlack`** へ 1 列締めた。現行の執行値はこちらで、上の記述はその時点の
-決定として残す。
+## Addendum (2026-09-13) — finer prefill chunks for the browser comparison page
 
-- 理由: 借り手 context（drafter の readonly attention）は貸し手より 1 列古い最古列 `P−W` まで
-  読む。棄却行 j が潰す論理列は `P+j−capacity` で、これが借り手の窓に入らない条件は
-  `j − m < capacity − window = slidingSlack`（m = `commit` した行数・`commit(0)` を含む）⟺
-  **`Q ≤ slidingSlack`**。借り手が居ない context でも同じ門にする（借り手は deferred +
-  `commit(0)` の後にも開けられるので、有無で分岐すると後から開いた借り手が壊れた窓を読む）。
-- 受理集合の縮小は 2 つ: 余裕 8 の gemma4 配布形は deferred run が 8 行までで、投機の drafter は
-  `k + 1 ≤ 8` から**最大 7 段**（`+ 1` の時代は 8 段が通っていた — これは門の上限であって
-  配布形の値ではない: 配布 drafter は 3 段・limitations 参照）。余裕 0 の context は
-  **`queryLength = 1` の deferred run すら発行できない**（同期区間で fail loudly）。
-- immediate な run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま不変。
+Withdrawn 2026-10-18: it set the initial selection of the Deno-era browser comparison page to buckets
+of 4–56 rows ([research](../research/2026-09-13-m2-prefill-adoption.md)); that page was removed on
+2026-10-16 (`bb35fe2a`). Default buckets will be decided again on the rebuilt page with Dawn
+measurements.
 
-## バッチ実行の GenerationContext（2026-09-12）
+## Addendum (2026-10-11) — forking the conversation state
 
-- `EnqueueOptions.generation`を追加し、通常runと同じcontext・queryLength・commitを受ける。
-  contextの所属、束縛、許可行、容量、deferredのsliding余裕、借り手の制約は既存runと同じ。
-  IR・保存資産・Session.runの数値/長さ契約は変えない。
-- 使用予約はenqueueの発行時に取り、batchの最終決着まで保つ。enqueueのPromiseは
-  エンコードの完了だけを表し、この時点では長さを進めない。区間成功時にadvance/deferし、
-  `finish` / `finishAndRead`が呼び手へ返る前に確定と予約返却を完了する。
-  `settle()`は途中のフェンスであり、長さの確定には使わない。
-- 同じcontextに複数の未確定実行を積むことは拒否する。別contextは同じbatchへ積める。
-  借り手の予約種別は貸し手へ伝え、読み書きの排他を保つ。借り手自身は論理長を進めない。
-- 後続Sessionや読み戻しの失敗も区間全体の失敗とする。stateを書いてsubmitした実行は
-  既存runと同じsnapshot判定でpoisonし、再利用を拒否する。書込み前の入力/compile失敗は
-  contextをpoisonしない。複数contextの確定途中で内部失敗した場合も、書込み済み全contextをpoisonする。
-- batch予約中のcontext.disposeと、そのcontextを所有するSession.disposeは受付終了前に拒否する。
-  finish後は再試行できる。通常runの二段破棄（新規受付を閉じ、受理済みrunの後で破棄）は維持する。
-  batch待ちをSessionの直列化鎖へ積むだけの案は、後続enqueue→dispose→batch→enqueueの循環を作るため採らない。
-- 外部batchの従来規約は残る。同じSessionの通常runが未決着のままenqueueすることは拒否される。
-  透明なモデル最適化に使う側は、通常runとbatchを開く操作の順序をそろえる必要がある。
-  この追加だけでGemmaの出力転送を変えたとはしない。
+The maintainer's rulings of 2026-10-10 and 2026-10-11 added `GenerationContext.fork():
+Promise<GenerationContext>` to the lifetime operations of decision 6. Use: try another continuation
+from the middle of the same conversation (for example regenerating a chat reply), which previously
+required replaying the token transcript into a new context.
 
-## 追記（2026-09-13）— ブラウザ計測のchunk64への細分化
+### Scope
 
-[M2追試](../research/2026-09-13-m2-prefill-adoption.md)とRTXの負荷検証を踏まえ、
-ブラウザ比較画面の初期選択だけを細分化（4/8/16/24/32/40/48/56行）へ変更する。
-同じ加算方式での出力を維持し、短い日本語入力のTTFTを減らせる。
-長いchunk・複数容量での計画LRU不足は解消していないため、モデル・runtime・CLIの既定バケットとcache上限には適用しない。
-画面では標準も選べ、URL/APIで指定を省略したときの動作も維持する。
-次の最適化の基準として両E2B・Karume・並列加算を選択済みにする。参照経路と全組み合わせも明示的に選べる。
+- In scope, one item only: **a full duplicate of a context of the same Session and capacity**: every
+  byte of every slot (including sliding slack rows), `pastLength` and the immutable values
+  (`chunkLength` / `chunkBuckets` / capacity bindings / sliding windows).
+- Not copied: baked bind groups (re-baked on the duplicate's first run), the logical-length uniform
+  (rewritten before every encode), borrowers and a pending deferred commit (empty by the rejections).
+- Still out of scope: persistence (decision 7), prefix cache, another capacity, batch > 1, paging.
+- The fork is an independent context owned by the caller; the original may be disposed first.
 
-## 追記（2026-10-11）— 会話状態の分岐（fork・裁定 8）
+### Meaning of "while borrowed"
 
-裁定 8（2026-10-10・a）と裁定 36（2026-10-11・a）で、決定 6 の寿命操作に
-`GenerationContext.fork(): Promise<GenerationContext>` を足した。用途は「同じ会話の途中から
-別の続きを試す」こと（チャットの再生成など）で、従来は新しい context へ token transcript を
-replay するしかなかった。
+"Fork is rejected while borrowed" means **while a borrower's run is executing** (while the lender's use
+reservation is held), not "while a live borrower exists". Three reasons:
 
-### 範囲
+- A borrower (the drafter's readonly attention) never moves the logical length and writes no KV row
+  (ADR 0096 decision 1).
+- A borrower's run also takes the lender's use reservation, so a fork during it is rejected by (d)
+  below.
+- A speculative sequence keeps its borrower for its whole lifetime; rejecting the mere presence of a
+  borrower would make fork unusable under the default speculation settings.
 
-- 範囲に入れるのは 1 点だけ: **同じ Session・同じ容量の context の丸ごと複製**。写すのは
-  全スロットの全バイト（sliding の ring の余裕行も含む）・`pastLength`・不変の値
-  （`chunkLength` / `chunkBuckets` / 容量の束縛 / sliding の窓）。
-- 写さないもの: context 側で焼いた bind group（元のスロットを束ねているので、複製は最初の run で
-  焼き直す）・論理長 uniform の中身（毎 run の encode 前に全体を書き直す）・借り手の集合と
-  deferred の保留（下の拒否により、複製の時点で空）。
-- 範囲外のまま残すもの: 永続化（決定 7 の dump / restore）・内容アドレスでの再利用
-  （prefix cache）・別の容量への移し替え・batch > 1・paged。
-- 分岐は呼び手が所有する独立の context である。親子の依存は持たず、元を先に dispose してよい。
+After a fork, the original borrower stays bound to the original slots; the duplicate has no borrower.
+The GPU test `gpu_borrowed_context_test.ts` fixes this binding.
 
-### 「借用中」の読み替え（裁定 36 = a）
+### Synchronous-section contract
 
-裁定 8 の「借用中の分岐は拒否」は、**借り手の run が走っている間**（= 貸し手の使用予約が
-立っている間）と読む。生きている借り手を持つこと自体は拒否しない。根拠は 3 つ:
+- MUST: the rejection checks, capturing `pastLength`, the Session-dispose check, allocation, encoding
+  the copy, `queue.submit` and issuing the error-scope pop happen **in the synchronous section of the
+  `fork()` call, with no await**; only the pop result is awaited. Same shape as
+  `GenerationContext.create` and `ResidentTensor.read` (the third invariant of GpuContext error-scope
+  sections: a scope that completes inside one synchronous section needs no lock).
+- No use reservation is taken on the original. When the original is quiescent (no run in progress, no
+  pending deferred commit), no unsubmitted write to its slots exists (a run's reservation is returned in
+  its finally, when all its GPU work is submitted). The copy is submitted at the call, so queue order
+  guarantees "after earlier writes, before later writes"; a run / `rewind` / `dispose` / second `fork`
+  issued on the original without awaiting `fork()` is safe.
+- The copy uses neither the Session's serialisation chain nor the `SubmitScheduler` pending queue (own
+  encoder and submit) — the same side as `createGenerationContext`, which stays off the chain to avoid
+  a wait cycle with batch sections (the NOTE at `Session.#adopt` in `executor.ts`). As a cost, the
+  copy's GPU time is not in the scheduler statistics.
+- Registration after allocation (re-check dispose → live set → `contextCount`) goes through the one
+  path shared with `createGenerationContext` (`Session.#adopt`).
+- An allocation failure (out-of-memory error scope) fails loudly; the original stays intact and what
+  was allocated is released.
 
-- 借り手（drafter の readonly attention）は論理長を動かさず、KV に 1 行も書かない（ADR 0096
-  段 2 §2.1）。
-- 借り手の run は貸し手の使用予約も取る。そのため走っている間の fork は、下の (d) で拒否される。
-- 投機つきの sequence は借り手を寿命の間ずっと持つ。借り手を持つこと自体を拒否すると、既定の
-  投機設定では fork が使えなくなる。
+### Rejections
 
-fork の後も、元の借り手は元のスロットを束ねたまま残る。複製には借り手がいない。この束縛は
-GPU テスト（`gpu_borrowed_context_test.ts`）で固定する。
+`fork()` decides in its synchronous section and rejects the returned Promise (same shape as run /
+dispose); (b) with `GpuDeviceLostError`, the others with `ExecutionError`:
 
-### 同期区間の契約
+(a) after a dispose request; (b) after device loss; (c) after poisoning (item 3); (d) an unsettled run
+exists (including a borrower's run holding the lender's reservation); (e) a batch use reservation is
+held (until the section is finally settled); (f) a deferred commit is pending (`pendingCommit`); (g)
+the context is a borrower (borrowed slots are not duplicated); (h) the Session is disposed (checked at
+the call and again after allocation).
 
-- MUST: 拒否の検査・`pastLength` の捕捉・Session の dispose の検査・確保・複製のエンコード・
-  `queue.submit`・errorScope の pop の発行までを、**`fork()` を呼んだ同期区間で await なしに**
-  行う。待つのは pop の結果だけ。形は `GenerationContext.create` と `ResidentTensor.read` と
-  同じ（GpuContext の errorScope 区間の不変条件の 3 つ目 — 同期区間で完結するスコープはロック
-  不要）。
-- 元には使用予約を立てない。元が静止している（進行中の run も deferred の保留も無い）なら、
-  元のスロットへの未 submit の書き込みは無い（run の予約は本体の finally で返り、その時点で
-  GPU の操作は全部 submit 済み）。複製を呼んだ時点で submit するので、queue の順序が
-  「先行の書き込みの後・後続の書き込みの前」を保証する。したがって `fork()` を await せずに
-  元へ発行した run / `rewind` / `dispose` / 2 本目の `fork` は、どれも安全に通る。
-- 複製は Session の直列化鎖にも `SubmitScheduler` の pending にも載せない（自前の encoder と
-  submit）。`createGenerationContext` を鎖の外に置く理由（batch 区間との待ち合わせの閉路を
-  作らない — executor.ts の `Session.#adopt` の NOTE）と同じ側に立つ。代償と
-  して、複製の GPU 時間は scheduler の統計に載らない。
-- 確保の後の登録（dispose の再検査 → 生存集合 → `contextCount`）は `createGenerationContext` と
-  共有の 1 経路（`Session.#adopt`）を通る。
-- 確保の失敗（out-of-memory errorScope）は fail loudly で、元は無傷のまま残り、確保した分は
-  返す。
+Not rejected: a lender with a live borrower, and a context with sliding slots (independent of the
+rewind rejection of item 2 — the copy takes the physical layout along, so logical ranges stay aligned).
 
-### 拒否
+### Diagnostics and VRAM
 
-`fork()` は次の場合に、呼んだ同期区間で判定して戻り Promise を reject する（run / dispose と
-同じ形）。(b) は `GpuDeviceLostError`、他は `ExecutionError`。
+- Each fork adds the original's resident bytes to `stateBacking.residentBytes` and 1 to
+  `contextCount`. `rebindCount` grows by one per backing used on the fork's first run (re-baking is per
+  (context, backing) pair); runs that continue the original do not add to it.
+- The estimate (ADR 0089) is unchanged: the number of contexts kept alive × state bytes is the caller's
+  account (`docs/limitations.md`).
 
-- (a) dispose 要求の後
-- (b) device 消失の後
-- (c) 汚染（追記 3）の後
-- (d) 決着していない run がある（借り手の run が貸し手の予約を取っている間を含む）
-- (e) batch の使用予約中（区間の最終決着まで）
-- (f) deferred commit の確定待ち（`pendingCommit`）
-- (g) 借り手 context（借り物のスロットは複製の対象にしない）
-- (h) Session が dispose 済み（呼んだ時点と、確保の後の 2 回）
+### Determinism
 
-拒否しないもの: 生きている借り手を持つ貸し手・sliding スロットを含む context（追記 2 の
-`rewind` 全拒否とは独立 — 複製は物理配置ごと写すので論理範囲とずれない）。
+Right after the fork the state is bit-identical to the original. Whether a branch's tokens match "the
+same operations without fork" follows the numerics path: without speculation and with `speculative:
+"always"` they match; with the self-funding gate, wall-clock time differs per branch even with the
+gate state copied (ADR 0083 addendum of 2026-10-11), so they match only where speculation check ⑤ is
+green (otherwise see the speculation section of `docs/limitations.md`).
 
-### 診断と VRAM
+### Relation to other decisions
 
-- 複製 1 本ごとに `stateBacking.residentBytes` が元の常駐バイト数だけ増え、`contextCount` が
-  1 増える。`rebindCount` は複製の最初の run で、使った backing 1 本につき 1 増える（焼き直しは
-  (context, backing) の組ごと）。元の続きの run では増えない。
-- 見積り（ADR 0089）は変えない。同時に生かす context の本数 × state のバイト数が呼び手の
-  勘定になる（limitations）。
+Fork is not the dump / restore of decision 7 and does not anticipate it: it stays inside the GPU, the
+device and the Session. Public surface (ADR 0008): no new exported type, three methods on existing
+types (`GenerationContext.fork` / `GenerationSequence.fork` / `Gemma4ChatSession.fork`).
 
-### 決定性
+### Rejected alternatives
 
-複製はスロットのバイトを丸ごと写すので、分岐した直後の状態は元とビット同一である。分岐ごとの
-token 列が「fork を使わない同じ操作列」と一致するかは、数値経路の決定性に従う: 投機なしと
-`speculative: "always"` は一致する。自己採算ゲートつきの投機は、ゲートの観測状態を分岐へ
-写しても（ADR 0083 の追記〈2026-10-11〉）壁時計は分岐ごとに揺れるので、投機⑤の門が緑の device
-でだけ一致する（門が赤の device の扱いは limitations の投機の節と同じ）。
-
-### 他の決定との関係
-
-- 決定 7 の dump / restore（ホスト側へ state のバイトを出す）とは別物で、それを先取りしない。
-  fork は GPU の中だけで閉じ、同じ device・同じ Session の外へは出ない。
-- ADR 0008 の薄い公開面: 新しい export 型は作らない。既存の型にメソッドを 3 つ足すだけ
-  （`GenerationContext.fork` / `GenerationSequence.fork` / `Gemma4ChatSession.fork`）。
-
-### 採らなかった案
-
-- A: 複製を Session の直列化鎖に積み、使用予約 `"fork"` を取る。複製が run と同じ scheduler の
-  FIFO に入り統計にも載るが、鎖の外に置いた生成の経路を鎖へ載せることになり、使用予約が 3 値に
-  なって拒否の判定が広がる。同じ Session の別 context の長い run の後ろに fork が並ぶ。
-- B: `createGenerationContext({ fork: source })`。入口は 1 本のままだが、見積りと共有している
-  `GenerationContextSpec` に fork の欄を足すことになり、必須欄の `chunkLength` が意味を失う。
-  寿命操作を context の面に並べる決定 6 の配置からも外れる。
-- C: スナップショットと復元（基点を別バッファへ保存して巻き戻す）。新しい公開型が要り、基点の
-  保存ぶんの VRAM が分岐とは別に要り、裁定 8 が範囲外に残した永続化の側に寄る。
+- A: the copy on the Session's serialisation chain with a `"fork"` reservation. It would join the
+  FIFO and the statistics, but moves a creation path onto the chain, gives the reservation three values
+  and makes a fork wait behind long runs of other contexts.
+- B: `createGenerationContext({ fork: source })`. One entry point, but a fork field in
+  `GenerationContextSpec` (shared with the estimate) leaves the required `chunkLength` meaningless, and
+  it departs from decision 6, which lines lifetime operations up on the context.
+- C: snapshot and restore. Needs a new public type and VRAM for the saved base point, and leans
+  towards the persistence left out of scope.

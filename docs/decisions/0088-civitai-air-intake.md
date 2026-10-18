@@ -1,76 +1,75 @@
-# 0088: Civitai 取り込みは AIR 指定の recipe コマンド + エージェント事前確認
+# 0088: Civitai intake through an AIR-addressed recipe command, with a license review by the agent beforehand
 
-- Status: accepted（2026-09-01 — ユーザー裁定「1. OK / 2. モデル名+バージョンで正規化」）
+- Status: accepted (2026-09-01 — the maintainer's ruling "1. OK / 2. normalise to name + version")
 - Date: 2026-09-01
-- 関連: ADR [0077](0077-model-version-naming.md)（モデル名に上流バージョン —
-  本 ADR が正規化規則を追加）/ [0087](0087-anima-official-extra-repos.md)（extra リポ =
-  第三者 fine-tune の置き場）/ [0073](0073-models-source-pin.md)（既定ソースの pin）
+- Related: [0077](0077-model-version-naming.md) (upstream version in the model name — this ADR adds a
+  normalisation rule) / [0087](0087-anima-official-extra-repos.md) (the extra repository, home of
+  third-party fine-tunes) / [0073](0073-models-source-pin.md) (pinning the default source)
 
 ## Context
 
-extra リポ（ADR 0087）へ第三者 fine-tune を足す作業は、これまで全段が手作業だった:
-ブラウザで Civitai から checkpoint を落とし、`inputs/anima/` へ手置きし、出所は
-コミットメッセージと `card.py` の手書きにだけ残る。sha256 の突合も命名も人任せで、
-「どの版をいつ・どの許諾表示のもとで取ったか」が機械可読に残らない。
+Adding a third-party fine-tune to the extra repository (ADR 0087) was manual throughout: download the
+checkpoint from Civitai in a browser, place it in `inputs/anima/`, and keep the provenance only in
+the commit message and a hand-written `card.py`. sha256 checks and naming were left to people, and
+"which version, when, under which terms" was not machine-readable.
 
-一次確認で確定した事実（2026-09-01 実測 — wai `2544636@2983680`）:
+Facts from a first check (2026-09-01, wai `2544636@2983680`):
 
-- メタ API（`/api/v1/model-versions/{id}` / `/api/v1/models/{id}`）は無認証で読め、
-  **model-versions 応答が AIR（`urn:air:anima:checkpoint:civitai:2544636@2983680`）を
-  サーバ発行値として返す**。sha256・ファイル型（Model / Text Encoder / VAE）・許諾 4 欄
-  （allowNoCredit / allowCommercialUse / allowDerivatives / allowDifferentLicense）・
-  usageControl・description（HTML）も揃う。
-- **ファイル DL だけは 401** — API トークンが要る。
-- ライセンスの実態は API 欄だけでは決まらない — 本文（description）に独自条件が
-  書かれることがあり、欄と本文が食い違いうる。
+- The metadata API (`/api/v1/model-versions/{id}`, `/api/v1/models/{id}`) needs no authentication,
+  and **the model-versions response returns the AIR
+  (`urn:air:anima:checkpoint:civitai:2544636@2983680`) as a server-issued value**, with sha256, file
+  types (Model / Text Encoder / VAE), the four permission fields (allowNoCredit /
+  allowCommercialUse / allowDerivatives / allowDifferentLicense), usageControl and description (HTML).
+- **Only the file download returns 401** — it needs an API token.
+- The API fields alone do not settle the license: the description may add terms that disagree.
 
 ## Decision
 
-**取り込みは `anima.civitai` コマンド（AIR / URL 指定）で行い、責務は
-「取得 + 検証 + 記録」まで**とする。diffusers 化は既存 `anima.single_file`、export と
-distribution / card への登録は従来の手順のまま（コマンドは登録を書き換えない）。
+**Intake goes through the `anima.civitai` command (AIR / URL), responsible for "fetch + verify +
+record" only.** Conversion to diffusers stays with `anima.single_file`; export and registration in
+distribution / card follow the existing procedure (the command does not edit the registration).
 
-1. **入口は AIR / URL の 2 形**。版未指定の URL は版一覧の案内表示のみ（取得しない）。
-   AIR はサーバ発行値を正とし、自前組み立てと食い違えばサーバ値を採って警告する。
-2. **モデル名は機械正規化 `anima-<モデル名>-<版名>`**（2026-09-01 裁定 — ADR 0077 の
-   「表記を正規化しない」を改訂）。小文字化・非 `[a-z0-9._-]` は `-`・丸括弧の付記は
-   除去・モデル名から `anima` トークンを除去。既存実績（`anima-wai-v1.0` /
-   `anima-copycat-20260610`）をそのままルール化したもので、**上流の逐語表記は
-   `civitai.json` に残る**ため出所ページとの突き合わせ可能性は失われない。`--name` で
-   上書き可（既定を人が裁定で覆す扉 — 0077 と同じく、既定名の自動が裁定を代替しない）。
-3. **provenance は連鎖させる**: 取得先 `inputs/anima/civitai-<versionId>/` に重みと
-   `civitai.json`（AIR・版名逐語・sha256・許諾欄・description・取得日時 — **機械専有**、
-   人は追記しない）を並べ、`single_file` が同居する `civitai.json` を
-   `source_provenance.json` へ読み継ぐ。dist まで出所が切れない。
-4. **sha256 は API 記載値と突合してから完成品にする**（`.part` → 一致で rename）。
-   不一致は fail loudly。既存ファイルが sha 一致なら取得をスキップ（冪等）。
-5. **ライセンスはエージェント事前確認形**（2026-09-01 裁定）: コマンドは許諾欄と本文を
-   記録するだけで、**判定も確認フラグの強制もしない**。取り込み作業を行うエージェントが
-   取得前後に API 欄と本文を突合し、食い違い・グレーは同ディレクトリの
-   `license-review.md`（人・エージェント記入 — コマンドは触らない）に記録して
-   ユーザーへ報告する。Anima 派生は base ライセンス（v1.2）引き継ぎが前提で、上流が
-   別ライセンスを名乗る場合は裁定に上げる。
-6. **DL トークンは env `CIVITAI_API_TOKEN`、付与は `?token=` クエリ**（Authorization
-   ヘッダは S3 への 307 リダイレクトで署名 URL と衝突しうる）。表示にはマスクを掛ける。
+1. **Two entry forms, AIR and URL.** A URL without a version only lists the versions (nothing is
+   fetched). The server-issued AIR wins; if it differs from the locally built one, it is taken with a
+   warning.
+2. **The model name is normalised mechanically to `anima-<model name>-<version name>`** (ruling of
+   2026-09-01 — revises ADR 0077's "the spelling is not normalised"): lower case, characters outside
+   `[a-z0-9._-]` become `-`, parenthesised notes and the token `anima` in the model name are removed.
+   This turns the existing names (`anima-wai-v1.0`, `anima-copycat-20260610`) into a rule; **the
+   verbatim upstream spelling stays in `civitai.json`**, so matching the source page stays possible.
+   `--name` overrides it (the door for a human ruling — as in 0077, the automatic default does not
+   replace a ruling).
+3. **Provenance is chained:** `inputs/anima/civitai-<versionId>/` holds the weights and
+   `civitai.json` (AIR, verbatim version name, sha256, permission fields, description, fetch time —
+   **owned by the machine**, never edited by people); `single_file` carries the adjacent
+   `civitai.json` into `source_provenance.json`, unbroken up to dist.
+4. **sha256 is checked against the API value before finalising** (`.part` → rename on match); a
+   mismatch fails loudly. An existing file with a matching sha is not fetched again (idempotent).
+5. **License: the agent reviews beforehand** (ruling of 2026-09-01). The command only records the
+   permission fields and the text; it **neither judges nor enforces a confirmation flag**. The agent
+   doing the intake compares fields and text before and after fetching, records disagreements and
+   grey areas in `license-review.md` in the same directory (written by people and agents, never by the
+   command) and reports to the maintainer. Anima derivatives are assumed to inherit the base license
+   (v1.2); an upstream claim of another license goes to a ruling.
+6. **The download token is the env `CIVITAI_API_TOKEN`, passed as the `?token=` query** (an
+   Authorization header may conflict with the signed URL on the 307 redirect to S3); output masks it.
 
 ## Consequences
 
-- `inputs/anima/civitai-<versionId>/` が取り込みの正規の置き場になる（assets-layout に
-  追記）。ディレクトリ名は versionId で機械的に一意 — 人向けの名前は `civitai.json` の
-  `derived_name` が持つ。
-- 機械記録（civitai.json）と人の判断記録（license-review.md）をファイルで分けたので、
-  再取得（civitai.json の上書き）が確認記録を消さない。
-- 登録（`distribution.py` / `card.py`）は引き続き手書き — 取り込みの自動化は
-  「登録の提案」まで進めない（新モデルの追加は毎回それ自体が裁定であるため）。
-- 対象は primary（Model 型）ファイルのみ。非 primary（Text Encoder / VAE）は列挙表示に
-  留める — checkpoint が持たない部分は base 共有で足りる（`single_file` の前提と同じ）。
-- Civitai 以外のソース（HF 直・手置き）は従来どおり — `civitai.json` が無いだけで
-  `single_file` は従来形の provenance を書く。
+- `inputs/anima/civitai-<versionId>/` is the canonical intake location (`docs/assets-layout.md`),
+  unique by versionId; the human-facing name is `derived_name` in `civitai.json`.
+- The machine record (`civitai.json`) and the human review (`license-review.md`) are separate files,
+  so a re-fetch does not erase the review.
+- Registration (`distribution.py`, `card.py`) stays hand-written — intake automation does not
+  propose registrations (adding a model is a ruling each time).
+- Only the primary (Model-type) file is taken; Text Encoder / VAE files are only listed (what a
+  checkpoint lacks is shared with base, as `single_file` assumes).
+- Other sources (HF directly, manual placement) work as before; without `civitai.json`, `single_file`
+  writes the former provenance.
 
-## 追記（2026-09-21）— 本体ファイルの選び方（Consequences の「primary（Model 型）」を決定に上げる）
+## Addendum (2026-09-21) — how the main file is chosen (the Consequences' "primary (Model-type)" becomes a decision)
 
-- **対象は `type == "Model"` のファイルに限る**。primary 真偽だけで選ぶと、上流が VAE や
-  Text Encoder を primary に立てた版でそちらを本体に採ってしまう（primary = Model 型という
-  同一視は上流が保証していない）。
-- **primary が無いときは Model 型が 1 本だけなら採る**。primary を立てない版が実在するため
-  で、Model 型が複数ある場合は fail loudly — どれが本体かは機械では決められない。
+- **Only files with `type == "Model"` are candidates.** The primary flag alone would take a VAE or
+  Text Encoder that upstream marked primary (upstream does not guarantee primary means Model).
+- **Without a primary file, a single Model-type file is taken.** Such versions exist; with several
+  Model-type files the command fails loudly — the main file cannot be decided mechanically.

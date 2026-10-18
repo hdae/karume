@@ -1,152 +1,116 @@
-# 0081: shard 仕様 v2 — グラフ専用 shard・上限 1GiB 1 本・均し詰め
+# 0081: Shard specification v2 — graph-only shard, one 1 GiB limit, balanced filling
 
-- Status: 一部 superseded by [0108](0108-container-format.md)（2026-09-24 発効 — 決定 1 / 3 の上書き。
-  末尾の追記）/ accepted（2026-08-30 — ユーザー裁定「グラフは別居・上限は 1 本・端数は均しで消す」。
-  レビュー M1-2 の c 案〈分割規則そのものの是正〉の実施）
+- Status: superseded in practice (2026-10-18 triage): decisions 1 and 3 by
+  [0108](0108-container-format.md) (accepted 2026-09-22, in effect 2026-09-24); decision 2 by
+  [0090](0090-shard-spec-v3-tensor-pieces.md) (2026-09-02) and then 0108; decision 4 by 0108
+  (2026-09-24, when step 3d retired the old writer) and the open consideration of decision 5 by 0108
+  (2026-09-22). No decision remains in force. Originally accepted 2026-08-30
+  (the maintainer's ruling: "the graph lives apart, one limit, remainders removed by balancing").
 - Date: 2026-08-30
-- 関連: ADR [0070](0070-shard-loading-admission.md)（shard ローダ契約の正本 — **決定 1 の
-  書き手側規則（2026-08-29 追記の「逐次詰め + 尾部スラック」）を本 ADR が置換**。決定 2 の
-  RAM ピーク目標と決定 5 の admission は本 ADR で初めて文字どおり成立する）/
-  [0071](0071-manifest-v3-shards.md)（決定 4 の撤回文が書いていた「1GiB 以下は単一ファイル」を
-  本 ADR が撤回する — manifest のスキーマ（`shards` 列）は無改変）/
-  [0063](0063-safetensors-physical-layout.md)（shard 単体の物理配置は不変）/
-  [0041](0041-manifest-v2.md)（リポ内レイアウト・宣言外ファイル検査は不変）
+- Related: ADR [0070](0070-shard-loading-admission.md) (shard loader contract — this ADR replaced
+  the writer rule of its decision 1, "sequential filling plus tail slack"; its decision 2 RAM peak
+  target and decision 5 admission hold literally only with this ADR) /
+  [0071](0071-manifest-v3-shards.md) (this ADR withdrew "1 GiB or less is a single file"; the
+  `shards` schema was unchanged) / [0063](0063-safetensors-physical-layout.md) (physical layout of
+  one shard, unchanged) / [0041](0041-manifest-v2.md) (repository layout, unchanged).
+- Today the distribution is the `krm` container (ADR 0108, `docs/container-v1.md`). Only the
+  migration CLI reads old shard lists (`tools/exporter/src/karume/legacy.py`).
 
 ## Context
 
-ADR 0070 の 2026-08-29 追記で入れた分割規則は「書き出し順の逐次詰め + 尾部スラック」で、
-**先頭のグラフ shard にも実重みをデータ節 1GiB まで詰める**形だった。結果、
+The split rule of the ADR 0070 addendum of 2026-08-29 filled shards sequentially in write order with
+tail slack, so **the leading graph shard also carried real weights up to a 1 GiB data section**:
 
-- **グラフを読むには重みを読み切るしかない**。anima Base f16 の 4 コンポーネントでは
-  グラフ shard の合計が 2,460.9MiB で、`fromPretrained` 直後の常駐がそのまま 2,461.6MiB に
-  なっていた（ADR 0070 の 2026-08-30 追記 = レビュー M1-2 の実測）。
-- models 側の是正（`PreparedModel` を握らない）で常駐は 0.7MiB まで落ちたが、代償として
-  **Session 構築のたびにグラフ shard 2.46GiB を読み直して再 parse** する形が残った
-  （512²・2 step の `generate` が 6.0s → 7.8〜12.6s）。
-- ADR 0070 決定 5 の admission は「グラフだけ先に取って判断する」前提だが、グラフ 1 本の
-  取得が数 GB の DL と RAM を意味する以上、前提が文字どおりには成立していなかった。
+- Reading the graph meant reading those weights. The graph shards of the four anima Base f16
+  components totalled 2,460.9 MiB, and the resident size right after `fromPretrained` was
+  2,461.6 MiB (ADR 0070 addendum of 2026-08-30).
+- Not holding `PreparedModel` in models cut that to 0.7 MiB, but every Session construction then
+  re-read and re-parsed the 2.46 GiB of graph shards (512², 2-step `generate`: 6.0 s → 7.8–12.6 s).
+- ADR 0070 decision 5 admission assumed "fetch only the graph first, then decide", which did not
+  hold while one graph meant a multi-GB download.
 
-尾部スラック（未閉 ≤1.5GiB は詰め切る）も同じ根から来ている: 「既存資産の再 dist をバイト単位で
-不変に保つ」ために単一ファイル配布形を残したかった、というのが当時の主動機で、そのために
-上限が 2 本（1GiB / 1.5GiB）に増えていた。再アップロードを 1 度呑めば、この制約は消える。
+The tail slack (an unclosed remainder up to 1.5 GiB is packed in) came from keeping re-dist output
+byte-identical with single-file distributions, which created a second limit. One re-upload removes
+that constraint.
 
 ## Decision
 
-規則を **読み手契約（フォーマット）** と **書き手ポリシー（本数と cut 位置）** の 2 層に分ける。
-前者は配布形の不変条件で、`karume verify` / `karume dist` が門にする。後者は
-`karume.shards` の裁量で、変えても既存の配布形は読めるままである。
+The rules split into a **reader contract** (format invariants, checked by `karume verify` /
+`karume dist`) and a **writer policy** (shard count and cut points, at the writer's discretion;
+changing it keeps existing distributions readable).
 
-### 1. 読み手契約: shard 0 はグラフ専用（データ節 0 テンソル）
+### 1. Reader contract: shard 0 is graph-only (zero tensors in the data section)
 
-先頭 shard は `__metadata__.karume_ir` **だけ**を持ち、データ節は空（8 バイトのヘッダ長 +
-ヘッダ JSON で終わる）。器は safetensors のまま。
+(Superseded by ADR 0108 on 2026-09-24: the graph lives in the part 0 descriptor.)
 
-これで「グラフ 1 本の取得 = 数 MB」になり、admission（ADR 0070 決定 5）と RAM ピーク目標
-（同決定 2 の O(最大重み shard)）が経路として文字どおり成立する。
+The first shard holds **only** `__metadata__.karume_ir`; its data section is empty (the 8-byte header
+length plus the header JSON). The container stays safetensors. Fetching the graph then costs a few
+MB, so admission (ADR 0070 decision 5) and the RAM peak target (decision 2, O(largest weight shard))
+hold literally.
 
-### 2. 読み手契約: 上限は `SHARD_BYTE_LIMIT`（1GiB）1 本だけ
+### 2. Reader contract: one limit, `SHARD_BYTE_LIMIT` (1 GiB)
 
-> 置換（ADR [0090](0090-shard-spec-v3-tensor-pieces.md)）: 値は 256MiB、測る量はデータ節ではなく
-> ファイル長へ。「1 本だけ」は据え置き。
+(Superseded by ADR 0090 on 2026-09-02: 256 MiB, measured on the file length; then by ADR 0108 on
+2026-09-22: part lengths chosen by the writer and independent limits, decisions 6 and 9.)
 
-全 shard のデータ節が 1GiB 以下。席（先頭 / 末尾）による例外は無く、`SHARD_TAIL_LIMIT`
-（1.5GiB の尾部スラック）は**廃止**する。
+Every shard's data section is at most 1 GiB, with no exception by position; `SHARD_TAIL_LIMIT`
+(1.5 GiB tail slack) is **abolished**. "A weight + scale pair over 1 GiB cannot be distributed"
+**follows** from this one limit and is not a separate constant: two limits make the rule decide
+which limit applies, which is exactly what this correction cleaned up.
 
-「単体で 1GiB を超える weight + scale の対は配布できない」は、この 1 本から**派生する**
-（1 shard に入らないので割り付け不能）。独立した定数にはしない — 上限が 2 つあると
-「どちらの上限で判定するか」を規則の側が持つことになり、今回の是正はまさにその形の後始末である。
+### 3. Reader contract: always split (no fat graph shard, no single-file distribution)
 
-### 3. 読み手契約: 常時分割（fat グラフ shard と単一ファイル配布形の廃止）
+(Superseded by ADR 0108 on 2026-09-24: split and single forms share one byte order and differ only
+in where the cuts are, 0108 decisions 2 and 3.)
 
-テンソルを 1 本でも持つコンポーネントは「グラフ shard + weight shard 1 本以上」= 2 ファイル
-以上になる。**単一ファイル配布形は受理保証を持たない**（TS ランタイム側は無改変なので偶然
-読めるが、それは仕様ではない）。強制は**書き手（`emit.write_model`）と verify（Python）**が持ち、
-`assert_empty_graph_shard` が読み返しで落とす。
+A component with at least one tensor has a graph shard plus one or more weight shards. **A single-file
+distribution carried no acceptance guarantee.** The writer and the Python verify enforced it (the
+old writer and its read-back check were removed with 0108 step 3d). Kept: declaration order,
+co-shard atomicity of a weight and its scale, no duplicates across shards, `karume_ir` only in
+shard 0, at most 1024 shards (ADR 0070 decision 1 / ADR 0071 decision 2).
 
-据え置き: 宣言順を変えない・weight と companion scale の co-shard 原子性・shard 跨ぎの重複
-禁止・`karume_ir` は shard 0 のみ・本数 ≤1024（ADR 0070 決定 1 / ADR 0071 決定 2）。
+### 4. Writer policy: minimal count, then balanced
 
-### 4. 書き手ポリシー: 最小本数 → その本数で均す
+(Superseded by ADR 0108 on 2026-09-24: the container writer fills parts of a fixed length in
+order, opening a new part when a group does not fit — `docs/container-v1.md` §4.2,
+`_plan_data_parts` in `tools/exporter/src/karume/container.py`.)
 
-- 本数 k = **上限 1GiB の下での最小連続分割数**。貪欲（入るだけ詰めて切る）が連続分割の
-  最小本数そのものなので、それを数えるだけ（`_suffix_shard_counts`）。
-- k を固定して**均す**: 各 shard の目標 = 残量 ÷ 残 shard 数。単位（weight + scale の対）は
-  跨がず、**suffix 実行可能性ガード**（「ここで cut を打っても残りの単位が残りの shard へ
-  上限内で収まる」位置でだけ切る）を掛けるので、均しても最後の 1 本が上限を破らない。
-- 決定的（同入力 → 同分割 → 同バイト）。尾部スラックが消えても端数 shard が出ないのは、
-  スラックではなく均しがその役を引き受けるからである（3.2GiB は `[1, 1, 1.2]` ではなく
-  `[0.8, 0.8, 0.8, 0.8]`）。
+- Count k = **the minimal number of contiguous splits under 1 GiB** (greedy filling gives it).
+- With k fixed, **balance**: each shard targets remaining bytes ÷ remaining shards; units (weight +
+  scale pairs) are not split, and a **suffix-feasibility guard** cuts only where the remaining units
+  still fit the remaining shards. Deterministic (same input → same split → same bytes); 3.2 GiB
+  becomes `[0.8, 0.8, 0.8, 0.8]`, not `[1, 1, 1.2]`.
 
-NOTE（正直な限界）: 連続順序と対の原子性の下では、k が `ceil(総量 / 上限)` を上回る並びが
-理論上ある。0.6GiB の対が 3 つ並ぶと総量 1.8GiB でも 3 本になる（隣接する 2 つで 1.2GiB >
-1GiB なので、どの 2 つも同居できない）。並べ替えれば減らせる場合があるが、宣言順を動かすのは
-読み手契約 3 の側の変更なので買わない。
+NOTE: under contiguous order and pair atomicity, k can exceed `ceil(total / limit)` (three 0.6 GiB
+pairs need three shards). Reordering would change the reader contract, so it was not done.
 
-### 5. 扉: cut 位置の選好は将来の書き手ポリシー拡張
+### 5. Door: cut-point preferences are a future writer-policy extension
 
-「層の境目で切る」「MoE のエキスパート単位で切る」といった cut 位置の選好は、**読み手契約を
-1 文字も変えずに**足せる（本数と位置は書き手の裁量で、読み手は列を順に受けるだけ）。今回は
-実装しない — 実需（部分ロード・層単位の遅延取得）が出てからで遅くない。
+Preferences such as "cut at layer boundaries" or "cut per MoE expert" can be added without changing
+the reader contract; not implemented until partial or per-layer loading needs them.
 
-**検討事項（2026-08-30 ユーザー・次に manifest 構造を大きく変える機会があれば）**:
-グラフを shard 連番から**完全に分離**する（manifest が直接参照する独立資産にする）案。動機 =
-dist の共有畳み込みで「グラフ shard は `shared/`・重み shard はモデル別」に割れる現行の配置が
-奇妙に映る（グラフと内容の在処が離れる）。今回は karume/4 のまま無改変を優先して shard 連番の
-1 本目に置いたが（旧クライアント互換 — Context 参照）、format バンプを伴う変更が別件で立った
-ときは同乗を再検討する。
+The open consideration of 2026-08-30 (separate the graph from the shard sequence as an independent
+asset at the next format change) was taken up by ADR 0108 (superseded by ADR 0108 on 2026-09-22:
+the graph container `krg` and the part 0 descriptor, decisions 1 and 4).
 
 ## Consequences
 
-- **全配布資産の再 dist + HF 再アップロード + pin 更新 + 越境参照の焼き直しが要る**（次波）。
-  旧規則で焼いた手元のミラーは `karume verify` が赤くなるのが**仕様どおり**の状態になる
-  （グラフ shard 空の門）。
-- ファイル数が増える。1GiB 以下の資産も 2 ファイル（グラフ数百 B〜数 MB + 重み 1 本）になり、
-  1.11GiB の text_encoder は 3 ファイルになる。HF の断片化（known-issues の hf_xet 退行）は
-  ファイル数に対して悪化しうるので、再アップロード波では runbook §2 の対策を併用する。
-- ランタイム / hub / manifest スキーマ / `karume.json` の形は**無改変**。変わるのは資産の
-  ファイル名・本数・バイト列だけで、`shards` 列の宣言はそのまま順序付きの FileRef 列である。
-- 「既存資産の再 dist はバイト単位で不変」という ADR 0070 追記の受入条件は**放棄**する
-  （代わりに得るのが決定 1）。分割の有無で経路が分岐しなくなったぶん、書き手・verify・dist の
-  規則は 1 本道になった（単一ファイル分岐が消えた）。
-- 均しにより各 shard が小さくなる（3.2GiB なら最大 1GiB → 0.8GiB）。取得層の同時 RAM 予算
-  1.5GiB に対する余裕はそのぶん増える。
+- Every distribution needed re-dist, HF re-upload, pin updates and rebuilt cross-references; local
+  mirrors written under the old rule failed `karume verify` by design.
+- More files: an asset under 1 GiB became two files, the 1.11 GiB text encoder three (the re-upload
+  used the fragmentation countermeasures of `docs/release-runbook.md`).
+- Runtime, hub, manifest schema and `karume.json` were unchanged; only file names, counts and bytes
+  changed.
+- The ADR 0070 acceptance condition "re-dist is byte-identical" was abandoned in exchange for
+  decision 1; the writer, verify and dist lost the single-file branch.
 
-## 追記 2026-09-02 — 書き手の目標 256MiB（受理上限 1GiB とは別の値）
+## Addendum (2026-09-02) — writer target 256 MiB
 
-> **置換（2026-09-02・ADR [0090](0090-shard-spec-v3-tensor-pieces.md)）**: 本追記の「目標 256MiB /
-> 実効目標 = max(目標, 最大単位)」と決定 2 の上限 1GiB は、テンソル分割（piece）の導入で「受理上限
-> 256MiB 1 本・ファイル長で測る」へ置き換わった。以下は経緯の記録。
+A writer target `SHARD_TARGET_BYTES` = 256 MiB (effective target = max(target, largest unit)) was
+added below the 1 GiB limit to cut the host RAM peak (ruling of 2026-09-02); ADR 0090 replaced it the
+same day. Details: [research/2026-09-02-shard-size-ram-peak.md](../research/2026-09-02-shard-size-ram-peak.md).
 
-メモリ管理波 Phase B / C-1（[research/2026-09-02-shard-size-ram-peak.md](../research/2026-09-02-shard-size-ram-peak.md)・
-ADR [0070](0070-shard-loading-admission.md) 追記 2026-09-02）で、ロード時のホスト RAM ピークは
-「定数 + 最大 shard 1 本」になった。shard サイズがそのままピークの上乗せ分なので、決定 4 の
-書き手ポリシーに**詰める目標**を足す。
+## Addendum (2026-09-22) — decisions 1 and 3 overridden by ADR 0108
 
-- **受理上限（決定 2）は 1GiB のまま**: 読み手（hub `MAX_SHARD_BYTES` / exporter verify）が見る値は
-  この 1 本だけで、変えない。「上限は 1 本」の趣旨（読み手がどの上限で判定するかを規則に持たせない）
-  は保たれる — 目標は書き手ポリシーの値で、読み手契約ではない。
-- **目標 `SHARD_TARGET_BYTES` = 256MiB**（`karume.shards`）。実効目標 = max(目標, 最大単位)。目標より
-  大きい単位（割れないテンソル / weight + scale の対）を持つコンポーネントは、その単位に合わせて
-  一様に詰める。HF transformers / gguf-split の慣行「上限超えの単独ファイルを許す」ではなく実効目標へ
-  揃えるのは、全 shard が実効目標以下という一様性を保ち、規則に特例の分岐を足さないため。
-  今の実資産で持ち上がるのは 3 コンポーネント（gemma4 model 384MiB・irodori backbone 300MiB・
-  anima text_encoder 297MiB）。
-- gemma4 PLE sidecar の分割（`plan_ple_shards`）も既定で目標を使う（遅延ロードで触った shard だけを
-  ホストへ読むので、目標がそのまま 1 回の読みの上限）。
-- 裁定（ユーザー・2026-09-02）: 512 / 256 のうち 256MiB。代償はファイル数とリクエスト数
-  （anima transformer f16 5 → 16 本・text_encoder 3 → 6 本）で、hub の 4 並列取得と読み手上限 1024 本の内側。
-- 将来: テンソル分割（Phase C-2）が入れば「実効目標」の式は常に目標へ潰れて不要になり、受理上限も
-  目標へ揃えて定数 1 本へ戻せる。manifest に分割単位は書かない — shard ごとの `size` から導ける。
-
-## 追記（2026-09-22）— 決定 1 / 3 は ADR 0108（proposed）が上書きする
-
-決定 1（shard 0 はグラフ専用ファイル）と決定 3（常時分割）は、ADR
-[0108](0108-container-format.md) が上書きする。0108 ではグラフは part 0 の descriptor が持ち、
-分割形と単一形はバイト列の並びが同じで「切れ目があるか否か」だけが違う（0108 決定 2 / 3）。
-0108 は **proposed** で実装は未着手なので、**実装が入るまでは現行のまま**であり、本文は
-書き換えていない。
-
-**2026-09-24**: ADR 0108 は accepted となり、段 3d（`9e905d9f`）で旧読み手（runtime の shard 進行検証・
-hub の逐次面 `streamAssets`）が消えたので、上の上書きは発効した。グラフは part 0 の descriptor が持ち、
-manifest の `shards` 欄も ADR [0109](0109-manifest-v5-container.md) で退役した。旧 shard 列を読むのは
-移行 CLI の旧形読み取り（`tools/exporter/src/karume/legacy.py`）だけである。
+ADR 0108 took effect on 2026-09-24, when step 3d (`9e905d9f`) removed the old readers; the manifest
+`shards` field was retired by ADR [0109](0109-manifest-v5-container.md).

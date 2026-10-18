@@ -1,359 +1,320 @@
-# 0069: packed 4bit 格納（ADR 0019 の w4 棄却を reopen）
+# 0069: Packed 4-bit storage (reopening ADR 0019's rejection of w4)
 
-- Status: accepted（2026-08-17 — ユーザー裁定 B〈zero-point 欄なし・予約つき〉/
-  C〈scale f32 開始・f16 両対応を将来目標〉+ 委任チェック方式。Codex レビュー第 3〜5 巡を
-  反映〈3 面分離・group scale 形・clamp tiny・f16 admission〉し第 6 巡で go）
-- 関連: ADR [0019](0019-i8-weight-execution.md)（i8 経路 — 本 ADR が「w4 再測しない」を
-  supersede し、実装規律は延長する）/ [0006](0006-quantization.md)（格納のみ量子化・
-  fake-quant 正）/ [0063](0063-safetensors-physical-layout.md)（物理配置 — 本 ADR とセットで
-  改訂）/ [0058](0058-numerics-opt-in-contract.md)（品質管理の分担）/
-  [0066](0066-generation-context-state-slots.md)（検収モデル = LLM への波）
-- 根拠:
+- Status: accepted (2026-08-17 — maintainer rulings B (no zero-point field, with a reservation) and
+  C (f32 scale first, f16 as a later goal) plus a delegated check; Codex review rounds 3 to 5 folded
+  in, go at round 6); partly superseded by [0108](0108-container-format.md) decisions 10–13
+  (2026-09-22: the declaration of the storage — dtype label, safetensors reader, zero-point field
+  name — moved to the container's codec ledger; addendum 11) and by
+  [0082](0082-linear-gemv-decode.md) (2026-08-31: the GEMV family unpacks in registers, not at tile
+  load); decision 5's linear-only start was widened by addenda 6 and 7 (2026-08-20); decision 6's
+  Phase 0 gate was withdrawn on 2026-10-18. The semantics (15 levels, offset 8, pack order, group
+  size, group scale shape, f16-scale admission) stay canonical here.
+- Date: 2026-08-17
+- Related: ADR [0019](0019-i8-weight-execution.md) (i8 path — this ADR supersedes its "do not
+  measure w4 again" and extends its implementation discipline) / [0006](0006-quantization.md)
+  (storage-only quantization, fake-quant is the reference) / [0063](0063-safetensors-physical-layout.md)
+  (physical layout, revised together with this ADR) / [0058](0058-numerics-opt-in-contract.md)
+  (division of quality control) / [0066](0066-generation-context-state-slots.md) (the LLM work this
+  serves)
+- Evidence:
   [research/2026-08-17-autoregressive-references.md](../research/2026-08-17-autoregressive-references.md)
-  §4（以下「調査 §n」）
+  §4 ("survey §n" below)
 
 ## Context
 
-検収モデル級（1〜2B param）を配布・常駐するには f16 でも 2〜4GiB 級で、4bit 格納が実用条件
-になる。一方 ADR 0019 は「per-tensor / w4 group 量子化: 不採用確定。再測しない」と書くが、
-この射程は過大（調査 §4.3）: 旧測定は **SBV2 voice 1 ファミリ・1 時点の int4 group 実測**
-（2026-08-03）であり、親 ADR 0006 は group-wise を「低優先 backlog」としか書いていない。
-棄却根拠の一つ「発話長の系統的短縮」は**採用済みの w8 でも観測されており**（ADR 0029:53）
-w4 固有の基準として機能しない。WebGPU 上の 4bit は ORT MatMulNBits / MLC q4f16_1 /
-llama.cpp WebGPU が実運用している（調査 §4.1）。
+Distributing and keeping resident an acceptance-class model (1–2B parameters) costs 2–4 GiB even in
+f16, so 4-bit storage is a practical requirement. ADR 0019 said "per-tensor / w4 group quantization:
+rejected, do not measure again", but that scope was too wide (survey §4.3): the old measurement was
+**one int4 group measurement of one SBV2 voice family at one point in time** (2026-08-03), and the
+parent ADR 0006 only listed group-wise quantization as a low-priority backlog item. One reason for
+the rejection, "systematically shorter utterances", **also appears with the adopted w8** (ADR 0029),
+so it is no w4-specific criterion. 4-bit on WebGPU is in production in ORT MatMulNBits, MLC q4f16_1
+and llama.cpp WebGPU (survey §4.1).
 
 ## Decision
 
-### 1. ADR 0019 の supersede 範囲（reopen の正確な形）
+### 1. What of ADR 0019 is superseded (the exact reopening)
 
-- 「**再測しない**」を撤回する。旧測定の適用範囲を「SBV2 voice の音声 SNR / 発話長・
-  per-tensor RTN および int4 group の 1 時点実測」に限定し、**テキスト生成（検収モデル）へ
-  一般化しない**。数値の帰属も訂正する: −1.5〜+5.1dB は int4 group の実測（0019:17 が正・
-  素朴 RTN へ帰属させた 0006:45 の側が不正確 — 調査 §7 wt LB-6 の検証済み補正）。
-- 0019 のその他（i8 経路・±127 対称・平坦添字・タイル読み込み時 dequant・fake-quant 規律）
-  は**本 ADR の土台としてそのまま有効**。
-- 派生同期（実装波で）: 当時の `docs/ir-v1.md`（現 [docs/ir-v2.md](../ir-v2.md) の前身・`2960ce37^` の版）「group_size は実行経路が無い」・limitations の w4 項・
-  container の groupSize 拒否。
+- "Do not measure again" is withdrawn. The old measurement applies only to "SBV2 voice audio SNR /
+  utterance length, per-tensor RTN and one int4 group measurement" and **is not generalised to text
+  generation**. The attribution is corrected too: −1.5 to +5.1 dB is the int4 group measurement (ADR
+  0019 is right; ADR 0006, which attributed it to naive RTN, is not — survey §7 LB-6).
+- The rest of ADR 0019 (i8 path, ±127 symmetric, flat indexing, dequantization at tile load,
+  fake-quant discipline) **stays valid as the base of this ADR**.
+- The derived documents (the IR spec's "group_size has no execution path", the w4 entry in
+  limitations, the container's groupSize rejection) were updated in the implementation wave.
 
-### 2. 格納の表現 = bit 幅一般化（shape は論理のまま — 裁定 3a）
+### 2. Representation: generalised bit width (shape stays logical)
 
-新しい格納 dtype **`storage.dtype: "i4"`** を追加する。**テンソル shape（IR `values{}` /
-safetensors ヘッダ）は論理形のまま**で、バイト数だけ bit 幅から導出する
-（GGUF / safetensors 本家と同配置 — 調査 §4.2。ORT 型の「物理 shape + 論理 attrs」は
-消費側 op 契約〈linear の `W[out,in]` 等〉が総崩れになるため採らない）。
+A storage dtype `i4` is added. **The tensor shape stays logical**; only the byte count is derived
+from the bit width (the same layout as GGUF / safetensors upstream — survey §4.2). The ORT form
+"physical shape + logical attributes" is not adopted: it would break every consuming op contract
+(linear `W[out,in]` and others).
 
-- safetensors リーダの改訂は **3 面を分離**する（第 3 巡で精密化 — `DTYPE_BYTES` の
-  単純置換では済まない。現行表は「バイト長の計算」と「絶対 offset の整列検査」の両方に
-  使われている）: ①**サイズ表（bit 単位）** — 検証は `numel × bits / 8` の厳密一致
-  ②**整列表（byte 単位）** — I4 は要素整列の概念を持たず「テンソル先頭が 4 byte 整列」を
-  要求（u32 束縛のため。F32/I32 = 4・F16 = 2 は従来どおり）③**view の型** — I4 に対応する
-  TypedArray は存在しないため、view は **raw バイト（`Uint8Array`）+ 論理 numel の
-  メタデータ**で表す（`STORAGE_ENCODING` の突合・container 検査・適格外の CPU nibble
-  展開器も同時に改訂対象として列挙する）。
-- **端数を作らない制約で整列問題を消す**: `i4` は量子化軸（最終次元 = linear の in 軸）の
-  要素数が `group_size` で割り切れることを MUST とし、`group_size` は
-  **2 冪かつ ≥ 16**（ORT と同制約 — 調査 §4.1。single-scale 例外は作らない）。これで
-  行境界・group 境界が常にバイト整列し、テンソル総バイト数は 4 の倍数（u32 束縛の
-  自然整列 — 末尾ゼロ詰め不要）。
-- ADR 0063 改訂（セット）: 書き出し順は I8 の後ろ末尾に I4 を足す・リーダ / ライタ /
-  `assert_reader_layout` を対で改訂。
+- **(superseded by ADR 0108 decisions 10–13 on 2026-09-22: the declaration `storage.dtype: "i4"` /
+  `storage.group_size`, the three revised surfaces of the safetensors reader (bit-based size table,
+  byte-based alignment table, raw `Uint8Array` view plus logical element count) and the ADR 0063
+  write order moved to the container's `encoding` binding (codec `int4-sym-g`, `groupSize`,
+  `scale`) and the codec ledger `CODEC_LEDGER` in `packages/runtime/src/format/container/codecs.ts`;
+  see [docs/container-v1.md](../container-v1.md) §6 and addendum 11.)**
+- **No remainders, so no alignment problem:** `i4` MUST have the element count of the quantized axis
+  divisible by `group_size`, and `group_size` is **a power of two and ≥ 16** (the same constraint as
+  ORT — survey §4.1; no single-scale exception). Row and group boundaries are then always
+  byte-aligned and the total byte count is a multiple of 4 (natural u32 alignment, no tail padding).
 
-### 3. 量子化形 = K 方向 group・対称 15 準位・scale f32（裁定 B / C 反映済み）
+### 3. Quantization: groups along K, symmetric, 15 levels, f32 scale
 
-- **group 対称量子化**: `scale = clamp(amax / 7, f32 tiny)`（group ごと — clamp は全ゼロ
-  group の 0 除算を閉じる。ADR 0019 の `clamp(amax/127, f32 tiny)` と同文・第 3 巡で
-  脱落を補正）・`q = clamp(round(w/scale), −7, +7)` を **offset 8 の unsigned nibble** で
-  格納（値域 [1,15]・0 は未使用 = 15 準位）。amax 要素が厳密復元され fake-quant が冪等 —
-  ADR 0019 の ±127 論証の 4bit 版（MLC q4f16_1 と同思想・調査 §4.1）。
-- **scale の形を明文化**（第 3 巡の矛盾指摘の閉鎖 — ADR 0019 の「同 rank keepdim
-  broadcast」は per-channel 専用で group には不適合）: scale の論理 shape は**重みと同 rank・
-  量子化軸を group 数に置換**した形（linear `W[O,I]` → scale `[O, I/group_size]`）。
-  container の scale 検査（現行 = keepdim broadcast 形）と WGSL の scale 束縛（現行 =
-  出力チャネルあたり 1 値の `wscale[channel]` — weight-storage.ts:140-150）は **group 版の
-  別分岐**として拡張する（添字 = `(row, k / group_size)`・タイル読み込み時に group 境界で
-  引き直す）。CPU 展開経路も同じ添字式でビット一致を保つ。
-- **zero-point 欄は作らない**（裁定済み 2026-08-17 — 対称のみで開始）。**後日追加で
-  困らないための予約 3 点**: ①欄名と形をここで予告する — 追加時は `storage.zero_point`
-  （scale と同形の companion `[O, I/group_size]`）で、既存資産・既存検査に影響しない
-  **追加欄**になる ②dequant 式は `(u − 8) · scale` を「zero_point 省略時の既定 = 8」と
-  読める形で規定する（ORT と同じ規約 — 非対称化は定数 8 を zero_point 読みへ差し替える
-  だけで、pack 形式・pack 順・15 準位の値域は不変）③Phase 0 sweep（決定 6）に非対称の
-  測定列を含め、対称の品質不足を**実装前に**検知する。
-- **scale は f32 companion で開始・f16 受理を将来目標**（裁定済み 2026-08-17 — 最終的に
-  両対応）。開始形は既存 `storage.scale` + `storage.group_size` の解禁で、ADR 0019 と
-  同じく GPU dequant と CPU 展開のビット一致を保つ。**f16 scale の追加はビット一致体制を
-  捨てずにできる**: f16 → f32 変換は厳密（拡張は無損失）なので、「f16 へ丸めた scale を
-  CPU / GPU の両方が同じ f32 値として使う」形で検証規律がそのまま成立する（丸めは emit の
-  1 回だけ・読みは厳密 — スコア格納 s16 と同じ手筋）。追加時は scale companion の dtype
-  受理を F32 | F16 へ広げ、emit 側は fake-quant が f16 丸め済み scale で参照採取する。
-  **f16 受理時の追加条件（第 4 巡）**: f32 → f16 の**丸めは**厳密でない — `f32 tiny` は
-  f16 で 0 に、大きい scale は inf になり得る。emit 側 admission で「f16 丸め後の scale が
-  **有限かつ非ゼロ**」を全 group で検査し（既存 f16 emit の inf 拒否と同族）、全ゼロ group
-  の clamp 下限は **f16 の最小正規値**へ置き換える。
-  f16 scale（MLC・GGUF の選択）とのサイズ差はサイズ試算表参照 — 帯域が問題になったら
-  group_size を上げる側でも調整できる（bit 幅あたりのオーバヘッド: group 32 で
-  f32 = +25% / f16 = +12.5%、group 128 で f32 = +6.25%）。既定 group_size は
-  Phase 0 sweep（決定 6）で決める。
+- **Symmetric group quantization:** `scale = clamp(amax / 7, f32 tiny)` per group (the clamp closes
+  division by zero on all-zero groups; same wording as ADR 0019's `clamp(amax/127, f32 tiny)`);
+  `q = clamp(round(w/scale), −7, +7)` stored as an **unsigned nibble with offset 8** (range [1,15],
+  0 unused = 15 levels). Fake-quant is idempotent — the 4-bit version of ADR 0019's ±127 argument
+  (same idea as MLC q4f16_1 — survey §4.1; addendum 3 refines which half holds exactly).
+- **Scale shape:** the scale has **the weight's rank with the quantized axis replaced by the group
+  count** (linear `W[O,I]` → scale `[O, I/group_size]`; ADR 0019's same-rank keepdim broadcast is
+  per-channel only). The container's scale check and the WGSL scale binding have a separate group
+  branch (index `(row, k / group_size)`); the CPU expansion uses the same index formula, so the two
+  stay bit-identical. Addendum 7 generalised the shape to any rank.
+- **No zero-point field** (ruled 2026-08-17 — symmetric only). Reservations so it can be added
+  later: ① the field is a companion of the scale's shape `[O, I/group_size]` and an added field,
+  not affecting existing assets or checks — **(superseded by ADR 0108 on 2026-09-22: the field name
+  is `encoding.zeroPoint`, not `storage.zero_point`; it is enabled by changing the ledger's
+  `zeroPoint: "forbidden"` to `"allowed"` — addendum 11)**; ② the dequantization formula
+  `(u − 8) · scale` reads as "zero_point defaults to 8 when omitted" (the ORT convention; going
+  asymmetric only replaces the constant 8 with a zero-point read — pack format, pack order and the
+  15-level range stay).
+- **The scale starts as an f32 companion; accepting f16 is a later goal** (ruled 2026-08-17 —
+  eventually both; the code accepts f32 only today, `SCALE_DTYPES` in `codecs.ts`). An f16 scale
+  keeps bit identity: f16 → f32 is exact, so CPU and GPU use the same f32 value of a scale rounded
+  to f16 once at emit. When f16 is accepted, the scale companion's dtype accepts F32 | F16 and emit
+  takes the fake-quant reference with the f16-rounded scale. **Extra condition for f16:** f32 → f16
+  rounding is not exact — `f32 tiny` becomes 0 and a large scale can become inf. Emit admission
+  checks that every rounded scale is **finite and non-zero** (same family as the existing f16 emit's
+  inf rejection), and the clamp floor for all-zero groups becomes **the smallest f16 normal**. The
+  size cost of an f32 scale can also be tuned by group size (overhead per bit width: group 32 —
+  f32 +25% / f16 +12.5%; group 128 — f32 +6.25%).
 
-### 4. pack 順の明文固定 + 検出器
+### 4. Pack order fixed in writing, with detectors
 
-**「1 バイトに要素 2i（下位 nibble）/ 2i+1（上位 nibble）」**（ORT 型 — `unpack4xU8` 2 発の
-展開順と対）。llama.cpp Q4_0 の split-half 順（byte j の下位 = 要素 j / 上位 = 要素 j+16）は
-採らない — pack 順は上流でも割れている自由パラメータで、**間違えても形も型も合う沈黙誤値**
-になる（調査 §4.1）。検出器 MUST: ①隣接要素が全て異なる非対称パターンのユニット
-②group 長・行長が語境界と一致しない形（平坦添字の罠 — 0019 の同型検出器の 4bit 版）
-③エクスポータ emit 直後の逆変換ビット一致門（`dequant(pack(w)) == fake_quant(w)`）。
+**"Element 2i in the low nibble, element 2i+1 in the high nibble of one byte"** (ORT style — pairs
+with the unpack order of two `unpack4xU8` calls). llama.cpp Q4_0's split-half order (byte j holds
+element j low and element j+16 high) is not adopted. Pack order is a free parameter on which
+upstreams disagree, and a mistake is **a silent wrong value with matching shape and type** (survey
+§4.1). Detectors MUST exist: ① a unit with an asymmetric pattern where all neighbours differ; ②
+shapes whose group and row lengths do not align with word boundaries (the flat-indexing trap — the
+4-bit version of ADR 0019's detector); ③ a round-trip bit-identity check right after exporter emit
+(`dequant(pack(w)) == fake_quant(w)`).
 
-### 5. 実行経路 = linear 限定で開始・タイル読み込み時 1 回展開
+### 5. Execution path
 
-- 適格は **linear の重みスロットのみ**で開始する（LLM の支配項。0019 の全 5 op 展開は
-  需要が出た op から追補 — embedding の w4 は語彙 262k 級で効果が大きいので最初の追補候補）。
-  適格外の i4 宣言はロード時 CPU 展開（f32・GPU とビット一致 — 0019 と同じ受け皿）。
-- WGSL は core builtin のみ（`unpack4xU8` + マスク / シフト — 調査 §4.1）・展開は
-  **共有メモリタイルへの読み込み時 1 回**（0019 流儀・ORT の内積内展開は採らない）・
-  語とレーンは平坦添字 MUST。
-- scale 適用は要素ごと（`q·s` — 0019 決定と同一。縮約外形への変更は 0019 と同じ改訂条件）。
+- Eligible ops: `linear`, `embedding` and `conv1d` with `groups == 1` (`I4_WEIGHT_OPS` in
+  `tools/exporter/src/karume/emit.py` and `packages/runtime/src/runtime/plan.ts`). **(superseded by
+  addenda 6 and 7 on 2026-08-20: the record started with linear weight slots only.)** An i4
+  declaration outside the eligible set is expanded on the CPU at load (f32, bit-identical to the
+  GPU — the same fallback as ADR 0019).
+- WGSL uses core builtins only (`unpack4xU8` + mask / shift — survey §4.1); words and lanes use flat
+  indexing (MUST). Unpacking happened once at shared-memory tile load (ADR 0019 style; ORT's
+  unpacking inside the dot product was not adopted) **(superseded by ADR 0082 on 2026-08-31: the
+  GEMV family drops shared memory and unpacks each weight word in registers inside the dot product;
+  the invariant kept is that GPU restoration and CPU expansion are bit-identical)**.
+- The scale is applied per element (`q·s` — as ADR 0019; moving it outside the reduction has ADR
+  0019's revision conditions — addendum 8).
 
-### 6. Phase 0 = Python fake-quant sweep が実装ゲート
+### 6. Phase 0 = Python fake-quant sweep as the implementation gate
 
-runtime を触らない **format 候補 sweep** を先行する: 検収モデル（MiniCPM5-1B 先行 —
-調査 §6.3）で group_size {32, 64, 128} × （必要なら）非対称の品質を fake-quant で比較し、
-既定 group_size と〔裁定 B〕の実測根拠を得る。品質管理は ADR 0058 決定 5 の分担
-（機械検証 = fake-quant 冪等・逆変換ビット一致 / 品質 = 人間レビュー + 助言的数値）。
+Withdrawn 2026-10-18: the gate was passed on 2026-08-18 (addendum 1). The division of quality
+control (machine checks = fake-quant idempotence and round-trip bit identity; quality = human review
+plus advisory numbers) is canonical in ADR 0058 decision 5.
 
-## サイズ試算（Gemma 4 E2B 級・weight 2B param 概算）
+## Size estimate (Gemma 4 E2B class, about 2B weight parameters)
 
-| 形                              | bpw  | 概算      |
-| ------------------------------- | ---- | --------- |
-| f16                             | 16   | ~4.0 GiB  |
-| i8 + per-channel f32 scale      | ~8.1 | ~2.0 GiB  |
-| i4 group 128 + f32 scale        | 4.25 | ~1.06 GiB |
-| i4 group 32 + f32 scale         | 5.0  | ~1.25 GiB |
-| （参考）i4 group 32 + f16 scale | 4.5  | ~1.13 GiB |
+| Form                                    | bpw  | Estimate  |
+| --------------------------------------- | ---- | --------- |
+| f16                                     | 16   | ~4.0 GiB  |
+| i8 + per-channel f32 scale              | ~8.1 | ~2.0 GiB  |
+| i4 group 128 + f32 scale                | 4.25 | ~1.06 GiB |
+| i4 group 32 + f32 scale                 | 5.0  | ~1.25 GiB |
+| (for reference) i4 group 32 + f16 scale | 4.5  | ~1.13 GiB |
 
 ## Consequences
 
-- ADR 0019 は supersede 注記（範囲限定）を受ける。0006 の帰属記述は訂正注記。
-- ADR 0063・ir-v1（storage dtype 語彙 + group_size 解禁）・container / safetensors
-  リーダ・exporter emit / verify が実装波で対で動く。
-- 受入条件: ①既存 f32/f16/i8 資産の読み書き・全 sha 門無風 ②逆変換ビット一致門
-  ③pack 順検出器（決定 4 の 3 点）④GPU dequant と CPU 展開のビット一致 ⑤診断
-  （`residentCompressedBytes` に i4 + scale が正しく載る）。
+- ADR 0019 carries a supersede note (limited scope); ADR 0006's attribution carries a correction.
+- Acceptance checks of the implementation: existing f32 / f16 / i8 assets read and write unchanged;
+  round-trip bit identity; the pack-order detectors of decision 4; GPU dequantization and CPU
+  expansion bit-identical; diagnostics (`residentCompressedBytes` includes i4 + scale).
 
-## 追記（2026-08-18・Phase 0 完了 — 既定 group_size と裁定 B の実測確定）
+## Addendum 1 (2026-08-18) — Phase 0 done: default group size and ruling B confirmed
 
-決定 6 の sweep を実施した（実測の正本 =
-[research/2026-08-18-w4-fake-quant-sweep.md](../research/2026-08-18-w4-fake-quant-sweep.md)・
-台本 = `tools/export-recipes/minicpm5/sweep_w4.py`）。確定 2 点（2026-08-18 ユーザー裁定）:
+The sweep of decision 6 ran (canonical numbers:
+[research/2026-08-18-w4-fake-quant-sweep.md](../research/2026-08-18-w4-fake-quant-sweep.md); script
+`tools/export-recipes/minicpm5/sweep_w4.py`). Two points confirmed (maintainer ruling 2026-08-18):
 
-1. **既定 group_size = 32（対称）**。weight 相対 RMSE は 32 < 64 < 128 で単調、自由走行
-   greedy の保持は g32 対称だけが相対的に持つ（23/48 — 他構成は 3〜8/48）。サイズ差は
-   g128 比 +18%（bpw 5.0・2B 級 ~1.25GiB）で常駐可能化の目的を損なわない。group_size は
-   格納欄であり、サイズ優先の資産が個別に 64 / 128 を選ぶことは妨げない（受理集合は
-   決定 2 のまま = 2 冪かつ ≥ 16）。
-2. **裁定 B（zero-point 欄なし）を実測で確認**: 連続 zero-point という上界測定でも
-   weight 空間の改善（−11〜−15%）がモデル級の品質に乗らず、同幅の改善は group を 1 段
-   細かくするだけで得られる。決定 3 の予約 3 点は変更なし（将来の追加条件のために残す）。
+1. **Default group size = 32 (symmetric).** Weight relative RMSE is monotone 32 < 64 < 128, and only
+   g32 symmetric keeps free-running greedy reasonably (23/48 — others 3–8/48). The size cost is +18%
+   over g128 (5.0 bpw, ~1.25 GiB at 2B), which does not defeat residency. `group_size` is a storage
+   field; an asset that favours size may pick 64 / 128 (accepted set as decision 2: power of two,
+   ≥ 16).
+2. **Ruling B (no zero-point field) confirmed:** even an upper-bound measurement with a continuous
+   zero point improves weight space (−11 to −15%) without improving model quality, and one finer
+   group step gives the same gain. The reservations of decision 3 stay for a future addition.
 
-付随所見: w4 RTN は 1B 級 checkpoint で品質が明確に落ちる（teacher-forced 一致 31〜37/48）。
-これは実装の検収方法論（fake-quant 済み重みとの一致 — ADR 0006）には影響しないが、w4 の
-採用は品質と引き換えの選択であることが数値で立った。AWQ / GPTQ 級の重み調整は未測定
-（実需が立てば別 ADR）。
+Side finding: w4 RTN clearly costs quality on a 1B checkpoint (teacher-forced agreement 31–37/48).
+This does not affect the acceptance method (agreement with fake-quantized weights — ADR 0006), but
+w4 is a trade of quality for size. AWQ / GPTQ-class weight adjustment was not measured (a separate
+ADR if needed).
 
-## 追記 2（2026-08-18・Phase 1 第 2 便 — 書き出し順の訂正）
+## Addendum 2 (2026-08-18) — write order corrected
 
-決定 2 の「書き出し順は I8 の後ろ末尾に I4 を足す」を**訂正する**。正しい並びは**整列単位の
-降順** = `F32 → I32 → I4 → 偶数要素 F16 → 奇数要素 F16 → I8`（ADR 0063 を同時改訂）。理由 3 点:
+Decision 2's "append I4 after I8" is **corrected**: the order is **descending alignment unit** =
+`F32 → I32 → I4 → even-length F16 → odd-length F16 → I8` (ADR 0063 revised at the same time).
+Reasons: the I8 section has arbitrary length, so I4 after it cannot meet the 4-byte start alignment,
+and the data section MUST be covered without gaps (ADR 0063); putting I4 earlier keeps later
+alignment (the element count is a multiple of 16, so the byte length is a multiple of 8); existing
+assets' bytes do not change. (The write order itself now belongs to the container — ADR 0108.)
 
-1. **I8 節は任意長**（要素サイズ 1 で整列制約が無い）なので、その後ろに置いた I4 は「テンソル
-   先頭が 4 バイト整列」（決定 2）を満たせない。データ節は隙間なく覆う MUST（ADR 0063）
-   なので、詰め物で整列を回復する逃げ道も無い。
-2. **I4 節を前置しても後続の整列は崩れない**: 量子化軸が 2 冪 ≥ 16 の `group_size` で
-   割り切れる（決定 2）⇒ 論理要素数は 16 の倍数 ⇒ バイト長は 8 の倍数。F16 の偶奇トリック
-   （奇数要素 F16 を末尾側へ寄せる）もそのまま成立する。
-3. **既存資産のバイト列は不変**: I4 を持つ配布形はまだ 1 つも無く、順序は他の dtype の相対
-   関係を変えない（f32 のみの資産が `save_file` と同一バイトになる性質も保つ）。
+## Addendum 3 (2026-08-18) — "amax restored exactly" refined (measured)
 
-決定 2 の他の項（bit 単位のサイズ表・整列表・view の型・端数を作らない制約）は変更なし。
+Of decision 3's claim, what always holds in f32 is **idempotence**. Exact restoration of amax,
+`fl(7·fl(amax/7)) == amax`, can be off by 1 ulp (about 9.5% of 200,000 random groups of 16 — the
+NOTE in `tools/exporter/tests/test_quantize.py`). Idempotence holds because the largest-magnitude
+element of each group always lands on `|q| = 7`, so the scale re-derived from the rounded weights,
+`fl(amax(|q·s|)/7) = s`, is a fixed point; ADR 0019's ±127 argument has the same structure (i8 NOTE
+in `tests/test_emit.py`). The checks (round-trip bit identity, idempotence) are unchanged.
 
-## 追記 3（2026-08-18・決定 3「amax 厳密復元」の精密化 — 実測）
+## Addendum 4 (2026-08-19) — acceptance on a real model and the mixed-storage API
 
-決定 3 の「amax 要素が厳密復元され fake-quant が冪等」のうち、f32 で常に成り立つのは
-**冪等の側**。amax の厳密復元 `fl(7·fl(amax/7)) == amax` は 1ulp ずれることがある
-（group 16 の乱数 20 万 group で約 9.5% — 実測の正本は `tools/exporter/tests/test_quantize.py`
-の NOTE）。冪等が保たれる機構は「各 group の最大絶対値要素が必ず `|q| = 7` に乗る ⇒
-丸め済み重みから引き直した scale `fl(amax(|q·s|)/7) = s` が不動点」で、ADR 0019 の
-±127 論証も同型（i8 側の実測 NOTE は `tests/test_emit.py`）。検証門の設計（逆変換ビット一致・
-冪等）は不変。
+Real-model w4 acceptance completed on Gemma 4 E2B (linear in i4 g32, embeddings in i8, the rest
+f32; greedy K = 16 on a real GPU exactly matched the torch golden). Three implementation decisions:
 
-## 追記 4（2026-08-19・波 H — 実モデル検収と混成格納の API 席）
+1. **Mixed-storage API:** `export_to_file` / `publish_model` take `weight_dtype_overrides` (tensor
+   key → storage dtype, taking precedence over `weight_dtype`), and `fake_quant_int8` / `int4` take
+   `include` (a predicate on module FQNs). Eligibility rules, scale shapes and checks of each dtype
+   stay as decided in this ADR and ADRs 0018 / 0019; only the assignment gained an expression. An
+   explicit override that cannot be met **fails loudly** (unknown key, ineligible slot, i4 on an op
+   outside the i4 set); the default keeps leaving ineligible weights in f32 silently (f32 is the more
+   faithful side, not an approximation). An explicit `"f32"` excludes a tensor from the compressed
+   default.
+2. **Tied lm_head assignment:** a tied tensor consumed by both the embedding and the linear weight
+   slot was i4-ineligible under decision 5 and i8-eligible; the fake-quant `include` **excludes it
+   from the i4 side and keeps it in i8** (passing it through both rounds it twice and the scale
+   ledger disagrees with the values). Storage is specified as "default i8 + linear explicitly i4".
+   Addendum 6 later made such a tensor i4-eligible.
+3. **RoPE position tables are not quantized:** with table lookup in decode, the cos / sin tables
+   enter the embedding weight slots (the i8-eligible set), so an explicit `"f32"` exclusion is
+   required. Rounding a position table, unlike rounding weights, **accumulates angle error along the
+   position**. The census pins "f32 embeddings = exactly the number of tables the series declares".
+   Gemma 4 dropped the tables from the distribution (ADR 0091, 2026-09-03); the series that still
+   bakes them (minicpm5 `export_decode`) has two tables, `cos_table` / `sin_table`.
 
-Gemma 4 E2B（`tools/export-recipes/gemma4/` — 1-shot + states 形 decode の 2 系列）で
-**実モデル w4 検収を完了**。linear 276 本 = i4 g32（1.88B 要素）・embedding 系 36 本
-（主 embedding〈tied lm_head〉+ PLE 35 分割表）= i8（2.75B 要素）・残り f32 の**混成格納**で、
-実 GPU の greedy K=16 が torch golden と厳密一致（門 = `e2e_gemma4_test.ts` /
-`e2e_gemma4_greedy_test.ts`。census が `:wi4g32` / `:wi8` の両変種と hostExpandedBytes 0 =
-適格落ちゼロを固定）。
+## Addendum 5 (2026-08-19) — measurement side: op opt-in and method screening
 
-実装確定 3 点:
+An extension of **fake-quant only**; the accepted storage set (decision 2) and emit eligibility do
+not change.
 
-1. **混成の API 席**: `export_to_file` / `write_model` に `weight_dtype_overrides`
-   （テンソルキー → 格納 dtype・既定 `weight_dtype` に優先）、`fake_quant_int8` / `int4` に
-   `include`（モジュール FQN 述語）。各 dtype の適格規則・scale 形・検証門は本 ADR と
-   0018/0019 の**既存決定のまま**（割り付けの表現だけが増えた）。明示指定は**満たせなければ
-   fail loudly**（未知キー・適格外・i4 × 非 linear）・既定側は従来の「適格外は静かに f32」
-   （I4-ELIG-01 挙動）を維持。`"f32"` の明示 = 圧縮既定からの除外。
-2. **tied lm_head の割り付け**: embedding と linear の両重みスロットで消費される tied 実体は
-   i4 不適格（決定 5）・i8 は両者適格。fake-quant の include で **i4 側から除外して i8 に
-   一本化**する（両方に通すと二重丸めで scale 台帳が実値と食い違う）。格納指定は「既定 i8 +
-   linear を i4 明示」の向き — i4 側のキーが fake-quant 台帳そのものになり、tied 実体に
-   export が付ける FQN を書く前に知らずに済む。
-3. **RoPE 位置表は量子化しない**: decode 系列の表引き化で cos/sin 表が embedding の
-   重みスロット（= i8 適格集合）に入るため、`"f32"` 明示除外が必須。位置表の丸めは重みの
-   丸めと違い**角度誤差が位置に沿って蓄積する**。読み手側は census の「f32 embedding = その系列が
-   宣言する表の本数ちょうど」で固定。（追記 2026-09-03: gemma4 は表を配布物から外した —
-   ADR 0091。本項が残るのは表を焼く系列〈minicpm5 の `export_decode`〉だけで、そこは
-   `cos_table` / `sin_table` の**表 2 本**である〈上流 `LlamaRotaryEmbedding` は層種別を持たない〉。
-   4 本は層種別 2 × cos/sin を持っていた gemma4 の数なので、写すと偽の期待値になる。）
+1. **`fake_quant_int4` gains an explicit `op_types` opt-in** (default `(nn.Linear,)` — existing
+   calls unchanged). It can widen to the i8 op types (`QUANT_MODULE_TYPES`) to measure non-linear w4
+   without touching the runtime. The group axis generalises "the in axis" (`quantize.channel_rows`:
+   conv flattens the receptive field `Cin·K` / `Cin·Kh·Kw` per output channel, `ConvTranspose1d` uses
+   axis 1 of its transposed layout, embedding uses D per vocabulary entry). A conv scale is rank 2
+   after flattening and **cannot reach emit structurally** (misuse is not silent).
+2. **Measurement-only rounding methods live in `quant_methods.py`** (FP4 e2m1 / NF4 / MXFP4 /
+   k-means codebook at three granularities). A separate module keeps "what `quantize.py` holds =
+   what can ship". They return counts only, **never a scale / codebook ledger** (no path into emit).
+   All are deterministic; target selection shares `iter_quant_targets` with the storage path.
+3. Method comparison ran at g = 32 (maintainer ruling 2026-08-19); the group-size re-evaluation is
+   addendum 9.
 
-## 追記 5（2026-08-19・測定側の拡張 — 対象 op の opt-in と方式スクリーニングの受け皿）
+## Addendum 6 (2026-08-20) — first extension of decision 5: i4 embedding
 
-w4 横展開 + 量子化方式スクリーニング波（backlog now 節）に伴う **fake-quant 側だけの拡張**。
-格納の受理集合（決定 2）・実行経路の linear 限定（決定 5）・emit の適格判定は**一切変えない**。
+**Embedding became i4-eligible** (maintainer approval, `0d8c6f6`).
 
-1. **`fake_quant_int4` に `op_types` の明示 opt-in を追加**（既定 `(nn.Linear,)` のまま =
-   既存呼び出しの挙動不変）。決定 5 の「追補は需要が出た op から」の**測定面の需要**が先に
-   立った形 — i8 と同じ 5 op 種まで広げて「非 linear の w4 は品質がどこまで戻るか」を
-   runtime 非接触で測る。group の軸は「in 軸」を一般化する（`quantize.channel_rows`:
-   conv は出力チャネルごとの受容野 `Cin·K` / `Cin·Kh·Kw` を平坦化・`ConvTranspose1d` は
-   転置レイアウトの軸 1・embedding は語彙エントリごとの D 軸）。conv 系の scale は受容野
-   平坦化の rank 2 になり**重みと rank が合わないため emit へ構造的に渡せない**
-   （誤用が沈黙しない側に倒してある）。
-2. **測定専用の丸め方式群を `quant_methods.py` に新設**（FP4 e2m1 / NF4 / MXFP4 /
-   k-means codebook〈per_tensor・per_channel・shared + g32 正規化の 3 粒度〉）。
-   `quantize.py` と別モジュールなのは「載っている形 = 出荷できる格納形」という読み方を
-   壊さないため。戻り値は計数のみで **scale / codebook の台帳を返さない**（emit へ流れる
-   口を作らない）。全方式とも決定的（k-means は分位点初期化 + 固定反復）・対象選択は
-   `iter_quant_targets` を格納経路と共有する。
-3. **位置づけ**: 決定 6（Phase 0 sweep）の方式次元への続編。追記 1 の g 軸確定（g32）を
-   前提に方式比較は g=32 固定で行い、g 軸の再評価は方式確定後に別途（2026-08-19 ユーザー
-   裁定）。校正ループ系（AWQ / GPTQ）は引き続き未測定 — 実需が立てば別 ADR（追記 1 のまま）。
-   codebook 系が採用に至る場合の格納の新席（表の companion 欄・view 型）は決定 2 の 3 面の
-   reopen として別途起票する。
+1. **Eligible set:** `I4_WEIGHT_OPS = {linear, embedding}` at the time (mirrored in `emit.py` and
+   `plan.ts`; eligibility, executor and estimate share one implementation per side).
+2. **Storage shape unchanged:** the vocabulary table `[V,D]` has identity `channel_rows`, and the
+   group scale `[V, D/g]` follows decisions 2 / 3.
+3. **Execution:** the gather kernel reads the group scale per thread (one thread per output element,
+   `wscale[pick·(D/g) + col/g]` — separate from linear's per-quad read). The group length is baked
+   into WGSL as a shift, so the key carries it (`:wi4g32`). GPU dequantization and CPU expansion
+   (`decodeI4`) are checked bit-identical over all 15 nibbles × 8 positions per word
+   (`packages/runtime/tests/gpu_i4_weights_test.ts`).
+4. **Tied lm_head reversed:** a tensor consumed by both linear and embedding slots is now
+   **eligible** (both ops have an unpacking path).
+5. Applied to DeBERTa (vocabulary table 22012×1024; 202.45 → 193.91 MB, 2026-08-20).
 
-## 追記 6（2026-08-20・決定 5 の追補第 1 号 — embedding の i4 実行経路と格納適格）
+## Addendum 7 (2026-08-20) — second extension of decision 5: i4 conv1d and rank-independent scale
 
-決定 5 の「需要が出た op から追補」の第 1 号として **embedding を i4 適格へ追補**した
-（ユーザー承認・波 J-5a・`0d8c6f6`）。
+**conv1d with `groups == 1` became i4-eligible** (maintainer approval, `eac9d43`).
 
-1. **適格集合**: i4 の適格 op は `I4_WEIGHT_OPS = {linear, embedding}`（`emit.py` と
-   `plan.ts` の鏡像 — 適格判定・executor・estimate は各側 1 実装を共有）。conv 系は
-   据え置き（展開経路が無い — `weight-storage.ts` の MUST。conv1d の追補は別決定 =
-   波 J-5b の領分）。
-2. **格納形は不変**: 語彙表 `[V,D]` は `channel_rows` が恒等で、group scale
-   `[V, D/g]` は「重みと同 rank・最終次元だけ group 数」— 決定 2/3 の規則がそのまま
-   成立し、新しい格納形は増えていない。
-3. **実行**: gather カーネルの per-thread group scale（1 スレッド 1 出力要素で巻き上げ先が
-   無く、要素ごとに `wscale[pick·(D/g) + col/g]` を引く — linear の quad 単位引きとは
-   別実装）。group 長は shift として WGSL へ焼くためキーに g 部が乗る（`:wi4g32`）。
-   GPU dequant と CPU 展開（`decodeI4`）は全 15 nibble × 語内 8 位置でビット一致を門化
-   （`gpu_i4_weights_test.ts`）。
-4. **tied lm_head の反転**: linear と embedding の両方の重みスロットで消費される実体は、
-   従来「linear 限定ゆえ不適格」だったが両 op とも展開経路を持つため**適格へ反転**
-   （両側の単体で固定）。
-5. **DeBERTa への適用実測**: 語彙表 22012×1024 を i4 化（除外 = `rel_embeddings`〈graph 上
-   embedding op が立たない = 重みスロット消費ゼロで一般適格外〉と conv）。系列 202.45 →
-   193.91 MB（−8.15 MiB — group scale の f32 が payload 半減益の約 3 割を食う）。SBV2
-   `w8-bert4` の取得量 = w8 比 −30.33%。WAV 参照は採り直し（旧値は e2e 側 NOTE が保持）。
+1. **Predicate:** op is conv1d ∧ `groups == 1` ∧ stored row length `Cin·K % group_size == 0`.
+   `groups > 1` (depthwise) goes to the direct kernel with no unpacking path; `conv_transpose1d`
+   has its row axis not first (`[Cin,Cout,K]`), so the pack order does not fit (no permuted pack for
+   2.6 MiB — maintainer ruling the same day). Emit (`I4_WEIGHT_OPS` + `_has_i4_kernel`) and
+   `plan.ts` (`I4_WEIGHT_OPS` + `i4Executable`) mirror each other in content and structure.
+2. **Rank-independent scale shape** (revises decision 3): quantized axis = row length with the first
+   dimension as rows and the rest flattened (exporter `quantize.storage_rows` / runtime
+   `groupScaleShape` in `format/container/codecs.ts` — one implementation per side). Scale = rank 2
+   `[rows, (numel/rows)/g]`; for rank-2 weights this equals the earlier rule. **Narrowing:** a rank-1
+   i4 weight is no longer expressible (no eligible op has one). Pack bytes follow the weight's
+   contiguous memory order regardless of rank.
+3. **Execution:** conv1d's implicit GEMM (A side = `W[Cout, Cin·K]`) reads the group scale per quad
+   while filling tiles (`fillAConv` in `gemm.ts`; an aligned quad never crosses a group ≥ 16). i4 on
+   the direct kernel or conv2d is a `CodegenError` at the codegen entry. A conv1d missing attributes
+   fails loudly at eligibility time (no default filling).
+4. **Census and graph agree:** fake-quant counts from the module tree, so **a wrapper holding unused
+   submodules** disagrees with the torch.export graph and emit's override spelling check (against
+   silent drops) fails. SBV2 front's `SdpReverseNoiseIn` was restructured so that ownership equals
+   use (`tools/export-recipes/sbv2/patch.py` — same objects, same call order, numerically unchanged).
+5. Applied to SBV2 (2026-08-20, all 14 models re-exported; w4 download 237.5 MB, −36.3% against w8).
 
-## 追記 7（2026-08-20・決定 5 の追補第 2 号 — conv1d の i4 実行経路と scale 形の rank 非依存化）
+## Addendum 8 (2026-08-21) — decision 5's scale application: w4a8 reduces per group
 
-決定 5 の「需要が出た op から追補」の第 2 号として **conv1d（`groups == 1`）を i4 適格へ
-追補**した（ユーザー承認・波 J-5b・`eac9d43`）。
+Decision 5 applied the scale per element and left moving it outside the reduction to ADR 0019's
+revision conditions. ADR [0076](0076-w4a8-linear-execution.md) (w4a8) made that change, and meets
+the conditions here.
 
-1. **適格述語**: op が conv1d ∧ attrs の `groups == 1` ∧ 格納行長 `Cin·K % group_size == 0`。
-   `groups > 1`（depthwise 系）は直接カーネル行きで展開経路が無く、`conv_transpose1d` は重み
-   `[Cin,Cout,K]` の行軸が先頭でないため pack 順が合わない（2.6 MiB のために permuted pack を
-   買わない — 同日ユーザー裁定）。emit（`I4_WEIGHT_OPS` + `_has_i4_kernel`）と plan.ts
-   （`I4_WEIGHT_OPS` + `i4Executable`）は**集合の中身も絞りの構造も対**の鏡像。
-2. **scale の論理形を rank 非依存へ一般化**（決定 3 の改訂）: 量子化軸 = 「先頭次元を行・残りを
-   平坦化」した行長（exporter `quantize.storage_rows` / runtime `format/i4.groupScaleShape` —
-   各側 1 実装共有）。scale = rank2 `[rows, (numel/rows)/g]`。rank2 の重み（linear /
-   embedding）では従来の「同 rank・最終次元だけ group 数」と同値で既存資産の検査結果は不変。
-   **narrowing**: rank1 の i4 重みは表現不能になった（適格 op に rank1 の重みスロットは無く、
-   現存資産・テストへの影響ゼロ）。pack のバイト列は重みの連続メモリ順のまま rank に依らず
-   一意（`[O,Cin,K]` row-major = `[O, Cin·K]` 平坦と同一バイト列）。
-3. **実行**: conv1d の implicit GEMM（A 側 = `W[Cout, Cin·K]`）のタイル充填が quad ごとに
-   group scale を引く（gemm.ts `fillAConv` — linear の B 側の鏡映・4 整列 quad は group ≥ 16 を
-   跨がない）。直接カーネル / conv2d への i4 は生成入口の `CodegenError`（適格判定が閉じている
-   前提だけに乗らない）。キーは `:wi4g32`（linear と同流儀）。attrs 欠落の conv1d は適格判定の
-   時点で fail loudly（既定値補完をしない — 従来の後段検査より前倒し）。
-4. **census と graph の一致**（recipe 側の教訓）: fake-quant の census はモジュール木から
-   数えるため、**使わない部分モジュールを抱える wrapper** では torch.export の graph と
-   食い違い、emit の override 綴り検査（沈黙 drop 防止）が落ちる。SBV2 front の
-   `SdpReverseNoiseIn` が該当（sdp 丸ごと保持 — `post_*` は訓練専用・reverse は ConvFlow を
-   1 本落とす）し、**所有 = 使用**へ再構成して構造的に一致させた（`sbv2/patch.py` — 同一
-   オブジェクト・同一呼び順で数値不変・`--verify front` 緑）。
-5. **SBV2 への適用実測（2026-08-20・全 14 モデル再 export）**: 適格 conv1d = front 60 +
-   voice 226 本（形は適格でも `groups > 1` の 12 / 48 本は i8 残留）。i4 系列 front
-   10.27→7.38 MB・voice 55.37→36.04 MB（計 −22.2 MB）。`w4` 取得量 = **237.5 MB（w8 比
-   −36.3%）**・温間合成 ~500ms（w8 ~547ms — conv 重み読みの帯域半減で in-kernel dequant
-   でも最速）。WAV 参照（w4）は採り直し（旧値は e2e 側 NOTE が保持・w8 / w8-bert4 門は不変 =
-   i8 席の非破壊証明）。
+1. **Only the w4a8 path.** The default `linearCompute` (f32 compute) keeps per-element application.
+2. **ADR 0019's reason for rejecting `(Σ x·q)·s` disappears in w4a8** — the same argument as ADR
+   [0025](0025-w8a8-linear-execution.md) decision 4. The rejection was about order dependence of
+   f32 reduction; w4a8 **reduces exactly in i32 within a group**, so order does not matter. The
+   flush is fixed at group boundaries and rounding happens `k/g + 1` times.
+3. **atol = 0 holds.** The CPU reference (`packages/runtime/src/reference/i8a8.ts`) rounds at the
+   same positions the same number of times; the real-GPU comparison uses `assertExact` (`===` over
+   all elements).
 
-## 追記 8（2026-08-21・決定 5 の scale 適用形 — w4a8 は group 境界の縮約外形）
+Tile geometry stays outside the numeric contract (the flush is at group boundaries, not tile
+boundaries).
 
-決定 5 は「scale 適用は要素ごと（`q·s` — 0019 決定と同一。**縮約外形への変更は 0019 と同じ改訂
-条件**）」と定めていた。ADR [0076](0076-w4a8-linear-execution.md)（w4a8）はまさにその切り替えを
-行ったので、ここで改訂条件を満たす。
+## Addendum 9 (2026-08-22) — group size re-evaluated: SBV2 stays at g32
 
-1. **適用範囲は w4a8 経路のみ**。`linearCompute` 既定（f32 計算経路）のタイル読み込み時 1 回展開
-   （`dequant4`）は**要素ごとのまま**で、決定 5 は無変更。
-2. **0019 が `(Σ x·q)·s` 形を却下した理由は w4a8 では消える** — ADR
-   [0025](0025-w8a8-linear-execution.md) 決定 4 と同型の論証。却下理由は f32 縮約の順序依存に
-   あったが、w4a8 は **group の中を i32 で厳密に縮約**するので順序非依存。scale が group ごとに
-   変わるぶんだけ flush 位置が group 境界に固定され、丸めは `k/g + 1` 回で決まる。
-3. **atol=0 は保たれる**。CPU 参照（`reference/i8a8.ts`）が同じ位置・同じ回数で丸めており、
-   実 GPU との突合は `assertExact`（`===` の全数比較）で門にしている。
+Done as deferred in addendum 5 (canonical measurements and listening:
+[research/2026-08-22-sbv2-g-axis.md](../research/2026-08-22-sbv2-g-axis.md)).
 
-タイル幾何は数値契約の外という既存の自由度も維持される（flush はタイル境界ではなく group 境界）。
+1. **Ruling:** SBV2 net_g keeps **g32** (`DEFAULT_GROUP_SIZE = 32` unchanged, storage shape
+   unchanged). Of g16 / g32 / g64 (g128 rejected by estimate), g32 is closest to f32; by ear g16 moved
+   the tension the **opposite way** (higher). The slightly low tension of addendum 7's application is
+   **not reduced by the group axis**.
+2. **Lesson (method):** weight-level fidelity is clearly better at g16 (nested-split guarantee plus
+   −15% relRMS), yet waveform identity metrics come out in reverse order — **chaotic amplification
+   in the flow / decoder means waveform metrics do not carry the order of g**. Group-size rulings
+   need a listening check (the first numeric stage cannot even narrow the field).
+3. **Scope:** this ruling covers SBV2 net_g (RTN, all roles). It does not generalise to anima. The
+   rig's `--w4-group-size` argument (`e813b8c`) remains.
 
-## 追記 9（2026-08-22・g 軸の再評価 — SBV2 は g32 据え置きで確定）
+## Addendum 10 (2026-09-24) — where the scale-shape formula lives
 
-追記 5 の「g 軸の再評価は方式確定後に別途」を消化した（波 J-3・実測と聴感の正本 =
-[research/2026-08-22-sbv2-g-axis.md](../research/2026-08-22-sbv2-g-axis.md)）。
+The scale shape comes from `groupScaleShape` in `packages/runtime/src/format/container/codecs.ts`
+(with `rowAxis`) for every consumer, including the CPU expansion `decodeI4` (`e034a136`).
 
-1. **裁定**: SBV2 net_g の group 長は **g32 据え置き**（既定 `DEFAULT_GROUP_SIZE = 32` は
-   不変・格納形の変更なし）。g16 / g32 / g64 の 3 点掃引（g128 は事前試算で棄却）で、
-   f32 に最も近いのは現行 g32 — 聴感で g16 はテンションを**逆方向**（高い側）へ動かした。
-   net_g の「テンション少し低め」（追記 7 の適用実測）は **g 軸では縮まない**ことが確定。
-2. **教訓（測定方法論）**: 重みレベルの忠実度は g16 が確実に良い（入れ子分割の数学保証 +
-   実測 relRMS −15%）のに、波形の f32 同一性指標は逆順に出る — **flow / decoder のカオス的
-   増幅により波形指標は g の順序を運ばない**。g 軸の裁定は聴感必須（数値第 1 段では
-   絞り込みすら効かない）。
-3. **スコープ**: この裁定は SBV2 net_g（RTN・全役割）のもの。anima の g 軸（別 research
-   §8-5）へは一般化しない — J-4 と同時に裁く。測定リグの g 引数化（`--w4-group-size`・
-   `e813b8c`）は資産として残る。
+## Addendum 11 (2026-09-25) — the declaration of decisions 2 / 3 moved to the container's codec ledger
 
-## 追記 10（2026-09-24・scale 形の式の置き場）
-
-- 追記 7 の 2 が指す runtime の `format/i4.groupScaleShape` は `format/container/codecs.ts` の
-  `groupScaleShape`（引数に `rowAxis` が増えた）へ移り、合流層・常駐プランナ・容器から Session 構築へ渡す
-  scale 形・CPU 展開 `decodeI4` の全てがこの 1 本から形を導く（`e034a136`）。
-
-## 追記 11（2026-09-25・決定 2 / 3 の宣言表現は容器の codec 台帳へ移った）
-
-- **移ったのは宣言の表現だけ**: 決定 2 の格納 dtype `storage.dtype: "i4"` と
-  `storage.group_size`、safetensors リーダの 3 面（サイズ・整列・view）、ADR 0063 の書き出し順は、
-  ADR [0108](0108-container-format.md) 決定 10〜13 と
-  [docs/container-v1.md](../container-v1.md) §6 の束縛表 `encoding`（codec `int4-sym-g` /
-  `groupSize` / `scale`）と codec 台帳（`packages/runtime/src/format/container/codecs.ts` の
-  `CODEC_LEDGER`）へ移った。safetensors の方言 dtype `I4` は受理しない（ADR 0063 の 2026-09-24
-  追記）。
-- **意味論は不変**: 値域（15 準位・offset 8 の unsigned nibble）・pack 順（決定 4）・group scale 形
-  （追記 10）・dequant 式 `(u − 8) · scale`・group 長の制約（2 冪かつ ≥ 16）・f16 scale の
-  admission 条件は容器でもこの ADR が正本のまま。
-- **zero-point の予約欄の実名**: 決定 3 が予告した `storage.zero_point` は使わない。追加時の欄は
-  `encoding.zeroPoint`（block 参照 — container-v1 §6.1）で、台帳の `zeroPoint: "forbidden"` を
-  `"allowed"` に変える形で解禁する。「offset 8 = zero_point 省略時の既定」という読みの予約は
-  変わらない。
+- **Only the declaration moved:** the storage dtype `i4` and `group_size`, the three safetensors
+  reader surfaces (size, alignment, view) and the ADR 0063 write order moved to ADR
+  [0108](0108-container-format.md) decisions 10–13 and the `encoding` binding in
+  [docs/container-v1.md](../container-v1.md) §6 (codec `int4-sym-g` / `groupSize` / `scale`) with
+  the codec ledger (`CODEC_LEDGER` in `packages/runtime/src/format/container/codecs.ts`). The
+  safetensors dtype `I4` is not accepted (ADR 0063, addendum of 2026-09-24).
+- **The semantics stay canonical here:** range (15 levels, unsigned nibble with offset 8), pack order
+  (decision 4), group scale shape (addendum 10), dequantization `(u − 8) · scale`, group-size
+  constraint (power of two, ≥ 16) and the f16-scale admission conditions.
+- **The zero-point field's real name:** not `storage.zero_point` but `encoding.zeroPoint` (a block
+  reference — container-v1 §6.1), enabled by changing the ledger's `zeroPoint: "forbidden"` to
+  `"allowed"`. The reading "offset 8 = default when the zero point is omitted" stays reserved.

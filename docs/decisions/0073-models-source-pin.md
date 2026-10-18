@@ -1,113 +1,101 @@
-# 0073: models の既定ソース pin — 公開時点のコミット SHA に固定する
+# 0073: Default sources of models are pinned to the commit SHA at publication
 
-- Status: accepted（2026-08-20 — ユーザー裁定「Pin を実装してください」。実装は HF
-  アップロード直後の段 — SHA が生まれてから焼く。手順の正本 =
-  [release-runbook.md](../release-runbook.md) §3）
+- Status: accepted (2026-08-20 — maintainer ruling "please implement the pin"; pins are written right
+  after the HF upload, once the SHA exists; procedure canonical in
+  [release-runbook.md](../release-runbook.md) §3); partly superseded: decision 2 was withdrawn on
+  2026-08-25 (addendum), and decision 1's constant shape by [0092](0092-distribution-repos-and-sources.md)
+  decision 3 (2026-09-04: per-family tables `<FAMILY>_SOURCES` and `KARUME_SOURCES`); decision 3's
+  rejection of automated stamping was re-graded to MAY on 2026-10-18
 - Date: 2026-08-20
-- 関連: ADR [0038](0038-manifest-v1.md)（revision 解決 — 「SHA を渡すと解決要求が発生しない」
-  設計を既定経路に載せる）/ [0041](0041-manifest-v2.md)（リポ名裁定 `karume-` prefix）/
-  [0071](0071-manifest-v3-shards.md)（format 断絶を pin が吸収する関係）
+- Related: ADR [0038](0038-manifest-v1.md) (revision resolution — passing a SHA issues no resolution
+  request) / [0041](0041-manifest-v2.md) (repository naming with the `karume-` prefix) /
+  [0071](0071-manifest-v3-shards.md) (the pin absorbs format breaks)
 
 ## Context
 
-models パッケージはリポ名も revision も持たず、hub の既定が `revision ?? "main"`
-（fetch.ts）。この形だと、配布リポ側の manifest / 資産が更新された瞬間に**公開済みの
-models パッケージが読む内容が黙って変わる**（quant 席の増減・defaultQuant 変更・format
-版上げで壊れる/変質する）。ブランチ・タグは HF 側で動かせるため、機械的に不変なのは
-コミット SHA だけ。SHA pin + manifest 由来の sha256 検証で「公開済みパッケージが読む
-バイト列」がネットワーク側の善意抜きに固定される。副次利得として、SHA 指定は revision
-解決リクエスト自体が消えるので**既定経路が完全キャッシュ時にオフライン起動できる**。
+The models package held neither repository names nor revisions, and the hub defaulted to
+`revision ?? "main"` (now `packages/hub/src/sources/hf.ts`). With that, **what a published models
+package reads changes silently** the moment the distribution repository's manifest or assets change
+(presets added or removed, `defaultQuant` changed, a format version bump breaks or alters it).
+Branches and tags can be moved on HF; only a commit SHA is immutable. A SHA pin plus the manifest's
+sha256 checks fix the bytes a published package reads without relying on the network side's good
+will. As a side benefit, a SHA issues no revision resolution request, so **the default path starts
+offline when everything is cached**.
 
 ## Decision
 
-### 1. 公式リポを持つファミリに既定ソース定数を焼く
+### 1. Families with an official repository get pinned source constants
 
-各ファミリ config に `<FAMILY>_DEFAULT_SOURCE = { repo, revision: "<40hex>" } as const
-satisfies HubRepoRef` を置き、サブパス export で公開する。対象 = 公開リポが実在する
-ファミリのみ（sbv2 → `hdae/karume-sbv2-jvnv`（既定）・irodori →
-`hdae/karume-irodori-v4-small`・anima → `hdae/karume-anima-turbo`）。公開リポの無い
-ファミリ（birefnet 等）は据え置き（ref 必須のまま）。fn の pin 定数は**作らない** —
-`karume-sbv2-fn` の公開自体が保留のため（2026-08-20 再裁定・backlog parked。公開されたら
-`SBV2_FN_SOURCE` として追加）。これは **models が公式既定リポを知る初の結び付き**（従来は完全リポ非依存）—
-利用者向けの既定体験（`fromPretrained()` だけで動く）を優先する裁定。
+Each family config carries a constant `{ repo, revision: "<40hex>" } as const satisfies HubRepoRef`,
+exported from the subpath, for families whose public repository exists. Families without one keep
+requiring a ref. No pin constant for fn: `karume-sbv2-fn` is not published (2026-08-20 ruling,
+backlog parked; it is added when published — today `SBV2_SOURCES` has only `sbv2-jvnv`). This is
+**the first link from models to its official repositories** (models were repository-agnostic
+before), chosen for the out-of-the-box experience.
+**(superseded by ADR 0092 decision 3 on 2026-09-04: the constants are per-family tables
+`<FAMILY>_SOURCES` in each family's `config.ts`, folded by `KARUME_SOURCES` in
+`packages/models/src/sources.ts`, nine families. The repositories listed in 2026-08 included
+`hdae/karume-anima-turbo`, retired by ADR 0087 on 2026-09-01; anima's current table is
+`ANIMA_SOURCES` with `anima` / `anima-extra`.)**
 
-### 2. `fromPretrained` の ref を optional 化（pin のあるファミリのみ）
+### 2. `fromPretrained` without a ref (families with a pin)
 
-省略時は pin 済み既定ソースを使う。追従挙動が欲しい利用者は
-`fromPretrained({ ...SBV2_DEFAULT_SOURCE, revision: "main" })` で今日と同じ動きを明示的に
-選べる（解除口は `HubRepoRef.revision` として型に既にある）。文字列 ref の意味
-（`{ repo }` = main 追従）は変えない。
+Withdrawn 2026-08-25 (addendum): `ref` is required again for every family.
 
-### 3. pin の更新は手書き + 手順書ゲート（stamp 自動化は不採用）
+### 3. Pins are updated by hand through the runbook check
 
-公開のたびに release-runbook §3 の手順（SHA 取得 → 定数記入 → 疎通 → verify → コミット）で
-更新する。生成器 + 照合タスクによる自動 stamp は公開回数がまだ少ない時点では過剰機械
-（Simplicity first）— 手作業ミスが実際に出たら再検討。タグ運用（HF の git tag を版として
-使う）は不採用 — タグは付け替え可能で、不変性が運用規律依存になる。
+Every publication updates the pins by the procedure of release-runbook §3 (get the SHA → write the
+table entry → connectivity check → verify → commit). Stamping by a generator plus a matching task is
+not adopted for now; the maintainer MAY adopt it (re-graded 2026-10-18 to MAY: the premise "few
+publications so far" no longer holds — about ten releases from 0.5.0 to 0.14.0 and 12 public
+repositories in the source tables — and hand copies of SHAs into docs disagreed in two consecutive releases; the
+invariants 40-hex revision, key derived from the repository name and owner are already checked by
+`packages/models/tests/sources_test.ts`). Using HF git tags as versions is not adopted: tags can be
+moved, so immutability would depend on discipline.
 
 ## Consequences
 
-- リリース順序が非可換になる: **HF アップロード → pin 焼き込み → JSR publish**
-  （runbook §0）。
-- 資産側の修正は models のパッチ公開までユーザーに届かない（安定優先の意識的
-  トレードオフ）。逆向きの事故（公開済みパッケージが黙って壊れる）は回復不能側なので、
-  回復可能側に倒す。
-- hub の既定 `revision ?? "main"` 自体は据え置き（hub 単体利用の意味論は不変）。
+- Release order is not commutative: **HF upload → write the pins → JSR publish** (runbook §0).
+- A fix on the asset side reaches users only with a models patch release (a deliberate trade for
+  stability). The opposite accident — a published package silently broken — is unrecoverable, so the
+  design leans to the recoverable side.
+- The hub's default `revision ?? "main"` stays (the semantics of using the hub alone are unchanged).
 
-## 追記
+## Addenda
 
-- 2026-08-24: **非既定の公開リポにも同じ pin を課す**（決定 1 の対象拡張）。決定 1 は
-  `<FAMILY>_DEFAULT_SOURCE`（= `fromPretrained` の既定席）だけを定義していたが、波 L で
-  anima の素版 3 モデルが同居する `hdae/karume-anima` を**既定ではない席**として公開し、
-  `ANIMA_BASE_SOURCE` を置いた（1 リポ = 3 モデルなのでリポ参照だけでは 1 本に決まらず、
-  利用者が `fromPretrained(ANIMA_BASE_SOURCE, { model })` と綴る）。pin の MUST は既定席と
-  同じ — **models が repo を綴る定数はすべて commit SHA で固定する**。理由も同じで、
-  「既定ではないから追従でよい」は成立しない（公開済みパッケージが読むバイト列が
-  ネットワーク側の都合で黙って変わる事故は、既定かどうかと無関係に回復不能側）。決定 3 の
-  更新手順（手書き + 手順書ゲート）は種別を問わず適用し、release-runbook §3 に非既定席の
-  チェック行がある。命名は `<FAMILY>_<席名>_SOURCE`。
-- 2026-08-25: **決定 2（`ref` の optional 化）を撤回**した（0.5.0 breaking 波 — ユーザー裁定）。
-  `fromPretrained` の `ref` は**全 7 ファミリで必須**に戻る。既定ソースは「`fromPretrained()`
-  だけで動く」利用者体験のために置いたが、実際には examples もモデルカードの Usage も
-  **repo 文字列を渡す形**で普及し、焼き込み既定 pin の存在に気づく動線がどこにも無かった —
-  ファミリごとの optional 分岐と「引数なしがどこを読むか」の説明という維持コストに旨みが
-  釣り合わない、という裁定。TS では引数必須なので型検査が落ち、型を持たない JS からの
-  引数なし呼び出しは共有の門（`packages/models/src/hub/repo-ref.ts` の `toRepoRef`）が
-  記述例 2 択つきで fail loudly する（`undefined` を hub まで滑らせて「repo が undefined の
-  URL を叩いた」という原因の遠い失敗にしない）。文字列 ref = `main` 追従の意味は不変。
-- 2026-08-25: **決定 1 の定数名を `<FAMILY>[_<VARIANT>]_CURRENT` へ改め、公開面（barrel +
-  サブパス）へ出す**。4 定数 = `ANIMA_TURBO_CURRENT` / `ANIMA_CURRENT` / `SBV2_JVNV_CURRENT` /
-  `IRODORI_V4_SMALL_CURRENT`（**公開リポ 1 つにつき 1 定数**・pin の値そのものは不変）。
-  旧名 `*_DEFAULT_SOURCE` / `ANIMA_BASE_SOURCE` は「既定席か否か」を綴っていたが、上の撤回で
-  既定席そのものが無くなったので意味を失う。新しい位置づけは**「パッケージ版に合わせて
-  自動追従したい場合のオプトイン」** — 再現性を自分で握りたい利用者はこの定数ではなく自分の
-  `{ repo, revision }` を書く。この位置づけは**維持義務**とセット: **bump のたびに pin を更新し
-  （決定 3 の手順）、必要に応じて動作テストまで通す**。検証していない pin を `*_CURRENT` の名で
-  出すと、名前が嘘になる。
-- 2026-08-25: hub 側の対として、**`revision` 未指定で `main` を暗黙解決したときに 1 回だけ
-  `console.warn`** を出す（`packages/hub/src/fetch.ts` の `warnImplicitMain`）。解決した SHA を
-  印字し、①その 1 行をコピーして `revision` に書く ②`@karume/models` の `*_CURRENT` を使う、の
-  2 択を案内する。`"main"` の**明示**指定・タグ・SHA 指定では出さない（明示は「可変 ref で
-  よい」という呼び手の意思表示で、警告は誤検出になる）。models の既定を落としたぶん、hub 単体
-  利用者にも pin への動線を残すのがこの警告の役割で、上の 2 件と 1 体でこの体系を成す。
-- 2026-08-25: **HF の git tag 運用は再検討の末、改めて不採用**（ユーザー裁定）。決定 3 は
-  「タグは付け替え可能で不変性が運用規律依存になる」を理由に落としたが、今回の理由はもう 1 つ
-  増える — 「パッケージ版に対応する版を指す」という意図は `*_CURRENT` が既に満たしており、
-  タグはその二重持ちになる。
-- 2026-08-31: **「取得元に既定を持たない」MUST は取得元ハンドルにも継承する**（ADR
-  [0086](0086-distribution-source.md)）。`fromPretrained` の第 1 引数は
-  `string | HubRepoRef | DistributionSource` の union になったが、**どの綴りでも省略は不可**で、
-  取得元は呼び出し側の決定として必ず綴らせる（2026-08-25 の撤回の理由がそのまま掛かる）。ただし
-  **取得元ハンドルは `toRepoRef` の綴り門を通らない** — HF の repo ではないので `owner/name` を
-  要求するのは筋違いで、ローカルの配布形が「repo が必須」で落ちる。判別は hub 公開の型述語
-  `isDistributionSource` 1 本（`toManifestSource`）に集約し、ハンドルは `loadManifest` へ直行する。
-  pin（`*_CURRENT`）に対応するものはハンドル側に無い — 世代の概念を持たない取得元なので、手元に
-  あるバイト列がそのまま正である（ADR 0086 決定 1・暗黙 `main` の警告も出ない）。
-- 2026-09-04: **決定 1 の「定数の形」と 2026-08-25 の `*_CURRENT` 命名は、ADR
-  [0092](0092-distribution-repos-and-sources.md) 決定 3 の家族別対応表
-  `<FAMILY>_SOURCES`（+ barrel の `KARUME_SOURCES`）で置換**した（0.9.0 breaking）。
-  「1 公開リポ = 1 定数」は決定 2（`ref` の optional 化 = 既定 1 つ）時代の形で、既定席を
-  撤回した後も残っていたもの — 家族に公開リポが増えるたびトップレベル定数が増え、
-  「この家族の公開リポ一覧」を表す席が型に無かった。**pin そのものの理由（Context）と、
-  決定 3 の更新手順〈手書き + 手順書ゲート〉・2026-08-25 の維持義務〈bump のたびに更新し、
-  検証してから名乗る〉は本 ADR のまま継承する** — 変わったのは入れ物だけである。
+- 2026-08-24: **non-default public repositories get the same pin.** MUST: **every constant through
+  which models names a repository is pinned to a commit SHA.** The reason is the same: "not the
+  default, so following `main` is fine" does not hold — silent changes to what a published package
+  reads are unrecoverable whether or not the source is the default. Decision 3's procedure applies to
+  every entry.
+- 2026-08-25: **decision 2 withdrawn** (0.5.0 breaking wave — maintainer ruling). `fromPretrained`
+  requires `ref` for every family. Examples and model cards had spread the "pass the repository
+  string" form, and nothing led users to the baked-in default; the per-family optional branch and
+  the explanation of "where does a call without arguments read" did not pay for themselves. In
+  TypeScript the missing argument fails type checking; an untyped JavaScript call without arguments
+  fails loudly in the shared check (`toRepoRef` in `packages/models/src/hub/repo-ref.ts`) with two
+  spelling examples, instead of letting `undefined` reach the hub. A string ref still means "follow
+  `main`".
+- 2026-08-25: the constants were renamed `*_CURRENT` (later replaced by ADR 0092's tables). The
+  maintenance duty carries over: **on every version bump the pins are updated (decision 3) and, as
+  needed, checked by running the models, before the table claims them as verified.** An unverified
+  pin under that name would be a lie.
+- 2026-08-25: the hub, as the counterpart, **warns once via `console.warn` when it resolves `main`
+  implicitly** because `revision` was omitted (`warnImplicitMain` in `packages/hub/src/sources/hf.ts`).
+  It prints the resolved SHA and offers two options: copy that line into `revision`, or use the
+  `@karume/models` source tables. An explicit `"main"`, a tag or a SHA does not warn (an explicit ref
+  states that a mutable ref is acceptable). This keeps a path to pins for users of the hub alone.
+- 2026-08-25: HF git tags were reconsidered and rejected again (maintainer ruling); one more reason —
+  "point at the version matching the package version" is already met by the source tables, so tags
+  would duplicate them.
+- 2026-08-31: **the "no default source" MUST extends to source handles** (ADR
+  [0086](0086-distribution-source.md)). The first argument of `fromPretrained` is
+  `string | HubRepoRef | DistributionSource`, and **no spelling may be omitted** — the caller always
+  names the source. A source handle **does not pass through `toRepoRef`** (it is not an HF
+  repository, so requiring `owner/name` would reject local distributions). The distinction is the hub
+  type predicate `isDistributionSource` alone (`toManifestSource`), and the handle goes straight to
+  `loadManifest`. Handles have no pin counterpart: a source without generations treats the bytes at
+  hand as canonical (ADR 0086 decision 1; no implicit-`main` warning either).
+- 2026-09-04: the constant shape was replaced by ADR [0092](0092-distribution-repos-and-sources.md)
+  decision 3 (0.9.0 breaking). **The reason for pinning (Context), decision 3's procedure and the
+  maintenance duty of 2026-08-25 stay with this ADR** — only the container changed.

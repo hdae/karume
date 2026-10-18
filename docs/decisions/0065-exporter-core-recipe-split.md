@@ -1,102 +1,100 @@
-# 0065: exporter を汎用 core（PyPI）とモデル別 recipe（repo 専用）へ分離する
+# 0065: Split the exporter into a generic core (PyPI) and per-model recipes (repository only)
 
-- Status: accepted（2026-08-15・ユーザー裁定 — 外部レビュー〈構造・ライセンス監査〉の
-  案 A を採用。「ライセンス的にも exporter は汎用モジュール + モデル別スクリプトへ再編すべき」
-  はユーザー方針 2026-08-14）
-- 関連: ADR [0037](0037-karume-monorepo.md)（PyPI `karume` の親決定 — 本 ADR が「エクスポータ
-  CLI」の性格を「汎用 exporter / IR tooling」へ改める）/ [0052](0052-exporter-transactional-artifacts.md)
-  （dist の transactional 契約 — engine 側に残る）/ [0063](0063-safetensors-physical-layout.md)
-  （emit の物理配置契約 — core の責務）
+- Status: accepted (2026-08-15 — the maintainer's ruling: option A of an external structure and
+  license audit, following the maintainer's policy of 2026-08-14); all stages implemented; decision 6
+  withdrawn 2026-10-18; decision 7's release gate superseded by the per-publication checks of
+  [release-runbook](../release-runbook.md) and [0122](0122-umt5-upstream-and-compatible-encoders.md)
+  decision 6 (2026-10-04)
+- Date: 2026-08-15
+- Related: [0037](0037-karume-monorepo.md) (parent decision for PyPI `karume` — this ADR turns the
+  "exporter CLI" into a generic exporter / IR tooling) / [0052](0052-exporter-transactional-artifacts.md)
+  (transactional dist contract — stays in the engine) / [0063](0063-safetensors-physical-layout.md)
+  (safetensors layout rules — a core responsibility)
 
 ## Context
 
-- 公開 API（`convert` / `normalize` / `emit` / `verify` / `pipeline`）は汎用で、変換コアは
-  `patch_*` へ直接依存しない（import 全数走査で確認済み）。しかし **wheel の物理境界は
-  `karume/` ディレクトリ全体**で、`patch_anima.py` 等の上流モデル由来コード（多数の逐語移植を
-  自己申告）・`anima_text.py`・family 知識を焼いた `dist.py`（3,557 行）/ `modelcard.py` /
-  `cli.py`（10 モデルのスクリプト名簿）が同一 Python distribution に入る。
-- つまり **API 上の境界と配布・ライセンス上の境界が一致していない**。`pip install karume` の
-  利用者は torch.export → IR に不要な family 知識と、その provenance 義務を一緒に受け取る。
-- 逆流の実測: `dist.py:69-84` が modelcard の family metadata / renderer を直接 import・
-  `dist.py` に `style_bert_vits2` の遅延 import・cross-family utility（`ROPE_BUFFER_NAMES` /
-  `assert_rope_lifted`）が `patch_anima` に埋まり EmbeddingGemma / Irodori が参照・
-  `conftest.py` が Irodori checkout を sys.path へ注入。
+- On 2026-08-15 the public API (`convert` / `normalize` / `emit` / `verify` / `pipeline`) was
+  generic, and the conversion core did not import `patch_*` (checked by scanning every import).
+  **The physical boundary of the wheel, however, was the whole `karume/` directory**: upstream code like
+  `patch_anima.py` (much of it declared as verbatim ports), `anima_text.py`, `dist.py` (3,557 lines)
+  and `modelcard.py` with family knowledge baked in, and `cli.py` with a roster of ten model scripts
+  all shipped in one Python distribution.
+- **The API boundary and the distribution / license boundary did not match**: a `pip install karume`
+  user received family knowledge torch.export → IR does not need, with its provenance obligations.
+- Observed backflow: `dist.py` imported modelcard family metadata and renderers directly and lazily
+  imported `style_bert_vits2`; cross-family utilities (`ROPE_BUFFER_NAMES` / `assert_rope_lifted`)
+  lived in `patch_anima` and were used by EmbeddingGemma / Irodori; `conftest.py` injected an Irodori
+  checkout into `sys.path`.
 
-## 決定
+## Decision
 
-1. **PyPI `karume` = 汎用 exporter core のみ**。残るのは IR / ops / dims / extents / shapes /
-   convert / normalize / quantize / act_quant / emit / verify / pipeline / goldens と、
-   **generic dist engine**（artifact 配置・manifest・hash・staging/swap〈ADR 0052〉・汎用検証）
-   / **generic modelcard renderer**。モデル非依存として成立する CLI（`karume verify` 等）だけ
-   残し、family command・スクリプト名簿は削除する。
-2. **モデル別 recipe は `tools/export-recipes/<family>/` へ**（wheel 外・repo 専用）:
-   export 台本・`patch_*`・参照 pipeline・demo・quant 計測・**dist recipe**（source layout・
-   モデル名・quant variants・repo 命名・カード選択）・**card template / metadata**・family
-   テスト・`THIRD_PARTY_NOTICES.md`（provenance は family 単位でコードと同居させる）。
-   複数 family で共有するが core に昇格できない補助は `tools/export-recipes/_shared/`。
-3. **依存方向は recipe → core の一方向のみ**（core → recipe は import 禁止）。これを
-   **machine gate**（pytest の境界テスト + wheel 内容検査）にする — 境界は規約でなく
-   テストが守る。
-4. **依存管理**: recipe 側は非公開 uv プロジェクト（`tools/export-recipes/pyproject.toml`）に
-   まとめ、現行の family dependency group（anima / sbv2 / siglip2 …）をそちらへ移す。core は
-   path 依存（editable）で参照する。
-5. **`src/` layout**: core は再編と同時に `tools/exporter/src/karume/` へ（working tree の
-   偶発 import 防止・distribution 内容の可視化）。
-6. **互換 shim は作らない**（未リリース — 破壊的変更が既定）。旧 import パス・旧 CLI
-   コマンドはそのまま消す。
-7. **ライセンス**: core wheel には upstream モデル実装のコピーを入れない、と機械的に説明
-   できる状態を目標にする。pyproject に `license`（MIT）を明示。**upstream revision 単位の
-   ライセンス互換確認（人間の interview）はリリース gate**（backlog release）— 本再編は
-   その前提を作る作業で、確認そのものは含まない。
+1. **PyPI `karume` = the generic exporter core only.** It keeps IR / ops / dims / extents / shapes /
+   convert / normalize / quantize / act_quant / emit / verify / pipeline / goldens, the **generic dist
+   engine** (artifact placement, manifest, hashes, staging / swap (ADR 0052), generic checks) and the
+   **generic model-card renderer**. Only model-independent CLI commands stay (today `dist` / `migrate`
+   / `verify`); family commands and the script roster are removed.
+2. **Per-model recipes live in `tools/export-recipes/<family>/`** (outside the wheel, repository
+   only): export scripts, `patch_*`, reference pipelines, demos, quant measurements, the **dist
+   recipe** (source layout, model names, quant variants, repository names, card choice — today
+   `<family>/distribution.py`, driven by `tools/export-recipes/dist.py`), **card templates and
+   metadata**, family tests and `THIRD_PARTY_NOTICES.md` (provenance sits with the code, per family).
+   Helpers shared by several families that cannot move into core go to `tools/export-recipes/_shared/`.
+3. **Dependencies point one way, recipe → core** (core MUST NOT import a recipe). This is a **machine
+   check** — the boundary test `tools/exporter/tests/test_architecture_boundary.py` and the wheel
+   content inspection in CI (`.github/workflows/ci.yml`, step "Inspect distribution"): tests guard the
+   boundary, not convention.
+4. **Dependency management.** The recipes form a private uv project
+   (`tools/export-recipes/pyproject.toml`) that holds the family dependency groups (anima / sbv2 /
+   siglip2 …). Both projects are members of one uv workspace (`tools/pyproject.toml`, one lock and one
+   venv), through which the recipes depend on core.
+5. **`src/` layout.** Core lives in `tools/exporter/src/karume/` (prevents accidental imports from the
+   working tree and makes the distribution content visible).
+6. Withdrawn 2026-10-18: "no compatibility shims (unreleased — breaking changes by default); old
+   import paths and CLI commands are removed". It governed the one-time reorganisation, which is
+   complete; it is not a compatibility policy for the published package (which ships `karume migrate`).
+7. **License.** The goal is a state in which one can show mechanically that the core wheel contains
+   no copy of an upstream model implementation; `pyproject.toml` declares `license` (MIT). The
+   license compatibility check per upstream revision (a human review) is a release gate (superseded by
+   docs/release-runbook.md and ADR 0122 decision 6 on 2026-10-04: the check runs at every publication —
+   the per-family provenance item of the runbook checklist and the container license check before
+   upload). This reorganisation prepares the check and does not contain it.
 
-## 段階（各段で main を緑に保つ）
+## Stages
 
-1. **境界テスト先行**（ファイルは動かさない）: 変換 core 集合に対する「patch_* / family
-   import 禁止」gate を追加。gate の対象集合は段が進むたびに広げる。
-2. **横断 utility の回収**: `ROPE_BUFFER_NAMES` / `assert_rope_lifted` を `patch_anima` から
-   出す（モデル非依存なら core・そうでなければ `_shared/`）。
-3. **`dist.py` / `modelcard.py` の engine / recipe 分割**: family を 1 個ずつ移し、毎回
-   dist テスト緑で刻む。
-4. **family source + tests の移動**: `tools/export-recipes/<family>/` へ（Irodori の
-   sys.path 注入は family conftest へ）。
-5. **core の純化**: `src/` layout 化・CLI から family command 削除。
-6. **packaging / provenance**: license metadata・wheel/sdist 検査・family 別
-   `THIRD_PARTY_NOTICES.md` の骨組み。
-7. **CI 分離**: core = pytest + wheel build + 内容検査 / recipe = fixture ベースのテスト。
-8. **docs 同期**: ADR 0037 注記・CLAUDE.md 構成節・limitations（インストール版 CLI 制約の
-   解消）・backlog クローズ。
+Eight stages, each keeping `main` green: boundary test first → cross-family utilities out of
+`patch_anima` (now `karume/rope.py`) → dist / modelcard split into engine and recipe → family
+sources and tests moved → `src/` layout and CLI clean-up → packaging and provenance → CI split → docs
+sync. All eight are complete.
 
-## 検討した代替案
+## Alternatives considered
 
-- **B: recipe も個別 PyPI distribution 化** — version matrix と release 責任が増える。外部へ
-  recipe を安定 API として出すと決めた時点で A → B へ昇格できる（今は過剰）。
-- **C: 現状維持 + extras（`karume[anima]`）** — heterogeneous な上流ライセンスを 1 wheel に
-  集約し続け、モデル追加のたび core の release surface が膨らむ。汎用 exporter を出す目的に
-  最も合わない。
+- **B: each recipe as its own PyPI distribution** — more version matrix and release duty. A can be
+  promoted to B once recipes are offered as a stable external API (too much today).
+- **C: status quo + extras (`karume[anima]`)** — keeps heterogeneous upstream licenses in one wheel and
+  grows the core's release surface with every model. Least fit for publishing a generic exporter.
 
-## Consequences / 非目標
+## Consequences / non-goals
 
-- **将来案（記録のみ・2026-08-15 ユーザー意向）**: export-recipes は最終的に**別リポジトリ**へ
-  分離する可能性がある（案 B〈別配布物〉のリポ版）。現時点では非目標 — ただしリポ内の
-  相対結合（`_shared/paths.py` の REPO_ROOT・runtime 適合 fixture の共有・goldens 出力先）を
-  これ以上深くしない判断材料として記録する。
+- **Future option (record only — the maintainer's intent, 2026-08-15):** `export-recipes` may move to
+  a **separate repository** (the repository form of option B). Not a goal today; recorded so that
+  in-repository coupling (`REPO_ROOT` in `_shared/paths.py`, shared runtime conformance fixtures, the
+  goldens output path) does not grow deeper.
+- The three JSR packages (runtime / hub / models) and the root `models/` (distribution mirror) are
+  **out of scope** (the boundary is already orthogonal); so was `examples/`, removed on 2026-10-16
+  (`bb35fe2a`).
+- Moving the IR conformance fixtures (`packages/runtime/tests/fixtures/`) to a neutral location is
+  **deferred** (not needed for the split; revisit a neutral `spec/` directory when demand appears).
+- Repository topology (`paths.py`) belongs to the recipe side (`tools/export-recipes/_shared/paths.py`);
+  the core API keeps taking `Path` arguments.
+- The exporter README was rewritten for the new layout after the move (only minimal edits at G1).
 
-- JSR 3 パッケージ（runtime / hub / models）・ルート `models/`（配布形置き場）・`examples/`
-  は**本再編の対象外**（境界は既に直交している）。
-- IR 適合 fixture（`packages/runtime/tests/fixtures/`）の中立位置への移動は**保留**
-  （recipe 分離に必須ではない — 需要が出たら `spec/ir-v1/` 案を再訪）。
-- `karume/paths.py`（repo topology 依存）は recipe 側の関心事へ — core API は Path を
-  受け取る形を保つ。
-- exporter README は移動後の構成で全面改稿する（G1 では最小修正に留めた）。
+## Addendum (2026-10-11) — model family names and the default distribution owner kept in core
 
-## 追記（2026-10-11）— core に残るモデル系列名と配布先の既定値
+Two exceptions to decision 1 (no model-specific knowledge in core) are allowed; the comments of the
+boundary test follow this scope.
 
-決定 1（core にモデル固有の知識を置かない）の例外として、次の 2 つを core に残すことを認める。
-境界テスト（`tools/exporter/tests/test_architecture_boundary.py`）のコメントもこの範囲で書く。
-
-1. **`karume.migrate.PLE_OWNER`**（pipeline 名 `gemma4` / `gemma4-qat` → PLE sidecar の畳み先の部品名）。
-   旧形式（`karume/4`）の一度きりの移行に限った例外である。旧 manifest は PLE の持ち主を宣言する欄を
-   持たないので、移行 CLI が表として持つ（持ち主の記録は ADR 0108 追記 3 の 6）。新しい配布形はこの表を
-   使わない。
-2. **`karume.modelcard.HF_OWNER`**（配布先の HF アカウントの既定値）。モデルカードの使い方の例と
-   `karume dist` のリポ名の既定に使う。`--repo` で上書きできるので、正しさの欠陥ではない。
+1. **`karume.migrate.PLE_OWNER`** (pipeline name `gemma4` / `gemma4-qat` → the component that absorbs
+   the PLE sidecar), only for the one-time migration of the old format (`karume/4`), whose manifest
+   has no field for the PLE owner (ADR 0108 addendum 3, item 6). New distributions do not use it.
+2. **`karume.modelcard.HF_OWNER`** (default HF account): used in the model card's usage example and
+   the default repository name of `karume dist`; `--repo` overrides it, so it is no correctness defect.

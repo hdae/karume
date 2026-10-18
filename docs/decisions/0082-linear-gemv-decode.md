@@ -1,313 +1,313 @@
-# 0082 — linear の GEMV 族（decode M=1 × 重み i4・既定経路・ビット同一）
+# 0082: GEMV kernel family for linear (decode M=1 × i4 weights, reference path, bit-identical)
 
-- Status: accepted（2026-08-31・perf-ledger K-11 の実施。スパイクで機序・利得・ビット同一を
-  先に実測してから本実装 — ADR 0060 と同じ進め方）
-- 対象: runtime（`src/kernels/linear-gemv.ts` 新規 / `src/runtime/recipe-builder.ts` の
-  `buildLinear`）。IR 仕様・エクスポータ・配布資産・公開 API は無変更（再 export 不要）。
-- 関連: ADR [0022](0022-gemm-register-blocking.md)（決定 3 = 縮約順の数値契約。本 ADR は
-  その射程を**カーネル族が増えた形へ延長**する — 撤回はしない）/
-  [0069](0069-packed-w4-storage.md)（i4 格納・group scale・nibble 順）/
-  [0058](0058-numerics-opt-in-contract.md)（数値 opt-in 契約 — 本 ADR は**席を使わない**。
-  理由は決定 3）/ [0021](0021-gpu-timing-diagnostics.md)（キー別 GPU 実時間 = 実測の観測点）
-- 需要の実測:
-  [research/2026-08-30-gemma4-decode-wallclock.md](../research/2026-08-30-gemma4-decode-wallclock.md)
-  （decode 1 token ≈85ms の 85% = `linear:…:wi4g32` 276 本の 73.3ms。§7 が本 ADR の実測追記）
+- Status: accepted (2026-08-31; perf-ledger K-11 — the spike measured mechanism, gain and bit
+  identity before the implementation, as in ADR 0060); partly superseded by
+  [0098](0098-linear-gemv-parallel.md) (decision 5, 2026-09-13: K-parallel reduction adopted as an
+  opt-in); the storage clause of decision 4 opened by addenda 4, 6 and 7 and by
+  [0131](0131-bf16-weight-execution.md) (bf16); re-graded 2026-10-18 to SHOULD: the `v4` clause of
+  decision 4 and the 256-element cap of addendum 5.
+- Scope: runtime (`src/kernels/linear-gemv.ts`, `buildLinear` in
+  `src/runtime/recipe-builders/linear.ts`). IR, exporter, distributed assets and public API
+  unchanged (no re-export).
+- Related: ADR [0022](0022-gemm-register-blocking.md) (decision 3, the numerics contract of the
+  reduction order — this ADR **extends** its reach to a second kernel family, it does not withdraw
+  it) / [0069](0069-packed-w4-storage.md) (i4 storage, group scale, nibble order) /
+  [0058](0058-numerics-opt-in-contract.md) (numerics opt-in contract — this ADR **adds no option**,
+  see decision 3) / [0021](0021-gpu-timing-diagnostics.md) (per-key GPU time, the measuring point).
+- Demand: [research/2026-08-30-gemma4-decode-wallclock.md](../research/2026-08-30-gemma4-decode-wallclock.md)
+  (decode ≈85 ms/token, 85% of it 73.3 ms in 276 `linear:…:wi4g32` dispatches; §7 holds this ADR's
+  measurements).
 
 ## Context
 
-Gemma 4 E2B の decode は 1 token ≈85ms で、その 8 割超を `linear` の M=1 実行が握っていた。
-起票時（K-11）の読みは「実効読み ≈16GB/s = 理論帯域の 2% 弱だから帯域の使い方が悪い」だったが、
-**スパイクで機序を採り直したところ帯域飢餓ではなかった**:
+Gemma 4 E2B decode took ≈85 ms per token, over 80% of it in `linear` at M=1. The K-11 entry read
+"effective ≈16 GB/s, under 2% of peak bandwidth, so bandwidth is used badly", but **the spike showed
+it was not bandwidth starvation**:
 
-- 所要は **k に比例し n にほぼ非依存**。重みが L2 に収まる小形でも 1 dispatch あたりの時間が
-  ほとんど変わらない（帯域が律速なら n = 転送量に比例するはず）。
-- 内訳は「K タイル 16 ごとの二重 `workgroupBarrier()`」で、**重み読みのレイテンシがタイル本数
-  ぶん逐次に露出**する形（実測 `k / 16 × ≈1.3µs`）。加えて M=1 のバケット幾何 `M16N16`
-  （64 スレッド）は**出力を書くのが 4 スレッドだけ**で、共有 A タイル 16 行のうち 15 行は
-  0 埋めの死荷重になっている。
+- Time is **proportional to k and almost independent of n**; even shapes whose weights fit in L2 take
+  about the same time per dispatch (a bandwidth bound would scale with n).
+- The cause is the double `workgroupBarrier()` per K tile of 16: **the latency of weight reads is
+  exposed serially, once per tile** (measured `k / 16 × ≈1.3 µs`). The M=1 bucket geometry `M16N16`
+  (64 threads) also has **only 4 threads writing output**; 15 of the 16 rows of the shared A tile are
+  zero-filled dead weight.
 
-つまり既定の GEMM 骨格（共有タイル + barrier）は M=1 では構造的に噛み合わず、幾何の掃引で
-届く範囲の話ではない。ここが「幾何を選び直す」ではなく「別のカーネル族を足す」の分岐点。
+The GEMM skeleton (shared tiles + barriers) does not fit M=1 structurally, and no geometry sweep
+reaches it. This is the point where a second kernel family is added instead of a new geometry.
 
 ## Decision
 
-### 1. `linear` に 2 本目のカーネル族 `linear_gemv` を足す（既定経路・opt-in 席なし）
+### 1. `linear` gets a second kernel family, `linear_gemv` (reference path, no opt-in option)
 
-`src/kernels/linear-gemv.ts` に、共有メモリと barrier を持たない **1 スレッド = 1 出力列**の
-GEMV を置く。束縛番号・uniform（`{m,n,k}` 3 語）・出力実体は既定経路と同一で、変わるのは
-要素型 2 つ（重み `vec4<u32>` = 16 B 単位読み / 出力 `f32` のスカラ書き）と担当割りだけ。
-重み語を `unroll` 本まとめて先に発行してメモリ並列度を作り、`n` 本の独立した縮約で遅延を隠す。
+`src/kernels/linear-gemv.ts` holds a GEMV with **one thread per output column**, without shared
+memory or barriers. Binding numbers, the uniform (`{m,n,k}`, 3 words) and the output are the same as
+the GEMM path; only two element types (weights as `vec4<u32>`, 16-byte reads; scalar `f32` output)
+and the work assignment change. `unroll` weight words are issued ahead to create memory parallelism,
+and `n` independent reductions hide the latency.
 
-生成パラメタ（`LinearGemvVariant` = `cols` 列 / workgroup × 語 `unroll` 本先読み）の
-**唯一の選択点は `defaultLinearGemvVariant()`**（既定 `c32 u4`）。i8a8 側・f32 骨格側の幾何と
-同じ規律で、実行時オートチューンは採らず、変種は判別子としてパイプラインキーに載る。
+The generation parameters (`LinearGemvVariant` = `cols` columns per workgroup × `unroll` words read
+ahead) have **one selection point, `defaultLinearGemvVariant()`** (default `c32 u4`; addendum 10 adds
+one shape). As for the i8a8 and f32 geometries, there is no run-time autotuning, and the variant is
+part of the pipeline key.
 
-### 2. 選択点は 2 段になる（gemm-geometry の「唯一の選択点」MUST の射程を明示する）
+### 2. Selection has two stages (the reach of gemm-geometry's "single selection point" MUST)
 
-`src/kernels/gemm-geometry.ts` は「`defaultGemmGeometry` が唯一の選択点」「`gemmGeometryForRows`
-は純関数」と書いているが、その射程は **GEMM 骨格の内側**（どの幾何でタイルを切るか）である。
-本 ADR で linear の選択は次の 2 段になる:
+`src/kernels/gemm-geometry.ts` says "`defaultGemmGeometry` is the single selection point" and
+"`gemmGeometryForRows` is pure"; their reach is **inside the GEMM skeleton** (which geometry cuts the
+tiles). With this ADR the selection for linear has two stages:
 
-1. **族の選択** — `buildLinear` の 1 箇所。プラン時 shape と Session ノブだけの述語。
-2. **骨格内の幾何選択** — `gemmGeometryForRows`（族 1 = 既定経路に入った後だけ）。
+1. **Family selection** — in one place, `buildLinear`; a predicate over plan-time shapes and Session
+   options only.
+2. **Geometry selection inside the skeleton** — `gemmGeometryForRows` (only after the GEMM family is
+   chosen).
 
-MUST: どちらの段も**プラン時 shape の純関数**で、選択結果は必ずパイプラインキーへ載る
-（族名 `linear_gemv` / 変種 `c32u4` / group `g32`）。ADR 0022 の「実行時オートチューン禁止」と
-「同一キー → バイト同一 WGSL」はこの 2 段構成でも 1 文字も緩まない。
-MUST: 族を増やすたびに段が増える形にはしない — 族の選択は `buildLinear` の 1 箇所に閉じる。
+MUST: both stages are **pure functions of plan-time shapes**, and the result is always in the
+pipeline key (family `linear_gemv`, variant `c32u4`, group `g32`). ADR 0022's "no run-time
+autotuning" and "same key → byte-identical WGSL" are not relaxed by one character.
+MUST: adding a family does not add a stage — family selection stays in one place, `buildLinear`.
 
-### 3. 数値の席 = 既定経路（ADR 0058 の opt-in 席は使わない）
+### 3. Numerics: the reference path (no ADR 0058 opt-in option)
 
-ADR 0058 の席の対象は「**数値を変える**最適化」。本族は変えないので席を作らない
-（ADR 0060 の決定 4 と同じ判断）。ビット同一の根拠は ADR 0022 決定 3 が幾何に許した自由と
-同型で、**変わるのは担当割りだけ**:
+ADR 0058 options are for optimizations that **change numerics**. This family does not, so it adds no
+option (the same judgement as ADR 0060 decision 4). Bit identity rests on the same freedom ADR 0022
+decision 3 grants geometries: **only the work assignment changes**.
 
-- 1 出力要素あたりの縮約は k 昇順の逐次（語の昇順 × 語内の要素昇順）
-- 積和の字面は `acc = acc + a * b`
-- 重みの復元は `f32(i32(u) − 8) * scale` の成分ごと f32 乗算（`dequant4` と同一）
-- bias は縮約の外で最後に 1 度だけ加算
+- Each output element is reduced sequentially in ascending k (ascending words × ascending elements
+  within a word).
+- The multiply-add is written `acc = acc + a * b`.
+- Weights are restored as `f32(i32(u) − 8) * scale`, a per-component f32 multiply (same as
+  `dequant4`).
+- The bias is added once, after the reduction.
 
-MUST: 先読み（`unroll`）は語をまとめて**読む**だけで、積和は語の昇順のまま。語をまたいで
-積和を混ぜた瞬間に契約が割れる。
-NOTE: f32 縮約に順序非依存の理論保証は無いので、ビット同一は gemm-geometry と同じく
-**実測命題**（下の検証）。ADR 0058 追記 2026-08-29 の一般則「ビット同一を根拠に自動選択する
-なら当該 device で機械検証できていること」に対応するのが `gpu_linear_gemv_test.ts` の u32 門で、
-こちらは**変種選択ではなく族選択が形（shape）だけで決まる**ぶん、カナリアのような実行時の
-判定は要らない（M2 実機での確認は未了 — known-issues の Metal 節）。
+MUST: read-ahead (`unroll`) only **reads** words together; the multiply-adds stay in ascending word
+order. Mixing multiply-adds across words breaks the contract.
+NOTE: f32 reduction has no theoretical order independence, so bit identity is, as in gemm-geometry,
+a **measured claim** (Verification). The ADR 0058 addendum of 2026-08-29 ("automatic selection that
+claims bit identity needs a machine check on that device") is met by the u32 check in
+`packages/runtime/tests/gpu_linear_gemv_test.ts`; since the family is chosen by shape alone, no
+run-time canary is needed. Apple M2: see addenda 1 to 3.
 
-### 4. 門（適格判定）は実測した範囲に留める
+### 4. Eligibility stays inside the measured range
 
-`buildLinear` が族 2 を選ぶ条件は `m === 1` × 重み `i4` × 計算 `f32` × `v4` ×
-`groupSize % 32 === 0` × `k % 32 === 0`。前 4 つは掃引した組み合わせそのもの、後ろ 2 つは
-カーネルの構造要件（重み 1 語 = 32 要素が group を跨がない / 重み束縛 `vec4<u32>` の 16 B 整列。
-`k % 32` は ADR 0069 決定 2 の「行長は group_size の倍数」から従うが、束縛の要件として言い直す）。
+`buildLinear` picks the GEMV family when `m === 1` × `i4` weights × `f32` compute × `v4` ×
+`groupSize % 32 === 0` × `k % 32 === 0`. The first four are the swept combination; the last two are
+structural (one weight word of 32 elements does not cross a group; the 16-byte alignment of the
+`vec4<u32>` binding — `k % 32` also follows from ADR 0069 decision 2, restated as a binding
+requirement).
 
-MUST: i8 / f16 格納や `v4` でない形へ門を広げない。同じ機序は効くはずだが**実測が無い**ため、
-`gemmGeometryForRows` の「掃引の実測点の外側を補間で埋めない」MUST と同じ規律を適用する。
-NOTE: `v4`（`n % 4 == 0`）は GEMV 自身の要件では**ない**（出力はスカラ書き）。門に残して
-あるのは実測の範囲に留めるためで、外すこと自体は将来の掃引の対象。
+The eligibility SHOULD NOT be widened to shapes that are not `v4` until they are measured, by the
+same discipline as `gemmGeometryForRows` ("do not fill points outside the sweep by interpolation").
+(Re-graded 2026-10-18 to SHOULD: the clause keeps the eligibility inside the measured range; a sweep
+plus the u32 check can open it.) The clause also closed i8 / f16 storage (superseded for storage by
+addendum 4 on 2026-09-06 for i8, addenda 6 and 7 on 2026-09-11 for f16 and f32, and ADR 0131 on
+2026-10-17 for bf16).
+NOTE: `v4` (`n % 4 == 0`) is **not** a GEMV requirement (the output is written as scalars); it stays
+only to keep to the measured range, and removing it is a matter for a future sweep.
 
-### 5. split-K は不採用（記録として保持）
+### 5. split-K is not adopted (kept as a record)
 
-1 出力列を複数スレッドで分担し部分和を足し直す split-K も実装して測った。**ビット同一を失う
-（縮約順が変わる = ADR 0058 の席が必須になる）代償に対し、上乗せは本ビット同一版比 ×1.40 のみ**
-で、その先はフェンス床 ≈11ms（perf-ledger H-2）が支配へ戻るため壁時計の改善は頭打ちになる。
-数値契約を割って得るものが無いので**採らない**。実装は残さない（未リリース = 死蔵コード禁止）。
+(Superseded by ADR 0098 on 2026-09-13: K-parallel reduction, `SessionOptions.linearGemvReduce:
+"parallel"`, is an opt-in option, and the gemma4 default preset `i4-fast` declares it —
+`tools/export-recipes/gemma4/distribution.py`, ADR 0128; ADR [0101](0101-linear-gemv-subgroup.md)
+adds a subgroup variant.)
 
-## 検証（全て実測済み・RTX 3080 Ti / Deno 2.9.6 / Linux・2026-08-30〜31）
+split-K (several threads share one output column and sum partial results) was implemented and
+measured. **It loses bit identity (a different reduction order needs an ADR 0058 option) for only
+×1.40 over the bit-identical version**, beyond which the fence floor ≈11 ms (perf-ledger H-2)
+dominates and the wall clock flattens (RTX 3080 Ti, Deno). With nothing gained for breaking the
+contract, it was **not adopted** and not kept in the code.
 
-- **利得**: 対象カーネル単体で census 加重 62.38ms → 7.38ms（**×8.45**・kill 基準 ×1.3 を
-  大きく上回る）。実グラフの decode GPU 実時間 86ms → 20ms、decode 壁 84.2 → 32.5ms/token
-  （**×2.59** — 残りはフェンス床と非 linear へ移る）。
-- **ビット同一（スパイク）**: 単体 16 形（census 実 12 形 + 端 4 形 = `n=100 k=1568` /
-  `n=1500 k=1536` / `n=36 k=288` / `n=4 k=32`）で**全要素 u32 一致**。実グラフでは greedy
-  parity の margin 3 値が完全一致（token 列だけでなく決定の余裕まで不変）。
-- **ビット同一（常設門）**: `tests/gpu_linear_gemv_test.ts` — 6 形について M=1（GEMV）と
-  M=2（既定 M16N16）の先頭行を **u32 完全一致**で突き合わせる（`gpu_gemm_skinny_test.ts` の
-  バケット跨ぎ門を族跨ぎへ延長した形）+ CPU 参照との allclose（比較相手が GEMV へ流れていた
-  場合の恒真化を排除）。形は**本番 12 形が一度も踏まない端**を持つ: `n % 32 != 0`（最終
-  workgroup が部分的）・`units % 4 != 0`（先読みループの端数）・`units < 4`（先読みループが
-  一度も回らない）。
-- **故障注入 2 件**（設計時に実測）: ①group scale の shift を 1 段ずらす → u32 門が落ちる
-  ②語内の積和を「上位 nibble 先」へ並べ替える（**積の集合は同じで加算順だけが変わる**）→
-  u32 門だけが落ち、差は **1 ULP**（`0xc083c922` vs `0xc083c921`）で allclose は素通りする。
-  「u32 完全一致でなければこの門は意味を持たない」ことの実証。
-- **codegen 決定性**: `fixtures/wgsl/linear_gemv_g32.wgsl` / `_g64.wgsl` の 2 本
-  （g32 では scale 添字の `(unit · 32) >> shift` が恒等式へ縮むので、shift の焼き込みが
-  効いていることは g64 側でしか見えない = **対で置くのが条件**）。既存の `linear_wi4*` が
-  1 バイトも動かないことも同じ列挙が検出器。
-- **門そのもの**: パイプラインキーの側から、`M=1 × i4 × g32 × v4` でだけ `linear_gemv:` が
-  立ち、条件を**1 つずつだけ**外した 3 形（M=2 / group 16 / n=33）は従来の `linear:` キーの
-  ままであることを実 GPU で検査。
+## Verification (measured on RTX 3080 Ti / Deno 2.9.6 / Linux, 2026-08-30 to 31)
 
-## 帰結・残件
+The u32 checks now run in the Vitest GPU lane on Node + Dawn (ADR [0129](0129-test-layout-and-lanes.md)).
 
-- decode の律速はカーネルからフェンス床（perf-ledger H-2 ≈11ms）と非 linear 側へ移った。
-  research §5 が「カーネル律速が解消した後に再評価」と書いていた**レンズ L-7 / L-12**
-  （dispatch ダイエット / prefill chunkLength — LLM レンズの採番で perf-ledger の L-7 とは
-  別物）の復活条件はこれで満ちる。再評価そのものは本 ADR の射程外。
-- **prefill（M=32）は本族の対象外**（GEMV は M=1 専用）。K-11 起票時の「prefill も同カーネルで
-  キー分岐の設計に含める」は本 ADR では扱わない — 実測上 prefill は M=32 で GEMM が畳めており
-  5.2ms/token（decode の 1/16）で、機序が別。
-- **Metal（Apple GPU）未確認**: 動的 `vec4` 添字は避けてある（ACTIVE_DESIGN の落とし穴）が、
-  数値も動作も M2 実機では未検証（known-issues の Metal 節に手動確認項目として記載）。
-- 診断・census で本族を数えるときは `linear:` 前置ではなく **`linear_gemv:` 前置**を見る
-  （族名が変わったので、`startsWith("linear:")` のフィルタは本族を拾わない）。
+- **Gain**: the kernel alone, census-weighted, 62.38 ms → 7.38 ms (**×8.45**, far over the ×1.3 kill
+  criterion). Real graph: decode GPU time 86 → 20 ms; decode wall 84.2 → 32.5 ms/token (**×2.59** —
+  the rest moves to the fence floor and non-linear ops).
+- **Bit identity (spike)**: 16 shapes alone (12 census shapes + 4 edge shapes, `n=100 k=1568`,
+  `n=1500 k=1536`, `n=36 k=288`, `n=4 k=32`) agree **as u32 on every element**. On the real graph the
+  three margins of greedy parity match exactly.
+- **Bit identity (permanent check)**: `gpu_linear_gemv_test.ts` compares GEMV output with the leading
+  rows of the GEMM path **as exact u32** (`gpu_gemm_skinny_test.ts`'s cross-bucket check extended
+  across families; the comparison side runs at M = 65 since addendum 5, M=2 before), plus allclose
+  against a CPU reference (no tautology if both sides ran GEMV). The shapes cover **edges production
+  never hits**: `n % 32 != 0`, `units % 4 != 0` (read-ahead remainder), `units < 4` (no read-ahead).
+- **Fault injection**: ① a group-scale shift off by one fails the u32 check; ② "upper nibble first"
+  in-word order (**same products, different addition order**) fails only the u32 check, by **1 ULP**
+  (`0xc083c922` vs `0xc083c921`), while allclose passes — the check means something only as exact u32.
+- **Codegen determinism**: `fixtures/wgsl/linear_gemv_g32.wgsl` and `_g64.wgsl` (with g32 the scale
+  index `(unit · 32) >> shift` collapses to an identity, so the baked shift is visible only with g64 —
+  **the pair is the condition**). The same enumeration detects any byte change in `linear_wi4*`.
+- **Eligibility itself**: on a real GPU, `linear_gemv:` appears in the pipeline key only for the
+  eligible shapes, and shapes that drop **exactly one** condition (M = 65 since addendum 5, group 16,
+  n = 33) keep the `linear:` key.
 
-## 追記 1（2026-09-01 — Metal 実測: ビット同一の実測命題は M2 で 1 ULP 破れる・既定維持）
+## Consequences
 
-M2 実機で u32 完全一致門が 1 ULP 差で落ちる（`0x414b3249` vs `0x414b3248`・整除形
-k128 n64 g32・門キー検査は緑・Linux / Vulkan は緑）。切り分け:
-`gpu_gemm_skinny_test.ts` のバケット跨ぎ u32 門は M2 で**緑** — 「Metal では別カーネル間の
-ビット同一が一般に成立しない」は棄却され、**GEMV 固有**と確定。機序の見立て（未確定）:
-既定 GEMM の linear は i4 の逆量子化を共有 B タイルへ**格納してから** MAC が読む
-（workgroup memory が丸め障壁になり fp contraction が跨げない — ACTIVE_DESIGN の
-「丸め障壁は実測依存」Pitfall と同じ概念）のに対し、GEMV は `x × (f32(q−8) × ws)` を
-1 式で書くため MSL 側の contraction が丸め点を変えうる（naga → MSL の FMA 契約 —
-known-issues Metal 節の 1 ULP エピローグ問題と同じクラス）。
+- Decode is now bound by the fence floor (perf-ledger H-2, ≈11 ms) and non-linear ops. The revival
+  condition of the LLM lenses L-7 / L-12 (dispatch diet / prefill chunkLength; not perf-ledger's L-7)
+  is met; re-evaluating them is out of scope.
+- **Prefill (M=32) was out of scope** (GEMM at 5.2 ms/token, a different mechanism); addendum 5 later
+  extended the family to M ≤ 64. **Metal**: dynamic `vec4` indexing is avoided; see addenda 1 to 3.
+- Diagnostics and the census count this family by the **`linear_gemv:` prefix**; a
+  `startsWith("linear:")` filter does not catch it.
 
-裁定（2026-09-01 ユーザー実機実測を受けて）: **既定経路は維持**する。
+## Addendum 1 (2026-09-01) — Metal: the bit-identity claim breaks by 1 ULP on M2; the default stays
 
-1. 製品契約は破れない — margin 門（≥2.5e-2）≫ 1 ULP で、chat e2e が M2 で golden 同一
-   token 列を実測済み。decode 高速化も M2 で有効。
-2. u32 門の目的はカーネル退行の検出で、それは CI（Linux / Vulkan）で立ち続ける — M2 の赤は
-   attention i8a8 parity と同じ「既知の赤」扱い（known-issues が消費側 doc）。
-3. Metal で GEMV を無効化する代替は decode ×8 退行で不均衡。
+On an M2 the exact u32 check fails by 1 ULP (`0x414b3249` vs `0x414b3248`, k128 n64 g32; the key
+check is green; Linux / Vulkan are green). The cross-bucket u32 check of `gpu_gemm_skinny_test.ts` is
+green on M2, so the break is **specific to GEMV**. Suspected mechanism (unconfirmed): the GEMM path
+stores the i4 dequantization in the shared B tile before the MACs read it (workgroup memory acts as a
+rounding barrier), while GEMV writes `x × (f32(q−8) × ws)` as one expression that MSL contraction may
+round differently (the same class as the 1-ULP epilogue issue in the Metal section of
+`docs/known-issues.md`).
 
-決定 3 の実測命題は「**Vulkan / Linux で成立・Metal は 1 ULP 帯**」へ精密化する。根治候補
-（未着手）= GEMV の逆量子化に明示の丸め点を入れて contraction を遮る式形の探索
-（M2 実機ループが要る — known-issues の根治候補と同席）。
+Ruling (2026-09-01): **the reference path keeps GEMV**, on three grounds: (1) the product contract
+holds — the margin check (≥2.5e-2) is far above 1 ULP, and the chat e2e was golden-identical on the
+M2 with the decode speed-up in effect there; (2) the u32 check exists to detect kernel regressions
+and keeps doing so on Linux / Vulkan, with the M2 red treated as a known red; (3) disabling GEMV on
+Metal would cost ×8 in decode, out of proportion. Decision 3's claim is refined to "**holds on Vulkan / Linux; Metal is within 1 ULP**". The
+root-cause candidate (an explicit rounding point in GEMV's dequantization) is not started.
 
-## 追記 2（2026-09-01）: 追記 1 の根拠 1 の撤回と裁定の維持
+## Addendum 2 (2026-09-01) — ground 1 of addendum 1 withdrawn
 
-追記 1 の根拠 1「chat e2e が M2 で golden 同一 token 列を実測済み・decode 高速化も M2 で有効」
-は**実走の裏付けが無いまま書かれていた**（M2 で実測されたのはカナリア / reduce parity /
-skinny / gemv 門のみ — ユーザー指摘で発覚・撤回）。実際には gemma4 は M2 で **prefill logits が
-決定的に NaN** になり 1 token も生成できない（GEMV とは独立・波前コードでも再現 =
-最初から未実測だった未解決バグ — known-issues「gemma4 の prefill logits が Metal で NaN」節）。
+Ground 1 (chat e2e golden on M2) had not been run (gemma4 prefill then gave NaN on Metal, a separate
+bug); the ruling stood on grounds 2 and 3.
 
-**裁定（既定 GEMV 維持）は根拠 2・3 で維持する** — u32 門の目的は CI（Linux / Vulkan）での
-退行検出であり、Metal の 1 ULP は既知の赤のまま。margin 門が 1 ULP を吸収するという実測命題は
-**NaN バグの解消後に M2 で立て直す**（それまで「M2 で品質健全」を本 ADR の根拠として使わない）。
+## Addendum 3 (2026-09-02) — the claim re-established on M2
 
-## 追記 3（2026-09-02）: 実測命題の M2 での立て直し — 成立
+After the NaN fix (`tanh_stable`) the gemma4 chat e2e (temperature 0, equal to the Linux golden)
+passed on M2 with the u32 check still 1 ULP red (HEAD `2b096c4`): the output does not move. Grounds
+1–3 hold.
 
-追記 2 が保留した「margin 門が GEMV の 1 ULP 差を吸収する（貪欲デコードの出力が動かない）」を、
-NaN バグ（`tanh_stable` で解消済み）の後に M2 で実測した。
+## Addendum 4 (2026-09-06) — eligibility widened to i8 storage: lm_head (M=1) joins GEMV (perf-ledger K-16)
 
-- 環境: Apple M2（24GB）・Deno 2.9.4・HEAD `2b096c4`（メモリ管理波 Phase A 後）。
-- 実測: `e2e_gemma4_chat_test.ts`（`fromAssets` → `chat` の温度 0 出力が Linux で採った greedy
-  golden と文字単位一致 — 6 門）が M2 で全緑。同時に `gpu_linear_gemv_test.ts` の u32 完全一致門は
-  追記 1 と同一署名（`0x414b3249` vs `0x414b3248`）で赤のまま = 1 ULP 差は残っているのに出力は
-  動かない。
-- 結論: 追記 1 の根拠 1 は「M2 で実走の裏付けあり」の形で立て直せた。裁定（既定 GEMV 維持）は
-  根拠 1〜3 が揃った状態で維持する。u32 門は引き続き CI（Linux / Vulkan）の退行検出器で、Metal の
-  1 ULP は known-issues の既知の赤。
+Decision 4 closed i8 × f32 × M=1 for lack of measurements; it was measured and opened (`5ddd186`).
 
-## 追記 4（2026-09-06）: 門を i8 格納へ広げる — lm_head（M=1）を GEMV 族へ（perf-ledger K-16）
+- Target: gemma4 decode lm_head (i8 [262,144 × 1,536], per-output-channel scale), 24% of decode GPU
+  time (5.3 ms/token) on the GEMM skeleton at M=1. Same mechanism as decision 1, independent of the
+  storage dtype.
+- Implementation: a storage axis (one word = 32 i4 or 16 i8 elements; `linearGemvUnit(storage)` is the
+  single derivation point). i8 restores as `f32(q) * scale` with the per-channel scale outside the
+  reduction (ADR 0019); order and form per decision 3 — **bit-identical to the GEMM path** (u32 check
+  on 6 i8 shapes + exact gemma4 golden). i4 WGSL is byte-unchanged.
+- Eligibility: `m === 1 × i8 × f32 × v4 × k % 16 === 0` (no group condition). `n % 4 != 0` and
+  `k % 16 != 0` stay on the GEMM path per decision 4.
+- Measured ([research 2026-09-06](../research/2026-09-06-gemv-i8-k16.md)): kernel 5.317 → 1.056 ms
+  (×5.03); decode GPU 22.8 / 21.8 → 17.5 / 17.0 ms/token (−21 to −24%); wall −3.2 to −4.8%. `c32 u4`
+  is best.
+- The remaining i4 down-projection and ①QK (K-14) reduce k sequentially in one thread and cannot be
+  split without changing the order, so they need an opt-in option design (done in ADR 0098).
 
-決定 4 が「実測が無い」を理由に閉じていた i8 × f32 × M=1 を、実測して開いた（`5ddd186`）。
+## Addendum 5 (2026-09-07) — eligibility widened to 1 ≤ M ≤ 64: row-block variant (perf-ledger K-21)
 
-- 対象: gemma4 decode の lm_head（i8 [262,144 × 1,536]・出力チャネルごと scale）。GEMM 骨格の M=1 で
-  decode GPU の 24%（5.3 ms/token）を占めていた。機序は決定 1 と同じ（K タイルごとの barrier が
-  重み読みのレイテンシを逐次に露出する）で、格納 dtype に依らない。
-- 実装: 族に格納の軸を足した（1 語 = i4 32 要素 / i8 16 要素・`linearGemvUnit(storage)` が門と
-  カーネルの唯一の導出点）。i8 の復元は既定経路と同じ字面 `f32(q) * scale` の要素ごと乗算で、
-  scale は出力チャネルごと 1 本を縮約の外で束ねる（ADR 0019）。縮約順・積和の字面・bias の
-  足し順は決定 3 のまま = **既定経路とビット同一**（門 = `gpu_linear_gemv_test.ts` の i8 6 形
-  u32 完全一致 + gemma4 golden 厳密一致）。i4 の生成 WGSL はバイト不変。
-- 門: `m === 1 × i8 × f32 × v4 × k % 16 === 0`（i8 は group を持たないので group 条件は無い）。
-  `n % 4 != 0` / `k % 16 != 0` は決定 4 の規律どおり既定経路のまま。
-- 実測（[research 2026-09-06](../research/2026-09-06-gemv-i8-k16.md)）: 単体 5.317 → 1.056 ms
-  （×5.03・kill 線 ×1.3）、実走 decode GPU 22.8 / 21.8 → 17.5 / 17.0 ms/token（−21〜−24%）、壁
-  −3.2〜−4.8%（prefill + 29 token）。変種は c32 u4 が最良（c64 / c128 / c256・u2 / u8 はいずれも遅い）。
-- 決定 5（split-K 不採用）は変わらない。残る i4 GEMV の down-proj と ①QK（K-14）は「k 方向が
-  1 スレッド逐次」で、縮約順を変えずに割る手が無いため opt-in 席の設計になる。
+Decision 4 closed M ≥ 2 for lack of measurements; it was measured and opened (`5701262`).
 
-## 追記 5（2026-09-07）: 門を 1 ≤ M ≤ 64 へ広げる — 行ブロック変種（perf-ledger K-21）
+- Demand: M ≥ 2 linear fell to the GEMM skeleton (M16N16 for M ≤ 64) and paid an **M-independent fixed
+  cost of 65–67 ms** over gemma4 E2B's 276 dispatches (short chat prefill, speculative verify —
+  [research 2026-09-07 §7.2](../research/2026-09-07-codex-perf-review-followup.md)). Same mechanism.
+- Implementation ([research 2026-09-07-gemv-rows-k21](../research/2026-09-07-gemv-rows-k21.md)): a
+  **row-block variant** `linearGemvRowsWgsl` (one thread = one column × `rows` rows; weight word and
+  scale read once and multiplied with each row's x; `ceil(m / rows)` y tiles). M=1 keeps its variant
+  (decode WGSL byte-unchanged, guarded by the fixtures).
+- Selection stays two pure stages over plan-time shapes (decision 2's MUST unchanged): family in
+  `buildLinear` (1 ≤ m ≤ `LINEAR_GEMV_MAX_ROWS` = 64, other conditions as decision 4 / addendum 4);
+  variant by `defaultLinearGemvRowsVariant(storage, m, n)` (`r<rows>` in the key). `rows` starts at
+  the largest power of two ≤ m under the cap (i4 8 rows / i8 16 rows) and halves until
+  `n · ceil(m / rows)` threads reach 16384. That target is the saturation point of the reference
+  device (RTX 3080 Ti), not a portable optimum (`docs/limitations.md`;
+  `SessionOptions.linearGemvRowsThreadTarget` overrides it).
+- Numerics: reference path (decision 3 extended to row blocks). Per-element reduction order, product
+  pairing and bias order equal the M=1 variant and the GEMM path; the dequantized f32 is held in a
+  `let` shared across rows (the same single multiply as rounding point). Bit identity remains a
+  measured claim: a spike over 6,422 combinations and the permanent `gpu_linear_gemv_test.ts` (6 i4 /
+  5 i8 row-block shapes; comparison side M = 65), gemma4 greedy parity and chat golden, and the other
+  families' sha256 regression checks all pass. Fault injection (nibble order swapped on the row-block
+  side only) fails only the u32 check, by 1 ULP.
+- **The cap of 256 elements per word is a compile-cost decision**: generated text grows with the row
+  count and naga's parse and validation cost grows super-linearly with text (i4 16 rows = 202 KB /
+  733 ms; i8 32 rows = 165 KB / 315 ms). Lowering the run-time optimum (512) to 256 and hoisting the
+  dequantization cut the five shaders of gemma4's first turn from ≈1.3 s to ≈150 ms (cost:
+  census-weighted M=32 +4%, lm_head +1.6 ms/run). Folding the row loop into a WGSL `for` was 2–7×
+  slower (private arrays spill to local memory). The value 256 SHOULD be kept as a provisional value
+  until it is re-swept on Dawn / Tint (re-graded 2026-10-18 to SHOULD: it was measured with naga, which
+  only the secondary Deno path uses now; Tint parse cost was not measured). Changing it MUST come with
+  a re-measured sweep of run time and compile time (`ROWS_ELEMENTS_PER_WORD_CAP`,
+  `src/kernels/linear-gemv.ts`). The codegen check bounds the generated text (below 12,000 characters
+  for every default height since addendum 9, `tests/linear_gemv_rows_test.ts`).
+- Gain (census-weighted, same submit): M=2 ×7.0 / M=8 ×6.0 / M=32 ×3.1 / M=64 ×2.6 (i4); M=32
+  ×1.7–2.2 (i8). Over the ×1.3 kill criterion everywhere. Real-graph numbers: research §8 /
+  perf-ledger K-21.
+- Open: row blocks unmeasured on Metal (expected within 1 ULP — `docs/known-issues.md`); M > 64 stays
+  on the GEMM skeleton (M64N32 and up).
 
-決定 4 が「実測が無い」を理由に M=1 に閉じていた門を、M ≥ 2 を実測して開いた（`5701262`）。
+## Addendum 6 (2026-09-11) — f16 storage at M=1 joins the GEMV family (K-25)
 
-- 需要: M ≥ 2 の linear は既定 GEMM 骨格（M ≤ 64 は幾何 M16N16）に落ち、gemma4 E2B の 276 本で
-  **M に無関係な固定費 65〜67 ms** を払っていた（短い chat ターンの prefill・投機検証 T(k+1) の
-  支配項 — [research 2026-09-07 §7.2](../research/2026-09-07-codex-perf-review-followup.md)）。機序は
-  決定 1 と同じ（K タイルごとの barrier が重み読みの遅延を逐次に露出する）で、M に依らない。
-- 実装（[research 2026-09-07-gemv-rows-k21](../research/2026-09-07-gemv-rows-k21.md)）: 族に**行ブロック変種**
-  `linearGemvRowsWgsl`（1 スレッド = 1 列 × `rows` 行・重み語と scale を 1 回読んで行ごとの x と積和・
-  行方向は `ceil(m / rows)` 枚の y タイル）を足す。M=1 は従来の変種のまま（decode の生成物は
-  1 バイトも動かない — fixture が検出器）。
-- 選択は 2 段で、どちらも**プラン時 shape の純関数**（決定 2 の MUST はそのまま）: 族の選択 =
-  `buildLinear` の 1 箇所（門は 1 ≤ m ≤ `LINEAR_GEMV_MAX_ROWS` = 64・他の条件は決定 4 / 追記 4 と同じ）、
-  変種の選択 = `defaultLinearGemvRowsVariant(storage, m, n)`（キーに `r<rows>` が載る）。`rows` の規則 =
-  「m 以下の最大 2 冪（天井 256 要素/語 = i4 8 行 / i8 16 行）から始め、スレッド数 `n · ceil(m / rows)` が
-  16384 に届くまで半分にする」。並列度の目標 16384 は参照 device（RTX 3080 Ti）の飽和点で可搬な最適値では
-  ない（[limitations](../limitations.md)）。
-- 数値の席 = 既定経路（決定 3 の射程を行ブロックへ延長）: 1 出力要素あたりの縮約順・積の対応・bias の
-  足し順は M=1 変種 / 既定経路と同一で、違いは逆量子化した f32 を `let` に置いて行間で共有すること
-  （丸め点は同じ 1 個の乗算）。ビット同一は実測命題のまま — スパイク 6,422 組（変種 × M × census 13 形）
-  - 常設門 `gpu_linear_gemv_test.ts`（行ブロック i4 6 形 / i8 5 形 = rows > 1・y タイル複数・部分的な
-    最終タイル・rows 1 の y タイル形を踏む・比較相手は門の外 M=65）+ gemma4 greedy parity / chat golden +
-    他家族の sha 門（`deno task verify`）が全て緑。故障注入（行ブロック側だけ nibble の加算順を入れ替え）は
-    u32 門だけを 1 ULP で落とし、allclose は素通りする（M=1 側と同じ実証）。
-- **天井 256 要素/語はコンパイル費の決定**: 生成テキストが行数に比例し、naga の解析・検証費がテキスト量に
-  超線形（i4 16 行 = 202 KB / 733 ms・i8 32 行 = 165 KB / 315 ms）。実行時間の最適（512）から 256 へ
-  下げ、逆量子化を巻き上げてテキストを縮めることで、gemma4 の初回ターンが作る 5 本の合計を
-  ≈ 1.3 s → ≈ 150 ms にした（失う実行時間は census 加重 M=32 で +4%・lm_head +1.6 ms/run）。行ループを
-  WGSL の `for` に畳む形（テキストを行数から切り離す）は 2〜7 倍遅く棄却（private 配列がローカルメモリへ
-  落ちる）。生成テキストの上限（i4 8 行 / i8 16 行 ≤ 80,000 文字）は codegen 門が固定する。
-- 利得（census 加重・同一 submit 内の倍率）: M=2 ×7.0 / M=8 ×6.0 / M=32 ×3.1 / M=64 ×2.6（i4）・
-  M=32 ×1.7〜2.2（i8）。kill 線 ×1.3 を全域で上回る。実グラフの再測は research §8 / perf-ledger K-21。
-- 残件: Metal は行ブロック変種も未実測（追記 1 の 1 ULP 帯の見込み — known-issues）。M > 64 は
-  幾何 M64N32 以上の GEMM 骨格のまま（実測の外）。ブラウザ（Tint）の解析費は未測。
+- Added as a storage variant after the maintainer approved the f16 GEMV work. Public API, IR,
+  distribution format and stored weights unchanged. One weight word is the same `vec4<u32>` carrying 8
+  elements; the low and high halves of `unpack2x16float` are multiplied and added in ascending K. No
+  scale binding.
+- Eligibility: `m === 1`, f16 storage, f32 compute, `v4`, `k > 0`, `k % 8 === 0`. f16 row blocks are
+  rejected at generation; K=0 stays on the GEMM path (zero-size dimensions, `docs/limitations.md`).
+- The variant stays `c32u4`; `c32u16` wins the weighted kernel figure but loses on the vocabulary
+  head, and Qwen's overall result depends on input. No per-shape option.
+- Reduction order, restoration and bias follow decision 3; i4 / i8 WGSL byte-unchanged. Added: f16
+  snapshot, eligibility tests, u32 equality with the GEMM path's leading row, independent CPU
+  reference; reversing only the multiply-add order fails the u32 check.
+- Accepted on RTX 3080 Ti / Deno (kernel, Qwen3-0.6B f16) and Chrome (Qwen); numbers in
+  [research 2026-09-10](../research/2026-09-10-codex-mtp-optimization.md) (f16 GEMV section). Apple M2
+  not verified; RTX bit equality and gains are not claimed for other backends.
 
-## 追記 6（2026-09-11）: f16 格納の M=1 を GEMV 族へ広げる（K-25）
+## Addendum 7 (2026-09-11) — f32 storage at M=1 joins the GEMV family (K-26)
 
-- 利用者が f16 GEMV の試作・最適化を承認したため、既存族の格納変種として追加する。
-  公開 API・IR・配布形式・格納重みは変えない。重み 1 語は同じ `vec4<u32>` で 8 要素を運び、
-  `unpack2x16float` の下位・上位を K 昇順に積和する。scale 束縛は不要。
-- 門は `m === 1`・f16 格納・f32 計算・`v4`・`k > 0`・`k % 8 === 0`。
-  f16 の行ブロックは生成口でも拒否する。K=0 は [既存の制約](../limitations.md#0-要素次元を持つ-gemm-系の形は-gpu-束縛の最小サイズで落ちる未対応の退化域) に従い通常経路へ残す。
-- 変種は既存の `c32u4` を維持。`c32u16` は単体の加重値では勝つが、語彙 head で遅くなり、
-  Qwen 全体では入力により勝敗が変わるため採らない。形状別の追加ノブも作らない。
-- 縮約順・復元・bias の契約は決定 3 と同じ。既存 i4 / i8 の WGSL はバイト不変。
-  f16 の snapshot、適用条件、通常 GEMM の先頭行との u32 一致、独立 CPU 参照の門を追加する。
-  積和順だけを反転した故障注入で u32 門が落ちることも確認した。
-- RTX 3080 Ti / Deno の単体・Qwen3-0.6B f16 と、Chrome の Qwen で検収。
-  [実測記録](../research/2026-09-10-codex-mtp-optimization.md#f16-格納-m1-の-gemv2026-09-11) を数値の正本とする。
-  Apple M2 は未検証。RTX のビット一致と利得を他バックエンドの測定結果とは扱わない。
+- Prototyped after f16 with existing f32 assets of Qwen3-0.6B / MiniCPM5-2B: all logits bit-equal to
+  the GEMM path, faster generation (research 2026-09-10, f32 GEMV section).
+- One weight word is `vec4<f32>` (4 elements); ascending K, per-component multiply-add and final bias
+  kept; no scale binding. f16 / i4 / i8 WGSL byte-unchanged.
+- Eligibility: M=1, f32 compute, K>0, K%4=0, N%4=0. Row blocks and f16 compute stay separate.
+  Variant `c32u4`. No public API, IR or asset format added.
+- Permanent checks: 4-element words and read-ahead edges, N edges, each eligibility condition, u32
+  equality with the GEMM path's leading row, CPU reference. The f32 control in the f16 test now
+  expects the new f32 GEMV key (scope widened; tolerances unchanged). M2 not verified.
 
-## 追記 7（2026-09-11）: f32 格納の M=1 を GEMV 族へ広げる（K-26）
+## Addendum 8 (2026-09-11) — smaller INT2 row-block shaders (K-30)
 
-- f16 の実測後、同じ担当割りを f32 格納でも独立試作した。Qwen3-0.6B / MiniCPM5-2B の
-  既存 f32 資産を使い、通常 GEMM との全 logits ビット一致と生成時間の改善を確認した。
-  [実測記録](../research/2026-09-10-codex-mtp-optimization.md#f32-格納-m1-の-gemv2026-09-11) を根拠に採用する。
-- 重み 1 語は `vec4<f32>` の 4 要素。縮約は K 昇順、各成分の積和と最後の bias を維持する。
-  f16 と同様に scale 束縛は不要。既存 f16 / i4 / i8 の生成 WGSL はバイト不変。
-- 門は M=1・f32 計算・K>0・K%4=0・N%4=0。行ブロックと f16 計算は別のまま。
-  変種は既存 c32u4。語彙 head の改善幅は中間層より小さいが、モデル全体の改善が採否基準を満たす。
-  公開 API・IR・モデル資産形式を追加しない。
-- 4 要素語と先読みの端、N の端、門の各条件、通常 GEMM の先頭行との u32 一致と CPU 参照を常設門にする。
-  既存 f16 テストの f32 対照は削除せず、新しい f32 GEMV キーを期待する。
-  対照の適用範囲が広がったことによる変更で、数値の許容差は変えない。M2 は未検証。
+- To shorten QAT's first preparation, only the INT2 row block moves the 64-element-word multiply-add
+  into a WGSL function, keeping per-row ascending K, static component indices, the dequantization and
+  multiply-add expressions and the final bias. Row count, variant selection, eligibility, public API,
+  IR and stored assets unchanged.
+- Applying the same function to M=1 was rejected (slightly slower after warm-up on Deno, slower first
+  run on Chrome). M=1, other storage types and GEMM WGSL and keys are unchanged; only the changed INT2
+  row block uses the key `linear_gemv:v2:...:wi2`.
+- The default r4 WGSL shrinks from 76,161 to 9,169 characters (no dynamic row loop or array). The
+  in-function dequantization runs per row, so shorter source does not imply faster GPU execution.
+  Accepted by u32 comparison on 54 real-weight conditions, comparison with M=1 on long K and edge rows,
+  snapshots and full verification.
+- Measured (research 2026-09-10, INT2 row-block section): QAT E2B's first response ≈21% shorter on
+  Deno, 15–16% on Chrome; warm kernels unchanged (not a warm-speed gain). M2 and E4B not measured.
 
-## 追記 8（2026-09-11）: INT2 行ブロックのシェーダーを縮小する（K-30）
+## Addendum 9 (2026-09-11) — the function form for INT4 and INT8 row blocks too
 
-- QATの初回準備を短縮するため、INT2の行ブロックだけ、64要素語の積和をWGSL関数へまとめる。
-  各行のK昇順、成分の静的添字、逆量子化と積和の式、最後のbiasを維持する。
-  行数・変種の選択、適用条件、公開API、IR、保存資産は変更しない。
-- M=1にも同じ関数化を施す案は、Denoの暖機後に小幅な低下があり、Chromeの初回も遅くなったため採らない。
-  毎tokenのM=1、他の格納型、通常GEMMのWGSLとキーは維持する。
-  変更したINT2行ブロックだけキーを `linear_gemv:v2:...:wi2` とする。
-- 既定のr4のWGSLは76,161文字から9,169文字へ縮む。動的な行ループや配列への置換ではない。
-  関数内の逆量子化は行ごとに評価されるため、ソースの短さからGPU実行の高速化を推定しない。
-  実重み54条件のu32比較、既存M=1との長いK・端行の比較、snapshotと全体検証で検収する。
-- [実測](../research/2026-09-10-codex-mtp-optimization.md#int2-行ブロックの初回準備短縮2026-09-11)では、
-  QAT E2Bの初回応答がDenoで約21%、Chromeで約15〜16%短縮した。
-  暖機後の生成カーネルは変わらず、暖機後の速度改善としては扱わない。Apple M2とE4B全体は未計測。
+- The same first-parse reduction is applied to INT4 and INT8 row blocks: a WGSL function generated
+  from the M=1 in-word multiply-add receives per-row accumulators, keeping ascending K, the f32
+  dequantization multiply, static indices and the final bias. The expression layout differs from the
+  old source (which shared the dequantization across rows), so numerical equality is checked by u32
+  equality with the GEMM path and the CPU reference, not by source comparison.
+- The changed row-block keys move to v2; M=1 and the INT2 row block keep WGSL and keys. Public API,
+  IR, assets, variant selection and numerics contract unchanged.
+- At the default maximum height INT4 shrinks 72,592 → 7,835 characters, INT8 70,318 → 10,212. A check
+  keeps every default height under 12,000 characters; K=4096 and partial-tile numerical tests added.
+- Measured (research 2026-09-10, INT4 / INT8 row-block section): shorter first runs on Deno (normal
+  and QAT, empty and reused cache); Chrome QAT slightly worse on the reversed empty-cache comparison,
+  better on reuse. Not a warm-speed change. M2 not accepted.
 
-## 追記 9（2026-09-11）: INT4・INT8 行ブロックにも関数化を適用する
+## Addendum 10 (2026-09-12) — large-vocabulary INT8 at M=1 selects c16
 
-- INT2と同じ初回解析量の削減を、INT4・INT8の行ブロックへ広げる。既存M=1の語内積和から
-  WGSL関数を生成し、行別のアキュムレータを渡す。K昇順、逆量子化のf32乗算、静的成分添字、
-  最後のbiasを維持する。逆量子化を行間で共有する旧ソースとは式の配置が変わるため、
-  ソース比較だけで数値同一とせず通常GEMMとのu32一致とCPU参照で検査する。
-- 変更対象の行ブロックキーをv2へ上げる。M=1の全格納型と、既にv2のINT2行ブロックは
-  WGSL・キーとも維持する。公開API、IR、配布資産、変種選択、数値契約は変更しない。
-- 既定の最大高さではINT4が72,592→7,835文字、INT8が70,318→10,212文字へ縮む。
-  両格納型の全既定高さを12,000文字未満にする門と、K=4096・部分行タイルの数値検証を追加する。
-  既存の短いK、列の端、group scale、bias、通常GEMMとの比較も維持する。
-- [実測](../research/2026-09-10-codex-mtp-optimization.md#int4int8-行ブロックとドライバキャッシュの分離2026-09-11)では、
-  Denoの通常版・QATの初回短縮を、空の専用キャッシュと再利用の両方で再現した。
-  ChromeのQATでは空キャッシュの逆順比較が小幅に悪化したが、再利用時は両組で短縮した。
-  毎tokenのM=1は変わらず、暖機後の生成速度を上げる変更とは扱わない。M2は未検収。
-
-## 追記10（2026-09-12）: 大語彙INT8のM=1はc16を選ぶ
-
-- `defaultLinearGemvVariant`は任意の実行形状を受け、INT8・N=262144・K=1536だけc16u4を返す。
-  shapeはM=1のrecipe構築時だけ渡す。形状未指定のcodegenと行ブロックは従来のc32u4を維持する。
-- 適用形は通常版Gemma 4 E2Bの語彙出力。実重みの全出力u32一致、ChromeのABBA/BAAB各4組の
-  全体比較を根拠に限定採用する。数値と検証の正本は[追試記録](../research/2026-09-12-chrome-gemv-followup.md)。
-- WGSLの計算式・加算順・逆量子化・biasは不変。既存のキー形式にc16を載せ、同一キーの本文を変えない。
-  公開API・IR・保存形式・常駐メモリは変更しない。未計測の近傍形や他の格納型へ範囲を広げない。
-- 端の列と先読み語を持つGPU比較、独立CPU参照、既存Gemmaのlogits/golden/投機検証の門を維持する。
-  M2での利得・数値は未検収。
+- `defaultLinearGemvVariant` takes an optional shape and returns `c16u4` only for INT8, N=262144,
+  K=1536; the shape is passed only when building the M=1 recipe. Codegen without a shape and row
+  blocks keep `c32u4`.
+- Applied to the vocabulary output of standard Gemma 4 E2B, based on u32 equality of every output
+  with real weights and Chrome ABBA / BAAB comparisons (4 pairs each)
+  ([follow-up](../research/2026-09-12-chrome-gemv-followup.md)).
+- WGSL, addition order, dequantization and bias unchanged; c16 uses the existing key format. Public
+  API, IR, storage format and resident memory unchanged. Not widened to unmeasured shapes or storage
+  types. Existing GPU, CPU-reference and Gemma checks kept. M2 not accepted.

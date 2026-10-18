@@ -1,73 +1,72 @@
-# 0087: Anima の配布リポを「公式 / 追加学習」の軸で割る
+# 0087: Split the Anima distribution repositories into "official" and "fine-tuned"
 
-- Status: accepted（2026-09-01 — ユーザー裁定。旧 karume-anima-turbo の LoRA 焼き込み配布は
-  公式 Turbo checkpoint で置き換え）
+- Status: accepted (2026-09-01 — the maintainer's ruling; the official Turbo checkpoint replaces the
+  LoRA-merged karume-anima-turbo); partly superseded by [0092](0092-distribution-repos-and-sources.md)
+  (decision 2's pin constant, replaced by `ANIMA_SOURCES`, 2026-09-04)
 - Date: 2026-09-01
-- 関連: ADR [0041](0041-manifest-v2.md)（1 リポ複数モデル + `defaultModel`）/
-  [0073](0073-models-source-pin.md)（pin 定数 — 1 公開リポ 1 定数）/
-  [0077](0077-model-version-naming.md)（モデル名 = 上流の名乗り）/
-  [0038](0038-manifest-v1.md) §7（越境参照）/ [0016](0016-anima-chain-export.md)
-  （LoRA 焼き込み export — 本 ADR で配布経路からは退役）
+- Related: [0041](0041-manifest-v2.md) (several models per repository) / [0073](0073-models-source-pin.md)
+  (one pin constant per public repository) / [0077](0077-model-version-naming.md) (upstream names) /
+  [0038](0038-manifest-v1.md) §7 (cross-repo) / [0016](0016-anima-chain-export.md) (LoRA-merged export)
 
 ## Context
 
-上流 CircleStone が Anima を **Base / Aesthetic / Turbo の 3 公式変種**として配り直した
-（HF `circlestone-labs/Anima` = civitai 2458426・全て単一 safetensors bf16）。特に Turbo が
-公式 checkpoint になったことで、従来の「base に turbo LoRA v0.2 を焼き込む」配布
-（ADR 0016・`hdae/karume-anima-turbo`）は存在理由を失った。上流 README は「まず Turbo を」
-と推奨し、Base は LoRA 作成向けと位置づけている。
+Upstream CircleStone republished Anima as **three official variants: Base, Aesthetic and Turbo**
+(HF `circlestone-labs/Anima` = civitai 2458426, each one bf16 safetensors file). With Turbo an
+official checkpoint, the distribution that merged the turbo LoRA v0.2 into base (ADR 0016,
+`hdae/karume-anima-turbo`) lost its reason to exist. The upstream README recommends Turbo first and
+positions Base for LoRA training.
 
-従来のリポ割りは「LoRA 焼き込みの有無 = NOTICE（改変告知）の違い」が軸だった。素版リポには
-公式 base と第三者 fine-tune（wai / copycat）が同居しており、「公式の新変種をどこへ足すか」
-「第三者 fine-tune を Civitai URL / AIR 指定で気軽に足せる置き場」（backlog N3）の両方に
-答えられない。
+The old split was "LoRA merged or not = a different NOTICE (modification notice)". The plain
+repository mixed the official base with third-party fine-tunes (wai, copycat) and answered neither
+"where do new official variants go" nor "where can fine-tunes be added by Civitai URL / AIR"
+(backlog N3).
 
 ## Decision
 
-1. **リポの分割軸は「公式 / 追加学習」にする。**
-   - `karume-anima`（公式）: `anima-turbo-v1.1`（**既定** — 上流推奨・2026-09-01 裁定）/
-     `anima-v1.0` / `anima-aesthetic-v1.1` / `anima-turbo-v1.0` / `anima-aesthetic-v1.0`
-     = 計 5 変種（下の追記 2026-09-01 を参照）。
-   - `karume-anima-extra`（追加学習）: `anima-wai-v1.0` / `anima-copycat-20260610` +
-     以後 Civitai URL / AIR 指定で足す第三者 fine-tune（N3 の受け皿）。
-2. **旧 `anima-turbo`（LoRA 焼き込み）モデルと `hdae/karume-anima-turbo` リポは退役。**
-   pin 定数も `ANIMA_TURBO_CURRENT` を廃止し `ANIMA_CURRENT` の 1 本へ統合（breaking —
-   未リリース側の JSR 公開面。公開済み旧リポの扱い〈deprecation 掲示等〉はリリース時に裁定）。
-3. **text stack（text_encoder / vae_decoder / tokenizer ×2・共有 text_conditioner）は
-   extra → 公式の向きで越境参照する**（ADR 0038 §7）。従来の turbo → base と同じ運用
-   （公開順序: 公式を先に上げ main SHA を焼いてから extra を組む — runbook）。
-4. NOTICE は従来どおり Pipeline = リポ 1 組（改変告知の正しさが分かれ目という MUST は不変 —
-   軸が「焼き込みの有無」から「公式 / 追加学習」へ変わっただけ）。
+1. **The repositories are split by "official / fine-tuned".**
+   - `karume-anima` (official): `anima-turbo-v1.1` (**default** — upstream's recommendation, ruling of
+     2026-09-01) / `anima-v1.0` / `anima-aesthetic-v1.1` / `anima-turbo-v1.0` /
+     `anima-aesthetic-v1.0` = five variants (2026-09-01 addendum).
+   - `karume-anima-extra` (fine-tuned): `anima-wai-v1.0` / `anima-copycat-20260610`, plus fine-tunes
+     added later by Civitai URL / AIR (the home for N3).
+2. **The LoRA-merged `anima-turbo` model and the `hdae/karume-anima-turbo` repository are retired.**
+   The pin constant `ANIMA_TURBO_CURRENT` was folded into `ANIMA_CURRENT` (breaking — unreleased JSR
+   surface; the published old repository was left to the release) (superseded by ADR 0092 decision 4
+   on 2026-09-04: `*_CURRENT` constants became the table `ANIMA_SOURCES`, keys `anima` and
+   `anima-extra` — `packages/models/src/anima/config.ts`).
+3. **The text stack (text_encoder / vae_decoder / two tokenizers / a shared text_conditioner — the
+   last corrected by the 2026-09-03 addendum) is referenced cross-repo from extra to official** (ADR
+   0038 §7), as turbo → base was (publishing order: upload official first, record its main SHA, then
+   build extra — release runbook).
+4. NOTICE stays one per Pipeline = repository pair (the MUST that the modification notice must be
+   correct is unchanged — only the axis moved from "merged or not" to "official / fine-tuned").
 
 ## Consequences
 
-- 公式変種の追加は `karume-anima` の 1 リポで閉じ、利用者の既定体験
-  （`fromPretrained(ANIMA_CURRENT)`）が上流推奨の Turbo になる。
-- LoRA 焼き込み経路（`anima/lora.py`・`export --lora`）は配布経路から使われなくなる。
-  機構自体は当面残す（将来の fine-tune 取り込みで LoRA 配布物を焼く可能性・
-  `assert_lora_provenance` の「無いことの検査」は旧 fused 系列の誤挿入を落とす門として
-  引き続き有効）。
-- 旧系列 `outputs/series/anima-turbo-*-dyn` は参照されなくなる（`lora_provenance.json` を
-  持つため新しい席には入らない）。掃除は別途裁定。
-- extra リポは公式リポの公開 SHA に従属する（参照先を上げ直したら extra も焼き直し —
-  runbook の公開順序 MUST）。
+- New official variants stay in `karume-anima`, and the default experience (`fromPretrained` with
+  the `anima` entry of `ANIMA_SOURCES`) is upstream's recommended Turbo.
+- The LoRA-merge path (`anima/lora.py`, `export --lora`) is no longer used for distribution but stays
+  (future fine-tunes may need a merged LoRA; `assert_lora_provenance`'s absence check keeps rejecting
+  an old fused series inserted by mistake).
+- The old series `outputs/series/anima-turbo-*-dyn` are unreferenced (`lora_provenance.json` keeps
+  them out of the new presets); cleanup is a separate ruling.
+- Extra depends on the official repository's published SHA (re-uploading the target means rebuilding
+  extra — the runbook's publishing-order MUST).
 
-## 追記 2026-09-01（公式は 5 変種）
+## Addendum (2026-09-01) — five official variants
 
-決定 1 の公式列挙へ `anima-turbo-v1.0` / `anima-aesthetic-v1.0` を足す（同日のユーザー追加裁定 —
-この系はバージョン間で好みが分かれるので旧版へ戻る先を残す。ADR
-[0077](0077-model-version-naming.md) の動機そのもの）。公式リポは計 **5 変種**同居になる。
-Context の「上流の 3 公式変種」は上流の系列（Base / Aesthetic / Turbo）の話なので据え置き —
-配布モデル数 5 = 3 系列 × 版（v1.0 / v1.1、ただし Base は v1.0 のみ）。
+`anima-turbo-v1.0` / `anima-aesthetic-v1.0` join decision 1's official list (the maintainer's
+additional ruling that day — preferences differ between versions, so a way back is kept; the
+motivation of ADR [0077](0077-model-version-naming.md)). The Context's "three official variants" are
+upstream's lines: five models = three lines × versions (v1.0 / v1.1; Base has v1.0 only).
 
-## 追記 2026-09-03（越境参照の対象役割の訂正と、複数モデル同居リポへの適用）
+## Addendum (2026-09-03) — the roles referenced cross-repo, and repositories with several models
 
-- **決定 3 の「共有 text_conditioner」は誤り**。extra の 2 モデル（`anima-wai-v1.0` /
-  `anima-copycat-20260610`）はどちらも `own_text_conditioner=True`
-  （`tools/export-recipes/anima/distribution.py`）で text_conditioner を自前で持つ。越境参照の
-  対象は **`text_encoder` / `vae_decoder` / `tokenizer` / `tokenizer_2`** の 4 役割。
-- **越境参照は複数モデル同居リポの組み立てにも掛ける。** 門は「指定役割の現物が**全モデルで
-  参照先とバイト同一**」— plan ごとに突合し、全 plan の参照が一致することを確認する。旧門
-  「越境参照は 1 モデルの組み立てにだけ許す」（2026-08-24 — 旧 `karume-anima-turbo` が
-  1 リポ 1 モデルだった時代の綴り）は、extra が 2 モデル同居になった時点で成立しなくなった。
-  曖昧さの実体は「同じ役割名が別バイトを指す」ことなので、そこを直接検査する形へ置き換える。
+- **Decision 3's "shared text_conditioner" was wrong.** Both extra models have
+  `own_text_conditioner=True` (`tools/export-recipes/anima/distribution.py`). The roles referenced
+  cross-repo are **`text_encoder` / `vae_decoder` / `tokenizer` / `tokenizer_2`**.
+- **Cross-repo references also apply to repositories with several models.** The check: the files of
+  the named roles are **byte-identical to the target in every model**, compared per plan, with all
+  plans' references agreeing. The former check "cross-repo only when building one model"
+  (2026-08-24, when `karume-anima-turbo` held one model) stopped holding once extra held two; the real
+  ambiguity, "one role name pointing at different bytes", is checked directly instead.

@@ -1,288 +1,267 @@
-# 0067: attention の autoregressive 語彙 — GQA 整除 broadcast と state 参照つき契約
+# 0067: Autoregressive attention vocabulary — divisible GQA broadcast and a contract with state references
 
-- Status: accepted（2026-08-17 — ユーザー裁定 A〈GQA × i8a8 は fail loudly 開始・後日
-  サポート前提〉+ 委任チェック方式。Codex レビュー第 3〜6 巡を反映し第 6 巡で go —
-  states 形は第 4 巡指摘で 1 種へ再設計・第 5 巡で sliding 両側述語と物理 shape を接続）
-- 関連: ADR [0023](0023-fused-attention.md)（融合 attention — 決定 4 の**一部**を supersede）/
-  [0044](0044-runtime-attention-mask.md)（safe_softmax 意味論）/
-  [0060](0060-row-block-attention.md)（行ブロック実行 — 保存経路への接続が本 ADR の受入条件）/
-  [0066](0066-generation-context-state-slots.md)（state スロット・論理長スカラ — 前提）/
-  [0058](0058-numerics-opt-in-contract.md)（未実装の組は縮退でなく fail loudly）
-- 根拠:
-  [research/2026-08-17-autoregressive-references.md](../research/2026-08-17-autoregressive-references.md)
-  §3・§6（以下「調査 §n」）
+- Status: accepted (2026-08-17 — the maintainer's ruling: GQA × i8a8 starts as fail loudly, with support
+  to follow); partly superseded: decision 4's "one form, capacity = window, no slack" and decision 5's
+  "exactly one append per slot" by [0096](0096-speculative-decoding.md) decisions 1 / 4 (2026-09-08),
+  the M = 1 condition of ①′ by 0096 (2026-09-09), the two-value option by
+  [0102](0102-state-attention-stats-pv-fusion.md) (2026-09-15), the `Gemma4Pipeline` default by
+  [0104](0104-gemma-fast-quant.md) (addendum of 2026-09-26). Re-graded 2026-10-18: decision 2's r = 1
+  byte identity and the geometry thresholds to SHOULD; subgroup reductions reopened as MAY.
+- Date: 2026-08-17
+- Related: [0023](0023-fused-attention.md) (decision 1 supersedes **part** of its decision 4) /
+  [0044](0044-runtime-attention-mask.md) (safe_softmax) / [0060](0060-row-block-attention.md) (row
+  blocks — an acceptance condition) / [0066](0066-generation-context-state-slots.md) (state slots,
+  logical-length scalars) / [0058](0058-numerics-opt-in-contract.md) (unimplemented combinations fail
+  loudly instead of falling back)
+- Basis: [research/2026-08-17-autoregressive-references.md](../research/2026-08-17-autoregressive-references.md)
+  §3, §6 ("research §n" below)
 
 ## Context
 
-検収モデルは両方とも現契約で書けない: Gemma 4 E2B は 8:1 の MQA（`num_key_value_heads: 1`）、
-MiniCPM5-1B は 16:2 の GQA — `attention` は q/k/v の H 完全一致を要求する（ADR 0023 決定 4・
-shapes.ts:524）。さらに autoregressive 実行には「KV を state スロットから読む」「causal /
-sliding を表す」「論理長で仕事を切る」語彙が無い。参照実装の確定事実は調査 §3（GQA は
-kernel 内整数除算が主流・mask は attrs + 値 or 述語計算・空行 0 の構成は実装依存）。
+Neither target model fit the contract: Gemma 4 E2B is 8:1 MQA (`num_key_value_heads: 1`), MiniCPM5-1B
+is 16:2 GQA, and `attention` required the same H for q/k/v (ADR 0023 decision 4,
+`packages/runtime/src/ops/shapes.ts`). There was also no vocabulary for "read KV from a state slot",
+"express causal / sliding" or "cut work by the logical length". Reference facts are in research §3
+(GQA by integer division in the kernel is the norm; masks are attrs + values or computed predicates;
+how an empty row becomes 0 depends on the implementation).
 
 ## Decision
 
-### 1. GQA = `attention` の H 突合を整除 broadcast へ緩める（G3 案 A）
+### 1. GQA = the H match of `attention` relaxed to a divisible broadcast (G3 option A)
 
-`q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]`・条件 **`H % Hkv == 0`**・出力 `[B,H,M,D]`。
-`r = H / Hkv` は**導出値**（attrs 欄を作らない — 「GQA は欄を作らない」の趣旨は維持）。
-実装は **`H ≥ Hkv ≥ 1` を併せて課す**（`0 % Hkv == 0` で H=0 が、等値短絡で H=Hkv=0 が
-素通りする縮退形の検出線 — 2026-08-17 実装波 A の追修・独立レビュー指摘）。
+`q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]`, condition **`H % Hkv == 0`**, output `[B,H,M,D]`.
+`r = H / Hkv` is **derived** (no attrs field). The implementation also requires **`H ≥ Hkv ≥ 1`**
+(`0 % Hkv == 0` would let H = 0 through, the equality short-circuit H = Hkv = 0 — fix after
+independent review, 2026-08-17).
 
-- supersede は ADR 0023 決定 4 のうち「**q/k/v の H 完全一致**」の 1 句のみ。B 完全一致・
-  k/v 間の Hkv 一致・D 3 者同一・N=0 拒否は**取り違え検出線としてそのまま維持**する。
-  Hkv=1（MQA — Gemma 4 E2B）も同式で表す。
-- `bmm` のバッチ整除 broadcast（案 B）は入れない — bmm の「バッチ完全一致」は意図的な
-  検出線（ADR 0022/0023）で、緩めると B 取り違えが shape 検査を素通りする面が広がる。
-  分解経路の GQA は救わず、**GQA モデルは SDPA 保存が必須**（エクスポータの `enable_gqa`
-  全件拒否〈aten_handlers.py:800-804〉を「保存ターゲットのみ条件付き受理」へ改める）。
+- Only "**exact H match of q/k/v**" of ADR 0023 decision 4 is superseded. Exact B match, equal Hkv of
+  k and v, equal D and the N = 0 rejection **stay as detectors of mix-ups**. MQA (Hkv = 1) uses the
+  same formula.
+- No divisible batch broadcast for `bmm` (option B): its exact batch match is a deliberate detector
+  (ADR 0022 / 0023). GQA on the decomposed path is not rescued: **GQA models MUST preserve SDPA**. The
+  exporter no longer reads `enable_gqa` (`_h_attention` in `tools/exporter/src/karume/aten_handlers.py`);
+  the shape layer checks the GQA conditions.
 
-### 2. 実装形: kernel 内整数除算 + uniform・r=1 はバイト同一
+### 2. Implementation: integer division in the kernel + a uniform
 
-head 写像は `wid.z / r`（`wid.z = b*H + h` に対し `H = Hkv·r` なら
-`wid.z / r = b*Hkv + h/r` が整数除算で厳密成立 — ORT WebGPU と同一構成・調査 §3.2）。
+Head mapping `wid.z / r` (for `wid.z = b*H + h` and `H = Hkv·r`, integer division gives exactly
+`b*Hkv + h/r` — as ORT WebGPU, research §3.2).
 
-- f32 融合経路の変更は gemm.ts の bbase 算術 2 枝（attention_qk / attention_pv 共有枝 —
-  後者は linear と同居のため op 分岐を足す）。codegen キーに GQA ビット 1 本・r は uniform。
-- MUST: **r=1 の生成 WGSL はバイト同一**（ORT JSEP の `nReps === 1` 特殊化が先例 — 既存
-  スナップショット門・ビット同一門を凍結したまま席を足す）。
-- 受入条件: **repeat_kv 実体化版との Uint32 parity**（r ∈ {1,2,8}・B>1 を含む形状群 +
-  故障注入〈r 誤り・pv 側写像漏れ〉）。ADR 0060 決定 3 と同型の「base 算術のみ差分」論証は
-  実測で確認するまで主張しない（調査 §7 attn LB-6）。
+- The f32 fused path changes the B-operand batch base in `gemm.ts` (the branch shared by attention_qk /
+  attention_pv; an op branch is added since the latter lives with linear). The codegen key gets one GQA
+  bit; r is a uniform.
+- The r = 1 path SHOULD generate WGSL without the GQA terms, so non-GQA shapes do not pay for the
+  uniform (precedent: ORT JSEP's `nReps === 1` specialisation) (re-graded 2026-10-18 to SHOULD: byte
+  identity with the pre-GQA WGSL was the migration condition at introduction; codegen determinism
+  stays a separate invariant).
+- Acceptance: **Uint32 parity against a materialised repeat_kv** (r ∈ {1, 2, 8}, B > 1, fault injection:
+  wrong r, missing PV-side mapping). An ADR 0060 decision 3-style "only base arithmetic differs"
+  argument is not claimed until measured (research §7, attn LB-6).
 
-### 3. GQA × i8a8 は fail loudly で開始（裁定済み 2026-08-17 — 後日サポート前提）
+### 3. GQA × i8a8 starts as fail loudly (ruled 2026-08-17 — support to follow)
 
-i8a8 attention は別 WGSL で head 基底が 5 本（attention-i8a8.ts:378-382 — K/scale・V/scale
-のみ kv-head へ写し Q/S/O は q-head のまま）、recipe-builder の K/V 量子化・確保も `B*H`
-前提（調査 §3.2）。**初期実装は `attentionCompute: "i8a8"` × GQA 形を fail loudly で拒否**
-する（ADR 0058 決定 3 —「未実装の組は縮退でなく fail loudly」。黙って f32 へ落とすと
-性能が静かに変わる）。
+The i8a8 attention is a separate WGSL with five head bases (`attention-i8a8.ts`: only K/scale and
+V/scale map to the kv-head), and the recipe builder quantizes and allocates K/V for `B*H` (research
+§3.2). **The first implementation rejects `attentionCompute: "i8a8"` × a GQA shape with fail loudly**
+(ADR 0058 decision 3; a silent drop to f32 would change performance silently) — in
+`packages/runtime/src/runtime/recipe-builders/attention.ts`.
 
-**拒否は暫定で、後日サポートを前提とする**（ユーザー裁定）。追補時の対象面は確定済み:
-①head 基底 5 本のうち kbase / ksbase（と PV 側の V/scale 基底）だけを kv-head 写像
-（`wid.z / r`）に変え、qbase / qsbase / sbase は q-head のまま ②recipe-builder の K/V
-量子化・確保を Hkv 形へ。検証は f32 経路の GQA parity 資産（決定 2 の repeat_kv 突合）を
-i8a8 版へそのまま流用できる形で作っておく。
+**The rejection is provisional; support is expected** (the maintainer's ruling). Surfaces: ① of the
+five bases only kbase / ksbase (and the V/scale bases on the PV side) take the kv-head mapping
+(`wid.z / r`); qbase / qsbase / sbase stay on the q-head; ② the recipe builder quantizes and allocates
+K/V in the Hkv shape. The f32 GQA parity assets (decision 2) are built to carry over to i8a8.
 
-### 4. state 参照つき attention（同一 op 名の契約拡張・欄の有無が形を判別）
+### 4. Attention with state references (same op, extended contract; the field decides the form)
 
-ノードに**省略可能な `states` 欄**（ADR 0066 決定 2 の「ins / outs と別の欄で名前参照」）を
-足す: `{ "k": <slot 名>, "v": <slot 名> }`。欄が**無い**ノードは従来契約そのまま
-（既存資産・既存門は無風 — mask 第 4 入力〈maxArity〉と同じ拡張手筋）。欄が**ある**形:
+Nodes get an **optional `states` field** (ADR 0066 decision 2): `{ "k": <slot name>, "v": <slot name> }`.
+Without it the old contract holds (existing assets and checks unaffected — the same extension pattern
+as the fourth mask input). With it:
 
-- **形は 1 種のみ**（第 4 巡で単純化 — 当初案の「共有形 = ins なし」は sliding ring で
-  append 先行が必須になり、Q>1 で共有層の窓が欠ける〈満杯 ring へ Q 行 append すると
-  row 0 の要る過去 W−1 行のうち Q−1 行が消える〉ため廃止）: **ins の k/v = 今 step の
-  新規 k/v・スロット = 過去分のみ**。ins の宣言 shape は **`[B,Hkv,M,D]`（M = 物理 chunk
-  次元 — prefill は chunkLength・decode は 1）**で、有効データは先頭 queryLength 行の
-  compact-prefix（ADR 0066 追記 6 — queryLength は shape でなく実行時スカラ。第 5 巡で
-  物理 / 論理の表記を接続）。KV 共有層
-  （Gemma 4 E2B の末尾 20 層）は自層で projection を計算せず、**所有層の k/v 値テンソルを
-  ins にそのまま配線**する（グラフ配線 + 同一スロット名参照で共有を表す — 解決規則は
-  vLLM の kv_sharing_target_layer_name と同じ「同種 attention の直近非共有層」・
-  refs/vllm gemma4.py:462-488）。全読者が past を読み終えた後に append する（決定 5b）
-  ので、ring 容量 = window のままで staging も slack も不要。
-- **スロットの物理形と検査**（第 4 巡で追加）: states 形が参照するスロットは
-  **`[B, Hkv, C, D]` 固定**（C = 容量・dtype は f32〈f16 は ADR 0066 追記 5 の席〉）。
-  contracts は ①k/v スロットの同形 ②ins との B / Hkv / D 一致 ③`window ≤ C`（sliding）
-  ④full スロットは実行時に `pastLength + queryLength ≤ C`（context 側検査）を
-  fail loudly で課す — 通常値のみ見る現行 shape 検査（shapes.ts:510-540）の state 延長で、
-  スロット取り違えを OOB / 沈黙誤読の前で止める。
-- **causal 固定**（欄を作らない — 非 causal + state の実在需要が無い。双方向 prefill は
-  states 無し形で表す）。判定は述語 `col ≤ pastLength + row`（論理座標・TVM 型・調査 §3.1
-  — mask tensor は実体化しない）。**sliding 時は下限述語を AND する MUST**（第 5 巡 high の
-  閉鎖）: `max(0, pastLength + row − window + 1) ≤ col ≤ pastLength + row` の**両側**。
-  上限（causal）だけだと row > 0 が resident 全体を走査して**窓外 key を row ぶん余計に
-  沈黙混入**する（W=4 で row 1 は正しい 4 個でなく 5 個を見る）。一次実装 = vLLM の
-  `(q_abs − key_pos) < W` AND（triton_attention_helpers.py:197-229 @7ea4b40）。
-- **sliding window は省略可能 attrs `window`**（正の int・欄の不存在 = 全 context）。
-  層別混在（Gemma 4 E2B の 28/7）はノードごとに違う attrs で表す — 別 op・別 kernel を
-  作らない（調査 §3.4 の全実装一致）。**論理 col → 物理 row の写像は読み書き同式 MUST**:
-  sliding スロットの物理 row = `col % window`（`state_append` の書き込み式と同一 —
-  読み側だけ別式にすると沈黙誤読になる）。読者が参照する past の resident 範囲は
-  `[pastLength − min(pastLength, window − 1), pastLength)`（append 前なので row 0 の窓まで
-  全行 resident — 形 1 種化の成立根拠）。current 部分（`col ≥ pastLength`）は ins から
-  読む。カーネルは論理座標で述語を評価してから写像する。
-- 論理長（pastLength / queryLength）は**実行時スカラ**として **context 所有の可変
-  uniform**（ADR 0066 追記 4 — params 内容アドレスキャッシュに載せない）で渡し、dispatch
-  数は**ホストが論理長から算出**する（karume は graph capture を持たず毎 run エンコード
-  するため、ORT の indirect dispatch 相当は不要 — ADR 0066 の仕事量合格条件
-  〈∝ queryLength × (有効 past + queryLength)・追記 1 の訂正式〉をホスト側 dispatch
-  算出で満たす）。
-- **RoPE は attention op の外**（グラフの通常ノード列）。~~層種別 RoPE（Gemma 4 E2B の
-  theta 100 倍差 + partial rotary 0.25 — 調査 §6.1）はエクスポータがグラフに焼く。~~ →
-  **ADR [0091](0091-gemma4-host-rope-variable-capacity.md) 決定 1 で置換**（表は配布物に入れず、
-  ホストが chunk ごとに cos / sin を派生入力として渡す）。**`attention op は RoPE を知らない`
-  MUST は 0091 でも不変**。
+- **One form only**: **ins k/v = this step's new k/v; slots = the past only**. The declared ins shape is
+  **`[B,Hkv,M,D]` (M = physical chunk dimension — chunkLength for prefill, 1 for decode)**; valid data
+  is the compact prefix of queryLength rows (ADR 0066 addendum 6). KV-sharing layers (the last 20 of
+  Gemma 4 E2B) compute no projection and **wire the owner layer's k/v value tensors into ins** (same
+  slot name; resolution as vLLM's kv_sharing_target_layer_name, "nearest non-shared layer of the same
+  kind" — refs/vllm gemma4.py:462-488). Every reader reads the past before the append (decision 5b), so
+  the ring capacity stays the window, without staging or slack. (Superseded by ADR 0096 decisions 1 / 4
+  on 2026-09-08: a readonly form (`ins: [q]`) reads external slots, and sliding capacity is window +
+  slack — the addendum of 2026-09-08 and [docs/ir-v2.md](../ir-v2.md).)
+- **Physical slot shape and checks**: slots are **`[B, Hkv, C, D]`** (C = capacity, f32; f16 is the
+  reserved option of ADR 0066 addendum 5). Fail loudly on ① k/v slots of different shapes ② B / Hkv / D
+  mismatch with ins ③ `window ≤ C` violated (sliding) ④ `pastLength + queryLength > C` at run time for
+  full slots (checked by the context) — the state extension of the shape check, stopping slot mix-ups
+  before OOB or silent misreads.
+- **Causal only** (no field — no demand for non-causal + state; bidirectional prefill uses the form
+  without states). Predicate `col ≤ pastLength + row` (logical coordinates, TVM style — research §3.1;
+  no mask tensor). **With sliding, the lower bound MUST be ANDed**: `max(0, pastLength + row − window +
+  1) ≤ col ≤ pastLength + row`. With the upper bound alone, row > 0 **silently mixes in row-many
+  out-of-window keys** (W = 4: row 1 sees 5 keys). Reference: vLLM's `(q_abs − key_pos) < W` AND
+  (triton_attention_helpers.py:197-229 @7ea4b40).
+- **The sliding window is the optional attrs `window`** (positive int; absent = whole context);
+  per-layer mixes (Gemma 4 E2B 28 / 7) use per-node attrs, no separate op or kernel (research §3.4).
+  **Logical col → physical row MUST use the same formula for reads and writes**: `col % window`, as
+  `state_append` writes (superseded by the addendum of 2026-09-08 on 2026-09-08: the modulus is
+  capacity; the same-formula MUST stays). The referenced past is resident in `[pastLength −
+  min(pastLength, window − 1), pastLength)`; the current part (`col ≥ pastLength`) comes from ins. The
+  kernel evaluates the predicate in logical coordinates, then maps.
+- The logical lengths are **runtime scalars** in the **context-owned mutable uniform** (ADR 0066
+  addendum 4), and **the host computes dispatch counts from them** (no graph capture, every run is
+  encoded, so no indirect dispatch is needed to meet ADR 0066's workload condition).
+- **RoPE stays outside the attention op.** Per-layer RoPE (Gemma 4 E2B — research §6.1) was baked into
+  the graph by the exporter (replaced by ADR [0091](0091-gemma4-host-rope-variable-capacity.md)
+  decision 1 on 2026-09-03: the host passes cos / sin per chunk as derived inputs). **"The attention op
+  does not know RoPE" MUST stays.**
 
-### 5. KV の書き込みは別 op `state_append`
+### 5. KV writes are a separate op, `state_append`
 
-「今 step の k/v をスロットへ書く」のは attention ではなく**単機能 op `state_append`**
-（slot 名 + 入力 `[B,Hkv,M,D]`〈宣言 shape — attention の ins と同じ物理 chunk 次元〉+
-論理位置スカラ。**書くのは先頭 queryLength 行のみ**〈pad 行は書かない — スロットは
-full-write 対象外・ADR 0066 追記 6〉。sliding スロットは `position % window` のリング
-書込みもここが持つ）。
+The **single-purpose op `state_append`** writes this step's k/v into the slot (slot name + input
+`[B,Hkv,M,D]` (same physical chunk dimension as attention's ins) + a logical position scalar; **it writes
+only the first queryLength rows** (slots are outside full-write — ADR 0066 addendum 6); it also owns the
+ring write of sliding slots).
 
-- why-not（attention 内蔵 = TVM 型）: dispatch は 1 本増えるが、①full-write / padding 行
-  no-op（queryLength が切る — ADR 0066 決定 4）の検証が単機能 op に閉じる ②attention 側は
-  読み取り専用のままビット同一検証が単純 ③KV 共有層（append を持たない層）が
-  「`state_append` ノードが無い」だけで表せる。ORT の kv_empty（present 出力なし）と同じ
-  表現力を op の不在で得る。**append の不在は層単位の話で、スロット単位では終端
-  `state_append` が常にちょうど 1 本**（共有層はその 1 本を複数の読者で分け合う）— 検査の
-  粒度がスロットなのはこのため（決定 5b・`runtime/plan.ts` の `assertStateOrder`）。
-- why-not（staging / ring slack = ORT の WindowedKvCache 型）: 共有層のために append を
-  読者より先に置く設計なら ring に `window + Q − 1` の slack か staging バッファが要る
-  （refs/onnxruntime GQA cpu 実装が同種の staging 切替を持つ）。決定 4 の「全読者が ins で
-  current を受ける」形なら append は常に最後で、容量 = window のまま済む — 採らない。
-- **出力は 0 本**（値を定義しない effect op）。IR パーサの「outs 空は拒否」
-  （format/ir.ts:322-324）は「**契約が effect を宣言する op に限り 0 本を許す**」へ改訂し、
-  実装 6 面の出力数一般化は ADR 0068 決定 1 が受け持つ（第 3 巡の矛盾指摘の解消）。
+- why-not (append inside attention, TVM style): one more dispatch, but ① verification of full-write /
+  no-op pad rows stays in a single-purpose op ② attention stays read-only, so bit-identity checks stay
+  simple ③ KV-sharing layers are just "no `state_append` node" (ORT's kv_empty by the absence of an op).
+  **Absence is per layer; per slot there is always exactly one terminal `state_append`** (shared layers
+  split it among readers), so the check works per slot (decision 5b, `assertStateOrder` in
+  `runtime/plan.ts`). (Superseded by ADR 0096 decision 1 on 2026-09-08: true for slots the context
+  owns; external slots read by a readonly attention have no append.)
+- why-not (staging / ring slack, ORT WindowedKvCache style): appending before readers needs `window + Q
+  − 1` slack or a staging buffer; with every reader taking current from ins the append is always last.
+- **Zero outputs** (an effect op). The IR parser no longer rejects empty `outs`; the contract layer
+  allows 0 outputs only for ops whose contract declares an effect (`format/ir.ts`). The output-count
+  generalisation over six surfaces is ADR 0068 decision 1.
 
-### 5b. state effect の順序 = nodes 配列順（データ辺に依存しない）
+### 5b. Order of state effects = `nodes` array order (independent of data edges)
 
-state 参照（読み・書き）は**テンソルのデータ辺を張らない**ため、DAG のトポロジ順では
-順序が決まらない。契約: **同一スロットに触れるノード同士の実行順は `nodes` 配列順を
-保存する MUST**（plan / recipe は state を触るステップの相対順を並べ替えない —
-融合 matcher も state 跨ぎの並べ替えをしない）。エクスポータの発行規約:
+State reads and writes **draw no data edges**, so topological order does not fix them. Contract:
+**nodes touching the same slot MUST execute in `nodes` array order** (plan / recipe never reorder
+state-touching steps; fusion matchers never reorder across state). Exporter emission rules:
 
-1. **当該スロットの全読者（所有層 + 共有層の attention）→ `state_append`（書き）**の順に
-   発行する（第 4 巡で単純化 — 全読者は past をスロットから・current を ins から読むので、
-   append は常に最後の 1 回。ring wrap が今 step の読者の過去行を潰す経路が構造的に無い）。
-2. 検査: plan は「同一スロットへの append は 1 step に 1 回まで」「append より後に当該
-   スロットの読者が居ない」を fail loudly で検査する（発行順の誤りを沈黙誤値にしない —
-   第 3 / 4 巡 high 指摘の閉鎖）。
+1. Emit **every reader of the slot (owner + shared attention layers) → `state_append`**: the append is
+   always the last, single write, so a ring wrap cannot overwrite this step's readers' past rows.
+2. Checks: the plan fails loudly on "more than one append to a slot per step" and "a reader of the slot
+   after its append".
 
-### 6. 空行 → 0 の意味論を states 形に内蔵（safe_softmax 系）
+### 6. Empty row → 0 built into the states form (safe_softmax family)
 
-states 形では padding 行・（chunk 先頭での）空 context 行が**正規に**出るため、
-ADR 0044 の「融合 attention へ全 −inf 行は契約違反」は states 形に**適用しない** —
-states 形の行統計は「**行 max 初期値 −inf + 分母 0 ガード**」の構成で空行 → 出力 0 を
-構造的に保証する（llama.cpp WebGPU 型 — 調査 §3.4）。
+The states form legitimately produces pad rows and empty-context rows, so ADR 0044's "an all −inf row
+into fused attention is a contract violation" **does not apply**. Its row statistics use **"row max
+initialised to −inf + a zero-denominator guard"**, giving empty row → output 0 by construction
+(llama.cpp WebGPU style — research §3.4).
 
-MUST: **有限 sentinel（−5e4 等）で −inf を代用しない** — TVM はこの構成で空行が
-「V の重み 1 平均」になっており、safe_softmax 契約（行 max −inf → 全 0）を満たさない
-（調査 §7 attn LB-4 の refuted が根拠）。
+MUST: **−inf is never replaced by a finite sentinel (−5e4 and the like)** — TVM's construction makes an
+empty row "the weight-1 average of V", breaking safe_softmax (row max −inf → all 0) (research §7, attn
+LB-4).
 
-### 7. S の実体化は行ブロック（保存経路への 0060 接続 — 受入条件）
+### 7. S is materialised in row blocks (ADR 0060 on the preserved path — acceptance condition)
 
-states 形の ①QK は S を行ブロック窓で実体化する（`[B·H, block, N]` — ADR 0060 の機構を
-保存 `attention` 経路へ移植）。decode（queryLength=1）は S が `[B·H,1,N]` で常に 1 枚。
-prefill chunk × 長 context で `maxStorageBufferBindingSize` 128MiB を超える形が正規に
-来るため（調査 §3.1）、**行ブロック無しの states 形実装は受入不可**（第 2 巡 high 指摘）。
-S とは別に **state スロット自体の binding も上限を超えうる**（Gemma 4 E2B full 層の
-131K 容量 × f32）— そちらの契約（容量ゲート + f16 席予約）は ADR 0066 追記 5 が持つ。
+① QK materialises S in row-block windows (`[B·H, block, N]` — ADR 0060 moved to the preserved
+`attention` path); decode has S `[B·H, 1, N]`. Prefill chunk × long context legitimately exceeds the 128
+MiB `maxStorageBufferBindingSize` (research §3.1), so **a states-form implementation without row blocks
+is not acceptable**. **A state slot's own binding can also exceed the limit** (131K × f32 on Gemma 4
+E2B's full layers) — that contract is ADR 0066 addendum 5.
 
 ## Consequences
 
-- 既存資産・既存門は無風（states 欄なし・r=1 バイト同一・mask 契約不変）。
-- ADR 0023 は決定 4 の H 句のみ supersede 注記を受ける。ADR 0044 は「states 形は空行正規」
-  の対照注記を受ける。
-- エクスポータ: `_h_attention` の enable_gqa 条件付き受理・states/`state_append` の発行は
-  decode グラフ台本（実装波）で。IR 仕様は states 欄・`state_append`・attrs `window` の
-  3 点で本書改訂。
-- 受入条件（実装波のゲート）: ①r=1 スナップショットバイト同一 ②repeat_kv parity + 故障
-  注入 ③census（GQA が実際に効いた検査 — 0058 決定 4）④行ブロック動作（強制分割含む）
-  ⑤空行 → 0 の直接門（全 padding 行入力）⑥既存 sha 門全緑。
+- Existing assets and checks are unaffected (no states field, r = 1 unchanged, mask contract unchanged).
+- ADR 0023 carries a supersede note on its H clause; ADR 0044 the contrast "empty rows are legitimate in
+  the states form". The IR gained the states field, `state_append` and attrs `window`; the exporter emits
+  them in the decode graph scripts.
+- Acceptance conditions of the implementation wave: ① r = 1 snapshots byte-identical ② repeat_kv parity
+  + fault injection ③ census (GQA took effect — 0058 decision 4) ④ row blocks (with forced splits) ⑤ a
+  direct check of empty row → 0 ⑥ all existing sha256 checks green.
 
-## 追記（2026-09-03）— ③PV の KV 並列縮約変種（perf-ledger K-12）
+## Addendum (2026-09-03) — KV-parallel reduction variant ③′ of ③ PV (perf-ledger K-12)
 
-決定 4 の states 形 ③PV（`O = P @ V`）に **KV 長方向を workgroup 内 16 レーンで分担する変種**
-（`attention_state_pv:…:wg16x16:par`）を足した。1 invocation が O の 1 要素を live 列の逐次ループで
-積む形は、decode（M=1）で有効 invocation が `D × B·H`（Gemma 4 E2B の full 層で 4,096）に固定され、
-KV 長が 1 スレッドの逐次長にしか効かない — P=16K で attention が decode GPU 時間の 72% を占めた
-機序（[research 2026-09-03 P 掃引](../research/2026-09-03-gemma4-context-length-sweep.md) §3）。
+③ PV (`O = P @ V`) gets **a variant that splits the KV length over 16 lanes of a workgroup**
+(`attention_state_pv:v1:f32:wg16x16:par`). With one invocation per O element, decode (M = 1) has a fixed
+`D × B·H` invocations and KV length only lengthens one thread's loop; at P = 16K attention took 72% of
+decode GPU time ([research](../research/2026-09-03-gemma4-context-length-sweep.md) §3).
 
-- **契約**: 束縛・params・dispatch の**本数**は ③ と同一（workgroup 幾何は違う — 行軸が
-  `rowsBlock / TILE_M` から `rowsBlock` へ変わるので workgroup 数は prefill で 4 倍。decode は
-  `rowsBlock = 1` なので両者一致する）。レーン `l` が `cl ≡ l (mod 16)` の列を昇順に
-  部分累積し、workgroup 共有メモリで固定順の木（stride 8 → 4 → 2 → 1）に畳む。決定性（同一入力 →
-  同一出力）・容量非依存・行ブロック非依存・pad 行 → 厳密 0 は ③ と同じくビット門で保つ。
-  縮約順が違うので **③ とビット同一ではない**（本 ADR 冒頭の「縮約は col 昇順の逐次で固定」は ③ の
-  契約であり、③' は「レーン部分和 → 固定順木」を自分の契約として持つ）。
-- **席**: ADR 0058 の opt-in 席 `SessionOptions.stateAttentionReduce: "sequential" | "parallel"`
-  （既定 `"sequential"` = 参照経路）。検証門は 3 点セット — ③ の既存門は無変更・③' の A/B 帯門
-  （`tests/gpu_state_attention_parallel_test.ts`・帯 5e-6・実測最悪は ③ との差 2.4e-7 /
-  f64 参照との差 3.99e-7）・census 門
-  （`tests/gpu_state_execution_test.ts` — 席どおりのキーが走り、他方が混ざらない）。
-- **実測**（[research 2026-09-03](../research/2026-09-03-gemma4-chunklength-k12-sweep.md) §3）:
-  full PV 35.0 → 3.6 ms・sliding PV 6.2 → 0.8 ms・decode 壁 P=16K 81.3 → 41.0 ms/token（×1.98）・
-  token 列一致。**既定への昇格（2026-09-03）**: ADR 0058 決定 6 のとおりユーザーの品質裁定（対話 example の目視）と e2e golden の再走（不変）を同一コミットで行い、`Gemma4Pipeline` は `stateAttentionReduce: "parallel"` を既定で Session に与える（`GEMMA4_STATE_ATTENTION_REDUCE`）。runtime の既定と低レベル面（decode 系列の検収門）は参照経路のまま。
-- why-not（split-KV + merge 段 / online softmax / subgroup）: workgroup 内分割は dispatch 数も中間
-  バッファも増やさず実装が最小で、③' を段 A の中身として流用する形で split-KV へ伸ばせる。
-  online 形は S 一時を消す別の価値を持つが decode の並列度を単体では解かない。subgroup はアダプタが
-  feature を広告せず入場不可（2026-08-10 プローブ）。
+- **Contract**: bindings, params and the **number** of dispatches equal ③ (row axis `rowsBlock` instead
+  of `rowsBlock / TILE_M`: 4× workgroups in prefill, equal in decode). Lane `l` accumulates `cl ≡ l (mod
+  16)` ascending and folds along a fixed tree (stride 8 → 4 → 2 → 1). Determinism, independence of
+  capacity and row blocks, and pad rows → exact 0 are held by bit-exact checks; **not bit-identical to
+  ③** (③ reduces sequentially by ascending col; ③′ owns "lane partial sums → fixed tree").
+- **Option**: the ADR 0058 opt-in `SessionOptions.stateAttentionReduce: "sequential" | "parallel"`
+  (default `"sequential"` = reference path) (superseded by ADR 0102 on 2026-09-15: a third value
+  `"parallel-fused"` for states forms with M ≤ 8 and a column bound ≤ 1024; still one option). Checks:
+  ③ unchanged; A/B tolerance check (`tests/gpu_state_attention_parallel_test.ts`, tolerance 5e-6);
+  census check (`tests/gpu_state_execution_test.ts`).
+- **Measured** ([research](../research/2026-09-03-gemma4-chunklength-k12-sweep.md) §3): full PV 35.0 →
+  3.6 ms, decode at P = 16K 81.3 → 41.0 ms/token, tokens unchanged. The promotion to the
+  `Gemma4Pipeline` default (2026-09-03) is superseded by ADR 0104 addendum of 2026-09-26: the default
+  is the preset's `session` declaration in the manifest; without one the reference path `"sequential"`
+  runs (no family default in code — `packages/models/src/gemma/session-options.ts`).
+- why-not (split-KV + merge / online softmax): the in-workgroup split adds no dispatch or buffer and can
+  become stage A of a split-KV; the online form removes the S temporary but does not fix decode
+  parallelism. Subgroup reductions MAY be reconsidered on measurement (re-graded 2026-10-18 to MAY: the
+  2026-08-10 reason — the adapter did not advertise the feature — no longer holds; `acquireGpu`
+  requests subgroups and ADR [0100](0100-rms-subgroup-reduction.md) /
+  [0101](0101-linear-gemv-subgroup.md) use them).
 
-## 追記（2026-09-06）— ①QK の D 方向並列縮約変種 ①′（perf-ledger K-14）
+## Addendum (2026-09-06) — D-parallel reduction variant ①′ of ① QK (perf-ledger K-14)
 
-決定 4 の states 形 ①QK（S の 1 要素 = D の逐次内積）に、③′ と同じ手筋で **D 方向を workgroup 内
-16 レーンで分担する変種**（`attention_state_qk:v1:f32:wg16x16:par`）を足した。decode（M=1）では
-1 invocation の遅延が D 逐次で長く、P=16K で ①QK が decode GPU の 17%（K-12 後の最大の attention 項）
-だった（[research 2026-09-06](../research/2026-09-06-state-qk-parallel-k14.md)）。
+① QK gets, by the technique of ③′, **a variant that splits D over 16 lanes**
+(`attention_state_qk:v1:f32:wg16x16:par`); at P = 16K ① QK took 17% of decode GPU time
+([research](../research/2026-09-06-state-qk-parallel-k14.md)).
 
-- **契約**: 束縛・params・dispatch 本数は ① と同一。1 workgroup = 局所行 1 本 × 16 列で、レーン `l` が
-  `d ≡ l (mod 16)` を昇順に部分累積し、共有メモリで固定順の木（stride 8 → 4 → 2 → 1）に畳む。
-  書く条件（live 範囲は述語外でも −inf・`cl ≥ live` と pad 行は書かない）と半スケールは ① と同一。
-  縮約順が違うので **① とビット同一ではない**。決定性・容量非依存・行ブロック非依存・述語外 −inf の
-  ビット一致・pad 行非書き込みはビット門で保つ。
-- **席**: ③′ と**同じ** `SessionOptions.stateAttentionReduce: "parallel"`（ノブは 1 つ — 2026-09-06
-  ユーザー裁定）。ただし **①′ が選ばれるのは M（chunkRows）= 1 の計画だけ**
-  （`stateQkParallelEligible`）: prefill 計画（M=768）では ① が既に行 × 列で埋まっており、①′ は行タイル幅
-  4 → 1 で workgroup と barrier を 4 倍積むだけになって ①QK が 1.5〜1.9 倍・壁が +30〜60% 逆行した。
-  ③′ は全 M で席に従う（K-12 の実測で prefill も逆行しない）。判定材料は計画時の静的値だけ
-  （実行時の論理長で分岐すると同じ計画鍵が run ごとに違うパイプラインを指す）。
-- **検証門**: ① の既存門は無変更・①′ の A/B 帯門（`tests/gpu_state_attention_parallel_test.ts`・帯
-  5e-6・実測最悪は ① との差 3.58e-7 / f64 参照との差 4.17e-7・故障注入 2 種で落ちる）・census 門
-  （`tests/gpu_state_execution_test.ts` — M=1 / M>1 × 席の 6 行）・非 GPU の適用条件の真理値表
-  （`tests/kernel_state_attention_test.ts`）。
-- **実測**（同 research）: decode ①QK 6.3 → 3.7〜4.1 ms/token（×1.55〜1.72）・decode 壁 P=16K
-  37.2〜39.4 → 33.0〜35.4 ms/token（−9〜15%）・P=256 −4.5%・門の後の prefill は ① と同等。
-  `Gemma4Pipeline` の既定は `"parallel"` のまま（追記 2026-09-03 の昇格に ①′ が乗る — golden /
-  reduce_parity の token 列は不変）。
-- **prefill 側**: 律速が traffic（K 行を M 行ぶん読み直す）なので D レーン分割は効かない。M でバケット
-  する幾何表（M=1: D レーン / M ≥ 16: K タイル共有）が「同じ族・同じ席」で両方を持つ形で、後者は
-  perf-ledger K-13 の設計。
+- **Contract**: bindings, params and dispatch count equal ①. One workgroup = one row × 16 columns; lane
+  `l` accumulates `d ≡ l (mod 16)` and folds along the fixed tree. Write conditions (−inf outside the
+  predicate in the live range; nothing for `cl ≥ live` or pad rows) and half-scaling equal ①; **not
+  bit-identical to ①**; determinism and the other properties are held by bit-exact checks.
+- **Option**: the **same** `stateAttentionReduce: "parallel"` (one knob — the maintainer's ruling of
+  2026-09-06). **①′ was selected only for M (chunkRows) = 1** (`stateQkParallelEligible`) (superseded
+  by ADR 0096 on 2026-09-09: M ≤ 8, so verify rows and decode share the reduction order; `chunkRows <=
+  8` in `packages/runtime/src/kernels/state-attention.ts`). In prefill (M = 768) ①′ shrinks the row tile
+  4 → 1 and was 1.5–1.9× slower. Selection uses only plan-time static values (branching on the runtime
+  logical length would make one plan key point at different pipelines).
+- **Checks**: ① unchanged; A/B tolerance check (`tests/gpu_state_attention_parallel_test.ts`, 5e-6, two
+  fault injections fail it); census check (`tests/gpu_state_execution_test.ts`); a non-GPU truth table
+  of the eligibility conditions (`tests/kernel_state_attention_test.ts`).
+- **Measured**: decode ① QK 6.3 → 3.7–4.1 ms/token, decode wall at P = 16K −9 to −15%. The
+  `Gemma4Pipeline` default is superseded as above (ADR 0104, 2026-09-26). Prefill is traffic-bound, which
+  D lanes do not help; the geometry table below holds both in one family and one option.
 
-## 追記（2026-09-06）— 幾何表: prefill 計画（M ≥ 16）は GEMM 骨格のタイル経路 ①ₜ / ③ₜ（perf-ledger K-13）
+## Addendum (2026-09-06) — geometry table: prefill plans (M ≥ 16) take the tiled path ①ₜ / ③ₜ (perf-ledger K-13)
 
-決定 4 の ①QK / ③PV は 1 invocation = 1 要素で、prefill 計画（M = chunk 行数 768）では K / V 行を M 行
-ぶん読み直す traffic 律速だった（14.7K token の chunk 1 本で attention が GPU の 79% —
-[research 2026-09-06](../research/2026-09-06-state-attention-tiled-k13.md)）。融合 attention（ADR 0023 系）
-が持つ GEMM 骨格（共有タイル・レジスタブロック・M バケット幾何・K タイル 16 昇順 — ADR 0022 決定 3）に
-states 用の断片を差した ①ₜ / ③ₜ を足し、**M ≥ 16 の計画で席に依らず選ぶ**。
+Prefill plans (M = 768) were traffic-bound, rereading K / V rows M times (attention 79% of GPU time for
+a 14.7K-token chunk — [research](../research/2026-09-06-state-attention-tiled-k13.md)). ①ₜ / ③ₜ plug
+states fragments into the GEMM skeleton of fused attention (shared tiles, register blocking, ascending
+K tiles of 16 — ADR 0022 decision 3) and are **selected for M ≥ 16 regardless of the option**.
 
-- **契約（ビット同一）**: ①ₜ は A = q·scale / B = k·scale を共有タイルに置き骨格が d 昇順に
-  `acc = acc + a * b` を回す = ① の 1 項の式（半スケールを双方に）と加算順に一致。③ₜ は A = P
-  （S と行統計から充填時に `exp(S − m)·inv`・非実体化）/ B = V を col 昇順に回す = ③ と一致。
-  境界は実効 live で切り（`dims.n` / `dims.k` は col_cap の静的上界）、S は live 範囲を述語で
-  −inf / 値に埋めて `[live, col_cap)` と pad 行は書かない（① と同じ残骸）、O は full-write で pad 行は
-  `select` の厳密 +0.0（③ と同じ — V に非有限が混ざっても NaN 化しない）。有効行を含まない行タイルは
-  K ループ 0 周（仕事量 ∝ Q — ADR 0066 決定 3）。門 = S / O 全語の u32 一致（17 / 19 ケース・述語外 −inf・
-  残骸・pad 行込み）+ 故障注入 + gemma4 golden 厳密一致。
-- **幾何表**（この波の帰結 — GEMM の `gemmGeometryForRows` と同じ「M で選ぶ」型）:
+- **Contract (bit-identical)**: ①ₜ tiles A = q·scale / B = k·scale and sums `acc = acc + a * b` over
+  ascending d — ①'s formula and order; ③ₜ runs A = P (`exp(S − m)·inv`, not materialised) / B = V over
+  ascending col — ③'s. S fills the live range with −inf / values and writes neither `[live, col_cap)`
+  nor pad rows (as ①); O is full-write with pad rows an exact +0.0 via `select` (as ③). Row tiles
+  without valid rows run 0 K iterations (work ∝ Q — ADR 0066 decision 3). Checks: u32 equality of every
+  word of S / O (17 / 19 cases) + fault injection + exact Gemma 4 golden.
+- **Geometry table** (current; chosen by M like `gemmGeometryForRows`):
 
-  | 計画の M        | ①QK                  | ③PV                  | 数値                                 |
-  | --------------- | -------------------- | -------------------- | ------------------------------------ |
-  | 1（decode）     | ①′（席 parallel）/ ① | ③′（席 parallel）/ ③ | 席で選ぶ（並列縮約は A/B 帯門）      |
-  | 2〜15           | ①                    | ③′（席 parallel）/ ③ | 同上                                 |
-  | ≥ 16（prefill） | ①ₜ                   | ③ₜ                   | 参照経路とビット同一（席に依らない） |
+  | M of the plan        | ① QK              | ③ PV              | Numerics                                    |
+  | -------------------- | ----------------- | ----------------- | ------------------------------------------- |
+  | 1–8 (decode, verify) | ①′ (parallel) / ① | ③′ (parallel) / ③ | by the option (parallel: A/B tolerance)     |
+  | 9–15                 | ①                 | ③′ (parallel) / ③ | same                                        |
+  | ≥ 16 (prefill)       | ①ₜ                | ③ₜ                | bit-identical to the reference path         |
 
-  ③′（追記 2026-09-03）の適用は M < 16 へ狭まる（prefill での ③′ の利得は誤差内だった）。適用条件は
-  純関数（`stateQkTiledEligible` / `statePvTiledEligible` = `chunkRows >= 16`）で、計画時の静的値だけで決まる。
-- **実測**（同 research）: prefill 20 chunk の GPU 35.2 / 40.9 → 10.3 / 11.0 s（①QK ×13・③PV ×11〜12）・
-  P=16K の prefill 壁 53.6 / 56.8 → 19.5 / 20.6 s（−64%）・decode 不変・token 列一致。残る prefill の GPU は
-  linear が 72%。
-- why-not（online softmax）: S の実体化を消す価値は別軸で、今の律速は traffic だった。①ₜ / ③ₜ の断片は
-  online 形の段の中身として流用できる（追記 2026-09-03 の why-not と同じ筋）。
+  (The row "2–15 → ①" of 2026-09-06 is superseded by ADR 0096 on 2026-09-09; `"parallel-fused"` of ADR
+  0102 applies on the M ≤ 8 row.) ③′ narrows to M < 16. Eligibility is a pure function of plan-time
+  values (`stateQkTiledEligible` / `statePvTiledEligible` = `chunkRows >= 16`). The thresholds SHOULD
+  stay as listed until re-measured (re-graded 2026-10-18 to SHOULD: ①ₜ / ③ₜ are bit-identical to the
+  reference path, so the thresholds are a performance choice measured on RTX 3080 Ti / Vulkan (wgpu) /
+  Deno 2.9.6, open to change after measurement on Dawn and browsers).
+- **Measured**: prefill at P = 16K −64% wall, decode and tokens unchanged.
+- why-not (online softmax): removing the materialised S is a separate axis; the bound was traffic.
 
-## 追記（2026-09-08）— ring の法は `window` ではなく `capacity`（ADR 0096 決定 4・MTP 段 1）
+## Addendum (2026-09-08) — the ring modulus is `capacity`, not `window` (ADR 0096 decision 4)
 
-- 決定 4 の `slot_row(col) = col % window` を **`col % capacity`** に改めた（読み書き同式の MUST は
-  不変 — `stateSlotRowWgsl` の 1 文字列を ①/①′/①ₜ/③/③′/③ₜ/append の全経路と参照実装が共有する）。
-  `column_base` / `live_columns` / `in_window` は window 基準のまま — 物理行数と論理窓幅は別の量に
-  なった。sliding スロットの capacity は配布形が `window + 余裕` で焼き（gemma4 は 8）、余裕は投機
-  verify の棄却行の置き場（ADR 0066 追記 2026-09-08）。`window ≤ capacity` の門（決定 4 ③）は不変。
-- `state_append` の重複排除ガード（Q > capacity で同じ物理行へ写る論理行のうち最後の 1 本だけが
-  書く）も capacity 基準。window 基準のままだと capacity > window のとき、誰とも alias しない行が
-  黙って書かれない（prefill の chunk が行を落とす）。
-- 決定 5（append はスロットにつきちょうど 1 本・最後のノード）は段 1 では不変。段 2 で「読むだけの
-  外部スロット」を第 3 種として足す（ADR 0096 決定 1）。
+- `slot_row(col) = col % window` of decision 4 becomes **`col % capacity`** (the same-formula MUST
+  holds — one `stateSlotRowWgsl` string is shared by ①/①′/①ₜ/③/③′/③ₜ/append and the reference
+  implementation). `column_base` / `live_columns` / `in_window` stay window-based. The distribution bakes
+  sliding capacity as `window + slack` (8 for Gemma 4), the slack holding rejected verify rows (ADR 0066
+  addendum of 2026-09-08). The `window ≤ capacity` check is unchanged.
+- The de-duplication guard of `state_append` (with Q > capacity only the last logical row per physical
+  row writes) is capacity-based too; a window-based guard would silently drop rows when capacity >
+  window.
+- Decision 5 was unchanged in step 1; step 2 added read-only external slots (ADR 0096 decision 1).

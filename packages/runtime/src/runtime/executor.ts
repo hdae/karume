@@ -1031,7 +1031,7 @@ export class Session {
       return Promise.reject(cause);
     }
     // enqueueのエンコード完了と区間の成功を分ける。長さの確定も予約の返却もfinishの決着前。
-    // DECIDED: docs/decisions/0066-generation-context-state-slots.md#バッチ実行の-generationcontext2026-09-12
+    // DECIDED: docs/decisions/0066-generation-context-state-slots.md#addendum-2026-09-12--generationcontext-in-batched-execution
     let finalize: { complete(): void; fail(cause: unknown): void } | undefined;
     if (lease !== undefined) {
       batch.onSettled({

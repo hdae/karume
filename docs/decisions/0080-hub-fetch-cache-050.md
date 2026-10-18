@@ -1,117 +1,115 @@
-# 0080: hub の資産キャッシュを fetch-cache 0.5.0 の内容キーと記録ハッシュ信頼へ移行
+# 0080: Hub asset cache moves to the content keys and recorded-hash trust of fetch-cache 0.5.0
 
-- Status: accepted（2026-08-28 — ユーザー裁定: 検証移譲 OK・認証隔離は撤去〈gated 運用予定なし・
-  過剰防御〉）。**旧番 0080 ドラフト（`archive/hub-cas-0.5.0` の 272c0e9 — main 未マージ）を
-  置換する** — 当時の裁定（検証責務の移譲・knob なし常時トラスト・self-heal の位置づけ・prune の
-  先送り）は本 ADR がそのまま引き継ぎ、キーの実装形だけが変わった（hub 自前の合成 URL キー →
-  fetch-cache 0.5.0 の内容キー）。
+- Status: accepted (2026-08-28 — the maintainer's ruling: hand verification to the fetch layer; drop
+  the per-credential isolation, since no gated hosting is planned); partly superseded by
+  [0086](0086-distribution-source.md) (2026-08-31: verification is decided per source); decision 3's
+  re-isolation path narrowed on 2026-10-10; decision 5's purge re-graded 2026-10-18 to MAY.
 - Date: 2026-08-28
-- 関連: ADR [0038](0038-manifest-v1.md)（fetch-cache 接続契約 — 決定 5 を本 ADR が更新）/
-  [0070](0070-shard-loading-admission.md)（決定 2 の「sha256 照合はキャッシュヒットにも走る
-  （非交渉条件）」を本 ADR が**変更** — 照合の実体が hub の全量再ハッシュから fetch-cache の
-  記録ハッシュ比較へ移る）
+- Related: ADR [0038](0038-manifest-v1.md) (fetch-cache connection contract — this ADR updates its
+  decision 5) / [0070](0070-shard-loading-admission.md) (this ADR **changes** decision 2's "the sha256
+  check also runs on cache hits (non-negotiable)": a full re-hash in the hub becomes a comparison of
+  the recorded hash in fetch-cache). Replaces an unmerged draft of 0080 (`272c0e9`), whose rulings
+  carry over; only the key changed (a hub-made synthetic URL key → the fetch-cache content key).
 
 ## Context
 
-fetch-cache 0.5.0 が公開された（breaking — 上流 ADR 0006〜0008）。要点は「**バイトは格納時に
-検証し、ハッシュをエントリへ記録し、以後のヒットは文字列比較で決める**」への転換で、multi-GB
-資産の起動ごと全量再ハッシュが消える。HF 内容キー `["hf", kind, repo, path, sha256]` は
-revision に依存せず、revision bump でバイト不変なら再 DL しない — 旧 0080 ドラフトが hub 自前の
-合成 URL キー（`https://karume.invalid/sha256/<hex>`）で作ろうとした性質を、ライブラリが
-natively 提供する。一方 0.5.0 は `cacheName` を全廃した（名前空間 `"fetch-cache"` 固定）ため、
-hub の認証別名前空間（`karume/1:auth:<hex16>` — gated 資産の token 間隔離）は席を失った。
+fetch-cache 0.5.0 (breaking — upstream ADRs 0006 to 0008) **verifies bytes when storing them,
+records the hash on the entry, and decides later hits by a string comparison**, so the full re-hash
+of multi-GB assets on every start disappears. The HF content key `["hf", kind, repo, path, sha256]`
+does not depend on the revision: a revision bump with unchanged bytes does not download again (the
+property the draft built with `https://karume.invalid/sha256/<hex>` keys). 0.5.0 also removed
+`cacheName` (the namespace is fixed to `"fetch-cache"`), so the hub's per-credential namespaces
+(`karume/1:auth:<hex16>`, isolating gated assets between tokens) lost their place.
 
 ## Decision
 
-### 1. 検証責務を fetch-cache へ移譲する（knob なし常時トラスト）
+### 1. Hand verification to fetch-cache (always trust, no knob)
 
-資産取得（`fetchAssets` / `streamAssets` 両相）は spec に `sha256`（manifest の FileRef）と
-`expectedBytes`（= `size`）を常時渡し、hub 自前の validate フック（毎ヒット全量 sha256 +
-size 検査）を撤去する。miss 時は受信中に検証（不一致はエントリ不成立）、hit 時は記録ハッシュの
-文字列比較、記録なしエントリは初回検証読みで backfill、記録不一致は自動 evict + refetch
-（self-heal）。`recheck` は渡さない — opt-in/out の knob を設けない裁定は旧ドラフトから不変。
-manifest 取得だけは従来どおり parse 検証のみ（事前の期待 sha256 が存在しない）。
+> Narrowed by ADR [0086](0086-distribution-source.md) on 2026-08-31: verification is per source
+> (addendum below).
 
-**ADR 0070 決定 2 の「照合はキャッシュヒットにも走る（非交渉条件）」の帰結**: 条件の目的
-（キャッシュ腐敗の検出）は記録ハッシュ側が引き継ぐが、検出できる腐敗の範囲は変わる —
-**格納後のサイレントなビット腐敗は検出されない**（記録と中身が独立に腐る事故は文字列比較を
-素通りする）。回復手段は `clearHubCache`（将来はキャッシュ保守波の `pruneHubCache`）。この
-代償の受け入れは旧ドラフトで裁定済み。
+Asset fetching always passes `sha256` (the manifest `FileRef`) and `expectedBytes` (= `size`), and
+the hub's own validate hook (full sha256 and size on every hit) is removed. A miss is verified while
+receiving (a mismatch leaves no entry); a hit compares the recorded hash; an entry without a record
+is backfilled by a verifying first read; a record mismatch evicts and refetches (self-heal).
+`recheck` is not passed: there is no opt-in / opt-out knob. The manifest fetch keeps its parse-only
+check (no expected sha256 exists in advance).
 
-### 2. キーはライブラリの内容キーをそのまま使う
+**For ADR 0070 decision 2**: the purpose (detecting cache corruption) passes to the recorded hash,
+but **silent bit rot after storage is not detected** (record and content can rot independently).
+The recovery is `clearHubCache`, or `evictCachedAssets` for one selection (ADR
+[0094](0094-hub-cache-inventory-and-eviction.md)). This cost was accepted in the draft.
 
-hub はキーを合成しない。`sha256` を渡せば `["hf", kind, repo, path, sha256]`、渡さないもの
-（manifest）は resolve URL キー。revision 跨ぎの同一バイトヒット・別 revision の共存はキー設計の
-帰結として得る。旧ドラフトの `casKeyFor` / `karume-cache/2` 名前空間は不採用（不要になった）。
+### 2. Keys are the library's content keys
 
-### 3. 認証別キャッシュ隔離の撤去（ユーザー裁定）
+The hub builds no keys: with `sha256` the key is `["hf", kind, repo, path, sha256]`; without it (the
+manifest) it is the resolve URL. Same-byte hits across revisions and coexisting revisions follow from
+the key design. The draft's `casKeyFor` and `karume-cache/2` namespace are not adopted.
 
-`cacheNameFor` の token 別名前空間（`karume/1:auth:<hex16>`）は復元しない。gated 資産の運用
-予定がなく過剰防御（2026-08-28 裁定）。認証ヘッダは RequestInit として透過するが、キャッシュは
-共有名前空間に載る — 同一端末で別 token の利用者が gated 資産の写しへ到達しうる制約は
-limitations に by-design として記載する。将来 gated 運用を始める場合は custom `caches` ラッパ
-（`open()` の remap）で隔離を再導入できる（0.5.0 README の移行節が示す代替）。
+### 3. Per-credential cache isolation is removed (the maintainer's ruling)
 
-### 4. `AssetPhase` から `verifying` を撤去する
+The per-token namespaces of `cacheNameFor` are not restored: no gated assets are planned and the
+isolation was excessive defence (2026-08-28). The authorization header passes through as
+`RequestInit`, but the cache is shared, so another token's user on the same device can reach a gated
+asset's copy; `docs/limitations.md` records this as by-design. If gated hosting starts, a custom
+`caches` wrapper remapping `open()` was named as the way back — **not enough, see the 2026-10-10
+addendum**.
 
-検証は fetch-cache 内部（受信中 / 文字列比較）に埋まり hub から観測できない — 観測できない
-フェーズを偽装しない（breaking・pre-release）。`fileLoaded` / `fileTotal` は `complete` で
-一致する契約のまま。
+### 4. `AssetPhase` loses `verifying`
 
-### 5. 移行と付随の獲得
+Verification happens inside fetch-cache; the hub does not fake a phase it cannot observe (breaking,
+pre-release). `fileLoaded` / `fileTotal` still agree at `complete`.
 
-- **旧名前空間の purge**: `loadManifest` 入口で 1 回、`karume/1` と `karume/1:auth:*` を
-  `caches.delete`（失敗してもロードは続行）。キー形も変わるため旧エントリは miss して再 DL
-  1 回（データ喪失ではない）。
-- **`clearHubCache` の意味変更**: 対象が固定名前空間 `"fetch-cache"` になる — 同一 origin で
-  アプリが fetch-cache を直接使っている場合はそれも消える（docstring に明記）。repo 単位の
-  細粒度掃除（`evict(prefix)` / `listKeys`）はキャッシュ保守波の `pruneHubCache` で。
-- **DL 前即エラーの獲得**: `expectedBytes` の確保失敗は受信前に throw（`cause` = RangeError）—
-  「Chromium の単一 ArrayBuffer 上限超えを DL 後にしか観測できない」既知問題（backlog ③）が
-  この追従で閉じる。hub は握りつぶさず最初の真因として上げる（取得失敗の真因復元機構と整合）。
+### 5. Migration and what it brings
+
+- **Purge of the old namespaces**: the hub MAY keep deleting `karume/1` and `karume/1:auth:*` at the
+  entry of `loadManifest` (the load continues on failure); `clearHubCache` collects them too
+  (`packages/hub/src/cache.ts`). The key shape changed, so old entries miss and download once more.
+  (Re-graded 2026-10-18 to MAY: the purge stays, its cost is small.)
+- **`clearHubCache`** now clears the fixed namespace `"fetch-cache"`, including what an application
+  on the same origin cached with fetch-cache directly (stated in the docstring). Fine-grained cleanup
+  became `listCachedAssets` / `evictCachedAssets` (ADR 0094).
+- **Error before download**: a failed allocation of `expectedBytes` throws before receiving (`cause`
+  = `RangeError`), closing the known issue that the Chromium single-`ArrayBuffer` limit surfaced only
+  after the download. The hub reports it as the first root cause.
 
 ## Consequences
 
-- breaking（hub 0.7.0 系）: `AssetPhase` の縮小・`clearHubCache` の対象変更・（内部）検証の
-  実体変更。anima-web は `verifying` フェーズの消滅に追随が要る。
-- multi-GB 資産の 2 回目以降ロードから全量再ハッシュが消える（Pixel 級での起動 CPU/RAM 削減）。
-- `sha256Hex` と直列化保険（Chrome の digest 全量コピー対策）は hub から消えるが、**全量コピー
-  そのものが消えるのは逐次面の相 1 だけ**（prefetch は受信中の逐次ハッシュ）。全量面の network
-  経路は fetch-cache が確定バイト列へ `crypto.subtle.digest` を呼ぶため Blink 側の +N ピークは
-  残り、しかも hub からは直列化できない — 同時本数を抑えるのは `BYTE_BUDGET`（1.5GiB）のみに
-  なった。初回 DL の RAM ピークは要実測（キャッシュヒットは記録比較だけで digest 自体が
-  起きないため、2 回目以降は明確に改善側）。
-- shard 配布波（R1）の相 1 prefetch は本 ADR の `sha256` 席が前提（0.5.0 の prefetch は記録を
-  焼き、一致エントリを再 DL しない）。
+- Breaking (hub 0.7.0): `AssetPhase` is `"downloading" | "complete"`
+  (`packages/hub/src/progress.ts`), `clearHubCache` changed target, verification moved internally.
+- From the second load on, the full re-hash of multi-GB assets disappears.
+- `sha256Hex` and the digest serialization guard leave the hub, but **Chrome's full copy of the
+  digest input disappears only on the warming path (phase 1, now `prefetchAssets`)**, which hashes
+  while receiving. On the network path of `fetchAssets` fetch-cache digests the finished bytes, so
+  Blink's +N peak remains and only `BYTE_BUDGET` (1.5 GiB, `packages/hub/src/fetch.ts`) limits
+  concurrency. Cache hits run no digest; prefetch records the hash and skips matching entries.
 
-## 追記
+## Addendum (2026-08-31) — distribution sources (ADR 0086)
 
-- 2026-08-31（取得元抽象 — ADR [0086](0086-distribution-source.md)）: **決定 1 の検証責務は
-  「取得層へ移譲」ではなく「取得元ごと」になった**。HF 取得元は本 ADR のとおり sha256 +
-  `expectedBytes` を fetch-cache へ委ね記録ハッシュで済ませるが、**ローカル取得元（手元の
-  ディレクトリ）は `size` の厳密一致だけを見て sha256 は照合しない**（ADR 0086 決定 2）。哲学は
-  同型 — あちらは「格納時に検証し以後は記録を信頼する」で全量再ハッシュを消し、こちらは「手元の
-  ファイルは取得物ではなく利用者の資産」として毎起動の全量ハッシュを買わない。ローカル経路が
-  検出できるのは「途中で切れたコピー・別 quant の取り違え」までで、**改竄は検出しない**
-  （by-design として `docs/limitations.md` に記載）。決定 3（credential 隔離の撤去）は
-  HTTP 取得元だけの話で、ローカル取得元はそもそも CacheStorage を通らない。
-- 2026-09-25（コンテナ経路 — ADR [0109](0109-manifest-v5-container.md) 決定 7）: 上の「ローカル
-  経路は改竄を検出しない」は、**hub がファイル全体の sha256 を照合しない**点に限って今も成り立つ。
-  コンテナ（`krm` の part）では、ローカル取得元は未検証の取得元として扱われ、runtime の
-  `openContainer` が descriptor の 2 文書と、読んだ block ごとの sha256 を照合する（ADR
-  [0086](0086-distribution-source.md) 決定 2 の追記）。size の厳密一致だけが門として残るのは
-  manifest `assets` の `FileRef` で直接読むファイルである。
-- 2026-10-10（取得層の同時取得の合流 — Codex レビュー R4-009 / R4-017）: 取得層はプロセス内の
-  同時取得を内容キーだけで 1 本に合流させ（single-flight）、合流した後発には先に走った取得の
-  バイト列を渡す。後発が渡した `caches`・認証ヘッダ・`fetch` は使われず、後発は記録ハッシュを
-  見ずに自分の sha256 で全量を照合し直す（`@hdae/fetch-cache` 0.8.0 の by-design）。この事実で
-  本 ADR の 2 か所の言い切りを狭める（本文は書き換えない）:
-  - 決定 3 の「custom `caches` ラッパ（`open()` の remap）で隔離を再導入できる」は不十分である。
-    キャッシュを分けても、認証付きの取得が走っている間の無認証の要求はその取得に合流して
-    認証付きのバイト列を受け取る。隔離には合流キーを認証ごとに分けること（取得層の変更）か、
-    実行環境（origin・プロセス）を分けることが要る。gated 運用の予定は無いので、現時点の
-    利用者影響は無い（`docs/limitations.md` の「hub: キャッシュは credential で隔離しない」）。
-  - Consequences の「2 回目以降ロードから全量再ハッシュが消える」は、単独の呼び出しと合流の
-    先発に限る。同じファイルを同時に要求して合流した後発は、キャッシュヒットでも全量の SHA-256 を
-    計算し直す。正しさには影響せず、大きなファイルを並行に取ったときの CPU 時間だけが増える
-    （増分は未計測）。後発の照合を省くのは取得層の信頼モデルの再設計なので、hub 側では直さない。
+Verification in decision 1 is per source. The HF source works as above. **The local source (a
+directory on disk) checks only an exact `size` match, not sha256** (ADR 0086 decision 2): files on
+disk are the user's assets, not fetched data, so no full hash is paid on every start. It catches a
+truncated copy or a mixed-up quant and **does not detect tampering** (by-design,
+`docs/limitations.md`). Decision 3 concerns HTTP sources only.
+
+## Addendum (2026-09-25) — container path (ADR 0109 decision 7)
+
+"Does not detect tampering" now means only that **the hub does not check a whole file's sha256**.
+For container parts (`krm`) the local source is unverified and the runtime's `openContainer` checks
+the two descriptor documents and the sha256 of every block it reads (ADR 0086 decision 2, addendum).
+The `size` match remains the only check for files read through a manifest `assets` `FileRef`.
+
+## Addendum (2026-10-10) — merged concurrent fetches
+
+The fetch layer merges concurrent fetches in the process by content key (single-flight) and gives
+later callers the first fetch's bytes; their `caches`, authorization header and `fetch` are unused,
+and they re-check the full bytes against their own sha256 (by-design in `@hdae/fetch-cache` 0.8.0).
+This narrows two statements:
+
+- Decision 3: a custom `caches` wrapper does not isolate. An unauthenticated request made during an
+  authenticated fetch joins it and receives the authenticated bytes. Isolation needs merge keys split
+  by credential (a fetch-layer change) or separate origins / processes. No gated hosting is planned,
+  so users are not affected (`docs/limitations.md`).
+- Consequences: a later caller merged into a concurrent fetch recomputes the full SHA-256 even on a
+  cache hit. Correctness is unaffected; CPU time grows for parallel large fetches (not measured).
+  Changing that is a redesign of the fetch layer's trust model, not a hub fix.

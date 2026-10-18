@@ -1,188 +1,161 @@
-# 0074: quant 席の命名規則 — 格納語彙 1 本 + 軸ごとのノブ
+# 0074: Preset naming — one storage vocabulary plus per-axis knobs
 
-- Status: implemented（2026-08-25・0.5.0 の breaking 波 — 決定 6 の移行表どおりに適用済み。
-  recipe 側の席名一斉改名と `karume/4` emit、deno 側の `linearCompute` / `attentionCompute` の値
-  `"i8a8"` → `"a8"` 改名まで完了し、[0075](0075-quant-presentation.md) の繰り上げと同乗した。
-  公開リポの再アップロードと pin 更新（[0073](0073-models-source-pin.md)）は **0.5.0 で
-  消化済み**（4 リポの revision は
-  [退避した backlog の消化済み節](../research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md)の
-  0.5.0 節が記録）。SBV2 の
-  yomi 依存分離は同乗せず 0.6.0 へ送った〈backlog〉。起票は 2026-08-21 のユーザー裁定
-  「起票お願いします」）
+- Status: implemented (2026-08-25, 0.5.0 breaking wave — every preset renamed by decision 6, the
+  `linearCompute` / `attentionCompute` value `"i8a8"` renamed `"a8"`, published together with
+  [0075](0075-quant-presentation.md); proposed on 2026-08-21 by the maintainer's ruling). Still in
+  force; [0128](0128-default-preset-original-weights.md) keeps decision 5.
 - Date: 2026-08-21
-- 関連: ADR [0041](0041-manifest-v2.md)（`presets` → `quants` の語彙）/
-  [0025](0025-w8a8-linear-execution.md)・[0030](0030-attention-a8-execution.md)（`i8a8` の出自）/
-  [0069](0069-packed-w4-storage.md)（i4 格納）/ [0075](0075-quant-presentation.md)（表示名・説明）
+- Related: ADR [0041](0041-manifest-v2.md) (the `presets` → `quants` vocabulary) /
+  [0025](0025-w8a8-linear-execution.md) and [0030](0030-attention-a8-execution.md) (origin of
+  `i8a8`) / [0069](0069-packed-w4-storage.md) (i4 storage) / [0075](0075-quant-presentation.md)
+  (display label and description) / [0073](0073-models-source-pin.md) (pins)
 
 ## Context
 
-quant 席の名前はファミリごとに独立に育ち、2026-08-21 時点で 4 つのほころびがある。
+Preset names grew independently per family and had four flaws on 2026-08-21.
 
-| ファミリ                                    | 席                                                                | 既定       |
+| Family                                      | Presets                                                           | Default    |
 | ------------------------------------------- | ----------------------------------------------------------------- | ---------- |
 | anima                                       | `f16` `i8` `w8a8` `w8a8-a8` `w8a8-s16` `f16-c16` `w4` `w4-a8-s16` | `w8a8-s16` |
 | sbv2                                        | `f16` `w8` `w8a8` `w8-bert4` `w4`                                 | `w8-bert4` |
 | irodori                                     | `f32` `f16` `w8` `w8a8`                                           | `w8a8`     |
 | birefnet / depth-anything / siglip2 / vowel | `f32`                                                             | `f32`      |
 
-1. **同じものに 2 綴り** — 「i8 格納・素の計算」が anima では `i8`、sbv2 / irodori では `w8`。
-2. **同じ綴りが 2 つの軸** — `w8a8` の `a8` は linear の活性、`w8a8-a8` の 2 つめの `-a8` は
-   attention の活性。2026-08-21 に新設した `w4-a8-s16` もこの曖昧さを引き継いでいる。
-3. **名前が実態と食い違う** — sbv2 の `f16` 席は純粋な f16 ではなく `text_encoder` だけ i8
-   （`sbv2/distribution.py`）。
-4. **文法の違う軸が混在** — `w8-bert4` は「部品ごとの上書き」で、他の席名と組み立て方が別。
+1. **Two spellings for one thing** — "i8 storage, plain compute" was `i8` in anima and `w8` in sbv2 /
+   irodori.
+2. **One spelling for two axes** — the `a8` of `w8a8` is the linear activation; the second `-a8` of
+   `w8a8-a8` is the attention activation. `w4-a8-s16`, added on 2026-08-21, inherited the ambiguity.
+3. **Names that contradict the content** — sbv2's `f16` preset was not pure f16: only `text_encoder`
+   was i8 (`sbv2/distribution.py`).
+4. **Axes with different grammar mixed** — `w8-bert4` is a per-component override, built differently
+   from the other names.
 
-hub は quant 名を**不透明なキーとしてしか扱わない**（`resolveFiles` は
-`Object.hasOwn(entry.quants, quantName)` を見るだけ）。したがって改名はデータと文書の変更で、
-パーサや runtime の工事を伴わない。
+The hub treats a preset name **only as an opaque key** (`resolveSelection` in
+`packages/hub/src/resolve.ts` checks `Object.hasOwn(entry.quants, quant)`), so renaming changes data
+and documents, not parsers or the runtime.
 
 ## Decision
 
-### 1. 文法
+### 1. Grammar
 
-    <格納>[+<部品><ビット>]…[-<ノブ>]…
+    <storage>[+<component><bits>]…[-<knob>]…
 
-- `<格納>` = 全役割に共通の**基底**格納
-- `+<部品><ビット>` = 役割ごとの上書き（0 個以上）
-- `-<ノブ>` = 実行時のノブ（0 個以上・下の定義順に並べる）
+- `<storage>` = the **base** storage common to every role
+- `+<component><bits>` = per-role overrides (zero or more)
+- `-<knob>` = runtime knobs (zero or more, in the order defined below)
 
-### 2. 格納の語彙は資産ヘッダと 1:1（`f32` / `f16` / `i8` / `i4`）
+### 2. The storage vocabulary matches the asset's storage one-to-one (`f32` / `f16` / `i8` / `i4`)
 
-`w8` / `w4` という第 2 語彙を廃す。席の `weights` 宣言に書く dtype ラベル・
-`STORAGE_REQUIREMENTS` が要求するヘッダ dtype・席名の 3 つが同じ綴りになり、
-「どれが正か」を考える場面が消える。`i4` は混成（適格な重みが i4・残りが i8）を指すラベルで、
-これは既に `ANIMA_WEIGHTS` / `SBV2` の席が使っている意味そのもの。
+The second vocabulary `w8` / `w4` is dropped. The dtype label in a preset's `weights` declaration,
+the storage that `STORAGE_REQUIREMENTS` demands and the preset name share one spelling, so the
+question "which one is right" never arises. `i4` labels mixed storage (eligible weights in i4, the
+rest in i8), the meaning the anima and sbv2 presets already used. The vocabulary has grown since:
+`i2` (addendum of 2026-09-19) and `bf16` (ADR [0131](0131-bf16-weight-execution.md), 2026-10-17 — the
+anima preset `bf16`, a bare storage name); the full list and each type's state are indexed in
+[quantization](../quantization.md) table 1. Since ADR 0108 the "asset's storage" is the container's
+codec (addendum of 2026-09-25).
 
-### 3. ノブの綴り — `a8` / `attn8` / `s16` / `c16`
+### 3. Knob spellings — `a8` / `attn8` / `s16` / `c16`
 
-| トークン | 軸                               | session の値                                |
-| -------- | -------------------------------- | ------------------------------------------- |
-| `a8`     | linear の活性を i8 へ            | `linearCompute: "a8"`                       |
-| `attn8`  | attention の活性を i8 へ         | `attentionCompute: "a8"`                    |
-| `s16`    | attention の score 格納を f16 へ | `attentionScoreStorage: "f16"`              |
-| `c16`    | 計算を f16 へ（shaderF16 要求）  | `linearCompute` / `attentionCompute: "f16"` |
+| Token   | Axis                                | Session value                               |
+| ------- | ----------------------------------- | ------------------------------------------- |
+| `a8`    | linear activations to i8            | `linearCompute: "a8"`                       |
+| `attn8` | attention activations to i8         | `attentionCompute: "a8"`                    |
+| `s16`   | attention score storage to f16      | `attentionScoreStorage: "f16"`              |
+| `c16`   | compute in f16 (requires shaderF16) | `linearCompute` / `attentionCompute: "f16"` |
 
-**値の語彙（`a8`）と席名のトークン（`a8` / `attn8`）は別レイヤ** — オプションのキーが既に軸を
-名指ししているので値は軸を持たない（`attentionCompute: "a8"`）。席名は 1 本の文字列に軸を
-畳むので、どちらの活性かをトークンで分ける。
+**The value vocabulary (`a8`) and the name tokens (`a8` / `attn8`) are separate layers.** The option
+key already names the axis, so the value carries none (`attentionCompute: "a8"`). A preset name folds
+the axes into one string, so the token tells which activation.
 
-`linearCompute` の値を `i8a8` → `a8` にするのは、このノブが決めているのが**活性の扱いだけ**だから
-（重みの格納は資産ヘッダが決める）。旧綴りの前半 `i8` は重み格納の判別子 `:wi8` を畳んだもので
-（[dp4a-w8a8-design](../research/2026-08-03-dp4a-w8a8-design.md) — 逐語「`v2` の重み格納判別子 `:wi8` は i8a8 では意味が重複するので `i8a8` に畳む」）、i4 常駐の重みを同じ経路へ
-載せる w4a8 が入ると事実として嘘になる。**格納形を値に書くと、資産ヘッダと manifest の二重持ちに
-なる**（CLAUDE.md の「派生状態を独立更新の非正規化フィールドに持たない」）ため、値を格納形ごとに
-増やす案（`i4a8` を足す）は採らない — 混成資産（anima の i4 系列は i4 453 本 + i8 1 本）で
-どちらか一方しか加速できなくなる実害もある。
+`linearCompute`'s value becomes `a8` instead of `i8a8` because the knob decides **only how activations
+are handled** (the asset decides the weight storage). The `i8` of the old spelling folded the weight
+storage discriminator `:wi8` ([dp4a-w8a8-design](../research/2026-08-03-dp4a-w8a8-design.md)), which
+becomes false once w4a8 puts i4-resident weights on the same path. **Writing the storage into the
+value would keep it twice, in the asset and in the manifest** (the rule against maintaining derivable
+state in an independently updated field), so adding values per storage (`i4a8`) is not adopted — it
+would also accelerate only one side of a mixed asset (anima's i4 series has 453 i4 tensors and one
+i8).
 
-### 4. 部品上書きの略称は recipe が定め、カードで対応を明示する
+### 4. Component abbreviations are defined by the recipe and shown on the card
 
-`i8+bert4` の `bert` のような略称は役割名（`text_encoder`）より短く読みやすい一方、
-それ自体が語彙になる。**略称の定義は recipe（`distribution.py`）が持ち、生成モデルカードの
-quant 表に対応を必ず出す**。[0075](0075-quant-presentation.md) の表示名・説明が入れば UI 側では
-略称を読ませずに済む。
+An abbreviation such as the `bert` of `i8+bert4` is shorter than the role name (`text_encoder`) but
+becomes vocabulary itself. **The recipe (`distribution.py`) defines the abbreviations, and the
+generated model card's quant table always shows the mapping** (the `abbreviations` argument of
+`quants` in `tools/exporter/src/karume/modelcard.py`). With [0075](0075-quant-presentation.md)'s
+label and description, a UI need not show abbreviations at all.
 
-### 5. 既定は名前で表さない
+### 5. The default is not expressed in the name
 
-「推奨」「default」を席名に含めない — `defaultQuant` が既に指しているので、名前に書くと
-二重持ちになる（同じ理由で [0075](0075-quant-presentation.md) も `recommended` 欄を持たない）。
+Preset names do not contain "recommended" or "default": `defaultQuant` already points at the default,
+and a name would keep it twice (for the same reason [0075](0075-quant-presentation.md) has no
+`recommended` field).
 
-### 6. 移行表（0.5.0 で一斉に）
+### 6. Migration (all at once in 0.5.0)
 
-`<格納>` は**全役割に共通の基底格納**（決定 1）を字句どおり採る。anima は text_encoder /
-text_conditioner / vae_decoder が f16 固定で、圧縮が掛かるのは transformer だけなので、基底は
-`f16` になり DiT ぶんは部品上書き `+dit<ビット>` で綴る。sbv2 / irodori は全役割が同じ格納を
-持つので基底 1 語で足りる（sbv2 の `f16` 席だけ text_encoder が i8 なので `+bert8`）。
-
-| 現行                        | 0.5.0                   | 備考                                                         |
-| --------------------------- | ----------------------- | ------------------------------------------------------------ |
-| sbv2 `w8` / irodori `w8`    | `i8`                    | 2 綴りの統合（全役割が i8）                                  |
-| sbv2 / irodori `w8a8`       | `i8-a8`                 |                                                              |
-| sbv2 `w8-bert4`（既定）     | `i8+bert4`              |                                                              |
-| sbv2 `w4`                   | `i4`                    | 全役割が i4                                                  |
-| sbv2 `f16`                  | `f16+bert8`             | 実態（text_encoder だけ i8）に合わせる                       |
-| anima `i8`                  | `f16+dit8`              | 実態に合わせる（i8 は transformer だけ・他 3 役は f16 固定） |
-| anima `w8a8`                | `f16+dit8-a8`           |                                                              |
-| anima `w8a8-a8`             | `f16+dit8-a8-attn8`     |                                                              |
-| anima `w8a8-s16`（既定）    | `f16+dit8-a8-attn8-s16` |                                                              |
-| anima `w4`                  | `f16+dit4`              |                                                              |
-| anima `w4-a8-s16`           | `f16+dit4-attn8-s16`    | 現行名の `-a8` は attention の意味だった                     |
-| anima `f16-c16`             | `f16-c16`               | 変化なし                                                     |
-| anima `f16` / `f32` / `f16` | 同名                    | 変化なし                                                     |
-
-**適用は 0.5.0 の breaking 波でまとめて行う**（Status 参照）— この表は「移行時にこう変える」の
-記録であって、現行コード（`ANIMA_QUANTS` / `SBV2_QUANTS` / `IRODORI_QUANT_SEATS`）はまだ旧名の
-まま〈時点記録 — **適用済み**（0.5.0・2026-08-25）。recipes の散文とエラー文言・perf-ledger の
-SBV2 席名は 2026-09-05 に追随〉。公開済み 4 リポの manifest は再アップロード + pin 更新（[0073](0073-models-source-pin.md)）
-と同時に切り替える。
-
-新しい名前は長くなる（`i8-a8-attn8-s16`）が、**id は機械の都合で、人が読むのは
-[0075](0075-quant-presentation.md) の `label` / `description`** という役割分担を取る。
+Applied on 2026-08-25 in the 0.5.0 breaking wave, with no compatibility shim. `<storage>` is taken
+literally as the base common to every role: anima keeps text_encoder / text_conditioner /
+vae_decoder in f16 and compresses only the transformer, so its base is `f16` with `+dit<bits>`
+(for example `w8a8-s16` → `f16+dit8-a8-attn8-s16`; `w4-a8-s16` → `f16+dit4-attn8-s16`, whose old
+`-a8` meant attention); sbv2 / irodori use one base word (`w8-bert4` → `i8+bert4`, sbv2 `f16` →
+`f16+bert8`, irodori `w4` → `i8+dit4`). Names grow longer (`i8-a8-attn8-s16`), but **the id serves
+the machine; people read [0075](0075-quant-presentation.md)'s `label` / `description`.**
 
 ## Consequences
 
-- 公開済み 4 リポ（jvnv / irodori / anima-turbo / anima — 起票後の波 L で 1 増）の manifest が
-  全て変わる → 再アップロード + pin 更新
-  （[0073](0073-models-source-pin.md)）が要る。0.5.0 の他の breaking と 1 回にまとめる。
-- hub / runtime のコード変更は**不要**（名前は不透明キー）。変わるのは recipe の quant 表・
-  examples・E2E テストの参照名・docs。**`linearCompute` / `attentionCompute` の値**の改名だけは
-  runtime の型（`ComputePrecision` / `SessionOptions`）と `recipe-builder.ts` の値比較 2 箇所、
-  hub の `LINEAR_COMPUTE` / `ATTENTION_COMPUTE` allowlist に触れる（型検査で全参照点が落ちる）。
-  [0075](0075-quant-presentation.md) の format 繰り上げと同じ波。
-- 旧名の互換シムは**作らない**。リリース済みだが、breaking 波でまとめて切り替える方が、
-  「どちらの綴りも通る」期間を作るより誤解が少ない（旧名で pin された 0.4.0 クライアントは
-  旧 revision を読み続けるので壊れない — pin が緩衝材になる）。
-- 小ファミリ（`f32` のみ）は無変更。
+- The manifests of every published repository changed, so they were re-uploaded and their pins
+  updated ([0073](0073-models-source-pin.md)), together with the other 0.5.0 breaking changes.
+- The hub and runtime need no change for preset names (opaque keys). Renaming the
+  `linearCompute` / `attentionCompute` value touches the runtime types (`ComputePrecision` /
+  `SessionOptions`) and the hub's `LINEAR_COMPUTE` / `ATTENTION_COMPUTE` allowlists (type checking
+  finds every reference).
+- **No compatibility shim** for old names. A breaking switch at once misleads less than a period where
+  both spellings work; 0.4.0 clients pinned to old names keep reading the old revision, so the pin
+  absorbs the break.
+- Small families (`f32` only) are unchanged.
 
-## 追記（2026-08-24）— 波 J-4 で増えた席の移行行
+## Addendum (2026-08-24) — presets added in wave J-4
 
-起票（2026-08-21）後に irodori へ `w4` 席が増えた（ADR
-[0050](0050-irodori-quant-series.md) 追記 2・HF 公開済み）。移行表へ 1 行追う:
+irodori gained a `w4` preset (ADR [0050](0050-irodori-quant-series.md) addendum 2); its 0.5.0 name is
+`i8+dit4` (base i8 for all seven roles, the DiT alone mixed i4). Applied with decision 6.
 
-| 現行         | 0.5.0     | 備考                                                       |
-| ------------ | --------- | ---------------------------------------------------------- |
-| irodori `w4` | `i8+dit4` | 基底 = 全 7 役 i8・DiT だけ i4 混成（決定 1 の字句どおり） |
+## Addendum (2026-09-13) — parallel GEMV reduction
 
-anima の `w4` / `w4-a8-s16` は既存行のまま（素版リポ karume-anima のローカル配布形にも
-同名で組み込まれているが**その 2 席は未公開** — 配布スキップ裁定 2026-08-24・perf-ledger
-Q-5）。公開リポ数は Consequences の 4 のまま変わらない。
+The knob `gemvpar` is added at the end of the knob order and means `session.linearGemvReduce:
+"parallel"`. `i4-gemvpar` has the same weight mapping as `i4`; only the reduction differs
+([ADR 0098](0098-linear-gemv-parallel.md)). The default is still chosen by `defaultQuant`, not by
+name.
 
-## 追記（2026-09-13）— GEMVの並列加算
+## Addendum (2026-09-19) — the `fast` token, `i2` in the storage vocabulary, ADRs that extend this rule
 
-実行ノブの末尾に `gemvpar` を追加し、`session.linearGemvReduce: "parallel"` を表す。
-今回の `i4-gemvpar` は `i4` と同じ重み写像を持ち、加算方式だけが異なる（[ADR 0098](0098-linear-gemv-parallel.md)）。
-既定は引き続き名前ではなく `defaultQuant` で選ぶ。参照用の既存quant名と意味は維持する。
+### The `fast` token
 
-## 追記（2026-09-19）— `fast` トークン・格納語彙の `i2`・この規則へ追記した ADR の一覧
+The knob spelling `fast` is added. It is not one knob but **the bundle of speed-up knobs the family
+has accepted**, defined by each `distribution.py` quant table (for plain Gemma: parallel GEMV plus
+RMS→add fusion; QAT adds linear→SRQ fusion — [ADR 0104](0104-gemma-fast-quant.md)). The bundle may
+differ per family and cannot be read from the name; [0075](0075-quant-presentation.md)'s `label` /
+`description` explain it.
 
-### `fast` トークン
+### `i2` joins the storage vocabulary of decision 2
 
-実行ノブの綴りに `fast` を追加する。意味は個別のノブではなく
-**そのファミリが検収済みの高速化ノブ束**で、中身は各 `distribution.py` の quant 表が持つ
-（通常 Gemma は並列 GEMV + RMS→add 融合、QAT はさらに linear→SRQ 融合 — [ADR 0104](0104-gemma-fast-quant.md)）。
-束の中身はファミリごとに違ってよく、席名からは読めない。
-読み手向けの説明は [0075](0075-quant-presentation.md) の `label` / `description` が持つ。
+INT2 storage (ADR [0097](0097-gemma4-qat-integration.md) addendum 1)
+makes **`i2` a further word**. Decision 2's rule (preset name, `weights` dtype label and the storage
+`STORAGE_REQUIREMENTS` demands share one spelling) is unchanged.
 
-### 決定 2 の格納語彙に `i2` を足す
+### ADRs that add to or make exceptions to this rule
 
-決定 2 の「格納の語彙は資産ヘッダと 1:1」は `f32` / `f16` / `i8` / `i4` の 4 語で書かれているが、
-INT2 格納の追加（[ADR 0097 追記 1](0097-gemma4-qat-integration.md#追記-1--int2-格納と実行の契約2026-09-11)）で
-**`i2` が 5 語目**になった。決定 2 の規則（席名・`weights` の dtype ラベル・
-`STORAGE_REQUIREMENTS` が要求するヘッダ dtype の 3 つが同じ綴り）は変えない。
-語彙の全数と各格納型の状態は [quantization](../quantization.md) 表 1 が索引を持つ。
+| ADR                                               | What it adds                                                                                                           |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| [0098](0098-linear-gemv-parallel.md)              | knob `gemvpar` (addendum of 2026-09-13)                                                                                |
+| [0097](0097-gemma4-qat-integration.md) addendum 5 | QAT preset names — mixed INT2 / INT4 / INT8 under the single label `i4`; the breakdown goes in `label` / `description` |
+| [0104](0104-gemma-fast-quant.md)                  | knob `fast` (above); existing assets are not updated automatically                                                     |
+| [0131](0131-bf16-weight-execution.md)             | storage word and preset name `bf16` (2026-10-17)                                                                       |
 
-### この規則へ追記・例外を足した ADR
+## Addendum (2026-09-25) — the canonical storage vocabulary after the container
 
-| ADR                                                                                              | 足したもの                                                                                            |
-| ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
-| [0098](0098-linear-gemv-parallel.md)                                                             | ノブ `gemvpar`（2026-09-13 追記）                                                                     |
-| [0097 追記 5](0097-gemma4-qat-integration.md#追記-5--固定-qat-recipe-と数値比較の扱い2026-09-11) | QAT の席名 — 混成 INT2 / INT4 / INT8 を `i4` の 1 ラベルで表し、内訳は `label` / `description` に書く |
-| [0104](0104-gemma-fast-quant.md)                                                                 | ノブ `fast`（上記）・既存資産を自動更新しない宣言                                                     |
-
-## 追記（2026-09-25）— コンテナ後の格納語彙の正本
-
-決定 2 の「資産ヘッダ」は、ADR [0108](0108-container-format.md) 以降はコンテナ descriptor の
-`encoding.codec` を指す（codec 台帳 — 0108 決定 12 / 13・[container-v1](../container-v1.md) §6）。
-dtype ラベル・席名の綴りは codec から導く layout（`codecLayout`）と一致し、3 つの綴りが揃う規則の
-趣旨は `karume dist` の検査（`tools/exporter/src/karume/dist.py` の `storage_dtypes`）で今も成り立つ。
-manifest は `karume/5` が同じ欄（`quants[].weights` の dtype ラベル）を引き継ぐ（ADR
-[0109](0109-manifest-v5-container.md) 決定 2）。
+Decision 2's "asset's storage" means, since ADR [0108](0108-container-format.md), the container
+descriptor's `encoding.codec` (codec ledger — 0108 decisions 12 / 13, [container-v1](../container-v1.md)
+§6). The dtype label and the preset name match the layout derived from the codec (`codecLayout`), and
+`karume dist` still checks that the three spellings agree (`storage_dtypes` in
+`tools/exporter/src/karume/dist.py`). Manifest `karume/5` keeps the same field (`quants[].weights`
+dtype label — ADR [0109](0109-manifest-v5-container.md) decision 2).

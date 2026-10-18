@@ -1,181 +1,180 @@
-# 0093: 中間バッファ（transient）の静的 liveness パッキング — サイズ別プールから区間 + offset 配置へ
+# 0093: Static liveness packing of transient buffers — from size-class pools to intervals and offsets
 
-- Status: implemented（2026-09-05 — 決定 1〜8 を runtime へ結線: `transient-plan.ts` の計画を
-  `recipe.ts` の焼き込み / ミス run・`executor.ts` の backing・`estimate.ts` の見積りが共有し、
-  `RunArena` のプールと `derivePlanSlots` は退役。dispatch の読み書きは `PipelineCache` が WGSL 宣言
-  から採る。裁定は網羅レビュー 2026-09-04_62bdbeb の要判断 2 をユーザーが推奨案 a
-  〈A 代数書き換え → B 本 ADR → C 上限 preflight〉で下したもの。実測の正本 =
-  `.claude/reviews/2026-09-04_62bdbeb/B1-design-draft.md` / `findings/module-B1-birefnet-2048.md`）
+- Status: implemented (2026-09-05 — decisions 1–8 wired into the runtime; the maintainer chose the
+  recommended order of the exhaustive review of 2026-09-04: algebraic rewrite (A) → this ADR (B) →
+  limit preflight (C); measurement notes in `.claude/reviews/2026-09-04_62bdbeb/`)
 - Date: 2026-09-05
-- 関連: ADR [0004](0004-execution-model.md)（バッファ管理「per-run アリーナ（サイズ別プール +
-  最終消費者解放）」— **本 ADR が置換**。不変条件 ①②③④⑥ は据え置き）/
-  [0014](0014-layout-ops-full-write.md)（full-write — 据え置き・本 ADR の再利用安全性の根拠）/
-  [0054](0054-resident-loop-and-fence.md)（フェンスと寿命 — 不変）/
-  [0066](0066-generation-context-state-slots.md)（state スロットは context 所有 — 本 ADR の対象外）/
-  [0070](0070-shard-loading-admission.md) 決定 5・[0089](0089-memory-limits-preflight.md)
-  （見積りと上限検査 — 決定 4 / 5 が中間へ拡張される）/
-  [0022](0022-gemm-register-blocking.md)（実行時オートチューン禁止 — 計画は純関数のまま）
+- Related: [0004](0004-execution-model.md) (buffer management with size-class pools — **replaced by
+  this ADR**; invariants ①②③④⑥ kept) / [0014](0014-layout-ops-full-write.md) (full-write — the basis
+  for safe reuse) / [0054](0054-resident-loop-and-fence.md) (fences, unchanged) /
+  [0066](0066-generation-context-state-slots.md) (state slots, out of scope) /
+  [0070](0070-shard-loading-admission.md) decision 5 and [0089](0089-memory-limits-preflight.md)
+  (extended to intermediates by decisions 4 / 5) / [0022](0022-gemm-register-blocking.md) (no run-time
+  autotuning)
 
 ## Context
 
-中間バッファ（ノード出力とノード内一時）の確保は **サイズクラス厳密一致の LIFO プール**
-（`RunArena.allocStorage` と、その鏡写しである `derivePlanSlots` / `estimate.transientSlotBytes`）で
-行われている。サイズが揃わない列では解放済みが再利用されず slot が累積するため、**必要な
-GPU メモリが同時生存バイトの最大（生存ピーク）の約 3.2 倍に膨らむ**。BiRefNet HR の実 IR で
-計算した値（2026-09-04・`estimateGraphMemory` と純関数の再生）:
+Intermediate buffers (node outputs and per-node temporaries) were allocated from a **LIFO pool with
+exact size-class matching** (`RunArena.allocStorage`, mirrored by `derivePlanSlots` /
+`estimate.transientSlotBytes`). When sizes do not line up, released buffers are not reused and slots
+pile up, so **the GPU memory needed grows to about 3.2× the maximum of simultaneously live bytes (the
+liveness peak)**. Computed on the real BiRefNet HR IR (2026-09-04, `estimateGraphMemory` and a replay
+of the pure function):
 
-| 解像度 | workspace（現行プール） | 生存ピーク |  膨張 |
-| ------ | ----------------------: | ---------: | ----: |
-| 1024²  |                6.14 GiB |   1.88 GiB | 3.27× |
-| 2048²  |               23.76 GiB |   7.50 GiB | 3.17× |
+| Resolution | workspace (pool) | liveness peak | inflation |
+| ---------- | ---------------: | ------------: | --------: |
+| 1024²      |         6.14 GiB |      1.88 GiB |     3.27× |
+| 2048²      |        23.76 GiB |      7.50 GiB |     3.17× |
 
-2048² は 12 GiB 級 GPU でグラフの 5.4% 地点で総確保が天井に当たる（limitations「Deno では
-GPUBuffer の総確保がドライバ申告予算の 97% で頭打ち」）。同じ膨張率は他家族にも掛かっており、
-1024² の BiRefNet が「デスクトップ級 GPU 限定」なのはこの規則の帰結である。
+At 2048² a 12 GiB GPU hit the allocation ceiling 5.4% into the graph (the limitations entry on Deno
+capping total GPUBuffer allocation at 97% of the driver-reported budget). The same inflation applied
+to other families; it is why BiRefNet 1024² was "desktop-class GPUs only".
 
-厳密一致の根拠は「要求より大きいバッファを配ると runtime-sized array の `arrayLength()` が
-静かに変わる」（`arena.ts`）だったが、①生成 WGSL に `arrayLength` は 1 度も現れず（要素数は
-params の `n` で渡す）②bind group entry は `{ buffer, offset, size }` で**束縛範囲を実寸に切れる**
-ので、実寸の保証は「バッファの大きさ」ではなく「束縛範囲」の性質として保てる。
+Exact matching was justified by "a larger buffer silently changes `arrayLength()` of a runtime-sized
+array" (`arena.ts`). But ① generated WGSL never calls `arrayLength` (element counts come in the `n`
+param), and ② a bind group entry is `{ buffer, offset, size }`, so the **bound range can be cut to
+the exact size**. The exact-size guarantee can be a property of the bound range, not of the buffer.
 
 ## Decision
 
-### 1. 計画 = 区間 + offset（純関数・実行時オートチューン無し）
+### 1. The plan = intervals + offsets (a pure function; no run-time autotuning)
 
-- レシピ列（`StepRecipe[]`）から、確保・解放の**イベント順**をそのまま再生して各論理テンソル
-  （ノード出力・一時）の**生存区間** `[alloc, release)` と実寸（`toSizeClass`）を取り、
-  時間区間が重ならないテンソル同士が同じバイトを共有できるように **first-fit（大きい順）で
-  領域バッファの offset へ配置**する。順序は確保 → retain → 定義ぶんの解放が現行と同一
-  （`executeStepRecipe` / `derivePlanSlots` の MUST の順）。別名（reshape / 恒等 expand）は根の
-  区間へ合算、pinned（グラフ出力）は末尾まで生存。
-- 領域は `maxBufferSize` を bin にして複数本になりうる。offset は `minStorageBufferOffsetAlignment`
-  （granted 値・仕様既定 256 B）に整列する。
-- **usage scope の制約**（WebGPU: 1 dispatch の中で同じ GPUBuffer を `read`（read-only-storage）
-  と `read_write`（storage）の両方で束ねることはできない — 判定はバッファ単位で範囲は見ない）を
-  計画に組み込む: 同じ dispatch で片方が読まれ他方が書かれる 2 テンソルは**別の領域**に置く。
-  dispatch ごとの読み / 書きの役割は、**その dispatch が使うカーネルの WGSL 宣言**
-  （`@binding(N) var<storage, read>` / `read_write`）から機械的に採る（手書きの表を持たない）。
-- 計画は bindings だけの純関数で、`PreparedPlan`（導出済み計画）と同じ寿命で持つ。**GPU の
-  granted limits（`maxBufferSize` / `maxStorageBufferBindingSize` / offset 整列）は値として渡す**
-  （ADR 0022 — 融合の行ブロック枚数と同じ扱い）。
+- Replay the allocation and release events of the recipe list (`StepRecipe[]`) in order to obtain each
+  logical tensor's (node output, temporary) **live interval** `[alloc, release)` and exact size
+  (`toSizeClass`), then place tensors whose intervals do not overlap into shared bytes by **first-fit
+  in decreasing size** at offsets of region buffers. Event order (allocate → retain → release of what
+  the step defines) is the same as before (the MUST order of `executeStepRecipe`). Aliases (reshape,
+  identity expand) merge into the interval of their root; pinned tensors (graph outputs) live to the
+  end.
+- Regions are binned by `maxBufferSize` and may be several buffers. Offsets are aligned to
+  `minStorageBufferOffsetAlignment` (the granted value; spec default 256 B).
+- **The usage-scope rule** (WebGPU: one dispatch cannot bind the same GPUBuffer as both `read` and
+  `read_write`; the check is per buffer, not per range) is part of the plan: two tensors of which one
+  is read and the other written by the same dispatch go into **different regions**. The roles are
+  taken mechanically from **the WGSL declarations of the kernel** (`var<storage, read>` /
+  `read_write`), with no hand-written table.
+- The plan is a pure function of the bindings with the lifetime of `PreparedPlan`. **The GPU's granted
+  limits (`maxBufferSize` / `maxStorageBufferBindingSize` / offset alignment) are passed as values**
+  (ADR 0022 — like the number of row blocks in fusion).
 
-### 2. 束縛は実寸で切る
+### 2. Bindings are cut to the exact size
 
-`createBindGroup` のエントリは、計画が配った slot については `{ buffer: 領域, offset, size }` を
-渡す（Session 常駐の重み / scale / params・入力・state スロットは従来どおりバッファ全体）。
-「要求より大きいバッファを配らない」（ADR 0004 / `arena.ts` の MUST）は「束縛範囲を実寸に切る」
-へ言い換える。
+For slots handed out by the plan, `createBindGroup` entries pass `{ buffer: region, offset, size }`
+(Session-resident weights / scales / params, inputs and state slots still bind the whole buffer).
+"Never hand out a buffer larger than requested" (ADR 0004 / `arena.ts` MUST) is restated as "cut the
+bound range to the exact size".
 
-### 3. ミス run とヒット run は同じ計画を使う（アリーナの出力プールは退役）
+### 3. Miss runs and hit runs use the same plan (the arena's output pool is retired)
 
-- ミス run（初回）は計画の領域を run 寿命で確保して回し、run の末尾で返す。ヒット run は同じ
-  計画の領域を Session 常駐（backing）として保持し、bind group を焼き込む — 現行の 2 経路の
-  区別（プール確保 vs 常駐 slot）はそのまま、**確保の中身だけ**が「slot 1 本ずつ」から
-  「領域 1〜数本」へ変わる。
-- `RunArena` の役割は「host が書くバッファ / readback staging / 領域の所有と flush-before-destroy」
-  に縮む。出力ストレージの参照計数・プール・`assertDrained` は計画側の再生へ移る。
+- A miss run (the first) allocates the plan's regions for the run's lifetime and returns them at the
+  end. A hit run keeps the same plan's regions as Session-resident backing and bakes the bind groups.
+  The two paths (pool allocation vs resident slots) stay; only **what is allocated** changes from one
+  buffer per slot to one or a few regions.
+- `RunArena` shrinks to host-written buffers, readback staging and region ownership
+  (flush-before-destroy); output reference counting and `assertDrained` move to the plan's replay.
 
-### 4. 見積りは同じパッカーを共有する
+### 4. The estimate shares the packer
 
-`estimateGraphMemory` の `transientSlotBytes` は、融合前ノード列から同じ形の「確保プログラム」を組み
-**同じ関数**でパッキングした領域総和を返す（ADR 0070 決定 5 の「実行と同じ規則」を関数共有で
-満たす — 3 箇所に同じ規則を写す現状を 1 箇所へ）。融合が畳む中間と融合ルールの一時は従来どおり
-`unaccounted` の側（融合前の列で数える近似は不変）。見積り側の限界値は WebGPU core 既定
-（`maxBufferSize` 256 MiB / 整列 256 B）を使い、device が渡されればその granted 値を使う。
+`transientSlotBytes` of `estimateGraphMemory` builds the same kind of allocation program from the
+pre-fusion node list and packs it with **the same function**, returning the sum of regions (ADR 0070
+decision 5, "the same rule as execution", met by sharing the function instead of copying the rule to
+three places). Intermediates folded by fusion and temporaries of fusion rules stay on the
+`unaccounted` side (the pre-fusion approximation is unchanged; see the addendum of 2026-10-10). The
+estimate uses WebGPU core defaults (`maxBufferSize` 256 MiB, alignment 256 B), or the device's granted
+values when a device is given.
 
-### 5. 中間の上限 preflight（ADR 0089 決定 1 の中間への拡張・レビュー C 案）
+### 5. Limit preflight for intermediates (ADR 0089 decision 1 extended; option C of the review)
 
-計画時に「slot 実寸 > `maxStorageBufferBindingSize`」「領域 > `maxBufferSize`」を**確保の前に全件列挙して
-落とす**（`assertWeightsWithinLimits` と同じ文言の型）。ADR 0089 Consequences「run 時 transient は
-errorScope 頼み」の起票を閉じる。
+At plan time, "slot size > `maxStorageBufferBindingSize`" and "region > `maxBufferSize`" are **listed in
+full and fail before any allocation** (same message form as `assertWeightsWithinLimits`). This closes
+the item "run-time transients rely on errorScope" from ADR 0089's Consequences.
 
-### 6. 診断欄の意味
+### 6. Meaning of the diagnostics fields
 
-- `ArenaStats.peakTransientBytes` = **生存ピーク**（計画の同時生存バイトの最大 —
-  `TransientPlan.peakLiveBytes`）。`transientBytes` = run 末尾に生存している中間 = pin されたグラフ出力の
-  総バイト数。`allocatedBytes` = 領域の総和 + host / staging。`reuseCount` = 先に置かれた別の slot と
-  バイト範囲を共有した slot の本数（`TransientPlan.sharedSlots` — 旧プールの「配り直し回数」に相当し、
-  full-write の故障注入テストが配り直しの発生を確かめる観測点として残す。実装時 2026-09-05 に「0 固定」
-  から改めた）。`PlanBackingStats.residentBytes` = 領域の総和。
-- 「slot の総バイト数 = 非 backed run のプール確保」（footprint 不変の門）は「backed の領域総和 =
-  ミス run の領域総和」へ読み替える（同じ計画を使うので恒等）。
+- `ArenaStats.peakTransientBytes` = **liveness peak** (the plan's maximum of simultaneously live
+  bytes, `TransientPlan.peakLiveBytes`). `transientBytes` = intermediates live at the end of the run =
+  total bytes of pinned graph outputs. `allocatedBytes` = sum of regions + host / staging.
+  `reuseCount` = slots sharing a byte range with a slot placed earlier (`TransientPlan.sharedSlots`;
+  the full-write fault-injection test uses it to confirm reuse happens — changed from "always 0" at
+  implementation, 2026-09-05). `PlanBackingStats.residentBytes` = sum of regions.
+- The footprint check "total slot bytes = pool allocation of a non-backed run" reads "sum of backed
+  regions = sum of regions of a miss run" (an identity, since both use the same plan).
 
-### 7. 据え置くもの
+### 7. Unchanged
 
-full-write（ADR 0014 — 全ノードは自分の束縛範囲の全バイトを書く。前 run / 別テンソルの残骸を読まない
-根拠はそのまま）・flush-before-destroy・writeBuffer 対象はプール外（入力は領域に入れない）・
-state スロットは context 所有（ADR 0066）・codegen 決定性。
+Full-write (ADR 0014 — every node writes every byte of its bound range and never reads leftovers of an
+earlier run or another tensor), flush-before-destroy, `writeBuffer` targets outside the pool (inputs do
+not go into regions), state slots owned by the context (ADR 0066), codegen determinism.
 
-### 8. 退役する MUST
+### 8. Retired MUSTs
 
-- ADR 0004 バッファ管理「per-run アリーナ（**サイズ別プール** + 最終消費者解放）」→ 区間 + offset 配置。
-- `recipe.ts` `derivePlanSlots` の「**独自パッキング禁止**（RunArena のサイズクラス LIFO を仮想的に
-  再生して導く）」→ 計画は 1 本の純関数（`transient-plan.ts`）で、実行・焼き込み・見積りがそれを共有する
-  （「別の値が同じ実体を掴んでよいか」の判定が 2 実装に分かれる懸念は、判定が 1 箇所になることで解ける）。
-- `arena.ts` の「要求より大きいバッファを配らない」→ 決定 2 へ言い換え。
+- ADR 0004 buffer management, "per-run arena (**size-class pools** + release by the last consumer)" →
+  interval + offset placement.
+- `derivePlanSlots` in `recipe.ts`, "**no packing of its own** (derive by virtually replaying the
+  RunArena size-class LIFO)" → one pure function (`transient-plan.ts`) shared by execution, baking and
+  the estimate (the concern that "may another value grab the same memory" is judged by two
+  implementations disappears because it is judged in one place).
+- "Never hand out a buffer larger than requested" in `arena.ts` → restated as decision 2.
 
 ## Consequences
 
-- 見込み（実 IR の模擬・重なり検査済み・first-fit は生存ピークちょうどに到達）: BiRefNet 2048² の
-  workspace 23.76 → 7.50 GiB（decoder 末尾の代数書き換え〈レビュー A 案〉と併せて 2.50 GiB）、1024² は
-  6.14 → 1.88 GiB（併せて 0.63 GiB）。他家族も同じ規則で縮む（perf ではなくメモリ管理の是正）。
-- 実測（2026-09-05・結線後・RTX 3080 Ti / Deno wgpu Vulkan）: BiRefNet 1024² の中間の領域総和
-  2,020 MiB（生存ピーク 1,920 MiB・領域 5 本・共有 slot 2,060 本・dispatch 2,308）で、見込み
-  1.88 GiB とほぼ一致（差は 256 バイト整列と別領域規則のぶん）。run 時間 1.5〜1.7 s。2048² は
-  計画時 preflight が `'upsample_bilinear2d_20' 3221225472B / 'cat_212' 4026531840B` の 2 本を
-  列挙して落とす（A 案の代数書き換えで消える 2 本 — そのとおり）。
-- 実測（2026-09-05・A = recipe パッチ ⑨ と併せて・同じ機）: 1024² の中間 749 MiB（見込み 0.63 GiB）・
-  run 1.8 s / 2048² の中間 2,948 MiB（生存ピーク 2,560 MiB・見込み 2.50 GiB）・重み 1,116 MiB・
-  GPU 総確保 ≈ 4.1 GiB〈訂正 2026-10-11: 1 GiB = 1,024 MiB で約 4.0 GiB — 元の値は MiB を 1,000 で割っていた〉・
-  run 7.5〜8.6 s（RTX 3080 Ti 12 GiB）。2048² は preflight を通り、runtime /
-  models の e2e（1024² golden）は緑のまま。
-- 触る面: `packages/runtime/src/runtime/transient-plan.ts`（新設・パッカー）/ `recipe.ts`（`derivePlanSlots`
-  → 計画・`createBindGroup` の offset/size・`executeStepRecipe` の確保経路）/ `executor.ts`
-  （`#activateBacking` の領域確保・ミス run の領域確保・readback の offset）/ `estimate.ts`
-  （`transientSlotBytes` の共有化）/ `arena.ts`（出力プールの退役）/ `recipe-builder.ts`（dispatch の
-  読み書き役割を WGSL から採る）。公開面（`mod.ts`）は変えない。
-- 回帰門: 全家族の e2e golden（sha256）・`gpu_plan_backing_test`（footprint 不変の読み替え）・
-  `estimate_test` の GPU 突合・`gpu_full_write_test`（故障注入）・`runtime_executor_test` の
-  `peakTransientBytes` 期待値（生存ピークへ更新 — 数値が変わるのは意味が変わるため。旧値との
-  対応を doc に残す）。
-- 未検証: 記号次元を持つ家族（gemma4 / sbv2）でも区間は bindings ごとに計画時に確定するので同じ形が
-  成立する見込み。Metal / ブラウザ（Dawn）での offset 束縛の validation 差は実機で確認する。
+- Projection (simulated on the real IR, overlap-checked; first-fit reaches the liveness peak exactly):
+  BiRefNet 2048² workspace 23.76 → 7.50 GiB (2.50 GiB together with the decoder-tail algebraic
+  rewrite, option A), 1024² 6.14 → 1.88 GiB (0.63 GiB with A). Other families shrink by the same rule
+  (a memory-management correction, not a performance change).
+- Measured on 2026-09-05 (RTX 3080 Ti, Deno wgpu Vulkan): BiRefNet 1024² intermediate regions
+  2,020 MiB (liveness peak 1,920 MiB; the gap is alignment and the separate-region rule), run
+  1.5–1.7 s. At 2048² the preflight listed `'upsample_bilinear2d_20' 3221225472B / 'cat_212'
+  4026531840B` and failed (the two tensors option A removes). With A (recipe patch ⑨): 1024²
+  intermediates 749 MiB; 2048² intermediates 2,948 MiB (liveness peak 2,560 MiB), weights 1,116 MiB,
+  total GPU allocation about 4.0 GiB (corrected 2026-10-11 from 4.1 GiB, which divided MiB by 1,000),
+  run 7.5–8.6 s on the 12 GiB card; e2e (1024² golden) stayed green.
+- Surfaces touched: `packages/runtime/src/runtime/transient-plan.ts` (new, the packer), `recipe.ts`,
+  `executor.ts` (`#activateBacking`), `estimate.ts`, `arena.ts` (output pool retired), and dispatch
+  roles from WGSL (`StorageRoles` in `packages/runtime/src/gpu/pipeline-cache.ts`, consumed by
+  `recipe-builder.ts`). The public surface (`mod.ts`) is unchanged.
+- Regression checks: the e2e goldens of every family (sha256), `gpu_plan_backing_test` (the
+  restated footprint check), `gpu_estimate_test` (GPU comparison), `gpu_full_write_test` (fault
+  injection), and the `peakTransientBytes` expectations in `gpu_runtime_executor_test` (updated to the
+  liveness peak — the number changes because its meaning changes).
+- Not verified at the time: symbolic-dimension families (gemma4 / sbv2); Metal / Dawn offset bindings.
 
-## 追記（2026-10-10）— 決定 4 の改定: 行ブロック attention の窓は融合後の形で見積る
+## Addendum (2026-10-10) — decision 4 revised: row-block attention windows are estimated in fused form
 
-### 何を改めたか
+Decision 4's "intermediates folded by fusion stay on the `unaccounted` side" is revised **only for
+the windows of row-block attention** (ADR [0060](0060-row-block-attention.md)).
 
-決定 4 の「融合が畳む中間と融合ルールの一時は従来どおり `unaccounted` の側（融合前の列で数える近似は
-不変）」を、**行ブロック attention（ADR [0060](0060-row-block-attention.md)）の窓に限って**改める。
+- The estimate (`transientSlotBytes` in `estimate.ts`) calls the execution's fusion plan
+  (`planFusions` in `fusion.ts`, a pure function without GPU). Only windows claimed by row-block
+  attention are replaced by their post-fusion allocation program (the rule's declared temporaries,
+  single output, deferred release of external inputs) before packing; dispatch roles come from WGSL
+  as in execution.
+- The limit preflight of decision 5 applies to the buffers actually bound after fusion (one row
+  block's temporaries and the output), not to the full-width scores, mask-added scores or softmax
+  output that fusion never materialises. When fusion does not apply and an intermediate exceeds a
+  limit, every overrun is listed and it fails, as before.
+- Other fusion rules are still counted in pre-fusion form (`unaccounted`).
+- The fusion plan uses the packer's binding limit (`EstimateOptions.maxStorageBufferBindingSize`, core
+  default when absent). `maxComputeWorkgroupsPerDimension` is not checked (it does not affect bytes).
 
-- 見積り（`estimate.ts` の `transientSlotBytes`）は、実行相と同じ融合計画（`fusion.ts` の `planFusions` —
-  GPU に触れない純関数）を呼ぶ。行ブロック attention が掴んだ窓だけを、融合後の確保プログラムに置き換えて
-  から同じパッカーへ渡す。置き換えた確保プログラムは、ルールが宣言する一時・単一出力・外部入力の延べ
-  解放を持つ。dispatch の読み書きは実行相と同じく WGSL の storage 宣言から採る。
-- 決定 5 の上限 preflight は、融合後に実際に束縛するバッファ（行ブロック 1 枚ぶんの一時と出力）にだけ
-  当たる。融合で実体化されないスコア・mask 加算後・softmax 後の全幅には当てない。融合が成立しない形で
-  中間が上限を超えるときは、従来どおり全件列挙して落とす。
-- 他の融合ルールは融合前の列で数えるまま（`unaccounted` の側）。
-- 融合計画の束縛上限は、パッカーの上限検査と同じ値を使う（`EstimateOptions.maxStorageBufferBindingSize`・
-  無指定なら WebGPU core 既定）。dispatch 数の上限（`maxComputeWorkgroupsPerDimension`）は見積りでは
-  検査しない（素のノードと同じ — バイト数に効かない）。
+Why: in pre-fusion form exactly the shapes that run thanks to row-block splitting (pre-fusion scores
+above the binding limit — ADR 0060's demand shape) threw in the estimate and returned neither
+`peakAccountedBytes` nor `unaccounted`. A second copy of "which intermediates fold" would be double
+bookkeeping, so the estimate shares the execution's function (ADR
+[0070](0070-shard-loading-admission.md) decision 5).
 
-### なぜ
+Effect on `workspaceBytes`:
 
-融合前の列で数えると、行ブロック分割で実行できる形の見積りだけが上限超過の例外になる。融合前の
-スコアが束縛上限を超える分解 attention（ADR 0060 の需要形）がそれに当たり、`peakAccountedBytes` も
-`unaccounted` も返らない。「どの中間が畳まれるか」の判定を見積り側にもう 1 本書くと二重管理になるので、
-実行相と同じ関数を共有する（ADR [0070](0070-shard-loading-admission.md) 決定 5 の「実行と同じ規則」）。
+- For graphs with row-block attention windows, one row block's temporaries and output are counted
+  instead of the pre-fusion scores, mask-added scores and softmax output (`H·M·N·4` bytes each). At
+  most two temporaries are live at once, and reads and writes of one dispatch go to separate regions,
+  so they occupy two regions. The block count depends only on the estimate's binding limit.
+- Example: for `q[4,2048,8]`, 4,200 key columns and a 128 MiB binding limit, the three pre-fusion
+  intermediates (137,625,600 B each) exceeded the limit and threw. After fusion they split into two
+  blocks of 1,024 rows: temporaries 68,812,800 B × 2 regions + output 262,144 B = 137,887,744 B (the
+  hand-computed constant in `packages/runtime/tests/estimate_test.ts`).
+- Graphs without such windows do not move by a single byte.
 
-### `workspaceBytes` の変わり方
-
-- 行ブロック attention の窓を持つグラフでは、融合前のスコア・mask 加算後・softmax 後（各 `H·M·N·4`
-  バイト）の代わりに、行ブロック 1 枚ぶんの一時と出力が数えられる。一時の同時生存は 2 本までで、
-  同じ dispatch の読み書きは別領域なので 2 領域に分かれる。枚数は見積りの束縛上限だけで決まる。
-- 例: `q[4,2048,8]`・キー 4,200 列・束縛上限 128 MiB では、融合前の中間 3 本（各 137,625,600 B）が
-  上限超過で例外だった。融合後は 1,024 行ずつの 2 枚に割れ、一時 68,812,800 B × 2 領域 + 出力
-  262,144 B = 137,887,744 B を返す（`packages/runtime/tests/estimate_test.ts` の手計算定数）。
-- 窓を持たないグラフの値は 1 バイトも動かない。
-
-行ブロックの枚数の上限には利用者の予算（`EstimateOptions.attentionRowBlockMaxBytes`）も効く（束縛上限との小さいほう・実行と
-同じ導出）。融合 attention op のノード内一時も見積りに数える — [ADR 0124](0124-attention-row-block-budget.md) 決定 7。
+The user's budget (`EstimateOptions.attentionRowBlockMaxBytes`) also bounds the block size (the smaller
+of it and the binding limit, derived as in execution). Per-node temporaries of the fused attention op
+are counted in the estimate too — ADR [0124](0124-attention-row-block-budget.md) decision 7.

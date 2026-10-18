@@ -1,46 +1,40 @@
-# 0075: quant プリセットの表示名と説明 — アプリの選択 UI へ出す欄
+# 0075: Display name and description of a quant preset — fields for an application's selection UI
 
-- Status: implemented（2026-08-25・0.5.0 の breaking 波 — `label` / `description` の受理と長さ
-  検査、`karume/4` への繰り上げ、モデルカードの quant 表が manifest と**同じ文字列**を印字する
-  ところまで完了し、[0074](0074-quant-seat-naming.md) の席名改名と同乗した。Context の NOTE が
-  指摘していた §7 据え置き席との食い違いも同じ波で解消（ADR
-  [0038](0038-manifest-v1.md) 追記 2026-08-25）。公開リポの再アップロードと pin 更新は
-  **0.5.0 で消化済み**（0074 と同じ回・revision は
-  [退避した backlog の消化済み節](../research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md)の
-  0.5.0 節）。
-  起票は 2026-08-21 のユーザー提案「量子化の選択肢を表示するアプリの場合のために、プリセットに
-  表示名と説明とかを書けるようにしたら良いかもしれません」→ 起票裁定）
+- Status: implemented (2026-08-25, the 0.5.0 breaking release, together with the preset renames of
+  [0074](0074-quant-seat-naming.md)); partly superseded by [0109](0109-manifest-v5-container.md)
+  (decision 4 and its consequence: the manifest format is `karume/5` since 2026-09-22, marked
+  2026-10-18). Filed on 2026-08-21 from a proposal of the maintainer
 - Date: 2026-08-21
-- 関連: ADR [0038](0038-manifest-v1.md)（format 繰り上げ規則・session allowlist）/
-  [0041](0041-manifest-v2.md)（`quants` の語彙）/ [0071](0071-manifest-v3-shards.md)（`karume/3`）/
-  [0074](0074-quant-seat-naming.md)（席名の規則 — 本 ADR と役割を分ける）
+- Related: [0038](0038-manifest-v1.md) (format bump rule, session allowlist) /
+  [0041](0041-manifest-v2.md) (the `quants` vocabulary) / [0071](0071-manifest-v3-shards.md)
+  (`karume/3`) / [0074](0074-quant-seat-naming.md) (preset naming — a separate role from this ADR)
 
 ## Context
 
-quant 席は今のところ**機械名だけ**を持つ（`w8a8-s16` / `w8-bert4`）。この名前は
-「どの格納・どのノブか」を畳んだ識別子で、選択 UI を持つアプリ（例: 量子化を利用者に選ばせる
-デモやツール）がそのまま画面に出すには不親切であり、[0074](0074-quant-seat-naming.md) の
-規則化で機械名は**さらに長くなる**（`i8-a8-attn8-s16`）。
+A quant preset had only a machine name (`w8a8-s16`, `w8-bert4`). The name folds the storage and the
+knobs into one identifier. An application with a selection UI (a demo or a tool that lets the user
+pick the quantization) cannot show it as is, and the naming rule of [0074](0074-quant-seat-naming.md)
+makes machine names longer still (`i8-a8-attn8-s16`).
 
-一方で「この席は何が嬉しいのか」を知っているのは recipe を書いた人間で、その知識は今
-モデルカードの散文にしか残らない。カードは README であってアプリからは読めない。
+The recipe author knows what a preset is good for, but that knowledge lived only in the model card
+prose, a README that an application cannot read.
 
-**互換性の制約（実コードで確認済み）**: manifest パーサは quant エントリに厳格な allowlist を
-持ち、未知キーは fail loudly する（`QUANT_KEYS = ["weights", "session", "gpuFeatures"]` を
-`assertAllowedKeys` で検査 — `packages/hub/src/manifest.ts`）。したがって欄の追加は
-**optional であっても後方互換ではない** — 旧クライアントは新しい manifest を読めない。
-これは ADR [0038](0038-manifest-v1.md) 決定 1 と**矛盾しない** — 同 ADR は「エンベロープ内の
-未知キーは fail loudly で拒否する。additive 進化が許されるのは `pipelineConfig` の内側と §7 の
-明示列挙席だけ」と定め、§7 の見出し自身が「ここに無い追加は `karume/2`」と言っている。表示欄は
-その列挙に無いので、major 繰り上げは**0038 が最初から指定していた手順そのもの**である。
+Compatibility constraint: the manifest parser has a strict allowlist for quant entries and fails
+loudly on an unknown key (`QUANT_KEYS`, checked by `assertAllowedKeys` in
+`packages/hub/src/manifest.ts`; the list then held `weights`, `session` and `gpuFeatures`). Adding a
+field is therefore not backward compatible even when it is optional: an old client cannot read the
+new manifest. This agrees with ADR [0038](0038-manifest-v1.md) decision 1, which rejects unknown
+keys in the envelope and allows additive change only inside `pipelineConfig` and in the fields its
+§7 lists ("an addition not listed here is `karume/2`"). The display fields are not in that list, so
+a major bump is the procedure 0038 prescribed from the start.
 
-NOTE: 本当の食い違いは別の位置にある — §7 が「据え置きで足せる」と列挙した 2 席（ファイル参照の
-`repo` / `revision`・preset の `requiredLimits`）は現行の `FILE_REF_KEYS` / `QUANT_KEYS` に席が無く、
-今足せばやはり旧クライアントが読めない。据え置きの約束が実装と食い違っている。
+A note of 2026-08-21 found that two fields §7 listed as addable (file reference `repo` / `revision`,
+preset `requiredLimits`) were missing from the allowlists too; fixed in the same release (ADR 0038
+addendum 2026-08-25).
 
 ## Decision
 
-### 1. quant エントリに `label` と `description` を optional で足す
+### 1. Add optional `label` and `description` to a quant entry
 
 ```jsonc
 "i8-a8-attn8-s16": {
@@ -51,68 +45,72 @@ NOTE: 本当の食い違いは別の位置にある — §7 が「据え置き�
 }
 ```
 
-- `label` = 選択肢に出す短い表示名（**64 字上限**）
-- `description` = 1 行の説明（**200 字上限**）
-- どちらも**英語**（配布物の README / モデルカードと同じ規約）。多言語欄は持たない —
-  アプリ側が席 id をキーに自前の訳を当てられる
-- 未設定でも動く（optional）。設定が無い席は呼び手が id をそのまま出す
+- `label`: a short display name for the choice (at most 64 characters).
+- `description`: a one-line explanation (at most 200 characters).
+- Both are English, like the distribution README and the model card. There is no multilingual
+  field; an application can key its own translation on the preset id.
+- Both are optional; without them the caller shows the id.
 
-### 2. hub は上限を検査するだけで、意味を解釈しない
+### 2. The hub checks the limits and does not interpret the meaning
 
-長さ上限は「manifest は外部入力」という前提から来る境界検査で、内容の妥当性
-（説明が実態と合っているか）は検査できないし、しない。表示は完全に呼び手の責任。
+The length limits are a boundary check, because a manifest is external input. Whether the text
+matches the preset cannot be checked and is not checked; display is the caller's responsibility.
 
-### 3. `recommended` / 並び順の欄は持たない
+### 3. No `recommended` field and no ordering field
 
-- 「推奨」は `defaultQuant` が既に指している
-- 並び順はアプリが**取得量**で概ね決められる。ただし取得量は全順序を与えない — **計算ノブ
-  （`linearCompute` / `attentionCompute`）だけが違う席は同じ重みを指すので取得量が同点になる**
-  （anima の 8 席は 3 値へ潰れる）。同点の中は `quants` の**宣言順**（JSON の挿入順）で並べる
-  のが一次キー。
-- 取得量の算出は `resolveFiles` の戻り値から出すが、**「`weights` から解決したファイルの合計」
-  とは一致しない** — 戻り値は `assets`（quant 非依存）も含み、複数キーが同じ `path` を指し得る
-  （取得層は path で一意化してから合計する）。数えるときは同じ一意化を通すこと。
+- `defaultQuant` already names the recommended preset.
+- An application can order presets roughly by download size. Download size is not a total order:
+  presets that differ only in compute knobs (`linearCompute` / `attentionCompute`) point at the same
+  weights and tie (anima's seven presets fall into three sizes). Within a tie the primary key is
+  the declaration order of `quants` (JSON insertion order).
+- The download size is not the sum of the files resolved from `weights`: the resolved selection also
+  holds the `assets` (independent of the preset), and several keys can point at the same file.
+  Count it with the deduplication the fetch layer uses — by file identity, not by path alone —
+  which is `selectionRefs(resolveSelection(…))` in `packages/hub/src/resolve.ts`.
 
-`recommended` / 並び順の欄を持たないのは、導出できるものを独立更新の欄で持つと食い違ったとき
-に正が無くなるため（CLAUDE.md の「派生状態を独立更新の非正規化フィールドに持たない」）。
+These fields are left out because derivable state in an independently updated field has no source
+of truth once the two disagree (CLAUDE.md: no derivable state in denormalized fields).
 
-### 4. format を `karume/4` へ繰り上げる
+### 4. Bump the format to `karume/4` (superseded by ADR 0109 on 2026-09-22: the format is `karume/5`)
 
-Context の allowlist の性質上、欄を足した manifest は旧クライアントから読めない。
-**黙って読めない形にせず、format major で断絶を宣言する**（ADR 0041 §1 の「未知 major は
-fail loudly」に乗る）。0.5.0 の breaking 波にまとめ、公開 4 リポの再アップロードと pin 更新
-（[0073](0073-models-source-pin.md)）を 1 回で済ませる。
+Because of the allowlist, a manifest with the new fields cannot be read by an old client. The break
+is declared with a format major instead of being left silent; this rides on ADR 0041 §1 ("an unknown
+major fails loudly"). The bump went into the 0.5.0 breaking release, so the four public repositories
+were re-uploaded and the pins ([0073](0073-models-source-pin.md)) updated once.
 
-### 5. モデルカードの quant 表も同じ文字列から出す
+### 5. The model card's quant table prints the same strings
 
-説明の綴りが manifest とカードで独立に育つと、片方だけ古くなる。カード生成
-（`karume.modelcard`）は manifest 由来の値だけを印字する MUST が既にあるので、その規律に乗せる。
+Wording grown separately in the manifest and the card goes stale on one side. Card generation
+(`karume.modelcard`) already MUST print only values from the manifest; this rides on that rule.
 
-recipe が既に持っている英語散文（`*_NOTICE_MARKDOWN` 等の改変告知）とは**責務が別**で、
-統合も相互参照もしない: 告知は「このリポの重みに何をしたか」を Pipeline へ固定で載せる 1 組で、
-`description` は「席 1 つが何か」を席ごとに書く。告知側へ席の説明を足すと、席の増減で告知が
-中身と食い違う（同じ理由で告知はモデルの並びにも依存させない）。
+The English prose a recipe already has (modification notices such as `*_NOTICE_MARKDOWN`) is a
+separate responsibility and is neither merged nor cross-referenced. A notice is one fixed text about
+what was done to the weights of the repository; `description` says per preset what that preset is.
+Preset descriptions in the notice would disagree with the content whenever presets are added or
+removed (for the same reason the notice does not depend on the list of models).
 
 ## Consequences
 
-- `karume/4` の繰り上げは [0074](0074-quant-seat-naming.md) の席名改名・`linearCompute` の値の
-  改名と**同じ波でしか出さない**（format 断絶を 2 回起こさない）。
-- hub は `QUANT_KEYS` に 2 キーと長さ検査を足すだけ。resolve 側は無変更（表示欄は解決に効かない）。
-- recipe は席ごとに 2 行の英語を書く義務が増える。**書かない席があってよい**（optional）ので、
-  小ファミリの `f32` 単席は据え置ける。
-- 席名が長くなること（[0074](0074-quant-seat-naming.md)）の代償を UI 側で吸収できる —
-  この 2 本の ADR は対で意味を持つ。
+- The `karume/4` bump shipped only together with the renames of [0074](0074-quant-seat-naming.md),
+  so the format broke once (superseded by ADR 0109 on 2026-09-22: the format is `karume/5`).
+- The hub adds two keys to `QUANT_KEYS` and the length check. Resolution is unchanged.
+- A recipe writes two English lines per preset. A preset can omit them (optional), so the single
+  `f32` preset of a small family stays as it is.
+- The UI can absorb the cost of the longer names of [0074](0074-quant-seat-naming.md); the two ADRs
+  make sense as a pair.
 
-## 追記（2026-10-11）— 表示欄の受理集合は hub の parser を正とする
+## Addendum (2026-10-11) — the hub parser defines the accepted set of the display fields
 
-- 受理集合 = 欄が無いか、上限以内（コードポイント数）の文字列。`null` と文字列以外は拒否する。
-  空文字・空白だけ・改行を含む値は受理する（決定 2 — 意味は解釈しない。決定 1 の「1 行の説明」は
-  書き手への指針で、検査ではない）。
-- `karume dist`（Python）はこの集合に合わせる。両側は共有表
-  `packages/hub/tests/fixtures/quant-presentation.json` を同じく回して照合する。
-- モデルカードの quant 表は、空白の連なり（改行を含む）を 1 つの空白に畳んで 1 セルに綴り、
-  空白しか無い欄は書いていない席と同じ `—` にする。ここでいう空白は引数なしの `str.split()` が
-  切る文字（`str.isspace()` が真の文字）で、ASCII の空白と改行だけでなく Unicode の空白を全て
-  含む — NBSP（U+00A0）・全角空白（U+3000）・行区切り（U+2028）も 1 つの空白に畳まれる
-  （ゼロ幅空白 U+200B は空白に数えない）。`|` は表の列を割るので `\|` に逃がす。決定 5 の
-  「同じ文字列」から外れるのは、表の 1 セルに収めるこの 2 つの変換だけ。
+- Accepted: the field is absent, or a string within the limit (counted in code points). `null` and
+  non-strings are rejected. An empty string, whitespace only and values with line breaks are
+  accepted (decision 2: the meaning is not interpreted; "one line" in decision 1 is guidance for the
+  author, not a check).
+- `karume dist` (Python) follows this set. Both sides run the shared table
+  `packages/hub/tests/fixtures/quant-presentation.json` to stay in agreement.
+- The model card's quant table folds every run of whitespace (line breaks included) into one space
+  so the value fits one cell, and writes `—` for a field that holds only whitespace, as for an
+  absent field. Whitespace is what `str.split()` without arguments splits on (characters for which
+  `str.isspace()` is true): Unicode whitespace as well as ASCII spaces and line breaks, so NBSP
+  (U+00A0), the ideographic space (U+3000) and the line separator (U+2028) also fold; the zero-width
+  space (U+200B) is not whitespace. `|` would split the table column and is escaped as `\|`. These
+  two transformations are the only departures from "the same strings" of decision 5.

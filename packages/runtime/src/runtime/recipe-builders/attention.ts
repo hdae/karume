@@ -415,7 +415,8 @@ export const buildAttention = async (
   // GQA（整除 broadcast — ADR 0067 決定 1 / 2）。`r = H / Hkv` は**導出値**（attrs 欄は無い）で、
   // 整除は shape 検査（src/ops/shapes.ts）が保証する。確保・dispatch・S / O / 行統計は
   // すべて q 側の `B·H` のままで、**K / V の読みだけ**が kv-head へ写る。
-  // MUST: `r = 1` では GQA ビットを立てない（キーも生成 WGSL もバイト同一 — ADR 0067 決定 2）。
+  // SHOULD（2026-10-18 に MUST から再等級 — ADR 0067 決定 2）: `r = 1` では GQA ビットを立てない
+  // （キーも生成 WGSL もバイト同一）。
   const kvHeads = k[1];
   const kvRepeat = q[1] / kvHeads;
   const gqa = kvRepeat > 1;

@@ -1,178 +1,177 @@
-# 0089: GPU メモリ適合は「絶対上限との決定論的比較」へ昇格する（メモリ管理波 Phase A）
+# 0089: GPU memory fit becomes a deterministic comparison against absolute limits (memory management phase A)
 
-- Status: accepted（2026-09-01 — ユーザー裁定「OK、進めてください」・設計裁定 1a / 2a / 記録承認）
+- Status: accepted (2026-09-01); partly superseded by [0108](0108-container-format.md) (decision 4:
+  the shard-size check became the part-length ceiling, effective 2026-09-24). The payload-only demand
+  of decision 3 was re-graded to MAY on 2026-10-18
 - Date: 2026-09-01
-- 関連: ADR [0070](0070-shard-loading-admission.md)（決定 4 = errorScope 全面依存・決定 5 =
-  空き側と比較しない・決定 6 = limits preflight の席予約 — 本 ADR がその席の実装）/
-  [0066](0066-generation-context-state-slots.md)（追記 5 = state の binding 上限検査）/
-  [0038](0038-manifest-v1.md)（§7 追記 = `requiredLimits` 欄の導入）/
-  [0081](0081-shard-spec-v2.md)（shard 上限 — 本 ADR が読み手側の門を実装。値と測り方は ADR
-  [0090](0090-shard-spec-v3-tensor-pieces.md) で 256MiB・ファイル長へ）
+- Related: [0070](0070-shard-loading-admission.md) (decision 4 = reliance on errorScope; decision 5
+  = never compare against free memory; decision 6 = the limits preflight this ADR implements) /
+  [0066](0066-generation-context-state-slots.md) (addendum 5 = state binding-limit check) /
+  [0038](0038-manifest-v1.md) (§7 addendum = the `requiredLimits` field) /
+  [0081](0081-shard-spec-v2.md) (shard limit; later changed by [0090](0090-shard-spec-v3-tensor-pieces.md))
 
 ## Context
 
-確保失敗の検出は shard 単位の out-of-memory / validation errorScope に全面依存していた
-（ADR 0070 決定 4）。この網には 3 つの弱点がある: ①**実装依存** — M2 実機で out-of-memory
-errorScope が沈黙する実測（known-issues・wgpu-hal metal の `check_if_oom()` は no-op）が
-あり、沈黙環境では「確保失敗 = 無効バッファへの no-op writeBuffer = ゴミを読む」が通り得る
-②**遅い** — 検出は数 GiB を転送した後 ③**粗い** — 名乗れるのは失敗 shard までで、どの重みが
-何バイト超えたかは出ない。
+Allocation failures were detected only by the out-of-memory / validation errorScope per shard
+(ADR 0070 decision 4). That net has three weaknesses:
 
-一方で確保寸法は**宣言だけで確定している**（常駐計画 `planWeightResidency` は prepare 相の
-純関数・state スロットも束縛で決まる）。また manifest の `requiredLimits` 欄は「exporter が
-書かない（gemma4 recipe だけが手書き）・hub が parse するだけ・読み手ゼロ」の三重に空で、
-shard 1GiB 上限（ADR 0081）の門は書き手側にしか無かった。
+1. **Implementation-dependent.** On an M2 the out-of-memory errorScope stays silent (the known-issues
+   entry on the silent out-of-memory errorScope on Metal; wgpu-hal metal's `check_if_oom()` is a
+   no-op). There a failed allocation becomes a no-op `writeBuffer` into an invalid buffer, and the run
+   reads garbage.
+2. **Late.** The failure shows up after gigabytes have been transferred.
+3. **Coarse.** It names the failing shard at best, not which weight exceeded what by how many bytes.
+
+Allocation sizes, however, are fixed by declarations alone: the residency plan
+(`planWeightResidency`) is a pure function of the prepare phase, and state slots are fixed by their
+bindings. The manifest's `requiredLimits` field was empty three times over: the exporter did not
+write it (only the gemma4 recipe wrote it by hand), the hub only parsed it, and nothing read it. The
+1 GiB shard limit (ADR 0081) was checked only on the writer side.
 
 ## Decision
 
-**決定論的に比較できるものは全て、確保・取得の前の明示検査に昇格する。** 比較の相手は
-デバイスの**絶対上限**（`maxBufferSize` / `maxStorageBufferBindingSize`）だけで、空き VRAM・
-確保合計とは比較しない（ADR 0070 決定 5 の維持 — WebGPU は総量を露出せず、当て推量の閾値は
-健全な環境で誤拒否を作る）。総量の最終検出は errorScope のままで、Metal の沈黙環境では
-それが残る — [limitations](../limitations.md) の「GPU メモリの事前検査は絶対上限まで」節が
-この限界の記録。
+**Everything that can be compared deterministically is promoted to an explicit check before
+allocation or fetch.** The only comparison target is the device's **absolute limits**
+(`maxBufferSize` / `maxStorageBufferBindingSize`). Free VRAM and the allocation total are not
+compared (ADR 0070 decision 5 stands: WebGPU does not expose totals, and a guessed threshold
+rejects healthy environments). The last line of detection for totals stays errorScope, which is
+silent on Metal; the [limitations](../limitations.md) entry on the GPU memory preflight stopping at
+the absolute device limits records this gap.
 
-1. **重み経路の明示検査**（runtime）: 席 → 確保バッファの写像を
-   `planWeightBuffers`（weight-residency.ts）へ 1 本化し（適格 = payload・適格外 = f32
-   展開後・i8 / i4 は companion scale をもう 1 本・`toSizeClass` 整列後 = createBuffer 実寸）、
-   `assertWeightsWithinLimits` が Session 構築の入口（shard ループ前 = 1 バイトも上げる前）で
-   全エントリを両上限と突合する。超過は**全件列挙して 1 回で**落とす。見積り
-   （estimate.ts）も同じ写像を消費する — 検査・見積り・実ロードが別の寸法を主張する形を
-   作らない。
-2. **state 検査の補完**（runtime）: 既存の binding 上限検査（ADR 0066 追記 5）に
-   `maxBufferSize` も加える。`binding ≤ buffer` は device を自前計画する側の関係であって、
-   外から渡された GpuContext への保証ではない。
-3. **`requiredLimits` の書き手は core の組み立て一括導出**（exporter `karume/limits.py` +
-   `dist.py` の `bake_required_limits`）: 需要 = quant が選ぶコンポーネントの最大テンソル
-   payload と最大 state スロット（容量は `pipelineConfig` で数値化・記号 2 本以上や束縛欠落は
-   fail loudly）。**常駐前提の寸法のみ** — f32 展開のワーストを要求に書くと本来動く環境を
-   DL 前に誤拒否する（展開時の実寸は決定 1 の実行時検査が守る）。**焼くのは WebGPU 保証既定
-   （256MiB / 128MiB）を超える席だけ**（「欄なし = 既定スペックで動く」の意味論）。
-   workgroup 系はカーネル設計依存なので焼かない。**計画側の手書きは二重管理として拒否**
-   （gemma4 recipe の手書き席は退役 — core 導出値と完全一致を確認済み）。
+1. **Explicit check of the weight path** (runtime). The mapping from residency to allocated buffers
+   has one implementation, `planWeightBuffers` (`weight-residency.ts`): eligible weights as payload,
+   ineligible ones after f32 expansion, i8 / i4 with one more companion-scale buffer, sizes after
+   `toSizeClass` alignment (the real `createBuffer` size). `assertWeightsWithinLimits` checks every
+   entry against both limits at the entry of Session construction, before any byte is uploaded
+   (today: before the per-part batch loop in `session-build.ts`). Every overrun is listed in **one**
+   failure. The estimator (`estimate.ts`) consumes the same mapping, so check, estimate and real load
+   cannot claim different sizes.
+2. **State check completed** (runtime). The existing binding-limit check (ADR 0066 addendum 5) also
+   checks `maxBufferSize` (`generation-context.ts`). `binding ≤ buffer` holds for a device the runtime
+   plans itself; it is not guaranteed for a `GpuContext` passed in from outside.
+3. **The writer of `requiredLimits` is derived in core** (exporter `karume/limits.py` and
+   `bake_required_limits` in `dist.py`). Demand = the largest weight tensor payload and the largest
+   state slot of the components the quant selects (capacity resolved from `pipelineConfig`; two or
+   more symbols or a missing binding fail loudly). The demand MAY count resident sizes (payloads)
+   only and leave out the f32-expanded size of weights that cannot stay compressed (re-graded
+   2026-10-18 to MAY: the original reason, false rejection of devices that would run, does not hold
+   — see the addendum of 2026-09-25; what remains is that Python has no mirror of the residency
+   classification, and counting expanded sizes was left as a candidate for after the release, which
+   0.14.0 satisfied). Only presets whose demand exceeds the WebGPU guaranteed defaults (256 MiB /
+   128 MiB) get the field, so that "no field = runs on a default-spec device" keeps its meaning.
+   Workgroup limits are not baked; they depend on kernel design. **Hand-written values on the
+   planning side are rejected** as double bookkeeping (the gemma4 recipe's hand-written field was
+   retired after it matched the derived value exactly).
 
-   > **意味論の限定（2026-09-05 裁定 3b）**: 「欄なし = 既定スペックで動く」は**常駐分
-   > （重み・state）が既定内**という主張で、**中間テンソル（ノード出力）は含まない**。
-   > 中間を静的に数えて焼く案は採らない — 融合後の実需要は granted limit に依存する
-   > （行ブロック attention は S を全幅で実体化しない）ので配布形からは原理的に決まらず、
-   > 融合前の最大を焼くと**動く device を DL 前に誤拒否する** = 決定 3 の MUST が禁じる
-   > 失敗形になる。実例: BiRefNet 1024² は最大 initializer 38MiB で欄が空になるが、
-   > 実行時は 1 binding 約 1GiB が要る。中間の上限超過は ADR
-   > [0093](0093-transient-liveness-packing.md) 決定 5 の計画時 preflight（Session 構築時に
-   > 全件列挙して落とす）が受け、それより前の段では「落としてから落ちる」に留まる
-   > （資源の目安はモデルカードの注記で告知する）。
-4. **shard 上限の読み手検査**（hub — 当時 1GiB・ADR 0090 で 256MiB のファイル長へ）: manifest parse
-   時に `shards` の各 `size` を検査（閉区間・Python 正本 `shards.py` と同値）。`assets` / `extras` は
-   対象外 — 上限は shard 分割の契約で、上限超の単一付帯資産は合法。
-5. **席（次段 = 波 2）**: manifest `requiredLimits` の読み手（models の admission で GPU
-   limits と比較して DL 前拒否・adapter 取得の先行）と、`estimateSessionMemory` のロード面
-   結線。ADR 0070 決定 6 の残り半分。
+   **Scope of the claim (ruling of 2026-09-05).** "No field = runs on a default-spec device" claims
+   that **resident data (weights and state) fits the defaults**; it does not cover intermediate
+   tensors (node outputs). Intermediates are not counted statically: after fusion their real demand
+   depends on the granted limit (row-block attention does not materialise S at full width), so it
+   cannot be read off the distribution, and baking the pre-fusion maximum would reject working
+   devices before download. Example: BiRefNet 1024² carries no field, yet its largest binding at run
+   time is 320 MiB (limitations, BiRefNet section, measured 2026-10-16). Intermediate overruns are
+   caught by the plan-time preflight of ADR [0093](0093-transient-liveness-packing.md) decision 5
+   (listed in full at Session construction); before that point the model is downloaded and then
+   fails. Model cards state the resource needs.
+4. **Reader-side check of the shard limit** (hub). At manifest parse each `size` in `shards` is
+   checked (closed interval, same as the Python source `shards.py`). `assets` / `extras` are exempt:
+   the limit is part of the shard-splitting contract, and a single oversized asset is legal.
+   (Superseded by ADR 0108 decision 6 on 2026-09-24: `packages/hub/src/manifest.ts` applies a
+   part-length ceiling of 1024 MiB, closed interval, to `container.parts` only; the Python source is
+   `PART_MAX_BYTES` in `tools/exporter/src/karume/container.py`.)
+5. **Next step (wave 2).** A reader of manifest `requiredLimits` (models admission compares it with
+   the GPU limits and rejects before download, reading the adapter first) and the wiring of
+   `estimateSessionMemory` into loading. This is the other half of ADR 0070 decision 6.
 
 ## Consequences
 
-- dist 再生成で `requiredLimits` 欄が新設される: anima 全 30 quant（296.8MiB）・irodori
-  f32（300MiB 両上限）/ f16（150MiB・binding のみ — 片側だけ超過する帯の実例）。gemma4 は
-  手書きと導出が同値なのでバイト不変・sbv2 は既定内で無風。再生成は models 読み手（波 2）と
-  同じ回で行う。
-- 検査が新たに弾く既存資産は無い: bind group は常にバッファ全体を束縛するので、binding 上限を
-  超える重みが正常動作していた経路は存在しない。
-- 残る同型の弱点（起票のみ・本 ADR 対象外）: `GpuContext.createResident` と run 時 transient
-  の確保は依然 errorScope 頼み。gemma4 PLE sidecar は shard 連番形だが `extras` 席なので
-  決定 4 の門の外（現物は上限内）。
-  - **閉じ（2026-09-05・ADR [0093](0093-transient-liveness-packing.md) 決定 5）**: run 時
-    transient のぶんは、計画時に「slot 実寸 > `maxStorageBufferBindingSize`」「領域 >
-    `maxBufferSize`」を確保の前に全件列挙して落とす形で閉じる（`createResident` の席は残る）。
+- Regenerating the distributions adds `requiredLimits`: all 30 anima quants (296.8 MiB), irodori f32
+  (300 MiB, both limits) and f16 (150 MiB, binding only — an example of the band where only one limit
+  is exceeded). gemma4 stays byte-identical (hand-written equals derived); sbv2 is within the
+  defaults.
+- No existing asset is newly rejected: a bind group always binds the whole buffer, so no weight above
+  the binding limit ever ran.
+- Remaining weaknesses of the same kind (filed only): `GpuContext.createResident` and run-time
+  transients still rely on errorScope. The gemma4 PLE sidecar was shard-numbered but sat in `extras`,
+  outside decision 4 (within the limit in practice).
+  - Closed for run-time transients on 2026-09-05 by ADR [0093](0093-transient-liveness-packing.md)
+    decision 5 (slot size > `maxStorageBufferBindingSize` and region > `maxBufferSize` are listed in
+    full at plan time, before allocation). `createResident` remains.
 
-## 追記 2026-09-01（波 2 = models 読み手結線の実装）
+## Addendum (2026-09-01) — wave 2: the models reader
 
-- **limits の入手 = 案 A（アダプタを読んで捨てる）で実装**（裁定 1a）。runtime に
-  `readAdapterLimits`（`requestAdapter` → `planRequiredLimits`・絞り無し・device は作らない）を
-  新設し、models の `session/gpu-features.ts` に `assertRequiredLimitsSatisfied`（部分写像・
-  不足は全件列挙）と `assertRequiredLimitsBeforeDownload`（共有 GPU なら `GpuContext.limits`、
-  自前経路ならアダプタ実測値）を同居。席は 7 家族の admission（共有 GPU・`fromAssets` も守る）
-  - 8 家族の `fromPretrained` admission 閉包（重み prefetch の前）。gemma4 は
-    `gemma4ManifestConfig` が quant を返す形へ変更して閉包側に席を置き、`fromAssets`
-    （manifest 無し）は対象外（limitations 記録）。
-  - 追記（2026-09-05・W-M6-2）: `assertRequiredLimitsBeforeDownload` は宣言の有無に依らず、共有 GPU が
-    無ければ `readAdapterLimits()` を 1 度読む（比較は宣言が無ければ no-op のまま = 「欄なし =
-    既定スペックで動く」の意味論は不変）。買うのは GPU 不在の早期検出だけで、limits 検査の強化
-    ではない。
-- 案 B（device を DL 前に取る）/ 案 C（アダプタを持ち回る）を採らなかった理由: 8 家族の
-  「資産の解析は GPU を取りに行く前」の順序 MUST と衝突する。加えて WebGPU 仕様はアダプタが
-  「いつでも失効しうる」（システム変化が無くても数秒〜数分後でも可、と Note が明記）と定め、
-  失効後の `requestDevice` は例外ではなく生まれた時点で lost な device を返す静かな失敗になる。
-  実装者側の指針も「device 要求の直前に新しいアダプタを取れ」。A の弱点（2 回の
-  `requestAdapter` が同じ物理アダプタを返す保証は無い）は、決定 1 の構築時検査が最終検査として
-  残ることで吸収する（DL 前検査は事前判定）。
-- **`estimateSessionMemory` のロード面結線（決定 5 の後半）は Phase B へ送る**: 見積りは
-  グラフ入力の記号次元の全束縛が前提（未束縛は fail loudly）で、ロード時に束縛値を持つのは
-  gemma4（capacity / chunkLength が config にある）だけ。他 7 家族は生成時の形状に依存するため、
-  今結線すると家族ごとに恣意的な代表形状を焼くことになる。limitations の該当節は「呼び手に
-  判断材料を渡すところまで」が目的で拒否は担わないので、遅らせても安全性は落ちない。Phase B の
-  RAM ピーク実測で「どの数字が判断に効くか」を見てから席を決める。
-- **dist 再生成は既存 5 ミラー**（karume-anima / irodori v4-small / irodori v4.1-small /
-  sbv2-jvnv / gemma4-e2b）で実施。Consequences の見込みどおり: anima 30 quant に
-  `maxBufferSize` = `maxStorageBufferBindingSize` = 311,164,928（296.75MiB）、irodori f32 に
-  両上限 314,572,800（300MiB）/ f16 に binding のみ 157,286,400（150MiB）、gemma4 は manifest
-  不変、sbv2 は欄なし。shard のサイズ・sha は全て不変（manifest の差分は `requiredLimits` 欄
-  のみを機械比較）。「全 8 家族」は文書上の数え方で、siglip2 / birefnet / depth-anything /
-  vowel-detector は未配布（ミラーも pin も無い）— ~~初回組み立てはリリース波~~ → リリース後
-  （2026-09-03 裁定・backlog release 節）。
-- 再生成で見えた既存ドリフト 2 点（本 ADR の対象外・記録のみ）: ①sbv2 の
-  `shared/text/symbols.json` が源（`outputs/misc/sbv2-demo/`・2026-08-30 17:40 再生成）に追随して
-  1,642 → 1,647 バイトへ変化（WAV 凍結 e2e は緑 = 出力に影響しないメタデータ差）②gemma4 と
-  irodori v4-small の README がカード生成器の文言変更に追随（折り返し・「v4 (Small)」→
-  「v4 Small」）。
+- **Limits are obtained by reading the adapter and discarding it (option A).** The runtime adds
+  `readAdapterLimits` (`requestAdapter` → `planRequiredLimits`, no caps, no device;
+  `packages/runtime/src/gpu/acquire.ts`). `packages/models/src/session/gpu-features.ts` holds
+  `assertRequiredLimitsSatisfied` (partial mapping, lists every shortfall) and
+  `assertRequiredLimitsBeforeDownload` (`GpuContext.limits` with a shared GPU, the adapter's values
+  otherwise). Call sites: the admission of each family given a shared GPU (which also guards
+  `fromAssets`), and each family's `fromPretrained` before the weight prefetch. gemma4 checks only in
+  `fromPretrained` (`gemma4ManifestConfig` returns the quant); its `fromAssets` has no manifest and is
+  not covered (recorded in [limitations](../limitations.md), the entry on the pre-download GPU fit
+  check).
+  - 2026-09-05: `assertRequiredLimitsBeforeDownload` reads the adapter once without a shared GPU even
+    when nothing is declared (the comparison is still a no-op without a declaration, so the meaning of
+    "no field" is unchanged). This only detects a missing GPU early; it does not strengthen the check.
+- Option B (acquire the device before download) and option C (carry the adapter around) were
+  rejected. Both conflict with the ordering rule that every family parses its assets before it
+  acquires a GPU (MUST). The WebGPU spec also lets an adapter expire at any time, and `requestDevice`
+  on an expired adapter silently returns a device that is already lost; implementers advise
+  requesting a fresh adapter right before the device. Option A's weakness (two `requestAdapter` calls
+  need not return the same physical adapter) is absorbed by decision 1: the construction-time check
+  stays the final check, and the pre-download check is a precheck.
+- **Wiring `estimateSessionMemory` into loading (second half of decision 5) moves to phase B.** The
+  estimate needs every symbolic input dimension bound (unbound fails loudly), and only gemma4 has the
+  bound values at load time (capacity and chunkLength in its config). Wiring it now would bake an
+  arbitrary representative shape per family. The limitations entry only gives the caller data to
+  decide with; it does not reject, so the delay costs no safety.
+- The five existing mirrors were regenerated with the values predicted above; shard sizes and sha256
+  did not change (only `requiredLimits` differed in the manifests). Two unrelated drifts were noted
+  (an sbv2 `symbols.json` metadata change, model-card wording).
 
-## 追記（2026-09-02 — Phase B 実測と Phase C-1・見積り結線の据え置き）
+## Addendum (2026-09-02) — phase B measurements; the estimate wiring stays deferred
 
-- **Phase B 実測**（[research/2026-09-02-shard-size-ram-peak.md](../research/2026-09-02-shard-size-ram-peak.md)）:
-  ホスト RAM ピークは「定数 + k × 最大 shard」で k ≈ 3（Linux）/ 2.4（Mac）。shard 内の完了待ちを
-  刻む案は Vulkan で無効・Metal で −13%。明示 GC で shard 1 本分。効くレバーは shard サイズと、
-  shard を読む器の使い回し。
-- **Phase C-1 = 器の使い回し**を実装（契約変更は ADR [0070](0070-shard-loading-admission.md) 追記
-  2026-09-02 が正本）: ピーク ≈ 0.45GB + 最大 shard 1 本（anima f16 1GiB shard 4,069 → 1,402 MiB・
-  gemma4 2,622 → 1,116 MiB）。HF 経路は取得層側の対応待ち（→ fetch-cache 0.6.0 の `into` で 2026-09-02 夜に配線済み — ADR 0070 追記）。
-- **`estimateSessionMemory` のロード面結線は据え置きを確定**: Phase B で「判断に効く数字」はホスト側
-  （manifest の最大 shard から導ける）であって GPU 見積りではないと分かった。GPU 見積りは引き続き
-  呼び手が生成形状を決めた後に使う面（limitations「未実装」節はそのまま）。
-- 残る裁定 = 書き手の shard 目標値（512 or 256MiB — ADR 0081 側の 2 値化）。C-2 候補 = テンソル単位
-  ストリーミング（ピーク → 定数 + 最大テンソル）。
+- Phase B measured the host RAM peak as "constant + k × largest shard" (k ≈ 3 on Linux, 2.4 on Mac;
+  [research/2026-09-02-shard-size-ram-peak.md](../research/2026-09-02-shard-size-ram-peak.md)). Phase
+  C-1 (reusing the read buffer) followed and was retired on 2026-09-24 (ADR 0108 step 3d; ADR 0070
+  addendum of 2026-09-24).
+- **Wiring `estimateSessionMemory` into loading stays deferred.** The figure that matters for the
+  decision is host-side (derivable from the manifest), not the GPU estimate. The GPU estimate remains
+  a surface the caller uses after choosing the generation shape.
 
-## 追記（2026-09-24 — 「manifest の最大 shard」の読み替え）
+## Addendum (2026-09-24) — "the largest shard in the manifest" under the container format
 
-2026-09-02 追記の「判断に効く数字はホスト側（manifest の最大 shard から導ける）」は、ADR
-[0108](0108-container-format.md) の容器では取得元の型で分かれる。seek 型（ローカルの位置読み・ブラウザの
-Blob）は宣言の最大 block から閉じる。scan 型（Deno の HF 経由）は最大 part に GC を待つ前の器が加わり、
-その本数は宣言からは閉じない（0108 追記 5 の 5）。数え方の正本は [container-v1](../container-v1.md) §11。
-同じ追記の Phase C-1（器の使い回し）は 0108 段 3d で退役し（ADR [0070](0070-shard-loading-admission.md) の
-2026-09-24 追記）、C-2 候補（テンソル単位ストリーミング）は段 3e で block 粒度として全経路に
-入った（0108 追記 5 の 3）。ホスト RAM を減らす効果があるのは seek 型だけで、scan 型では block が保持枠の
-view なので減らない（container-v1 §11）。決定 1 の「shard ループ前」は、現行では part ごとの batch ループの前
-（`assertWeightsWithinLimits` の呼び出し位置）で、検査の意味は変わらない。決定 4 の「`shards` の各 `size` の
-検査（Python 正本 `shards.py`）」は、`shards` 欄と `shards.py` が退役したので、現行では
-`packages/hub/src/manifest.ts` が `container.parts` だけに掛ける part 長の天井（1024 MiB・閉区間）と読む
-（Python 正本は `tools/exporter/src/karume/container.py` の `PART_MAX_BYTES`）。
+With the container of ADR [0108](0108-container-format.md) the host-side figure depends on the source
+type. Seek-type sources (local positional reads, a browser Blob) are bounded by the largest declared
+block. Scan-type sources (Deno via HF) add buffers awaiting GC to the largest part, and how many of
+those exist is not bounded by the declarations (0108 addendum 5, item 5). The counting rule lives in
+[container-v1](../container-v1.md) §11. Tensor-level streaming (the old candidate C-2) reached every
+path as block granularity at 0108 step 3e; it lowers host RAM only for seek-type sources. "Before the
+shard loop" in decision 1 now reads "before the per-part batch loop" (where `assertWeightsWithinLimits`
+is called); the meaning of the check is unchanged. Decision 4 now reads as the part-length ceiling
+(see decision 4).
 
-## 追記（2026-09-25 — 決定 3 の「展開ワーストを書かない」根拠の訂正）
+## Addendum (2026-09-25) — correction of the rationale of decision 3
 
-決定 3 は、需要を常駐前提の寸法に限る根拠を「f32 展開のワーストを要求に書くと本来動く環境を DL 前に誤拒否
-する」とした。この根拠は現行コードでは成り立たない。常駐できるかどうか（席）を決める
-`planWeightResidency(graph)`（`packages/runtime/src/runtime/weight-residency.ts`）はグラフだけを受ける純関数で、
-device に依らない。常駐できない席（`expanded`）は、どの device でも f32 へ展開されて `numel × 4` で確保される。
-したがって展開後の寸法が既定を超える配布物は、既定スペックの device では `createSession` の上限検査で必ず
-落ちる。「本来動く環境」は無い。
+Decision 3 limited the demand to resident sizes because "writing the f32-expanded worst case would
+reject, before download, environments that would run". This does not hold in the current code.
+`planWeightResidency(graph)` (`packages/runtime/src/runtime/weight-residency.ts`) is a pure function
+of the graph and does not depend on the device. A weight that cannot stay resident in compressed form
+(`expanded`) is expanded to f32 on every device and allocated as `numel × 4`. A distribution whose
+expanded size exceeds the defaults therefore always fails the limit check in `createSession` on a
+default-spec device; there is no "environment that would run".
 
-現行の需要の意味論は次のとおりで、コードは据え置く（2026-09-25 裁定）。
+The current semantics of the demand (code unchanged, ruling of 2026-09-25):
 
-- exporter の需要（`tools/exporter/src/karume/dist.py` の `component_demand_bytes`）は、合流した供給計画の
-  **payload 長**（piece を合わせた長さと companion scale）と最大 state スロットの最大である。展開席の展開後
-  サイズは数えない。
-- よって「欄なし = 既定スペックで動く」が保証するのは**常駐席（raw / f16 / i8 / i4 / i2）と state が既定内**で
-  あることまでで、展開席の寸法は欄に現れない。展開席の上限超過は `createSession` の検査（決定 1）が受ける。
-- 実資産では展開席は 0 本である（2026-09-24 の全域レビューで配布形 110 容器の全 initializer を席分類した
-  結果）。今は食い違いが発火しない潜在の差に留まる。
+- The exporter's demand (`component_demand_bytes` in `tools/exporter/src/karume/dist.py`) is the
+  maximum of the **payload lengths** in the merged supply plan (pieces summed, companion scales
+  separately) and the largest state slot. Expanded sizes are not counted.
+- "No field = runs on a default-spec device" therefore covers **resident presets (raw / f16 / i8 / i4
+  / i2) and state** only. Overruns of expanded weights are caught by the check in `createSession`
+  (decision 1).
+- The shipped assets have no expanded weight (all initializers of the 110 distributed containers were
+  classified in the review of 2026-09-24), so the gap is latent.
 
-展開席を需要に含める（Python に席分類の鏡像を持たせ、TS との突合表で固定する）のはリリース後の候補とする。
-`tools/exporter/src/karume/limits.py` の docstring の MUST（「展開ワーストを要求に書くと誤拒否する」）も、
-この訂正に揃える対象である。
+The docstring of `tools/exporter/src/karume/limits.py` already gives this reason (a limitation from
+having no Python mirror of the residency classification, not an exclusion to avoid false rejection);
+it still labels the rule MUST, while this ADR grades it MAY since 2026-10-18.

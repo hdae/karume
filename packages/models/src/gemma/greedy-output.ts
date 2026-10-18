@@ -118,7 +118,7 @@ const withPleInput = async (
  * targetの通常runとgreedy batchを同じ鎖へ載せる。別会話の通常runがバッチに先行すると、
  * enqueue→run→scope lock→batchの循環になるため、batchを開く前から順序を保つ。
  * context構築はSession鎖の外にあり、ここでもそのまま通す。GPU資源は最初のgreedy時だけ確保する。
- * DECIDED: docs/decisions/0083-generation-api-surface.md#gemmaの温度0生成の小出力2026-09-12
+ * DECIDED: docs/decisions/0083-generation-api-surface.md#addendum-2026-09-12--small-output-for-gemmas-temperature-0-decode
  *
  * `ple`を渡すとper_layer_inputsをGPU内gatherで作る（ADR 0085の GPU 常駐席）。所有権は呼び手側で、
  * ここはenqueueを積むだけである（disposeはpipelineがSessionの後に行う）。

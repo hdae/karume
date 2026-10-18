@@ -1031,7 +1031,7 @@ M2 / ブラウザでの今回の多ターン操作、f16 GEMV / INT2 の試作�
 既存 GEMV 族へ f16 の読み出しを追加し、1 スレッドが 1 列を K 昇順に計算する。
 `unpack2x16float`、`acc = acc + x * w`、最後の bias 加算を維持する。
 門は M=1・f32 計算・K>0・K%8=0・N%4=0。公開 API / IR / 資産は無変更。
-判断は [ADR 0082 追記 6](../decisions/0082-linear-gemv-decode.md#追記-62026-09-11-f16-格納の-m1-を-gemv-族へ広げるk-25)。
+判断は [ADR 0082 追記 6](../decisions/0082-linear-gemv-decode.md#addendum-6-2026-09-11--f16-storage-at-m1-joins-the-gemv-family-k-25)。
 
 実 Qwen の f16 linear は 197 本、形状 `(N,K,本数)` は
 `(2048,1024,28)` / `(1024,1024,56)` / `(1024,2048,28)` /
@@ -2203,7 +2203,7 @@ Chromeは候補→基準の順でも初回短縮を再現した。全3組・27�
 暖機後の全体速度比はDeno **0.996〜1.006**、Chrome **0.996〜1.067**で、短文の揺れを含む。
 M=1のWGSLは全文不変なので、この値を生成カーネルの高速化とは呼ばない。
 集計は `new-model-summary.json`。公開API、数値契約、保存形式を維持し、
-変更する行ブロックだけキーの版を上げる（[ADR 0082](../decisions/0082-linear-gemv-decode.md#追記-82026-09-11-int2-行ブロックのシェーダーを縮小するk-30)）。
+変更する行ブロックだけキーの版を上げる（[ADR 0082](../decisions/0082-linear-gemv-decode.md#addendum-8-2026-09-11--smaller-int2-row-block-shaders-k-30)）。
 
 ### 正しさと適用範囲
 
@@ -2236,7 +2236,7 @@ PLE（per-layer embeddings、層ごとの埋め込み）の行読みには、値
 
 一意行数が8以下なら値とscaleを並行して読み、それより多ければ従来の16workerと行内直列を保つ。
 数値演算と配布バイトは変えず、公開APIも追加しない。
-設計と失敗時の意味は[ADR 0085](../decisions/0085-ple-host-gather.md#追記2026-09-11--小さい-gather-の値と-scale-を並行して読む)へ記録した。
+設計と失敗時の意味は[ADR 0085](../decisions/0085-ple-host-gather.md#addendum-2026-09-11--values-and-scales-of-a-small-gather-are-read-concurrently)へ記録した。
 
 ### モデル全体の対照
 
@@ -2334,7 +2334,7 @@ M2・E4B全体・長文prefillは未計測。
 INT4・INT8のsnapshot4本だけを更新し、M=1とINT2は更新しない。
 K=4096・M=9・N=4096の長い縮約と部分タイルを両格納型のGPUテストへ追加し、
 通常GEMMの先頭行とのu32一致・独立CPU参照・実際の選択キーで検証する。
-決定は[ADR 0082 追記9](../decisions/0082-linear-gemv-decode.md#追記-92026-09-11-int4int8-行ブロックにも関数化を適用する)。
+決定は[ADR 0082 追記9](../decisions/0082-linear-gemv-decode.md#addendum-9-2026-09-11--the-function-form-for-int4-and-int8-row-blocks-too)。
 
 追加した長いKの最初の検証は **90 passed / 2 failed、8秒**。
 通常GEMMとの全ビット比較は通り、f64で総和する汎用CPU参照との比較だけが失敗した。
@@ -2373,7 +2373,7 @@ INT4はmaxAbs 0.00042724609375、INT8は0.002838134765625。
 最大の値と最小indexを選ぶ規則は変えず、値は元入力のu32をそのまま写す。
 mergeで元入力を読むため、部分結果だけでなく元入力の寿命も見積りと実行へ載せる。
 新しい公開APIやIRは追加しない。決定は
-[ADR 0068 追記9](../decisions/0068-decode-exit-multi-output.md#追記-92026-09-11-topk-k1-の長い行も-2-dispatch-へ分割する)。
+[ADR 0068 追記9](../decisions/0068-decode-exit-multi-output.md#addendum-9-2026-09-11--topk-k1-over-long-rows-also-uses-two-dispatches)。
 
 `top1-kernel-bench.ts` / `.json` は同じcompute pass内の100反復を、heater後に8試料・順序交替で測った。
 基準と候補の値・indexのu32一致を確認してから計測する。中央値は次のとおり。
@@ -2614,7 +2614,7 @@ targetのlogitsを常駐出力へコピー→別topk Session→8B読み戻しで
 `Session.enqueue`へ`generation`を追加し、既存のcontext・queryLength・commitを受ける。
 入力の写しと使用予約は発行時、論理長のadvance/deferと予約返却はバッチ最終決着時とする。
 後続Sessionや読み戻しの失敗も書き込み済みcontextをpoisonする。IRと保存資産は変えない。
-[ADR 0066](../decisions/0066-generation-context-state-slots.md#バッチ実行の-generationcontext2026-09-12)
+[ADR 0066](../decisions/0066-generation-context-state-slots.md#addendum-2026-09-12--generationcontext-in-batched-execution)
 に、借り手への予約伝播・通常runとバッチ中の破棄の違いを記録した。
 
 バッチの使用予約中はcontext/所有Sessionのdisposeを受付終了前に拒否する。
@@ -2676,7 +2676,7 @@ modelsの診断なし正順/逆順比較も全16組で出力が一致した（`p
 最初の案は比較のたびに整数順へ変換する。次の案は入力時に一度だけ順位キーへ変換する。
 正値の符号ビットを反転し、負値は全ビットを反転する。±0は同点、NaNは全て最優先の同一キーとし、
 同点なら最小indexを採る。値を返すtopkは元入力から選択値のビットを再読する。
-採用案は後者（[ADR 0068追記10](../decisions/0068-decode-exit-multi-output.md#追記-102026-09-12-非正規数を失わない最大値上位候補の比較)）。
+採用案は後者（[ADR 0068追記10](../decisions/0068-decode-exit-multi-output.md#addendum-10-2026-09-12--maximum-and-top-candidate-comparison-that-keeps-subnormals)）。
 
 ### 数値検証
 
@@ -2740,7 +2740,7 @@ argmaxの行長262,144・64行では順位キーが0.666倍、対応するtopk�
 **decodeだけ**、target enqueue→常駐logits→小さなtopk Session→8B読戻しを接続した。
 prefillは従来runを維持する。保存済みlogits+hiddenのグラフ・資産・CLI引数は変更しない。
 最大値・NaNの最小添字・非有限値の拒否は従来CPU選択と同じ。一般samplingと投機は従来経路。
-[ADR 0083](../decisions/0083-generation-api-surface.md#gemmaの温度0生成の小出力2026-09-12)に
+[ADR 0083](../decisions/0083-generation-api-surface.md#addendum-2026-09-12--small-output-for-gemmas-temperature-0-decode)に
 適用条件、通常runとbatchの直列化、準備失敗と資源解放を記録した。
 
 ### 比較条件と一致
@@ -2837,7 +2837,7 @@ decodeTokensPerSecondを出す。未測定はnull。文字列の再符号化や�
 短い生成を独立sequenceで行い、解放してから会話を開始する。MiniCPM5/Qwen3も独立した短い生成で暖機する。
 本番のsampler設定を用いるが、履歴・KV・乱数状態・投機ゲートは本番と共有しない。
 全ての入力長・投機経路のコンパイルやdriver cacheの管理を保証するものではない。
-契約変更は[ADR 0084](../decisions/0084-gemma-tokenizer-chat.md#トークン通知とデモ計測2026-09-12)。
+契約変更は[ADR 0084](../decisions/0084-gemma-tokenizer-chat.md#addendum-2026-09-12--token-notification-and-demo-measurement)。
 
 重点CPU検証は**78 passed（84 steps）/ 0 failed、1秒**。
 `outputs/bench/karume/2026-09-12_demo-timing-qpj_8tgs/focused.log`に保存した。

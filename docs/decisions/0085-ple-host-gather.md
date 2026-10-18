@@ -1,321 +1,306 @@
-# 0085: PLE の配布形 — token-major + vocab レンジ shard・ホスト gather
+# 0085: PLE distribution — token-major rows, vocab-range splits, host-side gather
 
-- Status: implemented（2026-08-31 accepted — 設計ドラフトの裁定 3 を★推奨案で確定〈ユーザー裁定〉。
-  実装は段 1b〈`16bf5aa6`〉で完了〈2026-09-25 時点の現況〉）
+- Status: implemented (accepted 2026-08-31 — the maintainer adopted the recommended option for the
+  draft's open question 3; stage 1b `16bf5aa6`); partly superseded: decision 3's "no range reads in
+  hub" by the 2026-09-07 addendum and ADR [0086](0086-distribution-source.md) capability ⑧
+  (2026-09-07); the shard width, the shard-based default budget, the cost-type policy table and the
+  manifest-asset check by [0108](0108-container-format.md) decision 5 and the 2026-09-22 addendum
+  (2026-09-22); the GPU-resident load mechanism of 2026-09-19 by the 2026-09-24 addendum
 - Date: 2026-08-31
-- 対象: `tools/export-recipes/gemma4/`（PLE の外出しと sidecar 生成）/
-  `packages/models/src/gemma/`（ホスト側 loader）。IR 仕様・ランタイム・hub は**無改変**。
-- 関連: ADR [0083](0083-generation-api-surface.md)（生成 API 面 — 同じ再 export に乗る = 案 α）/
-  [0084](0084-gemma-tokenizer-chat.md)（決定 5 = 同一 digest set の束ね方）/
-  [0070](0070-shard-loading-admission.md)（shard ロードと admission）/
-  [0081](0081-shard-spec-v2.md)（shard 仕様 v2 — 1GiB 上限）/
-  [0066](0066-generation-context-state-slots.md)（Session / context の寿命）/
-  [0038](0038-manifest-v1.md)（キャッシュ設計 = キーは URL・部分読み席なし）
-- 根拠:
-  [research/2026-08-31-generation-api-design-draft.md](../research/2026-08-31-generation-api-design-draft.md)
-  §2（候補比較・実測値の正本）/
+- Scope: `tools/export-recipes/gemma4/` (moving PLE out of the graph, writing the sidecar) /
+  `packages/models/src/gemma/` (host-side loader). IR, runtime and hub **unchanged**.
+- Related: [0083](0083-generation-api-surface.md) (generation API — same re-export, option α) /
+  [0084](0084-gemma-tokenizer-chat.md) (decision 5: the digest set) /
+  [0070](0070-shard-loading-admission.md) (shard loading and admission) /
+  [0081](0081-shard-spec-v2.md) (shard spec v2, 1 GiB limit) /
+  [0066](0066-generation-context-state-slots.md) (Session / context lifetime) /
+  [0038](0038-manifest-v1.md) (cache keyed by URL, no partial reads)
+- Basis: [research/2026-08-31-generation-api-design-draft.md](../research/2026-08-31-generation-api-design-draft.md)
+  §2 (candidates, measured values) /
   [research/2026-08-31-freetoken-moe-over-arraybuffer.md](../research/2026-08-31-freetoken-moe-over-arraybuffer.md)
-  §3・§4（スケール軸での位置づけ = **c-1 ホスト gather の初適用**）/
-  [limitations](../limitations.md)（Chromium の単一 ArrayBuffer 上限）
+  §3, §4 (**the first use of c-1, host-side gather**) / [limitations](../limitations.md) (Chromium's
+  single-ArrayBuffer limit)
 
 ## Context
 
-Gemma 4 E2B の PLE（per-layer embeddings）は `input_ids` **だけ**を引数に取る純粋な行 lookup で、
-recipe には切断点が既にある — `tools/export-recipes/gemma4/ple.py` の
-`per_layer_inputs(tables, input_ids, scale)` が `[1,M,35,256]` を組み、decode / token の両台本が
-同じ 1 本を通しているだけである。
+Gemma 4 E2B's PLE (per-layer embeddings) is a pure row lookup on `input_ids` **alone**, and the recipe
+already has the cut point: `per_layer_inputs(tables, input_ids, scale)` in
+`tools/export-recipes/gemma4/ple.py` builds `[1,M,35,256]` for both the decode and the token scripts.
 
-- 常駐は **i8 35 表 × 64 MiB = 2,240 MiB**（容器ヘッダの実測）で、容器全体 3.70 GiB の **59%**。
-  外に出せば **3,787 MiB → 1,547 MiB**。
-- ランタイムは**全 initializer に Session 構築時の GPU 常駐席を与える契約**
-  （`packages/runtime/src/runtime/executor.ts` の「席はプランナが正本 — 全 initializer を載せる
-  契約」）なので、**グラフに残す限り lazy にはならない**。
-- **速度には効かない**。初回実測（K-11 前・decode GPU 86.2ms のうち `linear` 系が 78.7ms）では
-  embedding 35 本は「残り ≈935 本 ≈4.5ms」の内数だった。逆流するコストは
-  `per_layer_inputs[1,M,35,256]` f32 のアップロードで、decode 35,840 B/token・prefill chunk 32 で
-  1,146,880 B/chunk — 実測の壁（decode 32.5ms/token・prefill ≈162ms/chunk）に対して無視できる。
+- Resident size is **i8, 35 tables × 64 MiB = 2,240 MiB** (from the container header), **59%** of
+  the 3.70 GiB container. Moving it out takes **3,787 MiB → 1,547 MiB**.
+- The runtime **gives every initializer a GPU-resident slot at Session construction**
+  (`packages/runtime/src/runtime/executor.ts`: the planner is the source of truth, all initializers
+  are loaded), so **nothing that stays in the graph becomes lazy**.
+- **Speed is unaffected.** In the first measurement (before K-11; `linear` took 78.7 of 86.2 ms of
+  decode GPU time) the 35 embeddings were inside "the remaining ≈935 nodes, ≈4.5 ms". The new cost,
+  uploading `per_layer_inputs` f32 (35,840 B per decode token, 1,146,880 B per prefill chunk of 32),
+  is negligible against the wall times (decode 32.5 ms/token, prefill ≈162 ms/chunk).
 
-つまりこれは**純粋に常駐の話**であり、採否は常駐削減の効き幅だけで測れる。
+This is **purely a residency question**, judged by the residency saved.
 
 ## Decision
 
-### 1. 配布形は token-major + vocab レンジ shard に固定する
+### 1. The distribution layout is fixed as token-major rows split by vocab range
 
-`[token][layer][256] i8` + `[token][layer] scale` の **token-major** に固定し、**vocab の範囲で
-shard** する。
+`[token][layer][256] i8` + `[token][layer] scale`, **token-major**, **split by vocab range**:
 
-根拠:
+1. **The layout is independent of the host strategy (fully resident or partial reads)**, so fixing it
+   first costs nothing: moving later to "read only the rows" (alternative b) needs **neither a
+   re-export nor an HF re-upload**.
+2. **Token-major makes one token's PLE one contiguous read** (8,960 B + 35 scales); table-major would
+   need **35 scattered reads**, multiplying I/O by 35 once partial reads arrive.
 
-1. **配布形はホスト側の方式（全量常駐 / 部分読み）と独立で、先に固定して損が無い**。後から
-   「キャッシュから行だけ読む」（検討した代替案 b）へ移るときに、**再 export も HF 再アップロードも
-   要らない**（ホスト側の差し替えだけで済む）。
-2. **token-major なら 1 token の PLE は連続 1 読み**（8,960 B + 35 scale）。table-major のまま
-   だと 1 token を引くために **35 箇所の離散読み**になり、部分読みへ移った瞬間に I/O が 35 倍に
-   なる（「1 token の PLE を引くために 35 個の離れた asset location を読む」形）。
+### 2. Splitting is a requirement, not a matter of weight (the single-ArrayBuffer limit)
 
-### 2. 分割は「重い / 軽い」ではなく必須要件である（単一 ArrayBuffer 天井）
+One full table on the host is **impossible in Chromium by construction**:
 
-全量ホスト常駐の素直な形（1 本の表）は **Chromium で原理的に不可**である:
+- Full PLE in i8 = 262,144 × 8,960 = **2,348,810,240 B** (= 35 × 64 MiB = 2,240 MiB).
+- Chromium's single-ArrayBuffer limit = **2,145,386,496 B** (limitations — the limit that made anima
+  Base f16 unloadable).
 
-- PLE i8 全量 = 262,144 × 8,960 = **2,348,810,240 B**（= 35 × 64 MiB = 2,240 MiB）
-- Chromium の単一 ArrayBuffer 上限 = **2,145,386,496 B**（limitations の恒久記載 — anima Base f16
-  がロード不能だったのと同じ天井）
+NOTE: the draft §2.3 writes `2,351,662,080 B`, a multiplication error (the correct value matches the
+draft's own "35 × 64 MiB = 2,240 MiB"); **the conclusion does not change**.
 
-NOTE: ドラフト §2.3 は同じ式に `2,351,662,080 B` と書いているが、これは積の誤りである
-（正 = `2,348,810,240 B`。ドラフト自身の「i8 35 表 × 64 MiB = 2,240 MiB」と一致するのは後者）。
-**天井超過という結論は変わらない**（超過幅が 206,275,584 B → 203,423,744 B に変わるだけ）。
+So "host residency is simple but heavy" does not hold — **splitting is required for every option**.
+Splitting into 35 tables (67,108,864 B each) avoids the limit but is the table-major form decision 1
+avoids.
 
-したがって「ホスト常駐案は単純だが重い」という評定は成立しない — **分割はどの案を採っても必須
-要件**である。35 表に割れば 1 表 = 67,108,864 B で天井は回避できるが、それは table-major のままで
-決定 1 が避けた形になる。
+### 3. The first host side is "lazy loading of touched shards + LRU"
 
-### 3. 初版のホスト側は「触った shard の遅延ロード + LRU」（hub に部分読み席を新設しない）
+Vocab-range shards are **loaded lazily per file and evicted by LRU**; hub's whole-file reads were
+enough at the time. Hub gains no range-read capability here (superseded by the 2026-09-07 addendum
+and ADR 0086 capability ⑧ on 2026-09-07: a real need appeared — 137 shard re-reads, about 42 s, for
+400 tokens of natural text — and hub gained range reads).
 
-vocab レンジ shard を**ファイル単位で遅延ロードし、LRU で落とす**。hub は今日の `streamAssets` /
-`prefetchAssets`（最小単位 = ファイル 1 本 = `StreamedAsset {id, bytes}`）のままで足りる。
+**Not measured (speculation):** which vocab ranges real conversations touch; frequency-ordered
+SentencePiece vocabularies are a general claim, unchecked for this checkpoint. The shard width was to
+be chosen after measuring the three golden cases and a chat corpus (superseded by ADR 0108 decision 5
+on 2026-09-22: the container's block limit fixes the width — 2026-09-22 addendum).
 
-hub に部分読み（Range）の席を新設するのは**独立の設計判断**で、この波に抱き込むと射程が膨らむ —
-ADR 0038 のキャッシュ設計（キーは URL）へ踏み込むうえ、Range 並列は perf L-3 で parked のままで
-ある。決定 1 のとおり配布形が同じなので、実需が出たときにホスト側だけ差し替えれば移れる。
+### 4. Host-side dequantization MUST be bit-identical to the GPU `embedding`
 
-**未実測（speculation とラベルする）**: 「実会話が触る token id が vocab のどの範囲に集中するか」は
-測っていない。SentencePiece 語彙が頻度順に並ぶという一般論はあるが、この checkpoint では確認して
-いない。**shard 幅は golden 3 ケース + chat コーパスで実測してから決める**。
+Otherwise token-sequence parity breaks, and so does the proof of unchanged behaviour (used when the
+sliding capacity changed, ADR 0066 addendum 9). `per_layer_scale` = `256 ** 0.5` = **16.0**, a power
+of two, so f32 multiplication is exact (the `ple.py` docstring relies on the same fact); **matching
+the order is enough** (stage 1b's acceptance criterion).
 
-### 4. ホスト gather の逆量子化は GPU 側 `embedding` とビット一致する MUST
+### 5. The loader cross-checks the id spaces
 
-さもないと token 列 parity が割れ、「機能不変であること」の証明（ADR 0066 追記 9 で sliding 容量を
-変えたときに使った手）が使えなくなる。`per_layer_scale` = `256 ** 0.5` = **16.0** で 2 冪なので
-f32 の乗算は厳密であり（`ple.py` の docstring が同じ理由でビット一致検査を成立させている）、
-**順序さえ揃えれば成立する見込み**（実測は段 1b の合格線）。
+The loader compares the ids the tokenizer can produce, the main embedding's vocab rows, the PLE
+sidecar's rows and the special ids. **A mismatch does not go out of bounds; it reads a valid row of
+another token** (silent corruption), so the fail-loudly check belongs here.
 
-### 5. loader で id 空間を相互照合する
+### 6. No "pageable initializer" — PLE simply becomes an ordinary graph input
 
-tokenizer が生成し得る id / 主 embedding の vocab 行数 / PLE sidecar の行数 / special id を、
-loader が突き合わせる。**ここがずれると OOB ではなく「別 token の有効な行」を引く**（例外なしで
-沈黙して壊れる）ので、fail loudly の門を置く場所はここである。
+The runtime gets no **fifth weight lifetime** (unloaded initializer / dynamic residency). PLE is an
+ordinary graph input supplied by the host (`per_layer_inputs`); the runtime contract does not change.
+Precedents: the relative position tables of flow / voice are host-built graph inputs (limitations);
+ADR 0079. An "unloaded initializer" slot was **already declined by the MoE ruling of 2026-08-31**
+(backlog parked, dependent on value-dependent execution selection in the IR).
 
-### 6. 「pageable initializer」は足さない — PLE は通常のグラフ入力になるだけ
+## Alternatives considered
 
-汎用ランタイムに**第五の weight lifetime**（未着荷 initializer / 動的常駐）を足す形は採らない。
-PLE はホストが供給する通常のグラフ入力（`per_layer_inputs`）になるだけで、ランタイムの契約は
-1 文字も変わらない。
-
-前例 = 「flow / voice の相対位置表はグラフ入力 — 生成はホスト側の責務」（limitations）・
-ADR 0079（テキスト解析は呼び手の責務）。「未着荷 initializer」席の新設は **2026-08-31 の MoE 裁定で
-見送り済み**（backlog parked — IR への値依存実行選択に従属）なので、本 ADR はその裁定と整合する。
-
-## 検討した代替案
-
-- **b) hub のキャッシュから行だけ読む**（token ごとに 1 行）: RAM も VRAM も食わないのが利点だが、
-  hub に部分読みの席が今日無く（公開面 = manifest / resolve / fetch / stream / prefetch / clear・
-  最小単位はファイル 1 本）、ADR 0038 のキャッシュ設計に踏み込む。Range 並列は perf L-3 で parked。
-  **配布形は決定 1 と同じ**なので、実需が出たときにホスト側だけ差し替えれば移れる — 今この波で
-  買う必要が無い。
-- **c) 現状維持 + PLE を i4 化**（2,240 → 1,120 MiB）: recipe だけで閉じるのが利点だが、recipe
-  README が「embeddings are int8 … not int4-eligible」と明記しており、品質リスクを token 列 parity で
-  潰す作業が要る（潰せること自体は利点）。常駐削減も決定 3 の形より小さい。却下（i4 化そのものは
-  将来の独立候補として残る）。
-- **a) 全量ホスト常駐（分割つき）**: 決定 2 のとおり分割は必須要件なので、分割してしまえば
-  「触ったぶんだけ読む」（決定 3）に対する優位が残らない。ブラウザで JS heap 2.19 GiB を常時
-  抱える形も現実的でない。却下。
+- **b) Read only the rows from hub's cache:** uses neither RAM nor VRAM, but hub had no partial reads
+  and it touches ADR 0038's cache design. **Same layout as decision 1**, so the host side can switch
+  later (adopted 2026-09-07 — addendum below).
+- **c) Keep PLE in the graph as i4** (2,240 → 1,120 MiB): recipe-only, but the recipe README says
+  "embeddings are int8 … not int4-eligible", the quality risk needs parity work, and it saves less
+  than decision 3. Rejected (i4 stays a separate future candidate).
+- **a) Full host residency (split):** splitting is required anyway, after which it has no advantage
+  over reading what is touched; a permanent 2.19 GiB JS heap in a browser is unrealistic. Rejected.
 
 ## Consequences
 
-- **GPU 常駐 3.70 → 1.51 GiB**（−59%）。**速度は変わらない**（Context のとおり効くのは常駐だけ）。
-- **段 1b は案 α**（ドラフト §7.1 の裁定 5）: PLE 外出しと最終行 logits 出口（ADR 0083 決定 6）を
-  **同じ再 export に載せ、製品グラフを 1 系列にする**。3.7GiB 系列の再 export が 1 回で済む代わりに、
-  ホスト PLE loader が e2e の前提になる。既存 2 系列（logits opt-in / token-only）は検収 fixture
-  として残す。
-- **合格線（段 1b）**: 既存 `greedy.<case>` golden との交差 parity（`argmax(logits)` == 既存 token 列・
-  3 ケース × K=16）+ PLE 逆量子化のビット一致（決定 4）。
-- PLE sidecar は配布 digest set の一員になる（ADR 0084 決定 5）— 製品グラフ / weight shards /
-  compiled tokenizer / chat format version と同じ束で配る。
-- 本方式は freetoken 調査の **c-1（ホスト gather）の初適用**であり、スケール軸の公式スタンス
-  （MoE は全 expert VRAM 常駐・総パラメータで予算 — limitations）と整合する。embedding / lm_head
-  級の**行疎な表**には効くが、expert FFN には効かない（同調査 §4）ことは既に記録済み。
-- 追記（2026-09-05）: `fromPretrained` は PLE 索引の `shards[].file` 集合と manifest の遅延資産
-  キー集合の**対称差**を `#build` の前に見る（索引が名指す shard が manifest に無い / manifest の
-  遅延資産を索引が名指さない、のどちらも構築前に落とす）。この式は `EAGER_ASSETS` が tokenizer と
-  ple_index の 2 本ちょうどであることに依存する。
-- ホスト側の PLE アップロードが毎 step 増えるので、将来 decode がさらに速くなった場合は
-  この転送（decode 35,840 B/token）が観測対象に入りうる — 現時点の壁に対しては無視できる。
+- **GPU residency 3.70 → 1.51 GiB** (−59%); **speed unchanged**.
+- **Stage 1b takes option α** (draft §7.1, open question 5): moving PLE out and the last-row logits
+  exit (ADR 0083 decision 6) ride **one re-export, one product graph series**; the host PLE loader
+  becomes a precondition of the e2e tests. The two existing series (logits opt-in / token-only) remain
+  as acceptance fixtures.
+- **Acceptance (stage 1b):** cross parity with the `greedy.<case>` goldens (`argmax(logits)` equals
+  the existing tokens, 3 cases × K=16) + bit-identical PLE dequantization (decision 4).
+- The PLE sidecar is a member of the distribution digest set (ADR 0084 decision 5).
+- This is the **first use of c-1 (host gather)**, consistent with the scale-axis stance (MoE keeps
+  every expert in VRAM, budgeted by total parameters — limitations); it helps **row-sparse tables**
+  (embedding / lm_head), not expert FFNs (that research, §4).
+- Addendum (2026-09-05): `fromPretrained` compared the PLE index's `shards[].file` with the
+  manifest's lazy asset keys before `#build` (superseded by the 2026-09-22 addendum on 2026-09-22:
+  admission cross-checks the index against the container's assets).
+- The per-step PLE upload (35,840 B per decode token) may become worth observing if decode gets much
+  faster; it is negligible today.
 
-## 追記（2026-09-02 — 決定 3 の常駐上限は「本数」ではなく「バイト」）
+## Addendum (2026-09-02) — decision 3's residency limit is bytes, not a count
 
-常駐の上限は **shard の本数ではなくホスト RAM のバイト数**（`Gemma4PleOptions.maxResidentBytes` /
-`Gemma4PipelineOptions.maxResidentPleBytes`）で受ける。本数のまま持つと同じ数字が資産世代ごとに
-違う RAM を意味するからで、実例が既に出ている: shard 上限 1GiB 世代の E2B は 3 本（1 本 758MiB）
-だったが、ADR 0090 で書き手の上限を 256MiB にした世代は 9 本（1 本 253MiB）になり、「常駐 3 本」の
-意味が 2.2GiB → 759MiB へ黙って変わった。1 本ぶんのバイト数は索引（`ple.json` の `shards` と
-`layers` / `dim`）だけから決まる（`(stop-start) × layers × (dim + 4)` — i8 `values` + f32
-`scales`）ので、読む前に予算の検査も LRU の追い出しも判定できる。既定は**最大 shard 2 本ぶん**で、
-従来の既定「2 本」の意味（どの 2 本を掴んでも収まる）を shard 幅に依らず保つ。`0` は「常駐させ
-ない」という正当な指定（読み終えた shard を即座に落とす）で、それ以外で **shard 1 本すら載らない
-予算は構築時に fail loudly** にする — 黙って超過すれば予算が意味を失い、黙って守れば gather が
-引けないため、どちらも呼び手の指定を裏切る。
+The limit is **host RAM in bytes** (`Gemma4PleOptions.maxResidentBytes` /
+`Gemma4PipelineOptions.maxResidentPleBytes`), not a number of shards: a count means different RAM in
+each asset generation (E2B had 3 shards of 758 MiB under the 1 GiB limit and 9 of 253 MiB under ADR
+0090's 256 MiB writer limit, so "3 resident" silently went from 2.2 GiB to 759 MiB). One shard's size
+is known from the index alone, so budget checks and eviction are decided before reading. The default
+was two of the largest shards (superseded by the 2026-09-22 addendum on 2026-09-22: two of the largest
+blocks, about 64 MiB). `0` is a valid "keep nothing"; any other budget that **cannot hold one shard
+fails loudly at construction** — silently exceeding it voids the budget, silently honouring it leaves
+the gather unable to read.
 
-## 追記（2026-09-07 — 決定 3 の LRU は「1 回の gather の中では hit 先行」）
+## Addendum (2026-09-07) — within one gather, decision 3's LRU serves hits first
 
-1 回の gather が触る shard は束ねて 1 本ずつ引くが、**常駐している shard を先に処理する**。初出順に
-引くと、未常駐 shard の読みが起こす LRU の追い出しが「この gather がまだ触っていない常駐 shard」を
-落とし、同じ gather の中で読み直しになる（実測 2026-09-06: 予算 = 最大 shard 2 本・shard 1 / 2 が常駐
-の状態から `[0,1,2]` 順に引くと 3 load、`[1,2,0]` 順なら 1 load — 順序依存）。hit を先に触れば LRU の
-末尾へ回るので、1 回の gather の load 数は miss 数（= 理論最小）になる。走行中に掴んだ shard の実体は
-ローカル変数が持つので、途中で追い出されても値は揃う（決定 3 の「値も token 列も変わらない」は不変）。
+The shards (blocks since 2026-09-22) one gather touches are grouped and read one at a time, **resident
+ones first**: in first-touch order, eviction caused by a miss can drop a resident shard the gather has
+not used yet (measured 2026-09-06: budget of two largest shards, shards 1 and 2 resident — order
+`[0,1,2]` caused 3 loads, `[1,2,0]` caused 1). Hits first, the loads equal the misses (the minimum). A
+shard taken during the gather is held by a local variable, so eviction midway changes no value.
 
-併せて、同じ id が並ぶ列（prefill の pad 行 id 0 が典型）は最初の位置だけ逆量子化し、残りの位置へは
-f32 バイト列を複写する。再計算ではなく複写なので決定 4 の 2 段丸めとビット同一である。gather を
-またぐ行キャッシュ（token 行の LRU）は**入れない** — 実利用の測定（同日・自然文 2 ターン × 200 token・既定予算）で
-shard の読み直しが 137 回・約 42 s / 壁 58 s と p50 の問題であり、オフラインの方針比較で行キャッシュは 71 回にしか
-減らなかった（初出 token の miss は減らない）。対処は**行読み**（下の追記）。
+Repeated ids (typically prefill's pad id 0) are dequantized once and the f32 bytes copied — a copy,
+so bit-identical to decision 4. A cross-gather row cache was **not** added then: in real use (2 turns
+× 200 tokens, default budget) shard re-reads were 137, about 42 s of a 58 s wall, and offline a row
+cache only cut them to 71 (first-seen tokens still miss). The fix was row reads (next addendum).
 
-## 追記（2026-09-07 — 代替案 b「行だけ読む」を採る: 読み口を区間読みの handle へ）
+## Addendum (2026-09-07) — alternative b ("read only the rows") adopted
 
-決定 3 が「実需が出たときにホスト側だけ差し替える」と予定していた代替案 b を採る。読み口を
-`Gemma4Assets.openPleShard(file) → { bytes, readAll, range?: { cost: "seek" | "scan", read(offset, length) } }` に
-置き換え（`readPleShard` からの**破壊的変更** — limitations）、`Gemma4Ple` は shard ごとに header を 1 度だけ小読みして行の
-位置を持ち、小さい gather（decode の 1 id など）は values 8,960 B + scales 140 B の 2 区間だけを読む。方針は shard ごとに
-束ねた一意行数 rows で決める: 常駐（pending 含む）→ hit / range 無し → 全量 + LRU（従来）/ cost "scan" → rows ≤ 2 なら行読み・
-それ以外は全量 + LRU / cost "seek" → rows ≥ 32 かつ予算に**追い出し無しで**載るなら全量 + LRU・それ以外は行読み。range が
-あるなら LRU の追い出しは起こさない（9 shard に散る自然文で回り続けるのが実測の 137 回の正体）。行の値は同じ bytes から
-同じ 2 段丸めで組むので決定 4 のビット一致は不変（torch 突合門で確認）。読み口の実装: `denoDirectory` = `Deno.open` の位置読み
-（seek・実測 46 µs/read）/ ブラウザの HF 取得元 = CacheStorage の `response.blob().slice()`（Chrome 152 実測 0.1〜0.3 ms・
-Range 要求は 200 全量で無視される）/ Deno の HF 取得元 = 本文ストリームの読み飛ばし（`blob()` が全量を読むため・17〜76 ms・scan）。
-取得層 `@hdae/fetch-cache` の `openCachedUrl` / `openHfFile`（その ADR 0012）と hub の能力 ⑧（ADR 0086 追記）がこれを支える。
+Decision 3's planned alternative b is adopted: `Gemma4Ple` reads only the rows of a small gather
+(for one decode id, 8,960 B of values and 140 B of scales), and range reads cause no LRU eviction
+(the eviction loop over 9 shards was the cause of the 137 re-reads). Rows are built from the same
+bytes with the same rounding, so decision 4 holds (confirmed by the torch comparison check). Hub
+supports it through the fetch layer `@hdae/fetch-cache` (`openCachedUrl` / `openHfFile`) and ADR 0086
+capability ⑧ (`openAsset`).
 
-## 追記（2026-09-11 — 小さい gather の値と scale を並行して読む）
+The shard-level handle (`Gemma4Assets.openPleShard`) and the policy table switching row reads and
+whole reads by the reader's cost type (`"seek"` / `"scan"`, rows ≤ 2 / rows ≥ 32) are superseded by the
+2026-09-22 addendum on 2026-09-22: the PLE consumer ignores the cost type (hub's
+`AssetRangeReader.cost` remains, `packages/hub/src/fetch.ts`), and the whole-read threshold of 32 rows
+applies per block (`FULL_BLOCK_ROWS` in `packages/models/src/gemma/ple.ts`).
 
-行読みする一意行数が8以下の場合は、各行の値とscaleの2区間を並行して読む。
-それより多い場合は従来どおり16本のworkerが各行の2区間を順に読む。
-これでdecodeの1行にあった直列待ちを減らしつつ、1回のgather全体で同時読み込み数16の上限を守る。
-上限はshardをまたいで掛け、ヘッダ取得後に行の読み込みを発行する。
+## Addendum (2026-09-11) — values and scales of a small gather are read concurrently
 
-並行に発行した2区間は、片方が拒否されても両方の決着を待つ。両方が成功してから行を書き、
-`rowReads`を増やす。両方が拒否された場合は従来の順序と同じ値側の原因を返す。
-中断signalの透過、常駐予算、区間位置、逆量子化、重複行の複写は変えない。
-公開API・保存形式・数値契約は不変で、通常GemmaとQATの共通loaderへ適用する。
+With 8 unique rows or fewer, each row's values and scales ranges are read concurrently; above that,
+16 workers read each row's two ranges in order. This removes a serial wait from the single decode row
+while the whole gather keeps the limit of 16 concurrent reads, applied across blocks; row reads are
+issued after the header is read.
 
-[実測](../research/2026-09-10-codex-mtp-optimization.md#ple-の行内並行読み2026-09-11)では、
-HTTP Rangeを使うChromeのQAT生成が約2〜5%速くなった。Denoローカル読みはほぼ同等だった。
-この差をすべての取得元やApple M2の効果として扱わない。
+Both ranges are awaited even if one is rejected. The row is written and `rowReads` incremented only
+after both succeed; if both fail, the values-side cause is reported. Abort propagation, the budget,
+range positions, dequantization and the copying of repeated rows are unchanged, as are the public
+API, the storage format and the numerics contract; it applies to the loader shared by Gemma and QAT.
+Measured 2026-09-11: QAT generation in Chrome over HTTP Range about 2–5% faster, Deno local reads the
+same; not generalised to other sources or Apple M2
+([research](../research/2026-09-10-codex-mtp-optimization.md), section of 2026-09-11).
 
-## 追記（2026-09-12 — 行読み後の量子化行を小さな LRU へ保持する）
+## Addendum (2026-09-12) — quantized rows read by row reads are kept in a small LRU
 
-9/7 に見送った行キャッシュを、行読み導入後の別の費用に対して採る。
-当時は shard の全量読み直しが律速であり、行キャッシュだけでは初出 token の大きな読みを解消できなかった。
-今回の HTTP Range 計測では小さな読み自体が prefill の 66〜74 ms を占め、同じ token でも毎回値と scale を読み直していた。
-[費用の分解と比較](../research/2026-09-12-ple-row-cache.md)を根拠に、通常版と QAT の共通 PLE loader へ追加する。
+The row cache declined on 2026-09-07 is adopted against a different cost: with row reads in place,
+the small reads took 66–74 ms of prefill in the HTTP Range measurement, re-reading the same token's
+values and scales every time ([cost breakdown](../research/2026-09-12-ple-row-cache.md)). It is added
+to the PLE loader shared by Gemma and QAT.
 
-- 行読みが成功した量子化値と f32 scale を、そのまま最大 256 行の LRU へ保持する。
-  逆量子化した f32 行を別途保持せず、hit も既存の `writeRow` を使う。丸め順序・固定量子化・token 列の契約は不変。
-  同じ gather 内では行 hit を先に使い、後続 miss による追い出しで未処理 hit を失わない。
-- 既存 `maxResidentPleBytes` / `maxResidentBytes` の予算を共有する。全量 shard が優先で、空きに入る行数だけ保持する。
-  shard の予約時と行の保存時に、`shard の予約 byte + 保持行の byte ≤ 既存予算` に収める。予算 0 は行も保持しない。
-  E2B の上限 payload は通常版 2,329,600 B、QAT 1,182,720 B。新しいメモリ予算や CLI ノブは追加しない。
-- 内部診断 `residentBytes` は両者の payload 合計へ拡張する。`resident` は従来どおり全量 shard 数、
-  `rowReads` は実際に行を読み終えた数で、hit を読取りとして加算しない。一時読取りバッファや管理オブジェクトは従来同様に別。
-- 値と scale の両方が成功してから保持する。拒否された行、読取り中に中断・dispose された行は保持しない。
-  cache は pipeline の PLE 所有者と同じ寿命で、dispose で空にする。全量読みの判断基準と同時読取り上限 16 は維持する。
-- 新しいプロンプトにも共通 token の hit は効くが、初出 token の読取りは残る。
-  同じ入力を反復した速度は上限寄りの結果として分け、未使用の英語・日本語入力でも比較する。
-  M2 の改善後の速度は利用者実機での追試が必要。
+- The quantized values and f32 scales of a successful row read are kept as is in an LRU of at most
+  256 rows; no dequantized rows are kept, and hits go through the existing `writeRow`. Rounding order,
+  static quantization and the token-sequence contract are unchanged. Row hits are used first within a
+  gather, so a later miss's eviction cannot lose an unprocessed hit.
+- The existing `maxResidentPleBytes` / `maxResidentBytes` budget is shared; whole blocks take
+  priority and rows use only free space (`reserved block bytes + kept row bytes ≤ budget` at both
+  reservation and storage). Budget 0 keeps no rows. Maximum payload for E2B: 2,329,600 B (regular),
+  1,182,720 B (QAT). No new memory budget or CLI option.
+- The internal diagnostic `residentBytes` covers both payloads; `resident` counts whole blocks,
+  `rowReads` counts rows actually read (hits are not reads). Temporary buffers and bookkeeping stay
+  outside.
+- A row is kept only after values and scales both succeed; rejected rows and rows aborted or disposed
+  during the read are not kept. The cache lives as long as the pipeline's PLE owner and is emptied on
+  dispose. The whole-read criterion and the limit of 16 concurrent reads stay.
+- First-seen reads remain. Speeds on repeated identical input are reported apart as an upper bound
+  and compared with unseen English and Japanese input; M2 speed needs a re-run on the maintainer's
+  machine.
 
-公開の関数引数・グラフ・保存資産・数値契約は変わらない。既定で既存予算の未使用部分を少量使うことと、
-内部診断が行の常駐 byte を含むことが変更点である。CPU で予算・LRU・重複・並行読取り・中断・破棄と
-I2/I4 の固定参照との bit 一致を検査し、実 GPU では通常/QAT・E2B/E4B の生成列と全体検証を確認する。
+Public arguments, graphs, stored assets and the numerics contract do not change; by default a little
+unused budget is used, and the diagnostic includes resident row bytes. Budget, LRU, duplicates,
+concurrent reads, abort, dispose and bit identity with the I2/I4 static references are checked on the
+CPU; generated sequences and full verification of regular/QAT and E2B/E4B on a real GPU.
 
-## 追記（2026-09-19 — GPU 常駐席: opt-in で sidecar を GPU に置き、gather も GPU 内で行う）
+## Addendum (2026-09-19) — GPU residency: opt-in placement of the sidecar on the GPU, gather on the GPU
 
-perf-ledger H-28。決定 3（遅延ロード + LRU）と決定 6（PLE は通常のグラフ入力）に対する
-**opt-in の例外**を 1 つ置く。既定は従来どおり `"host"` で、宣言した呼び手だけが GPU 常駐になる
-（利用者裁定 2026-09-19 = 案 A「単一束縛 + 束縛上限の引き上げ + opt-in 席」）。
+perf-ledger H-28. One **opt-in exception** to decision 3 (lazy loading + LRU) and decision 6 (an
+ordinary graph input). The default stays `"host"` (the maintainer's ruling of 2026-09-19: "single
+binding + raised binding limit + opt-in option").
 
-- **席**: `Gemma4PipelineOptions.pleResidency: "host" | "gpu"`（既定 `"host"`）。通常 Gemma と
-  QAT の共通 pipeline が受ける。不正値・併用できないノブは資産を読む前に fail loudly。
-- **何を消すか**: run ごとのホスト逆量子化と `per_layer_inputs` の writeBuffer（decode
-  35,840 B/token = 約 0.25 ms、prefill 768 行で 27.5 MB）。先行投入（H-27 段 ②）の硬い前提でもある。
-- **機構**: `embedding` → `mul embed_scale` の 2 ノードだけの小さな IR を別 Session で持ち、
-  target の run と**同じ batch へ先に enqueue** して出力を常駐テンソルへ書き、target はそれを
-  `per_layer_inputs` の常駐入力として受ける（writeBuffer を出さない）。temperature 0 の decode は
-  greedy 出力の batch に相乗りするのでフェンスは増えない。温度 > 0 や診断付きの decode（通常 run）も
-  同じ batch に積み、グラフ出力は batch の終端フェンスで読み戻す（`Session.enqueueRead` —
-  [0054 追記](0054-resident-loop-and-fence.md#グラフ出力の一括読み戻し2026-09-20)・2026-09-20 に残件 ① として
-  改訂。それまでは gather 用の batch を 1 本先に閉じていた）。prefill（M > 1）だけは gather 用の batch を
-  1 本余分に払う — enqueue 系は初回から slot backing を作る契約で、chunk 形の backing を 1 本目から
-  払わせないため。prefill も decode も GPU gather を通る（片方だけの席にしない）。
-- **重みの形**: 重みは `[tokens × layers, dim]`・添字は `id × layers + layer`。1 行 = 1 層ぶんに
-  なるので、sidecar の `scales[rows, layers]` がそのまま行 scale の並びになり、**i8 / i2 の行
-  scale も i4 の `group_size = dim` の group scale も同じ平坦添字**で引ける。逆量子化は
-  `embedding` の `f32(q) × scale` 1 回、`embed_scale` はその後の別ノード — 決定 4 の 2 段丸めと
-  同じ順序・同じ丸め点である（`ple.probe.safetensors` との u32 一致で門を張る）。
-- **ロード**: 決定 2（ホストで 1 本の巨大 ArrayBuffer に連結しない）を保つため、sidecar の shard を
-  1 本ずつ読んで**ランタイムの shard 逐次面**（ADR 0070 決定 3 / 0090 の piece）へ流す。ランタイムが
-  piece を親 1 本ぶんの GPU バッファへ行オフセット位置に `queue.writeBuffer` する。合成 shard の器は
-  1 本を使い回すので、ホスト RAM のピークは「sidecar の最大 shard 1 本 + 器 1 本」に収まる。
-  companion scale は piece 1 と同じ shard に置く契約（ADR 0090 決定 1）なので、**scale だけは先に
-  全量（E2B で 35 MiB）を集める** — 区間読みできる読み口なら shard あたり数 MB の小読みで済み、
-  持たない読み口では sidecar を 1 度余分に読む。piece 1 は先頭 1 行に切って graph shard へ同居させる。
-- **常駐量と束縛上限**: `values` は分割しない 1 本のバッファで、QAT E2B（i4）1,174,405,120 B・
-  QAT E4B（i2）704,643,072 B・通常 Gemma 4 E2B（i8）2,348,810,240 B。`scales` は f32 で
-  E2B 36,700,160 B。`acquireGpu` はアダプタ実測値をそのまま `requiredLimits` に要求する
-  （`planRequiredLimits`）ので、device 取得側に足すものは無く、**ロード時に
-  `maxStorageBufferBindingSize` / `maxBufferSize` と突き合わせて足りなければ fail loudly** する。
-  黙ってホスト経路へ退避しない。参照機（RTX 3080 Ti / Vulkan）の上限は 2,147,483,644 B で、
-  通常 Gemma 4 E2B の i8 sidecar はこの席を使えない（QAT の i4 / i2 は載る）。
-- **見積り**: 常駐 PLE と gather Session のぶんは `estimateSessionMemory()` の `auxiliaryBytes`
-  （小出力 decode の補助 Session と同じ欄）に載り、`peakAccountedBytes` にも加わる。
-- **未対応の組み合わせ**（どれも fail loudly）: `maxResidentPleBytes`（GPU 常駐では引かれない）/
-  投機デコード（drafter の per-layer 入力は範囲外）/ `gpuTiming`（計測中は batch を開けない）。
-- **検収**: `packages/models/tests/e2e_gemma4_ple_gpu_test.ts` が ①golden（torch の 35 表経路）と
-  u32 一致 ②ホスト `ple.gather` と u32 一致 ③QAT E2B の 16 token greedy 生成 id 列が `"host"` と
-  一致、を見る。CPU 側は `gemma_ple_gpu_test.ts`（席の受理・gather IR の形・合成コンテナの突合）。
-  **速度の採否はまだ付いていない** — Deno CLI の decode は deno_webgpu の 10 ms/token 床を含むので
-  判定に使えず、M2 / Chrome の計測は未検収である。
+- **Option:** `Gemma4PipelineOptions.pleResidency: "host" | "gpu"` (default `"host"`), for regular
+  Gemma and QAT. Invalid values and incompatible options fail loudly before any asset is read.
+- **Removes:** the per-run host dequantization and the writeBuffer of `per_layer_inputs` (35,840 B
+  per decode token, about 0.25 ms; 27.5 MB for a 768-row prefill). Also a hard prerequisite of decode
+  pre-issue (H-27 step ②).
+- **Mechanism:** a two-node IR (`embedding` → `mul embed_scale`) in its own Session is **enqueued
+  first in the target run's batch** and writes a resident tensor, which the target takes as the
+  resident input `per_layer_inputs` (no writeBuffer). Temperature-0 decode rides the greedy output's
+  batch (no extra fence). Decode with temperature > 0 or diagnostics is stacked on the same batch, and
+  graph outputs are read back at its final fence (`Session.enqueueRead` —
+  [0054 addendum](0054-resident-loop-and-fence.md#addendum-2026-09-20--batch-readback-of-graph-outputs),
+  since 2026-09-20). Only prefill (M > 1) pays one extra gather batch, so that the enqueue path does
+  not create chunk-shaped slot backing from the first chunk. Prefill and decode both use the GPU
+  gather.
+- **Weight layout:** `[tokens × layers, dim]`, index `id × layers + layer`. One row is one layer, so
+  the sidecar's `scales[rows, layers]` is the row-scale sequence, and **i8 / i2 row scales and i4
+  group scales with `group_size = dim` share the flat index**. Dequantization is one `f32(q) × scale`
+  in `embedding`, then `embed_scale` in a separate node — decision 4's order and rounding points
+  (checked by u32 equality with `ple.probe.safetensors`).
+- **Loading:** superseded by the 2026-09-24 addendum on 2026-09-24 (current mechanism there).
+- **Resident size and binding limits:** `values` is one unsplit buffer — QAT E2B (i4)
+  1,174,405,120 B, QAT E4B (i2) 704,643,072 B, regular Gemma 4 E2B (i8) 2,348,810,240 B; `scales` (f32)
+  36,700,160 B for E2B. `acquireGpu` requests the adapter's measured limits (`planRequiredLimits`);
+  **at load the sizes are checked against `maxStorageBufferBindingSize` / `maxBufferSize` and fail
+  loudly when short**, with no silent fallback to the host. The reference machine (RTX 3080 Ti /
+  Vulkan) allows 2,147,483,644 B, so regular E2B's i8 sidecar cannot use this option (QAT fits).
+- **Estimate:** resident PLE and the gather Session count in `auxiliaryBytes` of
+  `estimateSessionMemory()` and in `peakAccountedBytes`.
+- **Unsupported** (fail loudly): `maxResidentPleBytes` (not drawn), speculative decoding (drafter
+  inputs out of scope), `gpuTiming` (no batch while measuring).
+- **Acceptance:** `packages/e2e/tests/e2e_gemma4_ple_gpu_test.ts` checks ① u32 equality with the
+  golden (torch's 35-table path), ② u32 equality with the host `ple.gather`, ③ 16-token greedy ids of
+  QAT E2B equal to `"host"`; on the CPU, `packages/models/tests/gemma4_ple_gpu_test.ts` covers option
+  acceptance, the gather IR's shape and the container cross-check. **No speed verdict was recorded**
+  (Deno CLI decode included deno_webgpu's 10 ms/token floor; M2 / Chrome were not accepted).
 
-## 追記（2026-09-22 — sidecar はコンテナの資産へ: 索引 schema 3 と block 列）
+## Addendum (2026-09-22) — the sidecar becomes container assets: index schema 3 and block lists
 
-配布形がコンテナ（`krm` — ADR [0108](0108-container-format.md) / [0109](0109-manifest-v5-container.md)
-決定 4）へ移り、PLE sidecar は manifest の `assets` から消えて**モデル容器の資産**になった。
+With the distribution in the container (`krm` — ADR [0108](0108-container-format.md) /
+[0109](0109-manifest-v5-container.md) decision 4), the PLE sidecar left the manifest's `assets` and
+became **assets of the model container**.
 
-- **索引 schema 3**（資産 `ple_index`・役割 `ple-index`・正準 JSON）:
+- **Index schema 3** (asset `ple_index`, role `ple-index`, canonical JSON):
   `{ schema: 3, storage: "i8" | "i4" | "i2", tokens, layers, dim, embedScale,
-  values: { rowBytes, blocks: [{ asset, start, stop }, …] }, scales: { rowBytes, blocks: […] } }`。
-  `values` と `scales` は**別々の行列**で、token の半開区間（昇順・隙間なし・先頭 0・末尾 `tokens`）が
-  block（資産 `ple.values.<k>` / `ple.scales.<k>`・役割 `ple-values` / `ple-scales`）を指す。旧 shard の
-  境界は消え、書き手が block 上限（32 MiB）以下・**行の倍数**で切り直す。`rowBytes` は
-  `layers × dim / packFactor`（i8 = 1・i4 = 2・i2 = 4）と `layers × 4`。
-- **読み口は block 単位**（`openBlock(asset) → AssetReader` = 容器の `asset(name)`）。token → (block, 行 offset)
-  は索引の二分探索 + `(token − start) × rowBytes`。区間読みの費用型（seek / scan）の方針表は消えた —
-  読み口は費用型を持たず、検証済みの取得元では区間だけを取り、未検証の取得元では block を 1 度検証して
-  読み口の寿命だけ保持する（runtime の `AssetReader`）。残るのは決定 3 の LRU（**block 単位**で数える —
-  既定の常駐上限は「最大 block 2 本ぶん」= 約 64 MiB）と行 LRU、`Gemma4PleStats`、GPU 常駐席
-  （block ごとに全量を上げる）。
-- **admission で索引 × 資産を全件突合**する（`values.blocks` / `scales.blocks` の asset が容器の資産に
-  役割つきで在り、論理長が `(stop − start) × rowBytes` と一致）。索引は重み block と part を共有しない
-  資産なので、重みを 1 バイトも取る前に読める（container-v1 §4.2）。
-- 区間読みを要する block は **1 block = 1 part**（container-v1 §4.2 の「専用 part に単独」）。gemma4 E2B
-  では `values` 約 72 block + `scales` 数 block が part になる（part 件数の上限 1024 の内側）。
-- 旧 sidecar（schema 1 / 2 の safetensors）を読む処理は移行 CLI（`karume migrate --manifest`）だけが持つ。
-  系列出力（`outputs/series/`）が旧形で残る段 3 までは、テスト helper `ple-series.ts` が旧 shard の
-  テンソル領域をそのまま block 1 本の資産として畳む（値はビット同一・段 3 で退役）。
+  values: { rowBytes, blocks: [{ asset, start, stop }, …] }, scales: { rowBytes, blocks: […] } }`.
+  `values` and `scales` are **separate matrices**; half-open token ranges (ascending, gap-free, 0 to
+  `tokens`) point at blocks (assets `ple.values.<k>` / `ple.scales.<k>`, roles `ple-values` /
+  `ple-scales`). Shard boundaries are gone; the writer cuts blocks at or below the 32 MiB block limit
+  **in whole rows**. `rowBytes` is `layers × dim / packFactor` (i8 = 1, i4 = 2, i2 = 4) and
+  `layers × 4`.
+- **Reads are per block** (`openBlock(asset) → AssetReader`, the container's `asset(name)`); token →
+  (block, row offset) is a binary search plus `(token − start) × rowBytes`. Readers carry no cost
+  type: a verified source fetches only the range; an unverified one verifies the block once and keeps
+  it for the reader's lifetime (the runtime's `AssetReader`). What remains: decision 3's LRU
+  (**counted in blocks**; default limit two of the largest blocks, about 64 MiB), the row LRU,
+  `Gemma4PleStats` and GPU residency (each block uploaded whole).
+- **Admission cross-checks the index against every asset** (each asset of `values.blocks` /
+  `scales.blocks` exists with its role, with logical length `(stop − start) × rowBytes`). The index
+  shares no part with weight blocks, so it is readable before any weight byte (container-v1 §4.2).
+- A block that needs range reads is **one block per part** (container-v1 §4.2). gemma4 E2B has about
+  72 `values` blocks plus a few `scales` blocks as parts (within the limit of 1024 parts).
+- Only the migration CLI (`karume migrate --manifest`) reads the old sidecar (schema 1 / 2
+  safetensors); the loader reads schema 3 only.
 
-## 追記（2026-09-24 — GPU 常駐席のロード機構とホスト RAM ピークを現行へ）
+## Addendum (2026-09-24) — GPU-resident load mechanism and host RAM peak
 
-2026-09-19 追記の「ロード」項の機構は、ADR [0108](0108-container-format.md) 段 3d（`9e905d9f`・旧配布形の
-読み手の削除）と段 3e（Session 構築の block 逐次化）で変わった。本文は書き換えず、現行をここに書く。
+The load mechanism of 2026-09-19 changed with ADR [0108](0108-container-format.md) stage 3d
+(`9e905d9f`, old distribution readers removed) and stage 3e (block-by-block Session construction);
+its terms (shard-sequential path, reused synthetic shard buffer, piece 1 trimmed into the graph shard)
+no longer exist in the code.
 
-- **退役した語**: 「ランタイムの shard 逐次面」「合成 shard の器は 1 本を使い回す」「sidecar の最大 shard
-  1 本 + 器 1 本」「piece 1 は先頭 1 行に切って graph shard へ同居させる」「区間読みできない読み口では
-  sidecar を 1 度余分に読む」は、どれも現行の経路に無い。
-- **現行の経路**: 索引が指す `values` の block 列を**メモリ内容器**（`openMemoryContainer` — 0108 追記 4 の 8）の
-  `pieces` として渡し、Session 構築は piece を 1 本読んでは親 1 本ぶんの GPU バッファへ行オフセット位置に
-  `writeBuffer` して、その反復で手放す（ADR 0070 決定 3 の 2026-09-24 追記）。companion scale は piece 1 と
-  同じ part に置く規則（container-v1 §5 の規則③）なので、`scales` の block 列を先に全量読んで 1 本に集めて
-  渡す。
-- **ホスト RAM のピークは「scale 表の全量 + 最大 values block 1 本」**（E2B で 35 MiB + 32 MiB 以下）。
-  scale は 1 倍で数え、× 2 にはならない。メモリ内容器は渡された scale の器を複製せずに返し
-  （`packages/runtime/src/format/container/memory.ts` の `readBlock`）、Session 構築の scale は写しを作らない
-  view で（`session-build.ts` の `scaleTensor`）、`ple` は `embedding` の重みスロットでしか消費されないので
-  席は圧縮のまま載る。scale の写しを作るのは展開席の piece 列の「持ち越し scale」だけで、PLE はそこを
-  通らない。数え方の正本は [container-v1](../container-v1.md) §11。
+- **Current path:** the index's `values` blocks are passed as the `pieces` of an **in-memory
+  container** (`openMemoryContainer` — 0108 addendum 4, item 8). Session construction reads one piece
+  at a time, `writeBuffer`s it at its row offset into one GPU buffer for the whole parent, and
+  releases it in that iteration (ADR 0070 decision 3, 2026-09-24 addendum). The companion scale lives
+  in piece 1's part (container-v1 §5, rule ③), so the `scales` blocks are read in full first and
+  passed as one buffer.
+- **Host RAM peak is "the whole scale table + the largest values block"** (E2B: 35 MiB + at most
+  32 MiB). Scales count once: the in-memory container returns the scale buffer without copying
+  (`readBlock` in `packages/runtime/src/format/container/memory.ts`), Session construction takes it as
+  a view (`scaleTensor` in `packages/runtime/src/runtime/session-build.ts`), and `ple` is consumed only
+  by `embedding`'s weight slot, so it loads compressed. Only the carried scale of an expanded weight's
+  piece list copies scales, and PLE does not go through it. Accounting: [container-v1](../container-v1.md)
+  §11.

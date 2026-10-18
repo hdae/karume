@@ -1,237 +1,225 @@
-# 0084: Gemma の tokenizer / detokenizer / chat template — compile-to-asset と射程の切り方
+# 0084: Gemma tokenizer, detokenizer and chat template — compile-to-asset and the scope cut
 
-- Status: implemented（2026-08-31 accepted — 設計ドラフトの裁定 6 / 9 を★推奨案で確定〈ユーザー裁定〉。
-  実装は段 1a〈`a235d539`〉/ 段 4〈`088ad297`〉で完了〈2026-09-25 時点の現況〉）
+- Status: implemented (accepted 2026-08-31 — the maintainer adopted the recommended option for the
+  draft's open questions 6 and 9; stage 1a `a235d539`, stage 4 `088ad297`); partly superseded by
+  [0127](0127-node-dawn-toolchain.md) (the CLI demo rules of the 2026-09-12 addendum, 2026-10-16;
+  the measurement definitions re-graded 2026-10-18 to SHOULD)
 - Date: 2026-08-31
-- 対象: `packages/models/src/text/`（家族中立の共通層）/ `packages/models/src/gemma/text/`
-  （新設・ファミリ側）/ `tools/export-recipes/`（compile 台本）。IR 仕様・ランタイム・hub は無改変。
-- 関連: ADR [0083](0083-generation-api-surface.md)（生成 API 面 — token イベントの粒度が
-  streaming decoder の前提）/ [0085](0085-ple-host-gather.md)（PLE 配布形 — 同一 digest set の
-  同居者）/ [0048](0048-irodori-host-port.md)（決定 2 = Unigram 本体は家族中立の共通層
-  `src/text/`。追記の教訓 = **前処理 helper を TS と Python で共有すると parity が恒真化する**）/
-  [0065](0065-exporter-core-recipe-split.md)（汎用 core と recipe の境界 — compile 台本は recipe 側）/
-  [0079](0079-sbv2-two-layer-input.md)（テキスト解析は呼び手の責務・変換関数 1 本という前例）/
-  [0038](0038-manifest-v1.md)（`pipelineConfig` の所有）
-- 根拠:
-  [research/2026-08-31-generation-api-design-draft.md](../research/2026-08-31-generation-api-design-draft.md)
-  §0.2・§5・§6（以下「ドラフト §n」— 実資産の実測値と候補比較はそちらが正本）
+- Scope: `packages/models/src/text/` (family-neutral common layer) / `packages/models/src/gemma/text/`
+  (family side) / `tools/export-recipes/` (the compile script). IR, runtime and hub unchanged.
+- Related: [0083](0083-generation-api-surface.md) (generation API — token events feed the streaming
+  decoder) / [0085](0085-ple-host-gather.md) (PLE, same digest set) /
+  [0048](0048-irodori-host-port.md) (decision 2: Unigram lives in `src/text/`; its addendum: **a
+  preprocessing helper shared by TS and Python makes parity tautological**) /
+  [0065](0065-exporter-core-recipe-split.md) (the compile script is recipe side) /
+  [0079](0079-sbv2-two-layer-input.md) (text analysis is the caller's job; one conversion function) /
+  [0038](0038-manifest-v1.md) (ownership of `pipelineConfig`)
+- Basis: [research/2026-08-31-generation-api-design-draft.md](../research/2026-08-31-generation-api-design-draft.md)
+  §0.2, §5, §6 ("the draft §n"; measured values and the comparison of candidates live there)
 
 ## Context
 
-`packages/models/src/text/` は現在 encode 側の 4 本（`unigram.ts` / `added-tokens.ts` /
-`code-points.ts` / `asset-gates.ts`）だけで、**detokenize がどこにも無い**。gemma4 を
-「文字列 in → 文字列 out」で渡すには Gemma の SPM-BPE encode と streaming decode、そして chat
-形式が要る。
+When this was decided, `packages/models/src/text/` held only four encode-side files (`unigram.ts`,
+`added-tokens.ts`, `code-points.ts`, `asset-gates.ts`) and **no detokenizer**. "String in, string
+out" for gemma4 needs Gemma's SPM-BPE encode, a streaming decode and the chat format.
 
-ドラフト作成時に実資産（`inputs/gemma4/gemma-4-E2B-it/` と `inputs/embeddinggemma/google-300m/`）
-を直接読んで確定した事実が、レビューのレンズ記述を 3 点動かした（ドラフト §0.2・§10）:
+Reading the real assets (`inputs/gemma4/gemma-4-E2B-it/`, `inputs/embeddinggemma/google-300m/`)
+established three facts that changed the review's assumptions (draft §0.2, §10):
 
-1. **gemma4 と embeddinggemma は「BPE コアは同一・資産は別物」**。`.model.merges` は **sha256
-   ビット同一**（514,906 本）だが、`.model.vocab` は 262,144 本のうち **6,206 スロットで綴りが
-   違う**（予約枠の名前 — 例 id 46 = G4 `<|tool>` / EG `<unused40>`）。`added_tokens` は
-   **24 本 vs 6,415 本**、post_processor は **G4 = 特殊トークン付与なし / EG = `<bos>` … `<eos>`
-   を付与**。→ **実装は共用できるが資産は共用できない**。
-2. **Gemma の tokenizer は Unicode 表に依存しない**。normalizer = `Replace(" " → "▁")` 1 本・
-   pre_tokenizer = `Split(" ", MergedWithPrevious)` のみ・decoder =
-   `Sequence[Replace("▁"→" "), ByteFallback, Fuse]`（両資産で同一構成）。Qwen2 で必要だった
-   焼き表 3 種（`code-ranges` / `caseFold` / `nfcSegments`）が **1 つも要らない**。
-3. **chat の綴りは Gemma 3 系ではない**。`<|turn>` / `<turn|>` / `<|channel>` / `<|think|>`
-   （`tokenizer_config.json` の `sot_token` / `eot_token` / `soc_token` / `think_token` が正本）。
-   `<start_of_turn>` は EG 側 vocab にはあるが **G4 vocab には無い**。
+1. **gemma4 and EmbeddingGemma share the BPE core but not the assets.** `.model.merges` is
+   **bit-identical by sha256** (514,906 merges), but `.model.vocab` **differs at 6,206 of 262,144
+   slots** (reserved-slot names — id 46 is `<|tool>` in G4, `<unused40>` in EG). `added_tokens` has
+   **24 vs 6,415** entries; the post_processor adds **nothing in G4, `<bos>` … `<eos>` in EG**. →
+   **The implementation can be shared; the assets cannot.**
+2. **The Gemma tokenizer needs no Unicode tables.** Normalizer `Replace(" " → "▁")`, pre_tokenizer
+   `Split(" ", MergedWithPrevious)`, decoder `Sequence[Replace("▁"→" "), ByteFallback, Fuse]` (same in
+   both assets). **None** of Qwen2's three baked tables (`code-ranges`, `caseFold`, `nfcSegments`) is
+   needed.
+3. **The chat spelling is not Gemma 3's.** It is `<|turn>` / `<turn|>` / `<|channel>` / `<|think|>`
+   (source of truth: `sot_token` / `eot_token` / `soc_token` / `think_token` in
+   `tokenizer_config.json`). `<start_of_turn>` is in the EG vocab but **not in G4's**.
 
 ## Decision
 
-### 1. tokenizer は compile-to-asset（recipe が実 `tokenizer.json` を検査して独自 schema へ compile）
+### 1. The tokenizer is compiled to an asset (the recipe checks the real `tokenizer.json` and compiles it to our own schema)
 
-export recipe（Python）が upstream の `tokenizer.json` を読み、repo 独自の小さな schema へ
-compile する。**未知の構成は compile 時に fail loudly**（実行時に散らさない）。
+The export recipe (Python) compiles the upstream `tokenizer.json` to a small schema of our own.
+**An unknown configuration fails loudly at compile time**, not at run time.
 
-家風どおりである: Qwen2 は「JS の `\p{L}` / `NFC` / `toLowerCase` を正本にしない」ために表を
-焼いており（`packages/models/src/anima/text/qwen2-tokenizer.ts`）、Unigram は「正本は Rust の
-`Lattice::viterbi` をコードポイント位置で写したもの」（`packages/models/src/text/unigram.ts`）。
-**「実装は写す・表は焼く」が既に規約**である。
+This is existing practice: Qwen2 bakes tables so that JS `\p{L}` / `NFC` / `toLowerCase` are not the
+source of truth (`packages/models/src/anima/text/qwen2-tokenizer.ts`); Unigram ports Rust's
+`Lattice::viterbi` at code-point positions (`packages/models/src/text/unigram.ts`). **"Port the
+implementation, bake the tables" is already the rule.**
 
-compile が吐くのは **id 順の vocab 行 / merges rank 表 / byteIds 256 本 / added tokens /
-special id 集合**だけの小さな資産になる（Context 2 のとおり Gemma では Unicode 表を焼く必要が
-無い）。upstream の `tokenizer.json` は **32.2 MB**（実測）で、生 JSON を配るのは無駄。
+The asset holds only **the vocab lines in id order, the merge rank table, 256 byteIds, the added
+tokens and the special ids** (Context 2). The upstream `tokenizer.json` is **32.2 MB** (measured);
+shipping it raw is waste.
 
-MUST: **byteIds は 256 本を明示構築し、欠落・重複を fail loudly で拒否する**。実測では
-`<0x00>`…`<0xFF>` が連番（238..493・両資産とも）で `unigram.ts` の `base + byte` 前提は成立するが、
-それは**この資産の実測事実であって schema の保証ではない**。compile 時に 256 本を引く費用は
-ゼロに近い。
+MUST: **byteIds are built explicitly as 256 entries; a missing or duplicate entry fails loudly.**
+`<0x00>`…`<0xFF>` are consecutive in both assets (238..493), so `unigram.ts`'s `base + byte` holds,
+but that is **a measured fact about these assets, not a guarantee of the schema**; the lookup costs
+next to nothing.
 
-MUST: 配布破損の門は既存の `packages/models/src/text/asset-gates.ts` をそのまま効かせる
-（`assertUniqueLines` = 行番号 = id の重複 / `setUnique` = merge 順の後勝ちの禁止。レビュー
-CG3-6 の修正でこの門は既に家族横断へ寄せてある）。
+MUST: the distribution-corruption checks of `packages/models/src/text/asset-gates.ts` apply
+unchanged (`assertUniqueLines`: line number = id, no duplicates; `setUnique`: no later merge
+overriding an earlier one); a review fix had already made them family-wide.
 
-### 2. 分割 — 共通処理は `src/text/`・受理 schema と特殊 token はファミリ側
+### 2. Split — common processing in `src/text/`, acceptance schema and special tokens on the family side
 
-`packages/models/src/text/`（**ファミリ非依存** — ADR 0048 決定 2 と同じ位置づけ理由）:
+`packages/models/src/text/` (**family-independent**, for the reason of ADR 0048 decision 2): BPE
+merge (rank table + tie rule), UTF-8 reconstruction for byte_fallback, the streaming decoder's state
+machine. **Decode is split the same way** (byte reconstruction common, special tokens family side).
 
-- BPE merge（rank 表 + tie 規則）/ byte_fallback の UTF-8 再構成 / streaming decoder の状態機械
-- **decode も同じ分割**（バイト再構成は共通・特殊 token の扱いはファミリ側）
+`packages/models/src/gemma/text/` (family side): the acceptance schema (**exact match** of model
+type, flags, normalizer, pre_tokenizer and decoder sequence); the special ids, the `<bos>` policy
+and the post_processor equivalent (**G4 adds nothing, EG adds bos…eos** — Context 1).
 
-`packages/models/src/gemma/text/`（新設・ファミリ側）:
+MUST: **every module is free of side effects** (nothing such as a byte encoder is built at module
+scope; the lazy-construction precedent is `qwen2-tokenizer.ts`). It is the precondition for
+tree-shaking through the barrel.
 
-- 受理 schema（model type / flags / normalizer / pre_tokenizer / decoder sequence の
-  **exact-match**）
-- special id 集合・`<bos>` 方針・post_processor 相当（**G4 = 何も付けない / EG = bos…eos** —
-  Context 1）
+### 3. BPE uses a merge queue from the start (the O(n²) full-scan splice is not ported)
 
-MUST: **全モジュール副作用ゼロ**（byte encoder 等をモジュールスコープで組み立てない — 遅延構築の
-前例は `qwen2-tokenizer.ts`）。barrel 経由 tree-shaking の成立条件である。
+Qwen2's `#bpe` scanned every adjacent pair and spliced the lowest rank, O(n²). **Gemma's
+pre_tokenizer splits only on spaces**, so **for languages without spaces (Japanese, Chinese), URLs or
+base64 one pre-token is the whole input**. The gemma4 goldens already include a Japanese case
+(capital-ja, T=10); long Japanese input is a real use.
 
-### 3. BPE は最初から merge queue で書く（O(n²) の全走査 splice を写さない）
+→ Port Rust's **merge queue and list structure**, and pin **rank and position ties and stale-pair
+invalidation** with fixtures. Acceptance: "linear cost on long Japanese text" (stage 1a).
 
-Qwen2 の `#bpe` は「全隣接ペアを走査 → 最小 rank を splice」の O(n²) で、Qwen2 は pre_tokenizer が
-細かく切るので実害が出ない。だが **Gemma の pre_tokenizer は空白での分割だけ**
-（`Split(" ", MergedWithPrevious)`）なので、**空白の無い言語（日本語 / 中国語）や URL・base64 では
-1 pre-token が入力全長になる**。gemma4 の golden には日本語ケース（capital-ja, T=10）が既にあり、
-長文の日本語入力は実需そのものである。
+### 4. The detokenizer streams — UTF-8 carry-over is held in a state machine
 
-→ Rust の **merge queue / list 構造まで移植**し、**rank・position の tie と stale pair の無効化**を
-fixture で固定する。合格線は「日本語長文で計算量が線形」（段 1a）。
+The shape is `push(id) → committed string`. An incomplete UTF-8 sequence inside a byte_fallback run
+is carried over in a buffer; only the committed part is returned.
 
-### 4. detokenizer は streaming — UTF-8 の持ち越しを状態機械で持つ
+MUST: **nothing but a byte run is buffered without bound.** A direct test pins this, so a "fake
+streaming" decoder that holds every token until `finish()` cannot pass. Otherwise one iteration of
+`for await` over ADR 0083 decision 2's `AsyncIterable` would mean nothing to the consumer.
 
-`push(id) → 確定した文字列` の形にする。byte_fallback の途中（不完全な UTF-8 バイト列）は
-buffer に持ち越し、確定したぶんだけ返す。
+### 5. Chat is one family-specific pure function; the first scope is plain conversation only (open question 6)
 
-MUST: **byte run 以外を無制限に buffer しない**。`finish()` まで全 token を溜めるだけの
-「偽 streaming」を通さないため、この点は直接テストで縛る。
+`gemma4ChatPrompt(messages, options) → token ids`. No generic template renderer (see Alternatives).
 
-これが ADR 0083 決定 2 の `AsyncIterable` と直結する — 1 token push ごとに確定文字列が出る形で
-なければ、`for await` の 1 反復が消費者にとって意味を持たない。
+Why narrow: `chat_template.jinja` is **386 lines / 18,569 B** (measured), with tool declaration
+formatters (`format_parameters`, `format_function_declaration`), thinking-channel ordering and
+tool_call argument serialisation, but **plain conversation needs five spellings and three branches**
+(`bos_token`, `'<|turn>system\n'`, `'<turn|>\n'`, `'<|turn>' + role + '\n'` with `assistant` mapped to
+`model`, and the generation prompt `'<|turn>model\n'`). Precedent: ADR 0079; the recipe README also
+says `<bos>` comes from the chat template, i.e. **the host's job**.
 
-### 5. chat はファミリ固有の純関数 1 本・初版の射程は「素の会話」だけ（裁定 6）
+**Rejected input (fails loudly):** `tools`, `reasoning` (thinking), image or audio parts, and any
+`role` other than `system|user|assistant|developer`. **Nothing is silently ignored** — "I passed tools
+and they were not used" must not pass without an error. The scope widens when a real need appears.
 
-`gemma4ChatPrompt(messages, options) → token id 列`。汎用テンプレートレンダラは作らない
-（検討した代替案）。
+MUST (owner of `<bos>`): **`encode(text)` does not add `<bos>`** (as the measured G4 post_processor).
+**Only the chat function adds it**; otherwise chat would produce a double BOS.
 
-射程を絞る根拠: `chat_template.jinja` は **386 行 / 18,569 B**（実測）で tool 宣言のフォーマッタ
-（`format_parameters` / `format_function_declaration`）・thinking チャネルの順序制御・tool_call
-引数の直列化を含むが、**素の会話だけなら綴りは 5 個・分岐は 3 本**である（実測行 = `bos_token` /
-`'<|turn>system\n'` / `'<turn|>\n'` / `'<|turn>' + role + '\n'`〈`assistant` → `model` へ写像〉/
-生成プロンプト `'<|turn>model\n'`）。前例は ADR 0079 の「テキスト解析は呼び手の責務・変換関数
-1 本」で、recipe README も「`<bos>` は `chat_template.jinja` が出す = **ホストの仕事**」と書いている。
+MUST (same digest set): the product graph, weight shards, PLE sidecar (ADR 0085), compiled
+tokenizer, BOS / special-token policy and prompt / chat format version are **bound into the same
+distribution digest set**. The chat format and the EOS set (ADR 0083 decision 8) both come from the
+checkpoint's side files (`tokenizer_config.json`, `generation_config.json`); **picked up separately,
+one of them goes stale**.
 
-**拒否する入力（fail loudly）**: `tools` / `reasoning`（thinking）/ 画像・音声パート /
-`role` が `system|user|assistant|developer` 以外。**黙って無視しない** — 無視すると「tool を
-渡したのに使われない」が例外なしで通る。射程を広げるのは実需が出てから。
+### 6. The EmbeddingGemma asset compile rides along in stage 1a (open question 9)
 
-MUST（`<bos>` の所有者）: **`encode(text)` は `<bos>` を付けない**（post_processor が何も付けない
-G4 の実測と一致）。**chat 関数だけが付ける**。分けないと chat 導入時に double-BOS になる。
+Stage 1a also compiles the EG assets (the tokenizer part of the backlog item "complete
+EmbeddingGemma"). The **implementation** in `src/text/` is shared, **not the assets** (Context 1), so
+decision 2's split proves "one implementation, two assets". The EG pipeline, batch>1 export and
+runtime attention_mask wiring stayed out of scope, in the backlog.
 
-MUST（同一 digest set）: 製品グラフ + weight shards + PLE sidecar（ADR 0085）+ compiled tokenizer +
-BOS / special-token ポリシー + prompt / chat format version を**同じ配布 digest set に束ねる**。
-chat 形式と EOS 集合（ADR 0083 決定 8）はどちらもこの checkpoint の付随ファイル
-（`tokenizer_config.json` / `generation_config.json`）から来るので、**別々に拾うと片方だけ古くなる**。
+### 7. Verification (how parity fixtures are taken)
 
-### 6. EmbeddingGemma の資産 compile を段 1a に同乗させる（裁定 9）
+- MUST: **parity fixtures are taken in Python by calling `tokenizers.Tokenizer.from_file()`
+  independently.** A shared preprocessing helper makes parity tautological (ADR 0048's addendum: a
+  shared step hid a caption defect).
+- The edges are **hit directly**: BPE rank and ties, metaspace boundaries, CJK, combining
+  characters, non-BMP, adjacent AddedTokens, bytes 0..255, multiple byte fallbacks, invalid or
+  incomplete byte runs, special-token decode.
+- **Streaming check:** for short sequences, **every chunk partition** of `push()` concatenates to the
+  one-shot `decode(ids)`, plus the direct test of the unbounded-buffer MUST.
+- **Chat check:** id sequences match fixtures from HF `apply_chat_template`.
 
-段 1a の tokenizer 実装に EG の資産 compile まで載せる（backlog later「EmbeddingGemma の完成」の
-tokenizer 部分の消化）。共用できるのは `src/text/` の**実装**であって**資産ではない**（Context 1）
-ので、決定 2 の分割がそのまま「1 実装 2 資産」の実証になる。EG の models pipeline / batch>1
-export / runtime attention_mask 配線は本波の射程外で later に残る。
+## Alternatives considered
 
-### 7. 検証（parity fixture の採り方）
-
-- MUST: **parity fixture は Python 側で `tokenizers.Tokenizer.from_file()` を独立に呼んで採る**。
-  TS と Python が前処理 helper を共有すると parity が恒真化する（ADR 0048 追記の実例 — 共有された
-  前処理のせいで caption の欠陥が検出できなかった）。
-- 自然文だけでは足りないので**直接叩く**: BPE rank / tie、metaspace 境界、CJK、結合文字、非 BMP、
-  AddedToken 隣接、byte 0..255、複数 byte fallback、不正 / 不完全な byte run、special token decode。
-- **streaming の門**: 短い token 列について**全 chunk partition**で `push()` の分け方を変え、
-  連結が one-shot `decode(ids)` と一致すること + 「byte run 以外を無制限に buffer しない」直接テスト。
-- **chat の門**: HF `apply_chat_template` の出力を fixture にした id 列一致。
-
-## 検討した代替案
-
-- **ランタイムが `tokenizer.json` を直接パースする**（compile 台本ゼロ）: **32.2 MB** の JSON を
-  配布・パースすることになり、未知構成の扱いが実行時に散る。「JS の Unicode / NFC を正本に
-  しない」規律（qwen2）も実装側に散る。却下。
-- **既存 `unigram.ts` の拡張**（差分最小）: Unigram（Viterbi 格子）と BPE（merge rank）は別の
-  アルゴリズムで、同じファイルに置く理由が無い。却下。
-- **汎用テンプレートレンダラ（Jinja 風）**: 「ランタイム依存は Web 標準のみ」（CLAUDE.md 横断
-  不変条件）と「投機的な一般化をしない」の両方に反する。却下（採るなら再裁定要）。
-- **chat を完全に呼び手任せにする**（消費者が `<|turn>` を手書き）: 綴りが Gemma 3 系と違う
-  （Context 3）ことを消費者が踏み抜く形で、EOS 集合との同期も呼び手に漏れる。却下。
+- **The runtime parses `tokenizer.json`** (no compile script): ships and parses **32.2 MB** of JSON
+  and scatters the handling of unknown configurations and the "JS Unicode / NFC is not the source of
+  truth" discipline over run time. Rejected.
+- **Extend `unigram.ts`** (smallest diff): Unigram (Viterbi lattice) and BPE (merge rank) are
+  different algorithms. Rejected.
+- **A generic (Jinja-like) template renderer:** contradicts "runtime dependencies are Web standard
+  APIs only" (`CLAUDE.md`) and "no speculative generalisation". Rejected (needs a new ruling).
+- **Leave chat to the caller** (hand-written `<|turn>`): consumers trip over the non-Gemma-3
+  spelling (Context 3), and syncing with the EOS set leaks to them. Rejected.
 
 ## Consequences
 
-- 段 1a は **GPU 不要で単体テストに閉じる**ので、段 1b（実 GPU）と**並行レーン**で走らせられる
-  （backlog now の実行計画）。ADR 0083 のイベント形が確定していること（段 0）だけが前提で、
-  段 3 の実装完了は前提にならない。
-- `packages/models/src/gemma/` が新しいファミリディレクトリとして立つ（tokenizer と chat が先・
-  pipeline は段 4）。
-- EG 資産の compile が同乗するぶん段 1a は重くなるが、受理 schema をファミリ側へ置いた分割の
-  実証（1 実装 2 資産）になる。
-- compiled tokenizer と chat format version は配布 digest set の一員になる（決定 5）— dist /
-  モデルカードへの反映は段 5。
-- レンズ見積りの訂正 2 点が本 ADR に織り込まれている: encode 側の実装コストは焼き表が要らない
-  ぶん**小さい**が、BPE の探索構造は**最初から merge queue が要る**（決定 3）。
+- Stage 1a needed no GPU and ran in parallel with stage 1b; `packages/models/src/gemma/` became a
+  family directory (tokenizer and chat first, the pipeline in stage 4).
+- The compiled tokenizer and chat format version are members of the digest set (decision 5).
+- The review's estimate was corrected twice: the encode side is **cheaper** (no baked tables), but BPE
+  **needs a merge queue from the start** (decision 3).
 
-## 追記
+## Addendum (2026-08-31) — public-surface review
 
-- 2026-08-31（公開面レビューの消化 — 裁定の原文 = `.claude/reviews/2026-08-31_182ced7/`）:
-  - **`gemma4ChatTurn(tokenizer, message)` を足した**（決定 5 の chat 関数 1 本に対する **差分
-    描画**の対）。`gemma4ChatPrompt` は毎ターン会話全体を描くので `GenerationSequence` で多ターンを
-    回すと O(n²) の prefill になり、実走した消費者は「全体を描いて先頭の `<bos>` を剥がす」当て
-    推量を書いていた（温度 0 で `chat()` と逐語一致したが**無保証**）。turn-local 契約を関数と
-    doc で正本化する。MUST: **前 turn を閉じる `<turn|>` は含めない** — その綴りは生成が出して
-    sequence が未 commit の frontier（`pendingToken`）として持ち、次の `generate` が prompt の
-    先頭へ自動連結する（ADR 0083 決定 4）。二重に描くと turn の区切りが 2 つになり、例外は
-    1 つも出ない。成立する等式 `gemma4ChatPrompt(全会話) = gemma4ChatPrompt(先頭 turn まで) ⧺
-    生成本文 ⧺ [<turn|>] ⧺ gemma4ChatTurn(次の発話) ⧺ …` を任意の分割で見る門を置く。
-    MUST: `assistant` は**拒否**する（model turn は生成が埋める席で、上流 template も連続
-    assistant を 1 つの turn へ畳む — 差し込むなら `gemma4ChatPrompt` で全体を描き直す）。
-    使えるのは生成が `<turn|>` で閉じた直後だけで、max-tokens / `break` で打ち切ったターンの
-    続きは増分ではなく続きの生成（`prompt: []`）が正である。
-  - **`parseGemma4PipelineConfig` を公開した**（決定 5 の「同一 digest set」を消費者側でも保つ）。
-    `fromPretrained` は内部で通すので呼ぶ必要は無く、要るのは `karume.json` を自分で読んで
-    `fromAssets` へ渡す側である — 手元にあるのは hub の `ModelEntry.pipelineConfig`
-    （`Record<string, unknown>`）なので、この口が無いと `as` で被せるか 3 つの数を配布形と自分の
-    コードに二重持ちするしかない（どちらも配布形が動いたときに黙って食い違う）。あわせて
-    `fromAssets` も `fromPretrained` と**同じ門**（未知キー・値域・`chunkLength ≤ capacity ≤
-    maxPosition`）をバイト列を開く前に通す。
-  - **`Gemma4Pipeline.sampler` → `defaultSampler` へ改名**し、`Gemma4PipelineConfig.sampler` の型を
-    `SamplerSpec` から `Gemma4DefaultSampler`（`temperature` / `topK` / `topP` の **3 欄必須**）へ
-    縮小した（ADR 0083 決定 7 の「既定値は配布形が宣言する」の綴り直し）。旧名は「今この生成が
-    使っている sampler」と読めるが、実際には要求が省略したときだけ使われる**既定**である。
-    型を `SamplerSpec` のままにすると受理集合より広い型になり（`logitBias` /
-    `seed` / `repetitionPenalty` は配布者が推奨する性質の値ではない）、「型は通るのに
-    パーサが未知キーで落とす」欄が公開面に生える。部分宣言を許さないのは「温度だけ推奨・top-k は
-    低層の既定」という**上流のどこにも無い**組み合わせを作らないため。
-  - **破壊的変更（未リリース面）**: 上の改名・`config.sampler` の型縮小・`fromAssets` が不正宣言を
-    ロード前に拒否するようになったこと。GPU golden は全て不変。
+Ruling records: `.claude/reviews/2026-08-31_182ced7/` (local, untracked).
 
-## トークン通知とデモ計測（2026-09-12）
+- **`gemma4ChatTurn(tokenizer, message)` was added**, the incremental counterpart of decision 5's
+  chat function. `gemma4ChatPrompt` renders the whole conversation each turn (O(n²) prefill over
+  `GenerationSequence`), and a real consumer had guessed "render everything, strip the leading
+  `<bos>`", which matched `chat()` at temperature 0 **without any guarantee**. The turn-local contract
+  is canonical in the function and its doc. MUST: **the `<turn|>` that closes the previous turn is
+  not included** — generation emits it, the sequence holds it as the uncommitted frontier
+  (`pendingToken`) and the next `generate` prepends it (ADR 0083 decision 4); rendering it twice
+  makes two separators without any error. A check covers `gemma4ChatPrompt(whole) =
+  gemma4ChatPrompt(up to the first turn) ⧺ generated text ⧺ [<turn|>] ⧺ gemma4ChatTurn(next) ⧺ …` for
+  arbitrary splits. MUST: **`assistant` is rejected** (generation fills model turns, and upstream
+  folds consecutive assistant messages into one turn — re-render with `gemma4ChatPrompt` to insert
+  one). It is valid only right after a turn closed with `<turn|>`; a turn cut by max-tokens or
+  `break` continues by generation (`prompt: []`).
+- **`parseGemma4PipelineConfig` was made public**, keeping decision 5's digest set on the consumer
+  side. Callers who read `karume.json` themselves for `fromAssets` hold hub's
+  `ModelEntry.pipelineConfig` (`Record<string, unknown>`) and would otherwise cast with `as` or
+  duplicate three numbers (both diverge silently when the distribution changes). `fromAssets` now
+  runs **the same checks** as `fromPretrained` (unknown keys, value ranges,
+  `chunkLength ≤ capacity ≤ maxPosition`) before opening any bytes.
+- **`Gemma4Pipeline.sampler` became `defaultSampler`**, and `Gemma4PipelineConfig.sampler` narrowed
+  from `SamplerSpec` to `Gemma4DefaultSampler` (`temperature`, `topK`, `topP`, **all required**) —
+  ADR 0083 decision 7 respelt. The old name read as "the sampler in use", but it is the **default**
+  for requests that omit one. `SamplerSpec` would be wider than the accepted set (`logitBias`,
+  `seed`, `repetitionPenalty` are not recommendations), exposing fields that type-check but fail
+  parsing. Partial declarations are refused so that a combination found **nowhere upstream**
+  ("recommended temperature, low-level default top-k") cannot arise.
+- **Breaking changes (unreleased surface):** the rename, the narrowed type, and `fromAssets`
+  rejecting invalid declarations before loading. All GPU goldens unchanged.
 
-利用者の速度比較依頼により、Gemma4ChatOptions / Gemma4ChatTurnOptions に省略可能な
-`onToken(id)` を追加する。復号前の生成イベントで同期通知し、停止 token は既存イベントと同じく
-含めない。特殊 token と停止文字列に隠れる token は含む。関数は要求発行時に保持し、例外は
-onPrefill と同じく生成の失敗として伝播させる。既存の戻り値・生成列・停止勘定は変更しない。
+## Addendum (2026-09-12) — token notification and demo measurement
 
-デモはモデル読込後に独立した生成状態で主要な prefill / decode を暖機し、解放後に会話を開始する。
-既定は暖機ありへ変更し、`--no-warmup` で従来の開始条件を選べる。全形のコンパイルや driver cache
-の消去は保証しない。Gemma は全 chunk 長の prefill と短い decode を別 sequence で通す。
-抽選設定は本番と同じだが、履歴・KV・乱数状態・投機ゲートは会話と共有しない。
+At the maintainer's request for speed comparisons, `Gemma4ChatOptions` and `Gemma4ChatTurnOptions`
+gained an optional `onToken(id)`, called synchronously on the generation event before decoding. Stop
+tokens are excluded as in the existing events; special tokens and tokens hidden by stop strings are
+included. The function is captured when the request is issued, and its exception propagates as a
+generation failure, as with `onPrefill`. Return values, the sequence and stop accounting are
+unchanged.
 
-Gemma通常/QAT・MiniCPM5・Qwen3のデモは、開始から最初の非停止 token までをTTFT、
-`(非停止token数 - 1) / (完了時刻 - 最初のtoken時刻)`をdecode速度とする。
-本文を再tokenizeせず、復号前の配送を数える。0 tokenのTTFT、0〜1 tokenまたは時間0の速度は未測定。
-従来のターン全体時間と停止込みtoken数は残す。JSON出力はelapsedMsを維持し、
-`generatedTokens`・`ttftMs`・`decodeTokensPerSecond`を追加する（未測定はnull）。
+The rules for the Deno CLI demos (warm-up by default, `--no-warmup`, the JSON fields `elapsedMs`,
+`generatedTokens`, `ttftMs`, `decodeTokensPerSecond`) are superseded by ADR 0127 decision 5 on
+2026-10-16: the demos were not ported and are to be rebuilt as browser applications. The rebuilt
+applications SHOULD keep the definitions: TTFT runs from the start to the first non-stop token;
+decode speed is `(non-stop tokens - 1) / (completion time - time of the first token)`; tokens are
+counted as delivered before decoding, without re-tokenizing; TTFT with zero tokens, and speed with
+zero or one token or zero elapsed time, are reported as not measured (re-graded 2026-10-18 to SHOULD:
+the CLI demos they governed no longer exist).
 
-## 追記（2026-10-10）— Qwen2 の BPE も同じ merge queue を使う
+## Addendum (2026-10-10) — Qwen2 BPE uses the same merge queue
 
-決定 3 の「Qwen2 は pre_tokenizer が細かく切るので O(n²) でも実害が出ない」は誤りだった。
-区切りの無い英字列と句読点の無い日本語は、Qwen2 の文字クラスでも 1 pre-token になる。
-byte-level では日本語 1 文字が 3 記号に膨らみ、512 token の切り詰めは pre-token 単位でしか効かない。
-（Codex 深掘りレビュー 2026-10-04 の R5-006。）
+Decision 3's "Qwen2's pre_tokenizer splits finely, so O(n²) does no harm" was wrong: letters without
+separators and Japanese without punctuation are one pre-token under Qwen2's classes too, one
+Japanese character is three byte-level symbols, and the 512-token truncation acts only per pre-token
+(item R5-006 of the external deep review of 2026-10-04).
 
-- 併合は `src/text/bpe.ts` の `mergeSymbols`（rank → 位置の優先度つきキュー・古い項目の無効化）を
-  Gemma と Qwen2 で共有する。byte-level の変換と綴りでの規則の引き方だけを Qwen2 側に残す。
-- Qwen2 は記号を pre-token の中だけの番号で持つ。語彙に要るのは最後に残った綴りだけで、受理集合は
-  従来の全隣接走査の形と同じ。
-- 実資産の語彙で、従来の形と id 列が一致することを確かめた（2,036 入力・不一致 0）。
+- Gemma and Qwen2 share `mergeSymbols` in `src/text/bpe.ts` (a priority queue by rank then position,
+  invalidating stale entries). Only the byte-level mapping and rule lookup by spelling stay in Qwen2.
+- Qwen2 numbers symbols locally within a pre-token; the vocab is needed only for the final
+  spellings, and the accepted set equals the former full adjacent scan's.
+- On the real vocab the id sequences matched the former implementation (2,036 inputs, 0 mismatches).

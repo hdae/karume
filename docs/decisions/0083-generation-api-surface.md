@@ -1,78 +1,82 @@
-# 0083: 生成 API 面 — `GenerationProgram` / `GenerationSequence`・token イベント・sampling ホスト
+# 0083: Generation API surface — `GenerationProgram` / `GenerationSequence`, token events, host-side sampling
 
-- Status: implemented（2026-08-31 accepted — 設計ドラフトの裁定 10 点をすべて★推奨案で確定〈ユーザー裁定〉。
-  実装は段 0〜3 で完了 — 段 3 = `6b536fe1`〈2026-09-25 時点の現況〉）
+- Status: implemented (accepted 2026-08-31 — the maintainer confirmed the recommended option on all
+  ten design points; implemented in stages 0 to 3, stage 3 = `6b536fe1`); partly superseded:
+  branching in decision 4 by `fork()` (2026-10-11 addendum), decision 10 revised for the high-level
+  surface (2026-09-02 addendum), and two Consequences items marked superseded on 2026-10-18 (distribution
+  scope by ADR 0097, host-generated RoPE by ADR 0091).
 - Date: 2026-08-31
-- 対象: `packages/models/src/generation/`（新規 `program.ts` / `sequence.ts` / `sampler.ts` +
-  `greedy.ts` の格下げ）と gemma4 の製品グラフ台本。IR 仕様・ランタイム・hub は無改変。
-- 関連: ADR [0066](0066-generation-context-state-slots.md)（GenerationContext の寿命・決定 6 の
-  二重簿記の禁止・決定 8 のスコープ外・追記 2 の `rewind` 拒否）/
-  [0068](0068-decode-exit-multi-output.md)（decode 出口 — 決定 4 が opt-in で残した全語彙 logits
-  の欄を本 ADR が製品既定へ引き上げる。0068 側は**追記 6** で受ける）/
-  [0067](0067-autoregressive-attention-vocabulary.md)（state 参照つき attention）/
-  [0008](0008-public-api.md)（薄い公開面）/ [0078](0078-anima-sampler-selection.md)（配布形が
-  既定を宣言しリクエスト席で上書きする前例）/ [0079](0079-sbv2-two-layer-input.md)（呼び手の
-  責務分割の前例）/ [0082](0082-linear-gemv-decode.md)（decode 壁 32.5ms/token の実測前提）/
-  本波の兄弟 = [0084](0084-gemma-tokenizer-chat.md)（tokenizer・chat）/
-  [0085](0085-ple-host-gather.md)（PLE 配布形）
-- 根拠:
-  [research/2026-08-31-generation-api-design-draft.md](../research/2026-08-31-generation-api-design-draft.md)
-  （以下「ドラフト §n」— 候補比較・棄却理由・実資産の実測はそちらが正本）
+- Scope: `packages/models/src/generation/` (`program.ts` / `sequence.ts` / `sampler.ts`, and
+  `greedy.ts` demoted) and the gemma4 product graph script. IR, runtime and hub unchanged.
+- Related: ADR [0066](0066-generation-context-state-slots.md) (`GenerationContext`: decision 6 no
+  double bookkeeping, decision 8 scope, addendum 2 `rewind` rejection) /
+  [0068](0068-decode-exit-multi-output.md) (decode exit — the opt-in all-vocabulary logits of its
+  decision 4 become the product default, recorded in its addendum 6) /
+  [0067](0067-autoregressive-attention-vocabulary.md) / [0008](0008-public-api.md) /
+  [0078](0078-anima-sampler-selection.md) (distribution default, request override) /
+  [0079](0079-sbv2-two-layer-input.md) / [0082](0082-linear-gemv-decode.md) (decode 32.5 ms/token) /
+  siblings [0084](0084-gemma-tokenizer-chat.md) (tokenizer, chat), [0085](0085-ple-host-gather.md) (PLE).
+- Basis: [research/2026-08-31-generation-api-design-draft.md](../research/2026-08-31-generation-api-design-draft.md)
+  ("draft §n" below — candidate comparison, rejection reasons and asset measurements live there).
 
 ## Context
 
-消費者が触れる生成面は `generateGreedy` 1 本（`packages/models/src/generation/greedy.ts`）で、
-LLM 実需（streaming チャット）に要る面が構造的に欠けている:
+The only generation surface for consumers was `generateGreedy`
+(`packages/models/src/generation/greedy.ts`), which lacks what LLM use (streaming chat) needs:
 
-- **静的配線とリクエストが 1 つの型に同居する**（`GreedySpec` — `session` / `inputIds` /
-  `positionIds` / `token` / `lastRow` / `chunkLength` / `maxPosition` / `bindings` が静的側、
-  `prompt` / `maxNewTokens` がリクエスト側）。
-- **停止条件が無い**（「EOS 停止は載せない」と本文が書いている）。**sampling はホストにも無い**
-  （「温度も top-k も RNG も置かない」MUST — 固定 token id 列での検収が目的の関数だから）。
-- **多ターンの面が無い**（毎回 context を作り `finally` で dispose する）。
+- **Static wiring and the request share one type** (`GreedySpec`: `session`, `inputIds`,
+  `positionIds`, `token`, `lastRow`, `chunkLength`, `maxPosition`, `bindings` are static; `prompt`,
+  `maxNewTokens` are the request).
+- **No stop condition** ("no EOS stop") and **no sampling on the host either** ("no temperature, top-k
+  or RNG" MUST — the function exists for acceptance with fixed token-id sequences).
+- **No multi-turn surface** (a context is created every time and disposed in `finally`).
 
-一方で足場は揃った: 同一 context への並行 run は既にランタイムが `ExecutionError` で拒否し
-（レビュー修正波 CG5-2）、`last_row` 添字による最終行選択の配線は実装済みで（ADR 0068 追記 4）、
-decode の壁は 32.5ms/token（ADR 0082）まで下がっている。
+The groundwork was in place: the runtime already rejects concurrent runs on one context with
+`ExecutionError`, the wiring that selects the last row through the `last_row` index exists (ADR 0068
+addendum 4), and decode is down to 32.5 ms/token (ADR 0082).
 
-本 ADR は「文字列 in → 文字列 out」を消費者へ渡すための **API 面と契約**を固定する。tokenizer /
-detokenizer / chat は ADR 0084、PLE の配布形は ADR 0085 が持つ。
+This ADR fixes the **API surface and contracts** that hand "string in → string out" to consumers.
+Tokenizer, detokenizer and chat belong to ADR 0084; the PLE distribution to ADR 0085.
 
 ## Decision
 
-### 1. 面は 2 層 — `GenerationProgram`（静的配線）と `GenerationSequence`（1 会話の寿命）
+### 1. Two layers — `GenerationProgram` (static wiring) and `GenerationSequence` (one conversation)
 
-`GenerationProgram` は **setup 時に全結線を検証する不変オブジェクト**、`GenerationSequence` は
-1 会話ぶんの寿命を持つ実体。型は仮（実装波で確定）だが契約は次の形:
+`GenerationProgram` is an **immutable object whose wiring is fully checked at setup**;
+`GenerationSequence` owns the lifetime of one conversation. Types were provisional (fixed during
+implementation); the contract has this shape:
 
 ```ts
 type GenerationProgram = {
   readonly inputIds: string;
   readonly positionIds: string;
   readonly lastRow: string;
-  readonly logits: string; // ← 最終行 logits 出口（決定 6）
+  readonly logits: string; // last-row logits exit (decision 6)
   readonly chunkLength: number;
   readonly maxPosition: number;
   readonly vocabSize: number;
-  readonly stopTokens: readonly number[]; // EOS 集合（決定 8）
+  readonly stopTokens: readonly number[]; // EOS set (decision 8)
   readonly bindings?: SymbolBindings;
 };
 
 type GenerationRequest = {
-  readonly prompt: readonly number[]; // 多ターンでは「今ターンぶん」だけ
+  readonly prompt: readonly number[]; // in multi-turn use, only this turn's tokens
   readonly maxNewTokens: number;
-  readonly sampler?: SamplerSpec; // 省略時は配布形の宣言（決定 7）
+  readonly sampler?: SamplerSpec; // defaults to the distribution's declaration (decision 7)
   readonly signal?: AbortSignal;
 };
 ```
 
-MUST: **program は可変状態を持たない**。そして **sequence の可変状態は `context` と
-`pendingToken` の 2 つだけ**である。position / totalLength といった counter を sequence に
-持たせず、run を組む直前に `context.pastLength` を読んで `position_ids` を作る（ADR 0066
-決定 6 = **二重簿記の禁止**。論理長の進行は run の成功で context が進める）。`totalLength` が
-要るなら `context.pastLength + (pendingToken ? 1 : 0)` をその場で導出して**保存しない**。
+MUST: **the program holds no mutable state**, and **the sequence's mutable state is only `context`
+and `pendingToken`**. The sequence keeps no position or totalLength counter: it reads
+`context.pastLength` right before building a run to make `position_ids` (ADR 0066 decision 6, **no
+double bookkeeping**; the logical length advances when a run succeeds). If `totalLength` is needed it
+is derived as `context.pastLength + (pendingToken ? 1 : 0)` and **not stored**.
+NOTE: speculative decoding added a copy of the drafter's input hidden state (one row, 2026-09-08) and
+`fork()` copies the speculation gate's observed state (2026-10-11); neither records progress, so the
+no-double-bookkeeping rule still holds, but "only two" no longer lists every field.
 
-### 2. token 列は `AsyncIterable<GenerationEvent>` で出す（裁定 1）
+### 2. Tokens are emitted as `AsyncIterable<GenerationEvent>`
 
 ```ts
 type GenerationEvent =
@@ -81,409 +85,401 @@ type GenerationEvent =
 
 interface GenerationSequence {
   generate(request: GenerationRequest): AsyncIterable<GenerationEvent> & {
-    /** 停止理由（`eos` / `max-tokens` / `aborted`）— iterable を汲み切った後に読む。 */
+    /** Stop reason (`eos` / `max-tokens` / `aborted`) — read after draining the iterable. */
     readonly done: Promise<GenerationStop>;
   };
   dispose(): Promise<void>;
 }
 ```
 
-家風は anima 流の `onEvent` コールバック（`packages/models/src/anima/pipeline.ts`）だが、その
-成立理由がここでは反転する: anima は「**返り値が画像 1 枚で、途中経過が副次**」（event union は
-`stage` / `denoise-step` / `vae-tile` = 全部進捗）なのに対し、LLM は**列そのものが返り値**である。
-`for await` にすると detokenizer の部分 UTF-8 持ち越し（ADR 0084 決定 4）が「push すると確定した
-文字列だけ出る」形と直結し、`break` / `return()` で自然に閉じる。
+The house style is anima's `onEvent` callback (`packages/models/src/anima/pipeline.ts`), but its
+reason reverses here: anima returns one image and the events are side progress, while for an LLM
+**the sequence is the return value**. With `for await`, the detokenizer's carry-over of partial UTF-8
+(ADR 0084 decision 4) maps directly onto "push and only finished text comes out", and `break` /
+`return()` closes naturally.
 
-MUST（`break` の穴）: 中断された iterable は `return()` 経由で `finally` に入るが、そこで
-**論理長は成功した run のぶんだけ既に進んでいる**。`pendingToken` を正しく残さないと次ターンで
-1 token 落ちる。`for await` を採る以上、この経路の門は必須（段 3 の合格線）。
+MUST (the `break` hole): an interrupted iterable enters `finally` through `return()`, and by then **the
+logical length has already advanced by the successful runs**. If `pendingToken` is not kept
+correctly, the next turn loses one token. Having chosen `for await`, a check on this path is
+mandatory (the pass line of stage 3).
 
-MUST: sequence は「generate 1 回ぶん」を `createOperationChain`
-（`packages/models/src/concurrency/serial.ts`）で直列化する — 他 3 家族と同型。**自前ロックは
-作らない**（ランタイム側の single-flight が既に 2 本目の発行を拒否する）。
+MUST: the sequence serializes each `generate` with `createOperationChain`
+(`packages/models/src/concurrency/serial.ts`), as the other families do. **No home-made lock** (the
+runtime's single-flight already rejects a second issue).
 
-### 3. `GenerationContext` は sequence の内側に隠す（裁定 2）
+### 3. `GenerationContext` stays inside the sequence
 
-製品面に素の `GenerationContext` を出さない。「最大 1 token の未 commit frontier」（決定 4）は
-消費者から見えなくなる。検収経路（`generateGreedy` / e2e）は内部ヘルパとして context を直接
-使い続けるので、**公開面が二重にならない**。
+The product surface does not expose a raw `GenerationContext`; the uncommitted frontier of at most one
+token (decision 4) becomes invisible to consumers. The acceptance paths (`generateGreedy`, e2e) keep
+using the context directly as internal helpers, so **the public surface is not duplicated**.
 
-### 4. 多ターンは `pendingToken` を連結した prefill
+### 4. Multi-turn prefill prepends `pendingToken`
 
-`GenerationContext` は常に**最大 1 token の未 commit frontier**を持つ（K token 生成後の
-`pastLength = T + K − 1` — `generateGreedy` が `maxNewTokens - 1` 回しか decode しないため。
-レビュー CG5-1 で追認）。したがって次ターンは、**`pendingToken` を新しい user turn の token 列の
-先頭に連結して prefill する**。余分な「commit だけの run」を増やさずに frontier を KV へ収める形で、
-これが決定 3（context を隠す）を成立させる要でもある。
+A `GenerationContext` always holds **an uncommitted frontier of at most one token** (after K generated
+tokens `pastLength = T + K − 1`, because `generateGreedy` decodes only `maxNewTokens - 1` times;
+confirmed by review CG5-1). The next turn therefore **prefills with `pendingToken` prepended to the
+new user turn's tokens**. The frontier enters the KV without an extra commit-only run; this is also
+what makes decision 3 possible.
 
-MUST: `rewind` は使わない — sliding スロットを含む context は**全拒否**（ADR 0066 追記 2）。
-編集・分岐は「新しい context + token transcript の replay」が正。\
-**追記 2026-10-11（裁定 8）: 分岐は `GenerationSequence.fork()` / `Gemma4ChatSession.fork()` に
-なった**（末尾の「追記（2026-10-11）— 会話の分岐（fork・裁定 8）」と ADR
-[0066](0066-generation-context-state-slots.md) の同日の追記）。編集（途中の発話の書き換え）と
-容量の変更は従来どおり新しい context への replay。
+MUST: `rewind` is not used — contexts with sliding slots are **always rejected** (ADR 0066 addendum
+2). Editing and branching were "a new context + token transcript replay".
+(Superseded for branching on 2026-10-11: `GenerationSequence.fork()` / `Gemma4ChatSession.fork()`,
+see the addendum of that date and ADR 0066's addendum of the same day. Editing an earlier utterance
+and changing the capacity still replay into a new context.)
 
-### 5. cancel は `AbortSignal` が正（`onEvent` の throw を中断手段にしない）
+### 5. Cancellation uses `AbortSignal` (a throw from `onEvent` is not a cancel mechanism)
 
-`GenerationRequest.signal` を受け、段の境目で検査して `signal.reason` を**包まずそのまま
-throw** する。流儀の前例は構築経路の `AnimaPipelineOptions.signal`。backlog later の「生成ループの
-AbortSignal 中断席（需要待ち）」は **LLM がその需要**なので、本 ADR で席を開ける。
+`GenerationRequest.signal` is checked at stage boundaries, and `signal.reason` is **thrown as is,
+unwrapped**. The precedent is `AnimaPipelineOptions.signal` on the build path. The deferred backlog
+item "AbortSignal for the generation loop (waiting for demand)" had its demand in LLMs, so this ADR
+opens it.
 
-### 6. 出口は最終行 logits・sampling はホスト維持（裁定 4 — topk 製品グラフは棄却）
+### 6. The exit is the last-row logits; sampling stays on the host (a topk product graph is rejected)
 
-製品グラフの出口を `logits[1,1,V]`（**最終行のみ**）にする。`last_row` 行選択 → 1 行 lm_head の
-配線は `tools/export-recipes/gemma4/export_token.py` の `TokenOnlyChunkWrapper` に既にあり、
-**argmax を外すだけ**で届く。ADR 0068 決定 4 は全語彙 logits の readback を「グラフ出力に logits
-を宣言した場合の opt-in として残す（欄を消さない）」と書いており、却下したのは **GPU 側 full
-sampling** の方である。よって本決定は**再裁定を要さず**、ADR 0068 には追記 6 を置く。
+The product graph's exit is `logits[1,1,V]` (**last row only**). The wiring "select `last_row` → one-row
+lm_head" already exists in `TokenOnlyChunkWrapper` (`tools/export-recipes/gemma4/export_token.py`);
+**only the argmax is removed**. ADR 0068 decision 4 keeps the all-vocabulary logits readback "as an
+opt-in when the graph declares logits as an output (the field is not removed)", and what it rejected
+was **GPU-side full sampling**. So this decision **needs no new ruling**, and ADR 0068 records it in
+addendum 6.
 
-**topk 製品グラフを採らない根拠**（棄却理由の記録）:
+**Why a topk product graph is not adopted** (record of rejection):
 
-1. **`k ≤ 63` がモデル自身の推奨既定に 1 だけ足りない**。実装上限は ADR 0068 追記 2 の
-   `8·W·(k+1) ≤ maxComputeWorkgroupStorageSize`（W=32・WebGPU 既定 16384B）で **k ≤ 63**、
-   一方 gemma-4-E2B-it の `generation_config.json` の推奨既定は **`top_k: 64`**（実資産の実測 —
-   ドラフト §0.2-8）。ADR 0068 自身の却下文が「topk k 本の readback（k ≤ 64）」を前提にしていた
-   のに実装が 63 に着地したので、この 1 の差がそのままモデル既定と噛み合わない。
-   「実用上 63 で十分」と言い張れる形ではない。
-2. **exporter の停止点は handler ではなく `operator.getitem`**（ADR 0068 追記 3 の実測）—
-   aten handler を足しただけでは道が開かない。
-3. **repetition penalty / logit bias / full-vocab nucleus は全語彙が要る**（top-63 の外の softmax
-   質量をホストが知らない）。chat 用途でこれらを持たない選択は現実的でない。
-4. **コストが壁に対して無視できる**。1 MiB の readback は同じ submit に相乗りするのでフェンスは
-   増えず、262,144 要素の JS 走査込みで **0.3〜0.6ms 級の見積り**。decode 32.5ms/token
-   （ADR 0082）に対して数%で、フェンス床 ≈11ms が支配へ戻った現在でも桁は変わらない。
-   **prefill の読み戻しはむしろ減る**: 現行の logits opt-in 系列は `[1,M,V]` を返すので chunk 32 で
-   32 MiB、最終行だけなら **1 MiB**。
+1. **`k ≤ 63` is one short of the model's recommended default.** The limit `8·W·(k+1) ≤
+   maxComputeWorkgroupStorageSize` (ADR 0068 addendum 2; W=32, WebGPU default 16384 B) gives **k ≤ 63**
+   (`TOPK_CORE_LIMIT_MAX_K`, `packages/runtime/src/kernels/topk.ts`); gemma-4-E2B-it recommends
+   **`top_k: 64`** (draft §0.2-8).
+2. **The exporter stops at `operator.getitem`, not at a handler** (ADR 0068 addendum 3): adding an
+   aten handler does not open the path.
+3. **Repetition penalty, logit bias and full-vocabulary nucleus need the whole vocabulary** (the host
+   does not know the softmax mass outside the top 63). Chat cannot reasonably go without them.
+4. **The cost is negligible.** The 1 MiB readback rides the same submit (no extra fence); with the JS
+   scan over 262,144 elements it is **estimated at 0.3–0.6 ms**, a few percent of 32.5 ms/token (ADR
+   0082). **Prefill readback shrinks**: `[1,M,V]` is 32 MiB at chunk 32; the last row is **1 MiB**.
 
-MUST: **sampling / RNG はホスト維持**（ADR 0068 決定 4 の再確認 — GPU 側は argmax / topk のみ）。
+MUST: **sampling and RNG stay on the host** (ADR 0068 decision 4 reconfirmed — the GPU side does only
+argmax / topk).
 
-### 7. sampler — 置き場・RNG 契約・既定値の所有者（裁定 7）
+### 7. Sampler — location, RNG contract, owner of the defaults
 
-- **置き場** = `packages/models/src/generation/sampler.ts`（`greedy.ts` と同じ「パイプライン
-  非依存の共通処理」の位置づけ）。初版の射程 = 温度 / top-k（**上限なし** — 決定 6 の出口だから）/
-  top-p / repetition penalty / logit bias / seed。
-- **RNG** = `packages/models/src/anima/random.ts` の splitmix64 の流儀を再利用する。
-  MUST（前例そのまま）: その doc が「torch の `randn` とは別物・同じ seed でも同じ列にならない」と
-  書いているのと同じ理由で、**HF の sampling 出力との token 列 parity は取れない**。parity 門は
-  温度 0（= greedy）で採り、sampler 自体は自前 fixture + 分布門で縛る。
-- **既定値は配布形が宣言する**: `generation_config.json` の推奨（gemma-4-E2B-it =
-  temperature 1.0 / top_k 64 / top_p 0.95）を dist が `pipelineConfig` へ焼き、リクエストが
-  `sampler` を省略したときの既定にする。前例は anima の `scheduler.type`（ADR 0078 — 配布形が
-  既定を宣言し `AnimaGenerateRequest.sampler` で上書きする形）。**最終行 logits 出口だからこそ
-  `top_k: 64` がそのまま表現できる**（決定 6 の裏返し）。
-  NOTE: 低層（`sampler.ts` 単体・`generateGreedy`）の既定は greedy のままで、これは
-  「sampler 未宣言 = 温度 0 の縮退形」という位置づけである。parity 門はこの経路で生き続ける。
+- **Location**: `packages/models/src/generation/sampler.ts` (pipeline-independent shared code, like
+  `greedy.ts`). First scope: temperature, top-k (**no upper limit** — decision 6's exit), top-p,
+  repetition penalty, logit bias, seed.
+- **RNG**: reuses the splitmix64 approach of `packages/models/src/anima/random.ts` (now
+  `packages/models/src/generation/random.ts`). MUST (as in that precedent, whose doc says "not
+  torch's `randn`; the same seed gives a different sequence"): **token-sequence parity with HF's
+  sampling output is not attainable**. Parity checks run at temperature 0 (= greedy); the sampler is
+  bound by its own fixtures and distribution checks.
+- **Defaults are declared by the distribution**: the recommendation of `generation_config.json`
+  (gemma-4-E2B-it: temperature 1.0 / top_k 64 / top_p 0.95) is written by dist into `pipelineConfig`
+  and used when the request omits `sampler`. The precedent is anima's `scheduler.type` (ADR 0078 —
+  the distribution declares the default, `AnimaGenerateRequest.sampler` overrides it). **Because the
+  exit is the last-row logits, `top_k: 64` can be expressed as is** (the flip side of decision 6).
+  NOTE: the lower layer (`sampler.ts` alone, `generateGreedy`) defaults to greedy — "no sampler
+  declared = the temperature-0 degenerate form". The parity checks live on through that path.
 
-### 8. 停止 token は集合（モデル宣言由来）
+### 8. Stop tokens are a set (declared by the model)
 
-停止条件は単数の EOS ではなく**集合**である: gemma-4-E2B-it の `generation_config.json` は
-`eos_token_id = [1, 106, 50]`（`<eos>` / `<turn|>` / `<|tool_response>` — 実資産の実測）。
-`GenerationProgram.stopTokens` で受け、**sampling の結果に対して**判定する（sampler と同じ段）。
+The stop condition is a **set**, not a single EOS: gemma-4-E2B-it's `generation_config.json` has
+`eos_token_id = [1, 106, 50]` (`<eos>` / `<turn|>` / `<|tool_response>`). It is received as
+`GenerationProgram.stopTokens` and checked **against the sampling result** (the same stage as the
+sampler).
 
-MUST: EOS 集合と chat 形式は**同じ配布 digest set から来る**（ADR 0084 決定 5）— 別々の場所から
-拾うと片方だけ古くなる。
+MUST: the EOS set and the chat format **come from the same distribution digest set** (ADR 0084
+decision 5) — taken from different places, one of them goes stale.
 
-### 9. `generateGreedy` は内部ヘルパへ格下げする（裁定 8 — breaking・今波）
+### 9. `generateGreedy` is demoted to an internal helper (breaking)
 
-barrel（`packages/models/mod.ts`）から export を外し、parity 検収用の内部ヘルパにする。
-「当面は公開のまま残して次の breaking 波で外す」は採らない。既に公開済みの面なので**破壊的変更**
-として limitations とリリースノートに載せる。**消えるのは公開 export だけ**で、既存 golden の
-token 列を突き合わせる parity 門は経路として残る。
+Its export leaves the barrel (`packages/models/mod.ts`); it becomes an internal helper for parity
+acceptance. "Keep it public for now and remove it in the next breaking release" is not adopted. The
+surface was already published, so this is a **breaking change** recorded in `docs/limitations.md` and
+the release notes. **Only the public export disappears**; the parity checks against existing golden
+token sequences remain.
 
-### 10. 容量超過は専用の型で落とす
+### 10. Capacity overflow fails with a dedicated type
 
-full スロットの `P + Q ≤ C` 超過は今日「汎用メッセージで fail loudly」。sequence は専用の型
-（`GenerationCapacityError` 相当）で落とし、**「会話の切り詰めはホストの責務」**を limitations に
-明文化する（lens-llm L-9 b の消化）。
+(Revised on 2026-09-02 for the high-level surface: `Gemma4ChatSession` has an overflow policy, see
+that addendum.)
 
-## 検討した代替案
+Exceeding `P + Q ≤ C` on a full slot "failed loudly with a generic message". The sequence fails with a
+dedicated type (`GenerationCapacityError`), and **"truncating the conversation is the host's job"**
+is stated in `docs/limitations.md` (LLM lens L-9 b).
 
-- **anima 流 `onEvent` コールバック**（家風に完全一致 — await する / 例外を握らない / throw が
-  step 粒度の中断手段）: 放置された async generator が直列化鎖の席を握る危険が無いのが利点で、
-  リポ初の公開 async generator を作らずに済む。却下の理由は決定 2 のとおり「token 列は進捗では
-  なく値」— streaming 消費者に自前キューを組ませる形になる。AbortSignal を cancel の正に据えた
-  （決定 5）ので、throw を中断手段にする必要も同時に消えた。
-- **関数 1 本の拡張（`generateStream(spec)`・sequence 型を作らない）**: 追加型ゼロで最小だが、
-  `GenerationContext` を製品面に露出する形になり、`pendingToken` の管理が呼び手へ漏れる。
-  「直前 assistant の最後の token が履歴から 1 個落ちる」事故を消費者側で再生産するので却下。
-- **topk 製品グラフ（argmax → topk・k 固定）**: readback は 512B 級で済むが、決定 6 の 1〜3 の
-  とおり。**GPU 側 full sampling / nucleus** は ADR 0068 が正面から却下済み（採るなら再裁定要）。
+## Alternatives considered
+
+- **anima-style `onEvent` callback** (house style; no abandoned async generator can hold the
+  serialization chain): rejected per decision 2 — tokens are the value, and streaming consumers would
+  build their own queues. With `AbortSignal` (decision 5), throwing to interrupt is not needed.
+- **Extending one function (`generateStream(spec)`, no sequence type)**: no new types, but the
+  `GenerationContext` is exposed and `pendingToken` handling leaks to callers, who would reproduce the
+  "last token of the previous assistant turn drops from history" accident. Rejected.
+- **topk product graph (argmax → topk, fixed k)**: a 512-byte readback, but see decision 6 points 1
+  to 3. **GPU-side full sampling / nucleus** was rejected outright by ADR 0068 (adopting it would need
+  a new ruling).
 
 ## Consequences
 
-- 実装は backlog now の実行計画（6 段）。**段 0（契約固め）は本 ADR + ADR 0084 / 0085 +
-  ADR 0068 追記 6 で完了**（コード 0 行 — ADR がイベント契約そのもの）。
-- **破壊的変更 1 件**: `generateGreedy` の公開 export 削除（決定 9）。limitations が消費側の doc。
-- **段 1b の再 export は案 α**（裁定 5）: PLE 外出し（ADR 0085）と最終行 logits 出口を**同じ
-  再 export に載せ、製品グラフを 1 系列にする**。3.7GiB 系列の再 export が 1 回で済む代わりに、
-  ホスト PLE loader が e2e の前提になる。既存 2 系列（logits opt-in / token-only）は検収 fixture
-  として残す。案 β（logits 出口だけ先行・PLE は後）は再 export 2 回 + 段 2〜4 の fixture 採り直しに
-  なるので採らない。
-- **配布対象は gemma4 E2B のみ**（裁定 10）— ライセンス門を待つ間に minicpm5 で配布経路だけ先行
-  させる案は採らない。公開は ADR [0065](0065-exporter-core-recipe-split.md) 決定 7（stage 6 =
-  upstream revision 単位のライセンス interview）後で、技術側の完成と独立に止まりうる。
-- **本波では採らないので現時点の再裁定を要さない 4 件**（採るときは各々再裁定が要る — ドラフト §9）:
-  1. `rewind` の利用 — sliding を含む context は全拒否（ADR 0066 追記 2）。緩和は compaction
-     実装と対で裁定する。
-  2. continuous batching / batch > 1 / 複数シーケンス — ADR 0066 決定 8 のスコープ外のまま。
-  3. GPU 側 full sampling / nucleus — ADR 0068 が却下済み（決定 6 の MUST がこれを維持する）。
-  4. RoPE 表のホスト生成（lens-llm L-9 c）— ADR 0067 決定 4「RoPE は attention op の外・
-     エクスポータがグラフに焼く」と衝突する。
-- 射程外（本波でやらない）: decode 性能そのもの（ADR 0082 で消化済み・以降はレンズ L-7 / L-12 の
-  再評価 = perf-ledger）/ KV の f16 席 / topk の exporter 配線（決定 6 を採る限り実需が立たない）。
+- Implementation ran as the six-stage plan in the backlog. Stage 0 (contracts) was this ADR + ADRs
+  0084 / 0085 + ADR 0068 addendum 6; stage 1b put the PLE split-out (ADR 0085) and the last-row logits
+  exit into one re-export, keeping the two older series (logits opt-in / token-only) as acceptance
+  fixtures (details: draft §9).
+- **One breaking change**: the public export of `generateGreedy` is removed (decision 9).
+- Distribution covered gemma4 E2B only; distributing through minicpm5 while the licence gate was
+  pending was not adopted, and publication waited for the licence review per upstream revision (ADR
+  [0065](0065-exporter-core-recipe-split.md) decision 7). (Superseded by ADR 0097 on 2026-09-11:
+  QAT E2B / E4B joined, and the gemma4 recipe ships `e4b` — `tools/export-recipes/gemma4/distribution.py`;
+  `hdae/karume-gemma4` is published.)
+- **Four items not adopted here, each needing a new ruling if adopted** (draft §9):
+  1. Using `rewind` — contexts with sliding slots are always rejected (ADR 0066 addendum 2); relaxing
+     it is ruled together with compaction.
+  2. Continuous batching / batch > 1 / multiple sequences — out of scope per ADR 0066 decision 8.
+  3. GPU-side full sampling / nucleus — rejected by ADR 0068 (decision 6's MUST keeps it so).
+  4. Host-generated RoPE tables (LLM lens L-9 c) — conflicted with ADR 0067 decision 4 ("RoPE is
+     outside the attention op; the exporter bakes it into the graph"). (Superseded by ADR
+     [0091](0091-gemma4-host-rope-variable-capacity.md) on 2026-09-03: the host supplies RoPE per
+     chunk; 0091 is the new ruling.)
+- Out of scope: decode performance itself (done in ADR 0082; lenses L-7 / L-12 in perf-ledger), an
+  f16 KV option, exporter wiring for topk (no demand while decision 6 holds).
 
-## 追記
+## Addendum (2026-08-31) — public-surface review: read-outs added, write paths closed
 
-- 2026-08-31（公開面レビューの消化 — 裁定の原文 = `.claude/reviews/2026-08-31_182ced7/`）:
-  実走した消費者が「面から読めない数」を推定で埋めていた 3 点と、公開面の書き換え口 1 点を閉じた。
-  いずれも決定 1〜10 の設計は不変で、**読み口を足すか、書ける口を塞ぐか**である。
-  - **`GenerationStop.tokens`**（決定 2 の停止イベント）: そのターンが生成した token 数。
-    MUST: `eos` の停止 token も 1 個として数える — 抽選 1 回 = run 1 回なので、この数がそのまま
-    生成に費やした run 数と一致し、`tok/s` を**再エンコード無し**で書ける（それがこの欄の目的）。
-    本文だけの数が要るなら `reason === "eos"` のとき 1 引く。従来は消費者が本文を再 encode して
-    token 数を推定していた（tokenizer の往復が恒真でない以上、推定は原理的に外れうる）。
-  - **`GenerationSequence.used`**（決定 1 の「可変な寿命」の読み口）: この会話が既に占めている
-    論理位置の数。MUST: **導出値**（`context.pastLength` + 未 commit frontier — ADR 0066 決定 6 の
-    二重簿記の禁止）で、独立した counter は持たない。次のターンが通るかは
-    `used + prompt.length + maxNewTokens - 1 ≤ capacity` かつ
-    `used + prompt.length + maxNewTokens - 2 < maxPosition` で事前に判定できる。
-  - **`GenerationCapacityError` の構造化欄**（決定 10 の専用型を「読み解かせない」形へ）:
-    `constraint`（`capacity` / `maxPosition` のどちらを踏んだか）/ `pastLength` / `promptLength`
-    （**`pendingToken` 連結後**の実数 — 呼び手が渡した `prompt` より 1 多いことがある）/
-    `requestedNewTokens` / `limit` / `maxNewTokens`（この prompt のまま今なら通る上限・負値は
-    「何 token 溢れているか」）。専用型を持つ意味は文言ではなく**切り詰めの計算に要る数**なので、
-    それを欄で渡す。
-  - **公開 `GenerationProgram` を読み口だけへ絞る**（決定 1 の「program は不変」の強制）:
-    生成ループが読む全欄は内部型 `GenerationWiring` へ分離し、公開面（`Gemma4Pipeline.program`）が
-    出すのは自分で `sequence()` を回すときに要る数（`chunkLength` / `capacity` / `maxPosition` /
-    `vocabSize` / `stopTokens`）だけにした。グラフ入出力の名前・記号束縛・`derivedInputs` を
-    公開すると、①消費者が読んでも使い道が無い（配線の相手である Session は公開面に無い）
-    ②`derive` の差し替えや `bindings` の改変が公開面から書ける — **検証済みであること**が
-    `GenerationProgram` の意味そのものなので、書ける口は意味を壊す。面は凍結して返し、
-    `stopTokens` は**凍結コピー**にする（同じ配列を出すと消費側の `sort()` / `length = 0` が
-    生成ループの停止集合を書き換え、「EOS で止まらない生成」として沈黙劣化する）。
-  - **破壊的変更（未リリース面）**: `GenerationStop` の欄追加・`GenerationCapacityError` の
-    コンストラクタ 2 引数化・`GenerationProgram` からの配線欄の消滅・`dispose()` 後の `generate`
-    が**同期 throw** になったこと。消費側の doc は `docs/limitations.md`。
+Consumers who ran the surface had guessed three numbers it did not expose, and one write path existed.
+The design of decisions 1–10 is unchanged; **read-outs are added and write paths closed**.
 
-- 2026-09-02（同じ公開面レビューの第 2 波 — 決定 1 の「program は不変」と同じ規律を**要求の側**へ
-  広げた）: 面の設計は不変で、**呼び手が握ったままの object を後から書き換える口**を 2 つ塞ぐ。
-  - **`SamplerSpec.logitBias` は `Map` ではなくタプルの配列**（`readonly [token, bias][]` —
-    決定 7 の sampler の受理集合）。この指定は JSON を通る経路（配布形の宣言・ホスト側の設定
-    保存・ログ）と worker 境界を跨ぐが、`Map` は `JSON.stringify` が `{}` へ潰すので、往復した
-    指定は**黙って空の bias** になる（例外は出ず「効いていないノブ」としてだけ現れる）。
-    MUST: 同じ token を 2 度書いたら fail loudly — `Map` は後勝ちで畳んでいたが、加算の面で
-    畳むと「2 つ書いた bias の片方だけが効く」形になり、足すのか上書きするのかを呼び手が
-    読めない。**破壊的変更（未リリース面）**。
-  - **要求は発行時に写す**（`GenerationSequence.generate` / `Gemma4Pipeline.chat`）: `prompt` の
-    複製・`maxNewTokens` / `signal` の束縛・sampler 指定のスナップショット（`logitBias` は要素の
-    タプルまで写す）を**発行の同期部分**で済ませる。async generator の本体は最初の `next()` まで
-    走らないので、写さないと「受理集合を検査した値」と「実際に流す値」が別物になり得た — 検査後に
-    `prompt` へ語彙外 id を足す / 走行中に `maxNewTokens` を伸ばす / `logitBias` を差し替える、の
-    どれも例外にならない。複製はレイヤごとに 1 箇所（`generate` が prompt・`createSampler` が
-    sampler 指定）で、〈訂正 2026-09-05: sampler 指定の写しは `sampler.ts` の `snapshotSpec` 1 本に
-    集約し、発行時（`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`）と `createSampler` の双方が
-    同じ 1 本を呼ぶ〉`samplerDistribution` は 1 回の呼び出しの中でしか spec を読まないので写さない。
-    観測できる変化は「発行後の書き換えが効かなくなる」ことだけで、消費側の doc は
-    `docs/limitations.md`。
+- **`GenerationStop.tokens`**: the number of tokens generated in the turn. MUST: an `eos` stop token
+  counts as one — one draw = one run, so the number equals the runs spent and gives tok/s **without
+  re-encoding** (the field's purpose). Subtract one for `reason === "eos"` to count body tokens only.
+- **`GenerationSequence.used`**: logical positions the conversation already occupies. MUST: a
+  **derived value** (`context.pastLength` + the uncommitted frontier — ADR 0066 decision 6), not an
+  independent counter. Whether the next turn fits is decidable in advance:
+  `used + prompt.length + maxNewTokens - 1 ≤ capacity` and
+  `used + prompt.length + maxNewTokens - 2 < maxPosition`.
+- **Structured fields on `GenerationCapacityError`**: `constraint` (`capacity` or `maxPosition`),
+  `pastLength`, `promptLength` (**after** prepending `pendingToken` — may be one more than the
+  caller's `prompt`), `requestedNewTokens`, `limit`, `maxNewTokens` (the largest value that fits now;
+  negative = by how many tokens it overflows). The dedicated type exists to carry **the numbers
+  truncation needs**, not a message.
+- **The public `GenerationProgram` is read-only** (enforcing decision 1): the loop's fields moved to the
+  internal `GenerationWiring`; `Gemma4Pipeline.program` exposes only what running `sequence()` needs
+  (`chunkLength`, `capacity`, `maxPosition`, `vocabSize`, `stopTokens`). Graph I/O names, bindings and
+  `derivedInputs` were useless to consumers and writable, and **being verified is what
+  `GenerationProgram` means**. The surface is frozen and `stopTokens` is a **frozen copy** (a shared
+  array would let a consumer's `sort()` silently change the stop set).
+- Breaking (unreleased surface; `docs/limitations.md`): new `GenerationStop` field, two-argument
+  `GenerationCapacityError` constructor, wiring fields gone from `GenerationProgram`, `generate` after
+  `dispose()` throws synchronously.
 
-- 2026-09-02（同じ第 2 波の続き — **要求ごとの停止条件**と**一括受け取り**）: 決定 8 の停止集合は
-  「配布形が宣言した EOS」しか無く、ターンごとに止め方を変える術が公開面に無かった（消費者は
-  detokenize しながら自分で `break` する = 停止文字列の跨ぎと未 commit frontier の扱いを再実装
-  することになる）。面の設計は不変で、**停止条件を 2 層に分けて要求側へ開く**。
-  - **停止 token は sequence 層**（`GenerationRequest.stopTokens`）: 配布形の集合との**和集合**で
-    判定する（配布形の EOS は常に効く）。`GenerationStop` に枝 `stop-token` を足して読み分ける —
-    両方の集合に居る id は `eos` で閉じる（配布形の終端記号としての意味が優先する）。語彙外・
-    重複は**同期に** fail loudly: 停止 token は「出力に現れない id」なので、間違っていても生成は
-    普通に完走し、出力が伸び続けることでしか気づけない。指定は発行時に写す（上の追記と同じ規律）。
-  - **停止文字列は chat 層**（`Gemma4ChatOptions.stopStrings`）: sequence は token id しか扱わない
-    ので、文字列の判定は復号の**後**にしか置けない（1 つの停止文字列が複数 token に割れることも、
-    1 つの token が停止文字列の末尾と次の本文をまたぐこともある）。実体は
-    `src/text/detokenizer.ts` の `createStopStringFilter`（ファミリ非依存）で、`byte_fallback` の
-    run 持ち越しとは**別の状態機械**である。
-  - **保留（holdback）の規則**: 確定した文字列でも、**停止文字列の接頭辞になっている末尾**だけは
-    出力を保留する。固定長（最長の停止文字列 − 1 文字）で保留すると止まらないターンでも描画が
-    常に遅れるので、接頭辞から外れた時点でまとめて流す（例: 停止 `"END"` に対し `"E"` `"N"` `"X"`
-    は 3 片目で `"ENX"` がまとめて出る）。一致したら**停止文字列の手前まで**を流し、停止文字列
-    そのものとその後ろは流さない。止まらずに終わったターンは保留ぶんを最後に流す（1 文字も
-    落とさない — 保留は判定のための遅延であって切り詰めではない）。
-  - **早期終了の畳み方**: 停止文字列で止めるときはイベント列から `return` で抜ける（`for await`
-    の脱出が `return()` を呼ぶ）。既存の `break` 中断とまったく同じ後始末で、会話は成功した run の
-    ぶんだけ進み、最後の token は未 commit frontier（`pendingToken`）に残る — 停止 token で
-    止めたときと同じ状態である。停止理由は chat 層で `stop-string`（`Gemma4ChatStop`）へ差し替え、
-    `tokens` は内側の `done` の数をそのまま運ぶ（この層で数え直さない = 二重簿記の禁止）。
-  - **一括受け取り `Gemma4ChatStream.text()`**: 汲み切って連結した 1 本を返す。**1 つの
-    ストリームは 1 通りにしか消費できない**（反復と `text()` の併用も、2 度の反復も**同期に**
-    throw）— 生成は 1 度しか走らないので、2 通り目には「残り」しか流れず、例外にならない
-    取り違えになる。メソッドを `chat` の隣に増やさず stream 側に置いたのは、停止理由（`done`）と
-    同じ 1 つの返り値にぶら下がる観測口だからである。
-  - **破壊的変更（未リリース面）**: `GenerationStop` の union に `stop-token` が増えた・
-    `Gemma4ChatStream.done` の型が `GenerationStop` から `Gemma4ChatStop` になった。消費側の doc は
-    `docs/limitations.md`。
+## Addendum (2026-09-02) — requests are copied at issue
 
-- 2026-09-02（同じ第 2 波の続き — **中間層 `Gemma4ChatSession`** と、それに伴う**決定 10 の改訂**）:
-  実走した消費者の指摘は「普通の stateful chat が欲しいだけなのに、`chat()` は毎回全履歴を
-  再計算し、効率化しようとすると急に token id / `<bos>` / 未 commit frontier の世界へ落とされる」。
-  低レベル面（決定 1〜5）も `chat()` も設計は不変で、**その落差だけを持つ層**を足す
-  （`packages/models/src/gemma/chat-session.ts`）。素材は既存の公開面だけ — `sequence()` の KV 継続 /
-  `gemma4ChatPrompt` と `gemma4ChatTurn` / `GenerationSequence.used` /
-  `GenerationCapacityError` の構造化欄 / `chat()` の停止条件と `Gemma4ChatStream` — なので、
-  消費者は同じものを自分で書ける（写経見本だった `examples/gemma4/main.ts` の中身がここへ
-  昇格し、example は「普通の chat」の書き方に戻った）。
-  - **決定 10 の改訂**: 「会話の切り詰めはホストの責務」は**低レベル面についてはそのまま**
-    （`sequence()` / `chat()` は今も `GenerationCapacityError` を投げて終わる）。~~高レベル面でも
-    同じ~~ ← 打ち消し: `Gemma4ChatSession` は**注入可能な既定ポリシー**
-    （`Gemma4ChatSessionOptions.onOverflow`）を持つ。既定は `dropOldestTurns` = **最古の
-    user / assistant の対を落とす**（system 発話は残す・片方だけ落とすと「答えだけ」「問いだけ」の
-    壊れた文脈になるので対を単位にする）。ホストが throw する関数を渡せば従来の意味論に戻る。
-    「切り詰めない」を既定にしなかったのは、会話 UI で**必ず**要る打ち手を全消費者に再実装させる
-    形だからで、方針そのものは差し替えられるべきという判断は決定 10 のまま残っている。
-  - **判定は事前**（例外を待たない）: 各ターンの prompt を組んだ直後に
-    `used + prompt + maxNewTokens - 1` を上限（`capacity` と `maxPosition` の小さい方）と比べ、
-    超えていれば送る前に `onOverflow` を回す。`used` を公開したのはこの判定のためである
-    （追記 2026-08-31）。走行中に踏む `GenerationCapacityError` の捕捉は**安全網として残さない** —
-    事前判定が正しい限り到達しないので、掴んで再試行すると事前判定のずれが黙って隠れる。
-  - **収束の保証**: 再試行が続くのは**履歴が縮んだとき**だけ（縮まない結果を返したポリシーは
-    `GenerationCapacityError`）。履歴の件数は非負整数なので、試行回数は入口の発話数を超えない —
-    その不変条件が破れたことは `#prepare` の門が名指しで落とす（回数の定数を置かない）。
-  - **KV を継ぐ条件**: 直前のターンが**配布形の EOS で閉じた**ときだけ差分（`gemma4ChatTurn`）で
-    継ぐ。max-tokens / 停止文字列 / 中断 / 失敗で閉じたターンの後ろは model turn が閉じていないので、
-    sequence を捨てて履歴から描き直す（決定 4 の turn-local 契約をそのまま門にした形）。ターンの
-    締めで履歴へ積むのは**実際に流した本文**だけで、1 文字も出なかったターンはその発話ごと履歴から
-    外す（答えの無い問いを残さない）。
-  - **1 セッション = 1 生成**: 2 本目の `send` は**同期に** throw する（`chat()` のように順番待ちに
-    しない）。履歴は 1 本の会話として順に積まれるので、2 本が同じ履歴を押すと「答えの無い問い」を
-    挟んだ会話が KV へ入る — 例外にならない取り違えなので口の側で塞ぐ。代償として、発行した
-    stream を汲まずに捨てるとセッションはそのターンのまま止まる（締めが列の終端で走るため）。
-  - **入口はコンストラクタ**（`new Gemma4ChatSession(pipeline, options)`）: `Gemma4Pipeline` に
-    `createChatSession()` を生やすと pipeline → chat-session → pipeline の相互 import になる
-    （`decodeChatChunks` / `chatStreamOf` を共有するため）。依存を一方向に保つ方を採り、
-    セッションが読む面は `Gemma4ChatSessionHost`（tokenizer / program / defaultSampler /
-    `sequence()`）へ絞った — この層が公開面より内側を 1 つも使っていないことが型で読め、
-    実 GPU 無しの門（`tests/gemma_chat_session_test.ts`）もそこから来る。
-  - **今回入れないもの**: モデルに要約させる compact（`onOverflow` の実装の 1 つとして後から
-    足せる席はある）。**窓（`capacity`）を広げた後に再検討する** — 今の 640 では要約自体が
-    入らない。\
-    **追記 2026-09-03: この再検討条件は成立した**。ADR
-    [0091](0091-gemma4-host-rope-variable-capacity.md) 決定 4 で `capacity` は実行時ノブになり、
-    既定 4,096・上限は配布形の宣言 `maxPosition`（E2B は 131,072）。compact は `onOverflow` の
-    ポリシー実装 1 本として backlog へ起票済み（数字 640 は当時の値で、現在の既定ではない）。
+The immutability of decision 1 extends **to requests**: two ways to rewrite an object the caller still
+holds are closed.
 
-## 追記（2026-09-08）— 決定 6 の出口は「選んだ R 行」へ一般化（ADR 0096 決定 5・MTP 段 1）
+- **`SamplerSpec.logitBias` is an array of tuples** (`readonly [token, bias][]`), not a `Map`. The
+  spec crosses JSON (distribution declaration, host settings, logs) and worker boundaries, and
+  `JSON.stringify` turns a `Map` into `{}` — a round-tripped spec silently has **no bias**. MUST: the
+  same token twice fails loudly (a `Map` kept the last write; for an additive bias that means only one
+  of two written biases applies, and the caller cannot tell add from overwrite). Breaking (unreleased).
+- **Requests are copied at issue** (`GenerationSequence.generate` / `Gemma4Pipeline.chat`): the
+  `prompt` copy, `maxNewTokens` / `signal` and a sampler snapshot (down to the `logitBias` tuples) are
+  taken **in the synchronous part of the issue** — an async generator body runs only at the first
+  `next()`, so the checked and the used values could otherwise differ, silently. One copy per layer:
+  `generate` copies the prompt; the sampler spec copy is the single `snapshotSpec` in `sampler.ts`,
+  called at issue (`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`) and by `createSampler`
+  (2026-09-05). Observable change: rewriting after issue has no effect (`docs/limitations.md`).
 
-- 決定 6「出口は最終行 logits `[1,1,V]`・sampling はホスト維持」のうち、**出口の形**だけを
-  `logits[1,R,V]` + hidden `[1,R,H]`（`last_row[R]`）へ広げた（ADR 0068 追記 7）。sampling / RNG が
-  ホスト側にあることと GPU 側 argmax の禁止は不変。`GenerationProgramSpec` は `hidden`（必須）を
-  受け、配線は `hiddenSize` をグラフから導出する。R=1 の prefill / decode は従来と同一で、
-  `readLogits` は行の view を返す形（`{ rows, row(i) }`）になった。
-- 決定 1 / 4（可変状態は `context` と `pendingToken`・未 commit の frontier は最大 1 token）は段 1 では
-  不変 — 段 3（投機ループ）で「cycle の起点 P + 受理済み列」へ一般化する（ADR 0096 段 3）。
+## Addendum (2026-09-02) — per-request stop conditions and reading the whole text
 
-## 追記（2026-09-08）— 投機ループの DI と run 単位の観測席（ADR 0096 段 3）
+Decision 8's set held only the distribution's EOS; there was no way to change how a turn stops
+(consumers would `break` while detokenizing and re-implement stop strings across tokens and the
+uncommitted frontier). The design is unchanged; **stop conditions open to requests in two layers**.
 
-- 決定 1 / 4 の一般化は**「frontier は依然 1 token」**の形で閉じた: 投機の verify（deferred run）は
-  受理列 `[d₁..d_a, b']` を 1 個ずつ配送し、`pendingToken` を yield の前に更新する MUST に乗せて
-  **配送した frontier まで**を `commit(rows)` する（ADR 0096 追記〈段 3〉）。可変状態は
-  `context` / `pendingToken` に、導出できない **drafter 入力の hidden の写し（1 行）**が増えただけで、
-  進行の記録は `context.pastLength` のまま（二重簿記は無い）。
-- 決定 3（`GenerationContext` を外へ出さない）は不変。drafter は `GenerationSequenceOptions.speculative =
-  { open(context) → DraftFace, k }` の DI で、借り手 context は sequence の**内側**で開き・先に畳む。
-  `DraftFace`（`draft` / `dispose` / `steps`）は Session も context も知らない狭い面で、GPU 無しの fake
-  が受理 0 / 停止 token / 中断 / 例外 / 途中 `break` を踏む（テスト専用の口を公開面へ出さない）。
-- 観測は **run 単位の hook** `GenerationSequenceOptions.onRun(phase)` に移した（`GenerationRunPhase` =
-  prefill / decode / draft / verify・番号 1 始まり・verify は commit 直後の同期区間）。sequence は
-  依然 Session も診断も知らず、pipeline 層が hook の中で `Session.diagnostics()` を読む。イベント列
-  から run 数を導出していた `withRunDiagnostics` は投機（1 run が 0〜k+1 token）で成立しないので
-  置き換えた。公開型 `Gemma4RunPhase` は `GenerationRunPhase` の別名になり、枝が 2 → 4 に増える
-  （未リリースの破壊的変更）。
-- 決定 7（sampling はホスト）: 投機は温度に依らず張る。受理の抽選は行ごとに `sampler.next` を非投機と
-  同じ logits・history・順序で 1 回ずつ呼ぶので、RNG の消費列も token 列も非投機と厳密一致する
-  （温度 > 0 では one-hot draft の speculative sampling と同値）。
+- **Stop tokens at the sequence layer** (`GenerationRequest.stopTokens`): checked as the **union**
+  with the distribution's set (its EOS always applies). `GenerationStop` gains the branch
+  `stop-token`; an id in both sets closes as `eos` (the terminator meaning wins). Out-of-vocabulary or
+  duplicate ids fail loudly **synchronously**: a stop token never appears in the output, so a wrong
+  one only shows as output that never stops. Copied at issue.
+- **Stop strings at the chat layer** (`Gemma4ChatOptions.stopStrings`): matching sits **after**
+  decoding (a stop string can span tokens). Implemented by `createStopStringFilter` in
+  `src/text/detokenizer.ts`, a state machine **separate** from the `byte_fallback` carry-over.
+- **Holdback**: only **a finished tail that is a prefix of a stop string** is held back (a fixed
+  holdback would delay every turn); it is released once it leaves the prefix (stop `"END"`: `"E"`,
+  `"N"`, `"X"` releases `"ENX"` at the third piece). On a match, text before the stop string is
+  released, the rest is not; a turn ending without a match releases the held text (nothing dropped).
+- **Early termination**: a stop-string match leaves by `return`, the same clean-up as `break` (the
+  last token stays as `pendingToken`). The chat layer reports `stop-string` (`Gemma4ChatStop`), and
+  `tokens` carries the inner `done` count unchanged (no recount — no double bookkeeping).
+- **Whole text, `Gemma4ChatStream.text()`**: drains and returns the concatenation. **A stream is
+  consumed one way only** (a second consumption throws **synchronously**; it would silently get only
+  the rest). It sits on the stream, next to the stop reason (`done`).
+- Breaking (unreleased; `docs/limitations.md`): `stop-token` in the `GenerationStop` union;
+  `Gemma4ChatStream.done` typed `Gemma4ChatStop`.
 
-## 追記（2026-09-09）— 観測 1 通に run の壁とゲートの状態を載せる（MTP 4-B ⑨）
+## Addendum (2026-09-02) — the middle layer `Gemma4ChatSession`; decision 10 revised
 
-- `GenerationRunPhase` の `decode` / `verify` 枝に optional の `wallMs` / `delivered` / `gate`
-  （`GenerationGateTrace` = 定常モード・ターン内の切替回数・その run をゲートが観測したか）を足した。
-  枝は増やさない（網羅 switch を持つ消費者を壊さない — 上の追記の方針を維持）。
-- `wallMs` は**ゲートが判断に使う同じ変数**（受理判定の直後・配送の yield の前）で、非投機の decode も
-  step の先頭（派生入力の前）から抽選の直後までの同じ区間で測る。消費者の速さを含まないのは、遅い
-  消費者ほど投機を切る誤りを避けるためで、内訳の壁とゲートの壁を別に測ると「なぜ倒れたか」を辿れなく
-  なる。`gate` は観測の**後**の値（倒れた cycle は倒れた後のモードを名乗る）。
-- 用途は時間の内訳（`tools/mtp-bench` の局面別バケット）で、pipeline 層は phase を素通しする。
+Consumers wanted "an ordinary stateful chat": `chat()` recomputes the whole history each time, and
+making it efficient drops them into token ids, `<bos>` and the uncommitted frontier. The low-level
+surface (decisions 1–5) and `chat()` are unchanged; **a layer covering that gap** is added
+(`packages/models/src/gemma/chat-session.ts`). It is built only from public surfaces — KV continuation
+of `sequence()`, `gemma4ChatPrompt` / `gemma4ChatTurn`, `GenerationSequence.used`, the structured
+fields of `GenerationCapacityError`, `chat()`'s stop conditions and `Gemma4ChatStream` — so consumers
+could write it themselves. (The Deno-era example that held this code was removed with the CLI
+examples, ADR 0127 decision 5.)
 
-## 追記: top-p 単独指定の整列（2026-09-10）
+- **Decision 10 revised**: "truncation is the host's job" **still holds for the low-level surface**
+  (`sequence()` / `chat()` throw `GenerationCapacityError`). `Gemma4ChatSession` has an **injectable
+  default policy** (`Gemma4ChatSessionOptions.onOverflow`); the default `dropOldestTurns` **drops the
+  oldest user / assistant pair** (system utterances stay; dropping half a pair leaves "only an answer"
+  or "only a question"). A host passing a throwing function gets the old semantics. Not truncating by
+  default would make every consumer re-implement something chat UIs **always** need; that the policy
+  must be replaceable stays as decision 10 said.
+- **Checked in advance** (no waiting for the exception): right after building each turn's prompt,
+  `used + prompt + maxNewTokens - 1` is compared with the limit (the smaller of `capacity` and
+  `maxPosition`), and `onOverflow` runs before sending if it is exceeded; `used` was exposed for this.
+  A `GenerationCapacityError` raised mid-run is **not caught as a safety net** — with a correct
+  pre-check it is unreachable, and catching and retrying would hide a drift in the pre-check.
+- **Convergence**: retries continue only **while the history shrinks** (a policy returning a history
+  that did not shrink gets `GenerationCapacityError`). The history length is a non-negative integer,
+  so attempts cannot exceed the number of utterances; a broken invariant is named by the check in
+  `#prepare` (no retry-count constant).
+- **When the KV is reused**: only after a turn **closed by the distribution's EOS** does the next turn
+  continue by difference (`gemma4ChatTurn`). After max-tokens, a stop string, an abort or a failure,
+  the model turn is not closed, so the sequence is discarded and redrawn from history (decision 4's
+  turn-local contract as a check). A turn adds to history **only the body actually delivered**; a turn
+  that produced no text removes its utterance (no unanswered questions).
+- **One session = one generation**: a second `send` throws **synchronously** (no queue as in
+  `chat()`); two sends on one history would put an unanswered question into the KV. The cost: a stream
+  issued but never drained leaves the session in that turn.
+- **Entry is the constructor** (`new Gemma4ChatSession(pipeline, options)`): a
+  `Gemma4Pipeline.createChatSession()` would make the imports circular. The session reads only
+  `Gemma4ChatSessionHost` (tokenizer, program, defaultSampler, `sequence()`), so the type shows it uses
+  nothing inside the public surface, and the GPU-free checks
+  (`packages/models/tests/gemma4_chat_session_test.ts`) build on it.
+- Compaction by model summary was left out while the window was 640; ADR
+  [0091](0091-gemma4-host-rope-variable-capacity.md) decision 4 made `capacity` a run-time option
+  (default 4,096, limit `maxPosition`, 131,072 for E2B) on 2026-09-03, and compaction is in the
+  backlog as one `onOverflow` policy.
 
-`topK` 無しの nucleus sampling は全語彙の累積確率を使う。f32 logit のビット列を降順キーへ変換する
-安定 radix sort を採用し、比較ソートの O(V log V) を O(V) にする。キーだけで符号付きゼロを
-同一視し、token id 昇順から安定に並べることで、同値の順位・softmax の加算順・境界で残る集合を維持する。
-RNG・温度処理・top-k 指定時の有界 heap は変更しない。作業配列は呼び出し内に閉じる。
+## Addendum (2026-09-08) — decision 6's exit generalized to "R selected rows" (ADR 0096 decision 5, MTP stage 1)
 
-段階的に候補 heap を広げる案は、残りの確率質量と f64 加算順まで一致させる条件が増えるため採らない。
-全語彙を正確に整列するだけで、Gemma 実 logits の CPU 抽選は 7.6〜7.8 倍になった。
-本 ADR 決定 6 の 0.3〜0.6 ms という走査費の見積もりを、top-p 単独の比較ソート費へ適用してはいけない。
-配布既定は top-k 64 付きであり、今回の高速化をその既定生成の改善と扱わない。
+- Of decision 6 ("last-row logits `[1,1,V]`, sampling on the host"), only **the exit shape** widened
+  to `logits[1,R,V]` + hidden `[1,R,H]` (`last_row[R]`) (ADR 0068 addendum 7). Sampling and RNG stay
+  on the host, and GPU-side full sampling stays rejected (decision 6). `GenerationProgramSpec` takes
+  `hidden` (required) and the wiring derives `hiddenSize` from the graph. R=1 prefill / decode are
+  unchanged; `readLogits` returns row views (`{ rows, row(i) }`).
+- Decisions 1 / 4 (mutable state `context` and `pendingToken`; frontier at most one token) are
+  unchanged in stage 1 and generalized in stage 3 (ADR 0096).
 
-[実測・厳密一致の門](../research/2026-09-10-codex-mtp-optimization.md#共通サンプラーの-top-p-単独指定)を参照。
+## Addendum (2026-09-08) — dependency injection for the speculative loop and per-run observation (ADR 0096 stage 3)
 
-## Gemmaの温度0生成の小出力（2026-09-12）
+- Decisions 1 / 4 generalized while **"the frontier is still one token"**: speculative verify
+  (deferred run) delivers the accepted sequence `[d₁..d_a, b']` one by one, updates `pendingToken`
+  before each yield (MUST), and `commit(rows)` covers **up to the delivered frontier** (ADR 0096
+  addendum, stage 3). Mutable state is `context` / `pendingToken` plus a non-derivable **copy of the
+  drafter's input hidden state (one row)**; progress is still recorded only in `context.pastLength`.
+- Decision 3 is unchanged. The drafter is injected as `GenerationSequenceOptions.speculative =
+  { open(context) → DraftFace, k }`; the borrowing context opens inside the sequence and closes first.
+  `DraftFace` (`draft` / `dispose` / `steps`) knows neither Session nor context, so a GPU-free fake
+  covers the edge cases without a test-only public entry.
+- Observation moved to a **per-run hook** `GenerationSequenceOptions.onRun(phase)`
+  (`GenerationRunPhase` = prefill / decode / draft / verify, numbered from 1; verify fires in the
+  synchronous section right after commit). The sequence still knows neither Session nor diagnostics;
+  the pipeline reads `Session.diagnostics()` inside the hook. `withRunDiagnostics`, which derived run
+  counts from events, could not work with speculation (one run = 0 to k+1 tokens) and was replaced.
+  The public `Gemma4RunPhase` became an alias of `GenerationRunPhase` with four branches instead of
+  two (breaking, unreleased).
+- Decision 7 (sampling on the host): speculation runs at any temperature. Acceptance calls
+  `sampler.next` once per row with the same logits, history and order as non-speculative decoding, so
+  the RNG stream and the tokens match it exactly (at temperature > 0 this equals speculative sampling
+  with a one-hot draft).
 
-- 通常Gemma4とGemma4-QATの共通pipelineで、生logitsを加工しない温度0・非投機のdecodeだけを
-  target enqueue→常駐logits→別topk(k=1) Session→finishAndReadへ接続する。
-  prefillは従来runで処理し、最初のtokenまでの経路を維持する。初回prefillからbackingを作る案は、
-  Chrome E4Bの初回が遅くなったため採らない。
-  保存済みグラフのlogits+hidden出口を変更しない。新しいCLI引数やモデル資産は不要。
-  一般sampling、penalty/bias、投機は通常runを使う。
-- 生成ループは小出力を内部能力として受ける。架空の全語彙logitsへ膨らませるadapterは作らない。
-  Samplerが発行時に固定した指定から、最大値だけで決められる能力を返す。
-  温度0ではtopK/topP/seedが選択に効かない既存契約を維持する。全ての不正指定は従来どおり検査する。
-- topkが返す最初のNaNまたは最大値と最小添字を検査する。NaN・最大値±Infinityは従来同様に拒否し、
-  有効tokenへ畳まない。選択の失敗より前に、書き込み済みfrontierをpendingTokenから外す。
-  中間prefillは抽選しないので、その非有限値を最終chunkの選択と混同しない。
-- 診断callback/gpuTimingを指定したpipelineは従来runのままにし、lastRun等の観測を維持する。
-  生の生成イベント、EOS、break、AbortSignal、複数turnは同じ生成ループを通す。
-- helperはpipeline寿命で共有する。通常runとbatch全体を同じ操作鎖へ載せ、混在会話で
-  runがbatchの内側へ先行する循環を防ぐ。contextの構築はSession鎖外の既存契約を維持する。
-  GPU資源は最初のgreedy時に遅延確保し、準備失敗は部分確保を全て返して次の発行で再試行する。
-  解放順はsequence→helperのselectorとresident→drafter→target→GPU→PLE。
-- 追加のresidentとselectorのメモリは`auxiliaryBytes`へ別計上し、`peakAccountedBytes`にも保守的に加える。
-  内訳と合計の契約は[ADR 0070](0070-shard-loading-admission.md#補助資源の見積り内訳2026-09-12)に記録する。
-  selectorは1形のみで複数backing予算0。runtime estimatorが数える入力分は実際にはresidentを
-  借りるため、この加算は小さな過大見積りになる。値を小さく見せるために計測から省かない。
-- 検収はCPUで経路選択/履歴/NaN/中断、GPUでmixed run/部分確保/解放、実pipelineで通常/QATの
-  E2B/E4B・Deno/Chromeのtoken/会話結果一致とABBA速度比較。M2は利用者実機での追試が必要。
-  温度ありのCLI既定設定がこの最適化で速くなったとは報告しない。
+## Addendum (2026-09-09) — one observation carries the run's wall time and the gate state (MTP 4-B ⑨)
 
-[実測と検収](../research/2026-09-10-codex-mtp-optimization.md#gemmaの温度0decodeの小出力化2026-09-12)を参照。
+- The `decode` / `verify` branches of `GenerationRunPhase` gain optional `wallMs` / `delivered` /
+  `gate` (`GenerationGateTrace` = steady mode, switches within the turn, whether the gate observed
+  this run). No new branches (exhaustive switches in consumers keep working).
+- `wallMs` is **the variable the gate decides on** (to right after the acceptance check, before the
+  delivering yield; non-speculative decode over the same span). It excludes the consumer's speed, so
+  slow consumers do not turn speculation off. `gate` is the value **after** the observation.
+- The use was the time breakdown of the MTP bench (`tools/mtp-bench`, removed with the Deno-era tools
+  in `bb35fe2a`); the pipeline passes the phase through.
 
-## 追記（2026-10-11）— 会話の分岐（fork・裁定 8）
+## Addendum (2026-09-10) — sorting for top-p without top-k
 
-決定 4 の「分岐は新しい context + replay」を、同じ容量の丸ごと複製へ置き換えた。複製の契約
-（範囲・同期区間・拒否・決定性）は ADR [0066](0066-generation-context-state-slots.md) の同日の
-追記が正本で、ここはその上の 2 層（sequence と chat session）の決定だけを書く。
+Nucleus sampling without `topK` uses the cumulative probability over the whole vocabulary. A stable
+radix sort on f32 logit bits mapped to descending keys replaces the O(V log V) comparison sort with
+O(V). Signed zeros are equal in the key, and ties keep ascending token-id order, so ranks of equal
+values, the softmax addition order and the set kept at the boundary are preserved. RNG, temperature
+handling and the bounded heap used with top-k are unchanged; work arrays stay inside the call.
 
-- **`GenerationSequence.fork(): Promise<GenerationSequence>`**: 同じ会話の続きを持つ独立の
-  sequence を返す。写すのは context（runtime の fork）・`pendingToken`（未 commit frontier）・
-  自己採算ゲートの観測状態。投機の drafter の面は複製した context に対して開き直す（借り手は
-  context ごと — 元の借り手を共有しない）。RNG は写さない（`generate` ごとに seed から作る）。
-  - 本体は sequence の直列化鎖に積む: 走行中の `generate` の後に走り、その時点の
-    `pendingToken` と context を写す。dispose 済みの sequence では同期に throw する
-    （`generate` と同じ規律）。
-  - drafter の開き直しに失敗したら、複製した context を畳んでから投げ直す（元は無傷）。
-  - 分岐は呼び手が所有する独立の sequence で、dispose は各自で行う。
-- **自己採算ゲートは観測状態を写す**（`SpeculationGate.fork()` — 非公開の型）。ゲートの寿命を
-  sequence にする理由（同じ会話・同じ host で測り直さない）は分岐にもそのまま当てはまる。写した後の
-  2 つのゲートは独立で、片方への観測はもう片方を動かさない。
-- **`Gemma4ChatSession.fork(): Promise<Gemma4ChatSession>`**: 同じ設定・同じ履歴の独立の
-  セッションを返す。dispose 済みと走行中のターンがある（busy）ときは同期に throw する（`send` と
-  同じ規律）。履歴と「KV に入っている件数」の写しと `sequence.fork()` の呼び出しは、`fork()` を
-  呼んだ同期区間で行う（直後の `send` が先に履歴を積む形を塞ぐ）。KV が空の会話（直前のターンが
-  EOS で閉じていない・まだ送っていない）は GPU の複製を出さず、履歴だけを写す。
-- **再生成は fork の使い方として書く**（`regenerate` は作らない）。基点のセッションを進めずに置き、
-  押されるたびに `fork()` して `send` する。KV は基点 + 分岐 1 本でほぼ 2 倍になり、これは
-  replay で作り直す形と変わらない（公開面の大きさだけが違う）。
-  - **同じ seed なら同じ答えになる**: 抽選の乱数列は `generate` ごとに sampler の `seed`（既定 0）
-    から作り直し、複製した KV は元とビット同一なので、seed を変えない再生成は毎回同じ token 列を
-    返す。違う答えを引くには試行ごとに seed を変える（例 `send(text, { sampler: { ...spec, seed:
-    attempt } })` — chat session の `fork` の doc の例）。温度 0 は seed に関わらず同じ。
-- 公開面: 既存の型（`GenerationSequence` / `Gemma4ChatSession`）にメソッドが 1 つずつ増えるだけで、
-  新しい export は無い（ADR 0008）。
+A step-wise widening heap was not adopted (more conditions to match the remaining mass and f64
+order). Exact full sorting made CPU sampling on real Gemma logits 7.6–7.8× faster. Decision 6's
+0.3–0.6 ms scan estimate does not apply to the comparison-sort cost of top-p alone. The distributed
+default includes top-k 64, so default generation is not improved by this. Measurements:
+[research 2026-09-10](../research/2026-09-10-codex-mtp-optimization.md) (shared sampler, top-p alone).
+
+## Addendum (2026-09-12) — small output for Gemma's temperature-0 decode
+
+- In the shared pipeline of Gemma4 and Gemma4-QAT, only temperature-0, non-speculative decode on
+  unprocessed logits is connected as target enqueue → resident logits → a separate topk(k=1) Session →
+  finishAndRead. Prefill uses the normal run, keeping the path to the first token; building the
+  backing from the first prefill was rejected (Chrome E4B's first turn got slower). The stored graph's
+  logits + hidden exit is unchanged; no new CLI argument or model asset. General sampling,
+  penalty / bias and speculation use the normal run.
+- The generation loop takes the small output as an internal capability; no adapter inflates it to
+  fake all-vocabulary logits. The sampler returns, from the spec fixed at issue, whether the choice
+  is decided by the maximum alone. At temperature 0, topK / topP / seed do not affect the choice
+  (existing contract); every invalid spec is still checked.
+- The first NaN, or the maximum with its smallest index, returned by topk is checked. NaN and a
+  maximum of ±Infinity are rejected as before, not folded into a valid token. Before a selection
+  failure, the written frontier is removed from `pendingToken`. Intermediate prefill chunks are not
+  sampled, so their non-finite values are not confused with the final chunk's selection.
+- Pipelines with a diagnostics callback / gpuTiming keep the normal run (`lastRun` preserved). Events,
+  EOS, `break`, AbortSignal and multiple turns use the same loop.
+- The helper lives as long as the pipeline; normal runs and whole batches share one operation chain
+  (no run overtakes a batch). GPU resources are allocated at the first greedy use; a failed preparation
+  returns partial allocations and retries at the next issue. Release order: sequence → selector and
+  resident buffers → drafter → target → GPU → PLE.
+- The extra resident and selector memory goes into `auxiliaryBytes` and, conservatively, into
+  `peakAccountedBytes` (ADR [0070](0070-shard-loading-admission.md), 2026-09-12 auxiliary-resource
+  section); the slight overestimate (the estimator's input borrows the resident buffer) is kept rather
+  than dropped to make the number smaller.
+- Accepted on CPU (path selection, history, NaN, abort), GPU (mixed runs, partial allocation, release)
+  and the real pipeline (normal / QAT E2B / E4B on Deno and Chrome, equal tokens, ABBA speed). M2 needs
+  a re-run; the CLI default with temperature is not reported as faster.
+
+Measurements and acceptance: [research 2026-09-10](../research/2026-09-10-codex-mtp-optimization.md)
+(Gemma temperature-0 decode section).
+
+## Addendum (2026-10-11) — branching a conversation (fork)
+
+Decision 4's "branching = new context + replay" is replaced by a full copy at the same capacity. The
+copy contract (range, synchronous section, rejections, determinism) lives in ADR
+[0066](0066-generation-context-state-slots.md)'s addendum of the same day; this records only the two
+layers above it (sequence and chat session).
+
+- **`GenerationSequence.fork(): Promise<GenerationSequence>`** returns an independent sequence that
+  continues the same conversation. It copies the context (the runtime's fork), `pendingToken` (the
+  uncommitted frontier) and the speculation gate's observed state. The drafter face is reopened on the
+  copied context (the borrower goes with the context; the original borrower is not shared). The RNG is
+  not copied (each `generate` builds it from the seed).
+  - It runs on the sequence's serialization chain, after an in-flight `generate`; on a disposed
+    sequence it throws synchronously. If reopening the drafter fails, the copy is closed before
+    rethrowing. The caller owns and disposes the branch.
+- **The speculation gate copies its observed state** (`SpeculationGate.fork()`, not public); the two
+  gates are independent afterwards.
+- **`Gemma4ChatSession.fork(): Promise<Gemma4ChatSession>`** returns an independent session with the
+  same settings and history. It throws synchronously when disposed or busy with a turn (as `send`
+  does). Copying the history and "how many entries are in the KV", and calling `sequence.fork()`, all
+  happen in the synchronous section of `fork()` (so a following `send` cannot push history first). A
+  conversation with an empty KV (last turn not closed by EOS, or nothing sent yet) copies only the
+  history, with no GPU copy.
+- **Regeneration is written as a use of fork** (no `regenerate`): keep the base session as is, and on
+  each press `fork()` and `send`. KV roughly doubles (base + one branch), the same as rebuilding by
+  replay; only the public surface differs.
+  - **The same seed gives the same answer**: the draw's random stream is rebuilt from the sampler
+    `seed` (default 0) on every `generate`, and the copied KV is bit-identical, so regenerating without
+    changing the seed returns the same tokens. To draw a different answer, change the seed per attempt
+    (for example `send(text, { sampler: { ...spec, seed: attempt } })`, as in the chat session's `fork`
+    doc). Temperature 0 gives the same answer regardless of seed.
+- Public surface: one method each on existing types (`GenerationSequence` / `Gemma4ChatSession`), no
+  new export (ADR 0008).

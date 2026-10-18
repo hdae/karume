@@ -213,7 +213,7 @@ export type AdmissionReport = {
   /**
    * 補助Sessionや常駐入出力の追加勘定。resident / scenarios の内訳とは重複させない。
    * 省略は0。runtimeの単体Session見積りは省略し、modelsが補助資源を持つ場合に加える。
-   * DECIDED: docs/decisions/0070-shard-loading-admission.md#補助資源の見積り内訳2026-09-12
+   * DECIDED: docs/decisions/0070-shard-loading-admission.md#auxiliary-resource-breakdown-2026-09-12
    */
   readonly auxiliaryBytes?: number;
   /**

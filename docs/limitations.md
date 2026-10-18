@@ -1839,7 +1839,7 @@ BiRefNet の α マットの後処理の fixture（`birefnet/tests/test_matte_fi
   [0066](decisions/0066-generation-context-state-slots.md) 追記 2 — ring はエビクト後に物理配置と
   論理範囲が一致せず、左詰め compaction を持たない。緩和は compaction 実装と対）。
 - `enqueue.generation`はcontextの使用予約をbatchの最終決着まで保つ（2026-09-12追加・
-  [ADR 0066](decisions/0066-generation-context-state-slots.md#バッチ実行の-generationcontext2026-09-12)）。
+  [ADR 0066](decisions/0066-generation-context-state-slots.md#addendum-2026-09-12--generationcontext-in-batched-execution)）。
   同じcontextの未確定実行を複数積むこと、予約中のcontext/所有Sessionのdisposeは拒否する。
   `finish` / `finishAndRead`後に次の実行・破棄へ進む。通常runの破棄待ち契約は変わらない。
 - state スロットの dtype は f32 のみ（f16 は席予約 — ADR 0066 追記 5）・複数シーケンス /
