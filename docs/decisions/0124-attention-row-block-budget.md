@@ -1,226 +1,223 @@
-# 0124: attention の行ブロックの一時に容量の予算（`attentionRowBlockMaxBytes`）を置く
+# 0124: A capacity budget for attention row-block temporaries (`attentionRowBlockMaxBytes`)
 
-- Status: accepted（利用者裁定 2026-10-11 — 裁定 6 = a〈行ブロック分割を利用者の予算でも細かく割れるようにする・結果のビットは
-  変えない〉、設計 v2 の問い 33〜35 = 推奨案 a。設計の正本は `.claude/reviews/2026-10-04_de127de1/DESIGN-4-6-8-v2-2026-10-11.md`
-  の d6〈git 追跡外〉）
+- Status: accepted (2026-10-11, the maintainer: a user budget may split row blocks finer without
+  changing result bits; the open design questions answered as recommended); implemented 2026-10-11.
+  The gpu-lab part of decision 10 lapsed with `tools/gpu-lab` (`bb35fe2a`, 2026-10-16). Design notes:
+  `.claude/reviews/2026-10-04_de127de1/DESIGN-4-6-8-v2-2026-10-11.md` (d6, untracked)
 - Date: 2026-10-11
-- 関連: ADR [0060](0060-row-block-attention.md)（分解 attention の行ブロック — ビット同一の根拠）/
-  [0023](0023-fused-attention.md)（融合 attention）/ [0067](0067-autoregressive-attention-vocabulary.md) 決定 7（states 形の行ブロック）/
-  [0093](0093-transient-liveness-packing.md)（中間の配置と見積り — 追記 2026-10-10）/
-  [0070](0070-shard-loading-admission.md) 決定 5（見積りは空き VRAM と比べない）/
-  [0022](0022-gemm-register-blocking.md)（実行時オートチューン禁止）/ [0058](0058-numerics-opt-in-contract.md)（数値の opt-in 席）/
-  [0121](0121-wan22-ti2v-5b.md)（Wan2.2 — 開発機の 1280×704×121 の実測）
+- Related: ADR [0060](0060-row-block-attention.md) (row-block decomposed attention — the basis of bit
+  identity) / [0023](0023-fused-attention.md) (fused attention) /
+  [0067](0067-autoregressive-attention-vocabulary.md) decision 7 (states-form row blocks) /
+  [0093](0093-transient-liveness-packing.md) (intermediate placement and estimate — addendum
+  2026-10-10) / [0070](0070-shard-loading-admission.md) decision 5 (the estimate is not compared with
+  free VRAM) / [0022](0022-gemm-register-blocking.md) (no runtime autotuning) /
+  [0058](0058-numerics-opt-in-contract.md) (numeric opt-in options) / [0121](0121-wan22-ti2v-5b.md)
+  (Wan2.2 — the development machine's 1280×704×121 measurements)
 
 ## Context
 
-### 行ブロックの今の決め方
+Three attention forms materialise the score matrix S: fused attention (ADR 0023), the states form
+(ADR 0067) and the decomposed `rowBlockAttention` (ADR 0060). Each computes S in blocks of query rows;
+the count is the smallest that makes one S block and one row-statistics block each fit the device's
+`maxStorageBufferBindingSize`, so only the binding limit decides it. With a limit of about 2 GiB (RTX
+3080 Ti, Arc B570), Wan2.2's practical preset at 1280×704×121 (S = 27,280) has one S block of about
+1.96 GiB (17 blocks); on the development machine (RTX 3080 Ti, 12,288 MiB) the DiT stage peaked at
+11,361 MiB (ADR 0121). Splitting finer shrinks the temporaries alive during attention and lowers the
+VRAM peak. The aim is headroom on 10–12 GB class devices, not new shapes: 832×480 is outside
+acceptance, and 121 frames already completed on the development machine.
 
-スコア行列 S を実体化する attention は 3 つの形がある。融合 attention（ADR 0023）・states 形（ADR 0067）・分解 attention の
-`rowBlockAttention`（ADR 0060）である。どれも S をクエリ行のかたまり（行ブロック）に分けて順に計算する。枚数は
-「S 1 枚と行統計 1 枚のそれぞれが device の `maxStorageBufferBindingSize` に収まる最小枚数」で、device の束縛上限だけで決まる。
+Deciding facts:
 
-束縛上限がほぼ 2 GiB の機（RTX 3080 Ti・Arc B570）では、Wan2.2 の 1280×704×121（S = 27,280）の実用席で S 1 枚が約 1.96 GiB
-（17 枚）になる。開発機（RTX 3080 Ti・12,288 MiB）の DiT の段の VRAM の山は 11,361 MiB で、余裕は約 0.9 GiB だった（ADR 0121
-追記「開発機の 1280×704×121」）。
-
-### 何を変えたいか
-
-行ブロックを束縛上限より細かく割れば、attention の瞬間に生きている一時が縮み、VRAM の山が下がる。効き目は「入らない形を入れる」
-ことではなく、「10〜12 GB 級の機に余裕を作る」ことである。832×480 は受理の外で、121 フレームは開発機で完走済みである。
-
-### 決め手になる事実
-
-- **WebGPU は空き VRAM を見せない**。見積りは空き側と比べない（ADR 0070 決定 5）。実行時オートチューンは禁止（ADR 0022）。
-  いつ速度を捨てて容量を取るかを runtime や pipeline は判断できない。判断できるのは利用者（アプリ）だけである。
-- **行ブロックはビット同一**。行窓は担当行の割り当てだけを変える（ADR 0060 決定 3）。したがって予算は数値の席ではなく、
-  `submitPolicy` と同じ資源の政策になる。
-- **速度の代価は Wan の規模では未測定**。小さい形では後退の実測がある（Anima の形 `[1,16,4096,128]` の a8 / s16 で 1 分割
-  6.46 / 6.98 ms・8 分割 8.42 / 10.90 ms — [research 2026-09-10](../research/2026-09-10-codex-mtp-optimization.md)）。分割の方が
-  速かった例もある（ADR 0060 の検収・S = 750 の分解経路で 2 枚 46.8 ms 対 1 枚 48.9 ms）。
+- **WebGPU does not expose free VRAM.** The estimate is never compared with free memory (ADR 0070
+  decision 5), and runtime autotuning is ruled out (ADR 0022). Neither the runtime nor a pipeline can
+  decide when to trade speed for capacity; only the user (the application) can.
+- **Row blocks are bit-identical.** A row window only reassigns rows (ADR 0060 decision 3), so the
+  budget is a resource policy like `submitPolicy`, not a numeric option.
+- **Speed cost at Wan scale was unmeasured** at the time. Small shapes slowed down (Anima's
+  `[1,16,4096,128]`, a8 / s16: 6.46 / 6.98 ms in 1 block, 8.42 / 10.90 ms in 8 — [research
+  2026-09-10](../research/2026-09-10-codex-mtp-optimization.md)); a decomposed case sped up (ADR 0060,
+  S = 750: 46.8 ms in 2 blocks, 48.9 ms in 1).
 
 ## Decision
 
-### 1. ノブの意味 — 行ブロックの一時 1 本ごとの上限（合計ではない）
+### 1. Meaning — a limit per row-block temporary, not a total
 
-- `SessionOptions.attentionRowBlockMaxBytes`（任意・正の安全な整数・バイト）を足す。
-- 行ブロックの上限は **min(device の granted な `maxStorageBufferBindingSize`, 予算)** にする。
-- 上限は**一時 1 本ごと**で、合計ではない。S 1 枚と行統計 1 枚はそれぞれ上限以下で、同時に生きる合計は上限を超えうる。
-  i8a8 の量子化の一時（行ブロックのループの外）と他の中間は、この値で縛らない。
-- 導出は純関数 1 本（`rowBlockLimit` — `packages/runtime/src/runtime/fusion-rules/row-block-attention.ts`）にまとめる。
-  融合 attention・states 形・readonly の states 形・分解の `rowBlockAttention`・見積りは、全てこの 1 本を通す。
-- 中間バッファの配置の上限検査（ADR 0093 決定 5）は granted 値のままにする。FFN の中間や埋め込みの束縛は縛らない。
+- `SessionOptions.attentionRowBlockMaxBytes` is added (optional, positive safe integer, bytes).
+- The row-block limit is **min(granted `maxStorageBufferBindingSize`, budget)**.
+- The limit applies **to each temporary**, not to their sum: one S block and one row-statistics block
+  are each within it, and what is alive together may exceed it. The i8a8 quantization temporaries
+  (outside the row-block loop) and other intermediates are not bound by it.
+- One pure function derives it (`rowBlockLimit` in
+  `packages/runtime/src/runtime/fusion-rules/row-block-attention.ts`); fused attention, the states
+  form, the read-only states form, the decomposed `rowBlockAttention` and the estimate all go through
+  it.
+- The placement limit check for intermediate buffers (ADR 0093 decision 5) keeps the granted value;
+  FFN intermediates and embedding bindings are not bound.
 
-### 2. 既定は今と同一
+### 2. The default is unchanged
 
-欄を省くと上限は束縛上限のままになる。枚数・パイプラインキー・WGSL・dispatch 列・backing は、欄を足す前と 1 バイトも変わらない。
-既存の sha 行・WGSL スナップショット・census はそのまま通る。
+Without the field, block counts, pipeline keys, WGSL, dispatch sequences and backing are byte for
+byte as before; existing sha rows, WGSL snapshots and the census pass unchanged.
 
-### 3. 資源の政策で、数値の席ではない
+### 3. A resource policy, not a numeric option
 
-quant 席・manifest の `session`・hub には入れない。出力のビットを変えないからである。census の除外リスト `NonNumericField`
-（`packages/runtime/tests/helpers/pipeline-census.ts`）に名前を足し、「数値を変えない欄」と型の上で宣言する。
+It does not enter presets, the manifest's `session` or the hub, because it does not change output
+bits. Its name is in the census exclusion type `NonNumericField`
+(`packages/runtime/tests/helpers/pipeline-census.ts`), declaring it a field that does not change
+numbers.
 
-### 4. ビット同一の根拠
+### 4. Basis of bit identity
 
-構造の根拠は 3 つある。
+Structurally:
 
-1. 行窓は担当行の割り当てだけを変える（ADR 0060 決定 3）。1 出力要素の K 縮約順と丸めの並びは動かない。
-2. 行統計と softmax は行の中で閉じる。行を切っても 1 行の演算列は変わらない。
-3. i8a8 の量子化は行ブロックのループの外にある。量子化の値は枚数に依らない。
+1. a row window only reassigns rows (ADR 0060 decision 3); the K reduction order and the rounding
+   sequence of each output element do not move;
+2. row statistics and softmax are closed within a row; cutting between rows does not change a row's
+   operation sequence;
+3. i8a8 quantization is outside the row-block loop; its values do not depend on the block count.
 
-n = 1 から n ≥ 2 への切り替えは行窓の別キー・別 WGSL に替わる。この境目のビット同一は、テストで縛っている変種の列挙で担保する。
+Going from n = 1 to n ≥ 2 switches to a row-window key and a different WGSL. Bit identity at that
+boundary is covered by the enumerated variants that tests pin:
 
-| 形                           | 変種                                                                    | テスト（強制分割と予算分割の両方で 1 枚実行と Uint32 一致） |
-| ---------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------- |
-| 融合 attention               | f32・f32 + mask・s16・a8・a8 + s16（GQA 形を含む）                      | `packages/runtime/tests/gpu_attention_row_block_test.ts`    |
-| 融合 attention（f16 計算）   | f16・f16 + mask（GQA 形を含む・`shader-f16` を要る — 別の `Deno.test`） | 同上（本 ADR で追加）                                       |
-| 分解 attention（9 ノード窓） | f32                                                                     | `packages/runtime/tests/gpu_row_block_attention_test.ts`    |
-| states 形                    | f32 だけ（数値変種と組むと fail loudly — ADR 0058 決定 3）              | `packages/runtime/tests/gpu_state_execution_test.ts`        |
+| Form                                 | Variants                                                         | Test (forced split and budget split both equal 1-block execution in Uint32) |
+| ------------------------------------ | ---------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| fused attention                      | f32, f32 + mask, s16, a8, a8 + s16 (GQA shapes included)         | `packages/runtime/tests/gpu_attention_row_block_test.ts`                      |
+| fused attention (f16 compute)        | f16, f16 + mask (GQA included; needs `shader-f16`, separate case) | same file (added by this ADR)                                                 |
+| decomposed attention (9-node window) | f32                                                              | `packages/runtime/tests/gpu_row_block_attention_test.ts`                      |
+| states form                          | f32 only (numeric variants fail loudly — ADR 0058 decision 3)    | `packages/runtime/tests/gpu_state_execution_test.ts`                          |
 
-予算で割った走行では、枚数が 2 以上であることと、中間のピーク（`peakTransientBytes`）が予算なしより厳密に小さいことを同時に見る
-（予算が効かないまま同じ経路を 2 回撃つ形を緑にしない）。
+A budget-split run checks at once that the count is 2 or more and that the intermediate peak
+(`peakTransientBytes`) is strictly below the unbudgeted one, so a budget that has no effect cannot
+pass by running the same path twice.
 
-### 5. 落ちる時点
+### 5. When it fails
 
-- クエリ 1 行ぶんの一時が予算を超える形は、**その形の計画を最初に導く run** で、予算を名指して fail loudly にする。
-  Session の構築時には形が記号のままで、枚数が決まらないからである。Wan では重みの読み込みの後に落ちる。readonly の states 形
-  （1 行 = decode）でも、長い容量に小さい予算を渡すと decode で落ちる。
-- 構築時の値域検査（`sessionOptionsViolation`）は、構築時に分かる不正値（0・負・非整数・NaN・数値でない値）だけを落とす。
-- 予算違反を重みの読み込みの前に知る手段は、見積り（決定 7）に同じ値を渡すことである。
+- A shape whose one-query-row temporary exceeds the budget fails loudly, naming the budget, **at the
+  first run that derives the plan for that shape**: at Session construction shapes are still symbolic
+  and the count is unknown. In Wan this is after the weights are loaded. A read-only states form (one
+  row = decode) with a long capacity and a small budget fails at decode.
+- The construction-time range check (`sessionOptionsViolation`) rejects only values known to be
+  invalid then (0, negative, non-integer, NaN, non-number).
+- Passing the same value to the estimate (decision 7) reveals a violation before weights load.
 
-### 6. 強制枚数との優先
+### 6. Precedence over a forced count
 
-テスト専用の `ROW_BLOCK_SPLIT` で枚数を強制したときは、その枚数が min(束縛上限, 予算) に収まるときだけ通す。収まらなければ
-予算を名指して fail loudly にする（強制で予算を緩めない）。予算を渡さない既存の強制テストの意味は変わらない。
+When the test-only `ROW_BLOCK_SPLIT` forces a count, it passes only if that count fits
+min(binding limit, budget); otherwise it fails loudly naming the budget (forcing never loosens the
+budget). Existing forced-split tests without a budget keep their meaning.
 
-### 7. 見積り
+### 7. The estimate
 
-- `EstimateOptions.attentionRowBlockMaxBytes` を足す。値域検査は Session 構築と同じ文言で、行ブロックを持たないグラフでも見る。
-- 既存の勘定（states 形の S と行統計・分解の行ブロック attention の窓の一時）は、実行と同じ導出（決定 1）で枚数を決める。
-  1 行ぶんに満たない予算は、実行の計画導出と同じ文言で落ちる。
-- **融合 attention op のノード内一時（S・行統計・i8a8 の量子化の中間）も見積りに数える**（裁定 34 = a）。実行と同じ純関数
-  （`planAttentionBlocks`・`attentionRoute`・`attentionScoreElementBytes`・`attentionI8a8TempBytes`）で数える。これは予算の
-  有無に関わらず、融合 attention op を持つ全系列の見積りの値を増やしうる既定の挙動の変更である。そこで、先に既存の呼び手の
-  前後の表を [research 2026-10-11](../research/2026-10-11-fused-attention-estimate-before-after.md) に書き、勘定の変更と
-  `unaccounted` の文言の変更を別のコミットにした（表の結果: Anima の段ごとの見積りと Gemma の見積りは前後で不変）。
-- 融合 attention op の枚数は束縛上限で決まる。`maxStorageBufferBindingSize` を渡さない見積りは、枚数がどの device でも同じ形
-  だけを数える。WebGPU core 既定（128 MiB — device の granted 値は常にこれ以上）で 1 枚に収まる形と、予算が core 既定以下の形
-  （上限は全 device で予算そのもの）である。それ以外の形は、上限を渡すことを名指して fail loudly にする（states 形と同じ理由 —
-  core 既定で割ると、どの device でも出ない枚数を見積りだけが名乗りうる）。
-- 実行が拒否する組（mask × a8・GQA × a8・i8a8 の i32 縮約の門・states 形 × f32 以外の席）には見積りも数を返さない。判定は
-  実行と同じ純関数（`fusedAttentionViolation` / `stateAttentionVariantViolation` —
-  `packages/runtime/src/runtime/recipe-builders/attention.ts`）で、文言も同じ。
-- `EstimateOptions` は `attentionCompute` / `attentionScoreStorage` も受ける。省略は runtime の既定と同じ f32 で数える
-  （`stateAttentionReduce` と同じ前例）。
+- `EstimateOptions.attentionRowBlockMaxBytes` is added, range-checked with the same message as Session
+  construction, even for graphs without row blocks.
+- Existing accounting (states-form S and row statistics, the decomposed row-block window temporaries)
+  derives its counts as execution does (decision 1). A budget below one row fails with the message
+  execution uses.
+- **The in-node temporaries of fused attention ops (S, row statistics, i8a8 quantization
+  intermediates) are counted too**, with execution's pure functions (`planAttentionBlocks`,
+  `attentionScoreElementBytes`, `attentionI8a8TempBytes` in `recipe-builders/attention.ts`;
+  `attentionRoute` in `attention-route.ts`, both under `packages/runtime/src/runtime/`). This changes
+  the default for every series with fused attention ops, budget or not, so the before / after table
+  for existing callers came first
+  ([research 2026-10-11](../research/2026-10-11-fused-attention-estimate-before-after.md)), and the
+  accounting and `unaccounted` message changes were separate commits.
+- A fused attention op's count depends on the binding limit. An estimate without
+  `maxStorageBufferBindingSize` counts only shapes whose count is the same on every device: shapes
+  that fit one block at the WebGPU core default (128 MiB; a granted value is never lower) and shapes
+  whose budget is at or below the core default (the limit is then the budget everywhere). Other
+  shapes fail loudly asking for the limit (as for the states form: dividing by the core default could
+  claim a count no device would produce).
+- Combinations execution rejects (mask × a8, GQA × a8, the i8a8 i32 reduction check, states form ×
+  non-f32) get no estimate either, decided by the same pure functions (`fusedAttentionViolation` /
+  `stateAttentionVariantViolation`) with the same messages.
+- `EstimateOptions` also accepts `attentionCompute` / `attentionScoreStorage`; omitted, they count as
+  the runtime default f32 (the precedent of `stateAttentionReduce`).
 
-### 8. ビット同一の門は 2 層
+### 8. Bit-identity check in two layers
 
-- **層 1**: DiT の e2e（`packages/models/tests/e2e_wan_ti2v_dit_test.ts`）で `SessionOptions` を直接渡す u32 の A/B。同じ入力で
-  予算なし / 512 MiB / 256 MiB を回し、出力のビット列を比べる。形は 17 フレーム（既定のレーン）と 121 フレーム（opt-in
-  `KARUME_WAN_TI2V_121F=1`）で、実用席と参照席の両方を回す。行ブロックの期待枚数は self / cross 別・席の格納幅つきの式で
-  runtime と独立に導き、行窓の ①QK の dispatch 本数がそれと一致し、予算なしと違うことを同時に見る。models の口に依らない。
-- **層 2**: pipeline の sha 行との照合。予算を pipeline に届ける口（models）ができたときだけ行う。口を出さないと決まった場合、
-  pipeline に配線が無いので出力は変わりえず、層 2 は要らない。
+- **Layer 1**: the DiT e2e (now `packages/e2e/tests/e2e_wan_ti2v_dit_test.ts` — ADR 0129) runs a u32
+  A/B with `SessionOptions` passed directly: the same input without a budget, with 512 MiB and with
+  256 MiB, comparing output bits, at 17 frames (default lane) and 121 frames (opt-in
+  `KARUME_WAN_TI2V_121F=1`), for the practical and the reference preset. The expected block counts are
+  derived independently of the runtime (self / cross separately, with the preset's storage width); the
+  number of ① QK dispatches of the row windows must equal them and differ from the unbudgeted run. It
+  does not depend on a models knob.
+- **Layer 2**: comparison with the pipeline's sha rows, only once a models knob exists; without one
+  no wiring can change the output.
 
-### 9. online softmax（S を作らない opt-in の高速パス）との境界
+### 9. Boundary with online softmax (an opt-in fast path without S)
 
-この ADR の外に置く。決めるのは境界の 2 点だけである。
+Outside this ADR, except: this knob is a resource policy and stays out of presets; whether a path
+without S ignores or rejects it is that path's ADR's decision (per-phase GPU times were taken in step
+4b).
 
-1. このノブは資源の政策で、quant 席に入れない。
-2. S を作らない経路が来たときに、このノブを無視するか拒否するかは、その経路の ADR で決める。
+### 10. Public surface
 
-その経路の前提になる段別の GPU 時間（QK・行統計・PV）は、段 4b の計測モードで同じ走行のついでに採る。
+- The runtime's `SessionOptions` / `EstimateOptions` each gain one optional field; `mod.ts` exports no
+  new name.
+- **No knob in models** (`WanTi2vPipeline`) **and no budget in Wan's default**: ruled on 2026-10-11
+  after step 4b; added when a problem needs it (ADR [0005](0005-verification.md) addendum 2026-10-11:
+  no options without a use). Reason: the 121-frame practical preset fits the 12 GiB class development
+  machine without a budget (DiT-only peak 11,308 MiB), and a wall-clock cost could not be ruled out.
+  That peak was measured on Deno 2.9.6 only; the Node + Dawn peak is not measured. (The gpu-lab Wan
+  tab named here was removed with `tools/gpu-lab` in `bb35fe2a`, 2026-10-16.)
+- "61 frames and more are unsupported on 10 GB class devices" (`docs/limitations.md`, Wan2.2 sizes)
+  stays: no such device is at hand to check. Its basis is the Deno total-allocation ceiling of about
+  9.4 GiB measured on the former Arc B570; Node + Dawn's ceiling is not measured.
 
-### 10. 公開面
+## Alternatives not taken
 
-- runtime の `SessionOptions` / `EstimateOptions` に任意欄を 1 つずつ足すだけを先に行う。`mod.ts` の輸出名は増えない。
-- models（`WanPipelineOptions`・gpu-lab の Wan タブ）に出すかは、段 4b の実測（減り幅と速度の代価）を見てから決める（裁定 33 = a）。
-  → 出さないと決めた（段 4b の結果の節の末尾 — 裁定 39 = a）。
-- Wan の既定に予算を入れるかは、段 4b の数字を添えて後で問う。→ 入れないと決めた（同上）。
-- 10 GB 級の機で「61 フレーム以上は非対応」（limitations）は変えない（裁定 35 = a — 確かめる機が手元に無い）。
-
-## 採らなかった案
-
-- **runtime の既定を固定の予算にする（例 1 GiB・全系列）**: 空き VRAM が見えないので、余裕のある機でも一律に分割の代価を払う。
-  代価は Wan の規模では未測定で、小さい形では後退し、分解経路では速くなった例もある。どちらに転ぶか分からないまま、Anima・Irodori
-  など全系列の既定の性能が黙って変わる（ADR 0058 決定 3 の精神に反する）。固定値の根拠は 1 機の実測にしか置けない。
-- **総 VRAM の予算から行ブロックの上限を逆算する（pipeline が見積りで決める）**: 融合 attention の一時を見積りが数えるまで
-  成立しない。backing の実測は同じ 121 フレーム・同じ 17 枚で Deno 5.97 GiB 対 Chrome 4.80 GiB と 1.17 GiB 違い、原因が
-  分かっていない（ADR 0121）。逆算した値は機によって外れうる。外れると out-of-memory で落ち、最上段の公開面の意味が内部の近似の
-  精度に縛られる。
-- **`planBackingBudgetBytes` の流用**: backing の保持本数という別の意味と混ざる。
-- **device の束縛上限そのものを絞る**（`acquireGpu` の requiredLimits を下げる）: FFN の中間や埋め込みの束縛まで縛る。
-- **`ROW_BLOCK_SPLIT`（枚数）を公開のノブに昇格する**: 同じ枚数でも形ごとに 1 枚の大きさが変わる。バイトの上限に替える。
+- **A fixed runtime default budget (for example 1 GiB for all series)**: free VRAM is invisible, so
+  devices with headroom pay the split cost too; the default performance of every series would change
+  silently in either direction (against the spirit of ADR 0058 decision 3), and a fixed value could
+  rest only on one machine. (Step 4b later measured the Wan-scale cost; the other reasons stand.)
+- **Derive the limit from a total VRAM budget via the estimate**: needed the estimate to count fused
+  attention first, and backing differed by 1.17 GiB between Deno (5.97 GiB) and Chrome (4.80 GiB) for
+  the same run for an unknown reason (ADR 0121), so a derived value can miss and fail out of memory.
+- **Reuse `planBackingBudgetBytes`**: mixes in a different meaning (how many backings are kept).
+- **Lower the device binding limit itself** (`requiredLimits` in `acquireGpu`): would also bind FFN
+  intermediates and embeddings.
+- **Promote `ROW_BLOCK_SPLIT` (a count) to a public knob**: the same count gives different block sizes
+  per shape; a byte limit is used instead.
 
 ## Consequences
 
-- runtime の `SessionOptions` / `EstimateOptions` に任意欄が 1 つずつ増える（追加だけで、既存の呼び手は壊れない）。hub・manifest・
-  quant 席は変わらない。
-- 予算をかけると dispatch が増える（融合 attention は 1 枚あたり 3 本）。Wan2.2 の 121 フレームの実用席で 512 MiB なら、1 forward
-  あたり約 4,590 本増える（計算値: self (67 − 17) × 3 × 30 層 + cross (2 − 1) × 3 × 30 層）。速度の代価の実測は「結果」の節。
-- 予算をかけると cross-attention（テキスト 512 列）も割れる（121 フレームの実用席で 512 MiB なら 2 枚 — 計算値）。予算を
-  指定した利用者の環境では、他の系列（Anima・Irodori など）の n = 1 から n ≥ 2 への境目が新たに踏まれる。強制分割の parity
-  （決定 4）が形を横断して担保する。
-- 効き目は推測の幅である（実測は「結果」の節 — 512 MiB で backing −1.46 GiB）。backing の式 `max(Sblk + k·A, 2·S·ffn·4 + 3·A)`
-  （[research 2026-10-04](../research/2026-10-04-wan22-ti2v-5b-karume-gap.md) §3.2）に当てると、予算 512 MiB の減り幅は
-  0.95〜1.46 GiB になる（推測 — 下端が Chrome の点、上端が Deno の点）。Chrome の点では FFN の項が下限を決め、1 GiB でも
-  512 MiB と同じだけ減る（推測）。
-- 落ちる時点が遅い（決定 5）。予算違反は Wan では重みの読み込みの後に落ちる。
-- 見積りの拡張（決定 7）で、融合 attention op を持つグラフの `workspaceBytes` / `peakAccountedBytes` が増えうる。既存の呼び手は
-  前後で不変だった（[research 2026-10-11](../research/2026-10-11-fused-attention-estimate-before-after.md) の前後の表）。Anima の
-  段ごとの見積りは、text 段が融合 attention op を持たず、VAE の 1 本の一時は既存の領域の中に収まる。Gemma の attention は全て
-  states 形である。したがって Anima の先回りの退避（常駐 DiT を畳む判断）の入力は変わらない。増えるのは Wan2.2 の DiT
-  （融合 attention op 60 本）で、実用席・121 フレーム・予算なしの `workspaceBytes` は 3.54 GiB から 5.61 GiB になる。Wan の
-  pipeline は見積りを呼ばないので、実行の挙動は変わらない。
-- 束縛上限を渡さない見積りは、融合 attention op の枚数が device に依る形を拒否する（決定 7）。既存の呼び手は上限を渡すか
-  （Anima）、融合 attention op を持たない（Gemma）ので影響しない。
+- One optional field each in the runtime's `SessionOptions` / `EstimateOptions` (additive; existing
+  callers unaffected). Hub, manifest and presets unchanged.
+- A budget adds dispatches (3 per block for fused attention): for the 121-frame practical preset at
+  512 MiB, about 4,590 more per forward (self (67 − 17) × 3 × 30 layers + cross (2 − 1) × 3 × 30
+  layers).
+- A budget also splits cross-attention (512 text columns; 2 blocks at 512 MiB for the 121-frame
+  practical preset). Where users set a budget, other series (Anima, Irodori, …) newly cross the
+  n = 1 to n ≥ 2 boundary; the forced-split parity of decision 4 covers that across shapes.
+- Failures come late (decision 5): in Wan after the weights are loaded.
+- The estimate extension (decision 7) may raise `workspaceBytes` / `peakAccountedBytes`. Existing
+  callers were unchanged (Anima's text stage has no fused attention op and its VAE temporary fits the
+  existing region; Gemma uses only the states form), so Anima's pre-emptive eviction of the resident
+  DiT gets the same inputs. Wan2.2's DiT (60 fused attention ops; practical preset, 121 frames, no
+  budget) rises from 3.54 to 5.61 GiB `workspaceBytes`; Wan's pipeline does not call the estimate.
+  Callers that omit the binding limit are not affected by decision 7's rejection: Anima passes it and
+  Gemma has no fused attention op.
 
-## 検収（門の形）
+## Acceptance
 
-- ホスト（GPU 不要）: `rowBlockLimit` の 3 分岐・Wan2.2 の形の枚数（121 フレームの実用席の self で予算なし / 512 MiB / 256 MiB が
-  17 / 67 / 134 枚 ほか）・1 行に満たない予算の fail loudly（予算を名指す）・強制枚数との併用・値域検査・見積りの手計算の定数
-  （ADR 0093 追記の例に予算 64 MiB を掛けると 3 枚・`workspaceBytes` 92,057,472 B）。既存の WGSL スナップショットと census は不変。
-- 実 GPU（決定 4 の表）: 強制分割と予算分割の両方で 1 枚実行と Uint32 一致・予算つきの枚数が 2 以上・ピークが厳密に小さい。
-- 層 1（決定 8）: DiT の u32 A/B。
-- 見積りの拡張: 他の融合が成立しない融合 attention 1 ノードのグラフで、`workspaceBytes` が実行の `planBacking.residentBytes` と
-  予算あり・なしの両方で厳密に一致する（`packages/runtime/tests/gpu_estimate_test.ts`）。
+Completed 2026-10-11: host tests (`rowBlockLimit`, Wan2.2 counts, loud failures, forced counts, range
+checks, hand-computed estimate constants), the real-GPU table of decision 4, layer 1 of decision 8,
+and the estimate extension (`workspaceBytes` equals execution's `planBacking.residentBytes` for a
+single fused attention node — `packages/runtime/tests/gpu_estimate_test.ts`). WGSL snapshots and the
+census were unchanged.
 
-## 結果
+## Results
 
-実測は開発機（RTX 3080 Ti・Deno 2.9.6・2026-10-11）の 1 台だけで、表と測り方の正本は
-[research 2026-10-11](../research/2026-10-11-row-block-budget-stage-4b.md)。Chrome と 10 GB 級の機は測っていない。
+Measured on one machine only (RTX 3080 Ti, Deno 2.9.6, 2026-10-11); tables and method in
+[research 2026-10-11](../research/2026-10-11-row-block-budget-stage-4b.md). Chrome and 10 GB class
+devices were not measured.
 
-### 層 1 の門（決定 8）
-
-17 フレームと 121 フレーム、参照席と実用席の全ての組で、予算 512 MiB / 256 MiB の出力が予算なしと Uint32 で一致した。①QK の
-枚数は全ての組で runtime と独立の期待と一致し、予算なしとも違った（121 フレームの self は実用席 17 / 67 / 134 枚・参照席 34 / 134 /
-268 枚、cross は実用席 1 / 2 / 3 枚・参照席 1 / 3 / 5 枚）。17 フレームの A/B は既定のレーン（`test:models:wan-ti2v`）に入っており、
-所要は 2 席で 1m26s。層 2 は口を出すかが決まっていないので行っていない。
-
-### 段 4b（121 フレームの実用席・DiT の 1 forward）
-
-| 予算    | backing（予算なしとの差） | VRAM の山（GPU 全体・2 回の平均） | 計測モードの GPU 時間の合計 | うち `attention_pv` | 1 submit の最大 |
-| ------- | ------------------------- | --------------------------------- | --------------------------- | ------------------- | --------------- |
-| なし    | 5.97 GiB                  | 11,308 MiB                        | 37.3 s                      | 10.9 s              | 288 ms          |
-| 1 GiB   | 4.99 GiB（−0.98 GiB）     | 10,304 MiB                        | 35.8 s                      | 9.9 s               | 293 ms          |
-| 512 MiB | 4.51 GiB（−1.46 GiB）     | 9,811 MiB                         | 36.3 s                      | 12.8 s              | 262 ms          |
-| 256 MiB | 4.33 GiB（−1.65 GiB）     | 9,622 MiB                         | 46.6 s                      | 20.9 s              | 329 ms          |
-
-- **山は 1 GiB → 512 MiB → 256 MiB で単調に下がった**。GPU 全体の山の差は backing の差と 3 MiB 以内で一致した。ただし 512 MiB から
-  256 MiB への上積みは backing −0.19 GiB で、計測モードの GPU 時間は +28% になった。
-- **推測の幅の置き換え**: Consequences の推測（512 MiB で backing −0.95〜−1.46 GiB）に対し、実測は −1.46 GiB で上端（Deno の点）と
-  一致した。山は 9,811 MiB で、ADR 0121 の DiT の段の山 11,361 MiB から推測の減り幅を引いた 9,866〜10,389 MiB より低い（この計測の
-  予算なしの山は DiT だけを回した 11,308 MiB で、基準が違う）。Chrome の点（推測の下端）は未測のまま。
-- **見積りの単調でない形（256 MiB が 512 MiB より大きい — 決定 7 の前後の表）は実寸の backing では出なかった**。
-- **速度の代価**: 1 GiB と 512 MiB は計測モードの GPU 時間の合計が予算なしと揺れの内（−3.9% / −2.6% — attention 以外の部分が同じ
-  カーネルで 2.35 s 揺れた）。256 MiB は +24.9% で、ほぼ全てが `attention_pv` の増分だった。`attention_qk` と `attention_stats` は
-  予算に依らずほぼ同じだった。1 submit の GPU 時間の最大は全ての予算で 1 s の内。
-- 通常モードの壁時計（ABBA・各 4 回）は全ての走行が 93〜94 ℃ の熱制限を含み、予算なしの 4 回でも 28.4〜40.5 s と揺れたので、速さの
-  主な材料にはしていない。256 MiB だけが 4 回とも遅かった（46.2〜49.4 s）。
-- dispatch の増分は計算値と一致した（512 MiB で 1 forward あたり 4,590 本）。
-
-**決定（裁定 39 = a・利用者 2026-10-11）**: Wan の既定は変えない（予算を入れない）。models（`WanTi2vPipeline`）と gpu-lab の Wan タブにも
-口を足さない — 解決すべき問題が出たら足す（ADR [0005](0005-verification.md) の追記 2026-10-11 の方針: 使いどころの無い選択肢で公開面を
-増やさない）。理由: 121 フレームの実用席は予算なしで 12 GiB 級の開発機に収まり（DiT だけを回した山 11,308 MiB）、解決すべき問題が無い。
-また、壁時計の代価が無いとは言えていない（通常モードの壁時計は熱制限で揺れ、速さの材料にできなかった）。runtime の
-`SessionOptions.attentionRowBlockMaxBytes` は従来どおり使える。
+- **Layer 1**: for 17 and 121 frames and both presets, outputs at 512 MiB and 256 MiB equal the
+  unbudgeted output in Uint32, with ① QK counts as expected. The 17-frame A/B runs in the default lane
+  (now the Vitest project `models:wan-ti2v` — ADR 0129). Layer 2 was not run (no models knob).
+- **Step 4b** (121-frame practical preset, one DiT forward): backing 5.97 GiB without a budget, −0.98
+  at 1 GiB, −1.46 at 512 MiB, −1.65 GiB at 256 MiB; the peak fell from 11,308 to 9,622 MiB. GPU time
+  in measurement mode stayed within noise at 1 GiB and 512 MiB and rose by 24.9% at 256 MiB (almost
+  all `attention_pv`); wall-clock runs were thermally throttled and not used. Decision 10 records what
+  followed.

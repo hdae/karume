@@ -10,7 +10,7 @@
     2026-09-26 addendum that rejected a runtime-wide numerics axis.
   - [0110](0110-practical-tier-numerics-contract.md) — the reference / practical tiers and the contract classes
     E / C / R / Q; this ADR amends decisions 1, 7 and 8 and keeps decisions 2–6 as the correctness contract.
-  - [0028](0028-f16-compute-variants.md) — decision 1, the ban on automatic variant selection ("auto 禁止");
+  - [0028](0028-f16-compute-variants.md) — decision 1, the ban on automatic variant selection ("no auto");
     relaxed for the practical profile only.
   - [0111](0111-session-options-composition.md) — the composition rule "explicit > quant declaration > runtime
     default"; this ADR withdraws its decision 7 (no bulk axis in the runtime) and extends decision 1.
@@ -322,4 +322,4 @@ The ADR is reopened when either is measured:
 - Context item 3: its MUST is superseded by ADR 0128 decision 5 (noted inline).
 - Staging: the work moved to phase 2 step 2-8 and was deferred there; none of 3-1a–3-1d is scheduled.
 - The glossary (`docs/GLOSSARY.ja.md`) marks the profile terms as deferred and restores "reference path"
-  (参照経路) as the term for the runtime's omitted-value path.
+  as the term for the runtime's omitted-value path.

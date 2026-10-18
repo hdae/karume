@@ -1,639 +1,472 @@
-# 0122: umT5 の出所を本家 google/umt5-xxl へ移し、互換の text encoder を作って差し替える経路を定める
+# 0122: umT5 upstream moves to google/umt5-xxl; a path to build and swap in compatible text encoders
 
-- Status: accepted（利用者裁定 2026-10-04 — 「裁定（2026-10-04・利用者）」節）
+- Status: accepted (2026-10-04, the maintainer's rulings on the explicit opt-in for undeclared
+  licences and on keeping component replacement as it is); decisions 3 and 8 partly superseded by
+  this ADR's addendum of 2026-10-15 (the umT5 repository now carries its own tokenizer asset);
+  decision 4's "the modules stay under `wan/`" and the `examples/wan` part of decision 7.2 withdrawn
+  2026-10-18
 - Date: 2026-10-04
-- 関連: research [2026-10-04-umt5-upstream-provenance](../research/2026-10-04-umt5-upstream-provenance.md)（以下「出所調査 §n」—
-  重み・トークナイザ・容器への影響の実測）/ [2026-10-04-component-swap-recon](../research/2026-10-04-component-swap-recon.md)
-  （以下「差し替え調査 §n」— 部品差し替え席の現状と穴）/ 追加学習版 umT5 の読み取り調査（以下「追加学習版調査」— 記録は
-  `.claude/reviews/2026-10-04_umt5-variant-recon/` の `REPORT.md` と `raw/`〈比較の台本・ヘッダの JSON・比較の結果〉。git 追跡外で、
-  消して安全な席ではない。固有名はそちらにだけ置く）/ ADR [0119](0119-wan-umt5-gpu-text-encoder.md)（umT5 の GPU 経路・別リポ `karume-umt5-xxl`・越境参照 —
-  追記「段 10d の設計」D の出所の記述を本 ADR が置き換える）/ [0108](0108-container-format.md) 決定 19（部品差し替え席）/
-  [0109](0109-manifest-v5-container.md) 決定 3・10（越境参照の二重 pin・差し替え席の admission）/ [0038](0038-manifest-v1.md) §7（越境参照）/
-  [0086](0086-distribution-source.md)（取得元ハンドル・越境の明示 mapping）/ [0088](0088-civitai-air-intake.md)（第三者の重みの取り込みと
-  出所の json — 本 ADR の取り込みの前例）/ [0092](0092-distribution-repos-and-sources.md) 決定 1・2・6・7（リポの粒度と命名・
-  ライセンス的に面倒な派生・法的テキストの同梱）/ [0065](0065-exporter-core-recipe-split.md)（exporter core と recipe の境界）/
-  [0106](0106-device-keyed-references.md)（sha256 参照値の環境行）/ 0121（Wan2.2 TI2V-5B — 並行して起草中。umT5 を越境参照する側）
+- Related: research [2026-10-04-umt5-upstream-provenance](../research/2026-10-04-umt5-upstream-provenance.md)
+  ("provenance study §n" — weights, tokenizer and container effects, measured) /
+  [2026-10-04-component-swap-recon](../research/2026-10-04-component-swap-recon.md) ("swap study §n" —
+  the state of component replacement and its gaps) / the read-out of the community fine-tune of umT5
+  (`.claude/reviews/2026-10-04_umt5-variant-recon/`, untracked; third-party names live only there) /
+  ADR [0119](0119-wan-umt5-gpu-text-encoder.md) (the umT5 GPU path, the separate repository
+  `karume-umt5-xxl`, cross-repository references — this ADR replaces the provenance statement of its
+  "step 10d design" addendum, part D) / [0108](0108-container-format.md) decision 19 (component
+  replacement) / [0109](0109-manifest-v5-container.md) decisions 3 and 10 (double pin of
+  cross-repository references; admission of a replacement) / [0038](0038-manifest-v1.md) §7
+  (cross-repository references) / [0086](0086-distribution-source.md) (source handles, explicit
+  cross-repository mapping) / [0088](0088-civitai-air-intake.md) (intake of third-party weights with a
+  provenance JSON — the precedent) / [0092](0092-distribution-repos-and-sources.md) decisions 1, 2, 6
+  and 7 (repository granularity and naming, licence-encumbered derivatives, bundled legal texts) /
+  [0065](0065-exporter-core-recipe-split.md) (exporter core and recipe boundary) /
+  [0106](0106-device-keyed-references.md) (per-environment sha256 rows) /
+  [0121](0121-wan22-ti2v-5b.md) (Wan2.2 TI2V-5B, which also references the umT5 container)
 
 ## Context
 
-### 要望
+### Requests
 
-利用者の要望は 3 つ。
+The maintainer asked for three things:
 
-1. **出所を本家にしたい**。`karume-umt5-xxl` は Wan2.1 Diffusers の `text_encoder` から焼いたもので、モデルカードの出自が
-   「Wan のリポの部品」になっている。umT5-XXL は Google の汎用の encoder なので、本家 `google/umt5-xxl` から export したい。
-2. **依存モデルの差し替えの仕組みを考えておきたい**。パイプラインが内部で使うモデル（Wan の text encoder など）を、
-   互換の別モデルへ差し替える使い方の設計。
-3. **コミュニティの追加学習版 umT5 の変換を試したい**。HF に公開されている追加学習版を Karume の容器にし、Wan2.1 の
-   text encoder に差し替えて動かしたい。
+1. **Make the upstream the original.** `karume-umt5-xxl` was built from the `text_encoder` of Wan2.1
+   Diffusers, so its model card named "a component of the Wan repository" as its origin. umT5-XXL is
+   Google's general encoder; export it from `google/umt5-xxl`.
+2. **Design the replacement of a dependent model** (for example Wan's text encoder) with a compatible
+   one.
+3. **Try converting a community fine-tune of umT5** published on HF and run it as Wan2.1's text
+   encoder.
 
-### 用語（本 ADR の初出）
+### Terms first used here
 
-| 語                          | 意味                                                                                                                                                           |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 本家（`google/umt5-xxl`）   | umT5-XXL を公開した Google の HF リポ。encoder + decoder + `lm_head` の `UMT5ForConditionalGeneration` を pickle の `.bin` 6 分割で持つ                        |
-| pickle の `.bin` 分割形     | `pytorch_model-0000N-of-0000M.bin` + 索引 `pytorch_model.bin.index.json`。中身は torch の pickle（zip 形式）で、safetensors と違って読むと任意コードが走りうる |
-| `weights_only=True`         | `torch.load` の引数。pickle から復元してよい型をテンソルと基本型に限り、任意コードの実行を閉じる                                                               |
-| tied な別名                 | 同じ重みを 2 つの名前で指す形。umT5 では語彙埋め込み `shared.weight` と `encoder.embed_tokens.weight`                                                          |
-| RNE                         | 最近接偶数丸め（round to nearest, ties to even）。f32 → bf16 の標準の丸め                                                                                      |
-| upcast                      | 精度の低い型から高い型への変換（bf16 → f32）。bf16 の値は f32 で全部表せるので無損失。本 ADR では取り込みの BF16 を読みの時点で広げる（写しは作らない）        |
-| 互換の text encoder         | 本家と同じ構成（`config.json` のグラフに効く欄が同じ）で重みだけが違う umT5（追加学習版など）。同じ recipe で export するとグラフ記述が同じになる見込み        |
-| 取り込み（intake）          | 第三者の重みを pin した revision で取り、sha256 を照合し、取ったファイルをそのまま `inputs/` に置き、出所の記録を添える工程（ADR 0088 の umT5 版）             |
-| 出所の記録（`intake.json`） | 取り込みの台本が API の値から機械で書く json（リポ・revision・ファイル・sha256・宣言されたライセンスとベース・元の dtype・config の出所・取得日時）            |
-| 手元の実験用ミラー          | 配布形と同じ形だが公開しない配布ディレクトリ。`models/` の外に置く                                                                                             |
-| ライセンス未宣言            | HF のリポがライセンスを名乗っていない状態（cardData も README も無い）。再配布の条件が決まらない                                                               |
-| `NOASSERTION`               | SPDX がライセンス情報を主張しないことを示す特別な値。本 ADR では「ライセンス未宣言」を容器へ焼く印の候補                                                       |
+| Term                                      | Meaning                                                                                                                                         |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| original (`google/umt5-xxl`)              | Google's HF repository: the full `UMT5ForConditionalGeneration` (encoder, decoder, `lm_head`) as six pickle `.bin` shards                       |
+| pickle `.bin` shards                      | `pytorch_model-0000N-of-0000M.bin` plus the index `pytorch_model.bin.index.json`; unlike safetensors, loading can run arbitrary code             |
+| tied alias                                | one weight under two names; in umT5 `shared.weight` and `encoder.embed_tokens.weight`                                                           |
+| compatible text encoder                   | an umT5 with the original's configuration (the graph-relevant fields of `config.json`) and different weights, such as a fine-tune               |
+| intake                                    | fetching third-party weights at a pinned revision, checking sha256, storing the files unchanged under `inputs/` with a provenance record (as ADR 0088) |
+| provenance record (`intake.json`)         | JSON written by the intake script from API values: repository, revision, files, sha256, declared licence and base, source dtype, config origin  |
+| local experimental mirror                 | a distribution-shaped directory that is never published; it lives outside `models/`                                                            |
+| undeclared licence                        | the HF repository names no licence (no `cardData`, no README); the redistribution terms are unknown                                              |
 
-### 調査の結論（数値は調査の値）
+### Findings (numbers from the studies)
 
-**本家を上流にできるか**（出所調査）:
+- **The weights are identical.** The 243 encoder tensors of the original at commit
+  `66cb9e7e85526fe440a945569e42c72fb6cbc0ad` (`apache-2.0`) match the 242 tensors of Wan2.1
+  Diffusers' `text_encoder` bit for bit in f32 (`encoder.embed_tokens.weight` shares storage with
+  `shared.weight`). Wan's f32 is real f32, not an upcast of bf16 (provenance study §2). Quantization
+  and the traced graph are identical too (§4.1).
+- **The obstacles were the recipe's reader**: the original ships only pickle `.bin` (safetensors exist
+  only in two unmerged bot PRs whose shard 1 differs in sha256 for an unknown reason); the index
+  lists both tied aliases; `UMT5EncoderModel.from_pretrained` requires all six shards (about 51.9 GB)
+  while the encoder needs shards 1–3 (29,837,688,579 B).
+- **The tokenizer gives the same ids but different bytes**: no id mismatch over 2,034 inputs, but the
+  original `tokenizer.json` differs in the last digits of 65,654 scores (§3).
+- **Wan2.2 TI2V-5B uses the same umT5**: its bf16 is the round-to-nearest-even (RNE) rounding of
+  Wan2.1's f32 for all 242 tensors (§6).
+- **Component replacement already exists** (swap study): eight families' `fromPretrained` accept
+  `components: { <role>: { source, model?, quant? } }`, handled in one place
+  (`packages/models/src/hub/components.ts`). A replacement is accepted when its graph descriptor
+  sha256 equals the original manifest's declaration, bindings have no missing or surplus entries, and
+  the family check passes. The graph descriptor does not depend on the weights. Only containers are
+  taken from the replacement; tokenizer and other assets come from the original manifest and nobody
+  checks they match. Wan's family check (`umt5Contract`, now in
+  `packages/models/src/wan/text-stage.ts`) accepts only i8 and f32 storage.
+- **The graph is not the whole contract**: changing `relative_attention_max_distance` from 128 to 64
+  produced a byte-identical container. The bucket table is a graph input whose configuration the TS
+  host fixes (`UMT5_RELATIVE_POSITION = { numBuckets: 32, maxDistance: 128 }` and the effective length
+  512 in `packages/models/src/umt5/relative-position.ts`). Component replacement neither checks nor
+  records the provenance, licence or pipeline name of the replacement.
+- **The community fine-tune**: one bf16 safetensors file (11,361,851,256 B) with the 242 HF-style keys
+  of Wan's `text_encoder`, no `config.json`, no index. Only 80 tensors (blocks 16–23) differ; the
+  other 162 equal the RNE rounding of Wan's f32. The fp8 variant is a scale-1 cast (relative RMS
+  error of q 4.9%) and unusable as input. Its embedded `spiece.model` matches the original's sha256
+  (fact); that the bf16 variant used the same tokenizer is an inference. **It declares neither licence
+  nor base.** i8 quantized from bf16 differs in bytes from i8 quantized from f32 even in unchanged
+  layers.
 
-- **重みは同じ**。本家の commit `66cb9e7e85526fe440a945569e42c72fb6cbc0ad`（main・tags なし・2023-07-03・`apache-2.0`）の encoder 243 本は、
-  Wan2.1 Diffusers の `text_encoder` 242 本と f32 で全要素がビット一致した（差のある要素 0 / 6,731,059,200。本家だけにある
-  `encoder.embed_tokens.weight` は `shared.weight` と同じ storage — 出所調査 §2.1）。Wan の f32 は bf16 からの昇格ではなく本物の f32（同 §2.2）。
-- **量子化とグラフも同じ**。recipe の `quantize_rows` を両方から呼んだ 3 本で packed と scale が一致。本家の config から組んだ meta モデルの
-  trace は、ノード 914・テンソル 244・量子化の対象 169 本まで一致（同 §4.1）。容器で変わるのは part 0（`model-00001-of-00026.krm`）の
-  `provenance.upstreamRevision` の 40 文字だけの見込み（推測 — 容器は書いていない・同 §4.2）。
-- **障害は recipe の読み口の 3 つ**（同 §0）: ①本家は pickle の `.bin` だけ（safetensors は未マージの bot の PR 2 本にしか無く、2 本で
-  shard 1 の sha256 が違う — 理由は未調査）。②索引が tied な別名を両方持ち、今の `checkpoint_keys`（`wan/umt5_export.py:309-329`）が
-  「1 つに決まらない」で落ちる（実測）。③`UMT5EncoderModel.from_pretrained` は decoder を含む 6 本全部（約 51.9 GB）を要求する（実測）。
-- **encoder に要るのは shard 1〜3**（計 29,837,688,579 B）。索引の `total_size` は 51,890,126,848 B（同 §1）。`UMT5Config.from_pretrained` は
-  本家の config で通るが、`AutoConfig` は `model_type` が欠けていて落ちる（同 §1.1）。
-- **トークナイザは id 列が同じでバイトが違う**。2,034 本で id 列の不一致 0 だが、本家の `tokenizer.json` はスコアが 65,654 個ずれる
-  （最大 3.55e-15）。本家から資産を焼くと資産のバイトが変わる（同 §3）。`spiece.model` は本家・Wan で sha256 が一致。
-- **Wan2.2 TI2V-5B の umT5 は同じもの**。Diffusers 版は bf16 で、Wan2.1 の f32 の RNE 丸めと全 242 本でビット一致（同 §6）。
-- **独立検証で落ちていた事実**（同「独立検証」）: `write`（`--check` なし）は系列の部品ディレクトリを丸ごと差し替え golden も消す
-  （`umt5_export.py:567-590`）ので、移行は write → reference → dist の再生成が要る。出所調査 §4.2 の表は part の番号に 0 始まりと
-  1 始まりが混ざる（本 ADR はファイル名の番号 `00001`〜`00026` で書く）。Wan2.2 から越境参照するとき、トークナイザ資産は Wan2.1 の
-  リポの部品で `karume-umt5-xxl` には無い。
+### Constraints
 
-**差し替えの仕組みの現状**（差し替え調査）:
-
-- **仕組みは既にある**。8 系列の `fromPretrained` が `components: { <役割>: { source, model?, quant? } }` を受け、
-  `packages/models/src/hub/components.ts:381-492` の 1 本が処理する。受理の条件は「差し替え先のグラフ記述の sha256 が元の manifest の
-  宣言と同一」（`:431-437`）+ 束縛の不足 / 余剰 0 + 家族の門。Wan では `textEncoder: "gpu"` の経路で `text_encoder` を差し替えられる
-  （`wan/pipeline.ts:188-191`）。
-- **グラフ記述は重みに依らない**。umT5 の書き手は meta モデルで trace する。合成実験で「重みだけ違う 3 本はグラフ記述の sha256 が一致・
-  語彙 +1 で不一致」（差し替え調査 §1.2.3）。実ミラーでも anima の公式 5 + 第三者 2 の `transformer` が同じ sha256（同 §1.2.4）。
-- **差し替えで取るのは容器だけ**。トークナイザ等の資産は元の manifest から取る（`components.ts:486-489`）。トークナイザの同一性は
-  誰も検査しない（同 §1.3）。
-- **Wan の家族の門は格納を絞る**。`umt5Contract` は i8 と f32 だけを受け、i4 / f16 の umT5 は重みを取る前に落ちる（`wan/pipeline.ts:986-1008`）。
-  差し替え先の quant 席の `session` / `requiredLimits` は読まれない（同 §1.4）。
-- **穴**: 第三者が互換部品を作る経路が無い（書き手は Wan の pin 1 本からしか読まず、配布の門は出所をその pin と突き合わせる —
-  `umt5_distribution.py:156-158, 272-291`）。README・examples・カードに差し替えの説明が 0 件。Wan の正の経路のテストが無い（同 §1.6）。
-- **独立検証で覆った主張**（同「独立検証」— refuted・影響 medium）: 「構成の欄が違えばグラフ記述は変わる」は網羅的でない。tiny で
-  `relative_attention_max_distance` を 128 → 64 にすると、容器がバイト同一になった。バケット表はグラフの入力で、TS が
-  `{ numBuckets: 32, maxDistance: 128 }` を固定している（`packages/models/src/wan/umt5/relative-position.ts:39`）。互換の契約には
-  グラフの外の前処理の定数（バケットの構成・有効長 512・トークナイザ）も入る。
-- **独立検証で落ちていた事実**: 差し替え席は差し替え先の provenance・ライセンス・pipeline 名を検査も記録もしない
-  （`components.ts:416-438` は manifest とグラフの sha256 だけを見る）。配布時の出所の門は実行時の差し替えには効かない。
-
-**コミュニティの追加学習版**（追加学習版調査 — 固有名は書かない）:
-
-- 現行の bf16 版は単一の safetensors（11,361,851,256 B）で、キーは HF の綴りの 242 本（Wan の `text_encoder` と同じ集合 =
-  `shared.weight` + `encoder.*` 241 本。本家だけが持つ `encoder.embed_tokens.weight` は無い）・形は全部一致・dtype は BF16。
-  `config.json` も索引も無い。
-- 重みが違うのはブロック 16〜23 の 80 本だけ。残り 162 本（語彙埋め込みを含む — `shared.weight` の変更行 0 / 256,384）は Wan の f32 を
-  bf16 へ RNE で丸めた値とビット一致。
-- fp8 版は scale 1 の単純なキャスト（q の相対 RMS 誤差 4.9%）で、変換の入力に向かない。
-- トークナイザ: **事実**は、fp8 版に埋め込まれた `spiece.model` が本家・Wan と sha256 で一致（4,548,313 B）すること。変換する bf16 版は
-  トークナイザを持たない。bf16 版も同じトークナイザで学習したとみなすのは**推論**で、根拠は同じ配布元の別形式であることと、
-  語彙埋め込みが Wan の RNE 丸めと全行一致すること（語彙を替えて学習した形と整合しない）。
-- **ライセンスもベースも宣言していない**（README なし・cardData なし）。学習データの一次記述も無い。
-- recipe は F32 だけを受け、`config.json` を要る（`umt5_export.py:111-113, 259-307, 357-364`）ので、そのままでは読めない。
-- bf16 起点の i8 は、重みが変わっていない層でも F32 起点の i8 とバイトが違う（ブロック 0 の q で i8 の不一致 811,397 / 16,777,216 要素・
-  scale は 4,096 行すべて）。
-
-### 制約
-
-- 横断の不変条件: 未対応・想定外は fail loudly・sha 門の tolerance 化は禁止（ADR 0106）。
-- recipe の MUST「出発点は F32」（`umt5_export.py:259-307` の `Checkpoint`・理由は `:262-264`「別の dtype なら丸めの出発点が変わる」）。
-  丸めの出発点が変わると i8 のバイトが変わる。本 ADR はこの MUST を上流の表から読む経路に残し、取り込みの経路だけ決定 5 の形に替える。
-- 配布の門は容器の出所で閉じる（`_shared/upstream.py:134-142` `assert_upstream_provenance` の MUST — モデル名の表だけで閉じると別の
-  checkpoint の容器が帰属表のライセンスを名乗る）。置き場（path）だけで閉じる門もこの原則の外にある。
-- ADR 0092 決定 6: 学習データが不明なもの・検閲解除派生など、再配布の書面根拠を引き受けられない資産は、**exporter core を使う別ライブラリ +
-  別 HF リポ**として組み、本リポの models にパイプラインを足さず、対応表にも載せない。追加学習版はこれに当たる。本 ADR の取り込みの口は
-  手元の実験用ミラーまでで、0092 決定 6 の経路（別ライブラリ・別リポでの配布）の代わりではない。追加学習版を配る日が来ても、その経路は
-  0092 決定 6 のほうで組む。
-- 第三者のリポ名（特に成人向けのもの）を git で追跡するファイルに書かない。
-- `karume-umt5-xxl` も `karume-wan2.1` も未公開（Wan の越境参照の revision は仮の SHA）。移行の配慮は要らない。
-- ADR 0121（Wan2.2 TI2V-5B）が並行して起草中で、`karume-umt5-xxl` を越境参照する。
+- Unsupported or unexpected input fails loudly; sha256 regression checks are never turned into
+  tolerances (ADR 0106).
+- The recipe's MUST "the starting point is F32" (`Checkpoint` in `tools/export-recipes/wan/umt5_export.py`):
+  another dtype changes the rounding start and therefore the i8 bytes.
+- The distribution check closes on the container's provenance
+  (`assert_upstream_provenance` in `tools/export-recipes/_shared/upstream.py`), not on a model-name
+  table or on a path alone.
+- ADR 0092 decision 6: assets whose redistribution cannot be backed in writing (unknown training data,
+  uncensored derivatives) go to a separate library and HF repository built on the exporter core,
+  never into this repository's models or tables. The fine-tune is such an asset; this ADR's intake
+  stops at a local experimental mirror and does not replace that route.
+- Third-party repository names (adult ones in particular) are not written into tracked files.
 
 ## Decision
 
-### 1. umT5 の上流を本家 `google/umt5-xxl` にする
+### 1. umT5's upstream is `google/umt5-xxl`
 
-守るもの: 配布物の出所が実物の出自（Google の汎用の encoder）と一致すること。Wan2.1 と Wan2.2 の両方から同じ説明で参照できること。
+Protects: the distribution's provenance matches its real origin, and Wan2.1 and Wan2.2 refer to it in
+the same words.
 
-- **何を**: umT5 の容器の上流を本家の commit `66cb9e7e85526fe440a945569e42c72fb6cbc0ad`（`apache-2.0`）にする。umT5 専用の上流の表を
-  `wan/sources.py` に足す（キーは umT5 の配布形のモデル名 `xxl`）。容器の provenance・配布の門・カード・NOTICE はこの行を引く。
-  Wan の表 `SOURCES`（`sources.py:54-60`）は Wan の DiT / VAE / トークナイザのために残す。
-- **配布物の重みは変わらない見込み**。f32 が全要素ビット一致で、量子化はその決定的な関数なので、重みの part は同じバイトになる。
-  変わるのは出所を持つ部分（part 0 のモデル記述・それを指す manifest の値・カード・NOTICE）。これは推測なので、実際に書き直して
-  差分で確かめる（段 a の検収）。
-- **カードと NOTICE の書き方**: `base_model: google/umt5-xxl`。帰属は「本家の commit `66cb9e7e…` の encoder（decoder と `lm_head` は
-  含めない）」。「Relation」の行は「Wan2.1 Diffusers の `text_encoder`（f32）と全テンソルがビット一致・Wan2.2 TI2V-5B Diffusers の bf16 は
-  その RNE 丸め（2026-10-04 に確認）」。今の「同一は未確認」（`umt5_distribution.py:331-354, 434-463`）は事実が変わったので消す。
-  本家には NOTICE ファイルが無いので、引き継ぐ NOTICE の本文は無い。改変告知に「encoder だけを変換し decoder と `lm_head` は含めない」を足す。
-  今の帰属節は「the `<subfolder>` folder of <repo>」と綴る（`umt5_distribution.py:445-447`）が、本家の encoder はリポの直下にあり
-  subfolder が無い。本家の行は subfolder を持たせず、文面は「the encoder weights (`shared.weight` and `encoder.*`) of <repo> at commit …」に
-  する（空の subfolder を文面に流さない）。
-- **追跡されるもう 1 つの出所の記述**: `tools/export-recipes/wan/THIRD_PARTY_NOTICES.md` の umT5 の節（`:58-63`）は上流を Wan・revision を
-  `0fad780a…` と書き、「容器の `provenance.upstreamRevision` と同じ値」と言い切る。段 a の後は容器と食い違うので、同じ段で本家の行に直す。
-- **なぜ**: 値は同じなので、出所の表を変えるだけで要望 1 を満たせる。Wan2.2 も同じ encoder を使う（決定 8）ので、どちらかの Wan を
-  名乗る出所より本家のほうが両方の消費者に正しい。
+- The upstream of the umT5 container is the original at commit `66cb9e7e…` (`apache-2.0`), held in
+  its own table `UMT5_SOURCES` in `tools/export-recipes/wan/sources.py` (model `xxl`). Container
+  provenance, the distribution check, the card and NOTICE read this row. Wan's table `SOURCES` stays
+  for Wan's DiT, VAE and tokenizer.
+- Card and NOTICE: `base_model: google/umt5-xxl`; attribution names "the encoder weights
+  (`shared.weight` and `encoder.*`) of google/umt5-xxl at commit …" without a subfolder and without
+  the decoder and `lm_head`; the relation line states the bit identity with Wan2.1 Diffusers'
+  `text_encoder` and the RNE relation to Wan2.2's bf16 (confirmed 2026-10-04). The modification
+  notice says only the encoder was converted. `tools/export-recipes/wan/THIRD_PARTY_NOTICES.md` names
+  the same upstream.
+- Why: the values are the same, so changing the provenance table meets request 1, and the original is
+  correct for both consumers.
 
-### 2. 本家の配布形を読む口 — pin・shard の導出・`.bin` の mmap 読み・tied な別名の規則
+### 2. Reading the original — pin, shards from the index, mmap `.bin` reads, tied aliases
 
-守るもの: 上流が動いても黙って別の重みを読まないこと。pickle の読み込みで任意コードを走らせないこと。31 GiB 機で RSS を抑えること。
+Protects: a moved upstream is never read silently; unpickling never runs arbitrary code; resident
+memory (RSS) stays bounded while reading about 30 GB of shards.
 
-- **pin**: main の commit を 40 桁で pin する（ブランチ名は置かない — `sources.py` の流儀）。
-- **取る shard を索引から導く**: まず `config.json` と `pytorch_model.bin.index.json` を取り、索引の `weight_map` から encoder と `shared` の
-  キーが載る shard を導いて、その分だけを取る（今は 1〜3・計約 29.8 GB）。shard のファイル名を手で書かない（上流の索引が正本）。
-- **shard の sha256 を表に置き、unpickle の前に照合する**: umT5 の上流の表の本家の行に、encoder に要る shard の LFS sha256（API の値・
-  64 桁 — 出所調査 §1 の表は先頭 16 桁だけを載せる）を置く。`torch.load` の前に各 shard の sha256 を表と突き合わせ、違えば 1 本も開かずに
-  落とす。導いた shard の集合と表の集合が違う場合も落とす（上流の索引が動いたか、表が古い）。
-- **読み口**: `Checkpoint`（`umt5_export.py:259-307`）に `.bin` の分割形を足す。shard ごとに 1 回
-  `torch.load(path, map_location="cpu", mmap=True, weights_only=True)` で開いて使い回し、テンソル 1 本ずつ・行の塊ごとに読む。
-  F32 の MUST はそのまま掛ける。zip 形式でない `.bin` は torch が開けないので、その例外を名指しで包んで落とす。
-  safetensors の読み口は残す（決定 5 の互換の text encoder が使う）。
-- **`.bin` を読むのは pin した本家の行だけ**: `.bin` の分割形は、上流の表の行（sha256 を持つ行）から組んだときだけ開く。ディレクトリに
-  `pytorch_model.bin.index.json` があるだけでは開かない（索引の有無で読み口を選ぶと、本家以外の pickle も unpickle する口になる）。
-  取り込み（決定 5）は safetensors だけを受ける。`weights_only=True` は防御の 2 枚目で、1 枚目は sha256 の pin。
-- **tied な別名**（`checkpoint_keys`）: 候補が 2 つ以上 checkpoint にあるとき、全候補が同じ storage（同じ data pointer・offset・形・stride）か、
-  行の塊ごとの比較でビット一致なら、transformers の tied の宣言の先（`shared.weight` — `UMT5EncoderModel._tied_weights_keys` の実測値）を選ぶ。
-  1 つでも違えば fail loudly。候補が 0 本のときも今どおり落とす。今の「黙って別の重みを読まない」意図（`umt5_export.py:316-317`）を保つ。
-- **bot の未マージ PR の safetensors は使わない**。本家の main ではなく、PR 2 本で shard 1 の sha256 が違う理由も分かっていない。
-- **`from_pretrained` を使わない経路を保つ**: グラフは今どおり `UMT5Config.from_pretrained` + meta で組む（`umt5_export.py:357-364`）。
-  `UMT5EncoderModel.from_pretrained` は decoder を含む 6 本を要求する（出所調査 §1.1）。
+- **Pin** the main commit by its 40-digit SHA (no branch names).
+- **Derive the shards from the index**: fetch `config.json` and `pytorch_model.bin.index.json`, derive
+  the shards holding `shared` and `encoder.*` from `weight_map`, fetch only those. Shard file names
+  are not written by hand.
+- **sha256 before unpickling**: the row holds the 64-digit LFS sha256 of each needed shard. Each
+  shard is checked before `torch.load`; any mismatch, or a derived shard set that differs from the
+  table, fails without opening anything.
+- **Reader**: `Checkpoint` gains the `.bin` shard form, read with
+  `torch.load(path, map_location="cpu", mmap=True, weights_only=True)`, one tensor and one row block
+  at a time; the F32 MUST still applies. A non-zip `.bin` fails with a named error. The safetensors
+  reader stays (decision 5 uses it).
+- **Only the pinned original opens `.bin`**: the `.bin` form is opened only from a table row that
+  carries sha256, never because a directory contains an index. Intake (decision 5) accepts
+  safetensors only. `weights_only=True` is the second defence; the sha256 pin is the first.
+- **Tied aliases** (`checkpoint_keys`): when several candidates exist, they are accepted only if they
+  share storage or are bit-identical by row blocks, and `shared.weight` (transformers' tied target) is
+  used. Any difference, or no candidate, fails loudly.
+- The unmerged bot PRs' safetensors are not used. The graph is still built from
+  `UMT5Config.from_pretrained` on the meta device, never from `UMT5EncoderModel.from_pretrained`.
+- Implemented 2026-10-04 (`c657a3dd`): each read opens and closes the shard (holding shards open put
+  file-backed pages in RSS: quantization peak 17.62 GiB, against 6.14 GiB when reopening at 10–19 ms
+  per open). The sha256 check runs on the descriptor held at construction and reads use the same
+  descriptor, so swapping the path after the check still reads the checked content; an in-place
+  rewrite of the same inode cannot be blocked while reading by mmap (documented in the docstring).
+  Arguments that do not apply to a subcommand are rejected when given.
 
-### 3. トークナイザ資産・check-mask・事前計算・バケット表の config の上流は Wan のまま
+### 3. Tokenizer asset, check-mask, precomputed embeddings and bucket fixture keep Wan as upstream
 
-守るもの: Wan のトークナイザ資産と前処理の表のバイトが変わらないこと。カードの出所の説明が部品ごとに正しく、互いに食い違わないこと。
+Protects: the bytes of Wan's tokenizer asset and preprocessing tables do not change; each component's
+provenance statement is correct and consistent.
 
-- **Wan の snapshot を使い続ける部分**: トークナイザ資産（`wan/umt5_tokenizer.py` — 形式 `karume-wan-umt5-tokenizer/1` は Wan の前処理の
-  表を束ねたもの）、check-mask（`umt5_export.py:618-633` — 調べたいのは Wan の事前計算資産の経路）、事前計算の埋め込み資産
-  （`wan/text_embeds.py`）、ホストのバケット表の fixture の config（`wan/umt5_host_fixture.py:147`）、golden のケースの id 列
-  （`umt5_reference.upstream_encoder` — Wan のトークナイザ）。
-- **書き手の軸を 2 本に割る**: 今の umT5 の書き手は `--model` 1 本（`umt5_export.py:766` — 選択肢は Wan の `SOURCES`）で、
-  provenance（`:512-517` の `SOURCES[model]`）・量子化しない重みと config（`:730-758` の `upstream_dir(model)`）・golden のケース
-  （同 `upstream_encoder(model)`）を同じ値から引く。決定 1 と本決定で出所が割れるので、軸も割る。
-  - umT5 の上流の軸（umT5 の表の `xxl`、または決定 5 の `--intake`）: `prepare` / `write` の重み・config・provenance、`reference` の
-    config と量子化しない重み、配布の門と帰属節。
-  - Wan の text 側の snapshot の軸（`SOURCES` の `t2v-1.3b`）: `reference` のケースの id 列（Wan のトークナイザ）、`check-mask` /
-    `compare-mask`、トークナイザ資産・事前計算・ホストの fixture（今どおり Wan の台本が引く）。
-  - 引数の綴りは段 a で決める。`reference` は両方の軸を混ぜて使う唯一のサブコマンドなので、どちらの値を使ったかを golden のメタに残す。
-- **なぜ**: id 列は同じだが、本家から焼くとスコアの桁で資産のバイトが変わり、資産の焼き直しと TS の fixture の確認が増えるだけで
-  得るものが無い（出所調査 §3.3）。check-mask を本家で回すと 6 本全部（約 51.9 GB）が要る。
-- **カードの書き方**: `karume-umt5-xxl` のカードは「encoder の重みは本家」とだけ言い、トークナイザは「Wan の配布形が持つ」と言う
-  （今の `_umt5_overview` の形を保つ）。Wan のカード（`wan/card.py:228-240`）と NOTICE（`wan/distribution.py:735-736`）の
-  「the umT5-XXL encoder of the same checkpoint」は「本家の encoder（この checkpoint の `text_encoder` と f32 でビット一致）」へ直す。
-  トークナイザは今どおり「この checkpoint の `tokenizer/` から変換」と書く。
+- These keep using the Wan snapshot: the tokenizer asset (`wan/umt5_tokenizer.py`, format
+  `karume-wan-umt5-tokenizer/1`, which bundles Wan's preprocessing tables), check-mask, the
+  precomputed embedding asset (`wan/text_embeds.py`), the host bucket fixture's config
+  (`wan/umt5_host_fixture.py`) and the golden cases' id sequences.
+- **The writer has two axes**: `--upstream` (umT5: weights, config and provenance for `prepare` /
+  `write`, config and unquantized weights for `reference`, the distribution check and attribution)
+  and `--model` (Wan's text side: id sequences of the `reference` cases, `check-mask` /
+  `compare-mask`, tokenizer asset, precomputed embeddings, host fixture). `reference` mixes both and
+  records which value it used in the golden metadata.
+- Why: building the Wan asset from the original changes only score digits; running check-mask on the
+  original needs all six shards.
+- Cards: Wan's card and NOTICE describe umT5 as "the original encoder (bit-identical in f32 to this
+  checkpoint's `text_encoder`)"; the tokenizer is "converted from this checkpoint's `tokenizer/`".
+- (Superseded by this ADR's addendum on 2026-10-15: `karume-umt5-xxl` now also carries a tokenizer
+  asset of its own, built from the original. Wan's asset stays with Wan with unchanged bytes.)
 
-### 4. 系列名を出所に合わせて改名する — recipe のモジュールは `wan/` の下に残す
+### 4. The series is renamed after its provenance
 
-守るもの: 系列名が中身の出所を偽らないこと。umT5 を使う家族が Wan だけのうちは、モジュールの分割の費用を払わないこと。
+Protects: a series name does not misstate where its content comes from.
 
-- **改名**: 系列 `wan2.1-umt5-i8-dyn` を `umt5-xxl-i8-dyn` にする（`<名>-<格納>-dyn` の規約）。綴りの持ち主は `umt5_export.py:89`・
-  `umt5_distribution.py:73`・`packages/runtime/tests/helpers/series-graphs.ts:65`・`packages/models/tests/e2e_wan_umt5_test.ts:115` と
-  README / doc。未公開なので移行の配慮は要らない。トークナイザの系列 `wan2.1-umt5-tokenizer` は Wan の資産なので名前を変えない。
-  配布リポ名 `karume-umt5-xxl`・モデル名 `xxl`・pipeline 名 `umt5-encoder/1`・部品名 `text_encoder` も変えない。
-- **改名の副産物**: 新しい系列は別ディレクトリに書かれるので、旧系列を残したまま part ごとの差分が取れる（段 a の検収）。
-- **モジュールは動かさない**。umT5 の書き手（`umt5_export` / `umt5_reference` / `umt5_patch` / `umt5_distribution`）は `wan/` の下に残す。
-  - なぜ: 書き手は Wan の消費の形（有効長・バケット表の入力・Wan のトークナイザで作るケース）に合わせて作られ、check-mask・
-    事前計算・ホストの fixture と同じ Wan の snapshot を引く（決定 3）。動かすには encoder の側とトークナイザ・前処理の側を割る必要があり、
-    それは「トークナイザ資産を umT5 リポへ移す」（採らなかった案 B / C）と同じ分割になる。umT5 を消費するのは今 Wan2.1 と Wan2.2 だけ。
-  - 復活の条件: Wan 以外の家族が umT5 を消費する日、またはトークナイザ資産を umT5 リポへ移す日に、`tools/export-recipes/umt5/` へ
-    分ける（ADR 0065 決定 2 の家族単位）。
+- Series `wan2.1-umt5-i8-dyn` became `umt5-xxl-i8-dyn` (`<name>-<storage>-dyn`). The tokenizer series
+  `wan2.1-umt5-tokenizer`, the repository `karume-umt5-xxl`, model `xxl`, pipeline `umt5-encoder/1`
+  and component `text_encoder` keep their names.
+- Withdrawn 2026-10-18: "the recipe modules stay under `wan/`". Its own revival condition (the
+  tokenizer asset moves to the umT5 repository) was met by the 2026-10-15 addendum. The writers
+  (`umt5_export`, `umt5_reference`, `umt5_patch`, `umt5_distribution`, `umt5_intake`,
+  `umt5_xxl_tokenizer`) are still under `tools/export-recipes/wan/`; a split into
+  `tools/export-recipes/umt5/` (ADR 0065 decision 2, one directory per family) is open for a new
+  decision.
 
-### 5. 互換の text encoder を作る経路 — 取り込みの台本と出所の記録
+### 5. Building a compatible text encoder — intake script and provenance record
 
-守るもの: 第三者の重みの出所（どのリポのどの版をどの条件で取ったか）が機械で辿れること。出所の門を外さないこと。第三者のリポ名を
-追跡されるコードに書かないこと。丸めの出発点が何だったかを偽らないこと（上流の表から読む経路は「出発点は F32」の MUST のまま・取り込みの
-経路は元の dtype を明示して名乗る）。
+Protects: third-party provenance (which repository, which revision, under which terms) is
+machine-traceable; the provenance check stays; no third-party repository name enters tracked code;
+the rounding start is never misstated (the table path keeps "the starting point is F32"; the intake
+path states its source dtype).
 
-- **取り込みの台本**（新規・`wan/` の下）: `--repo <owner/name> --revision <40 桁> --file <名前> --name <名前>` を受け、
-  1. HF API の値（その revision の LFS の sha256・`cardData` のライセンスとベース）を読む。
-  2. 指定の 1 本を pin した revision で取り、sha256 を API の値と突き合わせる（`.part` → 一致で rename — ADR 0088 決定 4 と同じ）。
-     受けるのは safetensors だけ（pickle の `.bin` は拒む — `.bin` を開くのは決定 2 の本家の行だけ）。
-  3. ヘッダを読み、キー集合と形を見る。期待するキー集合は Wan の `text_encoder` と同じ 242 本（`shared.weight` + `encoder.*` 241 本 —
-     出所調査 §2.1 の表）。tied な別名の対（`shared.weight` / `encoder.embed_tokens.weight`）は 1 本とみなして数え、対の両方を持つ
-     ファイル（本家の形 = 243 本）は決定 2 の規則に従う（ビット一致なら受けて `shared.weight` を使い、違えば落とす）。片方だけ持つ
-     ファイルはその 1 本を使う。dtype は全テンソルが同じ BF16 か F32 であることを見る。違えば fail loudly（FP8 は情報を失った派生
-     なので拒む・BF16 と F32 の混在も拒む・旧い綴り〈`blocks.N.attn.q` 等〉も拒む — 変換表は持たない）。
-  4. 取ったファイルを**そのまま** `inputs/umt5/<名前>/` に置く（名前も変えない — sha256 とファイル名が上流と一致したまま残り、後から
-     API の値と突き合わせ直せる）。F32 の写しは作らない。元の dtype（`BF16` / `F32`）は `intake.json` に名乗らせる。
-  5. `config.json` を置く。上流が持っていればグラフに効く欄とバケットの構成（`relative_attention_num_buckets` /
-     `relative_attention_max_distance`）を本家の config と突き合わせ、違えば fail loudly（TS がバケットの構成を固定しているため —
-     独立検証の refuted）。上流が持たなければ本家の pin の config を写し、`intake.json` に「構成は推定（本家の写し）」と記録する。
-     この場合の照合は空になる（写した値どうしを比べるだけ）。`relative_attention_max_distance` は重みの形から導けないので、上流が
-     違う値で学習していても取り込みは気づけない（決定 7 の limitations の実例）。
-  6. 出所の記録 `intake.json`（機械専有 — 人は追記しない）を書く。ライセンスの判定はしない（ADR 0088 決定 5）。取り込みを行う
-     エージェントが確認した内容は同じディレクトリの `license-review.md`（人・エージェントが記入）に残す。
-- **書き手**: `umt5_export write` に取り込み済みのディレクトリを渡す口を足す（例 `--intake inputs/umt5/<名前>`）。系列名は
-  `umt5-xxl-<名前>-i8-dyn`。容器の provenance は `intake.json` のライセンスと revision から焼く（未宣言の扱いは決定 6）。
-  - **元の dtype の受け方**: `Checkpoint` は `intake.json` が名指すファイルを読み、`intake.json` が名乗る dtype だけを受ける（全テンソルが
-    その dtype でなければ落とす）。BF16 は読みの時点で F32 へ広げる（無損失 — bf16 の値は f32 で全部表せる）。量子化はその f32 の値の
-    決定的な関数なので、容器は「同じ値を F32 で持つ checkpoint」から書いた容器とバイト同一になる（段 b の検収で縛る）。上流の表から
-    読む経路（本家・Wan）は今どおり F32 だけを受ける。
-  - **元の dtype を見える所に残す**: `intake.json` に加えて、実験用ミラーのカードの帰属節に「上流の重みは bfloat16。量子化の前に
-    float32 へ無損失で広げた」と書く。丸めの出発点が bf16 であること（同じ層でも F32 起点の i8 とバイトが違う — 追加学習版調査）を
-    利用者が読み取れるようにする。容器の provenance には dtype の欄が無い（container-v1 §2.3）ので、容器へは焼かない。
-- **配布の門**: `assert_umt5_encoder`（`umt5_distribution.py:272-291`）は、本家の行（コードの表）に無いモデルなら `intake.json` を引き、
-  容器の provenance をそれと突き合わせる。出所の門は外さない。
-- **第三者の部品を `karume-umt5-xxl` に混ぜない**。今の `umt5_repo_name`（`:299-301`）はモデルによらず `karume-umt5-xxl` を返し、
-  第三者のモデルを組むと既定の出力先が本家のミラーになる。第三者のモデルは `karume-umt5-xxl` を名乗らせず、既定の出力先は `models/` の外
-  （手元の実験用ミラーの席 — 例 `outputs/misc/local-dist/<名前>/`）にする。
-  - **`models/` の下へは書かせない**: 取り込み由来のモデルは、**ライセンスの宣言の有無によらず**、出力先が `models/` の下なら組む前に
-    落とす。判定は `--out` と `models/` を実 path（symlink と `..` を解いた path）どうしで比べる。`models/` は「そのまま上げられる配布形」の
-    席（`docs/assets-layout.md`）で、公開の経路はこの ADR では作らない（次項）ので、取り込み由来のモデルがそこに居る理由が無い。
-- **第三者のミラーのルートのファイル**: 今の umT5 の Pipeline は `root_files` を Apache の `LICENSE.md` と `UMT5_NOTICE_MARKDOWN` に固定
-  している（`umt5_distribution.py:530-542`）。その NOTICE は Wan の `text_encoder` を上流と名乗り「No retraining and no fine-tuning」と
-  書く（`:331-356`）。第三者の部品にこの 2 本を付けない。ルートのファイルは `intake.json` から導く。
-  - ライセンスが宣言済みなら、`LICENSE.md` はその識別子の逐語本文（`_shared/licenses/` に本文が無い識別子なら落とす）。
-  - ライセンスが未宣言なら `LICENSE.md` を置かず、`NOTICE.md` とカードの冒頭に「上流はライセンスを宣言していない」と書く（決定 6）。
-  - `NOTICE.md` は `intake.json` の上流（リポ・revision・宣言されたベース — 未宣言なら未宣言と書く）と、このリポが加えた変更（容器への
-    変換・bf16 から f32 への無損失の拡幅・int8 化）を書く。「No retraining」や Wan・Google を上流と名乗る文は書かない（追加学習は
-    第三者が行ったもので、その上流は宣言されていない）。
-- **公開の経路はこの ADR では作らない**。ライセンスを宣言した第三者の互換部品を配るなら、リポの命名（ADR 0092 決定 1・2）とカードの
-  帰属を決める裁定が要る（ADR 0088 Consequences の「新モデルの追加は毎回それ自体が裁定」）。要望は「変換を試したい」で、公開ではない。
-- **なぜ json で、コードの表ではないか**（採らなかった案に詳細）: 出所の値は取り込みの時点の API の値で、機械が書けば転記の誤りが無い。
-  コードの表に第三者の行を足すと、実験のたびに追跡されるコードへ第三者のリポ名が入る。ADR 0092 決定 6 に当たる派生ならなおさら
-  本リポに残せない。本家の行（`google/umt5-xxl`）は第一の上流なのでコードに置く。
+- **Intake script** (`tools/export-recipes/wan/umt5_intake.py`) takes
+  `--repo <owner/name> --revision <40 digits> --file <name> --name <name>` and:
+  1. reads the HF API values (LFS sha256 at that revision, licence and base from `cardData`);
+  2. fetches the one file at the pinned revision and checks sha256 (`.part`, renamed on a match, as
+     ADR 0088 decision 4); safetensors only — `.bin` is rejected;
+  3. reads the header: the expected key set is the 242 keys of Wan's `text_encoder`; a file with both
+     tied aliases (the original's 243) follows decision 2; all tensors must share one dtype, BF16 or
+     F32. FP8, mixed BF16/F32 and legacy key spellings (`blocks.N.attn.q`) fail loudly;
+  4. stores the file **unchanged** under `inputs/umt5/<name>/` (no F32 copy), so its sha256 and name
+     still match the upstream;
+  5. stores `config.json`: an upstream config is compared with the original's on the graph-relevant
+     fields and the bucket configuration and fails loudly on a difference; without one, the
+     original's config is copied and `intake.json` records "configuration inferred (copy of the
+     original)" — the comparison is then empty, and `relative_attention_max_distance` cannot be
+     derived from weight shapes (a limitation of decision 7);
+  6. writes `intake.json` (machine-owned; format `karume-umt5-intake/2`). It does not judge the
+     licence (ADR 0088 decision 5); the agent's review goes into `license-review.md` beside it.
+- **Writer**: `umt5_export write --intake inputs/umt5/<name>` writes series
+  `umt5-xxl-<name>-i8-dyn`, with provenance from `intake.json`. `Checkpoint` accepts only the dtype
+  `intake.json` declares and widens BF16 to F32 at read time (lossless), so the container is
+  byte-identical to one written from an F32 copy of the same values. The table path still accepts F32
+  only. The mirror's card states that the upstream weights are bfloat16 and were widened losslessly
+  before quantization (container provenance has no dtype field — container-v1 §2.3).
+- **Distribution check**: `assert_umt5_encoder` reads `intake.json` for a model not in the code table
+  and compares the container's provenance with it.
+- **No third-party component in `karume-umt5-xxl`**: third-party models never take that name; their
+  default output is outside `models/` (`outputs/misc/local-dist/<name>/`). An intake-derived model
+  fails before writing when the output resolves (symlinks and `..` resolved) under `models/`,
+  **whether or not it declares a licence**.
+- **Root files of a third-party mirror** derive from `intake.json` (`intake_root_files`), never the
+  original's Apache `LICENSE.md` and NOTICE: a declared licence gives its verbatim text (an identifier
+  without text in `_shared/licenses/` fails); an undeclared one gives no `LICENSE.md` and a statement
+  at the top of `NOTICE.md` and the card. `NOTICE.md` names the upstream from `intake.json` and the
+  changes made here, and never says "No retraining" or names Wan or Google as upstream.
+- **No publication route here**: publishing a declared third-party component needs a ruling on repository
+  naming and card attribution (ADR 0088: each new model is its own ruling).
+- Implemented 2026-10-04 (`ca38d638`, `6cdad993`). Review fixes: reads go through a descriptor checked
+  against the record; `intake.json` records the sha256 of `config.json` and checks it at entry; the
+  intake directory accepts only an allow-list (weights, `config.json`, `intake.json`,
+  `license-review.md`) and rejects symlinks.
 
-### 6. ライセンス未宣言の重み — 手元の実験用ミラーだけを作れる明示の口（裁定 1）
+### 6. Weights with an undeclared licence — an explicit opt-in for local experimental mirrors only
 
-守るもの: 再配布の条件が決まらない重みが公開の経路に乗らないこと。手元での動作確認（要望 3）は止めないこと。
+Protects: weights with unknown redistribution terms never reach the publication route; local trials
+(request 3) still work. The maintainer ruled on 2026-10-04 to provide this opt-in.
 
-- **何を**（推奨 = 裁定 1 の (a)）: `intake.json` のライセンスが未宣言なら、書き手も配布の組み立ても既定で落とす。明示の引数
-  （例 `--allow-undeclared-license`）を付けたときだけ、容器のライセンス欄に未宣言の印（候補は SPDX の `NOASSERTION` — 綴りは段 b で
-  決める）を焼き、手元の実験用ミラーを組める。流儀は既存の仮の SHA の門（`--allow-placeholder-ref` — `tools/export-recipes/dist.py:91-108`）と同じ。
-- **公開の経路で拒む仕組み**（3 重 — 1 と 3 は容器の中身で閉じる。`_shared/upstream.py:140-142` の「容器の出所で門を閉じる」原則に
-  合わせ、置き場だけに頼らない）:
-  1. 配布の門は、未宣言の印を焼いた容器を明示の引数なしでは組まない（1 バイトも書く前に落ちる）。
-  2. 取り込み由来のモデルは、出力先が `models/` の下なら落ちる（決定 5 — 実 path どうしで比べる。実験用ミラーは `models/` の外だけ）。
-  3. **公開前の門**: アップロードの台本（`tools/release/hf-upload.zsh` — 今は `models/$NAME` をそのまま上げ、provenance を読まない
-     〈`:128`〉）は、上げる前に `models/<repo>` の全容器の part 0 の `provenance.license` を読み、未宣言の印があれば 1 バイトも上げずに
-     落とす。手で `models/` の下へ写したミラーや symlink も、中身で止まる。
-  - 残る穴: `hf upload` を台本を通さず直に実行すれば、どの門も通らない。リポの中では閉じられないので、容器の印とカードの冒頭の文で
-    「未宣言である」ことを見える形に残す。
-- **カード**: 実験用ミラーのカードの冒頭に「手元の実験用・上流はライセンスを宣言していない・再配布しない」を書く（文面は段 b）。
-- **ADR 0088 決定 5 との違い**: 0088 決定 5 は取り込みのコマンドに「判定も確認フラグの強制もしない」と定めた。本決定の明示の引数は
-  これから外れる。外れる理由: 本決定の引数は取り込み（記録するだけ — 0088 決定 5 のまま）ではなく、書き手と配布の組み立ての門に掛かる。
-  判定するのは「ライセンス欄が空である」という機械で決まる事実で、許諾の解釈ではない。0088 の Anima 派生はベースのライセンスの
-  引き継ぎが前提だったが、未宣言の重みにはその前提が無い。
-- **なぜ**: 未宣言の印を焼かずに作る（ライセンス欄を偽る）か、作れない（要望 3 が止まる）かの二択を、明示の口で避ける。
-  印は容器の中に残す。container-v1 §2.3 の provenance は単一の `krm` を持ち出したときに出所を辿るための欄だが、持つのは revision だけで
-  リポ名を持たない（出所調査 §4.1）。持ち出した容器から上流を特定できるのは、ミラーのカードと `intake.json` を併せたときだけ。
-  容器の印が単体で伝えるのは「上流がライセンスを宣言していない」ことの表示に絞られ、公開前の門（3）はその表示で止める。
+- When `intake.json` declares no licence, the writer and the distribution build fail by default. With
+  `--allow-undeclared-license` they write the marker `NOASSERTION` (SPDX) into the container's licence
+  field and may build a local experimental mirror — the same "open only when explicit" form as
+  `--allow-placeholder-ref` (`tools/export-recipes/dist.py`). Licence values that cannot identify terms
+  (no declaration, `unknown`, `none`, an `other` without `license_name`) are recorded as undeclared;
+  a named `other` passes as declared.
+- **Three guards on the publication route** (1 and 3 close on container content, as
+  `_shared/upstream.py` requires, not on location):
+  1. the distribution build refuses a container with the marker without the flag, before writing a
+     byte;
+  2. an intake-derived model fails when its output is under `models/` (decision 5);
+  3. **pre-upload guard**: `tools/release/hf-upload.zsh upload` runs `tools/release/container_license.ts`
+     (Node) over `models/<repo>`, reads `provenance.license` from every container's part 0, and
+     uploads nothing when a marker (any case) is present or the directory has no container.
+  - Remaining gap: running `hf upload` directly bypasses every guard; the container marker and the
+    card's opening statement keep the status visible.
+- The card of an experimental mirror opens with "local experiment, upstream declares no licence, do
+  not redistribute".
+- Difference from ADR 0088 decision 5 (intake neither judges nor forces confirmation): intake still
+  only records; the flag applies to the writer and the distribution build, and what it tests is the
+  mechanical fact "the licence field is empty", not an interpretation of terms.
+- Why: the alternative is to falsify the licence field or to block request 3. The marker stays in the
+  container; it carries only "the upstream declared no licence", since provenance holds a revision but
+  no repository name.
 
-### 7. 差し替えの方針 — 今の `components` 席のまま（案 A・裁定 2）
+### 7. Replacement stays with the current `components` mechanism (option A)
 
-守るもの: 互換の判定を内容ハッシュ（グラフ記述の sha256）1 つに保つこと（導出できる状態を別の欄で持たない）。manifest の形式
-（`karume/5`）を変えないこと。
+Protects: compatibility is decided by one content hash (the graph descriptor sha256), with no second
+derivable field; the manifest format (`karume/5`) does not change. The maintainer ruled on 2026-10-04
+to proceed with the current mechanism.
 
-- **何を**（推奨 = 裁定 2 の (a)）: 差し替えの仕組みは今の部品差し替え席のまま。足すのは次の 5 つ。
-  1. **第三者の互換部品を作る経路**（決定 5・6）。
-  2. **Wan の `text_encoder` を差し替える使い方の説明と例**: examples/wan の README と例・`tools/export-recipes/wan/README.md` の
-     取り込みと変換の手順・`karume-umt5-xxl` のカードの Usage に 1 段落。説明には「`source` は `{ repo, revision }` で pin する（文字列は
-     main 追従になり元の pin が消える — `wan/pipeline.ts:1145-1146`）」と「`textEncoder: "precomputed"` では差し替えも効かない」を入れる。
-  3. **差し替えを踏むテスト**（GPU 不要・疑似 HF のリポ）: Wan の正の経路（`text_encoder` を差し、元の越境先の part を 1 バイトも取らない）・
-     越境参照の席を差し替える形（今の Wan の `text_encoder` は元から越境参照 — 取得元に umT5 の `crossRepo` mapping が要らないことの確認）・
-     i4 の差し替えが `umt5Contract` で重みを取る前に落ちる形。
-  4. **差し替えが検査しないものの記録**（各項目は利用者に見える害を先に書く）。`docs/limitations.md` に 3 項目:
-     - **プロンプトが黙って誤読される**: 語彙数が同じで別のトークナイザで学習した部品を差すと、エラーなく受理され、プロンプトが
-       誤った id 列に区切られたまま生成が進む。仕組み: トークナイザは元の manifest の資産のままで（`components.ts:486-489`）、誰も
-       同一性を検査しない。
-     - **出力が黙って劣化する**: 相対位置のバケットの構成が違う umT5 を差しても、エラーなく受理され、本来と違う位置関係で encode
-       される。仕組み: バケット表の構成（`numBuckets` 32・`maxDistance` 128 — `relative-position.ts:39`）と有効長 512（同 `:45`）は
-       グラフ記述に入らず、構成の違う umT5 でも容器がバイト同一になりうる（独立検証の実測）。config を持たない上流を取り込むと、
-       取り込みの照合も空になる（決定 5 手順 5）。
-     - **ライセンス不明の重みが警告なく動く**: 差し替え先の出所とライセンスは実行時に検査も記録もしない（`components.ts:416-438`）。
-       生成物からも、どの重みを使ったかは分からない。runtime は出所を知らない（ADR 0108 決定 19）。
-  5. **known-issues への記録**（by-design ではなく、ADR 0108 決定 19 が admission に求める「quant 席と実行設定の整合」の検査が無い状態）:
-     **大きい部品への差し替えが、取得の後で落ちる**: 差し替え先の quant 席の `session` / `gpuFeatures` / `requiredLimits` は使われず、
-     元の席の値で事前判定する（差し替え調査 §1.4）。差し替え先が大きいバッファを要すると、事前判定を通って重みを取った後に Session の
-     構築で落ちる（同 §2.3 — 推測）。Wan の umT5 は i8 / f32 しか受けないので今は影響しない。`docs/known-issues.md` に 1 項目として置く。
-- **なぜ**: 目の前の利用例（追加学習版）は構成が本家と同じ形で（キー集合と形が Wan と一致）、トークナイザも同じとみなせる（fp8 版に
-  埋め込まれた `spiece.model` の sha256 一致は事実・変換する bf16 版が同じトークナイザであることは推論 — 「調査の結論」）。今の受理の
-  条件で通る見込み。止めているのは作る経路と説明の欠落で、manifest の変更は要らない。トークナイザの沈黙の誤りは「語彙数が同じで
-  別のトークナイザ」に限られ、実例はまだ無い。
+- The mechanism stays. Added:
+  1. the route for building third-party compatible components (decisions 5 and 6);
+  2. the explanation: intake and conversion steps in `tools/export-recipes/wan/README.md` and a
+     paragraph in the Usage of the `karume-umt5-xxl` card (`_umt5_usage` in `umt5_distribution.py`).
+     It states that `source` is pinned as `{ repo, revision }` (a string reads as `{ repo }` and
+     follows `main` — `packages/models/src/hub/repo-ref.ts`) and that replacement has no effect with
+     `textEncoder: "precomputed"`. Withdrawn 2026-10-18: the `examples/wan` README and example, removed
+     with `examples/` in `bb35fe2a` (2026-10-16); a new home depends on ADR 0127's open point on
+     rebuilding the examples as browser applications;
+  3. tests that exercise replacement without a GPU (Wan's positive path, replacing a
+     cross-repository slot, an i4 replacement failing in `umt5Contract` before weights are fetched —
+     landed in the step d addendum);
+  4. `docs/limitations.md` ("Wan2.1: umT5 swap … what it does not check"), each item harm first:
+     **prompts silently misread** (a component trained with another tokenizer of the same vocabulary
+     size is accepted; nobody checks the tokenizer); **output silently degraded** (a different bucket
+     configuration is accepted, since bucket configuration and effective length are host constants
+     outside the graph descriptor; with a config-less upstream the intake comparison is empty);
+     **weights of unknown licence run without warning** (replacement neither checks nor records
+     provenance; the runtime does not know provenance — ADR 0108 decision 19);
+  5. `docs/known-issues.md`: **replacing with a larger component fails only after the weights are
+     fetched** — the replacement preset's `session` / `gpuFeatures` / `requiredLimits` are ignored and
+     the original preset's values decide admission, so `fromPretrained` would succeed and the first
+     `generate()` (where Wan's text stage builds its Session) would fail (inferred; no instance yet). ADR 0108 decision 19 asks
+     admission to check this; it is not by design. Recipe-built components write the vocabulary
+     embedding as i8 and are not affected; a component with an f32 vocabulary embedding passes
+     `umt5Contract` and can fail this way.
+- Why: the case at hand (the fine-tune) has the original's key set and shapes and, by inference, its
+  tokenizer, so it passes the current acceptance conditions. The silent tokenizer error needs "same
+  vocabulary size, other tokenizer", which has no instance yet.
+- As of 2026-10-18 option C's revival condition (three or more sharing pairs, or a family other than
+  Wan consuming umT5) is at a boundary: Wan2.2 also references `karume-umt5-xxl`, umT5 is a family of
+  its own with `Umt5Encoder` (`packages/models/mod.ts`), and Wan2.1 is not published on HF. How to
+  count is the maintainer's call.
 
-### 8. Wan2.2 TI2V-5B（ADR 0121）との関係
+### 8. Relation to Wan2.2 TI2V-5B (ADR 0121)
 
-守るもの: Wan2.1 と Wan2.2 が同じ umT5 の容器を共有し、出所の説明も同じであること。
+Protects: Wan2.1 and Wan2.2 share one umT5 container with one provenance statement.
 
-- Wan2.2 TI2V-5B も `karume-umt5-xxl` を越境参照する（Wan2.2 Diffusers の bf16 から作り直さない — 丸めの出発点が f32 でなくなり、
-  i8 のバイトが違う同じ encoder が 2 本になる）。
-- 0121 への制約: Wan2.2 のカードと NOTICE も umT5 を「本家の encoder」と書く（Wan2.2 自身の bf16 の `text_encoder` はその RNE 丸め）。
-  トークナイザ資産は `karume-umt5-xxl` に無いので、Wan2.2 の配布形が自分で持つ（置き方は 0121 が決める。本 ADR は umT5 リポに資産を
-  足さない — 決定 7 の案 A）。
-- 公開の順序は今と同じ: `karume-umt5-xxl` を先に上げ、その実 SHA で Wan2.1 と Wan2.2 を焼き直す（release-runbook §0）。本 ADR の段 a は
-  `karume-umt5-xxl` の初回公開より前に終える（出所を書き直した容器で公開する）。
-- 推測: 0121 の pipeline が `text_encoder` を同じ役割名で差し替え席に載せるなら、本 ADR の互換部品はそのまま Wan2.2 にも差せる
-  （グラフ記述が同じ容器を共有するため）。
+- Wan2.2 also references `karume-umt5-xxl` across repositories and does not rebuild umT5 from Wan2.2
+  Diffusers' bf16 (the rounding start would no longer be f32, giving a second, byte-different copy of
+  the same encoder).
+- Wan2.2's card and NOTICE describe umT5 as the original encoder (Wan2.2's own bf16 `text_encoder`
+  is its RNE rounding). Wan2.2's distribution carries its own tokenizer asset with the preprocessing
+  tables. (Superseded by this ADR's addendum on 2026-10-15: "this ADR adds no asset to the umT5
+  repository" — `karume-umt5-xxl` now has its own tokenizer asset.)
+- Publication order (umT5 first, then the Wan distributions with its real SHA — release-runbook §0)
+  was followed at 0.14.0.
 
-### 9. 段の分割
+### 9. Steps
 
-| 段 | 中身                                                                                                                                                                                          | GPU             |
-| -- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| a  | 基準線を作る（今の出所のまま `write --check` 緑・`reference` の再現性・dist の組み直し）→ 本家の読み口と出所の切り替え（決定 1〜4）→ write → reference → dist の再生成 → 基準線との差分の確認 | 確認の 1 回だけ |
-| b  | 取り込みの台本・書き手の `--intake`・配布の門の json 照合・ライセンス未宣言の明示の口・手元の実験用ミラーの席とルートのファイル・公開前の門（決定 5・6）                                      | 不要            |
-| c  | 追加学習版を取り込んで変換し、Wan2.1 の `text_encoder` に差し替えて GPU で通す                                                                                                                | 要る            |
-| d  | 説明・例・差し替えのテスト・limitations と known-issues（決定 7）                                                                                                                             | 不要            |
+Steps a (baseline, then the switch of reader and provenance — decisions 1–4), b (intake, `--intake`,
+JSON check, undeclared-licence opt-in, pre-upload guard — decisions 5–6), c (convert the fine-tune and
+swap it into Wan2.1 on the GPU) and d (explanation, tests, limitations — decision 7) were all
+completed on 2026-10-04; the addenda record the results.
 
-- a は 0121 の配布形の作業より先に終える（0121 が越境参照する容器の part 0 の sha256 が a で変わる）。
-- a の基準線: 今の系列 `wan2.1-umt5-i8-dyn` は recipe の外の driver が書いたもので（`umt5_export.py:45`）、recipe の `write_container` が
-  それをバイト単位で再現した記録は docs に無い。配布形も最新の recipe より古い（`models/karume-wan2.1/karume.json` は 2026-10-04 02:45 UTC に
-  組まれ、その後に既定の quant 席を変える recipe のコミット〈02:48〉が入った）。このまま切り替えると、差が出たときに出所の切り替えの
-  せいか書き口や recipe の差かを区別できない。だから切り替えの前に、今の出所のまま基準線を作る。
-- c は b の後。d は b の後（README の取り込み手順が b の台本に依る）で、c とは独立に進められる（疑似 HF のリポで GPU を使わない）。
+## Alternatives not taken
 
-## 採らなかった案
-
-- **上流を Wan2.1 のまま据える（今の形）** — 重みは同じで手間は 0 だが、要望 1（出自が不自然）が残る。Wan2.2 から参照すると
-  「Wan2.1 の部品」を名乗る encoder を別世代が使う説明になる。
-- **Wan2.2 Diffusers の bf16（11.4 GB）を上流にする** — 取得は本家の約 29.8 GB より軽いが、丸めの出発点が f32 でなくなり、i8 の
-  バイトが変わる（独立検証の取得量と正確さのトレードオフ）。「出発点は F32」の MUST にも当たる。
-- **本家の bot の未マージ PR の safetensors を読む** — 本家の main ではなく、2 本で shard 1 の sha256 が違う理由も分からない。
-- **`UMT5EncoderModel.from_pretrained` で本家を読む** — decoder を含む 6 本（約 51.9 GB）が要る（出所調査 §1.1）。
-- **トークナイザ資産も本家から焼く** — id 列は同じで得るものが無く、資産のバイトだけが変わる（決定 3）。
-- **umT5 の recipe を今 `tools/export-recipes/umt5/` へ動かす** — 決定 4。トークナイザ・前処理の側との分割が先に要る。
-- **第三者の出所の表を recipe のコードに直書きする**（anima の追加学習版の登録の形） — 実験のたびに追跡されるコードへ第三者のリポ名が
-  入り、ADR 0092 決定 6 に当たる派生では本リポに置けない。手書きの転記は API の値との食い違いを生みうる。公開する第三者の部品を
-  登録する日には、その裁定の中でコードの表を足すかを決める（ADR 0088 の登録は手書きの前例）。
-- **出所を CLI の引数で名乗らせる**（`--license apache-2.0` など） — 出所の門が「名乗った値」と「焼いた値」の突き合わせになり、
-  上流の実物に結び付かない。
-- **取り込みで BF16 を F32 へ upcast した写し（約 22.7 GB）を `inputs/` に置き、`Checkpoint` は F32 だけを受け続ける**（起草時の案） —
-  MUST「出発点は F32」を形の上で満たすだけで、目的（丸めの出発点を本物の F32 に保つ）は満たさない。丸めの出発点は写しを作っても
-  bf16 のままで（同じ層でも F32 起点の i8 とバイトが違う — 追加学習版調査）、容器は決定 5 の「読みの時点で広げる」形とバイト同一に
-  なる（量子化は f32 の値の決定的な関数）。得るものが無いのに、①生成物 22.7 GB を「手置きの実重み — 生成物ではない」席
-  （`docs/assets-layout.md` の `inputs/`）に置く、②置いたファイルの sha256 が上流の LFS の値と合わなくなり、後から API と突き合わせ直せない、
-  ③元が bf16 だったことがファイルからも容器からも消える、の 3 つを払う。決定 5 は MUST を上流の表の経路に残したまま、取り込みの経路で
-  元の dtype を明示して受け、記録とカードで名乗る。
-- **`Checkpoint` が F32 以外の dtype を宣言なしで何でも受ける** — 読んだファイルが想定と違う dtype でも黙って通る。決定 5 は
-  `intake.json` が名乗る dtype だけを受け、食い違いを fail loudly にする。
-- **fp8 版を変換の入力にする** — scale 1 の単純なキャストで情報を失っている（q の相対 RMS 誤差 4.9%）。
-- **第三者の部品を `karume-umt5-xxl` の 2 本目のモデルとして同居させる** — 出所とライセンスの違う重みが 1 リポに混ざる。派生は別リポ
-  （ADR 0092 決定 1）。
-- **手元の実験用ミラーを `models/` に置く** — `models/` はアップロードの台本が `models/<repo>` をそのまま上げる配布形の席で、公開の経路を
-  持たない取り込み由来のモデルが居る理由が無い。誤公開の防壁を公開前の門（決定 6 の 3）1 枚に減らす。決定 5 が実 path で拒む。
-- **ライセンス未宣言の重みは一切変換しない**（明示の口を設けない） — 裁定 1 の (b)。
-- **案 B: 役割の契約名と付随資産を manifest に名乗らせる**（部品側が「提供する役割の契約」と要るトークナイザを持ち、元側が要求を
-  宣言する） — トークナイザの沈黙の誤りが消え、契約名で互換リポを探せる。採らない理由: manifest の major を上げる（ADR 0038 §7 に
-  無い追加）。契約名はグラフ記述の sha256 から導けない第 2 の識別子で、食い違う状態（契約名は同じでグラフが違う）を生む。Wan の
-  トークナイザ資産は前処理の表と束ねた形式で、部品側へ移すには形式を割る作業が要る。**復活の条件**: 「語彙数が同じで別の
-  トークナイザ」の互換部品の実例が出たとき（その時点で「役割に属する資産」の宣言だけを裁定する）。
-- **案 C: 依存モデルを「部品リポ」として一級化し、差し替え = 越境先の付け替えにする** — 付随資産ごと差し替わり、第三者は部品リポを
-  1 本作れば済む。採らない理由: 全系列の配布形の作り直しと hub / models の両方の変更が要る。依存モデルを他の系列と共有しているのは
-  今 2 組（Wan → umT5・anima-extra → anima）だけ（差し替え調査 §1.5）。**復活の条件**: 依存モデルを共有する組が 3 つ以上になったとき、
-  または Wan 以外の家族が umT5 を消費するとき。
-- **バケットの構成をグラフ記述へ焼いて互換の検査に入れる** — 構成の違う umT5 を差し替えで拒めるが、グラフ記述が変わり sha 参照行と
-  ホストの fixture の焼き直しが要る。TS は構成を固定していて、config を持つ上流なら取り込みが本家と突き合わせる（決定 5）。
-  config を持たない上流（今回の追加学習版）にはこの照合が効かない。ただしその場合はグラフへ焼いても同じく効かない — 焼く値も本家から
-  写した config から来て、`relative_attention_max_distance` は重みの形から導けないため。この場合は「構成は推定（本家の写し）」を
-  `intake.json` とカードに残して見える形にし、limitations の実例にする（決定 5・7）。**復活の条件**: バケットの構成が違う互換部品の
-  実例が出たとき。
-- **実行時の差し替えで出所・ライセンスを検査する** — runtime は出所を知らない（ADR 0108 決定 19）。limitations に記録する（決定 7）。
+- **Keep Wan2.1 as upstream**: no work, but request 1 remains, and Wan2.2 would use an encoder that
+  calls itself a Wan2.1 component.
+- **Use Wan2.2 Diffusers' bf16 (11.4 GB) as upstream**: lighter to fetch, but the rounding start is no
+  longer f32 and the i8 bytes change, against the F32 MUST.
+- **Read the bot PRs' safetensors**: not on the original's main, and the two PRs disagree on shard 1.
+- **`UMT5EncoderModel.from_pretrained`**: needs all six shards (about 51.9 GB).
+- **Build the tokenizer asset from the original**: same ids, only the bytes change (decision 3).
+- **Move the umT5 recipe to `tools/export-recipes/umt5/` now**: rejected at the time by decision 4;
+  that reason was withdrawn on 2026-10-18.
+- **Hard-code third-party provenance in recipe code** (the form used for anima fine-tunes): puts
+  third-party names into tracked code at every experiment and cannot hold ADR 0092 decision 6
+  derivatives. A published third-party component decides on a code table within its own ruling.
+- **State provenance through CLI flags** (`--license …`): the check would compare stated with written
+  values, unlinked to the real upstream.
+- **Store an F32 upcast copy (about 22.7 GB) under `inputs/` and keep `Checkpoint` F32-only**: meets
+  the F32 MUST only in form (the rounding start is still bf16 and the container is byte-identical to
+  decision 5's read-time widening), while storing a generated file among hand-placed weights, breaking
+  the sha256 link to the upstream LFS value, and erasing the source dtype.
+- **Let `Checkpoint` accept any dtype without a declaration**: an unexpected dtype would pass
+  silently.
+- **Use the fp8 variant**: lossy scale-1 cast.
+- **Host the third-party component as a second model in `karume-umt5-xxl`**: mixes provenance and
+  licences in one repository (ADR 0092 decision 1).
+- **Put local experimental mirrors under `models/`**: that is the directory the upload script
+  publishes; it would leave the pre-upload guard as the only barrier.
+- **Never convert weights with an undeclared licence**: blocks request 3 (the maintainer chose the
+  opt-in).
+- **Option B — the manifest names role contracts and their assets**: removes the silent tokenizer
+  error, but raises the manifest major, adds a second identifier not derivable from the graph sha256,
+  and requires splitting Wan's bundled tokenizer asset. Revival: a compatible component with the same
+  vocabulary size and another tokenizer appears (then rule only on declaring role-owned assets).
+- **Option C — dependent models as first-class component repositories; replacement re-targets the
+  cross-repository reference**: replaces assets along with the weights, but rebuilds every
+  distribution and changes hub and models; only two sharing pairs existed (Wan → umT5, anima-extra →
+  anima). Revival: three or more sharing pairs, or a family other than Wan consuming umT5 (see
+  decision 7 for the 2026-10-18 count).
+- **Bake the bucket configuration into the graph descriptor**: would reject a differently configured
+  umT5 but changes the descriptor and forces new sha rows and fixtures; for a config-less upstream the
+  baked value would also be a copy of the original's, so it would catch nothing. Revival: a compatible
+  component with a different bucket configuration appears.
+- **Check provenance and licence at replacement time**: the runtime does not know provenance (ADR
+  0108 decision 19); recorded as a limitation.
 
 ## Consequences
 
-- 配布物: `karume-umt5-xxl` の出所が本家になる。重みの part は不変の見込みで、part 0 と manifest の 2 つの値（part 0 の sha256・
-  モデル記述の sha256）とカード・NOTICE だけが変わる（段 a で確かめる）。`karume-wan2.1` は越境参照の同じ 2 つの値とカード・NOTICE が変わる。
-- recipe: 本家の約 29.8 GB の shard（開発機の HF キャッシュには取得済み — 出所調査 §1）が umT5 の export の入力になる。Wan の
-  `text_encoder`（f32 約 22.7 GB）はトークナイザ・check-mask・事前計算のために引き続き要る。
-- recipe の MUST「出発点は F32」は上流の表から読む経路に残る。取り込みの経路だけが、`intake.json` が名乗る dtype（BF16 か F32）を受けて
-  読みの時点で F32 へ広げる（決定 5）。
-- 公開の手順: アップロードの台本が、上げる前に容器の provenance のライセンスを読む門を持つ（決定 6）。既存の配布リポには未宣言の印が
-  無いので、今の公開の手順は変わらない。
-- 公開面（TS）: 変わらない。差し替えの説明・例・テストが増える。
-- ADR 0119 追記「段 10d の設計」D の「出所は Wan-AI/Wan2.1-T2V-1.3B-Diffusers の text_encoder・同一は未確認」を本 ADR の決定 1 が
-  置き換える（0119 側の追記はオーケストレータが書く）。
+- `karume-umt5-xxl` names the original as upstream. The weight parts did not change; part 0, the two
+  manifest values that point at it, the card and NOTICE changed (verified at step a). For
+  `karume-wan2.1` the same two cross-repository values and its card and NOTICE changed — this now
+  concerns only the local distribution, since Wan2.1 is not published on HF (addendum 2026-10-15).
+- The recipe reads the original's shards 1–3 (about 29.8 GB, sha256-checked on every `write` /
+  `reference`); Wan's f32 `text_encoder` (about 22.7 GB) is still needed for the tokenizer,
+  check-mask and precomputed embeddings.
+- The F32 MUST holds on the table path; only the intake path accepts the declared dtype (BF16 or F32)
+  and widens at read time.
+- The upload script reads container licences before uploading; existing distributions carry no
+  marker, so the release procedure is otherwise unchanged.
+- The public TS surface did not change for replacement; it gained explanation and tests.
+- Risks that remain: `weights_only=True` loading was observed without warnings on torch 2.13.0 only;
+  graph descriptor identity across exporter / torch / transformers versions is unmeasured (a mismatch
+  fails safe). The original's index and `config.json` are not pinned by sha256; a mismatching index
+  fails with a plain `KeyError` (no path substitutes values).
 
-### 影響ファイル
+## Open points
 
-| 区分            | ファイル                                                                                                                                                                                                                                                                                  | 段   |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
-| 上流の表と取得  | `tools/export-recipes/wan/sources.py`（umT5 の表・本家の shard の取得口と shard の sha256）                                                                                                                                                                                               | a    |
-| 書き手          | `tools/export-recipes/wan/umt5_export.py`（`.bin` の読み口と unpickle 前の sha256 照合・tied な別名・provenance・系列名・軸の 2 本化）                                                                                                                                                    | a    |
-| 配布 recipe     | `tools/export-recipes/wan/umt5_distribution.py`（出所の表・NOTICE・カードの帰属節〈subfolder なし〉・系列名）・`wan/distribution.py`（NOTICE・系列名の doc）・`wan/card.py`（umT5 の説明）                                                                                                | a    |
-| 出所の記述      | `tools/export-recipes/wan/THIRD_PARTY_NOTICES.md`（umT5 の節 `:58-63` — 上流と revision を本家へ）                                                                                                                                                                                        | a    |
-| 系列名の綴り    | `packages/runtime/tests/helpers/series-graphs.ts`・`packages/models/tests/e2e_wan_umt5_test.ts`・`wan/README.md`・`wan/distribution.py` の doc                                                                                                                                            | a    |
-| recipe のテスト | `tools/export-recipes/wan/tests/test_umt5_distribution.py`（出所の期待値の参照先。`:150` と `:279` の `assert "has not been checked"` は事実が変わったので直すテスト — 直すのは自分のコミットに分ける）・新規（`.bin` の読み口・別名の規則・shard の導出と sha256 照合 — 小模型）         | a    |
-| 取り込み        | `tools/export-recipes/wan/` の新規台本（取り込み）・`umt5_export.py`（`--intake`・元の dtype の受け方・未宣言の明示の口）・`umt5_distribution.py`（json 照合・第三者の出力先とリポ名・ルートのファイル）・`dist.py`（明示の口の引数・実 path の判定）・新規テスト（合成の BF16 の小模型） | b    |
-| 公開前の門      | `tools/release/hf-upload.zsh`（上げる前に容器の provenance のライセンスを読む）・`docs/release-runbook.md`                                                                                                                                                                                | b    |
-| 手元の資産      | `inputs/umt5/<名前>/`・`outputs/series/umt5-xxl-<名前>-i8-dyn/`・`outputs/misc/local-dist/<名前>/`（全て git 追跡外）                                                                                                                                                                     | c    |
-| TS のテスト     | `packages/models/tests/` の新規ホストテスト（Wan の差し替えの正の経路・越境の席の差し替え・i4 の拒否）・差し替えの e2e（実験用ミラーの path は環境変数で受ける — 追跡されるコードに名前を書かない）                                                                                       | c・d |
-| 文書            | `examples/wan/README.md`（と例）・`tools/export-recipes/wan/README.md`・`docs/limitations.md`・`docs/known-issues.md`・`docs/assets-layout.md`（`inputs/umt5/`・実験用ミラーの席）・`docs/glossary.md`・`docs/backlog.md`・`.claude/ACTIVE_DESIGN.md`・ADR 0119 の追記                    | 各段 |
+- Publishing a third-party compatible component that declares a licence (repository naming, card
+  attribution, whether it enters a code table) is ruled on when requested. ADR 0092 decision 6
+  derivatives are never published from this repository.
+- Graph descriptor identity across exporter / torch / transformers versions (swap study §2.2).
 
-### 費用とリスク
+## Addendum (2026-10-04) — step a: the switch changed no weight byte
 
-- **取得とディスク**: 本家の shard 1〜3 で約 29.8 GB。追加学習版は bf16 の 11.4 GB をそのまま `inputs/` に置く（F32 の写しは作らない）。
-- **sha256 の照合の手間**: 本家の `write` / `reference` のたびに shard 3 本（約 29.8 GB）を読み通して sha256 を取る。
-- **`.bin` の読み口の将来**: `weights_only=True` は torch 2.13.0 で警告なしに読めた（観測のみ）。将来の torch で挙動が変わりうる。
-- **基準線が作れない場合**: 段 a の最初の `write --check` が赤なら、recipe の書き口が今の系列を再現しない。その時点で止め、どの part が
-  違うかと原因を記録する（切り替えには進まない — 差分の帰属が決まらないため）。
-- **golden が再現しない場合**: `reference` の再実行で golden のテンソルがビット一致しなければ、golden の比較は記録（`ratios` の差）に
-  下げ、門にしない。段 a の門は part の sha256 と GPU の sha 行に残る。
-- **予測が外れる場合**: 段 a で重みの part が 1 本でも変わったら、決定 1 の前提（値が同じ）が崩れる。その時点で止め、原因（読み口・
-  別名の選び方・量子化）を調べる。sha 参照行は焼き直さない（tolerance 化と同じく門の意味が消える）。
-- **追加学習版のグラフ記述**: 同じ config ならグラフ記述が同じ見込みだが、未確認（段 c で確かめる）。exporter / torch / transformers の
-  版が違えばグラフ記述が別になりうる（差し替え調査 §2.2 — 安全側の失敗）。
-- **追加学習版の品質**: bf16 起点の i8 は全 part のバイトが本家と違う。出力の差は未測で、段 c は「動くこと」と観測の記録までを見る。
-- **0121 との順序**: 段 a が `karume-umt5-xxl` の part 0 の sha256 を変えるので、0121 の配布形を先に焼くと焼き直しになる。
+Baseline at `1fb74d10` (`write --check` green, golden reproduced byte for byte, dist rebuild identical);
+after the switch the weight parts 00002–00026 matched 25 of 25, part 00001 differed only in
+`provenance.upstreamRevision`, and the 48 golden tensors matched bit for bit. Evidence:
+`outputs/bench/karume-umt5-xxl/2026-10-04_stage-a/`; reader details under decision 2.
 
-## 検収
+## Addendum (2026-10-04) — step b and the CPU part of step c: the fine-tune has the original's graph
 
-| 段 | 中身                                                                | 検収の形（緑の条件）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | GPU             |
-| -- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| a  | 基準線・本家の読み口と出所の切り替え・再生成・差分（決定 1〜4）     | **基準線（切り替えの前・今の出所のまま）**: HEAD の recipe で `write --check` が緑（recipe の書き口が今の系列を全 part の sha256 で再現する — 赤なら止める）。旧系列の golden を退避して `reference` を再実行し、golden のテンソルがビット一致するかを見る（スレッド数を記録する — 一致しなければ以下の golden の比較は記録に下げる）。`dist --pipeline umt5` と `dist --pipeline wan`（仮の SHA）を今の recipe で組み直し、これを基準線にする。**切り替えの後**: 新しい系列 `umt5-xxl-i8-dyn` を `write` → `reference` で書き、旧系列 `wan2.1-umt5-i8-dyn` と比べる: `model-00002`〜`00026` の sha256 が全部一致・`model-00001` は sha256 だけが違い長さは同じ・part 0 のグラフ記述の sha256 は同じ・モデル記述を JSON で比べると違いは `provenance.upstreamRevision`（`0fad780a…` → `66cb9e7e…`）だけ。golden の出力テンソルは全部ビット一致し、違うのはメタの part 0 の sha256 と軸の記録だけ（基準線の golden は軸の記録の欄を持たないので、欄の追加は差として許す）（基準線で再現性が確かめられた場合だけ門 — でなければ `ratios` の差の記録）。`dist` を同じ 2 つで組み直し、基準線と比べる（manifest の `generator` が基準線と同じであることが比較の前提）: `karume-umt5-xxl/karume.json` の差分が `text_encoder` の part 0 の sha256 とモデル記述の sha256 の 2 つだけ・`karume-wan2.1/karume.json` の差分も越境参照の同じ 2 つだけ・Wan の DiT / VAE / 資産の現物はバイト不変。`THIRD_PARTY_NOTICES.md` の umT5 の節が本家の行と一致。カードと NOTICE の出所の文面が本家を名乗り、Wan 側の文面と食い違わない。新しいテスト: 小模型の `.bin` 分割形を `Checkpoint` が読み safetensors の読みと値が一致・shard を索引から導く・別名の規則（同じ storage → `shared.weight`・別 storage でビット一致 → 同じ・値が違う → 落ちる）。故障注入（別名の片方の 1 要素を変える・shard を 1 本外す・F32 でない `.bin`・shard の 1 バイトを変えて sha256 を表と食い違わせる〈`torch.load` の前に落ちる〉・表の行を経ずに `pytorch_model.bin.index.json` だけのディレクトリを渡す〈`.bin` を開かずに落ちる〉）が全部赤。帰属節の文面に空の subfolder が出ない。両方の `uv run pytest` 緑。確認の 1 回: `test:models:wan` の umT5 の e2e（golden の part 0 の照合）と GPU 経路の sha 行が、既存の行のまま一致する（`KARUME_REFERENCE=write` を使わない） | 確認の 1 回だけ |
-| b  | 取り込みの台本・`--intake`・json 照合・未宣言の明示の口・公開前の門 | 合成の BF16 の小模型の safetensors と模擬の API 応答で: 取り込みはファイルをそのまま置き、置いたファイルの sha256 が API の値と一致・`intake.json` が元の dtype と config の出所（上流のもの / 本家の写し）を名乗る。`--intake` で書いた容器が、同じ値を F32 へ広げた safetensors を同じ `intake.json`（dtype の欄だけ F32）で書いた容器と全 part の sha256 で一致（読みの時点の拡幅が丸めの出発点を変えない）。sha256 の不一致・キー集合の不一致（期待は Wan の形の 242 本）・別名の対の値の不一致・FP8・BF16 と F32 の混在・`intake.json` の dtype とファイルの dtype の食い違い・`.bin`・旧い綴り・config のグラフに効く欄やバケットの構成の不一致が全部 fail loudly。対の両方を持つ形（243 本・ビット一致）と片方だけの形は受ける。上流の表から読む経路に BF16 の checkpoint を渡すと落ちる。ライセンス未宣言の取り込みは、明示の引数なしの `write` と `dist` が 1 バイトも書く前に落ちる。明示の引数ありでは容器のライセンス欄に未宣言の印が入る。取り込み由来のモデルは、**ライセンスの宣言の有無によらず**、出力先が `models/` の下なら落ちる（`models/` への symlink・`..` を含む相対の `--out` でも落ちる）・`models/` の外なら組める。ミラーのルートのファイル: 未宣言なら `LICENSE.md` が無く、`NOTICE.md` とカードの冒頭が未宣言と書く。宣言済みなら `LICENSE.md` がその識別子の本文。どちらも `NOTICE.md` に「No retraining」の文と Wan・Google を上流と名乗る文が無い。公開前の門: 未宣言の印の容器を `models/` の下へ手で置いたミラーを、アップロードの台本が 1 バイトも上げずに拒む（hf は呼ばない形で試す）。宣言済みのライセンスでは json の値と容器の provenance が照合され、食い違えば落ちる。第三者のモデルが `karume-umt5-xxl` を名乗らない。本家の `dist --pipeline umt5` は不変。追跡されるファイルに第三者のリポ名が無い（テストは架空の名前）。両方の `uv run pytest` 緑                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 不要            |
-| c  | 追加学習版の変換と Wan2.1 への差し替え                              | 追加学習版の bf16 版を取り込み（sha256 一致・`intake.json` が元の dtype `BF16` と「構成は推定〈本家の写し〉」を名乗る・`license-review.md` に未宣言とベース未宣言を記録）、i8 の系列と手元の実験用ミラーを組む。グラフ記述の sha256 が `karume-umt5-xxl` の `text_encoder` と一致する（不一致なら止めて原因を記録 — 版の違いか構成の違いか）。Wan2.1 を `components: { text_encoder: <実験用ミラー> }` で構築し、admission を通る・元の越境先の umT5 の part を取らない・生成が完走する・非有限 0。text 段の出力を本家の i8 と固定 4 プロンプトで比べた記録（行ごとのコサインの最小・相対フロベニウス — 観測であって門ではない）。視認の素材（seed 4 本以上 × プロンプト 2〜3 種 — プロンプトは利用者が選ぶ）を利用者へ渡す                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 要る            |
-| d  | 説明・例・差し替えのテスト・limitations                             | examples/wan と `tools/export-recipes/wan/README.md` に差し替えの例と取り込みの手順（`{ repo, revision }` の pin・precomputed では効かないこと）。`karume-umt5-xxl` のカードの Usage に差し替えの段落。疑似 HF のリポで: Wan の正の経路（差した役割だけが別リポから来る・元の越境先の part は 0 バイト）・越境の席の差し替え（`crossRepo` mapping なしで通る）・i4 の差し替えが重みを取る前に `umt5Contract` で落ちる。故障注入（グラフ記述の sha256 を 1 文字変える）で拒否。limitations に決定 7 の 3 項目・known-issues に 1 項目（各項目が利用者に見える害を先に書く）。glossary・assets-layout の行。新しいホストテストをファイル指定で回して緑（`test:models:wan` は GPU の e2e を含むので段 d の門にしない — GPU を待たない）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | 不要            |
+Step b landed as decisions 5 and 6 describe (`NOASSERTION`, the Node `container_license.ts`). The
+fine-tune (local name `community-ft`) was taken in (BF16, undeclared licence, inferred configuration);
+its graph descriptor sha256 equals `karume-umt5-xxl`'s (`59ca0ccf…68ee`), and the pre-upload guard
+rejects its mirror. Evidence: `outputs/bench/karume-umt5-xxl/2026-10-04_stage-c/`.
 
-## 裁定
+## Addendum (2026-10-04) — step d: replacing a cross-repository slot needs no `crossRepo` mapping
 
-利用者に判断を仰ぐ点（推奨案つき）。
+Fact: a Wan distribution given no `crossRepo` mapping passes admission and fetching once
+`text_encoder` is replaced; without the replacement it fails with "cross-repository source missing".
+The replaced slot takes the replacement's manifest as its origin (`packages/models/src/hub/components.ts`),
+and a cross-repository origin is resolved only per reference (`sourceForRef` → `originFor` in
+`packages/hub/src/source.ts`). Host test: `packages/models/tests/wan_components_test.ts` (the replaced
+role comes only from the replacement and the original cross-repository part is fetched 0 bytes; the
+mapping-free case for local and HTTP replacements; an i4 replacement fails in `umt5Contract` before
+any weight part; a one-character change of the graph sha256 is rejected in admission).
 
-1. **ライセンスを宣言していない重みを、手元の実験用にだけ変換できる口を設けるか**（決定 6）
-   - (a) 設ける。明示の引数を付けたときだけ、ライセンス欄に「未宣言」の印を焼いた容器と手元の実験用ミラーを作れる。そのミラーは
-     `models/` の外にしか置けず（取り込み由来のモデルは全部そう — 決定 5）、`LICENSE.md` を持たず、アップロードの台本は容器の印を
-     読んで上げるのを拒む。守るもの: 要望 3（追加学習版を手元で試す）を止めずに、再配布の条件が決まらない重みを公開の経路から
-     締め出すこと。台本を通さず `hf upload` を直に実行する穴だけはリポの中で閉じられない。
-   - (b) 設けない。ライセンスを宣言していない重みは取り込みの時点で落ちる。追加学習版は変換できず、段 c は止まる（ライセンスを
-     宣言した互換の追加学習版が見つかるまで）。守るもの: 第三者の重みの扱いを「再配布できるものだけ」に一本化すること。
-   - **推奨 (a)**。今の追加学習版はライセンスもベースも宣言していないので、(b) では要望 3 が満たせない。印は容器の中に残り、公開の
-     経路は 3 重に拒む（決定 6 — 配布の門と公開前の門は容器の中身で閉じ、置き場の判定は実 path で比べる）。既存の仮の SHA の門と同じ
-     「明示したときだけ開く」形。取り込みのコマンドに確認を強制しない ADR 0088 決定 5 からは外れるが、引数が掛かるのは書き手と組み立ての
-     門で、判定するのは「ライセンス欄が空」という機械で決まる事実だけ。
-2. **差し替えの仕組みを今の形（部品差し替え席）のまま進めるか**（決定 7）
-   - (a) 今の形のまま進める。Wan の text encoder を、トークナイザが同じ互換モデル（今回の追加学習版を含む）へ差し替えられる。
-     トークナイザが違うのに語彙数だけ同じモデルを差すと、受理されたまま誤った文字の区切りで動く（limitations に書く）。manifest の
-     形式は変わらず、配布形の作り直しも無い。守るもの: 互換の判定を「グラフ記述が同じ」1 つに保つこと。
-   - (b) 今回 manifest に「この部品が提供する役割」と「その役割に属するトークナイザ」を名乗らせる形まで作る。トークナイザの違う
-     モデルは拒まれるか、トークナイザごと差し替わる。代わりに manifest の形式の版が上がり、全配布形の焼き直しと、Wan のトークナイザ
-     資産（前処理の表と束ねた形式）の分割が要る。
-   - **推奨 (a)**。今回の追加学習版は、fp8 版に埋め込まれたトークナイザの原本（`spiece.model`）が本家・Wan と sha256 で一致する（事実）。
-     変換する bf16 版はトークナイザを持たず、同じものとみなすのは推論（同じ配布元の別形式・語彙埋め込みが Wan の丸めと全行一致）。
-     それで (a) で足りる。(b) が守る誤りの実例はまだ無い。(b) は実例が出た日に「役割に属する資産」の部分だけを裁定する（採らなかった案 B の復活の条件）。
+## Addendum (2026-10-04) — step c on the GPU and the swap e2e
 
-## 裁定（2026-10-04・利用者）
+The swapped Wan2.1 passed admission and generated without non-finite values; the maintainer's visual
+review (2026-10-05) found no large differences or collapse, which closed the quality question for i8
+quantized from bf16. The opt-in e2e is `packages/e2e/tests/e2e_wan_swap_test.ts`
+(`KARUME_WAN_SWAP_TEXT_ENCODER=<mirror directory>`), with a GPU-free control in the default lane.
+Material: `outputs/verify/<environment key>/2026-10-04_wan-visual-gpu-text-community-ft/`.
 
-1. **ライセンスを宣言していない重みを手元の実験用にだけ変換できる口 = 設ける（a）**。
-2. **依存モデルの差し替え = 今の部品差し替え席のまま進める（a）**。
-3. 併せて承認: 出所を本家 `google/umt5-xxl` へ切り替える（決定 1）・系列名を出所に合わせて改名する（決定 4）。利用者の返答は
-   「OK, 進めてください」（推奨案の一覧への一括の承認）。
+## Addendum (2026-10-15) — umT5 usable without Wan (supersedes the "no asset in the umT5 repository" of decisions 3 and 8)
 
-## 未解決
-
-- **ライセンスを宣言した第三者の互換部品の公開**: リポの命名・カードの帰属・コードの表に載せるかは、要望が出た日に裁定する（決定 5）。
-  ADR 0092 決定 6 に当たる派生は本リポからは公開しない。
-- **未宣言の印の綴り**: SPDX の `NOASSERTION` を候補にする。容器・カードの frontmatter・json での扱いは段 b で決める。
-- **`reference` のビット再現性**（段 a の基準線で確かめる — 同じ容器で 2 回回した記録は無い。スレッド数は今は固定していない）。
-  再現しなければ golden の比較は記録に下げる。
-- **`write --check` が今の系列を再現するか**（段 a の基準線 — 今の系列は recipe の外の driver が書いた）。
-- **公開前の門の実装の形**（zsh の台本から provenance を読む口を何で書くか）は段 b で決める。台本を通さない `hf upload` は閉じられない。
-- **追加学習版のグラフ記述の一致**（段 c）と、exporter / torch / transformers の版を跨いだグラフ記述の一致（差し替え調査 §2.2 — 未実測）。
-- **越境の席の差し替えに `crossRepo` mapping が要らないこと**（差し替え調査 §1.1.1 の推測 — 段 d のテストで確かめる）。
-- **bf16 起点の i8 の品質**: 追加学習版の出力の差（段 c の記録）。最終判断は利用者の視認。
-- **`.bin` の `weights_only=True` 読みの将来の挙動**（torch 2.13.0 では警告なし — 観測のみ）。
-- **公式の `models_t5_umt5-xxl-enc-bf16.pth` が本家の f32 の RNE 丸めと同じ値か**（出所調査 §7 — 読んでいない。本 ADR の判断には効かない）。
-- **0121 との順序**: 段 a を 0121 の配布形の作業より先に終える調整（決定 8）。
-
-## 追記（2026-10-04）: 段 a の結果 — 出所の切り替えは重みを 1 バイトも変えなかった
-
-- **基準線（切り替えの前・HEAD `1fb74d10`）**: `write --check` は緑（137 s）、`reference` の再実行で golden 10 本がバイト単位で再現（338 s）、
-  dist を別の出力先へ組んだ結果は今のミラーと差分 0（`outputs/bench/karume-umt5-xxl/2026-10-04_baseline/`）。golden の比較を門にできると確かめた。
-- **実装**（`c657a3dd`）: 上流の表 `UMT5_SOURCES`（`google/umt5-xxl` @ `66cb9e7e`・apache-2.0・shard 1〜3 の sha256）、pin した行だけが開ける
-  `.bin` の読み口、tied な別名の規則、軸の 2 本化（`--upstream` = umT5・`--model` = Wan の text 側）、系列名 `umt5-xxl-i8-dyn`。
-- **検収 ✅**（証拠 `outputs/bench/karume-umt5-xxl/2026-10-04_stage-a/`・独立レビューが sha256 とテンソルを自分で計算し直して再現）:
-  - part 00002〜00026（重み）は旧系列と sha256 が 25 / 25 一致。
-  - part 00001 の差は 38 バイトで、モデル記述の `provenance.upstreamRevision` の値だけ（グラフ記述の sha256 は同じ）。
-  - golden 10 本の出力テンソル（48 本）はビット一致。メタの差は `container.part0Sha256` と新しく足した `axes` の 7 欄だけ。
-  - umT5 の dist の差は `NOTICE.md`・`README.md`・`karume.json`（`parts[0].sha256` と `descriptor.model.sha256` の 2 値）・part 1 本。Wan の dist の差は
-    越境参照の同じ 2 値と README・NOTICE の文面だけ。
-- **決定 2 の補足（レビューで直した点）**: 開いた shard を握り続けると file-backed のページが RSS に乗る（量子化の山 17.62 GiB）ので、読むたびに開いて
-  閉じる形にした（山 6.14 GiB・開く費用は 1 回 10〜19 ms）。sha256 の照合は構築時に握った記述子に対して行い、読みも同じ記述子から開く
-  （照合の後に path を差し替えても、照合した内容を読む）。同じ inode をその場で書き換えられる場合は塞げない（mmap で読む限り — docstring に明記）。
-  サブコマンドに効かない引数は、明示されたら拒む。
-- **残り**: 配布形ミラーの焼き直し（umT5 → Wan の順 — Wan の越境参照は umT5 の part 1 本目の sha256 を持つ）と、GPU での確認 1 回（umT5 の e2e と GPU 経路の
-  sha 行が既存の行のまま一致すること）。どちらも GPU の直列キューの後。その後に旧系列 `outputs/series/wan2.1-umt5-i8-dyn` を片付ける。
-- **起票（範囲外）**: 本家の索引（`pytorch_model.bin.index.json`）と `config.json` は sha256 で pin していない。索引が実物と食い違うと素の `KeyError` で落ちる
-  （値がすり替わる経路は無い）。
-
-## 追記（2026-10-04）: 段 b の結果と段 c の CPU 部分 — 追加学習版はグラフ記述が本家と同一
-
-- **段 b の実装**（`ca38d638`・`6cdad993`）: 取り込みの台本 `wan/umt5_intake.py`（記録 `intake.json`・形式 `karume-umt5-intake/2`）、書き手の `--intake`
-  （記録が名乗る dtype だけを受け、BF16 は読みの時点で F32 へ広げる）、取り込み由来のミラー（`dist.py --intake`・既定の出力先
-  `outputs/misc/local-dist/<名前>`・`models/` の下は実 path で拒む）、公開前の門。
-- **未解決を閉じる**: 未宣言の印は `NOASSERTION`。再配布の条件を識別できない値（宣言なし・`unknown`・`none`・名前の無い `other`）は取り込みが未宣言として
-  記録する。名前のある `other` は宣言済みとして通す（既存の配布形に `other` を名乗る容器がある）。公開前の門は `tools/release/container_license.ts`
-  （deno）で、`hf-upload.zsh upload` が上げる前に全容器の `provenance.license` を読み、未宣言の印（大小文字を問わない）と、容器が 1 本も無い
-  ディレクトリを拒む。既存の配布形ミラー 13 件は門を通る。
-- **検収の文言の補足**: 「同じ `intake.json`（dtype の欄だけ F32）」は、中身が違えばファイルの sha256 と長さも違うので、その 2 欄も変えた記録で比べた
-  （容器に効く欄 — ライセンスと revision — は同じ）。BF16 から書いた容器と F32 へ広げた写しから書いた容器は、全 part の sha256 が一致した。
-- **レビューで直した点**: 取り込み先に索引と別の重みを置くと照合していないファイルが読まれた（読み口を、握った記述子で照合して同じ記述子から読む形に
-  替えた）。取り込みの後に `config.json` を書き換えても通った（記録に sha256 を持たせ、入口で照合する）。取り込み先に置けるファイルは許可の一覧
-  （重み・`config.json`・`intake.json`・`license-review.md`）で閉じ、symlink も拒む。
-- **段 c の CPU 部分 ✅**（名前 `community-ft`・`outputs/bench/karume-umt5-xxl/2026-10-04_stage-c/`）: 取り込み 50 s（11.36 GB・BF16・ライセンスは未宣言の印・
-  config は本家の写し = 構成は推定）→ i8 の系列 226 s → golden 10 本 417 s → 実験用ミラー 18 s。**グラフ記述の sha256 は本家の `karume-umt5-xxl` と同一**
-  （`59ca0ccf…68ee`）— 部品差し替え席の受理の条件を満たす。公開前の門はこのミラーを拒む（終了コード 1）。取り込み由来の系列が手元に在っても、追跡される
-  表に名前を足さずにホストの門番は緑。
-- **残り**: 段 c の GPU 部分（Wan2.1 の `text_encoder` に差し替えて通す・出力差の記録・視認の素材）と段 d。
-- **起票（範囲外）**: 宣言済みの第三者のミラーを `models/` に置いた場合を機械で止める 2 枚目は無い（第三者の公開は裁定が要る）。`config.json` の照合は
-  入口で 1 回で、実行中の書き換えは防げない。
-
-## 追記（2026-10-04）: 段 d の結果 — 越境参照の席の差し替えに `crossRepo` mapping は要らない
-
-- **未解決を閉じる（越境の席の差し替え）**: 事実として成立する。手元の配布形（`localDirectory`）の Wan に `crossRepo` を 1 本も渡さず
-  `text_encoder` を差すと、admission・重みの取得・資産の取得を通る。差さなければ同じ取得元は、umT5 の part 0 の取得で「越境先が無い」
-  （hub の `local.ts` の案内）を cause に持つ失敗で落ちる。機序: 差し替えた席は差し替え先の manifest を出所に持ち
-  （`packages/models/src/hub/components.ts:438`）、元の席の越境参照は 1 本も引かれない。越境先の取得元は ref ごとに引くときにだけ解決する
-  （`packages/hub/src/source.ts:274-277` の `sourceForRef` → `originFor`）。差し替え先が手元のディレクトリなら構築の前に読まれるのは
-  part 0 だけで、重みは Session の構築で読まれる（ホストテストでは観測しない）。差し替え先が HTTP なら全 part の取得まで観測した。
-- **着地したもの**:
-  - ホストテスト `packages/models/tests/wan_components_test.ts`（wan のレーン・GPU 不要・疑似 HF とメモリ上のディレクトリ）:
-    差した `text_encoder` だけが差し替え先から来て元の越境先は 0 バイト（対照: 差さなければ越境先から取る）・越境の席の差し替えが
-    mapping なしで通る（対照: 差さなければ mapping 不在で落ちる・差し替え先は手元と HTTP の 2 通り）・i4 の差し替え先は
-    `umt5Contract` が重みの part を取る前に落とす・故障注入（差し替え先のグラフ記述の sha256 を 1 文字変える）で admission が拒み
-    容器を 1 本も取らない。正の経路は `WanPipeline.fromPretrained` の入口から通し、埋め込み資産を読めないバイト列にして資産の
-    解析で止める（= admission と重みの取得を通り終えた — `irodori_admission_test.ts` と同じ観測の形）。
-  - `examples/wan`: `--swap-text-encoder <手元の配布形 | owner/name@<40 桁の commit>>`（`components: { text_encoder: { source } }`）。
-    素のリポ名・commit でない ref・`--text-encoder precomputed` との組み合わせ・`--umt5-source` との組み合わせは拒む。出力先の経路名は
-    `gpu-swap`。README に pin の規則と precomputed の規則。
-  - `tools/export-recipes/wan/README.md`: 取り込みから差し替えまでの手順（取り込み → `license-review.md` → `--intake` の書き手 →
-    実験用ミラー → 差し替え → 公開前の門の手動の確認）。
-  - `karume-umt5-xxl` のカードの Usage に差し替えの段落（`wan/umt5_distribution.py` の `_umt5_usage`・pytest 1 本）。配布形ミラーの
-    `models/karume-umt5-xxl/README.md` はこの段落の分だけ古い（焼き直しは配布形ミラーの次の組み直しで — カードとミラーを比べる門は無い）。
-  - `docs/limitations.md` に決定 7 の 4 の 3 項目・`docs/known-issues.md` に決定 7 の 5 の 1 項目・`docs/glossary.md` に 2 行（バケットの
-    構成・差し替えのフラグ）。`docs/assets-layout.md` の行（`inputs/umt5/`・実験用ミラーの席）は段 b で入っている。
-- **残り**: 影響ファイルの表の「差し替えの e2e」（実験用ミラーの path は環境変数で受ける）は未着手で、段 c の GPU 部分と一緒に
-  GPU が空いてから入れる。差し替え先が手元のディレクトリのとき重みの block を差し替え先から読むこと（Session の構築時の区間読み）は、
-  ホストテストでは観測せず、この e2e で押さえる。
-- **決定 7 の 5 の補足**: 「Wan の umT5 は i8 / f32 しか受けないので今は影響しない」は網羅的でない。`umt5Contract` が求めるのは
-  「格納は i8 か f32 で、i8 が 1 本以上」までなので、語彙埋め込みを f32 で持つ部品（埋め込みのバッファが約 4 倍）は門を通り、元の席の
-  `requiredLimits` の事前判定を通ったまま重みを取った後に落ちうる。recipe の書き手は語彙埋め込みを i8 で書くので、recipe で作った部品では
-  起きない（known-issues の項目にこの形で書いた）。
-
-## 追記（2026-10-04）: 段 c の GPU の結果と差し替えの e2e — 追加学習版は受理され、出力は本家と別物になる
-
-- **受理**: Wan2.1 の `text_encoder` を手元の実験用ミラー（追加学習版）へ差し替えた構築は、B570 で admission を通った（グラフ記述の
-  sha256 が本家と同一 — 段 b の追記）。umT5 の越境先の mapping は渡していない。
-- **視認の素材**: プロンプト 3 種 × seed 42〜45 の 12 本（832×480・33 フレーム・50 ステップ・実用席）。全て非有限 0・所要 966〜978 s
-  （本家の umT5 の同じ要求は 959〜975 s）。置き場は `outputs/verify/<環境キー>/2026-10-04_wan-visual-gpu-text-community-ft/`
-  （対 = `…_wan-visual-gpu-text-free/`）。
-- **出力差（記録）**: 同じ要求の本家の umT5 の素材と比べた、フレームの uint8 の平均絶対差は 28.6〜73.0（12 本・一致するフレームは
-  0 枚 — 同じ置き場の `diff-vs-original-umt5.json`）。差し替えは実際に効いている。品質の最終判断は利用者の視認
-  （未解決「bf16 起点の i8 の品質」）。
-- **差し替えの e2e**（`packages/models/tests/e2e_wan_swap_test.ts`・opt-in `KARUME_WAN_SWAP_TEXT_ENCODER=<実験用ミラーのディレクトリ>`）:
-  実 GPU の 1 本と、GPU を使わない対照 1 本（差さず mapping も無ければ「越境先が無い」で落ちる — 既定のレーンで回る）。B570 の実走は
-  2 passed・223 s: 構築 0.4 s（差し替え先から読むのは `karume.json` と part 0 だけ）・text 段で差し替え先の束縛された block を全部
-  （25 part・5.296 GiB・520 回）差し替え先から読む・Wan の取得元は text encoder の part を 1 度も読まない・2 ステップの生成が非有限 0・
-  出力の sha256 は本家の umT5 の行（`gpu-text-2step-boxing-cats-seed42`）と不一致（観測 — 門にしない）。段 d の「残り」
-  （手元の差し替え先から重みの block を読むことの観測）はこれで閉じた。
-- **配布形ミラー**: `models/karume-umt5-xxl` を組み直した。変わったのは README の差し替えの段落（11 行）だけで、README 以外の全ファイルは
-  sha256 が前後で同一。
-- **段 a〜d は完了**。残るのは「未解決」の項目（第三者の互換部品の公開の裁定・版を跨いだグラフ記述の一致・利用者の視認）。
-
-## 裁定（2026-10-05・利用者）: 追加学習版の視認 = 問題なし
-
-- 差し替えの素材 12 本（プロンプト 3 種 × seed 42〜45・本家の umT5 の同じ要求と対）を見比べた結果: **大きな違いも崩壊も無く、指示どおりの
-  絵が出ている**。未解決「bf16 起点の i8 の品質」はこれで閉じる（bf16 を f32 へ広げてから i8 に丸める経路で、視認できる劣化は無い）。
-- 本家との出力の差（平均絶対差 28.6〜73.0）は、text encoder が別の重みであることの現れで、劣化ではない。追加学習が対象にした種類の指示への
-  反応が違う程度、というのが利用者の見立て（その種類のプロンプトでの比較はしていない）。
-- 残る未解決は、第三者の互換部品の公開の裁定と、版を跨いだグラフ記述の一致の 2 つ。
-
-## 追記（2026-10-15）: umT5 を Wan に依らず単体で使える形にする（決定 3 / 8 の「umT5 のリポに資産を足さない」を改める）
-
-- **利用者裁定（2026-10-15）**: 「umT5 は Wan に関わらず使えるようにしたい」— 0.14.0（`karume-umt5-xxl` の初公開）に入れる。同じ日の
-  裁定で Wan2.1（`karume-wan2.1`）は HF に公開しない（配布形は手元で `dist.py` から組む）ので、umT5 のリポを使う公開の配布は
-  `karume-wan2.2` だけになる。
-- **決定 3 / 8 の改め**: `karume-umt5-xxl` はモデル `xxl` の資産 `tokenizer`（形式 `karume-umt5-tokenizer/1`）を持つ。中身は Wan の
-  資産（`karume-wan-umt5-tokenizer/1`）の T5 の表の部分だけ（語彙・スコア・追加語彙・空白集合・最大長 512）で、Wan の前処理の表は
-  持たない。出所は本家 `google/umt5-xxl` の pin した commit の `tokenizer.json` と `tokenizer_config.json`（両方の sha256 を
-  `wan.sources.UMT5_SOURCES` に pin し、読む前に照合する）。表を作る関数は Wan の資産と共有する（`wan/umt5_tokenizer.py` の
-  `t5_table_fields`）— 書き手は `wan/umt5_xxl_tokenizer.py`・系列の席は `outputs/series/umt5-xxl-tokenizer/tokenizer.json`。
-  Wan2.2 は自分の資産（前処理の表込み）を持ち続け、そのバイトは変わらない。
-- **本家のトークナイザの実測**: 本家の backend は Wan の `tokenizer/` と同じ形で、正規化は要らない（違いはスコアの末尾 1 ulp の
-  表記だけ）。受理する入力の id 列は Wan の資産と一致する（fixture 50 本・Wan のパリティの 218 本・掃引 4,563 本で不一致 0・
-  transformers 5.14.1 と `tokenizer.json` の両経路）。決定 3 が「本家から焼くとスコアの桁で資産のバイトが変わる」と書いた差は、
-  この末尾の表記の差。
-- **受理集合（前処理なしで使う形）**: 拒否の規則は Wan と同じ（本文中の追加語彙・空白の直後の `▁`・語彙外の文字・512 トークン超・
-  2 トークン未満 — ADR 0119 決定 1・4）に、**U+0020 以外の空白と末尾の U+0020** を足す。前処理が無いと、この 2 つの形で
-  transformers 5.14.1 と `tokenizer.json` の id 列が割れる（`"a\tb"` は `[289, 748, 1]` と `[289, 3, 485, 1]`・`"a "` は `[289, 1]` と
-  `[289, 273, 1]`）ので、決定 1 の「どの版の参照とも同じ id 列」を守るため拒む。trim や空白の畳み込みは足さない（足すと第 2 の
-  前処理になる — 直し方は文言が言う）。Wan の経路では前処理が空白を U+0020 1 個へ畳んで両端を落とすので、この拒否は起きない。
-- **TS の入口**: サブパス `@karume/models/umt5`（barrel にも出す）の `Umt5Encoder` — `fromPretrained(ref)` / `fromAssets` /
-  `tokenize(text)` / `encode(text, { signal }) → { inputIds, hiddenStates: [L, 4096] f32 行優先, length, hiddenSize }` /
-  `dispose`。Session は構築から `dispose` まで常駐する（重みは i8 で約 5.3 GiB — 1 回ごとに張ると重みを毎回上げ直す。Wan の
-  text 段は段ごとに張って畳むまま）。pipeline `umt5-encoder/1` はこれで読み手を持つ: admission はトークナイザ資産の宣言を
-  重みの part を取る前に見る。トークナイザを持たない取り込み由来の手元の実験用ミラー（決定 5）は、今どおり Wan の部品差し替え
-  席でだけ使える。
-- **共有の 1 本**: umT5 のホストのコード（バケット表・Session の入出力・グラフの取り決めの門・トークナイザの受理集合）は
-  `packages/models/src/umt5/` に移し、Wan はそれを呼ぶ（Wan のトークナイザ = 前処理 → `Umt5Tokenizer`）。2 本持つと拒否の
-  規則が片方だけ古びる。
-- **取得元の pin**: `UMT5_SOURCES`（キー `umt5-xxl`）は HF への公開の回に足す（ADR 0073 決定 1 — 公開前は `fromPretrained` の
-  `ref` が必須）。手順は release-runbook の「家族の初公開」。
-- **検証**: GPU の e2e（`e2e_umt5_encoder_test.ts`）は Wan の umT5 の移植の門と同じ golden・同じ帯で 10 本とも帯の内・`tokenize` の
-  id 列が golden と一致（RTX 3080 Ti・2026-10-15）。トークナイザのパリティ（`umt5_tokenizer_test.ts` — recipe の fixture と
-  突き合わせ・空白の規則を外す故障注入で 17 本が赤）。
+- The maintainer ruled (2026-10-15) that umT5 is usable independently of Wan, shipped in 0.14.0 (the
+  first publication of `karume-umt5-xxl`). The same day's ruling keeps Wan2.1 off HF, so
+  `karume-wan2.2` is the only published distribution that uses the umT5 repository.
+- `karume-umt5-xxl` carries the model asset `tokenizer` (format `karume-umt5-tokenizer/1`): only the
+  T5 table (vocabulary, scores, added vocabulary, whitespace set, maximum length 512), without Wan's
+  preprocessing tables. Its source is the original's `tokenizer.json` and `tokenizer_config.json` at
+  the pinned commit, both sha256-pinned in `wan.sources.UMT5_SOURCES` and checked before reading. The
+  table builder is shared with Wan's asset (`t5_table_fields` in `wan/umt5_tokenizer.py`); the writer
+  is `wan/umt5_xxl_tokenizer.py`, the series `outputs/series/umt5-xxl-tokenizer/tokenizer.json`.
+  Wan2.2 keeps its own asset with unchanged bytes.
+- The original's backend has the same form as Wan's `tokenizer/` (the score difference is a last-ulp
+  notation); accepted inputs give Wan's id sequences (50 fixtures, 218 Wan parity cases, 4,563 sweep
+  inputs, no mismatch, through transformers 5.14.1 and `tokenizer.json`).
+- **Acceptance set without preprocessing**: Wan's rejection rules (ADR 0119 decisions 1 and 4) plus
+  **whitespace other than U+0020 and a trailing U+0020**, because without preprocessing transformers
+  5.14.1 and `tokenizer.json` disagree on those forms (`"a\tb"`: `[289, 748, 1]` vs
+  `[289, 3, 485, 1]`; `"a "`: `[289, 1]` vs `[289, 273, 1]`). No trimming or whitespace folding is
+  added (it would be a second preprocessing). On Wan's path preprocessing folds whitespace first, so
+  the rejection never fires there.
+- **TS entry**: subpath `@karume/models/umt5` (also in the barrel), `Umt5Encoder` with
+  `fromPretrained(ref)` / `fromAssets` / `tokenize(text)` /
+  `encode(text, { signal }) → { inputIds, hiddenStates: [L, 4096] f32 row-major, length, hiddenSize }`
+  / `dispose`. The Session is resident from construction to `dispose` (i8 weights about 5.3 GiB);
+  Wan's text stage still builds and tears down its Session per stage. Admission of pipeline
+  `umt5-encoder/1` checks the tokenizer asset declaration before fetching weight parts. Intake-derived
+  mirrors (no tokenizer) remain usable only through Wan's component replacement.
+- **One shared implementation**: the umT5 host code (bucket table, Session I/O, graph contract check,
+  tokenizer acceptance set) lives in `packages/models/src/umt5/`, and Wan calls it (Wan's tokenizer =
+  preprocessing → `Umt5Tokenizer`), so the rejection rules cannot drift apart.
+- The published source pin is `UMT5_SOURCES["umt5-xxl"]` in `packages/models/src/umt5/config.ts`
+  (`hdae/karume-umt5-xxl`), added at the 0.14.0 publication (ADR 0073 decision 1; release-runbook
+  "first publication of a family").
+- Verification: the GPU e2e of `Umt5Encoder` (same goldens and band as Wan's umT5 port check, all 10
+  within the band, `tokenize` ids equal to the golden; RTX 3080 Ti, 2026-10-15) now lives merged into
+  `packages/e2e/tests/e2e_wan_umt5_test.ts`; the tokenizer parity test is
+  `packages/models/tests/umt5_tokenizer_test.ts` (17 failures under fault injection on the whitespace
+  rule).

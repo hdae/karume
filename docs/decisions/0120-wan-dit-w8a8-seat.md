@@ -1,483 +1,393 @@
-# 0120: Wan2.1 DiT に w8a8 の quant 席を足す — 参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16`
+# 0120: Add w8a8 presets to the Wan2.1 DiT — reference preset `f16+dit8` and practical preset `f16+dit8-a8-attn8-s16`
 
-- Status: accepted（利用者裁定 2026-10-03〈「裁定」節の 2 点・attention a8 は視認で確認〉と 2026-10-04〈実用席の品質 = 問題なし・
-  既定席 = 実用席〉）
+- Status: accepted (2026-10-03 — the maintainer's rulings on the two open points, attention a8 to be
+  confirmed visually; 2026-10-04 — the practical preset's quality passes the visual review and it
+  becomes the default preset); partly superseded: decision 6 (default stays `f16`) by the ruling of
+  2026-10-04 (4), generalized by [0128](0128-default-preset-original-weights.md) decision 1 on 2026-10-17;
+  decision 3's r check is opt-in since 2026-10-17 ([0129](0129-test-layout-and-lanes.md) addendum
+  (2)). Decision 1's "no intermediate presets" re-graded 2026-10-18 to SHOULD.
 - Date: 2026-10-03
-- 関連: research [2026-10-03-wan-w8a8-recon](../research/2026-10-03-wan-w8a8-recon.md)（以下「調査 §n」— 事実と数値の
-  出典）/ ADR [0118](0118-wan21-video-generation.md)（Wan2.1 の受け入れ — 決定 7 の「i8 / i4 は品質の実測の後」と
-  決定 8 の数値照合を本 ADR が引き継ぐ）/ [0110](0110-practical-tier-numerics-contract.md)（参照層 / 実用層・自機 A/B 門・
-  sha 行の分類・既定席の品質裁定）/ [0025](0025-w8a8-linear-execution.md)（linear の a8）/
-  [0030](0030-attention-a8-execution.md)（attention の a8）/ [0031](0031-attention-score-f16-storage.md)（S の f16 格納）/
-  [0076](0076-w4a8-linear-execution.md)（w4a8 — anima の i4 席で a8 を外した前例）/ [0006](0006-quantization.md)・
-  [0019](0019-i8-weight-execution.md)（量子化はグラフの意味論に入らない・参照は fake-quant 重みで採る）/
-  [0074](0074-quant-seat-naming.md)・[0075](0075-quant-presentation.md)（席名の文法と表示欄）/
-  [0058](0058-numerics-opt-in-contract.md)（追記 2026-09-13 の視認の手順）/ [0106](0106-device-keyed-references.md)（環境キー別の
-  sha 行）/ [0109](0109-manifest-v5-container.md)（manifest `karume/5` の格納ラベルごとの容器）
+- Related: research [2026-10-03-wan-w8a8-recon](../research/2026-10-03-wan-w8a8-recon.md)
+  ("investigation §n" below — source of the facts and numbers) / ADR
+  [0118](0118-wan21-video-generation.md) (Wan2.1 adoption; this ADR takes over decision 7's "i8 / i4
+  after measuring quality" and decision 8's numeric comparison) /
+  [0110](0110-practical-tier-numerics-contract.md) (reference path and practical presets, self A/B
+  check, classes of sha256 rows, quality review for the default preset) /
+  [0025](0025-w8a8-linear-execution.md) (linear a8) / [0030](0030-attention-a8-execution.md)
+  (attention a8) / [0031](0031-attention-score-f16-storage.md) (f16 storage of S) /
+  [0076](0076-w4a8-linear-execution.md) (w4a8 — Anima's i4 preset dropped a8) /
+  [0006](0006-quantization.md), [0019](0019-i8-weight-execution.md) (quantization stays out of graph
+  semantics; references use fake-quant weights) / [0074](0074-quant-seat-naming.md),
+  [0075](0075-quant-presentation.md) (preset naming and presentation) /
+  [0058](0058-numerics-opt-in-contract.md) (addendum 2026-09-13, the visual review procedure) /
+  [0106](0106-device-keyed-references.md) (sha256 rows per environment key) /
+  [0109](0109-manifest-v5-container.md) (manifest `karume/5`, one container per storage label).
 
 ## Context
 
-### 要望
+### Need
 
-Wan2.1 T2V 1.3B（ADR 0118）の DiT に、anima の既定席 `f16+dit8-a8-attn8-s16` と同じ機構の量子化席を足す。
-今の Wan の quant 席は `f16` の 1 つだけで、`session`（実行ノブの束）は空である（`tools/export-recipes/wan/distribution.py` の
-`WAN_QUANTS`）。ADR 0118 決定 7 は「i8 / i4 は品質の実測の後」と保留していた。
+Add to the Wan2.1 T2V 1.3B DiT (ADR 0118) quantized presets with the same machinery as Anima's default
+`f16+dit8-a8-attn8-s16`. Wan had one preset, `f16`, with an empty `session` (`WAN_QUANTS` in
+`tools/export-recipes/wan/distribution.py`); ADR 0118 decision 7 deferred i8 / i4 until quality was
+measured.
 
-### 用語（本 ADR の初出）
+### Terms
 
-| 語              | 意味                                                                                                                                   |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `dit8`          | 席名の部品上書き。DiT（manifest の役割 `transformer`）の重みを i8 per-channel（出力チャネルごとの scale）で格納する（ADR 0074 決定 4） |
-| `a8`            | `linearCompute: "a8"`。linear の入力活性を per-token（行ごと）の i8 にして整数内積（i32 の厳密加算）で計算する（ADR 0025）             |
-| `attn8`         | `attentionCompute: "a8"`。attention の q / k / P̃ / V を i8 にして整数内積で計算する（ADR 0030）                                        |
-| `s16`           | `attentionScoreStorage: "f16"`。attention のスコア S を f16 で格納する（ADR 0031）                                                     |
-| w8a8            | 重み i8 × 活性 i8 の整数内積の経路（`dit8` + `a8`）                                                                                    |
-| 参照層 / 実用層 | runtime の省略値の経路 / quant 席の `session` が束ねた opt-in の経路（ADR 0110 決定 1）                                                |
-| 参照席 / 実用席 | 同じ重みで `session` が空の席 / `session` が空でない席。参照席は自機 A/B 門の比較相手（glossary「参照席」）                            |
-| r（正規化比）   | ADR 0118 決定 8 の実寸の指標。GPU の CPU f64 参照に対する誤差 ÷ CPU f32 参照自身の f64 参照に対する誤差（glossary「正規化比（r）」）   |
-| relRMS          | 相対 RMS 誤差。自機 A/B 門の帯の物差し（ADR 0110 決定 5）                                                                              |
-| 1 パス          | DiT の 1 forward。50 ステップ × CFG（条件つき / 条件なしの 2 本）で 1 本の生成は 100 パス                                              |
-| S               | DiT のトークン数。832×480 で 1,560 × 潜在のフレーム数。33 フレームで 14,040・81 フレームで 32,760                                      |
+| Term                                | Meaning                                                                                                                       |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `dit8`                              | Component override in the preset name: the DiT weights (manifest role `transformer`) stored as i8 per-channel (ADR 0074 decision 4) |
+| `a8`                                | `linearCompute: "a8"`: linear inputs quantized per token to i8, integer dot products with exact i32 sums (ADR 0025)            |
+| `attn8`                             | `attentionCompute: "a8"`: attention q / k / P̃ / V in i8 with integer dot products (ADR 0030)                                   |
+| `s16`                               | `attentionScoreStorage: "f16"`: attention scores S stored as f16 (ADR 0031)                                                   |
+| w8a8                                | i8 weights × i8 activations (`dit8` + `a8`)                                                                                   |
+| reference path / practical preset   | The runtime's omitted-value path / the opt-in path bundled by a preset's `session` (ADR 0110 decision 1)                      |
+| reference preset / practical preset | Same weights with an empty `session` / with a non-empty `session`; the reference preset is the partner of the self A/B check |
+| r (normalized ratio)                | ADR 0118 decision 8's metric: GPU error against the CPU f64 reference ÷ the CPU f32 reference's own error against f64         |
+| relRMS                              | Relative RMS error; the measure of the self A/B check (ADR 0110 decision 5)                                                   |
+| pass                                | One DiT forward; one generation is 100 passes (50 steps × CFG 2)                                                              |
+| S                                   | DiT token count: 1,560 × latent frames at 832×480; 14,040 at 33 frames, 32,760 at 81 frames                                   |
 
-### 調査の結論（数値は調査の値）
+### Findings of the investigation
 
-- **runtime の追加は要らない見込み**。DiT の重みは linear 307 本だけで、k は全部 4 の倍数（a8 の述語を満たす — 調査 §2.2）。
-  attention 60 本（self 30 + cross 30）は mask も GQA も無く D = 128 で、S は常に 4 の倍数なので、①QK・③PV・`s16` の適格条件を
-  全受理形で満たす（式から従う — 調査 §2.2）。行ブロック（S を行方向に分けて束縛上限に収める仕組み）× a8 / `s16` には
-  Uint32 一致の門が既にある（調査 §1.4）。
-- **conv3d は DiT に無い**。patch 埋め込みの Conv3d は recipe が `Linear(64→1536)` に差し替えている（調査 §2.1）。
-- **adaLN の重みは共有の `time_proj` 1 本**。ブロックごとの `scale_shift_table` は linear ではなく加算表で、f32 のまま残る
-  （調査 §2.2）。anima の adaLN 168 本に当たる重みは 1 本しかない。
-- **重みは 2.65 → 約 1.33 GiB**（上流のヘッダからの計算・anima の実物の比 0.5015 と合う — 調査 §2.3）。配布の取得量は
-  3.14 → 約 1.72 GB（推測 — 容器のオーバーヘッドは f16 と同程度と仮定）。
-- **重みだけ i8 にしても速くならない**（anima の実測 — DiT は重み帯域律速ではない・調査 §3.1）。速くなるのは a8 から。
-  B570 での anima の実測は linear 2.68×（量子化込み）・attention 3 段 1.69×（調査 §3.1）。
-- **Metal（M2）では a8 が速くならない**（i8a8 の linear が f32 と同じ時間 — 調査 §3.1）。M2 の利用者には品質だけを払う席になる。
-- **K-75 の影響を受けない**。GPU の f32 GEMM の K 縮約の丸め誤差（perf-ledger K-75）は、a8 の i32 の厳密加算では消える。
-  代わりに活性の量子化誤差が入り、そちらが桁で大きい（anima の step 1 latent の relRMS 1.2〜1.4e-2 — 調査 §3.5）。
-- **数値の門は 2 層に分かれる**。`f16+dit8`（`session` が空）は参照層で、GPU の i8 は要素ごとの逆量子化が CPU の展開と
-  ビット一致する（ADR 0019）ので ADR 0118 決定 8 の r 門がそのまま効く。a8 を含む席は実用層で、カーネルは既存の契約クラス
-  E（GPU と TS 参照が atol = 0）に入っている（調査 §4.1）。
-
-### 期待値（全て推測 — 段 3 / 4 の実測で置き換える）
-
-| 量                     | `f16`（実測）                      | 実用席 `f16+dit8-a8-attn8-s16`（推測）                 | 出典      |
-| ---------------------- | ---------------------------------- | ------------------------------------------------------ | --------- |
-| DiT の重み             | 2.65 GiB                           | 約 1.33 GiB                                            | 調査 §2.3 |
-| 取得量（1 モデル）     | 3.14 GB                            | 約 1.72 GB                                             | 調査 §2.3 |
-| 1 パス（33 フレーム）  | 16.8 s                             | 約 8 s                                                 | 調査 §3.3 |
-| 1 パス（81 フレーム）  | 68.6 s                             | 約 36 s                                                | 調査 §3.3 |
-| 50 ステップの DiT      | 28 分 / 114 分（33 / 81 フレーム） | 約 13 分 / 約 60 分                                    | 調査 §3.3 |
-| DiT 段の VRAM の山     | 6.19 / 7.31 GiB（fdinfo）          | 約 1 GiB 下がる（33 フレーム 約 1〜1.3・81 約 0.7〜1） | 調査 §3.4 |
-| VAE 段（席に依らない） | 128.9 s / 315 s                    | 同じ                                                   | 調査 §3.3 |
-
-- 速度の上限は anima（S = 1,024）の倍率を Wan の計算量の内訳（33 フレームは linear 48%・self-attention 50%、81 フレームは
-  self-attention 70%）に当てたもので、elementwise の分だけ楽観側に倒れている（調査 §3.2・§3.3）。Wan の op 別の時間の
-  記録は無い。
+- **No runtime addition expected.** The DiT weights are 307 linears, all with k divisible by 4 (the a8
+  predicate). The 60 attentions (30 self, 30 cross) have no mask, no GQA, D = 128 and S divisible by
+  4, so ①QK, ③PV and `s16` are eligible on every accepted shape. Row blocks (splitting S to fit the
+  binding limit) × a8 / `s16` already have a Uint32 identity check.
+- **No conv3d in the DiT**: the recipe replaces the patch Conv3d with `Linear(64→1536)`.
+- **adaLN has one shared `time_proj` weight**; the per-block `scale_shift_table` is an additive f32
+  table.
+- **Weights 2.65 → about 1.33 GiB**; download 3.14 → about 1.72 GB.
+- **i8 weights alone are not faster** (DiT is not weight-bandwidth bound); speed comes from a8 (Anima on
+  the B570: linear 2.68×, attention 1.69×).
+- **No a8 gain on Metal (M2)**: the i8a8 linear takes as long as f32.
+- **K-75 does not apply**: the f32 GEMM K-reduction rounding (perf-ledger K-75) disappears with exact
+  i32 sums; activation quantization error, an order of magnitude larger, replaces it.
+- **Two layers of numeric checks**: `f16+dit8` (empty `session`) is the reference path, where GPU
+  dequantization is bit-identical to the CPU expansion (ADR 0019), so ADR 0118 decision 8's r check
+  applies. Presets with a8 are practical presets; their kernels are in contract class E (atol = 0
+  against the TS reference).
+- Pre-implementation estimates (pass time, VRAM peak) were replaced by the measurements of steps 3–4
+  (addendum "steps 3, 4 and 5").
 
 ## Decision
 
-### 1. 足す席は 2 つ — 参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16`
+### 1. Two presets — reference preset `f16+dit8` and practical preset `f16+dit8-a8-attn8-s16`
 
-| 席                      | `weights.transformer` | `session`                                                                       | 層     |
-| ----------------------- | --------------------- | ------------------------------------------------------------------------------- | ------ |
-| `f16`（既存）           | `f16`                 | 空                                                                              | 参照層 |
-| `f16+dit8`              | `i8`                  | 空（重みだけ i8・計算は f32）                                                   | 参照層 |
-| `f16+dit8-a8-attn8-s16` | `i8`                  | `linearCompute: "a8"`・`attentionCompute: "a8"`・`attentionScoreStorage: "f16"` | 実用層 |
+| Preset                  | `weights.transformer` | `session`                                                                       | Path             |
+| ----------------------- | --------------------- | ------------------------------------------------------------------------------- | ---------------- |
+| `f16` (existing)        | `f16`                 | empty                                                                           | reference path   |
+| `f16+dit8`              | `i8`                  | empty (i8 weights, f32 compute)                                                 | reference path   |
+| `f16+dit8-a8-attn8-s16` | `i8`                  | `linearCompute: "a8"`, `attentionCompute: "a8"`, `attentionScoreStorage: "f16"` | practical preset |
 
-- 中間の席（`f16+dit8-a8` / `f16+dit8-a8-attn8`）は作らない。
-- 略称は anima と同じ `{"dit": "transformer"}`。容器は格納ラベルごとに `transformer/model.f16.krm`（既存・path を動かさない）と
-  `transformer/model.i8.krm`。
+- Intermediate presets (`f16+dit8-a8` / `f16+dit8-a8-attn8`) SHOULD NOT be added (re-graded 2026-10-18
+  to SHOULD: the cost per preset still holds, but a sibling preset without a8 for devices without dp4a
+  — ADR 0128 decision 5 — may be wanted).
+- Short name `{"dit": "transformer"}` as Anima. Containers per storage label:
+  `transformer/model.f16.krm` (existing path) and `transformer/model.i8.krm`.
 
-なぜ:
+Why:
 
-- 参照席は自機 A/B 門の床の相手として manifest に要る。`referencePartnerOf` は該当が 0 個だと throw する（glossary「参照席」）。
-- 中間の席は、視認・sha 行・カードの費用を席の数だけ増やす。Wan の視認は 1 本約 15〜30 分（調査 §7 軸 1）なので効く。
-- ノブ単位の切り分け（a8 だけ・+ attn8）は、テストの manifest 上書き（anima の故障注入と同じ `withManifestOverride`）で足りる。
+- The reference preset is needed in the manifest as the difference floor's partner of the self A/B
+  check; `referencePartnerOf` throws when none matches.
+- Each preset multiplies the cost of visual reviews, sha256 rows and card entries (a Wan visual review
+  took 15–30 minutes per video on the B570).
+- Knob-by-knob isolation (a8 only, + attn8) is done with manifest overrides in tests
+  (`withManifestOverride`, as Anima's fault injection; `knobRungs` in `e2e_wan_ab_test.ts`).
 
-守るもの: 自機 A/B 門の床が恒真にならないこと（比較相手が同じ重みであること — ADR 0110 決定 5 ②）。席の数に比例する
-運用費を最小に保つこと。
+Protects: the difference floor of the self A/B check never becomes vacuous (the partner has the same
+weights — ADR 0110 decision 5 ②); the running cost that grows with the preset count stays minimal.
 
-### 2. i8 にする範囲は DiT の linear 307 本すべて・bias と norm は上流の f32 のまま・VAE は対象外
+### 2. i8 covers all 307 DiT linears; bias and norm stay upstream f32; the VAE is out of scope
 
-- DiT の linear 307 本（self / cross-attention・FFN・`condition_embedder` 5 本・`patch_embedding`・`proj_out`）を全部 i8 にする。
-  anima の i8 系列と同じ範囲。
-- 退路: `condition_embedder` / `patch_embedding` / `proj_out` を f16 に残す混成は、段 3 のノブ単位の測定と段 6 の視認で
-  問題が出たときに採る。exporter の既存の口 `weight_dtype_overrides`（テンソル 1 本単位の格納の上書き — 調査 §1.2）で書ける。
-- bias と norm の weight（と `scale_shift_table`）は上流の f32 の値のまま残す。f16 系列の `round_to_f16` のような f16 の丸めは
-  i8 系列に入れない（anima の i8 系列の前例 — `fake_quant_int8` は Linear 等の `weight` だけを丸める・調査 §1.2）。
-- 校正（calibration）は要らない。重みは RTN（最近接丸め）の per-channel、活性は実行時の per-token の動的量子化で、校正データを
-  使う段が無い（調査 §5.1）。
-- VAE は席の対象外で f16 のまま。
+- All 307 DiT linears (self / cross attention, FFN, five in `condition_embedder`, `patch_embedding`,
+  `proj_out`) are i8 — the same scope as Anima's i8 series.
+- Fallback: keeping `condition_embedder` / `patch_embedding` / `proj_out` in f16 if step 3 or the visual
+  review found a problem, expressible with the exporter's `weight_dtype_overrides`. Not needed (ruling
+  2026-10-04).
+- Bias, norm weights and `scale_shift_table` keep the upstream f32 values; no f16 rounding enters the
+  i8 series (`fake_quant_int8` rounds only `weight` of Linear and similar).
+- No calibration: weights use per-channel RTN, activations per-token dynamic quantization.
+- The VAE stays f16.
 
-なぜ:
+Why: all-i8 is the simplest and Anima's default passed the visual review with adaLN in i8 + a8; the
+only ground for a mixed form was diffusers' layer-wise cast exclusion list, unmeasured on Wan. Rounding
+bias / norm to f16 would add wording to the NOTICE. The VAE attention was excluded by ADR 0030 decision
+7, and the VAE stage is 4% of an 81-frame run.
 
-- 全部を i8 にするのが最も単純で、anima の既定席は adaLN を含めて i8 + a8 で視認を通っている。混成を最初から採る根拠は
-  上流 diffusers の層別キャストの除外表（`patch_embedding` / `condition_embedder` / `norm` を「precision-critical」として除く）
-  だけで、Wan での実測は無い（調査 §6 の 2）。
-- bias / norm を f16 に丸めると「i8 の席は f16 の丸めも含む」になり、NOTICE の改変告知の文面が増える。計算と格納の形は
-  どちらでも同じで、値だけが違う（調査 §7 軸 8）。
-- VAE の attention は ADR 0030 決定 7 で対象外にした前例があり、VAE 段は 81 フレームの通しの 4%（315 s / 7,173 s）しかない
-  （調査 §7 軸 9）。
+Protects: one rule for building the series, the same as Anima's i8 series. The NOTICE wording MUST
+match the distribution.
 
-守るもの: 系列の作り方を anima の i8 系列と同じ 1 本の規則に保つこと。NOTICE の文面が配布形と対応すること（MUST）。
+### 3. Numeric check of the reference preset `f16+dit8` — ADR 0118 decision 8's r check at S = 192 and S = 14,040
 
-### 3. 参照席 `f16+dit8` の数値の門 — ADR 0118 決定 8 の r 門を S = 192 と S = 14,040 で持つ
+- The reference is re-taken with i8 fake-quant weights (ADR 0006, 0019): CPU f64 and f32 goldens.
+- The metric is r; the band is derived per S (worst of six decision cases × 5), accepted on separate
+  cases, and fault injections must land outside it.
+- **S = 32,760 (81 frames) is excluded**: its CPU reference costs about 5.5 hours for eight cases;
+  i8-specific errors (scale axis, binding, dequantization) do not depend on S; the growth with S is a
+  property of the GEMM K-reduction shared with the `f16` preset, whose S = 32,760 check (band 104)
+  already watches it. S = 14,040 stays as the one full-size point, so the S = 192 band is not carried
+  to full size.
 
-- 参照は i8 の fake-quant 重みで採り直す（ADR 0006・0019）。golden は CPU で f64 と f32 の参照を採る。
-- 指標は ADR 0118 決定 8 の正規化比 r。帯は S ごとに独立に導く（決定用 6 本の最悪 r × 5）。決定用と受入れのケースを分け、
-  故障注入が帯の外に出ることを見る。ケースの組は f16 席の同じ S の組を i8 の重みで採り直す。
-- **S = 32,760（81 フレーム）は外す**。
+**(superseded by ADR 0129 addendum (2) on 2026-10-17: the r check and its fault injections run only
+with `KARUME_UPSTREAM_PARITY=1` — `packages/e2e/tests/e2e_wan_dit_test.ts:1912` (S = 14,040) and
+`:1957` (S = 192). Parity was proven at implementation; later changes are caught by the sha256 rows
+and the self A/B check. The default run keeps the measured-mode structure checks and the per-submit
+GPU time limit.)**
 
-なぜ（決定 8 の「帯は S ごとに独立に導く」から S = 32,760 だけを外す理由）:
+Protects: "the i8 weights were ported correctly" is stated numerically; i8 dequantization, scale or
+binding mistakes are caught on the reference path before the practical preset's check.
 
-- 費用: S = 32,760 の CPU 参照は 8 本で約 5.5 時間（RSS 17〜18 GiB）かかる（調査 §4.3 ④）。S = 14,040 の 8 本は約 1.5 時間。
-- i8 に固有の誤り（scale の軸・束縛・逆量子化）は S に依らない。S = 192 と S = 14,040 で掴める。
-- S による誤差の伸びは GEMM の K 縮約の性質（K-75）で、f16 席と同じカーネルの性質であり、席に固有ではない。f16 席の
-  S = 32,760 の r 門（帯 104 — ADR 0118 段 8）がその伸びを既に見ている。
-- S = 14,040 は残す。決定 8 の「S = 192 の帯を実寸へ持ち込まない」を、実寸の 1 点で守るためである。
+### 4. Check of the practical preset — the self A/B check at 33 and 81 frames
 
-守るもの: 「i8 の重みを正しく移植できた」を数値で言えること。i8 の逆量子化・scale・束縛の取り違えを、実用席の門より前の
-参照層で掴むこと。
+The self A/B check of ADR 0110 decision 5 in the same form as Anima's
+(`packages/e2e/tests/e2e_anima_ab_test.ts`, `helpers/ab-gate.ts`); Wan's is
+`packages/e2e/tests/e2e_wan_ab_test.ts` with `helpers/wan-ab-gate.ts`.
 
-### 4. 実用席の門 — 自機 A/B 門を 33 フレームと 81 フレームの両方で持つ
+- **Partner**: the reference preset `f16+dit8` on the same machine with the same i8 weights; no torch
+  golden.
+- **Observation point**: the step 1 latent; generation stops once it is taken.
+- **Difference floor**: red when bit-identical to the reference preset (MUST). `floor` goes above 0 only
+  when removing one knob is shown to give clearly less difference than the full bundle.
+- **Collapse ceiling**: measured relRMS × 2, derived per case (33 / 81 frames). Before derivation
+  `band: undefined` makes the check print the measurement and fail. The ceilings 2.2e-1 / 4.2e-1
+  (`e2e_wan_ab_test.ts:94-103`) were derived on the B570 and not re-derived on the RTX 3080 Ti; ADR
+  0110 decision 5 does not require a per-machine derivation.
+- **Census**: every knob's variant actually ran — exactly 307 linear rows in the census table; attention
+  "at least one" (its row-block count depends on the device limit).
+- **Determinism**: two independent practical runs are bit-identical (ADR 0110 decision 6).
+- **Fault injections**: empty `session` → floor red; a different seed on the second run → determinism
+  red; `attentionCompute` removed → census red (extended to five in the addendum below).
+- **sha256 rows**: in the default lane (2 steps × 33 frames), a reference row for the reference preset
+  and a practical row for the practical preset (ADR 0110 decision 7); 81-frame rows in the 50-step
+  opt-in (`KARUME_WAN_FULL_PIPELINE=1`).
+- **Per-submit GPU time**: the maximum per-submit GPU time in measured mode (`gpuTiming`) is at most
+  1 s, measured per preset (`SUBMIT_GPU_LIMIT_MS`, `packages/e2e/tests/e2e_wan_dit_test.ts:451`,
+  `PRACTICAL_TIMING_CASES` at `:442`). The value stays; its basis is now the Windows TDR (2 s) and
+  the browsers' GPU watchdog, not the xe `job_timeout` of the former B570 machine (as ADR 0118
+  decision 6).
+- 81-frame A/B runs first, in descending order of allocation (on the B570 `destroy()` released late and
+  a later probe ran out of memory — ADR 0118 step 8).
 
-ADR 0110 決定 5 の自機 A/B 門を、anima（`packages/models/tests/e2e_anima_ab_test.ts`・`helpers/ab-gate.ts`）と同じ形で持つ。
+Why both frame counts: attention a8 error grows with the row length N (③PV's P̃ scale is fixed at
+1/127, so sharp rows lose mass — ADR 0030 decision 6). Anima was accepted up to N = 4,096; Wan's
+self-attention has N = 14,040 / 32,760, so 33-frame results are not extrapolated to 81 frames.
 
-- **比較相手**: 同じ機・同じ i8 重みの参照席 `f16+dit8`。torch の golden は使わない。
-- **観測点**: step 1 の latent（席が最初に効いた直後 — 決定 5-4）。採ったら生成を打ち切る。
-- **床**: 参照席とビット同一なら赤（MUST）。`floor` を 0 より上に置くのは、ノブ 1 つを外した実測が全部入りより明確に小さいと
-  示せたときだけ。
-- **上限**: 実測 relRMS × 2（決定 5-3）。ケース（33 / 81 フレーム）ごとに独立に導く。導出前は `band: undefined` で、門は
-  実測を出して赤で止まる。
-- **census**: 束の各ノブの変種が実際に走ったこと。linear は束の census 表に 307 本ちょうどで行を置く。attention は表に
-  書かない規約（行ブロックの枚数が device の上限で変わる — 調査 §1.5）なので「1 本以上」で見る。
-- **決定性**: 実用席の独立 2 回の latent がビット一致（ADR 0110 決定 6）。
-- **故障注入**: ① 実用席の `session` を空にした manifest → 床が赤 ② 2 回目だけ別 seed → 決定性が赤 ③ `attentionCompute`
-  だけ外す → census が赤。
-- **sha 行**: 既定レーンの 2 ステップ × 33 フレームに、参照席の行（参照行 — 凍結）と実用席の行（実用行 — 実用層の退行と
-  決定性の検出器）を足す（ADR 0110 決定 7）。81 フレームの行は 50 ステップの opt-in（`KARUME_WAN_FULL_PIPELINE=1`）に置く
-  （ADR 0118 段 8 と同じ配置）。
-- 81 フレームの A/B は確保の大きい順に並べる。B570 では `destroy()` の解放が遅れ、段 8 で後ろに置いた probe が OOM になった
-  （ADR 0118 段 8 の結果・リスク 6）。
+Protects: silent degradation of the whole bundle (floor), collapse (ceiling), per-knob degradation
+(census) and determinism are caught at full size, long rows included.
 
-なぜ両方のフレーム数か:
+### 5. Measure quality before the visual review by comparing presets on the GPU — no torch CPU shim
 
-- attention a8 の誤差は行の長さ N とともに増える。③PV の P̃ の scale は 1/127 に構造的に固定され、誤差は行の peak / rms で
-  決まり、その分布は N とともに大きい側へ寄る（ADR 0030 決定 6・検出限界 1）。ADR 0030 は 512px の結果を 1024px へ外挿せず、
-  1024px を直接測り直した。
-- anima で検収した N は最大 4,096（1024²）で、Wan の self-attention は N = 14,040 / 32,760（3.4 倍 / 8 倍）。33 フレームの結果を
-  81 フレームへ外挿しない。
-- 81 フレームの A/B は 1 回約 5 分（推測 — 調査 §4.3）。
+- Step 3 adds knobs one at a time on the same i8 weights through manifest overrides (`a8` →
+  `+ attn8` → `+ s16`) and records the step 1 relRMS against `f16+dit8` at 33 / 81 frames. Values are
+  recorded, not banded.
+- Why: Anima's torch CPU shim (`measure_quant.py`, the Q0 of ADR 0025 / 0030) was the check before the
+  kernels existed. The kernels are now in contract class E (atol = 0 against TS), so the GPU measures
+  the real thing in minutes; a shim at S = 14,040 would take hours on the CPU.
 
-守るもの: 束全体の沈黙縮退（床）・崩壊（上限）・ノブ単位の縮退（census）・決定性を、長い行を含む実寸で掴むこと。
+Protects: per-knob contributions and the N dependence are seen on the real kernels before the visual
+review.
 
-### 5. 実装前の品質は GPU で席どうしを比べて測る — torch CPU のシムは作らない
+### 6. Default preset stays `f16` — whether the practical preset becomes the default is ruled after the step 6 visual review
 
-- 段 3 で、同じ i8 重みのまま、manifest の上書きでノブを 1 つずつ足す（`a8` → `+ attn8` → `+ s16`）。各構成の step 1 latent の
-  relRMS（参照席 `f16+dit8` に対して）を 33 / 81 フレームで測る。
-- 層ごとの差は 33 フレームで採る見込み。81 フレームは層別 probe の読み戻しが B570 に入らない（ADR 0118 段 8 の計画）。
-- 値は帯にせず記録する。
+- This ADR leaves `defaultQuant` at `f16`; the default is ruled separately after the visual A/B (ADR
+  0110 decision 8).
 
-なぜ:
+**(superseded by the ruling of 2026-10-04 (4) and by ADR 0128 decision 1 on 2026-10-17: the default is
+the practical preset `f16+dit8-a8-attn8-s16` — `WAN_DEFAULT_QUANT` in
+`tools/export-recipes/wan/distribution.py:343`; devices without dp4a get a warning, ADR 0128
+decision 5.)**
 
-- anima の torch CPU のシム（ADR 0025 / 0030 の Q0 — `measure_quant.py`）は、カーネルを書く前の門だった。今はカーネルが
-  契約クラス E で揃っていて、GPU の値が TS 参照と atol = 0 で一致する。GPU で測ればそのまま本物を測れて、1 回数分で済む
-  （推測 — 調査 §7 軸 5）。
-- シムは S = 14,040 で P を head ごとに実体化する必要があり、CPU で数時間級になる（推測）。
+### 7. The public API is only the existing `quant` option
 
-守るもの: 視認に進む前に、ノブごとの誤差の寄与と N 依存を本物のカーネルで見ること。
+- Presets are selected with `WanPipeline`'s existing `quant` option.
+- The acceptance table `WAN_SESSION_POLICY` (`packages/models/src/wan/family.ts:231`) sets
+  `linearCompute`, `attentionCompute` and `attentionScoreStorage` to `true` so the manifest's
+  `session` may declare them.
+- No explicit user options (`linearCompute` and the like) are added to the public surface; the third
+  argument of `resolveSessionOptions` stays empty (`family.ts:419-424`). They can be added on demand
+  since the acceptance table is shared.
 
-### 6. 既定席は `f16` のまま — 実用席を既定にするかは段 6 の視認の後に別に裁定する
+Why: manifest overrides suffice for tests; no public surface without a use (ADR 0008).
 
-- 本 ADR では `defaultQuant` を `f16` のまま変えない。
-- 実用席を既定にするかは、段 6 の視認 A/B の結果で別に裁定する（ADR 0110 決定 8 — `defaultQuant` に入れるときだけ品質裁定を
-  行う）。
-- 視認の素材: 実用席 12 本 × 33 フレーム（seed 42〜45 × 固定プロンプト boxing-cats / cat-dog-baking / ferret・50 ステップ）。
-  `f16` 側は ADR 0118 段 7 の 12 本（`outputs/verify/deno-intel-graphics-bmg-g21/2026-10-03_wan-visual/`）と対にする。
-  `f16` 席の数値は変わらないので撮り直さない。
-- 裁定の材料に次を書く: Metal（M2）では a8 が速くならず、品質だけを払う（調査 §3.1）。ブラウザ優先の方針の下では、Chrome
-  （ADR 0118 段 9）の結果も材料になる。
+Protects: a minimal public surface; a declaration outside the acceptance table still fails loudly
+before the weights are fetched.
 
-なぜ: 機械の門（決定 3〜4）が示すのは「opt-in として安全」までで、品質は示さない（ADR 0110 決定 8）。anima では単一 seed の
-評が seed を増やして覆った前例があり（`docs/research/2026-08-28-anima-adaln8-visual.md`）、Wan の adaLN の経路（共有の
-`time_proj` 1 本）で同じことが起きない保証は無い（リスク 2）。
+### 8. Steps and acceptance
 
-守るもの: 既定で配る生成物の品質を、未実施の人間評価で決めないこと（ADR 0058 追記 2026-09-13）。
+Seven steps (table under "Acceptance"); independent of ADR 0118 step 9 (Chrome) and step 10 (umT5 on
+the GPU). GPU steps (3–6) ran one at a time; the test runner now serializes test files
+(`fileParallelism: false`, `vite.config.ts:40`).
 
-### 7. 公開 API は既存の `quant` オプションだけ
+Protects: each step can be accepted alone; GPU measurements do not interfere.
 
-- 席の選択は `WanPipeline` の既存の `quant` オプションで行う。
-- 受理表 `WAN_SESSION_POLICY`（`packages/models/src/wan/pipeline.ts` — 今は `family.ts` へ移った〈`0fb5c005`〉）の `linearCompute` / `attentionCompute` /
-  `attentionScoreStorage` の 3 キーを `true` にする。manifest の `session` が宣言したこの 3 つを受けるためである。
-- 利用者の明示指定（`linearCompute` などを直接渡す口）は公開面に足さない。`resolveSessionOptions` の第 3 引数は空のまま。
-  anima は明示指定も受けるが、Wan は要求が出てから足す（受理表は同じ 1 本なので後から足せる）。
+## Alternatives not taken
 
-なぜ: テストでのノブの切り分けは manifest の上書きで足りる（決定 1・5）。使い道の無い公開面を増やさない（ADR 0008 の
-薄い面）。
-
-守るもの: 公開面を必要最小に保つこと。受理表にないキーの宣言が重みの取得前に fail loudly で落ちる性質を保つこと。
-
-### 8. 段の分割と検収
-
-7 段に分ける（「検収」節の表）。GPU を使う段（3〜6）は GPU のロックで 1 本ずつ直列に回し、順序はメインが決める。
-ADR 0118 の段 9（Chrome）・段 10（umT5 を GPU で）とは依存しない。
-
-守るもの: 各段を単独で検収できること。GPU の測定どうしが干渉しないこと。
-
-## 採らなかった案
-
-- **anima と同じ 4 席の並び（`f16+dit8` / `-a8` / `-a8-attn8` / `-a8-attn8-s16`）**（調査 §7 軸 1 の a）— 視認・sha 行・カードの
-  費用が席の数だけ増える。ノブ単位の切り分けはテストの manifest 上書きで足りる（決定 1）。
-- **実用席だけを置く（参照席を manifest に置かない）**（軸 1 の c）— 自機 A/B 門の床の相手が無くなる。`referencePartnerOf` は
-  0 個で throw する。
-- **条件の経路と端を最初から f16 に残す混成**（軸 2 の b）— 根拠は上流の層別キャストの除外表だけで、Wan での実測が無い。
-  退路として残す（決定 2）。増えるのは約 25.8 MB で時間はほぼ不変（推測）だが、census で f32 経路の linear が 7 本残る。
-- **i8 系列の bias / norm を f16 の値へ丸める**（軸 8 の b）— NOTICE の文面が増え、i8 の席が f16 の丸めも含むことになる（決定 2）。
-- **VAE も i8 にする**（軸 9）— VAE の attention は ADR 0030 決定 7 で対象外にした前例があり、VAE 段は通しの 4% しかない。
-- **`f16+dit8` の r 門を決定 8 のとおり全 S（192 / 14,040 / 32,760）で持つ**（軸 3 の a）— CPU 約 7.6 時間。S = 32,760 で増える分
-  （約 5.5 時間）は、f16 席と同じカーネルの性質を測り直すだけになる（決定 3）。
-- **`f16+dit8` の r 門は S = 192 だけにし、実寸の誤差の伸びは `f16` 席の門に任せる**（調査の推奨・軸 3 の b）— 決定 8 の
-  「S = 192 の帯を実寸へ持ち込まない」から外れる。実寸の 1 点（S = 14,040・CPU 約 1.5 時間）は費用に見合うと判断した（決定 3）。
-- **`f16+dit8` に数値の門を持たせない**（軸 3 の c・anima の前例）— 参照席は自機 A/B 門の比較相手で、その正しさが崩れると
-  実用席の門も意味を失う。i8 の取り違えを参照層で掴む門が無くなる。
-- **自機 A/B 門を 33 フレームだけで持つ**（軸 4 の a）— attention a8 の誤差は N で増え、33 フレームの結果を 81 フレームへ
-  外挿できない（決定 4）。
-- **`f16` 席の出力に対する相対誤差の帯**（調査 §4.3 の ②）— 重みが違うので床が恒真になる。ADR 0110 決定 5 ② が名指しで
-  退けた形。
-- **上流の bf16 実行との比較を門にする**（調査 §4.3 の ③）— CPU の bf16 で 50 ステップは数時間級（推測）で、拡散の軌道は
-  分岐するので画素距離は品質を表さない（anima で記録済み — `docs/research/2026-08-21-anima-i4-seat-speed.md`）。
-- **torch CPU のシム（Q0）を Wan へ移植する**（軸 5 の a）— カーネルが E クラスで揃った今は GPU で本物を測れる。シムは
-  S = 14,040 で CPU 数時間級（推測 — 決定 5）。
-- **測らずに視認へ進む**（軸 5 の c）— 視認の 1 本は約 15〜30 分で、ノブごとの寄与と N 依存を切り分けられない。
-- **本 ADR で実用席を既定にする**（軸 6 の b）— 品質裁定は段 6 の視認の後でしかできない（ADR 0110 決定 8）。
-- **`linearCompute` などの明示指定を公開する**（軸 7 の b）— 要求が無い。後から足せる（決定 7）。
+- **Anima's four presets** (`f16+dit8` / `-a8` / `-a8-attn8` / `-a8-attn8-s16`) — cost grows with the
+  preset count; manifest overrides isolate knobs (decision 1).
+- **Only the practical preset** — the self A/B check loses its partner; `referencePartnerOf` throws.
+- **Mixed form with the condition path and the ends in f16 from the start** — grounded only in
+  upstream's cast exclusion list; kept as the fallback (decision 2).
+- **Round i8-series bias / norm to f16** — more NOTICE wording (decision 2).
+- **i8 VAE** — ADR 0030 decision 7 precedent; 4% of the run.
+- **r check at every S including 32,760** — about 7.6 CPU hours; the extra 5.5 hours re-measure a kernel
+  property shared with `f16` (decision 3).
+- **r check at S = 192 only** — would carry the S = 192 band to full size (decision 3).
+- **No numeric check for `f16+dit8`** — the self A/B partner's correctness would be unchecked.
+- **Self A/B at 33 frames only** — attention a8 error grows with N (decision 4).
+- **Band relative to the `f16` preset's output** — different weights make the floor vacuous; rejected
+  by name in ADR 0110 decision 5 ②.
+- **Comparison with upstream bf16 execution as a check** — hours on the CPU, and diffusion trajectories
+  diverge, so pixel distance does not measure quality
+  ([research 2026-08-21](../research/2026-08-21-anima-i4-seat-speed.md)).
+- **Port the torch CPU shim (Q0)** — the E-class kernels make the GPU measurement real (decision 5).
+- **Go to the visual review without measuring** — cannot isolate per-knob contributions or N.
+- **Make the practical preset the default in this ADR** — needed the visual review first (ADR 0110
+  decision 8).
+- **Expose `linearCompute` and the like** — no demand (decision 7).
 
 ## Consequences
 
-- runtime は変わらない見込み（新しいカーネル・キー・op は無い — 調査 §要約）。既存の codegen スナップショットは不変。
-- `f16` 席は 1 bit も変わらない。f16 系列・配布形の `transformer/model.f16.krm`・`f16` の sha 行（参照行）はバイト不変でなければ
-  ならない。
-- 配布形 `models/karume-wan2.1/` に `transformer/model.i8.krm`（約 1.43 GB）が増える。1 席あたりの取得量は約 1.72 GB に下がる
-  （推測）。
-- 公開面: `@karume/models` の `./wan` の型は変わらない。`quant` に渡せる値が 2 つ増える。
+- No runtime change (no new kernel, key or op); codegen snapshots unchanged.
+- The `f16` preset does not change by one bit: the f16 series, `transformer/model.f16.krm` and the
+  `f16` sha256 rows stay byte-identical.
+- The distribution `models/karume-wan2.1/` gains `transformer/model.i8.krm` (1,426,806,948 B); an i8
+  preset downloads 1.72 GB.
+- Public surface: the types of `@karume/models/wan` are unchanged; `quant` accepts two more values.
+- The affected-file list and the cost estimates of the plan are history; the measurements are in the
+  addenda.
 
-### 影響ファイル
+### Risks (investigation §6)
 
-| 区分            | ファイル                                                                                                                                                                          | 中身                                                                                                                       |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| exporter recipe | `tools/export-recipes/wan/export_dit.py`                                                                                                                                          | i8 系列（`wan2.1-t2v-1.3b-i8-dyn`・transformer だけ・`fake_quant_int8`）と i8 の fake-quant 重みでの golden                |
-| distribution    | `tools/export-recipes/wan/distribution.py`                                                                                                                                        | 役割を `transformer_f16` / `transformer_i8` に割る・格納の要求と禁止を役割ごとに・席 2 つ・`label` / `description`・略称表 |
-| カードと NOTICE | `tools/export-recipes/wan/card.py`・`THIRD_PARTY_NOTICES.md` の改変告知                                                                                                           | quant 表・資源の表（`WAN_RESOURCE_QUANT` は今 1 席分しか名乗れない）・i8 を足した旨                                        |
-| models          | `packages/models/src/wan/pipeline.ts`                                                                                                                                             | `WAN_SESSION_POLICY` の 3 キーを `true` に・受理表のコメント                                                               |
-| tests           | `packages/models/tests/e2e_wan_pipeline_test.ts`・`session_options_test.ts`・`helpers/census-table.ts`・新規の Wan の自機 A/B 門・`e2e_wan_dit_test.ts`                           | admission の故障注入の差し替え（別の未受理キーへ）・census 表の行・A/B 門・`f16+dit8` の r 門・sha 行                      |
-| fixture         | `packages/models/tests/fixtures/references/wan.json`                                                                                                                              | 参照席と実用席の sha 行（B570 の環境キー）                                                                                 |
-| 文書            | `docs/quantization.md` 表 3・`docs/perf-ledger.md`・`docs/limitations.md`・ADR 0118 決定 7 と未解決・`docs/glossary.md`・`.claude/ACTIVE_DESIGN.md`・`docs/backlog.md`・CHANGELOG | 席の追加・Wan の a8 の速度の起票・Metal で a8 の利得なし・指し先                                                           |
+1. **Attention a8 on long rows (the largest risk)**: ③PV's P̃ is `round(127·exp(S − m))` with the row
+   scale fixed at 1/127; in sharp rows, elements with `exp(S − m) < 1/254` round to 0 and mass is lost.
+   Confirmed on measurement (addendum "steps 3, 4 and 5"); accepted by the visual review.
+2. **adaLN and the condition path**: the shared `time_proj` input (M = 1) is quantized with one row
+   scale, and its error reaches every token and block (speculation). Fallback: decision 2's mixed form.
+3. **Temporal consistency**: per-token error differs per frame and could appear as flicker in still
+   regions (speculation); a PNG contact sheet can miss it.
+4. **Text context outliers**: T5-family activations have large outliers; per-token i8 errs more on
+   those rows (speculation). Zero padding rows stay exactly 0 (ADR 0025 decision 2).
+5. **Row blocks**: a8 / `s16` × row blocks have the Uint32 identity check; at 81 frames `s16` changes
+   only the block count (24 → 12), not the VRAM peak.
+6. **VRAM and late release on the B570**: see decision 4's ordering.
+7. **No gain on Metal**: handled by ADR 0128 decision 5's dp4a warning.
+8. **Timing**: a8 adds dispatches (Anima 3,087 → 3,311 per step), so the per-submit limit is measured
+   per preset.
 
-### 費用（推測を含む）
+## Acceptance
 
-- CPU: S = 192 の golden は分単位、S = 14,040 の golden 8 本は約 1.5 時間（調査 §4.3 ④）。
-- GPU: 自機 A/B 門は 33 フレームで 1 分強（参照 2 パス約 34 s + 実用 2 回 × 2 パス約 32 s）、81 フレームで約 5 分（調査 §4.3 ①'）。
-  視認 12 本は 1 本約 15 分（a8 席）で約 3 時間（調査 §4.3 ①）。
-- レーン: `test:models:wan` の既定に A/B 門 2 ケースと sha 行 2 本が増える。
+| Step | Content                                                                                                     | Green condition                                                                                                                                                                                                                                                                                                       |
+| ---: | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    1 | i8 series export (`wan2.1-t2v-1.3b-i8-dyn`, transformer only, bias / norm upstream f32) and goldens at S = 192 and S = 14,040 | The series binds i8 and not f16 / i4; 307 i8 weights, 700,480 scales; the f16 series and existing goldens byte-identical (safetensors compared by tensor); `uv run pytest` green in tools/exporter and tools/export-recipes |
+|    2 | Distribution presets, card, NOTICE, local mirror, the three `WAN_SESSION_POLICY` keys, admission test, census rows | `verify_dist` green; three presets in the manifest; download measured; swapped storage (f16 series in the i8 role or the reverse) red at build; the `f16` entry and container byte-identical; admission fault injection red; GPU-free checks green |
+|    3 | r check of `f16+dit8` (S = 192, 14,040); per-knob step 1 relRMS at 33 / 81 frames                            | r band per S from six decision cases × 5, acceptance inside, fault injections (the four of `f16` + at least one i8-specific) outside — opt-in since 2026-10-17; per-knob values recorded                                                                                                                               |
+|    4 | Self A/B check (33 / 81 frames), census, determinism, fault injections, per-submit time, VRAM, pass time     | Ceiling = measured relRMS × 2 per case; full bundle inside, at least one bit different, no non-finite; census exactly 307 linears and ≥ 1 attention; two runs bit-identical; all fault injections red; max per-submit GPU time ≤ 1 s in measured mode; 81 frames first                                                 |
+|    5 | sha256 rows (2 steps × 33 frames × 2 presets; 81 frames in the 50-step opt-in)                               | `KARUME_REFERENCE=write` creates the rows and a rerun matches; `f16+dit8` rows are reference rows, practical rows are practical rows (ADR 0110 decision 7); existing `f16` rows unchanged                                                                                                                              |
+|    6 | Visual A/B (12 practical videos × 33 frames × 50 steps paired with the `f16` 12) and the default ruling      | The maintainer's ruling; an unperformed review is never recorded as done (ADR 0058 addendum); non-finite count and time recorded                                                                                                                                                                                      |
+|    7 | Docs sync                                                                                                   | quantization table 3, perf-ledger, limitations, ADR 0118 pointers, glossary, ACTIVE_DESIGN, backlog and CHANGELOG match                                                                                                                                                                                               |
 
-### リスク（調査 §6）
+All seven steps are done (addenda below).
 
-1. **attention a8 の長い行（最大のリスク）**: ③PV の P̃ は `round(127·exp(S − m))` で、行の scale は 1/127 に固定される。鋭い行では
-   `exp(S − m) < 1/254` の要素が 0 に丸まり、質量が消える。anima で検収した N は最大 4,096 で、Wan は 14,040 / 32,760。
-   決定 4 で 81 フレームを直接測り、決定 5 で N 依存を記録する。
-2. **adaLN と条件の経路**: Wan の adaLN の重みは共有の `time_proj` 1 本で、a8 では M = 1 の入力ベクトルが行 1 本ぶんの scale で
-   量子化され、誤差が全トークン・全ブロックの shift / scale / gate へ一様に乗る（推測）。上流 diffusers は低精度格納で
-   `condition_embedder` 等を除外している。anima の結果はモデル固有で一般化できない。退路は決定 2 の混成。
-3. **時間方向の一貫性**: per-token の量子化誤差はフレームごとに別の値になり、静止部分のちらつきとして見える可能性がある
-   （推測 — 前例なし）。PNG の一覧図では見落としうる（「裁定」節の 1）。
-4. **テキスト文脈の外れ値**: `text_embedder` の入力は umT5 の出力 `[512, 4096]` で、T5 系は活性の外れ値が大きいと言われる。
-   per-token の i8 では外れ値の行で誤差が大きくなる（推測 — 実測なし）。パディングの 0 行は厳密に 0 のまま（ADR 0025 決定 2）。
-5. **行ブロックとの相互作用**: a8 / `s16` × 行ブロックは Uint32 一致の門がある。量子化の一時（最大 201 MB の Vᵀ）は束縛上限の
-   下に収まる。数値の新しいリスクは見つかっていない。81 フレームでは S のブロックが束縛上限まで詰まるので、`s16` は VRAM の山を
-   下げず、ブロックの枚数（24 → 12 枚）だけが変わる（調査 §3.4）。
-6. **VRAM と B570 の解放遅れ**: 自機 A/B 門は pipeline を順に張る。B570 では `destroy()` の解放が遅れる（ADR 0118 段 8）。
-   81 フレームの A/B は確保の大きい順・解放待ちの手順が要る可能性がある。
-7. **Metal で速くならない**: M2 の利用者には a8 席が品質だけを払う席になる（決定 6 の材料）。
-8. **時間の門**: a8 席はカーネルが速くなる一方で dispatch が増える（anima で 3,087 → 3,311 / step — ADR 0030）。「1 submit ≤ 1 s」
-   の門は席ごとに測り直す。
+## Rulings (2026-10-03, the maintainer)
 
-## 検収
+1. Visual A/B material is handed over as PNG frame sequences and contact sheets first; a synchronized
+   player page or ffmpeg on demand.
+2. **Attention a8 error: confirm visually first**; if rejected, switch the practical preset to
+   `f16+dit8-a8`.
+3. The default preset is ruled after step 6 (decision 6).
 
-| 段 | 中身                                                                                                                                                                                                                              | 検収の形（緑の条件）                                                                                                                                                                                                                                                                                                                                                                                                | GPU                  |
-| -: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-|  1 | i8 系列の export（`wan2.1-t2v-1.3b-i8-dyn`・transformer だけ・bias / norm は上流の f32）と S = 192 の golden（i8 の fake-quant 重みで f64 / f32 の参照）・pytest。S = 14,040 の golden（CPU 約 1.5 時間）も段 3 の前に CPU で採る | 系列の束縛表に i8 があり f16 / i4 が無い。i8 の重みが 307 本・scale が 700,480 本。f16 系列と既存 golden がバイト不変（safetensors はテンソルで比べる — ADR 0118 段 8 の結果）。`uv run pytest` が tools/exporter と tools/export-recipes の両方で緑                                                                                                                                                                | 不要                 |
-|  2 | distribution の席・カード・NOTICE・ローカルミラーの組み立て・`WAN_SESSION_POLICY` の 3 キー・admission テストの差し替え・census 表の行（linear 307 本の i8a8）                                                                    | `verify_dist` が緑。manifest に `f16` / `f16+dit8` / `f16+dit8-a8-attn8-s16` の 3 席。取得量を実測し、約 1.72 GB の見込みと並べる。格納の取り違え（f16 系列を i8 の役割へ・i8 系列を f16 の役割へ）が組み立てで赤。`f16` 席の manifest の項と容器がバイト不変。admission の故障注入（別の未受理キーの宣言）が赤。GPU 不要の門（census 表・受理表の網羅）が緑                                                        | 不要                 |
-|  3 | 参照席 `f16+dit8` の r 門（S = 192・14,040）。ノブ単位の step 1 relRMS（manifest の上書きで `a8` → `+ attn8` → `+ s16`・33 / 81 フレーム）と層ごとの差（33 フレーム）                                                             | r の帯を S ごとに決定用 6 本の最悪 × 5 で独立に導き、受入れのケースが帯の内。故障注入（f16 席と同じ 4 件 + i8 に固有の注入〈例: 1 本の linear の scale を 2 倍〉を 1 件以上）が帯の外。ノブ単位の relRMS と層ごとの差は帯にせず results に記録                                                                                                                                                                      | 要                   |
-|  4 | 自機 A/B 門（33 / 81 フレーム）・census・決定性・故障注入 3 件・1 submit ≤ 1 s・VRAM・1 パスの時間                                                                                                                                | 上限 = 実測 relRMS × 2 をケースごとに宣言し、全部入りが帯の内・参照席と 1 bit 以上違う・非有限 0。census が linear 307 本ちょうど・attention は 1 本以上。実用 2 回がビット一致。故障注入 3 件（床・決定性・census）が全部赤。1 submit の GPU 時間の最大 ≤ 1 s（**計測モード〈`gpuTiming`〉の値** — ADR 0118 段 8 の範囲の注記と同じ）。VRAM の山と 1 パスの時間を記録し、期待値の表と並べる。81 フレームを先に回す | 要                   |
-|  5 | sha 行（2 ステップ × 33 フレーム × 2 席・81 フレームは 50 ステップの opt-in）                                                                                                                                                     | `KARUME_REFERENCE=write` で B570 の行ができ、続けて回すと一致。`f16+dit8` の行は参照行、実用席の行は実用行（ADR 0110 決定 7）。既存の `f16` の行は不変                                                                                                                                                                                                                                                              | 要                   |
-|  6 | 視認 A/B（実用席 12 本 × 33 フレーム・50 ステップ・`f16` の 12 本と対）と既定席の裁定                                                                                                                                             | 利用者の裁定。未実施の視認を実施済みと書かない（ADR 0058 追記）。非有限 0 と所要を記録                                                                                                                                                                                                                                                                                                                              | 要（+ 利用者の目視） |
-|  7 | docs の同期                                                                                                                                                                                                                       | quantization 表 3・perf-ledger・limitations・ADR 0118 の指し先・glossary・ACTIVE_DESIGN・backlog・CHANGELOG が本 ADR と段の結果に合う                                                                                                                                                                                                                                                                               | 不要                 |
+## Open questions
 
-- 段 1・2 は GPU を使わない。段 3〜6 は GPU のロックで直列化し、順序はメインが決める。
-- 段 9（Chrome）・段 10（umT5 を GPU で）とは依存しない。Chrome の検収で取得量と VRAM が効くなら、本 ADR を先に進める理由に
-  なる（推測 — 調査 §5.2）。
+- **An i4 (w4a8) preset**: Anima's i4 preset dropped a8 after its visual review (ADR 0076 decision 6);
+  whether Wan gets one, and with a8 or not, is open.
+- **Gains in Chrome**: download, VRAM and a8 speed of the practical preset in Chrome (ADR 0118 step 9
+  ran only the precomputed path with `f16`).
+- Closed: the expected values (replaced by measurements in steps 2–4), attention a8's N dependence
+  (step 3), the mixed fallback (not needed — ruling 2026-10-04).
 
-## 裁定
+## Addendum (2026-10-03) — results of steps 1 and 2
 
-利用者に判断を仰ぐ点。
+Step 1 (`6cb822a9`): i8 container 1,426,806,948 B (9 parts), 307 i8 / 521 f32 tensors; growth (S = 768)
+is excluded from the i8 goldens because decision 3 does not list that S. Step 2 (`fff846a6` /
+`c36e543e`): three presets; an i8 preset downloads 1.72 GB (as expected); two build checks were added
+(`rope_base` byte-identical; the embedding asset fits both transformers' context inputs).
 
-1. **視認 A/B の受け渡しの形**。今は PNG のフレーム列と一覧図で渡している。この機に `ffmpeg` は無い（調査 §4.3）。時間方向の
-   ちらつき（リスク 3）は一覧図では見落としうる。
-   - a. 今のまま（PNG のフレーム列と一覧図）。
-   - b. 利用者の機で `ffmpeg` を使い、PNG 列を動画にして見る。
-   - c. ブラウザで再生する簡易ページ（PNG 列を `f16` と実用席の左右に並べて同期再生する・`ffmpeg` 不要・`outputs/` に置く）。
-   - **推奨 c**。ちらつきは動いている状態で並べないと見えにくい。この機に `ffmpeg` が無くても作れ、リポのコードにも依存にも
-     入らない。b でもよいが、利用者の機の手間が増える。
-2. **既定席の裁定は段 6 の後**。本 ADR では `defaultQuant` を `f16` のまま変えない（決定 6）。
-   - **推奨: 本 ADR はこの形で承認し、段 6 の視認の結果で実用席を既定にするかを別に裁定する**。材料には Metal（M2）では a8 が
-     速くならない（品質だけを払う）ことと、Chrome（段 9）の結果を含める。
+## Addendum (2026-10-03) — test implementation of steps 3 to 5, notes on decisions 4 and 5
 
-## 未解決
+- **Tests done** (`006504a4`–`cce2ec43`): the reference preset's r check switches
+  `e2e_wan_dit_test.ts` by series root (i8 at S = 192, 9 cases; S = 14,040, 8 cases). The self A/B
+  check is `e2e_wan_ab_test.ts`. sha256 rows `<preset>-2step-seed-boxing-cats-seed42` (row class derived
+  from the manifest's `session`) plus 50-step opt-in rows for the practical preset at 81 / 33 frames.
+- **Decision 4 — five fault injections**: ① empty `session` → floor; ② different seed → determinism;
+  ③ `attentionCompute` removed → census; ④ census table count ± 1 → census; ⑤ a different seed's latent
+  against the reference preset → ceiling (a proxy for collapse; ADR 0110's "scale × 2" example has no
+  entry through the pipeline A/B and is implemented in the DiT r check as `to_v` per-channel scale × 2).
+- **Decision 5 — no per-layer differences**: they would need an i8 per-layer probe series; step 3 keeps
+  only the step 1 relRMS per knob. A per-layer attribution is filed separately when a problem needs it.
 
-- **実測で置き換える数値**: 1 パスの時間（33 / 81 フレーム）・DiT 段の VRAM の山・dispatch の本数・取得量。期待値の表は全て
-  推測で、段 2〜4 の実測で置き換える。
-- **attention a8 の N 依存の実測**: 段 3 のノブ単位の relRMS（33 / 81 フレーム）で、`+ attn8` の寄与が N とともにどれだけ伸びるか。
-- **i4（w4a8）の席の是非**: anima の i4 席は品質の視認で a8 を外した（ADR 0076 決定 6）。Wan で i4 の席を足すか、足すなら a8 を
-  宣言するかは、本 ADR の席の結果を見てから別に決める。
-- **混成（決定 2 の退路）の要否**: 段 3 の層ごとの差と段 6 の視認で、`condition_embedder` / `patch_embedding` / `proj_out` を f16 に
-  残す必要があるか。
-- **Chrome での利得**: 段 9 の M2 / RTX で、取得量と VRAM の利得と、a8 の速度の利得（M2 では無い見込み）がどう出るか。
+## Addendum (2026-10-03) — results of steps 3, 4 and 5: attention a8 error grows strongly with row length
 
-## 追記（2026-10-03）: 段 1 / 2 の結果
+- **Step 3, r check of `f16+dit8`** (`bb41b26c`–): band 54 at S = 14,040 (worst 10.7 × 5) and 30 at
+  S = 192 (5.97 × 5); acceptance inside (3.71 / 4.64, 3.82 / 3.43); five fault injections outside (`to_v`
+  scale × 2 at r 1.66e+4–4.45e+4). Max per-submit GPU time 270.4 ms at S = 14,040.
+- **Step 3, per-knob step 1 relRMS (33 frames, against the reference preset)**: linear a8 only
+  **2.9991e-2** → + attention a8 **1.04e-1** → + s16 **1.0676e-1**. Most of the error is attention a8.
+- **Step 4, self A/B check**: practical preset step 1 relRMS **1.0676e-1 at 33 frames / 2.0956e-1 at 81
+  frames** (maxAbs 0.284 / 0.540); ceilings 2.2e-1 / 4.2e-1. Floor, census (307 linears in i8a8,
+  attention 480 / 1,560) and determinism green; five fault injections red; a different seed's latent at
+  relRMS 1.38.
+- **Step 4, speed and VRAM** (B570, DiT alone, normal mode): one forward **68.5 → 34.0 s at S = 32,760
+  and 17.1 → 8.5 s at S = 14,040 (−50%)**; max per-submit 381.5 / 157.2 ms; allocation 6.17 → 5.46 GiB
+  (81 frames), 5.15 → 4.02 GiB (33 frames).
+- **Step 5, sha256 rows**: `f16+dit8-2step-seed-boxing-cats-seed42` (reference row) and
+  `f16+dit8-a8-attn8-s16-2step-seed-boxing-cats-seed42` (practical row) on the B570, reproduced.
+- **Risk 1 materialized**: Anima's practical step 1 relRMS is 1.2–1.4e-2 (ADR 0110); Wan's is an order
+  of magnitude larger and nearly doubles from N = 14,040 to 32,760, caused by attention a8. Step 1
+  relRMS is not quality, so the decision went to the visual A/B: (a) proceed and judge visually
+  (recommended, −50% time); (b) if rejected, `f16+dit8-a8` (relRMS 3.0e-2); (c) a separate 81-frame
+  preset without attention a8 (rejected by decision 1's cost argument).
 
-- **段 1 ✅**（`6cb822a9`）: `--dtype i8 --no-full` で S = 192 の 9 ケース（CPU 104 s・RSS 13.8 GiB・2 回の実走でバイト一致）。
-  容器は 1,426,806,948 B（1.33 GiB・9 part・f16 比 0.502）、i8 307 本 / f32 521 本・scale 700,480。eager 同値の門は丸めた後の
-  重みで見る（f16 系列と同じ形 — 参照が丸め済みの重みで採られたことも縛れる）。growth（S = 768）は i8 の golden から外す
-  （決定 3 の S に無い）。S = 14,040 の golden は別に採取（CPU 約 1.5 時間）。観測（門ではない）: 重みだけ i8 にした CPU 参照の
-  f16 系列に対する差は S = 192 で 4.7e-2 / 1.5e-2（max abs ÷ max ref）。
-- **段 2 ✅**（`fff846a6` / `c36e543e`）: 席 3 つ（`f16` 既定 / `f16+dit8` / `f16+dit8-a8-attn8-s16`）。取得量は `f16` 3.14 GB /
-  i8 の 2 席 1.72 GB（見込みと一致・f16 比 0.549）、ミラー 4.25 GiB、`verify_dist` 緑。容器が 2 本になって生じる不変条件として
-  組み立ての門を 2 つ足した（`rope_base` のバイト同一・埋め込み資産が両方の transformer の文脈入力と噛み合う）。`f16` 席の
-  description は「the only quant」が偽になるため変えた（weights / session / label / 容器は不変）。GPU: `e2e_wan_pipeline_test.ts`
-  5 passed（admission の差し替え〈受理表に無い `stateAttentionReduce` の宣言は fail loudly〉・f16 と seed 経路の sha 行は新しい
-  ミラーで不変）。i8 の 2 席はまだどの GPU テストでもロードしていない（段 3 / 4 で初めて実測）。
-- 段 3〜5 のテストは実装中（GPU の実走と帯の確定はメインが行う）。
+## Addendum (2026-10-03) — step 6 material
 
-## 追記（2026-10-03）: 段 3〜5 のテスト実装と決定 4 / 5 の補足
+12 practical-preset videos (seeds 42–45 × boxing-cats / ferret / cat-dog-baking, 50 steps, 832×480, 33
+frames) on the B570, 951–952 s each against 1,815 s for `f16`; no non-finite values; paired with the
+`f16` videos of ADR 0118 step 7.
 
-- **テスト実装 ✅**（`006504a4`〜`cce2ec43`・GPU の実走と帯の確定は別）: 参照席の r 門は `e2e_wan_dit_test.ts` を系列 root で
-  切り替える形（f16 の判定・文言・ID は不変）で、i8 の S = 192（9 本）と S = 14,040（8 本）。帯は**未導出（undefined）**で、
-  実走が r を出して赤になり、組の最後の step が候補（決定用 6 本の最悪 × 5）を出す。自機 A/B 門は `e2e_wan_ab_test.ts`
-  （33 / 81 フレーム・床 = ビット同一なら赤・上限は未導出・census 307 本・決定性）。ノブ単位の記録（a8 → +attn8 → +s16）は
-  一時 manifest で step 1 の relRMS を記録だけ。sha 行は `<席>-2step-seed-boxing-cats-seed42` の 2 本（参照行 / 実用行の分類は
-  manifest の session から導く）と 50 ステップ opt-in の実用席 81 / 33。
-- **決定 4 の補足 — 故障注入は 5 件**: ① session 空（= 参照席）→ 床 ② 別 seed → 決定性 ③ attentionCompute 外し → census
-  ④ census 表の本数 ±1 → census ⑤ 別 seed の潜在を参照席と比べる → 上限（崩壊の代理。ADR 0110 決定 5-5 の例「scale × 2」は
-  pipeline 経由の A/B に入れる口が無く、DiT 単体の r 門の側で `to_v` の per-channel scale × 2 として実装）。
-- **決定 5 の補足 — 層ごとの差は採らない**: i8 の層別 probe 系列（`--layers` を i8 で許す・実重みの CPU export）が要るので、段 3 の
-  検収は step 1 の relRMS（席どうし・ノブ単位）だけにする。層ごとの帰属が要る問題が出たときに別起票。
-- **既定レーンの所要の見込み（推測）**: 約 25 分増（i8 の r 門 約 6 分・実用席の時間 約 4 分・A/B 約 9 分・i8 の 2 席の 2 ステップ
-  約 6.5 分）。opt-in は 81f のノブ 約 3 分と 50 ステップの実用席 2 ケース 約 75 分。
-- 既定席を実用席へ変えるとき（段 6 の裁定）: 既存の f16 の sha 行のケースは quant を省いて既定席に任せているので、ID は同じまま
-  別の席の値で回り、帯と sha で赤になる（黙っては通らない）。その時点で `quant: "f16"` の明示を判断する。
+## Rulings (2026-10-04, the maintainer)
 
-## 追記（2026-10-03）: 段 3 / 4 / 5 の結果と要判断 — attention a8 の誤差は行の長さで大きく増える
+1. **The practical preset's quality passes.** In the 12 pairs (`f16` vs `f16+dit8-a8-attn8-s16`) there
+   is no clear degradation; the bundle (linear a8 + attention a8 + f16 S storage) is fixed and option
+   (b) is not taken.
+2. The default preset was left open at first (material: no a8 gain on Metal; the `f16` preset took 46
+   minutes for 81 frames × 50 steps in Chrome on an RTX 5070 Ti — ADR 0118 addendum 2026-10-04).
+3. Next: the two 50-step practical sha256 rows (addendum below).
+4. **Default preset = the practical preset `f16+dit8-a8-attn8-s16`** (same day, ruling decision 6). The
+   maintainer's policy: the default is "the most practical preset now" (light, small quality loss); a
+   later switch to "the preset closest to the original weights" stays possible. `f16` remains as an
+   explicitly selected reference-side preset; existing sha256 rows, bands and case ids keep their
+   values by naming `f16` explicitly. ADR 0128 (rewritten 2026-10-17) generalized this ruling into a
+   per-model procedure; the default stays the practical preset and devices without dp4a get a runtime
+   warning (its decision 5).
 
-- **段 3 ✅ 参照席 `f16+dit8` の r 門**（`bb41b26c`〜）: 帯は S = 14,040 が 54（決定用の最悪 r 10.7 × 5）・S = 192 が 30（5.97 × 5）。
-  受入れは帯の内（3.71 / 4.64・3.82 / 3.43）、故障注入 5 件（f16 席と同じ 4 件 + `to_v` の scale × 2 → r 1.66e+4〜4.45e+4）は帯の外。
-  1 submit の GPU 時間の最大 270.4 ms（S = 14,040・f16 席と同じ）。i8 の S = 14,040 golden は CPU 94 分（RSS は S = 192 と同程度）。
-- **段 3 ✅ ノブ単位の step 1 relRMS（33 フレーム・参照席に対して）**: linear の a8 だけ **2.9991e-2** → + attention の a8 **1.04e-1**
-  → + s16 **1.0676e-1**。誤差の大半は attention の a8。
-- **段 4 ✅ 自機 A/B 門**（`e2e_wan_ab_test.ts`）: 実用席 `f16+dit8-a8-attn8-s16` の step 1 relRMS は **33 フレーム 1.0676e-1 / 81 フレーム
-  2.0956e-1**（maxAbs 0.284 / 0.540）。帯は規則どおり実測 × 2 で 2.2e-1 / 4.2e-1。床（参照席とビット同一）・census（linear 307 本が
-  i8a8・attention 480 / 1,560 本）・決定性は緑、故障注入 5 件は赤。別 seed の潜在の relRMS は 1.38（崩壊の代理）。
-- **段 4 ✅ 実用席の速度と VRAM**（B570・DiT 単体・通常モード）: 1 forward **S = 32,760: 68.5 → 34.0 s（−50%）/ S = 14,040: 17.1 →
-  8.5 s（−50%）**。1 submit の GPU 時間の最大 381.5 / 157.2 ms（≤ 1 s）。確保 6.17 → 5.46 GiB（81 フレーム）/ 5.15 → 4.02 GiB
-  （33 フレーム）。単発 dispatch の最大は `linear:v4:i8a8:…:dp4a` の 62.8 / 27.3 ms。期待値（約 36 / 約 8 s）と一致。
-- **段 5 ✅ sha 行**: `f16+dit8-2step-seed-boxing-cats-seed42`（参照行）/ `f16+dit8-a8-attn8-s16-2step-seed-boxing-cats-seed42`
-  （実用行）を B570 で作り、比較モードの再走で一致。50 ステップ opt-in の実用席の行は未作成（段 6 の素材と一緒に）。
-- **要判断（利用者へ）— リスク 1 が実測で出た**: anima の実用席の step 1 relRMS は 1.2〜1.4e-2（ADR 0110）だが、Wan の実用席は
-  33 フレームで 1.07e-1、81 フレームで 2.10e-1 と 1 桁大きく、行の長さ N（14,040 → 32,760）でほぼ 2 倍になる。原因は attention の
-  a8（③PV の行 scale が 1/127 に固定され、鋭い行で質量が消える — ADR 0030 決定 6）。step 1 の relRMS は品質そのものではない
-  （画素距離は品質の物差しにならない — anima の記録）ので、裁定は段 6 の視認 A/B（実用席 12 本 vs f16 の 12 本）で行う。選択肢:
-  - (a) このまま段 6 へ進み、視認で判断する（推奨 — 速度 −50% の利得が大きい）。
-  - (b) 視認で不採用なら実用席を `f16+dit8-a8`（linear だけ a8・relRMS 3.0e-2・速度は −32% の見込み・81 フレームでは −19%）へ
-    差し替える（決定 1 の 2 席の構成は保ち、席名だけ変わる）。
-  - (c) 81 フレームだけ attention の a8 を外す席を分ける（席が 3 つになり、決定 1 の費用の理由に反する）。
-    **推奨は (a) → 不採用なら (b)**。視認 A/B の素材（実用席 12 本・50 ステップ・33 フレーム）はこれから生成する（1 本約 10 分の見込み）。
+## Addendum (2026-10-04) — switching the default preset
 
-## 裁定（2026-10-03・利用者）
+- `WAN_DEFAULT_QUANT` in `tools/export-recipes/wan/distribution.py` is the practical preset; the card's
+  `(default)` and the Usage `quant` derive from the manifest; the card's quality line states the visual
+  review result.
+- **Tests name the preset explicitly in every case**: `e2e_wan_pipeline_test.ts` has `F16_QUANT`, and
+  `loadPipeline` / `rowClassOf` / `FULL_CASES` require the preset (omission stopped by the type). Cases
+  without a preset name in their ids run with `quant: "f16"`.
+- **Values kept**: the sha256 rows, case ids, bands (`LATENT_RATIO_BANDS` / `FRAME_RATIO_BAND`) and the
+  fault floors in `fixtures/references/wan.json` and the tests did not change by one character.
+- A host test (`packages/models/tests/wan_pipeline_test.ts`) checks that building from the mirror's
+  `karume.json` without `quant` resolves to the practical preset. The follow-up work (rebuilding the
+  mirror, host checks, the GPU lane) was done; examples and gpu-lab were removed later
+  (`bb35fe2a`, ADR 0127).
 
-1. **視認 A/B の受け渡し = まず PNG（フレーム列と一覧図）**で w8a8 の結果を見る。動画として見るのは利用者側の ffmpeg か、こちらの
-   同期再生ページ（案 c）のどちらでも可 — 要望が出たら作る。
-2. **attention a8 の誤差（追記 2026-10-03 の要判断）= まず視認で確認する（案 (a)）**。不採用なら (b)（実用席を `f16+dit8-a8` へ）。
-3. 既定席は段 6 の視認の後に別に裁定（決定 6 のとおり）。
+## Addendum (2026-10-04) — two 50-step sha256 rows of the practical preset
 
-## 追記（2026-10-03）: 段 6 の素材 — 実用席 12 本を生成し利用者へ
-
-- 実用席 `f16+dit8-a8-attn8-s16` で seed 42〜45 × boxing-cats / ferret / cat-dog-baking（50 ステップ・832×480・33 フレーム）の 12 本を
-  B570 で生成した（`outputs/verify/deno-intel-graphics-bmg-g21/2026-10-03_wan-visual-i8/<prompt>-seed<N>/`・フレーム PNG と 4×8 の一覧図・
-  `log.json`）。所要は **1 本 951〜952 s**（`f16` 席の段 7 は 1,815 s — 通しで 1.9 倍）、非有限 0。段 7 の `f16` の 12 本
-  （`2026-10-03_wan-visual/`）と同じ seed / プロンプトの対。一覧図 12 枚を利用者へ渡した（裁定 1 = まず PNG）。
-- 裁定待ち: 実用席の品質（attention a8 の誤差の大きさ — 追記「段 3 / 4 / 5 の結果」の要判断）と既定席（決定 6）。不採用なら実用席を
-  `f16+dit8-a8` へ差し替える案 (b)。50 ステップ opt-in の実用席の sha 行 2 本は、裁定の後に `KARUME_WAN_FULL_PIPELINE=1
-  KARUME_REFERENCE=write` で作る（席が変われば行も変わるため）。
-
-## 裁定（2026-10-04・利用者）
-
-1. **実用席の品質 = 問題なし**。段 6 の 12 対（`f16` と実用席 `f16+dit8-a8-attn8-s16`・seed 42〜45 × 固定プロンプト 3 本）の視認で、
-   `f16` と比べて明確な劣化は無く、誤差の範囲。→ 実用席は今の束（linear a8 + attention a8 + S の f16 格納）で確定し、案 (b)
-   （実用席を `f16+dit8-a8` へ差し替える）は採らない。
-2. **既定席（決定 6）は未裁定**。別に仰ぐ（材料: Metal では a8 が速くならない・RTX 5070 Ti の Chrome の `f16` 席は 81 フレーム
-   50 ステップで 46 分 — ADR 0118 追記 2026-10-04）。
-3. 次の作業: 50 ステップ opt-in の実用席の sha 行 2 本を `KARUME_WAN_FULL_PIPELINE=1 KARUME_REFERENCE=write` で作る（結果は次の追記）。
-4. **既定席 = 実用席 `f16+dit8-a8-attn8-s16`**（同日・決定 6 の裁定）。利用者の方針: 既定は「今いちばん実用的な席」（軽く、品質の
-   劣化が小さい席）にする。将来の方針転換で「元の重みにいちばん近い席」を既定にする可能性は残す（その場合はこの裁定を改める）。
-   `f16` 席は明示の指定で使う参照側の席として残り、既存の sha 行・帯・case id は `f16` の指定を明示して値を保つ。
-   〈→ 追記 2026-10-17: ADR 0128（書き換え）がこの裁定を「モデルごとの手続き」の実例として一般化した。既定は実用席のまま・dp4a の無い device では runtime が警告する（同 ADR 決定 5）〉
-
-## 追記（2026-10-04）: 既定席の切り替え
-
-裁定 2026-10-04 の 4 を反映した。決定 6 の本文は当時の判断として残す。
-
-- **宣言**: recipe の `WAN_DEFAULT_QUANT` を実用席 `f16+dit8-a8-attn8-s16` にした（`wan/distribution.py`）。カードの quant 表の
-  `(default)` と Usage の `quant` は manifest から導くので、焼き直しで自動で移る。カードの品質の行は「視認は未了・既定は `f16` の
-  まま」から段 6 の視認の結果（12 対で明確な劣化なし）へ書き換えた。資源の表は従来どおり `f16` 席の実測だと名乗る。
-- **models のテスト — 席は全ケースで明示する**: `e2e_wan_pipeline_test.ts` に `F16_QUANT` を足し、`loadPipeline` /
-  `rowClassOf` / `FULL_CASES` の席を必須にした（省略を型で止める）。席名を持たない既存のケース（帯の 3 本・seed 経路・
-  50 ステップの 33 / 81 フレーム・GPU 経路の 2 本）は `quant: "f16"` で回る。家族 admission の故障注入（GPU 不要）も
-  `f16` 席の宣言を書き換えるので、`quant: "f16"` を明示した。ほかの Wan の e2e（DiT 単体・自機 A/B・umT5・VAE）は元から
-  席を明示するか、manifest の席に依らない。
-- **保った値**: `fixtures/references/wan.json` の sha 行・case id・帯（`LATENT_RATIO_BANDS` / `FRAME_RATIO_BAND`）・故障の床は
-  1 文字も変えていない。
-- **ホストの検査 1 本**（`wan_pipeline_test.ts`）: 配布形ミラーの `karume.json` で `quant` を省いた構築が実用席へ解決すること。
-  limits が全部 0 のフェイク GPU を渡すと、家族 admission がどの席も宣言する `requiredLimits` で落ち、その文言が解決した席を
-  名指す（重みも GPU も使わない）。ミラーを焼き直すまでは赤（ミラーの `defaultQuant` が `f16` のまま）。
-- **gpu-lab の Wan タブ**: quant の選択を足した（先頭の「既定」は読み込み時に manifest の `defaultQuant` へ解決する）。解決した
-  名前を `fromPretrained` へ明示して渡し、参照ケースの id もその名前から決める（`f16` 席は席名を持たない id・i8 の席は e2e が行を
-  持つ組だけ席名を先頭に置いた id）。JSON は `karume-wan-browser/3`（読み込みと行が席を持つ）。
-- **文書**: `examples/wan/README.md`（既定の所要）・recipe の README（manifest の表）・`docs/quantization.md`（★）・
-  `docs/limitations.md`・`CHANGELOG.md`（Changed）。
-- **残りの作業**:
-  1. 配布形ミラー `models/karume-wan2.1` の焼き直し（GPU のジョブがミラーを読み終えてから）:
-     `cd tools/export-recipes && uv run python dist.py --pipeline wan --ref-revision 0000000000000000000000000000000000000000
-     --allow-placeholder-ref --ref-repo hdae/karume-umt5-xxl --ref-dist ../../models/karume-umt5-xxl --ref-model xxl
-     --ref-role text_encoder`（今のミラーと同じ仮の SHA）。変わる見込みは `karume.json`（`defaultQuant`）と `README.md`（カード）
-     だけで、容器と資産は同じバイト（推測 — 焼き直しの後に差分で確かめる）。
-  2. 焼き直しの後のホストの検査: `wan_pipeline_test.ts`（上の 1 本が緑になる）・配布門番 `distribution_gate_test.ts`（既定の選択が
-     i8 の transformer の part を見るようになる）・融合ヒット数 `assets_fusion_counts_test.ts`（`f16` を明示しているので値は不変）。
-  3. GPU のレーン: `deno task test:models:wan` で、席名を持たない既存の行が `f16` の明示で一致すること（帯・故障注入・sha 行）。
-     50 ステップの opt-in（`KARUME_WAN_FULL_PIPELINE=1`）は実用席の行 2 本を作る作業（裁定 2026-10-04 の 3）と同じ走行でよい。
-
-## 追記（2026-10-04）: 50 ステップの実用席の sha 行 2 本
-
-- `KARUME_WAN_FULL_PIPELINE=1 KARUME_REFERENCE=write` で opt-in の 4 ケースを回した（B570・1 passed / 4 steps・228 分 55 秒・非有限 0・
-  device lost なし）。`f16` 席の 2 本は既存の行と一致し、実用席の行 2 本を作った（`fixtures/references/wan.json`）:
-  `f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42`（33 フレーム）と `f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42-81f`。
-- 所要と資源（壁 = DiT 段 + VAE 段）:
-
-  | ケース     |      壁 |  DiT 段 | VAE 段 | DiT 段の VRAM の山 | 1 submit の窓平均の最大 |
-  | ---------- | ------: | ------: | -----: | -----------------: | ----------------------: |
-  | `f16`・81  | 7,178 s | 6,861 s |  316 s |           6.87 GiB |                268.7 ms |
-  | 実用席・81 | 3,703 s | 3,383 s |  319 s |           6.18 GiB |                152.7 ms |
-  | `f16`・33  | 1,835 s | 1,698 s |  136 s |           5.72 GiB |                113.5 ms |
-  | 実用席・33 |   988 s |   852 s |  135 s |           4.57 GiB |                 48.4 ms |
-
-  実用席は 81 フレームでも DiT 段が `f16` の約半分（×0.49）で、VAE 段は席に依らない。予算超過のチャンクは 4 本とも 0。
-- 残り: モデルカードと README 類の「実用席の 81 フレームは未計測」の記述を、この値（約 62 分）へ直す（カードの出力が変わるので、
-  配布形ミラーの次の焼き直しと一緒に行う）。
+`KARUME_WAN_FULL_PIPELINE=1 KARUME_REFERENCE=write` on the B570 matched the `f16` rows and wrote
+`f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42` (33 frames) and `…-seed42-81f`. Wall time at 81
+frames 3,703 s against 7,178 s for `f16` (DiT stage × 0.49; DiT stage VRAM peak 6.18 GiB against
+6.87 GiB); at 33 frames 988 s against 1,835 s. The card states these values (`card.py:117`).

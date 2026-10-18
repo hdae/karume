@@ -1,575 +1,572 @@
-# 0117: 利用者アプリの中で幾何を掃引し、表を作って保存し、次の `acquireGpu` に注入する（`@karume/runtime/tune`）
+# 0117: Sweep geometries inside the user's application, store the profile and inject it into the next `acquireGpu` (`@karume/runtime/tune`)
 
-- Status: accepted・**全 7 段 ✅（2026-10-03）**（利用者裁定 2026-10-01。3 論点〈公開の形・計測の門・保存キー〉とも推奨案 a。決定 4 の「runtime の版ではなくカーネルの指紋」と
-  埋め込み 2 表への適用、決定 3 の 1%・決定 2 / 6 の形も同日に推奨案で裁定）
+- Status: accepted (2026-10-01 — the maintainer's ruling: option a for public form, measurement
+  check and storage key; recommended options for decisions 2 / 3 / 4 / 6); implemented (2026-10-03);
+  partly superseded by [0127](0127-node-dawn-toolchain.md) decision 5 (2026-10-16: decision 1's
+  thin shells `tools/geometry-sweep` and `tools/gpu-lab` are not ported, so the regeneration decision
+  4 requires has no tool in the repository). Triage 2026-10-18: decisions 3 and 4 kept at their grade.
 - Date: 2026-10-01
-- 関連: ADR [0115](0115-geometry-profiles.md)（幾何プロファイル・決定 1 / 4 / 8・追記決定 6 / 7 / 8・追記 7 / 9）/
-  [0116](0116-geometry-profile-row-buckets.md)（行数バケット 7 段・段ごとの fallback）/
-  [0022](0022-gemm-register-blocking.md)（追記の MUST「実行時オートチューン禁止」「既定変更は門の再実測とセット」）/
-  [0008](0008-public-api.md)（薄い公開面・サブ面は `exports` で足す・道具は `src/` を直接 import してよい）/
-  [0106](0106-device-keyed-references.md)（sha256 参照値を環境キーごとの行で持つ）/ perf-ledger K-71。
-  実装（移す前）= `tools/geometry-sweep/`（harness / cases / geometries / derive / report）・`tools/gpu-lab/browser/`（掃引とプロファイルのタブ）。
-  注入口 = `packages/runtime/src/gpu/acquire.ts`。表の型 = `packages/runtime/src/kernels/geometry-profile.ts`。
+- Related: [0115](0115-geometry-profiles.md) (geometry profiles — decisions 1 / 4 / 8, addendum
+  decisions 6 / 7 / 8, addenda 7 / 9) / [0116](0116-geometry-profile-row-buckets.md) (seven row
+  buckets, per-bucket fallback) / [0022](0022-gemm-register-blocking.md) (the addendum's MUSTs "no
+  run-time autotuning" and "a change of the default geometry goes together with re-running the
+  sha256 checks") / [0008](0008-public-api.md) (thin public surface; a second surface is added
+  through `exports`; tools may import `src/` directly) / [0106](0106-device-keyed-references.md)
+  (sha256 reference values per environment key) / perf-ledger K-71.
+  Code: injection in `packages/runtime/src/gpu/acquire.ts`, the profile type in
+  `packages/runtime/src/kernels/geometry-profile.ts`, the sweep core in `packages/runtime/src/tune/`.
 
 ## Context
 
-利用者アプリが自分の端末で掃引し、表（幾何プロファイル）を作って保存し、以後は `acquireGpu` に固定で注入する。これを成立させたい。
-開発者が実機を持たない端末（例: 8 GB 級の Android）は、今は既定の幾何で走るしかない。
+The goal: a user's application sweeps on its own device, builds a table (a geometry profile),
+stores it, and from then on injects it into `acquireGpu` as a fixed value. Devices the developers do
+not own (for example an 8 GB-class Android phone) otherwise run only with the default geometry.
 
-### 現状ある物
+What existed on 2026-10-01: the injection entry point `acquireGpu({ geometryProfile })` (ADR 0115
+addendum decision 6), whose structural check `assertGeometryProfile` (id, shape of `match`, rule
+lists, divisibility) runs before the device is created and whose table is copied and fixed for the
+device's lifetime, with `match`, `provenance` and the building version not compared; the public
+`BUILTIN_GEOMETRY_PROFILES` and `GeometryProfile` (addendum decision 7); a JSON serializer writing the
+trailing `maxRows` (Infinity) as `1e999`; and the proof of concept in `tools/gpu-lab` (ADR 0115
+addenda 7 / 9), which swept on a dedicated device and kept the last table in localStorage.
 
-- 注入口 `acquireGpu({ geometryProfile })`（`acquire.ts:551`・ADR 0115 追記決定 6）。門 `assertGeometryProfile`（id・`match` の形・規則列・整除）を
-  device を作る前に通し（`acquire.ts:592-594` → `640-650`）、複製して device の寿命の間は変えない。`match`・`provenance`・表を作った版は
-  照合しない（`acquire.ts:537-538`）。
-- 埋め込みの表の一覧 `BUILTIN_GEOMETRY_PROFILES` と型 `GeometryProfile` ほかの公開（`mod.ts:132-135`・追記決定 7）。
-- 表の JSON 直列化 `profileJson`（`tools/geometry-sweep/derive.ts:1157`）。末尾の `maxRows`（Infinity）を `1e999` と書く。
-- `tools/gpu-lab` での実証（ADR 0115 追記 7・追記 9）。掃引は専用の device を取って捨てる（`sweep-tab.ts:221-227` / `271-285`）。
-  最後に生成した表を localStorage（キー `karume-gpu-lab/last-generated-profile/1` — `injectable-tables.ts:15`）に残す。
+Four design points (backlog K-71):
 
-### 4 つの設計論点（backlog K-71 の起票）
+1. The sweep core and the generator imported runtime internals from `src/`: not publishable on JSR.
+2. The generator accepted only unquantized timestamp-query records, so Chrome without developer
+   flags (timestamps rounded to 100 µs) could not build a table.
+3. Injection compared neither `match` nor a version; no storage key told whether a table applies.
+4. The sweep's duration was not recorded (`date` was the end time).
 
-1. 掃引の核と生成器が runtime の内部 `src/` を直接 import していて、JSR では配れない（`harness.ts:46-115`）。
-2. 生成器は timestamp-query かつ非量子化の記録しか受けない（`derive.ts:262-290`）。フラグ無しの Chrome（timestamp が 100 µs に丸まる）では表を作れない。
-3. 注入は `match` も版も照合しない。保存した表を当ててよいかの判断材料（保存キー）が表に無い。
-4. 掃引の所要時間が記録に無い（`date` は終了時刻 — `sweep-tab.ts:186`）。
-
-### 調査の数値
-
-**内部 import**（機械抽出）:
-
-| 区分                                    | 数・中身                                                                                                                                                                      |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 掃引側が import する runtime の内部の値 | 64（うち `harness.ts` が 55）                                                                                                                                                 |
-| 内部の型                                | 2（`StorageRoles` / `Conv2dDims`）                                                                                                                                            |
-| 掃引に要るが公開面に無いもの            | 明示幾何の codegen 入口（key / params / WGSL）・pipeline cache・error scope の規律（`RUNTIME_INTERNAL`）                                                                      |
-| runtime 以外の依存                      | `tools/opbench/bench.ts` の較正定数（`calibrateReps` / `ROUNDS` / `TARGET_PASS_MS` / `WARMUP_MIN_RUNS` / `WARMUP_NS`）・`tools/anima-residency/timing.ts` の `looksQuantized` |
-
-公開面にあるのは「表の形」と「GPU を取る口」だけで、掃引に要るものは全部内部にある。
-
-**計測の門**（2026-09-29 の gpu-lab の full・各 45 ケース 2,247 行・当時の 3 段の生成器で 10 欄）:
-
-| 記録                      | pass の GPU 時間 最小 / p5 / 中央値 | 床（壁時計 − GPU 時間）中央値 / 最大 | 100 µs 丸めの模擬で全欄の採否が原本と同じ試行 | 壁時計だけで選んで採否が変わった欄 |
-| ------------------------- | ----------------------------------- | ------------------------------------ | --------------------------------------------: | ---------------------------------: |
-| M5（Chrome 154）          | 49.6 / 71.9 / 85.9 ms               | 0.65 / 3.85 ms                       |                                     200 / 200 |                             0 / 10 |
-| M2（Chrome 153）          | 20.2 / 79.1 / 85.5 ms               | 0.79 / 1.61 ms                       |                                     200 / 200 |                             0 / 10 |
-| RTX 5070 Ti（Chrome 153） | 3.1 / 72.0 / 80.3 ms                | 1.25 / 13.5 ms                       |                                     200 / 200 |                             0 / 10 |
-
-- harness は reps を壁時計で見積り、1 pass ≈ 80 ms（`TARGET_PASS_MS` — `tools/opbench/bench.ts:22`）に揃える（`harness.ts:1099-1126`）。
-  100 µs 丸めの誤差は timestamp 2 つの差あたり 1 刻み未満で、80 ms の pass なら約 0.13%。採用の閾値 ×1.05 より 2 桁小さい。
-- 今の門の理由（`tools/anima-residency/timing.ts:143-148`）は、Anima の 1 dispatch = 1 pass の計測から来ている。pass を 80 ms に揃える掃引には当たらない。
-- 外れの実例: RTX の `i8a8-linear-m1024-n8192-k2048` の 1 行（`tile32x64r8x8w8x4k32`）は reps の見積りが外れて pass 3.1 ms だった。
-  100 µs 丸めならこの行で約 3% の誤差になる。
-- 丸めの模擬は、各 round の begin / end を位相が一様乱数の 100 µs 格子へ切り捨てた（同じ測定値の再利用 — Chrome の丸め方式は未確認）。
-
-**所要時間**（記録からの積み上げ・2026-09-29 の 45 ケース時点）:
-
-| 記録      |    行 | 積み上げ | うち空回し |
-| --------- | ----: | -------: | ---------: |
-| M5 quick+ |   340 |   7.3 分 |     3.2 分 |
-| M2 quick+ |   340 |   8.6 分 |     3.3 分 |
-| M5 full   | 2,247 |  45.9 分 |    21.8 分 |
-| M2 full   | 2,247 |  60.7 分 |    24.5 分 |
-| RTX full  | 2,247 |  42.4 分 |    21.0 分 |
-
-- 目安は quick+ 7〜9 分・full 42〜61 分。空回し（1 幾何 0.5 s）が約半分を占める。
-- 算入していないもの: パイプラインのコンパイル・入力の生成と書き込み（ケースごと最大約 1.1 GiB）・出力の digest の読み戻しと SHA-256
-  （full で約 134 GiB・quick+ で約 20 GiB）。ADR 0116 で 57 ケースになったので、その分も伸びる（推測）。
-
-**保存キーの材料**:
-
-| 情報                             | フラグ無しの Chrome で | 備考                                                                                                                                                    |
-| -------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| adapter の vendor / architecture | 取れる                 | Apple M2 と M5 は同じ `apple` / `metal-3`（ADR 0115 追記 9）                                                                                            |
-| adapter の device                | 空                     | フラグ有りで Apple は `0x0000`・NVIDIA は PCI ID                                                                                                        |
-| adapter の description           | 空                     | フラグ有りで `"Apple M2"` / `"Apple M5"`                                                                                                                |
-| runtime の版                     | 取れない               | mod.ts にも src にも版の定数が無い（`packages/runtime/deno.json` の `"version"` だけ）                                                                  |
-| カーネルの指紋                   | 今は無い               | codegen 決定性（同一キー → バイト同一 WGSL）で安定に導ける                                                                                              |
-| ケース集合の版                   | 今は無い               | `SWEEP_CASES`（`cases.ts:351`）に版の欄が無い                                                                                                           |
-| 今の `provenance`                | —                      | `sweep` / `sha256` / `date` / `adapter` の 4 文字列（`geometry-profile.ts:83-88`）。`adapter` は連結文字列（`derive.ts:937-942`）で `device` を持たない |
-
-保存した表を黙って当てて遅くなる形は 4 つある: 別の機へ持ち出す・同じ端末で別の adapter が選ばれる・runtime を更新する（既定の幾何・
-バケット境界・カーネル本体が変わる）・ブラウザやドライバを更新する。今はどれも検出しない。
-
-**バンドル**（`deno bundle --minify` の実測）: サブパスを import したアプリだけが +36〜71 KB（gzip +11〜20 KB）。import しないアプリは 0。
+Measurements behind the decisions (2026-09-29, history): the sweep imported 64 internal values and 2
+internal types, while the public surface held only the table's shape and the way to get a GPU.
+Simulating 100 µs rounding on the full sweeps of three machines (M5, M2, RTX 5070 Ti; 200 trials
+each) changed no field's adoption, nor did choosing by wall clock alone. A sweep took 7–9 minutes
+(quick+) to 42–61 minutes (full), about half of it idle runs. Without flags Chrome reports an empty
+adapter `device` and `description`, and Apple M2 and M5 share `apple` / `metal-3`. The subpath adds
+36–71 KB (gzip 11–20 KB) to bundles that import it, nothing to others. Full tables: this file at
+`cb88cb33`.
 
 ## Decision
 
-### 1. 公開の形 = `@karume/runtime` のサブパス `./tune`
+### 1. Public form: the subpath `./tune` of `@karume/runtime`
 
-- 掃引の核を `packages/runtime/src/tune/` へ移す。harness / cases / geometries / derive / report の Deno 非依存部、opbench の較正定数、
-  `looksQuantized`（と量子化単位 `CHROME_TIMESTAMP_QUANTUM_NS`）。
-- `packages/runtime/deno.json` の `exports` を `{ ".": "./mod.ts", "./tune": "./tune.ts" }` にする。入口は `packages/runtime/tune.ts`
-  （`mod.ts` と同じく、明示的に設計した薄い面 — ADR 0008）。
-- 掃引が使う codegen の内部語彙（Context の 64 値・2 型）は、同じパッケージの中から import する。`./tune` にも `.` にも出さないこと MUST。
-  理由: 出すと semver の面になり、ADR 0008 追記 2026-09-03「道具のために内部 API を公開面へ出すのは禁止」と、ADR 0115 の採らなかった案
-  （公開面に内部の codegen 語彙が漏れる）に当たる。
-- この形を採る理由:
-  - **掃引とカーネルの版が必ず揃う**。同じパッケージ版の中で、掃引が組む束縛表・params・WGSL と本番の recipe が一致する。
-    別パッケージだと tune@x が runtime@y の生成器を呼びうる。束縛の入れ替わりのうち役割の同じものは `assertBindingRoles` でも見えない（`harness.ts:36-37`）。
-  - **内部語彙のサブパス（`./internal`）を作らずに済む**。
-  - CLI・gpu-lab・利用者アプリが同じ核を使う（実装 1 本）。
-- `tools/geometry-sweep` の CLI（`main.ts` / `profile.ts`）と `tools/gpu-lab` は `./tune` の利用者になる（薄い殻）。道具だけが使う物
-  （生成物の TS の描画 `renderProfileSource`・`--check`・`--min-speedup`）は道具側に残し、`src/tune/` の内部を直接 import してよい
-  （ADR 0008 追記 2026-09-03 の射程）。
-- `src/tune/` のモジュールは副作用ゼロ MUST（横断の不変条件）。import 時に計算しない（ケース集合の版も関数で導く — 決定 4）。
-  この規約の射程（純粋な定数構築は許容）は追記 2026-10-02（独立レビュー）で明文化した。
-- main の面（`mod.ts`）は値を増やさない。変わるのは `AcquireGpuOptions.geometryProfile` の型（決定 6）と `GeometryProfile.provenance` の形（決定 4）。
+- The sweep core moves to `packages/runtime/src/tune/`: the Deno-independent parts of harness /
+  cases / geometries / derive / report, the opbench calibration constants (now
+  `src/tune/measurement.ts`), and `looksQuantized` with `CHROME_TIMESTAMP_QUANTUM_NS` (now
+  `src/tune/report.ts`).
+- `exports` becomes `{ ".": "./mod.ts", "./tune": "./tune.ts" }` (`packages/runtime/package.json`
+  and `deno.json`). The entry `packages/runtime/tune.ts` is a deliberately designed thin surface like
+  `mod.ts` (ADR 0008).
+- The internal codegen vocabulary the sweep uses is imported within the package and MUST NOT be
+  exported from `./tune` or `.`. Reason: it would become semver surface, against ADR 0008 addendum
+  2026-09-03 (no internal APIs on the public surface for tools) and the alternative ADR 0115
+  rejected.
+- Why this form: **the sweep and the kernels always share a version** — within one package version
+  the binding tables, params and WGSL the sweep builds match the production recipes, whereas a
+  separate package could have tune@x call the generators of runtime@y (a swap between bindings of the
+  same role is invisible even to `assertBindingRoles`); **no `./internal` subpath is needed**; the
+  CLI, gpu-lab and user applications share one core.
+- `tools/geometry-sweep` (`main.ts` / `profile.ts`) and `tools/gpu-lab` become thin shells over
+  `./tune`. What only the tools use (rendering the generated TS `renderProfileSource`, `--check`,
+  `--min-speedup`) stays in the tools, which may import `src/tune/` directly (ADR 0008 addendum
+  2026-09-03). (Superseded by ADR 0127 on 2026-10-16: both tools were removed in `bb35fe2a`; the
+  structure — `./tune` as the core, tools as thin shells — applies unchanged to the browser
+  applications that will replace them. Comments in `src/tune/` (`derive.ts:5-7`, `sweep.ts:6`,
+  `report.ts:4`) and `tests/tune_profile_test.ts:6` still name the removed tools.)
+- Modules in `src/tune/` MUST be free of side effects (cross-cutting invariant): nothing is computed
+  at import time (the case-set version is a function — decision 4). The scope (pure constant
+  construction is allowed) is stated in the addendum of 2026-10-02 (independent review).
+- The main surface (`mod.ts`) gains no values; only the type of `AcquireGpuOptions.geometryProfile`
+  (decision 6) and the shape of `GeometryProfile.provenance` (decision 4) change.
 
-### 2. `./tune` の面 = 高水準の入口だけ
+### 2. The `./tune` surface: high-level entry points only
 
-| 入口                                                              | 役割                                                                                                                                                                                                         |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `runGeometrySweep(options)`                                       | 専用の device を取って掃引し、終わったら捨てる。戻りは記録（`karume-geometry-sweep/2`）。options = adapter の要求・候補集合（`quick` / `quick+` / `full`）・op の絞り込み・中断（`AbortSignal`）・進捗の通知 |
-| `deriveGeometryProfile(reports, options)`                         | 記録 1 本以上から表を作る（生成器 — 規則は ADR 0115 決定 4・ADR 0116・本 ADR 決定 3）。戻りは表と採否の行                                                                                                    |
-| `geometryProfileJson(profile)` / `parseGeometryProfileJson(text)` | 表の直列化と unknown 境界の parse（決定 7）                                                                                                                                                                  |
-| `geometryProfileMismatch(profile, adapterInfo)`                   | 保存した表を当ててよいかの照合（決定 5）                                                                                                                                                                     |
-| `sweepCaseSetId()`                                                | ケース集合の版（決定 4）                                                                                                                                                                                     |
-| 型                                                                | 記録の型・options の型・候補集合の型・parse の失敗の型 `GeometryProfileParseError`                                                                                                                           |
+| Entry point                                                       | Role                                                                                                                                                         |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `runGeometrySweep(options)`                                       | Acquires a dedicated device, sweeps, destroys it; returns the record (`karume-geometry-sweep/2`). Options include the adapter request, the candidate set (`quick` / `quick+` / `full`), an op filter, an `AbortSignal` and progress |
+| `deriveGeometryProfile(reports, options)`                         | Builds a table from one or more records (rules: ADR 0115 decision 4, ADR 0116, decision 3 here); returns the table and the per-field verdicts                |
+| `geometryProfileJson(profile)` / `parseGeometryProfileJson(text)` | Serialization and the parse at the `unknown` boundary (decision 7)                                                                                           |
+| `geometryProfileMismatch(profile, adapterInfo)`                   | Whether a stored table may be applied (decision 5)                                                                                                           |
+| `sweepCaseSetId()`                                                | The case-set version (decision 4)                                                                                                                            |
+| Types                                                             | The record, options, candidate set and the parse error `GeometryProfileParseError`                                                                           |
 
-- 名前は本 ADR で決める。引数と戻りの細部は段 2 / 4 で詰める（公開面スナップショット門が差分を出す）。
-- `runGeometrySweep` は呼び手の `GpuContext` を受けず、device を自分で取って捨てる。掃引と推論が同じ device を共有する形を、型の上で
-  作れなくするため（決定 9 の MUST を構造で守る）。gpu-lab と CLI は今も専用の device を取って捨てているので、その手順を核へ寄せるだけ。
-- timestamp-query は、adapter が列挙すれば要求する（今の CLI と同じ — `derive.ts:264-266` の文言）。列挙しない adapter では壁時計で測る。
-  その記録は残せるが、生成器は拒む（決定 3）。
-- 掃引のケース集合は anima の op census 由来（`cases.ts:1-18`）。別の系列のアプリも anima の shape で欄の採否を決める。この性格を
-  `./tune` の doc に書く。
+- The names are fixed here; argument and return details were settled in steps 2 / 4 (the
+  public-surface snapshot check shows the diff).
+- `runGeometrySweep` takes no `GpuContext`; it acquires and destroys its own device, so "sweep and
+  inference share a device" cannot be expressed in the types (decision 9's MUST kept by structure).
+- timestamp-query is requested when the adapter lists it; otherwise the sweep measures by wall clock,
+  and the generator rejects that record (decision 3).
+- The cases come from Anima's op census (`src/tune/cases.ts` header), so applications of other
+  families also get their fields decided by Anima's shapes; the `./tune` doc states this.
 
-### 3. 計測の門 = 観測ごとの丸め誤差の上界（ADR 0115 決定 4「入力の門」の改定）
+### 3. Measurement check: an upper bound on rounding error per observation (amends ADR 0115 decision 4's input check)
 
-量子化フラグでの一律拒否（`derive.ts:279-284`）をやめる。観測（掃引 1 本の中の 1 行）ごとに、丸めが比に与える誤差の上界を出して判定する。
+The blanket rejection on the quantized flag is dropped. Each observation (one row of one sweep) gets
+an upper bound on the error rounding adds to its ratio.
 
-- **量子化単位 q**: `gpuTiming.quantized` が true なら 100 µs（Chrome の刻み）。false なら 0（`ns` の非量子化と `deno-raw-tick`）。
-- **行の上界** e(r) = q ÷ min（行 r の計測 round のうち負でないもの）。
-  `perDispatch` = その min ÷ reps で、reps は整数なので誤差を持たない。timestamp 2 つの差の丸め誤差は 1 刻み未満なので、
-  e(r) は `perDispatch` の相対誤差の上界になる（1 次の近似）。
-- **比の上界** E(r) = e(r) + e(d)。d は同じ掃引・同じケースの既定の行。`speedupVsDefault` は 2 つの `perDispatch` の比なので、
-  相対誤差は和で押さえられる（1 次の近似）。
-- **しきい値**: E(r) ≤ 1%。定数 1 本で、CLI 引数にもアプリの options にもしない（規則は 1 つ）。E は一次近似で、
-  厳密な上界ではない（追記 2026-10-02・独立レビュー）。根拠:
-  - 80 ms の pass で e は約 0.13%、E は約 0.25%。
-  - 2026-09-29 の 3 機の full では、既定の行の e は最大 0.15%。E が 1% を超える観測は M5 0・M2 0・RTX 1（Context の外れ行・e だけで 3.2%）。
-  - 1% は採用の閾値 ×1.05 の余地（5%）の 1/5、再測定比の門の許容幅（0.9〜1.1 — 追記決定 8）の 1/10。
-- **超えた観測の扱い**（追記決定 8 と同じ流儀）:
-  - その掃引の比の材料から、その (ケース, 幾何) の観測を外す。出力の不一致と失敗はその観測でも判定に効く（正しさの門は丸めに依らない）。
-  - 他の掃引に同じ (ケース, 幾何) の観測があればそちらで判定する。無ければ「測っていない」扱いで、その幾何はその欄の候補にならない（安全側）。
-  - 既定の行の e が大きいと、そのケースの全観測の E が超える。結果として、再測定比の範囲外と同じく、そのケースの比は全部外れる。
-  - 外した観測と E の値は採否の行（生成物の冒頭コメントと `deriveGeometryProfile` の戻り）に残す。除外を無効にする口は作らない。
-- `gpuTiming.quantized` は記録に残す（書き手の判定 `roundsLookQuantized` — `report.ts:178-193` は変えない）。読み手は真偽値であることを
-  検査し、q を決めるのに使う。
-- **壁時計だけの記録**（`gpuTiming.unit` = `wall`）と `gpuTiming` の無い記録は、引き続き拒む（fail loudly）。理由:
-  - 壁時計の誤差は、丸めのような既知の定数で押さえられない。submit → 完了の床が pass ごとに動く（Chrome の 3 機で中央値 0.65〜1.25 ms・
-    最大 13.5 ms。Deno は約 11 ms — `report.ts:34-36`）。
-  - 床は GPU 時間と並べないと記録から読めないので、行ごとの上界を記録だけから出せない。
-  - 3 機で壁時計だけでも採否が同じだったのは、床が pass（約 80 ms）に比べて小さかったという観察で、モバイルの床は未知。
-  - Chrome はフラグ無しでも timestamp-query を出す（100 µs に丸めて — `tools/gpu-lab/README.md`「Before measuring」）。アプリ内の掃引は
-    丸めた timestamp で測れるので、壁時計を受けなくても論点 2 は解ける。
-- 決定 4 の他の規則（合成・既定の行の突合・候補・×1.05・既定のまま・再測定比による除外）は変えない。
+- **Quantization unit q**: 100 µs (Chrome's step) when `gpuTiming.quantized` is true, else 0
+  (unquantized `ns` and `deno-raw-tick`).
+- **Row bound** e(r) = q ÷ min (the non-negative measured rounds of row r). `perDispatch` = that min ÷
+  reps, and the integer reps carries no error. The rounding error of a difference of two timestamps
+  is under one step, so e(r) bounds the relative error of `perDispatch` (to first order).
+- **Ratio bound** E(r) = e(r) + e(d), d being the default row of the same sweep and case: the sum
+  bounds the relative error of `speedupVsDefault`, a ratio of two `perDispatch` (to first order).
+- **Threshold**: E(r) ≤ 1% (`ROUNDING_ERROR_LIMIT`, `src/tune/derive.ts:98`) — one constant, neither a
+  CLI argument nor an application option. E is a first-order approximation, not a strict bound
+  (addendum 2026-10-02, independent review). Basis: on an 80 ms pass e ≈ 0.13% and E ≈ 0.25%; on the
+  three full sweeps of 2026-09-29 the default rows' e was at most 0.15%, and only one observation (an
+  RTX row whose pass was 3.1 ms because the reps estimate missed; e alone 3.2%) exceeded 1%; 1% is one
+  fifth of the ×1.05 adoption margin and one tenth of the re-measurement ratio's range (0.9–1.1 —
+  ADR 0115 addendum decision 8).
+- **Observations above the bound** (the style of addendum decision 8):
+  - The (case, geometry) observation leaves that sweep's ratio data. Output mismatches and failures
+    still count (the correctness check does not depend on rounding).
+  - Another sweep with the same (case, geometry) decides instead; with none, the geometry counts as
+    not measured and is no candidate for that field (the safe side).
+  - A large e on the default row pushes every observation of the case over the bound, so the whole
+    case drops out, as with an out-of-range re-measurement ratio.
+  - Dropped observations and their E are listed in the verdicts (the generated file's header comment
+    and the return of `deriveGeometryProfile`). There is no switch to disable the exclusion.
+- `gpuTiming.quantized` stays in the record (decided by the writer's `roundsLookQuantized`,
+  unchanged). The reader checks that it is a boolean and uses it to choose q.
+- **Wall-clock-only records** (`gpuTiming.unit` = `wall`) and records without `gpuTiming` are still
+  rejected (fail loudly): wall-clock error has no known constant bound — the submit-to-completion
+  floor moves per pass (median 0.65–1.25 ms, up to 13.5 ms on the three Chrome machines; about 11 ms
+  on Deno — `WALL_TIMING_NOTE`, `src/tune/report.ts:34`); the floor is readable only next to GPU
+  time, so the record alone gives no per-row bound; and wall clock gave the same verdicts on three
+  machines only because the floor was small against an 80 ms pass — the mobile floor is unknown.
+- The quantization unit rests on the premise that Chrome without flags rounds timestamps to 100 µs.
+  It did not hold for Chrome 154 on macOS (addendum 2026-10-02); Windows and Android without flags
+  are not observed. The rule stays as decided, as a safeguard for rounded records (kept 2026-10-18).
+- The other rules of ADR 0115 decision 4 (merging, matching the default row, candidates, ×1.05,
+  keep-the-default, exclusion by re-measurement ratio) are unchanged.
 
-### 4. `provenance` の構造化
+### 4. Structured `provenance`
 
 ```ts
 readonly provenance?: {
-  readonly sweep: string; // 掃引の記録の path（--from の順に ", " で連結 — 今のまま）
-  readonly sha256: string; // 同上の sha256
-  readonly date: string; // 同上の掃引日
-  readonly candidateSet: string; // 同上の候補集合（quick / quick+ / full）
-  readonly adapter: {
-    readonly vendor: string;
-    readonly architecture: string;
-    readonly device: string;
-    readonly description: string;
-  };
-  readonly kernels: string; // カーネルの指紋
-  readonly caseSet: string; // ケース集合の版
+  readonly sweep: string; // paths of the sweep records (in input order, joined with ", ")
+  readonly sha256: string; // their sha256
+  readonly date: string; // their sweep dates
+  readonly candidateSet: string; // their candidate set (quick / quick+ / full)
+  readonly userAgent?: readonly string[]; // browsers of the sweeps (addendum 2026-10-02)
+  readonly adapter: { readonly vendor: string; readonly architecture: string;
+                      readonly device: string; readonly description: string };
+  readonly kernels: string; // the kernel fingerprint
+  readonly caseSet: string; // the case-set version
 };
 ```
 
-- `adapter` は連結文字列（`derive.ts:937-942`）をやめ、`GPUAdapterInfo` の 4 欄を空文字も含めてそのまま持つ。生成器は、全ての入力の記録で
-  4 欄が一致することを要求する（今の 3 欄の一致の検査 — `derive.ts:819-848` — に `device` を足す）。表示用のラベルは描画のときに
-  4 欄から導く（同じ情報を 2 か所に持たない）。
-- `candidateSet` は記録の `settings.candidateSet`。欄の無い古い記録（quick+ の導入前）は `settings.quick` から `quick` / `full` を読む。
-- 書くのは生成器 `buildGeometryProfile`（`derive.ts:1103-1145`）だけ。TS の生成物と注入の JSON は今までどおりこの 1 本から作る。
-- `provenance` は公開型 `GeometryProfile` の欄なので、形の変更は公開面の変更になる（v0.x の Breaking・CHANGELOG に明記）。
-- runtime（`assertGeometryProfile`・注入口）は `provenance` を見ないまま（追記決定 6）。
+- `adapter` holds the four `GPUAdapterInfo` fields as they are (empty strings included) instead of a
+  joined string. The generator requires all input records to agree on the four fields (the earlier
+  three-field check plus `device`). A display label is derived from them when rendering.
+- `candidateSet` is the record's `settings.candidateSet`; old records without it (before quick+) read
+  `quick` / `full` from `settings.quick`.
+- Only the generator `buildGeometryProfile` (`src/tune/derive.ts:1193`) writes it; the generated TS
+  and the injected JSON both come from it. `provenance` is a field of the public type, so its shape
+  is public surface.
+- The runtime (`assertGeometryProfile`, injection) does not compare `provenance` (addendum decision
+  6); it checks only the field types, so that a value that passed is a well-typed `GeometryProfile`
+  (`src/kernels/geometry-profile.ts:241-245`, `:344`).
 
-#### runtime の版ではなくカーネルの指紋を採る
+#### A kernel fingerprint instead of the runtime version
 
-- **指紋の定義**: 表の各欄について、その欄に入る掃引ケースの各 shape で、表の幾何と既定の幾何（欄の fallback — ADR 0116 決定 3）の
-  パイプラインキー・params・WGSL・workgroups を決まった順に連結し、同期の非暗号ハッシュ（64 bit 以上）を取った 16 進文字列。
-  GPU も時刻も読まない。codegen 決定性で、同じ runtime なら常に同じ値になる。導出は掃引の case plan（`harness.ts:621` の `casePlan`）と
-  同じ経路を通す（掃引で測ったカーネルと、指紋が指すカーネルを別の経路で組まない）。
-  指紋が覆うのは掃引ケースの固定の計算変種だけ（範囲は追記 2026-10-02・独立レビュー）。
-- 理由:
-  - **情報源から導ける**。runtime には版の定数が無い。版を使うなら、src に `deno.json` の写しを置く（同期を保つ検査が要る）か、
-    アプリに自分の依存の版を書かせる（書き忘れと書き違いが黙って通る）ことになる。
-  - **無効になる時機が合っている**。版は GEMM のカーネルに触れないリリースでも表を捨てさせ、利用者に 7〜61 分の再掃引を強いる。
-    指紋は、表が指すカーネルか既定のカーネルが変わったときだけ変わる。
-  - **未リリースの checkout でも効く**（gpu-lab・開発中）。版の文字列が同じでも、カーネルが変われば指紋は変わる。
-- 費用と穴:
-  - 照合のたびに codegen を回してハッシュを取る（GPU なし。推測: 数 ms〜数十 ms — 段 4 で測る）。
-  - キー・params・WGSL・workgroups の外の変更（recipe の束縛の並びなど）は指紋に出ない。そこは runtime 自身の検査
-    （codegen スナップショット・既定の幾何での GPU テスト）が受け持つ。
-  - 同期のハッシュにするのは、照合の純関数とコールバック（決定 6）を同期に保つため（`crypto.subtle` は非同期しか無い）。
-    偶発の衝突だけを想定し、敵対的な偽装は射程外（表は利用者自身の保存物）。
-- 埋め込みの 2 表も生成時に指紋を持つ。単体テストで「埋め込みの表の `provenance.kernels` = 今の runtime で導いた指紋」を縛る。
-  GEMM のカーネルを変える変更は、2 表の再生成を同じ変更で伴う（幾何の値は変えない）。カーネルが変わったことを機械が告げ、
-  per-profile の GPU テスト（ADR 0116 決定 7）が新しいカーネルで出力一致を確かめ直す。ADR 0022 追記「既定の変更は門の再実測とセット」と同じ規律。
+- **Definition**: for each field of the table and each shape of the sweep cases in it, the pipeline
+  key, params, WGSL and workgroups of the table's geometry and of the default geometry (the field's
+  fallback — ADR 0116 decision 3) are concatenated in a fixed order and hashed with a synchronous
+  non-cryptographic hash (64 bits or more), as hex. No GPU, no clock; by codegen determinism the same
+  runtime always gives the same value. It is derived through the sweep's case plan (`casePlan`,
+  `src/tune/harness.ts:606`), so measured and fingerprinted kernels are never built by separate
+  paths. It covers only the fixed compute variants of the sweep cases (addendum 2026-10-02,
+  independent review).
+- Reasons: **it derives from the source of truth** — the runtime has no version constant, and a
+  version would need a copy in `src` (with a sync check) or the application writing its own
+  dependency version (silent mistakes); **it invalidates at the right time** — a version discards
+  tables at every release, even one not touching GEMM, forcing a 7–61 minute re-sweep, while the
+  fingerprint changes only with the kernels the table or the default points to; **it works on
+  unreleased checkouts**, where kernels change under the same version string.
+- Costs and gaps: each match runs codegen and hashes (no GPU; measured at step 4: median 12–14 ms for
+  the two built-in tables on Deno, Ryzen 5 5600, about 26 ms on the first call). Changes outside key,
+  params, WGSL and workgroups (for example the order of recipe bindings) do not show; the runtime's
+  own checks (codegen snapshots, GPU tests with the default geometry) cover them. The hash is
+  synchronous to keep matching and the callback (decision 6) synchronous (`crypto.subtle` is async
+  only); only accidental collisions are considered, not forgery (the table is the user's own data).
+- The two built-in tables carry the fingerprint too, and a unit test pins "`provenance.kernels` = the
+  fingerprint derived by the current runtime" (`packages/runtime/tests/tune_fingerprint_test.ts:406-420`).
+  A change to the GEMM kernels goes together with regenerating the two tables in the same change
+  (geometry values unchanged): the machine reports that the kernels changed, and the per-profile GPU
+  test (`gpu_geometry_profile_test.ts`, ADR 0116 decision 7) re-checks output identity with the new
+  kernels — the discipline of ADR 0022's "a change of the default goes together with re-running the
+  checks". (Kept 2026-10-18: the rule keeps a stale table from surviving silently. Since ADR 0127
+  decision 5 removed `tools/geometry-sweep` (`bb35fe2a`), nothing in the repository renders the
+  built-in tables, which call themselves "generated — do not edit by hand"
+  (`src/kernels/geometry-profiles/apple-metal-3.ts:2`); a GEMM kernel change turns this test red with
+  only a hand edit to fix it. The regeneration path has to be restored before work on the GEMM
+  kernels.)
 
-#### ケース集合の版
+#### Case-set version
 
-- `sweepCaseSetId()` = `SWEEP_CASES`（`cases.ts:351`）と境界 `PROFILE_GEMM_ROWS_BOUNDS`（`cases.ts:135`）を正規の JSON にして、
-  指紋と同じハッシュを取った文字列。手で上げる版番号は置かない（ケースを足して版を上げ忘れる形を作らない）。
-- 定数ではなく関数にするのは、import 時に計算しないため（決定 1）。
+- `sweepCaseSetId()` hashes, like the fingerprint, canonical JSON of `SWEEP_CASES`
+  (`src/tune/cases.ts:350`) and `PROFILE_GEMM_ROWS_BOUNDS` (`src/tune/cases.ts:135`); only the fields
+  that decide the dispatch go in (addendum 2026-10-02, step 4). No hand-bumped version number (no way
+  to add a case and forget the bump). A function, not a constant, so nothing runs at import time.
 
-### 5. 照合の純関数 `geometryProfileMismatch`
+### 5. The pure matching function `geometryProfileMismatch`
 
-- 形: `geometryProfileMismatch(profile: GeometryProfile, adapterInfo: GPUAdapterInfo): string | undefined`。最初の不一致の文言を返し、
-  一致なら `undefined`。投げない。`sessionOptionsViolation`（`mod.ts:168`）と同じ流儀で、打つ手（既定で走る・再掃引する・利用者に知らせる）は呼び手が決める。
-- 照合する物（全て文字列の完全一致）:
-  1. `provenance` があること（無い表 = 手書きの表 → 「照合の材料が無い」）。
-  2. adapter の 4 欄（`vendor` / `architecture` / `device` / `description` — 空文字も値として比べる）。
-  3. カーネルの指紋（今の runtime で表から導き直した値と `provenance.kernels`）。
-  4. ケース集合の版（`sweepCaseSetId()` と `provenance.caseSet`）。
-- 照合しない物: `candidateSet`（quick+ の表で足りるかはアプリの判断）・`match`（注入は `match` を見ない — 追記決定 6）・
-  ブラウザやドライバの版（取れる情報が無い）。
-- 置き場は `./tune`（指紋とケース集合の版が `src/tune/` にあるため）。起動時に照合するだけのアプリも `./tune` を import する。
-  掃引の核はモジュールが副作用ゼロなので tree-shaking で落ちる見込み（推測 — 未測定・未解決に記録）。
-- **限界**: フラグ無しの Chrome では `device` と `description` が空で、Apple M2 と M5 は同じ 4 欄になる（ADR 0115 追記 9 / 追記決定 7）。
-  この関数は、表をその 2 機の間で持ち運んだことを検出できない。localStorage は端末とブラウザのプロファイルに閉じるので、アプリが自分で
-  表を運ばない限りこの形は起きない（推測: Chrome の同期は localStorage を運ばない — 未確認）。
+- Form: `geometryProfileMismatch(profile: GeometryProfile, adapterInfo: GPUAdapterInfo): string |
+  undefined` (parameter narrowed to the four fields — addendum 2026-10-02, step 4). It returns the
+  first mismatch as a message, or `undefined`, and never throws. As with `sessionOptionsViolation`
+  (`mod.ts:171`), the caller decides what to do (run with the default, re-sweep, tell the user).
+- Compared, all by exact string equality: (1) `provenance` is present (a table without it is
+  hand-written — "nothing to match against"); (2) the four adapter fields (`vendor` / `architecture` /
+  `device` / `description`, empty strings compared as values); (3) the kernel fingerprint
+  (re-derived from the table by the current runtime vs `provenance.kernels`); (4) the case-set
+  version (`sweepCaseSetId()` vs `provenance.caseSet`).
+- Not compared: `candidateSet` (whether quick+ suffices is the application's call), `match`
+  (injection ignores it — addendum decision 6), browser and driver versions (no information).
+- It lives in `./tune` with the fingerprint and the case-set version. An application that only
+  matches at start-up also imports `./tune`; the sweep core is expected to drop out by tree-shaking
+  (inference — not measured; see Open points).
+- **Limit**: without flags Chrome reports empty `device` and `description`, so Apple M2 and M5 have
+  the same four fields (ADR 0115 addendum 9 / addendum decision 7) and a table carried between them
+  is not detected. localStorage stays on the device and browser profile, so only an application that
+  carries tables itself hits this (inference: Chrome sync does not carry localStorage — unconfirmed).
 
-### 6. コールバック形の注入口
+### 6. Callback form of the injection entry point
 
-- `AcquireGpuOptions.geometryProfile` の型を `GeometryProfile | ((adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined)` に広げる。
-- 呼ぶ時機: `acquireGpu` 1 回につき 1 度。adapter を取った後（`acquire.ts:595`）で、device を作る前（`acquire.ts:606`）。
-  渡す `adapterInfo` は `readAdapterInfo`（`acquire.ts:382-383` — 欠落を空値に正規化）の値で、後で `GpuContext.adapterInfo` になる物
-  （`acquire.ts:627`）と同じ。
-- 戻りが `undefined` なら、指定が無いときと同じ自動選択（埋め込みの表から 1 本）。戻りの表は、表を直接渡したときと同じ門と複製
-  （`acquire.ts:640-650`）を通る。壊れていれば device を作る前に `GpuFeatureError`。コールバックが投げた例外はそのまま伝え、device を作らない。
-- 理由: runtime が実際に選んだ adapter の情報で表を引ける。今は、アプリが生の `navigator.gpu.requestAdapter()` を自分で呼ぶ
-  （runtime が選ぶ adapter と一致する保証が仕様に無い — `acquire.ts:665` の NOTE と同じ問題）か、注入なしで 1 度 acquire して捨てるしかない。
-- **コールバックは同期 MUST**。理由: adapter は数秒〜数分で失効してよく、失効した adapter の `requestDevice` は例外ではなく、生まれた時点で
-  lost な device を返す（`acquire.ts:660-664`）。adapter を持ったまま I/O を待つ窓を作らない。保存した表の読み込み（IndexedDB など非同期）は
-  `acquireGpu` の前に済ませ、コールバックは純関数（parse・照合・選択）だけにする。
-- コールバックは測らない（device がまだ無い）。adapter 情報と保存済みの表の純関数なので、ADR 0022 追記の MUST に触れない。
-- runtime は注入時に照合しない（追記決定 6 の設計のまま）。照合はアプリがコールバックの中で `geometryProfileMismatch` を呼んで行う。
-  `match` を見ないのも同じ（別の機の表を当てる A/B の用途は残る）。
+- `AcquireGpuOptions.geometryProfile` widens to
+  `GeometryProfile | ((adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined)`.
+- It is called once per `acquireGpu`, after the adapter is obtained and before the device is created
+  (`acquire.ts:628-631`), with the value of `readAdapterInfo` (`acquire.ts:387-388`, missing info
+  normalized to empty values) — the same value that becomes `GpuContext.adapterInfo`.
+- `undefined` means the automatic selection used without the option (one of the built-in tables). A
+  returned table goes through the same check and copy as a table passed directly; a broken table
+  raises `GpuFeatureError` before the device is created. An exception from the callback propagates
+  as is, and no device is created.
+- Reason: the table is chosen with the information of the adapter the runtime actually selected.
+  Otherwise the application calls the raw `navigator.gpu.requestAdapter()` itself (the spec does not
+  guarantee the same adapter — the NOTE at `acquire.ts:770`) or acquires once without injection.
+- **The callback MUST be synchronous.** Reason: an adapter may expire within seconds to minutes, and
+  `requestDevice` on an expired adapter does not throw but returns a device lost from birth
+  (`acquire.ts:765-767`). No window of waiting on I/O while holding an adapter is opened: loading a
+  stored table (IndexedDB and other asynchronous storage) finishes before `acquireGpu`, and the
+  callback is a pure function (parse, match, choose).
+- The callback measures nothing (there is no device yet), so it does not touch ADR 0022's MUST. The
+  runtime does not match at injection (addendum decision 6); the application calls
+  `geometryProfileMismatch` inside the callback. `match` is ignored too (A/B with another machine's
+  table remains possible).
 
-### 7. unknown 境界の parse `parseGeometryProfileJson`
+### 7. Parse at the `unknown` boundary: `parseGeometryProfileJson`
 
-- 形: `parseGeometryProfileJson(text: string): GeometryProfile`。失敗は `GeometryProfileParseError`（`./tune` の公開型）で、文言は欄の path を名指す。
-- 検査:
-  - JSON として読めること。
-  - 全欄の型（`id` は文字列・幾何は整数の欄だけ・`provenance` は決定 4 の形）。
-  - **未知の欄の拒否**（表・`match`・幾何・`provenance` の全ての階層）。
-  - `gemmRows` の末尾の `maxRows` が Infinity であること（`1e999` の復元）。末尾が `null` なら「Infinity の欠落（素の `JSON.stringify` は
-    Infinity を null にする — `geometryProfileJson` で書く）」と名指す。
-  - 最後に `assertGeometryProfile`（runtime の門と同じ 1 本）。
-- 未知の欄を拒む理由: 表は注入して実行に効く値で、形の版が違う表を黙って読むと欄の意味の取り違えが通る。読めない表は捨てて掃引し直すのが
-  アプリの正しい手（決定 10）。掃引の記録（決定 8）とは方針が逆になる。記録は欄を足していく追記型のログで、読み手は自分が読む欄だけを使うから。
-- `geometryProfileJson(profile)` は今の `profileJson`（`derive.ts:1157`）。parse との往復で構造が一致することを単体テストで縛る。
-- 保存した JSON の欠落が公開型でない `TypeError` で落ちる形と、末尾 `null` の文言が真因（Infinity の欠落）を名指さない形は、
-  アプリの経路では parse が受け持つ。runtime の注入の門（型付きの値を受ける）は変えない。
+- Form: `parseGeometryProfileJson(text: string): GeometryProfile`. Failures raise
+  `GeometryProfileParseError` (public in `./tune`) with a message naming the field path.
+- Checks: the text is JSON; the types of all fields (`id` a string, geometries integer fields only,
+  `provenance` as in decision 4); **unknown fields are rejected** at every level (table, `match`,
+  geometries, `provenance`); the trailing `maxRows` of `gemmRows` is Infinity (restored from
+  `1e999`), and a trailing `null` is named as "Infinity missing (plain `JSON.stringify` turns
+  Infinity into null — write with `geometryProfileJson`)"; finally `assertGeometryProfile` (the same
+  single check as the runtime's).
+- Why reject unknown fields: a table is injected and affects execution, and reading a table of a
+  different shape version lets a misread field through silently. Discarding an unreadable table and
+  sweeping again is the application's correct move (decision 10). The sweep record (decision 8) is
+  the opposite: an append-only log whose readers use only the fields they read.
+- `geometryProfileJson(profile)` is the serializer (`src/tune/derive.ts:1369`); a unit test pins the
+  round trip. In the application's path the parse handles a missing field in stored JSON (otherwise
+  a non-public `TypeError`) and a trailing `null` (otherwise a message that does not name the missing
+  Infinity); the runtime's injection check (which takes typed values) is unchanged.
 
-### 8. 掃引の記録 `karume-geometry-sweep/2` に足す欄
+### 8. Fields added to the sweep record `karume-geometry-sweep/2`
 
-| 欄                  | 中身                                                   | 理由                                                                                    |
-| ------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------- |
-| `startedAt`         | 掃引の開始時刻（ISO 8601）                             | 今の `date` は終了時刻（`sweep-tab.ts:186` は記録を組む時点）で、所要が記録から読めない |
-| `aborted`           | 中断で終わったか（真偽値）                             | 中断した掃引と op を絞った掃引を、記録だけで区別できない（どちらもケースが欠けるだけ）  |
-| `cases[].elapsedMs` | ケースごとの壁時計（ms）                               | どのケースが所要を食うかを記録から読む                                                  |
-| `caseSet`           | ケース集合の版（決定 4）                               | どのケース集合で測ったか                                                                |
-| `defaultKernels`    | 既定の表（`DEFAULT_GEOMETRY_PROFILE`）のカーネルの指紋 | どの runtime のカーネルを比の土台にしたか                                               |
+| Field               | Content                                                              | Reason                                                                                   |
+| ------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `startedAt`         | Start time of the sweep (ISO 8601)                                   | `date` is the end time; the duration could not be read                                   |
+| `aborted`           | Whether the sweep ended by abort (boolean)                           | An aborted sweep and an op-filtered sweep could not be told apart (both just lack cases) |
+| `cases[].elapsedMs` | Wall clock per case (ms)                                             | Which cases take the time                                                                |
+| `caseSet`           | The case-set version (decision 4)                                    | Which case set was measured                                                              |
+| `defaultKernels`    | Kernel fingerprint of the default table (`DEFAULT_GEOMETRY_PROFILE`) | Which runtime's kernels the ratios rest on                                               |
 
-- 形式は /2 のまま、任意の欄として足す。読み手の `parseSweepReport`（`derive.ts:251-325`）は読む欄だけを検査し、未知の欄を無視する。
-  `candidateSet` を足したときと同じ流儀（`report.ts:128-131`）。
-- 生成器は `caseSet` / `defaultKernels` があれば今の runtime の値と照合し、違えば止める（fail loudly）。理由は既定の行の突合（ADR 0115 決定 4）と
-  同じで、土台が今の runtime と別物の記録で表を作らないため。欄の無い記録（今までの記録）は今までどおり受ける。
-  候補の側の指紋 `candidateKernels` を同じ流儀で足す（追記 2026-10-02・独立レビュー）。
-- `aborted` は生成器の判定に使わない。途中で切れたケースは既定の再測定が無いので、追記決定 8 の規則で比の材料から外れる。
-- 書き手は `runGeometrySweep` 1 本（CLI も gpu-lab もこれを使う）。
+- The format stays /2 and the fields are optional. The reader `parseSweepReport`
+  (`src/tune/derive.ts:376`) checks only the fields it reads and ignores unknown ones (as when
+  `candidateSet` was added).
+- When `caseSet` / `defaultKernels` are present, the generator compares them with the current
+  runtime and stops on a difference (fail loudly), for the reason of matching the default row (ADR
+  0115 decision 4): no table from a record whose baseline is another runtime. Records without them
+  are accepted as before. The candidate-side `candidateKernels` follows the same style (addendum
+  2026-10-02, independent review).
+- `aborted` is not used by the generator: a case cut off midway has no re-measurement of the default,
+  so addendum decision 8's rule drops it from the ratio data.
+- The only writer is `runGeometrySweep`.
 
-### 9. 不変条件と責任の分界（ADR 0022 追記の MUST との整合）
+### 9. Invariants and the division of responsibility (consistency with ADR 0022's MUST)
 
-ADR 0022 追記の原文（`0022-gemm-register-blocking.md:88-89`）:
-「MUST: 幾何の既定変更は門の再実測とセット。**実行時に幾何が変わる形（オートチューン）は f32/f16 では取らない**」。
+ADR 0022's addendum (`0022-gemm-register-blocking.md:88-89`): "MUST: a change of the default
+geometry goes together with re-running the sha256 checks. MUST NOT: geometry that changes at run time
+(autotuning) for f32 / f16."
 
-- **runtime の acquire / Session の経路では測らない MUST**。測るのは、利用者が明示的に呼ぶ `./tune` の `runGeometrySweep` だけ。
-  `./tune` を採ると runtime パッケージが測るコードを含むので、不変条件の主語を「runtime は測らない」から「acquire / Session の経路は測らない」へ言い直す。
-- **掃引は専用の device で行う MUST**（`runGeometrySweep` が取って捨てる — 決定 2）。**推論と並走させない MUST**。並走すると測定が汚れ、
-  GPU も取り合う。runtime は別の device の使われ方を見られないので、これは利用者アプリへの契約として `./tune` の doc に書く。
-- 表は device の寿命の間は変わらない（追記決定 6・`acquire.ts:592-594` の複製）。新しい表は次の `acquireGpu` から効く。
-  同じ device の上で表を差し替える口は作らない。
-- 同じ表・同じ shape なら毎回同じ幾何・同じキー・同じ WGSL（ADR 0115 決定 8）。アプリは起動時に表を 1 度決めるだけなので、キーの意味は崩れない。
+- **Nothing is measured on the runtime's acquire / Session path (MUST).** Only `runGeometrySweep`,
+  which the user calls explicitly, measures. Since the runtime package now contains measuring code,
+  the subject of the invariant is restated from "the runtime" to "the acquire / Session path".
+- **A sweep MUST run on a dedicated device** (acquired and destroyed by `runGeometrySweep` — decision
+  2). **It MUST NOT run alongside inference**: that pollutes the measurement, and both compete for the
+  GPU. The runtime cannot see how another device is used, so this is a contract with the application,
+  stated in the `./tune` doc.
+- A table does not change during the device's lifetime (addendum decision 6; the copy in
+  `acquireGpu`); a new table takes effect from the next `acquireGpu`, with no way to replace it on
+  the same device. The same table and shape always give the same geometry, key and WGSL (ADR 0115
+  decision 8); the application decides the table once at start-up, so the meaning of a key holds.
 
-| 誰が                     | 何を保証する                                                                                                                                             |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| runtime                  | 注入された表を device の寿命の間は変えない・acquire / Session の経路で測らない・注入時の構造検査（`assertGeometryProfile`）                              |
-| `./tune`（掃引と生成器） | 採る幾何はクラスの全ケースで出力が既定と一致し、×1.05 以上（ADR 0115 決定 4）。証拠は掃引のケース集合（anima の shape）× その端末 × 採用幾何の範囲に限る |
-| 利用者アプリ             | 照合（`geometryProfileMismatch`）で使い続けてよいかを決める・掃引を推論と並走させない・どの表で走ったかを記録する（出力の再現性）                        |
+| Who                            | Guarantees                                                                                                                                                                                                        |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| runtime                        | The injected table does not change during the device's lifetime; nothing is measured on the acquire / Session path; structural check at injection (`assertGeometryProfile`)                                     |
+| `./tune` (sweep and generator) | An adopted geometry matched the default's output in every case of its class and was ×1.05 or faster (ADR 0115 decision 4); the evidence covers only the sweep's case set (Anima's shapes) × that device × the adopted geometries |
+| user application               | Decides with `geometryProfileMismatch` whether to keep a table; does not sweep alongside inference; records which table ran (output reproducibility)                                                             |
 
-- E2E の sha 門（PNG / WAV の sha256 参照値 — ADR 0106）は、リポの埋め込みの表には掛かるが、アプリ内で作った表には掛からない。
-  アプリ内の表の出力一致の証拠は、掃引の出力一致の門だけになる（追記決定 6 の「runtime は保証しない」の範囲）。
-- アプリが「既定で起動 → 裏で掃引 → 表を差し替えて取り直す」を自動で回すと、アプリの水準では実行時オートチューンと同じ振る舞いになる。
-  runtime の不変条件（device 単位で不変・acquire / Session の経路で測らない）は保たれる。いつどの表で走ったかの記録はアプリの責任で、
-  `./tune` の doc にこの点を書く。
+- The end-to-end sha256 checks (PNG / WAV reference values — ADR 0106) cover the built-in tables,
+  not tables built in an application; for those, the only evidence of output identity is the sweep's
+  output check (within addendum decision 6's "the runtime does not guarantee").
+- An application that automates "default → sweep in the background → re-acquire with the new table"
+  behaves like run-time autotuning at the application level. The runtime's invariants (fixed per
+  device, no measuring on the acquire / Session path) still hold; recording when and with which table
+  it ran is the application's responsibility, and the `./tune` doc says so.
 
-### 10. 表の寿命と再掃引の時機
+### 10. Table lifetime and when to re-sweep
 
-- **使い続けてよい条件**: `geometryProfileMismatch` が `undefined` を返すこと（adapter の 4 欄・カーネルの指紋・ケース集合の版が一致）。
-- **再掃引の時機**: 照合が不一致を返したとき（runtime の更新でカーネルかケース集合が変わった・別の adapter が選ばれた・フラグの切替で
-  `device` / `description` が変わった）と、利用者の明示操作。不一致の間は、コールバックが `undefined` を返して既定で走れる。
-- **検出できない古さ**: ブラウザ・ドライバ・OS の更新で性能特性が変わっても、照合は一致のまま（取れる情報が無い）。黙って遅くなりうる。
-  実例: M2 の既定幾何 `reg128x128r8x8w16` の linear M 1024 が Chrome 153 → 154 で 19.68 → 13.07 ms（×0.66）になり、採用幾何
-  `reg128x32r8x4w8` は 11.38 → 11.00 ms で不変、照合は一致のまま（research K-70 §15・2026-10-02）。
-  出力一致の証拠は崩れない（幾何は担当割りだけを変え、カーネルは指紋で同一）。利用者の明示操作で再掃引する。
-- quick+ と full のどちらを勧めるか、いつ掃引を走らせるか（初回起動・アイドル時・設定画面）は利用者アプリの判断で、本 ADR は決めない。
-  目安は Context の所要時間。
-- 表の保管先（localStorage・IndexedDB・ファイル）は runtime の範囲外。`geometryProfileJson` の文字列を保存し、`parseGeometryProfileJson` で戻す。
+- **Condition for continued use**: `geometryProfileMismatch` returns `undefined` (adapter fields,
+  kernel fingerprint and case-set version match).
+- **When to re-sweep**: on a mismatch (a runtime update changed the kernels or the case set, another
+  adapter was chosen, a flag change altered `device` / `description`) and on the user's explicit
+  request. While mismatched, the callback can return `undefined` and run with the default.
+- **Undetectable staleness**: browser, driver or OS updates can change performance while matching
+  succeeds (no information), so a table can become slower silently. Example: M2's default
+  `reg128x128r8x8w16` for linear M 1024 went 19.68 → 13.07 ms (×0.66) from Chrome 153 to 154, the
+  adopted `reg128x32r8x4w8` 11.38 → 11.00 ms, and matching succeeded ([research
+  K-70](../research/2026-09-27-k70-metal-per-op.md) §15). Output identity still holds (a geometry only
+  changes the work split; the fingerprint proves the kernels unchanged); the user re-sweeps.
+- Quick+ or full, and when to sweep (first launch, idle time, a settings screen), is the
+  application's decision; the durations under Context are the guide. Storage (localStorage,
+  IndexedDB, a file) is outside the runtime: store the `geometryProfileJson` string and restore it
+  with `parseGeometryProfileJson`.
 
-## 採らなかった案
+### Alternatives not taken
 
-- **別パッケージ `@karume/tune`（A）** — 採らない。JSR の別パッケージは相手の `exports` 経由でしか import できない。runtime に内部語彙の
-  サブパス（harness が使う 55 値と `RUNTIME_INTERNAL` の 3 プリミティブ）が要り、codegen 語彙が semver の面になる（ADR 0008・0115 の判断に反する）。
-  tune と runtime の版もずれうる。
-- **公開しない（C）/ gpu-lab のページを静的に置き、利用者が自分の端末で回して JSON をアプリに貼る（C'）** — 採らない。全ての不変条件を
-  そのまま保てるが、「アプリの中で」を満たさない。開発者が実機を持たない端末は既定のまま残る。
-- **runtime が注入時に照合する** — 採らない。追記決定 6 が残した「別の機の表を当てて A/B する」用途が消える。照合に落ちたときの打つ手は
-  アプリごとに違い、runtime が投げると選べない。照合は純関数で公開し、呼ぶかどうかをアプリに置く。
-- **保存キーに runtime の版を使う** — 採らない（決定 4）。runtime に版の定数が無く、写しかアプリ任せになる。GEMM に触れないリリースでも
-  表を捨てさせ、未リリースの checkout ではカーネルが変わっても同じ値のまま。
-- **門を外すだけ（量子化フラグの拒否を消し、上界を見ない）** — 採らない。3 機では採否が変わらなかったが、外れ行（RTX の pass 3.1 ms・
-  誤差約 3%）のような観測を材料に残す。pass の短い行は reps の見積りが外れたときに出るので、端末を選ばず起こりうる。上界の判定なら
-  外れた観測だけを外し、他は今と同じに使える。
-- **壁時計だけの記録も受ける** — 採らない（決定 3）。床が pass ごとに動き、記録だけから上界を出せない。
-- **コールバックを非同期にする** — 採らない（決定 6）。adapter を持ったまま待つ窓を作る。
-- **`runGeometrySweep` が呼び手の `GpuContext` を受ける** — 採らない（決定 2）。推論中の device を渡す形を型の上で許す。
+- **A separate package `@karume/tune` (A)**: a separate JSR package imports only through the other's
+  `exports`, so the runtime would need a subpath of internal vocabulary (55 values used by the
+  harness and the three `RUNTIME_INTERNAL` primitives), making codegen vocabulary semver surface
+  (against ADR 0008 and 0115); the two versions could also drift.
+- **Not publishing (C) / a static gpu-lab page whose JSON users paste into the application (C')**:
+  every invariant holds, but not "inside the application"; devices the developers do not own stay on
+  the default.
+- **The runtime matches at injection**: removes the A/B use of another machine's table that addendum
+  decision 6 kept, and a throw from the runtime leaves applications no choice of response. Matching
+  is a pure function the application may call.
+- **The runtime version as storage key** (decision 4): there is no version constant; it discards
+  tables on releases that do not touch GEMM and stays the same on unreleased checkouts whose kernels
+  changed.
+- **Only removing the quantized-flag rejection, without a bound**: verdicts did not change on three
+  machines, but outliers such as the RTX row (3.1 ms pass, about 3% error) would stay in the data;
+  short passes appear whenever the reps estimate misses, on any device. The bound drops only those.
+- **Accepting wall-clock-only records** (decision 3: no bound from the record), **an asynchronous
+  callback** (decision 6: a wait while holding an adapter), **`runGeometrySweep` taking the caller's
+  `GpuContext`** (decision 2: the types would allow a device running inference).
 
 ## Consequences
 
-- **公開面**: `@karume/runtime` に 2 面目 `./tune` が増える。main の面は値が増えない。`AcquireGpuOptions.geometryProfile` の型が広がり、
-  `GeometryProfile.provenance` の形が変わる（`adapter` が文字列から 4 欄へ — v0.x の Breaking・CHANGELOG に明記）。
-  公開面スナップショット門は entry を `exports` から採る（`tests/helpers/public-surface.ts:84-96`）ので、fixture に `"./tune"` のキーが 1 つ増える。
-- **配布物**: runtime の publish に約 3,300 行の掃引の核と較正定数が入る。`./tune` を import しないアプリのバンドルは変わらない。
-- **記録形式とケース集合に semver の義務が付く**。ケース集合を変えるとケース集合の版が変わり、全利用者の保存した表が照合で不一致になる
-  （再掃引）。ケースの追加はこの費用込みで判断する。
-- **フラグ無しの Chrome で表を作れるようになる**。gpu-lab のプロファイルタブも量子化した記録を受ける（README「Before measuring」の
-  「the profile tab rejects it」は書き換える）。
-- **GEMM のカーネルを変える変更は、埋め込み 2 表の再生成（指紋の更新）を伴う**（決定 4）。
-- **小さい端末**（推測）: f32 self attention M = N = 4096 の 4 ケースは 1 本 512 MiB〜1 GiB の束縛が要る。`maxStorageBufferBindingSize` が
-  小さい端末では失敗行になり、attention 系の欄は既定のまま（安全側）になる。
+- **Public surface**: `@karume/runtime` gains a second surface `./tune`; the main surface gains no
+  values; `AcquireGpuOptions.geometryProfile` widens and `GeometryProfile.provenance` changes
+  (`adapter` from a string to four fields). The public-surface snapshot check takes its entries from
+  `exports` in `package.json` (`packages/runtime/tests/helpers/public-surface.ts:97-110`), so the
+  fixture gains the key `"./tune"`.
+- **Published package**: it includes the sweep core and calibration constants (`src/tune/`, 4,694
+  lines on 2026-10-18). Bundles of applications that do not import `./tune` do not change.
+- **The record format and the case set carry semver obligations**: changing the case set changes its
+  version, and every stored table then mismatches (re-sweep). Adding a case is decided with that
+  cost included.
+- **Chrome without flags can build tables.**
+- **A GEMM kernel change goes together with regenerating the two built-in tables** (decision 4 and
+  its 2026-10-18 note).
+- **Small devices** (inference): the four f32 self-attention cases with M = N = 4096 need bindings of
+  512 MiB to 1 GiB each; with a small `maxStorageBufferBindingSize` they become failed rows and the
+  attention fields stay at the default (the safe side).
 
-### 影響ファイル
+## Acceptance
 
-| 区分       | 移動元 → 移動先（または変更先）                                                                                                                   | 中身                                                         |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| 掃引の核   | `tools/geometry-sweep/harness.ts` → `packages/runtime/src/tune/harness.ts`                                                                        | 計測の規約・case plan・digest                                |
-| 〃         | `tools/geometry-sweep/cases.ts` → `src/tune/cases.ts`                                                                                             | 形状表・`PROFILE_GEMM_ROWS_BOUNDS`・ケース集合の版           |
-| 〃         | `tools/geometry-sweep/geometries.ts` → `src/tune/geometries.ts`                                                                                   | 候補集合                                                     |
-| 〃         | `tools/geometry-sweep/derive.ts` の記録の parse・採否・`buildGeometryProfile`・JSON → `src/tune/derive.ts`                                        | 生成器・門（決定 3）・`provenance`（決定 4）                 |
-| 〃         | `tools/geometry-sweep/report.ts` → `src/tune/report.ts`                                                                                           | 記録の形・足す欄（決定 8）                                   |
-| 〃         | `tools/opbench/bench.ts` の `calibrateReps` / `ROUNDS` / `TARGET_PASS_MS` / `WARMUP_MIN_RUNS` / `WARMUP_NS` → `src/tune/`                         | opbench はここから import する                               |
-| 〃         | `tools/anima-residency/timing.ts` の `looksQuantized` / `CHROME_TIMESTAMP_QUANTUM_NS` → `src/tune/`                                               | anima-residency はここから import する                       |
-| 新規       | `src/tune/` の指紋・ケース集合の版・照合・parse                                                                                                   | 決定 4 / 5 / 7                                               |
-| 公開面     | `packages/runtime/tune.ts`（新規）・`packages/runtime/deno.json`（`exports`）                                                                     | 決定 1 / 2                                                   |
-| 注入口     | `packages/runtime/src/gpu/acquire.ts`・`mod.ts` の doc                                                                                            | コールバック形（決定 6）                                     |
-| 表の型     | `packages/runtime/src/kernels/geometry-profile.ts`                                                                                                | `provenance` の形（決定 4）                                  |
-| 生成物     | `packages/runtime/src/kernels/geometry-profiles/apple-metal-3.ts`・`nvidia-blackwell.ts`                                                          | 再生成（幾何の値は不変・`provenance` の形と指紋）            |
-| 道具（殻） | `tools/geometry-sweep/main.ts`・`profile.ts`・TS の描画（道具側に残す）・`tools/gpu-lab/browser/*`（`injectable-tables.ts` の保存キーを `/2` へ） | `./tune` の利用者                                            |
-| テスト     | 掃引の核の `tools/geometry-sweep/*_test.ts`（約 1,900 行）→ `packages/runtime/tests/`                                                             | テストの置き場は検証対象と同じ層（ADR 0008 追記 2026-09-03） |
-| 文書       | `tools/geometry-sweep/README.md`・`tools/gpu-lab/README.md`・glossary・backlog・ACTIVE_DESIGN・CHANGELOG                                          | 同期                                                         |
+The seven steps ran from 2026-10-01 to 2026-10-03 (`cb88cb33`, `51724541`, `d242008f` for the
+move). Step 7 ran sweep → build → store → reload → match → inject by callback on Chrome 154 without
+flags on M2 and M5, with PNG sha256 identical to the flagged run with the built-in table ([research
+2026-10-02-app-tuning-flagless-m2](../research/2026-10-02-app-tuning-flagless-m2.md) §8). Full
+verify: 3,544 passed / 1 failed (the B570 OOM check in `docs/known-issues.md`, unrelated).
 
-### テスト
+## Open points
 
-| テスト                          | 中身                                                                                                                                                                                                                    |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 新規 `parseGeometryProfileJson` | `1e999` の復元・末尾 `null` の名指し・型の誤り・各階層の未知の欄の拒否・`provenance` の形・`geometryProfileJson` との往復                                                                                               |
-| 新規 `geometryProfileMismatch`  | 一致で `undefined`・adapter の 4 欄 / 指紋 / ケース集合の版を 1 つずつ違えて文言・`provenance` 無し                                                                                                                     |
-| 新規 カーネルの指紋             | 同じ表で決定的・表の 1 欄の幾何を変えると変わる・`provenance` だけ変えても変わらない・埋め込み 2 表の `provenance.kernels` が今の値と一致                                                                               |
-| 新規 ケース集合の版             | ケースを 1 本足すと変わる・境界を変えると変わる                                                                                                                                                                         |
-| 門（生成器）                    | 量子化した記録を受ける・E > 1% の観測だけが外れ、採否の行に E が残る・既定の行の e が大きいとケースの比が全部外れる・壁時計の記録は拒む。故障注入 3 通りで赤: 上界の判定を外す・既定の行の e を足さない・壁時計を受ける |
-| 記録の欄                        | `caseSet` / `defaultKernels` が今の値と違う記録を生成器が拒む・欄の無い記録は受ける                                                                                                                                     |
-| 注入口（実 GPU・B570）          | コールバックが受ける `adapterInfo` が `GpuContext.adapterInfo` と同じ・戻した表の幾何判別子が実走キーに載り既定と Uint32 一致・`undefined` で自動選択                                                                   |
-| 注入口（偽の `navigator.gpu`）  | コールバックが壊れた表を返す / 投げると `requestDevice` が 0 回・コールバックは 1 度だけ呼ばれる                                                                                                                        |
-| 公開面                          | fixture に `"./tune"` が増え、main の面の値は不変                                                                                                                                                                       |
-| 不変                            | codegen スナップショット（WGSL・キー）無変更・埋め込み 2 表の `--check` がバイト同一・移したテストが同じ件数で緑                                                                                                        |
+- **Tuning the 1% threshold on measurements.** Its basis is three full sweeps (2026-09-29) and a
+  rounding simulation reusing the same measurements; in records re-measured without flags, thermal
+  and jitter differences should exceed rounding (the re-measurement ratio check handles those).
+  Chrome's rounding scheme is not confirmed: the "under one step" bound holds for truncation to a
+  grid and for rounding to the nearest, not for a scheme that adds jitter.
+- Outside the runtime / this ADR: **where an application stores its table** and how storage failures
+  (quota, private mode) are handled; **registering an M5 table** (as in ADR 0116).
+- **Size and tree-shaking of `./tune` from JSR**: only a `deno bundle` measurement exists; how users'
+  bundlers drop it, and whether the sweep core drops out when only matching is imported, are not
+  measured.
+- **Mobile (8 GB-class Android)**: the floor, whether 1 GiB bindings work, and device loss under
+  memory pressure (the Pixel entries in `docs/known-issues.md`) are not observed; all three measured
+  machines are desktop class.
+- **Wall-clock records**: devices without timestamp-query still cannot build tables. Recording the
+  floor per row to derive a bound is considered once such devices appear.
+- **Per-row stage times** (compile / probe / warmup / rounds / digest) are not recorded; idle runs
+  take about half the duration, so they matter for shortening it.
+- **Widening the variants the fingerprint covers** (addendum 2026-10-02, independent review): it
+  covers only the sweep cases' fixed variants (f32 compute, no mask, f16 weight storage and so on); a
+  change to only the f16 compute path, masked attention, i4 and similar paths does not show. A
+  candidate remedy: fingerprinted but unmeasured variant cases (a match then costs more).
 
-### 段階分解
+## Addendum (2026-10-02) — step 3 results and deviations from decision 3
 
-| 段 | 中身                                                                                                                                      | 条件                                                       |
-| -: | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-|  1 | 本 ADR・ADR 0008 / 0115 の追記                                                                                                            | この commit                                                |
-|  2 | `src/tune/` への移動と `./tune` の `exports`（決定 1 / 2）。CLI と gpu-lab を殻にする。生成の振る舞いは変えない                           | —                                                          |
-|  3 | 計測の門の改定（決定 3）                                                                                                                  | 段 2 の後                                                  |
-|  4 | `provenance` の構造化・カーネルの指紋・ケース集合の版・照合・parse（決定 4 / 5 / 7）。埋め込み 2 表の再生成・gpu-lab の保存キーを `/2` へ | 段 2 の後。2 表の再生成は ADR 0116 の段 4 と順序を合わせる |
-|  5 | コールバック形の注入口（決定 6）                                                                                                          | 段 2 の後（段 3 / 4 と並行可）                             |
-|  6 | 記録の欄（決定 8）                                                                                                                        | 段 4 の後（指紋とケース集合の版を使う）                    |
-|  7 | 検収と docs の同期                                                                                                                        | 段 3〜6 の後                                               |
+- **"Non-negative rounds" reads as "positive rounds".** Negative rounds stay in the record as 0
+  (`clampedNegativeSamples`) and cannot be told from rounds rounded to 0. Excluding 0 from the min
+  changes no verdict: a row with `perDispatch` = 0 never had a ratio to the default.
+- **A case whose default row has no bound (no `rounds`, or no positive round) drops out of the ratio
+  data as a whole** (the safe side). With q = 0 rounds are not read, so old records pass as before.
+- **Records with `quantized: true` and a unit other than `ns` are rejected** (a check decision 3 did
+  not have): the writer judges quantization only for `ns`, and a 100 µs step on raw ticks would give
+  a different bound.
+- **A case-level exclusion row carries e(d)**, not each observation's E; since E ≥ e(d) > 1%, that is
+  enough.
 
-## 検収
+## Addendum (2026-10-02) — a browser-version reference field in the table's `provenance` (the maintainer's ruling)
 
-| 段 | 緑の条件                                                                                                                                                                                                                         | 結果                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| -: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-|  1 | `deno fmt --check` 緑                                                                                                                                                                                                            | ✅（2026-10-01・`cb88cb33` ADR + ADR 0008 / 0115 追記・`51724541` 決定 4 の裁定）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-|  2 | 移したテストが同じ件数で緑・codegen スナップショット無変更・2 表の `--check` バイト同一・公開面 fixture の差分が `"./tune"` の追加だけ・`deno publish --dry-run` 緑・gpu-lab で quick の掃引 → 生成 → 注入が通る（利用者の実機） | ✅（2026-10-01・`d242008f`）: 移したテストは葉 114 件で同数・codegen スナップショット無変更・2 表 `--check` バイト同一・公開面 fixture は `./tune` の 16 シンボル追加のみ・`deno publish --dry-run` 緑・フル verify 緑。gpu-lab の実機の往復（掃引 → 生成 → 注入）は利用者待ち                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-|  3 | 門の単体テストと故障注入 3 通りの赤。2026-09-29 の 3 機の full を丸めの模擬（各 200 試行）で新しい門に通し、全欄の採否が原本と一致し、外れる観測は RTX の 1 行だけ。2 表の `--check` バイト同一（入力は非量子化で q = 0）        | ✅（2026-10-02: derive.ts の門を改定・テスト 11 本〈E ≤ 1% で受ける・E > 1% の観測だけ外す・既定の行の e が大きいとケースごと・他の掃引で判定・rounds 無しの扱い〉+ 境界 E = 1.00%・故障注入 ①②③ で赤を実測・3 機 × 200 試行の模擬〈実装と検証で別 seed〉で全 14 欄の採否が原本と一致・外れた観測は RTX の `i8a8-linear-m1024-n8192-k2048` / `tile32x64r8x8w8x4k32` の 1 本〈E 3.36〜3.47%〉だけ・2 表 `--check` バイト同一。生成物の冒頭コメントの規則説明の同期は段 4 の再生成で）                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-|  4 | 新しい純関数の単体テスト緑。2 表を再生成し、幾何の値が不変・`--check` バイト同一・`provenance.kernels` の一致テスト緑。照合 1 回の所要を記録する                                                                                 | ✅（2026-10-02: provenance 構造化・FNV-1a 64 bit の指紋〈casePlan と同じ経路・dp4a 2 変種を含む〉・caseSet〈dispatch を決める欄のみ〉・geometryProfileMismatch・parseGeometryProfileJson + GeometryProfileParseError・テスト 15 件〈指紋の感度 = 14 欄のどれを変えても変わる / params・workgroups だけでも変わる / 埋め込み 2 表の指紋と caseSet の一致 / 未知の欄 12 階層 / 末尾 null〉・故障注入 5 + 5 通りで赤・2 表再生成で幾何の値が不変〈provenance 抜きの JSON の sha256 が前後一致〉・`--check` バイト同一・照合 1 回の所要 = 埋め込み 2 表で中央値 12〜14 ms〈Deno・Ryzen 5 5600・GPU なし・1 回目 約 26 ms〉）                                                                                                                                                                                                                                                                                                                                  |
-|  5 | 注入口の実 GPU テスト（B570）と偽の `navigator.gpu` のテストが緑。故障注入 2 通り（コールバックの戻りを門に通さない・device を作った後で呼ぶ）で赤                                                                               | ✅（2026-10-02: 偽の navigator.gpu のテスト 8 本〈1 回だけ呼ぶ・adapterInfo は GpuContext と同一・undefined → 自動・壊れた表 → device 作成前に GpuFeatureError・例外はそのまま・Promise / thenable は await せず拒む〈本物の Promise には no-op の catch で unhandled rejection を出さない〉・adapter.info 無しは空値で凍結〉+ 実 GPU（B570）1 本・故障注入 ①②（戻りを門に通さない / device の後で呼ぶ）で赤を実測）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-|  6 | 記録の欄の単体テスト緑。gpu-lab の quick+ の記録に `startedAt` / `aborted` / `cases[].elapsedMs` / `caseSet` / `defaultKernels` が載る（利用者の実機）                                                                           | ✅（2026-10-02: startedAt / aborted / cases[].elapsedMs / caseSet / defaultKernels を runGeometrySweep が書き、parseSweepReport は caseSet / defaultKernels を今の値と照合〈欄の無い記録は通す〉・provenance.userAgent は文字列の配列〈現れた順・重複除去・欠けた記録が混ざれば書かない〉・B570 の最小掃引で欄を実測〈caseSet c1060d8829f3b9de・defaultKernels ea5c10c2bfb5047d・elapsedMs 9171.3〉。利用者の実機の quick+ は段 7 で）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-|  7 | フラグ無しの Chrome（M2 か M5）で、アプリの流れ（掃引 → 生成 → 保存 → 再起動 → 照合 → コールバックで注入）が通り、診断 `geometryProfile` が保存した表の id になる。フル verify 緑                                                | **実機 ✅（M2 と M5 の両方）**（2026-10-02・フラグ無し・Chrome 154: 掃引〈quick+〉→ 表を作る → 再読み込み → 「保存した表（照合して注入）」→ 1 枚生成で、行の geometryProfileRequested は `saved:<id>`・各段の geometryProfile は保存した表の id・今の runtime で caseSet / 指紋とも一致〈geometryProfileMismatch → 一致〉・PNG sha はフラグ有り + 埋め込み表の記録とビット同一〈f16 041027e63559・既定 0a5695470e4a〉・DiT GPU 42.10 / 68.25 s も同じ。M5 も同じ流れで通り〈表は conv2d.rows32 以外が既定なので PNG は既定幾何の A/B と同一・f16 dbad691e97ac・既定 0df85f770e9a〉。2 機の記録は adapter 4 欄が同じ〈description 空〉で provenance.sweep と DiT の時間でしか見分けられない。timestamp は両機とも非量子化。[research](../research/2026-10-02-app-tuning-flagless-m2.md) §8。**フル verify ✅**〈2026-10-03・3,544 passed / 1 failed・72 分・赤の 1 本は known-issues 既載の B570 の OOM 門〈destroy() の解放遅れ・この変更とは無関係〉〉） |
+[research K-70](../research/2026-09-27-k70-metal-per-op.md) §15 showed M2's default geometry
+`reg128x128r8x8w16` shrinking to ×0.66 between Chrome 153 and 154, which cut the table's gain from
+×1.78 to ×1.20 (the first case of decision 10's undetectable staleness). Decision 5's "browser and
+driver versions are not compared" stays (version strings do not map one to one to performance, and
+a mismatch would discard tables needlessly). Instead the table gets `provenance.userAgent` (optional,
+copied from the input records' `userAgent`, not used for matching), added **in the same change as
+step 6 (record fields)**, so that an application can tell the user the sweeping browser differs from
+the current one and suggest a re-sweep (the decision is the application's).
 
-## 未解決
+## Addendum (2026-10-02) — step 4 results and deviations from decisions 2 / 4 / 5
 
-- **しきい値 1% の実測での詰め**。根拠は 2026-09-29 の 3 機の full と、同じ測定値を再利用した丸めの模擬だけ。フラグ無しで測り直した記録では、
-  熱や揺れの差が丸めより大きいはず（それは再測定比の門が受け持つ）。Chrome の丸め方式（各 timestamp の切り捨てか別の方式か）も未確認。
-  1 刻み未満という上界は格子への切り捨てでも最近接でも成り立つが、揺らぎ（jitter）を足す方式なら成り立たない。
-- **アプリ内の表の保管先**（localStorage・IndexedDB・ファイル）と保管の失敗（容量・プライベートモード）の扱いは、runtime の範囲外。
-- **M5 の表の登録**は ADR 0116 と同じく本 ADR の範囲外。M5 の利用者はアプリ内の掃引で自分の表を作れるようになる。
-- **JSR 公開時の `./tune` のサイズと tree-shaking**。`deno bundle` での実測（Context）はあるが、JSR から入れた利用者のバンドラでの落ち方と、
-  照合だけを import したときに掃引の核が落ちるかは未測定。
-- **モバイル（8 GB 級 Android）**。床の大きさ・1 GiB 級の束縛の可否・メモリ逼迫での device lost の危険（known-issues の Pixel の項）は未観測。
-  測った 3 機はどれもデスクトップ級。
-- **壁時計の記録**。timestamp-query を出さない端末では表を作れないまま。床を行ごとに記録して上界を出す形は、そういう端末が実際に出てから検討する。
-- **行ごとの段の時間**（compile / probe / warmup / rounds / digest）は記録に足していない。空回しが所要の約半分を占めるので、短縮を検討するときの材料になる。
-- **カーネルの指紋の照合 1 回の所要**（推測: 数 ms〜数十 ms）は段 4 で測る。大きければ指紋の範囲（欄の全ケースか、代表 1 ケースか）を見直す。
-- **指紋の覆う計算変種を広げるか**（追記 2026-10-02・独立レビュー）。指紋は掃引ケースの固定の変種（f32 compute・
-  マスク無し・重み f16 格納など）の dispatch だけを覆う。f16 compute・マスク付き attention・i4 などの経路だけを変える
-  変更は指紋に出ない。対策候補は、測らずに指紋にだけ入れる変種ケースを足すこと（照合 1 回の所要は増える）。
+- **CHANGELOG: Added, not Breaking**: `GeometryProfile` and `provenance` arrived after 0.13.0
+  (`84d369d9`) and were unreleased.
+- **`geometryProfileKernelsId` is not exported** (decision 2); the matcher re-derives it. `./tune`
+  gained `parseGeometryProfileJson` / `GeometryProfileParseError` / `geometryProfileMismatch` /
+  `sweepCaseSetId`.
+- **The case-set version is built only from the fields that decide a case's dispatch** (id, op,
+  m / n / k / batch; attention stage / batchHeads / d / scale / score; conv2d channelsIn /
+  channelsOut / height / width; plus the bucket bounds). The descriptive `source`, `censusCount` and
+  `mirrorOf` are left out, so a fix to a description does not invalidate stored tables. The types
+  enforce the classification (a new field is a type error until classified), and a case with an
+  unclassified field throws.
+- **The matcher's parameter type is `Pick<GPUAdapterInfo, the four fields>`**, so both the real object
+  and `GpuContext.adapterInfo` can be passed.
+- **The fingerprint's dispatch-count limit is fixed at 65535** (the default
+  `maxComputeWorkgroupsPerDimension` WebGPU guarantees everywhere, so the fingerprint does not depend
+  on the device). i8a8 cases include both dp4a variants (the adapter information does not decide
+  which WGSL runs). Concatenation follows the case order, not the field order (same set of
+  dispatches). The stage before ③PV (①QK with the default geometry and the row statistics) is not
+  included, by definition.
+- **A table whose fingerprint cannot be derived** (it fails the codegen check, or a dispatch count
+  exceeds the limit) raises `KernelsIdError` (internal). The generator throws naming field, geometry
+  and case; the matcher returns the message without throwing.
+- **Sweep records require `adapter.device` and `settings`** (for the four-field check and
+  `candidateSet`).
 
-## 追記（2026-10-02）: 段 3 の結果と決定 3 からの逸脱
+## Addendum (2026-10-02) — steps 5 / 6 results and deviations from decisions 6 / 8 and the userAgent addendum
 
-段 3（計測の門）を実装した。検収は上の表の段 3 の行。決定 3 の字義から離れた点と、段 4 以降へ送った点:
+- **A callback returning a Promise is rejected, and a real Promise gets a no-op catch** (never
+  awaited; a custom thenable's `then` is never called). Without it, Deno ends the process on the
+  unhandled rejection and the intended `GpuFeatureError` never arrives.
+- **`provenance.userAgent` is an array of strings** (order of appearance, duplicates removed; an empty
+  array is not written; if any record lacks `userAgent` the field is not written; a record's
+  `{ deno }` becomes `Deno/<version>`). The addendum said "joined", but Chrome's UA contains `", "`,
+  so joined values could not be split. Not used for matching.
+- **The new record fields are required in the TS type** (the writer's output); the reader accepts
+  their absence at the `unknown` boundary. `aborted` is true only when an abort left out a geometry, a
+  re-measurement of the default or a later case.
+- **`EMPTY_ADAPTER_INFO` (the empty value for a missing `adapter.info`) is frozen**, because it
+  reaches the user's callback.
+- Step 7 ran through a gpu-lab setting (removed by ADR 0127 decision 5) that used the callback
+  pattern the `./tune` module doc describes (parse, match, inject or `undefined`).
 
-- **「負でない round」は「正の round」として読む**。記録では負だった round が 0 で残り（`clampedNegativeSamples`）、丸めで 0 になった round と
-  区別できない。0 を min の候補から外しても、`perDispatch` = 0 の行はもともと既定比を持たないので判定は変わらない。
-- **既定の行の上界が出せない（`rounds` が無い・正の round が無い）ケースは、ケースごと比の材料から外す**（安全側）。q = 0（非量子化）なら
-  rounds を見ないので、古い記録は今までどおり通る。
-- **`quantized: true` かつ単位が `ns` 以外の記録は拒む**（決定 3 に無い検査）。書き手は単位 `ns` でだけ量子化を判定するので、raw tick に
-  100 µs の刻みを当てると上界が別物になる。
-- **ケース単位の除外の行に載るのは e(d)**（個々の観測の E ではない）。E ≥ e(d) > 1% なので情報としては足りる。
-- **生成物の冒頭コメントの規則説明**（`tools/geometry-sweep/render.ts`）は再測定比の除外だけを書いている。直すと 2 表の `--check` が
-  崩れるので、段 4 の再生成（provenance の構造化）と同じ変更で同期する。
-- **Context の外れ行の幾何名**は `tile32x64r8x8w8x4k32` が正しい（`tile32x64r8x4w8x4k32` は誤記 — 同日に訂正）。
+## Addendum (2026-10-02) — findings of the independent review (Codex)
 
-## 追記（2026-10-02）: 表の `provenance` にブラウザ版の参考欄（利用者裁定）
+Design concerns and findings L2 / M7 of the independent review (Codex), as the orchestrator ruled.
 
-research K-70 §15 で、M2 の既定幾何 `reg128x128r8x8w16` が Chrome 153 → 154 の下で ×0.66 に縮み、表の利得が
-×1.78 → ×1.20 に変わる実例が出た（§10「検出できない古さ」の最初の実例）。決定 5 の「照合しない物: ブラウザや
-ドライバの版」は変えない（版の文字列は性能特性と 1 対 1 でなく、不一致にすると表が無駄に捨てられる）。代わりに
-表の `provenance.userAgent`（任意・入力の記録の `userAgent` を写す・入力どうしで違えば連結・照合には使わない）を
-**段 6（記録の欄）と同じ変更で足す**。用途は、アプリが「掃引した時のブラウザと今のブラウザが違う」ことを利用者に
-知らせて再掃引を勧める材料（判断はアプリ）。
+- **What the fingerprint covers (decision 4 made explicit)**: only dispatches built from the shapes
+  of `SWEEP_CASES` × these fixed variants (`profileKernelsId` in `fingerprint.ts` → `casePlan` in
+  `harness.ts`):
 
-## 追記（2026-10-02）: 段 4 の結果と決定 2 / 4 / 5 からの逸脱
+  | op             | Variants in the fingerprint                                                      |
+  | -------------- | -------------------------------------------------------------------------------- |
+  | linear         | f16 weight storage, f32 compute (`linearKey("f16", v4, "f32", m, …)`)            |
+  | matmul         | f32                                                                              |
+  | bmm            | f32, no row window                                                               |
+  | attention      | f32 compute, S stored as f32, no mask, no GQA, no row window (stages ①QK / ③PV) |
+  | i8a8-linear    | i8 weights (per-channel), both dp4a variants                                     |
+  | i8a8-attention | S stored as f16 (s16), both dp4a variants                                       |
+  | conv2d         | f16 weight storage, 3×3, stride 1, padding 1, dilation 1, groups 1, batch 1      |
 
-- **CHANGELOG は Breaking ではなく Added**。`GeometryProfile` と `provenance` は 0.13.0 より後に入り（`84d369d9`）未リリースなので、
-  Unreleased の Added の項目を書き換えた。
-- **`geometryProfileKernelsId` は公開しない**（決定 2「高水準の入口だけ」）。照合が表から導き直す。`./tune` に足したのは
-  `parseGeometryProfileJson` / `GeometryProfileParseError` / `geometryProfileMismatch` / `sweepCaseSetId` の 4 つ。
-- **ケース集合の版は、ケースの dispatch を決める欄だけから作る**（id・op・m / n / k / batch・attention の stage / batchHeads / d /
-  scale / score・conv2d の channelsIn / channelsOut / height / width + 段の境界）。説明文 `source`・`censusCount`・`mirrorOf` は入れない —
-  説明文の修正で利用者の保存した表が不一致になる形を避ける。欄の分類は型で縛り（欄を足すと分類するまで型エラー）、
-  分類に無い欄を持つケースは投げる。
-- **照合の引数型は `Pick<GPUAdapterInfo, 4 欄>`**（決定 5 の `GPUAdapterInfo` より広い — 実物も `GpuContext.adapterInfo` も渡せる）。
-- **指紋の dispatch 数の上限は 65535 に固定**（WebGPU が全 device に保証する `maxComputeWorkgroupsPerDimension` の既定値 — 指紋が
-  device に依らないため）。i8a8 のケースは dp4a の 2 変種を両方入れる（adapter の情報からはどちらの WGSL かが決まらない）。
-  連結の順は欄ごとではなくケースの順（入る dispatch の集合は同じ）。③PV の前段（既定幾何の ①QK と行統計）は定義どおり入れない。
-- **指紋を導けない表**（codegen の門に落ちる・dispatch 数が上限を超える）は `KernelsIdError`（内部型）。生成器は欄・幾何・ケースを
-  名指して投げ、照合は投げずに文言で返す。
-- **掃引の記録は `adapter.device` と `settings` を必須に**（4 欄一致の検査と candidateSet の読み取りのため）。
-- gpu-lab の保存形 `/2` は `{ savedAt, checkout, profileJson }` で、表示の adapter は `provenance.adapter` から導く（provenance の無い表は保存も復元も拒む）。
-- 生成物の冒頭コメントの「材料の門」の規則説明に、段 3 の丸めの門（観測単位・E > 1%）を足した（段 3 の追記で送った項目）。
+  - Only the one of v4 / scalar that the case's shape selects goes in; the limit of 65535 and the
+    exclusion of the stage before ③PV are as in the step 4 addendum.
+  - **Changes that do not show**: those altering only paths outside these variants — the f16 compute
+    branch, f16 storage of S in f32 attention, attention with mask / GQA / row window, the bmm row
+    window, linear and conv2d with f32 / i8 / i4 / i2 weights, i4 i8a8 linear, the v4 / scalar side
+    no case shape selects. The table applies to those paths too, yet matching still succeeds.
+  - Matching (decision 5) guarantees only that the table's and the default's geometries build the
+    same kernels for these variants; this ADR and the `./tune` doc state the scope. Outside it the
+    runtime's own checks (codegen snapshots, GPU tests with the default geometry) remain responsible.
+    Fingerprint-only variant cases are listed under Open points.
+- **The candidate fingerprint `candidateKernels` (M7 — one row added to decision 8's table)**:
 
-## 追記（2026-10-02）: 段 5 / 6 の結果と決定 6 / 8・追記（userAgent）からの逸脱
+  | Field              | Content                                                                         | Reason                                                                         |
+  | ------------------ | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+  | `candidateKernels` | Fingerprint of the dispatches of the candidates the sweep measured              | Tells apart a runtime that changed only the candidates' WGSL, not the default |
 
-- **Promise を返すコールバックは拒むが、本物の Promise には no-op の catch を付ける**（await はしない・自作 thenable の then は呼ばない）。
-  付けないと Deno では unhandled rejection でプロセスが落ち、意図した GpuFeatureError が届かない。
-- **`provenance.userAgent` は文字列の配列**（現れた順・重複除去・空配列は書かない・1 本でも userAgent の無い記録が混ざれば欄ごと書かない・
-  記録の `{ deno }` は `Deno/<版>` に）。追記では「連結」と書いたが、Chrome の UA 自体が `", "` を含み値ごとに分けられないので配列にした。
-  照合には使わない。
-- **記録の新しい欄は TS の型では必須**（書き手の出力の型）。読み手は unknown 境界で欄の有無を受ける（形式上は任意）。`aborted` は
-  「中断で幾何・既定の再測定・後続ケースのどれかが欠けた」ときだけ true（測り終えた後の中断は false）。
-- **`EMPTY_ADAPTER_INFO`（adapter.info が無いときの空値）を凍結**。利用者のコールバックに渡るため。
-- gpu-lab が段 7 の検収経路になる: GPU 設定の「保存した表（照合して注入 — 一致しなければ自動）」は acquireGpu にコールバック形を渡し、
-  コールバック内で parse → `geometryProfileMismatch` → 一致なら注入・不一致なら undefined（理由を状態行に）。読めない保存物は acquire の
-  後に捨てる（コールバックは純関数のまま）。既知の表示の不整合: 適用の後に保存物が壊れていると判定されると選択肢が有効のまま残り
-  「未適用」が出る（起動時に読めない保存物は消すので稀）。
+  - Derived in the style of `defaultKernels`: per case × candidate × dp4a variant, the one-line JSON
+    of key, params, WGSL and workgroups, joined with newlines and hashed with FNV-1a 64 bit; the case
+    plan is the sweep's.
+  - The writer is `runGeometrySweep`. When the field is present the generator compares it with the
+    current runtime and stops on a difference (fail loudly); records without it are accepted (as for
+    `caseSet` / `defaultKernels`). A fault injection pins it: with one candidate's WGSL changed and
+    the default unchanged, generating from an old record stops.
+  - Reason: comparing only `caseSet` and `defaultKernels` lets an old record pass on a runtime that
+    changed only the candidates' WGSL; the generator would decide from stale measurements and stamp
+    the new kernels' fingerprint into `provenance.kernels`, undetectable by later matching.
+  - **Derivation (ruling at implementation, 2026-10-02)**: not from the current candidate set for the
+    record's `candidateSet`, as the review text said, but from **the record's rows (the (case,
+    geometry) pairs without `error`) built with the record's dp4a variant**. The quick+ set includes
+    the registered tables' geometries, so deriving from the current set would reject quick+ records
+    with unchanged kernels after a table is registered; deriving from rows also matches sweeps
+    narrowed by op or case and aborted sweeps. Writer and reader share one function.
+- **The scope of "nothing is computed at import time" (L2 — decision 1 made explicit)**: prohibited
+  are side effects (GPU, I/O, global mutable state, registration) and precomputing values every
+  match needs (values that run the codegen, such as `sweepCaseSetId()` and the fingerprint, are
+  functions). **Pure constant construction** such as `SWEEP_CASES` (immutable data built with `map` /
+  `flatMap` / `filter`) is allowed: no GPU or I/O, always the same result, and the tree-shaking
+  condition (cross-cutting invariant) holds.
+- **The 1% bound is a first-order approximation (note on decision 3)**: E = e(r) + e(d) approximates
+  the ratio's relative error to first order. Example: both observations at 20 ms with q = 0.1 ms give
+  E = 1.00%, accepted (exactly 1% is accepted — step 3), yet true values of 19.9001 ms and 20.0999 ms
+  give a relative error of about 1.004%. Decision 3's "bound" is read in this sense. A strict
+  guarantee would need interval division; it is not taken (1% is one fifth of the ×1.05 margin, and
+  the difference is about 0.5% of the 1%).
+- **Fixes for findings in steps 5 / 6**:
+  - M1 (a record with a default `perDispatch` of 0 was rejected whole): the writer writes ratios
+    (`speedupVsDefault`, the re-measurement ratio) only when numerator and denominator are both
+    positive; such a case drops out by the reader's rule (no bound for the default → case dropped).
+  - M6 (an exception in progress notification became a measurement failure, notified twice):
+    notification moves outside the measurement's try/catch; the callback's exception propagates.
+  - M3 (a Promise from another realm left an unhandled rejection): a native Promise's rejection is
+    handled with a realm-independent check, keeping the contract of never calling an arbitrary
+    thenable's `then` (decision 6, step 5 addendum).
 
-## 追記（2026-10-02）: 独立レビュー（Codex）の指摘
+## Addendum (2026-10-02) — Chrome 154 without flags (macOS, M2) did not round timestamps
 
-独立レビュー（Codex・2026-10-02）の設計上の懸念と L2・M7 を、オーケストレータの裁定どおりに反映した。コードの修正は別の変更で行う。
+None of 2,605 rounds in the first step 7 record was a multiple of 100 µs. Decision 3's check stays
+unchanged as a safeguard for rounded records ([research
+2026-10-02-app-tuning-flagless-m2](../research/2026-10-02-app-tuning-flagless-m2.md) §3).
 
-- **指紋が覆う範囲（決定 4 の明文化）**。指紋は、掃引ケース（`SWEEP_CASES`）の shape × 次の固定の計算変種で組んだ
-  dispatch だけを覆う（`fingerprint.ts` の `profileKernelsId` → `harness.ts` の `casePlan`）:
+## Addendum (2026-10-03) — acceptance complete
 
-  | op             | 指紋に入る変種                                                                    |
-  | -------------- | --------------------------------------------------------------------------------- |
-  | linear         | 重み f16 格納・compute f32（`linearKey("f16", v4, "f32", m, …)`）                 |
-  | matmul         | f32                                                                               |
-  | bmm            | f32・行窓無し                                                                     |
-  | attention      | compute f32・S の格納 f32・マスク無し・GQA 無し・行窓無し（①QK / ③PV の各 stage） |
-  | i8a8-linear    | 重み i8（per-channel）・dp4a の 2 変種                                            |
-  | i8a8-attention | S の格納 f16（s16）・dp4a の 2 変種                                               |
-  | conv2d         | 重み f16 格納・3×3・stride 1・padding 1・dilation 1・groups 1・batch 1            |
-
-  - v4 / スカラの別はケースの shape で決まる 1 つだけが入る。dispatch 数の上限は 65535 に固定（段 4 の追記）。
-    ③PV の前段（既定幾何の ①QK と行統計）は入らない（段 4 の追記）。
-  - **指紋に出ない変更**: 上の固定から外れる経路だけを変えるもの。例: f16 compute の分岐・f32 attention の S の f16 格納・
-    マスク / GQA / 行窓付きの attention・bmm の行窓・重みが f32 / i8 / i4 / i2 格納の linear と conv2d・i4 の i8a8 linear・
-    ケースの shape で選ばれない v4 / スカラの側。表はこれらの経路にも当たるが、こうした変更の後も照合は一致を返す。
-  - 照合（決定 5）が保証するのは「表の幾何と既定の幾何が、上の変種で組むカーネルが同じ」ことまで。この範囲を本 ADR と
-    `./tune` の doc に書く（doc は別の変更で直す）。範囲の外は、今までどおり runtime 自身の検査（codegen スナップショット・
-    既定の幾何での GPU テスト）が受け持つ。
-  - 指紋専用の変種ケースを足す案は未解決へ送った。
-- **候補集合の指紋 `candidateKernels`（M7・決定 8 の表に 1 行足す）**:
-
-  | 欄                 | 中身                                                                    | 理由                                                            |
-  | ------------------ | ----------------------------------------------------------------------- | --------------------------------------------------------------- |
-  | `candidateKernels` | その掃引の候補集合で測る全候補の dispatch の指紋（`candidateSet` ごと） | 既定を変えず候補の WGSL だけを変えた runtime を記録から見分ける |
-
-  - 導出は既定の指紋（`defaultKernels`）と同じ流儀にする。`SWEEP_CASES` の順 × 各ケースの全候補（候補集合の順・既定を含む）×
-    dp4a の変種で、キー・params・WGSL・workgroups の 1 行 JSON を改行で連結し、FNV-1a 64 bit を取る。case plan は掃引と同じ。
-  - op の絞り込みに依らず、`SWEEP_CASES` の全ケースで取る。生成器が記録の `candidateSet` だけから今の値を導き直せるように
-    するため。
-  - 書き手は `runGeometrySweep`。生成器は欄があれば今の runtime の値と照合し、違えば止める（fail loudly）。欄の無い記録は
-    今までどおり受ける（`caseSet` / `defaultKernels` と同じ）。
-  - 理由: 照合の対象が `caseSet` と `defaultKernels` だけだと、既定を変えずに候補の WGSL だけを変えた runtime で古い記録が通る。
-    生成器は古い実測で採否を決め、変更後のカーネルの指紋を `provenance.kernels` に付ける。保存した後の照合（決定 5）でも、
-    古い実測だったことは検出できない。
-  - テストに故障注入を 1 つ足す: 既定を変えず候補 1 つの WGSL だけを変えた runtime で、古い記録から生成すると止まる。
-- **「import 時に計算しない」の射程（L2・決定 1 の明文化）**。決定 1 の規約が禁じるのは次の 2 つ:
-  - 副作用（GPU・I/O・グローバル可変状態・登録）。
-  - 照合のたびに要る値の事前計算。`sweepCaseSetId()` と指紋のように runtime の codegen を回す値は関数にする。
-  - `SWEEP_CASES` のような**純粋な定数構築**（`map` / `flatMap` / `filter` で組む不変のデータ）は許容する。GPU も I/O も
-    触らず、評価の結果は常に同じで、tree-shaking の成立条件（横断の不変条件）も崩さない。
-- **1% の上界は一次近似（決定 3 への注記）**。E = e(r) + e(d) は比の相対誤差の一次近似で、厳密な上界ではない。
-  例: 両方の観測が 20 ms・q = 0.1 ms なら E = 1.00% で受理するが（1% ちょうどは受理 — 段 3）、真値が 19.9001 ms と
-  20.0999 ms なら比の相対誤差は約 1.004% になりうる。決定 3 の「上界」はこの意味で読む。厳密な保証が要るなら区間の除算
-  （比の最小と最大を区間で出す）で判定するが、今は採らない（1% は ×1.05 の余地の 1/5 で、差は 1% の 0.5% 程度）。
-- **段 5 / 6 の実装で見つかった指摘の修正方針**（コードの修正は別の変更）:
-  - M1（既定の `perDispatch` が 0 の記録は、読み手が記録全体を拒む）: 書き手は分子と分母が両方とも正のときだけ比
-    （`speedupVsDefault`・再測定比）を書く。既定が 0 のケースは、読み手の既存の規則（既定の上界を出せない → ケースを外す）で外れる。
-  - M6（進捗通知の例外が計測の失敗に化け、通知が二重になる）: 進捗通知を計測の try/catch の外へ出し、利用者のコールバックの
-    例外はそのまま伝える。
-  - M3（別 realm の Promise を返すコールバックで unhandled rejection が残る）: realm に依存しない判定でネイティブ Promise の
-    拒否を処理する。任意の thenable の `then` を呼ばない契約（決定 6・段 5 の追記）は保つ。
-
-- **`candidateKernels` の導き方（実装時の裁定・2026-10-02）**: 上の追記は「記録の candidateSet ごとに今の候補集合から導く」と
-  書いたが、実装は**記録の行（`error` の無い (ケース, 幾何)）を記録の dp4a 変種で組んだ dispatch** から導く。quick+ の候補集合は
-  登録済みの表の幾何を含むので、今の集合から導くと表を 1 つ登録しただけでカーネル不変の quick+ の記録まで拒まれる。行から導けば
-  op や case を絞った掃引・中断した掃引もそのまま照合できる。書き手と読み手は同じ 1 本の関数を使う。
-
-## 追記（2026-10-02）: フラグ無しの Chrome 154（macOS・M2）では timestamp が丸められていなかった
-
-段 7 の最初の記録（quick+・57 ケース）で、2,605 round のうち 100 µs の倍数は 0。リポの掃引記録 14 本（フラグ有り 13 本 +
-無し 1 本・Chrome 153 / 154・4 機種）はすべて `quantized: false`。Context と決定 3 が前提にした「フラグ無しの Chrome は 100 µs に
-丸める」は、少なくとも macOS の Chrome 154 では成り立たない（推測: Chrome 側の緩和か Metal バックエンドの扱い — Windows / Android の
-フラグ無しは未観測）。決定 3 の門は、丸められた記録が来ても受けられる保険として残す（規則は変えない）。gpu-lab README の
-「Before measuring」の文言は「丸められうる（記録の `quantized` が示す）」に弱めた。記録は
-[research 2026-10-02-app-tuning-flagless-m2](../research/2026-10-02-app-tuning-flagless-m2.md)。
-
-## 追記（2026-10-03）: 検収完了
-
-段 1〜7 がすべて ✅。段 7 の実機は M2 / M5 のフラグ無し Chrome で「保存した表（照合して注入）」が通り（PNG はフラグ有り + 埋め込み表と
-ビット同一）、フル verify は 3,544 passed（赤の 1 本は known-issues 既載の B570 の OOM 門 — destroy() の解放遅れで、この ADR の変更とは
-無関係）。残る未解決（指紋が覆う範囲・1% は一次近似・M5 の表・モバイル・壁時計の記録・解放遅れのテスト側の待ち）は本文の未解決節のまま。
+Steps 1–7 all green (see Acceptance); the remaining items stay under Open points.

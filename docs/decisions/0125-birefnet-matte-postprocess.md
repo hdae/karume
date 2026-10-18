@@ -1,186 +1,163 @@
-# 0125: BiRefNet の α マットの後処理 — 系列ごとの上流の手順・golden の契約・A/B の規則
+# 0125: BiRefNet alpha matte post-processing — per-checkpoint upstream procedures, the golden contract, the A/B rule
 
-- Status: accepted（利用者裁定 2026-10-11 — 裁定 4・28〜32・37・38）。A/B の結果と、それを受けた配布形の
-  宣言は末尾の「結果」の節（追記 2026-10-11）で確定した
+- Status: accepted (2026-10-11, the maintainer's rulings on the parity level, per-checkpoint
+  procedures, the A/B form and material, one Pillow port, adopting the upstream procedure for HR and
+  adding no public option); the A/B result and the distribution declaration `postprocess`
+  (`birefnet/2`) were settled the same day (see "Results")
 - Date: 2026-10-11
-- 関連: ADR [0008](0008-public-api.md)（公開面は薄く）/ [0038](0038-manifest-v1.md)（`pipelineConfig` の
-  拡張と pipeline の major）/ [0113](0113-birefnet-weight-series.md)（BiRefNet 系の重み格納系列）/
-  [0121](0121-wan22-ti2v-5b.md) 決定 11（Wan2.2 の I2V の条件画像 = Pillow の LANCZOS とのビット一致）
+- Related: ADR [0008](0008-public-api.md) (thin public surface) / [0038](0038-manifest-v1.md)
+  (extending `pipelineConfig` and the pipeline major) / [0113](0113-birefnet-weight-series.md)
+  (BiRefNet weight series) / [0121](0121-wan22-ti2v-5b.md) decision 11 (Wan2.2 I2V conditioning image
+  bit-identical with Pillow's LANCZOS) / [0005](0005-verification.md) addendum 2026-10-11 (upstream
+  parity policy)
 
 ## Context
 
-### 起きたこと
+### What happened
 
-レビュー（R6B-001）が、BiRefNet 系の後処理（グラフの出す logit → sigmoid → 入力画像の寸法へ戻す → 8bit の α）が
-上流と補間法と量子化の位置で違い、境界の α が最大 10〜29 段ずれることを示した（拡大の 3 例の最大差 — 段差
-4 → 8 で 12・滑らかな斜面 8 → 21 で 10・細い前景 6 → 15 で 29。縮小は測っていない）。比較の相手は Pillow 本体
-ではなく、リポ内の Pillow 準拠の f64 の helper（`resizeRgb8` の bicubic に `trunc(255σ)` を通したもの）だった。
-裁定 4 は「上流の手順の実装を作り、今の経路と A/B で比べて採否を決める」だった。
+A review (R6B-001) showed that BiRefNet post-processing (graph logit → sigmoid → resize to the input
+image → 8-bit alpha) differed from upstream in interpolation and in where quantization happens, moving
+edge alpha by up to 10–29 levels (upscaling cases, measured against an in-repository f64 Pillow-style
+helper, not Pillow itself). The maintainer's ruling: implement the upstream procedure and decide by an
+A/B against the current path.
 
-### 上流は系列ごとに違う
+### Upstream differs per checkpoint
 
-- **BiRefNet_HR**（同梱 `handler.py:131-137`・モデルカードの利用例も同じ順）: 半精度のモデル → 半精度の
-  `sigmoid` → `transforms.ToPILImage()`（torchvision 0.28 は `(x * 255).astype(np.uint8)` = 切り捨て）→
-  Pillow の `pred_pil.resize(image.size)`（resample を省くと BICUBIC・8bit の 1 バンド）。量子化が resize の
-  **前**にある。
-- **Lucida**（HR の fine-tune・モデルカード `README.md:86-89`）: f32 のモデル → `sigmoid` →
-  `transforms.functional.resize`（テンソル枝・bilinear・antialias 既定）→ `(alpha.numpy() * 255).astype("uint8")`
-  = 切り捨て。
-- **今の経路**（`packages/models/src/birefnet/matte.ts`）: σ を f64 で計算して f32 に格納 → `resizePlaneF32`
-  （antialias bilinear・f64・パスの間で丸めない）→ `Math.round(255·α)`。補間は Lucida の上流と同じ形で、
-  HR の上流とは補間法と量子化の位置が違い、両系列の上流と丸め（四捨五入か切り捨てか）が違う。
+- **BiRefNet_HR** (bundled `handler.py:131-137`; the model card's example has the same order):
+  half-precision model → half-precision `sigmoid` → `transforms.ToPILImage()` (torchvision 0.28:
+  `(x * 255).astype(np.uint8)`, truncation) → Pillow `pred_pil.resize(image.size)` (BICUBIC by
+  default, 8-bit, one band). Quantization comes **before** the resize.
+- **Lucida** (an HR fine-tune; model card `README.md:86-89`): f32 model → `sigmoid` →
+  `transforms.functional.resize` (tensor branch, bilinear, antialias by default) →
+  `(alpha.numpy() * 255).astype("uint8")` (truncation).
+- **The path before this ADR** (`packages/models/src/birefnet/matte.ts`): σ computed in f64 and stored
+  as f32 → `resizePlaneF32` (antialiased bilinear, f64, no rounding between passes) →
+  `Math.round(255·α)`. Its interpolation matched Lucida's upstream; it differed from HR's upstream in
+  interpolation and quantization position, and from both in rounding (round vs truncate).
 
-### 量子化の境目（自前の計算と torch の CPU での確かめ）
+### Quantization thresholds (own calculation, checked with torch on CPU)
 
-α が 255 になる logit の下限は、四捨五入（f32 / f64）で 6.23（ln 509）、HR の上流（半精度 + 切り捨て）で
-8.32（ln 4095）、f32 の切り捨て（Lucida の上流）で 16.64（24·ln 2）。実画像 e2e の f32 席のマット logits
-（2026-10-11・前景のある 2 枚 × 2 系列）では、f32 の切り捨てで前景（四捨五入の α ≥ 128）の 60.1〜85.3% が
-255 ではなく 254 になる。
+The smallest logit giving alpha 255 is 6.23 (ln 509) with rounding (f32 / f64), 8.32 (ln 4095) with
+HR's upstream (half precision + truncation), and 16.64 (24·ln 2) with f32 truncation (Lucida's
+upstream). On the real-image e2e's f32 matte logits (2026-10-11, 2 images with foreground × 2
+checkpoints), f32 truncation turns 60.1–85.3% of the foreground (rounded alpha ≥ 128) into 254
+instead of 255.
 
 ## Decision
 
-1. **上流との一致の水準**（裁定 29）: 上流との一致は計算結果の数値の水準、または数値の意図の水準で取る。上流の
-   誤り・不具合・速度のための精度の選択は写さない。写すのは系列ごとの**補間のカーネルと段の順序**。
-2. **系列ごとの上流を基準にする**（裁定 28 = a）。手順は配布形の `pipelineConfig` に宣言させる方針とし、
-   宣言の欄を足すかどうかは A/B の結果で決める（決定 11）。（「結果」の節で確定: 欄を足した。）
-3. **手順は 2 つ**（`matte.ts` の `MATTE_PROCEDURES`）:
-   - `u8-pil-bicubic`（HR の上流の意図）: σ を f64 で計算 → `Math.round(255σ)` で 8bit の平面 → Pillow 12.3.0
-     の 8bit・1 バンドの BICUBIC（22 bit の固定小数点・中間 uint8・寸法が同じ軸はパスを飛ばす）→ uint8。σ を
-     f32 に格納してから丸めない。
-   - `float-bilinear`（Lucida の上流の意図 = **今の経路そのもの**）: 1 ビットも変えない（σ の f32 への格納を
-     含む）。
-   - パイプラインの既定は `float-bilinear` のまま。手順の引数は `matteFromLogits` の内部の口で、`mod.ts` と
-     サブパスには出さない（ADR 0008）。（「結果」の節で改訂: 既定は外し、パイプラインは配布形の宣言を渡す。）
-4. **量子化はどの手順も四捨五入**（`Math.round(255·α)`・0.5 は切り上げ）。上流の切り捨ては `astype(uint8)` の
-   慣用であって意図ではない — 確信度 1 の前景は不透明（255）が意図。帰結として、飽和はどの手順も logit 6.23
-   から。
-5. **精度**: HR の上流の半精度は写さない（速度のための選択で、karume の logit はもともと f32 のグラフの出力 —
-   上流の半精度のモデルの logit とは初めから一致しない）。半精度の出どころはモデル全体の選択で、上流の重み
-   （`inputs/birefnet/BiRefNet_HR/model.safetensors`）は浮動小数のテンソルが全て F16（F16 687 本・I64 67 本）、
-   同梱 `handler.py:101` の `.half()` がモデル全体を半精度で回す（重みも活性も f16 — σ の半精度はその帰結）。
-   HR の karume の席はどちらも計算が f32 で、f32 席は F16 の重みを f32 へ広げた値（値は変わらない）、f16 席は
-   重みの格納だけが f16（ADR 0113 / 0018）〈→ ADR 0113 追記 2026-10-11: HR の f32 席は退役し f16 席だけ〉。
-   どちらの席でも logit は上流の半精度の活性とは一致しないので、後処理の最後の段だけ半精度を真似ても上流には
-   近づかない。上流の不具合も写さない（例: torch 2.13.0 の CPU の antialias bilinear は幅 1・高さ 2 以上の入力の
-   縦を壊し、全行が先頭の行の値になる — 実測）。
-6. **golden の契約**（常設の門・CPU だけ・環境に依らない）:
-   - 書き手は `tools/export-recipes/birefnet/matte_fixture.py`。系列ごとの上流の関数をそのまま呼び、量子化だけを
-     `floor(x + 0.5)` へ差し替える。fixture は `packages/models/tests/fixtures/birefnet-matte/`（git 管理）。
-   - 入力は実画像 e2e の既定席のマット logits（portrait / street・両系列 — HR は f16 席・Lucida は f32 席〈→ ADR
-     0113 追記 2026-10-11〉）の輪郭付近の窓（40×32）と、窓の中心を通る長さ 1024 の行と幅 2 の列（実運用の
-     係数表 1024 → 832 / 480 / 2048）、合成の境界ケース。来歴（ファイル・sha256・窓）を入力表に、torch /
-     torchvision / Pillow / numpy の版を JSON に記録し、recipe の pytest が git の入力から作り直してバイト一致を
-     見る。目標寸法は 1024² 以外（拡大・縮小・非正方・片軸だけ・恒等）。
-   - `u8-pil-bicubic` は **0 不一致**。JS の `Math.exp` と numpy の `exp` は最終 ulp が割れうるので、255σ が
-     `k + 0.5` から 1e-9 未満の標本は生成器が拒む。
-   - `float-bilinear` は、golden（torch の丸める前の `255α`）の四捨五入と一致するか、golden の `255α` が
-     `k + 0.5` から **ε = 1e-2** 以内のときだけ 1 段ずれてよい。ε は torch の f32 の `255α` と TS の f64 の経路の
-     `255α` の差の実測の最大値（2026-10-11 は 4.2e-3 — 1024 → 480 の縮小の列。torch が座標と重みを f32 で
-     持つため、添字が大きいほど効く）の 2 倍以上になる最小の 10 の冪。生成器は実測が ε の半分を超えたら落ちる。
-     2026-10-11 の fixture では 76,767 標本中 66 標本が ε の内の 1 段のずれで、その 66 標本の golden の `255α` の
-     `k + 0.5` からの距離は最大 7.6e-6（2^-17・ケース `thin.up`）— ε はこれの 1,000 倍を超える余裕を持つ。
-   - birefnet グループの Pillow は `==12.3.0`（wan グループと同じ版）に固定する。
-   - この門（recipe の pytest）は既定の `uv run pytest` でも走る。Pillow は torchvision（exporter の core の依存）
-     経由で既定の sync にも入り、`uv.lock` の解が上のピンで 12.3.0 に揃うため（2026-10-11 に既定のグループだけの
-     venv で golden の 14 件〈と A/B の検算の 11 件〉が SKIP なしで通ることを確認）。テストの
-     `importorskip("PIL")` は Pillow の無い環境での保険で、今の依存の形では SKIP にならない。
-7. **Pillow の写しは 1 本**（裁定 32 = b）: Pillow の 8bit の分離型 resample の逐語の写しは
-   `packages/models/src/image/pillow-resample.ts` の共通の核（フィルタとチャネル数を引数に取る）だけに置く。
-   `u8-pil-bicubic`（1 バンド・BICUBIC）と Wan2.2 の I2V の `lanczos.ts`（3 チャネル・LANCZOS — ADR 0121
-   決定 11）がその上に載る。Wan の既存の LANCZOS の fixture は無変更のまま全一致する。
-8. **A/B は HR だけ・3 択**（裁定 30）: Lucida は決定 6 の fixture で今の経路が上流と数値の水準で一致したので
-   A/B をしない。HR は 8 対（縮小 4・拡大 4）を盲検にし、各対で「A / 同じ / B」の 3 択で答える。左右の割り付けは
-   seed 固定の擬似乱数で決め、対応表は別のファイルに置く。**今の経路を残すのは「今の経路」が 5 対以上かつ
-   「上流」が 0 対のときだけ**。それ以外は上流（`u8-pil-bicubic`）を採る。
-9. **数値の列は記録だけ**（判定には使わない）: 輪郭の帯 = どちらかの手順で `0 < α < 255` の画素をチェビシェフ
-   距離で 2 画素膨張した範囲。K 列 = 帯の中の 2 手順の差（8bit の段）。総合列 = 目標が 2048² ちょうどの画像に
-   限り、2048² モデルの σ（resize を通さない）を擬似正解にした帯の中の SAD・MSE・Gradient error（α ∈ [0, 1]・
-   σ = 1.4 のガウス微分）。2048² モデルは輪郭が 1024² モデルより鋭く、鋭いカーネルに有利に振れうる（推測）。
-10. **素材は anima で生成**（裁定 31 = b）: 拡大 4 枚 = 2048×2048（anima の各辺の上限 — 1920 を超える寸法は
-    anima が学習時に宣言した位置の外側で品質が落ちうるが、輪郭の A/B には足りる前提）、縮小 4 枚 = 832×512 で
-    生成して上下 16 画素を補間なしで切り落とした 832×480。被写体は髪・毛皮・細い物で、無難な題材に限る。
-    プロンプト・seed・寸法の正本は `tools/birefnet-ab/corpus.ts`。画像は `outputs/` だけに置き、リポの記録には
-    載せない。
-11. **配布形への反映は A/B の結果しだい**（裁定 28 の但し書き）: HR が上流を採ったときだけ、`pipelineConfig` に
-    手順の宣言の欄を足す（スキーマの変更 — pipeline の major を上げる）。両系列とも今の経路なら宣言は要らず、
-    スキーマを変えない。変更する場合は main に入れ、HF への再アップロードは次のリリースでマニフェストの他の
-    変更とまとめて行う（再アップロードを 1 回に寄せる）。席の予定は ADR 0113 の追記（2026-09-26 / 09-27）の
-    とおりで、HR は次のリリースで f16 席だけになり（f32 席は同じ値を倍の常駐で持つだけなので退役）、Lucida は
-    f32 既定 + f16。スキーマを変える場合の HR の再アップロードは、この f16 席だけへの切り替えと同じ回に乗せる。
-    決定 6 の fixture の入力（f32 席の logits の窓）は git に入った値で、recipe の pytest もその値から作り直す
-    ので、f32 席の退役で門は動かない〈→ ADR 0113 追記 2026-10-11: HR の入力は f16 席の logits から採り直した —
-    値と sha256 は f32 席と同じ〉。（「結果」の節で確定: HR が上流を採ったので欄を足した。）
+1. **Level of upstream parity**: parity is reached at the level of computed values or of their
+   intent. Upstream errors, bugs and precision choices made for speed are not copied; what is copied
+   per checkpoint is **the interpolation kernel and the order of stages**.
+2. **Each checkpoint follows its own upstream**, declared in the distribution's `pipelineConfig`
+   (settled in "Results": the field was added).
+3. **Two procedures** (`MATTE_PROCEDURES` in `matte.ts`):
+   - `u8-pil-bicubic` (HR's upstream intent): σ in f64 → `Math.round(255σ)` into an 8-bit plane →
+     Pillow 12.3.0's 8-bit one-band BICUBIC (22-bit fixed point, uint8 intermediate, a pass is skipped
+     on an axis whose size is unchanged) → uint8. σ is not stored as f32 before rounding.
+   - `float-bilinear` (Lucida's upstream intent = the earlier path itself): unchanged to the bit,
+     including storing σ as f32.
+   - The procedure argument of `matteFromLogits` is internal, not exported from `mod.ts` or a subpath
+     (ADR 0008). It has no default (revised in "Results"): the pipeline passes the distribution's
+     `config.postprocess`, so a missing declaration cannot silently run one checkpoint's procedure.
+4. **Every procedure rounds** (`Math.round(255·α)`, 0.5 rounds up). Upstream truncation is the
+   `astype(uint8)` idiom, not intent — a foreground of confidence 1 is meant to be opaque (255). As a
+   consequence every procedure saturates from logit 6.23.
+5. **Precision**: HR's upstream half precision is not copied. It is a speed choice for the whole model
+   (`handler.py:101` runs `.half()`; the upstream weights in `inputs/birefnet/BiRefNet_HR/model.safetensors`
+   are F16 for every float tensor — F16 687, I64 67), so σ in half precision follows from it. Karume's
+   logits come from an f32-compute graph (HR's preset stores f16 weights and computes in f32 — ADR 0113
+   addendum 2026-10-11: HR keeps only the f16 preset), so they never match the half-precision
+   activations, and imitating half precision in the last stage alone does not bring the result closer.
+   Upstream bugs are not copied either (for example torch 2.13.0's CPU antialiased bilinear breaks the
+   vertical axis for width-1, height ≥ 2 inputs, repeating the first row — measured).
+6. **Golden contract** (a permanent check, CPU only, environment-independent):
+   - Writer: `tools/export-recipes/birefnet/matte_fixture.py`. It calls each checkpoint's upstream
+     functions as they are and replaces only quantization with `floor(x + 0.5)`. Fixtures:
+     `packages/models/tests/fixtures/birefnet-matte/` (tracked).
+   - Inputs: windows (40×32) near the contour of the real-image e2e's matte logits for the default
+     presets (portrait / street; HR from the f16 preset, Lucida from the f32 preset — ADR 0113
+     addendum 2026-10-11), a 1024-long row and a 2-wide column through each window centre (the
+     production coefficient tables 1024 → 832 / 480 / 2048), and synthetic edge cases. Provenance (file,
+     sha256, window) is in the input table and the torch / torchvision / Pillow / numpy versions in the
+     JSON; the recipe's pytest rebuilds from the tracked inputs and checks byte identity. Target sizes
+     other than 1024² (up, down, non-square, one axis only, identity).
+   - `u8-pil-bicubic`: **zero mismatches**. JS `Math.exp` and numpy `exp` may differ in the last ulp,
+     so the generator rejects samples whose 255σ lies within 1e-9 of `k + 0.5`.
+   - `float-bilinear`: equals the rounding of the golden (torch's unrounded `255α`), or differs by one
+     level only where the golden `255α` is within **ε = 1e-2** of `k + 0.5`. ε is the smallest power of
+     ten at least twice the measured maximum difference between torch's f32 `255α` and the TS f64 path
+     (4.2e-3 on 2026-10-11, the 1024 → 480 downscale column; torch keeps coordinates and weights in
+     f32, which matters more at large indices). The generator fails when the measurement exceeds ε/2.
+     In the 2026-10-11 fixture, 66 of 76,767 samples are one-level differences within ε, at most
+     7.6e-6 (2^-17) from `k + 0.5` (case `thin.up`).
+   - Pillow in the birefnet group is pinned `==12.3.0` (the same version as the wan group —
+     `tools/export-recipes/pyproject.toml`).
+   - The check also runs under the default `uv run pytest`: Pillow reaches the default sync through
+     torchvision (an exporter core dependency) and `uv.lock` resolves it to 12.3.0 under the pin
+     (confirmed 2026-10-11 in a default-group-only venv: 14 golden tests and 11 A/B verification tests
+     ran without SKIP). `importorskip("PIL")` in the tests guards environments without Pillow and does
+     not skip under the current dependencies.
+7. **One Pillow port**: the verbatim port of Pillow's 8-bit separable resample lives only in the
+   shared core `packages/models/src/image/pillow-resample.ts` (filter and channel count as
+   arguments). `u8-pil-bicubic` (one band, BICUBIC) and Wan2.2 I2V's `lanczos.ts` (three channels,
+   LANCZOS — ADR 0121 decision 11) build on it; Wan's existing LANCZOS fixtures still match.
+8. **A/B for HR only, three choices**: Lucida already matched its upstream at the value level through
+   the fixtures of decision 6. HR was judged on 8 blind pairs (4 down, 4 up) with "A / same / B"; the
+   current path would be kept only with 5 or more "current" and 0 "upstream" answers, otherwise the
+   upstream procedure is adopted. Done 2026-10-11 (see "Results").
+9. **Numeric columns are records only** (contour-band differences between the two procedures, and
+   SAD / MSE / gradient error against the 2048² model's σ for 2048² targets), never a decision input.
+10. **A/B material was generated with anima** (4 images at 2048×2048, 4 at 832×480 cut from 832×512;
+    hair, fur and thin objects, neutral subjects only; images only under `outputs/`). The corpus
+    definition `tools/birefnet-ab/corpus.ts` was removed with `tools/birefnet-ab/` in `bb35fe2a`
+    (2026-10-16) and remains in the 0.14.0 history; the checker
+    `tools/export-recipes/birefnet/matte_ab_check.py` remains.
+11. **Distribution change only if HR adopts the upstream procedure**: settled in "Results" — the
+    `postprocess` field was added (pipeline major `birefnet/2`). Moving the fixture inputs from the f32
+    to the f16 preset left the check unchanged (same values and sha256 — ADR 0113 addendum
+    2026-10-11).
 
-## 採らなかった案
+## Alternatives not taken
 
-- **コードで 1 本の手順に固定する**: 上流は系列ごとに違うので、少なくとも 1 系列が自分の上流から外れる。HR の
-  上流に揃えると、Lucida は今より上流から遠ざかる。
-- **コードに「系列 → 手順」の表を持つ**: モデル固有の値を TS に置くことになり（`birefnet/config.ts` の MUST に
-  反する）、第三者の fine-tune を渡すと表に当たらない。
-- **HR の半精度を写す（`Math.f16round`）**: 目的は切り捨ての下で飽和の閾値 8.32 を再現することだけだった。
-  決定 4（四捨五入）で目的ごと消える。
-- **上流どおりの切り捨て**: 前景の 6〜8 割が 254 になる（Context）。255 を不透明とする使い方を壊す。
-- **5 段階の回答**: 目視の差を細かく言い分ける前提が要る。3 択のほうが答えが安定する（裁定 30）。
-- **系列ごとに素材を分ける（HR は実写・Lucida はイラスト）**: 適切な実写の用意が難しい（裁定 31）。
+- **Fix one procedure in code**: upstream differs per checkpoint, so at least one checkpoint would
+  leave its upstream; aligning with HR would move Lucida further away.
+- **A checkpoint → procedure table in code**: puts model-specific values into TS (against the MUST in
+  `birefnet/config.ts`) and misses third-party fine-tunes.
+- **Copy HR's half precision (`Math.f16round`)**: its only purpose was to reproduce the 8.32 saturation
+  threshold under truncation, which decision 4 removes.
+- **Truncate as upstream does**: 60–85% of the foreground would be 254 (Context), breaking uses that
+  treat 255 as opaque.
+- **Five-level answers**: assume finer visual distinctions; three choices give steadier answers.
+- **Separate material per checkpoint (photos for HR, illustrations for Lucida)**: suitable photos are
+  hard to prepare.
 
 ## Consequences
 
-- 今の経路の出力は変わらない（既定は `float-bilinear` で、本体は逐語の移動）。（「結果」の節で改訂: HR の出力は
-  入力画像の寸法がモデルの解像度と違うとき輪郭だけ変わる。Lucida は変わらない。）
-- 契約にできるのは「karume の logit に系列ごとの上流の手順を当てた値」まで。上流の半精度のモデルの出力との
-  一致は主張しない。
-- Pillow の版を上げるときは、BiRefNet の fixture と Wan の LANCZOS の fixture を作り直す（どちらも recipe の
-  pytest が今の Pillow と突き合わせて、作り直し忘れを赤にする）。
-- A/B の道具は `tools/birefnet-ab/`。道具の出力は recipe の `birefnet/matte_ab_check.py` が決定 6 と同じ契約で
-  検算する。ただし A/B の検算は、同点の標本（255σ が `k + 0.5` から `TIE_MARGIN` 未満）が BICUBIC の台で届く
-  出力画素を外し、残りを 0 不一致で比べる（外した数は `excludedTiePixels`）。
+- HR's `segment` output changes only at contours, and only when the input size differs from the model
+  resolution (equal sizes skip the resample, leaving only the f32-storage rounding of σ). Lucida's
+  output does not change.
+- The contract covers "Karume's logits through each checkpoint's upstream procedure"; no match with
+  the upstream half-precision model's output is claimed.
+- Raising Pillow requires rebuilding the BiRefNet and Wan LANCZOS fixtures; both recipe pytests compare
+  against the installed Pillow and turn a forgotten rebuild red.
+- The A/B checker (`birefnet/matte_ab_check.py`) verifies tool output under decision 6's contract,
+  excluding output pixels reached through the BICUBIC support by tied samples (255σ within
+  `TIE_MARGIN` of `k + 0.5`; count in `excludedTiePixels`) and requiring zero mismatches elsewhere.
 
-## 結果（追記 2026-10-11）— A/B の回答・裁定 37 / 38・配布形の宣言
+## Results (addendum 2026-10-11) — A/B answers, rulings and the distribution declaration
 
-### A/B の結果
-
-- 決定 10 の素材 8 枚で、HR の 8 対を決定 8 のとおり盲検の 3 択で答えた。回答は **8 対とも「同じ」**（見分けが
-  つかない）。
-- 対 7（down-fern・832×480）は前景が検出されず、2 手順の差が 0 だった（判断材料にならない対）。
-- 数値の列（記録だけ — 決定 9）: 輪郭の帯の中の 2 手順の差は、平均 0.29〜2.05 段・最大 13〜25 段（拡大 4 対は
-  最大 13〜25 段、前景のある縮小 3 対は最大 20〜21 段）。総合列（拡大 4 枚）は、SAD が 4 対とも上流のほうが
-  わずかに小さい（今の経路の SAD に対して 0.003〜5.4%）。MSE は小数第 3 位の表示で 3 対が同じで、1 対
-  （up-dandelion）は上流 0.068・今 0.067。
-  Gradient error は勝ち負けが割れた（上流が小さいのは 4 対中 1 対）。
-- 道具の出力（2 手順の α）は recipe の検算（`birefnet/matte_ab_check.py`）で上流の関数と突き合わせ、
-  不一致は 0。
-- 出力の置き場は `outputs/birefnet-ab/2026-10-11/`（git 追跡外 — `key/metrics.md`・`key/mapping.json`・
-  `blind/answer-sheet.md`）。
-
-### 裁定と決定の確定
-
-- **裁定 37 = a**: 決定 8 の規則（今の経路を残すのは「今の経路」が 5 対以上かつ「上流」が 0 対のときだけ）の
-  とおり、HR は上流の手順 `u8-pil-bicubic` を採る。Lucida は `float-bilinear` のまま（決定 6 の fixture で
-  上流と数値の水準で一致 — A/B はしない）。
-- **裁定 38 = a**: アプリが手順を選ぶ公開オプションは足さない。上流の手順に回避の要る問題は見つからなかった
-  ので、上流に合わせて選択肢は増やさない。方針の正本は ADR [0005](0005-verification.md) の追記
-  （2026-10-11 — 上流との一致の方針: 上流に問題があれば回避策をオプションで用意し、優れていれば既定にする。
-  問題が無ければ上流に合わせ、オプションは足さない）。
-- **決定 2 / 11 の確定（スキーマの変更）**: 配布形の `pipelineConfig` に必須の欄 `postprocess` を足す。値は
-  `u8-pil-bicubic` / `float-bilinear` の閉じた集合で、既定は無く、集合の外は fail loudly。必須の欄の新設なので
-  pipeline の major を `birefnet/2` に上げる（ADR [0038](0038-manifest-v1.md) の繰り上げ規則）。`birefnet/1` の
-  配布形は major の門で落ちる。
-- 欄は組み立て段（`tools/export-recipes/birefnet/distribution.py` の `BIREFNET_POSTPROCESS`）が checkpoint から
-  書く（HR → `u8-pil-bicubic`・Lucida → `float-bilinear`）。TS 側は系列の表を持たない（採らなかった案の
-  2 つ目と同じ理由）。モデルカードはモデルごとの節に手順（補間・段の順序・四捨五入）を宣言から描く。
-- **決定 3 の改訂**: `matteFromLogits` の手順の引数は既定を持たない（宣言の受け口）。パイプラインは
-  `config.postprocess` を渡す。宣言の渡し忘れが、片方の系列の手順で黙って走らないようにするため。
-
-### 影響と再アップロードの時期
-
-- HR の `segment` の出力は、入力画像の寸法がモデルの解像度と違うとき輪郭だけ変わる（上の数値の列の幅）。
-  寸法が同じときは resample を飛ばすので、違いは σ を f32 に格納するかどうかの丸めの割れに限られ、実質
-  変わらない。Lucida の出力は変わらない（`float-bilinear` は同じ経路）。
-- スキーマの変更は main に入れる。HF の 2 リポ（`karume-birefnet-hr` / `karume-lucida`）の再アップロードと
-  `BIREFNET_SOURCES` の revision の更新は、次のリリースでマニフェストの他の変更とまとめて行う（裁定 28 の
-  但し書き）。HR は f16 席だけへの切り替え、Lucida は f32 の焼き直しと同じ回に乗せる（ADR
-  [0113](0113-birefnet-weight-series.md) の追記・backlog の release 節 — recipe は 2026-10-11 に f16 席だけの形へ
-  変えた）。それまでは、公開済みの revision（`birefnet/1`）を main の models は読めない。
-- 手元の配布形のミラー（`models/karume-birefnet-hr` / `models/karume-lucida`）は `dist.py` で組み直す。差分は
-  `karume.json`（`pipeline` と `pipelineConfig.postprocess`）と `README.md` だけで、重みの part は変わらない
-  〈→ ADR 0113 追記 2026-10-11: `karume-birefnet-hr` は f16 席だけになるので、f32 の part と quant も消える〉。
+- **A/B**: all 8 HR pairs answered "same" (one pair, down-fern, had no detected foreground and zero
+  difference); the checker found zero mismatches against the upstream functions. Records:
+  `outputs/birefnet-ab/2026-10-11/` (untracked).
+- **Ruling**: under decision 8's rule, HR adopts `u8-pil-bicubic`; Lucida stays `float-bilinear`. No
+  public option for choosing a procedure is added: the upstream procedure needed no workaround, so
+  following upstream adds no choice (ADR [0005](0005-verification.md) addendum 2026-10-11).
+- **Schema**: the distribution's `pipelineConfig` gains the required field `postprocess`, a closed set
+  `u8-pil-bicubic` / `float-bilinear` with no default; anything else fails loudly. A new required field
+  raises the pipeline major to `birefnet/2` (ADR [0038](0038-manifest-v1.md)); `birefnet/1`
+  distributions fail the major check. The distribution builder writes it from the checkpoint
+  (`BIREFNET_POSTPROCESS` in `tools/export-recipes/birefnet/distribution.py`: HR → `u8-pil-bicubic`,
+  Lucida → `float-bilinear`); TS holds no checkpoint table. Model cards describe each model's procedure
+  from the declaration.
+- Published as `birefnet/2` with the re-uploads of `karume-birefnet-hr` and `karume-lucida` (CHANGELOG
+  0.14.0).
