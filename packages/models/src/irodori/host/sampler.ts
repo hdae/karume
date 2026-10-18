@@ -1,19 +1,23 @@
 /**
- * Euler サンプラのホスト残置（ADR 0047 決定 4）— t スケジュール・CFG 合成・x の更新。
+ * The part of the Euler sampler left on the host (ADR 0047 decision 4) — t schedule, CFG
+ * combination, update of x.
  *
- * MUST: f32 の丸めを 1 演算ずつ `Math.fround` で踏む（`anima/sampler.ts` の同節）。
+ * MUST: f32 rounding is applied one operation at a time with `Math.fround` (the same section of
+ * `anima/sampler.ts`).
  */
 
 const f32 = Math.fround;
 
 /**
- * `[steps+1]` の t 列（**閉形式** `initScale·(1 − i/steps)`）。
+ * The t sequence of `[steps+1]` (**closed form** `initScale·(1 − i/steps)`).
  *
- * NOTE: 上流は `(1 − linspace(0,1,n+1))·initScale` で作る。両者はビット一致しない
- * （`linspace` は `start + i·step` を f32 で積むので最終 ulp が割れる点がある — exporter 側の
- * 実測 `tScheduleClosedFormMaxAbs` = 5.96e-8 @ steps=40）。t が入るのは `t_embed` と刻み幅
- * `t_next − t` だけで、この差が最終 latent に効く量は golden の突合閾値の 3 桁下。
- * **閉形式を採るのは添字と値が 1 対 1 で読めるため**で、丸めの実測に基づく制約ではない。
+ * NOTE: upstream builds it as `(1 − linspace(0,1,n+1))·initScale`. The two are not bit-identical
+ * (`linspace` accumulates `start + i·step` in f32, so the last ulp splits at some points — measured
+ * on the exporter side, `tScheduleClosedFormMaxAbs` = 5.96e-8 @ steps=40). t enters only
+ * `t_embed` and the step size `t_next − t`, and the effect of this difference on the final latent
+ * is 3 orders of magnitude below the golden comparison threshold.
+ * **The closed form is chosen because index and value read 1 to 1**, not because of a constraint
+ * based on measured rounding.
  */
 export const tSchedule = (steps: number, initScale: number): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(steps) || steps < 1) {
@@ -26,26 +30,27 @@ export const tSchedule = (steps: number, initScale: number): Float32Array<ArrayB
   return schedule;
 };
 
-/** CFG の 1 変種（uncond forward の結果とその強さ）。 */
+/** One CFG variant (the result of an uncond forward and its strength). */
 export type CfgVariant = {
   /**
-   * 強さ。
-   * MUST: **f32 で厳密に表せる値**であること — ここは f64 のまま乗算に入るので、f32 非厳密な
-   * 値だと同じ演算を f32 で積む常駐経路と 1〜2 ulp 割れる（配布形の宣言段で
-   * `parseCfgScales` が落とす）。
+   * Strength.
+   * MUST: **a value exactly representable in f32** — here it enters the multiply as f64, so a value
+   * that is not exact in f32 splits by 1 to 2 ulp from the resident path, which queues the same
+   * operation in f32 (`parseCfgScales` rejects it at the distribution's declaration step).
    */
   readonly scale: number;
-  /** その条件だけを落としたマスクで回した速度場。 */
+  /** The velocity field run with the mask that drops only that condition. */
   readonly velocity: Float32Array<ArrayBuffer>;
 };
 
 /**
- * CFG independent の合成 `v = v_cond + Σ_k s_k·(v_cond − v_k)`。
+ * The CFG-independent combination `v = v_cond + Σ_k s_k·(v_cond − v_k)`.
  *
- * MUST: 変種の順（text → speaker → caption）を保つ。加算は結合的でないので、順が変われば
- * 最終桁が変わる（上流はこの順に 1 変種ずつテンソル演算を積む）。
- * MUST: 変種が 0 本でも新しい配列を返す（呼び出し側が Session の出力バッファを掴んだまま
- * 次の run へ入るのを避ける）。
+ * MUST: keep the variant order (text → speaker → caption). Addition is not associative, so a
+ * different order changes the last digits (upstream queues the tensor operations one variant at a
+ * time in this order).
+ * MUST: return a new array even with 0 variants (so the caller does not enter the next run while
+ * holding on to a Session output buffer).
  */
 export const combineCfg = (
   cond: Float32Array<ArrayBuffer>,
@@ -68,7 +73,7 @@ export const combineCfg = (
   return out;
 };
 
-/** Euler 更新 `x + v·Δt`（Δt = `t_next − t` で負）。 */
+/** Euler update `x + v·Δt` (Δt = `t_next − t`, negative). */
 export const eulerStep = (
   x: Float32Array<ArrayBuffer>,
   velocity: Float32Array<ArrayBuffer>,

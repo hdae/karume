@@ -1,19 +1,23 @@
 /**
- * latent 長 S の決定（上流 `inference_runtime._synthesize` の 2 経路）。
+ * Deciding the latent length S (the 2 paths of upstream's `inference_runtime._synthesize`).
  *
- * MUST: 丸めは Python の `round`（**銀行家丸め** = 0.5 ちょうどは偶数側）。`Math.round` は
- * 常に上へ倒すので、予測フレーム数が .5 ちょうどのときだけ 1 フレームずれる — 出力の長さが
- * 変わるだけで例外は出ず、golden 突合まで沈黙する。
+ * MUST: rounding is Python's `round` (**banker's rounding** = exactly 0.5 goes to the even side).
+ * `Math.round` always rounds up, so only when the predicted frame count is exactly .5 it is off by
+ * one frame — only the output length changes, no exception is raised, and it stays silent until
+ * the golden comparison.
  *
- * MUST: `expm1` は f32 で踏む。グラフ出力（log frames）は f32 なので、f64 のまま指数へ通すと
- * 境界ケースで丸め先が変わりうる。
+ * MUST: `expm1` is taken in f32. The graph output (log frames) is f32, so feeding the exponential
+ * in f64 can change the rounding target in boundary cases.
  */
 
 import { ModelInputError } from "../../errors.ts";
 
 const f32 = Math.fround;
 
-/** S の clamp 範囲と秒 ↔ フレーム換算（`clampRange` だけが使う内側の面）。 */
+/**
+ * The clamp range of S and the seconds ↔ frames conversion (the inner surface only `clampRange`
+ * uses).
+ */
 type FrameBounds = {
   readonly frameRate: number;
   readonly minSeconds: number;
@@ -21,9 +25,9 @@ type FrameBounds = {
 };
 
 /**
- * S の決定に要る数（正本は manifest の `pipelineConfig`）。秒 → フレームと
- * 秒 → サンプル → フレームの両方を持つのは、経路ごとに上流の式が違うため。整合
- * （`sampleRate == frameRate × hopLength`）は `config.ts` が parse 時に見ている。
+ * The numbers needed to decide S (source of truth: the manifest's `pipelineConfig`). It holds both
+ * seconds → frames and seconds → samples → frames because upstream's formula differs per path.
+ * Their consistency (`sampleRate == frameRate × hopLength`) is checked by `config.ts` at parse time.
  */
 export type SampleBounds = FrameBounds & {
   readonly sampleRate: number;
@@ -31,11 +35,11 @@ export type SampleBounds = FrameBounds & {
 };
 
 /**
- * Python の `round(x)`（half-to-even）。
+ * Python's `round(x)` (half-to-even).
  *
- * NOTE: 0.5 ちょうどが観測できるのは値が 2 進で厳密に半整数のときだけで、それ以外は
- * 単純な最近接丸めと同じ。判定を `x - floor(x)` で書いているのは、その厳密な半整数を
- * 取りこぼさないため。
+ * NOTE: exactly 0.5 is observable only when the value is exactly a half-integer in binary;
+ * otherwise it is the same as plain round-to-nearest. The test is written with `x - floor(x)` so
+ * that such exact half-integers are not missed.
  */
 export const bankerRound = (value: number): number => {
   if (!Number.isFinite(value)) throw new RangeError(`丸め対象 ${value} が有限の数でない`);
@@ -46,18 +50,19 @@ export const bankerRound = (value: number): number => {
   return lower % 2 === 0 ? lower : lower + 1;
 };
 
-/** clamp の下限 / 上限フレーム（上流と同じ `ceil` / `floor` の非対称）。 */
+/** Lower / upper clamp frames (the same `ceil` / `floor` asymmetry as upstream). */
 const clampRange = (bounds: FrameBounds): { readonly min: number; readonly max: number } => ({
   min: Math.max(1, Math.ceil(bounds.minSeconds * bounds.frameRate)),
   max: Math.max(1, Math.floor(bounds.maxSeconds * bounds.frameRate)),
 });
 
 /**
- * 決まった latent 長 S と、波形をそこから切り出す長さ（サンプル）。
+ * The decided latent length S, and the length (samples) the waveform is cut to from it.
  *
- * `targetSamples` を S と一緒に返すのは、2 つの経路で式が違うため（duration 経路は
- * `S × hopLength` ちょうど・手動秒経路は最大 `hopLength − 1` サンプル短い）。呼び出し側で
- * 組み直すと、片方の経路だけが黙って全長を出す。
+ * `targetSamples` is returned together with S because the formula differs between the 2 paths (the
+ * duration path gives exactly `S × hopLength`; the manual-seconds path is up to `hopLength − 1`
+ * samples shorter). Rebuilt on the caller's side, one of the paths would silently emit the full
+ * length.
  */
 export type SequencePlan = {
   readonly frames: number;
@@ -65,11 +70,12 @@ export type SequencePlan = {
 };
 
 /**
- * duration グラフの出力（log frames）から S を決める。
+ * Decides S from the output of the duration graph (log frames).
  *
- * `expm1` → 銀行家丸め → `[minFrames, maxFrames]` clamp（上流 `_synthesize`）。
- * `duration_scale` は既定 1.0 で、実行時ノブとしては持たない（配布形の既定に無い）。
- * この経路の `targetSamples` は `S × hopLength` ちょうど（切り出しは実質 no-op）。
+ * `expm1` → banker's rounding → clamp to `[minFrames, maxFrames]` (upstream `_synthesize`).
+ * `duration_scale` defaults to 1.0 and is not held as a runtime knob (it is not among the
+ * distribution's defaults).
+ * On this path `targetSamples` is exactly `S × hopLength` (the cut is effectively a no-op).
  */
 export const sequenceLengthFromLogFrames = (
   logFrames: number,
@@ -85,44 +91,50 @@ export const sequenceLengthFromLogFrames = (
 };
 
 /**
- * 秒の直接指定から S と切り出し長を決める（上流の `manual_seconds` 経路 — duration グラフを
- * 回さない）。
+ * Decides S and the cut length from directly given seconds (upstream's `manual_seconds` path — the
+ * duration graph does not run).
  *
- * 上流（`_synthesize`）の綴りそのまま: `[minSeconds, maxSeconds]` へ clamp した秒を
- * **サンプル数へ落としてから**（`max(1, trunc(clamped × sampleRate))`）フレーム化する
- * （`ceil(targetSamples / hopLength)`）。
+ * Exactly upstream's (`_synthesize`) spelling: the seconds clamped to `[minSeconds, maxSeconds]`
+ * are **first turned into a sample count** (`max(1, trunc(clamped × sampleRate))`) and then into
+ * frames (`ceil(targetSamples / hopLength)`).
  *
- * MUST: `frameRate` 経由の `ceil(clamped × frameRate)` で代用しない。両者は「秒 × frameRate が
- * 整数のすぐ上（1 サンプル未満）」で 1 フレームずれる（例: 1.000005 秒 → 上流 25 / frameRate
- * 経由 26）。値ではなく**長さ**にしか出ないので、突合門が無ければ気づけない差になる。
+ * MUST: do not substitute `ceil(clamped × frameRate)` through `frameRate`. The two differ by one
+ * frame when "seconds × frameRate is just above an integer (by less than one sample)" (e.g.
+ * 1.000005 s → upstream 25 / through frameRate 26). It shows up only in the **length**, not in the
+ * values, so without the comparison check it is a difference nobody would notice.
  *
- * `targetSamples` は S × hopLength より最大 `hopLength − 1` サンプル短い — 呼び出し側は
- * 波形をこの長さで切る（切らないと指定秒より長い音声が出る）。
+ * `targetSamples` is up to `hopLength − 1` samples shorter than S × hopLength — the caller cuts the
+ * waveform to this length (otherwise the audio comes out longer than the requested seconds).
  */
 export const sequenceLengthFromSeconds = (seconds: number, bounds: SampleBounds): SequencePlan => {
-  // `seconds` は呼び手の要求ノブ（`IrodoriGenerateRequest.durationSeconds`）なので 400 側
-  // （ADR 0107）。`maxSequenceLength` 経由で配布形の `maxSeconds` が入る経路もあるが、そちらは
-  // `config.ts` が parse 時に有限性を確かめた後なのでここへは届かない。
+  // `seconds` is the caller's request knob (`IrodoriGenerateRequest.durationSeconds`), so the 400
+  // side (ADR 0107). There is also a path where the distribution's `maxSeconds` enters through
+  // `maxSequenceLength`, but it comes after `config.ts` confirmed finiteness at parse time, so it
+  // never reaches here.
   if (!Number.isFinite(seconds)) {
     throw new ModelInputError(`durationSeconds ${seconds} が有限の数でない`);
   }
-  // 上流はフレーム側の clamp を掛け直さない（秒を先に clamp してあるので範囲は自動で収まる）。
+  // Upstream does not clamp again on the frame side (the seconds were clamped first, so the range
+  // fits automatically).
   const clamped = Math.min(bounds.maxSeconds, Math.max(bounds.minSeconds, seconds));
   const targetSamples = Math.max(1, Math.trunc(clamped * bounds.sampleRate));
   return { frames: Math.ceil(targetSamples / bounds.hopLength), targetSamples };
 };
 
 /**
- * 宣言 `maxSeconds` から**到達しうる S の最大**（2 経路の大きいほう）。
+ * **The maximum S reachable** from the declared `maxSeconds` (the larger of the 2 paths).
  *
- * 秒 → S の丸め方は経路ごとに違う（duration 経路は `floor(maxSeconds·frameRate)` の clamp 上限・
- * 手動秒経路は `ceil(trunc(maxSeconds·sampleRate) / hopLength)`）ので、どちらか片方の式で
- * 上限を語ると 1 フレーム取りこぼす（実測: frameRate=25 / hopLength=1920 で maxSeconds=30.5 は
- * duration 762 / 手動秒 763）。`config.ts` が `ditSymMax` との整合を parse 時に見るための面で、
- * **式の正本はこのモジュールのまま**（config 側に写しを置かない）。
+ * The rounding from seconds to S differs per path (the duration path has the clamp maximum
+ * `floor(maxSeconds·frameRate)`; the manual-seconds path has
+ * `ceil(trunc(maxSeconds·sampleRate) / hopLength)`), so stating the maximum with only one of the
+ * formulas misses one frame (measured: with frameRate=25 / hopLength=1920, maxSeconds=30.5 gives
+ * duration 762 / manual seconds 763). This is the surface `config.ts` uses to check consistency
+ * with `ditSymMax` at parse time, and **the formulas stay canonical in this module** (no copy on
+ * the config side).
  */
 export const maxSequenceLength = (bounds: SampleBounds): number => {
   const { min, max } = clampRange(bounds);
-  // clamp は下限を優先する（`min > max` の宣言では下限側が返る）ので両方を見る。
+  // The clamp gives the lower bound priority (with a `min > max` declaration the lower side is
+  // returned), so both are checked.
   return Math.max(min, max, sequenceLengthFromSeconds(bounds.maxSeconds, bounds).frames);
 };

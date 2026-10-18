@@ -1,68 +1,77 @@
 /**
- * Wan2.1 の `pipelineConfig` のスキーマ検証（ADR 0038 §1 — スキーマは各パイプライン実装が所有・検証）。
+ * Schema validation of Wan2.1's `pipelineConfig` (ADR 0038 §1 — each pipeline implementation owns
+ * and validates its schema).
  *
- * hub は `pipelineConfig` を素通しする（禁止キーの一掃と規模上限だけを見る）。したがって
- * **形の正本はこのモジュール**で、焼く側（recipe `tools/export-recipes/wan/distribution.py` の
- * `WAN_PIPELINE_CONFIG`）の欄名とは recipe 側のテストが突き合わせる。
+ * The hub passes `pipelineConfig` through (it only strips forbidden keys and checks the size
+ * limit). **This module is therefore the source of truth for the shape**, and the recipe-side test
+ * matches its field names against the writer (`WAN_PIPELINE_CONFIG` in the recipe
+ * `tools/export-recipes/wan/distribution.py`).
  *
- * 宣言するのは生成の既定だけ（ADR 0118 決定 5 — 製品の既定は manifest の `pipelineConfig.scheduler` で
- * 起こし、視認の A/B で変えるかを決める）:
+ * Only the generation defaults are declared (ADR 0118 decision 5 — the product defaults start in the
+ * manifest's `pipelineConfig.scheduler`, and the visual A/B decides whether to change them):
  *
- * - `scheduler.shift` — flow matching の shift（参照の設定 — Wan2.1 は 3.0・Wan2.2 は 5.0）
- * - `defaults.steps` / `defaults.guidance` — denoise の step 数と CFG の強さ（参照の設定 50 / 5.0）
+ * - `scheduler.shift` — the flow matching shift (reference setting — 3.0 for Wan2.1, 5.0 for Wan2.2)
+ * - `defaults.steps` / `defaults.guidance` — the denoise step count and CFG strength (reference
+ *   setting 50 / 5.0)
  *
- * UniPC の構造（次数・bh2・`num_train_timesteps`）は宣言の席を持たない — 移植が実装している分岐は
- * 1 つきりで（`scheduler.ts` の `WAN_UNIPC_CONFIG`）、宣言できるようにすると検証していない組み合わせを
- * 配布側が選べてしまう。
+ * UniPC's structure (order, bh2, `num_train_timesteps`) has no field in the declaration — the port
+ * implements exactly one branch (`WAN_UNIPC_CONFIG` in `scheduler.ts`), and making it declarable
+ * would let a distribution pick an unverified combination.
  *
- * MUST: 未知キーは fail loudly（綴り違いが黙って既定へ縮退すると、配布者の意図した既定と実行が
- * 食い違ったまま気づけない）。値域は生成の要求の門（`family.ts` の `planWanGeneration`）と同じで、
- * 外れた宣言は**資産の齟齬**として素の `Error` で落とす（入力起因ではない — ADR 0107 決定 2）。
- * 既定の steps × shift の組で UniPC の σ 列が組めることもここで見る — 見ないと、要求が何も渡さない
- * `generate` が `planWanGeneration` で入力起因（`ModelInputError`）として落ちる。
- * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
+ * MUST: unknown keys fail loudly (if a misspelling silently fell back to the default, the default the
+ * distributor intended and the run would disagree unnoticed). The value ranges are the same as the
+ * generation request checks (`planWanGeneration` in `family.ts`), and a declaration outside them
+ * fails with a plain `Error` as an **asset inconsistency** (not an input error — ADR 0107
+ * decision 2). This also checks that the default steps × shift pair yields a UniPC σ sequence —
+ * otherwise a `generate` whose request passes nothing would fail in `planWanGeneration` as an input
+ * error (`ModelInputError`).
+ * MUST: maps are read only through `Object.hasOwn` (cross-cutting invariant).
  */
 
 import type { HubRepoRef } from "@karume/hub";
 import { assertAllowedKeys, readNumber, readRecord } from "../config/readers.ts";
 import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "./scheduler.ts";
 
-/** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
+/** The `pipeline` contract name and the major this implementation accepts (ADR 0038 §1). */
 export const WAN_PIPELINE_NAME = "wan";
 export const WAN_PIPELINE_MAJOR = 1;
 
 /**
- * Wan2.2 TI2V の `pipeline` の契約名と major（`WanTi2vPipeline` — ADR 0121 決定 10）。`pipelineConfig` の
- * スキーマは Wan2.1 と同じ 1 本（{@link parseWanPipelineConfig}）。
+ * The `pipeline` contract name and major of Wan2.2 TI2V (`WanTi2vPipeline` — ADR 0121 decision 10).
+ * The `pipelineConfig` schema is the same single one as Wan2.1 ({@link parseWanPipelineConfig}).
  */
 export const WAN_TI2V_PIPELINE_NAME = "wan-ti2v";
 export const WAN_TI2V_PIPELINE_MAJOR = 1;
 
 /**
- * Wan ファミリの**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は無い**）。
- * 値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ * The Wan family's **table of public distribution repositories** (ADR 0092 — one table per family,
+ * **no default entry**). The values are **the sources this package version verified** (pinned
+ * commit SHAs — ADR 0073).
  *
- * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
- * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。世代は別リポ（ADR 0092 決定 1）:
+ * A key is the basename of the HF repository name without `karume-` (`"karume-" + key` gives back
+ * the basename — the check in `tests/sources_test.ts` holds this invariant). Generations are separate
+ * repositories (ADR 0092 decision 1):
  *
- * - `"wan2.2"` = `hdae/karume-wan2.2`（Wan2.2 TI2V 5B — `WanTi2vPipeline` が読む・umT5 の text_encoder は
- *   `karume-umt5-xxl` を越境参照する）
+ * - `"wan2.2"` = `hdae/karume-wan2.2` (Wan2.2 TI2V 5B — read by `WanTi2vPipeline`; umT5's
+ *   text_encoder is a cross-repository reference to `karume-umt5-xxl`)
  *
- * Wan2.1（`karume-wan2.1`）は HF に公開しない（ADR 0118 追記（2026-10-15））ので**キーを持たない** — 公開リポの
- * 無いキーは 404 にしかならない（ADR 0073 決定 1 の理由）。`WanPipeline` には手元の配布形を渡す。
+ * Wan2.1 (`karume-wan2.1`) is not published on HF (ADR 0118 addendum (2026-10-15)), so it **has no
+ * key** — a key without a public repository can only give a 404 (the reason of ADR 0073 decision 1).
+ * Pass a local distribution to `WanPipeline`.
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
- * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
- * 既定は無い）。
+ * Pass it **as an opt-in to follow the package version automatically** — to pin reproducibility
+ * yourself, write your own `{ repo, revision }` instead of this table (`fromPretrained` has no
+ * default).
  *
- * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
- * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
- * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
- * 同時に成立する（ADR 0038）。main 追従が要る利用者は
- * `{ ...WAN_SOURCES["wan2.2"], revision: "main" }` を明示的に選ぶ。
+ * MUST: pin the revision to a commit SHA — branches and tags can be moved on the distribution side,
+ * so the bytes this published package reads would change silently at the network's convenience (an
+ * unrecoverable accident). A SHA removes the revision-resolution request itself, so an offline start
+ * with a full cache works at the same time (ADR 0038). A user who needs to follow main chooses
+ * `{ ...WAN_SOURCES["wan2.2"], revision: "main" }` explicitly.
  */
-// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+// NOTE: the revision is updated to the SHA of main after the upload, in §3 of the release runbook
+// (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand + the
+// runbook check).
 export const WAN_SOURCES = {
   "wan2.2": {
     repo: "hdae/karume-wan2.2",
@@ -74,13 +83,13 @@ const ROOT_KEYS: readonly string[] = ["scheduler", "defaults"];
 const SCHEDULER_KEYS: readonly string[] = ["shift"];
 const DEFAULTS_KEYS: readonly string[] = ["steps", "guidance"];
 
-/** 配布者の推奨既定（`generate` の未指定欄を埋める）。 */
+/** The distributor's recommended defaults (they fill the fields `generate` leaves unset). */
 export type WanPipelineConfig = {
   readonly scheduler: { readonly shift: number };
   readonly defaults: { readonly steps: number; readonly guidance: number };
 };
 
-/** 欄の集まりを読む（欠落・オブジェクトでない・未知キーを落とす）。 */
+/** Reads a section of fields (rejects a missing section, a non-object and unknown keys). */
 const readSection = (
   raw: Readonly<Record<string, unknown>>,
   key: string,
@@ -92,7 +101,7 @@ const readSection = (
   return record;
 };
 
-/** manifest の `pipelineConfig`（hub が素通しした生の値）を検査して読む。 */
+/** Checks and reads the manifest's `pipelineConfig` (the raw value the hub passed through). */
 export const parseWanPipelineConfig = (
   raw: Readonly<Record<string, unknown>>,
 ): WanPipelineConfig => {
@@ -110,7 +119,8 @@ export const parseWanPipelineConfig = (
     defaults,
     "steps",
     "pipelineConfig.defaults",
-    // 上限は要求の門と同じ `num_train_timesteps`（`scheduler.ts` の `wanUniPcSchedule` の MUST）。
+    // The upper limit is `num_train_timesteps`, as in the request check (the MUST of
+    // `wanUniPcSchedule` in `scheduler.ts`).
     (value) => Number.isInteger(value) && value >= 1 && value <= WAN_UNIPC_CONFIG.numTrainTimesteps,
     `1 以上 ${WAN_UNIPC_CONFIG.numTrainTimesteps} 以下の整数でない`,
   );
@@ -118,7 +128,8 @@ export const parseWanPipelineConfig = (
     defaults,
     "guidance",
     "pipelineConfig.defaults",
-    // CFG は f32 で掛ける（要求の門と同じ — f64 で有限でも f32 で Infinity なら合成が NaN）。
+    // CFG is applied in f32 (as in the request check — finite in f64 but Infinity in f32 makes the
+    // combination NaN).
     (value) => Number.isFinite(Math.fround(value)) && value >= 1,
     "1 以上で f32 に収まる有限の数でない",
   );

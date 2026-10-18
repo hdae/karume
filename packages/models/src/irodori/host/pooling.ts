@@ -1,19 +1,20 @@
 /**
- * 系列 → ベクトルの縮約（ADR 0047 決定 4 のホスト残置）。
+ * Reduction from a sequence to a vector (left on the host — ADR 0047 decision 4).
  *
- * 2 箇所で要る: `speaker` グラフの出力へ前置する平均トークン（上流
- * `_prepend_masked_mean_token`）と、`duration` の `caption_vec`（`caption_norm` 済み系列の
- * masked mean — 上流 `DurationPredictor._caption_vec`）。
+ * Needed in 2 places: the mean token prepended to the output of the `speaker` graph (upstream
+ * `_prepend_masked_mean_token`), and `caption_vec` of `duration` (the masked mean of the
+ * `caption_norm`-ed sequence — upstream `DurationPredictor._caption_vec`).
  *
- * どちらも **B=1・マスク全 True の経路でしか呼ばない**（参照なし / caption 空はホストが
- * ゼロを置いて短絡する）ので、上流の `sum(x·mask)/clamp_min(sum(mask),1)` は単純平均に落ちる。
+ * Both are **called only on the B=1, all-True-mask path** (no reference / an empty caption is
+ * short-circuited by the host placing zeros), so upstream's `sum(x·mask)/clamp_min(sum(mask),1)`
+ * reduces to a plain mean.
  *
- * MUST: f32 の丸めを 1 演算ずつ踏む（列ごとの逐次和）。
+ * MUST: f32 rounding is applied one operation at a time (a sequential sum per column).
  */
 
 const f32 = Math.fround;
 
-/** 行方向の平均 `[width]`。 */
+/** Mean over rows `[width]`. */
 export const rowMean = (
   state: Float32Array<ArrayBuffer>,
   rows: number,
@@ -33,10 +34,10 @@ export const rowMean = (
 };
 
 /**
- * 平均トークンを先頭に前置した `[(rows+1)·width]`。
+ * `[(rows+1)·width]` with the mean token prepended at the start.
  *
- * MUST: 前置であって後置ではない — `duration` の `speaker_vec` は `speaker_state[:,0]`
- * （= この平均トークン）を採る契約で、位置がずれると別の行が話者ベクトルになる。
+ * MUST: prepended, not appended — `speaker_vec` of `duration` takes `speaker_state[:,0]` (= this
+ * mean token) by contract, and if the position shifts, another row becomes the speaker vector.
  */
 export const prependMeanToken = (
   state: Float32Array<ArrayBuffer>,

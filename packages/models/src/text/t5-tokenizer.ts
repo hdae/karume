@@ -1,21 +1,22 @@
 /**
- * T5 系（SentencePiece の Unigram を `tokenizers` で組んだもの）のトークナイザ — 家族横断。
+ * Tokenizer for the T5 family (SentencePiece Unigram assembled with `tokenizers`) — shared across
+ * families.
  *
- * 正本の経路（anima の T5 と Wan の umT5 の transformers 5.14.1 が同じ形）:
+ * The source-of-truth path (anima's T5 and Wan's umT5 have the same shape in transformers 5.14.1):
  *
- *   AddedVocabulary（特殊トークンを leftmost-longest で切り出す）
- *   → 正規化（家族ごと — anima は Precompiled・umT5 は無し）
- *   → WhitespaceSplit → Metaspace（replacement=▁ / prepend_scheme=always / split）
- *   → Unigram（Viterbi・byte_fallback なし・fuse_unk）
- *   → TemplateProcessing（末尾に `</s>`）
+ *   AddedVocabulary (cuts out special tokens leftmost-longest) → normalization (per family — anima
+ *   uses Precompiled, umT5 none) → WhitespaceSplit → Metaspace (replacement=▁ /
+ *   prepend_scheme=always / split) → Unigram (Viterbi, no byte_fallback, fuse_unk) →
+ *   TemplateProcessing (`</s>` at the end)
  *
- * 表（語彙・追加語彙・空白集合）は資産から受け、家族で割れる 3 点は {@link T5Policy} で受ける:
- * 正規化の有無、語彙外の扱い（unk へ融合 / 拒む）、上限超えの扱い（切り詰め / 拒む）。
- * anima は上流どおり「unk・切り詰め」、Wan の umT5 は版に依らない id 列のために「拒む・拒む」
- * （ADR 0119 決定 1・決定 4）。
+ * The tables (vocabulary, added vocabulary, whitespace set) come from the assets, and the three
+ * points where families differ come through {@link T5Policy}: whether to normalize, how to treat
+ * out-of-vocabulary text (fuse into unk / reject), and how to treat input over the limit (truncate
+ * / reject). anima follows upstream with "unk, truncate"; Wan's umT5 uses "reject, reject" for an
+ * id sequence that does not depend on the version (ADR 0119 decision 1, decision 4).
  *
- * Unigram の本体（Viterbi・同点処理・融合）は `unigram.ts`、追加語彙の切り出しは
- * `added-tokens.ts` が持つ。
+ * The Unigram core (Viterbi, tie handling, fusion) lives in `unigram.ts`, and cutting out the added
+ * vocabulary in `added-tokens.ts`.
  */
 
 import { ModelInputError } from "../errors.ts";
@@ -38,42 +39,54 @@ import {
   type UnigramVocabEntry,
 } from "./unigram.ts";
 
-/** Metaspace の置換文字（U+2581）。 */
+/** Metaspace replacement character (U+2581). */
 export const METASPACE = "▁";
 
 export type T5VocabEntry = UnigramVocabEntry;
 
-/** T5 系トークナイザの表（資産由来）。 */
+/** Tables of the T5-family tokenizer (from the assets). */
 export type T5Tables = {
   readonly vocab: ReadonlyMap<string, T5VocabEntry>;
-  /** 語彙**全体**の最小スコア。部分集合を渡す場合も全体の値を渡す（未知ノードの重み）。 */
+  /**
+   * Minimum score of the **whole** vocabulary. Pass the whole-vocabulary value even with a subset
+   * (the unknown-node weight).
+   */
   readonly minScore: number;
-  /** 語彙**全体**の最長トークンのコードポイント数（前方一致の探索幅）。 */
+  /** Code-point count of the **whole** vocabulary's longest token (the prefix-search width). */
   readonly maxTokenLength: number;
   readonly unkId: number;
   readonly eosId: number;
   readonly addedTokens: ReadonlyMap<string, number>;
-  /** WhitespaceSplit の空白集合（エクスポータが正本に 1 文字ずつ聞いて畳んだ表）。 */
+  /**
+   * WhitespaceSplit's whitespace set (a table the exporter folded by asking the source of truth one
+   * character at a time).
+   */
   readonly space: CodeRanges;
-  /** `</s>` を含む id 列の最大長（上流の `max_length`）。 */
+  /** Maximum length of the id sequence including `</s>` (upstream `max_length`). */
   readonly maxLength: number;
 };
 
-/** 家族ごとに上流の呼び方が割れる 3 点。 */
+/** The three points where families call upstream differently. */
 export type T5Policy = {
-  /** 追加語彙を切り出した後の各断片に掛ける正規化（上流の normalizer）。無ければ掛けない。 */
+  /**
+   * Normalization applied to each piece after the added vocabulary is cut out (upstream's
+   * normalizer). None if absent.
+   */
   readonly normalize?: (text: string) => string;
-  /** 語彙外（Unigram の未知ノード）: `"unk"` = unk_id 1 個へ融合 / `"reject"` = 拒む。 */
+  /**
+   * Out-of-vocabulary (Unigram's unknown node): `"unk"` = fuse into one unk_id / `"reject"`
+   * = reject.
+   */
   readonly unknown: "unk" | "reject";
-  /** `maxLength` を超える入力: `"truncate"` = `</s>` の分を空けて切る / `"reject"` = 拒む。 */
+  /** Input over `maxLength`: `"truncate"` = cut leaving room for `</s>` / `"reject"` = reject. */
   readonly overflow: "truncate" | "reject";
 };
 
 /**
- * WhitespaceSplit → Metaspace。空白は捨て、各断片の先頭に ▁ を付ける。
+ * WhitespaceSplit → Metaspace. Whitespace is dropped and ▁ is prepended to each piece.
  *
- * MUST: `split=true` は MergedWithNext — 区切りの ▁ は**次の**断片の先頭に付く。
- * 「前の断片の末尾」にすると分割が変わる。
+ * MUST: `split=true` is MergedWithNext — the separating ▁ attaches to the head of the **next**
+ * piece. Attaching it to "the tail of the previous piece" changes the segmentation.
  */
 export const t5PreTokenize = (text: string, space: CodeRanges): string[] => {
   const out: string[] = [];
@@ -109,7 +122,10 @@ const splitOnSpace = (text: string, space: CodeRanges): string[] => {
   return out;
 };
 
-/** 未知の片の表示（語彙外の拒否のメッセージ用 — 人が直す箇所を探せる形）。 */
+/**
+ * Display of an unknown piece (for the out-of-vocabulary rejection message — in a form that lets a
+ * person find what to fix).
+ */
 const describeText = (text: string): string =>
   `${JSON.stringify(text)}（${toCodePoints(text)
     .map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`)
@@ -126,9 +142,11 @@ export class T5UnigramTokenizer {
     this.#added = createAddedTokenMatcher([...tables.addedTokens.keys()]);
   }
 
-  /** 1 断片を id 列へ（語彙外は方針どおり unk へ融合するか拒む）。 */
+  /**
+   * One piece → id sequence (out-of-vocabulary text is fused into unk or rejected per the policy).
+   */
   #tokenize(piece: string, label: string): number[] {
-    // T5Tables は UnigramModel の面をそのまま満たす（byteBaseId を持たない = byte_fallback なし）。
+    // T5Tables satisfies the UnigramModel surface as is (no byteBaseId = no byte_fallback).
     const model = this.#tables satisfies UnigramModel;
     const cps = toCodePoints(piece);
     if (this.#policy.unknown === "unk") return unigramTokenize(model, cps);
@@ -146,13 +164,15 @@ export class T5UnigramTokenizer {
   }
 
   /**
-   * `tokenizer([text], max_length=maxLength, truncation=True)` と同じ id 列（上限超えは方針どおり）。
+   * The same id sequence as `tokenizer([text], max_length=maxLength, truncation=True)` (input over
+   * the limit per the policy).
    *
-   * MUST: 切り詰めは `</s>` の分を空けてから（正本の truncation は post_processor の**前**）。
-   * `slice(0, maxLength)` の後に足すと `maxLength + 1` 個になる。結果として id 列は常に `</s>` で
-   * 終わり、長さは必ず 1 以上。
+   * MUST: truncate after leaving room for `</s>` (the source of truth truncates **before** the
+   * post_processor). Appending after `slice(0, maxLength)` gives `maxLength + 1` ids. As a result
+   * the id sequence always ends with `</s>` and its length is always at least 1.
    *
-   * `label` は拒否のメッセージに出す（正 / ネガティブのどちらかが判る形にする）。
+   * `label` appears in rejection messages (a form that tells whether it was the positive or the
+   * negative prompt).
    */
   encode(text: string, label: string = "入力"): number[] {
     const budget = this.#tables.maxLength - 1;
@@ -164,43 +184,47 @@ export class T5UnigramTokenizer {
           "黙って切り詰めない。プロンプトを短くする",
       );
     /**
-     * 次の id を積む前に呼ぶ（追加語彙も断片も必ず 1 個以上の id を出す）。予算に達していれば、
-     * 切り詰めなら false（以降を捨てる）・拒むなら投げる。
+     * Called before pushing the next id (added vocabulary and pieces always emit at least one id).
+     * When the budget is reached: false (drop the rest) when truncating, throws when rejecting.
      */
     const hasRoom = (): boolean => {
       if (ids.length < budget) return true;
       if (reject) throw overflow();
       return false;
     };
-    // 先頭から順に積むだけなので、予算に達した後の chunk / 断片を捨てても id 列は変わらない
-    // （切り詰めの後ろを符号化する費用を入力長に比例させない — 拒む方針でも同じ所で止まる）。
+    // Ids are only pushed in order from the start, so dropping the chunks / pieces after the budget
+    // is reached does not change the id sequence (the cost of encoding past the truncation point
+    // does not grow with the input length — the reject policy stops at the same place).
     for (const chunk of this.#added.split(text)) {
       if (chunk.added) {
         if (!hasRoom()) break;
         ids.push(this.#tables.addedTokens.get(chunk.text) as number);
         continue;
       }
-      // NOTE: 追加語彙でない chunk は空白だけなら id を出さないので、ここでは拒まない
-      // （拒む方針の判定は id を出す断片の手前と末尾で行う）。
+      // NOTE: a non-added chunk emits no id if it is whitespace only, so it is not rejected here
+      // (the reject policy decides just before a piece that emits ids, and at the end).
       if (!reject && ids.length >= budget) break;
       const normalized = this.#policy.normalize?.(chunk.text) ?? chunk.text;
       for (const piece of t5PreTokenize(normalized, this.#tables.space)) {
         if (!hasRoom()) break;
-        // 長い断片でも引数展開しない（`push(...)` は V8 の引数上限で RangeError になる）。
+        // Do not spread long pieces into arguments (`push(...)` throws RangeError at V8's argument
+        // limit).
         for (const id of this.#tokenize(piece, label)) ids.push(id);
       }
     }
-    // 最後の断片が予算をまたいで積んだ分（拒む方針ではここで落とす）。
+    // What the last piece pushed across the budget (the reject policy fails here).
     if (reject && ids.length > budget) throw overflow();
     return [...ids.slice(0, budget), this.#tables.eosId];
   }
 }
 
 /**
- * T5 系の資産 JSON（`vocabText` / `scores` / `unkId` / `eosId` / `addedTokens` / `space` /
- * `maxLength`）を表に変換する（外部境界なので構造を検査してから使う）。
+ * Converts the T5-family asset JSON (`vocabText` / `scores` / `unkId` / `eosId` / `addedTokens` /
+ * `space` / `maxLength`) into tables (an external boundary, so the structure is checked before
+ * use).
  *
- * MUST: `minScore` / `maxTokenLength` は**語彙全体**から導く（未知ノードの重みと探索幅）。
+ * MUST: `minScore` / `maxTokenLength` are derived from **the whole vocabulary** (the unknown-node
+ * weight and the search width).
  */
 export const parseT5Tables = (raw: unknown, label: string): T5Tables => {
   const obj = asRecord(raw, label);

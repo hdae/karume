@@ -1,34 +1,41 @@
 /**
- * `@karume/models` の**家族横断**の入力起因エラー。
+ * The **cross-family** input-caused error of `@karume/models`.
  *
- * 分類の軸は**呼び手の分岐先**（`@karume/hub` の `HubError` と同じ流儀）: これが飛ぶのは
- * 「渡した要求そのものが受理できない = 入力を直せば通る」ときだけで、HTTP サーバーなら 400 に
- * 当たる。内部不変条件の破れ・資産（manifest / tokenizer / 容器）の齟齬・GPU 容量の不足は
- * 素の `Error` や既存の型のまま投げる — あれは 500 であって、呼び手が入力を直しても直らない。
+ * The classification axis is **where the caller branches** (the same convention as `HubError` in
+ * `@karume/hub`): this is thrown only when "the request itself cannot be accepted = fixing the input
+ * makes it pass", which in an HTTP server would be a 400. Broken internal invariants, inconsistent
+ * assets (manifest / tokenizer / container) and insufficient GPU capacity are thrown as a plain
+ * `Error` or an existing type — those are a 500, and the caller cannot fix them by fixing the input.
  *
- * 型が家族ごとに割れていると、8 家族を同じホストに載せた側は**メッセージの文字列を読む**しか
- * 400 / 500 を分ける手が無くなる。1 本にするのはそのためで、家族の数だけ専用型を作らない。
+ * If the type were split per family, a host serving every family would have **no way but reading
+ * the message string** to tell 400 from 500. That is why there is one type, and no dedicated type
+ * per family.
  *
- * ## 適用範囲
+ * ## Scope
  *
- * **生成要求の値域・型・組合せ**の検査だけ。次の 2 つは打つ手が違うので同じ型に混ぜない:
+ * Only checks of **the range, type and combination of a generation request**. The following two
+ * have different remedies and are not mixed into the same type:
  *
- * - model / quant / sampler 名の綴り違い（打つ手は「受理集合を引き直す」）
- * - 呼び出し手順の違反（`dispose` 済みの再利用・二重生成 — 打つ手は「呼ぶ順を直す」）
+ * - misspelled model / quant / sampler names (the remedy is "look up the accepted set again")
+ * - violations of the call order (reuse after `dispose`, double generation — the remedy is "fix the
+ *   call order")
  *
- * どちらも素の `Error` のままにする。範囲を後から**足す**のは呼び手にとって互換だが、
- * 狭めるのは既に分岐している側を壊すので破壊変更である。
+ * Both stay a plain `Error`. **Widening** the scope later is compatible for callers, but narrowing
+ * it breaks those who already branch on it, so it is a breaking change.
  *
- * MUST: 型を分けるだけで**メッセージの質は落とさない**（期待と実際の両方を書く）。型は分岐の
- * ため、メッセージは人のためで、どちらも要る。
+ * MUST: splitting the type **does not lower the quality of the message** (state both the
+ * expectation and the actual value). The type is for branching, the message is for people, and both
+ * are needed.
  *
- * NOTE: 派生は `Sbv2InputError`（`./sbv2/errors.ts`）・`GenerationCapacityError`
- * （`./generation/sequence.ts`）・`PromptCleanError`（`./wan/text/prompt-clean.ts`）の 3 本だけ。
- * 1 本目は ADR 0072 決定 6 の線引きを仕様として持ち、2 本目は切り詰めの計算に要る実値を欄で
- * 運び、3 本目は拒否の理由（reason）を欄で運ぶ — どれも `instanceof` の外に**追加の情報**が
- * あるから型が要る。情報が増えない分岐先を型で割らない。
+ * NOTE: the only derived types are the 3 of `Sbv2InputError` (`./sbv2/errors.ts`),
+ * `GenerationCapacityError` (`./generation/sequence.ts`) and `PromptCleanError`
+ * (`./wan/text/prompt-clean.ts`). The first holds the line drawn by ADR 0072 decision 6 as its
+ * specification, the second carries in fields the actual values the truncation computation needs,
+ * and the third carries the reason for the rejection (reason) in a field — each needs a type because
+ * it carries **additional information** beyond `instanceof`. Branch targets that add no information
+ * are not split by type.
  *
- * DECIDED: [ADR 0107](../../../docs/decisions/0107-model-input-error.md)。
+ * DECIDED: [ADR 0107](../../../docs/decisions/0107-model-input-error.md).
  */
 export class ModelInputError extends Error {
   constructor(message: string, options?: ErrorOptions) {

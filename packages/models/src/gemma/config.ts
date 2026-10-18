@@ -1,17 +1,20 @@
 /**
- * gemma4 の `pipelineConfig` スキーマ検証（ADR 0038 §1 — スキーマは各パイプライン実装が所有・
- * 検証）。
+ * Schema validation of gemma4's `pipelineConfig` (ADR 0038 §1 — each pipeline implementation owns
+ * and validates its schema).
  *
- * hub は `pipelineConfig` を素通しする（禁止キーの一掃と規模上限だけを見る）ので、**形の正本は
- * このモジュール**で、手書きの検査を全て parse 時に走らせる。焼く側の正本は
- * `tools/export-recipes/gemma4/distribution.py`（`gemma4_pipeline_config` / `gemma4_sampler`）。
+ * hub passes `pipelineConfig` through (it checks only the removal of forbidden keys and the size
+ * limits), so **this module is canonical for the shape**, and every hand-written check runs at
+ * parse time. The baking side's canonical source is `tools/export-recipes/gemma4/distribution.py`
+ * (`gemma4_pipeline_config` / `gemma4_sampler`).
  *
- * MUST: 未知キーは fail loudly（`{ capacity: 640, capasity: 640 }` のような綴り違いが黙って
- * 既定へ縮退すると、配布者の意図した宣言と実行が食い違ったまま気づけない）。
- * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
+ * MUST: unknown keys fail loudly (if a misspelling such as `{ capacity: 640, capasity: 640 }`
+ * silently degraded to the default, the declaration the distributor intended and the execution
+ * would differ unnoticed).
+ * MUST: maps are read only through `Object.hasOwn` (cross-cutting invariant).
  *
- * NOTE: 公開配布リポの対応表（{@link GEMMA4_SOURCES}）もここに置く。manifest から導ける値では
- * なく「どの manifest を取りに行くか」の側なので、配布形が持てない（ADR 0073）。
+ * NOTE: the public distribution repository table ({@link GEMMA4_SOURCES}) also lives here. It is
+ * not a value derivable from the manifest but the "which manifest to fetch" side, so a distribution
+ * cannot carry it (ADR 0073).
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -25,30 +28,33 @@ import {
   type Gemma4RopeSpec,
 } from "./rope.ts";
 
-/** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
+/** The contract name of `pipeline` and the major this implementation accepts (ADR 0038 §1). */
 export const GEMMA4_PIPELINE_NAME = "gemma4";
 export const GEMMA4_PIPELINE_MAJOR = 1;
 
 /**
- * Gemma 4 ファミリの**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は
- * 無い**）。値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ * The **public distribution repository table** of the Gemma 4 family (ADR 0092 — one table per
+ * family, **no default entry**). The values are **the sources this package version verified**
+ * (pinned commit SHAs — ADR 0073).
  *
- * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
- * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。同一家族 = 1 リポなので、
- * 将来の E4B / 12B もこの 1 本（`"gemma4"`）に同居する（既定以外は `{ model }` で選ぶ）。
+ * The key is the basename of the HF repository name without `karume-` (`"karume-" + key` gives back
+ * the repository basename — this invariant is checked by `tests/sources_test.ts`). One family = one
+ * repository, so a future E4B / 12B also lives in this one entry (`"gemma4"`) (non-default models
+ * are chosen with `{ model }`).
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
- * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
- * 既定は無い）。
+ * Pass it **as an opt-in when you want to follow the package version automatically** — to pin
+ * reproducibility yourself, write your own `{ repo, revision }` instead of using this table
+ * (`fromPretrained` has no default).
  *
- * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
- * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
- * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
- * 同時に成立する（ADR 0038）。main 追従が要る利用者は
- * `{ ...GEMMA4_SOURCES["gemma4"], revision: "main" }` を明示的に選ぶ。
+ * MUST: revisions are pinned to commit SHAs — branches and tags can be moved on the distribution
+ * side, so the bytes this published package reads would change silently at the network's
+ * convenience (an accident on the unrecoverable side). A SHA removes the revision-resolution
+ * request itself, so offline start-up with a full cache works at the same time (ADR 0038). A user
+ * who needs to follow main explicitly chooses `{ ...GEMMA4_SOURCES["gemma4"], revision: "main" }`.
  */
-// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+// NOTE: the revision is updated to main's SHA after the upload, in §3 of the release runbook
+// (docs/release-runbook.md) (inheriting the maintenance duty of ADR 0073 decision 3 — hand-written
+// + runbook gate).
 export const GEMMA4_SOURCES = {
   gemma4: {
     repo: "hdae/karume-gemma4",
@@ -57,77 +63,93 @@ export const GEMMA4_SOURCES = {
 } as const satisfies Record<string, HubRepoRef>;
 
 /**
- * 配布形が宣言できる sampler の既定（`SamplerSpec` の**部分集合**）。
+ * The sampler defaults a distribution can declare (a **subset** of `SamplerSpec`).
  *
- * MUST: `SamplerSpec` 全体を開けない — `logitBias` / `seed` /
- * `repetitionPenalty` は「配布者が推奨する」性質の値ではない（上流 `generation_config.json` が
- * 持つのもこの 3 つだけ）。型を `SamplerSpec` のままにすると**受理集合より広い型**になり、
- * 「型は通るのにパーサが未知キーで落とす」欄が公開面に生える。欄を増やすのは実需が出てから。
+ * MUST: do not open up the whole `SamplerSpec` — `logitBias` / `seed` / `repetitionPenalty` are not
+ * values of the "recommended by the distributor" kind (the upstream `generation_config.json` also
+ * carries only these three). Keeping the type as `SamplerSpec` would make it **wider than the
+ * acceptance set**, growing fields on the public surface that "pass the type but fail the parser as
+ * unknown keys". Add fields when a real need appears.
  *
- * MUST: 3 欄とも必須（{@link parseGemma4PipelineConfig} は欄の欠落を落とす）。部分宣言を
- * 許すと「温度だけ推奨・top-k は低層の既定」という**上流のどこにも無い**組み合わせが生まれる。
+ * MUST: all three fields are required ({@link parseGemma4PipelineConfig} rejects a missing field).
+ * Allowing partial declarations would create combinations found **nowhere upstream**, such as
+ * "temperature recommended, top-k left at the low-level default".
  */
 export type Gemma4DefaultSampler = {
-  /** softmax の前に logits を割る温度（0 以上の有限数）。 */
+  /** Temperature dividing the logits before softmax (a finite number ≥ 0). */
   readonly temperature: number;
-  /** 候補を確率上位 `topK` 件に絞る（1 以上の整数）。 */
+  /** Narrows the candidates to the top `topK` by probability (an integer ≥ 1). */
   readonly topK: number;
-  /** 累積確率が `topP` に達するまでの最小の候補集合に絞る（0 < topP ≤ 1）。 */
+  /**
+   * Narrows to the smallest candidate set whose cumulative probability reaches `topP` (0 < topP ≤
+   * 1).
+   */
   readonly topP: number;
 };
 
 /**
- * 静的配線のうち**資産世代ごとに動く数**（配布形の `pipelineConfig` が宣言する）。
+ * The **numbers that change with each asset generation** among the static wiring (declared by the
+ * distribution's `pipelineConfig`).
  *
- * NOTE: 記号（full スロットの容量記号）はここに置かない — グラフから導出できるものを宣言に
- * 二重持ちすると、片方だけ古びる（`pipeline.ts` の `capacitySymbolOf`）。
+ * NOTE: the symbol (the full slots' capacity symbol) is not put here — keeping something derivable
+ * from the graph in the declaration as well lets one copy go stale (`capacitySymbolOf` in
+ * `./admission.ts`).
  */
 export type Gemma4PipelineConfig = {
   /**
-   * 固定長 prefill chunk の行数の**既定**（ADR 0066 決定 4 — context の計画時定数）。
+   * The **default** row count of a fixed-length prefill chunk (ADR 0066 decision 4 — a plan-time
+   * constant of the context).
    *
-   * 実行時ノブでもある（`Gemma4PipelineOptions.chunkLength`）— グラフの chunk 行は記号 `M` なので、
-   * 資産を焼き直さずに選べる（上限は {@link maxChunkLength}）。
+   * It is also a runtime option (`Gemma4PipelineOptions.chunkLength`) — the graph's chunk rows are
+   * the symbol `M`, so it can be chosen without re-baking the asset (limited by
+   * {@link maxChunkLength}).
    */
   readonly chunkLength: number;
   /**
-   * `chunkLength` に選べる値の**上限**（記号 `M` を焼いた trace 範囲の上端）。
+   * The **upper limit** of values selectable for `chunkLength` (the top of the trace range the
+   * symbol `M` was baked with).
    *
-   * MUST: 必須。IR の `symbols` は名前の列だけで記号の上限を持たない（`format/ir.ts`）ので、
-   * これは**資産から導けない唯一の数**である。宣言が無いと、trace 範囲の外の `chunkLength` は
-   * 例外なく素通りして走る（値が壊れるとは限らないが保証の外 — 横断不変条件「想定外は
-   * fail loudly」に反する）。焼く側の正本は `gemma4.export.SYM_MAX`（配布 recipe が写しを持つ）。
+   * MUST: required. The IR's `symbols` is only a list of names and carries no symbol limit
+   * (`format/ir.ts`), so this is **the only number not derivable from the asset**. Without the
+   * declaration, a `chunkLength` outside the trace range would run through without an exception
+   * (the values are not necessarily broken, but it is outside the guarantee — against the
+   * cross-cutting invariant "fail loudly on the unexpected"). The baking side's canonical source is
+   * `gemma4.export.SYM_MAX` (the distribution recipe holds a copy).
    */
   readonly maxChunkLength: number;
   /**
-   * この**モデルが宣言する**絶対位置の排他的上限（上流 `max_position_embeddings`）。
+   * The exclusive upper limit of absolute positions **the model declares** (upstream
+   * `max_position_embeddings`).
    *
-   * NOTE: 以前は「焼き込んだ RoPE 表の行数」だった。表は配布形から外れ、cos / sin は chunk ぶんだけ
-   * ホストが作る（`./rope.ts`）ので、この数はもう資産の物理的な形ではなく**モデルの宣言**である。
-   * 読み手にとっての意味（`capacity` はこれを超えられない）は変わらない。
+   * NOTE: this used to be "the row count of the baked RoPE tables". The tables left the
+   * distribution and the host builds cos / sin only for the chunk (`./rope.ts`), so this number is
+   * no longer the physical shape of the asset but **the model's declaration**. What it means to the
+   * reader (`capacity` cannot exceed it) is unchanged.
    */
   readonly maxPosition: number;
   /**
-   * full スロットの容量の**既定**（会話が使える最大の論理長）。
+   * The **default** capacity of the full slots (the maximum logical length a conversation can use).
    *
-   * 実行時ノブでもある（`createGenerationSequence` / `Gemma4Pipeline.sequence` の `capacity`）—
-   * 容量は state スロットの物理確保量そのものなので、長い会話と VRAM の交換を呼び手が選ぶ。
+   * It is also a runtime option (`capacity` of `createGenerationSequence` /
+   * `Gemma4Pipeline.sequence`) — the capacity is the physical allocation of the state slots itself,
+   * so the caller chooses the trade between long conversations and VRAM.
    */
   readonly capacity: number;
   /**
-   * RoPE の cos / sin をホストで作るためのパラメータ（層種別 2 本 — ADR 0067 決定 4 の改訂）。
+   * Parameters for building RoPE's cos / sin on the host (two, one per layer type — a revision of
+   * ADR 0067 decision 4).
    *
-   * MUST: 必須。表がグラフから外れた配布形では、この宣言が**位置エンコーディングの唯一の出どころ**
-   * である（欠けたまま動けば、回転しない attention が例外なしで走る）。式と値域の正本は
-   * `./rope.ts`。
+   * MUST: required. In a distribution whose tables left the graph, this declaration is **the only
+   * source of position encoding** (running without it would run attention without rotation, with no
+   * exception). The canonical formula and value ranges live in `./rope.ts`.
    */
   readonly rope: Gemma4RopeSpec;
   /**
-   * 配布形が宣言する sampler の既定（ADR 0083 決定 7）。
+   * The sampler defaults the distribution declares (ADR 0083 decision 7).
    *
-   * リクエストが `sampler` を省略したときに使われる。宣言が無ければ低層の既定（温度 0 =
-   * greedy）のままで、これは「sampler 未宣言 = 温度 0 の縮退形」という位置づけである
-   * （parity 門はこの経路で生き続ける）。
+   * Used when a request omits `sampler`. Without a declaration the low-level default (temperature 0
+   * = greedy) stays, positioned as "no sampler declared = the degenerate temperature-0 form" (the
+   * parity check keeps living on this path).
    */
   readonly sampler?: Gemma4DefaultSampler;
 };
@@ -141,13 +163,19 @@ const ROOT_KEYS: readonly string[] = [
   "sampler",
 ];
 
-/** 受理する sampler の欄（型の正本は {@link Gemma4DefaultSampler} — 増やす理由も同 doc）。 */
+/**
+ * Accepted sampler fields (the type's canonical source is {@link Gemma4DefaultSampler} — so is the
+ * reason to add any).
+ */
 const SAMPLER_KEYS: readonly string[] = ["temperature", "topK", "topP"];
 
-/** 受理する rope 層種別の欄（型の正本は `./rope.ts` の {@link Gemma4RopeLayerSpec}）。 */
+/**
+ * Accepted fields per rope layer type (the type's canonical source is {@link Gemma4RopeLayerSpec}
+ * in `./rope.ts`).
+ */
 const ROPE_LAYER_KEYS: readonly string[] = ["theta", "headDim", "rotaryDim"];
 
-/** 欄が実在して数であることだけを見る（値域は呼び手が足す）。 */
+/** Checks only that the field exists and is a number (the caller adds the value range). */
 const readRawNumber = (raw: Record<string, unknown>, key: string, where: string): number => {
   if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
   const value = raw[key];
@@ -168,10 +196,10 @@ const readNumber = (
 };
 
 /**
- * `sampler` を読む（欄ごと無ければ `undefined` = 低層の既定 = greedy）。
+ * Reads `sampler` (when the whole field is absent, `undefined` = the low-level default = greedy).
  *
- * 値域は `generation/sampler.ts` の `assertSpec` と同じ — 配布形を読んだ時点で落とし、
- * 「1 回生成させてから初めて分かる」形を作らない。
+ * The value ranges are the same as `assertSpec` in `generation/sampler.ts` — rejected when the
+ * distribution is read, instead of the shape "found out only after generating once".
  */
 const parseSampler = (raw: unknown, where: string): Gemma4DefaultSampler => {
   const record = isRecord(raw) ? raw : undefined;
@@ -203,11 +231,12 @@ const parseSampler = (raw: unknown, where: string): Gemma4DefaultSampler => {
 };
 
 /**
- * 層種別 1 つぶんの rope パラメータを読む。
+ * Reads the rope parameters of one layer type.
  *
- * MUST: 値域はここで見ない — 数の受理集合（正の theta・偶数の headDim・`2 ≤ rotaryDim ≤ headDim`）は
- * `./rope.ts` の `assertGemma4RopeLayerSpec` が正本で、同じ式を 2 実装持つと片方だけが古びる。
- * ここが持つのは**宣言の形**（未知キー・欠落・型）だけである。
+ * MUST: value ranges are not checked here — the numeric acceptance set (positive theta, even
+ * headDim, `2 ≤ rotaryDim ≤ headDim`) is canonical in `assertGemma4RopeLayerSpec` of `./rope.ts`,
+ * and with the same formula in two implementations one goes stale. This function holds only **the
+ * shape of the declaration** (unknown keys, missing fields, types).
  */
 const parseRopeLayer = (raw: unknown, where: string): Gemma4RopeLayerSpec => {
   if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない（${String(raw)}）`);
@@ -219,7 +248,7 @@ const parseRopeLayer = (raw: unknown, where: string): Gemma4RopeLayerSpec => {
   };
 };
 
-/** 層種別 2 本ぶんを読み、値域は `./rope.ts` の門へ委ねる。 */
+/** Reads both layer types and leaves the value ranges to the check in `./rope.ts`. */
 const parseRope = (raw: unknown, where: string): Gemma4RopeSpec => {
   if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない（${String(raw)}）`);
   assertAllowedKeys(raw, GEMMA4_ROPE_LAYER_TYPES, where);
@@ -236,30 +265,36 @@ const parseRope = (raw: unknown, where: string): Gemma4RopeSpec => {
 };
 
 /**
- * `unknown`（hub が素通しした生の宣言）を検査して {@link Gemma4PipelineConfig} にする。
+ * Checks an `unknown` (the raw declaration hub passed through) and turns it into a
+ * {@link Gemma4PipelineConfig}.
  *
- * MUST: 数の関係まで見る — `chunkLength ≤ maxChunkLength` と `chunkLength ≤ capacity ≤ maxPosition`。
- * 容量いっぱいの会話は位置 `capacity - 1` まで進むので、モデルが宣言した位置上限を超える既定は
- * **長い会話でだけ**実行時に落ちる（焼く側の `gemma4_pipeline_config` が同じ関係を見るが、他人の
- * 配布形は検査を通っていない前提で読む）。実行時ノブ（sequence の `capacity`・pipeline の
- * `chunkLength`）にも同じ関係が掛かる（`generation/sequence.ts` / `./pipeline.ts`）。
+ * MUST: check the numeric relations as well — `chunkLength ≤ maxChunkLength` and `chunkLength ≤
+ * capacity ≤ maxPosition`. A conversation that fills the capacity reaches position `capacity - 1`,
+ * so a default above the model's declared position limit would fail at run time **only in long
+ * conversations** (the baking side's `gemma4_pipeline_config` checks the same relations, but other
+ * people's distributions are read on the assumption that they skipped the check). The runtime
+ * options (the sequence's `capacity`, the pipeline's `chunkLength`) are subject to the same
+ * relations (`generation/sequence.ts` / `./admission.ts`).
  *
- * ## 公開している理由 — `fromAssets` を使う消費者のための口
+ * ## Why it is public — the entry for consumers of `fromAssets`
  *
- * `Gemma4Pipeline.fromPretrained` は内部でこれを通すので呼ぶ必要は無い。要るのは
- * `Gemma4Pipeline.fromAssets` に自分でバイト列を渡す側で、`karume.json` を自前で読むと
- * 手元にあるのは hub の `ModelEntry.pipelineConfig`（`Record<string, unknown>`）である。
- * この口が無いと消費者は `as Gemma4PipelineConfig` で被せるか、3 つの数を配布形と自分の
- * コードに二重持ちするしかない（どちらも配布形が動いたときに黙って食い違う）。
+ * `Gemma4Pipeline.fromPretrained` runs this internally, so there is no need to call it. It is
+ * needed by callers who pass their own bytes to `Gemma4Pipeline.fromAssets`: reading `karume.json`
+ * themselves, what they hold is hub's `ModelEntry.pipelineConfig` (`Record<string, unknown>`).
+ * Without this entry a consumer could only cast with `as Gemma4PipelineConfig` or keep the three
+ * numbers both in the distribution and in their own code (either silently diverges when the
+ * distribution moves).
  */
 export const parseGemma4PipelineConfig = (raw: unknown): Gemma4PipelineConfig => {
   const where = "pipelineConfig";
   if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない（${String(raw)}）`);
   assertAllowedKeys(raw, ROOT_KEYS, where);
   const positiveInteger = (value: number): boolean => Number.isSafeInteger(value) && value >= 1;
-  // MUST: chunk の行数は 2 以上（実行時ノブの門 `assertChunkLength` と同じ下限 — 1 行の chunk は
-  // decode 形の専用値）。宣言の段で閉じないと、配布形の齟齬が呼び手の入力起因の型
-  // （`ModelInputError`）で落ちる（ADR 0107 決定 2）。書き手 `gemma4_pipeline_config` も [2, max] で焼く。
+  // MUST: chunk row counts are at least 2 (the same lower bound as the runtime option's check
+  // `assertChunkLength` — a one-row chunk is reserved for the decode shape). Without closing it at
+  // the declaration step, a distribution mismatch would fail with the type for caller-caused input
+  // (`ModelInputError`) (ADR 0107 decision 2). The writer `gemma4_pipeline_config` also bakes [2,
+  // max].
   const chunkRows = (value: number): boolean => Number.isSafeInteger(value) && value >= 2;
   const chunkLength = readNumber(raw, "chunkLength", where, chunkRows, "2 以上の整数でない");
   const maxChunkLength = readNumber(raw, "maxChunkLength", where, chunkRows, "2 以上の整数でない");

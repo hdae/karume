@@ -1,31 +1,35 @@
 /**
- * `t_embed` のホスト生成（上流 `get_timestep_embedding` の写し）。
+ * Host generation of `t_embed` (a copy of upstream's `get_timestep_embedding`).
  *
- * グラフに載せられないのは `cos` が IR の op 語彙に無いため（`sin` だけを足した第 1 層の
- * 判断 — ADR 0043 / 0047 決定 4）。
+ * It cannot go into the graph because `cos` is not in the IR's op vocabulary (the layer-1 decision
+ * that added only `sin` — ADR 0043 / 0047 decision 4).
  *
- * MUST: f32 の丸めを 1 演算ずつ `Math.fround` で踏む。JS の数値は f64 なので、まとめて
- * 計算してから丸めると torch の f32 逐次計算と最終桁が変わる（`anima/sampler.ts` の同節）。
+ * MUST: f32 rounding is applied one operation at a time with `Math.fround`. JS numbers are f64, so
+ * computing in bulk and rounding afterwards changes the last digits relative to torch's sequential
+ * f32 computation (the same section of `anima/sampler.ts`).
  *
- * ## NOTE: 参照とビット一致は**しない**（一致を期待して締めない）
+ * ## NOTE: it is **not** bit-identical to the reference (do not tighten expecting a match)
  *
- * torch CPU の f32 `exp` / `sin` / `cos` は SLEEF の 1.0 ULP 実装で、JS の `Math.*`（f64 で
- * 計算して f32 へ丸める）とは最終ビットが割れる。突合は golden 表からの実測で導いた atol
- * （テスト側の定数 docstring）で締める。
+ * torch CPU's f32 `exp` / `sin` / `cos` are SLEEF's 1.0-ULP implementations, and their last bits
+ * split from JS's `Math.*` (computed in f64 and rounded to f32). The comparison is bounded by an
+ * atol derived from measurements against the golden table (the docstring of the constant on the
+ * test side).
  */
 
 const f32 = Math.fround;
 
-/** 上流の `max_period`（`1000 · exp(−ln(10000)·k/half)` の 10000）。 */
+/** Upstream's `max_period` (the 10000 in `1000 · exp(−ln(10000)·k/half)`). */
 const MAX_PERIOD = 10000;
-/** 周波数の全体倍率（上流の `1000.0`）。 */
+/** Overall scale of the frequencies (upstream's `1000.0`). */
 const FREQ_SCALE = 1000;
 
 /**
- * 周波数表 `[dim/2]`。t に依らないので 1 回作って使い回す（40 step ぶんの再計算を避ける）。
+ * Frequency table `[dim/2]`. It does not depend on t, so it is built once and reused (avoids
+ * recomputing it for 40 steps).
  *
- * 式の順序も上流の写し: `−log(10000)` を f32 へ落としてから `k` を掛け、`half` で割り、
- * `exp` してから `1000` を掛ける。まとめて f64 で計算すると最終ビットが変わる。
+ * The order of the formula is also copied from upstream: round `−log(10000)` to f32, multiply by
+ * `k`, divide by `half`, take `exp`, then multiply by `1000`. Computing it all in f64 changes the
+ * last bits.
  */
 export const timestepFrequencies = (dim: number): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(dim) || dim <= 0 || dim % 2 !== 0) {
@@ -42,10 +46,11 @@ export const timestepFrequencies = (dim: number): Float32Array<ArrayBuffer> => {
 };
 
 /**
- * 1 step ぶんの `t_embed` `[2·freqs.length]`。**前半 cos・後半 sin**（上流の `torch.cat`）。
+ * `t_embed` `[2·freqs.length]` for one step. **First half cos, second half sin** (upstream's
+ * `torch.cat`).
  *
- * MUST: 前後半を入れ替えない。値域が同じ `[-1,1]` なので、取り違えても shape も統計も
- * 変わらず、出力だけが別物になる。
+ * MUST: do not swap the halves. Both have the range `[-1,1]`, so a mix-up changes neither the
+ * shape nor the statistics; only the output becomes something else.
  */
 export const timestepEmbedding = (
   t: number,

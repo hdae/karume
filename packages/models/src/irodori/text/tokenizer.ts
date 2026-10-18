@@ -1,18 +1,20 @@
 /**
- * Irodori-TTS v4 のトークナイザ（Unigram + byte_fallback）。text / caption の両方が同じ 1 本を通る。
+ * The Irodori-TTS v4 tokenizer (Unigram + byte_fallback). Both text and caption go through this
+ * same one.
  *
- * 正本の経路（`tokenizer/tokenizer.json`）は
- *   AddedVocabulary（18 特殊トークンを leftmost-longest で切り出す）
- *   → normalizer は **null**（正規化は上流のパイプライン段 `normalize.ts` が担う）
+ * The canonical path (`tokenizer/tokenizer.json`) is
+ *   AddedVocabulary (splits out the 18 special tokens leftmost-longest)
+ *   → normalizer is **null** (normalization is done by the earlier pipeline step `normalize.ts`)
  *   → Metaspace{replacement=▁, prepend_scheme=never, split=false}
- *      = U+0020 を ▁ に置換するだけ（**先頭に ▁ を足さない / ▁ で断片に割らない**）
- *   → Unigram（Viterbi・unk_id=0・**byte_fallback あり**・fuse_unk）
- *   → post_processor は特殊トークンを足さない（BOS は下の {@link IrodoriTokenizer.encodePadded}
- *      = 上流 `PretrainedTextTokenizer.batch_encode` 相当が前置する）
+ *      = only replaces U+0020 with ▁ (**does not prepend ▁ / does not split into pieces at ▁**)
+ *   → Unigram (Viterbi, unk_id=0, **with byte_fallback**, fuse_unk)
+ *   → post_processor adds no special tokens (BOS is prepended by
+ *      {@link IrodoriTokenizer.encodePadded} below = the counterpart of upstream's
+ *      `PretrainedTextTokenizer.batch_encode`)
  *
- * Unigram 本体（Viterbi・同点処理・`fuse_unk`・バイト展開）はファミリ非依存なので
- * `src/text/unigram.ts` が持つ。ここが持つのは Irodori 固有の前段（AddedVocabulary・Metaspace）と
- * 後段（BOS 前置・切り詰め・右 pad・マスク）だけ。
+ * The Unigram core (Viterbi, tie handling, `fuse_unk`, byte expansion) is family-independent, so
+ * `src/text/unigram.ts` holds it. This module holds only Irodori's own front end (AddedVocabulary,
+ * Metaspace) and back end (BOS prepend, truncation, right padding, mask).
  */
 
 import { type AddedTokenMatcher, createAddedTokenMatcher } from "../../text/added-tokens.ts";
@@ -28,25 +30,28 @@ import {
 import { assertEncodableText, toCodePoints } from "../../text/code-points.ts";
 import { type UnigramModel, unigramTokenize, type UnigramVocabEntry } from "../../text/unigram.ts";
 
-/** Metaspace の置換文字（U+2581）。 */
+/** Metaspace replacement character (U+2581). */
 const METASPACE = "▁";
 
 export type IrodoriTokenizerAssets = {
   readonly vocab: ReadonlyMap<string, UnigramVocabEntry>;
-  /** 語彙**全体**の最小スコア。部分集合を渡す場合も全体の値を渡す（未知ノードの重み）。 */
+  /**
+   * Minimum score of the **whole** vocabulary. Pass the whole-vocabulary value even when passing a
+   * subset (the weight of unknown nodes).
+   */
   readonly minScore: number;
-  /** 語彙**全体**の最長トークンのコードポイント数（前方一致の探索幅）。 */
+  /** Code-point count of the longest token of the **whole** vocabulary (prefix-search width). */
   readonly maxTokenLength: number;
   readonly unkId: number;
-  /** `<0x00>` の id（未知の断片は UTF-8 バイト列 → `byteBaseId + バイト値` へ展開される）。 */
+  /** Id of `<0x00>` (an unknown piece expands to UTF-8 bytes → `byteBaseId + byte value`). */
   readonly byteBaseId: number;
   readonly bosId: number;
   readonly padId: number;
-  /** 追加語彙（特殊トークン）。正規化の**前**に切り出される。 */
+  /** Added vocabulary (special tokens). Split out **before** normalization. */
   readonly addedTokens: ReadonlyMap<string, number>;
 };
 
-/** 上流 `batch_encode` の最終形（グラフ入力の dtype — i32 と bool = u32・ADR 0009）。 */
+/** Final form of upstream's `batch_encode` (graph input dtypes — i32 and bool = u32, ADR 0009). */
 type IrodoriPaddedIds = {
   readonly ids: Int32Array<ArrayBuffer>;
   readonly mask: Uint32Array<ArrayBuffer>;
@@ -62,15 +67,17 @@ export class IrodoriTokenizer {
   }
 
   /**
-   * 正規化済みテキスト → 素の id 列（特殊トークンを足さない）。
+   * Normalized text → plain id sequence (no special tokens added).
    *
-   * MUST: 入力は `normalize.ts` を通した後の文字列。正本の `tokenizer.json` は normalizer が
-   * null なので、ここで正規化すると二重掛けになる（`…` の縮約などが 2 回走る）。
+   * MUST: the input is the string after `normalize.ts`. The canonical `tokenizer.json` has a null
+   * normalizer, so normalizing here would apply it twice (the `…` collapsing and so on would run
+   * twice).
    */
   encode(text: string): number[] {
-    // 本文そのものの受理検査は格子を解く前に通す（ADR 0107 決定 2 の入力起因）。下の
-    // 資産解析（`parseIrodoriTokenizerAssets`）も同じ条件を通るが、そちらの破れは資産の
-    // 齟齬なので素の `Error` のまま残す。
+    // The acceptance check of the body text itself runs before the lattice is solved (input-caused
+    // per ADR 0107 decision 2). The asset parsing below (`parseIrodoriTokenizerAsset`) goes
+    // through the same condition, but a violation there is an asset mismatch, so it stays a plain
+    // `Error`.
     assertEncodableText(text, "irodori の本文");
     const ids: number[] = [];
     for (const chunk of this.#added.split(text)) {
@@ -78,10 +85,12 @@ export class IrodoriTokenizer {
         ids.push(this.#assets.addedTokens.get(chunk.text) as number);
         continue;
       }
-      // Metaspace は `split=false` なので断片に割らない — 全文を 1 つの格子で解く。
+      // Metaspace has `split=false`, so the text is not split into pieces — the whole text is
+      // solved as one lattice.
       const piece = chunk.text.replaceAll(" ", METASPACE);
-      // IrodoriTokenizerAssets は UnigramModel の面をそのまま満たす。断片が全文なので id 列も
-      // 長くなりうる — 引数展開（`push(...ids)`）にするとスタック上限に当たる。
+      // IrodoriTokenizerAssets satisfies the UnigramModel surface as is. The piece is the whole
+      // text, so the id sequence can be long too — spreading arguments (`push(...ids)`) would hit
+      // the stack limit.
       for (const id of unigramTokenize(this.#assets satisfies UnigramModel, toCodePoints(piece))) {
         ids.push(id);
       }
@@ -90,12 +99,13 @@ export class IrodoriTokenizer {
   }
 
   /**
-   * 上流 `PretrainedTextTokenizer.batch_encode([text], max_length)` と同じ最終形:
-   * BOS 前置 + 右詰め pad + 有効長マスク。
+   * The same final form as upstream's `PretrainedTextTokenizer.batch_encode([text], max_length)`:
+   * BOS prepended + right padding + valid-length mask.
    *
-   * MUST: 本体の予算は `maxLength - 1`（BOS の 1 個ぶんを空ける）。素朴に `maxLength` で切ると
-   * 全体が 1 個溢れる — 書き込みに {@link Int32Array.prototype.set} を使うのはそれを黙って
-   * 捨てさせないため（添字代入は範囲外を無視するので、溢れが沈黙で吸われる）。
+   * MUST: the body budget is `maxLength - 1` (leaving room for the one BOS). Naively cutting at
+   * `maxLength` overflows the whole by one — writing with {@link Int32Array.prototype.set} is there
+   * so that the overflow is not silently discarded (index assignment ignores out-of-range writes,
+   * so the overflow would be swallowed silently).
    */
   encodePadded(text: string, maxLength: number): IrodoriPaddedIds {
     if (!Number.isInteger(maxLength) || maxLength <= 0) {
@@ -113,18 +123,21 @@ export class IrodoriTokenizer {
 }
 
 /**
- * byte fallback の先頭 id（{@link asId} に加えて 256 本連番全体が語彙内であること）。
+ * First id of the byte fallback ({@link asId}, plus the whole run of 256 consecutive ids being
+ * inside the vocabulary).
  *
- * MUST: 単独 id 用の {@link asVocabId}（`< vocabSize`）では足りない — `byteBaseId` は
- * 単独の id ではなく未知断片の展開先 256 本連番の先頭で、消費側（`unigram.ts` の
- * `base + byte`、byte = 0..255）は `byteBaseId + 255` まで発行する。ここを見逃すと
- * 未知断片が現れた瞬間に語彙外 id が出て、embedding gather の OOB（非有限 — ADR 0061）まで
- * 表面化しない沈黙誤値になる。
+ * MUST: {@link asVocabId} for a single id (`< vocabSize`) is not enough — `byteBaseId` is not a
+ * single id but the start of the 256 consecutive ids an unknown piece expands to, and the consumer
+ * (`base + byte` in `unigram.ts`, byte = 0..255) emits up to `byteBaseId + 255`. Missing this, an
+ * out-of-vocabulary id appears the moment an unknown piece shows up, a silent wrong value that does
+ * not surface until the OOB of the embedding gather (non-finite — ADR 0061).
  *
- * MUST: 256 行の綴りも照合する（`<0x00>`..`<0xFF>` が順に並ぶこと = 配布契約）。消費側は
- * 綴りではなく連番の算術で id を求めるので、行が入れ替わった資産は HF（名前で id を引く）と
- * 別の id を黙って出す。exporter 側（`tools/export-recipes/irodori/tokenizer_ref.py`）の
- * 連番検査と対で、読み込み側でも同じ契約を落とす。
+ * MUST: the spellings of the 256 rows are matched too (`<0x00>`..`<0xFF>` in order = the
+ * distribution contract). The consumer computes ids by arithmetic on the run, not by spelling, so
+ * an asset with swapped rows would silently emit ids different from HF (which looks ids up by
+ * name). Paired with the run check on the exporter side
+ * (`tools/export-recipes/irodori/tokenizer_ref.py`), the reader rejects the same contract
+ * violations.
  */
 const asByteBaseId = (value: unknown, label: string, tokens: readonly string[]): number => {
   const id = asId(value, label);
@@ -145,14 +158,17 @@ const asByteBaseId = (value: unknown, label: string, tokens: readonly string[]):
 };
 
 /**
- * 追加トークン（語彙の前段で丸ごと切り出す綴り → id）を読み、語彙表と突き合わせる。
+ * Reads the added tokens (spelling split out whole before the vocabulary → id) and matches them
+ * against the vocabulary table.
  *
- * MUST: id は語彙の行数未満。共通の {@link parseAddedTokens} は i32 の値域しか見ない（anima の
- * Qwen2 が語彙表の外へ採番する形を正当に持つため — 共通側は狭めない）が、Irodori の追加
- * トークンは全て語彙表の行で、encode は写像の値をそのままグラフ入力へ積む。範囲外の id を
- * 通すと embedding gather の OOB（非有限 — ADR 0061）まで表面化しない。
- * MUST: 語彙に同じ綴りの行があれば id はその行番号と一致する。食い違うと、追加トークンとして
- * 切り出した綴りだけが語彙表と別の行を指す沈黙誤値になる（形も値域も合ったまま通る）。
+ * MUST: an id is below the vocabulary row count. The shared {@link parseAddedTokens} checks only
+ * the i32 range (anima's Qwen2 legitimately numbers tokens outside its vocabulary table — the shared
+ * side is not narrowed), but Irodori's added tokens are all rows of the vocabulary table, and encode
+ * pushes the mapped values into the graph input as they are. An out-of-range id that gets through
+ * does not surface until the OOB of the embedding gather (non-finite — ADR 0061).
+ * MUST: if the vocabulary has a row with the same spelling, the id equals that row number. On a
+ * mismatch, only the spellings split out as added tokens point at a different row than the
+ * vocabulary table, a silent wrong value (it passes with matching shape and range).
  */
 const parseIrodoriAddedTokens = (
   raw: unknown,
@@ -177,22 +193,28 @@ const parseIrodoriAddedTokens = (
 };
 
 /**
- * 資産 JSON（exporter の `tokenizer.json`）を資産表へ。外部境界なので構造を検査してから使う。
+ * Asset JSON (the exporter's `tokenizer.json`) → the asset table. It is an external boundary, so the
+ * structure is checked before use.
  *
- * MUST: 語彙の行数と `scores` の本数を突き合わせる。ずれたまま通すと id が総ずれするが、
- * Viterbi は落ちない（語彙に無い断片はバイト展開へ逃げる）ので**沈黙誤値**になる。
- * MUST: 行の一意性も見る（{@link assertUniqueLines} — 行数の突合では重複を捕まえられない）。
- * MUST: 単独の特殊 id は整数かつ語彙の行数未満（{@link asVocabId} — 理由は同 doc）。
- * MUST: `byteBaseId` は単独 id ではないので {@link asVocabId} では足りない —
- * 256 本連番の全体が語彙内であること（{@link asByteBaseId} — 理由は同 doc）。
- * MUST: 追加トークンも語彙表と突き合わせる（{@link parseIrodoriAddedTokens} — 理由は同 doc）。
+ * MUST: the vocabulary row count and the number of `scores` are matched. Letting a mismatch through
+ * shifts every id, but Viterbi does not fail (a piece missing from the vocabulary escapes to byte
+ * expansion), so it becomes a **silent wrong value**.
+ * MUST: row uniqueness is checked too ({@link assertUniqueLines} — matching the row count cannot
+ * catch duplicates).
+ * MUST: a single special id is an integer below the vocabulary row count ({@link asVocabId} — the
+ * reason is in its doc).
+ * MUST: `byteBaseId` is not a single id, so {@link asVocabId} is not enough — the whole run of 256
+ * consecutive ids must be inside the vocabulary ({@link asByteBaseId} — the reason is in its doc).
+ * MUST: the added tokens are matched against the vocabulary table too
+ * ({@link parseIrodoriAddedTokens} — the reason is in its doc).
  */
 export const parseIrodoriTokenizerAsset = (
   raw: unknown,
   label: string = "tokenizer",
 ): IrodoriTokenizerAssets => {
   const obj = asRecord(raw, label);
-  // 行番号 0-origin = id。語彙に改行・タブ・生空白を含むトークンが無いことは emit 時に検査済み。
+  // 0-origin row number = id. That no token in the vocabulary contains a newline, tab or raw space
+  // was checked at emit time.
   const tokens = asString(obj["vocabText"], `${label}.vocabText`).split("\n");
   const rawScores = obj["scores"];
   if (!Array.isArray(rawScores) || rawScores.length !== tokens.length) {

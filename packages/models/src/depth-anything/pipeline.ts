@@ -1,48 +1,55 @@
 /**
- * `DepthAnythingPipeline` — 画像 → 相対深度マップ（単一画像の深度推定）の 1 本の面。
+ * `DepthAnythingPipeline` — the single surface for image → relative depth map (single-image depth
+ * estimation).
  *
- * パイプライン（全段 Karume・torch 不使用）:
+ * Pipeline (every step in Karume, no torch):
  *
- * 1. ホスト: RGB8 の画素列を `pipelineConfig` の寸法へ resize（antialias 付き **bicubic**）
- * 2. ホスト: rescale + normalize を畳んだ形で通し、`[1, 3, S, S]` の f32 にする
- * 3. `depth` を 1 回回す → **相対深度** `[1, S, S]`（head 末尾の ReLU 済み・非負）
- * 4. ホスト: 元画像の解像度へ戻す
+ * 1. Host: resize the RGB8 pixel row to the size in `pipelineConfig` (antialiased **bicubic**)
+ * 2. Host: apply rescale + normalize folded together into `[1, 3, S, S]` f32
+ * 3. Run `depth` once → **relative depth** `[1, S, S]` (after the head's final ReLU, non-negative)
+ * 4. Host: back to the original image resolution
  *
- * 前処理 2 段の実装と参照実装は `src/image/preprocess.ts`（`resizeRgb8` / `normalizeToNchw`）で、
- * ここはそれを `pipelineConfig` の定数で結線するだけ。**decode は karume の責務ではない** —
- * 入口は「RGB8 の画素列 + 幅 + 高さ」で、PNG / JPEG のデコーダは持たない（ブラウザなら
- * `createImageBitmap` + canvas、Deno なら任意のデコーダ）。
+ * The implementation and the reference implementation of the two preprocessing steps live in
+ * `src/image/preprocess.ts` (`resizeRgb8` / `normalizeToNchw`); this only wires them with the
+ * `pipelineConfig` constants. **Decoding is not karume's job** — the entry is "RGB8 pixel row +
+ * width + height", and there is no PNG / JPEG decoder (in a browser `createImageBitmap` + canvas,
+ * on Node / Deno any decoder).
  *
- * MUST: 補間は **bicubic**（上流 `preprocessor_config.json` の `"resample": 3`）。SigLIP2 /
- * BiRefNet の bilinear とは別のフィルタで、宣言の受理集合が `src/depth-anything/config.ts` で
- * 1 値に絞ってある（取り違えは `pixel_values` の最大 0.59 ずれ = uint8 1 LSB の 34 倍）。
+ * MUST: the interpolation is **bicubic** (`"resample": 3` of the upstream
+ * `preprocessor_config.json`). It is a different filter from the bilinear of SigLIP2 / BiRefNet,
+ * and the declaration's accepted set is narrowed to one value in `src/depth-anything/config.ts` (a
+ * mix-up shifts `pixel_values` by up to 0.59 = 34 times one uint8 LSB).
  *
- * ## MUST: Session は構築時に 1 本だけ張り、`dispose` まで持つ（Anima / Irodori と非対称）
+ * ## MUST: one Session is created at construction and kept until `dispose` (unlike Anima / Irodori)
  *
- * あちらが段ごとに張っては畳むのは、複数の巨大グラフを同時常駐させられないから（ADR 0016）。
- * こちらはグラフが 1 本（Small で 99MB）で畳む相手がおらず、逆に「1 枚ごとに張っては畳む」
- * 形にすると**画像 1 枚あたり重みを丸ごとアップロードし直す**。深度推定は何枚も通す使い方が
- * 普通なので、常駐が既定の形になる（SigLIP2 / BiRefNet と同じ理由・同じ形）。
+ * Those create and tear down per step because several huge graphs cannot be resident at once
+ * (ADR 0016). Here there is one graph (99MB for Small) with nothing to make room for; the opposite,
+ * "create and tear down per image", **would re-upload the whole weights for every image**. Depth
+ * estimation normally runs many images, so residency is the default shape (the same reason and the
+ * same shape as SigLIP2 / BiRefNet).
  *
- * MUST: それでも直列化鎖には載せる — `estimate` の同時実行は 1 つの Session を 2 本の `run` で
- * 共有することになり、`dispose` は in-flight の完了を待たずに GPU を破棄する
- * （flush-before-destroy 違反）。
+ * MUST: it still goes on the serialization chain — concurrent `estimate` calls would share one
+ * Session between two `run`s, and `dispose` would destroy the GPU without waiting for in-flight
+ * work (a flush-before-destroy violation).
  *
- * ## 返すのは **生の相対深度 f32**（`[0, 1]` へ畳まない・PNG も持たない）
+ * ## It returns **raw relative depth in f32** (not folded into `[0, 1]`, no PNG)
  *
- * {@link DepthAnythingPipeline.estimate} が返すのは「入力と同じ寸法・画素あたり 1 つの f32」で、
- * 正規化も着色もしない。
+ * {@link DepthAnythingPipeline.estimate} returns "one f32 per pixel, at the size of the input",
+ * with no normalization and no colouring.
  *
- * - **正規化は可視化の決定であって推論の一部ではない**。min-max で畳むと元の尺度が復元でき
- *   なくなり、2 枚の深度を同じ尺度で並べる / 閾値を跨いで使う口が消える（逆向きは 3 行で
- *   できる — 下の「使い方」）。BiRefNet が α マットを返して RGBA 合成を持たないのと同じ線。
- * - `min` / `max` を添えて返すこともしない — 返した配列から**導出できる**値で、独立に更新
- *   される席を作らない（CLAUDE.md の「導出可能な状態を二重に持たない」）。
- * - **相対深度には単位も原点も無い**（大きいほど手前）。`[0, 1]` に見える口を生やすと、
- *   絶対距離を約束していると読める — この重みは metric depth ではない
- *   （`depth_estimation_type` は `relative`・`tools/export-recipes/depth_anything/patch.py` が構成を検査する）。
+ * - **Normalization is a visualization decision, not part of inference.** Folding by min-max makes
+ *   the original scale unrecoverable and removes the way to put two depth maps on the same scale or
+ *   to use a threshold across them (the other direction takes three lines — "Usage" below). The
+ *   same line as BiRefNet returning an alpha matte without RGBA compositing.
+ * - Nor does it return `min` / `max` alongside — they are **derivable** from the returned array,
+ *   and no independently updated field is created (CLAUDE.md's "do not hold derivable state
+ *   twice").
+ * - **Relative depth has neither a unit nor an origin** (larger = nearer). An entry that looks like
+ *   `[0, 1]` would read as a promise of absolute distance — these weights are not metric depth
+ *   (`depth_estimation_type` is `relative`; `tools/export-recipes/depth_anything/patch.py` checks
+ *   the configuration).
  *
- * 使い方（可視化用に `[0, 1]` へ畳む場合）:
+ * Usage (folding into `[0, 1]` for visualization):
  *
  * ```ts
  * const depth = await pipeline.estimate(image);
@@ -56,32 +63,34 @@
  * const normalized = depth.data.map((value) => (span > 0 ? (value - min) / span : 0));
  * ```
  *
- * ## NOTE: 元解像度へ戻す段は bilinear（上流の `post_process_depth_estimation` と別）
+ * ## NOTE: step 4 is bilinear (unlike upstream's `post_process_depth_estimation`)
  *
- * 段 4 は `resizePlaneF32`（`src/image/preprocess.ts` — Pillow / torchvision と同じ台の
- * **antialias 付き bilinear**）を使う。上流 transformers の
- * `DPTImageProcessor.post_process_depth_estimation` は
- * `F.interpolate(mode="bicubic", align_corners=False)`（a = −0.75・antialias 無し）で、
- * **カーネルも縮小時の台の伸びも別**（焼かれた 518² より小さい画像へ戻すとき、こちらは
- * 面積平均が掛かる）。合わせていないのは、
+ * Step 4 uses `resizePlaneF32` (`src/image/preprocess.ts` — **antialiased bilinear** with the same
+ * support as Pillow / torchvision). Upstream transformers'
+ * `DPTImageProcessor.post_process_depth_estimation` is
+ * `F.interpolate(mode="bicubic", align_corners=False)` (a = −0.75, no antialias), so **both the
+ * kernel and the support stretch on downscaling differ** (when going back to an image smaller than
+ * the baked 518², this side applies area averaging). They are not matched because
  *
- * - モデルの答えは焼かれた解像度（518²）の `predicted_depth` そのもので、そこから先の拡大は
- *   情報を増やさない**表示解像度への引き伸ばし**だから。数値の正はその 518² の地図に対して
- *   `packages/runtime/tests/e2e_depth_anything_real_test.ts` が掛かっている。
- * - `post_process_depth_estimation` は transformers 側の任意の便宜関数で、チェックポイントの
- *   定義（`preprocessor_config.json`）には現れない。前処理の `resample` と違い、**配布形が
- *   宣言として持つ事実ではない**。
+ * - the model's answer is the `predicted_depth` at the baked resolution (518²) itself, and
+ *   upscaling from there adds no information — it is **a stretch to the display resolution**.
+ *   Numerical correctness is checked on that 518² map by
+ *   `packages/e2e/tests/e2e_depth_anything_real_test.ts`.
+ * - `post_process_depth_estimation` is an optional convenience function on the transformers side
+ *   and does not appear in the checkpoint's definition (`preprocessor_config.json`). Unlike the
+ *   preprocessing `resample`, **it is not a fact the distribution holds as a declaration**.
  *
- * 逆に言えば「上流の後処理とビット単位で揃える」主張は**していない**。揃える必要が出たら、
- * `resizePlaneF32` に `F.interpolate` 互換の三次枝（a = −0.75・antialias 無し）を足す設計に
- * なる（現状は bilinear 固定）。
+ * Conversely, **no** claim is made of "bit-for-bit agreement with the upstream post-processing". If
+ * that becomes necessary, the design would add an `F.interpolate`-compatible cubic branch (a
+ * = −0.75, no antialias) to `resizePlaneF32` (today bilinear is fixed).
  *
- * ## MUST: 数値の正はここでは担保されない
+ * ## MUST: numerical correctness is not guaranteed here
  *
- * 正はグラフ単位の golden E2E（`packages/runtime/tests/e2e_depth_anything_real_test.ts` — 実重み ×
- * 合成 4 + 実画像 4 ケース）と、前処理のパリティ門
- * （`packages/models/tests/image_preprocess_test.ts` / 実画像は
- * `packages/models/tests/e2e_depth_anything_real_test.ts`）が担保する。
+ * Correctness is guaranteed by `packages/e2e/tests/e2e_depth_anything_real_test.ts` (the model
+ * output pinned per environment by its sha256 rows — ADR 0106 — and the real-image discrimination
+ * test; the torch golden-parity cases were dropped in the 0.15 test triage) and the preprocessing
+ * parity check (`packages/models/tests/image_preprocess_test.ts` / real images in the same
+ * `packages/e2e/tests/e2e_depth_anything_real_test.ts`).
  */
 
 import {
@@ -141,19 +150,22 @@ import {
 import { readAssetBuffer } from "../hub/asset-readers.ts";
 import { assertGraphInputDim, assertGraphInputDtype } from "../hub/graph-gates.ts";
 
-/** manifest の weights 表に現れる部品名（ADR 0041 §3 の規約名）。 */
+/** Component name in the manifest's weights table (the conventional name of ADR 0041 §3). */
 const DEPTH = "depth";
 
-/** この系列の weights 部品（差し替え席が受ける役割名でもある）。 */
+/** This family's weights components (also the role names component replacement accepts). */
 const COMPONENT_KEYS = [DEPTH] as const;
 
-/** グラフ入力の名前（`tools/export-recipes/depth_anything/export.py` の `INPUT_NAME`）。 */
+/** Name of the graph input (`INPUT_NAME` in `tools/export-recipes/depth_anything/export.py`). */
 const PIXEL_VALUES = "pixel_values";
 
-/** 入力のチャネル数（RGB）。batch と併せてグラフ側も静的 1 / 3 で焼かれている。 */
+/** Input channel count (RGB). The graph is baked with static 1 / 3 for it and the batch. */
 const CHANNELS = 3;
 
-/** 入力と同じ寸法の相対深度マップ（画素あたり 1 つの f32・行優先・非負・大きいほど手前）。 */
+/**
+ * A relative depth map of the same size as the input (one f32 per pixel, row-major, non-negative,
+ * larger = nearer).
+ */
 export type DepthMap = {
   readonly data: Float32Array<ArrayBuffer>;
   readonly width: number;
@@ -161,38 +173,39 @@ export type DepthMap = {
 };
 
 /**
- * 構築オプション（{@link DepthAnythingPipeline.fromAssets} /
- * {@link DepthAnythingPipeline.fromPretrained} 共通）。
+ * Construction options (shared by {@link DepthAnythingPipeline.fromAssets} /
+ * {@link DepthAnythingPipeline.fromPretrained}).
  */
 export type DepthAnythingPipelineOptions = {
   /**
-   * 既存の GPU を共有する。**渡した側が所有権を持つ**ので
-   * {@link DepthAnythingPipeline.dispose} は破棄しない。省略時はパイプラインが内部で
-   * `acquireGpu` し、`dispose()` で破棄する。
+   * Shares an existing GPU. **The caller keeps ownership**, so
+   * {@link DepthAnythingPipeline.dispose} does not destroy it. When omitted, the pipeline calls
+   * `acquireGpu` internally and destroys it in `dispose()`.
    */
   readonly gpu?: GpuContext;
-  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  /** Model (a key of the manifest's models). Defaults to `defaultModel`. */
   readonly model?: string;
-  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  /** Execution configuration (a key of that model's quants). Defaults to `defaultQuant`. */
   readonly quant?: string;
   /**
-   * 実行 1 回ごとの診断を受け取る観測席（1 深度地図 = `depth` 1 回）。op 別 GPU 時間
-   * （`lastRunTiming`）が要るときは `gpu` に `acquireGpu({ gpuTiming: true })` を渡す
-   * （ADR 0021 — 既定は計測しない）。
+   * Observation hook that receives the diagnostics of each run (one depth map = one `depth` run).
+   * For per-op GPU time (`lastRunTiming`) pass `acquireGpu({ gpuTiming: true })` as `gpu` (ADR 0021
+   * — no timing by default).
    *
-   * NOTE: SigLIP2 / BiRefNet と同じくコンポーネント名を渡さない — グラフが 1 本しかないので、
-   * 名前が常に同じ 1 値になる（受け手が分岐できない引数を渡さない）。
+   * NOTE: like SigLIP2 / BiRefNet, no component name is passed — there is one graph, so the name
+   * would always be the same single value (no argument the receiver cannot branch on).
    *
-   * コールバックの例外は握らない（fail loudly — 推定ごと落ちる）。
+   * Exceptions from the callback are not caught (fail loudly — the estimation fails with it).
    */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
 /**
- * {@link DepthAnythingPipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。
+ * Fetch-layer options used only by {@link DepthAnythingPipeline.fromPretrained} (passed through to
+ * the hub).
  *
- * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
- * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
+ * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
+ * `onRetry` are **for HTTP sources only**, lives in one place, {@link FromPretrainedHubOptions}.
  */
 export type DepthAnythingFromPretrainedOptions = DepthAnythingPipelineOptions &
   FromPretrainedHubOptions &
@@ -200,17 +213,18 @@ export type DepthAnythingFromPretrainedOptions = DepthAnythingPipelineOptions &
     readonly signal?: AbortSignal;
   };
 
-/** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
+/** Input for building directly from fetched assets (pass the hub's `fetchAssets` result as is). */
 export type DepthAnythingAssets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
 /**
- * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は
- * {@link readAssetBuffer}）。
+ * Turns the fetched bytes into an ArrayBuffer that can be passed to `openContainer` (the check
+ * itself is {@link readAssetBuffer}).
  *
- * MUST: `slice` で写さない — 配布形は 1 本 99MB あり、ホスト RAM のピークが倍になる。
+ * MUST: do not copy with `slice` — the distribution is 99MB in one file, and the host RAM peak
+ * would double.
  */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -218,24 +232,27 @@ const assetBuffer = (
 ): ArrayBuffer => readAssetBuffer("depth-anything", "weights", assets, key);
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 8 家族共有 —
- * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`depth`）か、分割形の
- * part 列（`depth[0]` / `depth[1]` / …）。
+ * The component supplier of the full-asset surface (`fromAssets`) (the receiving implementation is
+ * shared by every family — {@link assetComponentOpener}). A component key is either one single-form
+ * `krm` (`depth`) or the part sequence of the split form (`depth[0]` / `depth[1]` / …).
  */
 const assetOpener = (assets: DepthAnythingAssets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("depth-anything", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
- * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
+ * Checks that the **static** dimension of one graph-input axis matches the `pipelineConfig`
+ * declaration.
  *
- * MUST: 落とさない。前処理は宣言の寸法へ resize するので、グラフが別の解像度で焼かれていても
- * **ホスト側は最後まで通る**（落ちるのは Session の shape 検査で、そのときには「どちらの数が
- * 正しいのか」が読み手に伝わらない）。DINOv2 の位置埋め込みはパッチ数に紐づいているので、
- * 事前学習解像度でないグラフはそもそも焼けない（`tools/export-recipes/depth_anything/patch.py` の ②）— つまりここで
- * 落ちるのは常に**資産の取り違え**である。
+ * MUST: do not drop this check. Preprocessing resizes to the declared size, so even when the graph
+ * was baked at another resolution **the host side passes all the way through** (the failure comes
+ * from the Session's shape check, by which time the reader cannot tell "which number is right").
+ * DINOv2's position embeddings are tied to the patch count, so a graph at anything but the
+ * pretraining resolution cannot be baked in the first place (② of
+ * `tools/export-recipes/depth_anything/patch.py`) — so a failure here is always **a mixed-up
+ * asset**.
  *
- * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: the `export` is for tests that pin the rejection paths without a GPU (not exposed on
+ * `mod.ts` / the subpath surface — ADR 0008).
  */
 export const assertStaticDim = (
   model: GraphOwner,
@@ -246,15 +263,15 @@ export const assertStaticDim = (
 ): void => assertGraphInputDim("depth-anything", model, inputName, axis, expected, where);
 
 /**
- * グラフ**出力**の形が `[1, imageHeight, imageWidth]` であることを見る。
+ * Checks that the graph **output** has shape `[1, imageHeight, imageWidth]`.
  *
- * MUST: 落とさない。後段は「要素数が H×W」しか見ない形にもできるが、それだとチャネル軸を
- * 持ったまま焼かれたグラフ（`[1, 1, S, S]`）や、中間段まで出す別 export が**別の値を深度
- * として**通り抜ける。階数まで見るのは、`[1, S, S]` と `[1, 1, S, S]` が要素数では区別
- * できないため。
+ * MUST: do not drop this check. The later steps could check only "element count is H×W", but then a
+ * graph baked with the channel axis kept (`[1, 1, S, S]`) or another export that also emits
+ * intermediate stages would pass through **with different values read as depth**. The rank is
+ * checked too because `[1, S, S]` and `[1, 1, S, S]` cannot be told apart by element count.
  *
- * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: the `export` is for tests that pin the rejection paths without a GPU (not exposed on
+ * `mod.ts` / the subpath surface — ADR 0008).
  */
 export const assertDepthShape = (
   model: GraphOwner,
@@ -284,22 +301,23 @@ const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
 };
 
 /**
- * RGB8 の画素列 → グラフへ渡す `pixel_values`（`[3, S, S]` を平らにしたもの）。
+ * RGB8 pixel row → the `pixel_values` passed to the graph (`[3, S, S]` flattened).
  *
- * 前処理そのものは `src/image/preprocess.ts` が持ち、ここがするのは `pipelineConfig` の
- * 定数で結線することだけ。**`resizeRgb8` は `(width, height)` の順**なので、宣言の 2 欄を
- * 取り違えると非正方の配布形で黙って転置される。
+ * The preprocessing itself is owned by `src/image/preprocess.ts`; all this does is wire it with the
+ * `pipelineConfig` constants. **`resizeRgb8` takes `(width, height)` in that order**, so swapping
+ * the two declared fields would silently transpose a non-square distribution.
  *
- * MUST: 補間フィルタも `config.interpolation` から渡す（既定引数に頼らない）。宣言と実効値を
- * 1 本にすると、受理集合がリテラル型なので**型検査が同一性を保証する** — 新しい家族が渡し
- * 忘れる経路が構造的に消える（`preprocess.ts` の MUST「モデルカードの一部なので呼び出し側が
- * 明示する」の実装側）。
+ * MUST: the interpolation filter also comes from `config.interpolation` (do not rely on the default
+ * argument). With the declaration and the effective value as one, and the accepted set a literal
+ * type, **the type checker guarantees they are identical** — the path by which a new family forgets
+ * to pass it disappears structurally (the implementation side of `preprocess.ts`'s MUST "it is part
+ * of the model card, so the caller states it explicitly").
  *
- * アスペクト比は保たない（グラフが正方 1 点でしか受け取らないので、伸縮以外に行き先が無い —
- * `config.ts` の NOTE）。
+ * The aspect ratio is not kept (the graph accepts one square size only, so stretching is the only
+ * way — the NOTE in `config.ts`).
  *
- * NOTE: `export` は結線を直接叩くテストのため（`fromAssets` 経由で此処へ届くには実 IR
- * コンテナが要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
+ * NOTE: the `export` is for tests that call the wiring directly (reaching here through `fromAssets`
+ * needs a real IR container). Not exposed on `mod.ts` / the subpath surface (ADR 0008).
  */
 export const preprocessPixelValues = (
   config: DepthAnythingPipelineConfig,
@@ -312,23 +330,26 @@ export const preprocessPixelValues = (
   );
 
 /**
- * グラフの出す深度地図 → 元画像の解像度（モジュール doc の段 4）。
+ * The graph's depth map → the original image resolution (step 4 of the module doc).
  *
- * **値には触らない** — 正規化も clamp も掛けない（返すのは生の相対深度 — モジュール doc の
- * 「返すのは生の相対深度 f32」）。`resizePlaneF32` の重みは非負で総和 1 なので、非負という
- * 出力の性質（head 末尾の ReLU）は拡大しても保たれる。
+ * **The values are not touched** — no normalization, no clamp (it returns raw relative depth — the
+ * module doc's "It returns raw relative depth in f32"). The weights of `resizePlaneF32` are
+ * non-negative and sum to 1, so the output's non-negativity (the head's final ReLU) survives
+ * upscaling.
  *
- * 恒等寸法（`sourceWidth === width && sourceHeight === height`）では値がそのまま通る
- * （`resizePlaneF32` の台が近傍 1 点へ縮む — 前処理層のテストが固定している）ので、
- * 「元解像度 = 焼かれた解像度」の呼び出しに丸め損失は入らない。
+ * At the identity size (`sourceWidth === width && sourceHeight === height`) the values pass through
+ * unchanged (the support of `resizePlaneF32` shrinks to the nearest single point — pinned by the
+ * preprocessing layer's tests), so a call with "original resolution = baked resolution" incurs no
+ * rounding loss.
  *
- * MUST: 非有限値は resize の**前**（発生源に一番近い位置）で画素座標つきに落とす。
- * `resizePlaneF32` は重み付き和なので NaN を近傍へ広げてから返し、この doc が配っている
- * 可視化レシピの min / max 走査は NaN 比較が常に偽で素通りする（`span` が非正になり
- * **全画素 0 = 一様な真っ黒の深度地図**が正常値の顔で出る）。birefnet の `matteFromLogits`・
- * sbv2 の波形 gate・`anima/image.ts` と同じ検査点。
+ * MUST: non-finite values fail with their pixel coordinates **before** the resize (the position
+ * closest to the source). `resizePlaneF32` is a weighted sum that spreads NaN to the neighbourhood
+ * before returning, and the min / max scan of the visualization recipe this doc hands out passes
+ * NaN through because NaN comparisons are always false (`span` becomes non-positive and **every
+ * pixel 0 = a uniformly black depth map** comes out looking like a normal value). The same check
+ * point as birefnet's `matteFromLogits`, sbv2's waveform check and `anima/image.ts`.
  *
- * NOTE: `export` はテストのため（{@link preprocessPixelValues} と同じ理由）。
+ * NOTE: the `export` is for tests (the same reason as {@link preprocessPixelValues}).
  */
 export const resampleDepth = (
   depth: Float32Array<ArrayBuffer>,
@@ -351,27 +372,30 @@ export const resampleDepth = (
   };
 };
 
-/** {@link DepthAnythingPipeline} の内部状態（公開面には出さない）。 */
+/** Internal state of {@link DepthAnythingPipeline} (not on the public surface). */
 type DepthAnythingState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly config: DepthAnythingPipelineConfig;
   readonly depth: ModelComponent;
-  /** 構築時に張って `dispose` まで持つ 1 本（モジュール doc の MUST）。 */
+  /** The one Session created at construction and kept until `dispose` (the module doc's MUST). */
   readonly session: Session;
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
 /**
- * depth-anything が受ける実行ノブ（manifest の quant 宣言）。合成規則（明示 > 宣言 > runtime 既定）・
- * 値域・組合せ・送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合
- * だけを決める。明示の上書き口は持たない（構築オプションに実行ノブの欄が無い）。
+ * The execution knobs depth-anything accepts (the manifest's quant declaration). The merge rule
+ * (explicit > declared > runtime default), value ranges, combinations and the classification of the
+ * thrown types are owned by `resolveSessionOptions`, shared by every family; this only decides the
+ * accepted set. There is no explicit override (the construction options have no execution-knob
+ * field).
  *
- * どのキーも受けないのは、配布形が f32 の既定経路だけで、実行ノブを宣言した quant を持たない
- * から（宣言が現れたら、受ける前に参照値で確かめる — 黙って runtime へ流さない）。
+ * No key is accepted because the distribution has only the f32 default path and no quant that
+ * declares execution knobs (when a declaration appears, check it against the reference values
+ * before accepting it — do not silently pass it to the runtime).
  *
- * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: the `export` is for the equivalence test that runs every quant of the mirror through the
+ * same table (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const DEPTH_ANYTHING_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: false,
@@ -384,25 +408,34 @@ export const DEPTH_ANYTHING_SESSION_POLICY: FamilySessionPolicy = {
   packedStaticQuantize: false,
 };
 
-/** 家族 admission（{@link admitDepthAnything}）が確定させる材料。 */
+/** What the family admission ({@link admitDepthAnything}) settles. */
 type DepthAnythingAdmission = {
   readonly config: DepthAnythingPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
-  /** quant 宣言を受理表で通した実効設定（{@link DEPTH_ANYTHING_SESSION_POLICY}）。 */
+  /**
+   * The effective settings after passing the quant declaration through the acceptance table
+   * ({@link DEPTH_ANYTHING_SESSION_POLICY}).
+   */
   readonly sessionOptions: SessionOptions;
-  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  /**
+   * The quant declaration plus the features the effective settings need (both the request and the
+   * check read this).
+   */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
 };
 
 /**
- * この manifest とこのグラフを depth-anything として実行できるかを見る（`hub/components.ts`
- * の家族 admission 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
+ * Checks whether this manifest and this graph can run as depth-anything (the family admission hook
+ * of `hub/components.ts` — on the fetch surface it is called **before a single byte of the weight
+ * parts is fetched**).
  *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
- * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
- * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
- * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+ * MUST: gather the family's checks in this one function. Scattered into later steps, on the fetch
+ * surface they would fail only **after** GB-class weights are downloaded (the implementation would
+ * be narrower than the wording of ADR 0070 decision 5).
+ * MUST: manifest contract violations and **the match against the graph** fail **before the GPU is
+ * acquired**. In the other order, an environment without a GPU turns them into a different
+ * exception and the reader cannot tell "what was wrong".
  */
 const admitDepthAnything = (
   manifest: Manifest,
@@ -425,7 +458,8 @@ const admitDepthAnything = (
     );
   }
   if (major !== DEPTH_ANYTHING_PIPELINE_MAJOR) {
-    // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門（ADR 0038 §6）。
+    // The only check that stops silent degradation from "old implementation × new repository"
+    // (ADR 0038 §6).
     throw new Error(
       `DepthAnythingPipeline: pipeline '${name}/${major}' の major に未対応` +
         `（この実装が読めるのは ${DEPTH_ANYTHING_PIPELINE_NAME}/` +
@@ -442,7 +476,8 @@ const admitDepthAnything = (
     );
   }
   const quant = entry.quants[quantName];
-  // 未対応の宣言は部品を開く前（= 重みの part を取る前）に落とす（全家族共通の 1 本）。
+  // Unsupported declarations fail before components are opened (= before weight parts are fetched;
+  // one path shared by every family).
   const sessionOptions = resolveSessionOptions(
     DEPTH_ANYTHING_SESSION_POLICY,
     quant.session,
@@ -452,8 +487,9 @@ const admitDepthAnything = (
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
   const depth = open(DEPTH);
-  // グラフの宣言と pipelineConfig の突合。入出力が 1 本ずつであることまで見るのは、中間段の
-  // 深度まで出す別 export が混ざると、位置で引く後段が黙って別の値を深度として読むため。
+  // Match the graph declaration against pipelineConfig. Checking that there is exactly one input
+  // and one output matters because, if another export that also emits intermediate-stage depth got
+  // mixed in, the later steps that pick by position would silently read other values as depth.
   if (depth.graph.inputs.length !== 1 || depth.graph.outputs.length !== 1) {
     throw new Error(
       `DepthAnythingPipeline: depth グラフの入出力が ${depth.graph.inputs.length} /` +
@@ -467,9 +503,10 @@ const admitDepthAnything = (
   assertStaticDim(depth, PIXEL_VALUES, 3, config.imageWidth, "imageWidth");
   assertDepthShape(depth, config, "深度地図の形");
 
-  // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
-  // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
-  // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+  // MUST: a shared GPU's missing capability (feature / device limit) fails here — unlike acquiring
+  // our own, there is no reason to wait for `acquireGpu`, and this is the only family check that
+  // knows before the weights are downloaded (the mapping between request and check is the one
+  // function in `session/gpu-features.ts`, and the later check calls the same function).
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(
       gpuFeatures,
@@ -487,11 +524,13 @@ const admitDepthAnything = (
 };
 
 /**
- * admission を通った材料から実行状態を組む（GPU 取得と Session 構築だけ）。
+ * Builds the execution state from the materials that passed admission (GPU acquisition and Session
+ * construction only).
  *
- * MUST: GPU 取得後に許される検査は GPU の能力（feature の shader-f16 — ADR 0028 / device limits —
- * ADR 0089 決定 5）だけ。この関数が取得後に見るのは feature だけで、limits は共有 GPU のときに
- * {@link admitDepthAnything} が見る（自前で取った device の limits はここでは照合しない）。
+ * MUST: the only checks allowed after GPU acquisition are GPU capabilities (the shader-f16 feature
+ * — ADR 0028 / device limits — ADR 0089 decision 5). After acquisition this function checks only
+ * features; limits are checked by {@link admitDepthAnything} for a shared GPU, and for a device
+ * acquired here by `assertRequiredLimits` right after acquisition.
  */
 const openDepthAnythingState = async (
   admitted: DepthAnythingAdmission,
@@ -499,19 +538,21 @@ const openDepthAnythingState = async (
   options: DepthAnythingPipelineOptions = {},
 ): Promise<DepthAnythingState> => {
   const { config, quantName, quant, sessionOptions, gpuFeatures } = admitted;
-  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  // The supplier is **the same one** admission saw (`open` only looks up components already
+  // opened).
   const depth = open(DEPTH);
-  // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
-  // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
-  // {@link admitDepthAnything} が既に同じ 1 本で見ているが、自前で取った device は
-  // ここが唯一の門）。
+  // MUST: declared features can only be requested at device creation (ADR 0028). A shared GPU
+  // cannot be asked for them, so the missing capability is named and fails (a shared GPU was
+  // already checked by {@link admitDepthAnything} through the same function, but for a device
+  // acquired here this is the only check).
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `DepthAnythingPipeline: quant '${quantName}'`);
-    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
-    // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
-    // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は `admitDepthAnything` が見ている。
+    // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
+    // (`fromPretrained` checks against adapter values); without this a missing declaration surfaces
+    // only at Session construction, and a declaration stricter than the real demand is never
+    // matched at all. A shared GPU is checked by `admitDepthAnything`.
     if (ownsGpu) {
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
@@ -530,13 +571,14 @@ const openDepthAnythingState = async (
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
   } catch (error) {
-    // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
+    // A GPU acquired internally can no longer be released by anyone if construction fails, so it is
+    // returned here.
     if (ownsGpu) gpu.destroy();
     throw error;
   }
 };
 
-/** 画像 1 枚を通す（前処理 → `depth` 1 回 → 元解像度へ戻す）。 */
+/** Runs one image (preprocessing → one `depth` run → back to the original resolution). */
 const estimateImage = async (state: DepthAnythingState, image: Rgb8Image): Promise<DepthMap> => {
   const { config } = state;
   const pixelValues: Tensor = {
@@ -563,20 +605,23 @@ const estimateImage = async (state: DepthAnythingState, image: Rgb8Image): Promi
 };
 
 /**
- * Depth Anything V2 の画像 → 相対深度マップのパイプライン（グラフ 1 本）。
+ * Depth Anything V2's image → relative depth map pipeline (one graph).
  *
- * 構築は {@link DepthAnythingPipeline.fromPretrained}（HF から取得）か
- * {@link DepthAnythingPipeline.fromAssets}（取得済みバイト列）だけを入口にする — コンストラクタ
- * を private にしてあるのは、manifest 検査と資産の突合を迂回した半端な状態を作れないように
- * するため（ADR 0008）。
+ * Construction enters only through {@link DepthAnythingPipeline.fromPretrained} (fetch from HF) or
+ * {@link DepthAnythingPipeline.fromAssets} (already-fetched bytes) — the constructor is private so
+ * that no half-built state bypassing the manifest checks and the asset matching can be created
+ * (ADR 0008).
  */
 export class DepthAnythingPipeline {
   readonly #state: DepthAnythingState;
-  /** estimate と dispose の直列化鎖（「1 本ずつ」を公開 API 側で守る — モジュール doc）。 */
+  /**
+   * Serialization chain for estimate and dispose ("one at a time" kept on the public API side —
+   * module doc).
+   */
   readonly #chain = createOperationChain();
   /**
-   * dispose の 1 本。**undefined でないことが「dispose 済み」**（別に真偽値を持つと、独立に
-   * 更新される派生状態になる）。
+   * The one dispose. **Not being undefined means "disposed"** (a separate boolean would be derived
+   * state updated independently).
    */
   #disposal: Promise<void> | undefined;
 
@@ -585,20 +630,21 @@ export class DepthAnythingPipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
-   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
-   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
-   * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
-   * {@link FromPretrainedComponentOptions.components}（役割は `depth` 1 本）。
+   * Fetches a distribution and builds (`loadManifest` → `resolveSelection` → fetch **only each
+   * component's descriptor (part 0)** for admission → warm the weight parts → `fetchAssets` for the
+   * remaining assets → construction). Blocks are read in part order at the moment the Session is
+   * built (ADR 0109 — `src/hub/components.ts`). To replace a component with the same role from
+   * another repository use {@link FromPretrainedComponentOptions.components} (one role, `depth`).
    *
-   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が
-   * 検証した取得元は {@link DEPTH_ANYTHING_SOURCES}（`./config.ts`）の `"depth-anything-v2"` —
-   * 再現性を自分で固定するなら `{ repo, revision }` を呼び手が明示する。文字列の `ref` は
-   * `{ repo }` と読む（= `main` 追従）。
+   * **`ref` is required** (sources have no default — the MUST of `src/hub/repo-ref.ts`). The source
+   * this package version verified is `"depth-anything-v2"` of {@link DEPTH_ANYTHING_SOURCES}
+   * (`./config.ts`) — to pin reproducibility yourself, the caller states `{ repo, revision }`
+   * explicitly. A string `ref` reads as `{ repo }` (= follows `main`).
    *
-   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
-   * 通らない（{@link DepthAnythingFromPretrainedOptions} の HTTP 専用ノブは効かない）。
+   * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
+   * `@karume/hub/deno`). It skips the check of HF's `owner/name` spelling and touches neither the
+   * network nor CacheStorage (the HTTP-only knobs of {@link DepthAnythingFromPretrainedOptions}
+   * have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
@@ -623,7 +669,8 @@ export class DepthAnythingPipeline {
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
-    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+    // The family checks run in the admission hook (before weight parts are fetched —
+    // `hub/components.ts`).
     const { admitted, open } = await loadContainerComponents(
       "DepthAnythingPipeline.fromPretrained",
       loaded,
@@ -631,8 +678,9 @@ export class DepthAnythingPipeline {
       COMPONENT_KEYS,
       async (open) => {
         const admitted = admitDepthAnything(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
-        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+        // The `requiredLimits` the distribution declared are checked here, **before weight parts
+        // are fetched** (ADR 0089 decision 5 — a shared GPU's limits, or the adapter's measured
+        // values on the path that acquires its own).
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
@@ -650,13 +698,15 @@ export class DepthAnythingPipeline {
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openContainer`・グラフとの突合を
-   * 全てここで済ませ、**`depth` の Session を 1 本張って**返す（モジュール doc の MUST）。
+   * Builds from an already-fetched manifest + assets. Contract checks, asset interpretation,
+   * `openContainer` and the match against the graph all happen here, and it returns **with the one
+   * `depth` Session created** (the module doc's MUST).
    *
-   * 部品のキーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`depth`）と、分割形の
-   * part 列（`depth[0]` / `depth[1]` / … — part 0 から添字順）。分割形はバイト列を連結せず
-   * part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly（受け口の実装は
-   * `src/hub/components.ts` の 1 本）。
+   * Component keys are accepted **in both forms** — one single-form `krm` byte array (`depth`) and
+   * the part sequence of the split form (`depth[0]` / `depth[1]` / … — in index order from part 0).
+   * The split form is opened as a part sequence without concatenating the bytes. A missing index or
+   * mixing with the single-form key fails loudly (the receiving implementation is the one in
+   * `src/hub/components.ts`).
    */
   static async fromAssets(
     input: DepthAnythingAssets,
@@ -668,18 +718,19 @@ export class DepthAnythingPipeline {
   }
 
   /**
-   * 画像 1 枚の相対深度を出す。返るのは**入力と同じ寸法**の生の f32（モジュール doc の
-   * 「返すのは生の相対深度 f32」）— 大きいほど手前で、単位も原点も無い。
+   * Estimates the relative depth of one image. It returns raw f32 **of the same size as the input**
+   * (the module doc's "It returns raw relative depth in f32") — larger = nearer, with neither a
+   * unit nor an origin.
    *
-   * 入力は RGB8 の画素列（行優先・画素あたり 3 バイト）で、resize / rescale / normalize は
-   * この中で配布形の定数どおりに掛かる。アスペクト比は保たない（グラフが正方 1 点でしか
-   * 受け取らないため — `config.ts` の NOTE）。
+   * The input is an RGB8 pixel row (row-major, 3 bytes per pixel); resize / rescale / normalize are
+   * applied inside with the distribution's constants. The aspect ratio is not kept (the graph
+   * accepts one square size only — the NOTE in `config.ts`).
    *
-   * 並行に呼ばれた場合は**待たされて順に**走る（1 つの Session を 2 本の run で共有しない）。
+   * Concurrent calls **wait and run in order** (one Session is not shared between two runs).
    */
   async estimate(image: Rgb8Image): Promise<DepthMap> {
-    // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた
-    // 推定まで巻き添えで落ちる）。
+    // The disposed check happens at call time (checking inside the chain would also fail the
+    // estimations accepted before dispose).
     if (this.#disposal !== undefined) {
       throw new Error("DepthAnythingPipeline: dispose 済みでは推定できない");
     }
@@ -687,17 +738,19 @@ export class DepthAnythingPipeline {
   }
 
   /**
-   * 解放する。Session は必ず畳み、**内部で取得した GPU だけ**破棄する（`options.gpu` で
-   * 渡された GpuContext は呼び出し側の所有物なので触らない）。
+   * Releases. The Session is always torn down, and **only a GPU acquired internally** is destroyed
+   * (a GpuContext passed in `options.gpu` belongs to the caller and is not touched).
    *
-   * MUST: in-flight の実行の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
-   * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
-   * 呼び出し側が「破棄済み」と見なして次へ進む）。
+   * MUST: destroy only after in-flight runs have finished (flush-before-destroy) — putting the
+   * destruction on the chain too fixes the order of waiting and destroying in one place. Later
+   * calls return the same completion (returning earlier would let the caller treat it as
+   * "destroyed" and move on).
    *
-   * MUST: `Session.dispose()` が失敗しても `gpu.destroy()` は必ず通す（{@link disposeSteps}）—
-   * 直列 `await` だと前段の reject で後段へ到達せず、`openXState` の catch が掲げている
-   * 「内部で取った GPU は必ず返す」が dispose 経路でだけ破れる。しかも `#disposal` に
-   * rejected promise が居座るので、2 度目の `dispose()` は再試行にならない。
+   * MUST: `gpu.destroy()` always runs even if `Session.dispose()` fails ({@link disposeSteps}) —
+   * with a serial `await`, a reject in the earlier step never reaches the later one, and "a GPU
+   * acquired internally is always returned", which the catch of `openXState` promises, would break
+   * on the dispose path only. Worse, the rejected promise would stay in `#disposal`, so a second
+   * `dispose()` would not retry.
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(() =>
@@ -711,7 +764,7 @@ export class DepthAnythingPipeline {
     return this.#disposal;
   }
 
-  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  /** `await using` support (Explicit Resource Management) — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }

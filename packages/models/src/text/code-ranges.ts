@@ -1,21 +1,24 @@
 /**
- * コードポイントの閉区間表（昇順・非重複）と二分探索、資産 JSON からの読み取り。
+ * Tables of closed code-point ranges (ascending, non-overlapping), binary search over them, and
+ * reading them from asset JSON.
  *
- * テキスト層は Unicode の分類を TS で再実装しない。分類の正本はエクスポータ側の
- * Python / Rust（`tokenizers`）で、そこが**全コードポイントを実評価して畳んだ**閉区間表を
- * ここが引くだけにする。判定の実装がここ 1 つなので、表さえ正しければ分類はずれない。
+ * The text layer does not reimplement Unicode classification in TS. The source of truth for
+ * classification is the exporter-side Python / Rust (`tokenizers`), and this only looks up the
+ * closed-range tables that **fold the actual evaluation of every code point** there. With the check
+ * implemented in this one place, classification cannot drift as long as the tables are right.
  *
- * 読み取り（{@link parseCodeRanges}）も家族横断でここに置く — anima と Wan の 2 家族が同じ形の表を
- * 資産から読む（家族のディレクトリに置くと、別家族が使うときに家族間 import になる）。sbv2 の
- * `parseRanges` は検査の文言が違うので別に持つ。
+ * Reading ({@link parseCodeRanges}) also lives here across families — the two families anima and
+ * Wan read tables of the same shape from their assets (in a family directory, another family using
+ * it would mean a cross-family import). sbv2's `parseRanges` has different check messages and is
+ * kept separately.
  */
 
 import { assertCodePoint } from "./asset-gates.ts";
 
-/** 両端を含むコードポイント区間の昇順リスト。 */
+/** Ascending list of code-point ranges including both ends. */
 export type CodeRanges = readonly (readonly [number, number])[];
 
-/** cp が区間表に含まれるか。 */
+/** Whether cp is contained in the range table. */
 export const inCodeRanges = (ranges: CodeRanges, cp: number): boolean => {
   let low = 0;
   let high = ranges.length - 1;
@@ -30,12 +33,14 @@ export const inCodeRanges = (ranges: CodeRanges, cp: number): boolean => {
 };
 
 /**
- * 外部境界（資産 JSON）の構造検査。壊れた表を黙って空表として使わない。
+ * Structural check of an external boundary (asset JSON). A broken table is never silently used as
+ * an empty table.
  *
- * MUST: **整数・コードポイント範囲・昇順・非重複**まで見る。`inCodeRanges` は二分探索
- * なので、この前提が破れても例外にならず「静かに別の文字分類」になる（`[65.5, 90]` は境界だけ
- * を半端にずらし、順序が崩れた表は `\p{L}` の判定が 1 区間ぶん抜ける — どちらも pre-token の
- * 切れ目が変わって id 列が別物になる）。値域の規律は sbv2 の同型 `parseRanges` と同じ。
+ * MUST: check **integers, code-point range, ascending order and no overlap**. `inCodeRanges` is a
+ * binary search, so if these premises break it raises no exception and becomes "a quietly different
+ * character classification" (`[65.5, 90]` moves only a boundary to a fractional position, and a table out of order
+ * drops one range from the `\p{L}` check — both change where pre-tokens split and give a different
+ * id sequence). The value-range discipline is the same as sbv2's isomorphic `parseRanges`.
  */
 export const parseCodeRanges = (raw: unknown, label: string): CodeRanges => {
   if (!Array.isArray(raw)) throw new Error(`${label}: 区間表が配列でない`);

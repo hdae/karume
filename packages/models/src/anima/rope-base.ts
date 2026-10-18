@@ -1,41 +1,47 @@
 /**
- * 容器の資産 `rope_base`（軸別 rope 素表）の読み取り。
+ * Reads the container asset `rope_base` (per-axis rope base tables).
  *
- * 素表は `transformer` 容器の**資産**（役割 `rope-base` — ADR 0109 決定 4）で、payload の
- * バイト列は**safetensors 形式**（グラフでも重みでもない）。payload の解析は `@karume/runtime` 公開面の
- * `parseSafetensors`（厳格リーダ — データ節の被覆・整列・dtype はそちらで検査済み）に委ね、
- * この層は「F32・rank2 の表を軸ごとに引き、行数を突き合わせる」用途特化の検査だけを持つ
- * （DECIDED: 二重実装の解消として runtime 公開面へ載せた — ADR 0008 追記 2026-08-05）。
+ * The base tables are an **asset** of the `transformer` container (role `rope-base` — ADR 0109
+ * decision 4), and the payload bytes are **in safetensors format** (neither a graph nor weights).
+ * Parsing the payload is left to `parseSafetensors` on the `@karume/runtime` public surface (a
+ * strict reader — coverage of the data section, alignment and dtype are checked there); this layer
+ * only holds the purpose-specific checks "fetch the F32 rank-2 table per axis and compare row
+ * counts" (DECIDED: put on the runtime public surface to remove a duplicate implementation —
+ * ADR 0008 addendum 2026-08-05).
  *
- * ## rope 表は「計算」ではなく「素表からの並べ替え」
+ * ## The rope table is "rearranged from base tables", not "computed"
  *
- * MUST: cos / sin を TS で計算し**ない**。`torch` の f32 三角関数は正しく丸めた値と 1 ulp
- * ずれることがあり（実測: 位置 × 周波数 8,192 通りのうち cos 472 件 / sin 231 件）、JS の
- * `Math.cos` は f64 で正しく丸まるので**必ず食い違う**。静的グラフには torch の値が焼かれて
- * いる以上、S 形とのビット同一は「軸ごとの素表を焼いて並べ替えるだけ」でしか成立しない。
+ * MUST NOT compute cos / sin in TS. `torch`'s f32 trigonometric functions can differ by 1 ulp from
+ * the correctly rounded value (measured: of 8,192 position × frequency pairs, cos 472 / sin 231),
+ * and JS `Math.cos` rounds correctly in f64, so the two **always disagree**. Since the static graph
+ * has torch's values baked in, bit identity with the S-form holds only by "baking the per-axis base
+ * tables and just rearranging them".
  *
- * 素表は**解像度に依らない**（軸 × 位置の表なので、任意の H' / W' を組める）。行数は上流の
- * `seq = arange(max(max_size))` の長さ = モデル側の位置表の天井そのもの。
+ * The base tables **do not depend on the resolution** (a table of axis × position, so any H' / W'
+ * can be assembled). The row count is the length of upstream's `seq = arange(max(max_size))` = the
+ * ceiling of the model's position table itself.
  */
 
 import { parseSafetensors } from "@karume/runtime";
 import type { SafetensorsFile } from "@karume/runtime";
 
-/** 素表のテンソルキー（順序は t → h → w のブロック順）。 */
+/** Tensor keys of the base tables (order is the block order t → h → w). */
 const ROPE_AXES = ["t", "h", "w"] as const;
 
-/** F32 のみ受ける（素表は cos / sin の実数表で、他の格納形は上流に存在しない）。 */
+/**
+ * Accepts F32 only (the base tables are real cos / sin tables; no other storage exists upstream).
+ */
 const F32_DTYPE = "F32";
 
-/** 軸ごとの cos / sin 素表（行 = 位置・列 = その軸のブロック幅）。 */
+/** Per-axis cos / sin base tables (row = position, column = that axis's block width). */
 export type RopeBase = {
-  /** 全軸で共通の行数（= モデル側の位置表の天井）。 */
+  /** Row count shared by all axes (= the ceiling of the model's position table). */
   readonly rows: number;
-  /** 軸ごとのブロック幅（`t + h + w` の 2 倍が head_dim）。 */
+  /** Block width per axis (twice `t + h + w` is head_dim). */
   readonly widths: readonly [number, number, number];
-  /** `[t, h, w]` の順に並べた cos 素表。 */
+  /** cos base tables in the order `[t, h, w]`. */
   readonly cos: readonly Float32Array<ArrayBuffer>[];
-  /** 同 sin。 */
+  /** Same for sin. */
   readonly sin: readonly Float32Array<ArrayBuffer>[];
 };
 
@@ -44,7 +50,10 @@ type RawTable = {
   readonly shape: readonly [number, number];
 };
 
-/** F32・rank2 の表を 1 本引く（整列は `parseSafetensors` が保証済み — view はゼロコピー）。 */
+/**
+ * Fetches one F32 rank-2 table (alignment is guaranteed by `parseSafetensors` — the view is
+ * zero-copy).
+ */
 const tableOf = (file: SafetensorsFile, name: string): RawTable => {
   const view = file.tensors.get(name);
   if (view === undefined) throw new Error(`rope 素表に '${name}' が無い`);
@@ -62,16 +71,17 @@ const tableOf = (file: SafetensorsFile, name: string): RawTable => {
 };
 
 /**
- * 資産 `rope_base` の payload（safetensors 形式）を読む。
+ * Reads the payload (safetensors format) of the asset `rope_base`.
  *
- * MUST: 行数が全軸で揃っていることを見る。揃っていないと「h の行を w の表から読む」形の
- * 取り違えが範囲内に収まって黙って通る。
+ * MUST: check that the row count is the same on every axis. Otherwise a mix-up of the "read h's
+ * rows from w's table" kind stays within range and passes silently.
  */
 export const parseRopeBase = (buffer: ArrayBuffer): RopeBase => {
   const file = parseSafetensors(buffer);
-  // MUST: モジュールスコープの const に持たない（横断不変条件「全モジュール副作用ゼロ =
-  // import 時実行禁止」— barrel 経由 tree-shaking の成立条件。png.ts の buildCrcTable と同じ
-  // 理由）。素表のテンソルは 6 本だけで、呼び出しごとの構築は無視できる。
+  // MUST: do not hold this in a module-scope const (cross-cutting invariant "zero side effects in
+  // every module = no execution at import" — the condition for tree-shaking through the barrel; the
+  // same reason as png.ts's buildCrcTable). The base tables are only 6 tensors, so building it per
+  // call is negligible.
   const expectedKeys = new Set(ROPE_AXES.flatMap((axis) => [`cos_${axis}`, `sin_${axis}`]));
   for (const name of file.tensors.keys()) {
     if (!expectedKeys.has(name)) throw new Error(`rope 素表に想定外のテンソル '${name}' がある`);
@@ -97,9 +107,9 @@ export const parseRopeBase = (buffer: ArrayBuffer): RopeBase => {
   return { rows: rows ?? 0, widths: [widths[0], widths[1], widths[2]], cos, sin };
 };
 
-/** rope 表 1 行の幅（= attention の head_dim）。 */
+/** Width of one row of the rope table (= attention head_dim). */
 export const ropeWidth = (base: RopeBase): number =>
   2 * (base.widths[0] + base.widths[1] + base.widths[2]);
 
-/** 軸の並び（`ropeTables` が読み出し位置を組むのに使う）。 */
+/** Number of axes (`ropeTables` uses it to build the read positions). */
 export const ROPE_AXIS_COUNT = ROPE_AXES.length;

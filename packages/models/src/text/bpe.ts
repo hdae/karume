@@ -1,74 +1,82 @@
 /**
- * BPE（merge rank）の記号列生成と併合、および byte_fallback の展開。
+ * BPE (merge rank) symbol-sequence construction and merging, plus the byte_fallback expansion.
  *
- * **ファミリ非依存の共通処理**（BPE を使う tokenizer は総じてこの経路を通る）なので、
- * ファミリのディレクトリではなく `src/text/` に置く（`unigram.ts` と同じ位置づけ理由）。
- * 正規化・pre-tokenize・特殊トークン・post_processor はファミリ側の責務で、ここは
- * 「1 断片 → id 列」だけを見る。
+ * This is **family-independent common processing** (tokenizers that use BPE all go through this
+ * path), so it lives in `src/text/` rather than a family directory (the same placement reason as
+ * `unigram.ts`). Normalization, pre-tokenization, special tokens and the post_processor are the
+ * family's job; this looks only at "one piece → id sequence".
  *
- * 正本は `tokenizers`（Rust）の `BPE::merge_word` + `Word::merge_all` を写したもの:
+ * This module is a port of the source of truth, `BPE::merge_word` + `Word::merge_all` of `tokenizers` (Rust):
  *
- *   ① 記号はコードポイント単位で始まる。語彙に無い 1 文字は byte_fallback で UTF-8 バイト
- *      1 個ずつの記号へ割れる（本移植は byteIds 256 本が揃っている資産だけを受けるので、
- *      `<unk>` へ落ちる枝は**原理的に到達しない** — {@link createBpeModel} が門になる）
- *   ② 併合は **rank の最小 → 位置の小さい方**の優先度つきキューで進める。取り出した項目は
- *      「その位置の記号が生きているか」「同じ対がまだそこに在るか」で無効化する
+ *   (1) Symbols start as code points. A single character missing from the vocabulary splits by
+ *       byte_fallback into one symbol per UTF-8 byte (this port accepts only assets with all 256
+ *       byteIds, so the branch that falls to `<unk>` is **unreachable by construction** —
+ *       {@link createBpeModel} is the check)
+ *   (2) Merging proceeds with a priority queue ordered by **lowest rank → smaller position**. A
+ *       popped entry is invalidated by "is the symbol at that position alive" and "is the same pair
+ *       still there"
  *
- * MUST: **最初から merge queue で書く**（ADR 0084 決定 3）。「全隣接ペアを走査 → 最小 rank を
- * splice」の O(n²) を写してはならない — Gemma の pre_tokenizer は正規化後の文字列を 1 つも
- * 切らないので、**1 断片が入力全長になる**。Qwen2 も区切りの無い英字列・句読点の無い日本語は
- * 1 断片になるので、併合（{@link mergeSymbols}）は同じ 1 本を使う（ADR 0084 追記 2026-10-10）。
+ * MUST: **write it with a merge queue from the start** (ADR 0084 decision 3). The O(n²) "scan every
+ * adjacent pair → splice the lowest rank" MUST NOT be ported — Gemma's pre_tokenizer does not split
+ * the normalized string at all, so **one piece is the whole input**. Qwen2 too makes one piece of a
+ * letter run without separators or Japanese without punctuation, so merging ({@link mergeSymbols})
+ * uses the same single implementation (ADR 0084 addendum 2026-10-10).
  */
 
 import { setUnique } from "./asset-gates.ts";
 import { toCodePoints } from "./code-points.ts";
 
-/** 1 本の併合規則（`rank` は上流の並び順・`newId` は連結した綴りの id）。 */
+/** One merge rule (`rank` is the upstream order, `newId` the id of the concatenated spelling). */
 export type BpeMerge = {
   readonly rank: number;
   readonly newId: number;
 };
 
-/** 引くだけの形へ畳んだ BPE モデル。 */
+/** A BPE model folded into a lookup-only shape. */
 export type BpeModel = {
-  /** id → 綴り。 */
+  /** id → spelling. */
   readonly tokenOf: ReadonlyMap<number, string>;
-  /** 綴り → id。 */
+  /** spelling → id. */
   readonly idOf: ReadonlyMap<string, number>;
-  /** {@link pairKey} → 併合規則。 */
+  /** {@link pairKey} → merge rule. */
   readonly merges: ReadonlyMap<number, BpeMerge>;
-  /** 対の合成鍵の刻み（= 語彙の最大 id + 1）。 */
+  /** Stride of the composite pair key (= the vocabulary's largest id + 1). */
   readonly pairStride: number;
-  /** byte 値 → id（256 本）。 */
+  /** byte value → id (256 entries). */
   readonly byteIds: readonly number[];
-  /** id → byte 値（復号側が byte run を判定する向き）。 */
+  /** id → byte value (the direction the decoder uses to detect byte runs). */
   readonly byteOf: ReadonlyMap<number, number>;
 };
 
-/** {@link createBpeModel} が受ける素材（密な語彙表でも部分集合でも同じ口）。 */
+/**
+ * The material {@link createBpeModel} accepts (the same entry for a dense vocabulary table or a
+ * subset).
+ */
 export type BpeSource = {
-  /** `[id, 綴り]`。 */
+  /** `[id, spelling]`. */
   readonly vocab: readonly (readonly [number, string])[];
-  /** `[左 id, 右 id, rank]`。 */
+  /** `[left id, right id, rank]`. */
   readonly merges: readonly (readonly [number, number, number])[];
-  /** byte 0..255 に対応する id（**256 本ちょうど**）。 */
+  /** ids for bytes 0..255 (**exactly 256 entries**). */
   readonly byteIds: readonly number[];
 };
 
-/** byte_fallback 語彙の綴り（`tokenizers` の `format!("<{:#04X}>")`）。 */
+/** Spelling of a byte_fallback vocabulary entry (`format!("<{:#04X}>")` of `tokenizers`). */
 const byteTokenSpelling = (byte: number): string =>
   `<0x${byte.toString(16).toUpperCase().padStart(2, "0")}>`;
 
-/** 隣接 2 記号の合成鍵。 */
+/** Composite key of two adjacent symbols. */
 const pairKey = (model: BpeModel, left: number, right: number): number =>
   left * model.pairStride + right;
 
 /**
- * 資産の素材から BPE モデルを組む（外部境界なので値域と整合をここで見る）。
+ * Builds a BPE model from the asset material (an external boundary, so value ranges and consistency
+ * are checked here).
  *
- * MUST: **`newId` を資産に持たせず、ここで綴りの連結から引き直す**。上流も
- * `vocab[a + b]` を引いて作るので、資産へ書いて持ち回ると「語彙と併合先がずれた資産」が
- * 例外にならずに通る（分割だけが静かに変わる）。
+ * MUST: **do not let the asset carry `newId`; look it up again here from the concatenated
+ * spellings**. Upstream also builds it by looking up `vocab[a + b]`, so carrying it in the asset
+ * would let "an asset whose vocabulary and merge targets disagree" through without an exception
+ * (only the segmentation would change quietly).
  */
 export const createBpeModel = (source: BpeSource): BpeModel => {
   const tokenOf = new Map<number, string>();
@@ -82,8 +90,9 @@ export const createBpeModel = (source: BpeSource): BpeModel => {
     setUnique(idOf, token, id, "語彙の綴り");
     maxId = Math.max(maxId, id);
   }
-  // 対の鍵は `左 * 刻み + 右` の 1 つの数。刻みを語彙から導くので、資産が大きくなれば
-  // 鍵が安全整数の外へ出る — その時点で **fail loudly**（黙って別の対に当たらせない）。
+  // The pair key is one number, `left * stride + right`. The stride is derived from the vocabulary,
+  // so as the asset grows the key can leave the safe-integer range — at that point **fail loudly**
+  // (never let it silently hit another pair).
   const pairStride = maxId + 1;
   if (pairStride * pairStride > Number.MAX_SAFE_INTEGER) {
     throw new Error(`語彙が大きすぎて対の合成鍵が安全整数に収まらない（最大 id ${maxId}）`);
@@ -95,8 +104,9 @@ export const createBpeModel = (source: BpeSource): BpeModel => {
   const byteOf = new Map<number, number>();
   for (const [byte, id] of source.byteIds.entries()) {
     const token = tokenOf.get(id);
-    // MUST: 綴りまで検める。`base + byte` の連番は**実資産の実測事実**であって schema の
-    // 保証ではない（ADR 0084 決定 1）— ずれた表を通すと byte 展開が別の行を指す。
+    // MUST: check the spelling too. The consecutive `base + byte` numbering is **a measured fact
+    // about the real assets**, not a guarantee of the schema (ADR 0084 decision 1) — letting a
+    // shifted table through would make the byte expansion point at other rows.
     if (token !== byteTokenSpelling(byte)) {
       throw new Error(
         `byteIds[${byte}] の id ${id} の綴りが ${byteTokenSpelling(byte)} でない（${token}）`,
@@ -127,22 +137,28 @@ export const createBpeModel = (source: BpeSource): BpeModel => {
     if (!Number.isSafeInteger(rank) || rank < 0) {
       throw new Error(`merge の rank が非負の安全整数でない（${rank}）`);
     }
-    // MUST: 後勝ちを禁じる。上流も HashMap なので重複対は片方が黙って消え、分割規則だけが
-    // 別物になる（`asset-gates.ts` の `setUnique` を置いた理由そのもの）。
+    // MUST: forbid later-wins. Upstream is a HashMap too, so a duplicate pair silently loses one
+    // side and only the segmentation rule changes (the very reason `setUnique` exists in
+    // `asset-gates.ts`).
     setUnique(merges, pairKey(model, left, right), { rank, newId }, "merge の対");
   }
   return model;
 };
 
-/** 優先度つきキューの項目（正本の `Merge` — 順序は rank 昇順・同点は位置の昇順）。 */
+/**
+ * A priority-queue entry (the source of truth's `Merge` — ordered by rank ascending, ties by
+ * position ascending).
+ */
 type QueuedMerge = {
   readonly pos: number;
   readonly rank: number;
-  /** 積んだ時点の規則。取り出し時に**同一性で**照合して古い項目を捨てる。 */
+  /**
+   * The rule at the time of pushing. Compared **by identity** at pop time to discard stale entries.
+   */
   readonly merge: BpeMerge;
 };
 
-/** 二分ヒープ（最小取り出し）。単一用途なので {@link mergeSymbols} の中だけで使う。 */
+/** Binary heap (min-pop). Single-use, so it is used only inside {@link mergeSymbols}. */
 const isBefore = (a: QueuedMerge, b: QueuedMerge): boolean =>
   a.rank !== b.rank ? a.rank < b.rank : a.pos < b.pos;
 
@@ -178,11 +194,12 @@ const heapPop = (heap: QueuedMerge[]): QueuedMerge | undefined => {
 };
 
 /**
- * 1 断片（pre-token）を id 列へ。
+ * One piece (pre-token) → id sequence.
  *
- * 断片は正規化まで済んだ文字列で受ける（正規化・pre-tokenize はファミリ側の責務）。
- * 対にならないサロゲートは {@link toCodePoints} が落とす — 正本（Rust の `str`）に載らない
- * 値で、黙って U+FFFD へ潰すと id 列が静かに変わるため。
+ * The piece is received as an already-normalized string (normalization and pre-tokenization are the
+ * family's job). Unpaired surrogates are rejected by {@link toCodePoints} — they are values the
+ * source of truth (Rust's `str`) cannot hold, and silently collapsing them to U+FFFD would quietly
+ * change the id sequence.
  */
 export const bpeEncode = (model: BpeModel, piece: string): number[] =>
   mergeSymbols(initialSymbols(model, piece), (left, right) =>
@@ -190,12 +207,13 @@ export const bpeEncode = (model: BpeModel, piece: string): number[] =>
   );
 
 /**
- * 記号 id の列を併合しきる（正本の `Word::merge_all` — rank の最小 → 位置の小さい方の優先度つき
- * キューと隣接リスト）。記号列の作り方（byte_fallback / byte-level）は系列側に残し、併合だけを
- * 共有する。
+ * Merges a sequence of symbol ids to the end (the source of truth's `Word::merge_all` — a priority
+ * queue by lowest rank → smaller position, and an adjacency list). How the symbol sequence is built
+ * (byte_fallback / byte-level) stays with the family; only merging is shared.
  *
- * MUST: `mergeOf` は同じ対に**同じ実体**を返す（取り出した項目の照合は同一性で行う — 下の MUST）。
- * 渡した配列は書き換える（呼び手は作ったばかりの記号列を渡す）。
+ * MUST: `mergeOf` returns **the same object** for the same pair (popped entries are compared by
+ * identity — the MUST below). The passed array is rewritten (the caller passes a freshly built
+ * symbol sequence).
  */
 export const mergeSymbols = (
   symbols: number[],
@@ -225,8 +243,9 @@ export const mergeSymbols = (
     if (alive[top.pos] === 0) continue;
     const right = next[top.pos];
     if (right === -1) continue;
-    // MUST: **同一性で**照合する。位置の記号は他の併合で入れ替わりうるので、rank だけの
-    // 比較では「別の対がたまたま同じ rank」を通してしまう（正本は `new_id` で見ている）。
+    // MUST: compare **by identity**. The symbol at a position can be replaced by another merge, so
+    // comparing only the rank would let "another pair that happens to have the same rank" through
+    // (the source of truth checks `new_id`).
     if (mergeOf(symbols[top.pos], symbols[right]) !== top.merge) continue;
 
     symbols[top.pos] = top.merge.newId;
@@ -240,10 +259,12 @@ export const mergeSymbols = (
 };
 
 /**
- * 記号列の初期状態（コードポイント 1 個 = 記号 1 個・語彙に無ければ byte_fallback）。
+ * The initial state of the symbol sequence (one code point = one symbol; byte_fallback if not in
+ * the vocabulary).
  *
- * NOTE: `<unk>` へ落ちる枝は写していない。{@link createBpeModel} が byteIds 256 本の存在を
- * 門にしているので、正本の「バイトが 1 つでも語彙に無ければ unk」は到達しない。
+ * NOTE: the branch that falls to `<unk>` is not ported. {@link createBpeModel} checks that all 256
+ * byteIds exist, so the source of truth's "unk if even one byte is missing from the vocabulary" is
+ * unreachable.
  */
 const initialSymbols = (model: BpeModel, piece: string): number[] => {
   const symbols: number[] = [];

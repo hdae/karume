@@ -1,29 +1,31 @@
 /**
- * radix-2 の反復 FFT。母音検出の特徴抽出が要る 2 つの量 — 実信号の**パワースペクトル**と
- * **自己相関** — だけを出す。
+ * Iterative radix-2 FFT. It outputs only the 2 quantities the vowel detector's feature extraction
+ * needs — the **power spectrum** and the **autocorrelation** of a real signal.
  *
- * ## なぜ `src/audio/` ではなくファミリの下なのか
+ * ## Why under the family and not in `src/audio/`
  *
- * 汎用の FFT ではない（実信号・2 冪・スペクトルと自己相関の 2 本だけ・スクラッチ常駐）。
- * 利用者は {@link ./features.ts} 1 つで、共有層へ上げる根拠が無い（`src/audio/wav.ts` は
- * 「音声モデルは総じて WAV を読み書きする」から共有層に居る）。第 2 の利用者が現れたときに
- * 上げれば良い。
+ * It is not a general FFT (real signals, powers of 2, only the spectrum and the autocorrelation,
+ * resident scratch). The only user is {@link ./features.ts}, and there is no ground for raising it
+ * to the shared layer (`src/audio/wav.ts` sits in the shared layer because "audio models in
+ * general read and write WAV"). It can be raised when a second user appears.
  *
- * ## MUST: 変換は f64 で回す（上流 TS 実装は f32）
+ * ## MUST: run the transform in f64 (the upstream TS implementation uses f32)
  *
- * 仕様の正本は Python 側（`features.py` / `dsp.py`）で、そこは `np.fft` を通る = **必ず f64**
- * （numpy の FFT は f32 入力でも倍精度へ上げる）。上流の TS 実装は Float32Array でバタフライを
- * 回しているぶんだけ正本から離れており、Python 参照との max abs diff は **5.42e-6**（実測）。
- * ここを f64 にすると dtype の流れが Python と 1 段ずつ揃い、**4.77e-7 = 参照を f32 で
- * 保存したことによる 2 ULP** まで縮む（= 数値としては底に当たっている。導出は
- * `tests/vowel_detector_host_test.ts` の冒頭）。
+ * The canonical spec is the Python side (`features.py` / `dsp.py`), which goes through `np.fft` =
+ * **always f64** (numpy's FFT promotes even f32 input to double precision). The upstream TS
+ * implementation runs its butterflies in Float32Array and is that much further from the canonical
+ * spec; its max abs diff against the Python reference is **5.42e-6** (measured). Making this f64
+ * aligns the dtype flow with Python step by step and shrinks it to **4.77e-7 = 2 ULP from storing
+ * the reference in f32** (= numerically at the floor. The derivation is at the top of
+ * `tests/vowel_detector_host_test.ts`).
  *
- * 丸めを写経して偽の一致を作るのではなく、**正本と同じ精度で計算して差を実測する**という
- * 選択は `src/irodori/host/loudness.ts` と同じ（あちらは逆に上流が f32 の IIR で、写しても
- * ビット一致が得られないので f64 を選んだ）。
+ * The choice of **computing at the same precision as the canonical spec and measuring the
+ * difference** rather than copying its rounding to fake a match is the same as in
+ * `src/irodori/host/loudness.ts` (there, conversely, upstream is an f32 IIR, and copying it would
+ * not give a bit match either, so f64 was chosen).
  */
 
-/** サイズ `size` のビット反転表（DIT の入力並べ替え用）。 */
+/** Bit-reversal table of size `size` (for the DIT input reordering). */
 const bitReverseTable = (size: number): Uint32Array<ArrayBuffer> => {
   const bits = Math.log2(size);
   const table = new Uint32Array(size);
@@ -38,10 +40,12 @@ const bitReverseTable = (size: number): Uint32Array<ArrayBuffer> => {
 };
 
 /**
- * 変換長 `size`（2 冪）の FFT。回転因子とスクラッチを持ち回るのでフレームごとに作り直さない。
+ * FFT of transform length `size` (a power of 2). It carries the twiddle factors and the scratch,
+ * so it is not rebuilt per frame.
  *
- * 状態はスクラッチだけ（呼び出しの間に持ち越す意味は無い）。`powerSpectrum` /
- * `autocorrelation` は互いのスクラッチを壊すので、結果は呼び出しごとに `out` へ取り切る。
+ * The only state is the scratch (there is no point carrying it over between calls).
+ * `powerSpectrum` / `autocorrelation` clobber each other's scratch, so each call takes its result
+ * fully into `out`.
  */
 export class Fft {
   readonly size: number;
@@ -70,8 +74,9 @@ export class Fft {
   }
 
   /**
-   * 実信号（長さ ≤ `size`・不足は**末尾**ゼロ詰め）のパワースペクトル `|X[k]|²` を
-   * `out[0..size/2]` へ書く（`np.abs(np.fft.rfft(x, n=size))**2` と同じ並び）。
+   * Writes the power spectrum `|X[k]|²` of a real signal (length ≤ `size`, the shortfall
+   * zero-padded at the **end**) to `out[0..size/2]` (the same order as
+   * `np.abs(np.fft.rfft(x, n=size))**2`).
    */
   powerSpectrum(input: Float32Array<ArrayBuffer>, out: Float64Array<ArrayBuffer>): void {
     const bins = this.size / 2 + 1;
@@ -89,15 +94,17 @@ export class Fft {
   }
 
   /**
-   * 実信号の線形自己相関（lag 0..`out.length − 1`）を `out` へ書く。
+   * Writes the linear autocorrelation of a real signal (lag 0..`out.length − 1`) to `out`.
    *
-   * MUST: 変換長は信号長の **2 倍以上**（巡回相関が線形相関に化けるゼロ詰めの条件）。
-   * MUST: lag は信号長未満（`out.length ≤ input.length`）。信号長以上の lag は線形自己相関では 0 で、
-   * 逆変換の結果のうち「変換長 − 信号長」を超える添字には負の lag の値が回り込む（`[1, 2]` を
-   * 変換長 4 で通すと、添字 2 は線形どおり 0、添字 3 には lag −1 の 2 が出る）。両者を区別せず、
-   * 信号長未満に限る。
-   * パワースペクトルは実かつ偶対称なので、逆変換は同じバタフライを掛けて `size` で割れば
-   * 得られる（`np.fft.irfft(S·conj(S))` と同値）。
+   * MUST: the transform length is **at least twice** the signal length (the zero-padding condition
+   * under which circular correlation equals linear correlation).
+   * MUST: lags are below the signal length (`out.length ≤ input.length`). Lags at or above the
+   * signal length are 0 in linear autocorrelation, and in the inverse transform's result the
+   * values of negative lags wrap around into indices above "transform length − signal length"
+   * (passing `[1, 2]` with transform length 4 gives 0 at index 2, as linear correlation says, but
+   * the 2 of lag −1 at index 3). The two are not told apart; lags are limited to below the signal
+   * length. The power spectrum is real and even-symmetric, so the inverse transform is obtained by
+   * applying the same butterflies and dividing by `size` (equivalent to `np.fft.irfft(S·conj(S))`).
    */
   autocorrelation(input: Float32Array<ArrayBuffer>, out: Float64Array<ArrayBuffer>): void {
     if (input.length * 2 > this.size) {
@@ -123,7 +130,7 @@ export class Fft {
     for (let lag = 0; lag < out.length; lag += 1) out[lag] = this.#re[lag] / this.size;
   }
 
-  /** 入力をビット反転順に読み込む（足りない添字はゼロ = 末尾ゼロ詰め）。 */
+  /** Loads the input in bit-reversed order (missing indices are zero = zero padding at the end). */
   #load(values: ArrayLike<number>): void {
     for (let index = 0; index < this.size; index += 1) {
       const source = this.#reversed[index];
@@ -132,7 +139,7 @@ export class Fft {
     }
   }
 
-  /** ビット反転済みの `#re` / `#im` をその場で変換する（DIT）。 */
+  /** Transforms the bit-reversed `#re` / `#im` in place (DIT). */
   #butterflies(): void {
     for (let span = 2; span <= this.size; span <<= 1) {
       const half = span >> 1;

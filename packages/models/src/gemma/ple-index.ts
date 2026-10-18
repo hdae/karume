@@ -1,25 +1,28 @@
 /**
- * PLE（per-layer embeddings）の**索引**と、行の位置・長さ・scale を決める定数
- * （ADR [0085](../../../../docs/decisions/0085-ple-host-gather.md) /
- * [0109](../../../../docs/decisions/0109-manifest-v5-container.md) 決定 4）。
+ * The **index** of PLE (per-layer embeddings), and the constants that decide a row's position,
+ * length and scale (ADR [0085](../../../../docs/decisions/0085-ple-host-gather.md) /
+ * [0109](../../../../docs/decisions/0109-manifest-v5-container.md) decision 4).
  *
- * 索引はモデル容器の資産 `ple_index`（役割 `ple-index`・schema 3 の正準 JSON）で、`values` と
- * `scales` を**別々の block 列**として指す（役割 `ple-values` / `ple-scales`）。block 1 本は
- * 「token 区間 `[start, stop)` ぶんの行を隙間なく並べた生の行列」で、safetensors ヘッダも
- * メタデータも持たない — 読み手がするのは token → (block, 行 offset) の翻訳だけである。
+ * The index is the model container's asset `ple_index` (role `ple-index`, canonical JSON of schema
+ * 3), and points at `values` and `scales` as **separate block lists** (roles `ple-values` /
+ * `ple-scales`). One block is "a raw matrix of the rows of the token range `[start, stop)` laid out
+ * without gaps", with neither a safetensors header nor metadata — all a reader does is translate
+ * token → (block, row offset).
  *
- * ここに集めてあるのは「**block のバイト列を 1 つも読まずに**決まること」— 受理形への変換、
- * 格納 dtype から決まる 1 バイトあたりの要素数、block 1 本ぶんの常駐バイト、既定の常駐予算、
- * そして索引と容器の資産宣言の突合（{@link assertGemma4PleAssets}）である。読み手は 3 つで、
- * ホスト gather の所有者（`./ple.ts`）・GPU 常駐席（`./ple-gpu.ts`）・入口の門
- * （`./pipeline.ts` の admission）が同じ値を引く。
+ * What is gathered here is "what is decided **without reading a single byte of a block**" — the
+ * conversion to the accepted form, the number of elements per byte decided by the storage dtype,
+ * the resident bytes of one block, the default resident budget, and the cross-check of the index
+ * against the container's asset declarations ({@link assertGemma4PleAssets}). There are three
+ * readers: the owner of the host gather (`./ple.ts`), the GPU residency option (`./ple-gpu.ts`) and
+ * the entry check (the admission in `./pipeline.ts`) read the same values.
  *
- * MUST: {@link SCALE_BYTES} / {@link packFactor} の所有者はこの 1 本であること。以前は GPU
- * 常駐席が「`ple.ts` と対」というコメント付きで同じ値を独立に持っていたが、規約コメントによる
- * 同期は壊れても静かで、ずれた瞬間に「形も dtype も合ったまま別の行を引く」形になる
- * （ADR 0085 決定 5 の沈黙誤値）。
+ * MUST: this file is the only owner of {@link SCALE_BYTES} / {@link packFactor}. The GPU residency
+ * option used to hold the same values independently with a comment saying "paired with `ple.ts`",
+ * but synchronization by convention comments breaks silently, and the moment they diverge it
+ * becomes "read another row with shape and dtype still matching" (ADR 0085 decision 5's silent
+ * wrong value).
  *
- * MUST: モジュール副作用ゼロ（横断不変条件）。
+ * MUST: zero module side effects (cross-cutting invariant).
  */
 
 import type { OpenedContainer } from "@karume/runtime";
@@ -27,66 +30,84 @@ import type { ModelComponent } from "../hub/components.ts";
 import { readWholeAsset } from "../hub/asset-readers.ts";
 import { assertAllowedKeys, readRecord } from "../config/readers.ts";
 
-/** {@link readGemma4PleIndex} / {@link assertGemma4PleAssets} が読む部品の面（宣言だけ）。 */
+/**
+ * The component surface {@link readGemma4PleIndex} / {@link assertGemma4PleAssets} read
+ * (declarations only).
+ */
 export type Gemma4PleAssetSource = Pick<ModelComponent, "assets" | "asset">;
 
-/** 索引が載る容器の資産名と役割（書き手の正本は exporter の `migrate.py`）。 */
+/**
+ * Container asset name and role of the index (the writer's canonical source is the exporter's
+ * `migrate.py`).
+ */
 export const PLE_INDEX_ASSET = "ple_index";
 const PLE_INDEX_ROLE = "ple-index";
 
-/** `values` / `scales` の block が名乗る役割（container-v1 §2.2 の「models 側の解釈者名」）。 */
+/**
+ * Roles the `values` / `scales` blocks carry (container-v1 §2.2's "name of the interpreter on the
+ * models side").
+ */
 const TABLE_ROLE = { values: "ple-values", scales: "ple-scales" } as const;
 
-/** 表の名前（索引の欄名でもある）。 */
+/** Table names (also the index's field names). */
 export type Gemma4PleTableName = keyof typeof TABLE_ROLE;
 
 const TABLE_NAMES: readonly Gemma4PleTableName[] = ["values", "scales"];
 
-/** PLE の格納 dtype（`values` の詰め方 — `scales` は常に f32）。 */
+/** PLE storage dtype (how `values` is packed — `scales` is always f32). */
 export type Gemma4PleStorage = "i8" | "i4" | "i2";
 
-/** 表 1 本の block（token 区間 `[start, stop)` と、その実体を配る容器の資産名）。 */
+/**
+ * One block of a table (the token range `[start, stop)` and the container asset name that serves
+ * its data).
+ */
 export type Gemma4PleBlock = {
   readonly asset: string;
   readonly start: number;
   readonly stop: number;
 };
 
-/** `values` / `scales` の 1 表ぶん（1 行のバイト数 + token 区間の昇順・隙間なし分割）。 */
+/**
+ * One table of `values` / `scales` (bytes per row + an ascending, gap-free split of the token
+ * range).
+ */
 export type Gemma4PleTable = {
   readonly rowBytes: number;
   readonly blocks: readonly Gemma4PleBlock[];
 };
 
-/** `ple_index`（schema 3）の受理形。 */
+/** The accepted form of `ple_index` (schema 3). */
 export type Gemma4PleIndex = {
-  /** 格納 dtype。 */
+  /** Storage dtype. */
   readonly storage: Gemma4PleStorage;
-  /** 索引が持つ token 行数（= `vocab_size_per_layer_input`）。 */
+  /** Number of token rows the index holds (= `vocab_size_per_layer_input`). */
   readonly tokens: number;
-  /** 層数（E2B は 35）。 */
+  /** Number of layers (35 for E2B). */
   readonly layers: number;
-  /** 層当たりの次元（E2B は 256）。 */
+  /** Dimension per layer (256 for E2B). */
   readonly dim: number;
-  /** lookup 後に掛かる embed scale（`hidden_size_per_layer_input ** 0.5`）。 */
+  /** The embed scale applied after the lookup (`hidden_size_per_layer_input ** 0.5`). */
   readonly embedScale: number;
   readonly values: Gemma4PleTable;
   readonly scales: Gemma4PleTable;
 };
 
 /**
- * 索引の版。
+ * Index version.
  *
- * MUST: **schema 3 だけ**を読む。旧 sidecar（schema 1 / 2 — ファイル名と safetensors の表を
- * 指す形）は配布形ごと退役しており、両読みを実装すると「旧索引 × 新容器」の組み合わせが
- * 形だけ通る（ADR 0109 決定 1 の major 繰り上げ規則と同じ流儀）。
+ * MUST: read **schema 3 only**. The old sidecar (schema 1 / 2 — the form pointing at file names and
+ * safetensors tables) was retired together with its distribution, and implementing both would let
+ * the combination "old index × new container" pass on shape alone (the same approach as ADR 0109
+ * decision 1's major-bump rule).
  */
 export const SCHEMA = 3;
 
-/** per-row scale 1 個ぶんのバイト数（`scales` は f32）。 */
+/** Bytes of one per-row scale (`scales` is f32). */
 export const SCALE_BYTES = 4;
 
-/** 格納 dtype → 1 バイトに詰まる要素数（`values` の 1 行 = `layers × dim / packFactor` バイト）。 */
+/**
+ * Storage dtype → elements packed per byte (one `values` row = `layers × dim / packFactor` bytes).
+ */
 export const packFactor = (index: Pick<Gemma4PleIndex, "storage">): number =>
   index.storage === "i2" ? 4 : index.storage === "i4" ? 2 : 1;
 
@@ -119,13 +140,15 @@ const readOffset = (raw: Record<string, unknown>, key: string, where: string): n
 };
 
 /**
- * 表 1 本を受理形へ落とす。
+ * Converts one table to the accepted form.
  *
- * MUST: block の範囲は `[0, tokens)` の**隙間も重なりも無い昇順分割**であること。緩めると
- * 「引けない id がある索引」や「2 本が同じ id を持つ索引」が通り、後者は**どちらの行を
- * 引いたか**で結果が変わる（沈黙誤値）。
- * MUST: `rowBytes` は宣言（層数 / 次元 / 格納）から決まる値と一致すること。ここがずれると
- * 行 offset の掛け算だけが静かにずれ、形も dtype も合ったまま別 token の行を引く。
+ * MUST: the block ranges are an **ascending split of `[0, tokens)` with neither gaps nor
+ * overlaps**. Relaxing it would let through "an index with ids that cannot be read" or "an index
+ * where two blocks hold the same id", and with the latter the result depends on **which row was
+ * read** (a silent wrong value).
+ * MUST: `rowBytes` equals the value decided by the declaration (layers / dimension / storage). If
+ * it diverges, only the row-offset multiplication quietly shifts, reading another token's row with
+ * shape and dtype still matching.
  */
 const readTable = (
   root: Record<string, unknown>,
@@ -172,7 +195,10 @@ const readTable = (
   return { rowBytes, blocks };
 };
 
-/** `ple_index` の JSON を受理形へ落とす（未知キー・欠け・不連続な範囲は fail loudly）。 */
+/**
+ * Converts the `ple_index` JSON to the accepted form (unknown keys, missing fields and
+ * non-contiguous ranges fail loudly).
+ */
 export const parseGemma4PleIndex = (raw: unknown, where = PLE_INDEX_ASSET): Gemma4PleIndex => {
   const root = readRecord(raw, where);
   assertAllowedKeys(root, INDEX_KEYS, where);
@@ -182,8 +208,9 @@ export const parseGemma4PleIndex = (raw: unknown, where = PLE_INDEX_ASSET): Gemm
         `（旧 sidecar の索引は読まない — 配布形は容器の資産へ移った）`,
     );
   }
-  // MUST: 欠落を i8 と読まない — schema 3 の書き手は必ず綴る。既定へ倒すと、欄を落とした索引が
-  // 「storage が無い」ではなく rowBytes の食い違い（i8 block なら黙って通る）として現れる。
+  // MUST: do not read a missing field as i8 — a schema 3 writer always spells it. Falling back to a
+  // default would make an index that dropped the field show up not as "storage is missing" but as a
+  // rowBytes mismatch (or pass silently for an i8 block).
   const storage = Object.hasOwn(root, "storage") ? root.storage : undefined;
   if (storage !== "i8" && storage !== "i4" && storage !== "i2") {
     throw new Error(`${where}.storage ${String(storage)} が i8 / i4 / i2 でない`);
@@ -210,15 +237,16 @@ export const parseGemma4PleIndex = (raw: unknown, where = PLE_INDEX_ASSET): Gemm
   };
 };
 
-/** block 1 本の実体バイト数（= 容器がその資産に宣言する論理長）。 */
+/** Actual bytes of one block (= the logical length the container declares for that asset). */
 export const gemma4PleBlockBytes = (table: Gemma4PleTable, block: Gemma4PleBlock): number =>
   (block.stop - block.start) * table.rowBytes;
 
 /**
- * token → その表の block 添字。
+ * token → block index in that table.
  *
- * 索引は昇順の隙間なし分割（{@link parseGemma4PleIndex} の MUST）なので二分探索でよい。
- * 値域（`0 <= id < tokens`）は呼び手が先に見る（`./ple.ts` の gather / `./ple-gpu.ts` の enqueue）。
+ * The index is an ascending, gap-free split (the MUST of {@link parseGemma4PleIndex}), so a binary
+ * search is enough. The value range (`0 <= id < tokens`) is checked by the caller first (the gather
+ * in `./ple.ts` / the enqueue in `./ple-gpu.ts`).
  */
 export const gemma4PleBlockOf = (table: Gemma4PleTable, id: number): number => {
   let low = 0;
@@ -231,11 +259,14 @@ export const gemma4PleBlockOf = (table: Gemma4PleTable, id: number): number => {
   return low;
 };
 
-/** 索引が指す block 全部ぶん（= 全量常駐に要るホスト RAM）。 */
+/** All blocks the index points at (= the host RAM full residency needs). */
 export const gemma4PleTotalBytes = (index: Gemma4PleIndex): number =>
   index.tokens * (index.values.rowBytes + index.scales.rowBytes);
 
-/** 索引中で最も大きい block 1 本（予算の下限 = これを割ると 1 本も載せられない）。 */
+/**
+ * The largest single block in the index (the budget's lower bound = below it not even one block
+ * fits).
+ */
 export const largestBlockBytes = (index: Gemma4PleIndex): number => {
   let largest = 0;
   for (const name of TABLE_NAMES) {
@@ -247,34 +278,40 @@ export const largestBlockBytes = (index: Gemma4PleIndex): number => {
   return largest;
 };
 
-/** 既定の常駐予算を導く block 本数（{@link defaultGemma4PleResidentBytes} の意味づけ）。 */
+/**
+ * Number of blocks the default resident budget is derived from (the meaning of
+ * {@link defaultGemma4PleResidentBytes}).
+ */
 const DEFAULT_RESIDENT_BLOCKS = 2;
 
 /**
- * 常駐予算の既定 = **最も大きい block 2 本ぶん**（`./ple.ts` の
- * `Gemma4PleOptions.maxResidentBytes`）。
+ * The default resident budget = **two of the largest blocks** (`Gemma4PleOptions.maxResidentBytes`
+ * in `./ple.ts`).
  *
- * 「2 本」を本数のまま既定にすると、資産世代で block 幅が変わった瞬間に同じ数字が別の RAM を
- * 意味する。**最大** block を基準に取るのは、どの 2 本を掴んでも予算に収まる = 「2 本常駐」の
- * 意味が幅に依らず保たれる唯一の取り方だからである（ADR 0085 追記 2026-09-02）。
+ * Making "two blocks" the default as a count would make the same number mean different RAM the
+ * moment the block width changes with the asset generation. Basing it on the **largest** block is
+ * the only choice for which any two blocks fit the budget = the meaning of "two resident blocks"
+ * holds regardless of the width (ADR 0085 addendum 2026-09-02).
  *
- * NOTE: 1 行は `values` と `scales` の 2 表から引くので、2 本は「値の block 1 本 + scale の
- * block 1 本」をちょうど賄う本数でもある。
+ * NOTE: one row is read from the two tables `values` and `scales`, so two is also exactly the
+ * number that covers "one value block + one scale block".
  */
 export const defaultGemma4PleResidentBytes = (index: Gemma4PleIndex): number =>
   DEFAULT_RESIDENT_BLOCKS * largestBlockBytes(index);
 
 /**
- * 索引と容器の資産宣言が**ちょうど一致**することを見る門（**block のバイト列を 1 つも
- * 取る前**）。
+ * The check that the index and the container's asset declarations **match exactly** (**before a
+ * single byte of a block is fetched**).
  *
- * MUST: 両方向を全件列挙する。索引にあって容器に無い block は、その token 範囲を初めて引いた
- * ターン（= 会話の途中・GB 級のロード完了後）まで落ちない。容器にあって索引に無い block は
- * 「配布形が宣言した資産を 1 本も読まないまま動く」形で、永久に検出されない。長さの食い違いは
- * **形も dtype も合ったまま別 token の行を引く**（ADR 0085 決定 5 の沈黙誤値）。
+ * MUST: list everything in both directions. A block in the index but not in the container does not
+ * fail until the turn that first reads that token range (= mid-conversation, after a GB-scale load
+ * has finished). A block in the container but not in the index is the shape "runs without ever
+ * reading an asset the distribution declared" and is never detected. A length mismatch **reads
+ * another token's row with shape and dtype still matching** (ADR 0085 decision 5's silent wrong
+ * value).
  *
- * MUST: 1 件目で止めない。片方だけ焼き直した配布形では数十件が同時にずれるので、1 件ずつ
- * 直す往復にしない。
+ * MUST: do not stop at the first problem. In a distribution where only one side was re-baked,
+ * dozens diverge at once, so do not force a round trip per fix.
  */
 export const assertGemma4PleAssets = (
   where: string,
@@ -321,11 +358,12 @@ export const assertGemma4PleAssets = (
 };
 
 /**
- * 容器の資産から索引を読んで受理形にし、指し先の block が実在することまで見る
- * （**重みの block を 1 バイトも取る前**に通す家族の門 — `./pipeline.ts` の admission 席）。
+ * Reads the index from the container's assets into the accepted form, and checks that the blocks it
+ * points at exist (the family check passed **before a single byte of a weight block is fetched** —
+ * the admission slot in `./pipeline.ts`).
  *
- * 索引そのものは数 KB の資産で、`values` / `scales` の block とは別の block に置かれる
- * （container-v1 §4.2 — 区間読みを要する block だけが専用 part に単独で載る）。
+ * The index itself is an asset of a few KB, placed in a block separate from the `values` / `scales`
+ * blocks (container-v1 §4.2 — only blocks that need range reads sit alone in their own part).
  */
 export const readGemma4PleIndex = async (
   where: string,
@@ -365,11 +403,12 @@ export const readGemma4PleIndex = async (
 };
 
 /**
- * 開いた容器（runtime の `OpenedContainer`）を {@link Gemma4PleAssetSource} へ畳む。
+ * Folds an opened container (the runtime's `OpenedContainer`) into a {@link Gemma4PleAssetSource}.
  *
- * 取得面・全量面の部品（`ModelComponent`）は最初からこの面なので、要るのは**容器を直に開く
- * 側**（実資産の検収・bench の台本）だけである。役割の写し取りを呼び手ごとに書くと、綴りの
- * 違う写しが静かに増える。
+ * Components from the fetch surface and the full-bytes surface (`ModelComponent`) already have this
+ * surface, so only **callers that open a container directly** (acceptance on real assets, and the
+ * bench scripts — tools/mtp-bench, removed in 0.15) need it. Writing the role copy per caller would
+ * quietly multiply copies with different spellings.
  */
 export const gemma4PleAssetSource = (
   opened: Pick<OpenedContainer, "model" | "asset">,

@@ -1,36 +1,47 @@
 /**
- * manifest の weights 部品を**コンテナ（`krm`）**から Session へ載せる内部機構
- * （8 系列の `fromPretrained` / `fromAssets` が共有する 1 本 — ADR 0109 決定 2 / 10・ADR 0108 決定 19）。
+ * Internal mechanism that loads the manifest's weights components from **containers (`krm`)** into
+ * Sessions (the one mechanism shared by every family's `fromPretrained` / `fromAssets` — ADR 0109
+ * decisions 2 / 10, ADR 0108 decision 19).
  *
- * MUST: barrel には出さない。ロード経路の綴りを揃えるための機構で、利用者が触る面ではない。
+ * MUST: not exported from the barrel. It exists to keep the load paths spelled the same way; it is
+ * not a surface the user touches.
  *
- * ## 順序（「実行できないモデルの重みは 1 バイトも落とさない」— ADR 0070 決定 5 を継承）
+ * ## Order ("do not download a single byte of weights for a model that cannot run" — inherited from
+ * ADR 0070 decision 5)
  *
- * 1. 各部品の **part 0（descriptor）だけ**を温めて開く（`openContainer` — 2 文書を manifest の期待値で
- *    照合し、グラフ × 束縛表の合流で**不足 / 余剰 0** を宣言だけで確かめる）。`prepareContainer` の
- *    capability 門もここ。
- * 2. 家族の門（{@link FamilyAdmission}）を通す。手元にあるのは各部品のグラフ宣言と資産の**宣言**
- *    （名前 → 役割・論理長）。重み block と part を共有しない資産（索引・`rope_base` — 書き手の規約
- *    container-v1 §4.2）は `asset(name)` でここでも読んでよい（PLE の索引 × 資産の全件突合がそれ）。
- * 3. 通ったら重みの part（part 1 以降）を永続キャッシュへ落とす（`prefetchAssets` — 進捗・中断・
- *    4 並列）。Session を組むその瞬間に block が part 順に読まれる（hub の取得面 — ホスト RAM に
- *    載るのは seek 型の取得元で block の重ね合わせ、scan 型で part 1 本）。
- * 4. 残りの資産（tokenizer 等 — manifest の `assets`）を全量で取る。
+ * 1. Warm and open **only part 0 (the descriptor)** of each component (`openContainer` — checks the
+ *    two documents against the manifest's expected values and confirms **zero shortage / excess** in
+ *    the merge of graph × binding table from the declarations alone). The capability check of
+ *    `prepareContainer` also runs here.
+ * 2. Pass the family check ({@link FamilyAdmission}). What is at hand is each component's graph
+ *    declaration and the **declarations** of its assets (name → role, logical length). Assets that
+ *    share no part with weight blocks (indexes, `rope_base` — the writer's convention, container-v1
+ *    §4.2) may be read here too via `asset(name)` (the check of the PLE index against every asset
+ *    entry does exactly that).
+ * 3. Once it passes, download the weight parts (part 1 onward) into the persistent cache
+ *    (`prefetchAssets` — progress, abort, 4 in parallel). Blocks are read in part order at the
+ *    moment the Session is built (hub's fetch surface — what lands in host RAM is the overlap of
+ *    blocks for a seek-type source, one part for a scan-type source).
+ * 4. Fetch the remaining assets (tokenizer etc. — the manifest's `assets`) in full.
  *
- * ## 部品差し替え席（{@link LoadContainerOptions.components} — ADR 0108 決定 19）
+ * ## Component-replacement option ({@link LoadContainerOptions.components} — ADR 0108 decision 19)
  *
- * 役割 → {@link ComponentSource}（別の `karume/5` リポの同じ役割）で部品を差し替える。admission は
- * **重みを 1 バイトも取る前**に ①グラフ記述の sha256 が manifest の宣言と一致（グラフ契約が同一の
- * 部品だけ）②束縛表の不足 / 余剰 0（`openContainer` が descriptor だけで出す）③家族の門、を通す。
- * 不足も余剰も全件列挙で拒否する（diffusers の `strict=False` は採らない）。
+ * Replaces a component by role → {@link ComponentSource} (the same role in another `karume/5`
+ * repo). Admission runs **before a single byte of weights is fetched**: (1) the sha256 of the graph
+ * descriptor matches the manifest's declaration (only components with an identical graph contract),
+ * (2) zero shortage / excess in the binding table (`openContainer` reports it from the descriptor
+ * alone), (3) the family check. Both shortage and excess are rejected with a full listing
+ * (diffusers' `strict=False` is not adopted).
  *
- * ## 全量面（`from*Assets`）
+ * ## Whole-bytes surface (`from*Assets`)
  *
- * 取得済みバイト列から組む入口は {@link assetComponentOpener} で同じ姿（{@link ModelComponent}）に
- * 畳む。部品キーは**単一形 `krm` のバイト列**（`<役割>`）か**分割形の part 列**（`<役割>[i]` —
- * part 0 から添字順）。期待値（2 文書の sha256）は無い — 手元のバイト列は呼び手が保証する。
- * 同期の供給口を返すために**全部品を先に開く**ので、この面では容器を開くのが家族 admission より
- * 先になる（取得面と順序が逆）— 中断は家族の `fromAssets` 入口で先に見る。
+ * The entries that build from already-fetched bytes fold into the same shape
+ * ({@link ModelComponent}) via {@link assetComponentOpener}. A component key is either **the bytes
+ * of a single-form `krm`** (`<role>`) or **the part list of a split form** (`<role>[i]` — in index
+ * order from part 0). There are no expected values (the sha256 of the two documents) — the caller
+ * vouches for the bytes at hand. To return a synchronous opener it **opens every component first**,
+ * so on this surface opening the containers comes before family admission (the reverse of the
+ * fetch surface) — the family's `fromAssets` entry checks for abort first.
  */
 
 import {
@@ -64,58 +75,65 @@ import {
 import { toManifestSource } from "./repo-ref.ts";
 
 /**
- * グラフ**宣言**を持つもの（`prepareContainer` が返す `PreparedModel` と
- * {@link ModelComponent} の共通面）。
+ * Something that carries a graph **declaration** (the common surface of the `PreparedModel` that
+ * `prepareContainer` returns and {@link ModelComponent}).
  *
- * 宣言との突合（入出力の本数・静的次元と `pipelineConfig` の一致）は取得面でも全量面でも
- * 同じ 1 本で書きたいので、検査 helper はこの面だけを受ける。
+ * The check against the declaration (input/output counts, static dimensions agreeing with
+ * `pipelineConfig`) should be written once for both the fetch surface and the whole-bytes surface,
+ * so the check helpers accept only this surface.
  */
 export type GraphOwner = {
   readonly graph: PreparedModel["graph"];
 };
 
-/** コンポーネント 1 本の「実行前の姿」= グラフ宣言 + Session の入口 + 容器の資産。 */
+/** One component "before execution" = graph declaration + Session entry + the container's assets. */
 export type ModelComponent = GraphOwner & {
-  /** Session を 1 本張る。呼ぶたびに block を part 順に読み直す（列は使い回さない）。 */
+  /** Builds one Session. Every call re-reads the blocks in part order (the stream is not reused). */
   readonly createSession: (gpu: GpuContext, options?: SessionOptions) => Promise<Session>;
   /**
-   * 容器が宣言する資産名 → 役割（container-v1 §2.2 — runtime は役割を解釈しない）。家族が
-   * 「この部品に PLE がある / 無い」を**宣言だけ**で見る口（admission で使える）。
+   * Asset name → role as declared by the container (container-v1 §2.2 — the runtime does not
+   * interpret roles). The family's way to see "this component has / has no PLE" from the
+   * **declarations alone** (usable during admission).
    */
   readonly assets: Readonly<Record<string, string>>;
   /**
-   * 資産 1 本の読み口（未宣言は fail loudly）。開くだけでは 1 バイトも取らない — 区間読みは
-   * `read(offset, length)` のときだけ（PLE の行読み・`rope_base` の全量読みがこれ）。
+   * Reader for one asset (undeclared names fail loudly). Opening fetches no byte — range reads
+   * happen only on `read(offset, length)` (PLE row reads and the full read of `rope_base` are such
+   * reads).
    *
-   * 呼ぶたびに新しい読み口を返す。未検証の取得元（全量面の part 列・ローカルディレクトリ）では
-   * 読み口が block を**寿命ぶん保持**する（runtime の `AssetReader`）ので、家族は読み口を 1 回の
-   * 読みより長く握らない（握ると家族側の常駐予算の外でホスト RAM が育つ）。
+   * Every call returns a new reader. With an unverified source (the part list of the whole-bytes
+   * surface, a local directory) a reader **holds its blocks for its lifetime** (the runtime's
+   * `AssetReader`), so a family does not hold a reader longer than one read (holding it grows host
+   * RAM outside the family's residency budget).
    */
   readonly asset: (name: string) => AssetReader;
   /**
-   * 必要側のバイト数の見積り（`PreparedModel.estimate` そのもの — GPU に触らない純関数）。段を張る前に
-   * 「残りの VRAM に入るか」を量る呼び手（anima の常駐 DiT の先回り退避）が使う。
+   * Estimate of the demand-side byte count (`PreparedModel.estimate` itself — a pure function that
+   * does not touch the GPU). Used by callers that measure "does it fit in the remaining VRAM" before
+   * building a stage (anima's pre-emptive eviction of the resident DiT).
    */
   readonly estimate: (options: EstimateOptions) => AdmissionReport;
   /**
-   * 重みの part（part 1 以降）の最大バイト長（part 0 = descriptor だけの容器では 0）。
+   * The largest byte length of a weight part (part 1 onward; 0 for a container whose only part is
+   * part 0 = the descriptor).
    *
-   * WHY: Session 構築は part を 1 本ずつアップロードし、実装（wgpu の `queue.writeBuffer`）の staging は
-   * その part のフェンスまで確保されたまま残る — 見積り（{@link ModelComponent.estimate}）が勘定しない
-   * 一時の上乗せは「最大の part 1 本ぶん」になる。
+   * WHY: building a Session uploads one part at a time, and the implementation's staging (wgpu's
+   * `queue.writeBuffer`) stays allocated until that part's fence — the transient overhead that the
+   * estimate ({@link ModelComponent.estimate}) does not count is "one largest part".
    */
   readonly maxPartBytes: number;
 };
 
 /**
- * 役割 → コンポーネントの供給口。全量面は「手元のバイト列を `openContainer`」、取得面は
- * 「開いて admission 済みの引き当て」で、パイプライン本体はどちらか知らずに同じ順序で組み立てる。
+ * Role → component opener. On the whole-bytes surface it is "`openContainer` on the bytes at hand",
+ * on the fetch surface "a lookup into what was opened and admitted"; the pipeline body assembles in
+ * the same order without knowing which.
  */
 export type ComponentOpener = (key: string) => ModelComponent;
 
 /**
- * 部品差し替えの出所（ADR 0108 決定 19 / ADR 0109 決定 10）— 別の `karume/5` リポの**同じ役割**。
- * `model` / `quant` は省略時にそのリポの既定。
+ * Source of a component replacement (ADR 0108 decision 19 / ADR 0109 decision 10) — **the same
+ * role** in another `karume/5` repo. `model` / `quant` default to that repo's defaults when omitted.
  */
 export type ComponentSource = {
   readonly source: string | HubRepoRef | DistributionSource;
@@ -124,40 +142,43 @@ export type ComponentSource = {
 };
 
 /**
- * 家族側の admission — 「この manifest / このグラフでは、この家族として実行できない」を
- * **重みの part を 1 バイトも取る前に**落とすための席（ADR 0070 決定 5 を継承）。
+ * Family-side admission — the hook that rejects "with this manifest / this graph, this cannot run
+ * as this family" **before a single byte of the weight parts is fetched** (inherited from ADR 0070
+ * decision 5).
  *
- * `openContainer` / `prepareContainer`（合流・不足 / 余剰・capability）の直後・重み prefetch の**前**に
- * 1 度だけ呼ばれ、手元にあるのは各部品の `IrGraph` と資産の宣言（{@link ModelComponent.assets} /
- * `asset(name).length`）だけ。資産のバイト列はまだ無い（あれを待つと重み prefetch より前という
- * 位置が保てない）。
+ * Called once, right after `openContainer` / `prepareContainer` (merge, shortage / excess,
+ * capability) and **before** the weight prefetch; all that is at hand is each component's `IrGraph`
+ * and the asset declarations ({@link ModelComponent.assets} / `asset(name).length`). The asset bytes
+ * are not there yet (waiting for them would lose the position before the weight prefetch).
  *
- * MUST: 家族はここで**自分の門を全部**通し、戻り値（parse 済み config / quant）と**同じ供給口**を
- * 後段の状態構築へそのまま渡す — 同じ検査を前段と後段に 2 実装持つと、片方だけ更新された瞬間に
- * 「前は通るが後で落ちる」形へ戻る。
+ * MUST: the family runs **all of its checks** here and passes the return value (parsed config /
+ * quant) and **the same opener** straight on to the later state construction — with two
+ * implementations of the same check in the early and the late step, the moment only one of them is
+ * updated it goes back to "passes early but fails later".
  */
 export type FamilyAdmission<Admitted> = (open: ComponentOpener) => Admitted | Promise<Admitted>;
 
-/** {@link loadContainerComponents} の戻り。 */
+/** Return value of {@link loadContainerComponents}. */
 export type ContainerComponents<Admitted> = {
-  /** weights 部品の供給口（渡した `componentKeys` 以外は fail loudly）。 */
+  /** Opener for the weights components (anything outside the given `componentKeys` fails loudly). */
   readonly open: ComponentOpener;
-  /** manifest の `assets`（tokenizer 等）のバイト列 — 全量で受け取る。 */
+  /** The bytes of the manifest's `assets` (tokenizer etc.) — received in full. */
   readonly assets: Record<string, Uint8Array<ArrayBuffer>>;
-  /** 家族 admission（{@link FamilyAdmission}）が確定させた材料。 */
+  /** The material that family admission ({@link FamilyAdmission}) settled. */
   readonly admitted: Admitted;
 };
 
-/** {@link loadContainerComponents} の追加オプション（取得層のオプションはそのまま透過する）。 */
+/** Extra options of {@link loadContainerComponents} (the fetch layer's options pass through as is). */
 export type LoadContainerOptions = FetchAssetsOptions & {
   /**
-   * 部品差し替え席（役割 → 出所）。渡した役割は `componentKeys` の部分集合 MUST（未知の役割は
-   * fail loudly — 綴り間違いを黙って「差し替えない」に畳まない）。
+   * Component-replacement option (role → source). The given roles MUST be a subset of
+   * `componentKeys` (an unknown role fails loudly — a misspelling is not silently folded into
+   * "replace nothing").
    */
   readonly components?: Readonly<Record<string, ComponentSource>>;
 };
 
-/** 重みの part（part 1 以降）の最大バイト長（{@link ModelComponent.maxPartBytes}）。 */
+/** The largest byte length of a weight part (part 1 onward — {@link ModelComponent.maxPartBytes}). */
 const maxWeightPartBytes = (opened: OpenedContainer): number => {
   let max = 0;
   for (let index = 1; index < opened.source.partCount; index += 1) {
@@ -166,7 +187,7 @@ const maxWeightPartBytes = (opened: OpenedContainer): number => {
   return max;
 };
 
-/** 開いた容器 1 本を {@link ModelComponent} に畳む（取得面 / 全量面が共有する 1 本）。 */
+/** Folds one opened container into a {@link ModelComponent} (shared by the fetch and whole-bytes surfaces). */
 const containerComponent = (opened: OpenedContainer, prepared: PreparedModel): ModelComponent => ({
   graph: prepared.graph,
   createSession: (gpu, options = {}) => prepared.createContainerSession(gpu, options),
@@ -178,7 +199,7 @@ const containerComponent = (opened: OpenedContainer, prepared: PreparedModel): M
   maxPartBytes: maxWeightPartBytes(opened),
 });
 
-/** 開いた部品の表から供給口を作る（開いていない役割は fail loudly）。 */
+/** Builds an opener from the table of opened components (a role that was not opened fails loudly). */
 const openerOf =
   (where: string, components: ReadonlyMap<string, ModelComponent>): ComponentOpener =>
   (key) => {
@@ -191,15 +212,15 @@ const openerOf =
     return component;
   };
 
-/** `<役割>[<添字>]` の添字部分（10 進整数のみ）。 */
+/** The index part of `<role>[<index>]` (decimal integers only). */
 const PART_INDEX = /^\d+$/;
 
-/** 全量面の部品 1 本の読み方（単一形のキー 1 本 / 分割形の part キー列）。 */
+/** How one component of the whole-bytes surface is read (one single-form key / a list of part keys). */
 type ComponentKeyPlan =
   | { readonly kind: "bytes"; readonly key: string }
   | { readonly kind: "parts"; readonly keys: readonly string[] };
 
-/** `<役割>[<添字>]` の形をしたキーの総数（連続本数との差が欠番の本数）。 */
+/** Total number of keys shaped `<role>[<index>]` (its difference from the contiguous count is the number of gaps). */
 const indexedKeyCount = (keys: readonly string[], componentKey: string): number => {
   const prefix = `${componentKey}[`;
   let count = 0;
@@ -211,10 +232,12 @@ const indexedKeyCount = (keys: readonly string[], componentKey: string): number 
 };
 
 /**
- * 全量面の部品 1 本を「単一形 1 本」と「分割形の part 列」のどちらで読むか。
+ * Whether one component of the whole-bytes surface is read as "one single form" or "a split form's
+ * part list".
  *
- * MUST: 添字は `[0]` から欠番なく連続していること・素キーと `[i]` を混ぜないこと。どちらも
- * キーの作り方が壊れている印で、黙って読み飛ばすと遠くの層から「part が足りない」の形で落ちる。
+ * MUST: the indexes run contiguously from `[0]` without gaps, and a bare key is not mixed with
+ * `[i]` keys. Either violation marks broken key construction; skipping it silently fails far away,
+ * in another layer, as "not enough parts".
  */
 const planComponentKeys = (
   where: string,
@@ -260,12 +283,12 @@ const planComponentKeys = (
 };
 
 /**
- * 全量面（`from*Assets`）のコンポーネント供給口 — 8 系列が共有する 1 本。
+ * Component opener of the whole-bytes surface (`from*Assets`) — the one shared by every family.
  *
- * `componentKeys` の部品を**先に全部開く**（`openContainer` は非同期なので、同期の
- * {@link ComponentOpener} を返すには開いてから配るしかない）。`buffer` は家族側の資産アクセサ
- * （「資産が無い」「bytes が buffer 全体を占めていない」の文言を家族側に残すため、part 1 本ずつも
- * 同じ門を通す）。
+ * It **opens every component of `componentKeys` first** (`openContainer` is asynchronous, so the
+ * only way to return a synchronous {@link ComponentOpener} is to open first and hand out after).
+ * `buffer` is the family's asset accessor (each single part goes through the same check too, so
+ * that the "asset missing" / "bytes do not cover the whole buffer" messages stay with the family).
  */
 export const assetComponentOpener = async (
   where: string,
@@ -288,16 +311,18 @@ export const assetComponentOpener = async (
 };
 
 /**
- * モデル全体で**1 本**の進捗ストリームにする（MUST — 消費者から見える契約）。
+ * Makes **one** progress stream for the whole model (MUST — a contract visible to consumers).
  *
- * 取得が「descriptor の温め + 重み part の温め + 資産の全量面」へ割れ、差し替え席では取得元も
- * 割れるが、呼び手が見る `total` は取る全ファイルの size 合計で、`loaded` は受信済み合計。
- * per-file の欄（`fileLoaded` / `fileTotal`）・`phase`・取得先（`repo` / `revision`）は取得層の
- * ものを素通しする。
+ * Fetching splits into "warming the descriptors + warming the weight parts + fetching the assets in
+ * full", and with the replacement option the sources split too, but the `total` the caller
+ * sees is the size sum of every file fetched and `loaded` is the sum received. The per-file fields
+ * (`fileLoaded` / `fileTotal`), `phase` and the fetch target (`repo` / `revision`) pass through from
+ * the fetch layer.
  *
- * MUST: ファイルの引き当ては (取得先の repo, revision, path) で行う（`AssetProgress.path` の
- * MUST NOT）— 越境参照と差し替え席は別リポの同じ path を 1 回のロードに並べるので、path だけで
- * 畳むと 2 本が 1 本に数えられ、`total` が実際に取る量より小さくなる。
+ * MUST: files are matched by (fetch target repo, revision, path) (the MUST NOT on
+ * `AssetProgress.path`) — cross-repo references and the replacement option put the same path from
+ * different repos into one load, so folding by path alone counts two files as one and makes `total`
+ * smaller than what is actually fetched.
  */
 const aggregateProgress = (
   sources: readonly { readonly loaded: LoadedManifest; readonly refs: readonly FileRef[] }[],
@@ -319,46 +344,49 @@ const aggregateProgress = (
   };
 };
 
-/** 進捗の引き当てキー（取得先の repo / revision を持たない取得元では欄が抜けたまま綴る）。 */
+/** Progress lookup key (a source without a fetch target repo / revision is spelled with those fields empty). */
 const progressKey = (repo: string | undefined, revision: string | undefined, path: string) =>
   JSON.stringify([repo ?? "", revision ?? "", path]);
 
 /**
- * `loaded` の取得面が `ref` について出す進捗の引き当てキー。取得先の決め方は hub の公開契約
- * （`AssetProgress.repo` / `revision`）どおり — 越境参照（`repo` と `revision` の対）は宣言された
- * 越境先、それ以外はその manifest のセッション（`LoadedManifest.repo` / `revisionSha`）。
+ * The progress lookup key that the fetch surface of `loaded` emits for `ref`. The fetch target is
+ * decided as hub's public contract (`AssetProgress.repo` / `revision`) says — a cross-repo reference
+ * (a `repo` and `revision` pair) uses the declared target, anything else the session of that
+ * manifest (`LoadedManifest.repo` / `revisionSha`).
  *
- * NOTE: 同じ manifest の参照どうしでは、このキーが同じ ⇔ hub の `fileRefKey` が同じ
- * （{@link prefetchSeats} の一意化が hub の重複検査と食い違わない）。自リポ参照と越境参照が同じ
- * キーへ畳まれるのは越境が読み込んだ repo 自身を指すときだけで、その manifest は hub の
- * `loadManifest` が拒否する（ADR 0038 追記 2026-10-11）。
+ * NOTE: between references of the same manifest, this key is equal ⇔ hub's `fileRefKey` is equal
+ * (the de-duplication in {@link prefetchSeats} does not disagree with hub's duplicate check). A
+ * same-repo reference and a cross-repo reference fold into the same key only when the cross-repo
+ * reference points at the very repo that was loaded, and hub's `loadManifest` rejects such a
+ * manifest (ADR 0038 addendum 2026-10-11).
  */
 const progressKeyOf = (loaded: LoadedManifest, ref: FileRef): string =>
   ref.repo !== undefined && ref.revision !== undefined
     ? progressKey(ref.repo, ref.revision, ref.path)
     : progressKey(loaded.repo, loaded.revisionSha, ref.path);
 
-/** 部品 1 本の出所（差し替え席なら別リポの manifest）。 */
+/** The source of one component (for the replacement option, another repo's manifest). */
 type Seat = {
   readonly key: string;
   readonly loaded: LoadedManifest;
   readonly container: ContainerRef;
 };
 
-/** 実体を持つ part（長さ 0 の part は取得の対象外 — hub も取らない）。 */
+/** Parts with content (a zero-length part is not fetched — hub does not fetch it either). */
 const nonEmptyParts = (parts: readonly FileRef[]): readonly FileRef[] =>
   parts.filter((part) => part.size > 0);
 
 /**
- * 席ごとに選んだ FileRef を、manifest（取得元）ごとにまとめて温める。同じ manifest の part は
- * 1 回の `prefetchAssets` に載せる — 家族ごと・部品ごとに呼び分けると取得層の同時取得が効かず、
- * 直列 DL に落ちる。
+ * Warms the FileRefs chosen per seat, grouped by manifest (source). The parts of one manifest go
+ * into a single `prefetchAssets` call — calling it per family or per component defeats the fetch
+ * layer's concurrent fetching and drops to serial downloads.
  *
- * MUST: 取得計画は 1 本のファイルを 1 回だけ載せる（容器ごとの part 列はそのまま、計画だけを
- * 一意化する）— manifest は選択内の別の容器が同じ part を共有することを許すが、`prefetchAssets`
- * は重複参照を呼び手の誤りとして拒否するので、連結のまま渡すと宣言は通るのにロードが落ちる。
- * 同一性は進捗の分母（{@link aggregateProgress}）と同じ {@link progressKeyOf} で見る — 別の
- * 物差しにすると、取るファイルと分母が食い違う。
+ * MUST: the fetch plan carries each file only once (the per-container part lists stay as they are;
+ * only the plan is de-duplicated) — a manifest allows different containers in one selection to
+ * share a part, but `prefetchAssets` rejects duplicate references as a caller error, so passing the
+ * concatenation as is makes the load fail although the declaration passed. Identity is judged by
+ * {@link progressKeyOf}, the same as the progress denominator ({@link aggregateProgress}) — with a
+ * different measure, the files fetched and the denominator disagree.
  */
 const prefetchSeats = async (
   seats: readonly Seat[],
@@ -380,16 +408,19 @@ const prefetchSeats = async (
 };
 
 /**
- * 各部品の descriptor（part 0）だけを取って admission（合流 + capability + 家族）を通し、通った後に
- * 重みの part を永続キャッシュへ落とし、残りの資産（manifest の `assets`）を全量で取る。
+ * Fetches only each component's descriptor (part 0) and runs admission (merge + capability +
+ * family); once that passes, downloads the weight parts into the persistent cache and fetches the
+ * remaining assets (the manifest's `assets`) in full.
  *
- * MUST: `admit`（{@link FamilyAdmission}）は省略できない席にする — 「実行できないモデルの
- * 重みは 1 バイトも落とさない」は runtime の capability 門だけでは満たせず、家族の門
- * （pipeline 名 / major・`pipelineConfig` の schema・グラフと config の突合・共有 GPU の
- * feature）まで前段に揃って初めて文面どおりになる。
+ * MUST: `admit` ({@link FamilyAdmission}) is a parameter that cannot be omitted — "do not download
+ * a single byte of weights for a model that cannot run" is not met by the runtime's capability
+ * check alone; it holds as written only once the family's checks (pipeline name / major, the
+ * `pipelineConfig` schema, the graph-vs-config check, the features of the shared GPU) all sit in
+ * the early step.
  *
- * MUST: 差し替え席（{@link LoadContainerOptions.components}）の検査（役割の実在・グラフ記述の
- * 同一性）は descriptor を取る前に済ませる — 別リポの manifest を読むだけで判定できる。
+ * MUST: the checks of the replacement option ({@link LoadContainerOptions.components}) (the role
+ * exists, the graph descriptor is identical) finish before any descriptor is fetched — reading the
+ * other repo's manifest is enough to decide them.
  */
 export const loadContainerComponents = async <Admitted>(
   where: string,
@@ -409,12 +440,14 @@ export const loadContainerComponents = async <Admitted>(
     }
   }
 
-  // 席（部品ごとの出所）— 差し替えは別リポの manifest を読んで**同じ役割**の容器を引く。
+  // Seats (the source of each component) — a replacement reads another repo's manifest and picks
+  // the container of **the same role**.
   const seats: Seat[] = [];
   for (const key of componentKeys) {
-    // MUST: 役割の表は own のキーでだけ引く（横断規約「シンボル束縛は `Object.hasOwn`」）— 上の
-    // 検査は `Object.keys`（own）で行っているので、直接添字で継承プロパティ（`Object.create` や
-    // プロトタイプ汚染）を読むと、検査を通っていない値が席に座る。
+    // MUST: look up the role table by own keys only (the cross-cutting rule "bind symbols with
+    // `Object.hasOwn`") — the check above uses `Object.keys` (own), so reading an inherited property
+    // by direct indexing (`Object.create` or prototype pollution) seats a value that never passed
+    // the check.
     const base = Object.hasOwn(selection.containers, key) ? selection.containers[key] : undefined;
     if (base === undefined) {
       throw new Error(
@@ -438,14 +471,15 @@ export const loadContainerComponents = async <Admitted>(
     const { containers } = resolveSelection(other.manifest, {
       ...(replacement.model === undefined ? {} : { model: replacement.model }),
       ...(replacement.quant === undefined ? {} : { quant: replacement.quant }),
-      // 未知の役割名は resolveSelection が `ManifestReferenceError`（利用可能な部品つき）で落とす。
+      // An unknown role name fails in resolveSelection with `ManifestReferenceError` (listing the available components).
       weights: [key],
     });
     const container = Object.hasOwn(containers, key) ? containers[key] : undefined;
     if (container === undefined) {
       throw new Error(`${seatWhere}: 参照先の manifest に部品 '${key}' の容器が無い`);
     }
-    // グラフ契約の同一性 — 重みを 1 バイトも取る前に、2 つの manifest の宣言だけで見る。
+    // Identity of the graph contract — judged from the two manifests' declarations alone, before a
+    // single byte of weights is fetched.
     if (container.descriptor.graph.sha256 !== base.descriptor.graph.sha256) {
       throw new Error(
         `${seatWhere}: グラフ記述が manifest の宣言と違う（差し替えられるのはグラフ記述の sha256 が` +
@@ -466,37 +500,42 @@ export const loadContainerComponents = async <Admitted>(
     ...streamOptions,
     ...(aggregated === undefined ? {} : { onProgress: aggregated }),
   };
-  // Session 構築時の読みはキャッシュ済み part の区間読みなので、**進捗は流さない**（流すと
-  // `complete` がロード完了の後にもう一度出て、集約 `loaded` が二重計上になる）。
+  // Reads during Session construction are range reads of cached parts, so **no progress is
+  // streamed** (streaming would emit `complete` again after the load finished and double-count the
+  // aggregated `loaded`).
   //
-  // MUST: `signal` も落とす — 呼び手が渡す signal は「このロード 1 回」の寿命を表す値で、
-  // 取得面へ持ち越すと `AbortSignal.timeout(120_000)` やアンマウント時の `abort()` が
-  // 「ロードは成功したのに以後の生成が全部落ちる」形になる。`headers` / `fetch` / `caches` /
-  // `onCacheError` は「取得の道具」なので寿命いっぱい持つのが正しく、`signal` だけが別種の値。
+  // MUST: drop `signal` too — the signal the caller passes expresses the lifetime of "this one
+  // load", and carrying it into the fetch surface turns `AbortSignal.timeout(120_000)` or an
+  // `abort()` on unmount into "the load succeeded but every later generation fails". `headers` /
+  // `fetch` / `caches` / `onCacheError` are "fetch tools", so holding them for the whole lifetime is
+  // right; only `signal` is a different kind of value.
   const { onProgress: _loadProgress, signal: _loadSignal, ...sessionOptions } = hubOptions;
 
-  // 1. descriptor（part 0）だけを温めて開く。合流（不足 / 余剰 0）と capability 門はここで落ちる。
+  // 1. Warm and open only the descriptors (part 0). The merge (zero shortage / excess) and the
+  //    capability check fail here.
   await prefetchSeats(seats, (seat) => [seat.container.parts[0]], hubOptions);
   const components = new Map<string, ModelComponent>();
   for (const seat of seats) {
     hubOptions.signal?.throwIfAborted();
     const source = openContainerSource(seat.loaded, seat.container, sessionOptions);
     const opened = await openContainer({ kind: "source", source }, seat.container.descriptor);
-    // グラフ名 = 役割名（書き手の規約 — container-v1 §2.1。無ければ prepareContainer が在るグラフを
-    // 列挙して落とす）。
+    // Graph name = role name (the writer's convention — container-v1 §2.1; when it is missing,
+    // prepareContainer fails listing the graphs that exist).
     components.set(seat.key, containerComponent(opened, prepareContainer(opened, seat.key)));
   }
   const open = openerOf(where, components);
 
-  // 2. 家族 admission — 合流 / capability の直後・重み prefetch の前。供給口は下で返すものと
-  // **同じ 1 本**を渡す（前段だけ別の開き方をすると、後段が握るのと別の部品を検査したことになる）。
+  // 2. Family admission — right after merge / capability, before the weight prefetch. Pass it **the
+  // same opener** that is returned below (opening differently in the early step alone would check
+  // different components from the ones the later step holds).
   const admitted = await admit(open);
 
-  // 3. 重みの part を落とす（全部品ぶんを取得元ごとに 1 回で — Session を遅延構築する家族で
-  // 「重みの DL が初回実行まで遅れ、ロード進捗にも現れない」形を無くす）。
+  // 3. Download the weight parts (for every component, once per source — removes the shape where
+  // a family that builds its Sessions lazily "delays the weight download until the first run, and
+  // it never shows in the load progress").
   await prefetchSeats(seats, (seat) => nonEmptyParts(seat.container.parts.slice(1)), hubOptions);
 
-  // 4. 残りの資産（tokenizer 等）は全量面のまま。
+  // 4. The remaining assets (tokenizer etc.) are still fetched as whole bytes.
   const assets =
     Object.keys(selection.assets).length === 0
       ? {}

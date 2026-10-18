@@ -1,22 +1,25 @@
 /**
- * VAE decode 出力（planar `[1,3,H,W]`・値域 `[-1,1]`）→ インターリーブ RGBA 8bit。
+ * VAE decode output (planar `[1,3,H,W]`, range `[-1,1]`) → interleaved 8-bit RGBA.
  *
- * 規則は `VaeImageProcessor.postprocess` の式 `v = clamp(x/2 + 0.5, 0, 1)` と `v·255` を **f64** で計算し、
- * `Math.round`（0.5 は切り上げ）で 8bit にする。
+ * The rule computes `VaeImageProcessor.postprocess`'s `v = clamp(x/2 + 0.5, 0, 1)` and `v·255` in
+ * **f64** and rounds to 8 bits with `Math.round` (0.5 rounds up).
  *
- * NOTE: 上流と 8bit で一致する規則ではない。diffusers の `numpy_to_pil` は f32 の `(images * 255).round()`
- * （numpy の偶数丸め）なので、8bit の境界の近傍で ±1 割れる（例 x = −0.4941176176 は f32 で 64.5 → 64・
- * ここでは f64 の 64.500004 → 65）。画素値と sha256 の参照行はこの規則で固定してある（変えない —
- * ADR 0118 の X-3 は記録のみ）。8bit の出力を上流と突き合わせるときは、この差を前提にする。
+ * NOTE: this rule does not match upstream to the 8-bit value. diffusers' `numpy_to_pil` is the f32
+ * `(images * 255).round()` (numpy's round-half-to-even), so values near an 8-bit boundary differ by
+ * ±1 (e.g. x = −0.4941176176 is 64.5 → 64 in f32, here f64 64.500004 → 65). Pixel values and the
+ * sha256 reference rows are fixed by this rule (do not change it — review finding X-3 of the
+ * ADR 0118 review of 2026-10-03 was recorded only). When comparing the 8-bit output with upstream,
+ * assume this difference.
  *
- * NOTE: **clamp を二重に掛けているのは意図的**（無害）。`AutoencoderKLQwenImage._decode` の
- * `clamp(-1,1)` は IR 側に焼き込まれているので実行経路では飽和済みだが、この関数は
- * 「[-1,1] の平面画像」を入口の契約として持つ。
- * MUST: `[0,1]` 変換の**前**に clamp を移さない（postprocess 由来の clamp と取り違えると
- * 負値が 0 に潰れてから +0.5 され、暗部が中間灰に張り付く）。
+ * NOTE: **the double clamp is intentional** (harmless). The `clamp(-1,1)` of
+ * `AutoencoderKLQwenImage._decode` is baked into the IR, so on the execution path the values are
+ * already saturated, but this function takes "a planar image in [-1,1]" as its entry contract.
+ * MUST: do not move the clamp **before** the `[0,1]` conversion (confused with the clamp from
+ * postprocess, negative values would collapse to 0 before +0.5 and the shadows would stick to
+ * mid-grey).
  *
- * DOM に依存しない（`ImageData` を作らずバイト列を返す）ので、そのままブラウザの
- * `putImageData` にも PNG 書き出しにも渡せる。
+ * Independent of the DOM (returns bytes instead of creating `ImageData`), so the result can go
+ * straight to the browser's `putImageData` or to PNG writing.
  */
 export const imageToRgba = (
   image: Float32Array<ArrayBuffer>,
@@ -34,8 +37,9 @@ export const imageToRgba = (
   for (let index = 0; index < plane; index += 1) {
     for (let channel = 0; channel < 3; channel += 1) {
       const raw = image[channel * plane + index];
-      // MUST: 非有限値を黙って返さない。RGBA 量子化（`Uint8ClampedArray` 代入）は NaN を 0、
-      // ±Inf を 0/255 という「正常な画素」へ変換してしまうので、ここが最後の検査点。
+      // MUST: do not return non-finite values silently. RGBA quantization (assignment to
+      // `Uint8ClampedArray`) turns NaN into 0 and ±Inf into 0/255, i.e. "normal pixels", so this is
+      // the last checkpoint.
       if (!Number.isFinite(raw)) {
         const x = index % width;
         const y = Math.floor(index / width);

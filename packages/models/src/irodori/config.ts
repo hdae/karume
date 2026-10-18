@@ -1,30 +1,35 @@
 /**
- * `pipelineConfig` のスキーマ検証（ADR 0038 §1 — スキーマは各パイプライン実装が所有・検証）。
+ * Schema validation of `pipelineConfig` (ADR 0038 §1 — each pipeline implementation owns and
+ * validates its schema).
  *
- * hub は `pipelineConfig` を素通しする（禁止キーの一掃と規模上限だけを見る）。したがって
- * **形の正本はこのモジュール**で、手書きの検査を全て parse 時に走らせる。
+ * The hub passes `pipelineConfig` through (it only strips forbidden keys and checks the size
+ * limits). **This module is therefore the source of truth for the shape**, and every hand-written
+ * check runs at parse time.
  *
- * MUST: 未知キーは fail loudly（`{ steps: 40, step: 40 }` のような綴り違いが黙って既定へ
- * 縮退すると、配布者の意図した既定と実行が食い違ったまま気づけない）。
- * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
+ * MUST: unknown keys fail loudly (if a typo such as `{ steps: 40, step: 40 }` silently fell back to
+ * the default, the run would differ from the default the distributor intended without anyone
+ * noticing).
+ * MUST: maps are read only through `Object.hasOwn` (cross-cutting invariant).
  *
- * ## MUST: モデル固有の数はここ（= manifest）が正本で、TS 側に定数を置かない
+ * ## MUST: model-specific numbers come from here (= the manifest), never from TS constants
  *
- * Irodori は「グラフの宣言長」と「ホストの式」が噛み合って初めて正しく動く（条件 state の
- * Tmax・speaker 行数・latent 幅・t_embed 幅・S の clamp 範囲）。TS に直書きすると、重みを
- * 差し替えたときにホストだけが古い数を持ったまま **shape は合う**形で沈黙誤値になる。
- * 実グラフとの突合は {@link IrodoriPipeline.fromAssets} が資産に対して行う。
+ * Irodori works correctly only when "the declared lengths of the graphs" and "the host formulas"
+ * mesh (Tmax of the condition states, speaker row count, latent width, t_embed width, the clamp
+ * range of S). Hard-coded in TS, a weight swap would leave only the host with old numbers,
+ * producing a silent wrong value in a form where **the shapes still match**.
+ * Matching against the real graphs is done on the assets by {@link IrodoriPipeline.fromAssets}.
  *
- * ## MUST: 対応外の CFG モードは**値を保持せず**パース時に拒否する（ADR 0047 決定 1）
+ * ## MUST: reject unsupported CFG modes at parse time, **keeping no value** (ADR 0047 decision 1)
  *
- * この実装の uncond は「cond の state + 該当区間のマスク全 False」で、これが上流と一致するのは
- * `speaker_uncond_mode="mask"` かつ `cfg_guidance_mode="independent"` のときだけ。他のモード
- * （`"noise"` / `joint` / `alternating`）は同値が成り立たないので、分岐を持つのではなく
- * **受理しない**（型としても "mask" / "independent" しか表せない）。
+ * This implementation's uncond is "cond's state + an all-False mask over the segment", and it
+ * matches upstream only with `speaker_uncond_mode="mask"` and `cfg_guidance_mode="independent"`.
+ * The other modes (`"noise"` / `joint` / `alternating`) break the equivalence, so instead of
+ * branching on them they are **not accepted** (the type can express only "mask" / "independent"
+ * too).
  *
- * NOTE: 公開配布リポの対応表（{@link IRODORI_SOURCES}）もここに置く。上の MUST が禁じる
- * 「モデル固有の数」ではなく「どの manifest を取りに行くか」の側で、そもそも配布形が持てない
- * 値だから（ADR 0073）。
+ * NOTE: the table of public distribution repositories ({@link IRODORI_SOURCES}) lives here too. It
+ * is not one of the "model-specific numbers" the MUST above forbids but belongs to "which manifest
+ * to fetch", a value a distribution cannot hold in the first place (ADR 0073).
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -37,37 +42,41 @@ import {
 } from "../config/readers.ts";
 import { maxSequenceLength } from "./host/round.ts";
 
-/** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
+/** The contract name of `pipeline`, and the major this implementation accepts (ADR 0038 §1). */
 export const IRODORI_PIPELINE_NAME = "irodori";
 export const IRODORI_PIPELINE_MAJOR = 1;
 
 /**
- * Irodori ファミリの**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は
- * 無い**）。値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ * **Table of public distribution repositories** of the Irodori family (ADR 0092 — one table per
+ * family, **no default entry**). The values are **the sources this package version verified**
+ * (pinned commit SHAs — ADR 0073).
  *
- * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
- * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。世代・版は別リポ =
- * 別エントリで、旧版も**温存する**（旧版のリポはそのまま公開が続く）:
+ * A key is the basename of the HF repository name without `karume-` (`"karume-" + key` gives the
+ * repository basename back — the check in `tests/sources_test.ts` covers this invariant).
+ * Generations and versions are separate repositories = separate entries, and old versions are
+ * **kept** (the old repositories stay public as they are):
  *
  * - `"irodori-v4-small"` = `hdae/karume-irodori-v4-small`
- * - `"irodori-v4.1-small"` = `hdae/karume-irodori-v4.1-small`（上流 v4.1 = duration predictor
- *   だけを再学習した後続版）
+ * - `"irodori-v4.1-small"` = `hdae/karume-irodori-v4.1-small` (upstream v4.1 = a follow-up version
+ *   that retrained only the duration predictor)
  *
- * 発話長の付き方が変わるので、この 2 つは「新旧」ではなく**別の取得元**として並ぶ
- * （examples の台本既定は v4.1）。
+ * The utterance lengths come out differently, so the two stand side by side as **separate sources**
+ * rather than "old and new" (the example scripts defaulted to v4.1 — the examples were removed in
+ * 0.15).
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
- * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
- * 既定は無い）。
+ * Pass it **as the opt-in for following the package version automatically** — to pin
+ * reproducibility yourself, write your own `{ repo, revision }` instead of this table
+ * (`fromPretrained` has no default).
  *
- * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
- * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
- * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
- * 同時に成立する（ADR 0038）。main 追従が要る利用者は
- * `{ ...IRODORI_SOURCES["irodori-v4.1-small"], revision: "main" }` を明示的に選ぶ。
+ * MUST: a revision is pinned to a commit SHA — branches and tags can be moved by the distributor,
+ * so the bytes this published package reads would change silently for network-side reasons (an
+ * unrecoverable kind of accident). A SHA removes the revision-resolution request itself, so offline
+ * startup with a complete cache also works (ADR 0038). A user who needs to follow main explicitly
+ * chooses `{ ...IRODORI_SOURCES["irodori-v4.1-small"], revision: "main" }`.
  */
-// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+// NOTE: the revision is updated to the SHA of main after the upload, in §3 of the release runbook
+// (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand + the
+// runbook check).
 export const IRODORI_SOURCES = {
   "irodori-v4-small": {
     repo: "hdae/karume-irodori-v4-small",
@@ -107,12 +116,12 @@ const ROOT_KEYS: readonly string[] = [
 
 const CFG_SCALE_KEYS: readonly string[] = ["text", "speaker", "caption"];
 
-/** この実装が受理する唯一の uncond の作り方（ADR 0047 決定 1）。 */
+/** The only way of building uncond this implementation accepts (ADR 0047 decision 1). */
 const SPEAKER_UNCOND_MODE = "mask";
-/** この実装が受理する唯一の CFG 合成（`v_cond + Σ s_k(v_cond − v_k)`）。 */
+/** The only CFG combination this implementation accepts (`v_cond + Σ s_k(v_cond − v_k)`). */
 const CFG_GUIDANCE_MODE = "independent";
 
-/** CFG の強さ（条件ごと）。合成順は text → speaker → caption で固定（ADR 0047）。 */
+/** CFG strength per condition. Combination order fixed: text → speaker → caption (ADR 0047). */
 type IrodoriCfgScales = {
   readonly text: number;
   readonly speaker: number;
@@ -120,49 +129,62 @@ type IrodoriCfgScales = {
 };
 
 export type IrodoriPipelineConfig = {
-  /** text 側 token 列の上限（BOS 込み）。`dit_context` の `text_state` の宣言長でもある。 */
+  /**
+   * Maximum text token length (BOS included). Also the declared length of `text_state` of
+   * `dit_context`.
+   */
   readonly maxTextLen: number;
-  /** caption 側 token 列の上限（BOS 込み）。`dit_context` の `caption_state` の宣言長でもある。 */
+  /**
+   * Maximum caption token length (BOS included). Also the declared length of `caption_state` of
+   * `dit_context`.
+   */
   readonly maxCaptionLen: number;
-  /** `dit_context` の `speaker_state` の宣言行数（参照 latent の上限 + 平均トークン 1 本）。 */
+  /**
+   * Declared row count of `speaker_state` of `dit_context` (the reference-latent maximum + 1 mean
+   * token).
+   */
   readonly speakerRows: number;
-  /** `dit` の記号次元 S の上限。 */
+  /** Maximum of the symbolic dimension S of `dit`. */
   readonly ditSymMax: number;
-  /** codec のフレームレート（Hz）— 秒 ↔ latent フレームの換算。 */
+  /** Codec frame rate (Hz) — the conversion between seconds and latent frames. */
   readonly frameRate: number;
-  /** 波形のサンプリング周波数（Hz）。秒 → サンプル数の換算に要る。 */
+  /** Sampling rate of the waveform (Hz). Needed for the conversion from seconds to samples. */
   readonly sampleRate: number;
-  /** latent 1 フレームが展開されるサンプル数（decoder の出力倍率）。 */
+  /** Number of samples one latent frame decodes into (the decoder's output ratio). */
   readonly hopLength: number;
   /**
-   * codec decoder をタイル分割するときに、採用区間の両側へ足す latent フレーム数。
+   * Number of latent frames added on both sides of the kept span when the codec decoder is tiled.
    *
-   * decoder の受容野（片側 13,793 サンプル = 7.19 フレーム）に由来する**モデル定数**で、
-   * 実行時ノブではない。これだけの halo を捨てれば、タイル内部は全長 decode と**ビット一致**
-   * する（実 GPU の門 `tests/e2e_irodori_codec_test.ts` が実測する）。
+   * A **model constant** that comes from the decoder's receptive field (13,793 samples per side =
+   * 7.19 frames), not a runtime knob. Discarding this much halo makes the inside of a tile
+   * **bit-identical** to a full-length decode (measured by the real-GPU check
+   * `packages/e2e/tests/e2e_irodori_codec_test.ts`).
    */
   readonly codecHaloFrames: number;
-  /** patch 済み latent の幅（`x_t` の最終次元）。 */
+  /** Width of the patched latent (the last dimension of `x_t`). */
   readonly latentDim: number;
-  /** 参照 latent を speaker エンコーダへ渡すときの時間方向 patch 幅。 */
+  /** Patch width along time when the reference latent is passed to the speaker encoder. */
   readonly speakerPatchSize: number;
   readonly speakerDim: number;
   readonly textDim: number;
   readonly captionDim: number;
-  /** `t_embed` の幅（前半 cos / 後半 sin）。 */
+  /** Width of `t_embed` (first half cos / second half sin). */
   readonly timestepEmbedDim: number;
-  /** Euler の step 数。 */
+  /** Number of Euler steps. */
   readonly steps: number;
-  /** t スケジュールの初期倍率（`t_i = initScale·(1 − i/steps)`）。 */
+  /** Initial scale of the t schedule (`t_i = initScale·(1 − i/steps)`). */
   readonly initScale: number;
-  /** CFG を掛ける t の下限 / 上限（両端を含む）。 */
+  /** Lower / upper bound of the t where CFG applies (both ends included). */
   readonly cfgMinT: number;
   readonly cfgMaxT: number;
   readonly cfgScales: IrodoriCfgScales;
-  /** S の clamp 範囲を決める秒数。 */
+  /** Seconds that decide the clamp range of S. */
   readonly minSeconds: number;
   readonly maxSeconds: number;
-  /** ADR 0047 が受理する唯一の値。**分岐用ではなく、配布形の宣言を検査するために持つ**。 */
+  /**
+   * The only value ADR 0047 accepts. **Held to check the distribution's declaration, not to branch
+   * on**.
+   */
   readonly speakerUncondMode: typeof SPEAKER_UNCOND_MODE;
   readonly cfgGuidanceMode: typeof CFG_GUIDANCE_MODE;
 };
@@ -170,25 +192,31 @@ export type IrodoriPipelineConfig = {
 const isPositiveFinite = (value: number): boolean => Number.isFinite(value) && value > 0;
 const isNonNegativeFinite = (value: number): boolean => Number.isFinite(value) && value >= 0;
 /**
- * t スケジュールの初期倍率の受理条件 — 正の有限数で、かつ **f32 へ丸めても有限**であること。
+ * Acceptance condition of the initial scale of the t schedule — a positive finite number that
+ * **stays finite when rounded to f32**.
  *
- * MUST: 倍精度で有限なだけでは足りない。t 列は `f32(initScale · f32(1 − i/steps))` で作って
- * GPU（`t_embed` と刻み幅）へ渡すので、f32 の最大値を超える値（例 1e39）は t 列の先頭側を
- * ±Inf にして、出力の非有限検査まで（DiT を回し切ってから）表面化しない。t 列の各値は
- * `f32(initScale)` 以下なので、ここで 1 回見れば列の全要素が有限になる（走査は要らない）。
- * NOTE: f32 で有限でもグラフ内の演算で溢れる大きさは別問題で、ここでは縛らない。
+ * MUST: being finite in double precision is not enough. The t sequence is built as
+ * `f32(initScale · f32(1 − i/steps))` and passed to the GPU (`t_embed` and the step size), so a
+ * value above the f32 maximum (e.g. 1e39) turns the head of the t sequence into ±Inf, which does
+ * not surface until the non-finite check of the output (after the DiT has run to the end). Every
+ * value of the t sequence is at most `f32(initScale)`, so one check here makes every element of the
+ * sequence finite (no scan needed).
+ * NOTE: a magnitude that is finite in f32 but overflows in the graph's arithmetic is a separate
+ * problem and is not constrained here.
  */
 const isPositiveF32Finite = (value: number): boolean =>
   isPositiveFinite(value) && Number.isFinite(Math.fround(value));
 /**
- * CFG 強さの受理条件 — 非負の有限数で、かつ **f32 で厳密に表せる**こと。
+ * Acceptance condition of a CFG strength — a non-negative finite number that is **exactly
+ * representable in f32**.
  *
- * MUST: 宣言段で f32 厳密を要求する。JS の数値は f64 で、ホスト経路の `combineCfg` は
- * `f32(scale * f32(base − v))` と f64 の scale をそのまま乗算に入れる一方、常駐経路は
- * scale を f32 へ丸めてから GPU が f32 乗算する。f32 非厳密な値（例 1.3）ではこの 2 つが
- * 1〜2 ulp 割れ、「2 経路の出力は同じ」という MUST（`pipeline.ts` の DiT ループ分岐）が
- * 条件付きにしか成立しなくなる。配布形の宣言側で落とせば、ホスト側に f64 が入る余地が
- * そもそも消える（実配布の 3.0 / 5.0 / 3.0 は全て f32 厳密）。
+ * MUST: f32 exactness is required at the declaration step. JS numbers are f64; the host path's
+ * `combineCfg` feeds the f64 scale into the multiply as is, `f32(scale * f32(base − v))`, while the
+ * resident path rounds the scale to f32 and the GPU multiplies in f32. With a value that is not
+ * exact in f32 (e.g. 1.3) the two split by 1 to 2 ulp, and the MUST "the outputs of the 2 paths are
+ * the same" (the DiT loop branch in `pipeline.ts`) holds only conditionally. Rejecting it on the
+ * distribution's declaration removes any room for f64 on the host side in the first place (the
+ * real distributions' 3.0 / 5.0 / 3.0 are all exact in f32).
  */
 const isNonNegativeF32 = (value: number): boolean =>
   isNonNegativeFinite(value) && value === Math.fround(value);
@@ -197,7 +225,8 @@ const parseCfgScales = (raw: unknown): IrodoriCfgScales => {
   const where = "pipelineConfig.cfgScales";
   const record = readRecord(raw, where);
   assertAllowedKeys(record, CFG_SCALE_KEYS, where);
-  // 0 は「その条件の CFG を回さない」を意味する正規の値（上流 `has_*_cfg = scale > 0`）。
+  // 0 is a regular value meaning "do not run CFG for that condition" (upstream
+  // `has_*_cfg = scale > 0`).
   const requirement = "非負の有限数でない、または f32 で厳密に表せない";
   return {
     text: readNumber(record, "text", where, isNonNegativeF32, requirement),
@@ -206,17 +235,18 @@ const parseCfgScales = (raw: unknown): IrodoriCfgScales => {
   };
 };
 
-/** manifest の `pipelineConfig`（hub が素通しした生の値）を検査して読む。 */
+/** Checks and reads the manifest's `pipelineConfig` (the raw value the hub passed through). */
 export const parseIrodoriPipelineConfig = (
   raw: Readonly<Record<string, unknown>>,
 ): IrodoriPipelineConfig => {
   const where = "pipelineConfig";
   assertAllowedKeys(raw, ROOT_KEYS, where);
   const positive = "正の整数でない";
-  // 前置トークンに 1 本取られる欄（text / caption は BOS・speaker は平均トークン）は、本体の
-  // 予算が残る 2 以上が要る。1 を受けると text は本文 0 token・speaker は参照 latent 0 行で、
-  // 落ちる場所が「参照音声の上限サンプル数 0」→ `integratedLoudness` の「波形が空」のような
-  // 無関係な文言になる。
+  // A field that loses one entry to a leading token (BOS for text / caption, the mean token for
+  // speaker) needs at least 2 so that the body keeps a budget. Accepting 1 gives text a body of 0
+  // tokens and speaker 0 rows of reference latent, and the failure surfaces with an unrelated
+  // message such as "maximum reference-audio samples 0" → "the waveform is empty" from
+  // `integratedLoudness`.
   const withLeadingToken = (value: number): boolean => Number.isInteger(value) && value >= 2;
   const config: IrodoriPipelineConfig = {
     maxTextLen: readNumber(raw, "maxTextLen", where, withLeadingToken, "2 以上の整数でない"),
@@ -232,7 +262,7 @@ export const parseIrodoriPipelineConfig = (
     speakerDim: readNumber(raw, "speakerDim", where, isPositiveInteger, positive),
     textDim: readNumber(raw, "textDim", where, isPositiveInteger, positive),
     captionDim: readNumber(raw, "captionDim", where, isPositiveInteger, positive),
-    // 前半 cos / 後半 sin に割るので奇数幅は組めない。
+    // Split into a cos half / a sin half, so an odd width cannot be built.
     timestepEmbedDim: readNumber(
       raw,
       "timestepEmbedDim",
@@ -268,7 +298,8 @@ export const parseIrodoriPipelineConfig = (
       "CFG の合成が `v_cond + Σ s_k(v_cond − v_k)` の形に限られる（ADR 0047 決定 1）",
     ),
   };
-  // 区間が空 / 逆順の宣言は「CFG が 1 度も掛からない」形で沈黙する（forward 数だけが減る）。
+  // A declaration with an empty / reversed interval stays silent as "CFG never applies" (only the
+  // forward count goes down).
   if (config.cfgMinT > config.cfgMaxT) {
     throw new Error(
       `${where}: cfgMinT ${config.cfgMinT} が cfgMaxT ${config.cfgMaxT} より大きい（CFG が 1 度も掛からない）`,
@@ -279,18 +310,20 @@ export const parseIrodoriPipelineConfig = (
       `${where}: minSeconds ${config.minSeconds} が maxSeconds ${config.maxSeconds} より大きい`,
     );
   }
-  // 秒 → フレーム（`frameRate`）と 秒 → サンプル → フレーム（`sampleRate` / `hopLength`）の
-  // 2 系統が独立に動く形を作らない。ずれると S の決め方が経路ごとに変わり、切り出し長だけが
-  // 静かに食い違う（例外は出ない）。
+  // The two conversions, seconds → frames (`frameRate`) and seconds → samples → frames
+  // (`sampleRate` / `hopLength`), must not move independently. If they diverge, the way S is
+  // decided changes per path, and only the cut length quietly disagrees (no exception).
   if (config.sampleRate !== config.frameRate * config.hopLength) {
     throw new Error(
       `${where}: sampleRate ${config.sampleRate} が frameRate ${config.frameRate} × hopLength` +
         ` ${config.hopLength} = ${config.frameRate * config.hopLength} と違う`,
     );
   }
-  // 秒の上限から到達しうる S が dit の宣言上限を超える宣言は、**長い発話のときだけ**
-  // 「決まった latent 長が dit の宣言上限を超えている」で落ちる（duration 段まで走った後）。
-  // 到達しうる最大は 2 経路の丸めが違うので `host/round.ts` の 1 本から引く（式を写さない）。
+  // A declaration where the S reachable from the maximum seconds exceeds the declared maximum of
+  // dit fails **only for long utterances**, with "the decided latent length exceeds the declared
+  // maximum of dit" (after running up to the duration step). The reachable maximum differs by the
+  // rounding of the 2 paths, so it is read from the one function in `host/round.ts` (the formula is
+  // not copied).
   const reachable = maxSequenceLength(config);
   if (reachable > config.ditSymMax) {
     throw new Error(

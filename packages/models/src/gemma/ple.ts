@@ -1,78 +1,87 @@
 /**
- * Gemma 4 の PLE（per-layer embeddings）を**ホスト側で gather** する実装（ADR 0085）。
+ * The **host-side gather** of Gemma 4's PLE (per-layer embeddings) (ADR 0085).
  *
- * 索引（容器の資産 `ple_index`）の codec と定数は `./ple-index.ts` にあり、このファイルが持つのは
- * **所有者**だけである — block / 行 / 予算の 3 本が 1 つの `residentBytes` を共有する関係は
- * 割れないので、同じ関数の中に置く。
+ * The codec and constants of the index (the container asset `ple_index`) live in `./ple-index.ts`;
+ * this file holds only the **owner** — the block / row / budget trio shares one `residentBytes`, a
+ * relation that cannot be split, so it lives in one function.
  *
- * ## なぜホストが引くのか
+ * ## Why the host gathers
  *
- * PLE は `input_ids` **だけ**を引数に取る純粋な行 lookup で、E2B では i8 35 表 = 2,240MiB。
- * ランタイムは全 initializer に Session 構築時の GPU 常駐席を与える契約なので、グラフに
- * 残す限り lazy にならない（ADR 0085 Context）。グラフから外して `per_layer_inputs[1,M,35,256]`
- * を**通常のグラフ入力**として供給すると、常駐が 3.70 → 1.51 GiB になる。ランタイムの契約は
- * 1 文字も変わらない（ADR 0085 決定 6 — 「pageable initializer」の席は作らない）。
+ * PLE is a pure row lookup whose **only** argument is `input_ids`; for E2B it is 35 i8 tables =
+ * 2,240 MiB. The runtime contract gives every initializer GPU residency at Session construction, so
+ * as long as PLE stays in the graph it cannot be lazy (ADR 0085 Context). Taking it out of the
+ * graph and supplying `per_layer_inputs[1,M,35,256]` as an **ordinary graph input** brings
+ * residency from 3.70 to 1.51 GiB. The runtime contract does not change by a single character
+ * (ADR 0085 decision 6 — no "pageable initializer" slot is created).
  *
- * 前例は SBV2 の相対位置表（`sbv2/relattn-tables.ts`）と Anima の rope 素表 — どちらも
- * 「モデル固有の入力の作り方」は models 側の知識で、runtime の語彙ではない（ADR 0008）。
+ * The precedents are SBV2's relative position tables (`sbv2/relattn-tables.ts`) and Anima's rope
+ * base tables — in both, "how to build a model-specific input" is knowledge of models, not runtime
+ * vocabulary (ADR 0008).
  *
- * ## 配布形（モデル容器の資産 — ADR 0109 決定 4）
+ * ## Distribution (assets of the model container — ADR 0109 decision 4)
  *
- * `values`（**token-major** の `[tokens, layers, dim]`）と `scales`（`[tokens, layers]` f32）を
- * それぞれ block 上限以下・**行の倍数**で切った block 列にし、役割 `ple-values` / `ple-scales` の
- * 資産として容器へ入れる。区間読みを要する block は専用 part に単独で置かれる
- * （container-v1 §4.2）ので、1 行の読みが隣の重みを引きずらない。2 表の block 境界は
- * **独立**である（1 行 = 値 8,960 B / scale 140 B なので、同じ 32MiB でも跨ぐ token 数が違う）。
+ * `values` (**token-major** `[tokens, layers, dim]`) and `scales` (`[tokens, layers]` f32) are each
+ * cut into a list of blocks at or below the block limit and **in whole rows**, and stored in the
+ * container as assets with the roles `ple-values` / `ple-scales`. A block that needs range reads
+ * sits alone in its own part (container-v1 §4.2), so reading one row does not drag in the
+ * neighbouring weights. The block boundaries of the two tables are **independent** (one row =
+ * 8,960 B of values / 140 B of scales, so the same 32 MiB spans a different number of tokens).
  *
- * ## MUST: 逆量子化は GPU 側 `embedding` とビット一致する
+ * ## MUST: dequantization is bit-identical to the GPU-side `embedding`
  *
- * グラフに残していれば `embedding` が `f32(i8) × per-row scale` を計算し、その直後の `mul` が
- * `embed_scale`（= `hidden_size_per_layer_input ** 0.5` = 16.0）を掛けていた。ここも**同じ順序**
- * （`(q × scale) × embedScale`）で組む。`embedScale` は 2 冪なので f32 の乗算が厳密で、順序さえ
- * 揃えば一致する（ADR 0085 決定 4）。割れると token 列 parity が割れ、「機能不変であること」の
- * 証明が使えなくなる。門は `packages/models/tests/e2e_gemma4_product_test.ts` の
- * `ple.probe.safetensors` 突合（torch が 35 表経路で計算した値との**厳密一致**）。
+ * While PLE was in the graph, `embedding` computed `f32(i8) × per-row scale` and the `mul` right
+ * after it multiplied by `embed_scale` (= `hidden_size_per_layer_input ** 0.5` = 16.0). This file
+ * builds it in **the same order** (`(q × scale) × embedScale`). `embedScale` is a power of two, so
+ * the f32 multiplication is exact and matching the order is enough (ADR 0085 decision 4). If it
+ * diverged, token-sequence parity would break and the proof of "unchanged behaviour" would be
+ * unusable. The check is the `ple.probe.safetensors` comparison in
+ * `packages/e2e/tests/e2e_gemma4_product_test.ts` (**exact equality** with the values torch
+ * computed on the 35-table path).
  *
- * ## 読み方（block 全量 ↔ 行）と読み口の寿命
+ * ## How to read (whole block ↔ rows) and the reader's lifetime
  *
- * 索引が指す block の読み口（runtime の `AssetReader`）は `open(MODEL).asset(name)` で開く。
- * 1 回の gather は表ごとに block で束ね、その block に触る**一意行数**で方針を決める:
+ * The reader of a block the index points at (the runtime's `AssetReader`) is opened with
+ * `open(MODEL).asset(name)`. One gather groups ids by block per table and picks the policy from the
+ * **unique row count** touching that block:
  *
- * | 状態 | 方針 |
+ * | State | Policy |
  * | --- | --- |
- * | 既に常駐 | hit（LRU の末尾へ） |
- * | 一意行数 ≥ {@link FULL_BLOCK_ROWS}（block の行数が下回ればその行数）かつ予算に**追い出し無しで**載る | 全量読み + LRU |
- * | それ以外 | 行読み（`read(行 offset, rowBytes)`） |
+ * | Already resident | hit (moved to the LRU tail) |
+ * | Unique rows ≥ {@link FULL_BLOCK_ROWS} (or the block's row count when smaller) and it fits the budget **without eviction** | whole read + LRU |
+ * | Otherwise | row reads (`read(row offset, rowBytes)`) |
  *
- * MUST: **読み口を 1 回の読みより長く持たない**。検証済みでない取得元（手元のバイト列 /
- * ローカルディレクトリ）の `AssetReader` は block を 1 度検証して**読み口が生きている間**
- * 保持する契約（runtime の `AssetReader` の doc）なので、読み口を掴み続けると
- * {@link Gemma4PleOptions.maxResidentBytes} の外でホスト RAM が育つ。常駐は
- * 「読み終えた ArrayBuffer」1 本だけで表し、読み口はその場で捨てる。
+ * MUST: **do not hold a reader longer than one read**. The `AssetReader` of an unverified source
+ * (in-memory bytes / a local directory) verifies the block once and keeps it **while the reader is
+ * alive** (the contract in the runtime's `AssetReader` doc), so holding readers lets host RAM grow
+ * outside {@link Gemma4PleOptions.maxResidentBytes}. Residency is represented only by "the
+ * ArrayBuffer that was read", and the reader is dropped on the spot.
  *
- * 読み終えた量子化行は最大 {@link ROW_CACHE_CAPACITY} 行まで LRU で再利用する。全量 block を
- * 優先し、既存のホスト RAM 予算の空きだけを使う。予算 0 は行も保持しない
- * （ADR 0085 追記 2026-09-12）。値は同じバイト列を同じ 2 段丸めに掛けるので、決定 4 の
- * ビット一致は経路に依らない。
+ * Quantized rows that were read are reused through an LRU of at most {@link ROW_CACHE_CAPACITY}
+ * rows. Whole blocks take priority, and rows use only the free space of the existing host RAM
+ * budget. A budget of 0 keeps no rows either (ADR 0085 addendum 2026-09-12). The same bytes go
+ * through the same two-step rounding, so decision 4's bit identity does not depend on the path.
  *
- * ## gather の順序（hit 先行）と重複 id
+ * ## Gather order (hits first) and duplicate ids
  *
- * 1 回の gather は**行キャッシュと常駐 block の hit を先に触る**。未常駐を先に読むと、その
- * 読みの LRU 追い出しが「この gather がまだ触っていない hit」を落とし、同じ gather の中で
- * 読み直しになる。hit を先に触ると LRU の末尾へ回るので、後続の miss の追い出し先が
- * 「この gather で用の済んだ block」側へ寄る。走行中に掴んだ実体はローカル変数が持つので、
- * 途中で追い出されても値は揃う。
+ * One gather **touches the row-cache and resident-block hits first**. Reading the non-resident
+ * blocks first would let that read's LRU eviction drop "a hit this gather has not touched yet",
+ * forcing a re-read within the same gather. Touching hits first moves them to the LRU tail, so the
+ * eviction of a later miss leans towards "blocks this gather is done with". The data taken during
+ * the run is held by local variables, so values stay consistent even if eviction happens midway.
  *
- * 同じ id が並ぶ列（prefill の pad 行 id 0 が典型 — 768 行のうち大半が同じ id）は、**最初の
- * 1 位置だけ逆量子化して残りへ f32 バイト列を複写**する。再計算ではなく複写なので 2 段丸めの
- * 結果とビット同一で、`(q × scale) × embedScale` の契約はそのまま保たれる。
+ * For a sequence with repeated ids (typically prefill's pad row id 0 — most of 768 rows share one
+ * id), **only the first position is dequantized and its f32 bytes are copied to the rest**. A copy,
+ * not a recomputation, is bit-identical to the two-step rounding, so the
+ * `(q × scale) × embedScale` contract holds as is.
  *
- * ## MUST: id 空間を相互照合する（ADR 0085 決定 5）
+ * ## MUST: cross-check the id spaces (ADR 0085 decision 5)
  *
- * 索引の行数 / 主 embedding の vocab 行数 / 実際に引く id を突き合わせる。ここがずれると
- * **OOB ではなく「別 token の有効な行」**を引く（例外なしで沈黙して壊れる）ので、fail loudly の
- * 門を置く場所はここしかない。索引と容器の資産の突合（block の実在・長さ）は入口の admission
- * （`./ple-index.ts` の `assertGemma4PleAssets`）が**重みを 1 バイトも取る前**に全件列挙する。
+ * Compare the index's row count, the main embedding's vocab row count and the ids actually looked
+ * up. A mismatch here reads **not out of bounds but "a valid row of another token"** (silent
+ * corruption without an exception), so this is the only place for the fail-loudly check. The
+ * cross-check of the index against the container's assets (blocks exist, lengths) is listed in full
+ * by the entry admission (`assertGemma4PleAssets` in `./ple-index.ts`) **before a single weight
+ * byte is fetched**.
  */
 
 import type { AssetReader, Tensor } from "@karume/runtime";
@@ -90,191 +99,217 @@ import {
 } from "./ple-index.ts";
 
 /**
- * gather 1 回へ透過するノブ。
+ * Options passed through to one gather.
  *
- * MUST: **best-effort** の契約である — 中断は**段の境目**（行読みの 1 本ごと・全量読みの
- * 直前）でしか見ない。runtime の `AssetReader.read` は signal を受けないので、走り出した
- * 読み 1 本を途中で畳む口は無い。生成側は run の発行前に自分で `signal` を見る
- * （`generation/sequence.ts`）ので、中断の正しさをここへ委ねていない。
+ * MUST: the contract is **best-effort** — abort is checked only **between steps** (per row read and
+ * right before a whole read). The runtime's `AssetReader.read` takes no signal, so there is no way
+ * to stop a read once it has started. The generation side checks its own `signal` before issuing a
+ * run (`generation/sequence.ts`), so it does not rely on this for the correctness of abort.
  */
 export type Gemma4PleReadOptions = {
-  /** この gather の中断（生成 1 回ぶんの `signal` がそのまま降りてくる）。 */
+  /** Abort of this gather (one generation's `signal`, passed down as is). */
   readonly signal?: AbortSignal;
 };
 
 export type Gemma4PleOptions = {
   readonly index: Gemma4PleIndex;
   /**
-   * 索引が指す block 1 本の読み口を開く（`open(MODEL).asset` そのもの — 呼び手の責務）。
+   * Opens the reader of one block the index points at (`open(MODEL).asset` itself — the caller's
+   * responsibility).
    *
-   * MUST: 呼ばれるたびに**新しい読み口**を返してよい（むしろそれが既定である）。この実装は
-   * 開いた読み口を 1 回の読みより長く持たない（モジュール doc の MUST）ので、読み口側で
-   * block を保持する取得元でもホスト RAM は {@link Gemma4PleOptions.maxResidentBytes} に収まる。
+   * MUST: it may return a **new reader** on every call (in fact that is the default). This
+   * implementation does not hold an opened reader longer than one read (the MUST in the module
+   * doc), so even with a source that keeps the block on the reader side, host RAM stays within
+   * {@link Gemma4PleOptions.maxResidentBytes}.
    */
   readonly openBlock: (asset: string) => AssetReader;
   /**
-   * 主 embedding の vocab 行数（id 空間の相互照合 — ADR 0085 決定 5）。
+   * The main embedding's vocab row count (cross-check of the id spaces — ADR 0085 decision 5).
    *
-   * MUST: 省略可能にしない。索引と主 embedding が別の語彙で焼かれた組み合わせは、
-   * shape も dtype も合ったまま**別 token の行**を引く。
+   * MUST: do not make it optional. A combination whose index and main embedding were baked with
+   * different vocabularies reads **another token's row** with shape and dtype still matching.
    */
   readonly vocabSize: number;
   /**
-   * 常駐させる block と量子化行の**ホスト RAM 上限（バイト）**（LRU — ADR 0085 決定 3）。
+   * The **host RAM limit (bytes)** for resident blocks and quantized rows (LRU — ADR 0085
+   * decision 3).
    *
-   * 省略時は {@link defaultGemma4PleResidentBytes}（= 最大 block 2 本ぶん）。`0` は「常駐させ
-   * ない」= gather が使い終わった block を即座に落とす形で、正当な指定である（読み直しが毎回
-   * 走るのと引き換えに、この索引のホスト RAM がピーク 1 本ぶんで収まる）。
+   * Defaults to {@link defaultGemma4PleResidentBytes} (= two of the largest blocks). `0` means
+   * "keep nothing resident" = the gather drops each block as soon as it is done with it, and is a
+   * valid setting (in exchange for re-reading every time, this index's host RAM stays at a peak of
+   * one block).
    *
-   * MUST: 本数ではなくバイトで受ける。block 幅は資産世代（書き手の block 上限）で変わるので、
-   * 「2 本」は世代ごとに違う RAM を意味してしまう（ADR 0085 追記 2026-09-02）。
+   * MUST: take bytes, not a count. The block width changes with the asset generation (the writer's
+   * block limit), so "two blocks" would mean different RAM in each generation (ADR 0085 addendum
+   * 2026-09-02).
    */
   readonly maxResidentBytes?: number;
 };
 
-/** 遅延ロードの実測（門が「触った block だけ読んだ」を恒真でなく見るための欄）。 */
+/**
+ * Measurements of lazy loading (fields that let a check see "read only touched blocks"
+ * non-vacuously).
+ */
 export type Gemma4PleStats = {
-  /** block を**全量**取りに行った回数（キャッシュミスのうち行読みへ倒さなかった数）。 */
+  /** Number of **whole** block fetches (cache misses that were not routed to row reads). */
   readonly loads: number;
   /**
-   * 行読みで引いた区間の本数（{@link Gemma4PleStats.loads} と対）。
+   * Number of ranges read by row reads (pairs with {@link Gemma4PleStats.loads}).
    *
-   * 「全量読みが起きていない」を恒真でなく見るための欄である — 全量読みが 0 なだけなら
-   * 「そもそも引いていない」形でも成り立つので、引いた区間の本数を並べて初めて行読み経路を
-   * 踏んだことが言える。1 行は `values` と `scales` の 2 表から引くので、両方を行読みで
-   * 引いた行は 2 本数える。
+   * This field lets "no whole read happened" be checked non-vacuously — zero whole reads alone also
+   * holds when "nothing was read at all", so only together with the number of ranges read does it
+   * show the row-read path was taken. One row is read from the two tables `values` and `scales`, so
+   * a row read from both by row reads counts twice.
    */
   readonly rowReads: number;
-  /** 現在常駐している block 数（2 表の合計）。 */
+  /** Number of blocks currently resident (both tables combined). */
   readonly resident: number;
   /**
-   * 常駐 block と行キャッシュが占めるホスト RAM（{@link Gemma4PleOptions.maxResidentBytes} と
-   * 同じ単位）。
+   * Host RAM taken by resident blocks and the row cache (the same unit as
+   * {@link Gemma4PleOptions.maxResidentBytes}).
    *
-   * 全量 block は読み**始めた**時点で予約し、行は読み終えて保持した byte 数を加える。
-   * block の予約時に行を追い出すため、両者の合計は既存予算を超えない。読取り中の一時バッファや
-   * Map 等の管理用オブジェクトはこの量に含まない。
+   * A whole block is reserved when its read **starts**; a row adds its bytes once read and kept.
+   * Rows are evicted when a block is reserved, so the sum of both never exceeds the existing
+   * budget. Temporary buffers during reads and bookkeeping objects such as Maps are not counted.
    */
   readonly residentBytes: number;
 };
 
 export type Gemma4Ple = {
   /**
-   * token id 列 → `per_layer_inputs` の `[1, ids.length, layers, dim]` f32。
+   * token id sequence → `per_layer_inputs` `[1, ids.length, layers, dim]` f32.
    *
-   * prefill の pad 行も**そのまま id を渡す**（ホストは `input_ids` の pad を 0 で埋めるので、
-   * ここにも 0 行の PLE が入る）— グラフ内で引いていたときと同じ値になり、pad 行の値契約
-   * （ADR 0066 追記 6）が保たれる。
+   * Prefill pad rows also **pass their id as is** (the host fills the pad of `input_ids` with 0, so
+   * the PLE of row 0 goes in here too) — the values equal those of the in-graph lookup, and the
+   * value contract of pad rows (ADR 0066 addendum of 2026-08-17, item 6) holds.
    */
   gather(ids: readonly number[], options?: Gemma4PleReadOptions): Promise<Tensor>;
   stats(): Gemma4PleStats;
   /**
-   * 常駐 block を解放する（ホスト RAM で {@link Gemma4PleOptions.maxResidentBytes} ぶん）。
+   * Releases the resident blocks (up to {@link Gemma4PleOptions.maxResidentBytes} of host RAM).
    *
-   * MUST: 解放口を持つ。GPU 側の常駐は `Session.dispose` が返すが、ここは**ホスト RAM の
-   * キャッシュ**なので、口が無いと「パイプラインを dispose しても常駐ぶんが返らない」
-   * （実体を掴む参照を 1 つ残せばプロセス寿命まで残る）。
+   * MUST: have a release surface. GPU-side residency is returned by `Session.dispose`, but this is
+   * a **host RAM cache**, so without a surface "disposing the pipeline does not return the resident
+   * bytes" (one reference left holding the data keeps it for the life of the process).
    *
-   * 以後の {@link Gemma4Ple.gather} は fail loudly — 解放済みの実体が黙って読み直しを始めると、
-   * 「dispose したのに RAM が戻らない」形が復活する。冪等。
+   * Any later {@link Gemma4Ple.gather} fails loudly — if a released owner silently started
+   * re-reading, the "RAM does not come back after dispose" shape would return. Idempotent.
    */
   dispose(): void;
 };
 
 /**
- * 全量読みへ倒す一意行数の下限（**実測から置いた暫定値**）。
+ * The unique-row lower bound for routing to a whole read (**a provisional value set from
+ * measurements**).
  *
- * 区間読み 1 本は 0.1〜0.6 ms なので、**この gather 1 回**を見る限り行読みは何行でも全量読み
- * より安い。全量読みが得になるのは「以後の gather の hit のために予算の空きへ載せる」ときだけ
- * で、この閾値は「1 回でこれだけ触る block は以後も触る」という見込みの線である。低くしすぎると
- * 常駐が回り、高くしすぎると常駐が温まらない（ADR 0085 追記 2026-09-07 の `SEEK_FULL_ROWS` を
- * block 単位へ引き継いだもの）。
+ * One range read takes 0.1–0.6 ms, so **for this one gather** row reads are cheaper than a whole
+ * read at any row count. A whole read pays off only when "loading it into the free budget for later
+ * gathers' hits", and this threshold is the line of the expectation that "a block touched this much
+ * in one gather will be touched again". Too low and residency churns; too high and residency never
+ * warms up (`SEEK_FULL_ROWS` of ADR 0085 addendum 2026-09-07, carried over to blocks).
  *
- * 実際の下限は **block の行数と小さい方**を採る（{@link fullBlockRows}）— block の全行を触る
- * gather では、行読み `rows × 2` 回より全量 1 回の方が必ず安い。この規則が無いと、行数の少ない
- * block（末尾の端数・小さい配布形）は何度触っても常駐にならない。
+ * The actual lower bound is **the smaller of this and the block's row count**
+ * ({@link fullBlockRows}) — for a gather that touches every row of a block, one whole read is
+ * always cheaper than `rows × 2` row reads. Without this rule, blocks with few rows (the trailing
+ * remainder, small distributions) would never become resident however often they are touched.
  */
 const FULL_BLOCK_ROWS = 32;
 
-/** その block を全量読みへ倒す一意行数の下限（block が細いときは全行が下限）。 */
+/**
+ * The unique-row lower bound for routing that block to a whole read (all rows when the block is
+ * narrow).
+ */
 const fullBlockRows = (block: Gemma4PleBlock): number =>
   Math.min(FULL_BLOCK_ROWS, block.stop - block.start);
 
 /**
- * 行読みの**同時発行の上限**（1 回の gather が 2 表を通して持つ in-flight の読み本数）。
+ * The **concurrency limit of row reads** (in-flight reads one gather holds across both tables).
  *
- * MUST: 上限を置く。取得元によっては **1 read = 1 fd** で（ローカル取得元は read のたびに
- * `Deno.open` する）、上限が無いと 1 回の gather が**引く区間の本数ぶん**の fd を同時に握る。
- * prefill の 768 行 chunk を全て行読みで流す形（常駐予算に空きが無い状態）が現実の上界で、
- * `ulimit -n 1024`（Linux の既定）の残りを丸ごと食う。実測（2026-09-07・上限無しの版）:
- * 768 行でピーク 768 本、1,200 行で `Too many open files (os error 24)`。
+ * MUST: have a limit. Some sources use **1 read = 1 fd** (the local directory sources open the file
+ * on every read — `Deno.open` in `denoDirectory`, `open` in `nodeDirectory`), so without a limit
+ * one gather holds as many fds at once as **the number of ranges it reads**. Streaming a whole
+ * 768-row prefill chunk through row reads (no free resident budget) is the realistic upper bound
+ * and eats the whole remainder of `ulimit -n 1024` (the Linux default). Measured (2026-09-07, the
+ * version without a limit): a peak of 768 at 768 rows, `Too many open files (os error 24)` at 1,200
+ * rows.
  *
- * MUST: 上限は表ごと・block ごとではなく **gather 全体**に掛ける — 分けて掛けると、複数の
- * block に散る prefill で上限が本数ぶん倍になる（fd の枯渇はそこで起きる）。
+ * MUST: apply the limit to **the whole gather**, not per table or per block — applied separately, a
+ * prefill spread over several blocks multiplies the limit by their number (that is where fds run
+ * out).
  */
 const ROW_READ_CONCURRENCY = 16;
 
-/** 同じ token の再読取りを省く上限。block 常駐後の予算の空きだけを使う（ADR 0085）。 */
+/**
+ * Limit for skipping re-reads of the same token. Uses only the budget left after resident blocks
+ * (ADR 0085).
+ */
 const ROW_CACHE_CAPACITY = 256;
 
-/** 読み終えた行 1 本（量子化バイト列のまま持ち、逆量子化の順序を変えない）。 */
+/** One row that was read (kept as quantized bytes, so the dequantization order does not change). */
 type CachedRow = {
   readonly values: Int8Array<ArrayBuffer> | Uint8Array<ArrayBuffer>;
   readonly scales: Float32Array<ArrayBuffer>;
 };
 
 /**
- * 1 表ぶんの引き当て結果（全量 block の view か、行読みで得た 1 行）。
+ * The lookup result of one table (a view of a whole block, or one row obtained by a row read).
  *
- * `from` は**要素**単位の行の先頭（`values` はバイト・`scales` は f32 の添字）で、
- * {@link createGemma4Ple} の `writeRow` がそのまま受ける形である。
+ * `from` is the row start in **elements** (bytes for `values`, the f32 index for `scales`), the
+ * form that `writeRow` in {@link createGemma4Ple} takes as is.
  */
 type Supply<T> = {
   readonly array: T;
   readonly from: number;
-  /** 行読みで得た（= 自分の buffer を丸ごと占める）なら true。行キャッシュはこれだけを保存する。 */
+  /**
+   * true when obtained by a row read (= it occupies its own buffer). Only these go into the row
+   * cache.
+   */
   readonly owned: boolean;
 };
 
 /**
- * 1 回の gather の失敗の共有口（最初の原因 1 件）。
+ * The shared failure slot of one gather (the first cause).
  *
- * 行読みの worker と全量 block の待ち合わせが同じ 1 つを見る — 片方の失敗で以後の新規発行を
- * 止め、開始済みの読みが全て決着してから最初の原因で reject するため（ADR 0085 の 2026-09-11
- * 追記「両方の決着を待つ」を job 単位の構造でも守る）。
+ * The row-read workers and the wait for whole blocks see the same one — so that a failure on one
+ * side stops new issues, and the gather rejects with the first cause only after every started read
+ * has settled (keeping ADR 0085 addendum 2026-09-11's "wait for both to settle" in the per-job
+ * structure as well).
  */
 type GatherFailure = { cause?: { readonly error: unknown } };
 
-/** 1 表ぶんの計画（全量読みへ倒した block と、行読みへ倒した id）。 */
+/** The plan of one table (blocks routed to whole reads, and ids routed to row reads). */
 type TablePlan = {
   readonly table: Gemma4PleTable;
-  /** block 添字 → その block を引く id 列。 */
+  /** block index → the ids read from that block. */
   readonly grouped: Map<number, number[]>;
-  /** block 添字 → 全量読み（開始済み）。 */
+  /** block index → whole read (already started). */
   readonly full: Map<number, Promise<ArrayBuffer>>;
-  /** 行読みへ倒した id → block 添字。 */
+  /** id routed to a row read → block index. */
   readonly rows: Map<number, number>;
-  /** 行読みの結果（id → 自分の buffer を占める 1 行）。 */
+  /** Row-read results (id → one row occupying its own buffer). */
   readonly read: Map<number, ArrayBuffer>;
 };
 
 /**
- * 索引の指す block を**触ったぶんだけ**読む gather を組む（ADR 0085 決定 3 + 0109 決定 4）。
+ * Builds the gather that reads **only what it touches** of the blocks the index points at (ADR 0085
+ * decision 3 + 0109 decision 4).
  *
- * MUST: モジュール副作用ゼロ（この関数を呼ぶまで何も起きない）。
+ * MUST: zero module side effects (nothing happens until this function is called).
  */
 export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   const { index, openBlock, vocabSize } = options;
   const budget = options.maxResidentBytes ?? defaultGemma4PleResidentBytes(index);
-  // 予算は呼び手の `maxResidentPleBytes` そのものなので入力起因（ADR 0107 決定 2）。
+  // The budget is the caller's `maxResidentPleBytes` itself, so it is input-caused (ADR 0107
+  // decision 2).
   if (!Number.isSafeInteger(budget) || budget < 0) {
     throw new ModelInputError(`maxResidentBytes ${budget} が 0 以上の整数でない`);
   }
   const largest = largestBlockBytes(index);
-  // MUST: 「1 本すら載らない予算」は fail loudly。黙って超過すれば予算が意味を失い、黙って
-  // 守れば gather が引けない — どちらも呼び手の指定を裏切る。0 は例外で、「常駐させない」
-  // という指定として正当（読み終えた block を即座に落とす形）。
-  // 資産の寸法と突き合わせるが、拒否しているのは呼び手が渡した予算の値なので入力起因。
+  // MUST: "a budget that cannot hold even one block" fails loudly. Silently exceeding it voids the
+  // budget, silently honouring it leaves the gather unable to read — both betray the caller's
+  // setting. 0 is the exception: valid as "keep nothing resident" (drop each block as soon as it is
+  // read). It is compared with the asset sizes, but what is rejected is the budget the caller
+  // passed, so it is input-caused.
   if (budget > 0 && budget < largest) {
     throw new ModelInputError(
       `maxResidentBytes ${budget} が PLE の block 1 本ぶん ${largest} バイトに満たない` +
@@ -282,8 +317,9 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         ` scales ${index.scales.blocks.length} 本 — 常駐させないなら 0 を渡す）`,
     );
   }
-  // ① 索引の行数 と ② 主 embedding の vocab 行数（ADR 0085 決定 5 の相互照合）。
-  // こちらは焼いた組み合わせの齟齬なので素の `Error` のまま（呼び手は指定を直せない）。
+  // (1) the index's row count and (2) the main embedding's vocab row count (ADR 0085 decision 5's
+  // cross-check). This is a mismatch of the baked combination, so it stays a plain `Error` (the
+  // caller cannot fix it by changing a setting).
   if (index.tokens !== vocabSize) {
     throw new Error(
       `PLE の索引の行数 ${index.tokens} が主 embedding の vocab 行数 ${vocabSize} と違う` +
@@ -293,17 +329,25 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   const stride = index.layers * index.dim;
   const factor = packFactor(index);
   const rowValueBytes = index.values.rowBytes;
-  /** 行 1 本ぶんの `scales`（f32 × 層数）の**要素数**。 */
+  /** **Element count** of one row of `scales` (f32 × layers). */
   const scaleStride = index.layers;
   const rowBytes = rowValueBytes + index.scales.rowBytes;
-  /** 行も量子化された byte 列のまま保持し、逆量子化の順序を変えない。挿入順 = LRU。 */
+  /**
+   * Rows are kept as quantized bytes too, so the dequantization order does not change. Insertion
+   * order = LRU.
+   */
   const rowCache = new Map<number, CachedRow>();
-  /** 挿入順 = LRU（触った block を末尾へ付け替え、予算超過分は先頭から落とす）。 */
+  /**
+   * Insertion order = LRU (a touched block is moved to the tail; overflow is dropped from the
+   * head).
+   */
   const resident = new Map<
     string,
     { readonly bytes: number; readonly data: Promise<ArrayBuffer> }
   >();
-  /** 常駐（= 読みを始めたぶんを含む）の合計バイト。`resident` の増減と必ず対で動かす。 */
+  /**
+   * Total bytes resident (including reads already started). Always moves together with `resident`.
+   */
   let residentBytes = 0;
   let loads = 0;
   let rowReads = 0;
@@ -328,51 +372,56 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   };
 
   /**
-   * block 1 本を常駐キャッシュから取る（未常駐なら**全量**読む）。
+   * Takes one block from the resident cache (reads it **whole** when not resident).
    *
-   * MUST: 同期のまま保つ（`resident` の照会と登録の間に await を挟まない）— 挟むと同じ block を
-   * 同時に要求した 2 本が揃って miss と判定し、二重読みになる。
+   * MUST: keep it synchronous (no await between looking up `resident` and registering) — with one,
+   * two concurrent requests for the same block would both judge it a miss and read it twice.
    */
   const acquire = (table: Gemma4PleTable, position: number): Promise<ArrayBuffer> => {
     const block = table.blocks[position];
     const cached = resident.get(block.asset);
     if (cached !== undefined) {
-      // 参照したので末尾へ付け替える（Map の反復順 = 挿入順）。
+      // Touched, so move it to the tail (Map iteration order = insertion order).
       resident.delete(block.asset);
       resident.set(block.asset, cached);
       return cached.data;
     }
     const bytes = gemma4PleBlockBytes(table, block);
     loads += 1;
-    // 読み口はこの読み 1 回ぶんだけ生かす（モジュール doc の MUST）。
+    // The reader lives only for this one read (the MUST in the module doc).
     const data = readAssetRange(openBlock(block.asset), 0, bytes);
-    // MUST: 失敗した取得を常駐させない（次の gather が同じ拒否済み Promise を掴み続ける）。
+    // MUST: do not keep a failed fetch resident (the next gather would keep taking the same
+    // rejected Promise).
     data.catch(() => {
       if (resident.get(block.asset)?.data === data) release(block.asset);
     });
-    // dispose 中も先行 gather は完了してよいが、所有者のキャッシュへは戻さない。
+    // A gather already running may complete during dispose, but nothing goes back into the owner's
+    // cache.
     if (disposed) return data;
     resident.set(block.asset, { bytes, data });
     residentBytes += bytes;
-    // 予算はバイトで測る（本数ではない）。予算 0 では今入れたぶんもここで落ちるが、走行中の
-    // gather は解決済みの実体を自分で掴んでいるので値は揃う。
+    // The budget is measured in bytes (not a count). With a budget of 0 the block just added is
+    // dropped here too, but the running gather holds the resolved data itself, so values stay
+    // consistent.
     for (const oldest of resident.keys()) {
       if (residentBytes <= budget) break;
       release(oldest);
     }
-    // 全量 block を優先し、行の常駐を既存予算へ上乗せしない。
+    // Whole blocks take priority; resident rows are not added on top of the existing budget.
     trimRows();
     return data;
   };
 
   /**
-   * 行 1 本を `data` の位置 `target` へ逆量子化して書く。
+   * Dequantizes one row and writes it at position `target` of `data`.
    *
-   * MUST: 全量経路と行読み経路が**この 1 実装**を共有する（式を 2 つ持つと、片方だけ丸め点が
-   * ずれても値が「だいたい合う」ので気づけない）。
-   * MUST: 逆量子化 → embed scale の **2 段**（GPU 側 `embedding` と直後の `mul` と同じ順序・
-   * 同じ丸め点）。JS の算術は f64 なので、`Math.fround` で 1 段目を f32 へ落としてから掛ける —
-   * f64 のまま 1 度に丸めると subnormal 域で 2 段丸めと結果が割れうる（ADR 0085 決定 4）。
+   * MUST: the whole-block path and the row-read path share **this one implementation** (with two
+   * formulas, a rounding point drifting in only one of them goes unnoticed because the values
+   * "roughly match").
+   * MUST: **two steps**, dequantization → embed scale (the same order and rounding points as the
+   * GPU-side `embedding` and the `mul` right after it). JS arithmetic is f64, so the first step is
+   * brought down to f32 with `Math.fround` before multiplying — rounding once in f64 can give a
+   * different result from the two-step rounding in the subnormal range (ADR 0085 decision 4).
    */
   const writeRow = (
     data: Float32Array<ArrayBuffer>,
@@ -406,9 +455,10 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   };
 
   /**
-   * 同じ id が並ぶ残りの位置へ、**計算済みの f32 バイト列を複写**する。
+   * **Copies the computed f32 bytes** to the remaining positions with the same id.
    *
-   * 再計算ではなく複写なので、2 段丸めの結果とビット同一であることが構造で保証される。
+   * A copy, not a recomputation, so bit identity with the two-step rounding is guaranteed by
+   * construction.
    */
   const copyDuplicates = (
     data: Float32Array<ArrayBuffer>,
@@ -420,7 +470,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     }
   };
 
-  /** 引く id を block へ束ねる（方針はまだ決めない）。 */
+  /** Groups the ids to read by block (the policy is not decided yet). */
   const groupTable = (table: Gemma4PleTable, missing: readonly number[]): TablePlan => {
     const grouped = new Map<number, number[]>();
     for (const id of missing) {
@@ -433,11 +483,12 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   };
 
   /**
-   * 既に常駐している block を触って LRU の末尾へ回し、`planned` へ計上する。
+   * Touches the blocks that are already resident, moving them to the LRU tail, and adds them to
+   * `planned`.
    *
-   * MUST: **2 表ぶんをまとめて先に**通す（後段の全量読みより前）— 表ごとに「触る → 載せる」を
-   * 済ませると、先に走った表の全量読みが**もう一方の表の hit**を追い出す（追い出しは表を
-   * またぐ 1 本の LRU で起きる）。
+   * MUST: run **both tables first, together** (before the whole reads that follow) — finishing
+   * "touch → load" per table lets the first table's whole read evict **the other table's hit**
+   * (eviction happens in one LRU spanning both tables).
    */
   const touchHits = (plan: TablePlan, planned: { value: number }): void => {
     for (const position of plan.grouped.keys()) {
@@ -449,11 +500,12 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   };
 
   /**
-   * 未常駐の block を「全量読み」と「行読み」へ振り分ける。
+   * Routes the non-resident blocks to "whole read" or "row reads".
    *
-   * `planned` は**この gather が握る常駐量**（hit + これから載せるぶん）で、2 表を通して 1 つを
-   * 共有する。予算を超える手前で止めるので、**1 回の gather が自分の hit を追い出すことは無い** —
-   * 一方で前の gather が載せた block は追い出されるので、作業集合は LRU で入れ替わる。
+   * `planned` is **the resident amount this gather holds** (hits + what it is about to load), one
+   * value shared across both tables. It stops short of exceeding the budget, so **one gather never
+   * evicts its own hits** — while blocks loaded by earlier gathers are evicted, so the working set
+   * rotates through the LRU.
    */
   const decideTable = (plan: TablePlan, planned: { value: number }): void => {
     for (const [position, ids] of plan.grouped) {
@@ -469,7 +521,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     }
   };
 
-  /** 行読みの 1 本（`[行 offset, +rowBytes)` を引いて自分の buffer に持つ）。 */
+  /** One row read (reads `[row offset, +rowBytes)` into its own buffer). */
   const readRow = async (plan: TablePlan, id: number): Promise<void> => {
     const position = plan.rows.get(id) as number;
     const block: Gemma4PleBlock = plan.table.blocks[position];
@@ -485,9 +537,11 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   };
 
   /**
-   * 2 表ぶんの行読みを 1 本の列に畳み、{@link ROW_READ_CONCURRENCY} 本のプールで流す。
+   * Folds the row reads of both tables into one list and runs it through a pool of
+   * {@link ROW_READ_CONCURRENCY} workers.
    *
-   * 失敗は reject せず `failure` に最初の 1 件を記録する（待ち合わせは呼び手が全経路ぶん揃える）。
+   * A failure does not reject; the first one is recorded in `failure` (the caller waits for every
+   * path).
    */
   const gatherRows = async (
     plans: readonly TablePlan[],
@@ -501,14 +555,16 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     if (jobs.length === 0) return;
     let next = 0;
     const worker = async (): Promise<void> => {
-      // MUST: 取り出しと `next` の前進の間に await を挟まない（挟むと 2 本が同じ行を引く）。
-      // MUST: 失敗の後は新しい job を取り出さない — 取り出し続けると、失敗を受けた呼び手の
-      // retry とこの gather の残りの読みが重なり、同時発行の上限が gather 全体で守られなくなる。
+      // MUST: no await between taking a job and advancing `next` (with one, two workers read the
+      // same row).
+      // MUST: take no new job after a failure — continuing would overlap the caller's retry after
+      // the failure with this gather's remaining reads, and the concurrency limit would no longer
+      // hold across the whole gather.
       while (failure.cause === undefined && next < jobs.length) {
         const job = jobs[next];
         next += 1;
         try {
-          // 中断は段の境目で見る（読み 1 本を途中で畳む口は `AssetReader` に無い）。
+          // Abort is checked between steps (`AssetReader` has no way to stop one read midway).
           options.signal?.throwIfAborted();
           await readRow(job.plan, job.id);
         } catch (error) {
@@ -520,9 +576,10 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   };
 
   /**
-   * 表 1 本から id の行を引き当てる（行読みの結果 → 無ければ全量 block の view）。
+   * Looks up an id's row in one table (the row-read result → otherwise a view of the whole block).
    *
-   * `rowUnits` は 1 行ぶんの**要素数**（`values` はバイト数・`scales` は層数）。
+   * `rowUnits` is the **element count** of one row (bytes for `values`, the layer count for
+   * `scales`).
    */
   const supplyOf = <T>(
     plan: TablePlan,
@@ -536,7 +593,8 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     const position = gemma4PleBlockOf(plan.table, id);
     const buffer = blocks.get(position);
     if (buffer === undefined) {
-      // 起きるなら計画と引き当ての食い違い（= この実装のバグ）なので黙って 0 行を配らない。
+      // If this happens, the plan and the lookup disagree (= a bug in this implementation), so do
+      // not silently hand out a zero row.
       throw new Error(`PLE gather: token ${id} の block ${position} を取っていない`);
     }
     return {
@@ -547,10 +605,10 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   };
 
   /**
-   * 全量 block の待ち合わせ（block 添字 → バイト列）。
+   * Waits for the whole blocks (block index → bytes).
    *
-   * reject せず、失敗は `failure` へ記録する — 1 本の失敗で即座に抜けると、残りの block と
-   * 行読みが決着する前に呼び手へ制御が戻る。
+   * Does not reject; failures are recorded in `failure` — leaving at the first failure would return
+   * control to the caller before the remaining blocks and row reads have settled.
    */
   const awaitFull = async (
     plan: TablePlan,
@@ -579,11 +637,13 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         throw new Error("PLE gather: dispose 済みの索引は引けない（常駐は解放済み）");
       }
       if (ids.length < 1) throw new Error("PLE gather の token 列が空");
-      // 中断済みで呼ばれたら資産に 1 バイトも触らずに返す（段の境目の 1 本目）。
+      // Called already aborted: return without touching a single asset byte (the first step
+      // boundary).
       options.signal?.throwIfAborted();
       ids.forEach((id, position) => {
-        // ③ 実際に引く id（tokenizer が生成しうる special id を含む）— 範囲外は OOB ではなく
-        // 「別 token の有効な行」になるので、ここが唯一の fail loudly の位置。
+        // (3) the ids actually looked up (including the special ids the tokenizer can produce) —
+        // out of range is not OOB but "a valid row of another token", so this is the only
+        // fail-loudly point.
         if (!Number.isSafeInteger(id) || id < 0 || id >= index.tokens) {
           throw new Error(
             `token id[${position}] ${id} が PLE の索引の 0..${index.tokens - 1} の外`,
@@ -591,14 +651,14 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         }
       });
       const data = new Float32Array(ids.length * stride);
-      // 同じ id の位置を束ねる（逆量子化は id ごとに 1 回で済む）。
+      // Group the positions of each id (dequantization then happens once per id).
       const rows = new Map<number, number[]>();
       ids.forEach((id, position) => {
         const positions = rows.get(id);
         if (positions === undefined) rows.set(id, [position]);
         else positions.push(position);
       });
-      // ① 行キャッシュの hit を先に書く（後続の読みの追い出しで落ちる前に触る）。
+      // (1) Write the row-cache hits first (touch them before a later read's eviction drops them).
       const missing: number[] = [];
       for (const [id, positions] of rows) {
         const cached = rowCache.get(id);
@@ -613,7 +673,8 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         copyDuplicates(data, positions, first);
       }
       if (missing.length > 0) {
-        // ② 表ごとに block へ束ね、**2 表の hit を先に触ってから**方針を決める。
+        // (2) Group by block per table, and decide the policy **after touching the hits of both
+        // tables**.
         const planned = { value: 0 };
         const valuePlan = groupTable(index.values, missing);
         const scalePlan = groupTable(index.scales, missing);
@@ -621,19 +682,20 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         touchHits(scalePlan, planned);
         decideTable(valuePlan, planned);
         decideTable(scalePlan, planned);
-        // ③ 行読みを先に流す（hit 先行の延長 — 全量読みを待ってから流すと、その追い出しが
-        // この gather の行キャッシュ hit を落とす）。全量 block の失敗も行読みの新規発行を
-        // 止めるよう、待ち合わせ（= 失敗の記録口）は行読みより先に張る。
+        // (3) Run the row reads first (an extension of hits-first — running them after waiting for
+        // the whole reads would let that eviction drop this gather's row-cache hits). The waits (=
+        // the failure record) are set up before the row reads, so that a whole-block failure also
+        // stops new row reads.
         const failure: GatherFailure = {};
         const valueFull = awaitFull(valuePlan, failure);
         const scaleFull = awaitFull(scalePlan, failure);
         await gatherRows([valuePlan, scalePlan], options, failure);
         const valueBlocks = await valueFull;
         const scaleBlocks = await scaleFull;
-        // MUST: reject は開始済みの読みが全て決着した後（失敗後の retry や dispose と古い読みを
-        // 重ねない）。
+        // MUST: reject only after every started read has settled (do not overlap old reads with a
+        // retry or dispose after the failure).
         if (failure.cause !== undefined) throw failure.cause.error;
-        // ④ 2 表を突き合わせて書く。
+        // (4) Match the two tables and write.
         for (const id of missing) {
           const positions = rows.get(id) as number[];
           const values = supplyOf(valuePlan, id, valueBlocks, valuesView, rowValueBytes);
@@ -641,8 +703,9 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
           const first = positions[0] * stride;
           writeRow(data, first, values.array, values.from, scales.array, scales.from);
           copyDuplicates(data, positions, first);
-          // 行キャッシュに載せるのは**両表とも行読みで引いた**行だけ（全量 block の view を
-          // 保存すると block そのものが予算の外で生き残る）。中断・dispose 後には復活させない。
+          // Only rows read **by row reads from both tables** go into the row cache (keeping a view
+          // of a whole block would let the block itself survive outside the budget). Nothing is
+          // revived after abort or dispose.
           if (
             values.owned &&
             scales.owned &&
@@ -668,7 +731,8 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     },
     dispose(): void {
       disposed = true;
-      // 走行中の読みまでは止めない（返ってきた buffer は誰も掴まないので回収される）。
+      // Reads in flight are not stopped (the buffers they return are held by nobody and get
+      // collected).
       resident.clear();
       residentBytes = 0;
       rowCache.clear();

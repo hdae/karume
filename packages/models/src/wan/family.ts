@@ -1,18 +1,22 @@
 /**
- * Wan の家族 admission・構築・生成の本体（ADR 0121 決定 10 — Wan2.1 / 2.2 の class が共有する 1 本）。
+ * The body of Wan's family admission, construction and generation (ADR 0121 decision 10 — one body
+ * shared by the Wan2.1 / 2.2 classes).
  *
- * 公開 class（`./pipeline.ts` の `WanPipeline`・`./ti2v-pipeline.ts` の `WanTi2vPipeline`）は薄い殻
- * （private のコンストラクタ・直列化鎖・`dispose`）で、
- * manifest の門・部品の突合・GPU の取得・段の順序（(encoder →) text → DiT → VAE）の本体はここにある。段の順序と
- * Session の寿命・中断の MUST は `./pipeline.ts` 冒頭の doc が正本。世代ごとに違う値は全て
- * {@link WanFamilySpec} が運ぶ（文言の接頭辞・pipeline 名と major・世代の記述子）。I2V の encoder の部品の有無も
- * 世代の記述子（DiT の入力の形が `"ti2v"`）から決まる。
+ * The public classes (`WanPipeline` in `./pipeline.ts`, `WanTi2vPipeline` in `./ti2v-pipeline.ts`) are
+ * thin shells (private constructor, serialization chain, `dispose`);
+ * the manifest checks, component matching, GPU acquisition and the stage order ((encoder →) text → DiT
+ * → VAE) live here. The stage order, Session lifetimes and the cancellation MUSTs are defined by the
+ * doc at the top of `./pipeline.ts`. Every value that differs by generation is carried by
+ * {@link WanFamilySpec} (message prefix, pipeline name and major, generation descriptor). Whether the
+ * I2V encoder components exist is also decided by the generation descriptor (a DiT input form of
+ * `"ti2v"`).
  *
- * NOTE: 内部だけ（`mod.ts` / サブパス面には出さない — ADR 0008）。公開型は `./pipeline.ts` と
- * `./ti2v-pipeline.ts` から `import type` だけで取る（値の import を持たない — 両方ともここの値を使うので、値の
- * 循環 import を作らない）。
+ * NOTE: internal only (not on the `mod.ts` / subpath surface — ADR 0008). The public types are taken
+ * from `./pipeline.ts` and `./ti2v-pipeline.ts` with `import type` only (no value imports — both use
+ * values from here, so no value import cycle is created).
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is side-effect free (no import-time execution, no global mutable state —
+ * CLAUDE.md).
  */
 
 import {
@@ -125,12 +129,15 @@ import {
 } from "./vae-encoder.ts";
 
 /**
- * 世代と経路で取る部品（取得面の `componentKeys`・全量面の開く部品）。DiT の入力の形が `"ti2v"` の世代（Wan2.2）は
- * I2V の VAE encoder の 3 部品を、画像を渡さない使い方でも取る（構築の口を増やさない — 部品は配布形が常に持つ）。
+ * The components fetched per generation and path (`componentKeys` of the fetch surface, the
+ * components the full-asset surface opens). A generation whose DiT input form is `"ti2v"` (Wan2.2)
+ * fetches the three I2V VAE encoder components even for use without an image (no extra construction
+ * entry point — the distribution always carries them).
  *
- * MUST: `"precomputed"` は umT5 の部品を開かない — 開くと umT5 の取得（i8 で約 5.3 GiB）が軽い使い方にも乗る
- * （決定 7 の「umT5 を取らない軽い使い方」が消える）。
- * MUST: 入力の形 `"t2v"` の世代（Wan2.1）の部品の並びは encoder の追加の前と同じ（2.1 の取得を変えない）。
+ * MUST: `"precomputed"` does not open the umT5 component — opening it would add the umT5 fetch (about
+ * 5.3 GiB in i8) to the light use as well (decision 7's "light use without umT5" would be lost).
+ * MUST: for a generation of input form `"t2v"` (Wan2.1) the component order stays as before the
+ * encoder was added (2.1's fetch does not change).
  */
 const wanComponentKeys = (
   generation: WanGenerationDescriptor,
@@ -143,32 +150,34 @@ const wanComponentKeys = (
   ...(route === "gpu" ? [TEXT_ENCODER] : []),
 ];
 
-/** 家族ごとに違う値（class が自分の 1 本を {@link loadWanFromPretrained} などへ渡す）。 */
+/** The values that differ per family (a class passes its own to {@link loadWanFromPretrained} etc.). */
 export type WanFamilySpec = {
   /**
-   * 文言の接頭辞（class 名）。共有の段（`text-stage.ts` / `dit-loop.ts` / `tile-decode.ts` /
-   * `graph-io.ts`）へもこの値を渡す。
+   * The message prefix (the class name). Also passed to the shared stages (`text-stage.ts` /
+   * `dit-loop.ts` / `tile-decode.ts` / `graph-io.ts`).
    */
   readonly owner: string;
-  /** manifest の `pipeline` の名前と major（家族 admission の門 — ADR 0038 §6）。 */
+  /** The manifest `pipeline` name and major (the family admission check — ADR 0038 §6). */
   readonly pipeline: { readonly name: string; readonly major: number };
-  /** 世代の記述子（受理集合・既定・fps・統計・VAE の照合・DiT の入力の形）。 */
+  /** The generation descriptor (accepted set, defaults, fps, statistics, VAE match, DiT input form). */
   readonly generation: WanGenerationDescriptor;
   /**
-   * `ref` を省いたときの診断が案内する対応表の綴り（`toManifestSource` の第 3 引数 — `src/hub/repo-ref.ts`）。
-   * 公開配布リポを持たない世代（Wan2.1 — `WAN_SOURCES` にキーが無い）は省く（存在しないキーを案内しない）。
+   * The spelling of the table that the diagnostic points to when `ref` is omitted (the third argument
+   * of `toManifestSource` — `src/hub/repo-ref.ts`). Omitted for a generation without a public
+   * distribution repository (Wan2.1 — `WAN_SOURCES` has no key for it) (no pointing at a key that does
+   * not exist).
    */
   readonly sourcesExample?: string;
 };
 
-/** Wan2.1 T2V 1.3B（`WanPipeline` — pipeline `wan/1`・{@link WAN21_GENERATION}）。 */
+/** Wan2.1 T2V 1.3B (`WanPipeline` — pipeline `wan/1`, {@link WAN21_GENERATION}). */
 export const WAN21_FAMILY: WanFamilySpec = {
   owner: "WanPipeline",
   pipeline: { name: WAN_PIPELINE_NAME, major: WAN_PIPELINE_MAJOR },
   generation: WAN21_GENERATION,
 };
 
-/** Wan2.2 TI2V 5B（`WanTi2vPipeline` — pipeline `wan-ti2v/1`・{@link WAN22_TI2V_GENERATION}）。 */
+/** Wan2.2 TI2V 5B (`WanTi2vPipeline` — pipeline `wan-ti2v/1`, {@link WAN22_TI2V_GENERATION}). */
 export const WAN22_TI2V_FAMILY: WanFamilySpec = {
   owner: "WanTi2vPipeline",
   pipeline: { name: WAN_TI2V_PIPELINE_NAME, major: WAN_TI2V_PIPELINE_MAJOR },
@@ -177,12 +186,14 @@ export const WAN22_TI2V_FAMILY: WanFamilySpec = {
 };
 
 /**
- * 生成の要求を検査して計画にする（`generate` の入口・GPU に触る前の純粋な門 — 検査の本体と MUST は
- * {@link planWanRequest}）。`"precomputed"` の経路の入口で、プロンプトはテキスト埋め込み資産の集合で
- * 引く（{@link precomputedPromptGate}）。寸法とフレーム数の受理集合と既定は `generation`
- * （{@link WanFamilySpec.generation}）、拒否の文言の接頭辞は `owner`。
+ * Checks a generation request and turns it into a plan (the entry of `generate` — a pure check before
+ * touching the GPU; the body of the checks and its MUSTs are in {@link planWanRequest}). The entry of
+ * the `"precomputed"` path: the prompt is looked up in the text embedding asset's set
+ * ({@link precomputedPromptGate}). The accepted set and defaults of size and frame count come from
+ * `generation` ({@link WanFamilySpec.generation}); the prefix of rejection messages is `owner`.
  *
- * NOTE: `export` は GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: `export` is for tests that pin the checks without a GPU (not on the `mod.ts` / subpath
+ * surface — ADR 0008).
  */
 export const planWanGeneration = (
   request: WanTi2vGenerateRequest,
@@ -195,15 +206,18 @@ export const planWanGeneration = (
   planWanRequest(request, precomputedPromptGate(embeds, owner), layout, config, generation);
 
 /**
- * `"gpu"` の経路の入口（{@link planWanGeneration} と同じ検査の順・同じノブの門）。プロンプトは umT5 の
- * プロンプト層（`prompt_clean` の鏡像 → トークナイザ — {@link gpuPromptGate}）で id 列にする。拒否は
- * `ModelInputError`（前処理の拒否は派生の `PromptCleanError`）で、文言は直し方まで言う。
- * `negativePrompt` を省くと既定の negative（`text-stage.ts` の `WAN_DEFAULT_NEGATIVE_PROMPT`）を同じ門で
- * 符号化する。
+ * The entry of the `"gpu"` path (the same check order and the same knob checks as
+ * {@link planWanGeneration}). The prompt becomes an id sequence through umT5's prompt layer (the
+ * `prompt_clean` mirror → tokenizer — {@link gpuPromptGate}). A rejection is a `ModelInputError` (a
+ * preprocessing rejection is the derived `PromptCleanError`), and the message says how to fix it.
+ * When `negativePrompt` is omitted, the default negative (`WAN_DEFAULT_NEGATIVE_PROMPT` in
+ * `text-stage.ts`) is encoded through the same check.
  *
- * MUST: 符号化はここで済ませる — umT5 の重み（i8 で約 5.3 GiB）を上げてから語彙外で落ちる形にしない。
+ * MUST: encoding is finished here — no failing on out-of-vocabulary input after the umT5 weights
+ * (about 5.3 GiB in i8) are uploaded.
  *
- * NOTE: `export` は GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: `export` is for tests that pin the checks without a GPU (not on the `mod.ts` / subpath
+ * surface — ADR 0008).
  */
 export const planWanGpuGeneration = (
   request: WanTi2vGenerateRequest,
@@ -215,18 +229,22 @@ export const planWanGpuGeneration = (
   planWanRequest(request, gpuPromptGate(encoder), layout, config, generation);
 
 /**
- * この家族が manifest の `session` と明示指定で受けるキー（受理表 — `session/options.ts`）。
+ * The keys this family accepts from the manifest's `session` and explicit overrides (the acceptance
+ * table — `session/options.ts`).
  *
- * linear / 融合 attention の実行形 3 欄を受ける: 配布形の実用席 `f16+dit8-a8-attn8-s16` がこの 3 つを
- * 宣言する（ADR 0120 決定 1 / 7 — anima の同名の席と同じ宣言）。並列 GEMV と融合の 4 欄は受けない —
- * Wan の DiT のグラフでは効く席も数値も確かめていない組合せだから。受けないキーの宣言は重みを取る
- * 前に fail loudly（黙って既定で走らせない）。
+ * The three execution-form fields of linear / fused attention are accepted: the distribution's
+ * practical preset `f16+dit8-a8-attn8-s16` declares these three (ADR 0120 decisions 1 / 7 — the same
+ * declaration as anima's preset of the same name). The four fields of the parallel GEMV and fusion are
+ * not accepted — for Wan's DiT graph neither the presets where they would apply nor their numerics
+ * have been checked. A declaration of an unaccepted key fails loudly before the weights are fetched
+ * (not silently run with the default).
  *
- * 席の選択は既存の `quant` だけで、利用者の明示指定の口は公開面に足さない（ADR 0120 決定 7 —
- * `resolveSessionOptions` の第 3 引数は空のまま。受理表は同じ 1 本なので、要求が出たら後から足せる）。
+ * Preset selection is only the existing `quant`; no explicit override for the caller is added to the
+ * public surface (ADR 0120 decision 7 — the third argument of `resolveSessionOptions` stays empty. The
+ * acceptance table is the same single one, so an override can be added later if requested).
  *
- * NOTE: `export` は全家族の受理表の網羅を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: `export` is for the test that pins coverage of every family's acceptance table (not on the
+ * `mod.ts` / subpath surface — ADR 0008).
  */
 export const WAN_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: true,
@@ -239,24 +257,30 @@ export const WAN_SESSION_POLICY: FamilySessionPolicy = {
   packedStaticQuantize: false,
 };
 
-/** 家族 admission（{@link admitWan}）が確定させる材料。 */
+/** The material the family admission ({@link admitWan}) settles. */
 type WanAdmission = {
   readonly config: WanPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
-  /** quant 宣言を受理表で通した実効設定（{@link WAN_SESSION_POLICY} — DiT の Session へ渡す）。 */
+  /**
+   * The effective settings of the quant declaration after the acceptance table
+   * ({@link WAN_SESSION_POLICY} — passed to the DiT Session).
+   */
   readonly sessionOptions: SessionOptions;
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
   readonly layout: WanVaeChunkLayout;
   readonly ropeBase: WanRopeBase;
   readonly dit: DitContract;
-  /** 経路（`"gpu"` は umT5 のグラフの取り決めを伴う）。 */
+  /** The path (`"gpu"` comes with the umT5 graph contract). */
   readonly textEncoder: WanTextAdmission;
-  /** I2V の VAE encoder の 3 グラフの取り決め（DiT の入力の形が `"ti2v"` の世代だけ — 他は undefined）。 */
+  /**
+   * The contract of the three I2V VAE encoder graphs (only for a generation whose DiT input form is
+   * `"ti2v"` — otherwise undefined).
+   */
   readonly vaeEncoder: WanVaeEncoderContract | undefined;
 };
 
-/** Wan の class の内部状態（{@link loadWanFromPretrained} / {@link loadWanFromAssets} が組む）。 */
+/** Internal state of a Wan class (built by {@link loadWanFromPretrained} / {@link loadWanFromAssets}). */
 export type WanState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
@@ -265,31 +289,33 @@ export type WanState = {
   readonly transformer: ModelComponent;
   readonly vaeFirst: ModelComponent;
   readonly vaeNext: ModelComponent;
-  /** I2V の VAE encoder（DiT の入力の形が `"ti2v"` の世代だけ — 他は undefined）。 */
+  /** The I2V VAE encoder (only for a generation whose DiT input form is `"ti2v"`; else undefined). */
   readonly vaeEncoder: WanVaeEncoder | undefined;
   readonly layout: WanVaeChunkLayout;
   readonly ropeBase: WanRopeBase;
   readonly dit: DitContract;
-  /** 埋め込み資産（`"precomputed"` の受理集合・両経路の `prompts`）。 */
+  /** The embedding asset (the accepted set of `"precomputed"`, `prompts` on both paths). */
   readonly textEmbeds: WanTextEmbeds;
   readonly text: WanTextStage;
   readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /**
- * 配布形から取得して組む（class の `fromPretrained` の本体 — 手順と MUST は `WanPipeline.fromPretrained`
- * の doc）。
+ * Fetches from the distribution and builds (the body of the class's `fromPretrained` — the procedure
+ * and MUSTs are in the doc of `WanPipeline.fromPretrained`).
  */
 export const loadWanFromPretrained = async (
   spec: WanFamilySpec,
   ref: string | HubRepoRef | DistributionSource,
   options: WanFromPretrainedOptions,
 ): Promise<WanState> => {
-  // 経路は取得の前に決める（取る部品が変わる）— 綴り違いは 1 バイトも取らずに落とす。
+  // The path is decided before fetching (the components to fetch change) — a misspelling fails
+  // without fetching a byte.
   const route = textEncoderRouteOf(options, spec.owner);
   const source = toManifestSource(ref, `${spec.owner}.fromPretrained`, spec.sourcesExample);
-  // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない —
-  // `hubLoadOptions` が写す・anima / irodori と同じ形）。
+  // The signal goes to **both** the fetch layer and construction (no window where cancellation stops
+  // working the moment the download ends — copied by `hubLoadOptions`, the same form as anima /
+  // irodori).
   const hubOptions = hubLoadOptions(options);
   const loaded = await loadManifest(source, hubOptions);
   assertTextEncoderDeclared(loaded.manifest, options, route, spec.owner);
@@ -307,7 +333,8 @@ export const loadWanFromPretrained = async (
       : { onRunDiagnostics: options.onRunDiagnostics }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   };
-  // 家族の門は admission 席で通す（重みの part を取る前 — `src/hub/components.ts`）。
+  // The family checks run in the admission callback (before the weight parts are fetched —
+  // `src/hub/components.ts`).
   const { admitted, assets, open } = await loadContainerComponents(
     `${spec.owner}.fromPretrained`,
     loaded,
@@ -315,8 +342,9 @@ export const loadWanFromPretrained = async (
     wanComponentKeys(spec.generation, route),
     async (open) => {
       const admitted = await admitWan(spec, loaded.manifest, open, buildOptions);
-      // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
-      // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+      // The `requiredLimits` the distribution declares are checked here, **before the weight parts are
+      // fetched** (ADR 0089 decision 5 — a shared GPU's limits, or the adapter's measured values on the
+      // path that acquires its own).
       await assertRequiredLimitsBeforeDownload(
         admitted.quant.requiredLimits,
         buildOptions.gpu,
@@ -334,8 +362,9 @@ export const loadWanFromPretrained = async (
 };
 
 /**
- * 取得済みの manifest + 資産から組む（{@link WanAssets}）。容器を開いて、取得面と同じ家族 admission
- * （{@link admitWan}）と組み立て（{@link buildWan}）を通す — 2 面の違いは部品の供給口だけ。
+ * Builds from an already-fetched manifest + assets ({@link WanAssets}). Opens the containers and runs
+ * the same family admission ({@link admitWan}) and assembly ({@link buildWan}) as the fetch surface —
+ * the two surfaces differ only in how components are supplied.
  */
 export const loadWanFromAssets = async (
   spec: WanFamilySpec,
@@ -343,7 +372,8 @@ export const loadWanFromAssets = async (
   options: WanPipelineOptions,
 ): Promise<WanState> => {
   const route = textEncoderRouteOf(options, spec.owner);
-  // 入口の検査（中断済みなら容器を 1 本も開かない — 開くのは GB 級の part 列の検証を含む）。
+  // The entry check (if already cancelled, no container is opened — opening includes validating
+  // GB-scale part sequences).
   await settleAbort(options.signal);
   assertTextEncoderDeclared(input.manifest, options, route, spec.owner);
   const buffer = (key: string): ArrayBuffer =>
@@ -359,17 +389,21 @@ export const loadWanFromAssets = async (
 };
 
 /**
- * この manifest と部品のグラフ宣言を `spec` の世代（{@link WAN21_FAMILY} なら Wan2.1）として実行できるかを
- * 見る（家族 admission — 取得面では **重みの part を 1 バイトも取る前**に呼ばれる）。
+ * Checks whether this manifest and the components' graph declarations can run as the generation of
+ * `spec` (Wan2.1 for {@link WAN21_FAMILY}) (the family admission — on the fetch surface it is called
+ * **before a single byte of the weight parts is fetched**).
  *
- * MUST: 家族の門はこの 1 本に集める（pipeline 名 / major・`pipelineConfig`・quant の `session`・
- * 共有 GPU の能力・計測の device・グラフ宣言 × ホストの取り決め）。後段へ散らすと、取得面では GB 級の
- * 重みを落とした**後**にしか落ちない（ADR 0070 決定 5）。
- * MUST: manifest の契約違反は **GPU を取りに行く前**に落とす（他の家族と同じ順序）。
+ * MUST: the family checks are gathered in this one function (pipeline name / major,
+ * `pipelineConfig`, the quant's `session`, the shared GPU's capabilities, the timing device, graph
+ * declarations × host contracts). Scattered into later stages, on the fetch surface they would fail
+ * only **after** GB-scale weights were downloaded (ADR 0070 decision 5).
+ * MUST: manifest contract violations fail **before the GPU is acquired** (the same order as the other
+ * families).
  *
- * NOTE: RoPE の素表（`transformer` の容器の資産）はここで読む — 重み block と part を共有しない資産は
- * admission の席でも読める（`src/hub/components.ts`）。埋め込み資産・トークナイザ資産（manifest の
- * `assets`）はまだ届いていないので、中身の突合は {@link buildWan}（ここで見るのは宣言の有無）。
+ * NOTE: the RoPE base table (an asset of the `transformer` container) is read here — an asset that
+ * shares no part with weight blocks can be read during admission too (`src/hub/components.ts`). The
+ * embedding asset and the tokenizer asset (the manifest's `assets`) have not arrived yet, so their
+ * contents are matched in {@link buildWan} (here only their declaration is checked).
  */
 const admitWan = async (
   spec: WanFamilySpec,
@@ -377,7 +411,7 @@ const admitWan = async (
   open: ComponentOpener,
   options: WanPipelineOptions,
 ): Promise<WanAdmission> => {
-  // 段の境目（容器を開いた後・重みの part を取る前）。
+  // A step boundary (after the containers are opened, before the weight parts are fetched).
   await settleAbort(options.signal);
   const route = textEncoderRouteOf(options, spec.owner);
   const modelName = options.model ?? manifest.defaultModel;
@@ -396,7 +430,8 @@ const admitWan = async (
     );
   }
   if (major !== spec.pipeline.major) {
-    // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門（ADR 0038 §6）。
+    // The only check that stops the silent degradation of "old implementation × new repository"
+    // (ADR 0038 §6).
     throw new Error(
       `${spec.owner}: pipeline '${name}/${major}' の major に未対応` +
         `（この実装が読めるのは ${spec.pipeline.name}/${spec.pipeline.major}）`,
@@ -412,10 +447,11 @@ const admitWan = async (
     );
   }
   const quant = entry.quants[quantName];
-  // `"gpu"` の経路はトークナイザ資産を読む — 宣言が無ければ umT5（約 5.3 GiB）を取る前に落とす
-  // （中身は届いてから {@link buildWan} が見る）。
+  // The `"gpu"` path reads the tokenizer asset — without a declaration, fail before fetching umT5
+  // (about 5.3 GiB) (its contents are checked by {@link buildWan} once they arrive).
   assertTokenizerDeclared(entry, route, spec.owner);
-  // 未対応の宣言は重みの part を取る前に落とす（全家族共通の 1 本）。
+  // Unsupported declarations fail before the weight parts are fetched (one function shared by every
+  // family).
   const sessionOptions = resolveSessionOptions(
     WAN_SESSION_POLICY,
     quant.session,
@@ -430,8 +466,8 @@ const admitWan = async (
         "（runtime は計測の device で batch を開かない）— 計測なしの device を渡す",
     );
   }
-  // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 重みを落とす前に判る
-  // 唯一の家族門（後段の検査も同じ関数を呼ぶ）。
+  // MUST: a shared GPU's missing capabilities (feature / device limit) fail here — the only family
+  // check that knows before the weights are downloaded (the later checks call the same functions).
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(gpuFeatures, options.gpu, `${spec.owner}: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
@@ -443,8 +479,9 @@ const admitWan = async (
 
   const transformer = open(TRANSFORMER);
   const layout = wanVaeChunkLayout(open(VAE_DECODER_FIRST), open(VAE_DECODER_NEXT));
-  // 潜在のチャネル数は VAE の宣言から読み、記述子（統計の本数・unpatchify の倍率）と照合する。DiT の
-  // `tokens` の幅との照合は、同じチャネル数で組んだ patch を ditContract が見る。
+  // The latent channel count is read from the VAE declaration and matched against the descriptor (the
+  // number of statistics, the unpatchify factor). Matching against the width of the DiT's `tokens`
+  // happens in ditContract, which checks the patch built with the same channel count.
   assertWanVaeMatchesGeneration(layout, spec.generation, spec.owner);
   assertWanVaeTilesCover(layout, spec.generation, spec.owner);
   const ropeBase = parseWanRopeBase(await readWholeAsset(transformer.asset(ROPE_BASE)));
@@ -456,8 +493,9 @@ const admitWan = async (
     spec.owner,
   );
   const textEncoder = admitWanText(route, open, dit, spec.owner);
-  // I2V の encoder は decoder の潜在と空間の圧縮に照らして見る（受理寸法の被覆を含む — `wanVaeEncoderContract`）。
-  // 未知の DiT の入力の形は ditContract が先に落としている。
+  // The I2V encoder is checked against the decoder's latent and spatial compression (including
+  // coverage of the accepted sizes — `wanVaeEncoderContract`).
+  // An unknown DiT input form has already failed in ditContract.
   const vaeEncoder =
     spec.generation.ditInputForm === "ti2v"
       ? wanVaeEncoderContract(
@@ -486,11 +524,13 @@ const admitWan = async (
 };
 
 /**
- * admission を通った材料 + 資産から組む（{@link loadWanFromAssets} と {@link loadWanFromPretrained} が
- * 共有する 1 本）。埋め込み資産を解析して DiT の文脈入力と突き合わせ、GPU を取る（共有 GPU なら取らない）。
+ * Builds from the material that passed admission + the assets (one function shared by
+ * {@link loadWanFromAssets} and {@link loadWanFromPretrained}). Parses the embedding asset, matches it
+ * against the DiT's context input, and acquires the GPU (not for a shared GPU).
  *
- * MUST: 資産の解析と突合は **GPU を取りに行く前**（壊れた資産の真因を GPU 無し環境の別の例外で
- * 消さない — 他の家族と同じ順序）。Session は 1 本も張らない（VRAM の MUST — `./pipeline.ts` 冒頭の doc）。
+ * MUST: parsing and matching the assets come **before the GPU is acquired** (the true cause of a broken
+ * asset is not masked by another exception on a machine without a GPU — the same order as the other
+ * families). No Session is created (the VRAM MUST — the doc at the top of `./pipeline.ts`).
  */
 const buildWan = async (
   spec: WanFamilySpec,
@@ -500,7 +540,7 @@ const buildWan = async (
   options: WanPipelineOptions,
 ): Promise<WanState> => {
   const { config, quantName, sessionOptions, gpuFeatures, layout, ropeBase, dit } = admitted;
-  // 段の境目（資産が届いた後・解析の前）。
+  // A step boundary (after the assets arrive, before parsing).
   await settleAbort(options.signal);
   const { textEmbeds, text } = await loadWanTextStage(
     admitted.textEncoder,
@@ -515,16 +555,19 @@ const buildWan = async (
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を誰も
-    // 解放できないまま抜ける。`acquireGpu` の await 明けはマイクロタスクなので、ここでもマクロタスクへ
-    // 譲る（待機中に積まれた中断のタスクはまだ実行されていない — anima と同じ）。
+    // MUST: the cancellation check **after** acquiring the GPU stays inside the try — outside it, the
+    // internally acquired device would be left with nobody to release it. Resuming from the
+    // `acquireGpu` await is a microtask, so yield to a macrotask here too (a cancellation task queued
+    // during the wait has not run yet — the same as anima).
     await settleAbort(options.signal);
-    // 宣言された feature は device 作成時にしか要求できない（ADR 0028）— 自前で取った device は
-    // ここが唯一の門（共有 GPU は {@link admitWan} が同じ 1 本で見ている）。
+    // Declared features can be requested only when the device is created (ADR 0028) — for a device
+    // acquired here this is the only check (a shared GPU is checked by {@link admitWan} with the same
+    // function).
     assertGpuFeaturesGranted(gpuFeatures, gpu, `${spec.owner}: quant '${quantName}'`);
-    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
-    // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が段ごとの Session の構築まで
-    // 遅れる（VAE の段なら DiT の段を全部回した後）。共有 GPU は {@link admitWan} が見ている。
+    // The limits of a device acquired here are checked here too — `fromAssets` has no pre-fetch check
+    // point (`fromPretrained` checks with the adapter values), and without this a shortfall in the
+    // declaration would surface only when each stage's Session is built (for the VAE stage, after the
+    // whole DiT stage has run). A shared GPU is checked by {@link admitWan}.
     if (ownsGpu) {
       assertRequiredLimitsSatisfied(
         admitted.quant.requiredLimits,
@@ -537,7 +580,7 @@ const buildWan = async (
       ownsGpu,
       config,
       sessionOptions,
-      // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+      // The supplier is **the same one** admission saw (`open` only looks up the opened components).
       transformer: open(TRANSFORMER),
       vaeFirst: open(VAE_DECODER_FIRST),
       vaeNext: open(VAE_DECODER_NEXT),
@@ -560,15 +603,17 @@ const buildWan = async (
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
   } catch (error) {
-    // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
+    // A GPU acquired internally can no longer be released by anyone if construction fails, so it is
+    // returned here.
     if (ownsGpu) gpu.destroy();
     throw error;
   }
 };
 
 /**
- * プロンプト（と I2V の条件画像）から動画を 1 本生成する（class の `generate` が直列化鎖に載せる本体 — 段の順序と
- * Session の寿命・中断は `./pipeline.ts` 冒頭の doc）。
+ * Generates one video from a prompt (and the I2V condition image) (the body the class's `generate` puts
+ * on the serialization chain — the stage order, Session lifetimes and cancellation are in the doc at
+ * the top of `./pipeline.ts`).
  */
 export const generateWanVideo = async (
   spec: WanFamilySpec,
@@ -583,8 +628,9 @@ export const generateWanVideo = async (
       : async (event: WanGenerateEvent) => {
           await onEvent(event);
         };
-  // 入口の門は経路ごと（どちらも GPU に触る前の純粋な検査）。プロンプトの文脈は経路ごとに作り、
-  // encoder・DiT・VAE の段は同じ 1 本を通る。text の段は encoder の段の後に回すので、ここでは組み方だけを決める。
+  // The entry check is per path (both are pure checks before touching the GPU). The prompt contexts
+  // are built per path, and the encoder, DiT and VAE stages go through the same single body. The text
+  // stage runs after the encoder stage, so only how to build it is decided here.
   let knobs: WanGenerationKnobs;
   let encodeContexts: () => Promise<WanContexts>;
   if (state.text.kind === "gpu") {
@@ -598,7 +644,8 @@ export const generateWanVideo = async (
     );
     knobs = plan;
     encodeContexts = async () => {
-      // 段の境目（入口 / encoder → text）。直列化鎖の順番待ちの間に届いた中断もここで効く。
+      // A stage boundary (entry / encoder → text). A cancellation that arrived while waiting on the
+      // serialization chain also takes effect here.
       await settleAbort(signal);
       return await encodeWanPrompts(state, text, plan, emit, signal, spec.owner);
     };
@@ -614,21 +661,25 @@ export const generateWanVideo = async (
     knobs = plan;
     encodeContexts = () => Promise.resolve(precomputedContexts(plan, dit));
   }
-  // MUST: 呼び手の latents は門（`plan.ts`）が有限性を見たこの同期区間のうちに写して所有する。以降の段は
-  // 開始通知の callback と `settleAbort`（マクロタスクへ譲る）を await するので、写しを DiT の段まで遅らせると、
-  // その間に呼び手が書き換えた値（門を通っていない NaN を含む）で回る。DiT の段はこの写しを写さずに使う。
+  // MUST: the caller's latents are copied and owned within this synchronous section, where the check
+  // (`plan.ts`) verified their finiteness. Later stages await the start-notification callback and
+  // `settleAbort` (yielding to a macrotask), so delaying the copy to the DiT stage would run with
+  // values the caller modified in between (including NaN that never passed the check). The DiT stage
+  // uses this copy without copying again.
   if (knobs.initial.kind === "latents") {
     knobs = { ...knobs, initial: { kind: "latents", data: Float32Array.from(knobs.initial.data) } };
   }
-  // I2V の encoder の段は最初（text の段より前 — ADR 0121 決定 11）。画像の無い要求は段を持たない。
+  // The I2V encoder stage comes first (before the text stage — ADR 0121 decision 11). A request
+  // without an image has no such stage.
   let condition: Float32Array<ArrayBuffer> | undefined;
   if (knobs.conditionImage !== undefined) {
     const { vaeEncoder } = state;
     if (vaeEncoder === undefined) {
-      // 門（plan.ts）は入力の形 "ti2v" の世代でだけ画像を通し、その世代は構築で encoder を組むので、来たら配線の破れ。
+      // The check (plan.ts) lets an image through only for a generation of input form "ti2v", and that
+      // generation builds the encoder at construction, so reaching here means broken wiring.
       throw new Error(`${spec.owner}: 条件画像を受けたが VAE encoder の部品が組まれていない`);
     }
-    // 段の境目（入口 → encoder）。
+    // A stage boundary (entry → encoder).
     await settleAbort(signal);
     condition = await encodeWanImageStage(
       { ...state, vaeEncoder },
@@ -640,10 +691,10 @@ export const generateWanVideo = async (
     );
   }
   const contexts = await encodeContexts();
-  // 段の境目（text → DiT）。
+  // A stage boundary (text → DiT).
   await settleAbort(signal);
   const latents = await runWanDenoise(state, knobs, contexts, condition, emit, signal, spec.owner);
-  // 段の境目（DiT → VAE）。
+  // A stage boundary (DiT → VAE).
   await settleAbort(signal);
   const data = await decodeWanVaeStage(
     state,

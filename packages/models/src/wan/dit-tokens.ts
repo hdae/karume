@@ -1,24 +1,28 @@
 /**
- * Wan2.1 の DiT の **S 形グラフ**（トークン長 1 シンボル）のホスト側 — patchify / unpatchify
- * （ADR 0118 決定 3）。
+ * The host side of Wan2.1's DiT **S-shaped graph** (one symbol for the token length) — patchify /
+ * unpatchify (ADR 0118 decision 3).
  *
- * グラフの入口は patchify の後・出口は unpatchify の前なので、潜在 `[C,F,H,W]` とトークン列
- * `[1,S,C·pt·ph·pw]` の行き来はここが持つ。グラフの中に F / H / W は 1 つも現れない。
+ * The graph's entry is after patchify and its exit before unpatchify, so the conversion between
+ * latents `[C,F,H,W]` and the token sequence `[1,S,C·pt·ph·pw]` lives here. F / H / W never appear
+ * inside the graph.
  *
- * ## 2 つの並びは別物
+ * ## The two layouts are different
  *
- * - 入口（patchify）の最終次元は **`(c, pt, ph, pw)`** — 上流の patch 埋め込み `Conv3d(k = s = patch)`
- *   の重み `[Cout, C, pt, ph, pw]` を平坦化した Linear の入力の並び。
- * - 出口（unpatchify）の最終次元は **`(pt, ph, pw, c)`** — 上流 `proj_out` の出力を
- *   `reshape(…, pt, ph, pw, -1)` で読む並び（`transformer_wan.py` の出口）。
+ * - The last dimension at the entry (patchify) is **`(c, pt, ph, pw)`** — the input order of the
+ *   Linear that flattens the weight `[Cout, C, pt, ph, pw]` of upstream's patch embedding
+ *   `Conv3d(k = s = patch)`.
+ * - The last dimension at the exit (unpatchify) is **`(pt, ph, pw, c)`** — the order in which
+ *   upstream reads the output of `proj_out` with `reshape(…, pt, ph, pw, -1)` (the exit of
+ *   `transformer_wan.py`).
  *
- * どちらもトークン添字は `(f·H' + h)·W' + w`。MUST: unpatchify を patchify の逆順に「直さない」
- * （shape は合ったまま値だけが散る）。
+ * Both use the token index `(f·H' + h)·W' + w`. MUST: do not "fix" unpatchify into the reverse of
+ * patchify (the shapes still match and only the values scatter).
  *
- * 潜在はバッチ軸を持たない `[C,F,H,W]`（B = 1 — CFG は 2 回の forward。ADR 0118 決定 3）。
+ * The latents are `[C,F,H,W]` without a batch axis (B = 1 — CFG is two forwards. ADR 0118
+ * decision 3).
  */
 
-/** patch の刻み（`(pt, ph, pw)`）と潜在のチャネル数 `C`。 */
+/** The patch strides (`(pt, ph, pw)`) and the latent channel count `C`. */
 export type WanPatchGeometry = {
   readonly channels: number;
   readonly patchFrames: number;
@@ -26,7 +30,7 @@ export type WanPatchGeometry = {
   readonly patchWidth: number;
 };
 
-/** 潜在のトークン格子（`F' = F/pt`・`H' = H/ph`・`W' = W/pw`）とトークン長 `S = F'·H'·W'`。 */
+/** The latent token grid (`F' = F/pt`, `H' = H/ph`, `W' = W/pw`) and the token length `S = F'·H'·W'`. */
 export type WanTokenGrid = {
   readonly frames: number;
   readonly rows: number;
@@ -34,11 +38,11 @@ export type WanTokenGrid = {
   readonly count: number;
 };
 
-/** 1 トークンの幅（`C·pt·ph·pw` — 入口と出口で同じ幅・並びだけが違う）。 */
+/** The width of one token (`C·pt·ph·pw` — the same width at entry and exit; only the order differs). */
 export const wanTokenWidth = (geometry: WanPatchGeometry): number =>
   geometry.channels * geometry.patchFrames * geometry.patchHeight * geometry.patchWidth;
 
-/** `[C,F,H,W]` の潜在形を検査して `(F, H, W)` を返す。 */
+/** Checks a `[C,F,H,W]` latent shape and returns `(F, H, W)`. */
 const latentExtents = (
   latentShape: readonly number[],
   geometry: WanPatchGeometry,
@@ -67,7 +71,7 @@ const latentExtents = (
   return [frames, height, width];
 };
 
-/** 潜在 `[C,F,H,W]` のトークン格子。 */
+/** The token grid of latents `[C,F,H,W]`. */
 export const wanTokenGrid = (
   latentShape: readonly number[],
   geometry: WanPatchGeometry,
@@ -82,10 +86,10 @@ export const wanTokenGrid = (
 };
 
 /**
- * 潜在 `[C,F,H,W]` → `tokens [1,S,C·pt·ph·pw]`（最終次元は `(c, pt, ph, pw)`）。
+ * Latents `[C,F,H,W]` → `tokens [1,S,C·pt·ph·pw]` (last dimension `(c, pt, ph, pw)`).
  *
- * 添字: `tokens[token·width + c·V + (it·ph + ih)·pw + iw] = latents[c][f·pt+it][h·ph+ih][w·pw+iw]`
- * （`V = pt·ph·pw`・`token = (f·H' + h)·W' + w`）。
+ * Index: `tokens[token·width + c·V + (it·ph + ih)·pw + iw] = latents[c][f·pt+it][h·ph+ih][w·pw+iw]`
+ * (`V = pt·ph·pw`, `token = (f·H' + h)·W' + w`).
  */
 export const patchifyLatents = (
   latents: Float32Array<ArrayBuffer>,
@@ -129,10 +133,10 @@ export const patchifyLatents = (
 };
 
 /**
- * `tokens [1,S,pt·ph·pw·C]` → 潜在 `[C,F,H,W]`（最終次元は `(pt, ph, pw, c)`）。
+ * `tokens [1,S,pt·ph·pw·C]` → latents `[C,F,H,W]` (last dimension `(pt, ph, pw, c)`).
  *
- * 添字: `latents[c][f·pt+it][h·ph+ih][w·pw+iw] = tokens[token·width + ((it·ph + ih)·pw + iw)·C + c]`。
- * MUST: patchify の逆順ではない（モジュール doc）。
+ * Index: `latents[c][f·pt+it][h·ph+ih][w·pw+iw] = tokens[token·width + ((it·ph + ih)·pw + iw)·C + c]`.
+ * MUST: this is not the reverse of patchify (module doc).
  */
 export const unpatchifyTokens = (
   tokens: Float32Array<ArrayBuffer>,

@@ -1,25 +1,26 @@
 /**
- * Gemma 系トークナイザ（SPM-BPE + byte_fallback）— 文字列 ⇄ id 列。
+ * The Gemma tokenizer (SPM-BPE + byte_fallback) — string ⇄ id sequence.
  *
- * 正本の経路（両資産で同一構成 — ADR 0084 Context 2）:
- *   AddedVocabulary（追加語彙を leftmost-longest で切り出す・正規化の**前**）
- *   → Replace(" " → "▁") → Split(" ", MergedWithPrevious) → BPE（byte_fallback）
- *   → TemplateProcessing（gemma4 = 素通し / EmbeddingGemma = `<bos>` … `<eos>`）
- * 復号は Sequence[Replace("▁" → " "), ByteFallback, Fuse]。
+ * The reference pipeline (the same configuration for both assets — ADR 0084 Context 2):
+ *   AddedVocabulary (cuts out the added vocabulary leftmost-longest, **before** normalization)
+ *   → Replace(" " → "▁") → Split(" ", MergedWithPrevious) → BPE (byte_fallback)
+ *   → TemplateProcessing (gemma4 = pass-through / EmbeddingGemma = `<bos>` … `<eos>`)
+ * Decoding is Sequence[Replace("▁" → " "), ByteFallback, Fuse].
  *
- * MUST: **pre_tokenizer は正規化後に 1 度も切らない**。normalizer が U+0020 を 1 つ残らず
- * U+2581 へ置換した後の文字列に対して `Split(" ")` が走るので、区切りは原理的に見つからない
- * （実測でも `pre_tokenize_str("hello▁world▁foo")` は 1 断片）。**断片は入力全長**になり、
- * 日本語だけでなく英文でも BPE の探索が長くなる — だから `bpeEncode` は merge queue で
- * 書いてある（ADR 0084 決定 3）。走査そのものを写さないのは、写しても常に恒等だから。
+ * MUST: **the pre_tokenizer never splits after normalization**. `Split(" ")` runs on the string
+ * after the normalizer has replaced every U+0020 with U+2581, so by construction it finds no
+ * separator (measured as well: `pre_tokenize_str("hello▁world▁foo")` is one piece). **The piece is
+ * the whole input**, so the BPE search gets long for English as well as Japanese — which is why
+ * `bpeEncode` is written with a merge queue (ADR 0084 decision 3). The scan itself is not ported
+ * because it would always be the identity.
  *
- * MUST: {@link GemmaTokenizer.encode} は `<bos>` を付けない（gemma4 の post_processor の
- * 実測と一致）。付けるのは chat 関数だけ — 分けないと chat 導入時に double-BOS になる
- * （ADR 0084 決定 5）。EmbeddingGemma のように資産が付与を宣言している場合は
- * {@link GemmaTokenizer.encodeWithSpecialTokens} が付ける。
+ * MUST: {@link GemmaTokenizer.encode} does not add `<bos>` (matching the measured gemma4
+ * post_processor). Only the chat function adds it — without that split, chat would produce a double
+ * BOS (ADR 0084 decision 5). When the asset declares that they are added, as EmbeddingGemma does,
+ * {@link GemmaTokenizer.encodeWithSpecialTokens} adds them.
  *
- * MUST: **モジュールスコープで表を組み立てない**（横断不変条件「全モジュール副作用ゼロ」）。
- * 追加語彙の並びも復号の口も、インスタンス 1 個につき 1 回だけ組む。
+ * MUST: **do not build tables at module scope** (the cross-cutting invariant "zero module side
+ * effects"). Both the added-vocabulary order and the decoding hooks are built once per instance.
  */
 
 import { type AddedTokenMatcher, createAddedTokenMatcher } from "../../text/added-tokens.ts";
@@ -32,14 +33,15 @@ import {
 } from "../../text/detokenizer.ts";
 import { type GemmaTokenizerAssets, METASPACE } from "./asset.ts";
 
-/** 復号の振る舞い。 */
+/** Decoding behaviour. */
 export type GemmaDecodeOptions = {
   /**
-   * 特殊トークン（`<bos>` / `<eos>` / `<|turn>` …）を出力から落とすか。既定 `true`
-   * （正本 `Tokenizer.decode` の既定と同じ・生成の出力をそのまま人へ見せる形）。
+   * Whether to drop special tokens (`<bos>` / `<eos>` / `<|turn>` …) from the output. Default
+   * `true` (the same as the reference `Tokenizer.decode`'s default; the form that shows generated
+   * output to people as is).
    *
-   * NOTE: 落としたトークンは **byte run を切らない** — 正本も skip を綴り列を作る段で
-   * 行うので、挟まれた byte 列は隣接したものとして 1 文字に畳まれる。
+   * NOTE: a dropped token **does not break a byte run** — the reference also skips while building
+   * the spelling sequence, so bytes on both sides are folded into one character as if adjacent.
    */
   readonly skipSpecialTokens?: boolean;
 };
@@ -57,22 +59,26 @@ export class GemmaTokenizer {
     );
   }
 
-  /** 資産が宣言している post_processor の形。 */
+  /** The post_processor form the asset declares. */
   get postProcessor(): GemmaTokenizerAssets["spec"]["postProcessor"] {
     return this.#assets.spec.postProcessor;
   }
 
-  /** 資産が宣言している `<eos>` の id（停止条件の起点 — ADR 0083 決定 8）。 */
+  /**
+   * The id of `<eos>` the asset declares (the basis of the stop condition — ADR 0083 decision 8).
+   */
   get eosId(): number {
     return this.#assets.eosId;
   }
 
   /**
-   * この資産が生成しうる**最大の token id**（id 空間の相互照合 — ADR 0085 決定 5）。
+   * The **largest token id** this asset can produce (cross-check of the id spaces — ADR 0085
+   * decision 5).
    *
-   * 追加語彙は語彙表の**外**へ採番されうる（EmbeddingGemma の `<image_soft_token>` は
-   * id 262144 / 語彙 262,144 行）ので、語彙行数だけでは上限にならない。ここが主 embedding の
-   * 行数を超える資産の組み合わせは、OOB ではなく**別 token の有効な行**を引く。
+   * Added vocabulary may be numbered **outside** the vocabulary table (EmbeddingGemma's
+   * `<image_soft_token>` is id 262144 / 262,144 vocabulary rows), so the vocabulary row count alone
+   * is not the limit. An asset combination where this exceeds the main embedding's row count reads
+   * not out of bounds but **a valid row of another token**.
    */
   get maxTokenId(): number {
     let max = this.#assets.model.pairStride - 1;
@@ -81,24 +87,27 @@ export class GemmaTokenizer {
   }
 
   /**
-   * 追加語彙の綴り → id（無ければ `undefined`）。
+   * Added-vocabulary spelling → id (`undefined` when absent).
    *
-   * chat の綴り（`<|turn>` / `<turn|>`）も停止 token（`<|tool_response>`）も**同じ資産**から
-   * 引くための口である（ADR 0084 決定 5 の「同一 digest set」— 別々の場所から拾うと片方だけ
-   * 古くなる）。欠けている綴りを名指しで落とすのは呼び手の責務なので、ここは `undefined` を
-   * 返すだけにする（この面自体は「知らない綴り」を異常と見なせない）。
+   * The entry that reads both the chat spellings (`<|turn>` / `<turn|>`) and the stop tokens
+   * (`<|tool_response>`) from **the same asset** (ADR 0084 decision 5's "same digest set" — picking
+   * them up from separate places lets one go stale). Failing on a missing spelling by name is the
+   * caller's responsibility, so this only returns `undefined` (this surface by itself cannot treat
+   * "an unknown spelling" as an error).
    */
   addedTokenId(token: string): number | undefined {
     return this.#assets.addedTokens.get(token);
   }
 
   /**
-   * `tokenizer.encode(text, add_special_tokens=False)` と同じ id 列。
+   * The same id sequence as `tokenizer.encode(text, add_special_tokens=False)`.
    *
-   * post_processor は通さない — `<bos>` の所有者は chat 関数（ADR 0084 決定 5）。
+   * The post_processor is not applied — the owner of `<bos>` is the chat function (ADR 0084
+   * decision 5).
    *
-   * 対にならないサロゲートは `ModelInputError`（呼び手が本文を直せば解消する — ADR 0107 決定 2）。
-   * 受けるのは呼び手の本文（chat の描画を含む）だけなので、入口のここで送出型を上げる。
+   * An unpaired surrogate is a `ModelInputError` (fixed when the caller fixes the text — ADR 0107
+   * decision 2). Only the caller's text (including the rendered chat) comes in, so the thrown type
+   * is raised here at the entry.
    */
   encode(text: string): number[] {
     assertEncodableText(text, "Gemma の本文");
@@ -108,9 +117,10 @@ export class GemmaTokenizer {
         ids.push(this.#assets.addedTokens.get(chunk.text) as number);
         continue;
       }
-      // normalizer は `Replace(" " → "▁")` 1 本きり（Unicode 分類にも NFC にも触らない）。
-      // 1 要素ずつ積む — 本文は丸ごと 1 断片なので、引数展開（`push(...)`）は約 13 万 token で
-      // V8 の引数上限の RangeError になり、呼び手の容量判定へ届く前に落ちる。
+      // The normalizer is a single `Replace(" " → "▁")` (it touches neither Unicode categories nor
+      // NFC). Push one element at a time — the whole text is one piece, so spreading arguments
+      // (`push(...)`) hits V8's argument limit as a RangeError at about 130,000 tokens, failing
+      // before the caller's capacity check is reached.
       for (const id of bpeEncode(this.#assets.model, chunk.text.replaceAll(" ", METASPACE))) {
         ids.push(id);
       }
@@ -119,10 +129,10 @@ export class GemmaTokenizer {
   }
 
   /**
-   * `tokenizer.encode(text, add_special_tokens=True)` と同じ id 列。
+   * The same id sequence as `tokenizer.encode(text, add_special_tokens=True)`.
    *
-   * 足すものは資産の宣言が決める（gemma4 は何も足さない / EmbeddingGemma は
-   * `<bos>` … `<eos>`）。呼び手が家族を場合分けしないための口。
+   * What is added is decided by the asset's declaration (nothing for gemma4 / `<bos>` … `<eos>` for
+   * EmbeddingGemma). The entry that spares callers from branching on the family.
    */
   encodeWithSpecialTokens(text: string): number[] {
     const ids = this.encode(text);
@@ -130,13 +140,17 @@ export class GemmaTokenizer {
     return [this.#assets.bosId, ...ids, this.#assets.eosId];
   }
 
-  /** `tokenizer.decode(ids, …)` と同じ文字列（逐次復号と同じ状態機械を通る）。 */
+  /**
+   * The same string as `tokenizer.decode(ids, …)` (goes through the same state machine as streaming
+   * decoding).
+   */
   decode(ids: Iterable<number>, options: GemmaDecodeOptions = {}): string {
     return detokenize(this.#decoderSource(options), ids);
   }
 
   /**
-   * `push(id) → 確定した文字列` の逐次復号器を組む（ADR 0083 決定 2 の 1 反復 = 1 push）。
+   * Builds a streaming decoder `push(id) → settled string` (one iteration of ADR 0083 decision 2 =
+   * one push).
    */
   createDetokenizer(options: GemmaDecodeOptions = {}): StreamingDetokenizer {
     return new StreamingDetokenizer(this.#decoderSource(options));
@@ -149,14 +163,17 @@ export class GemmaTokenizer {
       byteOf: (id) => model.byteOf.get(id),
       textOf: (id) => {
         if (skipSpecialTokens && specialIds.has(id)) return undefined;
-        // 追加語彙が先（正本の `id_to_token` と同じ順 — 語彙表の外の id はこちらにしかない）。
+        // Added vocabulary first (the same order as the reference's `id_to_token` — ids outside the
+        // vocabulary table exist only there).
         const token = this.#tokenOfAdded.get(id) ?? model.tokenOf.get(id);
         if (token === undefined) {
-          // 正本は未知 id を黙って読み飛ばすが、こちらは落とす（横断不変条件の fail loudly）。
+          // The reference silently skips unknown ids; this fails (the cross-cutting invariant: fail
+          // loudly).
           throw new Error(`復号: id ${id} が語彙にも追加語彙にも無い`);
         }
-        // デコーダ鎖の 1 段目 `Replace("▁" → " ")`。byte_fallback の綴りは metaspace を
-        // 含まないので、この置換と byte 判定の順序は結果を変えない。
+        // The first step of the decoder chain, `Replace("▁" → " ")`. byte_fallback spellings
+        // contain no metaspace, so the order of this replacement and the byte check does not change
+        // the result.
         return token.replaceAll(METASPACE, " ");
       },
     };

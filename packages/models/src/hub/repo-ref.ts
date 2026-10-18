@@ -1,38 +1,41 @@
 /**
- * `fromPretrained` の第 1 引数（文字列 | {@link HubRepoRef} | {@link DistributionSource}）を
- * hub へ渡す形へ正規化する（**パイプライン非依存の共通処理** — 8 家族の `fromPretrained` が
- * 同じ形で使う）。
+ * Normalises the first argument of `fromPretrained` (string | {@link HubRepoRef} |
+ * {@link DistributionSource}) into the shape passed to hub (**pipeline-independent shared
+ * processing** — every family's `fromPretrained` uses it the same way).
  *
- * MUST: barrel には出さない。これは引数の綴りを揃える内部機構で、利用者が触る面ではない。
+ * MUST: not exported from the barrel. It is an internal mechanism that keeps the argument spelling
+ * uniform, not a surface the user touches.
  *
- * ## MUST: 取得元に既定を持たない（ADR 0073 決定 2 の「ref を optional 化」は 0.5.0 で撤回）
+ * ## MUST: no default for the source (ADR 0073 decision 2, "make ref optional", was withdrawn in 0.5.0)
  *
- * 既定があると「どのリポから取っているか」を 1 文字も綴らないコードが書け、パッケージ版を
- * 上げた瞬間に取得先が黙って動く（pin 定数の更新はパッチ公開でも起きる）。取得元は呼び出し側の
- * 決定として**必ず綴らせる**。TS では引数必須なので型検査が落ち、型を持たない JS からの
- * 引数なし呼び出しは {@link toRepoRef} が記述例つきで落とす — `undefined` を hub まで滑らせて
- * 「repo が undefined の URL を叩いた」という原因の遠い失敗にしない。
+ * A default lets code be written that never spells out "which repo it fetches from", and the fetch
+ * target moves silently the moment the package version is bumped (pin constants are updated even in
+ * patch releases). The source is the caller's decision and **must always be spelled out**. In TS the
+ * argument is required, so type checking fails; an argument-less call from untyped JS is rejected by
+ * {@link toRepoRef} with an example — `undefined` is not allowed to slide down to hub and become a
+ * failure far from its cause ("hit a URL whose repo is undefined").
  */
 
 import { type DistributionSource, type HubRepoRef, isDistributionSource } from "@karume/hub";
 
 /**
- * HF の repo 名 1 セグメントの許可文字（hub の `manifest.ts` の越境参照検査と**同じ規則** —
- * どちらも「取得層が URL へ綴り込む生文字列」なので、綴りの受理集合は 1 つに揃える）。
+ * Characters allowed in one segment of an HF repo name (**the same rule** as the cross-repo
+ * reference check in hub's `manifest.ts` — both are "raw strings the fetch layer spells into a
+ * URL", so there is one accepted set of spellings).
  */
 const REPO_SEGMENT_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 
 /**
- * `repo` が HF の `owner/name` の綴りであることを見る（**取得層より前**）。
+ * Checks that `repo` is spelled as an HF `owner/name` (**before the fetch layer**).
  *
- * ローカルのディレクトリパスを渡した呼び出しは、この門が無いと**そのまま HF へ飛ぶ**
- * （`./models/foo` が URL の一部として綴り込まれ、返るのは 401 / 404 — 「取得先が存在しない」
- * という原因の遠い診断になる）。パスにしか見えない綴り（先頭 `./` `../` `/`・末尾 `/`・
- * スラッシュ 2 個以上・空セグメント・許可外の文字）はここで落とす。
+ * Without this check a call that passes a local directory path **goes straight to HF**
+ * (`./models/foo` is spelled into the URL and what comes back is 401 / 404 — a diagnosis far from
+ * the cause, "the fetch target does not exist"). Spellings that can only be paths (leading `./`
+ * `../` `/`, trailing `/`, two or more slashes, empty segments, disallowed characters) fail here.
  *
- * NOTE: `models/karume-gemma4` のような**合法な `owner/name` に見えるパス**は救えない
- * （HF の repo 名として完全に正しい綴りで、区別できる情報がこの引数の中に無い）。ここが見るのは
- * 綴りだけで、「実在するか」は取得層の仕事である。
+ * NOTE: a **path that looks like a legal `owner/name`**, such as `models/karume-gemma4`, cannot be
+ * caught (it is a perfectly valid HF repo name, and nothing in this argument tells them apart).
+ * This check looks only at the spelling; "does it exist" is the fetch layer's job.
  */
 const assertRepoSpelling = (repo: string, where: string): void => {
   const segments = repo.split("/");
@@ -45,18 +48,20 @@ const assertRepoSpelling = (repo: string, where: string): void => {
 };
 
 /**
- * `ref` を {@link HubRepoRef} にする。文字列は `{ repo }` と読む（= `main` 追従）。
+ * Turns `ref` into a {@link HubRepoRef}. A string reads as `{ repo }` (= tracks `main`).
  *
- * 綴りは HF の `owner/name` であることまで見る（{@link assertRepoSpelling}）— ローカルの
- * ディレクトリパスを渡した呼び出しを、URL へ綴り込む前に落とす。
+ * The spelling is checked down to being an HF `owner/name` ({@link assertRepoSpelling}) — a call
+ * that passes a local directory path fails before it is spelled into a URL.
  *
- * `undefined` を受ける型なのは**呼び出し側の型を緩めるためではない** — `fromPretrained` の
- * `ref` は必須で、`undefined` が来るのは型検査の外（JS）からだけ。ここで落とすべき値を型から
- * 消してしまうと、この門自体を素直に叩けなくなる。
+ * The type accepts `undefined` **not to loosen the caller's type** — `ref` of `fromPretrained` is
+ * required, and `undefined` arrives only from outside type checking (JS). Removing from the type
+ * the very value this function must reject would make the check itself impossible to exercise
+ * plainly.
  *
- * @param where 診断の主語（`"AnimaPipeline.fromPretrained"`）。
- * @param sourcesExample このファミリの対応表を引く綴り（`ANIMA_SOURCES["anima"]` — ADR 0092）。
- *   公開配布リポを持たないファミリでは省く（存在しない識別子を案内しない）。
+ * @param where Subject of the diagnostic (`"AnimaPipeline.fromPretrained"`).
+ * @param sourcesExample The spelling that looks up this family's source table
+ *   (`ANIMA_SOURCES["anima"]` — ADR 0092). Omitted for families without a public distribution repo
+ *   (so no non-existent identifier is suggested).
  */
 export const toRepoRef = (
   ref: string | HubRepoRef | undefined,
@@ -78,13 +83,15 @@ export const toRepoRef = (
 };
 
 /**
- * `fromPretrained` の第 1 引数を `loadManifest` の第 1 引数へ写す。取得元ハンドル
- * （{@link DistributionSource} — `localDirectory` / `denoDirectory` が返す不透明な値）は
- * **そのまま通す**: HF の repo ではないので `owner/name` の綴りを要求する {@link toRepoRef} の
- * 門を通す意味が無い（ローカルの配布形が「repo が必須」で落ちる）。
+ * Maps the first argument of `fromPretrained` onto the first argument of `loadManifest`. A source
+ * handle ({@link DistributionSource} — the opaque value returned by `localDirectory` /
+ * `denoDirectory` / `nodeDirectory`) **passes through as is**: it is not an HF repo, so running it
+ * through the {@link toRepoRef} check that requires an `owner/name` spelling is pointless (a local
+ * distribution would fail with "repo is required").
  *
- * MUST: 判別は hub の {@link isDistributionSource} に委ねる — 構造判別（`"repo" in ref`）や
- * ブランド欄の検査をこちらに書くと、`HubRepoRef` の綴り間違いが取得元として通る。
+ * MUST: leave the discrimination to hub's {@link isDistributionSource} — writing a structural test
+ * (`"repo" in ref`) or a brand-field check here would let a misspelled `HubRepoRef` pass as a
+ * source.
  */
 export const toManifestSource = (
   ref: string | HubRepoRef | DistributionSource | undefined,

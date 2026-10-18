@@ -1,28 +1,31 @@
 /**
- * 構築の中断を段の境目で観測する道具（**パイプライン非依存の共通処理**）。
+ * A tool that observes an abort of construction at stage boundaries (**pipeline-independent shared
+ * processing**).
  *
- * MUST: barrel には出さない。中断のノブは各パイプラインの `options.signal` で、これはその
- * 検査の置き方を 1 本に揃えるための内部機構。
+ * MUST: not exported from the barrel. The abort knob is each pipeline's `options.signal`; this is an
+ * internal mechanism that keeps the placement of that check uniform.
  */
 
 /**
- * 段の境目で中断を**観測できる形**に検査する（イベントループへ 1 度譲ってから `throwIfAborted`）。
+ * Checks for abort at a stage boundary **in a form that can observe it** (yields to the event loop
+ * once, then `throwIfAborted`).
  *
- * MUST: 譲り先は**マクロタスク**でなければならない。`abort()` の届き方はクリック・timer・
- * worker メッセージなどの**タスク**配送なので、`await Promise.resolve()`（マイクロタスク）
- * では現在のタスクの中に留まったままで、まだ実行されていない中断タスクを観測できない。
- * 譲らない検査は「呼ばれた時点で既に中断済み」しか拾えない死文になる。
+ * MUST: the yield goes to a **macrotask**. `abort()` arrives through **task** delivery — clicks,
+ * timers, worker messages — so `await Promise.resolve()` (a microtask) stays inside the current task
+ * and cannot observe an abort task that has not run yet. A check without the yield is dead text that
+ * only catches "already aborted at the time of the call".
  *
- * NOTE: 譲り先は **`setTimeout(0)`** に固定する（`MessageChannel` ではない）。ブラウザの非表示タブでは
- * timer throttling がそのまま生成速度になる（1 token ごとに 1 timer）が、`MessageChannel` に
- * 替えると **timer で届く中断（`setTimeout(() => abort())` / `AbortSignal.timeout`）との順序が
- * 失われる** — 先に仕掛けた timer より message タスクが先に配送されうるので、「実行開始後に
- * 届いた中断は最初の段境界で効く」（`anima_pipeline_test` / `irodori_pipeline_test` の門）が
- * 負荷次第で破れる（2026-09-05 フル verify で実測）。中断の確実な観測を速度より優先する。
- * 非表示タブの throttling は limitations の「ブラウザ: 非表示タブでは生成が timer throttling の
- * 刻みに釘付けになる」節に記録してある。
+ * NOTE: the yield is fixed to **`setTimeout(0)`** (not `MessageChannel`). In a hidden browser tab,
+ * timer throttling becomes the generation speed as is (one timer per token), but switching to
+ * `MessageChannel` **loses the ordering with aborts delivered by timers
+ * (`setTimeout(() => abort())` / `AbortSignal.timeout`)** — a message task can be delivered before a
+ * timer armed earlier, so "an abort that arrives after execution starts takes effect at the first
+ * stage boundary" (the check in `anima_pipeline_test` / `irodori_pipeline_test`) breaks depending on
+ * load (measured in the full verify of 2026-09-05). Reliable observation of aborts takes priority
+ * over speed. The hidden-tab throttling is recorded in the limitations section "Browser: in a hidden
+ * tab, generation is pinned to the timer-throttling tick".
  *
- * `signal` 未指定なら譲らない（購読していない呼び出しにタスク 1 往復のコストを乗せない）。
+ * Without a `signal` it does not yield (calls that do not subscribe do not pay a task round trip).
  */
 export const settleAbort = async (signal: AbortSignal | undefined): Promise<void> => {
   if (signal === undefined) return;

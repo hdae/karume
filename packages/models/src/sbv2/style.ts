@@ -1,35 +1,38 @@
 /**
- * スタイルベクトルと話者埋め込みの**行引き**（配布形の 2 つの表 → front / voice の入力）。
+ * **Row lookup** of style vectors and speaker embeddings (the distribution's 2 tables → inputs of
+ * front / voice).
  *
- * 配布形は「表を配って実行時に行を引く」形で、名前 → 行番号の対応は `pipelineConfig` の
- * `styles` / `speakers` が持つ（ADR 0038 §2 / `tools/export-recipes/sbv2/distribution.py` —
- * 表 2 本と pipelineConfig の 3 つで 1 組）。
+ * The distribution takes the form "ship the tables and pick a row at run time", and the name → row
+ * number mapping is held by `pipelineConfig`'s `styles` / `speakers` (ADR 0038 §2 /
+ * `tools/export-recipes/sbv2/distribution.py` — the 2 tables and pipelineConfig form one set of 3).
  *
- * ## MUST: 行がずれても shape は合う
+ * ## MUST: when rows shift, the shapes still match
  *
- * スタイル ID も話者 ID も**表の物理行そのもの**なので、ずれてもロードも実行も通り、
- * **別のスタイル・別の話者の声が出る**だけで沈黙する。行番号の妥当性（順列であること）は
- * `config.ts` が、表の行数・列数との突合は呼び出し側（`pipeline.ts` がグラフ入力の静的次元と
- * 突き合わせる）が受け持つ。
+ * Style IDs and speaker IDs are both **the physical rows of the table**, so a shift still loads and
+ * runs, and stays silent with only **the voice of a different style / different speaker** coming
+ * out. The validity of the row numbers (being a permutation) is owned by `config.ts`, and the
+ * comparison with the tables' row and column counts by the caller (`pipeline.ts` compares them
+ * with the static dimensions of the graph inputs).
  *
- * ## 参照実装との対応
+ * ## Correspondence with the reference implementation
  *
- * {@link styleVector} は `TTSModel.__get_style_vector` と同式（正本は
- * `tools/export-recipes/sbv2/demo.py` の `style_vector`）で、**平均スタイルは行 0** という SBV2 の
- * 規約に乗っている。`weight = 1` なら選んだ行そのもの、`0` なら平均行に縮退する。
+ * {@link styleVector} is the same formula as `TTSModel.__get_style_vector` (canonical:
+ * `style_vector` in `tools/export-recipes/sbv2/demo.py`) and relies on SBV2's convention that **the
+ * mean style is row 0**. `weight = 1` gives the selected row itself, `0` degenerates to the mean
+ * row.
  */
 
 import { parseSafetensors, type Tensor } from "@karume/runtime";
 import { Sbv2InputError } from "./errors.ts";
 
 /**
- * 配布形の safetensors に入っている表のテンソル名（`tools/export-recipes/sbv2/distribution.py` の
- * `SBV2_STYLE_KEY` / `SBV2_SPEAKER_KEY` と対）。
+ * Tensor names of the tables inside the distribution's safetensors (paired with `SBV2_STYLE_KEY` /
+ * `SBV2_SPEAKER_KEY` in `tools/export-recipes/sbv2/distribution.py`).
  */
 export const STYLE_TENSOR = "style_vectors";
 export const SPEAKER_TENSOR = "speaker_embeddings";
 
-/** 2 次元の f32 表（行 = スタイル / 話者、列 = 特徴）。 */
+/** A 2-D f32 table (rows = styles / speakers, columns = features). */
 export type Sbv2Table = {
   readonly data: Float32Array<ArrayBuffer>;
   readonly rows: number;
@@ -37,10 +40,10 @@ export type Sbv2Table = {
 };
 
 /**
- * 1 テンソルだけを持つ safetensors を `[rows, cols]` の f32 表として読む。
+ * Reads a safetensors file holding exactly one tensor as a `[rows, cols]` f32 table.
  *
- * 資産は外部境界なので、テンソル名・dtype・次元数を全て検査してから使う（壊れた表は
- * 「行を引けない」ではなく「別の行を引く」形で沈黙しうる）。
+ * Assets are an external boundary, so the tensor name, dtype and rank are all checked before use (a
+ * broken table can stay silent not as "cannot look up a row" but as "looks up a different row").
  */
 export const parseSbv2Table = (buffer: ArrayBuffer, name: string): Sbv2Table => {
   const file = parseSafetensors(buffer);
@@ -77,23 +80,26 @@ const assertRow = (
 };
 
 /**
- * `styleWeight` の受理集合（**有限の数**）を見る門。入力起因なので型は `Sbv2InputError`
- * （`errors.ts` の分類軸 — NaN / Inf は呼び手が値を直せば通る）。
+ * Check of the acceptance set of `styleWeight` (**a finite number**). It is input-caused, so the
+ * type is `Sbv2InputError` (the classification axis of `errors.ts` — NaN / Inf pass once the
+ * caller fixes the value).
  *
- * NOTE: `export` は**生成の入口**（`pipeline.ts` の `synthesizeSbv2`）が同じ集合で先に落とす
- * ため。表引きに入るのはテキスト層を抜けた後なので、ここだけに検査があると打ち間違いが
- * text_encoder を 1 run 払ってから落ちる。受理集合の所有者はこの 1 本で、入口は条件を写さずに
- * これを呼ぶ（両側に条件を書くと必ず割れる）。
+ * NOTE: it is `export`ed because **the generation entry** (`synthesizeSbv2` in `pipeline.ts`) fails
+ * early on the same set. The table lookup comes only after the text layer, so with the check only
+ * here a typo would fail after paying one text_encoder run. This is the one owner of the acceptance
+ * set, and the entry calls it without copying the condition (writing the condition on both sides is
+ * bound to split).
  */
 export const assertFiniteStyleWeight = (weight: number): void => {
   if (!Number.isFinite(weight)) throw new Sbv2InputError(`styleWeight ${weight} が有限の数でない`);
 };
 
 /**
- * スタイルベクトル `[1, cols]` を作る（`mean + (picked − mean) · weight`）。
+ * Builds the style vector `[1, cols]` (`mean + (picked − mean) · weight`).
  *
- * MUST: `mean` は**行 0**（SBV2 の規約 — `style_vectors.npy` の先頭行が平均スタイル）。
- * 平均を列ごとに計算し直す実装にすると、weight ≠ 1 のときだけ静かに別のベクトルになる。
+ * MUST: `mean` is **row 0** (SBV2's convention — the first row of `style_vectors.npy` is the mean
+ * style). An implementation that recomputes the mean per column silently produces a different
+ * vector, only when weight ≠ 1.
  */
 export const styleVector = (
   table: Float32Array<ArrayBuffer>,
@@ -114,8 +120,8 @@ export const styleVector = (
 };
 
 /**
- * 話者埋め込み `g` を `[1, cols, 1]` で作る。front / voice はどちらもこの形を入力に取る
- * （末尾の 1 は時間軸 — conv1d の broadcast 相手）。
+ * Builds the speaker embedding `g` as `[1, cols, 1]`. front and voice both take this shape as input
+ * (the trailing 1 is the time axis — the broadcast partner of conv1d).
  */
 export const speakerEmbedding = (
   table: Float32Array<ArrayBuffer>,

@@ -1,19 +1,20 @@
 /**
- * 生成した動画（`[3, F, H, W]`・値域 `[-1, 1]`）の 1 フレーム → インターリーブ RGBA 8bit。
+ * One frame of a generated video (`[3, F, H, W]`, range `[-1, 1]`) → interleaved 8-bit RGBA.
  *
- * 規則は anima の `imageToRgba` と同じ: `v = clamp(x/2 + 0.5, 0, 1)` と `v·255` を **f64** で計算し、
- * `Math.round`（0.5 は切り上げ）で 8bit にする（ADR 0118 決定 8 の「uint8 化は Anima の画像と同じ
- * 規則」）。家族をまたいで import しないので写しを持つ（片方の変更がもう片方の sha256 の行を黙って
- * 動かさないように）。
+ * The rule is the same as anima's `imageToRgba`: compute `v = clamp(x/2 + 0.5, 0, 1)` and `v·255` in
+ * **f64**, then convert to 8 bits with `Math.round` (0.5 rounds up) (ADR 0118 decision 8: "uint8
+ * conversion as for Anima's images"). Families do not import each other, so this keeps its own copy
+ * (so that a change to one does not silently move the other's sha256 rows).
  *
- * NOTE: 上流と 8bit で一致する規則ではない。diffusers の `numpy_to_pil` は f32 の
- * `(images * 255).round()`（numpy の偶数丸め）なので、8bit の境界の近傍で ±1 割れる（例 x =
- * −0.4941176176 は f32 で 64.5 → 64・ここでは f64 の 64.500004 → 65）。上流 Wan の既定は
- * `output_type="np"`（uint8 にしない）で、例が使う `export_to_video` は `astype(uint8)` の**切り捨て**。
- * 8bit の出力を上流と突き合わせるときは、この差を前提にする。
+ * NOTE: this rule does not match upstream at 8 bits. diffusers' `numpy_to_pil` is f32
+ * `(images * 255).round()` (numpy's round-half-to-even), so the two split by ±1 near an 8-bit
+ * boundary (e.g. x = −0.4941176176 is 64.5 → 64 in f32, and 64.500004 → 65 in f64 here). Upstream
+ * Wan's default is `output_type="np"` (no uint8 conversion), and the `export_to_video` its example
+ * uses **truncates** with `astype(uint8)`. Assume this difference when comparing 8-bit output with
+ * upstream.
  *
- * MUST: `[0,1]` 変換の**前**に clamp を移さない（負値が 0 に潰れてから +0.5 され、暗部が中間灰に
- * 張り付く）。
+ * MUST: do not move the clamp **before** the `[0,1]` conversion (negative values would collapse to 0
+ * and then get +0.5, pinning the shadows to mid-grey).
  */
 
 import type { GeneratedVideo } from "./pipeline.ts";
@@ -23,7 +24,8 @@ export const wanFrameToRgba = (
   frame: number,
 ): Uint8ClampedArray<ArrayBuffer> => {
   const { frames, width, height, data } = video;
-  // 寸法は長さの照合だけでは縛れない（幅 0.5 × 高さ 2 も長さは合う）— Anima の `imageToRgba` と同じ入口契約。
+  // A length check alone cannot pin the dimensions (width 0.5 × height 2 also has the right
+  // length) — the same entry contract as Anima's `imageToRgba`.
   if (![frames, width, height].every((dim) => Number.isInteger(dim) && dim > 0)) {
     throw new RangeError(`動画の寸法 ${frames} フレーム × ${width}×${height} が正の整数でない`);
   }
@@ -39,7 +41,7 @@ export const wanFrameToRgba = (
     const base = (channel * frames + frame) * plane;
     for (let index = 0; index < plane; index += 1) {
       const raw = data[base + index];
-      // MUST: 非有限値を黙って画素にしない（`Uint8ClampedArray` は NaN を 0 にする）。
+      // MUST: never turn a non-finite value into a pixel silently (`Uint8ClampedArray` makes NaN 0).
       if (!Number.isFinite(raw)) {
         throw new Error(
           `フレーム ${frame} の画素 (x=${index % width}, y=${Math.floor(index / width)}) の ` +

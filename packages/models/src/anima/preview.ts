@@ -1,44 +1,54 @@
 /**
- * 途中 latent → RGB プレビューの線形近似（VAE を通さない）。
+ * Linear approximation of an intermediate latent → RGB preview (without the VAE).
  *
- * `denoise-step` イベントの `copyLatents()` が返す latent を、チャネル方向の 1 次結合だけで
- * 色に起こす。VAE は DiT を解放した**後**にしかロードできない（VRAM の MUST — `pipeline.ts`
- * のモジュール doc）ので、step ごとの経過を絵で見せる手段はこの近似しかない。
+ * Turns the latent returned by `copyLatents()` of the `denoise-step` event into colour with a
+ * linear combination over channels only. The VAE can be loaded only **after** the DiT is released
+ * (a VRAM MUST — the module doc of `pipeline.ts`), so this approximation is the only way to show
+ * per-step progress as a picture.
  *
- * MUST: これは**厳密な decode ではない**。16 チャネルを 3 チャネルへ潰す線形射影なので、
- * 細部・質感・文字は再現しない（潰れた latent 解像度の 1/8 サムネイルとして見る）。生成結果の
- * 正しさをこの出力で判定しない — 出す絵の正本は `generate` の返り値である。
+ * MUST: this is **not an exact decode**. It is a linear projection that collapses 16 channels into
+ * 3, so detail, texture and text are not reproduced (view it as a thumbnail at the collapsed latent
+ * resolution, 1/8). Do not judge the correctness of the generated result from this output — the
+ * canonical picture is the return value of `generate`.
  */
 
 import { imageToRgba } from "./image.ts";
 
 /**
- * 16ch latent → RGB の線形近似係数（行 = latent のチャネル・列 = R,G,B）と定数項。
+ * Linear approximation coefficients of 16ch latent → RGB (row = latent channel, column = R,G,B) and
+ * the constant term.
  *
- * 出所: https://huggingface.co/spaces/KAD001/Wan2GP/blob/main/shared/RGB_factors.py の
- * `"qwen"` family（ComfyUI 系のプレビューアが同じ表を使う）。
+ * Source: the `"qwen"` family of
+ * https://huggingface.co/spaces/KAD001/Wan2GP/blob/main/shared/RGB_factors.py (ComfyUI-style
+ * previewers use the same table).
  *
- * MUST: `export` しない。これはプレビューの見え方を決めるだけの内部定数で、公開すると
- * 「消費側が自前で当てる」経路ができ、較正空間の取り違え（下記）が再び起こりうる。
+ * MUST: do not `export`. This is an internal constant that only decides how the preview looks;
+ * exposing it would create a "consumer applies it itself" path where the calibration-space mix-up
+ * (below) could happen again.
  *
- * ## 較正空間の実測（2026-08-24）
+ * ## Measurement of the calibration space (2026-08-24)
  *
- * この表が**どちらの latent 空間**で較正されているかの一次記録は見つからなかったので、実測で
- * 決めた。リグ = local の turbo 配布形（`models/karume-anima` の turbo / 既定 quant）・512×512・
- * seed 0・manifest 既定 steps（8）で 1 枚生成し、最終 step の latent を捕まえて
- * (A) 正規化 latent 直当て / (B) `denormalizeLatents` を通した逆正規化 latent 直当て の 2 通りを、
- * 生成画像を 8×8 box 平均で latent 解像度へ落とした参照と突き合わせた。
+ * No primary record of **which latent space** this table was calibrated in was found, so it was
+ * decided by measurement. Rig = the local turbo distribution (`models/karume-anima` turbo / default
+ * quant), 512×512, seed 0, the manifest's default steps (8): one image was generated, the last
+ * step's latent was captured, and two variants — (A) applied directly to the normalised latent /
+ * (B) applied directly to the denormalised latent passed through `denormalizeLatents` — were
+ * compared with a reference made by 8×8 box-averaging the generated image down to latent
+ * resolution.
  *
- * - Pearson 相関（clamp 前の線形出力）: A = R 0.9794 / G 0.9742 / B 0.9759 / 輝度 0.9771
- *   （平均 0.9767）、B = R 0.9798 / G 0.9743 / B 0.9730 / 輝度 0.9771（平均 0.9761）。
- *   **相関だけでは決まらない**（差 0.0006）— 逆正規化は latent のチャネルごとのアフィン変換で、
- *   射影後も「係数を重み付けし直した射影」にしかならず、相関はそこにほぼ不変だから。
- * - 決め手は**絶対値の合い方**: 参照との RMSE が A 0.0797 / B 0.3614、値域 `[0,1]` から
- *   飛び出して clamp で潰れる画素の割合が A 1.2% / B 51.7%。B は絵として白飛びして成立しない。
- *   よって**較正空間は正規化 latent**（A）。ComfyUI の慣行とも一致する。
- * - 同じ実測で**出力の値域規約**も決まった: 線形出力は `[0,1]` ではなく **VAE sample と同じ
- *   `[-1,1]`** に載る（`[0,1]` として扱うと RMSE 0.5454 / clamp 50.2% で半分が潰れる）。
- *   だから最終画像とまったく同じ postprocess（{@link imageToRgba}）を通す。
+ * - Pearson correlation (linear output before clamping): A = R 0.9794 / G 0.9742 / B 0.9759 /
+ *   luminance 0.9771 (mean 0.9767), B = R 0.9798 / G 0.9743 / B 0.9730 / luminance 0.9771 (mean
+ *   0.9761). **Correlation alone does not decide** (difference 0.0006) — denormalisation is a
+ *   per-channel affine transform of the latent, so after projection it is only "a projection with
+ *   re-weighted coefficients", to which correlation is nearly invariant.
+ * - The deciding factor is **how well the absolute values fit**: RMSE against the reference is A
+ *   0.0797 / B 0.3614, and the share of pixels that leave the range `[0,1]` and are crushed by the
+ *   clamp is A 1.2% / B 51.7%. B blows out to white and does not work as a picture. So **the
+ *   calibration space is the normalised latent** (A), which also matches ComfyUI practice.
+ * - The same measurement also fixed **the range convention of the output**: the linear output lies
+ *   not in `[0,1]` but in **`[-1,1]`, the same as the VAE sample** (treated as `[0,1]`, RMSE 0.5454
+ *   / clamp 50.2% — half is crushed). So it goes through exactly the same postprocess as the final
+ *   image ({@link imageToRgba}).
  */
 const LATENT_RGB_FACTORS: readonly (readonly [number, number, number])[] = [
   [-0.1299, -0.1692, 0.2932],
@@ -59,19 +69,22 @@ const LATENT_RGB_FACTORS: readonly (readonly [number, number, number])[] = [
   [0.1984, 0.0913, 0.1861],
 ];
 
-/** {@link LATENT_RGB_FACTORS} と対の定数項（`latent_rgb_factors_bias`）。 */
+/** Constant term paired with {@link LATENT_RGB_FACTORS} (`latent_rgb_factors_bias`). */
 const LATENT_RGB_BIAS: readonly [number, number, number] = [-0.1835, -0.0868, -0.336];
 
 /**
- * 途中 latent 1 枚を RGBA プレビューへ近似する。返る画像は **latent 解像度**（元画像の 1/8）。
+ * Approximates one intermediate latent as an RGBA preview. The returned image is at **latent
+ * resolution** (1/8 of the original image).
  *
- * MUST: 渡すのは `denoise-step` の `copyLatents()` の返り値**そのまま**（= 正規化 latent）で、
- * `denormalizeLatents` に通してはならない。係数は正規化空間で較正されている（モジュール内の
- * 実測記録）ので、逆正規化した値を渡すと白飛びした別物になる。
+ * MUST: pass the return value of `denoise-step`'s `copyLatents()` **as is** (= the normalised
+ * latent); do not pass it through `denormalizeLatents`. The coefficients are calibrated in the
+ * normalised space (the measurement record in this module), so passing denormalised values gives a
+ * blown-out different picture.
  *
- * MUST: **B=1 前提**を入口で検査する。チャネルごとの区間を `height × width` で割り出して
- * いるので、B>1 の `[B,C,H,W]` を渡すと 1 枚目の C 面が 2 枚目まで食い込んだ**沈黙誤値**に
- * なる（長さは合っているので黙って通る）。`denormalizeLatents` と同じ流儀。
+ * MUST: check the **B=1 assumption** at the entry. The per-channel range is derived from
+ * `height × width`, so passing a B>1 `[B,C,H,W]` makes the first image's C planes bite into the
+ * second — **a silent wrong value** (the length matches, so it passes silently). The same style as
+ * `denormalizeLatents`.
  */
 export const approximatePreview = (
   latents: Float32Array<ArrayBufferLike>,
@@ -99,8 +112,9 @@ export const approximatePreview = (
   }
   const [, channels, height, width] = shape;
   const plane = height * width;
-  // planar `[3,H,W]`・値域 [-1,1] に組んでから最終画像と同じ postprocess へ渡す（clamp と
-  // 8bit 量子化と非有限値の門を 1 本に保つ — 2 経路に分けると規約が独立に動く）。
+  // Build planar `[3,H,W]` in range [-1,1], then pass it to the same postprocess as the final image
+  // (keeps the clamp, 8-bit quantization and the non-finite check in one place — two paths would
+  // let the conventions move independently).
   const image = new Float32Array(plane * 3);
   for (let channel = 0; channel < 3; channel += 1) {
     const bias = LATENT_RGB_BIAS[channel];

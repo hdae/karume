@@ -1,41 +1,51 @@
 /**
- * 追加語彙（特殊トークン）の切り出し。
+ * Cutting out the added vocabulary (special tokens).
  *
- * **ファミリ非依存**（`tokenizers` の `AddedVocabulary` はモデル種別に依らず正規化の手前に
- * 挟まる）なので `src/text/` に置く。切り出された断片は正規化も pre-token 化も通さず id を
- * 直接出す、という契約もモデル種別に依らない。
+ * It is **family-independent** (`AddedVocabulary` of `tokenizers` sits before normalization
+ * regardless of the model kind), so it lives in `src/text/`. The contract that cut-out pieces emit
+ * their id directly, without normalization or pre-tokenization, does not depend on the model kind
+ * either.
  */
 
-/** 切り出しの 1 片（`added` なら追加語彙そのもの）。 */
+/** One cut-out part (the added vocabulary entry itself when `added`). */
 type AddedTokenChunk = { text: string; added: boolean };
 
-/** 追加語彙の照合索引（tokenizer の構築時に 1 回だけ組み、encode のたびに使い回す）。 */
+/**
+ * Matching index of the added vocabulary (built once when the tokenizer is constructed, reused for
+ * every encode).
+ */
 export type AddedTokenMatcher = {
-  /** 追加語彙を leftmost-longest で切り出す（{@link createAddedTokenMatcher} の規則）。 */
+  /**
+   * Cuts out the added vocabulary leftmost-longest (the rule of {@link createAddedTokenMatcher}).
+   */
   split(text: string): AddedTokenChunk[];
 };
 
-/** 索引の節（UTF-16 単位 1 つぶんの遷移と、ここで終わる候補の有無）。 */
+/** A node of the index (transitions for one UTF-16 unit, and whether a candidate ends here). */
 type TrieNode = { readonly next: Map<string, TrieNode>; terminal: boolean };
 
 /**
- * 追加語彙の照合索引を組む。規則は leftmost-longest（正本の `AddedVocabulary` = AhoCorasick の
- * LeftmostLongest と同じ）: 位置が同じなら長い方、位置が違えば左が勝つ。
+ * Builds the matching index of the added vocabulary. The rule is leftmost-longest (the same as the
+ * source of truth's `AddedVocabulary` = AhoCorasick's LeftmostLongest): at the same position the
+ * longer one wins; at different positions the left one wins.
  *
- * MUST: 長い順に並べて先頭一致で採るだけでは足りない — **各位置で全候補中の最長**を採る。
- * 索引は文字単位の trie で、各位置から辿りながら最長の終端を記録する（辿る長さは最長の候補長で
- * 頭打ち）。先頭 1 文字で束ねるだけだと、全候補が共通接頭辞（`<unused0>` 等の `<`）を持つ
- * 資産で本文の `<` ごとに全候補を走査し、文字数 × 語彙数になる（EmbeddingGemma は 6,415 本）。
+ * MUST: sorting longest-first and taking the first prefix match is not enough — take **the longest
+ * of all candidates at each position**. The index is a per-character trie, walked from each
+ * position while recording the longest terminal (the walk is capped at the longest candidate
+ * length). Grouping only by the first character would, for assets whose candidates all share a
+ * prefix (the `<` of `<unused0>` etc.), scan every candidate at each `<` in the text — characters ×
+ * vocabulary size (EmbeddingGemma has 6,415 entries).
  *
- * NOTE: 照合の単位は UTF-16 単位（`text[i]`）。候補も同じ単位で辿るので、BMP 外の文字は
- * サロゲート対の 2 段で一致する（コードポイント単位と結果は変わらない）。
+ * NOTE: the matching unit is the UTF-16 unit (`text[i]`). Candidates are walked in the same unit,
+ * so characters outside the BMP match in two steps over the surrogate pair (the result is the same
+ * as per code point).
  */
 export const createAddedTokenMatcher = (added: readonly string[]): AddedTokenMatcher => {
   const root: TrieNode = { next: new Map(), terminal: false };
   for (const token of added) {
     if (token === "") {
-      // 空文字は全位置で一致して走査が進まない（無限ループ）。黙って読み飛ばすと切り出し規則
-      // そのものが別物になるので落とす。
+      // The empty string matches at every position and the scan never advances (an infinite loop).
+      // Silently skipping it would change the cut-out rule itself, so it fails.
       throw new Error("追加語彙に空文字がある — 切り出しが進まない");
     }
     let node = root;
@@ -50,7 +60,7 @@ export const createAddedTokenMatcher = (added: readonly string[]): AddedTokenMat
     node.terminal = true;
   }
 
-  /** 位置 `start` から始まる最長の候補の長さ（無ければ 0）。 */
+  /** Length of the longest candidate starting at position `start` (0 if none). */
   const longestAt = (text: string, start: number): number => {
     let node = root;
     let longest = 0;
@@ -66,7 +76,7 @@ export const createAddedTokenMatcher = (added: readonly string[]): AddedTokenMat
   return {
     split(text: string): AddedTokenChunk[] {
       const out: AddedTokenChunk[] = [];
-      // 追加語彙でない区間の始点（区間は 1 回の slice で切り出す）。
+      // Start of the current non-added span (the span is cut out with one slice).
       let plainStart = 0;
       let i = 0;
       while (i < text.length) {
@@ -87,8 +97,8 @@ export const createAddedTokenMatcher = (added: readonly string[]): AddedTokenMat
 };
 
 /**
- * 1 回きりの切り出し（索引を組んで捨てる）。encode を繰り返す tokenizer は
- * {@link createAddedTokenMatcher} を構築時に 1 回だけ呼んで使い回す。
+ * One-off cutting out (builds the index and throws it away). A tokenizer that encodes repeatedly
+ * calls {@link createAddedTokenMatcher} once at construction and reuses it.
  */
 export const splitAddedTokens = (text: string, added: readonly string[]): AddedTokenChunk[] =>
   createAddedTokenMatcher(added).split(text);

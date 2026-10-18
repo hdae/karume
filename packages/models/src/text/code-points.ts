@@ -1,17 +1,18 @@
 /**
- * 文字列 → コードポイント列。
+ * String → code-point sequence.
  *
- * **ファミリ非依存**（Unigram / BPE / 正規化のどの経路も、正本と同じ「コードポイントの列」で
- * 数え始める）なので `src/text/` に置く。ファミリ側のディレクトリに置くと、別ファミリが
- * 使うときに家族間 import（依存の逆流）になる。
+ * It is **family-independent** (the Unigram, BPE and normalization paths all start counting on "a
+ * sequence of code points", as the source of truth does), so it lives in `src/text/`. In a family
+ * directory, another family using it would mean a cross-family import (a reversed dependency).
  */
 
 import { ModelInputError } from "../errors.ts";
 
 /**
- * 対になっていないサロゲートは**受け付けない** — Python / Rust の str には載らない値で
- * 正本の出力が定義されない。黙って U+FFFD に潰すと id 列が静かに変わるので落とす
- * （JS の文字列型でのみ表現できる入力なので、移植で最も忘れやすい防御）。
+ * Unpaired surrogates are **not accepted** — they are values Python / Rust strings cannot hold, so
+ * the source of truth's output is undefined. Silently collapsing them to U+FFFD would quietly
+ * change the id sequence, so they fail (input only the JS string type can express — the defence
+ * most easily forgotten in a port).
  */
 export const toCodePoints = (text: string): number[] => {
   const out: number[] = [];
@@ -26,12 +27,13 @@ export const toCodePoints = (text: string): number[] => {
 };
 
 /**
- * 呼び手の本文が {@link toCodePoints} を通ることを**生成の入口で**確かめる。
+ * Checks **at the generation entry** that the caller's text passes {@link toCodePoints}.
  *
- * MUST: 受理条件の正本は {@link toCodePoints} 1 本のまま — ここが上げるのは**送出型だけ**。
- * 一括で置き換えないのは、同じ throw が語彙資産の解析でも出るためで、そちらは資産の齟齬
- * （呼び手が本文を直しても直らない）だから素の `Error` が正しい。呼び手の本文を受ける家族の
- * `encode` だけがこの口を通す（ADR 0107 決定 2）。
+ * MUST: the source of truth for the acceptance condition stays the single {@link toCodePoints} —
+ * this raises **only the thrown type**. It is not replaced wholesale because the same throw also
+ * occurs while parsing vocabulary assets, where it is an asset mismatch (fixing the caller's text
+ * does not fix it), so a plain `Error` is right there. Only the `encode` of families that accept
+ * the caller's text goes through this entry (ADR 0107 decision 2).
  */
 export const assertEncodableText = (text: string, label: string): void => {
   try {

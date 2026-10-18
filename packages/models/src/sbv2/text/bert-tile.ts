@@ -1,18 +1,18 @@
 /**
- * DeBERTa 隠れ状態の選択と、word2ph による音素レベルへの tile 展開。
+ * Selection of the DeBERTa hidden state, and its tile expansion to phoneme level by word2ph.
  *
- * 参照実装 `nlp/japanese/bert_feature.py` の
- * `torch.cat(res["hidden_states"][-3:-2], -1)[0]` → `torch.cat([res[i].repeat(w[i],1) ...]).T`
- * に対応する 2 段。IR のグラフ出力は位置で引くので、選択は
- * **末尾からの相対位置**で行う（層を削った variant でも同じ規則で引ける）。
+ * The 2 steps correspond to the reference implementation `nlp/japanese/bert_feature.py`'s
+ * `torch.cat(res["hidden_states"][-3:-2], -1)[0]` → `torch.cat([res[i].repeat(w[i],1) ...]).T`.
+ * The IR's graph outputs are looked up by position, so the selection is made by **position relative
+ * to the end** (a variant with trimmed layers is looked up by the same rule).
  */
 
 /**
- * BERT 特徴に使う hidden_states の出力名を、末尾からの位置で選ぶ。
+ * Selects the output name of the hidden_states used for BERT features by its position from the end.
  *
- * MUST: 固定 index にしない。配布形（`sbv2-22layer`）は SBV2 が使う 1 本だけを出すが、検証用の
- * `full-24layer` は埋め込み出力込み 25 本、`dev-2layer` は 3 本で、固定 index はどれかで別の層を
- * 静かに引く。
+ * MUST: do not use a fixed index. The distribution (`sbv2-22layer`) outputs only the one SBV2 uses,
+ * but the verification graph `full-24layer` has 25 including the embedding output and `dev-2layer`
+ * has 3, so a fixed index silently picks a different layer in one of them.
  */
 export const bertHiddenOutput = (outputs: readonly string[], fromEnd: number): string => {
   if (!Number.isInteger(fromEnd) || fromEnd < 1) {
@@ -25,27 +25,28 @@ export const bertHiddenOutput = (outputs: readonly string[], fromEnd: number): s
 };
 
 /**
- * {@link tileBertToPhoneLevel} の結果。
+ * The result of {@link tileBertToPhoneLevel}.
  *
- * MUST: `columns` は**走査が実際に進めた列数**で、`data` の確保サイズ（`dim · sum(word2ph)`）
- * とは別の観測値。両者を突き合わせる門（`pipeline.ts` の `assertTiledBert`）はこの独立性の
- * 上にだけ成立する — `sum(word2ph)` から算出し直した値を入れると、門は恒真に戻る。
+ * MUST: `columns` is **the number of columns the walk actually advanced**, an observation separate
+ * from the allocation size of `data` (`dim · sum(word2ph)`). The check that compares the two
+ * (`assertTiledBert` in `pipeline.ts`) holds only on top of this independence — put in a value
+ * recomputed from `sum(word2ph)` and the check becomes a tautology again.
  */
 export type TiledBert = {
   readonly data: Float32Array<ArrayBuffer>;
-  /** BERT 特徴の次元（`hidden` の行長）。 */
+  /** Dimension of the BERT features (the row length of `hidden`). */
   readonly dim: number;
-  /** 走査が書いた列数（正しく回れば `sum(word2ph)` = 音素数 P）。 */
+  /** Number of columns the walk wrote (`sum(word2ph)` = phoneme count P when it runs correctly). */
   readonly columns: number;
 };
 
 /**
- * トークンごと隠れ状態 `[tokenCount, dim]`（行優先）を word2ph で音素レベルへ tile 展開し、
- * 転置して `[dim, P]`（P = sum(word2ph)）にする。
+ * Tile-expands the per-token hidden states `[tokenCount, dim]` (row-major) to phoneme level by
+ * word2ph and transposes to `[dim, P]` (P = sum(word2ph)).
  *
- * @param hidden グラフ出力の生データ（`[1, tokenCount, dim]` の row-major と同じ並び）。
- * @param tokenCount DeBERTa トークン数（CLS / SEP 込み）。
- * @param word2ph add_blank 後の word2ph（長さ === tokenCount が必須）。
+ * @param hidden raw data of the graph output (same order as row-major `[1, tokenCount, dim]`).
+ * @param tokenCount DeBERTa token count (including CLS / SEP).
+ * @param word2ph word2ph after add_blank (length === tokenCount is required).
  */
 export const tileBertToPhoneLevel = (
   hidden: Float32Array<ArrayBuffer>,
@@ -63,7 +64,7 @@ export const tileBertToPhoneLevel = (
   }
   const dim = hidden.length / tokenCount;
   const total = word2ph.reduce((sum, count) => sum + count, 0);
-  // out[d * total + p] = hidden[srcToken(p) * dim + d]（展開と転置を 1 周で行う）。
+  // out[d * total + p] = hidden[srcToken(p) * dim + d] (expansion and transpose in one pass).
   const out = new Float32Array(dim * total);
   let column = 0;
   for (let token = 0; token < tokenCount; token += 1) {

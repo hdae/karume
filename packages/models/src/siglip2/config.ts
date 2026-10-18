@@ -1,38 +1,44 @@
 /**
- * `pipelineConfig` のスキーマ検証（ADR 0038 §1 — スキーマは各パイプライン実装が所有・検証）。
+ * Schema validation of `pipelineConfig` (ADR 0038 §1 — each pipeline implementation owns and
+ * validates its schema).
  *
- * hub は `pipelineConfig` を素通しする（禁止キーの一掃と規模上限だけを見る）。したがって
- * **形の正本はこのモジュール**で、手書きの検査を全て parse 時に走らせる。
+ * The hub passes `pipelineConfig` through (it only strips forbidden keys and checks the size
+ * limit). **This module is therefore the source of truth for the shape**, and every hand-written
+ * check runs at parse time.
  *
- * MUST: 未知キーは fail loudly（`{ imageMean: …, image_mean: … }` のような綴り違いが黙って
- * 既定へ縮退すると、配布者の意図した前処理と実行が食い違ったまま気づけない）。
- * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
+ * MUST: unknown keys fail loudly (if a misspelling such as `{ imageMean: …, image_mean: … }`
+ * silently fell back to the default, the preprocessing the distributor intended and the one that
+ * runs would disagree without anyone noticing).
+ * MUST: maps are read only through `Object.hasOwn` (cross-cutting invariant).
  *
- * ## MUST: モデル固有の数はここ（= manifest）が正本で、TS 側に定数を置かない
+ * ## MUST: model-specific numbers live here (= the manifest), never as TS constants
  *
- * SigLIP2 は base（224 / hidden 768）と so400m（384 / hidden 1152）で寸法だけが違う同じ経路
- * なので、TS に 224 や 768 を直書きすると**もう片方の配布形で沈黙誤値になる**（前処理が別の
- * 寸法へ resize したまま shape だけ合う、ということは起きない — グラフが弾く — が、寸法を
- * 取り違えた側は resize を 2 度通ったような画になる）。実グラフとの突合は
- * `Siglip2Pipeline.fromAssets` が資産に対して行う。
+ * SigLIP2 base (224 / hidden 768) and so400m (384 / hidden 1152) are the same path differing only
+ * in sizes, so hard-coding 224 or 768 in TS **gives silently wrong values for the other
+ * distribution** (preprocessing resizing to another size while only the shapes match cannot happen
+ * — the graph rejects it — but the side with the mixed-up size produces an image that looks resized
+ * twice). The match against the real graph is done on the assets by `Siglip2Pipeline.fromAssets`.
  *
- * ## MUST: 補間は**宣言**として持ち、対応外は値を保持せずパース時に拒否する
+ * ## MUST: interpolation is a **declaration**; unsupported values are rejected at parse time
  *
- * 上流 `preprocessor_config.json` の `"resample"` が 2（PIL の BILINEAR）なので、この家族の
- * 前処理は bilinear が正本。bicubic を要求するチェックポイントを黙って bilinear で通すと、
- * **resize の値が最大 47/255 ずれたまま**ロードも実行も通る（実測 — 前処理層のモジュール
- * doc）。分岐を持つのではなく**受理しない**（型としても `"bilinear"` しか表せない）。
- * 前処理層（`src/image/preprocess.ts`）は bicubic も実装しているので、受理集合を広げるかは
- * 「この配布形の上流がどの `resample` で学習されたか」の判断であって実装の有無ではない。
+ * Upstream `preprocessor_config.json` has `"resample"` 2 (PIL's BILINEAR), so bilinear is the
+ * source of truth for this family's preprocessing. Silently running a checkpoint that requires
+ * bicubic through bilinear **leaves the resized values off by up to 47/255** while loading and
+ * execution both pass (measured — the preprocessing layer's module doc). Rather than branching, it
+ * is **not accepted** (the type can only express `"bilinear"` too). The preprocessing layer
+ * (`src/image/preprocess.ts`) implements bicubic as well, so widening the accepted set is a
+ * judgement on "which `resample` this distribution's upstream was trained with", not on whether an
+ * implementation exists.
  *
- * NOTE: rescale の除数（255）はここに無い。`normalizeToNchw` の入口が 8bit の画素列
- * （`Rgb8Image`）で閉じており、`rescale_factor` が 1/255 でないチェックポイントは
- * **配布形を組む段**で落ちる（`tools/export-recipes/siglip2/distribution.py`）。実行時に
- * 選べない数を宣言だけ持たせても、二重の正本が増えるだけになる。
+ * NOTE: the rescale divisor (255) is not here. The entry of `normalizeToNchw` is closed over 8-bit
+ * pixel rows (`Rgb8Image`), and a checkpoint whose `rescale_factor` is not 1/255 fails **at the
+ * step that builds the distribution** (`tools/export-recipes/siglip2/distribution.py`). Giving a
+ * declaration to a number that cannot be chosen at run time would only add a second source of
+ * truth.
  *
- * NOTE: 公開配布リポの対応表（{@link SIGLIP2_SOURCES}）もここに置く。上の MUST が禁じる
- * 「モデル固有の数」ではなく「どの manifest を取りに行くか」の側で、そもそも配布形が持てない
- * 値だから（ADR 0073）。
+ * NOTE: the public distribution repository table ({@link SIGLIP2_SOURCES}) lives here too. It is
+ * not a "model-specific number" forbidden by the MUST above but on the "which manifest to fetch"
+ * side — a value the distribution cannot hold in the first place (ADR 0073).
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -45,37 +51,39 @@ import {
 } from "../config/readers.ts";
 import { normalizationOverflow } from "../image/preprocess.ts";
 
-/** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
+/** The contract name of `pipeline` and the major this implementation accepts (ADR 0038 §1). */
 export const SIGLIP2_PIPELINE_NAME = "siglip2";
 export const SIGLIP2_PIPELINE_MAJOR = 1;
 
 /**
- * SigLIP2 ファミリの**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は
- * 無い**）。値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ * The SigLIP2 family's **public distribution repository table** (ADR 0092 — one table per family,
+ * **no default entry**). The values are **the sources this package version verified** (pinned
+ * commit SHAs — ADR 0073).
  *
- * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
- * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。同一家族 = 1 リポで、
- * 寸法だけが違う 2 モデルが同居する:
+ * The key is the HF repository basename with `karume-` dropped (`"karume-" + key` gives the
+ * repository basename back — this invariant is checked by `tests/sources_test.ts`). One family
+ * = one repository, holding two models that differ only in sizes:
  *
- * - `"siglip2"` = `hdae/karume-siglip2`（base 224 / hidden 768 と so400m 384 / hidden 1152 が
- *   同居・既定 = base）
+ * - `"siglip2"` = `hdae/karume-siglip2` (base 224 / hidden 768 and so400m 384 / hidden 1152 side by
+ *   side, default = base)
  *
- * 1 リポ = 複数モデルなので、リポ参照だけでは 1 本に決まらない — so400m を使うときは
- * `fromPretrained(SIGLIP2_SOURCES["siglip2"], { model: "so400m" })` と綴る
- * （`Siglip2PipelineOptions.model` — `./pipeline.ts`）。
+ * One repository = several models, so the repository reference alone does not pick one — so400m is
+ * spelled `fromPretrained(SIGLIP2_SOURCES["siglip2"], { model: "so400m" })`
+ * (`Siglip2PipelineOptions.model` — `./pipeline.ts`).
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
- * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
- * 既定は無い）。
+ * Pass it **as an opt-in when you want to follow the package version automatically** — to pin
+ * reproducibility yourself, write your own `{ repo, revision }` instead of using this table
+ * (`fromPretrained` has no default).
  *
- * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
- * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
- * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
- * 同時に成立する（ADR 0038）。main 追従が要る利用者は
- * `{ ...SIGLIP2_SOURCES["siglip2"], revision: "main" }` を明示的に選ぶ。
+ * MUST: pin the revision to a commit SHA — branches and tags can be moved on the distribution side,
+ * so the bytes this published package reads would change silently for network-side reasons (an
+ * unrecoverable accident). A SHA also removes the revision-resolution request itself, so an offline
+ * start from a complete cache works at the same time (ADR 0038). A user who needs to follow main
+ * explicitly chooses `{ ...SIGLIP2_SOURCES["siglip2"], revision: "main" }`.
  */
-// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+// NOTE: the revision is updated to main's SHA after the upload by §3 of the release runbook
+// (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand +
+// runbook check).
 export const SIGLIP2_SOURCES = {
   siglip2: {
     repo: "hdae/karume-siglip2",
@@ -92,26 +100,29 @@ const ROOT_KEYS: readonly string[] = [
   "interpolation",
 ];
 
-/** この実装が受理する唯一の補間（モジュール doc の MUST）。 */
+/** The only interpolation this implementation accepts (the module doc's MUST). */
 const INTERPOLATION = "bilinear";
 
-/** 正規化の定数（`[0, 1]` 尺度 — `preprocessor_config.json` の綴りのまま）。 */
+/** Normalization constants (`[0, 1]` scale — spelled as in `preprocessor_config.json`). */
 type Siglip2Channels = readonly [number, number, number];
 
 export type Siglip2PipelineConfig = {
-  /** 前処理の resize 先（`preprocessor_config.json` の `size.width`）。 */
+  /** Preprocessing resize target (`size.width` of `preprocessor_config.json`). */
   readonly imageWidth: number;
-  /** 前処理の resize 先（`preprocessor_config.json` の `size.height`）。 */
+  /** Preprocessing resize target (`size.height` of `preprocessor_config.json`). */
   readonly imageHeight: number;
   readonly imageMean: Siglip2Channels;
   readonly imageStd: Siglip2Channels;
-  /** `pooler_output` の幅（vision tower の hidden — base 768 / so400m 1152）。 */
+  /** Width of `pooler_output` (the vision tower's hidden — base 768 / so400m 1152). */
   readonly hiddenDim: number;
-  /** ADR 0038 §1 の流儀で**宣言**として持つ（分岐用ではない — モジュール doc の MUST）。 */
+  /**
+   * Held as a **declaration** in the manner of ADR 0038 §1 (not for branching — the module doc's
+   * MUST).
+   */
   readonly interpolation: typeof INTERPOLATION;
 };
 
-/** manifest の `pipelineConfig`（hub が素通しした生の値）を検査して読む。 */
+/** Checks and reads the manifest's `pipelineConfig` (the raw value the hub passed through). */
 export const parseSiglip2PipelineConfig = (
   raw: Readonly<Record<string, unknown>>,
 ): Siglip2PipelineConfig => {
@@ -121,8 +132,8 @@ export const parseSiglip2PipelineConfig = (
   const config: Siglip2PipelineConfig = {
     imageWidth: readNumber(raw, "imageWidth", where, isPositiveInteger, positive),
     imageHeight: readNumber(raw, "imageHeight", where, isPositiveInteger, positive),
-    // mean は負でも構わない（`(x − mean·255) / (std·255)` の平行移動）が、有限でなければ
-    // 全画素が NaN になる。
+    // The mean may be negative (a translation in `(x − mean·255) / (std·255)`), but a non-finite
+    // one turns every pixel into NaN.
     imageMean: readChannels(raw, "imageMean", where, Number.isFinite, "有限の数でない要素がある"),
     imageStd: readChannels(
       raw,
@@ -141,8 +152,9 @@ export const parseSiglip2PipelineConfig = (
         "bicubic で通すと resize の値が最大 47/255 ずれる",
     ),
   };
-  // 個々の欄が有限でも、組で正規化後の値が f32 で溢れる配布形は資産の不正として構築時に落とす
-  // （`normalizeToNchw` まで待つと、生成のたびに入力起因の型で落ちる）。
+  // A distribution whose fields are each finite but whose pair overflows f32 after normalization is
+  // rejected at construction as an asset defect (waiting until `normalizeToNchw` would fail every
+  // generation with an input-caused error type).
   const overflow = normalizationOverflow(config.imageMean, config.imageStd);
   if (overflow !== undefined) throw new Error(`${where}.imageMean / imageStd: ${overflow}`);
   return config;

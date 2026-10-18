@@ -1,41 +1,46 @@
 /**
- * 生成の**静的配線**（ADR 0083 決定 1 の `GenerationProgram`）。**パイプライン非依存の共通処理**
- * なので `greedy.ts` / `sampler.ts` と同じ `src/generation/` に置く。
+ * The **static wiring** of generation (`GenerationProgram` of ADR 0083 decision 1). It is
+ * **pipeline-independent shared code**, so it lives in `src/generation/` next to `greedy.ts` /
+ * `sampler.ts`.
  *
- * ## 2 層に割る理由
+ * ## Why split into two layers
  *
- * 現行の `GreedySpec`（`greedy.ts`）は静的配線（グラフ入力 / 出力の名前・chunk 長・位置上限）と
- * リクエスト（prompt・生成数）が 1 つの型に同居している。多ターンの会話は「同じ配線で別の
- * リクエストを何度も出す」形なので、ここを割らないと**毎回すべての配線を書き直す**面になる。
- * program は不変で、可変な寿命は {@link GenerationSequence}（`sequence.ts`）だけが持つ。
+ * The current `GreedySpec` (`greedy.ts`) holds the static wiring (graph input / output names, chunk
+ * length, position limit) and the request (prompt, number of tokens) in one type. A multi-turn
+ * conversation is "issuing different requests many times on the same wiring", so without this split
+ * the surface would **rewrite the whole wiring every time**. The program is immutable, and only
+ * {@link GenerationSequence} (`sequence.ts`) owns a mutable lifetime.
  *
- * 配線の型はさらに 2 つに割れている — 生成ループが読む全欄が {@link GenerationWiring}（内部）、
- * 消費者が `sequence()` を回すときに読む数だけが {@link GenerationProgram}（公開・凍結）。
+ * The wiring type is split in two again — every field the generation loop reads is in
+ * {@link GenerationWiring} (internal), and only the numbers a consumer reads when running
+ * `sequence()` are in {@link GenerationProgram} (public, frozen).
  *
- * ## MUST: setup 時に全結線を検証する
+ * ## MUST: verify the whole wiring at setup
  *
- * 名前の取り違えは**例外も警告も出ない**（`greedy.ts` の `readToken` が同じ理由で dtype と形を
- * 見ている）。出力名が別の出力を指していれば、形が合う限り「もっともらしい token 列」が出る。
- * グラフ入力が 1 本結線されないまま run へ行けば診断は真因から遠い場所で出る。よって
- * {@link createGenerationProgram} は**グラフと突き合わせて**次を全部見る:
+ * A mixed-up name raises **no exception and no warning** (`readToken` in `greedy.ts` checks dtype
+ * and shape for the same reason). If an output name points at another output, "a plausible token
+ * sequence" comes out as long as the shape matches. If one graph input goes to a run unwired, the
+ * diagnosis appears far from the real cause. So {@link createGenerationProgram} checks all of the
+ * following **against the graph**:
  *
- * - 名前の実在（入力 2 本 + 派生入力の名前 + 出力 2 本）
- * - 形と dtype（`[1,M]` の i32・`[R]` の i32・`[1,R,V]` の f32・`[1,R,H]` の f32）
- * - **グラフ入力の完全被覆**（program が結線しない入力が 1 本も残らない・余分な名前も無い）
- * - 記号（入力 shape から決まらない記号は容量記号ちょうど 1 本であること）
+ * - that the names exist (2 inputs + the derived input names + 2 outputs)
+ * - shapes and dtypes (`[1,M]` i32, `[R]` i32, `[1,R,V]` f32, `[1,R,H]` f32)
+ * - **complete coverage of the graph inputs** (no input left unwired by the program, no extra
+ *   names)
+ * - symbols (exactly one symbol, the capacity symbol, is not determined by input shapes)
  *
- * MUST: program は可変状態を持たない（ADR 0083 決定 1）。
+ * MUST: the program holds no mutable state (ADR 0083 decision 1).
  */
 
 import { assertChunkBuckets, type RunInputs } from "@karume/runtime";
 
 /**
- * program が結線検証に使うグラフの面（`PreparedModel["graph"]` の部分集合）。
+ * The graph surface the program uses to verify its wiring (a subset of `PreparedModel["graph"]`).
  *
- * MUST: `PreparedModel["graph"]` をそのまま要求しない。IR の全体（nodes / initializers /
- * states）は結線検証に要らないうえ、要求すると単体テストが**実 IR コンテナを組む**羽目になる
- * （`greedy.ts` の `GreedySession` が narrow interface である理由と同じ）。実 `IrGraph` が
- * この面を満たすことは型門（テスト側）で固定する。
+ * MUST: do not require `PreparedModel["graph"]` itself. The whole IR (nodes / initializers /
+ * states) is not needed to verify the wiring, and requiring it would force unit tests to **build a
+ * real IR container** (the same reason `GreedySession` in `greedy.ts` is a narrow interface). That
+ * the real `IrGraph` satisfies this surface is pinned by a type check (on the test side).
  */
 export type GenerationGraph = {
   readonly symbols: readonly string[];
@@ -51,53 +56,61 @@ export type GenerationGraph = {
 };
 
 /**
- * {@link DerivedRunInputs.derive} が受ける実行時のノブ（静的配線ではなく**その run 1 回**の事情）。
+ * Run-time knobs that {@link DerivedRunInputs.derive} receives (not static wiring but what applies
+ * to **that one run**).
  *
- * MUST: **best-effort** の契約である — 実装が `signal` を無視しても壊れない（無視すれば中断が
- * 「今の派生入力を作り終えてから」効くだけ）。生成ループは `derive` の `await` 明けに自分でも
- * `signal` を見て run の発行を止めるので、中断の正しさをこの席へ委ねていない。
+ * MUST: the contract is **best-effort** — nothing breaks if an implementation ignores `signal`
+ * (ignoring it only makes the abort take effect "after the current derived inputs are finished").
+ * The generation loop checks `signal` itself after `derive`'s `await` and stops issuing the run, so
+ * the correctness of the abort is not delegated to this slot.
  */
 export type DeriveInputsOptions = {
   /**
-   * この生成の中断（`GenerationRequest.signal` がそのまま降りてくる）。
+   * This generation's abort (`GenerationRequest.signal` passed down as is).
    *
-   * 派生入力の材料が GB 級の遅延ロードになる配布形（gemma4 の PLE — `model` 容器の資産・
-   * ADR 0085）では、ここを見ないと「停止を押しても block 1 本（≤ 32 MiB）の読みが終わるまで
-   * 返らない」形になる。
+   * In a distribution whose derived inputs come from GB-scale lazy loads (gemma4's PLE — assets of
+   * the `model` container, ADR 0085), not looking at it gives the shape "pressing stop does not
+   * return until one block (≤ 32 MiB) has been read".
    */
   readonly signal?: AbortSignal;
 };
 
 /**
- * ホスト由来の per-chunk 入力の席（ADR 0083 決定 1 の「モデル固有の入力の作り方は models 側の
- * 知識」— gemma4 の PLE `per_layer_inputs[1,M,35,256]` がこの一実装。ADR 0085）。
+ * The slot for host-derived per-chunk inputs (ADR 0083 decision 1's "how to build model-specific
+ * inputs is knowledge of the models side" — gemma4's PLE `per_layer_inputs[1,M,35,256]` is one
+ * implementation of it, ADR 0085).
  *
- * 前例は SBV2 の相対位置表 / Anima の rope 素表で、どちらも「グラフ入力を作るのはホスト」。
- * ここは**その作り手を program に差し込む席**で、生成ループは token id 列を渡すだけになる。
+ * The precedents are SBV2's relative-position tables / Anima's raw rope tables; in both "the host
+ * builds the graph input". This is **the slot that plugs that producer into the program**, so the
+ * generation loop only passes the token id sequence.
  */
 export type DerivedRunInputs = {
   /**
-   * この席が供給するグラフ入力の名前。
+   * Names of the graph inputs this slot supplies.
    *
-   * MUST: 省略可能にしない。名前を宣言させることが「グラフ入力の完全被覆」を setup で見られる
-   * 唯一の手段で（関数の返り値は呼ばないと分からない）、宣言と実際の返り値の食い違いは
-   * 実行時に落とす（{@link DerivedRunInputs.derive} の契約）。
+   * MUST: not optional. Having the names declared is the only way to check "complete coverage of
+   * the graph inputs" at setup (a function's return value is unknown until it is called), and a
+   * mismatch between the declaration and the actual return value fails at run time (the contract of
+   * {@link DerivedRunInputs.derive}).
    */
   readonly names: readonly string[];
   /**
-   * 物理 chunk 1 本ぶんの token id 列と**絶対位置列** → 追加入力。
+   * The token id sequence and the **absolute position sequence** of one physical chunk → extra
+   * inputs.
    *
-   * 渡るのはどちらも**物理行数ぶん**（prefill は pad 行を含む・decode は 1 行）で、pad 行には
-   * `input_ids` と同じ 0 が入る — グラフ内で引いていたときと同じ値にするため（PLE の
-   * `gather` doc と ADR 0066 追記 6 の値契約）。位置も同じ規約で、pad 行は 0 である。
+   * Both cover **the physical row count** (prefill including pad rows, decode one row), with the
+   * same 0 as `input_ids` in pad rows — to give the same values as when the lookup ran inside the
+   * graph (the PLE `gather` doc and the value contract of ADR 0066 addendum 6). Positions follow the
+   * same convention, with 0 in pad rows.
    *
-   * `positions` を渡すのは、位置に依存するホスト由来入力（gemma4 の RoPE cos / sin —
-   * `gemma/rope.ts`）がこの席を使うため。`position_ids` を**グラフ入力として**渡す形は
-   * もう無いので、位置の唯一の行き先がここである。
+   * `positions` is passed because position-dependent host-derived inputs (gemma4's RoPE cos / sin
+   * — `gemma/rope.ts`) use this slot. Passing `position_ids` **as a graph input** no longer exists,
+   * so this is the only destination of positions.
    *
-   * MUST: **純関数席**（同じ `(ids, positions)` に同じ値。呼ぶ順序に依らない）。返り値のキーは
-   * {@link DerivedRunInputs.names} と過不足なく一致すること。`options` は値に影響しない
-   * 事情（中断）だけを運ぶので、この MUST とは両立する。
+   * MUST: **a pure-function slot** (the same value for the same `(ids, positions)`, independent of
+   * call order). The keys of the return value match {@link DerivedRunInputs.names} exactly.
+   * `options` carries only circumstances that do not affect the values (abort), so it is compatible
+   * with this MUST.
    */
   readonly derive: (
     ids: readonly number[],
@@ -106,173 +119,196 @@ export type DerivedRunInputs = {
   ) => Promise<RunInputs>;
 };
 
-/** {@link createGenerationProgram} の指定（グラフを伴う — 検証はここで全部済ませる）。 */
+/** Specification for {@link createGenerationProgram} (with the graph — all verification is here). */
 export type GenerationProgramSpec = {
-  /** 結線を突き合わせるグラフ（`PreparedModel.graph` をそのまま渡せる）。 */
+  /** The graph to check the wiring against (`PreparedModel.graph` can be passed as is). */
   readonly graph: GenerationGraph;
-  /** token id 列を受けるグラフ入力の名前（`[1,M]` の i32）。 */
+  /** Name of the graph input that receives the token id sequence (`[1,M]` i32). */
   readonly inputIds: string;
   /**
-   * 選ぶ行の添字**列**を受けるグラフ入力の名前（`[R]` の i32 — ADR 0068 決定 4 の行選択）。
+   * Name of the graph input that receives the **sequence** of row indices to select (`[R]` i32 —
+   * the row selection of ADR 0068 decision 4).
    *
-   * R は記号で、その run で選ぶ行数そのものである（この入力の要素数が R を束縛する唯一の源）。
-   * 通常の prefill / decode は R=1（最終有効行 1 本）で、値も token 列も従来と同一である。
-   * R を固定数 1 で焼くと、投機の verify（draft 行を一度に検証する run）が同じグラフで回せない。
+   * R is a symbol and is exactly the number of rows selected in that run (this input's element
+   * count is the only source that binds R). Ordinary prefill / decode has R=1 (the one last valid
+   * row), and the values and token sequence are identical to before. Baking R as the fixed number
+   * 1 would keep speculation's verify (a run that checks the draft rows at once) from running on
+   * the same graph.
    */
   readonly lastRow: string;
-  /** 選んだ行の logits を出すグラフ出力の名前（`[1,R,V]` の f32 — ADR 0083 決定 6）。 */
+  /** Graph output name of the selected rows' logits (`[1,R,V]` f32 — ADR 0083 decision 6). */
   readonly logits: string;
   /**
-   * 選んだ行の**最終 norm 後 hidden** を出すグラフ出力の名前（`[1,R,H]` の f32）。
+   * Name of the graph output with the selected rows' **final-norm hidden** (`[1,R,H]` f32).
    *
-   * MUST: 省略可能にしない。drafter は「本体が実際に置いた行の hidden」を入力に取るので、
-   * ここが欠けた配布形では投機が組めない。省略可能にすると「hidden の無いグラフでも program は
-   * 組める」形になり、欠けは drafter を繋ぐ段まで落ちない（配布形の焼き直しが要る所まで）。
+   * MUST: not optional. The drafter takes "the hidden of the row the target actually placed" as
+   * input, so a distribution without this cannot build speculation. Making it optional gives the
+   * shape "a program can be built even for a graph without hidden", and the gap does not fail until
+   * the step that connects the drafter (by which point the distribution has to be rebuilt).
    */
   readonly hidden: string;
-  /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。 */
+  /** Rows of a fixed-length prefill chunk (ADR 0066 decision 4 — a plan-time context constant). */
   readonly chunkLength: number;
   /**
-   * prefill 形として `chunkLength` に**加えて**許す物理 chunk 行数（ADR 0066 決定 4 /
-   * 追記〈バケット〉）。省略 / 空 = 追加なし（prefill 形 1 本 + decode 形の従来どおり）。
+   * Physical chunk row counts allowed as prefill shapes **in addition to** `chunkLength` (ADR 0066
+   * decision 4 / addendum 10, buckets). Omitted / empty = none added (one prefill shape + the
+   * decode shape, as before).
    *
-   * 短い prompt を `chunkLength` 行へ pad すると、pad 行ぶんの仕事（行局所な linear /
-   * pointwise / norm は物理行数に比例する）がそのまま無駄になる。宣言しておくと chunk ごとに
-   * `queryLength` 以上の最小バケットを物理行数に選べる（`sequence.ts` の `physicalChunkRows`）。
+   * Padding a short prompt to `chunkLength` rows wastes the pad rows' work outright (row-local
+   * linear / pointwise / norm scale with the physical row count). Declaring buckets lets each chunk
+   * choose the smallest bucket ≥ `queryLength` as its physical row count (`physicalChunkRows` in
+   * `sequence.ts`).
    *
-   * MUST: 受理集合（2 以上 `chunkLength` 未満の整数・狭義昇順）の検査は runtime の
-   * `assertChunkBuckets` 1 本に任せる — 同じ規則をここで写すと、context が許す集合と
-   * 呼び出し側が選ぶ集合が別々に育つ。
+   * MUST: checking the acceptance set (integers ≥ 2 and < `chunkLength`, strictly increasing) is
+   * left to runtime's single `assertChunkBuckets` — copying the same rule here would let the set the
+   * context allows and the set the caller chooses from grow apart.
    */
   readonly chunkBuckets?: readonly number[];
   /**
-   * 引ける絶対位置の**排他的上限**（位置は `0..maxPosition-1` — モデルが宣言する位置上限）。
+   * **Exclusive upper bound** of the absolute positions that can be looked up (positions are
+   * `0..maxPosition-1` — the position limit the model declares).
    *
-   * MUST: 省略可能にしない（`greedy.ts` の `maxPosition` と同じ理由 — 上限の外の位置は例外を
-   * 出さず、学習していない位置の attention が「もっともらしい token id」に畳まれる）。
+   * MUST: not optional (the same reason as `maxPosition` in `greedy.ts` — a position beyond the
+   * limit raises no exception, and attention at untrained positions is folded into "a plausible
+   * token id").
    */
   readonly maxPosition: number;
   /**
-   * full スロットの容量の**既定**（`pastLength + queryLength ≤ capacity` — ADR 0067 決定 4 ④）。
+   * The **default** capacity of the full slots (`pastLength + queryLength ≤ capacity` — ADR 0067
+   * decision 4, check (4)).
    *
-   * MUST: 省略可能にしない。超過はランタイムも拒否するが、それは **run のエンコード直前**で、
-   * 「会話が入り切らない」という**ホストが判断すべき事実**が汎用メッセージに埋もれる
-   * （ADR 0083 決定 10）。sequence はこの値で run の**前**に見て専用型で落とす。
+   * MUST: not optional. The runtime also rejects an overflow, but only **right before encoding the
+   * run**, where the fact "the conversation does not fit", **which the host has to decide on**, is
+   * buried in a generic message (ADR 0083 decision 10). The sequence checks with this value
+   * **before** the run and fails with a dedicated type.
    *
-   * NOTE: 実際に使う容量は sequence（= context）ごとに選べる（`createGenerationSequence` の
-   * `capacity`）。program が持つのは**既定**で、context の物理確保はその sequence の値で決まる。
+   * NOTE: the capacity actually used can be chosen per sequence (= context) (`capacity` of
+   * `createGenerationSequence`). The program holds the **default**; the context's physical
+   * allocation is decided by that sequence's value.
    */
   readonly capacity: number;
-  /** 語彙数（logits 出口の最終軸 — グラフと相互照合する）。 */
+  /** Vocabulary size (the last axis of the logits exit — cross-checked against the graph). */
   readonly vocabSize: number;
-  /** 停止 token の集合（ADR 0083 決定 8 — 空なら EOS 停止をしない）。 */
+  /** The stop token set (ADR 0083 decision 8 — empty means no EOS stop). */
   readonly stopTokens: readonly number[];
   /**
-   * full スロット容量の**記号名**（`createGenerationContext` の束縛点で使う綴り）。
+   * The **symbol name** of the full-slot capacity (the spelling used at the binding point of
+   * `createGenerationContext`).
    *
-   * MUST: 束縛**値**は持たない。容量は sequence ごとに選べるので、値を配線側にも持つと
-   * 「program の `capacity` と `bindings` のどちらが本当の容量か」という独立に更新される
-   * 二重持ちになる（CLAUDE.md の派生状態の禁止）。記号は資産の綴りで不変、値は実行時ノブ。
+   * MUST: hold no binding **value**. The capacity can be chosen per sequence, so also holding the
+   * value on the wiring side would be an independently updated duplicate ("which is the real
+   * capacity, the program's `capacity` or `bindings`?") (CLAUDE.md's ban on derived state). The
+   * symbol is the asset's spelling and immutable; the value is a run-time knob.
    *
-   * MUST: 入力 shape から決まる記号を指してはならない（{@link createGenerationProgram} が見る）—
-   * その記号は run の入力から決まるので、context 側の束縛と分裂して run が拒否する。
+   * MUST: never point at a symbol determined by input shapes (checked by
+   * {@link createGenerationProgram}) — such a symbol is determined by the run's inputs, so it
+   * splits from the context-side binding and the run rejects it.
    */
   readonly capacitySymbol: string;
-  /** ホスト由来の per-chunk 入力（無い配布形は省略）。 */
+  /** Host-derived per-chunk inputs (omitted for distributions without them). */
   readonly derivedInputs?: DerivedRunInputs;
   /**
-   * **Session 側が常駐入力として差す**グラフ入力の名前（gemma4 の PLE GPU 常駐席 — ADR 0085
-   * 追記〈GPU 常駐席〉）。
+   * Names of the graph inputs that **the Session side plugs in as resident inputs** (gemma4's PLE
+   * GPU residency — ADR 0085 addendum (2026-09-19), GPU residency).
    *
-   * 宣言するのは名前だけで、値は作らない（作り手は run を発行する側 = `Session` の包み）。
-   * それでも席が要るのは「グラフ入力の完全被覆」を setup で見るためで、ここに書かないと
-   * **ホストが作らない入力**が「結線されていない」として落ちる。
+   * Only names are declared; no values are built (the producer is the side that issues the run =
+   * the `Session` wrapper). The slot is still needed to check "complete coverage of the graph
+   * inputs" at setup; without listing them here, **inputs the host does not build** fail as "not
+   * wired".
    *
-   * MUST: {@link DerivedRunInputs.names} と重ねない（同じ入力を 2 つの作り手が名乗る形）。
-   * 重複は {@link assertInputCoverage} が落とす。
+   * MUST: do not overlap with {@link DerivedRunInputs.names} (two producers claiming the same
+   * input). An overlap fails in {@link assertInputCoverage}.
    */
   readonly residentInputs?: readonly string[];
 };
 
 /**
- * 検証済みの静的配線（{@link createGenerationProgram} だけが作る）。**内部の型**で、公開面には
- * 出さない（出す面は {@link GenerationProgram}）。
+ * The verified static wiring (only {@link createGenerationProgram} builds it). An **internal
+ * type**, not on the public surface (the public surface is {@link GenerationProgram}).
  *
- * MUST: フィールドを足すときは {@link createGenerationProgram} の検証も同時に足す — 検証されない
- * 配線欄は「setup 時に全結線を検証する」という本型の存在理由を静かに壊す。
+ * MUST: when adding a field, add its verification to {@link createGenerationProgram} at the same
+ * time — an unverified wiring field silently breaks this type's reason to exist, "verify the whole
+ * wiring at setup".
  */
 export type GenerationWiring = Omit<GenerationProgramSpec, "graph" | "chunkBuckets"> & {
   /**
-   * 検証済みの prefill バケット（**省略できない** — 宣言の無い spec は空配列へ畳んである）。
+   * The verified prefill buckets (**not optional** — a spec without a declaration is folded into
+   * an empty array).
    *
-   * 省略可能なまま持ち回すと、物理行数を選ぶ側（`sequence.ts`）が毎回 `?? []` を書くことに
-   * なり、その 1 つが欠けても「バケットが黙って効かない」だけで例外は出ない。
+   * Carrying it around as optional would make the side that picks physical row counts
+   * (`sequence.ts`) write `?? []` every time, and missing one of them would raise no exception, just
+   * "buckets silently have no effect".
    */
   readonly chunkBuckets: readonly number[];
   /**
-   * hidden 出口の最終軸 H（{@link GenerationProgramSpec.hidden} の宣言形から**導出**した値）。
+   * The last axis H of the hidden exit (a value **derived** from the declared shape of
+   * {@link GenerationProgramSpec.hidden}).
    *
-   * MUST: 呼び手に宣言させない（`vocabSize` と違い、突き合わせる相手が資産側に無い）。
-   * グラフが唯一の源なので、宣言を受けると「配線の H」と「グラフの H」が独立に更新される
-   * 二重持ちになる。
+   * MUST: the caller does not declare it (unlike `vocabSize`, there is nothing on the asset side to
+   * check it against). The graph is the only source, so accepting a declaration would make "the
+   * wiring's H" and "the graph's H" an independently updated duplicate.
    */
   readonly hiddenSize: number;
   /**
-   * 行数記号 R の名前（`last_row` 入力の宣言形 `[R]` から**導出**）。run では `last_row` の要素数が
-   * これを束縛するが、run を伴わない見積り（`estimateGraphMemory` の `bindings`）は入力 shape を
-   * 持たないので、この名前で R = 1 を明示して渡す。
+   * Name of the row-count symbol R (**derived** from the declared shape `[R]` of the `last_row`
+   * input). In a run, the element count of `last_row` binds it, but an estimate without a run
+   * (`bindings` of `estimateGraphMemory`) has no input shapes, so R = 1 is passed explicitly under
+   * this name.
    */
   readonly rowSymbol: string;
 };
 
 /**
- * 検証済み静的配線の**読み口**（公開面 — `Gemma4Pipeline.program`）。
+ * The **read surface** of the verified static wiring (public — `Gemma4Pipeline.program`).
  *
- * 出すのは「自分で `sequence()` を回すときに読む必要がある数」だけである。グラフ入力 / 出力の
- * 名前・容量記号・`derivedInputs` は**内部配線**（{@link GenerationWiring}）で、公開すると
- * ①消費者が読んでも使い道が無い（配線の相手である Session は公開面に出ていない）
- * ②`derive` の差し替えや記号の改変が公開面から書ける — 検証済みであることが
- * `GenerationProgram` の意味そのものなので、書ける口は意味を壊す。
+ * It exposes only "the numbers you need to read when running `sequence()` yourself". Graph input /
+ * output names, the capacity symbol and `derivedInputs` are **internal wiring**
+ * ({@link GenerationWiring}); exposing them would mean (1) consumers reading them have no use for
+ * them (the Session they are wired to is not on the public surface), and (2) replacing `derive` or
+ * altering symbols becomes writable from the public surface — being verified is exactly what
+ * `GenerationProgram` means, so a writable path breaks that meaning.
  *
- * MUST: {@link generationProgramFace} が凍結して返す（`stopTokens` は凍結コピー）。
+ * MUST: {@link generationProgramFace} returns it frozen (`stopTokens` is a frozen copy).
  */
 export type GenerationProgram = {
-  /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — この pipeline が使う値）。 */
+  /** Rows of a fixed-length prefill chunk (ADR 0066 decision 4 — the value this pipeline uses). */
   readonly chunkLength: number;
   /**
-   * prefill 形として `chunkLength` に加えて使う物理 chunk 行数（狭義昇順・空なら無し）。
+   * Physical chunk row counts used as prefill shapes in addition to `chunkLength` (strictly
+   * increasing; empty = none).
    *
-   * 短い chunk はこの中から `queryLength` 以上の最小値を物理行数に選ぶ（無ければ
-   * `chunkLength`）。自分で `sequence()` を回す側が「この prompt 長は何行に載るか」を
-   * 読める唯一の値である。
+   * A short chunk takes the smallest of these ≥ `queryLength` as its physical row count
+   * (`chunkLength` if none). It is the only value from which a side running `sequence()` itself can
+   * read "how many rows this prompt length lands on".
    */
   readonly chunkBuckets: readonly number[];
-  /** 引ける絶対位置の排他的上限（位置は `0..maxPosition-1` — モデルの宣言）。 */
+  /** Exclusive upper bound of absolute positions (`0..maxPosition-1` — the model's declaration). */
   readonly maxPosition: number;
   /**
-   * full スロットの容量の**既定**（`pastLength + queryLength ≤ capacity`）。
+   * The **default** capacity of the full slots (`pastLength + queryLength ≤ capacity`).
    *
-   * 実際に使う容量は sequence ごとに選べる（`GenerationSequence.capacity` が**その会話の**値）。
+   * The capacity actually used can be chosen per sequence (`GenerationSequence.capacity` is the
+   * value **for that conversation**).
    */
   readonly capacity: number;
-  /** 語彙数（`prompt` の token id の値域はここで決まる）。 */
+  /** Vocabulary size (it decides the range of `prompt` token ids). */
   readonly vocabSize: number;
-  /** 停止 token の集合（ADR 0083 決定 8 — 空なら EOS 停止をしない）。 */
+  /** The stop token set (ADR 0083 decision 8 — empty means no EOS stop). */
   readonly stopTokens: readonly number[];
 };
 
 /**
- * 内部配線 → 公開の読み口（**凍結**）。
+ * Internal wiring → public read surface (**frozen**).
  *
- * MUST: `stopTokens` は凍結**コピー**にする。同じ配列を出すと、消費者側の `sort()` /
- * `length = 0` が生成ループの停止集合そのものを書き換える（例外にならない沈黙劣化で、
- * 「EOS で止まらない生成」として現れる）。
+ * MUST: make `stopTokens` a frozen **copy**. Exposing the same array would let a consumer's
+ * `sort()` / `length = 0` rewrite the generation loop's stop set itself (silent degradation without
+ * an exception, showing up as "generation that does not stop at EOS").
  */
 export const generationProgramFace = (wiring: GenerationWiring): GenerationProgram =>
   Object.freeze({
     chunkLength: wiring.chunkLength,
-    // `stopTokens` と同じ理由で凍結コピー（消費者の `sort()` / `length = 0` が物理行数の
-    // 選び方そのものを書き換えないようにする）。
+    // A frozen copy for the same reason as `stopTokens` (a consumer's `sort()` / `length = 0` must
+    // not rewrite how physical row counts are chosen).
     chunkBuckets: Object.freeze([...wiring.chunkBuckets]),
     maxPosition: wiring.maxPosition,
     capacity: wiring.capacity,
@@ -286,7 +322,7 @@ const assertPositiveInteger = (value: number, where: string): void => {
   }
 };
 
-/** 形を診断文へ落とす（記号次元は綴りのまま出す）。 */
+/** Renders a shape for a diagnostic (symbolic dimensions are printed as spelled). */
 const showShape = (shape: readonly (number | string)[]): string => `[${shape.join(",")}]`;
 
 const findInput = (graph: GenerationGraph, name: string, role: string) => {
@@ -305,11 +341,12 @@ const assertDtype = (actual: string, expected: string, where: string): void => {
 };
 
 /**
- * `[1, M]` の i32 入力（M は記号）であることを見る。
+ * Checks that it is a `[1, M]` i32 input (M a symbol).
  *
- * MUST: 2 次元目が**記号**であることまで見る。固定数だと prefill 形（`M = chunkLength`）と
- * decode 形（`M = 1`）の 2 本を同じグラフで回せず（ADR 0066 決定 4）、その食い違いは
- * 「decode の 1 回目で形が合わない」という真因から遠い診断で出る。
+ * MUST: check that the second dimension is a **symbol** too. With a fixed number the prefill shape
+ * (`M = chunkLength`) and the decode shape (`M = 1`) cannot both run on the same graph (ADR 0066
+ * decision 4), and the mismatch would surface as a diagnosis far from the real cause: "the shape
+ * does not match on the first decode".
  */
 const assertRowInput = (graph: GenerationGraph, name: string, role: string): string => {
   const spec = findInput(graph, name, role);
@@ -325,14 +362,16 @@ const assertRowInput = (graph: GenerationGraph, name: string, role: string): str
 };
 
 /**
- * 行選択入力（`[R]` の i32）であることを見て、その**記号名 R** を返す。
+ * Checks that it is a row-selection input (`[R]` i32) and returns its **symbol name R**.
  *
- * MUST: 次元が**記号**であることまで見る。固定数 1 だと「1 run = 1 行」しか焼かれておらず、
- * 投機の verify（draft 行をまとめて検証する run）が同じグラフで回せない。R=1 の run
- * （通常の prefill / decode）は要素 1 本の入力で従来と同じ形に畳まれる。
+ * MUST: check that the dimension is a **symbol** too. With the fixed number 1, only "1 run = 1 row"
+ * is baked in, and speculation's verify (a run that checks the draft rows together) cannot run on
+ * the same graph. An R=1 run (ordinary prefill / decode) folds into the same shape as before with a
+ * one-element input.
  *
- * NOTE: R が入力 shape に現れることが {@link assertSymbols} の前提でもある — 行数は run の
- * 入力（この列の長さ）から決まり、容量記号のように context の束縛を要らない。
+ * NOTE: R appearing in an input shape is also a premise of {@link assertSymbols} — the row count is
+ * determined by the run's input (the length of this sequence) and, unlike the capacity symbol,
+ * needs no context binding.
  */
 const assertLastRowInput = (graph: GenerationGraph, name: string): string => {
   const spec = findInput(graph, name, "last_row 入力");
@@ -348,10 +387,11 @@ const assertLastRowInput = (graph: GenerationGraph, name: string): string => {
 };
 
 /**
- * グラフ**出力**に載っている名前の値情報を引く。
+ * Looks up the value info of a name listed among the graph **outputs**.
  *
- * MUST: **グラフ出力に載っていること**まで見る。ノード出力として存在するだけの名前は run から
- * 返ってこないので、「出力 '…' が無い」という真因から遠い実行時例外になる。
+ * MUST: check **that it is listed among the graph outputs** too. A name that exists only as a node
+ * output is not returned by the run, which turns into a run-time exception far from the real cause:
+ * "output '…' is missing".
  */
 const findOutputValue = (graph: GenerationGraph, name: string, role: string) => {
   if (!graph.outputs.includes(name)) {
@@ -366,11 +406,11 @@ const findOutputValue = (graph: GenerationGraph, name: string, role: string) => 
 };
 
 /**
- * logits 出口（`[1,R,V]` の f32）であることを見る。
+ * Checks that it is the logits exit (`[1,R,V]` f32).
  *
- * MUST: 2 次元目が **`last_row` と同じ記号**であることまで見る。別記号なら「選んだ行数」と
- * 「返る行数」が別々に決まる形で、run は形が合う限り通ってしまう（verify で `R` 行渡したのに
- * 1 行しか返らない、が例外なしで起きる）。
+ * MUST: check that the second dimension is **the same symbol as `last_row`** too. With a different
+ * symbol "the rows selected" and "the rows returned" are decided separately, and the run passes as
+ * long as the shapes match (verify passes `R` rows and only 1 comes back, with no exception).
  */
 const assertLogitsOutput = (
   graph: GenerationGraph,
@@ -395,12 +435,13 @@ const assertLogitsOutput = (
 };
 
 /**
- * hidden 出口（`[1,R,H]` の f32）であることを見て、H を返す。
+ * Checks that it is the hidden exit (`[1,R,H]` f32) and returns H.
  *
- * `vocabSize` に当たる宣言を受けないのは、H を突き合わせる相手が資産側に無いためである
- * （語彙数は tokenizer と PLE の索引の相互照合の基準になるが、hidden 幅はグラフだけが持つ）。
- * よってここが見るのは「正整数の固定次元であること」まで — 記号のままなら run ごとに幅が
- * 変わる形で、drafter 側の重みと繋がらない。
+ * No declaration like `vocabSize` is accepted because there is nothing on the asset side to check H
+ * against (the vocabulary size is the reference for cross-checking the tokenizer and the PLE index,
+ * but only the graph has the hidden width). So this checks only "a fixed positive-integer
+ * dimension" — left as a symbol, the width would vary per run and could not connect to the
+ * drafter's weights.
  */
 const assertHiddenOutput = (graph: GenerationGraph, name: string, rowSymbol: string): number => {
   const info = findOutputValue(graph, name, "hidden 出口");
@@ -422,10 +463,11 @@ const assertHiddenOutput = (graph: GenerationGraph, name: string, rowSymbol: str
 };
 
 /**
- * グラフ入力が過不足なく結線されていることを見る。
+ * Checks that the graph inputs are wired exactly, nothing missing and nothing extra.
  *
- * MUST: 両方向を見る。**欠け**は run が「バッファが無い」で落ちる（真因から遠い）し、
- * **余り**（`derivedInputs.names` に居ない名前を宣言した形）は毎 run 無視される入力を作る。
+ * MUST: check both directions. A **missing** one makes the run fail with "no buffer" (far from the
+ * real cause), and an **extra** one (a declared name that is not in `derivedInputs.names`) creates
+ * an input ignored on every run.
  */
 const assertInputCoverage = (graph: GenerationGraph, wired: readonly string[]): void => {
   const declared = new Set(wired);
@@ -447,11 +489,12 @@ const assertInputCoverage = (graph: GenerationGraph, wired: readonly string[]): 
 };
 
 /**
- * 記号が全部決まることを見る。
+ * Checks that every symbol is determined.
  *
- * 入力 shape に現れる記号は run の入力から決まり、残り（states の容量記号）は
- * `createGenerationContext` の束縛が与える唯一の源である（`resolveBindings` の MUST — states は
- * 束縛源にならない）。両方から漏れた記号は context 生成まで気づけないので、ここで落とす。
+ * Symbols in input shapes are determined by the run's inputs; for the rest (the states' capacity
+ * symbol) the binding of `createGenerationContext` is the only source (the MUST of
+ * `resolveBindings` — states are not a binding source). A symbol missed by both would go unnoticed
+ * until context creation, so it fails here.
  */
 const assertSymbols = (graph: GenerationGraph, capacitySymbol: string): void => {
   const fromInputs = new Set<string>();
@@ -463,8 +506,9 @@ const assertSymbols = (graph: GenerationGraph, capacitySymbol: string): void => 
       `容量記号 ${capacitySymbol} がグラフの symbols [${graph.symbols.join(", ")}] に無い`,
     );
   }
-  // 入力由来の記号を容量記号に選ぶと、run の入力と context の束縛が同じ記号を別の値で決める
-  // （runtime が分裂として拒否する）— 綴りの取り違えなので、配線を組む時点で落とす。
+  // Choosing an input-derived symbol as the capacity symbol makes the run's inputs and the
+  // context's binding decide the same symbol with different values (the runtime rejects the split)
+  // — it is a spelling mix-up, so fail when the wiring is built.
   if (fromInputs.has(capacitySymbol)) {
     throw new Error(
       `容量記号 ${capacitySymbol} は入力 shape から決まる記号である` +
@@ -483,16 +527,18 @@ const assertSymbols = (graph: GenerationGraph, capacitySymbol: string): void => 
 };
 
 /**
- * 静的配線をグラフと突き合わせて確定する（**唯一の入口** — 検証を迂回した program を作らせない）。
+ * Settles the static wiring against the graph (**the only entry** — no program that bypasses
+ * verification can be built).
  *
- * MUST: GPU に触る前に落ちる（引数はグラフと数値だけ）。配線の誤りが 3.7GiB のロードの末に
- * 出るのと、`prepareContainer` の直後に出るのとでは診断の価値が違う。
+ * MUST: fail before touching the GPU (the arguments are only the graph and numbers). A wiring error
+ * after a 3.7GiB load and one right after `prepareContainer` differ in diagnostic value.
  */
 export const createGenerationProgram = (spec: GenerationProgramSpec): GenerationWiring => {
   const { graph } = spec;
   assertPositiveInteger(spec.chunkLength, "chunkLength");
-  // 受理集合の正本は runtime（`createGenerationContext` が同じ関数で拒否する）。ここで通すのは
-  // 「context を作る前に落とす」ためで、規則そのものは持たない。
+  // The acceptance set's source of truth is the runtime (`createGenerationContext` rejects with
+  // the same function). Calling it here is to "fail before the context is built"; this holds no
+  // rule of its own.
   assertChunkBuckets(spec.chunkBuckets, spec.chunkLength);
   assertPositiveInteger(spec.maxPosition, "maxPosition");
   assertPositiveInteger(spec.capacity, "capacity");
@@ -505,17 +551,18 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
 
   const lengthSymbol = assertRowInput(graph, spec.inputIds, "token id 入力");
   const rowSymbol = assertLastRowInput(graph, spec.lastRow);
-  // MUST: 入力長（物理行数）と選択行数は別の記号。同じ記号だと個別の形検査は通るが、prefill
-  // （物理行 chunk・選択行 1）の最初の run で 1 つの記号が 2 つの値に束縛されて拒否される —
-  // decode（どちらも 1）は偶然通るので、誤配線の検出が GPU 構築後まで遅れる。
+  // MUST: the input length (physical rows) and the selected row count are different symbols.
+  // With the same symbol each shape check passes, but the first prefill run (physical rows =
+  // chunk, selected rows = 1) binds one symbol to two values and is rejected — decode (both 1)
+  // passes by chance, so detecting the miswiring is delayed until after the GPU build.
   if (lengthSymbol === rowSymbol) {
     throw new Error(
       `token id 入力 '${spec.inputIds}' の長さと last_row 入力 '${spec.lastRow}' の行数が` +
         `同じ記号 ${rowSymbol} を使っている（入力長と選択行数は run ごとに別の値をとる）`,
     );
   }
-  // 同じ名前を 2 本の出口に結線した形は、V = H のときだけ両方の形検査を通ってしまう
-  // （drafter が logits を hidden として食う = 例外の出ない取り違え）。
+  // Wiring the same name to both exits passes both shape checks only when V = H
+  // (the drafter eats logits as hidden = a mix-up without an exception).
   if (spec.logits === spec.hidden) {
     throw new Error(`logits 出口と hidden 出口が同じ名前 '${spec.logits}' を指している`);
   }
@@ -537,8 +584,9 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
     hiddenSize,
     rowSymbol,
     chunkLength: spec.chunkLength,
-    // 凍結コピー: 配線は不変オブジェクトなので、呼び手の配列を後から書き換えられると
-    // 「context が許す集合」と「物理行数を選ぶ集合」が実行中に割れる。
+    // A frozen copy: the wiring is an immutable object, so if the caller's array were rewritten
+    // later, "the set the context allows" and "the set physical row counts are chosen from" would
+    // split during execution.
     chunkBuckets: Object.freeze([...(spec.chunkBuckets ?? [])]),
     maxPosition: spec.maxPosition,
     capacity: spec.capacity,

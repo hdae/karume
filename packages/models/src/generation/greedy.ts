@@ -1,17 +1,19 @@
 /**
- * 固定長 greedy 生成ループ（**パイプライン非依存の共通処理** — autoregressive な言語モデルは
- * 総じて「プロンプトを固定長 chunk で流し込む → 1 token ずつ回す」を通る）なので、ファミリの
- * ディレクトリではなく `src/generation/` に置く（`src/image/` / `src/audio/` と同じ位置づけ）。
+ * Fixed-length greedy generation loop (**pipeline-independent shared code** — autoregressive language
+ * models generally go through "feed the prompt in fixed-length chunks → step one token at a time"),
+ * so it lives in `src/generation/` and not in a family directory (the same standing as `src/image/` /
+ * `src/audio/`).
  *
- * 実行形は ADR 0066 決定 4 の **2 本だけ**: prefill は物理 chunk 行数 `M = chunkLength` 固定で
- * 末尾 chunk を pad し、decode は `M = queryLength = 1`。切るのは `queryLength` で、論理長
- * （`pastLength`）はホストが持たない — 進行は run の成功で context が進める（決定 6 の
- * 二重簿記の禁止）。したがってこのループが覚えているのは「次に食わせる token と絶対位置」だけ。
+ * The execution shapes are **only the two** of ADR 0066 decision 4: prefill pads the last chunk with
+ * the physical chunk row count fixed at `M = chunkLength`, and decode is `M = queryLength = 1`. What
+ * is cut is `queryLength`; the host does not hold the logical length (`pastLength`) — the context
+ * advances it when a run succeeds (decision 6's ban on double bookkeeping). So the only thing this
+ * loop remembers is "the next token to feed and its absolute position".
  *
- * MUST: sampling は載せない。次 token はグラフ側の argmax 出力（`[1,M,1]` の i32）をそのまま
- * 読むだけで、温度も top-k も RNG もホストに置かない（sampling / RNG は op-vocabulary の裁定
- * どおりホスト維持だが、この関数の目的は**固定 token id 列での検収**なので決定的な経路 1 本に
- * 閉じる）。
+ * MUST: no sampling here. The next token is read as is from the graph's argmax output (`[1,M,1]`
+ * i32), and no temperature, top-k or RNG is kept on the host (sampling / RNG stay on the host as the
+ * op-vocabulary ruling says, but the purpose of this function is **acceptance on a fixed token id
+ * sequence**, so it is closed to a single deterministic path).
  */
 
 import type {
@@ -23,19 +25,22 @@ import type {
   Tensor,
 } from "@karume/runtime";
 
-/** 生成ループが context に要求する面 — 実体は不透明で、寿命の返却だけを呼ぶ。 */
+/** The surface the generation loop requires of a context — opaque; only its release is called. */
 export type GenerationDisposable = { dispose(): Promise<void> };
 
 /**
- * 生成ループが Session に要求する面（narrow interface — DI で fake を差せる）。
+ * The surface the generation loop requires of a Session (narrow interface — DI lets a fake stand
+ * in).
  *
- * MUST: `Pick<Session, "run" | "createGenerationContext">` にはしない。`GenerationContext` は
- * `#` private を持つ**名前的な型**で、GPU 無しの fake がどう書いても満たせないため、Pick では
- * 単体テストが実 GPU を要求する形になる。context の型を型引数で通してあるのは「create が返した
- * 実体だけが run へ戻る」ことを型で縛るためで、`{ dispose }` に潰すと（メソッドの双変性で）
- * 別の context を実 Session へ渡す形が型検査を通ってしまう。
+ * MUST: not `Pick<Session, "run" | "createGenerationContext">`. `GenerationContext` is a **nominal
+ * type** with `#` private fields that no GPU-free fake can satisfy however it is written, so with
+ * Pick the unit tests would require a real GPU. The context type is threaded through as a type
+ * parameter to pin in the types that "only the object create returned goes back into run";
+ * collapsing it to `{ dispose }` would (through method bivariance) let passing another context to a
+ * real Session pass the type check.
  *
- * MUST: 実 `Session` がこの面を満たすことはテスト側の型門で固定する（綴りのドリフト検出）。
+ * MUST: that the real `Session` satisfies this surface is pinned by a type check on the test side
+ * (detects spelling drift).
  */
 export type GreedySession<C extends GenerationDisposable = GenerationContext> = {
   createGenerationContext(spec: GenerationContextSpec): Promise<C>;
@@ -46,59 +51,65 @@ export type GreedySession<C extends GenerationDisposable = GenerationContext> = 
   ): Promise<RunOutputs>;
 };
 
-/** {@link generateGreedy} の指定。 */
+/** Specification of {@link generateGreedy}. */
 export type GreedySpec<C extends GenerationDisposable = GenerationContext> = {
   readonly session: GreedySession<C>;
-  /** token id 列を受けるグラフ入力の名前（`[1,M]` の i32）。 */
+  /** Name of the graph input that receives the token id sequence (`[1,M]` i32). */
   readonly inputIds: string;
   /**
-   * ホスト由来の派生入力の作り手（`program.ts` の `DerivedRunInputs` と同じ席の最小形）。
+   * Producer of host-derived inputs (the minimal form of the same slot as `DerivedRunInputs` in
+   * `program.ts`).
    *
-   * 渡るのは**物理行数ぶん**の token id 列と絶対位置列（prefill は pad 行込み・decode は 1 行）で、
-   * pad 行にはどちらも 0 が入る（ADR 0066 追記 6 の値契約）。返り値はそのまま run の入力へ
-   * 展開するので、位置に依存するグラフ入力（gemma4 の RoPE cos / sin — `gemma/rope.ts`・
-   * MiniCPM5 decode 系列の `position_ids`）はここが唯一の供給口である。
+   * It receives the token id sequence and the absolute position sequence **for the physical row
+   * count** (prefill including pad rows, decode one row), with 0 in both for pad rows (the value
+   * contract of ADR 0066 addendum 6). The return value is spread into the run's inputs as is, so
+   * this is the only supplier of position-dependent graph inputs (gemma4's RoPE cos / sin —
+   * `gemma/rope.ts`; `position_ids` of the MiniCPM5 decode series).
    *
-   * MUST: **同期の純関数**（同じ `(ids, positions)` に同じ値）。`sequence.ts` 側が非同期なのは
-   * GB 級の遅延ロード（PLE の block）を待つ席が要るためで、この関数の目的は固定 token id 列での
-   * 検収なので、待ちの入る派生入力は通さない。
+   * MUST: a **synchronous pure function** (the same value for the same `(ids, positions)`).
+   * `sequence.ts` is asynchronous because it needs a place to wait for GB-scale lazy loads (PLE
+   * blocks); the purpose of this function is acceptance on a fixed token id sequence, so derived
+   * inputs that wait are not passed through.
    */
   readonly derive?: (ids: Int32Array<ArrayBuffer>, positions: Int32Array<ArrayBuffer>) => RunInputs;
-  /** argmax token を出すグラフ出力の名前（`[1,M,1]` の i32 — token-only 形は `[1,1,1]`）。 */
+  /** Name of the graph output with the argmax token (`[1,M,1]` i32 — `[1,1,1]` for token-only). */
   readonly token: string;
   /**
-   * token-only 出口（ADR 0068 決定 4 の既定形）の **last_row 入力**の名前（`[1]` の i32）。
-   * 指定すると各 run に最終有効行の添字（prefill = `queryLength − 1` / decode = `0`）を供給し、
-   * `token` 出力を `[1,1,1]`（選ばれた 1 行ぶん）として読む。省略時は現行の logits opt-in 形
-   * （`[1,M,1]` の全行 argmax から最終有効行を読む）。
+   * Name of the **last_row input** (`[1]` i32) of the token-only exit (the form ADR 0068 decision 4
+   * made the default; that default was superseded by ADR 0083 decision 6). When given, each run is
+   * supplied with the index of the last valid row (prefill = `queryLength − 1` / decode = `0`) and
+   * the `token` output is read as `[1,1,1]` (the one selected row). When omitted, the current logits
+   * opt-in form (read the last valid row from the all-row argmax `[1,M,1]`).
    */
   readonly lastRow?: string;
-  /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。 */
+  /** Rows of a fixed-length prefill chunk (ADR 0066 decision 4 — a plan-time context constant). */
   readonly chunkLength: number;
   /**
-   * 引ける絶対位置の**排他的上限**（位置は `0..maxPosition-1` — モデルが宣言する位置上限。
-   * RoPE 表を焼いたまま出す系列ではその表の行数がそのまま上限で、MiniCPM5 decode 系列は 512）。
+   * **Exclusive upper bound** of the absolute positions that can be looked up (positions are
+   * `0..maxPosition-1` — the position limit the model declares. For series that ship with the RoPE
+   * table baked in, the table's row count is the limit as is; the MiniCPM5 decode series has 512).
    *
-   * MUST: 省略可能にしない。上限の外の位置は例外を出さず（表を焼いた系列の OOB gather は
-   * by-design で非有限 — limitations。表を持たない系列でも学習していない位置の attention に
-   * なる）、argmax がその logits を**もっともらしい token id に畳む**ので、上限を知らないまま
-   * 回すと生成の後半が沈黙誤 token になる（2026-08-18 実測 — 位置 512 で全 logits 非有限 →
-   * token 0）。ここで落とすのが唯一の fail loudly の位置。
+   * MUST: not optional. A position beyond the limit raises no exception (the OOB gather of a series
+   * with a baked table is non-finite by design — limitations; even a series without a table attends
+   * at positions it was never trained on), and argmax **folds those logits into a plausible token
+   * id**, so running without knowing the limit makes the second half of generation silently wrong
+   * tokens (measured 2026-08-18 — all logits non-finite at position 512 → token 0). Failing here is
+   * the only place to fail loudly.
    */
   readonly maxPosition: number;
-  /** state スロット容量の記号束縛（`createGenerationContext` へ素通し）。 */
+  /** Symbol bindings of the state slot capacity (passed through to `createGenerationContext`). */
   readonly bindings?: SymbolBindings;
-  /** プロンプトの token id 列（長さ 1 以上）。 */
+  /** The prompt's token id sequence (length 1 or more). */
   readonly prompt: readonly number[];
-  /** 生成する token 数（1 以上）。 */
+  /** Number of tokens to generate (1 or more). */
   readonly maxNewTokens: number;
 };
 
-/** prefill 1 回ぶんの割り当て（{@link planPrefillChunks}）。 */
+/** The assignment of one prefill ({@link planPrefillChunks}). */
 export type PrefillChunk = {
-  /** 先頭有効行の絶対位置（= それまでに流し込んだ token 数）。 */
+  /** Absolute position of the first valid row (= the number of tokens fed so far). */
   readonly position: number;
-  /** 有効行数（`1..chunkLength` — 末尾 chunk だけが chunkLength 未満になりうる）。 */
+  /** Valid row count (`1..chunkLength` — only the last chunk can be shorter than chunkLength). */
   readonly queryLength: number;
 };
 
@@ -109,11 +120,13 @@ const assertPositiveInteger = (value: number, where: string): void => {
 };
 
 /**
- * プロンプト長を固定長 chunk へ割る（ADR 0066 決定 4 — 可変長 chunk も全量一括も採らない）。
+ * Splits the prompt length into fixed-length chunks (ADR 0066 decision 4 — neither variable-length
+ * chunks nor feeding everything at once).
  *
- * 末尾 chunk だけが `queryLength < chunkLength` になり、その差が pad 行。**純関数**にしてある
- * のは、割り方の誤り（位置の飛び / 重なり / 末尾の取りこぼし）が GPU を回さずに落ちる位置に
- * あるべきだからで、`generateGreedy` の入口検査もここ 1 本に相乗りしている。
+ * Only the last chunk has `queryLength < chunkLength`, and the difference is pad rows. It is a
+ * **pure function** because split errors (a skipped position / an overlap / a dropped tail) belong
+ * where they fail without running the GPU; the entry check of `generateGreedy` rides on this one
+ * function too.
  */
 export const planPrefillChunks = (
   promptLength: number,
@@ -128,14 +141,14 @@ export const planPrefillChunks = (
   return chunks;
 };
 
-/** i32 の入力テンソル 1 本（token id 列も絶対位置列も `[1, rows]`）。 */
+/** One i32 input tensor (both the token id sequence and the absolute positions are `[1, rows]`). */
 const i32Row = (rows: number, data: Int32Array<ArrayBuffer>): Tensor => ({
   dtype: "i32",
   shape: [1, rows],
   data,
 });
 
-/** token-only 形の last_row 入力（`[1]` の i32 — 選ぶ行の添字）。 */
+/** The last_row input of the token-only form (`[1]` i32 — the index of the row to select). */
 const lastRowInput = (row: number): Tensor => ({
   dtype: "i32",
   shape: [1],
@@ -146,9 +159,10 @@ const prefillInputs = <C extends GenerationDisposable>(
   spec: GreedySpec<C>,
   chunk: PrefillChunk,
 ): RunInputs => {
-  // MUST: pad 行は 0 のまま（ADR 0066 追記 6 の値契約 — pad 行の値が非有限だと「−inf 加算 +
-  // exp」経路で valid 行へ漏れるので、ホストが 0 で埋める）。`Int32Array` の初期値がそのまま
-  // その契約なので、埋めるのは先頭 queryLength 行だけでよい。
+  // MUST: pad rows stay 0 (the value contract of ADR 0066 addendum 6 — non-finite pad-row values
+  // would leak into valid rows through the "−inf add + exp" path, so the host fills them with 0).
+  // The initial value of `Int32Array` is that contract as is, so only the first queryLength rows
+  // need filling.
   const ids = new Int32Array(spec.chunkLength);
   const positions = new Int32Array(spec.chunkLength);
   for (let row = 0; row < chunk.queryLength; row += 1) {
@@ -157,7 +171,8 @@ const prefillInputs = <C extends GenerationDisposable>(
   }
   return {
     [spec.inputIds]: i32Row(spec.chunkLength, ids),
-    // token-only 形は最終**有効**行を添字で選ぶ（pad 行の lm_head は走らない — ADR 0068 決定 4）。
+    // The token-only form selects the last **valid** row by index (the lm_head does not run on pad
+    // rows — ADR 0068 decision 4).
     ...(spec.lastRow === undefined ? {} : { [spec.lastRow]: lastRowInput(chunk.queryLength - 1) }),
     ...(spec.derive === undefined ? {} : spec.derive(ids, positions)),
   };
@@ -178,11 +193,12 @@ const decodeInputs = <C extends GenerationDisposable>(
 };
 
 /**
- * argmax 出力の 1 行から token id を読む。
+ * Reads a token id from one row of the argmax output.
  *
- * MUST: dtype と形をここで検査する（fail loudly）。**出力名の取り違え**は、たまたま形の合う
- * 別の出力（logits など）を掴むと例外も警告も出ないまま誤った token 列を返すので、名前の
- * 引き当てと同時に「argmax token 列の形」であることを見る。
+ * MUST: check the dtype and shape here (fail loudly). **A mixed-up output name** that happens to
+ * catch another output with a matching shape (logits, for example) returns a wrong token sequence
+ * with no exception and no warning, so together with looking up the name, this checks that it has
+ * "the shape of an argmax token sequence".
  */
 const readToken = (outputs: RunOutputs, name: string, rows: number, row: number): number => {
   if (!Object.hasOwn(outputs, name)) throw new Error(`グラフ出力 '${name}' が無い`);
@@ -206,10 +222,11 @@ const readToken = (outputs: RunOutputs, name: string, rows: number, row: number)
 };
 
 /**
- * プロンプトから `maxNewTokens` 個の token を greedy に生成する（ADR 0066 決定 4 の 2 形）。
+ * Generates `maxNewTokens` tokens greedily from the prompt (the two shapes of ADR 0066 decision 4).
  *
- * NOTE: **EOS 停止は載せない** — 固定 token id 列での parity 検収が目的で、停止条件を持つと
- * 「どこで止まったか」が比較対象に混ざる（実用の停止はこの返り値を見る呼び出し側の仕事）。
+ * NOTE: **no EOS stop** — the purpose is parity acceptance on a fixed token id sequence, and a stop
+ * condition would mix "where it stopped" into what is compared (practical stopping is the job of the
+ * caller that looks at this return value).
  */
 export const generateGreedy = async <C extends GenerationDisposable>(
   spec: GreedySpec<C>,
@@ -219,14 +236,16 @@ export const generateGreedy = async <C extends GenerationDisposable>(
   assertPositiveInteger(maxNewTokens, "maxNewTokens");
   assertPositiveInteger(maxPosition, "maxPosition");
   prompt.forEach((id, index) => {
-    // `Int32Array` への書き込みは非整数の切り詰めも i32 値域外の wrap も**黙って**行う
-    // （例: 2^32+1 → 1 — 別の有効 token id に化けて例外にならない）ので、入口で落とす。
+    // Writing to an `Int32Array` **silently** truncates non-integers and wraps values outside the
+    // i32 range (e.g. 2^32+1 → 1 — it turns into another valid token id without an exception), so
+    // fail at the entry.
     if (!Number.isSafeInteger(id) || id < 0 || id > 0x7fffffff) {
       throw new Error(`prompt[${index}] ${id} が 0..2147483647 の整数でない`);
     }
   });
-  // 踏む最大の絶対位置 = 最終 decode step の T + maxNewTokens - 2（decode 0 回なら prefill の
-  // T - 1 で、同じ式に畳まれる）。表の外は沈黙誤 token（maxPosition の JSDoc）なのでここで落とす。
+  // The largest absolute position touched = T + maxNewTokens - 2 at the last decode step (with zero
+  // decodes it is prefill's T - 1, which folds into the same formula). Outside the table means
+  // silently wrong tokens (the JSDoc of maxPosition), so fail here.
   const lastPosition = prompt.length + maxNewTokens - 2;
   if (lastPosition >= maxPosition) {
     throw new Error(
@@ -235,14 +254,16 @@ export const generateGreedy = async <C extends GenerationDisposable>(
     );
   }
 
-  // MUST: 容量記号（states 専用記号）の束縛点は context 生成**だけ**で、run の bindings へは
-  // 渡さない（ADR 0066 追記 7 — run の記号解決に効くのは入力由来の束縛だけ）。
+  // MUST: the capacity symbol (a states-only symbol) is bound **only** at context creation and is
+  // not passed to the run's bindings (ADR 0066 addendum 7 — only input-derived bindings take part
+  // in the run's symbol resolution).
   const context = await session.createGenerationContext({
     bindings: spec.bindings,
     chunkLength,
   });
   try {
-    // token-only 形は出力が選ばれた 1 行ぶん（`[1,1,1]`）なので、読む位置は形も添字も固定。
+    // The token-only form outputs only the selected row (`[1,1,1]`), so both the shape and the
+    // index read are fixed.
     const tokenOnly = spec.lastRow !== undefined;
     let token = 0;
     for (const chunk of chunks) {
@@ -250,16 +271,17 @@ export const generateGreedy = async <C extends GenerationDisposable>(
         context,
         queryLength: chunk.queryLength,
       });
-      // 生成の起点になるのは**最終 chunk の最終有効行**だけ（chunks は 1 本以上なので、この
-      // 初期値は必ず上書きされる）。途中 chunk の出力は捨てる。
+      // Only **the last valid row of the last chunk** starts generation (there is at least one
+      // chunk, so this initial value is always overwritten). Outputs of earlier chunks are dropped.
       token = tokenOnly
         ? readToken(outputs, spec.token, 1, 0)
         : readToken(outputs, spec.token, chunkLength, chunk.queryLength - 1);
     }
 
     const generated = [token];
-    // decode は「位置 `T + i` に `g_i` を置くと `g_{i+1}` が出る」形。前 step の返り値を
-    // そのまま次の入力にするのが greedy の feedback で、ここが唯一の状態。
+    // Decode has the shape "placing `g_i` at position `T + i` yields `g_{i+1}`". Feeding the
+    // previous step's return value straight into the next input is greedy's feedback, and this is
+    // the only state.
     for (let index = 0; index + 1 < maxNewTokens; index += 1) {
       const outputs = await session.run(
         decodeInputs(spec, generated[index], prompt.length + index),
@@ -270,8 +292,9 @@ export const generateGreedy = async <C extends GenerationDisposable>(
     }
     return generated;
   } finally {
-    // MUST: 途中で落ちても返す（失敗した context は poison 化していて再利用できない —
-    // ADR 0066 追記 3。抱えたままにすると KV 容量ぶんの VRAM が生成 1 本ごとに積み上がる）。
+    // MUST: release it even after a failure midway (a failed context is poisoned and cannot be
+    // reused — ADR 0066 addendum 3. Holding on to it piles up VRAM of the KV capacity per
+    // generation).
     await context.dispose();
   }
 };

@@ -1,27 +1,34 @@
 /**
- * Wan2.2 TI2V の I2V の VAE encoder の段 — 条件画像 1 枚を encode の chunk 0 で潜在にする（ADR 0121 決定 11・段 9）。
+ * The VAE encoder stage of Wan2.2 TI2V's I2V — turns one condition image into a latent with encode
+ * chunk 0 (ADR 0121 decision 11, stage 9).
  *
- * encoder は記号長の 3 グラフ（recipe `wan/export_vae_encoder.py`）。mid block の attention の前後で分けてあるのは、
- * IR の次元式が記号 1 つの一次式で、attention が作る系列長 h·w を 1 軸に書けないから（ADR 0121 の追記「段 9 の計画の
- * 裁定と段 9a の結果」）:
+ * The encoder is three symbolic-length graphs (recipe `wan/export_vae_encoder.py`). It is split before
+ * and after the mid block's attention because the IR's dimension expressions are linear in a single
+ * symbol, and the sequence length h·w that attention creates cannot be written as one axis (ADR 0121
+ * addendum "stage 9 plan rulings and stage 9a results"):
  *
- * | 部品               | 入力 → 出力                                             | 記号     |
+ * | Component          | Input → output                                          | Symbols  |
  * | ------------------ | ------------------------------------------------------- | -------- |
- * | `vae_encoder_pre`  | patchify 済みの画像 `[3·p², 1, k·h, k·w]` → `[C, 1, h, w]` | h, w     |
- * | `vae_encoder_attn` | `[C, S]` → `[C, S]`                                     | S（h·w） |
+ * | `vae_encoder_pre`  | patchified image `[3·p², 1, k·h, k·w]` → `[C, 1, h, w]` | h, w     |
+ * | `vae_encoder_attn` | `[C, S]` → `[C, S]`                                     | S (h·w)  |
  * | `vae_encoder_post` | `[C, 1, h, w]` → mu `[Cz, 1, h, w]`                     | h, w     |
  *
- * h, w は潜在の高さ・幅、k は入口の倍率（空間の圧縮 ÷ p — p は記述子の `vaePatchSize`）、C は mid block のチャネル数、
- * Cz は潜在のチャネル数。3 Session は同じ GpuContext に張り、1 本の batch で pre → attn → post を enqueue して常駐
- * テンソルで受け渡す（`[C, 1, h, w]` と `[C, S]` は同じバイト列の読み替えなので写し直さない）。読み戻しは mu の 1 回
- * だけで、mu は `normalizeWanLatents` で正規化して DiT の条件の潜在にする。
+ * h, w are the latent height and width, k the entry factor (spatial compression ÷ p — p is the
+ * descriptor's `vaePatchSize`), C the mid block's channel count, Cz the latent channel count. The
+ * three Sessions are created on the same GpuContext; pre → attn → post are enqueued in one batch
+ * and hand over through resident tensors (`[C, 1, h, w]` and `[C, S]` are reinterpretations of the
+ * same bytes, so nothing is copied again). There is a single read-back, of mu, and mu is normalized
+ * by `normalizeWanLatents` into the DiT's condition latent.
  *
- * 段の順序と Session の寿命（encoder → text → DiT → VAE を 1 段ずつ張って畳む）は `./pipeline.ts` 冒頭の doc が正本で、
- * ここは encoder の段 1 本を回すだけ。`owner` は文言の接頭辞（`"WanTi2vPipeline"`）。
+ * The stage order and Session lifetimes (encoder → text → DiT → VAE, each created and closed one stage
+ * at a time) are defined by the doc at the top of `./pipeline.ts`; this module only runs the one
+ * encoder stage. `owner` is the message prefix (`"WanTi2vPipeline"`).
  *
- * NOTE: `export` はパイプラインの内部と、GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: `export` is for the pipeline internals and for tests that pin the checks without a GPU (not on
+ * the `mod.ts` / subpath surface — ADR 0008).
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is side-effect free (no import-time execution, no global mutable state —
+ * CLAUDE.md).
  */
 
 import type { GpuContext, ResidentTensor, Session, SessionDiagnostics } from "@karume/runtime";
@@ -38,49 +45,61 @@ import type { WanI2vImageInput } from "./i2v-preprocess.ts";
 import { normalizeWanLatents } from "./latents.ts";
 import { wanSpatialCompression } from "./tile-decode.ts";
 
-/** 部品のキー（系列のグラフ名 = manifest の weights 名 — recipe `wan/export_vae_encoder.py`）。 */
+/**
+ * Component keys (the series' graph names = the manifest's weights names — recipe
+ * `wan/export_vae_encoder.py`).
+ */
 export const VAE_ENCODER_PRE = "vae_encoder_pre";
 export const VAE_ENCODER_ATTN = "vae_encoder_attn";
 export const VAE_ENCODER_POST = "vae_encoder_post";
 
-/** encoder の 3 部品（段の中で回す順）。 */
+/** The encoder's three components (in the order they run within the stage). */
 export const WAN_VAE_ENCODER_KEYS: readonly string[] = [
   VAE_ENCODER_PRE,
   VAE_ENCODER_ATTN,
   VAE_ENCODER_POST,
 ];
 
-/** 条件画像のチャネル数（RGB — patchify の前）。 */
+/** The channel count of the condition image (RGB — before patchify). */
 const RGB_CHANNELS = 3;
 
-/** 要素あたりのバイト数（意味論 dtype は全て 4 バイト — ADR 0009）。 */
+/** Bytes per element (every semantic dtype is 4 bytes — ADR 0009). */
 const BYTES_PER_ELEMENT = 4;
 
-/** 構築時に確かめた encoder の 3 グラフの取り決め（{@link wanVaeEncoderContract}）。 */
+/** The encoder's three-graph contract, confirmed at construction ({@link wanVaeEncoderContract}). */
 export type WanVaeEncoderContract = {
   readonly pre: { readonly input: string; readonly output: string };
-  /** `sequence` は系列長の記号（束縛 `S = h·w` の名前）。 */
+  /** `sequence` is the sequence-length symbol (the name of the binding `S = h·w`). */
   readonly attn: { readonly input: string; readonly output: string; readonly sequence: string };
-  /** `height` / `width` は post の記号（常駐の入力は束縛の源にならないので bindings で渡す）。 */
+  /**
+   * `height` / `width` are post's symbols (a resident input is not a binding source, so they are
+   * passed as bindings).
+   */
   readonly post: {
     readonly input: string;
     readonly output: string;
     readonly height: string;
     readonly width: string;
   };
-  /** mid block のチャネル数（pre の出口 = attn の系列の幅 = post の入口）。 */
+  /** The mid block's channel count (pre's exit = the width of attn's sequence = post's entry). */
   readonly hiddenChannels: number;
-  /** 潜在のチャネル数（post の出口 = mu の本数 — VAE decoder の潜在と同じ）。 */
+  /** The latent channel count (post's exit = mu's channel count — same as the VAE decoder's latent). */
   readonly latentChannels: number;
-  /** pre の入口のチャネル数（`3·p²` — patchify 済みの画像）。 */
+  /** The channel count at pre's entry (`3·p²` — the patchified image). */
   readonly patchChannels: number;
-  /** pre の入口の空間の倍率 k（patchify 済みの画像の辺 = k × 潜在の辺）。 */
+  /** The spatial factor k at pre's entry (the patchified image's edge = k × the latent edge). */
   readonly inputScale: number;
-  /** 空間の圧縮（画像の画素 / 潜在 — decoder と同じ 1 本 `wanSpatialCompression`）。 */
+  /**
+   * The spatial compression (image pixels / latent — the same single function as the decoder,
+   * `wanSpatialCompression`).
+   */
   readonly compression: number;
 };
 
-/** encoder の 3 部品（構築時に開いた供給口と、admission で確かめた取り決め）。 */
+/**
+ * The encoder's three components (the suppliers opened at construction and the contract confirmed in
+ * admission).
+ */
 export type WanVaeEncoder = {
   readonly pre: ModelComponent;
   readonly attn: ModelComponent;
@@ -88,11 +107,14 @@ export type WanVaeEncoder = {
   readonly contract: WanVaeEncoderContract;
 };
 
-/** 記号 1 つの次元を係数 k 倍した正準表記（IR の次元式 `coeff·sym` — 係数 1 は省く）。 */
+/**
+ * The canonical notation of a single-symbol dimension times a coefficient k (the IR dimension
+ * expression `coeff·sym` — coefficient 1 is omitted).
+ */
 const scaledSymbol = (scale: number, symbol: string): string =>
   scale === 1 ? symbol : `${scale}${symbol}`;
 
-/** グラフの唯一の入力と出力（f32 の 1 本 → 1 本 — ホストはそれだけを組んで読む）。 */
+/** The graph's sole input and output (one f32 → one — the host builds and reads only that). */
 const soleIo = (owner: string, part: string, model: GraphOwner) => {
   const { inputs, outputs } = model.graph;
   if (inputs.length !== 1 || outputs.length !== 1) {
@@ -115,7 +137,7 @@ const soleIo = (owner: string, part: string, model: GraphOwner) => {
   return { input: input.name, inputShape: input.shape, output, outputShape: value.shape };
 };
 
-/** 軸の宣言が記号そのもの（係数 1・オフセット 0 — 宣言の記号の 1 つ）であること。 */
+/** The axis declaration is a bare symbol (coefficient 1, offset 0 — one of the declared symbols). */
 const symbolAt = (
   owner: string,
   part: string,
@@ -133,7 +155,7 @@ const symbolAt = (
   return dim;
 };
 
-/** 軸の宣言が静的次元であること。 */
+/** The axis declaration is a static dimension. */
 const staticAt = (
   owner: string,
   part: string,
@@ -148,7 +170,7 @@ const staticAt = (
   return dim;
 };
 
-/** 宣言の記号の集合がちょうど `expected` であること（束縛の源はホストが渡す分だけ）。 */
+/** The declared symbols are exactly `expected` (binding sources are only what the host passes). */
 const assertSymbols = (
   owner: string,
   part: string,
@@ -166,21 +188,23 @@ const assertSymbols = (
   }
 };
 
-/** 寸法 1 つに対する encoder の束縛（{@link wanVaeEncoderBinding}）。 */
+/** The encoder's bindings for one size ({@link wanVaeEncoderBinding}). */
 export type WanVaeEncoderBinding = {
-  /** 潜在の高さ・幅（post の記号の値・attn の系列長は `height·width`）。 */
+  /** The latent height and width (post's symbol values; attn's sequence length is `height·width`). */
   readonly height: number;
   readonly width: number;
-  /** pre の入口の形 `[3·p², 1, k·h, k·w]`（前処理の出力の形と一致すること）。 */
+  /** The shape of pre's entry `[3·p², 1, k·h, k·w]` (matches the shape of the preprocessing output). */
   readonly inputShape: readonly [number, number, number, number];
 };
 
 /**
- * 出力寸法 `size` の encoder の束縛（潜在の高さ・幅と pre の入口の形）。割り切れない寸法は素の `Error`（受理寸法は
- * 入口の門が先に絞るので、ここで落ちるのは資産と記述子の齟齬）。
+ * The encoder's bindings for the output size `size` (the latent height and width and the shape of
+ * pre's entry). A size that does not divide evenly is a plain `Error` (the entry check narrows the
+ * accepted sizes first, so a failure here means the asset and the descriptor disagree).
  *
- * MUST: admission の被覆の門（{@link wanVaeEncoderContract}）と段（{@link encodeWanImageStage}）は同じこの 1 本で束縛を
- * 導く — 2 経路で導くと、admission が通した寸法を段が別の形で回しうる。
+ * MUST: the admission coverage check ({@link wanVaeEncoderContract}) and the stage
+ * ({@link encodeWanImageStage}) derive the bindings with this same function — derived on two paths,
+ * the stage could run a size admission accepted with a different shape.
  */
 export const wanVaeEncoderBinding = (
   contract: WanVaeEncoderContract,
@@ -208,19 +232,25 @@ export const wanVaeEncoderBinding = (
 };
 
 /**
- * encoder の 3 グラフの宣言を、ホストが組む入力と読む出力・VAE decoder の潜在と突き合わせ、受理寸法を全部覆えるかを
- * 見る（家族 admission の門 — 重みの part を取る前）。
+ * Matches the declarations of the encoder's three graphs against the inputs the host builds, the
+ * outputs it reads and the VAE decoder's latent, and checks that they cover every accepted size (a
+ * family admission check — before the weight parts are fetched).
  *
- * - 各グラフは f32 の入力 1 本 → 出力 1 本。pre は `[3·p², 1, k·h, k·w]` → `[C, 1, h, w]`（k = 空間の圧縮 ÷ p・
- *   記号は h, w の 2 つだけ）、attn は `[C, S]` → `[C, S]`（記号は S だけ）、post は `[C, 1, h, w]` → `[Cz, 1, h, w]`
- *   （記号は h, w の 2 つだけ）。C は 3 本で同じ・Cz は decoder の潜在のチャネル数。
- * - 被覆: 記号長のグラフに寸法ごとの形は無いので、受理寸法ごとに束縛（{@link wanVaeEncoderBinding}）が整数で
- *   導けること。入口の倍率 k は decoder の空間の圧縮から導いた値で照合するので、圧縮の違う encoder は形の検査で落ちる。
+ * - Each graph is one f32 input → one output. pre is `[3·p², 1, k·h, k·w]` → `[C, 1, h, w]` (k =
+ *   spatial compression ÷ p; only the two symbols h, w), attn is `[C, S]` → `[C, S]` (only the symbol
+ *   S), post is `[C, 1, h, w]` → `[Cz, 1, h, w]` (only the two symbols h, w). C is the same in all
+ *   three; Cz is the decoder's latent channel count.
+ * - Coverage: a symbolic-length graph has no per-size shapes, so for each accepted size the bindings
+ *   ({@link wanVaeEncoderBinding}) must come out as integers. The entry factor k is matched with the
+ *   value derived from the decoder's spatial compression, so an encoder with a different compression
+ *   fails the shape check.
  *
- * MUST: admission で呼ぶ。ホストは自分の定数で入力を組み、束縛を渡すので、宣言が違っていても落ちるのは 3 つの
- * Session を張った後の batch の中（失敗の帰属は batch 単位で、どのグラフかも絞れない）になる。
+ * MUST: call in admission. The host builds the inputs with its own constants and passes the bindings,
+ * so a differing declaration would fail only inside the batch after the three Sessions are created
+ * (failure attribution is per batch, and it cannot even be narrowed to which graph).
  *
- * NOTE: 記号の名前はグラフの宣言から読む（ホストに綴らない — 束縛は名前で渡す）。
+ * NOTE: symbol names are read from the graph declarations (not spelled out on the host — bindings are
+ * passed by name).
  */
 export const wanVaeEncoderContract = (
   parts: { readonly pre: GraphOwner; readonly attn: GraphOwner; readonly post: GraphOwner },
@@ -306,17 +336,20 @@ export const wanVaeEncoderContract = (
   return contract;
 };
 
-/** encoder の段が読む構築済みの材料（パイプラインの内部状態のうちこの段の分 — 構造で受ける）。 */
+/**
+ * The built material the encoder stage reads (this stage's part of the pipeline's internal state —
+ * taken structurally).
+ */
 type WanVaeEncodeState = {
   readonly gpu: GpuContext;
   readonly vaeEncoder: WanVaeEncoder;
   readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
-/** 段の 3 Session（段の中で回す順）。 */
+/** The stage's three Sessions (in the order they run within the stage). */
 type EncoderSessions = { readonly pre: Session; readonly attn: Session; readonly post: Session };
 
-/** 受け渡しの常駐（pre の出口・attn の出口・mu）。 */
+/** The hand-over residents (pre's exit, attn's exit, mu). */
 type EncoderResidents = {
   readonly pre: ResidentTensor;
   readonly attn: ResidentTensor;
@@ -324,10 +357,12 @@ type EncoderResidents = {
 };
 
 /**
- * 3 グラフを 1 本の batch で回して mu を読む（読み戻しは batch の決着の 1 回 — フェンスも 1 本）。
+ * Runs the three graphs in one batch and reads mu (one read-back at the batch's settlement — and one
+ * fence).
  *
- * MUST: 区間の中で Session の構築・`run`・`dispose` を発行しない（`GpuContext.beginBatch` の MUST — 区間ロックの
- * 自己デッドロック）。Session と常駐は呼び手が区間の前に張る。
+ * MUST: do not issue Session construction, `run` or `dispose` inside the span (the MUST of
+ * `GpuContext.beginBatch` — a self-deadlock on the span lock). The caller creates the Sessions and
+ * residents before the span.
  */
 const runEncoderBatch = async (
   gpu: GpuContext,
@@ -343,7 +378,8 @@ const runEncoderBatch = async (
       { [contract.pre.input]: { dtype: "f32", shape: binding.inputShape, data: pixels } },
       { batch, copyOutputs: { [contract.pre.output]: residents.pre } },
     );
-    // 常駐の入力は記号の束縛の源にならない（バイト列と大きさしか持たない）ので、記号は bindings で渡す。
+    // A resident input is not a source for symbol bindings (it carries only bytes and a size), so the
+    // symbols are passed as bindings.
     await sessions.attn.enqueue(
       { [contract.attn.input]: residents.pre },
       {
@@ -364,9 +400,10 @@ const runEncoderBatch = async (
       },
     );
   } catch (cause) {
-    // MUST: 区間を閉じてロックを返す（閉じないと同じ device の次の batch / run が永久に待つ）。
-    // 失敗の本体は呼び手へ投げ直す（finish 側の決着は区間が記録した同じ失敗の写しなので捨てる — VAE decoder の
-    // `decodeWanVaeTile` と同じ形）。
+    // MUST: close the span and return the lock (otherwise the next batch / run on the same device waits
+    // forever). The main failure is rethrown to the caller (the settlement on the finish side is a copy
+    // of the same failure the span recorded, so it is discarded — the same form as the VAE decoder's
+    // `decodeWanVaeTile`).
     await batch.finish().catch(() => undefined);
     throw cause;
   }
@@ -375,18 +412,25 @@ const runEncoderBatch = async (
 };
 
 /**
- * encoder の段（3 Session と受け渡しの常駐を張り、1 本の batch で回し、畳んで解放を待つ — `end` は待った後）。返すのは
- * 正規化した条件の潜在 `[Cz, 1, h, w]`（`normalizeWanLatents` — DiT の段は先頭の潜在フレームをこれで置き換える）。
+ * The encoder stage (creates the three Sessions and the hand-over residents, runs them in one batch,
+ * closes them and waits for the release — `end` comes after the wait). Returns the normalized
+ * condition latent `[Cz, 1, h, w]` (`normalizeWanLatents` — the DiT stage replaces the first latent
+ * frame with it).
  *
- * MUST: DiT の段を張る前に畳み、解放を待つ（ADR 0121 決定 11 — DiT の段の容量の余裕は 0.4〜0.8 GiB しか無く、
- * encoder の確保〈1280×704 で重み 103 MiB・計画の backing 900 MiB〉を残さない。B570 は `destroy()` の解放が次の
- * device poll まで遅れる — `settleReleasedMemory` の doc）。失敗した段も畳んでから解放を待つ（同じ pipeline の次の
- * 生成の DiT の段に残さない）。畳む失敗と待ちの失敗で本体の失敗を上書きしない（DiT の段と同じ形）。
- * Session の実行オプションは `{}`（quant の `session` は DiT の Session だけが受ける — VAE decoder と同じ取り決め）。
- * MUST: Session → 常駐の順で畳む（焼き込みの参照が残る間、常駐の破棄は拒まれる）。
+ * MUST: close and wait for the release before the DiT stage is created (ADR 0121 decision 11 — the DiT
+ * stage has only 0.4–0.8 GiB of capacity margin, so the encoder's allocation (at 1280×704, 103 MiB of
+ * weights and 900 MiB of planned backing) must not remain. On the B570 the release of `destroy()` is
+ * delayed until the next device poll — the doc of `settleReleasedMemory`). A failed stage is also
+ * closed and then waited on (nothing remains into the DiT stage of the same pipeline's next
+ * generation). A failure to close or to wait does not overwrite the main failure (the same form as the
+ * DiT stage). The Session's execution options are `{}` (the quant's `session` is taken only by the DiT
+ * Session — the same contract as the VAE decoder).
+ * MUST: close Sessions → residents in that order (destroying a resident is refused while a baked-in
+ * reference remains).
  *
- * MUST: 正規化の後の有限性を見る（O(Cz·h·w)）。非有限の条件の潜在を DiT へ渡すと、置き換えの式
- * `(1 − m)·cond + m·latents` の上では落ちる所が step 1 の潜在の門になり、文言が DiT を指す（真因の段を取り違える）。
+ * MUST: check finiteness after normalization (O(Cz·h·w)). Passing a non-finite condition latent to the
+ * DiT, under the replacement formula `(1 − m)·cond + m·latents`, would fail at the step-1 latent check
+ * with a message pointing at the DiT (blaming the wrong stage for the true cause).
  */
 export const encodeWanImageStage = async (
   state: WanVaeEncodeState,
@@ -436,7 +480,7 @@ export const encodeWanImageStage = async (
       attn: await createResident(contract.hiddenChannels, `wan ${VAE_ENCODER_ATTN}`),
       mu: await createResident(contract.latentChannels, `wan ${VAE_ENCODER_POST}`),
     };
-    // run の前（3 グラフの batch は不可分 — 中断はここで効く）。
+    // Before the run (the three-graph batch is indivisible — cancellation takes effect here).
     await settleAbort(signal);
     const read = await runEncoderBatch(state.gpu, opened, carried, contract, binding, image.pixels);
     observe?.(VAE_ENCODER_PRE, opened.pre.diagnostics());
@@ -458,8 +502,10 @@ export const encodeWanImageStage = async (
     failure = { error };
     throw error;
   } finally {
-    // 解放待ちは失敗した段でも置く — 呼び手が同じ pipeline で次の生成を回すと、その DiT の段が encoder の確保の
-    // 解放を待たずに張られる。待ちの失敗は畳む失敗と同じ扱い（本体の失敗を上書きしない）。
+    // The release wait is placed for a failed stage too — if the caller runs the next generation on
+    // the same pipeline, its DiT stage would otherwise be created without waiting for the release of
+    // the encoder's allocation. A failure to wait is handled like a failure to close (it does not
+    // overwrite the main failure).
     await disposeSteps([
       () => {
         if (failure !== undefined) throw failure.error;

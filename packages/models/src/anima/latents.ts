@@ -1,5 +1,5 @@
 /**
- * latent と条件テンソルの整形（IR の外側）。
+ * Shaping of latents and condition tensors (outside the IR).
  */
 
 import type { Tensor } from "@karume/runtime";
@@ -7,26 +7,28 @@ import type { Tensor } from "@karume/runtime";
 const f32 = Math.fround;
 
 /**
- * VAE の per-channel latent 平均 / 標準偏差（`AutoencoderKLQwenImage.config.latents_mean` /
- * `latents_std`）。
+ * Per-channel latent mean / standard deviation of the VAE
+ * (`AutoencoderKLQwenImage.config.latents_mean` / `latents_std`).
  *
- * **なぜパイプライン側に定数として置くか**: この 2 本は VAE の config にしかなく、IR にも
- * 配布資産にも入っていない（VAE decoder のグラフは**逆正規化済み**の latent を受ける）。
- * manifest の `pipelineConfig` にも置かない — アーキ定数はパイプライン実装が持つ、が
- * ADR 0038 §2 の「導出元を一意に保つ」規律。
+ * **Why they are constants on the pipeline side**: these two exist only in the VAE config and are
+ * in neither the IR nor the distributed assets (the VAE decoder graph takes an **already
+ * denormalised** latent). They are not put in the manifest's `pipelineConfig` either — architecture
+ * constants belong to the pipeline implementation, the "keep one derivation source" rule of
+ * ADR 0038 §2.
  *
- * MUST: 手写しの数を検証なしで置かない。参照フィクスチャの `latents_mean` / `latents_std` との
- * ビット一致をテストが固定する。値を差し替えるモデルを使うならその 1 本が落ちる。
+ * MUST: do not place hand-copied numbers without verification. A test pins bit equality with the
+ * reference fixture's `latents_mean` / `latents_std`. Using a model that replaces the values fails
+ * that one test.
  *
- * MUST: モジュールスコープに TypedArray を持たない（`Float32Array.from` を import 時に実行し
- * ない）— 横断不変条件「全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止）」。
- * ここは `readonly number[]` の配列リテラルに留め、`Float32Array` は {@link animaLatents} が
- * 呼び出しごとに組む（16 要素 × 2 の生成費用しか増えない）。消費側（`pipeline.ts` の逆正規化・
- * barrel の利用者）はそのアクセサだけを通る。
+ * MUST: do not hold a TypedArray at module scope (do not run `Float32Array.from` at import) —
+ * cross-cutting invariant "zero side effects in every module (no execution at import, no global
+ * mutable state)". This stays a `readonly number[]` array literal, and {@link animaLatents} builds
+ * the `Float32Array` per call (adding only the cost of creating 16 elements × 2). Consumers
+ * (denormalisation in `pipeline.ts`, barrel users) go through that accessor only.
  *
- * 各値は VAE config の 4 桁小数（例 `-0.7571`）を f32 へ丸めた値の最短 10 進表記で、参照
- * フィクスチャ（torch の f32 テンソル由来）と同じ表記になる。f64 の小数のまま置くと、この
- * 配列自体が逆正規化で実際に使う f32 と食い違う。
+ * Each value is the shortest decimal form of the VAE config's 4-digit decimal (e.g. `-0.7571`)
+ * rounded to f32, the same notation as the reference fixture (from torch's f32 tensor). Kept as f64
+ * decimals, this array itself would disagree with the f32 actually used in denormalisation.
  */
 export const ANIMA_LATENTS_MEAN: readonly number[] = [
   -0.757099986076355, -0.708899974822998, -0.911300003528595, 0.10750000178813934,
@@ -35,7 +37,7 @@ export const ANIMA_LATENTS_MEAN: readonly number[] = [
   -0.19220000505447388, -0.9496999979019165, 0.25029999017715454, -0.2921000123023987,
 ];
 
-/** {@link ANIMA_LATENTS_MEAN} と対の標準偏差。 */
+/** Standard deviation paired with {@link ANIMA_LATENTS_MEAN}. */
 export const ANIMA_LATENTS_STD: readonly number[] = [
   2.8183999061584473, 1.4541000127792358, 2.327500104904175, 2.6558001041412354, 1.219599962234497,
   1.770799994468689, 2.6052000522613525, 2.0743000507354736, 3.268699884414673, 2.152600049972534,
@@ -44,13 +46,14 @@ export const ANIMA_LATENTS_STD: readonly number[] = [
 ];
 
 /**
- * 逆正規化の定数対を**呼び出しごとに独立した写しで**返す（公開面が出すのはこちら）。
+ * Returns the denormalisation constant pair **as an independent copy per call** (this is what the
+ * public surface exposes).
  *
- * MUST: 呼び出しごとに新しい `Float32Array` を組む（使い回さない）。返り値を消費側が
- * 書き換えても、`generate` の逆正規化にも次の呼び出しの返り値にも波及しない。
+ * MUST: build a new `Float32Array` per call (do not reuse). If a consumer modifies the return
+ * value, it reaches neither `generate`'s denormalisation nor the return value of the next call.
  *
- * NOTE: 「凍らせて出す」は成立しない — 要素を持つ TypedArray は `Object.freeze` が
- * TypeError を投げる。写しを返すアクセサが唯一の形。
+ * NOTE: "expose it frozen" does not work — `Object.freeze` throws TypeError on a TypedArray with
+ * elements. An accessor that returns a copy is the only form.
  */
 export const animaLatents = (): {
   mean: Float32Array<ArrayBuffer>;
@@ -61,12 +64,13 @@ export const animaLatents = (): {
 });
 
 /**
- * latent の per-channel 逆正規化。
- * MUST: `latents · std` に直さない — 参照実装は **std の逆数を作って割る**ので、
- * 掛け算に変えると最終桁が変わる（ビット一致が崩れる）。
- * MUST: **B=1 前提**を入口で検査する。チャネルごとの区間を `length / channels` で
- * 割り出しているので、B>1 の `[B,C,H,W]` を渡すと 1 区間が B 枚ぶんに伸び、B 枚に別々の
- * mean/std が当たった**沈黙誤値**になる（長さは割り切れるので黙って通る）。
+ * Per-channel denormalisation of a latent.
+ * MUST: do not rewrite as `latents · std` — the reference implementation **builds the reciprocal of
+ * std and divides**, so switching to multiplication changes the last digit (bit equality breaks).
+ * MUST: check the **B=1 assumption** at the entry. The per-channel range is derived as
+ * `length / channels`, so passing a B>1 `[B,C,H,W]` stretches one range over B images, which then
+ * get different mean/std each — **a silent wrong value** (the length divides evenly, so it passes
+ * silently).
  */
 export const denormalizeLatents = (
   latents: Float32Array<ArrayBufferLike>,
@@ -99,14 +103,15 @@ export const denormalizeLatents = (
 };
 
 /**
- * conditioner 出力を `min_sequence_length` 行までゼロ詰めする（IR の外側）。
+ * Zero-pads the conditioner output up to `min_sequence_length` rows (outside the IR).
  *
- * MUST: **B=1 前提**と行数上限を入口で検査する。`[B,T,W]` を平坦にコピーしているので、
- * B>1 だと 2 枚目以降が 1 枚目の余白へ流れ込み、行数さえ足りていれば黙って通る。
- * 行数超過（T > rows）は `set` が RangeError を投げるが、その診断は「どの段の話か」を
- * 何も言わないのでここで名前付きで落とす。
- * MUST: dtype も見る。i32 / bool のテンソルを渡すと `TypedArray.prototype.set` が**黙って
- * 数値変換**し、shape も長さも合ったまま値だけが別物になる（沈黙誤値）。
+ * MUST: check the **B=1 assumption** and the row limit at the entry. `[B,T,W]` is copied flat, so
+ * with B>1 the second and later images flow into the first one's padding, and it passes silently as
+ * long as there are enough rows. Too many rows (T > rows) makes `set` throw RangeError, but that
+ * diagnosis says nothing about "which stage it is about", so this fails with a name here.
+ * MUST: check the dtype too. Passing an i32 / bool tensor makes `TypedArray.prototype.set`
+ * **silently convert the numbers**, and only the values change while shape and length still match
+ * (a silent wrong value).
  */
 export const padSequence = (hidden: Tensor, rows: number): Float32Array<ArrayBuffer> => {
   if (hidden.dtype !== "f32") {

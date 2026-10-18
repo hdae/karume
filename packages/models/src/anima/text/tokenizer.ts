@@ -1,14 +1,15 @@
 /**
- * Anima のプロンプト層 — 2 つのトークナイザ資産の解釈と、プロンプト 1 本の符号化。
+ * Anima's prompt layer — interpreting the two tokenizer assets and encoding one prompt.
  *
- * Anima のテキスト層は**同じ文字列を 2 本のトークナイザに独立に通す**:
+ * Anima's text layer **passes the same string through two tokenizers independently**:
  *
- *   ① Qwen2 BPE（manifest の `tokenizer`）    → text_encoder（Qwen3）→ source_hidden_states
- *   ② T5 Unigram（manifest の `tokenizer_2`） → text_conditioner     → target_input_ids
+ *   ① Qwen2 BPE (the manifest's `tokenizer`)    → text_encoder (Qwen3) → source_hidden_states
+ *   ② T5 Unigram (the manifest's `tokenizer_2`) → text_conditioner     → target_input_ids
  *
- * 配布形: 語彙・merges・正規化表は exporter が焼いた JSON（生の `tokenizer.json` 計 13.8MB
- * ではなく、実行に要る情報だけを抜いた計 4.6MB の形）。**取得は hub の責務**なので、ここは
- * バイト列を受けるだけで I/O を持たない（ブラウザでも Deno でも同じ経路）。
+ * Distribution: vocabularies, merges and normalisation tables are JSON baked by the exporter (not
+ * the raw `tokenizer.json`, 13.8MB in total, but a 4.6MB form holding only what execution needs).
+ * **Fetching is the hub's job**, so this module only takes bytes and has no I/O (the same path in
+ * the browser, on Node and on Deno).
  */
 
 import { ModelInputError } from "../../errors.ts";
@@ -34,27 +35,28 @@ import {
 import { parseSpmTables } from "./spm-normalizer.ts";
 import { type T5Assets, T5Tokenizer } from "./t5-tokenizer.ts";
 
-/** プロンプト 1 本の符号化結果（グラフ入力は i32 — ADR 0009）。 */
+/** Encoding result of one prompt (graph inputs are i32 — ADR 0009). */
 type AnimaPromptIds = {
   readonly qwenIds: Int32Array<ArrayBuffer>;
   readonly t5Ids: Int32Array<ArrayBuffer>;
 };
 
 /**
- * 受理集合の下限。エクスポータの `Dim("Tsrc", min=2)` / `Dim("Ttgt", min=2)` そのもの
- * （`torch.export` の 0/1 特殊化を避けるための下限で、1 トークンの入力は**グラフに食わせ
- * られない**）。空文字・空白だけのプロンプトは T5 が `</s>` だけの長さ 1 になり、1 文字の
- * プロンプトは Qwen2 が 1 トークンになる — どちらもここで落とす。
+ * Lower bound of the accepted set. Exactly the exporter's `Dim("Tsrc", min=2)` /
+ * `Dim("Ttgt", min=2)` (a lower bound to avoid `torch.export`'s 0/1 specialisation; a one-token
+ * input **cannot be fed to the graph**). An empty or whitespace-only prompt becomes length 1 in T5
+ * (only `</s>`), and a one-character prompt becomes one token in Qwen2 — both are rejected here.
  */
 export const PROMPT_MIN_TOKENS = 2;
 
 /**
- * プロンプト長が受理集合に入っていることを検査する（違反は fail loudly）。
+ * Checks that the prompt length is in the accepted set (a violation fails loudly).
  *
- * 上限側は「切り詰めが効いていること」の検査でもある: T5 は `</s>` を足す前に切り詰めるので、
- * 順序を取り違えると `maxLength + 1` 個になる（shape エラーにならず conditioner の
- * 512 パディング検査まで沈黙する）。送出型も下限と上限で割れる — 下限は呼び手が 1 語足せば
- * 通る入力起因、上限は切り詰めが壊れたときだけ届く内部不変条件である。
+ * The upper side also checks "truncation is in effect": T5 truncates before appending `</s>`, so
+ * getting the order wrong yields `maxLength + 1` (no shape error; silent until the conditioner's
+ * 512-padding check). The thrown type also differs between the bounds — the lower bound is
+ * input-caused (the caller passes by adding one word), the upper bound is an internal invariant
+ * that is reached only when truncation is broken.
  */
 export const assertPromptTokenLengths = (
   label: string,
@@ -74,15 +76,15 @@ export const assertPromptTokenLengths = (
       );
     }
     if (length > maxLength) {
-      // 上限側は入力起因ではない（ADR 0107 決定 2）— 両トークナイザは `maxLength` で切り詰めて
-      // から返すので、ここに来るのは切り詰めが壊れたときだけ = 内部不変条件の破れである。
-      // 呼び手がプロンプトを短くしても直らないので素の `Error` のまま投げる。
+      // The upper side is not input-caused (ADR 0107 decision 2) — both tokenizers truncate to
+      // `maxLength` before returning, so this is reached only when truncation is broken = a broken
+      // internal invariant. Shortening the prompt would not fix it, so a plain `Error` is thrown.
       throw new Error(`${label}の ${which} id 列が ${length} トークン（上限 ${maxLength}）`);
     }
   }
 };
 
-/** Anima のテキスト層が要する 2 つのトークナイザ。 */
+/** The two tokenizers Anima's text layer needs. */
 export class AnimaTokenizers {
   readonly #qwen2: Qwen2Tokenizer;
   readonly #t5: T5Tokenizer;
@@ -90,8 +92,9 @@ export class AnimaTokenizers {
 
   constructor(qwen2Assets: Qwen2Assets, t5Assets: T5Assets) {
     if (qwen2Assets.maxLength !== t5Assets.maxLength) {
-      // 片方だけ古い資産を掴んでいる状態。切り詰め長が違うと長いプロンプトで id 列の
-      // 長さだけが食い違い、conditioner の 512 パディング検査まで表面化しない。
+      // Only one side holds a stale asset. With different truncation lengths, only the id sequence
+      // lengths disagree on long prompts, which surfaces no earlier than the conditioner's
+      // 512-padding check.
       throw new Error(
         `トークナイザ資産の maxLength が食い違う（Qwen2 ${qwen2Assets.maxLength} / ` +
           `T5 ${t5Assets.maxLength}）`,
@@ -102,18 +105,19 @@ export class AnimaTokenizers {
     this.#maxLength = qwen2Assets.maxLength;
   }
 
-  /** 正本の呼び出しに合わせた切り詰め長（512）。 */
+  /** Truncation length matching the canonical call (512). */
   get maxLength(): number {
     return this.#maxLength;
   }
 
   /**
-   * プロンプト 1 本を両トークナイザに通す。長さが受理集合を外れたらここで落とす
-   * （`label` はその際のメッセージに出す — 正 / ネガティブのどちらかが判る形にする）。
+   * Passes one prompt through both tokenizers. A length outside the accepted set fails here
+   * (`label` appears in that message — so it tells the positive from the negative prompt).
    */
   encode(prompt: string, label: string = "プロンプト"): AnimaPromptIds {
-    // 本文そのものの受理検査は**両トークナイザへ渡す前**に通す（ADR 0107 決定 2 の入力起因）。
-    // 語彙資産の解析も同じ条件を通るが、そちらの破れは資産の齟齬なので型を分ける。
+    // The acceptance check of the text itself runs **before it is passed to the tokenizers**
+    // (input-caused per ADR 0107 decision 2). Parsing the vocabulary assets passes the same
+    // condition, but a violation there is an asset inconsistency, so the type differs.
     assertEncodableText(prompt, label);
     const qwenIds = Int32Array.from(this.#qwen2.encode(prompt));
     const t5Ids = Int32Array.from(this.#t5.encode(prompt));
@@ -131,7 +135,7 @@ const parseClasses = (raw: unknown, label: string): Qwen2CharClasses => {
   };
 };
 
-/** `(?i:)` の同一視表（`[cp, 接尾辞側の文字]` の対）。 */
+/** Equivalence table of `(?i:)` (pairs of `[cp, the character on the suffix side]`). */
 const parseCaseFold = (raw: unknown, label: string): Qwen2CaseFold => {
   if (!Array.isArray(raw)) throw new Error(`${label}: 配列でない`);
   const out = new Map<number, number>();
@@ -152,11 +156,12 @@ const parseCaseFold = (raw: unknown, label: string): Qwen2CaseFold => {
 };
 
 /**
- * 行区切りの表を読み、行数が資産の申告と合っていることを確かめる。
+ * Reads a newline-separated table and checks that the line count matches what the asset declares.
  *
- * MUST: 件数を突き合わせる。`mergesText` が欠けても BPE は「見つからないので結合しない」
- * だけで**落ちない** — 分割が変わって id 列が静かに別物になる（`vocabText` 側は語彙に無い
- * トークンで落ちるが、こちらは沈黙誤値）。
+ * MUST: compare the counts. If `mergesText` is missing lines, BPE just "does not merge what it
+ * cannot find" and **does not fail** — the split changes and the id sequence silently becomes a
+ * different one (the `vocabText` side fails on a token missing from the vocabulary, but this one is
+ * a silent wrong value).
  */
 const parseLines = (raw: unknown, count: unknown, label: string, countLabel: string): string[] => {
   const lines = asString(raw, label).split("\n");
@@ -169,10 +174,14 @@ const parseLines = (raw: unknown, count: unknown, label: string, countLabel: str
   return lines;
 };
 
-/** Qwen2 の資産 JSON を資産表に変換する（外部境界なので構造を検査してから使う）。 */
+/**
+ * Converts the Qwen2 asset JSON into asset tables (an external boundary, so the structure is
+ * checked before use).
+ */
 const parseQwen2Asset = (raw: unknown, label: string = "tokenizer"): Qwen2Assets => {
   const obj = asRecord(raw, label);
-  // 行番号 0-origin = id / rank。byte-level 語彙は改行も空白も含まない（emit 時に検査済み）。
+  // 0-origin line number = id / rank. The byte-level vocabulary contains no newline or space
+  // (checked at emit).
   const vocabLines = parseLines(
     obj["vocabText"],
     obj["vocabCount"],
@@ -202,7 +211,10 @@ const parseQwen2Asset = (raw: unknown, label: string = "tokenizer"): Qwen2Assets
   };
 };
 
-/** T5 の資産 JSON を資産表に変換する（共通の T5 の表 + Anima の Precompiled 正規化の表）。 */
+/**
+ * Converts the T5 asset JSON into asset tables (the shared T5 tables + Anima's Precompiled
+ * normalisation table).
+ */
 const parseT5Asset = (raw: unknown, label: string = "tokenizer_2"): T5Assets => ({
   ...parseT5Tables(raw, label),
   normalizer: parseSpmTables(asRecord(raw, label)["normalizer"], `${label}.normalizer`),
@@ -223,8 +235,8 @@ const decodeJson = (bytes: Uint8Array<ArrayBuffer>, label: string): unknown => {
 };
 
 /**
- * 取得済みバイト列（manifest の `tokenizer` / `tokenizer_2`）からトークナイザ 2 本を組む。
- * I/O を持たない — 取得は hub の責務。
+ * Builds the two tokenizers from already fetched bytes (the manifest's `tokenizer` /
+ * `tokenizer_2`). No I/O — fetching is the hub's job.
  */
 export const createTokenizers = (
   qwen2Bytes: Uint8Array<ArrayBuffer>,

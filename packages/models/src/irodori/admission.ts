@@ -1,13 +1,16 @@
 /**
- * irodori の**受理（admission）**— 配布形の宣言と製品グラフがこの実装で走れるかを見る門と、
- * 門が確定させた材料。取得キーと資産の読み口もここに置く（門が最初に読む口だから）。
+ * irodori's **admission** — the checks of whether the distribution's declarations and the product
+ * graphs can run on this implementation, and the material those checks settle. The fetch keys and
+ * the asset readers live here too (they are what the checks read first).
  *
- * 10 段の説明（何をどの順で回すか）は {@link "./pipeline.ts"} 冒頭の doc が正本で、ここが持つ
- * のは段へ入る**前**に通す門だけ。Session も GPU も資産の所有権も持たない（構築と所有権は
- * `./pipeline.ts`）ので、門は実 GPU も実資産も無しで直接叩ける
- * （`tests/irodori_admission_test.ts`）。
+ * The description of the 10 steps (what runs in which order) is canonical in the doc at the top of
+ * {@link "./pipeline.ts"}; this module holds only the checks passed **before** entering the steps.
+ * It holds no Session, no GPU and no ownership of assets (construction and ownership are in
+ * `./pipeline.ts`), so the checks can be called directly without a real GPU or real assets
+ * (`tests/irodori_admission_test.ts`).
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is free of side effects (no execution at import time, no global mutable state
+ * — CLAUDE.md).
  */
 
 import type { SessionOptions } from "@karume/runtime";
@@ -31,7 +34,7 @@ import { assetComponentOpener, type ComponentOpener, type GraphOwner } from "../
 import { readAssetBuffer, readAssetJson } from "../hub/asset-readers.ts";
 import { assertGraphInputDim } from "../hub/graph-gates.ts";
 
-/** manifest の weights / assets 表に現れる名前（ADR 0041 §3 の規約名）。 */
+/** Names in the manifest's weights / assets tables (the conventional names of ADR 0041 §3). */
 export const BACKBONE = "backbone";
 export const TEXT_PROJ = "text_proj";
 export const CAPTION_PROJ = "caption_proj";
@@ -39,15 +42,19 @@ export const SPEAKER = "speaker";
 export const DURATION = "duration";
 export const DIT = "dit";
 /**
- * 条件側 K/V 射影（`dit` の各ブロックが条件 3 本から作る context K / V を、生成 1 回ぶんだけ
- * 先に作るグラフ — DECIDED: ADR 0114）。出力はそのまま `dit` の同名入力になる。
+ * Context K/V projection (the graph that computes, once per generation and ahead of time, the
+ * context K / V that each block of `dit` builds from the 3 conditions — DECIDED: ADR 0114). Its
+ * outputs become the inputs of `dit` with the same names, as they are.
  */
 export const DIT_CONTEXT = "dit_context";
 export const CODEC_DECODER = "codec_decoder";
 export const CODEC_ENCODER = "codec_encoder";
 export const TOKENIZER = "tokenizer";
 
-/** この系列の weights 部品（差し替え席が受ける役割名でもある・宣言順）。 */
+/**
+ * The weights components of this family (also the role names that component replacement accepts;
+ * in declaration order).
+ */
 export const COMPONENT_KEYS = [
   BACKBONE,
   TEXT_PROJ,
@@ -61,8 +68,8 @@ export const COMPONENT_KEYS = [
 ] as const;
 
 /**
- * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は
- * {@link readAssetBuffer}）。
+ * Turns fetched bytes into an ArrayBuffer that can be passed to `openContainer` (the check itself
+ * is {@link readAssetBuffer}).
  */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -70,18 +77,18 @@ const assetBuffer = (
 ): ArrayBuffer => readAssetBuffer("irodori", "weights / assets", assets, key);
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 8 家族共有 —
- * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`dit`）か、分割形の
- * part 列（`dit[0]` / `dit[1]` / …）。
+ * Component supplier of the full-asset surface (`fromAssets`) (the receiving implementation is
+ * shared by the 8 families — {@link assetComponentOpener}). A component key is either one entry
+ * for a single-form `krm` (`dit`) or the part list of the split form (`dit[0]` / `dit[1]` / …).
  */
 export const assetOpener = (assets: IrodoriAssets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("irodori", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
- * 資産 JSON を読む（decode / parse の門は {@link readAssetJson}）。
+ * Reads an asset JSON (the decode / parse checks are {@link readAssetJson}).
  *
- * NOTE: `export` は門を直接叩くテストのため（`fromAssets` 経由で此処へ届くには実 IR
- * コンテナ 9 本が要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
+ * NOTE: `export` is for the tests that call the check directly (reaching here through `fromAssets`
+ * needs 9 real IR containers). Not exposed on `mod.ts` / the subpath surface (ADR 0008).
  */
 export const assetJson = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -89,10 +96,12 @@ export const assetJson = (
 ): unknown => readAssetJson("irodori", "weights / assets", assets, key);
 
 /**
- * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
+ * Checks that the **static** dimension of one axis of a graph input matches the declaration in
+ * `pipelineConfig`.
  *
- * MUST: 落とさない。条件 state の宣言長や幅がホストの値とずれても、右 pad と行数計算は
- * そのまま通り（shape は合う）、**別の位置の条件を読んだ**結果が沈黙で出る。
+ * MUST: do not remove this check. Even when the declared length or width of a condition state
+ * disagrees with the host's value, the right padding and the row arithmetic still go through (the
+ * shapes match), and a result that **read the condition at another position** comes out silently.
  */
 const assertStaticDim = (
   model: GraphOwner,
@@ -103,10 +112,12 @@ const assertStaticDim = (
 ): void => assertGraphInputDim("irodori", model, inputName, axis, expected, where);
 
 /**
- * グラフ**出力**の 1 軸が「記号 × 係数」の派生次元で、その係数が宣言と一致することを見る。
+ * Checks that one axis of a graph **output** is a derived dimension "symbol × coefficient" whose
+ * coefficient matches the declaration.
  *
- * MUST: 落とさない。decoder の出力倍率（1 latent フレーム → `hopLength` サンプル）がずれても
- * 出力は「それらしい長さの波形」になり、秒指定の切り出しと末尾トリムだけが別の位置を指す。
+ * MUST: do not remove this check. Even when the decoder's output ratio (1 latent frame →
+ * `hopLength` samples) is off, the output is a "plausibly long waveform", and only the cut to the
+ * requested seconds and the tail trim point at another position.
  */
 const assertOutputScale = (
   model: GraphOwner,
@@ -120,8 +131,9 @@ const assertOutputScale = (
     throw new Error(`irodori: グラフ出力 '${name}' の宣言が無い（${where}）`);
   }
   const symbol = model.graph.symbols[0];
-  // 正準表記は `coeff·sym` で、**係数 1 は省略**する（`format/dims.ts` の `formatDim`）。
-  // 綴りを合わせないと、倍率 1 の正しいグラフをここが誤って拒否する。
+  // The canonical spelling is `coeff·sym`, and **a coefficient of 1 is omitted** (`formatDim` in
+  // `format/dims.ts`). Without matching that spelling, this check would wrongly reject a correct
+  // graph with a ratio of 1.
   const canonical = `${expected === 1 ? "" : expected}${symbol}`;
   const dim = value.shape[axis];
   if (symbol === undefined || dim !== canonical) {
@@ -133,11 +145,11 @@ const assertOutputScale = (
 };
 
 /**
- * グラフ**出力**の 1 軸が宣言どおりの**静的**次元であることを見る。
+ * Checks that one axis of a graph **output** is the declared **static** dimension.
  *
- * MUST: 落とさない。encoder の latent 幅が `pipelineConfig` の `latentDim` とずれても、後段の
- * patch は「幅 × patchSize」で割り切れる限り通ってしまい、**別のチャネルを話者特徴として
- * 読んだ**結果が沈黙で出る。
+ * MUST: do not remove this check. Even when the encoder's latent width disagrees with `latentDim`
+ * of `pipelineConfig`, the later patch goes through as long as "width × patchSize" divides, and a
+ * result that **read other channels as speaker features** comes out silently.
  */
 const assertOutputDim = (
   model: GraphOwner,
@@ -159,23 +171,26 @@ const assertOutputDim = (
   }
 };
 
-/** `dit` が forward ごとにホストから受ける入力（残りは全て `dit_context` の出力）。 */
+/** Inputs `dit` takes from the host per forward (the rest are all outputs of `dit_context`). */
 const DIT_STEP_INPUTS = ["x_t", "t_embed", "mask"] as const;
 
 /**
- * `dit_context` の出力と `dit` の入力の配線を見て、常駐テンソルの大きさを導く（DECIDED:
- * ADR 0114 — 条件側 K / V は生成 1 回だけ回し、出力を常駐テンソルのまま `dit` へ渡す）。
+ * Checks the wiring from the outputs of `dit_context` to the inputs of `dit`, and derives the sizes
+ * of the resident tensors (DECIDED: ADR 0114 — the context K / V run once per generation, and the
+ * outputs go to `dit` as resident tensors).
  *
- * 見るのは 4 点:
- * - `dit_context` は記号次元を持たない（常駐テンソルは確保時に大きさが要るので、S に依る形は
- *   置けない）
- * - 出力は 2 本以上の偶数本（ブロックごとの K / V の対 — ブロック数は宣言から導き、焼かない）
- * - `dit` の入力名の集合 = {@link DIT_STEP_INPUTS} ∪ `dit_context` の出力名
- * - 出力ごとに形が静的で、`dit` の同名入力と dtype・形が一致する
+ * It checks 4 points:
+ * - `dit_context` has no symbolic dimension (a resident tensor needs its size at allocation, so a
+ *   shape that depends on S cannot be placed)
+ * - the outputs are an even number, at least 2 (the K / V pair of each block — the block count is
+ *   derived from the declaration, not baked in)
+ * - the set of `dit` input names = {@link DIT_STEP_INPUTS} ∪ the output names of `dit_context`
+ * - each output has a static shape and matches the same-named input of `dit` in dtype and shape
  *
- * MUST: 落とさない。常駐入力は**大きさしか**検査されない（runtime の `RunInput` の doc）ので、
- * 形や dtype が食い違っていてもバイト数さえ合えば、別の並びとして読まれた K / V で沈黙のまま
- * 回る。名前の食い違いは実行時にも落ちるが、GB 級の重みを落とした**後**になる。
+ * MUST: do not remove this check. A resident input is checked **only for its size** (the doc of
+ * `RunInput` in the runtime), so even with a mismatched shape or dtype, as long as the byte count
+ * matches, the loop runs silently on K / V read as a different layout. A name mismatch also fails
+ * at run time, but only **after** GB-class weights have been downloaded.
  */
 const admitDitContext = (dit: GraphOwner, ditContext: GraphOwner): readonly DitContextOutput[] => {
   const symbols = ditContext.graph.symbols;
@@ -205,7 +220,7 @@ const admitDitContext = (dit: GraphOwner, ditContext: GraphOwner): readonly DitC
   return outputs.map((name) => {
     const value = ditContext.graph.values[name];
     if (value === undefined) throw new Error(`irodori: dit_context の出力 '${name}' の宣言が無い`);
-    // 上の集合の一致で必ずある（ここは型を絞るためだけに見る）。
+    // Always present given the set equality above (checked here only to narrow the type).
     const input = ditInputs.get(name);
     if (input === undefined) throw new Error(`irodori: dit の入力 '${name}' が無い`);
     const dims = value.shape.filter((dim): dim is number => typeof dim === "number");
@@ -220,24 +235,28 @@ const admitDitContext = (dit: GraphOwner, ditContext: GraphOwner): readonly DitC
           "合わない（静的な同じ形・同じ dtype が要る）",
       );
     }
-    // 要素は全 dtype 4 バイト（ADR 0009）。
+    // Elements are 4 bytes for every dtype (ADR 0009).
     return { name, byteLength: dims.reduce((product, dim) => product * dim, 4) };
   });
 };
 
 /**
- * irodori が受ける実行ノブ（manifest の quant 宣言と明示指定の両方）。効く先は `dit` と
- * `dit_context` の Session だけ（{@link IrodoriAdmission.ditSessionOptions}）。優先順位・値域・
- * 組合せ・送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合だけを決める。
+ * The execution knobs irodori accepts (both from the manifest's quant declaration and from explicit
+ * options). They apply only to the Sessions of `dit` and `dit_context`
+ * ({@link IrodoriAdmission.ditSessionOptions}). Precedence, value ranges, combinations and the
+ * classification of thrown types are owned by `resolveSessionOptions`, shared by every family;
+ * this only decides the acceptance set.
  *
- * `attentionCompute` / `attentionScoreStorage` を受けないのは、`dit` の attention が実行時の
- * bool マスク入力を持つため融合 attention の契約に載らず、SDPA を保存しない分解経路
- * （matmul + safe_softmax）で書き出されている — 融合 attention のノブが効く席がグラフに無い —
- * から（`tools/export-recipes/irodori/export.py` の `dit` 境界節）。並列 GEMV と融合の 4 欄は
- * 配布形が宣言せず、irodori の参照値で確かめていない組合せなので受けない。
+ * `attentionCompute` / `attentionScoreStorage` are not accepted because the attention of `dit`
+ * takes a runtime bool mask input, so it does not fit the fused-attention contract and is exported
+ * on a decomposed path that does not preserve SDPA (matmul + safe_softmax) — the graph has no place
+ * where the fused-attention knobs would apply (the `dit` boundary section of
+ * `tools/export-recipes/irodori/export.py`). The 4 fields of parallel GEMV and fusion are not
+ * accepted because the distributions do not declare them and the combinations have not been
+ * checked against irodori's reference values.
  *
- * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: `export` is so that the equivalence test runs every quant of the mirror through the same
+ * table (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const IRODORI_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: true,
@@ -251,69 +270,80 @@ export const IRODORI_SESSION_POLICY: FamilySessionPolicy = {
 };
 
 /**
- * `dit_context` の出力 1 本 = `dit` の同名入力 1 本（条件側 K / V — DECIDED: ADR 0114）。
- * 名前と、常駐テンソルに取るバイト数（静的 shape の要素数 × 4 — ADR 0009 の意味論 dtype は
- * 全て 4 バイト）。
+ * One output of `dit_context` = one same-named input of `dit` (context K / V — DECIDED: ADR 0114).
+ * The name, and the byte count taken for the resident tensor (element count of the static shape × 4
+ * — the semantic dtypes of ADR 0009 are all 4 bytes).
  */
 export type DitContextOutput = {
   readonly name: string;
   readonly byteLength: number;
 };
 
-/** 家族 admission（{@link admitIrodori}）が確定させる材料。 */
+/** The material that family admission ({@link admitIrodori}) settles. */
 export type IrodoriAdmission = {
   readonly config: IrodoriPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
   /**
-   * `dit` の記号次元 S の名前（admission が唯一の導出点）。
+   * Name of the symbolic dimension S of `dit` (admission is the only place that derives it).
    *
-   * MUST: 実行時に `graph.symbols` から引き直さない — 「記号は 1 本」を確かめた席と使う席が
-   * 離れると、経路によって検査が走ったり走らなかったりする（CLAUDE.md の「導出値は source of
-   * truth から 1 度だけ導く」）。
+   * MUST: do not look it up again from `graph.symbols` at run time — if the place that confirmed
+   * "there is one symbol" and the place that uses it drift apart, the check runs on some paths and
+   * not on others (CLAUDE.md's "derive a derived value once from the source of truth").
    */
   readonly ditSymbol: string;
   /**
-   * `dit_context` の出力列（宣言順）— 両経路の常駐テンソルの確保はこれだけを読む。
+   * Output list of `dit_context` (in declaration order) — the resident-tensor allocation of both
+   * paths reads only this.
    *
-   * MUST: 実行時に宣言から引き直さない（{@link IrodoriAdmission.ditSymbol} と同じ理由 — 「出力と
-   * `dit` の入力が名前・形で 1 対 1」を確かめた席と、バイト数を使う席を離さない）。
+   * MUST: do not derive it again from the declaration at run time (same reason as
+   * {@link IrodoriAdmission.ditSymbol} — the place that confirmed "the outputs and the inputs of
+   * `dit` correspond 1 to 1 by name and shape" and the place that uses the byte counts stay
+   * together).
    */
   readonly ditContextOutputs: readonly DitContextOutput[];
   /**
-   * 明示指定と quant 宣言を合成した `dit` と `dit_context` の実効設定
-   * （{@link IRODORI_SESSION_POLICY}）。条件側の linear は分割前は `dit` の中で同じ席で走って
-   * いたので、`dit_context` にも同じ 1 本を渡す（別の席で走らせると数値が動く）。
+   * The effective options of `dit` and `dit_context`, combined from the explicit options and the
+   * quant declaration ({@link IRODORI_SESSION_POLICY}). Before the split, the condition-side
+   * linears ran inside `dit` with the same options, so `dit_context` gets the same object too
+   * (running it with other options moves the numbers).
    */
   readonly ditSessionOptions: SessionOptions;
-  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  /**
+   * The quant declaration plus the features the effective options need (both the request and the
+   * check read this).
+   */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
 };
 
 /**
- * この manifest とこのグラフを irodori として実行できるかを見る（`hub/components.ts` の
- * 家族 admission 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
+ * Checks whether this manifest and these graphs can run as irodori (the family admission hook of
+ * `hub/components.ts` — on the fetch surface it is called **before a single byte of a weight part
+ * is fetched**).
  *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
- * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
- * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
- * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+ * MUST: the family checks are gathered in this one function. Spread over later steps, on the fetch
+ * surface they would fail only **after** GB-class weights are downloaded (the implementation would
+ * be narrower than the text of ADR 0070 decision 5).
+ * MUST: manifest contract violations and **the matching against the graphs** fail **before the GPU
+ * is acquired**. If the order slips, on an environment without a GPU the failure turns into a
+ * different exception and the reader never learns "what was wrong".
  *
- * NOTE: {@link IrodoriPipelineOptions.signal} の検査は**段の境目**にだけ置き、そこで
- * イベントループへ 1 度譲ってから検査する（{@link settleAbort}）— 同期解析の最中に届いた中断は
- * 次の境目で効く（`options.gpu` 供給時も同様）。グラフとの突合（`assertStaticDim` 群）は
- * 開いた容器の宣言を読むだけなので境目を割らない。
- * NOTE: 資産（tokenizer）の解析はこの席へ置けない — admission の時点で手元にあるのは資産の
- * **宣言**だけでバイト列はまだ無い（待つと重み prefetch より前という位置が保てない）ので
- * {@link "./pipeline.ts"} の `buildIrodoriState` に残る。
+ * NOTE: the check of {@link IrodoriPipelineOptions.signal} sits only at **step boundaries**, where
+ * it yields to the event loop once before checking ({@link settleAbort}) — an abort that arrives
+ * during synchronous parsing takes effect at the next boundary (likewise when `options.gpu` is
+ * given). The matching against the graphs (the `assertStaticDim` group) only reads the declarations
+ * of the opened containers, so it does not split a boundary.
+ * NOTE: the parsing of an asset (tokenizer) cannot be placed here — at admission time only the
+ * asset's **declaration** is at hand, not its bytes (waiting for them would lose the position
+ * before the weight prefetch), so it stays in `buildIrodoriState` of {@link "./pipeline.ts"}.
  */
 export const admitIrodori = async (
   manifest: Manifest,
   open: ComponentOpener,
   options: IrodoriPipelineOptions,
 ): Promise<IrodoriAdmission> => {
-  // 中断の検査は**段の境目**に置く。入口が最初の 1 本: 中断済みで呼ばれたら manifest にも
-  // 資産にも触らずに返す。
+  // Abort checks sit at **step boundaries**. The entry is the first one: when called already
+  // aborted, return without touching the manifest or the assets.
   options.signal?.throwIfAborted();
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
@@ -331,7 +361,8 @@ export const admitIrodori = async (
     );
   }
   if (major !== IRODORI_PIPELINE_MAJOR) {
-    // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門（ADR 0038 §6）。
+    // The only check that stops the silent degradation of "old implementation × new repository"
+    // (ADR 0038 §6).
     throw new Error(
       `IrodoriPipeline: pipeline '${name}/${major}' の major に未対応` +
         `（この実装が読めるのは ${IRODORI_PIPELINE_NAME}/${IRODORI_PIPELINE_MAJOR}）`,
@@ -347,8 +378,10 @@ export const admitIrodori = async (
     );
   }
   const quant = entry.quants[quantName];
-  // 明示 > quant 宣言 > runtime 既定（全家族共通の 1 本）。未対応の宣言も誤った明示指定も
-  // 部品を開く前に落とす（manifest と呼び手の指定だけで決まる判定なので、容器を待たない）。
+  // Explicit > quant declaration > runtime default (one function shared by every family). Both an
+  // unsupported declaration and a wrong explicit option fail before the components are opened (the
+  // decision depends only on the manifest and the caller's options, so it does not wait for the
+  // containers).
   const ditSessionOptions = resolveSessionOptions(
     IRODORI_SESSION_POLICY,
     quant.session,
@@ -357,13 +390,14 @@ export const admitIrodori = async (
   );
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, ditSessionOptions);
 
-  // 9 本の部品が全部開けることをこの席で見る（開いていない役割は供給口が fail loudly）。
-  // 引き当ての間に中断の境目を置く。
+  // Checks here that all 9 components can be opened (for a role that is not open, the supplier
+  // fails loudly). Abort boundaries sit between the lookups.
   for (const key of COMPONENT_KEYS) {
     await settleAbort(options.signal);
     open(key);
   }
-  // グラフ突合は GPU より前（docstring の順序 MUST）。突合を掛けるのは下の 6 本。
+  // Matching against the graphs comes before the GPU (the ordering MUST of the docstring). The
+  // matching applies to the 6 below.
   const speaker = open(SPEAKER);
   const duration = open(DURATION);
   const dit = open(DIT);
@@ -371,10 +405,11 @@ export const admitIrodori = async (
   const codecDecoder = open(CODEC_DECODER);
   const codecEncoder = open(CODEC_ENCODER);
 
-  // グラフの宣言と pipelineConfig の突合（ホストの式が読む数は全て config 由来）。
+  // Matching the graph declarations against pipelineConfig (every number the host formulas read
+  // comes from the config).
   assertStaticDim(dit, "x_t", 2, config.latentDim, "latentDim");
   assertStaticDim(dit, "t_embed", 1, config.timestepEmbedDim, "timestepEmbedDim");
-  // 条件 3 本を受けるのは `dit_context`（`dit` は K / V を受ける — ADR 0114）。
+  // The 3 conditions are taken by `dit_context` (`dit` takes the K / V — ADR 0114).
   assertStaticDim(ditContext, "text_state", 1, config.maxTextLen, "maxTextLen");
   assertStaticDim(ditContext, "text_state", 2, config.textDim, "textDim");
   assertStaticDim(ditContext, "speaker_state", 1, config.speakerRows, "speakerRows");
@@ -384,7 +419,8 @@ export const admitIrodori = async (
   assertStaticDim(duration, "text_state", 2, config.textDim, "textDim");
   assertStaticDim(duration, "speaker_vec", 1, config.speakerDim, "speakerDim");
   assertStaticDim(duration, "caption_vec", 1, config.captionDim, "captionDim");
-  // 参照 latent の patch 幅（latentDim × speakerPatchSize）が speaker の入力幅と一致する。
+  // The patch width of the reference latent (latentDim × speakerPatchSize) matches the input width
+  // of speaker.
   assertStaticDim(
     speaker,
     "latent",
@@ -392,19 +428,23 @@ export const admitIrodori = async (
     config.latentDim * config.speakerPatchSize,
     "latentDim × speakerPatchSize",
   );
-  // codec decoder は latent を 1 フレーム = hopLength サンプルへ展開する。入力幅と**出力の
-  // 派生次元の係数**の両方を見る（係数だけがずれた資産は shape が合ったまま通り、切り出しと
-  // 末尾トリムのサンプル位置だけが静かに別の場所を指す）。
+  // The codec decoder decodes 1 latent frame into hopLength samples. Both the input width and **the
+  // coefficient of the output's derived dimension** are checked (an asset where only the
+  // coefficient is off passes with matching shapes, and only the sample positions of the cut and
+  // the tail trim quietly point somewhere else).
   assertStaticDim(codecDecoder, "latent", 2, config.latentDim, "latentDim");
   assertOutputScale(codecDecoder, 2, config.hopLength, "hopLength");
-  // encoder は逆向き（`[1,T,hopLength]` の波形 → `[1,T,latentDim]`）。入力のフレーム幅が
-  // `hopLength` でないと、ホストが並べた波形が**1 フレームずつずれて**読まれる。
+  // The encoder goes the other way (a `[1,T,hopLength]` waveform → `[1,T,latentDim]`). If the input
+  // frame width is not `hopLength`, the waveform the host laid out is read **shifted by one frame
+  // at a time**.
   assertStaticDim(codecEncoder, "wav", 2, config.hopLength, "hopLength");
   assertOutputDim(codecEncoder, 2, config.latentDim, "latentDim");
-  // `dit` の記号次元は S の 1 本だけ（常駐経路は毎 enqueue この名前で束縛を渡す）。家族の門は
-  // この 1 本に集める MUST の一部で、実行時に置くと ①GB 級の重みを落とした後にしか落ちない
-  // ②ホスト経路（`gpuTiming` 有効 device / `onEvent` 購読）では走らず、同じ配布形が観測経路
-  // ごとに違う文言で落ちる、の 2 つが起きる。
+  // `dit` has exactly one symbolic dimension, S (the resident path passes the binding under this
+  // name on every enqueue). This is part of the MUST that gathers the family checks in this one
+  // function; placed at run time, two things happen: (1) it fails only after GB-class weights are
+  // downloaded (2) it does not run on the host path (a `gpuTiming` device / an `onEvent`
+  // subscriber), so the same distribution fails with different messages depending on the
+  // observation path.
   const ditSymbols = dit.graph.symbols;
   if (ditSymbols.length !== 1) {
     throw new Error(`irodori: dit の記号次元が 1 本でない（[${ditSymbols.join(", ")}]）`);
@@ -412,9 +452,11 @@ export const admitIrodori = async (
   const ditSymbol = ditSymbols[0];
   const ditContextOutputs = admitDitContext(dit, ditContext);
 
-  // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
-  // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
-  // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+  // MUST: a missing capability of a shared GPU (feature / device limit) fails here — unlike the
+  // case where the pipeline acquires its own, there is no reason to wait for `acquireGpu`, and this
+  // is the only family check that knows before the weights are downloaded (the mapping between
+  // request and check is the one in `session/gpu-features.ts`, and the later checks call the same
+  // functions).
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(gpuFeatures, options.gpu, `IrodoriPipeline: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(

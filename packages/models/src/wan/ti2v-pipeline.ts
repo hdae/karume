@@ -1,29 +1,39 @@
 /**
- * `WanTi2vPipeline` — テキスト（+ 条件画像）→ 動画（Wan2.2 TI2V 5B の T2V と I2V）の 1 本の面（ADR 0121 決定 10・11）。
+ * `WanTi2vPipeline` — the one surface for text (+ condition image) → video (Wan2.2 TI2V 5B's T2V and
+ * I2V) (ADR 0121 decisions 10 and 11).
  *
- * 段の順序（(encoder →) text → DiT → VAE を 1 段ずつ張って畳む）・Session の寿命・中断・公開型
- * （`WanGenerateRequest` / `GeneratedVideo` / `WanGenerateEvent` / 構築オプション）は Wan2.1 の
- * `WanPipeline` と同じ 1 本で、正本は `./pipeline.ts` 冒頭の doc。家族 admission・構築・生成の本体も
- * 共有の `family.ts` にあり、ここは class の殻（private のコンストラクタ・直列化鎖・`dispose`）と 2.2 だけの
- * 要求の型（{@link WanTi2vGenerateRequest} — 条件画像）を持ち、`WAN22_TI2V_FAMILY`（pipeline `wan-ti2v/1`・世代の
- * 記述子 `WAN22_TI2V_GENERATION`）を渡す。
+ * The stage order ((encoder →) text → DiT → VAE, each stage opened and folded in turn), Session
+ * lifetimes, cancellation and the public types (`WanGenerateRequest` / `GeneratedVideo` /
+ * `WanGenerateEvent` / construction options) are the same single design as Wan2.1's `WanPipeline`;
+ * the source of truth is the doc at the top of `./pipeline.ts`. The family admission and the bodies
+ * of construction and generation also live in the shared `family.ts`; this file holds the class
+ * shell (private constructor, serialization chain, `dispose`) and the 2.2-only request type
+ * ({@link WanTi2vGenerateRequest} — the condition image), and passes `WAN22_TI2V_FAMILY` (pipeline
+ * `wan-ti2v/1`, generation descriptor `WAN22_TI2V_GENERATION`).
  *
- * Wan2.1 との違いは全て世代の記述子と資産の宣言から来る（コードの分岐ではない）:
+ * Every difference from Wan2.1 comes from the generation descriptor and the asset declarations (not
+ * from code branches):
  *
- * - 受理集合は 1280×704 / 704×1280 × フレーム数 4n+1 の 5〜121（既定 1280×704・33 フレーム）
- * - 潜在は 48 チャネル（`[48, F', H/16, W/16]` — VAE のグラフの比 8 × unpatchify 2）・出力は 24 fps
- * - DiT の入力は 7 本（条件側の時刻と条件マスク — T2V では条件マスクは全て偽・条件側の時刻は生成側と同じ・I2V では
- *   先頭の潜在フレームのトークンが真で条件側の時刻は 0）
- * - I2V の VAE encoder（記号長の 3 グラフ — `vae-encoder.ts`）の部品を持つ（DiT の入力の形が `"ti2v"` の世代だけ）
+ * - The accepted set is 1280×704 / 704×1280 × 4n+1 frames, 5–121 (default 1280×704, 33 frames)
+ * - The latents have 48 channels (`[48, F', H/16, W/16]` — the VAE graph's ratio 8 × unpatchify 2);
+ *   the output is 24 fps
+ * - The DiT has 7 inputs (condition-side time and condition mask — in T2V the condition mask is all
+ *   false and the condition-side time equals the generation side; in I2V the tokens of the first
+ *   latent frame are true and the condition-side time is 0)
+ * - It has the I2V VAE encoder components (three symbolic-length graphs — `vae-encoder.ts`) (only for
+ *   the generation whose DiT input form is `"ti2v"`)
  *
- * NOTE: 殻の重複（約 60 行）は受け入れている — 共有の基底 class や mixin は作らない（ADR 0121 段 6 の設計
- * §3.2。本体は `family.ts` の 1 本で、重複するのは private 状態と委譲だけ）。
+ * NOTE: the duplicated shell (about 60 lines) is accepted — no shared base class or mixin (ADR 0121
+ * stage 6 design §3.2. The body is the single one in `family.ts`; only the private state and the
+ * delegation are duplicated).
  *
- * 配布形は `karume-wan2.2`（ADR 0121 段 8 — recipe `dist.py --pipeline wan-ti2v` が組む・HF の公開リポは
- * `WAN_SOURCES["wan2.2"]`）。入口は 2.1 と同じく配布形から取得する {@link WanTi2vPipeline.fromPretrained} と、
- * 取得済みのバイト列から組む {@link WanTi2vPipeline.fromAssets} の 2 つ。
+ * The distribution is `karume-wan2.2` (ADR 0121 stage 8 — built by the recipe
+ * `dist.py --pipeline wan-ti2v`; the public HF repository is `WAN_SOURCES["wan2.2"]`). As in 2.1 there
+ * are two entries: {@link WanTi2vPipeline.fromPretrained}, which fetches from the distribution, and
+ * {@link WanTi2vPipeline.fromAssets}, which builds from already-fetched bytes.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is side-effect free (no import-time execution, no global mutable state —
+ * CLAUDE.md).
  */
 
 import type { DistributionSource, HubRepoRef } from "@karume/hub";
@@ -48,52 +58,66 @@ import type { WanI2vFit } from "./i2v-preprocess.ts";
 import type { WanPrompt } from "./text-embeds.ts";
 
 /**
- * Wan2.2 の 1 回の生成要求（{@link WanGenerateRequest} + I2V の条件画像）。`image` を省けばテキスト → 動画（T2V —
- * 画像の欄が無い要求と同じ経路・同じ値）。
+ * One Wan2.2 generation request ({@link WanGenerateRequest} + the I2V condition image). Without
+ * `image` it is text → video (T2V — the same path and the same values as a request without the image
+ * field).
  *
- * `image` を渡すと I2V（ADR 0121 決定 11 — 条件づけは diffusers の `WanImageToVideoPipeline` の `expand_timesteps` の形）:
+ * With `image` it is I2V (ADR 0121 decision 11 — the conditioning has the form of `expand_timesteps`
+ * in diffusers' `WanImageToVideoPipeline`):
  *
- * - 出力寸法: `width` / `height` を省けば、受理集合（1280×704 / 704×1280）から画像の縦横比に近い方を選ぶ（公式 Wan2.2 の
- *   比較式 `max(r / rc, rc / r)`・同点は横長 — 幅 ≥ 高さの画像は 1280×704）。片方か両方を明示したら、それに合う受理集合の
- *   寸法（無ければ `ModelInputError`）。公式は受理集合の外の寸法（16:9 の画像で 1248×704 など）も選ぶので、同じ画像でも
- *   公式よりクロップが多くなりうる。
- * - 前処理は RGB8 のまま（decode は呼び手 — 画素はそのまま使い、色空間の変換はしない）→ 寸法合わせ（`fit`）→
- *   `[-1, 1]` → VAE encoder（`vae_encoder` の段 — 最初の段）→ 潜在の正規化 → DiT の先頭の潜在フレームの条件。
- * - 出力の 1 枚目は条件画像を VAE で encode → decode した絵になる（先頭の潜在フレームが条件の潜在そのもの）。
+ * - Output size: when `width` / `height` are omitted, the accepted size (1280×704 / 704×1280) closer
+ *   to the image's aspect ratio is chosen (official Wan2.2's comparison `max(r / rc, rc / r)`, ties
+ *   go landscape — an image with width ≥ height gets 1280×704). When one or both are given, the
+ *   accepted size that matches them (`ModelInputError` when none does). The official code also picks
+ *   sizes outside the accepted set (such as 1248×704 for a 16:9 image), so the same image can be
+ *   cropped more than in the official code.
+ * - Preprocessing stays in RGB8 (decoding is the caller's job — the pixels are used as they are,
+ *   without colour-space conversion) → size fitting (`fit`) → `[-1, 1]` → VAE encoder (the
+ *   `vae_encoder` stage — the first stage) → latent normalization → the condition of the DiT's first
+ *   latent frame.
+ * - The first output frame is the condition image encoded and decoded by the VAE (the first latent
+ *   frame is the condition latent itself).
  */
 export type WanTi2vGenerateRequest = WanGenerateRequest & {
   /**
-   * I2V の条件画像（RGB8・インターリーブ・`data.length = 3·width·height`）。寸法は任意（出力寸法へ合わせる）。
-   * パイプラインは書き換えない。呼び手も `generate` が決着するまで `data` を書き換えない（画素は直列化鎖で順番が
-   * 来てから読むので、待っている間の書き換えは生成に効く）。RGB8 の形でない値（`data` が `Uint8Array` でない・
-   * `null` など）と、寸法と長さの食い違いは `ModelInputError`。
+   * The I2V condition image (RGB8, interleaved, `data.length = 3·width·height`). Any size (it is
+   * fitted to the output size). The pipeline does not modify it. The caller also must not modify
+   * `data` until `generate` settles (the pixels are read when the request's turn comes on the
+   * serialization chain, so a modification while waiting affects the generation). A value not in
+   * RGB8 form (`data` not a `Uint8Array`, `null`, etc.) and a mismatch between size and length are a
+   * `ModelInputError`.
    */
   readonly image?: Rgb8Image;
   /**
-   * 条件画像の寸法の合わせ方（`image` を渡したときだけ — 省けば `"crop"`）。
+   * How the condition image is fitted to the size (only with `image` — `"crop"` when omitted).
    *
-   * - `"crop"`: 公式 Wan2.2 の I2V と同じ — 縦横比を保って出力を覆う大きさへ LANCZOS で伸縮し、中央を切り出す
-   * - `"stretch"`: diffusers の `WanImageToVideoPipeline` と同じ — 出力寸法へ直接 LANCZOS で伸縮する（縦横比は保たない）
+   * - `"crop"`: the same as official Wan2.2's I2V — LANCZOS-resize, keeping the aspect ratio, to a
+   *   size that covers the output, then cut out the centre
+   * - `"stretch"`: the same as diffusers' `WanImageToVideoPipeline` — LANCZOS-resize directly to the
+   *   output size (the aspect ratio is not kept)
    *
-   * `image` 無しで渡すと `ModelInputError`（効かないノブを黙って受けない）。綴り違いは素の `Error`（model / quant 名の
-   * 綴り違いと同じ扱い — 打つ手は値の範囲を直すことではなく受理集合を引き直すこと・ADR 0107 決定 3）で、`image` の
-   * 有無より先に見る（`image` 無しの綴り違いも素の `Error`）。
+   * Passing it without `image` is a `ModelInputError` (a knob with no effect is not accepted
+   * silently). A misspelling is a plain `Error` (treated like a misspelt model / quant name — the
+   * remedy is to look up the accepted set again, not to fix a value range; ADR 0107 decision 3), and
+   * it is checked before whether `image` is present (a misspelling without `image` is also a plain
+   * `Error`).
    */
   readonly fit?: WanI2vFit;
 };
 
 /**
- * Wan2.2 TI2V 5B のテキスト（+ 条件画像）→ 動画パイプライン（T2V と I2V — {@link WanTi2vGenerateRequest}）。
+ * The text (+ condition image) → video pipeline of Wan2.2 TI2V 5B (T2V and I2V —
+ * {@link WanTi2vGenerateRequest}).
  *
- * 構築は {@link WanTi2vPipeline.fromPretrained}（配布形から取得）か {@link WanTi2vPipeline.fromAssets}
- * （取得済みバイト列）だけを入口にする（コンストラクタは private — manifest 検査と資産の突合を迂回した
- * 半端な状態を作らせない。ADR 0008）。
+ * Construction has only two entries: {@link WanTi2vPipeline.fromPretrained} (fetch from the
+ * distribution) and {@link WanTi2vPipeline.fromAssets} (already-fetched bytes) (the constructor is
+ * private — no half-built state that bypasses the manifest check and the asset matching. ADR 0008).
  */
 export class WanTi2vPipeline {
   readonly #state: WanState;
-  /** generate と dispose の直列化鎖。 */
+  /** The serialization chain of generate and dispose. */
   readonly #chain = createOperationChain();
-  /** dispose の 1 本（undefined でないことが「dispose 済み」）。 */
+  /** The single dispose (not undefined means "disposed"). */
   #disposal: Promise<void> | undefined;
 
   private constructor(state: WanState) {
@@ -101,15 +125,19 @@ export class WanTi2vPipeline {
   }
 
   /**
-   * 配布形から取得して組む（手順・`ref` の読み方は `WanPipeline.fromPretrained` と同じ 1 本 — `family.ts`）。取る部品は
-   * 2.1 の部品に I2V の VAE encoder の 3 本（`vae_encoder_pre` / `vae_encoder_attn` / `vae_encoder_post` — 画像を渡さない
-   * 使い方でも取る）を足したもの。manifest の pipeline は `wan-ti2v/1` を要る。
+   * Fetches from the distribution and builds (the procedure and how `ref` is read are the same single
+   * implementation as `WanPipeline.fromPretrained` — `family.ts`). The fetched components are 2.1's
+   * plus the three I2V VAE encoder parts (`vae_encoder_pre` / `vae_encoder_attn` /
+   * `vae_encoder_post` — fetched even for use without an image). The manifest's pipeline must be
+   * `wan-ti2v/1`.
    *
-   * パッケージ版が検証した取得元は `WAN_SOURCES`（`config.ts`）の `"wan2.2"` — 再現性を自分で固定するなら
-   * `{ repo, revision }` を呼び手が明示する。HF から取るとき umT5 の越境先は manifest が pin した commit で取るので、
-   * 呼び手は渡さない。手元のミラー（`models/karume-wan2.2`）は取得元ハンドル（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）で渡し、`"gpu"` の経路では umT5 の越境先（`karume-umt5-xxl`）をその取得元の `crossRepo` に
-   * mapping で渡す（キーは manifest の `text_encoder` が宣言する repo — 2.1 と同じ形）。
+   * The source this package version verified is `"wan2.2"` in `WAN_SOURCES` (`config.ts`) — to pin
+   * reproducibility yourself, the caller gives `{ repo, revision }` explicitly. When fetching from
+   * HF, umT5's cross-repository target is fetched at the commit the manifest pins, so the caller does
+   * not pass it. A local mirror (`models/karume-wan2.2`) is passed as a source handle
+   * (`localDirectory` / `denoDirectory` of `@karume/hub/deno`), and on the `"gpu"` path umT5's
+   * cross-repository target (`karume-umt5-xxl`) is passed as a mapping in that source's `crossRepo`
+   * (the key is the repo the manifest's `text_encoder` declares — the same form as 2.1).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
@@ -119,8 +147,9 @@ export class WanTi2vPipeline {
   }
 
   /**
-   * 取得済みの manifest + 資産から組む（{@link WanAssets}）。容器を開いて、取得面と同じ家族 admission と
-   * 組み立て（`family.ts`）を通す — 2 面の違いは部品の供給口だけ。
+   * Builds from an already-fetched manifest + assets ({@link WanAssets}). Opens the containers and
+   * goes through the same family admission and assembly (`family.ts`) as the fetching surface — the
+   * two surfaces differ only in where the components come from.
    */
   static async fromAssets(
     input: WanAssets,
@@ -130,8 +159,9 @@ export class WanTi2vPipeline {
   }
 
   /**
-   * テキスト埋め込み資産のプロンプトの一覧（資産のメタの並び — 埋め込みの値は持たない写し）。
-   * 経路ごとの意味は `WanPipeline.prompts` と同じ（`"precomputed"` は受理集合そのもの・`"gpu"` は例示）。
+   * The list of prompts of the text embedding asset (in the asset metadata's order — a copy without
+   * the embedding values). Its meaning per path is the same as `WanPipeline.prompts`
+   * (`"precomputed"`: the accepted set itself; `"gpu"`: examples).
    */
   get prompts(): readonly WanPrompt[] {
     return this.#state.textEmbeds.entries.map(({ name, role, prompt, normalized }) => ({
@@ -143,9 +173,9 @@ export class WanTi2vPipeline {
   }
 
   /**
-   * プロンプト（と条件画像 — {@link WanTi2vGenerateRequest}）から動画を 1 本生成する。同じ要求（seed か latents・
-   * ノブ・画像）なら同じ値が出る。並行に呼ばれた場合は待たされて順に走る（グラフの同時常駐を作らない —
-   * `./pipeline.ts` 冒頭の doc）。
+   * Generates one video from a prompt (and a condition image — {@link WanTi2vGenerateRequest}). The
+   * same request (seed or latents, knobs, image) gives the same values. Concurrent calls wait and run
+   * in order (no two graphs resident at once — the doc at the top of `./pipeline.ts`).
    */
   async generate(request: WanTi2vGenerateRequest): Promise<GeneratedVideo> {
     if (this.#disposal !== undefined) {
@@ -155,8 +185,9 @@ export class WanTi2vPipeline {
   }
 
   /**
-   * 解放する。**内部で取得した GPU だけ**破棄する（`options.gpu` は呼び手の所有物）。
-   * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy — 鎖に載せる）。
+   * Releases. Destroys **only a GPU acquired internally** (`options.gpu` belongs to the caller).
+   * MUST: wait for an in-flight generation to complete before destroying (flush-before-destroy — it
+   * goes on the chain).
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(() => {
@@ -165,7 +196,7 @@ export class WanTi2vPipeline {
     return this.#disposal;
   }
 
-  /** `await using` 対応 — {@link dispose} の別名。 */
+  /** `await using` support — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }

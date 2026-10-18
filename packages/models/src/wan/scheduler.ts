@@ -1,35 +1,38 @@
 /**
- * Wan2.1 のサンプラのホスト側 — flow matching の UniPC（diffusers 0.39.0 の
- * `UniPCMultistepScheduler`）と CFG の合成（ADR 0118 決定 5）。
+ * The host side of Wan2.1's sampler — flow matching UniPC (diffusers 0.39.0's
+ * `UniPCMultistepScheduler`) and the CFG combination (ADR 0118 decision 5).
  *
- * 移植するのは Wan2.1 の scheduler config が通る分岐だけ: `use_flow_sigmas`・静的 shift・
- * `prediction_type = flow_prediction`・`predict_x0`・`final_sigmas_type = zero`・
- * `lower_order_final`・`disable_corrector = []`・`thresholding` なし・`solver_p` なし。
- * `solver_order` は 1 / 2、`solver_type` は bh1 / bh2 を受ける（Wan の値は 2 / bh2 —
- * {@link WAN_UNIPC_CONFIG}。1 次と bh1 は単体テストの故障注入が使う）。
+ * Only the branches Wan2.1's scheduler config takes are ported: `use_flow_sigmas`, static shift,
+ * `prediction_type = flow_prediction`, `predict_x0`, `final_sigmas_type = zero`,
+ * `lower_order_final`, `disable_corrector = []`, no `thresholding`, no `solver_p`.
+ * `solver_order` accepts 1 / 2 and `solver_type` bh1 / bh2 (Wan's values are 2 / bh2 —
+ * {@link WAN_UNIPC_CONFIG}; order 1 and bh1 are used by the unit tests' fault injection).
  *
- * ## σ 列と timestep（`set_timesteps` の flow の分岐）
+ * ## σ sequence and timesteps (the flow branch of `set_timesteps`)
  *
- * σ は **f64 で計算してから f32 へ落とす**（決定 5）: numpy の `linspace(1, 1/N, steps+1)[:-1]`
- * → `shift·σ / (1 + (shift−1)·σ)` → σ[0] が 1 なら `1e-6` を引く → timestep は f64 の `σ·N` を
- * 切り捨てた整数 → 最後に 0 を足して f32。上流と同じ演算を同じ順で踏むので、f32 の列は上流と
- * ビット一致し、timestep は完全一致する（単体テストが fixture で縛る）。
+ * σ is **computed in f64 and then dropped to f32** (decision 5): numpy's
+ * `linspace(1, 1/N, steps+1)[:-1]` → `shift·σ / (1 + (shift−1)·σ)` → subtract `1e-6` when σ[0] is 1
+ * → the timestep is the f64 `σ·N` truncated to an integer → finally append 0 and convert to f32. The
+ * same operations run in the same order as upstream, so the f32 sequence is bit-identical to
+ * upstream and the timesteps match exactly (the unit tests pin this with a fixture).
  *
- * ## 更新（`step` / 予測子 `multistep_uni_p_bh_update` / 修正子 `multistep_uni_c_bh_update`）
+ * ## Update (`step` / predictor `multistep_uni_p_bh_update` / corrector `multistep_uni_c_bh_update`)
  *
- * 上流は CPU の f32 テンソルで計算する。係数（σ の比・λ・h・expm1 …）は 0-d の f32 テンソルで、
- * 要素ごとの演算は 1 本ずつ別の kernel（融合しない）。ここでは同じ演算を同じ順で `Math.fround`
- * を 1 演算ずつ踏んで写す。
+ * Upstream computes with f32 tensors on the CPU. The coefficients (ratio of σ, λ, h, expm1 …) are
+ * 0-d f32 tensors, and each elementwise operation is a separate kernel (no fusion). Here the same
+ * operations are copied in the same order, applying `Math.fround` after every operation.
  *
- * ## MUST: 軌跡は参照とビット一致し**ない**（一致を期待して締めない）
+ * ## MUST: the trajectory is **not** bit-identical to the reference (do not tighten to a match)
  *
- * f32 の `log` / `expm1` は torch（SLEEF / libm）と JS の `Math.*`（f64 で計算して f32 へ丸める）で
- * 最終ビットが割れうる。修正子の 2×2 の連立（上流は `torch.linalg.solve` = LAPACK の LU）は
- * 参照実装の sgetrf2 + sgetrs の演算順で写したが、torch が呼ぶ実装（MKL）の内部の順は保証されない。
- * 突き合わせは実測から導いた atol で行う（`packages/models/tests/wan_scheduler_test.ts` — 実測値は
- * そちらの doc）。
+ * f32 `log` / `expm1` can split in the last bit between torch (SLEEF / libm) and JS's `Math.*`
+ * (computed in f64 and rounded to f32). The corrector's 2×2 system (upstream: `torch.linalg.solve`
+ * = LAPACK's LU) is copied in the operation order of the reference sgetrf2 + sgetrs, but the
+ * internal order of the implementation torch calls (MKL) is not guaranteed. The comparison uses an
+ * atol derived from measurements (`packages/models/tests/wan_scheduler_test.ts` — the measured
+ * values are in its doc).
  *
- * MUST: モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: modules are side-effect free (no import-time execution, no global mutable state —
+ * CLAUDE.md).
  */
 
 const f32 = Math.fround;
@@ -46,27 +49,32 @@ const f32 = Math.fround;
 //
 //   Copyright 2025 TSAIL Team and The HuggingFace Team. All rights reserved.
 
-/** 上流の flow の分岐が σ[0] から引く量（`set_timesteps` の `eps`）。 */
+/** The amount upstream's flow branch subtracts from σ[0] (`eps` in `set_timesteps`). */
 const SIGMA_EPSILON = 1e-6;
 
-/** 予測子の 2 次の係数（上流の「order 2 は簡略版」— `rhos_p = 0.5`）と修正子の 1 次の係数。 */
+/**
+ * The predictor's order-2 coefficient (upstream's "order 2 is the simplified version" —
+ * `rhos_p = 0.5`) and the corrector's order-1 coefficient.
+ */
 const HALF = 0.5;
 
-/** diffusers の scheduler config のうち、この移植が読む値。 */
+/** The values of diffusers' scheduler config that this port reads. */
 export type WanUniPcConfig = {
-  /** `num_train_timesteps`（σ の linspace の下端 `1/N` と timestep の `σ·N`）。 */
+  /** `num_train_timesteps` (the lower end `1/N` of the σ linspace and `σ·N` of the timestep). */
   readonly numTrainTimesteps: number;
-  /** `solver_order`（多段の次数の上限）。 */
+  /** `solver_order` (the upper limit of the multistep order). */
   readonly solverOrder: 1 | 2;
-  /** `solver_type`（`B(h)` の選び方 — bh1 は `hh`・bh2 は `expm1(hh)`）。 */
+  /** `solver_type` (how `B(h)` is chosen — `hh` for bh1, `expm1(hh)` for bh2). */
   readonly solverType: "bh1" | "bh2";
 };
 
 /**
- * Wan2.1 T2V 1.3B の scheduler config（上流 `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` の
- * `scheduler/scheduler_config.json` — pin した revision の値。fixture の `scheduler_config` と同じ）。
+ * The scheduler config of Wan2.1 T2V 1.3B (`scheduler/scheduler_config.json` of upstream
+ * `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` — the values at the pinned revision; the same as the fixture's
+ * `scheduler_config`).
  *
- * NOTE: shift（`flow_shift` 3.0）はここに持たない — 生成の要求のノブ（`WanGenerateRequest.shift`）。
+ * NOTE: shift (`flow_shift` 3.0) is not kept here — it is a knob of the generation request
+ * (`WanGenerateRequest.shift`).
  */
 export const WAN_UNIPC_CONFIG: WanUniPcConfig = {
   numTrainTimesteps: 1000,
@@ -74,23 +82,23 @@ export const WAN_UNIPC_CONFIG: WanUniPcConfig = {
   solverType: "bh2",
 };
 
-/** σ 列と timestep 列（{@link wanUniPcSchedule}）。 */
+/** The σ sequence and the timestep sequence ({@link wanUniPcSchedule}). */
 export type WanUniPcSchedule = {
-  /** f32 の σ（長さ `steps + 1`・最後は 0）。 */
+  /** f32 σ (length `steps + 1`, the last is 0). */
   readonly sigmas: Float32Array<ArrayBuffer>;
-  /** 整数の timestep（長さ `steps`・DiT の `timesteps_proj` へ渡す値）。 */
+  /** Integer timesteps (length `steps`, the values passed to the DiT's `timesteps_proj`). */
   readonly timesteps: readonly number[];
 };
 
 /**
- * 上流の flow の分岐の f64 の σ 列（σ[0] の補正の前・長さ `steps`）。
+ * The f64 σ sequence of upstream's flow branch (before the σ[0] correction, length `steps`).
  *
- * numpy の `linspace(start, stop, num)` は `step = (stop − start) / (num − 1)` を先に作って
- * `i·step` に `start` を足す（2 回の丸め — JS も融合しない）。shift は
- * `(shift·σ) / (1 + (shift − 1)·σ)` の順（上流の式の評価順）。
+ * numpy's `linspace(start, stop, num)` first computes `step = (stop − start) / (num − 1)` and then
+ * adds `start` to `i·step` (two roundings — JS does not fuse them either). The shift is evaluated as
+ * `(shift·σ) / (1 + (shift − 1)·σ)` (the evaluation order of upstream's expression).
  *
- * NOTE: `export` は単体テストが f64 の列と故障注入（σ[0] の補正を外す）を組むため（`mod.ts` /
- * サブパス面には出さない — ADR 0008）。
+ * NOTE: the `export` lets the unit tests build the f64 sequence and the fault injection (dropping the
+ * σ[0] correction) (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const flowShiftedSigmas = (
   steps: number,
@@ -109,15 +117,17 @@ export const flowShiftedSigmas = (
 };
 
 /**
- * `set_timesteps(steps)` の σ 列（f32）と timestep 列（モジュール doc の「σ 列と timestep」）。
+ * The σ sequence (f32) and the timestep sequence of `set_timesteps(steps)` (module doc, "σ sequence
+ * and timesteps").
  *
- * MUST: 返す前に σ 列の構造を見る（正・狭義単調減少・最後が 0）。f32 へ落とした隣り合う σ が
- * 等しいと `h = 0` で更新が NaN になり、生成の途中で遠くの症状として出る。
+ * MUST: check the structure of the σ sequence before returning it (positive, strictly decreasing,
+ * last is 0). If two adjacent σ become equal after the drop to f32, `h = 0` makes the update NaN,
+ * which shows up as a distant symptom midway through generation.
  *
- * MUST: steps の上限は `numTrainTimesteps`（Wan は 1000）で、配列を確保する前に見る。整数の
- * timestep は `trunc(σ·N)` なので 0〜N−1 の N 通りしか無く、N を超える steps は timestep が必ず
- * 重複する。上限が無いと巨大な steps で σ 列を全部作る同期ループ（中断も効かない）を走らせてから
- * 落ちる。
+ * MUST: the upper limit of steps is `numTrainTimesteps` (1000 for Wan), checked before allocating
+ * the arrays. An integer timestep is `trunc(σ·N)`, so there are only N values 0 to N−1, and steps
+ * above N always duplicate a timestep. Without the limit, a huge steps would run a synchronous loop
+ * building the whole σ sequence (which cannot be cancelled either) before failing.
  */
 export const wanUniPcSchedule = (
   steps: number,
@@ -134,9 +144,10 @@ export const wanUniPcSchedule = (
     throw new RangeError(`shift ${shift} が正の有限値でない`);
   }
   const sigmas64 = flowShiftedSigmas(steps, shift, numTrainTimesteps);
-  // 上流の `np.fabs(sigmas[0] - 1) < eps` の分岐（最初の更新の `log(alpha)` の発散よけ）。
+  // Upstream's `np.fabs(sigmas[0] - 1) < eps` branch (avoids divergence of `log(alpha)` in the
+  // first update).
   if (Math.abs(sigmas64[0] - 1) < SIGMA_EPSILON) sigmas64[0] -= SIGMA_EPSILON;
-  // timestep は f64 の σ·N を int64 へ切り捨てた値（f32 へ落とす前の σ から作る）。
+  // The timestep is the f64 σ·N truncated to int64 (built from σ before the drop to f32).
   const timesteps = sigmas64.map((sigma) => Math.trunc(sigma * numTrainTimesteps));
   const sigmas = Float32Array.from([...sigmas64, 0]);
   for (let index = 0; index < steps; index += 1) {
@@ -151,13 +162,14 @@ export const wanUniPcSchedule = (
   return { sigmas, timesteps };
 };
 
-/** 上流の `lambda = log(alpha) − log(sigma)`（flow の `alpha = 1 − σ`・f32 の 0-d テンソル）。 */
+/** Upstream's `lambda = log(alpha) − log(sigma)` (flow's `alpha = 1 − σ`, an f32 0-d tensor). */
 const lambdaOf = (sigma: number): number =>
   f32(f32(Math.log(f32(1 - sigma))) - f32(Math.log(sigma)));
 
 /**
- * 2×2 の連立 `a·x = b` を f32 で解く（LAPACK 参照実装の sgetrf2 + sgetrs の演算順 — 部分 pivot・
- * L の列は pivot の逆数を掛ける・U の後退代入は除算）。
+ * Solves the 2×2 system `a·x = b` in f32 (the operation order of the LAPACK reference sgetrf2 +
+ * sgetrs — partial pivoting, L's column multiplied by the pivot's reciprocal, U's back substitution
+ * by division).
  */
 const solve2x2 = (
   matrix: readonly [readonly [number, number], readonly [number, number]],
@@ -165,7 +177,7 @@ const solve2x2 = (
 ): readonly [number, number] => {
   let [[a00, a01], [a10, a11]] = matrix;
   let [b0, b1] = rhs;
-  // isamax は同値なら先頭を選ぶので、入れ替えるのは厳密に大きいときだけ。
+  // isamax picks the first on a tie, so swap only when strictly larger.
   if (Math.abs(a10) > Math.abs(a00)) {
     [a00, a01, a10, a11] = [a10, a11, a00, a01];
     [b0, b1] = [b1, b0];
@@ -178,15 +190,15 @@ const solve2x2 = (
   return [x0, x1];
 };
 
-/** 予測子・修正子が共有する 1 区間 `[σ_s0 → σ_t]` の係数（0-d の f32 テンソルの写し）。 */
+/** The coefficients of one interval `[σ_s0 → σ_t]` shared by predictor and corrector (copies of 0-d f32 tensors). */
 type Interval = {
   readonly h: number;
   readonly lambdaS0: number;
-  /** `(σ_t / σ_s0)` — `x` に掛ける係数。 */
+  /** `(σ_t / σ_s0)` — the coefficient applied to `x`. */
   readonly ratio: number;
-  /** `alpha_t · h_phi_1` — `m0` に掛ける係数。 */
+  /** `alpha_t · h_phi_1` — the coefficient applied to `m0`. */
   readonly x0Weight: number;
-  /** `alpha_t · B(h)` — 高次の補正に掛ける係数。 */
+  /** `alpha_t · B(h)` — the coefficient applied to the higher-order correction. */
   readonly correctionWeight: number;
   readonly hh: number;
   readonly hPhi1: number;
@@ -194,13 +206,14 @@ type Interval = {
 };
 
 /**
- * flow matching の UniPC（bh1 / bh2・次数 1 / 2）の状態機械。上流の `step` を 1 回呼ぶごとに
- * {@link WanUniPcSampler.step} を 1 回呼ぶ（step の添字は内部で数える — 上流の
- * `set_begin_index(0)` の後と同じ）。
+ * The state machine of flow matching UniPC (bh1 / bh2, order 1 / 2). Call
+ * {@link WanUniPcSampler.step} once for every call of upstream's `step` (the step index is counted
+ * internally — the same as after upstream's `set_begin_index(0)`).
  *
- * 状態は直近 `solverOrder` 本の x0 の予測（上流の `model_outputs`）・前の step の修正後の潜在
- * （`last_sample`）・warmup の数（`lower_order_nums`）・前の step の次数（`this_order`）。
- * 生成 1 本ごとに作り直す（上流の `set_timesteps` が状態を初期化するのと同じ）。
+ * The state is the x0 predictions of the last `solverOrder` steps (upstream's `model_outputs`), the
+ * previous step's corrected latent (`last_sample`), the warmup count (`lower_order_nums`) and the
+ * previous step's order (`this_order`). It is rebuilt for every generation (just as upstream's
+ * `set_timesteps` initializes the state).
  */
 export class WanUniPcSampler {
   readonly #sigmas: Float32Array<ArrayBuffer>;
@@ -210,7 +223,7 @@ export class WanUniPcSampler {
   #lowerOrderNums = 0;
   #thisOrder = 0;
   #lastSample: Float32Array<ArrayBuffer> | undefined;
-  /** 直近の x0 の予測（古い順・長さは `solverOrder` まで）。 */
+  /** The latest x0 predictions (oldest first, length up to `solverOrder`). */
   #history: Float32Array<ArrayBuffer>[] = [];
 
   constructor(schedule: { readonly sigmas: Float32Array<ArrayBuffer> }, config: WanUniPcConfig) {
@@ -222,14 +235,14 @@ export class WanUniPcSampler {
     this.#config = config;
   }
 
-  /** 済んだ step 数。 */
+  /** The number of steps done. */
   get index(): number {
     return this.#index;
   }
 
   /**
-   * 1 step 進める: `modelOutput`（flow の速度場 — CFG 合成済み）と現在の潜在 `sample` から次の
-   * 潜在を返す。どちらも書き換えない。
+   * Advances one step: returns the next latent from `modelOutput` (flow's velocity field — already
+   * CFG-combined) and the current latent `sample`. Modifies neither.
    */
   step(
     modelOutput: Float32Array<ArrayBuffer>,
@@ -245,7 +258,8 @@ export class WanUniPcSampler {
       );
     }
     const { solverOrder } = this.#config;
-    // convert_model_output（flow_prediction・predict_x0）: x0 = sample − σ·v（変換前の潜在で作る）。
+    // convert_model_output (flow_prediction, predict_x0): x0 = sample − σ·v (built from the latent
+    // before conversion).
     const sigma = this.#sigmas[index];
     const x0 = new Float32Array(sample.length);
     for (let element = 0; element < sample.length; element += 1) {
@@ -258,7 +272,8 @@ export class WanUniPcSampler {
         : sample;
     this.#history.push(x0);
     if (this.#history.length > solverOrder) this.#history.shift();
-    // lower_order_final: 最後の数 step は残りの step 数まで次数を落とす。warmup は済んだ数 + 1 まで。
+    // lower_order_final: the last few steps lower the order to the number of remaining steps. During
+    // warmup the order is at most the steps done + 1.
     const thisOrder = Math.min(solverOrder, this.#steps - index, this.#lowerOrderNums + 1);
     this.#thisOrder = thisOrder;
     this.#lastSample = corrected;
@@ -268,14 +283,14 @@ export class WanUniPcSampler {
     return next;
   }
 
-  /** 区間 `[σ[s0] → σ[t]]` の係数。 */
+  /** The coefficients of the interval `[σ[s0] → σ[t]]`. */
   #interval(t: number, s0: number): Interval {
     const sigmaT = this.#sigmas[t];
     const sigmaS0 = this.#sigmas[s0];
     const alphaT = f32(1 - sigmaT);
     const lambdaS0 = lambdaOf(sigmaS0);
     const h = f32(lambdaOf(sigmaT) - lambdaS0);
-    // predict_x0 なので hh = −h。
+    // predict_x0, so hh = −h.
     const hh = -h;
     const hPhi1 = f32(Math.expm1(hh));
     const bH = this.#config.solverType === "bh2" ? f32(Math.expm1(hh)) : hh;
@@ -291,12 +306,12 @@ export class WanUniPcSampler {
     };
   }
 
-  /** `rk = (λ_si − λ_s0) / h`（2 次の項の刻み比）。 */
+  /** `rk = (λ_si − λ_s0) / h` (the step ratio of the order-2 term). */
   #ratioOf(si: number, interval: Interval): number {
     return f32(f32(lambdaOf(this.#sigmas[si]) - interval.lambdaS0) / interval.h);
   }
 
-  /** 予測子（上流 `multistep_uni_p_bh_update` — 区間 `[σ[k] → σ[k+1]]`）。 */
+  /** The predictor (upstream `multistep_uni_p_bh_update` — interval `[σ[k] → σ[k+1]]`). */
   #predict(sample: Float32Array<ArrayBuffer>, order: number): Float32Array<ArrayBuffer> {
     const index = this.#index;
     const interval = this.#interval(index + 1, index);
@@ -315,7 +330,8 @@ export class WanUniPcSampler {
       }
       return out;
     }
-    // 1 次: 上流は `x_t_ − alpha_t·B_h·0`（整数 0 を掛けた 0-d テンソルを引く — ±0 の符号まで写す）。
+    // Order 1: upstream computes `x_t_ − alpha_t·B_h·0` (subtracts a 0-d tensor multiplied by the
+    // integer 0 — copied down to the sign of ±0).
     // oxlint-disable-next-line oxc/erasing-op -- deliberate: multiplying by 0 keeps the sign of ±0 (and NaN) that upstream subtracts
     const zero = f32(interval.correctionWeight * 0);
     for (let element = 0; element < sample.length; element += 1) {
@@ -328,9 +344,9 @@ export class WanUniPcSampler {
   }
 
   /**
-   * 修正子（上流 `multistep_uni_c_bh_update` — 区間 `[σ[k−1] → σ[k]]`）。`modelT` はこの step の
-   * x0・`lastSample` は前の step の修正後の潜在・`order` は前の step の次数。履歴（m0 = 前の step の
-   * x0）は追加の**前**に読む。
+   * The corrector (upstream `multistep_uni_c_bh_update` — interval `[σ[k−1] → σ[k]]`). `modelT` is
+   * this step's x0, `lastSample` the previous step's corrected latent, `order` the previous step's
+   * order. The history (m0 = the previous step's x0) is read **before** the append.
    */
   #correct(
     modelT: Float32Array<ArrayBuffer>,
@@ -340,7 +356,7 @@ export class WanUniPcSampler {
     const index = this.#index;
     const interval = this.#interval(index, index - 1);
     const m0 = this.#history[this.#history.length - 1];
-    // b_i = h_phi_k · i! / B_h（h_phi_k の漸化 — 上流の for 文の逐語）。
+    // b_i = h_phi_k · i! / B_h (the recurrence of h_phi_k — verbatim from upstream's for loop).
     let hPhiK = f32(f32(interval.hPhi1 / interval.hh) - 1);
     let factorial = 1;
     const b: number[] = [];
@@ -356,7 +372,7 @@ export class WanUniPcSampler {
           f32(interval.ratio * lastSample[element]) - f32(interval.x0Weight * m0[element]),
         );
         const d1t = f32(modelT[element] - m0[element]);
-        // 上流は `0 + rhos_c[-1]·D1_t`（corr_res が整数 0）。
+        // Upstream computes `0 + rhos_c[-1]·D1_t` (corr_res is the integer 0).
         const inner = f32(0 + f32(HALF * d1t));
         out[element] = f32(base - f32(interval.correctionWeight * inner));
       }
@@ -364,7 +380,7 @@ export class WanUniPcSampler {
     }
     const m1 = this.#history[this.#history.length - 2];
     const rk = this.#ratioOf(index - 2, interval);
-    // R = stack([rks^0, rks^1]) = [[1, 1], [rk, 1]]（rks = [rk, 1]）。
+    // R = stack([rks^0, rks^1]) = [[1, 1], [rk, 1]] (rks = [rk, 1]).
     const [rho0, rho1] = solve2x2(
       [
         [1, 1],
@@ -387,8 +403,8 @@ export class WanUniPcSampler {
 }
 
 /**
- * CFG の合成 `uncond + g·(cond − uncond)`（上流 `pipeline_wan.py` の逐語 — f32 で 1 演算ずつ。
- * `g` は torch の Python スカラと同じく f32 へ落としてから掛ける）。
+ * The CFG combination `uncond + g·(cond − uncond)` (verbatim upstream `pipeline_wan.py` — one f32
+ * operation at a time; `g` is dropped to f32 before multiplying, as with torch's Python scalars).
  */
 export const wanClassifierFreeGuidance = (
   cond: Float32Array<ArrayBuffer>,

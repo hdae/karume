@@ -1,42 +1,47 @@
 /**
- * Wan2.1 の前処理 `prompt_clean`（diffusers 0.39.0）の鏡像 — ADR 0119 決定 2（案 b'）。
+ * A mirror of Wan2.1's preprocessing `prompt_clean` (diffusers 0.39.0) — ADR 0119 decision 2
+ * (option b').
  *
- * 上流は `ftfy.fix_text → html.unescape × 2 → strip → \s+ を U+0020 1 個へ → strip`。ftfy 6.3.1 の
- * `fix_text` は入力を「改行の直後」と「1,000,000 コードポイントごと」で区切り、区切りごとに
- * 次の 1 周を不動点まで回す:
+ * Upstream is `ftfy.fix_text → html.unescape × 2 → strip → \s+ to one U+0020 → strip`. ftfy 6.3.1's
+ * `fix_text` splits the input "right after a newline" and "every 1,000,000 code points", and runs
+ * the following round on each segment until a fixed point:
  *
- *   unescape_html → fix_encoding（ヒューリスティック）→ fix_c1_controls → fix_latin_ligatures →
+ *   unescape_html → fix_encoding (heuristic) → fix_c1_controls → fix_latin_ligatures →
  *   fix_character_width → uncurl_quotes → fix_line_breaks → fix_surrogates →
  *   remove_terminal_escapes → remove_control_chars → NFC
  *
- * ここが持つのは決定的な処理だけ（表引きの 4 本・改行・端末エスケープ・NFC・空白の畳み込み）。
- * 表を持たない処理とヒューリスティックは、**それが効く入力を拒む**ことで no-op に固定する —
- * 拒まなかった入力では上流のその処理が何もしないので、残りだけで上流と同じ文字列になる
- * （黙って近似しない）。拒む入力（{@link PromptCleanRejectReason}）:
+ * This module has only the deterministic steps (the four table lookups, line breaks, terminal
+ * escapes, NFC, whitespace collapsing). Steps without tables and the heuristics are pinned to no-ops
+ * by **rejecting the inputs they act on** — for an input that is not rejected, upstream's step does
+ * nothing, so the remaining steps alone give upstream's string (no silent approximation). Rejected
+ * inputs ({@link PromptCleanRejectReason}):
  *
- * - `"c1"` — C1 制御文字（U+0080〜009F）。`fix_c1_controls` は C1 を Windows-1252 として読み直す。
- *   表の出力と NFC は C1 を作らないので、入口で 1 度見れば足りる。
- * - `"entity"` — HTML の文字参照になりうる並び。各周の先頭で ftfy の `HTML_ENTITY_RE`
- *   （`&#?[0-9A-Za-z]{1,24};`）が当たるか、`fix_text` の後で `html.unescape` の `_charref`
- *   （`&` の直後が `#` + 数字・`#x` + 16 進・`\t \n \f 空白 < & # ;` 以外の文字）が当たれば拒む。
- *   当たらなければ ftfy の `unescape_html` と 2 回の `html.unescape` はどれも何もしない。名前表は
- *   持たないので、`R&D` のように entity にならない並びも拒む（`R & D` と空白を挟めば通る）。
- * - `"mojibake"` — 各周の先頭で「ASCII でなく、ftfy の `BADNESS_RE` が当たる」。当たらなければ
- *   `fix_encoding` は何もしない（`ftfy/__init__.py:482`）。`BADNESS_RE` は recipe が構文木から
- *   `\u{…}` の字面だけの JS 正規表現へ訳して資産に焼く（`\w` / `\s` / `.` の意味が Python と JS で
- *   割れないように — `tools/export-recipes/wan/prompt_clean.py` の `badness_terms`）。
- * - `"unassigned"` — UCD 16.0.0 で未割り当てのコードポイント。ftfy の処理ではなく NFC の版差の
- *   防壁: NFC は JS エンジンの `normalize` に任せ、割り当て済みの文字なら Unicode の安定性方針で
- *   版をまたいで同じ結果になるが、Python（UCD 16.0.0）で未割り当ての文字は新しいエンジンが
- *   分解・結合クラスを持ちうる。
+ * - `"c1"` — C1 control characters (U+0080 to 009F). `fix_c1_controls` re-reads C1 as
+ *   Windows-1252. Neither the table outputs nor NFC produce C1, so one check at the entry suffices.
+ * - `"entity"` — sequences that can become HTML character references. Rejected if ftfy's
+ *   `HTML_ENTITY_RE` (`&#?[0-9A-Za-z]{1,24};`) matches at the start of a round, or if
+ *   `html.unescape`'s `_charref` (`&` followed by `#` + digit, `#x` + hex digit, or a character
+ *   other than `\t \n \f space < & # ;`) matches after `fix_text`. Without a match, ftfy's
+ *   `unescape_html` and both `html.unescape` calls do nothing. There is no name table, so sequences
+ *   that do not become an entity, like `R&D`, are rejected too (`R & D` with spaces passes).
+ * - `"mojibake"` — "not ASCII, and ftfy's `BADNESS_RE` matches" at the start of a round. Without a
+ *   match `fix_encoding` does nothing (`ftfy/__init__.py:482`). The recipe translates `BADNESS_RE`
+ *   from its syntax tree into a JS regular expression made only of `\u{…}` literals and bakes it into
+ *   the asset (so the meaning of `\w` / `\s` / `.` cannot split between Python and JS —
+ *   `badness_terms` in `tools/export-recipes/wan/prompt_clean.py`).
+ * - `"unassigned"` — code points unassigned in UCD 16.0.0. Not an ftfy step but a guard against NFC
+ *   version differences: NFC is left to the JS engine's `normalize`, and for assigned characters
+ *   Unicode's stability policy gives the same result across versions, but a newer engine can give a
+ *   character unassigned in Python (UCD 16.0.0) a decomposition or combining class.
  *
- * 孤立サロゲートは入口の `assertEncodableText` が拒む（`fix_surrogates` は JS の正当な文字列を
- * UTF-8 で渡した Python の str には効かない）。
+ * Lone surrogates are rejected at the entry by `assertEncodableText` (`fix_surrogates` has no effect
+ * on a Python str made from a valid JS string passed as UTF-8).
  *
- * 表（{@link PromptCleanTables}）は recipe が ftfy 6.3.1・`re` / `regex`・`unicodedata` 16.0.0 から
- * 焼いた資産を引くだけで、Unicode の判定を TS で再実装しない。処理の順と形は recipe の鏡像
- * `prompt_clean.clean` の写経で、鏡像と上流の一致は recipe が網羅 + 乱択で検査し、TS とその
- * 期待の一致は `wan_text_prompt_clean_*_test.ts` が縛る。
+ * The tables ({@link PromptCleanTables}) are only looked up from the asset the recipe bakes from
+ * ftfy 6.3.1, `re` / `regex` and `unicodedata` 16.0.0; Unicode classification is not reimplemented in
+ * TS. The order and shape of the steps copy the recipe's mirror `prompt_clean.clean`; the recipe
+ * checks the mirror against upstream exhaustively + by random sampling, and
+ * `wan_text_prompt_clean_test.ts` pins TS to those expectations.
  */
 
 import { ModelInputError } from "../../errors.ts";
@@ -45,14 +50,15 @@ import { assertEncodableText, toCodePoints } from "../../text/code-points.ts";
 import { type CodeRanges, inCodeRanges, parseCodeRanges } from "../../text/code-ranges.ts";
 import { sha256HexSync } from "../../text/sha256.ts";
 
-/** 前処理が受けない入力の理由（ADR 0119 決定 2）。 */
+/** The reason the preprocessing does not accept an input (ADR 0119 decision 2). */
 export type PromptCleanRejectReason = "unassigned" | "c1" | "entity" | "mojibake";
 
 /**
- * 前処理が受けない入力（入力起因 — {@link ModelInputError} の派生）。
+ * An input the preprocessing does not accept (an input error — derived from
+ * {@link ModelInputError}).
  *
- * 型を分けるのは {@link PromptCleanRejectReason} を欄で運ぶため（UI が直し方を出し分けられる・
- * テストが上流の期待と理由まで突き合わせられる）。
+ * It is a separate type so that it carries {@link PromptCleanRejectReason} in a field (a UI can show
+ * the matching fix, and tests can compare down to the reason with upstream's expectations).
  */
 export class PromptCleanError extends ModelInputError {
   readonly reason: PromptCleanRejectReason;
@@ -64,59 +70,65 @@ export class PromptCleanError extends ModelInputError {
   }
 }
 
-/** recipe が焼いた前処理の表（資産の `promptClean`）。 */
+/** The preprocessing tables the recipe baked (the asset's `promptClean`). */
 export type PromptCleanTables = {
-  /** `fix_latin_ligatures` の写像（`ﬁ` → `fi` など）。 */
+  /** The mapping of `fix_latin_ligatures` (`ﬁ` → `fi` etc.). */
   readonly ligatures: ReadonlyMap<number, string>;
-  /** `fix_character_width` の写像（全角・半角形の標準形・U+3000 → U+0020）。 */
+  /** The mapping of `fix_character_width` (standard forms of full-width / half-width forms, U+3000 → U+0020). */
   readonly width: ReadonlyMap<number, string>;
-  /** `uncurl_quotes` が `'` / `"` へ寄せる文字。 */
+  /** The characters `uncurl_quotes` maps to `'` / `"`. */
   readonly singleQuotes: CodeRanges;
   readonly doubleQuotes: CodeRanges;
-  /** `remove_control_chars` が消す文字。 */
+  /** The characters `remove_control_chars` removes. */
   readonly controlChars: CodeRanges;
-  /** `remove_terminal_escapes` の `\d`（Python の Unicode の Nd — ASCII の数字だけではない）。 */
+  /** `\d` of `remove_terminal_escapes` (Python's Unicode Nd — not only ASCII digits). */
   readonly ansiDigits: CodeRanges;
-  /** UCD 16.0.0 で割り当て済みの文字。 */
+  /** The characters assigned in UCD 16.0.0. */
   readonly assigned: CodeRanges;
-  /** `str.strip()` が落とす文字（`str.isspace`）。 */
+  /** The characters `str.strip()` removes (`str.isspace`). */
   readonly stripSpace: CodeRanges;
-  /** `whitespace_clean` の `regex` の `\s`。 */
+  /** `\s` of `regex` in `whitespace_clean`. */
   readonly collapseSpace: CodeRanges;
-  /** `BADNESS_RE` の JS 訳（`u` フラグ・`g` / `y` なし = 状態を持たない）。 */
+  /** The JS translation of `BADNESS_RE` (`u` flag, no `g` / `y` = stateless). */
   readonly badness: RegExp;
 };
 
 /**
- * 資産の `badness`（ftfy 6.3.1 の `BADNESS_RE` の JS 訳 — recipe の `emit_js`）の UTF-8 の sha256。
+ * The sha256 of the UTF-8 of the asset's `badness` (the JS translation of ftfy 6.3.1's `BADNESS_RE`
+ * — the recipe's `emit_js`).
  *
- * MUST: 式は実行する前にこの値と照合する。資産は信用できない外部入力（`fromPretrained` は任意の repo を
- * 指せる — `src/text/asset-gates.ts`）で、構文が正しいだけの式を受けると `(a+)+$` のような式が前処理
- * （構築時の既定の negative の検査を含む）でバックトラッキングを指数的に伸ばし、イベントループを止める。
- * 翻訳は版に固定した 1 本（ADR 0119 決定 2）なので、任意の式を受ける理由が無い。ftfy の版や翻訳を
- * 変えたら recipe の焼き直しと同時にこの値を更新する（パリティのフィクスチャと同じ値になる）。
+ * MUST: match the expression against this value before running it. The asset is untrusted external
+ * input (`fromPretrained` can point at any repo — `src/text/asset-gates.ts`), and accepting any
+ * syntactically valid expression would let one like `(a+)+$` make backtracking grow exponentially in
+ * the preprocessing (including the check of the default negative at construction) and stall the
+ * event loop. The translation is a single one pinned to a version (ADR 0119 decision 2), so there is
+ * no reason to accept arbitrary expressions. When the ftfy version or the translation changes,
+ * update this value together with rebuilding the recipe output (it equals the parity fixture's
+ * value).
  */
 const FTFY_BADNESS_SHA256 = "7da149647fdaad8c293f44706c67b5649a6f76593cbcf9f23d9613680466312e";
 
-/** ftfy の `max_decode_length`（区切りの最大コードポイント数）。 */
+/** ftfy's `max_decode_length` (the maximum number of code points per segment). */
 const MAX_DECODE_LENGTH = 1_000_000;
 
 /**
- * 不動点の周回の上限。上流の表では 2 周で止まる（recipe の乱択の観測 — `maxRounds`）。届かない
- * のは表が壊れているときだけなので、入力起因ではない素の Error で落とす（無限に回さない）。
+ * The upper limit of rounds to the fixed point. With upstream's tables it stops in 2 rounds (observed
+ * in the recipe's random sampling — `maxRounds`). Not reaching it happens only with broken tables, so
+ * it fails with a plain Error, not an input error (it never loops forever).
  */
 const MAX_FIX_ROUNDS = 8;
 
 const C1_FIRST = 0x80;
 const C1_LAST = 0x9f;
 
-/** ftfy の `HTML_ENTITY_RE`（`ftfy/chardata.py:82` の逐語）。 */
+/** ftfy's `HTML_ENTITY_RE` (verbatim from `ftfy/chardata.py:82`). */
 const FTFY_ENTITY = /&#?[0-9A-Za-z]{1,24};/;
 
 /**
- * `html.unescape` の `_charref`（Python 3.14 `html/__init__.py:118-120`）が**当たるかどうか**と
- * 同値な形。`#[0-9]+;?` などは 1 文字目が当たれば必ず満たせるので、存在判定には 1 文字目だけで
- * よい（同値は recipe の pytest が全コードポイントで確かめる）。
+ * A form equivalent to **whether** `html.unescape`'s `_charref` (Python 3.14
+ * `html/__init__.py:118-120`) matches. `#[0-9]+;?` and the like are always satisfied once the first
+ * character matches, so the first character is enough to test for existence (the recipe's pytest
+ * confirms the equivalence on every code point).
  */
 const HTML_CHARREF = /&(?:#[0-9]|#[xX][0-9a-fA-F]|[^\t\n\f <&#;])/u;
 
@@ -137,7 +149,10 @@ const isAscii = (text: string): boolean => {
 const isAsciiLetter = (cp: number): boolean =>
   (cp >= 0x41 && cp <= 0x5a) || (cp >= 0x61 && cp <= 0x7a);
 
-/** `fix_text` の区切り（改行の直後で切る・1 区切りは最大 {@link MAX_DECODE_LENGTH} コードポイント）。 */
+/**
+ * The segments of `fix_text` (split right after a newline; one segment is at most
+ * {@link MAX_DECODE_LENGTH} code points).
+ */
 const splitSegments = (text: string): string[] => {
   const out: string[] = [];
   let start = 0;
@@ -163,7 +178,7 @@ const translate = (text: string, map: ReadonlyMap<number, string>): string => {
   return out;
 };
 
-/** `uncurl_quotes`（2 つの集合は交わらず、置換先は集合の外 — recipe の表の検査）。 */
+/** `uncurl_quotes` (the two sets are disjoint and the replacements lie outside them — checked on the recipe's tables). */
 const uncurlQuotes = (tables: PromptCleanTables, text: string): string => {
   let out = "";
   for (const ch of text) {
@@ -177,7 +192,7 @@ const uncurlQuotes = (tables: PromptCleanTables, text: string): string => {
   return out;
 };
 
-/** `fix_line_breaks`（`ftfy/fixes.py` の逐語 — 置換の順も同じ）。 */
+/** `fix_line_breaks` (verbatim from `ftfy/fixes.py` — the same replacement order too). */
 const fixLineBreaks = (text: string): string =>
   text
     .replaceAll("\r\n", "\n")
@@ -187,9 +202,9 @@ const fixLineBreaks = (text: string): string =>
     .replaceAll("\u0085", "\n");
 
 /**
- * `remove_terminal_escapes`（`ESC [ (\d|;)* 英字` を消す）。`re.sub` と同じく左から試し、
- * 当たらなければ 1 文字進む（重ならない）。数字と `;` と英字は交わらないので、貪欲に読んだ後に
- * 戻っても別の一致は無い。
+ * `remove_terminal_escapes` (removes `ESC [ (\d|;)* letter`). Like `re.sub` it tries from the left
+ * and advances one character when there is no match (no overlap). Digits, `;` and letters are
+ * disjoint, so backing up after a greedy read finds no other match.
  */
 const removeTerminalEscapes = (tables: PromptCleanTables, text: string): string => {
   if (!text.includes("\x1b")) return text;
@@ -221,14 +236,14 @@ const removeControlChars = (tables: PromptCleanTables, text: string): string => 
   return out;
 };
 
-/** `str.strip()`（両端の `isspace` を落とす）。 */
+/** `str.strip()` (removes `isspace` characters at both ends). */
 const strip = (tables: PromptCleanTables, text: string): string => {
   const cps = toCodePoints(text);
   let start = 0;
   let end = cps.length;
   while (start < end && inCodeRanges(tables.stripSpace, cps[start])) start += 1;
   while (end > start && inCodeRanges(tables.stripSpace, cps[end - 1])) end -= 1;
-  // 引数展開しない（長い入力で V8 の引数上限の RangeError になる）。
+  // No argument spreading (a long input would hit V8's argument limit with a RangeError).
   let out = "";
   for (let k = start; k < end; k++) out += String.fromCodePoint(cps[k]);
   return out;
@@ -258,15 +273,18 @@ const rejectEntity = (label: string, found: string): PromptCleanError =>
       "`&` の直後に空白を入れる（例 `R&D` → `R & D`）か、参照を元の文字に直してから渡す",
   );
 
-/** 1 区切りを不動点まで回す（ftfy の 1 周から、拒んで no-op にした処理を除いたもの）。 */
+/**
+ * Runs one segment to the fixed point (ftfy's round without the steps made no-ops by
+ * rejection).
+ */
 const fixSegment = (tables: PromptCleanTables, segment: string, label: string): string => {
   let text = segment;
   for (let round = 0; round < MAX_FIX_ROUNDS; round++) {
     const before = text;
-    // unescape_html: 当たる並びがあれば拒む（無ければ no-op）。
+    // unescape_html: reject if a sequence matches (otherwise a no-op).
     const entity = FTFY_ENTITY.exec(text);
     if (entity !== null) throw rejectEntity(label, entity[0]);
-    // fix_encoding: ASCII でなく BADNESS_RE が当たれば拒む（無ければ no-op）。
+    // fix_encoding: reject if not ASCII and BADNESS_RE matches (otherwise a no-op).
     if (!isAscii(text)) {
       const bad = tables.badness.exec(text);
       if (bad !== null) {
@@ -278,7 +296,7 @@ const fixSegment = (tables: PromptCleanTables, segment: string, label: string): 
         );
       }
     }
-    // fix_c1_controls / fix_surrogates: 入口で拒んだので no-op。
+    // fix_c1_controls / fix_surrogates: rejected at the entry, so no-ops.
     text = translate(text, tables.ligatures);
     text = translate(text, tables.width);
     text = uncurlQuotes(tables, text);
@@ -294,10 +312,11 @@ const fixSegment = (tables: PromptCleanTables, segment: string, label: string): 
 };
 
 /**
- * 上流の `prompt_clean` と同じ文字列を返す。受けない入力は {@link PromptCleanError}
- * （孤立サロゲートだけは `assertEncodableText` の {@link ModelInputError}）。
+ * Returns the same string as upstream's `prompt_clean`. An input that is not accepted throws
+ * {@link PromptCleanError} (only a lone surrogate throws `assertEncodableText`'s
+ * {@link ModelInputError}).
  *
- * `label` は拒否のメッセージに出す（正 / ネガティブのどちらかが判る形にする）。
+ * `label` appears in the rejection message (in a form that tells positive from negative).
  */
 export const cleanPrompt = (
   tables: PromptCleanTables,
@@ -324,13 +343,16 @@ export const cleanPrompt = (
   }
   let fixed = "";
   for (const segment of splitSegments(text)) fixed += fixSegment(tables, segment, label);
-  // html.unescape × 2: 当たる並びがあれば拒む（無ければ 2 回とも no-op）。
+  // html.unescape × 2: reject if a sequence matches (otherwise both calls are no-ops).
   const charref = HTML_CHARREF.exec(fixed);
   if (charref !== null) throw rejectEntity(label, charref[0]);
   return strip(tables, collapse(tables, strip(tables, fixed)));
 };
 
-/** `[cp, 置換文字列]` の対の列を写像へ（鍵の域と重複・置換文字列のサロゲートまで見る）。 */
+/**
+ * Turns a list of `[cp, replacement]` pairs into a map (checks the key range, duplicates and
+ * surrogates in the replacement).
+ */
 const parseCharMap = (raw: unknown, label: string): Map<number, string> => {
   if (!Array.isArray(raw)) throw new Error(`${label}: 配列でない`);
   const out = new Map<number, string>();
@@ -344,7 +366,8 @@ const parseCharMap = (raw: unknown, label: string): Map<number, string> => {
       throw new Error(`${label}: [cp, 文字列] でない`);
     }
     assertCodePoint(entry[0], label);
-    // 置換文字列が孤立サロゲートを持つと、NFC と以降の処理が上流（Python の str）と割れる。
+    // A lone surrogate in the replacement would split NFC and the later steps from upstream (a
+    // Python str).
     toCodePoints(entry[1]);
     setUnique(out, entry[0], entry[1], label);
   }
@@ -352,10 +375,12 @@ const parseCharMap = (raw: unknown, label: string): Map<number, string> => {
 };
 
 /**
- * 資産の `promptClean` を表に変換する（外部境界なので構造を検査してから使う）。
+ * Converts the asset's `promptClean` into tables (an external boundary, so the structure is checked
+ * before use).
  *
- * MUST: 区間表は `parseCodeRanges` の値域門を通す（壊れた表は例外にならず「静かに別の文字分類」
- * になり、前処理の出力だけが上流と割れる）。
+ * MUST: range tables go through the range check of `parseCodeRanges` (a broken table raises no
+ * exception but becomes "silently a different character classification", and only the
+ * preprocessing output splits from upstream).
  */
 export const parsePromptCleanTables = (raw: unknown, label: string): PromptCleanTables => {
   const obj = asRecord(raw, label);
@@ -368,11 +393,13 @@ export const parsePromptCleanTables = (raw: unknown, label: string): PromptClean
     );
   }
   let badness: RegExp;
-  // 受理する式は上の sha256 の照合で固定の 1 本に絞られ、手元のエンジンでは構築が失敗しない。それでも
-  // catch を残すのは、固定の式が `\u{…}` の符号位置エスケープ（u フラグが要る）を使うので、u フラグを
-  // 解釈できないエンジンでは構築が失敗しうるから — そのとき素の SyntaxError でなく資産の文脈で落とす。
+  // The sha256 match above narrows the accepted expression to one fixed expression, whose
+  // construction does not fail on the engines at hand. The catch stays because the fixed expression
+  // uses `\u{…}` code point escapes (which need the u flag), so construction can fail on an engine
+  // that does not understand the u flag — then it fails in the asset's context rather than as a
+  // bare SyntaxError.
   try {
-    // `g` / `y` を付けない — `exec` / `test` が lastIndex を持たず、呼ぶたびに先頭から探す。
+    // No `g` / `y` — `exec` / `test` keep no lastIndex and search from the start on every call.
     badness = new RegExp(source, "u");
   } catch (cause) {
     throw new Error(`${label}.badness: 正規表現として読めない`, { cause });

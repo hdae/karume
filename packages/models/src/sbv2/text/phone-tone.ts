@@ -1,40 +1,43 @@
 /**
- * 発話（モーラ列）→ SBV2 の given_phone / given_tone。
+ * Utterance (mora sequence) → SBV2's given_phone / given_tone.
  *
- * MUST: 音素・トーンを組む経路は**ここ 1 本だけ**。二経路化すると、経路ごとに梱包規則が
- * ズレる（長さは合うのに音だけ崩れる）。
+ * MUST: **this is the only path** that builds phonemes and tones. With two paths, the packing rules
+ * drift per path (the lengths match but only the sound breaks).
  *
- * SBV2 の音素・トーン規約:
+ * SBV2's phoneme and tone conventions:
  *
- * - 音素列は先頭・末尾に PAD（記号表の `pad`、tone 0）を必ず含む完全な列。
- * - 1 モーラは `consonant` があれば `[consonant, vowel]`、無ければ `[vowel]`。促音は `"q"`
- *   1 個・撥音は `"N"` 1 個（`Sbv2Mora.vowel` が音素そのものを持つ）。
- * - トーンは 0/1 の 2 値で、子音・母音とも同一トーン（モーラ単位の値を音素へ配る）。
- * - 記号はテキストに実在した句読点（正規形）だけを tone 0 で出す。実在しない記号は
- *   合成しない（参照実装 g2p と同方針）。
+ * - The phoneme sequence is a complete sequence that always includes PAD (the symbol table's `pad`,
+ *   tone 0) at the start and the end.
+ * - A mora is `[consonant, vowel]` when it has a `consonant`, otherwise `[vowel]`. The geminate is
+ *   one `"q"` and the moraic nasal one `"N"` (`Sbv2Mora.vowel` holds the phoneme itself).
+ * - Tone is binary 0/1, and consonant and vowel share the same tone (the per-mora value is spread
+ *   to the phonemes).
+ * - Symbols are emitted with tone 0 only for punctuation actually present in the text (normal
+ *   form). Symbols that are not present are not synthesised (the same policy as the reference
+ *   implementation's g2p).
  *
- * MUST: 出力の非 PAD 部分は語アライメントと完全一致する（`words.flatMap(w => w.phones)` ===
- * `leadingPunctuations` + Σ（モーラ音素 + そのモーラの punctuations））— word2ph の
- * `sum(word2ph) === phones.length` がこの一致に依存する。突合は `model-input.ts` の
- * `assertWordPhones` が持つ。
+ * MUST: the non-PAD part of the output matches the word alignment exactly
+ * (`words.flatMap(w => w.phones)` === `leadingPunctuations` + Σ (mora phonemes + that mora's
+ * punctuations)) — word2ph's `sum(word2ph) === phones.length` depends on this match. The
+ * comparison is owned by `assertWordPhones` in `model-input.ts`.
  */
 
 import { Sbv2InputError } from "../errors.ts";
 import type { Sbv2Utterance } from "./utterance.ts";
 
 type Sbv2PhoneTone = {
-  /** given_phone（両端 PAD 込み、add_blank 前）。 */
+  /** given_phone (including PAD at both ends, before add_blank). */
   readonly phones: readonly string[];
-  /** given_tone（0/1、phones と同長）。 */
+  /** given_tone (0/1, same length as phones). */
   readonly tones: readonly number[];
 };
 
 /**
- * 発話を given_phone / given_tone へ変換する（位置ごとに対応、tone は音素単位）。
+ * Converts an utterance to given_phone / given_tone (position by position; tone per phoneme).
  *
- * MUST: `tone` の値域を**ここで**見る。型は 0|1 だが JS からの呼び出しには効かず、`toneStart`
- * を足した後では 0/1 以外でも記号表の範囲に収まってしまう（例外が出ないまま別の tone 行を
- * 引く）。
+ * MUST: check the range of `tone` **here**. The type is 0|1 but has no effect on calls from JS, and
+ * once `toneStart` is added, values other than 0/1 can still land inside the table's range (looking
+ * up a different tone row without an exception).
  */
 export const toSbv2PhoneTone = (utterance: Sbv2Utterance, pad: string): Sbv2PhoneTone => {
   const phones: string[] = [pad];
@@ -47,7 +50,8 @@ export const toSbv2PhoneTone = (utterance: Sbv2Utterance, pad: string): Sbv2Phon
     }
   };
 
-  // 先頭モーラより前の実在記号（記号だけの入力ではモーラが無く全てここに入る）。
+  // Symbols actually present before the first mora (with symbol-only input there are no moras and
+  // all of them go here).
   pushPunctuations(utterance.leadingPunctuations);
 
   for (const [index, mora] of utterance.moras.entries()) {
@@ -58,14 +62,15 @@ export const toSbv2PhoneTone = (utterance: Sbv2Utterance, pad: string): Sbv2Phon
           "（生の 2 値トーンで与える）",
       );
     }
-    // 1 モーラを [consonant, vowel] に展開したとき、子音・母音とも同一トーンを振る。
+    // When a mora expands to [consonant, vowel], consonant and vowel get the same tone.
     if (mora.consonant !== undefined) {
       phones.push(mora.consonant);
       tones.push(tone);
     }
     phones.push(mora.vowel);
     tones.push(tone);
-    // モーラ直後にテキスト上実在した記号（正規形・出現順）。
+    // Symbols actually present in the text right after the mora (normal form, in order of
+    // appearance).
     if (mora.punctuations !== undefined) pushPunctuations(mora.punctuations);
   }
 

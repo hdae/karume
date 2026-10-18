@@ -1,12 +1,14 @@
 /**
- * 実行時資産のトークナイザ JSON（`karume dist` が配る形）を検査して {@link DebertaTokenizer} に
- * するところまで。
+ * Checks the tokenizer JSON of the run-time assets (the form `karume dist` ships) and turns it
+ * into a {@link DebertaTokenizer}, and no further.
  *
- * 見るのは資産の構造だけで、GPU も実行状態も触らない — 依存は `./tokenizer.ts` と資産 JSON の
- * 共通値域門（`../../text/asset-gates.ts`）に閉じる。
+ * It looks only at the structure of the asset and touches neither the GPU nor run-time state — its
+ * dependencies are limited to `./tokenizer.ts` and the shared value-range checks of asset JSON
+ * (`../../text/asset-gates.ts`).
  *
- * MUST: `sbv2/pipeline.ts` を import しない。`text/` は pipeline の葉として片方向に保つ
- * （逆向きの依存を 1 本でも入れると、資産門だけを GPU 無しで叩けなくなる）。
+ * MUST: do not import `sbv2/pipeline.ts`. `text/` stays a leaf of pipeline in one direction (a
+ * single dependency in the opposite direction makes it impossible to exercise the asset checks
+ * alone without a GPU).
  */
 
 import { isRecord } from "../../config/readers.ts";
@@ -14,13 +16,15 @@ import { MAX_CODE_POINT } from "../../text/asset-gates.ts";
 import { type CleanRanges, DebertaTokenizer } from "./tokenizer.ts";
 
 /**
- * `cleanRanges` の区間表を検査して読む。
+ * Checks and reads the range table of `cleanRanges`.
  *
- * MUST: 整数・コードポイント範囲・`start <= end`・**昇順かつ非重複**まで見る。`inRanges`
- * （`text/tokenizer.ts`）は二分探索なので、この前提が破れても例外は出ず**黙って外す** —
- * 除去 / 空白化の規則だけが変わった `bertText` から `inputIds` と `baseWord2ph` が同じ
- * 壊れ方で作られるため、`text/model-input.ts` の長さ突合門も通り、別の BERT 埋め込みで合成した
- * 音がそのまま出る。並べ替えて救わない（資産の不正として構築時に落とす）。
+ * MUST: check integers, the code-point range, `start <= end`, and **ascending and
+ * non-overlapping**. `inCodeRanges` (`text/code-ranges.ts`) is a binary search, so when this
+ * premise breaks it raises no exception and **silently misses** — `inputIds` and `baseWord2ph` are
+ * built from a `bertText` whose removal / spacing rules alone changed, broken in the same way, so
+ * they also pass the length check in `text/model-input.ts`, and audio synthesised from different
+ * BERT embeddings comes out as is. Do not rescue by sorting (fail at construction as an invalid
+ * asset).
  */
 const parseRanges = (raw: unknown, where: string): (readonly [number, number])[] => {
   if (!Array.isArray(raw)) throw new Error(`${where}: 区間表が配列でない`);
@@ -54,14 +58,15 @@ const parseRanges = (raw: unknown, where: string): (readonly [number, number])[]
   });
 };
 
-/** i32 の上限（トークン id は最終的に `Int32Array` へ書かれる）。 */
+/** Upper bound of i32 (token ids are finally written to an `Int32Array`). */
 const MAX_TOKEN_ID = 2147483647;
 
 /**
- * 実行時資産のトークナイザ JSON（`karume dist` が配る形）を検査して読む。
+ * Checks and reads the tokenizer JSON of the run-time assets (the form `karume dist` ships).
  *
- * MUST: 構造を検査してから使う。壊れた語彙表は「読めない」ではなく**全トークンが `[UNK]`**
- * という形で沈黙し、BERT 特徴だけが静かに無意味になる（`text/tokenizer.ts` の doc）。
+ * MUST: check the structure before use. A broken vocabulary does not fail as "cannot read"; it
+ * stays silent in the form **every token is `[UNK]`**, and only the BERT features quietly become
+ * meaningless (the doc of `text/tokenizer.ts`).
  */
 export const parseTokenizerAsset = (raw: unknown, where: string): DebertaTokenizer => {
   if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない`);
@@ -71,9 +76,10 @@ export const parseTokenizerAsset = (raw: unknown, where: string): DebertaTokeniz
   if (typeof clsId !== "number" || typeof sepId !== "number" || typeof unkId !== "number") {
     throw new Error(`${where}.special: clsId / sepId / unkId が数値でない`);
   }
-  // MUST: 整数かつ i32 の範囲。id は `Int32Array` へ書かれるので、非整数は**黙って切り捨て
-  // られ**、範囲外は wrap する — どちらも「別のトークンを指す」沈黙誤値になる（語彙の行数に
-  // 収まることは `fromVocabText` が語彙表を持つ側で見る）。
+  // MUST: an integer within the i32 range. ids are written to an `Int32Array`, so a non-integer is
+  // **silently truncated** and an out-of-range value wraps — both are silent wrong values that
+  // "point at a different token" (fitting within the vocabulary's row count is checked by
+  // `fromVocabText`, the side that holds the vocabulary).
   for (const [name, id] of [
     ["clsId", clsId],
     ["sepId", sepId],

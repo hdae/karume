@@ -1,48 +1,53 @@
 /**
- * Wan2.1 の DiT の 3D RoPE 表のホスト側 — 容器の資産 `rope_base`（軸別の素表）の読み取りと、
- * S 形グラフの入力 `rope_cos` / `rope_sin [1,S,1,head_dim]` への並べ替え（ADR 0118 決定 3）。
+ * The host side of the 3D RoPE tables of Wan2.1's DiT — reading the container asset `rope_base`
+ * (per-axis base tables) and reordering it into the S-shaped graph's inputs `rope_cos` /
+ * `rope_sin [1,S,1,head_dim]` (ADR 0118 decision 3).
  *
- * 素表は `transformer` 容器の**資産**（役割 `rope-base` — ADR 0109 決定 4）で、payload は safetensors
- * 形式。キーは `cos_t` / `sin_t` / `cos_h` / `sin_h` / `cos_w` / `sin_w`（Anima の `rope_base` と同じ
- * 綴り・同じ意味 = 軸 × 位置 × 周波数の表）で、各 `[rows, その軸の周波数の本数]` の F32。値は上流
- * `WanRotaryPosEmbed` の表そのもの（exporter が上流の出力から切り出す — `wan/dit_patch.py`）。
+ * The base tables are an **asset** of the `transformer` container (role `rope-base` — ADR 0109
+ * decision 4) with a safetensors payload. The keys are `cos_t` / `sin_t` / `cos_h` / `sin_h` /
+ * `cos_w` / `sin_w` (the same spelling and meaning as Anima's `rope_base` = an axis × position ×
+ * frequency table), each an F32 `[rows, number of frequencies of that axis]`. The values are upstream
+ * `WanRotaryPosEmbed`'s tables as they are (the exporter cuts them out of upstream's output —
+ * `wan/dit_patch.py`).
  *
- * ## 表は「計算」ではなく「素表からの並べ替え」
+ * ## The tables are "reordered from base tables", not "computed"
  *
- * MUST: cos / sin を TS で計算し**ない**。上流は float64 で角度と三角関数を計算してから f32 に落とす
- * ので、TS で式を写すと `pow` / 除算 / `cos` の実装差で最終ビットが割れうる。素表を並べ替えるだけなら
- * 上流の表とビット同一になる（Anima の `rope-base.ts` と同じ判断）。
+ * MUST: do **not** compute cos / sin in TS. Upstream computes the angles and trigonometric functions in
+ * float64 and then drops to f32, so copying the formula into TS can split the last bit through
+ * implementation differences in `pow` / division / `cos`. Only reordering the base tables is
+ * bit-identical to upstream's tables (the same judgement as Anima's `rope-base.ts`).
  *
- * ## 並べ方（interleave 形）
+ * ## Layout (interleaved form)
  *
- * 1 行（1 トークン）は `[t ブロック, h ブロック, w ブロック]` の連結で、各ブロックは周波数 1 本ごとに
- * 同じ値を 2 つ並べる（上流の `repeat_interleave(2)` — 回転の対が隣接 2 要素 `(x[2i], x[2i+1])`）。
- * Anima の half-split 形（`[t, h, w, t, h, w]`）とは並びが違う。
+ * One row (one token) is the concatenation `[t block, h block, w block]`, and each block repeats the
+ * value of every frequency twice (upstream's `repeat_interleave(2)` — a rotation pair is two adjacent
+ * elements `(x[2i], x[2i+1])`). The order differs from Anima's half-split form
+ * (`[t, h, w, t, h, w]`).
  */
 
 import { parseSafetensors } from "@karume/runtime";
 import type { SafetensorsFile } from "@karume/runtime";
 import type { WanTokenGrid } from "./dit-tokens.ts";
 
-/** 素表の軸（順序は t → h → w のブロック順）。 */
+/** The axes of the base tables (in block order t → h → w). */
 const ROPE_AXES = ["t", "h", "w"] as const;
 
-/** F32 のみ受ける（素表は cos / sin の実数表で、他の格納形は上流に存在しない）。 */
+/** Only F32 is accepted (the base tables are real-valued cos / sin tables; upstream has no other storage form). */
 const F32_DTYPE = "F32";
 
-/** 軸ごとの cos / sin 素表（行 = 位置・列 = その軸の周波数）。 */
+/** Per-axis cos / sin base tables (row = position, column = a frequency of that axis). */
 export type WanRopeBase = {
-  /** 全軸で共通の行数（= 上流の位置表の天井 `rope_max_seq_len`）。 */
+  /** The row count shared by all axes (= the ceiling of upstream's position table, `rope_max_seq_len`). */
   readonly rows: number;
-  /** 軸ごとの周波数の本数（`2 × (t + h + w)` が head_dim）。 */
+  /** The number of frequencies per axis (`2 × (t + h + w)` is head_dim). */
   readonly widths: readonly [number, number, number];
-  /** `[t, h, w]` の順に並べた cos 素表（行優先 `[rows, widths[axis]]`）。 */
+  /** The cos base tables in `[t, h, w]` order (row-major `[rows, widths[axis]]`). */
   readonly cos: readonly [
     Float32Array<ArrayBuffer>,
     Float32Array<ArrayBuffer>,
     Float32Array<ArrayBuffer>,
   ];
-  /** 同 sin。 */
+  /** The same for sin. */
   readonly sin: readonly [
     Float32Array<ArrayBuffer>,
     Float32Array<ArrayBuffer>,
@@ -55,7 +60,7 @@ type RawTable = {
   readonly shape: readonly [number, number];
 };
 
-/** F32・rank 2 の表を 1 本引く（整列は `parseSafetensors` が保証済み — view はゼロコピー）。 */
+/** Fetches one F32 rank-2 table (`parseSafetensors` already guarantees alignment — the view is zero-copy). */
 const tableOf = (file: SafetensorsFile, name: string): RawTable => {
   const view = file.tensors.get(name);
   if (view === undefined) throw new Error(`rope 素表に '${name}' が無い`);
@@ -68,14 +73,14 @@ const tableOf = (file: SafetensorsFile, name: string): RawTable => {
 };
 
 /**
- * 資産 `rope_base` の payload（safetensors 形式）を読む。
+ * Reads the payload (safetensors format) of the asset `rope_base`.
  *
- * MUST: キーがちょうど 6 本であること・行数が全軸で揃っていることを見る。揃っていないと「h の行を
- * w の表から読む」形の取り違えが範囲内に収まって黙って通る。
+ * MUST: check that there are exactly 6 keys and that the row count is the same on every axis.
+ * Otherwise a mix-up such as "reading h's rows from w's table" stays in range and passes silently.
  */
 export const parseWanRopeBase = (buffer: ArrayBuffer): WanRopeBase => {
   const file = parseSafetensors(buffer);
-  // MUST: モジュールスコープの const に持たない（横断不変条件「全モジュール副作用ゼロ」）。
+  // MUST: not a module-scope const (cross-cutting invariant "every module is side-effect free").
   const expectedKeys = new Set(ROPE_AXES.flatMap((axis) => [`cos_${axis}`, `sin_${axis}`]));
   for (const name of file.tensors.keys()) {
     if (!expectedKeys.has(name)) throw new Error(`rope 素表に想定外のテンソル '${name}' がある`);
@@ -103,16 +108,18 @@ export const parseWanRopeBase = (buffer: ArrayBuffer): WanRopeBase => {
   };
 };
 
-/** RoPE 表 1 行の幅（= attention の head_dim）。 */
+/** The width of one RoPE table row (= the attention's head_dim). */
 export const wanRopeWidth = (base: WanRopeBase): number =>
   2 * (base.widths[0] + base.widths[1] + base.widths[2]);
 
 /**
- * `rope_cos` / `rope_sin`（`[1,S,1,head_dim]` を平坦化した `S·head_dim`）を素表から組む。
+ * Builds `rope_cos` / `rope_sin` (`S·head_dim`, the flattened `[1,S,1,head_dim]`) from the base
+ * tables.
  *
- * トークン `(f, h, w)`（添字 `(f·H' + h)·W' + w`）の行は、t ブロックが位置 f・h ブロックが位置 h・
- * w ブロックが位置 w の素表の行を、周波数 1 本ごとに 2 回ずつ並べたもの（モジュール doc）。
- * MUST: F' / H' / W' のどれかが素表の行数を超える格子は落とす（上流でも位置表の天井を超えて組めない）。
+ * The row of token `(f, h, w)` (index `(f·H' + h)·W' + w`) is the base-table row at position f for
+ * the t block, position h for the h block and position w for the w block, each frequency repeated
+ * twice (module doc). MUST: reject a grid where any of F' / H' / W' exceeds the base tables' row
+ * count (upstream cannot build past the ceiling of its position table either).
  */
 export const wanRopeTables = (
   base: WanRopeBase,

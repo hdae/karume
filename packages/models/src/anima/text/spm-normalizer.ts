@@ -1,24 +1,27 @@
 /**
- * T5（SentencePiece）の `Precompiled` 正規化器を、焼いた表を引くだけで再現する。
+ * Reproduces the `Precompiled` normaliser of T5 (SentencePiece) by looking up baked tables only.
  *
- * 正本は Rust の `tokenizers::normalizers::Precompiled`。その実挙動は SentencePiece の
- * 正規化とは別物で、**書記素クラスタ単位の丸ごと置換 + 最短接頭辞勝ち**という形をしている:
+ * The canonical implementation is Rust's `tokenizers::normalizers::Precompiled`. Its actual
+ * behaviour differs from SentencePiece normalisation and has the shape **whole-replacement per
+ * grapheme cluster + shortest prefix wins**:
  *
- *     クラスタ g ごとに:
- *       UTF-8 長(g) < 6 かつ g のいずれかの接頭辞が規則表にある
- *         → **最短**の一致接頭辞の値を出し、g の残りは捨てる
- *       さもなくば 1 コードポイントずつ引く（規則が無ければその文字のまま）
+ *     for each cluster g:
+ *       UTF-8 length(g) < 6 and some prefix of g is in the rule table
+ *         → emit the value of the **shortest** matching prefix and drop the rest of g
+ *       otherwise look up one code point at a time (a character without a rule stays as is)
  *
- * 実測:
- *   `A`+U+0301+U+0301 → `Á`（3 文字目が消える）/ `A`+U+0302+U+0301 → `Â`
- *   （3cp 規則 `Ấ` ではなく 2cp 接頭辞が勝つ）。素朴に「最長一致」や NFKC で実装すると、
- *   この 2 例で確実に外れる。
+ * Measured:
+ *   `A`+U+0301+U+0301 → `Á` (the third character disappears) / `A`+U+0302+U+0301 → `Â`
+ *   (the 2-cp prefix wins over the 3-cp rule `Ấ`). A naive "longest match" or NFKC implementation
+ *   is certain to fail on these two examples.
  *
- * **DARTS トライを TS で復号しない / UAX#29 を TS で実装しない**。エクスポータが正本を
- * 全コードポイントに当てて、
- *   ・発火しうる規則だけ（真の接頭辞に規則を持たない・UTF-8 6 バイト未満）
- *   ・クラスタ境界に要る 3 つの閉区間表（extend / breakAfter / prepend）
- * に畳んだものをここが引く。畳み込みの同値は emit のたびに網羅 + 乱択で検査される。
+ * **Do not decode the DARTS trie in TS / do not implement UAX#29 in TS**. The exporter applies the
+ * canonical implementation to every code point and folds the result into
+ *   - only the rules that can fire (no rule on a proper prefix, under 6 UTF-8 bytes)
+ *   - the three closed-interval tables needed for cluster boundaries (extend / breakAfter /
+ *     prepend)
+ * which is what this module looks up. The equivalence of the folding is checked exhaustively plus
+ * by random sampling at every emit.
  */
 
 import { assertCodePoint, setUnique } from "../../text/asset-gates.ts";
@@ -26,30 +29,33 @@ import { toCodePoints } from "../../text/code-points.ts";
 import { type CodeRanges, inCodeRanges, parseCodeRanges } from "../../text/code-ranges.ts";
 import { utf8Length } from "./code-ranges.ts";
 
-/** 丸ごと置換を試みるクラスタの UTF-8 長上限（正本 spm_precompiled の `len() < 6`）。 */
+/**
+ * Upper UTF-8 length of a cluster that tries whole replacement (the canonical spm_precompiled's
+ * `len() < 6`).
+ */
 const CLUSTER_BYTE_LIMIT = 6;
 
 const CR = 0x0d;
 const LF = 0x0a;
 
-/** 2 コードポイント鍵の合成キー（コードポイントは 0x10FFFF 以下なので衝突しない）。 */
+/** Combined key of a 2-code-point key (code points are at most 0x10FFFF, so no collision). */
 const pairKey = (first: number, second: number): number => first * 0x110000 + second;
 
-/** 焼いた正規化表。 */
+/** Baked normalisation tables. */
 export type SpmTables = {
-  /** 1 コードポイント鍵の写像。 */
+  /** Mapping of 1-code-point keys. */
   readonly single: ReadonlyMap<number, string>;
-  /** 2 コードポイント鍵の写像（真の接頭辞に規則を持たないものだけ）。 */
+  /** Mapping of 2-code-point keys (only those without a rule on a proper prefix). */
   readonly multi: ReadonlyMap<number, string>;
-  /** 直前の文字と同じクラスタに合流する文字。 */
+  /** Characters that join the cluster of the preceding character. */
   readonly extend: CodeRanges;
-  /** この文字の直後で必ずクラスタが切れる文字。 */
+  /** Characters after which a cluster always ends. */
   readonly breakAfter: CodeRanges;
-  /** 後続をクラスタに引き込む文字。 */
+  /** Characters that pull the following character into their cluster. */
   readonly prepend: CodeRanges;
 };
 
-/** 焼いた表だけで `Precompiled` を再現する。 */
+/** Reproduces `Precompiled` from the baked tables alone. */
 export const normalizeSpm = (tables: SpmTables, text: string): string => {
   const cps = toCodePoints(text);
   const out: string[] = [];
@@ -59,10 +65,10 @@ export const normalizeSpm = (tables: SpmTables, text: string): string => {
     let bytes = 0;
     for (let k = i; k < end; k++) bytes += utf8Length(cps[k]);
     let replacement: string | undefined;
-    // MUST: 6 バイト境界を落とすと絵文字 / ハングル周りが静かに壊れる（丸ごと置換の経路に
-    // 入らないはずのクラスタが入る）。
+    // MUST: dropping the 6-byte boundary silently breaks emoji / Hangul (clusters that should not
+    // enter the whole-replacement path enter it).
     if (bytes < CLUSTER_BYTE_LIMIT) {
-      // 最短の一致接頭辞が勝つ — 1cp を先に引く。
+      // The shortest matching prefix wins — look up 1 cp first.
       replacement = tables.single.get(cps[i]);
       if (replacement === undefined && end - i >= 2) {
         replacement = tables.multi.get(pairKey(cps[i], cps[i + 1]));
@@ -80,14 +86,16 @@ export const normalizeSpm = (tables: SpmTables, text: string): string => {
   return out.join("");
 };
 
-/** i から始まるクラスタの終端（排他）。prepend* + 基底 + extend* / CRLF / 制御単独。 */
+/**
+ * End (exclusive) of the cluster starting at i. prepend* + base + extend* / CRLF / a lone control.
+ */
 const clusterEnd = (tables: SpmTables, cps: readonly number[], i: number): number => {
   let j = i;
   while (j < cps.length && inCodeRanges(tables.prepend, cps[j])) j++;
-  // prepend の直後が制御文字ならそこで切れる（引き込まない）。
+  // A control character right after prepend ends the cluster there (not pulled in).
   if (j < cps.length && !(j > i && inCodeRanges(tables.breakAfter, cps[j]))) {
     if (cps[j] === CR && cps[j + 1] === LF) {
-      j += 2; // GB3: CR × LF は 1 クラスタ
+      j += 2; // GB3: CR × LF is one cluster
     } else if (inCodeRanges(tables.breakAfter, cps[j])) {
       j += 1;
     } else {
@@ -99,11 +107,13 @@ const clusterEnd = (tables: SpmTables, cps: readonly number[], i: number): numbe
 };
 
 /**
- * 資産 / フィクスチャの JSON 形（Python 側 `SpmTables.to_json` と対）。
+ * JSON form of the asset / fixture (the counterpart of Python's `SpmTables.to_json`).
  *
- * MUST: 鍵のコードポイント域と重複まで見る。{@link pairKey} の一意性は「鍵が 0x10FFFF 以下」
- * が前提で、域外の値が入ると別の対と同じ合成鍵に潰れる。重複鍵も `Map` の後勝ちで通るが、
- * どちらも例外にならず**正規化の結果だけ**が静かに変わる（tokenize の id 列が別物になる）。
+ * MUST: check the code-point range of the keys and duplicates too. The uniqueness of
+ * {@link pairKey} assumes "keys are at most 0x10FFFF"; an out-of-range value collapses into the
+ * same combined key as another pair. Duplicate keys also pass with `Map`'s last-wins, and neither
+ * throws: **only the normalisation result** changes silently (the tokenize id sequence becomes a
+ * different one).
  */
 export const parseSpmTables = (raw: unknown, label: string): SpmTables => {
   if (typeof raw !== "object" || raw === null) throw new Error(`${label}: オブジェクトでない`);

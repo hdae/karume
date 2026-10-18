@@ -1,15 +1,18 @@
 /**
- * `pipelineConfig` のスキーマ検証（ADR 0038 §1 — スキーマは各パイプライン実装が所有・検証）。
+ * Schema validation of `pipelineConfig` (ADR 0038 §1 — each pipeline implementation owns and
+ * validates the schema).
  *
- * hub は `pipelineConfig` を素通しする（禁止キーの一掃と規模上限だけを見る）。したがって
- * **形の正本はこのモジュール**で、手書きの検査を全て parse 時に走らせる。
+ * The hub passes `pipelineConfig` through (it only strips forbidden keys and checks the size
+ * limit). So **this module is the source of truth for the shape**, and every hand-written check
+ * runs at parse time.
  *
- * MUST: 未知キーは fail loudly（`{ steps: 8, step: 8 }` のような綴り違いが黙って既定へ
- * 縮退すると、配布者の意図した既定と実行が食い違ったまま気づけない）。
- * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
+ * MUST: unknown keys fail loudly (if a misspelling like `{ steps: 8, step: 8 }` silently fell back
+ * to the default, the run would disagree with the default the distributor intended, unnoticed).
+ * MUST: maps are read only through `Object.hasOwn` (cross-cutting invariant).
  *
- * NOTE: 公開配布リポの対応表（{@link ANIMA_SOURCES}）もここに置く。manifest から導ける値では
- * なく「どの manifest を取りに行くか」の側なので、配布形が持てない（ADR 0073）。
+ * NOTE: the public distribution repository table ({@link ANIMA_SOURCES}) lives here too. It is not
+ * a value derivable from the manifest but the "which manifest to fetch" side, so the distribution
+ * cannot hold it (ADR 0073).
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -18,47 +21,50 @@ import { assertAllowedKeys, readNumber, readRecord } from "../config/readers.ts"
 import { assertAcceptableResolution, type ImageSize } from "./resolution.ts";
 import { assertAcceptableSteps } from "./sampler.ts";
 
-/** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
+/** Contract name of `pipeline` and the major version this implementation accepts (ADR 0038 §1). */
 export const ANIMA_PIPELINE_NAME = "anima";
 export const ANIMA_PIPELINE_MAJOR = 1;
 
 /**
- * Anima ファミリの**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は無い**）。
- * 値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ * **Public distribution repository table** of the Anima family (ADR 0092 — one table per family,
+ * **no default entry**). The values are **the sources this package version verified** (pinned
+ * commit SHAs — ADR 0073).
  *
- * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
- * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。リポの分割軸は
- * 「公式 / 追加学習」（ADR 0087）で 2 本:
+ * A key is the HF repository basename without `karume-` (`"karume-" + key` gives the basename back
+ * — the check in `tests/sources_test.ts` covers this invariant). The repositories are split along
+ * "official / fine-tuned" (ADR 0087) into two:
  *
- * - `"anima"` = `hdae/karume-anima`（公式モデルが同居 — Turbo / Base / Aesthetic の 5 変種・
- *   既定 = Turbo）
- * - `"anima-extra"` = `hdae/karume-anima-extra`（**第三者 fine-tune** が同居・既定 =
- *   `anima-wai-v1.0`）
+ * - `"anima"` = `hdae/karume-anima` (the official models together — 5 variants of Turbo / Base /
+ *   Aesthetic, default = Turbo)
+ * - `"anima-extra"` = `hdae/karume-anima-extra` (**third-party fine-tunes** together, default =
+ *   `anima-wai-v1.0`)
  *
- * どちらも 1 リポ = 複数モデルなので、リポ参照だけでは 1 本に決まらない — 既定以外を使うときは
- * `fromPretrained(ANIMA_SOURCES["anima"], { model })` と綴る。
+ * Both are one repository = several models, so a repository reference alone does not pick one — to
+ * use a non-default model, write `fromPretrained(ANIMA_SOURCES["anima"], { model })`.
  *
- * `anima-extra` は text stack（`text_encoder` / `vae_decoder` / `tokenizer` / `tokenizer_2`）を
- * 自分では配らず、公式リポ（`"anima"` が指す revision）から**越境参照で借りる**（ADR 0038 §7）。
- * したがって 2 本は独立ではなく、公式を上げ直したら extra も焼き直す（公開順序の MUST は
- * docs/release-runbook.md）。
+ * `anima-extra` does not ship the text stack (`text_encoder` / `vae_decoder` / `tokenizer` /
+ * `tokenizer_2`) itself and **borrows it by cross-repository reference** from the official
+ * repository (the revision `"anima"` points at) (ADR 0038 §7). So the two are not independent: when
+ * the official one is re-uploaded, extra is rebuilt too (the MUST on publication order is in
+ * docs/release-runbook.md).
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
- * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
- * 既定は無い）。
+ * Pass it as **the opt-in for following the package version automatically** — to pin
+ * reproducibility yourself, write your own `{ repo, revision }` instead of this table
+ * (`fromPretrained` has no default).
  *
- * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
- * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
- * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
- * 同時に成立する（ADR 0038）。main 追従が要る利用者は
- * `{ ...ANIMA_SOURCES["anima"], revision: "main" }` を明示的に選ぶ。
+ * MUST: pin the revision to a commit SHA — branches and tags can be moved on the distribution side,
+ * so the bytes this published package reads would change silently for network-side reasons (an
+ * unrecoverable accident). A SHA removes the revision-resolution request itself, so an offline
+ * start with a complete cache works at the same time (ADR 0038). Users who need to follow main
+ * choose `{ ...ANIMA_SOURCES["anima"], revision: "main" }` explicitly.
  *
- * NOTE: 旧 turbo 専用リポ（`hdae/karume-anima-turbo` — LoRA を焼き込んだ 1 モデル 1 リポの形）は
- * 廃止（2026-09-01 裁定・breaking）。公式 Turbo checkpoint（anima-turbo-v1.1）が `"anima"` の
- * 既定モデルとして同居する形に統合された。
+ * NOTE: the old turbo-only repository (`hdae/karume-anima-turbo` — one model per repository with
+ * the LoRA baked in) is retired (ruling of 2026-09-01, breaking). It was merged into a form where
+ * the official Turbo checkpoint (anima-turbo-v1.1) lives in `"anima"` as its default model.
  */
-// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+// NOTE: the revision is updated to main's SHA after upload in §3 of the release runbook
+// (docs/release-runbook.md) (inherits the upkeep duty of ADR 0073 decision 3 — by hand + the
+// runbook check).
 export const ANIMA_SOURCES = {
   anima: {
     repo: "hdae/karume-anima",
@@ -76,37 +82,42 @@ const DEFAULTS_KEYS: readonly string[] = ["steps", "guidanceScale", "resolution"
 const RESOLUTION_KEYS: readonly string[] = ["width", "height"];
 
 /**
- * denoise の更新則（サンプラ種別）。manifest の宣言が**既定**を決め、生成要求側の `sampler`
- * 席（`AnimaGenerateRequest`）が呼び出しごとに上書きする（再裁定 2026-08-25 — 配布既定は
- * 配布者の推奨、更新則の選択は利用者のノブ）。どちらの値も資産に依らず常に有効。
+ * Update rule of denoising (sampler type). The manifest's declaration sets the **default**, and the
+ * `sampler` field of the generation request (`AnimaGenerateRequest`) overrides it per call
+ * (re-ruling of 2026-08-25 — the distribution default is the distributor's recommendation, the
+ * choice of update rule is the user's knob). Both values are always valid, independent of the
+ * assets.
  *
- * - `"euler"` — `FlowMatchEulerDiscreteScheduler` の 1 次更新（`sampler.ts` の `cfgEulerStep`）。
- * - `"dpmpp-2m"` — DPM++ 2M（`src/generation/dpm-solver-multistep.ts`）。
+ * - `"euler"` — first-order update of `FlowMatchEulerDiscreteScheduler` (`cfgEulerStep` in
+ *   `sampler.ts`).
+ * - `"dpmpp-2m"` — DPM++ 2M (`src/generation/dpm-solver-multistep.ts`).
  */
 export type AnimaSamplerType = (typeof ANIMA_SAMPLER_TYPES)[number];
 
 /**
- * {@link AnimaSamplerType} の値の並び（語彙の正本 — 型はここから導く）。検査
- * （{@link assertAnimaSamplerType}）も CLI / UI の選択肢もこの 1 本を読む。
+ * The values of {@link AnimaSamplerType} (the source of truth for the vocabulary — the type is
+ * derived from it). The check ({@link assertAnimaSamplerType}) and CLI / UI choices all read this
+ * one list.
  *
- * MUST: 凍結する — 公開する module スコープの共有物で、JS の消費者が書き換えると以後の
- * 全 pipeline の受理集合（manifest 側 / request 側の両方）が黙って変わる。
+ * MUST: frozen — it is a public module-scope shared object, and if a JS consumer modified it, the
+ * accepted set of every later pipeline (both the manifest side and the request side) would change
+ * silently.
  */
 export const ANIMA_SAMPLER_TYPES = Object.freeze(["euler", "dpmpp-2m"] as const);
 
 /**
- * `scheduler.type` 省略時の値。
+ * Value when `scheduler.type` is omitted.
  *
- * MUST: 既定は `"euler"` — `type` は additive に足した optional 席（ADR 0038 §1）なので、
- * **この欄を持たない既存の配布 manifest は 1 バイトも変えずに従来の更新則のまま**でなければ
- * ならない（既に配られたリポは migrate できない）。
+ * MUST: the default is `"euler"` — `type` is an optional field added additively (ADR 0038 §1), so
+ * **existing distribution manifests without this field have to keep the old update rule without
+ * changing a byte** (repositories already distributed cannot be migrated).
  */
 const DEFAULT_SAMPLER_TYPE: AnimaSamplerType = "euler";
 
 /**
- * scheduler の構成（配布物ごとに変わりうるので manifest が持つ）。
- * `type` は省略可（既定 {@link DEFAULT_SAMPLER_TYPE}）で、parse 済みの値は**常に埋まっている**
- * — 既定の解決はこの 1 箇所に閉じ、消費側（pipeline）は分岐を持たない。
+ * Scheduler configuration (can vary per distribution, so the manifest holds it). `type` is optional
+ * (default {@link DEFAULT_SAMPLER_TYPE}) and the parsed value is **always filled** — resolving the
+ * default is confined to this one place, and the consumer (pipeline) has no branch.
  */
 type AnimaScheduler = {
   readonly type: AnimaSamplerType;
@@ -114,7 +125,7 @@ type AnimaScheduler = {
   readonly numTrainTimesteps: number;
 };
 
-/** 配布者の推奨既定（`generate` の未指定欄を埋める）。 */
+/** The distributor's recommended defaults (fill the fields `generate` leaves unspecified). */
 type AnimaDefaults = {
   readonly steps: number;
   readonly guidanceScale: number;
@@ -134,11 +145,12 @@ const parseResolutionEntry = (raw: unknown, where: string): ImageSize => {
     width: readNumber(record, "width", where, Number.isInteger, "正の整数でない"),
     height: readNumber(record, "height", where, Number.isInteger, "正の整数でない"),
   };
-  // 既定値も受理集合の内側でなければならない（配布時に外れていたら fromAssets で落ちる —
-  // 「生成を 1 回走らせて初めて分かる」を作らない）。
-  // MUST: 受理集合の条件は resolution.ts 1 本のまま借りるが、**送出型はここで戻す** — 落ちる
-  // 対象は配布 manifest の宣言であって呼び手の要求ではないので、入力起因ではなく資産の齟齬
-  // （ADR 0107 決定 2 の 500 側）。元の `ModelInputError` は `cause` に残す。
+  // The default must also be inside the accepted set (if the distribution falls outside it,
+  // fromAssets fails — no "found out only after running one generation").
+  // MUST: the accepted-set conditions are borrowed from resolution.ts as the single source, but
+  // **the thrown type is changed back here** — what fails is the distribution manifest's
+  // declaration, not the caller's request, so it is an asset mismatch, not input-caused (the 500
+  // side of ADR 0107 decision 2). The original `ModelInputError` is kept as `cause`.
   try {
     assertAcceptableResolution(size);
   } catch (cause) {
@@ -152,11 +164,13 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
   const record = readRecord(raw, where);
   assertAllowedKeys(record, DEFAULTS_KEYS, where);
   const steps = readNumber(record, "steps", where, Number.isFinite, "有限の数でない");
-  // 既定が生成の門の外だと、要求が何も渡さない generate が入力起因として落ちる。
-  // MUST: 受理集合の条件は生成の門（`sampler.ts` の `assertAcceptableSteps`）1 本を呼ぶ — ここに
-  // 範囲を書き写すと片方だけが緩む。送出型は解像度と同じ理由でここで戻す（落ちる対象は配布
-  // manifest の宣言で、呼び手の要求ではない — ADR 0107 決定 2 の 500 側）。元の
-  // `ModelInputError` は `cause` に残す。
+  // If the default is outside the generation check, a generate whose request passes nothing fails
+  // as input-caused.
+  // MUST: the accepted-set conditions call the single generation check (`assertAcceptableSteps` in
+  // `sampler.ts`) — copying the range here would let one side drift looser. The thrown type is
+  // changed back here for the same reason as the resolution (what fails is the distribution
+  // manifest's declaration, not the caller's request — the 500 side of ADR 0107 decision 2). The
+  // original `ModelInputError` is kept as `cause`.
   try {
     assertAcceptableSteps(steps);
   } catch (cause) {
@@ -183,11 +197,13 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
 };
 
 /**
- * サンプラ種別の綴りを**期待と実際を並べて**検査する（manifest 側 / 生成要求側の共通口）。
+ * Checks the sampler type spelling, **showing expected and actual side by side** (the shared entry
+ * of the manifest side and the generation request side).
  *
- * MUST: 語彙の正本は {@link ANIMA_SAMPLER_TYPES} 1 本 — 綴り違いが黙って既定へ縮退すると、宣言・
- * 指定した更新則と実行が食い違ったまま気づけない。`where` は綴りの出所（`scheduler.type` /
- * request の `sampler`）を指す。
+ * MUST: the single source of truth for the vocabulary is {@link ANIMA_SAMPLER_TYPES} — if a
+ * misspelling silently fell back to the default, the run would disagree with the declared or
+ * requested update rule, unnoticed. `where` names the origin of the spelling (`scheduler.type` /
+ * the request's `sampler`).
  */
 export const assertAnimaSamplerType = (value: unknown, where: string): AnimaSamplerType => {
   const accepted =
@@ -203,7 +219,10 @@ export const assertAnimaSamplerType = (value: unknown, where: string): AnimaSamp
   return accepted;
 };
 
-/** `scheduler.type` を読む（欄ごと無ければ既定 — 未知値は {@link assertAnimaSamplerType} が落とす）。 */
+/**
+ * Reads `scheduler.type` (default when the field is absent — {@link assertAnimaSamplerType} rejects
+ * unknown values).
+ */
 const parseSamplerType = (record: Record<string, unknown>, where: string): AnimaSamplerType =>
   Object.hasOwn(record, "type")
     ? assertAnimaSamplerType(record["type"], `${where}.type`)
@@ -232,7 +251,7 @@ const parseScheduler = (raw: unknown): AnimaScheduler => {
   };
 };
 
-/** manifest の `pipelineConfig`（hub が素通しした生の値）を検査して読む。 */
+/** Checks and reads the manifest's `pipelineConfig` (the raw value the hub passed through). */
 export const parseAnimaPipelineConfig = (
   raw: Readonly<Record<string, unknown>>,
 ): AnimaPipelineConfig => {

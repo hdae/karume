@@ -1,48 +1,51 @@
 /**
- * RGBA バイト列 → PNG（8bit truecolor RGB・非インタレース）。
+ * RGBA bytes → PNG (8-bit truecolor RGB, non-interlaced).
  *
- * **パイプライン非依存の共通処理**（画像生成モデルは総じて最後に PNG を書く）。ランタイム
- * 依存は **Web 標準 API のみ**（ADR 0002）で、圧縮は `CompressionStream("deflate")` に任せる。
+ * **Pipeline-independent shared processing** (image generation models generally write a PNG at the
+ * end). Runtime dependencies are **Web standard APIs only** (ADR 0002); compression is left to
+ * `CompressionStream("deflate")`.
  *
- * MUST: `"deflate"` であって `"deflate-raw"` ではない。Compression Streams の `"deflate"` は
- * **RFC1950 の zlib ラッパ付き**（2 バイトのヘッダ + 末尾 Adler-32）を出し、これは PNG の
- * IDAT が要求する形そのもの。`"deflate-raw"` を使うと zlib ヘッダが無く、デコーダは
- * 「不正な圧縮方式」で落ちる。
+ * MUST: `"deflate"`, not `"deflate-raw"`. Compression Streams' `"deflate"` emits **the RFC1950 zlib
+ * wrapper** (a 2-byte header + a trailing Adler-32), which is exactly the form PNG's IDAT requires.
+ * With `"deflate-raw"` the zlib header is missing and decoders fail with "invalid compression
+ * method".
  *
- * MUST: 各スキャンラインの先頭に filter type バイト `0x00`（None）を挿入してから圧縮する。
- * 挿入を忘れると行が 1 バイトずつずれ、**画像は開けるが色が斜めに流れる**（`Uint8Array` の
- * 長さ検査では捕まらない）。
+ * MUST: insert the filter type byte `0x00` (None) at the start of each scanline before compressing.
+ * Forgetting it shifts each row by 1 byte, and **the image opens but the colours smear
+ * diagonally** (a length check on the `Uint8Array` does not catch it).
  *
- * CRC32 は Web 標準に無いので自前で持つ（表 256 エントリ・PNG 仕様 Annex D の多項式）。
+ * CRC32 is not in the Web standard, so it is implemented here (a 256-entry table, the polynomial of
+ * the PNG specification's Annex D).
  */
 
 import { ModelInputError } from "../errors.ts";
 
 /**
- * PNG シグネチャ（8 バイト）。
+ * PNG signature (8 bytes).
  *
- * MUST: 配列リテラルに留め、`Uint8Array` は {@link encodePng} の中で組む（モジュールスコープで
- * `Uint8Array.from` を実行しない — {@link buildCrcTable} と同じ横断不変条件）。
+ * MUST: keep it an array literal and build the `Uint8Array` inside {@link encodePng} (do not run
+ * `Uint8Array.from` at module scope — the same cross-cutting invariant as {@link buildCrcTable}).
  */
 const SIGNATURE: readonly number[] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
-/** 8bit / チャネル。 */
+/** 8 bits / channel. */
 const BIT_DEPTH = 8;
-/** color type 2 = truecolor（RGB・アルファ無し）。 */
+/** color type 2 = truecolor (RGB, no alpha). */
 const COLOR_TYPE_RGB = 2;
 const COMPRESSION_DEFLATE = 0;
 const FILTER_ADAPTIVE = 0;
 const INTERLACE_NONE = 0;
-/** スキャンライン先頭の filter type（None）。 */
+/** The filter type at the start of a scanline (None). */
 const FILTER_NONE = 0;
 
 /**
- * CRC-32 の表を組む。
+ * Builds the CRC-32 table.
  *
- * MUST: モジュールスコープの `const` に持たない（横断不変条件「全モジュール副作用ゼロ」=
- * import 時実行もグローバル可変状態も禁止 — barrel 経由 tree-shaking の成立条件）。
- * 呼び出しごとに組み直すが、PNG 1 枚あたりの呼び出しは 3 チャンクだけで、表の構築は
- * 2,048 回の整数演算 = 数 MB の IDAT に掛かる CRC 本体に対して無視できる。
+ * MUST: not held in a module-scope `const` (the cross-cutting invariant "zero side effects in every
+ * module" = no import-time execution and no global mutable state — the condition for tree-shaking
+ * through the barrel). It is rebuilt on every call, but one PNG makes only 3 chunk calls, and
+ * building the table is 2,048 integer operations = negligible next to the CRC itself over an IDAT
+ * of several MB.
  */
 const buildCrcTable = (): Uint32Array<ArrayBuffer> => {
   const table = new Uint32Array(256);
@@ -56,7 +59,7 @@ const buildCrcTable = (): Uint32Array<ArrayBuffer> => {
   return table;
 };
 
-/** PNG チャンクの CRC-32（ISO 3309 / ITU-T V.42 — 反転初期値・反転出力）。 */
+/** CRC-32 of a PNG chunk (ISO 3309 / ITU-T V.42 — inverted initial value, inverted output). */
 export const crc32 = (bytes: Uint8Array<ArrayBuffer>): number => {
   const table = buildCrcTable();
   let crc = 0xffffffff;
@@ -66,7 +69,7 @@ export const crc32 = (bytes: Uint8Array<ArrayBuffer>): number => {
   return (crc ^ 0xffffffff) >>> 0;
 };
 
-/** 1 チャンク（長さ 4 + 型 4 + データ + CRC 4）。CRC は**型を含む**範囲に掛かる。 */
+/** One chunk (length 4 + type 4 + data + CRC 4). The CRC covers the range **including the type**. */
 const chunk = (type: string, data: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> => {
   const out = new Uint8Array(12 + data.length);
   const view = new DataView(out.buffer);
@@ -78,9 +81,9 @@ const chunk = (type: string, data: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuf
 };
 
 /**
- * zlib（RFC1950）形式へ圧縮する。
- * NOTE: `Uint8Array<ArrayBuffer>` を要求するのは `SharedArrayBuffer` 由来を弾くため
- * （`CompressionStream` の `BufferSource` は共有バッファを受け付けない）。
+ * Compresses into zlib (RFC1950) form.
+ * NOTE: `Uint8Array<ArrayBuffer>` is required to reject `SharedArrayBuffer`-backed input
+ * (`CompressionStream`'s `BufferSource` does not accept shared buffers).
  */
 const deflate = async (bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> => {
   const source = new ReadableStream<BufferSource>({
@@ -94,20 +97,20 @@ const deflate = async (bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array<Array
 };
 
 /**
- * RGBA（4 バイト / 画素・行優先）を PNG バイト列にする。
+ * Turns RGBA (4 bytes / pixel, row-major) into PNG bytes.
  *
- * アルファは**落とす**（truecolor RGB で書く）。生成画像は不透明で、PNG にアルファ面を
- * 持たせると 1/4 が定数 255 の死に容量になるだけだから。
- * MUST: 落とす前に 255 であることを検査する（半透明を黙って不透明化しない）。
+ * Alpha is **dropped** (written as truecolor RGB). Generated images are opaque, and giving the PNG an
+ * alpha plane would only add a quarter of dead capacity holding the constant 255.
+ * MUST: check that it is 255 before dropping it (do not silently make translucency opaque).
  */
 export const encodePng = async (
   rgba: Uint8ClampedArray<ArrayBufferLike> | Uint8Array<ArrayBufferLike>,
   width: number,
   height: number,
 ): Promise<Uint8Array<ArrayBuffer>> => {
-  // NOTE: 3 引数とも呼び手のもの（この関数は barrel から出るだけで、パイプラインの内側からは
-  // 呼ばれない）。打つ手は「渡す寸法 / バイト列を直す」の 1 つなので {@link ModelInputError}
-  // （ADR 0107 決定 2）。
+  // NOTE: all 3 arguments belong to the caller (this function is only exported from the barrel and
+  // is not called from inside a pipeline). The only remedy is "fix the size / bytes you pass", hence
+  // {@link ModelInputError} (ADR 0107 decision 2).
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
     throw new ModelInputError(`画像サイズ ${width}×${height} が正の整数でない`);
   }
@@ -123,8 +126,8 @@ export const encodePng = async (
     for (let x = 0; x < width; x += 1) {
       const source = (y * width + x) * 4;
       if (rgba[source + 3] !== 255) {
-        // アルファも呼び手が渡した `rgba` の中身なので、寸法・長さと同じ入力起因である
-        // （打つ手は「255 に直す」の 1 つ — ADR 0107 決定 2）。
+        // Alpha is also the content of the `rgba` the caller passed, so it is input-caused like the
+        // size and the length (the only remedy is "make it 255" — ADR 0107 decision 2).
         throw new ModelInputError(
           `画素 (${x}, ${y}) のアルファが ${rgba[source + 3]}（255 でない）`,
         );

@@ -1,12 +1,15 @@
 /**
- * 参照条件の組立て — 参照音声 → DACVAE latent（段 0）と、latent → `speaker` → 平均トークン
- * 前置（段 4）、および条件 state を宣言長へ右 pad する口（段 6 のホスト残置）。
+ * Assembly of the reference conditions — reference audio → DACVAE latent (step 0), latent →
+ * `speaker` → prepending the mean token (step 4), and the helper that right-pads a condition state
+ * to its declared length (the part of step 6 left on the host).
  *
- * 10 段の説明（何をどの順で回すか）は {@link "./pipeline.ts"} 冒頭の doc が正本。ここが持つ
- * のは speaker 条件 1 本ぶんの組立てだけで、text / caption の条件（段 2 / 3）は backbone の
- * 1 セッション 2 run と同じ席で読むため `./pipeline.ts` の `generateLatent` に残る。
+ * The description of the 10 steps (what runs in which order) is canonical in the doc at the top of
+ * {@link "./pipeline.ts"}. This module holds only the assembly of the one speaker condition; the
+ * text / caption conditions (steps 2 / 3) stay in `generateLatent` of `./pipeline.ts`, because they
+ * are read in the same place as the 2 runs of backbone in one session.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is free of side effects (no execution at import time, no global mutable state
+ * — CLAUDE.md).
  */
 
 import { ModelInputError } from "../errors.ts";
@@ -16,16 +19,22 @@ import { normalizeReference, reflectPadToHop } from "./host/reference.ts";
 import type { IrodoriSpeakerInput, IrodoriState } from "./pipeline.ts";
 import { asF32, type EmitEvent, f32, outputAt, withStageSession } from "./stage.ts";
 
-/** 条件 1 本ぶんの中間状態（行数を値と一緒に持ち歩く — 幅は config が正本）。 */
+/**
+ * Intermediate state of one condition (carries the row count along with the values — the width's
+ * source of truth is the config).
+ */
 export type ConditionState = {
   readonly data: Float32Array<ArrayBuffer>;
   readonly rows: number;
 };
 
-/** 条件を載せない（参照なし / caption 空）ときのゼロ供給。右 pad で全 0 行になる。 */
+/**
+ * Zero supply when a condition is absent (no reference / empty caption). Right padding turns it
+ * into all-zero rows.
+ */
 export const emptyCondition = (): ConditionState => ({ data: new Float32Array(0), rows: 0 });
 
-/** 条件 state を宣言長へ右詰め 0 pad する（ADR 0047 のホスト残置）。 */
+/** Zero-pads a condition state on the right to its declared length (left on the host — ADR 0047). */
 export const rightPad = (
   state: ConditionState,
   rows: number,
@@ -45,7 +54,7 @@ export const rightPad = (
   return padded;
 };
 
-/** 参照音声の門が読む配布形の宣言。 */
+/** The distribution declarations the reference-audio check reads. */
 type ReferenceAudioShape = {
   readonly sampleRate: number;
   readonly hopLength: number;
@@ -54,35 +63,39 @@ type ReferenceAudioShape = {
 };
 
 /**
- * 参照音声の切り詰めの上限（サンプル数）。
+ * Maximum length (in samples) the reference audio is truncated to.
  *
- * 上限は `speakerRows` から導く — speaker 条件は「平均トークン 1 本 + patch した
- * 参照」なので、載る参照は `(speakerRows − 1) × speakerPatchSize` フレーム（実重み v4-small で
- * 3,000 フレーム = 120 秒）。**TS 側に秒数を定数で置かない**（config.ts の MUST — 重みを
- * 差し替えたときにホストだけ古い上限を持つ形を作らない）。
+ * The maximum is derived from `speakerRows` — the speaker condition is "1 mean token + the patched
+ * reference", so the reference that fits is `(speakerRows − 1) × speakerPatchSize` frames (3,000
+ * frames = 120 s with the real v4-small weights). **No seconds constant on the TS side** (the MUST
+ * of config.ts — no form where only the host keeps an old maximum after the weights are swapped).
  */
 const referenceMaxSamples = (config: ReferenceAudioShape): number =>
   (config.speakerRows - 1) * config.speakerPatchSize * config.hopLength;
 
 /**
- * 参照音声の受理集合（周波数と長さ）を見る門。生成の入口（{@link assertSpeakerReference}）と
- * codec encoder の直前（{@link encodeReferenceAudio}）の両方がこの 1 本を呼ぶ。
+ * The check of the reference audio's acceptance set (rate and length). Both the entry of generation
+ * ({@link assertSpeakerReference}) and the point right before the codec encoder
+ * ({@link encodeReferenceAudio}) call this one function.
  *
- * 長さは「codec の後の patch で speaker の下限 {@link SPEAKER_MIN_TOKENS} トークンに届くか」で見る。
- * codec encoder は hop 1 つを 1 フレームにし（入力 `[1, frames, hopLength]`）、末尾は reflect pad で
- * hop の倍数へ切り上げるので、フレーム数は `ceil(切り詰め後のサンプル数 / hopLength)`。届かない参照を
- * 通すと、codec encoder を GPU で回した後に patch で落ちるか（0 トークン）、export の下限の外の
- * S = 1 が speaker グラフへ届く（1 トークン）。
+ * The length is checked as "does the patch after the codec reach the speaker minimum of
+ * {@link SPEAKER_MIN_TOKENS} tokens". The codec encoder turns one hop into one frame (input
+ * `[1, frames, hopLength]`) and rounds the tail up to a multiple of the hop with reflect padding, so
+ * the frame count is `ceil(samples after truncation / hopLength)`. A reference that does not reach
+ * it either fails at the patch after the codec encoder ran on the GPU (0 tokens), or delivers S = 1,
+ * outside the export minimum, to the speaker graph (1 token).
  *
- * どちらの破れも呼び手が渡した `IrodoriSpeakerInput.audio` の欄そのもので、打つ手は「変換して /
- * 長い参照を渡し直す」なので入力起因（ADR 0107 決定 2）。
+ * Both violations are the very fields of `IrodoriSpeakerInput.audio` the caller passed, and the
+ * remedy is "convert it / pass a longer reference again", so they are input-caused (ADR 0107
+ * decision 2).
  */
 const assertReferenceAudio = (
   audio: { readonly data: Float32Array<ArrayBuffer>; readonly sampleRate: number },
   config: ReferenceAudioShape,
 ): void => {
   if (audio.sampleRate !== config.sampleRate) {
-    // リサンプルは持たない（ADR 0048 の流儀 — 黙って近似せず、変換は呼び出し側の責務にする）。
+    // There is no resampling (the convention of ADR 0048 — no silent approximation; conversion is
+    // the caller's responsibility).
     throw new ModelInputError(
       `IrodoriPipeline: 参照音声が ${audio.sampleRate}Hz（配布形は ${config.sampleRate}Hz）` +
         " — リサンプルは持たないので、あらかじめ変換して渡す",
@@ -100,13 +113,15 @@ const assertReferenceAudio = (
 };
 
 /**
- * 参照音声 → DACVAE latent（ホスト前処理 + `codec_encoder`）。
+ * Reference audio → DACVAE latent (host preprocessing + `codec_encoder`).
  *
- * 受理集合は codec encoder を回す前に {@link assertReferenceAudio} で見る（生成の入口でも
- * 同じ門を通っているので、ここは低水準の経路の契約）。
+ * The acceptance set is checked with {@link assertReferenceAudio} before the codec encoder runs (the
+ * entry of generation has already passed the same check, so this is the contract of the low-level
+ * path).
  *
- * MUST: 切り詰め（{@link referenceMaxSamples}）は正規化より**前**。後ろに回すと、捨てる区間の
- * 音量が LUFS に混ざる（上流も `wav[:, :int(max_ref_seconds·sr)]` を先に取る）。
+ * MUST: truncation ({@link referenceMaxSamples}) comes **before** normalization. Moved after it,
+ * the loudness of the discarded part would leak into the LUFS (upstream also takes
+ * `wav[:, :int(max_ref_seconds·sr)]` first).
  */
 const encodeReferenceAudio = async (
   state: IrodoriState,
@@ -138,7 +153,10 @@ const encodeReferenceAudio = async (
   );
 };
 
-/** speaker 条件の形を決める配布形の宣言（直接指定の門が読む欄だけ）。 */
+/**
+ * The distribution declarations that decide the shape of the speaker condition (only the fields the
+ * checks of direct inputs read).
+ */
 type SpeakerShape = {
   readonly speakerDim: number;
   readonly speakerRows: number;
@@ -147,10 +165,12 @@ type SpeakerShape = {
 };
 
 /**
- * speaker 条件の行数が宣言長に収まることを、呼び手が渡した値に対して見る。
+ * Checks, on a value the caller passed, that the row count of the speaker condition fits the
+ * declared length.
  *
- * {@link rightPad} も同じ関係を見るが、あちらは条件を組み終えた後の最終突合せ（どの経路で
- * 作っても宣言長を超えていない、という内部不変条件）なので素の `Error` のまま残す。
+ * {@link rightPad} checks the same relation, but that is the final check after the condition is
+ * assembled (the internal invariant "whichever path built it, it does not exceed the declared
+ * length"), so it stays a plain `Error`.
  */
 const assertSpeakerRows = (rows: number, speakerRows: number, where: string): void => {
   if (rows > speakerRows) {
@@ -161,16 +181,18 @@ const assertSpeakerRows = (rows: number, speakerRows: number, where: string): vo
 };
 
 /**
- * 直接指定された speaker state をそのまま条件にする（上流 `speaker_state_override` の経路）。
+ * Uses a directly given speaker state as the condition as is (upstream's `speaker_state_override`
+ * path).
  *
- * MUST: `speaker` グラフも `speaker_norm` も平均トークン前置も**通さない**。加工すると、
- * 配られた埋め込みが二重に正規化された別のベクトルとして条件に入る。
+ * MUST: it does **not** go through the `speaker` graph, `speaker_norm` or the mean-token prepend.
+ * Processing it would put the distributed embedding into the condition as a different, doubly
+ * normalized vector.
  *
- * 形も行数も呼び手が渡した埋め込みそのものなので、不受理は入力起因（ADR 0107 決定 2 —
- * 打つ手は「渡す配列を直す」1 つ）。
+ * Both the shape and the row count are those of the embedding the caller passed, so a rejection is
+ * input-caused (ADR 0107 decision 2 — the one remedy is "fix the array you pass").
  *
- * NOTE: `export` は門を直接叩くテストのため（{@link encodeSpeaker} へ届くには GPU と実資産が
- * 要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
+ * NOTE: `export` is for the tests that call the check directly (reaching {@link encodeSpeaker} needs
+ * a GPU and real assets). Not exposed on `mod.ts` / the subpath surface (ADR 0008).
  */
 export const conditionFromStateOverride = (
   stateOverride: Float32Array<ArrayBuffer>,
@@ -188,13 +210,15 @@ export const conditionFromStateOverride = (
 };
 
 /**
- * 呼び手が直接渡した参照 latent を patch し、行数の上限まで見る（直接指定の門 1 本）。
+ * Patches a reference latent the caller passed directly, and checks it up to the row maximum (the
+ * one check of a direct input).
  *
- * 受理条件の正本は {@link patchReferenceLatent} 1 本のまま。あの関数は codec encoder の出力
- * （= モデル出力）も受けるので、そちらの破れは内部不変条件であって素の `Error` が正しい。
- * 出所が呼び手だと分かるこの経路だけが**送出型を**入力起因へ上げる（ADR 0107 決定 2）。
+ * The acceptance condition stays canonical in {@link patchReferenceLatent} alone. That function also
+ * receives the output of the codec encoder (= a model output), where a violation is an internal
+ * invariant and a plain `Error` is right. Only this path, where the origin is known to be the
+ * caller, raises **the thrown type** to input-caused (ADR 0107 decision 2).
  *
- * NOTE: `export` は {@link conditionFromStateOverride} と同じ事情。
+ * NOTE: `export` for the same reason as {@link conditionFromStateOverride}.
  */
 export const patchRequestedLatent = (
   latent: Float32Array<ArrayBuffer>,
@@ -209,18 +233,20 @@ export const patchRequestedLatent = (
       { cause },
     );
   }
-  // 平均トークン 1 本ぶんを足した行数が条件の長さ。speaker グラフを回す前に見る。
+  // The row count plus 1 for the mean token is the condition length. Checked before the speaker
+  // graph runs.
   assertSpeakerRows(patched.tokens + 1, config.speakerRows, "speaker.latent");
   return patched;
 };
 
 /**
- * 参照（音声 / latent）の受理集合を、生成の入口で GPU を回す前に見る（`pipeline.ts` の
- * `assertIrodoriRequest`）。speaker 条件は段 ④ で組むので、ここで見ないと text / caption の段
- * （と音声なら codec encoder）を GPU で回してから入力の誤りで落ちる。
+ * Checks the acceptance set of the reference (audio / latent) at the entry of generation, before the
+ * GPU runs (`assertIrodoriRequest` in `pipeline.ts`). The speaker condition is assembled in step 4,
+ * so without this check an input error would fail only after the text / caption steps (and, for
+ * audio, the codec encoder) ran on the GPU.
  *
- * MUST: 受理条件は書き写さない — 段 ④ と同じ門（{@link assertReferenceAudio} /
- * {@link patchRequestedLatent}）を呼ぶだけにする（返り値は捨てる）。
+ * MUST: the acceptance conditions are not copied — this only calls the same checks as step 4
+ * ({@link assertReferenceAudio} / {@link patchRequestedLatent}) (the return values are discarded).
  */
 export const assertSpeakerReference = (
   input: IrodoriSpeakerInput | undefined,
@@ -234,7 +260,10 @@ export const assertSpeakerReference = (
   patchRequestedLatent(input.latent, config);
 };
 
-/** speaker 条件を組む（参照音声 / 参照 latent / 埋め込み直接指定 / 参照なしのゼロ短絡）。 */
+/**
+ * Assembles the speaker condition (reference audio / reference latent / a directly given embedding /
+ * the zero short-circuit without a reference).
+ */
 export const encodeSpeaker = async (
   state: IrodoriState,
   emit: EmitEvent,
@@ -242,14 +271,16 @@ export const encodeSpeaker = async (
 ): Promise<ConditionState> => {
   const { config } = state;
   if (input === undefined) {
-    // 参照なしはグラフを回さずゼロを置く（上流の `no_ref` と厳密に一致することは exporter の
-    // `_no_reference_evidence` が実測済み）。区間マスクも全 0 になるので寄与は厳密に 0。
+    // Without a reference, zeros are placed without running the graph (exact agreement with
+    // upstream's `no_ref` was measured by the exporter's `_no_reference_evidence`). The segment mask
+    // is all 0 too, so the contribution is exactly 0.
     return emptyCondition();
   }
   if ("stateOverride" in input) return conditionFromStateOverride(input.stateOverride, config);
-  // patch の破れの**出所**は 2 経路で違う（呼び手の latent = 入力起因 / codec encoder の出力 =
-  // 内部不変条件）ので、条件は 1 本のまま送出型だけを分ける。音声経路の行数は切り詰めで
-  // 宣言長に収まるので、そちらは最終突合せ（{@link rightPad}）に任せる。
+  // The **origin** of a patch violation differs between the 2 paths (the caller's latent =
+  // input-caused / the output of the codec encoder = internal invariant), so the condition stays one
+  // and only the thrown type differs. On the audio path the row count fits the declared length
+  // thanks to the truncation, so that is left to the final check ({@link rightPad}).
   const patched =
     "audio" in input
       ? patchReferenceLatent(
@@ -264,7 +295,7 @@ export const encodeSpeaker = async (
     });
     return asF32(outputAt(state.speaker, outputs, 0), "speaker の出力");
   });
-  // 平均トークンの前置はグラフの外（ADR 0047 決定 4）。
+  // The mean token is prepended outside the graph (ADR 0047 decision 4).
   return {
     data: prependMeanToken(encoded, patched.tokens, config.speakerDim),
     rows: patched.tokens + 1,

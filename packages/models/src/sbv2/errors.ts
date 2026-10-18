@@ -1,21 +1,23 @@
 import { ModelInputError } from "../errors.ts";
 
 /**
- * SBV2 の入力起因エラー。
+ * SBV2's input error.
  *
- * 分類の軸は**呼び手の分岐先**（`@karume/hub` の `HubError` と同じ流儀）:
- * これが飛ぶのは「渡した要求そのものが受理できない」ときだけで、HTTP サーバーなら 400 に当たる。
- * 内部不変条件の破れ（`sum(word2ph)` の不一致・tile 走査の破れ・資産の齟齬）は素の `Error` の
- * まま投げる — あれは 500 であって、呼び手が入力を直しても直らない。
+ * The classification axis is **where the caller branches** (the same convention as `HubError` in
+ * `@karume/hub`): this is thrown only when "the request itself cannot be accepted", which in an
+ * HTTP server would be a 400. A broken internal invariant (a `sum(word2ph)` mismatch, a broken
+ * tile walk, an inconsistent asset) is thrown as a plain `Error` — that is a 500, and the caller
+ * cannot fix it by fixing the input.
  *
- * MUST: 型を分けるだけで**メッセージの質は落とさない**（期待と実際の両方を書く）。型は分岐の
- * ため、メッセージは人のためで、どちらも要る。
+ * MUST: splitting the type **does not lower the quality of the message** (state both the
+ * expectation and the actual value). The type is for branching, the message is for people, and
+ * both are needed.
  *
- * NOTE: {@link ModelInputError} の派生であり、**これ以上の派生は作らない**。家族横断の
- * 「入力を直せ」は親が受け持つので、この型が残っているのは ADR 0072 決定 6 の線引き（SBV2 の
- * どの検査が入力起因で、どれが内部不変条件か）を名前で持つためである。hub が 5 種に割って
- * いるのは利用者の分岐先が実際に違う（形式 / 参照 / path / 完全性 / 取得）からで、こちらは
- * 「入力を直せ」の 1 つしかない。
+ * NOTE: it derives from {@link ModelInputError}, and **no further derived types are made**. The
+ * family-wide "fix the input" is carried by the parent, so this type remains only to hold by name
+ * the line drawn by ADR 0072 decision 6 (which SBV2 checks are input-caused and which are internal
+ * invariants). hub splits into 5 types because the user's branch targets really differ (format /
+ * reference / path / integrity / fetch); here there is only one, "fix the input".
  */
 export class Sbv2InputError extends ModelInputError {
   constructor(message: string, options?: ErrorOptions) {

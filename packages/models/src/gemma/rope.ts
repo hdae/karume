@@ -1,96 +1,114 @@
 /**
- * Gemma 4 の RoPE（回転位置エンコーディング）の cos / sin 行を**ホスト側で生成**する実装。
+ * **Host-side generation** of the cos / sin rows of Gemma 4's RoPE (rotary position embedding).
  *
- * ## なぜホストが作るのか
+ * ## Why the host builds them
  *
- * 配布形は以前、位置 0..maxPosition−1 の cos / sin 表 4 本（層種別 2 × cos / sin）を IR の
- * 初期化子として焼き、グラフ内の `embedding`（行 gather）が `position_ids` で引いていた。
- * 表は位置ごとに独立な純関数 `f(position)` なので、chunk に載る位置のぶんだけをホストが
- * 作って**通常のグラフ入力**として渡せば、表は VRAM にも配布物にも要らず、会話の最大長
- * （`capacity`）は表の行数から解放されて実行時ノブになる。PLE の host gather（`ple.ts`）と
- * 同じ「chunk ぶんだけホストが作る派生入力」の席に嵌まる。
+ * The distribution used to bake four cos / sin tables for positions 0..maxPosition−1 (2 layer types
+ * × cos / sin) as IR initializers, and an in-graph `embedding` (row gather) looked them up with
+ * `position_ids`. A table is a pure function `f(position)` independent per position, so if the host
+ * builds only the positions in the chunk and passes them as **ordinary graph inputs**, the tables
+ * are needed neither in VRAM nor in the distribution, and the maximum conversation length
+ * (`capacity`) is freed from the table's row count and becomes a runtime option. It fits the same
+ * slot as PLE's host gather (`ple.ts`): "a derived input the host builds only for the chunk".
  *
- * ## 式（正本は**この実装**。exporter 側 `tools/export-recipes/gemma4/rope.py` は鏡像）
+ * ## Formula (canonical here; the exporter's `tools/export-recipes/gemma4/rope.py` is its mirror)
  *
- * 層種別 `{theta, headDim, rotaryDim}` に対し、`half = headDim / 2`・`rotated = rotaryDim / 2`:
+ * For a layer type `{theta, headDim, rotaryDim}`, with `half = headDim / 2` and
+ * `rotated = rotaryDim / 2`:
  *
  *     invFreq[i] = theta ** (−(2·i) / headDim)   (0 ≤ i < rotated)
- *     invFreq[i] = 0                              (rotated ≤ i < half — 回さない次元)
- *     angle[j]   = position × invFreq[j mod half] (0 ≤ j < headDim — 前半と後半は同じ角度)
+ *     invFreq[i] = 0                              (rotated ≤ i < half — dimensions not rotated)
+ *     angle[j]   = position × invFreq[j mod half] (0 ≤ j < headDim — both halves share the angle)
  *     cos[j] = cos(angle[j]) / sin[j] = sin(angle[j])
  *
- * 上流（transformers `Gemma4TextRotaryEmbedding`）の `emb = cat(freqs, freqs)` と同じ並びで、
- * default（sliding: rotaryDim = headDim）と proportional（full: rotaryDim = partial_rotary_factor
- * ぶん）は**同じ 1 式**に畳まれる。attention_scaling は両 rope_type とも 1 なので掛けない。
+ * The layout equals upstream's (transformers `Gemma4TextRotaryEmbedding`)
+ * `emb = cat(freqs, freqs)`, and default (sliding: rotaryDim = headDim) and proportional (full:
+ * rotaryDim = the partial_rotary_factor share) fold into **the same single formula**.
+ * attention_scaling is 1 for both rope_types, so it is not applied.
  *
- * ## 通常 Gemma の数値契約
+ * ## Numerics contract of regular Gemma
  *
- * - 計算は **f64**、格納時に 1 度だけ f32 へ丸める。上流は全経路 f32（角度 `position × invFreq`
- *   を f32 で積むため大きい位置ほど角度が粗い — 131,071 で ULP ≈ 0.008 rad）なので、
- *   **上流の表とはビット同一にならない**（ADR 0034 知見 2 と同じ壁 — torch の f32 三角関数は
- *   SLEEF の 1 ULP 誤差も持つ）。数学的に正確な側がこちらで、突合は位置比例の許容差で行う
- *   （`tests/gemma4_rope_test.ts` — 上流モジュールの実出力 fixture との比較 + 故障注入）。
- * - 決定性: f64 の加減乗除は IEEE 754 で engine 非依存。`Math.cos` / `Math.sin` だけは engine 間で
- *   f64 の 1 ULP 差がありうるが、f32 へ丸めた後に残る確率は要素あたり約 2⁻²⁹（128K × 1,536 要素の
- *   全表でも期待 0.4 要素）で、GPU 側の 1 ULP 群（known-issues の Metal 節）と同じ扱いにする。
- * - 回さない次元（`invFreq = 0`）は角度 0 なので cos = 1 / sin = 0 が**厳密**に出る。
+ * - Computed in **f64**, rounded to f32 once on storage. Upstream is f32 throughout (the angle
+ *   `position × invFreq` is accumulated in f32, so the angle gets coarser at larger positions — ULP
+ *   ≈ 0.008 rad at 131,071), so it is **not bit-identical to upstream's table** (the same wall as
+ *   ADR 0034 "Detection limits" item 2 — torch's f32 trigonometric functions also carry SLEEF's
+ *   1-ULP error). This side is the mathematically exact one, and the comparison uses a tolerance
+ *   proportional to the position (`tests/gemma4_rope_test.ts` — comparison with a fixture of the
+ *   upstream module's real output + fault injection).
+ * - Determinism: f64 addition, subtraction, multiplication and division are IEEE 754 and
+ *   engine-independent. Only `Math.cos` / `Math.sin` may differ by 1 f64 ULP between engines, but
+ *   the probability that it survives rounding to f32 is about 2⁻²⁹ per element (an expected 0.4
+ *   elements even over a full 128K × 1,536-element table), and it is treated like the GPU-side
+ *   1-ULP group (the Metal section of known-issues).
+ * - Dimensions not rotated (`invFreq = 0`) have angle 0, so cos = 1 / sin = 0 come out **exactly**.
  *
- * QAT 専用入口は周波数のべき乗・逆数・位置積を段ごとに f32 に丸める
- * （ADR 0097 追記 5）。上流の三角関数・縮約との全ビット一致は保証しない。
+ * The QAT-only entry rounds the frequency power, the reciprocal and the position product to f32 at
+ * each step (ADR 0097 addendum 5). Full bit identity with upstream's trigonometric functions and
+ * reductions is not guaranteed.
  *
- * MUST: pad 行（`position = 0`）も通常行と同じ式で埋める（cos = 1 / sin = 0）。pad 行の値は
- * 契約上無意味（ADR 0066 追記 6）だが、未初期化のまま渡すと NaN が pad 行の attention に入り
- * 「空行 → 厳密 0」の構造保証（ADR 0067 決定 6）の外側で NaN 分類が動きうる。
+ * MUST: pad rows (`position = 0`) are filled with the same formula as ordinary rows (cos = 1 / sin
+ * = 0). The values of pad rows are meaningless by contract (ADR 0066 addendum of 2026-08-17,
+ * item 6), but passing them uninitialized could let NaN into the attention of pad rows, with NaN
+ * classification acting outside the structural guarantee "empty row → exact 0" (ADR 0067
+ * decision 6).
  */
 
 import type { Tensor } from "@karume/runtime";
 
-/** 層種別の名前（上流 `layer_types` の綴りそのまま — グラフ入力名の一部になる）。 */
+/** Layer type names (upstream's `layer_types` spelling as is — part of the graph input names). */
 export const GEMMA4_ROPE_LAYER_TYPES = ["sliding_attention", "full_attention"] as const;
 
 export type Gemma4RopeLayerType = (typeof GEMMA4_ROPE_LAYER_TYPES)[number];
 
-/** 層種別 1 つぶんの RoPE パラメータ（配布形 `pipelineConfig.rope.<layerType>` が宣言する）。 */
+/**
+ * RoPE parameters of one layer type (declared by the distribution's
+ * `pipelineConfig.rope.<layerType>`).
+ */
 export type Gemma4RopeLayerSpec = {
-  /** 周波数の底（上流 `rope_theta`）。 */
+  /** Frequency base (upstream `rope_theta`). */
   readonly theta: number;
-  /** head 次元 `D`（= 生成する行の幅）。 */
+  /** Head dimension `D` (= the width of the generated row). */
   readonly headDim: number;
-  /** 回す次元数（default は `headDim`・proportional は `2 · int(factor · headDim / 2)`）。偶数。 */
+  /**
+   * Number of rotated dimensions (`headDim` for default, `2 · int(factor · headDim / 2)` for
+   * proportional). Even.
+   */
   readonly rotaryDim: number;
 };
 
-/** 層種別 2 本ぶん。 */
+/** Both layer types. */
 export type Gemma4RopeSpec = {
   readonly [layerType in Gemma4RopeLayerType]: Gemma4RopeLayerSpec;
 };
 
-/** 生成する cos / sin の 2 部。 */
+/** The two generated parts, cos / sin. */
 export const GEMMA4_ROPE_PARTS = ["cos", "sin"] as const;
 
 export type Gemma4RopePart = (typeof GEMMA4_ROPE_PARTS)[number];
 
 /**
- * グラフ入力名（exporter `tools/export-recipes/gemma4/export_decode.py` と**同じ綴り**）。
+ * Graph input name (**the same spelling** as the exporter's
+ * `tools/export-recipes/gemma4/export_decode.py`).
  *
- * MUST: ここが唯一の生成箇所（配布側の門 `GEMMA4_GRAPH_INPUTS` と TS の派生入力名は同じ文字列
- * から出す）。
+ * MUST: this is the only place that generates it (the distribution side's check
+ * `GEMMA4_GRAPH_INPUTS` and the TS derived-input names come from the same string).
  */
 export const gemma4RopeInputName = (layerType: Gemma4RopeLayerType, part: Gemma4RopePart): string =>
   `rope_${layerType}_${part}`;
 
-/** 4 本のグラフ入力名（層種別 × 部の固定順）。 */
+/** The four graph input names (in the fixed order layer type × part). */
 export const gemma4RopeInputNames = (): string[] =>
   GEMMA4_ROPE_LAYER_TYPES.flatMap((layerType) =>
     GEMMA4_ROPE_PARTS.map((part) => gemma4RopeInputName(layerType, part)),
   );
 
 /**
- * 層種別パラメータの値域門。
+ * Value-range check of the layer-type parameters.
  *
- * MUST: `rotaryDim` は偶数かつ `2 ≤ rotaryDim ≤ headDim`、`headDim` は偶数。奇数だと
- * 「前半 = 後半」の並びが崩れ、上流と別の表を黙って作る。`theta` は正の有限値
- * （`theta ** 負` が 0 / Inf に落ちる形を弾く）。
+ * MUST: `rotaryDim` is even with `2 ≤ rotaryDim ≤ headDim`, and `headDim` is even. An odd value
+ * breaks the "first half = second half" layout and silently builds a table different from
+ * upstream's. `theta` is a positive finite value (rejecting the shape where `theta ** negative`
+ * falls to 0 / Inf).
  */
 const assertGemma4RopeLayerSpec = (where: string, spec: Gemma4RopeLayerSpec): void => {
   const { theta, headDim, rotaryDim } = spec;
@@ -114,10 +132,11 @@ export const assertGemma4RopeSpec = (where: string, spec: Gemma4RopeSpec): void 
 };
 
 /**
- * 逆周波数 `invFreq[0 .. headDim/2)`。回さない次元は 0。QAT だけ段ごとに f32 へ丸める。
+ * Inverse frequencies `invFreq[0 .. headDim/2)`. Dimensions not rotated are 0. Only QAT rounds to
+ * f32 at each step.
  *
- * NOTE: `theta ** x` は `Math.pow` の f64。上流は f32 で `1 / base ** t` を計算するので相対 1e-7
- * 級の差があるが、これは意図した差（上の数値契約）。
+ * NOTE: `theta ** x` is `Math.pow` in f64. Upstream computes `1 / base ** t` in f32, so there is a
+ * relative difference around 1e-7, but this difference is intended (the numerics contract above).
  */
 const ropeInverseFrequencies = (
   spec: Gemma4RopeLayerSpec,
@@ -138,16 +157,17 @@ const ropeInverseFrequencies = (
   return invFreq;
 };
 
-/** `[rows, headDim]` 行優先の cos / sin（f32）。 */
+/** Row-major `[rows, headDim]` cos / sin (f32). */
 export type Gemma4RopeRows = {
   readonly cos: Float32Array<ArrayBuffer>;
   readonly sin: Float32Array<ArrayBuffer>;
 };
 
 /**
- * 位置列 → cos / sin 行（`[positions.length, headDim]`）。
+ * Positions → cos / sin rows (`[positions.length, headDim]`).
  *
- * MUST: 位置は非負整数（u32 の論理位置）。負や非整数は式が定義されないので fail loudly。
+ * MUST: positions are non-negative integers (u32 logical positions). Negative or non-integer values
+ * leave the formula undefined, so they fail loudly.
  */
 const ropeRows = (
   spec: Gemma4RopeLayerSpec,
@@ -168,7 +188,8 @@ const ropeRows = (
     const base = row * width;
     for (let i = 0; i < half; i += 1) {
       const angle = qat ? Math.fround(Math.fround(position) * invFreq[i]) : position * invFreq[i];
-      // 三角関数の結果は代入時に f32 へ丸める（前半と後半は同じ値）。
+      // The trigonometric results are rounded to f32 on assignment (first and second half share the
+      // value).
       const c = Math.cos(angle);
       const s = Math.sin(angle);
       cos[base + i] = c;
@@ -181,9 +202,10 @@ const ropeRows = (
 };
 
 /**
- * 物理 chunk 1 本ぶんの位置列 → グラフ入力 4 本（`[1, rows, headDim]` f32）。
+ * Positions of one physical chunk → the four graph inputs (`[1, rows, headDim]` f32).
  *
- * `positions` は物理行数ぶん（pad 行は 0 — `sequence.ts` が `input_ids` と同じ規約で埋める）。
+ * `positions` has one entry per physical row (pad rows are 0 — `sequence.ts` fills them by the same
+ * convention as `input_ids`).
  */
 const ropeInputs = (
   spec: Gemma4RopeSpec,
@@ -209,23 +231,24 @@ const ropeInputs = (
   return inputs;
 };
 
-/** 通常 Gemma の逆周波数（f64）。回さない次元は 0。 */
+/** Regular Gemma's inverse frequencies (f64). Dimensions not rotated are 0. */
 export const gemma4RopeInverseFrequencies = (
   spec: Gemma4RopeLayerSpec,
 ): Float64Array<ArrayBuffer> => ropeInverseFrequencies(spec, false);
-/** 通常 Gemma の位置列から cos / sin 行を f64 計算で作り、f32 格納する。 */
+/** Builds cos / sin rows from regular Gemma's positions, computed in f64 and stored as f32. */
 export const gemma4RopeRows = (
   spec: Gemma4RopeLayerSpec,
   positions: ArrayLike<number>,
 ): Gemma4RopeRows => ropeRows(spec, positions, false);
-/** 通常 Gemma の物理 chunk に対応する RoPE 入力4本。pad の位置は 0。 */
+/** The four RoPE inputs for a physical chunk of regular Gemma. Pad positions are 0. */
 export const gemma4RopeInputs = (
   spec: Gemma4RopeSpec,
   positions: ArrayLike<number>,
 ): Record<string, Tensor> => ropeInputs(spec, positions, false);
 /**
- * 固定 QAT 専用の f32 段丸め。pad を含む物理 chunk の RoPE 入力4本を作る。
- * DECIDED: [ADR 0097 追記5](../../../../docs/decisions/0097-gemma4-qat-integration.md#addendum-5-2026-09-11--fixed-qat-recipe-and-how-numeric-comparisons-are-treated)。
+ * Per-step f32 rounding, for fixed QAT only. Builds the four RoPE inputs of a physical chunk
+ * including pad.
+ * DECIDED: [ADR 0097 addendum 5](../../../../docs/decisions/0097-gemma4-qat-integration.md#addendum-5-2026-09-11--fixed-qat-recipe-and-how-numeric-comparisons-are-treated).
  */
 export const gemma4QatRopeInputs = (
   spec: Gemma4RopeSpec,

@@ -1,17 +1,20 @@
 /**
- * Anima のサンプラ — IR に載らない段を TS で持つ。
+ * Anima's sampler — holds the steps that are not in the IR, in TS.
  *
- * 中身は 3 つ: ①`FlowMatchEulerDiscreteScheduler` の sigma 列 ②timestep の正弦波埋め込み
- * ③CFG 合成 + Euler 更新。CFG の要否判定（{@link needsUncond}）は更新則に依らない 1 行の
- * 不変条件なので、ファミリ非依存の `src/generation/` から借りる（写しを持たない）。Anima 側の
- * 事情はここに残す — turbo 運用の 2× の出所は step 削減とは独立に**この分岐**で、参照
- * フィクスチャ側も CFG=1 では uncond 分岐を実行していない。
+ * Three parts: ① the sigma sequence of `FlowMatchEulerDiscreteScheduler` ② the sinusoidal timestep
+ * embedding ③ CFG mixing + the Euler update. Whether CFG is needed ({@link needsUncond}) is a
+ * one-line invariant independent of the update rule, so it is borrowed from the family-independent
+ * `src/generation/` (no copy). The Anima-side context stays here — the 2× of turbo operation comes
+ * from **this branch**, independent of the step reduction, and the reference fixtures do not run
+ * the uncond branch at CFG=1 either.
  *
- * MUST: f32 の丸めを 1 演算ずつ `Math.fround` で踏む。JS の数値は f64 なので、まとめて
- * 計算してから丸めると torch / numpy の f32 逐次計算と最終桁が変わる。
+ * MUST: apply the f32 rounding one operation at a time with `Math.fround`. JS numbers are f64, so
+ * computing in bulk and rounding at the end changes the last digit against torch / numpy's
+ * sequential f32 computation.
  *
- * NOTE: `shift` / `numTrainTimesteps` は **manifest の `pipelineConfig.scheduler` が正本**
- * （配布物ごとに変わりうる数なので、ここに定数として持たない — ADR 0038 §1）。
+ * NOTE: **the manifest's `pipelineConfig.scheduler` is the source of truth** for `shift` /
+ * `numTrainTimesteps` (numbers that can vary per distribution, so they are not constants here —
+ * ADR 0038 §1).
  */
 
 import { ModelInputError } from "../errors.ts";
@@ -19,32 +22,36 @@ import { needsUncond } from "../generation/dpm-solver-multistep.ts";
 
 const f32 = Math.fround;
 
-/** `get_timestep_embedding` の `max_period`（diffusers の既定 10000）。 */
+/** `max_period` of `get_timestep_embedding` (diffusers' default 10000). */
 const MAX_PERIOD = 10000;
 
 /**
- * `steps` の上限（{@link assertAcceptableSteps}）。
+ * Upper bound of `steps` ({@link assertAcceptableSteps}).
  *
- * NOTE: 値は Wan（`wan/scheduler.ts` の `wanUniPcSchedule` — `num_train_timesteps` の 1000）に揃えた
- * 実用上の上限。Wan の「超えると整数の timestep が必ず重複する」という根拠は Anima には当てはまらない
- * — Anima の timestep 埋め込みは σ の連続値をそのまま使う（{@link timestepsProj}）。上限の目的は、
- * 巨大な steps で梯子の `Float32Array` を確保して同期ループ（中断も効かない）を走らせる前に入口で
- * 止めること。manifest の既定の門（`config.ts`）は値ではなく {@link assertAcceptableSteps} を呼ぶ。
+ * NOTE: a practical upper bound aligned with Wan (`wanUniPcSchedule` in `wan/scheduler.ts` — 1000 =
+ * `num_train_timesteps`). Wan's reason "beyond it integer timesteps always repeat" does not apply
+ * to Anima — Anima's timestep embedding uses the continuous σ value as is ({@link timestepsProj}).
+ * The bound's purpose is to stop at the entry before a huge steps value allocates the ladder's
+ * `Float32Array` and runs a synchronous loop (which cannot even be aborted). The manifest default
+ * check (`config.ts`) calls {@link assertAcceptableSteps} rather than reading the value.
  */
 const ANIMA_MAX_STEPS = 1000;
 
 /**
- * `steps` の受理集合（**2 以上 {@link ANIMA_MAX_STEPS} 以下の整数**）を見る門。**この 1 本が所有者**で、生成の入口
- * （`pipeline.ts` の `generate`）も {@link sigmaSchedule} 自身もここを呼ぶ。
+ * The check of the accepted set of `steps` (**an integer from 2 to {@link ANIMA_MAX_STEPS}**).
+ * **This is the single owner**; both the generation entry (`generate` in `pipeline.ts`) and
+ * {@link sigmaSchedule} itself call it.
  *
- * NOTE: 生成の入口は他のノブと並べてここを先に呼び、入力起因の誤りをプロンプト層（トークナイズ）より
- * 前に {@link ModelInputError} で返す。{@link sigmaSchedule} 側の呼び出しは、低水準関数を単体で使うとき
- * （テスト・ツール）の契約。梯子そのものも生成の入口で GPU に触る前に組む（`pipeline.ts` の
- * `generate`）。受理集合を両側に書くと必ず片方が緩むので、条件はここにしか置かない。
+ * NOTE: the generation entry calls this first, alongside the other knobs, so input-caused errors
+ * come back as {@link ModelInputError} before the prompt layer (tokenization). The call in
+ * {@link sigmaSchedule} is the contract for using the low-level function on its own (tests, tools).
+ * The ladder itself is also built at the generation entry before touching the GPU (`generate` in
+ * `pipeline.ts`). Writing the accepted set in both places would always let one side drift looser,
+ * so the conditions live only here.
  *
- * 入力起因（呼び手が渡した生成ノブそのもの）なので {@link ModelInputError} を投げる —
- * 梯子の構造検査（先頭が 1 / 狭義単調減少）は配布物の `shift` に対する内部の前提なので
- * `RangeError` のままで、型で分かれる。
+ * Input-caused (the generation knob the caller passed itself), so it throws {@link ModelInputError}
+ * — the ladder's structural checks (head is 1 / strictly decreasing) are internal assumptions about
+ * the distribution's `shift`, so they stay `RangeError`, and the types tell them apart.
  */
 export const assertAcceptableSteps = (steps: number): void => {
   if (!Number.isInteger(steps) || steps < 2) {
@@ -73,43 +80,49 @@ export const assertAcceptableSteps = (steps: number): void => {
 //     Copyright 2025 Stability AI, Katherine Crowson and The HuggingFace Team. All rights reserved.
 
 /**
- * `FlowMatchEulerDiscreteScheduler.set_timesteps`（静的 shift 経路）の TS 実装。
- * 末尾に終端 0 を 1 つ足すので長さは `steps + 1`。
+ * TS implementation of `FlowMatchEulerDiscreteScheduler.set_timesteps` (the static shift path).
+ * A terminal 0 is appended, so the length is `steps + 1`.
  *
- * 組み方は numpy の `linspace` の写し（`step = (stop − start) / (num − 1)` を先に作って
- * `i · step + start`、最終要素は `stop` を直接代入）。
+ * The construction copies numpy's `linspace` (build `step = (stop − start) / (num − 1)` first, then
+ * `i · step + start`; the last element is assigned `stop` directly).
  *
- * NOTE（故障注入の実測）: steps=32 / shift=3 では ①`(i · delta) / div + start` への並べ替え
- * ②f32 への丸めを 1 演算ずつではなく最後にまとめる、のどちらも **33 要素が 1 ビットも
- * 変わらない**。この式は値域 [0.088, 1] に収まる well-conditioned な形で、丸めが効くほど桁が
- * 落ちない。**パリティテストが固定しているのは値であって式の形ではない** — 写しにしてあるのは
- * 上流の式と 1 対 1 で追えるようにするためで、丸めの実測に基づく制約ではない。実際に落ちるのは
- * linspace の端点・shift・終端 0 の取り違え（故障注入で確認）。
+ * NOTE (fault-injection measurement): with steps=32 / shift=3, neither ① reordering to
+ * `(i · delta) / div + start` nor ② rounding to f32 once at the end instead of per operation
+ * **changes a single bit of the 33 elements**. The formula is well-conditioned within the range
+ * [0.088, 1] and does not lose enough digits for rounding to matter. **The parity test pins the
+ * values, not the shape of the formula** — the copy is there so it can be followed 1:1 against the
+ * upstream formula, not a constraint from a rounding measurement. What actually fails is a mix-up
+ * of the linspace endpoints, the shift or the terminal 0 (confirmed by fault injection).
  *
- * ## MUST: 返す前に梯子そのものを構造検査する（`shift` の値域門はここが正本）
+ * ## MUST: check the ladder's structure before returning (source of truth for the `shift` range)
  *
- * `dpm-solver-multistep.ts` は「梯子の先頭が厳密に 1・末尾が厳密に 0」を明文の前提に置き、
- * step 0 の `alphaS0 = 0` をそこから導いている。`pipelineConfig.scheduler.shift` の受理集合
- * （`config.ts` の「正の有限数」）はこの前提より**広い**: f32 の 1.0 近傍の刻みは 2⁻²⁴ ≈
- * 5.96e-8 なので、`shift ≲ 3e-8` では分母 `f32(shift − 1) + 1` が厳密に 0 へ潰れて
- * `sigmas[0] = +Inf`（Euler は latent が NaN になり `imageToRgba` の非有限門まで真因が読めない
- * 形で伝播する）、`shift ≈ 1e-7` では先頭が 1 でなくなる（DPM++ 2M は例外を出さず、前提の
- * 崩れた別軌道を黙って走る）。受理集合を 2 箇所に書くと必ず片方が緩むので、門は梯子側の
- * この 1 本に置く。
+ * `dpm-solver-multistep.ts` states "the ladder starts at exactly 1 and ends at exactly 0" as an
+ * explicit assumption and derives step 0's `alphaS0 = 0` from it. The accepted set of
+ * `pipelineConfig.scheduler.shift` ("positive finite number" in `config.ts`) is **wider** than that
+ * assumption: the f32 step near 1.0 is 2⁻²⁴ ≈ 5.96e-8, so with `shift ≲ 3e-8` the denominator
+ * `f32(shift − 1) + 1` collapses to exactly 0 and `sigmas[0] = +Inf` (Euler turns the latent into
+ * NaN, which propagates in a form whose real cause cannot be read until the non-finite check of
+ * `imageToRgba`), and with `shift ≈ 1e-7` the head is no longer 1 (DPM++ 2M throws nothing and
+ * silently runs a different trajectory with the assumption broken). Writing the accepted set in two
+ * places would always let one side drift looser, so the check is this single one on the ladder
+ * side.
  *
- * NOTE（先頭の門は片側 — `1 − 4ulp ≤ σ₀ ≤ 1`）: 上流 diffusers も同じ式を f32 で評価しており、
- * `shift = 1.18 / 1.32 / 1.43 …`（`[1,20]` の 2 桁小数 1,901 通りのうち 111 通り）で先頭が
- * 1 から 1〜2 ulp ずれる。ずれの向きで扱いを分ける:
- * - **下側（σ₀ < 1・例 1.18）は受理する** — 厳密比較はこれら普通の値まで弾いて配布形の自由度を
- *   狭める。dpm-solver の「先頭が厳密に 1」は `alphaS0 = 1 − σ₀` を 0 と見なす導出の前提で、
- *   下側のずれは `alphaS0 ≈ 6e-8` として絵に効かない。幅は {@link SIGMA_HEAD_TOLERANCE}（4 ulp）。
- * - **上側（σ₀ > 1・例 1.32 / 1.57 …・同じ 1,901 通りのうち 55 通り）は拒否する** — DPM++ 2M は
- *   step 0 で `log(1 − σ₀)` を取るので負数の log で NaN になり、例外を出さずに全 step を NaN で
- *   走る（最後の RGBA 変換で真因の読めない形で落ちるか、VAE のクランプで普通の画素に化ける）。
- *   梯子は更新則に依らない 1 本で、門もここ 1 か所に置くので、Euler（上側でも壊れない）で使う
- *   場合も同じく拒否する — 失うのは小数 `shift` の理論上の自由度だけ。
+ * NOTE (the head check is one-sided — `1 − 4ulp ≤ σ₀ ≤ 1`): upstream diffusers evaluates the same
+ * formula in f32, and with `shift = 1.18 / 1.32 / 1.43 …` (111 of the 1,901 two-decimal values in
+ * `[1,20]`) the head is 1–2 ulp away from 1. The handling depends on the direction:
+ * - **Below (σ₀ < 1, e.g. 1.18) is accepted** — an exact comparison would reject these ordinary
+ *   values too and narrow the distribution's freedom. dpm-solver's "head is exactly 1" is the
+ *   assumption of a derivation that treats `alphaS0 = 1 − σ₀` as 0, and a downward offset gives
+ *   `alphaS0 ≈ 6e-8`, which does not affect the picture. The width is {@link SIGMA_HEAD_TOLERANCE}
+ *   (4 ulp).
+ * - **Above (σ₀ > 1, e.g. 1.32 / 1.57 …, 55 of the same 1,901 values) is rejected** — DPM++ 2M
+ *   takes `log(1 − σ₀)` at step 0, so the log of a negative number gives NaN and every step runs on
+ *   NaN without an exception (it fails at the final RGBA conversion in a form whose real cause
+ *   cannot be read, or the VAE's clamp turns it into ordinary pixels). The ladder is one regardless
+ *   of the update rule and the check sits only here, so it is rejected for Euler too (which does
+ *   not break above) — only the theoretical freedom of a fractional `shift` is lost.
  */
-/** 梯子の先頭が 1 から**下へ**離れてよい幅（f32 の 4 ulp = 2⁻²²・上側は 0 — 片側の門）。 */
+/** How far the ladder head may be **below** 1 (f32 4 ulp = 2⁻²²; 0 above — a one-sided check). */
 const SIGMA_HEAD_TOLERANCE = 2 ** -22;
 
 export const sigmaSchedule = (steps: number, shift: number): Float32Array<ArrayBuffer> => {
@@ -122,9 +135,9 @@ export const sigmaSchedule = (steps: number, shift: number): Float32Array<ArrayB
     const sigma = f32(index === steps - 1 ? stop : index * step + start);
     sigmas[index] = f32(f32(shift * sigma) / f32(f32((shift - 1) * sigma) + 1));
   }
-  // 先頭は 1 の下側にだけ f32 の丸め数 ulp を許す（{@link SIGMA_HEAD_TOLERANCE}）。上側は 1 ulp でも
-  // DPM++ 2M の `log(1 − σ₀)` が NaN になるので許さない（+Inf もこの上側の枝で落ちる）。
-  // NaN は比較が偽になるので同じ枝で落ちる。
+  // The head may be a few ulp of f32 rounding below 1 only ({@link SIGMA_HEAD_TOLERANCE}). Above,
+  // even 1 ulp makes DPM++ 2M's `log(1 − σ₀)` NaN, so it is not allowed (+Inf also fails on this
+  // upper branch). NaN compares false, so it fails on the same branch.
   if (!(sigmas[0] <= 1 && 1 - sigmas[0] <= SIGMA_HEAD_TOLERANCE)) {
     throw new RangeError(
       `sigma 梯子の先頭が ${sigmas[0]}（1 を超えている / 1 から下へ ${SIGMA_HEAD_TOLERANCE} を` +
@@ -152,24 +165,29 @@ export const sigmaSchedule = (steps: number, shift: number): Float32Array<ArrayB
 //   Copyright 2026 The HuggingFace Team. All rights reserved.
 
 /**
- * 1 step ぶんの timestep 埋め込み `[width]`（`Timesteps(2048, flip_sin_to_cos=True,
- * downscale_freq_shift=0.0)` = `get_timestep_embedding` の写し）。**前半 cos・後半 sin**。
+ * Timestep embedding `[width]` for one step (a copy of `Timesteps(2048, flip_sin_to_cos=True,
+ * downscale_freq_shift=0.0)` = `get_timestep_embedding`). **cos in the first half, sin in the
+ * second.**
  *
- * 入力は sigma そのもの。上流は `timesteps[i] / num_train_timesteps` と往復するので順序を
- * 写してあるが、**f32 の往復は 1 ビットも変えない**（エクスポータ側の実測 NOTE と同じ）。
+ * The input is sigma itself. Upstream round-trips through `timesteps[i] / num_train_timesteps`, so
+ * the order is copied, but **the f32 round trip changes no bit** (same as the exporter-side
+ * measurement NOTE).
  *
- * `width` はグラフ入力 `timesteps_proj` の静的次元から渡す（呼び出し側に 2048 を書かない）。
+ * `width` comes from the static dimension of the graph input `timesteps_proj` (callers do not write
+ * 2048).
  *
- * ## MUST: この関数は参照とビット一致し**ない**（実測 — 一致を期待して締めない）
+ * ## MUST: this is **not** bit-identical to the reference (measured — do not tighten for a match)
  *
- * torch CPU の f32 `exp` / `sin` / `cos` は SLEEF の 1.0 ULP 実装で、JS の `Math.*`（f64 で
- * 計算して f32 へ丸める = 0.5 ULP 相当）とは最終ビットが割れる。実測（参照フィクスチャ 3 本 =
- * 計 72 行）: 不一致 4.01〜4.03% / 最大 2 ULP / 最大絶対差 5.96e-8。内訳は `exp` 段が 1,024 件中
- * 9 件（1 ULP）で、残りは `sin` / `cos` 段。ビット一致させるには SLEEF の多項式近似を写す必要が
- * あり、値域 [-1,1] の表に対して 6e-8 の差のために持ち込む複雑さではない。パリティテストは
- * この実測から導いた atol 6e-7（実測最悪の約 10 倍）で固定する — 実装バグの差は桁違いに大きい
- * （実測: **行ずれ 1.68e-1** = 閾値の 5.4 桁上 / **cos·sin 反転 1.00e+0** = 6.2 桁上）ので、
- * 丸め差を許しても検出力は残る。
+ * torch CPU's f32 `exp` / `sin` / `cos` are SLEEF's 1.0 ULP implementations, and their last bit
+ * differs from JS `Math.*` (computed in f64 and rounded to f32 = about 0.5 ULP). Measured (3
+ * reference fixtures = 72 rows in total): mismatches 4.01–4.03% / at most 2 ULP / largest absolute
+ * difference 5.96e-8. Of these, the `exp` step accounts for 9 of 1,024 (1 ULP) and the rest are the
+ * `sin` / `cos` step. Bit identity would require copying SLEEF's polynomial approximations, which
+ * is not worth the complexity for a 6e-8 difference on a table in the range [-1,1]. The parity test
+ * pins it with atol 6e-7 derived from this measurement (about 10× the measured worst) —
+ * implementation bugs differ by orders of magnitude more (measured: **row shift 1.68e-1** = 5.4
+ * orders above the threshold / **cos·sin swap 1.00e+0** = 6.2 orders above), so detection power
+ * remains while allowing rounding differences.
  */
 export const timestepsProj = (
   sigma: number,
@@ -184,12 +202,13 @@ export const timestepsProj = (
   }
   const half = width / 2;
   const timestep = f32(f32(sigma * numTrainTimesteps) / numTrainTimesteps);
-  // `-math.log(max_period)` は f32 テンソルとの積で f32 へ落ちる（torch のスカラ昇格）。
-  // f64 のまま掛けると不一致が 825 → 2,503 件・最大 17 ULP へ増えるのを実測済み。
+  // `-math.log(max_period)` drops to f32 in the product with an f32 tensor (torch's scalar
+  // promotion). Multiplying in f64 was measured to raise the mismatches from 825 to 2,503 and the
+  // maximum to 17 ULP.
   const logMaxPeriod = f32(-Math.log(MAX_PERIOD));
   const out = new Float32Array(width);
   for (let index = 0; index < half; index += 1) {
-    // downscale_freq_shift = 0 なので分母は half そのもの。
+    // downscale_freq_shift = 0, so the denominator is half itself.
     const exponent = f32(f32(logMaxPeriod * index) / half);
     const angle = f32(timestep * f32(Math.exp(exponent)));
     out[index] = f32(Math.cos(angle));
@@ -199,17 +218,18 @@ export const timestepsProj = (
 };
 
 /**
- * CFG 混合（`uncond + scale·(cond − uncond)`）と Euler 更新（`x + Δσ·noise`）。
+ * CFG mixing (`uncond + scale·(cond − uncond)`) and the Euler update (`x + Δσ·noise`).
  *
- * MUST: `uncond` の有無は {@link needsUncond} とちょうど一致させる（食い違いは fail loudly）。
- * 「CFG=1 なのに uncond を渡す」は呼び出し側の分岐漏れで、素通しすると
- * **参照と 1 ULP 級で割れた値が「GPU の誤差」として tolerance に吸われる**。
+ * MUST: the presence of `uncond` matches {@link needsUncond} exactly (a mismatch fails loudly).
+ * "Passing uncond at CFG=1" is a branch missed by the caller; passed through, **values that differ
+ * from the reference at the 1 ULP level get absorbed into the tolerance as "GPU error"**.
  *
- * NOTE（長さの突合を持たない理由）: `previous` / `cond` / `uncond` の長さは**呼び手が構造的に
- * 揃える**。呼び手は `pipeline.ts` の denoise ループ 1 箇所だけで、cond / uncond は同じ dyn
- * グラフを同じ入力 shape で回した出力なので長さが割れる形が作れず、latent 側と食い違えば
- * `unpatchifyTokens` が先に名指しで落とす（`dit-tokens.ts`）。ファミリ非依存の共有面
- * （`generation/dpm-solver-multistep.ts`）は呼び手が増えうるので事情が違う。
+ * NOTE (why lengths are not compared): the lengths of `previous` / `cond` / `uncond` are **made
+ * equal structurally by the caller**. The only caller is the denoise loop in `pipeline.ts`, and
+ * cond / uncond are outputs of the same dyn graph run with the same input shape, so their lengths
+ * cannot differ; a mismatch with the latent side is caught first, by name, in `unpatchifyTokens`
+ * (`dit-tokens.ts`). The family-independent shared surface (`generation/dpm-solver-multistep.ts`)
+ * is different, since its callers can grow.
  */
 export const cfgEulerStep = (
   previous: Float32Array<ArrayBuffer>,
@@ -225,8 +245,9 @@ export const cfgEulerStep = (
   if (!wants && uncond !== undefined) {
     throw new Error("CFG scale 1 で uncond が渡された（uncond 分岐を計算しない経路のはず）");
   }
-  // 倍率は先に f32 へ落とす（torch は Python float のスカラを f32 テンソルとの積の前に f32 へ落とす —
-  // f64 のまま掛けると 1.1 のような f32 で表せない倍率で合成が 1 ulp ずれる）。
+  // Drop the scale to f32 first (torch drops a Python float scalar to f32 before the product with
+  // an f32 tensor — multiplying in f64 makes the mix 1 ulp off for a scale f32 cannot represent,
+  // such as 1.1).
   const scale = f32(guidance);
   const next = new Float32Array(previous.length);
   for (let index = 0; index < previous.length; index += 1) {

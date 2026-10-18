@@ -1,60 +1,65 @@
 /**
- * BiRefNet 系の α マットの後処理（グラフの出す logit の地図 → 入力画像と同じ寸法の 8bit α）。
+ * Alpha matte post-processing for the BiRefNet family (the graph's logit map → an 8-bit α of the
+ * same size as the input image).
  *
- * `pipeline.ts` のモジュール doc の段 4。GPU にもグラフにも触らない純関数なので、パイプラインの
- * 外に置き、CPU だけのテスト（`tests/birefnet_matte_test.ts` — 上流の関数で作った golden
- * `tests/fixtures/birefnet-matte/` と突き合わせる）で直接縛る。
+ * Step 4 of the module doc of `pipeline.ts`. It is a pure function that touches neither the GPU nor
+ * the graph, so it lives outside the pipeline and is pinned directly by a CPU-only test
+ * (`tests/birefnet_matte_test.ts` — checked against the goldens made with the upstream functions,
+ * `tests/fixtures/birefnet-matte/`).
  *
- * ## 上流の実際の手順（系列ごとに違う）
+ * ## The actual upstream procedures (they differ per checkpoint)
  *
- * - **BiRefNet_HR**（同梱 `handler.py:131-137`・モデルカードの利用例も同じ順）: 半精度のモデルが
- *   出す logit → 半精度の `sigmoid` → `transforms.ToPILImage()`（torchvision 0.28 は
- *   `(x * 255).astype(np.uint8)` = 切り捨て）→ Pillow の `pred_pil.resize(image.size)`（resample
- *   を省くと BICUBIC・8bit の 1 バンド）。
- * - **Lucida**（モデルカード `README.md:86-89`）: f32 の logit → `sigmoid` →
- *   `transforms.functional.resize`（テンソル枝・bilinear・antialias 既定）→
- *   `(alpha.numpy() * 255).astype("uint8")` = 切り捨て。
+ * - **BiRefNet_HR** (bundled `handler.py:131-137`; the model card's usage example has the same
+ *   order): logits from the half-precision model → half-precision `sigmoid` →
+ *   `transforms.ToPILImage()` (torchvision 0.28 does `(x * 255).astype(np.uint8)` = truncation) →
+ *   Pillow's `pred_pil.resize(image.size)` (resample omitted = BICUBIC, 8-bit one band).
+ * - **Lucida** (model card `README.md:86-89`): f32 logits → `sigmoid` →
+ *   `transforms.functional.resize` (tensor branch, bilinear, antialias by default) →
+ *   `(alpha.numpy() * 255).astype("uint8")` = truncation.
  *
- * ## 手順（{@link MatteProcedure} — ADR 0125）
+ * ## Procedures ({@link MatteProcedure} — ADR 0125)
  *
- * 上流との一致は計算結果の数値の水準（または数値の意図の水準）で取り、上流の誤りや速度のための
- * 選択は写さない（ADR 0125 決定 1）。写すのは系列ごとの補間のカーネルと段の順序で、写さないのは
- * 切り捨て（全手順とも四捨五入 = `Math.round(255·α)`・0.5 は切り上げ）と HR の半精度。
+ * Upstream parity is reached at the level of computed values (or of their intent); upstream errors
+ * and choices made for speed are not copied (ADR 0125 decision 1). What is copied per checkpoint is
+ * the interpolation kernel and the order of stages; what is not copied is the truncation (every
+ * procedure rounds = `Math.round(255·α)`, 0.5 rounds up) and HR's half precision.
  *
- * - `float-bilinear`（Lucida の上流の意図 = 手順を宣言で選ぶ前のパイプラインの経路そのもの）:
- *   σ を f64 で計算して f32 に格納 → `resizePlaneF32`（antialias bilinear・f64・パスの間で丸めない）
- *   → `Math.round(255·α)`。
- * - `u8-pil-bicubic`（HR の上流の意図）: σ を f64 で計算 → `Math.round(255σ)` で 8bit の平面 →
- *   Pillow 12.3.0 の 8bit・1 バンドの BICUBIC（`src/image/pillow-resample.ts` — 22 bit の固定小数点・
- *   中間 uint8・寸法が同じ軸はパスを飛ばす）。
+ * - `float-bilinear` (Lucida's upstream intent = the pipeline's path itself before procedures were
+ *   chosen by declaration): σ computed in f64 and stored in f32 → `resizePlaneF32` (antialiased
+ *   bilinear, f64, no rounding between passes) → `Math.round(255·α)`.
+ * - `u8-pil-bicubic` (HR's upstream intent): σ computed in f64 → `Math.round(255σ)` into an 8-bit
+ *   plane → Pillow 12.3.0's 8-bit one-band BICUBIC (`src/image/pillow-resample.ts` — 22-bit fixed
+ *   point, uint8 intermediate, a pass is skipped on an axis whose size is unchanged).
  *
- * どの手順を当てるかは配布形の `pipelineConfig.postprocess` が宣言する（`./config.ts` — 組み立て段が
- * checkpoint から決める: HR → `u8-pil-bicubic`・Lucida → `float-bilinear`）。HR の 2 手順を盲検で
- * 比べた A/B は 8 対とも「見分けがつかない」で、事前の規則どおり上流の手順を採った（ADR 0125 の
- * 結果の節）。手順の引数は宣言の受け口で、アプリが選ぶ公開オプションではない（`mod.ts` / サブパス面
- * には出さない — ADR 0008）。
+ * Which procedure applies is declared by the distribution's `pipelineConfig.postprocess`
+ * (`./config.ts` — the build step decides it from the checkpoint: HR → `u8-pil-bicubic`, Lucida →
+ * `float-bilinear`). The blind A/B of HR's two procedures answered "indistinguishable" for all 8
+ * pairs, and the upstream procedure was adopted as the rule set in advance required (ADR 0125,
+ * "Results (addendum 2026-10-11) — A/B answers, rulings and the distribution declaration"). The
+ * procedure argument receives the declaration; it is not a public option an application chooses
+ * (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 
 import { resizePlaneF32 } from "../image/preprocess.ts";
 import { resizeU8PlaneBicubic } from "../image/pillow-resample.ts";
 
-/** 8bit の α の最大値。 */
+/** Maximum value of the 8-bit α. */
 const ALPHA_MAX = 255;
 
-/** 入力と同じ寸法の α マット（画素あたり 1 バイト・行優先）。 */
+/** An alpha matte of the same size as the input (one byte per pixel, row-major). */
 export type AlphaMatte = {
   readonly data: Uint8Array<ArrayBuffer>;
   readonly width: number;
   readonly height: number;
 };
 
-/** 後処理の手順の名前（モジュール doc「手順」— 名前の正本は ADR 0125）。 */
+/** Names of the post-processing procedures (module doc "Procedures" — ADR 0125 owns the names). */
 export const MATTE_PROCEDURES = ["float-bilinear", "u8-pil-bicubic"] as const;
 
-/** {@link MATTE_PROCEDURES} の 1 つ。 */
+/** One of {@link MATTE_PROCEDURES}. */
 export type MatteProcedure = (typeof MATTE_PROCEDURES)[number];
 
-/** 1 つの手順の本体（logit の地図 → 入力と同じ寸法の 8bit α の画素列）。 */
+/** The body of one procedure (logit map → 8-bit α pixel row of the same size as the input). */
 type ProcedureBody = (
   logits: Float32Array<ArrayBuffer>,
   sourceWidth: number,
@@ -64,11 +69,12 @@ type ProcedureBody = (
 ) => Uint8Array<ArrayBuffer>;
 
 /**
- * logit 1 つの σ（f64）。
+ * σ of one logit (f64).
  *
- * MUST: 非有限値を黙って返さない。α の量子化（`Uint8Array` 代入）は NaN を 0 = 「完全に透明な
- * 画素」という**正常に見えるマット**へ変換してしまう。resize は重み付き和で NaN を伝播するだけ
- * なので、発生源に一番近いここで落とす（`anima/image.ts` と同じ検査点）。
+ * MUST: never return a non-finite value silently. Quantizing α (assigning into a `Uint8Array`)
+ * turns NaN into 0 = "a fully transparent pixel", **a matte that looks normal**. Resizing is a
+ * weighted sum that merely propagates NaN, so the check sits here, closest to the source (the same
+ * check point as `anima/image.ts`).
  */
 const sigmoidAt = (
   logits: Float32Array<ArrayBuffer>,
@@ -84,7 +90,7 @@ const sigmoidAt = (
   return 1 / (1 + Math.exp(-raw));
 };
 
-/** `float-bilinear`（モジュール doc — Lucida の上流の意図）。 */
+/** `float-bilinear` (module doc — Lucida's upstream intent). */
 const floatBilinear: ProcedureBody = (logits, sourceWidth, sourceHeight, width, height) => {
   const alpha = new Float32Array(logits.length);
   for (let index = 0; index < logits.length; index += 1) {
@@ -99,11 +105,12 @@ const floatBilinear: ProcedureBody = (logits, sourceWidth, sourceHeight, width, 
 };
 
 /**
- * `u8-pil-bicubic`（モジュール doc — HR の上流の意図）。
+ * `u8-pil-bicubic` (module doc — HR's upstream intent).
  *
- * MUST: σ を f32 に格納してから丸めない（`float-bilinear` と違い、f64 の σ を直接 `Math.round` に
- * 渡す — golden の生成器〈`tools/export-recipes/birefnet/matte_fixture.py`〉と同じ式。f32 へ格納すると
- * `k + 0.5` の近くの標本の丸めの向きが変わりうる）。
+ * MUST: do not store σ in f32 before rounding (unlike `float-bilinear`, the f64 σ goes straight
+ * into `Math.round` — the same formula as the golden generator
+ * (`tools/export-recipes/birefnet/matte_fixture.py`). Storing in f32 can flip the rounding
+ * direction of samples near `k + 0.5`).
  */
 const u8PilBicubic: ProcedureBody = (logits, sourceWidth, sourceHeight, width, height) => {
   const quantized = new Uint8Array(logits.length);
@@ -119,15 +126,17 @@ const PROCEDURES: Readonly<Record<MatteProcedure, ProcedureBody>> = {
 };
 
 /**
- * グラフの出す logit の地図 → 入力と同じ寸法の 8bit α（`pipeline.ts` のモジュール doc の段 4）。
+ * The graph's logit map → an 8-bit α of the same size as the input (step 4 of the module doc of
+ * `pipeline.ts`).
  *
- * `procedure` は配布形の宣言（`pipelineConfig.postprocess`）をそのまま渡す。既定を持たないのは、
- * 宣言を渡し忘れた呼び手が黙って片方の系列の手順で走らないようにするため。8bit へ落とすのは
- * **この配布形の出力形式の決定**で、量子化はどの手順も四捨五入（ADR 0125 — 上流はどちらの系列も
- * 切り捨て）。
+ * `procedure` takes the distribution's declaration (`pipelineConfig.postprocess`) as is. It has no
+ * default so that a caller who forgot to pass the declaration does not silently run with one
+ * checkpoint's procedure. Dropping to 8 bit is **a decision about this distribution's output
+ * format**, and every procedure quantizes by rounding (ADR 0125 — upstream truncates for both
+ * checkpoints).
  *
- * NOTE: `export` はパイプライン・テスト・A/B の道具（`tools/birefnet-ab/`）のため（`mod.ts` /
- * サブパス面には出さない — ADR 0008）。
+ * NOTE: the `export` serves the pipeline, the tests and the A/B tool (`tools/birefnet-ab/`, removed
+ * in 0.15) (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const matteFromLogits = (
   logits: Float32Array<ArrayBuffer>,
@@ -137,8 +146,9 @@ export const matteFromLogits = (
   height: number,
   procedure: MatteProcedure,
 ): AlphaMatte => {
-  // MUST: `Object.hasOwn` で引く — JS の呼び手が `"toString"` 等を渡すと Object.prototype の
-  // メンバを手順として受けてしまう。名前の綴り違いなので素の `Error`（ADR 0107 決定 3）。
+  // MUST: look up with `Object.hasOwn` — a JS caller passing `"toString"` etc. would otherwise get
+  // an Object.prototype member accepted as a procedure. A misspelled name, so a plain `Error`
+  // (ADR 0107 decision 3).
   if (!Object.hasOwn(PROCEDURES, procedure)) {
     throw new Error(
       `birefnet: 後処理の手順 ${JSON.stringify(procedure)} は未対応（期待 ${MATTE_PROCEDURES.map(

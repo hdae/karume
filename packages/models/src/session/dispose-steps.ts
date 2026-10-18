@@ -1,29 +1,33 @@
 /**
- * 後始末の段を「途中で失敗しても残りを必ず通す」形で並べる道具（**パイプライン非依存の共通
- * 処理** — 常駐 Session を持つ家族の `dispose()` が同じ形で使う）。
+ * A tool that lays out cleanup steps so that "the rest always runs even if one fails midway"
+ * (**pipeline-independent shared processing** — used the same way by the `dispose()` of families
+ * that hold resident Sessions).
  *
- * MUST: barrel には出さない（同居する `options.ts` / `gpu-features.ts` と同じ理由 — 利用者が
- * 触る面ではない内部機構）。
+ * MUST: not exported from the barrel (for the same reason as the co-located `options.ts` /
+ * `gpu-features.ts` — an internal mechanism, not a surface the user touches).
  *
- * ## なぜ直列 `await` ではだめか
+ * ## Why sequential `await` does not work
  *
- * `dispose()` は `await session.dispose(); if (ownsGpu) gpu.destroy();` の形で書きたくなるが、
- * `Session.dispose()` は reject しうる（`RunArena` が flush の失敗を握り潰さずに伝播させる）。
- * 直列に並べると前段の失敗で後段へ到達せず、各家族の `openXState` が catch で掲げている
- * 「**内部で取った GPU は必ず返す**」という不変条件が dispose 経路でだけ破れる。しかも
- * `#disposal` に rejected promise が居座るので、2 度目の `dispose()` は再試行ではなく同じ
- * 失敗を返すだけになる（`#state` は private なので呼び手に他の把手が無い）。
+ * It is tempting to write `dispose()` as `await session.dispose(); if (ownsGpu) gpu.destroy();`, but
+ * `Session.dispose()` can reject (`RunArena` propagates a flush failure instead of swallowing it).
+ * Written sequentially, a failure in the earlier step means the later one is never reached, and the invariant
+ * that each family's `openXState` upholds in its catch — "**a GPU acquired internally is always
+ * returned**" — breaks on the dispose path only. On top of that, a rejected promise stays in
+ * `#disposal`, so a second `dispose()` is not a retry but just returns the same failure (`#state` is
+ * private, so the caller has no other handle).
  *
- * `try { … } finally { gpu.destroy(); }` も劣る — `finally` の中で例外が出ると**元の失敗を
- * 上書き**して、最初に何が壊れたかが消える。
+ * `try { … } finally { gpu.destroy(); }` is worse too — an exception inside `finally` **overwrites
+ * the original failure**, and what broke first is lost.
  */
 
 /**
- * 段を宣言順に走らせ、失敗を集めてから投げ直す（破棄の順序は呼び手が決める）。
+ * Runs the steps in declaration order, collects the failures, then rethrows (the caller decides the
+ * disposal order).
  *
- * 各段は独立に catch するので、途中の 1 本が投げても残りの段は必ず走る。失敗が 1 件なら
- * **その例外をそのまま**投げ（呼び手の `assertRejects(…, Error, "device lost")` が素直に
- * 書ける）、2 件以上なら `AggregateError` で運ぶ（どの段が落ちたかを消さない）。
+ * Each step catches on its own, so even if one throws midway the remaining steps always run. With
+ * one failure it throws **that exception as is** (so the caller's
+ * `assertRejects(…, Error, "device lost")` stays straightforward); with two or more it carries them
+ * in an `AggregateError` (without losing which step failed).
  */
 export const disposeSteps = async (
   steps: readonly (() => Promise<void> | void)[],

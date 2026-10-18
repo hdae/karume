@@ -1,55 +1,57 @@
 /**
- * Wan2.1 のテキスト埋め込み資産（第 1 段 = 事前計算した埋め込み — ADR 0118 決定 4）の読み口。
+ * Reader of Wan2.1's text embedding asset (stage 1 = precomputed embeddings — ADR 0118 decision 4).
  *
- * 資産は recipe `tools/export-recipes/wan/text_embeds.py` が書く safetensors 1 本:
+ * The asset is one safetensors file written by the recipe `tools/export-recipes/wan/text_embeds.py`:
  *
- * - テンソル: プロンプトごとに 1 本（名前 = プロンプト名・`F32`・`[L_valid, width]` — umT5 の出力を
- *   有効長で切った行。`width` は DiT の `encoder_hidden_states` の最終次元）。
- * - メタ: キー {@link WAN_TEXT_EMBEDS_METADATA_KEY} の 1 つだけに JSON（`prompts` に各プロンプトの
- *   名前・役割・原文・正規化後の文字列・トークン数。他の欄〈出所・版〉は来歴で、ここでは読まない）。
+ * - Tensors: one per prompt (name = prompt name, `F32`, `[L_valid, width]` — umT5's output rows cut
+ *   to the valid length; `width` is the last dimension of the DiT's `encoder_hidden_states`).
+ * - Metadata: JSON under the single key {@link WAN_TEXT_EMBEDS_METADATA_KEY} (`prompts` holds each
+ *   prompt's name, role, original text, normalized string and token count; the other fields
+ *   (provenance, version) are history and are not read here).
  *
- * 受理集合はメタのプロンプト文そのもの: `generate({ prompt })` は原文か正規化後の文字列のどちらかに
- * 完全一致した行だけを受け、集合の外は fail loudly（決定 4 — 第 2 段〈umT5 i8〉で集合が広がるだけで
- * API は割れない）。
+ * The accepted set is the metadata's prompt texts themselves: `generate({ prompt })` accepts only a
+ * row whose original text or normalized string matches exactly, and anything outside the set fails
+ * loudly (decision 4 — stage 2 (umT5 i8) only widens the set and does not break the API).
  *
- * MUST: モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: modules are side-effect free (no import-time execution, no global mutable state —
+ * CLAUDE.md).
  */
 
 import { parseSafetensors } from "@karume/runtime";
 
-/** メタの唯一のキー（recipe の `METADATA_KEY`）。 */
+/** The only metadata key (the recipe's `METADATA_KEY`). */
 export const WAN_TEXT_EMBEDS_METADATA_KEY = "karume.wan.text_embeds";
 
-/** プロンプトの役割（`negative` は CFG の uncond 側の既定 — 公式の `sample_neg_prompt`）。 */
+/** The prompt's role (`negative` is the default for CFG's uncond side — the official `sample_neg_prompt`). */
 export type WanPromptRole = "positive" | "negative";
 
-/** 受理集合の 1 行（資産のメタ — 埋め込みの値は持たない）。 */
+/** One row of the accepted set (the asset's metadata — without the embedding values). */
 export type WanPrompt = {
-  /** 資産のテンソル名（`boxing-cats` など）。 */
+  /** The asset's tensor name (such as `boxing-cats`). */
   readonly name: string;
   readonly role: WanPromptRole;
-  /** 出所の原文（改行や全角の約物を含めて逐語）。 */
+  /** The source's original text (verbatim, including line breaks and full-width punctuation). */
   readonly prompt: string;
-  /** 上流の `prompt_clean`（ftfy → html の unescape → 空白の畳み込み）の後の文字列。 */
+  /** The string after upstream's `prompt_clean` (ftfy → HTML unescape → whitespace collapsing). */
   readonly normalized: string;
 };
 
-/** 1 プロンプトの埋め込み（`[tokens, width]` の行優先・f32）。 */
+/** The embedding of one prompt (row-major `[tokens, width]`, f32). */
 export type WanTextEmbedding = WanPrompt & {
-  /** 有効長 `L_valid`（トークナイザのマスクが 1 の長さ）。 */
+  /** The valid length `L_valid` (the length over which the tokenizer's mask is 1). */
   readonly tokens: number;
   readonly data: Float32Array<ArrayBuffer>;
 };
 
-/** 埋め込み資産の全体（検査済み）。 */
+/** The whole embedding asset (checked). */
 export type WanTextEmbeds = {
-  /** 1 行の幅（umT5 の出力次元）。 */
+  /** The width of one row (umT5's output dimension). */
   readonly width: number;
-  /** メタの並びのまま。 */
+  /** In the metadata's order. */
   readonly entries: readonly WanTextEmbedding[];
 };
 
-/** 埋め込み資産がこのモジュールの取り決めから外れた（資産の齟齬 — 入力起因ではない）。 */
+/** The embedding asset breaks this module's conventions (an asset inconsistency — not an input error). */
 export class WanTextEmbedsError extends Error {
   override readonly name = "WanTextEmbedsError";
 }
@@ -64,11 +66,13 @@ const textField = (entry: Record<string, unknown>, key: string, where: string): 
 };
 
 /**
- * 埋め込み資産（safetensors）を読んで検査する。
+ * Reads and checks the embedding asset (safetensors).
  *
- * MUST: メタとテンソルの対応を全部見る（名前の集合が一致・行数がメタのトークン数と一致・幅が全行で
- * 同じ）。1 つでも崩れていると「別のプロンプトの埋め込みで生成する」形が黙って通る。
- * MUST: 原文 / 正規化後の文字列が 2 つの行に当たる資産は拒む（どちらの埋め込みを使うかが決まらない）。
+ * MUST: check the whole correspondence between metadata and tensors (the name sets match, the row
+ * counts match the metadata's token counts, the width is the same on every row). If any of it is
+ * off, "generating with another prompt's embedding" passes silently.
+ * MUST: reject an asset where an original text / normalized string hits two rows (which embedding to
+ * use would be undecided).
  */
 export const parseWanTextEmbeds = (buffer: ArrayBuffer): WanTextEmbeds => {
   const file = parseSafetensors(buffer);
@@ -133,9 +137,10 @@ export const parseWanTextEmbeds = (buffer: ArrayBuffer): WanTextEmbeds => {
       );
     }
     const data = new Float32Array(file.buffer, view.byteOffset, tokens * width);
-    // MUST: 有限性は読み込み時に 1 回だけ見る（生成のたびの padding で繰り返さない）。GPU 経路は
-    // umT5 の出力の非有限を即座に拒むので、こちらで見ないと壊れた埋め込みは DiT をロード・実行
-    // してから潜在の非有限として落ち、原因の段を取り違える。
+    // MUST: check finiteness once at load time (not again in the padding of every generation). The
+    // GPU path rejects non-finite umT5 output immediately, so without this check a broken embedding
+    // would fail only after the DiT is loaded and run, as non-finite latents, blaming the wrong
+    // stage.
     for (let at = 0; at < data.length; at += 1) {
       if (!Number.isFinite(data[at])) {
         throw new WanTextEmbedsError(
@@ -153,7 +158,7 @@ export const parseWanTextEmbeds = (buffer: ArrayBuffer): WanTextEmbeds => {
   return { width: width as number, entries };
 };
 
-/** 原文か正規化後の文字列に完全一致する行（無ければ undefined）。 */
+/** The row whose original text or normalized string matches exactly (undefined when none). */
 export const findWanTextEmbedding = (
   embeds: WanTextEmbeds,
   text: string,
@@ -161,8 +166,8 @@ export const findWanTextEmbedding = (
   embeds.entries.find((entry) => entry.prompt === text || entry.normalized === text);
 
 /**
- * DiT の `encoder_hidden_states [1, rows, width]` へ有効長の後ろをゼロで埋める（上流の
- * `_get_t5_prompt_embeds` の `new_zeros` と同じ — ホストが埋める。決定 4）。
+ * Zero-pads past the valid length into the DiT's `encoder_hidden_states [1, rows, width]` (the same
+ * as `new_zeros` in upstream's `_get_t5_prompt_embeds` — the host pads. Decision 4).
  */
 export const padWanTextEmbedding = (
   entry: WanTextEmbedding,

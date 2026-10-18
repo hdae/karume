@@ -1,21 +1,25 @@
 /**
- * f32 モノラル波形 ↔ WAV（RIFF）バイト列。
+ * f32 mono waveform ↔ WAV (RIFF) bytes.
  *
- * **パイプライン非依存の共通処理**（音声生成モデルは総じて最後に WAV を書き、声質の参照には
- * WAV を読む）なので、ファミリのディレクトリではなく `src/audio/` に置く（`src/image/png.ts`
- * と同じ位置づけ）。ランタイム依存は無い（`DataView` だけ）。
+ * This is **pipeline-independent shared processing** (audio generation models generally write a WAV
+ * at the end and read a WAV for the voice reference), so it lives in `src/audio/` rather than in a
+ * family directory (the same standing as `src/image/png.ts`). No runtime dependencies (`DataView`
+ * only).
  *
- * パイプラインの出力と、torch 参照（`tools/export-recipes/sbv2/demo.py`）が出す reference.wav /
- * official.wav は**同じ規則**で書く（クリップ → `floor(x·32767 + 0.5)`）。エンコード規則が
- * 割れると「聴き比べ」に実装差が混ざる。
+ * The pipeline output and the reference.wav / official.wav produced by the torch reference
+ * (`tools/export-recipes/sbv2/demo.py`) are written by **the same rule** (clip →
+ * `floor(x·32767 + 0.5)`). If the encoding rules diverged, implementation differences would mix
+ * into "listening comparisons".
  *
- * ## MUST: 読みと書きでスケールが非対称なのは意図（往復はビット一致しない）
+ * ## MUST: the asymmetric scale between reading and writing is intended (a round trip is not bit-identical)
  *
- * {@link decodeWav} の int16 → f32 は **32768 で割り**、{@link encodeWav} の f32 → int16 は
- * **32767 を掛ける**。前者は参照音声の読み手（上流 `soundfile` / `codec.py`）の規約に、後者は聴き比べ
- * 相手の torch 台本に、それぞれ合わせた結果で、どちらも**外部との一致が正**。揃えると
- * 参照音声の LUFS が上流とずれる（相対 3e-5 — 実測は `tools/export-recipes/irodori/dacvae/host.py`
- * の `_wav_scale_evidence`）。したがって往復すると 1LSB 級の差が出る（`wav_test.ts` が固定）。
+ * {@link decodeWav}'s int16 → f32 **divides by 32768**, and {@link encodeWav}'s f32 → int16
+ * **multiplies by 32767**. The former follows the convention of the reference-audio reader (upstream
+ * `soundfile` / `codec.py`), the latter the torch script it is compared against by ear; in both
+ * cases **agreement with the outside is what is correct**. Aligning them would shift the reference
+ * audio's LUFS from upstream (relative 3e-5 — measured by `_wav_scale_evidence` in
+ * `tools/export-recipes/irodori/dacvae/host.py`). So a round trip differs at the 1 LSB level (pinned
+ * by `wav_test.ts`).
  */
 
 import { ModelInputError } from "../errors.ts";
@@ -24,19 +28,20 @@ const HEADER_BYTES = 44;
 const BITS_PER_SAMPLE = 16;
 const CHANNELS = 1;
 const FORMAT_PCM = 1;
-/** IEEE 754 float の WAVE format tag（`WAVE_FORMAT_IEEE_FLOAT`）。 */
+/** WAVE format tag for IEEE 754 float (`WAVE_FORMAT_IEEE_FLOAT`). */
 const FORMAT_IEEE_FLOAT = 3;
-/** f32 → i16 のスケール。`Math.round(v · 32767)` が ±32767 に収まる（-32768 は使わない）。 */
+/** f32 → i16 scale. `Math.round(v · 32767)` stays within ±32767 (-32768 is not used). */
 const FULL_SCALE = 32767;
-/** i16 → f32 のスケール。下端 −32768 が厳密に −1.0 へ写る（上流の読み手と同じ規約）。 */
+/** i16 → f32 scale. The bottom end −32768 maps exactly to −1.0 (the same convention as the upstream reader). */
 const INT16_DIVISOR = 32768;
-/** RIFF のヘッダ欄（チャンク長 / sample rate / byte rate）が取れる最大値。 */
+/** The largest value the RIFF header fields (chunk length / sample rate / byte rate) can hold. */
 const U32_MAX = 0xffff_ffff;
 
 /**
- * NOTE: この関数の検査は 4 本とも {@link ModelInputError}。`samples` も `sampleRate` も
- * 呼び手が渡す値で（barrel から出るだけで、パイプラインの内側からは呼ばれない）、打つ手は
- * 「渡す波形 / 周波数を直す」の 1 つ = HTTP なら 400 に当たる（ADR 0107 決定 2・決定 5）。
+ * NOTE: all 4 checks of this function are {@link ModelInputError}. Both `samples` and `sampleRate`
+ * are values the caller passes (it is only exported from the barrel and is not called from inside a
+ * pipeline), and the only remedy is "fix the waveform / rate you pass" = what HTTP would call a 400
+ * (ADR 0107 decisions 2 and 5).
  */
 export const encodeWav = (
   samples: Float32Array<ArrayBufferLike>,
@@ -47,9 +52,9 @@ export const encodeWav = (
   }
   const bytesPerSample = BITS_PER_SAMPLE / 8;
   const frameBytes = CHANNELS * bytesPerSample;
-  // MUST: u32 域を先に見る。`setUint32` は mod 2^32 で黙って巻き戻すので、検査を欠くと
-  // 「別の周波数・別の長さを宣言した valid な WAV」が出る。byte rate は sampleRate の 2 倍
-  // なので、この 1 本で sampleRate 自身の u32 超過も覆う。
+  // MUST: check the u32 range first. `setUint32` wraps silently modulo 2^32, so without the check
+  // the output would be "a valid WAV declaring a different rate and a different length". The byte
+  // rate is twice sampleRate, so this one check also covers sampleRate itself exceeding u32.
   const byteRate = sampleRate * frameBytes;
   if (byteRate > U32_MAX) {
     throw new ModelInputError(
@@ -58,7 +63,7 @@ export const encodeWav = (
     );
   }
   const dataBytes = samples.length * bytesPerSample;
-  // RIFF チャンク長は data 長 + 36 を書くので、data 長より先にそちらが溢れる。
+  // The RIFF chunk length is written as data length + 36, so it overflows before the data length does.
   const riffBytes = HEADER_BYTES - 8 + dataBytes;
   if (riffBytes > U32_MAX) {
     throw new ModelInputError(
@@ -68,9 +73,9 @@ export const encodeWav = (
         )} サンプル）`,
     );
   }
-  // MUST: 非有限サンプルはここで落とす。下のクリップは `Math.max` / `Math.min` なので NaN を
-  // 素通しし、`Math.round(NaN)` を受けた `setInt16` は 0 を書く（±Infinity はフルスケールへ
-  // 張り付く）— どちらも例外にならず、数値破綻が「valid な無音 / クリップ WAV」に化ける。
+  // MUST: reject non-finite samples here. The clip below uses `Math.max` / `Math.min`, which pass
+  // NaN through, and `setInt16` given `Math.round(NaN)` writes 0 (±Infinity sticks to full scale) —
+  // neither throws, so numerical breakdown turns into "a valid silent / clipped WAV".
   for (let i = 0; i < samples.length; i += 1) {
     if (!Number.isFinite(samples[i])) {
       throw new ModelInputError(`${i} 番目のサンプル ${samples[i]} が非有限（WAV には書けない）`);
@@ -85,7 +90,7 @@ export const encodeWav = (
   view.setUint32(4, riffBytes, true);
   ascii(8, "WAVE");
   ascii(12, "fmt ");
-  view.setUint32(16, 16, true); // fmt チャンク長（PCM）
+  view.setUint32(16, 16, true); // fmt chunk length (PCM)
   view.setUint16(20, FORMAT_PCM, true);
   view.setUint16(22, CHANNELS, true);
   view.setUint32(24, sampleRate, true);
@@ -101,13 +106,13 @@ export const encodeWav = (
   return out;
 };
 
-/** {@link decodeWav} の結果（モノラル f32 と、ファイルが宣言していたサンプリング周波数）。 */
+/** The result of {@link decodeWav} (mono f32 and the sampling rate the file declared). */
 export type DecodedWav = {
   readonly data: Float32Array<ArrayBuffer>;
   readonly sampleRate: number;
 };
 
-/** RIFF の 1 チャンク（`id` は ASCII 4 文字、`offset` はデータ本体の先頭）。 */
+/** One RIFF chunk (`id` is 4 ASCII characters; `offset` is the start of the data body). */
 type RiffChunk = {
   readonly offset: number;
   readonly length: number;
@@ -122,23 +127,25 @@ const ascii = (view: DataView, offset: number): string =>
   );
 
 /**
- * `fmt ` と `data` のチャンクを拾う。
+ * Picks up the `fmt ` and `data` chunks.
  *
- * MUST: 知らないチャンク（`LIST` / `fact` / `bext` …）は**読み飛ばす**。実在の WAV は
- * メタデータチャンクを普通に挟むので、44 バイト固定ヘッダを決め打ちすると読めない。
- * チャンクは奇数長のとき 1 バイトの詰めが入る（RIFF の規約）。
+ * MUST: **skip** unknown chunks (`LIST` / `fact` / `bext` …). Real WAV files routinely include
+ * metadata chunks, so assuming a fixed 44-byte header cannot read them. A chunk of odd length is
+ * followed by a 1-byte pad (the RIFF convention).
  *
- * MUST: 走査の境界は物理長でなく **RIFF が offset 4 で宣言した論理終端**（{@link encodeWav} が
- * 書いている欄）。宣言の外に物理バイトが余っていても、それは RIFF 容器の外なので読まない
- * （近似ではなく仕様どおりの無視）。逆に論理終端が物理長を超えるのは切り詰められた器。
+ * MUST: the scan boundary is not the physical length but **the logical end RIFF declares at offset
+ * 4** (the field {@link encodeWav} writes). Physical bytes left beyond the declaration are outside the
+ * RIFF container and are not read (ignored per the specification, not an approximation).
+ * Conversely, a logical end beyond the physical length means a truncated container.
  *
- * MUST: 走査は論理終端**ちょうど**で終わる。終端の手前に 8 バイトに満たない断片が残るのは、
- * 壊れた器か、奇数長チャンクの詰めを書き落とした書き手の後で 1 バイトずれたヘッダを読んだ形
- * （以後のチャンク境界が全部ずれる）。黙って無視すると、チャンク重複や長さ超過を落とす他の
- * 検査と厳格さが食い違う。
- * NOTE: 唯一の例外は「**最後の**チャンクが奇数長で詰めの 1 バイトだけが無い」形で、走査は
- * 終端の 1 バイト先で終わる。実在の書き手に多く、詰めの後ろに読むものが無いのでずれも
- * 起こらないため受ける。
+ * MUST: the scan ends **exactly** at the logical end. A fragment of fewer than 8 bytes left before
+ * the end means either a broken container or a header read 1 byte off after a writer that omitted
+ * the pad of an odd-length chunk (every later chunk boundary is shifted). Ignoring it silently would
+ * make this inconsistent in strictness with the other checks that reject duplicate chunks and
+ * excessive lengths.
+ * NOTE: the only exception is the shape "**the last** chunk has odd length and only its 1-byte pad
+ * is missing", where the scan ends 1 byte past the end. It is common among real writers, and there
+ * is nothing to read after the pad so nothing shifts, hence it is accepted.
  */
 const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: RiffChunk } => {
   if (view.byteLength < 12) {
@@ -177,8 +184,8 @@ const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: R
           `残りは ${logicalEnd - offset} バイトしかない`,
       );
     }
-    // MUST: `fmt ` / `data` は 1 本ずつ。後勝ちで上書きすると、書き手の意図と別の data を黙って
-    // 読みうる（読み飛ばす未知チャンクは重複してよい）。
+    // MUST: one `fmt ` / `data` each. Overwriting with the last one could silently read a data other
+    // than the one the writer intended (skipped unknown chunks may repeat).
     if ((id === "fmt " && fmt !== undefined) || (id === "data" && data !== undefined)) {
       throw new ModelInputError(`decodeWav: チャンク '${id}' が 2 本ある`);
     }
@@ -195,18 +202,21 @@ const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: R
 };
 
 /**
- * WAV（RIFF）バイト列 → モノラル f32。
+ * WAV (RIFF) bytes → mono f32.
  *
- * 受け付けるのは **PCM 16bit**（/32768）と **IEEE float 32bit**（そのまま）だけで、他の
- * format tag / bit depth は fail loudly（黙って近似しない — 横断不変条件）。多チャネルは
- * **チャネル平均**で mono 化する（上流 `codec.py` の `encode_waveform` と同じ）。
+ * Only **PCM 16-bit** (/32768) and **IEEE float 32-bit** (as is) are accepted; any other format
+ * tag / bit depth fails loudly (no silent approximation — the cross-cutting invariant).
+ * Multi-channel input is made mono by **channel averaging** (the same as `encode_waveform` in
+ * upstream `codec.py`).
  *
- * リサンプルはしない。周波数が要求と違うかどうかは呼び出し側（パイプライン）が判定する。
+ * No resampling. Whether the rate differs from what is required is decided by the caller (the
+ * pipeline).
  *
- * NOTE: ヘッダ・チャンク・形式の検査は {@link findChunks} の 6 本を含めて全て
- * {@link ModelInputError}。解析しているのは**ホストが渡したバイト列そのもの**（この関数も
- * barrel から出るだけで、パイプラインの内側からは呼ばれない）で、資産の齟齬ではない — 打つ手は
- * 「渡す WAV を直す」の 1 つ = HTTP なら 400 に当たる（ADR 0107 決定 2）。
+ * NOTE: every header, chunk and format check, including the 7 in {@link findChunks}, is a
+ * {@link ModelInputError}. What is parsed is **the bytes the host passed themselves** (this function
+ * too is only exported from the barrel and is not called from inside a pipeline), not an asset
+ * inconsistency — the only remedy is "fix the WAV you pass" = what HTTP would call a 400 (ADR 0107
+ * decision 2).
  */
 export const decodeWav = (bytes: Uint8Array<ArrayBufferLike>): DecodedWav => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -232,9 +242,10 @@ export const decodeWav = (bytes: Uint8Array<ArrayBufferLike>): DecodedWav => {
   }
   const bytesPerSample = bits / 8;
   const frameBytes = bytesPerSample * channels;
-  // MUST: フレーム長は上の 4 欄から**独自に導出**しているので、fmt が宣言している block align /
-  // byte rate と突き合わせる。検査を欠くと、宣言と導出が食い違うヘッダが黙って通り、書き手が
-  // 意図した整列・速度と別の綴りで data を読む。
+  // MUST: the frame length is **derived independently** from the 4 fields above, so it is matched
+  // against the block align / byte rate that fmt declares. Without this check a header whose
+  // declaration and derivation disagree would pass silently, and data would be read with an
+  // alignment and rate other than the writer intended.
   const blockAlign = view.getUint16(fmt.offset + 12, true);
   const byteRate = view.getUint32(fmt.offset + 8, true);
   if (blockAlign !== frameBytes) {
@@ -264,7 +275,7 @@ export const decodeWav = (bytes: Uint8Array<ArrayBufferLike>): DecodedWav => {
       const at = base + channel * bytesPerSample;
       sum += pcm16 ? view.getInt16(at, true) / INT16_DIVISOR : view.getFloat32(at, true);
     }
-    // mono は割り算を通さない（1 で割ると値は同じだが、意図が「平均」でなく「そのまま」なので）。
+    // Mono skips the division (dividing by 1 gives the same value, but the intent is "as is", not "average").
     out[frame] = channels === 1 ? sum : sum / channels;
   }
   return { data: out, sampleRate };

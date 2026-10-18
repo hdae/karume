@@ -1,21 +1,27 @@
 /**
- * Wan2.2 TI2V の I2V の条件画像の前処理（ホスト・GPU に触らない — ADR 0121 決定 11・段 9a）:
- * 出力寸法の選択 → 寸法合わせ（crop / stretch・Pillow の LANCZOS）→ `[-1, 1]` → patchify（VAE encoder の入力
- * `[3·p², 1, H/p, W/p]`）。encoder の出口の mu の正規化は `latents.ts` の `normalizeWanLatents`。
+ * Preprocessing of the I2V condition image for Wan2.2 TI2V (on the host, no GPU — ADR 0121
+ * decision 11, stage 9a): output size selection → size fitting (crop / stretch, Pillow's LANCZOS) →
+ * `[-1, 1]` → patchify (the VAE encoder input `[3·p², 1, H/p, W/p]`). Normalizing the mu at the
+ * encoder exit is `normalizeWanLatents` in `latents.ts`.
  *
- * 寸法合わせの正本は 2 つ:
+ * Size fitting has two sources of truth:
  *
- * - fit = `"crop"`（既定）: 公式 Wan2.2 の `textimage2video.py` の i2v — `scale = max(ow / iw, oh / ih)` →
- *   `round(iw·scale)`・`round(ih·scale)`（Python の `round`）→ LANCZOS → 中央クロップ `(rw − ow) // 2` →
- *   `TF.to_tensor(img).sub_(0.5).div_(0.5)`
- * - fit = `"stretch"`: diffusers の `WanImageToVideoPipeline`（`VideoProcessor.preprocess` の resize_mode `"default"`
- *   = `(width, height)` へ直接 LANCZOS・`reducing_gap` 無し → `2·(x / 255) − 1`）
+ * - fit = `"crop"` (default): i2v in official Wan2.2's `textimage2video.py` —
+ *   `scale = max(ow / iw, oh / ih)` → `round(iw·scale)`, `round(ih·scale)` (Python's `round`) →
+ *   LANCZOS → centre crop `(rw − ow) // 2` → `TF.to_tensor(img).sub_(0.5).div_(0.5)`
+ * - fit = `"stretch"`: diffusers' `WanImageToVideoPipeline` (`VideoProcessor.preprocess` with
+ *   resize_mode `"default"` = LANCZOS directly to `(width, height)`, no `reducing_gap` →
+ *   `2·(x / 255) − 1`)
  *
- * 出力寸法の選び方だけは公式と違う: 公式は面積の上限の下で自由な寸法（16:9 の画像なら 1248×704）を選ぶが、ここは
- * 受理集合（記述子の `acceptedSizes`）の中から公式の比較式で選ぶ（ADR 0121 の追記「受理寸法を公式の 2 寸法へ」）。
+ * Only the choice of output size differs from the official code: the official code picks a free
+ * size under an area limit (1248×704 for a 16:9 image), while this picks from the accepted set (the
+ * descriptor's `acceptedSizes`) with the official comparison (ADR 0121 addendum "accepted sizes
+ * moved to the two official sizes").
  *
- * NOTE: `export` はパイプラインの内部とテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。例外は型の
- * {@link WanI2vFit} だけで、公開の要求の型（`WanTi2vGenerateRequest` の `fit`）の語彙なので `./wan` と barrel から出す。
+ * NOTE: the `export`s are for the pipeline internals and the tests (not exposed on `mod.ts` / the
+ * subpath surface — ADR 0008). The only exception is the type {@link WanI2vFit}, which is vocabulary
+ * of the public request type (`fit` of `WanTi2vGenerateRequest`) and is therefore exported from
+ * `./wan` and the barrel.
  */
 
 import { ModelInputError } from "../errors.ts";
@@ -23,25 +29,30 @@ import { resizeRgb8Lanczos, resizeRgb8LanczosWindow } from "../image/lanczos.ts"
 import { assertRgb8, type Rgb8Image } from "../image/preprocess.ts";
 import type { WanGenerationDescriptor } from "./descriptor.ts";
 
-/** 条件画像の寸法の合わせ方（公式の中央クロップ / diffusers の直接の伸縮 — モジュール doc）。 */
+/** How the condition image is fitted to the size (the official centre crop / diffusers' direct resize — module doc). */
 export type WanI2vFit = "crop" | "stretch";
 
-/** 値が {@link WanI2vFit} の綴りのどれかか（要求の門 `plan.ts` が型をすり抜けた綴り違いを弾く）。 */
+/**
+ * Whether the value is one of the spellings of {@link WanI2vFit} (the request check in `plan.ts`
+ * rejects misspellings that slipped past the type).
+ */
 export const isWanI2vFit = (value: unknown): value is WanI2vFit =>
   value === "crop" || value === "stretch";
 
-/** 省いたときの合わせ方（公式 Wan2.2 の I2V と同じ）。 */
+/** The fit used when omitted (the same as official Wan2.2's I2V). */
 const DEFAULT_FIT: WanI2vFit = "crop";
 
-/** チャネル数（RGB）。 */
+/** The channel count (RGB). */
 const CHANNELS = 3;
 
 type Size = { readonly width: number; readonly height: number };
 
 /**
- * 公式の比較式 `max(r / rc, rc / r)`（r = 画像の幅 / 高さ・rc = 候補の幅 / 高さ）を `max(a, b) / min(a, b)`
- * （a = iw·ch・b = ih·cw — 整数の積）の形で計算する。数学的には同じ値で、丸めが割り算 1 回だけになるので、転置した
- * 2 候補に対する正方形の画像が浮動小数の丸めに依らず厳密に同点になる（公式の形は割り算を 3 回重ねる）。
+ * Computes the official comparison `max(r / rc, rc / r)` (r = image width / height, rc = candidate
+ * width / height) in the form `max(a, b) / min(a, b)` (a = iw·ch, b = ih·cw — integer products). It
+ * is mathematically the same value, and since the only rounding is one division, a square image
+ * ties exactly between two transposed candidates regardless of floating-point rounding (the official
+ * form chains three divisions).
  */
 const aspectDistance = (image: Size, candidate: Size): number => {
   const a = image.width * candidate.height;
@@ -51,7 +62,7 @@ const aspectDistance = (image: Size, candidate: Size): number => {
 
 const isLandscape = ({ width, height }: Size): boolean => width >= height;
 
-/** 要求が明示した寸法の欄の綴り（拒否の文言用）。 */
+/** The spelling of the size fields the request gave (for the rejection message). */
 const describeRequested = (requested: Partial<Size>): string => {
   if (requested.width !== undefined && requested.height !== undefined) {
     return `${requested.width}×${requested.height}`;
@@ -60,15 +71,18 @@ const describeRequested = (requested: Partial<Size>): string => {
 };
 
 /**
- * I2V の出力寸法を選ぶ: 受理集合（記述子の `acceptedSizes`）のうち、要求が明示した欄（width / height）に合う候補の
- * 中から、画像の縦横比に最も近いもの。近さは公式 Wan2.2 の `best_output_size` の比較式（{@link aspectDistance}）で
- * 測り、同点は横長（幅 ≥ 高さ）を取る。受理集合が 2 寸法（1280×704 / 704×1280）なら「画像の幅 ≥ 高さ → 1280×704」と
- * 同じ結果になる。
+ * Selects the I2V output size: among the accepted sizes (the descriptor's `acceptedSizes`) that match
+ * the fields the request gave (width / height), the one closest to the image's aspect ratio.
+ * Closeness is measured with the comparison of official Wan2.2's `best_output_size`
+ * ({@link aspectDistance}), and a tie goes to landscape (width ≥ height). With an accepted set of two
+ * sizes (1280×704 / 704×1280) the result equals "image width ≥ height → 1280×704".
  *
- * MUST: 差の絶対値 `|r − rc|` で測らない — 2 寸法では同点が r ≈ 1.18 へ移り、正方形の画像が縦長になる（公式と逆）。
+ * MUST: do not measure by the absolute difference `|r − rc|` — with two sizes the tie moves to
+ * r ≈ 1.18, and a square image becomes portrait (the opposite of the official code).
  *
- * 両方を明示すれば完全一致の 1 つ、片方だけならその欄が合う候補の中から縦横比で選ぶ。合う候補が無ければ
- * `ModelInputError`（受理集合の外 — 入力起因）。
+ * With both given it is the one exact match; with only one, the aspect ratio picks among the
+ * candidates matching that field. With no matching candidate it is a `ModelInputError` (outside the
+ * accepted set — an input error).
  */
 export const selectWanI2vSize = (
   image: Rgb8Image,
@@ -104,8 +118,8 @@ export const selectWanI2vSize = (
 };
 
 /**
- * Python の `round(x)`（float — .5 ちょうどは偶数側）。`x − floor(x)` は |x| < 2^52 で厳密なので、.5 の判定に
- * 丸めは入らない。
+ * Python's `round(x)` (float — an exact .5 goes to the even side). `x − floor(x)` is exact for
+ * |x| < 2^52, so no rounding enters the .5 test.
  */
 const roundHalfEven = (value: number): number => {
   const floor = Math.floor(value);
@@ -116,11 +130,12 @@ const roundHalfEven = (value: number): number => {
 };
 
 /**
- * fit = `"crop"` の縮尺後の寸法（公式: `scale = max(ow / iw, oh / ih)` → `round(iw·scale)`・`round(ih·scale)`）。
- * 縮尺は覆う側（両軸とも目標以上）を取る。
+ * The scaled size for fit = `"crop"` (official: `scale = max(ow / iw, oh / ih)` → `round(iw·scale)`,
+ * `round(ih·scale)`). The scale takes the covering side (both axes at least the target).
  *
- * MUST: 丸めは Python の `round`（.5 ちょうどは偶数側）。JS の `Math.round`（.5 は +∞ 側）で写すと、例えば
- * 512×301 → 1280×704 で 301 × 2.5 = 752.5 が 753 になり、中央クロップの位置ごと 1 px ずれる。
+ * MUST: the rounding is Python's `round` (an exact .5 goes to the even side). Copying it with JS's
+ * `Math.round` (.5 goes toward +∞) turns, for example, 301 × 2.5 = 752.5 for 512×301 → 1280×704 into
+ * 753, shifting the centre crop's position by 1 px.
  */
 export const wanI2vCoverSize = (image: Size, target: Size): Size => {
   const scale = Math.max(target.width / image.width, target.height / image.height);
@@ -131,16 +146,21 @@ export const wanI2vCoverSize = (image: Size, target: Size): Size => {
 };
 
 /**
- * 画像を出力寸法 `size` に合わせる（モジュール doc の 2 つの正本）。`"crop"` は覆う寸法（{@link wanI2vCoverSize}）へ
- * LANCZOS で伸縮してから中央を切り出し（`(rw − ow) // 2` — 余りの 1 px は右・下に残る）、`"stretch"` は `size` へ
- * 直接 LANCZOS で伸縮する（縦横比は保たない）。
+ * Fits the image to the output size `size` (the two sources of truth in the module doc). `"crop"`
+ * LANCZOS-resizes to the covering size ({@link wanI2vCoverSize}) and then cuts out the centre
+ * (`(rw − ow) // 2` — a leftover 1 px stays on the right / bottom); `"stretch"` LANCZOS-resizes
+ * directly to `size` (the aspect ratio is not kept).
  *
- * crop は覆う寸法の全体を作らず、切り出す窓の出力だけを計算する（`resizeRgb8LanczosWindow` — 全体を伸縮してから
- * 切り出した値と uint8 で同じ）。全体を作ると、縦横比の極端な入力で手間と中間が際限なく膨らむ（例 4096×4 →
- * 1280×704 は覆う寸法が 720,896×704 で、中間だけで 1.5 GB）。
+ * crop does not build the whole covering image; it computes only the output of the window it cuts
+ * out (`resizeRgb8LanczosWindow` — equal in uint8 to resizing the whole image and then cutting).
+ * Building the whole image would let the work and the intermediate grow without bound for extreme
+ * aspect ratios (e.g. 4096×4 → 1280×704 has a covering size of 720,896×704, 1.5 GB for the
+ * intermediate alone).
  *
- * NOTE: fit の綴りの拒否は素の `Error`（名前の綴り違い — ADR 0107 決定 3 の sampler 名と同じ扱い）。要求の欄として
- * 受ける門（`plan.ts`）も同じ素の `Error` で先に弾く（{@link isWanI2vFit}）ので、ここは門を経ない呼び出しの守り。
+ * NOTE: rejecting a fit spelling is a plain `Error` (a misspelt name — the same treatment as the
+ * sampler name in ADR 0107 decision 3). The check that accepts it as a request field (`plan.ts`)
+ * rejects it first with the same plain `Error` ({@link isWanI2vFit}), so this is the guard for calls
+ * that bypass that check.
  */
 export const fitWanI2vImage = (image: Rgb8Image, size: Size, fit: WanI2vFit): Rgb8Image => {
   if (fit === "stretch") return resizeRgb8Lanczos(image, size.width, size.height);
@@ -148,8 +168,10 @@ export const fitWanI2vImage = (image: Rgb8Image, size: Size, fit: WanI2vFit): Rg
     throw new Error(`I2V の fit ${JSON.stringify(fit)} は未対応（期待 'crop' / 'stretch'）`);
   }
   const cover = wanI2vCoverSize(image, size);
-  // 縮尺を決めた側の軸は `iw·(ow / iw)` の丸め誤差（0.5 未満）が丸めで消えて目標ちょうど、もう片方の軸は目標以上
-  // になる。下回るなら式の写し間違い（公式も `assert img.width == ow and img.height == oh` で同じことを見る）。
+  // On the axis that set the scale, the rounding error of `iw·(ow / iw)` (under 0.5) disappears in
+  // the rounding and the size equals the target; the other axis is at least the target. Anything
+  // smaller is a mistake in copying the formula (the official code checks the same with
+  // `assert img.width == ow and img.height == oh`).
   if (cover.width < size.width || cover.height < size.height) {
     throw new Error(
       `I2V の crop: 縮尺後の ${cover.width}×${cover.height} が出力 ${size.width}×${size.height} を覆わない`,
@@ -164,12 +186,13 @@ export const fitWanI2vImage = (image: Rgb8Image, size: Size, fit: WanI2vFit): Rg
 };
 
 /**
- * RGB8（インターリーブ）→ planar `[3, H, W]` の `[-1, 1]`: `f32(2·f32(x / 255) − 1)`。
+ * RGB8 (interleaved) → planar `[3, H, W]` in `[-1, 1]`: `f32(2·f32(x / 255) − 1)`.
  *
- * MUST: この順で書く — 公式の `TF.to_tensor(img).sub_(0.5).div_(0.5)` と diffusers の `2·(x / 255) − 1` は f32 で
- * ビット一致し、この式がその値（f64 で計算して f32 へ 1 回丸める形は、f64 の精度が f32 の 2 倍 + 2 bit 以上あるので
- * f32 の演算と同じ値）。`normalizeToNchw`（mean = std = 0.5 の畳んだ形 `(x − 127.5) / 127.5`）は 256 値のうち
- * 128 値で最終ビットがずれるので使わない。
+ * MUST: write it in this order — the official `TF.to_tensor(img).sub_(0.5).div_(0.5)` and diffusers'
+ * `2·(x / 255) − 1` are bit-identical in f32, and this expression gives that value (computing in f64
+ * and rounding to f32 once gives the same value as f32 arithmetic, because f64 has at least twice
+ * f32's precision + 2 bits). `normalizeToNchw` (the folded form `(x − 127.5) / 127.5` for
+ * mean = std = 0.5) is not used because its last bit differs on 128 of the 256 values.
  */
 export const wanI2vPixels = (image: Rgb8Image): Float32Array<ArrayBuffer> => {
   assertRgb8(image);
@@ -185,12 +208,14 @@ export const wanI2vPixels = (image: Rgb8Image): Float32Array<ArrayBuffer> => {
 };
 
 /**
- * patchify: planar `[C, H, W]`（1 フレーム）→ `[C·p², H/p, W/p]`（上流 diffusers の `patchify` と同じ並び —
- * `view(c, f, h, r, w, q).permute(c, q, r, f, h, w)`・r = q = p）。添字の対応は
- * `out[c·p² + dx·p + dy, y, x] = in[c, y·p + dy, x·p + dx]`（チャネル内のずれは幅方向 dx が上位・高さ方向 dy が
- * 下位）— `vae-tiles.ts` の `unpatchifyWanVaeFrames` の逆。VAE encoder の入力 `[C·p², 1, H/p, W/p]` は同じバイト列。
+ * patchify: planar `[C, H, W]` (one frame) → `[C·p², H/p, W/p]` (the same order as upstream diffusers'
+ * `patchify` — `view(c, f, h, r, w, q).permute(c, q, r, f, h, w)`, r = q = p). The index mapping is
+ * `out[c·p² + dx·p + dy, y, x] = in[c, y·p + dy, x·p + dx]` (within a channel the width offset dx is
+ * the major and the height offset dy the minor) — the inverse of `unpatchifyWanVaeFrames` in
+ * `vae-tiles.ts`. The VAE encoder input `[C·p², 1, H/p, W/p]` is the same bytes.
  *
- * 写しだけで浮動小数の演算は無い（値はビット単位で保たれる）。形・倍率・長さの食い違いは fail loudly。
+ * Only copies, no floating-point arithmetic (values are preserved bit for bit). A mismatch in shape,
+ * factor or length fails loudly.
  */
 export const patchifyWanImage = (
   pixels: Float32Array<ArrayBuffer>,
@@ -217,7 +242,7 @@ export const patchifyWanImage = (
   const rows = height / patchSize;
   const columns = width / patchSize;
   const out = new Float32Array(pixels.length);
-  // 出力の並び（c → dx → dy → y → x）で回すので、書き込み先は 1 ずつ進む。
+  // The loops follow the output order (c → dx → dy → y → x), so the write position advances by 1.
   let to = 0;
   for (let channel = 0; channel < channels; channel += 1) {
     const plane = channel * height * width;
@@ -236,20 +261,21 @@ export const patchifyWanImage = (
   return out;
 };
 
-/** I2V の条件画像の前処理の結果（VAE encoder の入力と、選んだ出力寸法）。 */
+/** The result of preprocessing the I2V condition image (the VAE encoder input and the chosen output size). */
 export type WanI2vImageInput = {
-  /** 出力寸法（受理集合の中 — 生成の width / height になる）。 */
+  /** The output size (inside the accepted set — it becomes the generation's width / height). */
   readonly width: number;
   readonly height: number;
-  /** encoder の入力（patchify 済み・`[-1, 1]`）。形は {@link WanI2vImageInput.shape}。 */
+  /** The encoder input (patchified, `[-1, 1]`). Its shape is {@link WanI2vImageInput.shape}. */
   readonly pixels: Float32Array<ArrayBuffer>;
-  /** `[3·p², 1, H/p, W/p]`（p は記述子の `vaePatchSize`）。 */
+  /** `[3·p², 1, H/p, W/p]` (p is the descriptor's `vaePatchSize`). */
   readonly shape: readonly [number, number, number, number];
 };
 
 /**
- * 条件画像 → VAE encoder の入力（寸法の選択 {@link selectWanI2vSize} → 寸法合わせ {@link fitWanI2vImage} →
- * `[-1, 1]` {@link wanI2vPixels} → patchify {@link patchifyWanImage}）。`fit` を省けば `"crop"`（公式）。
+ * Condition image → VAE encoder input (size selection {@link selectWanI2vSize} → size fitting
+ * {@link fitWanI2vImage} → `[-1, 1]` {@link wanI2vPixels} → patchify {@link patchifyWanImage}).
+ * Without `fit` it is `"crop"` (official).
  */
 export const preprocessWanI2vImage = (
   image: Rgb8Image,

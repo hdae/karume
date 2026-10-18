@@ -1,16 +1,19 @@
 /**
- * Wan の DiT の段 — S 形グラフの取り決め（{@link ditContract}）と denoise のループ
- * （patchify → DiT → unpatchify → CFG → UniPC — {@link runWanDenoise}）。
+ * Wan's DiT stage — the S-shaped graph contract ({@link ditContract}) and the denoise loop
+ * (patchify → DiT → unpatchify → CFG → UniPC — {@link runWanDenoise}).
  *
- * 段の順序と Session の寿命（text → DiT → VAE を 1 段ずつ張って畳む）は `./pipeline.ts` 冒頭の doc が
- * 正本で、ここは DiT の段 1 本を回すだけ。Wan2.1 / 2.2 の class が共有する（ADR 0121 決定 10）。
- * `owner` は文言の接頭辞（Wan2.1 は `"WanPipeline"`・Wan2.2 は `"WanTi2vPipeline"`）。
+ * The stage order and Session lifetimes (text → DiT → VAE, each created and closed one stage at a
+ * time) are defined by the doc at the top of `./pipeline.ts`; this module only runs the one DiT stage.
+ * Shared by the Wan2.1 / 2.2 classes (ADR 0121 decision 10).
+ * `owner` is the message prefix (`"WanPipeline"` for Wan2.1, `"WanTi2vPipeline"` for Wan2.2).
  *
- * NOTE: 公開型（`WanGenerateEvent` / `WanRunComponent`）は `./pipeline.ts` から `import type` で取る
- * （型だけの参照は消去されるので循環 import にならない）。段 9（I2V）で `vae_encoder` の段が増えても置き場は
- * `./pipeline.ts` のまま — 型だけの参照で循環が起きないので、独立のモジュールへ移す理由が無い。
+ * NOTE: the public types (`WanGenerateEvent` / `WanRunComponent`) are taken from `./pipeline.ts` with
+ * `import type` (type-only references are erased, so there is no import cycle). Even with the
+ * `vae_encoder` stage added at stage 9 (I2V) they stay in `./pipeline.ts` — type-only references cause
+ * no cycle, so there is no reason to move them to a separate module.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is side-effect free (no import-time execution, no global mutable state —
+ * CLAUDE.md).
  */
 
 import type { GpuContext, RunInputs, SessionDiagnostics, SessionOptions } from "@karume/runtime";
@@ -35,27 +38,33 @@ import { asF32, assertDims, firstNonFinite, valueShape } from "./graph-io.ts";
 import { WanRandn } from "./random.ts";
 import { WAN_UNIPC_CONFIG, wanClassifierFreeGuidance, WanUniPcSampler } from "./scheduler.ts";
 
-/** 部品のキー（系列のグラフ名 = 段 7 の manifest の weights 名）。 */
+/** The component key (the series' graph name = the weights name of the step 7 manifest). */
 export const TRANSFORMER = "transformer";
 
-/** `transformer` の容器が宣言する RoPE の素表の資産名（役割 `rope-base`）。 */
+/** The asset name of the RoPE base table declared by the `transformer` container (role `rope-base`). */
 export const ROPE_BASE = "rope_base";
 
-/** DiT の S 形グラフの入力名（recipe `wan/export_dit.py` の forward の引数名）。 */
+/** Input names of the DiT's S-shaped graph (forward argument names of recipe `wan/export_dit.py`). */
 const DIT_TOKENS = "tokens";
 const DIT_TIMESTEPS_PROJ = "timesteps_proj";
 export const DIT_CONTEXT = "encoder_hidden_states";
 const DIT_ROPE_COS = "rope_cos";
 const DIT_ROPE_SIN = "rope_sin";
-/** TI2V の DiT の追加入力 2 本（recipe `wan/ti2v_export_dit.py` の `INPUT_NAMES` の末尾と同名）。 */
+/**
+ * The two extra inputs of the TI2V DiT (named as the tail of `INPUT_NAMES` in recipe
+ * `wan/ti2v_export_dit.py`).
+ */
 const DIT_TIMESTEPS_PROJ_CONDITION = "timesteps_proj_condition";
 const DIT_CONDITION_MASK = "condition_mask";
 
-/** 網羅の外の形（記述子・内部状態が型の外の値を持つ — 黙って t2v として回さない）。 */
+/**
+ * A form outside the exhaustive set (a descriptor or internal state holding an out-of-type value —
+ * not silently run as t2v).
+ */
 const unknownDitInputForm = (form: never, owner: string): Error =>
   new Error(`${owner}: DiT の入力の形 '${String(form)}' は未知（"t2v" / "ti2v"）`);
 
-/** DiT の入力の形ごとのグラフ入力名の集合（未知の形は fail loudly）。 */
+/** The set of graph input names per DiT input form (an unknown form fails loudly). */
 const ditInputNames = (form: WanDitInputForm, owner: string): readonly string[] => {
   const t2v = [DIT_TOKENS, DIT_TIMESTEPS_PROJ, DIT_CONTEXT, DIT_ROPE_COS, DIT_ROPE_SIN];
   switch (form) {
@@ -69,13 +78,13 @@ const ditInputNames = (form: WanDitInputForm, owner: string): readonly string[] 
 };
 
 /**
- * DiT の patch（刻みは上流 transformer の config `patch_size [1, 2, 2]` — アーキ定数）。チャネル数は
- * VAE の chunk グラフの宣言（`latent` の軸 0 — `WanVaeChunkLayout.latentChannels`）から受ける
- * （Wan2.1 は 16）。グラフの `tokens` の最終次元（`C·1·2·2` — Wan2.1 は 64）は {@link ditContract} が
- * 構築時に突き合わせる。
+ * The DiT patch (the stride is the upstream transformer config's `patch_size [1, 2, 2]` — an
+ * architecture constant). The channel count comes from the VAE chunk graph declaration (axis 0 of
+ * `latent` — `WanVaeChunkLayout.latentChannels`) (16 for Wan2.1). The last dimension of the graph's
+ * `tokens` (`C·1·2·2` — 64 for Wan2.1) is matched by {@link ditContract} at construction.
  *
- * NOTE: `export` は家族 admission と、GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: `export` is for the family admission and for tests that pin the checks without a GPU (not on
+ * the `mod.ts` / subpath surface — ADR 0008).
  */
 export const wanDitPatch = (latentChannels: number): WanPatchGeometry => ({
   channels: latentChannels,
@@ -84,7 +93,7 @@ export const wanDitPatch = (latentChannels: number): WanPatchGeometry => ({
   patchWidth: 2,
 });
 
-/** グラフ入力の宣言（無ければ fail loudly）。 */
+/** The declaration of a graph input (fails loudly if absent). */
 const graphInput = (
   owner: string,
   model: GraphOwner,
@@ -95,11 +104,11 @@ const graphInput = (
   return spec;
 };
 
-/** グラフ入力の形（無ければ fail loudly）。 */
+/** The shape of a graph input (fails loudly if absent). */
 const inputShape = (owner: string, model: GraphOwner, name: string): readonly (number | string)[] =>
   graphInput(owner, model, name).shape;
 
-/** グラフ入力の dtype と形（ホストが組む dtype・形と違えば fail loudly）。 */
+/** The dtype and shape of a graph input (fails loudly if they differ from what the host builds). */
 const assertInput = (
   owner: string,
   model: GraphOwner,
@@ -116,7 +125,7 @@ const assertInput = (
   assertDims(owner, spec.shape, expected, `'${name}'`);
 };
 
-/** 静的次元（記号次元なら fail loudly）。 */
+/** A static dimension (fails loudly on a symbolic dimension). */
 const staticDim = (
   owner: string,
   dims: readonly (number | string)[],
@@ -128,48 +137,55 @@ const staticDim = (
   return dim;
 };
 
-/** 構築時に確かめた DiT のグラフの取り決め。 */
+/** The DiT graph contract confirmed at construction. */
 export type DitContract = {
-  /** グラフ出力の名前（`[1, S, C·1·2·2]`）。 */
+  /** The name of the graph output (`[1, S, C·1·2·2]`). */
   readonly output: string;
-  /** `timesteps_proj [1, W]` の W。 */
+  /** W of `timesteps_proj [1, W]`. */
   readonly projWidth: number;
-  /** `encoder_hidden_states [1, rows, width]` の rows（ゼロで埋める先の行数）。 */
+  /** rows of `encoder_hidden_states [1, rows, width]` (the row count to pad with zeros up to). */
   readonly contextRows: number;
   readonly contextWidth: number;
   /**
-   * 宣言との照合に使った patch（{@link runWanDenoise} はこれで patchify / unpatchify する — 同じ値を
-   * 照合とループの 2 経路で導かない）。
+   * The patch used for matching the declaration ({@link runWanDenoise} patchifies / unpatchifies with
+   * it — the same value is not derived twice, once for matching and once for the loop).
    */
   readonly patch: WanPatchGeometry;
-  /** 宣言と照合した入力の形（{@link runWanDenoise} は条件入力をこれで組むか決める）。 */
+  /**
+   * The input form matched against the declaration ({@link runWanDenoise} decides from it whether to
+   * build the condition inputs).
+   */
   readonly form: WanDitInputForm;
 };
 
 /**
- * DiT のグラフ宣言を、ホストが組む入力（`patch`・RoPE の素表）と突き合わせる。`patch` のチャネル数は
- * VAE の宣言から来る（{@link wanDitPatch}）ので、VAE の潜在と DiT の `tokens` のチャネルの食い違いも
- * ここで落ちる。
+ * Matches the DiT graph declaration against the inputs the host builds (`patch`, the RoPE base table).
+ * The channel count of `patch` comes from the VAE declaration ({@link wanDitPatch}), so a channel
+ * mismatch between the VAE latent and the DiT's `tokens` also fails here.
  *
- * MUST: 構築時に落とす。ホストの前処理は自分の定数で組むので、グラフが別の寸法で焼かれていても
- * ホスト側は最後まで通り、落ちるのは DiT の重みを上げた後の Session の shape 検査になる。取得面では
- * 家族 admission（重みの part を取る前）で呼ぶ — 埋め込み資産との突合（`text-stage.ts` の
- * `assertEmbedsFitContext`）は資産のバイト列が届いてから。
+ * MUST: fail at construction. The host preprocessing builds with its own constants, so even if the
+ * graph was exported with other dimensions the host side runs to the end, and the failure would come
+ * only from the Session's shape check after the DiT weights are uploaded. On the fetch surface it is
+ * called in the family admission (before the weight parts are fetched) — matching against the
+ * embedding asset (`assertEmbedsFitContext` in `text-stage.ts`) waits until the asset bytes arrive.
  *
- * MUST: 最終次元だけでなく rank・batch（B = 1 — 決定 5）・可変の S まで照合する。ホストは
- * `tokens [1, S, C·1·2·2]`・`rope_cos / rope_sin [1, S, 1, w]` を組み、出力を
- * `[1, S, C·1·2·2]` として読む（{@link runWanDenoise}）ので、batch 2・固定の S・rank 違いの宣言も
- * Session の shape 検査まで通ってしまう。S は寸法とフレーム数ごとに変わるので記号次元で、4 本とも
- * **同じ記号**であること（IR の記号は上下限を持たないので、上限の突合は要らない）。
+ * MUST: match not only the last dimension but also the rank, batch (B = 1 — decision 5) and the
+ * variable S. The host builds `tokens [1, S, C·1·2·2]` and `rope_cos / rope_sin [1, S, 1, w]` and reads
+ * the output as `[1, S, C·1·2·2]` ({@link runWanDenoise}), so a declaration with batch 2, a fixed S or
+ * a different rank would also get as far as the Session's shape check. S changes with the size and
+ * frame count, so it is a symbolic dimension, and all four carry **the same symbol** (IR symbols have
+ * no bounds, so no bound matching is needed).
  *
- * MUST: グラフ入力の名前の集合は `form`（世代の記述子の `ditInputForm`）の期待とちょうど一致させる。
- * ホストは期待の入力だけを組むので、余分な入力（2.1 の宣言の 6 本目・TI2V の DiT を 2.1 として開く）は
- * Session の入力検査まで通ってしまう。この検査は既存の 5 本の検査の**後**に置く — 入力が欠けた資産の
- * 文言（`'X' が無い`）を変えない。TI2V は追加の 2 本の dtype と形も見る（条件側の時刻は f32 で
- * `timesteps_proj` と同じ `[1, W]`・条件マスクは bool の `[1, S, 1]` で S は `tokens` と同じ記号）。
+ * MUST: the set of graph input names matches exactly what `form` (the generation descriptor's
+ * `ditInputForm`) expects. The host builds only the expected inputs, so an extra input (a sixth one in
+ * a 2.1 declaration, or a TI2V DiT opened as 2.1) would get as far as the Session's input check. This
+ * check comes **after** the checks of the existing five — it does not change the message for an asset
+ * missing an input (the "'X' is missing" wording). For TI2V the dtype and shape of the two extra inputs are checked too
+ * (the condition-side time is f32 with the same `[1, W]` as `timesteps_proj`; the condition mask is a
+ * bool `[1, S, 1]` with the same symbol S as `tokens`).
  *
- * NOTE: `export` は家族 admission と、GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: `export` is for the family admission and for tests that pin the checks without a GPU (not on
+ * the `mod.ts` / subpath surface — ADR 0008).
  */
 export const ditContract = (
   transformer: GraphOwner,
@@ -178,7 +194,8 @@ export const ditContract = (
   form: WanDitInputForm,
   owner: string,
 ): DitContract => {
-  // 未知の形は資産の中身に関係なく同じ文言で落とす（集合の照合そのものは 5 本の検査の後）。
+  // An unknown form fails with the same message whatever the asset contains (the set matching itself
+  // comes after the five checks).
   const expected = ditInputNames(form, owner);
   const tokenWidth = wanTokenWidth(patch);
   const tokens = inputShape(owner, transformer, DIT_TOKENS);
@@ -243,13 +260,16 @@ export const ditContract = (
   return { output, projWidth, contextRows, contextWidth, patch, form };
 };
 
-/** DiT の文脈入力の中身（`[rows, width]` へ詰めた positive と、CFG の uncond 側）。 */
+/** The DiT's context input (positive padded to `[rows, width]`, and CFG's uncond side). */
 export type WanContexts = {
   readonly positive: Float32Array<ArrayBuffer>;
   readonly negative: Float32Array<ArrayBuffer> | undefined;
 };
 
-/** DiT の段が読む構築済みの材料（パイプラインの内部状態のうちこの段の分 — 構造で受ける）。 */
+/**
+ * The built material the DiT stage reads (this stage's part of the pipeline's internal state — taken
+ * structurally).
+ */
 type WanDenoiseState = {
   readonly gpu: GpuContext;
   readonly sessionOptions: SessionOptions;
@@ -260,9 +280,11 @@ type WanDenoiseState = {
 };
 
 /**
- * TI2V の DiT の条件入力 2 本（ADR 0121 決定 3）。条件側の時刻の形は生成側と同じ `projShape`。
- * T2V は条件マスクが全て偽で、条件側の時刻は生成側と同じ配列。I2V は先頭の潜在フレームのトークンが真で、
- * 条件側の時刻は t = 0 の proj（{@link wanConditionMask}・{@link runWanDenoise}）。
+ * The two condition inputs of the TI2V DiT (ADR 0121 decision 3). The condition-side time has the
+ * same `projShape` as the generation side. For T2V the condition mask is all false and the
+ * condition-side time is the same array as the generation side. For I2V the tokens of the first
+ * latent frame are true and the condition-side time is the proj at t = 0 ({@link wanConditionMask},
+ * {@link runWanDenoise}).
  */
 type DitConditionInputs = {
   readonly proj: Float32Array<ArrayBuffer>;
@@ -271,15 +293,17 @@ type DitConditionInputs = {
 };
 
 /**
- * DiT の 1 回の forward の入力（S 形グラフの入力 — t2v は 5 本・ti2v は `condition` の 2 本を足した
- * 7 本）。ホストが組んだ配列をそのまま渡す（写さない — run が settle するまで書き換えない借用）。
- * `condition` が undefined なら 5 本だけ（キーも順も配列も条件入力の追加前と同じ — Wan2.1 の
- * Session に渡るバイト列を変えない）。
+ * The inputs of one DiT forward (the S-shaped graph's inputs — 5 for t2v, 7 for ti2v with the two of
+ * `condition` added). The arrays the host built are passed as is (not copied — a borrow that is not
+ * modified until the run settles). When `condition` is undefined only the five are passed (keys,
+ * order and arrays the same as before the condition inputs were added — the bytes that reach the
+ * Wan2.1 Session do not change).
  *
- * MUST: DiT の入力を組むのはこの 1 か所（ADR 0121 決定 10 — 2.1 と 2.2 が共有する）。
+ * MUST: this is the only place that builds the DiT inputs (ADR 0121 decision 10 — shared by 2.1 and
+ * 2.2).
  *
- * NOTE: `export` は GPU 無しで入力の組み方を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: `export` is for tests that pin how the inputs are built without a GPU (not on the `mod.ts` /
+ * subpath surface — ADR 0008).
  */
 export const ditInputs = (input: {
   readonly tokens: Float32Array<ArrayBuffer>;
@@ -317,15 +341,18 @@ export const ditInputs = (input: {
 });
 
 /**
- * 条件マスク（ADR 0121 決定 3 — ループの前に 1 回だけ作る）。入力の形 "t2v" の DiT は条件入力を持たないので
- * undefined（条件の潜在を渡されたら fail loudly）。"ti2v" は、テキストだけの要求（T2V — 入力の形とは別の軸）なら
- * 全て偽、I2V（`conditioned`）なら先頭の潜在フレームのトークン — トークン添字 `(f·H' + h)·W' + w` で先頭に連続して
- * 並ぶ `rows·cols` 個（1280×704 で 880）— が真。
+ * The condition mask (ADR 0121 decision 3 — built once before the loop). A DiT of input form "t2v" has
+ * no condition inputs, so it is undefined (fails loudly if a condition latent is passed). For "ti2v",
+ * a text-only request (T2V — an axis separate from the input form) gives all false, and I2V
+ * (`conditioned`) sets true the tokens of the first latent frame — the `rows·cols` tokens that come
+ * first and contiguous under the token index `(f·H' + h)·W' + w` (880 at 1280×704).
  *
- * MUST: I2V は時間の patch が 1 のときだけ組む — 先頭のトークンのフレームが先頭の潜在フレームと一致する前提（上流
- * diffusers の `first_frame_mask[0][0][:, ::2, ::2]` も同じ前提）。
+ * MUST: I2V is built only when the temporal patch is 1 — it assumes the frame of the first tokens
+ * matches the first latent frame (upstream diffusers' `first_frame_mask[0][0][:, ::2, ::2]` assumes the
+ * same).
  *
- * NOTE: `export` は GPU 無しでマスクの形を縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: `export` is for tests that pin the mask's shape without a GPU (not on the `mod.ts` / subpath
+ * surface — ADR 0008).
  */
 export const wanConditionMask = (
   form: WanDitInputForm,
@@ -361,14 +388,19 @@ export const wanConditionMask = (
 };
 
 /**
- * モデル入力の先頭の潜在フレームを条件の潜在で置き換えた写し（上流 diffusers の `expand_timesteps` 分岐の
- * `(1 − m)·condition + m·latents` — m は先頭フレームが 0・他が 1。ADR 0121 決定 11）。`latents` は `[C, F, H, W]`、
- * `condition` は 1 フレームの `[C, 1, H, W]` で、上流と同じく全フレームへ broadcast した式の値を要素ごとに書く。
+ * A copy of the model input with its first latent frame replaced by the condition latent (upstream
+ * diffusers' `expand_timesteps` branch `(1 − m)·condition + m·latents` — m is 0 for the first frame
+ * and 1 elsewhere. ADR 0121 decision 11). `latents` is `[C, F, H, W]`, `condition` the single-frame
+ * `[C, 1, H, W]`; as upstream, the value of the formula broadcast over all frames is written element
+ * by element.
  *
- * 式を逐語に計算する（先頭フレームを写すだけにしない）: m が 0 か 1 なので各項は条件・潜在・符号付きゼロのどれかで、
- * 和は丸めを含まない — f32 の上流と符号付きゼロまで同じ値になる（写すだけだと、潜在が -0 の要素で上流の +0 と割れる）。
+ * The formula is computed literally (not just copying the first frame): m is 0 or 1, so each term is
+ * the condition, the latent or a signed zero, and the sum involves no rounding — it gives the same
+ * values as the f32 upstream down to signed zeros (a plain copy would disagree with upstream's +0 for
+ * elements where the latent is -0).
  *
- * NOTE: `export` は GPU 無しで置き換えを縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: `export` is for tests that pin the replacement without a GPU (not on the `mod.ts` / subpath
+ * surface — ADR 0008).
  */
 export const withWanFirstFrameCondition = (
   latents: Float32Array<ArrayBuffer>,
@@ -387,7 +419,7 @@ export const withWanFirstFrameCondition = (
   for (let channel = 0; channel < channels; channel += 1) {
     const from = channel * plane;
     for (let frame = 0; frame < frames; frame += 1) {
-      // 上流の `first_frame_mask`（先頭フレームが 0）。
+      // Upstream's `first_frame_mask` (0 for the first frame).
       const keep = frame === 0 ? 0 : 1;
       const base = (channel * frames + frame) * plane;
       for (let index = 0; index < plane; index += 1) {
@@ -399,27 +431,35 @@ export const withWanFirstFrameCondition = (
 };
 
 /**
- * DiT の段（Session を張り、steps 回まわして畳む — `end` は畳んだ後）。
+ * The DiT stage (creates the Session, runs `steps` iterations and closes it — `end` comes after the
+ * close).
  *
- * `condition`（I2V の条件の潜在 `[C, 1, H, W]` — 正規化済み・有限）を渡すと、上流 diffusers の `expand_timesteps`
- * 分岐の形で条件づける（ADR 0121 決定 11）: 各 step でモデル入力の先頭の潜在フレームだけを置き換え
- * （{@link withWanFirstFrameCondition}）、UniPC は置き換えない潜在で進め、ループの後に 1 回置き換えてから返す。
- * 条件マスクは先頭フレームのトークンが真（{@link wanConditionMask}）、条件側の時刻は t = 0 の proj を 1 回だけ作る。
- * `denoise-step` の `copyLatents` が返すのはスケジューラの状態（置き換える前 — diffusers の callback と同じ値）。
- * 公式 Wan2.2 の形（初期と各 step の後に置き換える）とは途中の潜在の先頭フレームだけが違い、最終出力は同じ値になる
- * （UniPC は要素ごとの更新で、モデル入力は両方の形で同じ — 置き換える要素は他の要素へ流れない）。
+ * Passing `condition` (the I2V condition latent `[C, 1, H, W]` — normalized, finite) conditions in the
+ * form of upstream diffusers' `expand_timesteps` branch (ADR 0121 decision 11): at each step only the
+ * first latent frame of the model input is replaced ({@link withWanFirstFrameCondition}), UniPC
+ * advances the unreplaced latent, and after the loop the latent is replaced once more before
+ * returning. The condition mask is true for the first frame's tokens ({@link wanConditionMask}); the
+ * condition-side time is the proj at t = 0, built once. What `copyLatents` of `denoise-step` returns
+ * is the scheduler state (before the replacement — the same value as diffusers' callback). Compared
+ * with the official Wan2.2 form (replacing initially and after each step), only the first frame of the
+ * intermediate latents differs and the final output has the same values (UniPC updates element-wise
+ * and the model input is the same in both forms — the replaced elements do not flow into other
+ * elements).
  *
- * `condition` が undefined（テキストだけの要求）なら今までと同じ配列だけを回す（条件マスクは全て偽・条件側の時刻は
- * 生成側と同じ配列・モデル入力は潜在そのもの — T2V の sha 行を変えない）。
+ * When `condition` is undefined (a text-only request), only the same arrays as before run (the
+ * condition mask is all false, the condition-side time is the same array as the generation side, the
+ * model input is the latent itself — the T2V sha rows do not change).
  *
- * MUST: 各 step の更新後の潜在の有限性を見る（O(N) のホスト走査 — 81 フレームで 1 step 約 210 万
- * 要素）。非有限の潜在を黙って次の step と VAE の段へ渡すと、VAE の後のクランプが ±Inf を ±1 に
- * 変えて検出できなくなる。
+ * MUST: check the finiteness of the latent after each step's update (an O(N) host scan — about 2.1
+ * million elements per step at 81 frames). Passing a non-finite latent silently to the next step and
+ * the VAE stage would let the clamp after the VAE turn ±Inf into ±1, beyond detection.
  *
- * MUST（呼び手の事前条件）: `plan.initial` が latents なら、`plan.initial.data` は呼び手が入口の門の
- * 直後に写した、呼び手だけが所有する配列であること — この関数は写さずに使い、UniPC は step 0 の潜在を
- * 参照のまま持つ。写すのは呼び手（`family.ts` の `generateWanVideo`）の責任で、型でも計画でも強制されない。
- * 外の利用者の配列を直に渡すと、実行中の書き換え（門を通っていない NaN を含む）が補正子へ届く。
+ * MUST (caller's precondition): when `plan.initial` is latents, `plan.initial.data` is an array the
+ * caller copied right after the entry check and that only the caller owns — this function uses it
+ * without copying, and UniPC keeps the step-0 latent by reference. Copying is the responsibility of the
+ * caller (`generateWanVideo` in `family.ts`) and is enforced by neither the type nor the plan. Passing
+ * an outside caller's array directly lets modifications during the run (including NaN that never
+ * passed the check) reach the corrector.
  */
 export const runWanDenoise = async (
   state: WanDenoiseState,
@@ -439,15 +479,17 @@ export const runWanDenoise = async (
   const ropeShape = [1, grid.count, 1, wanRopeWidth(state.ropeBase)];
   const contextShape = [1, dit.contextRows, dit.contextWidth];
   const projShape = [1, dit.projWidth];
-  // 未知の形・条件を受けない形はここ（Session を張る前）で落ちる。
+  // An unknown form, or a form that takes no condition, fails here (before the Session is created).
   const conditionMask = wanConditionMask(dit.form, grid, patch, condition !== undefined, owner);
   const maskShape = [1, grid.count, 1];
-  // 条件側の時刻（上流は `first_frame_mask · t` — 先頭フレームのトークンは t = 0）。step に依らないので 1 回だけ作る。
+  // The condition-side time (upstream's `first_frame_mask · t` — the first frame's tokens get t = 0).
+  // Independent of the step, so built once.
   const conditionProj = condition === undefined ? undefined : timestepsProj(0, dit.projWidth);
   const { positive, negative } = contexts;
   const elements = latentShape.reduce((product, dim) => product * dim, 1);
-  // `plan.initial` の latents は呼び手（`generateWanVideo`）が入口の門の直後に写した所有の配列なので、ここでは
-  // 写さない（UniPC は step 0 の潜在を参照のまま持つ — 呼び手の配列を直に渡すと実行中の書き換えが補正子へ届く）。
+  // The latents of `plan.initial` are an owned array the caller (`generateWanVideo`) copied right after
+  // the entry check, so they are not copied here (UniPC keeps the step-0 latent by reference — passing
+  // the caller's array directly would let modifications during the run reach the corrector).
   let current: Float32Array<ArrayBuffer> =
     plan.initial.kind === "latents"
       ? plan.initial.data
@@ -463,7 +505,8 @@ export const runWanDenoise = async (
       proj: Float32Array<ArrayBuffer>,
       context: Float32Array<ArrayBuffer>,
     ): Promise<Float32Array<ArrayBuffer>> => {
-      // T2V の条件側の時刻は生成側と同じ配列（決定 3 — どちらも読むだけの借用）。
+      // For T2V the condition-side time is the same array as the generation side (decision 3 — both
+      // only read it, a borrow).
       const conditionInputs =
         conditionMask === undefined
           ? undefined
@@ -486,12 +529,14 @@ export const runWanDenoise = async (
     };
     const sampler = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
     for (let index = 0; index < plan.steps; index += 1) {
-      // 各 step の前（step の 2 回の forward は不可分 — 中断は次の step の前で効く）。
+      // Before each step (a step's two forwards are indivisible — cancellation takes effect before
+      // the next step).
       await settleAbort(signal);
       const timestep = schedule.timesteps[index];
       const proj = timestepsProj(timestep, dit.projWidth);
-      // CFG は uncond → cond の逐次 2 回（B = 1 — 決定 5）。同じ潜在なので patchify は 1 回。
-      // 合成はホストで。I2V はモデル入力だけ先頭フレームを置き換える（UniPC へは置き換えない `current`）。
+      // CFG runs uncond → cond as two sequential passes (B = 1 — decision 5). Same latent, so one
+      // patchify. The combination happens on the host. For I2V only the model input has its first
+      // frame replaced (UniPC gets the unreplaced `current`).
       const modelInput =
         condition === undefined
           ? current
@@ -523,8 +568,9 @@ export const runWanDenoise = async (
     failure = { error };
     throw error;
   } finally {
-    // MUST: 畳む失敗で本体の失敗（run の失敗・`onEvent` の throw・非有限の門）を上書きしない —
-    // VAE の段と同じ形（`disposeSteps` の doc）。両方が落ちたら本体を先頭にした AggregateError。
+    // MUST: a failure to close does not overwrite the main failure (a run failure, a throw from
+    // `onEvent`, the non-finite check) — the same form as the VAE stage (the doc of `disposeSteps`).
+    // If both fail, an AggregateError with the main failure first.
     await disposeSteps([
       () => {
         if (failure !== undefined) throw failure.error;
@@ -532,8 +578,9 @@ export const runWanDenoise = async (
       () => session.dispose(),
     ]);
   }
-  // I2V はループの後に 1 回置き換えてから VAE の段へ渡す（上流 diffusers と同じ — 置き換えた要素は有限の条件と
-  // 門を通った潜在だけから作るので、有限性は保たれる）。
+  // For I2V the latent is replaced once after the loop before it goes to the VAE stage (as upstream
+  // diffusers — the replaced elements come only from the finite condition and latents that passed the
+  // check, so finiteness holds).
   const latents =
     condition === undefined ? current : withWanFirstFrameCondition(current, condition, latentShape);
   await emit({ kind: "stage", component: "transformer", at: "end" });

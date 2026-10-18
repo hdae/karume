@@ -1,19 +1,22 @@
 /**
- * Wan の VAE の段 — chunk グラフ 2 本（first / next）の**常時タイル** decode（ADR 0118 決定 2 —
- * `vae-tiles.ts`）と、VAE のグラフ宣言 × 世代の記述子の家族 admission の門
- * （{@link assertWanVaeMatchesGeneration}・{@link assertWanVaeTilesCover}）。
+ * Wan's VAE stage — the **always-tiled** decode of the two chunk graphs (first / next) (ADR 0118
+ * decision 2 — `vae-tiles.ts`), and the family admission checks of the VAE graph declarations ×
+ * the generation descriptor ({@link assertWanVaeMatchesGeneration}, {@link assertWanVaeTilesCover}).
  *
- * 段の順序と Session の寿命（text → DiT → VAE を 1 段ずつ張って畳む）は `./pipeline.ts` 冒頭の doc が
- * 正本で、ここは VAE の段 1 本を回すだけ。Wan2.1 / 2.2 の class が共有する（ADR 0121 決定 10）。
- * 世代ごとの値（受理集合・逆正規化の統計・unpatchify の倍率）は世代の記述子（`./descriptor.ts`）から
- * 引数で受ける。潜在と出口のチャネル数・タイル辺・グラフの入出力の空間比はグラフ宣言から読む
- * （`wanVaeChunkLayout`）。`owner` は文言の接頭辞（Wan2.1 は `"WanPipeline"`・Wan2.2 は
- * `"WanTi2vPipeline"`）。
+ * The stage order and Session lifetimes (text → DiT → VAE, each created and closed one stage at a
+ * time) are defined by the doc at the top of `./pipeline.ts`; this module only runs the one VAE stage.
+ * Shared by the Wan2.1 / 2.2 classes (ADR 0121 decision 10).
+ * Per-generation values (accepted set, de-normalization statistics, unpatchify factor) are received
+ * as arguments from the generation descriptor (`./descriptor.ts`). The latent and exit channel
+ * counts, the tile edge and the graph's input / output spatial ratio are read from the graph
+ * declarations (`wanVaeChunkLayout`). `owner` is the message prefix (`"WanPipeline"` for Wan2.1,
+ * `"WanTi2vPipeline"` for Wan2.2).
  *
- * NOTE: 公開型（`WanGenerateEvent` / `WanRunComponent`）は `./pipeline.ts` から `import type` で取る
- * （型だけの参照は消去されるので循環 import にならない）。
+ * NOTE: the public types (`WanGenerateEvent` / `WanRunComponent`) are taken from `./pipeline.ts` with
+ * `import type` (type-only references are erased, so there is no import cycle).
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is side-effect free (no import-time execution, no global mutable state —
+ * CLAUDE.md).
  */
 
 import type { GpuContext, Session, SessionDiagnostics } from "@karume/runtime";
@@ -38,34 +41,37 @@ import {
   type WanVaeTilePlan,
 } from "./vae-tiles.ts";
 
-/** 部品のキー（系列のグラフ名 = 段 7 の manifest の weights 名）。 */
+/** Component keys (the series' graph names = the weights names of the step 7 manifest). */
 export const VAE_DECODER_FIRST = "vae_decoder_first";
 export const VAE_DECODER_NEXT = "vae_decoder_next";
 
 /**
- * 最終出力のチャネル数（RGB）。VAE のグラフの出口は `WAN_RGB_CHANNELS · vaePatchSize²`
- * （{@link assertWanVaeMatchesGeneration} が照合する — unpatchify の無い世代は出口 = RGB）。
+ * The channel count of the final output (RGB). The VAE graph's exit is `WAN_RGB_CHANNELS ·
+ * vaePatchSize²` (matched by {@link assertWanVaeMatchesGeneration} — for a generation without
+ * unpatchify, exit = RGB).
  */
 const WAN_RGB_CHANNELS = 3;
 
 /**
- * グラフの入出力の空間比（chunk グラフの宣言 `sampleTile / tile`）。圧縮（{@link wanSpatialCompression}）
- * と重なり（{@link planWanGenerationTiles}）は、この 1 本から比を取る（入力の導出を 2 本に分けない）。
+ * The graph's input / output spatial ratio (the chunk graph declaration's `sampleTile / tile`). The
+ * compression ({@link wanSpatialCompression}) and the overlap ({@link planWanGenerationTiles}) take
+ * the ratio from this one function (the derivation of the input is not split in two).
  */
 const graphScale = (layout: PlanLayout): number => layout.sampleTile / layout.tile;
 
 /**
- * 生成要求の空間の圧縮（潜在 1 あたりの最終出力の画素数）= グラフの入出力の空間比
- * （`layout.sampleTile / layout.tile`）× 世代の unpatchify の倍率（`generation.vaePatchSize`）。
- * 正の整数でなければ fail loudly（`wanVaeSpatialCompression`）。
+ * The spatial compression of a generation request (final output pixels per latent) = the graph's
+ * input / output spatial ratio (`layout.sampleTile / layout.tile`) × the generation's unpatchify factor
+ * (`generation.vaePatchSize`). Fails loudly unless it is a positive integer
+ * (`wanVaeSpatialCompression`).
  *
- * MUST: 潜在の大きさ（`plan.ts` の `planWanRequest`）・タイルで覆えるかの門
- * （{@link assertWanVaeTilesCover}）・重なり（{@link planWanGenerationTiles}）は同じ 1 本の圧縮を使う
- * （ADR 0121 決定 6 — 1 か所でもグラフの比だけで割ると、unpatchify のある世代で潜在の大きさと
- * タイル計画が食い違う）。
+ * MUST: the latent size (`planWanRequest` in `plan.ts`), the check that tiles cover it
+ * ({@link assertWanVaeTilesCover}) and the overlap ({@link planWanGenerationTiles}) use the same single
+ * compression (ADR 0121 decision 6 — if even one place divides by the graph's ratio alone, the latent
+ * size and the tile plan disagree for a generation with unpatchify).
  *
- * NOTE: `export` は共有の段と、GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: `export` is for the shared stages and for tests that pin the checks without a GPU (not on the
+ * `mod.ts` / subpath surface — ADR 0008).
  */
 export const wanSpatialCompression = (
   layout: PlanLayout,
@@ -73,11 +79,13 @@ export const wanSpatialCompression = (
 ): number => wanVaeSpatialCompression(graphScale(layout), generation.vaePatchSize);
 
 /**
- * 生成要求の潜在 `height × width` のタイル計画（本番の唯一の入口）。重なりは出力 64 px を空間の圧縮で
- * 割って導く（`wanVaeMinTileOverlap` — 割り切れなければ fail loudly）。
+ * The tile plan for a generation request's latent `height × width` (the single production entry
+ * point). The overlap is derived by dividing 64 px of output by the spatial compression
+ * (`wanVaeMinTileOverlap` — fails loudly if it does not divide evenly).
  *
- * NOTE: `export` は計画の門・admission の門と、GPU の照合（`e2e_wan_vae_tiles_test.ts`）が本番の導出を
- * 通るため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: `export` is so that the plan check, the admission check and the GPU comparison
+ * (`e2e_wan_vae_tiles_test.ts`) go through the production derivation (not on the `mod.ts` / subpath
+ * surface — ADR 0008).
  */
 export const planWanGenerationTiles = (
   layout: PlanLayout,
@@ -93,16 +101,19 @@ export const planWanGenerationTiles = (
   );
 
 /**
- * VAE のグラフ宣言が世代の記述子と合うことを見る（家族 admission の門）。逆正規化の統計の本数 =
- * 潜在のチャネル数・出口のチャネル数 = RGB × `vaePatchSize²`。
+ * Checks that the VAE graph declarations agree with the generation descriptor (a family admission
+ * check). The number of de-normalization statistics = the latent channel count; the exit channel
+ * count = RGB × `vaePatchSize²`.
  *
- * MUST: admission で呼ぶ。統計の本数が潜在のチャネル数と違っても、潜在の要素数が統計の本数で
- * 割り切れれば逆正規化（`denormalizeWanLatents`）は黙って通る。出口のチャネル数が unpatchify の
- * 倍率と合わない資産は、タイル decode の後の形の検査（{@link finishWanVaeFrames}）まで落ちない（DiT の段を全部払った後）。
+ * MUST: call in admission. Even when the number of statistics differs from the latent channel count,
+ * de-normalization (`denormalizeWanLatents`) passes silently if the latent's element count is divisible
+ * by the number of statistics. An asset whose exit channel count does not match the unpatchify factor
+ * would not fail until the shape check after the tiled decode ({@link finishWanVaeFrames}) (after
+ * paying for the whole DiT stage).
  *
- * NOTE: `vaePatchSize` は出口のチャネル数からも導けるが、上流の事実として記述子に持ち、ここで照合に
- * 使う（ADR 0121 決定 6）。`export` は GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: `vaePatchSize` could also be derived from the exit channel count, but it is held in the
+ * descriptor as an upstream fact and used here for matching (ADR 0121 decision 6). `export` is for
+ * tests that pin the checks without a GPU (not on the `mod.ts` / subpath surface — ADR 0008).
  */
 export const assertWanVaeMatchesGeneration = (
   layout: Pick<WanVaeChunkLayout, "latentChannels" | "sampleChannels">,
@@ -126,16 +137,18 @@ export const assertWanVaeMatchesGeneration = (
 };
 
 /**
- * VAE の chunk グラフの幾何で、受理する寸法（`generation.acceptedSizes`）が全部タイルで覆えることを
- * 見る（家族 admission の門 — 寸法は有限なので全数を計画する）。
+ * Checks that, with the VAE chunk graphs' geometry, every accepted size (`generation.acceptedSizes`)
+ * can be covered by tiles (a family admission check — the sizes are finite, so every one is planned).
  *
- * MUST: admission で呼ぶ。タイル辺は配布物だけで差し替えられる（ADR 0118 決定 2）ので、潜在の短辺
- * より大きいタイル（例 64 > 60）や重なりの下限を満たせないタイル（例 8）の資産も chunk グラフの
- * 検査（`wanVaeChunkLayout`）は通る。ここで落とさないと、DiT の段を全部払った後の VAE の段で
- * 初めて落ちる。
+ * MUST: call in admission. The tile edge can be changed by the distribution alone (ADR 0118 decision
+ * 2), so an asset with tiles larger than the latent's short side (for example 64 > 60) or tiles that
+ * cannot meet the overlap lower bound (for example 8) still passes the chunk graph check
+ * (`wanVaeChunkLayout`). Unless it fails here, it fails for the first time in the VAE stage, after
+ * paying for the whole DiT stage.
  *
- * MUST: 重なり（{@link planWanGenerationTiles}）は「潜在が整数か」の検査の**後**、`try` の中で求める
- * — 前に置くと、潜在が整数にならない縮尺の資産で、64 px が割り切れない旨の文言が先に出る。
+ * MUST: the overlap ({@link planWanGenerationTiles}) is computed **after** the "is the latent an
+ * integer" check, inside the `try` — placed before, an asset whose scale makes the latent non-integer
+ * would first show the message that 64 px does not divide evenly.
  */
 export const assertWanVaeTilesCover = (
   layout: PlanLayout,
@@ -165,7 +178,10 @@ export const assertWanVaeTilesCover = (
   }
 };
 
-/** VAE の段が読む構築済みの材料（パイプラインの内部状態のうちこの段の分 — 構造で受ける）。 */
+/**
+ * The built material the VAE stage reads (this stage's part of the pipeline's internal state — taken
+ * structurally).
+ */
 type WanVaeDecodeState = {
   readonly gpu: GpuContext;
   readonly vaeFirst: ModelComponent;
@@ -175,21 +191,24 @@ type WanVaeDecodeState = {
 };
 
 /**
- * 貼り合わせた patchify 空間のフレーム（クランプ前・`[Cs, F', h, w]`）を、最終フレーム `[3, F, H, W]`
- * （クランプ済み）にする: 形の検査 → unpatchify（世代の `vaePatchSize`）→ 有限性（クランプ前・RGB の
- * 座標で名指す）→ クランプ。順は上流の `_decode` / `tiled_decode`（unpatchify の後に clamp）と同じ。
+ * Turns the pasted frames in patchify space (pre-clamp, `[Cs, F', h, w]`) into the final frames
+ * `[3, F, H, W]` (clamped): shape check → unpatchify (the generation's `vaePatchSize`) → finiteness
+ * (before the clamp, named in RGB coordinates) → clamp. The order is the same as upstream's `_decode` /
+ * `tiled_decode` (clamp after unpatchify).
  *
- * 形は次元ごとに見る: チャネル `Cs`・高さ `h`・幅 `w` はタイル計画（出口のチャネル数と潜在 × 縮尺）から、
- * フレーム数 `F'` は長さから導く（`Cs·h·w` で割り切れなければ落とす）。unpatchify した形を
- * `[3, plan.frames, plan.height, plan.width]` と比べる（要素数だけだと patchify 空間の
- * `3·p²·(H/p)·(W/p)` と `3·H·W` が等しく、unpatchify の有無を見分けられない）。
+ * The shape is checked per dimension: the channels `Cs`, height `h` and width `w` are derived from the
+ * tile plan (the exit channel count and latent × scale), and the frame count `F'` from the length
+ * (fails unless it divides by `Cs·h·w`). The unpatchified shape is compared with
+ * `[3, plan.frames, plan.height, plan.width]` (by element count alone, patchify space's
+ * `3·p²·(H/p)·(W/p)` equals `3·H·W`, and whether unpatchify happened could not be told apart).
  *
- * MUST: クランプの**前**に有限性を見る。上流と同じクランプ（{@link clampWanVaeFrames}）は ±Inf を
- * ±1 に変えるので、後では検出できない（クランプ自体は上流の写しなので変えない）。
+ * MUST: check finiteness **before** the clamp. The clamp, the same as upstream's
+ * ({@link clampWanVaeFrames}), turns ±Inf into ±1, so it cannot be detected afterwards (the clamp
+ * itself is a copy of upstream and is not changed).
  *
- * NOTE: unpatchify の無い世代（`vaePatchSize` 1）は `assembled` そのものを in-place にクランプして返す
- * （写さない）。`export` は GPU 無しで末尾を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: a generation without unpatchify (`vaePatchSize` 1) clamps `assembled` itself in place and
+ * returns it (no copy). `export` is for tests that pin the tail without a GPU (not on the `mod.ts` /
+ * subpath surface — ADR 0008).
  */
 export const finishWanVaeFrames = (
   assembled: Float32Array<ArrayBuffer>,
@@ -245,8 +264,9 @@ export const finishWanVaeFrames = (
 };
 
 /**
- * VAE の段（chunk グラフ 2 本の Session と常駐の cache を張り、タイル decode して畳む）。末尾の形の検査・
- * unpatchify・有限性・クランプは {@link finishWanVaeFrames}。
+ * The VAE stage (creates the Sessions of the two chunk graphs and the resident caches, runs the tiled
+ * decode and closes them). The final shape check, unpatchify, finiteness and clamp are in
+ * {@link finishWanVaeFrames}.
  */
 export const decodeWanVaeStage = async (
   state: WanVaeDecodeState,
@@ -270,13 +290,16 @@ export const decodeWanVaeStage = async (
   let frames: Float32Array<ArrayBuffer>;
   let failure: { readonly error: unknown } | undefined;
   try {
-    // VAE は quant の session を受けない（`{}` — anima の `withStage` と同じ取り決め。
-    // `sessionOptions` は家族 admission が quant の宣言を受理表で通した、DiT の Session へ渡す実効設定）。
+    // The VAE does not take the quant's session (`{}` — the same contract as anima's `withStage`.
+    // `sessionOptions` are the effective settings the family admission derived from the quant
+    // declaration through the acceptance table, passed to the DiT Session).
     first = await state.vaeFirst.createSession(state.gpu, {});
     next = await state.vaeNext.createSession(state.gpu, {});
     caches = await WanVaeChunkCaches.create(state.gpu, layout);
-    // 最初のタイルの前（開始通知の中や資源の確保中に届いた中断はここで効く — text / encoder / DiT の段と
-    // 同じく、資源を取った後・最初の GPU 作業の前に見る。タイルの間の検査は下の callback）。
+    // Before the first tile (a cancellation that arrived during the start notification or while
+    // allocating resources takes effect here — as in the text / encoder / DiT stages, checked after
+    // acquiring resources and before the first GPU work. The check between tiles is the callback
+    // below).
     await settleAbort(signal);
     const sessions = { first, next };
     frames = await decodeWanVaeTiled(
@@ -289,7 +312,8 @@ export const decodeWanVaeStage = async (
         observe?.("vae_decoder_first", sessions.first.diagnostics());
         observe?.("vae_decoder_next", sessions.next.diagnostics());
         await emit({ kind: "vae-tile", tile, tiles });
-        // タイルの間（1 タイル = 1 batch で不可分 — 中断は次のタイルの前で効く）。
+        // Between tiles (one tile = one batch, indivisible — cancellation takes effect before the
+        // next tile).
         await settleAbort(signal);
       },
     );
@@ -297,7 +321,8 @@ export const decodeWanVaeStage = async (
     failure = { error };
     throw error;
   } finally {
-    // MUST: Session → 常駐の順で畳む（段 4 / 5 の e2e と同じ）。畳む失敗で本体の失敗を上書きしない。
+    // MUST: close Sessions → residents in that order (the same as the step 4 / 5 e2e). A failure to
+    // close does not overwrite the main failure.
     const opened = { first, next, caches };
     await disposeSteps([
       () => {

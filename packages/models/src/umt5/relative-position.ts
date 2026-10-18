@@ -1,66 +1,77 @@
 /**
- * umT5-XXL の相対位置のバケット表をホストで作る（ADR 0119 決定 3）。
+ * Builds umT5-XXL's relative-position bucket table on the host (ADR 0119 decision 3).
  *
- * T5 系の attention は位置の差（キーの位置 − クエリの位置）を 32 個のバケットに落とし、層ごとの表
- * `[32, heads]` から引いた値をスコアに足す。表 `[L, L]` は有効長 L だけで決まるが、L はグラフの
- * 動的形の 1 シンボル（決定 4）なので、定数に焼くと最大長の表から `[:L, :L]` を切り出す形が要る。
- * DeBERTa（ADR 0045）と Anima の RoPE（ADR 0034）の入力昇格に倣い、ホストが作ってグラフ入力で渡す。
+ * T5-style attention maps the position difference (key position − query position) to 32 buckets
+ * and adds the value looked up from a per-layer table `[32, heads]` to the scores. The table
+ * `[L, L]` depends only on the valid length L, but L is one symbol of the graph's dynamic shape
+ * (decision 4), so baking it as a constant would need `[:L, :L]` sliced from the max-length table.
+ * Following the promotion to inputs of DeBERTa (ADR 0045) and Anima's RoPE (ADR 0034), the host
+ * builds it and passes it as a graph input.
  *
- * ## MUST: Python 側とバイト一致であること
+ * ## MUST: byte-identical to the Python side
  *
- * 正本は recipe `tools/export-recipes/wan/umt5_patch.py` の `relative_position_buckets`（上流
- * transformers 5.14.1 の `UMT5Attention._relative_position_bucket` をそのまま呼ぶ）。式が割れても
- * shape は合うので、モデルは落ちずに別の距離のバイアスを黙って足す（沈黙誤値）。golden の表も
- * Python が作るので、ホストとゴールデンが同じ誤りを共有すると E2E もすり抜ける。
- * `packages/models/tests/umt5_relative_position_test.ts` が fixture（`fixtures/wan-umt5/`）と
- * 有効長 2〜512 の全表をバイト一致で縛る（sbv2 の `sbv2_rel_pos_parity_test.ts` と同じ責務）。
+ * The source of truth is `relative_position_buckets` in the recipe
+ * `tools/export-recipes/wan/umt5_patch.py` (which calls upstream transformers 5.14.1's
+ * `UMT5Attention._relative_position_bucket` as is). If the formula splits, the shape still matches,
+ * so the model does not fail but silently adds the bias of another distance (a silent wrong value).
+ * The golden tables are also made by Python, so if host and golden share the same error the E2E
+ * slips through as well. `packages/models/tests/umt5_relative_position_test.ts` pins the fixture
+ * (`fixtures/wan-umt5/`) and every table for valid lengths 2 to 512 byte for byte (the same duty as
+ * sbv2's `sbv2_rel_pos_parity_test.ts`).
  *
- * 上流は torch の f32 の `log` で、ここは f64 の `Math.log`。境界（距離 8・12・16・23・32・46・64・91）
- * で切り捨てが割れないことは実測命題（調査 2026-10-03-umt5-encoder-recon §4.3 — 距離 ±511 の全件で
- * 一致）なので、構成（{@link UMT5_RELATIVE_POSITION}）や上限を変えるときは測り直す。
+ * Upstream uses torch's f32 `log`; this uses f64 `Math.log`. That truncation does not split at the
+ * boundaries (distances 8, 12, 16, 23, 32, 46, 64, 91) is a measured claim (research
+ * 2026-10-03-umt5-encoder-recon §4.3 — all distances ±511 match), so measure again when changing the
+ * configuration ({@link UMT5_RELATIVE_POSITION}) or the upper limit.
  *
- * MUST: モジュール副作用ゼロ（CLAUDE.md）。
+ * MUST: modules are side-effect free (CLAUDE.md).
  */
 
 import type { Tensor } from "@karume/runtime";
 
-/** i32 のテンソル（バケット表の型 — Session の入力にそのまま渡せる）。 */
+/** An i32 tensor (the type of the bucket table — it can be passed to a Session input as is). */
 export type I32Tensor = Extract<Tensor, { readonly dtype: "i32" }>;
 
 /**
- * バケットの構成（umT5-XXL の `text_encoder/config.json` — 双方向〈エンコーダ〉の枝だけ）。
+ * The bucket configuration (umT5-XXL's `text_encoder/config.json` — only the bidirectional
+ * (encoder) branch).
  *
- * 構成の宣言の席は持たない: Python と突き合わせたのはこの 1 組だけで、宣言できるようにすると
- * 検証していない組み合わせを配布側が選べてしまう（`src/wan/scheduler.ts` の `WAN_UNIPC_CONFIG` と同じ判断）。
- * 値が pin した config と一致することは recipe の pytest（`test_umt5_host_fixture.py`）と
- * fixture のテストが縛る。
+ * There is no field to declare the configuration: only this one pair was compared with Python, and
+ * making it declarable would let a distribution pick an unverified combination (the same judgement
+ * as `WAN_UNIPC_CONFIG` in `src/wan/scheduler.ts`). The recipe's pytest
+ * (`test_umt5_host_fixture.py`) and the fixture test pin the values to the pinned config.
  */
 export const UMT5_RELATIVE_POSITION = { numBuckets: 32, maxDistance: 128 } as const;
 
 /**
- * 有効長の下限（グラフの記号次元の下限 — `torch.export` の 0 / 1 特殊化を避けた 2・ADR 0119 決定 4。
- * anima の `PROMPT_MIN_TOKENS` と同じ理由）。トークナイザの受理集合の下限もこの値（`</s>` だけの
- * 長さ 1 を拒む — `./tokenizer.ts`）。
+ * The lower limit of the valid length (the lower limit of the graph's symbolic dimension — 2, which
+ * avoids `torch.export`'s 0 / 1 specialization; ADR 0119 decision 4; the same reason as anima's
+ * `PROMPT_MIN_TOKENS`). The lower limit of the tokenizer's accepted set is this value too (rejects
+ * length 1, only `</s>` — `./tokenizer.ts`).
  */
 export const UMT5_MIN_TOKENS = 2;
 
 /**
- * 有効長の上限（グラフの記号次元の上限・上流の `max_sequence_length` — 決定 4）。Python の表との
- * 一致を確かめたのもここまで（距離 ±511）。
+ * The upper limit of the valid length (the upper limit of the graph's symbolic dimension, upstream's
+ * `max_sequence_length` — decision 4). The match with Python's tables was also verified only up to
+ * here (distance ±511).
  */
 export const UMT5_MAX_LENGTH = 512;
 
-/** 距離 `distance`（キーの位置 − クエリの位置）のバケット（上流の式の双方向の枝）。 */
+/** The bucket of `distance` (key position − query position) (the bidirectional branch of upstream's formula). */
 const bucketOf = (distance: number): number => {
   const { numBuckets, maxDistance } = UMT5_RELATIVE_POSITION;
-  // 双方向: 半分ずつを向きに割り当てる（正の距離 = キーがクエリより後ろ — 後半の 16〜31）。
+  // Bidirectional: each direction gets half (positive distance = key after the query — the upper
+  // half, 16 to 31).
   const half = numBuckets / 2;
   const base = distance > 0 ? half : 0;
   const magnitude = Math.abs(distance);
-  // 半分の半分（0〜7）は距離そのまま、残り（8〜15）は max_distance までの対数の刻み。
+  // Half of the half (0 to 7) is the distance itself; the rest (8 to 15) is a logarithmic scale up to
+  // max_distance.
   const maxExact = half / 2;
   if (magnitude < maxExact) return base + magnitude;
-  // 上流の `log_ratio.to(torch.long)`（0 への切り捨て — 対数の比は 0 以上なので floor と同じ）。
+  // Upstream's `log_ratio.to(torch.long)` (truncation toward 0 — the log ratio is non-negative, so
+  // the same as floor).
   const large =
     maxExact +
     Math.trunc(
@@ -70,11 +81,12 @@ const bucketOf = (distance: number): number => {
 };
 
 /**
- * 有効長 `length` のバケット表 `[L, L]`（i32・行優先）。`table[i][j] = bucket(j − i)`（上流の
- * `compute_bias` と同じ向き — 行がクエリ・列がキー）。
+ * The bucket table `[L, L]` for valid length `length` (i32, row-major).
+ * `table[i][j] = bucket(j − i)` (the same orientation as upstream's `compute_bias` — rows are
+ * queries, columns keys).
  *
- * 表は `j − i` にしか依存しない（Toeplitz）ので、対角ごとの値 `2L − 1` 本を先に作ってから展開する
- * （L = 512 でもバケットの計算は 1,023 回）。
+ * The table depends only on `j − i` (Toeplitz), so the `2L − 1` per-diagonal values are built first
+ * and then expanded (even at L = 512 the bucket is computed 1,023 times).
  */
 export const buildUmt5RelativePositionBuckets = (length: number): I32Tensor => {
   if (!Number.isInteger(length) || length < UMT5_MIN_TOKENS || length > UMT5_MAX_LENGTH) {
@@ -82,14 +94,14 @@ export const buildUmt5RelativePositionBuckets = (length: number): I32Tensor => {
       `umT5 の有効長 ${length} が ${UMT5_MIN_TOKENS}〜${UMT5_MAX_LENGTH} の整数でない`,
     );
   }
-  // 対角 d = j − i ∈ [−(L−1), L−1] の値（添字は d + L − 1）。
+  // The values for diagonals d = j − i ∈ [−(L−1), L−1] (index d + L − 1).
   const diagonal = new Int32Array(2 * length - 1);
   for (let distance = 1 - length; distance < length; distance += 1) {
     diagonal[distance + length - 1] = bucketOf(distance);
   }
   const data = new Int32Array(length * length);
   for (let query = 0; query < length; query += 1) {
-    // 行 i は対角の値の連続した区間（d = −i 〜 L−1−i）をそのまま写したもの。
+    // Row i is a straight copy of a contiguous range of the diagonal values (d = −i to L−1−i).
     const start = length - 1 - query;
     data.set(diagonal.subarray(start, start + length), query * length);
   }

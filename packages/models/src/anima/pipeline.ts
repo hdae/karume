@@ -1,51 +1,59 @@
 /**
- * `AnimaPipeline` — テキスト → 画像（Anima）の 1 本の面。
+ * `AnimaPipeline` — the single surface for text → image (Anima).
  *
- * パイプライン（全段 Karume・torch 不使用）:
+ * Pipeline (every stage in Karume, no torch):
  *
- * 1. トークナイザ 2 本（Qwen2 BPE / T5 Unigram）でプロンプトを id 列にする
- * 2. `text_encoder`（Qwen3）→ `text_conditioner` → 512 ゼロ埋め
- * 3. `transformer`（S 形 DiT）を N step 回し、ホスト側で CFG 合成 + 更新（更新則は request の
- *    `sampler`、省略時は manifest の `pipelineConfig.scheduler.type` — Euler / DPM++ 2M）
- * 4. latent を per-channel 逆正規化 → `vae_decoder` を**常時タイル**で通す
- * 5. RGBA 化して返す（PNG 化は `encodePng` — パイプライン非依存の共通処理）
+ * 1. Turn the prompt into id sequences with two tokenizers (Qwen2 BPE / T5 Unigram)
+ * 2. `text_encoder` (Qwen3) → `text_conditioner` → zero-pad to 512
+ * 3. Run the `transformer` (S-form DiT) for N steps, with CFG mixing + the update on the host (the
+ *    update rule is the request's `sampler`, defaulting to the manifest's
+ *    `pipelineConfig.scheduler.type` — Euler / DPM++ 2M)
+ * 4. Denormalise the latent per channel → run `vae_decoder` **always tiled**
+ * 5. Convert to RGBA and return (PNG encoding is `encodePng` — shared, pipeline-independent)
  *
- * ## MUST: 既定ではグラフは 1 本ずつ開いて閉じる（ADR 0016 / 0112）
+ * ## MUST: by default graphs are opened and closed one at a time (ADR 0016 / 0112)
  *
- * 既定の `residency: "per-stage"` では解放の**位置**に意味がある。テキスト経路（重み 1,396MiB）を
- * DiT ロードの**前**に、DiT を VAE ロードの**前**に解放する。DiT の重みは quant 席で倍違う
- * （既定席 `f16+dit8-a8-attn8-s16` = 1,875MiB・`f16` 席 = 3,733MiB — 2026-08-05 final-perf-bench
- * の VRAM 表）。VAE を常時タイルにした後は**チェーン最大は DiT 段**で、既定の VRAM の前提は
- * 「最大の段 1 本ぶん」。
- * したがって {@link AnimaPipeline.fromAssets} は **Session を 1 本も張らない** —
- * 開くのはコンテナ（`openContainer` = 2 文書の解析のみ）までで、GPU 常駐は
- * {@link AnimaPipeline.generate} の中で段ごとに張っては畳む。
+ * With the default `residency: "per-stage"` the **position** of each release matters. The text path
+ * (weights 1,396MiB) is released **before** the DiT load, and the DiT **before** the VAE load. The
+ * DiT weights differ by a factor of two between quant presets (default preset
+ * `f16+dit8-a8-attn8-s16` = 1,875MiB, `f16` preset = 3,733MiB — the VRAM table of the 2026-08-05
+ * final-perf-bench). Since the VAE is always tiled, **the chain peak is the DiT stage**, and the
+ * default VRAM assumption is "the largest single stage". So {@link AnimaPipeline.fromAssets}
+ * **opens no Session at all** — it only opens containers (`openContainer` = parsing the two
+ * documents), and GPU residency is opened and closed per stage inside
+ * {@link AnimaPipeline.generate}.
  *
- * opt-in の `residency: "transformer"` は DiT の Session だけを generate を跨いで持ち続ける
- * （状態機械は `residency.ts`）。text / VAE の段は常駐 DiT の**上に**乗るので、チェーン最大は
- * 必ず上がる（既定席 1024² で常駐ぶん +2,646MiB — ADR 0112）。そこで常駐 DiT がある時点で段を張る前に
- * （text 段の前と、DiT 段の後・VAE 段の前の 2 点）、次の段が要る量を試し確保（runtime の
- * `fitsHeadroom`）で量り、入らなければ常駐 DiT を**先に**退避する（OOM を踏む前 — 重みのアップロードの
- * OOM は device を失わせうる: `residency.ts` の「退避の 2 本の線」）。見積りが外れて段が `GpuOutOfMemoryError` を投げたときは
- * 常駐 DiT を退避してその段を 1 回だけやり直す（2 本目の線）。どちらの退避の後も、この pipeline は
- * 常駐しない（格下げ）。常駐 DiT も最初の generate の DiT 段で作る（構築時には張らない）。
+ * The opt-in `residency: "transformer"` keeps only the DiT Session across generate calls (the state
+ * machine is `residency.ts`). The text / VAE stages stack **on top of** the resident DiT, so the
+ * chain peak always rises (+2,646MiB for the resident share at 1024² with the default preset —
+ * ADR 0112). So while a resident DiT exists, before opening a stage (two points: before the text
+ * stages, and after the DiT stage and before the VAE stage), the amount the next stage needs is
+ * measured with a headroom probe (the runtime's `fitsHeadroom`), and if it does not fit, the
+ * resident DiT is evicted **first** (before hitting an OOM — an OOM in a weight upload can lose the
+ * device: "The two lines of eviction" in `residency.ts`). When the estimate is off and a stage
+ * throws `GpuOutOfMemoryError`, the resident DiT is evicted and that stage re-run once (the second
+ * line). After either eviction this pipeline no longer keeps the DiT resident (downgrade). The
+ * resident DiT, too, is created in the DiT stage of the first generate (nothing is opened at
+ * construction).
  *
- * MUST: この段取りは**公開 API 側でも**守る — `generate` は直列化鎖に載せ（並行呼び出しは
- * 待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。載せないと、並行
- * 呼び出し 2 本ぶんのグラフが同時常駐して VRAM の前提が崩れ、生成中の dispose が
- * flush-before-destroy を破る。
+ * MUST: **the public API also** keeps this sequencing — `generate` goes on the serialisation chain
+ * (concurrent calls wait and run in order), and `dispose` waits for it to finish before destroying
+ * the GPU. Otherwise the graphs of two concurrent calls are resident at once and the VRAM
+ * assumption breaks, and a dispose during generation breaks flush-before-destroy.
  *
- * ## MUST: DiT は S 形・VAE は常時タイル（ADR 0038 §4）
+ * ## MUST: the DiT is S-form, the VAE is always tiled (ADR 0038 §4)
  *
- * 配布される transformer は解像度を 1 つも持たない S 形だけで、VAE decoder は latent 64×64 の
- * 固定タイル 1 本だけ。したがって**資産が解像度から独立**し、非タイル経路も静的形の分岐も
- * 存在しない（512px は 1 タイルに縮退し、非タイル decode とビット同一 — ADR 0033 の門）。
- * 受理集合の正本は `resolution.ts` の定数。
+ * The distributed transformer is only the S form, which holds no resolution, and the VAE decoder is
+ * only one fixed tile of latent 64×64. So **the assets are independent of the resolution**, and
+ * there is no non-tiled path and no static-shape branch (512px degenerates to one tile,
+ * bit-identical to the non-tiled decode — the check of ADR 0033). The source of truth for the
+ * accepted set is the constants in `resolution.ts`.
  *
- * ## MUST: 出力画像の「正しさ」はここでは担保されない
+ * ## MUST: the "correctness" of the output image is not guaranteed here
  *
- * 数値の正は参照フィクスチャとの E2E（実 GPU）が担保する。seed 付き乱数は **torch の `randn`
- * とは別列**なので、自由生成した絵を torch と比べることはできない（`random.ts` の doc）。
+ * Numerical correctness is guaranteed by the E2E against the reference fixtures (real GPU). The
+ * seeded random numbers are **a different sequence from torch's `randn`**, so a freely generated
+ * picture cannot be compared with torch (the doc of `random.ts`).
  */
 
 import {
@@ -138,7 +146,10 @@ import {
   TransformerResidency,
 } from "./residency.ts";
 
-/** manifest の weights / assets 表に現れる名前（ADR 0041 §3 の規約名）。 */
+/**
+ * Names that appear in the manifest's weights / assets tables (the conventional names of ADR 0041
+ * §3).
+ */
 const TEXT_ENCODER = "text_encoder";
 const TEXT_CONDITIONER = "text_conditioner";
 const TRANSFORMER = "transformer";
@@ -146,139 +157,158 @@ const VAE_DECODER = "vae_decoder";
 const TOKENIZER = "tokenizer";
 const TOKENIZER_2 = "tokenizer_2";
 
-/** `transformer` の容器が宣言する rope 素表の資産名（役割 `rope-base` — ADR 0109 決定 4）。 */
+/**
+ * Asset name of the rope base table declared by the `transformer` container (role `rope-base` —
+ * ADR 0109 decision 4).
+ */
 const ROPE_BASE = "rope_base";
 
-/** この系列の weights 部品（差し替え席が受ける役割名でもある）。 */
+/** This family's weight components (also the role names component replacement accepts). */
 const COMPONENT_KEYS = [TEXT_ENCODER, TEXT_CONDITIONER, TRANSFORMER, VAE_DECODER] as const;
 
-/** 生成結果。`data` は RGBA 8bit（4 バイト / 画素・行優先）。 */
+/** Generation result. `data` is 8-bit RGBA (4 bytes per pixel, row-major). */
 export type GeneratedImage = {
   readonly width: number;
   readonly height: number;
   readonly data: Uint8Array<ArrayBuffer>;
 };
 
-/** 1 回の生成要求。未指定の欄は manifest の `pipelineConfig.defaults` が埋める。 */
+/**
+ * One generation request. Fields left unspecified are filled from the manifest's
+ * `pipelineConfig.defaults`.
+ */
 export type AnimaGenerateRequest = {
   readonly prompt: string;
   /**
-   * ネガティブプロンプト。`guidanceScale === 1` では uncond 側を 1 度も計算しないので、
-   * **指定すると fail loudly**（効かないノブを黙って受けない — {@link needsUncond}）。
+   * Negative prompt. With `guidanceScale === 1` the uncond side is never computed, so **specifying
+   * it fails loudly** (a knob with no effect is not silently accepted — {@link needsUncond}).
    */
   readonly negativePrompt?: string;
   /**
-   * denoise の step 数（2 以上 1000 以下の整数・既定は `pipelineConfig.defaults.steps`）。外れると
-   * GPU に触る前に `ModelInputError`。
+   * Number of denoise steps (an integer from 2 to 1000; default `pipelineConfig.defaults.steps`).
+   * Out of range gives `ModelInputError` before touching the GPU.
    */
   readonly steps?: number;
   readonly guidanceScale?: number;
   readonly resolution?: ImageSize;
-  /** 初期ノイズの seed（既定 0 — 同じ seed なら同じ画像）。 */
+  /** Seed of the initial noise (default 0 — the same seed gives the same image). */
   readonly seed?: number;
   /**
-   * denoise の更新則（{@link AnimaSamplerType}）。省略時は manifest の
-   * `pipelineConfig.scheduler.type`（公式配布は `"euler"`）。
+   * Update rule of denoising ({@link AnimaSamplerType}). Defaults to the manifest's
+   * `pipelineConfig.scheduler.type` (`"euler"` in the official distribution).
    *
-   * DPM++ 2M は**選択肢の一つ**であって配布既定ではない（再裁定 2026-08-25）。更新則は資産に
-   * 依らないホスト側の式なので、**どちらの値も配布物によらず常に有効** — 同じ資産・同じ seed
-   * でも値が違えば出る画素は変わる（`euler` の指定は manifest 既定が euler の配布物とビット
-   * 同一）。
+   * DPM++ 2M is **one of the choices**, not the distribution default (re-ruling of 2026-08-25). The
+   * update rule is a host-side formula independent of the assets, so **both values are always valid
+   * whatever the distribution** — with the same assets and seed, a different value gives different
+   * pixels (specifying `euler` is bit-identical to a distribution whose manifest default is euler).
    */
   readonly sampler?: AnimaSamplerType;
   /**
-   * **この generate の後に** DiT の Session を持ち続けるか（{@link AnimaResidency}）。省略時は
-   * {@link AnimaPipelineOptions.residency}。
+   * Whether the DiT Session is kept **after this generate** ({@link AnimaResidency}). Defaults to
+   * {@link AnimaPipelineOptions.residency}.
    *
-   * 開始時に常駐 DiT が既にあれば、値に関わらずそれを使う（読み直さない）。連続生成では
-   * 途中を `"transformer"`、**最後の 1 枚だけ `"per-stage"`** にすると、その generate の後に
-   * 常駐 DiT が解放される（`residency` イベントの `released` / `request`）。
-   * 退避（OOM / 空き不足）で格下げ済みの pipeline では `"transformer"` を求めても持たず、
-   * `released` / `downgraded` を名乗る。未知の綴りは GPU に触る前に `ModelInputError`。
+   * If a resident DiT already exists at the start, it is used whatever the value (no reload). In a
+   * series of generations, using `"transformer"` in between and **`"per-stage"` only for the last
+   * one** releases the resident DiT after that generate (`released` / `request` of the `residency`
+   * event). A pipeline downgraded by an eviction (OOM / not enough headroom) does not keep it even
+   * when `"transformer"` is requested, and reports `released` / `downgraded`. An unknown spelling
+   * gives `ModelInputError` before touching the GPU.
    */
   readonly residency?: AnimaResidency;
   /**
-   * 生成イベントの観測席（{@link AnimaGenerateEvent}）— 段の開始 / 終了・denoise の 1 step
-   * 完了・VAE タイル 1 枚の完了・DiT 常駐の変化ごとに呼ばれる。
+   * Observation hook for generation events ({@link AnimaGenerateEvent}) — called at each stage
+   * start / end, each completed denoise step, each completed VAE tile and each change of DiT
+   * residency.
    *
-   * **await する**（発火の順序が決定的になり、消費側で間引き / スロットリングができる）。
-   * **例外は握らない**（`onRunDiagnostics` と同じ流儀 = fail loudly）— 副産物として
-   * **throw が step 粒度の中断手段**になる（生成は reject し、段の Session は解放される）。
-   * 持ち越した常駐 DiT を捨てるのは denoise ループ内（`denoise-step`）の throw だけで、そのとき
-   * `residency` の `evicted` / `failure` を名乗る。`stage` / `vae-tile` / `residency` の通知での
-   * throw では常駐 DiT は健全なので捨てない（ただし実効値が `"per-stage"` なら手放して
-   * `released` / `request` を名乗る — 失敗した generate でも「この後に持たない」指示は効く）。
-   * これらの通知で元と同じ例外を投げ直しても、生成が投げるのは元の例外 1 本のまま。
+   * **It is awaited** (the firing order becomes deterministic, and the consumer can thin out /
+   * throttle). **Exceptions are not swallowed** (the same style as `onRunDiagnostics` = fail
+   * loudly) — as a by-product, **a throw is the means of aborting at step granularity** (the
+   * generation rejects and the stage's Session is released). Only a throw inside the denoise loop
+   * (`denoise-step`) discards a carried-over resident DiT, and then `evicted` / `failure` of
+   * `residency` is reported. A throw from a `stage` / `vae-tile` / `residency` notification leaves
+   * the resident DiT healthy, so it is not discarded (but with effective `"per-stage"` it is
+   * released and `released` / `request` is reported — the instruction "do not keep it afterwards"
+   * takes effect even in a failed generate). Even if these notifications rethrow the same
+   * exception, the generation throws only the original one.
    *
-   * NOTE: 毎 step の VAE プレビューは提供しない。既定の段ごと運転では VAE は DiT を解放した
-   * **後**にしかロードできない（VRAM の MUST — モジュール doc）ので、途中結果として渡せるのは生 latent
-   * （`copyLatents`）だけ。プレビューは `approximatePreview`（`@karume/models/anima`）が
-   * この latent から近似する。
+   * NOTE: no per-step VAE preview is provided. In the default per-stage operation the VAE can be
+   * loaded only **after** the DiT is released (the VRAM MUST — module doc), so the only
+   * intermediate result that can be handed out is the raw latent (`copyLatents`).
+   * `approximatePreview` (`@karume/models/anima`) approximates a preview from this latent.
    *
-   * MUST: `onEvent` の中で同じパイプラインの `generate` / `dispose` を
-   * await してはならない（直列化鎖の自己デッドロック — 中断は throw で行う）。
+   * MUST NOT await `generate` / `dispose` of the same pipeline inside `onEvent` (a self-deadlock of
+   * the serialisation chain — abort with a throw instead).
    */
   readonly onEvent?: (event: AnimaGenerateEvent) => void | Promise<void>;
 };
 
 /**
- * {@link AnimaPipelineOptions.onRunDiagnostics} が受けるコンポーネント名（Session 1 本 = 1 名）。
- * `stage` イベント（{@link AnimaGenerateEvent}）の段名も同じ 4 名。
+ * Component names {@link AnimaPipelineOptions.onRunDiagnostics} receives (one Session = one name).
+ * The stage names of the `stage` event ({@link AnimaGenerateEvent}) are the same four.
  */
 export type AnimaRunComponent = "text_encoder" | "text_conditioner" | "transformer" | "vae_decoder";
 
-/** `denoise-step` の `copyLatents()` が返す途中 latent の写し。 */
+/** Copy of the intermediate latent returned by `copyLatents()` of `denoise-step`. */
 export type AnimaLatentSnapshot = {
   readonly data: Float32Array<ArrayBuffer>;
-  /** latent の形 `[1,C,H,W]`（DiT の plan が決めた値）。 */
+  /** Latent shape `[1,C,H,W]` (the value the DiT plan decided). */
   readonly shape: readonly number[];
 };
 
-/** {@link AnimaGenerateRequest.onEvent} が受ける生成イベント。 */
+/** Generation events {@link AnimaGenerateRequest.onEvent} receives. */
 export type AnimaGenerateEvent =
   /**
-   * 段の開始（`start`）と終了（`end`）。段ごと運転では Session 構築の**前**と解放の**後**に
-   * 当たり、GB 級ロードの進捗が見える。持ち越した常駐 DiT を実効値 `"transformer"` で使う
-   * `transformer` 段では start → end にロードも解放も入らない（段の本体だけ）。実効値
-   * `"per-stage"` で使う段では解放（手放し）が、OOM で退避した段では解放と段ごとのロードが
-   * start → end の中に入る。途中で落ちたら `end` は出ない。
+   * Stage start (`start`) and end (`end`). In per-stage operation they fall **before** Session
+   * construction and **after** release, so the progress of GB-scale loads is visible. A
+   * `transformer` stage that uses a carried-over resident DiT with effective `"transformer"` has no
+   * load or release between start and end (only the stage body). With effective `"per-stage"` the
+   * release is inside start → end, and after an OOM eviction the release and the per-stage load are
+   * inside. If the stage fails midway, `end` is not emitted.
    */
   | { readonly kind: "stage"; readonly component: AnimaRunComponent; readonly at: "start" | "end" }
   | {
       readonly kind: "denoise-step";
-      /** 完了した step 数（1-based）。 */
+      /** Number of completed steps (1-based). */
       readonly step: number;
       readonly steps: number;
-      /** その step で消費した sigma。 */
+      /** The sigma consumed in that step. */
       readonly sigma: number;
-      /** 呼んだときだけ途中 latent を写して返す（{@link latentSnapshot}）。 */
+      /** Copies and returns the intermediate latent only when called ({@link latentSnapshot}). */
       readonly copyLatents: () => AnimaLatentSnapshot;
     }
-  /** VAE タイル 1 枚の decode 完了（`tile` は 1-based）。 */
+  /** Decode of one VAE tile completed (`tile` is 1-based). */
   | { readonly kind: "vae-tile"; readonly tile: number; readonly tiles: number }
   /**
-   * DiT の常駐の変化（ADR 0112）。既定の段ごと運転で常駐と無関係な generate では出ない。
+   * Change of DiT residency (ADR 0112). Not emitted by a generate in the default per-stage
+   * operation unrelated to residency.
    *
-   * - `retained` / `request`: DiT をこの generate の後も持ち続ける（`transformer` 段の end の前）。
-   * - `released` / `request`: 持ち越した常駐 DiT を、実効値 `"per-stage"` に従って手放した
-   *   （DiT 段の end の前 — generate が DiT 段の前で失敗したときは、その失敗の後に出る）。
-   * - `released` / `downgraded`: 常駐を求められたが、退避（`out-of-memory` / `headroom`）で格下げ済み
-   *   なので持たない。
-   * - `evicted` / `headroom`: 次の段が要る量が常駐 DiT の上に入らない（試し確保が OOM）ので、**段を
-   *   張る前に**常駐 DiT を捨てた。出る場所は 2 つ — `text_encoder` の `stage` start より前（text_encoder /
-   *   text_conditioner の必要量で量った — 持ち越した DiT がある generate）か、`transformer` の `stage` end
-   *   と `vae_decoder` の `stage` start の間（vae_decoder の必要量で量った — その時点で DiT が席に載って
-   *   いるとき）。以後この pipeline は常駐しない（格下げ — OOM の退避と同じく戻さない）。text 段の前で
-   *   退避し、かつ実効値が `"transformer"` なら、この generate の DiT 段の end の前に `released` /
-   *   `downgraded` が続く（実効値 `"per-stage"` なら DiT 段は段ごと運転で何も名乗らない）。VAE 段の前で
-   *   退避したときは、DiT 段は既に `retained` / `request` を名乗っている。
-   * - `evicted` / `out-of-memory`: 常駐 DiT がある状態で段が `GpuOutOfMemoryError` を投げたので
-   *   常駐 DiT を捨て、**その段を 1 回だけ最初からやり直す**（DiT 段なら段ごと運転で —
-   *   `denoise-step` / `vae-tile` はこの後 1 から出直す）。以後この pipeline は常駐しない。DiT 段で
-   *   退避するのは前の generate から持ち越した DiT だけ（この generate で作った DiT の OOM は段ごと
-   *   運転と同じ VRAM 構成なので、退避せずにそのまま投げる — ADR 0112 決定 3）。
-   * - `evicted` / `failure`: 持ち越した常駐 DiT を使った DiT 段が失敗した（denoise ループ内の
-   *   `onEvent` の throw を含む）ので常駐 DiT を捨てた。
+   * - `retained` / `request`: the DiT is kept after this generate too (before the end of the
+   *   `transformer` stage).
+   * - `released` / `request`: the carried-over resident DiT was released as effective `"per-stage"`
+   *   says (before the end of the DiT stage — when the generate fails before the DiT stage, after
+   *   that failure).
+   * - `released` / `downgraded`: residency was requested, but the pipeline is downgraded by an
+   *   eviction (`out-of-memory` / `headroom`), so the DiT is not kept.
+   * - `evicted` / `headroom`: the next stage's need does not fit on top of the resident DiT (the
+   *   headroom probe hit OOM), so the resident DiT was discarded **before the stage was opened**.
+   *   It is emitted in one of two places — before the `stage` start of `text_encoder` (measured
+   *   with the needs of text_encoder / text_conditioner — a generate with a carried-over DiT), or
+   *   between the `stage` end of `transformer` and the `stage` start of `vae_decoder` (measured
+   *   with the vae_decoder need — when a DiT is in the slot at that point). Afterwards this
+   *   pipeline does not keep the DiT resident (downgrade — not undone, like an OOM eviction). With
+   *   an eviction before the text stages and effective `"transformer"`, `released` / `downgraded`
+   *   follows before the end of this generate's DiT stage (with effective `"per-stage"` the DiT
+   *   stage runs per-stage and reports nothing). With an eviction before the VAE stage, the DiT
+   *   stage has already reported `retained` / `request`.
+   * - `evicted` / `out-of-memory`: a stage threw `GpuOutOfMemoryError` while a resident DiT
+   *   existed, so the resident DiT was discarded and **that stage is re-run once from the start**
+   *   (a DiT stage in per-stage operation — `denoise-step` / `vae-tile` restart from 1 afterwards).
+   *   Afterwards this pipeline does not keep the DiT resident. In the DiT stage only a DiT carried
+   *   over from an earlier generate is evicted (an OOM of a DiT created in this generate has the
+   *   same VRAM layout as per-stage operation, so it is thrown as is without eviction — ADR 0112
+   *   decision 3).
+   * - `evicted` / `failure`: the DiT stage using a carried-over resident DiT failed (including a
+   *   throw from `onEvent` in the denoise loop), so the resident DiT was discarded.
    */
   | {
       readonly kind: "residency";
@@ -288,36 +318,43 @@ export type AnimaGenerateEvent =
     };
 
 /**
- * 途中 latent を返す口を作る（**lazy copy** — 呼ばれたときだけ写す）。
+ * Builds the function that returns the intermediate latent (**lazy copy** — copies only when
+ * called).
  *
- * 進捗だけを購読する消費側にコピー費用が一切かからず、内部の配列を渡さないので「次 step の
- * 入力を購読側に握られる」事故も構造的に起きない。
+ * A consumer that subscribes only to progress pays no copy cost, and since the internal array is
+ * never handed out, the accident "the subscriber holds the next step's input" cannot happen
+ * structurally.
  *
- * MUST: `data` だけでなく `shape` も写す。実引数は `plan.latentShape` の**素の可変配列**で、
- * 参照を渡すと購読側の書き換えが次 step の patchify / rope の対応を崩す（要素数は変わらない
- * ので末尾の「出た画像の寸法 == 要求解像度」検査も通り、黙って別物が出る）。
+ * MUST: copy `shape` as well as `data`. The actual argument is **the raw mutable array** of
+ * `plan.latentShape`; passing the reference lets a subscriber's modification break the patchify /
+ * rope correspondence of the next step (the element count does not change, so the final "output
+ * image size == requested resolution" check passes too, and a different picture comes out
+ * silently).
  *
- * MUST: 呼ばれた時点ではなく**作った時点**の配列を写す（引数で束縛する）。denoise ループの
- * `current` は step ごとに**新しい配列へ差し替わる**ので、この束縛がそのまま「その step の
- * latent」になる。ループ変数を閉じ込めると、後から呼んだ購読側に別 step の latent が返る。
+ * MUST: copy the array **as of creation**, not as of the call (bind it through the argument). The
+ * denoise loop's `current` is **replaced with a new array** each step, so this binding is exactly
+ * "that step's latent". Capturing the loop variable would return another step's latent to a
+ * subscriber that calls later.
  *
- * NOTE: `export` は GPU 無しで独立性を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: `export` is for the tests that pin the independence without a GPU (not exposed on `mod.ts`
+ * / the subpath surface — ADR 0008).
  */
 export const latentSnapshot =
   (latents: Float32Array<ArrayBuffer>, shape: readonly number[]): (() => AnimaLatentSnapshot) =>
   (): AnimaLatentSnapshot => ({ data: new Float32Array(latents), shape: [...shape] });
 
 /**
- * Anima が受ける実行ノブ（manifest の quant 宣言と明示指定の両方）。優先順位・値域・組合せ・
- * 送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合だけを決める。
+ * Execution knobs Anima accepts (both from the manifest's quant declaration and explicit options).
+ * Precedence, value ranges, combinations and the classification of the thrown type are held by the
+ * cross-family `resolveSessionOptions`; this only decides the accepted set.
  *
- * linear / 融合 attention の実行形 3 欄を受け、並列 GEMV と融合の 4 欄は受けない — 配布形が
- * 宣言し参照値で確かめてあるのは前者だけで、後者（Gemma の decode 向けに足したノブ）は
- * Anima のグラフでは効く席も数値も確かめていない組合せだから。
+ * It accepts the three fields for the execution form of linear / fused attention and not the four
+ * for parallel GEMV and fusion — only the former are declared by the distribution and confirmed by
+ * reference values; the latter (knobs added for Gemma's decode) are combinations whose effect and
+ * numerics have not been confirmed on Anima's graphs.
  *
- * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: `export` is so that the equivalence test runs every quant of the mirror through the same
+ * table (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const ANIMA_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: true,
@@ -330,95 +367,108 @@ export const ANIMA_SESSION_POLICY: FamilySessionPolicy = {
   packedStaticQuantize: false,
 };
 
-/** 構築オプション（{@link AnimaPipeline.fromAssets} / {@link AnimaPipeline.fromPretrained} 共通）。 */
+/**
+ * Construction options (shared by {@link AnimaPipeline.fromAssets} /
+ * {@link AnimaPipeline.fromPretrained}).
+ */
 export type AnimaPipelineOptions = {
   /**
-   * 既存の GPU を共有する。**渡した側が所有権を持つ**ので {@link AnimaPipeline.dispose} は
-   * 破棄しない。省略時はパイプラインが内部で `acquireGpu` し、`dispose()` で破棄する。
+   * Shares an existing GPU. **The caller keeps ownership**, so {@link AnimaPipeline.dispose} does
+   * not destroy it. When omitted, the pipeline calls `acquireGpu` internally and destroys it in
+   * `dispose()`.
    */
   readonly gpu?: GpuContext;
-  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  /** Model (a key of the manifest's models). Defaults to `defaultModel`. */
   readonly model?: string;
-  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  /** Execution configuration (a key of that model's quants). Defaults to `defaultQuant`. */
   readonly quant?: string;
   /**
-   * `Session.run` 1 回ごとの診断を受け取る観測席（DiT は 1 step = 1 回・VAE は 1 タイル =
-   * 1 回）。op 別 GPU 時間（`lastRunTiming`）が要るときは `gpu` に
-   * `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
-   * コールバックの例外は握らない（fail loudly — 生成ごと落ちる）。
+   * Observation hook that receives the diagnostics of each `Session.run` (DiT: one step = one run,
+   * VAE: one tile = one run). For per-op GPU time (`lastRunTiming`), pass
+   * `acquireGpu({ gpuTiming: true })` as `gpu` (ADR 0021 — not measured by default). Exceptions
+   * from the callback are not swallowed (fail loudly — the whole generation fails).
    */
   readonly onRunDiagnostics?: (
     component: AnimaRunComponent,
     diagnostics: SessionDiagnostics,
   ) => void;
   /**
-   * 構築の中断。{@link AnimaPipeline.fromAssets} が段の境目（入口 / トークナイザ解釈 /
-   * 各 `openContainer` の間 / GPU 取得の前後）で検査する。入口を除く各境目では**イベントループへ
-   * 1 度譲ってから**検査するので、同期解析の最中に届いた中断も次の境目で効く
-   * （`options.gpu` を渡して await が 1 つも無い経路でも同じ）。
-   * {@link AnimaPipeline.fromPretrained} は同じ 1 本を取得層へも渡すので、**DL と組み立ての
-   * どちらの最中でも**同じノブで中断できる（DL 完了後だけ中止ボタンが無反応、を作らない）。
+   * Abort of construction. {@link AnimaPipeline.fromAssets} checks it at the boundaries between
+   * steps (entry / tokenizer parsing / between each `openContainer` / before and after acquiring
+   * the GPU). At every boundary except the entry it **yields to the event loop once** before
+   * checking, so an abort that arrives during synchronous parsing takes effect at the next boundary
+   * (the same on a path with no await at all because `options.gpu` was passed).
+   * {@link AnimaPipeline.fromPretrained} passes the same signal to the fetch layer, so the same
+   * knob aborts **during either download or assembly** (no abort button that stops responding only
+   * after the download finished).
    *
-   * 中断の例外は `signal.reason` を**そのまま**投げる（包まない — 消費側が
-   * `error === controller.signal.reason` で自分の中断を識別できる）。
+   * The abort exception is `signal.reason` thrown **as is** (not wrapped — the consumer can
+   * recognise its own abort with `error === controller.signal.reason`).
    */
   readonly signal?: AbortSignal;
   /**
-   * linear の実行形を quant の宣言より優先して指定する（省略時は quant の `session` の宣言 →
-   * runtime 既定の順 — ADR 0058 追記 2026-09-26）。効くのは **DiT（transformer）の Session だけ**で、
-   * text 系と VAE は quant の宣言どおり（f32）に走る（quant 席の `session` と同じ適用範囲）。`"f16"` は device の shader-f16 を要し、
-   * 自前で取る GPU には要求を足す。共有 GPU（`gpu`）が持たなければ重みを取る前に落ちる。
-   * 不正な値・組合せは `ModelInputError`（ADR 0107）。
+   * Execution form of linear, taking precedence over the quant's declaration (when omitted: the
+   * quant's `session` declaration → the runtime default — ADR 0058 addendum 2026-09-26). It applies
+   * **only to the DiT (transformer) Session**; the text stages and the VAE run as the quant
+   * declares (f32) (the same scope as the quant preset's `session`). `"f16"` needs the device's
+   * shader-f16; a GPU acquired internally gets the request added. If a shared GPU (`gpu`) lacks it,
+   * this fails before the weights are fetched. Invalid values / combinations give `ModelInputError`
+   * (ADR 0107).
    */
   readonly linearCompute?: SessionOptions["linearCompute"];
   /**
-   * 融合 attention の実行形を quant の宣言より優先して指定する（優先順位と shader-f16 の扱いは
-   * {@link AnimaPipelineOptions.linearCompute} と同じ）。`attentionScoreStorage: "f16"` との
-   * 同時指定は runtime が受けない組合せなので `ModelInputError`。
+   * Execution form of fused attention, taking precedence over the quant's declaration (precedence
+   * and shader-f16 handling as in {@link AnimaPipelineOptions.linearCompute}). Combined with
+   * `attentionScoreStorage: "f16"` it is a combination the runtime does not accept, so
+   * `ModelInputError`.
    */
   readonly attentionCompute?: SessionOptions["attentionCompute"];
   /**
-   * 融合 attention の S の格納形を quant の宣言より優先して指定する（優先順位は
-   * {@link AnimaPipelineOptions.linearCompute} と同じ・shader-f16 は要らない）。
+   * Storage form of fused attention's S, taking precedence over the quant's declaration (precedence
+   * as in {@link AnimaPipelineOptions.linearCompute}; shader-f16 is not needed).
    */
   readonly attentionScoreStorage?: SessionOptions["attentionScoreStorage"];
   /**
-   * generate の後に DiT の Session を持ち続けるかの既定（{@link AnimaResidency}・省略時
-   * `"per-stage"` = 段ごとに張って畳む従来の挙動）。generate ごとに
-   * {@link AnimaGenerateRequest.residency} で上書きできる。
+   * Default for whether the DiT Session is kept after a generate ({@link AnimaResidency}; when
+   * omitted `"per-stage"` = the old behaviour of opening and closing per stage). Each generate can
+   * override it with {@link AnimaGenerateRequest.residency}.
    *
-   * `"transformer"` は 2 回目以降の generate で DiT の読み直し・計画の導出・中間バッファの作り直しを
-   * 消す代わりに、text / VAE の段が常駐 DiT の上に乗る（既定席 1024² で +2,646MiB・4 GB 級の
-   * GPU では使えない — docs/limitations.md）。VRAM が足りずに OOM したら常駐 DiT を退避して
-   * その段をやり直し、以後は常駐しない（`residency` イベントで名乗る — ADR 0112）。
-   * 構築時には Session を張らない（常駐 DiT は最初の generate の DiT 段で作る）。
-   * 未知の綴りは重みを取る前に `ModelInputError`。
+   * `"transformer"` removes the DiT reload, plan derivation and intermediate-buffer rebuild from
+   * the second generate on, at the cost of the text / VAE stages stacking on the resident DiT
+   * (+2,646MiB at 1024² with the default preset; not usable on 4 GB-class GPUs —
+   * docs/limitations.md). On an OOM for lack of VRAM the resident DiT is evicted, the stage re-run,
+   * and residency is not used afterwards (reported with the `residency` event — ADR 0112). No
+   * Session is opened at construction (the resident DiT is created in the DiT stage of the first
+   * generate). An unknown spelling gives `ModelInputError` before the weights are fetched.
    */
   readonly residency?: AnimaResidency;
 };
 
 /**
- * {@link AnimaPipeline.fromPretrained} が追加で受ける取得層のオプション（hub へ透過する）。
- * `signal` は構築側と共有なので {@link AnimaPipelineOptions} が持つ。
+ * Extra fetch-layer options {@link AnimaPipeline.fromPretrained} accepts (passed through to the
+ * hub). `signal` is shared with construction, so {@link AnimaPipelineOptions} holds it.
  *
- * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
- * 欄ごとの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
+ * NOTE: the per-field documentation, including that `headers` / `fetch` / `caches` / `onRetry` are
+ * **for HTTP sources only**, lives in one place: {@link FromPretrainedHubOptions}.
  */
 export type AnimaFromPretrainedOptions = AnimaPipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions;
 
-/** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
+/**
+ * Input for building directly from fetched assets (pass the return value of the hub's `fetchAssets`
+ * as is).
+ */
 export type AnimaAssets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
 /**
- * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は
- * {@link readAssetBuffer}）。
+ * Turns fetched bytes into an ArrayBuffer that can be passed to `openContainer` (the check itself
+ * is {@link readAssetBuffer}).
  *
- * MUST: `slice` で写さない — DiT は 1 本 3.7GiB あり、ホスト RAM のピークが倍になる。
+ * MUST: do not copy with `slice` — the DiT alone is 3.7GiB, and the host RAM peak would double.
  */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -426,9 +476,9 @@ const assetBuffer = (
 ): ArrayBuffer => readAssetBuffer("anima", "weights / assets", assets, key);
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 8 家族共有 —
- * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`transformer`）か、
- * 分割形の part 列（`transformer[0]` / `transformer[1]` / …）。
+ * Component opener of the whole-asset surface (`fromAssets`) (the implementation is shared by every
+ * family — {@link assetComponentOpener}). A component key is either the single-form `krm`
+ * (`transformer`) or the parts of the split form (`transformer[0]` / `transformer[1]` / …).
  */
 const assetOpener = (assets: AnimaAssets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("anima", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
@@ -442,8 +492,9 @@ const assetBytes = (
 };
 
 /**
- * グラフ入力の**静的**次元を引く。
- * MUST: パイプライン側に literal を置かない — コンテナが正で、モデルを差し替えたら値も追随する。
+ * Reads the **static** dimensions of a graph input.
+ * MUST: do not put literals on the pipeline side — the container is the source of truth, and the
+ * values follow when the model is replaced.
  */
 const graphInputShape = (model: GraphOwner, inputName: string): readonly (number | string)[] => {
   const spec = model.graph.inputs.find((input) => input.name === inputName);
@@ -473,9 +524,9 @@ const staticOutputShape = (model: GraphOwner): readonly number[] => {
 };
 
 /**
- * 記号次元を許す形から**最終次元**（= 特徴幅）を引く。S 形の `tokens [1,S,68]` は軸 1 が
- * 記号なので {@link staticInputShape} では読めないが、patch 幾何を割り出すのに要るのは
- * 最終次元だけ。
+ * Reads the **last dimension** (= feature width) of a shape that may have symbolic dimensions. Axis
+ * 1 of the S-form `tokens [1,S,68]` is symbolic, so {@link staticInputShape} cannot read it, but
+ * deriving the patch geometry needs only the last dimension.
  */
 const featureWidth = (dims: readonly (number | string)[], where: string): number => {
   const last = dims.at(-1);
@@ -495,10 +546,11 @@ const idsTensor = (values: Int32Array<ArrayBuffer>): Tensor => ({
 });
 
 /**
- * 段 1 本が常駐 DiT の上に要るバイト数（`residency.ts` の {@link stageMemoryNeed}）。
+ * Bytes one stage needs on top of the resident DiT ({@link stageMemoryNeed} in `residency.ts`).
  *
- * device の上限 2 つは全段に渡す — VAE の中間は上限で行ブロックが決まり、無いと見積りが落ちる
- * （text 系にも同じ形で渡す — 段の実引数と同じ見積りにするため）。
+ * The two device limits are passed to every stage — the VAE's intermediates get their row blocks
+ * from the limits, and the estimate fails without them (passed the same way to the text stages too,
+ * so the estimate matches the stage's actual arguments).
  */
 const stageNeed = (
   state: AnimaState,
@@ -515,12 +567,14 @@ const stageNeed = (
   );
 
 /**
- * text 段の前の量り（先回りの退避 — `residency.ts` の「退避の 2 本の線」）で使う、text_encoder /
- * text_conditioner が常駐 DiT の上に要るバイト数（段ごとの最大 — {@link generateMemoryNeed}）。
+ * Bytes text_encoder / text_conditioner need on top of the resident DiT, used by the measurement
+ * before the text stages (pre-emptive eviction — "The two lines of eviction" in `residency.ts`)
+ * (the per-stage maximum — {@link generateMemoryNeed}).
  *
- * 束縛はこの generate が段へ実際に渡す形から取る: text_encoder の `T` = qwen の id 列の長さ、
- * text_conditioner の `Tsrc` = その出力の長さ（= qwen の id 列の長さ）と `Ttgt` = T5 の id 列の長さ。
- * CFG の 2 本（正 / 負）は同じ Session で順に回るので長いほうで量る。
+ * The bindings come from the shapes this generate actually passes to the stages: text_encoder's `T`
+ * = the length of the qwen id sequence, text_conditioner's `Tsrc` = the length of that output (=
+ * the length of the qwen id sequence) and `Ttgt` = the length of the T5 id sequence. The two CFG
+ * prompts (positive / negative) run in turn on the same Session, so the longer one is measured.
  */
 const textStagesNeed = (
   state: AnimaState,
@@ -535,20 +589,22 @@ const textStagesNeed = (
 };
 
 /**
- * VAE 段の前の量り（DiT 段の後）で使う、vae_decoder が常駐 DiT の上に要るバイト数（静的形 — 束縛なし）。
+ * Bytes vae_decoder needs on top of the resident DiT, used by the measurement before the VAE stage
+ * (after the DiT stage) (static shape — no bindings).
  */
 const vaeStageNeed = (state: AnimaState): number => stageNeed(state, state.vaeDecoder, {});
 
 /**
- * 実際に uncond 側へ渡すネガティブプロンプトを決める（{@link AnimaPipeline.generate} の入口・
- * GPU に触れる前の純粋な検査）。
+ * Decides the negative prompt actually passed to the uncond side (the entry of
+ * {@link AnimaPipeline.generate}; a pure check before touching the GPU).
  *
- * MUST: 効かないノブを黙って受けない。guidance=1 は uncond 分岐を丸ごと計算しないので、
- * ネガティブプロンプトは 1 文字も使われない（指定できたように見えるのが最悪）。逆に uncond を
- * 計算する設定で綴りが無ければ、GPU へ入る前のここで落とす。
+ * MUST: do not silently accept a knob that has no effect. guidance=1 skips the uncond branch
+ * entirely, so not a single character of the negative prompt is used (looking as if it could be
+ * specified is the worst case). Conversely, with a setting that computes uncond and no spelling
+ * given, this fails here before entering the GPU.
  *
- * uncond の要否は `guidance` だけの関数なので、判定は引数に取らずここで導く（呼び手の
- * `wantsUncond` と食い違う余地を作らない）。
+ * Whether uncond is needed is a function of `guidance` alone, so it is derived here rather than
+ * taken as an argument (leaving no room to disagree with the caller's `wantsUncond`).
  */
 export const resolveNegativePrompt = (
   requested: string | undefined,
@@ -556,8 +612,9 @@ export const resolveNegativePrompt = (
   guidance: number,
 ): string | undefined => {
   const wantsUncond = needsUncond(guidance);
-  // どちらも `negativePrompt` と `guidanceScale` の**組合せ**の違反で、打つ手は要求の側にある
-  // （ADR 0107 決定 3 の値域・型・組合せ）。同じ入口の `guidanceScale` 非有限と型を揃える。
+  // Both are violations of the **combination** of `negativePrompt` and `guidanceScale`, and the fix
+  // is on the request side (range, type and combination per ADR 0107 decision 3). The type matches
+  // the non-finite `guidanceScale` check at the same entry.
   if (!wantsUncond && requested !== undefined) {
     throw new ModelInputError(
       `guidanceScale ${guidance} では uncond 側を計算しないので negativePrompt は効かない` +
@@ -575,8 +632,9 @@ export const resolveNegativePrompt = (
 };
 
 /**
- * 1 step ぶんの更新結果。`previousX0` は**そのまま次 step の入力へ持ち回る**状態で、
- * DPM++ 2M の 2 次項が読む唯一の履歴（Euler は履歴を持たないので常に `undefined`）。
+ * Update result of one step. `previousX0` is state **carried as is into the next step's input**,
+ * the only history DPM++ 2M's second-order term reads (Euler has no history, so it is always
+ * `undefined`).
  */
 export type AnimaDenoiseUpdate = {
   readonly sample: Float32Array<ArrayBuffer>;
@@ -584,24 +642,27 @@ export type AnimaDenoiseUpdate = {
 };
 
 /**
- * サンプラ種別による更新則の選択点（denoise ループが 1 step ごとに呼ぶ**唯一の分岐**）。
+ * The point where the sampler type selects the update rule (**the only branch** the denoise loop
+ * calls per step).
  *
- * MUST: `"euler"` は `cfgEulerStep` と Δσ の綴りを 1 ビットも変えない — `scheduler.type` を
- * 持たない既存の配布 manifest は既定 `"euler"` に落ちる（`config.ts`）ので、**配布済みリポの
- * 出力画像がここでビット同一のまま**でなければならない。
+ * MUST: `"euler"` does not change a single bit of `cfgEulerStep` and the spelling of Δσ — existing
+ * distribution manifests without `scheduler.type` fall back to the default `"euler"` (`config.ts`),
+ * so **the output images of already distributed repositories have to stay bit-identical** here.
  *
- * CFG 合成はどちらの更新則も自分の内側で行う（同じ式）。uncond 側 forward の要否は
- * {@link needsUncond} が `guidance` だけから決めるので、**種別に依存しない** — 呼び出し側の
- * 分岐は「何 step 回すか」も「uncond を計算するか」も共通のまま。
+ * Both update rules do the CFG mixing inside (the same formula). Whether the uncond forward is
+ * needed is decided by {@link needsUncond} from `guidance` alone, so it **does not depend on the
+ * type** — the caller's branches for "how many steps" and "whether to compute uncond" stay shared.
  *
- * MUST: 更新後の latent の有限性をここで見る（O(N) のホスト走査）。f32 で有限な CFG 倍率でも DiT の出力との組で
- * 合成が溢れうる（倍率 1e38 × 差分 10）。非有限の latent を次の step と VAE の段へ黙って渡すと、真因の読めない
- * 形で最後の RGBA 変換まで遅れて落ちるか、VAE の中のクランプで普通の画素に化ける（Wan の denoise と同じ門）。
+ * MUST: check the finiteness of the updated latent here (an O(N) host scan). Even a CFG scale
+ * finite in f32 can overflow the mix in combination with the DiT output (scale 1e38 × difference
+ * 10). Passing a non-finite latent silently to the next step and the VAE stage either fails late at
+ * the final RGBA conversion in a form whose real cause cannot be read, or the clamp inside the VAE
+ * turns it into ordinary pixels (the same check as Wan's denoise).
  *
- * NOTE: 入力の形は {@link DpmSolverMultistepInput} をそのまま借りる（Euler が読むのは
- * `sigmas` / `index` / `guidance` / 出力 2 本で、DPM++ 2M の入力の部分集合）。
- * NOTE: `export` は GPU 無しで選択を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: the input shape borrows {@link DpmSolverMultistepInput} as is (Euler reads `sigmas` /
+ * `index` / `guidance` / the two outputs, a subset of DPM++ 2M's input).
+ * NOTE: `export` is for the tests that pin the selection without a GPU (not exposed on `mod.ts` /
+ * the subpath surface — ADR 0008).
  */
 export const denoiseStep = (
   type: AnimaSamplerType,
@@ -622,7 +683,7 @@ export const denoiseStep = (
   return update;
 };
 
-/** 更新則 1 本の適用（{@link denoiseStep} の分岐の本体）。 */
+/** Applies one update rule (the body of the branch in {@link denoiseStep}). */
 const applyUpdateRule = (
   type: AnimaSamplerType,
   input: DpmSolverMultistepInput,
@@ -648,7 +709,10 @@ const applyUpdateRule = (
   }
 };
 
-/** S 形 DiT の step 間で変わらない材料（rope 表と patch 幾何は解像度だけの関数）。 */
+/**
+ * Material of the S-form DiT that does not change between steps (the rope tables and patch geometry
+ * are functions of the resolution only).
+ */
 type DynDitPlan = {
   readonly geometry: DitPatchGeometry;
   readonly latentShape: readonly number[];
@@ -659,8 +723,8 @@ type DynDitPlan = {
 };
 
 /**
- * 解像度から S 形 DiT の材料を組む。denoise ループの外で 1 度だけ呼ぶ（毎 step 組み直すと
- * 1024px で 4MB×2 の無駄が step ごとに乗る）。
+ * Builds the S-form DiT material from the resolution. Called once outside the denoise loop
+ * (rebuilding it every step would add a waste of 4MB×2 per step at 1024px).
  */
 const planDynDit = (model: GraphOwner, ropeBase: RopeBase, resolution: ImageSize): DynDitPlan => {
   const tokenWidth = featureWidth(graphInputShape(model, "tokens"), "グラフ入力 'tokens'");
@@ -668,10 +732,12 @@ const planDynDit = (model: GraphOwner, ropeBase: RopeBase, resolution: ImageSize
     tokenWidth,
     featureWidth(graphOutputShape(model), "グラフ出力"),
   );
-  // MUST: latent の寸法は**解像度から**割り出す（S 形のグラフは解像度を持たない）。
-  // 取り違えは generate 末尾の「出た画像の寸法 == 要求解像度」検査が閉じる。
-  // MUST: 軸の順は `[1,C,H,W]`（綴りの WxH とは逆）。非正方でここを入れ替えると要素数は
-  // 合ったまま latent が転置され、絵が黙って別物になる（正方では検出不能な取り違え）。
+  // MUST: derive the latent size **from the resolution** (the S-form graph holds no resolution). A
+  // mix-up is caught by the "output image size == requested resolution" check at the end of
+  // generate.
+  // MUST: the axis order is `[1,C,H,W]` (the reverse of the spelling WxH). Swapping them here for a
+  // non-square size transposes the latent while the element count still matches, and the picture
+  // silently becomes a different one (a mix-up undetectable with square sizes).
   const latentHeight = resolution.height / ANIMA_SPATIAL_COMPRESSION;
   const latentWidth = resolution.width / ANIMA_SPATIAL_COMPRESSION;
   if (!Number.isInteger(latentHeight) || !Number.isInteger(latentWidth)) {
@@ -692,10 +758,16 @@ const planDynDit = (model: GraphOwner, ropeBase: RopeBase, resolution: ImageSize
   };
 };
 
-/** 段の本体が受ける run（出力 1 本を返す — 観測席への通知込み）。 */
+/**
+ * The run a stage body receives (returns the one output — including the notification to the
+ * observation hook).
+ */
 type StageRun = (inputs: Record<string, Tensor>) => Promise<Tensor>;
 
-/** Session 1 本の run を段の本体向けに包む（出力 1 本を取り出し、観測席へ診断を渡す）。 */
+/**
+ * Wraps one Session's run for a stage body (extracts the one output and passes the diagnostics to
+ * the observation hook).
+ */
 const stageRun = (
   session: Session,
   model: ModelComponent,
@@ -710,15 +782,15 @@ const stageRun = (
 };
 
 /**
- * pipeline の `dispose` の本体: 常駐 DiT を畳んでから GPU を破棄する（`destroyGpu` は内部で取った
- * GPU のときだけ渡す — 共有 GPU は呼び出し側の所有物）。
+ * Body of the pipeline's `dispose`: fold the resident DiT, then destroy the GPU (`destroyGpu` is
+ * passed only for an internally acquired GPU — a shared GPU belongs to the caller).
  *
- * MUST: 常駐 DiT が先（flush-before-destroy）。畳むのに失敗しても GPU は返す（`disposeSteps` の doc —
- * 失敗は全部回した後に投げる）。
+ * MUST: the resident DiT first (flush-before-destroy). Even if folding it fails, the GPU is
+ * returned (the doc of `disposeSteps` — failures are thrown after every step has run).
  *
- * NOTE: `export` は GPU 無しで順序と失敗の扱いを縛るテストのため（`mod.ts` / サブパス面には出さない
- * — ADR 0008）。実 GPU の e2e は「常駐 DiT が畳まれたこと」を観測する口を持たない（GpuContext に
- * live バイトの診断が無い）。
+ * NOTE: `export` is for the tests that pin the order and failure handling without a GPU (not
+ * exposed on `mod.ts` / the subpath surface — ADR 0008). The real-GPU e2e has no way to observe
+ * "the resident DiT was folded" (GpuContext has no diagnostics of live bytes).
  */
 export const disposeResidencyThenGpu = (
   residency: { readonly dispose: () => Promise<void> },
@@ -727,9 +799,9 @@ export const disposeResidencyThenGpu = (
   disposeSteps([() => residency.dispose(), ...(destroyGpu === undefined ? [] : [destroyGpu])]);
 
 /**
- * 1 グラフぶんの Session を張り、使い終わったら必ず解放する。
- * MUST: `finally` で dispose する — 途中で落ちたときに VRAM が残ると、後続の段が確保に
- * 失敗して「最初の失敗とは別の場所」で落ちる。
+ * Opens a Session for one graph and always releases it when done.
+ * MUST: dispose in `finally` — if VRAM stays after a failure midway, a later stage fails to
+ * allocate and fails "somewhere other than the first failure".
  */
 const withSession = async <T>(
   gpu: GpuContext,
@@ -746,7 +818,7 @@ const withSession = async <T>(
     failure = { error };
     throw error;
   } finally {
-    // MUST: dispose の失敗で body の失敗を上書きしない（`disposeSteps` の doc）。
+    // MUST: a dispose failure does not overwrite the body's failure (the doc of `disposeSteps`).
     await disposeSteps([
       () => {
         if (failure !== undefined) throw failure.error;
@@ -756,7 +828,10 @@ const withSession = async <T>(
   }
 };
 
-/** 観測席（{@link AnimaPipelineOptions.onRunDiagnostics}）へコンポーネント名を焼いて渡す。 */
+/**
+ * Binds the component name for the observation hook
+ * ({@link AnimaPipelineOptions.onRunDiagnostics}).
+ */
 const observer = (
   state: AnimaState,
   component: AnimaRunComponent,
@@ -765,7 +840,9 @@ const observer = (
   return listener === undefined ? undefined : (diagnostics) => listener(component, diagnostics);
 };
 
-/** {@link AnimaPipeline} の内部状態（コンストラクタが private なので型は公開しない）。 */
+/**
+ * Internal state of {@link AnimaPipeline} (the constructor is private, so the type is not public).
+ */
 type AnimaState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
@@ -777,7 +854,7 @@ type AnimaState = {
   readonly transformer: ModelComponent;
   readonly ropeBase: RopeBase;
   readonly vaeDecoder: ModelComponent;
-  /** generate が request で上書きしなかったときの実効 residency（検査済み）。 */
+  /** Effective residency when a generate does not override it in the request (checked). */
   readonly residency: AnimaResidency;
   readonly onRunDiagnostics?: (
     component: AnimaRunComponent,
@@ -785,39 +862,48 @@ type AnimaState = {
   ) => void;
 };
 
-/** 家族 admission（`AnimaPipeline.#admit`）が確定させる材料。 */
+/** Material the family admission (`AnimaPipeline.#admit`) settles. */
 type AnimaAdmission = {
   readonly config: AnimaPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
-  /** 明示指定と quant 宣言を合成した実効設定（{@link ANIMA_SESSION_POLICY}）。 */
+  /**
+   * Effective settings combining explicit options and the quant declaration
+   * ({@link ANIMA_SESSION_POLICY}).
+   */
   readonly sessionOptions: SessionOptions;
-  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  /**
+   * The quant declaration plus the features the effective settings need (both the request and the
+   * check read it).
+   */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
-  /** 構築オプションの residency（検査済み・省略時は既定）。 */
+  /** Residency from the construction options (checked; the default when omitted). */
   readonly residency: AnimaResidency;
 };
 
 /**
- * Anima のテキスト → 画像パイプライン。
+ * Anima's text → image pipeline.
  *
- * 構築は {@link AnimaPipeline.fromPretrained}（HF から取得）か
- * {@link AnimaPipeline.fromAssets}（取得済みバイト列）だけを入口にする — コンストラクタを
- * private にしてあるのは、manifest 検査と資産の突合を迂回した半端な状態を作れないようにする
- * ため（`createSession` / `acquireGpu` と同じ流儀 — ADR 0008）。
+ * Construction has only two entries: {@link AnimaPipeline.fromPretrained} (fetch from HF) or
+ * {@link AnimaPipeline.fromAssets} (already fetched bytes) — the constructor is private so that no
+ * half-built state can bypass the manifest checks and the asset comparison (the same style as
+ * `createSession` / `acquireGpu` — ADR 0008).
  */
 export class AnimaPipeline {
   readonly #state: AnimaState;
-  /** generate と dispose の直列化鎖（モジュール doc の「1 本ずつ」を公開 API 側で守る）。 */
+  /**
+   * Serialisation chain of generate and dispose (keeps the module doc's "one at a time" on the
+   * public API side).
+   */
   readonly #chain = createOperationChain();
   /**
-   * dispose の 1 本。**undefined でないことが「dispose 済み」**（別に真偽値を持つと、独立に
-   * 更新される派生状態になる）。
+   * The one dispose. **Not undefined means "disposed"** (a separate boolean would be derived state
+   * updated independently).
    */
   #disposal: Promise<void> | undefined;
   /**
-   * DiT の常駐の席（ADR 0112）。pipeline の所有物 — `options.gpu` を共有していても `dispose` で
-   * 畳む。鎖（{@link AnimaPipeline.#chain}）の内側からだけ触る。
+   * The DiT resident slot (ADR 0112). Owned by the pipeline — folded in `dispose` even when
+   * `options.gpu` is shared. Touched only from inside the chain ({@link AnimaPipeline.#chain}).
    */
   readonly #residency: TransformerResidency<Session>;
 
@@ -825,32 +911,37 @@ export class AnimaPipeline {
     this.#state = state;
     this.#residency = new TransformerResidency<Session>({
       dispose: (session) => session.dispose(),
-      // 退避（OOM / 空き不足）の後、解放が device に届くのを待つ（理由は settle-released-memory.ts の doc）。
-      // 空の submit がここで安全なのは、退避が走るのは使用量が確保の線（予算の 97%）以下のとき（先回りの
-      // 試し確保は解放まで待って返る・反応の退避は OOM で確保が拒まれた直後）か、device が既に死んでいる
-      // ときだけだから — wgpu の submit 後の 99% 線の判定（超えると device を失う）を踏まない。
-      // NOTE: B570 で pipeline の退避 → やり直し（evict-probe・ダミー 6 GiB）が device lost になったのは、
-      // 段の OOM が `queue.writeBuffer` の staging 側で、その時点で device が無効化されていたため
-      // （docs/research/2026-09-27-h35-oom-device-lost.md）— 解放待ちでは直らない。主線は先回りの退避
-      // （`residency.ts` の「退避の 2 本の線」）。
+      // After an eviction (OOM / not enough headroom), wait for the release to reach the device
+      // (the reason is in the doc of settle-released-memory.ts). The empty submit is safe here
+      // because an eviction runs only when usage is at or below the allocation line (97 % of the
+      // budget) (the pre-emptive probe returns after waiting for the release; a reactive eviction
+      // comes right after an allocation was refused with OOM) or when the device is already dead —
+      // so it never hits wgpu's after-submit 99 % line check (exceeding it loses the device).
+      // NOTE: on the B570 the pipeline's eviction → re-run (evict-probe, 6 GiB dummy) hit device
+      // loss because the stage's OOM was on the staging side of `queue.writeBuffer`, which had
+      // already invalidated the device (docs/research/2026-09-27-h35-oom-device-lost.md) — waiting
+      // for the release does not fix it. The main line is pre-emptive eviction ("The two lines of
+      // eviction" in `residency.ts`).
       settleRelease: () => settleReleasedMemory(state.gpu),
     });
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
-   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
-   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
-   * `src/hub/components.ts`）。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。
-   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。
+   * Fetches from a distribution and builds (`loadManifest` → `resolveSelection` → fetch **only each
+   * component's descriptor (part 0)** for admission → warm the weight parts → `fetchAssets` for the
+   * remaining assets → build). Blocks are read in part order at the moment each Session is built
+   * (ADR 0109 — `src/hub/components.ts`). A string `ref` is read as `{ repo }` (= following
+   * `main`). **`ref` is required** (there is no default source — the MUST in
+   * `src/hub/repo-ref.ts`).
    *
-   * 部品を別リポの同じ役割で差し替えるときは
-   * {@link FromPretrainedComponentOptions.components}（`text_encoder` /
-   * `text_conditioner` / `transformer` / `vae_decoder`）。
+   * To replace a component with the same role from another repository, use
+   * {@link FromPretrainedComponentOptions.components} (`text_encoder` / `text_conditioner` /
+   * `transformer` / `vae_decoder`).
    *
-   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
-   * 通らない（{@link AnimaFromPretrainedOptions} の HTTP 専用ノブは効かない）。
+   * A local distribution is passed as **a source handle** (`localDirectory` / `nodeDirectory` of
+   * `@karume/hub/node` / `denoDirectory` of `@karume/hub/deno`). It skips the check on HF's
+   * `owner/name` spelling and goes through neither the network nor CacheStorage (the HTTP-only
+   * knobs of {@link AnimaFromPretrainedOptions} have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
@@ -868,7 +959,8 @@ export class AnimaPipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const selection = resolveSelection(loaded.manifest, choice);
-    // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない）。
+    // The signal goes to **both** the fetch layer and the build (no window where aborting stops
+    // working the moment the download ends).
     const buildOptions: AnimaPipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...choice,
@@ -885,7 +977,8 @@ export class AnimaPipeline {
         : { attentionScoreStorage: options.attentionScoreStorage }),
       ...(options.residency === undefined ? {} : { residency: options.residency }),
     };
-    // 家族の門は admission 席で通す（重みの part を取る前 — `src/hub/components.ts`）。
+    // The family checks run in the admission hook (before the weight parts are fetched —
+    // `src/hub/components.ts`).
     const { admitted, assets, open } = await loadContainerComponents(
       "AnimaPipeline.fromPretrained",
       loaded,
@@ -893,8 +986,9 @@ export class AnimaPipeline {
       COMPONENT_KEYS,
       async () => {
         const admitted = AnimaPipeline.#admit(loaded.manifest, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
-        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+        // The `requiredLimits` the distribution declares are checked here **before the weight parts
+        // are fetched** (ADR 0089 decision 5 — the limits of a shared GPU, or the adapter's
+        // measured values on the path that acquires its own).
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
@@ -912,22 +1006,27 @@ export class AnimaPipeline {
   }
 
   /**
-   * この manifest を anima として実行できるかを見る（`src/hub/components.ts` の家族
-   * admission 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
+   * Checks whether this manifest can run as anima (the family admission hook of
+   * `src/hub/components.ts` — on the fetch surface it is called **before a single byte of the
+   * weight parts is fetched**).
    *
-   * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
-   * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
-   * MUST: manifest の契約違反は **GPU を取りに行く前**に落とす（他 6 家族と同じ順序）。
+   * MUST: gather the family checks in this one place. Scattered into later steps, they would fail
+   * on the fetch surface only **after** GB-scale weights were downloaded (the implementation would
+   * be narrower than the wording of ADR 0070 decision 5).
+   * MUST: manifest contract violations fail **before acquiring the GPU** (the same order as the
+   * other families).
    *
-   * NOTE: グラフを受け取らないのは、この家族が「グラフ宣言 × pipelineConfig」の突合を構築時に
-   * 持たないため（patch 幾何と rope は解像度ごとに `planDynDit` が生成時に導く）。資産
-   * （tokenizer 2 本 / rope 素表）の解析もこの席へは置けない — admission の時点で手元にあるのは
-   * 資産の**宣言**（名前 → 役割・論理長）だけでバイト列はまだ無い（待つと重み prefetch より前
-   * という位置が保てない）ので {@link AnimaPipeline.#build} に残る。
+   * NOTE: it takes no graph because this family has no "graph declaration × pipelineConfig"
+   * comparison at construction (`planDynDit` derives the patch geometry and rope per resolution at
+   * generation). Parsing the assets (two tokenizers / the rope base table) cannot live in this hook
+   * either — at admission only the **declarations** of the assets (name → role, logical length) are
+   * at hand, not the bytes (waiting for them would lose the position before the weight prefetch),
+   * so it stays in {@link AnimaPipeline.#build}.
    */
   static #admit(manifest: Manifest, options: AnimaPipelineOptions): AnimaAdmission {
-    // 中断の検査は**段の境目**に置く（各段は不可分 — 3.7GiB の部品を途中で畳む口は無い）。
-    // 入口が最初の 1 本: 中断済みで呼ばれたら資産に 1 バイトも触らずに返す。
+    // Abort checks sit at **the boundaries between steps** (each step is indivisible — there is no
+    // way to fold a 3.7GiB component midway). The entry is the first one: when called already
+    // aborted, it returns without touching a byte of the assets.
     options.signal?.throwIfAborted();
     const modelName = options.model ?? manifest.defaultModel;
     if (!Object.hasOwn(manifest.models, modelName)) {
@@ -945,7 +1044,8 @@ export class AnimaPipeline {
       );
     }
     if (major !== ANIMA_PIPELINE_MAJOR) {
-      // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門（ADR 0038 §6）。
+      // The only check that stops the silent degradation of "old implementation × new repository"
+      // (ADR 0038 §6).
       throw new Error(
         `AnimaPipeline: pipeline '${name}/${major}' の major に未対応` +
           `（この実装が読めるのは ${ANIMA_PIPELINE_NAME}/${ANIMA_PIPELINE_MAJOR}）`,
@@ -961,8 +1061,9 @@ export class AnimaPipeline {
       );
     }
     const quant = entry.quants[quantName];
-    // 明示 > quant 宣言 > runtime 既定（全家族共通の 1 本）。未対応の宣言も誤った明示指定も
-    // ここで落とす（重みの part を取る前）。
+    // Explicit > quant declaration > runtime default (one implementation shared by every family).
+    // Unsupported declarations and wrong explicit options both fail here (before the weight parts
+    // are fetched).
     const sessionOptions = resolveSessionOptions(
       ANIMA_SESSION_POLICY,
       quant.session,
@@ -970,15 +1071,18 @@ export class AnimaPipeline {
       `AnimaPipeline: quant '${quantName}'`,
     );
     const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
-    // residency も同じ席で見る（未知の綴りを重みの取得の後まで持ち越さない）。
+    // residency is checked in the same hook (an unknown spelling is not carried past the weight
+    // fetch).
     const residency =
       options.residency === undefined
         ? DEFAULT_ANIMA_RESIDENCY
         : assertAnimaResidency(options.residency, "AnimaPipeline: residency");
 
-    // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
-    // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
-    // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+    // MUST: a shared GPU's missing capabilities (feature / device limit) fail in this hook — unlike
+    // acquiring a GPU internally there is no reason to wait for `acquireGpu`, and this is the only
+    // family check that knows before the weights are downloaded (the mapping between request and
+    // check is the single one in `session/gpu-features.ts`, and the later checks call the same
+    // function).
     if (options.gpu !== undefined) {
       assertGpuFeaturesGranted(gpuFeatures, options.gpu, `AnimaPipeline: quant '${quantName}'`);
       assertRequiredLimitsSatisfied(
@@ -992,11 +1096,11 @@ export class AnimaPipeline {
   }
 
   /**
-   * admission を通った材料 + 資産から組む（{@link AnimaPipeline.fromAssets} と
-   * `fromPretrained` が共有する 1 本）。2 面の違いは `open`（コンポーネントの供給口）だけで、
-   * 検査も順序も同じものを通る。
+   * Builds from the admitted material + the assets (the one implementation shared by
+   * {@link AnimaPipeline.fromAssets} and `fromPretrained`). The two surfaces differ only in `open`
+   * (the component opener); they pass the same checks in the same order.
    *
-   * MUST: 資産の解析は **GPU を取りに行く前**（docstring の順序 MUST）。
+   * MUST: the assets are parsed **before acquiring the GPU** (the ordering MUST of the docstring).
    */
   static async #build(
     admitted: AnimaAdmission,
@@ -1006,9 +1110,10 @@ export class AnimaPipeline {
   ): Promise<AnimaPipeline> {
     const { config, quantName, quant, sessionOptions, gpuFeatures, residency } = admitted;
 
-    // 資産の解析は GPU より前（docstring の順序 MUST）。3.7GiB の DiT を開くほうが device 生成
-    // より重いが、壊れた配布形の真因を消さないほうを採る — GPU 無し環境では acquireGpu 自体が
-    // 落ちるので、後ろに置くと「資産が無い」が永久に見えない。
+    // Asset parsing comes before the GPU (the ordering MUST of the docstring). Opening the 3.7GiB
+    // DiT is heavier than creating the device, but not hiding the real cause of a broken
+    // distribution wins — without a GPU, acquireGpu itself fails, so placed after it, "the asset is
+    // missing" would never be visible.
     await settleAbort(options.signal);
     const tokenizers = createTokenizers(
       assetBytes(assets, TOKENIZER),
@@ -1020,31 +1125,35 @@ export class AnimaPipeline {
     const textConditioner = open(TEXT_CONDITIONER);
     await settleAbort(options.signal);
     const transformer = open(TRANSFORMER);
-    // rope 素表は `transformer` の**容器の資産**（役割 `rope-base` — ADR 0109 決定 4）。
-    // 66 KB なので全量で読む（区間読みが要るのは PLE のような行単位の表だけ）。
+    // The rope base table is **a container asset** of `transformer` (role `rope-base` — ADR 0109
+    // decision 4). It is 66 KB, so it is read whole (range reads are needed only for row-wise
+    // tables like PLE).
     const ropeBase = parseRopeBase(await readWholeAsset(transformer.asset(ROPE_BASE)));
     await settleAbort(options.signal);
     const vaeDecoder = open(VAE_DECODER);
 
     await settleAbort(options.signal);
 
-    // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
-    // 渡された場合は要求できないので、能力が足りないことを名指しして落とす — 通すと Session
-    // 構築まで進んでから落ちる（あるいは黙って別の経路へ縮退する）。共有 GPU は
-    // {@link AnimaPipeline.#admit} が既に同じ 1 本で見ているが、自前で取った device は
-    // ここが唯一の門。
+    // MUST: declared features can only be requested at device creation (ADR 0028). A shared GPU
+    // cannot be asked, so the missing capability fails here by name — passing would fail later at
+    // Session construction (or silently fall back to another path). {@link AnimaPipeline.#admit}
+    // already checks a shared GPU with the same function, but for an internally acquired device
+    // this is the only check.
     const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
     const ownsGpu = options.gpu === undefined;
     try {
-      // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を
-      // 誰も解放できないまま抜ける（feature 検査と同じ後始末に乗せる）。
-      // ここでもマクロタスクへ譲る: `acquireGpu` の await 解決はマイクロタスク継続なので、
-      // 待機中に積まれたクリック由来の中断タスクはまだ実行されていない。
+      // MUST: the abort check **after** acquiring the GPU sits inside the try — outside it, the
+      // internally acquired device would be left with nobody to release it (it rides on the same
+      // clean-up as the feature check). Yield to a macrotask here too: the await of `acquireGpu`
+      // resolves as a microtask continuation, so an abort task queued by a click during the wait
+      // has not run yet.
       await settleAbort(options.signal);
       assertGpuFeaturesGranted(gpuFeatures, gpu, `AnimaPipeline: quant '${quantName}'`);
-      // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
-      // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
-      // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は {@link AnimaPipeline.#admit} が見ている。
+      // The limits of an internally acquired device are checked here too — `fromAssets` has no
+      // pre-fetch check (`fromPretrained` checks the adapter values); without it a shortfall of the
+      // declaration surfaces only at Session construction, and when the declaration is stricter
+      // than the real need, the comparison never happens at all. {@link AnimaPipeline.#admit}
+      // checks a shared GPU.
       if (ownsGpu) {
         assertRequiredLimitsSatisfied(
           quant.requiredLimits,
@@ -1069,38 +1178,45 @@ export class AnimaPipeline {
           : { onRunDiagnostics: options.onRunDiagnostics }),
       });
     } catch (error) {
-      // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
+      // An internally acquired GPU would have nobody to release it if construction fails, so it is
+      // returned here.
       if (ownsGpu) gpu.destroy();
       throw error;
     }
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。**ここが核**で、以下を全て構築時に済ませる:
+   * Builds from an already fetched manifest + assets. **This is the core**, and all of the
+   * following is done at construction:
    *
-   * - `model` の選択（未知のモデル名は利用可能な一覧つきで fail loudly — ADR 0041 §8）
-   * - `pipeline` の契約名と major の検査（**未知 major は fail loudly** — 検査責務は
-   *   models 側。ADR 0038 §1）
-   * - `pipelineConfig` の手書きスキーマ検証（未知キーも fail loudly）
-   * - quant の `session` → runtime `SessionOptions` の**明示写像**と `gpuFeatures` の解釈
-   * - 全 weights の `openContainer` / rope 素表 / トークナイザ 2 本の解釈
+   * - selecting `model` (an unknown model name fails loudly with the list of available ones —
+   *   ADR 0041 §8)
+   * - checking `pipeline`'s contract name and major (**an unknown major fails loudly** — the check
+   *   is the models side's responsibility; ADR 0038 §1)
+   * - hand-written schema validation of `pipelineConfig` (unknown keys fail loudly too)
+   * - the **explicit mapping** of the quant's `session` → runtime `SessionOptions` and interpreting
+   *   `gpuFeatures`
+   * - `openContainer` for every weight / the rope base table / interpreting the two tokenizers
    *
-   * weights の部品キーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`transformer`）と、
-   * 分割形の part 列（`transformer[0]` / `transformer[1]` / … — part 0 から添字順）。分割形は
-   * バイト列を連結せず part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly
-   * （受け口の実装は `src/hub/components.ts`）。rope 素表は `transformer` の容器の資産なので、
-   * この面でも `assets` には並べない。
+   * Weight component keys are **accepted in both forms** — the single-form `krm` bytes
+   * (`transformer`) and the parts of the split form (`transformer[0]` / `transformer[1]` / … — in
+   * index order from part 0). The split form is opened as parts without concatenating the bytes. A
+   * missing index or mixing with the single-form key fails loudly (the implementation is
+   * `src/hub/components.ts`). The rope base table is a container asset of `transformer`, so it is
+   * not listed in `assets` on this surface either.
    *
-   * MUST: manifest の契約違反と**資産の解析**は **GPU を取りに行く前**に落とす（他 6 家族と
-   * 同じ順序）。順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が
-   * 読み手に伝わらない。GPU 取得後に許される検査は GPU の能力だけ — feature（shader-f16 —
-   * ADR 0028）と、自前で取った device の limits（ADR 0089 決定 5 — 共有 GPU は `#admit` が見る）。
-   * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
+   * MUST: manifest contract violations and **asset parsing** fail **before acquiring the GPU** (the
+   * same order as the other families). Out of order, in an environment without a GPU they turn into
+   * another exception and the reader never learns "what was wrong". The only checks allowed after
+   * acquiring the GPU are its capabilities — features (shader-f16 — ADR 0028) and the limits of an
+   * internally acquired device (ADR 0089 decision 5 — `#admit` checks a shared GPU).
+   * MUST: open no Session at all (the VRAM MUST — module doc).
    *
-   * NOTE: 各段は不可分（3.7GiB の部品を途中で畳む口は無い）なので、
-   * {@link AnimaPipelineOptions.signal} の検査は**段の境目**にだけ置き、そこで
-   * イベントループへ 1 度譲ってから検査する（{@link settleAbort}）— 同期解析の最中に
-   * 届いた中断は次の境目で効く（`options.gpu` 供給時も同様）。
+   * NOTE: each step is indivisible (there is no way to fold a 3.7GiB component midway), so the
+   * checks of {@link AnimaPipelineOptions.signal} sit only at **the boundaries between steps**,
+   * each yielding to the event loop once before checking ({@link settleAbort}) — an abort that
+   * arrives during synchronous parsing takes effect at the next boundary (the same when
+   * `options.gpu` is supplied).
    */
   static async fromAssets(
     input: AnimaAssets,
@@ -1116,16 +1232,17 @@ export class AnimaPipeline {
   }
 
   /**
-   * プロンプトから画像 1 枚を生成する。
+   * Generates one image from a prompt.
    *
-   * 同じ seed・同じノブなら同じ画素が出る（乱数も丸めもホスト側で決定的 — `random.ts` /
-   * `sampler.ts`）。
+   * The same seed and knobs give the same pixels (random numbers and rounding are deterministic on
+   * the host — `random.ts` / `sampler.ts`).
    *
-   * 並行に呼ばれた場合は**待たされて順に**走る（グラフの同時常駐を作らない — モジュール doc）。
+   * Concurrent calls **wait and run in order** (graphs are never resident at the same time — module
+   * doc).
    */
   async generate(request: AnimaGenerateRequest): Promise<GeneratedImage> {
-    // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた生成まで
-    // 巻き添えで落ちる）。
+    // The disposed check happens at call time (checked inside the chain, generations accepted
+    // before the dispose would fail along with it).
     if (this.#disposal !== undefined) {
       throw new Error("AnimaPipeline: dispose 済みでは生成できない");
     }
@@ -1139,28 +1256,35 @@ export class AnimaPipeline {
     const guidance = request.guidanceScale ?? defaults.guidanceScale;
     const resolution = request.resolution ?? defaults.resolution;
     const seed = request.seed ?? 0;
-    // 更新則は request が優先で、省略時だけ配布者の宣言に落ちる。未知の綴りは GPU に触る前に
-    // 期待と実際を並べて落とす（TS 型を通らない JS 呼び出し向け — 既定への無言の縮退を作らない）。
+    // The request's update rule takes precedence; only when omitted does it fall back to the
+    // distributor's declaration. An unknown spelling fails before touching the GPU, showing
+    // expected and actual (for JS calls that bypass the TS types — no silent fallback to the
+    // default).
     const sampler =
       request.sampler === undefined
         ? state.config.scheduler.type
         : assertAnimaSamplerType(request.sampler, "sampler");
     assertAcceptableResolution(resolution);
-    // seed の検査も入口に置く。生成器を作るのは DiT の段（`new Randn(seed)`）で、そこは
-    // text encoder / conditioner を回して DiT の重みを上げ終えた後なので、`Randn` 側だけに
-    // 検査があると不正な seed が GB 級のロードの末に落ちる。
+    // The seed check sits at the entry too. The generator is created in the DiT stage
+    // (`new Randn(seed)`), after the text encoder / conditioner have run and the DiT weights are
+    // uploaded, so with the check only in `Randn` an invalid seed would fail after a GB-scale load.
     assertAcceptableSeed(seed);
-    // steps も入口で見る（他のノブと並べて、入力起因の誤りをプロンプト層より前に返す — 受理集合の
-    // 所有者は梯子側の `assertAcceptableSteps` 1 本。梯子は下で GPU に触る前に組む）。
+    // steps is checked at the entry too (alongside the other knobs, so input-caused errors come
+    // back before the prompt layer — the single owner of the accepted set is
+    // `assertAcceptableSteps` on the ladder side. The ladder is built below, before touching the
+    // GPU).
     assertAcceptableSteps(steps);
-    // f32 で見る: CFG は倍率を f32 で掛ける（`cfgEulerStep` / `dpmSolverMultistepStep`）ので、f64 で有限でも
-    // f32 で ±Infinity になる値（`Number.MAX_VALUE` など）は合成を壊す。f32 で有限でも DiT の出力との組で
-    // 溢れる値は、更新後の有限性の門（`denoiseStep`）が step を名指しして落とす。
+    // Checked in f32: CFG multiplies by the scale in f32 (`cfgEulerStep` /
+    // `dpmSolverMultistepStep`), so a value finite in f64 but ±Infinity in f32 (such as
+    // `Number.MAX_VALUE`) breaks the mix. A value finite in f32 that overflows in combination with
+    // the DiT output fails, with the step named, in the post-update finiteness check
+    // (`denoiseStep`).
     if (!Number.isFinite(Math.fround(guidance))) {
       throw new ModelInputError(`guidanceScale ${guidance} が f32 に収まる有限の数でない`);
     }
-    // 実効 residency（request ?? 構築オプション）。意味は「この generate の**後に** DiT を持つか」
-    // — 開始時の常駐 DiT は値に関わらず使う（`residency.ts` の `transformerSource`）。
+    // Effective residency (request ?? construction option). It means "keep the DiT **after** this
+    // generate" — a resident DiT present at the start is used whatever the value
+    // (`transformerSource` in `residency.ts`).
     const residency =
       request.residency === undefined
         ? state.residency
@@ -1173,7 +1297,8 @@ export class AnimaPipeline {
       guidance,
     );
 
-    // 生成イベントの発火口。未購読なら何もしない 1 本に畳んで、発火点に分岐を置かない。
+    // The emitter of generation events. Without a subscriber it collapses into a no-op, so the
+    // firing points have no branch.
     const { onEvent } = request;
     const emit: (event: AnimaGenerateEvent) => Promise<void> =
       onEvent === undefined
@@ -1183,12 +1308,16 @@ export class AnimaPipeline {
           };
     const notifyResidency = (notice: ResidencyNotice): Promise<void> =>
       emit({ kind: "residency", component: "transformer", ...notice });
-    /** 先回りの退避の試し確保（`TransformerResidency.ensureHeadroom` の `probe`）。 */
+    /**
+     * Headroom probe of pre-emptive eviction (the `probe` of
+     * `TransformerResidency.ensureHeadroom`).
+     */
     const probeHeadroom = (bytes: number): Promise<boolean> => fitsHeadroom(state.gpu, bytes);
     /**
-     * DiT 以外の段 1 本を回す（`stage` を Session 構築の前と解放の後に挟む — 途中で落ちたら
-     * `end` は出ない）。常駐 DiT がある状態の OOM は退避して段を 1 回だけやり直す
-     * （`TransformerResidency.runStage`）。text 系 / VAE は quant の session を受けない（`{}`）。
+     * Runs one stage other than the DiT (`stage` events wrap Session construction and release — if
+     * the stage fails midway, `end` is not emitted). An OOM while a resident DiT exists evicts it
+     * and re-runs the stage once (`TransformerResidency.runStage`). The text stages / VAE do not
+     * take the quant's session (`{}`).
      */
     const withStage = async <T>(
       component: Exclude<AnimaRunComponent, "transformer">,
@@ -1204,23 +1333,25 @@ export class AnimaPipeline {
       return result;
     };
 
-    // --- ① プロンプト層（GPU 不要・決定的）------------------------------------
+    // --- ① Prompt layer (no GPU, deterministic) ------------------------------------
     const positive = state.tokenizers.encode(request.prompt, "プロンプト");
     const negative = wantsUncond
       ? state.tokenizers.encode(negativePrompt as string, "ネガティブプロンプト")
       : undefined;
     const sigmas = sigmaSchedule(steps, state.config.scheduler.shift);
 
-    // GPU に触る段（text 段以降）で generate が失敗したら、実効値 per-stage の「この generate の後に
-    // 持たない」指示を効かせる（DiT 段より前の失敗 — text 段・`stage` の onEvent の throw 等 — でも
-    // 持ち越した DiT を手放す）。DiT 段の中の失敗は `runTransformer` が決着させている。入力の検査
-    // （ここより上）で落ちた要求は GPU にも常駐の席にも触らない。
+    // When the generate fails in a stage that touches the GPU (the text stages onwards), apply the
+    // effective per-stage instruction "do not keep it after this generate" (a failure before the
+    // DiT stage — a text stage, a throw from the `stage` onEvent, etc. — also releases the
+    // carried-over DiT). A failure inside the DiT stage is settled by `runTransformer`. A request
+    // rejected by the input checks (above) touches neither the GPU nor the resident slot.
     try {
-      // --- ①' 先回りの退避（text 段の前 — 持ち越した常駐 DiT があるときだけ）-------------
-      // text 系 2 段が常駐 DiT の上に入らなければ、OOM を踏む前に退避する（`residency.ts` の「退避の
-      // 2 本の線」）。試し確保の throw（validation / device 消失）はそのまま下の失敗経路へ流す。
-      // `holding` をここでも見るのは見積りの費用を段ごと運転に払わせないため（量るかどうかの判断は
-      // `ensureHeadroom` が持つ）。
+      // --- ①' Pre-emptive eviction (before the text stages; carried-over resident DiT only) ---
+      // If the two text stages do not fit on top of the resident DiT, evict before hitting an OOM
+      // ("The two lines of eviction" in `residency.ts`). A throw from the probe (validation /
+      // device loss) flows as is to the failure path below. `holding` is checked here too so that
+      // per-stage operation does not pay for the estimate (the decision whether to measure belongs
+      // to `ensureHeadroom`).
       if (this.#residency.holding) {
         await this.#residency.ensureHeadroom(
           textStagesNeed(state, negative === undefined ? [positive] : [positive, negative]),
@@ -1229,7 +1360,7 @@ export class AnimaPipeline {
         );
       }
 
-      // --- ② テキスト経路（DiT ロードの前に解放する）---------------------------
+      // --- ② Text path (released before the DiT load) ---------------------------
       const hidden = await withStage("text_encoder", state.textEncoder, (run) =>
         Promise.all([
           run({ input_ids: idsTensor(positive.qwenIds) }),
@@ -1250,12 +1381,13 @@ export class AnimaPipeline {
         ]),
       );
 
-      // --- ③ denoise（DiT を N step。段ごと運転なら VAE ロードの前に解放する）---------
-      // 低精度計算のノブ（quant の session）は **DiT の Session にだけ**効かせる —
-      // text 系 / VAE は対象外（比較の軸を DiT 1 本に保つ）。
-      // Session の出所（常駐 / 新規に常駐 / 段ごと）と段の後の扱いは `TransformerResidency` が
-      // 決める（ADR 0112）。本体は OOM の退避後のやり直しで**最初から**呼び直されるので、denoise の
-      // 状態（乱数・latent・DPM の履歴）は本体の中で作る。
+      // --- ③ denoise (DiT for N steps; released before the VAE load in per-stage operation) ---
+      // The low-precision knobs (the quant's session) apply **only to the DiT Session** — the
+      // text stages / VAE are excluded (keeping the axis of comparison to the DiT alone). The
+      // Session's source (resident / newly resident / per stage) and what happens after the stage
+      // are decided by `TransformerResidency` (ADR 0112). The body is called again **from the
+      // start** on a re-run after an OOM eviction, so the denoise state (random numbers, latent,
+      // DPM history) is created inside the body.
       const observeTransformer = observer(state, "transformer");
       await emit({ kind: "stage", component: "transformer", at: "start" });
       const { latents, latentShape } = await this.#residency.runTransformer({
@@ -1273,8 +1405,8 @@ export class AnimaPipeline {
             throw new Error(`conditioner 出力の幅 ${embeds[0].shape[2]} が DiT の ${width} と違う`);
           }
           /**
-           * latent 1 枚を DiT へ通す。入口で patchify、出口で unpatchify を挟むだけで、
-           * 呼び出し側（CFG / Euler）は latent だけを見る。
+           * Runs one latent through the DiT. It only wraps patchify at the entry and unpatchify at
+           * the exit, so the caller (CFG / Euler) sees only latents.
            */
           const predict = async (
             current: Float32Array<ArrayBuffer>,
@@ -1301,7 +1433,7 @@ export class AnimaPipeline {
           const padded = embeds.map((embed) => padSequence(embed, rows));
           const elements = plan.latentShape.reduce((a, b) => a * b, 1);
           let current = new Randn(seed).normals(elements);
-          // DPM++ 2M が読む唯一の履歴（step 0 では無い）。Euler 経路では常に undefined のまま。
+          // The only history DPM++ 2M reads (absent at step 0). Always undefined on the Euler path.
           let previousX0: Float32Array<ArrayBuffer> | undefined;
           for (let index = 0; index < steps; index += 1) {
             const proj: Tensor = {
@@ -1339,15 +1471,17 @@ export class AnimaPipeline {
       });
       await emit({ kind: "stage", component: "transformer", at: "end" });
 
-      // --- ③' 先回りの退避（VAE 段の前 — この時点で常駐 DiT があるときだけ）----------------
-      // text 段の前の量りでは覆えない 2 つ — DiT をこの generate で作って席に載せた（最初の generate）
-      // と、持ち越した DiT が新しい解像度で backing を育てた — をここで量る（`residency.ts` の「退避の
-      // 2 本の線」）。DiT 段は常駐の恩恵を受け終えているので、退避はできるだけ遅いほうが得。
+      // --- ③' Pre-emptive eviction (before the VAE stage; resident DiT at this point only) ---
+      // Measures here the two cases the measurement before the text stages cannot cover — the
+      // DiT was created in this generate and put in the slot (the first generate), and a
+      // carried-over DiT grew its backing at a new resolution ("The two lines of eviction" in
+      // `residency.ts`). The DiT stage has already benefited from residency, so evicting as late as
+      // possible is cheaper.
       if (this.#residency.holding) {
         await this.#residency.ensureHeadroom(vaeStageNeed(state), probeHeadroom, notifyResidency);
       }
 
-      // --- ④ 逆正規化 → VAE decode（常時タイル — ADR 0038 §4）-------------------
+      // --- ④ Denormalise → VAE decode (always tiled — ADR 0038 §4) -------------------
       const { mean: latentsMean, std: latentsStd } = animaLatents();
       const denormalized = denormalizeLatents(latents, latentShape, latentsMean, latentsStd);
       const decoded = await withStage("vae_decoder", state.vaeDecoder, async (run) => {
@@ -1365,21 +1499,24 @@ export class AnimaPipeline {
           await emit({ kind: "vae-tile", tile: decodedTiles, tiles });
           return sample;
         });
-        // 寸法は**幾何**が正本（latent の全長 × 縮尺）。画素数から逆算しない — 非正方では
-        // `3·H·W` の分解が一意でなく、逆算では縦横の取り違えが原理的に検出できない。
+        // The **geometry** is the source of truth for the size (latent length × scale). Do not
+        // derive it back from the pixel count — for non-square sizes `3·H·W` does not factor
+        // uniquely, and a derivation could never detect a height / width mix-up.
         return {
           pixels,
           width: geometry.cols.extent * geometry.scale,
           height: geometry.rows.extent * geometry.scale,
           tiles,
-          // ブレンド幅は**対ごと**（丸め等間隔なので 1 latent まで動く）。診断に載るのは
-          // 幾何そのもので、代表値へ畳むと食い違いの手掛かりが消える。
+          // Blend widths are **per pair** (with rounded equal spacing they vary by up to 1 latent).
+          // The diagnostics carry the geometry itself; folding it to a representative value would
+          // erase the clue to a mismatch.
           blend: [blendsOf(geometry.rows), blendsOf(geometry.cols)] as const,
         };
       });
 
-      // MUST: 出た画像の寸法はノブではなく**資産**が決める。ここで食い違うなら開いた export が
-      // 想定と違うので、黙って返さない。要素数との整合は `imageToRgba` が見る。
+      // MUST: the size of the output image is decided by **the assets**, not the knobs. A mismatch
+      // here means the opened export differs from what was expected, so do not return silently.
+      // Consistency with the element count is checked by `imageToRgba`.
       if (decoded.width !== resolution.width || decoded.height !== resolution.height) {
         throw new Error(
           `VAE 出力が ${decoded.width}×${decoded.height} で要求解像度 ${formatResolution(
@@ -1402,21 +1539,24 @@ export class AnimaPipeline {
   }
 
   /**
-   * 解放する。常駐 DiT（{@link AnimaPipelineOptions.residency}）は必ず畳み、**内部で取得した GPU
-   * だけ**破棄する（`options.gpu` で渡された GpuContext は呼び出し側の所有物なので触らない）。
+   * Releases. The resident DiT ({@link AnimaPipelineOptions.residency}) is always folded, and
+   * **only an internally acquired GPU** is destroyed (a GpuContext passed as `options.gpu` belongs
+   * to the caller and is not touched).
    *
-   * `options.gpu` を共有していても dispose は必須 — 常駐 DiT（既定席 1024² で約 2.6 GiB）は共有
-   * device の上に残り続ける。device が失われていると常駐 DiT の破棄（Session の flush）が失敗し、
-   * dispose が reject しうる（内部で取った GPU はそれでも破棄する）。
+   * dispose is required even with a shared `options.gpu` — the resident DiT (about 2.6 GiB at 1024²
+   * with the default preset) stays on the shared device. If the device is lost, disposing the
+   * resident DiT (the Session's flush) fails and dispose may reject (an internally acquired GPU is
+   * destroyed anyway).
    *
-   * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
-   * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
-   * 呼び出し側が「破棄済み」と見なして次へ進む）。
+   * MUST: wait for in-flight generation to finish before destroying (flush-before-destroy) —
+   * putting the destruction on the chain too decides the order of waiting and destroying in one
+   * place. Later calls return the same completion (returning earlier would let the caller treat it
+   * as "destroyed" and move on).
    */
   dispose(): Promise<void> {
-    // MUST: 常駐 DiT を先に畳んでから GPU を破棄する（flush-before-destroy）。常駐 DiT は共有 GPU
-    // （`options.gpu`）でも pipeline の所有物なので必ず畳む。畳むのに失敗しても内部で取った GPU は
-    // 返す（`disposeSteps` の doc）。
+    // MUST: fold the resident DiT first, then destroy the GPU (flush-before-destroy). The resident
+    // DiT belongs to the pipeline even with a shared GPU (`options.gpu`), so it is always folded.
+    // Even if folding fails, an internally acquired GPU is returned (the doc of `disposeSteps`).
     this.#disposal ??= this.#chain(() =>
       disposeResidencyThenGpu(
         this.#residency,
@@ -1426,7 +1566,7 @@ export class AnimaPipeline {
     return this.#disposal;
   }
 
-  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  /** `await using` support (Explicit Resource Management) — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }

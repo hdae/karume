@@ -1,28 +1,30 @@
 /**
- * Gemma 4 の MTP drafter を 1 回回す**内部 API**（ADR
- * [0096](../../../../docs/decisions/0096-speculative-decoding.md) 決定 1〜3・段 2 §5）。
+ * The **internal API** that runs Gemma 4's MTP drafter once (ADR
+ * [0096](../../../../docs/decisions/0096-speculative-decoding.md) decisions 1–3, stage 2 §5).
  *
- * 部品は 3 本 — 借り手 context を開く {@link openDrafterContext}、1 サイクルぶんの draft を採る
- * {@link draftOnce}、その 2 本を 1 つの `DraftFace` に束ねる {@link openGemma4DraftFace}。投機
- * ループ（`src/generation/sequence.ts`）が見るのは束ねた面だけである（生成面は gemma4 も Session
- * も知らない — ADR 0083）。
+ * Three parts — {@link openDrafterContext} opens the borrowing context, {@link draftOnce} takes one
+ * cycle's draft, and {@link openGemma4DraftFace} bundles the two into one `DraftFace`. The
+ * speculation loop (`src/generation/sequence.ts`) sees only the bundled surface (the generation
+ * layer knows neither gemma4 nor Session — ADR 0083).
  *
- * MUST: `mod.ts` / `./gemma` サブパスには出さない（ADR 0008 の薄い面）。GenerationContext は
- * sequence ごとの内部実体で公開面に無い（ADR 0083 決定 3）ので、この 2 本を公開面へ出すと
- * 「利用者が握れない値を引数に取る関数」が並ぶ。
+ * MUST: not exposed on `mod.ts` / the `./gemma` subpath (ADR 0008's thin surface). A
+ * GenerationContext is an internal per-sequence object not on the public surface (ADR 0083 decision
+ * 3), so exposing these two would line up "functions taking values the user cannot hold".
  *
- * ## drafter が回るための前提（貸し手 = target との結線）
+ * ## Preconditions for running the drafter (wiring with the lender = the target)
  *
- * - drafter Session は貸し手 Session の embedding 表 1 本を**借りている**（`sharedWeights` —
- *   バイトは 1 つも複製されない）。束ねるのは `pipeline.ts` の構築で、ここは走らせるだけ。
- * - 借り手 context は貸し手 context の KV スロット（l13 sliding / l14 full）を**名前で**束ねる。
- *   draft の query は論理位置 `P`（= `context.pastLength`）— 貸し手が最後に確定させた token は
- *   まだ KV に入っていない frontier で、その位置に居る。ホストが渡す RoPE の 1 行も同じ位置。
- * - 貸し手の run / commit と直列化されるのは runtime の仕事（借り手 run が貸し手の run リースを
- *   取る）。**貸し手に未 commit の run が残っていると draft は拒否される** — draft は commit の
- *   後に採る。
+ * - The drafter Session **borrows** one embedding table of the lender Session (`sharedWeights` —
+ *   not a single byte is copied). The binding is done by construction in `pipeline.ts`; this file
+ *   only runs it.
+ * - The borrowing context binds the lender context's KV slots (l13 sliding / l14 full) **by name**.
+ *   The draft's query is at logical position `P` (= `context.pastLength`) — the token the lender
+ *   committed last is the frontier not yet in the KV and sits at that position. The one RoPE row
+ *   the host passes is at the same position.
+ * - Serialization with the lender's run / commit is the runtime's job (a borrower run takes the
+ *   lender's run lease). **A draft is rejected while the lender has an uncommitted run** — the
+ *   draft is taken after the commit.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: zero module side effects (no execution at import, no global mutable state — CLAUDE.md).
  */
 
 import type { GenerationContext, PreparedModel, Session, Tensor } from "@karume/runtime";
@@ -38,71 +40,85 @@ import {
 } from "./rope.ts";
 
 /**
- * drafter が 1 サイクルで出す draft token の本数（= MTP head の段数）。
+ * Number of draft tokens the drafter emits per cycle (= the number of MTP head steps).
  *
- * 受けるのは**この値で焼いた資産だけ**である（グラフ出口の本数が段数そのもの）。投機ループが
- * 1 cycle で使う本数 `k` はこの範囲内で選べる（`1..GEMMA4_DRAFT_STEPS` — 予算末尾ではさらに
- * 縮む）が、資産側の段数は固定である。
+ * **Only assets baked with this value** are accepted (the number of graph exits is the step count
+ * itself). The number `k` the speculation loop uses per cycle can be chosen within this range
+ * (`1..GEMMA4_DRAFT_STEPS` — it shrinks further at the end of the budget), but the asset's step
+ * count is fixed.
  */
 export const GEMMA4_DRAFT_STEPS = 3;
 
 /**
- * この層が読むグラフ宣言（`PreparedModel["graph"]` = IR そのもの）。
+ * The graph declaration this layer reads (`PreparedModel["graph"]` = the IR itself).
  *
- * 生成面の `GenerationGraph`（`../generation/program.ts`）の部分集合では足りない — 見るのは
- * states の `external` と initializers の `shared` で、どちらも IR 本体にしか無い欄である。
+ * A subset of the generation layer's `GenerationGraph` (`../generation/program.ts`) is not enough —
+ * it reads `external` of states and `shared` of initializers, fields only the IR proper has.
  */
 type DrafterGraph = PreparedModel["graph"];
 
-/** drafter グラフの入力名（正本は `tools/export-recipes/gemma4/export_drafter.py`）。 */
+/**
+ * Input names of the drafter graph (canonical in `tools/export-recipes/gemma4/export_drafter.py`).
+ */
 const TOKEN_INPUT = "token";
 const HIDDEN_INPUT = "hidden";
 
 /**
- * drafter グラフの入力名（**順序が契約** — 確定した token / それを出した行の hidden / RoPE 4 本）。
+ * Input names of the drafter graph (**the order is the contract** — the committed token / the
+ * hidden of the row that produced it / the four RoPE inputs).
  *
- * 名前ではなく順序まで見るのは、焼く側（`DrafterWrapper.forward` の引数順）と読む側が
- * 同じ列を主張していることの検出器にするため。順序だけずれた資産は名前で引く限り黙って通る。
+ * The order is checked, not only the names, to detect whether the baking side (the argument order
+ * of `DrafterWrapper.forward`) and the reading side claim the same list. An asset whose order alone
+ * is off passes silently as long as inputs are looked up by name.
  */
 const DRAFTER_INPUTS: readonly string[] = [TOKEN_INPUT, HIDDEN_INPUT, ...gemma4RopeInputNames()];
 
 /**
- * drafter 1 本ぶんの実行に要るもの。
+ * What running one drafter needs.
  *
- * MUST: Session だけでは足りない — 出口の**名前**（段順）も RoPE の式も Session からは引けない
- * （`Session` はグラフを公開しない）ので、admission が確定させたものをここに束ねて持ち回る。
- * 席を分けて持つと「別の資産の出口名で読む」形が書ける。
+ * MUST: a Session alone is not enough — neither the exit **names** (step order) nor the RoPE
+ * formula can be obtained from a Session (`Session` does not expose its graph), so what admission
+ * settled is bundled here and carried around. Holding them in separate fields would make "reading
+ * with another asset's exit names" expressible.
  */
 export type Gemma4Drafter = {
   readonly session: Session;
   /**
-   * drafter コンテナのグラフ宣言（**見積り専用** — `Gemma4Pipeline.estimateSessionMemory` が
-   * drafter の常駐重みと借り手 context の state をこれから引く）。
+   * The graph declaration of the drafter container (**for estimates only** —
+   * `Gemma4Pipeline.estimateSessionMemory` derives the drafter's resident weights and the borrowing
+   * context's state from it).
    *
-   * MUST: `PreparedModel` ではなくグラフだけを持つ（`Gemma4State.graph` と同じ MUST — 全量の
-   * バイト列を掴んだままにしない）。
+   * MUST: hold only the graph, not the `PreparedModel` (the same MUST as `Gemma4State.graph` — do
+   * not keep holding the full bytes).
    */
   readonly graph: DrafterGraph;
-  /** draft 出口 3 本の名前（**段順** = グラフの宣言順）。 */
+  /** Names of the three draft exits (**step order** = the graph's declaration order). */
   readonly outputs: readonly string[];
-  /** 位置 1 行ぶんの cos / sin を作る宣言（貸し手と同じ `pipelineConfig.rope`）。 */
+  /**
+   * The declaration that builds one position's cos / sin row (the lender's `pipelineConfig.rope`).
+   */
   readonly rope: Gemma4RopeSpec;
-  /** 入力 `hidden` の幅（= 貸し手の最終 norm 後 hidden の幅）。 */
+  /** Width of the input `hidden` (= the width of the lender's final-norm hidden). */
   readonly hiddenSize: number;
 };
 
-/** {@link admitGemma4Drafter} が確定させる材料（Session を組む前に決まるもの）。 */
+/**
+ * The material {@link admitGemma4Drafter} settles (what is decided before building the Session).
+ */
 export type Gemma4DrafterAdmission = {
   readonly outputs: readonly string[];
   readonly hiddenSize: number;
   /**
-   * `createSession` の `sharedWeights` に渡す対応表 — **借り手の initializer 名 → 貸し手の
-   * initializer 名**。値の側で `lender.exportWeight(...)` を引く。
+   * The mapping passed to `sharedWeights` of `createSession` — **borrower's initializer name →
+   * lender's initializer name**. The value side is looked up with `lender.exportWeight(...)`.
    */
   readonly sharedWeights: Readonly<Record<string, string>>;
 };
 
-/** 形の突合（記号次元は綴りのまま比べる — 貸し手と借り手で同じ記号名 MUST）。 */
+/**
+ * Shape comparison (symbolic dimensions are compared by spelling — lender and borrower MUST use the
+ * same symbol names).
+ */
 const sameShape = (
   left: readonly (number | string)[],
   right: readonly (number | string)[],
@@ -111,12 +127,13 @@ const sameShape = (
 const showShape = (shape: readonly (number | string)[]): string => `[${shape.join(",")}]`;
 
 /**
- * drafter グラフの入力 6 本（名前・順序・dtype・形）を見る。
+ * Checks the six inputs of the drafter graph (names, order, dtype, shape).
  *
- * `hidden` の幅は**貸し手から**渡す（drafter 側の宣言を正としない — 別世代の target と組んだ
- * 資産はここで落ちる）。RoPE 4 本の幅は `pipelineConfig.rope.<層種>.headDim` と突き合わせる
- * （sliding 256 と full 512 の引き違いは、ホストが表を渡す初 run まで落ちない誤りである —
- * `pipeline.ts` の `assertRopeInputShapes` と同じ理由）。
+ * The width of `hidden` is passed **from the lender** (the drafter's own declaration is not taken
+ * as correct — an asset paired with a target of another generation fails here). The widths of the
+ * four RoPE inputs are checked against `pipelineConfig.rope.<layer type>.headDim` (mixing up
+ * sliding 256 and full 512 is a mistake that does not fail until the first run where the host
+ * passes the table — the same reason as `assertRopeInputShapes` in `./admission.ts`).
  */
 const assertDrafterInputs = (
   where: string,
@@ -155,7 +172,7 @@ const assertDrafterInputs = (
   }
 };
 
-/** draft 出口 3 本（段順・`[1,1,1]` の i32）。 */
+/** The three draft exits (step order, i32 `[1,1,1]`). */
 const assertDrafterOutputs = (where: string, graph: DrafterGraph): readonly string[] => {
   if (graph.outputs.length !== GEMMA4_DRAFT_STEPS) {
     throw new Error(
@@ -177,11 +194,12 @@ const assertDrafterOutputs = (where: string, graph: DrafterGraph): readonly stri
 };
 
 /**
- * 借り物スロットが**貸し手と同名・同形**であることを見る（借り手 context の束ねが名前で行われる
- * ので、綴りが違えば runtime が落とすが、その時点では既に Session を 2 本組んでいる）。
+ * Checks that the borrowed slots have **the same names and shapes as the lender's** (the borrowing
+ * context binds by name, so a different spelling makes the runtime fail, but by then two Sessions
+ * have already been built).
  *
- * MUST: 全スロットが external であること。1 本でも自前スロットがあると、借り手は「空の過去」を
- * 自分で確保して読む（値は出るが中身が無い = 沈黙誤値）。
+ * MUST: every slot is external. With even one slot of its own, the borrower allocates and reads "an
+ * empty past" by itself (values come out but carry nothing = a silent wrong value).
  */
 const assertDrafterStates = (where: string, graph: DrafterGraph, target: DrafterGraph): void => {
   const names = Object.keys(graph.states);
@@ -213,13 +231,15 @@ const assertDrafterStates = (where: string, graph: DrafterGraph, target: Drafter
 };
 
 /**
- * 共有 initializer（バイトを持たない宣言）を貸し手の initializer 名へ解決する。
+ * Resolves the shared initializers (declarations without bytes) to the lender's initializer names.
  *
- * 借り手の名前は**貸し手の initializer 名と同じ**（docs/ir-v2.md「共有 initializer」— 名前が
- * 実体の鍵なので、対応表は恒等写像）。貸し手グラフに同名の実体が無ければ fail loudly — 通すと
- * `createSession` が「shared 宣言に対して重みが不足」と落ちるだけで、**どの表を借りそこねたか**が
- * 残らない。格納の互換（貸し手の codec を借り手の消費席で実行できるか）は借り手 Session 構築時の
- * 門（runtime の `resolveSharedWeights`）が見る。
+ * The borrower's name is **the same as the lender's initializer name** (docs/ir-v2.md "Shared
+ * initializers (`shared`)" — the name is the key of the data, so the mapping is the identity). If
+ * the lender graph has no data under that name, fail loudly — letting it through would only make
+ * `createSession` fail with "weights missing for a shared declaration", leaving no record of
+ * **which table failed to be borrowed**. Storage compatibility (whether the lender's codec can run
+ * in the borrower's consuming slot) is checked by the check at borrower Session construction (the
+ * runtime's `resolveSharedWeights`).
  */
 const resolveSharedWeights = (
   where: string,
@@ -248,15 +268,18 @@ const resolveSharedWeights = (
 };
 
 /**
- * drafter コンテナを「この target と組める MTP head か」で見る門（**重みの part を取る前**）。
+ * The check of whether the drafter container is "an MTP head that can pair with this target"
+ * (**before fetching the weight parts**).
  *
- * 見るのは 5 つ — ①入力 6 本（順序込み）②出口 3 本 ③全スロットが external で貸し手と同名同形
- * ④共有 initializer が貸し手の initializer へ解決できる ⑤記号は貸し手の容量記号 1 本だけ。
- * どれも「別世代の target と組んだ drafter」を、GB 級の重みを落とす前に落とすためのものである。
+ * It checks five things — (1) the six inputs (including order) (2) the three exits (3) every slot
+ * is external with the lender's names and shapes (4) the shared initializers resolve to the
+ * lender's initializers (5) the only symbol is the lender's capacity symbol. Each exists to reject
+ * "a drafter paired with a target of another generation" before GB-scale weights are downloaded.
  *
- * NOTE: `requiredLimits` は見ない — drafter は target と**同じ quant 席**に居る（manifest の
- * `quants.<名>.weights` が両方を指す）ので、宣言は 1 つしかない（その 1 つを DL 前に見るのは
- * `Gemma4Pipeline.fromPretrained` の admission 閉包）。
+ * NOTE: `requiredLimits` is not checked — the drafter is in **the same quant preset** as the target
+ * (the manifest's `quants.<name>.weights` points at both), so there is only one declaration
+ * (checking it before download is the job of the admission closure of
+ * `Gemma4Pipeline.fromPretrained`).
  */
 export const admitGemma4Drafter = (
   where: string,
@@ -282,13 +305,14 @@ export const admitGemma4Drafter = (
 };
 
 /**
- * 貸し手（target）の生成 context を借りる drafter 用 context を開く。
+ * Opens the drafter's context that borrows the lender's (the target's) generation context.
  *
- * 借り手は自前の KV を 1 バイトも確保しない（束ねるのは貸し手のスロットバッファ）。
- * `chunkLength` は 1 ちょうど・`bindings` は貸し手のものを継承する（どちらも runtime の門）。
+ * The borrower does not allocate a single byte of its own KV (it binds the lender's slot buffers).
+ * `chunkLength` is exactly 1 and `bindings` are inherited from the lender (both are runtime
+ * checks).
  *
- * MUST: **借り手を先に畳む**。借り手が生きている間、貸し手 context の `dispose()` は
- * fail loudly になる（借り手の bind group が貸し手のスロットを掴んでいる）。
+ * MUST: **close the borrower first**. While the borrower is alive, the lender context's `dispose()`
+ * fails loudly (the borrower's bind groups hold the lender's slots).
  */
 export const openDrafterContext = (
   drafter: Gemma4Drafter,
@@ -297,24 +321,27 @@ export const openDrafterContext = (
   drafter.session.createGenerationContext({ chunkLength: 1, borrow: target });
 
 /**
- * 1 サイクルぶんの入力（`P = context.pastLength` = KV に入っている行数）。
+ * One cycle's input (`P = context.pastLength` = the number of rows in the KV).
  *
- * 組は「最後に確定した token と、**それを出した行**の hidden」— drafter 自身の段間再帰
- * （token と、その token を出した段の hidden を次段へ送る）と同じ組み方で、torch drafter の
- * golden もこの組で採っている。
+ * The pair is "the last committed token and the hidden of **the row that produced it**" — the same
+ * pairing as the drafter's own recursion between steps (a token and the hidden of the step that
+ * produced it go to the next step), and the torch drafter's golden was also taken with this
+ * pairing.
  *
- * MUST: 生成面の `DraftCycle`（`../generation/speculation.ts`）**そのもの**である。写した型を
- * 持つと、欄の意味が片方だけ改まったときに型検査が通り続ける。
+ * MUST: it is the generation layer's `DraftCycle` (`../generation/speculation.ts`) **itself**. With
+ * a copied type, the type check would keep passing when the meaning of a field changed in only one
+ * of them.
  */
 export type Gemma4DraftCycle = DraftCycle;
 
 /**
- * 貸し手 context 1 本ぶんの `DraftFace` を開く（投機ループ〈`createGenerationSequence` の
- * `speculative.open`〉が sequence 生成時に 1 度だけ呼ぶ席）。
+ * Opens the `DraftFace` for one lender context (the hook the speculation loop — `speculative.open`
+ * of `createGenerationSequence` — calls once when the sequence is created).
  *
- * 束ねるのは 3 つ — 段数（配布形に焼かれた出口の本数）・{@link draftOnce}・借り手 context の
- * 返却である。生成面は gemma4 も Session も知らないので、借り手 context の寿命はこの閉包が持つ
- * （`dispose` を呼ぶ順序 = 借り手 → 貸し手 は sequence 側の MUST）。
+ * It bundles three things — the step count (the number of exits baked into the distribution),
+ * {@link draftOnce}, and the return of the borrowing context. The generation layer knows neither
+ * gemma4 nor Session, so this closure owns the borrowing context's lifetime (the `dispose` order =
+ * borrower → lender is the sequence side's MUST).
  */
 export const openGemma4DraftFace = async (
   drafter: Gemma4Drafter,
@@ -330,15 +357,16 @@ export const openGemma4DraftFace = async (
 };
 
 /**
- * draft を 1 サイクル採る（k = 3 段ぶんの token を 1 run で出す）。
+ * Takes one cycle's draft (emits k = 3 steps' tokens in one run).
  *
- * 借り手 run は貸し手の run リースを取るので、貸し手の run / commit / rewind と直列化される。
- * **貸し手に未 commit の run が残っていれば拒否される**（draft は commit の後）。借り手は論理長を
- * 1 つも動かさない（`state_append` が 0 本 = KV に 1 行も書かない）ので、棄却されても巻き戻す
- * ものが無い。
+ * A borrower run takes the lender's run lease, so it is serialized with the lender's run / commit /
+ * rewind. **It is rejected while the lender has an uncommitted run** (the draft comes after the
+ * commit). The borrower does not move the logical length at all (`state_append` count 0 = not a
+ * single row is written to the KV), so there is nothing to roll back when the draft is rejected.
  *
- * MUST: `hidden` は**`token` を出した行**（位置 `P−1`）であること — 別の行を渡しても形は合うので
- * 例外にならず、draft の質だけが静かに落ちる（この層で検出できるのは幅だけ）。
+ * MUST: `hidden` is **the row that produced `token`** (position `P−1`) — passing another row still
+ * matches the shape, so there is no exception, and only the draft quality quietly drops (all this
+ * layer can detect is the width).
  */
 export const draftOnce = async (
   drafter: Gemma4Drafter,
@@ -359,7 +387,8 @@ export const draftOnce = async (
   const inputs: Record<string, Tensor> = {
     [TOKEN_INPUT]: { dtype: "i32", shape: [1, 1], data: Int32Array.of(token) },
     [HIDDEN_INPUT]: { dtype: "f32", shape: [1, drafter.hiddenSize], data: hidden },
-    // 位置 P の 1 行（PLE は要らない — drafter は主表も per-layer 表も引かない）。
+    // The one row at position P (no PLE needed — the drafter reads neither the main table nor the
+    // per-layer table).
     ...gemma4RopeInputs(drafter.rope, [position]),
   };
   const outputs = await drafter.session.run(inputs, {}, { context: borrowed, queryLength: 1 });

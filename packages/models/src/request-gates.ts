@@ -1,35 +1,37 @@
 /**
- * 生成要求の門のうち、**家族をまたいで受理集合が同じ**ものの置き場。
+ * The home of the generation-request checks whose **accepted set is the same across families**.
  *
- * 家族ごとの門（解像度・スタイル名・chunk 長）は家族側に置く — ここに来るのは
- * 「anima でも sbv2 でも irodori でも同じ値だけが通る」と言い切れる検査だけである。
- * 受理集合を複数の家族が写して持つと必ず割れる（片方だけ緩む・片方だけ falsy 判定になる）ので、
- * **所有者を 1 本にする**のがこのモジュールの役目。
+ * Per-family checks (resolution, style name, chunk length) live in the family — only checks that can
+ * be stated as "exactly the same values pass in anima, sbv2 and irodori alike" come here. When
+ * several families keep copies of an accepted set, they always diverge (one loosens, one switches to
+ * a falsy test), so the job of this module is to **give it a single owner**.
  *
- * MUST: モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: zero module side effects (no import-time execution, no global mutable state — CLAUDE.md).
  */
 
 import { ModelInputError } from "./errors.ts";
 
 /**
- * `seed` の受理集合（**非負の安全整数**）を見る門。anima / sbv2 / irodori と、gemma の生成
- * sampler（`generation/random.ts`）が共有する。
+ * The check of the accepted set of `seed` (**a non-negative safe integer**). Shared by anima / sbv2 /
+ * irodori / wan and gemma's generation sampler (`generation/random.ts`).
  *
- * 4 者とも受けた `seed` を `BigInt` へ落として splitmix64 の状態にするので、条件の理由は
- * 3 つに分かれる:
+ * All five turn the received `seed` into a `BigInt` as splitmix64 state, so the reasons for the
+ * conditions split three ways:
  *
- * - **非負**は API の値域方針である。負も `BigInt` へは落ちる（`BigInt(-1) === -1n`）し、
- *   64 bit へ畳めば有効な状態になるが、`seed` の要求としては受けない。
- * - **上限 `Number.MAX_SAFE_INTEGER`** は、2^53 以上では隣接整数を区別できないため
- *   （2^53 自体は厳密に表せるが、2^53 + 1 は 2^53 へ潰れる）。ここを開けると「渡した値」と
- *   「使われた値」が黙って食い違う。
- * - **端数**は `BigInt` への変換そのものが `RangeError` を投げる（`BigInt(1.5)`）ので、
- *   入口で落とさないと乱数生成器の内側で別の顔の例外になる。
+ * - **Non-negative** is the API's value-range policy. A negative value also converts to `BigInt`
+ *   (`BigInt(-1) === -1n`) and becomes a valid state once folded to 64 bits, but it is not accepted
+ *   as a `seed` request.
+ * - **The upper bound `Number.MAX_SAFE_INTEGER`** is there because adjacent integers cannot be told
+ *   apart from 2^53 on (2^53 itself is exact, but 2^53 + 1 collapses to 2^53). Opening it would make
+ *   "the value passed" and "the value used" disagree silently.
+ * - **Fractions** make the `BigInt` conversion itself throw a `RangeError` (`BigInt(1.5)`), so
+ *   without rejecting them at the entry they surface inside the random generator as an exception
+ *   with a different face.
  *
- * NOTE: 呼ぶのは**生成の入口**（各 `generate` の冒頭）であって、乱数生成器のコンストラクタ
- * だけではない。生成器を作るのは重みを GPU に載せた後なので、そこにしか検査が無いと
- * **GB 級のロードを待たされた末に**「seed が整数でない」で落ちる。入口で先に落とせば、
- * 打ち間違いは 1 ミリ秒で返る。
+ * NOTE: it is called at **the generation entry** (the start of each `generate`), not only in the
+ * random generator's constructor. The generator is created after the weights are on the GPU, so if
+ * the check lived only there, a typo would fail with "seed is not an integer" **after waiting for a
+ * GB-scale load**. Rejecting at the entry returns a typo in a millisecond.
  */
 export const assertAcceptableSeed = (seed: number): void => {
   if (!Number.isInteger(seed) || seed < 0 || seed > Number.MAX_SAFE_INTEGER) {

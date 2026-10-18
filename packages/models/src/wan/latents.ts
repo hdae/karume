@@ -1,21 +1,24 @@
 /**
- * Wan の潜在とテキスト文脈の整形（グラフの外側 — ADR 0118 決定 2 / 4）。
+ * Shaping of Wan's latents and text context (outside the graph — ADR 0118 decisions 2 / 4).
  */
 
 const f32 = Math.fround;
 
 /**
- * VAE の per-channel の潜在の平均 / 標準偏差（上流 `AutoencoderKLWan.config.latents_mean` /
- * `latents_std` — pin した revision の `vae/config.json`）。
+ * The VAE's per-channel latent mean / standard deviation (upstream
+ * `AutoencoderKLWan.config.latents_mean` / `latents_std` — `vae/config.json` of the pinned
+ * revision).
  *
- * パイプライン側に定数として置く理由は anima（`anima/latents.ts`）と同じ: この 2 本は VAE の config
- * にしかなく、IR にも配布資産にも入っていない（VAE の chunk グラフは**逆正規化済み**の潜在を受ける）。
- * 各値は config の 4 桁小数を f32 へ丸めた値の最短 10 進表記（逆正規化で実際に使う f32 そのもの）。
+ * They are constants on the pipeline side for the same reason as in anima (`anima/latents.ts`): the
+ * two lists exist only in the VAE config and are in neither the IR nor the distribution assets (the
+ * VAE chunk graphs take **already denormalized** latents). Each value is the shortest decimal form of
+ * the config's 4-digit decimal rounded to f32 (exactly the f32 that denormalization uses).
  *
- * NOTE: 値は anima（QwenImage の VAE — Wan の VAE からの fine-tune）の定数と同じだが、家族をまたいで
- * import しない（家族ごとに資産の出所が違う — 片方の差し替えがもう片方を動かさないように）。
+ * NOTE: the values equal anima's constants (QwenImage's VAE — a fine-tune of Wan's VAE), but the
+ * families do not import each other (each family's assets have their own provenance — so that
+ * replacing one does not move the other).
  *
- * MUST: モジュールスコープに TypedArray を持たない（横断不変条件「全モジュール副作用ゼロ」）。
+ * MUST: no TypedArray at module scope (cross-cutting invariant "every module is side-effect free").
  */
 export const WAN_LATENTS_MEAN: readonly number[] = [
   -0.757099986076355, -0.708899974822998, -0.911300003528595, 0.10750000178813934,
@@ -24,7 +27,7 @@ export const WAN_LATENTS_MEAN: readonly number[] = [
   -0.19220000505447388, -0.9496999979019165, 0.25029999017715454, -0.2921000123023987,
 ];
 
-/** {@link WAN_LATENTS_MEAN} と対の標準偏差。 */
+/** The standard deviation paired with {@link WAN_LATENTS_MEAN}. */
 export const WAN_LATENTS_STD: readonly number[] = [
   2.8183999061584473, 1.4541000127792358, 2.327500104904175, 2.6558001041412354, 1.219599962234497,
   1.770799994468689, 2.6052000522613525, 2.0743000507354736, 3.268699884414673, 2.152600049972534,
@@ -33,13 +36,15 @@ export const WAN_LATENTS_STD: readonly number[] = [
 ];
 
 /**
- * Wan2.2（TI2V 5B）の VAE の per-channel の潜在の平均（48 チャネル — 上流
- * `AutoencoderKLWan.config.latents_mean`・pin した revision の `vae/config.json`）。置く理由と値の規約
- * （config の小数〈4 桁以下〉を f32 へ丸めた値の最短 10 進表記）は {@link WAN_LATENTS_MEAN} と同じ。
+ * The per-channel latent mean of the Wan2.2 (TI2V 5B) VAE (48 channels — upstream
+ * `AutoencoderKLWan.config.latents_mean`, `vae/config.json` of the pinned revision). The reason for
+ * keeping it here and the value convention (shortest decimal form of the config's decimal (at most 4
+ * digits) rounded to f32) are the same as {@link WAN_LATENTS_MEAN}.
  *
- * MUST: 値を変えるときは `tests/fixtures/wan-latents/wan22-ti2v.json` も同じ値にする — fixture を挟んだ
- * 両側のテスト（TS のホストテストと recipe の `wan/tests/test_ti2v_generation_stats.py` が pin の config と
- * 照合）が片側だけの更新を赤にする。
+ * MUST: when changing a value, change `tests/fixtures/wan-latents/wan22-ti2v.json` to the same value —
+ * the tests on both sides of the fixture (the TS host test, and the recipe's
+ * `wan/tests/test_ti2v_generation_stats.py` which matches it against the pinned config) turn a
+ * one-sided update red.
  */
 export const WAN22_LATENTS_MEAN: readonly number[] = [
   -0.2289000004529953, -0.005200000014156103, -0.13230000436306, -0.23389999568462372,
@@ -56,7 +61,7 @@ export const WAN22_LATENTS_MEAN: readonly number[] = [
   0.3573000133037567, -0.05480000004172325, -0.1680999994277954, -0.06669999659061432,
 ];
 
-/** {@link WAN22_LATENTS_MEAN} と対の標準偏差。 */
+/** The standard deviation paired with {@link WAN22_LATENTS_MEAN}. */
 export const WAN22_LATENTS_STD: readonly number[] = [
   0.476500004529953, 1.0363999605178833, 0.4514000117778778, 1.1677000522613525, 0.5313000082969666,
   0.49900001287460327, 0.48179998993873596, 0.5012999773025513, 0.8158000111579895,
@@ -72,8 +77,9 @@ export const WAN22_LATENTS_STD: readonly number[] = [
 ];
 
 /**
- * 潜在の正規化・逆正規化の per-channel の統計（世代ごとの表 — 世代の記述子 `descriptor.ts` が持つ参照）。
- * チャネル数は表の本数（`mean` と `std` は同じ本数）。
+ * Per-channel statistics for normalizing and denormalizing latents (one table per generation — the
+ * generation descriptor `descriptor.ts` holds the reference). The channel count is the length of the
+ * lists (`mean` and `std` have the same length).
  */
 export type WanLatentStats = {
   readonly mean: readonly number[];
@@ -81,15 +87,19 @@ export type WanLatentStats = {
 };
 
 /**
- * std の逆数（上流の `1.0 / torch.tensor(latents_std)` = f32 の std から f32 の割り算）。正規化と逆正規化が共有する
- * — 上流は 2 つの向きとも同じ式で逆数を作る（`pipeline_wan.py` / `pipeline_wan_i2v.py`）。
+ * The reciprocal of std (upstream's `1.0 / torch.tensor(latents_std)` = an f32 division of the f32
+ * std). Normalization and denormalization share it — upstream builds the reciprocal with the same
+ * expression in both directions (`pipeline_wan.py` / `pipeline_wan_i2v.py`).
  *
- * MUST: config の 10 進値から f64 で作った逆数を f32 へ丸める形にしない — 2.2 の 48 本のうち 14 本が違う値になる
- * （段 9 の調査の実測）。
+ * MUST: do not compute the reciprocal in f64 from the config's decimal value and round it to f32 —
+ * 14 of 2.2's 48 values come out different (measured in the stage 9 investigation).
  */
 const inverseLatentStd = (std: number): number => f32(1 / f32(std));
 
-/** 統計の本数と潜在の要素数の整合を見て、1 チャネルあたりの要素数を返す（`what` は文言の頭）。 */
+/**
+ * Checks the statistics' length against the latents' element count and returns the elements per
+ * channel (`what` heads the message).
+ */
 const elementsPerChannel = (
   latents: Float32Array<ArrayBuffer>,
   stats: WanLatentStats,
@@ -107,11 +117,11 @@ const elementsPerChannel = (
 };
 
 /**
- * 潜在 `[C, F, H, W]` の per-channel の逆正規化（VAE の前 — 上流 `pipeline_wan.py` の
- * `latents / (1 / std) + mean` の逐語）。`C` は `stats` の本数。
+ * Per-channel denormalization of latents `[C, F, H, W]` (before the VAE — verbatim upstream
+ * `pipeline_wan.py` `latents / (1 / std) + mean`). `C` is the length of `stats`.
  *
- * MUST: `latents · std` に直さない — 上流は std の逆数を f32 で作ってから割るので、掛け算に変えると
- * 最終桁が変わる。
+ * MUST: do not rewrite this as `latents · std` — upstream builds the reciprocal of std in f32 and
+ * then divides, so turning it into a multiplication changes the last digit.
  */
 export const denormalizeWanLatents = (
   latents: Float32Array<ArrayBuffer>,
@@ -132,12 +142,13 @@ export const denormalizeWanLatents = (
 };
 
 /**
- * 潜在 `[C, F, H, W]` の per-channel の正規化（VAE encoder の出口の mu → DiT の条件の潜在 — 上流
- * `pipeline_wan_i2v.py` の `(latent_condition − latents_mean) * latents_std` の逐語。`latents_std` は std の逆数）。
- * {@link denormalizeWanLatents} の逆向きで、`C` は `stats` の本数。
+ * Per-channel normalization of latents `[C, F, H, W]` (mu at the VAE encoder exit → the DiT's
+ * condition latent — verbatim upstream `pipeline_wan_i2v.py`
+ * `(latent_condition − latents_mean) * latents_std`, where `latents_std` is the reciprocal of std).
+ * The inverse of {@link denormalizeWanLatents}; `C` is the length of `stats`.
  *
- * MUST: `(x − mean) / std` に直さない — 上流は std の逆数を f32 で作ってから掛けるので、割り算に変えると
- * 最終桁が変わる。
+ * MUST: do not rewrite this as `(x − mean) / std` — upstream builds the reciprocal of std in f32 and
+ * then multiplies, so turning it into a division changes the last digit.
  */
 export const normalizeWanLatents = (
   latents: Float32Array<ArrayBuffer>,

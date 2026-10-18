@@ -1,117 +1,136 @@
 /**
- * Anima の DiT 常駐（ADR 0112）— 決定の純関数と、常駐の席 1 本の状態機械。
+ * Anima DiT residency (ADR 0112) — the pure decision functions and the state machine of the one
+ * resident slot.
  *
- * 既定（`"per-stage"`）は従来どおり段ごとに Session を張っては畳む。opt-in の `"transformer"` は
- * DiT の Session を generate を跨いで持ち続け、2 回目以降の generate で重みの読み直し・導出・
- * backing の作り直しを消す（ADR 0112 決定 1）。
+ * The default (`"per-stage"`) opens and closes a Session per stage as before. The opt-in
+ * `"transformer"` keeps the DiT Session across generate calls and removes the weight reload,
+ * re-derivation and backing rebuild from the second generate on (ADR 0112 decision 1).
  *
- * ここに置くのは「いつ持ち、いつ手放し、いつ退避するか」だけで、GPU に触る処理は注入された
- * 口（`open` / `dispose` / `settleRelease`）越しに呼ぶ。GPU 無しの単体テストで状態遷移を
- * 故障注入つきで縛るため（`tests/anima_residency_test.ts`）。
+ * Only "when to keep, when to release, when to evict" lives here; GPU work is called through
+ * injected hooks (`open` / `dispose` / `settleRelease`), so GPU-less unit tests can pin the state
+ * transitions with fault injection (`tests/anima_residency_test.ts`).
  *
- * ## 状態
+ * ## State
  *
- * | 欄           | 意味                                                                                   |
- * | ------------ | -------------------------------------------------------------------------------------- |
- * | `held`       | 常駐中の DiT（無ければ undefined）                                                     |
- * | `downgraded` | 退避したことがある（OOM / 空き不足 — 以後この pipeline の寿命の間は常駐しない: 格下げ） |
+ * | Field        | Meaning                                                                        |
+ * | ------------ | ------------------------------------------------------------------------------ |
+ * | `held`       | The resident DiT (undefined if none)                                           |
+ * | `downgraded` | Has evicted (OOM / low headroom): downgraded for the pipeline's remaining life |
  *
- * MUST: 格下げは戻さない。戻すと、VRAM が足りない機で毎回 OOM を踏み直してから（または空きを
- * 試し確保してから）遅い経路へ落ちる（退避の費用を generate ごとに払う）。
- * MUST: 常駐しない判断は必ず名乗る（`residency` イベント）。黙って遅い経路へ落ちると、利用者は
- * opt-in が効いていないことに気付けない。例外は既定の段ごと運転で常駐と無関係な generate
- * （既定の挙動にイベントを足さない — 既存の購読側のイベント列を変えない）と、この generate で作った
- * DiT を段の失敗で畳むとき（席に載る前の失敗で、常駐の状態は何も変わらない — 次の generate は
- * また常駐を試みるので遅い経路へ落ちてもいない）だけ。
+ * MUST: a downgrade is not undone. Undoing it would make a machine short of VRAM hit the OOM again
+ * (or probe the headroom) every time before falling to the slow path (paying the eviction cost per
+ * generate).
+ * MUST: a decision not to keep the DiT resident is always reported (`residency` event). Falling to
+ * the slow path silently leaves the user unable to notice that the opt-in has no effect. The only
+ * exceptions are a generate in the default per-stage operation unrelated to residency (no event is
+ * added to the default behaviour — existing subscribers' event sequences do not change) and folding
+ * a DiT created in this generate after a stage failure (a failure before it enters the slot; the
+ * residency state does not change — the next generate tries residency again, so nothing has fallen
+ * to the slow path).
  *
- * ## 退避の 2 本の線
+ * ## The two lines of eviction
  *
- * 1. **先回り**（{@link TransformerResidency.ensureHeadroom}）: 常駐 DiT がある時点で、次に張る段が要る量を
- *    試し確保で量り、入らなければ段を張る前に退避する。量る点は generate の中に 2 つ:
- *    - text 段の前（常駐 DiT を持ち越した generate）— text_encoder / text_conditioner の必要量の最大
- *      （{@link generateMemoryNeed}）。
- *    - DiT 段の後・VAE 段の前（その時点で常駐 DiT があるとき）— vae_decoder の必要量。この点が要るのは、
- *      最初の generate（DiT をこの generate で作って席に載せ、その上に VAE が乗る）と、持ち越した DiT が
- *      新しい解像度を回した generate（DiT 段の中で計画の backing が育つので、text 段の前に量った空きは
- *      VAE の時点では古い）を覆うため。VAE を text 段の前の量りに含めないのは、遅く退避するほうが得だから
- *      （DiT 段は常駐の恩恵を受け終えている）。
- * 2. **反応**（{@link TransformerResidency.runStage} / `runTransformer`）: 段が `GpuOutOfMemoryError` を
- *    投げたら退避してやり直す（2 本目の線 — 先回りの見積りが外れたとき）。
+ * 1. **Pre-emptive** ({@link TransformerResidency.ensureHeadroom}): while a resident DiT exists,
+ *    the amount the next stage needs is measured with a headroom probe, and if it does not fit, the
+ *    DiT is evicted before the stage is opened. There are two measuring points in a generate:
+ *    - before the text stages (a generate with a carried-over DiT) — the larger of the text_encoder
+ *      / text_conditioner needs ({@link generateMemoryNeed}).
+ *    - after the DiT stage and before the VAE stage (when a resident DiT exists at that point) —
+ *      the vae_decoder need. This point covers the first generate (the DiT is created in this
+ *      generate and put in the slot, and the VAE stacks on it) and a generate whose carried-over
+ *      DiT ran a new resolution (the plan's backing grows inside the DiT stage, so the headroom
+ *      measured before the text stages is stale by the VAE). The VAE is not included in the
+ *      measurement before the text stages because evicting later is cheaper (the DiT stage has
+ *      already benefited from residency).
+ * 2. **Reactive** ({@link TransformerResidency.runStage} / `runTransformer`): when a stage throws
+ *    `GpuOutOfMemoryError`, evict and re-run (the second line — when the pre-emptive estimate is
+ *    off).
  *
- * どちらの線の退避も同じ格下げを立てる（以後この pipeline は常駐しない — 上の「格下げは戻さない」MUST は
- * 先回りの退避にもそのまま効く）。
+ * An eviction on either line sets the same downgrade (this pipeline does not keep the DiT resident
+ * afterwards — the "a downgrade is not undone" MUST above applies to pre-emptive eviction as is).
  *
- * WHY 先回りが主線か: WebGPU で device を失わずに OOM を返すのは `createBuffer` / `createTexture` だけで、
- * 重みのアップロード（`queue.writeBuffer`）の staging の OOM は device を無効化する（wgpu / Dawn —
- * runtime の `gpu/headroom.ts` 冒頭）。反応の線はその OOM を踏んだ時点で手遅れになりうる。
+ * WHY pre-emption is the main line: in WebGPU only `createBuffer` / `createTexture` return OOM
+ * without losing the device; an OOM in the staging of a weight upload (`queue.writeBuffer`)
+ * invalidates the device (wgpu / Dawn — the head of the runtime's `gpu/headroom.ts`). The reactive
+ * line can be too late by the time it hits that OOM.
  */
 
 import { type AdmissionReport, GpuOutOfMemoryError } from "@karume/runtime";
 import { ModelInputError } from "../errors.ts";
 
 /**
- * 受理する綴りの並び（語彙の正本 — 型はここから導く）。
+ * The accepted spellings (the source of truth for the vocabulary — the type is derived from it).
  *
- * NOTE: 公開面には型だけを出し、この並びは出さない（`ANIMA_SAMPLER_TYPES` とは非対称）— 公開面は薄く
- * 保つ（ADR 0008）ので、選択肢を列挙する消費者（CLI / UI）が現れてから同じ凍結した並びとして足す。
+ * NOTE: only the type is on the public surface, not this list (asymmetric with
+ * `ANIMA_SAMPLER_TYPES`) — the public surface stays thin (ADR 0008), so the list is added as the
+ * same frozen list once a consumer that enumerates the choices (CLI / UI) appears.
  */
 const ANIMA_RESIDENCIES = Object.freeze(["per-stage", "transformer"] as const);
 
 /**
- * DiT の Session を generate の後に持ち続けるか。
+ * Whether the DiT Session is kept after a generate.
  *
- * - `"per-stage"`（既定）: 段ごとに張って畳む。VRAM のピークは最大の段 1 本ぶん。
- * - `"transformer"`: DiT を**この generate の後も**持ち続ける。text / VAE の段は常駐 DiT の上に乗る。
+ * - `"per-stage"` (default): open and close per stage. The VRAM peak is the largest single stage.
+ * - `"transformer"`: keep the DiT **after this generate too**. The text / VAE stages stack on the
+ *   resident DiT.
  */
 export type AnimaResidency = (typeof ANIMA_RESIDENCIES)[number];
 
-/** 省略時の値（従来の挙動 — 既定の VRAM の前提を変えない）。 */
+/** Value when omitted (the old behaviour — the default VRAM assumption does not change). */
 export const DEFAULT_ANIMA_RESIDENCY: AnimaResidency = "per-stage";
 
-/** `residency` イベントの動作。 */
+/** Action of the `residency` event. */
 export type AnimaResidencyAction =
-  /** DiT をこの generate の後も持ち続ける。 */
+  /** The DiT is kept after this generate too. */
   | "retained"
   /**
-   * DiT を手放した（常駐を求められなかった — DiT 段の終わりか、DiT 段の前で失敗した generate の後 /
-   * 求められたが格下げ済み）。
+   * The DiT was released (residency was not requested — at the end of the DiT stage, or after a
+   * generate that failed before the DiT stage / requested but already downgraded).
    */
   | "released"
-  /** 常駐中の DiT を途中で捨てた（OOM で退避した / 持ち越した DiT の段が失敗した）。 */
+  /**
+   * The resident DiT was discarded midway (evicted on OOM / the stage of a carried-over DiT
+   * failed).
+   */
   | "evicted";
 
-/** `residency` イベントの理由。 */
+/** Reason of the `residency` event. */
 export type AnimaResidencyReason =
-  /** 実効 residency（request ?? pipeline 既定）どおり。 */
+  /** As the effective residency says (request ?? pipeline default). */
   | "request"
-  /** 常駐を求められたが、この pipeline は退避（`out-of-memory` / `headroom`）で格下げ済み。 */
+  /**
+   * Residency was requested, but this pipeline is downgraded by an eviction (`out-of-memory` /
+   * `headroom`).
+   */
   | "downgraded"
-  /** 他の段か、持ち越した DiT の run が `GpuOutOfMemoryError` を投げたので退避した。 */
+  /** Evicted because another stage or the run of a carried-over DiT threw `GpuOutOfMemoryError`. */
   | "out-of-memory"
   /**
-   * 段を張る前の試し確保で、次の段が要る量が常駐 DiT の上に入らなかったので先に退避した（OOM を踏む前 —
-   * {@link TransformerResidency.ensureHeadroom}）。量る点は text 段の前（text 系 2 段の必要量）と、DiT 段の
-   * 後・VAE 段の前（VAE の必要量）の 2 つ。
+   * The headroom probe before opening a stage found that the next stage's need does not fit on top
+   * of the resident DiT, so it was evicted first (before hitting an OOM —
+   * {@link TransformerResidency.ensureHeadroom}). There are two measuring points: before the text
+   * stages (the need of the two text stages) and after the DiT stage, before the VAE stage (the
+   * VAE's need).
    */
   | "headroom"
   /**
-   * 持ち越した常駐 DiT を使った DiT 段が失敗した（denoise ループ内の `onEvent` の throw による中断を
-   * 含む）ので、壊れうる Session を捨てた。
+   * The DiT stage using a carried-over resident DiT failed (including an abort by `onEvent`
+   * throwing in the denoise loop), so the possibly broken Session was discarded.
    */
   | "failure";
 
-/** 状態機械が発する通知（pipeline が `residency` イベントへ写す）。 */
+/** Notification the state machine emits (the pipeline maps it to a `residency` event). */
 export type ResidencyNotice = {
   readonly action: AnimaResidencyAction;
   readonly reason: AnimaResidencyReason;
 };
 
 /**
- * `residency` の綴りを検査する（構築オプションと request の両方の入口）。
+ * Checks the spelling of `residency` (the entry for both the construction option and the request).
  *
- * MUST: 未知の綴りは既定へ縮退させず落とす — 綴り違いの `"transformers"` が黙って段ごと運転に
- * なると、利用者は常駐が効いていないことに速度でしか気付けない。打つ手は呼び手の側にあるので
- * 入力起因（ADR 0107）。
+ * MUST: an unknown spelling fails instead of falling back to the default — if a misspelled
+ * `"transformers"` silently became per-stage operation, the user could notice that residency has no
+ * effect only from the speed. The fix is on the caller's side, so it is input-caused (ADR 0107).
  */
 export const assertAnimaResidency = (value: unknown, where: string): AnimaResidency => {
   const accepted =
@@ -127,63 +146,77 @@ export const assertAnimaResidency = (value: unknown, where: string): AnimaReside
   return accepted;
 };
 
-/** DiT 段の Session の出所。 */
+/** Where the DiT stage's Session comes from. */
 export type TransformerSource =
-  /** 前の generate から持ち越した常駐 DiT を使う（読み直さない）。 */
+  /** Use the resident DiT carried over from an earlier generate (no reload). */
   | "resident"
-  /** 新しく作り、段が成功したら常駐の席に載せる（席に載るのは段の後 — 段の中の失敗は段ごと運転と同じ）。 */
+  /**
+   * Create a new one and put it in the resident slot if the stage succeeds (it enters the slot
+   * after the stage — a failure inside the stage is the same as per-stage operation).
+   */
   | "build-resident"
-  /** 段ごとに作って畳む（常駐の席に載せない）。 */
+  /** Create and fold per stage (not put in the resident slot). */
   | "per-stage";
 
-/** 決定の入力（DiT 段の**開始時**の事実）。 */
+/** Input of the decision (the facts at the **start** of the DiT stage). */
 export type ResidencyFacts = {
-  /** この generate の実効 residency（request ?? pipeline 既定）。 */
+  /** Effective residency of this generate (request ?? pipeline default). */
   readonly effective: AnimaResidency;
-  /** 退避（OOM / 空き不足）で格下げ済みか。 */
+  /** Whether already downgraded by an eviction (OOM / not enough headroom). */
   readonly downgraded: boolean;
-  /** 常駐の席に DiT が載っているか（= 前の generate から持ち越した DiT がある）。 */
+  /**
+   * Whether a DiT is in the resident slot (= a DiT carried over from an earlier generate exists).
+   */
   readonly held: boolean;
 };
 
 /**
- * DiT 段の Session をどこから取るか。
+ * Where to take the DiT stage's Session from.
  *
- * MUST: 常駐 DiT が既にあれば、実効値に関わらずそれを使う（読み直さない — 実効値の意味は「この
- * generate の**後に**持つか」であって「この generate で使うか」ではない）。
+ * MUST: if a resident DiT already exists, use it whatever the effective value (no reload — the
+ * effective value means "keep it **after** this generate", not "use it in this generate").
  */
 export const transformerSource = (facts: ResidencyFacts): TransformerSource => {
   if (facts.held) return "resident";
   return facts.effective === "transformer" && !facts.downgraded ? "build-resident" : "per-stage";
 };
 
-/** DiT 段の結末（持ち越した DiT の OOM は別の経路 — {@link TransformerResidency} が退避してやり直す）。 */
+/**
+ * Outcome of the DiT stage (an OOM of a carried-over DiT takes another path —
+ * {@link TransformerResidency} evicts and re-runs).
+ */
 export type TransformerOutcome = "success" | "failure";
 
-/** 席の DiT をどうするかの決定。 */
+/** Decision on what to do with the DiT in the slot. */
 export type TransformerDecision = {
   /**
-   * `retain` = 席に載せて持つ / `release` = 手放して畳む / `evict` = 途中で捨てて畳む（GPU 側の扱いは
-   * `release` と同じで、差は名乗る理由だけ）。
+   * `retain` = put in the slot and keep / `release` = release and fold / `evict` = discard midway
+   * and fold (the GPU side is the same as `release`; only the reported reason differs).
    */
   readonly action: "retain" | "release" | "evict";
-  /** 発するイベント（既定の段ごと運転で常駐と無関係なら無し）。 */
+  /** Event to emit (none in the default per-stage operation unrelated to residency). */
   readonly notice?: ResidencyNotice;
 };
 
 /**
- * DiT 段を抜けるときに、段で使った DiT をどうするかを決める（`facts` は段の**開始時**の事実 —
- * 出所は {@link transformerSource} で導く）。状態機械はこの `action` をそのまま適用する（真実はここ 1 か所）。
+ * Decides, when leaving the DiT stage, what to do with the DiT the stage used (`facts` are the
+ * facts at the **start** of the stage — the source is derived with {@link transformerSource}). The
+ * state machine applies this `action` as is (the single source of truth).
  *
- * - 失敗: 持ち越した DiT（`resident`）は捨てて名乗る（壊れた Session を次の generate へ持ち越さない —
- *   OOM や device 消失の後の Session は使えるとは限らない）。この generate で作った DiT は段ごと運転の
- *   失敗と同じで、畳むだけで名乗らない（席に載る前の失敗 — 利用者から見て常駐は何も変わっていない）。
- * - 成功: 実効値 `transformer` で格下げでなければ持つ。持たないときは理由を名乗る。常駐と無関係な
- *   段ごと運転だけは名乗らない（既定のイベント列を変えない）。
+ * - Failure: a carried-over DiT (`resident`) is discarded and reported (a broken Session is not
+ *   carried into the next generate — a Session after an OOM or device loss is not necessarily
+ *   usable). A DiT created in this generate is the same as a per-stage failure: folded without a
+ *   report (a failure before it enters the slot — from the user's point of view residency has not
+ *   changed).
+ * - Success: kept if the effective value is `transformer` and not downgraded. When not kept, the
+ *   reason is reported. Only per-stage operation unrelated to residency is not reported (the
+ *   default event sequence does not change).
  *
- * MUST: 到達しない組は既定値へ落とさず投げる（黙って「名乗らずに手放す」を返すと、常駐しない判断は
- * 必ず名乗る MUST と食い違う値が残る）。席に DiT があるまま格下げ済みにはならない — 格下げは退避で
- * 席を空けるときにだけ立ち、格下げ後は席に載せない。
+ * MUST: an unreachable combination throws instead of falling back to a default value (silently
+ * returning "release without a report" would leave a value that contradicts the MUST that a
+ * decision not to keep the DiT is always reported). A downgraded state never has a DiT in the slot
+ * — the downgrade is set only when an eviction empties the slot, and nothing enters the slot after
+ * it.
  */
 export const decideAfterTransformer = (
   facts: ResidencyFacts,
@@ -204,13 +237,14 @@ export const decideAfterTransformer = (
     case "build-resident":
       return { action: "retain", notice: { action: "retained", reason: "request" } };
     case "resident":
-      // 実効値 per-stage で持ち越した DiT を使ったら、手放したことを名乗る（連続生成の最後の 1 枚を
-      // per-stage にして解放する使い方の観測点）。
+      // A carried-over DiT used with effective per-stage reports its release (the observation point
+      // of the usage that makes the last of a series per-stage to release it).
       return facts.effective === "transformer"
         ? { action: "retain", notice: { action: "retained", reason: "request" } }
         : { action: "release", notice: { action: "released", reason: "request" } };
     case "per-stage":
-      // 席が空で実効値 transformer なのに段ごと運転 = 格下げ済み（transformerSource の対偶）。
+      // Empty slot and effective transformer, yet per-stage operation = downgraded (the
+      // contrapositive of transformerSource).
       return facts.effective === "transformer"
         ? { action: "release", notice: { action: "released", reason: "downgraded" } }
         : { action: "release" };
@@ -218,12 +252,14 @@ export const decideAfterTransformer = (
 };
 
 /**
- * generate が DiT 段の外で失敗したとき、席の DiT をどうするかを決める（席に DiT があるときだけ呼ぶ）。
+ * Decides what to do with the DiT in the slot when a generate fails outside the DiT stage (called
+ * only when the slot holds a DiT).
  *
- * - 実効値 `per-stage`: 手放して `released` / `request` を名乗る — 「この generate の後に持たない」指示は
- *   generate が失敗しても効かせる（効かせないと、手放したつもりの VRAM が次の generate か dispose まで残る）。
- * - 実効値 `transformer`: 持ったまま名乗らない（DiT 段を抜けていれば `retained` は名乗り済み、DiT 段の前なら
- *   常駐の状態は何も変わっていない）。
+ * - Effective `per-stage`: release and report `released` / `request` — the instruction "do not keep
+ *   it after this generate" takes effect even when the generate fails (otherwise VRAM thought
+ *   released stays until the next generate or dispose).
+ * - Effective `transformer`: keep it without a report (if the DiT stage was left, `retained` has
+ *   been reported; before the DiT stage the residency state has not changed).
  */
 export const decideAfterFailedGenerate = (effective: AnimaResidency): TransformerDecision =>
   effective === "per-stage"
@@ -231,26 +267,31 @@ export const decideAfterFailedGenerate = (effective: AnimaResidency): Transforme
     : { action: "retain" };
 
 /**
- * 空きの試し確保に足す余裕（512 MiB）。
+ * Margin added to the headroom probe (512 MiB).
  *
- * WHY: 見積り（`AdmissionReport.peakAccountedBytes`）+ 最大 part の staging は「勘定に入れた分」で、
- * 実際の確保はそれを超えうる — ①割り当て器（gpu-allocator）のブロックは 256 MiB で、ブロック未満の
- * 確保が新しいブロックを切ると試し確保が見た量より最大 256 MiB 多く取られる ②wgpu は submit / poll の
- * 後に予算の 99% を超えると device を失う（確保の OOM 線は 97%）— この差が 9.93 GiB の機（Arc B570）で
- * 約 178 MiB ③見積りの `unaccounted`（params・量子化の一時など）は勘定の外。①+② を覆い ③ に少し残す
- * 値として 512 MiB を置く（常駐の既定席 1024² で常駐ぶん +2,646 MiB — ADR 0112 — に比べて小さい）。
+ * WHY: the estimate (`AdmissionReport.peakAccountedBytes`) + the staging of the largest part is
+ * "what is accounted for", and real allocations can exceed it — ① the allocator's (gpu-allocator)
+ * blocks are 256 MiB, and an allocation below block size that opens a new block takes up to 256 MiB
+ * more than the probe saw ② wgpu loses the device when it exceeds 99 % of the budget after submit /
+ * poll (the OOM line of allocation is 97 %) — this difference is about 178 MiB on a 9.93 GiB
+ * machine (Arc B570) ③ the estimate's `unaccounted` (params, quantization scratch, etc.) is outside
+ * the accounting. 512 MiB is a value that covers ① + ② and leaves a little for ③ (small against the
+ * resident share of +2,646 MiB at 1024² with the default preset — ADR 0112).
  */
 export const HEADROOM_MARGIN_BYTES = 512 * 1024 * 1024;
 
 /**
- * 段 1 本が常駐 DiT の上に要るバイト数 = 見積りのピーク + 最大 part の staging + 余裕。
+ * Bytes one stage needs on top of the resident DiT = estimated peak + staging of the largest part +
+ * margin.
  *
- * - `report.peakAccountedBytes`: 重み + 保持集合の上限（`ModelComponent.estimate` — 束縛と device の
- *   上限はその段の実引数と同じもの）。
- * - `maxPartBytes`: 構築中に同時に残る staging（`ModelComponent.maxPartBytes` の WHY）。
- * - {@link HEADROOM_MARGIN_BYTES}: 勘定の外の上乗せ。
+ * - `report.peakAccountedBytes`: weights + the bound of the retained set (`ModelComponent.estimate`
+ *   — the bindings and device limits are the same as the stage's actual arguments).
+ * - `maxPartBytes`: the staging alive at the same time during construction (the WHY of
+ *   `ModelComponent.maxPartBytes`).
+ * - {@link HEADROOM_MARGIN_BYTES}: the extra for what is outside the accounting.
  *
- * NOTE: `export` は GPU 無しで算術を縛るテストのため（公開面には出さない）。
+ * NOTE: `export` is for the tests that pin the arithmetic without a GPU (not on the public
+ * surface).
  */
 export const stageMemoryNeed = (
   report: Pick<AdmissionReport, "peakAccountedBytes">,
@@ -258,64 +299,76 @@ export const stageMemoryNeed = (
 ): number => report.peakAccountedBytes + maxPartBytes + HEADROOM_MARGIN_BYTES;
 
 /**
- * 続けて走る段の組（text 段の前の量りでは text_encoder / text_conditioner）が常駐 DiT の上に要る
- * バイト数 = 段ごとの必要量の**最大**。
+ * Bytes a group of consecutive stages (text_encoder / text_conditioner for the measurement before
+ * the text stages) needs on top of the resident DiT = the **maximum** of the per-stage needs.
  *
- * WHY 和でなく最大: 段は 1 本ずつ順に走り、各段の Session は次の段を張る前に畳む（pipeline の
- * `withSession` の finally）。同時に居るのは常駐 DiT（text 段の間は一定 — 試し確保の時点で既に載っている）
- * と段 1 本だけなので、最も重い段 1 本が入れば残りも入る。DiT 段を挟むと常駐 DiT の backing が育ちうる
- * ので、VAE 段はこの組に入れず DiT 段の後に別に量る（モジュール doc「退避の 2 本の線」）。
+ * WHY the maximum, not the sum: stages run one at a time, and each stage's Session is folded before
+ * the next stage is opened (the finally of the pipeline's `withSession`). Only the resident DiT
+ * (constant during the text stages — already in place at the probe) and one stage coexist, so if
+ * the heaviest stage fits, the rest fit. Across the DiT stage the resident DiT's backing can grow,
+ * so the VAE stage is not in this group and is measured separately after the DiT stage (module doc,
+ * "The two lines of eviction").
  *
- * NOTE: `export` は GPU 無しで算術を縛るテストのため（公開面には出さない）。
+ * NOTE: `export` is for the tests that pin the arithmetic without a GPU (not on the public
+ * surface).
  */
 export const generateMemoryNeed = (needs: readonly number[]): number => Math.max(0, ...needs);
 
 /**
- * OOM の退避に当たる失敗か（退避する相手 = 常駐の席の DiT があり、失敗が `GpuOutOfMemoryError`）。
+ * Whether a failure calls for an OOM eviction (there is something to evict = a DiT in the resident
+ * slot, and the failure is `GpuOutOfMemoryError`).
  *
- * MUST: 型で判定する（文言を見ない）— errorScope が捕まえた余力切れだけが退避で直りうる失敗で、
- * validation や device 消失を退避でやり直すと本当の原因が 2 度目の失敗に埋もれる。
+ * MUST: decide by type (do not look at the message) — only running out of memory, caught by the
+ * errorScope, is a failure eviction can fix; re-running a validation error or device loss after an
+ * eviction buries the real cause under the second failure.
  */
 export const evictsForMemory = (error: unknown, held: boolean): boolean =>
   held && error instanceof GpuOutOfMemoryError;
 
-/** 状態機械が GPU 側へ頼む口（本番は Session と GpuContext の薄い包み）。 */
+/**
+ * Hooks the state machine asks of the GPU side (in production, thin wrappers of Session and
+ * GpuContext).
+ */
 export type ResidencyHooks<T> = {
-  /** 常駐させていた資源を破棄する。 */
+  /** Disposes the resource that was kept resident. */
   readonly dispose: (resource: T) => Promise<void> | void;
   /**
-   * 退避（OOM / 空き不足）で破棄した後、解放が device に届くのを待つ。Intel / wgpu は `destroy()` の解放が
-   * 次の device poll まで遅れる（docs/known-issues.md「Intel Arc B570」節）ので、待たずに
-   * やり直すと同じ OOM を踏みうる（待ちの形の根拠と未検証の範囲は pipeline 側の実装の doc）。
-   * この待ちは、致命的な OOM で既に無効化された device の消失も表面化させる（pipeline 側の実装が待ちの
-   * 前に空の submit を出す — 有効性を検査する呼び出し）ので、死んだ device は次の段より前にここで
-   * 消失の例外になる。先回りの退避（{@link TransformerResidency.ensureHeadroom}）にはやり直しが無い —
-   * 待ちの後は次の段をそのまま張る。
+   * After disposing on an eviction (OOM / not enough headroom), waits for the release to reach the
+   * device. On Intel / wgpu the release by `destroy()` is deferred to the next device poll
+   * (docs/known-issues.md, Intel Arc B570 section), so re-running without waiting can hit the same
+   * OOM (the grounds for the shape of the wait and the unverified range are in the doc of the
+   * pipeline-side implementation). The wait also surfaces the loss of a device already invalidated
+   * by a fatal OOM (the pipeline-side implementation issues an empty submit before waiting — a
+   * validated call), so a dead device becomes a loss exception here, before the next stage.
+   * Pre-emptive eviction ({@link TransformerResidency.ensureHeadroom}) has no re-run — after the
+   * wait the next stage is opened as is.
    */
   readonly settleRelease: () => Promise<void>;
 };
 
-/** 通知の受け口（pipeline の `onEvent` へ写す）。 */
+/** Receiver of notifications (mapped to the pipeline's `onEvent`). */
 export type ResidencyNotify = (notice: ResidencyNotice) => Promise<void>;
 
-/** DiT 段 1 回ぶんの入力。 */
+/** Input of one DiT stage. */
 export type TransformerStage<T, R> = {
   readonly effective: AnimaResidency;
-  /** DiT の Session を作る。 */
+  /** Creates the DiT Session. */
   readonly open: () => Promise<T>;
-  /** 段の本体（denoise ループ）。やり直しでは最初から呼び直す。 */
+  /** The stage body (the denoise loop). A re-run calls it again from the start. */
   readonly body: (resource: T) => Promise<R>;
   readonly notify: ResidencyNotify;
 };
 
 /**
- * 常駐の席 1 本（DiT）の状態機械。pipeline に 1 つ持ち、`generate` / `dispose` の直列化鎖の
- * 内側からだけ呼ぶ（並行呼び出しを想定しない — 鎖が 1 本ずつに並べる）。
+ * State machine of the one resident slot (DiT). The pipeline holds one and calls it only from
+ * inside the serialisation chain of `generate` / `dispose` (concurrent calls are not expected — the
+ * chain orders them one at a time).
  *
- * 席をどうするかは純関数（{@link decideAfterTransformer} / {@link decideAfterFailedGenerate}）が決め、
- * ここはその `action` を適用して通知を出すだけ。例外は退避（OOM の反応 {@link evictsForMemory} /
- * 空き不足の先回り {@link TransformerResidency.ensureHeadroom}）で、決定ではなく GPU の事実への
- * 反応なのでここに置く。
+ * What to do with the slot is decided by pure functions ({@link decideAfterTransformer} /
+ * {@link decideAfterFailedGenerate}); this only applies their `action` and emits notifications. The
+ * exception is eviction (reactive on OOM {@link evictsForMemory} / pre-emptive on insufficient
+ * headroom {@link TransformerResidency.ensureHeadroom}), which lives here because it reacts to GPU
+ * facts rather than being a decision.
  */
 export class TransformerResidency<T> {
   readonly #hooks: ResidencyHooks<T>;
@@ -326,20 +379,21 @@ export class TransformerResidency<T> {
     this.#hooks = hooks;
   }
 
-  /** 常駐中の DiT があるか（診断とテスト用）。 */
+  /** Whether a resident DiT exists (for diagnostics and tests). */
   get holding(): boolean {
     return this.#held !== undefined;
   }
 
-  /** 退避（OOM / 空き不足）で格下げ済みか（診断とテスト用）。 */
+  /** Whether downgraded by an eviction (OOM / not enough headroom) (for diagnostics and tests). */
   get downgraded(): boolean {
     return this.#downgraded;
   }
 
   /**
-   * DiT 以外の段 1 本を回す。常駐 DiT がある状態で段が `GpuOutOfMemoryError` を投げたら、
-   * 常駐 DiT を退避してから**段を 1 回だけ**やり直す（`attempt` を呼び直す — Session の構築から）。
-   * やり直しの失敗はそのまま投げる（退避する相手はもう居ない）。
+   * Runs one stage other than the DiT. If the stage throws `GpuOutOfMemoryError` while a resident
+   * DiT exists, the resident DiT is evicted and **the stage is re-run once** (`attempt` is called
+   * again — from Session construction). A failure of the re-run is thrown as is (nothing is left to
+   * evict).
    */
   async runStage<R>(attempt: () => Promise<R>, notify: ResidencyNotify): Promise<R> {
     try {
@@ -352,18 +406,20 @@ export class TransformerResidency<T> {
   }
 
   /**
-   * DiT 段を回す（Session の出所は {@link transformerSource}・抜けるときは
-   * {@link decideAfterTransformer} の `action` を適用する）。
+   * Runs the DiT stage (the Session's source is {@link transformerSource}; on leaving, the `action`
+   * of {@link decideAfterTransformer} is applied).
    *
-   * 持ち越した DiT の run が `GpuOutOfMemoryError` を投げたら、それを退避して段ごと運転で
-   * **段を最初から 1 回だけ**やり直す。denoise の状態は段の本体が作り直すので、出る値は変わらない
-   * （同じ seed・同じ入力・同じグラフ）。
+   * If the run of a carried-over DiT throws `GpuOutOfMemoryError`, it is evicted and **the stage is
+   * re-run once from the start** in per-stage operation. The stage body rebuilds the denoise state,
+   * so the output does not change (same seed, same inputs, same graph).
    *
-   * この generate で作る DiT は、段が成功して `retain` と決まるまで席に載せない。その run の失敗は
-   * OOM でも退避しない（格下げも通知もせず、畳んで元の例外を投げる）。WHY: そのとき pipeline が持つ
-   * GPU 資源はこの DiT 1 本だけ（text 段は畳んだ後）で、VRAM の構成は段ごと運転と同じ — 常駐が原因の
-   * OOM ではないので、格下げして GB 級を読み直しても同じ構成をもう一度試すだけになる。
-   * DiT の構築そのものの OOM も同じく退避しない（退避する相手が居ない）。
+   * A DiT created in this generate does not enter the slot until the stage succeeds and `retain` is
+   * decided. A failure of its run is not evicted even on OOM (no downgrade or notification; it is
+   * folded and the original error thrown). WHY: the pipeline then holds only this DiT as GPU
+   * resources (the text stages are already folded), the same VRAM layout as per-stage operation —
+   * the OOM is not caused by residency, so downgrading and reloading the GB-scale weights would
+   * only retry the same layout. An OOM in constructing the DiT itself is likewise not evicted
+   * (nothing to evict).
    */
   async runTransformer<R>(stage: TransformerStage<T, R>): Promise<R> {
     const facts = this.#facts(stage.effective);
@@ -375,8 +431,8 @@ export class TransformerResidency<T> {
     } catch (error) {
       if (evictsForMemory(error, carried !== undefined)) {
         await this.#evict("out-of-memory", stage.notify, { error });
-        // 退避で席は空き格下げが立ったので、やり直しは段ごと運転になり、そこでは退避しない
-        // （退避する相手が居ない = やり直しは構造上 1 回だけ）。
+        // The eviction emptied the slot and set the downgrade, so the re-run is per-stage
+        // operation, which does not evict (nothing to evict = structurally only one re-run).
         return await this.runTransformer(stage);
       }
       throw await this.#settleFailure(
@@ -393,9 +449,10 @@ export class TransformerResidency<T> {
   }
 
   /**
-   * generate が DiT 段の外で失敗したときに呼ぶ（pipeline の `#generate` の失敗経路 — DiT 段の中の失敗は
-   * {@link runTransformer} で決着済み）。席に DiT があれば {@link decideAfterFailedGenerate} を適用する。
-   * 返り値は投げるべき例外（{@link #settleFailure} の MUST）。
+   * Called when a generate fails outside the DiT stage (the failure path of the pipeline's
+   * `#generate` — a failure inside the DiT stage is settled in {@link runTransformer}). If the slot
+   * holds a DiT, {@link decideAfterFailedGenerate} is applied. Returns the exception to throw (the
+   * MUST of {@link #settleFailure}).
    */
   async releaseIfRequested(
     error: unknown,
@@ -408,17 +465,21 @@ export class TransformerResidency<T> {
   }
 
   /**
-   * 先回りの退避（モジュール doc「退避の 2 本の線」の 1）: 常駐 DiT の上に `need` バイトが入るかを
-   * `probe` で量り、入らなければ 格下げ → 常駐 DiT を破棄 → 解放が届くのを待つ → `evicted` /
-   * `headroom` を名乗る。pipeline は次の段を張る前（text 段の前 / VAE 段の前）に呼ぶ。
+   * Pre-emptive eviction (line 1 of the module doc's "The two lines of eviction"): `probe` measures
+   * whether `need` bytes fit on top of the resident DiT, and if not: downgrade → dispose the
+   * resident DiT → wait for the release → report `evicted` / `headroom`. The pipeline calls it
+   * before opening the next stage (before the text stages / before the VAE stage).
    *
-   * - 常駐 DiT が無い: 何もしない（`probe` も呼ばない — 退避する相手が居ないので量る意味が無い）。
-   * - `probe` が true: 何もしない（常駐を続ける）。
-   * - `probe` が false: 退避する。後始末（破棄・解放待ち）が失敗したら、名乗ってから後始末の失敗を
-   *   並べた `AggregateError` を投げる — 先頭に元の失敗が無い点だけが OOM の退避と違う。
-   * - `probe` が投げた: そのまま投げる（格下げも破棄もせず、常駐 DiT を持ったまま）。WHY: validation
-   *   （バグ）や device 消失は「入らない」ではない — 退避で片付けると本当の原因が埋もれる。席の DiT の
-   *   扱いは generate の失敗経路（{@link releaseIfRequested}）が決める。
+   * - No resident DiT: nothing happens (`probe` is not called either — nothing to evict, so nothing
+   *   to measure).
+   * - `probe` returns true: nothing happens (residency continues).
+   * - `probe` returns false: evict. If the clean-up (dispose, release wait) fails, report and then
+   *   throw an `AggregateError` listing the clean-up failures — the only difference from the OOM
+   *   eviction is that no original failure leads the list.
+   * - `probe` throws: thrown as is (no downgrade or disposal; the resident DiT is kept). WHY: a
+   *   validation error (a bug) or device loss is not "does not fit" — handling it by eviction would
+   *   bury the real cause. What happens to the DiT in the slot is decided by the generate's failure
+   *   path ({@link releaseIfRequested}).
    */
   async ensureHeadroom(
     need: number,
@@ -431,8 +492,8 @@ export class TransformerResidency<T> {
   }
 
   /**
-   * 常駐 DiT を手放す（pipeline の `dispose` から — 鎖の中で GPU を破棄する**前**に呼ぶ。
-   * flush-before-destroy）。常駐が無ければ何もしない。
+   * Releases the resident DiT (from the pipeline's `dispose` — called inside the chain **before**
+   * the GPU is destroyed; flush-before-destroy). Nothing happens without a resident DiT.
    */
   async dispose(): Promise<void> {
     await this.#release();
@@ -443,10 +504,11 @@ export class TransformerResidency<T> {
   }
 
   /**
-   * 決定の `action` を DiT に適用する（`retain` = 席に載せる — 持ち越しなら既に載っている /
-   * `release`・`evict` = 席から外して破棄する）。
+   * Applies the decision's `action` to the DiT (`retain` = put in the slot — a carried-over one is
+   * already there / `release`, `evict` = take out of the slot and dispose).
    *
-   * MUST: 席は破棄の**前**に空ける（破棄に失敗した Session を次の generate が拾わない）。
+   * MUST: empty the slot **before** disposing (so the next generate does not pick up a Session
+   * whose disposal failed).
    */
   async #apply(action: TransformerDecision["action"], resource: T): Promise<void> {
     if (action === "retain") {
@@ -458,12 +520,13 @@ export class TransformerResidency<T> {
   }
 
   /**
-   * 失敗の後始末: 決定を適用してから名乗り、投げるべき例外を返す。
+   * Clean-up after a failure: apply the decision, then report, and return the exception to throw.
    *
-   * MUST: 元の失敗を上書きしない。後始末（破棄・通知）の失敗は `AggregateError` に並べる。
-   * 通知の購読側が**元の失敗と同じ例外**を投げ直したとき（`signal.throwIfAborted()` を毎回呼ぶ
-   * 中断の書き方）は新しい失敗ではないので並べない — 並べると消費側が
-   * `error === signal.reason` で自分の中断を識別できなくなる。
+   * MUST: do not overwrite the original failure. Failures of the clean-up (dispose, notification)
+   * are listed in an `AggregateError`. When a notification subscriber rethrows **the same exception
+   * as the original failure** (the abort pattern that calls `signal.throwIfAborted()` every time),
+   * it is not a new failure and is not listed — listing it would stop the consumer from recognising
+   * its own abort with `error === signal.reason`.
    */
   async #settleFailure(
     error: unknown,
@@ -479,15 +542,19 @@ export class TransformerResidency<T> {
   }
 
   /**
-   * 退避（OOM の反応 / 空き不足の先回り — 共有の 1 本）: 格下げ → 常駐 DiT を破棄 → 解放が届くのを
-   * 待つ → `evicted` / `reason` を名乗る。`cause` は反応の退避の元の失敗（先回りでは undefined）。
+   * Eviction (reactive on OOM / pre-emptive on insufficient headroom — one shared implementation):
+   * downgrade → dispose the resident DiT → wait for the release → report `evicted` / `reason`.
+   * `cause` is the original failure of a reactive eviction (undefined for a pre-emptive one).
    *
-   * MUST: 格下げを最初に立てる（破棄が失敗しても、以後この pipeline が常駐を試みない）。
-   * MUST: 席は破棄の**前**に空ける（破棄に失敗した Session を次の generate が拾わない）。
-   * MUST: 後始末（破棄・解放待ち）が失敗しても `evicted` を名乗ってから投げる — 格下げは立ち席は
-   * 空いたので、名乗らないと利用者は常駐を失ったことに次の generate まで気付けない。そのときの通知の
-   * 失敗も並べる（`AggregateError` — 元の失敗があればそれを先頭に置く）。後始末が通れば通知の throw は
-   * そのまま投げる（中断の手段）。
+   * MUST: set the downgrade first (even if disposal fails, this pipeline does not try residency
+   * again).
+   * MUST: empty the slot **before** disposing (so the next generate does not pick up a Session
+   * whose disposal failed).
+   * MUST: even if the clean-up (dispose, release wait) fails, report `evicted` before throwing —
+   * the downgrade is set and the slot is empty, so without the report the user would not notice the
+   * loss of residency until the next generate. A failure of that notification is listed too
+   * (`AggregateError` — led by the original failure if there is one). If the clean-up passes, a
+   * throw from the notification is thrown as is (the means of aborting).
    */
   async #evict(
     reason: "out-of-memory" | "headroom",
@@ -495,7 +562,8 @@ export class TransformerResidency<T> {
     cause: { readonly error: unknown } | undefined,
   ): Promise<void> {
     this.#downgraded = true;
-    // 元の失敗が無い（先回り）ときは「元の失敗と同じ例外の投げ直し」も無い — 一意な印で比べる。
+    // Without an original failure (pre-emptive) there is no "rethrow of the original failure"
+    // either — compare against a unique marker.
     const original = cause === undefined ? NO_ORIGINAL_FAILURE : cause.error;
     const failures = await cleanupFailures(original, [
       () => this.#release(),
@@ -520,15 +588,21 @@ export class TransformerResidency<T> {
   }
 }
 
-/** 元の失敗が無い退避（先回り）で {@link cleanupFailures} に渡す印（どの例外とも一致しない）。 */
+/**
+ * Marker passed to {@link cleanupFailures} for an eviction without an original failure
+ * (pre-emptive); matches no exception.
+ */
 const NO_ORIGINAL_FAILURE: unique symbol = Symbol("元の失敗なし");
 
-/** 後始末の失敗を並べた `AggregateError` の文言（段ごと運転の DiT にも常駐 DiT にも使う）。 */
+/**
+ * Message of the `AggregateError` listing clean-up failures (used for both the per-stage DiT and
+ * the resident DiT).
+ */
 const CLEANUP_FAILED = "anima: DiT の後始末が失敗した";
 
 /**
- * 後始末を全て走らせ、失敗を集める。元の失敗と同じ例外の投げ直しは並べない
- * （{@link TransformerResidency} の `#settleFailure` の MUST）。
+ * Runs every clean-up and collects the failures. A rethrow of the same exception as the original
+ * failure is not listed (the MUST of `#settleFailure` in {@link TransformerResidency}).
  */
 const cleanupFailures = async (
   error: unknown,
@@ -545,7 +619,10 @@ const cleanupFailures = async (
   return failures;
 };
 
-/** 後始末を全て走らせ、元の失敗を先頭に並べた例外を返す（後始末が全て通れば元の失敗そのもの）。 */
+/**
+ * Runs every clean-up and returns an exception led by the original failure (the original failure
+ * itself if every clean-up passes).
+ */
 const withCleanupFailures = async (
   error: unknown,
   cleanups: readonly (() => Promise<void> | void)[],

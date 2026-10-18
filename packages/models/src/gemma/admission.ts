@@ -1,15 +1,18 @@
 /**
- * gemma4 の**受理（admission）**— 配布形の宣言・製品グラフ・実行時ノブがこの実装で走れるかを
- * 見る門と、門が確定させた材料。
+ * gemma4 **admission** — the checks that decide whether the distribution's declarations, the
+ * product graph and the runtime options can run on this implementation, and the material those
+ * checks settle.
  *
- * MUST: 家族の門はここへ集める。{@link Gemma4Pipeline} 側へ散らすと、取得面では GB 級の重みを
- * 落とした**後**にしか落ちない — どの門がどの位置（GPU を取る前 / 資産を読む前 / 重みの part を
- * 取る前）で呼ばれるかは各関数の doc が名乗る。
+ * MUST: the family's checks are gathered here. Scattered into {@link Gemma4Pipeline}, on the fetch
+ * surface they would fail only **after** GB-scale weights were downloaded — each function's doc
+ * states at which point (before acquiring the GPU / before reading assets / before fetching weight
+ * parts) it is called.
  *
- * ここが持つのは受理集合の判定だけで、Session も GPU も資産の読み口も持たない（構築と所有権は
- * `./pipeline.ts`）。おかげで門は実 GPU も実資産も無しで直接叩ける（`tests/gemma4_config_test.ts`）。
+ * This module only decides the acceptance set; it holds no Session, GPU or asset reader
+ * (construction and ownership live in `./pipeline.ts`). As a result the checks can be called
+ * directly without a real GPU or real assets (`tests/gemma4_config_test.ts`).
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: zero module side effects (no execution at import, no global mutable state — CLAUDE.md).
  */
 
 import { assertChunkBuckets } from "@karume/runtime";
@@ -30,65 +33,77 @@ import { admitGemma4Drafter, type Gemma4DrafterAdmission } from "./speculative.t
 export type GemmaFamily = "gemma4" | "gemma4-qat";
 
 /**
- * family ごとの入口の名前（例外の接頭辞と `where` の前半を**ここ 1 箇所**から出す）。
+ * The entry name of each family (the exception prefix and the first half of `where` come from
+ * **this one place**).
  *
- * MUST: 共通基底が投げる文言も family の名前を名乗る — `Gemma4QatPipeline.fromPretrained` を
- * 叩いた利用者が `Gemma4Pipeline: ...` を受け取ると、どの入口の話か辿れない。
+ * MUST: messages thrown by the shared base also carry the family's name — a user who called
+ * `Gemma4QatPipeline.fromPretrained` and receives `Gemma4Pipeline: ...` cannot tell which entry it
+ * is about.
  */
 export const gemmaEntryName = (family: GemmaFamily): string =>
   family === "gemma4" ? "Gemma4Pipeline" : "Gemma4QatPipeline";
 
 /**
- * family と、QAT だけが持つ model 名（{@link admitGemma4Qat} が**グラフから確定**させた値）。
+ * The family, and the model name only QAT has (the value {@link admitGemma4Qat} **settles from the
+ * graph**).
  *
- * MUST: model 名を後段で再導出しない（判別規則が 2 実装に割れると、モデルが増えたときに
- * 片方だけが古い写像を使い続ける）。`Gemma4QatModel` に欄が増えれば型検査が欠落を教える。
+ * MUST: do not re-derive the model name later (if the discrimination rule splits into two
+ * implementations, one keeps using the old mapping when models are added). If `Gemma4QatModel`
+ * gains a field, the type check reports the gap.
  */
 export type GemmaFamilyAdmission =
   | { readonly family: "gemma4" }
   | { readonly family: "gemma4-qat"; readonly model: Gemma4QatModel };
 
 /**
- * 製品グラフの出口の本数（**順序が契約** — 出力 0 = 選んだ行の logits `[1,R,V]`・
- * 出力 1 = 同じ行の最終 norm 後 hidden `[1,R,H]`）。
+ * Number of exits of the product graph (**the order is the contract** — output 0 = the logits of
+ * the selected rows `[1,R,V]`, output 1 = the final-norm hidden of the same rows `[1,R,H]`).
  *
- * 名前ではなく順序で引く（`vocabSizeOf` / {@link buildGemma4Program}）— 出口の綴りは
- * 焼き手の内部名で、配布形ごとに動きうるためである。
+ * Looked up by order, not by name (`vocabSizeOf` / {@link buildGemma4Program}) — exit names are the
+ * baker's internal names and may move between distributions.
  */
 const GRAPH_OUTPUTS = 2;
 
 /**
- * 家族 admission（GPU を取りに行く前・取得面では重み prefetch の前に通す門）が確定させる材料。
+ * The material settled by the family admission (the check passed before acquiring the GPU, and on
+ * the fetch surface before the weight prefetch).
  *
- * NOTE: コンポーネントの実体はここに載せない — 供給口（`ComponentOpener`）が前段と後段へ
- * **同じ 1 本**で渡るので、開いた部品を材料へ写すと「前段が見たのと別の部品を後段が握る」形が
- * 書ける（差し替え席が入って以降はなおさら）。
- * NOTE: PLE loader も載せない — `wiring.derivedInputs.derive` の閉包が持つのが唯一の参照で、
- * 席を 2 つ作ると「片方だけ差し替えた」形が書ける。
+ * NOTE: component objects are not carried here — the supplier (`ComponentOpener`) is passed to both
+ * the earlier and the later stage as **the same one**, so copying an opened component into the
+ * material would make "the later stage holds a different component from the one the earlier stage
+ * saw" expressible (all the more since component replacement arrived).
+ * NOTE: the PLE loader is not carried either — the closure of `wiring.derivedInputs.derive` holds
+ * the only reference, and two fields would make "only one of them was replaced" expressible.
  */
 export type Gemma4Admission = {
   readonly config: Gemma4PipelineConfig;
-  /** 最終行 logits 出口の語彙数（id 空間の相互照合の基準 — ADR 0085 決定 5）。 */
+  /**
+   * Vocabulary size of the last-row logits exit (the basis of the id-space cross-check — ADR 0085
+   * decision 5).
+   */
   readonly vocabSize: number;
-  /** full スロットの容量記号（`createGenerationContext` の束縛点）。 */
+  /** Capacity symbol of the full slots (the binding point of `createGenerationContext`). */
   readonly capacitySymbol: string;
-  /** 投機を指定したときだけ確定する drafter の突合結果。 */
+  /** The drafter cross-check result, settled only when speculation is requested. */
   readonly drafter?: {
     readonly admission: Gemma4DrafterAdmission;
   };
 };
 
 /**
- * 選んだ行の logits 出口の語彙数をグラフから引く（`[1, R, V]` — ADR 0083 決定 6）。
+ * Reads the vocabulary size of the selected-row logits exit from the graph (`[1, R, V]` — ADR 0083
+ * decision 6).
  *
- * MUST: 呼び手に宣言させない。V は主 embedding の行数そのもので、宣言と食い違えば
- * PLE の索引との相互照合（ADR 0085 決定 5）が**間違った基準**で通ってしまう。形の検査は
- * `createGenerationProgram` が同じ値でもう一度行う。
+ * MUST: do not make the caller declare it. V is the main embedding's row count itself, and if a
+ * declaration disagreed, the cross-check with the PLE index (ADR 0085 decision 5) would pass
+ * against **the wrong basis**. `createGenerationProgram` checks the shape again with the same
+ * value.
  *
- * MUST: 出口は**2 本ちょうど**（出力 0 = logits・出力 1 = 最終 norm 後 hidden）。順序は IR の
- * 契約で、名前で引かないのは配布形の綴りに依存しないためである（`capacitySymbolOf` と同じ
- * 流儀）。出口 1 本の旧配布形は**ここで**落とす — 互換分岐を書くと「hidden の無い資産で
- * 投機が黙って組めない」形が残る。
+ * MUST: **exactly two** exits (output 0 = logits, output 1 = final-norm hidden). The order is the
+ * IR contract; not looking them up by name keeps this independent of the distribution's spelling
+ * (the same approach as `capacitySymbolOf`). An old distribution with one exit fails **here** — a
+ * compatibility branch would leave "speculation silently cannot be built on an asset without
+ * hidden".
  */
 const vocabSizeOf = (graph: GenerationGraph, entry: string): number => {
   if (graph.outputs.length !== GRAPH_OUTPUTS) {
@@ -112,10 +127,11 @@ const vocabSizeOf = (graph: GenerationGraph, entry: string): number => {
 };
 
 /**
- * 最終 norm 後 hidden 出口の幅をグラフから引く（`[1, R, H]` — 出力 1・ADR 0083 決定 6）。
+ * Reads the width of the final-norm hidden exit from the graph (`[1, R, H]` — output 1, ADR 0083
+ * decision 6).
  *
- * 呼ぶのは投機のときだけ（drafter の入力 `hidden` の幅がこれと一致する MUST）。本数と順序は
- * {@link vocabSizeOf} が既に見ている。
+ * Called only for speculation (the drafter's input `hidden` MUST match this width). The count and
+ * order were already checked by {@link vocabSizeOf}.
  */
 const hiddenSizeOf = (graph: GenerationGraph, entry: string): number => {
   const name = graph.outputs[1];
@@ -133,12 +149,13 @@ const hiddenSizeOf = (graph: GenerationGraph, entry: string): number => {
 };
 
 /**
- * full スロットの容量記号をグラフから引く。
+ * Reads the capacity symbol of the full slots from the graph.
  *
- * 記号は「入力 shape から決まらないもの」がちょうど 1 本のはずで（chunk 長の記号は
- * `input_ids` の 2 次元目から決まる・容量記号は states にしか現れない）、それを
- * `createGenerationContext` の束縛点へ渡す（ADR 0066 追記 7）。綴りを定数で持たないのは、
- * 資産側の綴りが変わったときに**黙って束縛されない記号**が残るのを避けるため。
+ * Exactly one symbol should be "not determined by the input shapes" (the chunk-length symbol comes
+ * from the second dimension of `input_ids`; the capacity symbol appears only in states), and it is
+ * passed to the binding point of `createGenerationContext` (ADR 0066 addendum of 2026-08-17,
+ * item 7). Its spelling is not held as a constant, to avoid leaving **a symbol that is silently
+ * never bound** when the asset's spelling changes.
  */
 const capacitySymbolOf = (graph: GenerationGraph, entry: string): string => {
   const fromInputs = new Set<string>();
@@ -158,22 +175,27 @@ const capacitySymbolOf = (graph: GenerationGraph, entry: string): string => {
 };
 
 /**
- * RoPE 派生入力 4 本の宣言形（`[1, M, headDim]`）と `pipelineConfig.rope.<層種>.headDim` の突合。
+ * Cross-checks the declared shape (`[1, M, headDim]`) of the four RoPE derived inputs against
+ * `pipelineConfig.rope.<layer type>.headDim`.
  *
- * MUST: setup で見られる配線は setup で見る。`createGenerationProgram` が見るのは派生入力の
- * **名前の被覆**だけなので、幅の食い違い（層種別の取り違え = sliding 256 と full 512 の引き違い。
- * exporter 側 `rope.py` が `head_dim` / `global_head_dim` の分岐で自認している間違い方）は、
- * ホストが渡す表を初 `run` が受けるまで落ちない — 3.7GiB のロードの**後**で、しかも文言は
- * 「要素数が shape と合わない」になる。焼く側の鏡像は `export_decode.py` の `assert_rope_inputs`。
+ * MUST: wiring that can be checked at setup is checked at setup. `createGenerationProgram` checks
+ * only **name coverage** of the derived inputs, so a width mismatch (mixing up layer types =
+ * reading sliding 256 for full 512 or vice versa — the mistake the exporter's `rope.py`
+ * acknowledges in its `head_dim` / `global_head_dim` branch) does not fail until the first `run`
+ * receives the table the host passes — **after** a 3.7 GiB load, and with the message "element
+ * count does not match the shape". The baking side's mirror is `assert_rope_inputs` in
+ * `export_decode.py`.
  *
- * NOTE: 内部の口だが export してあるのは、この単位なら宣言の突合を実 GPU も実資産も無しで
- * 縛れるため（`tests/gemma4_config_test.ts` — siglip2 の `assertStaticDim` と同じ流儀）。
+ * NOTE: an internal function, but exported because at this granularity the declaration cross-check
+ * can be pinned without a real GPU or real assets (`tests/gemma4_config_test.ts` — the same
+ * approach as siglip2's `assertStaticDim`).
  */
 export const assertRopeInputShapes = (
   graph: GenerationGraph,
   config: Gemma4PipelineConfig,
-  // NOTE: 既定が通常 Gemma の名前なのは {@link assertChunkLength} と同じ理由（直接叩く検査は
-  // 入口を持たない）。実経路（{@link admitGemma4}）は必ず family の名前を渡す。
+  // NOTE: the default is regular Gemma's name for the same reason as {@link assertChunkLength}
+  // (checks that call this directly have no entry). The real path ({@link admitGemma4}) always
+  // passes the family's name.
   entry: string = gemmaEntryName("gemma4"),
 ): void => {
   for (const layerType of GEMMA4_ROPE_LAYER_TYPES) {
@@ -196,28 +218,33 @@ export const assertRopeInputShapes = (
 };
 
 /**
- * この製品グラフを gemma4 として実行できるかを見る（**重みの part を 1 バイトも取る前**）。
+ * Checks whether this product graph can run as gemma4 (**before a single byte of the weight parts
+ * is fetched**).
  *
- * MUST: 家族の門はこの 1 本に集める（他ファミリの `admit*` と同じ規律 — `hub/components.ts` の
- * {@link FamilyAdmission} 席で呼ばれる）。後段へ散らすと、取得面では GB 級の重みを落とした
- * **後**にしか落ちない。
+ * MUST: the family's checks are gathered in this one function (the same discipline as other
+ * families' `admit*` — called at the {@link FamilyAdmission} slot of `hub/components.ts`).
+ * Scattered into later stages, on the fetch surface they would fail only **after** GB-scale weights
+ * were downloaded.
  *
- * NOTE: tokenizer の解析はここに置けない — admission の時点では manifest の `assets` をまだ
- * 取っていない（取ってからでは重み prefetch より前という位置が保てない）ので、
- * {@link buildGemma4Program} に残る（anima の `#admit` と同じ分け方）。PLE の索引だけは
- * **容器の資産**なので、この席と同じ位置で読める（`./ple-index.ts` の `readGemma4PleIndex`）。
+ * NOTE: tokenizer parsing cannot live here — at admission time the manifest's `assets` have not
+ * been fetched yet (fetching them would lose the position before the weight prefetch), so it stays
+ * in {@link buildGemma4Program} (the same split as anima's `#admit`). Only the PLE index is a
+ * **container asset**, so it can be read at the same point as this check (`readGemma4PleIndex` in
+ * `./ple-index.ts`).
  *
- * NOTE: `config` **単体**の検査はここには無い — 2 つの入口が**どちらも**
- * {@link parseGemma4PipelineConfig} を通してから呼ぶ（値域・関係・未知キーの門はそこが正本で、
- * 同じ検査を 2 実装持たない）。ここが見るのは宣言**とグラフの突合**だけで、
- * {@link assertRopeInputShapes} がその 1 本である（グラフはこの席で初めて手に入る）。
+ * NOTE: there is no check of `config` **alone** here — **both** entries pass it through
+ * {@link parseGemma4PipelineConfig} before calling this (that is the canonical place for the checks
+ * of ranges, relations and unknown keys; the same check is not implemented twice). What this
+ * function checks is only the cross-check **of the declaration against the graph**, and
+ * {@link assertRopeInputShapes} is that one (the graph first becomes available at this point).
  */
 export const admitGemma4 = (
   component: GraphOwner,
   config: Gemma4PipelineConfig,
   drafter: GraphOwner | undefined,
-  // MUST: family の入口名（{@link gemmaEntryName}）— 両家族がこの 1 本を通るので、配下の門の
-  // 文言が固定の名前を名乗ると QAT の利用者に別の入口の話として届く。
+  // MUST: the family's entry name ({@link gemmaEntryName}) — both families go through this one
+  // function, so if the messages of the checks below carried a fixed name, they would reach QAT
+  // users as being about a different entry.
   entry: string,
 ): Gemma4Admission => {
   const { graph } = component;
@@ -228,8 +255,9 @@ export const admitGemma4 = (
     config,
     vocabSize,
     capacitySymbol,
-    // drafter の門は `./speculative.ts` が持つ（借り物スロット・共有 initializer の綴りは
-    // 投機の知識で、target の門とは別の 1 本）。target の材料は**確定したもの**を渡す。
+    // The drafter's check lives in `./speculative.ts` (the names of the borrowed slots and shared
+    // initializers are speculation knowledge, a separate function from the target's check). The
+    // target's material is passed **as settled**.
     ...(drafter === undefined
       ? {}
       : {
@@ -246,30 +274,35 @@ export const admitGemma4 = (
 };
 
 /**
- * 実行時ノブの `chunkLength` を検査して返す（{@link Gemma4PipelineOptions.chunkLength} の門）。
+ * Checks and returns the runtime option `chunkLength` (the check of
+ * {@link Gemma4PipelineOptions.chunkLength}).
  *
- * MUST: 2 以上（グラフの chunk 記号は prefill 形の最小 2 で焼かれており、1 行の chunk は decode 形
- * として流れる）・配布形が宣言する `maxChunkLength` 以下・`maxPosition` 以下。宣言
- * （`parseGemma4PipelineConfig`）が同じ関係を既定値に対して見るので、ここが見るのは**呼び手が
- * 上書きした値**である。
+ * MUST: at least 2 (the graph's chunk symbol was baked with prefill shapes of at least 2, and a
+ * one-row chunk runs as the decode shape), at most the `maxChunkLength` the distribution declares,
+ * and at most `maxPosition`. The declaration (`parseGemma4PipelineConfig`) checks the same
+ * relations against the defaults, so what this checks is **the value the caller overrode**.
  *
- * MUST: `maxChunkLength` の門は落とせない — 記号 `M` の trace 範囲は資産に残らない（IR の
- * `symbols` は名前の列だけ）ので、宣言だけが「この資産が受けられる chunk 行数」の出どころで
- * ある。門が無かった頃、上限 768 の資産に `chunkLength: 1024` を渡すと例外なしで走っていた
- * （2026-09-03 実測）— 保証の外で動く形は fail loudly にする（横断不変条件）。
+ * MUST: the `maxChunkLength` check cannot be dropped — the trace range of the symbol `M` is not
+ * kept in the asset (the IR's `symbols` is only a list of names), so the declaration is the only
+ * source of "the chunk row counts this asset accepts". Before this check existed, passing
+ * `chunkLength: 1024` to an asset with a limit of 768 ran without an exception (measured
+ * 2026-09-03) — running outside the guarantee is made to fail loudly (cross-cutting invariant).
  *
- * NOTE: 容量との関係（`chunkLength ≤ capacity`）はここでは見ない — 容量は sequence ごとに選ぶので、
- * 両者が揃う唯一の場所が `createGenerationSequence` である（同じ式を 2 箇所に持たない）。
+ * NOTE: the relation to the capacity (`chunkLength ≤ capacity`) is not checked here — the capacity
+ * is chosen per sequence, so the only place where both are known is `createGenerationSequence` (the
+ * same formula is not kept in two places).
  *
- * NOTE: `export` は門を直接叩くテストのため（{@link assertRopeInputShapes} と同じ扱い — 実経路は
- * `fromAssets` / `fromPretrained` / `estimateSessionMemory` の 3 つで、どれも妥当値しか渡さない）。
- * `mod.ts` / サブパス面には出さない（ADR 0008）。
+ * NOTE: `export` is for tests that call the check directly (treated like
+ * {@link assertRopeInputShapes} — the real paths are `fromAssets` / `fromPretrained` /
+ * `estimateSessionMemory`, all of which pass only valid values). Not exposed on `mod.ts` / the
+ * subpath surface (ADR 0008).
  */
 export const assertChunkLength = (
   chunkLength: number,
   config: Gemma4PipelineConfig,
-  // NOTE: 既定が通常 Gemma の名前なのは、この門を**直接叩く検査**が入口を持たないため。
-  // 実経路（`buildGemma4Program` / `estimateSessionMemory`）は必ず family の名前を渡す。
+  // NOTE: the default is regular Gemma's name because **checks that call this directly** have no
+  // entry. The real paths (`buildGemma4Program` / `estimateSessionMemory`) always pass the family's
+  // name.
   entry: string = gemmaEntryName("gemma4"),
 ): number => {
   if (!Number.isSafeInteger(chunkLength) || chunkLength < 2) {
@@ -290,20 +323,23 @@ export const assertChunkLength = (
 };
 
 /**
- * 実行時ノブの `chunkBuckets` を検査して返す（{@link Gemma4PipelineOptions.chunkBuckets} の門）。
+ * Checks and returns the runtime option `chunkBuckets` (the check of
+ * {@link Gemma4PipelineOptions.chunkBuckets}).
  *
- * MUST: 受理集合の規則（2 以上 `chunkLength` 未満・狭義昇順）は**写さない** — 正本は runtime の
- * `assertChunkBuckets` 1 本で、そこが拒否する指定を context 生成まで通さないためにここで先に
- * 通す。この層が足すのは入口の名前だけで、`Gemma4PipelineOptions` に渡した呼び手が
- * 「自分のどの指定が落ちたか」を読めるようにする（`assertChunkLength` と同じ流儀）。
+ * MUST: the rules of the acceptance set (at least 2, below `chunkLength`, strictly ascending) are
+ * **not copied** — the canonical one is the runtime's `assertChunkBuckets`, and it is run here
+ * first so that a setting it rejects does not get as far as context creation. All this layer adds
+ * is the entry name, so that a caller who passed it to `Gemma4PipelineOptions` can read "which of
+ * my settings failed" (the same approach as `assertChunkLength`).
  *
- * NOTE: `maxChunkLength` の門は要らない（バケットは `chunkLength` 未満で、その `chunkLength`
- * 自体が {@link assertChunkLength} の門を通っている）。
+ * NOTE: no `maxChunkLength` check is needed (buckets are below `chunkLength`, and that
+ * `chunkLength` itself has passed the check of {@link assertChunkLength}).
  */
 export const assertGemma4ChunkBuckets = (
   chunkBuckets: readonly number[],
   chunkLength: number,
-  // NOTE: 既定の理由は {@link assertChunkLength} と同じ（門を直接叩く検査のため）。
+  // NOTE: the reason for the default is the same as {@link assertChunkLength} (for checks that call
+  // this directly).
   entry: string = gemmaEntryName("gemma4"),
 ): readonly number[] => {
   try {
@@ -318,16 +354,18 @@ export const assertGemma4ChunkBuckets = (
 };
 
 /**
- * この manifest を gemma4 として実行できるかを見る（**GPU も重みの part も触る前**）。
+ * Checks whether this manifest can run as gemma4 (**before touching the GPU or any weight part**).
  *
- * MUST: 未知 major は fail loudly（ADR 0038 §1 — 「古い実装 × 新しいリポ」の沈黙劣化を止める
- * 唯一の門）。`quant` の実在検査は取得の前に済ませる（`resolveSelection` も同じことを見るが、
- * こちらは利用可能な一覧を添えて落とす）。
+ * MUST: an unknown major fails loudly (ADR 0038 §1 — the only check that stops the silent
+ * degradation of "old implementation × new repository"). Whether `quant` exists is checked before
+ * fetching (`resolveSelection` checks the same, but this one fails with the list of available
+ * names).
  *
- * MUST: 選ばれた `Quant` を**捨てずに返す** — `requiredLimits` の DL 前検査
- * （ADR 0089 決定 5）は呼び手（{@link Gemma4Pipeline.fromPretrained} の admission 閉包）が
- * 通す。ここで名前の実在だけ見て中身を落とすと、宣言された GPU 前提を誰も読まないまま
- * 3.7GiB を落とす形へ戻る。
+ * MUST: **return the selected `Quant` instead of discarding it** — the pre-download check of
+ * `requiredLimits` (ADR 0089 decision 5) is run by the caller (the admission closure of
+ * {@link Gemma4Pipeline.fromPretrained}). Checking only that the name exists and dropping the
+ * content here would go back to downloading 3.7 GiB without anyone reading the declared GPU
+ * prerequisites.
  */
 export const gemma4ManifestConfig = (
   manifest: Manifest,

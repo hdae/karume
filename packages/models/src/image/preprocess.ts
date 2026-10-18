@@ -1,73 +1,75 @@
 /**
- * RGB8 の画素列 → モデル入力（resize → rescale → normalize → NCHW f32）。
+ * RGB8 pixels → model input (resize → rescale → normalize → NCHW f32).
  *
- * **パイプライン非依存の共通処理**（画像を入力に取るモデルは総じてこの 3 段を通る）なので、
- * ファミリのディレクトリではなく `src/image/` に置く（`png.ts` と同じ位置づけ）。
+ * This is **pipeline-independent shared processing** (models that take an image as input generally
+ * go through these 3 steps), so it lives in `src/image/` rather than in a family directory (the same
+ * standing as `png.ts`).
  *
- * **decode は karume の責務ではない**。入口は「RGB8 の画素列 + 幅 + 高さ」で、PNG / JPEG の
- * デコーダは持たない（ブラウザなら `createImageBitmap` + canvas、Deno なら任意のデコーダ）。
- * 一方で resize / rescale / normalize は**モデルカードの一部**（定数を間違えると静かに精度が
- * 落ちる）なので、利用者ではなくこちらが持つ。
+ * **Decoding is not karume's responsibility**. The entry is "RGB8 pixels + width + height", and no
+ * PNG / JPEG decoder is included (in a browser `createImageBitmap` + canvas, in Node / Deno any
+ * decoder). On the other hand, resize / rescale / normalize are **part of the model card** (a wrong
+ * constant silently costs accuracy), so this side owns them, not the user.
  *
- * 画素ごとの出力を持つモデル（セグメンテーションのマット）は、焼かれた解像度で出た地図を
- * 元画像の解像度へ**戻す**段も通る。台と重みは入口と同じものなので、その 1 本
- * （{@link resizePlaneF32}）もここが持つ。
+ * Models with per-pixel output (segmentation mattes) also go through a step that **brings back** the
+ * map produced at the exported resolution to the original image's resolution. The support and the
+ * weights are the same as at the entry, so that one function ({@link resizePlaneF32}) lives here too.
  *
- * ## MUST: 合わせている参照実装
+ * ## MUST: the reference implementation being matched
  *
- * transformers 5.14.1 の **`SiglipImageProcessor`（`TorchvisionBackend`）** — v5 の
- * `AutoImageProcessor` が既定で返す fast 側で、PIL 側（`SiglipImageProcessorPil`）ではない。
- * resize は `torchvision.transforms.v2.functional.resize(..., antialias=True)` で、この
- * antialias 経路は Pillow の `ImagingResample` と同じ「support を縮尺で伸ばす分離型
- * リサンプリング」（{@link buildTaps}）。
+ * transformers 5.14.1's **`SiglipImageProcessor` (`TorchvisionBackend`)** — the fast side that v5's
+ * `AutoImageProcessor` returns by default, not the PIL side (`SiglipImageProcessorPil`). Resize is
+ * `torchvision.transforms.v2.functional.resize(..., antialias=True)`, and this antialias path is the
+ * same "separable resampling that stretches the support by the scale" as Pillow's
+ * `ImagingResample` ({@link buildTaps}).
  *
- * MUST: 補間フィルタは**モデルカードの一部**なので呼び出し側が明示する（既定は bilinear）。
- * `preprocessor_config.json` の `"resample"` は **PIL の定数**（NEAREST=0 / LANCZOS=1 /
- * **BILINEAR=2** / **BICUBIC=3** / BOX=4 / HAMMING=5）で、SigLIP2 は 2 = bilinear、
- * Depth Anything V2（`DPTImageProcessor`）は 3 = bicubic。transformers のクラス属性の既定は
- * どちらのクラスも `PILImageResampling.BICUBIC` なので「SigLIP は bicubic」と読み違えやすいが、
- * SigLIP2 はチェックポイントの config が既定を上書きしている。取り違えの実測は SigLIP2 側で
- * 最大 47/255、DA-V2 側で `pixel_values` の最大 0.59（1 LSB = 0.0175 の 34 倍）。
- * `resample` の実測は `tools/export-recipes/siglip2/preprocess.py` と
- * `tools/export-recipes/depth_anything/export.py` が emit のたびに行う。
+ * MUST: the interpolation filter is **part of the model card**, so the caller states it explicitly
+ * (the default is bilinear). `"resample"` in `preprocessor_config.json` is **a PIL constant**
+ * (NEAREST=0 / LANCZOS=1 / **BILINEAR=2** / **BICUBIC=3** / BOX=4 / HAMMING=5): SigLIP2 has
+ * 2 = bilinear, Depth Anything V2 (`DPTImageProcessor`) 3 = bicubic. The class-attribute default in
+ * transformers is `PILImageResampling.BICUBIC` for both classes, which makes "SigLIP is bicubic" an
+ * easy misreading, but for SigLIP2 the checkpoint's config overrides the default. Measured effect of
+ * the mix-up: up to 47/255 on the SigLIP2 side, and up to 0.59 in `pixel_values` on the DA-V2 side
+ * (34 LSB, with 1 LSB = 0.0175). `resample` is measured on every emit by
+ * `tools/export-recipes/siglip2/preprocess.py` and `tools/export-recipes/depth_anything/export.py`.
  *
- * MUST: 2 パスの**間**で uint8 へ丸め直す（{@link resizeRgb8}）。PIL / torchvision の uint8
- * 経路は中間バッファを uint8 で持つので、f64 のまま縦パスへ渡すと参照とずれる標本が
- * **0.26% → 9.5%** へ跳ねる（18 幾何 × 224×224 = 2,709,504 標本の実測）。
+ * MUST: round back to uint8 **between** the 2 passes ({@link resizeRgb8}). The uint8 paths of PIL /
+ * torchvision keep the intermediate buffer in uint8, so passing f64 on to the vertical pass makes the
+ * samples that differ from the reference jump from **0.26% → 9.5%** (measured over 18 geometries ×
+ * 224×224 = 2,709,504 samples).
  */
 
 import { ModelInputError } from "../errors.ts";
 
-/** RGB8 の画素列（行優先・画素あたり 3 バイト）と、その寸法。 */
+/** RGB8 pixels (row-major, 3 bytes per pixel) and their size. */
 export type Rgb8Image = {
   readonly data: Uint8Array<ArrayBufferLike>;
   readonly width: number;
   readonly height: number;
 };
 
-/** チャネル数（RGB）。アルファは入口で受け取らない。 */
+/** Number of channels (RGB). Alpha is not accepted at the entry. */
 const CHANNELS = 3;
 
-/** リサンプルの補間フィルタ（`preprocessor_config.json` の `resample` に対応する綴り）。 */
+/** Interpolation filter of the resampling (the spelling that corresponds to `resample` in `preprocessor_config.json`). */
 export type ResampleFilter = "bilinear" | "bicubic";
 
-/** 1 つのフィルタ = 重み関数とその台の半径（縮小時はここに縮尺が掛かって台が伸びる）。 */
+/** One filter = weight function and the radius of its support (when downscaling, the scale multiplies it and the support grows). */
 type Kernel = {
-  /** 台の半径（縮尺 1 のときの値）。 */
+  /** Radius of the support (the value at scale 1). */
   readonly support: number;
   readonly weight: (x: number) => number;
 };
 
-/** 三角（bilinear）フィルタ。 */
+/** Triangle (bilinear) filter. */
 const triangle = (x: number): number => {
   const abs = Math.abs(x);
   return abs < 1 ? 1 - abs : 0;
 };
 
 /**
- * Catmull-Rom 系の三次フィルタ（PIL の `bicubic_filter` / torchvision の antialias 経路と
- * 同じ `a = -0.5`）。`|x| ∈ [1, 2)` で**負の重み**を持つので、階段状のエッジでは入力の値域を
- * 越えた overshoot が出る（{@link round8} の clamp が効く唯一の経路）。
+ * Catmull-Rom-style cubic filter (`a = -0.5`, the same as PIL's `bicubic_filter` / torchvision's
+ * antialias path). It has **negative weights** for `|x| ∈ [1, 2)`, so step edges overshoot beyond the
+ * input's value range (the only path where the clamp of {@link round8} matters).
  */
 const cubic = (x: number): number => {
   const a = -0.5;
@@ -82,22 +84,25 @@ const KERNELS: Readonly<Record<ResampleFilter, Kernel>> = {
   bicubic: { support: 2, weight: cubic },
 };
 
-/** 出力 1 点ぶんの入力範囲と重み。 */
+/** Input range and weights for one output point. */
 type Tap = {
   readonly start: number;
   readonly weights: Float64Array<ArrayBuffer>;
 };
 
 /**
- * 1 軸ぶんのリサンプル重みを組む（Pillow / torchvision の antialias 経路と同じ式）。
+ * Builds the resampling weights of one axis (the same formula as Pillow / torchvision's antialias
+ * path).
  *
- * 縮小（`scale > 1`）では台を縮尺ぶん伸ばして平均化し、拡大では台を 1 に固定する。端では
- * 台が入力の外へはみ出した分を**切り詰めて**から総和 1 に正規化する（`ImagingResample` の
- * 規約）— この切り詰めのせいで、拡大の端は近傍 1 点そのままになることがある。
+ * When downscaling (`scale > 1`) the support is stretched by the scale to average; when upscaling
+ * the support is fixed at 1. At the edges, the part of the support that sticks out of the input is
+ * **truncated** before normalising to a sum of 1 (`ImagingResample`'s convention) — because of this
+ * truncation an upscaled edge can end up as its single nearest sample.
  *
- * 重み和が 0 にならないことは式から出る: `center` を含む入力位置は必ず `[start, stop)` に
- * 入り、その重みは（bilinear で 0.5 / bicubic で 0.75 以上）正の値を持つ。負のローブを持つ
- * bicubic でも総和が 0 へ潰れる組み合わせは無いので、0 除算の分岐は要らない。
+ * That the weight sum never becomes 0 follows from the formula: the input position containing
+ * `center` always falls inside `[start, stop)`, and its weight is positive (at least 0.5 for
+ * bilinear / 0.75 for bicubic). Even bicubic, with its negative lobes, has no combination whose sum
+ * collapses to 0, so no division-by-zero branch is needed.
  */
 const buildTaps = (inSize: number, outSize: number, kernel: Kernel): readonly Tap[] => {
   const scale = inSize / outSize;
@@ -122,24 +127,25 @@ const buildTaps = (inSize: number, outSize: number, kernel: Kernel): readonly Ta
 };
 
 /**
- * 丸めて 8bit に収める。
+ * Rounds and fits into 8 bits.
  *
- * MUST: clamp を外さない。`Uint8Array` への代入は範囲外を **mod 256 で巻き戻す**ので、
- * 負のローブを持つ bicubic の overshoot が、飽和すべき画素の黒白反転として静かに通る
- * （bilinear は重みが非負で総和 1 なので掛からない経路）。
+ * MUST: keep the clamp. Assigning to a `Uint8Array` **wraps out-of-range values modulo 256**, so
+ * the overshoot of bicubic's negative lobes would pass silently as a black/white inversion of pixels
+ * that should saturate (bilinear has non-negative weights summing to 1, so it never takes this
+ * path).
  */
 const round8 = (value: number): number => Math.min(255, Math.max(0, Math.floor(value + 0.5)));
 
 /**
- * 入口の契約（正の整数寸法・長さの整合）を検査する。
+ * Checks the entry contract (positive integer size, consistent length).
  *
- * NOTE: {@link ModelInputError} なのは、見ているのが**呼び手が渡した画像そのもの**だから
- * （家族 3 つの `preprocessPixelValues` は `estimate` / `segment` / `embedImage` が受けた
- * `Rgb8Image` をそのまま流す）。打つ手は「渡す画像を直す」の 1 つ = HTTP なら 400 に当たる
- * （ADR 0107 決定 2）。
+ * NOTE: it is a {@link ModelInputError} because what it checks is **the image the caller passed
+ * itself** (the 3 families' `preprocessPixelValues` pass on the `Rgb8Image` that `estimate` /
+ * `segment` / `embedImage` received as is). The only remedy is "fix the image you pass" = what HTTP
+ * would call a 400 (ADR 0107 decision 2).
  *
- * NOTE: `export` は Wan の I2V の前処理（`lanczos.ts` と `wan/i2v-preprocess.ts`）が同じ検査を使うため
- * （`mod.ts` には出さない — ADR 0008）。
+ * NOTE: it is `export`ed because Wan's I2V preprocessing (`lanczos.ts` and `wan/i2v-preprocess.ts`)
+ * uses the same check (not exposed on `mod.ts` — ADR 0008).
  */
 export const assertRgb8 = (image: Rgb8Image): void => {
   const { data, width, height } = image;
@@ -152,16 +158,17 @@ export const assertRgb8 = (image: Rgb8Image): void => {
 };
 
 /**
- * RGB8 を指定寸法へリサンプルする（antialias 付き — モジュール docstring の参照実装）。
+ * Resamples RGB8 to the given size (antialiased — the reference implementation of the module
+ * docstring).
  *
- * アスペクト比は**保たない**（`size.height` / `size.width` へそのまま伸縮する）。SigLIP2 の
- * `preprocessor_config.json` が `size` を高さ・幅の対で持ち、crop も pad も無いため。DA-V2 は
- * `keep_aspect_ratio` を立てているが、正方入力 → 正方 `size` では恒等になる（アスペクト比を
- * 保つ経路が要るモデルが出るまで、この関数は寸法を受けるだけに留める）。
+ * The aspect ratio is **not preserved** (it stretches straight to `size.height` / `size.width`).
+ * SigLIP2's `preprocessor_config.json` holds `size` as a height/width pair with neither crop nor
+ * pad. DA-V2 sets `keep_aspect_ratio`, but a square input → a square `size` makes it the identity
+ * (until a model that needs an aspect-preserving path appears, this function only takes a size).
  *
- * `filter` は**モデルカードの一部**なので、家族側の呼び出しは 3 つとも `config.interpolation`
- * を明示で渡す（既定に頼る呼び出し側はもう無い — 残る既定 bilinear はテストが幾何だけを見る
- * ときの省略形）。
+ * `filter` is **part of the model card**, so all 3 family call sites pass `config.interpolation`
+ * explicitly (no caller relies on the default any more — the remaining bilinear default is a
+ * shorthand for tests that look only at geometry).
  */
 export const resizeRgb8 = (
   image: Rgb8Image,
@@ -170,16 +177,18 @@ export const resizeRgb8 = (
   filter: ResampleFilter = "bilinear",
 ): Rgb8Image => {
   assertRgb8(image);
-  // NOTE: 出力寸法も入力起因（ModelInputError）。家族 3 つが渡す `config.imageWidth` /
-  // `imageHeight` は parse 時点で `isPositiveInteger` を通っている（`siglip2/config.ts` ほか
-  // 2 家族の `readNumber`）ので、**パイプライン経由ではここへ到達しない** — 残る到達経路は
-  // barrel から `resizeRgb8` を直に叩く呼び手だけで、そこでは寸法が呼び手の要求そのもの。
+  // NOTE: the output size is input-caused too (ModelInputError). The `config.imageWidth` /
+  // `imageHeight` the 3 families pass have gone through `isPositiveInteger` at parse time
+  // (`readNumber` in `siglip2/config.ts` and the 2 other families), so **the pipeline path never
+  // reaches here** — the only remaining path is a caller hitting `resizeRgb8` directly from the
+  // barrel, where the size is the caller's request itself.
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
     throw new ModelInputError(`出力サイズ ${width}×${height} が正の整数でない`);
   }
-  // MUST: `Object.hasOwn` で引く — JS の呼び手が `"toString"` 等を渡すと Object.prototype の
-  // メンバを kernel として受け、support が NaN → 全 tap が空 → 全黒画像を黙って返す。
-  // 名前の綴り違いなので素の `Error`（ADR 0107 決定 3 — sampler 名と同じ扱い）。
+  // MUST: look up with `Object.hasOwn` — when a JS caller passes `"toString"` etc., a member of
+  // Object.prototype would be taken as the kernel, support becomes NaN → every tap is empty → an
+  // all-black image is returned silently. It is a misspelled name, so a plain `Error` (ADR 0107
+  // decision 3 — the same treatment as sampler names).
   if (!Object.hasOwn(KERNELS, filter)) {
     throw new Error(
       `resizeRgb8: 補間フィルタ ${JSON.stringify(filter)} は未対応（期待 ${Object.keys(KERNELS)
@@ -225,27 +234,30 @@ export const resizeRgb8 = (
 };
 
 /**
- * **単一チャネルの f32 平面**を指定寸法へリサンプルする（{@link buildTaps} を
- * {@link resizeRgb8} と共有する・フィルタは bilinear 固定）。
+ * Resamples **a single-channel f32 plane** to the given size (shares {@link buildTaps} with
+ * {@link resizeRgb8}; the filter is fixed to bilinear).
  *
- * 画素ごとの出力を持つモデル（セグメンテーションのマット等）は、グラフが焼かれた解像度で
- * 出した地図を**元画像の解像度へ戻す**必要がある。参照実装は
- * `torchvision.transforms.functional.resize`（テンソル枝・bilinear・antialias 既定）で、
- * 重みの組み方は {@link resizeRgb8} が合わせている Pillow の `ImagingResample` と同じ。
+ * Models with per-pixel output (segmentation mattes etc.) need to **bring the map back to the
+ * original image's resolution** from the resolution the graph was exported at. The reference
+ * implementation is `torchvision.transforms.functional.resize` (tensor branch, bilinear, antialias
+ * by default), whose weights are built the same way as Pillow's `ImagingResample`, which
+ * {@link resizeRgb8} matches.
  *
- * MUST: {@link resizeRgb8} と違って**2 パスの間で丸めない**。あちらの `round8` は PIL /
- * torchvision の **uint8 経路**が中間バッファを uint8 で持つことに合わせた再現で、f32 の
- * テンソル枝には無い段。ここで真似ると参照から離れるうえ、`[0, 1]` のマットが 8bit の段に
- * 潰れて境界の勾配が失われる。
+ * MUST: unlike {@link resizeRgb8}, **do not round between the 2 passes**. The `round8` there
+ * reproduces the fact that the **uint8 paths** of PIL / torchvision keep the intermediate buffer in
+ * uint8; the f32 tensor branch has no such step. Imitating it here would move away from the
+ * reference and, on top of that, crush a `[0, 1]` matte into 8-bit steps and lose the gradient at
+ * the boundary.
  *
- * 重みは非負で総和 1 なので、入力の値域は出力でも保たれる（`[0, 1]` のマットが範囲外へ
- * 出ることはない — clamp を置いていないのはこの理由）。
+ * The weights are non-negative and sum to 1, so the input's value range is preserved in the output
+ * (a `[0, 1]` matte never leaves its range — that is why there is no clamp).
  *
- * NOTE: 下の 2 つの検査は `RangeError` / 素の `Error` のまま据え置く（{@link resizeRgb8} と
- * 違って {@link ModelInputError} にしない）。この関数は barrel にもサブパス面にも出ておらず、
- * 呼び手は `birefnet` の `matteFromLogits` と `depth-anything` の `resampleDepth` の 2 つだけ
- * で、どちらも**資産（`config.imageWidth` / `imageHeight`）と検査済みの画像寸法**しか渡さない。
- * つまりここは**内部ヘルパの事前条件**であり、ADR 0107 決定 3 が適用範囲から外した側にある。
+ * NOTE: the 2 checks below stay `RangeError` / plain `Error` (unlike {@link resizeRgb8}, not
+ * {@link ModelInputError}). This function is exposed neither on the barrel nor on a subpath
+ * surface; its only 2 callers are `birefnet`'s `matteFromLogits` and `depth-anything`'s
+ * `resampleDepth`, and both pass **only asset values (`config.imageWidth` / `imageHeight`) and
+ * already-checked image sizes**. So these are **preconditions of an internal helper**, on the side
+ * that ADR 0107 decision 3 excludes from its scope.
  */
 export const resizePlaneF32 = (
   plane: Float32Array<ArrayBuffer>,
@@ -298,23 +310,25 @@ export const resizePlaneF32 = (
 };
 
 /**
- * rescale の除数（`rescale_factor` = 1/255 の逆数）。
- * f64 で `1 / 0.00392156862745098` はちょうど 255.0（Python 側が毎回実測する）。
+ * Divisor of rescale (the reciprocal of `rescale_factor` = 1/255).
+ * In f64, `1 / 0.00392156862745098` is exactly 255.0 (the Python side measures it every time).
  */
 const RESCALE_DIVISOR = 255;
 
 /**
- * 正規化後の値が f32 で有限に収まらない最初のチャネルを説明する文言（全チャネルが収まれば
- * `undefined`）。
+ * A message describing the first channel whose normalised values do not stay finite in f32
+ * (`undefined` when every channel fits).
  *
- * MUST: mean / std の個々の有限性だけでは足りない。正規化は f64 で計算して `Float32Array` へ
- * 入れるので、std が極端に小さい（例 1e-50）か mean が極端に大きいと、倍精度では有限な商が
- * f32 の最大値を超えて ±Inf になり、平面ごと非有限のまま GPU へ渡る。
- * 値域は {@link normalizeToNchw} と**同じ式**を画素の両端（0 と 255）に当てて求める — 式は画素に
- * ついて単調（divisor > 0）で f32 への丸めも単調なので、両端が有限なら全画素が有限になり、
- * 画素を走査せずに判定できる。
+ * MUST: finiteness of each mean / std alone is not enough. Normalisation is computed in f64 and
+ * stored into a `Float32Array`, so with an extremely small std (e.g. 1e-50) or an extremely large
+ * mean, a quotient that is finite in double precision exceeds the f32 maximum and becomes ±Inf, and
+ * the whole plane reaches the GPU non-finite.
+ * The value range is found by applying **the same formula** as {@link normalizeToNchw} to the pixel
+ * extremes (0 and 255) — the formula is monotonic in the pixel (divisor > 0) and rounding to f32 is
+ * monotonic too, so if both extremes are finite every pixel is finite, and the check needs no pass
+ * over the pixels.
  *
- * 前提: `std` は正の有限数・`mean` は有限数（呼び手が先に見る）。
+ * Precondition: `std` is a positive finite number and `mean` is finite (the caller checks first).
  */
 export const normalizationOverflow = (
   mean: readonly [number, number, number],
@@ -336,14 +350,15 @@ export const normalizationOverflow = (
 };
 
 /**
- * RGB8（インターリーブ）→ 正規化済み planar f32 `[3, height, width]`（batch 1 は畳む）。
+ * RGB8 (interleaved) → normalised planar f32 `[3, height, width]` (batch 1 is folded away).
  *
- * MUST: rescale と normalize を**畳んだ形**で計算する — 参照実装
- * （`TorchvisionBackend._fuse_mean_std_and_rescale_factor`）は `mean · 255` と `std · 255` を
- * 先に作って `(x - mean) / std` を 1 回だけ掛ける。`x / 255` を先に通すと丸めが 1 回増え、
- * 素の f32 比較でずれる（Python 側はこの畳んだ形とフルパイプラインのビット同一を実測）。
+ * MUST: compute rescale and normalize in **folded form** — the reference implementation
+ * (`TorchvisionBackend._fuse_mean_std_and_rescale_factor`) builds `mean · 255` and `std · 255`
+ * first and applies `(x - mean) / std` once. Applying `x / 255` first adds one more rounding and
+ * differs in a plain f32 comparison (the Python side measured this folded form to be bit-identical
+ * to the full pipeline).
  *
- * `mean` / `std` は `[0, 1]` 尺度（`preprocessor_config.json` の綴りのまま）で受ける。
+ * `mean` / `std` are taken on the `[0, 1]` scale (as spelled in `preprocessor_config.json`).
  */
 export const normalizeToNchw = (
   image: Rgb8Image,
@@ -351,8 +366,9 @@ export const normalizeToNchw = (
   std: readonly [number, number, number],
 ): Float32Array<ArrayBuffer> => {
   assertRgb8(image);
-  // mean / std は呼び手が渡す値そのもの（家族は config の parse 済みの値しか渡さない — 到達は
-  // barrel の直叩きだけ）。std が 0 / 非有限だと 0 除算で Inf / NaN の平面を黙って返す。
+  // mean / std are exactly the values the caller passes (families pass only parsed config values —
+  // only a direct barrel call reaches here). A std of 0 / non-finite would silently return an
+  // Inf / NaN plane through division by zero.
   for (let channel = 0; channel < CHANNELS; channel += 1) {
     if (!Number.isFinite(mean[channel])) {
       throw new ModelInputError(
@@ -365,10 +381,12 @@ export const normalizeToNchw = (
       );
     }
   }
-  // 有限の mean / std でも正規化の結果が f32 で溢れる組（極小の std で ±Inf・極大の mean で −Inf・
-  // mean と std の両方が極大で Inf / Inf = NaN — {@link normalizationOverflow}）。出力の確保より前に
-  // 見る — 巨大な画像で、拒否する係数のために確保しない。家族の経路は config の parse が同じ判定で
-  // 先に落とすので、ここへ届くのは barrel の直叩きだけ（上と同じ分類）。
+  // Even finite mean / std can produce combinations whose normalised result overflows f32 (±Inf for
+  // a tiny std, −Inf for a huge mean, Inf / Inf = NaN when both mean and std are huge —
+  // {@link normalizationOverflow}). Checked before allocating the output — a huge image is not
+  // allocated for coefficients that are going to be rejected. On the family path the config parse
+  // rejects with the same test first, so only a direct barrel call reaches here (the same
+  // classification as above).
   const overflow = normalizationOverflow(mean, std);
   if (overflow !== undefined) throw new ModelInputError(`normalizeToNchw: ${overflow}`);
   const plane = image.width * image.height;

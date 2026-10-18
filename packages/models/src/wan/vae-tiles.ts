@@ -1,47 +1,55 @@
 /**
- * Wan の動画 VAE の**タイル decode**（ホスト側 — ADR 0118 決定 2・段 5）。
+ * **Tiled decode** of Wan's video VAE (host side — ADR 0118 decision 2, step 5).
  *
- * chunk グラフ（`vae-chunks.ts`）の空間は潜在 `t×t` の固定タイル（開いた資産の入力形）なので、
- * 全画面（832×480 = 潜在 60×104）はホストがタイルに切って chunk 列を回し、重なりをブレンドして
- * 貼り合わせる（常時タイル — ADR 0033 / 0038 §4 の動画版）。Python 側の正は
- * `tools/export-recipes/wan/vae_tiling.py`（GPU の照合が読む参照フィクスチャもそこが書く）。
+ * The space of the chunk graphs (`vae-chunks.ts`) is a fixed latent `t×t` tile (the input shape of the
+ * opened asset), so for the full frame (832×480 = latent 60×104) the host cuts tiles, runs the chunk
+ * sequence on each, blends the overlaps and pastes them together (always tiled — the video version of
+ * ADR 0033 / 0038 §4). The Python-side source of truth is `tools/export-recipes/wan/vae_tiling.py`
+ * (which also writes the reference fixtures that the GPU comparison reads).
  *
- * ## タイル幾何 = 丸め等間隔スナップ配置（上流からの意図的な逸脱）
+ * ## Tile geometry = rounded evenly spaced snap placement (an intentional deviation from upstream)
  *
- * 上流（diffusers `AutoencoderKLWan.tiled_decode`）は `range(0, H, stride)` で走査するので最後の
- * タイルが短くなり、固定形の chunk グラフでは食えない。開始位置は 0 と `extent − tile` の間を
- * **丸めて等分**する（Anima と同じ規則 — ADR 0033 追記 P-3）。本数は「隣り合う対の重なりが
- * 下限以上」を満たす最小（{@link planWanVaeTileAxis}）。下限の正本は出力の 64 px で、潜在へは
- * 空間の圧縮で割って導く（{@link wanVaeMinTileOverlap} — ADR 0121 決定 6）。Wan2.1 は 64 ÷ 8 = 8 で、
- * 832×480 は行 0 / 14 / 28 × 列 0 / 24 / 48 / 72 の 12 枚。タイル辺と縮尺は資産の宣言から引く
- * （{@link planWanVaeTiles} — タイル辺の差し替えを配布物だけで済ませる。決定 2）。
+ * Upstream (diffusers `AutoencoderKLWan.tiled_decode`) scans with `range(0, H, stride)`, so the last
+ * tile is short, which a fixed-shape chunk graph cannot take. The start positions **divide the range
+ * between 0 and `extent − tile` evenly, rounded** (the same rule as Anima — ADR 0033 addendum P-3). The
+ * count is the smallest that satisfies "every adjacent pair overlaps at least the lower bound"
+ * ({@link planWanVaeTileAxis}). The source of truth for the lower bound is 64 px of output, derived in
+ * latents by dividing by the spatial compression ({@link wanVaeMinTileOverlap} — ADR 0121 decision 6).
+ * For Wan2.1 that is 64 ÷ 8 = 8, and 832×480 gives 12 tiles at rows 0 / 14 / 28 × columns 0 / 24 / 48
+ * / 72. The tile edge and the scale are taken from the asset's declaration ({@link planWanVaeTiles} —
+ * so a different tile edge needs only a new distribution. Decision 2).
  *
- * ## ブレンドは上流の線形ランプと同型・貼り付けは領域割り当て
+ * ## The blend has the same form as upstream's linear ramp; pasting assigns regions
  *
- * `blend_v` / `blend_h` と同じ式・同じ順序（**上のタイルとの縦ブレンドが先・左との横ブレンドが
- * 後**）・同じ sample 空間で、全フレーム・全チャネルに掛ける。上流はタイル配列を in-place に
- * 書き換えるので、隣に効くのはブレンド済みのタイル — ここでも同じ。貼り付けは「タイル i の担当 =
- * `[starts[i], starts[i+1])`・最後だけ末端まで」（上流の「stride 幅へ切り詰め + 全体 crop」の
- * スナップ版 — stride 幅で切り詰めると末端が欠ける。ADR 0033 決定 3）。
+ * The same formula and order as `blend_v` / `blend_h` (**vertical blend with the tile above first,
+ * horizontal blend with the tile to the left second**), in the same sample space, applied to every
+ * frame and every channel. Upstream rewrites the tile array in place, so what affects a neighbour is
+ * the already-blended tile — the same here. Pasting assigns "tile i owns
+ * `[starts[i], starts[i+1])`, the last one up to the end" (the snap version of upstream's "trim to the
+ * stride width + crop the whole" — trimming to the stride width would lose the end. ADR 0033 decision
+ * 3).
  *
- * ## タイルが外・chunk が内
+ * ## Tiles outside, chunks inside
  *
- * タイルごとに cache をゼロから作り直す（{@link decodeWanVaeTile} がタイルの頭でゼロに書く —
- * 上流 `tiled_decode` の `clear_cache` と同じ）。逆順だとタイルの枚数ぶんの cache を同時に持つ
- * （決定 2）。1 タイル = 1 batch・フレームだけを読み戻す手順は `vae-chunks.ts` の doc。
+ * The cache is rebuilt from zero per tile ({@link decodeWanVaeTile} writes zeros at the head of each
+ * tile — the same as `clear_cache` in upstream `tiled_decode`). The reverse nesting would hold as many
+ * caches as there are tiles at once (decision 2). The one tile = one batch, read-back-frames-only
+ * procedure is in the doc of `vae-chunks.ts`.
  *
- * ## 縮退（タイル 1 枚）は非タイルの chunk 列とビット同一 MUST
+ * ## MUST: the degenerate case (one tile) is bit-identical to the untiled chunk sequence
  *
- * 潜在がタイルちょうど（`extent === tile`）ならタイルは 1 枚で、ブレンドは 1 度も走らず担当領域が
- * 全体になる。この経路が chunk 列（{@link decodeWanVaeTile}）と 1 ビットでも違ったら切り出しか
- * 貼り付けの誤り — 実 GPU の e2e が Uint32 で門にする（ADR 0033 決定 4）。
+ * When the latent is exactly one tile (`extent === tile`) there is one tile, no blend ever runs, and the
+ * owned region is the whole. If this path differs from the chunk sequence ({@link decodeWanVaeTile}) by
+ * even one bit, cutting or pasting is wrong — the real-GPU e2e checks it in Uint32 (ADR 0033 decision
+ * 4).
  *
- * ## クランプ
+ * ## Clamp
  *
- * {@link decodeWanVaeTiled} の戻りは**クランプ前**（照合はクランプ前で行う — 飽和した要素の差を
- * 隠さない）。最終フレームは {@link clampWanVaeFrames} を通した値（上流と同じく貼り付けの後）。
- * unpatchify のある世代（Wan2.2）は、貼り合わせ（patchify 空間・クランプ前）→ {@link unpatchifyWanVaeFrames}
- * → クランプの順（上流の `_decode` / `tiled_decode` と同じ — ブレンドは patchify 空間で行う）。
+ * {@link decodeWanVaeTiled} returns values **before the clamp** (comparisons are made before the clamp
+ * — differences in saturated elements are not hidden). The final frames are the values passed through
+ * {@link clampWanVaeFrames} (after pasting, as upstream). For a generation with unpatchify (Wan2.2) the
+ * order is pasting (in patchify space, before the clamp) → {@link unpatchifyWanVaeFrames}
+ * → clamp (the same as upstream's `_decode` / `tiled_decode` — blending happens in patchify space).
  */
 
 import type { GpuContext, Session } from "@karume/runtime";
@@ -50,21 +58,23 @@ import { decodeWanVaeTile, type WanVaeChunkCaches, type WanVaeChunkLayout } from
 const f32 = Math.fround;
 
 /**
- * 隣り合うタイルの出力画素での最小の重なり。上流の既定のブレンド幅
- * `tile_sample_min − tile_sample_stride`（256 − 192 = 64 px）と同じ。Python 側
- * `vae_tiling.MIN_OVERLAP_PX` と同じ値（潜在の重なりはここから {@link wanVaeMinTileOverlap} で導く —
- * 世代ごとに潜在の値を持たない）。
+ * The minimum overlap of adjacent tiles in output pixels. Equal to upstream's default blend width
+ * `tile_sample_min − tile_sample_stride` (256 − 192 = 64 px). The same value as the Python side's
+ * `vae_tiling.MIN_OVERLAP_PX` (the latent overlap is derived from it by {@link wanVaeMinTileOverlap} —
+ * no latent value is held per generation).
  */
 const MIN_OVERLAP_PX = 64;
 
 /**
- * 空間の圧縮（潜在 1 あたりの最終出力の画素数）= グラフの入出力の空間比 `scale` × ホストの
- * unpatchify の倍率 `patchSize`（ADR 0121 決定 6）。グラフの比は chunk グラフの宣言
- * （`sampleTile / tile`）、unpatchify の倍率は世代の記述子（`vaePatchSize`）から来る。
+ * The spatial compression (final output pixels per latent) = the graph's input / output spatial ratio
+ * `scale` × the host unpatchify factor `patchSize` (ADR 0121 decision 6). The graph's ratio comes from
+ * the chunk graph declaration (`sampleTile / tile`), the unpatchify factor from the generation
+ * descriptor (`vaePatchSize`).
  *
- * MUST: 潜在の大きさ・タイルで覆えるかの門・重なりの式は、この 1 本から圧縮を取る（`tile-decode.ts`
- * の `wanSpatialCompression` と {@link wanVaeMinTileOverlap}）。圧縮をグラフの比だけで取ると、
- * unpatchify のある世代で潜在が倍の大きさになり、重なりも倍になる。
+ * MUST: the latent size, the check that tiles cover it, and the overlap formula take the compression
+ * from this one function (`wanSpatialCompression` in `tile-decode.ts` and {@link wanVaeMinTileOverlap}).
+ * Taking the compression from the graph's ratio alone doubles the latent size for a generation with
+ * unpatchify, and doubles the overlap too.
  */
 export const wanVaeSpatialCompression = (scale: number, patchSize: number): number => {
   if (!Number.isInteger(scale) || scale < 1 || !Number.isInteger(patchSize) || patchSize < 1) {
@@ -76,11 +86,13 @@ export const wanVaeSpatialCompression = (scale: number, patchSize: number): numb
 };
 
 /**
- * 隣り合うタイルが潜在で重なる最小幅 = {@link MIN_OVERLAP_PX} ÷ 空間の圧縮
- * （{@link wanVaeSpatialCompression}）。Python 側 `vae_tiling.min_overlap_latent` と同じ式・同じ文言
- * （タイル計画の凍結表が両側で割れる）。
+ * The minimum width by which adjacent tiles overlap in latents = {@link MIN_OVERLAP_PX} ÷ the spatial
+ * compression ({@link wanVaeSpatialCompression}). The same formula and the same message as the Python
+ * side's `vae_tiling.min_overlap_latent` (otherwise the frozen tile-plan tables of the two sides
+ * disagree).
  *
- * MUST: 割り切れない圧縮は丸めずに落とす（丸めると重なりが 64 px から黙ってずれる）。
+ * MUST: a compression that does not divide evenly fails without rounding (rounding would silently move
+ * the overlap away from 64 px).
  */
 export const wanVaeMinTileOverlap = (scale: number, patchSize: number): number => {
   const compression = wanVaeSpatialCompression(scale, patchSize);
@@ -93,48 +105,52 @@ export const wanVaeMinTileOverlap = (scale: number, patchSize: number): number =
   return MIN_OVERLAP_PX / compression;
 };
 
-/** 潜在の 1 軸ぶんのタイル配置。 */
+/** The tile placement along one latent axis. */
 export type WanVaeTileAxis = {
-  /** この軸の潜在の全長。 */
+  /** The full latent length along this axis. */
   readonly extent: number;
-  /** タイル 1 枚の潜在の幅（= chunk グラフの入力形）。 */
+  /** The latent width of one tile (= the input shape of the chunk graph). */
   readonly tile: number;
   /**
-   * 各タイルの開始位置（潜在・昇順・末尾はちょうど `extent − tile`）。
+   * The start position of each tile (latent, ascending, the last exactly `extent − tile`).
    *
-   * MUST: 開始位置の差（間隔）を欄として持たない — 対ごとに 1 潜在まで動くので、1 つの数に
-   * 畳むと配置と黙って食い違う。要るところで `starts` から引く（{@link wanVaeBlendExtentAt}）。
+   * MUST: do not hold the difference of start positions (the spacing) as a field — it moves by up to
+   * one latent per pair, so folding it into one number silently disagrees with the placement. Derive
+   * it from `starts` where needed ({@link wanVaeBlendExtentAt}).
    */
   readonly starts: readonly number[];
 };
 
-/** 潜在 `[C, F, H, W]` の 2 軸ぶんのタイル配置と、潜在 ↔ sample の縮尺。 */
+/** The tile placement along both axes of a latent `[C, F, H, W]`, and the latent ↔ sample scale. */
 export type WanVaeTilePlan = {
-  /** 潜在のチャネル数（切り出しの平面数を決める）。 */
+  /** The latent channel count (decides the number of planes to cut). */
   readonly latentChannels: number;
   /**
-   * chunk グラフの出口のチャネル数（貼り合わせでは、タイルの平面の数がこれの倍数であることの検査に
-   * 使う — ブレンドと貼り付けは平面ごとに回すので、チャネルとフレームを分けない）。
+   * The channel count at the chunk graph's exit (used in pasting to check that the number of tile
+   * planes is a multiple of it — blending and pasting loop over planes, without separating channels
+   * from frames).
    */
   readonly sampleChannels: number;
-  /** 潜在 1 あたりの sample 画素数。 */
+  /** Sample pixels per latent. */
   readonly scale: number;
-  /** 高さ軸。 */
+  /** The height axis. */
   readonly rows: WanVaeTileAxis;
-  /** 幅軸。 */
+  /** The width axis. */
   readonly cols: WanVaeTileAxis;
 };
 
 /**
- * 1 軸ぶんの丸め等間隔スナップ配置（Python 側 `vae_tiling.plan_tile_axis` と同じ規則）。
+ * Rounded evenly spaced snap placement along one axis (the same rule as the Python side's
+ * `vae_tiling.plan_tile_axis`).
  *
- * 本数は「重なりが `minOverlap` 以上」を満たす最小値 `ceil(span / (tile − minOverlap)) + 1`
- * （`span = extent − tile`）、開始位置は `round(i · span / (本数 − 1))`（`Math.round` = 0.5 は
- * 切り上げ — Python 側は同じ向きの整数式）。丸めの誤差が ±0.5 に収まるので間隔は 2 値にしか
- * ならない。
+ * The count is the smallest value that satisfies "overlap at least `minOverlap`",
+ * `ceil(span / (tile − minOverlap)) + 1` (`span = extent − tile`); the start positions are
+ * `round(i · span / (count − 1))` (`Math.round` = 0.5 rounds up — the Python side uses an integer
+ * formula that rounds the same way). The rounding error stays within ±0.5, so the spacing takes only
+ * two values.
  *
- * `minOverlap` は潜在の単位で必須（既定値を置かない — 世代ごとの値は {@link wanVaeMinTileOverlap}
- * で導き、渡し忘れを Wan2.1 の値で黙って計画しない）。
+ * `minOverlap` is required, in latent units (no default — each generation's value is derived by
+ * {@link wanVaeMinTileOverlap}, so a forgotten argument is not silently planned with Wan2.1's value).
  */
 export const planWanVaeTileAxis = (
   extent: number,
@@ -155,8 +171,8 @@ export const planWanVaeTileAxis = (
   }
   const span = extent - tile;
   if (span === 0) {
-    // 縮退: 1 枚で覆える。対が無いのでブレンドは走らず、貼り付けが素の写しになる（モジュール doc
-    // の MUST — 非タイルの chunk 列とビット同一）。
+    // Degenerate: one tile covers it. With no pair no blend runs, and pasting is a plain copy (the
+    // module doc's MUST — bit-identical to the untiled chunk sequence).
     return { extent, tile, starts: [0] };
   }
   const count = Math.ceil(span / (tile - minOverlap)) + 1;
@@ -164,8 +180,9 @@ export const planWanVaeTileAxis = (
   for (let index = 0; index < count; index += 1) {
     starts.push(Math.round((index * span) / (count - 1)));
   }
-  // 重なりの下限は本数の式から導けるが、導出は丸めの誤差評価に依っていて目で追えない。破れたら
-  // 継ぎ目がランプで隠れなくなる（絵にしか出ない沈黙誤り）ので、構造で落とす。
+  // The overlap lower bound follows from the count formula, but the derivation relies on bounding the
+  // rounding error and cannot be followed by eye. If it broke, the ramp would no longer hide the seams
+  // (a silent error that shows only in the picture), so it is enforced structurally.
   for (let index = 1; index < count; index += 1) {
     const overlap = tile - (starts[index] - starts[index - 1]);
     if (overlap < minOverlap) {
@@ -179,8 +196,9 @@ export const planWanVaeTileAxis = (
 };
 
 /**
- * 対 `(index − 1, index)` のブレンド幅（**sample 空間** — 上流の `blend_height` / `blend_width` と
- * 同じ単位）。丸め等間隔なので対ごとに 1 潜在まで動く。
+ * The blend width of the pair `(index − 1, index)` (**sample space** — the same unit as upstream's
+ * `blend_height` / `blend_width`). The spacing is rounded-even, so it moves by up to one latent per
+ * pair.
  */
 export const wanVaeBlendExtentAt = (axis: WanVaeTileAxis, scale: number, index: number): number => {
   if (!Number.isInteger(index) || index < 1 || index >= axis.starts.length) {
@@ -193,15 +211,16 @@ export const wanVaeBlendExtentAt = (axis: WanVaeTileAxis, scale: number, index: 
   return (axis.tile - (axis.starts[index] - axis.starts[index - 1])) * scale;
 };
 
-/** タイル `index` の担当領域の長さ（潜在）= 次のタイルの開始まで・最後だけ末端まで。 */
+/** Length of tile `index`'s owned region (latent) = up to the next tile's start; the last to the end. */
 const regionOf = (axis: WanVaeTileAxis, index: number): number =>
   (index + 1 < axis.starts.length ? axis.starts[index + 1] : axis.extent) - axis.starts[index];
 
 /**
- * 潜在の空間 `height × width` のタイル計画。タイル辺・縮尺・チャネル数は chunk グラフの宣言から引く
- * （`layout.tile` と `layout.sampleTile / layout.tile` — 呼び手に 32 や 8 を literal で置かない）。
- * `minOverlap` は {@link planWanVaeTileAxis} と同じく潜在の単位で必須（生成要求の計画は
- * `tile-decode.ts` の `planWanGenerationTiles` を通す）。
+ * The tile plan for the latent space `height × width`. The tile edge, scale and channel counts are
+ * taken from the chunk graph declaration (`layout.tile` and `layout.sampleTile / layout.tile` — no 32
+ * or 8 as a literal in the caller). `minOverlap` is required in latent units, as in
+ * {@link planWanVaeTileAxis} (plans for a generation request go through `planWanGenerationTiles` in
+ * `tile-decode.ts`).
  */
 export const planWanVaeTiles = (
   layout: Pick<WanVaeChunkLayout, "latentChannels" | "tile" | "sampleTile" | "sampleChannels">,
@@ -222,11 +241,11 @@ export const planWanVaeTiles = (
   };
 };
 
-/** タイルの総枚数。 */
+/** The total number of tiles. */
 export const wanVaeTileCount = (plan: WanVaeTilePlan): number =>
   plan.rows.starts.length * plan.cols.starts.length;
 
-/** 潜在 `[C, F, H, W]` のフレーム数 F（長さが計画と合わなければ fail loudly）。 */
+/** The frame count F of a latent `[C, F, H, W]` (fails loudly if the length does not match the plan). */
 const latentFrames = (plan: WanVaeTilePlan, latents: Float32Array<ArrayBuffer>): number => {
   const plane = plan.latentChannels * plan.rows.extent * plan.cols.extent;
   const frames = latents.length / plane;
@@ -239,8 +258,8 @@ const latentFrames = (plan: WanVaeTilePlan, latents: Float32Array<ArrayBuffer>):
 };
 
 /**
- * 潜在 `[C, F, H, W]` から `(row, col)` のタイル `[C, F, t, t]` を切り出す（平面ごとのコピー —
- * `C·F` 枚の平面はどれも `H × W`）。
+ * Cuts tile `(row, col)` `[C, F, t, t]` out of the latent `[C, F, H, W]` (a copy per plane — every one
+ * of the `C·F` planes is `H × W`).
  */
 export const wanVaeLatentTile = (
   plan: WanVaeTilePlan,
@@ -249,7 +268,8 @@ export const wanVaeLatentTile = (
   col: number,
 ): Float32Array<ArrayBuffer> => {
   const { rows, cols } = plan;
-  // 整数も見る — 大小比較だけでは 0.5 / NaN が通り、`starts[0.5]` が undefined になってゼロのタイルを黙って返す。
+  // Integers are checked too — a range comparison alone lets 0.5 / NaN through, `starts[0.5]` becomes
+  // undefined, and a zero tile is silently returned.
   if (
     !Number.isInteger(row) ||
     !Number.isInteger(col) ||
@@ -290,11 +310,11 @@ export const wanVaeLatentTile = (
 //   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
 
 /**
- * 上のタイルとの線形ランプ合成（上流 `blend_v` と同型・**in-place**）。
+ * Linear-ramp blend with the tile above (the same form as upstream `blend_v`, **in place**).
  *
- * `b[y] = a[H−blend+y]·(1 − y/blend) + b[y]·(y/blend)`。MUST: 重み 2 本を先に f32 へ丸めてから
- * 掛ける（torch は Python float のスカラをテンソル dtype へ落として演算する）— 丸めの位置を
- * 動かすと参照と最終桁で割れる。
+ * `b[y] = a[H−blend+y]·(1 − y/blend) + b[y]·(y/blend)`. MUST: round the two weights to f32 first, then
+ * multiply (torch casts a Python float scalar to the tensor dtype before the operation) — moving the
+ * rounding point disagrees with the reference in the last digit.
  */
 const blendVertical = (
   above: Float32Array<ArrayBuffer>,
@@ -320,7 +340,7 @@ const blendVertical = (
   }
 };
 
-/** 左のタイルとの線形ランプ合成（上流 `blend_h` と同型・**in-place**）。 */
+/** Linear-ramp blend with the tile to the left (the same form as upstream `blend_h`, **in place**). */
 const blendHorizontal = (
   left: Float32Array<ArrayBuffer>,
   current: Float32Array<ArrayBuffer>,
@@ -344,9 +364,8 @@ const blendHorizontal = (
 };
 
 /**
- * 貼り合わせの本体（**渡された配列の上で in-place にブレンドする** — 呼び手がその配列を所有して
- * いることが前提）。戻りは `[Cs, F', H·s, W·s]`（Cs は計画の `sampleChannels`・F' はタイルの
- * フレーム数）。
+ * The body of pasting (**blends in place on the given arrays** — assumes the caller owns them). Returns
+ * `[Cs, F', H·s, W·s]` (Cs is the plan's `sampleChannels`, F' the tiles' frame count).
  */
 const assembleOwnedTiles = (
   working: readonly Float32Array<ArrayBuffer>[],
@@ -377,9 +396,11 @@ const assembleOwnedTiles = (
     }
   }
 
-  // MUST: 縦（上）→ 横（左）の順（上流 `tiled_decode` と同じ）。入れ替えると角の 4 枚が重なる
-  // 領域で係数の積の順が変わる（単体テストの角の解析解が割れる）。
-  // MUST: ブレンド幅は対ごとに引く（丸め等間隔なので対で 1 潜在まで違う）。
+  // MUST: vertical (above) → horizontal (left), the order of upstream `tiled_decode`. Swapping them
+  // changes the order of the coefficient products where the four corner tiles overlap (the unit test's
+  // analytic corner solution breaks).
+  // MUST: take the blend width per pair (the spacing is rounded-even, so pairs differ by up to one
+  // latent).
   for (let row = 0; row < rowCount; row += 1) {
     for (let col = 0; col < colCount; col += 1) {
       const current = working[row * colCount + col];
@@ -410,9 +431,10 @@ const assembleOwnedTiles = (
   const width = cols.extent * scale;
   const out = new Float32Array(planes * height * width);
   for (let row = 0; row < rowCount; row += 1) {
-    // MUST: 幅は担当領域ちょうどにする。過大（常にタイル全幅）でも行優先の走査では後続タイルが
-    // 上書きして値が変わらず、数値の門では検出できない（ADR 0033 の検出限界 1）— その無害さは
-    // 走査順に依存するので、貼り付けを並列化・逆順化した瞬間に沈黙誤値へ変わる。
+    // MUST: the width is exactly the owned region. Too large (always the full tile width) still leaves
+    // the values unchanged under a row-major scan because later tiles overwrite, so no numeric check
+    // can detect it (ADR 0033 detection limits, item 1) — that harmlessness depends on the scan order,
+    // so it turns into silently wrong values the moment pasting is parallelized or reversed.
     const top = rows.starts[row] * scale;
     const spanRows = regionOf(rows, row) * scale;
     for (let col = 0; col < colCount; col += 1) {
@@ -434,11 +456,11 @@ const assembleOwnedTiles = (
 };
 
 /**
- * decode 済みのタイル（行優先・各 `[Cs, F', s, s]`）をブレンドして `[Cs, F', H·s, W·s]` に貼り
- * 合わせる（クランプ前のまま・Cs は計画の `sampleChannels`）。
+ * Blends the decoded tiles (row-major, each `[Cs, F', s, s]`) and pastes them into
+ * `[Cs, F', H·s, W·s]` (still before the clamp; Cs is the plan's `sampleChannels`).
  *
- * MUST: 渡された配列を破壊しない（ブレンドは in-place なので写しの上で行う）。配列を自分で所有
- * する {@link decodeWanVaeTiled} は写さずに本体を呼ぶ。
+ * MUST: do not destroy the given arrays (blending is in place, so it runs on copies).
+ * {@link decodeWanVaeTiled}, which owns its arrays, calls the body without copying.
  */
 export const assembleWanVaeTiles = (
   tiles: readonly Float32Array<ArrayBuffer>[],
@@ -450,18 +472,19 @@ export const assembleWanVaeTiles = (
   );
 
 /**
- * 全タイルを行優先で decode する（**タイルが外・chunk が内** — タイルごとに
- * {@link decodeWanVaeTile} が cache をゼロから回す）。戻りは各タイルのクランプ前の
- * `[Cs, 1 + 4(F−1), s, s]`（呼び手が所有する新しい配列）。
+ * Decodes every tile in row-major order (**tiles outside, chunks inside** — per tile,
+ * {@link decodeWanVaeTile} runs the cache from zero). Returns each tile's pre-clamp
+ * `[Cs, 1 + 4(F−1), s, s]` (new arrays owned by the caller).
  *
- * `latents` は逆正規化済みの `[C, F, H, W]`。計画のタイル辺・縮尺・チャネル数（潜在と出口）が開いた
- * 資産（`caches.layout`）と食い違えば fail loudly。
+ * `latents` is the de-normalized `[C, F, H, W]`. If the plan's tile edge, scale or channel counts
+ * (latent and exit) disagree with the opened asset (`caches.layout`), it fails loudly.
  *
- * `onTile` はタイル 1 枚の decode が決着するたびに await する（`tile` は 1 始まり・行優先 — パイプラインの
- * 進捗と診断の口。投げれば残りのタイルを回さずに投げ直す）。
+ * `onTile` is awaited each time the decode of one tile settles (`tile` is 1-based, row-major — the
+ * hook for the pipeline's progress and diagnostics. If it throws, the remaining tiles are not run and
+ * the error is rethrown).
  *
- * MUST: 同じ device の別の batch・run を並行に発行しない（タイルごとの batch が device の区間
- * ロックを持つ — `decodeWanVaeTile`）。
+ * MUST: do not issue another batch or run on the same device concurrently (each tile's batch holds the
+ * device's span lock — `decodeWanVaeTile`).
  */
 export const decodeWanVaeTiles = async (
   gpu: GpuContext,
@@ -485,8 +508,8 @@ export const decodeWanVaeTiles = async (
         `・sample ${layout.sampleTile}・出口 ${layout.sampleChannels} チャネル）と違う`,
     );
   }
-  // 潜在の長さは GPU を回す前に見る（タイルごとの切り出しでも落ちるが、それだと前のタイルの
-  // decode を払ってから落ちる）。
+  // The latent length is checked before running the GPU (cutting each tile would also fail, but only
+  // after paying for the decode of the earlier tiles).
   latentFrames(plan, latents);
   const decoded: Float32Array<ArrayBuffer>[] = [];
   for (let row = 0; row < plan.rows.starts.length; row += 1) {
@@ -501,9 +524,9 @@ export const decodeWanVaeTiles = async (
 };
 
 /**
- * タイル decode の本体: 全タイルを decode してブレンド・貼り付けした**クランプ前**の
- * `[Cs, 1 + 4(F−1), H·s, W·s]`。最終フレームは {@link clampWanVaeFrames} を通す。`onTile` は
- * {@link decodeWanVaeTiles} と同じ。
+ * The body of the tiled decode: decodes every tile, blends and pastes them, giving the **pre-clamp**
+ * `[Cs, 1 + 4(F−1), H·s, W·s]`. The final frames go through {@link clampWanVaeFrames}. `onTile` is the
+ * same as in {@link decodeWanVaeTiles}.
  */
 export const decodeWanVaeTiled = async (
   gpu: GpuContext,
@@ -516,15 +539,15 @@ export const decodeWanVaeTiled = async (
   assembleOwnedTiles(await decodeWanVaeTiles(gpu, sessions, caches, plan, latents, onTile), plan);
 
 /**
- * patchify 空間 `[Cs, F, h, w]` → `[Cs/p², F, h·p, w·p]`（上流 diffusers `unpatchify` と同じ並び —
- * `view(c, r, q, f, h, w).permute(c, f, h, q, w, r)`・r = q = p）。添字の対応は
- * `out[c, f, y·p + dy, x·p + dx] = in[c·p² + dx·p + dy, f, y, x]`（チャネル内のずれは幅方向 dx が上位・
- * 高さ方向 dy が下位）。
+ * Patchify space `[Cs, F, h, w]` → `[Cs/p², F, h·p, w·p]` (the same ordering as upstream diffusers
+ * `unpatchify` — `view(c, r, q, f, h, w).permute(c, f, h, q, w, r)`, r = q = p). The index mapping is
+ * `out[c, f, y·p + dy, x·p + dx] = in[c·p² + dx·p + dy, f, y, x]` (within a channel group the width
+ * offset dx is the major index and the height offset dy the minor).
  *
- * p = 1 は**入力をそのまま返す**（写さない — 上流の `if patch_size == 1: return x` と同じ）。p > 1 は
- * 新しい配列への写しだけで浮動小数の演算は無い（値はビット単位で保たれる）。
+ * p = 1 **returns the input as is** (no copy — the same as upstream's `if patch_size == 1: return x`).
+ * p > 1 only copies into a new array with no floating-point arithmetic (values are kept bit for bit).
  *
- * 形・倍率・長さの食い違いは fail loudly（p = 1 でも見る）。
+ * Mismatches of shape, factor or length fail loudly (checked even for p = 1).
  */
 export const unpatchifyWanVaeFrames = (
   frames: Float32Array<ArrayBuffer>,
@@ -554,7 +577,8 @@ export const unpatchifyWanVaeFrames = (
   const outChannels = channels / area;
   const plane = height * width;
   const out = new Float32Array(elements);
-  // 出力の行が連続になる順（c → f → y → dy → x → dx）で回すので、書き込み先は 1 ずつ進む。
+  // Loop in the order that makes output rows contiguous (c → f → y → dy → x → dx), so the write
+  // position advances by one.
   let to = 0;
   for (let channel = 0; channel < outChannels; channel += 1) {
     for (let frame = 0; frame < count; frame += 1) {
@@ -575,8 +599,8 @@ export const unpatchifyWanVaeFrames = (
 };
 
 /**
- * フレームを `[-1, 1]` へ in-place にクランプする（上流 `torch.clamp(min=-1, max=1)` と同じ —
- * NaN は NaN のまま・`-0` は `-0` のまま）。
+ * Clamps the frames to `[-1, 1]` in place (the same as upstream `torch.clamp(min=-1, max=1)` — NaN
+ * stays NaN, `-0` stays `-0`).
  */
 export const clampWanVaeFrames = (frames: Float32Array<ArrayBuffer>): void => {
   for (let index = 0; index < frames.length; index += 1) {

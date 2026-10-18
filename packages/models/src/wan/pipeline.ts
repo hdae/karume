@@ -1,92 +1,113 @@
 /**
- * `WanPipeline` — テキスト → 動画（Wan2.1 T2V 1.3B）の 1 本の面（ADR 0118 決定 7）。
+ * `WanPipeline` — the single surface for text → video (Wan2.1 T2V 1.3B) (ADR 0118 decision 7).
  *
- * パイプライン（全段 Karume・torch 不使用）:
+ * Pipeline (every stage runs in Karume, no torch):
  *
- * 0. **vae_encoder**（Wan2.2 の `WanTi2vPipeline` に条件画像〈`image`〉を渡した要求だけ — I2V・ADR 0121 決定 11）
- *    — 前処理（出力寸法の選択 → crop / stretch → `[-1, 1]` → patchify — `i2v-preprocess.ts`）の後、encoder の
- *    記号長の 3 グラフ（pre / attn / post）を 1 本の batch で回し、mu を正規化して条件の潜在にする
- *    （`vae-encoder.ts`）。DiT の段は各 step でモデル入力の先頭の潜在フレームをこれで置き換える（`dit-loop.ts`）
- * 1. **text** — 経路は構築時に選ぶ（{@link WanPipelineOptions.textEncoder} — ADR 0119 決定 7・追記
- *    「段 10d の設計」B）:
- *    - `"gpu"`（既定）— umT5（重み i8 per-channel・活性 f32 — ADR 0119 決定 5）の Session を張り、
- *      positive と negative を 1 回ずつ回して畳む。プロンプトは `prompt_clean` の鏡像とトークナイザの門を
- *      通る任意の文字列（2〜512 トークン — ADR 0119 決定 1・2・4）。出力 `[1, L, 4096]` をホストが
- *      DiT の文脈の行数までゼロで詰める
- *    - `"precomputed"` — テキスト埋め込み資産からプロンプトの行を引くだけ（ADR 0118 決定 4 の第 1 段・
- *      GPU を使わない）。資産の集合に無い文字列は fail loudly
- * 2. **transformer** — S 形の DiT（`[1,S,C·4]` — Wan2.1 は `[1,S,64]`・Wan2.2 は `[1,S,192]`・
- *    決定 3）を steps 回。CFG は uncond → cond の逐次 2 回（B = 1）で、合成 `uncond + g·(cond − uncond)`
- *    と UniPC の更新はホスト（決定 5 — `scheduler.ts`）
- * 3. **vae_decoder** — chunk グラフ 2 本（first / next）の**常時タイル** decode（決定 2 —
- *    `vae-tiles.ts`）→ `[-1, 1]` へクランプ
+ * 0. **vae_encoder** (only for a request that passes a condition image (`image`) to Wan2.2's
+ *    `WanTi2vPipeline` — I2V, ADR 0121 decision 11) — after preprocessing (choosing the output size →
+ *    crop / stretch → `[-1, 1]` → patchify — `i2v-preprocess.ts`), runs the encoder's three
+ *    symbolic-length graphs (pre / attn / post) in one batch and normalizes mu into the condition
+ *    latent (`vae-encoder.ts`). At each step the DiT stage replaces the first latent frame of the model
+ *    input with it (`dit-loop.ts`)
+ * 1. **text** — the path is chosen at construction ({@link WanPipelineOptions.textEncoder} — ADR 0119
+ *    decision 7, step 10d design addendum B):
+ *    - `"gpu"` (default) — creates a Session for umT5 (i8 per-channel weights, f32 activations — ADR
+ *      0119 decision 5), runs positive and negative once each, and closes it. The prompt is any string
+ *      that passes the `prompt_clean` mirror and the tokenizer check (2 to 512 tokens — ADR 0119
+ *      decisions 1, 2 and 4). The host pads the output `[1, L, 4096]` with zeros up to the row count
+ *      of the DiT context
+ *    - `"precomputed"` — only looks up the prompt's row in the text embedding asset (the first step of
+ *      ADR 0118 decision 4; no GPU use). A string outside the asset's set fails loudly
+ * 2. **transformer** — the S-shaped DiT (`[1,S,C·4]` — Wan2.1 is `[1,S,64]`, Wan2.2 is `[1,S,192]`;
+ *    decision 3), `steps` times. CFG runs uncond → cond as two sequential passes (B = 1); the
+ *    combination `uncond + g·(cond − uncond)` and the UniPC update run on the host (decision 5 —
+ *    `scheduler.ts`)
+ * 3. **vae_decoder** — **always-tiled** decode with the two chunk graphs (first / next) (decision 2 —
+ *    `vae-tiles.ts`) → clamp to `[-1, 1]`
  *
- * 返すのはフレーム `[3, F, H, W]` の f32（値域 `[-1, 1]`）と fps（{@link GeneratedVideo}）。PNG への
- * 書き出しは呼び手（`wanFrameToRgba` + `encodePng`）。
+ * Returns the frames `[3, F, H, W]` as f32 (range `[-1, 1]`) and the fps ({@link GeneratedVideo}).
+ * Writing PNGs is the caller's job (`wanFrameToRgba` + `encodePng`).
  *
- * 段の本体は Wan2.1 / 2.2 の class が共有するモジュールにある（ADR 0121 決定 10 — 入口の門は
- * `plan.ts`・text 段は `text-stage.ts`・DiT 段は `dit-loop.ts`・VAE 段は `tile-decode.ts`・2.2 の encoder の段は
- * `vae-encoder.ts`）。家族
- * admission・構築・段の順序の本体も共有の `family.ts`（世代の値を `WanFamilySpec` で受ける 1 本）にあり、
- * ここは公開型と Wan2.1 の class の殻（直列化鎖・`dispose`）を持ち、`WAN21_FAMILY` を渡す。公開型は
- * Wan2.2 の class（`./ti2v-pipeline.ts` の `WanTi2vPipeline`）と共有する — 受理集合・既定・潜在の形・fps の
- * ように世代で違う値は、どの class で組んだか（その class の世代の記述子）で決まる。
+ * The stage bodies live in modules shared by the Wan2.1 / 2.2 classes (ADR 0121 decision 10 — the entry
+ * check is `plan.ts`, the text stage `text-stage.ts`, the DiT stage `dit-loop.ts`, the VAE stage
+ * `tile-decode.ts`, and 2.2's encoder stage `vae-encoder.ts`). The family
+ * admission, construction and stage order also live in the shared `family.ts` (one body that takes the
+ * generation's values as a `WanFamilySpec`); this file holds the public types and the shell of the
+ * Wan2.1 class (serialization chain, `dispose`) and passes `WAN21_FAMILY`. The public types are shared
+ * with the Wan2.2 class (`WanTi2vPipeline` in `./ti2v-pipeline.ts`) — values that differ by generation,
+ * such as the accepted set, defaults, latent shape and fps, are decided by which class built the
+ * pipeline (that class's generation descriptor).
  *
- * ## MUST: 段ごとに Session を張って畳む・（encoder →）text → DiT → VAE の順に 1 段ずつ
+ * ## MUST: a Session per stage, created and closed one at a time — (encoder →) text → DiT → VAE
  *
- * 構築（{@link WanPipeline.fromPretrained} / {@link WanPipeline.fromAssets}）では Session を 1 本も
- * 張らない（コンテナを開くまで）。
- * `generate` の中で段ごとに Session を張り、畳んでから次の段を張る（決定 7 — anima の既定
- * `"per-stage"` と同じ）。text 段（umT5 の重み i8 5.30 GiB）と DiT 段（81 フレームで 7.31 GiB）の和は
- * B570 の天井 9,600 MiB を越える（ADR 0119 決定 11）ので、text 段は DiT 段を張る前に畳む。DiT 段
- * （33 フレームで約 5.7 GiB）と VAE 段（約 2.9 GiB）も同時に持たない。text 段を畳んだ直後の確保の残りは
- * B570・Deno・33 フレームで +0.08 GiB（text 段の山 6.30 GiB → 畳んだ後 0.708 GiB・段の前 0.633 GiB —
- * ADR 0119 追記「段 10c の GPU の門と段 10d-4 の結果」）。Chrome では測っていない。
+ * Construction ({@link WanPipeline.fromPretrained} / {@link WanPipeline.fromAssets}) creates no
+ * Session at all (it goes as far as opening the containers).
+ * `generate` creates a Session per stage and closes it before creating the next (decision 7 — the same
+ * as anima's default `"per-stage"`). The text stage (umT5 i8 weights, 5.30 GiB) plus the DiT stage
+ * (7.31 GiB at 81 frames) exceeds the B570's 9,600 MiB ceiling (ADR 0119 decision 11), so the text
+ * stage is closed before the DiT stage is created. The DiT stage (about 5.7 GiB at 33 frames) and the
+ * VAE stage (about 2.9 GiB) are not held at the same time either. The allocation left right after
+ * closing the text stage was +0.08 GiB on the B570 with Deno at 33 frames (text-stage peak 6.30 GiB →
+ * 0.708 GiB after closing, 0.633 GiB before the stage — ADR 0119 addendum "step 10c GPU check and step
+ * 10d-4"). Not measured in Chrome.
  *
- * I2V の encoder の段（Wan2.2 だけ）は最初に回し、3 Session と受け渡しの常駐を畳んでから**解放を待って**
- * （`session/settle-released-memory.ts`）次の段へ進む（ADR 0121 決定 11 — DiT の段の容量の余裕は 0.4〜0.8 GiB
- * しか無く、encoder の確保〈1280×704 で計画の backing 約 0.9 GiB〉を DiT の段に残さない — encoder の段が落ちた
- * ときも畳んでから待つので、同じ pipeline の次の生成の DiT の段にも残さない）。encoder の部品は
- * T2V だけに使う場合も構築時に取る（2.2 の配布形が常に持つ — 構築の口を増やさない）が、Session は画像を渡した
- * 要求でだけ張る。
+ * The I2V encoder stage (Wan2.2 only) runs first; its three Sessions and the hand-over residents are
+ * closed and then the pipeline **waits for the release** (`session/settle-released-memory.ts`) before
+ * moving to the next stage (ADR 0121 decision 11 — the DiT stage has only 0.4–0.8 GiB of capacity
+ * margin, so the encoder's allocation (about 0.9 GiB of planned backing at 1280×704) must not remain
+ * into the DiT stage; when the encoder stage fails it is also closed and then waited on, so nothing
+ * remains into the DiT stage of the same pipeline's next generation either). The encoder components
+ * are fetched at construction even for T2V-only use (the 2.2 distribution always carries them — no
+ * extra construction entry point), but their Sessions are created only for a request that passes an
+ * image.
  *
- * NOTE（text → DiT・DiT → VAE の切り替えには解放待ちを入れていない — 決定 7 の「切り替えのピークを測り、足りなければ
- * 入れる」の結果。I2V の encoder の段の後の待ちは ADR 0121 決定 11 の指定で、B570 では測っていない）:
- * B570（Intel / wgpu）は `destroy()` の解放が次の device poll まで遅れうる（docs/known-issues.md
- * 「Intel Arc B570」節）が、2026-10-02 の実測（832×480・33 フレーム・2 ステップの通し・fdinfo の
- * `drm-total-vram0`）では、DiT 段の山 5.75 GiB が **DiT の Session を畳んだ直後**（`stage` の `end`・
- * VAE の段を張る前）に 0.43 GiB（最初の段の前 0.19 GiB）へ戻っていた。切り替えの山は DiT 段の山
- * そのもの（VAE 段の山 2.88 GiB と重ならない）。遅れが出ないのは、`Session.dispose` が未完了の仕事を
- * 決着させてから破棄し、破棄の時点で GPU が参照中のバッファが残らないため（推測 — 遅れの実測例は
- * 参照中のバッファを捨てる形だった）。
+ * NOTE (the text → DiT and DiT → VAE switches have no release wait — the result of decision 7's
+ * "measure the peak at the switch and add a wait if it falls short" (that conditional wait was
+ * withdrawn on 2026-10-18 — ADR 0118 decision 7). The wait after the I2V encoder stage is specified by
+ * ADR 0121 decision 11 and was not measured on the B570):
+ * on the B570 (Intel / wgpu) the release of `destroy()` can be delayed until the next device poll
+ * (docs/known-issues.md, section "Intel Arc B570 (Linux / Vulkan ANV / xe)"), but in the measurement of
+ * 2026-10-02 (832×480, 33 frames, a two-step run end to end, fdinfo `drm-total-vram0`) the DiT stage's
+ * 5.75 GiB peak had already dropped to 0.43 GiB (0.19 GiB before the first stage) **right after the DiT
+ * Session was closed** (the `stage` `end`, before the VAE stage is created). The switch's peak is the
+ * DiT stage's peak itself (it does not overlap the VAE stage's 2.88 GiB peak). No delay shows because
+ * `Session.dispose` settles unfinished work before destroying, so no buffer the GPU still references
+ * remains at the time of destruction (speculation — the measured delay cases discarded buffers that
+ * were still referenced).
  *
- * MUST: 段の切り替えは公開 API 側でも守る — `generate` は直列化鎖に載せ（並行呼び出しは待たされて
- * 順に走る）、`dispose` はその完了を待ってから GPU を破棄する。
+ * MUST: the public API also enforces the stage switching — `generate` runs on the serialization chain
+ * (concurrent calls wait and run in turn), and `dispose` waits for it to complete before destroying the
+ * GPU.
  *
- * ## 中断（`signal` — ADR 0119 決定 9・追記「段 10d の設計」G）
+ * ## Cancellation (`signal` — ADR 0119 decision 9, step 10d design addendum G)
  *
- * 構築は {@link WanPipelineOptions.signal}（取得層と構築の段の境目 — anima / irodori と同じ形）、生成は
- * {@link WanGenerateRequest.signal}（段の境目・各 run の前〈text の 2 回・DiT の各 step〉・VAE のタイルの
- * 間 — `generation/sequence.ts` の形）。検査はイベントループへ 1 度譲ってから見る（`settleAbort`）。
- * 1 回の run は不可分で、中断は次の境目で効く。中断の例外は開いている Session を畳んでから
- * `signal.reason` を包まずに投げる（消費側が `error === controller.signal.reason` で識別できる —
- * ADR 0083 決定 5）。
+ * Construction takes {@link WanPipelineOptions.signal} (at the boundaries between the fetch layer and
+ * the construction steps — the same form as anima / irodori); generation takes
+ * {@link WanGenerateRequest.signal} (at stage boundaries, before each run (the two text runs, each DiT
+ * step) and between VAE tiles — the form of `generation/sequence.ts`). Each check first yields once to
+ * the event loop (`settleAbort`). One run is indivisible; the cancellation takes effect at the next
+ * boundary. The cancellation exception closes the open Sessions and then throws `signal.reason`
+ * unwrapped (the consumer can identify it by `error === controller.signal.reason` — ADR 0083 decision
+ * 5).
  *
- * ## 配布形（`karume-wan2.1` — ADR 0118 段 7）
+ * ## Distribution (`karume-wan2.1` — ADR 0118 step 7)
  *
- * 入口は配布形から取得する {@link WanPipeline.fromPretrained} と、取得済みのバイト列（manifest +
- * 資産）から組む {@link WanPipeline.fromAssets} の 2 つで、どちらも同じ家族 admission と組み立て
- * （`family.ts`）を通る。生成の既定（step 数・guidance・shift）は manifest の `pipelineConfig`
- * （`config.ts`）が持ち、UniPC の構造は上流の値（`WAN_UNIPC_CONFIG`）のまま。
+ * There are two entry points: {@link WanPipeline.fromPretrained}, which fetches from the distribution,
+ * and {@link WanPipeline.fromAssets}, which builds from already-fetched bytes (manifest + assets); both
+ * go through the same family admission and assembly (`family.ts`). The generation defaults (step
+ * count, guidance, shift) come from the manifest's `pipelineConfig` (`config.ts`); the UniPC structure
+ * stays at the upstream values (`WAN_UNIPC_CONFIG`).
  *
- * NOTE: 配布形 `karume-wan2.1` は HF に公開しない（ADR 0118 追記（2026-10-15））ので、公開配布リポの対応表
- * （`WAN_SOURCES` — `config.ts`）に Wan2.1 のキーは無い（表が持つのは Wan2.2 の `"wan2.2"` だけ）。
+ * NOTE: the `karume-wan2.1` distribution is not published on HF (ADR 0118 addendum (2026-10-15)), so
+ * the table of public distribution repositories (`WAN_SOURCES` — `config.ts`) has no Wan2.1 key (the
+ * table holds only Wan2.2's `"wan2.2"`).
  *
- * ## MUST: 出力の「正しさ」はここでは担保されない
+ * ## MUST: the "correctness" of the output is not guaranteed here
  *
- * 数値の正は参照との e2e（実 GPU — `packages/models/tests/e2e_wan_pipeline_test.ts`）が担保する。
- * seed 付き乱数は torch の `randn` とは別列（`random.ts`）なので、参照との照合は初期ノイズを
- * {@link WanGenerateRequest.latents} で注入して行う。
+ * Numeric correctness is guaranteed by the e2e against the reference (real GPU —
+ * `packages/e2e/tests/e2e_wan_pipeline_test.ts`). The seeded random generator is a different stream
+ * from torch's `randn` (`random.ts`), so comparison with the reference injects the initial noise via
+ * {@link WanGenerateRequest.latents}.
  */
 
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
@@ -106,22 +127,22 @@ import {
 } from "./family.ts";
 import type { WanPrompt } from "./text-embeds.ts";
 
-/** 生成結果。`data` は `[3, frames, height, width]` の f32（値域 `[-1, 1]` — クランプ済み）。 */
+/** The generation result. `data` is `[3, frames, height, width]` f32 (range `[-1, 1]` — clamped). */
 export type GeneratedVideo = {
   readonly frames: number;
   readonly width: number;
   readonly height: number;
   /**
-   * 出力のフレームレート（上流の世代の事実 — Wan2.1 は 16・Wan2.2 は 24。manifest の宣言ではなく
-   * ノブでもない — ADR 0121 決定 8）。
+   * The output frame rate (an upstream fact of the generation — 16 for Wan2.1, 24 for Wan2.2. Neither
+   * declared in the manifest nor a knob — ADR 0121 decision 8).
    */
   readonly fps: number;
   readonly data: Float32Array<ArrayBuffer>;
 };
 
 /**
- * `denoise-step` の `copyLatents()` が返す途中の潜在の写し（形は class の世代が決める — Wan2.1:
- * `[16, F', H/8, W/8]` / Wan2.2: `[48, F', H/16, W/16]`）。
+ * A copy of the intermediate latent returned by `copyLatents()` of `denoise-step` (the shape is decided
+ * by the class's generation — Wan2.1: `[16, F', H/8, W/8]` / Wan2.2: `[48, F', H/16, W/16]`).
  */
 export type WanLatentSnapshot = {
   readonly data: Float32Array<ArrayBuffer>;
@@ -129,9 +150,10 @@ export type WanLatentSnapshot = {
 };
 
 /**
- * {@link WanPipelineOptions.onRunDiagnostics} が受けるコンポーネント名（Session 1 本 = 1 名）。
- * `text_encoder` は `"gpu"` の経路の umT5（positive / negative の 1 回ずつ）。`vae_encoder_*` は Wan2.2 の I2V の
- * encoder の 3 グラフ（条件画像を渡した要求で 1 回ずつ）。
+ * The component names that {@link WanPipelineOptions.onRunDiagnostics} receives (one Session = one
+ * name). `text_encoder` is the umT5 of the `"gpu"` path (once each for positive / negative).
+ * `vae_encoder_*` are the three graphs of Wan2.2's I2V encoder (once each for a request that passes a
+ * condition image).
  */
 export type WanRunComponent =
   | "vae_encoder_pre"
@@ -142,13 +164,15 @@ export type WanRunComponent =
   | "vae_decoder_first"
   | "vae_decoder_next";
 
-/** {@link WanGenerateRequest.onEvent} が受ける生成イベント。 */
+/** The generation events that {@link WanGenerateRequest.onEvent} receives. */
 export type WanGenerateEvent =
   /**
-   * 段の開始（`start` — Session を張る前）と終了（`end` — Session を畳んだ後）。
-   * `vae_encoder` は Wan2.2 の I2V の条件画像の encode の段（`image` を渡した要求だけ・最初の段 — `end` は
-   * 3 グラフを畳んで解放を待った後）。`text_encoder` は `"gpu"` の経路の umT5 の段（`"precomputed"` では出ない）。
-   * `vae_decoder` は chunk グラフ 2 本の段。途中で落ちたら `end` は出ない。
+   * The start of a stage (`start` — before its Session is created) and its end (`end` — after its
+   * Session is closed). `vae_encoder` is the stage that encodes Wan2.2's I2V condition image (only for a
+   * request that passes `image`, and the first stage — `end` comes after the three graphs are closed
+   * and the release has been waited for). `text_encoder` is the umT5 stage of the `"gpu"` path (absent
+   * with `"precomputed"`). `vae_decoder` is the stage of the two chunk graphs. If a stage fails midway,
+   * no `end` is emitted.
    */
   | {
       readonly kind: "stage";
@@ -157,175 +181,199 @@ export type WanGenerateEvent =
     }
   | {
       readonly kind: "denoise-step";
-      /** 完了した step 数（1 始まり）。 */
+      /** The number of completed steps (1-based). */
       readonly step: number;
       readonly steps: number;
-      /** その step で DiT へ渡した timestep（整数）。 */
+      /** The timestep (an integer) passed to the DiT at that step. */
       readonly timestep: number;
       /**
-       * 呼んだときだけ途中の潜在を写して返す（UniPC の更新の後の潜在）。I2V（Wan2.2 に `image` を渡した要求）では
-       * スケジューラの状態そのもので、先頭の潜在フレームは条件の潜在に置き換わっていない — 置き換えは DiT の段の
-       * 最後に 1 回（上流 diffusers の `callback_on_step_end` が受ける `latents` と同じ値）。
+       * Copies and returns the intermediate latent only when called (the latent after the UniPC
+       * update). For I2V (a request that passes `image` to Wan2.2) this is the scheduler state itself,
+       * and its first latent frame has not been replaced by the condition latent — the replacement
+       * happens once at the end of the DiT stage (the same value as the `latents` that upstream
+       * diffusers' `callback_on_step_end` receives).
        */
       readonly copyLatents: () => WanLatentSnapshot;
     }
-  /** VAE のタイル 1 枚の decode の完了（`tile` は 1 始まり）。 */
+  /** Completion of the decode of one VAE tile (`tile` is 1-based). */
   | { readonly kind: "vae-tile"; readonly tile: number; readonly tiles: number };
 
 /**
- * 1 回の生成要求（Wan2.1 / 2.2 の class が共有する型）。省いた step 数・guidance・shift は manifest の
- * `pipelineConfig` の既定（Wan2.1 の配布形の値は参照の設定 — 50 ステップ・guide 5.0・shift 3.0。Wan2.2 の
- * 既定の shift は上流の scheduler の `flow_shift` 5.0〈公式の 720p の値〉で、配布形
- * `karume-wan2.2`〈ADR 0121 段 8〉の manifest が宣言する）。寸法と
- * フレーム数の受理集合と既定は class の世代が決める（Wan2.1 の `WanPipeline`: 832×480 / 480×832・
- * 5〜81 フレーム・既定 832×480・33 フレーム / Wan2.2 の `WanTi2vPipeline`: 1280×704 / 704×1280・5〜121
- * フレーム・既定 1280×704・33 フレーム）。
+ * One generation request (the type shared by the Wan2.1 / 2.2 classes). An omitted step count,
+ * guidance or shift takes the default of the manifest's `pipelineConfig` (the Wan2.1 distribution's
+ * values are the reference setting — 50 steps, guide 5.0, shift 3.0. Wan2.2's default shift is the
+ * upstream scheduler's `flow_shift` 5.0 (the official 720p value), declared by the manifest of the
+ * `karume-wan2.2` distribution (ADR 0121 stage 8)). The accepted set and defaults of size and
+ * frame count are decided by the class's generation (Wan2.1's `WanPipeline`: 832×480 / 480×832,
+ * 5–81 frames, default 832×480, 33 frames / Wan2.2's `WanTi2vPipeline`: 1280×704 / 704×1280, 5–121
+ * frames, default 1280×704, 33 frames).
  */
 export type WanGenerateRequest = {
   /**
-   * プロンプト。受理集合は構築時の経路（{@link WanPipelineOptions.textEncoder}）で決まる:
+   * The prompt. The accepted set depends on the path chosen at construction
+   * ({@link WanPipelineOptions.textEncoder}):
    *
-   * - `"gpu"`（既定）: 任意の文字列。上流の前処理（`prompt_clean`）の鏡像とトークナイザの門を通り、
-   *   通らない入力は `ModelInputError`（ADR 0119 決定 1・2・4）— 語彙外の文字・Unicode 16.0.0 で
-   *   未割り当ての文字・C1 制御文字・HTML の文字参照になりうる並び（`R&D` は `R & D` のように空白を挟めば
-   *   通る）・文字化けに見える並び・本文中の特殊トークン・空白の直後の `▁`・空や空白だけ（1 トークン）・
-   *   512 トークン超。拒否の文言は直し方まで言う。
-   * - `"precomputed"`: **テキスト埋め込み資産の集合にある文字列だけ**（原文か正規化後の文字列の
-   *   どちらかに完全一致 — class の `prompts`〈{@link WanPipeline.prompts} / `WanTi2vPipeline.prompts`〉）。
-   *   集合の外は `ModelInputError`（ADR 0118 決定 4）。
+   * - `"gpu"` (default): any string. It passes through the mirror of the upstream preprocessing
+   *   (`prompt_clean`) and the tokenizer check; input that does not pass is a `ModelInputError` (ADR
+   *   0119 decisions 1, 2 and 4) — out-of-vocabulary characters, characters unassigned in Unicode
+   *   16.0.0, C1 control characters, sequences that could be HTML character references (`R&D` passes
+   *   when spaced as `R & D`), sequences that look like mojibake, special tokens in the text, `▁` right
+   *   after whitespace, empty or whitespace only (1 token), more than 512 tokens. The rejection
+   *   message says how to fix the input.
+   * - `"precomputed"`: **only strings in the text embedding asset's set** (an exact match of either the
+   *   original or the normalized string — the class's `prompts` ({@link WanPipeline.prompts} /
+   *   `WanTi2vPipeline.prompts`)). Anything outside the set is a `ModelInputError` (ADR 0118 decision
+   *   4).
    */
   readonly prompt: string;
   /**
-   * CFG の uncond 側のプロンプト（{@link WanGenerateRequest.prompt} と同じ受理集合）。省くと公式の
-   * `sample_neg_prompt`（`"gpu"` は GPU で符号化した既定の文字列・`"precomputed"` は資産の `negative` の
-   * 行 — 同じ原文）。`guidance` が 1（CFG を回さない）のときに渡すと `ModelInputError`（効かないノブを
-   * 黙って受けない）。
+   * The prompt for CFG's uncond side (the same accepted set as {@link WanGenerateRequest.prompt}).
+   * When omitted, the official `sample_neg_prompt` is used (`"gpu"`: the default string encoded on the
+   * GPU; `"precomputed"`: the asset's `negative` row — the same original text). Passing it when
+   * `guidance` is 1 (CFG does not run) is a `ModelInputError` (a knob that has no effect is not
+   * silently accepted).
    */
   readonly negativePrompt?: string;
-  /** 初期ノイズの seed（既定 0 — {@link WanGenerateRequest.latents} とは排他）。 */
+  /** The seed of the initial noise (default 0 — exclusive with {@link WanGenerateRequest.latents}). */
   readonly seed?: number;
   /**
-   * 初期ノイズを外から渡す（f32・`F' = (frames − 1)/4 + 1`。形は class の世代が決める — Wan2.1:
-   * `[16, F', H/8, W/8]` / Wan2.2: `[48, F', H/16, W/16]`）。参照との照合で torch の `randn` の列を
-   * 注入する口（seed の生成器は torch とは別の列 — `random.ts`）。書き換えない。
+   * Passes the initial noise in from outside (f32, `F' = (frames − 1)/4 + 1`. The shape is decided by
+   * the class's generation — Wan2.1: `[16, F', H/8, W/8]` / Wan2.2: `[48, F', H/16, W/16]`). The entry
+   * point for injecting torch's `randn` stream when comparing with the reference (the seeded generator
+   * is a different stream from torch — `random.ts`). Not modified.
    */
   readonly latents?: Float32Array<ArrayBuffer>;
   /**
-   * denoise の step 数（1 以上 1000 以下の整数・既定は `pipelineConfig.defaults.steps`）。上限は
-   * `num_train_timesteps`（超えると整数の timestep が必ず重複する）。`shift` との組で σ 列が
-   * 狭義単調減少にならない値は `ModelInputError`。
+   * The number of denoise steps (an integer from 1 to 1000; default `pipelineConfig.defaults.steps`).
+   * The upper bound is `num_train_timesteps` (beyond it, integer timesteps always repeat). A value
+   * whose combination with `shift` gives a σ sequence that is not strictly decreasing is a
+   * `ModelInputError`.
    */
   readonly steps?: number;
   /**
-   * CFG の強さ（1 以上で f32 に丸めても有限・既定は `pipelineConfig.defaults.guidance`）。1 なら
-   * uncond 側を回さない（上流の `guidance_scale > 1` の判定と同じ）。1 未満は上流が CFG ごと切って値が
-   * 効かないので `ModelInputError`。
+   * The CFG strength (at least 1 and finite after rounding to f32; default
+   * `pipelineConfig.defaults.guidance`). At 1 the uncond side does not run (the same test as
+   * upstream's `guidance_scale > 1`). Below 1 upstream turns CFG off entirely and the value has no
+   * effect, so it is a `ModelInputError`.
    */
   readonly guidance?: number;
   /**
-   * flow matching の shift（正・既定は `pipelineConfig.scheduler.shift`）。`steps` との組で σ 列が
-   * 壊れる値（極端に大きい / 小さい shift）は `ModelInputError`。
+   * The flow-matching shift (positive; default `pipelineConfig.scheduler.shift`). A value that breaks
+   * the σ sequence in combination with `steps` (an extremely large / small shift) is a
+   * `ModelInputError`.
    */
   readonly shift?: number;
   /**
-   * フレーム数（4n+1。範囲と既定は class の世代が決める — Wan2.1: 5〜81・既定 33 / Wan2.2: 5〜121・
-   * 既定 33）。
+   * The frame count (4n+1. The range and default are decided by the class's generation — Wan2.1:
+   * 5–81, default 33 / Wan2.2: 5–121, default 33).
    */
   readonly frames?: number;
   /**
-   * 幅 × 高さ（受理集合と既定は class の世代が決める — Wan2.1: 832×480 か 480×832・既定 832×480 /
-   * Wan2.2: 1280×704 か 704×1280・既定 1280×704）。
+   * Width × height (the accepted set and default are decided by the class's generation — Wan2.1:
+   * 832×480 or 480×832, default 832×480 / Wan2.2: 1280×704 or 704×1280, default 1280×704).
    */
   readonly width?: number;
   readonly height?: number;
   /**
-   * 生成イベントの観測席（{@link WanGenerateEvent}）。**await する**（発火の順が決定的になる）。
-   * 例外は握らない — throw が step 粒度の中断になる（段の Session は畳まれる）。
+   * Observer of generation events ({@link WanGenerateEvent}). **It is awaited** (the firing order is
+   * deterministic). Exceptions are not swallowed — a throw cancels at step granularity (the stage's
+   * Session is closed).
    *
-   * MUST: `onEvent` の中で同じパイプラインの `generate` / `dispose` を await しない（直列化鎖の
-   * 自己デッドロック）。
+   * MUST: do not await `generate` / `dispose` of the same pipeline inside `onEvent` (a self-deadlock on
+   * the serialization chain).
    */
   readonly onEvent?: (event: WanGenerateEvent) => void | Promise<void>;
   /**
-   * 生成の中断。段の境目（text → DiT → VAE）・各 run の前（text の positive / negative・DiT の各 step）・
-   * VAE のタイルの間で、イベントループへ 1 度譲ってから検査する。1 回の run は不可分で、中断は次の
-   * 境目で効く。中断したら開いている Session を畳んでから `signal.reason` を**そのまま**投げる（包まない
-   * — `error === controller.signal.reason` で自分の中断を識別できる）。中断の後も同じパイプラインで
-   * 次の `generate` を回せる。
+   * Cancels the generation. Checked at stage boundaries (text → DiT → VAE), before each run (text
+   * positive / negative, each DiT step) and between VAE tiles, each time after yielding once to the
+   * event loop. One run is indivisible; the cancellation takes effect at the next boundary. On
+   * cancellation the open Sessions are closed and `signal.reason` is thrown **as is** (unwrapped — the
+   * caller can identify its own cancellation by `error === controller.signal.reason`). The same
+   * pipeline can run the next `generate` after a cancellation.
    */
   readonly signal?: AbortSignal;
 };
 
 /**
- * 構築オプション（class の `fromAssets` / `fromPretrained` 共通 — {@link WanPipeline.fromAssets} /
- * {@link WanPipeline.fromPretrained} と `WanTi2vPipeline` の同名の 2 つ）。
+ * Construction options (shared by the classes' `fromAssets` / `fromPretrained` —
+ * {@link WanPipeline.fromAssets} / {@link WanPipeline.fromPretrained} and the two of the same name on
+ * `WanTi2vPipeline`).
  */
 export type WanPipelineOptions = {
-  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  /** The model (a key of the manifest's models). Defaults to `defaultModel`. */
   readonly model?: string;
-  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  /** The execution configuration (a key of that model's quants). Defaults to `defaultQuant`. */
   readonly quant?: string;
   /**
-   * テキストエンコーダの経路（既定 `"gpu"` — ADR 0119 決定 7・追記「段 10d の設計」B）。取る部品が
-   * 経路で変わるので構築時に決める（生成ごとには切り替えない）。
+   * The text encoder path (default `"gpu"` — ADR 0119 decision 7, step 10d design addendum B). The
+   * components to fetch depend on the path, so it is decided at construction (not switched per
+   * generation).
    *
-   * - `"gpu"`: umT5（manifest の部品 `text_encoder` — 配布形では umT5 の配布リポへの越境参照・重み i8 で
-   *   約 5.3 GiB）とトークナイザ資産（`umt5_tokenizer`）を取り、`generate` ごとに umT5 の段を張って畳む。
-   *   任意のプロンプトを受ける。手元の配布形（`localDirectory` / `denoDirectory`）では、越境先を
-   *   取得元の `crossRepo` の mapping で渡す（隣のディレクトリを推測しない — hub の `local.ts`）。
-   * - `"precomputed"`: umT5 を取らず（1 バイトも読まない）、テキスト埋め込み資産のプロンプトだけを受ける
-   *   軽い使い方。資産の埋め込みは bf16 の umT5 の出力で、`"gpu"`（i8 の重み・f32 の活性）とは値が
-   *   一致しない — 同じ文字列でも経路を変えれば別の動画になる。
+   * - `"gpu"`: fetches umT5 (the manifest component `text_encoder` — in the distribution a
+   *   cross-repository reference to umT5's distribution repository, about 5.3 GiB with i8 weights) and
+   *   the tokenizer asset (`umt5_tokenizer`), and creates and closes the umT5 stage per `generate`.
+   *   Accepts any prompt. With a local distribution (`localDirectory` / `denoDirectory`), the
+   *   cross-repository target is passed as the source's `crossRepo` mapping (the neighbouring directory
+   *   is not guessed — hub's `local.ts`).
+   * - `"precomputed"`: a light use that does not fetch umT5 (reads not one byte of it) and accepts only
+   *   the prompts of the text embedding asset. The asset's embeddings are bf16 umT5 outputs and do not
+   *   match the values of `"gpu"` (i8 weights, f32 activations) — the same string gives a different
+   *   video when the path changes.
    *
-   * 未知の綴りは素の `Error`（取得の前に落ちる）。
+   * An unknown spelling is a plain `Error` (it fails before fetching).
    */
   readonly textEncoder?: "gpu" | "precomputed";
   /**
-   * 既存の GPU を共有する（渡した側が所有権を持つ — class の `dispose` は破棄しない）。
-   * 省くとパイプラインが `acquireGpu` し、`dispose` で破棄する。
+   * Shares an existing GPU (the passing side keeps ownership — the class's `dispose` does not destroy
+   * it). When omitted the pipeline calls `acquireGpu` and destroys it in `dispose`.
    *
-   * MUST: 計測（`acquireGpu({ gpuTiming: true })`）の device は渡せない — VAE の段は 1 タイル = 1 batch
-   * で回り、runtime は計測の device で batch を開かない（`GpuContext.beginBatch` の MUST）。構築時に
-   * 落とす（DiT の段を回し終えてから VAE の段で落ちる形にしない）。DiT の GPU 時間は DiT だけを回す
-   * e2e（段 3）で測る。
+   * MUST: a timing device (`acquireGpu({ gpuTiming: true })`) cannot be passed — the VAE stage runs one
+   * tile = one batch, and the runtime does not open a batch on a timing device (the MUST of
+   * `GpuContext.beginBatch`). It fails at construction (not as a failure in the VAE stage after the
+   * DiT stage has finished). The DiT's GPU time is measured by the e2e that runs only the DiT (step 3).
    */
   readonly gpu?: GpuContext;
   /**
-   * Session の診断の観測席（I2V の VAE encoder は条件画像 1 枚 = pre / attn / post の 1 回ずつ・umT5 は
-   * 1 プロンプト = 1 回・DiT は 1 forward = 1 回・VAE は 1 タイル = first / next の 1 回ずつ）。例外は握らない
-   * （fail loudly）。
+   * Observer of Session diagnostics (the I2V VAE encoder: one condition image = one each of pre / attn
+   * / post; umT5: one prompt = once; DiT: one forward = once; VAE: one tile = one each of first /
+   * next). Exceptions are not swallowed (fail loudly).
    */
   readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
   /**
-   * 構築の中断。class の `fromPretrained` は同じ 1 本を取得層へも渡すので、取得（umT5 だけで
-   * 約 5.3 GiB）と組み立てのどちらの最中でも効く。組み立ての段の境目（入口・容器を開いた後・資産の
-   * 解析の前・GPU の取得の前後）でイベントループへ 1 度譲ってから検査する。中断の例外は
-   * `signal.reason` を**そのまま**投げる（包まない — anima / irodori の構築と同じ形）。
+   * Cancels the construction. The class's `fromPretrained` passes the same signal to the fetch layer,
+   * so it takes effect both during the fetch (about 5.3 GiB for umT5 alone) and during assembly. At
+   * the boundaries of the assembly steps (entry, after opening the containers, before parsing the
+   * assets, before and after acquiring the GPU) it yields once to the event loop and then checks. The
+   * cancellation exception throws `signal.reason` **as is** (unwrapped — the same form as the anima /
+   * irodori construction).
    *
-   * NOTE: 構築の `signal` は生成には持ち越さない（生成の中断は {@link WanGenerateRequest.signal}）—
-   * 構築の寿命の値（`AbortSignal.timeout` など）が以後の生成を全部落とす形にしない。
+   * NOTE: the construction `signal` is not carried over to generation (generation is cancelled by
+   * {@link WanGenerateRequest.signal}) — a construction-lifetime value (such as
+   * `AbortSignal.timeout`) must not make every later generation fail.
    */
   readonly signal?: AbortSignal;
 };
 
 /**
- * class の `fromPretrained`（{@link WanPipeline.fromPretrained} / `WanTi2vPipeline.fromPretrained`）が
- * 追加で受ける取得層のオプション（hub へ透過する）。
+ * The fetch-layer options that the classes' `fromPretrained` ({@link WanPipeline.fromPretrained} /
+ * `WanTi2vPipeline.fromPretrained`) additionally accept (passed through to hub).
  *
- * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、欄ごとの
- * 説明は {@link FromPretrainedHubOptions} に 1 本化してある。
+ * NOTE: the per-field description, including that `headers` / `fetch` / `caches` / `onRetry` are
+ * **only for HTTP sources**, lives in one place: {@link FromPretrainedHubOptions}.
  */
 export type WanFromPretrainedOptions = WanPipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions;
 
 /**
- * 取得済みの manifest + 資産（hub の `fetchAssets` の返り値をそのまま渡せる形）。`assets` の部品は
- * 単一形 `krm` のキー（`transformer`）か part 列（`transformer[0]` / `transformer[1]` / … — part 0 から
- * 添字順）で、`transformer` / `vae_decoder_first` / `vae_decoder_next` の 3 本・Wan2.2（`WanTi2vPipeline`）では
- * I2V の VAE encoder の `vae_encoder_pre` / `vae_encoder_attn` / `vae_encoder_post` の 3 本（画像を渡さない使い方でも
- * 要る）と、`"gpu"` の経路（既定）では `text_encoder`（umT5）。加えて manifest の `assets` の `text_embeds`（埋め込み資産の
- * safetensors — 両方の経路）と、`"gpu"` の経路では `umt5_tokenizer`（トークナイザ資産の JSON）。
+ * An already-fetched manifest + assets (a shape that accepts hub's `fetchAssets` result as is). The
+ * components in `assets` are keyed by the single-form `krm` key (`transformer`) or as a part sequence
+ * (`transformer[0]` / `transformer[1]` / … — from part 0 in index order): the three
+ * `transformer` / `vae_decoder_first` / `vae_decoder_next`; for Wan2.2 (`WanTi2vPipeline`) the three
+ * of the I2V VAE encoder `vae_encoder_pre` / `vae_encoder_attn` / `vae_encoder_post` (needed even for
+ * use without an image); and on the `"gpu"` path (default) `text_encoder` (umT5). In addition the
+ * manifest's `assets` `text_embeds` (the embedding asset's safetensors — both paths) and, on the
+ * `"gpu"` path, `umt5_tokenizer` (the tokenizer asset's JSON).
  */
 export type WanAssets = {
   readonly manifest: Manifest;
@@ -333,17 +381,17 @@ export type WanAssets = {
 };
 
 /**
- * Wan2.1 のテキスト → 動画パイプライン。
+ * The Wan2.1 text → video pipeline.
  *
- * 構築は {@link WanPipeline.fromPretrained}（配布形から取得）か {@link WanPipeline.fromAssets}（取得済み
- * バイト列）だけを入口にする（コンストラクタは private — manifest 検査と資産の突合を迂回した半端な
- * 状態を作らせない。ADR 0008）。
+ * The only construction entry points are {@link WanPipeline.fromPretrained} (fetch from the
+ * distribution) and {@link WanPipeline.fromAssets} (already-fetched bytes) (the constructor is private
+ * — no half-built state that bypasses the manifest checks and the asset matching. ADR 0008).
  */
 export class WanPipeline {
   readonly #state: WanState;
-  /** generate と dispose の直列化鎖。 */
+  /** The serialization chain of generate and dispose. */
   readonly #chain = createOperationChain();
-  /** dispose の 1 本（undefined でないことが「dispose 済み」）。 */
+  /** The one dispose (not undefined means "disposed"). */
   #disposal: Promise<void> | undefined;
 
   private constructor(state: WanState) {
@@ -351,22 +399,25 @@ export class WanPipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor（part 0）
-   * だけ**を取って admission → 重みの part を温める → 埋め込み資産・トークナイザ資産の `fetchAssets` →
-   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 — `src/hub/components.ts`）。
-   * 取る部品は経路（{@link WanPipelineOptions.textEncoder}）で決まる — `"precomputed"` は umT5
-   * （`text_encoder`）を取らない。部品を別リポの同じ役割で差し替えるときは
-   * {@link FromPretrainedComponentOptions.components}（`transformer` / `vae_decoder_first` /
-   * `vae_decoder_next`、`"gpu"` の経路では `text_encoder` も）。
+   * Fetches from the distribution and builds (`loadManifest` → `resolveSelection` → fetch **only each
+   * component's descriptor (part 0)** for admission → warm the weight parts → `fetchAssets` for the
+   * embedding asset and the tokenizer asset → construction). Blocks are read in part order at the
+   * moment their Session is built (ADR 0109 — `src/hub/components.ts`). The components to fetch depend
+   * on the path ({@link WanPipelineOptions.textEncoder}) — `"precomputed"` does not fetch umT5
+   * (`text_encoder`). To replace a component with the same role from another repository, use
+   * {@link FromPretrainedComponentOptions.components} (`transformer` / `vae_decoder_first` /
+   * `vae_decoder_next`, plus `text_encoder` on the `"gpu"` path).
    *
-   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST。Wan2.1 は公開配布リポを
-   * 持たないので `WAN_SOURCES` にキーも無い）。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。手元の
-   * 配布形（`models/karume-wan2.1`）は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）— HF の `owner/name` の綴りの門は通らず、network も CacheStorage も通らない
-   * （{@link WanFromPretrainedOptions} の HTTP 専用ノブは効かない）。umT5 の越境先（umT5 の配布リポ）は
-   * その取得元の `crossRepo` に mapping で渡す（例 `denoDirectory("models/karume-wan2.1", { crossRepo:
-   * { "<owner>/karume-umt5-xxl": denoDirectory("models/karume-umt5-xxl") } })` — キーは manifest の
-   * `text_encoder` が宣言する repo）。
+   * **`ref` is required** (sources have no default — the MUST of `src/hub/repo-ref.ts`. Wan2.1 has no
+   * public distribution repository, so `WAN_SOURCES` has no key for it either). A string `ref` reads as
+   * `{ repo }` (= follows `main`). A local distribution (`models/karume-wan2.1`) is passed as a
+   * **source handle** (`localDirectory` / `denoDirectory` of `@karume/hub/deno`) — it does not pass
+   * the HF `owner/name` spelling check, and goes through neither the network nor CacheStorage (the
+   * HTTP-only knobs of {@link WanFromPretrainedOptions} have no effect). The umT5 cross-repository
+   * target (umT5's distribution repository) is passed as that source's `crossRepo` mapping (for example
+   * `denoDirectory("models/karume-wan2.1", { crossRepo:
+   * { "<owner>/karume-umt5-xxl": denoDirectory("models/karume-umt5-xxl") } })` — the key is the repo
+   * that the manifest's `text_encoder` declares).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
@@ -376,8 +427,9 @@ export class WanPipeline {
   }
 
   /**
-   * 取得済みの manifest + 資産から組む（{@link WanAssets}）。容器を開いて、取得面と同じ家族 admission と
-   * 組み立て（`family.ts`）を通す — 2 面の違いは部品の供給口だけ。
+   * Builds from an already-fetched manifest + assets ({@link WanAssets}). Opens the containers and runs
+   * the same family admission and assembly as the fetch surface (`family.ts`) — the two surfaces differ
+   * only in how components are supplied.
    */
   static async fromAssets(
     input: WanAssets,
@@ -387,13 +439,14 @@ export class WanPipeline {
   }
 
   /**
-   * テキスト埋め込み資産のプロンプトの一覧（資産のメタの並び — 埋め込みの値は持たない写し）。
-   * 経路で意味が変わる:
+   * The list of prompts in the text embedding asset (the asset's metadata in order — a copy without
+   * the embedding values). Its meaning depends on the path:
    *
-   * - `"precomputed"`: **受理集合そのもの**。`prompt` / `negativePrompt` には各行の `prompt` か
-   *   `normalized` を渡す。
-   * - `"gpu"`（既定）: 例示（固定プロンプトの名前と原文）。受理集合は任意の文字列で、各行の `prompt` を
-   *   渡すと GPU の umT5 で符号化する（資産の埋め込みは使わない）。
+   * - `"precomputed"`: **the accepted set itself**. Pass each row's `prompt` or `normalized` as
+   *   `prompt` / `negativePrompt`.
+   * - `"gpu"` (default): examples (the fixed prompts' names and original texts). The accepted set is
+   *   any string; passing a row's `prompt` encodes it with umT5 on the GPU (the asset's embeddings are
+   *   not used).
    */
   get prompts(): readonly WanPrompt[] {
     return this.#state.textEmbeds.entries.map(({ name, role, prompt, normalized }) => ({
@@ -405,8 +458,8 @@ export class WanPipeline {
   }
 
   /**
-   * プロンプトから動画を 1 本生成する。同じ要求（seed か latents・ノブ）なら同じ値が出る。
-   * 並行に呼ばれた場合は待たされて順に走る（グラフの同時常駐を作らない — モジュール doc）。
+   * Generates one video from a prompt. The same request (seed or latents, knobs) gives the same values.
+   * Concurrent calls wait and run in turn (no graphs resident at the same time — module doc).
    */
   async generate(request: WanGenerateRequest): Promise<GeneratedVideo> {
     if (this.#disposal !== undefined) throw new Error("WanPipeline: dispose 済みでは生成できない");
@@ -414,8 +467,10 @@ export class WanPipeline {
   }
 
   /**
-   * 解放する。**内部で取得した GPU だけ**破棄する（`options.gpu` は呼び手の所有物）。
-   * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy — 鎖に載せる）。
+   * Releases resources. Destroys **only a GPU acquired internally** (`options.gpu` belongs to the
+   * caller).
+   * MUST: wait for the in-flight generation to complete before destroying (flush-before-destroy — on
+   * the chain).
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(() => {
@@ -424,7 +479,7 @@ export class WanPipeline {
     return this.#disposal;
   }
 
-  /** `await using` 対応 — {@link dispose} の別名。 */
+  /** `await using` support — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }

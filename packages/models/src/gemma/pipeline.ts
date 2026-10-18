@@ -1,38 +1,43 @@
 /**
- * `Gemma4Pipeline` — **文字列 in → 文字列 out** の 1 本の面（生成 API 波の段 4）。
+ * `Gemma4Pipeline` — the one surface for **string in → string out** (stage 4 of the generation API
+ * wave).
  *
- * 束ねるのは 4 つで、どれも既に別の場所で正本を持っている:
+ * It ties together four things, each of which already has its source of truth elsewhere:
  *
- * 1. 製品グラフ（PLE 外出し + 最終行 logits 出口）の Session — `tools/export-recipes/gemma4/
- *    export_product.py` が直接書く容器 `model.krm`
- * 2. ホスト PLE gather（`src/gemma/ple.ts` — ADR
- *    [0085](../../../../docs/decisions/0085-ple-host-gather.md)）を
- *    {@link GenerationWiring.derivedInputs} の席へ差す
- * 3. compile 済み tokenizer（`src/gemma/text/`）と chat フォーマット（`src/gemma/text/chat.ts`）
- * 4. 生成ループ（`src/generation/` — ADR
- *    [0083](../../../../docs/decisions/0083-generation-api-surface.md) の program / sequence /
- *    sampler）
+ * 1. the Session of the product graph (PLE moved out + last-row logits exit) — the container
+ *    `model.krm` written directly by `tools/export-recipes/gemma4/export_product.py`
+ * 2. the host PLE gather (`src/gemma/ple.ts` — ADR
+ *    [0085](../../../../docs/decisions/0085-ple-host-gather.md)), plugged into the
+ *    {@link GenerationWiring.derivedInputs} field
+ * 3. the compiled tokenizer (`src/gemma/text/`) and the chat format (`src/gemma/text/chat.ts`)
+ * 4. the generation loop (`src/generation/` — the program / sequence / sampler of ADR
+ *    [0083](../../../../docs/decisions/0083-generation-api-surface.md))
  *
- * ここが足すのは**結線と id 空間の相互照合だけ**で、数値も語彙も 1 つも持たない。
+ * What this adds is **only the wiring and the cross-check of the id spaces**; it holds not a single
+ * number or vocabulary of its own.
  *
- * ## 2 つの入口（配布形と手元のバイト列）
+ * ## Two entry points (the distribution and bytes in hand)
  *
- * {@link Gemma4Pipeline.fromPretrained} は HF 配布形から（`karume.json` の `pipelineConfig` が
- * 静的配線を宣言する — 焼く側の正本は `tools/export-recipes/gemma4/distribution.py`）、
- * {@link Gemma4Pipeline.fromAssets} は取得済みバイト列から組む。**既定値は置かない** —
- * chunk 長も容量も位置上限も資産世代ごとに動くので、黙って古い数を使う形を作らない。
+ * {@link Gemma4Pipeline.fromPretrained} builds from the HF distribution (the `pipelineConfig` of
+ * `karume.json` declares the static wiring — the writer's source of truth is
+ * `tools/export-recipes/gemma4/distribution.py`), and {@link Gemma4Pipeline.fromAssets} builds from
+ * bytes already fetched. **No defaults are placed here** — chunk length, capacity and position limit
+ * all move with the asset generation, so nothing silently uses a stale number.
  *
- * MUST: PLE は配布形でも**全量常駐させない**（ADR 0085 決定 3）。索引も値も `model` 容器の
- * 資産（ADR 0109 決定 4）で、触った block だけが永続キャッシュから区間読みされる。
+ * MUST: PLE is **not made resident in full** even from the distribution (ADR 0085 decision 3). Both
+ * the index and the values are assets of the `model` container (ADR 0109 decision 4), and only the
+ * touched blocks are range-read from the persistent cache.
  *
- * ## MUST: id 空間を相互照合する（ADR 0085 決定 5）
+ * ## MUST: cross-check the id spaces (ADR 0085 decision 5)
  *
- * tokenizer が生成しうる id / 主 embedding の vocab 行数 / PLE の索引の行数を
- * {@link admitGemma4} と {@link buildGemma4Program} が突き合わせる。ここがずれると **OOB では
- * なく「別 token の有効な行」**を引く（例外なしで沈黙して壊れる）ので、fail loudly の門を置く
- * 場所はここしかない。
+ * {@link admitGemma4} and {@link buildGemma4Program} compare the ids the tokenizer can produce, the
+ * vocab rows of the main embedding and the rows of the PLE index. A mismatch here reads **not out of
+ * bounds but "a valid row of another token"** (silent corruption without an exception), so this is
+ * the only place for the fail-loudly check.
  *
- * ## MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）
+ * ## MUST: every module is side-effect free
+ *
+ * No import-time execution and no global mutable state (CLAUDE.md).
  */
 
 import { assertGemmaSessionOverrides, resolveGemmaSessionOptions } from "./session-options.ts";
@@ -147,418 +152,493 @@ import {
 } from "./chat-turn.ts";
 
 /**
- * グラフ入力の名前（正本は `export_product.py` の定数）。
+ * Graph input names (source of truth: the constants of `export_product.py`).
  *
- * NOTE: `position_ids` はもう無い — RoPE の cos / sin 4 本（`./rope.ts` が名前も値も作る）が
- * 位置を運ぶ唯一の入力になった。位置は「表を引く添字」ではなく「表そのもの」として渡る。
+ * NOTE: `position_ids` is gone — the four RoPE cos / sin inputs (`./rope.ts` builds both the names
+ * and the values) became the only inputs that carry the position. The position is passed as "the
+ * table itself", not as "an index into a table".
  */
 const INPUT_IDS = "input_ids";
 const PER_LAYER_INPUTS = "per_layer_inputs";
 const LAST_ROW = "last_row";
 
-/** manifest の weights / assets 表に現れる名前（ADR 0041 §3 の規約名）。 */
+/**
+ * The names that appear in the manifest's weights / assets tables (the convention names of ADR 0041
+ * §3).
+ */
 const MODEL = "model";
 /**
- * 投機（MTP drafter）を使うときだけ足す weights の役割（ADR 0096 段 2 §5）。
+ * The weights role added only when speculation (the MTP drafter) is used (ADR 0096 stage 2 §5).
  *
- * MUST: 既定では**取る部品の表に載せない**（`resolveSelection` の `weights` で `model` だけに
- * 絞る）。載せると投機を使わないロードでも drafter の descriptor と重みの part が落ちる。
+ * MUST: by default it is **not put in the table of components to fetch** (the `weights` of
+ * `resolveSelection` narrows to `model` only). Putting it there would download the drafter's
+ * descriptor and weight parts even for a load that does not use speculation.
  */
 const DRAFTER = "drafter";
 const TOKENIZER_ASSET = "tokenizer";
 
 /**
- * 取得済み資産から組むときの入力（**製品系列 1 世代ぶん**）。
+ * The input for building from fetched assets (**one generation of the product series**).
  *
- * PLE はもう呼び手が用意する資産ではない — 索引も値も `model` 容器の中に在る（ADR 0109
- * 決定 4）ので、この面も `model` の part 列を渡すだけで PLE まで揃う。
+ * PLE is no longer an asset the caller prepares — both the index and the values are inside the
+ * `model` container (ADR 0109 decision 4), so this surface too gets everything down to PLE just by
+ * passing the parts of `model`.
  */
 export type Gemma4Assets = {
   readonly config: Gemma4PipelineConfig;
   /**
-   * 製品グラフの容器（`krm`）の **part 列**（part 0 から添字順・長さ 0 の part も並べる）。
+   * The **parts** of the product graph's container (`krm`) (in index order from part 0, including
+   * zero-length parts).
    *
-   * MUST: 添字は part の id そのものである。長さ 0 の part を飛ばすと以降が 1 つずつ繰り上がり、
-   * 別の part として読まれる。
+   * MUST: the index is the part id itself. Skipping a zero-length part shifts every later part up by
+   * one, and they are read as different parts.
    */
   readonly model: readonly Uint8Array<ArrayBuffer>[];
-  /** compile 済み tokenizer 資産のバイト列（ADR 0084 決定 1）。 */
+  /** The bytes of the compiled tokenizer asset (ADR 0084 decision 1). */
   readonly tokenizer: Uint8Array<ArrayBuffer>;
 };
 
 export type Gemma4PipelineOptions = {
   /**
-   * 既存の GPU を共有する。**渡した側が所有権を持つ**ので {@link Gemma4Pipeline.dispose} は
-   * 破棄しない。省略時はパイプラインが内部で `acquireGpu` し、`dispose()` で破棄する。
+   * Shares an existing GPU. **The side that passed it keeps ownership**, so
+   * {@link Gemma4Pipeline.dispose} does not destroy it. When omitted, the pipeline calls
+   * `acquireGpu` internally and destroys it in `dispose()`.
    */
   readonly gpu?: GpuContext;
   /**
-   * PLE の常駐に使ってよい**ホスト RAM の上限（バイト）**（LRU — ADR 0085 決定 3）。
+   * The **upper limit of host RAM (bytes)** that PLE residency may use (LRU — ADR 0085 decision 3).
    *
-   * 省略時は最大 block 2 本ぶん（`ple-index.ts` の `defaultGemma4PleResidentBytes`）。
-   * `0` は全量 block も量子化行も保持しない。予算は値や token 列を変えない。
+   * Default: two of the largest blocks (`defaultGemma4PleResidentBytes` in `ple-index.ts`). `0`
+   * keeps neither whole blocks nor quantized rows. The budget changes neither values nor token
+   * sequences.
    *
-   * NOTE: 本数ではなくバイトで受ける — block 幅は資産世代で変わるので、「N 本」は世代ごとに
-   * 違う RAM を意味する（ADR 0085 追記 2026-09-02）。
-   * NOTE: 空きに載る全量 block と、さらに残った空きの量子化行（最大 256 行）で予算を共有する。
-   * 全量 block を優先し、行の保存では block を追い出さない。予算を絞ると行の再利用が減り、
-   * block の読み直しが増える（ADR 0085）。
+   * NOTE: taken in bytes, not as a count — the block width changes with the asset generation, so
+   * "N blocks" would mean different RAM per generation (ADR 0085 addendum 2026-09-02).
+   * NOTE: whole blocks that fit the free space and quantized rows in the space still left (at most
+   * 256 rows) share the budget. Whole blocks take priority, and storing rows never evicts a block.
+   * Tightening the budget reduces row reuse and increases block re-reads (ADR 0085).
    */
   readonly maxResidentPleBytes?: number;
   /**
-   * PLE をどこに置くか（既定 `"host"` = 現行そのまま・ADR 0085 追記〈GPU 常駐席〉）。
+   * Where PLE is placed (default `"host"` = as it is today; ADR 0085 addendum (GPU residency)).
    *
-   * `"gpu"` は PLE の量子化バイト列を**ロード時に 1 度だけ** GPU へ上げ、run ごとの
-   * `per_layer_inputs` を GPU 内 gather で作る（ホストの逆量子化と writeBuffer が消える —
-   * decode で約 0.25 ms/token）。prefill も decode も同じ経路を通る。
+   * `"gpu"` uploads PLE's quantized bytes to the GPU **once at load** and builds each run's
+   * `per_layer_inputs` with an on-GPU gather (the host dequantization and writeBuffer disappear —
+   * about 0.25 ms/token in decode). Prefill and decode take the same path.
    *
-   * MUST: 単一束縛なので、values のバイト数が `maxStorageBufferBindingSize` /
-   * `maxBufferSize` に収まらない device では **fail loudly**（黙ってホスト経路へ退避しない）。
-   * 量は配布形で決まる — QAT E2B（i4）は 1.09GiB・QAT E4B（i2）は 672MiB・通常 Gemma 4 E2B
-   * （i8）は 2.19GiB である。
+   * MUST: it is a single binding, so on a device where the byte size of values does not fit
+   * `maxStorageBufferBindingSize` / `maxBufferSize` it **fails loudly** (it does not silently fall
+   * back to the host path). The amount is set by the distribution — QAT E2B (i4) is 1.09 GiB, QAT E4B
+   * (i2) 672 MiB, and regular Gemma 4 E2B (i8) 2.19 GiB.
    *
-   * MUST: ホスト側の行キャッシュ（{@link Gemma4PipelineOptions.maxResidentPleBytes}）とは
-   * **併用できない**（GPU 常駐では 1 度も引かれない予算になる）。投機デコード
-   * （{@link Gemma4PipelineOptions.speculative}）と GPU 時間診断（`acquireGpu({ gpuTiming: true })`）
-   * との併用も未対応で、どれも fail loudly で断る。
+   * MUST: it **cannot be combined** with the host-side row cache
+   * ({@link Gemma4PipelineOptions.maxResidentPleBytes}) (under GPU residency that budget would never
+   * be drawn on). Combining it with speculative decoding ({@link Gemma4PipelineOptions.speculative})
+   * or with GPU timing diagnostics (`acquireGpu({ gpuTiming: true })`) is not supported either; each
+   * is refused by failing loudly.
    */
   readonly pleResidency?: Gemma4PleResidency;
   /**
-   * 固定長 prefill chunk の行数（省略時は配布形の宣言 {@link Gemma4PipelineConfig.chunkLength}）。
+   * The row count of a fixed-length prefill chunk (default: the distribution's declaration
+   * {@link Gemma4PipelineConfig.chunkLength}).
    *
-   * 上げるほど prefill の run 本数が減り（フェンス待ちの回数もその比で減る）、1 run あたりの
-   * 一時バッファと attention のスコア行列が増える。グラフの chunk 行は記号なので、資産を
-   * 焼き直さずに選べる。
+   * Raising it lowers the number of prefill runs (and the number of fence waits in proportion), and
+   * raises the transient buffers and the attention score matrix per run. The graph's chunk rows are
+   * symbolic, so it can be chosen without rebuilding the assets.
    *
-   * MUST: 2 以上・配布形の宣言 {@link Gemma4PipelineConfig.maxChunkLength} 以下・`maxPosition`
-   * 以下（このパイプラインの門）。1 は decode 形の専用値で、prefill 形として流す経路が無い
-   * （有効行 1 本の chunk は `GenerationSequence` が decode 形で流す）。上限を宣言から見るのは、
-   * 記号 `M` の trace 範囲が資産からは読めない（IR の `symbols` は名前の列だけ）ため — 宣言が
-   * 無かった頃は範囲外の値が例外なしで走っていた（2026-09-03 実測）。
-   * 各 sequence の容量に対する `chunkLength ≤ capacity` は `createGenerationSequence` が見る。
+   * MUST: at least 2, at most the distribution's declaration
+   * {@link Gemma4PipelineConfig.maxChunkLength}, and at most `maxPosition` (this pipeline's check). 1
+   * is a value reserved for the decode shape, and there is no path that runs it as a prefill shape (a
+   * chunk with one valid row is run by `GenerationSequence` in the decode shape). The upper limit is
+   * taken from the declaration because the trace range of the symbol `M` cannot be read from the
+   * assets (the IR's `symbols` is only a list of names) — before the declaration existed, an
+   * out-of-range value ran without an exception (measured 2026-09-03).
+   * `chunkLength ≤ capacity` against each sequence's capacity is checked by
+   * `createGenerationSequence`.
    */
   readonly chunkLength?: number;
   /**
-   * prefill 形として `chunkLength` に**加えて**使う物理 chunk 行数（省略時は
-   * {@link GEMMA4_CHUNK_BUCKETS} のうち `chunkLength` 未満のもの・`[]` で無効）。
+   * Physical chunk row counts used as prefill shapes **in addition to** `chunkLength` (default: the
+   * entries of {@link GEMMA4_CHUNK_BUCKETS} below `chunkLength`; `[]` disables them).
    *
-   * 短い prompt を `chunkLength`（配布既定 768）行へ pad すると、pad 行は出力にも KV にも
-   * 寄与しないのに行局所な op（linear / pointwise / norm）の仕事だけを物理行数に比例して積む。
-   * バケットがあると、その chunk は `queryLength` 以上の最小バケット行だけで流れる。長い
-   * prompt では 768 一括が最速なので、既定を下げるのではなく**実行形を増やす**形を採っている。
+   * Padding a short prompt to `chunkLength` (768 by distribution default) rows makes the pad rows
+   * contribute nothing to the output or the KV, yet the row-local ops (linear / pointwise / norm)
+   * still do work proportional to the physical row count. With buckets, such a chunk runs on only the
+   * smallest bucket of at least `queryLength` rows. For a long prompt a single 768 chunk is fastest,
+   * so instead of lowering the default, **more execution shapes are added**.
    *
-   * MUST: 2 以上 `chunkLength` 未満の整数の**狭義昇順**（受理集合の正本は runtime の
-   * `assertChunkBuckets` — この層は「どの入口の指定か」を文言に足すだけ）。
+   * MUST: integers of at least 2 and below `chunkLength` in **strictly ascending** order (the source
+   * of truth of the accepted set is the runtime's `assertChunkBuckets` — this layer only adds "which
+   * entry point's option" to the message).
    *
-   * NOTE: 本数ぶんだけ PreparedPlan の定常本数が増える（実行形 1 本 = 別鍵の計画 1 本 —
-   * ADR 0042 決定 2 の LRU）。既定の 6 本 + prefill 形 + decode 形 = **1 つの容量あたり** 8 形で、
-   * PreparedPlan の LRU 上限（runtime の `PREPARED_PLAN_CAPACITY` — verify 波で 12 へ広げた）に
-   * 収まる — 鍵は解決済みスロット容量を含む（ADR 0066 決定 3）ので、容量の違う sequence を
-   * 交互に回すと形は容量の数だけ倍になる。
-   * さらに足すと、生成ループの中で最古が毎回落ちて decode が静かに再導出へ落ちる（例外は出ない —
-   * 観測点は `SessionDiagnostics.lastRunPrepared`）。
+   * NOTE: each one adds a steady PreparedPlan (one execution shape = one plan with its own key — the
+   * LRU of ADR 0042 decision 2). The default 6 + the prefill shape + the decode shape = 8 shapes **per
+   * capacity**, which fits the PreparedPlan LRU bound (the runtime's `PREPARED_PLAN_CAPACITY` —
+   * widened to 12 in the verify wave) — the key includes the resolved slot capacity (ADR 0066
+   * decision 3), so alternating sequences of different capacities multiply the shapes by the number
+   * of capacities.
+   * Adding more makes the oldest drop every time inside the generation loop, and decode silently
+   * falls back to re-derivation (no exception — the observation point is
+   * `SessionDiagnostics.lastRunPrepared`).
    *
-   * NOTE: 複数 chunk のターンでは末尾 chunk だけが別の M になるので、slot backing（容量 1）の
-   * 作り直しが 1 回増える（prefill → decode の 2 回 / ターンが 3 回になる）。
+   * NOTE: in a multi-chunk turn only the last chunk has a different M, so the slot backing
+   * (capacity 1) is rebuilt one more time (2 rebuilds per turn, prefill → decode, become 3).
    */
   readonly chunkBuckets?: readonly number[];
   /**
-   * 実行 1 回ごとの診断を受け取る観測席（他 7 家族と同型）。op 別 GPU 時間（`lastRunTiming`）が
-   * 要るときは `gpu` に `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
+   * The observation callback that receives the diagnostics of each run (the same shape as the other
+   * families). When per-op GPU time (`lastRunTiming`) is needed, pass `acquireGpu({ gpuTiming: true
+   * })` as `gpu` (ADR 0021 — no measurement by default).
    *
-   * 呼ばれるのは **run 1 本ごとに 1 通**（prefill は chunk ごと・decode は step ごと・投機では
-   * cycle ごとに draft 1 通 + verify 1 通）で、その run の出力を読み終えた**同期区間**である
-   * （診断の `lastRun*` が「その run」の値であるのはこの区間だけ）。何の run だったかは第 2 引数
-   * {@link Gemma4RunPhase} が運ぶ — 回数から推定しない（複数 chunk の prefill があるターンでは、
-   * 2 本目以降の prefill を decode と取り違える）。prefill 直後の最初の token は最終 chunk の
-   * logits から抽選するだけで run を伴わないので、そこでは呼ばない。
+   * It is called **once per run** (per chunk in prefill, per step in decode, and per cycle one draft
+   * + one verify with speculation), in the **synchronous section** after that run's outputs have been
+   * read (the diagnostics' `lastRun*` hold "that run's" values only in this section). What the run
+   * was is carried by the second argument {@link Gemma4RunPhase} — do not infer it from the count (in
+   * a turn with a multi-chunk prefill, the second and later prefills would be mistaken for decode).
+   * The first token right after prefill is only sampled from the last chunk's logits and comes with
+   * no run, so there is no call there.
    *
-   * 診断を引く Session は phase で決まる — `draft` は借り手（drafter Session）・それ以外は
-   * 貸し手（target Session）である。
+   * The Session whose diagnostics are read depends on the phase — `draft` is the borrower (the
+   * drafter Session), everything else the lender (the target Session).
    *
-   * 中断せず走り切った非投機ターンの通知数は
-   * `GenerationStop.tokens − 1 + prefill chunk 数`（`tokens` は停止 token も 1 個数えるので、
-   * 引く 1 が「run を伴わない最初の抽選」ぶんである）。停止 token を引いた最後の decode run は
-   * `token` を yield せずに終わるが、その run のぶんも 1 通届く。消費側の `break` / `return()` /
-   * 中断で閉じたターンは、そこまでに完了した run のぶんだけが届く。投機ターンの通知数は
-   * `prefill chunk 数 + speculation.cycles + speculation.draftRuns + speculation.plainSteps` で
-   * ある（`plainSteps` = 自己採算ゲートが decode 形で回した step — `speculative: "always"` の
-   * ターンでは欄ごと無い）。
+   * For a non-speculative turn that ran to the end without interruption, the number of notifications
+   * is `GenerationStop.tokens − 1 + the number of prefill chunks` (`tokens` counts a stop token as
+   * 1, and the subtracted 1 is "the first sampling that comes with no run"). The last decode run that
+   * drew a stop token ends without yielding a `token`, but one notification still arrives for that
+   * run. A turn closed by the consumer's `break` / `return()` / an interruption delivers only the runs
+   * completed up to that point. For a speculative turn the count is
+   * `number of prefill chunks + speculation.cycles + speculation.draftRuns + speculation.plainSteps`
+   * (`plainSteps` = steps the self-tuning gate ran in the decode shape — absent altogether for a
+   * `speculative: "always"` turn).
    *
-   * NOTE: 他ファミリと違ってコンポーネント名を渡さない — グラフが 1 本しかないので、名前が
-   * 常に同じ 1 値になる（受け手が分岐できない引数を渡さない）。drafter が居るときも同じで、
-   * どちらの Session の診断かは `phase.kind` から読む。
+   * NOTE: unlike the other families, no component name is passed — there is only one graph, so the
+   * name would always be the same single value (an argument the receiver cannot branch on is not
+   * passed). The same holds when a drafter is present; which Session's diagnostics they are is read
+   * from `phase.kind`.
    *
-   * コールバックの例外は握らない（fail loudly — そのターンごと落ちる）。
+   * Exceptions from the callback are not caught (fail loudly — the whole turn fails).
    */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => void;
   /**
-   * states 形 attention ①QK / ③PV の縮約形。明示値 → 選択 quant の session → runtime の参照経路
-   * `"sequential"` の順で解決する（他の quant 実行ノブと同じ規則 — ADR 0104 追記 2026-09-26）。
-   * fromAssets には quant が無いため、未指定なら sequential。家族のコード既定は持たない。
+   * The reduction form of states-form attention ①QK / ③PV. Resolved in the order explicit value →
+   * the selected quant's session → the runtime's reference path `"sequential"` (the same rule as the
+   * other quant execution knobs — ADR 0104 addendum 2026-09-26). fromAssets has no quant, so it is
+   * sequential when unspecified. The family keeps no code default.
    *
-   * `"parallel"` は KV 長方向を 16 レーンで分担する変種（perf-ledger K-12）で、decode の
-   * attention が KV 長に比例して伸びる形を潰す（P=16K で 82 → 41 ms/token）。縮約順が違うので
-   * `"sequential"`（runtime の参照経路）とビット同一ではないが、gemma4 の greedy / chat golden は
-   * 両者で同一（ADR 0058 決定 6・ADR 0067 追記 2026-09-03）。`"sequential"` は parity の突合や
-   * 「順序依存の差を疑う」ときに戻す口。
-   * `"parallel-fused"` は少数行・短い列上限で行統計と PV を融合する任意指定（ADR 0102）。
-   * 加算順は parallel と同じで、対象外の形は parallel の経路を使う。
+   * `"parallel"` is the variant that splits the KV-length direction over 16 lanes (perf-ledger K-12),
+   * removing decode attention's growth in proportion to the KV length (82 → 41 ms/token at P=16K).
+   * The reduction order differs, so it is not bit-identical to `"sequential"` (the runtime's reference
+   * path), but gemma4's greedy / chat goldens are identical under both (ADR 0058 decision 6, ADR 0067
+   * addendum 2026-09-03). `"sequential"` is the way back for parity comparisons or when "suspecting
+   * an order-dependent difference".
+   * `"parallel-fused"` is an optional setting that fuses the row statistics and PV for few rows and a
+   * short column limit (ADR 0102). Its addition order is the same as parallel, and shapes outside its
+   * target use the parallel path.
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
   /**
-   * 量子化 GEMV の加算順。明示値 → 選択quantのsession → sequentialの順で解決する。
-   * fromAssetsにはquantが無いため、未指定ならsequential。モデル構成による自動選択はしない。
-   * 意味・適用形状はruntimeのSessionOptionsが正本。target / drafter両方へ渡す（ADR 0098）。
-   * 特にQATでは生成列が変わる場合がある。
+   * The addition order of the quantized GEMV. Resolved in the order explicit value → the selected
+   * quant's session → sequential. fromAssets has no quant, so it is sequential when unspecified. No
+   * automatic selection by model configuration. The runtime's SessionOptions is the source of truth
+   * for the meaning and the shapes it applies to. Passed to both target and drafter (ADR 0098).
+   * Especially for QAT, the generated sequence may change.
    */
   readonly linearGemvReduce?: SessionOptions["linearGemvReduce"];
   /**
-   * RMS→addの任意融合。意味・適用範囲はruntimeの同名設定が正本（ADR 0099）。
-   * 明示値 → 選択quantのsession → runtime既定の順で解決し、target / drafter両方へ渡す
-   * （ADR 0104）。fromAssetsにはquantが無いため、未指定ならruntime既定。
+   * The optional RMS→add fusion. The runtime setting of the same name is the source of truth for its
+   * meaning and scope (ADR 0099). Resolved in the order explicit value → the selected quant's session
+   * → the runtime default, and passed to both target and drafter (ADR 0104). fromAssets has no quant,
+   * so it is the runtime default when unspecified.
    */
   readonly fuseRmsNormAdd?: SessionOptions["fuseRmsNormAdd"];
   /**
-   * linear→固定SRQの任意融合。意味・適用範囲はruntimeの同名設定が正本（ADR 0103）。
-   * 実効の`linearGemvReduce`が`"parallel"`でなければ拒否する。
-   * 明示値 → 選択quantのsession → runtime既定の順で解決し、target / drafter両方へ渡す
-   * （ADR 0104）。fromAssetsにはquantが無いため、未指定ならruntime既定。
+   * The optional linear→fixed-SRQ fusion. The runtime setting of the same name is the source of
+   * truth for its meaning and scope (ADR 0103). Rejected unless the effective `linearGemvReduce` is
+   * `"parallel"`. Resolved in the order explicit value → the selected quant's session → the runtime
+   * default, and passed to both target and drafter (ADR 0104). fromAssets has no quant, so it is the
+   * runtime default when unspecified.
    */
   readonly fuseLinearStaticQuantize?: SessionOptions["fuseLinearStaticQuantize"];
   /**
-   * 固定SRQの活性をpacked int8で並列GEMVへ渡す。意味・適用範囲はruntimeの同名設定が正本
-   * （ADR 0105）。実効の`linearGemvReduce`が`"parallel"`でなければ拒否する。
-   * manifestの語彙には席が無いので**呼び手の明示指定だけ**で入り、target / drafter両方へ渡す。
+   * Passes the fixed-SRQ activations to the parallel GEMV as packed int8. The runtime setting of the
+   * same name is the source of truth for its meaning and scope (ADR 0105). Rejected unless the
+   * effective `linearGemvReduce` is `"parallel"`. The manifest vocabulary has no field for it, so it
+   * enters **only through the caller's explicit option**, and is passed to both target and drafter.
    */
   readonly packedStaticQuantize?: SessionOptions["packedStaticQuantize"];
-  /** RMSの任意縮約。subgroup32は対応GPU必須で、参照と加算順が変わる（ADR 0100）。 */
+  /**
+   * The optional RMS reduction. subgroup32 requires a supporting GPU and changes the addition order
+   * from the reference (ADR 0100).
+   */
   readonly rmsNormReduce?: SessionOptions["rmsNormReduce"];
-  /** GPUへの投入政策。target / drafterへ同じ値を渡し、省略時はruntimeの既定を使う。 */
+  /**
+   * The GPU submission policy. The same value goes to target / drafter; when omitted, the runtime
+   * default is used.
+   */
   readonly submitPolicy?: SessionOptions["submitPolicy"];
   /**
-   * slot backing（run の形ごとの中間バッファ束）を同時に保持するバイト予算。意味・既定・値域は
-   * runtime の `SessionOptions.planBackingBudgetBytes` が正本で、この pipeline はそこへ素通しする
-   * （`createSession` と {@link Gemma4Pipeline.estimateSessionMemory} の両方に同じ値が効く）。
-   * 生成は prefill バケット形 ↔ decode 形の切替が毎ターン起きるので、既定（256 MiB）では
-   * その両方が保持されて切替ごとの作り直しが消える。
+   * The byte budget for slot backings (the bundle of intermediate buffers per run shape) kept at the
+   * same time. The runtime's `SessionOptions.planBackingBudgetBytes` is the source of truth for the
+   * meaning, default and value range, and this pipeline passes it straight through (the same value
+   * applies to both `createSession` and {@link Gemma4Pipeline.estimateSessionMemory}).
+   * Generation switches between the prefill bucket shapes and the decode shape every turn, so with
+   * the default (256 MiB) both are kept and the rebuild on every switch disappears.
    */
   readonly planBackingBudgetBytes?: number;
   /**
-   * 行ブロック gemv（linear の GEMV 族・M ≥ 2）の並列度目標。意味・既定（16384 = 参照 device の
-   * 飽和点）・値域は runtime の `SessionOptions.linearGemvRowsThreadTarget` が正本で、この
-   * pipeline はそこへ素通しする（target Session と drafter Session の両方に同じ値が効く）。
-   * 飽和点が小さい GPU で下げると M=4 の verify が高い行ブロックを使う（重みの読み直しが減る）。
+   * The parallelism target of the row-block gemv (the linear GEMV family, M ≥ 2). The runtime's
+   * `SessionOptions.linearGemvRowsThreadTarget` is the source of truth for the meaning, default
+   * (16384 = the saturation point of the reference device) and value range, and this pipeline passes
+   * it straight through (the same value applies to both the target Session and the drafter Session).
+   * Lowering it on a GPU with a smaller saturation point makes the M=4 verify use taller row blocks
+   * (fewer weight re-reads).
    */
   readonly linearGemvRowsThreadTarget?: number;
   /**
-   * 投機デコード用の **MTP drafter を一緒に組む**（ADR 0096 — 省略時は組まない）。
+   * **Builds an MTP drafter alongside** for speculative decoding (ADR 0096 — not built when omitted).
    *
-   * 指定すると配布形の `drafter` weights も取得し、target Session の埋め込み表 1 本を借りる
-   * drafter Session を 1 本張る（バイトは複製されない）。**指定しない限り drafter の part は
-   * 1 バイトも落ちない** — 選択そのものから外れる（{@link DRAFTER} の MUST）。
+   * When given, the distribution's `drafter` weights are fetched as well, and one drafter Session is
+   * set up that borrows one embedding table of the target Session (no bytes are copied). **Unless it
+   * is given, not a single byte of the drafter's parts is downloaded** — it is out of the selection
+   * itself (the MUST of {@link DRAFTER}).
    *
-   * drafter が居る pipeline の `chat` / `sequence` は**既定で投機を張る**（1 verify run が
-   * 最大 `k+1` token を確定させる）。ターン / 会話ごとに切るノブは
-   * {@link Gemma4ChatOptions.speculative} と {@link Gemma4SequenceOptions.speculative}。
-   * 投機は**温度に依らず**張り、出る token 列は非投機と同一である（受理は行ごとに、非投機の
-   * decode が同じ位置で行う抽選と同じ logits・同じ history で 1 回ずつ引く — ADR 0096 決定 7）。
+   * `chat` / `sequence` of a pipeline with a drafter **speculate by default** (one verify run commits
+   * up to `k+1` tokens). The knobs to turn it off per turn / per conversation are
+   * {@link Gemma4ChatOptions.speculative} and {@link Gemma4SequenceOptions.speculative}.
+   * Speculation runs **regardless of temperature**, and the emitted token sequence is identical to
+   * the non-speculative one (acceptance draws once per row, with the same logits and the same history
+   * as the sampling the non-speculative decode does at the same position — ADR 0096 decision 7).
    *
-   * MUST: `k` は **1..{@link GEMMA4_DRAFT_STEPS}**（配布形の drafter グラフが 3 段で焼かれていて、
-   * 出口の本数が上限）。範囲外は fail loudly。
+   * MUST: `k` is **1..{@link GEMMA4_DRAFT_STEPS}** (the distribution's drafter graph is built with 3
+   * steps, and the number of exits is the upper limit). Out of range fails loudly.
    */
   readonly speculative?: {
-    /** 1 cycle で使う draft の本数（省略時は {@link GEMMA4_DRAFT_STEPS} = 配布形の段数）。 */
+    /**
+     * The number of drafts used per cycle (default {@link GEMMA4_DRAFT_STEPS} = the distribution's
+     * step count).
+     */
     readonly k?: number;
     /**
-     * 自己採算ゲートのノブ（**計測・検収用の静的ノブ** — 既定で十分。
-     * {@link Gemma4PipelineOptions.linearGemvRowsThreadTarget} と同じ扱いで、素通しする先は
-     * `GenerationSpeculativeOptions.gate` である）。
+     * The self-tuning gate's knobs (**static knobs for measurement and acceptance** — the
+     * defaults suffice. Treated like {@link Gemma4PipelineOptions.linearGemvRowsThreadTarget}, and
+     * passed straight through to `GenerationSpeculativeOptions.gate`).
      *
-     * 効くのは**ゲートが居るターンだけ**である（`speculative: true` / 未指定 = `policy: "auto"`）。
-     * 同じ pipeline の `speculative: "always"` のターンはゲートを作らないので、このノブは 1 つも
-     * 降りない（`gate` 欄ごと生えない）— 1 本の pipeline で 3 モードを交互に回す A/B の台本
-     * （`tools/mtp-bench`）がその形である。
+     * They apply **only to turns that have a gate** (`speculative: true` / unspecified =
+     * `policy: "auto"`). A `speculative: "always"` turn on the same pipeline builds no gate, so none
+     * of these knobs reaches it (the `gate` field does not appear at all) — an A/B script that
+     * alternates the three modes on one pipeline (`tools/mtp-bench`, removed in 0.15) had that shape.
      *
-     * MUST: ノブの門は `fromPretrained` の引数検査の段で通す（{@link createSpeculationGate} を
-     * 1 度作って捨てる）— 不正な値が GB 級の重みを読んだ後まで落ちない形にしない。
+     * MUST: the knobs' check runs at the argument-check step of `fromPretrained` (build one
+     * {@link createSpeculationGate} and discard it) — an invalid value must not survive until after
+     * GB-scale weights have been read.
      */
     readonly gate?: SpeculationGateOptions;
   };
 };
 
 /**
- * gemma4 パイプラインが使う prefill バケットの既定
- * （{@link Gemma4PipelineOptions.chunkBuckets}）— 2 冪の梯子。
+ * The default prefill buckets of the gemma4 pipeline ({@link Gemma4PipelineOptions.chunkBuckets}) —
+ * a power-of-two ladder.
  *
- * 実測で確定した列である（2026-09-07・RTX 3080 Ti / Vulkan・梯子 5 種 × prompt 5 長の ABBA）。
- * 効くのは短い発話で、20 token の prompt 1 本 + 1 token 生成の壁が `chunkLength` 768 固定の
- * 434 ms からこの梯子で 129 ms（−70%）になる。
+ * The list was settled by measurement (2026-09-07, RTX 3080 Ti / Vulkan, ABBA over 5 ladders × 5
+ * prompt lengths). It helps short messages: the wall time of one 20-token prompt + 1 generated token
+ * goes from 434 ms with `chunkLength` fixed at 768 to 129 ms with this ladder (−70%).
  *
- * **512 を入れないのは実測で 768 より遅いからである**（310 行の prompt で 550 ms 対 411 ms）。
- * GEMM の幾何は `M ≤ 512` で `M64N32`・それより上で `reg128x128` へ切り替わる
- * （`gemm-geometry.ts`）ので、512 行の小タイル形は 768 行の大タイル形に負ける。256 も同じ
- * `M64N32` だが、130 行の prompt で 305 ms 対 410 ms と勝つので梯子に残す。
+ * **512 is left out because it measured slower than 768** (550 ms vs 411 ms for a 310-row prompt).
+ * The GEMM geometry switches to `M64N32` for `M ≤ 512` and to `reg128x128` above
+ * (`gemm-geometry.ts`), so the small-tile shape of 512 rows loses to the large-tile shape of 768
+ * rows. 256 is also `M64N32`, but wins with 305 ms vs 410 ms for a 130-row prompt, so it stays in
+ * the ladder.
  *
- * **4 / 8 は投機の verify 用の段である**。verify は「draft した k 行 + 直前に確定した 1 行」を
- * 1 本の run で流す形（R = k+1 行）で、k=3 なら 4 行・k ≤ 7 なら 8 行に収まる（k の上限そのものは
- * sliding ring の余裕 = 棄却されうる行数の上限 8 で、context の `slidingSlack` が公開する）。
- * この段が無いと 4 行の verify が 32 行へ pad され、投機で削った仕事の一部をそのまま pad で
- * 払い直す。段そのものは通常の生成でも効く（4 token 以下の追い発話）。
+ * **4 / 8 are the buckets for speculative verify**. Verify runs "the k drafted rows + the 1 row
+ * committed just before" in one run (R = k+1 rows), which fits 4 rows for k=3 and 8 rows for k ≤ 7
+ * (the upper limit of k itself is the sliding ring's slack = the upper limit of rows that can be
+ * rejected, 8, which the context exposes as `slidingSlack`). Without these buckets a 4-row verify
+ * would be padded to 32 rows, paying back through padding part of the work speculation saved. The
+ * buckets also help ordinary generation (follow-up messages of 4 tokens or fewer).
  *
- * NOTE: 既定の 6 本 + prefill 形 + decode 形 = **1 つの容量あたり 8 形**が定常する
- * （{@link Gemma4PipelineOptions.chunkBuckets} の PreparedPlan の勘定）。
+ * NOTE: the default 6 + the prefill shape + the decode shape = **8 shapes per capacity** stay steady
+ * (the PreparedPlan count of {@link Gemma4PipelineOptions.chunkBuckets}).
  *
- * MUST: 凍結する — この配列は module スコープの共有物で、消費者が並べ替えると以後に組む
- * pipeline の物理行数の選び方まで変わる（`chunkBuckets` は昇順前提で先頭一致を採る）。
+ * MUST: frozen — this array is shared at module scope, and a consumer reordering it would change how
+ * every pipeline built afterwards chooses its physical row count (`chunkBuckets` assumes ascending
+ * order and takes the first match).
  */
 export const GEMMA4_CHUNK_BUCKETS: readonly number[] = Object.freeze([4, 8, 32, 64, 128, 256]);
 
 /**
- * 既定のバケット列を、選ばれた `chunkLength` に載る段だけへ切り詰める。
+ * Trims the default buckets to those that fit the chosen `chunkLength`.
  *
- * `chunkLength` は実行時ノブ（{@link Gemma4PipelineOptions.chunkLength}）なので、既定の梯子を
- * そのまま渡すと `chunkLength: 64` のような指定が「既定同士の食い違い」で落ちる。切り詰めるのは
- * **既定だけ**で、呼び手が明示したバケットは 1 つも落とさず fail loudly させる（黙って捨てると
- * 「宣言したのに効かないバケット」が例外なしで残る）。
+ * `chunkLength` is a runtime knob ({@link Gemma4PipelineOptions.chunkLength}), so passing the default
+ * ladder as is would make an option such as `chunkLength: 64` fail on "a conflict between two
+ * defaults". **Only the default** is trimmed; buckets the caller gave explicitly are never dropped
+ * and fail loudly instead (silently discarding them would leave "a bucket that was declared but has
+ * no effect" without an exception).
  */
 const defaultChunkBuckets = (chunkLength: number): readonly number[] =>
   GEMMA4_CHUNK_BUCKETS.filter((rows) => rows < chunkLength);
 
 /**
- * {@link Gemma4Pipeline.fromPretrained} が追加で受けるもの（選択軸 + 取得層へ透過するノブ）。
+ * What {@link Gemma4Pipeline.fromPretrained} accepts in addition (the selection axes + knobs passed
+ * through to the fetch layer).
  *
- * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
- * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
+ * NOTE: the description of the fetch layer's knobs, including that `headers` / `fetch` / `caches` /
+ * `onRetry` are **for HTTP sources only**, lives in one place, {@link FromPretrainedHubOptions}.
  */
 export type Gemma4FromPretrainedOptions = Gemma4PipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions & {
-    /** manifest のモデル名（省略時は `defaultModel`）。 */
+    /** The manifest's model name (default `defaultModel`). */
     readonly model?: string;
-    /** quant 名（省略時はそのモデルの `defaultQuant`）。 */
+    /** The quant name (default: that model's `defaultQuant`). */
     readonly quant?: string;
-    /** 取得の中断（構築側へは渡らない — `chat` / `sequence` の中断は要求ごとの `signal`）。 */
+    /**
+     * Aborts the fetch (not passed to construction — `chat` / `sequence` are interrupted by each
+     * request's `signal`).
+     */
     readonly signal?: AbortSignal;
   };
 
-/** {@link Gemma4Pipeline.sequence} の指定（1 会話ぶんの寿命に効く唯一のノブ）。 */
+/**
+ * The options of {@link Gemma4Pipeline.sequence} (the only knobs that apply to one conversation's
+ * lifetime).
+ */
 export type Gemma4SequenceOptions = {
   /**
-   * この会話が確保する full スロットの容量（省略時は配布形の既定 —
-   * {@link Gemma4PipelineConfig.capacity}）。
+   * The capacity of the full slots this conversation allocates (default: the distribution's default
+   * — {@link Gemma4PipelineConfig.capacity}).
    *
-   * MUST: `chunkLength ≤ capacity ≤ maxPosition`（`createGenerationSequence` が fail loudly）。
+   * MUST: `chunkLength ≤ capacity ≤ maxPosition` (`createGenerationSequence` fails loudly).
    */
   readonly capacity?: number;
   /**
-   * この会話で投機デコードを張るか（既定 = pipeline に drafter が居れば `true`）。
+   * Whether this conversation uses speculative decoding (default = `true` if the pipeline has a
+   * drafter).
    *
-   * - `true`（既定）… **自己採算ゲート付き**の投機。投機が decode に負けている間は cycle ごとに
-   *   decode 形（M=1）へ落ち、勝てそうなら戻る（`src/generation/speculation-gate.ts`）。
-   * - `"always"` … 常に投機（ゲートを作らない）。A/B の突合・検収の門・計測のための席である。
-   * - `false` … 「drafter は載せたままこの会話だけ従来の 1 token = 1 run で回す」。
+   * - `true` (default) … speculation **with the self-tuning gate**. While speculation is losing
+   *   to decode, it drops to the decode shape (M=1) per cycle, and returns when it looks like winning
+   *   (`src/generation/speculation-gate.ts`).
+   * - `"always"` … always speculate (no gate). The option for A/B comparison, acceptance checks and
+   *   measurement.
+   * - `false` … "keep the drafter loaded but run this conversation the old way, 1 token = 1 run".
    *
-   * drafter が居ない pipeline では `false` / 未指定でだけ通る（`true` / `"always"` は fail loudly —
-   * 指定は黙って無視される値ではなく、**元から選択肢が無い**）。
+   * On a pipeline without a drafter only `false` / unspecified pass (`true` / `"always"` fail loudly
+   * — the option is not a value to be silently ignored; **there was never a choice to begin with**).
    *
-   * NOTE: ゲートは**壁時計**で decode 形（M=1）と verify 形（M=4）を選ぶが、両者の同一性（logits
-   * の u32 一致とゲート付き / always の列一致）は e2e（`e2e_gemma4_speculative_test.ts`）が device
-   * ごとに門で固定しているので、壁時計の選択は出力を変えない（ADR 0096 追記 2026-09-26）。
-   * `"always"` と `stateAttentionReduce: "sequential"` は A/B・検収のための席として残る（門が赤の
-   * device では相違が実在するので、そこではこの 2 つを選ぶ — `docs/limitations.md`）。
+   * NOTE: the gate chooses between the decode shape (M=1) and the verify shape (M=4) by **wall
+   * clock**, but the e2e test (`e2e_gemma4_speculative_test.ts`) pins their identity (u32 match of
+   * the logits, and sequence match between gated and always) with a check per device, so the
+   * wall-clock choice does not change the output (ADR 0096 addendum 2026-09-26).
+   * `"always"` and `stateAttentionReduce: "sequential"` remain as options for A/B and acceptance (on a
+   * device where the check is red the difference is real, so choose these two there —
+   * `docs/limitations.md`).
    */
   readonly speculative?: boolean | "always";
 };
 
-/** {@link Gemma4Pipeline.estimateSessionMemory} の指定（見積る生成の形）。 */
+/**
+ * The options of {@link Gemma4Pipeline.estimateSessionMemory} (the shape of the generation to
+ * estimate).
+ */
 export type Gemma4EstimateOptions = {
-  /** 見積る容量（省略時はこの pipeline の既定）。 */
+  /** The capacity to estimate (default: this pipeline's default). */
   readonly capacity?: number;
   /**
-   * 見積る chunk 長（省略時はこの pipeline が使う値）。
+   * The chunk length to estimate (default: the value this pipeline uses).
    *
-   * 見積りに入るバケット形は、この pipeline の {@link Gemma4PipelineOptions.chunkBuckets} のうち
-   * この値未満の段だけである。pipeline の値より大きくしても、渡すバケットはこの pipeline の梯子の
-   * ままで、その chunk 長で pipeline を組み直したときの梯子には広げない。
+   * The bucket shapes in the estimate are only those of this pipeline's
+   * {@link Gemma4PipelineOptions.chunkBuckets} below this value. Even when it is larger than the
+   * pipeline's value, the buckets passed stay this pipeline's ladder; they are not widened to the
+   * ladder a pipeline rebuilt with that chunk length would have.
    */
   readonly chunkLength?: number;
 };
 
 /**
- * 1 ターンぶんの chat リクエスト。
+ * One turn's chat request.
  *
- * MUST: 中身は {@link Gemma4Pipeline.chat} が**発行時に写す**（ADR 0083 追記 2026-09-02）— 返った
- * 列を汲み始めた後にこの object や `sampler` の指定を書き換えても、走行中のターンには効かない。
+ * MUST: {@link Gemma4Pipeline.chat} **copies** the contents **at issue** (ADR 0083 addendum
+ * 2026-09-02) — rewriting this object or the `sampler` options after the returned stream has started
+ * draining has no effect on the running turn.
  */
 export type Gemma4ChatOptions = {
   /**
-   * 抽選する token 数の上限（1 以上）。停止 token もこの数に**含める**
-   * （`GenerationRequest.maxNewTokens` と同じ勘定）。
+   * The upper limit of tokens to sample (at least 1). Stop tokens **count** toward it (the same
+   * accounting as `GenerationRequest.maxNewTokens`).
    */
   readonly maxNewTokens: number;
   /**
-   * このターンだけ効かせる追加の停止 **token**（配布形の EOS 集合との和集合 —
-   * `GenerationRequest.stopTokens`）。語彙外・重複は fail loudly。
+   * Additional stop **tokens** for this turn only (unioned with the distribution's EOS set —
+   * `GenerationRequest.stopTokens`). Out-of-vocabulary ids and duplicates fail loudly.
    */
   readonly stopTokens?: readonly number[];
   /**
-   * このターンだけ効かせる停止**文字列**（どれかが**復号後の本文**に現れた時点で止める）。
+   * Stop **strings** for this turn only (generation stops as soon as any of them appears in **the
+   * decoded text**).
    *
-   * 判定は復号の後（この層）で、token 境界を跨いで現れても止まる。一致した停止文字列そのものと
-   * その後ろは**流れない**ので、`for await` で受けた片を連結したものが「停止文字列の手前まで」に
-   * なる（`done` は `stop-string` とその綴りを運ぶ）。空文字列・重複は fail loudly。
+   * The check happens after decoding (in this layer), so it stops even when a string spans a token
+   * boundary. The matched stop string itself and what follows **are not streamed**, so the pieces
+   * received with `for await`, concatenated, end "just before the stop string" (`done` carries
+   * `stop-string` and its spelling). Empty strings and duplicates fail loudly.
    *
-   * NOTE: 判定のために、停止文字列の**接頭辞になっている末尾**だけは確定していても出力を保留
-   * する（`src/text/detokenizer.ts` の `createStopStringFilter`）。接頭辞でなくなった時点で
-   * まとめて流れるので、止まらなかったターンの出力は 1 文字も欠けない。
+   * NOTE: for the check, only **the tail that is a prefix of a stop string** is held back from the
+   * output even when committed (`createStopStringFilter` in `src/text/detokenizer.ts`). It is
+   * streamed in one go once it stops being a prefix, so a turn that did not stop loses not a single
+   * character of output.
    *
-   * NOTE: 低レベル面（{@link Gemma4Pipeline.sequence}）にはこのノブが無い — `GenerationSequence`
-   * は token id しか扱わないので、自分で回すなら停止は token で書く（`docs/limitations.md`）。
+   * NOTE: the low-level surface ({@link Gemma4Pipeline.sequence}) has no such knob —
+   * `GenerationSequence` handles only token ids, so when running it yourself, write stops as tokens
+   * (`docs/limitations.md`).
    */
   readonly stopStrings?: readonly string[];
-  /** sampling の指定（省略時は {@link Gemma4PipelineConfig.sampler}、それも無ければ greedy）。 */
+  /** Sampling options (default {@link Gemma4PipelineConfig.sampler}, and failing that greedy). */
   readonly sampler?: SamplerSpec;
   /**
-   * このターンの sequence が確保する容量（省略時は配布形の既定 —
-   * {@link Gemma4PipelineConfig.capacity}）。
+   * The capacity this turn's sequence allocates (default: the distribution's default —
+   * {@link Gemma4PipelineConfig.capacity}).
    *
-   * `chat` は 1 ターン = 1 sequence なので、ここが「このターンの KV をどれだけ取るか」になる。
-   * 長い会話を持ち回るなら `Gemma4ChatSession`（セッション 1 本ぶんの容量）を使う。
+   * `chat` is one turn = one sequence, so this is "how much KV to take for this turn". To carry a
+   * long conversation, use `Gemma4ChatSession` (capacity per session).
    */
   readonly capacity?: number;
   /**
-   * prefill の進捗（chunk が 1 本 commit されるたび）。
+   * Prefill progress (each time one chunk is committed).
    *
-   * 長い prompt では最初の文字が出るまでの無音時間が prefill そのものなので、進捗を出す口が
-   * ここにしか無い（`chat` が流すのは復号後の**本文**だけ — ADR 0084 決定 4）。
+   * For a long prompt the silent time until the first character is prefill itself, and this is the
+   * only entry point that reports progress (`chat` streams only the decoded **text** — ADR 0084
+   * decision 4).
    *
-   * コールバックの例外は握らない（fail loudly — そのターンごと落ちる）。
+   * Exceptions from the callback are not caught (fail loudly — the whole turn fails).
    */
   readonly onPrefill?: (progress: Gemma4PrefillProgress) => void;
   /**
-   * 停止 token を除く生成 token の通知。復号・停止文字列の保留より前に同期で呼ぶ。
-   * 本文を出さない特殊 token も含む。例外はそのターンへ伝播する。発行時に関数を写す。
+   * Notification of generated tokens excluding stop tokens. Called synchronously, before decoding
+   * and before stop-string holding. Includes special tokens that emit no text. Exceptions propagate
+   * to the turn. The function is copied at issue.
    */
   readonly onToken?: (id: number) => void;
-  /** 中断（段の境目で検査し `signal.reason` をそのまま throw する — ADR 0083 決定 5）。 */
+  /**
+   * Interruption (checked at step boundaries; throws `signal.reason` as is — ADR 0083 decision 5).
+   */
   readonly signal?: AbortSignal;
   /**
-   * このターンで投機デコードを張るか（既定 = pipeline に drafter が居れば `true` = ゲート付き —
-   * 値の意味は {@link Gemma4SequenceOptions.speculative} と同じ）。
+   * Whether this turn uses speculative decoding (default = `true` = gated if the pipeline has a
+   * drafter — the values mean the same as {@link Gemma4SequenceOptions.speculative}).
    *
-   * 投機を張るかは sampler の指定に依らない（温度 > 0 でも token 列は非投機と同一）。この層は
-   * 指定をそのまま降ろすだけで、cycle の組み立ては生成面が持つ。
+   * Whether to speculate does not depend on the sampler options (even at temperature > 0 the token
+   * sequence is identical to the non-speculative one). This layer only passes the option down; the
+   * generation surface assembles the cycles.
    */
   readonly speculative?: boolean | "always";
 };
 
-/** {@link Gemma4Pipeline} の内部状態（公開面には出さない）。 */
+/** The internal state of {@link Gemma4Pipeline} (not exposed on the public surface). */
 type Gemma4State = {
   /**
-   * 構築に使った入口の名前（{@link gemmaEntryName}）。構築後に投げる文言の接頭辞がここから出る。
+   * The name of the entry point used for construction ({@link gemmaEntryName}). The prefix of
+   * messages thrown after construction comes from here.
    *
-   * MUST: family そのものではなく**名前**を持つ（この層から先で family 分岐を増やさない）。
+   * MUST: hold the **name**, not the family itself (no more family branching from this layer on).
    */
   readonly entry: string;
   readonly greedyOutput?: GemmaGreedyOutput;
@@ -566,104 +646,112 @@ type Gemma4State = {
   readonly ownsGpu: boolean;
   readonly session: Session;
   /**
-   * Session 構築に使った不変の設定。中間メモリ見積りにも同じ値を渡す（未指定 = 欄ごと無い =
-   * 見積りも runtime の既定で読む）。
+   * The immutable setting used to build the Session. The same value goes to the intermediate memory
+   * estimate (unspecified = no field = the estimate also reads the runtime default).
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
   /**
-   * 製品グラフの宣言（`estimateSessionMemory` の材料 — ADR 0070 決定 5 の estimator は
-   * `graph + 常駐計画` から純関数で出る）。
+   * The product graph's declaration (input of `estimateSessionMemory` — the estimator of ADR 0070
+   * decision 5 is a pure function of `graph + residency plan`).
    *
-   * MUST: `PreparedModel` ではなくグラフだけを持つ（`hub/components.ts` の同 MUST — 全量の
-   * バイト列を掴んだままにしない）。
+   * MUST: hold only the graph, not the `PreparedModel` (the same MUST as `hub/components.ts` — do not
+   * keep holding the whole bytes).
    */
   readonly graph: GraphOwner["graph"];
-  /** 生成ループが読む内部配線（`createGenerationSequence` へ渡す実体）。 */
+  /**
+   * The internal wiring the generation loop reads (the object passed to
+   * `createGenerationSequence`).
+   */
   readonly wiring: GenerationWiring;
   /**
-   * 公開の読み口（{@link Gemma4Pipeline.program}）。
+   * The public read-out ({@link Gemma4Pipeline.program}).
    *
-   * 凍結した狭い面を getter のたびに作らないための席で、{@link buildGemma4Program} が返した
-   * {@link Gemma4State.wiring} 1 本からその場で導いた値である（別経路で更新される欄ではない）。
+   * A field so that the frozen narrow surface is not built on every getter call; it is derived on
+   * the spot from the one {@link Gemma4State.wiring} that {@link buildGemma4Program} returned (not a
+   * field updated by a separate path).
    */
   readonly program: GenerationProgram;
   /**
-   * PLE のホスト側キャッシュ（**{@link Gemma4Pipeline.dispose} の解放先**）。
+   * PLE's host-side cache (**what {@link Gemma4Pipeline.dispose} releases**).
    *
-   * MUST: 席は dispose のためだけ — 引くのは `wiring.derivedInputs.derive` の閉包だけである。
-   * どちらも {@link buildGemma4Program} の 1 回の返り値なので「片方だけ差し替えた」形は書けず、
-   * 解放口を持たないと常駐ぶん（{@link Gemma4PipelineOptions.maxResidentPleBytes}）が
-   * プロセス寿命まで残る。
+   * MUST: the field exists only for dispose — only the closure of `wiring.derivedInputs.derive`
+   * draws on it. Both come from one return of {@link buildGemma4Program}, so "only one of them
+   * replaced" cannot be written, and without a release point the residency
+   * ({@link Gemma4PipelineOptions.maxResidentPleBytes}) would remain for the life of the process.
    *
-   * GPU 常駐席（{@link Gemma4PipelineOptions.pleResidency} = `"gpu"`）では**組まない** —
-   * ホスト側の行キャッシュを 1 度も引かないので、席だけ作ると「使われない LRU」が残る。
+   * Under GPU residency ({@link Gemma4PipelineOptions.pleResidency} = `"gpu"`) it is **not built** —
+   * the host-side row cache is never drawn on, so building only the field would leave "an LRU that is
+   * never used".
    */
   readonly ple?: Gemma4Ple;
   /**
-   * PLE の GPU 常駐（{@link Gemma4PipelineOptions.pleResidency} = `"gpu"` のときだけ）。
+   * PLE's GPU residency (only when {@link Gemma4PipelineOptions.pleResidency} = `"gpu"`).
    *
-   * MUST: dispose は **target Session より後**（target の bind group がこの常駐テンソルを
-   * 掴んでいる — 焼き込み参照が残っている間の解放は runtime が fail loudly で断る）。
+   * MUST: dispose **after the target Session** (the target's bind groups hold this resident tensor —
+   * the runtime refuses, by failing loudly, a release while baked references remain).
    */
   readonly pleGpu?: Gemma4PleResident;
   readonly tokenizer: GemmaTokenizer;
   readonly config: Gemma4PipelineConfig;
   /**
-   * 投機の drafter（{@link Gemma4PipelineOptions.speculative} を渡したときだけ）。
+   * The speculation drafter (only when {@link Gemma4PipelineOptions.speculative} was given).
    *
-   * MUST: dispose は**貸し手（target Session）より先**（借り手が生きている間の貸し手
-   * `dispose()` は runtime が fail loudly で断る — 借り手の bind group が貸し手の重みを
-   * 掴んでいる）。
+   * MUST: dispose **before the lender (the target Session)** (the runtime refuses, by failing
+   * loudly, the lender's `dispose()` while a borrower is alive — the borrower's bind groups hold the
+   * lender's weights).
    */
   readonly drafter?: Gemma4Drafter;
   /**
-   * 1 cycle で使う draft の本数（{@link Gemma4PipelineOptions.speculative} を渡したときだけ —
-   * 省略時は {@link GEMMA4_DRAFT_STEPS}）。
+   * The number of drafts used per cycle (only when {@link Gemma4PipelineOptions.speculative} was
+   * given — default {@link GEMMA4_DRAFT_STEPS}).
    *
-   * MUST: 席を持つのは投機の 2 つの消費者（生成の `speculative.k` と
-   * {@link Gemma4Pipeline.estimateSessionMemory} の verify シナリオ `k+1` 行）が**同じ値**を
-   * 見るため — 割れると「見積った形と違う run」が走る。
+   * MUST: the field exists so that the two consumers of speculation (generation's `speculative.k`
+   * and the verify scenario of `k+1` rows in {@link Gemma4Pipeline.estimateSessionMemory}) see **the
+   * same value** — if they diverged, "a run of a different shape from the estimated one" would run.
    */
   readonly speculativeK?: number;
   /**
-   * 自己採算ゲートのノブ（{@link Gemma4PipelineOptions.speculative} の `gate` を渡したときだけ —
-   * 省略時は `speculation-gate.ts` の既定）。
+   * The self-tuning gate's knobs (only when the `gate` of {@link Gemma4PipelineOptions.speculative}
+   * was given — default: the defaults of `speculation-gate.ts`).
    *
-   * MUST: 値の検査は pipeline を組む段（{@link assertSpeculative}）で済んでいる — この席は
-   * 「生成のたびに素通しする」ためだけで、ここから先で解釈しない。
+   * MUST: the value check is already done at the pipeline-building step ({@link assertSpeculative}) —
+   * this field only exists "to pass through on every generation", and nothing past here interprets it.
    */
   readonly speculativeGate?: SpeculationGateOptions;
   /**
-   * Session に渡した slot backing の保持予算（{@link Gemma4PipelineOptions.planBackingBudgetBytes}・
-   * 未指定なら runtime の既定）。
+   * The slot-backing budget passed to the Session ({@link Gemma4PipelineOptions.planBackingBudgetBytes};
+   * the runtime default when unspecified).
    *
-   * MUST: 席を持つのは {@link Gemma4Pipeline.estimateSessionMemory} が**同じ値**を見積りへ渡す
-   * ため — 握った値と見積りの前提が割れると、報告のピークが実際の保持集合と別の予算を名乗る。
+   * MUST: the field exists so that {@link Gemma4Pipeline.estimateSessionMemory} passes **the same
+   * value** to the estimate — if the held value and the estimate's premise diverged, the reported peak
+   * would name a different budget from the actual held set.
    */
   readonly planBackingBudgetBytes?: number;
-  /** 実行 1 回ごとの観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）。 */
+  /** The per-run observation callback ({@link Gemma4PipelineOptions.onRunDiagnostics}). */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => void;
 };
 
 /**
- * admission を通った材料のうち、家族の門が確定させた索引と manifest の資産（2 面が別の経路で
- * 用意し、解釈は 1 本に集める）。
+ * Of the material that passed admission, the index the family check settled and the manifest's
+ * assets (the two surfaces prepare them by different paths, and the interpretation is gathered in
+ * one place).
  */
 type Gemma4SidecarAssets = {
   readonly tokenizer: Uint8Array<ArrayBuffer>;
   /**
-   * **解析済み**の PLE 索引。
+   * The **parsed** PLE index.
    *
-   * MUST: 解析は面ごとに 1 回だけ（`ple_index` を 2 度開かない）。索引と容器の資産の突合
-   * （`./ple-index.ts` の `assertGemma4PleAssets`）にも索引が要るので、その 1 回を admission
-   * 席へ持ち上げてある。
+   * MUST: parsed only once per surface (`ple_index` is not opened twice). Matching the index against
+   * the container's assets (`assertGemma4PleAssets` in `./ple-index.ts`) also needs the index, so that
+   * one parse is lifted into the admission step.
    */
   readonly pleIndex: Gemma4PleIndex;
 };
 
 /**
- * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は 8 家族共有の
- * {@link readAssetBuffer} — 製品グラフの part は 1 本 256MiB 級なので写さない）。
+ * Turns fetched bytes into an ArrayBuffer that can be passed to `openContainer` (the body of the
+ * check is {@link readAssetBuffer}, shared by all families — a product graph part is 256 MiB-class,
+ * so it is not copied).
  */
 const assetBuffer = (
   where: string,
@@ -681,16 +769,18 @@ const assetBytes = (
 };
 
 /**
- * {@link Gemma4PipelineOptions.speculative} の門（**資産を 1 バイトも取る前**に同期で落とす）—
- * 通れば解決済みの `k` を返す。
+ * The check of {@link Gemma4PipelineOptions.speculative} (fails synchronously **before fetching a
+ * single byte of the assets**) — returns the resolved `k` when it passes.
  *
- * MUST: `1 ≤ k ≤ {@link GEMMA4_DRAFT_STEPS}`。配布形の drafter グラフは 3 段で焼かれていて出口の
- * 本数が上限で、下は「draft を 1 本も採らない投機」= 意味を持たない指定である。範囲外を受けると
- * 「宣言と違う本数の draft を採る」形が黙って通る（生成面の `assertSpeculativeSetup` も同じ関係を
- * 見るが、そちらが落ちるのは GB 級のロードの**後**である）。
+ * MUST: `1 ≤ k ≤ {@link GEMMA4_DRAFT_STEPS}`. The distribution's drafter graph is built with 3 steps
+ * and the number of exits is the upper limit; below it is "speculation that takes no draft at all" =
+ * a meaningless option. Accepting an out-of-range value would silently let "taking a different
+ * number of drafts than declared" through (the generation surface's `assertSpeculativeSetup` checks
+ * the same relation, but it fails only **after** the GB-scale load).
  *
- * ゲートのノブ（`gate`）の門も同じ段で通す — {@link createSpeculationGate} を 1 度作って捨てる。
- * 値域の判断はゲート自身が正本なので、同じ門を 2 実装持たない。
+ * The check of the gate's knobs (`gate`) runs at the same step — build one
+ * {@link createSpeculationGate} and discard it. The gate itself is the source of truth for the value
+ * ranges, so the same check is not implemented twice.
  */
 const assertSpeculative = (
   where: string,
@@ -698,9 +788,10 @@ const assertSpeculative = (
 ): number => {
   const k = speculative.k ?? GEMMA4_DRAFT_STEPS;
   if (!Number.isSafeInteger(k) || k < 1 || k > GEMMA4_DRAFT_STEPS) {
-    // `k` は呼び手のオプションの値域違反なので入力起因（ADR 0107 決定 2）。同じ事前ブロックに
-    // 並ぶ session / PLE の門と型を揃える。グラフ宣言との突き合わせ（生成面の
-    // `assertSpeculativeSetup`）は資産の齟齬なので素の `Error` のまま。
+    // `k` violates the value range of a caller option, so it is an input error (ADR 0107 decision
+    // 2). Its type matches the session / PLE checks in the same early block. Matching against the
+    // graph declaration (the generation surface's `assertSpeculativeSetup`) is an asset mismatch, so
+    // that stays a plain `Error`.
     throw new ModelInputError(
       `${where}: speculative.k ${k} が 1..${GEMMA4_DRAFT_STEPS} の外` +
         `（配布形の drafter は ${GEMMA4_DRAFT_STEPS} 段で焼かれている — 出口の本数が上限）`,
@@ -711,13 +802,16 @@ const assertSpeculative = (
 };
 
 /**
- * PLE の置き場を確定する（**資産を 1 バイトも読む前**に同期で落とす — ADR 0085 追記）。
+ * Settles where PLE is placed (fails synchronously **before reading a single byte of the assets** —
+ * ADR 0085 addendum).
  *
- * MUST: 併用できないノブはここで断る。どれも「指定は黙って無視される値ではない」形の誤りで、
- * 通すと「GPU 常駐にしたのに速くならない」「予算を渡したのに効かない」が例外も警告も無いまま
- * 残る（{@link speculativeSetup} の drafter 不在と同じ流儀）。
+ * MUST: knobs that cannot be combined are refused here. Each is a mistake of the form "the option is
+ * not a value to be silently ignored"; letting it through would leave "GPU residency that is not
+ * faster" or "a budget that has no effect" with neither an exception nor a warning (the same style
+ * as the missing drafter in {@link speculativeSetup}).
  *
- * NOTE: `export` は門を直接叩くテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: `export` is for the test that calls the check directly (not exposed on `mod.ts` / the
+ * subpath surface — ADR 0008).
  */
 export const resolveGemma4PleResidency = (
   where: string,
@@ -726,7 +820,8 @@ export const resolveGemma4PleResidency = (
   if (options.pleResidency === undefined) return "host";
   const residency = assertGemma4PleResidency(where, options.pleResidency);
   if (residency === "host") return residency;
-  // どちらも呼び手のオプション**だけ**で決まる組合せの違反なので入力起因（ADR 0107 決定 2）。
+  // Both are violations of combinations decided **only** by the caller's options, so they are input
+  // errors (ADR 0107 decision 2).
   if (options.maxResidentPleBytes !== undefined) {
     throw new ModelInputError(
       `${where}: pleResidency: "gpu" では maxResidentPleBytes が効かない` +
@@ -743,18 +838,22 @@ export const resolveGemma4PleResidency = (
 };
 
 /**
- * この会話で投機を張るなら、生成面へ渡す DI 一式を組む（{@link Gemma4SequenceOptions.speculative} /
- * {@link Gemma4ChatOptions.speculative} の解決 — chat と sequence が共有する 1 本）。
+ * If this conversation speculates, assembles the DI set passed to the generation surface (the
+ * resolution of {@link Gemma4SequenceOptions.speculative} / {@link Gemma4ChatOptions.speculative} —
+ * the one path shared by chat and sequence).
  *
- * 既定は「drafter が居れば張る」で、`false` だけが明示的な取り消しである。sampler の指定は
- * 見ない（投機は温度に依らず張り、token 列は非投機と同一 — ADR 0096 決定 7）。`"always"` は
- * 自己採算ゲートを作らない席（A/B・検収の門・計測）で、生成面の `policy` へそのまま降りる。
+ * The default is "speculate if there is a drafter", and only `false` explicitly cancels it. The
+ * sampler options are not looked at (speculation runs regardless of temperature, and the token
+ * sequence is identical to the non-speculative one — ADR 0096 decision 7). `"always"` is the option
+ * that builds no self-tuning gate (A/B, acceptance checks, measurement), passed straight down to
+ * the generation surface's `policy`.
  *
- * pipeline のゲートのノブ（{@link Gemma4PipelineOptions.speculative} の `gate`）は
- * **`"auto"` のターンにだけ**降りる（`"always"` はゲートを作らない席なので、渡しても読む相手が
- * 居ない）。1 本の pipeline で `false` / `"always"` / `true` を交互に回すのが A/B の台本の形
- * （`tools/mtp-bench`）なので、この組み合わせ自体は誤りではない — ノブが効く範囲を
- * {@link Gemma4PipelineOptions.speculative} の doc と bench の README（`config.gate`）で名乗る。
+ * The pipeline's gate knobs (the `gate` of {@link Gemma4PipelineOptions.speculative}) go down **only
+ * to `"auto"` turns** (`"always"` builds no gate, so nothing would read them). Alternating `false` /
+ * `"always"` / `true` on one pipeline was the shape of the A/B script (`tools/mtp-bench`, removed in
+ * 0.15), so the combination itself is not a mistake — the range where the knobs apply is stated in
+ * the doc of {@link Gemma4PipelineOptions.speculative} (the bench README that also stated it
+ * (`config.gate`) was removed with the tool).
  */
 export const speculativeSetup = (
   state: Pick<Gemma4State, "drafter" | "speculativeK" | "speculativeGate">,
@@ -763,8 +862,9 @@ export const speculativeSetup = (
   const drafter = state.drafter;
   if (enabled === false) return undefined;
   if (drafter === undefined) {
-    // 未指定（undefined）は「drafter が居れば張る」、明示の指定は drafter を要求する — 黙って
-    // 非投機で回すと、結果（`speculation` 欄の不在）からも無視を読み取れない。
+    // Unspecified (undefined) means "speculate if there is a drafter"; an explicit option requires a
+    // drafter — silently running non-speculatively would leave no way to read the ignoring from the
+    // result either (the absence of the `speculation` field).
     if (enabled !== undefined) {
       throw new Error(
         `speculative: ${JSON.stringify(enabled)} を渡したが、この pipeline は drafter 無しで` +
@@ -773,11 +873,12 @@ export const speculativeSetup = (
     }
     return undefined;
   }
-  // ゲートのノブは `"always"` へ渡さない（ゲートが居ないので読む相手が無い）— 欄ごと生やさない
-  // ことが「このターンにゲートは無い」の綴りである。
+  // The gate's knobs are not passed to `"always"` (there is no gate, so nothing reads them) — not
+  // adding the field at all is how "this turn has no gate" is spelled.
   const gate = enabled === "always" ? undefined : state.speculativeGate;
   return {
-    // 借り手 context は sequence 生成時に 1 本開き、sequence の dispose が**貸し手より先**に畳む。
+    // The borrower context is opened once when the sequence is created, and the sequence's dispose
+    // closes it **before the lender**.
     open: (context: GenerationContext): Promise<DraftFace> => openGemma4DraftFace(drafter, context),
     k: state.speculativeK ?? GEMMA4_DRAFT_STEPS,
     policy: enabled === "always" ? "always" : "auto",
@@ -785,49 +886,63 @@ export const speculativeSetup = (
   };
 };
 
-/** {@link gemma4EstimateGenerations} が返す、`estimateGraphMemory` の `generation` 欄 2 本。 */
+/**
+ * The two `generation` fields of `estimateGraphMemory` that {@link gemma4EstimateGenerations}
+ * returns.
+ */
 export type Gemma4EstimateGenerations = {
-  /** 本体（貸し手）の見積りに渡す指定。 */
+  /** The options passed to the estimate of the main model (the lender). */
   readonly target: NonNullable<EstimateOptions["generation"]>;
-  /** drafter（借り手 context）の見積りに渡す指定（drafter の無い pipeline では読まない）。 */
+  /**
+   * The options passed to the estimate of the drafter (the borrower context) (not read for a
+   * pipeline without a drafter).
+   */
   readonly borrower: NonNullable<EstimateOptions["generation"]>;
 };
 
 /**
- * {@link Gemma4Pipeline.estimateSessionMemory} が `estimateGraphMemory` へ渡す `generation` の
- * 指定（chunk 長・バケット・追加シナリオ）を、本体と drafter の 2 本ぶん組む。
+ * Builds the `generation` options (chunk length, buckets, additional scenarios) that
+ * {@link Gemma4Pipeline.estimateSessionMemory} passes to `estimateGraphMemory`, for both the main
+ * model and the drafter.
  *
- * 切り出してあるのは、この配線が実資産の見積り値からは観測できないため — gemma4 E2B の既定の
- * 構成ではバケット形がピークを支配しないので、配線の行を外しても `peakAccountedBytes` は動かない。
+ * It is a separate function because this wiring cannot be observed from the estimate values of the
+ * real assets — in gemma4 E2B's default configuration the bucket shapes do not dominate the peak, so
+ * removing a line of the wiring does not move `peakAccountedBytes`.
  *
- * NOTE: `export` は配線を GPU 無しで直接叩くテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: `export` is for the test that calls the wiring directly without a GPU (not exposed on
+ * `mod.ts` / the subpath surface — ADR 0008).
  */
 export const gemma4EstimateGenerations = (
   wiring: GenerationWiring,
   shape: {
     readonly capacity: number;
     readonly chunkLength: number;
-    /** 投機の verify が 1 run で流す行数 `k+1`（drafter の無い pipeline では省く）。 */
+    /**
+     * The row count `k+1` that speculative verify runs in one run (omitted for a pipeline without a
+     * drafter).
+     */
     readonly verifyQueryLength?: number;
   },
 ): Gemma4EstimateGenerations => {
   const bindings = { [wiring.capacitySymbol]: shape.capacity };
   const verifyQueryLength = shape.verifyQueryLength;
-  // MUST: sequence が流すバケット形を渡す（渡さないと、枚数の境界でバケット形が prefill 形
-  // より大きいときにピークが過小になる — ADR 0095 追記 2026-10-10）。
+  // MUST: pass the bucket shapes the sequence runs (otherwise, at a block-count boundary where a
+  // bucket shape is larger than the prefill shape, the peak comes out too small — ADR 0095 addendum
+  // 2026-10-10).
   const chunkBuckets = wiring.chunkBuckets.filter((bucketRows) => bucketRows < shape.chunkLength);
   return {
     target: {
       chunkLength: shape.chunkLength,
       bindings,
       chunkBuckets,
-      // 投機の verify は `k+1` 行を 1 run で流す形（prefill / decode のどちらでもない）。
-      // R は k+1・物理行数 M は sequence が流す形と同じ（バケットへ丸めた行数 —
-      // `chunkLength: k+1` を名乗ると k < 3 で実 run より小さい形を見積る）。
-      // MUST: 丸めは pipeline の配線ではなく**見積る** context（仮定の chunk 長と絞った梯子）に
-      // 対して行う。k+1 が梯子の最大段を超えると丸め先は chunk 長になり、pipeline の chunk 長は
-      // 仮定の context の許可集合 {1, 梯子, 仮定の chunk 長} に無いので、見積りが例外になる。
+      // Speculative verify runs `k+1` rows in one run (neither prefill nor decode).
+      // R is k+1; the physical row count M is the same as the shape the sequence runs (the row count
+      // rounded to a bucket — naming `chunkLength: k+1` would estimate a shape smaller than the real
+      // run for k < 3).
+      // MUST: the rounding is done against the context **being estimated** (the assumed chunk length
+      // and the narrowed ladder), not the pipeline's wiring. When k+1 exceeds the ladder's largest
+      // bucket, it rounds to the chunk length, and the pipeline's chunk length is not in the assumed
+      // context's allowed set {1, ladder, assumed chunk length}, so the estimate would throw.
       ...(verifyQueryLength === undefined
         ? {}
         : {
@@ -843,17 +958,19 @@ export const gemma4EstimateGenerations = (
             ],
           }),
     },
-    // 借り手 context は `chunkLength` 1 ちょうど・容量記号は貸し手から継承する。バケットは
-    // 渡さない — 借り手は M = 1 の形しか流さず、受理集合（2 以上 `chunkLength` 未満）も空。
+    // The borrower context has `chunkLength` exactly 1 and inherits the capacity symbol from the
+    // lender. No buckets are passed — the borrower runs only the M = 1 shape, and its accepted set
+    // (at least 2 and below `chunkLength`) is empty.
     borrower: { chunkLength: 1, bindings },
   };
 };
 
 /**
- * admission を通った材料 + 資産から静的配線を組む（`fromAssets` と `fromPretrained` が共有）。
+ * Builds the static wiring from the material that passed admission + the assets (shared by
+ * `fromAssets` and `fromPretrained`).
  *
- * ここが id 空間の相互照合（ADR 0085 決定 5）を全部通す — ①tokenizer が生成しうる id
- * ②主 embedding の vocab 行数 ③PLE の索引の行数。
+ * This runs the whole cross-check of the id spaces (ADR 0085 decision 5) — ① the ids the tokenizer
+ * can produce ② the vocab rows of the main embedding ③ the rows of the PLE index.
  */
 const buildGemma4Program = (
   admitted: Gemma4Admission,
@@ -869,23 +986,24 @@ const buildGemma4Program = (
 } => {
   const { config, vocabSize, capacitySymbol } = admitted;
   const entry = gemmaEntryName(admission.family);
-  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  // The supplier is **the same one** admission looked at (`open` only looks up the opened component).
   const model = open(MODEL);
   if (admission.family === "gemma4-qat") {
-    // model 名は admission が確定させた値をそのまま使う（層数から引き直さない）。
+    // The model name is the value admission settled, used as is (not re-derived from the layer count).
     assertGemma4QatPle(admission.model, model.graph, assets.pleIndex);
   }
   const ropeInputs = admission.family === "gemma4-qat" ? gemma4QatRopeInputs : gemma4RopeInputs;
   const tokenizer = new GemmaTokenizer(parseGemmaTokenizerAsset(assets.tokenizer));
-  // ① tokenizer が生成しうる id と ② 主 embedding の vocab 行数。
+  // ① the ids the tokenizer can produce and ② the vocab rows of the main embedding.
   if (tokenizer.maxTokenId >= vocabSize) {
     throw new Error(
       `${entry}: tokenizer の最大 token id ${tokenizer.maxTokenId} が` +
         ` 主 embedding の vocab 行数 ${vocabSize} の外（別の語彙で焼かれた組み合わせ）`,
     );
   }
-  // ③ PLE の索引の行数（この突合は `createGemma4Ple` が持つ — 同じ検査を 2 実装持たない）。
-  // GPU 常駐席ではホスト gather を組まず、同じ突合を `createGemma4PleResident` が通す。
+  // ③ the rows of the PLE index (`createGemma4Ple` owns this check — the same check is not
+  // implemented twice). Under GPU residency no host gather is built, and `createGemma4PleResident`
+  // runs the same check.
   const ple =
     residency === "host"
       ? createGemma4Ple({
@@ -903,7 +1021,7 @@ const buildGemma4Program = (
     graph: model.graph,
     inputIds: INPUT_IDS,
     lastRow: LAST_ROW,
-    // 出口は順序で引く（{@link GRAPH_OUTPUTS} — 本数は admission が既に見ている）。
+    // The exits are taken by order ({@link GRAPH_OUTPUTS} — admission has already checked the count).
     logits: model.graph.outputs[0],
     hidden: model.graph.outputs[1],
     chunkLength,
@@ -915,15 +1033,17 @@ const buildGemma4Program = (
     maxPosition: config.maxPosition,
     capacity: config.capacity,
     vocabSize,
-    // 停止集合は tokenizer 資産の追加語彙から導出する（ADR 0083 決定 8 / 0084 決定 5 —
-    // chat 形式と同じ digest set から来る）。
+    // The stop set is derived from the added vocabulary of the tokenizer asset (ADR 0083 decision 8
+    // / 0084 decision 5 — it comes from the same digest set as the chat format).
     stopTokens: gemma4StopTokens(tokenizer),
     capacitySymbol,
-    // ホスト由来の per-chunk 入力の席に PLE gather と RoPE の cos / sin を差す（ADR 0085 / 本波）。
-    // `options` は PLE へそのまま降ろす — block 1 本 32MiB 級の読みが中断の届かない区間に
-    // なるのを避ける（rope は同期の計算なので中断の窓を作らない）。
-    // GPU 常駐席では `per_layer_inputs` の作り手が Session 側（常駐入力）へ移るので、
-    // ホスト由来の席からは外して被覆だけを `residentInputs` で宣言する。
+    // The PLE gather and the RoPE cos / sin are plugged into the host-derived per-chunk input field
+    // (ADR 0085 / this wave). `options` goes straight down to PLE — so that reading a 32 MiB-class
+    // block does not become a section the interruption cannot reach (rope is a synchronous
+    // computation and opens no interruption window).
+    // Under GPU residency the producer of `per_layer_inputs` moves to the Session side (a resident
+    // input), so it is removed from the host-derived field and its coverage is declared only through
+    // `residentInputs`.
     derivedInputs:
       ple === undefined
         ? {
@@ -943,26 +1063,31 @@ const buildGemma4Program = (
 };
 
 /**
- * gemma4 の chat パイプライン（製品グラフ 1 本 + ホスト PLE + tokenizer）。
+ * The gemma4 chat pipeline (one product graph + host PLE + tokenizer).
  *
- * 構築の入口は {@link Gemma4Pipeline.fromPretrained}（HF から取得）と
- * {@link Gemma4Pipeline.fromAssets}（取得済みバイト列）の 2 つだけ — コンストラクタを private に
- * してあるのは、資産の突合を迂回した半端な状態を作れないようにするため（ADR 0008）。
+ * The only construction entry points are {@link Gemma4Pipeline.fromPretrained} (fetching from HF) and
+ * {@link Gemma4Pipeline.fromAssets} (bytes already fetched) — the constructor is private so that no
+ * half-built state that bypasses the asset checks can be created (ADR 0008).
  */
 class GemmaPipeline {
   readonly #state: Gemma4State;
-  /** chat と dispose の直列化鎖（1 つの Session を 2 本の会話で同時に押さない）。 */
+  /**
+   * The serialization chain of chat and dispose (one Session is not pushed by two conversations at
+   * once).
+   */
   readonly #chain = createOperationChain();
-  /** {@link Gemma4Pipeline.sequence} が渡した実体（dispose の取りこぼしを塞ぐ）。 */
+  /**
+   * The objects {@link Gemma4Pipeline.sequence} handed out (closes the gap of a missed dispose).
+   */
   readonly #handed = new Set<GenerationSequence>();
-  /** dispose の 1 本。**undefined でないことが「dispose 済み」**（派生状態を別に持たない）。 */
+  /** The one dispose. **Not undefined means "disposed"** (no separate derived state). */
   #disposal: Promise<void> | undefined;
 
   protected constructor(state: Gemma4State) {
     this.#state = state;
   }
 
-  /** 共通 factory の組み立て。family の契約を検査して状態を返す。 */
+  /** Assembly for the shared factory. Checks the family's contract and returns the state. */
   protected static async loadPretrained(
     family: GemmaFamily,
     ref: string | HubRepoRef | DistributionSource,
@@ -976,8 +1101,8 @@ class GemmaPipeline {
     if (options.speculative !== undefined) {
       assertSpeculative(where, options.speculative);
     }
-    // MUST: 席の指定は**資産を 1 バイトも読む前**に見る（`#build` でも同じ関数を通るが、
-    // そちらは GB 級のロードの後である）。
+    // MUST: the placement option is checked **before reading a single byte of the assets** (`#build`
+    // goes through the same function too, but that is after the GB-scale load).
     resolveGemma4PleResidency(where, options);
     const source = toManifestSource(
       ref,
@@ -992,8 +1117,9 @@ class GemmaPipeline {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
-    // MUST: 取る weights を役割で絞る（`ResolveOptions.weights`）。投機を使わないロードで
-    // drafter が表に残ると、その descriptor と重みの part まで落ちる。
+    // MUST: narrow the weights to fetch by role (`ResolveOptions.weights`). If the drafter stayed in
+    // the table for a load that does not use speculation, its descriptor and weight parts would be
+    // downloaded too.
     const componentKeys = options.speculative === undefined ? [MODEL] : [MODEL, DRAFTER];
     const selection = resolveSelection(loaded.manifest, {
       ...choice,
@@ -1004,10 +1130,12 @@ class GemmaPipeline {
       loaded,
       selection,
       componentKeys,
-      // 家族の門は admission 席で通す（重みの part を取る前 — `src/hub/components.ts`）。
+      // The family check runs at the admission step (before fetching the weight parts —
+      // `src/hub/components.ts`).
       async (open) => {
         const { config, quantName, quant } = gemma4ManifestConfig(loaded.manifest, choice, family);
-        // 未対応の宣言を無視して走らせない。重みの part の取得より前に拒否する。
+        // Unsupported declarations are never ignored in order to run anyway. They are rejected before fetching the
+        // weight parts.
         const quantSession = resolveGemmaSessionOptions(
           quant.session,
           options,
@@ -1022,7 +1150,8 @@ class GemmaPipeline {
           options.speculative === undefined ? undefined : open(DRAFTER),
           entry,
         );
-        // MUST: グラフから確定した model 名を**捨てずに運ぶ**（PLE 門が層数から引き直さない）。
+        // MUST: **carry, not discard,** the model name settled from the graph (the PLE check does not
+        // re-derive it from the layer count).
         const admission: GemmaFamilyAdmission =
           family === "gemma4-qat"
             ? {
@@ -1030,24 +1159,28 @@ class GemmaPipeline {
                 model: admitGemma4Qat(model.graph, choice.model ?? loaded.manifest.defaultModel),
               }
             : { family };
-        // MUST: 共有 GPU の feature 不足はこの席で落とす（自前で取る device と違って要求できず、
-        // 重みを落とす前に判る唯一の門 — 後段の検査も同じ `session/gpu-features.ts` の 1 本）。
+        // MUST: a shared GPU's missing features fail at this step (unlike a device acquired here,
+        // they cannot be requested, and this is the only check that knows before downloading the
+        // weights — the later check is the same one in `session/gpu-features.ts`).
         if (options.gpu !== undefined) {
           assertGpuFeaturesGranted(gpuFeatures, options.gpu, quantWhere);
         }
-        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
-        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
-        // 他 7 家族と違って席が閉包側にあるのは、{@link admitGemma4} が構築オプションを
-        // 受け取らない（グラフだけで決まる）ため。
+        // The `requiredLimits` the distribution declared are checked here **before fetching the
+        // weight parts** (ADR 0089 decision 5 — the limits of a shared GPU, or the adapter's measured
+        // values on the path that acquires its own).
+        // Unlike the other families this sits in the closure because {@link admitGemma4} takes no
+        // construction options (it is decided by the graph alone).
         await assertRequiredLimitsBeforeDownload(quant.requiredLimits, options.gpu, quantWhere);
-        // PLE の索引は**容器の資産**（ADR 0109 決定 4）なので、この席で読めて突合まで閉じる —
-        // 索引が指す block が容器に在るか・役割と長さが宣言どおりかを全件列挙する。
+        // The PLE index is **an asset of the container** (ADR 0109 decision 4), so it can be read and
+        // fully matched at this step — enumerating every entry: whether each block the index points
+        // to is in the container, and whether its role and length are as declared.
         //
-        // MUST: 宣言だけで落とせる門を**全部通した後**に置く。ここだけが部品のバイト列に触る段で
-        // ある（数 KB の索引 1 本 — `values` / `scales` の block は 1 本も読まない）。「重みを
-        // 1 バイトも取らない」が保てるのは、全量読みの資産が**重み block と同居しない**という
-        // 書き手の規約（ADR 0109 決定 4 / container-v1 §4.2）があるからで、索引の part を取っても
-        // 重みの part には手が伸びない。
+        // MUST: placed **after every check** that can fail on the declaration alone. This is the only
+        // step that touches a component's bytes (one index of a few KB — not a single `values` /
+        // `scales` block is read). "Not fetching a single byte of weights" holds because of the
+        // writer's convention that whole-read assets **do not share a part with weight blocks**
+        // (ADR 0109 decision 4 / container-v1 §4.2), so fetching the index's part does not reach the
+        // weight parts.
         const pleIndex = await readGemma4PleIndex(where, model);
         return {
           ...admitted,
@@ -1079,26 +1212,29 @@ class GemmaPipeline {
     );
   }
 
-  /** 共通 factory の組み立て。family の契約を検査して状態を返す。 */
+  /** Assembly for the shared factory. Checks the family's contract and returns the state. */
   protected static async loadAssets(
     family: GemmaFamily,
     input: Gemma4Assets,
     options: Gemma4PipelineOptions = {},
   ): Promise<Gemma4State> {
     const where = `${gemmaEntryName(family)}.fromAssets`;
-    // MUST: この面に drafter の席は無い（{@link Gemma4Assets} が持つのは製品グラフ 1 本）。
-    // 黙って投機なしで組むと「指定したのに効かない」形になるので fail loudly で断る。
+    // MUST: this surface has no place for a drafter ({@link Gemma4Assets} holds one product graph).
+    // Silently building without speculation would be "specified but no effect", so it is refused by
+    // failing loudly.
     if (options.speculative !== undefined) {
       throw new Error(
         `${where}: speculative は受けられない` +
           `（Gemma4Assets に drafter の容器が無い — 投機は fromPretrained から組む）`,
       );
     }
-    // 席の指定は資産を 1 バイトも開く前に見る（`loadPretrained` と同じ位置づけ）。
+    // The placement option is checked before opening a single byte of the assets (the same position
+    // as in `loadPretrained`).
     resolveGemma4PleResidency(where, options);
-    // MUST: quant 実行ノブの明示指定も**ここで**見る。この面は manifest を持たないので
-    // `resolveGemmaSessionOptions` を通れず、通さないと同じ誤指定が Session 構築まで降りて
-    // runtime の `ExecutionError` に化ける = 入口ごとに分類が割れる（ADR 0107 決定 2）。
+    // MUST: the explicit quant execution knobs are checked **here** too. This surface has no manifest
+    // and cannot go through `resolveGemmaSessionOptions`; without this the same mistaken option would
+    // travel down to Session construction and turn into the runtime's `ExecutionError` = the
+    // classification would split per entry point (ADR 0107 decision 2).
     assertGemmaSessionOverrides(options, where);
     const config = parseGemma4PipelineConfig(input.config);
     if (input.model.length === 0) {
@@ -1113,18 +1249,20 @@ class GemmaPipeline {
     const open = await assetComponentOpener(where, parts, (key) => assetBuffer(where, parts, key), [
       MODEL,
     ]);
-    // NOTE: `requiredLimits` の検査はこの面には無い — {@link Gemma4Assets} は manifest を
-    // 持たない（バイト列と `config` だけ）ので、宣言そのものへ到達できない。実寸の検査は
-    // Session 構築時の `assertWeightsWithinLimits`（ADR 0089 決定 1）が受け持つ。
+    // NOTE: this surface has no `requiredLimits` check — {@link Gemma4Assets} has no manifest (only
+    // bytes and `config`), so the declaration itself cannot be reached. The check against actual sizes
+    // is done by `assertWeightsWithinLimits` at Session construction (ADR 0089 decision 1).
     const model = open(MODEL);
     const admitted = admitGemma4(model, config, undefined, gemmaEntryName(family));
-    // PLE の索引は容器の資産なので、取得面と**同じ 1 本**の門を通す（`readGemma4PleIndex` が
-    // 索引と block の整合まで見る）。
+    // The PLE index is a container asset, so it goes through **the same one** check as the fetch
+    // surface (`readGemma4PleIndex` checks the consistency of the index and the blocks too).
     const pleIndex = await readGemma4PleIndex(where, model);
-    // model 名はグラフと PLE の構成から判別する（この面は manifest を持たない）。
+    // The model name is determined from the graph and the PLE configuration (this surface has no
+    // manifest).
     const admission: GemmaFamilyAdmission =
       family === "gemma4-qat" ? { family, model: admitGemma4Qat(model.graph) } : { family };
-    // この面は manifest を持たないので宣言は無い — 要求するのは実効設定が要る feature だけ。
+    // This surface has no manifest, so there is no declaration — only the features the effective
+    // settings need are requested.
     const requested = { gpuFeatures: sessionGpuFeatures(undefined, options), where };
     return await GemmaPipeline.#build(
       admission,
@@ -1140,20 +1278,24 @@ class GemmaPipeline {
   }
 
   /**
-   * admission を通った材料 + 資産から組む（2 面が共有する 1 本）。
+   * Builds from the material that passed admission + the assets (the one path shared by the two
+   * surfaces).
    *
-   * MUST: 資産の解析は **GPU を取りに行く前**（他 7 家族と同じ順序）— 順序がずれると、GPU の
-   * 無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+   * MUST: the assets are parsed **before going to get the GPU** (the same order as the other
+   * families) — in a different order, on an environment without a GPU the failure would turn into a
+   * different exception, and "what was wrong" would not reach the reader.
    *
-   * Session を 1 本持ち続けるのは siglip2 と同じ理由で、畳む相手（同時に載せられない別の
-   * 巨大グラフ）が居ないため — 会話ごとに張り直すと 1.5GiB の重みを毎回アップロードし直す。
+   * The Session is kept for the same reason as siglip2: there is nothing to make room for (no other
+   * huge graph that cannot be loaded at the same time) — rebuilding it per conversation would
+   * re-upload 1.5 GiB of weights every time.
    *
-   * 投機を指定したときは drafter Session も**ここで 1 本**張る（会話ごとではない — ADR 0096
-   * 段 2 の裁定「束ね口は context」）。順序は target が先で、drafter はその埋め込み表を借りる。
+   * When speculation is requested, one drafter Session is also set up **here** (not per conversation
+   * — the ruling of ADR 0096 stage 2, "the binding point is the context"). The target comes first, and
+   * the drafter borrows its embedding table.
    *
-   * @param requested 要求する feature（quant 宣言 ∪ 実効設定が要る feature —
-   *   `sessionGpuFeatures`）と、その診断の主語。drafter Session も同じ device に張るので
-   *   drafter のぶんを別に要求しない。
+   * @param requested The features to request (the quant declaration ∪ the features the effective
+   *   settings need — `sessionGpuFeatures`) and the subject of its diagnostics. The drafter Session
+   *   is set up on the same device, so nothing is requested separately for the drafter.
    */
   static async #build(
     admission: GemmaFamilyAdmission,
@@ -1173,7 +1315,8 @@ class GemmaPipeline {
       admission,
       residency,
     );
-    // 投機の `k` は 2 つの消費者（生成と見積り）が同じ値を見るように**ここで 1 度**解決する。
+    // The speculative `k` is resolved **once, here**, so that the two consumers (generation and the
+    // estimate) see the same value.
     const speculativeK =
       options.speculative === undefined
         ? undefined
@@ -1187,9 +1330,10 @@ class GemmaPipeline {
           options.linearGemvReduce === "parallel-subgroup32",
       }));
     const ownsGpu = options.gpu === undefined;
-    // quant 実行ノブ（③PV の縮約形を含む）は合成済みの値（明示 > quant 宣言）だけを渡し、
-    // 未指定なら欄ごと渡さない（既定値をここに写すと、runtime 側で既定が動いたときに
-    // この家族だけ古い値で走る — 予算も同じ）。drafter Session にも同じノブを渡す。
+    // The quant execution knobs (including the ③PV reduction form) pass only the composed values
+    // (explicit > quant declaration); unspecified ones are not passed at all (copying defaults here
+    // would make this family alone run with stale values when the runtime's default moves — the same
+    // for the budget). The drafter Session gets the same knobs.
     const sessionOptions = {
       ...(options.fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd: options.fuseRmsNormAdd }),
       ...(options.fuseLinearStaticQuantize === undefined
@@ -1213,23 +1357,27 @@ class GemmaPipeline {
         ? {}
         : { linearGemvRowsThreadTarget: options.linearGemvRowsThreadTarget }),
     };
-    // MUST: GPU 時間診断とは併用できない（`beginBatch` は計測が有効な device では開けない —
-    // gather を target と同じ batch へ積む機構そのものが成り立たない）。
+    // MUST: cannot be combined with GPU timing diagnostics (`beginBatch` cannot open on a device
+    // with measurement enabled — the mechanism of enqueuing the gather in the same batch as the target
+    // does not work at all).
     if (residency === "gpu" && gpu.gpuTimingEnabled) {
       throw new Error(
         `${entry}: pleResidency: "gpu" は gpuTiming が有効な device では使えない` +
           `（GPU 内 gather は batch へ積むが、計測中は batch を開けない — ADR 0021）`,
       );
     }
-    // 供給口は admission が見たものと**同じ 1 本**（前段と後段が別の部品を握らない）。
+    // The supplier is **the same one** admission looked at (the earlier and later steps do not hold
+    // different components).
     const model = open(MODEL);
     let session: Session | undefined;
     let pleGpu: Gemma4PleResident | undefined;
     try {
-      // MUST: 自前で取った device の feature 検査はここが唯一の門（共有 GPU は admission 席でも
-      // 同じ 1 本を通る）。try の中に置くのは、落ちたとき内部で取った device を返すため。
+      // MUST: for a device acquired here, this is the only feature check (a shared GPU goes through
+      // the same one at the admission step too). It is inside the try so that, on failure, the
+      // device acquired internally is given back.
       assertGpuFeaturesGranted(requested.gpuFeatures, gpu, requested.where);
-      // 束縛上限の不足は**重み 1.5GiB のアップロードより前**に落とす（graph-first と同じ並び）。
+      // A shortfall of the binding limit fails **before uploading 1.5 GiB of weights** (the same
+      // ordering as graph-first).
       pleGpu =
         residency === "host"
           ? undefined
@@ -1240,14 +1388,16 @@ class GemmaPipeline {
               vocabSize: admitted.vocabSize,
               inputName: PER_LAYER_INPUTS,
               idsName: INPUT_IDS,
-              // 流しうる物理行数（decode 1 + prefill バケット + chunk 長）— 出力常駐の上界。
+              // The physical row counts that can run (decode 1 + prefill buckets + chunk length) — the
+              // upper bound of the resident output.
               rows: [1, ...wiring.chunkBuckets, wiring.chunkLength],
               entry,
             });
       session = await model.createSession(gpu, sessionOptions);
-      // GPU 常駐席では greedy を使わない run（prefill・診断付き decode）も包みを通す —
-      // `per_layer_inputs` を差す場所がここしかない。greedy そのものを使うかは生成面が
-      // `onRun` の有無で決めるので、包みの有無とは独立である。
+      // Under GPU residency, runs that do not use greedy (prefill, decode with diagnostics) also go
+      // through the wrapper — it is the only place to plug in `per_layer_inputs`. Whether greedy
+      // itself is used is decided by the generation surface from the presence of `onRun`, so it is
+      // independent of whether the wrapper exists.
       const greedyOutput =
         pleGpu !== undefined || (!gpu.gpuTimingEnabled && options.onRunDiagnostics === undefined)
           ? createGemmaGreedyOutput(gpu, session, wiring.logits, wiring.vocabSize, pleGpu)
@@ -1277,7 +1427,7 @@ class GemmaPipeline {
         config: admitted.config,
         ...(drafter === undefined ? {} : { drafter }),
         ...(speculativeK === undefined ? {} : { speculativeK }),
-        // ゲートのノブは検査済み（`assertSpeculative`）の値をそのまま素通しする。
+        // The gate's knobs pass straight through with the already checked (`assertSpeculative`) value.
         ...(options.speculative?.gate === undefined
           ? {}
           : { speculativeGate: options.speculative.gate }),
@@ -1289,8 +1439,9 @@ class GemmaPipeline {
           : { onRunDiagnostics: options.onRunDiagnostics }),
       };
     } catch (error) {
-      // 構築に失敗したら誰も解放できなくなるので、ここで返す。順序は借り手（drafter は
-      // 張れていない = 借用計数は既に戻っている）→ 貸し手 → PLE の GPU 常駐 → 内部で取った GPU。
+      // If construction fails nobody else can release these, so they are given back here. The order
+      // is borrower (the drafter was not set up = the borrow count is already back) → lender → PLE's
+      // GPU residency → the GPU acquired internally.
       await disposeSteps([
         () => {
           if (session !== undefined) return session.dispose();
@@ -1305,11 +1456,11 @@ class GemmaPipeline {
   }
 
   /**
-   * drafter Session を 1 本張る（投機を指定したときだけ）。
+   * Sets up one drafter Session (only when speculation is requested).
    *
-   * 借りるのは target Session が既に GPU へ載せた埋め込み表で、借り手の initializer 名 →
-   * 貸し手 initializer 名の対応は admission が確定させてある（`./speculative.ts`）。
-   * バイトは 1 つも複製されない。
+   * It borrows the embedding table the target Session has already put on the GPU; the mapping from
+   * the borrower's initializer name to the lender's initializer name was settled by admission
+   * (`./speculative.ts`). Not a single byte is copied.
    */
   static async #buildDrafter(
     admitted: Gemma4Admission,
@@ -1333,7 +1484,7 @@ class GemmaPipeline {
         ...sessionOptions,
         sharedWeights,
       }),
-      // 見積り専用（`estimateSessionMemory` が drafter の常駐重みをこれから引く）。
+      // For the estimate only (`estimateSessionMemory` derives the drafter's resident weights from it).
       graph: component.graph,
       outputs: drafter.admission.outputs,
       rope: admitted.config.rope,
@@ -1342,41 +1493,47 @@ class GemmaPipeline {
   }
 
   /**
-   * 会話 1 ターンを回し、**確定した文字列片**を流す（ADR 0084 決定 4 の逐次復号）。
+   * Runs one conversation turn and streams **committed text pieces** (the streaming decode of ADR
+   * 0084 decision 4).
    *
-   * 会話の描画と符号化は `gemma4ChatPrompt`（射程外の入力はここで**同期に** fail loudly）、
-   * 生成は `GenerationSequence` 1 本で、汲み切る / `break` する / 中断するのいずれでも
-   * sequence は返る。**1 ターン = 1 sequence** なので過去 turn は残らない — 多ターンの会話を
-   * 自分で回すなら {@link Gemma4Pipeline.sequence} を使う。
+   * Rendering and encoding the conversation is `gemma4ChatPrompt` (out-of-scope input fails loudly
+   * here, **synchronously**), and generation is one `GenerationSequence`; whether drained, `break`-ed
+   * or interrupted, the sequence is returned. **One turn = one sequence**, so past turns do not
+   * remain — to run a multi-turn conversation yourself, use {@link Gemma4Pipeline.sequence}.
    *
-   * 逐次表示が要らないなら {@link Gemma4ChatStream.text} で 1 本の文字列として受け取れる
-   * （反復との併用は同期に throw する — 1 つのストリームは 1 通りにしか消費しない）。
+   * If incremental display is not needed, {@link Gemma4ChatStream.text} gives one string (mixing it
+   * with iteration throws synchronously — a stream is consumed in only one way).
    *
-   * 停止条件は 2 層で、要求ごとに足せる（配布形の EOS 集合は常に効く）:
-   * {@link Gemma4ChatOptions.stopTokens} は sequence 層（token id）、
-   * {@link Gemma4ChatOptions.stopStrings} はこの層（復号後の本文）が判定する。
+   * Stop conditions have two layers and can be added per request (the distribution's EOS set always
+   * applies): {@link Gemma4ChatOptions.stopTokens} is checked by the sequence layer (token ids), and
+   * {@link Gemma4ChatOptions.stopStrings} by this layer (the decoded text).
    *
-   * drafter を載せた pipeline では**既定で投機を張る**（{@link Gemma4ChatOptions.speculative} で
-   * ターンごとに切れる）。張ったターンは `done` の `speculation` に勘定が載る。配布形の推奨
-   * sampler（温度 1）でも張り、本文は投機なしで回したときと同じ列になる。既定は自己採算ゲート
-   * 付きなので、投機が負ける文脈では途中から decode 形へ落ちる（`speculation.plainSteps`）。
+   * A pipeline with a drafter loaded **speculates by default** (it can be turned off per turn with
+   * {@link Gemma4ChatOptions.speculative}). A speculating turn carries the accounting in the
+   * `speculation` of `done`. It speculates even with the distribution's recommended sampler
+   * (temperature 1), and the text is the same sequence as without speculation. The default comes
+   * with the self-tuning gate, so in a context where speculation loses it drops to the decode
+   * shape partway (`speculation.plainSteps`).
    *
-   * 並行に呼ばれた場合は**待たされて順に**走る（1 つの Session を 2 本の会話で同時に押さない）。
+   * When called concurrently, calls **wait and run in order** (one Session is not pushed by two
+   * conversations at once).
    */
   chat(messages: readonly Gemma4ChatMessage[], options: Gemma4ChatOptions): Gemma4ChatStream {
     if (this.#disposal !== undefined) {
       throw new Error(`${this.#state.entry}: dispose 済みでは生成できない`);
     }
-    // 受理集合は同期に落とす（GPU にも順番待ちにも入る前）。
+    // The accepted set fails synchronously (before entering the GPU or the queue).
     const prompt = gemma4ChatPrompt(this.#state.tokenizer, messages);
     const chosen = options.sampler ?? this.#state.config.sampler;
-    // MUST: 要求は**発行時に写す**（ADR 0083 追記 2026-09-02）。本体（async generator）は最初の
-    // `next()` まで走らないので、ここで `options` を読み切らないと `maxNewTokens` / `signal` は
-    // 「汲み始めた時点の値」になる — 発行と消費の間に書き換えた option が黙って効く形である。
-    // 配列と sampler 指定も**ここで**写す。受け手の複製（`GenerationSequence.generate` /
-    // `createSampler`）は async generator の本体 = 最初の `next()` なので、それだけに任せると
-    // 「発行してから汲み始めるまで」の窓で書き換えた停止集合・抽選指定が黙って効く。写し口は
-    // `sampler.ts` の {@link snapshotSpec} 1 本を共有する（`Gemma4ChatSession.send` と同じ）。
+    // MUST: the request is **copied at issue** (ADR 0083 addendum 2026-09-02). The body (an async
+    // generator) does not run until the first `next()`, so without reading `options` through here,
+    // `maxNewTokens` / `signal` would be "the values at the time draining started" — an option
+    // rewritten between issue and consumption would silently take effect.
+    // The arrays and the sampler options are copied **here** as well. The receivers' copies
+    // (`GenerationSequence.generate` / `createSampler`) happen in the body of the async generator =
+    // the first `next()`, so relying on them alone would silently apply a stop set or sampling
+    // options rewritten in the window "from issue until draining starts". The copy point is the one
+    // {@link snapshotSpec} in `sampler.ts`, shared (the same as `Gemma4ChatSession.send`).
     const sampler = chosen === undefined ? undefined : snapshotSpec(chosen);
     const request: GenerationRequest = {
       prompt,
@@ -1385,17 +1542,20 @@ class GemmaPipeline {
       ...(sampler === undefined ? {} : { sampler }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
-    // MUST: 受理集合の値域も**ここで**見る（検査の正本は `sequence.ts` の 1 本 — 式を写さない）。
-    // `generate` は下の async generator の本体で呼ぶので、ここで呼ばないと `maxNewTokens: 0` の
-    // ような要求が「汲み始めるまで落ちない」＝ 発行元から遠い場所でしか診断が出ない。
+    // MUST: the value ranges of the accepted set are checked **here** as well (the source of truth of
+    // the check is the one in `sequence.ts` — the formulas are not copied). `generate` is called in
+    // the body of the async generator below, so without this a request such as `maxNewTokens: 0`
+    // would "not fail until draining starts" = the diagnostic would appear only far from the issuer.
     assertGenerationRequestValues(this.#state.wiring.vocabSize, request);
-    // 停止文字列の状態機械もここで作る（指定の検査と複製がその中で済む = 受理集合が同期に
-    // 落ちる）。停止文字列が無ければ素通しになるので、経路を 2 本に割らない。
+    // The stop-string state machine is also built here (the option check and copy happen inside it =
+    // the accepted set fails synchronously). With no stop strings it passes everything through, so
+    // the path is not split in two.
     const stopStrings = createStopStringFilter(options.stopStrings ?? []);
     const capacity = options.capacity;
     const onPrefill = options.onPrefill;
     const onToken = options.onToken;
-    // 投機の DI と観測 hook も**発行時に**決める（本体は最初の `next()` まで走らない）。
+    // The speculation DI and the observation hook are also decided **at issue** (the body does not run
+    // until the first `next()`).
     const speculative = speculativeSetup(this.#state, options.speculative);
     const onRun = runDiagnosticsHook(this.#state);
 
@@ -1405,7 +1565,7 @@ class GemmaPipeline {
       settle = resolve;
       fail = reject;
     });
-    // 二次的な通知路なので、読まれなくても unhandled rejection にしない。
+    // A secondary notification path, so not an unhandled rejection even when nobody reads it.
     done.catch(() => {});
 
     const state = this.#state;
@@ -1416,13 +1576,17 @@ class GemmaPipeline {
       let sequence: GenerationSequence | undefined;
       let stream: GenerationStream | undefined;
       let failure: { readonly error: unknown } | undefined;
-      /** 一致した停止文字列（この層の停止理由 — 立ったら sequence の消費もそこで止める）。 */
+      /**
+       * The matched stop string (this layer's stop reason — once set, consuming the sequence stops
+       * there too).
+       */
       let matched: string | undefined;
       try {
-        // MUST: 本体の先頭でもう一度見る。async generator の本体は最初の `next()` まで走らない
-        // ので、発行時の検査だけでは「発行 → dispose → 汲み始める」が抜ける。抜けた先でも
-        // ランタイムが受け付けはしない（dispose 済み Session）が、真因から遠い**runtime の
-        // 文言**で落ちるため、ここで**発行時と同じ pipeline の文言**へ揃える。
+        // MUST: check again at the top of the body. The body of an async generator does not run until
+        // the first `next()`, so the check at issue alone misses "issue → dispose → start draining".
+        // Even past that the runtime would not accept it (a disposed Session), but it would fail with
+        // a **runtime message** far from the real cause, so this aligns it to **the same pipeline
+        // message as at issue**.
         if (disposed()) {
           throw new Error(`${state.entry}: dispose 済みでは生成できない`);
         }
@@ -1445,8 +1609,8 @@ class GemmaPipeline {
         );
       } catch (error) {
         failure = { error };
-        // MUST: 包まずそのまま投げる（ADR 0083 決定 5 — 消費側が `error === signal.reason` で
-        // 自分の中断を識別できる）。
+        // MUST: throw as is, unwrapped (ADR 0083 decision 5 — the consumer can identify its own
+        // interruption with `error === signal.reason`).
         throw error;
       } finally {
         await completeChatTurn({
@@ -1474,25 +1638,28 @@ class GemmaPipeline {
   }
 
   /**
-   * 低レベル面 — 多ターンの会話を自分で回す（ADR 0083 決定 1〜4 の `GenerationSequence`）。
+   * The low-level surface — run a multi-turn conversation yourself (the `GenerationSequence` of ADR
+   * 0083 decisions 1–4).
    *
-   * `prompt` は token id 列なので、会話の描画は呼び手が通す（`./gemma` サブパス）— 最初の
-   * ターンが {@link gemma4ChatPrompt}（`<bos>` 込みの全体）、2 ターン目以降は
-   * `gemma4ChatTurn`（**その turn の差分だけ**。前 turn を閉じる `<turn|>` は
-   * `GenerationSequence` の `pendingToken` が前置するので含めない — ADR 0083 決定 4）。
-   * **返った実体は呼び手が `dispose()` する** — 会話が終わった時点で返すのが
-   * 正で、取りこぼしても {@link Gemma4Pipeline.dispose} が巻き取る（Session を live な context
-   * ごと畳まないため）。
+   * `prompt` is a token id sequence, so the caller renders the conversation (the `./gemma` subpath) —
+   * the first turn with {@link gemma4ChatPrompt} (the whole, including `<bos>`), the second and later
+   * with `gemma4ChatTurn` (**only that turn's delta**; the `<turn|>` that closes the previous turn is
+   * prepended by `GenerationSequence`'s `pendingToken`, so it is not included — ADR 0083 decision 4).
+   * **The caller calls `dispose()` on the returned object** — returning it when the conversation ends
+   * is right, and if it is missed {@link Gemma4Pipeline.dispose} collects it (so that the Session is
+   * not closed with a live context).
    *
-   * MUST: {@link Gemma4Pipeline.chat} との直列化はしない（別の会話は別の context なので
-   * ランタイム側は受ける）。同時に走らせれば KV も 2 本ぶん常駐する。
+   * MUST: no serialization with {@link Gemma4Pipeline.chat} (another conversation is another context,
+   * so the runtime accepts it). Running them at the same time keeps two KVs resident.
    *
-   * `capacity` はこの会話が確保する容量（省略時は配布形の既定）。KV の物理確保はここで済むので、
-   * 短い会話に大きな容量を取らせない / 長い会話に必要なぶんだけ取る、の判断はこの 1 箇所である。
+   * `capacity` is the capacity this conversation allocates (default: the distribution's default). The
+   * KV's physical allocation happens here, so this is the one place to decide "do not take a large
+   * capacity for a short conversation / take only what a long conversation needs".
    *
-   * drafter を載せた pipeline では**既定で投機を張る**（{@link Gemma4SequenceOptions.speculative}
-   * で会話ごとに切れる）。借り手 context はこの sequence の寿命に束ねられ、`dispose()` が
-   * 貸し手より先に畳む。自己採算ゲートの状態も sequence の寿命（ターンを跨いで測り続ける）。
+   * A pipeline with a drafter loaded **speculates by default** (it can be turned off per conversation
+   * with {@link Gemma4SequenceOptions.speculative}). The borrower context is bound to this sequence's
+   * lifetime, and `dispose()` closes it before the lender. The self-tuning gate's state also lives
+   * as long as the sequence (it keeps measuring across turns).
    */
   async sequence(options: Gemma4SequenceOptions = {}): Promise<GenerationSequence> {
     if (this.#disposal !== undefined) {
@@ -1513,17 +1680,19 @@ class GemmaPipeline {
   }
 
   /**
-   * sequence を追跡つきの薄い包みで渡す（{@link Gemma4Pipeline.sequence} と、その分岐
-   * 〈`GenerationSequence.fork`〉が共有する 1 本）。
+   * Hands a sequence out in a thin tracking wrapper (the one path shared by
+   * {@link Gemma4Pipeline.sequence} and its branches (`GenerationSequence.fork`)).
    *
-   * 実体そのものではなく薄い包みを渡すのは、`GenerationSequence` に pipeline を知らせる席を
-   * 作らないため（生成面は最後までパイプライン非依存 — ADR 0083）。包みが持つのは**この
-   * 追跡だけ**である（観測席は `onRun` hook として sequence の中へ降りたので、`generate` は
-   * 素通しで足りる）。分岐も同じ包みで渡すので、`dispose` は分岐も巻き取る。
+   * A thin wrapper rather than the object itself is handed out so that `GenerationSequence` gets no
+   * field that would let it know about the pipeline (the generation surface stays pipeline-independent
+   * to the end — ADR 0083). The wrapper holds **only this tracking** (the observation callback went
+   * down into the sequence as the `onRun` hook, so `generate` can pass straight through). Branches are
+   * handed out in the same wrapper, so `dispose` collects them too.
    *
-   * MUST: `await` 明けにもう一度見る（確保〈分岐なら複製〉の途中で dispose された実体は、`dispose`
-   * の鎖本体が `#handed` を走査済みなので**どちらの経路からも畳まれない** — この再検査だけが
-   * 塞げる窓。runtime 側 `executor.ts` の `#adopt` と同型）。
+   * MUST: check once more after `await` (an object disposed in the middle of allocation (or of the
+   * copy, for a branch) is **closed by neither path**, because the body of the `dispose` chain has
+   * already walked `#handed` — this re-check is the only thing that closes the window. The same shape
+   * as `#adopt` in the runtime's `executor.ts`).
    */
   async #hand(inner: GenerationSequence): Promise<GenerationSequence> {
     const state = this.#state;
@@ -1531,18 +1700,21 @@ class GemmaPipeline {
       await inner.dispose();
       throw new Error(`${state.entry}: dispose 済みでは sequence を作れない`);
     }
-    // 正しく返された sequence は追跡から外す（外さないと、多ターン UI が会話ごとに作って
-    // 畳んでも Set が単調増加し、`dispose` が破棄済みの実体を全数もう一度 await する）。
+    // A sequence returned properly is removed from tracking (otherwise, with a multi-turn UI that
+    // creates and closes one per conversation, the Set grows monotonically and `dispose` awaits every
+    // already-destroyed object once more).
     const handed: GenerationSequence = {
       capacity: inner.capacity,
-      // 導出値なので包みも getter で素通しする（値を写すと「渡した瞬間の値」で固まる）。
+      // A derived value, so the wrapper also passes it through with a getter (copying the value would
+      // freeze it at "the value at hand-out time").
       get used(): number {
         return inner.used;
       },
       generate: (request): GenerationStream => inner.generate(request),
       fork: (): Promise<GenerationSequence> => {
-        // MUST: async にしない — dispose 済みの拒否は sequence 側が**同期に**投げる契約で、
-        // async で包むと reject に化ける。pipeline の dispose 後も同じく同期に落とす。
+        // MUST: not async — the sequence side's contract is to throw the disposed rejection
+        // **synchronously**, and wrapping it in async would turn it into a reject. After the
+        // pipeline's dispose it likewise fails synchronously.
         if (this.#disposal !== undefined) {
           throw new Error(`${state.entry}: dispose 済みでは sequence を作れない`);
         }
@@ -1550,7 +1722,8 @@ class GemmaPipeline {
       },
       dispose: async (): Promise<void> => {
         await inner.dispose();
-        // 失敗した dispose は外さない（context が返っていないので `dispose` が巻き取る側に残す）。
+        // A failed dispose is not removed (the context has not been returned, so it stays on the side
+        // `dispose` collects).
         this.#handed.delete(handed);
       },
     };
@@ -1559,43 +1732,53 @@ class GemmaPipeline {
   }
 
   /**
-   * この pipeline で 1 会話を回すときの GPU メモリ必要量を見積もる（ADR 0070 決定 5 の estimator）。
+   * Estimates the GPU memory needed to run one conversation on this pipeline (the estimator of ADR
+   * 0070 decision 5).
    *
-   * **ロードの後・sequence 生成の前**の面である。容量と chunk 長は実行時ノブなので、必要量は
-   * 「呼び手が生成の形を決めた後」でなければ決まらない（ADR 0089 追記 2026-09-02 の据え置きと
-   * 同じ読み — ロード面には結線しない）。
+   * A surface for **after loading and before creating a sequence**. Capacity and chunk length are
+   * runtime knobs, so the requirement is settled only "after the caller has decided the shape of the
+   * generation" (the same reading as the deferral of ADR 0089 addendum 2026-09-02 — not wired into
+   * the load surface).
    *
-   * MUST: 返るのは**必要側のカテゴリ別合計だけ**で、空き側との比較も可否判定もしない（同 決定 5）。
-   * 判定の最終門は out-of-memory errorScope のままで、この見積りは事前診断である。
+   * MUST: it returns **only the demand-side totals by category**, and neither compares against free
+   * memory nor decides feasibility (same, decision 5). The final check remains the out-of-memory
+   * errorScope; this estimate is an advance diagnostic.
    *
-   * NOTE: {@link Gemma4PipelineOptions.chunkBuckets} の各形は `peakAccountedBytes` の最大に入る
-   * が、`scenarios` には並ばない（ADR 0095 追記 2026-10-10）。最大 `M` の prefill 形で代表させない
-   * のは、attention の行ブロック分割が枚数の境界で「行数の少ない形のほうが一時が大きい」を作り、
-   * 中間が物理行数 `M` に単調でないため。見積る `chunkLength` を pipeline の値から変えたときは、
-   * この pipeline のバケットのうちその `chunkLength` 未満の段だけを渡す（バケットの受理集合は
-   * `chunkLength` 未満 — 既定の梯子の切り詰めと同じ規則）。バケット形の backing が他の形と
-   * **同時に常駐する**ぶんは、{@link Gemma4PipelineOptions.planBackingBudgetBytes} が
-   * `peakAccountedBytes` の片側の項として上から押さえる（ADR 0095 決定 4）。
+   * NOTE: each shape of {@link Gemma4PipelineOptions.chunkBuckets} enters the max of
+   * `peakAccountedBytes` but is not listed in `scenarios` (ADR 0095 addendum 2026-10-10). The prefill
+   * shape of the largest `M` is not used as the representative because the row-block split of
+   * attention creates, at block-count boundaries, "a shape with fewer rows having larger transients",
+   * so the intermediates are not monotonic in the physical row count `M`. When the `chunkLength` to
+   * estimate differs from the pipeline's value, only this pipeline's buckets below that
+   * `chunkLength` are passed (the accepted set of buckets is below `chunkLength` — the same rule as
+   * trimming the default ladder). The amount by which bucket-shape backings **stay resident at the
+   * same time** as other shapes is bounded from above by
+   * {@link Gemma4PipelineOptions.planBackingBudgetBytes} as one term of `peakAccountedBytes` (ADR
+   * 0095 decision 4).
    *
-   * 小出力decodeの補助Session・常駐入出力は `auxiliaryBytes` に別計上し、ピークにも加える。
-   * 診断で小出力を無効にしたpipelineではこの欄を省略する（0）。
+   * The auxiliary Session and resident inputs / outputs of small-output decode are counted separately
+   * in `auxiliaryBytes` and also added to the peak. For a pipeline whose small output was disabled by
+   * diagnostics this field is omitted (0).
    *
-   * NOTE: `AdmissionReport` は runtime の型で、`@karume/models` は再輸出しない（ADR 0008 の薄い面 —
-   * 見積りを読む消費者は runtime の型をそのまま使う）。
+   * NOTE: `AdmissionReport` is a runtime type, and `@karume/models` does not re-export it (the thin
+   * surface of ADR 0008 — consumers that read the estimate use the runtime type as is).
    *
-   * ## 投機（{@link Gemma4PipelineOptions.speculative} を渡した pipeline）
+   * ## Speculation (a pipeline given {@link Gemma4PipelineOptions.speculative})
    *
-   * 3 つが足される（ADR 0096 段 3 §3.3）:
+   * Three things are added (ADR 0096 stage 3 §3.3):
    *
-   * 1. **verify シナリオ** — `k+1` 行を 1 run で流す形（`scenarios` に `"verify"` として並ぶ）。
-   *    行選択記号 `R` も `k+1` に束ねる（readback は選んだ行数ぶん要る）。
-   * 2. **drafter の常駐重み** — `resident.weights` の各欄に足す。貸し手から借りている埋め込み表は
-   *    runtime の常駐プランナが `shared` 席として除くので、二重に数えない。
-   * 3. **借り手 context の state** — 借り物スロットは 1 バイトも確保しないので、増えるのは論理長
-   *    uniform の 8 バイトだけである。
+   * 1. **The verify scenario** — the shape that runs `k+1` rows in one run (listed in `scenarios` as
+   *    `"verify"`). The row-selection symbol `R` is also bound to `k+1` (readback needs as many rows
+   *    as were selected).
+   * 2. **The drafter's resident weights** — added to each field of `resident.weights`. The embedding
+   *    table borrowed from the lender is excluded by the runtime's residency planner as a `shared`
+   *    entry, so it is not counted twice.
+   * 3. **The borrower context's state** — borrowed slots allocate not a single byte, so the only
+   *    increase is the 8-byte logical-length uniform.
    *
-   * drafter の run 1 本ぶん（入出力と中間）は `unaccounted` 側に置く — draft run は verify run と
-   * 同時には走らないうえ、この形の必要量は `k` にも `capacity` にも依らない小さな定数である。
+   * One drafter run (inputs / outputs and intermediates) is put on the `unaccounted` side — a draft
+   * run never runs at the same time as a verify run, and the requirement of that shape is a small
+   * constant that depends on neither `k` nor `capacity`.
    */
   estimateSessionMemory(options: Gemma4EstimateOptions = {}): AdmissionReport {
     const { wiring, graph, gpu, drafter, entry } = this.#state;
@@ -1605,9 +1788,10 @@ class GemmaPipeline {
       this.#state.config,
       entry,
     );
-    // MUST: 整数条件と大小関係は**別の診断**で出す（`createGenerationSequence` /
-    // `Gemma4ChatSession` と同じ 3 本）。1 本に畳むと `capacity: NaN` も `1.5` も「未満」と
-    // 診断され、同じ指定が入口ごとに別の理由で落ちたように見える。
+    // MUST: the integer condition and the ordering are reported as **separate diagnostics** (the same
+    // three as `createGenerationSequence` / `Gemma4ChatSession`). Folded into one, `capacity: NaN` and
+    // `1.5` would both be diagnosed as "below", and the same option would look as if it failed for a
+    // different reason per entry point.
     if (!Number.isSafeInteger(capacity) || capacity < 1) {
       throw new ModelInputError(`${entry}: capacity ${capacity} が 1 以上の整数でない`);
     }
@@ -1621,17 +1805,20 @@ class GemmaPipeline {
         `${entry}: capacity ${capacity} が maxPosition ${wiring.maxPosition} を超えた`,
       );
     }
-    // MUST: Session に渡したのと同じ予算を渡す（片方だけ既定に落ちると、報告のピークが実際の
-    // 保持集合と別の予算を名乗る）。未指定は欄ごと渡さず runtime の既定に任せる。
+    // MUST: pass the same budget as was passed to the Session (if only one side fell back to the
+    // default, the reported peak would name a different budget from the actual held set). Unspecified
+    // is not passed at all and left to the runtime default.
     const budget =
       this.#state.planBackingBudgetBytes === undefined
         ? {}
         : { planBackingBudgetBytes: this.#state.planBackingBudgetBytes };
-    // MUST: 渡す（states 形 attention のノード内一時は行ブロック枚数がこの上限だけで決まるので、
-    // 省くと estimator が fail loudly する — 既定値で埋めない）。
+    // MUST: pass it (the in-node transients of states-form attention have a row-block count decided by
+    // this limit alone, so omitting it makes the estimator fail loudly — it is not filled with a
+    // default).
     const maxStorageBufferBindingSize = gpu.limits.maxStorageBufferBindingSize;
-    // state スロット単体の上限は 2 本とも見る（実構築 `GenerationContext.create` と同じ門 —
-    // 片方だけ渡すと「起動時には数字が出て最初のターンで落ちる」容量が見積りを通る）。
+    // Both limits on a single state slot are checked (the same check as the real construction in
+    // `GenerationContext.create` — passing only one would let through the estimate a capacity that
+    // "shows a number at startup and fails on the first turn").
     const maxBufferSize = gpu.limits.maxBufferSize;
     const generations = gemma4EstimateGenerations(wiring, {
       capacity,
@@ -1641,8 +1828,9 @@ class GemmaPipeline {
         : { verifyQueryLength: (this.#state.speculativeK ?? GEMMA4_DRAFT_STEPS) + 1 }),
     });
     const baseTarget = estimateGraphMemory(graph, planWeightResidency(graph), {
-      // 行数記号 R は run では `last_row` の要素数が束縛する（入力 shape 由来）。見積りは入力を
-      // 持たないので R = 1（通常の prefill / decode の形）を明示する。
+      // In a run the row-count symbol R is bound by the element count of `last_row` (from the input
+      // shape). The estimate has no inputs, so R = 1 (the ordinary prefill / decode shape) is given
+      // explicitly.
       bindings: { [wiring.rowSymbol]: 1 },
       generation: generations.target,
       maxStorageBufferBindingSize,
@@ -1652,8 +1840,8 @@ class GemmaPipeline {
         : { stateAttentionReduce: this.#state.stateAttentionReduce }),
       ...budget,
     });
-    // 小出力 decode の補助 Session と、PLE を GPU 常駐にした席のぶん（ADR 0085 追記）。
-    // どちらも持たない pipeline では欄ごと省く（0 を名乗らない）。
+    // The auxiliary Session of small-output decode, and the share of the GPU-resident PLE option (ADR
+    // 0085 addendum). A pipeline that has neither omits the field altogether (it does not claim 0).
     const auxiliary =
       (this.#state.greedyOutput?.extraBytes ?? 0) + (this.#state.pleGpu?.extraBytes ?? 0);
     const auxiliaryBytes = auxiliary === 0 ? undefined : auxiliary;
@@ -1663,9 +1851,10 @@ class GemmaPipeline {
       peakAccountedBytes: baseTarget.peakAccountedBytes + (auxiliaryBytes ?? 0),
     };
     if (drafter === undefined) return target;
-    // 借り手ぶん（常駐重みと context の state）は drafter グラフを**同じ estimator に掛けて**
-    // 引く（式をこの層で組み直さない — 借り物スロットと共有 initializer を外すのは runtime の
-    // 常駐プランナと `GenerationContext.create` の分岐そのものである）。
+    // The borrower's share (resident weights and the context's state) is derived by **running the
+    // drafter graph through the same estimator** (the formula is not rebuilt in this layer — excluding
+    // borrowed slots and shared initializers is exactly the branching of the runtime's residency
+    // planner and `GenerationContext.create`).
     const borrower = estimateGraphMemory(drafter.graph, planWeightResidency(drafter.graph), {
       generation: generations.borrower,
       maxStorageBufferBindingSize,
@@ -1687,13 +1876,14 @@ class GemmaPipeline {
         weights,
         stateBytes: target.resident.stateBytes + borrower.resident.stateBytes,
       },
-      // 形ごとの必要量は貸し手の 3 形（prefill / decode / verify）のまま — drafter の run は
-      // 貸し手の run と同時には走らない（借り手 run は貸し手の run リースを取る）。
+      // The per-shape requirement stays the lender's three shapes (prefill / decode / verify) — a
+      // drafter run never runs at the same time as a lender run (the borrower's run takes the lender's
+      // run lease).
       scenarios: target.scenarios,
       planBackingBudgetBytes: target.planBackingBudgetBytes,
       ...(auxiliaryBytes === undefined ? {} : { auxiliaryBytes }),
-      // 常駐は 2 つの Session が同時に抱えるので和。保持集合の上限（予算 vs 最大シナリオ）は
-      // 貸し手の側がそのまま効く。
+      // Residency is held by two Sessions at once, so it is the sum. The upper limit of the held set
+      // (budget vs the largest scenario) applies on the lender's side as is.
       peakAccountedBytes: target.peakAccountedBytes + residentBytes,
       unaccounted: [
         ...target.unaccounted,
@@ -1704,50 +1894,58 @@ class GemmaPipeline {
   }
 
   /**
-   * 静的配線の読み口（`sequence()` で回すときに chunk 長・位置上限・容量・語彙数・停止集合を
-   * 読む）。**凍結**した値で、`stopTokens` も凍結コピーである。
+   * The read-out of the static wiring (read the chunk length, position limit, capacity, vocabulary
+   * size and stop set when running with `sequence()`). It is a **frozen** value, and `stopTokens` is a
+   * frozen copy too.
    *
-   * 出るのは数だけで、グラフ入力 / 出力の名前や `derivedInputs` は出ない（`GenerationProgram`
-   * の doc — 配線の相手である Session が公開面に無いので読んでも使い道が無く、書ける口は
-   * 「検証済み」という型の意味を壊す）。
+   * Only numbers come out; the names of graph inputs / outputs and `derivedInputs` do not (the doc of
+   * `GenerationProgram` — the Session they are wired to is not on the public surface, so reading them
+   * would be useless, and a writable entry point would break the type's meaning of "verified").
    */
   get program(): GenerationProgram {
     return this.#state.program;
   }
 
-  /** 資産から組んだ tokenizer（chat の描画・復号に要る — 同じ digest set の 1 員）。 */
+  /**
+   * The tokenizer built from the assets (needed to render and decode chat — a member of the same
+   * digest set).
+   */
   get tokenizer(): GemmaTokenizer {
     return this.#state.tokenizer;
   }
 
   /**
-   * 配布形が宣言した sampler の**既定**（ADR 0083 決定 7 — 宣言が無ければ `undefined` = greedy）。
+   * The **default** sampler the distribution declared (ADR 0083 decision 7 — `undefined` = greedy
+   * when there is no declaration).
    *
-   * MUST: 名前は「今この生成が使っている sampler」ではない。{@link Gemma4Pipeline.chat} は
-   * 要求が `sampler` を省略したときだけこれを使い、要求が渡せばそちらが勝つ。低レベル面
-   * （{@link Gemma4Pipeline.sequence}）を自分で回すときは `generate` の `sampler` へ**自分で
-   * 渡す** — `GenerationSequence` は配布形を知らないので、渡さなければ低層の既定（温度 0）で
-   * 走る（parity 門がその経路である）。
+   * MUST: the name does not mean "the sampler this generation is using now".
+   * {@link Gemma4Pipeline.chat} uses it only when the request omits `sampler`; if the request passes
+   * one, that wins. When running the low-level surface ({@link Gemma4Pipeline.sequence}) yourself,
+   * **pass it yourself** to `generate`'s `sampler` — `GenerationSequence` does not know the
+   * distribution, so without it it runs with the lower layer's default (temperature 0) (the parity
+   * check takes that path).
    */
   get defaultSampler(): Gemma4DefaultSampler | undefined {
     return this.#state.config.sampler;
   }
 
   /**
-   * 解放する。渡した sequence を先に畳み、**drafter Session（居れば）→ target Session** の順に
-   * 畳み、**内部で取得した GPU だけ**破棄し、最後に PLE のホストキャッシュを返す。
+   * Releases. Closes the handed-out sequences first, then **the drafter Session (if any) → the target
+   * Session**, destroys **only the GPU acquired internally**, and finally returns PLE's host cache.
    *
-   * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
-   * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す。
+   * MUST: destroy after in-flight generation has completed (flush-before-destroy) — putting the
+   * destruction on the chain too decides the order of waiting and destroying in one place. Later
+   * calls return the same completion.
    *
-   * MUST: PLE も解放する。GPU 常駐と違い**ホスト RAM**（{@link Gemma4PipelineOptions.maxResidentPleBytes}
-   * ぶん = 既定で最大 block 2 本ぶん）なので、口が無いと「dispose 済みのハンドルを 1 つ持ち
-   * 続ける」だけでその RAM がプロセス寿命まで残る。
+   * MUST: PLE is released as well. Unlike GPU residency it is **host RAM**
+   * ({@link Gemma4PipelineOptions.maxResidentPleBytes} worth = by default two of the largest blocks),
+   * so without a release point "keeping one disposed handle" alone would keep that RAM for the life of
+   * the process.
    *
-   * MUST: 途中の 1 本が投げても**残りの段まで進む**。`#disposal` は失敗も含めて 1 本を保持する
-   * （2 度目も同じ拒否を返す = 再試行の口が無い）ので、最初の失敗で打ち切ると Session も GPU も
-   * PLE のホスト RAM も**二度と**解放されない。失敗は 1 件ならそのまま、2 件以上は
-   * `AggregateError` で運ぶ（どの段が落ちたかを消さない）。
+   * MUST: even when one step throws, **proceed to the remaining steps**. `#disposal` keeps one promise
+   * including failures (a second call returns the same rejection = there is no retry), so stopping at
+   * the first failure would mean the Session, the GPU and PLE's host RAM are **never** released. One
+   * failure is carried as is, two or more in an `AggregateError` (which step failed is not lost).
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(async () => {
@@ -1755,36 +1953,38 @@ class GemmaPipeline {
       this.#handed.clear();
       await disposeSteps([
         ...handed.map((sequence) => () => sequence.dispose()),
-        // MUST: 借り手（drafter Session）を貸し手より先に畳む — 借り手が生きている間の
-        // 貸し手 `dispose()` は runtime が fail loudly で断る（借り手の bind group が貸し手の
-        // 重みバッファを掴んでいる）。順序を逆にすると、この 1 本が必ず失敗して残りの段は
-        // 通るものの、報告に毎回「貸し出している」が載る。
+        // MUST: close the borrower (the drafter Session) before the lender — the runtime refuses, by
+        // failing loudly, the lender's `dispose()` while a borrower is alive (the borrower's bind
+        // groups hold the lender's weight buffers). In the reverse order this one step always fails;
+        // the remaining steps still go through, but every report would say "still lent out".
         () => this.#state.greedyOutput?.dispose(),
         () => this.#state.drafter?.session.dispose(),
         () => this.#state.session.dispose(),
-        // MUST: target Session の後（常駐入力の焼き込み参照が返ってから解放する）。
+        // MUST: after the target Session (released once the baked references of the resident input
+        // have been returned).
         () => this.#state.pleGpu?.dispose(),
         () => {
           if (this.#state.ownsGpu) this.#state.gpu.destroy();
         },
-        // 順序は GPU の後（走行中の生成は既に畳んであるので、ここで引き手はもう居ない）。
+        // Ordered after the GPU (running generation has already been closed, so nothing draws on it
+        // any more).
         () => this.#state.ple?.dispose(),
       ]);
     });
     return this.#disposal;
   }
 
-  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  /** `await using` support (Explicit Resource Management) — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }
 
   /**
-   * 直列化鎖の席を取り、返した関数で手放す。
+   * Takes a place on the serialization chain, and gives it up with the returned function.
    *
-   * 席を取るのは**本体が回り出した時**（async generator の本体は最初の `next()` まで走らない）。
-   * 発行時に取ると、汲まれないまま捨てられた stream が鎖を永久に握り、`dispose` まで
-   * 巻き添えになる。
+   * The place is taken **when the body starts running** (the body of an async generator does not run
+   * until the first `next()`). Taking it at issue would let a stream discarded without draining hold
+   * the chain forever, dragging `dispose` along.
    */
   #acquire(): Promise<() => void> {
     let release!: () => void;
@@ -1800,27 +2000,29 @@ class GemmaPipeline {
   }
 }
 
-/** 通常 Gemma 4。既存の取得・数値・MTP 契約を保つ入口。 */
+/** Regular Gemma 4. The entry point that keeps the existing fetch, numerics and MTP contracts. */
 export class Gemma4Pipeline extends GemmaPipeline {
   private constructor(state: Gemma4State) {
     super(state);
   }
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
-   * （part 0）だけ**を取って家族 admission → 重みの part を温める → tokenizer の取得 → 構築）。
-   * block は Session を組むその瞬間に part 順で読まれ、PLE は**触った block だけ**が永続
-   * キャッシュから区間読みされる（ADR 0109 / 0085 決定 3）。
+   * Fetches from the distribution and builds (`loadManifest` → `resolveSelection` → fetch **only each
+   * component's descriptor (part 0)** for the family admission → warm the weight parts → fetch the
+   * tokenizer → build). Blocks are read in part order at the moment the Session is built, and for PLE
+   * **only the touched blocks** are range-read from the persistent cache (ADR 0109 / 0085 decision 3).
    *
-   * 部品を別リポの同じ役割で差し替えるときは
-   * {@link FromPretrainedComponentOptions.components}（役割は `model` と `drafter`）。
+   * To replace a component with the same role from another repository, use
+   * {@link FromPretrainedComponentOptions.components} (the roles are `model` and `drafter`).
    *
-   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が検証した
-   * 取得元は {@link GEMMA4_SOURCES}（`./config.ts`）の `"gemma4"` — 再現性を自分で固定するなら
-   * `{ repo, revision }` を呼び手が明示する。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。
+   * **`ref` is required** (there is no default source — the MUST of `src/hub/repo-ref.ts`). The source
+   * the package release verified is `"gemma4"` of {@link GEMMA4_SOURCES} (`./config.ts`) — to pin
+   * reproducibility yourself, the caller gives `{ repo, revision }` explicitly. A string `ref` reads as
+   * `{ repo }` (= follows `main`).
    *
-   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
-   * 通らない（{@link Gemma4FromPretrainedOptions} の HTTP 専用ノブは効かない）。
+   * A distribution in hand is passed as a **source handle** (`localDirectory`, `denoDirectory` of
+   * `@karume/hub/deno`, or `nodeDirectory` of `@karume/hub/node`). It does not go through the check of
+   * HF's `owner/name` spelling, nor through the network or CacheStorage (the HTTP-only knobs of
+   * {@link Gemma4FromPretrainedOptions} have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
@@ -1829,18 +2031,21 @@ export class Gemma4Pipeline extends GemmaPipeline {
     return new Gemma4Pipeline(await super.loadPretrained(GEMMA4_PIPELINE_NAME, ref, options));
   }
   /**
-   * 取得済み資産から組む。資産の解釈・グラフとの突合・id 空間の相互照合を全てここで済ませ、
-   * **製品グラフの Session を 1 本張って**返す。
+   * Builds from fetched assets. Interpreting the assets, matching them against the graph and
+   * cross-checking the id spaces are all done here, and it returns with **one Session of the product
+   * graph set up**.
    *
-   * `model` は容器（`krm`）の **part 列**（part 0 から添字順・長さ 0 の part も含む）を受け、
-   * バイト列を連結せず part 列のまま開く（受け口の実装は `src/hub/components.ts` — 8 家族共有の
-   * {@link assetComponentOpener}）。PLE も索引も容器の中に在るので、この面へ渡す資産は
-   * part 列と tokenizer だけである（ADR 0109 決定 4）。
+   * `model` takes the container's (`krm`) **parts** (in index order from part 0, including zero-length
+   * parts), and opens them as parts without concatenating the bytes (the receiving implementation is
+   * {@link assetComponentOpener} in `src/hub/components.ts`, shared by all families). PLE and its index
+   * are both inside the container, so the assets passed to this surface are only the parts and the
+   * tokenizer (ADR 0109 decision 4).
    *
-   * MUST: `config` は {@link fromPretrained} と**同じ門**（{@link parseGemma4PipelineConfig}）を
-   * 通す。TS の型は未知キーも値域も見ないので、門が無いと `temperature: -1` のような宣言が
-   * 3.7GiB を読み切った後の初 `chat` で初めて落ちる。宣言を検査するのは**バイト列を 1 本も
-   * 開く前**である。
+   * MUST: `config` goes through **the same check** as {@link fromPretrained}
+   * ({@link parseGemma4PipelineConfig}). TS types check neither unknown keys nor value ranges, so
+   * without the check a declaration such as `temperature: -1` would first fail at the first `chat`
+   * after reading 3.7 GiB. The declaration is checked **before opening a single one of the byte
+   * arrays**.
    */
   static async fromAssets(
     input: Gemma4Assets,
@@ -1850,7 +2055,7 @@ export class Gemma4Pipeline extends GemmaPipeline {
   }
 }
 
-/** 固定 mobile QAT の初期実装では drafter を受けない。 */
+/** The initial implementation of fixed mobile QAT does not accept a drafter. */
 export type Gemma4QatPipelineOptions = Omit<Gemma4PipelineOptions, "speculative"> & {
   readonly speculative?: never;
 };
@@ -1862,19 +2067,28 @@ export type Gemma4QatFromPretrainedOptions = Omit<
   readonly model?: "e2b" | "e4b";
 };
 
-/** 実験段階の固定 QAT E2B/E4B。CPU/GPU の全ビット一致と広い品質は未保証（ADR 0097）。 */
+/**
+ * Fixed QAT E2B/E4B at the experimental stage. Full CPU/GPU bit agreement and broad quality are not
+ * guaranteed (ADR 0097).
+ */
 export class Gemma4QatPipeline extends GemmaPipeline {
   private constructor(state: Gemma4State) {
     super(state);
   }
-  /** 明示した QAT 配布形から E2B/E4B を組む。model 省略時は manifest の既定を使う。 */
+  /**
+   * Builds E2B/E4B from an explicitly given QAT distribution. When model is omitted, the manifest's
+   * default is used.
+   */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
     options: Gemma4QatFromPretrainedOptions = {},
   ): Promise<Gemma4QatPipeline> {
     return new Gemma4QatPipeline(await super.loadPretrained("gemma4-qat", ref, options));
   }
-  /** 取得済み固定 QAT 資産を検査して組む。モデルはグラフと PLE の構成から判別する。 */
+  /**
+   * Checks and builds from fetched fixed-QAT assets. The model is determined from the graph and the
+   * PLE configuration.
+   */
   static async fromAssets(
     input: Gemma4Assets,
     options: Gemma4QatPipelineOptions = {},

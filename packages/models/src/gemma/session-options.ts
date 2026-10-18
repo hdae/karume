@@ -1,4 +1,4 @@
-/** Gemmaのquant実行設定を利用者の明示指定で上書きする（ADR 0104）。 */
+/** Overrides Gemma's quant execution settings with the caller's explicit options (ADR 0104). */
 import type { SessionSpec } from "@karume/hub";
 import type { SessionOptions } from "@karume/runtime";
 
@@ -18,19 +18,22 @@ type GemmaSessionOptions = Pick<
 >;
 
 /**
- * Gemma が受けるキー（manifest の宣言と明示指定の両方）。優先順位・値域・組合せ・送出型の
- * 分類は全家族共通の {@link resolveSessionOptions} が持ち、ここは受理集合だけを決める。
+ * The keys Gemma accepts (both in the manifest declaration and as explicit options). Precedence,
+ * value ranges, combinations and the classification of the thrown type live in
+ * {@link resolveSessionOptions}, shared by all families; this only decides the accepted set.
  *
- * linear / attention の実行形（`linearCompute` / `attentionCompute` / `attentionScoreStorage`）を
- * 受けないのは、Gemma の配布形が宣言するのは並列 GEMV・states 形 attention の縮約形・融合の
- * 5 欄だけで、それ以外の宣言は検証されていない組合せだから（ADR 0104）。
+ * The linear / attention execution forms (`linearCompute` / `attentionCompute` /
+ * `attentionScoreStorage`) are not accepted because Gemma's distribution declares only five fields —
+ * parallel GEMV, the reduction form of states-form attention, and fusion — and any other declaration
+ * is an unverified combination (ADR 0104).
  *
- * `stateAttentionReduce` も他の欄と同じ規則に乗る（ADR 0104 追記 2026-09-26）: 宣言が無い quant
- * 席（参照の `i4`）と manifest を持たない `fromAssets` は runtime の参照経路 `"sequential"` で
- * 走る。家族のコード既定は持たない — 持つと `session` が空の席まで参照経路でなくなる。
+ * `stateAttentionReduce` follows the same rule as the other fields (ADR 0104 addendum 2026-09-26): a
+ * quant preset with no declaration (the reference `i4`) and `fromAssets`, which has no manifest, run
+ * on the runtime's reference path `"sequential"`. The family keeps no code default — one would take
+ * even presets with an empty `session` off the reference path.
  *
- * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: `export` is because the equivalence test runs every quant of the mirror through the same
+ * table (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const GEMMA_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: false,
@@ -44,14 +47,16 @@ export const GEMMA_SESSION_POLICY: FamilySessionPolicy = {
 };
 
 /**
- * 呼び手の**明示指定だけ**を相手にする門（入力起因 = `ModelInputError`）。
+ * The guard that looks **only at the caller's explicit options** (input error = `ModelInputError`).
  *
- * MUST: `fromAssets` はquant宣言を持たない面なので、この門を**資産を1バイトも開く前**に通す
- * （通さないと同じ誤指定がSession構築まで降り、runtime の `ExecutionError` に化けて
- * `fromPretrained` と分類が割れる）。quant宣言と突き合わせる組合せは見ないので、既定 `{}` を
- * 相手にしたときと同じ判定になる。
+ * MUST: `fromAssets` is a surface with no quant declaration, so it passes this guard **before
+ * opening a single byte of the assets** (otherwise the same mistaken option would travel down to
+ * Session construction, turn into the runtime's `ExecutionError`, and split the classification from
+ * `fromPretrained`). It does not look at combinations checked against a quant declaration, so it
+ * decides the same as against the default `{}`.
  *
- * NOTE: `export` は2つの入口が同じ門を通すため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: `export` is because the two entry points pass the same guard (not exposed on `mod.ts` / the
+ * subpath surface — ADR 0008).
  */
 export const assertGemmaSessionOverrides = (overrides: GemmaSessionOptions, where: string): void =>
   assertSessionOverrides(GEMMA_SESSION_POLICY, overrides, where);

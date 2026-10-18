@@ -1,15 +1,16 @@
 /**
- * 8 家族の `fromPretrained` が共通で持つオプション — **型と写しの 1 本**。取得層へ透過する
- * ノブ（{@link FromPretrainedHubOptions}）と、部品差し替え席
- * （{@link FromPretrainedComponentOptions}）の 2 つ。
+ * The options every family's `fromPretrained` has in common — **one type and one mapping**. Two
+ * parts: the knobs that pass through to the fetch layer ({@link FromPretrainedHubOptions}) and the
+ * component-replacement option ({@link FromPretrainedComponentOptions}).
  *
- * MUST: 家族ごとに複製しない。以前は同じ 5 欄と同じスプレッドが 8 か所へ手書きで並んでいて、
- * hub が欄を 1 つ増やしたとき（0.11.0 の {@link FromPretrainedHubOptions.onRetry}）に 8 か所とも
- * 落ちた — 「新しいノブが黙って届かない」形は複製がある限り再発する。
+ * MUST: not duplicated per family. The same 5 fields and the same spread used to be hand-written in
+ * 8 places, and when hub added a field ({@link FromPretrainedHubOptions.onRetry} in 0.11.0) all 8
+ * missed it — the shape "a new knob silently does not arrive" recurs as long as copies exist.
  *
- * NOTE: `signal` はここに含めない — 置き場が家族で割れている（取得と構築の**両方**へ渡す家族は
- * `XPipelineOptions` 側に持ち、取得だけに効く家族は `XFromPretrainedOptions` 側に持つ）。
- * {@link hubLoadOptions} は引数として受けて写すだけで、置き場には触らない。
+ * NOTE: `signal` is not included here — where it lives differs per family (families that pass it to
+ * **both** fetching and construction keep it on `XPipelineOptions`; families where it affects only
+ * fetching keep it on `XFromPretrainedOptions`). {@link hubLoadOptions} only takes it as an argument
+ * and maps it; it does not touch where it lives.
  */
 
 import type {
@@ -21,62 +22,67 @@ import type {
 import type { ComponentSource } from "./components.ts";
 
 /**
- * `XFromPretrainedOptions` が共通で持つ取得層のノブ（hub へそのまま透過する）。
+ * The fetch-layer knobs that `XFromPretrainedOptions` share (passed through to hub as is).
  *
- * NOTE: `headers` / `fetch` / `caches` / `onRetry` は **HTTP 取得元専用**のノブで、取得元ハンドル
- * （`localDirectory` / `denoDirectory`）を渡した呼び出しでは 1 つも効かない — 手元の配布形は
- * network も CacheStorage も通らない。
+ * NOTE: `headers` / `fetch` / `caches` / `onRetry` are knobs **for the HTTP source only**; none of
+ * them has any effect on a call that passes a source handle (`localDirectory` / `denoDirectory` /
+ * `nodeDirectory`) — a local distribution goes through neither the network nor CacheStorage.
  */
 export type FromPretrainedHubOptions = {
   /**
-   * `Authorization` 等。取得（revision 解決・ファイル）へそのまま透過する。
+   * `Authorization` etc. Passed through as is to fetching (revision resolution, files).
    *
-   * NOTE: **キャッシュは credential で分けない**（by-design — キーにヘッダは入らないので、
-   * 認証付きで取得したバイト列は以後の無認証呼び出しにもヒットする）。ADR 0080 決定 3 /
-   * `docs/limitations.md` の「hub: キャッシュは credential で隔離しない」が正本。
+   * NOTE: **the cache is not partitioned by credential** (by design — headers are not part of the
+   * key, so bytes fetched with authentication also hit for later unauthenticated calls). The
+   * canonical source is ADR 0080 decision 3 / `docs/limitations.md` "hub: the cache is not isolated
+   * by credential".
    */
   readonly headers?: HeadersInit;
   readonly onProgress?: (progress: AssetProgress) => void;
   readonly onCacheError?: (diagnostic: CacheDiagnostic) => void;
   /**
-   * 取得層が 429 / 503 を取り直す 1 回ごとの通知先（待機に入る**前**に届く）。アプリが
-   * 「rate limit 中・あと N 秒待つ」を出せるようにするための席で、無指定だと数十秒の沈黙に見える。
+   * Notified on each retry of a 429 / 503 by the fetch layer (delivered **before** the wait
+   * starts). The option exists so an app can show "rate limited, waiting N more seconds"; without
+   * it, it looks like tens of seconds of silence.
    *
-   * 届く範囲は manifest 取得（`loadManifest`）と資産取得（容器の part の逐次面・prefetch・全量面）の
-   * **両方** — この 1 本が `fromPretrained` の取得全部へ渡る。リスナーが throw しても取得は
-   * 落ちない（取得層が隔離して warn する）。
+   * It covers **both** the manifest fetch (`loadManifest`) and the asset fetches (the sequential
+   * surface of container parts, prefetch, the whole-bytes surface) — this one listener reaches every
+   * fetch of `fromPretrained`. A throwing listener does not fail the fetch (the fetch layer isolates
+   * it and warns).
    */
   readonly onRetry?: (diagnostic: RetryDiagnostic) => void;
-  /** `fetch` の差し替え（テスト・カスタム輸送用）。 */
+  /** Replacement for `fetch` (for tests and custom transports). */
   readonly fetch?: typeof globalThis.fetch;
-  /** `CacheStorage` の差し替え（テスト用）。 */
+  /** Replacement for `CacheStorage` (for tests). */
   readonly caches?: CacheStorage;
 };
 
 /**
- * `XFromPretrainedOptions` が共通で持つ**部品差し替え席**（ADR 0108 決定 19 / ADR 0109 決定 10）。
+ * The **component-replacement option** that `XFromPretrainedOptions` share (ADR 0108 decision 19 /
+ * ADR 0109 decision 10).
  */
 export type FromPretrainedComponentOptions = {
   /**
-   * 役割（manifest の weights 名）→ 別の `karume/5` リポの**同じ役割**。渡した役割の部品だけが
-   * その出所から来て、残りは元のリポのまま組む。
+   * Role (the manifest's weights name) → **the same role** in another `karume/5` repo. Only the
+   * components of the given roles come from that source; the rest are built from the original repo.
    *
-   * MUST: 差し替えられるのは**グラフ記述（`descriptor.graph` の sha256）が同一**の部品だけ。
-   * 同一性は**重みを 1 バイトも取る前**に 2 つの manifest の宣言だけで見て、違えば拒否する
-   * （束縛表の不足 / 余剰 0 も descriptor だけで確かめる）。この系列が持たない役割名は
-   * fail loudly — 綴り間違いを黙って「差し替えない」に畳まない。
+   * MUST: only components with an **identical graph descriptor (sha256 of `descriptor.graph`)** can
+   * be replaced. Identity is judged **before a single byte of weights is fetched**, from the two
+   * manifests' declarations alone, and a difference is rejected (zero shortage / excess in the
+   * binding table is also confirmed from the descriptor alone). A role name this family does not
+   * have fails loudly — a misspelling is not silently folded into "replace nothing".
    */
   readonly components?: Readonly<Record<string, ComponentSource>>;
 };
 
 /**
- * `fromPretrained` のオプション → hub のオプション。**定義済みの欄だけ**を写す
- * （`key: undefined` を作らない — 明示的な `undefined` は「無指定」と別物として hub の
- * 分岐に効きうる）。
+ * `fromPretrained` options → hub options. Maps **only the defined fields** (no `key: undefined` is
+ * created — an explicit `undefined` can affect hub's branching differently from "not given").
  *
- * `onProgress` は写さない — 進捗は家族ごとに集約の要否が違い、`loadContainerComponents` へ渡す
- * 側で別途載せる（manifest 取得に進捗は無い）。`components` も写さない — 取得層のノブではなく
- * 継ぎ目（`hub/components.ts`）が受ける席である。
+ * `onProgress` is not mapped — whether progress needs aggregation differs per family, and the side
+ * that passes it to `loadContainerComponents` attaches it separately (the manifest fetch has no
+ * progress). `components` is not mapped either — it is not a fetch-layer knob but an option the
+ * seam (`hub/components.ts`) receives.
  */
 export const hubLoadOptions = (
   options: FromPretrainedHubOptions & { readonly signal?: AbortSignal },

@@ -1,78 +1,86 @@
 /**
- * Euler サンプラの GPU 側 2 グラフ（**ホストで組む** IR v2 の宣言 — exporter は通さない）。
+ * The 2 GPU-side graphs of the Euler sampler (IR v2 declarations **built on the host** — they do not
+ * go through the exporter).
  *
- * DiT ループを 1 batch に束ねる（H-5）と、CFG 合成と Euler 更新だけがホストに残って
- * 「forward ごとに readback → 再アップロード」を強いる。この 2 演算は要素ごとの
- * add / sub / mul でしか無いので、配布形に足すのではなく**その場で組んだ小さな IR**を
- * 別 Session で回し、潜在は常駐テンソルのまま GPU に置いたままにする。
+ * Once the DiT loop is bundled into 1 batch (H-5), only the CFG combination and the Euler update
+ * would remain on the host and force "readback → re-upload on every forward". These 2 operations
+ * are nothing but elementwise add / sub / mul, so instead of adding them to the distribution,
+ * **small IR built on the spot** runs in separate Sessions, and the latent stays on the GPU as a
+ * resident tensor.
  *
- * ## MUST: 組んだ宣言は `parseIrDeclarationValue` に通す
+ * ## MUST: the built declarations go through `parseIrDeclarationValue`
  *
- * ここは exporter も容器の読み手も経由しないので、通さないとグラフ単体で決まる規則
- * （SSA・前方参照・トポロジカル順・`requires.ops` と実使用 op の一致・未知キー）が 1 つも
- * 検査されない。合流層（宣言 × 供給）と `prepareContainer`（capability + op 契約）はその
- * 種の壊れ方を見ないので、編集の誤りは Session 構築か実行まで落ちてこない。
+ * This goes through neither the exporter nor the container reader, so without it not one of the
+ * rules decided by the graph alone (SSA, forward references, topological order, `requires.ops`
+ * matching the ops actually used, unknown keys) is checked. The merge layer (declaration × supply)
+ * and `prepareContainer` (capability + op contracts) do not look at that kind of breakage, so an
+ * editing mistake would not fail until the Session is built or run.
  *
- * MUST NOT: 下のリテラルに省略可能な `states` を書き足さない。書かないことで、リテラルは
- * {@link IrDeclaration} として型が付かず（`states` が欠ける）、`parseIrDeclarationValue` の
- * 戻り値だけがこの関数の返り値になれる。包みを外した編集は `deno check` で落ちる。
+ * MUST NOT: do not add the optional `states` to the literals below. Leaving it out keeps the
+ * literals from typing as {@link IrDeclaration} (`states` is missing), so only the return value of
+ * `parseIrDeclarationValue` can be this function's return value. An edit that removes the wrapper
+ * fails the type check (`vp check`).
  *
- * ## MUST: 演算の結合順・引数順は TS 正本（`sampler.ts`）と 1 演算ずつ一致させる
+ * ## MUST: association and argument order match the TS source of truth (`sampler.ts`) op by op
  *
- * f32 の加算は非結合なので、積む順が変われば最終桁が変わる。正本は
- * {@link combineCfg}（`f32(value + f32(scale * f32(base − velocity)))` を変種順に畳む）と
- * {@link eulerStep}（`f32(x + f32(deltaT * velocity))`）で、下のノード列はその写しである
- * （`sub` → `mul` → `add` / `mul` → `add`）。ホスト側の関数は数値の正本として残してある。
+ * f32 addition is not associative, so a different queuing order changes the last digits. The
+ * source of truth is {@link combineCfg} (folds `f32(value + f32(scale * f32(base − velocity)))` in
+ * variant order) and {@link eulerStep} (`f32(x + f32(deltaT * velocity))`), and the node lists
+ * below are copies of them (`sub` → `mul` → `add` / `mul` → `add`). The host-side functions are
+ * kept as the numeric source of truth.
  *
- * ## NOTE: 記号次元を使わない（S は生成ごとに確定している）
+ * ## NOTE: no symbolic dimensions (S is fixed per generation)
  *
- * 呼ばれるのは S が決まった後なので、グラフは具体次元で組む。常駐テンソルは shape を持たない
- * （バイト列と大きさだけ）ため記号の束縛源になれず、記号を置くと束縛を毎 enqueue 渡す羽目に
- * なる。具体次元なら束縛は空のままで、実体の大きさとの突合は runtime が宣言 shape に対して
- * 行う。
+ * These are called after S is decided, so the graphs are built with concrete dimensions. A resident
+ * tensor has no shape (only bytes and a size), so it cannot be the binding source of a symbol, and
+ * a symbol would force passing the binding on every enqueue. With concrete dimensions the bindings
+ * stay empty, and the runtime matches the real sizes against the declared shapes.
  */
 
 import { type IrDeclaration, parseIrDeclarationValue } from "@karume/runtime";
 
-/** 潜在 1 本の shape（DiT の `x_t` / 速度場と同じ `[1, S, latentDim]`）。 */
+/** Shape of one latent (`[1, S, latentDim]`, the same as the DiT's `x_t` / velocity field). */
 const latentShape = (frames: number, latentDim: number): readonly number[] => [
   1,
   frames,
   latentDim,
 ];
 
-/** 入力名（呼び出し側と 1 箇所で共有する）。 */
+/** Input names (shared with the caller in one place). */
 export const COMBINE_INPUTS = {
-  /** 直前までの合成結果（k = 0 では cond そのもの）。 */
+  /** The combination so far (cond itself for k = 0). */
   accumulator: "acc_in",
-  /** cond 側の速度場（差の基準は**常に** cond）。 */
+  /** Velocity field of cond (the base of the difference is **always** cond). */
   cond: "cond",
-  /** その変種の uncond 速度場。 */
+  /** The uncond velocity field of that variant. */
   variant: "v_k",
-  /** その変種の強さ（shape `[1]` — 右詰め broadcast で全要素へ効く）。 */
+  /** Strength of that variant (shape `[1]` — right-aligned broadcast applies it everywhere). */
   scale: "s",
 } as const;
 
-/** {@link combineGraph} の出力名。 */
+/** Output name of {@link combineGraph}. */
 export const COMBINE_OUTPUT = "acc_out";
 
 export const EULER_INPUTS = {
-  /** 現在の潜在。 */
+  /** The current latent. */
   x: "x",
-  /** 速度場（CFG 有効 step は合成後・無効 step は cond そのもの）。 */
+  /**
+   * Velocity field (the combined one on a step with CFG, cond itself on a step without).
+   */
   velocity: "v",
-  /** 刻み幅 `t_next − t`（shape `[1]`・負）。 */
+  /** Step size `t_next − t` (shape `[1]`, negative). */
   deltaT: "dt",
 } as const;
 
-/** {@link eulerGraph} の出力名。 */
+/** Output name of {@link eulerGraph}. */
 export const EULER_OUTPUT = "x_next";
 
 /**
- * CFG 合成 1 変種ぶん `acc_out = acc_in + s·(cond − v_k)`（3 ノード）。
+ * CFG combination for one variant, `acc_out = acc_in + s·(cond − v_k)` (3 nodes).
  *
- * 変種は 1 本ずつこのグラフに通す — 正本 {@link combineCfg} が変種順に 1 本ずつ畳むのと
- * 同じ積み方にするため。強さ `s` は shape `[1]` の入力で、値ごとにグラフを組み直さない。
+ * Variants go through this graph one at a time — the same queuing as the source of truth
+ * {@link combineCfg}, which folds one variant at a time in variant order. The strength `s` is an
+ * input of shape `[1]`, so the graph is not rebuilt per value.
  */
 export const combineGraph = (frames: number, latentDim: number): IrDeclaration => {
   const rows = latentShape(frames, latentDim);
@@ -107,7 +115,7 @@ export const combineGraph = (frames: number, latentDim: number): IrDeclaration =
   });
 };
 
-/** Euler 更新 `x_next = x + dt·v`（2 ノード — 正本 {@link eulerStep} と同順）。 */
+/** Euler update `x_next = x + dt·v` (2 nodes — same order as the canonical {@link eulerStep}). */
 export const eulerGraph = (frames: number, latentDim: number): IrDeclaration => {
   const rows = latentShape(frames, latentDim);
   return parseIrDeclarationValue({

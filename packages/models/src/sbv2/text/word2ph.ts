@@ -1,16 +1,18 @@
 /**
- * base word2ph（add_blank 前）の生成。BERT テキスト層の中核。
+ * Generation of the base word2ph (before add_blank). The core of the BERT text layer.
  *
- * word2ph = 「DeBERTa の各トークン（= 文字）に音素を何個割り当てるか」。厳密アライメントは
- * 不可能（熟字訓）なので、参照実装は「単語ごとに音素数を文字数へ均等分配」する近似を採る
- * （`g2p.py` の `__distribute_phone`）。
+ * word2ph = "how many phonemes are assigned to each DeBERTa token (= character)". An exact
+ * alignment is impossible (jukujikun readings), so the reference implementation takes the
+ * approximation "distribute each word's phoneme count evenly over its characters"
+ * (`__distribute_phone` in `g2p.py`).
  *
- * スコープ: ここが作るのは add_blank **前**の base word2ph。
+ * Scope: what is built here is the base word2ph **before** add_blank.
  *
- * - `sum(base word2ph) === given_phone 長`（両端 PAD と句読点を含む `toSbv2PhoneTone` の出力長）
- * - `len(base word2ph) === Σ tokenize(語 surface) + 2`
+ * - `sum(base word2ph) === given_phone length` (the output length of `toSbv2PhoneTone`, including
+ *   PAD at both ends and punctuation)
+ * - `len(base word2ph) === Σ tokenize(word surface) + 2`
  *
- * add_blank の `*2` / `[0]+=1` は `symbols.ts` の `addBlankWord2ph` の責務。
+ * add_blank's `*2` / `[0]+=1` is the responsibility of `addBlankWord2ph` in `symbols.ts`.
  */
 
 import type { DebertaTokenizer } from "./tokenizer.ts";
@@ -18,14 +20,17 @@ import type { Sbv2Word } from "./utterance.ts";
 import { Sbv2InputError } from "../errors.ts";
 
 /**
- * n 個の音素を `wordLength` 文字へ均等分配する（`g2p.py __distribute_phone` と同じ分配）。
+ * Distributes n phonemes evenly over `wordLength` characters (the same distribution as
+ * `g2p.py __distribute_phone`).
  *
- * 上流は「左から右へ 1 ずつ、常に最小の文字（同値なら最左）へ足す」反復だが、その結果は
- * 閉形式で書ける: `q = ⌊n / W⌋`・`r = n mod W` として、先頭 `r` 文字が `q + 1`、残りが `q`。
- * 反復は 1 周ごとに全文字を 1 ずつ上げ、最後の端数 `r` 個が左から埋まるため。
+ * Upstream iterates "from left to right, add 1 at a time, always to the smallest character (the
+ * leftmost on ties)", but the result has a closed form: with `q = ⌊n / W⌋` and `r = n mod W`, the
+ * first `r` characters get `q + 1` and the rest `q`. Each round of the iteration raises every
+ * character by 1, and the final remainder `r` fills from the left.
  *
- * MUST: 反復の写経に戻さない — O(音素数 × 文字数) で、長さの上限検査（パイプライン側）より
- * 先に走るので、巨大な 1 語で数秒 CPU を占有する。閉形式なら O(W) で、分配は上流と同一。
+ * MUST: do not go back to copying the iteration — it is O(phonemes × characters) and runs before
+ * the length limit check (on the pipeline side), so one huge word occupies the CPU for seconds.
+ * The closed form is O(W), and the distribution is identical to upstream.
  */
 export const distributePhone = (phoneCount: number, wordLength: number): number[] => {
   if (!Number.isInteger(wordLength) || wordLength <= 0) {
@@ -40,35 +45,37 @@ export const distributePhone = (phoneCount: number, wordLength: number): number[
 };
 
 /**
- * 語アライメントと DeBERTa トークナイザから base word2ph を作る。
+ * Builds the base word2ph from the word alignment and the DeBERTa tokenizer.
  *
- * 不変条件（破れたら throw）:
+ * Invariants (throw when broken):
  *
- * - `word2ph.length === Σ tokenize(surface) + 2`（`bert_feature.py` の
- *   `len(word2ph) == len(text)+2`。text は語 surface の連結で、文字トークナイザは加算的
- *   なので `Σ tokenize(word) === tokenize(joined)` が成り立つ）。
- * - `sum(word2ph) === givenPhoneLength`（`g2p.py` の `len(phones) == sum(word2ph)`）。
+ * - `word2ph.length === Σ tokenize(surface) + 2` (`len(word2ph) == len(text)+2` in
+ *   `bert_feature.py`. text is the concatenation of the word surfaces, and the character tokenizer
+ *   is additive, so `Σ tokenize(word) === tokenize(joined)` holds).
+ * - `sum(word2ph) === givenPhoneLength` (`len(phones) == sum(word2ph)` in `g2p.py`).
  *
- * NOTE: 参照実装は句読点語だけトークナイズを省いて 1 文字扱いにするが、こちらは全語を
- * トークナイズする。参照側は `normalize_text` が "…" を "..." へ潰しているので実質同値で、
- * 上流の解析が "…" を 1 記号のまま残す場合、トークナイズ側に揃えないと DeBERTa の実トークン数
- * （NFKC で "..." の 3 個）と長さが合わなくなる。
+ * NOTE: the reference implementation skips tokenisation only for punctuation words and treats them
+ * as one character, whereas this tokenises every word. On the reference side `normalize_text` has
+ * already collapsed "…" to "...", so it is equivalent in practice; when the upstream analysis
+ * keeps "…" as one symbol, not aligning with the tokenising side makes the length disagree with
+ * DeBERTa's real token count (3 for "..." under NFKC).
  *
- * @param words 語アライメント（`Sbv2Utterance.words` — 両端 PAD を含まない）。
- * @param tokenizer DeBERTa 文字トークナイザ（各語 surface のトークン数算出に使う）。
- * @param givenPhoneLength `toSbv2PhoneTone(...).phones.length`（両端 PAD 込み）。
+ * @param words word alignment (`Sbv2Utterance.words` — without PAD at either end).
+ * @param tokenizer DeBERTa character tokenizer (used to count the tokens of each word surface).
+ * @param givenPhoneLength `toSbv2PhoneTone(...).phones.length` (including PAD at both ends).
  */
 export const buildBaseWord2ph = (
   words: readonly Sbv2Word[],
   tokenizer: DebertaTokenizer,
   givenPhoneLength: number,
 ): number[] => {
-  const word2ph: number[] = [1]; // 先頭 PAD 用の番兵。
+  const word2ph: number[] = [1]; // Sentinel for the leading PAD.
   let tokenTotal = 0;
   for (const word of words) {
     const wordLength = tokenizer.tokenize(word.surface).length;
     if (wordLength <= 0) {
-      // 呼び手が渡した surface（空白だけの語など）だけで到達するので入力起因 = 400。
+      // Reachable only through the surface the caller passed (a whitespace-only word and the like),
+      // so it is input-caused = 400.
       throw new Sbv2InputError(
         `語 surface が 0 トークンに正規化された: ${JSON.stringify(word.surface)}`,
       );
@@ -76,7 +83,7 @@ export const buildBaseWord2ph = (
     tokenTotal += wordLength;
     for (const count of distributePhone(word.phones.length, wordLength)) word2ph.push(count);
   }
-  word2ph.push(1); // 末尾 PAD 用の番兵。
+  word2ph.push(1); // Sentinel for the trailing PAD.
 
   const expectedLength = tokenTotal + 2;
   if (word2ph.length !== expectedLength) {

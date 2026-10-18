@@ -1,44 +1,52 @@
 /**
- * `Umt5Encoder` — テキスト → umT5-XXL の encoder の最終隠れ状態（`[L, 4096]`）の 1 本の面。
+ * `Umt5Encoder` — the one surface for text → the final hidden state of the umT5-XXL encoder
+ * (`[L, 4096]`).
  *
- * パイプライン（全段 Karume・torch 不使用）:
+ * Pipeline (every stage in Karume, no torch):
  *
- * 1. ホスト: 配布形のトークナイザ資産（`tokenizer` — 形式 `karume-umt5-tokenizer/1`）で文字列を id 列 `[L]` に
- *    する（`./tokenizer.ts` の `Umt5Tokenizer` — 前処理も Unicode 正規化もしない・末尾に `</s>`・受理集合の外は
- *    `ModelInputError`）
- * 2. ホスト: 有効長 L だけで決まる相対位置のバケット表 `[L, L]` を作る（`./relative-position.ts`）
- * 3. `text_encoder` を 1 回回す → `[1, L, 4096]` の f32 を `[L, 4096]`（行優先）として返す
+ * 1. Host: turns the string into an id sequence `[L]` with the distribution's tokenizer asset
+ *    (`tokenizer` — format `karume-umt5-tokenizer/1`) (`Umt5Tokenizer` in `./tokenizer.ts` — no
+ *    preprocessing, no Unicode normalization, trailing `</s>`, `ModelInputError` outside the accepted
+ *    set)
+ * 2. Host: builds the relative-position bucket table `[L, L]`, which depends only on the valid length
+ *    L (`./relative-position.ts`)
+ * 3. Runs `text_encoder` once → returns the f32 `[1, L, 4096]` as `[L, 4096]` (row-major)
  *
- * パディングもマスクも持たない（グラフは有効長 L の記号次元で回る — ADR 0119 決定 4）。Wan のように固定長の
- * 文脈へ詰めるのは呼び手の責務。
+ * No padding and no mask (the graph runs on the symbolic dimension of the valid length L — ADR 0119
+ * decision 4). Padding into a fixed-length context, as Wan does, is the caller's job.
  *
- * ## MUST: Session は構築時に 1 本だけ張り、`dispose` まで持つ
+ * ## MUST: one Session is opened at construction and kept until `dispose`
  *
- * 重みは i8 で約 5.3 GiB で、「1 回ごとに張っては畳む」形にすると**符号化 1 回ごとに重みを丸ごと
- * アップロードし直す**。埋め込みを何本も作る使い方が普通なので、siglip2 / depth-anything と同じく常駐が既定の
- * 形になる。Wan のように別の巨大グラフと交互に使うなら、Wan の text 段（`src/wan/text-stage.ts`）が段ごとに張って
- * 畳む — この class はその用途の面ではない。
+ * The weights are about 5.3 GiB in i8, and an "open and fold every time" form would **re-upload all
+ * weights for every encoding**. Producing many embeddings is the normal use, so residency is the
+ * default form, as in siglip2 / depth-anything. When it alternates with another huge graph, as in
+ * Wan, Wan's text stage (`src/wan/text-stage.ts`) opens and folds per stage — this class is not the
+ * surface for that use.
  *
- * MUST: それでも直列化鎖には載せる — `encode` の同時実行は 1 つの Session を 2 本の `run` で共有することになり、
- * `dispose` は in-flight の完了を待たずに GPU を破棄する（flush-before-destroy 違反）。
+ * MUST: it still goes on the serialization chain — concurrent `encode` calls would share one Session
+ * between two `run`s, and `dispose` would destroy the GPU without waiting for in-flight work to
+ * complete (a flush-before-destroy violation).
  *
- * ## 中断（`signal`）
+ * ## Cancellation (`signal`)
  *
- * 構築は {@link Umt5EncoderFromPretrainedOptions.signal}（取得層 — siglip2 / depth-anything と同じ置き場）、符号化は
- * {@link Umt5EncodeOptions.signal}（直列化鎖の順番を待った後・run の前で、イベントループへ 1 度譲ってから検査する —
- * 1 回の run は不可分）。中断の例外は `signal.reason` を**そのまま**投げる（包まない — 消費側が
- * `error === controller.signal.reason` で識別できる）。
+ * Construction uses {@link Umt5EncoderFromPretrainedOptions.signal} (the fetch layer — the same place
+ * as siglip2 / depth-anything); encoding uses {@link Umt5EncodeOptions.signal} (checked after waiting
+ * for the turn on the serialization chain and before the run, after yielding to the event loop once —
+ * a single run is indivisible). Cancellation throws `signal.reason` **as is** (not wrapped — the
+ * consumer can identify it with `error === controller.signal.reason`).
  *
- * ## 配布形（`karume-umt5-xxl` — pipeline `umt5-encoder/1`）
+ * ## Distribution (`karume-umt5-xxl` — pipeline `umt5-encoder/1`)
  *
- * {@link Umt5Encoder.fromPretrained} の第 1 引数は必須で、このパッケージ版が検証した取得元は
- * {@link UMT5_SOURCES}（`./config.ts`）の `"umt5-xxl"`。手元の配布形は `@karume/hub/deno` の `denoDirectory` で渡す。
+ * The first argument of {@link Umt5Encoder.fromPretrained} is required; the source this package
+ * version verified is `"umt5-xxl"` in {@link UMT5_SOURCES} (`./config.ts`). A local distribution is
+ * passed with `denoDirectory` of `@karume/hub/deno`.
  *
- * ## MUST: 数値の正はここでは担保されない
+ * ## MUST: numerical correctness is not guaranteed here
  *
- * 正は実 GPU の e2e（`packages/models/tests/e2e_wan_umt5_test.ts` — Wan の umT5 の移植の門
- * 〈`e2e_wan_umt5_test.ts`〉と同じ golden・同じ帯）と、トークナイザのパリティ（`umt5_tokenizer_test.ts`）・
- * バケット表のバイト一致（`umt5_relative_position_test.ts`）が担保する。
+ * Correctness is guaranteed by the real-GPU e2e (`packages/e2e/tests/e2e_wan_umt5_test.ts` — the
+ * same golden and the same band as Wan's umT5 port check in that file), the tokenizer parity
+ * (`umt5_tokenizer_test.ts`) and the byte-identical bucket tables
+ * (`umt5_relative_position_test.ts`).
  */
 
 import {
@@ -88,96 +96,109 @@ import { buildUmt5RelativePositionBuckets, UMT5_MAX_LENGTH } from "./relative-po
 import { umt5HiddenStates, umt5SessionInputs } from "./session-io.ts";
 import { parseUmt5TokenizerAsset, Umt5Tokenizer } from "./tokenizer.ts";
 
-/** 文言の接頭辞（class 名）。 */
+/** The message prefix (the class name). */
 const OWNER = "Umt5Encoder";
 
-/** manifest の weights 表に現れる部品名（差し替え席が受ける役割名でもある — ADR 0041 §3 の規約名）。 */
+/**
+ * The component name in the manifest's weights table (also the role name the replacement option
+ * accepts — the conventional name of ADR 0041 §3).
+ */
 const TEXT_ENCODER = "text_encoder";
 
-/** この系列の weights 部品。 */
+/** This family's weights components. */
 const COMPONENT_KEYS = [TEXT_ENCODER] as const;
 
 /**
- * トークナイザ資産のキー（manifest のモデル単位の `assets` — recipe `wan/umt5_distribution.py` の
- * `UMT5_TOKENIZER_ROLE`・形式 `karume-umt5-tokenizer/1`）。
+ * The key of the tokenizer asset (the manifest's per-model `assets` — `UMT5_TOKENIZER_ROLE` in the
+ * recipe `wan/umt5_distribution.py`, format `karume-umt5-tokenizer/1`).
  */
 const TOKENIZER = "tokenizer";
 
-/** 構築オプション（{@link Umt5Encoder.fromAssets} / {@link Umt5Encoder.fromPretrained} 共通）。 */
+/** Construction options (shared by {@link Umt5Encoder.fromAssets} / {@link Umt5Encoder.fromPretrained}). */
 export type Umt5EncoderOptions = {
   /**
-   * 既存の GPU を共有する。**渡した側が所有権を持つ**ので {@link Umt5Encoder.dispose} は破棄しない。省略時は
-   * encoder が内部で `acquireGpu` し、`dispose()` で破棄する。
+   * Shares an existing GPU. **The side that passes it owns it**, so {@link Umt5Encoder.dispose} does
+   * not destroy it. When omitted, the encoder calls `acquireGpu` internally and destroys it in
+   * `dispose()`.
    */
   readonly gpu?: GpuContext;
-  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  /** The model (a key of the manifest's models). `defaultModel` when omitted. */
   readonly model?: string;
-  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  /** The execution configuration (a key of that model's quants). `defaultQuant` when omitted. */
   readonly quant?: string;
   /**
-   * 実行 1 回ごとの診断を受け取る観測席（1 符号化 = `text_encoder` 1 回）。op 別 GPU 時間（`lastRunTiming`）が
-   * 要るときは `gpu` に `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
+   * An observation hook that receives the diagnostics of every run (one encoding = one
+   * `text_encoder` run). When per-op GPU time (`lastRunTiming`) is needed, pass
+   * `acquireGpu({ gpuTiming: true })` as `gpu` (ADR 0021 — no timing by default).
    *
-   * NOTE: コンポーネント名は渡さない — グラフが 1 本しかないので常に同じ 1 値になる（siglip2 と同じ）。
+   * NOTE: no component name is passed — there is only one graph, so it would always be the same
+   * value (as in siglip2).
    *
-   * コールバックの例外は握らない（fail loudly — 符号化ごと落ちる）。
+   * Exceptions from the callback are not swallowed (fail loudly — the encoding fails with it).
    */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
 /**
- * {@link Umt5Encoder.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。部品差し替え席
- * （`components`）の役割は `text_encoder` 1 本。
+ * Fetch-layer options used only by {@link Umt5Encoder.fromPretrained} (passed through to the hub).
+ * The component replacement option (`components`) has the single role `text_encoder`.
  *
- * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、取得層のノブの説明は
- * {@link FromPretrainedHubOptions} に 1 本化してある。
+ * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
+ * `onRetry` are **for HTTP sources only**, lives in one place: {@link FromPretrainedHubOptions}.
  */
 export type Umt5EncoderFromPretrainedOptions = Umt5EncoderOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions & {
-    /** 取得（manifest と重み約 5.3 GiB・トークナイザ資産）の中断。構築の後には持ち越さない。 */
+    /**
+     * Cancels fetching (the manifest, about 5.3 GiB of weights, the tokenizer asset). Not carried
+     * over past construction.
+     */
     readonly signal?: AbortSignal;
   };
 
 /**
- * 取得済みの manifest + 資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡せる形）。
- * `assets` は部品 `text_encoder`（単一形 `krm` のキー `text_encoder` か part 列 `text_encoder[0]` /
- * `text_encoder[1]` / …）と、manifest の `assets` のトークナイザ資産 `tokenizer`（JSON のバイト列）。
+ * The input for building directly from an already-fetched manifest + assets (a shape that accepts
+ * the hub's `fetchAssets` result as is). `assets` holds the component `text_encoder` (the key
+ * `text_encoder` of a single-form `krm`, or the part list `text_encoder[0]` / `text_encoder[1]` / …)
+ * and the tokenizer asset `tokenizer` of the manifest's `assets` (JSON bytes).
  */
 export type Umt5EncoderAssets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
-/** {@link Umt5Encoder.encode} の 1 回ぶんのオプション。 */
+/** Options for one call of {@link Umt5Encoder.encode}. */
 export type Umt5EncodeOptions = {
   /**
-   * 符号化の中断。直列化鎖の順番を待った後・run の前で、イベントループへ 1 度譲ってから検査する（1 回の run は
-   * 不可分）。中断したら `signal.reason` を**そのまま**投げる（包まない）。中断の後も同じ encoder で次の
-   * `encode` を回せる。
+   * Cancels the encoding. Checked after waiting for the turn on the serialization chain and before the
+   * run, after yielding to the event loop once (a single run is indivisible). On cancellation it
+   * throws `signal.reason` **as is** (not wrapped). The same encoder can run the next `encode` after a
+   * cancellation.
    */
   readonly signal?: AbortSignal;
 };
 
-/** 符号化 1 回の結果。 */
+/** The result of one encoding. */
 export type Umt5Encoding = {
-  /** トークナイザの id 列（i32・長さ `length`・末尾は `</s>` = 1）。 */
+  /** The tokenizer's id sequence (i32, length `length`, ending in `</s>` = 1). */
   readonly inputIds: Int32Array<ArrayBuffer>;
-  /** encoder の最終隠れ状態 `[length, hiddenSize]`（f32・行優先 — 1 トークン 1 行）。 */
+  /** The encoder's final hidden state `[length, hiddenSize]` (f32, row-major — one row per token). */
   readonly hiddenStates: Float32Array<ArrayBuffer>;
-  /** トークン数 L（`</s>` を含む — 2〜512）。 */
+  /** The token count L (including `</s>` — 2 to 512). */
   readonly length: number;
-  /** 1 行の幅（umT5-XXL は 4,096 — グラフ宣言から読む）。 */
+  /** The width of one row (4,096 for umT5-XXL — read from the graph declaration). */
   readonly hiddenSize: number;
 };
 
 /**
- * umT5 の encoder が受ける実行ノブ（manifest の quant 宣言）。どのキーも受けない: 配布形の席は i8 の重みを f32 で
- * 回す 1 つだけで、実行の形は格納が決める（ADR 0119 決定 5 — `./graph-contract.ts` の格納の門）。宣言が現れたら、
- * 受ける前に参照値で確かめる — 黙って runtime へ流さない。
+ * The execution knobs the umT5 encoder accepts (the manifest's quant declaration). It accepts no key:
+ * the distribution has a single preset, i8 weights run in f32, and the storage decides the form of
+ * execution (ADR 0119 decision 5 — the storage check in `./graph-contract.ts`). If a declaration
+ * appears, verify it against reference values before accepting it — never pass it to the runtime
+ * silently.
  *
- * NOTE: `export` は全家族の受理表の網羅と、配布形ミラーの同値を縛るテストのため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: the `export` is for the tests that cover the acceptance tables of every family and pin the
+ * equivalence of the distribution mirror (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const UMT5_ENCODER_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: false,
@@ -190,32 +211,37 @@ export const UMT5_ENCODER_SESSION_POLICY: FamilySessionPolicy = {
   packedStaticQuantize: false,
 };
 
-/** 家族 admission（{@link admitUmt5}）が確定させる材料。 */
+/** The material the family admission ({@link admitUmt5}) settles. */
 type Umt5Admission = {
   readonly quantName: string;
   readonly quant: Quant;
-  /** quant 宣言を受理表で通した実効設定（{@link UMT5_ENCODER_SESSION_POLICY}）。 */
+  /** The effective settings after passing the quant declaration through the acceptance table ({@link UMT5_ENCODER_SESSION_POLICY}). */
   readonly sessionOptions: SessionOptions;
-  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  /**
+   * The quant declaration plus the features the effective settings need (both the request and the
+   * check read this).
+   */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
   readonly contract: Umt5GraphContract;
 };
 
-/** {@link Umt5Encoder} の内部状態（公開面には出さない）。 */
+/** The internal state of {@link Umt5Encoder} (not on the public surface). */
 type Umt5State = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly tokenizer: Umt5Tokenizer;
   readonly contract: Umt5GraphContract;
-  /** 構築時に張って `dispose` まで持つ 1 本（モジュール doc の MUST）。 */
+  /** The single Session opened at construction and kept until `dispose` (the MUST in the module doc). */
   readonly session: Session;
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は全家族共有 — {@link assetComponentOpener}）。
+ * The component supplier of the whole-bytes surface (`fromAssets`) (the receiving implementation is
+ * shared by every family — {@link assetComponentOpener}).
  *
- * MUST: `slice` で写さない — 重みは約 5.3 GiB で、写すとホスト RAM のピークが倍になる（{@link readAssetBuffer}）。
+ * MUST: do not copy with `slice` — the weights are about 5.3 GiB, and a copy doubles the host RAM peak
+ * ({@link readAssetBuffer}).
  */
 const assetOpener = (assets: Umt5EncoderAssets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener(
@@ -226,13 +252,16 @@ const assetOpener = (assets: Umt5EncoderAssets["assets"]): Promise<ComponentOpen
   );
 
 /**
- * この manifest とこのグラフを umT5 の encoder として実行できるかを見る（`hub/components.ts` の
- * {@link FamilyAdmission} 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
+ * Checks whether this manifest and this graph can run as the umT5 encoder (the
+ * {@link FamilyAdmission} hook of `hub/components.ts` — on the fetching surface it is called
+ * **before a single byte of the weight parts is fetched**).
  *
- * MUST: 家族の門はこの 1 本に集める（pipeline 名 / major・`pipelineConfig`・quant・トークナイザ資産の宣言・
- * quant の `session`・共有 GPU の能力・グラフ宣言 × ホストの取り決め）。後段へ散らすと、取得面では 5.3 GiB の
- * 重みを落とした**後**にしか落ちない（ADR 0070 決定 5）。
- * MUST: manifest の契約違反とグラフとの突合は **GPU を取りに行く前**に落とす（他の家族と同じ順序）。
+ * MUST: gather the family checks in this one function (pipeline name / major, `pipelineConfig`,
+ * quant, the tokenizer asset declaration, the quant's `session`, the shared GPU's capabilities, the
+ * graph declaration × the host contract). Spread over later stages, on the fetching surface they
+ * would fail only **after** downloading 5.3 GiB of weights (ADR 0070 decision 5).
+ * MUST: manifest contract violations and the match against the graph fail **before acquiring the
+ * GPU** (the same order as the other families).
  */
 const admitUmt5 = (
   manifest: Manifest,
@@ -255,7 +284,8 @@ const admitUmt5 = (
     );
   }
   if (major !== UMT5_PIPELINE_MAJOR) {
-    // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門（ADR 0038 §6）。
+    // The only check that stops the silent degradation of "old implementation × new repository"
+    // (ADR 0038 §6).
     throw new Error(
       `${OWNER}: pipeline '${name}/${major}' の major に未対応` +
         `（この実装が読めるのは ${UMT5_PIPELINE_NAME}/${UMT5_PIPELINE_MAJOR}）`,
@@ -271,7 +301,8 @@ const admitUmt5 = (
     );
   }
   const quant = entry.quants[quantName];
-  // トークナイザ資産の中身は届いてから見る（{@link buildUmt5}）が、宣言が無ければ重み（約 5.3 GiB）を取る前に落とす。
+  // The tokenizer asset's contents are checked once it arrives ({@link buildUmt5}), but a missing
+  // declaration fails before the weights (about 5.3 GiB) are fetched.
   if (!Object.hasOwn(entry.assets, TOKENIZER)) {
     throw new Error(
       `${OWNER}: model '${modelName}' の manifest の assets にトークナイザ資産 '${TOKENIZER}' が無い` +
@@ -279,7 +310,8 @@ const admitUmt5 = (
         "手元の実験用ミラーなど〉は Wan の部品差し替え〈components の text_encoder〉でだけ使える）",
     );
   }
-  // 未対応の宣言は部品を開く前（= 重みの part を取る前）に落とす（全家族共通の 1 本）。
+  // An unsupported declaration fails before the components are opened (= before the weight parts are
+  // fetched) (the one implementation shared by every family).
   const sessionOptions = resolveSessionOptions(
     UMT5_ENCODER_SESSION_POLICY,
     quant.session,
@@ -290,8 +322,9 @@ const admitUmt5 = (
 
   const contract = umt5GraphContract(open(TEXT_ENCODER), OWNER);
 
-  // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 重みを落とす前に判る唯一の家族門
-  // （要求と検査の写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+  // MUST: a shared GPU lacking a capability (feature / device limit) fails here — the only family
+  // check that can tell before the weights are downloaded (the mapping between request and check is
+  // the one in `session/gpu-features.ts`, and the later check calls the same function).
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(gpuFeatures, options.gpu, `${OWNER}: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
@@ -304,10 +337,13 @@ const admitUmt5 = (
 };
 
 /**
- * admission を通った材料 + 資産から実行状態を組む（トークナイザ資産の解析 → GPU の取得 → Session の構築）。
+ * Builds the run state from the admitted material + assets (parse the tokenizer asset → acquire the
+ * GPU → build the Session).
  *
- * MUST: 資産の解析と突合は **GPU を取りに行く前**（壊れた資産の真因を GPU 無し環境の別の例外で消さない）。
- * MUST: GPU 取得後に許される検査は GPU の能力（feature — ADR 0028 / device limits — ADR 0089 決定 5）だけ。
+ * MUST: parse and match the assets **before acquiring the GPU** (so a different exception in an
+ * environment without a GPU does not hide the real cause, a broken asset).
+ * MUST: the only checks allowed after acquiring the GPU are GPU capabilities (features — ADR 0028 /
+ * device limits — ADR 0089 decision 5).
  */
 const buildUmt5 = async (
   admitted: Umt5Admission,
@@ -319,25 +355,27 @@ const buildUmt5 = async (
   const tokenizer = new Umt5Tokenizer(
     parseUmt5TokenizerAsset(readAssetJson(OWNER, "weights / assets", assets, TOKENIZER), TOKENIZER),
   );
-  // トークナイザの上限はグラフの記号次元の上限・バケット表の生成器の上限と同じ値（ADR 0119 決定 4）。違うと、
-  // 上限の間の入力がトークナイザを通ってからバケット表の生成で落ちる（大きい側）か、上流が受ける長さを黙って
-  // 拒む（小さい側）。
+  // The tokenizer's limit equals the upper limit of the graph's symbolic dimension and of the bucket
+  // table generator (ADR 0119 decision 4). Otherwise an input between the limits passes the tokenizer
+  // and then fails in bucket table generation (when larger), or a length upstream accepts is rejected
+  // silently (when smaller).
   if (tokenizer.maxLength !== UMT5_MAX_LENGTH) {
     throw new Error(
       `${OWNER}: トークナイザ資産の maxLength ${tokenizer.maxLength} が umT5 の有効長の上限 ` +
         `${UMT5_MAX_LENGTH} と違う`,
     );
   }
-  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  // The supplier is **the same one** admission looked at (`open` only looks up the opened component).
   const textEncoder = open(TEXT_ENCODER);
-  // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU は {@link admitUmt5} が
-  // 同じ 1 本で見ているが、自前で取った device はここが唯一の門。
+  // MUST: declared features can be requested only at device creation (ADR 0028). {@link admitUmt5}
+  // checks a shared GPU with the same function, but for a device acquired here this is the only check.
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `${OWNER}: quant '${quantName}'`);
-    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無い
-    // （`fromPretrained` はアダプタ値で見ている）。共有 GPU は {@link admitUmt5} が見ている。
+    // The limits of a device acquired here are also checked here — `fromAssets` has no place for a
+    // check before fetching (`fromPretrained` checks the adapter values). {@link admitUmt5} checks a
+    // shared GPU.
     if (ownsGpu) {
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
@@ -356,19 +394,21 @@ const buildUmt5 = async (
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
   } catch (error) {
-    // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
+    // A GPU acquired internally can be released by no one else if construction fails, so return it
+    // here.
     if (ownsGpu) gpu.destroy();
     throw error;
   }
 };
 
-/** id 列 1 本を回す（バケット表 → `text_encoder` 1 回 → 出力の検査）。 */
+/** Runs one id sequence (bucket table → one `text_encoder` run → output check). */
 const encodeIds = async (
   state: Umt5State,
   inputIds: Int32Array<ArrayBuffer>,
   signal: AbortSignal | undefined,
 ): Promise<Umt5Encoding> => {
-  // 直列化鎖の順番待ちの間に届いた中断もここで効く（run は不可分 — 中断は run の前でだけ効く）。
+  // A cancellation that arrived while waiting for the turn on the serialization chain also takes
+  // effect here (a run is indivisible — cancellation works only before the run).
   await settleAbort(signal);
   const { contract, session } = state;
   const outputs = await session.run(
@@ -383,8 +423,9 @@ const encodeIds = async (
     inputIds.length,
     contract.hiddenSize,
   );
-  // MUST: 非有限の出力は返さない（O(L·hiddenSize)）。下流の別のモデルへ渡ってから落ちると、文言が真因の段を
-  // 指さない（Wan の text 段の同じ門 — `src/wan/text-stage.ts` の `encodeWanPrompts`）。
+  // MUST: never return non-finite output (O(L·hiddenSize)). If it failed only after reaching another
+  // model downstream, the message would not point at the stage of the real cause (the same check as
+  // Wan's text stage — `encodeWanPrompts` in `src/wan/text-stage.ts`).
   const broken = hiddenStates.findIndex((value) => !Number.isFinite(value));
   if (broken !== -1) {
     throw new Error(
@@ -397,19 +438,20 @@ const encodeIds = async (
 };
 
 /**
- * umT5-XXL のテキスト → encoder の最終隠れ状態（グラフ 1 本・Session 常駐）。
+ * umT5-XXL text → the encoder's final hidden state (one graph, resident Session).
  *
- * 構築は {@link Umt5Encoder.fromPretrained}（配布形から取得）か {@link Umt5Encoder.fromAssets}（取得済み
- * バイト列）だけを入口にする — コンストラクタを private にしてあるのは、manifest 検査と資産の突合を迂回した
- * 半端な状態を作れないようにするため（ADR 0008）。
+ * Construction has only two entries: {@link Umt5Encoder.fromPretrained} (fetch from the
+ * distribution) and {@link Umt5Encoder.fromAssets} (already-fetched bytes) — the constructor is
+ * private so that no half-built state can bypass the manifest check and the asset matching
+ * (ADR 0008).
  */
 export class Umt5Encoder {
   readonly #state: Umt5State;
-  /** encode と dispose の直列化鎖（「1 本ずつ」を公開 API 側で守る — モジュール doc）。 */
+  /** The serialization chain of encode and dispose (the public API enforces "one at a time" — module doc). */
   readonly #chain = createOperationChain();
   /**
-   * dispose の 1 本。**undefined でないことが「dispose 済み」**（別に真偽値を持つと、独立に更新される派生状態に
-   * なる）。
+   * The single dispose. **Not undefined means "disposed"** (a separate boolean would be derived state
+   * updated independently).
    */
   #disposal: Promise<void> | undefined;
 
@@ -418,17 +460,20 @@ export class Umt5Encoder {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **部品の descriptor（part 0）だけ**を取って
-   * admission → 重みの part を温める → トークナイザ資産の `fetchAssets` → 構築）。block は Session を組むその瞬間に
-   * part 順で読まれる（ADR 0109 — `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
-   * {@link FromPretrainedComponentOptions.components}（役割は `text_encoder` 1 本 — トークナイザは差し替えない）。
+   * Fetches from the distribution and builds (`loadManifest` → `resolveSelection` → fetch **only the
+   * components' descriptors (part 0)** and run admission → warm up the weight parts → `fetchAssets`
+   * of the tokenizer asset → build). Blocks are read in part order at the moment the Session is built
+   * (ADR 0109 — `src/hub/components.ts`). To replace a component with the same role from another
+   * repository, use {@link FromPretrainedComponentOptions.components} (the single role
+   * `text_encoder` — the tokenizer is not replaced).
    *
-   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が検証した取得元は
-   * {@link UMT5_SOURCES}（`./config.ts`）の `"umt5-xxl"` — 再現性を自分で固定するなら `{ repo, revision }` を
-   * 呼び手が明示する。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。手元の配布形
-   * （`models/karume-umt5-xxl`）は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）— HF の `owner/name` の綴りの門は通らず、network も CacheStorage も通らない
-   * （{@link Umt5EncoderFromPretrainedOptions} の HTTP 専用ノブは効かない）。
+   * **`ref` is required** (there is no default source — the MUST in `src/hub/repo-ref.ts`). The
+   * source this package version verified is `"umt5-xxl"` in {@link UMT5_SOURCES} (`./config.ts`) —
+   * to pin reproducibility yourself, the caller gives `{ repo, revision }` explicitly. A string `ref`
+   * is read as `{ repo }` (= following `main`). A local distribution (`models/karume-umt5-xxl`) is
+   * passed as a **source handle** (`localDirectory` / `denoDirectory` of `@karume/hub/deno`) — it
+   * bypasses the check of the HF `owner/name` spelling, the network and CacheStorage (the HTTP-only
+   * knobs of {@link Umt5EncoderFromPretrainedOptions} have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
@@ -453,7 +498,8 @@ export class Umt5Encoder {
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
-    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+    // The family checks run in the admission hook (before the weight parts are fetched —
+    // `hub/components.ts`).
     const { admitted, assets, open } = await loadContainerComponents(
       `${OWNER}.fromPretrained`,
       loaded,
@@ -461,8 +507,9 @@ export class Umt5Encoder {
       COMPONENT_KEYS,
       async (open) => {
         const admitted = admitUmt5(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る（ADR 0089 決定 5 — 共有 GPU なら
-        // その limits、自前で取る経路はアダプタ実測値）。
+        // The `requiredLimits` the distribution declares are checked here **before the weight parts
+        // are fetched** (ADR 0089 decision 5 — the limits of a shared GPU, or the measured adapter
+        // values on the path that acquires its own).
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
@@ -480,8 +527,9 @@ export class Umt5Encoder {
   }
 
   /**
-   * 取得済みの manifest + 資産から組む（{@link Umt5EncoderAssets}）。容器を開いて、取得面と同じ家族 admission と
-   * 組み立てを通し、**`text_encoder` の Session を 1 本張って**返す（モジュール doc の MUST）。
+   * Builds from an already-fetched manifest + assets ({@link Umt5EncoderAssets}). Opens the
+   * containers, goes through the same family admission and assembly as the fetching surface, and
+   * returns with **one `text_encoder` Session opened** (the MUST in the module doc).
    */
   static async fromAssets(
     input: Umt5EncoderAssets,
@@ -493,40 +541,45 @@ export class Umt5Encoder {
   }
 
   /**
-   * トークナイザだけを通す（GPU に触らない — dispose の後も呼べる）。返るのは {@link encode} の `inputIds` と
-   * 同じ id 列。受理集合の外は `ModelInputError`（拒否の規則は `src/umt5/tokenizer.ts` のモジュール doc —
-   * 語彙外の文字・本文中の特殊トークン・空白の直後の `▁`・U+0020 以外の空白と末尾の空白・512 トークン超・
-   * 空文字）。
+   * Runs only the tokenizer (no GPU — callable after dispose). Returns the same id sequence as
+   * {@link encode}'s `inputIds`. Outside the accepted set it is a `ModelInputError` (the rejection
+   * rules are in the module doc of `src/umt5/tokenizer.ts` — out-of-vocabulary characters, special
+   * tokens in the text, `▁` right after whitespace, whitespace other than U+0020 and trailing
+   * whitespace, more than 512 tokens, the empty string).
    */
   tokenize(text: string): Int32Array<ArrayBuffer> {
     return this.#state.tokenizer.tokenize(text);
   }
 
   /**
-   * 文字列 1 本を符号化する（トークナイザ → バケット表 → `text_encoder` 1 回）。返るのは id 列と最終隠れ状態
-   * `[length, hiddenSize]`（{@link Umt5Encoding}）。受理集合の外の入力は GPU に触る前に `ModelInputError`
-   * （{@link tokenize} と同じ規則）。
+   * Encodes one string (tokenizer → bucket table → one `text_encoder` run). Returns the id sequence and
+   * the final hidden state `[length, hiddenSize]` ({@link Umt5Encoding}). An input outside the
+   * accepted set is a `ModelInputError` before the GPU is touched (the same rules as
+   * {@link tokenize}).
    *
-   * 並行に呼ばれた場合は**待たされて順に**走る（1 つの Session を 2 本の run で共有しない）。
+   * Concurrent calls **wait and run in order** (one Session is never shared by two runs).
    */
   async encode(text: string, options: Umt5EncodeOptions = {}): Promise<Umt5Encoding> {
-    // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた符号化まで巻き添えで落ちる）。
+    // The disposed check happens at call time (checking inside the chain would also fail encodings
+    // accepted before dispose).
     if (this.#disposal !== undefined) {
       throw new Error(`${OWNER}: dispose 済みでは符号化できない`);
     }
-    // 入力起因の拒否は順番を待たずに返す（トークナイザは状態を持たない純粋な処理）。
+    // Input-error rejections return without waiting for the turn (the tokenizer is pure and
+    // stateless).
     const inputIds = this.#state.tokenizer.tokenize(text);
     return await this.#chain(() => encodeIds(this.#state, inputIds, options.signal));
   }
 
   /**
-   * 解放する。Session は必ず畳み、**内部で取得した GPU だけ**破棄する（`options.gpu` で渡された GpuContext は
-   * 呼び出し側の所有物なので触らない）。
+   * Releases. Always folds the Session and destroys **only a GPU acquired internally** (a GpuContext
+   * passed in `options.gpu` belongs to the caller and is not touched).
    *
-   * MUST: in-flight の符号化の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に載せることで、待ちと
-   * 破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す。
+   * MUST: wait for an in-flight encoding to complete before destroying (flush-before-destroy) —
+   * putting the destruction on the chain too fixes the order of waiting and destroying in one place.
+   * Later calls return the same completion.
    *
-   * MUST: `Session.dispose()` が失敗しても `gpu.destroy()` は必ず通す（{@link disposeSteps}）。
+   * MUST: `gpu.destroy()` always runs even if `Session.dispose()` fails ({@link disposeSteps}).
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(() =>
@@ -540,7 +593,7 @@ export class Umt5Encoder {
     return this.#disposal;
   }
 
-  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  /** `await using` support (Explicit Resource Management) — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }

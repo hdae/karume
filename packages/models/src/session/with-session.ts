@@ -1,9 +1,9 @@
 /**
- * 一時 Session の実行スコープ（**パイプライン非依存の共通処理** — 段ごとに Session を張って
- * は畳む家族が同じ形で使う）。
+ * Execution scope of a temporary Session (**pipeline-independent shared processing** — used the same
+ * way by families that build and tear down a Session per stage).
  *
- * MUST: barrel には出さない（同居する `options.ts` / `dispose-steps.ts` / `gpu-features.ts`
- * と同じ理由 — 利用者が触る面ではない内部機構）。
+ * MUST: not exported from the barrel (for the same reason as the co-located `options.ts` /
+ * `dispose-steps.ts` / `gpu-features.ts` — an internal mechanism, not a surface the user touches).
  */
 
 import type {
@@ -18,13 +18,14 @@ import type { ModelComponent } from "../hub/components.ts";
 import { disposeSteps } from "./dispose-steps.ts";
 
 /**
- * 1 グラフぶんの Session を張り、使い終わったら必ず解放する。
- * MUST: `finally` で dispose する — 途中で落ちたときに VRAM が残ると、後続の段が確保に
- * 失敗して「最初の失敗とは別の場所」で落ちる。
+ * Builds a Session for one graph and always releases it after use.
+ * MUST: dispose in `finally` — if VRAM is left behind after a failure midway, the next stage fails
+ * to allocate and fails "somewhere other than the first failure".
  *
- * NOTE: `anima/pipeline.ts` にも同名の helper があるが、あちらの `run` は `graph.outputs[0]`
- * を 1 本だけ返す**別物**で、ここには載らない。Anima 側を多出力へ広げると全呼び出し側の分解が
- * 変わり、実 GPU でしか露見しない回帰リスクを負う — 統合は両者が揃ってからのリファクタに回す。
+ * NOTE: `anima/pipeline.ts` has a helper of the same name, but its `run` returns only
+ * `graph.outputs[0]` — **a different thing**, not built on this one. Widening the Anima side to
+ * multiple outputs would change the destructuring at every call site and carry a regression risk
+ * that shows only on a real GPU — merging them is left to a refactor once both line up.
  */
 export const withSession = async <T>(
   gpu: GpuContext,
@@ -49,8 +50,8 @@ export const withSession = async <T>(
     failure = { error };
     throw error;
   } finally {
-    // MUST: dispose の失敗で body の失敗を上書きしない（`disposeSteps` の doc — 素の `finally`
-    // で投げると最初に何が壊れたかが消える）。
+    // MUST: a dispose failure does not overwrite the failure of body (the doc of `disposeSteps` —
+    // throwing in a plain `finally` loses what broke first).
     await disposeSteps([
       () => {
         if (failure !== undefined) throw failure.error;

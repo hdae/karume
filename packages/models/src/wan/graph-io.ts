@@ -1,18 +1,21 @@
 /**
- * Wan のグラフ宣言とグラフ出力を読む小道具（値の宣言・形の照合・出力の dtype・非有限値の走査）。
+ * Small helpers that read Wan's graph declarations and graph outputs (value declarations, shape
+ * matching, output dtype, scan for non-finite values).
  *
- * 置き場がここなのは、共有の段（`./text-stage.ts` / `./dit-loop.ts` / `./tile-decode.ts` — Wan2.1 /
- * 2.2 の class が `./family.ts` を通して使う）が同じ小道具を読むため（ADR 0121 決定 10）。`owner` は
- * 文言の接頭辞（Wan2.1 は `"WanPipeline"`・Wan2.2 は `"WanTi2vPipeline"`）。
+ * They live here because the shared stages (`./text-stage.ts` / `./dit-loop.ts` / `./tile-decode.ts`
+ * — used by the Wan2.1 / 2.2 classes through `./family.ts`) read the same helpers (ADR 0121
+ * decision 10). `owner` is the message prefix (`"WanPipeline"` for Wan2.1, `"WanTi2vPipeline"` for
+ * Wan2.2).
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is side-effect free (no import-time execution, no global mutable state —
+ * CLAUDE.md).
  */
 
 import type { Tensor } from "@karume/runtime";
 
 import type { GraphOwner } from "../hub/components.ts";
 
-/** グラフの値の宣言（宣言の無い名前は fail loudly）。 */
+/** The declaration of a graph value (an undeclared name fails loudly). */
 export const valueOf = (
   owner: string,
   model: GraphOwner,
@@ -24,7 +27,7 @@ export const valueOf = (
   return model.graph.values[name];
 };
 
-/** グラフの値の形（宣言の無い名前は fail loudly）。 */
+/** The shape of a graph value (an undeclared name fails loudly). */
 export const valueShape = (
   owner: string,
   model: GraphOwner,
@@ -32,8 +35,8 @@ export const valueShape = (
 ): readonly (number | string)[] => valueOf(owner, model, name).shape;
 
 /**
- * 宣言の形を rank と全軸で照合する（数は静的次元・文字列は記号次元の名前）。`expected` はホストが
- * 組む形そのもの。
+ * Matches a declared shape on rank and every axis (a number is a static dimension, a string the
+ * name of a symbolic dimension). `expected` is the shape exactly as the host builds it.
  */
 export const assertDims = (
   owner: string,
@@ -53,6 +56,6 @@ export const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> 
   return tensor.data;
 };
 
-/** 最初の非有限値の添字（無ければ -1）。 */
+/** Index of the first non-finite value (-1 when there is none). */
 export const firstNonFinite = (values: Float32Array<ArrayBuffer>): number =>
   values.findIndex((value) => !Number.isFinite(value));

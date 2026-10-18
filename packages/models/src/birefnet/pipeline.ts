@@ -1,45 +1,51 @@
 /**
- * `BirefnetPipeline` — 画像 → α マット（背景抜き / salient object segmentation）の 1 本の面。
+ * `BirefnetPipeline` — the single surface for image → alpha matte (background removal / salient
+ * object segmentation).
  *
- * パイプライン（全段 Karume・torch 不使用）:
+ * Pipeline (every step in Karume, no torch):
  *
- * 1. ホスト: RGB8 の画素列を `pipelineConfig` の寸法へ resize（antialias 付き bilinear）
- * 2. ホスト: rescale + normalize を畳んだ形で通し、`[1, 3, S, S]` の f32 にする
- * 3. `matte` を 1 回回す → **sigmoid 前の logit** `[1, 1, S, S]`
- * 4. ホスト: `sigmoid` → **元画像の解像度へ戻す** → 8bit の α にする（`./matte.ts`）
+ * 1. Host: resize the RGB8 pixel row to the size in `pipelineConfig` (antialiased bilinear)
+ * 2. Host: apply rescale + normalize folded together into `[1, 3, S, S]` f32
+ * 3. Run `matte` once → **the logits before sigmoid** `[1, 1, S, S]`
+ * 4. Host: `sigmoid` → **back to the original image resolution** → 8-bit α (`./matte.ts`)
  *
- * 段 4 で sigmoid を resize より先に掛けるのは、両系列の上流（同梱 `handler.py` と Lucida の
- * モデルカードの利用例）がどちらも `preds.sigmoid()` してから元の解像度へ戻すため（logit のまま
- * 補間すると飽和域の外挿が効いて境界の α が変わる）。段 4 の補間と段の順序は系列ごとの上流に
- * 合わせ、どちらを当てるかは配布形の `pipelineConfig.postprocess` の宣言で決まる（HR =
- * `u8-pil-bicubic`・Lucida = `float-bilinear`。量子化はどちらも四捨五入で、上流の切り捨ては写さない —
- * ADR 0125。両系列の上流の実際の手順は `./matte.ts` のモジュール doc）。
+ * Step 4 applies sigmoid before the resize because both checkpoints' upstreams (the bundled
+ * `handler.py` and the usage example on Lucida's model card) do `preds.sigmoid()` before going back
+ * to the original resolution (interpolating logits extrapolates the saturated region and changes α
+ * at the boundary). Step 4's interpolation and order of stages follow each checkpoint's upstream,
+ * and which one applies is decided by the distribution's `pipelineConfig.postprocess` declaration
+ * (HR = `u8-pil-bicubic`, Lucida = `float-bilinear`. Both quantize by rounding; upstream truncation
+ * is not copied — ADR 0125. Both checkpoints' actual upstream procedures are in the module doc of
+ * `./matte.ts`).
  *
- * ## MUST: Session は構築時に 1 本だけ張り、`dispose` まで持つ（Anima / Irodori と非対称）
+ * ## MUST: one Session is created at construction and kept until `dispose` (unlike Anima / Irodori)
  *
- * あちらが段ごとに張っては畳むのは、複数の巨大グラフを同時常駐させられないから（ADR 0016）。
- * こちらはグラフが 1 本（1024² で 964MB）で畳む相手がおらず、逆に「1 枚ごとに張っては畳む」
- * 形にすると**画像 1 枚あたり重みを丸ごとアップロードし直す**。背景抜きは何枚も通す使い方が
- * 普通なので、常駐が既定の形になる（SigLIP2 と同じ理由・同じ形）。
+ * Those create and tear down per step because several huge graphs cannot be resident at once
+ * (ADR 0016). Here there is one graph (964MB at 1024²) with nothing to make room for; the opposite,
+ * "create and tear down per image", **would re-upload the whole weights for every image**.
+ * Background removal normally runs many images, so residency is the default shape (the same reason
+ * and the same shape as SigLIP2).
  *
- * MUST: それでも直列化鎖には載せる — `segment` の同時実行は 1 つの Session を 2 本の `run` で
- * 共有することになり、`dispose` は in-flight の完了を待たずに GPU を破棄する
- * （flush-before-destroy 違反）。
+ * MUST: it still goes on the serialization chain — concurrent `segment` calls would share one
+ * Session between two `run`s, and `dispose` would destroy the GPU without waiting for in-flight
+ * work (a flush-before-destroy violation).
  *
- * ## 返すのは α マット **1 枚だけ**（RGBA 合成も PNG も持たない）
+ * ## It returns **one alpha matte only** (no RGBA compositing, no PNG)
  *
- * {@link BirefnetPipeline.segment} が返すのは「入力と同じ寸法・画素あたり 1 バイトの α」で、
- * 前景を切り抜いた RGBA は返さない。
+ * {@link BirefnetPipeline.segment} returns "an α of the same size as the input, one byte per
+ * pixel", not an RGBA cut-out of the foreground.
  *
- * - **合成の方針は用途で変わる**（ストレート α のまま canvas へ渡す / 白地や単色へ合成して
- *   JPEG にする / 色にじみ除去を挟む）。ここで 1 つ選ぶと、他の選び方をする口が消える。
- * - 合成そのものは `rgba[i * 4 + 3] = alpha[i]` の 1 行で、抽象化する規模でもない
- *   （下の「使い方」のとおり）。
- * - `encodePng` は truecolor RGB 専用で、**α が 255 でない画素を受け取らない**
- *   （`src/image/png.ts`）。RGBA を返す口を生やしても、それを書き出す口を同時に足さない限り
- *   Deno では使い道が無い — 「使いやすくする」ための 1 本が 2 本の機能追加になる。
+ * - **The compositing policy depends on the use** (pass straight α to a canvas / composite onto
+ *   white or a solid colour and make a JPEG / insert colour decontamination). Choosing one here
+ *   closes the door on the others.
+ * - Compositing itself is one line, `rgba[i * 4 + 3] = alpha[i]`, not worth an abstraction (see
+ *   "Usage" below).
+ * - `encodePng` is truecolor RGB only and **does not accept pixels whose α is not 255**
+ *   (`src/image/png.ts`). Adding an entry that returns RGBA has no use outside the browser (Deno /
+ *   Node) unless an entry that writes it is added at the same time — one entry "for convenience"
+ *   becomes two features.
  *
- * 使い方（白地へ合成して PNG にする場合）:
+ * Usage (compositing onto white and writing a PNG):
  *
  * ```ts
  * const matte = await pipeline.segment(image);
@@ -54,12 +60,12 @@
  * await encodePng(rgba, matte.width, matte.height);
  * ```
  *
- * ## MUST: 数値の正はここでは担保されない
+ * ## MUST: numerical correctness is not guaranteed here
  *
- * 正はグラフ単位の golden E2E（`packages/runtime/tests/e2e_birefnet_test.ts` — 実重み 2 系列 ×
- * 合成 4 + 実画像 4 ケース）と、前処理のパリティ門
- * （`packages/models/tests/image_preprocess_test.ts` / 実画像は
- * `packages/models/tests/e2e_birefnet_real_test.ts`）が担保する。
+ * Correctness is guaranteed by the per-graph golden E2E (`packages/e2e/tests/e2e_birefnet_test.ts`
+ * — real weights of 2 series × 4 synthetic + 4 real-image cases) and the preprocessing parity check
+ * (`packages/models/tests/image_preprocess_test.ts` / real images in
+ * `packages/e2e/tests/e2e_birefnet_real_test.ts`).
  */
 
 import {
@@ -115,50 +121,55 @@ import {
 import { readAssetBuffer } from "../hub/asset-readers.ts";
 import { assertGraphInputDim, assertGraphInputDtype } from "../hub/graph-gates.ts";
 
-/** manifest の weights 表に現れる部品名（ADR 0041 §3 の規約名）。 */
+/** Component name in the manifest's weights table (the conventional name of ADR 0041 §3). */
 const MATTE = "matte";
 
-/** この系列の weights 部品（差し替え席が受ける役割名でもある）。 */
+/** This family's weights components (also the role names component replacement accepts). */
 const COMPONENT_KEYS = [MATTE] as const;
 
-/** グラフ入力の名前（`tools/export-recipes/birefnet/export.py` の `INPUT_NAME`）。 */
+/** Name of the graph input (`INPUT_NAME` in `tools/export-recipes/birefnet/export.py`). */
 const PIXEL_VALUES = "pixel_values";
 
-/** 入力のチャネル数（RGB）。batch と併せてグラフ側も静的 1 / 3 で焼かれている。 */
+/** Input channel count (RGB). The graph is baked with static 1 / 3 for it and the batch. */
 const CHANNELS = 3;
 
-/** 出力のチャネル数（マットは 1 枚）。 */
+/** Output channel count (one matte). */
 const MATTE_CHANNELS = 1;
 
-/** 構築オプション（{@link BirefnetPipeline.fromAssets} / {@link BirefnetPipeline.fromPretrained} 共通）。 */
+/**
+ * Construction options (shared by {@link BirefnetPipeline.fromAssets} /
+ * {@link BirefnetPipeline.fromPretrained}).
+ */
 export type BirefnetPipelineOptions = {
   /**
-   * 既存の GPU を共有する。**渡した側が所有権を持つ**ので {@link BirefnetPipeline.dispose} は
-   * 破棄しない。省略時はパイプラインが内部で `acquireGpu` し、`dispose()` で破棄する。
+   * Shares an existing GPU. **The caller keeps ownership**, so {@link BirefnetPipeline.dispose}
+   * does not destroy it. When omitted, the pipeline calls `acquireGpu` internally and destroys it
+   * in `dispose()`.
    */
   readonly gpu?: GpuContext;
-  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  /** Model (a key of the manifest's models). Defaults to `defaultModel`. */
   readonly model?: string;
-  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  /** Execution configuration (a key of that model's quants). Defaults to `defaultQuant`. */
   readonly quant?: string;
   /**
-   * 実行 1 回ごとの診断を受け取る観測席（1 マット = `matte` 1 回）。op 別 GPU 時間
-   * （`lastRunTiming`）が要るときは `gpu` に `acquireGpu({ gpuTiming: true })` を渡す
-   * （ADR 0021 — 既定は計測しない）。
+   * Observation hook that receives the diagnostics of each run (one matte = one `matte` run). For
+   * per-op GPU time (`lastRunTiming`) pass `acquireGpu({ gpuTiming: true })` as `gpu` (ADR 0021 —
+   * no timing by default).
    *
-   * NOTE: SigLIP2 と同じくコンポーネント名を渡さない — グラフが 1 本しかないので、名前が
-   * 常に同じ 1 値になる（受け手が分岐できない引数を渡さない）。
+   * NOTE: like SigLIP2, no component name is passed — there is one graph, so the name would always
+   * be the same single value (no argument the receiver cannot branch on).
    *
-   * コールバックの例外は握らない（fail loudly — セグメンテーションごと落ちる）。
+   * Exceptions from the callback are not caught (fail loudly — the segmentation fails with it).
    */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
 /**
- * {@link BirefnetPipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。
+ * Fetch-layer options used only by {@link BirefnetPipeline.fromPretrained} (passed through to the
+ * hub).
  *
- * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
- * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
+ * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
+ * `onRetry` are **for HTTP sources only**, lives in one place, {@link FromPretrainedHubOptions}.
  */
 export type BirefnetFromPretrainedOptions = BirefnetPipelineOptions &
   FromPretrainedHubOptions &
@@ -166,17 +177,18 @@ export type BirefnetFromPretrainedOptions = BirefnetPipelineOptions &
     readonly signal?: AbortSignal;
   };
 
-/** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
+/** Input for building directly from fetched assets (pass the hub's `fetchAssets` result as is). */
 export type BirefnetAssets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
 /**
- * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は
- * {@link readAssetBuffer}）。
+ * Turns the fetched bytes into an ArrayBuffer that can be passed to `openContainer` (the check
+ * itself is {@link readAssetBuffer}).
  *
- * MUST: `slice` で写さない — 1024² の配布形は 1 本 964MB あり、ホスト RAM のピークが倍になる。
+ * MUST: do not copy with `slice` — a 1024² distribution is 964MB in one file, and the host RAM peak
+ * would double.
  */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -184,23 +196,24 @@ const assetBuffer = (
 ): ArrayBuffer => readAssetBuffer("birefnet", "weights", assets, key);
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 8 家族共有 —
- * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`matte`）か、分割形の
- * part 列（`matte[0]` / `matte[1]` / …）。
+ * The component supplier of the full-asset surface (`fromAssets`) (the receiving implementation is
+ * shared by every family — {@link assetComponentOpener}). A component key is either one single-form
+ * `krm` (`matte`) or the part sequence of the split form (`matte[0]` / `matte[1]` / …).
  */
 const assetOpener = (assets: BirefnetAssets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("birefnet", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
- * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
+ * Checks that the **static** dimension of one graph-input axis matches the `pipelineConfig`
+ * declaration.
  *
- * MUST: 落とさない。前処理は宣言の寸法へ resize するので、グラフが別の解像度で焼かれていても
- * **ホスト側は最後まで通る**（落ちるのは Session の shape 検査で、そのときには「どちらの数が
- * 正しいのか」が読み手に伝わらない）。解像度違いの系列（1024² / 2048²）の資産取り違えは
- * ここが唯一の検出器。
+ * MUST: do not drop this check. Preprocessing resizes to the declared size, so even when the graph
+ * was baked at another resolution **the host side passes all the way through** (the failure comes
+ * from the Session's shape check, by which time the reader cannot tell "which number is right").
+ * This is the only detector of mixed-up assets between resolution series (1024² / 2048²).
  *
- * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: the `export` is for tests that pin the rejection paths without a GPU (not exposed on
+ * `mod.ts` / the subpath surface — ADR 0008).
  */
 export const assertStaticDim = (
   model: GraphOwner,
@@ -211,14 +224,14 @@ export const assertStaticDim = (
 ): void => assertGraphInputDim("birefnet", model, inputName, axis, expected, where);
 
 /**
- * グラフ**出力**の形が `[1, 1, imageHeight, imageWidth]` であることを見る。
+ * Checks that the graph **output** has shape `[1, 1, imageHeight, imageWidth]`.
  *
- * MUST: 落とさない。後段は「要素数が H×W」しか見ない形にもできるが、それだと multi-scale
- * supervision の中間予測込みで焼かれたグラフ（`[1, 3, S, S]` 相当）が**別の値を α として**
- * 通り抜ける。
+ * MUST: do not drop this check. The later steps could check only "element count is H×W", but then a
+ * graph baked with the intermediate predictions of multi-scale supervision (`[1, 3, S, S]` or
+ * similar) would pass through **with different values read as α**.
  *
- * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: the `export` is for tests that pin the rejection paths without a GPU (not exposed on
+ * `mod.ts` / the subpath surface — ADR 0008).
  */
 export const assertMatteShape = (
   model: GraphOwner,
@@ -248,19 +261,20 @@ const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
 };
 
 /**
- * RGB8 の画素列 → グラフへ渡す `pixel_values`（`[3, S, S]` を平らにしたもの）。
+ * RGB8 pixel row → the `pixel_values` passed to the graph (`[3, S, S]` flattened).
  *
- * 前処理そのものは `src/image/preprocess.ts` が持ち、ここがするのは `pipelineConfig` の
- * 定数で結線することだけ。**`resizeRgb8` は `(width, height)` の順**なので、宣言の 2 欄を
- * 取り違えると非正方の配布形で黙って転置される。
+ * The preprocessing itself is owned by `src/image/preprocess.ts`; all this does is wire it with the
+ * `pipelineConfig` constants. **`resizeRgb8` takes `(width, height)` in that order**, so swapping
+ * the two declared fields would silently transpose a non-square distribution.
  *
- * MUST: 補間フィルタも `config.interpolation` から渡す（既定引数に頼らない）。宣言と実効値を
- * 1 本にすると、受理集合がリテラル型なので**型検査が同一性を保証する** — 新しい家族が渡し
- * 忘れる経路が構造的に消える（`preprocess.ts` の MUST「モデルカードの一部なので呼び出し側が
- * 明示する」の実装側）。
+ * MUST: the interpolation filter also comes from `config.interpolation` (do not rely on the default
+ * argument). With the declaration and the effective value as one, and the accepted set a literal
+ * type, **the type checker guarantees they are identical** — the path by which a new family forgets
+ * to pass it disappears structurally (the implementation side of `preprocess.ts`'s MUST "it is part
+ * of the model card, so the caller states it explicitly").
  *
- * NOTE: `export` は結線を直接叩くテストのため（`fromAssets` 経由で此処へ届くには実 IR
- * コンテナが要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
+ * NOTE: the `export` is for tests that call the wiring directly (reaching here through `fromAssets`
+ * needs a real IR container). Not exposed on `mod.ts` / the subpath surface (ADR 0008).
  */
 export const preprocessPixelValues = (
   config: BirefnetPipelineConfig,
@@ -273,32 +287,36 @@ export const preprocessPixelValues = (
   );
 
 /**
- * {@link BirefnetPipeline} の内部状態（公開面には出さない）。
+ * Internal state of {@link BirefnetPipeline} (not on the public surface).
  *
- * NOTE: `export` は A/B の道具（`tools/birefnet-ab/`）が {@link loadBirefnetState} /
- * {@link matteLogits} を使うため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: the `export` exists because the A/B tool (`tools/birefnet-ab/`, removed in 0.15) used
+ * {@link loadBirefnetState} / {@link matteLogits} (not exposed on `mod.ts` / the subpath surface —
+ * ADR 0008).
  */
 export type BirefnetState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly config: BirefnetPipelineConfig;
   readonly matte: ModelComponent;
-  /** 構築時に張って `dispose` まで持つ 1 本（モジュール doc の MUST）。 */
+  /** The one Session created at construction and kept until `dispose` (the module doc's MUST). */
   readonly session: Session;
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
 /**
- * birefnet が受ける実行ノブ（manifest の quant 宣言）。合成規則（明示 > 宣言 > runtime 既定）・
- * 値域・組合せ・送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合
- * だけを決める。明示の上書き口は持たない（構築オプションに実行ノブの欄が無い）。
+ * The execution knobs birefnet accepts (the manifest's quant declaration). The merge rule
+ * (explicit > declared > runtime default), value ranges, combinations and the classification of
+ * the thrown types are owned by `resolveSessionOptions`, shared by every family; this only decides
+ * the accepted set. There is no explicit override (the construction options have no execution-knob
+ * field).
  *
- * どのキーも受けないのは、配布形が実行ノブを宣言した quant を持たないから（f32 / f16 の席とも
- * `session` は空 — 違うのは重みの格納だけ）。宣言が現れたら、受ける前に参照値で確かめる — 黙って
- * runtime へ流さない。
+ * No key is accepted because the distribution has no quant that declares execution knobs (`session`
+ * is empty for both the f32 and the f16 preset — only the weight storage differs). When a
+ * declaration appears, check it against the reference values before accepting it — do not silently
+ * pass it to the runtime.
  *
- * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: the `export` is for the equivalence test that runs every quant of the mirror through the
+ * same table (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const BIREFNET_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: false,
@@ -311,25 +329,34 @@ export const BIREFNET_SESSION_POLICY: FamilySessionPolicy = {
   packedStaticQuantize: false,
 };
 
-/** 家族 admission（{@link admitBirefnet}）が確定させる材料。 */
+/** What the family admission ({@link admitBirefnet}) settles. */
 type BirefnetAdmission = {
   readonly config: BirefnetPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
-  /** quant 宣言を受理表で通した実効設定（{@link BIREFNET_SESSION_POLICY}）。 */
+  /**
+   * The effective settings after passing the quant declaration through the acceptance table
+   * ({@link BIREFNET_SESSION_POLICY}).
+   */
   readonly sessionOptions: SessionOptions;
-  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  /**
+   * The quant declaration plus the features the effective settings need (both the request and the
+   * check read this).
+   */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
 };
 
 /**
- * この manifest とこのグラフを birefnet として実行できるかを見る（`hub/components.ts` の
- * 家族 admission 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
+ * Checks whether this manifest and this graph can run as birefnet (the family admission hook of
+ * `hub/components.ts` — on the fetch surface it is called **before a single byte of the weight
+ * parts is fetched**).
  *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
- * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
- * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
- * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+ * MUST: gather the family's checks in this one function. Scattered into later steps, on the fetch
+ * surface they would fail only **after** GB-class weights are downloaded (the implementation would
+ * be narrower than the wording of ADR 0070 decision 5).
+ * MUST: manifest contract violations and **the match against the graph** fail **before the GPU is
+ * acquired**. In the other order, an environment without a GPU turns them into a different
+ * exception and the reader cannot tell "what was wrong".
  */
 const admitBirefnet = (
   manifest: Manifest,
@@ -352,7 +379,8 @@ const admitBirefnet = (
     );
   }
   if (major !== BIREFNET_PIPELINE_MAJOR) {
-    // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門（ADR 0038 §6）。
+    // The only check that stops silent degradation from "old implementation × new repository"
+    // (ADR 0038 §6).
     throw new Error(
       `BirefnetPipeline: pipeline '${name}/${major}' の major に未対応` +
         `（この実装が読めるのは ${BIREFNET_PIPELINE_NAME}/${BIREFNET_PIPELINE_MAJOR}）`,
@@ -368,7 +396,8 @@ const admitBirefnet = (
     );
   }
   const quant = entry.quants[quantName];
-  // 未対応の宣言は部品を開く前（= 重みの part を取る前）に落とす（全家族共通の 1 本）。
+  // Unsupported declarations fail before components are opened (= before weight parts are fetched;
+  // one path shared by every family).
   const sessionOptions = resolveSessionOptions(
     BIREFNET_SESSION_POLICY,
     quant.session,
@@ -378,9 +407,10 @@ const admitBirefnet = (
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
   const matte = open(MATTE);
-  // グラフの宣言と pipelineConfig の突合。入出力が 1 本ずつであることまで見るのは、
-  // multi-scale supervision の中間予測込みで焼かれたグラフが混ざると、位置で引く後段が
-  // 黙って別の値を α として読むため。
+  // Match the graph declaration against pipelineConfig. Checking that there is exactly one input
+  // and one output matters because, if a graph baked with the intermediate predictions of
+  // multi-scale supervision got mixed in, the later steps that pick by position would silently read
+  // other values as α.
   if (matte.graph.inputs.length !== 1 || matte.graph.outputs.length !== 1) {
     throw new Error(
       `BirefnetPipeline: matte グラフの入出力が ${matte.graph.inputs.length} /` +
@@ -394,9 +424,10 @@ const admitBirefnet = (
   assertStaticDim(matte, PIXEL_VALUES, 3, config.imageWidth, "imageWidth");
   assertMatteShape(matte, config, "マットの形");
 
-  // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
-  // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
-  // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+  // MUST: a shared GPU's missing capability (feature / device limit) fails here — unlike acquiring
+  // our own, there is no reason to wait for `acquireGpu`, and this is the only family check that
+  // knows before the weights are downloaded (the mapping between request and check is the one
+  // function in `session/gpu-features.ts`, and the later check calls the same function).
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(gpuFeatures, options.gpu, `BirefnetPipeline: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
@@ -410,11 +441,13 @@ const admitBirefnet = (
 };
 
 /**
- * admission を通った材料から実行状態を組む（GPU 取得と Session 構築だけ）。
+ * Builds the execution state from the materials that passed admission (GPU acquisition and Session
+ * construction only).
  *
- * MUST: GPU 取得後に許される検査は GPU の能力（feature の shader-f16 — ADR 0028 / device limits —
- * ADR 0089 決定 5）だけ。この関数が取得後に見るのは feature だけで、limits は共有 GPU のときに
- * {@link admitBirefnet} が見る（自前で取った device の limits はここでは照合しない）。
+ * MUST: the only checks allowed after GPU acquisition are GPU capabilities (the shader-f16 feature
+ * — ADR 0028 / device limits — ADR 0089 decision 5). After acquisition this function checks only
+ * features; limits are checked by {@link admitBirefnet} for a shared GPU, and for a device acquired
+ * here by `assertRequiredLimits` right after acquisition.
  */
 const openBirefnetState = async (
   admitted: BirefnetAdmission,
@@ -422,18 +455,21 @@ const openBirefnetState = async (
   options: BirefnetPipelineOptions = {},
 ): Promise<BirefnetState> => {
   const { config, quantName, quant, sessionOptions, gpuFeatures } = admitted;
-  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  // The supplier is **the same one** admission saw (`open` only looks up components already
+  // opened).
   const matte = open(MATTE);
-  // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
-  // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
-  // {@link admitBirefnet} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
+  // MUST: declared features can only be requested at device creation (ADR 0028). A shared GPU
+  // cannot be asked for them, so the missing capability is named and fails (a shared GPU was
+  // already checked by {@link admitBirefnet} through the same function, but for a device acquired
+  // here this is the only check).
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `BirefnetPipeline: quant '${quantName}'`);
-    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
-    // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
-    // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は `admitBirefnet` が見ている。
+    // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
+    // (`fromPretrained` checks against adapter values); without this a missing declaration surfaces
+    // only at Session construction, and a declaration stricter than the real demand is never
+    // matched at all. A shared GPU is checked by `admitBirefnet`.
     if (ownsGpu) {
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
@@ -452,22 +488,24 @@ const openBirefnetState = async (
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
   } catch (error) {
-    // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
+    // A GPU acquired internally can no longer be released by anyone if construction fails, so it is
+    // returned here.
     if (ownsGpu) gpu.destroy();
     throw error;
   }
 };
 
 /**
- * 画像 1 枚の logit の地図（前処理 → `matte` 1 回 — `imageWidth × imageHeight` を行優先に平らに
- * した f32）。
+ * The logit map of one image (preprocessing → one `matte` run — `imageWidth × imageHeight` f32,
+ * flattened row-major).
  *
- * NOTE: `export` は A/B の道具（`tools/birefnet-ab/` — 1 回の実行の logit に後処理の手順を全部
- * 当て、手順ごとにグラフを回し直さない）のため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: the `export` exists for the A/B tool (`tools/birefnet-ab/`, removed in 0.15 — it applied
+ * every post-processing procedure to the logits of one run instead of re-running the graph per
+ * procedure) (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  *
- * MUST（呼び手）: パイプラインの外から呼ぶときは直列化鎖が付かない — 同じ `state` で前の呼び出しの
- * 完了を待ってから次を呼び、使い終えたら Session（と、自前で取らせた GPU）の解放を自分で持つ
- * （{@link loadBirefnetState} の MUST）。
+ * MUST (caller): called from outside the pipeline there is no serialization chain — with the same
+ * `state`, wait for the previous call to finish before the next one, and own the release of the
+ * Session (and of the GPU you let it acquire) when done (the MUST of {@link loadBirefnetState}).
  */
 export const matteLogits = async (
   state: BirefnetState,
@@ -496,10 +534,11 @@ export const matteLogits = async (
 };
 
 /**
- * 画像 1 枚を通す（前処理 → `matte` 1 回 → sigmoid → 元解像度の 8bit α）。
+ * Runs one image (preprocessing → one `matte` run → sigmoid → 8-bit α at the original resolution).
  *
- * MUST: 後処理の手順は配布形の宣言（`config.postprocess`）から渡す — 前処理の補間と同じく、宣言と
- * 実効値を 1 本にする（`preprocessPixelValues` の MUST と同じ理由）。
+ * MUST: the post-processing procedure comes from the distribution's declaration
+ * (`config.postprocess`) — like the preprocessing interpolation, the declaration and the effective
+ * value are one (the same reason as the MUST of `preprocessPixelValues`).
  */
 const segmentImage = async (state: BirefnetState, image: Rgb8Image): Promise<AlphaMatte> =>
   matteFromLogits(
@@ -512,19 +551,20 @@ const segmentImage = async (state: BirefnetState, image: Rgb8Image): Promise<Alp
   );
 
 /**
- * 配布形から取得して実行状態を組む（{@link BirefnetPipeline.fromPretrained} の本体 — 段取りの説明は
- * あちらの doc）。
+ * Fetches a distribution and builds the execution state (the body of
+ * {@link BirefnetPipeline.fromPretrained} — the sequence is described in its doc).
  *
- * NOTE: `export` は A/B の道具（`tools/birefnet-ab/`）がパイプラインと同じ門と同じグラフで logit を
- * 採るため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: the `export` exists so that the A/B tool (`tools/birefnet-ab/`, removed in 0.15) could take
+ * logits through the same checks and the same graph as the pipeline (not exposed on `mod.ts` / the
+ * subpath surface — ADR 0008).
  *
- * MUST（呼び手）: 返る状態には {@link BirefnetPipeline} の直列化鎖と `dispose` が付かないので、
- * その 2 つの役目は呼び手が持つ — {@link matteLogits} は前の呼び出しの完了を待ってから次を呼ぶ
- * （1 つの Session を 2 本の `run` で共有しない）。使い終えたら `state.session.dispose()` を
- * 自分で呼ぶ（in-flight の実行が終わった後に — flush-before-destroy）。`options.gpu` を省いて
- * GPU をこの関数に取らせた場合（`state.ownsGpu`）は、Session を畳んだ後の `state.gpu.destroy()`
- * も呼び手の持ち分になる（両方を必ず通す形は {@link BirefnetPipeline.dispose} と同じ
- * {@link disposeSteps}）。
+ * MUST (caller): the returned state comes without {@link BirefnetPipeline}'s serialization chain
+ * and `dispose`, so the caller takes over both roles — call {@link matteLogits} only after the
+ * previous call has finished (do not share one Session between two `run`s). When done, call
+ * `state.session.dispose()` yourself (after in-flight runs have finished — flush-before-destroy).
+ * If `options.gpu` was omitted and this function acquired the GPU (`state.ownsGpu`), the
+ * `state.gpu.destroy()` after tearing down the Session is also the caller's (the shape that always
+ * runs both is {@link disposeSteps}, the same as {@link BirefnetPipeline.dispose}).
  */
 export const loadBirefnetState = async (
   ref: string | HubRepoRef | DistributionSource,
@@ -549,7 +589,8 @@ export const loadBirefnetState = async (
       ? {}
       : { onRunDiagnostics: options.onRunDiagnostics }),
   };
-  // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+  // The family checks run in the admission hook (before weight parts are fetched —
+  // `hub/components.ts`).
   const { admitted, open } = await loadContainerComponents(
     "BirefnetPipeline.fromPretrained",
     loaded,
@@ -557,8 +598,9 @@ export const loadBirefnetState = async (
     COMPONENT_KEYS,
     async (open) => {
       const admitted = admitBirefnet(loaded.manifest, open, buildOptions);
-      // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
-      // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+      // The `requiredLimits` the distribution declared are checked here, **before weight parts are
+      // fetched** (ADR 0089 decision 5 — a shared GPU's limits, or the adapter's measured values on
+      // the path that acquires its own).
       await assertRequiredLimitsBeforeDownload(
         admitted.quant.requiredLimits,
         buildOptions.gpu,
@@ -576,20 +618,23 @@ export const loadBirefnetState = async (
 };
 
 /**
- * BiRefNet 系の画像 → α マットのパイプライン（グラフ 1 本）。
+ * The BiRefNet family's image → alpha matte pipeline (one graph).
  *
- * 構築は {@link BirefnetPipeline.fromPretrained}（HF から取得）か
- * {@link BirefnetPipeline.fromAssets}（取得済みバイト列）だけを入口にする — コンストラクタを
- * private にしてあるのは、manifest 検査と資産の突合を迂回した半端な状態を作れないようにする
- * ため（ADR 0008）。
+ * Construction enters only through {@link BirefnetPipeline.fromPretrained} (fetch from HF) or
+ * {@link BirefnetPipeline.fromAssets} (already-fetched bytes) — the constructor is private so that
+ * no half-built state bypassing the manifest checks and the asset matching can be created
+ * (ADR 0008).
  */
 export class BirefnetPipeline {
   readonly #state: BirefnetState;
-  /** segment と dispose の直列化鎖（「1 本ずつ」を公開 API 側で守る — モジュール doc）。 */
+  /**
+   * Serialization chain for segment and dispose ("one at a time" kept on the public API side —
+   * module doc).
+   */
   readonly #chain = createOperationChain();
   /**
-   * dispose の 1 本。**undefined でないことが「dispose 済み」**（別に真偽値を持つと、独立に
-   * 更新される派生状態になる）。
+   * The one dispose. **Not being undefined means "disposed"** (a separate boolean would be derived
+   * state updated independently).
    */
   #disposal: Promise<void> | undefined;
 
@@ -598,19 +643,20 @@ export class BirefnetPipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
-   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
-   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
-   * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
-   * {@link FromPretrainedComponentOptions.components}（役割は `matte` 1 本）。文字列の
-   * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
-   * `src/hub/repo-ref.ts` の MUST）。検証済み pin は {@link BIREFNET_SOURCES}（`./config.ts`）の
-   * `"birefnet-hr"` / `"lucida"` — 1 リポに 1024² / 2048² の 2 モデルが同居し、2048² は
-   * `{ model: "2048" }` で選ぶ。
+   * Fetches a distribution and builds (`loadManifest` → `resolveSelection` → fetch **only each
+   * component's descriptor (part 0)** for admission → warm the weight parts → `fetchAssets` for the
+   * remaining assets → construction). Blocks are read in part order at the moment the Session is
+   * built (ADR 0109 — `src/hub/components.ts`). To replace a component with the same role from
+   * another repository use {@link FromPretrainedComponentOptions.components} (one role, `matte`). A
+   * string `ref` reads as `{ repo }` (= follows `main`). **`ref` is required** (sources have no
+   * default — the MUST of `src/hub/repo-ref.ts`). The verified pins are `"birefnet-hr"` /
+   * `"lucida"` of {@link BIREFNET_SOURCES} (`./config.ts`) — one repository holds the two
+   * models 1024² / 2048², and 2048² is chosen with `{ model: "2048" }`.
    *
-   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
-   * 通らない（{@link BirefnetFromPretrainedOptions} の HTTP 専用ノブは効かない）。
+   * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
+   * `@karume/hub/deno`). It skips the check of HF's `owner/name` spelling and touches neither the
+   * network nor CacheStorage (the HTTP-only knobs of {@link BirefnetFromPretrainedOptions} have no
+   * effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
@@ -620,13 +666,15 @@ export class BirefnetPipeline {
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openContainer`・グラフとの突合を
-   * 全てここで済ませ、**`matte` の Session を 1 本張って**返す（モジュール doc の MUST）。
+   * Builds from an already-fetched manifest + assets. Contract checks, asset interpretation,
+   * `openContainer` and the match against the graph all happen here, and it returns **with the one
+   * `matte` Session created** (the module doc's MUST).
    *
-   * 部品のキーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`matte`）と、分割形の
-   * part 列（`matte[0]` / `matte[1]` / … — part 0 から添字順）。分割形はバイト列を連結せず
-   * part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly（受け口の実装は
-   * `src/hub/components.ts` の 1 本）。
+   * Component keys are accepted **in both forms** — one single-form `krm` byte array (`matte`) and
+   * the part sequence of the split form (`matte[0]` / `matte[1]` / … — in index order from part 0).
+   * The split form is opened as a part sequence without concatenating the bytes. A missing index or
+   * mixing with the single-form key fails loudly (the receiving implementation is the one in
+   * `src/hub/components.ts`).
    */
   static async fromAssets(
     input: BirefnetAssets,
@@ -638,18 +686,18 @@ export class BirefnetPipeline {
   }
 
   /**
-   * 画像 1 枚の α マットを出す。返るのは**入力と同じ寸法**の 8bit α（モジュール doc の
-   * 「返すのは α マット 1 枚だけ」）。
+   * Produces the alpha matte of one image. It returns an 8-bit α **of the same size as the input**
+   * (the module doc's "It returns one alpha matte only").
    *
-   * 入力は RGB8 の画素列（行優先・画素あたり 3 バイト）で、resize / rescale / normalize は
-   * この中で配布形の定数どおりに掛かる。アスペクト比は保たない（上流の前処理が高さ・幅の
-   * 対へそのまま伸縮する形で、crop も pad も無いため）。
+   * The input is an RGB8 pixel row (row-major, 3 bytes per pixel); resize / rescale / normalize are
+   * applied inside with the distribution's constants. The aspect ratio is not kept (the upstream
+   * preprocessing stretches straight to the height/width pair, with no crop and no pad).
    *
-   * 並行に呼ばれた場合は**待たされて順に**走る（1 つの Session を 2 本の run で共有しない）。
+   * Concurrent calls **wait and run in order** (one Session is not shared between two runs).
    */
   async segment(image: Rgb8Image): Promise<AlphaMatte> {
-    // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた
-    // セグメンテーションまで巻き添えで落ちる）。
+    // The disposed check happens at call time (checking inside the chain would also fail the
+    // segmentations accepted before dispose).
     if (this.#disposal !== undefined) {
       throw new Error("BirefnetPipeline: dispose 済みでは切り抜けない");
     }
@@ -657,17 +705,19 @@ export class BirefnetPipeline {
   }
 
   /**
-   * 解放する。Session は必ず畳み、**内部で取得した GPU だけ**破棄する（`options.gpu` で
-   * 渡された GpuContext は呼び出し側の所有物なので触らない）。
+   * Releases. The Session is always torn down, and **only a GPU acquired internally** is destroyed
+   * (a GpuContext passed in `options.gpu` belongs to the caller and is not touched).
    *
-   * MUST: in-flight の実行の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
-   * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
-   * 呼び出し側が「破棄済み」と見なして次へ進む）。
+   * MUST: destroy only after in-flight runs have finished (flush-before-destroy) — putting the
+   * destruction on the chain too fixes the order of waiting and destroying in one place. Later
+   * calls return the same completion (returning earlier would let the caller treat it as
+   * "destroyed" and move on).
    *
-   * MUST: `Session.dispose()` が失敗しても `gpu.destroy()` は必ず通す（{@link disposeSteps}）—
-   * 直列 `await` だと前段の reject で後段へ到達せず、`openXState` の catch が掲げている
-   * 「内部で取った GPU は必ず返す」が dispose 経路でだけ破れる。しかも `#disposal` に
-   * rejected promise が居座るので、2 度目の `dispose()` は再試行にならない。
+   * MUST: `gpu.destroy()` always runs even if `Session.dispose()` fails ({@link disposeSteps}) —
+   * with a serial `await`, a reject in the earlier step never reaches the later one, and "a GPU
+   * acquired internally is always returned", which the catch of `openXState` promises, would break
+   * on the dispose path only. Worse, the rejected promise would stay in `#disposal`, so a second
+   * `dispose()` would not retry.
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(() =>
@@ -681,7 +731,7 @@ export class BirefnetPipeline {
     return this.#disposal;
   }
 
-  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  /** `await using` support (Explicit Resource Management) — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }

@@ -1,46 +1,53 @@
 /**
- * `Gemma4ChatSession` — **普通の多ターン chat** を持ち回るための中間層。
+ * `Gemma4ChatSession` — the middle layer for carrying **an ordinary multi-turn chat**.
  *
- * 面は 3 層になる。低い方から:
+ * The surface has three layers. From the lowest:
  *
- * 1. `Gemma4Pipeline.sequence()`（ADR 0083 決定 1〜4）— token id と KV の寿命を自分で回す
- * 2. **ここ** — 会話（`Gemma4ChatMessage` の並び）と KV の対応を持ち、溢れたら注入された
- *    ポリシーで切り詰める
- * 3. `Gemma4Pipeline.chat()` — 1 ターン = 1 sequence（過去 turn は毎回描き直す）
+ * 1. `Gemma4Pipeline.sequence()` (ADR 0083 decisions 1–4) — the caller runs token ids and the KV
+ *    lifetime itself
+ * 2. **this** — holds the mapping between the conversation (a list of `Gemma4ChatMessage`) and the
+ *    KV, and truncates with an injected policy on overflow
+ * 3. `Gemma4Pipeline.chat()` — one turn = one sequence (past turns are re-rendered every time)
  *
- * 3 だけだと会話が伸びるほど prefill が O(n²) になり、避けようとすると 1 の世界（token id /
- * `<bos>` / 未 commit frontier）へ一気に落ちる。この層が持つのは**その落差だけ**で、生成そのもの
- * は 1 に、描画と復号と停止文字列は `chat()` と同じ実装（{@link decodeChatChunks} /
- * {@link chatStreamOf}）にそのまま乗る — `send` が返す `Gemma4ChatStream` は `chat()` の返り値と
- * 同じ型・同じ契約である。
+ * With only 3, prefill becomes O(n²) as the conversation grows, and avoiding that drops straight
+ * into the world of 1 (token ids / `<bos>` / the uncommitted frontier). This layer holds **only that
+ * gap**: generation itself rides on 1, and rendering, decoding and stop strings ride on the same
+ * implementation as `chat()` ({@link decodeChatChunks} / {@link chatStreamOf}) — the
+ * `Gemma4ChatStream` that `send` returns has the same type and the same contract as the return value
+ * of `chat()`.
  *
- * ## KV を継ぐ条件
+ * ## When the KV is carried over
  *
- * 直前のターンが**配布形の EOS で閉じた**（`GenerationStop.reason === "eos"`）ときだけ、次の
- * ターンは差分（{@link gemma4ChatTurn}）で継ぐ。閉じ札は生成が出して sequence が未 commit
- * frontier（`pendingToken`）に持っており、次の `generate` が prompt の先頭へ前置する（ADR 0083
- * 決定 4）。max-tokens / 停止文字列 / 中断で打ち切ったターンの後ろは model turn が閉じていない
- * ので、sequence を捨てて履歴から描き直す。
+ * Only when the previous turn **closed with the distribution's EOS** (`GenerationStop.reason ===
+ * "eos"`) does the next turn carry on with a delta ({@link gemma4ChatTurn}). The closing token was
+ * emitted by generation and is held by the sequence as the uncommitted frontier (`pendingToken`);
+ * the next `generate` prepends it to the prompt (ADR 0083 decision 4). After a turn cut off by
+ * max-tokens / a stop string / an interruption the model turn is not closed, so the sequence is
+ * discarded and re-rendered from the history.
  *
- * NOTE: 配布形の EOS 集合には `<eos>` も `<|tool_response>` も居る（`gemma4StopTokens`）。
- * `<turn|>` 以外で閉じたターンを継ぐと綴りは上流の template と 1 token だけ食い違うが、会話が
- * 欠けることはない（差分の先頭は常に「閉じ札の直後」である）。
+ * NOTE: the distribution's EOS set contains `<eos>` and `<|tool_response>` as well
+ * (`gemma4StopTokens`). Carrying over a turn closed by something other than `<turn|>` makes the
+ * spelling differ from the upstream template by one token, but the conversation loses nothing (the
+ * delta always starts "right after the closing token").
  *
- * ## 溢れ処理は**注入可能**（ADR 0083 決定 10 の改訂）
+ * ## Overflow handling is **injectable** (the revision of ADR 0083 decision 10)
  *
- * 低レベル面は今も「切り詰めはホストの責務」で、`GenerationCapacityError` を投げて終わる。この
- * 層は既定のポリシー（{@link dropOldestTurns} = 最古の user / assistant の対を落とす・system は
- * 残す）を持ち、{@link Gemma4ChatSessionOptions.onOverflow} で丸ごと差し替えられる。ホストが
- * throw する関数を渡せば従来どおりホスト側で扱える。
+ * The low-level surface still says "truncation is the host's job" and ends by throwing
+ * `GenerationCapacityError`. This layer has a default policy ({@link dropOldestTurns} = drop the
+ * oldest user / assistant pair, keep system), replaceable as a whole through
+ * {@link Gemma4ChatSessionOptions.onOverflow}. A host that passes a throwing function can handle it
+ * on its side as before.
  *
- * ## 分岐（{@link Gemma4ChatSession.fork} — ADR 0083 追記 2026-10-11・裁定 8）
+ * ## Branching ({@link Gemma4ChatSession.fork} — ADR 0083 addendum 2026-10-11, ruling 8)
  *
- * 同じ設定・同じ履歴の独立のセッションを返す。KV を継いでいる会話は `GenerationSequence.fork`
- * で KV ごと複製し、KV が空の会話（まだ送っていない・直前のターンが EOS で閉じていない）は履歴
- * だけを写す（GPU の複製を出さない — 分岐の最初の `send` が元と同じく全体を描き直す）。再生成は
- * `regenerate` を作らず、この使い方として書く（{@link Gemma4ChatSession.fork} の doc）。
+ * Returns an independent session with the same settings and the same history. A conversation that
+ * carries its KV is copied KV and all with `GenerationSequence.fork`; a conversation with an empty KV
+ * (nothing sent yet, or the previous turn did not close with EOS) copies only the history (no GPU
+ * copy — the branch's first `send` re-renders the whole, like the original). Regeneration is written
+ * as this use rather than a `regenerate` (the doc of {@link Gemma4ChatSession.fork}).
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is side-effect free (no import-time execution, no global mutable state —
+ * CLAUDE.md).
  */
 
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
@@ -69,11 +76,12 @@ import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4ChatTurn } from "./text
 import type { GemmaTokenizer } from "./text/tokenizer.ts";
 
 /**
- * セッションがパイプラインから読む面（{@link Gemma4Pipeline} がそのまま満たす）。
+ * The surface the session reads from the pipeline ({@link Gemma4Pipeline} satisfies it as is).
  *
- * 面を絞ってあるのは、この層が**公開面より内側を 1 つも使っていない**ことを型で示すため
- * （消費者が同じものを自分で書ける = 写経見本としての価値がここにある）。テストが実 GPU 無しで
- * 会話の組み立てだけを見られるのも同じ性質の帰結である。
+ * The surface is narrowed to show in the type that this layer **uses nothing inside the public
+ * surface** (a consumer could write the same thing — its value as a copyable example lies here).
+ * That tests can look at the conversation assembly alone without a real GPU follows from the same
+ * property.
  */
 export type Gemma4ChatSessionHost = {
   readonly tokenizer: GemmaTokenizer;
@@ -83,138 +91,151 @@ export type Gemma4ChatSessionHost = {
 };
 
 /**
- * 溢れ処理に渡る文脈（「今の会話」と「あとどれだけ足りないか」）。
+ * The context passed to overflow handling ("the current conversation" and "how much is missing").
  *
- * `capacity` / `needed` は**同じ物差し**（会話が占める論理位置の数）で、`needed > capacity` が
- * 呼ばれた理由である。`capacity` は 2 つの上限のうち**先に効いた方**（このセッションが確保した
- * state 容量と、モデルが宣言する位置上限の小さい方）で、どちらでも打つ手は同じ（会話を短くする）。
+ * `capacity` / `needed` use **the same measure** (the number of logical positions the conversation
+ * occupies), and `needed > capacity` is why it was called. `capacity` is **whichever of two limits
+ * bit first** (the smaller of the state capacity this session allocated and the position limit the
+ * model declares); either way the remedy is the same (shorten the conversation).
  */
 export type Gemma4ChatOverflow = {
-  /** 現在の履歴（system 発話を宣言していれば先頭がそれ）。 */
+  /** The current history (if a system message is declared, it comes first). */
   readonly turns: readonly Gemma4ChatMessage[];
-  /** セッションが宣言した system 発話（`undefined` = 宣言なし）。 */
+  /** The system message the session declared (`undefined` = none declared). */
   readonly system: string | undefined;
-  /** この会話が使える論理位置の上限。 */
+  /** The upper limit of logical positions this conversation can use. */
   readonly capacity: number;
-  /** このターンを通すのに要る論理位置の数（prompt + `maxNewTokens` − 1）。 */
+  /** The number of logical positions needed to pass this turn (prompt + `maxNewTokens` − 1). */
   readonly needed: number;
 };
 
 /**
- * 溢れたときに**新しい履歴**を返す関数（既定は {@link dropOldestTurns}）。
+ * A function that returns **a new history** on overflow (default {@link dropOldestTurns}).
  *
- * MUST: 返す履歴は渡された `turns` より**短い**こと。同じ長さ（= 打つ手が無い）を返せば
- * セッションが `GenerationCapacityError` で落とす — 縮まない再試行は無限ループにしかならず、
- * 「会話が入り切らない」という事実を握り潰す形でもある。throw すればそのまま呼び手へ届く。
+ * MUST: the returned history is **shorter** than the `turns` passed in. Returning the same length
+ * (= nothing can be done) makes the session fail with `GenerationCapacityError` — a retry that does
+ * not shrink can only loop forever, and would also crush the fact that "the conversation does not
+ * fit". A throw reaches the caller as is.
  *
- * MUST: **末尾（今答えようとしている発話）は残す**こと。落とした履歴は例外にならずに描画へ
- * 通り（`gemma4ChatPrompt` は末尾 role を制約しない）、「問いの無い会話」に答えが付く。写しを
- * 返す実装（`turns.map((turn) => ({ ...turn }))`）は正当で、判定は値で行う。
+ * MUST: **keep the last entry (the message being answered now)**. A history that dropped it passes
+ * into rendering without an exception (`gemma4ChatPrompt` does not constrain the last role), and an
+ * answer gets attached to "a conversation with no question". An implementation that returns copies
+ * (`turns.map((turn) => ({ ...turn }))`) is legitimate; the check compares values.
  */
 export type Gemma4ChatOverflowPolicy = (
   context: Gemma4ChatOverflow,
 ) => readonly Gemma4ChatMessage[] | Promise<readonly Gemma4ChatMessage[]>;
 
-/** セッション 1 本の設定（ターンごとに変える指定は {@link Gemma4ChatTurnOptions}）。 */
+/** The settings of one session (per-turn options are {@link Gemma4ChatTurnOptions}). */
 export type Gemma4ChatSessionOptions = {
-  /** 会話の先頭に置く system 発話（省略時は置かない）。 */
+  /** The system message placed at the start of the conversation (none when omitted). */
   readonly system?: string;
-  /** 1 ターンで生成する token 数の上限（ターンごとに上書きできる）。 */
+  /** The upper limit of tokens generated in one turn (can be overridden per turn). */
   readonly maxNewTokens: number;
   /**
-   * このセッションが確保する容量（省略時は配布形の既定 = `host.program.capacity`）。
+   * The capacity this session allocates (default: the distribution's default =
+   * `host.program.capacity`).
    *
-   * セッション 1 本 = 会話 1 本なので、ここが「この会話に KV をどれだけ取るか」である。溢れ判定
-   * （{@link Gemma4ChatSessionOptions.onOverflow} を呼ぶ線）もこの値で行う — 切り詰めの基準と
-   * 実際に確保した容量が別の数だと、通るはずのターンを落としたりその逆をしたりする。
+   * One session = one conversation, so this is "how much KV to take for this conversation". The
+   * overflow decision (the line at which {@link Gemma4ChatSessionOptions.onOverflow} is called) uses
+   * this value too — if the truncation criterion and the capacity actually allocated were different
+   * numbers, a turn that should pass would be dropped, or the reverse.
    *
-   * MUST: sequence を作り直しても同じ値を使う（会話の途中で容量が変わると、切り詰めの判断が
-   * ターンごとに別の物差しになる）。
+   * MUST: the same value is used when the sequence is rebuilt (if the capacity changed mid-
+   * conversation, the truncation decision would use a different measure per turn).
    */
   readonly capacity?: number;
   /**
-   * このセッションの sampling 指定。省略時は配布形の宣言
-   * （{@link Gemma4ChatSessionHost.defaultSampler}）で、それも無ければ温度 0（greedy）。
+   * This session's sampling options. When omitted, the distribution's declaration
+   * ({@link Gemma4ChatSessionHost.defaultSampler}), and failing that temperature 0 (greedy).
    */
   readonly sampler?: SamplerSpec;
-  /** 容量が足りないときに履歴を作り直す関数（既定 {@link dropOldestTurns}）。 */
+  /** Rebuilds the history when capacity runs out (default {@link dropOldestTurns}). */
   readonly onOverflow?: Gemma4ChatOverflowPolicy;
   /**
-   * この会話で投機デコードを張るか（既定 = pipeline に drafter が居れば `true` = 自己採算ゲート
-   * 付き。値の意味は {@link Gemma4SequenceOptions.speculative} と同じで、`"always"` は
-   * ゲート無しの常時投機）。
+   * Whether this conversation uses speculative decoding (default = `true` if the pipeline has a
+   * drafter = with the self-tuning gate; the values mean the same as
+   * {@link Gemma4SequenceOptions.speculative}, and `"always"` speculates always, with no gate).
    *
-   * ターンごとではなく**セッション単位**の席である — この層は 1 本の sequence を多ターン使い
-   * 回し、投機の借り手 context は sequence の寿命に束ねられている（ターンごとに切り替えるには
-   * sequence を作り直す = KV を捨てることになる）。ゲートの移動平均も同じ寿命なので、ターンを
-   * 跨いで測り続ける。
+   * This is a **per-session** option, not per-turn — this layer reuses one sequence across many
+   * turns, and the speculation borrower context is bound to the sequence's lifetime (switching per
+   * turn would mean rebuilding the sequence = discarding the KV). The gate's moving average has the
+   * same lifetime, so it keeps measuring across turns.
    */
   readonly speculative?: boolean | "always";
 };
 
 /**
- * 1 ターンだけ効かせる指定（{@link Gemma4Pipeline.chat} の要求と同じ語彙・意味も同じ）。
+ * Options that apply to one turn only (the same vocabulary and meaning as the request of
+ * {@link Gemma4Pipeline.chat}).
  *
- * MUST: 中身は {@link Gemma4ChatSession.send} が**発行時に写す**（ADR 0083 追記 2026-09-02）—
- * 返った列を汲み始めた後に書き換えても、走行中のターンには効かない。
+ * MUST: {@link Gemma4ChatSession.send} **copies** the contents **at issue** (ADR 0083 addendum
+ * 2026-09-02) — rewriting them after the returned stream has started draining has no effect on the
+ * running turn.
  */
 export type Gemma4ChatTurnOptions = {
-  /** 省略時はセッションの {@link Gemma4ChatSessionOptions.maxNewTokens}。 */
+  /** Defaults to the session's {@link Gemma4ChatSessionOptions.maxNewTokens}. */
   readonly maxNewTokens?: number;
-  /** このターンだけ効かせる追加の停止 token（配布形の EOS 集合との和集合）。 */
+  /** Additional stop tokens for this turn only (unioned with the distribution's EOS set). */
   readonly stopTokens?: readonly number[];
-  /** このターンだけ効かせる停止文字列（復号後の本文で判定する）。 */
+  /** Stop strings for this turn only (checked on the decoded text). */
   readonly stopStrings?: readonly string[];
-  /** 省略時はセッションの sampler。 */
+  /** Defaults to the session's sampler. */
   readonly sampler?: SamplerSpec;
   /**
-   * prefill の進捗（chunk が 1 本 commit されるたび — `Gemma4ChatOptions.onPrefill` と同じ意味）。
+   * Prefill progress (each time one chunk is committed — the same meaning as
+   * `Gemma4ChatOptions.onPrefill`).
    *
-   * 会話が伸びるほど「KV を継げず全体を描き直すターン」の prefill は長くなるので、無音時間を
-   * 出す口が要る。
+   * The longer the conversation, the longer the prefill of "a turn that cannot carry the KV and
+   * re-renders the whole", so an entry point that reports the silent time is needed.
    */
   readonly onPrefill?: (progress: Gemma4PrefillProgress) => void;
   /**
-   * 停止 token を除く生成 token の通知。復号・停止文字列の保留より前に同期で呼ぶ。
-   * 本文を出さない特殊 token も含む。例外はそのターンへ伝播する。発行時に関数を写す。
+   * Notification of generated tokens excluding stop tokens. Called synchronously, before decoding
+   * and before stop-string holding. Includes special tokens that emit no text. Exceptions propagate
+   * to the turn. The function is copied at issue.
    */
   readonly onToken?: (id: number) => void;
-  /** 中断（`signal.reason` をそのまま throw する — ADR 0083 決定 5）。 */
+  /** Interruption (throws `signal.reason` as is — ADR 0083 decision 5). */
   readonly signal?: AbortSignal;
 };
 
 /**
- * 既定の溢れ処理 — **最古の user / assistant の対を落とす**（system 発話は残す）。
+ * The default overflow handling — **drop the oldest user / assistant pair** (the system message is
+ * kept).
  *
- * 2 件ずつ落とすのは、片方だけ落とすと「答えだけが残った会話」「問いだけが残った会話」になり、
- * モデルに見せる文脈としては壊れているため。落とせるものが無ければ `turns` をそのまま返す
- * （= セッションが `GenerationCapacityError` で落とす — この 1 発話だけで入り切らない）。
+ * Two entries are dropped at a time because dropping only one leaves "a conversation with only the
+ * answer" or "a conversation with only the question", a broken context to show the model. When
+ * nothing can be dropped, `turns` is returned as is (= the session fails with
+ * `GenerationCapacityError` — this one message alone does not fit).
  */
 export const dropOldestTurns: Gemma4ChatOverflowPolicy = ({
   turns,
   system,
 }): readonly Gemma4ChatMessage[] => {
   const floor = system === undefined ? 0 : 1;
-  // 末尾の 1 件（= 今答えようとしている発話）は落とさない。
+  // The last entry (= the message being answered now) is never dropped.
   const droppable = turns.length - floor - 1;
   if (droppable <= 0) return turns;
   return [...turns.slice(0, floor), ...turns.slice(floor + Math.min(2, droppable))];
 };
 
 /**
- * このターンが上限を踏むか（踏むなら実値を返す）。
+ * Whether this turn hits a limit (returns the actual values if it does).
  *
- * `GenerationSequence` の予算検査（`sequence.ts` の `assertBudget`）と**同じ 2 式**を、run の直前
- * ではなく **prompt を組んだ直後**に見る。切り詰めは「例外が出てから」ではなく「送る前」に決めら
- * れる方が自然で、そのために `GenerationSequence.used` が公開されている（ADR 0083 追記
- * 2026-08-31）。
+ * Applies **the same two formulas** as `GenerationSequence`'s budget check (`assertBudget` in
+ * `sequence.ts`), not right before the run but **right after the prompt is built**. Truncation is
+ * more naturally decided "before sending" than "after an exception", and `GenerationSequence.used`
+ * is public for that (ADR 0083 addendum 2026-08-31).
  *
- * NOTE: 欄の割り振りは sequence 層と 1 だけずれる — この層の `pastLength` は `used`（未 commit
- * frontier 込み）で、`promptLength` はこの層が渡す prompt の長さである。合計も
- * `maxNewTokens`（= 今なら通る上限）も sequence 層の欄と一致する。
+ * NOTE: the split of the fields is off by one from the sequence layer — this layer's `pastLength` is
+ * `used` (including the uncommitted frontier), and `promptLength` is the length of the prompt this
+ * layer passes. The total and `maxNewTokens` (= the limit that would pass now) both match the
+ * sequence layer's fields.
  *
- * MUST: `capacity` は**このセッションが確保した容量**（`program.capacity` = 配布形の既定ではない）。
- * 実際に確保した容量と別の数で切り詰めを判断すると、通るターンを落とすか、落ちるターンを送る。
+ * MUST: `capacity` is **the capacity this session allocated** (not `program.capacity` = the
+ * distribution's default). Deciding truncation on a number other than the capacity actually
+ * allocated would drop a turn that passes, or send a turn that fails.
  */
 const overflowOf = (
   program: GenerationProgram,
@@ -235,29 +256,33 @@ const overflowOf = (
     maxNewTokens: limit - used - promptLength + 1,
   });
   const peak = used + promptLength + maxNewTokens - 1;
-  // 順序は sequence 層と同じ（両方踏むターンで同じ constraint を名乗る）。
+  // Same order as the sequence layer (a turn that hits both names the same constraint).
   if (peak - 1 >= program.maxPosition) return detail("maxPosition", program.maxPosition);
   if (peak > capacity) return detail("capacity", capacity);
   return undefined;
 };
 
-/** 会話が占める論理位置の数（{@link Gemma4ChatOverflow.needed}）。 */
+/**
+ * The number of logical positions the conversation occupies ({@link Gemma4ChatOverflow.needed}).
+ */
 const neededOf = (detail: GenerationCapacityDetail): number =>
   detail.pastLength + detail.promptLength + detail.requestedNewTokens - 1;
 
 /**
- * 発話の同値（`#shrink` の末尾門と `#finish` の巻き戻しが**同じ比較**を使う）。
+ * Message equality (the last-entry check of `#shrink` and the rewind of `#finish` use **the same
+ * comparison**).
  *
- * MUST: 参照同一性で見ない。溢れポリシーは `turns.map((turn) => ({ ...turn }))` のように写しを
- * 返してよい（渡すのは凍結コピーなので、写して返す実装は正当）。同一性で見ると、その正当な
- * ポリシーが「末尾を保っているのに落としたと判定される」（門側）か「1 文字も出なかったターンの
- * 巻き戻しが黙って効かなくなる」（`#finish` 側）になる。
+ * MUST: do not compare by reference identity. An overflow policy may return copies such as
+ * `turns.map((turn) => ({ ...turn }))` (what it receives is a frozen copy, so an implementation that
+ * copies and returns is legitimate). Comparing by identity would make that legitimate policy either
+ * "judged to have dropped the last entry while keeping it" (the check side) or "silently disable the
+ * rewind of a turn that emitted no character" (the `#finish` side).
  */
 const sameTurn = (left: Gemma4ChatMessage, right: Gemma4ChatMessage): boolean =>
   left.role === right.role && left.content === right.content;
 
 /**
- * 1 本の会話（履歴 + KV）を持つセッション。
+ * A session holding one conversation (history + KV).
  *
  * ```ts
  * await using pipeline = await Gemma4Pipeline.fromPretrained(ref);
@@ -266,13 +291,14 @@ const sameTurn = (left: Gemma4ChatMessage, right: Gemma4ChatMessage): boolean =>
  * console.log(await session.send("Another one.").text());
  * ```
  *
- * MUST: 同時に走らせられるターンは 1 本だけ（2 本目の `send` は**同期に** throw する）。
- * 履歴は 1 本の会話として順に積まれるので、2 本の生成が同じ履歴を押すと「答えの無い問い」を
- * 挟んだ会話が KV へ入る — 例外にならない取り違えなので、口の側で塞ぐ。
+ * MUST: only one turn can run at a time (a second `send` throws **synchronously**). The history is
+ * stacked in order as one conversation, so two generations pushing onto the same history would put a
+ * conversation with "a question without an answer" in between into the KV — a mix-up that raises no
+ * exception, so the entry point blocks it.
  *
- * MUST: 発行した stream は**汲み切るか `break` で閉じる**。ターンの締め（履歴への追記・KV を
- * 継ぐかの判定・次の `send` の受付）は列の終端で走るので、汲まずに捨てた stream はセッションを
- * そのターンのまま止める。
+ * MUST: an issued stream is **drained or closed with `break`**. The turn's wrap-up (appending to the
+ * history, deciding whether to carry the KV, accepting the next `send`) runs at the end of the
+ * stream, so a stream discarded without draining leaves the session stuck in that turn.
  */
 export class Gemma4ChatSession {
   readonly #host: Gemma4ChatSessionHost;
@@ -280,19 +306,27 @@ export class Gemma4ChatSession {
   readonly #maxNewTokens: number;
   readonly #sampler: SamplerSpec | undefined;
   readonly #onOverflow: Gemma4ChatOverflowPolicy;
-  /** このセッションが確保する容量（sequence を作り直しても不変 — 溢れ判定の物差しでもある）。 */
+  /**
+   * The capacity this session allocates (unchanged when the sequence is rebuilt — also the measure
+   * of the overflow decision).
+   */
   readonly #capacity: number;
-  /** 投機を張るか（`undefined` = pipeline の既定に任せる — sequence を作り直しても不変）。 */
+  /**
+   * Whether to speculate (`undefined` = leave it to the pipeline's default — unchanged when the
+   * sequence is rebuilt).
+   */
   readonly #speculative: boolean | "always" | undefined;
-  /** 会話の履歴（この層の唯一の可変状態 — sequence は transcript を持たない）。 */
+  /**
+   * The conversation history (this layer's only mutable state — the sequence holds no transcript).
+   */
   #turns: Gemma4ChatMessage[];
-  /** 現在の sequence（`undefined` = 次のターンで作り直す）。 */
+  /** The current sequence (`undefined` = rebuild on the next turn). */
   #sequence: GenerationSequence | undefined;
-  /** その sequence の KV に入っている履歴の件数（0 = 空 = 全体を描き直す）。 */
+  /** The number of history entries in that sequence's KV (0 = empty = re-render the whole). */
   #committed = 0;
-  /** ターンが走っている（発行済みで、まだ列が終端していない）。 */
+  /** A turn is running (issued, and its stream has not ended yet). */
   #busy = false;
-  /** dispose の 1 本。**undefined でないことが「dispose 済み」**（派生状態を別に持たない）。 */
+  /** The one dispose. **Not undefined means "disposed"** (no separate derived state). */
   #disposal: Promise<void> | undefined;
 
   constructor(host: Gemma4ChatSessionHost, options: Gemma4ChatSessionOptions) {
@@ -303,10 +337,12 @@ export class Gemma4ChatSession {
     this.#onOverflow = options.onOverflow ?? dropOldestTurns;
     this.#capacity = options.capacity ?? host.program.capacity;
     this.#speculative = options.speculative;
-    // MUST: 容量の関係を**構築時**に見る（式は `sequence.ts` の `createGenerationSequence` と
-    // 同じ 2 本）。この層は `#capacity` を溢れ判定の物差しとして sequence の確保より**前**に
-    // 使うので、検査を sequence 側だけに任せると、長いターンでは `#shrink` が履歴を実際に
-    // 切り詰めてから容量エラーになり、真因（宣言ミス）がどの診断にも出ない。
+    // MUST: check the capacity relations **at construction** (the same two formulas as
+    // `createGenerationSequence` in `sequence.ts`). This layer uses `#capacity` as the measure of
+    // the overflow decision **before** the sequence is allocated, so leaving the check to the
+    // sequence side alone would, for a long turn, have `#shrink` actually truncate the history
+    // before the capacity error, and the real cause (a declaration mistake) would appear in no
+    // diagnostic.
     if (!Number.isSafeInteger(this.#capacity) || this.#capacity < 1) {
       throw new ModelInputError(
         `Gemma4ChatSession: capacity ${this.#capacity} が 1 以上の整数でない`,
@@ -328,22 +364,23 @@ export class Gemma4ChatSession {
   }
 
   /**
-   * これまでの会話（system 発話を宣言していれば先頭がそれ）。
+   * The conversation so far (if a system message is declared, it comes first).
    *
-   * 凍結**コピー**を返す — 内部の配列をそのまま出すと、消費側の `push` / `splice` が KV との
-   * 対応（{@link Gemma4ChatSession} の「KV を継ぐ条件」）を静かに壊す。
+   * Returns a frozen **copy** — exposing the internal array as is would let the consumer's `push` /
+   * `splice` silently break the mapping to the KV ("When the KV is carried over" of
+   * {@link Gemma4ChatSession}).
    */
   get turns(): readonly Gemma4ChatMessage[] {
     return Object.freeze(this.#turns.map((turn) => Object.freeze({ ...turn })));
   }
 
   /**
-   * 発話を 1 つ送り、**確定した文字列片**を流す（{@link Gemma4Pipeline.chat} と同じ列・同じ
-   * 停止理由・同じ `text()`）。
+   * Sends one message and streams **committed text pieces** (the same stream, the same stop reason
+   * and the same `text()` as {@link Gemma4Pipeline.chat}).
    *
-   * 前のターンが EOS で閉じていれば KV を継いで**差分だけ**を流し、そうでなければ sequence を
-   * 作り直して履歴を描き直す。容量が足りないターンは**送る前に**溢れ処理へ回る
-   * （{@link Gemma4ChatSessionOptions.onOverflow}）。
+   * If the previous turn closed with EOS, the KV is carried over and **only the delta** is streamed;
+   * otherwise the sequence is rebuilt and the history re-rendered. A turn that does not fit goes to
+   * overflow handling **before sending** ({@link Gemma4ChatSessionOptions.onOverflow}).
    */
   send(text: string, options: Gemma4ChatTurnOptions = {}): Gemma4ChatStream {
     if (this.#disposal !== undefined) {
@@ -355,23 +392,27 @@ export class Gemma4ChatSession {
           "（1 セッション = 1 生成 — 発行した stream は汲み切るか break で閉じる）",
       );
     }
-    // MUST: 要求は**発行時に写す**（ADR 0083 追記 2026-09-02）。本体（async generator）は最初の
-    // `next()` まで走らないので、ここで読み切らないと「汲み始めた時点の値」で走る。
+    // MUST: the request is **copied at issue** (ADR 0083 addendum 2026-09-02). The body (an async
+    // generator) does not run until the first `next()`, so without reading everything here it would
+    // run with "the values at the time draining started".
     const maxNewTokens = options.maxNewTokens ?? this.#maxNewTokens;
-    // 抽選指定も配列と同じくここで写す（写し口は `sampler.ts` の {@link snapshotSpec} 1 本 —
-    // `createSampler` の複製は最初の `next()` なので、それだけでは発行〜消費の窓が残る）。
+    // The sampling options are copied here as well, like the arrays (the one copy point is
+    // {@link snapshotSpec} in `sampler.ts` — `createSampler` copies at the first `next()`, so that
+    // alone leaves the window between issue and consumption).
     const chosen = options.sampler ?? this.#sampler ?? this.#host.defaultSampler;
     const sampler = chosen === undefined ? undefined : snapshotSpec(chosen);
     const stopTokens = options.stopTokens === undefined ? undefined : [...options.stopTokens];
     const signal = options.signal;
     const onPrefill = options.onPrefill;
     const onToken = options.onToken;
-    // 停止文字列の状態機械もここで作る（指定の検査と複製がその中で済む = 受理集合が同期に落ちる）。
+    // The stop-string state machine is also built here (the option check and copy happen inside it =
+    // the accepted set fails synchronously).
     const stopStrings = createStopStringFilter(options.stopStrings ?? []);
     const detokenizer = this.#host.tokenizer.createDetokenizer();
-    // MUST: 受理集合の値域は**セッションの状態を動かす前**に見る（検査の正本は `sequence.ts` の
-    // 1 本）。後ろに置くと、不正な要求が履歴へ発話を積み `#busy` を立てたまま「汲み始めるまで
-    // 落ちない」形になり、呼び手から見ると 1 度の取り違えでセッションが使えなくなる。
+    // MUST: check the value ranges of the accepted set **before moving the session's state** (the
+    // source of truth of the check is the one in `sequence.ts`). Placed later, an invalid request
+    // would push a message onto the history and set `#busy`, "not failing until draining starts" —
+    // from the caller's view, one mistake would make the session unusable.
     assertGenerationRequestValues(this.#host.program.vocabSize, {
       maxNewTokens,
       ...(stopTokens === undefined ? {} : { stopTokens }),
@@ -388,7 +429,7 @@ export class Gemma4ChatSession {
       settle = resolve;
       fail = reject;
     });
-    // 二次的な通知路なので、読まれなくても unhandled rejection にしない。
+    // A secondary notification path, so not an unhandled rejection even when nobody reads it.
     done.catch(() => {});
 
     const prepare = this.#prepare.bind(this);
@@ -396,9 +437,9 @@ export class Gemma4ChatSession {
     const chunks = async function* (): AsyncGenerator<string, void, undefined> {
       let stream: GenerationStream | undefined;
       let failure: { readonly error: unknown } | undefined;
-      /** 一致した停止文字列（この層の停止理由）。 */
+      /** The matched stop string (this layer's stop reason). */
       let matched: string | undefined;
-      /** このターンで流した本文（履歴へ積む assistant の中身）。 */
+      /** The text streamed in this turn (the assistant entry pushed onto the history). */
       let reply = "";
       try {
         const { sequence, prompt } = await prepare(maxNewTokens);
@@ -421,14 +462,14 @@ export class Gemma4ChatSession {
             yield step.value;
           }
         } finally {
-          // MUST: 消費側の `break` を内側へ伝える（`yield*` の委譲と同じ形）。伝えないと
-          // イベント列の `finally` が走らず、sequence が走行中のまま残る。
+          // MUST: pass the consumer's `break` inward (the same shape as `yield*` delegation).
+          // Otherwise the event stream's `finally` does not run, and the sequence stays running.
           await parts.return(undefined);
         }
       } catch (error) {
         failure = { error };
-        // MUST: 包まずそのまま投げる（ADR 0083 決定 5 — 消費側が `error === signal.reason` で
-        // 自分の中断を識別できる）。
+        // MUST: throw as is, unwrapped (ADR 0083 decision 5 — the consumer can identify its own
+        // interruption with `error === signal.reason`).
         throw error;
       } finally {
         await completeChatTurn({
@@ -445,7 +486,8 @@ export class Gemma4ChatSession {
 
     return chatStreamOf(
       closeableGenerator(chunks(), (failure) => {
-        // prepare は未実行なので仮追加の発話だけを戻す。前ターンの KV はそのまま継げる。
+        // prepare has not run, so only the provisionally added message is removed. The previous
+        // turn's KV can still be carried over.
         this.#turns.pop();
         this.#busy = false;
         if (failure !== undefined) fail(failure.error);
@@ -456,53 +498,59 @@ export class Gemma4ChatSession {
   }
 
   /**
-   * 解放する。走行中のターンの後に sequence を畳む（`dispose` は sequence 自身の直列化鎖に
-   * 載るので、flush-before-destroy はそちらが持つ）。2 度目以降も同じ完了を返す。
+   * Releases. The sequence is closed after the running turn (`dispose` goes on the sequence's own
+   * serialization chain, so flush-before-destroy is held there). Later calls return the same
+   * completion.
    *
-   * MUST: パイプラインは畳まない（所有者は渡した側）。
+   * MUST: the pipeline is not closed (its owner is whoever passed it).
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#releaseSequence();
     return this.#disposal;
   }
 
-  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  /** `await using` support (Explicit Resource Management) — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }
 
   /**
-   * 同じ設定・同じ履歴の**独立の**セッションを返す（会話の分岐）。返ったセッションは呼び手が
-   * 所有し、`dispose()` も各自で行う（元との親子の依存は無く、元を先に dispose してよい）。
+   * Returns an **independent** session with the same settings and the same history (branching the
+   * conversation). The returned session is owned by the caller, which also calls its `dispose()`
+   * (there is no parent-child dependency on the original; the original may be disposed first).
    *
-   * 再生成はこの使い方で書く — 基点のセッションを進めずに置き、押されるたびに `fork()` して
-   * 分岐の側で `send` する（基点は残るので何度でもやり直せる）:
+   * Regeneration is written as this use — keep the base session without advancing it, and on each
+   * press `fork()` and `send` on the branch (the base stays, so it can be retried any number of
+   * times):
    *
    * ```ts
    * const sampler = { temperature: 1, topP: 0.95 } satisfies SamplerSpec;
    * await session.send("Name a color.", { sampler }).text();
    * for (let attempt = 1; attempt <= 3; attempt += 1) {
-   *   const retry = await session.fork(); // 基点（session）はこのまま置いておく
-   *   // 試行ごとに seed を変える（同じ seed なら同じ答えが返る — 下の注意）。
+   *   const retry = await session.fork(); // keep the base (session) as is
+   *   // Change the seed per attempt (the same seed returns the same answer — see the note below).
    *   console.log(await retry.send("Another one.", { sampler: { ...sampler, seed: attempt } }).text());
-   *   await retry.dispose(); // 気に入らなければ捨てて、次の試行は基点からもう一度 fork する
+   *   await retry.dispose(); // if it is not good, discard it; the next attempt forks the base again
    * }
    * ```
    *
-   * 注意: **同じ seed なら同じ答えになる**。抽選の乱数列は `send` ごとに sampler の `seed`
-   * （既定 0）から作り直し、複製した KV は元とビット同一なので、seed を変えない再生成は毎回
-   * 同じ token 列を返す（温度 0 は seed に関わらず同じ）。
+   * Note: **the same seed gives the same answer**. The sampling random sequence is rebuilt on each
+   * `send` from the sampler's `seed` (default 0), and the copied KV is bit-identical to the original,
+   * so a regeneration that does not change the seed returns the same token sequence every time
+   * (temperature 0 is the same regardless of seed).
    *
-   * KV を継いでいる会話は KV を同じ容量のまま丸ごと複製するので、基点 + 分岐 1 本で KV の
-   * VRAM はほぼ 2 倍になる。KV が空の会話（まだ送っていない・直前のターンが配布形の EOS で
-   * 閉じていない）は GPU の複製を出さず、履歴だけを写す。
+   * A conversation that carries its KV is copied whole at the same capacity, so the base + one
+   * branch roughly doubles the KV VRAM. A conversation with an empty KV (nothing sent yet, or the
+   * previous turn did not close with the distribution's EOS) makes no GPU copy and copies only the
+   * history.
    *
-   * dispose 済みと、走行中のターンがある（`send` が返した stream がまだ終端していない）ときは
-   * **同期に** throw する（`send` と同じ規律）。
+   * When disposed, or when a turn is running (the stream `send` returned has not ended yet), it
+   * throws **synchronously** (the same discipline as `send`).
    *
-   * MUST: 履歴と「KV に入っている件数」の写しと `sequence.fork()` の呼び出しは、**呼んだ同期区間で**
-   * 行う。後ろへずらすと、直後に発行した `send` が先に元の履歴へ発話を積み、分岐に「答えの無い
-   * 問い」が混ざる（例外にならない取り違え）。
+   * MUST: copying the history and "the number of entries in the KV" and calling `sequence.fork()`
+   * happen **in the calling synchronous section**. Deferred, a `send` issued right after would push a
+   * message onto the original history first, and "a question without an answer" would mix into the
+   * branch (a mix-up that raises no exception).
    */
   fork(): Promise<Gemma4ChatSession> {
     if (this.#disposal !== undefined) {
@@ -514,8 +562,8 @@ export class Gemma4ChatSession {
           "（fork はターンの合間だけ — 発行した stream は汲み切るか break で閉じる）",
       );
     }
-    // KV と履歴の対応（`#committed`）ごと写す。ターンの合間は「sequence が無い ⇔ KV は空
-    // （`#committed === 0`）」なので、KV の複製は sequence があるときだけ出す。
+    // Copy along with the KV-to-history mapping (`#committed`). Between turns, "no sequence ⇔ the KV
+    // is empty (`#committed === 0`)", so the KV copy is made only when there is a sequence.
     const turns = this.#turns.map((turn) => ({ ...turn }));
     const committed = this.#committed;
     const copying = this.#sequence?.fork();
@@ -537,39 +585,42 @@ export class Gemma4ChatSession {
   }
 
   /**
-   * このターンの sequence と prompt を用意する（容量が足りなければ溢れ処理を回してから）。
+   * Prepares this turn's sequence and prompt (running overflow handling first if it does not fit).
    *
-   * MUST: 溢れ判定は sequence の**確保より前**に行う。判定に要るのは `used` だけで、`#committed`
-   * が 0 なら KV は空 = `used` は 0 と決まるので、確保しなくても判定できる。順序が逆だと
-   * 「切り詰めるターンが capacity ぶんの KV を 1 度確保してすぐ捨てる」形になる（会話の初回・
-   * 前ターンが max-tokens / 停止文字列 / 中断 / 失敗で閉じた場合に踏む = 珍しくない）。
+   * MUST: the overflow decision happens **before allocating** the sequence. All it needs is `used`,
+   * and when `#committed` is 0 the KV is empty = `used` is 0, so it can be decided without
+   * allocating. In the reverse order, "a turn that truncates allocates a capacity's worth of KV once
+   * and immediately discards it" (hit on the first turn of a conversation, and when the previous turn
+   * closed by max-tokens / a stop string / an interruption / a failure = not rare).
    *
-   * MUST: 再試行は履歴が**縮んだ**ときだけ続く（`#shrink` の門）ので、
-   * 試行回数は入口の発話数を超えない — 下の門はその不変条件が破れたことを名指しで落とす席で、
-   * 成り立っている限り踏まない。
+   * MUST: retries continue only when the history **shrank** (the check in `#shrink`), so the number
+   * of attempts does not exceed the number of messages at entry — the guard below exists to fail by
+   * name when that invariant breaks, and is never hit while it holds.
    */
   async #prepare(
     maxNewTokens: number,
   ): Promise<{ readonly sequence: GenerationSequence; readonly prompt: number[] }> {
     const attempts = this.#turns.length;
     for (let attempt = 0; ; attempt += 1) {
-      // MUST: `await` 明けの再検査（`send` は発行時に見るが、本体が走り出すのはその後）。
-      // セッションだけを dispose した後に発行済みの stream を汲むと、生きた pipeline から
-      // 新しい容量ぶんの sequence を取れてしまう。
+      // MUST: re-check after `await` (`send` checks at issue, but the body starts running later).
+      // Draining an issued stream after disposing only the session would otherwise take a sequence
+      // with fresh capacity from a live pipeline.
       if (this.#disposal !== undefined) {
         throw new Error("Gemma4ChatSession: dispose 済みでは生成できない");
       }
       const held = this.#sequence;
-      // 差分を継ぐのは「直前の発話 1 件だけが未 commit」のときに限る。ずれたまま差分を流すと
-      // 会話が静かに欠けるので、継承の前提そのものを門にしておく。
+      // Carry on with a delta only when "exactly the last message is uncommitted". Streaming a delta
+      // while out of step would silently lose part of the conversation, so the premise of carrying
+      // over is itself a check.
       if (this.#committed !== 0 && this.#committed !== this.#turns.length - 1) {
         throw new Error(
           `Gemma4ChatSession 内部不整合: KV は ${this.#committed} 件だが履歴は ` +
             `${this.#turns.length} 件`,
         );
       }
-      // `used` は導出値（`#committed === 0` ⇔ KV は空 ⇔ `used === 0`）。同値が破れたまま 0 を
-      // 仮定すると溢れ判定が実際より緩くなるので、破れを名指しで落とす席を隣に置く。
+      // `used` is a derived value (`#committed === 0` ⇔ the KV is empty ⇔ `used === 0`). Assuming 0
+      // while the equivalence is broken would make the overflow decision looser than reality, so a
+      // guard that fails the break by name sits next to it.
       let used = 0;
       if (this.#committed !== 0) {
         if (held === undefined) {
@@ -598,12 +649,14 @@ export class Gemma4ChatSession {
         if (held !== undefined) return { sequence: held, prompt };
         const created = await this.#host.sequence({
           capacity: this.#capacity,
-          // 未指定は欄ごと渡さない（pipeline の既定 = drafter が居れば投機、に倒す）。
+          // When unspecified, the field is not passed at all (fall back to the pipeline's default =
+          // speculate if there is a drafter).
           ...(this.#speculative === undefined ? {} : { speculative: this.#speculative }),
         });
-        // MUST: `await` 明けにもう一度見る（`Gemma4Pipeline.sequence` と同じ形）。確保の途中で
-        // dispose された実体は `dispose()`（`#sequence` はまだ undefined）からも `#finish` の
-        // eos 枝（`#releaseSequence` を通らない）からも畳まれない — この再検査だけが塞げる窓。
+        // MUST: check once more after `await` (the same shape as `Gemma4Pipeline.sequence`). An
+        // instance disposed mid-allocation is closed neither by `dispose()` (`#sequence` is still
+        // undefined) nor by the eos branch of `#finish` (which does not go through
+        // `#releaseSequence`) — this re-check is the only thing that closes the window.
         if (this.#disposal !== undefined) {
           await created.dispose();
           throw new Error("Gemma4ChatSession: dispose 済みでは生成できない");
@@ -619,7 +672,10 @@ export class Gemma4ChatSession {
     }
   }
 
-  /** 溢れ処理を 1 回回す（履歴を差し替え、KV との対応が切れた sequence を捨てる）。 */
+  /**
+   * Runs overflow handling once (replaces the history and discards the sequence whose mapping to the
+   * KV broke).
+   */
   async #shrink(detail: GenerationCapacityDetail): Promise<void> {
     const before = this.#turns.length;
     const asked = this.#turns[before - 1];
@@ -630,9 +686,11 @@ export class Gemma4ChatSession {
       capacity: detail.limit,
       needed,
     });
-    // MUST: 今答えようとしている発話（末尾）が残っていること。落ちたまま通すと `#prepare` が
-    // 「問いの無い会話」を描き直し、`gemma4ChatPrompt` も末尾 role を制約しないので**例外ゼロ**で
-    // 答えだけが確定する。比較は値（{@link sameTurn}）— 写しを返す正当なポリシーを弾かない。
+    // MUST: the message being answered now (the last entry) remains. Letting it through dropped
+    // would make `#prepare` re-render "a conversation with no question", and since
+    // `gemma4ChatPrompt` does not constrain the last role either, only an answer would be committed
+    // with **zero exceptions**. The comparison is by value ({@link sameTurn}) — a legitimate policy
+    // that returns copies is not rejected.
     const last = next.at(-1);
     if (last === undefined || !sameTurn(last, asked)) {
       throw new Error(
@@ -649,11 +707,14 @@ export class Gemma4ChatSession {
       );
     }
     this.#turns = next.map((turn) => ({ ...turn }));
-    // 切り詰めた履歴は先頭から描き直すことになるので、context は返して組み直す。
+    // A truncated history is re-rendered from the start, so the context is returned and rebuilt.
     await this.#releaseSequence();
   }
 
-  /** ターンの締め（履歴への追記・KV を継ぐかの判定・次の `send` の受付）。 */
+  /**
+   * The turn's wrap-up (appending to the history, deciding whether to carry the KV, accepting the
+   * next `send`).
+   */
   async #finish(
     asked: Gemma4ChatMessage,
     reply: string,
@@ -661,17 +722,20 @@ export class Gemma4ChatSession {
   ): Promise<void> {
     try {
       if (stop?.reason === "eos") {
-        // 配布形の EOS で閉じた = model turn が閉じている。本文が空でも席は積む（KV には空の
-        // model turn が入っているので、積まないと描き直しが KV と別の会話になる）。
+        // Closed with the distribution's EOS = the model turn is closed. The entry is pushed even
+        // when the body is empty (the KV holds an empty model turn, so without it the re-render would
+        // be a different conversation from the KV).
         this.#turns.push({ role: "assistant", content: reply });
         this.#committed = this.#turns.length;
         return;
       }
-      // max-tokens / 停止文字列 / 中断 / 失敗は model turn を閉じていない = 差分の前提が無い。
+      // max-tokens / a stop string / an interruption / a failure leave the model turn unclosed = the
+      // premise of a delta is missing.
       if (reply !== "") this.#turns.push({ role: "assistant", content: reply });
       else {
-        // 1 文字も出なかったターンは**無かったことにする**（答えの無い問いを履歴へ残さない）。
-        // 比較は値（{@link sameTurn}）— 溢れ処理が履歴を写して返すと参照は切れる。
+        // A turn that emitted no character is **treated as never having happened** (no question
+        // without an answer is left in the history). The comparison is by value ({@link sameTurn}) —
+        // when overflow handling copies the history, references break.
         const last = this.#turns.at(-1);
         if (last !== undefined && sameTurn(last, asked)) this.#turns.pop();
       }
@@ -681,7 +745,10 @@ export class Gemma4ChatSession {
     }
   }
 
-  /** context を返して組み直しに備える（KV と履歴の対応が切れたときは必ずここを通る）。 */
+  /**
+   * Returns the context to prepare for a rebuild (always passed through when the KV-to-history
+   * mapping breaks).
+   */
   async #releaseSequence(): Promise<void> {
     const held = this.#sequence;
     this.#sequence = undefined;

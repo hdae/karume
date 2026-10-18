@@ -1,107 +1,128 @@
 /**
- * ホスト側 sampling（温度 / top-k / top-p / repetition penalty / logit bias / seed）と、
- * EOS **集合**での停止判定。**パイプライン非依存の共通処理**なので `greedy.ts` と同じ
- * `src/generation/` に置く（ADR 0083 決定 7 — 置き場の裁定そのもの）。
+ * Host-side sampling (temperature / top-k / top-p / repetition penalty / logit bias / seed) and the
+ * stop check against an EOS **set**. It is **pipeline-independent shared code**, so it lives in
+ * `src/generation/` next to `greedy.ts` (ADR 0083 decision 7 — that is the placement ruling itself).
  *
- * 一般samplingの入口は最終行logits `[1,1,V]` の生データ（ADR 0083 決定6）。
- * 全語彙を扱うため、top-kの実装上限を設けず、repetition penaltyとfull-vocab nucleusも表現する。
- * 加工不要の温度0だけは、GPUで選んだ最大値・最小添字を検査する内部能力も返す。
- * 保存済みグラフの出口と一般samplingの契約は変えない（ADR 0083 温度0生成の追記）。
+ * The entry of general sampling is the raw last-row logits `[1,1,V]` (ADR 0083 decision 6).
+ * Because it handles the whole vocabulary, top-k has no implementation limit, and repetition
+ * penalty and full-vocabulary nucleus can be expressed. Only temperature 0 without processing also
+ * returns an internal capability that checks the maximum and its smallest index selected on the GPU.
+ * The stored graph's exit and the contract of general sampling do not change (ADR 0083 addendum on
+ * temperature-0 decode).
  *
- * ## MUST: HF の token 列 parity は取れない
+ * ## MUST: token-sequence parity with HF is not attainable
  *
- * RNG は splitmix64（`random.ts`）で torch の Philox とは別物 — **同じ seed でも同じ列に
- * ならない**（ADR 0083 決定 7 の MUST）。参照突合は温度 0（= greedy 縮退）で採り、抽選が走る
- * 経路は自前 fixture と分布門で縛る。
+ * The RNG is splitmix64 (`random.ts`), not torch's Philox — **the same seed does not give the same
+ * sequence** (the MUST of ADR 0083 decision 7). Reference comparisons are taken at temperature 0
+ * (= the greedy degenerate form); the paths where the draw runs are bound by our own fixtures and
+ * distribution checks.
  *
- * ## この層の既定は greedy
+ * ## The default of this layer is greedy
  *
- * 既定は `temperature = 0` = argmax の縮退形で、推奨値（gemma-4-E2B-it = temperature 1.0 /
- * top_k 64 / top_p 0.95）を注入するのは**配布形の責務**（ADR 0083 決定 7 — 前例は anima の
- * `scheduler.type`）。「sampler 未宣言 = 決定的」にしておくと、既存 golden との parity 門が
- * この経路で生き続ける。
+ * The default is `temperature = 0` = the argmax degenerate form, and injecting the recommended
+ * values (gemma-4-E2B-it = temperature 1.0 / top_k 64 / top_p 0.95) is **the distribution's
+ * responsibility** (ADR 0083 decision 7 — the precedent is anima's `scheduler.type`). Keeping
+ * "no sampler declared = deterministic" keeps the parity checks against the existing golden alive on
+ * this path.
  *
- * ## 加工の順序（HF の `LogitsProcessorList` と同じ）
+ * ## Processing order (the same as HF's `LogitsProcessorList`)
  *
- * ① repetition penalty → ② logit bias → ③ 温度で除算 → ④ top-k → ⑤ top-p → ⑥ 多項抽選。
- * ①②は温度の**前**（HF は processor と warper で段が分かれており、penalty / bias は前段）。
- * 順序を入れ替えると同じノブでも別の分布になるので、ここが契約である。
+ * (1) repetition penalty → (2) logit bias → (3) divide by temperature → (4) top-k → (5) top-p →
+ * (6) multinomial draw. (1) and (2) come **before** temperature (HF splits processors and warpers
+ * into stages, and penalty / bias are in the earlier one). Swapping the order gives a different
+ * distribution for the same knobs, so this order is the contract.
  */
 
 import { ModelInputError } from "../errors.ts";
 import { Randu } from "./random.ts";
 
-/** sampling の指定（省略時は greedy = 温度 0 の縮退形）。 */
+/** The sampling specification (omitted = greedy = the temperature-0 degenerate form). */
 export type SamplerSpec = {
   /**
-   * softmax の前に logits を割る温度（0 以上・既定 0）。
+   * The temperature that divides the logits before softmax (0 or more, default 0).
    *
-   * `0` は **greedy**（argmax）で、RNG を消費せず top-k / top-p も効かない（候補を削っても
-   * 最大値は残るので結果が変わらない）。repetition penalty と logit bias は温度 0 でも効く。
+   * `0` is **greedy** (argmax): it consumes no RNG and top-k / top-p have no effect (trimming
+   * candidates keeps the maximum, so the result does not change). Repetition penalty and logit bias
+   * still apply at temperature 0.
    */
   readonly temperature?: number;
   /**
-   * 候補を確率上位 `topK` 件に絞る（1 以上の整数・**上限なし**）。語彙数を超える指定は語彙数へ
-   * 丸める（HF の `min(top_k, vocab)` と同じ）。
+   * Narrows the candidates to the `topK` most probable entries (an integer of 1 or more, **no upper
+   * limit**). A value above the vocabulary size is clamped to the vocabulary size (the same as HF's
+   * `min(top_k, vocab)`).
    */
   readonly topK?: number;
   /**
-   * 累積確率が `topP` に達するまでの**最小の候補集合**に絞る（0 < topP ≤ 1）。`1` は絞らない。
-   * 最上位 1 件は必ず残る（HF の `min_tokens_to_keep = 1`）。
+   * Narrows to the **smallest candidate set** whose cumulative probability reaches `topP`
+   * (0 < topP ≤ 1). `1` does not narrow. The top entry always remains (HF's
+   * `min_tokens_to_keep = 1`).
    */
   readonly topP?: number;
   /**
-   * 既出 token の logit を弱める係数（正の有限数・`1` は無効化）。向きは HF の
-   * `RepetitionPenaltyLogitsProcessor` と同じで、**負の logit は掛け・非負の logit は割る**
-   * （どちらも係数 > 1 なら値が下がる）。同じ token が履歴に何度出ても**適用は 1 回**。
+   * Factor that weakens the logits of tokens already seen (a positive finite number; `1`
+   * disables it). The direction is the same as HF's `RepetitionPenaltyLogitsProcessor`: **negative
+   * logits are multiplied, non-negative logits are divided** (both lower the value when the factor
+   * is > 1). However many times a token appears in the history, **it is applied once**.
    */
   readonly repetitionPenalty?: number;
   /**
-   * token id への logit 加算（`[token, bias]` の並び。値は有限数、または `-Infinity` =
-   * その token の禁止）。token が語彙の外なら fail loudly（黙って無視すると「効かない bias」が
-   * 静かに残る）。
+   * Logit addition per token id (a list of `[token, bias]`; the value is a finite number, or
+   * `-Infinity` = that token is banned). A token outside the vocabulary fails loudly (silently
+   * ignoring it would quietly leave "a bias that does nothing").
    *
-   * MUST: `Map` ではなく**タプルの配列**で受ける。この指定は JSON を通る経路（配布形の宣言・
-   * ホスト側の設定保存・ログ）と worker 境界を跨ぐが、`Map` は `JSON.stringify` が `{}` へ
-   * 潰すので、往復した指定は**黙って空の bias** になる（例外は出ず「効いていないノブ」として
-   * だけ現れる）。配列なら往復しても同じ指定である。
+   * MUST: accept an **array of tuples**, not a `Map`. This specification crosses paths that go
+   * through JSON (the distribution's declaration, host-side settings storage, logs) and worker
+   * boundaries, and `JSON.stringify` flattens a `Map` to `{}`, so a round-tripped spec **silently
+   * becomes an empty bias** (no exception; it shows up only as "a knob that has no effect"). An
+   * array stays the same specification after a round trip.
    *
-   * MUST: 同じ token を 2 度書いたら落とす（後勝ちで畳まない）。`Map` は畳んでいたが、
-   * 加算のこの面で畳むと「2 つ書いた bias の片方だけが効く」— 足すのか上書きするのかを
-   * 呼び手が読めない。
+   * MUST: fail when the same token is written twice (do not fold it as last-write-wins). `Map`
+   * folded it, but folding on this additive surface means "only one of the two written biases
+   * applies" — the caller cannot tell whether they add or overwrite.
    */
   readonly logitBias?: readonly (readonly [token: number, bias: number])[];
-  /** 抽選列の seed（非負の安全整数・既定 0 — 同じ seed なら同じ token 列）。 */
+  /**
+   * Seed of the draw sequence (a non-negative safe integer, default 0 — the same seed gives the
+   * same token sequence).
+   */
   readonly seed?: number;
 };
 
 /**
- * 抽選対象（除外済み・確率は候補集合の中で正規化済み。`tokens[i]` が `probabilities[i]` で
- * 選ばれる）。温度 0 では長さ 1（argmax の 1 点分布）になる。
+ * The draw target (exclusions applied, probabilities normalized within the candidate set;
+ * `tokens[i]` is chosen with `probabilities[i]`). At temperature 0 its length is 1 (argmax's
+ * one-point distribution).
  *
- * 並びは **`topK` が指定されているか `topP < 1` のとき確率降順**（top-p が「上位からの累積」で
- * 定義されているため必要）、それ以外（`topP = 1` 単独を含む）は token id 昇順 — 絞り込みが無い
- * 指定で語彙全体（V = 262,144）を毎 step 並べ替えないため。
+ * The order is **descending probability when `topK` is given or `topP < 1`** (needed because top-p
+ * is defined as "the cumulative sum from the top"), and ascending token id otherwise (including
+ * `topP = 1` alone) — so a specification without narrowing does not sort the whole vocabulary
+ * (V = 262,144) every step.
  *
- * NOTE: **並びは固定 seed で選ばれる token に効く**。抽選は一様乱数 1 個で累積分布を引く（逆 CDF）
- * ので、分布が同じでも並べ方が変われば同じ乱数が別の token に当たる（logits `[0, 1, 2]`・温度 1・
- * seed 1 で `topK` 未指定は 2, 2, 2, …、`topK: 3` は 2, 1, 0, …）。分布としては同じで、同じ指定・
- * 同じ seed なら同じ列になる（決定性の契約は指定ごと）。
+ * NOTE: **the order affects which token a fixed seed picks**. The draw looks up the cumulative
+ * distribution with one uniform random number (inverse CDF), so even with the same distribution a
+ * different order maps the same random number to a different token (logits `[0, 1, 2]`,
+ * temperature 1, seed 1: without `topK` 2, 2, 2, …; with `topK: 3` 2, 1, 0, …). As a distribution
+ * it is the same, and the same specification with the same seed gives the same sequence (the
+ * determinism contract is per specification).
  */
 export type SamplerDistribution = {
   readonly tokens: Int32Array<ArrayBuffer>;
   readonly probabilities: Float64Array<ArrayBuffer>;
 };
 
-/** 1 本の生成に張り付く抽選器（RNG 状態を持つので step をまたいで使い回す）。 */
+/** The sampler bound to one generation (it holds RNG state, so it is reused across steps). */
 export type Sampler = {
-  /** 加工不要の温度0だけ、GPUが選んだ最初のNaNまたは最大値・最小添字を検査して返す。 */
+  /**
+   * Only for temperature 0 without processing: checks and returns the first NaN, or the maximum
+   * with its smallest index, selected by the GPU.
+   */
   readonly greedy?: (value: number, index: number) => number;
   /**
-   * 最終行 logits から次の token を 1 個選ぶ。
+   * Picks the next token from the last-row logits.
    *
-   * `history` は repetition penalty が見る**それまでの token 列**（prompt を含む — HF が
-   * `input_ids` 全体に掛けるのと同じ）。penalty を使わない指定では読まれない。
+   * `history` is **the token sequence so far** that the repetition penalty looks at (including the
+   * prompt — the same as HF applying it to the whole `input_ids`). It is not read when the
+   * specification does not use the penalty.
    */
   next(logits: Float32Array<ArrayBuffer>, history: readonly number[]): number;
 };
@@ -113,8 +134,8 @@ const assertFiniteAtLeast = (value: number, minimum: number, where: string): voi
 };
 
 /**
- * {@link SamplerSpec} の欄の許可集合。`Record` で持つのは、型に欄を足したときにここへの
- * 書き足し漏れを型検査で落とすため。
+ * The allowed fields of {@link SamplerSpec}. It is a `Record` so that adding a field to the type
+ * without adding it here fails the type check.
  */
 const SAMPLER_SPEC_KEYS: Readonly<Record<keyof SamplerSpec, true>> = {
   temperature: true,
@@ -126,14 +147,14 @@ const SAMPLER_SPEC_KEYS: Readonly<Record<keyof SamplerSpec, true>> = {
 };
 
 /**
- * 指定の受理集合（fail loudly の唯一の位置）。
+ * The acceptance set of the specification (the only place that fails loudly).
  *
- * MUST: 黙って丸めない。`temperature: -1` や `topP: 0` を既定へ畳むと「効いていないノブ」が
- * 静かに残り、出力の違いからしか気づけない。
+ * MUST: do not clamp silently. Folding `temperature: -1` or `topP: 0` into the default quietly
+ * leaves "a knob that has no effect", noticeable only from differences in the output.
  *
- * MUST: 未知キーも落とす。JS / 保存設定の復元経路から来る `minP` や綴り違いの `top_p` は TS の
- * 余剰プロパティ検査に掛からず、無視すればそのノブだけが黙って効かない（同じ層の Gemma の
- * 設定や hub の manifest と同じ扱い）。
+ * MUST: reject unknown keys too. A `minP` or a misspelled `top_p` arriving from JS or from restored
+ * saved settings escapes TS's excess-property check, and ignoring it makes just that knob silently
+ * ineffective (the same treatment as Gemma's settings in the same layer and the hub's manifest).
  */
 const assertSpec = (spec: SamplerSpec): void => {
   for (const key of Object.keys(spec)) {
@@ -157,8 +178,9 @@ const assertSpec = (spec: SamplerSpec): void => {
       throw new ModelInputError(`repetitionPenalty ${spec.repetitionPenalty} が正の有限数でない`);
     }
   }
-  // MUST: 形と型まで見る（型を外した JS / JSON 入力が届く）。`Map` や object を反復の形の違いで
-  // 黙って受けたり、文字列の bias を `+=` で文字列連結（`1 + "0"` = `"10"`）させたりしない。
+  // MUST: check the shape and the types too (untyped JS / JSON input arrives here). Do not silently
+  // accept a `Map` or an object through a different iteration shape, and do not let a string bias
+  // concatenate through `+=` (`1 + "0"` = `"10"`).
   if (spec.logitBias !== undefined && !Array.isArray(spec.logitBias)) {
     throw new ModelInputError("logitBias が [token, bias] の組の配列でない");
   }
@@ -175,9 +197,9 @@ const assertSpec = (spec: SamplerSpec): void => {
       throw new ModelInputError(`logitBias に token ${token} が 2 度出る（後勝ちで畳まない）`);
     }
     biased.add(token);
-    // `-Infinity` は「その token を禁止する」慣用（HF の `SequenceBias` と同じ）。`+Infinity` と
-    // `NaN` は softmax を NaN にするだけなので受けない。number 以外（文字列・null・boolean）は
-    // 加算で暗黙変換されて別の値になるので受けない。
+    // `-Infinity` is the idiom for "ban this token" (the same as HF's `SequenceBias`). `+Infinity`
+    // and `NaN` only turn softmax into NaN, so they are rejected. Non-numbers (string, null,
+    // boolean) are implicitly converted by the addition into another value, so they are rejected.
     if (typeof bias !== "number" || !(Number.isFinite(bias) || bias === Number.NEGATIVE_INFINITY)) {
       throw new ModelInputError(`logitBias[${token}] ${bias} が有限数でも -Infinity でもない`);
     }
@@ -185,10 +207,10 @@ const assertSpec = (spec: SamplerSpec): void => {
 };
 
 /**
- * ①repetition penalty + ②logit bias + ③温度 を掛けた logits。
+ * The logits with (1) repetition penalty + (2) logit bias + (3) temperature applied.
  *
- * 何も掛からない指定では**入力をそのまま返す**（V = 262,144 の複製を毎 step 作らない）。
- * 返り値は読むだけで、書き換えてはならない。
+ * A specification that applies nothing **returns the input as is** (no copy of V = 262,144 values
+ * every step). The return value is read-only and must not be modified.
  */
 const processLogits = (
   logits: Float32Array<ArrayBuffer>,
@@ -204,26 +226,29 @@ const processLogits = (
   const processed = new Float32Array(logits.length);
   processed.set(logits);
   if (penalty !== 1) {
-    // MUST: 同じ token が履歴に何度出ても 1 回だけ（HF は `gather` した**元の値**を書き戻すので
-    // 重複は冪等）。素直に履歴を舐めると重複ぶん累乗され、別のノブになる。
+    // MUST: once however many times the token appears in the history (HF writes back the
+    // **original values** it `gather`ed, so duplicates are idempotent). Walking the history naively
+    // raises the factor to the power of the duplicates, which is a different knob.
     for (const token of new Set(history)) {
-      // NOTE: `history` は呼び手の要求ではない（`createSampler` は公開面に出ておらず、唯一の
-      // 呼び元 `GenerationSequence.generate` が渡すのは検査済み prompt + 自分が選んだ token）。
-      // ここが落ちるのは配線の破れ（logits 幅と `program.vocabSize` の食い違い）なので、
-      // 下の `logitBias`（呼び手が渡す値）と違い `ModelInputError` にしない — ADR 0107 決定 2。
+      // NOTE: `history` is not a caller request (`createSampler` is not on the public surface, and
+      // its only caller `GenerationSequence.generate` passes the checked prompt + tokens it chose
+      // itself). A failure here is broken wiring (logits width disagreeing with
+      // `program.vocabSize`), so unlike `logitBias` below (a value the caller passes) it is not a
+      // `ModelInputError` — ADR 0107 decision 2.
       if (!Number.isSafeInteger(token) || token < 0 || token >= processed.length) {
         throw new RangeError(`履歴の token id ${token} が語彙 0..${processed.length - 1} の外`);
       }
       const value = processed[token];
-      // HF `RepetitionPenaltyLogitsProcessor` の向き: 負なら掛け・非負なら割る。
+      // HF's `RepetitionPenaltyLogitsProcessor` direction: multiply if negative, divide if not.
       processed[token] = value < 0 ? value * penalty : value / penalty;
     }
   }
   if (bias !== undefined) {
     for (const [token, amount] of bias) {
       if (token >= processed.length) {
-        // 語彙の上限は指定の検査（`assertSpec`）の時点では未知なので、検査がここまで遅れる。
-        // 値そのものは呼び手が書いた `logitBias` なので入力起因（ADR 0107 決定 3）。
+        // The vocabulary limit is unknown when the specification is checked (`assertSpec`), so the
+        // check is deferred to here. The value itself is the caller's `logitBias`, so it is
+        // input-caused (ADR 0107 decision 3).
         throw new ModelInputError(
           `logitBias の token ${token} が語彙 0..${processed.length - 1} の外`,
         );
@@ -238,25 +263,28 @@ const processLogits = (
 };
 
 /**
- * NaN の混入を入口で落とす（fail loudly）。
+ * Rejects NaN at the entry (fail loudly).
  *
- * MUST: 走査してでも落とす。NaN は**あらゆる比較が false になる**ので、下流の 3 箇所が黙って
- * 壊れる — argmax は素通りして別 token を返し、top-k の閾値は一度 NaN になると以降の候補を
- * 全部弾き、softmax の分母は NaN になって確率が全滅する。範囲外添字の gather は行ごと NaN 汚染
- * するので（[known-issues] / [limitations]）、これは実際に起きる形である。
+ * MUST: reject it even at the cost of a scan. With NaN **every comparison is false**, so three
+ * places downstream break silently — argmax passes over it and returns another token, the top-k
+ * threshold rejects every later candidate once it becomes NaN, and the softmax denominator becomes
+ * NaN and wipes out every probability. An out-of-range index gather contaminates a whole row with
+ * NaN ([known-issues] / [limitations]), so this is a shape that really occurs.
  *
- * 温度 0 は最大値の探索、top-k は候補の走査にこの検査をまとめる。それ以外は順位付けの前に検査する。
+ * Temperature 0 folds this check into the search for the maximum, and top-k into the candidate
+ * scan. Everything else checks before ranking.
  */
 const assertNoNaN = (logits: Float32Array<ArrayBuffer>): void => {
   for (let token = 0; token < logits.length; token += 1) {
-    // MUST: `Number.isNaN` を使わない（呼び出しが V 回入る）— 自分自身と等しくないのが NaN。
+    // MUST: do not use `Number.isNaN` (it would be called V times) — NaN is the value not equal to
+    // itself.
     if (logits[token] !== logits[token]) {
       throw new Error(`logits[${token}] が NaN（非有限） — token id へ畳まずここで落とす`);
     }
   }
 };
 
-/** 最大値が有限か（NaN は比較が全て false になるので最大値には入らない）。 */
+/** Whether the maximum is finite (NaN never becomes the maximum: all its comparisons are false). */
 const hasFiniteMaximum = (logits: Float32Array<ArrayBuffer>): boolean => {
   let maximum = Number.NEGATIVE_INFINITY;
   for (let token = 0; token < logits.length; token += 1) {
@@ -266,23 +294,25 @@ const hasFiniteMaximum = (logits: Float32Array<ArrayBuffer>): boolean => {
 };
 
 /**
- * 非有限の最大値を**出所で**分けて投げる。
+ * Throws a non-finite maximum classified **by its origin**.
  *
- * `raw`（加工**前**の logits）の最大値が有限なら、候補を消したのは呼び手が渡した `logitBias`
- * で確定する — 打つ手は「禁止指定を外す」1 つなので入力起因（ADR 0107 決定 2）。加工前から
- * 非有限ならモデル出力の故障で、呼び手が要求をどう直しても直らない = 素の `Error` のまま。
+ * If the maximum of `raw` (the logits **before** processing) is finite, what removed the candidates
+ * is certainly the caller's `logitBias` — the only remedy is "remove the ban", so it is
+ * input-caused (ADR 0107 decision 2). If it was non-finite before processing, the model output is
+ * broken, and no change to the request fixes it = it stays a plain `Error`.
  *
- * MUST: 判定は**投げる直前**にだけ走らせる（`raw` の走査は語彙 V に比例するので、毎 step の
- * 通常経路へ足さない）。
+ * MUST: run the classification **only right before throwing** (scanning `raw` is proportional to
+ * the vocabulary V, so it is not added to the ordinary per-step path).
  */
 const nonFiniteMaximum = (message: string, raw: Float32Array<ArrayBuffer> | undefined): Error =>
   raw !== undefined && hasFiniteMaximum(raw) ? new ModelInputError(message) : new Error(message);
 
 /**
- * CPU/GPUで共通の最大値検査。非有限値をtokenへ畳まず、従来のエラーを返す。
+ * The maximum check shared by CPU and GPU. It does not fold non-finite values into a token and
+ * returns the same errors as before.
  *
- * `raw` を渡せる面（加工前 logits を持っている呼び手）だけが、非有限の最大値を
- * {@link nonFiniteMaximum} の規則で入力起因と内部異常に分ける。
+ * Only a surface that can pass `raw` (a caller holding the unprocessed logits) splits a non-finite
+ * maximum into input-caused and internal failure by the rule of {@link nonFiniteMaximum}.
  */
 const checkedMaximum = (value: number, index: number, raw?: Float32Array<ArrayBuffer>): number => {
   if (value !== value) {
@@ -298,12 +328,15 @@ const checkedMaximum = (value: number, index: number, raw?: Float32Array<ArrayBu
 };
 
 /**
- * 最大値の添字（同値は**先に出た方** — torch の `argmax` と同じ tie-break）。
+ * Index of the maximum (on a tie **the one that came first** — the same tie-break as torch's
+ * `argmax`).
  *
- * MUST: 最大値が非有限なら落とす。位置表の外の gather や壊れた重みは logits を非有限にするが、
- * argmax はそれを**もっともらしい token id に畳む**ので、畳まれる前がここしかない。
- * NaN は同じ走査で位置ごとに落とし、最後に最大値の ±Infinity を拒否する。
- * 検査用に全語彙をもう一度走査せず、同値の先勝ちと最初の NaN のエラーを維持する。
+ * MUST: fail when the maximum is non-finite. A gather outside the position table or broken weights
+ * make the logits non-finite, but argmax **folds that into a plausible token id**, and this is the
+ * only place before it is folded.
+ * NaN fails per position in the same scan, and a ±Infinity maximum is rejected at the end.
+ * It does not scan the whole vocabulary again for the check, and keeps first-wins on ties and the
+ * error for the first NaN.
  */
 const argmax = (logits: Float32Array<ArrayBuffer>, raw?: Float32Array<ArrayBuffer>): number => {
   let best = 0;
@@ -322,36 +355,43 @@ const argmax = (logits: Float32Array<ArrayBuffer>, raw?: Float32Array<ArrayBuffe
 };
 
 /**
- * 上位 `k` 件の token id を**降順**で選ぶ（同値は id の小さい方が上 — {@link argmax} と同じ
- * tie-break）。
+ * Selects the top `k` token ids in **descending** order (on a tie the smaller id ranks higher — the
+ * same tie-break as {@link argmax}).
  *
- * 全体ソートを避けるのは V = 262,144 に対して毎 step 走るため。**最悪要素を根に置く二分 heap**
- * を長さ k で持ち、根より良い token だけを差し替える — 走査 V 回 + 採用が起きたときだけ
- * O(log k) の沈め直しで済む。長さ ≤ k の降順配列へ挿入する形だと、値が改善し続ける入力
- * （昇順）で押し出しが毎回 O(k) になり V·k まで伸びる。
+ * A full sort is avoided because this runs every step over V = 262,144. A **binary heap with the
+ * worst element at the root** is kept at length k and only tokens better than the root replace it —
+ * V scan steps plus an O(log k) sift-down only when a token is taken. Inserting into a descending
+ * array of length ≤ k would make each push-out O(k) on input whose values keep improving
+ * (ascending), growing to V·k.
  *
- * 順位の決着は比較器 `better` 1 本で、heap の整列と最終 sort が共有する（2 箇所に書くと
- * tie-break がずれても「値としては上位 k 件」なので、並びの契約が壊れても静かに通る）。
+ * Ranking is settled by one comparator, `better`, shared by the heap ordering and the final sort
+ * (written in two places, a drifted tie-break would still give "the top k by value", so a broken
+ * order contract would pass silently).
  *
- * 定常相の足切りが `logits[token] <= logits[heap[0]]` の 1 比較で済むのは、走査が id 昇順で
- * heap 内の id が必ず現 token より小さいため — 同値なら tie-break（id 昇順）で現 token が
- * 負けるので、`better(token, heap[0])` は `logits[token] > logits[heap[0]]` と同値になる。
- * この足切りが無いと、同値が密な入力（語彙の大半が同じ logit）で挿入形に負ける。
+ * The steady-phase cut-off is the single comparison `logits[token] <= logits[heap[0]]` because the
+ * scan runs in ascending id order and every id in the heap is smaller than the current token — on a
+ * tie the current token loses the tie-break (ascending id), so `better(token, heap[0])` is
+ * equivalent to `logits[token] > logits[heap[0]]`. Without this cut-off, input dense with ties (most
+ * of the vocabulary at the same logit) would lose to the insertion form.
  *
- * MUST: NaN は充填・定常相とも、heap に触る前に token id 順で拒否する。NaN が根に
- * 入ると足切りの比較が常に false になり、以後の全 token が根を差し替える（結果も不正）。
- * `k` の語彙数への丸めも呼び手（{@link samplerDistribution}）の責務で、ここでは繰り返さない。
+ * MUST: in both the fill and the steady phase, NaN is rejected in token id order before it touches
+ * the heap. A NaN at the root makes the cut-off comparison always false, and every later token
+ * replaces the root (with a wrong result as well).
+ * Clamping `k` to the vocabulary size is also the caller's ({@link samplerDistribution}) job and is
+ * not repeated here.
  *
- * NOTE: HF の `TopKLogitsWarper` は「k 番目の値**未満**を落とす」閾値形なので、同値が並ぶと
- * k 件より多く残る。こちらは id で決着させて厳密に k 件に絞る — HF との token 列 parity は
- * どのみち取れない（RNG が別物）ので、`topK: 1` が greedy と厳密に一致する側を採る。
+ * NOTE: HF's `TopKLogitsWarper` is a threshold form that drops values **below** the k-th value, so
+ * it keeps every candidate equal to the k-th value and more than k remain on a tie. This one
+ * narrows to **exactly k entries**, keeping the smaller id on a tie — token-sequence parity with HF
+ * is not attainable anyway (the RNG differs), so it takes the side where `topK: 1` matches greedy
+ * exactly.
  */
 const selectTopKHeap = (logits: Float32Array<ArrayBuffer>, k: number): number[] => {
-  // 「left が right より上位」— 値の降順、同値は id の昇順。
+  // "left ranks above right" — descending value, ascending id on a tie.
   const better = (left: number, right: number): boolean =>
     logits[left] > logits[right] || (logits[left] === logits[right] && left < right);
 
-  // 根が**最悪**（= 次に押し出される候補）になる heap。
+  // A heap whose root is the **worst** (= the next candidate to be pushed out).
   const heap: number[] = [];
   const siftDown = (from: number): void => {
     let at = from;
@@ -368,8 +408,8 @@ const selectTopKHeap = (logits: Float32Array<ArrayBuffer>, k: number): number[] 
     }
   };
 
-  // token id 順に全件を検査し、先に現れた NaN を候補の大小に関係なく拒否する。
-  // 充填相: 先頭 k 件をそのまま積む。
+  // Check every entry in token id order and reject the first NaN regardless of candidate ranking.
+  // Fill phase: push the first k entries as they are.
   let token = 0;
   for (; token < k; token += 1) {
     const value = logits[token];
@@ -387,7 +427,8 @@ const selectTopKHeap = (logits: Float32Array<ArrayBuffer>, k: number): number[] 
       at = parent;
     }
   }
-  // 定常相: 根より良い token だけを差し替える。根の値は差し替え時だけ変わる。
+  // Steady phase: only tokens better than the root replace it. The root value changes only on a
+  // replacement.
   let cutoff = logits[heap[0]];
   for (; token < logits.length; token += 1) {
     const value = logits[token];
@@ -403,15 +444,18 @@ const selectTopKHeap = (logits: Float32Array<ArrayBuffer>, k: number): number[] 
 };
 
 /**
- * 全 token id を f32 logit の降順へ安定に並べる（同値は id 昇順）。
+ * Stably sorts every token id by descending f32 logit (ascending id on a tie).
  *
- * top-p 単独指定は全語彙の順位が要る。比較ソートの O(V log V) を避け、IEEE 754 のビット列を
- * 数値の降順キーへ変換して 1 バイトずつ 4 回配る。負数は元のビット列、非負数は符号以外を
- * 反転すると、キーの unsigned 昇順が logit の降順になる。NaN は入口で拒否済み。
+ * Top-p alone needs the rank of the whole vocabulary. Avoiding the O(V log V) comparison sort, it
+ * maps the IEEE 754 bit patterns to keys in descending numeric order and distributes them one byte
+ * at a time in 4 passes. Keeping the original bits for negative numbers and inverting all bits but
+ * the sign for non-negative numbers makes the unsigned ascending order of the keys the descending
+ * order of the logits. NaN was already rejected at the entry.
  *
- * MUST: +0 と -0 は比較ソートと同じ同順位にする。id 昇順から始めて各桁を安定に配るため、
- * 同値の tie-break と softmax の加算順は変わらない。top-p の境界も確率もビット同一のまま。
- * 入力の byteOffset を保ち、キーの正規化で入力 logits 自体を書き換えない。
+ * MUST: +0 and -0 rank equal, as in a comparison sort. It starts from ascending id order and
+ * distributes each digit stably, so the tie-break and the softmax addition order do not change.
+ * The top-p boundary and the probabilities stay bit-identical.
+ * It keeps the input's byteOffset, and normalizing the keys does not modify the input logits.
  */
 const sortAllDescending = (logits: Float32Array<ArrayBuffer>): Int32Array<ArrayBuffer> => {
   const length = logits.length;
@@ -448,12 +492,14 @@ const sortAllDescending = (logits: Float32Array<ArrayBuffer>): Int32Array<ArrayB
 };
 
 /**
- * 加工後 logits → 抽選対象（正規化済み。並びの契約は {@link SamplerDistribution}）。
+ * Processed logits → the draw target (normalized; the order contract is in
+ * {@link SamplerDistribution}).
  *
- * 温度 0 は argmax の 1 点分布へ縮退する（`greedy.ts` の parity 門と同じ token を出す面）。
+ * Temperature 0 degenerates to argmax's one-point distribution (the surface that yields the same
+ * token as the parity check of `greedy.ts`).
  *
- * NOTE: `topP` 単独指定は全語彙を radix sort（O(V)）する。top-k 指定時は引き続き有界 heap
- * で候補を選び、その候補内で top-p を適用する（正規化する集合を変えない）。
+ * NOTE: `topP` alone radix-sorts the whole vocabulary (O(V)). With top-k, the bounded heap still
+ * picks the candidates and top-p is applied within them (the normalized set does not change).
  */
 export const samplerDistribution = (
   logits: Float32Array<ArrayBuffer>,
@@ -462,20 +508,20 @@ export const samplerDistribution = (
 ): SamplerDistribution => {
   if (logits.length < 1) throw new Error("logits が空");
   assertSpec(spec);
-  // 加工の**後**で見る（生の logits だけでなく、`+Infinity` の席へ `-Infinity` の bias を
-  // 足したような組み合わせもここで捕まる）。
+  // Checked **after** processing (this catches not only the raw logits but also combinations such
+  // as a `-Infinity` bias added to a `+Infinity` entry).
   const processed = processLogits(logits, spec, history);
   const temperature = spec.temperature ?? 0;
   if (temperature === 0) {
-    // 加工前の `logits` を渡すのは、非有限の最大値の**出所**（モデル出力 / 呼び手の
-    // `logitBias`）を分けるため（{@link nonFiniteMaximum}）。
+    // The unprocessed `logits` are passed to tell the **origin** of a non-finite maximum (model
+    // output / the caller's `logitBias`) apart ({@link nonFiniteMaximum}).
     return {
       tokens: Int32Array.of(argmax(processed, logits)),
       probabilities: Float64Array.of(1),
     };
   }
 
-  // 語彙数を超える topK は語彙数へ丸める（HF の `min(top_k, vocab)`）。
+  // A topK above the vocabulary size is clamped to the vocabulary size (HF's `min(top_k, vocab)`).
   const topK = spec.topK === undefined ? undefined : Math.min(spec.topK, processed.length);
   const topP = spec.topP;
   let candidates: readonly number[] | Int32Array<ArrayBuffer>;
@@ -486,14 +532,16 @@ export const samplerDistribution = (
     else candidates = Array.from({ length: processed.length }, (_unused, token) => token);
   }
 
-  // softmax は候補集合の中だけで正規化する（top-k で落とした質量は分母から消える — HF が
-  // 落とした席を −inf にして `softmax` へ渡すのと同値）。
+  // Softmax normalizes within the candidate set only (the mass dropped by top-k leaves the
+  // denominator — equivalent to HF setting the dropped entries to −inf and passing them to
+  // `softmax`).
   let peak = Number.NEGATIVE_INFINITY;
   for (const token of candidates) {
     if (processed[token] > peak) peak = processed[token];
   }
   if (!Number.isFinite(peak)) {
-    // 温度 0 経路と同じ規則で出所を分ける（加工前が有限 = bias が候補を消した）。
+    // Classify the origin by the same rule as the temperature-0 path (finite before processing =
+    // the bias removed the candidates).
     throw nonFiniteMaximum(
       `候補の最大 logit が非有限（${peak}） — 全 token が禁止されている`,
       logits,
@@ -507,8 +555,9 @@ export const samplerDistribution = (
     total += weight;
   }
 
-  // ⑤top-p: 累積が topP に**達した 1 件を含めて**残す（HF `TopPLogitsWarper` の昇順 cumsum と
-  // 同値の降順形）。最上位 1 件は必ず残る。`topP = 1` は丸め次第で末尾を落とすので絞らない。
+  // (5) top-p: keep entries **including the one at which** the cumulative sum reaches topP (the
+  // descending form equivalent to the ascending cumsum of HF's `TopPLogitsWarper`). The top entry
+  // always remains. `topP = 1` does not narrow, since rounding could drop the tail.
   let kept = candidates.length;
   if (topP !== undefined && topP < 1) {
     let cumulative = 0;
@@ -533,24 +582,27 @@ export const samplerDistribution = (
 };
 
 /**
- * 指定の**発行時スナップショット**（ADR 0083 追記 2026-09-02 の防御コピー）。
+ * **Snapshot at issue** of the specification (the defensive copy of the ADR 0083 addendum of
+ * 2026-09-02).
  *
- * MUST: 呼び手が握っている object をそのまま持たない。抽選器は step をまたいで生き、毎 step
- * この指定を読み直すので、走行中に書き換えられると**生成の途中で分布が変わる**（例外にならず、
- * 「同じ seed で同じ列」という決定性の契約だけが静かに壊れる）。
+ * MUST: do not keep the object the caller holds. The sampler lives across steps and re-reads this
+ * specification every step, so rewriting it during a run **changes the distribution mid-generation**
+ * (no exception; only the determinism contract "same seed, same sequence" silently breaks).
  *
- * MUST: `logitBias` は要素まで写す — 配列だけ写すと中のタプルが共有され、`bias[0][1] = -Infinity`
- * が走行中の抽選へ通る。**配列の複製はここ 1 箇所だけ**である（{@link samplerDistribution} は
- * 1 回の呼び出しの中でしか spec を読まないので、写す必要が無い）。
+ * MUST: copy `logitBias` down to its elements — copying only the array shares the tuples inside,
+ * and `bias[0][1] = -Infinity` would reach the running draw. **This is the only place the array is
+ * copied** ({@link samplerDistribution} reads the spec only within one call, so it need not copy).
  *
- * NOTE: `export` は上層（`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`）が**発行時**に同じ
- * 写しを取るため。この 2 層は「要求は発行時に写す」を型 doc で約束しており、写しが
- * {@link createSampler}（= 最初の `next()`）まで遅れると、その間の書き換えが黙って効く。
- * 写し口をここ 1 本に保つための export で、`mod.ts` / サブパス面には出さない（ADR 0008）。
+ * NOTE: it is exported so the upper layers (`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`) take
+ * the same copy **at issue**. Those two layers promise "requests are copied at issue" in their type
+ * docs, and if the copy were delayed to {@link createSampler} (= the first `next()`), rewrites in
+ * between would silently take effect. The export keeps a single copy point and is not on the
+ * `mod.ts` / subpath surface (ADR 0008).
  */
 export const snapshotSpec = (spec: SamplerSpec): SamplerSpec => {
-  // MUST: 写す前に受理集合を通す（検査と写しの入口を 1 つに保つ）。写しは要素の形を前提に
-  // するので、検査より先に走ると形の誤りが入力の誤りではなく TypeError として出る。
+  // MUST: pass the acceptance set before copying (one entry for check and copy). The copy assumes
+  // the element shape, so if it ran before the check a shape error would surface as a TypeError
+  // rather than an input error.
   assertSpec(spec);
   return Object.freeze({
     ...spec,
@@ -565,17 +617,18 @@ export const snapshotSpec = (spec: SamplerSpec): SamplerSpec => {
 };
 
 /**
- * 抽選器を組む（RNG 状態を持つので、1 本の生成では**同じ実体を使い回す**）。
+ * Builds a sampler (it holds RNG state, so one generation **reuses the same object**).
  *
- * 指定を省略すると greedy（温度 0）— この層が既定を持たないことの表現である（ADR 0083 決定 7）。
+ * Omitting the specification gives greedy (temperature 0) — this expresses that this layer owns no
+ * defaults (ADR 0083 decision 7).
  */
 export const createSampler = (spec: SamplerSpec = {}): Sampler => {
-  // 検査を通した指定を**写して**持つ（{@link snapshotSpec} が検査してから写す — 検査した値と
-  // 抽選が読む値を同じに保つ）。
+  // Keep a **copy** of the checked specification ({@link snapshotSpec} checks, then copies — the
+  // checked values and the values the draw reads stay the same).
   const frozen = snapshotSpec(spec);
-  // seed の受理集合検査もここで済ませる（抽選が走るのは decode の途中なので、生成器を作るのを
-  // 遅らせると不正な seed が GB 級のロードの末に落ちる — `request-gates.ts` の
-  // `assertAcceptableSeed` がその受理集合の所有者）。
+  // The seed acceptance check also happens here (the draw runs in the middle of decode, so delaying
+  // the generator's creation would make an invalid seed fail after a GB-scale load —
+  // `assertAcceptableSeed` in `request-gates.ts` owns that acceptance set).
   const random = new Randu(frozen.seed ?? 0);
   const rawGreedy =
     (frozen.temperature ?? 0) === 0 &&
@@ -585,7 +638,8 @@ export const createSampler = (spec: SamplerSpec = {}): Sampler => {
     ...(rawGreedy ? { greedy: checkedMaximum } : {}),
     next(logits: Float32Array<ArrayBuffer>, history: readonly number[]): number {
       const { tokens, probabilities } = samplerDistribution(logits, frozen, history);
-      // 候補 1 件（温度 0 / topK 1 / 語彙 1）は抽選が自明なので RNG を回さない。
+      // One candidate (temperature 0 / topK 1 / vocabulary 1) makes the draw trivial, so the RNG
+      // is not advanced.
       if (tokens.length === 1) return tokens[0];
       const draw = random.uniform();
       let cumulative = 0;
@@ -593,21 +647,23 @@ export const createSampler = (spec: SamplerSpec = {}): Sampler => {
         cumulative += probabilities[index];
         if (draw < cumulative) return tokens[index];
       }
-      // 累積は丸めで 1 を僅かに下回りうる（`draw` は [0,1) なので、そのときだけここへ来る）。
+      // Rounding can leave the cumulative sum slightly below 1 (`draw` is in [0,1), so only then
+      // does control reach here).
       return tokens[tokens.length - 1];
     },
   };
 };
 
 /**
- * 停止 token 集合の判定（ADR 0083 決定 8）。
+ * Check against the stop token set (ADR 0083 decision 8).
  *
- * 停止条件は単数の EOS ではなく**集合**である（gemma-4-E2B-it の `generation_config.json` は
- * `eos_token_id = [1, 106, 50]`）。判定するのは **sampling の結果**で、argmax でも抽選でも
- * 同じ段に置く — logits の側で見ると「禁止された EOS が停止に化ける」類の食い違いが出る。
+ * The stop condition is a **set**, not a single EOS (gemma-4-E2B-it's `generation_config.json` has
+ * `eos_token_id = [1, 106, 50]`). What is checked is **the sampling result**, at the same stage for
+ * argmax and for the draw — checking on the logits side produces mismatches of the kind "a banned
+ * EOS turns into a stop".
  *
- * MUST: 集合の出どころは chat 形式と**同じ配布 digest set**（ADR 0084 決定 5）。別々の場所から
- * 拾うと片方だけ古くなる。
+ * MUST: the set comes from **the same distribution digest set** as the chat format (ADR 0084
+ * decision 5). Taken from different places, one of them goes stale.
  */
 export const isStopToken = (token: number, stopTokens: readonly number[]): boolean =>
   stopTokens.includes(token);

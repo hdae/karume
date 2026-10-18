@@ -1,21 +1,25 @@
 /**
- * denoise ループ（段 7）とその前段（段 6' — 条件側 K/V 射影 `dit_context` を生成 1 回だけ回す）
- * の 2 経路 — forward ごとにホストへ降りる {@link runDitLoopOnHost} と、ループ全体を 1 batch に
- * 束ねる GPU 常駐経路 {@link runDitLoopResident}。ループ 1 本ぶんの材料（{@link DitLoop}）を
- * 組むのは呼び手で、ここは受け取った材料を回すだけ。
+ * The 2 paths of the denoise loop (step 7) and the step before it (step 6' — run the context K/V
+ * projection `dit_context` once per generation): {@link runDitLoopOnHost}, which goes down to the
+ * host on every forward, and the GPU-resident path {@link runDitLoopResident}, which bundles the
+ * whole loop into 1 batch. The caller builds the material of one loop ({@link DitLoop}); this
+ * module only runs the material it receives.
  *
- * 10 段の説明（何をどの順で回すか）は {@link "./pipeline.ts"} 冒頭の doc が正本。**どちらの
- * 経路を回すかを決めるのもここではない** — 選択は `./pipeline.ts` の `generateLatent` にあり、
- * 計測が有効な device（ADR 0021 — batch を開けない）と `onEvent` の購読がホスト経路を選ぶ。
+ * The description of the 10 steps (what runs in which order) is canonical in the doc at the top of
+ * {@link "./pipeline.ts"}. **Choosing which path runs does not happen here either** — the choice
+ * is in `generateLatent` of `./pipeline.ts`, where a device with timing enabled (ADR 0021 — it
+ * cannot open a batch) and an `onEvent` subscription pick the host path.
  *
- * MUST: 2 経路を汎用の step executor へ畳まない。出力のビット同一は「積む演算が 1 演算ずつ
- * 同型」でだけ成立しており（{@link runDitLoopResident} の MUST）、共通化して片方の並びが
- * 動くと WAV の sha256 門が割れる。段 6' もその一部で、どちらの経路も「条件 3 本を
- * `dit_context` に同じ Session 設定で 1 度だけ通し、出力のバイトをそのまま常駐テンソルで
- * `dit` へ渡す」（DECIDED: ADR 0114）。違うのは写し方（GPU コピーか、ホストを経由した
- * `write` か）だけで、`dit` が読む K / V のバイトは同じ。
+ * MUST: do not fold the 2 paths into a generic step executor. The bit identity of the outputs holds
+ * only because "the queued operations have the same form, one operation at a time" (the MUST of
+ * {@link runDitLoopResident}); if sharing the code moves the order on one side, the WAV sha256
+ * check breaks. Step 6' is part of this: both paths "pass the 3 conditions through `dit_context`
+ * once with the same Session options, and hand the output bytes to `dit` as resident tensors as
+ * they are" (DECIDED: ADR 0114). Only the copy differs (a GPU copy, or a `write` through the
+ * host); the K / V bytes `dit` reads are the same.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is free of side effects (no execution at import time, no global mutable state
+ * — CLAUDE.md).
  */
 
 import { disposeSteps } from "../session/dispose-steps.ts";
@@ -57,37 +61,41 @@ import type { ModelComponent } from "../hub/components.ts";
 import { withSession } from "../session/with-session.ts";
 
 /**
- * 途中潜在を返す口を作る（**lazy copy** — 呼ばれたときだけ写す）。
+ * Builds the accessor that returns an intermediate latent (**lazy copy** — copies only on call).
  *
- * 進捗だけを購読する消費側にコピー費用が一切かからず、内部の配列を渡さないので「次 step の
- * 入力を購読側に握られる」事故も構造的に起きない。
+ * A consumer that subscribes only to progress pays no copy cost at all, and since the internal
+ * array is never handed out, the accident "the subscriber holds on to the input of the next step"
+ * cannot happen structurally.
  *
- * MUST: 呼ばれた時点ではなく**作った時点**の配列を写す（引数で束縛する）。DiT ループの `x` は
- * step ごとに**新しい配列へ差し替わる**ので、この束縛がそのまま「その step の潜在」になる。
- * ループ変数を閉じ込めると、後から呼んだ購読側に別 step の潜在が返る。
+ * MUST: copy the array as of **creation**, not as of the call (bind it through the argument). The
+ * `x` of the DiT loop is **replaced by a new array** every step, so this binding is exactly "the
+ * latent of that step". Capturing the loop variable would return the latent of another step to a
+ * subscriber that calls later.
  *
- * MUST: `data` だけでなく `shape` も写す。参照のまま返すと同じ step で 2 回呼んだ写しが同一の
- * 配列を共有し、購読側が 1 回目の `shape` を書き換えると 2 回目の写しが黙って別の形を名乗る。
- * 公開イベント面の契約（`IrodoriGenerateEvent.copyLatents` / `AnimaGenerateEvent.copyLatents`）
- * を家族間で 1 本にするための揃え（anima 側 `src/anima/pipeline.ts` の同名関数と同じ形）。
+ * MUST: copy `shape` as well as `data`. Returned by reference, two copies taken in the same step
+ * would share one array, and if the subscriber rewrote the first `shape`, the second copy would
+ * silently claim a different shape. An alignment that makes the contract of the public event
+ * surface (`IrodoriGenerateEvent.copyLatents` / `AnimaGenerateEvent.copyLatents`) one across
+ * families (the same form as the same-named function on the anima side, `src/anima/pipeline.ts`).
  *
- * NOTE: `export` は GPU 無しで独立性を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: `export` is for the test that pins the independence without a GPU (not exposed on `mod.ts`
+ * / the subpath surface — ADR 0008).
  */
 export const latentSnapshot =
   (latent: Float32Array<ArrayBuffer>, shape: readonly number[]): (() => IrodoriLatentSnapshot) =>
   (): IrodoriLatentSnapshot => ({ data: new Float32Array(latent), shape: [...shape] });
 
 /**
- * latent 段の結果。`plan.targetSamples` は波形の切り出しに要るので**決めた場所から持ち回る**
- * （`GeneratedLatent` は公開の面なので混ぜない）。
+ * Result of the latent step. `plan.targetSamples` is needed to cut the waveform, so it is **carried
+ * along from where it was decided** (`GeneratedLatent` is the public surface, so it is not mixed
+ * in).
  */
 export type LatentStage = {
   readonly latent: GeneratedLatent;
   readonly plan: SequencePlan;
 };
 
-/** CFG の 1 変種（落とす区間・強さ・その区間だけ False にしたマスク）。 */
+/** One CFG variant (the segment to drop, the strength, the mask with only that segment False). */
 export type UncondVariant = {
   readonly segment: IrodoriSegment;
   readonly scale: number;
@@ -95,38 +103,44 @@ export type UncondVariant = {
 };
 
 /**
- * DiT ループ 1 本ぶんの材料（2 つの経路が**同じもの**を読む — ホストの計算はどちらでも同一）。
+ * The material of one DiT loop (the 2 paths read **the same thing** — the host computation is
+ * identical on both).
  */
 export type DitLoop = {
   readonly frames: number;
-  /** 初期ノイズ `[frames × latentDim]`。 */
+  /** Initial noise `[frames × latentDim]`. */
   readonly initial: Float32Array<ArrayBuffer>;
   readonly schedule: Float32Array<ArrayBuffer>;
   readonly frequencies: Float32Array<ArrayBuffer>;
   /**
-   * 右 pad 済みの条件 3 本（`dit_context` のグラフ入力名 → Tensor）。読むのは段 6' の 1 度だけで、
-   * `dit` へは K / V に射影した常駐テンソルで渡る。
+   * The 3 right-padded conditions (graph input name of `dit_context` → Tensor). Read only once, in
+   * step 6'; they reach `dit` as resident tensors projected to K / V.
    */
   readonly conditions: Readonly<Record<string, Tensor>>;
   readonly condMask: Tensor;
   readonly uncondVariants: readonly UncondVariant[];
 };
 
-/** ループの結果（最終潜在と `dit` を回した回数）。 */
+/** Result of the loop (the final latent and how many times `dit` ran). */
 type DitLoopResult = {
   readonly x: Float32Array<ArrayBuffer>;
   readonly forwards: number;
 };
 
-/** 常駐テンソルの確保口（確保したものを呼び手の後始末へ載せる — 返す順序は呼び手が決める）。 */
+/**
+ * Allocator of resident tensors (puts what it allocates on the caller's cleanup — the caller
+ * decides the order of release).
+ */
 type CreateResident = (byteLength: number, label: string) => Promise<ResidentTensor>;
 
 /**
- * batch 区間を 1 本開いて `body` を積み、成否によらず必ず閉じる（常駐経路の 2 区間 — 段 6' の
- * 前段とループ本体 — が同じ閉じ方を使う）。
+ * Opens one batch span, queues `body`, and always closes it whatever the outcome (the 2 spans of
+ * the resident path — the step-6' span before the loop and the loop body — close the same way).
  *
- * MUST: 区間は必ず閉じる（開いたままだと device 単位のロックが返らず、以後の run が永久に待つ）。
- * MUST: `body` の失敗を `finish` の失敗で上書きしない（{@link disposeSteps} が両方を運ぶ）。
+ * MUST: always close the span (left open, the per-device lock never returns and every later run
+ * waits forever).
+ * MUST: do not overwrite a failure of `body` with a failure of `finish` ({@link disposeSteps}
+ * carries both).
  */
 const withBatch = async (
   gpu: GpuContext,
@@ -150,12 +164,15 @@ const withBatch = async (
 };
 
 /**
- * 段 6'（ホスト経路）: `dit_context` を `run` で 1 度だけ回し、出力をホストで受けて常駐テンソルへ
- * 書く。計測が有効な device は batch を開けない（ADR 0021）ので、常駐経路の前段 batch は使えない。
+ * Step 6' (host path): runs `dit_context` once with `run`, receives the outputs on the host and
+ * writes them into resident tensors. A device with timing enabled cannot open a batch (ADR 0021),
+ * so the resident path's batch before the loop cannot be used.
  *
- * ホストの写し（条件側 K / V — 178MiB 級）はこの関数の中でだけ生きる（ループの間は持たない）。
- * MUST: `dit_context` の Session は常駐テンソルを確保する**前**に畳む（`withStageSession` が
- * 返った時点で解放済み）— 出力スロットと常駐テンソルを同時に VRAM に置かない。
+ * The host copy (context K / V — 178MiB class) lives only inside this function (it is not held
+ * during the loop).
+ * MUST: the Session of `dit_context` is closed **before** the resident tensors are allocated (it is
+ * already released when `withStageSession` returns) — the output slots and the resident tensors
+ * are never in VRAM at the same time.
  */
 const projectContextOnHost = async (
   state: IrodoriState,
@@ -177,7 +194,8 @@ const projectContextOnHost = async (
       throw new Error(`dit_context の出力 '${name}' が実行結果に無い`);
     }
     const tensor = await createResident(byteLength, `irodori.${name}`);
-    // 大きさは `write` が厳密一致で見る（admission が導いた byteLength と実行結果の突合）。
+    // `write` checks the size for an exact match (matching the byteLength admission derived against
+    // the run result).
     tensor.write(outputs[name].data);
     context[name] = tensor;
   }
@@ -185,13 +203,14 @@ const projectContextOnHost = async (
 };
 
 /**
- * 段 6'（常駐経路）: `dit_context` を前段の batch で 1 度だけ積み、出力を `copyOutputs` で
- * 常駐テンソルへ写す（ホストへは降りない）。
+ * Step 6' (resident path): queues `dit_context` once in a batch before the loop, and copies the
+ * outputs into resident tensors with `copyOutputs` (nothing goes down to the host).
  *
- * MUST: 写し先の常駐テンソルは Session を開く**前**に確保し、Session は `dit` を開く**前**に
- * 畳む（返った時点で解放済み）。VRAM のピークを常駐 K / V ぶんに抑えるため — ループと同じ
- * batch に積むと、`dit_context` の出力スロットが `finish` まで残ってピークが倍になる
- * （batch の中では Session を dispose できない — ADR 0054 追記）。
+ * MUST: the destination resident tensors are allocated **before** the Session is opened, and the
+ * Session is closed **before** `dit` is opened (it is already released on return). This keeps the
+ * VRAM peak at the resident K / V — queued in the same batch as the loop, the output slots of
+ * `dit_context` would stay until `finish` and the peak would double (a Session cannot be disposed
+ * inside a batch — ADR 0054 addendum).
  */
 const projectContextOnGpu = async (
   state: IrodoriState,
@@ -202,7 +221,8 @@ const projectContextOnGpu = async (
   for (const { name, byteLength } of state.ditContextOutputs) {
     context[name] = await createResident(byteLength, `irodori.${name}`);
   }
-  // 観測は enqueue ごとにここで渡す（`withSession` の観測席は `run` にしか掛からない）。
+  // Observations are passed here per enqueue (the observation hook of `withSession` covers only
+  // `run`).
   const observe = observer(state, "dit-context");
   await withSession(
     state.gpu,
@@ -220,15 +240,16 @@ const projectContextOnGpu = async (
 };
 
 /**
- * forward ごとにホストへ降りるループ（`run` → readback → `combineCfg` + `eulerStep` →
- * 再アップロード）。
+ * The loop that goes down to the host on every forward (`run` → readback → `combineCfg` +
+ * `eulerStep` → re-upload).
  *
- * **数値の正本**であり、計測が有効な device（`gpuTiming` — 常駐経路が使う batch を開けない）
- * と生成イベントの購読（`onEvent` — 1 batch の途中は観測できない）での唯一の経路でもある。
- * 段 6' の K / V だけは常駐テンソルで `dit` へ渡す（毎 forward 178MiB をアップロードしない）。
+ * It is **the numeric source of truth**, and also the only path on a device with timing enabled
+ * (`gpuTiming` — it cannot open the batch the resident path uses) and with a generation-event
+ * subscription (`onEvent` — the middle of 1 batch cannot be observed).
+ * Only the K / V of step 6' reach `dit` as resident tensors (178MiB is not uploaded per forward).
  *
- * MUST: 常駐テンソルを返すのは `dit` の Session を畳んだ**後**（焼き込み参照が残っていると
- * `dispose` が fail loudly になる — {@link runDitLoopResident} と同じ）。
+ * MUST: the resident tensors are released **after** the Session of `dit` is closed (while a baked
+ * reference remains, `dispose` fails loudly — the same as {@link runDitLoopResident}).
  */
 export const runDitLoopOnHost = async (
   state: IrodoriState,
@@ -268,7 +289,8 @@ export const runDitLoopOnHost = async (
         forwards += 1;
         const variants: CfgVariant[] = [];
         if (t >= config.cfgMinT && t <= config.cfgMaxT) {
-          // MUST: 合成順は SEGMENT_ORDER（text → speaker → caption）— `combineCfg` の doc。
+          // MUST: the combination order is SEGMENT_ORDER (text → speaker → caption) — the doc of
+          // `combineCfg`.
           for (const variant of loop.uncondVariants) {
             const outputs = await run({
               x_t: xTensor,
@@ -300,8 +322,8 @@ export const runDitLoopOnHost = async (
     failure = { error };
     throw error;
   } finally {
-    // `dit` の Session は `withStageSession` が返った時点で解放済み。失敗しても全ての常駐
-    // テンソルの解放を試み、元の故障も残す。
+    // The Session of `dit` is already released when `withStageSession` returns. Even on failure,
+    // release of every resident tensor is attempted, and the original failure is kept.
     await disposeSteps([
       () => {
         if (failure !== undefined) throw failure.error;
@@ -313,21 +335,24 @@ export const runDitLoopOnHost = async (
 };
 
 /**
- * ループ全体を **1 batch** に束ねる GPU 常駐経路（H-5）。
+ * The GPU-resident path that bundles the whole loop into **1 batch** (H-5).
  *
- * 潜在・速度場・CFG の途中結果・条件側 K / V（段 6' — {@link projectContextOnGpu} が前段の
- * batch で作る）を全て {@link ResidentTensor} に置き、`dit` とホストで組んだ小グラフ 2 本
- * （{@link combineGraph} / {@link eulerGraph}）を `enqueue` で積むだけにする。ホストへ降りるのは
- * 最後の 1 回（`x_t.read()`）だけで、ループのフェンスは `batch.finish()` の 1 本に集約される
- * （前段の batch が別にフェンス 1 本を払う）。
+ * The latent, the velocity fields, the intermediate CFG results and the context K / V (step 6' —
+ * built by {@link projectContextOnGpu} in a batch before the loop) all live in
+ * {@link ResidentTensor}s, and the loop only queues `dit` and the 2 small graphs built on the host
+ * ({@link combineGraph} / {@link eulerGraph}) with `enqueue`. The only trip to the host is the
+ * final one (`x_t.read()`), and the loop's fences collapse into the single one of `batch.finish()`
+ * (the batch before the loop pays one more fence of its own).
  *
- * MUST: 区間の中で `Session.run` を待たない（自己デッドロック — `beginBatch` の doc）。
- * MUST: 演算の積み方は {@link runDitLoopOnHost} と 1 演算ずつ同型（段 6' の 1 回・変種順・差の
- * 基準・引数順）。ずれると最終桁が動き、WAV sha256 門が割れる。強さ `scale` はこちらが GPU へ
- * 渡す前に f32 へ丸めるのに対しホスト経路は JS の f64 で乗算するが、`parseCfgScales` が
- * f32 厳密な値しか受理しないので、2 経路の出力一致は**配布形に依らず無条件で**成立する。
- * MUST: 常駐テンソルを返すのは Session を全て畳んだ**後**（焼き込み参照が残っていると
- * `dispose` が fail loudly になる）。
+ * MUST: do not wait on `Session.run` inside the span (self-deadlock — the doc of `beginBatch`).
+ * MUST: the way operations are queued has the same form as {@link runDitLoopOnHost}, one operation
+ * at a time (step 6' once, the variant order, the base of the differences, the argument order). A
+ * mismatch moves the last digits and breaks the WAV sha256 check. This path rounds the strength
+ * `scale` to f32 before passing it to the GPU, while the host path multiplies in JS f64, but
+ * `parseCfgScales` accepts only f32-exact values, so the outputs of the 2 paths match
+ * **unconditionally, whatever the distribution**.
+ * MUST: the resident tensors are released **after** every Session is closed (while a baked
+ * reference remains, `dispose` fails loudly).
  */
 export const runDitLoopResident = async (
   state: IrodoriState,
@@ -337,8 +362,9 @@ export const runDitLoopResident = async (
   const { frames } = loop;
   const observe = observer(state, "dit");
   const latentBytes = frames * config.latentDim * 4;
-  // 記号次元は常駐入力から束縛できない（常駐テンソルは shape を持たない）ので毎 enqueue 明示する。
-  // 名前は admission が確定させたもの（「記号は 1 本」の検査もそこにある — `admitIrodori`）。
+  // The symbolic dimension cannot be bound from a resident input (a resident tensor has no shape),
+  // so it is given explicitly on every enqueue. The name is the one admission settled (the check
+  // "there is one symbol" lives there too — `admitIrodori`).
   const bindings = { [state.ditSymbol]: frames };
   const velocity = outputNameAt(state.dit, 0);
   const residents: ResidentTensor[] = [];
@@ -355,17 +381,19 @@ export const runDitLoopResident = async (
     const vVariant = await createResident(latentBytes, "irodori.v_variant");
     const accumulator = await createResident(latentBytes, "irodori.cfg_acc");
     xT.write(loop.initial);
-    // 段 6'。`dit` を開く前に `dit_context` の Session を畳む（projectContextOnGpu の MUST）。
+    // Step 6'. The Session of `dit_context` is closed before `dit` opens (the MUST of
+    // projectContextOnGpu).
     const context = await projectContextOnGpu(state, loop.conditions, createResident);
     const open = async (model: ModelComponent, options: SessionOptions): Promise<Session> => {
       const session = await model.createSession(gpu, options);
       sessions.push(session);
       return session;
     };
-    // ホストが組んだ小グラフは重みを 1 本も持たない（`krm` を書く理由が無い）ので、宣言だけを
-    // メモリ内容器に載せて Session にする。
+    // The small graphs the host builds hold no weights at all (no reason to write a `krm`), so only
+    // the declaration goes into an in-memory container and becomes a Session.
     const openHostGraph = async (name: string, declaration: IrDeclaration): Promise<Session> => {
-      // 供給が 1 本も無いので `tensors` は空表（`greedy-output.ts` と同じ綴り）。
+      // There is no supply at all, so `tensors` is an empty table (the same spelling as
+      // `greedy-output.ts`).
       const bound = openMemoryContainer({ graphs: { [name]: declaration }, tensors: {} });
       const session = await createSessionFromContainer(gpu, bound, name, {});
       sessions.push(session);
@@ -374,7 +402,7 @@ export const runDitLoopResident = async (
     const dit = await open(state.dit, state.ditSessionOptions);
     const combine = await openHostGraph("combine", combineGraph(frames, config.latentDim));
     const euler = await openHostGraph("euler", eulerGraph(frames, config.latentDim));
-    // 強さは step に依らないので 1 度だけ作る。
+    // The strengths do not depend on the step, so they are built once.
     const scales = loop.uncondVariants.map((variant) => f32(Float32Array.of(variant.scale), [1]));
 
     let forwards = 0;
@@ -391,17 +419,19 @@ export const runDitLoopResident = async (
           if (observe !== undefined) observe(dit.diagnostics());
         };
         await forward(loop.condMask, vCond);
-        // 区間の最初の 1 forward だけフェンスを張って推定を裏付ける（P-2）。これが無いと区間の
-        // 間ずっと実測 0 = チャンクは初期値 16 のままで、約 96,000 dispatch が 6,000 回の submit に
-        // 割れる。代償はフェンス 1 本（≈11 ms）。
+        // Only the first forward of the span places a fence to ground the estimate (P-2). Without
+        // it there is no measurement for the whole span = the chunk stays at its initial 16, and
+        // about 96,000 dispatches split into 6,000 submits. The cost is one fence (≈11 ms).
         if (step === 0) await batch.settle();
         const guided = t >= config.cfgMinT && t <= config.cfgMaxT && loop.uncondVariants.length > 0;
         if (guided) {
-          // MUST: 合成順は SEGMENT_ORDER（text → speaker → caption）— `combineCfg` の doc。
+          // MUST: the combination order is SEGMENT_ORDER (text → speaker → caption) — the doc of
+          // `combineCfg`.
           for (let index = 0; index < loop.uncondVariants.length; index += 1) {
             await forward(loop.uncondVariants[index].mask, vVariant);
-            // k = 0 の被加数は cond そのもの（正本 `combineCfg` の `let value = base`）。同じ
-            // バッファを acc_in と cond の 2 口で読むだけなので WebGPU 上も合法。
+            // The augend for k = 0 is cond itself (`let value = base` in the canonical
+            // `combineCfg`). The same buffer is only read through 2 inputs, acc_in and cond, so it
+            // is legal on WebGPU too.
             await combine.enqueue(
               {
                 [COMBINE_INPUTS.accumulator]: index === 0 ? vCond : accumulator,
@@ -431,7 +461,8 @@ export const runDitLoopResident = async (
     failure = { error };
     throw error;
   } finally {
-    // Session の焼き込み参照を先に外す。失敗しても全資源の解放を試み、元の故障も残す。
+    // Drop the Sessions' baked references first. Even on failure, release of every resource is
+    // attempted, and the original failure is kept.
     await disposeSteps([
       () => {
         if (failure !== undefined) throw failure.error;

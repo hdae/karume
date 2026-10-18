@@ -1,65 +1,72 @@
 /**
- * ITU-R BS.1770-4 の integrated loudness（LUFS）。参照音声の LUFS 正規化にだけ使う。
+ * Integrated loudness (LUFS) of ITU-R BS.1770-4. Used only for the LUFS normalization of the
+ * reference audio.
  *
- * 上流は `descript-audiotools` の `AudioSignal.loudness()`（= `pyloudnorm` の Meter を torch で
- * 書き直したもの）を通す。ここはその**実装仕様**の移植で、規格の一般形ではない — 規格が
- * 選択の余地を残している箇所（ゲーティングで残らなかったときの値・0.5 秒未満の扱い・ブロックの
- * 数え方）は上流の綴りに合わせてある。
+ * Upstream goes through `AudioSignal.loudness()` of `descript-audiotools` (= `pyloudnorm`'s Meter
+ * rewritten in torch). This is a port of that **implementation's behaviour**, not the general form
+ * of the standard — where the standard leaves room for choice (the value when nothing survives
+ * gating, the handling of less than 0.5 s, how blocks are counted), it follows upstream's spelling.
  *
- * ## 段
+ * ## Steps
  *
- * 1. 0.5 秒未満はゼロ pad してから測る（`AudioSignal.loudness` の `signal_duration < 0.5`）。
- *    pad は測定のためだけで、返るのは元の波形（呼び出し側は何も切らなくてよい）
- * 2. K-weighting = high_shelf → high_pass の 2 段 biquad（{@link kWeightingFilters}）
- * 3. 0.4 秒のブロックを 75% 重ねて（stride 0.1 秒）並べ、ブロックごとの平均二乗 z を採る。
- *    末尾の欠けたブロックは捨てずゼロ pad する（`F = 1 + ceil((T − 19200)/4800)`）
- * 4. l = −0.691 + 10·log10(z) を絶対閾 −70 LKFS で選び、残った z の平均から相対閾（−10 LU）を
- *    出し、**両方を通った**ブロックの z 平均で integrated loudness を出す
- * 5. −70 LKFS で下から clamp する
+ * 1. Less than 0.5 s is zero-padded before measuring (`signal_duration < 0.5` of
+ *    `AudioSignal.loudness`). The padding is only for the measurement; the original waveform is
+ *    what is returned (the caller has nothing to cut)
+ * 2. K-weighting = a 2-stage biquad, high_shelf → high_pass ({@link kWeightingFilters})
+ * 3. Lay out 0.4 s blocks overlapping by 75% (stride 0.1 s), and take the mean square z per block.
+ *    An incomplete trailing block is zero-padded, not discarded (`F = 1 + ceil((T − 19200)/4800)`)
+ * 4. Select l = −0.691 + 10·log10(z) with the absolute gate −70 LKFS, derive the relative gate
+ *    (−10 LU) from the mean of the remaining z, and compute the integrated loudness from the z mean
+ *    of the blocks that **passed both**
+ * 5. Clamp from below at −70 LKFS
  *
- * ## MUST: f64 で回す（上流は f32 の `lfilter`）
+ * ## MUST: run in f64 (upstream runs `lfilter` in f32)
  *
- * 上流は係数もデータも f32 のまま `torchaudio.functional.lfilter` を通す。ここを
- * `Math.fround` の逐次で写す選択もあるが、**採らない** — IIR の逐次差分方程式は丸めの入り方が
- * ライブラリの内部展開順（torchaudio は係数を正規化してから差分式を回す）に依存し、写しても
- * ビット一致は得られない。結果として残る差は refDb の 1e-5 LU 級（`irodori_reference_test.ts`
- * の実測表）で、正規化利得に直すと相対 1e-6 — 波形の tolerance に埋もれる。写経で偽の
- * 一致を演出するより、差を実測して門の閾値に載せるほうが素性が良い。
+ * Upstream passes both the coefficients and the data through `torchaudio.functional.lfilter` in
+ * f32. Copying that step by step with `Math.fround` is an option, but **it is not taken** — the way
+ * rounding enters an IIR's sequential difference equation depends on the library's internal
+ * evaluation order (torchaudio normalizes the coefficients before running the difference
+ * equation), so a copy would not give bit identity anyway. The difference that remains is of the
+ * 1e-5 LU class in refDb (the measurement table of `irodori_reference_test.ts`), relative 1e-6 as a
+ * normalization gain — buried in the waveform tolerance. Measuring the difference and putting it
+ * into the check's threshold is sounder than staging a fake match by transcription.
  */
 
-/** biquad 1 段（分母は `a[0] = 1` に正規化済み）。 */
+/** One biquad stage (the denominator is normalized to `a[0] = 1`). */
 type Biquad = {
   readonly b: readonly [number, number, number];
   readonly a: readonly [number, number, number];
 };
 
-/** 測定ブロック長（秒）。 */
+/** Measurement block length (seconds). */
 const BLOCK_SECONDS = 0.4;
-/** ブロックの重なり（75% → stride は 0.1 秒）。 */
+/** Block overlap (75% → a stride of 0.1 s). */
 const BLOCK_OVERLAP = 0.75;
-/** 測定の最小長（秒）。これ未満はゼロ pad してから測る。 */
+/** Minimum measurement length (seconds). Anything shorter is zero-padded before measuring. */
 const MIN_MEASURE_SECONDS = 0.5;
-/** BS.1770 のオフセット項（`l = OFFSET + 10·log10(z)`）。 */
+/** The offset term of BS.1770 (`l = OFFSET + 10·log10(z)`). */
 const LOUDNESS_OFFSET = -0.691;
-/** 絶対ゲート（LKFS）。返り値の下限でもある。 */
+/** Absolute gate (LKFS). Also the lower bound of the return value. */
 const ABSOLUTE_GATE_DB = -70;
-/** 相対ゲート（LU — 絶対ゲートを通ったブロックの平均から下げる幅）。 */
+/** Relative gate (LU — how far below the mean of the blocks that passed the absolute gate). */
 const RELATIVE_GATE_LU = -10;
 
-/** K-weighting 第 1 段（high shelf）の設計値（RBJ cookbook のパラメタ）。 */
+/** Design values of K-weighting stage 1 (high shelf) (RBJ cookbook parameters). */
 const SHELF_GAIN_DB = 4.0;
 const SHELF_Q = Math.SQRT1_2;
 const SHELF_FC_HZ = 1500;
-/** K-weighting 第 2 段（high pass）の設計値。ゲインは持たない（G = 0dB）。 */
+/** Design values of K-weighting stage 2 (high pass). No gain (G = 0dB). */
 const HIGHPASS_Q = 0.5;
 const HIGHPASS_FC_HZ = 38;
 
 /**
- * RBJ cookbook の high shelf。
+ * High shelf of the RBJ cookbook.
  *
- * MUST: 係数を数値で焼かない（式から作る）。48kHz 以外の参照音声はパイプラインが受け付け
- * ないが、係数を直書きすると「48kHz 用の係数で別の周波数を測る」誤りが**沈黙で**通る。
- * 48kHz での値そのものは `irodori_reference_test.ts` が固定する（式の写し間違いの検出）。
+ * MUST: do not bake the coefficients as numbers (build them from the formula). The pipeline does
+ * not accept reference audio other than 48kHz, but hard-coded coefficients would let the error
+ * "measuring another rate with 48kHz coefficients" through **silently**.
+ * The values at 48kHz themselves are pinned by `irodori_reference_test.ts` (catches a mistake in
+ * copying the formula).
  */
 const highShelf = (sampleRate: number, gainDb: number, q: number, fc: number): Biquad => {
   const amplitude = Math.pow(10, gainDb / 40);
@@ -76,7 +83,7 @@ const highShelf = (sampleRate: number, gainDb: number, q: number, fc: number): B
   return { b: [b0 / a0, b1 / a0, b2 / a0], a: [1, a1 / a0, a2 / a0] };
 };
 
-/** RBJ cookbook の high pass（2 次）。 */
+/** High pass of the RBJ cookbook (2nd order). */
 const highPass = (sampleRate: number, q: number, fc: number): Biquad => {
   const w0 = 2 * Math.PI * (fc / sampleRate);
   const alpha = Math.sin(w0) / (2 * q);
@@ -89,17 +96,19 @@ const highPass = (sampleRate: number, q: number, fc: number): Biquad => {
   };
 };
 
-/** K-weighting の 2 段（high shelf → high pass の順で当てる）。 */
+/** The 2 stages of K-weighting (applied in the order high shelf → high pass). */
 export const kWeightingFilters = (sampleRate: number): readonly [Biquad, Biquad] => [
   highShelf(sampleRate, SHELF_GAIN_DB, SHELF_Q, SHELF_FC_HZ),
   highPass(sampleRate, HIGHPASS_Q, HIGHPASS_FC_HZ),
 ];
 
 /**
- * biquad を逐次差分方程式で当てる（`lfilter` 相当 — 初期状態はゼロ）。
+ * Applies a biquad by its sequential difference equation (the counterpart of `lfilter` — zero
+ * initial state).
  *
- * MUST: 周波数領域や FIR 近似で代用しない。上流は厳密な IIR で、近似すると LUFS が 0.1 LU
- * 級でずれる（正規化利得が 1% 動く = 波形が全サンプルで食い違う）。
+ * MUST: do not substitute the frequency domain or an FIR approximation. Upstream is an exact IIR,
+ * and an approximation shifts the LUFS by about 0.1 LU (the normalization gain moves by 1% = the
+ * waveform differs in every sample).
  */
 const applyBiquad = (
   samples: Float64Array<ArrayBuffer>,
@@ -125,10 +134,10 @@ const applyBiquad = (
 };
 
 /**
- * integrated loudness（LUFS / LKFS）を返す。mono 専用（チャネル重み G = 1）。
+ * Returns the integrated loudness (LUFS / LKFS). Mono only (channel weight G = 1).
  *
- * ゲートを 1 ブロックも通らなかったときは −70 を返す（上流は `nan_to_num` → `log10(0)` →
- * `-inf` → `maximum(-70)` の順で同じ値に落ちる）。
+ * When not a single block passes the gates, it returns −70 (upstream reaches the same value through
+ * `nan_to_num` → `log10(0)` → `-inf` → `maximum(-70)`).
  */
 export const integratedLoudness = (
   samples: Float32Array<ArrayBuffer>,
@@ -138,7 +147,8 @@ export const integratedLoudness = (
     throw new RangeError(`integratedLoudness: サンプリング周波数 ${sampleRate} が正の整数でない`);
   }
   if (samples.length === 0) throw new RangeError("integratedLoudness: 波形が空");
-  // 0.5 秒未満は**測定のためだけに**末尾へゼロを足す（上流 `AudioSignal.loudness`）。
+  // Below 0.5 s, zeros are appended **only for the measurement** (upstream
+  // `AudioSignal.loudness`).
   const minimum = Math.round(MIN_MEASURE_SECONDS * sampleRate);
   const measured = new Float64Array(Math.max(samples.length, minimum)) as Float64Array<ArrayBuffer>;
   measured.set(samples);
@@ -146,16 +156,18 @@ export const integratedLoudness = (
   let filtered = measured;
   for (const filter of kWeightingFilters(sampleRate)) filtered = applyBiquad(filtered, filter);
 
-  // MUST: ブロックの数え方は `julius.core.unfold`（audiotools が `torch.nn.Unfold` の代わりに
-  // 使う）— **末尾の欠けたブロックを捨てず、ゼロ pad して数に入れる**。torch の Unfold と
-  // 読み違えると、長さが stride の倍数でない参照音声だけ LUFS が 0.07 LU ずれる（実測 —
-  // golden の ref-odd が 27 ブロックと 28 ブロックを判別する唯一のケース）。
-  // pad は**フィルタを当てた後**に足す（`_unfold` の中なので、IIR の尾はここへ伸びない）。
+  // MUST: blocks are counted as in `julius.core.unfold` (which audiotools uses instead of
+  // `torch.nn.Unfold`) — **an incomplete trailing block is not discarded but zero-padded and
+  // counted**. Misreading it as torch's Unfold shifts the LUFS by 0.07 LU only for reference audio
+  // whose length is not a multiple of the stride (measured — the golden's ref-odd is the only case
+  // that tells 27 blocks from 28).
+  // The padding is added **after the filters** (it is inside `_unfold`, so the IIR tail does not
+  // extend into it).
   const kernel = Math.trunc(BLOCK_SECONDS * sampleRate);
   const stride = Math.trunc(BLOCK_SECONDS * sampleRate * (1 - BLOCK_OVERLAP));
-  // MUST: floor 導出なので、極小の周波数では窓そのものが消える — stride 0 はブロック数が
-  // Infinity（確保の不透明なエラー）、kernel 0 は `squared / kernel` が NaN。どちらも
-  // 「その周波数では測れない」ことなので、導出値の下限で明示的に落とす。
+  // MUST: derived by floor, so at a tiny rate the window itself vanishes — stride 0 makes the
+  // block count Infinity (an opaque allocation error), kernel 0 makes `squared / kernel` NaN. Both
+  // mean "this rate cannot be measured", so the minimum of the derived values fails explicitly.
   if (kernel < 1 || stride < 1) {
     throw new RangeError(
       `integratedLoudness: サンプリング周波数 ${sampleRate} では loudness 窓が導出できない` +
@@ -172,7 +184,7 @@ export const integratedLoudness = (
     power[block] = squared / kernel;
   }
 
-  // 絶対ゲート → その平均から相対ゲート → 両方を通ったブロックの平均。
+  // Absolute gate → relative gate from its mean → mean of the blocks that passed both.
   const level = (mean: number): number => LOUDNESS_OFFSET + 10 * Math.log10(mean);
   const gatedMean = (threshold: number, relative: number): number => {
     let sum = 0;

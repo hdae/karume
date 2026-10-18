@@ -1,24 +1,28 @@
 /**
- * Qwen2 トークナイザ（byte-level BPE）。Anima の text_encoder（Qwen3）の入力を作る。
+ * Qwen2 tokenizer (byte-level BPE). Builds the input of Anima's text_encoder (Qwen3).
  *
- * 正本の経路（`tokenizer/tokenizer.json`）は
- *   AddedVocabulary（26 特殊トークンを leftmost-longest で切り出す）
- *   → NFC → Split（正規表現・Isolated）→ ByteLevel（add_prefix_space=false）
- *   → BPE（ignore_merges=false / unk なし）→ TemplateProcessing（**特殊トークン追加なし**）
+ * The canonical path (`tokenizer/tokenizer.json`) is
+ *   AddedVocabulary (cuts out the 26 special tokens leftmost-longest)
+ *   → NFC → Split (regular expression, Isolated) → ByteLevel (add_prefix_space=false)
+ *   → BPE (ignore_merges=false / no unk) → TemplateProcessing (**no special tokens added**)
  *
- * MUST: chat template を通さない。正本は素の `tokenizer([text], …)` を呼ぶ。
- * `apply_chat_template` を通すと `<|im_start|>` 系が前置され id 列が丸ごと別物になる。
+ * MUST: do not apply the chat template. The canonical code calls the plain `tokenizer([text], …)`.
+ * Going through `apply_chat_template` prepends `<|im_start|>` and the like, and the id sequence
+ * becomes an entirely different one.
  *
- * **正規表現の `\p{L}` / `\p{N}` / `\s` は使わない** — 判定の正本は Rust 側の Unicode 表で、
- * JS エンジンの ICU とずれた瞬間に pre-token の切れ目が変わり、id 列が静かに別物になる。
- * 分類はエクスポータが正本に 1 文字ずつ聞いて畳んだ閉区間表を引く（`text/code-ranges.ts`）。
+ * **Do not use the regular-expression classes `\p{L}` / `\p{N}` / `\s`** — the canonical source for
+ * classification is the Rust-side Unicode table; the moment it diverges from the JS engine's ICU,
+ * the pre-token boundaries change and the id sequence silently becomes a different one.
+ * Classification looks up the closed-interval tables the exporter folded by querying the canonical
+ * implementation one character at a time (`text/code-ranges.ts`).
  *
- * MUST: **NFC も同じ規律**。`String.prototype.normalize("NFC")` は正本ではない — 正本
- * （Rust の `unicode-normalization`）は Unicode 表が古く、実測で 123 コードポイントについて
- * ICU / Python と出力が割れる（120 cp は結合クラスを 0 と見なすので並べ替えない・3 cp は
- * 新しい合成をしない）。素の `normalize("NFC")` に委ねると、その文字を含むプロンプトだけが
- * 例外も警告も出さずに別の id 列になる。焼いた分節表で切ってから素の NFC を掛ける
- * （{@link normalizeNfc}）。
+ * MUST: **the same rule applies to NFC**. `String.prototype.normalize("NFC")` is not canonical —
+ * the canonical implementation (Rust's `unicode-normalization`) has an older Unicode table, and its
+ * output differs from ICU / Python on 123 code points (measured: 120 cp are treated as combining
+ * class 0 and not reordered, 3 cp do not get newer compositions). Delegating to the plain
+ * `normalize("NFC")` gives a different id sequence for exactly the prompts containing those
+ * characters, with no exception or warning. Split on the baked segment table first, then apply the
+ * plain NFC ({@link normalizeNfc}).
  */
 
 import { type AddedTokenMatcher, createAddedTokenMatcher } from "../../text/added-tokens.ts";
@@ -26,7 +30,7 @@ import { type BpeMerge, mergeSymbols } from "../../text/bpe.ts";
 import { toCodePoints } from "../../text/code-points.ts";
 import { type CodeRanges, inCodeRanges } from "../../text/code-ranges.ts";
 
-/** pre_tokenizer 正規表現が使う文字クラス（閉区間表）。 */
+/** Character classes used by the pre_tokenizer regular expression (closed-interval tables). */
 export type Qwen2CharClasses = {
   /** `\p{L}` */
   readonly letter: CodeRanges;
@@ -37,42 +41,49 @@ export type Qwen2CharClasses = {
 };
 
 /**
- * `(?i:'s|'t|…)` が同一視するコードポイント → 接尾辞側の文字（どちらも ASCII 小文字）。
+ * Code point that `(?i:'s|'t|…)` treats as equivalent → the character on the suffix side (both
+ * ASCII lowercase).
  *
- * MUST: `toLowerCase()` で代用しない。**正本の `(?i:)` は Unicode の simple case folding**
- * で、実測では U+017F（ſ）が `s` と同一視される（`it'ſs` は `'ſ` + `s` に切れる）。ASCII
- * の大小反転でも `toLowerCase()`（ſ → ſ）でも取りこぼし、pre-token の切れ目が静かに変わる。
- * 自明な組（cp 自身）は入っていない。
+ * MUST: do not substitute `toLowerCase()`. **The canonical `(?i:)` is Unicode simple case
+ * folding**; measured, U+017F (ſ) is equivalent to `s` (`it'ſs` splits into `'ſ` + `s`). ASCII case
+ * flipping and `toLowerCase()` (ſ → ſ) both miss it, and the pre-token boundaries change silently.
+ * Trivial pairs (the cp itself) are not included.
  */
 export type Qwen2CaseFold = ReadonlyMap<number, number>;
 
 export type Qwen2Assets = {
-  /** トークン文字列 → id。 */
+  /** Token string → id. */
   readonly vocab: ReadonlyMap<string, number>;
-  /** `"左 右"` → rank（byte-level 語彙は空白を含まないので区切りに使える）。 */
+  /**
+   * `"left right"` → rank (the byte-level vocabulary contains no space, so it can be the
+   * separator).
+   */
   readonly merges: ReadonlyMap<string, number>;
-  /** 追加語彙（特殊トークン）。正規化の**前**に切り出される。 */
+  /** Added vocabulary (special tokens). Cut out **before** normalisation. */
   readonly addedTokens: ReadonlyMap<string, number>;
   readonly classes: Qwen2CharClasses;
   readonly caseFold: Qwen2CaseFold;
-  /** 正本の NFC と `String.prototype.normalize` が割れるコードポイント（{@link normalizeNfc}）。 */
+  /**
+   * Code points where the canonical NFC and `String.prototype.normalize` differ
+   * ({@link normalizeNfc}).
+   */
   readonly nfcSegments: CodeRanges;
-  /** 正本の呼び出しに合わせた切り詰め長（512）。 */
+  /** Truncation length matching the canonical call (512). */
   readonly maxLength: number;
 };
 
-/** `(?i:'s|'t|'re|'ve|'m|'ll|'d)` の接尾辞（正規表現と同じ順）。 */
+/** Suffixes of `(?i:'s|'t|'re|'ve|'m|'ll|'d)` (in the same order as the regular expression). */
 const APOSTROPHE_SUFFIXES = ["s", "t", "re", "ve", "m", "ll", "d"] as const;
 
 /**
- * GPT-2 由来の byte → 可視文字表。Unicode 版に依存しない純アルゴリズムなので組み立ててよい
- * （表を焼く必要が無い唯一の箇所）。
+ * The byte → visible character table from GPT-2. A pure algorithm independent of the Unicode
+ * version, so it may be built (the only place where no table needs baking).
  *
- * MUST: モジュールスコープの `const` に持たない（横断不変条件「全モジュール副作用ゼロ」）。
- * 組み立ては {@link Qwen2Tokenizer} のコンストラクタで 1 インスタンス 1 回だけ走る。
+ * MUST: do not hold it in a module-scope `const` (cross-cutting invariant "zero side effects in
+ * every module"). It is built once per instance in the {@link Qwen2Tokenizer} constructor.
  */
 const buildByteEncoder = (): readonly string[] => {
-  // 可視のまま置ける範囲。それ以外は U+0100 から順に割り当てる。
+  // Ranges that can stay visible as is. The rest are assigned in order from U+0100.
   const isDirect = (byte: number): boolean =>
     (byte >= 0x21 && byte <= 0x7e) ||
     (byte >= 0xa1 && byte <= 0xac) ||
@@ -87,13 +98,15 @@ const buildByteEncoder = (): readonly string[] => {
 };
 
 /**
- * 正本（Rust の `unicode-normalization`）と同じ NFC。
+ * The same NFC as the canonical implementation (Rust's `unicode-normalization`).
  *
- * 分節 cp で文字列を切り、各節だけを `String.prototype.normalize("NFC")` に掛けて連結する。
- * MUST: 分節 cp 自身は**どちらの節にも入れない** — 正本はその cp を starter として扱い、
- * 前後の並べ替えにも合成にも関わらせないので、素通しがその挙動そのものになる。
- * 分節表は正本への探り針で焼いたもので、同値は emit のたびに全コードポイント × 11 文脈 +
- * 乱択で検査される。
+ * Splits the string at the segment cps, applies `String.prototype.normalize("NFC")` to each segment
+ * only, and concatenates.
+ * MUST: a segment cp itself goes **into neither segment** — the canonical implementation treats
+ * that cp as a starter and involves it in neither reordering nor composition around it, so passing
+ * it through is exactly that behaviour. The segment table was baked by probing the canonical
+ * implementation; the equivalence is checked at every emit over all code points × 11 contexts +
+ * random sampling.
  */
 export const normalizeNfc = (text: string, segments: CodeRanges): string => {
   const out: string[] = [];
@@ -111,7 +124,8 @@ export const normalizeNfc = (text: string, segments: CodeRanges): string => {
 };
 
 /**
- * Split 正規表現の手書き走査。選択肢は上から順に、最初に一致したものが勝つ:
+ * Hand-written scan of the Split regular expression. Alternatives are tried top to bottom, and the
+ * first match wins:
  *   ① `(?i:'s|'t|'re|'ve|'m|'ll|'d)`
  *   ② `[^\r\n\p{L}\p{N}]?\p{L}+`
  *   ③ `\p{N}`
@@ -119,8 +133,9 @@ export const normalizeNfc = (text: string, segments: CodeRanges): string => {
  *   ⑤ `\s*[\r\n]+`
  *   ⑥ `\s+(?!\S)`
  *   ⑦ `\s+`
- * どの選択肢も空一致しないので、位置ごとに 1 つ選んで進めば正本の find_iter と同値になる。
- * 同値そのものは `verify_qwen_pre_tokenize`（全コードポイント × 11 文脈）が実測で固定する。
+ * No alternative matches empty, so picking one per position and advancing is equivalent to the
+ * canonical find_iter. The equivalence itself is pinned by measurement in
+ * `verify_qwen_pre_tokenize` (all code points × 11 contexts).
  */
 export const qwen2PreTokenize = (
   cps: readonly number[],
@@ -138,7 +153,8 @@ export const qwen2PreTokenize = (
   let i = 0;
   while (i < n) {
     let end = -1;
-    // ① 短縮形。大小無視は焼いた表で引く（`toLowerCase()` は正本ではない）。
+    // ① Contractions. Case-insensitivity is looked up in the baked table (`toLowerCase()` is not
+    // canonical).
     if (cps[i] === 0x27) {
       for (const suffix of APOSTROPHE_SUFFIXES) {
         if (matchesFolded(cps, i + 1, suffix, caseFold)) {
@@ -147,7 +163,8 @@ export const qwen2PreTokenize = (
         }
       }
     }
-    // ② 任意の 1 文字（CR/LF・字・数以外）+ 字の連続。任意部を先に食い、駄目なら戻る。
+    // ② An optional single character (other than CR/LF, letters, numbers) + a run of letters. The
+    // optional part is consumed first, and backed off if that fails.
     if (end < 0) {
       for (const skip of [1, 0]) {
         if (skip === 1 && (isNewline(i) || isLetter(i) || isNumber(i))) continue;
@@ -160,9 +177,9 @@ export const qwen2PreTokenize = (
         }
       }
     }
-    // ③ 数字 1 文字（`+` が無いので必ず 1 文字ずつ切れる）
+    // ③ One digit (no `+`, so it always splits one character at a time)
     if (end < 0 && isNumber(i)) end = i + 1;
-    // ④ 任意の半角空白 1 文字 + その他の連続 + CR/LF の連続
+    // ④ An optional single ASCII space + a run of others + a run of CR/LF
     if (end < 0) {
       for (const skip of [1, 0]) {
         if (skip === 1 && cps[i] !== 0x20) continue;
@@ -176,7 +193,7 @@ export const qwen2PreTokenize = (
         }
       }
     }
-    // ⑤ 空白の連続のうち、末尾が CR/LF になる最長のもの
+    // ⑤ The longest prefix of a whitespace run that ends with CR/LF
     if (end < 0 && isSpace(i)) {
       let k = i;
       while (k < n && isSpace(k)) k++;
@@ -184,7 +201,7 @@ export const qwen2PreTokenize = (
       for (let m = i; m < k; m++) if (isNewline(m)) last = m;
       if (last >= 0) end = last + 1;
     }
-    // ⑥ 空白の連続（非空白が続くなら最後の 1 文字を残す）/ ⑦ 空白の連続
+    // ⑥ A whitespace run (leaving the last character if a non-space follows) / ⑦ a whitespace run
     if (end < 0 && isSpace(i)) {
       let k = i;
       while (k < n && isSpace(k)) k++;
@@ -193,7 +210,7 @@ export const qwen2PreTokenize = (
     if (end <= i) {
       throw new Error(`pre-token 走査が進まない（位置 ${i}, U+${cps[i].toString(16)}）`);
     }
-    // 長い pre-token でも引数展開しない（`fromCodePoint(...)` はスタック上限に当たる）。
+    // No argument spreading even for a long pre-token (`fromCodePoint(...)` hits the stack limit).
     let piece = "";
     for (let k = i; k < end; k++) piece += String.fromCodePoint(cps[k]);
     out.push(piece);
@@ -202,7 +219,10 @@ export const qwen2PreTokenize = (
   return out;
 };
 
-/** `cps[at:]` が接尾辞に大小無視で一致するか（同一視は焼いた表だけで判定する）。 */
+/**
+ * Whether `cps[at:]` matches the suffix case-insensitively (equivalence is decided by the baked
+ * table only).
+ */
 const matchesFolded = (
   cps: readonly number[],
   at: number,
@@ -231,16 +251,19 @@ export class Qwen2Tokenizer {
   }
 
   /**
-   * 1 つの pre-token（byte-level 符号化済み）を BPE で分割する（併合は Gemma と共通の 1 本）。
+   * Splits one pre-token (already byte-level encoded) with BPE (the merge is the single
+   * implementation shared with Gemma).
    *
-   * MUST: 二次時間の「全隣接ペアを走査 → 最小 rank を splice」に戻さない — 切り詰めは片単位で
-   * しか効かず、区切りの無い英字列や句読点の無い日本語は 1 片が入力全長になる（ADR 0084 追記
-   * 2026-10-10）。
+   * MUST: do not go back to the quadratic "scan every adjacent pair → splice the lowest rank" —
+   * truncation acts only per piece, and a run of letters without separators or Japanese without
+   * punctuation makes one piece the whole input (ADR 0084 addendum 2026-10-10).
    *
-   * 記号は**この片の中だけの番号**（綴りの初出順）で持ち、併合規則は綴りの対で引く。語彙の id で
-   * 持たないのは、併合の途中の綴りが語彙に要らないため（語彙に要るのは最後に残った綴りだけ —
-   * 全隣接走査の形と同じ受理集合）。対の結果は片の中で保持する: 共通の併合は同じ対に同じ実体を
-   * 求め（取り出した項目を同一性で照合する）、保持を片の寿命に閉じれば入力を重ねても膨らまない。
+   * Symbols are held as **numbers local to this piece** (in order of first spelling), and merge
+   * rules are looked up by the pair of spellings. They are not vocabulary ids because intermediate
+   * spellings of the merge need not be in the vocabulary (only the spellings left at the end must
+   * be — the same accepted set as the full adjacent scan). Pair results are kept within the piece:
+   * the shared merge expects the same object for the same pair (it matches popped entries by
+   * identity), and keeping the cache to the piece's lifetime means it does not grow across inputs.
    */
   #bpe(piece: string): number[] {
     const spellings: string[] = [];
@@ -273,7 +296,8 @@ export class Qwen2Tokenizer {
     const merged = mergeSymbols(Array.from(piece, intern), mergeOf);
     return merged.map((symbol) => {
       const id = this.#assets.vocab.get(spellings[symbol]);
-      // byte-level なので語彙に無いトークンは原理的に出ない。出たら表が壊れている。
+      // byte-level, so a token missing from the vocabulary cannot occur in principle. If it does,
+      // the table is broken.
       if (id === undefined) {
         throw new Error(`Qwen2 語彙に無いトークン ${JSON.stringify(spellings[symbol])}`);
       }
@@ -282,14 +306,15 @@ export class Qwen2Tokenizer {
   }
 
   /**
-   * `tokenizer([text], padding="longest", max_length=512, truncation=True)` と同じ id 列。
-   * post_processor が特殊トークンを足さないので、切り詰めは単純な先頭切り。
+   * The same id sequence as
+   * `tokenizer([text], padding="longest", max_length=512, truncation=True)`. The post_processor
+   * adds no special tokens, so truncation simply keeps the head.
    */
   encode(text: string): number[] {
     const maxLength = this.#assets.maxLength;
     const ids: number[] = [];
-    // 先頭から順に積むだけなので、上限に達した後の chunk / pre-token を捨てても id 列は変わら
-    // ない（BPE を切り詰めの後ろまで回さない）。
+    // Ids are only appended from the start, so dropping chunks / pre-tokens after the limit is
+    // reached does not change the id sequence (BPE is not run past the truncation point).
     for (const chunk of this.#added.split(text)) {
       if (ids.length >= maxLength) break;
       if (chunk.added) {
@@ -299,7 +324,7 @@ export class Qwen2Tokenizer {
       const cps = toCodePoints(normalizeNfc(chunk.text, this.#assets.nfcSegments));
       for (const piece of qwen2PreTokenize(cps, this.#assets.classes, this.#assets.caseFold)) {
         if (ids.length >= maxLength) break;
-        // ByteLevel（add_prefix_space=false）— **先頭スペースを足さない**。
+        // ByteLevel (add_prefix_space=false) — **no leading space is added**.
         let encoded = "";
         for (const byte of this.#encoder.encode(piece)) encoded += this.#byteEncoder[byte];
         for (const id of this.#bpe(encoded)) ids.push(id);

@@ -1,61 +1,76 @@
 /**
- * Unigram の格子探索（Viterbi）と id 化（fuse_unk / byte_fallback）。
+ * Unigram lattice search (Viterbi) and id conversion (fuse_unk / byte_fallback).
  *
- * **ファミリ非依存の共通処理**（Unigram を使う tokenizer は総じてこの経路を通る）なので、
- * ファミリのディレクトリではなく `src/text/` に置く（`src/audio/wav.ts` / `src/image/png.ts`
- * と同じ位置づけ）。正規化・pre-tokenize・特殊トークン・末尾の後処理はファミリ側の責務で、
- * ここは「1 断片 → id 列」だけを見る。
+ * This is **family-independent common processing** (tokenizers that use Unigram all go through this
+ * path), so it lives in `src/text/` rather than a family directory (the same placement as
+ * `src/audio/wav.ts` / `src/image/png.ts`). Normalization, pre-tokenization, special tokens and the
+ * final post-processing are the family's job; this looks only at "one piece → id sequence".
  *
- * 正本は `tokenizers`（Rust）の `Lattice::viterbi` をコードポイント位置で写したもの。同点処理
- * まで正本に合わせる: 同じ位置で終わるノードは「開始位置の昇順」に積まれ、同点なら先に積まれた
- * 方（= より長い断片）が勝つ。ここがずれると、稀にだが別の分割になり id 列が静かに変わる。
+ * This module is a port of the source of truth, `Lattice::viterbi` of `tokenizers` (Rust), at code-point
+ * positions. Tie handling follows the source of truth too: nodes ending at the same position are
+ * pushed in "ascending start position" order, and on a tie the one pushed first (= the longer
+ * piece) wins. If this drifts, a different segmentation occurs (rarely), and the id sequence
+ * changes quietly.
  *
- * 入力を文字列でなくコードポイント列で受けるのは、対にならないサロゲートを弾く文字列 → cp 変換
- * （`src/text/code-points.ts` の `toCodePoints`）と役割を分けるため。呼び手は必ずその変換を
- * 通してから渡す。
+ * The input is a code-point sequence rather than a string to separate roles from the string → cp
+ * conversion that rejects unpaired surrogates (`toCodePoints` in `src/text/code-points.ts`).
+ * Callers always pass through that conversion first.
  */
 
-/** 未知ノードのスコアは「語彙全体の最小スコア − 10」（正本の `K_UNK_PENALTY`）。 */
+/**
+ * The unknown-node score is "the whole vocabulary's minimum score − 10" (the source of truth's
+ * `K_UNK_PENALTY`).
+ */
 const UNK_PENALTY = 10;
 
 export type UnigramVocabEntry = { readonly id: number; readonly score: number };
 
 export type UnigramModel = {
   readonly vocab: ReadonlyMap<string, UnigramVocabEntry>;
-  /** 語彙**全体**の最小スコア。部分集合を渡す場合も全体の値を渡す（未知ノードの重み）。 */
+  /**
+   * Minimum score of the **whole** vocabulary. Pass the whole-vocabulary value even with a subset
+   * (the unknown-node weight).
+   */
   readonly minScore: number;
-  /** 語彙**全体**の最長トークンのコードポイント数（前方一致の探索幅）。 */
+  /** Code-point count of the **whole** vocabulary's longest token (the prefix-search width). */
   readonly maxTokenLength: number;
   readonly unkId: number;
   /**
-   * byte_fallback の `<0x00>` に当たる id。指定すると未知の断片は UTF-8 バイト列へ展開され、
-   * 各バイト `b` が `byteBaseId + b` になる（未指定なら未知は {@link UnigramModel.unkId} 1 個）。
-   * 語彙が `<0x00>`..`<0xFF>` を連番で持つことが前提（`tokenizers` の byte_fallback 語彙の形）。
+   * The id of byte_fallback's `<0x00>`. When set, unknown pieces expand into UTF-8 byte sequences
+   * and each byte `b` becomes `byteBaseId + b` (when unset, an unknown is one
+   * {@link UnigramModel.unkId}). Assumes the vocabulary holds `<0x00>`..`<0xFF>` consecutively (the
+   * shape of `tokenizers`' byte_fallback vocabulary).
    */
   readonly byteBaseId?: number;
 };
 
-/** Viterbi 経路のノード（開始位置とそこから始まるノードのスロット）。 */
+/** A node of the Viterbi path (start position and the slot of the node starting there). */
 type Slot = { readonly pos: number; readonly slot: number };
 
-/** 1 断片の分割の 1 片。`entry` が無い片は未知の断片（連続する未知ノードを融合したもの）。 */
+/**
+ * One part of a piece's segmentation. A part without `entry` is an unknown piece (consecutive
+ * unknown nodes fused).
+ */
 export type UnigramSegment = { readonly text: string; readonly entry?: UnigramVocabEntry };
 
 /**
- * 1 断片の Viterbi 分割（連続する未知ノードは 1 片に融合済み）。
+ * The Viterbi segmentation of one piece (consecutive unknown nodes already fused into one part).
  *
- * id へ写す前の形を公開するのは、未知の扱いが家族で割れるため: 多くは unk / byte_fallback へ
- * 写す（{@link unigramTokenize}）が、語彙外を受理しない家族（Wan の umT5 — ADR 0119 決定 1）は
- * 未知の片が 1 つでもあれば拒む。未知を id から判定すると、本文中の追加語彙が同じ id
- * （umT5 の unk_id 2 は `<s>`）を出す形と区別できない。
+ * The shape before mapping to ids is public because families differ on unknowns: most map them to
+ * unk / byte_fallback ({@link unigramTokenize}), but a family that does not accept
+ * out-of-vocabulary text (Wan's umT5 — ADR 0119 decision 1) rejects if there is even one unknown
+ * part. Judging unknowns from ids could not tell them apart from an added-vocabulary token in the
+ * text that emits the same id (umT5's unk_id 2 is `<s>`).
  *
- * NOTE: `tokenizer.json` の `fuse_unk` が `null` でも融合する（`tokenizers` の Unigram は
- * Rust 側の既定で融合する）。融合しないと日本語のように語彙に無い文字が続く入力で未知が
- * 1 文字ずつ並び、正本との突合が落ちる。
+ * NOTE: it fuses even when `fuse_unk` in `tokenizer.json` is `null` (the Unigram of `tokenizers`
+ * fuses by the Rust-side default). Without fusing, input with a run of characters missing from the
+ * vocabulary, such as Japanese, would line up one unknown per character and the match against the
+ * source of truth would fail.
  */
 export const unigramSegments = (model: UnigramModel, cps: readonly number[]): UnigramSegment[] => {
   const out: UnigramSegment[] = [];
-  // 連続する未知ノードを溜める緩衝。空でない = 直前まで未知が続いていた。
+  // Buffer accumulating consecutive unknown nodes. Non-empty = unknowns continued up to the
+  // previous node.
   let pending = "";
   for (const span of viterbi(model, cps)) {
     let text = "";
@@ -77,13 +92,17 @@ export const unigramSegments = (model: UnigramModel, cps: readonly number[]): Un
   return out;
 };
 
-/** 1 断片を id 列へ（未知の片は unk 1 個か、byte_fallback の UTF-8 バイト列へ写す）。 */
+/**
+ * One piece → id sequence (an unknown part maps to one unk or to byte_fallback's UTF-8 byte
+ * sequence).
+ */
 export const unigramTokenize = (model: UnigramModel, cps: readonly number[]): number[] => {
   const ids: number[] = [];
   for (const segment of unigramSegments(model, cps)) {
     if (segment.entry === undefined) {
-      // 未知の 1 片は byte 展開で長くなりうる — 引数展開（`push(...)`）は V8 の引数上限
-      // （約 13 万）で RangeError になるので 1 要素ずつ積む。
+      // One unknown part can grow long through byte expansion — spreading into arguments
+      // (`push(...)`) throws RangeError at V8's argument limit (about 130,000), so push one element
+      // at a time.
       for (const id of expandUnknown(model, segment.text)) ids.push(id);
     } else ids.push(segment.entry.id);
   }
@@ -91,13 +110,14 @@ export const unigramTokenize = (model: UnigramModel, cps: readonly number[]): nu
 };
 
 /**
- * 融合済みの未知断片 → id 列。
+ * Fused unknown piece → id sequence.
  *
- * NOTE: 「融合してから断片**全体**をバイト分解する」という境界は、実 HF tokenizer 由来の
- * parity fixture（`fixtures/irodori-text/parity.json` の `emoji-byte-fallback-pair` —
- * 語彙外絵文字 2 連で fuse × byte_fallback の相互作用を固定）で確定済み。将来 HF 側の挙動が
- * 変わった場合に**ここだけ**を差し替えれば済むよう、展開点を 1 関数に閉じてある
- * （{@link unigramSegments} 側の融合ループは byte_fallback の有無に依らず同じ形）。
+ * NOTE: the boundary "fuse first, then split the **whole** piece into bytes" is settled by the
+ * parity fixture taken from the real HF tokenizer (`emoji-byte-fallback-pair` in
+ * `fixtures/irodori-text/parity.json` — two out-of-vocabulary emoji in a row pin the interaction of
+ * fuse × byte_fallback). The expansion point is closed in one function so that **only this** needs
+ * replacing if HF's behaviour changes in the future (the fusion loop in {@link unigramSegments} has
+ * the same shape with or without byte_fallback).
  */
 const expandUnknown = (model: UnigramModel, text: string): number[] => {
   const base = model.byteBaseId;
@@ -106,14 +126,17 @@ const expandUnknown = (model: UnigramModel, text: string): number[] => {
   return Array.from(bytes, (byte) => base + byte);
 };
 
-/** 1 断片の最適分割（正本の `Lattice::viterbi` をコードポイント位置で写す）。 */
+/**
+ * The best segmentation of one piece (a port of the source of truth's `Lattice::viterbi` at
+ * code-point positions).
+ */
 const viterbi = (
   model: UnigramModel,
   cps: readonly number[],
 ): { start: number; length: number }[] => {
   const n = cps.length;
   const unkScore = model.minScore - UNK_PENALTY;
-  // begin[pos] = そこから始まるノードの長さ（挿入順 = 長さ昇順）
+  // begin[pos] = lengths of the nodes starting there (insertion order = ascending length)
   const begin: number[][] = [];
   const scores: number[][] = [];
   for (let pos = 0; pos < n; pos++) {
@@ -136,7 +159,8 @@ const viterbi = (
     begin.push(lengths);
     scores.push(nodeScores);
   }
-  // end[e] = そこで終わるノード。begin 昇順に積む（= 同じ e なら長い方が先）。
+  // end[e] = the nodes ending there. Pushed in ascending begin order (= for the same e, the longer
+  // one first).
   const end: Slot[][] = Array.from({ length: n + 1 }, () => []);
   for (let pos = 0; pos < n; pos++) {
     for (const [slot, length] of begin[pos].entries()) end[pos + length].push({ pos, slot });
@@ -146,13 +170,13 @@ const viterbi = (
     Array.from(lengths, (): Slot | undefined => undefined),
   );
 
-  /** pos で終わる最良ノード。pos=0 は bos（スコア 0）。到達不能なら undefined。 */
+  /** The best node ending at pos. pos=0 is bos (score 0). undefined if unreachable. */
   const bestLeft = (pos: number): { score: number; node: Slot | undefined } | undefined => {
     if (pos === 0) return { score: 0, node: undefined };
     let found: { score: number; node: Slot } | undefined;
     for (const node of end[pos]) {
       const candidate = best[node.pos][node.slot];
-      // MUST: 厳密な `>` — 同点は先に積まれた方（より長い断片）が残る。
+      // MUST: strict `>` — on a tie the one pushed first (the longer piece) stays.
       if (found === undefined || candidate > found.score) found = { score: candidate, node };
     }
     return found;

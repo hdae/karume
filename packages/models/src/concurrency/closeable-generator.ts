@@ -1,7 +1,8 @@
 /**
- * 未開始の return / throw も所有者へ通知する。native generator は最初の next より前に
- * 閉じると本体の finally を実行しないため、発行時に確保した状態を別に解放する必要がある。
- * 開始済みの終了処理と、next / return の順序は native generator に任せる。
+ * Notifies the owner of a return / throw before start as well. A native generator closed before its
+ * first next does not run the body's finally, so state acquired when the generator was issued has to
+ * be released separately. Cleanup after start, and the ordering of next / return, are left to the
+ * native generator.
  */
 export const closeableGenerator = <T>(
   generator: AsyncGenerator<T, void, undefined>,
@@ -10,8 +11,9 @@ export const closeableGenerator = <T>(
   let started = false;
   let closing: Promise<void> | undefined;
   const close = (result: Promise<IteratorResult<T, void>>): Promise<IteratorResult<T, void>> => {
-    // return に渡された Promise の拒否も所有者へ通知する。終了値の解決と要求の順序は
-    // native generator が担い、所有者の後始末だけを最初の終了に一度重ねる。
+    // A rejection of the Promise passed to return is also reported to the owner. Resolving the
+    // completion value and ordering the requests are the native generator's job; only the owner's
+    // cleanup is layered once onto the first close.
     closing ??= result.then(
       () => onUnstartedClose(),
       (error: unknown) => onUnstartedClose({ error }),

@@ -1,4 +1,7 @@
-/** 最終行の最大値をGPU内で選び、会話の出力転送を8Bにする内部実行面。 */
+/**
+ * Internal execution surface that picks the last row's maximum on the GPU and cuts a conversation's
+ * output transfer to 8 B.
+ */
 import {
   type BatchScope,
   type GenerationContext,
@@ -16,19 +19,24 @@ import type { GenerationGreedyRun, GenerationSession } from "../generation/seque
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { gemma4PleGatherIds, type Gemma4PleResident } from "./ple-gpu.ts";
 
-/** 選択グラフの名前（重みを 1 本も持たないのでメモリ内容器に宣言だけを載せる）。 */
+/**
+ * The name of the selection graph (it holds no weight, so only its declaration goes into an in-memory
+ * container).
+ */
 const SELECT_GRAPH = "select";
 
 /**
- * 保存済みtargetグラフを変えずに、別の小IRで最大値と最小添字を得る。
+ * Gets the maximum and its smallest index with a separate small IR, without changing the stored
+ * target graph.
  *
- * MUST: 組んだ宣言は `parseIrDeclarationValue` に通す — ここは exporter も容器の読み手も
- * 経由しないので、通さないとグラフ単体で決まる規則（SSA・トポロジカル順・`requires.ops` と
- * 実使用 op の一致・未知キー）が 1 つも検査されない。
+ * MUST: the assembled declaration goes through `parseIrDeclarationValue` — nothing here passes
+ * through the exporter or the container reader, so without it none of the rules a graph decides on
+ * its own (SSA, topological order, `requires.ops` matching the ops actually used, unknown keys) is
+ * checked.
  *
- * MUST NOT: 下のリテラルに省略可能な `states` を書き足さない。書かないことで、リテラルは
- * `IrDeclaration` として型が付かず、`parseIrDeclarationValue` の戻り値だけが `graph` に
- * なれる（包みを外した編集は `deno check` で落ちる）。
+ * MUST NOT: add the optional `states` to the literal below. Leaving it out keeps the literal from
+ * typing as an `IrDeclaration`, so only the return value of `parseIrDeclarationValue` can become
+ * `graph` (an edit that removes the wrapper fails `vp check`, the typecheck).
  */
 const selectionModel = (vocabSize: number): PreparedModel => {
   const graph = parseIrDeclarationValue({
@@ -74,7 +82,7 @@ const prepareResources = async (
   let selector: Session | undefined;
   const residents: ResidentTensor[] = [];
   try {
-    // 選択グラフは形が1個なのでbackingの複数保持予算を設けない。
+    // The selection graph has a single shape, so no budget for keeping several backings is set.
     selector = await model.createContainerSession(gpu, { planBackingBudgetBytes: 0 });
     const logits = await gpu.createResident(vocabSize * 4);
     residents.push(logits);
@@ -101,8 +109,9 @@ export type GemmaGreedyOutput = {
 };
 
 /**
- * PLEをGPU常駐にした席では、target実行の直前にGPU内gatherを積んで常駐入力を差す（ADR 0085）。
- * batchが開いている間に積めばフェンスは増えず、prefillの通常runだけがgather用のbatchを1本余分に払う。
+ * With the GPU-resident PLE option, enqueue an on-GPU gather right before the target run and plug in
+ * the resident input (ADR 0085). Enqueued while the batch is open it adds no fence;
+ * only the ordinary prefill run pays one extra batch for the gather.
  */
 const withPleInput = async (
   ple: Gemma4PleResident | undefined,
@@ -115,13 +124,15 @@ const withPleInput = async (
 };
 
 /**
- * targetの通常runとgreedy batchを同じ鎖へ載せる。別会話の通常runがバッチに先行すると、
- * enqueue→run→scope lock→batchの循環になるため、batchを開く前から順序を保つ。
- * context構築はSession鎖の外にあり、ここでもそのまま通す。GPU資源は最初のgreedy時だけ確保する。
+ * Puts the target's ordinary runs and the greedy batches on the same chain. If another
+ * conversation's ordinary run got ahead of a batch, the cycle enqueue → run → scope lock → batch
+ * would form, so the order is kept from before the batch opens.
+ * Context construction is outside the Session chain and passes straight through here as well. The
+ * GPU resources are allocated only at the first greedy call.
  * DECIDED: docs/decisions/0083-generation-api-surface.md#addendum-2026-09-12--small-output-for-gemmas-temperature-0-decode
  *
- * `ple`を渡すとper_layer_inputsをGPU内gatherで作る（ADR 0085の GPU 常駐席）。所有権は呼び手側で、
- * ここはenqueueを積むだけである（disposeはpipelineがSessionの後に行う）。
+ * Passing `ple` builds per_layer_inputs with an on-GPU gather (the GPU-resident option of ADR 0085).
+ * Ownership stays with the caller; this only enqueues (the pipeline disposes it after the Session).
  */
 export const createGemmaGreedyOutput = (
   gpu: GpuContext,
@@ -132,7 +143,8 @@ export const createGemmaGreedyOutput = (
 ): GemmaGreedyOutput => {
   const model = selectionModel(vocabSize),
     chain = createOperationChain();
-  // selectorの入力は常駐であり、ホスト入力ぶんも含むこの見積りは保守的な上界。
+  // The selector's input is resident, so this estimate, which includes the host-input share, is a
+  // conservative upper bound.
   const extraBytes =
     vocabSize * 4 + 8 + model.estimate({ planBackingBudgetBytes: 0 }).peakAccountedBytes;
   let ready: Promise<Resources> | undefined;
@@ -153,15 +165,17 @@ export const createGemmaGreedyOutput = (
           try {
             const extra = await withPleInput(ple, batch, inputs);
             if (rows > 1) {
-              // prefill（M > 1）は gather 用の batch を先に閉じてから通常 run に渡す（フェンスが
-              // chunk ごとに 1 本増える）。enqueue 系は初回から slot backing を作る契約なので、
-              // chunk 形の backing を 1 本目から払わせない（生成面の prefill が run に留まる理由と
-              // 同じ — generation/sequence.ts）。
+              // Prefill (M > 1) closes the gather batch first and then hands over to an ordinary run
+              // (one more fence per chunk). The enqueue family is contracted to build the slot
+              // backing from the first call, so the chunk-shaped backing is not paid from the first
+              // chunk on (the same reason the generation surface's prefill stays on run —
+              // generation/sequence.ts).
               await batch.finish();
               return await target.run(extra, bindings, generation);
             }
-            // decode（M = 1）は gather と target を同じ batch に積み、グラフ出力を batch の終端
-            // フェンスで読み戻す（フェンス 1 本 — greedy と同じ形・ADR 0054 追記）。
+            // Decode (M = 1) enqueues the gather and the target in the same batch and reads the graph
+            // outputs back at the batch's closing fence (one fence — the same shape as greedy;
+            // ADR 0054 addendum).
             const read = target.enqueueRead(extra, {
               batch,
               generation,
@@ -171,7 +185,8 @@ export const createGemmaGreedyOutput = (
             await batch.finish();
             return await read.outputs;
           } finally {
-            // finish は何度呼んでも同じ決着を返す（成功経路では上で済んでいる）。
+            // finish returns the same outcome however often it is called (on the success path it is
+            // already done above).
             await batch.finish();
           }
         });

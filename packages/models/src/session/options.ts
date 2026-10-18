@@ -1,19 +1,23 @@
 /**
- * manifest の `session`（manifest 所有語彙）→ runtime `SessionOptions` の写像と、利用者の
- * 明示指定との**合成**（**パイプライン非依存の共通処理** — 8 家族の admission が同じ 1 本を通る）。
+ * The mapping from the manifest's `session` (manifest-owned vocabulary) → runtime `SessionOptions`,
+ * and its **composition** with the user's explicit settings (**pipeline-independent shared
+ * processing** — every family's admission goes through this one function).
  *
- * 合成規則は全家族共通の 1 本: キーごとに **明示 > quant 宣言 > runtime 既定**（ADR 0058 追記
- * 2026-09-26）。家族が違うのは「どのキーを受理するか」（{@link FamilySessionPolicy}）だけで、
- * 優先順位・値域・組合せ・送出型の分類は家族ごとに書かない。
+ * The composition rule is one rule for every family: per key, **explicit > quant declaration >
+ * runtime default** (ADR 0058 addendum 2026-09-26). Families differ only in "which keys they
+ * accept" ({@link FamilySessionPolicy}); precedence, value ranges, combinations and the
+ * classification of the thrown type are not written per family.
  *
- * MUST: barrel には出さない。これは配布形の宣言を runtime のノブへ翻訳する内部機構で、
- * 利用者が触る面ではない（`export` はパッケージ内テストが写像そのものを叩くため — 写像の
- * 抜けは GPU を回さないと露見しない位置にある）。
+ * MUST: not exported from the barrel. This is an internal mechanism that translates the
+ * distribution's declarations into runtime knobs, not a surface the user touches (`export` exists so
+ * the package's tests can exercise the mapping itself — a gap in the mapping sits where it would not
+ * show without running the GPU).
  *
- * NOTE: 元は 7 家族の `pipeline.ts` へバイト単位で複製されていた。複製は「綴りの改名」は
- * 型検査で捕まえられる一方、「`SessionSpec` へのキー追加」は**どの家族も型検査を通る**
- * （写像は書いていないキーを黙って落とすだけ）ため、追随を忘れた家族がそのまま沈黙劣化した。
- * 1 本化と下の網羅表で、その余地を構造的に消している。
+ * NOTE: this used to be duplicated byte for byte into the `pipeline.ts` of 7 families. With
+ * duplication, "renaming a spelling" is caught by type checking, but "adding a key to
+ * `SessionSpec`" **passes type checking in every family** (the mapping just drops keys it does not
+ * write), so families that forgot to follow degraded silently. Consolidating into one plus the
+ * exhaustive table below removes that room structurally.
  */
 
 import type { SessionSpec } from "@karume/hub";
@@ -22,38 +26,44 @@ import { type SessionOptions, sessionOptionsViolation } from "@karume/runtime";
 import { ModelInputError } from "../errors.ts";
 
 /**
- * 利用者が明示で上書きできる欄の型（manifest 語彙と同じキー集合・値は runtime の値域）。
+ * The type of the fields the user can override explicitly (the same key set as the manifest
+ * vocabulary; the values take the runtime's value range).
  *
- * NOTE: 値域が `SessionSpec` でなく runtime 側なのは、配布形が宣言しない実行形（例
- * `linearGemvReduce: "parallel-subgroup32"` — device の subgroups 次第）も利用者は選べるため。
+ * NOTE: the value range is the runtime's rather than `SessionSpec`'s because the user may also pick
+ * execution forms the distribution does not declare (e.g. `linearGemvReduce: "parallel-subgroup32"`
+ * — depends on the device's subgroups).
  */
 export type SessionOverrides = Partial<Pick<SessionOptions, keyof SessionSpec>>;
 
 /**
- * 家族ごとの**受理表** — true = この家族が manifest の宣言と明示指定の両方で受けるキー。
+ * Per-family **acceptance table** — true = a key this family accepts both from the manifest's
+ * declaration and from explicit settings.
  *
- * MUST: キー集合は `Required<SessionSpec>` の**網羅**（{@link WRITERS} と同じ縛り）。
- * `SessionSpec` にノブが増えると全家族の表が型検査で落ちるので、「新しいノブを受けるか」を
- * 家族ごとに決め忘れる余地が無い。値の既定は持たない（既定は runtime が 1 か所で持つ）。
+ * MUST: the key set **covers** `Required<SessionSpec>` (the same constraint as {@link WRITERS}).
+ * When a knob is added to `SessionSpec`, every family's table fails type checking, so no family can
+ * forget to decide "does it accept the new knob". It holds no value defaults (the runtime owns the
+ * defaults in one place).
  */
 export type FamilySessionPolicy = { readonly [K in keyof Required<SessionSpec>]: boolean };
 
-/** 写像 1 キーぶん — `source` の欄が埋まっているときだけ `SessionOptions` の欄を作る。 */
+/** The mapping of one key — builds the `SessionOptions` field only when the `source` field is set. */
 type SpecWriter = (source: SessionOverrides) => SessionOptions;
 
 /**
- * manifest 所有の各キーを `SessionOptions` の欄へ写す表。
+ * The table that maps each manifest-owned key onto a `SessionOptions` field.
  *
- * MUST: キー集合は `Required<SessionSpec>` の**網羅** — `SessionSpec` にノブが増えたら
- * この宣言が型検査で落ちるので、写像の追随漏れ（= 配布形が宣言したノブが runtime へ届かない
- * 沈黙劣化）が起きない。
+ * MUST: the key set **covers** `Required<SessionSpec>` — when a knob is added to `SessionSpec`,
+ * this declaration fails type checking, so the mapping cannot fall behind (= a silent degradation
+ * where a knob the distribution declared never reaches the runtime).
  *
- * MUST: 個々の writer はスプレッドで丸投げしない（ADR 0038 §3 — 素通しにすると綴りが変わった
- * 瞬間に runtime が未知キーを黙って無視する。写像を明示すると綴りが割れた時点で型検査が
- * 落ちる）。`SessionOptions.submitPolicy`（TDR 予算 = ホスト政策）のように manifest 側に
- * 席の無いノブが混ざらないのも、この明示写像の効果。
- * MUST: 各 writer は欄を**1 度だけ**読む（分割代入）。明示指定は利用者のオブジェクトなので、
- * getter が判定した値と写した値をすり替えられないようにする。
+ * MUST: no writer hands everything over with a spread (ADR 0038 §3 — with a pass-through, the moment
+ * a spelling changes the runtime silently ignores the unknown key; with an explicit mapping, type
+ * checking fails as soon as the spellings diverge). That knobs without a slot on the manifest side,
+ * such as `SessionOptions.submitPolicy` (the TDR budget = host policy), do not get mixed in is also
+ * an effect of this explicit mapping.
+ * MUST: each writer reads its field **only once** (destructuring). Explicit settings are the user's
+ * object, so a getter must not be able to swap the value that was checked for the value that is
+ * copied.
  */
 const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
   linearCompute: ({ linearCompute }) => (linearCompute === undefined ? {} : { linearCompute }),
@@ -72,17 +82,17 @@ const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
     packedStaticQuantize === undefined ? {} : { packedStaticQuantize },
 };
 
-/** 埋まっている欄だけを持つ `SessionOptions` を組む（未指定のキーは欄ごと作らない）。 */
+/** Builds `SessionOptions` holding only the set fields (an unset key gets no field at all). */
 const writeOptions = (source: SessionOverrides): SessionOptions => {
   let options: SessionOptions = {};
   for (const write of Object.values(WRITERS)) options = { ...options, ...write(source) };
   return options;
 };
 
-/** 宣言された欄だけを持つ `SessionOptions` を組む（未指定のキーは欄ごと作らない）。 */
+/** Builds `SessionOptions` holding only the declared fields (an unset key gets no field at all). */
 export const toSessionOptions = (spec: SessionSpec): SessionOptions => writeOptions(spec);
 
-/** 文字列の受理集合（`Record<union, true>` — union に値が増えると型検査で欠落が赤くなる）。 */
+/** Accepted set of strings (`Record<union, true>` — when the union gains a value, the omission turns red in type checking). */
 const isOneOf = (accepted: Readonly<Record<string, true>>, value: unknown): boolean =>
   typeof value === "string" && Object.hasOwn(accepted, value);
 
@@ -102,12 +112,14 @@ const STATE_ATTENTION_REDUCES: Readonly<
 > = { sequential: true, parallel: true, "parallel-fused": true };
 
 /**
- * 欄 1 つぶんの値域の門（欄が無ければ通す）。
+ * The value-range check of one field (passes when the field is absent).
  *
- * MUST: runtime の `sessionOptionsViolation` より**前**に見る。runtime は構築と同じ読み方で
- * 省略を `??` で既定へ読むので、`null` のような「欄はあるが値が不正」が既定に化けて通る —
- * 明示の `null` を宣言へも既定へも戻さず拒否するのはこの層の責務。
- * MUST: 診断で利用者の変換（`toString` / `Symbol.toPrimitive`）を呼ばない — 値は載せず欄名だけ。
+ * MUST: runs **before** the runtime's `sessionOptionsViolation`. The runtime reads omissions as the
+ * default via `??`, the same way construction does, so something like `null` ("the field is there
+ * but the value is invalid") would pass disguised as the default — rejecting an explicit `null`
+ * instead of falling back to the declaration or the default is this layer's job.
+ * MUST: diagnostics do not invoke the user's conversions (`toString` / `Symbol.toPrimitive`) — only
+ * the field name, never the value.
  */
 const VALUE_GATES: {
   readonly [K in keyof Required<SessionSpec>]: (options: SessionOptions) => string | undefined;
@@ -147,12 +159,13 @@ const VALUE_GATES: {
 };
 
 /**
- * 値域・型・組合せを**1 本**で見る（受理条件の正本 — 条件は出所で分けない）。
+ * Checks value range, type and combination in **one place** (the canonical acceptance condition —
+ * conditions are not split by origin).
  *
- * 組合せ（`fuseLinearStaticQuantize` は `linearGemvReduce: parallel` が要る 等）は runtime の
- * `sessionOptionsViolation` をそのまま借りる — Session 構築が同じ関数で落とすので、ここに写しを
- * 置くと 2 つの受理集合が割れうる。GPU の能力（shader-f16 / subgroups）を要る条件はここでは
- * 決まらない（device を見る段で落ちる）。
+ * Combinations (`fuseLinearStaticQuantize` needs `linearGemvReduce: parallel`, etc.) borrow the
+ * runtime's `sessionOptionsViolation` as is — Session construction rejects with the same function,
+ * so a copy here could split the two accepted sets. Conditions that need GPU capabilities
+ * (shader-f16 / subgroups) are not decided here (they fail at the step that looks at the device).
  */
 const optionsViolation = (options: SessionOptions): string | undefined => {
   for (const gate of Object.values(VALUE_GATES)) {
@@ -162,29 +175,35 @@ const optionsViolation = (options: SessionOptions): string | undefined => {
   return sessionOptionsViolation(options);
 };
 
-/** 受理表を名前で引く（`Object.keys` 由来の文字列キーを型の外から受けるため）。 */
+/** Looks up the acceptance table by name (to accept string keys from `Object.keys`, outside the type). */
 const accepts = (policy: FamilySessionPolicy, key: string): boolean => {
   const table: Readonly<Record<string, boolean | undefined>> = policy;
   return Object.hasOwn(table, key) && table[key] === true;
 };
 
 /**
- * quant 宣言（`declared`）と利用者の明示指定（`overrides`）を合成して、Session へ渡す
- * `SessionOptions` を決める（ADR 0058 追記 2026-09-26 — 全家族共通の規則）。
+ * Composes the quant declaration (`declared`) with the user's explicit settings (`overrides`) and
+ * decides the `SessionOptions` passed to the Session (ADR 0058 addendum 2026-09-26 — the rule common
+ * to every family).
  *
- * - キーごとに **明示があればそれ、無ければ宣言、どちらも無ければ欄を作らない**（runtime 既定）。
- *   明示の `false` は宣言の `true` に勝つ（`undefined` だけが「指定なし」）。
- * - 不正な明示値（`null` / 非 boolean / 受理集合外の綴り）は宣言へ戻さず `ModelInputError`。
- * - `policy` が受けないキーを manifest が宣言していたら素の `Error`（資産の齟齬 — 呼び手が
- *   入力を直しても直らない）。受けないキーを明示されたら `ModelInputError`（黙って捨てると
- *   「指定したのに効かない」になる）。
- * - 実効設定が受理条件を破ったら、送出型を出所で分ける（ADR 0107 決定 2）: 同じ違反が宣言
- *   **だけ**でも成立するなら `Error`、明示指定が関与して初めて成立するなら `ModelInputError`。
+ * - Per key: **the explicit value if any, else the declaration, and with neither no field at all**
+ *   (runtime default). An explicit `false` beats a declared `true` (only `undefined` means "not
+ *   given").
+ * - An invalid explicit value (`null` / non-boolean / a spelling outside the accepted set) does not
+ *   fall back to the declaration; it is a `ModelInputError`.
+ * - A key the `policy` does not accept, declared by the manifest, is a plain `Error` (an asset
+ *   inconsistency — the caller cannot fix it by fixing the input). A key it does not accept, given
+ *   explicitly, is a `ModelInputError` (dropping it silently would mean "I set it but it has no
+ *   effect").
+ * - When the effective settings violate the acceptance condition, the thrown type is split by origin
+ *   (ADR 0107 decision 2): if the same violation arises from the declaration **alone** it is an
+ *   `Error`; if it arises only once explicit settings are involved it is a `ModelInputError`.
  *
- * MUST: 家族の admission 席（**重みの part を 1 バイトも取る前**）から呼ぶ。後段で呼ぶと、
- * 未対応の宣言も誤った明示指定も GB 級の取得の後にしか落ちない。
+ * MUST: called from the family's admission step (**before a single byte of the weight parts is
+ * fetched**). Called later, both an unsupported declaration and a wrong explicit setting would fail
+ * only after a GB-scale fetch.
  *
- * @param where 診断の主語（`"AnimaPipeline: quant 'f16'"`）。
+ * @param where Subject of the diagnostic (`"AnimaPipeline: quant 'f16'"`).
  */
 export const resolveSessionOptions = (
   policy: FamilySessionPolicy,
@@ -195,22 +214,24 @@ export const resolveSessionOptions = (
   for (const key of Object.keys(declared)) {
     if (!accepts(policy, key)) throw new Error(`${where}: session.${key}は未対応`);
   }
-  // 判定した値とマージに使う値が getter ですり替わらないよう、明示指定は 1 度だけ読んで
-  // 素のオブジェクトへ写す（`writeOptions` は欄を 1 度ずつ読み、`undefined` の欄は作らない）。
+  // So that a getter cannot swap the value that was checked for the value used in the merge, the
+  // explicit settings are read once and copied into a plain object (`writeOptions` reads each field
+  // once and creates no field for `undefined`).
   const explicit = writeOptions(overrides);
   for (const key of Object.keys(explicit)) {
     if (!accepts(policy, key)) {
       throw new ModelInputError(`${where}: ${key}はこの系列では指定できない`);
     }
   }
-  // ?? は null を宣言へ戻すので使わない — 明示の欄は値に依らず宣言を上書きし、不正な値は
-  // 直後の門で落とす。
+  // ?? is not used because it would send null back to the declaration — an explicit field overrides
+  // the declaration whatever its value, and an invalid value fails in the check right after.
   const effective: SessionOptions = { ...writeOptions(declared), ...explicit };
   const violation = optionsViolation(effective);
   if (violation !== undefined) {
-    // 送出型だけを出所で分ける（ADR 0107 決定 2）。判定は違反の同一性で見る — 同じ違反が
-    // 宣言だけでも成立するなら打つ手は配布の修正（500 相当）、上書きが関与して初めて
-    // 成立するなら打つ手は指定の修正（400 相当）。
+    // Only the thrown type is split by origin (ADR 0107 decision 2). The decision compares the
+    // identity of the violation — if the same violation arises from the declaration alone, the
+    // remedy is fixing the distribution (a 500 equivalent); if it arises only once the overrides are
+    // involved, the remedy is fixing the settings (a 400 equivalent).
     const message = `${where}: ${violation}`;
     throw violation === optionsViolation(writeOptions(declared))
       ? new Error(message)
@@ -220,12 +241,13 @@ export const resolveSessionOptions = (
 };
 
 /**
- * 呼び手の**明示指定だけ**を相手にする門（入力起因 = `ModelInputError`）。
+ * The check that looks at **only the caller's explicit settings** (input-caused = `ModelInputError`).
  *
- * MUST: quant 宣言を持たない入口（`fromAssets` のうち manifest を受けない面）は、この門を
- * **資産を 1 バイトも開く前**に通す。通さないと同じ誤指定が Session 構築まで降り、runtime の
- * `ExecutionError` に化けて manifest を持つ入口と分類が割れる。宣言 `{}` を相手にした
- * {@link resolveSessionOptions} と同じ判定になる。
+ * MUST: entries without a quant declaration (the surfaces of `fromAssets` that take no manifest) run
+ * this check **before opening a single byte of the assets**. Without it, the same wrong setting
+ * travels down to Session construction, turns into the runtime's `ExecutionError`, and the
+ * classification diverges from the entries that have a manifest. It decides the same as
+ * {@link resolveSessionOptions} with the declaration `{}`.
  */
 export const assertSessionOverrides = (
   policy: FamilySessionPolicy,

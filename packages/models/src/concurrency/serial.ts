@@ -1,26 +1,29 @@
 /**
- * 非同期操作を 1 本の promise 鎖に載せる直列化席（**パイプライン非依存の共通処理** — 3 家族の
- * `generate` / `dispose` が同じ形で使う）。
+ * A serialisation hook that puts asynchronous operations on one promise chain
+ * (**pipeline-independent shared processing** — used the same way by the families' `generate` /
+ * `dispose`).
  *
- * MUST: barrel には出さない。これはパイプラインが「グラフは 1 本ずつ」を公開 API 側でも守る
- * ための内部機構で、利用者が触る面ではない。
+ * MUST: not exported from the barrel. This is an internal mechanism with which a pipeline keeps "one
+ * graph at a time" on the public API side too, not a surface the user touches.
  *
- * MUST: 鎖そのものは決して reject しない — 前段の失敗（成功も）**決着だけ**を次へ渡す。
- * ここが reject を伝播すると 1 回の生成失敗で以後の生成が全て道連れになる。呼び出し側には
- * 操作の promise をそのまま返すので、失敗は fail loudly のまま届く。
+ * MUST: the chain itself never rejects — it passes on **only the settlement** of the previous
+ * operation (failure or success). If it propagated a rejection, one failed generation would drag
+ * down every later generation. The caller gets the operation's promise as is, so failures still
+ * arrive loudly.
  *
- * NOTE: runtime の Session も同じ形で run / dispose を直列化している（`executor.ts` の
- * `#serialize`）が、あちらは Session 1 本の内側だけを守る。段ごとに Session を張り替える
- * パイプラインは、その外側（generate 1 回ぶん）をここで守る。
+ * NOTE: the runtime's Session serialises run / dispose the same way (`#serialize` in `executor.ts`),
+ * but that guards only the inside of one Session. A pipeline that swaps Sessions per stage guards
+ * the outside of it (one generate) here.
  */
 
 /**
- * 直前までに積まれた操作の決着後に `operation` を走らせ、その結果 / 例外をそのまま返す。
- * 同期の操作（破棄など）も積める — 順番待ちに載ることだけが要件で、非同期である必要は無い。
+ * Runs `operation` after everything queued before it has settled, and returns its result /
+ * exception as is. Synchronous operations (disposal etc.) can be queued too — the only requirement is
+ * to wait in line; being asynchronous is not needed.
  */
 type OperationChain = <T>(operation: () => T | Promise<T>) => Promise<T>;
 
-/** 空の（何も積まれていない）直列化鎖を作る。 */
+/** Creates an empty serialisation chain (nothing queued yet). */
 export const createOperationChain = (): OperationChain => {
   let chain: Promise<void> = Promise.resolve();
   return <T>(operation: () => T | Promise<T>): Promise<T> => {

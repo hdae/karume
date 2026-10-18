@@ -1,51 +1,60 @@
 /**
- * `pipelineConfig` のスキーマ検証（ADR 0038 §1 — スキーマは各パイプライン実装が所有・検証）。
+ * Schema validation of `pipelineConfig` (ADR 0038 §1 — each pipeline implementation owns and
+ * validates its schema).
  *
- * hub は `pipelineConfig` を素通しする（禁止キーの一掃と規模上限だけを見る）。したがって
- * **形の正本はこのモジュール**で、手書きの検査を全て parse 時に走らせる。
+ * The hub passes `pipelineConfig` through (it only strips forbidden keys and checks the size
+ * limit). **This module is therefore the source of truth for the shape**, and every hand-written
+ * check runs at parse time.
  *
- * MUST: 未知キーは fail loudly（`{ imageMean: …, image_mean: … }` のような綴り違いが黙って
- * 既定へ縮退すると、配布者の意図した前処理と実行が食い違ったまま気づけない）。
- * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
+ * MUST: unknown keys fail loudly (if a misspelling such as `{ imageMean: …, image_mean: … }`
+ * silently fell back to the default, the preprocessing the distributor intended and the one that
+ * runs would disagree without anyone noticing).
+ * MUST: maps are read only through `Object.hasOwn` (cross-cutting invariant).
  *
- * ## MUST: モデル固有の数はここ（= manifest）が正本で、TS 側に定数を置かない
+ * ## MUST: model-specific numbers live here (= the manifest), never as TS constants
  *
- * BiRefNet 系は上流に `preprocessor_config.json` が無く、正規化定数は同梱 `handler.py` の
- * `ImagePreprocessor`（ImageNet 統計）にしか無い。だからといって TS に 0.485 を直書きすると、
- * 別の統計で学習された派生モデル（この形の配布形は fine-tune 違いが並ぶ）で**沈黙誤値**に
- * なる — 正規化がずれても shape は合い、マットは「それらしく」出るからである。
- * `imageMean` / `imageStd` を宣言として持ち、配布形ごとに読む。
+ * The BiRefNet family has no upstream `preprocessor_config.json`; the normalization constants exist
+ * only in `ImagePreprocessor` (ImageNet statistics) of the bundled `handler.py`. Hard-coding 0.485
+ * in TS anyway would give **silently wrong values** for derived models trained on other statistics
+ * (distributions of this shape come as a row of fine-tunes) — with a wrong normalization the shapes
+ * still match and the matte still comes out "plausible". `imageMean` / `imageStd` are held as
+ * declarations and read per distribution.
  *
- * ## MUST: 補間は**宣言**として持ち、対応外は値を保持せずパース時に拒否する
+ * ## MUST: interpolation is a **declaration**; unsupported values are rejected at parse time
  *
- * 上流（`handler.py` / モデルカードの利用例）は `torchvision.transforms.Resize((S, S))` を
- * 既定の補間で通す = bilinear なので、この家族の前処理は bilinear が正本。bicubic を要求する
- * 派生を黙って bilinear で通すと **resize の値が最大 47/255 ずれたまま**ロードも実行も通る
- * （実測 — 前処理層のモジュール doc）。分岐を持つのではなく**受理しない**（型としても
- * `"bilinear"` しか表せない）。前処理層（`src/image/preprocess.ts`）は bicubic も実装して
- * いるので、受理集合を広げるかは「その派生の上流がどの補間で学習されたか」の判断であって
- * 実装の有無ではない。
+ * Upstream (`handler.py` / the model card's usage example) runs
+ * `torchvision.transforms.Resize((S, S))` with the default interpolation = bilinear, so bilinear is
+ * the source of truth for this family's preprocessing. Silently running a derivative that requires
+ * bicubic through bilinear **leaves the resized values off by up to 47/255** while loading and
+ * execution both pass (measured — the preprocessing layer's module doc). Rather than branching, it
+ * is **not accepted** (the type can only express `"bilinear"` too). The preprocessing layer
+ * (`src/image/preprocess.ts`) implements bicubic as well, so widening the accepted set is a
+ * judgement on "which interpolation the derivative's upstream was trained with", not on whether an
+ * implementation exists.
  *
- * ## MUST: 後処理の手順も**宣言**として持ち、閉じた集合の外は fail loudly
+ * ## MUST: the post-processing procedure is a **declaration** too (closed set, fails loudly)
  *
- * logit → 8bit の α の後処理（`./matte.ts` の {@link MatteProcedure}）は系列ごとに上流が違う
- * （HR = 8bit へ丸めてから Pillow の BICUBIC・Lucida = 浮動小数のまま antialias bilinear → 8bit —
- * ADR 0125）。正規化定数と同じ理由で「系列 → 手順」の表を TS に置かない（表に無い第三者の
- * fine-tune で沈黙の取り違えになる）。組み立て段（`distribution.py`）が checkpoint から決めて
- * `postprocess` に書き、ここは受理するだけ。欄は必須で既定を持たない — 書き忘れた配布形が、黙って
- * 片方の系列の手順で走らないようにするため。必須の欄の追加は旧い配布形を読めなくするので、
- * pipeline の major を 2 に上げた（ADR 0038 の繰り上げ規則）。
+ * The logit → 8-bit α post-processing ({@link MatteProcedure} in `./matte.ts`) differs upstream per
+ * checkpoint (HR = round to 8 bit, then Pillow's BICUBIC; Lucida = antialiased bilinear in floating
+ * point → 8 bit — ADR 0125). For the same reason as the normalization constants, no "checkpoint →
+ * procedure" table lives in TS (a third-party fine-tune missing from the table would be silently
+ * mismatched). The build step (`distribution.py`) decides it from the checkpoint and writes
+ * `postprocess`; this module only accepts it. The field is required and has no default — so that a
+ * distribution that forgot to write it does not silently run with one checkpoint's procedure.
+ * Adding a required field makes old distributions unreadable, so the pipeline major was raised to 2
+ * (the major-bump rule of ADR 0038).
  *
- * NOTE: rescale の除数（255）はここに無い。`normalizeToNchw` の入口が 8bit の画素列
- * （`Rgb8Image`）で閉じており、実行時に選べない数を宣言だけ持たせても正本が 2 つ増える
- * （`src/siglip2/config.ts` と同じ判断）。
+ * NOTE: the rescale divisor (255) is not here. The entry of `normalizeToNchw` is closed over 8-bit
+ * pixel rows (`Rgb8Image`); giving a declaration to a number that cannot be chosen at run time
+ * would only add two more sources of truth (the same judgement as `src/siglip2/config.ts`).
  *
- * NOTE: `imageWidth` / `imageHeight` は焼かれたグラフの入力宣言と**同じ数**で、組み立て段
- * （`tools/export-recipes/birefnet/distribution.py`）がグラフから導いて書く。それでも宣言を
- * 置くのは、①前処理の resize 先はグラフを開く前に読めるべき欄で ②モデルカードが解像度を
- * 説明できるようにするため。二重化した分は {@link BirefnetPipelineConfig} を使う側
- * （`pipeline.ts` の `assertStaticDim`）が**毎回グラフと突き合わせる**ので、食い違ったまま
- * 走ることはない。
+ * NOTE: `imageWidth` / `imageHeight` are **the same numbers** as the baked graph's input
+ * declaration, and the build step (`tools/export-recipes/birefnet/distribution.py`) derives them
+ * from the graph and writes them. The declaration is kept anyway because (1) the preprocessing
+ * resize target is a field that must be readable before the graph is opened and (2) the model card
+ * can describe the resolution. The duplication is **checked against the graph every time** by the
+ * user of {@link BirefnetPipelineConfig} (`assertStaticDim` in `pipeline.ts`), so it never runs
+ * while they disagree.
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -60,43 +69,48 @@ import { normalizationOverflow } from "../image/preprocess.ts";
 import { MATTE_PROCEDURES, type MatteProcedure } from "./matte.ts";
 
 /**
- * `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。
+ * The contract name of `pipeline` and the major this implementation accepts (ADR 0038 §1).
  *
- * major 2 = `postprocess` の欄が必須になった形（モジュール doc — ADR 0125）。major 1 の配布形は
- * 手順を宣言していないので読まない。
+ * Major 2 = the shape in which the `postprocess` field became required (module doc — ADR 0125).
+ * Major-1 distributions declare no procedure and are not read.
  */
 export const BIREFNET_PIPELINE_NAME = "birefnet";
 export const BIREFNET_PIPELINE_MAJOR = 2;
 
 /**
- * BiRefNet 系の**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は無い**）。
- * 値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ * The BiRefNet family's **public distribution repository table** (ADR 0092 — one table per family,
+ * **no default entry**). The values are **the sources this package version verified** (pinned
+ * commit SHAs — ADR 0073).
  *
- * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
- * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。checkpoint ごとに
- * 1 リポで、各リポに**解像度ごとの別グラフ**が 2 モデル同居する（ADR 0092 決定 9）:
+ * The key is the HF repository basename with `karume-` dropped (`"karume-" + key` gives the
+ * repository basename back — this invariant is checked by `tests/sources_test.ts`). One repository
+ * per checkpoint, each holding **a separate graph per resolution** as two models (ADR 0092
+ * decision 9):
  *
- * - `"birefnet-hr"` = `hdae/karume-birefnet-hr`（上流 BiRefNet_HR — モデル `"1024"` / `"2048"`・
- *   既定 `"1024"`）
- * - `"lucida"` = `hdae/karume-lucida`（BiRefNet_HR の派生 Lucida — 同じ 2 モデル・既定 `"1024"`）
+ * - `"birefnet-hr"` = `hdae/karume-birefnet-hr` (upstream BiRefNet_HR — models `"1024"` / `"2048"`,
+ *   default `"1024"`)
+ * - `"lucida"` = `hdae/karume-lucida` (Lucida, a derivative of BiRefNet_HR — the same two models,
+ *   default `"1024"`)
  *
- * 1 リポ = 2 モデルなので、2048² を使うときは
- * `fromPretrained(BIREFNET_SOURCES["birefnet-hr"], { model: "2048" })` と綴る
- * （`BirefnetPipelineOptions.model` — `./pipeline.ts`）。モデル名は入力解像度そのもので、
- * 前処理の resize 先は `pipelineConfig.imageWidth` / `imageHeight` がモデルごとに宣言する。
+ * One repository = two models, so 2048² is spelled
+ * `fromPretrained(BIREFNET_SOURCES["birefnet-hr"], { model: "2048" })`
+ * (`BirefnetPipelineOptions.model` — `./pipeline.ts`). The model name is the input resolution
+ * itself, and the preprocessing resize target is declared per model by `pipelineConfig.imageWidth`
+ * / `imageHeight`.
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
- * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
- * 既定は無い）。
+ * Pass it **as an opt-in when you want to follow the package version automatically** — to pin
+ * reproducibility yourself, write your own `{ repo, revision }` instead of using this table
+ * (`fromPretrained` has no default).
  *
- * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
- * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
- * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
- * 同時に成立する（ADR 0038）。main 追従が要る利用者は
- * `{ ...BIREFNET_SOURCES["birefnet-hr"], revision: "main" }` を明示的に選ぶ。
+ * MUST: pin the revision to a commit SHA — branches and tags can be moved on the distribution side,
+ * so the bytes this published package reads would change silently for network-side reasons (an
+ * unrecoverable accident). A SHA also removes the revision-resolution request itself, so an offline
+ * start from a complete cache works at the same time (ADR 0038). A user who needs to follow main
+ * explicitly chooses `{ ...BIREFNET_SOURCES["birefnet-hr"], revision: "main" }`.
  */
-// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+// NOTE: the revision is updated to main's SHA after the upload by §3 of the release runbook
+// (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand +
+// runbook check).
 export const BIREFNET_SOURCES = {
   "birefnet-hr": {
     repo: "hdae/karume-birefnet-hr",
@@ -117,30 +131,36 @@ const ROOT_KEYS: readonly string[] = [
   "postprocess",
 ];
 
-/** この実装が受理する唯一の補間（モジュール doc の MUST）。 */
+/** The only interpolation this implementation accepts (the module doc's MUST). */
 const INTERPOLATION = "bilinear";
 
-/** 正規化の定数（`[0, 1]` 尺度 — 上流 `handler.py` の綴りのまま）。 */
+/** Normalization constants (`[0, 1]` scale — spelled as in upstream `handler.py`). */
 type BirefnetChannels = readonly [number, number, number];
 
 export type BirefnetPipelineConfig = {
-  /** 前処理の resize 先（= 焼かれたグラフの入力幅）。 */
+  /** Preprocessing resize target (= the baked graph's input width). */
   readonly imageWidth: number;
-  /** 前処理の resize 先（= 焼かれたグラフの入力高さ）。 */
+  /** Preprocessing resize target (= the baked graph's input height). */
   readonly imageHeight: number;
   readonly imageMean: BirefnetChannels;
   readonly imageStd: BirefnetChannels;
-  /** ADR 0038 §1 の流儀で**宣言**として持つ（分岐用ではない — モジュール doc の MUST）。 */
+  /**
+   * Held as a **declaration** in the manner of ADR 0038 §1 (not for branching — the module doc's
+   * MUST).
+   */
   readonly interpolation: typeof INTERPOLATION;
-  /** logit → 8bit の α の手順（モジュール doc の MUST — 系列ごとの上流の手順を配布形が宣言する）。 */
+  /**
+   * The logit → 8-bit α procedure (the module doc's MUST — the distribution declares each
+   * checkpoint's upstream procedure).
+   */
   readonly postprocess: MatteProcedure;
 };
 
 /**
- * `postprocess` を読む（閉じた集合 {@link MATTE_PROCEDURES} の外は落とす）。
+ * Reads `postprocess` (anything outside the closed set {@link MATTE_PROCEDURES} is rejected).
  *
- * 受理集合の配列と `===` で突き合わせる（表引きをしないので、`"toString"` のような
- * Object.prototype の綴りを手順と取り違える余地が無い）。
+ * Compared with `===` against the array of the accepted set (no table lookup, so there is no room
+ * to mistake an Object.prototype name such as `"toString"` for a procedure).
  */
 const readPostprocess = (raw: Readonly<Record<string, unknown>>, where: string): MatteProcedure => {
   const key = "postprocess";
@@ -157,7 +177,7 @@ const readPostprocess = (raw: Readonly<Record<string, unknown>>, where: string):
   return procedure;
 };
 
-/** manifest の `pipelineConfig`（hub が素通しした生の値）を検査して読む。 */
+/** Checks and reads the manifest's `pipelineConfig` (the raw value the hub passed through). */
 export const parseBirefnetPipelineConfig = (
   raw: Readonly<Record<string, unknown>>,
 ): BirefnetPipelineConfig => {
@@ -167,8 +187,8 @@ export const parseBirefnetPipelineConfig = (
   const config: BirefnetPipelineConfig = {
     imageWidth: readNumber(raw, "imageWidth", where, isPositiveInteger, positive),
     imageHeight: readNumber(raw, "imageHeight", where, isPositiveInteger, positive),
-    // mean は負でも構わない（`(x − mean·255) / (std·255)` の平行移動）が、有限でなければ
-    // 全画素が NaN になる。
+    // The mean may be negative (a translation in `(x − mean·255) / (std·255)`), but a non-finite
+    // one turns every pixel into NaN.
     imageMean: readChannels(raw, "imageMean", where, Number.isFinite, "有限の数でない要素がある"),
     imageStd: readChannels(
       raw,
@@ -187,8 +207,9 @@ export const parseBirefnetPipelineConfig = (
     ),
     postprocess: readPostprocess(raw, where),
   };
-  // 個々の欄が有限でも、組で正規化後の値が f32 で溢れる配布形は資産の不正として構築時に落とす
-  // （`normalizeToNchw` まで待つと、生成のたびに入力起因の型で落ちる）。
+  // A distribution whose fields are each finite but whose pair overflows f32 after normalization is
+  // rejected at construction as an asset defect (waiting until `normalizeToNchw` would fail every
+  // generation with an input-caused error type).
   const overflow = normalizationOverflow(config.imageMean, config.imageStd);
   if (overflow !== undefined) throw new Error(`${where}.imageMean / imageStd: ${overflow}`);
   return config;

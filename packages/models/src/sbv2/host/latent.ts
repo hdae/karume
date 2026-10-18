@@ -1,26 +1,28 @@
 /**
- * z_p の構築（front の m_p / logs_p を音素→フレームへ展開し、ノイズを載せる）。
+ * Construction of z_p (decode front's m_p / logs_p from phonemes to frames and add noise).
  *
- * 参照実装 `SynthesizerTrnJPExtra.infer` の
- * `m_p = attn · m_pᵀ` → `z_p = m_p + randn_like(m_p)·exp(logs_p)·noise_scale`。
- * attn は単調パスの 0/1 行列なので、行列積は `expandIdx` による gather と同値
- * （`duration.ts` の doc を参照）。
+ * The reference implementation `SynthesizerTrnJPExtra.infer`'s
+ * `m_p = attn · m_pᵀ` → `z_p = m_p + randn_like(m_p)·exp(logs_p)·noise_scale`.
+ * attn is the 0/1 matrix of a monotonic path, so the matrix product is equivalent to a gather by
+ * `expandIdx` (see the doc of `duration.ts`).
  */
 
 /**
- * `z_p[c][f] = m_p[c][idx[f]] + noise[c][f]·exp(logs_p[c][idx[f]])·noiseScale` を組む。
+ * Builds `z_p[c][f] = m_p[c][idx[f]] + noise[c][f]·exp(logs_p[c][idx[f]])·noiseScale`.
  *
- * @param mP front の出力 2（`[1, C, P]` の row-major データ）。
- * @param logsP front の出力 3（同形）。
- * @param expandIdx フレーム → 音素の添字（長さ Ty）。
- * @param channels C（front のグラフ出力 shape から採る — ここで決め打ちしない）。
- * @param noise 標準正規列（長さ `C·Ty`）。**利用者が供給する面ではない** — 常に内部の
- * `random.normals` から来る。引数にしてあるのは `examples/sbv2/dump.ts` が同じ列を
- * `zp_noise` として書き出し、参照側（`demo.py`）がそれを読んで突き合わせるため。
+ * @param mP front's output 2 (row-major data of `[1, C, P]`).
+ * @param logsP front's output 3 (same shape).
+ * @param expandIdx frame → phoneme index (length Ty).
+ * @param channels C (taken from the shape of front's graph output — not hard-coded here).
+ * @param noise standard normal sequence (length `C·Ty`). **Not a surface the user supplies** — it
+ * always comes from the internal `random.normals`. It is an argument because
+ * `examples/sbv2/dump.ts` (removed in 0.15) wrote the same sequence out as `zp_noise`, and the
+ * reference side (`demo.py`) reads it to compare.
  *
- * NOTE: 式は f64 で通して `Float32Array` 代入で 1 度だけ丸める（同ディレクトリの
- * `random.ts` と同じ家風）。参照は f32 逐次なので要素の 4 割が 1 ulp 割れるが、この経路を
- * 測る波形突合の実測 maxAbs 5.16e-5 に対して 3 桁下で、ceil のような離散化も挟まらない。
+ * NOTE: the expression runs in f64 and is rounded once on assignment to `Float32Array` (the same
+ * house style as `random.ts` in the same directory). The reference is sequential f32, so 40% of the
+ * elements differ by 1 ulp, but that is 3 orders of magnitude below the measured maxAbs 5.16e-5 of
+ * the waveform comparison that measures this path, and no discretisation like ceil sits in between.
  */
 export const buildZp = (
   mP: Float32Array<ArrayBuffer>,

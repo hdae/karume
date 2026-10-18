@@ -1,37 +1,39 @@
 /**
- * `pipelineConfig` を読む基本 reader（family 横断の下位層）。
+ * Basic readers for `pipelineConfig` (a lower layer shared across families).
  *
- * ADR 0038 §1 のとおり `pipelineConfig` のスキーマは各パイプライン実装が所有する。ここに置くのは
- * **どの family でも同じ骨格になる読み取りの手続きだけ**で、許可キー集合・既定値・許容する数値
- * 条件・受理する固定値といった**宣言の正本は各 family の `config.ts` に残す**。どの欄を読んだかを
- * 示す文言（`where` / `key`）と条件の説明（`requirement` / `why`）も呼び手から受け取るので、
- * エラー文言の責任も family 側にある。
+ * As ADR 0038 §1 states, each pipeline implementation owns the schema of `pipelineConfig`. What lives
+ * here is **only the reading procedure whose skeleton is the same in every family**; **the
+ * canonical declarations** — allowed key sets, defaults, accepted numeric conditions, accepted fixed
+ * values — **stay in each family's `config.ts`**. The text naming which field was read (`where` /
+ * `key`) and the description of the condition (`requirement` / `why`) also come from the caller, so
+ * the error text is the family's responsibility too.
  *
- * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
- * MUST: 未知キーは fail loudly（綴り違いが黙って既定へ縮退すると、配布者の意図した前処理と
- * 実行が食い違ったまま気づけない）。
+ * MUST: maps are looked up only through `Object.hasOwn` (the cross-cutting invariant).
+ * MUST: unknown keys fail loudly (if a misspelling silently fell back to the default, the
+ * preprocessing the distributor intended and the actual execution would disagree unnoticed).
  */
 
-/** mean / std の要素数（RGB — アルファは入口で受け取らない）。 */
+/** Number of mean / std elements (RGB — alpha is not accepted at the entry). */
 const CHANNELS = 3;
 
 /**
- * 素のオブジェクトか（配列は**含めない** — 欄の集まりとして読む先で `["a"]` が黙って
- * `{ "0": "a" }` として通ると、未知キー検査も既定値も別の意味で動く）。
+ * Whether it is a plain object (arrays are **not included** — if `["a"]` silently passed as
+ * `{ "0": "a" }` where it is read as a set of fields, the unknown-key check and the defaults would
+ * behave with a different meaning).
  */
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** 欄の集まりとして読む（欠落とオブジェクトでないのは同じ直し方なので 1 文言）。 */
+/** Reads as a set of fields (missing and not-an-object are fixed the same way, so one message). */
 export const readRecord = (raw: unknown, where: string): Record<string, unknown> => {
   if (!isRecord(raw)) throw new Error(`${where}: 無い / オブジェクトでない`);
   return raw;
 };
 
-/** 寸法・件数の欄の受理条件（{@link readNumber} の `check` に渡す）。 */
+/** Acceptance condition for size / count fields (passed as the `check` of {@link readNumber}). */
 export const isPositiveInteger = (value: number): boolean => Number.isInteger(value) && value > 0;
 
-/** 許可集合の外にあるキーを 1 つでも見つけたら落とす。 */
+/** Fails on the first key found outside the allowed set. */
 export const assertAllowedKeys = (
   value: Record<string, unknown>,
   allowed: readonly string[],
@@ -44,7 +46,7 @@ export const assertAllowedKeys = (
   }
 };
 
-/** 数の欄を読む（値域の判定 `check` と、外れたときの文言 `requirement` は呼び手が渡す）。 */
+/** Reads a number field (the caller passes the range test `check` and the message `requirement` used on failure). */
 export const readNumber = (
   raw: Record<string, unknown>,
   key: string,
@@ -61,10 +63,11 @@ export const readNumber = (
 };
 
 /**
- * チャネルごとの定数 3 本を読む。
+ * Reads the 3 per-channel constants.
  *
- * MUST: `std` は 0 を弾く（呼び手の `parse*PipelineConfig` が `check` で渡す）— 0 除算は例外を
- * 出さず `±Infinity` の `pixel_values` を作り、グラフは NaN を吐きながら shape だけ合う。
+ * MUST: `std` rejects 0 (the caller's `parse*PipelineConfig` passes it as `check`) — division by
+ * zero throws nothing, produces `pixel_values` of `±Infinity`, and the graph emits NaN while only the
+ * shape matches.
  */
 export const readChannels = (
   raw: Record<string, unknown>,
@@ -86,7 +89,7 @@ export const readChannels = (
   return [value[0], value[1], value[2]];
 };
 
-/** 受理集合が 1 値しかない欄。綴り違いも対応外も同じ文言で落とす。 */
+/** A field whose accepted set has a single value. A misspelling and an unsupported value fail with the same message. */
 export const readOnly = <T extends string>(
   raw: Record<string, unknown>,
   key: string,

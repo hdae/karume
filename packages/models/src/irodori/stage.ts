@@ -1,15 +1,17 @@
 /**
- * 段 1 本を回すための器 — 生成イベントの発火口・段の Session スコープ・グラフ入出力の
- * テンソル変換。
+ * The scaffolding for running one stage — the generation-event emitter, the per-stage Session scope,
+ * and the tensor conversions of graph inputs and outputs.
  *
- * 10 段の説明（何をどの順で回すか）は {@link "./pipeline.ts"} 冒頭の doc が正本で、ここは
- * 「どの段でも同じ形で要るもの」だけを持つ。段の順序も資源の所有権も持たない。
+ * The description of the 10 stages (what runs in which order) is canonical in the doc at the top of
+ * {@link "./pipeline.ts"}; this module holds only "what every stage needs in the same form". It owns
+ * neither the order of the stages nor any resource.
  *
- * 置き場がここなのは、`./pipeline.ts` / `./conditioning.ts` / `./dit-loop.ts` の 3 つが同じ器を
- * 読むため。`./pipeline.ts` に置いたままだと、新設側がその値を取りに戻って循環 import になる
- * （型だけの参照は消去されるので `import type` で取ってよい）。
+ * It lives here because the 3 modules `./pipeline.ts` / `./conditioning.ts` / `./dit-loop.ts` read
+ * the same scaffolding. Left in `./pipeline.ts`, the newer modules would import those values back
+ * from it and form an import cycle (type-only references are erased, so `import type` is fine).
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is free of side effects (no execution at import time, no global mutable state
+ * — CLAUDE.md).
  */
 
 import type {
@@ -24,15 +26,18 @@ import type { IrodoriGenerateEvent, IrodoriRunComponent, IrodoriState } from "./
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
 import { withSession } from "../session/with-session.ts";
 
-/** 生成イベントの発火口（未購読なら何もしない 1 本に畳んで、発火点に分岐を置かない）。 */
+/**
+ * Generation-event emitter (folded into a single no-op when nobody subscribes, so the firing points
+ * carry no branch).
+ */
 export type EmitEvent = (event: IrodoriGenerateEvent) => Promise<void>;
 
-/** 未購読のときの発火口。 */
+/** The emitter when nobody subscribes. */
 const NO_EVENTS: EmitEvent = () => Promise.resolve();
 
 /**
- * 要求の `onEvent` を発火口に畳む（await して例外は握らない —
- * {@link "./pipeline.ts"} の `IrodoriGenerateRequest.onEvent`）。
+ * Folds the request's `onEvent` into an emitter (awaited, exceptions not swallowed —
+ * `IrodoriGenerateRequest.onEvent` in {@link "./pipeline.ts"}).
  */
 export const emitter = (
   onEvent: ((event: IrodoriGenerateEvent) => void | Promise<void>) | undefined,
@@ -60,14 +65,14 @@ export const i32 = (data: Int32Array<ArrayBuffer>, shape: readonly number[]): Te
   data,
 });
 
-/** bool の実表現は u32 の 0 / 1（ADR 0009）。 */
+/** The physical representation of bool is u32 0 / 1 (ADR 0009). */
 export const bool = (value: boolean): Tensor => ({
   dtype: "bool",
   shape: [1, 1],
   data: Uint32Array.of(value ? 1 : 0),
 });
 
-/** グラフ出力**名**を位置で引く（名前を決め打ちしない）。 */
+/** Looks up a graph output **name** by position (names are not hard-coded). */
 export const outputNameAt = (model: GraphOwner, index: number): string => {
   const name = model.graph.outputs[index];
   if (name === undefined) {
@@ -76,7 +81,7 @@ export const outputNameAt = (model: GraphOwner, index: number): string => {
   return name;
 };
 
-/** グラフ出力を**位置**で引く。 */
+/** Looks up a graph output by **position**. */
 export const outputAt = (
   model: GraphOwner,
   outputs: Readonly<Record<string, Tensor>>,
@@ -89,8 +94,8 @@ export const outputAt = (
 };
 
 /**
- * 観測席（{@link "./pipeline.ts"} の `IrodoriPipelineOptions.onRunDiagnostics`）へ
- * コンポーネント名を焼いて渡す。
+ * Binds the component name into the diagnostics hook
+ * (`IrodoriPipelineOptions.onRunDiagnostics` in {@link "./pipeline.ts"}).
  */
 export const observer = (
   state: IrodoriState,
@@ -101,8 +106,8 @@ export const observer = (
 };
 
 /**
- * 段 1 本を回す（`stage` イベントを Session 構築の前と解放の後に挟む）。
- * 途中で落ちたら `end` は出ない（生成ごと reject する — `onEvent` の doc）。
+ * Runs one stage (emits the `stage` event before the Session is built and after it is released).
+ * If it fails midway, no `end` is emitted (the whole generation rejects — the doc of `onEvent`).
  */
 export const withStageSession = async <T>(
   state: IrodoriState,

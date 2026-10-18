@@ -1,20 +1,21 @@
 /**
- * JP-Extra の ID 化規則（`symbols.json` 資産の読み取りと、それを使った ID 列の組み立て）。
+ * JP-Extra's ID rules (reading the `symbols.json` asset, and building the ID sequences with it).
  *
- * ## MUST: 定数表をここに書かない
+ * ## MUST: do not write constant tables here
  *
- * 音素記号表・tone 基点・言語 ID・add_blank の挿入値は **`style_bert_vits2` の実物から
- * 引いた資産**（`tools/export-recipes/sbv2/demo.py` の `assets` サブコマンドが出す `symbols.json`）
- * だけを正とする。
- * これらは多言語版と JP-Extra で同じに見えて、ずれても **shape は合ったまま音だけが
- * 壊れる**（記号表の並びが 1 つずれれば別の音素、tone 基点がずれれば別の埋め込み行）。
- * TS 側に写した定数表を持つと、その齟齬を検出する手段が消える。
+ * The phoneme symbol table, the tone base, the language ID and the add_blank insertion value are
+ * authoritative only as **the asset taken from the actual `style_bert_vits2`** (the `symbols.json`
+ * written by the `assets` subcommand of `tools/export-recipes/sbv2/demo.py`).
+ * They look the same in the multilingual version and JP-Extra, and when they drift **the shapes
+ * still match and only the sound breaks** (one position off in the symbol table gives a different
+ * phoneme; a shifted tone base gives a different embedding row). Holding a copied constant table
+ * on the TS side removes the means of detecting that mismatch.
  *
- * ## 参照実装との対応
+ * ## Correspondence with the reference implementation
  *
  * - `phonesToIds` / `applyToneStart` / `languageIds` = `nlp.cleaned_text_to_sequence`
- * - `intersperse` = `models.commons.intersperse`（`infer.get_text` の add_blank 分岐）
- * - `addBlankWord2ph` = 同分岐の `word2ph[i] *= 2; word2ph[0] += 1`
+ * - `intersperse` = `models.commons.intersperse` (the add_blank branch of `infer.get_text`)
+ * - `addBlankWord2ph` = the same branch's `word2ph[i] *= 2; word2ph[0] += 1`
  */
 
 import { asPositiveInteger } from "../../text/asset-gates.ts";
@@ -22,71 +23,79 @@ import { assertLogBucketDomain } from "./rel-pos-tables.ts";
 import { Sbv2InputError } from "../errors.ts";
 
 /**
- * 相対位置の添字表を作るためのバケット規則（DeBERTa の config 由来）。
+ * Bucket rules for building the relative-position index tables (from DeBERTa's config).
  *
- * `buildRelPosTables` の引数そのもの。近傍は線形・遠方は対数で圧縮した添字を作る式で、
- * `positionBuckets` がバケット総数（= 添字の中心オフセット）、`maxPosition` が対数圧縮の
- * 基準になる最大距離。
+ * Exactly the arguments of `buildRelPosTables`. The formula builds indices that are linear near and
+ * log-compressed far; `positionBuckets` is the total bucket count (= the centre offset of the
+ * index), and `maxPosition` is the maximum distance the log compression is based on.
  */
 type Sbv2BertRelPos = {
-  /** `position_buckets`（char-wwm は 256）。 */
+  /** `position_buckets` (256 for char-wwm). */
   readonly positionBuckets: number;
-  /** `max_relative_positions`（1 未満なら `max_position_embeddings` — char-wwm は 512）。 */
+  /** `max_relative_positions` (`max_position_embeddings` when below 1 — 512 for char-wwm). */
   readonly maxPosition: number;
 };
 
-/** 実行時ノブ（`style_bert_vits2/constants.py` の既定値が資産経由で届く）。 */
+/** Run-time knobs (the defaults of `style_bert_vits2/constants.py` arrive through the asset). */
 export type Sbv2Knobs = {
-  /** sdp と dp の混合比（`logw = sdp·r + dp·(1−r)`）。 */
+  /** Mixing ratio of sdp and dp (`logw = sdp·r + dp·(1−r)`). */
   readonly sdpRatio: number;
-  /** z_p のノイズ倍率。 */
+  /** Noise scale of z_p. */
   readonly noiseScale: number;
-  /** sdp reverse のノイズ倍率（`z_noise` に乗せる）。 */
+  /** Noise scale of the sdp reverse (multiplied into `z_noise`). */
   readonly noiseScaleW: number;
-  /** 継続長のスケール（大きいほどゆっくり）。 */
+  /** Duration scale (larger is slower). */
   readonly lengthScale: number;
 };
 
-/** JP-Extra の ID 化規則とモデル定数（`symbols.json` の内容）。 */
+/** JP-Extra's ID rules and model constants (the content of `symbols.json`). */
 export type JpExtraRules = {
-  /** 音素記号表。添字が `enc_p.emb` の行番号。 */
+  /** Phoneme symbol table. The index is the row number of `enc_p.emb`. */
   readonly symbols: readonly string[];
-  /** 音素記号 → ID。 */
+  /** Phoneme symbol → ID. */
   readonly symbolToId: ReadonlyMap<string, number>;
-  /** PAD 記号（音素列の両端に置く。`SYMBOLS[0]`）。 */
+  /** The PAD symbol (placed at both ends of the phoneme sequence. `SYMBOLS[0]`). */
   readonly pad: string;
-  /** 音素として受け付ける正規形句読点。 */
+  /** Normal-form punctuation accepted as phonemes. */
   readonly punctuations: ReadonlySet<string>;
-  /** JP のトーン基点（`LANGUAGE_TONE_START_MAP["JP"]`）。given_tone に加算する。 */
+  /** JP's tone base (`LANGUAGE_TONE_START_MAP["JP"]`). Added to given_tone. */
   readonly toneStart: number;
-  /** JP の言語 ID（`LANGUAGE_ID_MAP["JP"]`）。 */
+  /** JP's language ID (`LANGUAGE_ID_MAP["JP"]`). */
   readonly languageId: number;
-  /** tone 埋め込みの行数（範囲検査に使う）。 */
+  /** Row count of the tone embedding (used for the range check). */
   readonly numTones: number;
-  /** language 埋め込みの行数（範囲検査に使う）。 */
+  /** Row count of the language embedding (used for the range check). */
   readonly numLanguages: number;
-  /** add_blank で挟む ID（3 系列とも同じ値 — 資産生成側がソースから抜いて確認済み）。 */
+  /**
+   * The ID inserted by add_blank (the same value for all 3 sequences — confirmed by the asset
+   * generator, which extracted it from the source).
+   */
   readonly blankId: number;
-  /** 出力 WAV のサンプリング周波数。 */
+  /** Sampling rate of the output WAV. */
   readonly samplingRate: number;
-  /** 1 フレームあたりのサンプル数（`audio 長 = hopLength × フレーム数` の検算に使う）。 */
+  /** Samples per frame (used to verify `audio length = hopLength × frames`). */
   readonly hopLength: number;
-  /** BERT 特徴に使う hidden_states の末尾からの位置（配布グラフは 1 本出しなので 1）。 */
+  /**
+   * Position from the end of the hidden_states used for BERT features (1, since the distributed
+   * graph has a single output).
+   */
   readonly bertHiddenFromEnd: number;
   /**
-   * 相対位置の添字表を作るためのバケット規則（DeBERTa の config 由来）。
+   * Bucket rules for building the relative-position index tables (from DeBERTa's config).
    *
-   * 表そのものはグラフ入力で、実長ぶんをホストが作る（`rel-pos-tables.ts`）。値を写経せず
-   * 資産から引くのは ADR 0039 決定 3 と同じ規律 — モデルが変われば規則も変わるのに、
-   * shape は合ったまま**別の位置埋め込みを gather する**（沈黙誤値）。
+   * The tables themselves are graph inputs, built by the host for the actual length
+   * (`rel-pos-tables.ts`). Taking the values from the asset instead of copying them is the same
+   * discipline as ADR 0039 decision 3 — when the model changes the rules change too, yet the shapes
+   * still match and it **gathers different position embeddings** (a silent wrong value).
    */
   readonly bertRelPos: Sbv2BertRelPos;
   /**
-   * 実行時ノブの既定値（**任意**）。
+   * Defaults of the run-time knobs (**optional**).
    *
-   * NOTE: `Sbv2Pipeline` はここを読まない — ノブの既定は manifest の
-   * `pipelineConfig.defaults` が正本で、同じ値を 2 箇所から導くのは二重保持だから
-   * （`src/sbv2/config.ts`）。配布形にはまだ両方が並ぶので「あれば読める」形にしてある。
+   * NOTE: `Sbv2Pipeline` does not read this — the canonical knob defaults are the manifest's
+   * `pipelineConfig.defaults`, and deriving the same values from 2 places is duplicate state
+   * (`src/sbv2/config.ts`). The distribution still carries both side by side, so this has the form
+   * "readable if present".
    */
   readonly defaults?: Sbv2Knobs;
 };
@@ -133,23 +142,24 @@ const parseBertRelPos = (raw: unknown, where: string): Sbv2BertRelPos => {
   const rule = asRecord(raw, where);
   const positionBuckets = asInteger(rule["positionBuckets"], `${where}.positionBuckets`);
   const maxPosition = asInteger(rule["maxPosition"], `${where}.maxPosition`);
-  // 2 未満だと mid = 0 で対数の分母が壊れる（式が成立する下限をここで縛る）。
+  // Below 2, mid = 0 breaks the log's denominator (bound here the lower limit at which the formula
+  // holds).
   if (positionBuckets < 2) {
     throw new Error(`${where}.positionBuckets: 2 以上でない（${positionBuckets}）`);
   }
   if (maxPosition < 2) {
     throw new Error(`${where}.maxPosition: 2 以上でない（${maxPosition}）`);
   }
-  // 下限を満たしても組によっては NaN を作る（{@link assertLogBucketDomain}）— 生成のたびの
-  // 表の構築まで待たず、資産の読み込み時に落とす。
+  // Even above the lower limits, some pairs produce NaN ({@link assertLogBucketDomain}) — fail when
+  // the asset is read rather than waiting for the table to be built on each generation.
   assertLogBucketDomain(positionBuckets, maxPosition, where);
   return { positionBuckets, maxPosition };
 };
 
 /**
- * `symbols.json` を検査して読む。**壊れた資産を黙って使わない** — 記号表が空でも
- * ID 化は「未知の音素」で落ちるだけで、tone 基点が欠けて 0 に縮退すると別の埋め込み行を
- * 静かに引く。
+ * Checks and reads `symbols.json`. **A broken asset is not used silently** — an empty symbol table
+ * only fails at ID conversion as "unknown phoneme", but a missing tone base that degenerates to 0
+ * quietly looks up a different embedding row.
  */
 export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => {
   const root = asRecord(raw, where);
@@ -173,10 +183,11 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
     numTones: asPositiveInteger(root["numTones"], `${where}.numTones`),
     numLanguages: asPositiveInteger(root["numLanguages"], `${where}.numLanguages`),
     blankId: asInteger(root["blankId"], `${where}.blankId`),
-    // MUST: 正値まで見る。`samplingRate` は `Sbv2Pipeline.generate` の `sampleRate` として
-    // **そのまま公開結果へ出る**（唯一の消費者が呼び手）ので、負値や 0 はどこでも例外に
-    // ならず「正常に見える壊れた WAV」になる。`hopLength` / `bertHiddenFromEnd` は遅れて
-    // fail loudly するが、門をここへ揃えて資産の不正として構築時に落とす。
+    // MUST: check down to positivity. `samplingRate` **goes out as is in the public result** as
+    // `Sbv2Pipeline.generate`'s `sampleRate` (its only consumer is the caller), so a negative
+    // value or 0 raises an exception nowhere and becomes "a broken WAV that looks normal".
+    // `hopLength` / `bertHiddenFromEnd` fail loudly later, but the checks are aligned here so they
+    // fail at construction as an invalid asset.
     samplingRate: asPositiveInteger(root["samplingRate"], `${where}.samplingRate`),
     hopLength: asPositiveInteger(root["hopLength"], `${where}.hopLength`),
     bertHiddenFromEnd: asPositiveInteger(root["bertHiddenFromEnd"], `${where}.bertHiddenFromEnd`),
@@ -186,12 +197,14 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
       : { defaults: parseKnobs(root["defaults"], `${where}.defaults`) }),
   };
   if (root["addBlank"] !== true) {
-    // add_blank=False のモデルは intersperse を通さないので、音素長も word2ph も別の式に
-    // なる。パイプラインは add_blank 前提の 1 経路しか持たない — 黙って通すと 2 倍長い列を作る。
+    // A model with add_blank=False does not go through intersperse, so the phoneme length and
+    // word2ph follow different formulas. The pipeline has only the one path that assumes add_blank
+    // — letting it through silently would build a sequence twice as long.
     throw new Error(`${where}.addBlank: true でない（add_blank 前提のパイプラインでは未対応）`);
   }
-  // MUST: blank は音素・tone・language の **3 本**の ID 列へ同じ値で入る（`intersperse`）ので、
-  // 3 表のどれか 1 つの外でも埋め込みの範囲外 gather になる（音素表だけでは足りない）。
+  // MUST: blank goes into **all 3** ID sequences — phoneme, tone and language — with the same value
+  // (`intersperse`), so being outside any one of the 3 tables gives an out-of-range embedding
+  // gather (the phoneme table alone is not enough).
   const blankLimit = Math.min(symbols.length, rules.numTones, rules.numLanguages);
   if (rules.blankId < 0 || rules.blankId >= blankLimit) {
     throw new Error(
@@ -210,14 +223,16 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
 };
 
 /**
- * 音素記号列を ID 列に変換する。未知の音素は握りつぶさず throw する（fail loudly）。
- * 参照実装 `cleaned_text_to_sequence` の KeyError と同じ挙動。
+ * Converts a phoneme symbol sequence to an ID sequence. Unknown phonemes are not swallowed; they
+ * throw (fail loudly). The same behaviour as the KeyError of the reference implementation's
+ * `cleaned_text_to_sequence`.
  */
 export const phonesToIds = (rules: JpExtraRules, phones: readonly string[]): number[] =>
   phones.map((phone) => {
     const id = rules.symbolToId.get(phone);
     if (id === undefined) {
-      // 呼び手の発話だけで到達する（未知の音素を moras / words に書く）ので入力起因 = 400。
+      // Reachable through the caller's utterance alone (writing an unknown phoneme into moras /
+      // words), so it is input-caused = 400.
       throw new Sbv2InputError(
         `記号表に無い音素 ${JSON.stringify(phone)} が phones に含まれる（ID 化不能）。` +
           " 発話（moras / words）の音素記号と JP-Extra モデルの記号表の齟齬を疑う。",
@@ -227,8 +242,8 @@ export const phonesToIds = (rules: JpExtraRules, phones: readonly string[]): num
   });
 
 /**
- * add_blank=True の後処理。要素間・両端に `item` を挟んで `2·len+1` にする
- * （`commons.intersperse`）。
+ * Post-processing for add_blank=True. Inserts `item` between elements and at both ends, giving
+ * `2·len+1` (`commons.intersperse`).
  */
 export const intersperse = (seq: readonly number[], item: number): number[] => {
   const result = new Array<number>(seq.length * 2 + 1).fill(item);
@@ -236,21 +251,22 @@ export const intersperse = (seq: readonly number[], item: number): number[] => {
   return result;
 };
 
-/** add_blank 適用済みの front 入力 ID 列（長さは全て `2·len+1`）。 */
+/** front's input ID sequences with add_blank applied (all of length `2·len+1`). */
 export type ModelIdSequences = {
   readonly phoneIds: readonly number[];
-  /** JP のトーン基点を加算済み。 */
+  /** With JP's tone base added. */
   readonly toneIds: readonly number[];
-  /** 実音素位置は `languageId`、blank 位置は `blankId`。 */
+  /** `languageId` at real phoneme positions, `blankId` at blank positions. */
   readonly languageIds: readonly number[];
 };
 
 /**
- * given_phone / given_tone を front 入力用の ID 列（add_blank 適用済み）へ変換する。
- * 参照実装 `cleaned_text_to_sequence` + `commons.intersperse` の忠実移植。
+ * Converts given_phone / given_tone to front's input ID sequences (add_blank applied).
+ * A faithful port of the reference implementation's `cleaned_text_to_sequence` +
+ * `commons.intersperse`.
  *
- * MUST: language は**全 0 ではない**（実音素位置は `languageId`、blank だけが `blankId`）。
- * JP-Extra も `language_emb` を持ち、`infer.get_text` は JP の言語 ID を配る。
+ * MUST: language is **not all 0** (`languageId` at real phoneme positions, `blankId` only at
+ * blanks). JP-Extra also has `language_emb`, and `infer.get_text` hands out JP's language ID.
  */
 export const phonesTonesToModelIds = (
   rules: JpExtraRules,
@@ -285,9 +301,10 @@ export const phonesTonesToModelIds = (
 };
 
 /**
- * base word2ph（add_blank 前）から add_blank 後の word2ph を作る。
- * 参照実装 `infer.get_text` の `word2ph[i] *= 2; word2ph[0] += 1` の忠実移植で、これにより
- * `sum(word2ph)` が add_blank 後の音素列長 `2·len+1` に一致する。
+ * Builds the word2ph after add_blank from the base word2ph (before add_blank).
+ * A faithful port of the reference implementation `infer.get_text`'s
+ * `word2ph[i] *= 2; word2ph[0] += 1`, which makes `sum(word2ph)` equal the phoneme sequence length
+ * after add_blank, `2·len+1`.
  */
 export const addBlankWord2ph = (baseWord2ph: readonly number[]): number[] => {
   if (baseWord2ph.length === 0) {

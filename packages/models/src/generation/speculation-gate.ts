@@ -1,208 +1,239 @@
 /**
- * 投機の**自己採算ゲート**（ADR 0096 段 4-B ④）— 「投機が decode に勝っているか」を実行時に
- * 測り、負ける文脈では decode 形（M=1）の 1 step へ落ちる。**パイプライン非依存・GPU 非依存・
- * 時計も RNG も持たない**純関数モジュールなので `speculation.ts` と同じ `src/generation/` に置く。
+ * The **self-tuning gate** of speculation (ADR 0096 stage 4-B (4)) — it measures at run time
+ * "whether speculation is beating decode", and in contexts where it loses it drops to one step of
+ * the decode shape (M=1). It is a pure-function module that is **pipeline-independent,
+ * GPU-independent and owns neither a clock nor an RNG**, so it lives in `src/generation/` next to
+ * `speculation.ts`.
  *
- * ## なぜ実行時に測るのか（固定の閾値を焼けない）
+ * ## Why measure at run time (no fixed threshold can be baked in)
  *
- * 投機の取り分は課題と host で決まる（`docs/research/2026-09-09-mtp-stage4.md` の実測 —
- * RTX 3080 Ti は抽出 1.81× / 要約 1.41× / 対話 1.18× / 自由文 **0.96×**、Apple M2 は
- * 抽出 1.27× / 要約 1.03× / 対話 0.93× / 自由文 **0.76×**）。採算が合う受理数の閾値
- * `A* = cycle の壁 ÷ decode の壁` も RTX 1.72〜1.88・M2 2.17〜2.6 と host で 0.5 以上動くので、
- * 配布形にも定数にも焼けない。ゲートが測るのは 3 本の量だけで、比
+ * What speculation gains depends on the task and the host (measured in
+ * `docs/research/2026-09-09-mtp-stage4.md` — RTX 3080 Ti: extraction 1.81× / summary 1.41× /
+ * dialogue 1.18× / free text **0.96×**; Apple M2: extraction 1.27× / summary 1.03× / dialogue
+ * 0.93× / free text **0.76×**). The break-even accepted count `A* = cycle wall ÷ decode wall` also
+ * moves by 0.5 or more with the host (RTX 1.72 to 1.88, M2 2.17 to 2.6), so it can be baked into
+ * neither the distribution nor a constant. The gate measures only three quantities and switches to
+ * whichever side the ratio
  *
  * ```text
- * (ΣWc / Σdelivered) / W1   … 投機の 1 token あたりの壁 ÷ decode の 1 token あたりの壁
+ * (ΣWc / Σdelivered) / W1   … speculation's wall per token ÷ decode's wall per token
  * ```
  *
- * が 1 を跨いだ側へ倒す（1 未満なら投機が速い）。`Wc` = 投機 cycle の壁・`delivered` = その cycle が
- * 確定させた token 数・`W1` = plain step（M=1）の壁で、どれも呼び手が観測した実測値である。
+ * crosses 1 towards (below 1, speculation is faster). `Wc` = the wall of a speculative cycle,
+ * `delivered` = the tokens that cycle confirmed, `W1` = the wall of a plain step (M=1); all are
+ * values the caller measured.
  *
- * ## 推定器は**ブロック集計**（受理数に移動平均を使わない）
+ * ## The estimator is **block aggregation** (no moving average over the accepted count)
  *
- * 分母の `delivered` は cycle ごとに大きく散る — 実測の受理数分布（RTX 対話）は平均 2.03 に対して
- * **標準偏差 0.88**（43%）である。1 サンプルや数サンプルの平均では「投機が負けている」ことを
- * 判定できない。よって speculate 側の判定は `window`（既定 16）本の cycle を**非重複ブロック**に
- * まとめ、ブロックが満ちるごとに `ΣWc / Σdelivered` を 1 度だけ評価する（ブロックは評価の後に
- * 空にする）。`msPerTokenSpec > W1 × leave` が `confirm`（既定 2）ブロック**連続**で成り立った
- * ときだけ plain へ倒す。
+ * The denominator `delivered` scatters widely per cycle — the measured distribution of the accepted
+ * count (RTX dialogue) has mean 2.03 and **standard deviation 0.88** (43%). One sample or the mean of
+ * a few cannot decide "speculation is losing". So the speculate side groups `window` (default 16)
+ * cycles into **non-overlapping blocks** and evaluates `ΣWc / Σdelivered` once each time a block
+ * fills (the block is emptied after the evaluation). It switches to plain only when
+ * `msPerTokenSpec > W1 × leave` holds for `confirm` (default 2) blocks **in a row**.
  *
- * **強い負けの早抜けは既定 off である**（{@link SpeculationGateOptions.earlyLeave} — 渡した席だけ、
- * ブロック 1 本の比が `leave + earlyLeave` を超えた時点で `confirm` の連続を待たずに倒す）。受理は
- * ターン内で定常でなく、勝つ課題（対話・比 0.90）でも 16 cycle 級で受理が落ちる区間が混ざる。
- * 早抜けが削るのは「抜けるまでの費用」1 ブロックぶん = sequence の寿命に 1 回だけで、誤発火の害は
- * 勝つ課題の毎ターンに出る（sequence を使い回した実測で 7 ターン中 3 ターンが誤って抜け、auto が
- * always の 0.96× まで落ちた — 早抜けを止めた席〈v2 のノブ一式・バースト側のノブは plain 側にしか効かない
- * ので差は早抜けに帰属する〉では 0 / 7 で 1.00×・
- * `docs/research/2026-09-09-mtp-stage4.md` §6.5 表 11″）。よって既定では取らない。
+ * **The early leave on a strong loss is off by default** ({@link SpeculationGateOptions.earlyLeave}
+ * — only when it is passed, the gate switches as soon as one block's ratio exceeds
+ * `leave + earlyLeave`, without waiting for `confirm` in a row). Acceptance is not steady within a
+ * turn; even on a winning task (dialogue, ratio 0.90) stretches of about 16 cycles with low
+ * acceptance occur. The early leave saves only "the cost until leaving", one block = once per
+ * sequence lifetime, while the harm of a false trigger appears on every turn of a winning task (with
+ * a reused sequence, 3 of 7 turns left by mistake and auto fell to always's 0.96× — with the early
+ * leave stopped (v2's full set of knobs; the burst-side knobs act only on the plain side, so the
+ * difference is attributable to the early leave) it was 0 / 7 at 1.00×,
+ * `docs/research/2026-09-09-mtp-stage4.md` §6.5 table 11″). So it is not taken by default.
  *
- * **EWMA を使わないのは種付けの欠陥のため**である。`ewma(undefined, sample) = sample` なので、
- * 受理数の EWMA は**最初の 1 サンプルで種付けされる** — 最初に観測した cycle が受理 0
- * （配送 1 個）だと `A = 1` になり、比 = `Wc / 1 / W1 ≈ 1.7 > leave` で即座に plain へ抜ける。
- * plain 側の探索が 1 cycle 単発だと同じノイズを引くので戻れず、バックオフだけが伸びる。実走で
- * 観測した形がこれで、`200 token / 7 cycle / plain step 190 / 切替 1` — 7 cycle 目で plain に
- * 落ちて 190 step 戻らず、`always`（ゲート無し）の 7,066 ms に対して 9,262 ms（**31% 遅い**）に
- * なった。ブロック集計は満ちるまで判定しないので、この種付けが起きる余地が無い。
+ * **EWMA is not used because of its seeding defect**. `ewma(undefined, sample) = sample`, so an
+ * EWMA of the accepted count is **seeded by the first sample** — if the first observed cycle accepts
+ * 0 (1 delivered), `A = 1` and the ratio = `Wc / 1 / W1 ≈ 1.7 > leave` leaves for plain at once.
+ * When the plain-side exploration is a single cycle it draws the same noise and cannot come back;
+ * only the backoff grows. This is the shape observed in a real run, `200 token / 7 cycle / plain
+ * step 190 / switch 1` — it dropped to plain at cycle 7, did not come back for 190 steps, and took
+ * 9,262 ms against 7,066 ms for `always` (no gate) (**31% slower**). Block aggregation does not
+ * decide until a block fills, so this seeding has no room to happen.
  *
- * ## 不感帯は**非対称**（守るのは「大きい負け」だけ）
+ * ## The dead band is **asymmetric** (it guards only against "large losses")
  *
- * plain へ抜けるのは比 > {@link SpeculationGateOptions.leave}（既定 1.01）、speculate へ戻るのは
- * 比 < {@link SpeculationGateOptions.enter}（既定 0.97）である。対称な 5% の不感帯にすると、
- * 守りたい最大の負けである RTX 自由文（比 1.037）が不感帯に入って**一度も発火しない**。ゲートが
- * 実際に救うのは M2 自由文 −24% / M2 対話 −7% 級の負けで、検収基準もその粒度で読む。
+ * The gate leaves for plain at ratio > {@link SpeculationGateOptions.leave} (default 1.01) and
+ * returns to speculate at ratio < {@link SpeculationGateOptions.enter} (default 0.97). With a
+ * symmetric 5% dead band, the largest loss to guard against, RTX free text (ratio 1.037), would fall
+ * inside the band and **never trigger**. What the gate actually rescues are losses of the M2 free
+ * text −24% / M2 dialogue −7% class, and the acceptance criteria are read at that granularity.
  *
- * ## 机上の根拠（既定のノブがこの値である理由）
+ * ## Back-of-the-envelope basis (why the default knobs have these values)
  *
- * 受理数の cycle あたりの標準偏差を 0.88（RTX 自由文の実測分布 — 対話は 1.14 でさらに散る）として:
+ * Taking the per-cycle standard deviation of the accepted count as 0.88 (the measured RTX free-text
+ * distribution — dialogue scatters more at 1.14):
  *
- * - **対話級（比 0.85・A 2.03）**: 16 cycle ブロックの `A` の sd ≈ 0.22 なので、比の sd ≈ 0.09。
- *   1 ブロックが 1.01 を超える確率 ≈ 5%・2 ブロック連続で ≈ 0.3%。200 token のターンは
- *   ≈ 6 ブロックなので、**誤って抜けるのはターンあたり ≈ 1.5%** である。EWMA の 1 サンプル
- *   種付け（上）だと同じ条件でほぼ確実に抜けるので、ここが `confirm = 2` の効き所である。
- * - **M2 自由文（比 1.31）**: 1 ブロックが 1.01 を下回る確率 ≈ 0.1%。よって 2 ブロック =
- *   32 cycle（≈ 3.8 秒）で確実に抜ける。sequence 寿命で 1 回払えばよい費用である（この 1 回を
- *   半分にするのが早抜けで、既定 off の理由は上の節）。
- * - **戻る側**: `burst`（既定 8）cycle のバーストは比の sd ≈ 0.13。M2 自由文で 0.97 を下回る確率
- *   ≈ 0.5% なので、誤って戻らない。負ける側が払うバーストの費用は M2 自由文で +227 ms/バースト
- *   で、間隔が 16 → 512 と伸びるぶん長い会話では消える。
- * - **早抜け（`earlyLeave` = 0.15 を渡した席）**: 対話級（比 0.85）のブロックの比の sd は上の 0.09
- *   なので、1.16 を超える確率は机上では ≈ 0.03% である。**この見積りが実走と合わない**のが既定
- *   off の理由で、受理がターン内で非定常だと勝つ課題でも 1 ブロックが 1.16 を超える区間が混ざる
- *   （上の節の 3 / 7 ターン）。机上の確率の小ささは根拠にならない。
- * - **バーストの早期打ち切り（`burstMin` = 4・`burstAbort` = 0.15）**: 比 0.85 のとき 4 cycle の比
- *   （sd ≈ 0.19）が 1.16 を超える確率は ≈ 5%。この誤発火は「誤って抜けた後のバースト」でしか
- *   起こりえず、代償は戻りがバースト 1 回ぶん遅れることだけである（ここが早抜けと違って既定 on の
- *   ままな理由 — 害の上限が探索 1 回で、勝っている文脈には触れない）。効き側は比 1.27（M2 自由文
- *   級）で 4 cycle の比が 1.16 を超える確率 ≈ 0.72 なので、負ける文脈のバーストの平均長は 8 cycle → **≈ 4.8 cycle**（実測分布でゲート本体を回した値・打ち切りの 7 割は 4 本目）
- *   に縮む。
+ * - **Dialogue class (ratio 0.85, A 2.03)**: the sd of `A` over a 16-cycle block ≈ 0.22, so the sd
+ *   of the ratio ≈ 0.09. The probability that one block exceeds 1.01 ≈ 5%, two blocks in a row ≈
+ *   0.3%. A 200-token turn is ≈ 6 blocks, so **a false leave happens in ≈ 1.5% of turns**. With the
+ *   one-sample EWMA seeding (above) it would leave almost certainly under the same conditions; this
+ *   is where `confirm = 2` pays off.
+ * - **M2 free text (ratio 1.31)**: the probability that one block falls below 1.01 ≈ 0.1%. So it
+ *   reliably leaves after 2 blocks = 32 cycles (≈ 3.8 s). That is a cost paid once per sequence
+ *   lifetime (halving this once is what the early leave does; the reason it is off by default is in
+ *   the section above).
+ * - **Returning**: a burst of `burst` (default 8) cycles has a ratio sd ≈ 0.13. For M2 free text
+ *   the probability of falling below 0.97 ≈ 0.5%, so it does not come back by mistake. The burst
+ *   cost the losing side pays is +227 ms per burst for M2 free text, and it fades in long
+ *   conversations as the interval grows from 16 to 512.
+ * - **Early leave (when `earlyLeave` = 0.15 is passed)**: the block ratio sd of the dialogue class
+ *   (ratio 0.85) is the 0.09 above, so the probability of exceeding 1.16 is ≈ 0.03% on paper.
+ *   **This estimate does not match real runs**, which is why it is off by default: when acceptance
+ *   is not steady within a turn, even a winning task has stretches where one block exceeds 1.16 (the
+ *   3 / 7 turns of the section above). A small probability on paper is no basis.
+ * - **Early burst abort (`burstMin` = 4, `burstAbort` = 0.15)**: at ratio 0.85 the probability that
+ *   the 4-cycle ratio (sd ≈ 0.19) exceeds 1.16 is ≈ 5%. This false trigger can only happen in "a
+ *   burst after a false leave", and its only cost is that returning is delayed by one burst (this
+ *   is why, unlike the early leave, it stays on by default — the harm is bounded by one exploration
+ *   and contexts that are winning are not touched). On the effective side, at ratio 1.27 (M2 free
+ *   text class) the probability that the 4-cycle ratio exceeds 1.16 is ≈ 0.72, so the mean burst
+ *   length in losing contexts shrinks from 8 cycles to **≈ 4.8 cycles** (the value from running the
+ *   gate itself on the measured distribution; 70% of the aborts happen at the 4th cycle).
  *
- * ## 探索（負けている側にも「戻る道」を残す）
+ * ## Exploration (a "way back" even for the losing side)
  *
- * - **plain 中**は幾何バックオフ（16 → 32 → 64 → … → 上限 512 step）で投機を `burst` cycle
- *   **連続**で試す。1 cycle 単発の探索では上の sd 0.88 に埋もれて判定できない（EWMA 設計が
- *   戻れなかった第 2 の理由がこれである）。バーストの `ΣWc / Σdelivered < W1 × enter` なら
- *   speculate へ戻し、間隔は `exploreBase` へ戻す。外れたら間隔を倍にする。
- * - **外れが確定したバーストは回し切らない**。`burstMin`（既定 4）本目以降の各観測で比が
- *   `leave + burstAbort`（既定 1.16）を超えていたら、残りの cycle を回さずにそのバーストを「外れ」
- *   として畳む（{@link SpeculationGateOptions.burstMin} /
- *   {@link SpeculationGateOptions.burstAbort}）。負ける文脈が払う探索費はここが主で、`burst`
- *   そのものを縮めるのと違って**戻れる側の判定精度は落ちない**（当たりの判定は満ちたバーストの
- *   集計のままである）。
- * - **speculate 中**は {@link SpeculationGateOptions.exploreBase} 観測ごとに 1 回 plain を測る
- *   （`W1` の鮮度が「抜ける」判断の材料そのもの）。既定は判定ブロックと同じ 16 で、費用は
- *   16 cycle につき plain 価格の 1 token（実測の壁では always 比 1% 前後）である。この
- *   plain step は**ブロックの cycle 数に数えない**（投機 cycle の集計だけがブロックである）。
- * - **`W1` の初回サンプルは 2 回目の decide**（1 cycle 回した直後）。未観測のまま 16 cycle 回すと
- *   M2 自由文で 2% を先に失う。`W1` は plain step の壁なので host で安定しており、ここだけは
- *   EWMA（係数 {@link SpeculationGateOptions.alpha}）でよい。
+ * - **While plain**, speculation is tried for `burst` cycles **in a row** with geometric backoff
+ *   (16 → 32 → 64 → … → at most 512 steps). Single-cycle exploration is buried in the sd 0.88 above
+ *   and cannot decide (the second reason the EWMA design could not come back). If the burst's
+ *   `ΣWc / Σdelivered < W1 × enter`, the gate returns to speculate and the interval goes back to
+ *   `exploreBase`. On a miss the interval doubles.
+ * - **A burst whose miss is certain is not run to the end**. If at any observation from the
+ *   `burstMin`-th (default 4) on the ratio exceeds `leave + burstAbort` (default 1.16), the burst is
+ *   folded as "a miss" without running the remaining cycles ({@link SpeculationGateOptions.burstMin}
+ *   / {@link SpeculationGateOptions.burstAbort}). This is the main exploration cost losing contexts
+ *   pay, and unlike shrinking `burst` itself **it does not lower the decision accuracy on the side
+ *   that can return** (a hit is still decided on the aggregate of a full burst).
+ * - **While speculating**, plain is measured once every {@link SpeculationGateOptions.exploreBase}
+ *   observations (the freshness of `W1` is itself the material of the "leave" decision). The default
+ *   is 16, the same as the decision block, and the cost is one token at plain price per 16 cycles
+ *   (about 1% against always in measured walls). This plain step **does not count towards the
+ *   block's cycles** (only the aggregate of speculative cycles makes up a block).
+ * - **The first `W1` sample is at the second decide** (right after one cycle). Running 16 cycles
+ *   without it loses 2% up front on M2 free text. `W1` is the wall of a plain step and is stable on a
+ *   host, so for this alone EWMA (factor {@link SpeculationGateOptions.alpha}) is fine.
  *
- * ## 呼び出し規約
+ * ## Calling convention
  *
- * MUST: 1 cycle につき {@link SpeculationGate.decide} を 1 回呼び、その cycle の観測を
- * {@link SpeculationGate.observeCycle} / {@link SpeculationGate.observePlain} で 1 回返す。
- * `decide()` は**状態を一切動かさない読み取り**である（モードの切替も `switches` の加算も観測の
- * 側で起きる）ので、同じ cycle で 2 度読んでも決定は割れない。
+ * MUST: call {@link SpeculationGate.decide} once per cycle and report that cycle's observation once
+ * with {@link SpeculationGate.observeCycle} / {@link SpeculationGate.observePlain}. `decide()` is
+ * **a read that moves no state at all** (mode switches and `switches` increments happen on the
+ * observation side), so reading it twice in one cycle does not split the decision.
  *
- * MUST: 呼び手が「壁の観測に混ぜない」と決めた cycle（各ターンの最初の cycle と予算末尾の強制
- * plain）では、観測の代わりに {@link SpeculationGate.skip} を 1 回呼ぶ。何も呼ばずに次の cycle へ
- * 進むとゲートはその cycle が無かったものとして決定を出すので、探索の周期が止まり、上の
- * 「`W1` の初回サンプルは 2 回目の decide」も「観測に混ぜる最初の cycle」まで遅れる。
+ * MUST: for a cycle the caller decided "not to mix into the wall observations" (the first cycle of
+ * each turn and the forced plain at the end of the budget), call {@link SpeculationGate.skip} once
+ * instead of an observation. Moving on to the next cycle without calling anything makes the gate
+ * decide as if that cycle never happened, so the exploration period stops, and "the first `W1`
+ * sample is at the second decide" above is delayed to "the first cycle mixed into the
+ * observations".
  */
 
 import { ModelInputError } from "../errors.ts";
 
-/** 次の 1 cycle を投機で回すか、decode 形（M=1）の 1 step で回すか。 */
+/** Whether the next cycle runs speculatively or as one step of the decode shape (M=1). */
 export type SpeculationDecision = "speculate" | "plain";
 
 /**
- * ゲートのノブ（すべて既定値を持つ — **既定で十分**である）。
+ * The gate's knobs (all have defaults — **the defaults suffice**).
  *
- * pipeline の静的ノブとして公開面にも出ている（`Gemma4PipelineOptions.speculative` の `gate`）が、
- * 席の性格は計測・検収用である（`linearGemvRowsThreadTarget` と同じ扱い — ノブの A/B を同じ台本で
- * 回すためだけに在る）。
+ * They are on the public surface as a static pipeline knob (`gate` of
+ * `Gemma4PipelineOptions.speculative`), but the option is meant for measurement and acceptance
+ * (the same treatment as `linearGemvRowsThreadTarget` — it exists only to run A/B of the knobs with
+ * the same script).
  */
 export type SpeculationGateOptions = {
-  /** `W1`（plain step の壁）の EWMA 係数（既定 0.2・`0 < alpha ≤ 1`）。 */
+  /** EWMA factor of `W1` (the wall of a plain step) (default 0.2, `0 < alpha ≤ 1`). */
   readonly alpha?: number;
-  /** speculate 側の判定ブロックの cycle 数（既定 16・2 以上の整数）。 */
+  /** Cycles per decision block on the speculate side (default 16, an integer of 2 or more). */
   readonly window?: number;
-  /** plain へ抜けるのに要る「負けブロック」の連続数（既定 2・1 以上の整数）。 */
+  /** "Losing blocks" in a row needed to leave for plain (default 2, an integer of 1 or more). */
   readonly confirm?: number;
-  /** plain 側の探索バーストの cycle 数（既定 8・1 以上の整数）。 */
+  /** Cycles per exploration burst on the plain side (default 8, an integer of 1 or more). */
   readonly burst?: number;
   /**
-   * バーストを早期に打ち切れる最小の cycle 数（既定 `min(4, burst)`・`1 ≤ burstMin ≤ burst` の
-   * 整数）。ここから `burst - 1` 本目までの各観測で比が `leave + burstAbort` を超えていたら、
-   * 残りを回さずに「外れたバースト」として畳む。
+   * The smallest cycle count at which a burst can be aborted early (default `min(4, burst)`, an
+   * integer with `1 ≤ burstMin ≤ burst`). If at any observation from here up to the `burst - 1`-th
+   * the ratio exceeds `leave + burstAbort`, the burst is folded as "a missed burst" without running
+   * the rest.
    */
   readonly burstMin?: number;
-  /** 探索の基本間隔（既定 16・cycle / step 単位）。 */
+  /** Base exploration interval (default 16, in cycles / steps). */
   readonly exploreBase?: number;
-  /** plain 側バックオフの上限（既定 512）。 */
+  /** Upper limit of the plain-side backoff (default 512). */
   readonly exploreMax?: number;
-  /** speculate へ戻る条件 `ΣWc/Σdelivered < W1 × enter`（既定 0.97・`enter < 1`）。 */
+  /** Condition to return to speculate, `ΣWc/Σdelivered < W1 × enter` (default 0.97, `enter < 1`). */
   readonly enter?: number;
-  /** plain へ抜ける条件 `ΣWc/Σdelivered > W1 × leave`（既定 1.01・`1 < leave`）。 */
+  /** Condition to leave for plain, `ΣWc/Σdelivered > W1 × leave` (default 1.01, `1 < leave`). */
   readonly leave?: number;
   /**
-   * speculate 側の**早抜け**の上乗せ（**未指定 = off**・指定するなら正の有限数）。渡した席では、
-   * ブロック 1 本の比が `leave + earlyLeave` を超えた時点で `confirm` の連続を待たずに plain へ
-   * 倒す。既定で持たないのは、実走では勝つ課題でも誤発火が毎ターン出るのに対し、利得は
-   * 「抜けるまでの 1 ブロック」= sequence の寿命に 1 回しかないからである（モジュール doc）。
+   * Margin of the speculate side's **early leave** (**unset = off**; when given, a positive finite
+   * number). When passed, the gate switches to plain as soon as one block's ratio exceeds
+   * `leave + earlyLeave`, without waiting for `confirm` in a row. It has no default because in real
+   * runs false triggers appear on every turn even for winning tasks, while the gain is "one block
+   * until leaving" = once per sequence lifetime (module doc).
    */
   readonly earlyLeave?: number;
   /**
-   * plain 側の探索バーストを畳む「強い負け」の上乗せ（既定 0.15・正の有限数）。`burstMin` 本目
-   * 以降の観測で比が `leave + burstAbort` を超えたバーストは、残りの cycle を回さずに「外れ」と
-   * して畳む。speculate 側の判定（`leave` / `confirm`）には効かない。
+   * Margin of the "strong loss" that folds a plain-side exploration burst (default 0.15, a positive
+   * finite number). A burst whose ratio exceeds `leave + burstAbort` at an observation from the
+   * `burstMin`-th on is folded as "a miss" without running the remaining cycles. It has no effect on
+   * the speculate side's decision (`leave` / `confirm`).
    */
   readonly burstAbort?: number;
 };
 
 export type SpeculationGate = {
   /**
-   * 次に回すのはどちらか（観測と内部 counter だけの決定的な**読み取り** — 時計は observe* が
-   * 受け取る）。
+   * Which one runs next (a deterministic **read** of the observations and internal counters only —
+   * the clock is received by observe*).
    *
-   * MUST: 1 cycle に 1 回呼ぶ。状態は一切動かさないので、同じ cycle で何度読んでも同じ値で、
-   * 決定を持ち越す必要も無い（モードの切替と `switches` の加算はブロック / バーストが満ちた
-   * 観測の側で起きる）。
+   * MUST: call once per cycle. It moves no state at all, so reading it any number of times in one
+   * cycle gives the same value, and the decision need not be carried over (mode switches and
+   * `switches` increments happen on the observation side, when a block / burst fills).
    */
   decide(): SpeculationDecision;
   /**
-   * 投機 cycle の観測（壁 ms と、その cycle が配送した token 数 = `confirmed.length`）。
+   * Observation of a speculative cycle (wall ms and the tokens that cycle delivered =
+   * `confirmed.length`).
    *
-   * speculate 中はブロックへ、plain 中は探索バーストへ積む。判定が動くのは満ちた時と、
-   * バーストが `burstMin` 本目以降で強い負けを出した時（そのバーストの打ち切り）だけである。
+   * While speculating it goes into the block, while plain into the exploration burst. The decision
+   * moves only when they fill, and when a burst shows a strong loss from the `burstMin`-th cycle on
+   * (that burst is aborted).
    */
   observeCycle(wallMs: number, delivered: number): void;
-  /** plain step（M=1）の観測（壁 ms）— `W1` の EWMA だけを動かす。 */
+  /** Observation of a plain step (M=1) (wall ms) — it moves only the EWMA of `W1`. */
   observePlain(wallMs: number): void;
   /**
-   * 観測を返さない cycle（呼び手が「壁の観測に混ぜない」と決めた cycle — 決定を諮らずに形が
-   * 決まった cycle も含む）。
+   * A cycle that reports no observation (a cycle the caller decided "not to mix into the wall
+   * observations" — including cycles whose shape was fixed without consulting the decision).
    *
-   * 動くのは探索の周期（次の探索までの残り）だけで、mode も `W1` もブロックも動かさない。混ぜ
-   * ない cycle でも GPU の仕事は 1 本走っているので、周期はそのぶん進めるのが正しい。
+   * Only the exploration period (what remains until the next exploration) moves; neither the mode,
+   * `W1` nor the block move. Even a cycle that is not mixed in runs one piece of GPU work, so
+   * advancing the period by it is correct.
    */
   skip(): void;
-  /** speculate ↔ plain の切替回数（探索バーストそのものは数えない）。 */
+  /** Number of speculate ↔ plain switches (exploration bursts themselves are not counted). */
   readonly switches: number;
-  /** 現在の定常モード（探索バーストで逆側を回している間も変わらない）。 */
+  /** The current steady mode (it does not change while an exploration burst runs the other side). */
   readonly mode: SpeculationDecision;
   /**
-   * 観測状態（モード・`W1`・探索の周期と間隔・切替回数・集計中の一群・連続の負けの数）を写した
-   * **独立の**ゲートを返す（ノブは同じ検査済みの値）。会話の分岐（`GenerationSequence.fork` —
-   * ADR 0083 追記 2026-10-11）が使う: 分岐は同じ会話・同じ host の続きなので、測り直さずに
-   * 続きから判断する（ゲートの寿命を sequence にする理由と同じ）。
+   * Returns an **independent** gate with a copy of the observed state (mode, `W1`, exploration
+   * period and interval, switch count, the group being aggregated, the count of consecutive losses)
+   * (the knobs are the same checked values). Used by conversation branching
+   * (`GenerationSequence.fork` — ADR 0083 addendum 2026-10-11): a branch continues the same
+   * conversation on the same host, so it decides from where it was without measuring again (the
+   * same reason the gate lives as long as the sequence).
    *
-   * MUST: 写した後の 2 つは状態を共有しない（片方への観測はもう片方を動かさない — 共有すると
-   * 片方の分岐の壁が他方のモードを倒す）。
+   * MUST: the two do not share state after the copy (an observation on one does not move the other
+   * — sharing would let one branch's walls flip the other's mode).
    */
   fork(): SpeculationGate;
 };
 
-/** ゲートの観測状態（{@link SpeculationGate.fork} が写す全部 — ノブは含まない）。 */
+/**
+ * The gate's observed state (everything {@link SpeculationGate.fork} copies — the knobs excluded).
+ */
 type GateState = {
   readonly mode: SpeculationDecision;
   readonly plainWall: number | undefined;
@@ -216,10 +247,10 @@ type GateState = {
 };
 
 /**
- * 正の有限数の門（比・係数のノブ）。
+ * Check for a positive finite number (ratio and factor knobs).
  *
- * ノブはすべて呼び手が `speculative.gate` で渡す値なので、不受理は入力起因である
- * （ADR 0107 決定 2 — 打つ手は「渡す値を直す」1 つ）。
+ * Every knob is a value the caller passes through `speculative.gate`, so a rejection is
+ * input-caused (ADR 0107 decision 2 — the only remedy is "fix the value passed").
  */
 const assertPositive = (name: string, value: number): void => {
   if (!Number.isFinite(value) || value <= 0) {
@@ -227,14 +258,16 @@ const assertPositive = (name: string, value: number): void => {
   }
 };
 
-/** cycle 数の門 — 端数の cycle 数は「何 cycle ごと」を意味できない。 */
+/** Check for a cycle count — a fractional cycle count cannot mean "every so many cycles". */
 const assertInterval = (name: string, value: number, least: number): void => {
   if (!Number.isSafeInteger(value) || value < least) {
     throw new ModelInputError(`speculation gate: ${name} ${value} が ${least} 以上の整数でない`);
   }
 };
 
-/** 検査済みのノブ（{@link createSpeculationGate} が値域を通した後の値 — 分岐も同じ値を使う）。 */
+/**
+ * Checked knobs (after {@link createSpeculationGate} checked their ranges — a branch reuses them).
+ */
 type GateKnobs = {
   readonly alpha: number;
   readonly window: number;
@@ -250,11 +283,11 @@ type GateKnobs = {
 };
 
 /**
- * 検査済みのノブと観測状態からゲートを組む（{@link createSpeculationGate} と
- * {@link SpeculationGate.fork} が共有する 1 本）。
+ * Builds a gate from checked knobs and an observed state (the one function shared by
+ * {@link createSpeculationGate} and {@link SpeculationGate.fork}).
  *
- * MUST: ノブの値域はここで見ない（呼び手が検査済みの値だけを渡す — 分岐は元のゲートが検査した
- * 値をそのまま渡す）。
+ * MUST: knob ranges are not checked here (callers pass only checked values — a branch passes the
+ * values the original gate checked as they are).
  */
 const openGate = (knobs: GateKnobs, initial: GateState): SpeculationGate => {
   const {
@@ -271,23 +304,26 @@ const openGate = (knobs: GateKnobs, initial: GateState): SpeculationGate => {
     burstAbort,
   } = knobs;
   let mode: SpeculationDecision = initial.mode;
-  /** plain step の壁 ms の EWMA（未観測は `undefined`）。 */
+  /** EWMA of the plain step's wall ms (`undefined` until observed). */
   let plainWall: number | undefined = initial.plainWall;
-  /** 現モードで観測した回数（モード切替と plain 側のバースト完了で 0 へ戻る）。 */
+  /**
+   * Observations in the current mode (back to 0 on a mode switch and when a plain burst completes).
+   */
   let sinceProbe = initial.sinceProbe;
-  /** plain 側の探索間隔（外れるたびに倍・当たれば `exploreBase` へ戻る）。 */
+  /** Plain-side exploration interval (doubles on every miss, back to `exploreBase` on a hit). */
   let backoff = initial.backoff;
   let switches = initial.switches;
   /**
-   * 集計中の一群（speculate 中は `window` 本のブロック・plain 中は `burst` 本の探索バースト）。
+   * The group being aggregated (a block of `window` cycles while speculating, an exploration burst
+   * of `burst` cycles while plain).
    *
-   * 2 つを 1 組の変数で持てるのは、モードの切替が必ずここを空にするためである（ブロックと
-   * バーストが同時に生きることは無い）。
+   * One set of variables can hold both because a mode switch always empties it (a block and a burst
+   * are never alive at the same time).
    */
   let batchCycles = initial.batchCycles;
   let batchWall = initial.batchWall;
   let batchDelivered = initial.batchDelivered;
-  /** `leave` を連続で超えたブロックの数（`confirm` に届いたら抜ける）。 */
+  /** Blocks in a row that exceeded `leave` (leaves when it reaches `confirm`). */
   let overRuns = initial.overRuns;
 
   const ewma = (value: number | undefined, sample: number): number =>
@@ -300,10 +336,10 @@ const openGate = (knobs: GateKnobs, initial: GateState): SpeculationGate => {
   };
 
   /**
-   * 一群の 1 token あたりの壁 ms（`ΣWc / Σdelivered`）と `W1` の比。
+   * Ratio of the group's wall ms per token (`ΣWc / Σdelivered`) to `W1`.
    *
-   * `delivered` は cycle あたり 1 個以上確定するので 0 にはならないが、割り算の前に見る
-   * （`W1` が未観測の状態で倒すと、根拠の無い切替になる）。
+   * At least one token is confirmed per cycle, so `delivered` is never 0, but it is checked before
+   * dividing (switching while `W1` is unobserved would be a switch without basis).
    */
   const batchRatio = (): number | undefined =>
     batchDelivered <= 0 || plainWall === undefined || plainWall <= 0
@@ -311,8 +347,8 @@ const openGate = (knobs: GateKnobs, initial: GateState): SpeculationGate => {
       : batchWall / batchDelivered / plainWall;
 
   /**
-   * plain へ倒す（ブロックが `confirm` 本連続で負けた / `earlyLeave` の席で 1 本が強い負けだった
-   * とき）。
+   * Switches to plain (when blocks lost `confirm` times in a row / when, with `earlyLeave` set, one
+   * block was a strong loss).
    */
   const leaveSpeculation = (): void => {
     mode = "plain";
@@ -323,15 +359,15 @@ const openGate = (knobs: GateKnobs, initial: GateState): SpeculationGate => {
     resetBatch();
   };
 
-  /** 外れたバースト（満ちても `enter` を下回らない / 途中で強い負けが出た）を畳む。 */
+  /** Folds a missed burst (full without falling below `enter` / a strong loss midway). */
   const missBurst = (): void => {
     resetBatch();
-    // 次の探索を遠ざけ、間隔を数え直す。
+    // Push the next exploration further out and restart counting the interval.
     sinceProbe = 0;
     backoff = Math.min(backoff * 2, exploreMax);
   };
 
-  /** speculate へ戻す（探索バーストが `enter` を下回ったとき）。 */
+  /** Returns to speculate (when an exploration burst fell below `enter`). */
   const enterSpeculation = (): void => {
     mode = "speculate";
     switches += 1;
@@ -343,18 +379,19 @@ const openGate = (knobs: GateKnobs, initial: GateState): SpeculationGate => {
 
   return {
     /**
-     * 今の状態から決定を出す（読み取りだけ — {@link SpeculationGate.decide} の MUST）。
+     * Decides from the current state (a read only — the MUST of {@link SpeculationGate.decide}).
      *
-     * plain 側は「バースト中は続ける / 間隔ぶん回したらバーストを始める」、speculate 側は
-     * 「`W1` が未観測なら 1 cycle 回した直後に 1 step / 以後は `exploreBase` ごとに 1 step」。
+     * The plain side: "continue during a burst / start a burst once the interval has run". The
+     * speculate side: "if `W1` is unobserved, one step right after one cycle / afterwards one step
+     * every `exploreBase`".
      */
     decide: (): SpeculationDecision => {
       if (mode === "plain") {
-        // `batchCycles > 0` = 探索バーストが進行中（満ちた時と、`burstMin` 以降の打ち切りで
-        // 0 へ戻る）。打ち切りが即座に plain へ返るのはこの読みだけで成り立つ。
+        // `batchCycles > 0` = an exploration burst is in progress (back to 0 when it fills and on
+        // an abort from `burstMin` on). This read alone makes an abort return to plain at once.
         return batchCycles > 0 || sinceProbe >= backoff ? "speculate" : "plain";
       }
-      // `W1` を 1 度も測っていないなら、1 cycle 回した直後に 1 step だけ plain を挟む。
+      // If `W1` has never been measured, insert a single plain step right after one cycle.
       if (plainWall === undefined) return sinceProbe >= 1 ? "plain" : "speculate";
       return sinceProbe % exploreBase === exploreBase - 1 ? "plain" : "speculate";
     },
@@ -363,8 +400,9 @@ const openGate = (knobs: GateKnobs, initial: GateState): SpeculationGate => {
       batchWall += wallMs;
       batchDelivered += delivered;
       if (mode === "plain") {
-        // plain 中の探索バースト — 満ちるまでは「戻る」判定も周期の数え直しもしない。ただし
-        // `burstMin` 本目からは強い負けだけを見て、外れが確定したバーストを畳む。
+        // An exploration burst while plain — no "return" decision and no period restart until it
+        // fills. From the `burstMin`-th cycle on, though, it watches for a strong loss only and
+        // folds a burst whose miss is certain.
         if (batchCycles < burst) {
           if (batchCycles < burstMin) return;
           const probe = batchRatio();
@@ -381,9 +419,11 @@ const openGate = (knobs: GateKnobs, initial: GateState): SpeculationGate => {
       }
       sinceProbe += 1;
       if (batchCycles < window) return;
-      // 満ちたブロック 1 本ぶんの判定（`W1` 未観測なら判定を持たない = 連続を切る）。
+      // The decision for one full block (with `W1` unobserved there is no decision = the run is
+      // broken).
       const measured = batchRatio();
-      // 早抜けを渡した席だけ、強い負けは `confirm` の連続を待たない（1 本で倒す）。
+      // Only when the early leave is passed, a strong loss does not wait for `confirm` in a row
+      // (one block switches).
       if (earlyLeave !== undefined && measured !== undefined && measured > leave + earlyLeave) {
         leaveSpeculation();
         return;
@@ -425,25 +465,28 @@ export const createSpeculationGate = (options: SpeculationGateOptions = {}): Spe
   const window = options.window ?? 16;
   const confirm = options.confirm ?? 2;
   const burst = options.burst ?? 8;
-  // 既定を `burst` で抑えるのは、`burst` を縮めた席（バースト 1 cycle など）で「打ち切る余地が
-  // 無い」のが正しい形であり、既定の組み合わせを門で弾く理由が無いためである。
+  // The default is capped by `burst` because with a shrunk `burst` (a 1-cycle burst, say) "no room
+  // to abort" is the correct shape, and there is no reason for the check to reject a default
+  // combination.
   const burstMin = options.burstMin ?? Math.min(4, burst);
   const exploreBase = options.exploreBase ?? 16;
   const exploreMax = options.exploreMax ?? 512;
   const enter = options.enter ?? 0.97;
   const leave = options.leave ?? 1.01;
-  // 早抜けは**未指定 = off**（値を持たないことがそのまま「倒さない」の綴りである）。
+  // The early leave is **unset = off** (having no value is itself how "do not switch" is spelled).
   const earlyLeave = options.earlyLeave;
   const burstAbort = options.burstAbort ?? 0.15;
   assertPositive("alpha", alpha);
-  // α > 1 の EWMA は過去へ負の重みを載せる（平均ではなくなる）ので上も閉じる。
+  // An EWMA with α > 1 puts negative weight on the past (it stops being an average), so the upper
+  // end is closed too.
   if (alpha > 1) throw new ModelInputError(`speculation gate: alpha ${alpha} が 0 < α ≤ 1 の外`);
-  // ブロックが 1 cycle だと「ブロック集計」が 1 サンプルの判定に戻る（種付けの欠陥そのもの）。
+  // A 1-cycle block turns "block aggregation" back into a one-sample decision (the seeding defect
+  // itself).
   assertInterval("window", window, 2);
   assertInterval("confirm", confirm, 1);
   assertInterval("burst", burst, 1);
   assertInterval("burstMin", burstMin, 1);
-  // `burstMin > burst` は「打ち切りが一度も発火しない」死んだノブなので、黙って通さない。
+  // `burstMin > burst` is a dead knob ("the abort never fires"), so it is not passed silently.
   if (burstMin > burst) {
     throw new ModelInputError(
       `speculation gate: burstMin ${burstMin} が burst ${burst} を超えている`,
@@ -455,7 +498,8 @@ export const createSpeculationGate = (options: SpeculationGateOptions = {}): Spe
   assertPositive("leave", leave);
   if (earlyLeave !== undefined) assertPositive("earlyLeave", earlyLeave);
   assertPositive("burstAbort", burstAbort);
-  // 不感帯は 1 を挟む（`enter ≥ 1` だと負けている最中に戻り、`leave ≤ 1` だと勝っていても抜ける）。
+  // The dead band straddles 1 (with `enter ≥ 1` it returns while losing, with `leave ≤ 1` it leaves
+  // even while winning).
   if (!(enter < 1 && 1 < leave)) {
     throw new Error(`speculation gate: enter ${enter} < 1 < leave ${leave} でない`);
   }

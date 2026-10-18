@@ -1,47 +1,53 @@
 /**
- * `Sbv2Pipeline` — テキスト → 音声（SBV2 / Style-Bert-VITS2 JP-Extra）の 1 本の面。
+ * `Sbv2Pipeline` — the one surface for text → speech (SBV2 / Style-Bert-VITS2 JP-Extra).
  *
- * パイプライン（NN は全段 Karume・torch 不使用）:
+ * Pipeline (every NN step is Karume, no torch):
  *
- * 1. 発話（解析済みのモーラ列 + 語アライメント）→ 音素 / トーン / word2ph / DeBERTa
- *    トークン列（GPU 不要・決定的）
- * 2. `text_encoder`（DeBERTa）→ hidden_states の末尾から N 本目（N は `symbols.json`）
- * 3. ホスト: word2ph で BERT 特徴を音素レベルへ tile 展開
- * 4. ホスト: `style_vec` / `g` を配布形の表から行引き（`style.ts`）
- * 5. `front`（enc_p + dp + sdp reverse）→ **4 出力**（logw_sdp / logw_dp / m_p / logs_p）
- * 6. ホスト: 継続長 → フレーム展開 idx → z_p → 相対位置注意表
- * 7. `voice`（flow + dec 融合）→ f32 波形（WAV 化は `encodeWav` — パイプライン非依存の共通処理）
+ * 1. utterance (analysed mora sequence + word alignment) → phonemes / tones / word2ph / DeBERTa
+ *    token sequence (no GPU, deterministic)
+ * 2. `text_encoder` (DeBERTa) → the N-th from the end of hidden_states (N from `symbols.json`)
+ * 3. host: tile-expand the BERT features to phoneme level with word2ph
+ * 4. host: look up rows of `style_vec` / `g` from the distribution's tables (`style.ts`)
+ * 5. `front` (enc_p + dp + sdp reverse) → **4 outputs** (logw_sdp / logw_dp / m_p / logs_p)
+ * 6. host: durations → frame expansion idx → z_p → relative-position attention tables
+ * 7. `voice` (flow + dec fused) → f32 waveform (WAV encoding is `encodeWav` — shared processing
+ *    independent of the pipeline)
  *
- * ## MUST: グラフは 1 本ずつ開いて閉じる
+ * ## MUST: open and close the graphs one at a time
  *
- * {@link Sbv2Pipeline.fromAssets} は **Session を 1 本も張らない** — 開くのはコンテナ
- * （`openContainer` = 2 文書の解析のみ）までで、GPU 常駐は {@link Sbv2Pipeline.generate} の中で
- * 段ごとに張っては畳む。3 グラフ（text_encoder / front / voice）を同時に生かさない。
+ * {@link Sbv2Pipeline.fromAssets} **creates no Session at all** — it opens only up to the
+ * containers (`openContainer` = parsing the 2 documents), and GPU residency is created and torn
+ * down step by step inside {@link Sbv2Pipeline.generate}. The 3 graphs (text_encoder / front /
+ * voice) are never alive at the same time.
  *
- * MUST: この段取りは**公開 API 側でも**守る — `generate` は直列化鎖に載せ（並行呼び出しは
- * 待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。載せないと、並行
- * 呼び出し 2 本ぶんのグラフが同時常駐し、生成中の dispose が flush-before-destroy を破る。
+ * MUST: this sequencing is kept **on the public API side too** — `generate` rides the serialization
+ * chain (concurrent calls wait and run in order), and `dispose` waits for its completion before
+ * destroying the GPU. Without it, the graphs of 2 concurrent calls would be resident at once, and a
+ * dispose during generation would break flush-before-destroy.
  *
- * ## MUST: 低精度ノブが効くのは front / voice だけ
+ * ## MUST: the low-precision knobs apply only to front / voice
  *
- * quant の `session`（Session の実行形ノブ）は front / voice の Session にだけ渡し、
- * `text_encoder` の Session は常に既定の実行形で張る — 実行形ノブの比較軸を SBV2 本体に保つ。
- * これは重みの**格納 dtype** とは別の話で、`text_encoder` の重みは quant ごとに i8 / i4 の
- * どちらかが来る（既定 `i8+bert4` と `i4` が i4 — quant 表は ADR 0039 の追記）。
+ * The quant's `session` (the Session's execution knobs) is passed only to the front / voice
+ * Sessions, and the `text_encoder` Session is always created with the default execution form —
+ * keeping the comparison axis of the execution knobs on the SBV2 body. This is separate from the
+ * weights' **storage dtype**: `text_encoder`'s weights come as i8 or i4 depending on the quant
+ * (the default `i8+bert4` and `i4` are i4 — the quant table is in the addendum of ADR 0039).
  *
- * ## MUST: 数値の正はここでは担保されない
+ * ## MUST: numerical correctness is not guaranteed here
  *
- * 正は golden E2E（`packages/runtime/tests/e2e_sbv2_test.ts`）と、`tools/export-recipes/sbv2/demo.py`
- * の `reference`（`python -m sbv2.demo reference`）による torch 突合（example の dump 経路）が
- * 担保する。
+ * Correctness is guaranteed by the golden E2E (`packages/e2e/tests/e2e_sbv2_test.ts`) and by the
+ * torch comparison through `reference` of `tools/export-recipes/sbv2/demo.py`
+ * (`python -m sbv2.demo reference`) (the example's dump path — `examples/sbv2/dump.ts`, removed in
+ * 0.15).
  *
- * ## MUST: テキスト解析はこのパッケージの責務ではない（0.6.0 の再裁定）
+ * ## MUST: text analysis is not this package's responsibility (the re-ruling of 0.6.0)
  *
- * 入口は解析済みの {@link Sbv2Utterance} だけ — 辞書・修正辞書・読みの決定は呼び手が持つ
- * （ADR 0072 の注入席〈overlay / givenTone / analyzeProsody〉は撤去した）。これで
- * `packages/models` から日本語辞書の取得（hub を経由しない唯一のネットワーク経路）も、
- * 解析器への依存も消える。karume 側に残るのは「渡された構造が自己整合していること」を
- * 検める入口の門（`text/model-input.ts`）だけ。
+ * The only entry is an analysed {@link Sbv2Utterance} — the dictionary, the correction dictionary
+ * and the choice of readings belong to the caller (ADR 0072's injection fields (overlay /
+ * givenTone / analyzeProsody) were removed). This removes both the fetching of the Japanese
+ * dictionary (the only network path not going through hub) and the dependency on an analyser from
+ * `packages/models`. What remains on the karume side is only the entry check
+ * (`text/model-input.ts`) that verifies "the given structure is self-consistent".
  */
 
 import {
@@ -116,9 +122,11 @@ import {
 import { readAssetBuffer, readAssetJson } from "../hub/asset-readers.ts";
 
 /**
- * manifest の weights / assets 表に現れる名前（ADR 0041 §3 の規約名）。
- * NOTE: `style_vectors` / `speaker_embeddings` は取得キーと safetensors のテンソル名が同綴り
- * （`style.ts` の {@link STYLE_TENSOR} / {@link SPEAKER_TENSOR}）だが、別の語彙なので別に持つ。
+ * Names that appear in the manifest's weights / assets tables (the conventional names of ADR 0041
+ * decision 3).
+ * NOTE: `style_vectors` / `speaker_embeddings` are spelled the same as the fetch keys and as the
+ * safetensors tensor names ({@link STYLE_TENSOR} / {@link SPEAKER_TENSOR} in `style.ts`), but they
+ * are separate vocabularies, so they are held separately.
  */
 const TEXT_ENCODER = "text_encoder";
 const FRONT = "front";
@@ -128,60 +136,68 @@ const SYMBOLS = "symbols";
 const STYLE_VECTORS = "style_vectors";
 const SPEAKER_EMBEDDINGS = "speaker_embeddings";
 
-/** この系列の weights 部品（差し替え席が受ける役割名でもある）。 */
+/** This family's weights components (also the role names the component replacement accepts). */
 const COMPONENT_KEYS = [FRONT, VOICE, TEXT_ENCODER] as const;
 
 /**
- * front のグラフ出力の本数（logw_sdp / logw_dp / m_p / logs_p）。
- * {@link outputAt} が位置で引く 4 本ちょうどを構築時に検める（{@link buildSbv2State}）。
+ * Number of front's graph outputs (logw_sdp / logw_dp / m_p / logs_p).
+ * Exactly the 4 that {@link outputAt} looks up by position are checked at construction
+ * ({@link buildSbv2State}).
  */
 const FRONT_OUTPUTS = 4;
 
-/** 生成結果。`data` は f32 モノラル波形（`encodeWav` にそのまま渡せる）。 */
+/** Generation result. `data` is an f32 mono waveform (can be passed to `encodeWav` as is). */
 export type GeneratedAudio = {
   readonly sampleRate: number;
   readonly data: Float32Array<ArrayBuffer>;
 };
 
-/** 1 回の生成のノブ。未指定の欄は manifest の `pipelineConfig.defaults` が埋める。 */
+/**
+ * Knobs of one generation. Unspecified fields are filled by the manifest's
+ * `pipelineConfig.defaults`.
+ */
 export type Sbv2GenerateOptions = {
-  /** 話者名（`pipelineConfig.speakers` のキー）。 */
+  /** Speaker name (a key of `pipelineConfig.speakers`). */
   readonly speaker?: string;
-  /** スタイル名（`pipelineConfig.styles` のキー）。 */
+  /** Style name (a key of `pipelineConfig.styles`). */
   readonly style?: string;
-  /** スタイルの強さ（1 = 選んだスタイルそのもの、0 = 平均スタイル）。 */
+  /** Style strength (1 = the selected style itself, 0 = the mean style). */
   readonly styleWeight?: number;
-  /** sdp と dp の混合比（`logw = sdp·r + dp·(1−r)`）。 */
+  /** Mixing ratio of sdp and dp (`logw = sdp·r + dp·(1−r)`). */
   readonly sdpRatio?: number;
-  /** z_p のノイズ倍率。 */
+  /** Noise scale of z_p. */
   readonly noiseScale?: number;
-  /** sdp reverse のノイズ倍率。 */
+  /** Noise scale of the sdp reverse. */
   readonly noiseScaleW?: number;
-  /** 継続長のスケール（大きいほどゆっくり）。 */
+  /** Duration scale (larger is slower). */
   readonly lengthScale?: number;
-  /** 乱数 seed（既定 0 — 同じ seed・同じノブなら同じ波形）。 */
+  /** Random seed (default 0 — the same seed and the same knobs give the same waveform). */
   readonly seed?: number;
 };
 
-/** {@link Sbv2PipelineOptions.onRunDiagnostics} が受けるコンポーネント名（Session 1 本 = 1 名）。 */
+/** Component name received by {@link Sbv2PipelineOptions.onRunDiagnostics} (1 Session = 1 name). */
 export type Sbv2RunComponent = "text_encoder" | "front" | "voice";
 
-/** 構築オプション（{@link Sbv2Pipeline.fromAssets} / {@link Sbv2Pipeline.fromPretrained} 共通）。 */
+/**
+ * Construction options (shared by {@link Sbv2Pipeline.fromAssets} /
+ * {@link Sbv2Pipeline.fromPretrained}).
+ */
 export type Sbv2PipelineOptions = {
   /**
-   * 既存の GPU を共有する。**渡した側が所有権を持つ**ので {@link Sbv2Pipeline.dispose} は
-   * 破棄しない。省略時はパイプラインが内部で `acquireGpu` し、`dispose()` で破棄する。
+   * Shares an existing GPU. **The passing side owns it**, so {@link Sbv2Pipeline.dispose} does not
+   * destroy it. When omitted, the pipeline calls `acquireGpu` internally and destroys it in
+   * `dispose()`.
    */
   readonly gpu?: GpuContext;
-  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  /** Model (a key of the manifest's models). `defaultModel` when omitted. */
   readonly model?: string;
-  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  /** Execution configuration (a key of that model's quants). `defaultQuant` when omitted. */
   readonly quant?: string;
   /**
-   * `Session.run` 1 回ごとの診断を受け取る観測席（1 合成 = text_encoder → front → voice の
-   * 3 回）。op 別 GPU 時間（`lastRunTiming`）が要るときは `gpu` に
-   * `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
-   * コールバックの例外は握らない（fail loudly — 合成ごと落ちる）。
+   * Observer hook that receives the diagnostics of each `Session.run` (1 synthesis = 3 runs:
+   * text_encoder → front → voice). When per-op GPU time (`lastRunTiming`) is needed, pass
+   * `acquireGpu({ gpuTiming: true })` as `gpu` (ADR 0021 — no timing by default).
+   * Exceptions from the callback are not caught (fail loudly — the whole synthesis fails).
    */
   readonly onRunDiagnostics?: (
     component: Sbv2RunComponent,
@@ -190,10 +206,10 @@ export type Sbv2PipelineOptions = {
 };
 
 /**
- * {@link Sbv2Pipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。
+ * Fetch-layer options used only by {@link Sbv2Pipeline.fromPretrained} (passed through to hub).
  *
- * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
- * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
+ * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
+ * `onRetry` are **for the HTTP source only**, is consolidated in {@link FromPretrainedHubOptions}.
  */
 export type Sbv2FromPretrainedOptions = Sbv2PipelineOptions &
   FromPretrainedHubOptions &
@@ -201,15 +217,18 @@ export type Sbv2FromPretrainedOptions = Sbv2PipelineOptions &
     readonly signal?: AbortSignal;
   };
 
-/** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
+/**
+ * Input for building directly from fetched assets (pass the return value of hub's `fetchAssets` as
+ * is).
+ */
 export type Sbv2Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
 /**
- * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は
- * {@link readAssetBuffer}）。
+ * Turns fetched bytes into an ArrayBuffer that can be passed to `openContainer` (the check itself
+ * is {@link readAssetBuffer}).
  */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -217,21 +236,23 @@ const assetBuffer = (
 ): ArrayBuffer => readAssetBuffer("sbv2", "weights / assets", assets, key);
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 8 家族共有 —
- * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`voice`）か、分割形の
- * part 列（`voice[0]` / `voice[1]` / …）。
+ * Component supplier of the in-memory surface (`fromAssets`) (the receiving implementation is
+ * shared by the families — {@link assetComponentOpener}). A component key is either the single
+ * form `krm` as one entry (`voice`), or the part sequence of the split form (`voice[0]` /
+ * `voice[1]` / …).
  *
- * NOTE: `export` は {@link openSbv2State} と同じ理由（dump 経路が全量面で state を組む —
- * `examples/sbv2/dump.ts`）。`mod.ts` / サブパス面には出さない。
+ * NOTE: `export` for the same reason as {@link openSbv2State} (the dump path builds the state on
+ * the in-memory surface — `examples/sbv2/dump.ts`, removed in 0.15). Not exposed on `mod.ts` / the
+ * subpath surface.
  */
 export const assetOpener = (assets: Sbv2Assets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("sbv2", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
- * 資産 JSON を読む（decode / parse の門は {@link readAssetJson}）。
+ * Reads an asset JSON (the decode / parse check is {@link readAssetJson}).
  *
- * NOTE: `export` は門を直接叩くテストのため（`fromAssets` 経由で此処へ届くには実 IR
- * コンテナ 3 本が要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
+ * NOTE: `export` for tests that call the check directly (reaching here through `fromAssets` needs 3
+ * real IR containers). Not exposed on `mod.ts` / the subpath surface (ADR 0008).
  */
 export const assetJson = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -239,11 +260,12 @@ export const assetJson = (
 ): unknown => readAssetJson("sbv2", "weights / assets", assets, key);
 
 /**
- * グラフ入力の 1 軸ぶんの**静的**次元を引く。
+ * Looks up the **static** dimension of one axis of a graph input.
  *
- * MUST: パイプライン側に literal を置かない — コンテナが正で、モデルを差し替えたら値も追随する。
- * MUST: 形全体を静的と要求しない。`bert` は `[1, 1024, P]` で P が記号次元（音素数はデータ
- * 依存）なので、要る軸だけを見る。
+ * MUST: do not put literals on the pipeline side — the container is authoritative, and when the
+ * model is replaced the value follows.
+ * MUST: do not require the whole shape to be static. `bert` is `[1, 1024, P]` where P is a symbolic
+ * dimension (the phoneme count depends on the data), so only the needed axis is looked at.
  */
 const staticInputDim = (model: GraphOwner, inputName: string, axis: number): number => {
   const spec = model.graph.inputs.find((input) => input.name === inputName);
@@ -255,7 +277,10 @@ const staticInputDim = (model: GraphOwner, inputName: string, axis: number): num
   return dim;
 };
 
-/** グラフ入力の軸 1（特徴幅）。`bert` の 1024・`style_vec` の 256・`g` の 512 を引く。 */
+/**
+ * Axis 1 (feature width) of a graph input. Looks up 1024 for `bert`, 256 for `style_vec`, 512 for
+ * `g`.
+ */
 const featureWidth = (model: GraphOwner, inputName: string): number =>
   staticInputDim(model, inputName, 1);
 
@@ -279,9 +304,9 @@ const i32 = (values: readonly number[], shape: readonly number[]): Tensor => ({
 const ones = (count: number): Float32Array<ArrayBuffer> => new Float32Array(count).fill(1);
 
 /**
- * グラフ出力を**位置**で引く（IR の出力名は export 時の torch ノード名 — `slice_54` /
- * `mul_3780` のように意味を持たないので名前を決め打ちしない）。本数は
- * {@link buildSbv2State} が構築時に見る。
+ * Looks up a graph output by **position** (the IR's output names are torch node names from export
+ * time — meaningless names like `slice_54` / `mul_3780`, so names are not hard-coded). The count is
+ * checked at construction by {@link buildSbv2State}.
  */
 const outputAt = (
   model: GraphOwner,
@@ -297,7 +322,10 @@ const outputAt = (
   return tensor;
 };
 
-/** 観測席（{@link Sbv2PipelineOptions.onRunDiagnostics}）へコンポーネント名を焼いて渡す。 */
+/**
+ * Passes the component name, bound in, to the observer hook
+ * ({@link Sbv2PipelineOptions.onRunDiagnostics}).
+ */
 const observer = (
   state: Sbv2State,
   component: Sbv2RunComponent,
@@ -307,14 +335,15 @@ const observer = (
 };
 
 /**
- * 配布形の表（`style_vectors` / `speaker_embeddings`）が名前表とグラフ入力の両方に合うことを
- * 構築時に見る。
+ * Checks at construction that the distribution's tables (`style_vectors` / `speaker_embeddings`)
+ * fit both the name table and the graph inputs.
  *
- * MUST: 行数の突合を落とさない。行番号は表の物理行そのものなので、名前表と表の行数がずれても
- * shape は合ったまま**別のスタイル・別の話者の声が出る**（`style.ts` の doc）。
+ * MUST: do not drop the row-count comparison. A row number is the physical row of the table itself,
+ * so when the name table and the table's row count drift apart the shapes still match and **the
+ * voice of a different style / different speaker comes out** (the doc of `style.ts`).
  *
- * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
- * `mod.ts` / サブパス面には出さない（ADR 0008）。
+ * NOTE: `export` for tests that call the check directly (the same situation as
+ * {@link assertTokenLimit}). Not exposed on `mod.ts` / the subpath surface (ADR 0008).
  */
 export const assertTableFits = (
   table: Sbv2Table,
@@ -336,15 +365,19 @@ export const assertTableFits = (
 };
 
 /**
- * front のグラフ出力が {@link outputAt} の位置引きどおり 4 本ちょうどであることを構築時に見る。
+ * Checks at construction that front's graph outputs are exactly 4, as {@link outputAt}'s positional
+ * lookup expects.
  *
- * MUST: 「4 本以上」にしない。位置 0..3 しか読まないので余った出力は静かに無視され、別の
- * variant（検証用の全層出し等）を front として掴んだことに気づけない。
+ * MUST: do not make it "4 or more". Only positions 0..3 are read, so extra outputs would be
+ * silently ignored, and grabbing a different variant (a verification graph exposing every layer,
+ * etc.) as front would go unnoticed.
  *
- * NOTE: 出力の**順序**（logw_sdp / logw_dp / m_p / logs_p）は shape が同型なので TS からは
- * 見分けられない — そこは exporter（`tools/export-recipes/sbv2/export.py` の出力名の並び）と
- * 参照環境の WAV sha256 門の責務。ここが見るのは本数だけ。
- * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ * NOTE: the **order** of the outputs (logw_sdp / logw_dp / m_p / logs_p) cannot be told apart from
+ * TS because the shapes are the same — that is the responsibility of the exporter (the order of
+ * output names in `tools/export-recipes/sbv2/export.py`) and of the WAV sha256 check of the
+ * reference environment. This looks at the count only.
+ * NOTE: `export` for tests that call the check directly (the same situation as
+ * {@link assertTokenLimit}).
  */
 export const assertFrontOutputs = (front: GraphOwner): void => {
   if (front.graph.outputs.length !== FRONT_OUTPUTS) {
@@ -356,15 +389,19 @@ export const assertFrontOutputs = (front: GraphOwner): void => {
 };
 
 /**
- * text_encoder が出す hidden の幅と、front のグラフ入力 `bert` の幅が一致することを構築時に見る。
+ * Checks at construction that the width of the hidden state text_encoder emits matches the width of
+ * front's graph input `bert`.
  *
- * MUST: **GPU を取りに行く前**（= text_encoder の Session を張る前）に呼ぶ。実行時まで残すと、
- * 配布形の text_encoder（DeBERTa）を構築して 1 run 払ってから `Session.run` の要素数検査で
- * 落ちる — 家族も資産も名指ししない汎用文言になる。
- * MUST: 見るのは**最終軸だけ**。出力形は `[1, T, dim]` で T が記号次元（トークン数はデータ
- * 依存）なので、形全体を静的と要求すると正当な配布形が通らない。
+ * MUST: call it **before going to get the GPU** (= before creating the text_encoder Session). Left
+ * until run time, it would build the distribution's text_encoder (DeBERTa), pay one run, and then
+ * fail at `Session.run`'s element-count check — with a generic message that names neither the
+ * family nor the asset.
+ * MUST: look at **the last axis only**. The output shape is `[1, T, dim]` where T is a symbolic
+ * dimension (the token count depends on the data), so requiring the whole shape to be static would
+ * reject a legitimate distribution.
  *
- * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ * NOTE: `export` for tests that call the check directly (the same situation as
+ * {@link assertTokenLimit}).
  */
 export const assertBertWidth = (
   textEncoder: GraphOwner,
@@ -392,12 +429,13 @@ export const assertBertWidth = (
 };
 
 /**
- * {@link Sbv2Pipeline} の内部状態。
+ * The internal state of {@link Sbv2Pipeline}.
  *
- * NOTE: 公開面（`mod.ts` / `sbv2.ts`）には出さない。torch 参照突合の dump 経路
- * （`examples/sbv2/dump.ts`）が {@link synthesizeSbv2} を直に呼ぶため関数だけを `export` して
- * いる — チェーンの実装を 2 本持たずに中間値を観測するための唯一の口で、利用者ストーリーでは
- * ない。この型自体は呼び出し側で推論に載るので、モジュール内に閉じる。
+ * NOTE: not exposed on the public surface (`mod.ts` / `sbv2.ts`). Only the function is `export`ed
+ * because the dump path of the torch reference comparison (`examples/sbv2/dump.ts`, removed in
+ * 0.15) calls {@link synthesizeSbv2} directly — it is the only opening for observing intermediate
+ * values without keeping 2 implementations of the chain, not a user story. The type itself is
+ * inferred on the caller's side, so it stays inside the module.
  */
 type Sbv2State = {
   readonly gpu: GpuContext;
@@ -417,7 +455,7 @@ type Sbv2State = {
   ) => void;
 };
 
-/** 合成 1 回ぶんの中間値（dump 経路と診断だけが読む）。 */
+/** Intermediate values of one synthesis (read only by the dump path and diagnostics). */
 type Sbv2Trace = {
   readonly input: Sbv2ModelInput;
   readonly speaker: string;
@@ -425,7 +463,7 @@ type Sbv2Trace = {
   readonly styleWeight: number;
   readonly knobs: Sbv2Knobs;
   readonly seed: number;
-  /** 実際に採った hidden_states のグラフ出力名。 */
+  /** The graph output name of the hidden_states actually taken. */
   readonly bertHiddenOutput: string;
   readonly xMask: Float32Array<ArrayBuffer>;
   readonly zNoise: Float32Array<ArrayBuffer>;
@@ -435,7 +473,10 @@ type Sbv2Trace = {
   readonly frames: number;
 };
 
-/** {@link synthesizeSbv2} の返り値。{@link Sbv2Pipeline.generate} はここから音だけを採る。 */
+/**
+ * Return value of {@link synthesizeSbv2}. {@link Sbv2Pipeline.generate} takes only the audio from
+ * it.
+ */
 type Sbv2Synthesis = {
   readonly sampleRate: number;
   readonly audio: Float32Array<ArrayBuffer>;
@@ -458,38 +499,44 @@ const finiteKnob = (value: number, name: string): number => {
 };
 
 /**
- * `seed` の受理集合を見る門。条件そのものは持たず、家族横断の所有者
- * {@link assertAcceptableSeed}（`request-gates.ts` — 非負の安全整数）へ委ねて型だけを被せ直す。
+ * Check of the acceptance set of `seed`. It holds no condition itself; it delegates to the
+ * family-wide owner {@link assertAcceptableSeed} (`request-gates.ts` — a non-negative safe integer)
+ * and only re-wraps the type.
  *
- * MUST: 他のノブと同じ段（Session を張る前）で呼ぶ。唯一の検査が `Randn` のコンストラクタ
- * だけだと、実行不能と最初から判っている要求に text_encoder（DeBERTa）の構築と
- * 1 run を丸ごと払ってから落ちる（{@link assertTokenLimit} の位置の MUST と同じ理由）。
- * MUST: 型は `Sbv2InputError` を保つ。`Randn` 側も所有者に揃って `ModelInputError` を投げる
- * ようになったので分類軸の外ではなくなったが、SBV2 だけを載せるホストは
- * `instanceof Sbv2InputError` で 400 を切り出している（ADR 0072 決定 6 の線引き）ので、
- * この入口の型を親へ緩めるのは破壊変更である。`Sbv2InputError` は `ModelInputError` の
- * 派生なので、複数家族を載せたホストの横断の分岐にはそのまま乗る。
+ * MUST: call it at the same step as the other knobs (before creating a Session). If the only check
+ * were the `Randn` constructor, a request known from the start to be unrunnable would pay for
+ * building text_encoder (DeBERTa) and a whole run before failing (the same reason as the MUST on
+ * the position of {@link assertTokenLimit}).
+ * MUST: keep the type `Sbv2InputError`. `Randn` now also throws `ModelInputError` in line with the
+ * owner, so it is no longer outside the classification axis, but hosts that carry only SBV2 carve
+ * out 400 with `instanceof Sbv2InputError` (the line drawn by ADR 0072 decision 6), so loosening
+ * this entry's type to the parent is a breaking change. `Sbv2InputError` derives from
+ * `ModelInputError`, so it rides the cross-family branching of hosts that carry several families
+ * as is.
  *
- * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ * NOTE: `export` for tests that call the check directly (the same situation as
+ * {@link assertTokenLimit}).
  */
 export const assertSeed = (seed: number): void => {
   try {
     assertAcceptableSeed(seed);
   } catch (cause) {
-    // 診断は所有者の文言をそのまま運ぶ（受理集合も文言も 2 か所に書かない）。
+    // The diagnostic carries the owner's message as is (neither the acceptance set nor the message
+    // is written in 2 places).
     if (cause instanceof ModelInputError) throw new Sbv2InputError(cause.message, { cause });
     throw cause;
   }
 };
 
 /**
- * トークン列の運用上限（`pipelineConfig.maxTokens`）を見る門。
+ * Check of the operating limit of the token sequence (`pipelineConfig.maxTokens`).
  *
- * MUST: 相対位置表（`c2p_pos` / `p2c_pos` は各 4·T² bytes）の生成と Session の確保**より前**に
- * 呼ぶ。上限は焼いたグラフの記号次元の上限そのもので、超えた要求はどう確保しても実行できない。
+ * MUST: call it **before** generating the relative-position tables (`c2p_pos` / `p2c_pos` are
+ * 4·T² bytes each) and allocating the Session. The limit is the upper bound of the baked graph's
+ * symbolic dimension itself, and a request beyond it cannot run however it is allocated.
  *
- * NOTE: `export` は門を直接叩くテストのため（合成経路でここへ届くには実 IR コンテナ 3 本が
- * 要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
+ * NOTE: `export` for tests that call the check directly (reaching here on the synthesis path needs
+ * 3 real IR containers). Not exposed on `mod.ts` / the subpath surface (ADR 0008).
  */
 export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
   if (tokens > maxTokens) {
@@ -501,20 +548,23 @@ export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
 };
 
 /**
- * 音素列（front の記号次元 P）の運用上限を見る門。
+ * Check of the operating limit of the phoneme sequence (front's symbolic dimension P).
  *
- * MUST: {@link assertTokenLimit} と**別に**要る。P = 2·sum(baseWord2ph)+1 と T = 語 surface の
- * トークン総数+2 のどちらが大きいかは**発話依存**で、一方が他方を含意しない — `distributePhone`
- * は音素数が文字数を下回る語に 0 を配るので（記号語 `{surface:"…", phones:["…"]}` は NFKC で
- * `"..."` の 3 トークンへ割れて `[1,0,0]`）、そういう語を並べれば P < T にもなる。
- * どちらの門を落としても、片側だけが上限を超える発話が素通りする。
- * MUST: DeBERTa を回す**前**に呼ぶ。後ろに置くと、超過が確定している要求に対して
- * text_encoder（DeBERTa）を張って回し切ってから front の記号次元で落ちる。
+ * MUST: needed **separately** from {@link assertTokenLimit}. Which of P = 2·sum(baseWord2ph)+1 and
+ * T = total tokens of the word surfaces + 2 is larger **depends on the utterance**, and neither
+ * implies the other — `distributePhone` gives 0 to words with fewer phonemes than characters (the
+ * symbol word `{surface:"…", phones:["…"]}` splits into the 3 tokens of `"..."` under NFKC, giving
+ * `[1,0,0]`), so lining up such words also gives P < T. Dropping either check lets through
+ * utterances where only one side exceeds the limit.
+ * MUST: call it **before** running DeBERTa. Placed after, a request already certain to exceed would
+ * create and fully run text_encoder (DeBERTa) before failing on front's symbolic dimension.
  *
- * NOTE: 上限は T と P で同じ 1 つ（`pipelineConfig.maxTokens`）— 焼いた記号次元の上限が
- * 1 組であることは配布側が固定している（`tools/export-recipes/sbv2/tests/test_distribution.py`
- * の `the_limits_are_the_symbolic_maxima_the_export_scripts_baked`）ので、欄は増やさない。
- * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ * NOTE: the limit is the same single value for T and P (`pipelineConfig.maxTokens`) — that the
+ * baked symbolic-dimension upper bounds form one set is fixed on the distribution side
+ * (`test_the_limits_are_the_symbolic_maxima_the_export_scripts_baked` in
+ * `tools/export-recipes/sbv2/tests/test_distribution.py`), so no field is added.
+ * NOTE: `export` for tests that call the check directly (the same situation as
+ * {@link assertTokenLimit}).
  */
 export const assertPhonemeLimit = (phonemes: number, maxTokens: number): void => {
   if (phonemes > maxTokens) {
@@ -526,16 +576,20 @@ export const assertPhonemeLimit = (phonemes: number, maxTokens: number): void =>
 };
 
 /**
- * sdp の `z_noise`（標準正規 × `noiseScaleW`）が f32 で全て有限であることを見る門。
+ * Check that sdp's `z_noise` (standard normal × `noiseScaleW`) is all finite in f32.
  *
- * MUST: `noiseScaleW` の検査は倍精度の有限性だけなので、f32 の最大値を超える積（例
- * `noiseScaleW = 1e39`）は `Float32Array` へ入れた時点で ±Inf になり、front を回し切った後の
- * 出力検査まで表面化しない（入力の誤りが無駄な GPU 実行の後に内部エラーとして出る）。乱数は
- * 長さと seed だけで決まるので、GPU を回す前に引いた列そのものを 1 回走査する。
- * MUST: 値の出どころで送出型を分ける — 呼び手が渡した `noiseScaleW` なら入力起因
- * （`Sbv2InputError`）、省略して配布形の `pipelineConfig.defaults` を使ったなら資産の不正。
- * NOTE: f32 で有限でもグラフ内で溢れる大きさ（例 1e30）は別問題で、ここでは縛らない。
- * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ * MUST: the check of `noiseScaleW` is only double-precision finiteness, so a product above the f32
+ * maximum (e.g. `noiseScaleW = 1e39`) becomes ±Inf the moment it enters a `Float32Array` and does
+ * not surface until the output check after front has fully run (an input error shows up as an
+ * internal error after wasted GPU work). The random numbers depend only on the length and the
+ * seed, so the sequence drawn before running the GPU is scanned once.
+ * MUST: the thrown type depends on where the value came from — a `noiseScaleW` the caller passed is
+ * input-caused (`Sbv2InputError`); if it was omitted and the distribution's
+ * `pipelineConfig.defaults` was used, the asset is invalid.
+ * NOTE: a magnitude that is finite in f32 but overflows inside the graph (e.g. 1e30) is a separate
+ * problem and is not bounded here.
+ * NOTE: `export` for tests that call the check directly (the same situation as
+ * {@link assertTokenLimit}).
  */
 export const assertFiniteNoise = (
   noise: Float32Array<ArrayBuffer>,
@@ -549,13 +603,16 @@ export const assertFiniteNoise = (
 };
 
 /**
- * tile 展開の結果を front へ渡す前に検める門。
+ * Check of the tile-expansion result before handing it to front.
  *
- * MUST: **書いた列数**（{@link TiledBert.columns}）を確保サイズと記号次元の両方に突き合わせる。
- * 「展開長 === 音素数」の 1 本だけでは、両辺が同じ `Sbv2ModelInput` から導かれる定理になって恒真
- * （`sum(word2ph) === P` は `buildBaseWord2ph` が既に強制済み）で、走査が壊れても緑のまま通る。
+ * MUST: compare **the number of columns written** ({@link TiledBert.columns}) with both the
+ * allocation size and the symbolic dimension. The single check "expanded length === phoneme count"
+ * would be a theorem derived on both sides from the same `Sbv2ModelInput` and thus a tautology
+ * (`sum(word2ph) === P` is already enforced by `buildBaseWord2ph`), staying green even when the
+ * walk breaks.
  *
- * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ * NOTE: `export` for tests that call the check directly (the same situation as
+ * {@link assertTokenLimit}).
  */
 export const assertTiledBert = (tiled: TiledBert, phonemes: number): void => {
   if (tiled.data.length !== tiled.dim * tiled.columns) {
@@ -570,15 +627,18 @@ export const assertTiledBert = (tiled: TiledBert, phonemes: number): void => {
 };
 
 /**
- * sbv2 が受ける実行ノブ（manifest の quant 宣言）。合成規則（明示 > 宣言 > runtime 既定）・
- * 値域・組合せ・送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合
- * だけを決める。明示の上書き口は持たない（構築オプションに実行ノブの欄が無い）。
+ * The execution knobs sbv2 accepts (the manifest's quant declaration). The merge rule (explicit >
+ * declared > runtime default), the value ranges, the combinations and the classification of the
+ * thrown type are held by `resolveSessionOptions`, shared by every family; this only decides the
+ * acceptance set. There is no explicit override (the construction options have no field for
+ * execution knobs).
  *
- * `linearCompute` だけを受けるのは、配布形（`i8-a8`）が宣言し参照値で確かめてあるのがこの 1 欄だけ
- * だから（他の欄は sbv2 のグラフで効く席も数値も確かめていない組合せ）。
+ * Only `linearCompute` is accepted because it is the one field the distribution (`i8-a8`) declares
+ * and that was confirmed against the reference values (the other fields are combinations for which
+ * neither an effective slot in sbv2's graphs nor the numbers have been confirmed).
  *
- * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: `export` so the equivalence test runs every quant of the mirror through the same table (not
+ * exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const SBV2_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: true,
@@ -591,29 +651,39 @@ export const SBV2_SESSION_POLICY: FamilySessionPolicy = {
   packedStaticQuantize: false,
 };
 
-/** 家族 admission（{@link admitSbv2}）が確定させる材料。 */
+/** Material settled by the family admission ({@link admitSbv2}). */
 type Sbv2Admission = {
   readonly config: Sbv2PipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
-  /** quant 宣言を受理表で通した実効設定（{@link SBV2_SESSION_POLICY}）。 */
+  /**
+   * The effective settings of the quant declaration passed through the acceptance table
+   * ({@link SBV2_SESSION_POLICY}).
+   */
   readonly sessionOptions: SessionOptions;
-  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  /**
+   * The quant declaration plus the features the effective settings need (both the request and the
+   * check look at this).
+   */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
 };
 
 /**
- * この manifest とこのグラフを sbv2 として実行できるかを見る（`hub/components.ts` の
- * 家族 admission 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
+ * Checks whether this manifest and these graphs can run as sbv2 (the family admission hook of
+ * `hub/components.ts` — on the fetching surface it is called **before a single byte of the weight
+ * parts is fetched**).
  *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
- * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
- * MUST: manifest の契約違反は **GPU を取りに行く前**に落とす。順序がずれると、GPU の無い
- * 環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+ * MUST: gather the family's checks into this one function. Scattered into later steps, on the
+ * fetching surface they would fail only **after** downloading GB-class weights (the implementation
+ * would be narrower than the wording of ADR 0070 decision 5).
+ * MUST: fail on manifest contract violations **before going to get the GPU**. If the order slips,
+ * in an environment without a GPU it turns into a different exception and "what was wrong" does
+ * not reach the reader.
  *
- * NOTE: 表（`style_vectors` / `speaker_embeddings`）とグラフ幅の突合はこの席へ置けない —
- * admission の時点では資産のバイト列をまだ取っていない（取ってからでは重み prefetch より前と
- * いう位置が保てない）ので {@link buildSbv2State} に残る。
+ * NOTE: the comparison of the tables (`style_vectors` / `speaker_embeddings`) with the graph widths
+ * cannot be placed in this hook — at admission time the asset bytes have not been fetched yet
+ * (fetching them first would lose the position before the weight prefetch), so it stays in
+ * {@link buildSbv2State}.
  */
 const admitSbv2 = (
   manifest: Manifest,
@@ -636,7 +706,8 @@ const admitSbv2 = (
     );
   }
   if (major !== SBV2_PIPELINE_MAJOR) {
-    // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門（ADR 0038 §6）。
+    // The only check that stops the silent degradation "old implementation × new repository" (ADR
+    // 0038 §6).
     throw new Error(
       `Sbv2Pipeline: pipeline '${name}/${major}' の major に未対応` +
         `（この実装が読めるのは ${SBV2_PIPELINE_NAME}/${SBV2_PIPELINE_MAJOR}）`,
@@ -652,7 +723,8 @@ const admitSbv2 = (
     );
   }
   const quant = entry.quants[quantName];
-  // 未対応の宣言は部品を開く前（= 重みの part を取る前）に落とす（全家族共通の 1 本）。
+  // Unsupported declarations fail before opening the components (= before fetching the weight
+  // parts) (the one function shared by every family).
   const sessionOptions = resolveSessionOptions(
     SBV2_SESSION_POLICY,
     quant.session,
@@ -661,13 +733,16 @@ const admitSbv2 = (
   );
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
-  // 部品が 3 本とも開けることをこの席で見る（供給口は後段と同じ 1 本 — 開いていない役割は
-  // fail loudly）。グラフ幅の突合は表のバイト列が要るので {@link buildSbv2State} に残る。
+  // Check in this hook that all 3 components can be opened (the supplier is the same one as later —
+  // a role that is not open fails loudly). The comparison of graph widths needs the table bytes,
+  // so it stays in {@link buildSbv2State}.
   for (const key of COMPONENT_KEYS) open(key);
 
-  // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
-  // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
-  // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+  // MUST: fail here on missing capabilities of a shared GPU (feature / device limit) — unlike the
+  // case where the pipeline acquires its own, there is no reason to wait for `acquireGpu`, and
+  // this is the only family check that knows before downloading the weights (the mapping between
+  // request and check is the one in `session/gpu-features.ts`, and the later check calls the same
+  // function).
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(gpuFeatures, options.gpu, `Sbv2Pipeline: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
@@ -681,12 +756,13 @@ const admitSbv2 = (
 };
 
 /**
- * admission を通った材料 + 資産から実行状態を組む。
+ * Builds the run state from the material that passed admission + the assets.
  *
- * MUST: **資産の解析・表の突合**は **GPU を取りに行く前**に落とす。順序がずれると、GPU の
- * 無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。GPU 取得後に
- * 許される検査は GPU の能力（shader-f16）だけ。
- * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
+ * MUST: fail on **parsing the assets and comparing the tables** **before going to get the GPU**. If
+ * the order slips, in an environment without a GPU it turns into a different exception and "what
+ * was wrong" does not reach the reader. The only check allowed after acquiring the GPU is the GPU's
+ * capability (shader-f16).
+ * MUST: create no Session at all (the VRAM MUST — the module doc).
  */
 const buildSbv2State = async (
   admitted: Sbv2Admission,
@@ -695,7 +771,8 @@ const buildSbv2State = async (
   options: Sbv2PipelineOptions = {},
 ): Promise<Sbv2State> => {
   const { config, quantName, quant, sessionOptions, gpuFeatures } = admitted;
-  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  // The supplier is **the same one** admission looked at (`open` only looks up the opened
+  // component).
   const front = open(FRONT);
   const voice = open(VOICE);
   const textEncoder = open(TEXT_ENCODER);
@@ -707,7 +784,8 @@ const buildSbv2State = async (
   assertTableFits(speakers, config.speakers, SPEAKER_EMBEDDINGS, featureWidth(front, "g"));
   assertFrontOutputs(front);
   assertBertWidth(textEncoder, front, rules.bertHiddenFromEnd);
-  // front と voice は同じ `g` を受ける。幅が割れていたら片方だけ別の話者表を要求している。
+  // front and voice receive the same `g`. If the widths differ, one of them asks for a different
+  // speaker table.
   const voiceGin = featureWidth(voice, "g");
   if (voiceGin !== speakers.cols) {
     throw new Error(
@@ -715,16 +793,19 @@ const buildSbv2State = async (
         " と違う（front / voice が別の話者埋め込みを要求している）",
     );
   }
-  // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
-  // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
-  // {@link admitSbv2} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
+  // MUST: declared features can be requested only at device creation (ADR 0028). With a shared GPU
+  // they cannot be requested, so fail naming the missing capability (a shared GPU was already
+  // checked by {@link admitSbv2} with the same function, but for a device acquired here this is
+  // the only check).
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `Sbv2Pipeline: quant '${quantName}'`);
-    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
-    // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
-    // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は {@link admitSbv2} が見ている。
+    // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
+    // (`fromPretrained` checks with the adapter's values), and without this a shortfall of the
+    // declaration would be delayed until Session construction, and when the declaration is stricter
+    // than the real demand the comparison would never happen at all. A shared GPU is checked by
+    // {@link admitSbv2}.
     if (ownsGpu) {
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
@@ -733,7 +814,7 @@ const buildSbv2State = async (
       );
     }
   } catch (error) {
-    // 内部で取った GPU は、ここで投げると誰も解放できなくなるので返してから落とす。
+    // A GPU acquired internally can be released by no one if we throw here, so give it back first.
     if (ownsGpu) gpu.destroy();
     throw error;
   }
@@ -748,7 +829,7 @@ const buildSbv2State = async (
     textEncoder,
     front,
     voice,
-    // 低精度ノブは front / voice の Session にだけ効かせる（モジュール doc の MUST）。
+    // The low-precision knobs apply only to the front / voice Sessions (the module doc's MUST).
     sessionOptions,
     ...(options.onRunDiagnostics === undefined
       ? {}
@@ -757,10 +838,10 @@ const buildSbv2State = async (
 };
 
 /**
- * manifest + 資産から実行状態を組む（{@link Sbv2Pipeline.fromAssets} の中身 = 家族 admission
- * → 状態構築の 1 続き）。取得済みバイト列しか無い面（`fromAssets` / dump 台本）はここを入口に
- * する — 取得面は admission だけを {@link loadContainerComponents} の席へ前倒しするので、
- * この 2 段を別々に呼ぶ。
+ * Builds the run state from the manifest + assets (the body of {@link Sbv2Pipeline.fromAssets} =
+ * the one sequence family admission → state construction). Surfaces that have only fetched bytes
+ * (`fromAssets` / the dump script) enter here — the fetching surface moves only admission forward
+ * into the hook of {@link loadContainerComponents}, so it calls these 2 steps separately.
  */
 export const openSbv2State = async (
   input: Sbv2Assets,
@@ -769,17 +850,19 @@ export const openSbv2State = async (
 ): Promise<Sbv2State> =>
   await buildSbv2State(admitSbv2(input.manifest, open, options), input.assets, open, options);
 
-/** 内部で取得した GPU だけを破棄する（渡された GpuContext は呼び出し側の所有物）。 */
+/** Destroys only an internally acquired GPU (a passed GpuContext belongs to the caller). */
 export const closeSbv2State = (state: Sbv2State): void => {
   if (state.ownsGpu) state.gpu.destroy();
 };
 
 /**
- * 発話 1 本を波形にする（中間値つき）。{@link Sbv2Pipeline.generate} はこれを呼んで
- * 音だけを返す。
+ * Turns one utterance into a waveform (with intermediate values). {@link Sbv2Pipeline.generate}
+ * calls this and returns only the audio.
  *
- * MUST: 乱数の消費順は `z_noise`（front の前）→ `zp_noise`（front の後）で固定。順を入れ替えると
- * 同じ seed から別の波形が出て、dump した乱数列と torch 参照の対応も崩れる（`host/random.ts`）。
+ * MUST: the order in which random numbers are consumed is fixed: `z_noise` (before front) →
+ * `zp_noise` (after front). Swapping the order makes the same seed give a different waveform and
+ * also breaks the correspondence between the dumped random sequence and the torch reference
+ * (`host/random.ts`).
  */
 export const synthesizeSbv2 = async (
   state: Sbv2State,
@@ -792,7 +875,8 @@ export const synthesizeSbv2 = async (
   const defaults = state.config.defaults;
   const speaker = options.speaker ?? defaults.speaker;
   const style = options.style ?? defaults.style;
-  // `styleWeight` の受理集合の所有者は表引き側（`style.ts`）— 入口は条件を写さずそれを呼ぶ。
+  // The owner of the acceptance set of `styleWeight` is the table-lookup side (`style.ts`) — the
+  // entry calls it without copying the condition.
   const styleWeight = options.styleWeight ?? defaults.styleWeight;
   assertFiniteStyleWeight(styleWeight);
   const knobs: Sbv2Knobs = {
@@ -809,33 +893,36 @@ export const synthesizeSbv2 = async (
   const styleRow = resolveRow(state.config.styles, style, "スタイル");
   const speakerRow = resolveRow(state.config.speakers, speaker, "話者");
 
-  // --- ① テキスト層（GPU 不要・決定的）-------------------------------------
-  // 発話の自己整合（moras と words の音素一致・sum(word2ph) === P）はここで見る。
+  // --- (1) text layer (no GPU, deterministic) ------------------------------
+  // The self-consistency of the utterance (phoneme match of moras and words, sum(word2ph) === P) is
+  // checked here.
   const input = buildSbv2ModelInput(utterance, state.tokenizer, state.rules);
   const phonemes = input.ids.phoneIds.length;
   const tokens = input.inputIds.length;
-  // 表の確保も Session も張る前に落とす（{@link assertTokenLimit} の MUST）。上限は T と P で
-  // 同じ 1 つだが、どちらが大きいかは発話依存（{@link assertPhonemeLimit} の MUST）なので
-  // **両方**見る。
+  // Fail before allocating the tables or creating any Session (the MUST of
+  // {@link assertTokenLimit}). The limit is the same single value for T and P, but which is larger
+  // depends on the utterance (the MUST of {@link assertPhonemeLimit}), so **both** are checked.
   assertTokenLimit(tokens, state.config.maxTokens);
   assertPhonemeLimit(phonemes, state.config.maxTokens);
 
-  // sdp の乱数は長さ（音素数）と seed だけで決まるので、GPU を回す前に引いて検める
-  // （{@link assertFiniteNoise} の MUST）。引く順は後段の z_p のノイズより前のまま（同じ seed で
-  // 同じ列）。
+  // sdp's random numbers depend only on the length (phoneme count) and the seed, so they are drawn
+  // and checked before running the GPU (the MUST of {@link assertFiniteNoise}). The draw order
+  // stays before the z_p noise of the later step (the same sequence for the same seed).
   const random = new Randn(seed);
   const zNoise = random.normals(2 * phonemes, knobs.noiseScaleW);
   assertFiniteNoise(zNoise, knobs.noiseScaleW, options.noiseScaleW !== undefined);
 
-  // --- ② text_encoder（DeBERTa・配布形は使う 1 本だけを出す）---------------
-  // quant の実行形ノブは渡さない（モジュール doc「低精度ノブが効くのは front / voice だけ」）。
+  // --- (2) text_encoder (DeBERTa; the distribution exposes only the one output used) ---
+  // The quant's execution knobs are not passed (module doc "the low-precision knobs apply only to
+  // front / voice").
   const hidden = await withSession(
     state.gpu,
     state.textEncoder,
     {},
     observer(state, "text_encoder"),
     async (run) => {
-      // 相対位置の添字表はグラフ入力（焼き込むと Tmax=512 で 2MiB — ADR 0045 波 3）。
+      // The relative-position index tables are graph inputs (baked in they would be 2MiB at
+      // Tmax=512 — ADR 0045 wave 3).
       const relPos = buildRelPosTables(
         tokens,
         state.rules.bertRelPos.positionBuckets,
@@ -857,11 +944,11 @@ export const synthesizeSbv2 = async (
     },
   );
 
-  // --- ③ BERT 特徴を音素レベルへ tile 展開 ---------------------------------
+  // --- (3) tile-expand the BERT features to phoneme level --------------------
   const tiled = tileBertToPhoneLevel(hidden.data, tokens, input.word2ph);
   assertTiledBert(tiled, phonemes);
 
-  // --- ④ style_vec / g を表から引く ----------------------------------------
+  // --- (4) look up style_vec / g from the tables ----------------------------
   const styleVec = styleVector(
     state.styles.data,
     state.styles.rows,
@@ -876,7 +963,7 @@ export const synthesizeSbv2 = async (
     speakerRow,
   );
 
-  // --- ⑤ front（enc_p + dp + sdp reverse・4 出力）--------------------------
+  // --- (5) front (enc_p + dp + sdp reverse, 4 outputs) ----------------------
   const xMask = ones(phonemes);
   const predicted = await withSession(
     state.gpu,
@@ -905,8 +992,9 @@ export const synthesizeSbv2 = async (
     },
   );
 
-  // --- ⑥ ホストグルー（継続長 → フレーム展開 → z_p → 相対位置表）----------
-  // 総フレーム数の上限は `durationsToFrames` が展開列を確保する前に見る（`host/duration.ts`）。
+  // --- (6) host glue (durations → frame expansion → z_p → relative-position tables) ---
+  // The upper limit of the total frame count is checked by `durationsToFrames` before it allocates
+  // the expansion sequence (`host/duration.ts`).
   const plan = durationsToFrames(
     predicted.logwSdp,
     predicted.logwDp,
@@ -927,7 +1015,7 @@ export const synthesizeSbv2 = async (
   );
   const tables = buildRelattnTables(plan.totalFrames);
 
-  // --- ⑦ voice（flow + dec 融合）-------------------------------------------
+  // --- (7) voice (flow + dec fused) -------------------------------------------
   const audio = await withSession(
     state.gpu,
     state.voice,
@@ -949,15 +1037,15 @@ export const synthesizeSbv2 = async (
   if (audio.length !== expectedSamples) {
     throw new Error(`波形長 ${audio.length} が hopLength×Ty(${expectedSamples}) と違う`);
   }
-  // MUST: 非有限値を黙って返さない。WAV 化は NaN を 0 に丸めるので、沈黙誤値がそのまま
-  // 「一部が無音の音声」として出てしまう。
+  // MUST: do not silently return non-finite values. WAV encoding rounds NaN to 0, so a silent wrong
+  // value would come out as is as "audio that is partly silent".
   for (const sample of audio) {
     if (!Number.isFinite(sample)) throw new Error("波形に非有限値が含まれる");
   }
 
   return {
-    // MUST: サンプリング周波数は `symbols.json` が正本（pipelineConfig には持たせない —
-    // 導出元の二重保持を作らない）。
+    // MUST: the canonical sampling rate is `symbols.json` (not held in pipelineConfig — no
+    // duplicate holding of the derivation source).
     sampleRate: state.rules.samplingRate,
     audio,
     trace: {
@@ -979,19 +1067,22 @@ export const synthesizeSbv2 = async (
 };
 
 /**
- * SBV2 のテキスト → 音声パイプライン。
+ * SBV2's text → speech pipeline.
  *
- * 構築は {@link Sbv2Pipeline.fromPretrained}（HF から取得）か {@link Sbv2Pipeline.fromAssets}
- * （取得済みバイト列）だけを入口にする — コンストラクタを private にしてあるのは、manifest
- * 検査と資産の突合を迂回した半端な状態を作れないようにするため（ADR 0008）。
+ * Construction enters only through {@link Sbv2Pipeline.fromPretrained} (fetch from HF) or
+ * {@link Sbv2Pipeline.fromAssets} (fetched bytes) — the constructor is private so that a half-built
+ * state that bypasses the manifest check and the asset comparison cannot be made (ADR 0008).
  */
 export class Sbv2Pipeline {
   readonly #state: Sbv2State;
-  /** generate と dispose の直列化鎖（モジュール doc の「1 本ずつ」を公開 API 側で守る）。 */
+  /**
+   * Serialization chain of generate and dispose (keeps the module doc's "one at a time" on the
+   * public API side).
+   */
   readonly #chain = createOperationChain();
   /**
-   * dispose の 1 本。**undefined でないことが「dispose 済み」**（別に真偽値を持つと、独立に
-   * 更新される派生状態になる）。
+   * The one dispose. **Not being undefined means "already disposed"** (holding a separate boolean
+   * would make it a derived state updated independently).
    */
   #disposal: Promise<void> | undefined;
 
@@ -1000,17 +1091,18 @@ export class Sbv2Pipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
-   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
-   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
-   * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
-   * {@link FromPretrainedComponentOptions.components}（`front` / `voice` / `text_encoder`）。
-   * 文字列の `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は
-   * 無い — `src/hub/repo-ref.ts` の MUST）。
+   * Fetches from a distribution and builds (`loadManifest` → `resolveSelection` → fetch **only each
+   * component's descriptor (part 0)** for admission → warm up the weight parts → `fetchAssets` for
+   * the remaining assets → construction). Blocks are read in part order at the very moment the
+   * Session is built (ADR 0109 — `src/hub/components.ts`). To replace a component with the same
+   * role from another repository, use {@link FromPretrainedComponentOptions.components} (`front` /
+   * `voice` / `text_encoder`). A string `ref` reads as `{ repo }` (= follows `main`). **`ref` is
+   * required** (a source has no default — the MUST of `src/hub/repo-ref.ts`).
    *
-   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
-   * 通らない（{@link Sbv2FromPretrainedOptions} の HTTP 専用ノブは効かない）。
+   * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
+   * `@karume/hub/deno` / `nodeDirectory` of `@karume/hub/node`). It goes through neither the
+   * spelling check of the HF `owner/name`, nor the network, nor CacheStorage (the HTTP-only knobs
+   * of {@link Sbv2FromPretrainedOptions} have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
@@ -1035,7 +1127,8 @@ export class Sbv2Pipeline {
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
-    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+    // The family's checks run in the admission hook (before fetching the weight parts —
+    // `hub/components.ts`).
     const { admitted, assets, open } = await loadContainerComponents(
       "Sbv2Pipeline.fromPretrained",
       loaded,
@@ -1043,8 +1136,9 @@ export class Sbv2Pipeline {
       COMPONENT_KEYS,
       async (open) => {
         const admitted = admitSbv2(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
-        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+        // The `requiredLimits` the distribution declares are checked here **before fetching the
+        // weight parts** (ADR 0089 decision 5 — the limits of a shared GPU, or the adapter's
+        // measured values on the path that acquires its own).
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
@@ -1062,13 +1156,14 @@ export class Sbv2Pipeline {
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openContainer` を全てここで
-   * 済ませ、**Session は 1 本も張らない**（{@link openSbv2State}）。
+   * Builds from a fetched manifest + assets. The contract check, the interpretation of the assets
+   * and `openContainer` are all done here, and **no Session is created** ({@link openSbv2State}).
    *
-   * 部品のキーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`voice`）と、分割形の
-   * part 列（`voice[0]` / `voice[1]` / … — part 0 から添字順）。分割形はバイト列を連結せず
-   * part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly（受け口の実装は
-   * `src/hub/components.ts` の 1 本）。
+   * Component keys **accept both forms** — the bytes of the single form `krm` as one entry
+   * (`voice`), and the part sequence of the split form (`voice[0]` / `voice[1]` / … — in index
+   * order from part 0). The split form is opened as the part sequence without concatenating the
+   * bytes. Missing indices and mixing with a single-form key fail loudly (the receiving
+   * implementation is the one in `src/hub/components.ts`).
    */
   static async fromAssets(
     input: Sbv2Assets,
@@ -1078,19 +1173,22 @@ export class Sbv2Pipeline {
   }
 
   /**
-   * 発話 1 本から音声を生成する。テキストの解析（読み・アクセント）は**呼び手の責務**で、
-   * ここが受けるのは解析済みの {@link Sbv2Utterance} だけ（モジュール doc の MUST）。
+   * Generates speech from one utterance. Text analysis (readings, accents) is **the caller's
+   * responsibility**, and this accepts only an analysed {@link Sbv2Utterance} (the module doc's
+   * MUST).
    *
-   * 同じ seed・同じノブなら同じ波形が出る（乱数もホストグルーも決定的 — `host/random.ts`）。
+   * The same seed and the same knobs give the same waveform (the random numbers and the host glue
+   * are deterministic — `host/random.ts`).
    *
-   * 並行に呼ばれた場合は**待たされて順に**走る（グラフの同時常駐を作らない — モジュール doc）。
+   * When called concurrently, calls **wait and run in order** (no simultaneous residency of graphs
+   * — the module doc).
    */
   async generate(
     utterance: Sbv2Utterance,
     options: Sbv2GenerateOptions = {},
   ): Promise<GeneratedAudio> {
-    // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた生成まで
-    // 巻き添えで落ちる）。
+    // The disposed check is made at call time (checked inside the chain, it would also take down
+    // generations accepted before the dispose).
     if (this.#disposal !== undefined) {
       throw new Error("Sbv2Pipeline: dispose 済みでは生成できない");
     }
@@ -1101,19 +1199,20 @@ export class Sbv2Pipeline {
   }
 
   /**
-   * 解放する。**内部で取得した GPU だけ**破棄する（`options.gpu` で渡された GpuContext は
-   * 呼び出し側の所有物なので触らない）。
+   * Releases. Destroys **only an internally acquired GPU** (a GpuContext passed via `options.gpu`
+   * belongs to the caller and is not touched).
    *
-   * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
-   * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
-   * 呼び出し側が「破棄済み」と見なして次へ進む）。
+   * MUST: wait for in-flight generations to complete before destroying (flush-before-destroy) —
+   * putting the destruction on the chain too fixes the order of waiting and destroying in one
+   * place. The second and later calls return the same completion (returning earlier would let the
+   * caller treat it as "already destroyed" and move on).
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(() => closeSbv2State(this.#state));
     return this.#disposal;
   }
 
-  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  /** `await using` support (Explicit Resource Management) — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }

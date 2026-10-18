@@ -1,29 +1,34 @@
 /**
- * `Quant` が宣言する **GPU 前提**（`gpuFeatures` = device 生成時にしか要求できない GPU
- * feature — ADR 0038 §3 / `requiredLimits` = 満たすべき device limit の最小値 — ADR 0038 §7）
- * → `acquireGpu` の要求と、突き合わせ相手（取得済み `GpuContext` またはアダプタ実測値）に
- * 対する検査の写像（**パイプライン非依存の共通処理** — feature 面は 8 家族全部の admission と
- * 構築（`fromAssets` / `fromPretrained` の両面）が、limits 面は 8 家族の `fromPretrained` が
- * 同じ形で使う）。
+ * Maps the **GPU prerequisites** a `Quant` declares (`gpuFeatures` = GPU features that can only be
+ * requested at device creation — ADR 0038 §3 / `requiredLimits` = minimum values of device limits
+ * that must be met — ADR 0038 §7) → the request to `acquireGpu`, and the check against the
+ * counterpart (an acquired `GpuContext` or the adapter's measured values) (**pipeline-independent
+ * shared processing** — the feature side is used the same way by the admission and construction of
+ * every family (both `fromAssets` and `fromPretrained`), the limits side by every family's
+ * `fromPretrained`).
  *
- * MUST: barrel には出さない（同居する `options.ts` と同じ理由 — 配布形の宣言を runtime の
- * ノブへ翻訳する内部機構で、利用者が触る面ではない）。`session` の写像と同居させてあるのは、
- * どちらも**同じ `Quant` の欄**を runtime のノブへ翻訳する処理だから。
+ * MUST: not exported from the barrel (for the same reason as the co-located `options.ts` — it is an
+ * internal mechanism that translates the distribution's declarations into runtime knobs, not a
+ * surface the user touches). It sits next to the `session` mapping because both translate **fields
+ * of the same `Quant`** into runtime knobs.
  *
- * MUST: 表のキー集合は `Required<GpuFeaturesSpec>` の**網羅** — `GpuFeaturesSpec` に feature が
- * 増えたらこの宣言が型検査で落ちる。全家族がこの表の 1 本を通る — 家族ごとに
- * `quant.gpuFeatures?.<欄> === true` を 1 行ずつ独立に読む形だと、欄が増えたとき**どの家族も
- * 型検査を通ったまま**その要求を黙って落とす（= 配布形が要求した能力を持たない device で実行が
- * 進む沈黙劣化）。
+ * MUST: the key set of the table **covers** `Required<GpuFeaturesSpec>` — when a feature is added to
+ * `GpuFeaturesSpec`, this declaration fails type checking. Every family goes through this one table
+ * — if each family read `quant.gpuFeatures?.<field> === true` line by line on its own, then when a
+ * field is added **every family would still pass type checking** and silently drop that request
+ * (= a silent degradation where execution proceeds on a device lacking a capability the
+ * distribution required).
  *
- * MUST: 「要求（`acquireGpu` へ何を渡すか）」と「検査（共有 GPU で有効になっているか）」を
- * 同じ 1 エントリに置く。別の表に分けると、片方だけ追随した形（要求はするが検査しない）が
- * 型検査を通ってしまう。
+ * MUST: keep "the request (what to pass to `acquireGpu`)" and "the check (is it enabled on the
+ * shared GPU)" in the same single entry. Splitting them into separate tables lets a shape where only
+ * one side follows (requests but does not check) pass type checking.
  *
- * NOTE: `requiredLimits` にこの網羅表の形は流用できない — feature が「全欄を知って要求を組む」
- * 全射なのに対し、limits は**部分写像**（配布形が書いた limit だけを見て、書かれていない
- * limit には何も主張しない — 欄なし = WebGPU 保証既定で動く、が ADR 0089 決定 3 の意味論）。
- * 語彙のずれ自体は `tests/limit_vocabulary_test.ts` が hub / runtime の両側で縛る。
+ * NOTE: this exhaustive-table shape cannot be reused for `requiredLimits` — features are a total
+ * mapping that "knows every field to build the request", whereas limits are a **partial mapping**
+ * (it looks only at the limits the distribution wrote and claims nothing about unwritten limits —
+ * no field = runs on the WebGPU guaranteed defaults, the semantics of ADR 0089 decision 3).
+ * Vocabulary drift itself is pinned on both the hub and the runtime side by
+ * `tests/limit_vocabulary_test.ts`.
  */
 
 import type { GpuFeaturesSpec, RequiredLimitsSpec } from "@karume/hub";
@@ -36,22 +41,23 @@ import {
 } from "@karume/runtime";
 
 type GpuFeatureEntry = {
-  /** 配布形がこの feature を要求しているか。 */
+  /** Whether the distribution requests this feature. */
   readonly wanted: (spec: GpuFeaturesSpec) => boolean;
-  /** 要求するときに `acquireGpu` へ足す欄。 */
+  /** The field added to `acquireGpu` when requesting it. */
   readonly acquire: AcquireGpuOptions;
-  /** 取得済みの GpuContext で実際に有効になっているか。 */
+  /** Whether it is actually enabled on the acquired GpuContext. */
   readonly enabled: (gpu: GpuContext) => boolean;
-  /** 診断に載せる feature の綴り（WebGPU 側の名前）。 */
+  /** The feature's spelling in diagnostics (the WebGPU-side name). */
   readonly label: string;
-  /** 診断に載せる取り直し方。 */
+  /** How to re-acquire, shown in diagnostics. */
   readonly reacquire: string;
   /**
-   * 実効 `SessionOptions` がこの feature を device に要求するか（runtime の Session 構築が
-   * 同じ条件で落とす — `@karume/runtime` の `buildSessionState` の f16 門）。
+   * Whether the effective `SessionOptions` require this feature on the device (the runtime's
+   * Session construction fails under the same condition — the f16 check in `buildSessionState` of
+   * `@karume/runtime`).
    */
   readonly requiredBy: (options: SessionOptions) => boolean;
-  /** 要求するときに宣言へ足す欄（{@link sessionGpuFeatures}）。 */
+  /** The field added to the declaration when it is required ({@link sessionGpuFeatures}). */
   readonly declare: GpuFeaturesSpec;
 };
 
@@ -68,17 +74,20 @@ const FEATURES: { readonly [K in keyof Required<GpuFeaturesSpec>]: GpuFeatureEnt
 };
 
 /**
- * quant の宣言した feature に、**実効** `SessionOptions`（明示指定を合成した後 —
- * `./options.ts` の `resolveSessionOptions`）が要る feature を足す。
+ * Adds to the features the quant declared the features that the **effective** `SessionOptions`
+ * (after explicit settings are composed in — `resolveSessionOptions` in `./options.ts`) require.
  *
- * MUST: 全家族が、要求（`acquireGpu`）と検査（共有 GPU・取得後）をこの返り値で行う — 明示の
- * 上書き口を持たない家族も含む。quant の宣言（`gpuFeatures`）だけを見ると、宣言が要求しない
- * f16 compute（明示の `linearCompute: "f16"`、または `session` には書いたが `gpuFeatures` を
- * 書き落とした配布形）のとき、自前で取る device が shader-f16 を持たず、重みを全部上げた後の
- * Session 構築で落ちる（共有 GPU なら admission 席で落とせたはずの能力不足が、取得の後まで
- * 遅れる）。「要求する feature = 宣言 ∪ 実効設定が要る feature」を家族ごとに書き分けない。
- * NOTE: 何も足さないときは `spec` をそのまま返す（宣言だけを見る形と同じ値になる — 配布形
- * ミラーの全 quant がこの形であることは `packages/e2e/tests/e2e_session_options_mirror_test.ts` が見る）。
+ * MUST: every family does both the request (`acquireGpu`) and the check (shared GPU, after
+ * acquisition) with this return value — including families without an explicit override. Looking
+ * only at the quant's declaration (`gpuFeatures`), f16 compute that the declaration does not request
+ * (an explicit `linearCompute: "f16"`, or a distribution that wrote it in `session` but left out
+ * `gpuFeatures`) makes a self-acquired device lack shader-f16 and fail at Session construction after
+ * all the weights were uploaded (with a shared GPU, a capability shortfall that the admission step
+ * could have rejected is delayed until after the fetch). "Requested features = declared ∪ the
+ * features the effective settings require" is not written separately per family.
+ * NOTE: when nothing is added it returns `spec` as is (the same value as looking at the declaration
+ * only — that every quant of the distribution mirror has this shape is checked by
+ * `packages/e2e/tests/e2e_session_options_mirror_test.ts`).
  */
 export const sessionGpuFeatures = (
   spec: GpuFeaturesSpec | undefined,
@@ -92,7 +101,7 @@ export const sessionGpuFeatures = (
   return merged;
 };
 
-/** 宣言された feature だけを要求する `acquireGpu` のオプションを組む。 */
+/** Builds `acquireGpu` options that request only the declared features. */
 export const toAcquireGpuOptions = (spec: GpuFeaturesSpec | undefined): AcquireGpuOptions => {
   if (spec === undefined) return {};
   let options: AcquireGpuOptions = {};
@@ -103,13 +112,14 @@ export const toAcquireGpuOptions = (spec: GpuFeaturesSpec | undefined): AcquireG
 };
 
 /**
- * 宣言された feature が取得済みの GpuContext で有効になっていることを確かめる。
+ * Confirms that the declared features are enabled on the acquired GpuContext.
  *
- * MUST: 共有 GPU（`options.gpu`）を渡された経路では feature を要求できない（device 作成時に
- * しか要求できない — ADR 0028）ので、能力が足りないことを**ここで**名指しして落とす。通すと
- * Session 構築まで進んでから落ちるか、黙って別の経路へ縮退する。
+ * MUST: on the path that receives a shared GPU (`options.gpu`), features cannot be requested (they
+ * can only be requested at device creation — ADR 0028), so the missing capability is named and
+ * rejected **here**. Letting it through either fails only after proceeding to Session construction
+ * or silently falls back to another path.
  *
- * @param where 診断の主語（`"AnimaPipeline: quant 'f16+dit8-a8-attn8-s16'"`）。
+ * @param where Subject of the diagnostic (`"AnimaPipeline: quant 'f16+dit8-a8-attn8-s16'"`).
  */
 export const assertGpuFeaturesGranted = (
   spec: GpuFeaturesSpec | undefined,
@@ -128,14 +138,17 @@ export const assertGpuFeaturesGranted = (
 };
 
 /**
- * 配布形が宣言した `requiredLimits` を、GPU 側の limits と突き合わせる（ADR 0089 決定 5）。
+ * Matches the `requiredLimits` the distribution declared against the GPU-side limits (ADR 0089
+ * decision 5).
  *
- * 見るのは **spec に書かれた limit だけ**（部分写像 — モジュール doc の NOTE）。不足は
- * **全件を 1 回で**列挙して落とす（1 本ずつ潰させると、環境が足りないことの全体像が出ない）。
+ * Only **the limits written in the spec** are checked (a partial mapping — the NOTE of the module
+ * doc). Shortfalls are listed **all at once** and rejected (fixing them one at a time would never
+ * show the full picture of what the environment lacks).
  *
- * @param limits 突き合わせ相手。共有 GPU なら `GpuContext.limits`、自前取得の経路なら
- *   `readAdapterLimits()` の実測値 — どちらも `planRequiredLimits` の同じ式なので同じ物差し。
- * @param where 診断の主語（`"AnimaPipeline: quant 'f16'"`）。
+ * @param limits The counterpart. `GpuContext.limits` for a shared GPU, the measured values of
+ *   `readAdapterLimits()` on the self-acquiring path — both come from the same formula of
+ *   `planRequiredLimits`, so they are the same measure.
+ * @param where Subject of the diagnostic (`"AnimaPipeline: quant 'f16'"`).
  */
 export const assertRequiredLimitsSatisfied = (
   spec: RequiredLimitsSpec | undefined,
@@ -143,8 +156,9 @@ export const assertRequiredLimitsSatisfied = (
   where: string,
 ): void => {
   if (spec === undefined) return;
-  // 型注釈で index signature 面へ移す（キーの語彙は hub / runtime で一致していることが
-  // `tests/limit_vocabulary_test.ts` の門で、ここは名前で引くだけ）。
+  // Moved onto an index-signature surface by the type annotation (that the key vocabulary agrees
+  // between hub and runtime is the check of `tests/limit_vocabulary_test.ts`; here it only looks up
+  // by name).
   const declared: Readonly<Record<string, number | undefined>> = spec;
   const granted: Readonly<Record<string, number | undefined>> = limits;
   const shortfalls: string[] = [];
@@ -153,8 +167,8 @@ export const assertRequiredLimitsSatisfied = (
     if (required === undefined) continue;
     const actual = granted[name];
     if (actual === undefined) {
-      // 語彙のずれ（hub が受理した名前を runtime が持たない）。黙って読み飛ばすと
-      // 「宣言された limit が誰にも見られない」= 静かな頭打ちに戻る。
+      // Vocabulary drift (a name hub accepted that the runtime does not have). Skipping it silently
+      // goes back to "a declared limit nobody looks at" = a silent ceiling.
       throw new Error(
         `${where} が要求する limit '${name}' は runtime の limits に無い` +
           `（hub と runtime の語彙のずれ — tests/limit_vocabulary_test.ts）`,
@@ -171,28 +185,32 @@ export const assertRequiredLimitsSatisfied = (
 };
 
 /**
- * `fromPretrained` の admission 席から呼ぶ **DL 前**の limits 検査（ADR 0089 決定 5）。
+ * The limits check **before download**, called from the admission step of `fromPretrained`
+ * (ADR 0089 decision 5).
  *
- * 共有 GPU（`options.gpu`）を渡されていればその `limits`、自前取得の経路ならアダプタを
- * 1 度だけ読んで（{@link readAdapterLimits} — device は作らず、アダプタも持ち回らない）
- * 突き合わせる。GPU の無い環境ではここが `GpuUnavailableError` になり、**重みを 1 バイトも
- * 落とさない**（それが席の存在理由 — 従来は数 GiB を転送した後に落ちていた）。
+ * With a shared GPU (`options.gpu`) it matches that GPU's `limits`; on the self-acquiring path it
+ * reads the adapter once ({@link readAdapterLimits} — creates no device and does not keep the
+ * adapter) and matches against that. In an environment without a GPU this becomes a
+ * `GpuUnavailableError` and **not a single byte of weights is downloaded** (that is why this step
+ * exists — previously it failed after transferring several GiB).
  *
- * MUST: 宣言が無い（`spec === undefined`）配布形でもアダプタは 1 度読む。ここで買うのは
- * **GPU 不在の早期検出だけ**で、limits の比較は spec 無しなら
- * {@link assertRequiredLimitsSatisfied} の入口で no-op になる（「欄なし = 既定スペックで動く」
- * という ADR 0089 決定 3 の意味論は 1 文字も変わらない）。読まない形にすると、宣言の無い
- * 配布形だけが GPU 不在の失敗を**全重みを落とし切った後**に受け取る = この席が消しに来た
- * 失敗の形がそのまま残る（8 家族の `#build` は `options.gpu` が無ければ必ず `acquireGpu` を
- * 踏むので、GPU 無し環境で `fromPretrained` が完走することは無い）。
+ * MUST: read the adapter once even for a distribution without a declaration
+ * (`spec === undefined`). What this buys is **only the early detection of a missing GPU**; without a
+ * spec the limits comparison is a no-op at the entry of {@link assertRequiredLimitsSatisfied} (the
+ * semantics of ADR 0089 decision 3, "no field = runs on the default spec", do not change by a single
+ * character). Not reading it would make only distributions without a declaration receive the
+ * missing-GPU failure **after downloading every weight** = the very failure shape this step exists to
+ * remove would remain (every family's `#build` always goes through `acquireGpu` when `options.gpu` is
+ * absent, so `fromPretrained` never completes in an environment without a GPU).
  *
- * NOTE: 追加のコストは `requestAdapter` 1 往復だけ（アダプタは持ち回らないので失効の危険は
- * 増えない — {@link readAdapterLimits}）。共有 GPU を渡された経路ではそもそもアダプタを
- * 読まない。
+ * NOTE: the extra cost is a single `requestAdapter` round trip (the adapter is not kept, so the risk
+ * of it expiring does not grow — {@link readAdapterLimits}). On the path that receives a shared GPU
+ * the adapter is not read at all.
  *
- * NOTE: 共有 GPU の経路は各家族の admission 関数が同じ検査を既に通している（あちらは
- * `fromAssets` 面も守る席）。ここが同じ比較をもう一度するのは、`fromPretrained` の 8 家族が
- * **同じ 1 行**で書けるようにするため — 純粋な数値比較なので、二重に見ても副作用は無い。
+ * NOTE: on the shared-GPU path each family's admission function has already run the same check
+ * (that one also guards the `fromAssets` surface). It is compared once more here so that every
+ * family's `fromPretrained` can write it as **the same one line** — it is a pure numeric comparison,
+ * so checking twice has no side effects.
  */
 export const assertRequiredLimitsBeforeDownload = async (
   spec: RequiredLimitsSpec | undefined,

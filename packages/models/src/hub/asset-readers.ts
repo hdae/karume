@@ -1,29 +1,31 @@
 /**
- * 取得済み資産バイト列の読み口（family 横断で 1 本に寄せたもの）。
+ * Readers for already-fetched asset bytes (consolidated into one across families).
  *
- * `fromAssets` / `fromPretrained` のどちらから来ても、パイプラインが資産のバイト列に触る入口は
- * ここだけになる。family ごとに違うのは**文言のラベル**（family 名と、取得キーが載る manifest の
- * 表）だけなので、それを引数で受けて手続きは 1 本に保つ — 文言は family 側の門として逐語で
- * 縛られている（`packages/models/tests/*_pipeline_test.ts`）ので、ラベルを落とさない。
+ * Whether the call comes from `fromAssets` or `fromPretrained`, this is the only entry through which
+ * a pipeline touches asset bytes. What differs per family is only **the label in the message** (the
+ * family name and the manifest table that carries the fetch key), so it is taken as an argument and
+ * the procedure stays single — the messages are pinned verbatim as the family's checks
+ * (`packages/models/tests/*_pipeline_test.ts`), so the label must not be dropped.
  *
- * 容器の内側の資産（`rope_base` / PLE — ADR 0109 決定 4）は manifest の表に載らないので、
- * 読み口は {@link readWholeAsset}（`AssetReader` 1 本を全量で読む）が受ける。
+ * Assets inside a container (`rope_base` / PLE — ADR 0109 decision 4) are not in the manifest's
+ * tables, so their reader is {@link readWholeAsset} (reads one `AssetReader` in full).
  */
 
 import type { AssetReader } from "@karume/runtime";
 
 /**
- * 取得キーが載る manifest の表。weights しか持たない family（画像系）と、資産表も併せて持つ
- * family（tokenizer / 表を配るもの）で「どこを直せばいいか」が違うので、文言に出す。
+ * The manifest table that carries the fetch key. A family with weights only (the image families)
+ * and a family that also has an assets table (those that ship a tokenizer / tables) differ in
+ * "where to fix it", so it appears in the message.
  */
 type ManifestTables = "weights" | "weights / assets";
 
 /**
- * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする。
+ * Turns already-fetched bytes into an ArrayBuffer that can be passed to `openContainer`.
  *
- * MUST: `slice` で写さない — 重み 1 本が GB 級になる family があり、写すとホスト RAM のピークが
- * 倍になる。hub は buffer 全体を占める view を返す契約なので、崩れていたら**取得層の不変条件
- * 破れ**として落とす。
+ * MUST: do not copy with `slice` — some families have a single weight in the GB range, and copying
+ * doubles the host RAM peak. hub's contract is to return a view that covers the whole buffer, so if
+ * that breaks it fails as **a broken invariant of the fetch layer**.
  */
 export const readAssetBuffer = (
   family: string,
@@ -49,19 +51,21 @@ export const readAssetBuffer = (
 };
 
 /**
- * **容器の資産**の `[offset, offset + length)` を読んで、**自分の buffer を丸ごと占める**
- * ArrayBuffer にする。
+ * Reads `[offset, offset + length)` of **a container asset** into an ArrayBuffer that **covers its
+ * own buffer entirely**.
  *
- * MUST: buffer 全体を占めていなければ**写す**。区間読みの返りは取得元の器の view でありうるので、
- * `bytes.buffer` をそのまま渡すと block の詰め物や隣の資産まで見せることになる（資産の論理長は
- * 宣言値で、block 長はそれを 4 の倍数へ切り上げた値 — container-v1 §2.2）。写した後なら
- * `new Float32Array(buffer)` のような整列要件のある view もそのまま作れる。RAM の面でも写しが
- * 要る: hub の scan 経路では器は part 全体（既定 256 MiB）なので、数 KB の行の view を握り続けると
- * part 全体が生き残る。buffer 全体を占める返り（part ちょうどの資産）は写さない — 器と共有するが、
- * 握る量は写しと同じで、呼び手は書き換えない。
+ * MUST: **copy** when the bytes do not cover the whole buffer. The result of a range read may be a
+ * view into the source's holder, so passing `bytes.buffer` as is would expose block padding and even
+ * neighbouring assets (an asset's logical length is the declared value; the block length is that
+ * rounded up to a multiple of 4 — container-v1 §2.2). After the copy, views with alignment
+ * requirements such as `new Float32Array(buffer)` can be built directly. RAM needs the copy too: on
+ * hub's scan path the holder is a whole part (256 MiB by default), so holding on to a view of a few
+ * KB of rows keeps the whole part alive. A result that covers the whole buffer (an asset exactly the
+ * size of its part) is not copied — it shares the holder, but holds as much as a copy would, and the
+ * caller does not write to it.
  *
- * NOTE: 範囲外の区間は runtime の `AssetReader.read` が宣言 `length` と突き合わせて落とす —
- * 同じ検査をここへ写さない。
+ * NOTE: an out-of-range interval is rejected by the runtime's `AssetReader.read` against the
+ * declared `length` — the same check is not duplicated here.
  */
 export const readAssetRange = async (
   reader: AssetReader,
@@ -75,20 +79,21 @@ export const readAssetRange = async (
 };
 
 /**
- * **容器の資産** 1 本を論理長ぶん全量読んで ArrayBuffer にする（全量パーサ =
- * `parseSafetensors` / `JSON.parse` へ渡す口）。区間読みで足りる消費側（PLE の行読み）は
- * {@link readAssetRange} を使う。
+ * Reads one **container asset** in full, up to its logical length, into an ArrayBuffer (the entry
+ * for whole-input parsers = `parseSafetensors` / `JSON.parse`). Consumers that need only range
+ * reads (PLE row reads) use {@link readAssetRange}.
  */
 export const readWholeAsset = (reader: AssetReader): Promise<ArrayBuffer> =>
   readAssetRange(reader, 0, reader.length);
 
 /**
- * 資産 JSON を読む。
+ * Reads an asset JSON.
  *
- * MUST: `fatal: true` で decode する。既定の TextDecoder は不正 UTF-8 を U+FFFD へ黙って
- * 置換するので、壊れたバイト列が「内容の違う valid JSON」として通ってしまう（hub の
- * manifest・safetensors ヘッダと同じ流儀で fail loudly）。
- * MUST: decode 段と parse 段を別の文言で落とす。どちらで壊れたかは配布物の直し方が違う。
+ * MUST: decode with `fatal: true`. The default TextDecoder silently replaces invalid UTF-8 with
+ * U+FFFD, so broken bytes would pass as "valid JSON with different content" (fail loudly, in the
+ * same manner as hub's manifest and the safetensors header).
+ * MUST: fail the decode step and the parse step with different messages. Which one broke changes
+ * how the distribution is fixed.
  */
 export const readAssetJson = (
   family: string,

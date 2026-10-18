@@ -1,63 +1,75 @@
 /**
- * `pipelineConfig` のスキーマ検証（ADR 0038 §1 — スキーマは各パイプライン実装が所有・検証）。
+ * Schema validation of `pipelineConfig` (ADR 0038 §1 — each pipeline implementation owns and
+ * validates the schema).
  *
- * hub は `pipelineConfig` を素通しする（禁止キーの一掃と規模上限だけを見る）。したがって
- * **形の正本はこのモジュール**で、手書きの検査を全て parse 時に走らせる。
+ * hub passes `pipelineConfig` through (it only strips forbidden keys and checks the size limits).
+ * So **the canonical shape is this module**, and every hand-written check runs at parse time.
  *
- * MUST: 未知キーは fail loudly（`{ noiseScale: 0.6, noise_scale: 0.6 }` のような綴り違いが
- * 黙って既定へ縮退すると、配布者の意図した既定と実行が食い違ったまま気づけない）。
- * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
+ * MUST: unknown keys fail loudly (if a misspelling such as `{ noiseScale: 0.6, noise_scale: 0.6 }`
+ * silently fell back to the default, the default the distributor intended and the run would
+ * disagree unnoticed).
+ * MUST: maps are read only through `Object.hasOwn` (a cross-cutting invariant).
  *
- * ## MUST: `styles` / `speakers` は「名前 → **表の行番号**」であって ID の別名ではない
+ * ## MUST: `styles` / `speakers` are "name → **table row number**", not aliases of IDs
  *
- * 解決先は配布形の `style_vectors` / `speaker_embeddings`（`style.ts`）で、行番号がずれても
- * shape は合ったままロードも実行も通り、**別のスタイル・別の話者の声が出る**だけで沈黙する。
- * 検出手段が他に無いので、値が `0..rows-1` の**順列**であることを parse 時に見る（表の行数
- * との突合は `Sbv2Pipeline.fromAssets` が実資産に対して行う）。
+ * They resolve to the distribution's `style_vectors` / `speaker_embeddings` (`style.ts`), and when
+ * a row number shifts the shapes still match, loading and running pass, and it stays silent with
+ * only **the voice of a different style / different speaker** coming out. There is no other means
+ * of detection, so the values are checked at parse time to be a **permutation** of `0..rows-1` (the
+ * comparison with the tables' row counts is done by `Sbv2Pipeline.fromAssets` against the real
+ * assets).
  *
- * ## MUST: `maxTokens` / `maxFrames` は配布形が宣言する運用上限
+ * ## MUST: `maxTokens` / `maxFrames` are operating limits declared by the distribution
  *
- * 窓付き相対位置注意の `(T, T)` 表は ADR 0045 でホストへ外出しされ、確保（8·T² bytes 級）が
- * ホストの責務になった。焼いたグラフの記号次元の上限を配布形から受け、`generate` が**表を
- * 確保する前**にこの値で落とす（正本は exporter の `dist.py`）。TS 側に定数を持たない —
- * 別の上限で焼いた配布形が来たときに、ホストだけが古い数を持つ形を作らないため。
+ * The `(T, T)` tables of windowed relative-position attention were moved out to the host by ADR
+ * 0013 (DeBERTa's relative-position tables by ADR 0045), and their allocation (8·T² bytes class)
+ * became the host's responsibility. The upper bound of the baked graph's symbolic dimension is
+ * received from the distribution, and `generate` fails on this value **before allocating the
+ * tables** (canonical: `tools/export-recipes/sbv2/distribution.py`). No constant is held on the TS
+ * side — so that when a distribution baked with a different limit arrives, the host is not the
+ * only one holding the old number.
  *
- * NOTE: 実行時ノブの既定は `symbols.json` にも同じ値が並ぶ（exporter 側が両者の食い違いを
- * 組み立て時に落とす）。パイプラインが読むのは**こちら**だけで、`symbols.json` の `defaults`
- * は見ない — 導出元を二重に持たないため（`text/symbols.ts` の同節は optional）。
+ * NOTE: the defaults of the run-time knobs also appear with the same values in `symbols.json` (the
+ * exporter side rejects a disagreement between the two at assembly time). The pipeline reads **this
+ * one** only and ignores `symbols.json`'s `defaults` — so as not to hold the derivation source
+ * twice (the same section in `text/symbols.ts` is optional).
  *
- * NOTE: 公開配布リポの対応表（{@link SBV2_SOURCES}）もここに置く。manifest から導ける値では
- * なく「どの manifest を取りに行くか」の側なので、配布形が持てない（ADR 0073）。
+ * NOTE: the mapping table of public distribution repositories ({@link SBV2_SOURCES}) also lives
+ * here. It is not a value derivable from the manifest but the side of "which manifest to fetch",
+ * so the distribution cannot hold it (ADR 0073).
  */
 
 import type { HubRepoRef } from "@karume/hub";
 import { assertAllowedKeys, readNumber, readRecord } from "../config/readers.ts";
 
-/** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
+/** The contract name of `pipeline` and the major this implementation accepts (ADR 0038 §1). */
 export const SBV2_PIPELINE_NAME = "sbv2";
 export const SBV2_PIPELINE_MAJOR = 1;
 
 /**
- * SBV2 ファミリの**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は無い**）。
- * 値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ * The **mapping table of public distribution repositories** of the SBV2 family (ADR 0092 — one
+ * table per family, **no default entry**).
+ * The values are **the sources this package version verified** (pinned commit SHAs — ADR 0073).
  *
- * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
- * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。今は 1 本:
+ * A key is the basename of the HF repository name with `karume-` dropped (`"karume-" + key` gives
+ * back the basename of the repository name — this invariant is checked by `tests/sources_test.ts`).
+ * There is one today:
  *
  * - `"sbv2-jvnv"` = `hdae/karume-sbv2-jvnv`
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
- * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
- * 既定は無い）。
+ * Pass it as **an opt-in for following the package version automatically** — to pin reproducibility
+ * yourself, write your own `{ repo, revision }` instead of this table (`fromPretrained` has no
+ * default).
  *
- * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
- * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
- * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
- * 同時に成立する（ADR 0038）。main 追従が要る利用者は
- * `{ ...SBV2_SOURCES["sbv2-jvnv"], revision: "main" }` を明示的に選ぶ。
+ * MUST: pin the revision to a commit SHA — branches and tags can be moved on the distribution
+ * side, so the bytes this published package reads would silently change for reasons on the network
+ * side (an unrecoverable kind of accident). Specifying a SHA removes the revision-resolution
+ * request itself, so an offline start with a complete cache also holds (ADR 0038). A user who
+ * needs to follow main explicitly chooses `{ ...SBV2_SOURCES["sbv2-jvnv"], revision: "main" }`.
  */
-// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+// NOTE: the revision is updated to main's SHA after the upload in §3 of the release runbook
+// (docs/release-runbook.md) (inheriting the maintenance duty of ADR 0073 decision 3 — by hand, plus
+// the runbook check).
 export const SBV2_SOURCES = {
   "sbv2-jvnv": {
     repo: "hdae/karume-sbv2-jvnv",
@@ -76,7 +88,7 @@ const DEFAULTS_KEYS: readonly string[] = [
   "lengthScale",
 ];
 
-/** 配布者の推奨既定（`generate` の未指定欄を埋める）。 */
+/** The distributor's recommended defaults (fill the unspecified fields of `generate`). */
 export type Sbv2Defaults = {
   readonly speaker: string;
   readonly style: string;
@@ -88,18 +100,24 @@ export type Sbv2Defaults = {
 };
 
 export type Sbv2PipelineConfig = {
-  /** スタイル名 → `style_vectors` の行番号（`0..rows-1` の順列）。 */
+  /** Style name → row number of `style_vectors` (a permutation of `0..rows-1`). */
   readonly styles: ReadonlyMap<string, number>;
-  /** 話者名 → `speaker_embeddings` の行番号（`0..rows-1` の順列）。 */
+  /** Speaker name → row number of `speaker_embeddings` (a permutation of `0..rows-1`). */
   readonly speakers: ReadonlyMap<string, number>;
-  /** DeBERTa へ渡せるトークン列の上限（焼いたグラフの記号次元の上限）。 */
+  /**
+   * Upper limit of the token sequence passed to DeBERTa (the upper bound of the baked graph's
+   * symbolic dimension).
+   */
   readonly maxTokens: number;
-  /** flow / voice へ渡せる総フレーム数の上限（同上）。 */
+  /** Upper limit of the total frame count passed to flow / voice (same as above). */
   readonly maxFrames: number;
   readonly defaults: Sbv2Defaults;
 };
 
-/** 確保サイズの比較に使う数なので、整数であるだけでなく**安全整数**であることまで見る。 */
+/**
+ * A number used to compare allocation sizes, so it is checked to be not only an integer but a
+ * **safe integer**.
+ */
 const isPositiveSafeInteger = (value: number): boolean => Number.isSafeInteger(value) && value > 0;
 
 const readString = (raw: Record<string, unknown>, key: string, where: string): string => {
@@ -112,10 +130,12 @@ const readString = (raw: Record<string, unknown>, key: string, where: string): s
 };
 
 /**
- * 「名前 → 行番号」の表を読む。値が `0..件数-1` の順列であることまで見る。
+ * Reads a "name → row number" table. Checks down to the values being a permutation of
+ * `0..count-1`.
  *
- * MUST: 順列検査を落とさない。行番号は表の物理行そのもので、重複や飛びがあっても
- * `style_vec` / `g` の shape は変わらない — 検査を抜けた瞬間から沈黙誤値になる。
+ * MUST: do not drop the permutation check. A row number is the physical row of the table itself,
+ * and duplicates or gaps do not change the shape of `style_vec` / `g` — the moment the check is
+ * skipped it becomes a silent wrong value.
  */
 const parseRowIndex = (raw: unknown, where: string): ReadonlyMap<string, number> => {
   const record = readRecord(raw, where);
@@ -151,8 +171,8 @@ const parseDefaults = (
   assertAllowedKeys(record, DEFAULTS_KEYS, where);
   const speaker = readString(record, "speaker", where);
   const style = readString(record, "style", where);
-  // 既定値も受理集合の内側でなければならない（配布時に外れていたら fromAssets で落ちる —
-  // 「生成を 1 回走らせて初めて分かる」を作らない）。
+  // The defaults too must be inside the acceptance set (if they were out of it at distribution
+  // time, fromAssets fails — do not create "found out only by running one generation").
   if (!speakers.has(speaker)) {
     throw new Error(
       `${where}.speaker: '${speaker}' が speakers に無い（利用可能: ${[...speakers.keys()].join(
@@ -172,8 +192,9 @@ const parseDefaults = (
     sdpRatio: readNumber(record, "sdpRatio", where, Number.isFinite, "有限の数でない"),
     noiseScale: readNumber(record, "noiseScale", where, Number.isFinite, "有限の数でない"),
     noiseScaleW: readNumber(record, "noiseScaleW", where, Number.isFinite, "有限の数でない"),
-    // lengthScale は継続長に直接掛かる。0 以下だと総フレーム数が 0 になり「発話にならない」
-    // 形で下流（durationsToFrames）が落ちる — 原因の遠い失敗にしない。
+    // lengthScale multiplies the durations directly. At 0 or below the total frame count becomes 0
+    // and the downstream (durationsToFrames) fails in the form "not an utterance" — do not make it
+    // a failure far from its cause.
     lengthScale: readNumber(
       record,
       "lengthScale",
@@ -184,7 +205,7 @@ const parseDefaults = (
   };
 };
 
-/** manifest の `pipelineConfig`（hub が素通しした生の値）を検査して読む。 */
+/** Checks and reads the manifest's `pipelineConfig` (the raw value hub passed through). */
 export const parseSbv2PipelineConfig = (
   raw: Readonly<Record<string, unknown>>,
 ): Sbv2PipelineConfig => {

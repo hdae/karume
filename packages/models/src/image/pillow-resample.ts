@@ -1,48 +1,56 @@
 /**
- * Pillow の 8bit の分離型リサンプル — `Image.resize` の 8bit 経路（`libImaging/Resample.c` の
- * `ImagingResampleInner` と `*_8bpc`）の逐語の移植。フィルタ（重み関数と台の半径）とチャネル数を
- * 引数に取る**共通の核**で、Pillow の値をビット単位で再現する経路はここに 1 本だけ置く（Pillow の版を
- * 上げるときの追従を 1 か所にする — ADR 0125）。
+ * Pillow's 8-bit separable resampling — a verbatim port of `Image.resize`'s 8-bit path
+ * (`ImagingResampleInner` and `*_8bpc` in `libImaging/Resample.c`). It is **the shared core** that
+ * takes the filter (weight function and support radius) and the channel count as arguments; the path
+ * that reproduces Pillow's values bit for bit lives here, once (so that following a Pillow version
+ * bump happens in one place — ADR 0125).
  *
- * 載っている経路:
+ * Paths built on it:
  *
- * - `lanczos.ts`（3 チャネル・LANCZOS・窓）: Wan2.2 の I2V の条件画像（公式実装と diffusers の
- *   `Image.resize(..., LANCZOS)` — ADR 0121 決定 11）。
- * - {@link resizeU8PlaneBicubic}（1 バンド・BICUBIC）: BiRefNet の α マットの `u8-pil-bicubic`
- *   （`src/birefnet/matte.ts` — HR の上流の `pred_pil.resize(image.size)`）。
+ * - `lanczos.ts` (3 channels, LANCZOS, window): the condition image of Wan2.2's I2V (the official
+ *   implementation and diffusers' `Image.resize(..., LANCZOS)` — ADR 0121 decision 11).
+ * - {@link resizeU8PlaneBicubic} (1 band, BICUBIC): `u8-pil-bicubic` of BiRefNet's alpha matte
+ *   (`src/birefnet/matte.ts` — HR's upstream `pred_pil.resize(image.size)`).
  *
- * ## `preprocess.ts` の `resizeRgb8` と経路を分けている理由
+ * ## Why this path is separate from `resizeRgb8` in `preprocess.ts`
  *
- * MUST: `resizeRgb8` の経路（f64 の重み・`/ filterScale`・`floor(v + 0.5)`）にカーネルを足すだけでは
- * Pillow と一致しない。Pillow の 8bit 経路は係数を 22 bit の固定小数点の整数へ丸め、積和を整数で
- * 取る。f64 のままだと丸め境界に載った標本が 1〜2 LSB ずれる（LANCZOS で、Wan2.2 の段 9 の調査の
- * Python の写しで 0.002〜0.275%）。一方 `resizeRgb8` は torchvision の
- * antialias 経路に合わせた SigLIP2 / Depth Anything / BiRefNet の前処理で、こちらに寄せると彼らの
- * 出力が動く。よって経路を分ける（公開の `resizeRgb8` / `ResampleFilter` は広げない — ADR 0008）。
+ * MUST: adding a kernel to the path of `resizeRgb8` (f64 weights, `/ filterScale`,
+ * `floor(v + 0.5)`) does not match Pillow. Pillow's 8-bit path rounds the coefficients to 22-bit
+ * fixed-point integers and accumulates in integers. Staying in f64, samples that sit on a rounding
+ * boundary are off by 1–2 LSB (0.002–0.275% with LANCZOS, in the Python copy of the Wan2.2 stage 9
+ * investigation). Meanwhile `resizeRgb8` is the preprocessing of SigLIP2 / Depth Anything / BiRefNet
+ * matched to torchvision's antialias path, and pulling it towards Pillow would move their output.
+ * So the paths are kept separate (the public `resizeRgb8` / `ResampleFilter` are not widened —
+ * ADR 0008).
  *
- * ## 逐語に写している点（Pillow 12.3.0 — 版を記録した fixture が縛る）
+ * ## What is copied verbatim (Pillow 12.3.0 — pinned by fixtures that record the version)
  *
- * - 係数の引数は `(x + xmin − center + 0.5) · (1 / filterscale)`（逆数を掛ける — Pillow の形のまま）
- * - `xmin` / `xmax` は `(int)` の切り捨ての後に `[0, inSize]` へ収める
- * - 総和 `ww` が 0 でないときだけ正規化する
- * - 係数は `(int)(±0.5 + w·2^22)`（符号で丸めの向きを変える）
- * - 積和は整数で、初期値 2^21 から `>> 22` して 0〜255 に飽和する（`clip8`）
- * - 横 → 縦の順・中間は uint8・寸法が変わらない軸はパスを飛ばす（`need_horizontal` /
- *   `need_vertical`）。両軸とも変わらなければ写し（`ImagingCopy` — `Image.resize` も同寸なら
- *   `copy()` を返す）
- * - 横パスは縦パスが読む入力の行（`ybox_first`〜`ybox_last`）だけを回す
- * - チャネルごとの積和は互いに独立（Pillow の 1 バンドの枝 `image8` と多バンドの枝は同じ式）
+ * - The coefficient argument is `(x + xmin − center + 0.5) · (1 / filterscale)` (multiplying by the
+ *   reciprocal — kept in Pillow's form)
+ * - `xmin` / `xmax` are clamped to `[0, inSize]` after the `(int)` truncation
+ * - Normalisation happens only when the sum `ww` is not 0
+ * - The coefficients are `(int)(±0.5 + w·2^22)` (the rounding direction follows the sign)
+ * - Accumulation is in integers, starts at 2^21, is shifted `>> 22` and saturated to 0–255
+ *   (`clip8`)
+ * - Horizontal → vertical order, uint8 intermediate, and the pass is skipped for an axis whose size
+ *   does not change (`need_horizontal` / `need_vertical`). When neither axis changes, a copy
+ *   (`ImagingCopy` — `Image.resize` also returns `copy()` for the same size)
+ * - The horizontal pass runs only over the input rows the vertical pass reads (`ybox_first` to
+ *   `ybox_last`)
+ * - The per-channel accumulations are independent of each other (Pillow's single-band branch
+ *   `image8` and its multi-band branch use the same formula)
  *
- * ## 窓だけを計算する（{@link resampleU8Window}）
+ * ## Computing only the window ({@link resampleU8Window})
  *
- * 係数は出力の添字ごとに独立し（`center = (i + 0.5)·scale`）、中間の uint8 も出力の列ごとに独立して
- * いる。よって伸縮後の画像の一部の矩形は、その矩形の出力の添字だけを計算すれば、全体を伸縮してから
- * 切り出した値と uint8 で同じになる。Wan2.2 の I2V の crop は覆う寸法へ伸縮してから中央を切り出すので、
- * 縦横比の極端な入力（例 4096×4 → 覆う寸法 720,896×704）でも、手間と中間の大きさを出力の窓の大きさに
- * 抑えられる。
+ * The coefficients are independent per output index (`center = (i + 0.5)·scale`), and the uint8
+ * intermediate is independent per output column. So for a rectangle of the resized image,
+ * computing only that rectangle's output indexes gives the same uint8 values as resizing the whole
+ * image and then cropping. Wan2.2's I2V crop resizes to the covering size and then crops the
+ * centre, so even for inputs with extreme aspect ratios (e.g. 4096×4 → covering size 720,896×704)
+ * the work and the intermediate size stay bounded by the size of the output window.
  *
- * NOTE: `export` は `src/` の内部の呼び手とテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: `export` serves internal callers in `src/` and the tests (not exposed on `mod.ts` / the
+ * subpath surface — ADR 0008).
  */
 
 // Third-party code notice. The filters, the fixed-point coefficients and the separable passes below
@@ -59,8 +67,8 @@
 //   Copyright © 2010 by Jeffrey 'Alex' Clark and contributors
 
 /**
- * Pillow のフィルタ（`Resample.c` の `struct filter` — 重み関数と、縮尺 1 のときの台の半径）。
- * `name` は診断の文言だけに使う。
+ * A Pillow filter (`struct filter` in `Resample.c` — the weight function and the support radius at
+ * scale 1). `name` is used only in diagnostic messages.
  */
 export type PillowFilter = {
   readonly name: string;
@@ -69,11 +77,13 @@ export type PillowFilter = {
 };
 
 /**
- * Pillow の `bicubic_filter`（`a = −0.5`・式の形と演算の順序は `Resample.c` のまま）。`|x| ∈ [1, 2)` で
- * 負の重みを持つので、段差では値域を越えた積和が出る（{@link clip8} の飽和が効く経路）。
+ * Pillow's `bicubic_filter` (`a = −0.5`; the shape of the formula and the order of operations are as
+ * in `Resample.c`). It has negative weights for `|x| ∈ [1, 2)`, so steps produce sums beyond the
+ * value range (the path where the saturation of {@link clip8} matters).
  *
- * NOTE: `preprocess.ts` の `cubic` と同じ式だが共有しない — あちらは torchvision の antialias 経路の
- * 写しで、こちらは Pillow の逐語の写し（正本が違うので、片方の版の追従がもう片方を動かさない形に保つ）。
+ * NOTE: the same formula as `cubic` in `preprocess.ts`, but not shared — that one copies
+ * torchvision's antialias path, this one is a verbatim copy of Pillow (the canonical sources differ,
+ * so following one version must not move the other).
  */
 const bicubic = (x: number): number => {
   const a = -0.5;
@@ -83,7 +93,7 @@ const bicubic = (x: number): number => {
   return 0;
 };
 
-/** Pillow の BICUBIC（`Resample.c` の `BICUBIC = {bicubic_filter, 2.0}`）。 */
+/** Pillow's BICUBIC (`BICUBIC = {bicubic_filter, 2.0}` in `Resample.c`). */
 export const PILLOW_BICUBIC: PillowFilter = { name: "BICUBIC", support: 2, weight: bicubic };
 
 const sinc = (x: number): number => {
@@ -92,33 +102,35 @@ const sinc = (x: number): number => {
   return Math.sin(radians) / radians;
 };
 
-/** Pillow の `lanczos_filter`（台の外は 0 — 右端 `x = 3` は台の外）。 */
+/** Pillow's `lanczos_filter` (0 outside the support — the right end `x = 3` is outside). */
 const lanczos = (x: number): number => (-3 <= x && x < 3 ? sinc(x) * sinc(x / 3) : 0);
 
 /**
- * Pillow の LANCZOS（`Resample.c` の `LANCZOS = {lanczos_filter, 3.0}`）。
+ * Pillow's LANCZOS (`LANCZOS = {lanczos_filter, 3.0}` in `Resample.c`).
  *
- * NOTE: 係数の `sin` は V8 の `Math.sin`、Pillow は C の libm の `sin`。最終 ulp が割れると整数係数が
- * 1 変わりうる（推測）。fixture は出力の uint8 だけを見るので、係数の ±1 はまず検出できない（ずれた
- * 係数が出力を変えるのは積和が 2^22 の境界をまたぐときだけ — 1 標本あたりおよそ 画素値 / 2^22）。
- * 2026-10-09 のレビューが係数表そのもの（`xmin` と整数係数の全列）を Resample.c の逐語の Python の
- * 写し（glibc の `sin`）と 1,600 幾何で比べ、不一致は 0 だった（その場の確かめで、常設の門ではない）。
- * BICUBIC は多項式で `sin` を使わないので、この問題を持たない。
+ * NOTE: the coefficients' `sin` is V8's `Math.sin`, while Pillow uses the C libm `sin`. If the last
+ * ulp differs, an integer coefficient can change by 1 (speculation). The fixtures look only at the
+ * output uint8, so a ±1 in a coefficient is hardly ever detectable (a shifted coefficient changes the
+ * output only when the sum crosses a 2^22 boundary — roughly pixel value / 2^22 per sample).
+ * The review of 2026-10-09 compared the coefficient table itself (`xmin` and every integer
+ * coefficient) against a verbatim Python copy of Resample.c (glibc's `sin`) over 1,600 geometries,
+ * with 0 mismatches (a one-off verification, not a standing check). BICUBIC is a polynomial and does
+ * not use `sin`, so it does not have this problem.
  */
 export const PILLOW_LANCZOS: PillowFilter = { name: "LANCZOS", support: 3, weight: lanczos };
 
-/** 係数の固定小数点の小数部のビット数（Pillow の `PRECISION_BITS` = 32 − 8 − 2）。 */
+/** Number of fractional bits of the fixed-point coefficients (Pillow's `PRECISION_BITS` = 32 − 8 − 2). */
 const PRECISION_BITS = 32 - 8 - 2;
 
-/** 係数の 1.0（`1 << PRECISION_BITS`）。 */
+/** 1.0 as a coefficient (`1 << PRECISION_BITS`). */
 const FIXED_ONE = 1 << PRECISION_BITS;
 
-/** 積和の初期値（`1 << (PRECISION_BITS - 1)` — `>> PRECISION_BITS` を四捨五入にする半分）。 */
+/** Initial value of the sum (`1 << (PRECISION_BITS - 1)` — the half that makes `>> PRECISION_BITS` round to nearest). */
 const FIXED_HALF = 1 << (PRECISION_BITS - 1);
 
 /**
- * 8bit の画素列（行優先・画素あたり `channels` バイト）と、その寸法。返す側は新しく確保した
- * `ArrayBuffer` の配列（`U8Image<ArrayBuffer>`）で、受ける側は共有メモリも受ける。
+ * 8-bit pixels (row-major, `channels` bytes per pixel) and their size. Results are arrays on a newly
+ * allocated `ArrayBuffer` (`U8Image<ArrayBuffer>`); inputs may also be on shared memory.
  */
 export type U8Image<Buffer extends ArrayBufferLike = ArrayBufferLike> = {
   readonly data: Uint8Array<Buffer>;
@@ -127,7 +139,7 @@ export type U8Image<Buffer extends ArrayBufferLike = ArrayBufferLike> = {
   readonly channels: number;
 };
 
-/** 伸縮後の画像から切り出す矩形（左上 `left`, `top` から `width × height`）。 */
+/** A rectangle cropped from the resized image (`width × height` from the top-left `left`, `top`). */
 export type PixelWindow = {
   readonly left: number;
   readonly top: number;
@@ -135,24 +147,25 @@ export type PixelWindow = {
   readonly height: number;
 };
 
-/** 出力 1 点ぶんの入力範囲と固定小数点の係数。 */
+/** Input range and fixed-point coefficients for one output point. */
 type FixedTap = {
   readonly start: number;
   readonly coefficients: Int32Array<ArrayBuffer>;
 };
 
-/** 1 軸の出力の窓（伸縮後の添字 `offset` から `length` 個）。 */
+/** The output window of one axis (`length` entries from the resized index `offset`). */
 type AxisWindow = {
   readonly offset: number;
   readonly length: number;
 };
 
 /**
- * 1 軸ぶんの係数（Pillow の `precompute_coeffs` → `normalize_coeffs_8bpc`）のうち、出力の窓 `window` の
- * 添字の分（添字ごとに独立 — モジュール doc「窓だけを計算する」）。
+ * The coefficients of one axis (Pillow's `precompute_coeffs` → `normalize_coeffs_8bpc`), for the
+ * indexes of the output window `window` only (independent per index — module doc "Computing only
+ * the window").
  *
- * NOTE: Pillow の `scale` は `(double)(in1 − in0) / outSize`（`in0` / `in1` は float の箱）で、箱を取らない
- * resize では `inSize / outSize` と同じ値になる（2^24 未満の整数は float で厳密）。
+ * NOTE: Pillow's `scale` is `(double)(in1 − in0) / outSize` (`in0` / `in1` are the float box), which
+ * for a resize without a box equals `inSize / outSize` (integers below 2^24 are exact in float).
  */
 const fixedTaps = (
   inSize: number,
@@ -188,10 +201,11 @@ const fixedTaps = (
 };
 
 /**
- * 固定小数点の積和を 8bit へ戻す（Pillow の `clip8` — `>> PRECISION_BITS` の後に 0〜255 へ飽和）。
+ * Brings a fixed-point sum back to 8 bits (Pillow's `clip8` — saturates to 0–255 after
+ * `>> PRECISION_BITS`).
  *
- * 積和は Pillow と同じく int32 に収まる（|係数の和| ≲ 1.3·2^22 × 255 + 2^21 < 2^31）ので、`>>` の
- * ToInt32 は値を変えない。
+ * As in Pillow, the sum fits in int32 (|sum of coefficients| ≲ 1.3·2^22 × 255 + 2^21 < 2^31), so the
+ * ToInt32 of `>>` does not change the value.
  */
 const clip8 = (sum: number): number => {
   const value = sum >> PRECISION_BITS;
@@ -199,8 +213,9 @@ const clip8 = (sum: number): number => {
 };
 
 /**
- * 横パス（Pillow の `ImagingResampleHorizontal_8bpc`）。入力の行 `rows` だけを回す（Pillow の
- * `ybox_first`〜`ybox_last`）。出力の列は `taps` の本数（窓の列）。
+ * Horizontal pass (Pillow's `ImagingResampleHorizontal_8bpc`). Runs only over the input rows `rows`
+ * (Pillow's `ybox_first` to `ybox_last`). The output columns are the number of `taps` (the window's
+ * columns).
  */
 const resampleHorizontal = (
   image: U8Image,
@@ -230,9 +245,9 @@ const resampleHorizontal = (
 };
 
 /**
- * 縦パス（Pillow の `ImagingResampleVertical_8bpc`）。`image` の行 0 は入力の行 `rowOffset`（Pillow が
- * 横パスの後に `bounds_vert` から `ybox_first` を引くのと同じ読み替え）。出力の行は `taps` の本数
- * （窓の行）。
+ * Vertical pass (Pillow's `ImagingResampleVertical_8bpc`). Row 0 of `image` is input row `rowOffset`
+ * (the same re-indexing Pillow does when it subtracts `ybox_first` from `bounds_vert` after the
+ * horizontal pass). The output rows are the number of `taps` (the window's rows).
  */
 const resampleVertical = (
   image: U8Image,
@@ -256,7 +271,7 @@ const resampleVertical = (
   return { data, width: image.width, height: taps.length, channels: image.channels };
 };
 
-/** 列 `columns`・行 `rows` の矩形の写し（パスを飛ばした軸の切り出し — 範囲の内側だけを呼ぶ）。 */
+/** Copy of the rectangle of columns `columns` and rows `rows` (the crop on an axis whose pass is skipped — called only within range). */
 const cropU8 = (image: U8Image, columns: AxisWindow, rows: AxisWindow): U8Image<ArrayBuffer> => {
   const { channels } = image;
   const rowBytes = columns.length * channels;
@@ -269,8 +284,8 @@ const cropU8 = (image: U8Image, columns: AxisWindow, rows: AxisWindow): U8Image<
 };
 
 /**
- * 縦パスが読む入力の行（Pillow の `ybox_first`〜`ybox_last`）。tap の起点も終点も出力の添字について
- * 単調なので、両端の tap で決まる。
+ * The input rows the vertical pass reads (Pillow's `ybox_first` to `ybox_last`). Both the start and
+ * the end of a tap are monotonic in the output index, so the taps at the two ends decide it.
  */
 const rowsReadBy = (taps: readonly FixedTap[]): AxisWindow => {
   const first = taps[0];
@@ -281,14 +296,16 @@ const rowsReadBy = (taps: readonly FixedTap[]): AxisWindow => {
 const isPositiveInteger = (value: number): boolean => Number.isInteger(value) && value > 0;
 
 /**
- * 8bit の画像を `width × height` へ `filter` でリサンプルし（Pillow の `Image.resize` と uint8 で一致 —
- * モジュール doc）、その矩形 `window` を切り出したものを返す。計算するのは窓の出力だけ（全体を伸縮
- * してから切り出した値と同じ）。縦横比は保たない。寸法が変わらない軸はパスを飛ばし（その軸は入力の
- * 写しを切り出す）、両軸とも変わらなければ写しを返す。
+ * Resamples an 8-bit image to `width × height` with `filter` (uint8-identical to Pillow's
+ * `Image.resize` — module doc) and returns the rectangle `window` cropped from it. Only the window's
+ * output is computed (the same values as resizing the whole image and cropping). The aspect ratio is
+ * not preserved. The pass is skipped for an axis whose size does not change (that axis crops a copy
+ * of the input), and when neither axis changes a copy is returned.
  *
- * 入力・出力寸法・窓の検査は内部の事前条件（呼び手は検査済みの画像と、受理集合や資産から導いた寸法
- * しか渡さない）なので `RangeError`。呼び手が受けた画像そのものの検査（`ModelInputError`）は呼び手が
- * 先に持つ。
+ * The checks of the input, the output size and the window are internal preconditions (callers pass
+ * only checked images and sizes derived from the acceptance set or from assets), hence
+ * `RangeError`. The check of the image the caller received itself (`ModelInputError`) belongs to the
+ * caller, earlier.
  */
 export const resampleU8Window = (
   image: U8Image,
@@ -333,7 +350,7 @@ export const resampleU8Window = (
     height === image.height
       ? undefined
       : fixedTaps(image.height, height, filter, { offset: top, length: window.height });
-  // 横パスが回す入力の行（縦を飛ばすなら窓の行そのもの）。
+  // The input rows the horizontal pass runs over (the window's own rows when the vertical pass is skipped).
   const rows =
     verticalTaps === undefined ? { offset: top, length: window.height } : rowsReadBy(verticalTaps);
   const band =
@@ -344,8 +361,8 @@ export const resampleU8Window = (
 };
 
 /**
- * 8bit の 1 バンドの平面（行優先）を `width × height` へ Pillow の BICUBIC でリサンプルする（Pillow の
- * L モードの `Image.resize((width, height))` — resample の既定 — と uint8 で一致）。
+ * Resamples an 8-bit single-band plane (row-major) to `width × height` with Pillow's BICUBIC
+ * (uint8-identical to Pillow's L-mode `Image.resize((width, height))` — the resample default).
  */
 export const resizeU8PlaneBicubic = (
   plane: Uint8Array<ArrayBufferLike>,
@@ -354,7 +371,7 @@ export const resizeU8PlaneBicubic = (
   width: number,
   height: number,
 ): Uint8Array<ArrayBuffer> =>
-  // 写しの経路（両軸とも同寸）も含め、返るのは新しく確保した配列（入力と領域を共有しない）。
+  // Including the copy path (both axes the same size), the result is a newly allocated array (it shares no memory with the input).
   resampleU8Window(
     { data: plane, width: sourceWidth, height: sourceHeight, channels: 1 },
     width,

@@ -1,14 +1,15 @@
 /**
- * 決定的な標準正規乱数（sdp の `z_noise` と z_p のノイズに使う）。
+ * Deterministic standard normal random numbers (used for sdp's `z_noise` and the noise of z_p).
  *
- * 乱数はグラフに焼かない（ADR 0013 — 実行時ノブと乱数はホスト側）。パイプラインが seed 付きの
- * 生成器を持つのは、**同じ seed なら同じ WAV が出る**ことを再現性の前提にするため
- * （`Math.random` だと torch 参照との突合が「毎回別の入力」になり、dump した乱数列を
- * 読ませる意味も薄れる）。
+ * Random numbers are not baked into the graph (ADR 0013 — run-time knobs and random numbers live on
+ * the host). The pipeline holds a seeded generator so that **the same seed gives the same WAV**
+ * can be the premise of reproducibility (with `Math.random` the comparison with the torch
+ * reference would be "a different input every time", and feeding it the dumped random sequence
+ * would mean little).
  *
- * 実装は splitmix64（状態遷移）+ Box–Muller（正規化）。splitmix64 は 64bit 定数を使うので
- * `BigInt` で回す — 生成量は 2·P + C·T 程度（数万〜数十万要素）で、ホスト側の他の処理に
- * 比べて無視できる。
+ * The implementation is splitmix64 (state transition) + Box–Muller (normalisation). splitmix64 uses
+ * 64-bit constants, so it runs on `BigInt` — the amount generated is about 2·P + C·T (tens of
+ * thousands to hundreds of thousands of elements), negligible next to the rest of the host work.
  */
 
 import { assertAcceptableSeed } from "../../request-gates.ts";
@@ -17,10 +18,10 @@ const GOLDEN_GAMMA = 0x9e3779b97f4a7c15n;
 const MIX_1 = 0xbf58476d1ce4e5b9n;
 const MIX_2 = 0x94d049bb133111ebn;
 const MASK_64 = (1n << 64n) - 1n;
-/** [0,1) の一様乱数を作るときの分母（53bit 仮数ぶん）。 */
+/** The denominator for making a uniform random number in [0,1) (53 mantissa bits). */
 const DENOMINATOR = 1n << 53n;
 
-/** splitmix64 の 1 ステップ。 */
+/** One step of splitmix64. */
 const nextUint64 = (state: bigint): { readonly state: bigint; readonly value: bigint } => {
   const next = (state + GOLDEN_GAMMA) & MASK_64;
   let z = next;
@@ -29,18 +30,21 @@ const nextUint64 = (state: bigint): { readonly state: bigint; readonly value: bi
   return { state: next, value: (z ^ (z >> 31n)) & MASK_64 };
 };
 
-/** 決定的な標準正規列の生成器（`seed` が同じなら同じ列）。 */
+/**
+ * Generator of a deterministic standard normal sequence (the same `seed` gives the same sequence).
+ */
 export class Randn {
   #state: bigint;
 
   constructor(seed: number) {
-    // 受理集合の所有者は家族横断の `request-gates.ts` 1 本（anima / sbv2 / irodori で同じ値域）。
-    // ここに条件を写すと、片方だけ緩む形でいつか割れる。
+    // The owner of the acceptance set is the one family-wide `request-gates.ts` (the same range for
+    // anima / sbv2 / irodori / wan / the generation sampler). Copying the condition here would one
+    // day split by one side loosening.
     assertAcceptableSeed(seed);
     this.#state = BigInt(seed) & MASK_64;
   }
 
-  /** [0, 1) の一様乱数。 */
+  /** A uniform random number in [0, 1). */
   #uniform(): number {
     const { state, value } = nextUint64(this.#state);
     this.#state = state;
@@ -48,11 +52,12 @@ export class Randn {
   }
 
   /**
-   * 標準正規列を `count` 要素ぶん引き、`scale` を掛けて f32 で返す。
+   * Draws `count` elements of a standard normal sequence, multiplies by `scale` and returns f32.
    *
-   * MUST: 奇数長でも Box–Muller の対を丸ごと消費する（余った sin 側を次の呼び出しへ
-   * 持ち越さない）。持ち越すと「同じ seed でも呼び出し順で列が変わる」形になり、
-   * dump した乱数列との対応が読めなくなる。
+   * MUST: even for an odd length, consume the Box–Muller pair whole (do not carry the leftover sin
+   * side over to the next call). Carrying it over makes "the same seed gives a different sequence
+   * depending on call order", and the correspondence with the dumped random sequence becomes
+   * unreadable.
    */
   normals(count: number, scale = 1): Float32Array<ArrayBuffer> {
     if (!Number.isInteger(count) || count < 0) {
@@ -60,10 +65,11 @@ export class Randn {
     }
     const out = new Float32Array(count);
     for (let i = 0; i < count; i += 2) {
-      // u1 = 0 は log(0) = -Inf を生む。53-bit 格子の中点 0.5/2^53 へ寄せる（半径 ≈8.65σ =
-      // 格子の自然な最大 ≈8.57σ と同程度。旧 Number.MIN_VALUE は最小の**非正規化数**で
-      // ≈38.6σ の異常値を作る形だった）。発生は 1 ドローあたり厳密に 2^-53 なので、この置換で
-      // 既存 seed の出力ビットは実質動かない（凍結 sha の生成量では踏まない）。
+      // u1 = 0 gives log(0) = -Inf. Move it to the midpoint 0.5/2^53 of the 53-bit lattice (radius
+      // ≈8.65σ = on par with the lattice's natural maximum ≈8.57σ. The old Number.MIN_VALUE is the
+      // smallest **subnormal** and produced an outlier of ≈38.6σ). It occurs with probability
+      // exactly 2^-53 per draw, so this replacement does not in practice move the output bits of
+      // existing seeds (the amounts generated for the frozen sha values never hit it).
       const u1 = this.#uniform() || 0.5 / 2 ** 53;
       const u2 = this.#uniform();
       const radius = Math.sqrt(-2 * Math.log(u1));

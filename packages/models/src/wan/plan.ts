@@ -1,11 +1,14 @@
 /**
- * Wan の生成要求の門 — 要求を検査して計画にする（`generate` の入口・GPU に触る前の純粋な門）。
+ * Wan's generation request check — checks a request and turns it into a plan (the entry of
+ * `generate` — a pure check before touching the GPU).
  *
- * 経路ごとの違いはプロンプトの引き方だけで（{@link PromptGate} — `./text-stage.ts`）、世代ごとの値
- * （受理集合・フレームの範囲・既定）は世代の記述子（`./descriptor.ts`）から引数で受ける。Wan2.1 / 2.2 の
- * class が共有する（ADR 0121 決定 10）。
+ * The only difference between paths is how the prompt is looked up ({@link PromptGate} —
+ * `./text-stage.ts`); per-generation values (accepted set, frame range, defaults) are received as
+ * arguments from the generation descriptor (`./descriptor.ts`). Shared by the Wan2.1 / 2.2 classes
+ * (ADR 0121 decision 10).
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is side-effect free (no import-time execution, no global mutable state —
+ * CLAUDE.md).
  */
 
 import { ModelInputError } from "../errors.ts";
@@ -21,36 +24,38 @@ import type { WanVaeChunkLayout } from "./vae-chunks.ts";
 import type { WanVaeTilePlan } from "./vae-tiles.ts";
 
 /**
- * VAE の時間圧縮（最初の chunk は 1 フレーム・以降は 4 フレーム — `vae-chunks.ts` の取り決め）。
+ * The VAE's temporal compression (the first chunk is 1 frame, later ones 4 frames — the contract of
+ * `vae-chunks.ts`).
  *
- * NOTE: `export` は記述子の整合のテストと gpu-lab が同じ値を引くため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: `export` is so that the descriptor consistency tests and gpu-lab (removed in 0.15) read the
+ * same value (not on the `mod.ts` / subpath surface — ADR 0008).
  */
 export const TEMPORAL_COMPRESSION = 4;
 
 /**
- * 初期ノイズの seed の既定（世代に依らない）。寸法とフレーム数の既定は世代の記述子
- * （{@link WanGenerationDescriptor}）、step 数・guidance・shift の既定は manifest の `pipelineConfig`
- * （{@link WanPipelineConfig}）。
+ * The default seed of the initial noise (independent of the generation). The size and frame-count
+ * defaults come from the generation descriptor ({@link WanGenerationDescriptor}); the step count,
+ * guidance and shift defaults from the manifest's `pipelineConfig` ({@link WanPipelineConfig}).
  */
 const DEFAULT_SEED = 0;
 
-/** 初期ノイズの出所（{@link planWanRequest}）。 */
+/** The source of the initial noise ({@link planWanRequest}). */
 type InitialNoise =
   | { readonly kind: "seed"; readonly seed: number }
   | { readonly kind: "latents"; readonly data: Float32Array<ArrayBuffer> };
 
 /**
- * 入口の門を通った生成の要求（{@link planWanRequest} の戻り）。
- * `Text` はプロンプト 1 本の形（`"precomputed"` = 資産の埋め込みの行・`"gpu"` = umT5 の id 列）。
+ * A generation request that passed the entry check (the return of {@link planWanRequest}).
+ * `Text` is the form of one prompt (`"precomputed"` = a row of the asset's embeddings, `"gpu"` = umT5
+ * ids).
  */
 export type WanGenerationPlan<Text = WanTextEmbedding> = WanGenerationKnobs & {
   readonly positive: Text;
-  /** CFG の uncond 側（`guidance` が 1 なら undefined — uncond を回さない）。 */
+  /** CFG's uncond side (undefined when `guidance` is 1 — uncond does not run). */
   readonly negative: Text | undefined;
 };
 
-/** 計画のうちプロンプト以外（DiT と VAE の段が使う — 経路に依らない）。 */
+/** The plan without the prompts (used by the DiT and VAE stages — independent of the path). */
 export type WanGenerationKnobs = {
   readonly steps: number;
   readonly guidance: number;
@@ -59,40 +64,48 @@ export type WanGenerationKnobs = {
   readonly width: number;
   readonly height: number;
   /**
-   * 潜在の形 `[C, F', H/s, W/s]`（C は VAE のグラフ宣言の潜在のチャネル数・s は空間の圧縮
-   * `wanSpatialCompression` — Wan2.1 は `[16, F', H/8, W/8]`）。
+   * The latent shape `[C, F', H/s, W/s]` (C is the latent channel count of the VAE graph declaration,
+   * s the spatial compression `wanSpatialCompression` — `[16, F', H/8, W/8]` for Wan2.1).
    */
   readonly latentShape: readonly [number, number, number, number];
   readonly initial: InitialNoise;
-  /** `steps` × `shift` の UniPC の σ 列と timestep 列（denoise はこれを使い、組み直さない）。 */
+  /**
+   * The UniPC σ sequence and timestep sequence for `steps` × `shift` (denoise uses it and does not
+   * rebuild it).
+   */
   readonly schedule: WanUniPcSchedule;
-  /** VAE のタイル計画（潜在 `H/s × W/s` — denoise の前に立てる）。 */
+  /** The VAE tile plan (latent `H/s × W/s` — made before denoise). */
   readonly tiles: WanVaeTilePlan;
   /**
-   * I2V の条件画像を前処理した VAE encoder の入力（`image` を渡した要求だけ — 出力寸法は `width` / `height` と同じ）。
-   * undefined ならテキストだけの要求（encoder の段を回さない・DiT は条件づけない）。
+   * The VAE encoder input from the preprocessed I2V condition image (only for a request that passes
+   * `image` — the output size equals `width` / `height`). Undefined means a text-only request (the
+   * encoder stage does not run, and the DiT is not conditioned).
    */
   readonly conditionImage: WanI2vImageInput | undefined;
 };
 
-/** 計画に要る VAE の chunk グラフの幾何（資産の宣言から — `wanVaeChunkLayout`）。 */
+/** The VAE chunk graph geometry the plan needs (from the asset's declaration — `wanVaeChunkLayout`). */
 export type PlanLayout = Pick<
   WanVaeChunkLayout,
   "latentChannels" | "tile" | "sampleTile" | "sampleChannels"
 >;
 
-/** 経路ごとのプロンプトの門（{@link planWanRequest} が 1 本の検査の順で呼ぶ）。 */
+/** The prompt check per path ({@link planWanRequest} calls it in one check order). */
 export type PromptGate<Text> = {
-  /** 渡された文字列（型は検査済み）を受理集合で引く / 符号化する。拒否は `ModelInputError`。 */
+  /**
+   * Looks up / encodes the given string (its type already checked) in the accepted set. A rejection
+   * is a `ModelInputError`.
+   */
   readonly resolve: (text: string, what: "prompt" | "negativePrompt") => Text;
-  /** `negativePrompt` を省いたときの既定（`guidance` > 1 のときだけ呼ぶ）。 */
+  /** The default when `negativePrompt` is omitted (called only when `guidance` > 1). */
   readonly defaultNegative: () => Text;
 };
 
 /**
- * 門が読む要求の欄（観測席と中断は段が読む — `WanGenerateRequest`）。I2V の欄（`image` / `fit`）は Wan2.2 の要求の型
- * （{@link WanTi2vGenerateRequest}）にしか無いが、門は世代に依らず 1 本で読む — Wan2.1 の class に JS の呼び手が
- * 型をすり抜けて渡した `image` も、ここで拒む。
+ * The request fields the check reads (the observer and cancellation are read by the stages —
+ * `WanGenerateRequest`). The I2V fields (`image` / `fit`) exist only in Wan2.2's request type
+ * ({@link WanTi2vGenerateRequest}), but the check reads them in one body regardless of generation — an
+ * `image` that a JS caller passes to the Wan2.1 class, slipping past the type, is rejected here too.
  */
 type WanPlanRequest = Pick<
   WanTi2vGenerateRequest,
@@ -111,12 +124,14 @@ type WanPlanRequest = Pick<
 >;
 
 /**
- * 条件画像が RGB8 の形（`data` が `Uint8Array` の object）であること。JS の呼び手が型をすり抜けて渡した値
- * （`null`・数・`data` の無い object）を `ModelInputError` にする — 要求の欄の型の誤りは入力起因（プロンプトの
- * `typeof` の門と同じ扱い）。寸法と長さの食い違いは前処理の `assertRgb8` が見る。
+ * The condition image has the RGB8 shape (an object whose `data` is a `Uint8Array`). A value a JS
+ * caller passes past the type (`null`, a number, an object without `data`) becomes a
+ * `ModelInputError` — a wrong type in a request field is an input error (the same handling as the
+ * prompt's `typeof` check). Mismatches of size and length are checked by the preprocessing's
+ * `assertRgb8`.
  *
- * MUST: `data` の型まで見る — `Float32Array` などの別の型の配列は長さの検査を通り、画素を uint8 と読み違えたまま
- * 黙って進む。
+ * MUST: check the type of `data` too — an array of another type such as `Float32Array` passes the
+ * length check and would silently proceed with the pixels misread as uint8.
  */
 const assertRgb8Shaped = (image: unknown): void => {
   if (
@@ -141,25 +156,32 @@ const assertRgb8Shaped = (image: unknown): void => {
 };
 
 /**
- * 生成の要求を検査して計画にする。2 つの経路の入口が共有する検査の本体で、プロンプトの引き方だけを
- * `gate` から受ける。省いた step 数・guidance・shift は `config`（manifest の `pipelineConfig`）の
- * 既定、寸法とフレーム数は世代の記述子（`generation`）の既定で埋める。
+ * Checks a generation request and turns it into a plan. The body of the checks shared by the entries
+ * of the two paths; only how the prompt is looked up comes from `gate`. An omitted step count,
+ * guidance or shift is filled with the default of `config` (the manifest's `pipelineConfig`); the size
+ * and frame count with the defaults of the generation descriptor (`generation`).
  *
- * MUST: 入力起因の失敗（集合の外のプロンプト・受理集合の外の寸法・値域外のノブ・σ 列が壊れる
- * steps × shift の組・条件画像を受けない世代への `image` / `fit`・`image` 無しの `fit`・RGB8 の形でない値や寸法と
- * 長さの合わない RGB8）は全部ここで `ModelInputError` にする。DiT の重みを上げてから落ちる形にしない。
- * 既定だけの組は manifest の門（`parseWanPipelineConfig`）が σ 列まで見ているので、ここで σ 列が
- * 壊れるのは要求が値を渡したときだけ（= 入力起因）。`fit` の綴り違いは素の `Error`（名前の綴り違い — ADR 0107
- * 決定 3。構築オプションの `textEncoder` と同じ扱い）で、`image` の有無より先に見る（欄そのものの値の検査を欄の
- * 組合せの検査より先に — `image` 無しの `fit: "cover"` も綴り違いとして落ちる）。
+ * MUST: every input-caused failure (a prompt outside the set, a size outside the accepted set, a knob
+ * out of range, a steps × shift combination that breaks the σ sequence, `image` / `fit` for a
+ * generation that takes no condition image, `fit` without `image`, a value that is not RGB8-shaped or
+ * an RGB8 whose size and length disagree) becomes a `ModelInputError` here. No failing after the DiT
+ * weights are uploaded. A combination of defaults alone has had its σ sequence checked by the manifest
+ * check (`parseWanPipelineConfig`), so a broken σ sequence here only happens when the request passed a
+ * value (= input-caused). A misspelled `fit` is a plain `Error` (a misspelled name — ADR 0107 decision
+ * 3; the same handling as the construction option `textEncoder`), and it is checked before whether
+ * `image` is present (the value of a field itself is checked before the combination of fields — `fit:
+ * "cover"` without `image` also fails as a misspelling).
  *
- * I2V（`image` を渡した要求 — 入力の形 `"ti2v"` の世代だけ）は、出力寸法を画像の縦横比と明示の `width` / `height` から
- * 受理集合の中で選び、前処理（寸法合わせ → `[-1, 1]` → patchify — `i2v-preprocess.ts`）までここで済ませる（GPU に
- * 触る前に入力の誤りを全部落とす）。`image` を渡さない要求は、画像の欄が無かったときと同じ計画になる。
+ * I2V (a request that passes `image` — only for a generation of input form `"ti2v"`) chooses the
+ * output size within the accepted set from the image's aspect ratio and an explicit `width` /
+ * `height`, and finishes preprocessing (fitting the size → `[-1, 1]` → patchify —
+ * `i2v-preprocess.ts`) here (all input errors fail before touching the GPU). A request that does not
+ * pass `image` gets the same plan as when there were no image fields.
  *
- * MUST: VAE のタイル計画もここで立てる — denoise の後に立てると、資産だけで判る不整合が全 step を
- * 払った後に落ちる。受理する寸法は家族 admission（`tile-decode.ts` の `assertWanVaeTilesCover`）が
- * 全数を通しているので、ここで落ちるのは admission を経ない呼び出しだけ（資産の齟齬 — 素の `Error`）。
+ * MUST: the VAE tile plan is also made here — made after denoise, an inconsistency that the assets
+ * alone reveal would fail after paying for every step. The family admission (`assertWanVaeTilesCover`
+ * in `tile-decode.ts`) has already passed every accepted size, so a failure here comes only from a
+ * call that bypassed admission (an asset mismatch — a plain `Error`).
  */
 export const planWanRequest = <Text>(
   request: WanPlanRequest,
@@ -175,8 +197,9 @@ export const planWanRequest = <Text>(
   const positive = resolve(request.prompt, "prompt");
 
   const steps = request.steps ?? config.defaults.steps;
-  // 上限は σ 列を作る前に単項の門で見る（`wanUniPcSchedule` の MUST — 巨大な steps で配列を確保して
-  // 同期ループを走らせない）。値は `num_train_timesteps`（超えると整数の timestep が必ず重複する）。
+  // The upper bound is checked by a single-value check before building the σ sequence (the MUST of
+  // `wanUniPcSchedule` — no allocating arrays and running a synchronous loop for a huge steps). The
+  // value is `num_train_timesteps` (beyond it, integer timesteps always repeat).
   const maxSteps = WAN_UNIPC_CONFIG.numTrainTimesteps;
   if (!Number.isInteger(steps) || steps < 1 || steps > maxSteps) {
     throw new ModelInputError(
@@ -185,8 +208,8 @@ export const planWanRequest = <Text>(
     );
   }
   const guidance = request.guidance ?? config.defaults.guidance;
-  // f32 で見る: CFG は `f32(guidance)` で掛ける（`wanClassifierFreeGuidance`）ので、f64 で有限でも
-  // f32 で Infinity になる値（`Number.MAX_VALUE` など）は合成を NaN にする。
+  // Checked in f32: CFG multiplies by `f32(guidance)` (`wanClassifierFreeGuidance`), so a value that is
+  // finite in f64 but Infinity in f32 (such as `Number.MAX_VALUE`) would make the combination NaN.
   if (!Number.isFinite(Math.fround(guidance)) || guidance < 1) {
     throw new ModelInputError(
       `guidance ${guidance} が 1 以上で f32 に収まる有限の数でない` +
@@ -201,8 +224,9 @@ export const planWanRequest = <Text>(
   try {
     schedule = wanUniPcSchedule(steps, shift, WAN_UNIPC_CONFIG.numTrainTimesteps);
   } catch (error) {
-    // 単項の門を通った steps / shift の組で σ 列が壊れる（低水準の RangeError — scheduler.ts の
-    // MUST）。既定の組は manifest の門が通しているので、ここに来るのは要求が渡した値のとき。
+    // A steps / shift combination that passed the single-value checks breaks the σ sequence (a
+    // low-level RangeError — the MUST of scheduler.ts). The default combination has passed the manifest
+    // check, so reaching here means the request passed the values.
     if (!(error instanceof RangeError)) throw error;
     throw new ModelInputError(
       `steps ${steps} と shift ${shift} の組では UniPC の σ 列が組めない（${error.message}）`,
@@ -210,7 +234,7 @@ export const planWanRequest = <Text>(
     );
   }
 
-  // CFG の uncond 側（上流の `do_classifier_free_guidance = guidance_scale > 1`）。
+  // CFG's uncond side (upstream's `do_classifier_free_guidance = guidance_scale > 1`).
   let negative: Text | undefined;
   if (guidance > 1) {
     negative =
@@ -234,9 +258,10 @@ export const planWanRequest = <Text>(
       `frames ${frames} が受理集合（4n+1 の ${generation.minFrames}〜${generation.maxFrames}）に無い`,
     );
   }
-  // I2V の欄の門（ADR 0121 決定 10・11）。条件画像を受けるのは条件入力を持つ DiT（入力の形 "ti2v"）の世代だけ。
-  // 値が undefined の欄は欄が無いのと同じに読む（2.2 の T2V と同じ読み方 — 画像を運ばないので、2.1 で I2V が回ると
-  // いう誤った期待を作らない）。
+  // The check of the I2V fields (ADR 0121 decisions 10 and 11). Only a generation whose DiT has
+  // condition inputs (input form "ti2v") takes a condition image. A field whose value is undefined is read as
+  // absent (the same reading as 2.2's T2V — it carries no image, so it does not create the false
+  // expectation that I2V runs on 2.1).
   if (
     generation.ditInputForm !== "ti2v" &&
     (request.image !== undefined || request.fit !== undefined)
@@ -268,7 +293,8 @@ export const planWanRequest = <Text>(
     }
   } else {
     assertRgb8Shaped(request.image);
-    // 出力寸法の選択（省いた欄は画像の縦横比で — 明示した欄は受理集合の中）と前処理。
+    // Choosing the output size (an omitted field follows the image's aspect ratio — an explicit field
+    // is within the accepted set) and preprocessing.
     conditionImage = preprocessWanI2vImage(
       request.image,
       { width: request.width, height: request.height, fit: request.fit },
@@ -285,7 +311,8 @@ export const planWanRequest = <Text>(
     width / compression,
   ];
   if (!latentShape.every(Number.isInteger)) {
-    // 受理集合は空間の圧縮で割り切れる寸法だけ — 割れるなら資産の取り違え（入力起因ではない）。
+    // The accepted set holds only sizes divisible by the spatial compression — if one does not
+    // divide, the asset is mixed up (not input-caused).
     throw new Error(`潜在の形 [${latentShape}] が整数でない（空間の圧縮 ${compression}）`);
   }
 
@@ -309,7 +336,8 @@ export const planWanRequest = <Text>(
     initial = { kind: "seed", seed };
   }
 
-  // 重なりの式（64 px ÷ 空間の圧縮）は潜在の整数の検査の後で求める（`assertWanVaeTilesCover` と同じ順）。
+  // The overlap formula (64 px ÷ spatial compression) is computed after the latent integer check
+  // (the same order as `assertWanVaeTilesCover`).
   const tiles = planWanGenerationTiles(layout, latentShape[2], latentShape[3], generation);
   return {
     positive,

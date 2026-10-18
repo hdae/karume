@@ -1,53 +1,56 @@
 /**
- * gemma4 の chat フォーマット — **ファミリ固有の純関数 1 本**（ADR 0084 決定 5）。
+ * The gemma4 chat format — **one family-specific pure function** (ADR 0084 decision 5).
  *
- * 汎用テンプレートレンダラは作らない。上流の `chat_template.jinja` は 386 行 / 18,569B ある
- * が、**素の会話だけなら綴りは 5 個・分岐は 3 本**で、Jinja 相当の評価器を持ち込むことは
- * 「ランタイム依存は Web 標準のみ」（CLAUDE.md 横断不変条件）と「投機的な一般化をしない」の
- * 両方に反する。前例は ADR 0079（テキスト解析は呼び手の責務・変換関数 1 本）。
+ * No generic template renderer is built. The upstream `chat_template.jinja` is 386 lines /
+ * 18,569 B, but **plain conversation needs only five spellings and three branches**, and bringing
+ * in a Jinja-equivalent evaluator would violate both "runtime dependencies are Web standards only"
+ * (CLAUDE.md cross-cutting invariants) and "no speculative generalization". Precedent: ADR 0079
+ * (text analysis is the caller's job; one conversion function).
  *
- * ## 綴りは Gemma 3 系ではない
+ * ## The spelling is not Gemma 3's
  *
- * `<|turn>` / `<turn|>` / `<|channel>` / `<|think|>` が正本で（`tokenizer_config.json` の
- * `sot_token` / `eot_token` / `soc_token` / `think_token`）、**`<start_of_turn>` はこの語彙に
- * 無い**（ADR 0084 Context 3）。消費者に手書きさせない理由がここにある。
+ * `<|turn>` / `<turn|>` / `<|channel>` / `<|think|>` are the source of truth (`sot_token` /
+ * `eot_token` / `soc_token` / `think_token` in `tokenizer_config.json`), and **`<start_of_turn>` is
+ * not in this vocabulary** (ADR 0084 Context 3). That is why consumers are not asked to write it by
+ * hand.
  *
- * ## MUST: `<bos>` の所有者はここ
+ * ## MUST: this module owns `<bos>`
  *
- * `GemmaTokenizer.encode` は `<bos>` を付けない（gemma4 の post_processor の実測と一致）。
- * 付けるのは {@link renderGemma4Chat} だけで、分けないと chat 導入時に double-BOS になる
- * （ADR 0084 決定 5 の MUST）。上流も同じ形である — template が `bos_token` を描画し、
- * `apply_chat_template` は `add_special_tokens=False` で符号化する。
+ * `GemmaTokenizer.encode` does not add `<bos>` (matching the measured gemma4 post_processor). Only
+ * {@link renderGemma4Chat} adds it; without the split, introducing chat would produce a double BOS
+ * (the MUST of ADR 0084 decision 5). Upstream has the same shape — the template renders
+ * `bos_token`, and `apply_chat_template` encodes with `add_special_tokens=False`.
  *
- * ## MUST: 射程外は fail loudly
+ * ## MUST: out of scope fails loudly
  *
- * 初版の射程は「素の会話」だけ（ADR 0084 決定 5・6.3）。tools / thinking / tool_call /
- * 画像・音声パート / 未知 role は**黙って無視しない** — 無視すると「tool を渡したのに
- * 使われない」が例外なしで通る。射程を広げるのは実需が出てからで、そのときは Python 側の
- * 電池（`tools/export-recipes/gemma4/chat.py` の docstring）にケースを足すところから始まる。
+ * The first scope is "plain conversation" only (ADR 0084 decision 5; draft §6.3). tools / thinking /
+ * tool_call / image and audio parts / unknown roles are **not silently ignored** — ignoring them
+ * would let "I passed tools and they were not used" through without an exception. The scope widens
+ * once a real need appears, and that starts by adding cases to the Python-side test battery (the
+ * docstring of `tools/export-recipes/gemma4/chat.py`).
  *
- * MUST: 全モジュール副作用ゼロ（表もインスタンスもモジュールスコープで組み立てない）。
+ * MUST: every module is side-effect free (no table or instance is built at module scope).
  */
 
 import { ModelInputError } from "../../errors.ts";
 import type { GemmaTokenizer } from "./tokenizer.ts";
 
-/** 初版の射程に入る role（`assistant` は描画時に `model` へ写像される）。 */
+/** The roles in the first scope (`assistant` is mapped to `model` when rendered). */
 export type Gemma4ChatRole = "system" | "developer" | "user" | "assistant";
 
 /**
- * 会話の 1 発話。
+ * One message of a conversation.
  *
- * MUST: 欄は 2 つだけ。`tools` / `reasoning` / `tool_calls` のような射程外の欄は
- * {@link renderGemma4Chat} が**許可リストで**落とす（型で防げるのは TS の呼び手だけで、
- * JSON から来た値は素通りする）。
+ * MUST: only two fields. Out-of-scope fields such as `tools` / `reasoning` / `tool_calls` are
+ * rejected by {@link renderGemma4Chat} **with an allow list** (the type protects only TS callers; a
+ * value that came from JSON passes straight through).
  */
 export type Gemma4ChatMessage = {
   readonly role: Gemma4ChatRole;
   readonly content: string;
 };
 
-/** chat の綴り（正本は `tokenizer_config.json` の `*_token` 欄）。 */
+/** The chat spellings (source of truth: the `*_token` fields of `tokenizer_config.json`). */
 const START_OF_TURN = "<|turn>";
 const END_OF_TURN = "<turn|>";
 const BOS = "<bos>";
@@ -55,27 +58,28 @@ const START_OF_CHANNEL = "<|channel>";
 const END_OF_CHANNEL = "<channel|>";
 const TOOL_RESPONSE = "<|tool_response>";
 
-/** 生成プロンプトが開く turn の role（`assistant` の写像先）。 */
+/** The role of the turn the generation prompt opens (what `assistant` maps to). */
 const MODEL_ROLE = "model";
 
-/** 先頭に置かれたときだけ `system` ブロックへ落ちる role。 */
+/** Roles that fall into the `system` block only when placed first. */
 const SYSTEM_ROLES: readonly string[] = ["system", "developer"];
 
 const ROLES: readonly string[] = ["system", "developer", "user", "assistant"];
 
-/** メッセージが持ってよい欄（許可リスト — Python 側の `ALLOWED_MESSAGE_KEYS` と対）。 */
+/** The fields a message may carry (allow list — pairs with `ALLOWED_MESSAGE_KEYS` in Python). */
 const MESSAGE_KEYS: readonly string[] = ["role", "content"];
 
 /**
- * Python の `str.isspace()` が真になるコードポイント。
+ * The code points for which Python's `str.isspace()` is true.
  *
- * Jinja の `trim` フィルタは `str.strip()` そのもので、JS の `String.prototype.trim()` とは
- * 2 点だけ違う: Python は `\x1c`–`\x1f` と `\x85` を空白と見なし、U+FEFF は見なさない。
- * exotic な差だが、出るのは**例外ではなく別の id 列**なので集合を明示して写す。
+ * Jinja's `trim` filter is `str.strip()` itself, which differs from JS's `String.prototype.trim()` in
+ * exactly two points: Python treats `\x1c`–`\x1f` and `\x85` as whitespace, and does not treat
+ * U+FEFF as whitespace. The difference is exotic, but what comes out is **a different id sequence,
+ * not an exception**, so the set is ported explicitly.
  */
 const isPythonSpace = (code: number): boolean =>
   (code >= 0x09 && code <= 0x0d) || // \t \n \v \f \r
-  (code >= 0x1c && code <= 0x20) || // ファイル / グループ / レコード / 単位区切り + 空白
+  (code >= 0x1c && code <= 0x20) || // file / group / record / unit separators + space
   code === 0x85 ||
   code === 0xa0 ||
   code === 0x1680 ||
@@ -86,7 +90,7 @@ const isPythonSpace = (code: number): boolean =>
   code === 0x205f ||
   code === 0x3000;
 
-/** Jinja の `trim`（= `str.strip()`）。 */
+/** Jinja's `trim` (= `str.strip()`). */
 const trim = (text: string): string => {
   let start = 0;
   let end = text.length;
@@ -96,9 +100,10 @@ const trim = (text: string): string => {
 };
 
 /**
- * 発話 1 つが素の会話の射程に入ることを確かめる（射程外は fail loudly）。
+ * Checks that one message is within the scope of plain conversation (out of scope fails loudly).
  *
- * `where` は診断の頭に付く場所（呼び手ごとに違う — 会話なら `… messages[i]`）。
+ * `where` is the location prefixed to the diagnostic (it differs per caller — `… messages[i]` for
+ * a conversation).
  */
 const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => {
   if (typeof message !== "object" || message === null) {
@@ -124,8 +129,9 @@ const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => 
         `（画像 / 音声パートの配列は初版では拒否する — ADR 0084 決定 5）`,
     );
   }
-  // 上流は model turn の本文にだけ `strip_thinking` を掛ける（thinking チャネルを本文から
-  // 巻き戻す）。ここは掛けないので、綴りが本文に居ると**黙って別の文字列**になる。
+  // Upstream applies `strip_thinking` only to the body of a model turn (it rewinds the thinking
+  // channel out of the body). It is not applied here, so a spelling in the body would **silently
+  // become a different string**.
   if (
     message.role === "assistant" &&
     (message.content.includes(START_OF_CHANNEL) || message.content.includes(END_OF_CHANNEL))
@@ -138,10 +144,10 @@ const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => 
 };
 
 /**
- * 素の会話であることを確かめる（射程外は fail loudly）。
+ * Checks that this is a plain conversation (out of scope fails loudly).
  *
- * MUST: 空の会話も落とす — 上流の `apply_chat_template` が `ValueError` で拒否するので、
- * 受理集合を上流より広げない。
+ * MUST: also reject an empty conversation — upstream `apply_chat_template` rejects it with a
+ * `ValueError`, so the accepted set is not made wider than upstream's.
  */
 const assertPlainConversation = (messages: readonly Gemma4ChatMessage[]): void => {
   if (messages.length === 0) {
@@ -155,21 +161,23 @@ const assertPlainConversation = (messages: readonly Gemma4ChatMessage[]): void =
 };
 
 /**
- * 会話 → 上流 `apply_chat_template(add_generation_prompt=True)` と同じ文字列。
+ * Conversation → the same string as upstream `apply_chat_template(add_generation_prompt=True)`.
  *
- * 踏む分岐は 3 本だけ（実測 — ADR 0084 決定 5 / research §6）:
+ * Only three branches are taken (measured — ADR 0084 decision 5 / the 2026-08-31 generation API
+ * draft §6):
  *
- * 1. **先頭が `system` / `developer`** なら `<|turn>system\n…<turn|>\n` の system ブロックへ
- *    落ちる。`developer` でも綴りは `system` になる（role をそのまま出さない唯一の位置）—
- *    2 番目以降の `developer` は `<|turn>developer\n` である。
- * 2. `assistant` は `model` へ写像され、**直前の role も `assistant`** なら turn を開き直さ
- *    ない（連続 assistant は 1 つの model turn へ畳まれる。閉じる側も対称に飛ばす）。
- * 3. 末尾に生成プロンプト `<|turn>model\n` を必ず置く（この関数は生成の入口専用で、
- *    「学習用に閉じた会話を描く」形は持たない）。
+ * 1. If **the first message is `system` / `developer`**, it falls into the system block
+ *    `<|turn>system\n…<turn|>\n`. Even `developer` is spelled `system` (the only position where the
+ *    role is not emitted as is) — a second or later `developer` is `<|turn>developer\n`.
+ * 2. `assistant` is mapped to `model`, and if **the previous role is also `assistant`** the turn is
+ *    not reopened (consecutive assistants fold into one model turn; the closing side is skipped
+ *    symmetrically).
+ * 3. The generation prompt `<|turn>model\n` is always placed at the end (this function is only the
+ *    entry to generation; it has no form for "rendering a closed conversation for training").
  *
- * NOTE: 公開面には出さない（ADR 0008 の薄い面 — 消費者の入口は
- * {@link gemma4ChatPrompt}）。`export` はフィクスチャ突合で「描画」と「符号化」を別々に
- * 見るため — 割れたときにどちらの段かが読み手に伝わる。
+ * NOTE: not exposed on the public surface (the thin surface of ADR 0008 — the consumer's entry is
+ * {@link gemma4ChatPrompt}). `export` is so that the fixture comparison looks at "rendering" and
+ * "encoding" separately — when they diverge, the reader learns which step it was.
  */
 export const renderGemma4Chat = (messages: readonly Gemma4ChatMessage[]): string => {
   assertPlainConversation(messages);
@@ -179,8 +187,8 @@ export const renderGemma4Chat = (messages: readonly Gemma4ChatMessage[]): string
     out += `${START_OF_TURN}system\n${trim(messages[0].content)}${END_OF_TURN}\n`;
     index = 1;
   }
-  // 継続の判定は**写像前**の role で行う（`model` へ写した後だと、system ブロックを挟んだ
-  // 直後の assistant が「継続」に見える）。
+  // Continuation is decided on the role **before mapping** (after mapping to `model`, an assistant
+  // right after the system block would look like a "continuation").
   let previousRole: Gemma4ChatRole | undefined;
   for (; index < messages.length; index += 1) {
     const message = messages[index];
@@ -197,13 +205,15 @@ export const renderGemma4Chat = (messages: readonly Gemma4ChatMessage[]): string
 };
 
 /**
- * 会話 → token id 列（`<bos>` 込み・末尾は生成プロンプト）。
+ * Conversation → token ids (`<bos>` included, ending with the generation prompt).
  *
- * 上流と同じ 2 段（描画 → `add_special_tokens=False` の符号化）で組む。chat の綴りは追加
- * 語彙なので、`encode` の leftmost-longest の切り出しがそのまま 1 トークンへ落とす。
+ * Built in the same two steps as upstream (render → encode with `add_special_tokens=False`). The
+ * chat spellings are added vocabulary, so the leftmost-longest split of `encode` turns each into one
+ * token as is.
  *
- * 合格線（段 4）は HF `apply_chat_template` の出力との **id 列一致**で、フィクスチャは
- * `tools/export-recipes/gemma4/chat.py` が上流から独立に採る（ADR 0084 決定 7）。
+ * The pass line (stage 4) is an **id-sequence match** with the output of HF `apply_chat_template`;
+ * the fixtures are taken independently from upstream by `tools/export-recipes/gemma4/chat.py`
+ * (ADR 0084 decision 7).
  */
 export const gemma4ChatPrompt = (
   tokenizer: GemmaTokenizer,
@@ -211,31 +221,37 @@ export const gemma4ChatPrompt = (
 ): number[] => tokenizer.encode(renderGemma4Chat(messages));
 
 /**
- * 新しい発話 1 つ → **会話の続きとして描き足す差分**（`<bos>` も過去 turn も含まない）。
+ * One new message → **the delta rendered as the continuation of the conversation** (containing
+ * neither `<bos>` nor past turns).
  *
- * ## MUST: 前 turn を閉じる `<turn|>` は含めない（turn-local 契約）
+ * ## MUST: do not include the `<turn|>` that closes the previous turn (the turn-local contract)
  *
- * 直前の model turn を閉じる `<turn|>` は、生成が出して `GenerationSequence` が未 commit の
- * frontier（`pendingToken`）として持っている綴りで、**次の `generate` が prompt の先頭へ自動で
- * 連結する**（ADR 0083 決定 4）。ここが描くのはその**次**からで、先頭は `<turn|>` の直後に来る
- * 改行である。二重に描くと turn の区切りが 2 つになり、例外は 1 つも出ない。
+ * The `<turn|>` that closes the previous model turn is a spelling generation emitted and that
+ * `GenerationSequence` holds as the uncommitted frontier (`pendingToken`); **the next `generate`
+ * prepends it to the prompt automatically** (ADR 0083 decision 4). This renders from **after** it,
+ * starting with the newline that follows `<turn|>`. Rendering it twice would make two turn
+ * separators, and not a single exception would occur.
  *
- * つまり成立する等式は（`⧺` は token 列の連結）:
+ * So the identity that holds is (`⧺` is token-sequence concatenation):
  *
  * ```text
- * gemma4ChatPrompt(全会話)
- *   = gemma4ChatPrompt(先頭 turn まで) ⧺ 生成された本文 ⧺ [<turn|>] ⧺ gemma4ChatTurn(次の発話) ⧺ …
+ * gemma4ChatPrompt(whole conversation)
+ *   = gemma4ChatPrompt(up to the first turn) ⧺ generated body ⧺ [<turn|>]
+ *     ⧺ gemma4ChatTurn(next message) ⧺ …
  * ```
  *
- * この等式は `gemma4_chat_test.ts` の門が任意の分割で見る（template の turn-local 性が壊れたら
- * そこで割れる — 消費者に「先頭の `<bos>` を剥がす」当て推量を書かせないための正本）。
+ * The check in `gemma4_chat_test.ts` verifies this identity over arbitrary splits (it breaks there
+ * if the template's turn-locality breaks — the source of truth that keeps consumers from writing a
+ * guess such as "strip the leading `<bos>`").
  *
- * MUST: 使えるのは**生成が `<turn|>` で閉じた直後**だけである。max-tokens や `break` で打ち切った
- * ターンの続きは model turn が閉じていないので、増分ではなく続きの生成（`prompt: []`）が正。
+ * MUST: usable only **right after generation closed with `<turn|>`**. A turn cut off by max-tokens or
+ * `break` has an unclosed model turn, so the right continuation is further generation
+ * (`prompt: []`), not a delta.
  *
- * MUST: `assistant` は拒否する。model turn は生成が埋める席で、上流の template も連続 assistant を
- * 1 つの turn へ畳む（`renderGemma4Chat` の分岐 2）ため、「閉じた model turn の後ろへ assistant を
- * 足す」形は差分として描けない。会話へ差し込むなら {@link gemma4ChatPrompt} で全体を描き直す。
+ * MUST: reject `assistant`. The model turn is the slot generation fills, and the upstream template
+ * also folds consecutive assistants into one turn (branch 2 of `renderGemma4Chat`), so "appending an
+ * assistant after a closed model turn" cannot be rendered as a delta. To insert one into a
+ * conversation, re-render the whole of it with {@link gemma4ChatPrompt}.
  */
 export const renderGemma4ChatTurn = (message: Gemma4ChatMessage): string => {
   assertPlainMessage(message, "gemma4ChatTurn: message");
@@ -246,8 +262,9 @@ export const renderGemma4ChatTurn = (message: Gemma4ChatMessage): string => {
         `会話へ差し込むなら gemma4ChatPrompt で全体を描き直す）`,
     );
   }
-  // 先頭の改行は「前 turn を閉じた `<turn|>` の直後」の 1 文字（`renderGemma4Chat` の
-  // `${END_OF_TURN}\n`）。`<turn|>` 自体は pendingToken が前置するのでここには無い。
+  // The leading newline is the one character "right after the `<turn|>` that closed the previous
+  // turn" (the `${END_OF_TURN}\n` of `renderGemma4Chat`). `<turn|>` itself is prepended by
+  // pendingToken, so it is not here.
   return (
     `\n${START_OF_TURN}${message.role}\n${trim(message.content)}${END_OF_TURN}\n` +
     `${START_OF_TURN}${MODEL_ROLE}\n`
@@ -255,25 +272,28 @@ export const renderGemma4ChatTurn = (message: Gemma4ChatMessage): string => {
 };
 
 /**
- * 新しい発話 1 つ → **次の `generate` にそのまま渡せる差分 token 列**（turn-local 契約は
- * {@link renderGemma4ChatTurn} の doc が正本 — 前 turn を閉じる `<turn|>` は含めない）。
+ * One new message → **a delta token sequence that can be passed to the next `generate` as is** (the
+ * doc of {@link renderGemma4ChatTurn} is the source of truth for the turn-local contract — the
+ * `<turn|>` that closes the previous turn is not included).
  *
- * 多ターンの会話を `Gemma4Pipeline.sequence()` で回すときの入口である。過去 turn は context の
- * KV にあるので、毎ターン会話全体を描き直す（= O(n²) の prefill）必要は無い。
+ * This is the entry for running a multi-turn conversation with `Gemma4Pipeline.sequence()`. Past
+ * turns are in the context's KV, so there is no need to re-render the whole conversation every turn
+ * (= an O(n²) prefill).
  */
 export const gemma4ChatTurn = (tokenizer: GemmaTokenizer, message: Gemma4ChatMessage): number[] =>
   tokenizer.encode(renderGemma4ChatTurn(message));
 
 /**
- * 停止 token の集合（ADR 0083 決定 8）— **トークナイザ資産から導出する**。
+ * The set of stop tokens (ADR 0083 decision 8) — **derived from the tokenizer asset**.
  *
- * gemma-4-E2B-it の `generation_config.json` は `eos_token_id = [1, 106, 50]`（`<eos>` /
- * `<turn|>` / `<|tool_response>`）を宣言する。数を焼き写さず綴りから引くのは、chat 形式と
- * EOS 集合が**同じ配布 digest set** から来る必要があるためである（ADR 0084 決定 5 — 別々の
- * 場所から拾うと片方だけ古くなる）。資産が入れ替われば id も一緒に動く。
+ * The `generation_config.json` of gemma-4-E2B-it declares `eos_token_id = [1, 106, 50]` (`<eos>` /
+ * `<turn|>` / `<|tool_response>`). The ids are looked up from their spellings rather than hard-coded
+ * because the chat format and the EOS set must come from **the same distribution digest set**
+ * (ADR 0084 decision 5 — picked up from separate places, one of them goes stale). When the asset is
+ * replaced, the ids move with it.
  *
- * MUST: 綴りが欠けている資産は fail loudly。集合が痩せたまま通すと「`<turn|>` で止まらず
- * 次の turn を自分で書き始める」形になり、例外は 1 つも出ない。
+ * MUST: an asset missing a spelling fails loudly. Passing a thinned set would end up "not stopping
+ * at `<turn|>` and starting to write the next turn itself", and not a single exception would occur.
  */
 export const gemma4StopTokens = (tokenizer: GemmaTokenizer): number[] => {
   const stops = [tokenizer.eosId];

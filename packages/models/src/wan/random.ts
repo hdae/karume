@@ -1,31 +1,35 @@
 /**
- * 決定的な標準正規乱数（Wan の初期ノイズ — ADR 0118 決定 5）。
+ * Deterministic standard normal random numbers (Wan's initial noise — ADR 0118 decision 5).
  *
- * 乱数はグラフに焼かない（ADR 0013 — 実行時ノブと乱数はホスト側）。seed 付きの生成器を持つのは
- * **同じ seed なら同じ動画が出る**ことを再現性の前提にするため。
+ * Random numbers are not baked into the graph (ADR 0013 — runtime knobs and random numbers live on
+ * the host). There is a seeded generator so that reproducibility can rest on **the same seed giving
+ * the same video**.
  *
- * 実装は splitmix64 + Box–Muller。`anima/random.ts` / `sbv2/host/random.ts` /
- * `irodori/host/random.ts` の `Randn` と**同じ核の意図的な複製**で、互いに import しない
- * （`generation/random.ts` の doc の前例 — 乱数列はその消費者の出力を決める入力なので、共有すると
- * 片方の都合〈消費順・生成量〉がもう片方の出力を静かに動かす）。
+ * The implementation is splitmix64 + Box–Muller. It is a **deliberate duplicate of the same core** as
+ * the `Randn` of `anima/random.ts` / `sbv2/host/random.ts` / `irodori/host/random.ts`, and none of
+ * them import each other (the precedent is the doc of `generation/random.ts` — a random sequence is
+ * an input that determines its consumer's output, so sharing it would let one consumer's needs
+ * (consumption order, amount drawn) silently move the other's output).
  *
- * ## MUST: torch の `randn` とは別物である
+ * ## MUST: this is not torch's `randn`
  *
- * 同じ seed を与えても torch の列にはならない。参照との照合はこの生成器で作った潜在ではなく、
- * fixture の `latents_init` を `WanGenerateRequest.latents` で注入して行う。
+ * The same seed does not give torch's sequence. Comparison with the reference does not use latents
+ * made by this generator; it injects the fixture's `latents_init` through
+ * `WanGenerateRequest.latents`.
  */
 
-// seed の受理集合（非負の安全整数）の所有者は家族横断の `request-gates.ts` 1 本。
+// The owner of the accepted seed set (non-negative safe integers) is the one cross-family
+// `request-gates.ts`.
 import { assertAcceptableSeed } from "../request-gates.ts";
 
 const GOLDEN_GAMMA = 0x9e3779b97f4a7c15n;
 const MIX_1 = 0xbf58476d1ce4e5b9n;
 const MIX_2 = 0x94d049bb133111ebn;
 const MASK_64 = (1n << 64n) - 1n;
-/** [0,1) の一様乱数を作るときの分母（53bit 仮数ぶん）。 */
+/** The denominator for drawing a uniform number in [0,1) (a 53-bit mantissa). */
 const DENOMINATOR = 1n << 53n;
 
-/** splitmix64 の 1 ステップ。 */
+/** One step of splitmix64. */
 const nextUint64 = (state: bigint): { readonly state: bigint; readonly value: bigint } => {
   const next = (state + GOLDEN_GAMMA) & MASK_64;
   let z = next;
@@ -34,7 +38,7 @@ const nextUint64 = (state: bigint): { readonly state: bigint; readonly value: bi
   return { state: next, value: (z ^ (z >> 31n)) & MASK_64 };
 };
 
-/** 決定的な標準正規列の生成器（`seed` が同じなら同じ列）。 */
+/** Generator of a deterministic standard normal sequence (the same `seed` gives the same sequence). */
 export class WanRandn {
   #state: bigint;
 
@@ -43,7 +47,7 @@ export class WanRandn {
     this.#state = BigInt(seed) & MASK_64;
   }
 
-  /** [0, 1) の一様乱数。 */
+  /** A uniform random number in [0, 1). */
   #uniform(): number {
     const { state, value } = nextUint64(this.#state);
     this.#state = state;
@@ -51,9 +55,10 @@ export class WanRandn {
   }
 
   /**
-   * 標準正規列を `count` 要素ぶん引いて f32 で返す。
+   * Draws `count` elements of the standard normal sequence and returns them as f32.
    *
-   * MUST: 奇数長でも Box–Muller の対を丸ごと消費する（余った sin 側を次の呼び出しへ持ち越さない）。
+   * MUST: consume whole Box–Muller pairs even for an odd length (do not carry the leftover sin side
+   * over to the next call).
    */
   normals(count: number): Float32Array<ArrayBuffer> {
     if (!Number.isInteger(count) || count < 0) {
@@ -61,7 +66,8 @@ export class WanRandn {
     }
     const out = new Float32Array(count);
     for (let i = 0; i < count; i += 2) {
-      // u1 = 0 は log(0) = -Inf を生む。53-bit 格子の中点 0.5/2^53 へ寄せる（anima と同じ扱い）。
+      // u1 = 0 yields log(0) = -Inf. Move it to the midpoint 0.5/2^53 of the 53-bit grid (the same
+      // handling as anima).
       const u1 = this.#uniform() || 0.5 / 2 ** 53;
       const u2 = this.#uniform();
       const radius = Math.sqrt(-2 * Math.log(u1));

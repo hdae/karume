@@ -1,73 +1,79 @@
 /**
- * `IrodoriPipeline` — テキスト（+ caption + 参照話者）→ **波形** の 1 本の面。
+ * `IrodoriPipeline` — one surface from text (+ caption + reference speaker) to a **waveform**.
  *
- * 出口は 2 つある: {@link IrodoriPipeline.generate}（波形）と
- * {@link IrodoriPipeline.generateLatent}（patch 済み latent `[S,32]` — codec を回さない）。
- * 後者は latent 門（`e2e_irodori_latent_test.ts`）の基盤であり、埋め込みだけが要る使い方の口。
+ * It has two exits: {@link IrodoriPipeline.generate} (waveform) and
+ * {@link IrodoriPipeline.generateLatent} (patched latent `[S,32]` — the codec does not run).
+ * The latter is the basis of the latent check (`e2e_irodori_latent_test.ts`) and the entry point
+ * for uses that need only the embedding.
  *
- * 参照話者は 3 通りで渡せる（`IrodoriSpeakerInput`）— 参照音声そのもの（`audio`・下の段 0）/
- * その DACVAE latent（`latent`）/ 出来合いの speaker state（`stateOverride`）。
+ * The reference speaker can be given in three ways (`IrodoriSpeakerInput`) — the reference audio
+ * itself (`audio` — stage 0 below) / its DACVAE latent (`latent`) / a ready-made speaker state
+ * (`stateOverride`).
  *
- * パイプライン（NN は全段 Karume・torch 不使用）:
+ * Pipeline (every NN stage runs on Karume — no torch):
  *
- * 0. ホスト: 参照音声を 120 秒で切り詰め → LUFS −16 正規化 → reflect pad →
- *    `codec_encoder` で latent へ（`audio` を渡したときだけ — `host/reference.ts`）
- * 1. ホスト: `normalize_text` → BOS 前置 → **詰めた** token 列（静的方式 — pad で呼ばない）
- * 2. `backbone`（ModernBERT）を text / caption の 2 回（**同じ 1 セッション**）
- * 3. `text-proj` → text 条件 / `caption-proj`（2 出力）→ caption 条件 + `caption_vec`
- * 4. ホスト: 参照 latent を patch → `speaker` → **平均トークンを前置**（グラフの外）
- * 5. `duration` → log frames → ホストで S を決める（expm1 → 銀行家丸め → clamp）
- * 6. ホスト: 条件 state を Tmax へ右 pad + 区間マスクを組む
- * 6'. `dit_context` を生成 1 回だけ回す（条件側 K/V 射影 — ブロックごとの context K / V を
- *    常駐テンソルへ写し、Session は `dit` を開く前に畳む。DECIDED: ADR 0114）
- * 7. `dit` を 1 セッションで 40〜100 forward（6' の K / V を常駐入力で受ける。CFG 合成と Euler
- *    は GPU 常駐の小グラフ 2 本 — ループ全体が 1 batch で、ホストへ降りるのは最後の潜在 1 回
- *    だけ）→ latent
- * 8. ホスト: 末尾トリムの位置を **z 上で**決める（`host/trim.ts`）
- * 9. `codec_decoder` を 1 セッションでタイルぶん回す（`codec.ts`）→ 全長の波形
- * 10. ホスト: 秒指定 / 末尾トリムの短いほうでサンプル単位に切る
+ * 0. Host: truncate the reference audio to 120 s → LUFS −16 normalization → reflect pad →
+ *    `codec_encoder` to a latent (only when `audio` is given — `host/reference.ts`)
+ * 1. Host: `normalize_text` → prepend BOS → a **packed** token sequence (static scheme — not called
+ *    with padding)
+ * 2. `backbone` (ModernBERT) twice, for text and caption (**in the same single session**)
+ * 3. `text-proj` → text condition / `caption-proj` (2 outputs) → caption condition + `caption_vec`
+ * 4. Host: patch the reference latent → `speaker` → **prepend the mean token** (outside the graph)
+ * 5. `duration` → log frames → the host decides S (expm1 → banker's rounding → clamp)
+ * 6. Host: right-pad the condition states to Tmax + build the segment mask
+ * 6'. Run `dit_context` once per generation (context K/V projection — copies each block's context
+ *    K / V into resident tensors, and the Session is closed before `dit` opens. DECIDED: ADR 0114)
+ * 7. `dit` runs 40 to 100 forwards in one session (it takes the K / V of 6' as resident inputs. The
+ *    CFG combination and Euler are two small GPU-resident graphs — the whole loop is one batch, and
+ *    the only trip to the host is the final latent, once) → latent
+ * 8. Host: decide the tail-trim position **on z** (`host/trim.ts`)
+ * 9. `codec_decoder` runs over the tiles in one session (`codec.ts`) → full-length waveform
+ * 10. Host: cut at sample granularity to the shorter of the requested seconds / the tail trim
  *
- * ## MUST: グラフは段ごとに開いて閉じる（`dit` と `codec_decoder` だけが複数 run）
+ * ## MUST: graphs are opened and closed per stage (only `dit` and `codec_decoder` run several times)
  *
- * {@link IrodoriPipeline.fromAssets} は **Session を 1 本も張らない** — 開くのはコンテナ
- * （`openContainer` = 2 文書の解析のみ）までで、GPU 常駐は {@link IrodoriPipeline.generate} の
- * 中で段ごとに張っては畳む。`backbone` だけで 1.26GB あるので、条件エンコーダと DiT を
- * 同時に生かさない。codec も同じ理由で DiT を畳んでから張る。`dit_context` も `dit` を張る
- * **前**に畳む（条件側の linear の重みと出力スロットを DiT のループ中に残さない — 残るのは
- * 常駐テンソルに写した K / V だけ）。DiT の段だけは `dit` に加えてホストで組んだ小グラフ 2 本
- * （{@link "./dit-loop.ts"} の `runDitLoopResident`）を同時に張るが、重みを持たないノード
- * 5 個ぶんなので VRAM の話には効かない。
+ * {@link IrodoriPipeline.fromAssets} **opens no Session at all** — it goes as far as opening the
+ * containers (`openContainer` = parsing the 2 documents only), and GPU residency is set up and torn
+ * down stage by stage inside {@link IrodoriPipeline.generate}. `backbone` alone is 1.26GB, so the
+ * condition encoders and the DiT are never alive at the same time. For the same reason the codec is
+ * opened after the DiT is closed. `dit_context` is also closed **before** `dit` is opened (the
+ * weights and output slots of the condition-side linears do not stay during the DiT loop — only the
+ * K / V copied into resident tensors remain). Only the DiT step opens, besides `dit`, two small
+ * graphs built on the host (`runDitLoopResident` in {@link "./dit-loop.ts"}) at the same time, but
+ * they are 5 nodes without weights, so they do not matter for VRAM.
  *
- * MUST: この段取りは**公開 API 側でも**守る — `generate` / `generateLatent` は直列化鎖に載せ
- * （並行呼び出しは待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。
- * 載せないと、並行呼び出し 2 本ぶんのグラフが同時常駐し、生成中の dispose が
- * flush-before-destroy を破る。
+ * MUST: this sequencing is kept **on the public API side too** — `generate` / `generateLatent` go
+ * on a serialization chain (concurrent calls wait and run in order), and `dispose` waits for its
+ * completion before destroying the GPU. Without the chain, the graphs of two concurrent calls are
+ * resident at the same time, and a dispose during generation breaks flush-before-destroy.
  *
- * ## NOTE: `codec_encoder` はタイル分割しない（decoder と非対称）
+ * ## NOTE: `codec_encoder` is not tiled (asymmetric with the decoder)
  *
- * 参照音声は 1 回の encode で流す。encoder の中間テンソルは 120 秒（T = 3000）で 1.47GB × 2 に
- * 達するので、**`maxStorageBufferBindingSize` が既定の 128MiB しか無い機では長い参照で確保に
- * 失敗する**（decoder 側の {@link DEFAULT_CODEC_TILE_FRAMES} に相当するものが無い）。参照音声は
- * 数秒〜十数秒が普通で、そこでは単発が通る。タイル化が要ると分かったら decoder と同じ形
- * （halo 付きの平行移動同変）をもう 1 本入れる。
+ * The reference audio goes through in one encode. The encoder's intermediate tensors reach
+ * 1.47GB × 2 at 120 s (T = 3000), so **on a machine whose `maxStorageBufferBindingSize` is only
+ * the default 128MiB, a long reference fails to allocate** (there is no counterpart of the
+ * decoder's {@link DEFAULT_CODEC_TILE_FRAMES}). A reference audio is usually a few seconds to a
+ * dozen or so, and a single pass works there. If tiling turns out to be needed, add one more of
+ * the same form as the decoder (translation equivariance with a halo).
  *
- * ## MUST: 低精度ノブが効くのは `dit` と `dit_context` だけ
+ * ## MUST: the low-precision knobs apply only to `dit` and `dit_context`
  *
- * quant の `session` は `dit` と `dit_context` の Session にだけ渡す。条件エンコーダ 5 本は
- * 1 回ずつしか回らず（合成時間の支配項は 40〜100 forward の DiT）、実行形ノブの比較軸を DiT に
- * 保つ。`dit_context` は DiT から割り出した条件側で、分割前は `dit` の中で同じ席で走っていた
- * — 別の席で走らせると数値が動く。
+ * The quant's `session` is passed only to the Sessions of `dit` and `dit_context`. The five
+ * condition encoders run only once each (the dominant term of synthesis time is the DiT's 40 to
+ * 100 forwards), which keeps the comparison axis of the execution knobs on the DiT. `dit_context`
+ * is the condition side split out of the DiT, and before the split it ran inside `dit` with the
+ * same options — running it with other options moves the numbers.
  *
- * ## MUST: uncond は「cond の state + 該当区間のマスク全 False」だけ（ADR 0047 決定 1）
+ * ## MUST: uncond is only "cond's state + an all-False mask over the segment" (ADR 0047 decision 1)
  *
- * `speakerUncondMode` / `cfgGuidanceMode` が対応外の配布形は **`config.ts` が parse 時に
- * 拒否する**ので、ここに分岐は無い。
+ * A distribution whose `speakerUncondMode` / `cfgGuidanceMode` is unsupported is **rejected by
+ * `config.ts` at parse time**, so there is no branch here.
  *
- * ## MUST: 数値の正はここでは担保されない
+ * ## MUST: numerical correctness is not guaranteed here
  *
- * 正はグラフ単位の golden E2E（`packages/runtime/tests/e2e_irodori_test.ts`）と、full-loop の
- * latent golden（`tools/export-recipes/irodori/pipeline_ref.py` が出す
- * `pipeline/case.*.safetensors`）が担保する。
+ * Correctness is guaranteed by the per-graph golden E2E (`packages/e2e/tests/e2e_irodori_test.ts`)
+ * and the full-loop latent golden (`pipeline/case.*.safetensors`, written by
+ * `tools/export-recipes/irodori/pipeline_ref.py`).
  */
 
 import {
@@ -176,109 +182,120 @@ import {
 import { ModelInputError } from "../errors.ts";
 import { assertAcceptableSeed } from "../request-gates.ts";
 
-/** 生成結果。`data` は patch 済み latent `[frames × latentDim]`（行優先）。 */
+/** Generation result. `data` is the patched latent `[frames × latentDim]` (row-major). */
 export type GeneratedLatent = {
   readonly data: Float32Array<ArrayBuffer>;
-  /** latent のフレーム数 S。 */
+  /** Number of latent frames S. */
   readonly frames: number;
   readonly latentDim: number;
   /**
-   * 実際に使った乱数 seed。`initialNoise` を渡した生成では乱数を 1 度も引かないので `undefined`。
+   * The random seed actually used. `undefined` for a generation given `initialNoise`, which never
+   * draws a random number.
    */
   readonly seed?: number;
-  /** `dit` を回した回数（cond + CFG の uncond）。 */
+  /** How many times `dit` ran (cond + the CFG uncond passes). */
   readonly forwards: number;
 };
 
 /**
- * 生成結果（波形）。`data` は**切り出し済み**のモノラル f32（`encodeWav` へそのまま渡せる）。
+ * Generation result (waveform). `data` is **already cut** mono f32 (can be passed to `encodeWav`
+ * as is).
  *
- * 名前に接頭辞が付いているのは、barrel（`mod.ts`）が SBV2 の `GeneratedAudio` を既に出して
- * いるため（あちらは `{ sampleRate, data }` の 2 欄で、こちらは latent 側の観測値も返す）。
+ * The name carries a prefix because the barrel (`mod.ts`) already exports SBV2's `GeneratedAudio`
+ * (that one has the 2 fields `{ sampleRate, data }`; this one also returns observations from the
+ * latent side).
  */
 export type IrodoriGeneratedAudio = {
   readonly data: Float32Array<ArrayBuffer>;
   readonly sampleRate: number;
-  /** 生成した latent のフレーム数 S。**波形長は末尾トリムでこれより短くなりうる**。 */
+  /** Number of generated latent frames S. **The tail trim can make the waveform shorter**. */
   readonly frames: number;
-  /** 実際に使った乱数 seed。`initialNoise` を渡した生成では `undefined`。 */
+  /** The random seed actually used. `undefined` for a generation given `initialNoise`. */
   readonly seed?: number;
-  /** `dit` を回した回数（cond + CFG の uncond）。 */
+  /** How many times `dit` ran (cond + the CFG uncond passes). */
   readonly forwards: number;
 };
 
 /**
- * 参照話者の与え方。
+ * How the reference speaker is given.
  *
- * - `audio` — 参照音声そのもの（モノラル f32 + サンプリング周波数）。`decodeWav` の返り値を
- *   そのまま渡せる。ホストで正規化 → `codec_encoder` を通してから `latent` と同じ経路へ合流
- *   する。**周波数は配布形の `sampleRate` と一致していなければならない**（リサンプルは
- *   持たない — 違えば fail loudly）。長さの下限は `(2 × speakerPatchSize − 1) × hopLength + 1`
- *   サンプル（patch 後に speaker の下限 2 トークン — v4 / v4.1 small の配布形で 13,441 サンプル）で、
- *   満たなければ入口で `ModelInputError`。
- * - `latent` — 参照音声の DACVAE latent `[frames × latentDim]`。patch → `speaker` →
- *   平均トークン前置の**正規経路**を通る。フレーム数の下限は `2 × speakerPatchSize`（同 8 フレーム）
- *   で、満たなければ入口で `ModelInputError`。
- * - `stateOverride` — 既に作ってある speaker state `[rows × speakerDim]`。`speaker` グラフも
- *   `speaker_norm` も平均トークン前置も**通さず**そのまま条件として使う（上流の
- *   `speaker_state_override` — 埋め込みを配る運用のための口）。
+ * - `audio` — the reference audio itself (mono f32 + sampling rate). The return value of
+ *   `decodeWav` can be passed as is. It is normalized on the host → goes through `codec_encoder`
+ *   and then joins the same path as `latent`. **The rate must match the distribution's
+ *   `sampleRate`** (there is no resampling — a mismatch fails loudly). The minimum length is
+ *   `(2 × speakerPatchSize − 1) × hopLength + 1` samples (the speaker minimum of 2 tokens after
+ *   patching — 13,441 samples for the v4 / v4.1 small distributions); a shorter one is a
+ *   `ModelInputError` at the entry.
+ * - `latent` — the DACVAE latent `[frames × latentDim]` of the reference audio. It goes through the
+ *   **regular path** of patch → `speaker` → prepending the mean token. The minimum frame count is
+ *   `2 × speakerPatchSize` (8 frames for the same distributions); a shorter one is a
+ *   `ModelInputError` at the entry.
+ * - `stateOverride` — a speaker state `[rows × speakerDim]` built beforehand. It is used as the
+ *   condition as is, **bypassing** the `speaker` graph, `speaker_norm` and the mean-token prepend
+ *   (upstream's `speaker_state_override` — the entry point for distributing embeddings).
  */
 export type IrodoriSpeakerInput =
   | { readonly audio: { readonly data: Float32Array<ArrayBuffer>; readonly sampleRate: number } }
   | { readonly latent: Float32Array<ArrayBuffer> }
   | { readonly stateOverride: Float32Array<ArrayBuffer> };
 
-/** 1 回の生成要求。 */
+/** One generation request. */
 export type IrodoriGenerateRequest = {
   readonly text: string;
-  /** 声色の指示文（Voice Design）。空 / 未指定なら caption 条件はゼロ供給 + CFG off。 */
+  /**
+   * Voice instruction text (Voice Design). Empty / unset gives a zero caption condition + CFG off.
+   */
   readonly caption?: string;
   readonly speaker?: IrodoriSpeakerInput;
-  /** 乱数 seed（既定 0 — 同じ seed なら同じ latent）。 */
+  /** Random seed (default 0 — the same seed gives the same latent). */
   readonly seed?: number;
   /**
-   * 初期ノイズ `[frames × latentDim]` の直接注入。**再現・検証用の口**で、通常の生成では
-   * 使わない（統合門が torch の乱数列をそのまま食わせるために置いてある）。長さは決まった
-   * S に一致していなければならないので、`durationSeconds` と併せて使うのが普通。
+   * Direct injection of the initial noise `[frames × latentDim]`. **An entry point for
+   * reproduction and verification**, not used in normal generation (it exists so the integration
+   * check can feed torch's random sequence as is). Its length must match the decided S, so it is
+   * normally used together with `durationSeconds`.
    */
   readonly initialNoise?: Float32Array<ArrayBuffer>;
   /**
-   * 発話長の直接指定（秒）。渡すと `duration` グラフを**回さない**（上流の `manual_seconds`）。
+   * Direct utterance length (seconds). When given, the `duration` graph **does not run**
+   * (upstream's `manual_seconds`).
    */
   readonly durationSeconds?: number;
   /**
-   * codec decode を 1 回あたり何 latent フレームに割るか（既定
-   * {@link DEFAULT_CODEC_TILE_FRAMES}）。**性能とメモリのノブで、出力は変わらない** —
-   * halo を捨てた採用区間は全長 decode とビット一致する（`codec.ts` のモジュール doc）。
-   * S がこの値以下なら 1 枚に縮退する（= 単発 decode）。
+   * How many latent frames one codec decode takes (default {@link DEFAULT_CODEC_TILE_FRAMES}).
+   * **A performance and memory knob that does not change the output** — the kept spans, with the
+   * halo discarded, are bit-identical to a full-length decode (module doc of `codec.ts`).
+   * When S is at most this value it collapses to one tile (= a single decode).
    */
   readonly codecTileFrames?: number;
   /**
-   * 生成イベントの観測席（{@link IrodoriGenerateEvent}）— 段の開始 / 終了と DiT の 1 step
-   * 完了ごとに呼ばれる。
+   * Hook for generation events ({@link IrodoriGenerateEvent}) — called at the start / end of each
+   * step and at the completion of each DiT step.
    *
-   * **await する**（発火の順序が決定的になり、消費側で間引き / スロットリングができる）。
-   * **例外は握らない**（`onRunDiagnostics` と同じ流儀 = fail loudly）— 副産物として
-   * **throw が step 粒度の中断手段**になる（生成は reject し、Session は `withSession` の
-   * `finally` で解放される）。
+   * **It is awaited** (the firing order becomes deterministic, and the consumer can thin out /
+   * throttle). **Exceptions are not swallowed** (the same convention as `onRunDiagnostics` = fail
+   * loudly) — as a by-product, **a throw is the way to abort at stage granularity** (generation
+   * rejects, and the Session is released in the `finally` of `withSession`).
    *
-   * MUST: 指定すると DiT ループは**ホスト経路**で回る（`gpuTiming` と同じ選択機構）。常駐経路
-   * （ADR 0054）は全 step を 1 batch + 単一フェンスに束ねる設計なので途中の観測が構造的に
-   * 不可能で、`enqueue` 時点の発火は「進捗」として嘘になる。**代償は壁時計だけ** — ADR 0054 が
-   * DiT ループに与えた 1.76 倍を放棄する（生成全体では実測 7.2 → 8.6 秒 / S 170・参照環境
-   * 2026-08-16）。2 経路の出力はビット同一（`runDitLoopResident` の MUST）なので**波形は
-   * 1 ビットも変わらない**（`e2e_irodori_wav_test.ts` の onEvent 段が同じ sha256 で門にしている）。
+   * MUST: when given, the DiT loop runs on the **host path** (the same selection mechanism as
+   * `gpuTiming`). The resident path (ADR 0054) bundles all stages into 1 batch + a single fence, so
+   * observing midway is structurally impossible, and firing at `enqueue` time would be a lie as
+   * "progress". **The cost is wall time only** — it gives up the 1.76× that ADR 0054 brought to
+   * the DiT loop (whole generation measured at 7.2 → 8.6 s / S 170, reference environment
+   * 2026-08-16). The outputs of the 2 paths are bit-identical (the MUST of `runDitLoopResident`),
+   * so **the waveform does not change by a single bit** (the onEvent step of
+   * `e2e_irodori_wav_test.ts` checks it with the same sha256).
    *
-   * MUST: `onEvent` の中で同じパイプラインの `generate` / `generateLatent` / `dispose` を
-   * await してはならない（直列化鎖の自己デッドロック — 中断は throw で行う）。
+   * MUST: inside `onEvent`, do not await `generate` / `generateLatent` / `dispose` of the same
+   * pipeline (a self-deadlock on the serialization chain — abort by throwing).
    */
   readonly onEvent?: (event: IrodoriGenerateEvent) => void | Promise<void>;
 };
 
 /**
- * {@link IrodoriPipelineOptions.onRunDiagnostics} が受けるコンポーネント名。
- * `stage` イベント（{@link IrodoriGenerateEvent}）の段名も同じ 9 名。綴りは weights の役割名の
- * `_` を `-` にしたもの（`dit_context` → `dit-context`）。
+ * The component names that {@link IrodoriPipelineOptions.onRunDiagnostics} receives.
+ * The stage names of the `stage` event ({@link IrodoriGenerateEvent}) are the same 9 names. The
+ * spelling is the weights role name with `_` turned into `-` (`dit_context` → `dit-context`).
  */
 export type IrodoriRunComponent =
   | "backbone"
@@ -291,22 +308,25 @@ export type IrodoriRunComponent =
   | "codec-encoder"
   | "codec-decoder";
 
-/** `denoise-step` の `copyLatents()` が返す途中潜在の写し。 */
+/** Copy of an intermediate latent returned by `copyLatents()` of `denoise-step`. */
 export type IrodoriLatentSnapshot = {
   readonly data: Float32Array<ArrayBuffer>;
-  /** 潜在の形 `[frames, latentDim]`。 */
+  /** Shape of the latent `[frames, latentDim]`. */
   readonly shape: readonly number[];
 };
 
 /**
- * {@link IrodoriGenerateRequest.onEvent} が受ける生成イベント。
+ * Generation events received by {@link IrodoriGenerateRequest.onEvent}.
  *
- * NOTE: anima の `AnimaGenerateEvent` と同型だが `vae-tile` に当たる席は無い — codec decode の
- * タイルは**性能とメモリのノブ**（`codecTileFrames`）で、段としては `codec-decoder` の
- * `stage` が覆う。
+ * NOTE: same shape as anima's `AnimaGenerateEvent`, but there is no counterpart of `vae-tile` —
+ * the codec decode tiles are **a performance and memory knob** (`codecTileFrames`), and as a step
+ * they are covered by the `stage` of `codec-decoder`.
  */
 export type IrodoriGenerateEvent =
-  /** 段の Session 構築の**前**（`start`）と解放の**後**（`end`）— GB 級ロードの進捗が見える。 */
+  /**
+   * **Before** the step's Session is built (`start`) and **after** it is released (`end`) — shows
+   * the progress of GB-class loads.
+   */
   | {
       readonly kind: "stage";
       readonly component: IrodoriRunComponent;
@@ -314,84 +334,99 @@ export type IrodoriGenerateEvent =
     }
   | {
       readonly kind: "denoise-step";
-      /** 完了した step 数（1-based）。**CFG の内側の forward 数ではない**。 */
+      /** Number of completed steps (1-based). **Not the number of forwards inside CFG**. */
       readonly step: number;
       readonly steps: number;
-      /** その step で消費した時刻 `t`（flow matching のスケジュール — anima の sigma に当たる）。 */
+      /** Time `t` consumed by that step (flow-matching schedule — anima's sigma counterpart). */
       readonly t: number;
-      /** 呼んだときだけ途中潜在を写して返す（{@link "./dit-loop.ts"} の `latentSnapshot`）。 */
+      /**
+       * Copies and returns the intermediate latent only when called (`latentSnapshot` in
+       * {@link "./dit-loop.ts"}).
+       */
       readonly copyLatents: () => IrodoriLatentSnapshot;
     };
 
-/** 構築オプション（{@link IrodoriPipeline.fromAssets} / {@link IrodoriPipeline.fromPretrained} 共通）。 */
+/**
+ * Construction options (shared by {@link IrodoriPipeline.fromAssets} /
+ * {@link IrodoriPipeline.fromPretrained}).
+ */
 export type IrodoriPipelineOptions = {
   /**
-   * 既存の GPU を共有する。**渡した側が所有権を持つ**ので {@link IrodoriPipeline.dispose} は
-   * 破棄しない。省略時はパイプラインが内部で `acquireGpu` し、`dispose()` で破棄する。
+   * Shares an existing GPU. **The caller keeps ownership**, so {@link IrodoriPipeline.dispose} does
+   * not destroy it. When omitted, the pipeline calls `acquireGpu` internally and destroys it in
+   * `dispose()`.
    */
   readonly gpu?: GpuContext;
-  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  /** Model (a key of the manifest's models). `defaultModel` when omitted. */
   readonly model?: string;
-  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  /** Execution configuration (a key of that model's quants). `defaultQuant` when omitted. */
   readonly quant?: string;
   /**
-   * 実行 1 回ごとの診断を受け取る観測席（1 生成 = 条件エンコーダ 5〜7 回 + `dit-context` 1 回 +
-   * `dit` 40〜100 回）。
-   * op 別 GPU 時間（`lastRunTiming`）が要るときは `gpu` に
-   * `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
+   * Hook that receives the diagnostics of every run (1 generation = 5 to 7 condition-encoder runs +
+   * 1 `dit-context` run + 40 to 100 `dit` runs).
+   * For per-op GPU time (`lastRunTiming`), pass `acquireGpu({ gpuTiming: true })` as `gpu`
+   * (ADR 0021 — the default does not measure).
    *
-   * NOTE: 計測を有効にした device では DiT ループが**ホスト経路**（forward ごとに readback）で
-   * 回る — 常駐経路が使う batch は計測と両立しない（`beginBatch` が拒否する）。出力は同じだが
-   * 壁時計は倍近くになるので、内訳を採るとき以外は計測を有効にしない。DiT の診断は
-   * `enqueue` ごとに届き、常駐経路では `lastRun` / `lastRunTiming` が `undefined` になる
-   * （アリーナも計測窓も作らない）。
+   * NOTE: on a device with timing enabled the DiT loop runs on the **host path** (a readback per
+   * forward) — the batch the resident path uses is incompatible with timing (`beginBatch` rejects
+   * it). The output is the same but the wall time nearly doubles, so do not enable timing except to
+   * take a breakdown. The DiT diagnostics arrive per `enqueue`, and on the resident path
+   * `lastRun` / `lastRunTiming` are `undefined` (neither an arena nor a timing window is created).
    *
-   * コールバックの例外は握らない（fail loudly — 生成ごと落ちる）。
+   * Exceptions from the callback are not swallowed (fail loudly — the whole generation fails).
    */
   readonly onRunDiagnostics?: (
     component: IrodoriRunComponent,
     diagnostics: SessionDiagnostics,
   ) => void;
   /**
-   * 構築の中断。{@link IrodoriPipeline.fromAssets} が段の境目（入口 / 各部品の間 /
-   * トークナイザ解釈 / GPU 取得の前後）で検査する。入口を除く各境目では**イベントループへ
-   * 1 度譲ってから**検査するので、同期解析の最中に届いた中断も次の境目で効く
-   * （`options.gpu` を渡して await が 1 つも無い経路でも同じ）。
-   * {@link IrodoriPipeline.fromPretrained} は同じ 1 本を取得層へも渡すので、**DL と組み立ての
-   * どちらの最中でも**同じノブで中断できる（DL 完了後だけ中止ボタンが無反応、を作らない）。
+   * Aborts construction. {@link IrodoriPipeline.fromAssets} checks it at stage boundaries (entry /
+   * between components / tokenizer parsing / before and after acquiring the GPU). At every boundary
+   * except the entry it **yields to the event loop once before** checking, so an abort that arrives
+   * during synchronous parsing takes effect at the next boundary (the same holds on a path with no
+   * await at all, when `options.gpu` is given).
+   * {@link IrodoriPipeline.fromPretrained} passes the same signal to the fetch layer, so the same
+   * knob aborts **both during download and during assembly** (no abort button that goes dead only
+   * after the download finishes).
    *
-   * 中断の例外は `signal.reason` を**そのまま**投げる（包まない — 消費側が
-   * `error === controller.signal.reason` で自分の中断を識別できる）。
+   * The abort exception throws `signal.reason` **as is** (not wrapped — the consumer can identify
+   * its own abort with `error === controller.signal.reason`).
    */
   readonly signal?: AbortSignal;
   /**
-   * `dit` / `dit_context` の linear の実行形を quant の宣言より優先して指定する（省略時は quant の
-   * `session` の宣言 → runtime 既定の順 — ADR 0058 追記 2026-09-26）。`"f16"` は device の
-   * shader-f16 を要し、自前で取る GPU には要求を足す。共有 GPU（`gpu`）が持たなければ重みを取る前に落ちる。
-   * 不正な値は `ModelInputError`（ADR 0107）。attention 系のノブは受けない（効く席が `dit` の
-   * グラフに無い — `src/irodori/admission.ts` の `IRODORI_SESSION_POLICY`）。
+   * Sets the execution form of the linears of `dit` / `dit_context`, taking precedence over the
+   * quant's declaration (when omitted: the quant's `session` declaration → the runtime default —
+   * ADR 0058 addendum 2026-09-26). `"f16"` needs the device's shader-f16; a GPU acquired by the
+   * pipeline gets the requirement added. If a shared GPU (`gpu`) lacks it, it fails before the
+   * weights are fetched. An invalid value is a `ModelInputError` (ADR 0107). The attention knobs
+   * are not accepted (the `dit` graph has no place where they would apply —
+   * `IRODORI_SESSION_POLICY` in `src/irodori/admission.ts`).
    */
   readonly linearCompute?: SessionOptions["linearCompute"];
 };
 
 /**
- * {@link IrodoriPipeline.fromPretrained} が追加で受ける取得層のオプション（hub へ透過する）。
- * `signal` は構築側と共有なので {@link IrodoriPipelineOptions} が持つ。
+ * Additional fetch-layer options that {@link IrodoriPipeline.fromPretrained} accepts (passed
+ * through to the hub). `signal` is shared with construction, so {@link IrodoriPipelineOptions}
+ * holds it.
  *
- * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
- * 欄ごとの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
+ * NOTE: the per-field descriptions, including that `headers` / `fetch` / `caches` / `onRetry` are
+ * **for HTTP sources only**, are kept in one place in {@link FromPretrainedHubOptions}.
  */
 export type IrodoriFromPretrainedOptions = IrodoriPipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions;
 
-/** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
+/**
+ * Input for building directly from fetched assets (pass the return value of the hub's
+ * `fetchAssets` as is).
+ */
 export type IrodoriAssets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
-/** {@link IrodoriPipeline} の内部状態（公開面には出さない）。 */
+/** Internal state of {@link IrodoriPipeline} (not exposed on the public surface). */
 export type IrodoriState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
@@ -406,11 +441,20 @@ export type IrodoriState = {
   readonly ditContext: ModelComponent;
   readonly codecEncoder: ModelComponent;
   readonly codecDecoder: ModelComponent;
-  /** `dit` の記号次元 S の名前（導出は {@link "./admission.ts"} の `admitIrodori` の 1 度だけ）。 */
+  /**
+   * Name of the symbolic dimension S of `dit` (derived once only, in `admitIrodori` of
+   * {@link "./admission.ts"}).
+   */
   readonly ditSymbol: string;
-  /** `dit_context` の出力列（導出は {@link "./admission.ts"} の `admitIrodori` の 1 度だけ）。 */
+  /**
+   * Output list of `dit_context` (derived once only, in `admitIrodori` of
+   * {@link "./admission.ts"}).
+   */
   readonly ditContextOutputs: readonly DitContextOutput[];
-  /** 低精度ノブ。**`dit` と `dit_context` の Session にだけ**渡す（モジュール doc の MUST）。 */
+  /**
+   * Low-precision knobs. Passed **only to the Sessions of `dit` and `dit_context`** (the MUST of
+   * the module doc).
+   */
   readonly ditSessionOptions: SessionOptions;
   readonly onRunDiagnostics?: (
     component: IrodoriRunComponent,
@@ -419,13 +463,14 @@ export type IrodoriState = {
 };
 
 /**
- * admission を通った材料 + 資産から実行状態を組む。
+ * Builds the execution state from the material that passed admission + the assets.
  *
- * MUST: 資産の解析は **GPU を取りに行く前**に落とす。順序がずれると、GPU の無い環境では
- * 別の例外に化けて「何が悪かったのか」が読み手に伝わらない。GPU 取得後に許される検査は
- * GPU の能力だけ — feature（shader-f16 — ADR 0028）と、自前で取った device の limits
- * （ADR 0089 決定 5 — 共有 GPU は `admitIrodori` が見る）。
- * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
+ * MUST: asset parsing fails **before the GPU is acquired**. If the order slips, on an environment
+ * without a GPU the failure turns into a different exception and the reader never learns "what
+ * was wrong". The only checks allowed after acquiring the GPU are of GPU capabilities — features
+ * (shader-f16 — ADR 0028) and the limits of a device acquired here (ADR 0089 decision 5 — for a
+ * shared GPU `admitIrodori` checks them).
+ * MUST: no Session is opened (the VRAM MUST — module doc).
  */
 const buildIrodoriState = async (
   admitted: IrodoriAdmission,
@@ -435,7 +480,7 @@ const buildIrodoriState = async (
 ): Promise<IrodoriState> => {
   const { config, quantName, quant, ditSymbol, ditContextOutputs, ditSessionOptions, gpuFeatures } =
     admitted;
-  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  // The supplier is **the same one** admission saw (`open` only looks up the opened components).
   const backbone = open(BACKBONE);
   const textProj = open(TEXT_PROJ);
   const captionProj = open(CAPTION_PROJ);
@@ -453,22 +498,25 @@ const buildIrodoriState = async (
 
   await settleAbort(options.signal);
 
-  // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
-  // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
-  // {@link "./admission.ts"} の `admitIrodori` が既に同じ 1 本で見ているが、自前で取った
-  // device はここが唯一の門）。
+  // MUST: declared features can be requested only when the device is created (ADR 0028). They
+  // cannot be requested for a shared GPU passed in, so a missing capability fails by name (a shared
+  // GPU has already been checked by the same function in `admitIrodori` of
+  // {@link "./admission.ts"}, but for a device acquired here this is the only check).
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を
-    // 誰も解放できないまま抜ける（feature 検査と同じ後始末に乗せる）。ここでもマクロタスクへ
-    // 譲る: `acquireGpu` の await 解決はマイクロタスク継続なので、待機中に積まれたクリック
-    // 由来の中断タスクはまだ実行されていない。
+    // MUST: the abort check **after** acquiring the GPU stays inside the try — outside it, the
+    // internally acquired device would be left with nobody able to release it (it rides on the
+    // same cleanup as the feature check). Yield to a macrotask here too: the await of `acquireGpu`
+    // resolves as a microtask continuation, so an abort task queued by a click during the wait
+    // has not run yet.
     await settleAbort(options.signal);
     assertGpuFeaturesGranted(gpuFeatures, gpu, `IrodoriPipeline: quant '${quantName}'`);
-    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
-    // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
-    // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は `admitIrodori` が見ている。
+    // The limits of a device acquired here are also checked here — `fromAssets` has no place for a
+    // pre-acquisition check (`fromPretrained` checks against the adapter values), and without this
+    // a shortfall in the declaration would surface only when the Session is built, and when the
+    // declaration is stricter than the real demand the comparison would never run at all. A shared
+    // GPU is checked by `admitIrodori`.
     if (ownsGpu) {
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
@@ -498,13 +546,17 @@ const buildIrodoriState = async (
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
   } catch (error) {
-    // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
+    // An internally acquired GPU can no longer be released by anyone if construction fails, so
+    // return it here.
     if (ownsGpu) gpu.destroy();
     throw error;
   }
 };
 
-/** S の決定に要る数を `pipelineConfig` から引く（入口検査と段 ⑤ が同じ 1 本を読む）。 */
+/**
+ * Reads the numbers needed to decide S from `pipelineConfig` (the entry check and stage 5 read the
+ * same one).
+ */
 const sampleBounds = (config: IrodoriPipelineConfig): SampleBounds => ({
   frameRate: config.frameRate,
   minSeconds: config.minSeconds,
@@ -514,49 +566,55 @@ const sampleBounds = (config: IrodoriPipelineConfig): SampleBounds => ({
 });
 
 /**
- * 要求ノブの受理集合を**生成に入る前**に見る（`generate` / `generateLatent` の入口）。
+ * Checks the acceptance sets of the request knobs **before generation starts** (the entry of
+ * `generate` / `generateLatent`).
  *
- * MUST: 受理集合そのものはここに書き写さない — 各ノブの正本（`assertCodecTileFrames` /
- * `assertAcceptableSeed` / `sequenceLengthFromSeconds` / `assertSpeakerReference`）を呼ぶだけに
- * する。条件を写すと、片方だけ緩んだときに気づけない。
+ * MUST: the acceptance sets themselves are not copied here — this only calls the canonical owner of
+ * each knob (`assertCodecTileFrames` / `assertAcceptableSeed` / `sequenceLengthFromSeconds` /
+ * `assertSpeakerReference`). Copying the conditions means a loosening of only one side goes
+ * unnoticed.
  *
- * なぜ入口なのか: これらの門は本来 latent 生成の**後**（`planCodecTiles` は decode 直前・
- * `Randn` は段 ⑦・秒指定は段 ⑤・参照の長さは段 ④）にしかなく、`codecTileFrames: 10` や
- * `seed: 1.5` のような綴り違いが重み 1.26GB のロードと DiT 全 step を消費してから落ちていた。
- * 呼び手の綴り違いの代償を計算時間で払わせない。
+ * Why at the entry: these checks originally existed only **after** latent generation
+ * (`planCodecTiles` right before decode, `Randn` at stage 7, the seconds request at stage 5, the
+ * reference length at stage 4), so a typo such as `codecTileFrames: 10` or `seed: 1.5` failed only
+ * after loading 1.26GB of weights and running every DiT step. The caller's typo is not paid for in
+ * compute time.
  *
- * NOTE（公開面の挙動が変わる 3 点）: ①`codecTileFrames` は codec を回さない
- * {@link IrodoriPipeline.generateLatent} でも検査対象になる（使わない値でも綴り違いなら落ちる）
- * ②`initialNoise` を渡した生成でも `seed` が検査される（従来は `Randn` を通らないので不正値が
- * 黙って無視されていた）。①②は「効かないノブを黙って受けない」側へ倒した意図的な変更。
- * ③`speaker` の参照（`audio` / `latent`）の検査（形の破れ・行数の超過・周波数・長さ）を段 ④ から
- * 入口へ前倒しした — `generate` / `generateLatent` とも、text / caption の段と codec encoder を
- * 回す前に落ちる。
+ * NOTE (3 changes in public behaviour): (1) `codecTileFrames` is checked even by
+ * {@link IrodoriPipeline.generateLatent}, which does not run the codec (an unused value still
+ * fails if it is a typo) (2) `seed` is checked even for a generation given `initialNoise`
+ * (previously it never went through `Randn`, so an invalid value was silently ignored). (1) and (2)
+ * are deliberate changes toward "do not silently accept a knob that has no effect". (3) The checks
+ * of the `speaker` reference (`audio` / `latent`) (broken shape, too many rows, rate, length) were
+ * moved forward from stage 4 to the entry — both `generate` and `generateLatent` fail before the
+ * text / caption stages and the codec encoder run.
  *
- * NOTE: `export` は GPU 無しで受理集合を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008・`latentSnapshot` と同じ流儀）。
+ * NOTE: `export` is for the tests that pin the acceptance sets without a GPU (not exposed on
+ * `mod.ts` / the subpath surface — ADR 0008, same convention as `latentSnapshot`).
  */
 export const assertIrodoriRequest = (
   request: IrodoriGenerateRequest,
   config: IrodoriPipelineConfig,
 ): void => {
-  // 既定値も検査する — 呼び手は `codecTileFrames` を渡す義務を負っていないので、既定タイルと
-  // `codecHaloFrames` の関係が壊れた配布形は「渡さなければ通る」形にしてはならない。
+  // The default is checked too — the caller is not obliged to pass `codecTileFrames`, so a
+  // distribution whose relation between the default tile and `codecHaloFrames` is broken must not
+  // be allowed to "pass as long as nothing is given".
   assertCodecTileFrames(
     request.codecTileFrames ?? DEFAULT_CODEC_TILE_FRAMES,
     config.codecHaloFrames,
   );
   if (request.seed !== undefined) assertAcceptableSeed(request.seed);
-  // 返り値は捨てる（段 ⑤ が改めて同じ関数で S を決める — ここは受理集合を借りるだけ）。
+  // The return value is discarded (stage 5 decides S again with the same function — this only
+  // borrows the acceptance set).
   if (request.durationSeconds !== undefined) {
     sequenceLengthFromSeconds(request.durationSeconds, sampleBounds(config));
   }
-  // 参照（音声 / latent）が speaker の下限に届くか — 段 ④ まで待つと text / caption の段と
-  // codec encoder を GPU で回してから落ちる。
+  // Whether the reference (audio / latent) reaches the speaker minimum — waiting until stage 4 would
+  // fail only after the text / caption stages and the codec encoder ran on the GPU.
   assertSpeakerReference(request.speaker, config);
 };
 
-/** テキスト 1 本（+ caption / 参照話者）から latent を作る。 */
+/** Builds a latent from one text (+ caption / reference speaker). */
 const generateLatent = async (
   state: IrodoriState,
   emit: EmitEvent,
@@ -564,16 +622,17 @@ const generateLatent = async (
 ): Promise<LatentStage> => {
   const { config } = state;
   const textIds = packIds(state.tokenizer, request.text, config.maxTextLen, "text");
-  // caption の有無は**生の文字列**で決める（上流 `str(req.caption).strip() != ""`）。
+  // Whether a caption exists is decided on the **raw string** (upstream
+  // `str(req.caption).strip() != ""`).
   const captionText = request.caption ?? "";
   const captionIds =
     captionText.trim().length === 0
       ? undefined
       : packCaptionIds(state.tokenizer, captionText, config.maxCaptionLen);
 
-  // --- ① backbone（text / caption を同じ 1 セッションで回す）---------------
-  // 1.26GB の重みを 2 度アップロードしないため 1 セッション 2 run にしてある。診断は run
-  // ごとに "backbone" として届く。
+  // --- (1) backbone (text / caption run in the same single session) ------
+  // One session with 2 runs, so the 1.26GB of weights is not uploaded twice. Diagnostics arrive
+  // per run as "backbone".
   const hidden = await withStageSession(
     state,
     emit,
@@ -596,7 +655,7 @@ const generateLatent = async (
     },
   );
 
-  // --- ② text-proj -------------------------------------------------------
+  // --- (2) text-proj -----------------------------------------------------
   const textState = await withStageSession(
     state,
     emit,
@@ -609,7 +668,7 @@ const generateLatent = async (
     },
   );
 
-  // --- ③ caption-proj（2 出力 — 第 2 出力は `caption_norm` 済み系列）------
+  // --- (3) caption-proj (2 outputs — the 2nd output is the `caption_norm`-ed sequence) ---
   let captionState: ConditionState = emptyCondition();
   let captionVec: Float32Array<ArrayBuffer> | undefined;
   if (hidden.caption !== undefined) {
@@ -631,19 +690,20 @@ const generateLatent = async (
       },
     );
     captionState = encoded.state;
-    // `caption_vec` は **`caption_norm` 済み**系列の行平均（第 1 出力から採ると別のベクトル）。
+    // `caption_vec` is the row mean of the **`caption_norm`-ed** sequence (taking it from the 1st
+    // output gives a different vector).
     captionVec = rowMean(encoded.normed, captionState.rows, config.captionDim);
   }
 
-  // --- ④ speaker ---------------------------------------------------------
+  // --- (4) speaker -------------------------------------------------------
   const speakerState = await encodeSpeaker(state, emit, request.speaker);
   const hasSpeaker = speakerState.rows > 0;
 
-  // --- ⑤ S の決定 --------------------------------------------------------
+  // --- (5) deciding S ----------------------------------------------------
   const bounds = sampleBounds(config);
   let plan: SequencePlan;
   if (request.durationSeconds !== undefined) {
-    // 手動指定は duration グラフを回さない（上流 `manual_seconds` 経路）。
+    // A manual length does not run the duration graph (upstream's `manual_seconds` path).
     plan = sequenceLengthFromSeconds(request.durationSeconds, bounds);
   } else {
     const logFrames = await withStageSession(
@@ -655,7 +715,7 @@ const generateLatent = async (
       async (run) => {
         const outputs = await run({
           text_state: f32(textState.data, [1, textState.rows, config.textDim]),
-          // `speaker_vec` は speaker state の**先頭行**（= 平均トークン）。
+          // `speaker_vec` is the **first row** of the speaker state (= the mean token).
           speaker_vec: f32(
             hasSpeaker
               ? speakerState.data.slice(0, config.speakerDim)
@@ -681,7 +741,7 @@ const generateLatent = async (
     );
   }
 
-  // --- ⑥ 条件の右 pad と区間マスク（ADR 0047 決定 1 / 4）------------------
+  // --- (6) right-padding of the conditions and the segment mask (ADR 0047 decisions 1 / 4) ---
   const caps: SegmentLengths = {
     text: config.maxTextLen,
     speaker: config.speakerRows,
@@ -697,7 +757,7 @@ const generateLatent = async (
     speaker_state: rightPad(speakerState, caps.speaker, config.speakerDim, "speaker 条件"),
     caption_state: rightPad(captionState, caps.caption, config.captionDim, "caption 条件"),
   };
-  // `dit_context` の入力（⑥' で 1 度だけ使う — K / V に射影してから `dit` へ渡す）。
+  // Inputs of `dit_context` (used once in (6') — projected to K / V and then passed to `dit`).
   const conditions = {
     text_state: f32(conditionValues.text_state, [1, caps.text, config.textDim]),
     speaker_state: f32(conditionValues.speaker_state, [1, caps.speaker, config.speakerDim]),
@@ -709,17 +769,18 @@ const generateLatent = async (
     shape: maskShape,
     data: buildDitMask(frames, used, caps),
   };
-  // CFG が有効な条件（上流 `has_*_cfg`）: 強さが正で、かつその条件が実際に載っていること
-  // （text は必ず 1 token 以上ある — 空文字は packIds が落とす）。uncond マスクは step ごとに
-  // 作り直さず、ここで 1 度だけ組む。
+  // Conditions with CFG enabled (upstream `has_*_cfg`): the strength is positive and the condition
+  // is actually present (text always has at least 1 token — packIds rejects an empty string). The
+  // uncond masks are not rebuilt per step; they are built once here.
   const uncondVariants: readonly UncondVariant[] = SEGMENT_ORDER.filter(
     (segment: IrodoriSegment) => config.cfgScales[segment] > 0 && used[segment] > 0,
   ).map((segment) => ({
     segment,
-    // MUST: 強さは f32 で持つ — ホスト経路の `combineCfg` は f64 のまま乗算に入れ、常駐経路は
-    // GPU へ渡す前に f32 へ丸めるので、値が f32 非厳密だと 2 経路が 1〜2 ulp 割れる。
-    // `parseCfgScales` が f32 厳密しか受理しないので現物では恒等だが、ここで丸めておくと
-    // 「ホスト側が見るのは f32」が局所で読める（数値の正本は `host/sampler.ts`）。
+    // MUST: the strength is held as f32 — the host path's `combineCfg` feeds it into the multiply
+    // as f64, while the resident path rounds it to f32 before passing it to the GPU, so a value
+    // that is not exact in f32 splits the 2 paths by 1 to 2 ulp. `parseCfgScales` accepts only
+    // f32-exact values, so on real input this is the identity, but rounding here makes "the host
+    // side sees f32" readable locally (the numeric source of truth is `host/sampler.ts`).
     scale: Math.fround(config.cfgScales[segment]),
     mask: {
       dtype: "bool",
@@ -728,7 +789,7 @@ const generateLatent = async (
     } satisfies Tensor,
   }));
 
-  // --- ⑥' 条件側 K/V 射影 + ⑦ Euler + CFG independent（2 経路とも dit-loop.ts）---
+  // --- (6') context K/V projection + (7) Euler + CFG independent (both paths in dit-loop.ts) ---
   const noiseLength = frames * config.latentDim;
   const seed = request.seed ?? 0;
   let initial: Float32Array<ArrayBuffer>;
@@ -736,8 +797,9 @@ const generateLatent = async (
     initial = new Randn(seed).normals(noiseLength);
   } else {
     if (request.initialNoise.length !== noiseLength) {
-      // 呼び手が渡した配列の長さなので 400 側（ADR 0107）。S は要求から一意に決まらない
-      // （duration グラフ経路がある）ので、入口では検査できず段 ⑦ が所有者のままになる。
+      // The length of an array the caller passed, so the 400 side (ADR 0107). S is not determined
+      // uniquely by the request (there is the duration-graph path), so the entry cannot check it
+      // and stage 7 stays its owner.
       throw new ModelInputError(
         `IrodoriPipeline: initialNoise の長さ ${request.initialNoise.length} が` +
           ` ${frames}×${config.latentDim} と違う（決まった latent 長は ${frames}）`,
@@ -754,11 +816,13 @@ const generateLatent = async (
     condMask,
     uncondVariants,
   };
-  // MUST: 計測が有効な device では batch を開けない（ADR 0021 — 未回収の timestamp が区間ぶん
-  // 溜まる）。op 別 GPU 時間の観測席（`onRunDiagnostics` + `gpuTiming`）を残すため、その device
-  // だけは従来のホストループへ落とす。積む演算はどちらも同型で、出力は同じでなければならない。
-  // 生成イベントの購読（`onEvent`）も同じ理由でホスト経路を選ぶ — 1 batch + 単一フェンスの
-  // 常駐経路は step の完了そのものがホストから観測できない（`onEvent` の doc の MUST）。
+  // MUST: a device with timing enabled cannot open a batch (ADR 0021 — unresolved timestamps pile
+  // up for the whole span). To keep the per-op GPU time hook (`onRunDiagnostics` + `gpuTiming`),
+  // only that device falls back to the original host loop. The operations queued are of the same
+  // form on both, and the outputs must be the same.
+  // Subscribing to generation events (`onEvent`) picks the host path for the same reason — on the
+  // resident path, 1 batch + a single fence, the completion of a step cannot be observed from the
+  // host at all (the MUST in the doc of `onEvent`).
   const { x, forwards } =
     state.gpu.gpuTimingEnabled || request.onEvent !== undefined
       ? await runDitLoopOnHost(state, emit, loop)
@@ -777,11 +841,12 @@ const generateLatent = async (
 };
 
 /**
- * latent を波形へ落とす（タイルを 1 セッションで順に回す）。
+ * Turns the latent into a waveform (runs the tiles in order in one session).
  *
- * MUST: **全長ぶん**の波形を組む。末尾トリムと秒指定の切り出しは decode の**後**に波形の
- * サンプル単位で行う（latent を切ってから decode すると境界 padding が変わり、全長 decode の
- * 先頭部分とビット一致しない — `codec.ts` のモジュール doc）。
+ * MUST: builds the waveform for the **full length**. The tail trim and the cut to the requested
+ * seconds happen **after** decode, at waveform sample granularity (cutting the latent before
+ * decode changes the boundary padding, and the result is not bit-identical to the leading part of
+ * a full-length decode — module doc of `codec.ts`).
  */
 const decodeWaveform = async (
   state: IrodoriState,
@@ -804,7 +869,7 @@ const decodeWaveform = async (
   );
 };
 
-/** テキスト 1 本から波形を作る（latent → 末尾トリム → decode → 切り出し）。 */
+/** Builds a waveform from one text (latent → tail trim → decode → cut). */
 const generateAudio = async (
   state: IrodoriState,
   emit: EmitEvent,
@@ -812,7 +877,7 @@ const generateAudio = async (
 ): Promise<IrodoriGeneratedAudio> => {
   const { config } = state;
   const { latent, plan } = await generateLatent(state, emit, request);
-  // 末尾トリムの判定は z 上（decode 前）— 上流 `_synthesize` と同じ順序。
+  // The tail trim is decided on z (before decode) — the same order as upstream's `_synthesize`.
   const flattening = findFlatteningPoint(latent.data, latent.frames, config.latentDim);
   const samples = trimmedSampleCount(plan.targetSamples, flattening, config.hopLength);
   const tiles = planCodecTiles(latent.frames, {
@@ -824,8 +889,9 @@ const generateAudio = async (
     samples === waveform.length
       ? waveform
       : (waveform.slice(0, samples) as Float32Array<ArrayBuffer>);
-  // MUST: 非有限値を黙って返さない。WAV 化は NaN を 0 に丸め ±Inf をフルスケールへ張り付かせる
-  // ので、沈黙誤値が「一部だけ無音 / 一部だけ轟音の音声」として出てしまう。
+  // MUST: do not silently return non-finite values. WAV encoding rounds NaN to 0 and pins ±Inf to
+  // full scale, so a silent wrong value would come out as "audio that is silent in places / roaring
+  // in places".
   for (const sample of data) {
     if (!Number.isFinite(sample)) throw new Error("irodori: 波形に非有限値が含まれる");
   }
@@ -839,20 +905,23 @@ const generateAudio = async (
 };
 
 /**
- * Irodori-TTS v4 のテキスト → 音声パイプライン。
+ * The text → speech pipeline of Irodori-TTS v4.
  *
- * 構築は {@link IrodoriPipeline.fromPretrained}（HF から取得）か
- * {@link IrodoriPipeline.fromAssets}（取得済みバイト列）だけを入口にする — コンストラクタを
- * private にしてあるのは、manifest 検査と資産の突合を迂回した半端な状態を作れないようにする
- * ため（ADR 0008）。
+ * Construction has only two entry points, {@link IrodoriPipeline.fromPretrained} (fetch from HF)
+ * and {@link IrodoriPipeline.fromAssets} (already fetched bytes) — the constructor is private so
+ * that a half-built state that bypasses the manifest checks and the asset matching cannot be
+ * created (ADR 0008).
  */
 export class IrodoriPipeline {
   readonly #state: IrodoriState;
-  /** generate / generateLatent と dispose の直列化鎖（「1 本ずつ」を公開 API 側で守る）。 */
+  /**
+   * The serialization chain of generate / generateLatent and dispose (keeps "one at a time" on the
+   * public API side).
+   */
   readonly #chain = createOperationChain();
   /**
-   * dispose の 1 本。**undefined でないことが「dispose 済み」**（別に真偽値を持つと、独立に
-   * 更新される派生状態になる）。
+   * The single dispose. **Being not undefined means "disposed"** (holding a separate boolean would
+   * be derived state updated independently).
    */
   #disposal: Promise<void> | undefined;
 
@@ -861,19 +930,20 @@ export class IrodoriPipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
-   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
-   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
-   * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
-   * {@link FromPretrainedComponentOptions.components}（役割は `backbone` / `text_proj` /
-   * `caption_proj` / `speaker` / `duration` / `dit` / `dit_context` / `codec_decoder` /
-   * `codec_encoder`）。
-   * 文字列の `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は
-   * 無い — `src/hub/repo-ref.ts` の MUST）。
+   * Fetches from a distribution and builds (`loadManifest` → `resolveSelection` → fetch **only the
+   * descriptor (part 0) of each component** and run admission → warm the weight parts →
+   * `fetchAssets` for the remaining assets → build). Blocks are read in part order at the moment
+   * the Session is built (ADR 0109 — `src/hub/components.ts`). To replace a component with the same
+   * role from another repository, use {@link FromPretrainedComponentOptions.components} (the roles
+   * are `backbone` / `text_proj` / `caption_proj` / `speaker` / `duration` / `dit` /
+   * `dit_context` / `codec_decoder` / `codec_encoder`).
+   * A string `ref` reads as `{ repo }` (= follows `main`). **`ref` is required** (sources have no
+   * default — the MUST of `src/hub/repo-ref.ts`).
    *
-   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
-   * 通らない（{@link IrodoriFromPretrainedOptions} の HTTP 専用ノブは効かない）。
+   * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
+   * `@karume/hub/deno`). It skips the spelling check of HF's `owner/name`, and goes through neither
+   * the network nor CacheStorage (the HTTP-only knobs of {@link IrodoriFromPretrainedOptions} have
+   * no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
@@ -891,7 +961,8 @@ export class IrodoriPipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const selection = resolveSelection(loaded.manifest, choice);
-    // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない）。
+    // The signal goes to **both** the fetch layer and construction (no window where the abort stops
+    // working the moment the download ends).
     const buildOptions: IrodoriPipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...choice,
@@ -901,7 +972,8 @@ export class IrodoriPipeline {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.linearCompute === undefined ? {} : { linearCompute: options.linearCompute }),
     };
-    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+    // The family checks run in the admission hook (before the weight parts are fetched —
+    // `hub/components.ts`).
     const { admitted, assets, open } = await loadContainerComponents(
       "IrodoriPipeline.fromPretrained",
       loaded,
@@ -909,8 +981,9 @@ export class IrodoriPipeline {
       COMPONENT_KEYS,
       async (open) => {
         const admitted = await admitIrodori(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
-        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+        // The `requiredLimits` declared by the distribution are checked here, **before the weight
+        // parts are fetched** (ADR 0089 decision 5 — the limits of a shared GPU, or the measured
+        // adapter values on the path that acquires its own).
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
@@ -928,22 +1001,25 @@ export class IrodoriPipeline {
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openContainer` を全てここで
-   * 済ませ、**Session は 1 本も張らない**。{@link IrodoriPipelineOptions.signal} を渡すと段の
-   * 境目で中断できる（`admitIrodori` の NOTE）。
+   * Builds from an already fetched manifest + assets. The contract checks, the interpretation of
+   * the assets and `openContainer` all happen here, and **no Session is opened**. Passing
+   * {@link IrodoriPipelineOptions.signal} allows aborting at step boundaries (the NOTE of
+   * `admitIrodori`).
    *
-   * 部品のキーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`dit`）と、分割形の
-   * part 列（`dit[0]` / `dit[1]` / … — part 0 から添字順）。分割形はバイト列を連結せず
-   * part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly（受け口の実装は
-   * `src/hub/components.ts` の 1 本）。
+   * Component keys **accept both forms** — the bytes of a single-form `krm` as one entry (`dit`),
+   * and the part list of the split form (`dit[0]` / `dit[1]` / … — in index order from part 0). The
+   * split form is opened as a part list without concatenating the bytes. A missing index or mixing
+   * with a single-form key fails loudly (the receiving implementation is the one in
+   * `src/hub/components.ts`).
    */
   static async fromAssets(
     input: IrodoriAssets,
     options: IrodoriPipelineOptions = {},
   ): Promise<IrodoriPipeline> {
-    // MUST: 入口の中断検査は容器を開く**前**（`admitIrodori` の入口と同じ 1 本を前倒しする）。
-    // 受け口は同期の供給口を返すために**先に全部品を開く**ので、ここを省くと中断済みの呼びが
-    // 9 本ぶんの容器を開いてから落ちる。
+    // MUST: the entry abort check comes **before** the containers are opened (the same one as the
+    // entry of `admitIrodori`, moved forward). The receiver **opens every component first** in
+    // order to return a synchronous supplier, so without this an already aborted call would open
+    // 9 containers before failing.
     options.signal?.throwIfAborted();
     const open = await assetOpener(input.assets);
     const admitted = await admitIrodori(input.manifest, open, options);
@@ -951,29 +1027,33 @@ export class IrodoriPipeline {
   }
 
   /**
-   * テキストから波形 1 本を生成する（`encodeWav` へそのまま渡せる f32 モノラル）。
+   * Generates one waveform from text (f32 mono that can be passed to `encodeWav` as is).
    *
-   * 同じ seed・同じ要求なら同じ波形が出る（乱数もホストグルーも決定的 — `host/random.ts`）。
+   * The same seed and the same request give the same waveform (both the random numbers and the
+   * host glue are deterministic — `host/random.ts`).
    *
-   * 並行に呼ばれた場合は**待たされて順に**走る（グラフの同時常駐を作らない — モジュール doc）。
+   * Concurrent calls **wait and run in order** (graphs are never resident at the same time —
+   * module doc).
    */
   async generate(request: IrodoriGenerateRequest): Promise<IrodoriGeneratedAudio> {
-    // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた生成まで
-    // 巻き添えで落ちる）。
+    // The disposed check happens at call time (checking inside the chain would also fail
+    // generations accepted before the dispose).
     if (this.#disposal !== undefined) {
       throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
     }
-    // 要求ノブの検査も呼び出し時点（鎖の外）で行う — 鎖に入れると、先行生成の決着まで
-    // 待たされてから綴り違いで落ちる（`createOperationChain` は空の鎖でも 1 microtask 遅れる）。
+    // The request-knob checks also happen at call time (outside the chain) — inside the chain, a
+    // typo would fail only after waiting for the preceding generation to settle
+    // (`createOperationChain` delays by 1 microtask even on an empty chain).
     assertIrodoriRequest(request, this.#state.config);
     return await this.#chain(() => generateAudio(this.#state, emitter(request.onEvent), request));
   }
 
   /**
-   * テキストから latent 1 本を生成する（codec を回さない — latent 門と埋め込み用途の面）。
+   * Generates one latent from text (does not run the codec — the surface for the latent check and
+   * for embedding uses).
    *
-   * 同じ seed・同じ要求なら同じ latent が出る。{@link IrodoriPipeline.generate} と**同じ鎖**に
-   * 載るので、混ぜて並行に呼んでも順に走る。
+   * The same seed and the same request give the same latent. It rides on **the same chain** as
+   * {@link IrodoriPipeline.generate}, so even mixed concurrent calls run in order.
    */
   async generateLatent(request: IrodoriGenerateRequest): Promise<GeneratedLatent> {
     if (this.#disposal !== undefined) {
@@ -986,12 +1066,13 @@ export class IrodoriPipeline {
   }
 
   /**
-   * 解放する。**内部で取得した GPU だけ**破棄する（`options.gpu` で渡された GpuContext は
-   * 呼び出し側の所有物なので触らない）。
+   * Releases. Destroys **only an internally acquired GPU** (a GpuContext passed in `options.gpu`
+   * belongs to the caller and is not touched).
    *
-   * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
-   * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
-   * 呼び出し側が「破棄済み」と見なして次へ進む）。
+   * MUST: destroys only after in-flight generations complete (flush-before-destroy) — putting the
+   * destruction on the chain too decides the order of waiting and destroying in one place. The
+   * second and later calls return the same completion (returning earlier would let the caller treat
+   * it as "destroyed" and move on).
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(() => {
@@ -1000,7 +1081,7 @@ export class IrodoriPipeline {
     return this.#disposal;
   }
 
-  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  /** Supports `await using` (Explicit Resource Management) — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }

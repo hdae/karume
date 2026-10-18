@@ -1,65 +1,76 @@
 /**
- * `VowelDetectorPipeline` — 16kHz モノラル音声 → リップシンク用の母音系列（`.lab`）の 1 本の面。
+ * `VowelDetectorPipeline` — the one surface for 16kHz mono audio → a vowel sequence for lip sync
+ * (`.lab`).
  *
- * パイプライン（全段 Karume・torch 不使用）:
+ * Pipeline (every step is Karume, no torch):
  *
- * 1. ホスト: 波形 → 80 次元 log-mel + DSP 3 次元 = `[T10, 83]`（`features.ts`・mel 基底は
- *    配布形の `assets` 席から受け取る）
- * 2. ホスト: 奇数フレームの端数 1 本を落とす（出力は 20ms 格子）
- * 3. `crnn` を 1 回回す → ロジット `[1, T10/2, 8]`（20ms 格子）
- * 4. ホスト: log_softmax → Viterbi → 短区間マージ → cons 吸収 → `.lab`（`postprocess.ts`）
+ * 1. host: waveform → 80-dim log-mel + 3 DSP dims = `[T10, 83]` (`features.ts`; the mel basis is
+ *    received from the distribution's `assets` field)
+ * 2. host: drop the one leftover frame of an odd frame count (the output is a 20ms grid)
+ * 3. run `crnn` once → logits `[1, T10/2, 8]` (20ms grid)
+ * 4. host: log_softmax → Viterbi → short-segment merge → cons absorption → `.lab`
+ *    (`postprocess.ts`)
  *
- * **リサンプルは呼び出し側の責務**（上流 `@hdae/vowel-detector` の線をそのまま引く）。入口は
- * 「16kHz モノラルの `Float32Array`」で、WAV の decode も周波数変換も持たない（`decodeWav` は
- * barrel から別に出ている）。渡された配列が本当に 16kHz かは**観測できない** — 違う周波数を
- * 渡すと `detect` は最後まで走って別の母音列を出すので、そこは呼び出し側の不変条件になる。
+ * **Resampling is the caller's responsibility** (drawing the line exactly where upstream
+ * `@hdae/vowel-detector` draws it). The entry is "a 16kHz mono `Float32Array`", with neither WAV
+ * decoding nor rate conversion (`decodeWav` is exported separately from the barrel). Whether the
+ * given array really is 16kHz **cannot be observed** — passing a different rate makes `detect` run
+ * to the end and emit a different vowel sequence, so that is an invariant on the caller's side.
  *
- * ## 長さは記号軸（グラフは 1 本・pad も長さ別の変種も無い）
+ * ## The length is a symbolic axis (one graph, no pad, no per-length variants)
  *
- * グラフ入力は `features [1, 2T, 83]`、出力は `[1, T, 8]` で、**時間軸だけが記号** `T`
- * （20ms 格子）。`detect` は音声の実長のまま 1 回回し、`T` を束縛して渡す。
- * `nn.GRU` を `gru_scan` へ差し替えて記号長を通す形は ADR 0056、`2T` のような派生次元から
- * シンボルを束縛する形は ADR 0057（それ以前の長さ別グラフ + 右ゼロ pad は同 ADR に経緯がある）。
+ * The graph input is `features [1, 2T, 83]` and the output `[1, T, 8]`, and **only the time axis is
+ * symbolic**, `T` (20ms grid). `detect` runs once at the audio's actual length and passes `T`
+ * bound. Passing the symbolic length by replacing `nn.GRU` with `gru_scan` is ADR 0056, and
+ * binding a symbol from a derived dimension like `2T` is ADR 0057 (the history of the earlier
+ * per-length graphs + right zero pad is in the same ADR).
  *
- * MUST: **10ms フレーム数は偶数**（グラフが `2T` を宣言している）。奇数フレームの端数 1 本は
- * **切り捨て**る — 半端フレームは入力 1 本分しか持たない出力になり、後処理の
- * 「1 フレーム = 20ms」が末尾だけ崩れる。切り捨てを忘れると `bindSymbols` が
- * 「実測 285 が宣言 '2T' の形をしていない」で落ちる（黙って丸めない）。
+ * MUST: **the 10ms frame count is even** (the graph declares `2T`). The one leftover frame of an
+ * odd frame count is **truncated** — a half frame would become an output that carries only one
+ * input frame, and post-processing's "1 frame = 20ms" would break only at the end. Forgetting the
+ * truncation makes `bindSymbols` fail because the measured length (e.g. 285) does not have the
+ * form of the declared `2T` (no silent rounding).
  *
- * MUST: **`minFrames` 未満 / `maxFrames` 超過はどちらも fail loudly**（黙って切り詰めない・
- * 黙って pad しない）。切り詰めは音声の末尾を無言で捨てる = `.lab` が入力より短くなるだけで、
- * 呼び出し側からは正常な結果に見える。下限側を通してしまうと記号 `T` を traced 範囲の外側で
- * 束縛して走る（グラフは `Dim("T", min=…, max=…)` で焼かれている）。両側とも配布形の
- * `pipelineConfig` が持つ数で、10ms フレーム側の単位（IR は記号の値域を持たないので、
- * ここでしか止められない — `config.ts`）。
+ * MUST: **below `minFrames` and above `maxFrames` both fail loudly** (no silent truncation, no
+ * silent pad). Truncation silently discards the end of the audio = the `.lab` only becomes shorter
+ * than the input, which looks like a normal result to the caller. Letting through the lower side
+ * would run with the symbol `T` bound outside the traced range (the graph is baked with
+ * `Dim("T", min=…, max=…)`). Both sides are numbers held by the distribution's `pipelineConfig`,
+ * in units of 10ms frames (the IR carries no symbol ranges, so only here can they be stopped —
+ * `config.ts`).
  *
- * ### 右ゼロ pad をしない理由（実測 — ADR 0057 以前の形が抱えていた負債）
+ * ### Why there is no right zero pad (measured — the debt the form before ADR 0057 carried)
  *
- * 逆方向 GRU が pad 側から状態を持ち帰るので、pad はロジットを O(1) 動かす。**pad 量に対して
- * 単調でも比例でもなく、2 フレーム（40ms）で既に飽和する**（実音声 4 本 × pad 10 段の実測:
- * 本体区間だけを比べた max abs diff が pad 2 で 2.2〜3.2、pad 1024 で 5.0〜6.0）。振幅は
- * 末尾に集中するが `|差| > 1e-2` は全フレームに届き、Viterbi が大域最適である以上、`.lab` の
- * 差は発話のどこにでも出た（実測の差は ①20ms の境界ずれ ②末尾に 40ms の `pau` が増減
- * ③発話中間に 40ms の `pau` が入る、の 3 型）。記号長にした今、この 3 型は**消えている**:
- * 配布形経由の `.lab` は実重み E2E（`packages/models/tests/e2e_vowel_detector_chain_test.ts`）が
- * 固定している実長経路の `.lab` と完全一致する（`tests/e2e_vowel_detector_chain_test.ts`）。
+ * The backward GRU carries state back from the pad side, so the pad moves the logits by O(1). **It
+ * is neither monotonic nor proportional in the pad amount, and saturates already at 2 frames
+ * (40ms)** (measured on 4 real recordings × 10 pad sizes: the max abs diff over the body segment
+ * only is 2.2–3.2 at pad 2 and 5.0–6.0 at pad 1024). The amplitude concentrates at the end, but
+ * `|diff| > 1e-2` reaches every frame, and since Viterbi is globally optimal, `.lab` differences
+ * appeared anywhere in the utterance (the measured differences were of 3 types: (1) a 20ms
+ * boundary shift, (2) a 40ms `pau` added or removed at the end, (3) a 40ms `pau` inserted
+ * mid-utterance). Now that the length is symbolic, these 3 types **are gone**: the `.lab` through
+ * the distribution matches exactly the `.lab` of the actual-length path pinned by the real-weight
+ * E2E (`packages/e2e/tests/e2e_vowel_detector_chain_test.ts`).
  *
- * ## Session は `detect` ごとに張って畳む
+ * ## The Session is created and torn down per `detect`
  *
- * グラフが 1 本になったので SigLIP2 / BiRefNet と同じ常駐も採れるが、この波では**張っては
- * 畳む**を保つ（VRAM を検出の間だけに閉じる形 — Irodori が巨大グラフを 1 本ずつ張っては畳む
- * のと同じ。`src/session/with-session.ts` の `withSession`）。重みは 2.66MB で再アップロードの
- * 実測は 30〜144ms なので、常駐化は**性能の判断**であって正しさの判断ではない。
+ * Now that there is one graph, the same residency as SigLIP2 / BiRefNet is possible, but this phase
+ * keeps **create and tear down** (a form that confines VRAM to the duration of detection — the
+ * same as Irodori creating and tearing down its huge graphs one at a time; `withSession` in
+ * `src/session/with-session.ts`). The weights are 2.66MB and the measured re-upload is 30–144ms, so
+ * making it resident is **a performance decision**, not a correctness decision.
  *
- * MUST: それでも直列化鎖には載せる — `detect` の同時実行は `dispose` が in-flight の完了を
- * 待たずに GPU を破棄する形（flush-before-destroy 違反）を作る。
+ * MUST: it still rides the serialization chain — concurrent `detect` calls would create the form
+ * where `dispose` destroys the GPU without waiting for in-flight completion (a flush-before-destroy
+ * violation).
  *
- * ## MUST: 数値の正はここでは担保されない
+ * ## MUST: numerical correctness is not guaranteed here
  *
- * 正は実重み E2E（合成 golden 4 ケース × 4 系列のロジット突合 =
- * `e2e_vowel_detector_test.ts`〈0.15 の選別で削除 — 鎖の sha 行が受け持つ〉・実音声 4 本の全鎖 `.lab` 完全一致 =
- * `packages/models/tests/e2e_vowel_detector_chain_test.ts`）と、ホスト層のパリティ門
- * （`packages/models/tests/vowel_detector_host_test.ts` — Python 正本との突合）が担保する。
+ * Correctness is guaranteed by the real-weight E2E (logit comparison of 4 synthetic golden cases ×
+ * 4 series = `e2e_vowel_detector_test.ts` (removed in the 0.15 test triage — the chain's sha
+ * reference row takes it over); exact `.lab` match of the whole chain on 4 real recordings =
+ * `packages/e2e/tests/e2e_vowel_detector_chain_test.ts`) and by the host layer's parity check
+ * (`packages/models/tests/vowel_detector_host_test.ts` — comparison with the canonical Python).
  */
 
 import {
@@ -123,67 +134,79 @@ import { readAssetBuffer } from "../hub/asset-readers.ts";
 import { withSession } from "../session/with-session.ts";
 
 /**
- * manifest の assets 表に現れる取得キーと、その safetensors のテンソル名
- * （`tools/export-recipes/vowel_detector/distribution.py` と対）。
+ * The fetch key that appears in the manifest's assets table, and the tensor name in that
+ * safetensors (paired with `tools/export-recipes/vowel_detector/distribution.py`).
  */
 const MEL_BASIS = "mel_basis";
 
-/** グラフ入力の名前（`tools/export-recipes/vowel_detector/export.py` の `INPUT_NAME`）。 */
+/** Name of the graph input (`INPUT_NAME` in `tools/export-recipes/vowel_detector/export.py`). */
 const INPUT_NAME = "features";
 
-/** 出力の時間軸の刻み（入力 2 フレーム = 出力 1 フレーム — conv の stride 2）。 */
+/** Step of the output time axis (2 input frames = 1 output frame — the conv's stride 2). */
 const TIME_STRIDE = 2;
 
-/** 入力フレームの毎秒本数（hop 160 / 16kHz = 10ms 格子）— 秒で語る文言のためだけに使う。 */
+/**
+ * Input frames per second (hop 160 / 16kHz = 10ms grid) — used only for messages that speak in
+ * seconds.
+ */
 const FRAMES_PER_SECOND = SAMPLE_RATE / HOP;
 
 /**
- * manifest の weights 表に現れる取得キー（CRNN 1 本 —
- * `tools/export-recipes/vowel_detector/distribution.py` の `VOWEL_DETECTOR_GRAPH_ROLE`）。
+ * The fetch key that appears in the manifest's weights table (one CRNN —
+ * `VOWEL_DETECTOR_GRAPH_ROLE` in `tools/export-recipes/vowel_detector/distribution.py`).
  */
 const GRAPH_ROLE = "crnn";
 
-/** この系列の weights 部品（差し替え席が受ける役割名でもある）。 */
+/** This family's weights components (also the role names the component replacement accepts). */
 const COMPONENT_KEYS = [GRAPH_ROLE] as const;
 
-/** {@link VowelDetectorPipeline.detect} の結果（上流 `@hdae/vowel-detector` の `DetectResult`）。 */
+/**
+ * The result of {@link VowelDetectorPipeline.detect} (upstream `@hdae/vowel-detector`'s
+ * `DetectResult`).
+ */
 export type VowelDetectorResult = {
-  /** 秒単位のセグメント列（a/i/u/e/o/N/pau — cons は後処理で吸収済み）。 */
+  /**
+   * Segment sequence in seconds (a/i/u/e/o/N/pau — cons is already absorbed by post-processing).
+   */
   readonly segments: readonly LabSegment[];
-  /** `.lab` 形式の本文（`開始 終了 ラベル` 行・秒 7 桁・末尾改行付き）。 */
+  /**
+   * The body in `.lab` format (lines of `start end label`, seconds to 7 digits, with a trailing
+   * newline).
+   */
   readonly lab: string;
 };
 
-/** 構築オプション（{@link VowelDetectorPipeline.fromAssets} / `fromPretrained` 共通）。 */
+/** Construction options (shared by {@link VowelDetectorPipeline.fromAssets} / `fromPretrained`). */
 export type VowelDetectorPipelineOptions = {
   /**
-   * 既存の GPU を共有する。**渡した側が所有権を持つ**ので
-   * {@link VowelDetectorPipeline.dispose} は破棄しない。省略時はパイプラインが内部で
-   * `acquireGpu` し、`dispose()` で破棄する。
+   * Shares an existing GPU. **The passing side owns it**, so
+   * {@link VowelDetectorPipeline.dispose} does not destroy it. When omitted, the pipeline calls
+   * `acquireGpu` internally and destroys it in `dispose()`.
    */
   readonly gpu?: GpuContext;
-  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  /** Model (a key of the manifest's models). `defaultModel` when omitted. */
   readonly model?: string;
-  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  /** Execution configuration (a key of that model's quants). `defaultQuant` when omitted. */
   readonly quant?: string;
   /**
-   * 実行 1 回ごとの診断を受け取る観測席（1 detect = CRNN 1 回の run）。op 別 GPU
-   * 時間（`lastRunTiming`）が要るときは `gpu` に `acquireGpu({ gpuTiming: true })` を渡す
-   * （ADR 0021 — 既定は計測しない）。
+   * Observer hook that receives the diagnostics of each run (1 detect = 1 CRNN run). When per-op
+   * GPU time (`lastRunTiming`) is needed, pass `acquireGpu({ gpuTiming: true })` as `gpu` (ADR
+   * 0021 — no timing by default).
    *
-   * NOTE: SigLIP2 / BiRefNet と同じくコンポーネント名を渡さない — 回るグラフは常に CRNN 1 本
-   * で、違うのは長さだけ（受け手が分岐できる軸ではない）。
+   * NOTE: like SigLIP2 / BiRefNet, no component name is passed — the graph that runs is always the
+   * one CRNN, and only the length differs (not an axis the receiver can branch on).
    *
-   * コールバックの例外は握らない（fail loudly — 検出ごと落ちる）。
+   * Exceptions from the callback are not caught (fail loudly — the whole detection fails).
    */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
 /**
- * {@link VowelDetectorPipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。
+ * Fetch-layer options used only by {@link VowelDetectorPipeline.fromPretrained} (passed through to
+ * hub).
  *
- * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
- * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
+ * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
+ * `onRetry` are **for the HTTP source only**, is consolidated in {@link FromPretrainedHubOptions}.
  */
 export type VowelDetectorFromPretrainedOptions = VowelDetectorPipelineOptions &
   FromPretrainedHubOptions &
@@ -191,15 +214,18 @@ export type VowelDetectorFromPretrainedOptions = VowelDetectorPipelineOptions &
     readonly signal?: AbortSignal;
   };
 
-/** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
+/**
+ * Input for building directly from fetched assets (pass the return value of hub's `fetchAssets` as
+ * is).
+ */
 export type VowelDetectorAssets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
 /**
- * 取得済みバイト列を `openContainer` / `parseSafetensors` へ渡せる ArrayBuffer にする
- * （門の本体は {@link readAssetBuffer}）。
+ * Turns fetched bytes into an ArrayBuffer that can be passed to `openContainer` /
+ * `parseSafetensors` (the check itself is {@link readAssetBuffer}).
  */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -207,22 +233,24 @@ const assetBuffer = (
 ): ArrayBuffer => readAssetBuffer("vowel-detector", "weights / assets", assets, key);
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 8 家族共有 —
- * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`crnn`）か、分割形の
- * part 列（`crnn[0]` / `crnn[1]` / …）。
+ * Component supplier of the in-memory surface (`fromAssets`) (the receiving implementation is
+ * shared by the families — {@link assetComponentOpener}). A component key is either the single
+ * form `krm` as one entry (`crnn`), or the part sequence of the split form (`crnn[0]` / `crnn[1]`
+ * / …).
  */
 const assetOpener = (assets: VowelDetectorAssets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("vowel-detector", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
- * mel 基底の資産（1 テンソルの f32 safetensors `[80, 257]`）を読む。
+ * Reads the mel-basis asset (a one-tensor f32 safetensors `[80, 257]`).
  *
- * 資産は外部境界なので、テンソル名・dtype・形を全て検査してから使う。**行列が転置していても
- * 要素数は同じ**（80×257 と 257×80 は別だが、`n_mels` を取り違えた別の基底なら要素数だけ
- * 合いうる）ので、形を 2 軸とも見る。
+ * Assets are an external boundary, so the tensor name, dtype and shape are all checked before use.
+ * **A transposed matrix has the same element count** (80×257 and 257×80 differ, but a different
+ * basis with a mistaken `n_mels` could match in element count alone), so both axes of the shape
+ * are checked.
  *
- * NOTE: `export` はテストのため（`fromAssets` 経由でここへ届くには manifest 一式が要る）。
- * `mod.ts` / サブパス面には出さない（ADR 0008）。
+ * NOTE: `export` for tests (reaching here through `fromAssets` needs a full manifest). Not exposed
+ * on `mod.ts` / the subpath surface (ADR 0008).
  */
 export const parseMelBasis = (buffer: ArrayBuffer): Float32Array<ArrayBuffer> => {
   const file = parseSafetensors(buffer);
@@ -245,17 +273,18 @@ export const parseMelBasis = (buffer: ArrayBuffer): Float32Array<ArrayBuffer> =>
 };
 
 /**
- * グラフが**記号長**で焼かれていることと、`pipelineConfig` と噛み合うことを見る。
- * 返すのは時間軸の記号名（`detect` が束縛に使う 1 語）。
+ * Checks that the graph is baked with a **symbolic length** and fits `pipelineConfig`.
+ * Returns the symbol name of the time axis (the one word `detect` uses for binding).
  *
- * MUST: 落とさない。長さを固定して焼いた古い形のグラフは**入出力の名前も階数も同じ**なので、
- * 同じ席に置かれても構築は通り、実行時に「shape が宣言と一致しない」だけが出る（そのときには
- * 「この配布形は 1 長でしか動かない」ことが読み手に伝わらない）。
- * MUST: 入力の時間軸が `2·T`・出力が `T` であることまで見る。倍率が抜けた配布形は、`.lab` の
- * 時間が 2 倍に伸びるだけで形は成立する。
+ * MUST: do not drop it. An old-form graph baked at a fixed length has **the same input/output names
+ * and ranks**, so placed in the same slot it passes construction, and at run time only "the shape
+ * does not match the declaration" appears (by then it does not reach the reader that "this
+ * distribution runs only at one length").
+ * MUST: check down to the input's time axis being `2·T` and the output's `T`. A distribution
+ * missing the factor would only stretch the `.lab` times by 2 while the shapes still hold.
  *
- * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: `export` for tests that pin the rejection paths without a GPU (not exposed on `mod.ts` /
+ * the subpath surface — ADR 0008).
  */
 export const assertGraph = (model: GraphOwner, config: VowelDetectorPipelineConfig): string => {
   if (model.graph.inputs.length !== 1 || model.graph.outputs.length !== 1) {
@@ -277,7 +306,8 @@ export const assertGraph = (model: GraphOwner, config: VowelDetectorPipelineConf
       `VowelDetectorPipeline: グラフ入力が '${input.name}'（'${INPUT_NAME}' が必要）`,
     );
   }
-  // 正準表記は `coeff·sym`（係数 1 は省略 — `format/dims.ts` の `formatDim`）。
+  // The canonical notation is `coeff·sym` (a coefficient of 1 is omitted — `formatDim` in
+  // `format/dims.ts`).
   const expectedInput = [1, `${TIME_STRIDE}${symbol}`, config.featureDim];
   if (
     input.shape.length !== expectedInput.length ||
@@ -306,24 +336,29 @@ export const assertGraph = (model: GraphOwner, config: VowelDetectorPipelineConf
   return symbol;
 };
 
-/** 10ms フレーム数を秒へ直す（両側の門の文言で共有 — 小数 2 桁）。 */
+/**
+ * Converts a 10ms frame count to seconds (shared by the messages of both checks — 2 decimal
+ * places).
+ */
 const seconds = (frames: number): string => (frames / FRAMES_PER_SECOND).toFixed(2);
 
 /**
- * 入力長（10ms フレーム数）が配布形の宣言する運用上限に収まっていることを見る。
+ * Checks that the input length (10ms frame count) is within the operating upper limit the
+ * distribution declares.
  *
- * MUST: 上限超過は落とす（モジュール doc の MUST — 黙って切り詰めない）。
+ * MUST: fail when the limit is exceeded (the module doc's MUST — no silent truncation).
  *
- * MUST: 比較するのは **10ms 側**（`config.maxFrames` は記号次元 `T` の上限を入力側の単位へ
- * 直した数で、`Dim(max=…)` そのものの 2 倍）。20ms 側の本数（`usable / TIME_STRIDE`）と
- * 比べる形へ直すと、実効上限が黙って 2 倍になる。IR は記号の値域を持たないので**ここが
- * 唯一の門**。
+ * MUST: compare on **the 10ms side** (`config.maxFrames` is the upper bound of the symbolic
+ * dimension `T` converted to input-side units, twice `Dim(max=…)` itself). Rewriting it to compare
+ * against the count on the 20ms side (`usable / TIME_STRIDE`) would silently double the effective
+ * limit. The IR carries no symbol ranges, so **this is the only check**.
  *
- * NOTE: `export` はテストのため（境界の振る舞いを実 GPU 無しで名指しできるように）。
+ * NOTE: `export` for tests (so the boundary behaviour can be named without a real GPU).
  */
 export const assertFrameLimit = (config: VowelDetectorPipelineConfig, frames: number): void => {
   if (frames <= config.maxFrames) return;
-  // 長さの出どころは呼び手の波形なので入力起因（ADR 0107 決定 2 — 区切って渡せば通る）。
+  // The length comes from the caller's waveform, so it is input-caused (ADR 0107 decision 2 —
+  // passing it in pieces works).
   throw new ModelInputError(
     `VowelDetectorPipeline: 音声が長すぎる（10ms フレーム ${frames} 本 = ` +
       `${seconds(frames)} 秒）— この配布形が焼かれている上限は ` +
@@ -333,19 +368,19 @@ export const assertFrameLimit = (config: VowelDetectorPipelineConfig, frames: nu
 };
 
 /**
- * 入力長（10ms フレーム数）が配布形の宣言する運用**下限**に届いていることを見る
- * （{@link assertFrameLimit} の対）。
+ * Checks that the input length (10ms frame count) reaches the operating **lower limit** the
+ * distribution declares (the counterpart of {@link assertFrameLimit}).
  *
- * MUST: 下限未満は落とす（モジュール doc の MUST — 黙って pad しない）。グラフは
- * `Dim("T", min=…)` で焼かれているので、下限未満の入力は記号を traced 範囲の外側で束縛して
- * 走る（`bindSymbols` は `bound >= 0` しか見ないので runtime も止めない）。上限側と同じく、
- * 比較するのは **10ms 側**。
+ * MUST: fail below the lower limit (the module doc's MUST — no silent pad). The graph is baked with
+ * `Dim("T", min=…)`, so an input below the lower limit would run with the symbol bound outside the
+ * traced range (`bindSymbols` only checks `bound >= 0`, so the runtime does not stop it either). As
+ * with the upper limit, the comparison is on **the 10ms side**.
  *
- * NOTE: `export` はテストのため（境界の振る舞いを実 GPU 無しで名指しできるように）。
+ * NOTE: `export` for tests (so the boundary behaviour can be named without a real GPU).
  */
 export const assertFrameFloor = (config: VowelDetectorPipelineConfig, frames: number): void => {
   if (frames >= config.minFrames) return;
-  // 上限側と同じく呼び手の波形の寸法（ADR 0107 決定 2）。
+  // Like the upper side, a dimension of the caller's waveform (ADR 0107 decision 2).
   throw new ModelInputError(
     `VowelDetectorPipeline: 音声が短すぎる（10ms フレーム ${frames} 本 = ` +
       `${seconds(frames)} 秒）— この配布形が焼かれている最小長は ` +
@@ -355,14 +390,14 @@ export const assertFrameFloor = (config: VowelDetectorPipelineConfig, frames: nu
   );
 };
 
-/** {@link VowelDetectorPipeline} の内部状態（公開面には出さない）。 */
+/** The internal state of {@link VowelDetectorPipeline} (not exposed on the public surface). */
 type VowelDetectorState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly config: VowelDetectorPipelineConfig;
-  /** 開いた CRNN グラフ（Session はここには持たない — モジュール doc）。 */
+  /** The opened CRNN graph (no Session is held here — the module doc). */
   readonly graph: ModelComponent;
-  /** 時間軸の記号名（`assertGraph` がグラフから読んだもの — 束縛のキー）。 */
+  /** Symbol name of the time axis (read from the graph by `assertGraph` — the binding key). */
   readonly symbol: string;
   readonly sessionOptions: SessionOptions;
   readonly melBasis: Float32Array<ArrayBuffer>;
@@ -370,15 +405,18 @@ type VowelDetectorState = {
 };
 
 /**
- * vowel-detector が受ける実行ノブ（manifest の quant 宣言）。合成規則（明示 > 宣言 > runtime 既定）・
- * 値域・組合せ・送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合
- * だけを決める。明示の上書き口は持たない（構築オプションに実行ノブの欄が無い）。
+ * The execution knobs vowel-detector accepts (the manifest's quant declaration). The merge rule
+ * (explicit > declared > runtime default), the value ranges, the combinations and the
+ * classification of the thrown type are held by `resolveSessionOptions`, shared by every family;
+ * this only decides the acceptance set. There is no explicit override (the construction options
+ * have no field for execution knobs).
  *
- * どのキーも受けないのは、実行ノブを宣言した quant を持たない（配布形は未公開・export は f32
- * の既定経路だけ）から（宣言が現れたら、受ける前に参照値で確かめる — 黙って runtime へ流さない）。
+ * No key is accepted because there is no quant that declares execution knobs (the distribution is
+ * unpublished and the export is only the f32 default path) (when a declaration appears, confirm it
+ * against the reference values before accepting it — do not pass it silently to the runtime).
  *
- * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: `export` so the equivalence test runs every quant of the mirror through the same table (not
+ * exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const VOWEL_DETECTOR_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: false,
@@ -391,30 +429,40 @@ export const VOWEL_DETECTOR_SESSION_POLICY: FamilySessionPolicy = {
   packedStaticQuantize: false,
 };
 
-/** 家族 admission（{@link admitVowelDetector}）が確定させる材料。 */
+/** Material settled by the family admission ({@link admitVowelDetector}). */
 type VowelDetectorAdmission = {
   readonly config: VowelDetectorPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
-  /** quant 宣言を受理表で通した実効設定（{@link VOWEL_DETECTOR_SESSION_POLICY}）。 */
+  /**
+   * The effective settings of the quant declaration passed through the acceptance table
+   * ({@link VOWEL_DETECTOR_SESSION_POLICY}).
+   */
   readonly sessionOptions: SessionOptions;
-  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  /**
+   * The quant declaration plus the features the effective settings need (both the request and the
+   * check look at this).
+   */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
-  /** 時間軸の記号名（`assertGraph` がグラフから読んだもの）。 */
+  /** Symbol name of the time axis (read from the graph by `assertGraph`). */
   readonly symbol: string;
 };
 
 /**
- * この manifest とこのグラフを vowel-detector として実行できるかを見る（`hub/components.ts`
- * の家族 admission 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
+ * Checks whether this manifest and this graph can run as vowel-detector (the family admission hook
+ * of `hub/components.ts` — on the fetching surface it is called **before a single byte of the
+ * weight parts is fetched**).
  *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
- * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
- * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
- * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+ * MUST: gather the family's checks into this one function. Scattered into later steps, on the
+ * fetching surface they would fail only **after** downloading GB-class weights (the implementation
+ * would be narrower than the wording of ADR 0070 decision 5).
+ * MUST: fail on manifest contract violations and **the comparison with the graph** **before going
+ * to get the GPU**. If the order slips, in an environment without a GPU it turns into a different
+ * exception and "what was wrong" does not reach the reader.
  *
- * NOTE: 資産（`mel_basis`）の解析はこの席へ置けない — admission の時点ではバイト列をまだ
- * 取っていない（取ってからでは重み prefetch より前という位置が保てない）。
+ * NOTE: parsing the asset (`mel_basis`) cannot be placed in this hook — at admission time the bytes
+ * have not been fetched yet (fetching them first would lose the position before the weight
+ * prefetch).
  */
 const admitVowelDetector = (
   manifest: Manifest,
@@ -437,7 +485,8 @@ const admitVowelDetector = (
     );
   }
   if (major !== VOWEL_DETECTOR_PIPELINE_MAJOR) {
-    // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門（ADR 0038 §6）。
+    // The only check that stops the silent degradation "old implementation × new repository" (ADR
+    // 0038 §6).
     throw new Error(
       `VowelDetectorPipeline: pipeline '${name}/${major}' の major に未対応` +
         `（この実装が読めるのは ` +
@@ -454,7 +503,8 @@ const admitVowelDetector = (
     );
   }
   const quant = entry.quants[quantName];
-  // 未対応の宣言は部品を開く前（= 重みの part を取る前）に落とす（全家族共通の 1 本）。
+  // Unsupported declarations fail before opening the components (= before fetching the weight
+  // parts) (the one function shared by every family).
   const sessionOptions = resolveSessionOptions(
     VOWEL_DETECTOR_SESSION_POLICY,
     quant.session,
@@ -466,9 +516,11 @@ const admitVowelDetector = (
   const graph = open(GRAPH_ROLE);
   const symbol = assertGraph(graph, config);
 
-  // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
-  // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
-  // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+  // MUST: fail here on missing capabilities of a shared GPU (feature / device limit) — unlike the
+  // case where the pipeline acquires its own, there is no reason to wait for `acquireGpu`, and
+  // this is the only family check that knows before downloading the weights (the mapping between
+  // request and check is the one in `session/gpu-features.ts`, and the later check calls the same
+  // function).
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(
       gpuFeatures,
@@ -486,11 +538,12 @@ const admitVowelDetector = (
 };
 
 /**
- * admission を通った材料 + 資産から実行状態を組む。
+ * Builds the run state from the material that passed admission + the assets.
  *
- * MUST: 資産の解析は **GPU を取りに行く前**に落とす。順序がずれると、GPU の無い環境では
- * 別の例外に化けて「何が悪かったのか」が読み手に伝わらない。GPU 取得後に許される検査は
- * GPU の能力（shader-f16）だけ（ADR 0028）。
+ * MUST: fail on parsing the assets **before going to get the GPU**. If the order slips, in an
+ * environment without a GPU it turns into a different exception and "what was wrong" does not reach
+ * the reader. The only check allowed after acquiring the GPU is the GPU's capability (shader-f16)
+ * (ADR 0028).
  */
 const openVowelDetectorState = async (
   admitted: VowelDetectorAdmission,
@@ -499,21 +552,24 @@ const openVowelDetectorState = async (
   options: VowelDetectorPipelineOptions = {},
 ): Promise<VowelDetectorState> => {
   const { config, quantName, quant, symbol, sessionOptions, gpuFeatures } = admitted;
-  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  // The supplier is **the same one** admission looked at (`open` only looks up the opened
+  // component).
   const graph = open(GRAPH_ROLE);
   const melBasis = parseMelBasis(assetBuffer(assets, MEL_BASIS));
 
-  // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
-  // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
-  // {@link admitVowelDetector} が既に同じ 1 本で見ているが、自前で取った device は
-  // ここが唯一の門）。
+  // MUST: declared features can be requested only at device creation (ADR 0028). With a shared GPU
+  // they cannot be requested, so fail naming the missing capability (a shared GPU was already
+  // checked by {@link admitVowelDetector} with the same function, but for a device acquired here
+  // this is the only check).
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `VowelDetectorPipeline: quant '${quantName}'`);
-    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
-    // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
-    // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は `admitVowelDetector` が見ている。
+    // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
+    // (`fromPretrained` checks with the adapter's values), and without this a shortfall of the
+    // declaration would be delayed until Session construction, and when the declaration is stricter
+    // than the real demand the comparison would never happen at all. A shared GPU is checked by
+    // `admitVowelDetector`.
     if (ownsGpu) {
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
@@ -522,7 +578,8 @@ const openVowelDetectorState = async (
       );
     }
   } catch (error) {
-    // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
+    // A GPU acquired internally can be released by no one if construction fails, so give it back
+    // here.
     if (ownsGpu) gpu.destroy();
     throw error;
   }
@@ -541,14 +598,16 @@ const openVowelDetectorState = async (
 };
 
 /**
- * 1 検出ぶんの Session を張り、使い終わったら必ず解放する。
+ * Creates the Session for one detection and always releases it when done.
  *
- * MUST: 張る・畳むは {@link withSession} に任せる — 途中で落ちたときに VRAM が残ると、後続の
- * 検出が確保に失敗して「最初の失敗とは別の場所」で落ちる。素の `finally` で `dispose` を待つ
- * 形は、run や診断コールバックの失敗の後に dispose まで失敗すると（device lost では両方が
- * 起きる）dispose の例外が元の例外を上書きし、最初に何が壊れたかが消える。
- * NOTE: `withSession` の `run` 包みは記号束縛を受けないので、body に渡る Session で直接
- * `run` し、診断も同じ順（run の直後）でここから呼ぶ。
+ * MUST: leave creating and tearing down to {@link withSession} — if VRAM remains after a failure
+ * midway, the following detection fails to allocate and fails "somewhere other than the first
+ * failure". A plain `finally` that awaits `dispose` lets dispose's exception overwrite the
+ * original one when dispose also fails after a failure of run or of the diagnostics callback
+ * (device lost causes both), erasing what broke first.
+ * NOTE: the `run` wrapper of `withSession` does not take symbol bindings, so this runs directly on
+ * the Session passed to the body, and calls the diagnostics from here in the same order (right
+ * after run).
  */
 const runGraph = (
   state: VowelDetectorState,
@@ -557,8 +616,9 @@ const runGraph = (
 ): Promise<Float32Array<ArrayBuffer>> => {
   const model = state.graph;
   return withSession(state.gpu, model, state.sessionOptions, undefined, async (_run, session) => {
-    // 記号 `T` は 20ms 格子の本数。入力軸は `2T` の派生次元なので実 shape からも解けるが
-    // （ADR 0057）、ホストが数えた本数を明示で渡して食い違いを実行前に落とす。
+    // The symbol `T` is the count on the 20ms grid. The input axis is the derived dimension `2T`,
+    // so it can also be solved from the actual shape (ADR 0057), but the host passes the count it
+    // computed explicitly so a disagreement fails before running.
     const outputs = await session.run({ [INPUT_NAME]: features }, { [state.symbol]: rows });
     if (state.onRunDiagnostics !== undefined) state.onRunDiagnostics(session.diagnostics());
     const name = model.graph.outputs[0];
@@ -566,7 +626,8 @@ const runGraph = (
     if (tensor === undefined) {
       throw new Error(`vowel-detector: グラフ出力 '${name}' が実行結果に無い`);
     }
-    // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
+    // Narrow by the discriminant (a cast to Float32Array would pass silently when the dtype is
+    // off).
     if (tensor.dtype !== "f32") {
       throw new Error(`vowel-detector: ロジットが f32 でない（${tensor.dtype}）`);
     }
@@ -575,23 +636,28 @@ const runGraph = (
 };
 
 /**
- * 音声 1 本を通す（上限検査 → 特徴 → 端数の切り捨て → 下限検査 → 実長で run → 後処理）。
+ * Runs one audio through (limit check → features → truncation of the leftover → floor check → run
+ * at the actual length → post-processing).
  */
 const detectAudio = async (
   state: VowelDetectorState,
   audio: Float32Array<ArrayBufferLike>,
 ): Promise<VowelDetectorResult> => {
   const { config } = state;
-  // 出力は 20ms 格子なので、奇数フレームの端数 1 本は落とす（**切り捨てであって pad ではない**
-  // — 半端フレームを 1 本足すと、その 1 本だけが入力 1 フレーム分しか持たない出力になる）。
+  // The output is a 20ms grid, so the one leftover frame of an odd frame count is dropped
+  // (**truncation, not pad** — adding one half frame would make that one output carry only one
+  // input frame).
   const frames = featureFrameCount(audio.length);
   const usable = frames - (frames % TIME_STRIDE);
-  // 端数を落とした後の実長を、配布形が宣言する運用範囲の**両側**と突き合わせる
-  // （下限は「出力 1 本を作れるか」より厳しい — グラフの traced 範囲そのもの）。
-  // MUST: 上限は特徴を作る**前**に見る（{@link featureFrameCount} の MUST — 長さだけで決まる
-  // 判定のために全フレーム分の FFT と非有限サンプルの走査を払わない）。下限は特徴の後に残す —
-  // 短い波形は抽出が安く、1 フレームも取れない長さは `extractFeatures` がサンプル数を名指しして
-  // 落とす（下限の文言だと負のフレーム数になる）。
+  // Compare the actual length after dropping the leftover with **both sides** of the operating
+  // range the distribution declares (the lower limit is stricter than "can one output be made" —
+  // it is the graph's traced range itself).
+  // MUST: check the upper limit **before** building the features (the MUST of
+  // {@link featureFrameCount} — do not pay for the FFT over every frame and the scan for non-finite
+  // samples for a decision that depends only on the length). The lower limit stays after the
+  // features — a short waveform is cheap to extract, and a length that yields not even one frame
+  // is rejected by `extractFeatures` naming the sample count (the lower-limit message would show a
+  // negative frame count).
   assertFrameLimit(config, usable);
   const features = extractFeatures(audio, state.melBasis);
   assertFrameFloor(config, usable);
@@ -602,7 +668,8 @@ const detectAudio = async (
     {
       dtype: "f32",
       shape: [1, usable, config.featureDim],
-      // 端数を落とした実長ぶんだけを渡す（pad は 1 要素も無い — モジュール doc）。
+      // Pass only the actual length after dropping the leftover (not a single element of pad — the
+      // module doc).
       data: features.data.slice(0, usable * config.featureDim),
     },
     rows,
@@ -619,20 +686,23 @@ const detectAudio = async (
 };
 
 /**
- * 母音検出のパイプライン（音声 → `.lab`）。
+ * The vowel-detection pipeline (audio → `.lab`).
  *
- * 構築は {@link VowelDetectorPipeline.fromPretrained}（HF から取得）か
- * {@link VowelDetectorPipeline.fromAssets}（取得済みバイト列）だけを入口にする —
- * コンストラクタを private にしてあるのは、manifest 検査と資産の突合を迂回した半端な状態を
- * 作れないようにするため（ADR 0008）。
+ * Construction enters only through {@link VowelDetectorPipeline.fromPretrained} (fetch from HF) or
+ * {@link VowelDetectorPipeline.fromAssets} (fetched bytes) — the constructor is private so that a
+ * half-built state that bypasses the manifest check and the asset comparison cannot be made (ADR
+ * 0008).
  */
 export class VowelDetectorPipeline {
   readonly #state: VowelDetectorState;
-  /** detect と dispose の直列化鎖（「1 本ずつ」を公開 API 側で守る — モジュール doc）。 */
+  /**
+   * Serialization chain of detect and dispose (keeps "one at a time" on the public API side — the
+   * module doc).
+   */
   readonly #chain = createOperationChain();
   /**
-   * dispose の 1 本。**undefined でないことが「dispose 済み」**（別に真偽値を持つと、独立に
-   * 更新される派生状態になる）。
+   * The one dispose. **Not being undefined means "already disposed"** (holding a separate boolean
+   * would make it a derived state updated independently).
    */
   #disposal: Promise<void> | undefined;
 
@@ -641,17 +711,19 @@ export class VowelDetectorPipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
-   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
-   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
-   * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
-   * {@link FromPretrainedComponentOptions.components}（役割は `crnn` 1 本）。文字列の
-   * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
-   * `src/hub/repo-ref.ts` の MUST。このファミリは公開配布リポを持たないので pin 定数も無い）。
+   * Fetches from a distribution and builds (`loadManifest` → `resolveSelection` → fetch **only each
+   * component's descriptor (part 0)** for admission → warm up the weight parts → `fetchAssets` for
+   * the remaining assets → construction). Blocks are read in part order at the very moment the
+   * Session is built (ADR 0109 — `src/hub/components.ts`). To replace a component with the same
+   * role from another repository, use {@link FromPretrainedComponentOptions.components} (the role
+   * is the one `crnn`). A string `ref` reads as `{ repo }` (= follows `main`). **`ref` is
+   * required** (a source has no default — the MUST of `src/hub/repo-ref.ts`. This family has no
+   * public distribution repository, so there is no pin constant either).
    *
-   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
-   * 通らない（{@link VowelDetectorFromPretrainedOptions} の HTTP 専用ノブは効かない）。
+   * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
+   * `@karume/hub/deno` / `nodeDirectory` of `@karume/hub/node`). It goes through neither the
+   * spelling check of the HF `owner/name`, nor the network, nor CacheStorage (the HTTP-only knobs
+   * of {@link VowelDetectorFromPretrainedOptions} have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
@@ -672,7 +744,8 @@ export class VowelDetectorPipeline {
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
-    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+    // The family's checks run in the admission hook (before fetching the weight parts —
+    // `hub/components.ts`).
     const { admitted, assets, open } = await loadContainerComponents(
       "VowelDetectorPipeline.fromPretrained",
       loaded,
@@ -680,8 +753,9 @@ export class VowelDetectorPipeline {
       COMPONENT_KEYS,
       async (open) => {
         const admitted = admitVowelDetector(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
-        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+        // The `requiredLimits` the distribution declares are checked here **before fetching the
+        // weight parts** (ADR 0089 decision 5 — the limits of a shared GPU, or the adapter's
+        // measured values on the path that acquires its own).
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
@@ -701,13 +775,15 @@ export class VowelDetectorPipeline {
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openContainer`・グラフとの突合を
-   * 全てここで済ませる（Session はまだ張らない — モジュール doc の MUST）。
+   * Builds from a fetched manifest + assets. The contract check, the interpretation of the assets,
+   * `openContainer` and the comparison with the graph are all done here (no Session is created yet
+   * — the module doc's MUST).
    *
-   * 部品のキーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`crnn`）と、分割形の
-   * part 列（`crnn[0]` / `crnn[1]` / … — part 0 から添字順）。分割形はバイト列を連結せず
-   * part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly（受け口の実装は
-   * `src/hub/components.ts` の 1 本）。
+   * Component keys **accept both forms** — the bytes of the single form `krm` as one entry
+   * (`crnn`), and the part sequence of the split form (`crnn[0]` / `crnn[1]` / … — in index order
+   * from part 0). The split form is opened as the part sequence without concatenating the bytes.
+   * Missing indices and mixing with a single-form key fail loudly (the receiving implementation is
+   * the one in `src/hub/components.ts`).
    */
   static async fromAssets(
     input: VowelDetectorAssets,
@@ -721,40 +797,46 @@ export class VowelDetectorPipeline {
   }
 
   /**
-   * 音声 1 本の母音系列を出す。返るのはセグメント列と `.lab` 本文の両方（同じ区間割りの
-   * 2 つの表現 — 上流 `@hdae/vowel-detector` の `detect` と同じ）。
+   * Emits the vowel sequence of one audio. Both the segment sequence and the `.lab` body are
+   * returned (2 representations of the same segmentation — the same as upstream
+   * `@hdae/vowel-detector`'s `detect`).
    *
-   * 入力は **16kHz モノラル**の `Float32Array`（`[-1, 1]` 尺度）。リサンプルは呼び出し側の
-   * 責務で、周波数が違っても**この関数は落ちない**（モジュール doc）。
+   * The input is a **16kHz mono** `Float32Array` (`[-1, 1]` scale). Resampling is the caller's
+   * responsibility, and **this function does not fail** on a different rate (the module doc).
    *
-   * 長さは実長のまま記号次元 `T` に束縛される（pad は 1 要素も入らない）。10ms フレーム数が
-   * 奇数なら端数 1 本を**切り捨てる**。`minFrames` 未満と `maxFrames` 超過はどちらも
-   * fail loudly で落ちる（同）。
+   * The length is bound to the symbolic dimension `T` at the actual length (not a single element
+   * of pad goes in). If the 10ms frame count is odd, the one leftover frame is **truncated**.
+   * Below `minFrames` and above `maxFrames` both fail loudly (same).
    *
-   * 並行に呼ばれた場合は**待たされて順に**走る（GPU の破棄と in-flight の run を交差させない）。
+   * When called concurrently, calls **wait and run in order** (GPU destruction and an in-flight
+   * run do not interleave).
    */
   async detect(audio: Float32Array<ArrayBufferLike>): Promise<VowelDetectorResult> {
-    // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた検出まで
-    // 巻き添えで落ちる）。
+    // The disposed check is made at call time (checked inside the chain, it would also take down
+    // detections accepted before the dispose).
     if (this.#disposal !== undefined) {
       throw new Error("VowelDetectorPipeline: dispose 済みでは検出できない");
     }
     return await this.#chain(() => detectAudio(this.#state, audio));
   }
 
-  /** 入力波形に要求するサンプリング周波数（配布形の宣言 — 呼び出し側のリサンプル先）。 */
+  /**
+   * The sampling rate required of the input waveform (the distribution's declaration — the
+   * caller's resampling target).
+   */
   get sampleRate(): typeof SAMPLE_RATE {
     return this.#state.config.sampleRate;
   }
 
   /**
-   * 解放する。**内部で取得した GPU だけ**破棄する（`options.gpu` で渡された GpuContext は
-   * 呼び出し側の所有物なので触らない）。Session は `detect` ごとに畳んでいるので、ここで
-   * 畳む相手は無い（モジュール doc の MUST）。
+   * Releases. Destroys **only an internally acquired GPU** (a GpuContext passed via `options.gpu`
+   * belongs to the caller and is not touched). Sessions are torn down per `detect`, so there is
+   * nothing to tear down here (the module doc's MUST).
    *
-   * MUST: in-flight の検出の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
-   * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
-   * 呼び出し側が「破棄済み」と見なして次へ進む）。
+   * MUST: wait for in-flight detections to complete before destroying (flush-before-destroy) —
+   * putting the destruction on the chain too fixes the order of waiting and destroying in one
+   * place. The second and later calls return the same completion (returning earlier would let the
+   * caller treat it as "already destroyed" and move on).
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(() => {
@@ -764,7 +846,7 @@ export class VowelDetectorPipeline {
     return this.#disposal;
   }
 
-  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  /** `await using` support (Explicit Resource Management) — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }

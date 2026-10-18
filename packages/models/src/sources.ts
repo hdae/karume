@@ -1,18 +1,20 @@
 /**
- * 全ファミリの**公開配布リポ対応表**を 1 つに畳んだ表（ADR 0092）。
+ * The **public distribution repo tables** of all families folded into one table (ADR 0092).
  *
- * 家族ごとの表（`<FAMILY>_SOURCES`）が正本で、ここはその和集合を barrel から 1 本で引ける形に
- * するだけ。値も**キーも家族側と同じ**なので、`KARUME_SOURCES["anima"]` と
- * `ANIMA_SOURCES["anima"]` は同一のエントリを指す。
+ * The per-family tables (`<FAMILY>_SOURCES`) are canonical; this only makes their union available
+ * from the barrel in one place. Values **and keys are the same as on the family side**, so
+ * `KARUME_SOURCES["anima"]` and `ANIMA_SOURCES["anima"]` point at the same entry.
  *
- * 使い道は「公開している配布リポを全部なめる」側（疎通スモーク・キャッシュの事前取得・
- * 一覧の表示）で、1 家族しか使わない消費者はサブパスの家族表を引く方が tree-shaking に効く
- * （barrel を引くと 9 家族の config が繋がる）。
+ * It serves the side that "walks every published distribution repo" (connectivity smoke tests,
+ * cache prefetch, listings); a consumer that uses only one family does better for tree-shaking by
+ * looking up that family's table on its subpath (importing the barrel pulls in the configs of 9
+ * families).
  *
- * MUST: 家族側の表を**そのまま**畳む — ここで綴り直すと、家族側を直しても barrel だけが古い
- * revision を配り続ける形（導出できる値の二重持ち）になる。キーが重なると後勝ちで 1 本が
- * 黙って消えるので、重複が無いことは `tests/sources_test.ts` の門が見る（キーは HF リポ名から
- * 導かれるので、重複は「同じリポを 2 家族が持っている」ときにしか起きない）。
+ * MUST: fold the family tables **as they are** — re-spelling them here would create a shape where
+ * the barrel keeps shipping an old revision after the family side is fixed (derivable values held
+ * twice). Overlapping keys would silently drop one entry (last one wins), so the absence of
+ * duplicates is checked by `tests/sources_test.ts` (keys derive from the HF repo name, so a duplicate
+ * occurs only when "two families hold the same repo").
  */
 
 import type { HubRepoRef } from "@karume/hub";

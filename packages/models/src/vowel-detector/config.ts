@@ -1,48 +1,55 @@
 /**
- * `pipelineConfig` のスキーマ検証（ADR 0038 §1 — スキーマは各パイプライン実装が所有・検証）。
+ * Schema validation of `pipelineConfig` (ADR 0038 §1 — each pipeline implementation owns and
+ * validates the schema).
  *
- * hub は `pipelineConfig` を素通しする（禁止キーの一掃と規模上限だけを見る）。したがって
- * **形の正本はこのモジュール**で、手書きの検査を全て parse 時に走らせる。
+ * hub passes `pipelineConfig` through (it only strips forbidden keys and checks the size limits).
+ * So **the canonical shape is this module**, and every hand-written check runs at parse time.
  *
- * MUST: 未知キーは fail loudly（`{ maxFrames: …, max_frames: … }` のような綴り違いが
- * 黙って既定へ縮退すると、配布者の意図した上限と実行が食い違ったまま気づけない）。
- * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
+ * MUST: unknown keys fail loudly (if a misspelling such as `{ maxFrames: …, max_frames: … }`
+ * silently fell back to the default, the limit the distributor intended and the run would disagree
+ * unnoticed).
+ * MUST: maps are read only through `Object.hasOwn` (a cross-cutting invariant).
  *
- * ## ここに並ぶ 5 欄のうち、**実行時に効くのは `minFrames` / `maxFrames` だけ**
+ * ## Of the 5 fields here, **only `minFrames` / `maxFrames` take effect at run time**
  *
- * 他の 3 欄（`sampleRate` / `featureDim` / `classes`）は BiRefNet の `interpolation` と同じ
- * **宣言**で、受理集合はこの実装が持つ 1 値きり。分岐を持たせるのではなく、外れた配布形を
- * パース時に**受理しない**:
+ * The other 3 (`sampleRate` / `featureDim` / `classes`) are **declarations**, like BiRefNet's
+ * `interpolation`, and their acceptance set is the single value this implementation holds. Rather
+ * than branching on them, a distribution that deviates is **not accepted** at parse time:
  *
- * - `sampleRate` — 特徴抽出はリサンプラを持たず、窓長・hop・mel 基底の帯域が 16kHz 前提で
- *   焼かれている（`features.ts` のモジュール doc）。別の周波数で学習された派生を通すと、
- *   `detect` は最後まで走って**それらしい別の母音列**を出す（形は合う）。
- * - `featureDim` — グラフ入力の最終軸と突き合わせる先（`pipeline.ts` の `assertGraph`）。
- * - `classes` — **並びが id**（`postprocess.ts` の `LIPSYNC_CLASSES`）。並びが違う配布形は
- *   ラベルが置換されるだけで、区間割りも `.lab` の書式も完全に成立する = 最も気づけない。
+ * - `sampleRate` — feature extraction has no resampler, and the window length, hop and the band of
+ *   the mel basis are baked for 16kHz (the module doc of `features.ts`). Letting through a
+ *   derivative trained at a different rate, `detect` runs to the end and emits **a plausible but
+ *   different vowel sequence** (the shapes match).
+ * - `featureDim` — compared with the last axis of the graph input (`assertGraph` in `pipeline.ts`).
+ * - `classes` — **the order is the id** (`LIPSYNC_CLASSES` in `postprocess.ts`). A distribution
+ *   with a different order only permutes the labels, and the segmentation and the `.lab` format
+ *   still hold completely = the hardest to notice.
  *
- * ## MUST: `minFrames` / `maxFrames` は配布形が宣言する運用範囲（TS 側に定数を持たない）
+ * ## MUST: `minFrames` / `maxFrames` are the distribution's operating range (no TS constants)
  *
- * グラフの時間軸は記号なので、**IR は値域を持たない**（`docs/ir-v2.md` の `symbols` は名前の
- * 列挙だけ）。焼くときに `Dim(min=…, max=…)` で宣言した記号 `T`（20ms 格子）の値域を
- * **入力側の単位（10ms フレーム）へ直したもの**を配布形から受け、`detect` が特徴抽出の直後に
- * 両側とも落とす（正本は `tools/export-recipes/vowel_detector/distribution.py`）。ここに既定値
- * や定数を置くと、別の値域で焼いた配布形が来たときにホストだけが古い数を持つ形になる
- * （SBV2 の `maxTokens` と同じ判断）。
+ * The graph's time axis is symbolic, so **the IR carries no value range** (`symbols` in
+ * `docs/ir-v2.md` is only a list of names). The range of the symbol `T` (20ms grid) declared with
+ * `Dim(min=…, max=…)` at bake time, **converted to input-side units (10ms frames)**, is received
+ * from the distribution, and `detect` fails on both sides (the upper limit before feature
+ * extraction, the lower limit right after it) (canonical:
+ * `tools/export-recipes/vowel_detector/distribution.py`). Putting defaults or constants here would
+ * leave the host alone with the old numbers when a distribution baked with a different range
+ * arrives (the same judgement as SBV2's `maxTokens`).
  *
- * ## MUST: 後処理の定数（`switchPenalty` / `minDurationFrames` / `frameSec`）はここに無い
+ * ## MUST: no post-processing constants here (`switchPenalty` / `minDurationFrames` / `frameSec`)
  *
- * 正本は `postprocess.ts` の module 定数（= 学習時の平滑化そのもの）。宣言の席を作ると
- * 「学習時と違う平滑化を配布形が指定できる」ことになるが、そこを動かして良い根拠が無い。
- * 値の一致は `tests/vowel_detector_host_test.ts` が上流 `feature_config.json` の写しと
- * 突き合わせる。
+ * The canonical values are the module constants of `postprocess.ts` (= the smoothing used at
+ * training time itself). Creating a declaration field would mean "the distribution can specify a
+ * smoothing different from training", and there is no ground for moving that. The match of the
+ * values is checked by `tests/vowel_detector_host_test.ts` against a copy of upstream's
+ * `feature_config.json`.
  */
 
 import { assertAllowedKeys } from "../config/readers.ts";
 import { FEATURE_DIM, SAMPLE_RATE } from "./features.ts";
 import { LIPSYNC_CLASSES } from "./postprocess.ts";
 
-/** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
+/** The contract name of `pipeline` and the major this implementation accepts (ADR 0038 §1). */
 export const VOWEL_DETECTOR_PIPELINE_NAME = "vowel-detector";
 export const VOWEL_DETECTOR_PIPELINE_MAJOR = 1;
 
@@ -54,33 +61,50 @@ const ROOT_KEYS: readonly string[] = [
   "maxFrames",
 ];
 
-/** 入力長の刻み（出力は 20ms 格子 = 入力 2 フレームで 1 本 — グラフ入力は `2T`）。 */
+/**
+ * Step of the input length (the output is a 20ms grid = one per 2 input frames — the graph input
+ * is `2T`).
+ */
 const LENGTH_MULTIPLE = 2;
 
 export type VowelDetectorPipelineConfig = {
-  /** 入力波形のサンプリング周波数。宣言のみ（受理集合は {@link SAMPLE_RATE} の 1 値）。 */
+  /**
+   * Sampling rate of the input waveform. Declaration only (the acceptance set is the single value
+   * {@link SAMPLE_RATE}).
+   */
   readonly sampleRate: typeof SAMPLE_RATE;
-  /** グラフ入力の特徴次元。宣言のみ（受理集合は {@link FEATURE_DIM} の 1 値）。 */
+  /**
+   * Feature dimension of the graph input. Declaration only (the acceptance set is the single value
+   * {@link FEATURE_DIM}).
+   */
   readonly featureDim: typeof FEATURE_DIM;
-  /** 出力クラス（**並びが id**）。受理するのは {@link LIPSYNC_CLASSES} と同一の並びだけ。 */
+  /**
+   * Output classes (**the order is the id**). Only the order identical to {@link LIPSYNC_CLASSES}
+   * is accepted.
+   */
   readonly classes: typeof LIPSYNC_CLASSES;
   /**
-   * 1 回の `detect` が受ける 10ms フレーム数の**下限** = 記号次元 `T` の下限（20ms 格子）を
-   * 入力側の単位へ直したもの。**2 の倍数**（グラフ入力は `2T`）。
+   * The **lower limit** of the 10ms frame count one `detect` accepts = the lower bound of the
+   * symbolic dimension `T` (20ms grid) converted to input-side units. **A multiple of 2** (the
+   * graph input is `2T`).
    */
   readonly minFrames: number;
   /**
-   * 1 回の `detect` が受ける 10ms フレーム数の**上限** = 記号次元 `T` の上限（20ms 格子）を
-   * 入力側の単位へ直したもの。**2 の倍数**（グラフ入力は `2T`）。
+   * The **upper limit** of the 10ms frame count one `detect` accepts = the upper bound of the
+   * symbolic dimension `T` (20ms grid) converted to input-side units. **A multiple of 2** (the
+   * graph input is `2T`).
    *
-   * NOTE: `Dim(max=…)` の数**そのものではない** — あちらは 20ms 格子の本数で、この欄はその
-   * 2 倍（10ms フレーム数）。比較相手も 10ms 側（{@link parseVowelDetectorPipelineConfig} の
-   * 消費者 = `pipeline.ts` の `assertFrameLimit`）。
+   * NOTE: **not** the number of `Dim(max=…)` itself — that one counts the 20ms grid, and this
+   * field is twice it (the 10ms frame count). The comparison partner is also on the 10ms side (the
+   * consumer of {@link parseVowelDetectorPipelineConfig} = `assertFrameLimit` in `pipeline.ts`).
    */
   readonly maxFrames: number;
 };
 
-/** 受理集合が 1 値しかない数の欄。綴り違いも対応外も同じ文言で落とす。 */
+/**
+ * A numeric field whose acceptance set is a single value. Misspellings and unsupported values fail
+ * with the same message.
+ */
 const readOnlyNumber = <T extends number>(
   raw: Record<string, unknown>,
   key: string,
@@ -99,7 +123,8 @@ const readOnlyNumber = <T extends number>(
 };
 
 /**
- * クラス語彙を読む。**並びまで**一致を要求する（モジュール doc の 3 つ目）。
+ * Reads the class vocabulary. Requires a match **down to the order** (the third item of the module
+ * doc).
  */
 const readClasses = (
   raw: Record<string, unknown>,
@@ -123,10 +148,11 @@ const readClasses = (
 };
 
 /**
- * 運用範囲の片側（`minFrames` / `maxFrames`）を読む。どちらも 10ms フレーム数。
+ * Reads one side of the operating range (`minFrames` / `maxFrames`). Both are 10ms frame counts.
  *
- * MUST: 2 の倍数であることまで見る — グラフ入力は `2T` なので、奇数の境界は「その 1 本だけは
- * 通らない境界」という、宣言としては成立するが意味の壊れた数になる。
+ * MUST: check down to being a multiple of 2 — the graph input is `2T`, so an odd bound is a number
+ * that holds as a declaration but whose meaning is broken: "a bound that only that one length
+ * cannot pass".
  */
 const readFrameBound = (raw: Record<string, unknown>, key: string, where: string): number => {
   if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
@@ -145,7 +171,7 @@ const readFrameBound = (raw: Record<string, unknown>, key: string, where: string
   return value;
 };
 
-/** manifest の `pipelineConfig`（hub が素通しした生の値）を検査して読む。 */
+/** Checks and reads the manifest's `pipelineConfig` (the raw value hub passed through). */
 export const parseVowelDetectorPipelineConfig = (
   raw: Readonly<Record<string, unknown>>,
 ): VowelDetectorPipelineConfig => {

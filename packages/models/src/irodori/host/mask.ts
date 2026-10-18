@@ -1,29 +1,35 @@
 /**
- * `dit` の連結マスク `[1,1,1,S+Σcaps]` の構築（ADR 0047 決定 1 / 4）。
+ * Building the concatenated mask `[1,1,1,S+Σcaps]` of `dit` (ADR 0047 decisions 1 / 4).
  *
- * 並びは **self（latent 全 1）→ text → speaker → caption** で、これは `dit` グラフ内の K/V の
- * 連結順そのもの。各条件区間は「使った長さの prefix だけ True」で、残りは右 pad ぶんの False。
+ * The order is **self (latent, all 1) → text → speaker → caption**, exactly the concatenation
+ * order of K/V inside the `dit` graph. Each condition segment is "True only for the prefix of the
+ * used length", and the rest, the right padding, is False.
  *
- * MUST: 区間の順とオフセットを崩さない。長さの合計が同じなら shape も実行も通り、**別の
- * 条件を落とした**結果が沈黙で出る（exporter の `TestSegmentMasks` が同じ値を固定している）。
+ * MUST: do not break the segment order or the offsets. With the same total length, both the shapes
+ * and the run go through, and a result that **dropped a different condition** comes out silently
+ * (the exporter's `TestSegmentMasks` pins the same values).
  *
- * uncond 変種は「該当区間だけ全 False」— cond の state をそのまま渡してマスクだけを落とすと
- * 上流の uncond（state 0 + マスク 0）とビット一致する、というのが ADR 0047 決定 1 の実測。
+ * An uncond variant is "all False for that segment only" — passing cond's state as is and dropping
+ * only the mask is bit-identical to upstream's uncond (state 0 + mask 0); that is the measurement
+ * behind ADR 0047 decision 1.
  */
 
-/** 条件区間の名前（= CFG の変種名 / K/V の連結順）。 */
+/** Name of a condition segment (= the CFG variant name / the K/V concatenation order). */
 export type IrodoriSegment = "text" | "speaker" | "caption";
 
-/** 連結順。**この順が正本**（exporter の `DIT_UNCOND_VARIANTS` と同綴り・同順）。 */
+/**
+ * Concatenation order. **This order is the source of truth** (same spelling and order as the
+ * exporter's `DIT_UNCOND_VARIANTS`).
+ */
 export const SEGMENT_ORDER: readonly IrodoriSegment[] = ["text", "speaker", "caption"];
 
-/** 区間ごとの長さ（`used` = 実際に埋めた行数 / `caps` = グラフの宣言長）。 */
+/** Length per segment (`used` = rows actually filled / `caps` = the graph's declared length). */
 export type SegmentLengths = Readonly<Record<IrodoriSegment, number>>;
 
 /**
- * 連結マスクを組む。`uncond` を渡すとその区間だけ全 False になる。
+ * Builds the concatenated mask. Passing `uncond` makes only that segment all False.
  *
- * dtype は bool（IR の境界規約 = u32 の 0/1 — ADR 0009）。
+ * The dtype is bool (the IR's boundary convention = u32 0/1 — ADR 0009).
  */
 export const buildDitMask = (
   latentLength: number,

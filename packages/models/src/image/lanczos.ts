@@ -1,35 +1,42 @@
 /**
- * RGB8 の LANCZOS リサンプル — Pillow の `Image.resize(size, Image.LANCZOS)` の 8bit 経路
- * （`libImaging/Resample.c` の `ImagingResampleInner` と `*_8bpc`）の逐語の移植。本体は Pillow の 8bit の
- * 分離型リサンプルの共通の核（`pillow-resample.ts` — フィルタ `PILLOW_LANCZOS`・3 チャネル）で、
- * ここは RGB8 の入口の検査と結線だけを持つ（Pillow の逐語の写しを 1 本に寄せる — ADR 0125）。
+ * LANCZOS resampling of RGB8 — a verbatim port of the 8-bit path of Pillow's
+ * `Image.resize(size, Image.LANCZOS)` (`ImagingResampleInner` and `*_8bpc` in
+ * `libImaging/Resample.c`). The body is the shared core of Pillow's 8-bit separable resampling
+ * (`pillow-resample.ts` — filter `PILLOW_LANCZOS`, 3 channels); this file holds only the RGB8 entry
+ * check and the wiring (the verbatim copy of Pillow is consolidated into one — ADR 0125).
  *
- * Wan2.2 の I2V の条件画像は、公式実装（`textimage2video.py`）も diffusers（`VaeImageProcessor` の
- * `resample="lanczos"`）も Pillow の LANCZOS で作る。その uint8 をビット単位で再現するために置く
- * （ADR 0121 決定 11）。逐語に写している点・`preprocess.ts` の `resizeRgb8` と経路を分けている理由・
- * 窓だけを計算する理由の正本は `pillow-resample.ts` のモジュール doc。版は fixture
- * `tests/fixtures/wan-i2v/lanczos.json`（画素は `lanczos.safetensors`）が記録する。
+ * The condition image of Wan2.2's I2V is made with Pillow's LANCZOS both by the official
+ * implementation (`textimage2video.py`) and by diffusers (`resample="lanczos"` of
+ * `VaeImageProcessor`). This exists to reproduce that uint8 bit for bit (ADR 0121 decision 11). The
+ * canonical source for what is copied verbatim, why the path is separate from `resizeRgb8` in
+ * `preprocess.ts`, and why only the window is computed is the module doc of `pillow-resample.ts`.
+ * The version is recorded by the fixture `tests/fixtures/wan-i2v/lanczos.json` (pixels in
+ * `lanczos.safetensors`).
  *
- * NOTE: `export` は Wan の I2V の前処理とテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: `export` serves Wan's I2V preprocessing and the tests (not exposed on `mod.ts` / the subpath
+ * surface — ADR 0008).
  */
 
 import { assertRgb8, type Rgb8Image } from "./preprocess.ts";
 import { PILLOW_LANCZOS, type PixelWindow, resampleU8Window } from "./pillow-resample.ts";
 
-/** チャネル数（RGB）。 */
+/** Number of channels (RGB). */
 const CHANNELS = 3;
 
-/** 伸縮後の画像から切り出す矩形（左上 `left`, `top` から `width × height`）。 */
+/** A rectangle cropped from the resized image (`width × height` from the top-left `left`, `top`). */
 export type Rgb8Window = PixelWindow;
 
 /**
- * RGB8 を `width × height` へ LANCZOS でリサンプルし（Pillow の `Image.resize(..., Image.LANCZOS)` と uint8 で一致 —
- * モジュール doc）、その矩形 `window` を切り出したものを返す。計算するのは窓の出力だけ（全体を伸縮してから切り出した
- * 値と同じ）。縦横比は保たない。寸法が変わらない軸はパスを飛ばし（その軸は入力の写しを切り出す）、両軸とも変わらなければ
- * 写しを返す（Pillow の `ImagingCopy`）。
+ * Resamples RGB8 to `width × height` with LANCZOS (uint8-identical to Pillow's
+ * `Image.resize(..., Image.LANCZOS)` — module doc) and returns the rectangle `window` cropped from
+ * it. Only the window's output is computed (the same values as resizing the whole image and
+ * cropping). The aspect ratio is not preserved. The pass is skipped for an axis whose size does not
+ * change (that axis crops a copy of the input), and when neither axis changes a copy is returned
+ * (Pillow's `ImagingCopy`).
  *
- * 画像の検査は `assertRgb8`（呼び手が渡した画像 — `ModelInputError`）。出力寸法と窓は内部の事前条件（呼び手は受理
- * 集合とそこから導いた寸法しか渡さない）なので `RangeError`（共通の核が投げる）。
+ * The image is checked by `assertRgb8` (the image the caller passed — `ModelInputError`). The output
+ * size and the window are internal preconditions (callers pass only the acceptance set and sizes
+ * derived from it), hence `RangeError` (thrown by the shared core).
  */
 export const resizeRgb8LanczosWindow = (
   image: Rgb8Image,
@@ -49,7 +56,8 @@ export const resizeRgb8LanczosWindow = (
 };
 
 /**
- * RGB8 を `width × height` へ LANCZOS でリサンプルする（{@link resizeRgb8LanczosWindow} の窓 = 全体）。
+ * Resamples RGB8 to `width × height` with LANCZOS (the window of {@link resizeRgb8LanczosWindow} =
+ * the whole image).
  */
 export const resizeRgb8Lanczos = (image: Rgb8Image, width: number, height: number): Rgb8Image =>
   resizeRgb8LanczosWindow(image, width, height, { left: 0, top: 0, width, height });

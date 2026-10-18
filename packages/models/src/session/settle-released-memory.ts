@@ -1,24 +1,29 @@
 /**
- * 破棄したバッファの解放を待つ道具（**パイプライン非依存の共通処理** — 段を畳んだ直後に次の段が
- * 大きな確保をする家族が使う）。
+ * A tool that waits for the release of destroyed buffers (**pipeline-independent shared processing**
+ * — used by families where the next stage makes a large allocation right after the previous stage
+ * is torn down).
  *
- * MUST: barrel には出さない（同居する `options.ts` / `dispose-steps.ts` と同じ理由 — 利用者が触る面
- * ではない内部機構）。
+ * MUST: not exported from the barrel (for the same reason as the co-located `options.ts` /
+ * `dispose-steps.ts` — an internal mechanism, not a surface the user touches).
  */
 
 import type { GpuContext } from "@karume/runtime";
 
 /**
- * 空の `queue.submit([])` を 1 本出してから `onSubmittedWorkDone` を待つ（device 消失とは競わせる）。
+ * Issues one empty `queue.submit([])` and then waits for `onSubmittedWorkDone` (raced against device
+ * loss).
  *
- * WHY: Intel / wgpu（B570）は `destroy()` の解放が次の device poll まで遅れ、畳んだ直後に確保し直すと
- * OOM を踏みうる（docs/known-issues.md「Intel Arc B570」節）。素の WebGPU の probe では、この待ちだけで
- * 確保し直しが通った（docs/research/2026-09-26-anima-residency-bench.md）。固定の sleep は足さない。
- * 空の submit は、wgpu の保留中の destroy を流すのと、致命的な OOM で無効化された device の消失を
- * ここで表面化させる（Deno は `device.lost` を有効性を検査する呼び出しで初めて解決する）ためのもの。
+ * WHY: on Intel / wgpu (B570) the release by `destroy()` is delayed until the next device poll, and
+ * re-allocating right after a teardown can hit OOM (docs/known-issues.md, the "Intel Arc B570"
+ * section). In a plain WebGPU probe this wait alone let the re-allocation succeed
+ * (docs/research/2026-09-26-anima-residency-bench.md). No fixed sleep is added.
+ * The empty submit is there to flush wgpu's pending destroys, and to surface here the loss of a
+ * device invalidated by a fatal OOM (Deno resolves `device.lost` only on a call that checks
+ * validity).
  *
- * MUST: device 消失と競わせる — 消失後の `onSubmittedWorkDone` が解決しない実装がありうる（runtime の
- * `raceDeviceLost` の doc）。消失したら待たずに戻り、次の段が消失の例外で fail loudly になる。
+ * MUST: race against device loss — some implementations may never resolve `onSubmittedWorkDone`
+ * after the loss (the doc of the runtime's `raceDeviceLost`). On loss it returns without waiting, and
+ * the next stage fails loudly with the loss exception.
  */
 export const settleReleasedMemory = async (gpu: GpuContext): Promise<void> => {
   let unsubscribe: () => void = () => {};

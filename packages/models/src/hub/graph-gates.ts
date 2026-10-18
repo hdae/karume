@@ -1,22 +1,26 @@
 /**
- * 焼かれたグラフの**宣言**と `pipelineConfig` の宣言を突き合わせる門（family 横断で 1 本に
- * 寄せたもの）。
+ * Checks that match the **declaration** of an exported graph against the declaration of
+ * `pipelineConfig` (consolidated into one across families).
  *
- * 突合は逐次面でも全量面でも同じ形で要るので、受けるのは {@link GraphOwner}（グラフ宣言だけ）
- * に限る — Session も GPU も触らない。family ごとに違うのは**文言のラベル**（family 名と、
- * どの宣言を見ていたか）だけなので、それを引数で受ける。
+ * The check is needed in the same form on the sequential surface and on the whole-bytes surface,
+ * so it accepts only {@link GraphOwner} (the graph declaration alone) — it touches neither a
+ * Session nor the GPU. What differs per family is only **the label in the message** (the family
+ * name and which declaration was being checked), so that is taken as an argument.
  */
 
 import type { GraphOwner } from "./components.ts";
 
 /**
- * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
+ * Checks that the **static** dimension of one axis of a graph input matches the declaration in
+ * `pipelineConfig`.
  *
- * MUST: 落とさない。ホスト側の前処理は宣言の寸法に合わせて作るので、グラフが別の寸法で焼かれて
- * いても**ホスト側は最後まで通る**（落ちるのは Session の shape 検査で、そのときには「どちらの
- * 数が正しいのか」が読み手に伝わらない）。資産の取り違えはここが唯一の検出器になる。
- * MUST: 形全体ではなく**要る軸だけ**を見る。データ依存の軸（記号次元・系列長）は静的でない
- * まま正当なので、全軸を静的と要求すると正しい配布形が通らない。
+ * MUST: do not drop this check. The host-side preprocessing is built to the declared size, so even
+ * when the graph was exported with a different size **the host side runs to the end** (what fails is
+ * the Session's shape check, and by then the reader cannot tell "which number is right"). This is
+ * the only detector of mixed-up assets.
+ * MUST: check **only the axes that matter**, not the whole shape. Data-dependent axes (symbolic
+ * dimensions, sequence length) are legitimately non-static, so requiring every axis to be static
+ * would reject a correct distribution.
  */
 export const assertGraphInputDim = (
   family: string,
@@ -40,12 +44,13 @@ export const assertGraphInputDim = (
 };
 
 /**
- * グラフ入力の dtype が家族の前処理の書く dtype と一致することを見る。
+ * Checks that the dtype of a graph input matches the dtype the family's preprocessing writes.
  *
- * MUST: 落とさない。{@link assertGraphInputDim} は軸の寸法しか見ないので、同じ形で別の dtype を
- * 受けるグラフ（例 i32 の `pixel_values`）は構築前の検査を通り、GPU と Session を作って重みを
- * 読んだ後の実行時の入力検査で、資産の取り違えを指さない文言で落ちる。軸と同じく**要る入力
- * だけ**を家族が名指しで見る（全入力を一律に縛らない）。
+ * MUST: do not drop this check. {@link assertGraphInputDim} looks only at axis sizes, so a graph that
+ * takes the same shape with a different dtype (e.g. an i32 `pixel_values`) passes the
+ * pre-construction checks and fails in the runtime input check — after the GPU and the Session are
+ * created and the weights are read — with a message that does not point at the mixed-up asset. As
+ * with axes, the family names **only the inputs that matter** (not every input uniformly).
  */
 export const assertGraphInputDtype = (
   family: string,

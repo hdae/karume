@@ -1,47 +1,52 @@
 /**
- * 継続長（front の logw → 音素ごとのフレーム数 → フレーム展開インデックス）。
+ * Durations (front's logw → frames per phoneme → frame expansion index).
  *
- * 参照実装 `SynthesizerTrnJPExtra.infer` の
+ * A port of the reference implementation `SynthesizerTrnJPExtra.infer`'s
  * `logw = sdp(...)·r + dp(...)·(1−r)` → `w = exp(logw)·x_mask·length_scale` →
- * `w_ceil = ceil(w)` → `attn = generate_path(w_ceil, ...)` を写したもの。**attn 行列（Ty×P）は
- * 作らない** — 単調パスなので `expandIdx`（長さ Ty の音素添字列）で同じ情報を持てる。
- * 続く m_p / logs_p の展開は行列積ではなく gather になる（ADR 0013 のホスト責務）。
+ * `w_ceil = ceil(w)` → `attn = generate_path(w_ceil, ...)`. **The attn matrix (Ty×P) is not built**
+ * — the path is monotonic, so `expandIdx` (a phoneme index sequence of length Ty) holds the same
+ * information. The following expansion of m_p / logs_p becomes a gather instead of a matrix product
+ * (the host's responsibility per ADR 0013).
  *
- * ## 既知差: `w_ceil` は torch とビット同一ではない（ADR 0048 と同じ形式の注記）
+ * ## Known difference: `w_ceil` is not bit-identical to torch (a note in the same form as ADR 0048)
  *
- * ここは式全体を JS の f64 で評価してから `Math.ceil` を掛けるのに対し、参照は f32 テンソル
- * 演算のまま `torch.ceil` する。`f32(exp_f32(x))` と `exp_f64(x)` の f32 半 ulp（相対 6e-8）が
- * ceil の閾値を跨ぐと **1 フレームずれる**（実測: 音素あたり 5.5e-7・229 音素の 1 発話で
- * P ≈ 1.3e-4）。
+ * Here the whole expression is evaluated in JS f64 before `Math.ceil`, whereas the reference
+ * applies `torch.ceil` while still in f32 tensor arithmetic. When the f32 half ulp (relative 6e-8)
+ * between `f32(exp_f32(x))` and `exp_f64(x)` crosses the threshold of ceil, it **shifts by 1
+ * frame** (measured: 5.5e-7 per phoneme, P ≈ 1.3e-4 for one utterance of 229 phonemes).
  *
- * MUST: これを `Math.fround` 逐次へ揃えても torch 一致は**決定的にならない** — front 出力
- * 自体の GPU/CPU 差 1e-5 が同じ閾値跨ぎを 2 桁以上高い率で起こし、支配項は上流に残る
- * （`tools/export-recipes/sbv2/README.md` が設計として明示的に許容し、割れた位置を
- * `w_ceil_diffs` に載せる）。karume 単体の再現性（WAV sha256 門）は f64 経路が決定的なので無傷。
+ * MUST: aligning this to sequential `Math.fround` **does not make the torch match deterministic** —
+ * the GPU/CPU difference of 1e-5 in the front output itself causes the same threshold crossing at a
+ * rate more than 2 orders of magnitude higher, and the dominant term remains upstream
+ * (`tools/export-recipes/sbv2/README.md` explicitly allows it by design and puts the positions that
+ * split into `w_ceil_diffs`). karume's own reproducibility (the WAV sha256 check) is intact because
+ * the f64 path is deterministic.
  */
 
 import { Sbv2InputError } from "../errors.ts";
 
 type DurationPlan = {
-  /** 音素ごとのフレーム数（ceil 済み・マスク適用済み）。 */
+  /** Frames per phoneme (after ceil and masking). */
   readonly wCeil: Int32Array<ArrayBuffer>;
-  /** 総フレーム数 Ty。 */
+  /** Total frame count Ty. */
   readonly totalFrames: number;
-  /** フレーム → 音素の展開インデックス（長さ Ty）。 */
+  /** Frame → phoneme expansion index (length Ty). */
   readonly expandIdx: Int32Array<ArrayBuffer>;
 };
 
 /**
- * logw（sdp / dp）から音素ごとの継続長とフレーム展開インデックスを作る。
+ * Builds per-phoneme durations and the frame expansion index from logw (sdp / dp).
  *
- * @param logwSdp front の出力 0（`[1,1,P]` の生データ）。
- * @param logwDp front の出力 1（同上）。
- * @param xMask front の入力 x_mask（`[1,1,P]`）。パディング列を 0 フレームに落とす。
- * @param maxFrames 総フレーム数の上限（配布形の `pipelineConfig.maxFrames`）。
+ * @param logwSdp front's output 0 (raw data of `[1,1,P]`).
+ * @param logwDp front's output 1 (same).
+ * @param xMask front's input x_mask (`[1,1,P]`). Drops padding columns to 0 frames.
+ * @param maxFrames upper limit of the total frame count (the distribution's
+ * `pipelineConfig.maxFrames`).
  *
- * MUST: 上限の検査は `expandIdx` の確保**より前**に置く。総フレーム数は logw と lengthScale
- * の積で決まる要求依存の数で、下流の `(T, T)` 表（8·T² bytes 級）どころか長さ T の展開列
- * すら確保できない大きさになりうる — 確保してから見ると原因の遠い OOM になる。
+ * MUST: place the limit check **before** allocating `expandIdx`. The total frame count is a
+ * request-dependent number set by the product of logw and lengthScale, and can be so large that not
+ * even the expansion sequence of length T, let alone the downstream `(T, T)` tables (8·T² bytes
+ * class), can be allocated — checking after allocating turns it into an OOM far from its cause.
  */
 export const durationsToFrames = (
   logwSdp: Float32Array<ArrayBuffer>,
@@ -63,8 +68,8 @@ export const durationsToFrames = (
     const logw = logwSdp[i] * sdpRatio + logwDp[i] * (1 - sdpRatio);
     const frames = Math.ceil(Math.exp(logw) * xMask[i] * lengthScale);
     if (!Number.isFinite(frames) || frames < 0) {
-      // 発散した logw（front の値が壊れている）を「巨大な Ty」として下流へ流すと、
-      // 確保サイズだけが異常になって原因の遠い OOM になる。ここで落とす。
+      // Passing a diverged logw (broken front values) downstream as "a huge Ty" makes only the
+      // allocation size abnormal and turns it into an OOM far from its cause. Fail here.
       throw new Error(`音素 ${i} の継続長 ${frames} が有限の非負値でない`);
     }
     wCeil[i] = frames;
@@ -74,9 +79,10 @@ export const durationsToFrames = (
     throw new Error("総フレーム数が 0（発話にならない — x_mask か front 出力を疑う）");
   }
   if (total > maxFrames) {
-    // MUST: ここだけ `Sbv2InputError`。同ファイルの他の throw は front 出力が壊れている
-    // ＝内部異常（500）だが、上限超過は「渡した text / lengthScale が受理できない」＝
-    // 入力起因（400）で、呼び手が要求を直せば直る（`errors.ts` の分類軸）。
+    // MUST: only this one is a `Sbv2InputError`. The other throws in this file mean the front
+    // output is broken = an internal fault (500), but exceeding the limit means "the given text /
+    // lengthScale cannot be accepted" = input-caused (400), which the caller fixes by fixing the
+    // request (the classification axis of `errors.ts`).
     throw new Sbv2InputError(
       `総フレーム数 ${total} が配布形の上限 maxFrames=${maxFrames} を超えている` +
         "（text を短く分けるか lengthScale を下げる）",

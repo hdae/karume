@@ -1,85 +1,96 @@
 /**
- * SBV2 の入力語彙（発話 = モーラ列 + 語アライメント）と、句構造からの変換。
+ * SBV2's input vocabulary (utterance = mora sequence + word alignment) and the conversion from the
+ * phrase structure.
  *
- * 責務境界（0.6.0 の再裁定）: テキスト解析（辞書・修正辞書）は**呼び手の責務**で、この
- * パッケージは解析済みの構造だけを受ける。したがってここの型は全て karume 所有で、解析器の
- * 型を import しない — {@link Sbv2Phrases} は「上流の解析結果が**構造的に**満たす形」を
- * 書いたものであって、特定の解析器への依存ではない。
+ * Responsibility boundary (the re-ruling of 0.6.0): text analysis (dictionary, correction
+ * dictionary) is **the caller's responsibility**, and this package accepts only the analysed
+ * structure. So every type here is karume-owned and imports no analyser types —
+ * {@link Sbv2Phrases} describes "the shape the upstream analysis result satisfies
+ * **structurally**", not a dependency on a particular analyser.
  *
- * MUST: 発話は**フラット**（句の入れ子を持たない）。句は「核 → トーン」を決めるためだけの
- * 構造で、SBV2 が読むのはモーラごとの 2 値トーンそのものなので、句を残すと「核とトーンの
- * どちらが正か」という二重表現になる。{@link toSbv2Utterance} が核を展開しきってから渡す。
+ * MUST: the utterance is **flat** (no nested phrases). A phrase is a structure only for deciding
+ * "nucleus → tone", and what SBV2 reads is the binary tone of each mora itself, so keeping phrases
+ * would create a dual representation of "which is authoritative, the nucleus or the tones".
+ * {@link toSbv2Utterance} expands the nucleus fully before handing it over.
  */
 
 import { Sbv2InputError } from "../errors.ts";
 
 /**
- * 語アライメントの 1 要素（1 語、または実在記号 1 文字）。
+ * One element of the word alignment (one word, or one actually present symbol character).
  *
- * `phones` は**その語が生む音素列**（両端 PAD を含まない）。記号要素は正規形 1 個
- * （例 `["!"]`）で、`surface` は正規化後テキスト上の生の 1 文字（例 `"！"`）。
+ * `phones` is **the phoneme sequence the word produces** (without PAD at either end). A symbol
+ * element is one normal form (e.g. `["!"]`), and `surface` is the raw single character in the
+ * normalised text (e.g. `"！"`).
  */
 export type Sbv2Word = {
-  /** 語の表層（DeBERTa のトークン数と BERT 入力テキストの出所）。 */
+  /** The word's surface (the source of DeBERTa's token count and of the BERT input text). */
   readonly surface: string;
-  /** その語が生む音素列（両端 PAD を含まない）。 */
+  /** The phoneme sequence the word produces (without PAD at either end). */
   readonly phones: readonly string[];
 };
 
 /**
- * 発話の 1 モーラ。**編集面はここ**（`tone` を直せばアクセントが動く）。
+ * One mora of the utterance. **This is the editing surface** (fixing `tone` moves the accent).
  *
- * MUST: 音素は `consonant` / `vowel` から導く（`consonant` があれば `[consonant, vowel]`、
- * 無ければ `[vowel]`）。派生した音素列を別欄で持たせない — 直して戻す往復で古い派生欄が
- * 同梱され、「無視する（編集を黙って捨てる）」か「落とす（正当な往復が通らない）」の二択に
- * なる。
+ * MUST: phonemes are derived from `consonant` / `vowel` (`[consonant, vowel]` when there is a
+ * `consonant`, otherwise `[vowel]`). Do not keep the derived phoneme sequence in a separate field —
+ * a fix-and-return round trip would carry the stale derived field along, leaving a choice between
+ * "ignore it (silently discard the edit)" and "reject it (a legitimate round trip fails)".
  */
 export type Sbv2Mora = {
-  /** カタカナ 1 モーラ（拗音は 1 モーラ）。表示・突合用。 */
+  /** One katakana mora (a contracted sound is one mora). For display and comparison. */
   readonly kana: string;
-  /** 子音音素（例 `"ky"`）。母音のみ・撥音・促音のモーラには無い。 */
+  /** Consonant phoneme (e.g. `"ky"`). Absent for vowel-only, moraic nasal and geminate moras. */
   readonly consonant?: string;
   /**
-   * 母音音素（`"a"`…`"o"` / 撥音 `"N"` / 促音 `"q"`）。長音は直前母音に解決済み。
+   * Vowel phoneme (`"a"`…`"o"` / moraic nasal `"N"` / geminate `"q"`). Long vowels are already
+   * resolved to the preceding vowel.
    *
-   * NOTE: **音素そのもの**が入る（促音は `"q"`）。上流の解析結果が促音を `"cl"` で表す場合の
-   * 畳み込みは {@link toSbv2Utterance} が済ませる。
+   * NOTE: **the phoneme itself** goes here (the geminate is `"q"`). When the upstream analysis
+   * result writes the geminate as `"cl"`, {@link toSbv2Utterance} does the folding.
    */
   readonly vowel: string;
-  /** 2 値トーン（0 = 低・1 = 高）。子音・母音とも同一トーンになる。 */
+  /** Binary tone (0 = low, 1 = high). Consonant and vowel get the same tone. */
   readonly tone: 0 | 1;
   /**
-   * このモーラの**直後**にテキスト上実在した記号の正規形列（出現順）。ポーズからの合成は
-   * しない（実在しない記号は音素にしない — 参照実装 g2p と同方針）。
+   * The normal-form sequence of symbols actually present in the text **right after** this mora (in
+   * order of appearance). Nothing is synthesised from pauses (symbols that are not present do not
+   * become phonemes — the same policy as the reference implementation's g2p).
    */
   readonly punctuations?: readonly string[];
 };
 
 /**
- * 1 回の合成に渡す発話（{@link Sbv2Pipeline.generate} の第 1 引数）。
+ * The utterance passed to one synthesis (the first argument of {@link Sbv2Pipeline.generate}).
  *
- * `moras` が編集面で、`words` は**読み取り専用**（BERT 入力テキストと word2ph の出所）。
- * `words` を書き換えると音素列と語割りが食い違い、合成は入口の門で落ちる — 読みを変えたい
- * ときは解析側（呼び手の辞書・修正辞書）からやり直す。
+ * `moras` is the editing surface, and `words` is **read-only** (the source of the BERT input text
+ * and word2ph). Rewriting `words` makes the phoneme sequence and the word split disagree, and the
+ * synthesis fails at the entry check — to change a reading, redo it from the analysis side (the
+ * caller's dictionary / correction dictionary).
  */
 export type Sbv2Utterance = {
-  /** 先頭のモーラより前に実在した記号の正規形列（記号だけの入力では全てここに入る）。 */
+  /**
+   * Normal-form sequence of symbols present before the first mora (with symbol-only input, all of
+   * them go here).
+   */
   readonly leadingPunctuations: readonly string[];
-  /** 発話のモーラ列（句の境界は残らない — モジュール doc の MUST）。 */
+  /** The utterance's mora sequence (phrase boundaries are not kept — the module doc's MUST). */
   readonly moras: readonly Sbv2Mora[];
-  /** 語アライメント（読み取り専用 — BERT 入力テキストと word2ph の出所）。 */
+  /** Word alignment (read-only — the source of the BERT input text and word2ph). */
   readonly words: readonly Sbv2Word[];
 };
 
 /**
- * 句構造の解析結果（{@link toSbv2Utterance} の入力）。
+ * The analysis result of the phrase structure (the input of {@link toSbv2Utterance}).
  *
- * 「アクセント句とその核」で読みを返す解析器の出力が**構造的に**満たす形を書いてある
- * （余分な欄を持っていても通る）。karume 側はこの部分集合しか読まない。
+ * It describes the shape that the output of an analyser returning readings as "accent phrases and
+ * their nuclei" satisfies **structurally** (extra fields pass). The karume side reads only this
+ * subset.
  */
 export type Sbv2Phrases = {
   readonly result: {
-    /** 先頭句より前に実在した記号の正規形列。 */
+    /** Normal-form sequence of symbols present before the first phrase. */
     readonly leadingPunctuations: readonly string[];
     readonly accentPhrases: readonly {
       readonly moras: readonly {
@@ -87,28 +98,35 @@ export type Sbv2Phrases = {
         readonly consonant?: string;
         readonly vowel: string;
       }[];
-      /** アクセント核（1-origin・0 = 平板）。上端は {@link toSbv2Utterance} が丸める。 */
+      /** Accent nucleus (1-origin, 0 = flat). {@link toSbv2Utterance} clamps the upper end. */
       readonly accentNucleus: number;
-      /** 句の直後に実在した記号の正規形列（出現順）。 */
+      /**
+       * Normal-form sequence of symbols present right after the phrase (in order of appearance).
+       */
       readonly punctuations: readonly string[];
     }[];
   };
-  /** 同一解析から採った語アライメント（音素列と語割りが整合している必要がある）。 */
+  /**
+   * Word alignment taken from the same analysis (the phoneme sequence and the word split must be
+   * consistent).
+   */
   readonly words: readonly Sbv2Word[];
 };
 
 /**
- * アクセント核を句内のモーラ 2 値トーンへ展開する。
+ * Expands an accent nucleus into the binary tones of the moras in the phrase.
  *
- * 規則（上流 SBV2 の g2p と同一）:
+ * Rules (identical to upstream SBV2's g2p):
  *
- * - 平板（k = 0）: 1 モーラ目だけ 0、以降 1。
- * - 頭高（k = 1）: 1 モーラ目だけ 1、以降 0。
- * - 中高・尾高（k > 1）: 1 モーラ目 0、2..k が 1、k+1 以降 0。
+ * - Flat (k = 0): only the first mora is 0, the rest 1.
+ * - Head-high (k = 1): only the first mora is 1, the rest 0.
+ * - Middle-high / tail-high (k > 1): the first mora 0, 2..k are 1, k+1 onwards 0.
  *
- * MUST: 核の**上端**はモーラ数へ丸める（範囲外核は辞書差・修正辞書由来で普通に出る）。
- * 丸めた値は同じトーン列を生むので音は変わらない。**下端**は丸めない — 負の核は「核の
- * 意味を取り違えた入力」で、黙って平板へ倒すと指定と別のアクセントで合成される。
+ * MUST: the **upper end** of the nucleus is clamped to the mora count (an out-of-range nucleus
+ * routinely comes from dictionary differences and correction dictionaries). The clamped value
+ * produces the same tone sequence, so the sound does not change. The **lower end** is not clamped
+ * — a negative nucleus is "input that misread the meaning of the nucleus", and silently falling
+ * back to flat would synthesise a different accent from the one specified.
  */
 const phraseTones = (accentNucleus: number, moraCount: number, where: string): (0 | 1)[] => {
   if (!Number.isInteger(accentNucleus) || accentNucleus < 0) {
@@ -123,22 +141,27 @@ const phraseTones = (accentNucleus: number, moraCount: number, where: string): (
   return Array.from({ length: moraCount }, (_, index) => (index >= 1 && index + 1 <= k ? 1 : 0));
 };
 
-/** 上流が促音を `"cl"` で表す場合の畳み込み（`Sbv2Mora.vowel` は音素そのもの）。 */
+/**
+ * Folding for when upstream writes the geminate as `"cl"` (`Sbv2Mora.vowel` is the phoneme itself).
+ */
 const toVowelPhone = (vowel: string): string => (vowel === "cl" ? "q" : vowel);
 
 /**
- * 句構造の解析結果を発話へ落とす（純関数・GPU 不要）。
+ * Lowers the phrase-structure analysis result to an utterance (pure function, no GPU).
  *
- * 核はここで {@link phraseTones} によりモーラごとの 2 値トーンへ展開しきる。句の直後の記号は
- * **その句の末尾モーラ**へ付け替える（フラット化しても音素の並びは変わらない）。句より前の
- * 記号は {@link Sbv2Utterance.leadingPunctuations} へそのまま移す。
+ * The nucleus is fully expanded here by {@link phraseTones} into a binary tone per mora. Symbols
+ * right after a phrase are moved to **the last mora of that phrase** (flattening does not change
+ * the order of the phonemes). Symbols before the first phrase move as is to
+ * {@link Sbv2Utterance.leadingPunctuations}.
  *
- * NOTE: モーラを 1 つも持たない句の記号は、直前のモーラ（無ければ先頭の記号列）へ寄せる。
- * 音素列としての位置は同じなので、寄せ先だけが変わる。
+ * NOTE: symbols of a phrase with no moras are attached to the preceding mora (or, if there is none,
+ * to the leading symbol sequence). Their position in the phoneme sequence is the same; only where
+ * they are attached changes.
  */
 export const toSbv2Utterance = (phrases: Sbv2Phrases): Sbv2Utterance => {
   const leadingPunctuations = [...phrases.result.leadingPunctuations];
-  // 記号を後から足すので、組み立て中だけ可変にする（返す前に読み取り専用の面へ載せる）。
+  // Symbols are added afterwards, so this is mutable only while building (it is put on the
+  // read-only surface before returning).
   const moras: {
     kana: string;
     consonant?: string;

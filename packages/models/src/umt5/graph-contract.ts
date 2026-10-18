@@ -1,14 +1,16 @@
 /**
- * umT5-XXL のグラフ宣言の取り決め — ホストが組む入力（id 列 `[1, L]` とバケット表 `[L, L]` の i32 —
- * `./session-io.ts`）と読む出力（`[1, L, W]` の f32）・格納（ADR 0119 決定 3・4・5）にグラフ宣言が合うかを、
- * 重みを 1 バイトも取る前に見る門。
+ * The umT5-XXL graph-declaration contract — a check, run before a single weight byte is fetched,
+ * that the graph declaration matches the inputs the host builds (i32 id sequence `[1, L]` and bucket
+ * table `[L, L]` — `./session-io.ts`), the output it reads (f32 `[1, L, W]`) and the storage (ADR 0119
+ * decisions 3, 4 and 5).
  *
- * 単体の `Umt5Encoder`（`./encoder.ts`）と Wan の text 段（`src/wan/text-stage.ts` の `umt5Contract` — DiT の
- * 文脈入力との突き合わせを足す）が共有する。`owner` は文言の接頭辞（`"Umt5Encoder"` / `"WanPipeline"` など）。
+ * Shared by the standalone `Umt5Encoder` (`./encoder.ts`) and Wan's text stage (`umt5Contract` in
+ * `src/wan/text-stage.ts` — which adds the match against the DiT's context input). `owner` is the
+ * message prefix (`"Umt5Encoder"` / `"WanPipeline"` etc.).
  *
- * NOTE: 内部だけ（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: internal only (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  *
- * MUST: モジュール副作用ゼロ（CLAUDE.md）。
+ * MUST: modules are side-effect free (CLAUDE.md).
  */
 
 import { codecLayout } from "@karume/runtime";
@@ -16,15 +18,15 @@ import { codecLayout } from "@karume/runtime";
 import type { GraphOwner } from "../hub/components.ts";
 import { UMT5_INPUT_IDS, UMT5_RELATIVE_POSITION_BUCKETS } from "./session-io.ts";
 
-/** 構築時に確かめた umT5 のグラフの取り決め。 */
+/** The umT5 graph contract verified at construction. */
 export type Umt5GraphContract = {
-  /** グラフ出力の名前（`[1, L, hiddenSize]`）。 */
+  /** The name of the graph output (`[1, L, hiddenSize]`). */
   readonly output: string;
-  /** 出力の幅（umT5-XXL は 4,096 — グラフ宣言の静的次元から読む）。 */
+  /** The output width (4,096 for umT5-XXL — read from the static dimension of the graph declaration). */
   readonly hiddenSize: number;
 };
 
-/** umT5 のグラフ入力の宣言（無ければ fail loudly）。 */
+/** The declaration of a umT5 graph input (fails loudly when absent). */
 const umt5Input = (
   owner: string,
   textEncoder: GraphOwner,
@@ -39,8 +41,9 @@ const umt5Input = (
 };
 
 /**
- * 宣言の形を rank と全軸で照合する（数は静的次元・文字列は記号次元の名前）。`expected` はホストが組む形
- * そのもの（文言は `src/wan/graph-io.ts` の `assertDims` と同じ形）。
+ * Matches a declared shape on rank and every axis (a number is a static dimension, a string the name
+ * of a symbolic dimension). `expected` is the shape exactly as the host builds it (the message has
+ * the same form as `assertDims` in `src/wan/graph-io.ts`).
  */
 const assertDims = (
   owner: string,
@@ -56,19 +59,23 @@ const assertDims = (
 };
 
 /**
- * umT5 のグラフ宣言を、ホストが組む入力と読む出力・受ける格納に突き合わせる（ADR 0119 決定 3・4・5）。
+ * Matches the umT5 graph declaration against the inputs the host builds, the output it reads and
+ * the storage it accepts (ADR 0119 decisions 3, 4 and 5).
  *
- * MUST: 家族 admission（重みの part を取る前）で呼ぶ。ホストは自分の定数で入力を組み、出力を
- * `[1, L, hiddenSize]` として読むので、宣言が違っていても落ちるのは umT5 の重み（i8 で約 5.3 GiB）を上げた後の
- * Session の shape 検査か、出力の検査になる。
+ * MUST: call it at family admission (before fetching the weight parts). The host builds the inputs
+ * from its own constants and reads the output as `[1, L, hiddenSize]`, so if the declaration differed
+ * the failure would come only after uploading umT5's weights (about 5.3 GiB in i8), in the Session's
+ * shape check or in the output check.
  *
- * - 入力はちょうど 2 本（`input_ids` `[1, L]`・`relative_position_buckets` `[L, L]`・どちらも i32）で、
- *   L は**同じ 1 つの記号次元**（有効長ごとに形を変えて渡す — 決定 4）。
- * - 出力は 1 本の f32 `[1, L, W]` で、L は入力と同じ記号。W は `hiddenSize` を渡せばその値（Wan は DiT の
- *   `encoder_hidden_states` の幅を渡す）、省けば宣言の静的な正の整数をそのまま採る（単体の encoder）。
- * - 格納は i8（`int8-sym` = per-channel）の重みと f32 の表だけ（決定 5 — GPU の移植の門で検証した
- *   組み合わせ。umT5 の Session は quant の実行ノブを受けないので、格納が実行の形を決める）。
- *   i8 を 1 本も持たない容器（全部 f32 など）も受けない。
+ * - Exactly 2 inputs (`input_ids` `[1, L]`, `relative_position_buckets` `[L, L]`, both i32), where L
+ *   is **one and the same symbolic dimension** (the shape changes per valid length — decision 4).
+ * - One f32 output `[1, L, W]`, with L the same symbol as the inputs. W is `hiddenSize` when given
+ *   (Wan passes the width of the DiT's `encoder_hidden_states`); when omitted, the declaration's
+ *   static positive integer is taken as is (the standalone encoder).
+ * - Storage is only i8 (`int8-sym` = per-channel) weights and f32 tables (decision 5 — the
+ *   combination verified by the GPU port check. umT5's Session takes no quant execution knobs, so
+ *   the storage decides the form of execution). A container with no i8 at all (all f32, etc.) is not
+ *   accepted either.
  */
 export const umt5GraphContract = (
   textEncoder: GraphOwner,
@@ -129,7 +136,8 @@ export const umt5GraphContract = (
   let quantized = 0;
   for (const [name, initializer] of Object.entries(graph.initializers)) {
     if (initializer.storage === undefined) {
-      // 共有の宣言（貸し手の Session の重みを借りる — 格納を持たない）。umT5 に貸し手は居ない。
+      // A shared declaration (borrows the weights of a lender Session — no storage of its own). umT5
+      // has no lender.
       throw new Error(
         `${owner}: text_encoder の initializer '${name}' が共有の宣言（umT5 は重みを借りない）`,
       );

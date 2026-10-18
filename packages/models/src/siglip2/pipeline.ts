@@ -1,48 +1,50 @@
 /**
- * `Siglip2Pipeline` — 画像 → 埋め込みベクトル（SigLIP2 の vision tower）の 1 本の面。
+ * `Siglip2Pipeline` — the single surface for image → embedding vector (SigLIP2's vision tower).
  *
- * パイプライン（全段 Karume・torch 不使用）:
+ * Pipeline (every step in Karume, no torch):
  *
- * 1. ホスト: RGB8 の画素列を `pipelineConfig` の寸法へ resize（antialias 付き bilinear）
- * 2. ホスト: rescale + normalize を畳んだ形で通し、`[1, 3, H, W]` の f32 にする
- * 3. `vision` を 1 回回す → `pooler_output`（MAP head 経由の `[1, hidden]`）
+ * 1. Host: resize the RGB8 pixel row to the size in `pipelineConfig` (antialiased bilinear)
+ * 2. Host: apply rescale + normalize folded together into `[1, 3, H, W]` f32
+ * 3. Run `vision` once → `pooler_output` (`[1, hidden]` through the MAP head)
  *
- * 前処理 2 段の実装と参照実装は `src/image/preprocess.ts`（`resizeRgb8` / `normalizeToNchw`）で、
- * ここはそれを `pipelineConfig` の定数で結線するだけ。**decode は karume の責務ではない** —
- * 入口は「RGB8 の画素列 + 幅 + 高さ」で、PNG / JPEG のデコーダは持たない（ブラウザなら
- * `createImageBitmap` + canvas、Deno なら任意のデコーダ）。
+ * The implementation and the reference implementation of the two preprocessing steps live in
+ * `src/image/preprocess.ts` (`resizeRgb8` / `normalizeToNchw`); this only wires them with the
+ * `pipelineConfig` constants. **Decoding is not karume's job** — the entry is "RGB8 pixel row +
+ * width + height", and there is no PNG / JPEG decoder (in a browser `createImageBitmap` + canvas,
+ * on Node / Deno any decoder).
  *
- * ## MUST: Session は構築時に 1 本だけ張り、`dispose` まで持つ（他ファミリと非対称）
+ * ## MUST: one Session is created at construction and kept until `dispose` (unlike other families)
  *
- * Anima / Irodori が段ごとに張っては畳むのは、複数の巨大グラフを同時常駐させられないから
- * （ADR 0016）。こちらはグラフが 1 本（base 372MB / so400m 1.71GB）で畳む相手がおらず、
- * 逆に「1 枚ごとに張っては畳む」形にすると**画像 1 枚あたり重みを丸ごとアップロードし直す**。
- * 埋め込みは何枚も通す使い方が普通なので、常駐が既定の形になる。
+ * Anima / Irodori create and tear down per step because several huge graphs cannot be resident at
+ * once (ADR 0016). Here there is one graph (base 372MB / so400m 1.71GB) with nothing to make room
+ * for; the opposite, "create and tear down per image", **would re-upload the whole weights for
+ * every image**. Embedding normally runs many images, so residency is the default shape.
  *
- * MUST: それでも直列化鎖には載せる — `embed` の同時実行は 1 つの Session を 2 本の `run` で
- * 共有することになり、`dispose` は in-flight の完了を待たずに GPU を破棄する
- * （flush-before-destroy 違反）。
+ * MUST: it still goes on the serialization chain — concurrent `embed` calls would share one Session
+ * between two `run`s, and `dispose` would destroy the GPU without waiting for in-flight work (a
+ * flush-before-destroy violation).
  *
- * ## 出力は `pooler_output` **そのもの**（L2 正規化も cosine も持たない）
+ * ## The output is `pooler_output` **itself** (no L2 normalization, no cosine)
  *
- * SigLIP2 の pooler_output は上流でも正規化されていない生のベクトル（実測 L2 ノルム
- * 12.7〜13.1）で、
+ * SigLIP2's pooler_output is a raw vector that upstream does not normalize either (measured L2 norm
+ * 12.7–13.1), and
  *
- * - 正規化するかどうかは**下流の用途で変わる**（cosine 検索なら正規化・線形プローブの入力
- *   なら生のまま）。ここで畳むと、生のベクトルを得る口が消える。
- * - SigLIP 本来の類似度は text tower の `logit_scale` / `logit_bias` を通した値で、この
- *   配布形は vision tower しか持たない。**「正しい類似度」をここから出すことはできない**ので、
- *   それらしい `similarity()` を生やすと正しくない意味を約束することになる。
- * - 呼び出し側の実装は `v.map(x => x / norm)` の 2 行で、抽象化する規模でもない。
+ * - whether to normalize **depends on the downstream use** (normalize for cosine search, keep raw
+ *   as linear-probe input). Folding it in here would remove the way to get the raw vector.
+ * - SigLIP's actual similarity is the value through the text tower's `logit_scale` / `logit_bias`,
+ *   and this distribution has only the vision tower. **The "right similarity" cannot come from
+ *   here**, so a plausible-looking `similarity()` would promise a wrong meaning.
+ * - The caller's implementation is the two lines of `v.map(x => x / norm)`, not worth an
+ *   abstraction.
  *
- * したがって {@link Siglip2Pipeline.embed} は `pooler_output` を素で返す（ADR 0008 の「薄い面」
- * — 利用者ストーリーは「画像を埋め込む」まで）。
+ * {@link Siglip2Pipeline.embed} therefore returns `pooler_output` bare (ADR 0008's "thin surface" —
+ * the user story ends at "embed an image").
  *
- * ## MUST: 数値の正はここでは担保されない
+ * ## MUST: numerical correctness is not guaranteed here
  *
- * 正はグラフ単位の golden E2E（`packages/runtime/tests/e2e_siglip2_test.ts` — 実重み 2 系列 ×
- * 4 ケース）と、前処理のパリティ門（`packages/models/tests/image_preprocess_test.ts`）が
- * 担保する。
+ * Correctness is guaranteed by the per-graph golden E2E (`packages/e2e/tests/e2e_siglip2_test.ts` —
+ * real weights of 2 series × 4 cases) and the preprocessing parity check
+ * (`packages/models/tests/image_preprocess_test.ts`).
  */
 
 import {
@@ -97,47 +99,52 @@ import {
 import { readAssetBuffer } from "../hub/asset-readers.ts";
 import { assertGraphInputDim, assertGraphInputDtype } from "../hub/graph-gates.ts";
 
-/** manifest の weights 表に現れる部品名（ADR 0041 §3 の規約名）。 */
+/** Component name in the manifest's weights table (the conventional name of ADR 0041 §3). */
 const VISION = "vision";
 
-/** この系列の weights 部品（差し替え席が受ける役割名でもある）。 */
+/** This family's weights components (also the role names component replacement accepts). */
 const COMPONENT_KEYS = [VISION] as const;
 
-/** グラフ入力の名前（`tools/export-recipes/siglip2/export.py` の `INPUT_NAME`）。 */
+/** Name of the graph input (`INPUT_NAME` in `tools/export-recipes/siglip2/export.py`). */
 const PIXEL_VALUES = "pixel_values";
 
-/** 入力のチャネル数（RGB）。batch と併せてグラフ側も静的 1 / 3 で焼かれている。 */
+/** Input channel count (RGB). The graph is baked with static 1 / 3 for it and the batch. */
 const CHANNELS = 3;
 
-/** 構築オプション（{@link Siglip2Pipeline.fromAssets} / {@link Siglip2Pipeline.fromPretrained} 共通）。 */
+/**
+ * Construction options (shared by {@link Siglip2Pipeline.fromAssets} /
+ * {@link Siglip2Pipeline.fromPretrained}).
+ */
 export type Siglip2PipelineOptions = {
   /**
-   * 既存の GPU を共有する。**渡した側が所有権を持つ**ので {@link Siglip2Pipeline.dispose} は
-   * 破棄しない。省略時はパイプラインが内部で `acquireGpu` し、`dispose()` で破棄する。
+   * Shares an existing GPU. **The caller keeps ownership**, so {@link Siglip2Pipeline.dispose} does
+   * not destroy it. When omitted, the pipeline calls `acquireGpu` internally and destroys it in
+   * `dispose()`.
    */
   readonly gpu?: GpuContext;
-  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  /** Model (a key of the manifest's models). Defaults to `defaultModel`. */
   readonly model?: string;
-  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  /** Execution configuration (a key of that model's quants). Defaults to `defaultQuant`. */
   readonly quant?: string;
   /**
-   * 実行 1 回ごとの診断を受け取る観測席（1 埋め込み = `vision` 1 回）。op 別 GPU 時間
-   * （`lastRunTiming`）が要るときは `gpu` に `acquireGpu({ gpuTiming: true })` を渡す
-   * （ADR 0021 — 既定は計測しない）。
+   * Observation hook that receives the diagnostics of each run (one embedding = one `vision` run).
+   * For per-op GPU time (`lastRunTiming`) pass `acquireGpu({ gpuTiming: true })` as `gpu` (ADR 0021
+   * — no timing by default).
    *
-   * NOTE: 他ファミリと違ってコンポーネント名を渡さない — グラフが 1 本しかないので、名前が
-   * 常に同じ 1 値になる（受け手が分岐できない引数を渡さない）。
+   * NOTE: unlike other families, no component name is passed — there is one graph, so the name
+   * would always be the same single value (no argument the receiver cannot branch on).
    *
-   * コールバックの例外は握らない（fail loudly — 埋め込みごと落ちる）。
+   * Exceptions from the callback are not caught (fail loudly — the embedding fails with it).
    */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
 /**
- * {@link Siglip2Pipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。
+ * Fetch-layer options used only by {@link Siglip2Pipeline.fromPretrained} (passed through to the
+ * hub).
  *
- * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
- * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
+ * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
+ * `onRetry` are **for HTTP sources only**, lives in one place, {@link FromPretrainedHubOptions}.
  */
 export type Siglip2FromPretrainedOptions = Siglip2PipelineOptions &
   FromPretrainedHubOptions &
@@ -145,17 +152,18 @@ export type Siglip2FromPretrainedOptions = Siglip2PipelineOptions &
     readonly signal?: AbortSignal;
   };
 
-/** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
+/** Input for building directly from fetched assets (pass the hub's `fetchAssets` result as is). */
 export type Siglip2Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
 /**
- * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は
- * {@link readAssetBuffer}）。
+ * Turns the fetched bytes into an ArrayBuffer that can be passed to `openContainer` (the check
+ * itself is {@link readAssetBuffer}).
  *
- * MUST: `slice` で写さない — so400m は 1 本 1.71GB あり、ホスト RAM のピークが倍になる。
+ * MUST: do not copy with `slice` — so400m is 1.71GB in one file, and the host RAM peak would
+ * double.
  */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -163,22 +171,24 @@ const assetBuffer = (
 ): ArrayBuffer => readAssetBuffer("siglip2", "weights", assets, key);
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 8 家族共有 —
- * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`vision`）か、分割形の
- * part 列（`vision[0]` / `vision[1]` / …）。
+ * The component supplier of the full-asset surface (`fromAssets`) (the receiving implementation is
+ * shared by every family — {@link assetComponentOpener}). A component key is either one single-form
+ * `krm` (`vision`) or the part sequence of the split form (`vision[0]` / `vision[1]` / …).
  */
 const assetOpener = (assets: Siglip2Assets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("siglip2", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
- * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
+ * Checks that the **static** dimension of one graph-input axis matches the `pipelineConfig`
+ * declaration.
  *
- * MUST: 落とさない。前処理は宣言の寸法へ resize するので、グラフが別の解像度で焼かれていても
- * **ホスト側は最後まで通る**（落ちるのは Session の shape 検査で、そのときには「どちらの数が
- * 正しいのか」が読み手に伝わらない）。base と so400m の資産取り違えはここが唯一の検出器。
+ * MUST: do not drop this check. Preprocessing resizes to the declared size, so even when the graph
+ * was baked at another resolution **the host side passes all the way through** (the failure comes
+ * from the Session's shape check, by which time the reader cannot tell "which number is right").
+ * This is the only detector of mixed-up base and so400m assets.
  *
- * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: the `export` is for tests that pin the rejection paths without a GPU (not exposed on
+ * `mod.ts` / the subpath surface — ADR 0008).
  */
 export const assertStaticDim = (
   model: GraphOwner,
@@ -189,13 +199,14 @@ export const assertStaticDim = (
 ): void => assertGraphInputDim("siglip2", model, inputName, axis, expected, where);
 
 /**
- * グラフ**出力**の 1 軸が宣言どおりの**静的**次元であることを見る。
+ * Checks that one axis of the graph **output** has the declared **static** dimension.
  *
- * MUST: 落とさない。`hiddenDim` は前処理にも実行にも使われないので、ずれても埋め込みは
- * 何事もなく出る（読み手が「768 次元だ」と思って 1152 次元を配る形になる）。
+ * MUST: do not drop this check. `hiddenDim` is used neither by preprocessing nor by execution, so
+ * if it is off the embedding still comes out without complaint (the reader would hand out 1152-dim
+ * vectors believing they are 768-dim).
  *
- * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: the `export` is for tests that pin the rejection paths without a GPU (not exposed on
+ * `mod.ts` / the subpath surface — ADR 0008).
  */
 export const assertOutputDim = (
   model: GraphOwner,
@@ -218,15 +229,16 @@ export const assertOutputDim = (
 };
 
 /**
- * グラフ**出力**が f32 の `[1, hiddenDim]`（rank 2・batch 軸 1）であることを見る（幅は
- * {@link assertOutputDim} が見る）。
+ * Checks that the graph **output** is f32 `[1, hiddenDim]` (rank 2, batch axis 1) (the width is
+ * checked by {@link assertOutputDim}).
  *
- * MUST: 落とさない。後段は出力の要素数が `hiddenDim` であることを実行**後**に見るだけなので、
- * batch 2 で焼いた別グラフ（`[2, hiddenDim]`）や f32 でない出力は構築を通り、GPU と Session を
- * 作って 1 回実行した後に、資産の取り違えを指さない文言で落ちる。
+ * MUST: do not drop this check. The later step only checks that the output has `hiddenDim` elements
+ * **after** the run, so another graph baked with batch 2 (`[2, hiddenDim]`) or a non-f32 output
+ * would pass construction, create the GPU and the Session, run once, and only then fail with a
+ * message that does not point at the mixed-up asset.
  *
- * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: the `export` is for tests that pin the rejection paths without a GPU (not exposed on
+ * `mod.ts` / the subpath surface — ADR 0008).
  */
 export const assertPooledOutput = (model: GraphOwner, where: string): void => {
   const name = model.graph.outputs[0];
@@ -248,19 +260,20 @@ const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
 };
 
 /**
- * RGB8 の画素列 → グラフへ渡す `pixel_values`（`[3, H, W]` を平らにしたもの）。
+ * RGB8 pixel row → the `pixel_values` passed to the graph (`[3, H, W]` flattened).
  *
- * 前処理そのものは `src/image/preprocess.ts` が持ち、ここがするのは `pipelineConfig` の
- * 定数で結線することだけ。**`resizeRgb8` は `(width, height)` の順**なので、宣言の 2 欄を
- * 取り違えると非正方の配布形で黙って転置される。
+ * The preprocessing itself is owned by `src/image/preprocess.ts`; all this does is wire it with the
+ * `pipelineConfig` constants. **`resizeRgb8` takes `(width, height)` in that order**, so swapping
+ * the two declared fields would silently transpose a non-square distribution.
  *
- * MUST: 補間フィルタも `config.interpolation` から渡す（既定引数に頼らない）。宣言と実効値を
- * 1 本にすると、受理集合がリテラル型なので**型検査が同一性を保証する** — 新しい家族が渡し
- * 忘れる経路が構造的に消える（`preprocess.ts` の MUST「モデルカードの一部なので呼び出し側が
- * 明示する」の実装側）。
+ * MUST: the interpolation filter also comes from `config.interpolation` (do not rely on the default
+ * argument). With the declaration and the effective value as one, and the accepted set a literal
+ * type, **the type checker guarantees they are identical** — the path by which a new family forgets
+ * to pass it disappears structurally (the implementation side of `preprocess.ts`'s MUST "it is part
+ * of the model card, so the caller states it explicitly").
  *
- * NOTE: `export` は結線を直接叩くテストのため（`fromAssets` 経由で此処へ届くには実 IR
- * コンテナが要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
+ * NOTE: the `export` is for tests that call the wiring directly (reaching here through `fromAssets`
+ * needs a real IR container). Not exposed on `mod.ts` / the subpath surface (ADR 0008).
  */
 export const preprocessPixelValues = (
   config: Siglip2PipelineConfig,
@@ -272,27 +285,30 @@ export const preprocessPixelValues = (
     config.imageStd,
   );
 
-/** {@link Siglip2Pipeline} の内部状態（公開面には出さない）。 */
+/** Internal state of {@link Siglip2Pipeline} (not on the public surface). */
 type Siglip2State = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly config: Siglip2PipelineConfig;
   readonly vision: ModelComponent;
-  /** 構築時に張って `dispose` まで持つ 1 本（モジュール doc の MUST）。 */
+  /** The one Session created at construction and kept until `dispose` (the module doc's MUST). */
   readonly session: Session;
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
 /**
- * siglip2 が受ける実行ノブ（manifest の quant 宣言）。合成規則（明示 > 宣言 > runtime 既定）・
- * 値域・組合せ・送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合
- * だけを決める。明示の上書き口は持たない（構築オプションに実行ノブの欄が無い）。
+ * The execution knobs siglip2 accepts (the manifest's quant declaration). The merge rule
+ * (explicit > declared > runtime default), value ranges, combinations and the classification of
+ * the thrown types are owned by `resolveSessionOptions`, shared by every family; this only decides
+ * the accepted set. There is no explicit override (the construction options have no execution-knob
+ * field).
  *
- * どのキーも受けないのは、配布形が f32 の既定経路だけで、実行ノブを宣言した quant を持たない
- * から（宣言が現れたら、受ける前に参照値で確かめる — 黙って runtime へ流さない）。
+ * No key is accepted because the distribution has only the f32 default path and no quant that
+ * declares execution knobs (when a declaration appears, check it against the reference values
+ * before accepting it — do not silently pass it to the runtime).
  *
- * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
+ * NOTE: the `export` is for the equivalence test that runs every quant of the mirror through the
+ * same table (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 export const SIGLIP2_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: false,
@@ -305,25 +321,34 @@ export const SIGLIP2_SESSION_POLICY: FamilySessionPolicy = {
   packedStaticQuantize: false,
 };
 
-/** 家族 admission（{@link admitSiglip2}）が確定させる材料。 */
+/** What the family admission ({@link admitSiglip2}) settles. */
 type Siglip2Admission = {
   readonly config: Siglip2PipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
-  /** quant 宣言を受理表で通した実効設定（{@link SIGLIP2_SESSION_POLICY}）。 */
+  /**
+   * The effective settings after passing the quant declaration through the acceptance table
+   * ({@link SIGLIP2_SESSION_POLICY}).
+   */
   readonly sessionOptions: SessionOptions;
-  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  /**
+   * The quant declaration plus the features the effective settings need (both the request and the
+   * check read this).
+   */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
 };
 
 /**
- * この manifest とこのグラフを siglip2 として実行できるかを見る（`hub/components.ts` の
- * {@link FamilyAdmission} 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
+ * Checks whether this manifest and this graph can run as siglip2 (the {@link FamilyAdmission} hook
+ * of `hub/components.ts` — on the fetch surface it is called **before a single byte of the weight
+ * parts is fetched**).
  *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
- * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
- * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
- * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
+ * MUST: gather the family's checks in this one function. Scattered into later steps, on the fetch
+ * surface they would fail only **after** GB-class weights are downloaded (the implementation would
+ * be narrower than the wording of ADR 0070 decision 5).
+ * MUST: manifest contract violations and **the match against the graph** fail **before the GPU is
+ * acquired**. In the other order, an environment without a GPU turns them into a different
+ * exception and the reader cannot tell "what was wrong".
  */
 const admitSiglip2 = (
   manifest: Manifest,
@@ -346,7 +371,8 @@ const admitSiglip2 = (
     );
   }
   if (major !== SIGLIP2_PIPELINE_MAJOR) {
-    // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門（ADR 0038 §6）。
+    // The only check that stops silent degradation from "old implementation × new repository"
+    // (ADR 0038 §6).
     throw new Error(
       `Siglip2Pipeline: pipeline '${name}/${major}' の major に未対応` +
         `（この実装が読めるのは ${SIGLIP2_PIPELINE_NAME}/${SIGLIP2_PIPELINE_MAJOR}）`,
@@ -362,7 +388,8 @@ const admitSiglip2 = (
     );
   }
   const quant = entry.quants[quantName];
-  // 未対応の宣言は部品を開く前（= 重みの part を取る前）に落とす（全家族共通の 1 本）。
+  // Unsupported declarations fail before components are opened (= before weight parts are fetched;
+  // one path shared by every family).
   const sessionOptions = resolveSessionOptions(
     SIGLIP2_SESSION_POLICY,
     quant.session,
@@ -372,8 +399,10 @@ const admitSiglip2 = (
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
   const vision = open(VISION);
-  // グラフの宣言と pipelineConfig の突合。入出力が 1 本ずつであることまで見るのは、text tower
-  // 込みの別グラフや golden 用の多出力版が混ざると、位置で引く後段が黙って別の値を読むため。
+  // Match the graph declaration against pipelineConfig. Checking that there is exactly one input
+  // and one output matters because, if another graph including the text tower or a multi-output
+  // version made for goldens got mixed in, the later steps that pick by position would silently
+  // read other values.
   if (vision.graph.inputs.length !== 1 || vision.graph.outputs.length !== 1) {
     throw new Error(
       `Siglip2Pipeline: vision グラフの入出力が ${vision.graph.inputs.length} /` +
@@ -388,9 +417,10 @@ const admitSiglip2 = (
   assertPooledOutput(vision, "pooler_output");
   assertOutputDim(vision, 1, config.hiddenDim, "hiddenDim");
 
-  // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
-  // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
-  // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
+  // MUST: a shared GPU's missing capability (feature / device limit) fails here — unlike acquiring
+  // our own, there is no reason to wait for `acquireGpu`, and this is the only family check that
+  // knows before the weights are downloaded (the mapping between request and check is the one
+  // function in `session/gpu-features.ts`, and the later check calls the same function).
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(gpuFeatures, options.gpu, `Siglip2Pipeline: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
@@ -404,11 +434,13 @@ const admitSiglip2 = (
 };
 
 /**
- * admission を通った材料から実行状態を組む（GPU 取得と Session 構築だけ）。
+ * Builds the execution state from the materials that passed admission (GPU acquisition and Session
+ * construction only).
  *
- * MUST: GPU 取得後に許される検査は GPU の能力（feature の shader-f16 — ADR 0028 / device limits —
- * ADR 0089 決定 5）だけ。この関数が取得後に見るのは feature だけで、limits は共有 GPU のときに
- * {@link admitSiglip2} が見る（自前で取った device の limits はここでは照合しない）。
+ * MUST: the only checks allowed after GPU acquisition are GPU capabilities (the shader-f16 feature
+ * — ADR 0028 / device limits — ADR 0089 decision 5). After acquisition this function checks only
+ * features; limits are checked by {@link admitSiglip2} for a shared GPU, and for a device acquired
+ * here by `assertRequiredLimits` right after acquisition.
  */
 const openSiglip2State = async (
   admitted: Siglip2Admission,
@@ -416,18 +448,21 @@ const openSiglip2State = async (
   options: Siglip2PipelineOptions = {},
 ): Promise<Siglip2State> => {
   const { config, quantName, quant, sessionOptions, gpuFeatures } = admitted;
-  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  // The supplier is **the same one** admission saw (`open` only looks up components already
+  // opened).
   const vision = open(VISION);
-  // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
-  // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
-  // {@link admitSiglip2} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
+  // MUST: declared features can only be requested at device creation (ADR 0028). A shared GPU
+  // cannot be asked for them, so the missing capability is named and fails (a shared GPU was
+  // already checked by {@link admitSiglip2} through the same function, but for a device acquired
+  // here this is the only check).
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `Siglip2Pipeline: quant '${quantName}'`);
-    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
-    // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
-    // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は `admitSiglip2` が見ている。
+    // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
+    // (`fromPretrained` checks against adapter values); without this a missing declaration surfaces
+    // only at Session construction, and a declaration stricter than the real demand is never
+    // matched at all. A shared GPU is checked by `admitSiglip2`.
     if (ownsGpu) {
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
@@ -446,13 +481,14 @@ const openSiglip2State = async (
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
   } catch (error) {
-    // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
+    // A GPU acquired internally can no longer be released by anyone if construction fails, so it is
+    // returned here.
     if (ownsGpu) gpu.destroy();
     throw error;
   }
 };
 
-/** 画像 1 枚を通す（前処理 → `vision` 1 回 → `pooler_output`）。 */
+/** Runs one image (preprocessing → one `vision` run → `pooler_output`). */
 const embedImage = async (
   state: Siglip2State,
   image: Rgb8Image,
@@ -478,20 +514,23 @@ const embedImage = async (
 };
 
 /**
- * SigLIP2 の画像 → 埋め込みパイプライン（vision tower 1 本）。
+ * SigLIP2's image → embedding pipeline (one vision tower).
  *
- * 構築は {@link Siglip2Pipeline.fromPretrained}（HF から取得）か
- * {@link Siglip2Pipeline.fromAssets}（取得済みバイト列）だけを入口にする — コンストラクタを
- * private にしてあるのは、manifest 検査と資産の突合を迂回した半端な状態を作れないようにする
- * ため（ADR 0008）。
+ * Construction enters only through {@link Siglip2Pipeline.fromPretrained} (fetch from HF) or
+ * {@link Siglip2Pipeline.fromAssets} (already-fetched bytes) — the constructor is private so that
+ * no half-built state bypassing the manifest checks and the asset matching can be created
+ * (ADR 0008).
  */
 export class Siglip2Pipeline {
   readonly #state: Siglip2State;
-  /** embed と dispose の直列化鎖（「1 本ずつ」を公開 API 側で守る — モジュール doc）。 */
+  /**
+   * Serialization chain for embed and dispose ("one at a time" kept on the public API side — module
+   * doc).
+   */
   readonly #chain = createOperationChain();
   /**
-   * dispose の 1 本。**undefined でないことが「dispose 済み」**（別に真偽値を持つと、独立に
-   * 更新される派生状態になる）。
+   * The one dispose. **Not being undefined means "disposed"** (a separate boolean would be derived
+   * state updated independently).
    */
   #disposal: Promise<void> | undefined;
 
@@ -500,20 +539,21 @@ export class Siglip2Pipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
-   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
-   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
-   * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
-   * {@link FromPretrainedComponentOptions.components}（役割は `vision` 1 本）。
+   * Fetches a distribution and builds (`loadManifest` → `resolveSelection` → fetch **only each
+   * component's descriptor (part 0)** for admission → warm the weight parts → `fetchAssets` for the
+   * remaining assets → construction). Blocks are read in part order at the moment the Session is
+   * built (ADR 0109 — `src/hub/components.ts`). To replace a component with the same role from
+   * another repository use {@link FromPretrainedComponentOptions.components} (one role, `vision`).
    *
-   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が
-   * 検証した取得元は {@link SIGLIP2_SOURCES}（`./config.ts`）の `"siglip2"` — 再現性を自分で
-   * 固定するなら `{ repo, revision }` を呼び手が明示する。文字列の `ref` は `{ repo }` と読む
-   * （= `main` 追従）。
+   * **`ref` is required** (sources have no default — the MUST of `src/hub/repo-ref.ts`). The source
+   * this package version verified is `"siglip2"` of {@link SIGLIP2_SOURCES} (`./config.ts`) — to
+   * pin reproducibility yourself, the caller states `{ repo, revision }` explicitly. A string `ref`
+   * reads as `{ repo }` (= follows `main`).
    *
-   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
-   * 通らない（{@link Siglip2FromPretrainedOptions} の HTTP 専用ノブは効かない）。
+   * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
+   * `@karume/hub/deno`). It skips the check of HF's `owner/name` spelling and touches neither the
+   * network nor CacheStorage (the HTTP-only knobs of {@link Siglip2FromPretrainedOptions} have no
+   * effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
@@ -538,7 +578,8 @@ export class Siglip2Pipeline {
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
-    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+    // The family checks run in the admission hook (before weight parts are fetched —
+    // `hub/components.ts`).
     const { admitted, open } = await loadContainerComponents(
       "Siglip2Pipeline.fromPretrained",
       loaded,
@@ -546,8 +587,9 @@ export class Siglip2Pipeline {
       COMPONENT_KEYS,
       async (open) => {
         const admitted = admitSiglip2(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
-        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+        // The `requiredLimits` the distribution declared are checked here, **before weight parts
+        // are fetched** (ADR 0089 decision 5 — a shared GPU's limits, or the adapter's measured
+        // values on the path that acquires its own).
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
@@ -565,13 +607,15 @@ export class Siglip2Pipeline {
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openContainer`・グラフとの突合を
-   * 全てここで済ませ、**`vision` の Session を 1 本張って**返す（モジュール doc の MUST）。
+   * Builds from an already-fetched manifest + assets. Contract checks, asset interpretation,
+   * `openContainer` and the match against the graph all happen here, and it returns **with the one
+   * `vision` Session created** (the module doc's MUST).
    *
-   * 部品のキーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`vision`）と、分割形の
-   * part 列（`vision[0]` / `vision[1]` / … — part 0 から添字順）。分割形はバイト列を連結せず
-   * part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly（受け口の実装は
-   * `src/hub/components.ts` の 1 本）。
+   * Component keys are accepted **in both forms** — one single-form `krm` byte array (`vision`) and
+   * the part sequence of the split form (`vision[0]` / `vision[1]` / … — in index order from
+   * part 0). The split form is opened as a part sequence without concatenating the bytes. A missing
+   * index or mixing with the single-form key fails loudly (the receiving implementation is the one
+   * in `src/hub/components.ts`).
    */
   static async fromAssets(
     input: Siglip2Assets,
@@ -583,18 +627,18 @@ export class Siglip2Pipeline {
   }
 
   /**
-   * 画像 1 枚を埋め込む。返るのは `pooler_output` **そのもの**（長さ `hiddenDim` の f32・
-   * L2 正規化していない — モジュール doc の判断）。
+   * Embeds one image. It returns `pooler_output` **itself** (f32 of length `hiddenDim`, not L2
+   * normalized — the module doc's judgement).
    *
-   * 入力は RGB8 の画素列（行優先・画素あたり 3 バイト）で、resize / rescale / normalize は
-   * この中で配布形の定数どおりに掛かる。アスペクト比は保たない（SigLIP2 の前処理が高さ・幅の
-   * 対へそのまま伸縮する形で、crop も pad も無いため）。
+   * The input is an RGB8 pixel row (row-major, 3 bytes per pixel); resize / rescale / normalize are
+   * applied inside with the distribution's constants. The aspect ratio is not kept (SigLIP2's
+   * preprocessing stretches straight to the height/width pair, with no crop and no pad).
    *
-   * 並行に呼ばれた場合は**待たされて順に**走る（1 つの Session を 2 本の run で共有しない）。
+   * Concurrent calls **wait and run in order** (one Session is not shared between two runs).
    */
   async embed(image: Rgb8Image): Promise<Float32Array<ArrayBuffer>> {
-    // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた埋め込み
-    // まで巻き添えで落ちる）。
+    // The disposed check happens at call time (checking inside the chain would also fail the
+    // embeddings accepted before dispose).
     if (this.#disposal !== undefined) {
       throw new Error("Siglip2Pipeline: dispose 済みでは埋め込めない");
     }
@@ -602,17 +646,19 @@ export class Siglip2Pipeline {
   }
 
   /**
-   * 解放する。Session は必ず畳み、**内部で取得した GPU だけ**破棄する（`options.gpu` で
-   * 渡された GpuContext は呼び出し側の所有物なので触らない）。
+   * Releases. The Session is always torn down, and **only a GPU acquired internally** is destroyed
+   * (a GpuContext passed in `options.gpu` belongs to the caller and is not touched).
    *
-   * MUST: in-flight の埋め込みの完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
-   * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
-   * 呼び出し側が「破棄済み」と見なして次へ進む）。
+   * MUST: destroy only after in-flight embeddings have finished (flush-before-destroy) — putting
+   * the destruction on the chain too fixes the order of waiting and destroying in one place. Later
+   * calls return the same completion (returning earlier would let the caller treat it as
+   * "destroyed" and move on).
    *
-   * MUST: `Session.dispose()` が失敗しても `gpu.destroy()` は必ず通す（{@link disposeSteps}）—
-   * 直列 `await` だと前段の reject で後段へ到達せず、`openXState` の catch が掲げている
-   * 「内部で取った GPU は必ず返す」が dispose 経路でだけ破れる。しかも `#disposal` に
-   * rejected promise が居座るので、2 度目の `dispose()` は再試行にならない。
+   * MUST: `gpu.destroy()` always runs even if `Session.dispose()` fails ({@link disposeSteps}) —
+   * with a serial `await`, a reject in the earlier step never reaches the later one, and "a GPU
+   * acquired internally is always returned", which the catch of `openXState` promises, would break
+   * on the dispose path only. Worse, the rejected promise would stay in `#disposal`, so a second
+   * `dispose()` would not retry.
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(() =>
@@ -626,7 +672,7 @@ export class Siglip2Pipeline {
     return this.#disposal;
   }
 
-  /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
+  /** `await using` support (Explicit Resource Management) — an alias of {@link dispose}. */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
   }

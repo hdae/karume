@@ -1,37 +1,40 @@
 /**
- * 末尾トリム（上流 `inference_runtime.find_flattening_point` + `_synthesize` の切り出し）。
+ * Tail trim (upstream's `inference_runtime.find_flattening_point` + the cut in `_synthesize`).
  *
- * ## MUST: 判定は **z（latent）上**で行い、切るのは**波形**
+ * ## MUST: decide **on z (the latent)**, cut the **waveform**
  *
- * 上流は「latent の末尾が平坦かつ 0 近傍になる位置」を latent 上で探し、その位置に
- * `hopLength` を掛けたサンプル位置で**波形を**切る。latent を切ってから decode すると、
- * 境界の padding が変わるので全長 decode の先頭部分とビット一致しない（recon 実測）。
- * したがって decode は常に全長で行い、切るのは最後の 1 回だけ。
+ * Upstream searches the latent for "the position where the latent's tail becomes flat and near 0",
+ * and cuts **the waveform** at that position times `hopLength` in samples. Cutting the latent before
+ * decode changes the boundary padding, so the result is not bit-identical to the leading part of a
+ * full-length decode (measured in the recon). Decode therefore always runs at full length, and the
+ * cut happens once, at the very end.
  *
- * ## しきい値は上流 `SamplingRequest` の既定（実行時ノブとしては持たない）
+ * ## The thresholds are the defaults of upstream's `SamplingRequest` (not held as runtime knobs)
  *
- * `tail_window_size` / `tail_std_threshold` / `tail_mean_threshold` は上流ではリクエスト側の
- * 欄だが、この実装は既定しか出さないので定数で持つ（`pipelineConfig` に載っていない = 配布形
- * が別の値を宣言する手段が無い）。golden との突合は
- * `outputs/series/dacvae-32dim/host/trim.safetensors` の 3 ケース。
+ * `tail_window_size` / `tail_std_threshold` / `tail_mean_threshold` are request-side fields
+ * upstream, but this implementation only ever uses the defaults, so they are constants (not in
+ * `pipelineConfig` = a distribution has no way to declare another value). The golden comparison is
+ * the 3 cases of `outputs/series/dacvae-32dim/host/trim.safetensors`.
  */
 
-/** 末尾を見る窓（latent フレーム数）。 */
+/** The window looked at the tail (latent frames). */
 const WINDOW = 20;
-/** 窓全体（`WINDOW × latentDim` スカラー）の母標準偏差のしきい値。 */
+/** Threshold of the population std of the whole window (`WINDOW × latentDim` scalars). */
 const STD_THRESHOLD = 0.05;
-/** 窓全体の平均の、目標値 0 からの許容差。 */
+/** Allowed distance of the whole window's mean from the target value 0. */
 const MEAN_THRESHOLD = 0.1;
 
 /**
- * 末尾が平坦になり始める latent フレーム位置を返す（見つからなければ `frames`）。
+ * Returns the latent frame position where the tail starts to flatten (`frames` if none is found).
  *
- * 上流と同じく **`WINDOW` 行のゼロ pad を末尾に足してから**先頭から走査する — pad があるので
- * 窓は常に `WINDOW` 行ぶんのスカラーを持ち、末尾に近い窓ほどゼロで薄まる。走査は `i = frames −
- * 1` までで、`i = frames`（全部 pad）は見ない（無条件に成立してしまうため）。
+ * As upstream does, it scans from the start **after appending `WINDOW` rows of zero padding to the
+ * tail** — thanks to the padding a window always holds `WINDOW` rows of scalars, and the closer a
+ * window is to the tail, the more it is diluted with zeros. The scan goes up to
+ * `i = frames − 1`; `i = frames` (all padding) is not examined (it would hold unconditionally).
  *
- * MUST: 母標準偏差（torch の `std(unbiased=False)`）— 不偏だと窓が小さいほど値が持ち上がり、
- * しきい値 0.05 の判定がフレーム単位でずれる。
+ * MUST: the population standard deviation (torch's `std(unbiased=False)`) — the unbiased one
+ * inflates the value more the smaller the window, and the 0.05 threshold test would shift by
+ * frames.
  */
 export const findFlatteningPoint = (
   latent: Float32Array<ArrayBuffer>,
@@ -51,21 +54,24 @@ export const findFlatteningPoint = (
   }
   const count = WINDOW * latentDim;
   for (let start = 0; start < frames; start += 1) {
-    // ゼロ pad の行は和にも二乗和にも寄与しないので、実在する行だけ走ればよい。
+    // Zero-padding rows contribute to neither the sum nor the sum of squares, so only the real rows
+    // need to be walked.
     const end = Math.min(frames, start + WINDOW) * latentDim;
     const from = start * latentDim;
     let sum = 0;
     for (let index = from; index < end; index += 1) sum += latent[index];
     const mean = sum / count;
     if (Math.abs(mean) >= MEAN_THRESHOLD) continue;
-    // 2 パス（平均を出してから偏差二乗和）。`E[x²] − E[x]²` は std が 0 に近いこの用途で
-    // 桁落ちして負の分散を作りうる — 判定したいのがまさにその領域なので使わない。
+    // Two passes (the mean first, then the sum of squared deviations). `E[x²] − E[x]²` can cancel
+    // catastrophically into a negative variance in this use, where the std is close to 0 — exactly
+    // the region the test is about, so it is not used.
     let squared = 0;
     for (let index = from; index < end; index += 1) {
       const deviation = latent[index] - mean;
       squared += deviation * deviation;
     }
-    // pad の行は `0 − mean` の偏差を持つ（上流も pad ごと std を採る）。
+    // Padding rows have the deviation `0 − mean` (upstream also takes the std including the
+    // padding).
     const padded = (count - (end - from)) * mean * mean;
     if (Math.sqrt((squared + padded) / count) < STD_THRESHOLD) return start;
   }
@@ -73,10 +79,11 @@ export const findFlatteningPoint = (
 };
 
 /**
- * 波形を切る長さ（サンプル）を決める（上流 `_synthesize` の `max_samples`）。
+ * Decides the length (samples) the waveform is cut to (`max_samples` of upstream's `_synthesize`).
  *
- * `flatteningPoint` が 0 のときだけ切らない — 上流が `flattening_samples > 0` を条件にして
- * いるためで、「先頭から平坦」= 全部無音と判定されたときに 0 サンプルの音声を返さない。
+ * Only when `flatteningPoint` is 0 is nothing cut — upstream conditions on
+ * `flattening_samples > 0`, so that when "flat from the start" = all silent is detected, it does not
+ * return 0 samples of audio.
  */
 export const trimmedSampleCount = (
   targetSamples: number,

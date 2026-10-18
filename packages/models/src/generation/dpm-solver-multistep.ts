@@ -1,63 +1,73 @@
 /**
- * DPM++ 2M — multistep DPM-Solver++ の 2 次（**ファミリ非依存の共通処理**）。
+ * DPM++ 2M — second-order multistep DPM-Solver++ (**family-independent shared code**).
  *
- * flow matching（`prediction_type="flow_prediction"`）の sigma 梯子の上を、直前 step の x0
- * 予測 1 本だけを覚えて 2 次で進む。梯子の作り方（静的 shift / dynamic shifting / 何 step か）は
- * **持たない** — 呼び出し側が作った梯子を配列で受けるだけなので、同じ更新式を使う画像 / 生成系
- * ならファミリを問わず載る。したがってファミリのディレクトリではなく `src/generation/` に置く
- * （`greedy.ts` と同じ位置づけ）。
+ * It advances at second order along the sigma ladder of flow matching
+ * (`prediction_type="flow_prediction"`), remembering only the previous step's single x0
+ * prediction. It does **not own** how the ladder is built (static shift / dynamic shifting / how many
+ * steps) — it only takes the ladder the caller built as an array, so any image / generative family
+ * that uses the same update rule can run on it. That is why it lives in `src/generation/` and not in
+ * a family directory (the same standing as `greedy.ts`).
  *
- * MUST: ファミリ側（`src/anima/` など）から何も import しない。梯子・CFG scale・step 数は
- * すべて引数で、この向きの依存（generation → ファミリ）を作った時点で共通処理でなくなる。
- * {@link needsUncond} はこの制約の下でも共有できる形（更新則に依らない 1 行の不変条件）なので
- * **定義はここ 1 本**で、ファミリ側（`src/anima/sampler.ts`）が import する — 依存の向きは
- * ファミリ → generation のままで、写しを置かない。
+ * MUST: import nothing from the family side (`src/anima/` and so on). The ladder, CFG scale and step
+ * count are all arguments; the moment a dependency in this direction (generation → family) appears,
+ * this stops being shared code. {@link needsUncond} has a form that can be shared under this
+ * constraint (a one-line invariant independent of the update rule), so **its one definition is
+ * here** and the family side (`src/anima/sampler.ts`) imports it — the dependency still points
+ * family → generation, and no copy is kept.
  *
- * MUST: f32 の丸めを 1 演算ずつ `Math.fround` で踏む（`src/anima/sampler.ts` と同じ規律）。
- * JS の数値は f64 なので、まとめて計算してから丸めると torch の f32 逐次計算と最終桁が変わる。
+ * MUST: apply f32 rounding one operation at a time with `Math.fround` (the same discipline as
+ * `src/anima/sampler.ts`). JS numbers are f64, so computing in bulk and rounding afterwards changes
+ * the last digit against torch's sequential f32 computation.
  *
- * 正本は diffusers 0.39.0 の `DPMSolverMultistepScheduler`（`algorithm_type="dpmsolver++"` ×
- * `solver_order=2` × `solver_type="midpoint"` × `final_sigmas_type="zero"`）。golden を焼く
- * リグは `tools/export-recipes/anima/dpmsolver_ref.py`。
+ * The source of truth is diffusers 0.39.0's `DPMSolverMultistepScheduler`
+ * (`algorithm_type="dpmsolver++"` × `solver_order=2` × `solver_type="midpoint"` ×
+ * `final_sigmas_type="zero"`). The rig that generates the golden is
+ * `tools/export-recipes/anima/dpmsolver_ref.py`.
  */
 
 const f32 = Math.fround;
 
 /**
- * uncond 側（ネガティブプロンプトの forward）が要るか。
+ * Whether the uncond side (the negative prompt's forward) is needed.
  *
- * `guidance === 1` のとき CFG 式 `uncond + 1·(cond − uncond)` は数学的に `cond` へ潰れるので、
- * uncond 側の計算は丸ごと不要になる。
+ * With `guidance === 1` the CFG formula `uncond + 1·(cond − uncond)` collapses mathematically to
+ * `cond`, so the uncond computation is not needed at all.
  *
- * MUST: 素朴に「両方計算して合成する」に倒さない。浮動小数の丸めでは
- * `uncond + (cond − uncond)` が `cond` とビット一致する保証が無い（Sterbenz の補題は一般の値では
- * 成立しない）。
+ * MUST: do not fall back to the naive "compute both and combine". Under floating-point rounding
+ * there is no guarantee that `uncond + (cond − uncond)` is bit-identical to `cond` (Sterbenz's lemma
+ * does not hold for general values).
  */
 export const needsUncond = (guidance: number): boolean => guidance !== 1;
 
-/** {@link dpmSolverMultistepStep} の入力。 */
+/** Input of {@link dpmSolverMultistepStep}. */
 export type DpmSolverMultistepInput = {
-  /** 現在の x（step 0 では初期ノイズ、以降は前 step の {@link DpmSolverMultistepUpdate.sample}）。 */
+  /**
+   * The current x (the initial noise at step 0, afterwards the previous step's
+   * {@link DpmSolverMultistepUpdate.sample}).
+   */
   readonly sample: Float32Array<ArrayBuffer>;
-  /** cond 側のモデル出力（flow の速度場）。 */
+  /** Model output of the cond side (the flow's velocity field). */
   readonly cond: Float32Array<ArrayBuffer>;
-  /** uncond 側のモデル出力。有無を {@link needsUncond} とちょうど一致させる。 */
+  /** Model output of the uncond side. Its presence must match {@link needsUncond} exactly. */
   readonly uncond: Float32Array<ArrayBuffer> | undefined;
-  /** CFG scale。 */
+  /** CFG scale. */
   readonly guidance: number;
-  /** sigma 梯子。長さ `steps + 1`・**末尾は厳密に 0**（`final_sigmas_type="zero"` と対）。 */
+  /**
+   * The sigma ladder. Length `steps + 1`, **the last entry exactly 0** (paired with
+   * `final_sigmas_type="zero"`).
+   */
   readonly sigmas: Float32Array<ArrayBuffer>;
-  /** これから踏む step の添字（`0 ≤ index < steps`）。 */
+  /** Index of the step about to be taken (`0 ≤ index < steps`). */
   readonly index: number;
-  /** 直前 step の {@link DpmSolverMultistepUpdate.x0}。`index === 0` でのみ `undefined`。 */
+  /** The previous step's {@link DpmSolverMultistepUpdate.x0}. `undefined` only when `index === 0`. */
   readonly previousX0: Float32Array<ArrayBuffer> | undefined;
 };
 
-/** {@link dpmSolverMultistepStep} の出力。`x0` は次 step の `previousX0` にそのまま渡す。 */
+/** Output of {@link dpmSolverMultistepStep}. Pass `x0` unchanged as the next step's `previousX0`. */
 export type DpmSolverMultistepUpdate = {
-  /** 更新後の x。 */
+  /** The updated x. */
   readonly sample: Float32Array<ArrayBuffer>;
-  /** この step の x0 予測（`x − σ·v`）。状態はこの 1 本だけ。 */
+  /** This step's x0 prediction (`x − σ·v`). This is the only state. */
   readonly x0: Float32Array<ArrayBuffer>;
 };
 
@@ -74,41 +84,47 @@ export type DpmSolverMultistepUpdate = {
 //   Copyright 2025 TSAIL Team and The HuggingFace Team. All rights reserved.
 
 /**
- * 1 step ぶんの DPM++ 2M 更新（CFG 合成 → x0 予測 → 1 次 / 2 次の状態更新）。
+ * One step of the DPM++ 2M update (CFG combination → x0 prediction → first / second-order state
+ * update).
  *
- * 次数の切り替えは diffusers の `step()` の写し。`solver_order=2` では
- * `lower_order_second` が構造上到達しないので、**1 次に落ちるのは step 0（`lower_order_nums < 1`）と
- * 最終 step（`final_sigmas_type="zero"` ⇒ `lower_order_final` が常に真）の 2 つだけ**で、
- * 残りは全て 2 次。
+ * The order switch is a copy of diffusers' `step()`. With `solver_order=2`, `lower_order_second` is
+ * structurally unreachable, so **only two steps drop to first order: step 0 (`lower_order_nums < 1`)
+ * and the final step (`final_sigmas_type="zero"` ⇒ `lower_order_final` is always true)**; all the
+ * others are second order.
  *
- * ## MUST: 梯子の端で出る ∓inf を前もって潰さない
+ * ## MUST: do not pre-empt the ∓inf that appears at the ends of the ladder
  *
- * 梯子の先頭が厳密に 1・末尾が厳密に 0 なので、flow 経路の `alpha = 1 − σ` が step 0 で
- * `alphaS0 = 0`・最終 step で `sigmaT = 0` を作り、`lambda = log(alpha) − log(σ)` が ∓inf、
- * `h` が +inf になる。式は破綻せず ①step 0 は `exp(−h) = 0` で `x ← σ_t·x + α_t·x0`（Euler 1 段と
- * 同値）②step 1 は `lambdaS1 = −inf` から `r0 = inf → D1 = 0` で 2 次項が自然に落ちる
- * ③最終 step は係数が `(0, −1)` で `x ← x0` がビット同一、に落ちる。特別扱いを足すと**値が変わる**
- * （リグの実測どおりの経路を通らなくなる）。
+ * The ladder starts at exactly 1 and ends at exactly 0, so the flow path's `alpha = 1 − σ` makes
+ * `alphaS0 = 0` at step 0 and `sigmaT = 0` at the final step; `lambda = log(alpha) − log(σ)` becomes
+ * ∓inf and `h` becomes +inf. The formulas do not break down: (1) step 0 has `exp(−h) = 0`, giving
+ * `x ← σ_t·x + α_t·x0` (equivalent to one Euler step); (2) step 1 has `lambdaS1 = −inf`, so
+ * `r0 = inf → D1 = 0` and the second-order term drops out naturally; (3) the final step has
+ * coefficients `(0, −1)`, and `x ← x0` is bit-identical. Adding special cases **changes the values**
+ * (the path no longer follows what the rig measured).
  *
- * ## MUST: この関数は参照とビット一致し**ない**（実測 — 一致を期待して締めない）
+ * ## MUST: this function is **not** bit-identical to the reference (measured — do not tighten a tolerance expecting a match)
  *
- * 係数を作る `log` / `exp` が torch CPU（SLEEF の 1.0 ULP 実装）と JS の `Math.*`（f64 で計算して
- * f32 へ丸める = 0.5 ULP 相当）で最終ビットが割れ、その差が**スカラ係数として全要素へ乗り**、
- * さらに x と x0 の 2 本の状態を通って step 間で累積する。実測（リグ golden との突合）:
+ * The `log` / `exp` that build the coefficients split in the last bit between torch CPU (SLEEF's
+ * 1.0 ULP implementation) and JS `Math.*` (computed in f64 and rounded to f32 = about 0.5 ULP); the
+ * difference **multiplies every element as a scalar coefficient** and then accumulates across steps
+ * through the two states x and x0. Measured (against the rig's golden):
  *
- * - パリティ用フィクスチャ（steps=8 / shift=3 / 4 要素 = 状態 32 個 + x0 予測 32 個）:
- *   **不一致 25/64・最大絶対差 3.576e-07・最大 8 ULP**。
- * - 掃引（steps ∈ {2,3,4,8,16,32,50} × shift ∈ {1,3,7} × 16 要素・seed 7 = 計 11,040 値）:
- *   **最大絶対差 1.192e-06**（steps=50 / shift=1）。step 数が増えるほど累積で伸びる。
- * - steps ≤ 4 は掃引した全 shift（1 / 3 / 7）で**ビット一致**（係数が厳密値だけで作れる格子点
- *   しか踏まない）。
- *   ここだけを見て「ビット一致する」と締めると、step を増やした瞬間に赤くなる。
+ * - Parity fixture (steps=8 / shift=3 / 4 elements = 32 states + 32 x0 predictions):
+ *   **25/64 mismatches, max absolute difference 3.576e-07, at most 8 ULP**.
+ * - Sweep (steps ∈ {2,3,4,8,16,32,50} × shift ∈ {1,3,7} × 16 elements, seed 7 = 11,040 values in
+ *   total): **max absolute difference 1.192e-06** (steps=50 / shift=1). It grows cumulatively with
+ *   the step count.
+ * - steps ≤ 4 is **bit-identical** for every swept shift (1 / 3 / 7) (it only touches lattice points
+ *   whose coefficients are built from exact values).
+ *   Concluding "it is bit-identical" from this case alone turns red the moment the step count grows.
  *
- * パリティテストはこの実測から導いた **atol 4e-6**（フィクスチャ実測最悪の約 11 倍・掃引最悪の
- * 約 3.4 倍）で固定する。実装バグの差は桁違いに大きい（フィクスチャ上の最大絶対差の実測:
- * **D0/D1 の係数取り違え 5.337e-01** = 閾値の 5.1 桁上 / **step 順序の入れ替え 2.034e+00** =
- * 5.7 桁上 / **midpoint の 0.5 落ち 1.748e-01** = 4.6 桁上 / **前 step の x0 の取り違え
- * 1.360e-01** = 4.5 桁上）ので、丸め差を許しても検出力は残る。
+ * The parity test is pinned at **atol 4e-6**, derived from these measurements (about 11× the worst
+ * fixture measurement and about 3.4× the worst sweep value). Implementation bugs differ by orders
+ * of magnitude more (measured max absolute difference on the fixture: **D0/D1 coefficients swapped
+ * 5.337e-01** = 5.1 orders above the threshold / **step order swapped 2.034e+00** = 5.7 orders above /
+ * **midpoint's 0.5 dropped 1.748e-01** = 4.6 orders above / **the previous step's x0 mixed up
+ * 1.360e-01** = 4.5 orders above), so detection power remains even with the rounding difference
+ * allowed.
  */
 export const dpmSolverMultistepStep = (
   input: DpmSolverMultistepInput,
@@ -133,7 +149,8 @@ export const dpmSolverMultistepStep = (
   if (!wants && uncond !== undefined) {
     throw new Error("CFG scale 1 で uncond が渡された（uncond 分岐を計算しない経路のはず）");
   }
-  // 状態の受け渡しが切れていたら黙って 1 次へ落ちない（1 次と 2 次は別の絵になる）。
+  // If the state hand-off is broken, do not silently drop to first order (first and second order
+  // give different pictures).
   if ((index === 0) !== (previousX0 === undefined)) {
     throw new Error(`step ${index} と直前 x0 の有無が食い違う（step 0 でのみ undefined を渡す）`);
   }
@@ -148,9 +165,11 @@ export const dpmSolverMultistepStep = (
   const sampleScale = f32(sigmaT / sigmaS0);
   const d0Scale = f32(alphaT * f32(f32(Math.exp(-h)) - 1));
 
-  // 1 次に落ちる 2 つの step（上の doc）は直前 x0 を読まない — 最終 step は状態を受け取っても捨てる。
+  // The two steps that drop to first order (doc above) do not read the previous x0 — the final step
+  // discards the state even when it receives one.
   const previous = index === 0 || index === steps - 1 ? undefined : previousX0;
-  // 2 次項の係数。midpoint は `d1Scale = d0Scale/2`、`invR0` は前 step との刻み比の逆数。
+  // Second-order term coefficients. Midpoint has `d1Scale = d0Scale/2`; `invR0` is the reciprocal
+  // of the step-size ratio to the previous step.
   let d1Scale = 0;
   let invR0 = 0;
   if (previous !== undefined) {
@@ -160,8 +179,9 @@ export const dpmSolverMultistepStep = (
     d1Scale = f32(0.5 * d0Scale);
   }
 
-  // CFG の倍率は先に f32 へ落とす（torch は Python float のスカラを f32 テンソルとの積の前に f32 へ落とす —
-  // f64 のまま掛けると 1.1 のような f32 で表せない倍率で合成が 1 ulp ずれる）。
+  // Round the CFG scale to f32 first (torch rounds a Python float scalar to f32 before multiplying
+  // it with an f32 tensor — multiplying in f64 shifts the combination by 1 ulp for a scale such as
+  // 1.1 that f32 cannot represent).
   const scale = f32(guidance);
   const next = new Float32Array(sample.length);
   const x0 = new Float32Array(sample.length);

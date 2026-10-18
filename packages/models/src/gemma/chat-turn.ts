@@ -1,13 +1,15 @@
 /**
- * chat 1 ターンぶんの**変換と後始末**（{@link Gemma4Pipeline.chat} と `Gemma4ChatSession.send` が
- * 共有する部品）— 生成イベント列 → 確定した文字列片、停止理由の組み立て、ターンの畳み方、
- * そして実行 1 回ごとの観測席の仕立て。
+ * The **conversion and cleanup** of one chat turn (the parts {@link Gemma4Pipeline.chat} and
+ * `Gemma4ChatSession.send` share) — generation events → committed text pieces, building the stop
+ * reason, closing the turn, and shaping the per-run observation callback.
  *
- * ここは Session も直列化鎖も GPU も**所有しない**（所有権と順番待ちは `./pipeline.ts`）。
- * 受け取ったイベント列を文字列にし、後始末の順序を 1 本に保つだけなので、停止文字列の契約も
- * 観測席の呼び出し規則も実 GPU 無しで縛れる（`tests/gemma4_chat_test.ts`）。
+ * This module **owns** no Session, no serialization chain and no GPU (ownership and queueing live in
+ * `./pipeline.ts`). It only turns the event stream it receives into text and keeps the cleanup order
+ * on one path, so the stop-string contract and the call rules of the observation callback can be
+ * pinned without a real GPU (`tests/gemma4_chat_test.ts`).
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is side-effect free (no import-time execution, no global mutable state —
+ * CLAUDE.md).
  */
 
 import type {
@@ -20,10 +22,11 @@ import type {
 import type { StopStringFilter, StreamingDetokenizer } from "../text/detokenizer.ts";
 
 /**
- * prefill の進捗 1 通ぶん（`chunk / chunks` がそのまま進捗）。
+ * One prefill progress notification (`chunk / chunks` is the progress as is).
  *
- * `chunk` は**commit 済み**の chunk 数（1 始まり）で、`GenerationEvent` の `prefill` と同じ意味・
- * 同じ数である（この層は文字列の面なのでイベント型そのものを出さない）。
+ * `chunk` is the number of **committed** chunks (1-based), with the same meaning and the same number
+ * as the `prefill` of `GenerationEvent` (this layer is the text surface, so it does not expose the
+ * event type itself).
  */
 export type Gemma4PrefillProgress = {
   readonly chunk: number;
@@ -31,86 +34,95 @@ export type Gemma4PrefillProgress = {
 };
 
 /**
- * 観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）が受ける「その 1 通がどの run か」。
+ * "Which run this notification is" as received by the observation callback
+ * ({@link Gemma4PipelineOptions.onRunDiagnostics}).
  *
- * 席が受けるのは **run 1 本につき 1 通**で、この値はその run が何だったかを言う（順番の勘定
- * ではない）。番号はすべて 1 始まり — `prefill` の `chunk` / `chunks` は `GenerationEvent` の
- * `prefill` と同じ数（commit 済み chunk 数）、`decode` の `step` は**そのターンの** decode run の
- * 番号、`draft` / `verify` の `cycle` は投機の cycle 番号（同じ cycle の 2 本は同じ番号を名乗る）。
+ * The callback receives **one notification per run**, and this value says what that run was (it is
+ * not a count of the order). All numbers are 1-based — the `chunk` / `chunks` of `prefill` are the
+ * same numbers as the `prefill` of `GenerationEvent` (committed chunk count), the `step` of `decode`
+ * is the number of the decode run **within that turn**, and the `cycle` of `draft` / `verify` is the
+ * speculation cycle number (the two runs of one cycle carry the same number).
  *
- * MUST: 受け手は通知の回数ではなくこの値で分岐する — 複数 chunk に割れた prompt では
- * 「1 通目だけが prefill」が成り立たない。
- * MUST: 生成面の `GenerationRunPhase` **そのもの**である（写した型を持たない — 枝が片方だけ
- * 増えたときに型検査が通り続ける）。この層が足すのは「どちらの Session の診断を引くか」だけ。
+ * MUST: the receiver branches on this value, not on the number of notifications — for a prompt
+ * split into several chunks, "only the first notification is prefill" does not hold.
+ * MUST: this is the generation surface's `GenerationRunPhase` **itself** (no copied type — a copy
+ * would keep type-checking when only one side gains a branch). All this layer adds is "which
+ * Session's diagnostics to read".
  */
 export type Gemma4RunPhase = GenerationRunPhase;
 
 /**
- * chat 1 ターンの停止理由。
+ * The stop reason of one chat turn.
  *
- * sequence 層の理由（`eos` / `stop-token` / `max-tokens` / `aborted` / `closed`）に、この層でしか
- * 判定できない 1 つ（{@link Gemma4ChatOptions.stopStrings} の一致）を足したもの。`tokens` の
- * 意味は sequence 層と同じ（そのターンが生成した token 数 — 停止 token も 1 個）で、
- * `stop-string` では**停止文字列を含む片を出した token まで**が数に入る。
+ * The sequence layer's reasons (`eos` / `stop-token` / `max-tokens` / `aborted` / `closed`) plus the
+ * one only this layer can decide (a match of {@link Gemma4ChatOptions.stopStrings}). `tokens` means
+ * the same as in the sequence layer (the number of tokens the turn generated — a stop token counts
+ * as 1); for `stop-string` it counts **up to the token that emitted the piece containing the stop
+ * string**.
  */
 export type Gemma4ChatStop =
   | GenerationStop
   | {
       readonly reason: "stop-string";
-      /** 一致した停止文字列（出力には含まれない）。 */
+      /** The matched stop string (not included in the output). */
       readonly stopString: string;
       readonly tokens: number;
       /**
-       * 投機の勘定（`GenerationStop.speculation` をそのまま写したもの — 投機 sequence の
-       * ターンだけ載る）。
+       * The speculation accounting (`GenerationStop.speculation` copied as is — present only for
+       * turns of a speculative sequence).
        *
-       * MUST: 写す。この枝は理由を差し替えるために object を組み直すので、写さないと
-       * 「停止文字列で閉じたターンだけ勘定が消える」形になる（例外にならない欠落）。
+       * MUST: copy it. This branch rebuilds the object to replace the reason, so without the copy
+       * "only turns closed by a stop string lose the accounting" (a loss that raises no exception).
        */
       readonly speculation?: GenerationSpeculation;
     };
 
 /**
- * 文字列片の列（`for await` で汲む）+ 停止理由 + 一括で受け取る口。
+ * A stream of text pieces (drained with `for await`) + the stop reason + a whole-text entry point.
  *
- * 片は逐次復号器が**確定させたぶん**だけで（ADR 0084 決定 4）、byte_fallback の途中は次の
- * token まで持ち越される。連結すると `decode(全 token id)` と一致する（停止文字列で切った
- * ターンだけは、その手前までになる）。
+ * The pieces are only what the streaming detokenizer has **committed** (ADR 0084 decision 4); a
+ * byte_fallback in progress is carried over to the next token. Concatenated they equal
+ * `decode(all token ids)` (except for a turn cut by a stop string, which ends just before it).
  *
- * MUST: **1 つのストリームは 1 通りにしか消費できない** — 反復（`for await`）と
- * {@link Gemma4ChatStream.text} の併用も、2 度の反復も、同期に throw する。生成は 1 度しか
- * 走らないので、2 通り目には「残り」しか流れない（先に汲んだ側だけが本文を持つ）— 例外に
- * ならない取り違えなので、口の側で塞ぐ。
+ * MUST: **a stream can be consumed in only one way** — mixing iteration (`for await`) with
+ * {@link Gemma4ChatStream.text}, or iterating twice, throws synchronously. Generation runs only once,
+ * so a second consumer would receive only "the rest" (only the side that drained first has the
+ * body) — a mix-up that raises no exception, so the entry point blocks it.
  *
- * MUST: `done` は**二次的な**通知路である（`GenerationStream.done` と同じ規律）— 失敗は
- * iterable 側が throw するのが一次で、`done` は同じ例外で reject するだけ。
+ * MUST: `done` is a **secondary** notification path (the same discipline as
+ * `GenerationStream.done`) — the primary path for a failure is the iterable throwing; `done` only
+ * rejects with the same exception.
  */
 export type Gemma4ChatStream = AsyncIterable<string> & {
   readonly done: Promise<Gemma4ChatStop>;
   /**
-   * 汲み切って連結した 1 本の文字列（逐次表示が要らない呼び手の口）。
+   * The whole text, drained and concatenated (the entry point for callers that do not need
+   * incremental display).
    *
-   * 反復と同じ列を同じ順で汲むだけなので、`text()` の結果は「片を全部連結したもの」と一致する。
-   * 停止理由が要るなら {@link Gemma4ChatStream.done} を併せて読む（`text()` の後でよい）。
+   * It drains the same stream in the same order as iteration, so the result of `text()` equals
+   * "all pieces concatenated". When the stop reason is needed, also read
+   * {@link Gemma4ChatStream.done} (after `text()` is fine).
    */
   text(): Promise<string>;
 };
 
 /**
- * 生成イベント → **確定した文字列片**（復号 → 停止文字列の判定）。返り値は一致した停止文字列
- * （`undefined` = 止まらずに列が終わった）。
+ * Generation events → **committed text pieces** (decode → stop-string check). The return value is
+ * the matched stop string (`undefined` = the stream ended without stopping).
  *
- * MUST: 停止文字列で止めるときは `return` で抜ける — `for await` の脱出はイベント列の
- * `return()` を呼ぶので、sequence は**中断（`break`）と同じ後始末**で畳まれる。畳み方を自前で
- * 書くと、KV の committed 整合（未 commit frontier 1 token）が 2 実装に分かれる。
+ * MUST: stopping on a stop string exits with `return` — leaving a `for await` calls the event
+ * stream's `return()`, so the sequence is closed with **the same cleanup as an interruption
+ * (`break`)**. Writing a separate way to close it would split the KV committed consistency (the
+ * uncommitted frontier of 1 token) across two implementations.
  *
- * NOTE: 停止 token（sequence 層）と違い、停止文字列は復号の**後**でしか判定できない — 1 つの
- * 停止文字列が複数 token に割れることも、1 つの token が停止文字列の末尾と次の本文をまたぐ
- * こともあるため。だから席が 2 層に分かれる（ADR 0083 追記 2026-09-02）。
+ * NOTE: unlike a stop token (sequence layer), a stop string can only be decided **after** decoding —
+ * one stop string can be split across several tokens, and one token can span the end of a stop
+ * string and the following text. That is why the check lives in two layers (ADR 0083 addendum
+ * 2026-09-02).
  *
- * NOTE: barrel（`mod.ts` / `./gemma`）には出さない**内部の口**である（公開の入口は
- * {@link Gemma4Pipeline.chat} だけ）。export してあるのは、この単位なら停止文字列の契約を
- * 実 GPU 無しで縛れるため（`tests/gemma4_chat_test.ts`）。
+ * NOTE: this is an **internal entry point** not exposed in the barrel (`mod.ts` / `./gemma`) (the
+ * public entry is {@link Gemma4Pipeline.chat} only). It is exported because at this unit the
+ * stop-string contract can be pinned without a real GPU (`tests/gemma4_chat_test.ts`).
  */
 export const decodeChatChunks = async function* (
   events: AsyncIterable<GenerationEvent>,
@@ -121,8 +133,9 @@ export const decodeChatChunks = async function* (
 ): AsyncGenerator<string, string | undefined, undefined> {
   for await (const event of events) {
     if (event.kind === "prefill") {
-      // 文字列の面には prefill の片が無い（本文はまだ 1 文字も出ていない）ので、進捗だけを
-      // 観測席へ渡す。例外は握らない（fail loudly — 呼び手のコールバックの誤りを飲まない）。
+      // The text surface has no prefill piece (no character of the body has been emitted yet), so
+      // only the progress goes to the observer. Exceptions are not caught (fail loudly — an error in
+      // the caller's callback is not swallowed).
       onPrefill?.({ chunk: event.chunk, chunks: event.chunks });
       continue;
     }
@@ -131,26 +144,28 @@ export const decodeChatChunks = async function* (
     if (chunk.text !== "") yield chunk.text;
     if (chunk.matched !== undefined) return chunk.matched;
   }
-  // 復号器の持ち越し（byte_fallback の run）を確定させたぶんも判定へ通す — 停止文字列の最後の
-  // 1 文字がその run の中に居ることがある。
+  // The detokenizer's carry-over (a byte_fallback run), once committed, also goes through the check
+  // — the last character of a stop string can sit inside that run.
   const tail = stopStrings.push(detokenizer.finish());
   if (tail.text !== "") yield tail.text;
   if (tail.matched !== undefined) return tail.matched;
-  // 止まらずに終わったターンは、接頭辞として保留していたぶんを最後に流す（1 文字も落とさない —
-  // 保留は判定のための遅延であって、出力の切り詰めではない）。
+  // A turn that ended without stopping finally emits what was held back as a prefix (not a single
+  // character is dropped — holding back is a delay for the check, not a truncation of the output).
   const held = stopStrings.finish();
   if (held !== "") yield held;
   return undefined;
 };
 
 /**
- * 片の generator + 停止理由 → 公開の {@link Gemma4ChatStream}（**1 通りにしか消費できない**口）。
+ * A piece generator + a stop reason → the public {@link Gemma4ChatStream} (an entry point that can
+ * be **consumed in only one way**).
  *
- * MUST: 反復と {@link Gemma4ChatStream.text} は**同じ generator**を汲む（別経路を作らない）—
- * 生成は 1 度しか走らないので、一括の口が独自のループを持つと「どちらで読んだかで結果が違う」
- * 形が書けてしまう。2 通り目は静かに空を返すだけで例外にならないので、口の側で塞ぐ。
+ * MUST: iteration and {@link Gemma4ChatStream.text} drain **the same generator** (no second path) —
+ * generation runs only once, so if the whole-text entry point had its own loop, "the result depends
+ * on which way it was read" could be written. The second consumer would silently get an empty
+ * result without an exception, so the entry point blocks it.
  *
- * NOTE: {@link decodeChatChunks} と同じく barrel には出さない内部の口である。
+ * NOTE: like {@link decodeChatChunks}, this is an internal entry point not exposed in the barrel.
  */
 export const chatStreamOf = (
   chunks: AsyncGenerator<string, void, undefined>,
@@ -172,8 +187,8 @@ export const chatStreamOf = (
       return chunks;
     },
     done,
-    // async にしない — 併用の検査は**同期に**落とす（返り値を await するまで気づけない形に
-    // しない。`generate` の寿命検査と同じ規律）。
+    // Not async — the mixed-use check fails **synchronously** (not in a form that is noticed only
+    // when the return value is awaited; the same discipline as the lifetime check of `generate`).
     text: (): Promise<string> => {
       claim("text()");
       return joinChunks(chunks);
@@ -182,27 +197,33 @@ export const chatStreamOf = (
 };
 
 /**
- * 観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）を生成面の `onRun` hook に仕立てる。
+ * Shapes the observation callback ({@link Gemma4PipelineOptions.onRunDiagnostics}) into the
+ * generation surface's `onRun` hook.
  *
- * 席が pipeline 層にあるのは、`GenerationSequence` が**パイプライン非依存**だからである
- * （Session も診断も知らない — ADR 0083）。生成面は run 1 本につき 1 回、その run の出力を
- * 読み終えた**同期区間**でこの hook を呼ぶので、この層がするのは「どちらの Session の診断を
- * 引くか」を `phase.kind` で決めることだけである。
+ * The callback lives in the pipeline layer because `GenerationSequence` is **pipeline-independent**
+ * (it knows neither Session nor diagnostics — ADR 0083). The generation surface calls this hook once
+ * per run, in the **synchronous section** after it has read that run's outputs, so all this layer
+ * does is decide "which Session's diagnostics to read" from `phase.kind`.
  *
- * かつてはイベント列（`GenerationEvent`）を包んで run 数を**導出**していた（`withRunDiagnostics`）。
- * 導出は 2 つの例外を抱えていた — prefill 直後の最初の token は run を伴わない・停止 token を
- * 引いた最後の decode run は列に出ない（`done` から補っていた）— うえ、投機では 1 verify run が
- * 複数 token を出すので導出そのものが成り立たない。run の発行元が直接名乗る形（ADR 0083 追記
- * 〈hook〉）にすると、どちらの例外も消える。
+ * It used to wrap the event stream (`GenerationEvent`) and **derive** the run count
+ * (`withRunDiagnostics`). The derivation carried two exceptions — the first token right after
+ * prefill comes with no run, and the last decode run that drew a stop token does not appear in the
+ * stream (it was filled in from `done`) — and with speculation one verify run emits several tokens,
+ * so the derivation itself breaks down. With the issuer of the run naming it directly (ADR 0083
+ * addendum (hook)), both exceptions disappear.
  *
- * MUST: 観測席が無ければ `undefined` を返す（hook を渡さない = 生成面が 1 回も呼ばない）。
- * MUST: `draft` は**借り手**（drafter Session）の診断を引く。貸し手のものを渡すと、draft run の
- * 診断として「その前の verify run」の値が届く（例外にならない取り違え）。
+ * MUST: return `undefined` when there is no observation callback (no hook passed = the generation
+ * surface never calls it).
+ * MUST: `draft` reads the diagnostics of the **borrower** (the drafter Session). Passing the
+ * lender's would deliver the value of "the verify run before it" as the diagnostics of the draft
+ * run (a mix-up that raises no exception).
  *
- * NOTE: 診断の型を型引数にしてあるのは、この関数が診断の**中身を 1 つも読まない**（席へ素通し
- * するだけ）ことを型で示すためで、同時に呼び出し規則の門（`gemma4_chat_test.ts`）が実 Session
- * 無しで書ける。{@link Gemma4State} は `SessionDiagnostics` でそのまま満たす。
- * NOTE: `export` は門を直接叩くテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: the diagnostics type is a type parameter to show in the type that this function **reads
+ * none of the diagnostics' content** (it only passes them through to the callback), and so that the
+ * check of the call rules (`gemma4_chat_test.ts`) can be written without a real Session.
+ * {@link Gemma4State} satisfies it with `SessionDiagnostics` as is.
+ * NOTE: `export` is for the test that calls the check directly (not exposed on `mod.ts` / the
+ * subpath surface — ADR 0008).
  */
 export const runDiagnosticsHook = <D>(state: {
   readonly session: { diagnostics: () => D };
@@ -217,8 +238,9 @@ export const runDiagnosticsHook = <D>(state: {
       return;
     }
     const drafter = state.drafter;
-    // draft run は drafter Session でしか起きない（居なければ簿記の破れ — 黙って貸し手の
-    // 診断を渡すと、別の run の値が draft の名前で積算される）。
+    // A draft run happens only on the drafter Session (no drafter means broken bookkeeping —
+    // silently passing the lender's diagnostics would accumulate another run's values under the
+    // draft name).
     if (drafter === undefined) {
       throw new Error("Gemma4Pipeline: drafter が居ないのに draft run の観測が届いた");
     }
@@ -227,11 +249,12 @@ export const runDiagnosticsHook = <D>(state: {
 };
 
 /**
- * 停止文字列で閉じたターンの停止理由（`chat` と `Gemma4ChatSession.send` が共有する 1 本）。
+ * The stop reason of a turn closed by a stop string (the one builder shared by `chat` and
+ * `Gemma4ChatSession.send`).
  *
- * 理由と綴りはこの層の判定だが、`tokens` と `speculation` は**内側の値をそのまま写す**
- * （この層で数え直さない）。写す欄が増えたときに片方の入口だけ古いまま残るのを防ぐため、
- * 組み立てを 1 本にしてある。
+ * The reason and its spelling are this layer's decision, but `tokens` and `speculation` **copy the
+ * inner values as is** (this layer does not recount). The construction is kept on one path so that,
+ * when a copied field is added, one entry point does not stay stale.
  */
 export const stopStringOf = (stopString: string, inner: GenerationStop): Gemma4ChatStop => ({
   reason: "stop-string",
@@ -241,21 +264,22 @@ export const stopStringOf = (stopString: string, inner: GenerationStop): Gemma4C
 });
 
 /**
- * ターンの後始末 1 本（`chat` と `Gemma4ChatSession.send` が共有する）。
+ * The one turn cleanup (shared by `chat` and `Gemma4ChatSession.send`).
  *
- * MUST: `release` は**無条件に**呼ぶ。`cleanup`（sequence の返却・セッションの締め）が投げたら
- * 席を返さない形にすると、直列化鎖は前段の決着を得られないまま以後の `chat` / `dispose` を
- * 永久に待つ — 例外 1 つで二度と動かないパイプラインになる（device 消失時に `context.dispose`
- * が `flush` の失敗を伝播させる経路が実在する）。順序は flush-before-destroy のまま
- * 「`cleanup` → `release`」である。
+ * MUST: call `release` **unconditionally**. If a throw from `cleanup` (returning the sequence,
+ * closing the session) skipped returning the lease, the serialization chain would never get the
+ * previous step's outcome and every later `chat` / `dispose` would wait forever — one exception
+ * would make a pipeline that never runs again (a path exists where `context.dispose` propagates a
+ * `flush` failure on device loss). The order stays flush-before-destroy: "`cleanup` → `release`".
  *
- * MUST: 本体（`failure`）も失敗しているときは**両方**運ぶ。呼び手の `finally` から呼ぶので、
- * ここで投げる例外は本体の例外を置き換える — 包まずに `AggregateError` へ 2 本とも載せる
- * （`errors[0]` が本体・`errors[1]` が後始末。中断の識別 `error === signal.reason` は
- * `errors[0]` に残る）。
+ * MUST: when the body (`failure`) has also failed, carry **both**. This is called from the caller's
+ * `finally`, so an exception thrown here replaces the body's — put both, unwrapped, into an
+ * `AggregateError` (`errors[0]` is the body, `errors[1]` the cleanup; the interruption check
+ * `error === signal.reason` still works on `errors[0]`).
  *
- * NOTE: 関数に切り出してあるのは、呼び手の `finally` に制御フロー文を置かないため
- * （`no-unsafe-finally` が禁ずるのは「元の例外を黙って捨てる」形で、ここは捨てずに畳んでいる）。
+ * NOTE: this is a separate function so that no control-flow statement sits in the caller's
+ * `finally` (`no-unsafe-finally` forbids "silently discarding the original exception"; here it is
+ * folded, not discarded).
  */
 export const closeChatTurn = async (
   where: string,
@@ -276,7 +300,7 @@ export const closeChatTurn = async (
   }
 };
 
-/** 後始末とリース返却が終わってから、iterable と同じ成否を done へ通知する。 */
+/** Notifies `done` with the same outcome as the iterable, after cleanup and returning the lease. */
 export const completeChatTurn = async (options: {
   readonly where: string;
   readonly stream?: GenerationStream;
@@ -294,7 +318,8 @@ export const completeChatTurn = async (options: {
       options.stream === undefined
         ? ({ reason: "closed", tokens: 0 } satisfies Gemma4ChatStop)
         : await options.stream.done;
-    // 中断は iterable が reason を投げ、done は aborted を返す既存契約を維持する。
+    // Keep the existing contract for an interruption: the iterable throws the reason and done
+    // returns aborted.
     if (failure === undefined || inner.reason === "aborted") {
       stop = options.matched === undefined ? inner : stopStringOf(options.matched, inner);
     }
@@ -314,7 +339,7 @@ export const completeChatTurn = async (options: {
   options.settle(stop ?? { reason: "closed", tokens: 0 });
 };
 
-/** 片を汲み切って連結する（{@link Gemma4ChatStream.text} の本体）。 */
+/** Drains and concatenates the pieces (the body of {@link Gemma4ChatStream.text}). */
 const joinChunks = async (chunks: AsyncIterable<string>): Promise<string> => {
   let text = "";
   for await (const chunk of chunks) text += chunk;

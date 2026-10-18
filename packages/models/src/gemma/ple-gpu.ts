@@ -1,66 +1,72 @@
 /**
- * Gemma 4 の PLE（per-layer embeddings）を **GPU に常駐させ、gather も GPU 内で行う席**
- * （既定は従来どおりホスト — ADR
- * [0085](../../../../docs/decisions/0085-ple-host-gather.md) 追記〈GPU 常駐席〉）。
+ * The **option that keeps Gemma 4's PLE (per-layer embeddings) resident on the GPU and gathers
+ * it on the GPU** (the default stays the host — ADR
+ * [0085](../../../../docs/decisions/0085-ple-host-gather.md) addendum (2026-09-19)
+ * "GPU residency").
  *
- * ## 何を消すのか
+ * ## What it removes
  *
- * ホスト経路（`./ple.ts`）は run ごとに `per_layer_inputs[1,M,layers,dim]` を**ホストで逆量子化
- * して writeBuffer** する。decode の 1 token でも 35,840 B の転送と行 1 本の逆量子化が要り、
- * prefill の 768 行では 27.5MB の転送になる。この席はその 2 つを消す — PLE の量子化バイト列
- * を**ロード時に 1 度だけ** GPU へ上げ、run では token id だけを渡して GPU 内で引く。
+ * The host path (`./ple.ts`) **dequantizes `per_layer_inputs[1,M,layers,dim]` on the host and
+ * writeBuffers it** on every run. Even one decode token needs a 35,840 B transfer and the
+ * dequantization of one row, and a 768-row prefill transfers 27.5 MB. This option removes both —
+ * the quantized PLE bytes go up to the GPU **once at load**, and a run passes only token ids and
+ * gathers on the GPU.
  *
- * ## 機構（`./greedy-output.ts` と同じ手筋）
+ * ## Mechanism (the same technique as `./greedy-output.ts`)
  *
- * gather 用の小さな IR（`embedding` → `mul embed_scale`）を持つ Session を 1 本張り、target の
- * run と**同じ batch へ先に enqueue** して、その出力を常駐テンソル（`copyOutputs`）へ書く。
- * target はその常駐テンソルを `per_layer_inputs` の**常駐入力**として受ける（writeBuffer を
- * 1 度も出さず bind group へ焼く）ので、1 token あたりのフェンスは従来どおり 1 本のままである。
+ * A Session holding a small gather IR (`embedding` → `mul embed_scale`) is created, its run is
+ * **enqueued first in the same batch** as the target's run, and its output is written to a resident
+ * tensor (`copyOutputs`). The target takes that resident tensor as the **resident input**
+ * `per_layer_inputs` (baked into the bind group without a single writeBuffer), so the fence count
+ * per token stays one, as before.
  *
- * ## MUST: ホスト経路とビット一致する（ADR 0085 決定 4）
+ * ## MUST: bit-identical to the host path (ADR 0085 decision 4)
  *
- * 重みは `[tokens×layers, dim]`・添字は `id×layers + layer` の形で持つ。この形なら
- * **1 行 = 1 層ぶんの dim 要素**になり、格納 dtype に依らず `scales` の `[tokens, layers]` が
- * そのまま行ごとの scale の並びになる（i8 / i2 は行 scale・i4 は `group_size = dim` の group
- * scale で、どちらも平坦添字は `id×layers + layer`）。逆量子化は `embedding` が
- * `f32(q) × scale` を 1 回の f32 乗算で行い、`embed_scale` はその**後**に別ノードで掛かる —
- * ホストの `Math.fround(q × scale) × embedScale` と同じ 2 段・同じ丸め点である。
+ * The weight is held as `[tokens×layers, dim]` with index `id×layers + layer`. In this layout **one
+ * row = the dim elements of one layer**, so whatever the storage dtype, `scales`' `[tokens,
+ * layers]` is the per-row scale sequence as is (i8 / i2 use row scales, i4 uses group scales with
+ * `group_size = dim`; both share the flat index `id×layers + layer`). Dequantization is one f32
+ * multiplication `f32(q) × scale` in `embedding`, and `embed_scale` is applied **afterwards** in a
+ * separate node — the same two steps and the same rounding points as the host's `Math.fround(q ×
+ * scale) × embedScale`.
  *
- * ## MUST: 単一束縛（利用者裁定 2026-09-19 案 A）
+ * ## MUST: single binding (the maintainer's ruling of 2026-09-19, option A)
  *
- * `values` は分割せず 1 本の GPU バッファへ載せる。**アダプタの束縛上限（`maxStorageBufferBindingSize`
- * / `maxBufferSize`）に収まらない配布形はこの席を使えない** — 黙ってホスト経路へ退避せず、
- * 何バイト足りないかを添えて fail loudly にする。
+ * `values` goes into one GPU buffer, unsplit. **A distribution that does not fit the adapter's
+ * binding limits (`maxStorageBufferBindingSize` / `maxBufferSize`) cannot use this option** — it
+ * does not silently fall back to the host path but fails loudly, stating how many bytes are short.
  *
- * ## ロード（piece ごとに writeBuffer — ADR 0085 決定 2 / ADR 0109 決定 4）
+ * ## Loading (writeBuffer per piece — ADR 0085 decision 2 / ADR 0109 decision 4)
  *
- * ホストで 1 本の巨大 ArrayBuffer に連結しない。索引が指す `values` の block を**メモリ内容器の
- * piece**（`openMemoryContainer` の `pieces`）としてそのまま渡す。Session 構築は piece ごとに
- * `read()` を 1 回呼び、親 1 本ぶんの GPU バッファへ行オフセット位置に `queue.writeBuffer` して、
- * **その反復で参照を手放す**（`writeBuffer` は呼んだ時点でバイト列を写す — ADR 0070 決定 3 の
- * 2026-09-24 追記）。メモリ内容器は piece 1 本を part 1 本に置くのでフェンスは part ごとに 1 回
- * 立つが、フェンスが律するのは staging だけでホスト RAM ではない。piece のバイト列はその 1 回の
- * 読みぶんしか確保しない（器は使い回さず piece ごとに取る）ので、`values` 由来のホスト RAM は
- * 「最大 block 1 本」に収まる。scan 型の取得元でも、PLE の block は 1 block = 1 part の専用 part
- * （container-v1 §4.2）なので保持枠が握るのはその block の part だけである（区間が part ちょうど
- * でなければ `readAssetRange` の写しがもう 1 本乗る）。
+ * The host does not concatenate everything into one huge ArrayBuffer. The `values` blocks the index
+ * points at are passed as they are as **pieces of an in-memory container** (`pieces` of
+ * `openMemoryContainer`). Session construction calls `read()` once per piece, `queue.writeBuffer`s
+ * it at its row offset into one GPU buffer for the whole parent, and **lets go of the reference in
+ * that iteration** (`writeBuffer` copies the bytes at the call — ADR 0070 decision 3, 2026-09-24
+ * addendum). The in-memory container puts one piece in one part, so a fence is raised once per
+ * part, but the fence governs only staging, not host RAM. The bytes of a piece are allocated only
+ * for that one read (no buffer is reused; each piece gets its own), so the host RAM taken by
+ * `values` stays within "one largest block". Even with a scan-type source, a PLE block is a
+ * dedicated part with 1 block = 1 part (container-v1 §4.2), so the holding window holds only that
+ * block's part (if the range is not exactly the part, the copy in `readAssetRange` adds one more).
  *
- * companion scale は piece 1 と同じ part に置かれる契約（container-v1 §5 の規則③）で、
- * ランタイムは piece 1 の時点で scale の全量を 1 本の GPU バッファへ書くので、**scale だけは先に
- * 全量を集める**。ここが構築時ピークの支配項である — `scales` は `tokens × layers × 4` バイトで、
- * E2B（262,144 token × 35 層）なら 1 本の器に 35 MiB を集める。容器はその器をそのまま抱えて
- * 構築の間生かす（複製しない）。`ple` は `embedding` の重みスロットでしか消費されないので席は
- * 圧縮のまま載り、展開席の piece 列が取る「持ち越し scale の写し」（container-v1 §11）も作らない。
- * したがってホスト RAM のピークは「scale 表の全量 + 最大 block 1 本」である（写しが無いので
- * scale は 1 本ぶん）。「最大 block 1 本」だけで見積もると支配項を丸ごと落とす。scale 表は
- * `krm` の block 上限（32 MiB）を受けない — メモリ内容器は合成した block の長さを上限と
- * 突き合わせない。
+ * The companion scale lives in the same part as piece 1 by contract (container-v1 §5, rule ③), and
+ * the runtime writes the whole scale into one GPU buffer at piece 1, so **only the scale is
+ * collected whole first**. That is the dominant term of the construction peak — `scales` is `tokens
+ * × layers × 4` bytes, which for E2B (262,144 tokens × 35 layers) collects 35 MiB into one buffer.
+ * The container holds that buffer as is for the duration of construction (no copy). `ple` is
+ * consumed only by `embedding`'s weight slot, so it loads compressed, and the "copy of the carried
+ * scale" that an expanded weight's piece list takes (container-v1 §11) is not made either. So the
+ * host RAM peak is "the whole scale table + one largest block" (no copy, so the scale counts once).
+ * Estimating with "one largest block" alone drops the dominant term entirely. The scale table is
+ * not subject to the `krm` block limit (32 MiB) — the in-memory container does not compare the
+ * length of a synthesized block with the limit.
  *
- * MUST: **読み口を 1 回の読みより長く持たない**（`./ple.ts` と同じ MUST）。検証済みでない
- * 取得元の `AssetReader` は block を読み口の寿命ぶん保持するので、掴み続けると「1 本ずつ流す」
- * 形がホスト RAM の上では成立しなくなる。
+ * MUST: **do not hold a reader longer than one read** (the same MUST as `./ple.ts`). The
+ * `AssetReader` of an unverified source keeps the block for the reader's lifetime, so holding
+ * readers breaks the "stream one at a time" shape as far as host RAM is concerned.
  *
- * MUST: 全モジュール副作用ゼロ（この関数群を呼ぶまで何も起きない）。
+ * MUST: zero module side effects (nothing happens until these functions are called).
  */
 
 import {
@@ -91,16 +97,17 @@ import {
   packFactor,
 } from "./ple-index.ts";
 
-/** PLE をどこに置くか（{@link Gemma4PipelineOptions.pleResidency} の値域）。 */
+/** Where PLE is placed (the value range of {@link Gemma4PipelineOptions.pleResidency}). */
 export type Gemma4PleResidency = "host" | "gpu";
 
 const PLE_RESIDENCIES: readonly Gemma4PleResidency[] = ["host", "gpu"];
 
 /**
- * 席の指定を検査して返す（**資産を 1 バイトも読む前**に同期で落とす）。
+ * Checks and returns the option value (fails synchronously **before a single asset byte is read**).
  *
- * MUST: 型の外から来た綴り違いを既定へ倒さない — `"GPU"` のような指定が黙ってホスト経路で
- * 走ると、「GPU 常駐にしたのに速くならない」が例外も警告も無いまま残る。
+ * MUST: do not route a misspelling from outside the type to the default — if a value like `"GPU"`
+ * silently ran on the host path, "GPU residency did not make it faster" would remain with neither
+ * an exception nor a warning.
  */
 export const assertGemma4PleResidency = (where: string, value: unknown): Gemma4PleResidency => {
   if (typeof value !== "string" || !PLE_RESIDENCIES.includes(value as Gemma4PleResidency)) {
@@ -111,26 +118,36 @@ export const assertGemma4PleResidency = (where: string, value: unknown): Gemma4P
   return value as Gemma4PleResidency;
 };
 
-/** gather IR の綴り（この 1 箇所が正本 — メモリ内容器と Session の両方が引く）。 */
+/**
+ * Names in the gather IR (this one place is canonical — both the in-memory container and the
+ * Session use them).
+ */
 const INDEX_INPUT = "ple_index";
 const GATHER_OUTPUT = "per_layer";
 const RAW_VALUE = "ple_raw";
 const WEIGHT_TENSOR = "ple";
 const EMBED_SCALE_TENSOR = "embed_scale";
-/** メモリ内容器に載せるグラフの名前（初期化子名 {@link WEIGHT_TENSOR} とは別の名前空間）。 */
+/**
+ * Name of the graph placed in the in-memory container (a namespace separate from the initializer
+ * name {@link WEIGHT_TENSOR}).
+ */
 const GATHER_GRAPH = "ple";
-/** 物理行数（token 行）の記号 — 束縛源は {@link INDEX_INPUT} の shape だけ。 */
+/**
+ * Symbol of the physical row count (token rows) — bound only from the shape of {@link INDEX_INPUT}.
+ */
 const ROW_SYMBOL = "M";
 
-/** 格納 dtype → codec 台帳の登録名（`values` の詰め方 — container-v1 §6.3）。 */
+/**
+ * Storage dtype → registered name in the codec ledger (how `values` is packed — container-v1 §6.3).
+ */
 const pleCodec = (index: Gemma4PleIndex): CodecName =>
   index.storage === "i2" ? "int2-off" : index.storage === "i4" ? "int4-sym-g" : "int8-sym";
 
 /**
- * GPU 常駐に要るバイト数（**索引だけで決まる** — バイト列を読む前に分かる）。
+ * The bytes GPU residency needs (**decided by the index alone** — known before reading any bytes).
  *
- * `values` が単一束縛の実体で、`scales` は companion scale である。束縛上限の検査も見積りも
- * この 1 本から引く。
+ * `values` is the single-binding body and `scales` the companion scale. Both the binding-limit
+ * check and the estimate derive from this one function.
  */
 export const gemma4PleGpuBytes = (
   index: Gemma4PleIndex,
@@ -141,23 +158,24 @@ export const gemma4PleGpuBytes = (
 };
 
 /**
- * gather 用の IR（`embedding` → `mul embed_scale`）。
+ * The gather IR (`embedding` → `mul embed_scale`).
  *
- * 添字入力を `[1, M, layers]` にしてあるので、出力はそのまま `[1, M, layers, dim]` =
- * `per_layer_inputs` の宣言形になる（reshape は要らない — `embedding` の出力形は
- * 「添字の形 + 重みの最終次元」）。
+ * The index input is `[1, M, layers]`, so the output is directly `[1, M, layers, dim]` = the
+ * declared shape of `per_layer_inputs` (no reshape needed — `embedding`'s output shape is "the
+ * index shape + the weight's last dimension").
  *
- * MUST: `embed_scale` は**別ノード**で掛ける（`embedding` の中へ畳まない）。ホスト経路の
- * `Math.fround(q × scale) × embedScale` と丸め点を合わせるのがこの 2 段の唯一の目的である
- * （ADR 0085 決定 4）。
+ * MUST: `embed_scale` is applied in a **separate node** (not folded into `embedding`). Matching the
+ * rounding points of the host path's `Math.fround(q × scale) × embedScale` is the only purpose of
+ * these two steps (ADR 0085 decision 4).
  *
- * MUST: 組んだ宣言は `parseIrDeclarationValue` に通す — ここは exporter も容器の読み手も
- * 経由しないので、通さないとグラフ単体で決まる規則（SSA・トポロジカル順・`requires.ops` と
- * 実使用 op の一致・未知キー・記号名の正準表記）が 1 つも検査されない。
+ * MUST: pass the built declaration through `parseIrDeclarationValue` — it goes through neither the
+ * exporter nor the container reader, so without it none of the rules decided by the graph alone
+ * (SSA, topological order, `requires.ops` matching the ops used, unknown keys, canonical symbol
+ * names) would be checked.
  *
- * MUST NOT: 下のリテラルに省略可能な `states` を書き足さない。書かないことで、リテラルは
- * {@link IrDeclaration} として型が付かず、`parseIrDeclarationValue` の戻り値だけがこの関数の
- * 返り値になれる（包みを外した編集は `deno check` で落ちる）。
+ * MUST NOT: add the optional `states` to the literal below. Leaving it out keeps the literal from
+ * typing as an {@link IrDeclaration}, so only the return value of `parseIrDeclarationValue` can be
+ * this function's return value (an edit that removes the wrapper fails the type check, `vp check`).
  */
 export const gemma4PleGatherGraph = (index: Gemma4PleIndex): IrDeclaration => {
   const rows = index.tokens * index.layers;
@@ -166,8 +184,9 @@ export const gemma4PleGatherGraph = (index: Gemma4PleIndex): IrDeclaration => {
     version: 2,
     requires: { ops: ["embedding", "mul"] },
     symbols: [ROW_SYMBOL],
-    // IR v2 の宣言は名前だけ（格納は束縛表 = メモリ内容器の `encoding` が持つ）。`shared` は
-    // 書かない = 実体を持つ側（`false` は綴れない — 欄の不存在と同じ宣言）。
+    // An IR v2 declaration carries names only (storage belongs to the binding table = the in-memory
+    // container's `encoding`). No `shared` = the side that owns the data (`false` cannot be spelled
+    // — it is the same declaration as an absent field).
     initializers: {
       [WEIGHT_TENSOR]: {},
       [EMBED_SCALE_TENSOR]: {},
@@ -185,8 +204,9 @@ export const gemma4PleGatherGraph = (index: Gemma4PleIndex): IrDeclaration => {
         op: "embedding",
         ins: [WEIGHT_TENSOR, INDEX_INPUT],
         outs: [RAW_VALUE],
-        // `padding_idx` は契約表の必須 attr だが forward には効かない（ADR 0012）。番兵 −1 =
-        // 未指定で、ホスト経路の行 lookup と同じ「素の gather」になる。
+        // `padding_idx` is a required attr of the contract table but has no effect in forward
+        // (ADR 0012). The sentinel −1 = unspecified, giving the same "plain gather" as the host
+        // path's row lookup.
         attrs: { padding_idx: -1 },
       },
       { op: "mul", ins: [RAW_VALUE, EMBED_SCALE_TENSOR], outs: [GATHER_OUTPUT], attrs: {} },
@@ -195,7 +215,8 @@ export const gemma4PleGatherGraph = (index: Gemma4PleIndex): IrDeclaration => {
 };
 
 /**
- * block 1 本の区間を読む（読み口は**この読み 1 回ぶん**だけ生かす — モジュール doc の MUST）。
+ * Reads a range of one block (the reader lives only for **this one read** — the MUST in the module
+ * doc).
  */
 const readBlockRange = async (
   openBlock: (asset: string) => AssetReader,
@@ -205,7 +226,10 @@ const readBlockRange = async (
 ): Promise<Uint8Array<ArrayBuffer>> =>
   new Uint8Array(await readAssetRange(openBlock(block.asset), offset, length));
 
-/** `scales` の block を索引の順に読んで、1 本の行列へ並べ直す（companion scale の全量）。 */
+/**
+ * Reads the `scales` blocks in index order and lays them out as one matrix (the whole companion
+ * scale).
+ */
 const readScaleTable = async (
   table: Gemma4PleTable,
   openBlock: (asset: string) => AssetReader,
@@ -220,25 +244,30 @@ const readScaleTable = async (
 };
 
 /**
- * ホストの GPU 常駐 PLE（**target の run へ差す常駐入力**を作る面）。
+ * The host's GPU-resident PLE (the surface that builds the **resident input passed to the target's
+ * run**).
  *
- * MUST: `enqueue` は target の enqueue と**同じ batch**へ積む（フェンスを増やさない）。
+ * MUST: `enqueue` goes into **the same batch** as the target's enqueue (no extra fence).
  */
 export type Gemma4PleResident = {
-  /** target が受け取るグラフ入力の名前（`per_layer_inputs`）。 */
+  /** Name of the graph input the target receives (`per_layer_inputs`). */
   readonly inputName: string;
-  /** その run の token id 列を運ぶグラフ入力の名前（`input_ids`）。 */
+  /** Name of the graph input that carries the run's token ids (`input_ids`). */
   readonly idsName: string;
   /**
-   * `ids` の PLE を GPU 内で引き、常駐テンソルへ書く enqueue を `batch` へ積む。
+   * Adds to `batch` the enqueue that gathers the PLE of `ids` on the GPU and writes it to a
+   * resident tensor.
    *
-   * 返るのは target の `per_layer_inputs` に束ねる常駐テンソルで、行数ごとに 1 本を使い回す
-   * （同じ形の run は同じバッファを踏むので、bind group の焼き直しも起きない）。
+   * Returns the resident tensor bound to the target's `per_layer_inputs`; one is reused per row
+   * count (runs of the same shape hit the same buffer, so the bind group is not rebaked either).
    */
   enqueue(batch: BatchScope, ids: Int32Array<ArrayBuffer>): Promise<ResidentTensor>;
-  /** 常駐 PLE（values + scales）と gather Session のぶんの見積り（auxiliaryBytes に載る）。 */
+  /**
+   * Estimate of the resident PLE (values + scales) and the gather Session (counted in
+   * auxiliaryBytes).
+   */
   readonly extraBytes: number;
-  /** 常駐した量子化バイト列そのもの（values + scales）。 */
+  /** The resident quantized bytes themselves (values + scales). */
   readonly residentBytes: number;
   dispose(): Promise<void>;
 };
@@ -246,31 +275,37 @@ export type Gemma4PleResident = {
 export type Gemma4PleResidentOptions = {
   readonly gpu: GpuContext;
   readonly index: Gemma4PleIndex;
-  /** 索引が指す block 1 本の読み口を開く（`open(MODEL).asset` そのもの）。 */
+  /** Opens the reader of one block the index points at (`open(MODEL).asset` itself). */
   readonly openBlock: (asset: string) => AssetReader;
-  /** 主 embedding の vocab 行数（id 空間の相互照合 — ADR 0085 決定 5）。 */
+  /** The main embedding's vocab row count (cross-check of the id spaces — ADR 0085 decision 5). */
   readonly vocabSize: number;
-  /** target が受け取るグラフ入力の名前。 */
+  /** Name of the graph input the target receives. */
   readonly inputName: string;
-  /** token id 列を運ぶグラフ入力の名前。 */
+  /** Name of the graph input that carries the token ids. */
   readonly idsName: string;
-  /** この pipeline が流しうる物理行数（見積りの上界に使う — decode 1 + バケット + chunk 長）。 */
+  /**
+   * Physical row counts this pipeline can run (the estimate's upper bound — decode 1 + buckets +
+   * chunk length).
+   */
   readonly rows: readonly number[];
-  /** 診断の主語（`Gemma4Pipeline` / `Gemma4QatPipeline`）。 */
+  /** The subject of diagnostics (`Gemma4Pipeline` / `Gemma4QatPipeline`). */
   readonly entry: string;
 };
 
 /**
- * 索引の指す block からメモリ内容器を組む（**GPU を 1 度も触らない**）。
+ * Builds an in-memory container from the blocks the index points at (**without touching the GPU
+ * once**).
  *
- * `values` の block 1 本 = piece 1 本で、piece の `read()` はそのときだけ区間読みを出す
- * （この層はバイト列を 1 本も抱えない）。行範囲は `[block.start × layers, block.stop × layers)`
- * — IR の 1 行 = 1 層ぶんなので、token 区間はそのまま行区間になる。
+ * One `values` block = one piece, and a piece's `read()` issues its range read only at that moment
+ * (this layer holds no bytes at all). The row range is `[block.start × layers, block.stop ×
+ * layers)` — one IR row = one layer, so the token range maps directly to a row range.
  *
- * companion scale は規則③で piece 1 と同じ part に置かれるので、scale だけ先に全量を集める。
- * block が 1 本しか無い索引は `pieces`（2 本以上 MUST）に割れないので全量 1 本で渡す。
+ * The companion scale sits in the same part as piece 1 by rule ③, so only the scale is collected
+ * whole first. An index with a single block cannot be split into `pieces` (2 or more, MUST), so it
+ * is passed whole as one.
  *
- * NOTE: `export` は合成の突合を GPU 無しで縛るため（`mod.ts` / サブパス面には出さない）。
+ * NOTE: `export` is there to pin the synthesized cross-check without a GPU (not exposed on `mod.ts`
+ * / the subpath surface).
  */
 export const buildGemma4PleGatherContainer = async (
   index: Gemma4PleIndex,
@@ -287,9 +322,9 @@ export const buildGemma4PleGatherContainer = async (
   }
   const bytes = gemma4PleGpuBytes(index);
   const scale = await readScaleTable(index.scales, openBlock, bytes.scales);
-  // i4 は group = 行長（ADR 0069 決定 2 の「2 冪 ≥ 16」を満たす）・i8 / i2 は per-channel で
-  // groupSize = 行長。どちらも group 数 1 なので、scale は `[tokens × layers, 1]` の f32 列
-  // そのもの（= `readScaleTable` が並べた順）になる。
+  // i4 has group = row length (meeting ADR 0069 decision 2's "power of two ≥ 16"); i8 / i2 are
+  // per-channel with groupSize = row length. Either way there is one group, so the scale is exactly
+  // the f32 column `[tokens × layers, 1]` (= the order `readScaleTable` laid out).
   const encoding: MemoryEncoding = {
     codec: pleCodec(index),
     rowAxis: 0,
@@ -324,11 +359,11 @@ export const buildGemma4PleGatherContainer = async (
 };
 
 /**
- * 束縛上限に収まるかを見る（**重みを 1 バイトも取る前**）。
+ * Checks that it fits the binding limits (**before a single weight byte is fetched**).
  *
- * MUST: 黙ってホスト経路へ退避しない。席を明示した利用者に「何が」「どれだけ」足りないかを
- * 返す（`acquireGpu` はアダプタ実測値をそのまま要求するので、ここで足りない値はその機の
- * 上限そのものである）。
+ * MUST: do not silently fall back to the host path. Tell the user who chose this option explicitly
+ * "what" is short and "by how much" (`acquireGpu` requests the adapter's measured values as they
+ * are, so a value short here is that machine's limit itself).
  */
 const assertBindingLimits = (options: Gemma4PleResidentOptions, valuesBytes: number): void => {
   const { limits } = options.gpu;
@@ -352,21 +387,23 @@ const assertBindingLimits = (options: Gemma4PleResidentOptions, valuesBytes: num
 };
 
 /**
- * PLE を GPU へ常駐させ、GPU 内 gather の面を返す。
+ * Makes PLE resident on the GPU and returns the surface of the on-GPU gather.
  *
- * 順序は「索引の門 → 束縛上限の門 → scale の収集 → piece の逐次消費」で、GPU を触るのは
- * 最後の 1 段だけである（ADR 0070 決定 5 の graph-first と同じ並び）。
+ * The order is "index check → binding-limit check → scale collection → sequential consumption of
+ * pieces", and only the last step touches the GPU (the same ordering as ADR 0070 decision 5's
+ * graph-first).
  *
- * NOTE: `values` の block が 1 本しか無い索引（全量が block 上限に収まる小さな配布形）だけは
- * piece に割れないので、scale の収集と同じ段で values も全量を読む — capability の門
- * （`prepareContainer`）より前に読み切る唯一の形である。
+ * NOTE: only an index with a single `values` block (a small distribution whose whole table fits the
+ * block limit) cannot be split into pieces, so values are also read whole in the same step as the
+ * scale collection — the only form read in full before the capability check (`prepareContainer`).
  */
 export const createGemma4PleResident = async (
   options: Gemma4PleResidentOptions,
 ): Promise<Gemma4PleResident> => {
   const { gpu, index, entry } = options;
-  // ① PLE の索引の行数 と ② 主 embedding の vocab 行数（ADR 0085 決定 5 の相互照合 — ホスト経路の
-  // `createGemma4Ple` が持つ門と同じ関係を、この席でも通す）。
+  // (1) the PLE index's row count and (2) the main embedding's vocab row count (ADR 0085
+  // decision 5's cross-check — the same relation as the check in the host path's `createGemma4Ple`,
+  // applied in this option too).
   if (index.tokens !== options.vocabSize) {
     throw new Error(
       `${entry}: PLE の索引の行数 ${index.tokens} が主 embedding の vocab 行数` +
@@ -378,15 +415,17 @@ export const createGemma4PleResident = async (
   const bound = await buildGemma4PleGatherContainer(index, options.openBlock, entry);
 
   const prepared: PreparedModel = prepareContainer(bound, GATHER_GRAPH);
-  // 出力の常駐は run の形ごとに 1 本（行数の集合は decode 1 + バケット + chunk 長で有界）。
+  // One resident output per run shape (the set of row counts is bounded: decode 1 + buckets + chunk
+  // length).
   const outputBytes = [...new Set(options.rows)].reduce(
     (total, rows) => total + rows * index.layers * index.dim * 4,
     0,
   );
-  // MUST: Session と見積りに**同じ予算**を渡す（片方だけ既定に落ちると、報告のピークが実際の
-  // 保持集合と別の予算を名乗る）。形ごとの backing は「gather の中間 + 出力」の 2 本ぶんなので、
-  // 全形を保持できる値を明示する（既定の 256MiB を使うと、この小さなグラフの報告が予算その
-  // ものの数字になる）。
+  // MUST: pass **the same budget** to the Session and the estimate (if only one fell back to the
+  // default, the reported peak would claim a different budget from the set actually held). Each
+  // shape's backing is two buffers, "gather intermediate + output", so pass a value that can hold
+  // every shape explicitly (with the default 256 MiB, this small graph's report would be the budget
+  // figure itself).
   const backingBudget = outputBytes * 2;
   const maxRows = options.rows.reduce((largest, rows) => Math.max(largest, rows), 1);
   const estimate = prepared.estimate({
@@ -397,7 +436,9 @@ export const createGemma4PleResident = async (
     planBackingBudgetBytes: backingBudget,
   });
 
-  /** 行数ごとの出力常駐と添字バッファ（同じ形の run は同じ実体を踏む）。 */
+  /**
+   * Resident output and index buffer per row count (runs of the same shape hit the same object).
+   */
   const outputs = new Map<number, ResidentTensor>();
   const indices = new Map<number, Int32Array<ArrayBuffer>>();
   let disposal: Promise<void> | undefined;
@@ -429,8 +470,8 @@ export const createGemma4PleResident = async (
       }
       for (let row = 0; row < rows; row += 1) {
         const id = ids[row];
-        // 範囲外は OOB ではなく「別 token の有効な行」/ NaN 汚染になるので、ここが fail loudly の
-        // 位置である（ホスト経路 `Gemma4Ple.gather` の ③ と同じ門）。
+        // Out of range is not OOB but "a valid row of another token" / NaN contamination, so this
+        // is the fail-loudly point (the same check as (3) of the host path's `Gemma4Ple.gather`).
         if (id < 0 || id >= index.tokens) {
           throw new Error(
             `${entry}: token id[${row}] ${id} が PLE の索引の 0..${index.tokens - 1} の外`,
@@ -455,7 +496,8 @@ export const createGemma4PleResident = async (
       return output;
     },
     dispose(): Promise<void> {
-      // 順序は Session → 常駐テンソル（焼き込み参照を返してから解放する — ADR 0004）。
+      // Order: Session → resident tensors (return the baked references before releasing —
+      // ADR 0004).
       disposal ??= disposeSteps([
         () => session.dispose(),
         ...[...outputs.values()].map((resident) => () => resident.dispose()),
@@ -469,10 +511,11 @@ export const createGemma4PleResident = async (
 };
 
 /**
- * run の入力から token id 列を取り出す（GPU 内 gather の添字の唯一の出どころ）。
+ * Takes the token ids out of a run's inputs (the only source of the on-GPU gather's indices).
  *
- * MUST: ホストの `Tensor`（i32）であることまで見る。常駐入力（`ResidentTensor`）にはホスト側の
- * 値が無いので、黙って読むと「空の添字で引いた PLE」が例外なしで流れる。
+ * MUST: check that it is a host `Tensor` (i32). A resident input (`ResidentTensor`) has no
+ * host-side values, so reading it silently would let "PLE gathered with empty indices" flow on
+ * without an exception.
  */
 export const gemma4PleGatherIds = (
   where: string,

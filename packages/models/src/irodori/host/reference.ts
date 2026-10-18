@@ -1,60 +1,66 @@
 /**
- * 参照音声（wav）→ codec encoder の入力までのホスト前処理（上流 `codec.py` の
- * `_normalize_loudness` / `encode_waveform` と `DACVAE._pad`）。
+ * Host preprocessing from the reference audio (wav) up to the input of the codec encoder
+ * (upstream's `_normalize_loudness` / `encode_waveform` of `codec.py`, and `DACVAE._pad`).
  *
- * 段は 3 つで、順序に意味がある: **切り詰め → 正規化 → reflect pad**。
- * 切り詰めを正規化の後に回すと、捨てる区間の音量が LUFS に混ざる（上流は
- * `wav[:, :int(max_ref_seconds·sr)]` を先に取る）。pad を正規化より前に回すと、鏡像の区間が
- * peak 判定に混ざる。
+ * There are 3 steps, and the order matters: **truncation → normalization → reflect pad**.
+ * Truncating after normalization would mix the loudness of the discarded part into the LUFS
+ * (upstream takes `wav[:, :int(max_ref_seconds·sr)]` first). Padding before normalization would mix
+ * the mirrored part into the peak test.
  *
- * 数の正本は golden `outputs/series/dacvae-32dim/host/`（`tools/export-recipes/irodori/dacvae/host.py`
- * が上流を**呼んで**書く 5 ケース）で、突合は `packages/models/tests/irodori_reference_test.ts`。
+ * The numeric source of truth is the golden `outputs/series/dacvae-32dim/host/` (5 cases written by
+ * `tools/export-recipes/irodori/dacvae/host.py`, which **calls** upstream), and the comparison is
+ * `packages/models/tests/irodori_reference_test.ts`.
  */
 
 import { ModelInputError } from "../../errors.ts";
 import { integratedLoudness } from "./loudness.ts";
 
 /**
- * 参照音声の目標ラウドネス（LUFS）。
+ * Target loudness of the reference audio (LUFS).
  *
- * 上流 `inference_runtime.SamplingRequest.ref_normalize_db` の既定で、`pipelineConfig` には
- * 載っていない（配布形が別の値を宣言する手段が無い）。末尾トリムのしきい値（`trim.ts`）と
- * 同じ扱いで、**実行時ノブとしては持たない**。
+ * The default of upstream's `inference_runtime.SamplingRequest.ref_normalize_db`, not in
+ * `pipelineConfig` (a distribution has no way to declare another value). Treated the same as the
+ * tail-trim thresholds (`trim.ts`): **not held as a runtime knob**.
  */
 const TARGET_DB = -16;
 
 /**
- * dB → 線形の換算係数（`ln(10)/20`）。audiotools の `AudioSignal.GAIN_FACTOR` と同じ数で、
- * golden `meta.json` の `gainFactor` が実測値を持っている。
+ * dB → linear conversion factor (`ln(10)/20`). The same number as audiotools'
+ * `AudioSignal.GAIN_FACTOR`; `gainFactor` in the golden's `meta.json` holds the measured value.
  */
 const GAIN_FACTOR = Math.LN10 / 20;
 
-/** {@link normalizeReference} の結果。スカラーは golden 突合の観測点として返す。 */
+/**
+ * Result of {@link normalizeReference}. The scalars are returned as observation points for the
+ * golden comparison.
+ */
 type NormalizedReference = {
   readonly data: Float32Array<ArrayBuffer>;
-  /** 測った integrated loudness（LUFS）。 */
+  /** The measured integrated loudness (LUFS). */
   readonly refDb: number;
-  /** LUFS 利得（`10^((−16 − refDb)/20)`）。 */
+  /** LUFS gain (`10^((−16 − refDb)/20)`). */
   readonly loudnessGain: number;
-  /** LUFS 利得を当てた後の peak（1 を超えたときだけ次の peak 利得が 1 未満になる）。 */
+  /** Peak after the LUFS gain (only when it exceeds 1 does the following peak gain drop below 1). */
   readonly peakBeforeScale: number;
-  /** peak 制限の利得（`peak > 1` のときだけ `1/peak`・それ以外は厳密に 1）。 */
+  /** Gain of the peak limit (`1/peak` only when `peak > 1`, otherwise exactly 1). */
   readonly peakGain: number;
 };
 
 /**
- * LUFS 正規化 + peak 制限（上流 `_normalize_loudness` → `ensure_max_of_audio`）。
+ * LUFS normalization + peak limit (upstream `_normalize_loudness` → `ensure_max_of_audio`).
  *
- * 掛けるのは **2 本の利得だけ**で、その積が正規化の全て（`irodori/dacvae/host.py` の
- * `_decomposition_evidence` が上流の出力とのビット一致を毎回実測している）。
+ * Only **2 gains** are applied, and their product is the whole normalization
+ * (`_decomposition_evidence` in `irodori/dacvae/host.py` measures bit identity with upstream's
+ * output every time).
  */
 export const normalizeReference = (
   samples: Float32Array<ArrayBuffer>,
   sampleRate: number,
 ): NormalizedReference => {
-  // MUST: 空波形はこの入口で落とす。この先の `integratedLoudness` は窓の本数が 0 になって
-  // `RangeError` を出すが、あれは導出値（`sampleRate` と窓長）の前提を見る門なので、呼び手の
-  // 波形の長さに対する診断としては出所が読めない（ADR 0107 決定 5 の「音声の寸法」）。
+  // MUST: an empty waveform fails at this entry. `integratedLoudness` further on would throw a
+  // `RangeError` with 0 windows, but that is a check of the premises of derived values
+  // (`sampleRate` and the window length), so as a diagnostic about the length of the caller's
+  // waveform its origin is unreadable (the "audio dimensions" of ADR 0107 decision 5).
   if (samples.length === 0) {
     throw new ModelInputError("irodori: 参照音声のサンプルが 0 個（波形が空）");
   }
@@ -63,14 +69,17 @@ export const normalizeReference = (
   const scaled = new Float32Array(samples.length) as Float32Array<ArrayBuffer>;
   let peakBeforeScale = 0;
   for (let i = 0; i < samples.length; i += 1) {
-    // MUST: 非有限サンプルはここで落とす。NaN は `magnitude > peakBeforeScale` が常に false
-    // なので peak 判定を素通りし、+Inf は `peakGain = 1/∞ = 0` で**全サンプルを 0 に潰す**
-    // （残るのは NaN 1 点だけ）— どちらも例外にならず「ほぼ無音の参照音声」として通る。
+    // MUST: non-finite samples fail here. NaN slips past the peak test because
+    // `magnitude > peakBeforeScale` is always false, and +Inf **crushes every sample to 0** through
+    // `peakGain = 1/∞ = 0` (only a single NaN remains) — neither raises an exception, and both pass
+    // as "almost silent reference audio".
     if (!Number.isFinite(samples[i])) {
-      // サンプル値は呼び手が渡した wav の中身なので入力起因（ADR 0107 決定 2）。
+      // The sample values are the content of the wav the caller passed, so input-caused (ADR 0107
+      // decision 2).
       throw new ModelInputError(`irodori: 参照音声の ${i} 番目のサンプルが非有限（${samples[i]}）`);
     }
-    // 代入した時点で f32 へ丸まる。peak は**丸めた後の値**で採る（上流も f32 テンソルの max）。
+    // The assignment rounds to f32. The peak is taken from **the rounded value** (upstream also
+    // takes the max of an f32 tensor).
     scaled[i] = samples[i] * loudnessGain;
     const magnitude = Math.abs(scaled[i]);
     if (magnitude > peakBeforeScale) peakBeforeScale = magnitude;
@@ -83,13 +92,15 @@ export const normalizeReference = (
 };
 
 /**
- * 末尾を鏡像で埋めて長さを `hopLength` の倍数へ揃える（上流 `DACVAE._pad` の reflect pad）。
+ * Fills the tail with a mirror image to round the length up to a multiple of `hopLength`
+ * (upstream's reflect pad in `DACVAE._pad`).
  *
- * 鏡像は**端のサンプルを含まない**（`[a,b,c,d]` に 2 足すと `[a,b,c,d,c,b]`）— torch の
- * `F.pad(mode="reflect")` の綴り。長さが既に倍数なら入力をそのまま返す（写しも作らない）。
+ * The mirror **does not include the edge sample** (adding 2 to `[a,b,c,d]` gives `[a,b,c,d,c,b]`)
+ * — the spelling of torch's `F.pad(mode="reflect")`. When the length is already a multiple, the
+ * input is returned as is (no copy is made either).
  *
- * MUST: `hopLength` 未満の入力は落とす。pad 量は最大 `hopLength − 1` なので、それより短い
- * 入力では鏡像が自分の先頭を飛び越える（torch も同じ条件で例外を投げる）。
+ * MUST: input shorter than `hopLength` fails. The padding is at most `hopLength − 1`, so with
+ * shorter input the mirror would jump past its own start (torch throws under the same condition).
  */
 export const reflectPadToHop = (
   samples: Float32Array<ArrayBuffer>,
@@ -99,9 +110,10 @@ export const reflectPadToHop = (
     throw new RangeError(`reflectPadToHop: hopLength ${hopLength} が正の整数でない`);
   }
   if (samples.length < hopLength) {
-    // 長さの出どころは呼び手が渡した参照音声（`IrodoriSpeakerInput` の wav）なので 400 側
-    // （ADR 0107 決定 5 の「音声の寸法」）。直上の `hopLength` は配布形が宣言する数で、
-    // 呼び手が直せないため `RangeError` のまま残す。
+    // The length comes from the reference audio the caller passed (the wav of
+    // `IrodoriSpeakerInput`), so the 400 side (the "audio dimensions" of ADR 0107 decision 5). The
+    // `hopLength` just above is a number the distribution declares, which the caller cannot fix,
+    // so it stays a `RangeError`.
     throw new ModelInputError(
       `reflectPadToHop: 参照音声が ${samples.length} サンプルしかない（hopLength ${hopLength} が要る）`,
     );

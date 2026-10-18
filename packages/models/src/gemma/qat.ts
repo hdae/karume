@@ -1,4 +1,7 @@
-/** QAT family の構造門。通常 Gemma の入口とは別に固定格納と SRQ を要求する。 */
+/**
+ * Structural checks of the QAT family. Separately from regular Gemma's entry, it requires fixed
+ * storage and SRQ.
+ */
 import { codecLayout } from "@karume/runtime";
 import type { GraphOwner } from "../hub/components.ts";
 import type { Gemma4PleIndex } from "./ple-index.ts";
@@ -7,16 +10,17 @@ type Graph = GraphOwner["graph"];
 export type Gemma4QatModel = "e2b" | "e4b";
 
 /**
- * モデル → PLE の格納型（TS 側の正本）。
+ * Model → PLE storage dtype (the canonical source on the TS side).
  *
- * MUST: 層数など別の鍵から導き直さない — 判別規則が 2 実装に割れると、3 つ目のモデルが
- * 増えたとき片方だけが古い写像を使い続ける。`Gemma4QatModel` に欄を足せば型検査が欠落を
- * 教える。一次情報は上流 `QuantizedEmbedding.num_bits`（recipe の `ple.py` が `i{bits}` を
- * 作る）で、ここはその期待値の綴り 1 箇所である。
+ * MUST: do not re-derive it from another key such as the layer count — if the discrimination rule
+ * splits into two implementations, one keeps using the old mapping when a third model is added.
+ * Adding a field to `Gemma4QatModel` makes the type check report the gap. The primary source is
+ * upstream's `QuantizedEmbedding.num_bits` (the recipe's `ple.py` builds `i{bits}` from it), and
+ * this is the one place that spells the expected value.
  */
 const PLE_STORAGE: Record<Gemma4QatModel, "i2" | "i4"> = { e2b: "i4", e4b: "i2" };
 
-/** PLE の 1 層あたりの次元（`per_layer_inputs` の shape[3]）。 */
+/** PLE dimension per layer (shape[3] of `per_layer_inputs`). */
 const PLE_DIM = 256;
 
 export const assertGemma4QatModel = (model: string): Gemma4QatModel => {
@@ -80,7 +84,7 @@ export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel 
   for (const node of graph.nodes) {
     if (node.op !== "linear") continue;
     const weight = graph.initializers[node.ins[1]];
-    // initializer 名 = 実体の鍵（FQN — docs/ir-v2.md）。
+    // initializer name = the key of the data (FQN — docs/ir-v2.md).
     if (
       weight?.storage?.codec === "f32" &&
       node.ins[1] === "model.model.per_layer_model_projection.weight"
@@ -102,9 +106,10 @@ export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel 
     }
     storages.add(layout);
     if (node.ins[1] === tokenWeight) {
-      // 共有 head だけ前後の SRQ を要求しない。公式 checkpoint の lm_head は SRQ の scale が
-      // 入出力とも 0（未較正 = 恒等）で、recipe は恒等 SRQ を IR に挟まない（ADR 0097）。
-      // SRQ を挟んだ形も受ける（恒等なので数値は同じ）。
+      // Only the shared head does not require SRQ before and after. The official checkpoint's
+      // lm_head has SRQ scales of 0 on both input and output (uncalibrated = identity), and the
+      // recipe does not insert the identity SRQ into the IR (ADR 0097). The form with SRQ inserted
+      // is accepted too (it is the identity, so the numbers are the same).
       heads++;
       continue;
     }
@@ -128,9 +133,10 @@ export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel 
       `Gemma4QatPipeline: per_layer_model_projection の f32 linear が ${ordinary} 本（1本が必要）`,
     );
   }
-  // i2 は共有 head が必ず満たす（head は token embedding と同じ i2 initializer を使い、
-  // `heads !== 1` が既に 1 本を要求している）ので網羅条件から外す。i4 と i8 の同時存在は
-  // 公式 E2B / E4B の実測構成に基づく仮定（ADR 0097 追記 7）。
+  // i2 is always satisfied by the shared head (the head uses the same i2 initializer as the token
+  // embedding, and `heads !== 1` already requires exactly one), so it is left out of the coverage
+  // condition. The coexistence of i4 and i8 is an assumption based on the measured configuration of
+  // the official E2B / E4B (ADR 0097 addendum 7).
   if (!["i4", "i8"].every((dtype) => storages.has(dtype))) {
     throw new Error(
       `Gemma4QatPipeline: 量子化 linear の格納が固定 INT4 と INT8 を揃えていない` +
@@ -151,8 +157,8 @@ export const assertGemma4QatPle = (
         ` '${PLE_STORAGE[model]}' と違う`,
     );
   }
-  // 層数と次元の正本はグラフの `per_layer_inputs`（tokens の突合は `createGemma4Ple` が持つ —
-  // 同じ検査を 2 実装持たない）。
+  // The canonical layer count and dimension are the graph's `per_layer_inputs` (the tokens
+  // cross-check belongs to `createGemma4Ple` — the same check is not implemented twice).
   const shape = graph.inputs.find((input) => input.name === "per_layer_inputs")?.shape;
   if (index.layers !== shape?.[2]) {
     throw new Error(

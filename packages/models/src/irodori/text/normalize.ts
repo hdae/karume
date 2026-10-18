@@ -1,57 +1,63 @@
 /**
- * Irodori-TTS v4 の `normalize_text` 移植（生テキスト → トークナイザに渡す文字列）。
+ * Port of Irodori-TTS v4's `normalize_text` (raw text → the string passed to the tokenizer).
  *
- * 正本は上流 `irodori_tts/text_normalization.py` で、5 段を**この順に**通す:
- *   ① SIMPLE_REPLACE_MAP の逐次 `replace`
- *   ② REGEX_REPLACE_MAP の逐次 `sub`
- *   ③ `strip_outer_brackets`（対応する外側括弧を、全体を囲んでいる間だけ剥がし続ける）
- *   ④ NFKC
- *   ⑤ `...` → `…` / `..` → `…`
+ * The source of truth is upstream's `irodori_tts/text_normalization.py`, which applies 5 steps
+ * **in this order**:
+ *   (1) sequential `replace` of SIMPLE_REPLACE_MAP
+ *   (2) sequential `sub` of REGEX_REPLACE_MAP
+ *   (3) `strip_outer_brackets` (keeps stripping a matching outer bracket pair while it encloses the
+ *       whole text)
+ *   (4) NFKC
+ *   (5) `...` → `…` / `..` → `…`
  *
- * MUST: 順序そのものが観測できる（例: `①` は ④ の前に消えるので `1` にならない / 全角 `；`
- * は ② の削除規則をすり抜けて ④ で `;` になる / `....` は ⑤ の前段が先に食うので `….`）。
- * 段を入れ替えると例外も警告も出さずに別の文字列になるので、golden 33 ケースが順序を固定する。
+ * MUST: the order itself is observable (e.g. `①` disappears before (4), so it never becomes `1` /
+ * a fullwidth `；` slips past the deletion rule of (2) and becomes `;` in (4) / `....` becomes `….`
+ * because the first replacement of (5) consumes it first). Swapping steps yields a different string
+ * without any exception or warning, so the 33 golden cases pin the order.
  *
- * NFKC は `String.prototype.normalize("NFKC")` に委ねる（正本も Python の `unicodedata` で、
- * 互換分解は Unicode 標準そのもの）。両者の Unicode 版がずれると黙って結果が変わるため、
- * パリティ門が**全コードポイント**を掃引して差分表と突き合わせる。
+ * NFKC is delegated to `String.prototype.normalize("NFKC")` (the source of truth is Python's
+ * `unicodedata`, and compatibility decomposition is the Unicode standard itself). If the Unicode
+ * versions of the two drift, the result changes silently, so the parity check sweeps **every code
+ * point** and compares it against the difference table.
  */
 
 /**
- * ① 逐次 `replace`（正本の dict の順）。目に見えない / 紛らわしい文字は `\uXXXX` で書く —
- * 編集の途中で消えたり、○ ◯ 〇 のように見分けの付かない別字が混ざる。
+ * (1) Sequential `replace` (in the order of the canonical dict). Invisible / confusable characters
+ * are written as `\uXXXX` — otherwise they vanish during editing, or indistinguishable different
+ * characters get mixed in (such as U+25CB / U+25EF / U+3007, three different circles).
  */
 const SIMPLE_REPLACEMENTS: readonly (readonly [string, string])[] = [
   ["\t", ""],
   ["[n]", ""],
-  // 正本の `r"\[n\]"` は正規表現ではなく**リテラル**（`str.replace` に渡している）。
+  // The canonical `r"\[n\]"` is not a regular expression but a **literal** (it is passed to
+  // `str.replace`).
   ["\\[n\\]", ""],
-  ["\u3000", ""], // 全角空白。④ の前なので半角化ではなく削除される
-  ["\uFF1F", "?"], // ？
-  ["\uFF01", "!"], // ！
+  ["\u3000", ""], // ideographic space. Before (4), so it is deleted rather than turned halfwidth
+  ["\uFF1F", "?"], // fullwidth ？
+  ["\uFF01", "!"], // fullwidth ！
   ["\u2665", "\u2661"], // ♥ → ♡
   ["\u25CF", "\u25CB"], // ● → ○
   ["\u25EF", "\u25CB"], // ◯ → ○
-  ["\u3007", "\u25CB"], // 〇（漢数字ゼロ）→ ○
+  ["\u3007", "\u25CB"], // U+3007 ideographic number zero → ○
 ];
 
 /**
- * ② 逐次 `sub`（正本の dict の順）。
+ * (2) Sequential `sub` (in the order of the canonical dict).
  *
- * NOTE: `g` 付き正規表現をモジュールスコープに置いているが、`String.prototype.replace` は
- * 開始時に `lastIndex` を 0 に戻すので呼び出し間で状態を持たない（横断不変条件「全モジュール
- * 副作用ゼロ」の意味での可変状態にはならない）。
+ * NOTE: regular expressions with `g` sit at module scope, but `String.prototype.replace` resets
+ * `lastIndex` to 0 when it starts, so no state carries between calls (it is not mutable state in
+ * the sense of the cross-cutting invariant "every module is free of side effects").
  */
 const REGEX_REPLACEMENTS: readonly (readonly [RegExp, string])[] = [
   // ; ▼ ♀ ♂ 《 》 ≪ ≫ ①〜⑥
   [/[;\u25BC\u2640\u2642\u300A\u300B\u226A\u226B\u2460\u2461\u2462\u2463\u2464\u2465]/gu, ""],
-  // ダッシュ・罫線類（U+2010〜U+2015 は範囲）
+  // dashes and box-drawing lines (U+2010 to U+2015 as a range)
   [/[\u02D7\u2010-\u2015\u2043\u2212\u23AF\u23E4\u2500\u2501\u2E3A\u2E3B]/gu, ""],
-  [/[\uFF5E\u301C]/gu, "\u30FC"], // ～ 〜 → ー（長音）
-  [/\u2026{3,}/gu, "\u2026\u2026"], // … 3 つ以上のときだけ 2 つへ縮約
+  [/[\uFF5E\u301C]/gu, "\u30FC"], // ～ 〜 → U+30FC (prolonged sound mark)
+  [/\u2026{3,}/gu, "\u2026\u2026"], // 3 or more … collapse to 2, only then
 ];
 
-/** ③ が剥がす括弧の対（開き → 閉じ）。 */
+/** The bracket pairs that (3) strips (open → close). */
 const BRACKET_PAIRS: readonly (readonly [string, string])[] = [
   ["\u300C", "\u300D"], // 「」
   ["\u300E", "\u300F"], // 『』
@@ -61,24 +67,29 @@ const BRACKET_PAIRS: readonly (readonly [string, string])[] = [
 ];
 
 /**
- * ③ 対応する外側括弧を剥がす。剥がすのは**全体を囲んでいる**ときだけで、剥がせた場合は
- * もう一度先頭から試す（`「（あ）」` は 2 回剥がれる）。
+ * (3) Strips matching outer brackets. It strips only while the pair **encloses the whole text**, and
+ * after a successful strip it tries again from the start (`「（a）」` is stripped twice).
  *
- * MUST: 走査はコードポイント単位（正本は Python の str = コードポイント列）。UTF-16 単位で
- * 数えると、BMP 外の文字を含む入力で長さと添字がずれる。
+ * MUST: the scan goes by code points (the source of truth is a Python str = a code-point
+ * sequence). Counting UTF-16 units shifts the length and the indices for input with characters
+ * outside the BMP.
  *
- * MUST: 入力長に線形の時間で求める。正本の形（1 段剥がすたびに残り全体を走査して切り出す）を
- * そのまま写すと入れ子 n 段で二次時間になり、token 数の切り詰めは正規化の後なので病的な長さの
- * 入力がそのまま届く。そこで「同種の括弧だけを数えた対応」を種類ごとのスタックで 1 回だけ
- * 求める: 正本の「外側の開き括弧から数えた深さが末尾より前で 0 に戻らず、末尾でちょうど 0」は、
- * 開き括弧 `k` の対応相手がちょうど末尾 `n−1−k` であることと同値（`k` より前の開き括弧は
- * スタックで下にあるので、窓の外の文字は `k` の対応を変えない）。各段の判定は自分の窓にしか
- * 依らないので、外側から順に判定して最初に外れた段で止め、最後に 1 回だけ切り出す。
+ * MUST: it runs in time linear in the input length. Copying the canonical form as is (scan and
+ * slice the whole remainder for every layer stripped) is quadratic for n nested layers, and since
+ * the token-count truncation comes after normalization, input of pathological length arrives
+ * untouched. So "the matching that counts only brackets of the same kind" is computed once, with
+ * one stack per kind: the canonical "the depth counted from the outer opening bracket does not
+ * return to 0 before the end, and is exactly 0 at the end" is equivalent to the partner of opening
+ * bracket `k` being exactly the end `n−1−k` (the opening brackets before `k` are lower in the
+ * stack, so the characters outside the window do not change the match of `k`). Each layer's test
+ * depends only on its own window, so the layers are tested from the outside in, stopping at the
+ * first one that fails, and the text is sliced once at the end.
  */
 const stripOuterBrackets = (text: string): string => {
   const cps = Array.from(text);
   const n = cps.length;
-  // 開き括弧の位置 → 同種の括弧だけで数えた対応する閉じ括弧の位置。
+  // Position of an opening bracket → position of the matching closing bracket, counting only
+  // brackets of the same kind.
   const matchOf = new Map<number, number>();
   const stacks = BRACKET_PAIRS.map(() => [] as number[]);
   for (const [index, ch] of cps.entries()) {
@@ -92,25 +103,26 @@ const stripOuterBrackets = (text: string): string => {
     }
   }
   let layer = 0;
-  // 残りが 2 文字以上の間だけ試す（正本の `len(text) >= 2`）。
+  // Try only while at least 2 characters remain (the canonical `len(text) >= 2`).
   while (n - 2 * layer >= 2) {
     const last = n - 1 - layer;
     const pair = BRACKET_PAIRS.find(([open]) => open === cps[layer]);
-    // 途中で対応が閉じる（`「あ」と「い」`）か閉じない（`((a)`）なら、外側の 1 対は全体を
-    // 囲んでいない。
+    // If the match closes midway (`「a」と「b」`) or never closes (`((a)`), the outer pair does not
+    // enclose the whole text.
     if (pair === undefined || cps[last] !== pair[1] || matchOf.get(layer) !== last) break;
     layer += 1;
   }
   return cps.slice(layer, n - layer).join("");
 };
 
-/** 生テキスト → 正規化済みテキスト（正本 `normalize_text` と同値）。 */
+/** Raw text → normalized text (equivalent to the canonical `normalize_text`). */
 export const normalizeText = (text: string): string => {
   let out = text;
   for (const [from, to] of SIMPLE_REPLACEMENTS) out = out.replaceAll(from, to);
   for (const [pattern, to] of REGEX_REPLACEMENTS) out = out.replace(pattern, to);
   out = stripOuterBrackets(out);
   out = out.normalize("NFKC");
-  // MUST: `...` を先に食う（`....` は `….` になる — 逆順だと `……` になって別物）。
+  // MUST: consume `...` first (`....` becomes `….` — in the reverse order it would become `……`, a
+  // different string).
   return out.replaceAll("...", "…").replaceAll("..", "…");
 };

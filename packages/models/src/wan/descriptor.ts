@@ -1,10 +1,12 @@
 /**
- * Wan の世代の記述子 — 世代で違い、グラフ宣言から導けない値を世代ごとに 1 か所へ集める
- * （ADR 0121 決定 10）。潜在のチャネル数・タイル辺・グラフの入出力の空間比のようにグラフ宣言から
- * 導ける値はここに置かない（資産の宣言から読む）。
+ * Wan's generation descriptors — the values that differ between generations and cannot be derived
+ * from the graph declarations, gathered in one place per generation (ADR 0121 decision 10). Values
+ * derivable from the graph declarations, such as the latent channel count, the tile edge and the
+ * spatial ratio of a graph's input to its output, do not live here (they are read from the asset
+ * declarations).
  *
- * NOTE: `export` はパイプラインの内部と、テスト・gpu-lab のため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * NOTE: the `export`s are for the pipeline internals, the tests and gpu-lab (removed in 0.15) (not
+ * exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
 
 import {
@@ -16,63 +18,73 @@ import {
 } from "./latents.ts";
 
 /**
- * DiT のグラフ入力の形（ADR 0121 決定 3）。`"t2v"` = Wan2.1 の 5 本（`tokens`・`timesteps_proj`・
- * `encoder_hidden_states`・`rope_cos`・`rope_sin`）、`"ti2v"` = Wan2.2 TI2V の 7 本（5 本 +
- * `timesteps_proj_condition`・`condition_mask`）。
+ * The DiT's graph input form (ADR 0121 decision 3). `"t2v"` = Wan2.1's 5 inputs (`tokens`,
+ * `timesteps_proj`, `encoder_hidden_states`, `rope_cos`, `rope_sin`), `"ti2v"` = Wan2.2 TI2V's 7
+ * inputs (the 5 + `timesteps_proj_condition`, `condition_mask`).
  */
 export type WanDitInputForm = "t2v" | "ti2v";
 
 export type WanGenerationDescriptor = {
   /**
-   * VAE の前の逆正規化の統計（VAE の config にしか無い — IR にも配布資産にも入っていない・表は
-   * `latents.ts`）。
+   * The statistics for denormalization before the VAE (they exist only in the VAE config — in neither
+   * the IR nor the distribution assets; the tables are in `latents.ts`).
    */
   readonly latents: WanLatentStats;
-  /** 受理する寸法（要求の門と、全数をタイルで覆えるかを見る家族 admission の門が使う）。 */
+  /**
+   * The accepted sizes (used by the request check and by the family admission check that verifies
+   * every size can be covered by tiles).
+   */
   readonly acceptedSizes: readonly { readonly width: number; readonly height: number }[];
-  /** 受理するフレーム数の範囲（両端を含む・4n+1 だけ — VAE の時間圧縮）。 */
+  /** The accepted frame-count range (inclusive, 4n+1 only — the VAE's temporal compression). */
   readonly minFrames: number;
   readonly maxFrames: number;
   /**
-   * 要求が省いた寸法とフレーム数（受理集合の中）。配布形は宣言しない — step 数・guidance・shift の
-   * 既定は manifest の `pipelineConfig`（`config.ts`）。
+   * The size and frame count used when the request omits them (inside the accepted set). The
+   * distribution does not declare them — the defaults for step count, guidance and shift are the
+   * manifest's `pipelineConfig` (`config.ts`).
    */
   readonly defaults: { readonly frames: number; readonly width: number; readonly height: number };
-  /** 出力のフレームレート（上流の世代の事実で、ノブではない — manifest に入れない・ADR 0121 決定 8）。 */
+  /**
+   * The output frame rate (a fact of the upstream generation, not a knob — not put in the manifest;
+   * ADR 0121 decision 8).
+   */
   readonly fps: number;
   /**
-   * 上流の VAE の `patch_size`（ホストの unpatchify の倍率・無しは 1 — ADR 0121 決定 6）。空間の圧縮
-   * （グラフの入出力の空間比 × この倍率）の因子。出口が RGB である前提なら VAE の出口のチャネル数
-   * （3·p²）からも導けるが、上流の事実として持ち、admission で宣言との照合に使う
-   * （`tile-decode.ts` の `assertWanVaeMatchesGeneration`）。
+   * The upstream VAE's `patch_size` (the factor of the host unpatchify; 1 when absent — ADR 0121
+   * decision 6). A factor of the spatial compression (spatial ratio of the graph's input to output ×
+   * this factor). Assuming an RGB exit it could also be derived from the VAE exit's channel count
+   * (3·p²), but it is kept as an upstream fact and matched against the declaration at admission
+   * (`assertWanVaeMatchesGeneration` in `tile-decode.ts`).
    */
   readonly vaePatchSize: number;
   /**
-   * 上流の DiT の入力の形（TI2V の DiT は条件側の時刻と条件マスクを持つ）。`vaePatchSize` と同じく上流の
-   * 事実として持ち、admission でグラフ宣言との照合に使う（`dit-loop.ts` の `ditContract`）。
+   * The upstream DiT's input form (the TI2V DiT has a condition-side time and a condition mask). Like
+   * `vaePatchSize` it is kept as an upstream fact and matched against the graph declaration at
+   * admission (`ditContract` in `dit-loop.ts`).
    */
   readonly ditInputForm: WanDitInputForm;
 };
 
 /**
- * Wan2.1（T2V 1.3B）の記述子。
+ * The descriptor of Wan2.1 (T2V 1.3B).
  *
- * 受理集合（ADR 0118 決定 7 — 832×480 / 480×832 × フレーム数 4n+1 の 5〜81）。検収したのは
- * 832×480 の 33 フレーム（段 3 / 5 / 6）と 81 フレーム（段 8）、480×832 の VAE（段 5）。
+ * Accepted set (ADR 0118 decision 7 — 832×480 / 480×832 × 4n+1 frames, 5–81). Acceptance-tested:
+ * 33 frames at 832×480 (steps 3 / 5 / 6), 81 frames (step 8), and the VAE at 480×832 (step 5).
  *
- * 81 フレームの可否は DiT 段単独の VRAM だけで決まる — `pipeline.ts` の冒頭の NOTE の実測どおり DiT の
- * Session を畳んだ直後に確保が戻り、DiT 段と VAE 段は重ならない（切り替えの山 = DiT 段の山）。段 8 の
- * 実測（B570・81 フレーム 50 ステップの通し・fdinfo）で DiT 段の山は 7.31 GiB・VAE 段の山は 3.78 GiB
- * （ADR 0118「段 8 の結果」）。MUST: 拒む文言は上限（81）だけを言う（利用者に段の番号は意味を
- * 持たない）。
+ * Whether 81 frames fit is decided by the VRAM of the DiT stage alone — as measured in the NOTE at
+ * the top of `pipeline.ts`, the allocation comes back right after the DiT Session is folded, and the
+ * DiT and VAE stages do not overlap (peak at the switch = peak of the DiT stage). Step 8's
+ * measurement (B570, a full 81-frame 50-step run, fdinfo) gave a DiT stage peak of 7.31 GiB and a VAE
+ * stage peak of 3.78 GiB (ADR 0118 "Step 8 results"). MUST: the rejection message states only the
+ * limit (81) (step numbers mean nothing to users).
  *
- * 既定は最初の到達目標の 832×480・33 フレーム（受理集合の側の事実）。fps 16 と `patch_size` 無し（1）は
- * 上流の Wan2.1 の値。
+ * The default is the first target, 832×480 with 33 frames (a fact of the accepted set). fps 16 and no
+ * `patch_size` (1) are upstream Wan2.1's values.
  *
- * MUST: 受理集合を変えるときはモデルカード（`tools/export-recipes/wan/card.py` の `WAN_ACCEPTED_SIZES` /
- * `WAN_FRAMES`）と `tests/fixtures/wan-card-limits.json` も同じ値にする — カードは manifest に無い
- * この事実を写しで持つので、fixture を挟んだ両側のテスト（wan_pipeline_test.ts と recipe の
- * test_distribution.py）が片側だけの更新を赤にする。
+ * MUST: when changing the accepted set, change the model card (`WAN_ACCEPTED_SIZES` / `WAN_FRAMES` in
+ * `tools/export-recipes/wan/card.py`) and `tests/fixtures/wan-card-limits.json` to the same values —
+ * the card keeps a copy of this fact, which is not in the manifest, so the tests on both sides of the
+ * fixture (wan_pipeline_test.ts and the recipe's test_distribution.py) turn a one-sided update red.
  */
 export const WAN21_GENERATION: WanGenerationDescriptor = {
   latents: { mean: WAN_LATENTS_MEAN, std: WAN_LATENTS_STD },
@@ -89,34 +101,46 @@ export const WAN21_GENERATION: WanGenerationDescriptor = {
 };
 
 /**
- * Wan2.2（TI2V 5B）の記述子（1280×704 / 704×1280 × フレーム数 4n+1 の 5〜121 だけ — ADR 0121 の
- * 「追記（2026-10-05）: 受理寸法を公式の 2 寸法へ」）。
+ * The descriptor of Wan2.2 (TI2V 5B) (only 1280×704 / 704×1280 × 4n+1 frames, 5–121 — ADR 0121
+ * "Addendum (2026-10-05) — accepted sizes moved to the two official sizes").
  *
- * 受理寸法は公式実装の対応寸法（Wan2.2 の `SUPPORTED_SIZES` — 公式が 720P と呼ぶ 2 向き）だけ。pin した
- * Diffusers のパイプラインの既定 832×480 は公式実装の対応寸法の外で、実際に生成して視認すると 3 本（実用席
- * shift 3・参照席 shift 3・実用席 shift 5）とも絵が崩れた（太い輪郭線とベタ塗り）。1280×704 は実用席・shift 5
- * （同じ seed・プロンプト）で写実に出た。よって 832×480 / 480×832 は受理しない。段 5 の 832×480 系のタイル
- * 参照は受理寸法に依らない数値の照合として残る（タイル計画の入口 `planWanGenerationTiles` は受理集合を見ない）。
+ * The accepted sizes are only the sizes the official implementation supports (Wan2.2's
+ * `SUPPORTED_SIZES` — the two orientations the official code calls 720P). The pinned Diffusers
+ * pipeline's default 832×480 is outside them, and when actually generated and viewed all three runs
+ * (practical preset shift 3, reference preset shift 3, practical preset shift 5) broke (thick
+ * outlines and flat fills). 1280×704 came out photorealistic with the practical preset at shift 5
+ * (same seed and prompt). So 832×480 / 480×832 are not accepted. Stage 5's tile references at
+ * 832×480 remain as numeric comparisons that do not depend on the accepted sizes (the tile-planning
+ * entry `planWanGenerationTiles` does not look at the accepted set).
  *
- * 上限 121 フレームは公式実装（Wan2.2 の公式リポのサンプラ — ADR 0121 の上流調査 §4.1。Diffusers の `WanPipeline` の
- * 既定 81 とは別）の既定。開発機（RTX 3080 Ti・12 GiB・Deno）で 1280×704・50 ステップが実用席で完走し
- * （DiT の段の VRAM の山 11,361 MiB〈nvidia-smi・GPU 全体〉・物理容量との差 約 0.9 GiB）、RTX 5070 Ti の
- * Chrome でも完走した（ADR 0121 の追記「RTX 3080 Ti のレーンとフル verify」と「RTX 5070 Ti の Chrome」）。開発機の参照値（sha 行）は 2 ステップ × 121 フレームのケース
- * （`e2e_wan_ti2v_pipeline_test.ts` の opt-in）で取る。B570 級（Deno の総確保の天井 約 9.4 GiB〈9,600 MiB〉）で確かめた
- * 長さは 57 フレームまで（2 席とも 49 フレーム・実用席は 57 も完走）で、それを超える長さは非対応（docs/limitations.md）。
- * 非対応とするのは B570 で 57 を超える長さを回していないからで、入るかどうかの見込みは推測: ADR 0121 の容量の表が見積ったのは
- * 2 点だけで、81 フレームは実用席が入らず、121 フレームは実用席の DiT の診断値 10.64 GiB（3080 Ti の実測）が天井を超え、参照席も
- * DiT の診断値の外挿 9.16〜9.50 GiB に DiT 以外の確保を足すと超える。61〜77 と 85〜117 は見積りも無い。受理集合は機ごとでは
- * ないので、その機でも受理し、入らなければ実行の途中で落ちる。
+ * The limit of 121 frames is the default of the official implementation (the sampler of the official
+ * Wan2.2 repository — ADR 0121's upstream study §4.1; distinct from the default 81 of Diffusers'
+ * `WanPipeline`). On the development machine (RTX 3080 Ti, 12 GiB, Deno) 1280×704 with 50 steps
+ * completed with the practical preset (VRAM peak of the DiT stage 11,361 MiB (nvidia-smi, whole GPU),
+ * about 0.9 GiB below the physical capacity), and it also completed in Chrome on the RTX 5070 Ti
+ * (ADR 0121's addenda "RTX 3080 Ti lanes and full verify" and "RTX 5070 Ti Chrome"). The development
+ * machine's reference values (sha rows) come from the case of 2 steps × 121 frames (the opt-in in
+ * `e2e_wan_ti2v_pipeline_test.ts`). On the B570 class (Deno's total allocation ceiling about 9.4 GiB
+ * (9,600 MiB)) the verified length goes up to 57 frames (49 frames with both presets, 57 also
+ * completed with the practical preset), and longer lengths are unsupported (docs/limitations.md).
+ * They are unsupported because no length above 57 was run on the B570, and whether they fit is
+ * speculation: ADR 0121's capacity table estimated only two points — at 81 frames the practical
+ * preset does not fit, and at 121 frames the practical preset's DiT diag value of 10.64 GiB (measured
+ * on the 3080 Ti) exceeds the ceiling, and the reference preset also exceeds it once the non-DiT
+ * allocations are added to the extrapolated DiT diag value of 9.16–9.50 GiB. 61–77 and 85–117 have
+ * no estimate at all. The accepted set is not per machine, so such a machine accepts them too, and if
+ * they do not fit the run fails midway.
  *
- * 既定の 1280×704・33 フレームは利用者の裁定（2026-10-09 — ADR 0121 追記「段 7 の結果」）。B570 級の機（57 フレームまで）でも
- * 既定のまま動き、この開発機で 1 本 約 13 分。fps 24 と `patch_size` 2 は上流の Wan2.2 の値
- * （逆正規化の統計の表は `latents.ts`）。
+ * The default 1280×704 with 33 frames is the maintainer's ruling (2026-10-09 — ADR 0121 addendum
+ * "stage 7 results"). It runs with the defaults on a B570-class machine (up to 57 frames) too, and
+ * takes about 13 minutes per video on this development machine. fps 24 and `patch_size` 2 are
+ * upstream Wan2.2's values (the tables of denormalization statistics are in `latents.ts`).
  *
- * MUST: 受理集合を変えるときはモデルカード（`tools/export-recipes/wan/card.py` の `WAN22_ACCEPTED_SIZES` /
- * `WAN22_FRAMES`）と `tests/fixtures/wan-ti2v-card-limits.json` も同じ値にする — カードは manifest に無い
- * この事実を写しで持つので、fixture を挟んだ両側のテスト（wan_pipeline_test.ts と recipe の
- * test_distribution.py）が片側だけの更新を赤にする。
+ * MUST: when changing the accepted set, change the model card (`WAN22_ACCEPTED_SIZES` /
+ * `WAN22_FRAMES` in `tools/export-recipes/wan/card.py`) and `tests/fixtures/wan-ti2v-card-limits.json`
+ * to the same values — the card keeps a copy of this fact, which is not in the manifest, so the tests
+ * on both sides of the fixture (wan_pipeline_test.ts and the recipe's test_distribution.py) turn a
+ * one-sided update red.
  */
 export const WAN22_TI2V_GENERATION: WanGenerationDescriptor = {
   latents: { mean: WAN22_LATENTS_MEAN, std: WAN22_LATENTS_STD },

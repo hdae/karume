@@ -1,60 +1,73 @@
 /**
- * 母音検出の後処理 — グラフが出したロジット `[T20, 8]` を `.lab`（開始秒 終了秒 ラベル）へ畳む。
+ * Post-processing of vowel detection — folds the graph's logits `[T20, 8]` into a `.lab` (start
+ * seconds, end seconds, label).
  *
- * 段は 4 つで、順番も含めて仕様の正本は Python 側
- * `training/src/vowel_detector/postprocess.py`（上流 `@hdae/vowel-detector`・MIT）:
+ * There are 4 steps, and the canonical spec, order included, is the Python side
+ * `training/src/vowel_detector/postprocess.py` (upstream `@hdae/vowel-detector`, MIT):
  *
- * 1. log_softmax（ロジット → log 事後確率）
- * 2. **遷移ペナルティ付き Viterbi** — クラス切替に固定コストを課して短い断片を潰す
- * 3. **短区間マージ** — `MIN_DURATION_FRAMES` 未満の区間を、そこでの事後確率が高いほうの隣接
- *    クラスへ塗り替える（`pau` は知覚上重要な無音なので短くても残す）
- * 4. **cons 吸収** — 日本語のモーラ構造 C+V に基づき、子音区間を**後続**の母音/N へ吸収する
- *    （後続が母音/N でなければ先行区間へ）
+ * 1. log_softmax (logits → log posteriors)
+ * 2. **Viterbi with a transition penalty** — a fixed cost on class switches flattens short
+ *    fragments
+ * 3. **short-segment merge** — repaint segments shorter than `MIN_DURATION_FRAMES` with whichever
+ *    neighbouring class has the higher posterior there (`pau` is perceptually important silence and
+ *    stays even when short)
+ * 4. **cons absorption** — based on Japanese mora structure C+V, absorb a consonant segment into
+ *    the **following** vowel/N (into the preceding segment if the following one is not a vowel/N)
  *
- * ## `src/text/unigram.ts` の Viterbi とは別物（共通化しない）
+ * ## Not the same thing as the Viterbi in `src/text/unigram.ts` (not shared)
  *
- * あちらは「可変長の断片で文字列を覆う格子」の最短経路（辺の集合が入力ごとに変わる）で、
- * こちらは「固定 8 クラス × T フレームの格子」に一律の遷移ペナルティを置いた平滑化。状態も
- * 遷移も評価関数も共有しないので、名前が同じだけの 2 つを 1 本にしても引数で分岐するだけの
- * 抽象が増える。
+ * That one is the shortest path through "a lattice covering a string with variable-length pieces"
+ * (the set of edges changes per input); this one is a smoothing that puts a uniform transition
+ * penalty on "a lattice of a fixed 8 classes × T frames". They share neither states, transitions
+ * nor the scoring function, so merging the two that only share a name would add an abstraction
+ * that just branches on its arguments.
  *
- * ## 定数は Python の module 定数がそのまま正本
+ * ## The constants are canonical as Python's module constants
  *
- * 配布形の `pipelineConfig` には載せない（載せると「学習時と違う平滑化を宣言できる」席が
- * できるが、そこを動かして良い根拠が無い）。値の一致は
- * `tests/vowel_detector_host_test.ts` が上流 `feature_config.json` の写しと突き合わせる。
+ * They are not put in the distribution's `pipelineConfig` (doing so would create a field that "can
+ * declare a smoothing different from training", and there is no ground for moving that). The match
+ * of the values is checked by `tests/vowel_detector_host_test.ts` against a copy of upstream's
+ * `feature_config.json`.
  */
 
-/** リップシンクの 8 クラス。**並びが id**（グラフの出力列と 1:1）。 */
+/** The 8 lip-sync classes. **The order is the id** (1:1 with the graph's output columns). */
 export const LIPSYNC_CLASSES = ["a", "i", "u", "e", "o", "N", "pau", "cons"] as const;
 
-/** 1 フレームの長さ（秒）。グラフ出力は 20ms グリッド（入力 10ms × stride 2）。 */
+/** Length of one frame (seconds). The graph output is a 20ms grid (input 10ms × stride 2). */
 export const FRAME_SEC = 0.02;
-/** クラス切替のコスト（log 確率スケール — 大きいほど平滑）。 */
+/** Cost of a class switch (on the log-probability scale — larger is smoother). */
 const SWITCH_PENALTY = 4.0;
-/** これ未満の区間は隣接へ吸収する（2 = 40ms。3 にすると実在する短母音まで消える）。 */
+/**
+ * Segments shorter than this are absorbed into a neighbour (2 = 40ms. 3 would also erase real
+ * short vowels).
+ */
 const MIN_DURATION_FRAMES = 2;
 
 const CLASS_COUNT = LIPSYNC_CLASSES.length;
 const classId = (label: (typeof LIPSYNC_CLASSES)[number]): number => LIPSYNC_CLASSES.indexOf(label);
 const CONS_ID = classId("cons");
 const PAU_ID = classId("pau");
-/** cons を**後続へ**吸収してよい相手（母音と撥音）。 */
+/** The partners cons may be absorbed into **forward** (vowels and the moraic nasal). */
 const VOWEL_OR_N: readonly number[] = (["a", "i", "u", "e", "o", "N"] as const).map(classId);
 
-/** クラス列の連続区間 `[classId, start, end]`（start / end の単位は呼び出し側の倍率）。 */
+/**
+ * A run of the class sequence `[classId, start, end]` (start / end are in the unit of the caller's
+ * scale).
+ */
 type ClassRun = readonly [classId: number, start: number, end: number];
 
 /**
- * 格子 `[frames, 8]` に非有限値が 1 つでもあれば座標を添えて落とす。
+ * Fails with the coordinates if the lattice `[frames, 8]` contains even one non-finite value.
  *
- * MUST: 通してはならない。非有限値は例外にならず**書式として正当な `.lab`** に化ける —
- * NaN / `+Infinity` は log_softmax でその行の 8 要素すべてを NaN にし、`viterbiSmooth` の
- * 比較（`score[cls] > best` / `stays`）が軒並み偽になって backpointer がゼロ初期化のまま残る。
- * 結果は「発話全体が `a`」の 1 区間で、GPU の数値異常も壊れた資産もどこにも表面化しない。
- * 横断の不変条件「未対応・想定外は fail loudly（黙って近似しない）」の側に倒す。
+ * MUST: do not let it through. A non-finite value raises no exception and turns into **a `.lab`
+ * that is valid as a format** — NaN / `+Infinity` make all 8 elements of that row NaN in
+ * log_softmax, the comparisons in `viterbiSmooth` (`score[cls] > best` / `stays`) all become
+ * false, and the backpointer stays zero-initialised. The result is a single segment "the whole
+ * utterance is `a`", and neither the GPU's numerical fault nor the broken asset surfaces anywhere.
+ * This sides with the cross-cutting invariant "unsupported or unexpected input fails loudly (no
+ * silent approximation)".
  *
- * @param where エラー文言の接頭辞（関数名 + 何の格子か）。
+ * @param where prefix of the error message (function name + which lattice).
  */
 const assertFiniteGrid = (
   values: Float32Array<ArrayBuffer> | Float64Array<ArrayBuffer>,
@@ -73,7 +86,7 @@ const assertFiniteGrid = (
   }
 };
 
-/** `.lab` の 1 行（秒）。 */
+/** One line of a `.lab` (seconds). */
 export type LabSegment = {
   readonly start: number;
   readonly end: number;
@@ -81,13 +94,15 @@ export type LabSegment = {
 };
 
 /**
- * 遷移ペナルティ付き Viterbi でクラス列を平滑化する。
+ * Smooths the class sequence with a transition-penalty Viterbi.
  *
- * 遷移は「留まる（コスト 0）」か「**その時点の最良クラスから**移る（コスト
- * `SWITCH_PENALTY`）」の 2 択しかない — 全対全の遷移行列を持たないので O(T·C) で回る。
+ * A transition is one of only 2 choices: "stay (cost 0)" or "move **from the best class at that
+ * point** (cost `SWITCH_PENALTY`)" — there is no all-to-all transition matrix, so it runs in
+ * O(T·C).
  *
- * 門から名指しできるように出してある（漸化式の綴りが 1 箇所ずれても `.lab` は
- * 「それらしい別の区間割り」になるだけで、末端の文字列比較まで異常が見えない）。
+ * It is exported so checks can name it (if the spelling of the recurrence slips in one place, the
+ * `.lab` only becomes "a plausible but different segmentation", and the anomaly is invisible until
+ * the final string comparison).
  */
 export const viterbiSmooth = (
   logProbabilities: Float64Array<ArrayBuffer>,
@@ -100,7 +115,8 @@ export const viterbiSmooth = (
     );
   }
   if (frames < 1) throw new Error(`viterbiSmooth: フレーム数 ${frames} が 1 未満`);
-  // 公開関数なので単体でも叩ける（`logitsToSegments` 経由なら入口で既に検査済み）。
+  // It is a public function and can be called alone (through `logitsToSegments` the entry has
+  // already checked).
   assertFiniteGrid(logProbabilities, frames, "viterbiSmooth: log 事後確率");
 
   const score = new Float64Array(CLASS_COUNT);
@@ -137,7 +153,7 @@ export const viterbiSmooth = (
   return path;
 };
 
-/** クラス列 → 連続区間（`frameSec` を掛けた尺度で返す）。 */
+/** Class sequence → runs (returned on the scale multiplied by `frameSec`). */
 const toRuns = (path: Int32Array<ArrayBuffer>, frameSec: number): ClassRun[] => {
   const runs: ClassRun[] = [];
   let start = 0;
@@ -151,10 +167,11 @@ const toRuns = (path: Int32Array<ArrayBuffer>, frameSec: number): ClassRun[] => 
 };
 
 /**
- * `MIN_DURATION_FRAMES` 未満の区間を、その区間での事後確率が高いほうの隣接クラスへ塗り替える。
+ * Repaints segments shorter than `MIN_DURATION_FRAMES` with whichever neighbouring class has the
+ * higher posterior over the segment.
  *
- * 1 箇所塗るたびに走査をやり直す（塗り替えで run の構造そのものが変わるため）。収束するまで
- * 繰り返す。`pau` は短くても残す。
+ * The scan restarts after each repaint (a repaint changes the structure of the runs itself). This
+ * repeats until convergence. `pau` stays even when short.
  */
 const mergeShortRuns = (
   path: Int32Array<ArrayBuffer>,
@@ -164,7 +181,7 @@ const mergeShortRuns = (
   let changed = true;
   while (changed) {
     changed = false;
-    const runs = toRuns(merged, 1); // 倍率 1 = 区間の単位はフレーム
+    const runs = toRuns(merged, 1); // Scale 1 = the segment unit is frames
     for (let index = 0; index < runs.length; index += 1) {
       const [cls, start, end] = runs[index];
       if (end - start >= MIN_DURATION_FRAMES || cls === PAU_ID) continue;
@@ -193,11 +210,13 @@ const mergeShortRuns = (
 };
 
 /**
- * cons 区間を隣接区間へ吸収して 7 ラベル（a/i/u/e/o/N/pau）の列にする。
+ * Absorbs cons segments into neighbouring segments, giving a sequence of 7 labels
+ * (a/i/u/e/o/N/pau).
  *
- * 基本は**後続**へ吸収（モーラ構造 C+V なので、子音は次の母音の口形の一部として見える）。
- * 後続が母音/N でなければ先行区間を伸ばし、先頭でどちらも無い縮退ケース（発話全体が cons）は
- * `pau` に落とす。
+ * By default it is absorbed **forward** (with mora structure C+V, the consonant appears as part of
+ * the mouth shape of the next vowel). If the following segment is not a vowel/N the preceding
+ * segment is extended, and in the degenerate case at the start where neither exists (the whole
+ * utterance is cons) it falls to `pau`.
  */
 const absorbConsonants = (runs: readonly ClassRun[]): LabSegment[] => {
   const result: LabSegment[] = [];
@@ -207,7 +226,8 @@ const absorbConsonants = (runs: readonly ClassRun[]): LabSegment[] => {
     if (cls === CONS_ID) {
       const next = index + 1 < runs.length ? runs[index + 1][0] : undefined;
       if (next !== undefined && VOWEL_OR_N.includes(next)) {
-        // 後続区間の開始を前倒しする（連続する cons では最初の開始だけ覚える）。
+        // Move the start of the following segment earlier (for consecutive cons only the first
+        // start is remembered).
         pendingStart ??= start;
       } else if (result.length > 0) {
         const last = result[result.length - 1];
@@ -231,11 +251,11 @@ const absorbConsonants = (runs: readonly ClassRun[]): LabSegment[] => {
 };
 
 /**
- * ロジット `[frames, 8]`（行優先）→ `.lab` セグメント列。
+ * Logits `[frames, 8]` (row-major) → `.lab` segment sequence.
  *
- * log_softmax は最大値を引いてから通す（Python 側は素の `logsumexp` だが、`exp` の桁溢れを
- * 避けるこの形と log 事後確率としては同値 — 差は f64 の丸めぶんだけで、段 2 以降は
- * すべて**差**しか見ない）。
+ * log_softmax subtracts the maximum before applying (the Python side uses a plain `logsumexp`, but
+ * this form, which avoids `exp` overflow, is equivalent as log posteriors — the difference is only
+ * f64 rounding, and step 2 onwards look **only at differences**).
  */
 export const logitsToSegments = (
   logits: Float32Array<ArrayBuffer>,
@@ -266,10 +286,11 @@ export const logitsToSegments = (
 };
 
 /**
- * `.lab` 本文（`開始 終了 ラベル` の行を秒 7 桁で並べ、各行に改行を付ける）。
+ * The `.lab` body (lines of `start end label` with seconds to 7 digits, each followed by a
+ * newline).
  *
- * MUST: 7 桁固定（上流 `lab.py` の `f"{s.start:.7f}"`）。桁を変えると既存の `.lab` 消費側
- * （リップシンクのタイムライン）との突合が文字列比較で外れる。
+ * MUST: fixed at 7 digits (upstream `lab.py`'s `f"{s.start:.7f}"`). Changing the digits breaks the
+ * string-comparison match with existing `.lab` consumers (lip-sync timelines).
  */
 export const toLab = (segments: readonly LabSegment[]): string =>
   segments

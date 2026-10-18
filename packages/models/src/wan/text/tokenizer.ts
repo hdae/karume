@@ -1,22 +1,27 @@
 /**
- * Wan2.1 のプロンプト層 — 前処理（`prompt_clean` の鏡像）→ umT5 のトークナイザ（受理集合の検査を含む）
- * （ADR 0119 決定 1・2・4）。
+ * Wan2.1's prompt layer — preprocessing (a mirror of `prompt_clean`) → the umT5 tokenizer (including
+ * the accepted-set check) (ADR 0119 decisions 1, 2 and 4).
  *
- * トークナイザと受理集合の検査は単体の umT5 と共有の 1 本（`src/umt5/tokenizer.ts` の `Umt5Tokenizer` — 経路の
- * 正本・拒否の規則と順はそちらのモジュール doc）で、Wan はその前に上流の前処理を通すだけ。上流と違えるのは
- * 「黙って id を作らない」所で、どれも `ModelInputError`（入力起因）で拒む: 前処理が拒む入力
- * （`PromptCleanError` — `./prompt-clean.ts`）・語彙外の文字（決定 1）・本文中の追加語彙と空白の直後の `▁`
- * （U+2581 — 版で id 列が割れる形）・512 トークン超（決定 4）・1 トークン（空・空白だけで `</s>` だけ）。
- * 共有の検査の「U+0020 以外の空白と末尾の U+0020」は、前処理が空白を U+0020 1 個へ畳んで両端を落とすので
- * この経路では起きない。
+ * The tokenizer and the accepted-set check are the single implementation shared with the standalone
+ * umT5 (`Umt5Tokenizer` in `src/umt5/tokenizer.ts` — the source of truth for the path; the rejection
+ * rules and their order are in that module's doc); Wan only runs upstream's preprocessing before it.
+ * Where it departs from upstream is "never make ids silently", and each case is rejected with a
+ * `ModelInputError` (an input error): input the preprocessing rejects (`PromptCleanError` —
+ * `./prompt-clean.ts`), out-of-vocabulary characters (decision 1), added tokens in the text and `▁`
+ * right after whitespace (U+2581 — forms whose id sequence splits between versions), more than 512
+ * tokens (decision 4), and 1 token (empty or whitespace-only, giving only `</s>`). The shared check's
+ * "whitespace other than U+0020, and a trailing U+0020" cannot happen on this path, because the
+ * preprocessing collapses whitespace into a single U+0020 and strips both ends.
  *
- * 受理した入力の id 列は、transformers 5.14.1 と `tokenizer.json` の 2 経路のどちらとも一致する
- * （recipe が fixture の生成時に確かめ、`wan_text_tokenizer_test.ts` が両方と突き合わせる）。
+ * The id sequence of an accepted input matches both paths, transformers 5.14.1 and `tokenizer.json`
+ * (the recipe confirms this when generating the fixture, and `wan_text_tokenizer_test.ts` compares
+ * with both).
  *
- * 資産（系列 `outputs/series/wan2.1-umt5-tokenizer/tokenizer.json` — 配布形では Wan の manifest の資産
- * `umt5_tokenizer`）は
- * 語彙・スコア・追加語彙・空白集合と前処理の表（`promptClean`）を 1 本に持つ。同じ recipe の
- * 1 回の実行で焼くので、トークナイザと前処理が別々に古びない。I/O は持たない（取得は hub の責務）。
+ * The asset (series `outputs/series/wan2.1-umt5-tokenizer/tokenizer.json` — in the distribution, the
+ * asset `umt5_tokenizer` of Wan's manifest) holds the vocabulary, scores, added tokens, whitespace set
+ * and the preprocessing tables (`promptClean`) in one file. One run of the same recipe writes them,
+ * so the tokenizer and the preprocessing cannot go stale separately. It does no I/O (fetching is the
+ * hub's job).
  */
 
 import { asRecord, asString } from "../../text/asset-gates.ts";
@@ -25,22 +30,23 @@ import { UMT5_MIN_TOKENS } from "../../umt5/relative-position.ts";
 import { Umt5Tokenizer } from "../../umt5/tokenizer.ts";
 import { cleanPrompt, parsePromptCleanTables, type PromptCleanTables } from "./prompt-clean.ts";
 
-/** 資産の形式の版（recipe の `ASSET_FORMAT`）。 */
+/** The version of the asset format (the recipe's `ASSET_FORMAT`). */
 export const WAN_TOKENIZER_FORMAT = "karume-wan-umt5-tokenizer/1";
 
 /**
- * 受理集合の下限（umT5 のグラフの有効長の下限 `UMT5_MIN_TOKENS` の別名 — ADR 0119 決定 4。値の正本は
- * `src/umt5/relative-position.ts`）。
+ * The lower limit of the accepted set (an alias of `UMT5_MIN_TOKENS`, the lower limit of the umT5
+ * graph's valid length — ADR 0119 decision 4. The value's source of truth is
+ * `src/umt5/relative-position.ts`).
  */
 export const WAN_PROMPT_MIN_TOKENS = UMT5_MIN_TOKENS;
 
-/** Wan のトークナイザ資産を読んだもの。 */
+/** Wan's tokenizer asset, parsed. */
 export type WanTokenizerAssets = {
   readonly t5: T5Tables;
   readonly promptClean: PromptCleanTables;
 };
 
-/** プロンプト 1 本を umT5 の id 列にする。 */
+/** Turns one prompt into a umT5 id sequence. */
 export class WanPromptEncoder {
   readonly #promptClean: PromptCleanTables;
   readonly #tokenizer: Umt5Tokenizer;
@@ -50,22 +56,24 @@ export class WanPromptEncoder {
     this.#tokenizer = new Umt5Tokenizer(assets.t5);
   }
 
-  /** id 列の最大長（`</s>` を含む — 上流の `max_sequence_length`）。 */
+  /** The maximum length of the id sequence (including `</s>` — upstream's `max_sequence_length`). */
   get maxLength(): number {
     return this.#tokenizer.maxLength;
   }
 
-  /** 前処理だけ（上流 `prompt_clean` の出力と同じ文字列）。 */
+  /** Preprocessing only (the same string as the output of upstream `prompt_clean`). */
   clean(prompt: string, label: string = "プロンプト"): string {
     return cleanPrompt(this.#promptClean, prompt, label);
   }
 
   /**
-   * 前処理 → 符号化 → 受理集合の検査。i32 の id 列（末尾は `</s>`・長さは 2〜`maxLength`）。
+   * Preprocessing → encoding → accepted-set check. An i32 id sequence (ending in `</s>`, length 2 to
+   * `maxLength`).
    *
-   * 拒否の順は recipe の fixture の生成と同じ: 前処理 → 追加語彙 → 空白の直後の `▁` →
-   * 語彙外 / 上限超え（先頭から積んで先に当たった方）→ 下限割れ（前処理の後は共有の 1 本 —
-   * `Umt5Tokenizer.tokenize`）。
+   * The rejection order is the same as in the recipe's fixture generation: preprocessing → added
+   * tokens → `▁` right after whitespace → out of vocabulary / over the limit (whichever is hit first
+   * while accumulating from the start) → under the lower limit (after preprocessing it is the shared
+   * implementation — `Umt5Tokenizer.tokenize`).
    */
   encode(prompt: string, label: string = "プロンプト"): Int32Array<ArrayBuffer> {
     return this.#tokenizer.tokenize(this.clean(prompt, label), label);
@@ -73,8 +81,9 @@ export class WanPromptEncoder {
 }
 
 /**
- * 資産 JSON（`JSON.parse` 済み）を表に変換する。外部境界なので構造を検査してから使う
- * （`fromPretrained(ref)` は任意の repo を指せる — `src/text/asset-gates.ts` の前提）。
+ * Converts the asset JSON (already `JSON.parse`d) into tables. It is an external boundary, so the
+ * structure is checked before use (`fromPretrained(ref)` can point at any repo — the premise of
+ * `src/text/asset-gates.ts`).
  */
 export const parseWanTokenizerAsset = (
   raw: unknown,
@@ -83,7 +92,8 @@ export const parseWanTokenizerAsset = (
   const obj = asRecord(raw, label);
   const format = asString(obj["format"], `${label}.format`);
   if (format !== WAN_TOKENIZER_FORMAT) {
-    // 知らない版を黙って読まない（欄の意味が変わっていても例外にならず id 列だけが変わる）。
+    // Do not read an unknown version silently (if a field's meaning changed, there would be no
+    // exception and only the id sequence would change).
     throw new Error(`${label}: 形式 ${format} を読めない（${WAN_TOKENIZER_FORMAT} だけを読む）`);
   }
   return {

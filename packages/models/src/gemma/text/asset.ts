@@ -1,37 +1,40 @@
 /**
- * Gemma 系トークナイザ資産（compile 済み）の受理と解釈。
+ * Acceptance and interpretation of the Gemma tokenizer asset (compiled).
  *
- * 配布形は上流の `tokenizer.json`（32.2MB）ではなく、export recipe が畳んだ小さな JSON
- * （`tools/export-recipes/_shared/gemma_tokenizer.py` — ADR 0084 決定 1）。**取得は hub の
- * 責務**なので、ここはバイト列を受けるだけで I/O を持たない。
+ * The distribution is not upstream's `tokenizer.json` (32.2 MB) but a small JSON the export recipe
+ * folds it into (`tools/export-recipes/_shared/gemma_tokenizer.py` — ADR 0084 decision 1).
+ * **Fetching is hub's responsibility**, so this module only receives bytes and does no I/O.
  *
- * ここが**ファミリ側**にあるのは、受理 schema と特殊トークン集合が資産ごとに別だから
- * （ADR 0084 決定 2）。実装（`src/text/bpe.ts` / `src/text/detokenizer.ts`）は gemma4 と
- * EmbeddingGemma で共用できるが、**資産は共用できない**: merges はビット同一でも語彙は
- * 6,206 スロットで綴りが違い、追加語彙は 24 本 vs 6,415 本、post_processor も別
- * （ADR 0084 Context 1）。
+ * It lives **on the family side** because the acceptance schema and the special-token set differ
+ * per asset (ADR 0084 decision 2). The implementation (`src/text/bpe.ts` /
+ * `src/text/detokenizer.ts`) can be shared by gemma4 and EmbeddingGemma, but **the assets cannot**:
+ * the merges are bit-identical but the vocabulary differs in spelling in 6,206 slots, the added
+ * vocabulary is 24 vs 6,415 entries, and the post_processor differs too (ADR 0084 Context 1).
  *
- * MUST: `fromPretrained(ref)` は任意の repo を指せるので、資産 JSON は**信用できない外部
- * 入力**として扱う。畳んだ資産は上流 JSON を持たないため、compile が確かめた構成を
- * {@link GemmaTokenizerSpec} として**宣言**し、ここで exact-match する（宣言が違う資産は
- * 別のトークナイザなので、読まずに落とす）。
+ * MUST: `fromPretrained(ref)` can point at any repo, so the asset JSON is treated as **untrusted
+ * external input**. The folded asset carries no upstream JSON, so the configuration the compile
+ * step checked is **declared** as {@link GemmaTokenizerSpec} and exact-matched here (an asset with
+ * a different declaration is a different tokenizer, so it is rejected without being read).
  */
 
 import { assertAllowedKeys } from "../../config/readers.ts";
 import { assertUniqueLines, setUnique } from "../../text/asset-gates.ts";
 import { type BpeModel, createBpeModel } from "../../text/bpe.ts";
 
-/** 資産 schema の版（知らない版は読まない）。 */
+/** Version of the asset schema (unknown versions are not read). */
 const ASSET_FORMAT = "karume-gemma-tokenizer/1";
 
-/** compile が確かめた上流構成の宣言（綴りは compile 台本と 1 対 1）。 */
+/**
+ * Declaration of the upstream configuration the compile step checked (spellings 1:1 with the
+ * compile script).
+ */
 const SPEC_NORMALIZER = "replace-space-with-metaspace";
 const SPEC_PRE_TOKENIZER = "split-space-merged-with-previous";
 const SPEC_DECODER = "metaspace-byte-fallback-fuse";
 
 /**
- * 資産の欄（書き手 `_shared/gemma_tokenizer.py` の `asset_payload` / `spec_of` と 1 対 1）。
- * `source` は出所記録で、読み手は解釈しない。
+ * Asset fields (1:1 with `asset_payload` / `spec_of` of the writer `_shared/gemma_tokenizer.py`).
+ * `source` is a provenance record and the reader does not interpret it.
  */
 const ASSET_KEYS = [
   "format",
@@ -49,29 +52,34 @@ const ASSET_KEYS = [
 ] as const;
 const SPEC_KEYS = ["normalizer", "preTokenizer", "decoder", "postProcessor"] as const;
 
-/** SentencePiece の空白置換文字（U+2581）。normalizer と decoder の両方が使う。 */
+/**
+ * SentencePiece's space replacement character (U+2581). Used by both the normalizer and the
+ * decoder.
+ */
 export const METASPACE = "▁";
 
 /**
- * post_processor 相当（実資産の 2 形）。
+ * The post_processor equivalent (the two forms in real assets).
  *
- * - `none` — 何も足さない（gemma4。`<bos>` を付けるのは chat 関数だけ — ADR 0084 決定 5）
- * - `bos-eos` — `<bos>` … `<eos>` で挟む（EmbeddingGemma）
+ * - `none` — adds nothing (gemma4; only the chat function adds `<bos>` — ADR 0084 decision 5)
+ * - `bos-eos` — wraps in `<bos>` … `<eos>` (EmbeddingGemma)
  */
 export type GemmaPostProcessor = "none" | "bos-eos";
 
-/** 資産が宣言する上流構成。 */
+/** The upstream configuration the asset declares. */
 export type GemmaTokenizerSpec = {
   readonly postProcessor: GemmaPostProcessor;
 };
 
-/** 解釈済みの資産（{@link parseGemmaTokenizerAsset} の出力・テストは直接組む）。 */
+/**
+ * The interpreted asset (the output of {@link parseGemmaTokenizerAsset}; tests build it directly).
+ */
 export type GemmaTokenizerAssets = {
   readonly spec: GemmaTokenizerSpec;
   readonly model: BpeModel;
-  /** 追加語彙（正規化の**前**に leftmost-longest で切り出される）。 */
+  /** Added vocabulary (cut out leftmost-longest **before** normalization). */
   readonly addedTokens: ReadonlyMap<string, number>;
-  /** `special: true` の追加語彙の id（復号時の skip 対象）。 */
+  /** ids of the added vocabulary with `special: true` (skipped when decoding). */
   readonly specialIds: ReadonlySet<number>;
   readonly unkId: number;
   readonly bosId: number;
@@ -85,7 +93,10 @@ const asRecord = (value: unknown, label: string): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 
-/** 欄を `Object.hasOwn` 経由で引く（欠落は「無い」で落とす — 型の文言に化かさない）。 */
+/**
+ * Reads a field through `Object.hasOwn` (a missing field fails as "missing" — not disguised as a
+ * type message).
+ */
 const readField = (record: Record<string, unknown>, key: string, where: string): unknown => {
   if (!Object.hasOwn(record, key)) throw new Error(`${where}.${key}: 無い`);
   return record[key];
@@ -96,7 +107,7 @@ const asString = (value: unknown, label: string): string => {
   return value;
 };
 
-/** i32 の上限（id は最終的に `Int32Array` としてグラフへ渡る — ADR 0009）。 */
+/** The i32 limit (ids finally reach the graph as an `Int32Array` — ADR 0009). */
 const MAX_ID = 2147483647;
 
 const asId = (value: unknown, label: string): number => {
@@ -111,7 +122,7 @@ const asArray = (value: unknown, label: string): unknown[] => {
   return value;
 };
 
-/** 宣言された構成を exact-match する（1 欄でも違えば別のトークナイザ）。 */
+/** Exact-matches the declared configuration (one differing field means a different tokenizer). */
 const parseSpec = (raw: unknown, label: string): GemmaTokenizerSpec => {
   const spec = asRecord(raw, label);
   assertAllowedKeys(spec, SPEC_KEYS, label);
@@ -134,11 +145,11 @@ const parseSpec = (raw: unknown, label: string): GemmaTokenizerSpec => {
   return { postProcessor: post };
 };
 
-/** `左 右` の行を id 対 + rank（行番号）へ。 */
+/** Lines of `left right` → id pair + rank (line number). */
 const parseMerges = (raw: unknown, count: unknown, label: string): [number, number, number][] => {
   const text = asString(raw, label);
-  // MUST: 件数を突き合わせる。merges が欠けても BPE は「見つからないので結合しない」だけで
-  // **落ちない** — 分割が変わって id 列が静かに別物になる。
+  // MUST: check the count. With merges missing, BPE only "does not merge what it cannot find" and
+  // **does not fail** — the split changes and the id sequence quietly becomes something else.
   const want = asId(count, `${label}Count`);
   const lines = text === "" ? [] : text.split("\n");
   if (lines.length !== want) {
@@ -160,8 +171,9 @@ const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
   for (const [index, entry] of asArray(raw, label).entries()) {
     const pair = asArray(entry, `${label}[${index}]`);
     if (pair.length !== 2) throw new Error(`${label}[${index}]: [綴り, id] でない`);
-    // NOTE: 語彙の行数では縛らない — 追加語彙は語彙表の**外**へ採番されうる
-    // （EmbeddingGemma の `<image_soft_token>` は id 262144 / 語彙 262,144 行）。
+    // NOTE: not bounded by the vocabulary row count — added vocabulary may be numbered **outside**
+    // the vocabulary table (EmbeddingGemma's `<image_soft_token>` is id 262144 / 262,144 vocabulary
+    // rows).
     setUnique(
       out,
       asString(pair[0], `${label}[${index}]`),
@@ -172,21 +184,23 @@ const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
   return out;
 };
 
-/** 資産 JSON（解析済み）を資産表へ。 */
+/** Asset JSON (parsed) → asset tables. */
 const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
   const asset = asRecord(raw, "tokenizer");
   const format = asString(readField(asset, "format", "tokenizer"), "tokenizer.format");
   if (format !== ASSET_FORMAT) {
     throw new Error(`tokenizer.format: ${JSON.stringify(ASSET_FORMAT)} でない（${format}）`);
   }
-  // 版の門の後に置く — 欄の増えた新版は「未知キー」でなく「版が違う」で落とす。
+  // Placed after the version check — a newer version with more fields fails as "wrong version", not
+  // "unknown key".
   assertAllowedKeys(asset, ASSET_KEYS, "tokenizer");
   const spec = parseSpec(readField(asset, "spec", "tokenizer"), "tokenizer.spec");
 
   const vocabLines = asArray(readField(asset, "vocab", "tokenizer"), "tokenizer.vocab").map(
     (token, index) => asString(token, `tokenizer.vocab[${index}]`),
   );
-  // 行番号 = id なので、重複は「例外にならない配布破損」（先の id が引けなくなる）。
+  // Line number = id, so a duplicate is "distribution corruption that raises no exception" (the
+  // earlier id becomes unreachable).
   assertUniqueLines(vocabLines, "tokenizer.vocab");
 
   const byteIds = asArray(readField(asset, "byteIds", "tokenizer"), "tokenizer.byteIds").map(
@@ -206,10 +220,11 @@ const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
     readField(asset, "addedTokens", "tokenizer"),
     "tokenizer.addedTokens",
   );
-  // MUST: 追加語彙は「綴り→id」と「id→綴り」の両向きで整合させる。綴りの重複は
-  // `parseAddedTokens` が落とすが、id の重複と、語彙内の id を別の綴りで使う形は例外に
-  // ならない — encode はその id を返し、decode は追加語彙側の綴りを返すので、資産の破損が
-  // 推論時に別の token へ化ける。語彙の外への採番（EmbeddingGemma）は従来どおり受ける。
+  // MUST: the added vocabulary is kept consistent in both directions, "spelling → id" and "id →
+  // spelling". Duplicate spellings are rejected by `parseAddedTokens`, but duplicate ids and an id
+  // in the vocabulary used with a different spelling raise no exception — encode returns that id
+  // and decode returns the added-vocabulary spelling, so asset corruption turns into a different
+  // token at inference. Numbering outside the vocabulary (EmbeddingGemma) is accepted as before.
   const addedIds = new Set<number>();
   for (const [token, id] of addedTokens) {
     if (addedIds.has(id)) {
@@ -230,8 +245,9 @@ const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
     "tokenizer.specialIds",
   ).entries()) {
     const specialId = asId(id, `tokenizer.specialIds[${index}]`);
-    // 特殊トークンは追加語彙の部分集合（正本の `is_special_token` も追加語彙側を見る）。
-    // 外れた id を通すと「skip されるはずのトークンが本文に出る / 出ないはずが消える」。
+    // Special tokens are a subset of the added vocabulary (the reference's `is_special_token` also
+    // looks at the added-vocabulary side). Letting a stray id through makes "a token that should be
+    // skipped appear in the text / one that should appear disappear".
     if (!addedIds.has(specialId)) {
       throw new Error(`tokenizer.specialIds[${index}]: id ${specialId} が追加語彙に無い`);
     }
@@ -254,7 +270,7 @@ const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
   };
 };
 
-/** 取得済みバイト列（manifest の `tokenizer`）から資産表を組む。 */
+/** Builds the asset tables from the fetched bytes (the manifest's `tokenizer`). */
 export const parseGemmaTokenizerAsset = (bytes: Uint8Array<ArrayBuffer>): GemmaTokenizerAssets => {
   let text: string;
   try {

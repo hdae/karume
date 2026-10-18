@@ -1,92 +1,97 @@
 /**
- * Wan2.1 の動画 VAE の **chunk グラフ 2 本**（`vae_decoder_first` / `vae_decoder_next`）を、常駐の
- * 因果キャッシュで回すホスト側（ADR 0118 決定 2 と追記 2026-10-02）。タイル 1 枚ぶんの chunk 列まで
- * を持つ — タイル計画・ブレンド・貼り付けとクランプは段 5 の層。
+ * The host side that runs Wan2.1's video VAE as **two chunk graphs** (`vae_decoder_first` /
+ * `vae_decoder_next`) with a resident causal cache (ADR 0118 decision 2 and the addendum of
+ * 2026-10-02). It covers up to the chunk sequence of one tile — tile planning, blending, pasting and
+ * the clamp are the step 5 layer.
  *
- * ## グラフの取り決め（recipe `tools/export-recipes/wan/vae_patch.py` が書く形）
+ * ## Graph contract (the form written by recipe `tools/export-recipes/wan/vae_patch.py`)
  *
- * - 入力: 潜在 1 フレーム `latent [C,1,t,t]`（逆正規化 `z / (1/std) + mean` はホスト —
- *   `latents.ts`）と cache `cache_NN [Cin,2,h,w]`（NN は上流の `feat_idx` の順）。
- * - 出力: クランプ前のフレーム（first は `[Cs,1,8t,8t]`・next は `[Cs,4,8t,8t]` — Cs は出口の
- *   チャネル数で、宣言から読む〈{@link WanVaeChunkLayout.sampleChannels}・Wan2.1 は RGB の 3〉）と、
- *   更新後の cache（**入力と同じ順** — 出力 1+k が cache 入力 k の更新後）。
- * - first は upsample3d の `time_conv` の cache を持たない（最初の chunk では走らない — 上流の
- *   `'Rep'`）。その cache はタイルの頭のゼロのまま next の 1 回目が読む。
+ * - Inputs: one latent frame `latent [C,1,t,t]` (the de-normalization `z / (1/std) + mean` is on the
+ *   host — `latents.ts`) and the caches `cache_NN [Cin,2,h,w]` (NN in upstream's `feat_idx` order).
+ * - Outputs: the pre-clamp frames (first `[Cs,1,8t,8t]`, next `[Cs,4,8t,8t]` — Cs is the exit channel
+ *   count, read from the declaration ({@link WanVaeChunkLayout.sampleChannels}; RGB's 3 for Wan2.1))
+ *   and the updated caches (**in the same order as the inputs** — output 1+k is the update of cache
+ *   input k).
+ * - first has no cache for upsample3d's `time_conv` (it does not run in the first chunk — upstream's
+ *   `'Rep'`). That cache stays at the tile-head zeros and is read by the first run of next.
  *
- * タイル辺 `t` と cache の形はここに literal で置かず、開いた資産のグラフ宣言から導く
- * （{@link wanVaeChunkLayout} — タイル辺の差し替えを配布物だけで済ませる。決定 2）。
+ * The tile edge `t` and the cache shapes are not literals here; they are derived from the opened
+ * asset's graph declarations ({@link wanVaeChunkLayout} — so a different tile edge needs only a new
+ * distribution. Decision 2).
  *
- * ## 1 タイル = 1 batch・フレームだけを読み戻す（追記 2026-10-02 の手順）
+ * ## One tile = one batch, read back only the frames (the procedure of the 2026-10-02 addendum)
  *
- * `Session.run` / `enqueueRead` は全グラフ出力（cache 30〜32 本・約 0.56〜0.58 GiB）を読み戻すので
- * **使わない** MUST NOT。手順は `beginBatch` → first を `enqueue({ copyOutputs })` → next を
- * chunk 数 −1 回 → `finishAndRead({ フレームの常駐 })`。cache の出力は `copyOutputs` で同じ常駐へ
- * 写す（入力に束ねた常駐を写し先にも使う — 写しは run の全 dispatch の後に積まれる FIFO なので、
- * 読んでから上書きする順が保たれる。ADR 0054 決定 3）。フレームの常駐は chunk ごとに別に持つ
- * （写しは区間の FIFO で積まれ、読み戻しは決着時に 1 度だけ走るので、同じ常駐へ写すと最後の
- * chunk しか残らない）。
+ * `Session.run` / `enqueueRead` read back every graph output (30–32 caches, about 0.56–0.58 GiB), so
+ * they MUST NOT be used. The procedure is `beginBatch` → first with `enqueue({ copyOutputs })` → next
+ * (chunk count − 1) times → `finishAndRead({ frame residents })`. The cache outputs are copied to the
+ * same residents with `copyOutputs` (the residents bound as inputs are also the copy targets — the
+ * copies are queued in FIFO after all dispatches of the run, so read-then-overwrite order is kept. ADR
+ * 0054 decision 3). The frame residents are held separately per chunk (copies are queued in the span's
+ * FIFO and the read-back runs only once at settlement, so copying to the same resident would keep only
+ * the last chunk).
  *
- * ## cache のゼロ化（タイルの頭）
+ * ## Zeroing the caches (at the tile head)
  *
- * first の cache 入力（ゼロであることが因果パディングの意味）と `time_conv` の 2 本（first が
- * 書かず next の 1 回目が読む）の**全部**がゼロである必要がある — 絞り込める対象は無い。
- * runtime の `ResidentTensor` には GPU 側でゼロを書く口（`clearBuffer`）が無いので、
- * `ResidentTensor.write`（`queue.writeBuffer`）でホストからゼロを書く。タイル 32 で 1 タイル
- * 0.58 GiB のホスト書き込みで、B570（ReBAR）では staging が VRAM の heap に載る（ADR 0118
- * 決定 2 が避けたいとした形）。GPU 側でゼロを書く口を足すかは runtime の公開面の判断（未決）。
+ * The cache inputs of first (being zero is what causal padding means) and the two of `time_conv`
+ * (first does not write them, the first run of next reads them) **all** need to be zero — there is
+ * nothing to narrow down. The runtime's `ResidentTensor` has no entry point for writing zeros on the
+ * GPU side (`clearBuffer`), so zeros are written from the host with `ResidentTensor.write`
+ * (`queue.writeBuffer`). With tile 32 that is 0.58 GiB of host writes per tile, and on the B570 (ReBAR)
+ * the staging sits in the VRAM heap (the form ADR 0118 decision 2 wanted to avoid). Whether to add a
+ * GPU-side zeroing entry point is a decision about the runtime's public surface (open).
  */
 
 import type { BatchScope, GpuContext, ResidentTensor, Session, Tensor } from "@karume/runtime";
 import type { GraphOwner } from "../hub/components.ts";
 
-/** 潜在の入力名（recipe の forward の引数名がそのまま IR の入力名になる）。 */
+/** The latent input name (the recipe's forward argument name becomes the IR input name as is). */
 export const WAN_VAE_LATENT_INPUT = "latent";
 
-/** cache の入力名（`cache_` + 上流の `feat_idx` の 2 桁）。 */
+/** Cache input names (`cache_` + two digits of upstream's `feat_idx`). */
 const CACHE_INPUT = /^cache_\d{2}$/;
 
-/** cache が持ち越すフレーム数（上流の `CACHE_T`）。 */
+/** The number of frames a cache carries over (upstream's `CACHE_T`). */
 const CACHE_FRAMES = 2;
 
-/** first / next の chunk が出すフレーム数（時間 upsample 2 段 = 4 倍・最初の chunk は 1 枚）。 */
+/** Frames produced by the first / next chunks (two temporal upsamples = 4×; the first gives 1). */
 const FIRST_FRAMES = 1;
 const NEXT_FRAMES = 4;
 
-/** 要素あたりのバイト数（意味論 dtype は全て 4 バイト — ADR 0009）。 */
+/** Bytes per element (every semantic dtype is 4 bytes — ADR 0009). */
 const BYTES_PER_ELEMENT = 4;
 
-/** chunk グラフの宣言が取り決め（このモジュールの doc）から外れた。 */
+/** A chunk graph declaration deviates from the contract (this module's doc). */
 export class WanVaeChunkError extends Error {
   override readonly name = "WanVaeChunkError";
 }
 
-/** chunk グラフ 1 本の入出力（検査済み）。 */
+/** The inputs / outputs of one chunk graph (checked). */
 export type WanVaeChunkGraph = {
-  /** cache の入力名（グラフ入力の順）。 */
+  /** Cache input names (in graph input order). */
   readonly caches: readonly string[];
-  /** フレームの出力名。 */
+  /** The frame output name. */
   readonly frameOutput: string;
-  /** 更新後の cache の出力名（`caches[k]` の更新後が `cacheOutputs[k]`）。 */
+  /** Output names of the updated caches (the update of `caches[k]` is `cacheOutputs[k]`). */
   readonly cacheOutputs: readonly string[];
-  /** フレームの形 `[Cs, T, 8t, 8t]`（T は first 1・next 4）。 */
+  /** The frame shape `[Cs, T, 8t, 8t]` (T is 1 for first, 4 for next). */
   readonly frameShape: readonly number[];
 };
 
-/** chunk グラフ 2 本の取り決め（開いた資産のグラフ宣言から導いた値）。 */
+/** The contract of the two chunk graphs (values derived from the opened asset's graph declarations). */
 export type WanVaeChunkLayout = {
-  /** 潜在のチャネル数（`latent` の軸 0）。 */
+  /** The latent channel count (axis 0 of `latent`). */
   readonly latentChannels: number;
-  /** 潜在タイルの辺（`latent` の軸 2 / 3）。 */
+  /** The edge of the latent tile (axes 2 / 3 of `latent`). */
   readonly tile: number;
-  /** 出力フレームの辺（`8t`）。 */
+  /** The edge of the output frame (`8t`). */
   readonly sampleTile: number;
   /**
-   * 出口のチャネル数（フレーム出力の軸 0 — first と next で同じ）。unpatchify の無い世代は RGB の 3、
-   * patchify 空間を出す世代は `3·p²`（記述子との照合は `tile-decode.ts` の
-   * `assertWanVaeMatchesGeneration`）。
+   * The exit channel count (axis 0 of the frame output — the same for first and next). RGB's 3 for a
+   * generation without unpatchify, `3·p²` for a generation that outputs patchify space (matched
+   * against the descriptor by `assertWanVaeMatchesGeneration` in `tile-decode.ts`).
    */
   readonly sampleChannels: number;
-  /** cache の全体（next の入力の順・名前 → 形）。 */
+  /** All caches (in next's input order, name → shape). */
   readonly cacheShapes: ReadonlyMap<string, readonly number[]>;
   readonly first: WanVaeChunkGraph;
   readonly next: WanVaeChunkGraph;
@@ -105,7 +110,7 @@ const sameShape = (a: readonly number[], b: readonly number[]): boolean =>
 
 const elements = (shape: readonly number[]): number => shape.reduce((count, dim) => count * dim, 1);
 
-/** グラフの値の静的な形（宣言の無い名前は fail loudly — `Object.hasOwn` で引く）。 */
+/** The static shape of a graph value (an undeclared name fails loudly — looked up by `Object.hasOwn`). */
 const valueShape = (owner: GraphOwner, name: string, where: string): readonly number[] => {
   if (!Object.hasOwn(owner.graph.values, name)) {
     throw new WanVaeChunkError(`${where}: 値 '${name}' の宣言が無い`);
@@ -114,9 +119,10 @@ const valueShape = (owner: GraphOwner, name: string, where: string): readonly nu
 };
 
 /**
- * 宣言の dtype が f32 であること。形と名前だけでは、i32 のフレームを読み戻したバイト列が Float32Array
- * として読まれ（整数の 1 は約 1.4e-45 の有限値）、有限性の検査も通ってほぼ黒い動画が黙って出る。
- * 量子化された重みの格納 dtype とは別物（ここは入出力の意味上の dtype — ADR 0009）。
+ * The declared dtype is f32. With shape and name alone, the bytes of an i32 frame read back would be
+ * read as a Float32Array (integer 1 becomes a finite value of about 1.4e-45), pass the finiteness
+ * check too, and an almost black video would come out silently. Not the same thing as the storage
+ * dtype of quantized weights (this is the semantic dtype of inputs / outputs — ADR 0009).
  */
 const assertF32Declared = (dtype: string, where: string, what: string): void => {
   if (dtype !== "f32") {
@@ -124,7 +130,10 @@ const assertF32Declared = (dtype: string, where: string, what: string): void => 
   }
 };
 
-/** 1 本のグラフ宣言を検査し、入出力の取り決めを引く（潜在の形も返す — 入出力の dtype は全て f32）。 */
+/**
+ * Checks one graph declaration and extracts its I/O contract (also returns the latent shape — every
+ * I/O dtype is f32).
+ */
 const chunkGraph = (
   owner: GraphOwner,
   where: string,
@@ -147,7 +156,7 @@ const chunkGraph = (
     );
   }
   if (cacheSpecs.length === 0) {
-    // chunk 間の状態は因果キャッシュだけが運ぶ（cache 0 本では chunk を繋げない）。
+    // Only the causal cache carries state between chunks (with zero caches chunks cannot be chained).
     throw new WanVaeChunkError(`${where}: cache の入力が 0 本（cache_NN で chunk を繋ぐ取り決め）`);
   }
   const [frameOutput, ...cacheOutputs] = outputs;
@@ -190,11 +199,13 @@ const chunkGraph = (
 };
 
 /**
- * 開いた資産の first / next のグラフ宣言から、chunk 列の取り決めを導いて検査する。
+ * Derives and checks the chunk-sequence contract from the opened asset's first / next graph
+ * declarations.
  *
- * MUST: 形はここで資産から引く（タイル辺・cache の形をホストに literal で置かない — 決定 2）。
- * 2 本の潜在の形・フレームの辺が揃い、first の cache が next の cache の部分列（同じ名前・同じ形・
- * 同じ順）であることを見る（first の外の cache は next の 1 回目でゼロのまま読まれる）。
+ * MUST: the shapes are taken from the asset here (no tile edge or cache shape as a literal on the host
+ * — decision 2). Checks that the two latent shapes and frame edges agree, and that first's caches are
+ * a subsequence of next's caches (same names, same shapes, same order) (caches outside first are read
+ * as zero by the first run of next).
  */
 export const wanVaeChunkLayout = (first: GraphOwner, next: GraphOwner): WanVaeChunkLayout => {
   const firstGraph = chunkGraph(first, "vae_decoder_first", FIRST_FRAMES);
@@ -248,15 +259,17 @@ export const wanVaeChunkLayout = (first: GraphOwner, next: GraphOwner): WanVaeCh
   };
 };
 
-/** chunk 数 F の出力フレーム数（`1 + 4(F−1)`）。 */
+/** The output frame count for F chunks (`1 + 4(F−1)`). */
 export const wanVaeFrameCount = (chunks: number): number =>
   FIRST_FRAMES + NEXT_FRAMES * (chunks - 1);
 
 /**
- * chunk 列が使う常駐テンソル一式（cache 全部 + chunk ごとのフレーム）。タイルを跨いで使い回す。
+ * The set of resident tensors the chunk sequence uses (all caches + the frames per chunk). Reused
+ * across tiles.
  *
- * MUST: {@link WanVaeChunkCaches.zero} と `dispose` は、この常駐を使う batch の決着の後にだけ呼ぶ
- * （`ResidentTensor.write` は発行済みの enqueue を追い越しうる — runtime の契約）。
+ * MUST: call {@link WanVaeChunkCaches.zero} and `dispose` only after the batches that use these
+ * residents have settled (`ResidentTensor.write` can overtake an enqueue already issued — the
+ * runtime's contract).
  */
 export class WanVaeChunkCaches {
   readonly layout: WanVaeChunkLayout;
@@ -277,11 +290,12 @@ export class WanVaeChunkCaches {
     this.#zeros = zeros;
   }
 
-  /** cache の常駐を確保する（WebGPU の新しいバッファはゼロで始まる）。 */
+  /** Allocates the cache residents (a new WebGPU buffer starts as zeros). */
   static async create(gpu: GpuContext, layout: WanVaeChunkLayout): Promise<WanVaeChunkCaches> {
-    // MUST: ホストのゼロ配列は GPU の常駐より先に確保する — 後にすると、常駐（約 0.58 GiB）の確保が
-    // 済んだ後にホスト配列だけが RangeError で落ちたとき、確保済みの常駐を誰も解放できない（呼び手は
-    // 戻り値を受け取っていないので畳めない）。先に置けば失敗点が GPU に触る前へ移り、後始末が要らない。
+    // MUST: allocate the host zero array before the GPU residents — afterwards, if only the host array
+    // failed with a RangeError after the residents (about 0.58 GiB) were allocated, nobody could
+    // release the allocated residents (the caller has not received the return value, so it cannot
+    // close them). Placed first, the failure point moves before touching the GPU and needs no cleanup.
     const largest = Math.max(...[...layout.cacheShapes.values()].map(elements));
     const zeros = new Float32Array(largest);
     const caches = new Map<string, ResidentTensor>();
@@ -296,29 +310,29 @@ export class WanVaeChunkCaches {
     return new WanVaeChunkCaches(gpu, layout, caches, zeros);
   }
 
-  /** cache の常駐の合計バイト数。 */
+  /** The total bytes of the cache residents. */
   get cacheBytes(): number {
     return [...this.#caches.values()].reduce((sum, resident) => sum + resident.byteLength, 0);
   }
 
-  /** フレームの常駐の合計バイト数（確保済みの分）。 */
+  /** The total bytes of the frame residents (those allocated so far). */
   get frameBytes(): number {
     return this.#frames.reduce((sum, resident) => sum + resident.byteLength, 0);
   }
 
-  /** cache 全部をゼロに書く（タイルの頭 — 絞り込める対象が無い理由はモジュールの doc）。 */
+  /** Writes zeros to every cache (at the tile head — why nothing can be narrowed: the module doc). */
   zero(): void {
     for (const resident of this.#caches.values()) {
       resident.write(this.#zeros.subarray(0, resident.byteLength / BYTES_PER_ELEMENT));
     }
   }
 
-  /** そのグラフの cache 入力（名前 → 常駐）。 */
+  /** The cache inputs of that graph (name → resident). */
   inputs(graph: WanVaeChunkGraph): Record<string, ResidentTensor> {
     return Object.fromEntries(graph.caches.map((name) => [name, this.#cache(name)]));
   }
 
-  /** そのグラフの `copyOutputs`（更新後の cache → 同じ常駐・フレーム → `frame`）。 */
+  /** The `copyOutputs` of that graph (updated caches → the same residents, frames → `frame`). */
   copyOutputs(graph: WanVaeChunkGraph, frame: ResidentTensor): Record<string, ResidentTensor> {
     const copies: Record<string, ResidentTensor> = { [graph.frameOutput]: frame };
     graph.caches.forEach((name, index) => {
@@ -327,7 +341,7 @@ export class WanVaeChunkCaches {
     return copies;
   }
 
-  /** chunk 0..count−1 のフレームの常駐（足りなければ確保する — chunk 0 は first の形）。 */
+  /** The frame residents of chunks 0..count−1 (allocated if missing — chunk 0 has first's shape). */
   async frames(count: number): Promise<readonly ResidentTensor[]> {
     while (this.#frames.length < count) {
       const index = this.#frames.length;
@@ -339,7 +353,10 @@ export class WanVaeChunkCaches {
     return this.#frames.slice(0, count);
   }
 
-  /** 常駐を全て返す（Session より先に呼んでよい — 焼き込みの参照が残っていれば runtime が拒む）。 */
+  /**
+   * Returns every resident (may be called before the Sessions — the runtime refuses if a baked-in
+   * reference remains).
+   */
   dispose(): void {
     for (const resident of [...this.#caches.values(), ...this.#frames]) resident.dispose();
   }
@@ -351,7 +368,7 @@ export class WanVaeChunkCaches {
   }
 }
 
-/** 潜在 `[C,F,t,t]` の chunk 数 F（長さが合わなければ fail loudly）。 */
+/** The chunk count F of a latent `[C,F,t,t]` (fails loudly if the length does not fit). */
 export const wanVaeChunkCount = (
   layout: WanVaeChunkLayout,
   latents: Float32Array<ArrayBuffer>,
@@ -366,14 +383,15 @@ export const wanVaeChunkCount = (
   return chunks;
 };
 
-/** 潜在 `[C,F,t,t]` から chunk `index` の 1 フレーム `[C,1,t,t]` を切り出す（写しを返す）。 */
+/** Cuts the single frame `[C,1,t,t]` of chunk `index` out of the latent `[C,F,t,t]` (a copy). */
 export const wanVaeLatentChunk = (
   layout: WanVaeChunkLayout,
   latents: Float32Array<ArrayBuffer>,
   index: number,
 ): Tensor => {
   const chunks = wanVaeChunkCount(layout, latents);
-  // 範囲外を通すと隣のチャネルの平面か末尾の外（空の subarray）を読み、ゼロ混じりの値を黙って返す。
+  // Letting an out-of-range index through would read the neighbouring channel's plane or past the
+  // end (an empty subarray) and silently return values mixed with zeros.
   if (!Number.isInteger(index) || index < 0 || index >= chunks) {
     throw new RangeError(`chunk ${index} が [0, ${chunks}) の外`);
   }
@@ -387,9 +405,10 @@ export const wanVaeLatentChunk = (
 };
 
 /**
- * chunk 1 本を batch に積む（cache は常駐の入力に束ね、更新後の cache とフレームを `copyOutputs`）。
+ * Queues one chunk on the batch (the caches are bound as resident inputs; the updated caches and the
+ * frame go through `copyOutputs`).
  *
- * `graph` と `session` は対で渡す（first の chunk は first の宣言と Session）。
+ * `graph` and `session` are passed as a pair (the first chunk takes first's declaration and Session).
  */
 export const enqueueWanVaeChunk = (
   batch: BatchScope,
@@ -405,8 +424,8 @@ export const enqueueWanVaeChunk = (
   );
 
 /**
- * chunk のフレーム（`[Cs,T_k,s,s]` を chunk 順に）を時間軸で連結し `[Cs, 1 + 4(F−1), s, s]` にする
- * （Cs は {@link WanVaeChunkLayout.sampleChannels}）。
+ * Concatenates the chunks' frames (`[Cs,T_k,s,s]` in chunk order) along the time axis into
+ * `[Cs, 1 + 4(F−1), s, s]` (Cs is {@link WanVaeChunkLayout.sampleChannels}).
  */
 export const concatWanVaeFrames = (
   layout: WanVaeChunkLayout,
@@ -433,12 +452,13 @@ export const concatWanVaeFrames = (
 };
 
 /**
- * タイル 1 枚の chunk 列を回す（1 タイル = 1 batch・フレームだけを読み戻す — モジュールの doc）。
+ * Runs the chunk sequence of one tile (one tile = one batch, read back only the frames — module doc).
  *
- * `latents` は逆正規化済みの `[C,F,t,t]`。戻りは**クランプ前**の `[Cs, 1 + 4(F−1), 8t, 8t]`。
- * タイルの頭で cache をゼロに書く（{@link WanVaeChunkCaches.zero}）。
+ * `latents` is the de-normalized `[C,F,t,t]`. Returns the **pre-clamp** `[Cs, 1 + 4(F−1), 8t, 8t]`.
+ * Writes zeros to the caches at the tile head ({@link WanVaeChunkCaches.zero}).
  *
- * MUST: 同じ device の別の batch・run を並行に発行しない（batch は device の区間ロックを持つ）。
+ * MUST: do not issue another batch or run on the same device concurrently (the batch holds the
+ * device's span lock).
  */
 export const decodeWanVaeTile = async (
   gpu: GpuContext,
@@ -464,8 +484,9 @@ export const decodeWanVaeTile = async (
       );
     }
   } catch (cause) {
-    // MUST: 区間を閉じてロックを返す（閉じないと同じ device の次の batch / run が永久に待つ）。
-    // 失敗の本体は呼び手へ投げ直す（finish 側の決着は同じ失敗の写しなので捨てる）。
+    // MUST: close the span and return the lock (otherwise the next batch / run on the same device waits
+    // forever). The main failure is rethrown to the caller (the settlement on the finish side is a copy
+    // of the same failure, so it is discarded).
     await batch.finish().catch(() => undefined);
     throw cause;
   }

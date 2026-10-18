@@ -1,98 +1,107 @@
 /**
- * VAE decode の**固定タイル化**（ホストグルーのみ — ランタイムは 1 行も関わらない）。ADR 0033。
+ * **Fixed-tile** VAE decode (host glue only — the runtime is not involved by a single line).
+ * ADR 0033.
  *
- * ## なぜホストだけで足りるのか
+ * ## Why the host alone is enough
  *
- * VAE decoder のグラフは**解像度に対して構造不変**である（実測: 512px 用と 1024px 用の
- * 重みペイロードは sha256 同一で、違うのは中間値の宣言 shape だけ — ADR 0038 §4 の実測 2）。
- * したがってタイル decoder（入力 `[1,16,64,64]`）を敷き詰めれば全解像度をカバーできる。
- * 要るのはタイルの切り出し・ブレンド・貼り付けだけで、それがこのモジュール。
+ * The VAE decoder graph is **structurally invariant to the resolution** (measured: the weight
+ * payloads for 512px and 1024px are sha256-identical; only the declared shapes of intermediate
+ * values differ — measurement 2 of ADR 0038 §4). So tiling a tile decoder (input `[1,16,64,64]`)
+ * covers every resolution. All that is needed is cutting out, blending and pasting tiles, which is
+ * this module.
  *
- * ## タイル幾何 = 丸め等間隔配置（diffusers からの意図的な逸脱）
+ * ## Tile geometry = rounded equal-spacing layout (a deliberate deviation from diffusers)
  *
- * 上流（`autoencoder_kl_qwenimage.py` の `tiled_decode`）は `range(0, H, stride)` で走査する
- * ので**最後のタイルが短くなる**。こちらのタイル decoder は**形が固定**なので短いタイルを
- * 食えない。そこで走査を「最後のタイルの開始位置を `extent − tile` にスナップする」形へ
- * 変える。開始位置は 0 と `extent − tile` の間を**丸めて等分**したもので、間隔は整数に
- * 割り切れなくてよい（{@link planTileAxis}）— 制約は「隣り合う対の重なりが下限以上」だけ。
+ * Upstream (`tiled_decode` in `autoencoder_kl_qwenimage.py`) scans with `range(0, H, stride)`, so
+ * **the last tile is shorter**. Our tile decoder has **a fixed shape** and cannot take a short
+ * tile. So the scan is changed to "snap the last tile's start to `extent − tile`". The starts
+ * **divide the range between 0 and `extent − tile` equally, rounded**, and the spacing need not
+ * divide evenly ({@link planTileAxis}) — the only constraint is "the overlap of each adjacent pair
+ * is at least the lower bound".
  *
- * 帰結として、上流の「各タイルを間隔ぶんへ切り詰めて連結 → 全体 crop」はそのままでは
- * **画像の末端に届かない**（間隔の総和 = `extent − tile < extent`）。スナップ配置での
- * 正しい対応物は「タイル i の担当領域 = `[starts[i], starts[i+1])`、最後だけ `[starts[n−1],
- * extent)`」という**領域割り当て**で、これは上流の crop + 全体 crop と同じ分割を与えつつ
- * 末端まで覆う（{@link assembleTiles}）。
+ * As a consequence, upstream's "truncate each tile to the spacing and concatenate → crop the whole"
+ * **does not reach the end of the image** as is (the sum of spacings = `extent − tile < extent`).
+ * The correct counterpart for snapped placement is the **region assignment** "tile i owns
+ * `[starts[i], starts[i+1])`, only the last one `[starts[n−1], extent)`", which gives the same
+ * split as upstream's crop + whole crop while covering up to the end ({@link assembleTiles}).
  *
- * ## ブレンドは上流の線形ランプと同型
+ * ## The blend has the same form as upstream's linear ramp
  *
- * `blend_v` / `blend_h` と同じ式・同じ順序（**上のタイルとの縦ブレンドが先・左との横ブレンドが
- * 後**）・同じ **sample 空間**で行う。上流はタイル配列を in-place に書き換えるので、隣に効くのは
- * **ブレンド済みのタイル**である — ここでも同じ。in-place で進める本体は 1 本だけ持ち、
- * {@link assembleTiles}（公開面）は写しを取ってからそれを呼び、{@link decodeTiled}（配列を
- * 自分で所有する内部経路）は写さずに直接呼ぶ。
+ * Same formula as `blend_v` / `blend_h`, same order (**the vertical blend with the tile above
+ * first, the horizontal blend with the tile on the left after**), same **sample space**. Upstream
+ * rewrites the tile array in place, so what affects a neighbour is **the already blended tile** —
+ * the same here. There is one in-place body: {@link assembleTiles} (public surface) copies and then
+ * calls it, and {@link decodeTiled} (the internal path that owns its arrays) calls it directly
+ * without copying.
  *
- * ## 縮退（タイル 1 枚）は非タイル経路と**ビット同一** MUST
+ * ## The degenerate case (one tile) is **bit-identical** to the non-tiled path — MUST
  *
- * `extent === tile`（512px = latent 64）ではタイルが 1 枚になり、ブレンドは 1 度も走らず
- * 担当領域が画像全体になる。この経路が非タイル decode と 1 ビットでも違ったら、それは幾何か
- * 貼り付けの誤り — 数値ではなく**構造で**恒等性を固定するための縮退点で、実 GPU の E2E が
- * Uint32 完全一致で門にする。
+ * With `extent === tile` (512px = latent 64) there is one tile, no blend runs and the owned region
+ * is the whole image. If this path differs from the non-tiled decode by even one bit, geometry or
+ * pasting is wrong — a degenerate point that pins the identity **by structure**, not by numbers; a
+ * unit test (the degenerate case of `assembleTiles` in `anima_tiling_test.ts`) checks it
+ * Uint32-exactly.
  */
 
 const f32 = Math.fround;
 
 /**
- * 隣り合うタイルが latent で重なる最小幅（= sample 64px）。
+ * Minimum overlap of adjacent tiles in latent units (= 64px in sample space).
  *
- * 上流の既定ブレンド幅（`tile_sample_min − tile_sample_stride` = 256−192 = 64px）と同じ
- * オーダーに合わせてある。decoder は 3×3 conv 12 本 + upsample 3 段で sample 空間の実効
- * 受容野が数十 px なので、これを下回ると継ぎ目がランプで隠しきれなくなる。
+ * Matched to the same order as upstream's default blend width
+ * (`tile_sample_min − tile_sample_stride` = 256−192 = 64px). The decoder has 12 3×3 convs + 3
+ * upsample stages, so its effective receptive field in sample space is a few tens of px; below this
+ * the ramp can no longer hide the seams.
  *
- * NOTE: `export` はテスト（受理集合の全辺でタイル配置を数える表）が**同じ定数で**分割計画を
- * 回すため（既定値を写すと、片方だけ動かしたときにテストと実際の分割が黙ってずれる）。
+ * NOTE: `export` is so that the test (the table counting tile layouts on every side of the accepted
+ * set) runs the split plan **with the same constant** (copying the default would let the test and
+ * the actual split drift apart silently when only one side moves).
  */
 export const MIN_TILE_OVERLAP_LATENT = 8;
 
-/** latent の 1 軸ぶんのタイル配置。 */
+/** Tile layout of one latent axis. */
 type TileAxis = {
-  /** この軸の latent 全長。 */
+  /** Latent length of this axis. */
   readonly extent: number;
-  /** タイル 1 枚の latent 幅（= タイル decoder の入力形）。 */
+  /** Latent width of one tile (= the tile decoder's input shape). */
   readonly tile: number;
   /**
-   * 各タイルの開始位置（latent・昇順・末尾はちょうど `extent − tile`）。
+   * Start of each tile (latent, ascending, the last exactly `extent − tile`).
    *
-   * MUST: 開始位置の差（間隔）を欄として持たない — 対ごとに 1 latent まで動くので、
-   * 1 つの数に畳むと配置と黙って食い違う。要るところで `starts` から引く
-   * （{@link blendExtentAt}）。
+   * MUST: do not hold the difference of starts (the spacing) as a field — it varies by up to 1
+   * latent per pair, so folding it into one number silently disagrees with the layout. Derive it
+   * from `starts` where needed ({@link blendExtentAt}).
    */
   readonly starts: readonly number[];
 };
 
-/** 2 軸ぶんのタイル配置と、latent ↔ sample の縮尺。 */
+/** Tile layout of both axes and the latent ↔ sample scale. */
 type TileGeometry = {
-  /** latent 1 あたりの sample 画素数。 */
+  /** Sample pixels per latent. */
   readonly scale: number;
-  /** latent のチャネル数（切り出しの平面幅を決める）。 */
+  /** Latent channel count (sets the plane width of the cut-out). */
   readonly channels: number;
-  /** 高さ軸。 */
+  /** Height axis. */
   readonly rows: TileAxis;
-  /** 幅軸。 */
+  /** Width axis. */
   readonly cols: TileAxis;
 };
 
 /**
- * 1 軸ぶんの丸め等間隔スナップ配置を決める。
+ * Decides the rounded equal-spacing snapped layout of one axis.
  *
- * 本数は「重なりが `minOverlap` 以上」を満たす最小値 `ceil(span / (tile − minOverlap)) + 1`
- * （`span = extent − tile`）、開始位置は `round(i · span / (本数 − 1))`。丸めの誤差が
- * ±0.5 に収まるので**間隔は 2 値（`floor` と `ceil`）にしかならず**、どの対の重なりも
- * `tile − ceil(span / (本数 − 1)) ≥ minOverlap` を満たす。
+ * The count is the smallest value meeting "overlap at least `minOverlap`",
+ * `ceil(span / (tile − minOverlap)) + 1` (`span = extent − tile`), and the starts are
+ * `round(i · span / (count − 1))`. The rounding error stays within ±0.5, so **the spacing takes
+ * only two values (`floor` and `ceil`)**, and the overlap of every pair satisfies
+ * `tile − ceil(span / (count − 1)) ≥ minOverlap`.
  *
- * NOTE: 旧規則（ADR 0033 決定 2）は「間隔が整数に割り切れる」ことまで課しており、本数を
- * `span` の約数から選んでいた。約数の乏しい辺では本数が跳ね（1456px = latent 182・
- * span 118 = 2·59 → 60 本）、実行不能な形を入口で拒否する必要があった。割り切れを外しても
- * 崩れるのは「全対で同じブレンド幅」だけで、それは対ごとに持てば済む
- * （{@link blendExtentAt}）— 均一性の実体は「重なりが下限以上・対ごとの差は高々 1 latent」。
+ * NOTE: the old rule (ADR 0033 decision 2) also required "the spacing divides evenly" and chose the
+ * count from the divisors of `span`. On sides with few divisors the count jumped (1456px = latent
+ * 182, span 118 = 2·59 → 60 tiles), and infeasible shapes had to be rejected at the entry. Dropping
+ * divisibility breaks only "the same blend width for every pair", which is handled by holding it
+ * per pair ({@link blendExtentAt}) — what uniformity really means is "overlap at least the lower
+ * bound, per-pair difference at most 1 latent".
  */
 export const planTileAxis = (extent: number, tile: number, minOverlap: number): TileAxis => {
   if (!Number.isInteger(extent) || !Number.isInteger(tile) || !Number.isInteger(minOverlap)) {
@@ -109,8 +118,8 @@ export const planTileAxis = (extent: number, tile: number, minOverlap: number): 
   }
   const span = extent - tile;
   if (span === 0) {
-    // 縮退: 1 枚で覆える。対が 1 つも無いのでブレンドは走らず、貼り付けが素の写しになる
-    // （非タイル経路とビット同一 — モジュール doc の MUST）。
+    // Degenerate: one tile covers it. There is no pair, so no blend runs and pasting is a plain
+    // copy (bit-identical to the non-tiled path — the MUST in the module doc).
     return { extent, tile, starts: [0] };
   }
   const count = Math.ceil(span / (tile - minOverlap)) + 1;
@@ -118,8 +127,9 @@ export const planTileAxis = (extent: number, tile: number, minOverlap: number): 
   for (let index = 0; index < count; index += 1) {
     starts.push(Math.round((index * span) / (count - 1)));
   }
-  // 重なりの下限は本数の式から導けるが、その導出は丸めの誤差評価に依っていて目で追えない。
-  // 破れたら継ぎ目がランプで隠れなくなる（絵にしか出ない沈黙誤り）ので、構造で落とす。
+  // The overlap bound follows from the count formula, but the derivation rests on a rounding-error
+  // estimate that cannot be followed by eye. If it breaks, the ramp no longer hides the seams (a
+  // silent error visible only in the picture), so it fails structurally.
   for (let index = 1; index < count; index += 1) {
     const overlap = tile - (starts[index] - starts[index - 1]);
     if (overlap < minOverlap) {
@@ -133,8 +143,8 @@ export const planTileAxis = (extent: number, tile: number, minOverlap: number): 
 };
 
 /**
- * 対 `(index − 1, index)` のブレンド幅（**sample 空間** — 上流の `blend_height` /
- * `blend_width` と同じ単位）。丸め等間隔なので対ごとに 1 latent まで動く。
+ * Blend width of the pair `(index − 1, index)` (**sample space** — the same unit as upstream's
+ * `blend_height` / `blend_width`). With rounded equal spacing it varies by up to 1 latent per pair.
  */
 export const blendExtentAt = (axis: TileAxis, scale: number, index: number): number => {
   if (!Number.isInteger(index) || index < 1 || index >= axis.starts.length) {
@@ -148,11 +158,11 @@ export const blendExtentAt = (axis: TileAxis, scale: number, index: number): num
 };
 
 /**
- * latent の形とタイル decoder の入出力の形から幾何を組む。
+ * Builds the geometry from the latent shape and the tile decoder's input/output shapes.
  *
- * `latentShape` は `[1,C,H,W]`（DiT が吐く latent）、`tileShape` はタイル decoder の
- * **グラフ入力** `[1,C,th,tw]`、`sampleShape` はその**グラフ出力** `[1,3,th·s,tw·s]`。
- * 縮尺 `s` を出力形から割り出すのは、呼び出し側に `8` を literal で置かないため。
+ * `latentShape` is `[1,C,H,W]` (the latent the DiT emits), `tileShape` is the tile decoder's
+ * **graph input** `[1,C,th,tw]`, and `sampleShape` its **graph output** `[1,3,th·s,tw·s]`. The
+ * scale `s` is derived from the output shape so that callers do not put `8` as a literal.
  */
 export const planVaeTiling = (
   latentShape: readonly number[],
@@ -191,12 +201,12 @@ export const planVaeTiling = (
   };
 };
 
-/** タイルの総枚数。 */
+/** Total number of tiles. */
 export const tileCount = (geometry: TileGeometry): number =>
   geometry.rows.starts.length * geometry.cols.starts.length;
 
 /**
- * latent `[1,C,H,W]` から `(row, col)` のタイル `[1,C,th,tw]` を切り出す（平面ごとのコピー）。
+ * Cuts the tile `[1,C,th,tw]` at `(row, col)` out of the latent `[1,C,H,W]` (a copy per plane).
  */
 export const latentTile = (
   latents: Float32Array<ArrayBuffer>,
@@ -205,7 +215,8 @@ export const latentTile = (
   col: number,
 ): Float32Array<ArrayBuffer> => {
   const { rows, cols, channels } = geometry;
-  // 整数も見る — 大小比較だけでは 0.5 / NaN が通り、`starts[0.5]` が undefined になってゼロのタイルを黙って返す。
+  // Check integrality too — comparisons alone let 0.5 / NaN through, `starts[0.5]` becomes
+  // undefined and a zero tile is returned silently.
   if (
     !Number.isInteger(row) ||
     !Number.isInteger(col) ||
@@ -250,11 +261,11 @@ export const latentTile = (
 //   Copyright 2025 The Qwen-Image Team, Wan Team and The HuggingFace Team. All rights reserved.
 
 /**
- * 上のタイルとの線形ランプ合成（上流 `blend_v` と同型・**in-place**）。
+ * Linear-ramp blend with the tile above (same form as upstream `blend_v`, **in place**).
  *
- * `b[y] = a[H−blend+y]·(1 − y/blend) + b[y]·(y/blend)`。MUST: 重み 2 本を先に f32 へ丸めて
- * から掛ける（torch は Python float のスカラをテンソル dtype へ落として演算する）— 丸めの
- * 位置を動かすと参照と最終桁で割れる。
+ * `b[y] = a[H−blend+y]·(1 − y/blend) + b[y]·(y/blend)`. MUST: round both weights to f32 before
+ * multiplying (torch drops a Python float scalar to the tensor dtype before operating) — moving the
+ * rounding point makes the last digit differ from the reference.
  */
 const blendVertical = (
   above: Float32Array<ArrayBuffer>,
@@ -280,7 +291,7 @@ const blendVertical = (
   }
 };
 
-/** 左のタイルとの線形ランプ合成（上流 `blend_h` と同型・**in-place**）。 */
+/** Linear-ramp blend with the tile on the left (same form as upstream `blend_h`, **in place**). */
 const blendHorizontal = (
   left: Float32Array<ArrayBuffer>,
   current: Float32Array<ArrayBuffer>,
@@ -304,9 +315,9 @@ const blendHorizontal = (
 };
 
 /**
- * 貼り合わせの本体（**渡された配列の上で in-place にブレンドする** — 呼び出し側がその配列を
- * 所有していることが前提）。形と枚数の検査もここに置くので、写しを取る公開面
- * {@link assembleTiles} と、配列を所有する内部経路 {@link decodeTiled} が同じ検査を通る。
+ * The body of the assembly (**blends in place on the arrays passed in** — assumes the caller owns
+ * them). The shape and count checks live here too, so the copying public surface
+ * {@link assembleTiles} and the owning internal path {@link decodeTiled} pass the same checks.
  */
 const assembleOwnedTiles = (
   working: Float32Array<ArrayBuffer>[],
@@ -335,10 +346,12 @@ const assembleOwnedTiles = (
     }
   }
 
-  // MUST: 縦（上）→ 横（左）の順（上流 `tiled_decode` と同じ）。順序を入れ替えると角の
-  // 4 枚が重なる領域で係数の積の順が変わり、継ぎ目に十字の筋が出る。
-  // MUST: ブレンド幅は**対ごと**に引く（丸め等間隔なので対で 1 latent まで違う）。1 つの
-  // 数を使い回すと、ずれた側の継ぎ目でランプの端が担当領域からはみ出す。
+  // MUST: vertical (above) → horizontal (left) order (the same as upstream `tiled_decode`).
+  // Swapping the order changes the order of the coefficient products where four tiles overlap at a
+  // corner, and a cross-shaped streak appears at the seams.
+  // MUST: look up the blend width **per pair** (with rounded equal spacing pairs differ by up to 1
+  // latent). Reusing one number makes the ramp's edge stick out of the owned region at the shifted
+  // seams.
   for (let row = 0; row < rowCount; row += 1) {
     for (let col = 0; col < colCount; col += 1) {
       const current = working[row * colCount + col];
@@ -369,14 +382,16 @@ const assembleOwnedTiles = (
   const width = cols.extent * scale;
   const image = new Float32Array(channels * height * width);
   for (let row = 0; row < rowCount; row += 1) {
-    // 担当領域 = 次のタイルの開始まで（最後だけ末端まで）。上流の「stride 幅へ切り詰め +
-    // 全体 crop」の等間隔スナップ版で、末端まで覆う（モジュール doc）。
+    // Owned region = up to the next tile's start (only the last one up to the end). The
+    // equal-spacing snapped version of upstream's "truncate to stride width + crop the whole",
+    // covering up to the end (module doc).
     //
-    // MUST: 幅は担当領域ちょうどにする。**過大**（例: 常にタイル全幅）にしても後続タイルが
-    // 上書きするので結果は 1 ビットも変わらず、数値網では検出できない（実測: 故障注入が
-    // 緑のまま通る）。この「無害さ」は行優先の走査順に依存しているので、貼り付けを並列化
-    // または逆順化した瞬間に沈黙誤値へ変わる。**過小**な側（常に stride 幅）は末端が欠ける
-    // ので検出できる。
+    // MUST: make the width exactly the owned region. Even if it is **too large** (e.g. always the
+    // full tile width), later tiles overwrite it, so the result does not change by a bit and
+    // numeric checks cannot detect it (measured: fault injection stays green). This "harmlessness"
+    // depends on the row-major scan order, so it turns into a silent wrong value the moment pasting
+    // is parallelised or reversed. The **too small** side (always the stride width) loses the end,
+    // so it is detectable.
     const top = rows.starts[row] * scale;
     const spanRows =
       ((row + 1 < rowCount ? rows.starts[row + 1] : rows.extent) - rows.starts[row]) * scale;
@@ -400,12 +415,12 @@ const assembleOwnedTiles = (
 };
 
 /**
- * decode 済みタイル（行優先）をブレンドして 1 枚の画像 `[1,C,H·s,W·s]` に貼り合わせる。
+ * Blends decoded tiles (row-major) and assembles them into one image `[1,C,H·s,W·s]`.
  *
- * MUST: 渡された配列を破壊しない。ブレンドは in-place で進むので、この公開面は写しを取って
- * から本体へ渡す — 呼び出し側が持っている Tensor の中身が黙って変わる形の罠を踏まないため。
- * 写しは**この公開契約のためだけ**に在り、配列を自分で所有する内部経路（{@link decodeTiled}）
- * は写さずに本体を直接呼ぶ。
+ * MUST: do not destroy the arrays passed in. The blend runs in place, so this public surface copies
+ * before passing them to the body — to avoid the trap of the caller's Tensor contents changing
+ * silently. The copy exists **only for this public contract**; the internal path that owns its
+ * arrays ({@link decodeTiled}) calls the body directly without copying.
  */
 export const assembleTiles = (
   decoded: readonly Float32Array<ArrayBuffer>[],
@@ -417,18 +432,17 @@ export const assembleTiles = (
   );
 
 /**
- * タイル decode の駆動（唯一の非純粋な継ぎ目 = `decode` コールバック）。
+ * Drives the tiled decode (the only impure seam = the `decode` callback).
  *
- * MUST: `decode` は **1 本の session を使い回す**呼び出しにする（タイルごとに開き直すと
- * 重みのロードが枚数ぶん走り、タイル化の狙い〈メモリのピークを 512px 相当に抑える〉に対して
- * 時間だけが跳ね上がる）。
+ * MUST: `decode` **reuses one session** (reopening per tile loads the weights once per tile, and
+ * only the time jumps, against the purpose of tiling (keeping the memory peak at the 512px level)).
  *
- * MUST: `decode` が返した配列は**所有権ごと渡す** — 呼び出し側は保持も再利用もしてはならない
- * （ここでそのまま in-place にブレンドする）。写しを 1 枚省くぶんがそのままピークの節約で、
- * 全タイルぶん（1024px で 27MiB / 2048px で 75MiB — docs/perf-ledger.md H-6）に効く。
- * `Session.run` の出力は readback ごとに新しく確保される（`executor.ts` が
- * `getMappedRange().slice(0)` を `hostTensor` へ渡す）ので、anima パイプラインのコールバックは
- * そのままこの契約を満たしている。
+ * MUST: the arrays `decode` returns are **handed over with ownership** — the caller neither keeps
+ * nor reuses them (they are blended in place here as they are). Skipping one copy is directly a
+ * peak saving, for all tiles (27MiB at 1024px / 75MiB at 2048px — docs/perf-ledger.md H-6).
+ * `Session.run` outputs are freshly allocated per readback (`executor.ts` passes
+ * `getMappedRange().slice(0)` to `hostTensor`), so the anima pipeline's callback meets this
+ * contract as is.
  */
 export const decodeTiled = async (
   latents: Float32Array<ArrayBuffer>,

@@ -1,80 +1,88 @@
 /**
- * codec decoder の**タイル分割**（ホストグルーのみ — ランタイムは 1 行も関わらない）。
+ * **Tiling** of the codec decoder (host glue only — not a single line of the runtime is involved).
  *
- * ## なぜタイルが要るのか
+ * ## Why tiles are needed
  *
- * decoder は latent `[1,S,32]` を `[1,1,1920S]` へ展開する。S = 750（30 秒）では中間テンソルが
- * 553MB に達し、**`maxStorageBufferBindingSize` の既定 128MiB の機では S ≥ 183 で確保に失敗
- * する**。タイルはこのポータビリティのためのもので、確保天井の高い機では単発 decode がそのまま
- * 通る（`tileFrames` は性能ノブであって、結果を変えるものではない）。
+ * The decoder decodes the latent `[1,S,32]` into `[1,1,1920S]`. At S = 750 (30 s) the intermediate
+ * tensors reach 553MB, and **on a machine with the default 128MiB `maxStorageBufferBindingSize`,
+ * allocation fails at S ≥ 183**. Tiles exist for this portability; on a machine with a high
+ * allocation ceiling a single decode goes through as is (`tileFrames` is a performance knob, not
+ * something that changes the result).
  *
- * ## なぜ halo を捨てればビット一致するのか
+ * ## Why discarding the halo gives bit identity
  *
- * decoder の主経路には因果層が 1 つも無く、全層が対称 pad か厳密に `L·stride` の
- * `conv_transpose1d` なので、**平行移動同変**である。片側の受容野は実測 13,793 サンプル
- * （= 7.19 latent フレーム）で、{@link IrodoriPipelineConfig.codecHaloFrames} の 8 フレーム
- * （15,360 サンプル）がこれを覆う。karume の `conv1d` / `conv_transpose1d` は出力要素ごとに
- * 固定順（`(ic,k)` 昇順）で縮約する gather 形なので、同じ入力窓なら**縮約順まで同じ**になり、
- * 採用区間は全長実行と 1 ビットも違わない。実 GPU の門
- * （`tests/e2e_irodori_codec_test.ts`）がこれを Uint32 で毎回実測する。
+ * The decoder's main path has no causal layer at all; every layer is either symmetric padding or a
+ * `conv_transpose1d` with exactly `L·stride`, so it is **translation equivariant**. The measured
+ * receptive field per side is 13,793 samples (= 7.19 latent frames), and the 8 frames of
+ * {@link IrodoriPipelineConfig.codecHaloFrames} (15,360 samples) cover it. Karume's `conv1d` /
+ * `conv_transpose1d` are gather-form kernels that reduce each output element in a fixed order
+ * (`(ic,k)` ascending), so the same input window gives **the same reduction order too**, and the
+ * kept span does not differ by a single bit from a full-length run. The real-GPU check
+ * (`packages/e2e/tests/e2e_irodori_codec_test.ts`) measures this in Uint32 every time.
  *
- * 先頭タイルの左端と末尾タイルの右端は**真の境界**なので halo が要らない（グラフのゼロ
- * padding が全長実行の端と同じ役をする）。
+ * The left end of the first tile and the right end of the last tile are **true boundaries**, so
+ * they need no halo (the graph's zero padding plays the same role as at the ends of a full-length
+ * run).
  *
- * ## 配置は等間隔 + 末尾スナップ（`anima/tiling.ts` と同じ流儀）
+ * ## Placement is evenly spaced + a snapped last tile (the same convention as `anima/tiling.ts`)
  *
- * タイルの decode 長を**全て `tileFrames` に揃える**ため、末尾タイルの開始位置を
- * `frames − tileFrames` へスナップする。同形なら Session の `PreparedExecutionPlan`
- * （ADR 0042）がタイル間で効き続ける — 形が 1 枚だけ違うと、そのぶんだけ導出をやり直す。
+ * To make **every tile's decode length `tileFrames`**, the start of the last tile snaps to
+ * `frames − tileFrames`. With identical shapes the Session's `PreparedExecutionPlan` (ADR 0042)
+ * keeps applying across tiles — a single tile with a different shape redoes the derivation for
+ * that tile.
  */
 
 import { ModelInputError } from "../errors.ts";
 
 /**
- * `tileFrames` の既定（= 1 回の decode に流す latent フレーム数の上限）。
+ * Default of `tileFrames` (= the maximum number of latent frames sent through one decode).
  *
- * `maxStorageBufferBindingSize` が既定の 128MiB しか無い機でも通る大きさ（S = 183 で確保に
- * 失敗する実測の 1 つ下）。確保天井の高い機では S ≤ 750 が単発で通るので、そこでは
- * {@link IrodoriGenerateRequest.codecTileFrames} に大きい値を渡せばタイルが 1 枚に縮退する。
+ * A size that goes through even on a machine whose `maxStorageBufferBindingSize` is only the
+ * default 128MiB (one below the measured S = 183 where allocation fails). On a machine with a high
+ * allocation ceiling S ≤ 750 goes through in one pass, so there passing a large value as
+ * {@link IrodoriGenerateRequest.codecTileFrames} collapses the tiles to one.
  */
 export const DEFAULT_CODEC_TILE_FRAMES = 182;
 
-/** タイル 1 枚（開始位置と長さは latent フレーム単位 — 1920 の格子が全段で揃う）。 */
+/**
+ * One tile (start and length in latent frames — the 1920-sample grid lines up through every layer).
+ */
 export type CodecTile = {
-  /** decode する区間の開始フレーム。 */
+  /** Start frame of the decoded span. */
   readonly start: number;
-  /** decode する区間の長さ（フレーム）。 */
+  /** Length of the decoded span (frames). */
   readonly length: number;
-  /** 採用区間の開始（タイル先頭からの相対フレーム — 左 halo の幅）。 */
+  /** Start of the kept span (frames relative to the tile start — the width of the left halo). */
   readonly offset: number;
-  /** 採用区間の長さ（フレーム）。全タイルの合計が S になる。 */
+  /** Length of the kept span (frames). The sum over all tiles is S. */
   readonly take: number;
 };
 
-/** {@link planCodecTiles} の入力（どちらも latent フレーム単位）。 */
+/** Input of {@link planCodecTiles} (both in latent frames). */
 type CodecTilePlanOptions = {
-  /** 1 回の decode に流す最大フレーム数。 */
+  /** Maximum number of frames sent through one decode. */
   readonly tileFrames: number;
-  /** 採用区間の両側へ足す文脈（{@link IrodoriPipelineConfig.codecHaloFrames}）。 */
+  /** Context added on both sides of the kept span ({@link IrodoriPipelineConfig.codecHaloFrames}). */
   readonly haloFrames: number;
 };
 
 /**
- * `tileFrames` の受理集合（halo 2 枚ぶんより大きい整数）。
+ * Acceptance set of `tileFrames` (an integer larger than 2 halos).
  *
- * NOTE: `export` は**生成の入口**（`pipeline.ts` の要求検査）が同じ集合で先に落とすため。
- * {@link planCodecTiles} を呼ぶのは latent 生成が終わった後なので、ここだけに検査があると
- * 重み 1.26GB のロードと DiT の全 step を消費してから落ちる。受理集合は 1 本しか持たない
- * （両側に条件を書くと必ず割れる）。
+ * NOTE: `export` so that **the entry of generation** (the request check in `pipeline.ts`) rejects
+ * with the same set first. {@link planCodecTiles} is called after latent generation, so with the
+ * check only here, it would fail after loading 1.26GB of weights and running every DiT step. The
+ * acceptance set exists only once (writing the condition on both sides always ends up diverging).
  */
 export const assertCodecTileFrames = (tileFrames: number, haloFrames: number): void => {
   if (!Number.isInteger(haloFrames) || haloFrames < 0) {
     throw new Error(`planCodecTiles: haloFrames ${haloFrames} が非負整数でない`);
   }
   if (!Number.isInteger(tileFrames) || tileFrames <= 2 * haloFrames) {
-    // `tileFrames` は呼び手の要求ノブ（`IrodoriGenerateRequest.codecTileFrames`）なので、
-    // 入力を直せば通る = ADR 0107 の分類で 400 側。直上の `haloFrames` は配布形が宣言する数で、
-    // 呼び手が直せないため素の `Error` のまま残す。
+    // `tileFrames` is the caller's request knob (`IrodoriGenerateRequest.codecTileFrames`), so
+    // fixing the input makes it pass = the 400 side in ADR 0107's classification. The `haloFrames`
+    // just above is a number the distribution declares, which the caller cannot fix, so it stays a
+    // plain `Error`.
     throw new ModelInputError(
       `planCodecTiles: tileFrames ${tileFrames} が halo 2 枚ぶん（${2 * haloFrames}）` +
         "より大きい整数でない（採用できるフレームが 1 枚も残らない）",
@@ -83,12 +91,12 @@ export const assertCodecTileFrames = (tileFrames: number, haloFrames: number): v
 };
 
 /**
- * latent 長 S を、採用区間が隙間なく並ぶタイル列へ割る。
+ * Splits the latent length S into a tile sequence whose kept spans line up without gaps.
  *
- * `frames <= tileFrames` なら 1 枚（= 単発 decode と同じ実行）。それ以外は
- * `step = tileFrames − 2·haloFrames` フレームずつ採用し、その両側へ halo を足した窓を
- * decode する。窓が latent の外へはみ出す端では halo が縮むが、そこは真の境界なので
- * 文脈が足りないのではなく**要らない**。
+ * `frames <= tileFrames` gives one tile (= the same run as a single decode). Otherwise
+ * `step = tileFrames − 2·haloFrames` frames are kept at a time, and the window with a halo added on
+ * both sides is decoded. At an end where the window would stick out of the latent the halo
+ * shrinks, but that is a true boundary, so the context is not missing but **not needed**.
  */
 export const planCodecTiles = (
   frames: number,
@@ -105,7 +113,8 @@ export const planCodecTiles = (
   const tiles: CodecTile[] = [];
   for (let takeStart = 0; takeStart < frames; takeStart += step) {
     const takeEnd = Math.min(frames, takeStart + step);
-    // 左へ halo ぶん下げ、latent の両端へはみ出す場合だけ内側へスナップする。
+    // Move left by the halo, and snap inward only when it would stick out of either end of the
+    // latent.
     const start = Math.min(Math.max(0, takeStart - haloFrames), frames - tileFrames);
     tiles.push({
       start,
@@ -118,13 +127,13 @@ export const planCodecTiles = (
   return tiles;
 };
 
-/** タイル 1 枚を decode する（`[1,length,latentDim]` → `[1,1,hopLength·length]` の生波形）。 */
+/** Decodes one tile (`[1,length,latentDim]` → a raw waveform `[1,1,hopLength·length]`). */
 type CodecTileRunner = (
   latent: Float32Array<ArrayBuffer>,
   frames: number,
 ) => Promise<Float32Array<ArrayBuffer>>;
 
-/** {@link decodeTiles} が要る幾何（`pipelineConfig` の 2 欄 + 計画）。 */
+/** The geometry {@link decodeTiles} needs (2 fields of `pipelineConfig` + the plan). */
 type CodecDecodeOptions = {
   readonly latentDim: number;
   readonly hopLength: number;
@@ -132,11 +141,11 @@ type CodecDecodeOptions = {
 };
 
 /**
- * タイルを順に decode して**全長ぶん**の波形へ貼り合わせる。
+ * Decodes the tiles in order and stitches them into a waveform of **the full length**.
  *
- * `run` を注入にしてあるのは、この貼り合わせが「単発 decode とビット一致する」ことを実 GPU の
- * 門が**この関数そのもの**に対して測れるようにするため（テストが同じループを写経すると、
- * 写しが正しいだけで本体が誤っていても緑になる）。
+ * `run` is injected so that the real-GPU check can measure "this stitching is bit-identical to a
+ * single decode" on **this very function** (a test that copied the same loop would be green when
+ * only the copy is right and the real one is wrong).
  */
 export const decodeTiles = async (
   latent: Float32Array<ArrayBuffer>,
@@ -152,8 +161,8 @@ export const decodeTiles = async (
   const frames = latent.length / latentDim;
   const waveform = new Float32Array(frames * hopLength) as Float32Array<ArrayBuffer>;
   for (const tile of tiles) {
-    // MUST: 写して渡す（view のまま渡すと、バッファ全体を占めることを前提にした受け渡しの
-    // 契約から外れる）。
+    // MUST: pass a copy (passing the view breaks the hand-off contract, which assumes the array
+    // occupies its whole buffer).
     const slice = latent.slice(
       tile.start * latentDim,
       (tile.start + tile.length) * latentDim,
@@ -174,10 +183,11 @@ export const decodeTiles = async (
 };
 
 /**
- * 「採用区間の両側に halo ぶんの文脈があるか、そこが真の境界か」を確かめる。
+ * Confirms "each side of a kept span either has a halo's worth of context or is a true boundary".
  *
- * MUST: 落とさない。この条件だけがビット一致の根拠で、破れても値は**それらしいまま**
- * （継ぎ目付近が数 LSB 違うだけ）出てくる。幾何を触ったときに気づける席がここしか無い。
+ * MUST: do not remove this check. This condition alone is the ground for the bit identity, and when
+ * it breaks the values still come out **looking plausible** (only a few LSBs differ near the seams).
+ * This is the only place that notices when someone touches the geometry.
  */
 const assertTileContext = (
   tiles: readonly CodecTile[],

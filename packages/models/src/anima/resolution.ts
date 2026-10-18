@@ -1,82 +1,96 @@
 /**
- * 生成解像度の綴りと**受理集合**（任意解像度・非正方形）。
+ * Spelling of the generation resolution and its **accepted set** (any resolution, non-square).
  *
- * ## なぜ受理集合を入口で持つのか
+ * ## Why the accepted set is held at the entry
  *
- * 受理できない形をそのまま流すと、落ちるのは資産をロードし終えた後の深い場所（rope 素表の
- * 行数超過 / タイル配置の不成立）で、診断も「どのノブが悪いのか」を言わない。`S` の上限
- * （export 時の `torch.export.Dim("S")`）は IR には残らないので、深い場所でも検査されない。
- * 入口で**条件を名指しして落とす**のが fail loudly。
+ * An unacceptable shape passed through fails deep down after the assets are loaded (rope base table
+ * rows exceeded / tile layout impossible), and the diagnosis does not say "which knob is wrong".
+ * The upper bound of `S` (`torch.export.Dim("S")` at export) does not survive in the IR, so it is
+ * not checked deep down either. Failing **with the condition named** at the entry is what fail
+ * loudly means here.
  *
- * MUST: ここは**入口の綴り検査**であって、形の正本ではない。latent が patch で割り切れるか
- * （`dit-tokens.ts` の `latentSides`）・rope 素表の行数に収まるか（同 `ropeTables`）・タイルが
- * 組めるか（`tiling.ts` の `planTileAxis`）は、資産から引いた実際の値で別途落ちる。ここの
- * 定数はその**写し**で、資産を差し替えたときに追随するのは向こう側である。
+ * MUST: this is **the entry's spelling check**, not the source of truth for the shape. Whether the
+ * latent divides by the patch (`latentSides` in `dit-tokens.ts`), fits the rope base table's rows
+ * (`ropeTables`, same file) and allows a tile layout (`planTileAxis` in `tiling.ts`) fail
+ * separately on the actual values read from the assets. The constants here are **copies** of those;
+ * when the assets change, that side is what follows.
  *
- * NOTE: タイルの**本数**は入口で見ない。丸め等間隔配置（ADR 0033 追記 2026-09-02）では
- * `ceil((latent − 64) / 56) + 1` で、この受理集合の上限 latent 256 でも 5 本にしかならない
- * ため、跳ねる辺そのものが存在しない。下限 512px を満たせばタイルは必ず組める。
+ * NOTE: the **number** of tiles is not checked at the entry. With the rounded equal-spacing layout
+ * (ADR 0033 addendum 2026-09-02) it is `ceil((latent − 64) / 56) + 1`, only 5 even at this accepted
+ * set's upper latent 256, so no side is rejected for it. Meeting the 512px lower bound always
+ * allows a tile layout.
  *
- * MUST: 受理集合を manifest に書かない（ADR 0038 §2「導出元を一意に保つ」）— アーキ定数は
- * パイプライン実装、`S` の上限は export 時の `torch.export.Dim` 宣言（IR には残らない）、資産の
- * 実在は weights / assets 表。**このモジュールの定数が受理集合の正本**である。
+ * MUST: do not write the accepted set into the manifest (ADR 0038 §2 "keep one derivation source")
+ * — architecture constants belong to the pipeline implementation, the upper bound of `S` to the
+ * `torch.export.Dim` declaration at export (not kept in the IR), and the existence of assets to the
+ * weights / assets tables. **The constants of this module are the source of truth for the accepted
+ * set**.
  */
 
 import { ModelInputError } from "../errors.ts";
 import { ANIMA_SPATIAL_COMPRESSION } from "./dit-tokens.ts";
 
-/** 画像の寸法（ピクセル）。軸の順は綴りと同じ `幅 × 高さ`。 */
+/** Image size (pixels). Axis order is the same as the spelling, `width × height`. */
 export type ImageSize = {
   readonly width: number;
   readonly height: number;
 };
 
 /**
- * DiT の patch の一辺（Anima の `patch_size = (1,2,2)`）。
- * MUST: 実際の patch 幾何は**グラフの入出力幅から割り出す**（`ditPatchGeometry`）。ここは
- * 入口で刻みを言うためだけの写しで、食い違えば `latentSides` が資産側の値で落とす。
+ * Side of the DiT patch (Anima's `patch_size = (1,2,2)`).
+ * MUST: the actual patch geometry is **derived from the graph's input/output widths**
+ * (`ditPatchGeometry`). This is a copy only for stating the step at the entry; on a mismatch
+ * `latentSides` fails on the asset-side value.
  */
 const DIT_PATCH_SIDE = 2;
 
-/** 各辺の刻み（= 空間圧縮 8 × patch 2）。latent の各辺が patch で割り切れる最小の単位。 */
+/**
+ * Step of each side (= spatial compression 8 × patch 2). The smallest unit at which each latent
+ * side divides by the patch.
+ */
 export const RESOLUTION_GRANULARITY = ANIMA_SPATIAL_COMPRESSION * DIT_PATCH_SIDE;
 
 /**
- * 各辺の下限。**VAE タイル decoder の latent 64**（= 512px）が 1 枚も入らない形は組めない
- * （`planTileAxis` が「latent 全長がタイル幅より小さい」で落とす）。
+ * Lower bound of each side. A shape that cannot hold even one **latent 64 of the VAE tile decoder**
+ * (= 512px) cannot be laid out (`planTileAxis` fails with "the latent length is smaller than the
+ * tile width").
  */
 export const MIN_RESOLUTION_SIDE = 512;
 
 /**
- * latent の各辺の上限。rope の**軸別素表の行数**（Anima では 128 行 = トークン 128 =
- * latent 256 = 2048px 相当）がモデル側の位置表の天井そのもので、超えると上流でも組めない。
+ * Upper bound of each latent side. The **row count of the per-axis rope base tables** (128 rows in
+ * Anima = 128 tokens = latent 256 = 2048px) is the ceiling of the model's position table itself;
+ * beyond it, upstream cannot build it either.
  *
- * NOTE（1920px 超はモデル宣言外の外挿位置 — 2026-09-04 裁定）: 素表の行数を決めているのは
- * **t 軸の上限**で、h / w 軸の宣言（`rope.max_size` = 120 トークン = 1920px）はそれより低い。
- * したがって 1920px 超〜2048px の要求は表の行としては引けるが、モデルが学習時に宣言した
- * h / w の範囲の**外側の位置**を使うことになる。数値は上流と同じ式で定義されるので静的形との
- * ビット一致は保たれ、差が出るとすれば学習分布外の位置に由来する**品質だけ**（未実測）。
- * 受理集合はこの理由では狭めない（実測なしに配布形の自由度を削らない）。
+ * NOTE (above 1920px are extrapolated positions outside the model's declaration — ruling of
+ * 2026-09-04): the row count of the base tables is set by **the upper bound of the t axis**, and
+ * the declaration of the h / w axes (`rope.max_size` = 120 tokens = 1920px) is lower. So a request
+ * above 1920px up to 2048px can be read as table rows, but uses **positions outside** the h / w
+ * range the model declared at training. The values are defined by the same formula as upstream, so
+ * bit equality with the static shape holds; any difference is **quality only**, from positions
+ * outside the training distribution (not measured). The accepted set is not narrowed for this
+ * reason (the distribution's freedom is not cut without a measurement).
  */
 const MAX_LATENT_SIDE = 256;
 
-/** 各辺の上限（ピクセル）。素表の天井を解像度へ写したもの。 */
+/** Upper bound of each side (pixels). The base tables' ceiling mapped to resolution. */
 export const MAX_RESOLUTION_SIDE = MAX_LATENT_SIDE * ANIMA_SPATIAL_COMPRESSION;
 
 /**
- * トークン長 `S` の上限（S 形グラフを export したときの `torch.export.Dim("S", max=16384)` —
- * ADR 0034。IR には残らない）。
+ * Upper bound of the token length `S` (`torch.export.Dim("S", max=16384)` when the S-form graph was
+ * exported — ADR 0034; not kept in the IR).
  */
 export const MAX_DIT_TOKENS = 16384;
 
-/** 正方か。 */
+/** Whether the size is square. */
 const isSquare = (size: ImageSize): boolean => size.width === size.height;
 
 /**
- * 綴り → 寸法。`1344x768` と、正方の略記 `512`（= `512x512`）を受ける。
+ * Spelling → size. Accepts `1344x768` and the square shorthand `512` (= `512x512`).
  *
- * MUST: 受理できない形は**条件を名指して**落とす。「解像度が変」だけだと、刻み・下限・
- * 天井・タイル本数・`S` の上限のどれに当たったのかが分からず、ノブを 1 つずつ試すことになる。
+ * MUST: fail an unacceptable shape **with the condition named**. "The resolution is wrong" alone
+ * does not say which of step, lower bound, ceiling, tile count or the `S` bound was hit, and the
+ * knobs end up being tried one by one.
  */
 export const parseResolution = (raw: string): ImageSize => {
   const parts = raw.toLowerCase().split("x");
@@ -91,21 +105,26 @@ export const parseResolution = (raw: string): ImageSize => {
   return size;
 };
 
-/** `1344x768` / 正方は略記（`512`）。{@link parseResolution} の逆で、往復は恒等。 */
+/**
+ * `1344x768` / the shorthand (`512`) for a square. The inverse of {@link parseResolution}; the
+ * round trip is the identity.
+ */
 export const formatResolution = (size: ImageSize): string =>
   isSquare(size) ? `${size.width}` : `${size.width}x${size.height}`;
 
-/** DiT のトークン長 `S`（= 各辺の刻みで割った格子の積）。 */
+/** DiT token length `S` (= the product of the grid obtained by dividing each side by the step). */
 const tokensOf = (size: ImageSize): number =>
   (size.width / RESOLUTION_GRANULARITY) * (size.height / RESOLUTION_GRANULARITY);
 
 /**
- * 受理集合の検査（4 条件）。呼び出し側の綴りに依らず**同じ順**で見る — 複数破っている形で
- * 診断が run ごとに変わると、直した先でまた別の条件に当たったのかが分からない。
+ * Accepted-set check (4 conditions). Checked **in the same order** whatever the caller's spelling —
+ * if the diagnosis of a shape that breaks several conditions changed per run, one could not tell
+ * whether the fix led to another condition.
  *
- * NOTE: 辺が 32 px の倍数でない解像度も受理するが、`S` が 4 の倍数でない形では既定席（a8 + s16）の
- * self-attention の ③PV と S の格納が f32 で走る（docs/limitations.md の融合 attention の a8 / s16 の節）。
- * 受理集合はこの理由では狭めない。
+ * NOTE: resolutions whose sides are not multiples of 32 px are accepted too, but for shapes where
+ * `S` is not a multiple of 4 the default preset's (a8 + s16) self-attention stores ③PV and S in f32
+ * (docs/limitations.md, the section on fused attention a8 / s16). The accepted set is not narrowed
+ * for this reason.
  */
 export const assertAcceptableResolution = (size: ImageSize): void => {
   const label = `${size.width}×${size.height}`;
@@ -138,9 +157,10 @@ export const assertAcceptableResolution = (size: ImageSize): void => {
     }
   }
   const tokens = tokensOf(size);
-  // NOTE: 現行定数では各辺の上限（2048 = 格子 128）から S ≤ 128² = MAX_DIT_TOKENS なので、
-  // この分岐に入る形は作れない。定数（辺の上限 / 刻み / S の上限）を動かしたときの保険として
-  // 残す — 到達しないことは定数関係の門（`anima_resolution_test.ts`）が固定する。
+  // NOTE: with the current constants the side bound (2048 = grid 128) gives S ≤ 128² =
+  // MAX_DIT_TOKENS, so no shape reaches this branch. It stays as insurance for when the constants
+  // (side bound / step / S bound) move — the check on the constant relations
+  // (`anima_resolution_test.ts`) pins that it is unreachable.
   if (tokens > MAX_DIT_TOKENS) {
     throw new Error(
       `解像度 ${label} のトークン長 S=${tokens} が上限 ${MAX_DIT_TOKENS} 超` +
