@@ -13,15 +13,22 @@ torch.export → コンテナ `krm`〈IR v2〉・uv 管理）。pnpm workspace +
   コミットメッセージ含む）に書かない**。
 - 対話の日本語の用語は [docs/GLOSSARY.ja.md](docs/GLOSSARY.ja.md)（意味から決める・直訳しない）。
 
-## 言語（移行中 — ADR 0130〈proposed〉）
+## Language (ADR 0130 — phase 2 in progress since 2026-10-18)
 
-- **新しく書くもの（コード・コメント・エラー文言・コミットメッセージ・docs・ADR）は英語**。
-  既存の日本語（コメント・docs・ADR・テストの文言）はフェーズ 2 で整理しながら英訳する —
-  移植中は同じファイルに両言語が混ざってよい。対話は日本語。
-- README・モデルカード生成物は従来どおり英語。例外: コードが実際に投げるエラー文言の逐語引用と、
-  日本語 TTS のデモ入力は日本語のまま（引用であって散文ではない）。
-- **日本語で対話するときは [docs/GLOSSARY.ja.md](docs/GLOSSARY.ja.md)（対話用の用語表）を先に読み、
-  その語で話す**（英語で対話するときは不要）。
+- **The repository is English**: code, identifiers, comments and JSDoc, Python docstrings, WGSL comments,
+  error messages and diagnostics, commit messages, ADRs, everything under `docs/`, READMEs, the CHANGELOG
+  and generated model cards. **Commit messages are all-English Conventional Commits**
+  (`<type>(<scope>): <description>`, body explains why) — this overrides any personal default that writes
+  the description in Japanese. Do not add new Japanese text anywhere else.
+- **Japanese appears in three places only**: the conversation with the maintainer; [docs/GLOSSARY.ja.md](docs/GLOSSARY.ja.md)
+  (English term → the Japanese used in conversation — read it first when the conversation is in Japanese and
+  use its terms); and material that is Japanese by nature (inputs of the Japanese TTS, tokenizer and generation
+  tests, and their fixtures). Existing Japanese text is being translated in phase 2 step 2-9; until then a
+  file may still mix both languages. Progress: `node tools/lang/scan-japanese.ts`.
+- Terms: English follows ordinary industry usage (no in-house coinages); the Japanese terms of the
+  conversation are chosen from meaning, not by literal translation (ADR 0130 decisions 4 and 5).
+- Checks: `node tools/lang/check-doc-links.ts` (Markdown links and `DECIDED:` pointers resolve) and
+  `node tools/lang/code-skeleton.ts --compare <ref>` (a comment-translation commit changed no code).
 
 ## 構成
 

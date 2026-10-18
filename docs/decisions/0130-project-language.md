@@ -1,6 +1,7 @@
 # 0130: Project language — English in the repository, Japanese in conversation
 
-- Status: proposed (2026-10-16; to be accepted by the maintainer after review)
+- Status: accepted (2026-10-18 — the maintainer's rulings at the plan check of phase 2 step 2-9 fill the
+  open points; see the addendum)
 - Date: 2026-10-16
 - Related: [0037](0037-karume-monorepo.md) (monorepo, brand and distribution — the published
   packages whose documentation this ADR covers) / [0075](0075-quant-presentation.md) (quant
@@ -92,7 +93,9 @@ rule is to choose the Japanese term from the concept's meaning, not by translati
    plans, reports, decision requests); (b) `docs/GLOSSARY.ja.md`, which maps an English term to its
    meaning and to the Japanese used in conversation; (c) material that is Japanese by nature —
    inputs for Japanese TTS and Japanese tokenizer / generation tests, Japanese fixtures, and
-   user-facing strings that are Japanese today until they are translated (decision 6). Rationale:
+   user-facing strings that are Japanese today until they are translated (decision 6); (d) the research
+   snapshots under `docs/research/` written before 2026-10-18, which stay Japanese behind an English header
+   line — research written after that date is English (ruling of 2026-10-18). Rationale:
    the maintainer's working language is Japanese; translating a Japanese test input would change
    what the test exercises.
 
@@ -113,9 +116,14 @@ rule is to choose the Japanese term from the concept's meaning, not by translati
    history behind a coinage.
 
 6. **Existing Japanese material is translated in phase 2 of the migration, not during the port.**
-   - ADRs are first reorganised, then translated. Fully superseded or withdrawn ADRs, and content
-     judged excessive in the reorganisation, are excluded from translation and marked as such;
-     ADRs that are still in force (including the partly superseded ones) are translated.
+   - ADRs are first triaged for force, then translated. For every decision still in force the triage
+     asks whether the constraint that produced it still holds: a decision that was provisional under a
+     constraint that is gone is re-graded by the maintainer (MUST to SHOULD or MAY, or marked superseded
+     by the later fact) before it is translated, and the translation records the new grade with its
+     date. "Excessive" is about force, not volume (ruling of 2026-10-18). Fully superseded or withdrawn
+     ADRs are excluded from translation and marked as such (an English status line; the number is
+     kept); ADRs that are still in force (including the partly superseded ones) are translated, with
+     the history-only narrative of their addenda compressed to the decision and its date.
    - Code comments and JSDoc are rewritten, not translated verbatim: each comment is checked against
      the code it describes, and a stale or wrong statement is corrected or removed rather than
      carried into English.
@@ -155,7 +163,11 @@ rule is to choose the Japanese term from the concept's meaning, not by translati
 
 - The "言語" section of the project `CLAUDE.md` is rewritten in phase 2: repository English,
   conversation Japanese, the commit convention of decision 2, and the transitional rule removed once
-  phase 2 completes. Until then the transitional rule of decision 7 governs.
+  phase 2 completes. Until then the transitional rule of decision 7 governs. (Rewritten at step 2-9a,
+  2026-10-18.)
+- `tools/lang/` holds the three checks of phase 2: the Japanese-text scan (progress and the basis of the
+  gate), the Markdown link and `DECIDED:` pointer check, and the code-skeleton check that proves a
+  comment-translation commit changed no code.
 - `docs/glossary.md` becomes an English glossary (term → meaning summary → pointer to the canonical
   source). Its "Japanese to use" column moves to `docs/GLOSSARY.ja.md`, which stays the only Japanese
   document in `docs/`. Meaning lives in the canonical source (ADR or doc); both glossaries remain
@@ -188,29 +200,53 @@ See "Open points".
 | Phase                        | Language work                                                                                                                                                         | Done when                                                                 |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | Phase 1 — port (in progress) | Decision 7: new material English, untouched Japanese stays, ported tests keep Japanese text                                                                           | Every lane runs on Node with the Deno baseline counts                     |
-| Phase 2 — clean-up, step 2-1 | Reorganise ADRs (exclude and mark superseded / withdrawn / excessive), then translate the rest; `docs/glossary.md` to English; `CLAUDE.md` language section rewritten | Every ADR in force is English; excluded ADRs carry an English status line |
-| Phase 2 — clean-up, step 2-2 | Rewrite comments and JSDoc with a fact check; translate error messages together with their assertions; translate the remaining `docs/`                                | No Japanese outside the places of decision 3                              |
-| Phase 3 — behaviour change   | None from this ADR                                                                                                                                                    | —                                                                         |
+| Phase 2 — step 2-9a (2026-10-18) | Rulings recorded here; `CLAUDE.md` language section rewritten; the three checks in `tools/lang/` | Baseline taken: 170,828 lines with Japanese text in tracked files |
+| 2-9b | ADRs: force triage over every ADR → the maintainer's rulings → translation in numeric batches of five, each with an independent review | Every ADR in force is English; excluded ADRs carry an English status line; links and `DECIDED:` pointers resolve |
+| 2-9c | `docs/*.md` and `docs/glossary.md` (English; the Japanese column moves to `GLOSSARY.ja.md`); `CLAUDE.md`, `AGENTS.md`, `.claude/ACTIVE_DESIGN.md` as a whole; CHANGELOG remnants; the English header line on research snapshots | No Japanese under `docs/` outside `GLOSSARY.ja.md` and `research/` |
+| 2-9d | Comments and JSDoc of `packages/*/src` rewritten with a fact check; WGSL comments translated and the snapshots regenerated in the same commit | Code skeleton unchanged per file; lanes green; sha256 rows unchanged |
+| 2-9e | Error messages with their assertions, module by module; verbatim quotes in docs in the same commit | All lanes green with unchanged test counts |
+| 2-9f | Python exporter (`tools/exporter`, sources and tests) | AST unchanged apart from docstrings; `uv run pytest` green |
+| 2-9g | Remaining tools and fixture notes | The scan shows no Japanese there |
+| 2-9h | Language gate (`verify_language_test.ts`, core lane) with an allow-list of the files that keep Japanese by nature or by this staging | Gate green; allow-list recorded here |
+| 0.15.x (after the release) | Comments in `packages/*/tests` (about 37,000 lines) and `tools/export-recipes` (about 30,000 lines) | Allow-list entries removed as each area is translated |
+| Phase 3 — behaviour change | None from this ADR | — |
 
 ## Open points
 
-- **WGSL comments.** They follow the same rule unless the maintainer objects. The cost is the
-  snapshot regeneration described above (228 of 258 fixtures carry Japanese comments today).
-- **Order of ADR translation.** Not decided (for example: ADRs referenced by `DECIDED:` pointers
-  first, or numeric order, or by package).
-- **Reviewer of translations.** Not decided who reviews translated ADRs, comments and messages, and
-  whether an independent review leg is required per batch.
-- **Criteria and form of the ADR reorganisation.** What counts as "excessive" content, whether
-  excluded ADRs stay in `docs/decisions/` untranslated with an English status line or are removed
-  (git keeps them), and whether ADR numbers are kept. Keeping numbers is the low-risk default because
-  of the `DECIDED:` pointers.
-- **Snapshot documents.** Whether time-stamped research records in `docs/research/` (171 entries)
-  are translated or kept as Japanese snapshots with an English header.
-- **Agent instruction files.** Whether `CLAUDE.md`, `AGENTS.md` and `.claude/ACTIVE_DESIGN.md` are
-  rewritten in English as a whole or only in their language section; decision 1 reads as "as a
-  whole", but only the language section is named in the plan.
-- **Enforcement.** Whether a lint check (Japanese characters outside an allow-list of paths such as
-  `docs/GLOSSARY.ja.md` and Japanese test inputs) is added once phase 2 completes.
-- **Japanese user-facing strings.** The list of strings that remain Japanese until translated
-  (decision 3c) is not yet enumerated.
-- **Exact wording of the new `CLAUDE.md` language section** and the date phase 2 starts.
+All resolved by the maintainer's rulings of 2026-10-18 (step 2-9 plan check):
+
+- **WGSL comments — resolved.** Translated; the snapshots are regenerated in the same commit (2-9d).
+  249 of 279 fixtures carry Japanese comments on 2026-10-18.
+- **Order of ADR translation — resolved.** The force triage runs over every ADR first; translation
+  then goes in numeric order in batches of five, so an interrupted run resumes at a batch boundary.
+- **Reviewer of translations — resolved.** One independent review leg per batch (medium effort; high
+  for records about numerics or GPU code) with a closed checklist — no decision lost, status line
+  present, links and `DECIDED:` pointers resolve, terms per the glossaries — and the maintainer's
+  session samples one ADR per batch plus every section a `DECIDED:` pointer names.
+- **Criteria and form of the ADR reorganisation — resolved.** "Excessive" means a decision whose
+  force outlived the constraint that produced it (decision 6; re-graded by the maintainer), not the
+  volume of text. Excluded ADRs stay in `docs/decisions/` untranslated with an English status line;
+  numbers are kept.
+- **Snapshot documents — resolved.** Kept Japanese behind an English header line (decision 3 (d)).
+- **Agent instruction files — resolved.** Rewritten in English as a whole (2-9c).
+- **Enforcement — resolved.** A test in the core lane (2-9h) fails on Japanese text outside an
+  allow-list; the allow-list is recorded in this ADR.
+- **Japanese user-facing strings — resolved.** The error messages and the three `console` messages of
+  `packages/*/src` (2026-10-18 scan); translated at 2-9e.
+- **Exact wording of the new `CLAUDE.md` language section — resolved.** Written at step 2-9a; phase 2
+  of the language work started on 2026-10-18.
+
+## Addendum (2026-10-18) — rulings at the plan check of step 2-9
+
+- **Scope for 0.15.0.** The material that readers of the published packages and of the design record
+  see goes first: ADRs in force, `docs/`, the sources of `packages/*/src` (comments, JSDoc, WGSL
+  comments, messages), the Python exporter, the tools and the agent instruction files — about 66,000
+  of the 170,828 lines with Japanese text counted on 2026-10-18. Comments in `packages/*/tests`,
+  `tools/export-recipes` and the research snapshots follow in 0.15.x (research stays Japanese by
+  decision 3 (d)); until then the gate's allow-list names them.
+- **Unpushed history.** The 27 commits on `wip/0.15` whose subject is Japanese (2026-10-17 and 18)
+  are not reworded: decision 2 does not rewrite history, and the documents cite their hashes.
+- **Baseline (tracked files, line-based, 2026-10-18).** `docs/decisions` 19,541 lines in 129 files;
+  `docs/` otherwise 5,651; `docs/research` 23,964; `packages/runtime/src` 16,512; `packages/models/src`
+  11,911; `packages/hub/src` 1,433; tests of the three packages and e2e 37,113; test fixtures 11,964;
+  `tools/exporter` 6,680 and its tests 3,806; `tools/export-recipes` 30,414; the other tools 703.

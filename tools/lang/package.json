@@ -1,0 +1,20 @@
+{
+  "name": "@karume/lang-tools",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Repository language tools (ADR 0130): Japanese-text scan, Markdown link check, comment-only change check.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "scan": "node scan-japanese.ts",
+    "links": "node check-doc-links.ts",
+    "skeleton": "node code-skeleton.ts",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "oxc-parser": "catalog:"
+  },
+  "devDependencies": {
+    "@karume/test-support": "workspace:*"
+  }
+}

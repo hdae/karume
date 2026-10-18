@@ -20,6 +20,7 @@
     "packages/*/*.ts",
     "packages/*/src/**/*.ts",
     "packages/*/tests/**/*.ts",
+    "tools/lang/**/*.ts",
     "tools/lint/**/*.ts",
     "tools/published-smoke/**/*.ts",
     "tools/verify-diff/**/*.ts",
