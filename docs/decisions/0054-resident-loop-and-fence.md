@@ -21,7 +21,7 @@ single wait.
    slot backing, run arena) are closed inside a Session, so passing data between Sessions went
    through the host at two fences. A resident tensor **holds only bytes and a size** (no dtype or
    shape it would have to invent). It is built only by `GpuContext.createResident` (async, inside an
-   error scope — a failed allocation is otherwise a silently invalid buffer) and MUST be destroyed only
+   error scope — a failed allocation is otherwise a silently invalid buffer) and is destroyed only
    when no baked bind group refers to it (fail loudly — a silent destroy corrupts unrelated dispatches).
 2. **BatchScope + Session.enqueue — a fence-free span.** One pair of error scopes (out-of-memory +
    validation) wraps the span; the only fence is `finish()`. **The no-overtaking invariant in a new form
@@ -37,7 +37,7 @@ single wait.
    are resident, and the loop (40 steps × 1+V forwards) is one batch. CFG combination and the Euler
    update are **small IR graphs built on the host** (3 + 2 nodes,
    `packages/models/src/irodori/host/sampler-graph.ts`) on a separate Session. **Their association,
-   variant and argument order MUST match the TS source of truth (`host/sampler.ts`) op by op** (f32
+   variant and argument order match the TS source of truth (`host/sampler.ts`) op by op** (f32
    addition is not associative; a mismatch splits the WAV sha256). This works because the loop is fully
    static (CFG window and variant set depend only on the step index). A device with gpuTiming takes the
    host loop (decision 2); the digest is the same.

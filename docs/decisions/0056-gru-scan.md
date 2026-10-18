@@ -131,7 +131,8 @@ branch point).
 **(c) The WGSL body of `sigmoid` is shared with the plain elementwise op** — `SIGMOID_STABLE_WGSL`
 is imported from `codegen/numerics-wgsl.ts` (moved there from `codegen/elementwise.ts` on 2026-09-05;
 same rule as `silu.ts`). A copy could split the rounding of the primitive and the fused version. `tanh`
-is a WGSL builtin, so there is nothing to share.
+is shared too: the fused kernel uses `TANH_STABLE_WGSL` (the key moved to `gru_scan:v2` for that
+change, which cured the silent NaN of Metal fast-math — `packages/runtime/src/kernels/gru-scan.ts`).
 
 **(d) The order and bracketing of operations follow the decomposition verbatim** — the update is
 **`h' = (h − n)·z + n`**. The mathematically equal `(1 − z)·n + z·h` is **a different rounding

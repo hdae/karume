@@ -25,7 +25,7 @@ existing ops do not change) and closes both holes.
    ATen; 1' = extended atomic; 2 = split between Core ATen (attr variants of core ops) and extended
    composite (non-core); 3 = fusion. Old numbers stay in past ADRs and ledger NOTEs as snapshots and
    are not used in new text.
-2. **Whether an ADR is needed depends on one test: Core ATen membership.** The ticket is the
+2. **Whether an ADR is needed depends on one test: Core ATen membership.** The test is the
    measured `torch.Tag.core in op.tags` (a machine test; the ledger records the command). Core ops
    and attr variants of them under another op name (`gelu_tanh` — a consequence of the empty-attrs
    contract, ADR 0012) belong to the **Core ATen layer: a ledger NOTE only**. IR names derived from
