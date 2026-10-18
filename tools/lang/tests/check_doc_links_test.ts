@@ -41,8 +41,7 @@ describe("linkTargets / decidedPointers", () => {
 
   it("extracts decision-record paths and ADR numbers from DECIDED: lines only", () => {
     // The marker is assembled so that the repository-wide check does not read this test as a pointer.
-    const source =
-      `// ${MARKER} docs/decisions/0042-plan.md#追記 and ADR 0058 決定 2\n// see ADR 0001 (not a pointer)\n`;
+    const source = `// ${MARKER} docs/decisions/0042-plan.md#追記 and ADR 0058 決定 2\n// see ADR 0001 (not a pointer)\n`;
     assertEquals(
       decidedPointers(source).map((t) => t.target),
       ["docs/decisions/0042-plan.md#追記", "adr:0058"],
