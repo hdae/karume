@@ -1,46 +1,52 @@
 /**
- * キャッシュ在庫の照会（{@link listCachedAssets}）と、**選択単位**の削除
- * （{@link evictCachedAssets}）。`clearHubCache`（名前空間まるごと）の隣に置く細粒度の面で、
- * 単位は取得と同じ「model / quant の 1 組」。
+ * Querying the cache inventory ({@link listCachedAssets}) and deleting **per selection**
+ * ({@link evictCachedAssets}). A fine-grained surface next to `clearHubCache` (the whole
+ * namespace); the unit is the same as for fetching, "one model / quant pair".
  *
- * 削除が単なる「対象の参照を消す」で済まないのは、同じファイルを複数の選択が共有するため
- * （quant を替えても tokenizer や f16 の text_encoder は同じ 1 本）。素朴に消すと、消していない
- * 選択が黙って部分在庫に落ち、次の起動でその選択だけ再 DL が走る。そこで**参照勘定**を挟む:
- * 他の選択が在庫として成立している（＝全参照が揃っている）なら、その選択が使うファイルは
- * 消さずに残す。
+ * Deletion is not just "delete the target's refs" because several selections share the same files
+ * (switching the quant keeps the same tokenizer or f16 text_encoder). Deleting naively would
+ * silently drop selections that were not deleted into a partial inventory, and the next start would
+ * re-download just those. So **reference counting** sits in between: if another selection is
+ * complete in the inventory (= all of its refs are present), the files it uses are kept.
  *
- * ただし**対象と参照集合がまったく同じ選択は守る側に数えない**（例: 重みは同じで session の
- * 計算ノブだけ違う `f16` と `f16-c16`）。キャッシュの粒度では両者を区別できず「片方だけ消す」は
- * 定義上できないので、守る側に数えると 1 本も消えないのに「守った」と名乗る嘘の答えになる。
- * どの選択が巻き添えで部分在庫に落ちたかは {@link EvictedAssets.alsoEvicted} が名乗る。
- * 守る側をアプリが決めたいときは {@link CacheInventoryOptions.protect} で明示する。
+ * However, **a selection with exactly the same ref set as the target is not counted as a
+ * protector** (for example `f16` and `f16-c16`, same weights, differing only in the session's
+ * compute knobs). The cache granularity cannot tell them apart and "delete only one of them" is
+ * impossible by definition, so counting it as a protector would give a lying answer that claims
+ * "protected" while nothing is deleted. {@link EvictedAssets.alsoEvicted} names which selections
+ * were dropped into a partial inventory as collateral. When the app wants to decide the protectors,
+ * it names them with {@link CacheInventoryOptions.protect}.
  *
- * MUST: 在庫の問い合わせは**取得元へ委ねる**（`source.ts` ⑥⑦）— キャッシュキーの綴りは取得層の
- * 所有物で、hub が組み立てると取得層の版が上がるたびに「消したつもりで残る」形が生まれる。
- * MUST: 参照の同一性は {@link fileRefKey}（越境参照は別リポの同名 path を別の 1 本として数える）。
+ * MUST: inventory queries are **delegated to the source** (`source.ts` (6) (7)) — the spelling of
+ * cache keys belongs to the fetch layer, and if hub built them, every new version of the fetch
+ * layer could produce entries "believed deleted but still there".
+ * MUST: ref identity is {@link fileRefKey} (a cross-repo reference counts a same-named path of
+ * another repo as a separate file).
  *
- * NOTE: manifest 本体（`karume.json`）のエントリは対象外 — URL キーで小さく、選択の所有物でも
- * ない（丸ごと消すのは `clearHubCache`）。
+ * NOTE: the entry of the manifest itself (`karume.json`) is out of scope — it is small, keyed by
+ * URL, and owned by no selection (deleting everything is `clearHubCache`).
  *
- * ## weights の絞り込み（{@link ResolveOptions.weights}）が勘定に効く形
+ * ## How narrowing the weights ({@link ResolveOptions.weights}) affects the counting
  *
- * 選択は {@link ResolveOptions} なので、対象にも `protect` にも「weights の部分集合」を渡せる。
- * 効き方は 1 つ — **参照の集合が絞ったぶんだけ小さくなる**（`resolveSelection` の結果がそのまま
- * 勘定の材料）:
+ * A selection is a {@link ResolveOptions}, so both the target and `protect` can take "a subset of
+ * the weights". It has one effect — **the ref set shrinks by what was narrowed** (the result of
+ * `resolveSelection` is the input to the counting as is):
  *
- * - 照会（{@link listCachedAssets}）… `cached` / `missing` は絞った参照だけを数える。ある役割
- *   （gemma4 の `drafter`）を落とし済みかを、本体の在庫と独立に問える。
- * - 削除（{@link evictCachedAssets}）… 消す候補が絞った参照だけになる。**同じ (model, quant) の
- *   残りは守る側に数えない**（守る側の候補は「対象と label の違う選択」で、同じ label の
- *   別の部分集合は候補に上がらない）ので、weights については「本体は残して drafter だけ消す」が
- *   書ける（ただし共通 assets〈tokenizer / PLE〉は守られない — `docs/known-issues.md`）。
- * - 巻き添え（{@link EvictedAssets.alsoEvicted}）… 数えるのは**他の (model, quant)** だけで、
- *   同じ選択の残りは載らない。同じ label の中で部分在庫になったかどうかは、必要なら
- *   {@link listCachedAssets} をもう一度引いて見る（label は `"<model>/<quant>"` のままで、
- *   部分集合を名乗る欄は持たない）。
- * - ラベル（{@link KeptAsset.sharedWith} / {@link EvictedAssets.alsoEvicted}）は絞っても
- *   `"<model>/<quant>"` のまま。`protect` に同じ label の部分集合を 2 つ並べると**両方が守る**
- *   （同じ label が 2 度出ないよう `sharedWith` は一意化する）。
+ * - Query ({@link listCachedAssets}) … `cached` / `missing` count only the narrowed refs. Whether a
+ *   role (gemma4's `drafter`) has been downloaded can be asked independently of the main model.
+ * - Deletion ({@link evictCachedAssets}) … only the narrowed refs are deletion candidates. **The
+ *   rest of the same (model, quant) is not counted as a protector** (protector candidates are
+ *   "selections with a label different from the target's"; another subset of the same label is not
+ *   a candidate), so for the weights, "keep the main model and delete only the drafter" can be
+ *   written (but the shared assets — tokenizer / PLE — are not protected; see
+ *   `docs/known-issues.md`).
+ * - Collateral ({@link EvictedAssets.alsoEvicted}) … counts only **other (model, quant) pairs**;
+ *   the rest of the same selection is not listed. Whether something became partial within the same
+ *   label can, if needed, be checked by calling {@link listCachedAssets} again (the label stays
+ *   `"<model>/<quant>"`, with no field naming the subset).
+ * - Labels ({@link KeptAsset.sharedWith} / {@link EvictedAssets.alsoEvicted}) stay
+ *   `"<model>/<quant>"` even when narrowed. Listing two subsets of the same label in `protect`
+ *   makes **both protect** (`sharedWith` is deduplicated so the same label does not appear twice).
  */
 
 import { HubError } from "./errors.ts";
@@ -49,73 +55,85 @@ import { type ResolveOptions, resolveSelection, selectionRefs } from "./resolve.
 import { type LoadedManifest, pinnedSourceOf } from "./session.ts";
 import { type PinnedSource, sourceForRef } from "./source.ts";
 
-/** 在庫の照会・削除の作法（取得の面と同じ差し替え点）。 */
+/** Options for inventory query and deletion (the same replacement points as the fetch surfaces). */
 export type CacheInventoryOptions = {
-  /** `CacheStorage` の差し替え（テスト用）。無指定は取得層の既定 = `globalThis.caches`。 */
+  /**
+   * Replacement for `CacheStorage` (for tests). When omitted, the fetch layer's default =
+   * `globalThis.caches`.
+   */
   readonly caches?: CacheStorage;
   /**
-   * 守る側の選択を明示する（**{@link evictCachedAssets} だけが読む** — 在庫の照会に守る側は
-   * 無い）。無指定なら manifest の全選択が候補（ただし対象と参照集合が同じものは除く）で、
-   * 指定するとこの一覧だけが候補になる。「全参照が在庫にあるものだけが実際に守る」のは
-   * どちらも同じ。
+   * Names the protecting selections explicitly (**read only by {@link evictCachedAssets}** — an
+   * inventory query has no protectors). When omitted, every selection of the manifest is a
+   * candidate (except those with the same ref set as the target); when given, only this list is. In
+   * both cases "only selections with all refs in the inventory actually protect".
    *
-   * 指定時は同一集合の除外を**しない** — 兄弟の選択を名指しで守れば `kept: "shared"` になる。
-   * 「同一集合をどう扱うか」の方針をアプリ側に残すための席。対象自身が入っていても無視する
-   * （= 同じ (model, quant) は `weights` で絞っていても候補にならない）。存在しない
-   * model / quant / weights は `ManifestReferenceError`。
+   * When given, same-set selections are **not** excluded — protecting a sibling selection by name
+   * yields `kept: "shared"`. This option leaves the policy "how to treat same-set selections" to
+   * the app. The target itself is ignored if listed (= the same (model, quant) is never a
+   * candidate, even when narrowed with `weights`). A nonexistent model / quant / weights is a
+   * `ManifestReferenceError`.
    */
   readonly protect?: readonly ResolveOptions[];
 };
 
-/** {@link listCachedAssets} の結果。合わせると選択の全参照（`fileRefKey` で一意化済み）になる。 */
+/**
+ * The result of {@link listCachedAssets}. Together they are all refs of the selection (deduplicated
+ * by `fileRefKey`).
+ */
 export type CachedAssets = {
-  /** 在庫にある参照（`selectionRefs` の順）。 */
+  /** Refs in the inventory (in `selectionRefs` order). */
   readonly cached: readonly FileRef[];
-  /** 在庫に無い参照（`selectionRefs` の順）。 */
+  /** Refs not in the inventory (in `selectionRefs` order). */
   readonly missing: readonly FileRef[];
 };
 
-/** 削除を見送った参照 1 本と、その理由。 */
+/** One ref whose deletion was skipped, and why. */
 export type KeptAsset = {
   readonly ref: FileRef;
   /**
-   * `"shared"` = 守る側の選択（全ファイルが在庫にあるもの）が参照している /
-   * `"cross-repo"` = 越境参照で、実体の持ち主は参照先 repo。
+   * `"shared"` = a protecting selection (one with all files in the inventory) references it /
+   * `"cross-repo"` = a cross-repo reference, whose file is owned by the target repo.
    *
-   * 守る側の候補は既定では「同じ manifest の他の選択のうち、対象と参照集合が同一でないもの」、
-   * {@link CacheInventoryOptions.protect} 指定時はその一覧だけ。
+   * By default the protector candidates are "the other selections of the same manifest whose ref
+   * set differs from the target's"; with {@link CacheInventoryOptions.protect}, only that list.
    */
   readonly reason: "shared" | "cross-repo";
-  /** `reason` が `"shared"` のとき、守っている選択のラベル `"<model>/<quant>"` の一覧。 */
+  /** When `reason` is `"shared"`, the labels `"<model>/<quant>"` of the protecting selections. */
   readonly sharedWith: readonly string[];
 };
 
-/** {@link evictCachedAssets} の結果。もともと在庫に無い参照はどちらにも載らない。 */
+/**
+ * The result of {@link evictCachedAssets}. Refs that were not in the inventory to begin with appear
+ * in neither.
+ */
 export type EvictedAssets = {
-  /** 実際に在庫から消えた参照（`selectionRefs` の順）。 */
+  /** Refs actually removed from the inventory (in `selectionRefs` order). */
   readonly evicted: readonly FileRef[];
-  /** 消さなかった参照と理由（`selectionRefs` の順）。 */
+  /** Refs not deleted, and why (in `selectionRefs` order). */
   readonly kept: readonly KeptAsset[];
   /**
-   * この削除で**巻き添えに部分在庫へ落ちた選択**のラベル `"<model>/<quant>"`（manifest の
-   * 宣言順）。対象を除く manifest の全選択のうち、呼び出し前は全参照が在庫にあり、かつ
-   * {@link EvictedAssets.evicted} の 1 本以上を使っていたもの。
+   * The labels `"<model>/<quant>"` of **selections dropped into a partial inventory as collateral**
+   * of this deletion (in manifest declaration order). Among all selections of the manifest except
+   * the target, those that had all refs in the inventory before the call and used at least one of
+   * {@link EvictedAssets.evicted}.
    *
-   * 候補ではなく**実際に消えた参照**で決まる（`evicted` と同じ契約 — 取得元が消したと名乗った
-   * ものだけ）。既定では対象と同一集合の兄弟がここに載り、`protect` 指定時は守らなかった
-   * 全在庫の選択が載る。アプリは「落とし済み」表示をこの一覧ぶん取り下げればよい。
+   * Decided by **the refs actually deleted**, not the candidates (the same contract as `evicted` —
+   * only what the source reports as deleted). By default the same-set siblings of the target appear
+   * here; with `protect`, every complete selection that was not protected appears. The app only
+   * needs to withdraw its "downloaded" display for the selections in this list.
    */
   readonly alsoEvicted: readonly string[];
 };
 
-/** (model, quant) の実名 1 組（既定を解決した後の名前）。 */
+/** One pair of real (model, quant) names (the names after resolving the defaults). */
 type Selection = { readonly model: string; readonly quant: string };
 
 const labelOf = (selection: Selection): string => `${selection.model}/${selection.quant}`;
 
 /**
- * `fileRefKey` で一意化する（`fetchAssets` と同じ規則・同じ順）。同じ path を指すキーが複数
- * あっても、在庫の 1 本は 1 本。
+ * Deduplicates by `fileRefKey` (the same rule and order as `fetchAssets`). Even if several keys
+ * point at the same path, one file in the inventory is one file.
  */
 const uniqueRefs = (refs: Iterable<FileRef>): readonly FileRef[] => {
   const unique = new Map<string, FileRef>();
@@ -127,21 +145,22 @@ const uniqueRefs = (refs: Iterable<FileRef>): readonly FileRef[] => {
 };
 
 /**
- * 選択 1 つぶんの参照列（長さ 0 の part は落とし、{@link fileRefKey} で一意化済み —
- * `selectionRefs` の契約）。存在しない model / quant はここで `ManifestReferenceError`。
+ * The ref list of one selection (zero-length parts dropped, deduplicated by {@link fileRefKey} —
+ * the contract of `selectionRefs`). A nonexistent model / quant is a `ManifestReferenceError` here.
  */
 const refsOf = (manifest: Manifest, selection: ResolveOptions): readonly FileRef[] =>
   selectionRefs(resolveSelection(manifest, selection));
 
-/** manifest の全 (model, quant) の組。 */
+/** Every (model, quant) pair of the manifest. */
 const allSelections = (manifest: Manifest): readonly Selection[] =>
   Object.entries(manifest.models).flatMap(([model, entry]) =>
     Object.keys(entry.quants).map((quant): Selection => ({ model, quant })),
   );
 
 /**
- * 選択を実名へ正規化する。実在検査は {@link resolveSelection} が持つので、**それを通した後に
- * だけ**呼ぶ（診断の正本を 2 か所に増やさない）。
+ * Normalises a selection to real names. The existence check belongs to {@link resolveSelection}, so
+ * call this **only after going through it** (do not grow the source of truth for diagnostics to two
+ * places).
  */
 const namedSelection = (manifest: Manifest, selection: ResolveOptions): Selection => {
   const model = selection.model ?? manifest.defaultModel;
@@ -151,12 +170,15 @@ const namedSelection = (manifest: Manifest, selection: ResolveOptions): Selectio
   return { model, quant: selection.quant ?? manifest.models[model].defaultQuant };
 };
 
-/** 選択 1 つと、その参照列（在庫の突合と守る側の判定で 1 組にして持ち回る）。 */
+/**
+ * One selection and its ref list (carried as a pair through inventory matching and the protector
+ * check).
+ */
 type SelectionRefs = { readonly selection: Selection; readonly refs: readonly FileRef[] };
 
 /**
- * 2 つの参照列が**同じ集合**か（順は問わない）。どちらも {@link uniqueRefs} 済みなので、本数が
- * 同じで片側が全部含まれていれば集合として等しい。
+ * Whether two ref lists are **the same set** (order does not matter). Both went through
+ * {@link uniqueRefs}, so equal counts plus one side fully contained means the sets are equal.
  */
 const sameRefSet = (left: readonly FileRef[], right: readonly FileRef[]): boolean => {
   if (left.length !== right.length) return false;
@@ -165,13 +187,15 @@ const sameRefSet = (left: readonly FileRef[], right: readonly FileRef[]): boolea
 };
 
 /**
- * `protect` の一覧を守る側の候補へ正規化する。`resolveSelection` を通してから実名化するので、
- * 存在しない model / quant / weights はここで `ManifestReferenceError`。重複は落とし、対象自身も
- * 落とす（対象を自分から守ることはできない）。
+ * Normalises the `protect` list into protector candidates. It goes through `resolveSelection`
+ * before normalising to real names, so a nonexistent model / quant / weights is a
+ * `ManifestReferenceError` here. Duplicates are dropped, and so is the target itself (a target
+ * cannot protect against itself).
  *
- * MUST: 一意化の鍵は label ではなく**label + 参照集合**にする。`weights` で絞った選択は同じ
- * label のまま別の集合を守るので、label だけで畳むと後勝ちで片方の指定が黙って消える
- * （「守ったはずのファイルが消えている」= 診断の出ない取り違え）。
+ * MUST: the deduplication key is **label + ref set**, not the label. A selection narrowed with
+ * `weights` protects a different set under the same label, so folding by label alone would silently
+ * drop one of the entries, last one wins ("files that should have been protected are gone" = a
+ * mix-up with no diagnostic).
  */
 const protectorsOf = (
   manifest: Manifest,
@@ -183,10 +207,12 @@ const protectorsOf = (
     const refs = refsOf(manifest, entry);
     const selection = namedSelection(manifest, entry);
     if (selection.model === target.model && selection.quant === target.quant) continue;
-    // 参照の並びは `selectionRefs` の宣言順なので、同じ部分集合は同じ鍵になる。
-    // MUST: 要素境界の曖昧でない綴り（`JSON.stringify` の配列）で組む — 区切り文字を挟むだけだと
-    // label に同じ文字が入った選択が別の選択と同じ鍵になり、後勝ちで片方が黙って消える
-    // （model / quant 名は manifest 側で制御文字を拒んでいないので、NUL 入りの名前が実際に届く）。
+    // The refs are in `selectionRefs` declaration order, so the same subset yields the same key.
+    // MUST: build it with a spelling whose element boundaries are unambiguous (a `JSON.stringify`
+    // array) — merely inserting a separator would give a selection whose label contains that
+    // character the same key as another selection, and one would silently disappear, last one wins
+    // (the manifest does not reject control characters in model / quant names, so names with NUL
+    // really arrive).
     byKey.set(JSON.stringify([labelOf(selection), refs.map(fileRefKey)]), {
       selection,
       refs,
@@ -196,11 +222,12 @@ const protectorsOf = (
 };
 
 /**
- * 参照を origin ごとにまとめて在庫を問い合わせ、在庫にあるものの `fileRefKey` を返す。
+ * Groups refs by origin, queries the inventory, and returns the `fileRefKey`s of those present.
  *
- * MUST: origin の同一性は `origin.label`（診断のための表示文字列）ではなく
- * {@link crossRefOf} の (repo, revision) の組で見る — ラベルは取得元ごとに語彙が違う表示欄で、
- * 同じ座標が別ラベルを名乗ることも別の座標が同じラベルを名乗ることもある。
+ * MUST: origin identity is the (repo, revision) pair of {@link crossRefOf}, not `origin.label` (a
+ * display string for diagnostics) — the label is a display field whose vocabulary differs per
+ * source; the same coordinates may carry different labels, and different coordinates the same
+ * label.
  */
 const queryInventory = async (
   source: PinnedSource,
@@ -209,7 +236,8 @@ const queryInventory = async (
   const groups = new Map<string, FileRef[]>();
   for (const ref of refs) {
     const cross = crossRefOf(ref);
-    // 空文字はセッションの取得元（越境の座標は必ず `<owner/name>@<sha>` の形になる）。
+    // The empty string is the session's source (cross-repo coordinates always take the form
+    // `<owner/name>@<sha>`).
     const origin = cross === undefined ? "" : `${cross.repo}@${cross.revision}`;
     const bucket = groups.get(origin);
     if (bucket === undefined) groups.set(origin, [ref]);
@@ -220,8 +248,8 @@ const queryInventory = async (
     const originSource = sourceForRef(source, bucket[0]);
     const inventory = originSource.inventory;
     if (inventory === undefined) {
-      // 組み込みの 2 取得元は両方持つので、ここに来るのは取得元契約の破れ（利用者の入力起因
-      // ではない）— `HubError` ではなく素の `Error` で落とす。
+      // Both built-in sources have it, so reaching here means a broken source contract (not caused
+      // by user input) — fail with a bare `Error`, not a `HubError`.
       throw new Error(
         `hub: 取得元 ${originSource.origin.label} が在庫の照会を持たない（取得元契約の不変条件破れ）`,
       );
@@ -232,17 +260,17 @@ const queryInventory = async (
 };
 
 /**
- * 選択 1 つぶんの参照が「network に出ずに読めるか」を照会する。**取りには行かない**
- * （在庫の問い合わせだけで、足りない分の DL も検証も起こさない）。
+ * Queries whether the refs of one selection "can be read without going to the network". **It
+ * fetches nothing** (only an inventory query; it neither downloads what is missing nor verifies).
  *
- * 使いどころは「この quant は落とし済みか」の表示と、`prefetchAssets` を出す前の判断。
- * **キャッシュを持つ取得元（HF）では** `CacheStorage` が無い環境で全て `missing` になる
- * （取得層の契約どおり — キャッシュは正しさの要件ではなく最適化なので、hub 側で特別扱いしない）。
- * 手元のディレクトリはキャッシュを介さずに読むので、`CacheStorage` の有無に関わらず
- * 「渡された全部が在庫にある」と答える。
+ * Uses: showing "has this quant been downloaded", and deciding before calling `prefetchAssets`.
+ * **For a source with a cache (HF)**, everything is `missing` in an environment without
+ * `CacheStorage` (as the fetch layer's contract says — the cache is an optimisation, not a
+ * correctness requirement, so hub does not special-case it). A local directory is read without a
+ * cache, so it answers "everything passed in is in the inventory" regardless of `CacheStorage`.
  *
- * `Cache.keys()` 未実装のランタイム（Deno 2.8 以前）では取得層が fail loud に throw する
- * （{@link HubError} ではなく素の `Error`）。
+ * On runtimes without `Cache.keys()` (Deno 2.8 and earlier) the fetch layer throws, failing loudly
+ * (a bare `Error`, not a {@link HubError}).
  */
 export const listCachedAssets = async (
   loaded: LoadedManifest,
@@ -259,28 +287,34 @@ export const listCachedAssets = async (
 };
 
 /**
- * 選択 1 つぶんの在庫を消して容量を空ける。**他の選択が壊れない範囲でだけ**消す:
+ * Deletes the inventory of one selection to free space. It deletes **only as far as no other
+ * selection breaks**:
  *
- * - 守る側の選択が**全参照を在庫に持っている**なら、その選択が使うファイルは残す
- *   （`kept: "shared"`）。部分在庫の選択は守らない — どのみち次に使うとき残りを取りに行くので、
- *   守らせると「消せないのに使えないファイル」だけが残る。
- * - 守る側の候補は既定では「同じ manifest の他の選択」から**対象と参照集合が同一のものを
- *   除いた**もの。同一集合の選択（重みは同じで session の設定だけ違う quant）はキャッシュの
- *   粒度で区別できず、守る側に数えると 1 本も消えない。`protect` を渡すとその一覧だけが候補に
- *   なり、同一集合の除外もしない（守り方の方針をアプリが決める席）。
- * - 巻き添えで部分在庫に落ちた選択は `alsoEvicted` が名乗る（消えた参照を 1 本以上使っていた、
- *   呼び出し前は全在庫だった選択）。次のロードで足りない分だけ取り直せば復旧する。
- * - 越境参照は残す（`kept: "cross-repo"`）。実体の持ち主は参照先 repo で、参照元の manifest
- *   から消すのは「他人のリポの在庫を、たまたま参照している側の都合で消す」ことになる。
- *   消したいときは参照先 repo の manifest を開いて消す。
- * - もともと在庫に無い参照は結果に載らない（消すも守るも無い）。
+ * - If a protecting selection **has all its refs in the inventory**, the files it uses are kept
+ *   (`kept: "shared"`). A partially cached selection does not protect — it fetches the rest the
+ *   next time it is used anyway, so letting it protect would leave only "files that cannot be
+ *   deleted yet cannot be used".
+ * - By default the protector candidates are "the other selections of the same manifest" **minus
+ *   those with the same ref set as the target**. A same-set selection (a quant with the same
+ *   weights, differing only in session settings) cannot be told apart at cache granularity, and
+ *   counting it as a protector would delete nothing. Passing `protect` makes only that list the
+ *   candidates, without the same-set exclusion (the app decides the protection policy).
+ * - Selections dropped into a partial inventory as collateral are named by `alsoEvicted`
+ *   (selections that used at least one deleted ref and were complete before the call). Refetching
+ *   what is missing on the next load restores them.
+ * - Cross-repo references are kept (`kept: "cross-repo"`). The file is owned by the target repo,
+ *   and deleting it from the referencing manifest would mean "deleting another repo's inventory for
+ *   the convenience of whoever happens to reference it". To delete it, open the target repo's
+ *   manifest and delete there.
+ * - Refs not in the inventory to begin with do not appear in the result (nothing to delete or
+ *   keep).
  *
- * キャッシュを持たない取得元（手元のディレクトリ）は {@link HubError} で断る — 中身は取得物
- * ではなく利用者の資産なので、hub が消してよいものが 1 つも無い。名前空間ごと消すのは
- * `clearHubCache`。
+ * A source without a cache (a local directory) is refused with a {@link HubError} — its contents
+ * are the user's assets, not fetched copies, so nothing there is hub's to delete. Deleting the
+ * whole namespace is `clearHubCache`.
  *
- * `Cache.keys()` 未実装のランタイム（Deno 2.8 以前）では取得層が fail loud に throw する
- * （{@link HubError} ではなく素の `Error`）。
+ * On runtimes without `Cache.keys()` (Deno 2.8 and earlier) the fetch layer throws, failing loudly
+ * (a bare `Error`, not a {@link HubError}).
  */
 export const evictCachedAssets = async (
   loaded: LoadedManifest,
@@ -303,16 +337,17 @@ export const evictCachedAssets = async (
   const others: readonly SelectionRefs[] = allSelections(manifest)
     .filter((other) => other.model !== target.model || other.quant !== target.quant)
     .map((other) => ({ selection: other, refs: refsOf(manifest, other) }));
-  // 守る側の候補。既定で同一集合の選択を外すのは、キャッシュの粒度では対象と区別できず
-  // 「片方だけ消す」が定義上できないため — 守る側に数えると必ず全ファイルが `shared` になり、
-  // 1 本も消えないのに「守った」と名乗る嘘になる。真部分集合・上位集合は従来どおり守る。
+  // Protector candidates. Same-set selections are excluded by default because cache granularity
+  // cannot tell them from the target, and "delete only one" is impossible by definition — counting
+  // them as protectors would always make every file `shared`, a lie that claims "protected" while
+  // nothing is deleted. Proper subsets and supersets protect as before.
   const protectors =
     options.protect === undefined
       ? others.filter((other) => !sameRefSet(other.refs, targets))
       : protectorsOf(manifest, options.protect, target);
-  // 在庫の問い合わせは**全選択の和集合に対して 1 回**（origin ごと）。選択ごとに引くと、
-  // 同じ repo の全列挙を選択の数だけ繰り返すことになる。守る側は manifest の選択なので、
-  // その参照はこの和集合に必ず含まれる。
+  // The inventory is queried **once over the union of all selections** (per origin). Querying per
+  // selection would repeat the full enumeration of the same repo once per selection. Protectors are
+  // selections of the manifest, so their refs are always in this union.
   const stock = await queryInventory(
     source,
     uniqueRefs([...targets, ...others.flatMap(({ refs }) => refs)]),
@@ -327,8 +362,9 @@ export const evictCachedAssets = async (
       const key = fileRefKey(ref);
       const labels = sharedWith.get(key);
       if (labels === undefined) sharedWith.set(key, [label]);
-      // 同じ label の部分集合が 2 つ守っていても、名乗る label は 1 つ（`protect` に
-      // `weights` 違いを並べたときだけ起きる — 同じ名前を 2 度出しても読み手に何も足さない）。
+      // Even if two subsets of the same label protect, the label is named once (this happens only
+      // when `protect` lists entries differing in `weights` — repeating the name adds nothing for
+      // the reader).
       else if (!labels.includes(label)) labels.push(label);
     }
   }
@@ -349,12 +385,14 @@ export const evictCachedAssets = async (
     evictable.push(ref);
   }
 
-  // 消えた事実は取得元が名乗る（件数 0 = 誰かが先に消していた）。順は対象の列に揃える。
+  // The source reports what was deleted (count 0 = someone deleted it first). The order follows the
+  // target list.
   const removed = new Set((await evictRefs(evictable)).map(fileRefKey));
   const evicted = evictable.filter((ref) => removed.has(fileRefKey(ref)));
-  // 巻き添えの判定も**実際に消えた集合**（= `evicted` そのもの）で行う。候補で数えると、
-  // 取得元が消せなかった参照の利用者まで「部分在庫に落ちた」と名乗ることになる。在庫の有無は
-  // 呼び出し前の観測（`stock`）で見る。
+  // Collateral is also judged by **the set actually deleted** (= `evicted` itself). Counting the
+  // candidates would also name the users of refs the source failed to delete as "dropped into a
+  // partial inventory". Presence in the inventory is taken from the observation before the call
+  // (`stock`).
   const evictedKeys = new Set(evicted.map(fileRefKey));
   const alsoEvicted = others
     .filter(

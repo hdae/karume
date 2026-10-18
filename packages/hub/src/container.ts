@@ -1,27 +1,33 @@
 /**
- * コンテナ（`krm`）1 本の**取得面**（ADR 0109 決定 7）。manifest の `container` 欄を受けて、
- * 読み手（`@karume/runtime` の `openContainer`）がそのまま食える「part → バイト区間」の口を返す。
+ * The **fetch surface** of one container (`krm`) (ADR 0109 decision 7). It takes the manifest's
+ * `container` field and returns a "part → byte range" interface that the reader (`openContainer` of
+ * `@karume/runtime`) consumes as is.
  *
- * この面が持つのは**区間読みだけ**である: 温めた永続キャッシュ（または手元の実体）に対して
- * `[offset, offset+length)` を引き、費用の型（`AssetRangeReader.cost`）で経路を分ける。
+ * This surface holds **range reads only**: it pulls `[offset, offset+length)` from the warmed
+ * persistent cache (or the local file) and picks the path by cost class (`AssetRangeReader.cost`).
  *
- * MUST: **温め（相 1）はこの面に入れない**。実行できないモデルの重みは 1 バイトも落とさない
- * （ADR 0108 決定 19 / ADR 0070 決定 5）ので、呼び手は
+ * MUST: **warming (phase 1) stays out of this surface**. Not one byte of the weights of a model
+ * that cannot run is downloaded (ADR 0108 decision 19 / ADR 0070 decision 5), so callers keep this
+ * order:
  *
- * 1. descriptor を持つ part 0 だけを取って admission を通す
- * 2. 通ったら重みの part を温める（{@link ../mod.ts prefetchAssets} — 進捗・中断・4 並列つき）
- * 3. この面を開いて読む
+ * 1. fetch only part 0, which holds the descriptor, and pass admission
+ * 2. once it passes, warm the weight parts ({@link ../mod.ts prefetchAssets} — with progress,
+ *    cancellation and 4-way concurrency)
+ * 3. open this surface and read
  *
- * の順を守る。面の中で全 part を温めると、この順序が面の内側から壊れる。温めずに開いても
- * 読めはする（HF 取得元の区間読み口は在庫が無ければ相 1 と同じ温めを 1 度だけ挟む — `source.ts` ⑧）
- * が、その温めは進捗にも中断にも現れない。
+ * Warming every part inside the surface would break this order from the inside. Opening without
+ * warming still reads (the HF source's range reader inserts the same warm-up as phase 1 exactly
+ * once when the file is not in the inventory — `source.ts` (8)), but that warm-up shows neither in
+ * progress nor in cancellation.
  *
- * MUST: hub は `@karume/runtime` を import しない（依存は一方向: models → hub / runtime）。
- * {@link ContainerBlockSource} は runtime の `BlockSource` と**構造互換**の型をこちら側で綴った
- * もので、`verified` 欄だけがこの面の上乗せ（ADR 0109 決定 7 の「検証済みを運ぶ」）。
+ * MUST: hub does not import `@karume/runtime` (dependencies go one way: models → hub / runtime).
+ * {@link ContainerBlockSource} is a type spelt on this side that is **structurally compatible**
+ * with the runtime's `BlockSource`; only the `verified` field is this surface's addition ("verified
+ * is carried along" of ADR 0109 decision 7).
  *
- * MUST: descriptor の中身は**開かない**。2 文書の検証も block 目次の突合も `openContainer` の
- * 責務で、hub が持つのは宣言（`parts[].size`）だけで閉じる検査に限る（ADR 0109 決定 6）。
+ * MUST: **do not open** the descriptor's contents. Verifying the two documents and matching the
+ * block index are `openContainer`'s job; hub keeps only the checks that close on the declaration
+ * (`parts[].size`) alone (ADR 0109 decision 6).
  */
 
 import { createFetchContext } from "./context.ts";
@@ -32,67 +38,78 @@ import { type LoadedManifest, type LoadManifestOptions, pinnedSourceOf } from ".
 import { type AssetRangeReader, type PinnedSource, sourceForRef } from "./source.ts";
 
 /**
- * part → バイト区間の引き出し口。`@karume/runtime` の `BlockSource` と構造互換で、
- * `openContainer({ kind: "source", source })` にそのまま渡せる。
+ * The part → byte range interface. Structurally compatible with the `BlockSource` of
+ * `@karume/runtime`, so it can be passed as is to `openContainer({ kind: "source", source })`.
  *
- * MUST: 返るバイト列は**呼び手が書き換えない**（取得元の実装によっては、取得元が抱え続ける
- * buffer そのものであり得る）。scan 経路の返りは part の器全体を握る view なので、区間より長く
- * 持つ呼び手は写す（握り続けると区間ではなく part 全体が生き残る）。
+ * MUST: **callers do not modify** the returned bytes (depending on the source's implementation,
+ * they may be the very buffer the source keeps holding). On the scan path the return is a view that
+ * holds the whole buffer of the part, so a caller that keeps it longer than the range copies it
+ * (holding it keeps the whole part alive, not just the range).
  */
 export type ContainerBlockSource = {
-  /** 宣言された part の本数（長さ 0 の part も数える — 添字が part の id）。 */
+  /** The number of declared parts (zero-length parts count too — the index is the part's id). */
   readonly partCount: number;
   /**
-   * 取得元がバイト列を**全量検証済み**か（ADR 0109 決定 7）。HF 取得元は取得層が part 全量を
-   * 流しながら sha256 を照合するので `true`、ローカルディレクトリは照合しないので `false`。
-   * 読み手はこれを見て block ごとの digest を掛けるかどうかを決める（cold の 2 重 digest を
-   * 避ける — container-v1 §7）。
+   * Whether the source has **verified the whole bytes** (ADR 0109 decision 7). For the HF source
+   * the fetch layer compares sha256 while streaming the whole part, so `true`; a local directory
+   * does not compare, so `false`. Readers use it to decide whether to digest each block (avoiding
+   * the double digest on a cold read — container-v1 §7).
    */
   readonly verified: boolean;
-  /** 宣言された part 長（同期・1 バイトも取らずに答える）。範囲外の添字は fail loudly。 */
+  /**
+   * The declared part length (synchronous; answers without fetching a byte). An out-of-range index
+   * fails loudly.
+   */
   partLength(index: number): number;
   /**
-   * `[offset, offset + length)` を返す。seek 経路は区間ぶんの tight view、scan 経路は保持枠の
-   * part の器の view（`byteOffset` = 区間の開始位置・`buffer` = part 全体）。
+   * Returns `[offset, offset + length)`. The seek path returns a tight view of the range; the scan
+   * path returns a view into the buffer of the part in the holding slot (`byteOffset` = start of
+   * the range, `buffer` = the whole part).
    */
   read(part: number, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>>;
 };
 
-/** 区間読みの経路。part ごとに 1 度だけ決める（取得元の能力と費用の型で分かれる）。 */
+/**
+ * The range-read path. Decided once per part (it splits on the source's capabilities and cost
+ * class).
+ */
 type ReadPlan =
-  /** 位置読みが安い取得元（ブラウザの Blob・ローカルの区間読み）— block ごとに引く。 */
+  /** A source with cheap positional reads (browser Blob, local range reads) — read per block. */
   | { readonly kind: "seek"; readonly reader: AssetRangeReader }
   /**
-   * 読み飛ばしが offset に比例する取得元（Deno の既定）と、区間読みを持たない取得元 —
-   * part を 1 度だけ全量読んで切り出す（同じ part の block を順に読むと読み飛ばしが二次に
-   * なるため）。
+   * A source whose skipping is proportional to the offset (the default under Deno and Node via HF)
+   * and a source without range reads — read the part fully once and slice it (reading the blocks of
+   * one part in order would make the skipping quadratic).
    */
   | { readonly kind: "scan" };
 
-/** scan 経路の保持枠 1 つぶん（in-flight の全量読みも同じ席で表す）。 */
+/** One holding slot of the scan path (an in-flight full read is held in the same slot). */
 type HeldPart = {
   readonly part: number;
   readonly bytes: Promise<Uint8Array<ArrayBuffer>>;
 };
 
 /**
- * コンテナ 1 本の取得面を開く。**何も取りに行かない**ので同期で返る — 実体に触れるのは
- * {@link ContainerBlockSource.read} を呼んだときだけ（part ごとに初回の読みで区間読み口を開く）。
+ * Opens the fetch surface of one container. It **fetches nothing**, so it returns synchronously —
+ * the files are touched only when {@link ContainerBlockSource.read} is called (the range reader of
+ * each part is opened on its first read).
  *
- * 進捗も `signal` の席もこの面には無い（温めを持たないので出すものが無い）。中断は口を配る前に
- * 1 度だけ見て、開いた後の読みには効かせない — 読み口は消費側が寿命ぶん掴み続ける前提なので、
- * 開いたときの signal を握ると以後の読みが全部それに道連れになる（`source.ts` ⑧）。
+ * This surface has no progress and no `signal` option (it does no warming, so there is nothing to
+ * report). Cancellation is checked once before the interface is handed out and does not apply to
+ * reads after opening — consumers hold a reader for its whole lifetime, so holding the signal from
+ * open would take every later read down with it (`source.ts` (8)).
  *
- * 失敗の扱いは 2 つに分かれる: 取得元の解決（未 mapping の越境）は取得の設定不足なので
- * `HubFetchError` に包み、`read` の失敗は取得元の素の `Error` をそのまま通す（`openAsset` と
- * 同じ — 読みは取得ではない）。
+ * Failures are handled in two ways: resolving the source (an unmapped cross-repo target) is missing
+ * fetch configuration, so it is wrapped in a `HubFetchError`; a `read` failure passes the source's
+ * bare `Error` through as is (as `openAsset` does — a read is not a fetch).
  */
 export const openContainerSource = (
   loaded: LoadedManifest,
   container: ContainerRef,
   options: LoadManifestOptions = {},
 ): ContainerBlockSource => {
-  // 中断は口の組み立てより先に見る（取得元の能力差で中断の見え方が変わらない — 共通層の作法）。
+  // Check cancellation before building the interface (so source capabilities do not change how
+  // cancellation looks — a convention of the common layer).
   options.signal?.throwIfAborted();
   const session = pinnedSourceOf(loaded, options);
   const context = createFetchContext(loaded, session.origin);
@@ -107,23 +124,24 @@ export const openContainerSource = (
     return parts[index];
   };
 
-  // 越境は**容器単位**（parse が一様性を門にしている）ので、取得元は容器に 1 つに決まる。
-  // 開くときに 1 度だけ解決して束縛する — read ごとに引くと、越境容器では読みのたびに越境先の
-  // 取得元が組み直される。
+  // Cross-repo references are **per container** (parsing checks that they are uniform), so there is
+  // exactly one source per container. Resolve and bind it once at open — looking it up per read
+  // would rebuild the target's source on every read of a cross-repo container.
   let origin: PinnedSource;
   try {
     origin = sourceForRef(session, parts[0]);
   } catch (error) {
-    // 未 mapping の越境（`sources/local.ts` の素の Error）は呼び手の設定不足。同じ manifest の
-    // `fetchAssets` と同じ見え方（path / repo / revisionSha / available つき）で落とす。
+    // An unmapped cross-repo target (the bare Error of `sources/local.ts`) is missing configuration
+    // on the caller's side. Fail the same way `fetchAssets` does for the same manifest (with path /
+    // repo / revisionSha / available).
     if (error instanceof HubError) throw error;
     throw context.fetchFailure(parts[0], "取得", error);
   }
   const verified = origin.origin.integrity === "network";
 
   const plans = new Map<number, Promise<ReadPlan>>();
-  // MUST: 引くのは添字だけ（ref は `partAt` で導く）— 添字と ref の組を呼び手が渡せる形にすると、
-  // 食い違った組で「別の part の読み口」を掴める。
+  // MUST: look up by index only (the ref is derived with `partAt`) — letting callers pass an
+  // (index, ref) pair would let a mismatched pair grab "another part's reader".
   const planFor = (index: number): Promise<ReadPlan> => {
     const existing = plans.get(index);
     if (existing !== undefined) return existing;
@@ -134,8 +152,8 @@ export const openContainerSource = (
         : openFile(partAt(index), {}).then((reader): ReadPlan =>
             reader.cost === "seek" ? { kind: "seek", reader } : { kind: "scan" },
           );
-    // MUST: 失敗した決定は覚えない — 覚えると、一過性の失敗で開けなかった part が以後の読みで
-    // すべて同じ reject を返し続ける（開き直す手段が消える）。
+    // MUST: do not remember a failed decision — remembering it would make a part that failed to
+    // open on a transient error return the same reject on every later read (no way left to reopen).
     const decided = opened.catch((error: unknown) => {
       plans.delete(index);
       throw error;
@@ -145,22 +163,27 @@ export const openContainerSource = (
   };
 
   /**
-   * scan 経路の保持枠。**同時に持つのは 1 part ぶんだけ**（別の part を読んだら前を手放す）。
-   * 切り出しは器の view なので、枠が握る part の器のほかにホスト RAM は乗らない — 重みの読み手
-   * （runtime の `containerBatches`）は block を 1 本ずつ引いて、上げた反復で手放す（引いた view も
-   * この器の中を指す）。part の境界では、手放した器が GC されるまで一時的に 2 part ぶんが生きる。
+   * The holding slot of the scan path. **It holds one part at a time** (reading another part
+   * releases the previous one). Slices are views into the buffer, so no host RAM is added beyond
+   * the buffer of the part the slot holds — the weight reader (the runtime's `containerBatches`)
+   * pulls blocks one at a time and releases each in the iteration that uploaded it (the views it
+   * pulled also point into this buffer). At a part boundary, two parts are alive for a while until
+   * the released buffer is garbage-collected.
    *
-   * MUST: **in-flight の全量読みも同じ席に置く** — 席を「決着したバイト列」だけにすると、同じ
-   * part への並行 read が全員 readFile へ入り、その瞬間だけ part 長 × 本数が生きる。
-   * NOTE: 席は 1 つなので、並行に**別の** part を読むと後の読みが先の読みを席から追い出し、
-   *       追い出された側の全量読みも最後まで走る。同時に生きる part は「並行に読む別 part の
-   *       本数」まで増え、hub はその本数を抑えない（追い出した part をまた読むと全量読みが重複
-   *       する）。追い出された part の器は、そこから切った view を呼び手が握っている間は生き残る。
-   *       重みの読み手は part 順に直列に読むのでこの形にならない。資産の行読み（models の PLE —
-   *       別の part を並行に読む）はこの形になり、prefill では行読みの同時発行の上限（models の
-   *       `ROW_READ_CONCURRENCY` = 16 本）まで part の全量読みが同時に生きる。区間は
-   *       `readAssetRange` が写すので読み終えた器は握らない（part ちょうどの資産は写さずに握るが、
-   *       握る量は写しと同じ）。
+   * MUST: **put the in-flight full read in the same slot as well** — if the slot held only "settled
+   * bytes", concurrent reads of the same part would all enter readFile, and part length × count
+   * would be alive at that moment.
+   * NOTE: there is one slot, so reading **different** parts concurrently makes the later read evict
+   *       the earlier one from the slot, and the evicted full read still runs to the end. The parts
+   *       alive at once grow up to "the number of different parts read concurrently", and hub does
+   *       not cap that number (reading an evicted part again repeats the full read). The buffer of
+   *       an evicted part survives while the caller holds views sliced from it.
+   *       The weight reader reads parts serially in order, so it never takes this shape. Row reads
+   *       of assets (the PLE in models — reading different parts concurrently) do, and during
+   *       prefill full reads of parts are alive at once up to the limit of concurrently issued row
+   *       reads (`ROW_READ_CONCURRENCY` = 16 in models). `readAssetRange` copies the range, so
+   *       finished buffers are not held (an asset exactly one part long is held without copying,
+   *       but the amount held equals the copy).
    */
   let held: HeldPart | undefined;
   const readWhole = (index: number, ref: FileRef): Promise<Uint8Array<ArrayBuffer>> => {
@@ -168,14 +191,16 @@ export const openContainerSource = (
     if (current !== undefined && current.part === index) return current.bytes;
     const pending = origin
       .readFile(ref, {
-        // この面は取得ではないので進捗は出さない（温めは呼び手が prefetchAssets で済ませている）。
+        // This surface is not a fetch, so it emits no progress (the caller already warmed with
+        // prefetchAssets).
         onProgress: () => {},
         sizeViolation: context.sizeViolation(ref),
       })
       .then((bytes) => assertTightView(bytes, ref.path));
     const entry: HeldPart = {
       part: index,
-      // MUST: 失敗した全量読みは席に残さない（残すと以後の読みが同じ reject を返し続ける）。
+      // MUST: do not leave a failed full read in the slot (later reads would keep returning the
+      // same reject).
       bytes: pending.catch((error: unknown) => {
         if (held === entry) held = undefined;
         throw error;
@@ -213,15 +238,18 @@ export const openContainerSource = (
       if (plan.kind === "seek") {
         return assertTightView(await plan.reader.read(offset, length), ref.path);
       }
-      // MUST: 切り出しは写さない（写すと part ごとに器と写しで part 長を 2 重に持つ）。返るのは
-      // 保持枠の part の器の view で、次の 2 つが成り立つので消費側はそのまま読める:
-      //  - 整列: 器は tight（上の `assertTightView`）なので byteOffset = block.offset で、block
-      //    開始は 64 B 整列（descriptor の parse が強制）。scale の Float32Array view に要る 4 B
-      //    整列はこれで満たされる — `assertTightView` を外すとこの整列が偶然任せになる。
-      //  - 寿命: 重みの読み手は batch の view をフェンスまでに使い切り、次の part を読み始める
-      //    （= 枠が器を手放す）のはその後なので、view は枠が器を握る期間の内側に収まる。
-      //    資産の読み手は `readAssetRange`（models）が区間を写してから持つ（part ちょうどの資産は
-      //    写さずに器を共有するが、握る量は写しと同じ）。
+      // MUST: do not copy the slice (copying would hold the part length twice per part, buffer and
+      // copy). The return is a view into the buffer of the part in the holding slot, and consumers
+      // can read it as is because two things hold:
+      //  - Alignment: the buffer is tight (`assertTightView` above), so byteOffset = block.offset,
+      //    and block starts are 64 B aligned (enforced by descriptor parsing). That satisfies the
+      //    4 B alignment a scale Float32Array view needs — removing `assertTightView` would leave
+      //    this alignment to chance.
+      //  - Lifetime: the weight reader uses up a batch's views by the fence, and only after that
+      //    starts reading the next part (= the slot releases the buffer), so the views stay within
+      //    the period the slot holds the buffer. The asset reader keeps a range only after
+      //    `readAssetRange` (models) copied it (an asset exactly one part long shares the buffer
+      //    without copying, but the amount held equals the copy).
       return (await readWhole(part, ref)).subarray(offset, offset + length);
     },
   };

@@ -1,46 +1,51 @@
 /**
- * `@karume/hub` — 配布 manifest v5（`karume.json` / `karume/5`）の解決と、HF またはローカル
- * ディレクトリからの取得。
+ * `@karume/hub` — resolves distribution manifest v5 (`karume.json` / `karume/5`) and fetches from
+ * Hugging Face or a local directory.
  *
- * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
- * 面は利用者ストーリーに対応する — manifest を読む（{@link parseManifest} /
- * {@link loadManifest}）/ 手元の配布形を取得元にする（{@link localDirectory} — ランタイム別の
- * 読み口は `@karume/hub/deno` 等のサブパス）/ モデルと実行構成を選ぶ
- * （{@link resolveSelection} — 平坦な FileRef 列は {@link selectionRefs}）/ コンテナ 1 本を
- * 区間読みで読む（{@link openContainerSource} — 温めは {@link prefetchAssets} が先。
- * `@karume/runtime` の `openContainer` にそのまま渡せる）/ 資産を取る（{@link fetchAssets} —
- * 選択ぶんの全量を RAM に載せる面。RAM ピークは「同時取得のバイト予算 + 完走済みの合計」で、
- * 全量を握れないモデルは容器面〈{@link openContainerSource}〉の区間読みで、必要なブロックだけを
- * その都度読む）/ 資産を先に永続キャッシュへ落とす
- * （{@link prefetchAssets} — バイト列を RAM に載せない温めだけの面）/ 資産 1 本の区間だけを読む
- * （{@link openAsset} — 取得元が持たなければ `undefined`）/ 失敗を型で捌く
- * （{@link HubError} 以下）/ キャッシュの診断を受け取る（{@link CacheDiagnostic}）/
- * 取得層の再試行（429 / 503 の `Retry-After` 追従）の通知を受け取る（{@link RetryDiagnostic}）/
- * キャッシュを消して容量を空ける（{@link clearHubCache}）/ 選択が落とし済みかを照会する
- * （{@link listCachedAssets} — 取りには行かない）/ 選択 1 つぶんの在庫を消す
- * （{@link evictCachedAssets} — 他の選択が使うファイルと越境参照は残す）。
+ * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
+ * wholesale. The surface follows the user's stories — read a manifest ({@link parseManifest} /
+ * {@link loadManifest}) / use a local distribution as the source ({@link localDirectory} — the
+ * per-runtime readers are subpaths such as `@karume/hub/deno`) / choose a model and an execution
+ * configuration ({@link resolveSelection} — the flat FileRef list is {@link selectionRefs}) / read
+ * one container with range reads ({@link openContainerSource} — warm it first with
+ * {@link prefetchAssets}; the result can be passed as is to `openContainer` of `@karume/runtime`) /
+ * fetch assets ({@link fetchAssets} — the surface that loads the whole selection into RAM; the RAM
+ * peak is "the byte budget of concurrent fetches + the total of completed ones", and a model that
+ * cannot be held whole is read through the container surface ({@link openContainerSource}) with
+ * range reads, only the blocks needed, when they are needed) / download assets into the persistent
+ * cache ahead of time ({@link prefetchAssets} — a warm-only surface that does not load bytes into
+ * RAM) / read only a range of one asset ({@link openAsset} — `undefined` when the source does not
+ * support it) / handle failures by type ({@link HubError} and its subclasses) / receive cache
+ * diagnostics ({@link CacheDiagnostic}) / receive notifications of the fetch layer's retries
+ * (following `Retry-After` on 429 / 503) ({@link RetryDiagnostic}) / clear the cache to free space
+ * ({@link clearHubCache}) / ask whether a selection is already downloaded ({@link listCachedAssets}
+ * — it does not fetch) / remove the stored files of one selection ({@link evictCachedAssets} — files
+ * used by other selections and cross-repository references are kept).
  *
- * 仕様の正本は `docs/decisions/0109-manifest-v5-container.md`（コンテナの物理形式は
- * `docs/container-v1.md`・取得層は `0038-manifest-v1.md` §5）。
+ * The specification is `docs/decisions/0109-manifest-v5-container.md` (the physical container
+ * format is `docs/container-v1.md`, the fetch layer is `0038-manifest-v1.md` §5).
  *
- * ## 版と manifest の対応
+ * ## Versions and manifests
  *
- * **旧版の manifest は読まない**（major が違えば unsupported format で落ちる —
- * ADR 0109 決定 1）。JSR 3 本と PyPI `karume`（manifest を書く側）は lockstep で上がるので、
- * 下の対応は `@karume/runtime` / `@karume/models` / exporter にもそのまま当てはまる。配布形
- * （HF リポの `karume.json`）を作り直す段取りを事前に読むための表:
+ * **Manifests of older versions are not read** (a different major fails as an unsupported format —
+ * ADR 0109 decision 1). The three JSR packages and PyPI `karume` (the side that writes manifests)
+ * move in lockstep, so the table below applies as is to `@karume/runtime` / `@karume/models` / the
+ * exporter. A table for planning ahead when a distribution (`karume.json` of a Hugging Face
+ * repository) has to be rebuilt:
  *
- * | パッケージ版 | `format` | 主な変更 |
+ * | Package version | `format` | Main changes |
  * | --- | --- | --- |
- * | 0.1.x | `karume/1` | 初版 |
- * | 0.2.x 〜 0.3.x | `karume/2` | model / quant の 2 軸（ADR 0041） |
- * | 0.4.x | `karume/3` | dtype エントリの shard 欄（ADR 0071） |
- * | 0.5.x 〜 0.12.x | `karume/4` | quant の表示欄 + `requiredLimits`（ADR 0075 / 0038 §7）・
- * ファイル参照の越境席（`repo` / `revision`）・`session` の計算ノブ値 `i8a8` → `a8`（ADR 0074） |
- * | 0.13.x | `karume/5` | 配布形がコンテナ（`krm`）へ — dtype エントリが `{ container }`
- * （descriptor の期待値 + part の FileRef 列）になり、`shards` / `extras` は退役（ADR 0109） |
+ * | 0.1.x | `karume/1` | First version |
+ * | 0.2.x – 0.3.x | `karume/2` | Two axes, model / quant (ADR 0041) |
+ * | 0.4.x | `karume/3` | shard field of dtype entries (ADR 0071) |
+ * | 0.5.x – 0.12.x | `karume/4` | quant display fields + `requiredLimits` (ADR 0075 / 0038 §7),
+ * cross-repository fields of file references (`repo` / `revision`), compute knob value `i8a8` →
+ * `a8` in `session` (ADR 0074) |
+ * | 0.13.x | `karume/5` | The distribution becomes containers (`krm`) — dtype entries become
+ * `{ container }` (the descriptor's expected values + the FileRef list of parts); `shards` / `extras`
+ * retired (ADR 0109) |
  *
- * 配布形を上げ直す手順は `docs/release-runbook.md`。
+ * The procedure for re-publishing a distribution is `docs/release-runbook.md`.
  */
 
 export { MANIFEST_FILENAME, parseManifest } from "./src/manifest.ts";
@@ -67,22 +72,23 @@ export { resolveSelection, selectionRefs } from "./src/resolve.ts";
 export type { ResolvedSelection, ResolveOptions } from "./src/resolve.ts";
 
 /**
- * コンテナ 1 本の取得面（ADR 0109 決定 7）。`openContainerSource` が返す
- * {@link ContainerBlockSource} は `@karume/runtime` の `BlockSource` と構造互換なので、
- * `openContainer({ kind: "source", source })` へそのまま渡せる。
+ * The fetch surface for one container (ADR 0109 decision 7). The {@link ContainerBlockSource}
+ * returned by `openContainerSource` is structurally compatible with `BlockSource` of
+ * `@karume/runtime`, so it can be passed as is to `openContainer({ kind: "source", source })`.
  *
- * この面は**温めない**（開くだけでは 1 バイトも取りに行かない）— 進捗・中断つきの温めは
- * {@link prefetchAssets} で先に通す（descriptor で admission を通してから重みを落とす順序を
- * 呼び手が保てるようにするため — ADR 0108 決定 19）。
+ * This surface **does not warm** (opening it fetches no bytes at all) — warm first, with progress
+ * and cancellation, through {@link prefetchAssets} (so that the caller can keep the order of passing
+ * admission on the descriptor before downloading weights — ADR 0108 decision 19).
  */
 export { openContainerSource } from "./src/container.ts";
 export type { ContainerBlockSource } from "./src/container.ts";
 
 /**
- * 取得元。`loadManifest` / `fromPretrained` は HF のリポ参照（{@link HubRepoRef}）か、ここで
- * 作った取得元ハンドル（{@link DistributionSource} — **中身は不透明**）のどちらでも受ける。
- * union を自前で捌く面（`@karume/models` の `fromPretrained`）は {@link isDistributionSource} で
- * 判別する — 不透明ハンドルを構造で見分けようとすると綴り間違いが取得元として通る。
+ * Sources. `loadManifest` / `fromPretrained` accept either a Hugging Face repository reference
+ * ({@link HubRepoRef}) or a source handle created here ({@link DistributionSource} — **its contents
+ * are opaque**). A surface that handles the union itself (`fromPretrained` of `@karume/models`)
+ * tells them apart with {@link isDistributionSource} — telling an opaque handle apart by its
+ * structure would let a misspelling pass as a source.
  */
 export { localDirectory } from "./src/sources/local.ts";
 export type { DirectoryAdapter, LocalDirectoryOptions } from "./src/sources/local.ts";
@@ -99,9 +105,10 @@ export type {
 } from "./src/inventory.ts";
 export { fetchAssets, loadManifest, prefetchAssets } from "./src/fetch.ts";
 /**
- * 資産 1 本の区間読み（{@link openAsset} — 全量ではなく `[offset, offset + length)` だけを引く。
- * **任意能力**なので、持たない取得元では `undefined` が返り、呼び手は全量読みへ倒す）。
- * 作法（{@link LoadManifestOptions}）は他の面と同じくこの呼び出しに渡した分だけが効く。
+ * Range reads of one asset ({@link openAsset} — reads only `[offset, offset + length)`, not the
+ * whole asset. It is an **optional capability**, so a source without it returns `undefined` and the
+ * caller falls back to a whole read). As with the other surfaces, only the options
+ * ({@link LoadManifestOptions}) passed to this call take effect.
  */
 export { openAsset } from "./src/fetch.ts";
 export type { AssetRangeReader } from "./src/source.ts";
@@ -116,9 +123,9 @@ export type {
 } from "./src/session.ts";
 
 /**
- * エラー型は「利用者の入力・環境に起因する失敗」だけを公開する。取得層の不変条件破れ
- * （bytes が buffer 全体を占めていない等）は hub 側のバグであって利用者が分岐すべきもの
- * ではないため、`Error` のまま届く。
+ * Only error types for "failures caused by the user's input or environment" are public. A broken
+ * invariant of the fetch layer (bytes not covering the whole buffer, and the like) is a bug in the
+ * hub, not something the user should branch on, so it arrives as a plain `Error`.
  */
 export {
   HubError,

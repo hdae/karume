@@ -1,37 +1,40 @@
 /**
- * 全量面 {@link ../src/fetch.ts fetchAssets} の送出を律速する小さな並行プリミティブ。
+ * A small concurrency primitive that paces the dispatch of the whole-file surface
+ * {@link ../src/fetch.ts fetchAssets}.
  *
- * 呼び手は 1 箇所しかないが、破れても「たまに詰まる」としか見えない不変条件（lost wakeup）を
- * 持つ。単体で観測できる形に切り出して、テストで挙動そのものを凍結するために独立させてある。
+ * It has a single caller, but it carries an invariant (no lost wakeup) whose violation shows only
+ * as "it hangs now and then". It is split out into a form that can be observed on its own so that
+ * tests freeze the behaviour itself.
  *
- * MUST: モジュール副作用ゼロ — 状態は必ず create* の呼び出しごとに閉じる（top-level の可変
- * 状態を置くと、無関係な 2 つの取得が同じ予算を共有してしまう）。
+ * MUST: zero module side effects — state always stays closed inside each create* call (top-level
+ * mutable state would make two unrelated downloads share the same budget).
  */
 
-/** {@link createByteAdmission} が返す席の貸し借り。 */
+/** Lending and returning of slots, as returned by {@link createByteAdmission}. */
 export type ByteAdmission = {
-  /** `bytes` ぶんの席が空くまで待ち、確保できたら解決する。 */
+  /** Waits until `bytes` worth of slots are free and resolves once they are acquired. */
   readonly admit: (bytes: number) => Promise<void>;
-  /** 取得の決着（成否は問わない）で席を返す。 */
+  /** Returns the slots when a download settles (success or failure alike). */
   readonly release: (bytes: number) => void;
 };
 
 /**
- * in-flight の合計バイト数に上限を課すアドミッション。要求は**先着順**に通し、追い越させない
- * （後続の小さいファイルが巨大ファイルを飛び越すと、送出順が実行時のサイズ分布で変わって
- * 再現性が失われる）。
+ * Admission control that caps the total in-flight bytes. Requests pass **in arrival order** and are
+ * never overtaken (if a later small file could jump past a huge one, the dispatch order would
+ * depend on the run-time size distribution and reproducibility would be lost).
  *
- * MUST: `admit` を呼ぶのは**同時に 1 本の送出ループだけ**。待機席は 1 つしか無いので、複数から
- * 待つと `release` の起こしを取りこぼす（この制約があるから head-of-line blocking も自明に
- * 成立する）。
+ * MUST: **only one dispatch loop at a time** calls `admit`. There is a single waiter slot, so
+ * waiting from several callers would lose a wakeup from `release` (this constraint is also what
+ * makes head-of-line blocking hold trivially).
  *
- * in-flight が 0 のときは予算を超える単独要求も必ず通す — 誰も走っていないのに待つと、席を
- * 返す相手が居ないまま永久に詰まる。
+ * When nothing is in flight, a single request larger than the budget always passes — waiting while
+ * nobody runs would hang forever, with no one left to return the slots.
  *
- * lost wakeup が無いことの理由: ①判定から待機登録までの間に await が無いので、`release` が
- * その隙間へ割り込めない。②起こされた待機者が再判定するまでに追加の `release` が来ても、
- * その時点で in-flight が 0 なら条件が偽になって進み、0 でなければ必ず未決着の取得が残って
- * いる＝将来の `release` が来る。
+ * Why there is no lost wakeup: (1) there is no await between the check and the waiter registration,
+ * so a `release` cannot slip into that gap. (2) If another `release` arrives before the woken
+ * waiter re-checks, then either in-flight is 0 at that point, the condition is false and the waiter
+ * proceeds, or it is not 0, in which case an unsettled download remains, so a future `release` will
+ * come.
  */
 export const createByteAdmission = (maxBytes: number): ByteAdmission => {
   let inFlight = 0;

@@ -1,41 +1,46 @@
 /**
- * `@karume/models` — パイプライン群の barrel。ファミリ別サブパス（`./anima` / `./birefnet` /
- * `./depth-anything` / `./gemma` / `./gemma4-qat` / `./irodori` / `./sbv2` / `./siglip2` /
- * `./umt5` / `./vowel-detector` / `./wan`）と両建て（ADR 0037）。
+ * `@karume/models` — the barrel of the pipelines. Offered alongside the per-family subpaths
+ * (`./anima` / `./birefnet` / `./depth-anything` / `./gemma` / `./gemma4-qat` / `./irodori` /
+ * `./sbv2` / `./siglip2` / `./umt5` / `./vowel-detector` / `./wan`) (ADR 0037).
  *
- * ADR 0008 の流儀で**薄い面**にする — ここに並ぶのは「パイプラインを組んで生成する」「出た
- * 画像を書き出す」という利用者ストーリーだけで、内部モジュールの素通し再輸出はしない。
+ * A **thin surface** in the manner of ADR 0008 — it lists only the user's stories, "build a
+ * pipeline and generate" and "write out the resulting image"; internal modules are not re-exported
+ * wholesale.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態・top-level 登録の禁止 —
- * CLAUDE.md）。barrel から 1 本だけ import したときに他ファミリが落ちるのは、この不変条件が
- * 成り立っているときだけ。
+ * MUST: every module is free of side effects (no execution at import, no global mutable state, no
+ * top-level registration — CLAUDE.md). Importing one export from the barrel drops the other
+ * families only while this invariant holds.
  *
- * NOTE: `fromPretrained` が読む配布 manifest の `format` は版ごとに固定で、**旧版は読まない**。
- * 「パッケージ版 ⇔ `format`」の対応表は `@karume/hub` のモジュール doc（配布形を作り直す
- * 段取りを事前に読むための表）。
+ * NOTE: the `format` of the distribution manifest that `fromPretrained` reads is fixed per version,
+ * and **older versions are not read**. The "package version ⇔ `format`" table is in the module doc of
+ * `@karume/hub` (a table for planning ahead when a distribution has to be rebuilt).
  */
 
 /**
- * 8 家族の `fromPretrained` オプション型が**共有する**取得層のノブ（`headers` / `onProgress` /
- * `onCacheError` / `onRetry` / `fetch` / `caches`）。家族ごとの型はこれと構築オプションの交差なので
- * 家族の数だけ輸出する意味は無く、ここに 1 本だけ置く — 複数の家族を同じ取得設定でロードする側が
- * その設定に名前を付けられる（付けられないと 8 家族ぶんの型から欄を写し直すことになる）。
+ * The fetch-layer knobs **shared** by the `fromPretrained` option types of every family (`headers` /
+ * `onProgress` / `onCacheError` / `onRetry` / `fetch` / `caches`). Each family's type is the
+ * intersection of this with its construction options, so there is no point exporting one per
+ * family; it is exported once, here — a caller that loads several families with the same fetch
+ * settings can give those settings a name (otherwise it would copy the fields from every family's
+ * type).
  */
 export type { FromPretrainedHubOptions } from "./src/hub/load-options.ts";
 
 /**
- * 8 家族の `fromPretrained` オプション型が共有する**部品差し替え席**（ADR 0108 決定 19 /
- * ADR 0109 決定 10）— 役割（manifest の weights 名）→ 別の `karume/5` リポの同じ役割。
- * 差し替えられるのは**グラフ記述の sha256 が同一**の部品だけで、同一性は重みを 1 バイトも
- * 取る前に 2 つの manifest の宣言だけで見る。
+ * The **component replacement option** shared by the `fromPretrained` option types of every family
+ * (ADR 0108 decision 19 / ADR 0109 decision 10) — role (a weights name in the manifest) → the same
+ * role in another `karume/5` repository. Only components whose **graph descriptor has the same
+ * sha256** can be replaced, and the identity is checked from the declarations of the two manifests
+ * alone, before a single weight byte is fetched.
  */
 export type { FromPretrainedComponentOptions } from "./src/hub/load-options.ts";
 export type { ComponentSource } from "./src/hub/components.ts";
 
 /**
- * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る）。**家族横断で 1 本**
- * なので、8 家族を同じホストに載せる側はこれ 1 つで 400 と 500 を分けられる。内部不変条件の
- * 破れ・資産の齟齬・GPU 容量は素の `Error` のまま飛ぶ（各サブパスを参照）。
+ * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it
+ * pass). **One type across all families**, so a host serving every family can tell 400 from 500
+ * with this one type. Broken internal invariants, asset mismatches and GPU capacity are thrown as
+ * plain `Error`s (see each subpath).
  */
 export { ModelInputError } from "./src/errors.ts";
 
@@ -56,8 +61,9 @@ export type {
   DepthMap,
 } from "./src/depth-anything/pipeline.ts";
 /**
- * このパッケージ版が検証した取得元の対応表（`./depth-anything` を参照 — 追従したい場合の
- * オプトイン）。世代・版は別リポなので今は 1 エントリ（ADR 0092）。
+ * The table of sources verified with this package version (see `./depth-anything` — an opt-in for
+ * callers who want to follow it). Generations and versions live in separate repositories, so it has
+ * one entry for now (ADR 0092).
  */
 export { DEPTH_ANYTHING_SOURCES } from "./src/depth-anything/config.ts";
 
@@ -72,38 +78,48 @@ export type {
   AnimaRunComponent,
   GeneratedImage,
 } from "./src/anima/pipeline.ts";
-/** `AnimaGenerateRequest.sampler` の語彙（型と値の並び — `./anima` を参照）。 */
+/**
+ * The vocabulary of `AnimaGenerateRequest.sampler` (the type and the list of values — see
+ * `./anima`).
+ */
 export type { AnimaSamplerType } from "./src/anima/config.ts";
 export { ANIMA_SAMPLER_TYPES } from "./src/anima/config.ts";
-/** `AnimaPipelineOptions.residency` / `AnimaGenerateRequest.residency` と `residency` イベントの語彙（`./anima` を参照）。 */
+/**
+ * The vocabulary of `AnimaPipelineOptions.residency` / `AnimaGenerateRequest.residency` and the
+ * `residency` event (see `./anima`).
+ */
 export type {
   AnimaResidency,
   AnimaResidencyAction,
   AnimaResidencyReason,
 } from "./src/anima/residency.ts";
 /**
- * 解像度の綴り（`1344x768` / 正方の略記 `512`）と受理集合。**受理集合の正本はこのパッケージ**
- * （ADR 0038 §2）なので、{@link ImageSize} だけ出して生成器を出さないと、CLI / UI が `WxH` の
- * 綴り契約を書き直すことになる（`./anima` を参照）。
+ * The spelling of resolutions (`1344x768` / the square shorthand `512`) and the accepted set. **This
+ * package is the source of truth for the accepted set** (ADR 0038 §2), so exporting only
+ * {@link ImageSize} without these functions would make CLIs / UIs rewrite the `WxH` spelling contract
+ * (see `./anima`).
  */
 export { formatResolution, parseResolution } from "./src/anima/resolution.ts";
 export type { ImageSize } from "./src/anima/resolution.ts";
 /**
- * 途中 latent → RGB の線形近似。`denoise-step` の `copyLatents()`
- * （{@link AnimaLatentSnapshot}）が返す 2 欄をそのまま渡す。VAE は DiT を解放した**後**にしか
- * ロードできない（VRAM の MUST）ので、step ごとの経過を絵で見せる手段はこれだけ — snapshot 型を
- * 出しておいて近似を出さないと、購読側は受け取った latent を使えない（`./anima` を参照）。
+ * A linear approximation from an intermediate latent to RGB. Pass the two fields returned by
+ * `copyLatents()` of `denoise-step` ({@link AnimaLatentSnapshot}) as they are. The VAE can be loaded
+ * only **after** the DiT is released (a VRAM MUST), so this is the only way to show per-step
+ * progress as a picture — exporting the snapshot type without the approximation would leave
+ * subscribers unable to use the latents they receive (see `./anima`).
  */
 export { approximatePreview } from "./src/anima/preview.ts";
 /**
- * 途中 latent の逆正規化素材（`const { mean, std } = animaLatents()` → `denormalizeLatents`）。
- * **プレビューには要らない** — VAE decode と同じ土俵で latent を扱いたい消費側のための面で、
- * 出さないと 2 本の定数が消費側に二重持ちされる（`./anima` を参照）。
+ * The constants for denormalizing an intermediate latent (`const { mean, std } = animaLatents()` →
+ * `denormalizeLatents`). **Not needed for previews** — a surface for consumers that want to handle
+ * latents on the same footing as the VAE decode; without it, consumers would keep their own copy of
+ * the two constants (see `./anima`).
  */
 export { animaLatents, denormalizeLatents } from "./src/anima/latents.ts";
 /**
- * このパッケージ版が検証した取得元の対応表（`./anima` を参照 — 追従したい場合のオプトイン）。
- * 公式変種のリポと第三者 fine-tune のリポで 2 エントリ（ADR 0087 / 0092）。
+ * The table of sources verified with this package version (see `./anima` — an opt-in for callers
+ * who want to follow it). Two entries: the repository of the official variants and the repository
+ * of third-party fine-tunes (ADR 0087 / 0092).
  */
 export { ANIMA_SOURCES } from "./src/anima/config.ts";
 
@@ -121,8 +137,9 @@ export type {
   IrodoriSpeakerInput,
 } from "./src/irodori/pipeline.ts";
 /**
- * このパッケージ版が検証した取得元の対応表（`./irodori` を参照 — 追従したい場合のオプトイン）。
- * 上流の v4 / v4.1 は別リポなので 2 エントリ（旧版の pin は温存 — ADR 0092）。
+ * The table of sources verified with this package version (see `./irodori` — an opt-in for callers
+ * who want to follow it). Upstream v4 / v4.1 are separate repositories, so two entries (the pin of
+ * the older version is kept — ADR 0092).
  */
 export { IRODORI_SOURCES } from "./src/irodori/config.ts";
 
@@ -136,18 +153,25 @@ export type {
   Sbv2RunComponent,
 } from "./src/sbv2/pipeline.ts";
 /**
- * 句構造の解析結果 → 発話の変換（`./sbv2` を参照）。0.6.0 でテキスト解析は呼び手の責務に
- * なり、`generate` は発話を第 1 引数に受ける（ADR 0072 の注入席はシム無しで撤去）。
+ * Conversion from a phrase-structure analysis to an utterance (see `./sbv2`). Since 0.6.0 text
+ * analysis is the caller's responsibility, and `generate` takes the utterance as its first argument
+ * (the injection slots of ADR 0072 were removed without a shim).
  */
 export { toSbv2Utterance } from "./src/sbv2/text/utterance.ts";
-/** 発話（モーラ列 + 語アライメント）の語彙 — SBV2 が読む欄だけを持つ（`./sbv2` を参照）。 */
+/**
+ * The vocabulary of an utterance (mora sequence + word alignment) — only the fields SBV2 reads (see
+ * `./sbv2`).
+ */
 export type { Sbv2Mora, Sbv2Phrases, Sbv2Utterance, Sbv2Word } from "./src/sbv2/text/utterance.ts";
 /**
- * SBV2 の入力起因の失敗（{@link ModelInputError} の派生 — SBV2 だけを載せる側は
- * こちらで分岐できる。内部不変条件の破れは素の `Error` のまま — `./sbv2` を参照）。
+ * SBV2's input-caused failure (a subclass of {@link ModelInputError} — a host serving only SBV2 can
+ * branch on this one. Broken internal invariants stay plain `Error`s — see `./sbv2`).
  */
 export { Sbv2InputError } from "./src/sbv2/errors.ts";
-/** このパッケージ版が検証した取得元の対応表（`./sbv2` を参照 — 追従したい場合のオプトイン）。 */
+/**
+ * The table of sources verified with this package version (see `./sbv2` — an opt-in for callers who
+ * want to follow it).
+ */
 export { SBV2_SOURCES } from "./src/sbv2/config.ts";
 
 export { Siglip2Pipeline } from "./src/siglip2/pipeline.ts";
@@ -157,51 +181,63 @@ export type {
   Siglip2PipelineOptions,
 } from "./src/siglip2/pipeline.ts";
 /**
- * このパッケージ版が検証した取得元の対応表（`./siglip2` を参照 — 追従したい場合の
- * オプトイン）。base と so400m が 1 リポに同居するので 1 エントリ（ADR 0092）。
+ * The table of sources verified with this package version (see `./siglip2` — an opt-in for callers
+ * who want to follow it). base and so400m share one repository, so one entry (ADR 0092).
  */
 export { SIGLIP2_SOURCES } from "./src/siglip2/config.ts";
 
 export { Gemma4Pipeline } from "./src/gemma/pipeline.ts";
 /**
- * gemma4 の prefill バケットの既定（`Gemma4PipelineOptions.chunkBuckets` の省略時の値 —
- * `chunkLength` に加えて許す物理 chunk 行数の梯子）。短い発話を pad 無しで流すための列で、
- * 自分で足し引きするときの起点として出す。実測で確定した列（`./gemma` を参照）。
+ * The default prefill buckets of gemma4 (the value of `Gemma4PipelineOptions.chunkBuckets` when
+ * omitted — the ladder of physical chunk row counts allowed in addition to `chunkLength`). The list
+ * that runs short utterances without padding, exported as a starting point for callers who add or
+ * remove entries. The list was fixed by measurement (see `./gemma`).
  */
 export { GEMMA4_CHUNK_BUCKETS } from "./src/gemma/pipeline.ts";
 export type {
   Gemma4Assets,
   Gemma4ChatOptions,
-  /** `estimateSessionMemory` が見積る生成の形（容量 / chunk 長 — `./gemma` を参照）。 */
+  /**
+   * The generation shape `estimateSessionMemory` estimates (capacity / chunk length — see
+   * `./gemma`).
+   */
   Gemma4EstimateOptions,
   Gemma4FromPretrainedOptions,
   Gemma4PipelineOptions,
-  /** `sequence()` の指定（この会話が確保する容量）。 */
+  /** The specification of `sequence()` (the capacity this conversation allocates). */
   Gemma4SequenceOptions,
 } from "./src/gemma/pipeline.ts";
 export type {
-  /** `chat` の停止理由（sequence 層の理由 + この層でしか判定できない `stop-string`）。 */
+  /**
+   * The stop reason of `chat` (the sequence layer's reasons + `stop-string`, which only this layer
+   * can decide).
+   */
   Gemma4ChatStop,
   Gemma4ChatStream,
-  /** prefill の進捗 1 通（`chunk / chunks` — `onPrefill` が受ける）。 */
+  /** One prefill progress report (`chunk / chunks` — received by `onPrefill`). */
   Gemma4PrefillProgress,
-  /** 観測席の 1 通がどの run か（prefill の chunk / decode の step — `onRunDiagnostics` が受ける）。 */
+  /**
+   * Which run one diagnostics report belongs to (a prefill chunk / a decode step — received by
+   * `onRunDiagnostics`).
+   */
   Gemma4RunPhase,
 } from "./src/gemma/chat-turn.ts";
 /**
- * 自己採算ゲートのノブ（`Gemma4PipelineOptions.speculative` の `gate` — 計測・検収用の静的ノブで
- * 既定で十分。`./gemma` を参照）。
+ * The knobs of the self-tuning gate (`gate` of `Gemma4PipelineOptions.speculative` — static knobs
+ * for measurement and acceptance; the defaults are enough. See `./gemma`).
  */
 export type { SpeculationGateOptions } from "./src/generation/speculation-gate.ts";
 /**
- * PLE の置き場（`Gemma4PipelineOptions.pleResidency` の値域 — 既定 `"host"`。
- * `"gpu"` は量子化バイト列を GPU に常駐させ gather も GPU 内で行う opt-in の席。`./gemma` を参照）。
+ * Where PLE lives (the values of `Gemma4PipelineOptions.pleResidency` — default `"host"`. `"gpu"` is
+ * the opt-in value that keeps the quantized bytes resident on the GPU and also gathers on the GPU.
+ * See `./gemma`).
  */
 export type { Gemma4PleResidency } from "./src/gemma/ple-gpu.ts";
 /**
- * 多ターンの会話を持ち回る中間層（`chat` と `sequence` の間 — 会話の履歴を持ち、KV を継ぎ、
- * 容量が足りないターンは送る前に切り詰める。既定の切り詰めは `dropOldestTurns` =
- * 最古の user / assistant の対を落とす。`./gemma` を参照）。
+ * The middle layer that carries a multi-turn conversation (between `chat` and `sequence` — it holds
+ * the conversation history, carries the KV over, and truncates a turn that does not fit the
+ * capacity before sending it. The default truncation is `dropOldestTurns` = drop the oldest
+ * user / assistant pair. See `./gemma`).
  */
 export { dropOldestTurns, Gemma4ChatSession } from "./src/gemma/chat-session.ts";
 export type {
@@ -212,54 +248,66 @@ export type {
   Gemma4ChatTurnOptions,
 } from "./src/gemma/chat-session.ts";
 export type { Gemma4DefaultSampler, Gemma4PipelineConfig } from "./src/gemma/config.ts";
-/** このパッケージ版が検証した取得元の対応表（`./gemma` を参照 — 追従したい場合のオプトイン）。 */
+/**
+ * The table of sources verified with this package version (see `./gemma` — an opt-in for callers
+ * who want to follow it).
+ */
 export { GEMMA4_SOURCES } from "./src/gemma/config.ts";
 /**
- * 生の宣言（`unknown`）→ 検証済みの `Gemma4PipelineConfig`。**`fromAssets` を使う消費者のための
- * 口**で、`fromPretrained` は内部で通すので呼ぶ必要は無い（`./gemma` を参照）。
+ * A raw declaration (`unknown`) → a validated `Gemma4PipelineConfig`. **An entry point for consumers
+ * that use `fromAssets`**; `fromPretrained` runs it internally, so there is no need to call it
+ * there (see `./gemma`).
  */
 export { parseGemma4PipelineConfig } from "./src/gemma/config.ts";
 /**
- * 配布形が宣言する RoPE のパラメータ（`pipelineConfig.rope` — 表は配布形に無く、cos / sin は
- * chunk ぶんだけホストが作る。`./gemma` を参照）。
+ * The RoPE parameters declared by the distribution (`pipelineConfig.rope` — the distribution has no
+ * table; the host computes cos / sin for one chunk at a time. See `./gemma`).
  */
 export type { Gemma4RopeLayerSpec, Gemma4RopeLayerType, Gemma4RopeSpec } from "./src/gemma/rope.ts";
 /**
- * 位置列 → RoPE のグラフ入力 4 本（`[1, rows, headDim]` の f32）。`Gemma4Pipeline` は内部で通すので、
- * 要るのは製品グラフを自分で回す側だけ（`./gemma` を参照）。
+ * Positions → the four RoPE graph inputs (f32 of `[1, rows, headDim]`). `Gemma4Pipeline` runs this
+ * internally, so it is needed only by callers that run the production graph themselves (see
+ * `./gemma`).
  */
 export { gemma4RopeInputs } from "./src/gemma/rope.ts";
 /**
- * 会話 → token id 列（`<bos>` 込み — 素の会話だけを受け、tools / thinking は fail loudly。
- * `./gemma` を参照）。`chat` は内部でこれを通すので、要るのは低レベル面（`sequence`）を
- * 自分で回すときだけ。
+ * Conversation → token ids (including `<bos>` — accepts plain conversations only; tools / thinking
+ * fail loudly. See `./gemma`). `chat` runs this internally, so it is needed only when driving the
+ * low-level surface (`sequence`) yourself.
  */
 export { gemma4ChatPrompt } from "./src/gemma/text/chat.ts";
 /**
- * 新しい発話 1 つ → 会話の続きとして描き足す**差分** token 列（多ターンを `sequence` で回すときの
- * 2 ターン目以降の入口。前 turn を閉じる `<turn|>` は含めない — `./gemma` を参照）。
+ * One new message → the **delta** tokens appended as the continuation of the conversation (the entry
+ * point for the second and later turns when running multiple turns with `sequence`. It does not
+ * include the `<turn|>` that closes the previous turn — see `./gemma`).
  */
 export { gemma4ChatTurn } from "./src/gemma/text/chat.ts";
 export type { Gemma4ChatMessage, Gemma4ChatRole } from "./src/gemma/text/chat.ts";
-/** 低レベル面で受けた token id を文字列へ戻す口（`./gemma` を参照）。 */
+/**
+ * The entry point that turns token ids received on the low-level surface back into strings (see
+ * `./gemma`).
+ */
 export type { GemmaDecodeOptions, GemmaTokenizer } from "./src/gemma/text/tokenizer.ts";
 export type { StreamingDetokenizer } from "./src/text/detokenizer.ts";
 /**
- * 生成の語彙（ADR 0083）。`Gemma4Pipeline.sequence()` を自分で回すときに要る型と、「会話が
- * 入り切らない」を他の失敗と読み分けるための例外（決定 10 — `./gemma` を参照）。
+ * The generation vocabulary (ADR 0083). The types needed to drive `Gemma4Pipeline.sequence()`
+ * yourself, and the exception that tells "the conversation does not fit" apart from other failures
+ * (decision 10 — see `./gemma`).
  */
 export { GenerationCapacityError } from "./src/generation/sequence.ts";
 export type {
   GenerationCapacityConstraint,
   GenerationCapacityDetail,
   GenerationEvent,
-  /** 観測 1 通に載るゲートの状態（`GenerationRunPhase.gate` — `./gemma` を参照）。 */
+  /**
+   * The gate state carried by one diagnostics report (`GenerationRunPhase.gate` — see `./gemma`).
+   */
   GenerationGateTrace,
   GenerationRequest,
-  /** run 1 本につき 1 通の観測（`Gemma4RunPhase` の実体 — `./gemma` を参照）。 */
+  /** One diagnostics report per run (what `Gemma4RunPhase` is — see `./gemma`). */
   GenerationRunPhase,
   GenerationSequence,
-  /** 投機の勘定（`GenerationStop.speculation` — `./gemma` を参照）。 */
+  /** The speculation tally (`GenerationStop.speculation` — see `./gemma`). */
   GenerationSpeculation,
   GenerationStop,
   GenerationStream,
@@ -278,12 +326,12 @@ export type { LabSegment } from "./src/vowel-detector/postprocess.ts";
 
 export { WanPipeline } from "./src/wan/pipeline.ts";
 /**
- * Wan2.2 TI2V 5B のテキスト（+ 条件画像）→ 動画（`./wan` を参照 — 要求の型だけが 2.2 専用で、他の公開型は
- * `WanPipeline` と共有）。
+ * Wan2.2 TI2V 5B: text (+ a conditioning image) → video (see `./wan` — only the request type is
+ * specific to 2.2; the other public types are shared with `WanPipeline`).
  */
 export { WanTi2vPipeline } from "./src/wan/ti2v-pipeline.ts";
 export type { WanTi2vGenerateRequest } from "./src/wan/ti2v-pipeline.ts";
-/** I2V の条件画像の寸法の合わせ方の語彙（`./wan` を参照）。 */
+/** The vocabulary of how the I2V conditioning image is fitted to the size (see `./wan`). */
 export type { WanI2vFit } from "./src/wan/i2v-preprocess.ts";
 export type {
   GeneratedVideo,
@@ -295,19 +343,26 @@ export type {
   WanPipelineOptions,
   WanRunComponent,
 } from "./src/wan/pipeline.ts";
-/** 受理するプロンプトの 1 行と役割の語彙（`./wan` を参照 — 第 1 段は集合の外を拒む）。 */
+/**
+ * The vocabulary of one accepted prompt line and its role (see `./wan` — the `"precomputed"` text
+ * encoder accepts only the fixed prompts of the asset; the default `"gpu"` path accepts any prompt).
+ */
 export type { WanPrompt, WanPromptRole } from "./src/wan/text-embeds.ts";
-/** 動画の 1 フレーム → RGBA 8bit（`./wan` を参照 — uint8 化の規則の正本）。 */
+/**
+ * One video frame → 8-bit RGBA (see `./wan` — the source of truth for the uint8 conversion rule).
+ */
 export { wanFrameToRgba } from "./src/wan/frames.ts";
 /**
- * このパッケージ版が検証した取得元の対応表（`./wan` を参照 — 追従したい場合のオプトイン）。
- * 公開しているのは Wan2.2 の 1 本だけで、Wan2.1 のキーは無い（ADR 0118 追記（2026-10-15））。
+ * The table of sources verified with this package version (see `./wan` — an opt-in for callers who
+ * want to follow it). Only Wan2.2 is published; there is no Wan2.1 key (ADR 0118 addendum
+ * (2026-10-15)).
  */
 export { WAN_SOURCES } from "./src/wan/config.ts";
 
 /**
- * umT5-XXL のテキスト → encoder の最終隠れ状態（`./umt5` を参照 — 配布形 `karume-umt5-xxl`・Session は構築から
- * `dispose` まで常駐。入力の規則は Wan のトークナイザと同じ 1 本で、Wan の前処理だけを持たない）。
+ * umT5-XXL: text → the encoder's last hidden state (see `./umt5` — distribution `karume-umt5-xxl`;
+ * the Session stays resident from construction until `dispose`. The input rules are the same single
+ * implementation as Wan's tokenizer, without Wan's preprocessing).
  */
 export { Umt5Encoder } from "./src/umt5/encoder.ts";
 export type {
@@ -317,22 +372,26 @@ export type {
   Umt5EncoderOptions,
   Umt5Encoding,
 } from "./src/umt5/encoder.ts";
-/** このパッケージ版が検証した取得元の対応表（`./umt5` を参照 — 追従したい場合のオプトイン）。 */
+/**
+ * The table of sources verified with this package version (see `./umt5` — an opt-in for callers who
+ * want to follow it).
+ */
 export { UMT5_SOURCES } from "./src/umt5/config.ts";
 
 /**
- * 全ファミリの取得元対応表を 1 つに畳んだ表（家族ごとの `*_SOURCES` と**同じキー・同じ値** —
- * ADR 0092）。**barrel にしか無い**面で、「公開している配布リポを全部なめる」側（疎通スモーク・
- * 事前取得・一覧）のために置く。1 家族しか使わない消費者はサブパスの家族表を引く
- * （barrel を引くと 9 家族の config が繋がる）。
+ * The source tables of every family merged into one (**the same keys and the same values** as each
+ * family's `*_SOURCES` — ADR 0092). A surface **only in the barrel**, for callers that "walk every
+ * published distribution repository" (connectivity smoke tests, prefetching, listings). A consumer
+ * that uses only one family should use that family's table from its subpath (using the barrel pulls
+ * in the configs of nine families).
  */
 export { KARUME_SOURCES } from "./src/sources.ts";
 
 /**
- * RGBA → PNG / f32 波形 ↔ WAV / RGB8 → モデル入力。**パイプライン非依存の共通処理**
- * （画像生成モデルは総じて最後に PNG を、音声生成モデルは WAV を通し、声質の参照には WAV を、
- * 画像を入力に取るモデルは resize → rescale → normalize を通る）なので、ファミリの
- * サブパスではなく barrel 直下に置く。
+ * RGBA → PNG / f32 waveform ↔ WAV / RGB8 → model input. **Common processing independent of any
+ * pipeline** (image generation models generally end with PNG, audio generation models with WAV,
+ * voice references come as WAV, and models that take images go through resize → rescale →
+ * normalize), so it sits at the top of the barrel rather than in a family subpath.
  */
 export { encodePng } from "./src/image/png.ts";
 export { normalizeToNchw, resizeRgb8 } from "./src/image/preprocess.ts";
@@ -341,12 +400,14 @@ export { decodeWav, encodeWav } from "./src/audio/wav.ts";
 export type { DecodedWav } from "./src/audio/wav.ts";
 
 /**
- * NOTE: 固定長 greedy 生成ループ（`generateGreedy` / `GreedySpec`）はここから**外した**
- * （ADR 0083 決定 9 — 破壊的変更。消費側の doc は limitations）。parity 検収用の内部ヘルパ
- * として `src/generation/greedy.ts` に残っており、生成の公開面は生成 API 波の sequence が持つ。
+ * NOTE: the fixed-length greedy generation loop (`generateGreedy` / `GreedySpec`) was **removed**
+ * from here (ADR 0083 decision 9 — a breaking change; the consumer-facing doc is limitations). It
+ * remains in `src/generation/greedy.ts` as an internal helper for parity acceptance; the public
+ * generation surface is the `sequence` of the generation-API phase.
  */
 
-// 固定 mobile QAT は別ファミリ。会話・設定の共通型は Gemma の公開面を使う。
+// The fixed mobile QAT is a separate family. The shared conversation and configuration types use
+// Gemma's public surface.
 export { Gemma4QatPipeline } from "./src/gemma/pipeline.ts";
 export type {
   Gemma4QatFromPretrainedOptions,

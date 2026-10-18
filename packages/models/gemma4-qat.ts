@@ -1,9 +1,10 @@
 /**
- * `@karume/models/gemma4-qat` — 固定 mobile QAT の E2B / E4B。
+ * `@karume/models/gemma4-qat` — E2B / E4B of the fixed mobile QAT.
  *
- * 実験段階。通常生成・会話の API は Gemma と共通だが、固定 INT2/INT4/INT8 と
- * SRQ を持つ別配布形だけを受ける。MTP と広い品質検収は未対応。
- * DECIDED: [ADR 0097](../../docs/decisions/0097-gemma4-qat-integration.md)。
+ * Experimental. The generation and conversation APIs are shared with Gemma, but it accepts only its
+ * own distribution, with fixed INT2/INT4/INT8 and SRQ. MTP and broad quality acceptance are not
+ * supported.
+ * DECIDED: [ADR 0097](../../docs/decisions/0097-gemma4-qat-integration.md).
  */
 export { Gemma4QatPipeline } from "./src/gemma/pipeline.ts";
 export type {

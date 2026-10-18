@@ -1,26 +1,30 @@
 /**
- * HuggingFace 取得元アダプター（ADR 0038 §5「hub の取得層」）。土台は `@hdae/fetch-cache`
- * （実行時依存ゼロ・Web 標準 API のみ）。取得元契約 `source.ts` の実装のひとつ
- * （もう 1 つは `local.ts` — こちらだけが世代・キャッシュ・network を持つ）。
+ * The Hugging Face source adapter (ADR 0038 §5, "hub's fetch layer"). Built on `@hdae/fetch-cache`
+ * (zero run-time dependencies, Web standard APIs only). One implementation of the source contract
+ * `source.ts` (the other is `local.ts` — only this one has generations, a cache and the network).
  *
- * このアダプターが持つもの（= HF / HTTP + 永続キャッシュに固有のもの）:
- * - 可変 ref → commit SHA の解決と、暗黙 `main` の pin 案内
- * - キャッシュの所有（0.5.0 で名前空間が内部固定 1 個になった）。資産のキーは内容キー
- *   `["hf", kind, repo, path, sha256]` なので、revision が動いてもバイト不変のファイルはヒットの
- *   まま読める。manifest だけは事前の期待 sha が無いので SHA 固定 resolve URL がキー。
- * - **資産の完全性検証**（spec の `sha256` / `expectedBytes` を取得層へ委ねる）。取得時に検証して
- *   記録ハッシュをエントリへ焼き、以後のヒットは記録との文字列比較だけで済ませる（全量ハッシュ
- *   0 回）。記録が食い違うエントリは自動で evict → 取り直し（self-heal）。受信バイトの上限も
- *   同じ `expectedBytes` が兼ねる — 宣言を超えた時点で取得層が受信を打ち切る（取得層 ADR 0011）。
- * - 相 1（streaming prefetch）— **RAM に載せずに永続キャッシュへ落とす** HTTP 固有の最適化。
- * - キャッシュ在庫の照会と削除（`source.ts` ⑥⑦）— 溜めているのがこの取得元なので、
- *   「何が手元にあるか」「これを消せるか」に答えられるのもここだけ。
- * - 区間読み（`source.ts` ⑧）— 溜めたエントリの中を `[offset, offset + length)` だけ開く
- *   （取得層 0.8.0 の `openHfFile`）。読めるのはキャッシュの中身だけなので、未取得の参照は
- *   相 1 と同じ温めを 1 度挟んでから開き直す。
+ * What this adapter holds (= what is specific to HF / HTTP + a persistent cache):
+ * - resolving a mutable ref → commit SHA, and the pinning guidance for an implicit `main`
+ * - ownership of the cache (since 0.5.0 there is a single, internally fixed namespace). The asset
+ *   key is the content key `["hf", kind, repo, path, sha256]`, so a file whose bytes do not change
+ *   stays a hit even when the revision moves. Only the manifest has no expected sha in advance, so
+ *   its key is the SHA-pinned resolve URL.
+ * - **asset integrity verification** (the spec's `sha256` / `expectedBytes` are delegated to the
+ *   fetch layer). It verifies on fetch and records the hash in the entry; later hits need only a
+ *   string comparison with the record (zero full-file hashes). An entry whose record disagrees is
+ *   evicted and fetched again automatically (self-heal). The same `expectedBytes` also caps the
+ *   bytes received — the fetch layer stops receiving once the declaration is exceeded (the fetch
+ *   layer's ADR 0011).
+ * - phase 1 (streaming prefetch) — an HTTP-specific optimisation that **writes to the persistent
+ *   cache without holding the bytes in RAM**.
+ * - querying and deleting the cache inventory (`source.ts` (6) (7)) — this source is the one that
+ *   keeps things, so only it can answer "what is here" and "can this be deleted".
+ * - range reads (`source.ts` (8)) — opens only `[offset, offset + length)` inside a stored entry
+ *   (`openHfFile` of fetch layer 0.8.0). Only the cache contents can be read, so a ref not fetched
+ *   yet gets the same warm-up as phase 1 once and is then reopened.
  *
- * MUST NOT: ここでエラーを組み立てない（診断の文脈を持つのは共通層 — `context.ts`）。
- * 例外は「取得層の不変条件破れ」を告げる素の `Error` だけ。
+ * MUST NOT: assemble errors here (the common layer holds the diagnostic context — `context.ts`).
+ * The only exception is a bare `Error` that reports "an invariant of the fetch layer is broken".
  */
 
 import { evict as evictKey, listKeys } from "@hdae/fetch-cache";
@@ -41,7 +45,10 @@ import {
   type SourceOrigin,
 } from "../source.ts";
 
-/** HF 上の 1 つの座標（世代は解決済み）。`hubUrl` は**ホストの選択**なので越境先にも効かせる。 */
+/**
+ * One coordinate on HF (generation resolved). `hubUrl` is **the choice of host**, so it applies to
+ * cross-repo targets too.
+ */
 type HfTarget = { readonly repo: string; readonly revision: string; readonly hubUrl?: string };
 
 const hfTarget = (repo: string, revision: string, hubUrl?: string): HfTarget => ({
@@ -56,11 +63,11 @@ const requestInit = (headers?: HeadersInit, signal?: AbortSignal): RequestInit =
 });
 
 /**
- * revision を渡さずに `main` を暗黙解決したときの案内を 1 回だけ出す。
+ * Prints the guidance once when `main` was resolved implicitly because no revision was passed.
  *
- * 呼び手が revision を書いていない場合だけが対象で、`"main"` の**明示**指定・タグ・SHA 指定
- * では出さない（明示は「可変 ref でよい」という呼び手の意思表示で、警告は誤検出になる）。
- * 解決した SHA を印字するのは、その 1 行をコピーすればそのまま pin が完成するため。
+ * Only when the caller wrote no revision; not for an **explicit** `"main"`, a tag or a SHA (an
+ * explicit value is the caller saying "a mutable ref is fine", and a warning would be a false
+ * positive). The resolved SHA is printed so that copying that one line completes the pin.
  */
 const warnImplicitMain = (repo: string, revisionSha: string): void => {
   console.warn(
@@ -72,11 +79,12 @@ const warnImplicitMain = (repo: string, revisionSha: string): void => {
 };
 
 /**
- * 資産 1 本のキャッシュキー（取得層 HF 層の**内容キー**）。hub は `kind` を渡さないので
- * 第 2 要素は常に `"model"`。
+ * The cache key of one asset (the **content key** of the fetch layer's HF layer). hub does not pass
+ * `kind`, so the second element is always `"model"`.
  *
- * MUST: 綴りをここ 1 箇所に閉じる — 在庫の照会（プレフィックス `["hf", "model", repo]`）と
- * 削除（5 要素の完全キー）が同じ式から外れると、消したつもりのエントリが残る。
+ * MUST: keep the spelling in this one place — if the inventory query (prefix `["hf", "model",
+ * repo]`) and deletion (the full five-element key) drift from the same expression, entries believed
+ * deleted remain.
  */
 const contentKey = (repo: string, ref: FileRef): readonly string[] => [
   "hf",
@@ -86,7 +94,10 @@ const contentKey = (repo: string, ref: FileRef): readonly string[] => [
   ref.sha256,
 ];
 
-/** 在庫の突合キー。repo はプレフィックスで絞り込み済みなので (path, sha256) の組で足りる。 */
+/**
+ * The inventory matching key. The repo is already narrowed by the prefix, so the (path, sha256)
+ * pair suffices.
+ */
 const stockKey = (path: string, sha256: string): string => `${path} ${sha256}`;
 
 /**
@@ -116,7 +127,8 @@ const pinnedHfSource = (
   const shared = {
     ...(options.caches === undefined ? {} : { caches: options.caches }),
   };
-  // 診断の名乗り（HF は repo と commit SHA を持つ取得元 — 完全性検証は network 取得の側）。
+  // The naming for diagnostics (HF is a source with a repo and a commit SHA — integrity checks are
+  // on the network-fetch side).
   const origin: SourceOrigin = {
     label: `repo ${repo} @ ${generation}`,
     integrity: "network",
@@ -124,9 +136,10 @@ const pinnedHfSource = (
     revisionSha: generation,
   };
   /**
-   * 相 1 の実体（④`prefetchFile` と ⑧`openFile` の温め直しが共用する）。バイト列を手元に持たず
-   * 永続キャッシュへ落とすだけの面で、`expectedBytes` は**受信の上限**として効く（取得層 ADR 0011）
-   * — 宣言を超えた時点で打ち切るので、この面でも上限が抜けない。
+   * The body of phase 1 (shared by (4) `prefetchFile` and the re-warm of (8) `openFile`). A surface
+   * that only writes to the persistent cache without holding the bytes, where `expectedBytes` acts
+   * as **the receive cap** (the fetch layer's ADR 0011) — it stops once the declaration is
+   * exceeded, so the cap holds on this surface too.
    */
   const warmFile = async (
     ref: FileRef,
@@ -156,14 +169,16 @@ const pinnedHfSource = (
     origin,
 
     readManifest: async ({ parse, signal }) => {
-      // manifest は正本の根なので**事前の期待 sha256 も期待バイト数も持てない**。取得層に
-      // 「厳密一致なしの上限」は無いので、1 MiB の上限は `parse`（`parseManifest`）が全量を
-      // 受け取ってから見る（受信を途中で止める門はここには無い）。
-      // MUST: UTF-8 decode と parse は取得層の `validate` フックの中で行う — 取得の外でやると
-      // 破損したキャッシュエントリが evict されず、`clearHubCache` を手で叩くまで毎回同じ
-      // ManifestFormatError を返し続ける（資産側と同じ self-heal 経路に揃える）。
-      // MUST NOT: このフックへ中断確認を混ぜない — フックの throw は下層で「破損」と解釈され、
-      // 健全なキャッシュエントリの evict と取り直しを招く。
+      // The manifest is the root of the source of truth, so it **can have neither an expected
+      // sha256 nor an expected byte count in advance**. The fetch layer has no "cap without exact
+      // match", so the 1 MiB limit is checked by `parse` (`parseManifest`) after receiving
+      // everything (there is no check here that stops receiving midway).
+      // MUST: UTF-8 decoding and parsing happen inside the fetch layer's `validate` hook — doing
+      // them outside the fetch would leave a corrupt cache entry unevicted, returning the same
+      // ManifestFormatError every time until `clearHubCache` is called by hand (this aligns with
+      // the same self-heal path as assets).
+      // MUST NOT: mix a cancellation check into this hook — a throw from the hook is read as
+      // "corrupt" by the lower layer and leads to evicting and refetching a healthy cache entry.
       await fetchHfFile(
         target,
         { path: MANIFEST_FILENAME, validate: parse },
@@ -182,18 +197,21 @@ const pinnedHfSource = (
         target,
         {
           path: ref.path,
-          // 検証は取得層が持つ（受信中のハッシュ / 記録ハッシュの突合 / 不一致の self-heal）。
+          // Verification belongs to the fetch layer (hashing while receiving / comparing the
+          // recorded hash / self-heal on mismatch).
           sha256: ref.sha256,
-          // バイト数の門（受信の上限 + 全量受信後の厳密一致）であり、同時に受信バッファの
-          // 前確保サイズでもある。確保自体が失敗する大きさ（Chromium の単一 ArrayBuffer 上限
-          // 超え）なら受信前に throw されるので、数 GB を撃ち終わってから落ちることがない。
+          // The byte-count check (receive cap + exact match after the full receive), and at the
+          // same time the pre-allocation size of the receive buffer. A size whose allocation itself
+          // fails (above Chromium's single-ArrayBuffer limit) throws before receiving, so it never
+          // fails only after several GB have been downloaded.
           expectedBytes: ref.size,
         },
         {
           init: requestInit(options.headers, signal),
           fetch: baseFetch,
-          // network 側だけ発火する（キャッシュヒットは complete の 1 点だけで進む）。
-          // `loaded` が `size` を超えないことは取得層の受信上限（`expectedBytes`）が保証する。
+          // Fires only on the network side (a cache hit advances with the single complete).
+          // The fetch layer's receive cap (`expectedBytes`) guarantees `loaded` never exceeds
+          // `size`.
           onProgress: (progress) => onProgress(progress.loaded),
           ...shared,
           ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
@@ -202,18 +220,20 @@ const pinnedHfSource = (
       );
     },
 
-    // 相 1: バイト列を手元に持たない面。既存エントリの扱いは記録ハッシュとの突合で決まる
-    // （取得層 0.5.0）— 記録が期待 sha256 と一致すれば network に出ずそのまま温存し、記録が
-    // 無い / 食い違うエントリは検証付きで温め直す。`caches` 不在・put 失敗は fail loud
-    // （素 fetch へ縮退する余地が無い — 縮退させると RAM ピークの目標が壊れる）。
+    // Phase 1: a surface that does not hold the bytes. An existing entry is handled by comparing
+    // the recorded hash (fetch layer 0.5.0) — if the record matches the expected sha256 it is kept
+    // as is without going to the network; an entry without a record or with a mismatching one is
+    // re-warmed with verification. A missing `caches` or a failed put fails loudly (there is no
+    // room to fall back to a plain fetch — a fallback would break the RAM-peak target).
     prefetchFile: async (ref, { signal, onProgress }) => {
       await warmFile(ref, { ...(signal === undefined ? {} : { signal }), onProgress });
     },
 
-    // ⑧区間読み。開くのはキャッシュの中身だけで、`openHfFile` は**network に出ない**（revision の
-    // 解決もしない）ので、未取得・記録なし・記録不一致（開く側が self-heal で消す）はどれも
-    // `undefined` として返る。そこで**相 1 と同じ温め**を 1 度だけ挟んでから開き直す — 呼び手に
-    // 「先に prefetchAssets を通せ」という手順を負わせないため（消費側は行を要求するだけでよい）。
+    // (8) Range reads. Only the cache contents are opened, and `openHfFile` **does not go to the
+    // network** (nor resolve a revision), so not fetched, no record, and a mismatching record
+    // (which the opening side deletes by self-heal) all come back as `undefined`. So it
+    // inserts **the same warm-up as phase 1** exactly once and reopens — so that callers do not
+    // carry the step "go through prefetchAssets first" (consumers only need to request rows).
     openFile: async (ref, { signal }): Promise<AssetRangeReader> => {
       const spec = { path: ref.path, sha256: ref.sha256, expectedBytes: ref.size };
       const strategy = defaultReadStrategy();
@@ -228,9 +248,10 @@ const pinnedHfSource = (
         opened = await openHfFile(target, spec, openOptions);
       }
       if (opened === undefined) {
-        // 温めが成功した直後に開けないのは取得層の不変条件破れ（相 1 は検証付きで記録ハッシュを
-        // 焼くので、そこを通れば同じ内容キーで開けるはず）か、温めと開き直しの間に在庫が
-        // 消されたか（在庫削除 ⑦ との競合）のどれかなので、候補を全て名指しして落とす。
+        // Failing to open right after a successful warm-up is either a broken invariant of the
+        // fetch layer (phase 1 records the hash with verification, so after it the same content key
+        // should open) or the inventory being deleted between the warm-up and the reopen (a race
+        // with inventory deletion (7)), so fail naming every candidate.
         throw new Error(
           `@karume/hub: ${ref.path} の区間読み口が温め直した直後も開かない` +
             `（記録ハッシュを保持しないキャッシュ / CacheStorage が使えない / 温めと開き直しの` +
@@ -239,38 +260,44 @@ const pinnedHfSource = (
       }
       const entry = opened;
       return {
-        // 費用の型は取得層の読み出し戦略そのもの: "blob" は遅延 Blob の slice（offset に依らない）・
-        // "stream" は本文の読み飛ばし（offset に比例）。Deno と Node では "stream"（`blob()` が全量を
-        // ヒープへ載せるため — `defaultReadStrategy`）なので "scan"・ブラウザでは "seek" になる。
+        // The cost class is the fetch layer's read strategy itself: "blob" is a slice of a lazy
+        // Blob (independent of the offset), "stream" skips through the body (proportional to the
+        // offset). Deno and Node use "stream" (`blob()` puts the whole body on the heap there —
+        // `defaultReadStrategy`), so "scan"; browsers get "seek".
         cost: entry.strategy === "blob" ? "seek" : "scan",
         read: async (offset, length, readOptions) => {
           const bytes = await entry.read(offset, length, readOptions);
           const { buffer } = bytes;
-          // 取得層の戻り型は buffer の種別を持たない（`Uint8Array<ArrayBufferLike>`）。消費側は
-          // 返ったバイト列をそのまま TypedArray として読むので、SharedArrayBuffer は黙って
-          // 通さない（`as` で潰すと、共有メモリ由来の view が型だけ健全に見える）。
+          // The fetch layer's return type does not carry the buffer kind
+          // (`Uint8Array<ArrayBufferLike>`). Consumers read the returned bytes as a TypedArray as
+          // is, so a SharedArrayBuffer is not let through silently (squashing it with `as` would
+          // make a view over shared memory look sound by type alone).
           if (!(buffer instanceof ArrayBuffer)) {
             throw new Error(
               `@karume/hub: ${ref.path} の区間読みが ArrayBuffer 以外の buffer を返した`,
             );
           }
-          // 長さ検査（`length` ちょうどか）と tight view 検査は取得層と共通層が持つので重ねない。
+          // The length check (exactly `length`?) and the tight view check belong to the fetch layer
+          // and the common layer, so they are not repeated here.
           return new Uint8Array(buffer, bytes.byteOffset, bytes.byteLength);
         },
       };
     },
 
-    // 越境先も同じアダプター（参照先は commit SHA 固定が必須なので、越境側で解決は起きない）。
-    // 資産のキャッシュキーは内容キー（`hubUrl` を含まない）なので、同じバイト列ならミラーを
-    // 跨いでも 1 エントリを共有する。別リポの同名 path はキーに `repo` が入るぶん別エントリ。
+    // Cross-repo targets use the same adapter (the target must be pinned to a commit SHA, so no
+    // resolution happens on the cross-repo side). The asset cache key is the content key (without
+    // `hubUrl`), so identical bytes share one entry even across mirrors. A same-named path in
+    // another repo is a separate entry, since the key includes `repo`.
     originFor: (crossRepo, crossRevision) =>
       pinnedHfSource(crossRepo, crossRevision, hubUrl, options),
 
-    // ⑥在庫。**listKeys は repo プレフィックスで 1 回だけ引く** — 参照ごとに引くと、参照の
-    // 本数だけキャッシュ全体の列挙が走る（数十コンポーネントの manifest で効く差）。
+    // (6) Inventory. **listKeys is called once with the repo prefix** — calling it per ref would
+    // enumerate the whole cache once per ref (a difference that matters for a manifest with dozens
+    // of components).
     inventory: async (refs) => {
       const keys = await listKeys(["hf", "model", repo], shared);
-      // 内容キーは 5 要素固定（`contentKey`）。それ以外の形はこの取得元が書いたものではない。
+      // A content key always has five elements (`contentKey`). Any other shape was not written by
+      // this source.
       const stock = new Set(
         keys.filter((key) => key.length === 5).map((key) => stockKey(`${key[3]}`, `${key[4]}`)),
       );
@@ -279,8 +306,8 @@ const pinnedHfSource = (
       );
     },
 
-    // ⑦削除。プレフィックス意味論だが完全キーを渡すので、対象はそのエントリ 1 件だけ
-    // （件数 > 0 = 実在して消えた）。
+    // (7) Deletion. The semantics are by prefix, but the full key is passed, so the target is that
+    // one entry only (count > 0 = it existed and was deleted).
     evict: async (refs) => {
       const removed: FileRef[] = [];
       for (const ref of refs) {
@@ -293,21 +320,22 @@ const pinnedHfSource = (
 };
 
 /**
- * HF の取得元を作る。`ref.revision` は可変 ref でよい（{@link SourceDriver.resolveGeneration}
- * が commit SHA へ解決する）。
+ * Creates an HF source. `ref.revision` may be a mutable ref ({@link SourceDriver.resolveGeneration}
+ * resolves it to a commit SHA).
  *
- * 取得の作法（`fetch` / `caches` / `headers`）は**面ごと**に渡る（`pin` の引数）— この factory が
- * 持つのは「どこから取るか」（repo / 要求 ref / ミラー）だけ。
+ * The fetch options (`fetch` / `caches` / `headers`) come **per surface** (the arguments of `pin`)
+ * — this factory holds only "where to fetch from" (repo / requested ref / mirror).
  */
 export const createHfSource = (ref: HubRepoRef): DistributionSource => {
-  // MUST: 入力オブジェクトの値は入口で 1 度だけ写し、以後は読み直さない — 読み直すと、呼び出し側が
-  // ロード後（や revision 解決の待ちの間）に同じオブジェクトを書き換えたとき、名乗り
-  // （`loaded.repo`）は旧値のまま取得だけが固定済み SHA で別の repo・ホストへ出る。
+  // MUST: copy the input object's values once at the entry and never read them again — otherwise,
+  // if the caller modified the same object after the load (or while revision resolution is
+  // pending), the naming (`loaded.repo`) would keep the old value while fetches go to another repo
+  // / host with the pinned SHA.
   const { repo, hubUrl, revision } = ref;
   const requested = revision ?? "main";
   const driver: SourceDriver = {
-    // 世代解決前の名乗り。解決に失敗したときの診断はこれ 1 つで「どこの何を引きに行ったか」を
-    // 言えなければならないので、要求した ref（可変 ref のまま）まで載せる。
+    // The naming before generation resolution. When resolution fails, the diagnostic must say "what
+    // was looked up where" with this alone, so it includes the requested ref (still mutable).
     origin: { label: `repo ${repo} @ ${requested}`, integrity: "network", repo },
 
     resolveGeneration: async (options) => {
@@ -317,18 +345,21 @@ export const createHfSource = (ref: HubRepoRef): DistributionSource => {
         init: requestInit(options.headers, options.signal),
         ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
       });
-      // MUST: 応答を commit SHA（越境参照の `revision` と同じ 40 桁小文字 hex の規則）として検査する
-      // — 取得層は非空文字列しか見ないので、非準拠ミラー・カスタム fetch が `main` や短縮形を返すと、
-      // それが「固定済みの世代」として以後の全取得で解決し直され、1 つの commit に固定する契約が
-      // 黙って崩れる。素の Error は共通層が世代解決の失敗として文脈付きで包む。
+      // MUST: check the response as a commit SHA (the same 40-lowercase-hex rule as the `revision`
+      // of a cross-repo reference) — the fetch layer checks only for a non-empty string, so if a
+      // non-conforming mirror or a custom fetch returned `main` or a short form, it would be
+      // resolved again on every later fetch as "the pinned generation", and the contract of pinning
+      // to one commit would silently break. The common layer wraps the bare Error with context as a
+      // generation-resolution failure.
       if (!isCommitSha(revisionSha)) {
         throw new Error(
           `@karume/hub: revision '${requested}' の解決応答が 40 桁小文字 hex の commit SHA でない` +
             `（応答 '${revisionSha}' — 非準拠のミラーか fetch の差し替えを疑う）`,
         );
       }
-      // 解決の**後**に出す — 印字する SHA が確定するのがここで、解決に失敗した場合は警告ではなく
-      // 失敗そのものが報告されるべきだから（fail loudly が先）。
+      // Emit it **after** resolution — this is where the SHA to print is settled, and when
+      // resolution fails, the failure itself should be reported, not a warning (fail loudly comes
+      // first).
       if (revision === undefined) warnImplicitMain(repo, revisionSha);
       return revisionSha;
     },

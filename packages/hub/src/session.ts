@@ -1,121 +1,141 @@
 /**
- * セッションの語彙 — 「どの取得元の、どの世代を、どんな作法で読むか」。取得元の実装
- * （`sources/`）にも共通層（`fetch.ts`）にも属さない、面と面の間で受け渡す型だけを置く。
+ * The session vocabulary — "which source, which generation, read with which call options". Only the
+ * types handed between surfaces live here; they belong neither to the source implementations
+ * (`sources/`) nor to the common layer (`fetch.ts`).
  *
- * NOTE: `fetch` / `caches` / `headers` / `onRetry` は HTTP 取得元の語彙がそのまま公開面に出て
- * いるもの。直接読める取得元（ローカルディレクトリ等）はこれらを**無視する**（`caches` を
- * 通らない・`fetch` を呼ばない）。全取得元に共通の作法は `signal` / `onProgress` /
- * `onCacheError` の側で、取得元ごとの設定は取得元を作る factory（`localDirectory(...)` 等）が
- * 受け取る。
+ * NOTE: `fetch` / `caches` / `headers` / `onRetry` are the HTTP source's vocabulary exposed as is
+ * on the public surface. Sources that read directly (a local directory, …) **ignore them** (they do
+ * not go through `caches` and do not call `fetch`). The options common to all sources are `signal`
+ * / `onProgress` / `onCacheError`; per-source settings are taken by the factory that creates the
+ * source (`localDirectory(...)`, …).
  */
 
 import type { Manifest } from "./manifest.ts";
 import type { AssetProgress } from "./progress.ts";
 import type { PinnedSource, SourceDriver, SourceOrigin } from "./source.ts";
 
-/** 取得対象リポジトリ。`hubUrl` は**アプリが明示指定した場合のみ**有効（manifest からは来ない）。 */
+/**
+ * The repository to fetch from. `hubUrl` applies **only when the app sets it explicitly** (it never
+ * comes from a manifest).
+ */
 export type HubRepoRef = {
-  /** `"owner/name"`。 */
+  /** `"owner/name"`. */
   readonly repo: string;
-  /** ブランチ / タグ / commit SHA。既定 `"main"`。SHA を渡すと解決要求が発生しない。 */
+  /** Branch / tag / commit SHA. Default `"main"`. Passing a SHA issues no resolution request. */
   readonly revision?: string;
-  /** ミラー用。既定 `https://huggingface.co`。 */
+  /** For mirrors. Default `https://huggingface.co`. */
   readonly hubUrl?: string;
 };
 
-/** cache I/O 失敗の診断（quota 超過等）。console.warn に任せず**アプリへ届ける**。 */
+/**
+ * Diagnostic for a cache I/O failure (quota exceeded, …). **Delivered to the app** instead of left
+ * to console.warn.
+ */
 export type CacheDiagnostic = {
   readonly op: "open" | "match" | "put" | "delete";
   readonly url: string;
   readonly error: unknown;
 };
 
-/** 取得層が 429 / 503 を `Retry-After` に従って取り直す 1 回ごとの通知（待機の前に届く）。 */
+/**
+ * Notification for each retry the fetch layer makes on 429 / 503 following `Retry-After` (sent
+ * before the wait).
+ */
 export type RetryDiagnostic = {
   readonly url: string;
   readonly status: number;
-  /** 何回目の再試行か（1 始まり）。 */
+  /** Which retry this is (1-based). */
   readonly attempt: number;
-  /** これから待つ ms。 */
+  /** The ms about to be waited. */
   readonly delayMs: number;
-  /** 応答の `Retry-After` ヘッダ（無ければ undefined）。 */
+  /** The response's `Retry-After` header (undefined if absent). */
   readonly retryAfter?: string;
 };
 
 export type LoadManifestOptions = {
   readonly signal?: AbortSignal;
   /**
-   * `Authorization` 等。取得（revision 解決・ファイル）へそのまま透過する。
+   * `Authorization` and the like. Passed through as is to the fetches (revision resolution, files).
    *
-   * NOTE: キャッシュは credential で分けない（by-design）— キーにヘッダは入らないので、認証付きで
-   * 取得したバイト列は以後の無認証呼び出しにもヒットする。gated 資産の運用予定が無い以上、
-   * 隔離は過剰防御だった（詳細は `docs/limitations.md`）。
+   * NOTE: the cache is not split by credential (by design) — headers are not part of the key, so
+   * bytes fetched with authentication are also hit by later unauthenticated calls. With no plans to
+   * operate gated assets, isolation was excessive defence (details in `docs/limitations.md`).
    */
   readonly headers?: HeadersInit;
   /**
-   * cache I/O 失敗の通知先。無指定だと「毎起動フル再 DL が黙って常態化」するため、
-   * アプリは受け取って `navigator.storage.persist()` の案内などに使う。
+   * Receiver of cache I/O failures. Without it, "a full re-download on every start silently becomes
+   * the norm", so apps take it and use it, for example, to suggest `navigator.storage.persist()`.
    */
   readonly onCacheError?: (diagnostic: CacheDiagnostic) => void;
   /**
-   * 再試行 1 回ごとの通知先。アプリが「rate limit 中・あと N 秒待つ」を表示できるように出す
-   * （沈黙のまま数十秒止まって見えるのを避ける）。
+   * Receiver of each retry. Emitted so that an app can show "rate limited, waiting N more seconds"
+   * (instead of appearing stuck in silence for tens of seconds).
    *
-   * 呼ぶのは**HTTP 取得元だけ**（ローカル取得元は取得層を通らないので呼ばない）。届く範囲は
-   * その面の全取得 — revision 解決・`karume.json`・資産（全量面と温め面）・
-   * 越境先のファイル。再試行の方針（既定 429 / 503・最大 5 回・`Retry-After` 優先）は取得層の
-   * 既定のままで hub は変えない。
+   * Called **only by the HTTP source** (the local source does not go through the fetch layer, so it
+   * never calls it). It covers every fetch of that surface — revision resolution, `karume.json`,
+   * assets (the whole-file and the warm-up surfaces) and cross-repo files. The retry policy
+   * (default 429 / 503, at most 5 times, `Retry-After` first) stays the fetch layer's default; hub
+   * does not change it.
    *
-   * NOTE: このリスナーが throw しても取得は落ちない（取得層が隔離して warn する）。
+   * NOTE: a throw from this listener does not fail the fetch (the fetch layer isolates it and
+   * warns).
    */
   readonly onRetry?: (diagnostic: RetryDiagnostic) => void;
-  /** `fetch` の差し替え（テスト・カスタム輸送用）。 */
+  /** Replacement for `fetch` (for tests and custom transports). */
   readonly fetch?: typeof globalThis.fetch;
-  /** `CacheStorage` の差し替え（テスト用）。 */
+  /** Replacement for `CacheStorage` (for tests). */
   readonly caches?: CacheStorage;
 };
 
-/** 解決済みのセッション（取得元の実装 + そこで固定した世代識別子）。 */
+/** A resolved session (the source implementation + the generation identifier pinned there). */
 type SessionSource = {
   readonly driver: SourceDriver;
-  /** {@link SourceDriver.resolveGeneration} の返り値（世代を持たない取得元では空文字）。 */
+  /**
+   * The return value of {@link SourceDriver.resolveGeneration} (the empty string for a source
+   * without generations).
+   */
   readonly generation: string;
 };
 
 /**
- * manifest → その取得元。private 欄（`#session`）にせずモジュール内の表に置く理由は
- * `source.ts` の `drivers` と同じ（欄を外へ読み出す `static` ブロックが import 時に走り、
- * bundler が使われていないクラスまで残す）。キーは値自身（弱参照）で、モジュールの外から見えない。
+ * manifest → its source. It lives in a module-level table instead of a private field (`#session`)
+ * for the same reason as `drivers` in `source.ts` (a `static` block that reads the field out runs
+ * at import time, and bundlers then keep even unused classes). The key is the value itself (a weak
+ * reference), invisible from outside the module.
  */
 const sessions = new WeakMap<LoadedManifest, SessionSource>();
 
 /**
- * 解決済み世代に固定された manifest。以降の取得は全てこの世代で行う。
+ * A manifest pinned to a resolved generation. Every later fetch uses this generation.
  *
- * **取得元そのものを内部欄として運ぶ** — 取得元を要する面（`fetchAssets` / `prefetchAssets` /
- * `openAsset` / `openContainerSource` / 在庫面 `listCachedAssets` / `evictCachedAssets`）は、
- * つまり {@link pinnedSourceOf} を通る全ての面は、識別欄から取得元を組み立て直すのではなく、
- * この値が持っている取得元を開く。
- * 組み立て直す形だと「HF なら repo と SHA から復元できる」という HF 固有の性質に全面が
- * 寄りかかり、復元手段の無い取得元（ローカルディレクトリ）が入れられない。
+ * **It carries the source itself as an internal field** — the surfaces that need a source
+ * (`fetchAssets` / `prefetchAssets` / `openAsset` / `openContainerSource` / the inventory surfaces
+ * `listCachedAssets` / `evictCachedAssets`), that is, every surface that goes through
+ * {@link pinnedSourceOf}, open the source this value holds instead of rebuilding a source from the
+ * identity fields.
+ * Rebuilding would make every surface lean on the HF-specific property "for HF it can be restored
+ * from repo and SHA", and a source with no way to restore it (a local directory) could not be
+ * added.
  *
- * 公開の識別欄（{@link repo} / {@link revisionSha}）は**診断と表示のための情報**であって、
- * 取得の再構成には使われない。持たない取得元（世代も repo も無いローカル配布形）では欄ごと
- * 現れない — 合成した repo や偽の SHA を名乗らせない（実在しないリポを指す診断になる）。
+ * The public identity fields ({@link repo} / {@link revisionSha}) are **information for diagnostics
+ * and display**, never used to reconstruct a fetch. For a source that lacks them (a local
+ * distribution with neither generations nor a repo) the fields do not appear at all — no synthetic
+ * repo or fake SHA is named (that would produce diagnostics pointing at a repo that does not
+ * exist).
  *
- * MUST: この型は hub の外で組み立てられない（`mod.ts` は型だけを輸出する）。取得元は
- * モジュール内の表（`sessions`）に閉じており、値を作り替えて渡すと取得元ごと失われる
- * （{@link pinnedSourceOf} が fail loudly で断る）。
+ * MUST: this type cannot be constructed outside hub (`mod.ts` exports only the type). The source is
+ * closed inside the module-level table (`sessions`); a rebuilt value loses its source altogether
+ * ({@link pinnedSourceOf} refuses it with a fail loudly).
  */
 export class LoadedManifest {
-  /** 取得元が repo という概念を持つ場合のみ（HF: `"owner/name"`）。 */
+  /** Only when the source has the notion of a repo (HF: `"owner/name"`). */
   readonly repo?: string;
-  /** 解決済み commit SHA（40 桁）。世代の概念を持つ取得元のみ。 */
+  /** The resolved commit SHA (40 digits). Only for sources with the notion of generations. */
   readonly revisionSha?: string;
   readonly manifest: Manifest;
   /**
-   * 型だけの名目ブランド（実行時には存在しない）。公開欄だけのクラスは構造的な型になり、
-   * `{ manifest }` のように手で組んだ値が `LoadedManifest` として型検査を通ってしまう。
+   * A type-only nominal brand (absent at run time). A class with only public fields is a structural
+   * type, and a hand-built value such as `{ manifest }` would type-check as a `LoadedManifest`.
    */
   declare private readonly brand: never;
 
@@ -128,9 +148,9 @@ export class LoadedManifest {
 }
 
 /**
- * セッションの取得元を**その呼び出しの作法で**開く。`fetch` / `caches` / `headers` を面ごとに
- * 差し替えられるのは、取得元が生成時ではなくここで作法を受け取るため（`source.ts` の
- * {@link SourceDriver.pin}）。
+ * Opens the session's source **with the options of that call**. `fetch` / `caches` / `headers` can
+ * be replaced per surface because the source takes its options here, not at creation
+ * ({@link SourceDriver.pin} in `source.ts`).
  */
 export const pinnedSourceOf = (
   loaded: LoadedManifest,
@@ -147,10 +167,10 @@ export const pinnedSourceOf = (
 
 export type FetchAssetsOptions = LoadManifestOptions & {
   /**
-   * 資産ごとの進捗の通知先。
+   * Receiver of per-asset progress.
    *
-   * NOTE: このリスナーが throw しても取得は落ちない（どの段の通知でも hub が隔離して warn する —
-   * 進捗は付随情報で、正しさの要件ではない）。
+   * NOTE: a throw from this listener does not fail the fetch (hub isolates it and warns for a
+   * notification of any phase — progress is incidental information, not a correctness requirement).
    */
   readonly onProgress?: (progress: AssetProgress) => void;
 };

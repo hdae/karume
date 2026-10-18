@@ -1,18 +1,19 @@
 /**
- * `@karume/models/birefnet` — BiRefNet 系（画像 → α マット / 背景抜き）ファミリのサブパス面。
+ * `@karume/models/birefnet` — the subpath surface of the BiRefNet family (image → alpha matte /
+ * background removal).
  *
- * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
- * 面は利用者ストーリーに対応する — 組む（{@link BirefnetPipeline.fromPretrained} /
- * {@link BirefnetPipeline.fromAssets}）/ 切り抜く（`segment`）/ 解放する（`dispose`）。
+ * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
+ * wholesale. The surface follows the user's stories — build ({@link BirefnetPipeline.fromPretrained}
+ * / {@link BirefnetPipeline.fromAssets}) / cut out (`segment`) / release (`dispose`).
  *
- * 画素の decode は利用者の責務で、resize / rescale / normalize は `segment` の中で配布形の
- * 定数どおりに掛かる。返るのは**入力と同じ寸法の 8bit α** 1 枚で、RGBA への合成は利用者側
- * （方針が用途で変わるため — `src/birefnet/pipeline.ts` のモジュール doc）。{@link Rgb8Image}
- * と {@link AlphaMatte} は `segment` の引数と返り値の型なので、このサブパスからも名指しできる
- * ように出す。
+ * Decoding the pixels is the user's responsibility; resize / rescale / normalize are applied inside
+ * `segment` with the distribution's constants. The result is one **8-bit alpha with the same size as
+ * the input**; compositing into RGBA is up to the user (the policy depends on the use — the module
+ * doc of `src/birefnet/pipeline.ts`). {@link Rgb8Image} and {@link AlphaMatte} are the argument and
+ * return types of `segment`, so they are exported here as well to be nameable from this subpath.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
- * barrel（`mod.ts`）経由の tree-shaking はこの不変条件の上にだけ成立する。
+ * MUST: every module is free of side effects (no execution at import, no global mutable state —
+ * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
 export { BirefnetPipeline } from "./src/birefnet/pipeline.ts";
@@ -26,8 +27,9 @@ export type { AlphaMatte } from "./src/birefnet/matte.ts";
 export type { Rgb8Image } from "./src/image/preprocess.ts";
 
 /**
- * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る — 入力画像の寸法と
- * 画素列の長さ）。**家族横断で 1 本**なので、複数の家族を同じホストに載せる側はこれだけで
- * 400 と 500 を分けられる。内部不変条件の破れ・資産の齟齬・GPU 容量は素の `Error` のまま飛ぶ。
+ * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it
+ * pass — the size of the input image and the length of its pixel array). **One type across all
+ * families**, so a host serving several families can tell 400 from 500 with this alone. Broken
+ * internal invariants, asset mismatches and GPU capacity are thrown as plain `Error`s.
  */
 export { ModelInputError } from "./src/errors.ts";

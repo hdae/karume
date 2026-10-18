@@ -1,17 +1,18 @@
 /**
- * `@karume/models/siglip2` — SigLIP2（画像 → 埋め込み）ファミリのサブパス面。
+ * `@karume/models/siglip2` — the subpath surface of the SigLIP2 (image → embedding) family.
  *
- * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
- * 面は利用者ストーリーに対応する — 組む（{@link Siglip2Pipeline.fromPretrained} /
- * {@link Siglip2Pipeline.fromAssets}）/ 取得元を選ぶ（{@link SIGLIP2_SOURCES}）/ 埋め込む
- * （`embed`）/ 解放する（`dispose`）。
+ * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
+ * wholesale. The surface follows the user's stories — build ({@link Siglip2Pipeline.fromPretrained}
+ * / {@link Siglip2Pipeline.fromAssets}) / choose a source ({@link SIGLIP2_SOURCES}) / embed
+ * (`embed`) / release (`dispose`).
  *
- * 画素の decode は利用者の責務で、resize / rescale / normalize は `embed` の中で配布形の
- * 定数どおりに掛かる（`src/siglip2/pipeline.ts` のモジュール doc）。{@link Rgb8Image} だけは
- * `embed` の引数の型なので、このサブパスからも名指しできるように再輸出する。
+ * Decoding the pixels is the user's responsibility; resize / rescale / normalize are applied inside
+ * `embed` with the distribution's constants (the module doc of `src/siglip2/pipeline.ts`). Only
+ * {@link Rgb8Image} is re-exported, because it is the argument type of `embed` and must be nameable
+ * from this subpath.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
- * barrel（`mod.ts`）経由の tree-shaking はこの不変条件の上にだけ成立する。
+ * MUST: every module is free of side effects (no execution at import, no global mutable state —
+ * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
 export { Siglip2Pipeline } from "./src/siglip2/pipeline.ts";
@@ -21,25 +22,27 @@ export type {
   Siglip2PipelineOptions,
 } from "./src/siglip2/pipeline.ts";
 /**
- * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から
- * `karume-` を落とした綴り・値は pin 済み commit SHA — ADR 0073 / 0092）。同一家族 = 1 リポ
- * なので 1 エントリで、寸法だけが違う 2 モデルが同居する:
+ * **The table of sources verified with this package version** (one table per family; keys are the
+ * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
+ * One family = one repository, so one entry, holding two models that differ only in size:
  *
- * - `SIGLIP2_SOURCES["siglip2"]` = `hdae/karume-siglip2`（base 224 / so400m 384・既定 = base）
+ * - `SIGLIP2_SOURCES["siglip2"]` = `hdae/karume-siglip2` (base 224 / so400m 384; default = base)
  *
- * 既定以外は `fromPretrained(SIGLIP2_SOURCES["siglip2"], { model: "so400m" })` と綴る
- * （{@link Siglip2PipelineOptions}）。
+ * For the non-default model write `fromPretrained(SIGLIP2_SOURCES["siglip2"], { model: "so400m" })`
+ * ({@link Siglip2PipelineOptions}).
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link Siglip2Pipeline.fromPretrained}
- * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この表ではなく自分の
- * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
+ * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
+ * is as the first argument of {@link Siglip2Pipeline.fromPretrained}. To pin reproducibility
+ * yourself, write your own `{ repo, revision }` instead of using this table (`fromPretrained` has no
+ * default).
  */
 export { SIGLIP2_SOURCES } from "./src/siglip2/config.ts";
 export type { Rgb8Image } from "./src/image/preprocess.ts";
 
 /**
- * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る — 入力画像の寸法と
- * 画素列の長さ）。**家族横断で 1 本**なので、複数の家族を同じホストに載せる側はこれだけで
- * 400 と 500 を分けられる。内部不変条件の破れ・資産の齟齬・GPU 容量は素の `Error` のまま飛ぶ。
+ * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it
+ * pass — the size of the input image and the length of its pixel array). **One type across all
+ * families**, so a host serving several families can tell 400 from 500 with this alone. Broken
+ * internal invariants, asset mismatches and GPU capacity are thrown as plain `Error`s.
  */
 export { ModelInputError } from "./src/errors.ts";

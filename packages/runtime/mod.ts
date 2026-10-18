@@ -1,20 +1,22 @@
 /**
- * Karume の公開 API。
+ * The public API of Karume.
  *
- * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
- * 面は利用者ストーリーに対応する — GPU を取る / モデルを開く / 能力を照会する /
- * セッションを作る / 実行する / 解放する / 診断を得る / 失敗を型で捌く。
+ * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
+ * wholesale. The surface follows the user's stories — acquire a GPU / open a model / query
+ * capabilities / create a session / run / release / get diagnostics / handle failures by type.
  *
- * エラー型は「利用者の入力・環境に起因する失敗」だけを公開する。ランタイム内部の不変条件
- * 破れ（アリーナの参照計数・codegen 決定性など）は Karume 側のバグであって利用者が
- * 分岐すべきものではないため、`Error`（`name` は保持）のまま届く。
+ * Only error types for "failures caused by the user's input or environment" are public. A broken
+ * internal invariant of the runtime (arena reference counting, codegen determinism and the like) is
+ * a bug in Karume, not something the user should branch on, so it arrives as a plain `Error` (with
+ * its `name` kept).
  */
 
 /**
- * Karume 専用コンテナ（`krm` / `krg` — ADR 0108・docs/container-v1.md）の読み口。`openContainer` は
- * 外側の期待 hash で 2 文書を検証してから parse し、グラフと束縛表を合流する（重みの block は
- * 要るときに取る）。`codecLayout` は codec 台帳の登録名 → 展開経路（`ternary` は `int2-off` と同じ
- * i2 経路）で、models が格納の性質で分岐するときの唯一の読み口。
+ * The reader of Karume's own container (`krm` / `krg` — ADR 0108, docs/container-v1.md).
+ * `openContainer` verifies the two documents against the outer expected hash before parsing them,
+ * and joins the graph with the binding table (weight blocks are fetched when needed). `codecLayout`
+ * maps a registered codec name to its decode path (`ternary` takes the same i2 path as `int2-off`),
+ * and is the only reader models use when they branch on the nature of the storage.
  */
 export { openContainer } from "./src/format/container/open.ts";
 export type {
@@ -25,12 +27,15 @@ export type {
   OpenedContainer,
 } from "./src/format/container/open.ts";
 /**
- * **メモリ内容器** — 手元のバイト列（合成した重み・別の器から読み出した実体）を容器を書かずに
- * Session 構築へ渡す供給面。`openContainer` と同じ 2 つの読み口（{@link BoundContainer}）を返すので、
- * `prepareContainer` / `createSessionFromContainer` はどちらの供給元でも同じ 1 本を通る。
+ * **The in-memory container** — a supply surface that passes bytes at hand (synthesised weights,
+ * data read from another container) to Session construction without writing a container. It
+ * returns the same two readers as `openContainer` ({@link BoundContainer}), so
+ * `prepareContainer` / `createSessionFromContainer` go through the same single path for either
+ * source.
  *
- * `MemoryTensor` は丸ごと 1 本（`bytes`）と行分割（`pieces` — 読み口の列）の排他で、後者は
- * バイト列を 1 つも抱えない（part ごとのフェンスで参照が尽きる = 器 1 本ぶんの RAM）。
+ * A `MemoryTensor` is either one whole tensor (`bytes`) or split into rows (`pieces` — a sequence of
+ * readers), exclusively; the latter holds no bytes at all (references run out at the fence of each
+ * part = RAM for one container).
  */
 export { openMemoryContainer } from "./src/format/container/memory.ts";
 export type {
@@ -39,7 +44,10 @@ export type {
   MemoryPiece,
   MemoryTensor,
 } from "./src/format/container/memory.ts";
-/** 供給元 2 種（`krm` / メモリ内容器）が満たす共通の面。置き場は合流層（供給元の実装ではない）。 */
+/**
+ * The common surface met by both sources (`krm` / in-memory container). It lives in the join layer,
+ * not in a source's implementation.
+ */
 export type { BoundContainer } from "./src/format/container/bind.ts";
 export { ContainerFormatError } from "./src/format/container/header.ts";
 export { codecLayout } from "./src/format/container/codecs.ts";
@@ -47,33 +55,42 @@ export type { CodecLayout, CodecName } from "./src/format/container/codecs.ts";
 export { DimError } from "./src/format/dims.ts";
 export { IrError } from "./src/format/ir.ts";
 /**
- * **ホストで組む IR v2 宣言の入口**（docs/ir-v2.md）。exporter を通さずその場で組んだ小さな
- * グラフ（CFG 合成・Euler 更新・最大値選択・PLE gather）を {@link openMemoryContainer} へ渡す
- * 呼び手が、**グラフ単体で決まる規則**をここで通す — SSA・前方参照・トポロジカル順・
- * `requires.ops` と実使用 op の一致・未知キー・記号名の正準表記・孤立宣言。
+ * **The entry point for IR v2 declarations built on the host** (docs/ir-v2.md). A caller that
+ * passes a small graph built on the spot without the exporter (CFG composition, an Euler update,
+ * max selection, PLE gather) to {@link openMemoryContainer} runs **the rules decided by the graph
+ * alone** through this — SSA, forward references, topological order, agreement of `requires.ops`
+ * with the ops actually used, unknown keys, the canonical spelling of symbol names, orphan
+ * declarations.
  *
- * この門は `krm` を開く経路（`openContainer`）が容器の宣言に対して通すものと同じ 1 本である。
- * 公開していないと、メモリ内容器の呼び手だけが検査を迂回した宣言で Session を組めてしまい、
- * 壊れたグラフは合流（宣言 × 供給）か実行まで落ちてこない。
+ * This check is the same single check that the path opening a `krm` (`openContainer`) applies to
+ * the container's declaration. Without it on the public surface, only callers of the in-memory
+ * container could build a Session from a declaration that bypassed the checks, and a broken graph
+ * would not fail until the join (declaration × supply) or execution.
  *
- * `initializers[name]` は `{}`（実体を持つ）か `{ "shared": true }`（貸し手 Session の重みを
- * 借りる）の 2 形だけ（`"shared": false` は書けない — 欄の不存在と同じ宣言なので正準形が
- * 2 通りになる）。`states` とノードの `states` は省略できる（空表が既定）。
+ * `initializers[name]` has exactly two forms: `{}` (has its own data) or `{ "shared": true }`
+ * (borrows a weight of the lending Session) (`"shared": false` cannot be written — it declares the
+ * same thing as an absent field, which would give two canonical forms). `states` and a node's
+ * `states` may be omitted (an empty table is the default).
  *
- * NOTE: 受けるのは **JSON.parse 済みの素の値**で、`1e999` 由来の非有限数と入れ子の深さは
- * ここでは見ない — `krm` 経路ではその 2 つを記述文書の読み手（`openContainer`）が持ち、
- * ホストで組む呼び手ではリテラルを書く側が持つ。外から来た JSON 文字列を載せるなら、
- * この 2 つを自分で検査してから渡す MUST（素の `JSON.parse` の戻りをそのまま渡すと
- * `krm` 経路にある検査だけが抜ける）。
+ * NOTE: it takes **a plain value already passed through JSON.parse**; non-finite numbers from
+ * `1e999` and nesting depth are not checked here — on the `krm` path the reader of the descriptor
+ * document (`openContainer`) owns those two, and for a caller building on the host, the side
+ * writing the literals owns them. A caller loading a JSON string from outside MUST check those two
+ * itself before passing it (passing the plain return of `JSON.parse` straight through skips exactly
+ * the checks that the `krm` path has).
  */
 export { parseIrDeclarationValue } from "./src/format/ir.ts";
-/** {@link parseIrDeclarationValue} が返す形（= `MemoryContainerInput["graphs"]` の値）。 */
+/**
+ * The shape {@link parseIrDeclarationValue} returns (= a value of
+ * `MemoryContainerInput["graphs"]`).
+ */
 export type { IrDeclaration } from "./src/format/ir.ts";
 /**
- * safetensors 厳格リーダ（被覆・整列・dtype 検査込み）。Karume の容器でない付帯資産
- * （例: Anima の rope 素表 — `transformer` 容器の資産 `rope_base`〈役割 `rope-base` — ADR 0109
- * 決定 4〉の payload）を models 側が同じ門で読むための面で、
- * 汎用ローダの提供が目的ではない（DECIDED: 二重実装の解消 — ADR 0008 追記 2026-08-05）。
+ * Strict safetensors reader (with coverage, alignment and dtype checks). A surface for models to
+ * read accompanying assets that are not Karume containers (for example Anima's rope base table —
+ * the payload of the asset `rope_base` of the `transformer` container, role `rope-base` — ADR 0109
+ * decision 4) through the same checks; providing a general-purpose loader is not the goal
+ * (DECIDED: removing a duplicate implementation — ADR 0008 addendum 2026-08-05).
  */
 export { parseSafetensors, SafetensorsError } from "./src/format/safetensors.ts";
 export type { SafetensorsDtype, SafetensorsFile, TensorView } from "./src/format/safetensors.ts";
@@ -88,26 +105,32 @@ export {
   readAdapterLimits,
   ResidentTensorError,
 } from "./src/gpu/device.ts";
-/** errorScope の規律から出る型付きエラー（置き場は `src/gpu/error-scope.ts` — 公開面は不変）。 */
+/**
+ * Typed errors raised by the errorScope discipline (they live in `src/gpu/error-scope.ts` — the
+ * public surface is unchanged).
+ */
 export {
   GpuInternalError,
   GpuOutOfMemoryError,
   GpuValidationError,
 } from "./src/gpu/error-scope.ts";
 /**
- * 空き VRAM の試し確保（`createBuffer` の非致命な OOM で「今この量が入るか」を見る）。大きな確保を
- * 伴う段の前に、OOM で device を失う経路（writeBuffer の staging）へ入る前の判断材料にする。
+ * A trial allocation of free VRAM (uses the non-fatal OOM of `createBuffer` to see "whether this
+ * amount fits right now"). Input for deciding, before a step with a large allocation, whether to
+ * enter a path that loses the device on OOM (the staging of writeBuffer).
  */
 export { fitsHeadroom } from "./src/gpu/headroom.ts";
 /**
- * GpuContext の構築は {@link acquireGpu} だけを入口にするため、型としてのみ公開する
- * （Session と同じ形）。値として公開すると `new GpuContext(...)` で planRequiredLimits /
- * assertLimitsGranted を迂回した device を渡せてしまい、limits 要求漏れの検出網が抜ける。
+ * {@link acquireGpu} is the only entry point that constructs a GpuContext, so it is public as a type
+ * only (the same form as Session). Public as a value, `new GpuContext(...)` could pass a device that
+ * bypassed planRequiredLimits / assertLimitsGranted, and the net that detects missing limit
+ * requests would have a hole.
  *
- * `ResidentTensor`（GpuContext 所有の第 4 の寿命クラス）と `BatchScope`（フェンス 1 本で閉じる
- * enqueue 区間）も同じ理由で型としてのみ公開する — 入口は `GpuContext.createResident` /
- * `GpuContext.beginBatch` だけで、直接構築すると errorScope の門（確保失敗の検出・区間ロックの
- * 保持）を迂回できてしまう。
+ * `ResidentTensor` (the fourth lifetime class, owned by the GpuContext) and `BatchScope` (an
+ * enqueue section closed by a single fence) are public as types only for the same reason — the
+ * only entry points are `GpuContext.createResident` / `GpuContext.beginBatch`, and constructing them
+ * directly could bypass the errorScope checks (detection of allocation failures, holding the
+ * section lock).
  */
 export type {
   AcquireGpuOptions,
@@ -120,17 +143,22 @@ export type {
 } from "./src/gpu/device.ts";
 
 /**
- * GEMM 幾何のプロファイル（ADR 0115）は型と**埋め込みの一覧**を公開する — 型は
- * `AcquireGpuOptions.geometryProfile` に渡す表の形（`tools/geometry-sweep` の生成物が満たす形）。
- * 一覧（`BUILTIN_GEOMETRY_PROFILES`）は埋め込みの全ての表 — adapter の (vendor, architecture, description)
- * で自動選択される表と、`match` を省いた注入専用の表（自動選択されない）— で、アプリが id で引いて
- * `acquireGpu({ geometryProfile })` に渡すための値（ADR 0115 追記決定 7）。一覧も各表も深く凍結してある
- * （書き換えると全 Session の自動選択が黙って変わるため）— 手を加えた表を注入するなら
- * `structuredClone` してから書き換える。
- * `geometryProfile` には表の代わりに同期のコールバック `(adapterInfo) => GeometryProfile | undefined` も渡せる
- * （ADR 0117 決定 6）— runtime が実際に取った adapter の情報で 1 度呼ばれ、保存した表を
- * `@karume/runtime/tune` の `geometryProfileMismatch` で照合して返す（`undefined` は自動選択）口。
- * 既定の表と選択関数は値として出さない（内部の codegen 語彙で、道具は `src/` から import する）。
+ * GEMM geometry profiles (ADR 0115) expose their type and **the list of embedded profiles** — the
+ * type is the shape of the table passed to `AcquireGpuOptions.geometryProfile` (the shape the
+ * output of `tools/geometry-sweep` (removed in 0.15) satisfied). The list
+ * (`BUILTIN_GEOMETRY_PROFILES`) holds every embedded table — the tables selected automatically by
+ * the adapter's (vendor, architecture, description), and the injection-only tables without `match`
+ * (never selected automatically) — as values an application looks up by id and passes to
+ * `acquireGpu({ geometryProfile })` (ADR 0115 addendum decision 7). The list and each table are
+ * deeply frozen (modifying them would silently change automatic selection for every Session) — to
+ * inject a modified table, `structuredClone` it first and modify the clone.
+ * Instead of a table, `geometryProfile` also accepts a synchronous callback
+ * `(adapterInfo) => GeometryProfile | undefined` (ADR 0117 decision 6) — called once with the
+ * information of the adapter the runtime actually obtained, it checks a saved table with
+ * `geometryProfileMismatch` of `@karume/runtime/tune` and returns it (`undefined` means automatic
+ * selection).
+ * The default table and the selection function are not exported as values (they are internal
+ * codegen vocabulary; tools import them from `src/`).
  */
 export type { GemmRowsRule, GeometryProfile } from "./src/kernels/geometry-profile.ts";
 export { BUILTIN_GEOMETRY_PROFILES } from "./src/kernels/geometry-profiles/index.ts";
@@ -140,8 +168,9 @@ export type { I8a8Geometry } from "./src/kernels/i8a8-geometry.ts";
 export type { ArenaStats } from "./src/gpu/arena.ts";
 export { DEFAULT_SUBMIT_POLICY, SubmitPolicyError } from "./src/gpu/submit.ts";
 /**
- * GPU 時間内訳（ADR 0021）は型だけ公開する。集計は SubmitScheduler の内部で、利用者の面は
- * `Session.diagnostics().lastRunTiming`（計測が無効なら undefined）1 つに閉じる。
+ * The GPU time breakdown (ADR 0021) is public as types only. Aggregation happens inside the
+ * SubmitScheduler, and the user-facing surface is the single field
+ * `Session.diagnostics().lastRunTiming` (undefined when measurement is disabled).
  */
 export type {
   ChunkBudgetStats,
@@ -154,8 +183,9 @@ export type {
 export { capabilities, OpContractError } from "./src/ops.ts";
 export type { RuntimeCapabilities } from "./src/ops.ts";
 /**
- * capability 不足（実行できない op / 意味論 dtype / attrs / 格納）。`prepareContainer` が
- * **重みの block を 1 つも取る前に**全件列挙して投げる型（ADR 0070 決定 5 の 2 段境界）。
+ * Missing capability (an op / semantic dtype / attrs / storage that cannot run). The type that
+ * `prepareContainer` throws, listing every case, **before fetching a single weight block** (the
+ * two-step boundary of ADR 0070 decision 5).
  */
 export { RuntimeSupportError } from "./src/ops/support.ts";
 
@@ -164,24 +194,28 @@ export { DispatchLimitError } from "./src/codegen/errors.ts";
 export { createSessionFromContainer, prepareContainer } from "./src/runtime/executor.ts";
 export { DEFAULT_PLAN_BACKING_BUDGET_BYTES } from "./src/runtime/session-types.ts";
 /**
- * `SessionOptions` の GPU 非依存の受理条件（型・綴り・組合せ・値域）を Session 構築と**同じ
- * 1 本**で判定する純関数。違反の文言を返し、送出型は呼び手が決める — 配布形の宣言と明示指定を
- * 合成する上位層が、重みを取る前に構築と同じ判定で落とすための口（ADR 0058 追記 2026-09-26）。
+ * A pure function that decides the GPU-independent acceptance conditions of `SessionOptions` (types,
+ * spellings, combinations, value ranges) with **the same single check** as Session construction. It
+ * returns the violation message and leaves the error type to the caller — the entry point for upper
+ * layers that compose a distribution's declarations with explicit options to fail, before fetching
+ * weights, with the same check as construction (ADR 0058 addendum 2026-09-26).
  */
 export { sessionOptionsViolation } from "./src/runtime/session-options-check.ts";
 /**
- * 重み取得前の admission の入口（ADR 0070 決定 5 / graph-first）。開いた容器のグラフ宣言だけで
- * 「実行できない」を先に落とし、必要メモリを見積り、そのまま Session にする 2 段境界:
- * `prepareContainer(opened, graphName) → estimate() → createContainerSession(gpu)`。
+ * The entry point of admission before fetching weights (ADR 0070 decision 5 / graph-first). A
+ * two-step boundary that rejects "cannot run" from the graph declaration of the opened container
+ * alone, estimates the memory needed, and turns it into a Session:
+ * `prepareContainer(opened, graphName) → estimate() → createContainerSession(gpu)`.
  *
- * `PreparedModel` は**型としてのみ**公開する — 入口は {@link prepareContainer} だけで、直接構築
- * すると capability 門と IR 契約検査を迂回した「実行できないモデルの Session」が作れてしまう
- * （`Session` / `GpuContext` と同じ流儀）。
+ * `PreparedModel` is public **as a type only** — the only entry point is {@link prepareContainer};
+ * constructing it directly could create "a Session of a model that cannot run" that bypassed the
+ * capability check and the IR contract checks (the same convention as `Session` / `GpuContext`).
  */
 export type { PreparedModel } from "./src/runtime/executor.ts";
 /**
- * メモリ必要量 estimator（ADR 0070 決定 5）。GPU 非依存の純関数で「必要側」のカテゴリ別
- * バイト数だけを出す — 空き側との比較・可否判定はしない（最終門は out-of-memory errorScope）。
+ * The memory requirement estimator (ADR 0070 decision 5). A GPU-independent pure function that
+ * reports only the "demand side" bytes per category — it does not compare with the free side or
+ * decide feasibility (the final check is the out-of-memory errorScope).
  */
 export { estimateGraphMemory } from "./src/runtime/estimate.ts";
 export type {
@@ -192,37 +226,44 @@ export type {
   EstimateOptions,
 } from "./src/runtime/estimate.ts";
 /**
- * 重み常駐計画 — グラフだけで決まる純関数で、{@link estimateGraphMemory} の第 2 引数。
+ * The weight residency plan — a pure function determined by the graph alone, and the second
+ * argument of {@link estimateGraphMemory}.
  *
- * ロードを終えた呼び手（models のパイプライン）は `PreparedModel` を握らず `IrGraph` だけ
- * 残す規律なので、`PreparedModel.estimate` の口が使えない。そこから同じ見積りへ戻る唯一の
- * 経路がこの 2 本（`estimateGraphMemory(graph, planWeightResidency(graph), options)`）で、
- * グラフが同じなら計画も同じ（純関数）。
+ * A caller that has finished loading (a models pipeline) keeps only the `IrGraph`, not the
+ * `PreparedModel`, by discipline, so the `PreparedModel.estimate` entry point is not available. These
+ * two (`estimateGraphMemory(graph, planWeightResidency(graph), options)`) are the only way back to
+ * the same estimate from there; the same graph gives the same plan (a pure function).
  *
- * グラフは `PreparedModel.graph`（構築と同じ門を通った検証済みのグラフ）から取る — この呼び方
- * では常駐計画が見積りの門より先に走るので、未検証のグラフでは失敗の文言がどのノードかを名乗らない。
+ * Take the graph from `PreparedModel.graph` (a validated graph that went through the same checks as
+ * construction) — called this way, the residency plan runs before the estimate's checks, so with an
+ * unvalidated graph the failure message does not name the node.
  */
 export { planWeightResidency } from "./src/runtime/weight-residency.ts";
 export type { WeightResidency } from "./src/runtime/weight-residency.ts";
 /**
- * Session の構築は {@link prepareContainer} の `createContainerSession` と、その合成である
- * {@link createSessionFromContainer} だけを入口にするため、型としてのみ公開する。
+ * Session construction has only two entry points, `createContainerSession` of
+ * {@link prepareContainer} and its composition {@link createSessionFromContainer}, so it is public
+ * as a type only.
  *
- * `Tensor` は意味論 dtype の判別ユニオン（ADR 0009 による ADR 0008 の部分改訂）:
+ * `Tensor` is a union discriminated by semantic dtype (ADR 0009's partial revision of ADR 0008):
  * `{ dtype: "f32", data: Float32Array }` / `{ dtype: "i32", data: Int32Array }` /
- * `{ dtype: "bool", data: Uint32Array }`（bool は u32 の 0 / 1）。入出力で対称。
+ * `{ dtype: "bool", data: Uint32Array }` (bool is a u32 holding 0 / 1). Symmetric for inputs and
+ * outputs.
  *
- * 入力の寿命は面の一部: `run` / `enqueue` は `inputs` Record の member 構成・各入力の shape・
- * `bindings` を**発行の同期区間で写し取る**が、`Tensor.data` は写さず**借りる** —
- * MUST NOT: 戻り Promise が settle するまで `data` を書き換える（沈黙誤値になる）。詳細は
- * `Session.run` の「入力の寿命」節。
+ * Input lifetime is part of the surface: `run` / `enqueue` **copy, in the synchronous section of the
+ * call**, the member set of the `inputs` Record, the shape of each input and `bindings`, but they do
+ * not copy `Tensor.data` — they **borrow** it.
+ * MUST NOT: modify `data` until the returned Promise settles (it produces silently wrong values).
+ * Details in the "input lifetime" section of `Session.run`.
  *
- * `GenerationContext`（1 生成ぶんの可変 state の所有者 — ADR 0066）も同じ理由で型のみ:
- * 入口は `Session.createGenerationContext` と `GenerationContext.fork` だけで、直接構築すると
- * 確保の errorScope と容量ゲートを迂回できてしまう（`ResidentTensor` / `BatchScope` と同じ流儀）。
+ * `GenerationContext` (the owner of the mutable state of one generation — ADR 0066) is type-only for
+ * the same reason: the only entry points are `Session.createGenerationContext` and
+ * `GenerationContext.fork`; constructing it directly could bypass the allocation errorScope and the
+ * capacity check (the same convention as `ResidentTensor` / `BatchScope`).
  *
- * `SharedWeight`（貸し出された重みへの不透明な参照 — ADR 0096 段 2 §2.2）も同じ理由で型のみ:
- * 入口は `Session.exportWeight` だけで、直接構築すると席の突合と借用計数を迂回できる。
+ * `SharedWeight` (an opaque reference to a lent weight — ADR 0096 decision 2 and its stage 2
+ * addendum) is type-only for the same reason: the only entry point is `Session.exportWeight`;
+ * constructing it directly could bypass the residency-class match and the borrow counting.
  */
 export type {
   ComputePrecision,
@@ -252,12 +293,14 @@ export type {
   Tensor,
 } from "./src/runtime/executor.ts";
 /**
- * `GenerationContextSpec.chunkBuckets` の値域・順序検査（ADR 0066 追記〈バケット〉）。
+ * The range and order check of `GenerationContextSpec.chunkBuckets` (ADR 0066 addendum
+ * 2026-08-17, item 10, buckets).
  *
- * GPU も Session も要らない純関数を**あえて**公開面に出しているのは、prefill 形の物理行数を
- * 選ぶ側（models のパイプライン）が同じ規則を独立に持たないため — 規則を写すと、context が
- * 許す集合と呼び出し側が選ぶ集合が別々に育ち、食い違いは `Session.run` の run 前検査という
- * 真因から遠い場所で出る。受理集合の正本は 1 本だけにする。
+ * A pure function that needs neither a GPU nor a Session is **deliberately** on the public surface
+ * so that the side choosing the physical row count of the prefill shape (a models pipeline) does not
+ * keep its own copy of the rule — with a copy, the set the context allows and the set the caller
+ * chooses grow apart, and a mismatch surfaces far from its true cause, in the pre-run check of
+ * `Session.run`. There is only one source of truth for the accepted set.
  */
 export { assertChunkBuckets } from "./src/runtime/generation-context.ts";
 export { ExecutionError } from "./src/runtime/plan.ts";

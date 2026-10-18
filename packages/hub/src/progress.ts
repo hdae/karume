@@ -1,81 +1,91 @@
 /**
- * 取得の進捗（ADR 0038 §5「進捗総量は content-length ではなく manifest の `size` 合計」）。
+ * Fetch progress (ADR 0038 §5, "the progress total is the sum of the manifest's `size`, not
+ * content-length").
  *
- * 集計は取得元の能力ではなく**共通層の作法**なので、全ての面（全量面 / 温め面）が同じ 1 つの
- * 実装を共有する。面ごとに書くと `loaded` の積み方だけが片方で直る形の食い違いを再生産する。
+ * Aggregation is **a convention of the common layer**, not a capability of the source, so every
+ * surface (the whole-file and the warm-up surfaces) shares one implementation. Writing it per
+ * surface would reproduce mismatches where the way `loaded` accumulates gets fixed on one side
+ * only.
  */
 
 import { type FileRef, fileRefKey } from "./manifest.ts";
 
 /**
- * ファイルの取得先の名乗り（`context.ts` の `FetchContext.originOf` の構造化欄）。進捗の
- * {@link AssetProgress.repo} / {@link AssetProgress.revision} はここから写す。
+ * The naming of where a file is fetched from (the structured fields of `FetchContext.originOf` in
+ * `context.ts`). Progress copies {@link AssetProgress.repo} / {@link AssetProgress.revision} from
+ * it.
  */
 type OriginIdentity = { readonly repo?: string; readonly revisionSha?: string };
 
 /**
- * 進捗のフェーズ。`complete` は 1 ファイルの終端（bytes が確定した点）。
+ * Progress phase. `complete` is the end of one file (the point where its bytes are final).
  *
- * MUST: 1 ファイルの phase は `downloading`* → `complete` の順にだけ進み、逆行しない
- * （`complete` はファイルごとに 1 回だけ・以降そのファイルの通知は出ない）。例外は破損キャッシュ
- * の self-heal で、取得層が拒否した後に network から取り直すためこの 1 巡が最初からやり直しに
- * なる（`complete` が終端であることは変わらない）。
+ * MUST: the phase of one file only moves `downloading`* → `complete` and never goes back
+ * (`complete` once per file; no notification for that file follows). The exception is self-heal of
+ * a corrupt cache entry: the fetch layer rejects it and fetches again from the network, so this
+ * cycle restarts from the beginning (`complete` stays the end).
  *
- * NOTE: 照合中を表す `verifying` は持たない — 資産の検証は取得元の内部（受信中のハッシュ / 記録
- * ハッシュの突合）に埋まっていて共通層からは観測できないため。観測できないフェーズを推測で
- * 名乗ると、実際には終わっている照合を「進行中」と表示する嘘になる。
+ * NOTE: there is no `verifying` phase for an ongoing comparison — asset verification is buried
+ * inside the source (hashing while receiving / comparing the recorded hash) and cannot be observed
+ * from the common layer. Naming an unobservable phase by guess would be a lie that shows a
+ * comparison already finished as "in progress".
  */
 export type AssetPhase = "downloading" | "complete";
 
 export type AssetProgress = {
   readonly phase: AssetPhase;
   /**
-   * イベントを起こしたファイルの path（リポ内の相対 path）。
+   * The path of the file that raised the event (relative to the repo).
    *
-   * MUST NOT: path だけをファイルの識別子にしない — 越境参照（ADR 0038 §7）や部品差し替えでは
-   * 別リポの同じ path が 1 回のロードに並ぶ。ファイル別に集計するときは {@link repo} /
-   * {@link revision} と組にしてキーにする。
+   * MUST NOT: use the path alone as a file's identifier — with cross-repo references (ADR 0038 §7)
+   * or component replacement, the same path from different repos appears in one load. To aggregate
+   * per file, key on it together with {@link repo} / {@link revision}.
    */
   readonly path: string;
   /**
-   * ファイルを**実際に取りに行った先**のリポ（`"owner/name"`）。越境参照は宣言された越境先、
-   * それ以外はセッションのリポ。repo という概念を持たない取得元（ローカルディレクトリ）の
-   * ファイルでは欄ごと現れない（合成した名前を名乗らせない）。
+   * The repo the file was **actually fetched from** (`"owner/name"`). For a cross-repo reference
+   * the declared target, otherwise the session's repo. For files of a source without the notion of
+   * a repo (a local directory) the field does not appear at all (no synthetic name is given).
    */
   readonly repo?: string;
   /**
-   * {@link repo} の世代（解決済み commit SHA・40 桁小文字 hex）。越境参照は宣言された
-   * `revision`、それ以外はセッションの解決済み SHA。世代を持たない取得元では欄ごと現れない。
+   * The generation of {@link repo} (the resolved commit SHA, 40 lowercase hex digits). For a
+   * cross-repo reference the declared `revision`, otherwise the session's resolved SHA. For a
+   * source without generations the field does not appear at all.
    */
   readonly revision?: string;
-  /** 取得済みバイトの合計（全ファイル・同一ファイル一意化後）。 */
+  /** Total bytes fetched (all files, after deduplicating identical files). */
   readonly loaded: number;
-  /** manifest の `size` 合計（同一ファイル一意化後）。 */
+  /** Sum of the manifest's `size` (after deduplicating identical files). */
   readonly total: number;
   /**
-   * `path` の**そのファイル自身**の受信済みバイト。`loaded` が全ファイルの合計なのに対し
-   * こちらは 1 ファイルぶんなので、ファイル別の進捗バーはこの値と {@link fileTotal} で描く。
+   * Bytes received for **the file of `path` itself**. `loaded` is the total over all files, while
+   * this is for one file, so per-file progress bars are drawn from this value and
+   * {@link fileTotal}.
    *
-   * `complete` は全量が揃った点なので常に `fileLoaded === fileTotal`（`downloading` が 1 度も
-   * 出ないキャッシュヒットでは `complete` の 1 点だけが出る）。
+   * `complete` is the point where everything has arrived, so `fileLoaded === fileTotal` always
+   * holds there (a cache hit, which never emits `downloading`, emits only the single `complete`).
    */
   readonly fileLoaded: number;
-  /** `path` のファイル自身の manifest 由来サイズ（`FileRef.size`）。`total` はこれの合計。 */
+  /**
+   * The manifest size of the file of `path` itself (`FileRef.size`). `total` is the sum of these.
+   */
   readonly fileTotal: number;
 };
 
-/** 取得面 1 つぶんの進捗集計器。状態（受信実績）はここに閉じる。 */
+/** Progress aggregator for one fetch surface. Its state (bytes received) stays closed in here. */
 export type ProgressEmitter = {
-  /** 受信途中の累積バイトを記録して `downloading` を出す。 */
+  /** Records the cumulative bytes received so far and emits `downloading`. */
   readonly downloading: (ref: FileRef, loaded: number) => void;
-  /** 1 ファイルの終端。 */
+  /** The end of one file. */
   readonly complete: (ref: FileRef) => void;
 };
 
 /**
- * 進捗の `fileTotal` に載せる manifest 由来の size を引く。表は取得対象そのものから作るので
- * 取得中の ref は必ず引ける — 引けないのは内部の不変条件が破れているときだけなので落とす
- * （0 で埋めるとファイル別の進捗バーが黙って壊れた値を描く）。
+ * Looks up the manifest size that goes into the progress's `fileTotal`. The table is built from the
+ * fetch targets themselves, so a ref being fetched is always found — a miss means an internal
+ * invariant is broken, so it throws (filling in 0 would make per-file progress bars silently draw
+ * broken values).
  */
 const fileSizeOf = (refs: ReadonlyMap<string, FileRef>, key: string): number => {
   const ref = refs.get(key);
@@ -86,16 +96,18 @@ const fileSizeOf = (refs: ReadonlyMap<string, FileRef>, key: string): number => 
 };
 
 /**
- * 取得対象の表（キーは {@link fileRefKey}）から集計器を作る。`total` はこの表の `size` 合計に
- * 固定され、以降変わらない。
+ * Creates an aggregator from the table of fetch targets (keyed by {@link fileRefKey}). `total` is
+ * fixed at the sum of this table's `size` and never changes afterwards.
  *
- * MUST: `originOf` はエラーの名乗りと**同じ関数**（`FetchContext.originOf`）を渡す — 進捗だけ
- * 別に「越境かどうか」を綴ると、診断と進捗が同じファイルに違う取得先を名乗る食い違いが出る。
+ * MUST: pass as `originOf` **the same function** that names errors (`FetchContext.originOf`) —
+ * spelling "is it cross-repo" separately for progress would make diagnostics and progress name
+ * different origins for the same file.
  *
- * MUST: 受信実績（`received`）の記録は通知（`emit`）より前に行う — `emit` は自分のファイルぶんも
- * `received` から読むので、順序が逆だと送出値が 1 イベントぶん古くなる（downloading の初回が
- * `fileLoaded` 0 を名乗り、以降ずっと 1 つ前の値で遅れる）。`fileLoaded` と全体 `loaded` は
- * 常に同じ値を数える（`emit` が自分のキーを除いて足す）ので、食い違いはどちらの順でも出ない。
+ * MUST: record the bytes received (`received`) before notifying (`emit`) — `emit` reads its own
+ * file's share from `received` as well, so in the reverse order the emitted value is one event
+ * stale (the first downloading reports `fileLoaded` 0 and stays one value behind from then on).
+ * `fileLoaded` and the overall `loaded` always count the same value (`emit` adds everything except
+ * its own key), so they cannot disagree in either order.
  */
 export const createProgressEmitter = (
   targets: ReadonlyMap<string, FileRef>,
@@ -110,13 +122,13 @@ export const createProgressEmitter = (
     if (onProgress === undefined) return;
     const refKey = fileRefKey(ref);
     const fileTotal = fileSizeOf(targets, refKey);
-    // complete は全量が揃った点なので size をそのまま渡す（キャッシュヒットは downloading が
-    // 1 度も出ず `received` に載らないため、受信実績から引くと 0 に見える）。
+    // complete is the point where everything has arrived, so pass the size as is (a cache hit never
+    // emits downloading and is not in `received`, so looking it up there would show 0).
     const fileLoaded = phase === "downloading" ? (received.get(refKey) ?? 0) : fileTotal;
-    // MUST: 全体 `loaded` にも同じ値を積む — このファイルぶんだけ `received` から引くと、
-    // 同一イベントで fileLoaded が size なのに loaded がそれを数えない矛盾が出る（全ファイル
-    // キャッシュ済みの起動では loaded が 0 のまま complete が並ぶ）。downloading では
-    // fileLoaded が `received` の値そのものなので二重計上にはならない。
+    // MUST: add the same value to the overall `loaded` — taking this file's share from `received`
+    // would contradict within one event: fileLoaded is the size while loaded does not count it (a
+    // start with every file cached would line up completes with loaded stuck at 0). In downloading,
+    // fileLoaded is the value in `received` itself, so nothing is counted twice.
     let sum = fileLoaded;
     for (const [other, bytes] of received) {
       if (other !== refKey) sum += bytes;
@@ -132,10 +144,12 @@ export const createProgressEmitter = (
       fileLoaded,
       fileTotal,
     };
-    // MUST: リスナーの例外はここ 1 か所で隔離し、全段（downloading / complete）を同じ扱いにする —
-    // 進捗は付随情報で正しさの要件ではない（取得層が downloading を隔離するのと同じ方針）。隔離が
-    // 段で違うと、同じ UI 側の例外が「受信中なら無害・終端ならロード全体の失敗（他ファイルの取得も
-    // 道連れ）」と意味を変える。捨てるのは通知 1 回だけで、無言にはしない（warn で届ける）。
+    // MUST: isolate listener exceptions in this one place and treat every phase (downloading /
+    // complete) the same — progress is incidental information, not a correctness requirement (the
+    // same policy as the fetch layer isolating downloading). If the isolation differed per phase,
+    // the same UI-side exception would change meaning: "harmless while receiving, a failure of the
+    // whole load at the end (taking the other files' fetches down with it)". Only that one
+    // notification is dropped, and not silently (it is reported with warn).
     try {
       onProgress(progress);
     } catch (error) {
@@ -153,9 +167,9 @@ export const createProgressEmitter = (
       emit("downloading", ref);
     },
     complete: (ref) => {
-      // MUST: `received` にも size を書く — 書かずに complete だけ出すと、キャッシュヒット
-      // （downloading が 1 度も出ない）だったファイルが後続イベントの `loaded` 合計から抜け、
-      // 全体の進捗が巻き戻って見える。
+      // MUST: write the size into `received` too — emitting only complete would drop a file that
+      // was a cache hit (no downloading ever emitted) from the `loaded` total of later events, and
+      // the overall progress would appear to go backwards.
       received.set(fileRefKey(ref), ref.size);
       emit("complete", ref);
     },

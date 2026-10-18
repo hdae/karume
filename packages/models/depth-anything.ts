@@ -1,20 +1,21 @@
 /**
- * `@karume/models/depth-anything` — Depth Anything V2（画像 → 相対深度マップ）ファミリの
- * サブパス面。
+ * `@karume/models/depth-anything` — the subpath surface of the Depth Anything V2 family (image →
+ * relative depth map).
  *
- * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
- * 面は利用者ストーリーに対応する — 組む（{@link DepthAnythingPipeline.fromPretrained} /
- * {@link DepthAnythingPipeline.fromAssets}）/ 取得元を選ぶ（{@link DEPTH_ANYTHING_SOURCES}）/
- * 深度を出す（`estimate`）/ 解放する（`dispose`）。
+ * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
+ * wholesale. The surface follows the user's stories — build
+ * ({@link DepthAnythingPipeline.fromPretrained} / {@link DepthAnythingPipeline.fromAssets}) / choose
+ * a source ({@link DEPTH_ANYTHING_SOURCES}) / estimate depth (`estimate`) / release (`dispose`).
  *
- * 画素の decode は利用者の責務で、resize / rescale / normalize は `estimate` の中で配布形の
- * 定数どおりに掛かる。返るのは**入力と同じ寸法の生の f32 相対深度**で、`[0, 1]` への正規化も
- * 着色も利用者側（可視化の決定であって推論の一部ではないため — `src/depth-anything/pipeline.ts`
- * のモジュール doc）。{@link Rgb8Image} と {@link DepthMap} は `estimate` の引数と返り値の型
- * なので、このサブパスからも名指しできるように出す。
+ * Decoding the pixels is the user's responsibility; resize / rescale / normalize are applied inside
+ * `estimate` with the distribution's constants. The result is **raw f32 relative depth with the same
+ * size as the input**; normalizing to `[0, 1]` and colouring are up to the user (they are
+ * visualization decisions, not part of inference — the module doc of
+ * `src/depth-anything/pipeline.ts`). {@link Rgb8Image} and {@link DepthMap} are the argument and
+ * return types of `estimate`, so they are exported here as well to be nameable from this subpath.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
- * barrel（`mod.ts`）経由の tree-shaking はこの不変条件の上にだけ成立する。
+ * MUST: every module is free of side effects (no execution at import, no global mutable state —
+ * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
 export { DepthAnythingPipeline } from "./src/depth-anything/pipeline.ts";
@@ -25,24 +26,26 @@ export type {
   DepthMap,
 } from "./src/depth-anything/pipeline.ts";
 /**
- * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から
- * `karume-` を落とした綴り・値は pin 済み commit SHA — ADR 0073 / 0092）。世代・版は別リポ =
- * 別エントリ（世代の綴りはリポ名に入る）なので、今は 1 エントリ:
+ * **The table of sources verified with this package version** (one table per family; keys are the
+ * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
+ * Generations and versions are separate repositories = separate entries (the generation is part of
+ * the repository name), so one entry for now:
  *
  * - `DEPTH_ANYTHING_SOURCES["depth-anything-v2"]` = `hdae/karume-depth-anything-v2`
- *   （既定 = Small）
+ *   (default = Small)
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン** —
- * {@link DepthAnythingPipeline.fromPretrained} の第 1 引数へそのまま渡す。再現性を自分で
- * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
- * 既定は無い）。
+ * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
+ * is as the first argument of {@link DepthAnythingPipeline.fromPretrained}. To pin reproducibility
+ * yourself, write your own `{ repo, revision }` instead of using this table (`fromPretrained` has no
+ * default).
  */
 export { DEPTH_ANYTHING_SOURCES } from "./src/depth-anything/config.ts";
 export type { Rgb8Image } from "./src/image/preprocess.ts";
 
 /**
- * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る — 入力画像の寸法と
- * 画素列の長さ）。**家族横断で 1 本**なので、複数の家族を同じホストに載せる側はこれだけで
- * 400 と 500 を分けられる。内部不変条件の破れ・資産の齟齬・GPU 容量は素の `Error` のまま飛ぶ。
+ * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it
+ * pass — the size of the input image and the length of its pixel array). **One type across all
+ * families**, so a host serving several families can tell 400 from 500 with this alone. Broken
+ * internal invariants, asset mismatches and GPU capacity are thrown as plain `Error`s.
  */
 export { ModelInputError } from "./src/errors.ts";

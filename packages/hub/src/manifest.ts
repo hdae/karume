@@ -1,21 +1,25 @@
 /**
- * `karume.json`（配布 manifest v5 = `karume/5`）の parse と全構造検査 — ADR 0109 の正本実装
- * （quant 席の語彙は ADR 0041 から継承）。
+ * Parsing and full structural checking of `karume.json` (distribution manifest v5 = `karume/5`) —
+ * the canonical implementation of ADR 0109 (the quant preset vocabulary is inherited from ADR
+ * 0041).
  *
- * MUST: **旧版は読まない**。`format` が `karume/5` 以外なら unsupported format で落とす
- * （2 形パースを持たない — ADR 0109 決定 1）。v5 は配布形が safetensors 方言の shard 列から
- * コンテナ（`krm` — ADR 0108 / container-v1）へ移った版で、`weights.<部品>.<dtype>` の中身が
- * `{ shards, extras }` から `{ container }`（descriptor の期待値 + part の FileRef 列）に
- * 置き換わった。`quants` / `session` / `gpuFeatures` / `requiredLimits` / `label` /
- * `description` / `assets` / 越境参照の席は v4 のまま（ADR 0109 決定 2 / 4）。
- * MUST: 手書き parse・Web 標準 API のみ・未対応と想定外は fail loudly（黙って正規化しない）。
- * MUST: manifest 由来のマップは `Object.hasOwn` 経由でのみ引き、合成はスプレッドのみ
- * （`Object.assign` 禁止 — CLAUDE.md 横断不変条件 / ADR 0038 §1）。
+ * MUST: **older versions are not read**. A `format` other than `karume/5` fails as an unsupported
+ * format (no two-format parsing — ADR 0109 decision 1). v5 is the version where the distribution
+ * moved from shard lists in a safetensors dialect to containers (`krm` — ADR 0108 / container-v1),
+ * and the contents of `weights.<component>.<dtype>` changed from `{ shards, extras }` to
+ * `{ container }` (the descriptor expectations + the part FileRef list). The `quants` / `session` /
+ * `gpuFeatures` / `requiredLimits` / `label` / `description` / `assets` / cross-repo reference
+ * fields stay as in v4 (ADR 0109 decisions 2 / 4).
+ * MUST: hand-written parsing, Web standard APIs only, unsupported and unexpected input fails loudly
+ * (no silent normalisation).
+ * MUST: maps from the manifest are looked up only through `Object.hasOwn`, and composed only with
+ * spread (no `Object.assign` — the cross-cutting invariant in CLAUDE.md / ADR 0038 §1).
  *
- * **検査の境界**（ADR 0109 決定 6）: ここで見るのは**宣言だけで閉じるもの**だけ —— 件数・天井・
- * `size: 0` の規則・part 0 の長さ・越境の一様性・descriptor の長さ。descriptor と parts の整合・
- * block 目次・codec 台帳の突合は**コンテナを開く側**（`@karume/runtime` の `openContainer`）が
- * 持つ。検査点を 2 つにすると、同じ規則が 2 か所で別々にずれる。
+ * **Check boundary** (ADR 0109 decision 6): only **what closes on the declarations alone** is
+ * checked here — counts, ceilings, the `size: 0` rule, the length of part 0, uniform cross-repo
+ * references, descriptor lengths. Consistency of descriptor and parts, the block index and the
+ * codec ledger are matched by **the side that opens the container** (`openContainer` of
+ * `@karume/runtime`). Two check points would let the same rule drift apart in two places.
  */
 
 import {
@@ -26,80 +30,88 @@ import {
   NO_LABELS,
 } from "./errors.ts";
 
-/** manifest のファイル名（リポジトリ直下の固定名 — ADR 0041 §1）。 */
+/** The manifest's file name (a fixed name at the repository root — ADR 0041 decision 1). */
 export const MANIFEST_FILENAME = "karume.json";
 
 /**
- * manifest 本体の上限（DoS 防波堤 — ADR 0041 §7）。判定は全量を受け取った後に行う
- * （{@link parseManifest} と、ローカル取得元の読み口）— 取得層に「厳密一致なしの上限」が無いので、
- * HF 取得元でも受信の途中では止めない（ADR 0094 決定 4）。
+ * The size limit of the manifest itself (DoS guard — ADR 0041 decision 7). Checked after receiving
+ * everything ({@link parseManifest} and the local source's reader) — the fetch layer has no "cap
+ * without exact match", so even the HF source does not stop midway through receiving (ADR 0094
+ * decision 4).
  */
 export const MAX_MANIFEST_BYTES = 1024 * 1024;
 
-/** 規模上限（ADR 0041 §7）。 */
+/** Size limits (ADR 0041 decision 7). */
 const MAX_MODELS = 32;
 const MAX_WEIGHTS = 32;
 const MAX_ASSETS = 32;
 const MAX_QUANTS = 32;
 const MAX_PIPELINE_CONFIG_BYTES = 256 * 1024;
 /**
- * manifest 全域走査の深さ上限。実在の manifest は envelope → models → weights → dtype →
- * container → parts → 要素の 7 段前後（`pipelineConfig` の入れ子を足しても十数段）で足りる。一方
- * 深さ検査が無いと、1MiB に収まる深いネストが `assertNoForbiddenKeys` の再帰でスタックを
- * 食い潰し、素の `RangeError` として `HubError` 契約の外へ抜ける（Deno 実測: 素の walk は
- * 配列 2,410 段で `RangeError`）。実用の要求より十分上・実測の破綻点よりはるか下に置き、
- * 深すぎる manifest は `ManifestFormatError` として fail loudly させる。
+ * The depth limit of the walk over the whole manifest. Real manifests need about 7 levels (envelope
+ * → models → weights → dtype → container → parts → element; a dozen or so even with the nesting of
+ * `pipelineConfig`). Without a depth check, deep nesting that fits in 1MiB would exhaust the stack
+ * in the recursion of `assertNoForbiddenKeys` and escape the `HubError` contract as a bare
+ * `RangeError` (measured on Deno: the bare walk hits `RangeError` at 2,410 nested arrays). It sits
+ * well above the practical need and far below the measured breaking point, and a manifest that is
+ * too deep fails loudly as a `ManifestFormatError`.
  */
 const MAX_MANIFEST_DEPTH = 64;
-/** 1 ファイルの上限バイト数（ADR 0038 §2 から据え置き）。part はこの内側にある。 */
+/** The byte limit of one file (kept from ADR 0038 §2). Parts are within it. */
 const MAX_FILE_BYTES = 16 * 2 ** 30;
 /**
- * 1 コンテナの part 件数の上限（container-v1 §10）。実在の配布は数十本で足りる一方、上限が
- * 無いと 1MiB の manifest に数千の part 参照を詰めた入力がそのまま取得計画になる。
- * 綴りは Python 正本 `tools/exporter/src/karume/container.py` の `MAX_PARTS` と同値。
+ * The limit on the part count of one container (container-v1 §10). Real distributions need a few
+ * dozen, but without a limit an input that packs thousands of part refs into a 1MiB manifest would
+ * become a fetch plan as is. The value equals `MAX_PARTS` in the canonical Python
+ * `tools/exporter/src/karume/container.py`.
  */
 const MAX_PARTS = 1024;
 /**
- * part 1 本の上限バイト数（1024MiB — container-v1 §10 の「part 長の天井」。part 0 / 1 を含む
- * 全 part に同じ値を掛ける）。
+ * The byte limit of one part (1024MiB — the "part length ceiling" of container-v1 §10; the same
+ * value applies to every part, parts 0 / 1 included).
  *
- * 測るのは manifest の `size` = **ファイル長**で、exporter の読み返し（`karume verify`）が実
- * ファイル長で見る量と同じ。読み手は「器の寸法を宣言から見積る」（ADR 0089）前提で組まれて
- * いるので、超過 part を黙って受けるとその前提が崩れ、取得層のバイト予算や Chromium の単一
- * `ArrayBuffer` 上限に**ブラウザで初めて**ぶつかる。parse 時が正位置 —— 読み手契約はフォーマット
- * 契約であり、「DL 開始後に初めて分かる」を許さないのが manifest 検査の目的そのもの。
+ * What is measured is the manifest's `size` = **the file length**, the same quantity the exporter's
+ * read-back (`karume verify`) checks against the real file length. Readers are built on the premise
+ * of "estimating buffer sizes from the declarations" (ADR 0089), so silently accepting an oversized
+ * part would break that premise, and it would hit the fetch layer's byte budget or Chromium's
+ * single-`ArrayBuffer` limit **only once in the browser**. Parse time is the right place — the
+ * reader contract is a format contract, and not allowing "found out only after the download
+ * started" is the very purpose of checking the manifest.
  *
- * MUST: 掛けるのは `container.parts` **だけ**。上限は part 分割の契約であって、`assets`
- * （単一ファイルで配る付帯資産）はこの規則の外にある — 混同すると上限超の実在資産が読めなく
- * なる。全 FileRef 共通の天井は {@link MAX_FILE_BYTES}。
+ * MUST: apply it to `container.parts` **only**. The limit is a contract of part splitting; `assets`
+ * (auxiliary assets distributed as single files) are outside this rule — confusing them would make
+ * real assets above the limit unreadable. The ceiling common to all FileRefs is
+ * {@link MAX_FILE_BYTES}.
  *
- * MUST: 綴りは Python 正本 `tools/exporter/src/karume/container.py` の `PART_MAX_BYTES` と
- * 同値に保つ（hub は exporter に依存しないので写しになる）。判定も向こうと同じ**閉区間**
- * （ちょうど上限は合法・超過だけを落とす）。
+ * MUST: keep the value equal to `PART_MAX_BYTES` in the canonical Python
+ * `tools/exporter/src/karume/container.py` (hub does not depend on the exporter, so this is a
+ * copy). The check is the same **closed interval** as there (exactly the limit is legal; only above
+ * it fails).
  */
 const MAX_PART_BYTES = 1024 * 2 ** 20;
 /**
- * descriptor の 1 文書（グラフ記述 / モデル記述）の上限バイト数（32MiB — container-v1 §10）。
- * part 0 を取る費用を block 上限と同じ桁に収めるための天井で、実測の IR は重複除去 47 本で
- * 9.0MiB（ADR 0109 Context）。綴りは Python 正本
- * `tools/exporter/src/karume/container.py` の `MAX_DESCRIPTOR_BYTES` と同値。
+ * The byte limit of one descriptor document (graph descriptor / model descriptor) (32MiB —
+ * container-v1 §10). A ceiling that keeps the cost of fetching part 0 in the same order as the
+ * block limit; the measured IR is 9.0MiB over 47 deduplicated graphs (ADR 0109 Context). The value
+ * equals `MAX_DESCRIPTOR_BYTES` in the canonical Python `tools/exporter/src/karume/container.py`.
  */
 const MAX_DESCRIPTOR_BYTES = 32 * 2 ** 20;
 /**
- * コンテナのヘッダ長（container-v1 §1 — 固定 24 バイト）。分割形の part 0 は「ヘッダ + 2 文書
- * ちょうど」なので、宣言どうしの整合（`parts[0].size === 24 + graph.length + model.length`）が
- * **1 バイトも取らずに**見られる（container-v1 §8）。
+ * The container header length (container-v1 §1 — a fixed 24 bytes). Part 0 of the split form is
+ * "header + exactly the two documents", so the consistency between declarations
+ * (`parts[0].size === 24 + graph.length + model.length`) can be checked **without fetching a byte**
+ * (container-v1 §8).
  */
 const CONTAINER_HEADER_BYTES = 24;
 /**
- * 空のバイト列の sha256。長さ 0 の part（const が空の part 1 — ADR 0109 決定 3）はこの値を
- * 名乗らなければならない。別の値は「0 バイトのファイルなのに中身がある」という読み取れない
- * 宣言なので fail loudly。
+ * The sha256 of the empty byte string. A zero-length part (part 1 with an empty const region — ADR
+ * 0109 decision 3) must declare this value. Any other value is an unreadable declaration, "a 0-byte
+ * file with contents", so it fails loudly.
  */
 const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-/** hub が理解する `format` の major。未知 major は fail loudly（ADR 0109 決定 1）。 */
+/** The `format` major hub understands. An unknown major fails loudly (ADR 0109 decision 1). */
 const FORMAT_MAJOR = 5;
-/** 表示欄の長さ上限（ADR 0075 決定 1）。 */
+/** Length limits of the display fields (ADR 0075 decision 1). */
 const MAX_LABEL_CHARS = 64;
 const MAX_DESCRIPTION_CHARS = 200;
 
@@ -108,27 +120,29 @@ const SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
 const FORMAT_RE = /^karume\/([1-9][0-9]*)$/;
 const PIPELINE_RE = /^([A-Za-z0-9_-]+)\/([1-9][0-9]*)$/;
 /**
- * 越境参照の `revision`（40 桁小文字 hex の commit SHA）。
+ * The `revision` of a cross-repo reference (a commit SHA of 40 lowercase hex digits).
  *
- * MUST: ブランチ・タグ・短縮 SHA は拒否する — 越境参照は「別リポの**不変**コンポーネントを
- * 指す」席（ADR 0038 §7）であって、可変 ref を許すと自リポの revision を SHA へ固定した意味
- * （manifest と重みが同一コミットから来ること）が参照先で崩れる。短縮形も曖昧なので不可。
+ * MUST: reject branches, tags and short SHAs — a cross-repo reference is a field that "points at an
+ * **immutable** component of another repo" (ADR 0038 §7), and allowing a mutable ref would undo, at
+ * the target, the point of pinning our own revision to a SHA (the manifest and the weights coming
+ * from the same commit). Short forms are ambiguous too, so they are not allowed.
  */
 const COMMIT_SHA_RE = /^[0-9a-f]{40}$/;
 /**
- * 越境参照の `repo` の 1 セグメント（`owner` / `name`）。path と同じ許可リスト文字に加えて
- * **先頭ドットを禁止**する（`.` / `..` そのものもここで落ちる）。
+ * One segment (`owner` / `name`) of a cross-repo reference's `repo`. The same allowlisted
+ * characters as paths, plus **a leading dot is forbidden** (`.` / `..` themselves also fail here).
  *
- * MUST: 禁止列挙ではなく許可リストにする — repo の `/` は取得層で構造要素として扱われ
- * percent-encode されない（`hfResolveUrl`）ので、列挙の抜けがそのまま SHA ピン外への
- * traversal になる（ADR 0038 §2 の path 検査と同じ理由）。
+ * MUST: use an allowlist, not a denylist — the fetch layer treats the `/` of a repo as structural
+ * and does not percent-encode it (`hfResolveUrl`), so a gap in a denylist would become traversal
+ * outside the SHA pin as is (the same reason as the path check of ADR 0038 §2).
  */
 const REPO_SEGMENT_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 
 /**
- * プロトタイプ汚染に使われるキー。JSON.parse は `__proto__` を**自前プロパティ**として
- * 置くため汚染そのものは起きないが、下流が素朴な代入で読み直す事故を構造的に断つため
- * manifest 全域で拒否する（ADR 0038 §1）。
+ * Keys used for prototype pollution. JSON.parse puts `__proto__` as **an own property**, so
+ * pollution itself does not happen, but they are rejected across the whole manifest to rule out
+ * structurally the accident of downstream code re-reading them with a naive assignment (ADR 0038
+ * §1).
  */
 const FORBIDDEN_KEYS: readonly string[] = ["__proto__", "constructor", "prototype"];
 
@@ -157,11 +171,14 @@ const QUANT_KEYS: readonly string[] = [
 const GPU_FEATURE_KEYS: readonly string[] = ["shaderF16"];
 
 /**
- * `session` の allowlist（キーも値も — ADR 0038 §3 から据え置き）。runtime 型の素通しではない。
+ * The `session` allowlist (both keys and values — kept from ADR 0038 §3). Not a pass-through of the
+ * runtime types.
  *
- * 値の `i8a8` は 0.5.0 で `a8` へ改名した（ADR 0074 決定 3）。このノブが決めているのは
- * **活性の扱いだけ**で、重みの格納形は資産ヘッダが決める — 格納形を値に綴ると manifest と
- * ヘッダの二重持ちになり、混成資産（i4 + i8）でどちらか一方しか加速できない嘘になる。
+ * The value `i8a8` was renamed to `a8` in 0.5.0 (ADR 0074 decision 3). This knob decides **only how
+ * activations are handled**; the storage layout of the weights is decided by the asset header —
+ * spelling the storage layout into the value would keep it twice, in the manifest and in the
+ * header, and with mixed assets (i4 + i8) it would be a lie that only one of them can be
+ * accelerated.
  */
 const LINEAR_COMPUTE: readonly LinearCompute[] = ["f32", "a8", "f16"];
 const ATTENTION_COMPUTE: readonly AttentionCompute[] = ["f32", "f16", "a8"];
@@ -169,12 +186,12 @@ const SCORE_STORAGE: readonly ScoreStorage[] = ["f32", "f16"];
 const LINEAR_GEMV_REDUCE = ["sequential", "parallel"] as const;
 const STATE_ATTENTION_REDUCE = ["sequential", "parallel", "parallel-fused"] as const;
 /**
- * `session` のキー allowlist — `Required<SessionSpec>` の**網羅表**として持つ。
+ * The key allowlist of `session` — held as **an exhaustive table** of `Required<SessionSpec>`.
  *
- * MUST: 網羅で縛るのは、allowlist と型と `parseSession` の 3 点がずれると配布形が宣言した
- * ノブが黙って捨てられるため（`@karume/models` の `WRITERS` と同じ門）。`SessionSpec` に
- * 席の無いキーを足すと余分な欄として、`SessionSpec` にだけノブを足すと欄の不足として、
- * どちらもこの宣言が型検査で落ちる。
+ * MUST: it is bound exhaustively because if the allowlist, the type and `parseSession` drifted
+ * apart, knobs that a distribution declares would be silently dropped (the same check as `WRITERS`
+ * in `@karume/models`). Adding a key without a field in `SessionSpec` (as an extra field) or adding
+ * a knob only to `SessionSpec` (as a missing field) both make this declaration fail type checking.
  */
 const SESSION_KEYS: Readonly<Record<keyof Required<SessionSpec>, true>> = {
   linearCompute: true,
@@ -192,14 +209,15 @@ export type AttentionCompute = "f32" | "f16" | "a8";
 export type ScoreStorage = "f32" | "f16";
 
 /**
- * quant が要求する device limit の名前（ADR 0038 §7 が据え置き席として列挙していた
- * `requiredLimits`）。
+ * The names of the device limits a quant requires (`requiredLimits`, which ADR 0038 §7 listed as a
+ * reserved field).
  *
- * MUST: 語彙は **manifest 所有**で runtime 型の素通しではない（`session` と同じ規律 —
- * ADR 0038 §3）。綴りは `@karume/runtime` の `REQUIRED_LIMIT_KEYS`（`acquireGpu` が
- * `requestDevice` へ渡す requiredLimits のキー）と 1 対 1 に保つ。hub は runtime に依存しない
- * ので写しになるが、**未知名は fail loudly で拒否する**ので綴りのずれが黙って無視されること
- * はない（配布済み manifest を runtime 内部の綴りへ釘付けしないための境界でもある）。
+ * MUST: the vocabulary is **owned by the manifest**, not a pass-through of runtime types (the same
+ * discipline as `session` — ADR 0038 §3). Keep the spelling one-to-one with `REQUIRED_LIMIT_KEYS`
+ * of `@karume/runtime` (the requiredLimits keys `acquireGpu` passes to `requestDevice`). hub does
+ * not depend on the runtime, so this is a copy, but **unknown names are rejected with a fail
+ * loudly**, so a drift in spelling is never silently ignored (it is also the boundary that keeps
+ * published manifests from being nailed to the runtime's internal spelling).
  */
 const REQUIRED_LIMIT_NAMES = [
   "maxBufferSize",
@@ -218,44 +236,53 @@ const REQUIRED_LIMIT_NAMES = [
 export type RequiredLimitName = (typeof REQUIRED_LIMIT_NAMES)[number];
 
 /**
- * quant が要求する limit の**最小値**の表（`limit 名 → 値`）。WebGPU の
- * `GPUDeviceDescriptor.requiredLimits` と同じ「名前 → 満たすべき最小値」の形なので、
- * 消費側の判定は `adapter.limits[name] >= value` の素の比較になる。
+ * The table of **minimum values** of the limits a quant requires (`limit name → value`). It has the
+ * same "name → minimum to satisfy" shape as WebGPU's `GPUDeviceDescriptor.requiredLimits`, so the
+ * consumer's check is the plain comparison `adapter.limits[name] >= value`.
  *
- * 書かれた名前だけが要求で、書かれていない limit は「要求しない」（部分写像）。
+ * Only the names written are requirements; a limit not written is "not required" (a partial
+ * mapping).
  */
 export type RequiredLimitsSpec = Readonly<Partial<Record<RequiredLimitName, number>>>;
 
 /**
- * ファイル参照の 3 点セット（ADR 0038 §2）。3 点全ての存在と形式が parse 時の必須検査。
+ * The triple of a file reference (ADR 0038 §2). The presence and format of all three are mandatory
+ * checks at parse time.
  *
- * 検査が掛かるのは **manifest データを parse する経路だけ**で、この型は公開型なので呼び手が手で
- * 組める（{@link crossRefOf} の doc と同旨）。`openAsset`（`fetch.ts`）は渡された ref が読み込み
- * 済み manifest に属するかを検査しないので、手組みの ref は 3 点セットの整合ごと無検査で通る。
+ * The checks apply **only on the path that parses manifest data**; this is a public type, so
+ * callers can build one by hand (as the doc of {@link crossRefOf} also says). `openAsset`
+ * (`fetch.ts`) does not check that a given ref belongs to the loaded manifest, so a hand-built ref
+ * passes unchecked, triple consistency included.
  */
 export type FileRef = {
   readonly path: string;
-  /** Hub 上の保存形 raw のバイト数。 */
+  /** The byte count of the raw stored form on the Hub. */
   readonly size: number;
-  /** 小文字 hex 64 桁。 */
+  /** 64 lowercase hex digits. */
   readonly sha256: string;
   /**
-   * 越境参照の取得元リポ（`owner/name` — ADR 0038 §7）。省略時は manifest 自身のリポ。
+   * The source repo of a cross-repo reference (`owner/name` — ADR 0038 §7). When omitted, the
+   * manifest's own repo.
    *
-   * MUST: {@link revision} と**両方同時**にのみ現れる（片方だけは fail loudly）。
+   * MUST: appears only **together with** {@link revision} (one alone fails loudly).
    */
   readonly repo?: string;
-  /** 越境参照の commit SHA（40 桁小文字 hex 固定）。{@link repo} と対。 */
+  /**
+   * The commit SHA of a cross-repo reference (always 40 lowercase hex digits). Paired with
+   * {@link repo}.
+   */
   readonly revision?: string;
 };
 
 /**
- * 越境参照の宣言（`repo` と `revision` の**対**）を取り出す。片方だけの宣言は越境ではない
- * （`undefined`）— parse は対を強制するが、{@link FileRef} は公開型なので呼び手が手で組める。
+ * Extracts the declaration of a cross-repo reference (the **pair** of `repo` and `revision`). A
+ * declaration with only one of them is not cross-repo (`undefined`) — parsing enforces the pair,
+ * but {@link FileRef} is a public type that callers can build by hand.
  *
- * MUST: 越境かどうかの判定はこの述語 1 本を引く（一意化キー・取得元の分岐・診断の名乗り）—
- * 面ごとに綴ると、片方だけを見る綴りが「キーは越境を名乗るのに取得はセッションの取得元から」
- * という食い違いを黙って作る（同じファイルが 2 本の別エントリとして数えられる）。
+ * MUST: every "is it cross-repo" decision goes through this one predicate (deduplication keys, the
+ * source branch, the naming in diagnostics) — spelling it per surface, a spelling that looks at
+ * only one of the two would silently create the mismatch "the key claims cross-repo but the fetch
+ * comes from the session's source" (the same file counted as two separate entries).
  */
 export const crossRefOf = (
   ref: FileRef,
@@ -265,10 +292,11 @@ export const crossRefOf = (
     : { repo: ref.repo, revision: ref.revision };
 
 /**
- * ファイル参照の同一性キー。越境参照（別リポの `repo` / `revision`）が入った以上、
- * **`path` だけでは 1 本のファイルを指さない** — 別リポの同名 path は別のバイト列であり、
- * path で畳むと 3 点セット一致検査が正しい manifest を誤って拒否し、取得層では別のファイルの
- * バイト列を返してしまう。自リポ参照のキーは `path` そのままなので、v3 までの挙動は変わらない。
+ * The identity key of a file reference. With cross-repo references (`repo` / `revision` of another
+ * repo), **`path` alone no longer identifies one file** — a same-named path in another repo is
+ * different bytes, and folding by path would make the triple-match check wrongly reject a valid
+ * manifest and the fetch layer return another file's bytes. For a reference to our own repo the key
+ * is `path` as is, so the behaviour up to v3 does not change.
  */
 export const fileRefKey = (ref: FileRef): string => {
   const cross = crossRefOf(ref);
@@ -276,145 +304,170 @@ export const fileRefKey = (ref: FileRef): string => {
 };
 
 /**
- * コンテナが内包する 1 文書（グラフ記述 / モデル記述）の**期待値**（container-v1 §7 の①）。
+ * The **expectation** for one document a container embeds (graph descriptor / model descriptor)
+ * (item (1) of container-v1 §7).
  *
- * descriptor は自分の正しさを証明できないので、外側（この manifest）が 2 文書それぞれの
- * バイト長と sha256 を持つ。part 0 ファイルの sha256（`parts[0].sha256`）とは**別の事実**で、
- * `graph` 文書の sha256 はそのまま `krg` の同一性（内容ハッシュ）になる（ADR 0109 決定 3）。
+ * A descriptor cannot prove its own correctness, so the outside (this manifest) holds the byte
+ * length and sha256 of each of the two documents. They are **a separate fact** from the sha256 of
+ * the part 0 file (`parts[0].sha256`), and the sha256 of the `graph` document is directly the
+ * identity (content hash) of the `krg` (ADR 0109 decision 3).
  */
 export type DocumentExpectation = {
-  /** バイト長（0 < length <= {@link MAX_DESCRIPTOR_BYTES}）。 */
+  /** Byte length (0 < length <= {@link MAX_DESCRIPTOR_BYTES}). */
   readonly length: number;
-  /** 小文字 hex 64 桁。 */
+  /** 64 lowercase hex digits. */
   readonly sha256: string;
 };
 
 /**
- * コンテナ 1 本の入口（ADR 0109 決定 3）。読み手（`openContainer`）が要求するのは
- * 「2 文書の期待値」と「part ごとのバイト列」の 2 つだけなので、manifest が持つのもこの 2 欄。
+ * The entry point of one container (ADR 0109 decision 3). The reader (`openContainer`) needs only
+ * two things, "the expectations for the two documents" and "the bytes of each part", so the
+ * manifest holds these two fields.
  *
- * MUST: {@link parts} は**添字順の全 part**（先頭が part 0 = descriptor のファイル）。並べ替えも
- * 重複畳み込みもしない — 添字が part の id なので、列を触った瞬間に識別子が壊れる。
- * MUST: 越境参照（`repo` / `revision`）は**容器単位**でそろっている（全部が自リポ、または全部が
- * 同じ (repo, revision)）。混在は parse が落とす（ADR 0109 決定 3）。
+ * MUST: {@link parts} is **every part in index order** (first is part 0 = the descriptor file). No
+ * reordering and no folding of duplicates — the index is the part's id, so touching the list breaks
+ * the identifiers.
+ * MUST: cross-repo references (`repo` / `revision`) are uniform **per container** (all own repo, or
+ * all the same (repo, revision)). Parsing rejects a mix (ADR 0109 decision 3).
  *
- * NOTE: ファイル名の規約（`<stem>-NNNNN-of-NNNNN.krm` — container-v1 §8）は書き手の規約で、
- * hub は検査しない。
+ * NOTE: the file name convention (`<stem>-NNNNN-of-NNNNN.krm` — container-v1 §8) is the writer's;
+ * hub does not check it.
  */
 export type ContainerRef = {
   readonly descriptor: {
     readonly graph: DocumentExpectation;
     readonly model: DocumentExpectation;
   };
-  /** part 0（descriptor のファイル）を先頭に、添字順の全 part。 */
+  /** Every part in index order, starting with part 0 (the descriptor file). */
   readonly parts: readonly FileRef[];
 };
 
 /**
- * weights の 1 dtype ぶん = コンテナ 1 本（`{ container }`）。v4 の `{ shards, extras }` の
- * 後継で、`shards` / `extras` は退役した（ADR 0109 決定 3 / 4 — extras の実物はコンテナの
- * 内側の資産へ移った）。
+ * One dtype of a weights entry = one container (`{ container }`). The successor of v4's
+ * `{ shards, extras }`; `shards` / `extras` are retired (ADR 0109 decisions 3 / 4 — the actual
+ * extras moved into assets inside the container).
  */
 export type WeightContainer = {
   readonly container: ContainerRef;
 };
 
 /**
- * weights の 1 エントリ = **dtype ラベル → コンテナ**。dtype ラベルは選択・表示の語彙で、
- * 格納の正本は descriptor の `encoding.codec`（ADR 0109 決定 2）— hub は写像の完全性だけを見る。
+ * One weights entry = **dtype label → container**. The dtype label is vocabulary for selection and
+ * display; the source of truth for storage is the descriptor's `encoding.codec` (ADR 0109 decision
+ * 2) — hub checks only the completeness of the mapping.
  */
 export type WeightEntry = Readonly<Record<string, WeightContainer>>;
 
-/** manifest 所有の実行ノブ語彙（ADR 0038 §3 / 0098 / 0104）。 */
+/** The manifest-owned vocabulary of execution knobs (ADR 0038 §3 / 0098 / 0104). */
 export type SessionSpec = {
   readonly linearCompute?: LinearCompute;
   readonly attentionCompute?: AttentionCompute;
   readonly attentionScoreStorage?: ScoreStorage;
   readonly linearGemvReduce?: "sequential" | "parallel";
   /**
-   * states 形 attention ①QK / ③PV の縮約形（ADR 0104 追記 2026-09-26〈語彙への昇格〉）。
-   * 宣言が無ければ読み手は runtime の参照経路（`"sequential"`）で走る。
+   * The reduction form of (1) QK / (3) PV of states-shaped attention (ADR 0104 addendum 2026-09-26,
+   * promotion to the vocabulary). Without a declaration the reader runs on the runtime's reference
+   * path (`"sequential"`).
    */
   readonly stateAttentionReduce?: "sequential" | "parallel" | "parallel-fused";
   readonly fuseRmsNormAdd?: boolean;
   readonly fuseLinearStaticQuantize?: boolean;
   /**
-   * 固定 SRQ の int8 活性を u32 へ詰めて並列 GEMV へ渡す（ADR 0105 追記 2〈語彙への昇格〉）。
-   * `linearGemvReduce: "parallel"` を伴わない宣言は消費側が拒否する。
+   * Packs the int8 activations of fixed SRQ into u32 and hands them to the parallel GEMV (ADR 0105
+   * addendum 2, promotion to the vocabulary). The consumer rejects a declaration without
+   * `linearGemvReduce: "parallel"`.
    */
   readonly packedStaticQuantize?: boolean;
 };
 
-/** device 生成前に要る GPU feature（`shaderF16` のみ — ADR 0038 §3）。 */
+/** GPU features needed before device creation (`shaderF16` only — ADR 0038 §3). */
 export type GpuFeaturesSpec = {
   readonly shaderF16?: boolean;
 };
 
-/** 名前付きの量子化・精度モード（v1 の Preset — ADR 0041 §3 で改名）。 */
+/** A named quantization / precision mode (v1's Preset — renamed by ADR 0041 decision 3). */
 export type Quant = {
-  /** weights 名 → その dtype ラベルへの**完全写像**。 */
+  /** A **complete mapping** from weights name → its dtype label. */
   readonly weights: Readonly<Record<string, string>>;
   readonly session: SessionSpec;
   readonly gpuFeatures?: GpuFeaturesSpec;
   /**
-   * 選択 UI に出す短い表示名（英語・{@link MAX_LABEL_CHARS} 文字以内 — ADR 0075 決定 1）。
-   * 席 id（`i8-a8-attn8-s16`）が機械の都合なのに対し、こちらが人の読む側。未設定なら
-   * 呼び手が id をそのまま出す。
+   * A short display name for selection UIs (English, at most {@link MAX_LABEL_CHARS} characters —
+   * ADR 0075 decision 1). The preset id (`i8-a8-attn8-s16`) serves the machine; this is the side
+   * people read. When unset, callers show the id as is.
    */
   readonly label?: string;
-  /** 1 行の説明（英語・{@link MAX_DESCRIPTION_CHARS} 文字以内 — ADR 0075 決定 1）。 */
+  /**
+   * A one-line description (English, at most {@link MAX_DESCRIPTION_CHARS} characters — ADR 0075
+   * decision 1).
+   */
   readonly description?: string;
   /**
-   * この席が要求する device limit の最小値（ADR 0038 §7）。
+   * The minimum device limits this preset requires (ADR 0038 §7).
    *
-   * NOTE: hub は受理・検査・型面への露出までを持ち、読み手は `@karume/models` の家族
-   * admission（重みを 1 バイトも取る前に GPU 側の limits と突き合わせる — ADR 0089
-   * 決定 5）。突き合わせ相手は、共有 GPU を渡された経路なら `GpuContext.limits`、自前で
-   * device を取る経路なら `readAdapterLimits()` のアダプタ実測値。
+   * NOTE: hub owns acceptance, checking and exposure in the types; the reader is the family
+   * admission of `@karume/models` (compared with the GPU's limits before a single weight byte is
+   * fetched — ADR 0089 decision 5). The comparison target is `GpuContext.limits` on the path given
+   * a shared GPU, and the adapter's measured values from `readAdapterLimits()` on the path that
+   * acquires its own device.
    */
   readonly requiredLimits?: RequiredLimitsSpec;
 };
 
-/** パイプライン実装の契約名 + major（`anima/1`）。未知 major の判定は models 側の責務。 */
+/**
+ * The contract name + major of a pipeline implementation (`anima/1`). Judging unknown majors is the
+ * models side's job.
+ */
 export type PipelineId = {
   readonly name: string;
   readonly major: number;
 };
 
 /**
- * 1 モデルぶんの宣言。`pipeline` が**モデル単位**なので、ファミリーリポに別アーキが混ざっても
- * 壊れない（ADR 0041 §2）。
+ * The declaration of one model. `pipeline` is **per model**, so a family repo does not break when
+ * it mixes architectures (ADR 0041 decision 2).
  */
 export type ModelEntry = {
   readonly pipeline: PipelineId;
-  /** dtype 別のテンソル容器。 */
+  /** Tensor containers per dtype. */
   readonly weights: Readonly<Record<string, WeightEntry>>;
-  /** quant 選択に依存しない無条件ファイル（tokenizer / symbols / style_vectors 等）。 */
+  /**
+   * Unconditional files independent of the quant choice (tokenizer / symbols / style_vectors, …).
+   */
   readonly assets: Readonly<Record<string, FileRef>>;
   readonly quants: Readonly<Record<string, Quant>>;
   readonly defaultQuant: string;
-  /** パイプライン所有 — hub は素通し（スキーマ検証は `@karume/models` の各実装）。 */
+  /**
+   * Owned by the pipeline — hub passes it through (schema validation is in each `@karume/models`
+   * implementation).
+   */
   readonly pipelineConfig: Readonly<Record<string, unknown>>;
-  /** このモデルで選べるもの（エラー提示にも使う）。 */
+  /** What can be chosen for this model (also used in errors). */
   readonly available: AvailableLabels;
 };
 
 export type Manifest = {
-  /** `karume/<major>`。major は hub が検査済み。 */
+  /** `karume/<major>`. hub has checked the major. */
   readonly format: string;
-  /** 焼いたツールの版（障害報告の照合用・実行意味論なし）。 */
+  /** The version of the tool that wrote it (for matching bug reports; no execution semantics). */
   readonly generator: string;
-  /** モデル未指定時に使うモデル名（必須 — ADR 0041 §2）。 */
+  /** The model name used when no model is given (required — ADR 0041 decision 2). */
   readonly defaultModel: string;
   readonly models: Readonly<Record<string, ModelEntry>>;
-  /** リポ全体で選べるもの（`quants` / `dtypes` はモデル文脈が無いので空）。 */
+  /**
+   * What can be chosen across the repo (`quants` / `dtypes` are empty, as there is no model
+   * context).
+   */
   readonly available: AvailableLabels;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** 検査失敗の生成器。`available` を全エラーへ確実に載せるため、parse 中は必ずこれを通す。 */
+/**
+ * The factory of check failures. During parsing, always go through it so that every error carries
+ * `available`.
+ */
 type Fail = {
   format: (message: string, cause?: unknown) => ManifestFormatError;
   reference: (message: string) => ManifestReferenceError;
@@ -422,7 +475,8 @@ type Fail = {
 };
 
 /**
- * 診断用走査の結果。`truncated` は規模上限を超えた表の一覧を打ち切ったか（{@link surveyLabels}）。
+ * The result of the diagnostic walk. `truncated` says whether a list of a table above its size
+ * limit was cut off ({@link surveyLabels}).
  */
 type LabelSurvey = {
   readonly available: AvailableLabels;
@@ -430,8 +484,9 @@ type LabelSurvey = {
 };
 
 /**
- * 打ち切ったときはエラー本文でそれを名乗る — 件数超過より先に別の検査（未知キー等）で落ちる
- * 経路では本文が件数を語らないので、`available` が一部だけだと読み手が取り違えないようにする。
+ * When cut off, the error message says so — on paths that fail an earlier check (unknown keys, …)
+ * before the count check, the message says nothing about counts, so this keeps readers from
+ * mistaking a partial `available` for the whole.
  */
 const createFail = ({ available, truncated }: LabelSurvey): Fail => {
   const note = truncated
@@ -445,12 +500,14 @@ const createFail = ({ available, truncated }: LabelSurvey): Fail => {
 };
 
 /**
- * manifest 全域から禁止キーを一掃する（`pipelineConfig` の内側も含む）。素通し先の実装が
- * 素朴な代入で読み直しても事故らないことを、hub の入口で一度だけ保証する。
+ * Clears forbidden keys from the whole manifest (including inside `pipelineConfig`). Guarantees
+ * once, at hub's entry, that implementations it passes data to cannot have an accident when
+ * re-reading with a naive assignment.
  *
- * MUST: 深さを自前で数えて上限で落とす（{@link MAX_MANIFEST_DEPTH}）。スタックが尽きるまで
- * 潜ると `RangeError` という `HubError` 契約外の型で抜ける — 想定外は型付きで fail loudly。
- * これが parse の最初の全域走査なので、この門が下流の走査（`JSON.stringify` 等）も守る。
+ * MUST: count the depth itself and fail at the limit ({@link MAX_MANIFEST_DEPTH}). Descending until
+ * the stack runs out would escape as `RangeError`, a type outside the `HubError` contract — the
+ * unexpected fails loudly with a type. This is the first full walk of parsing, so this check also
+ * protects the walks downstream (`JSON.stringify`, …).
  */
 const assertNoForbiddenKeys = (value: unknown, where: string, depth: number): void => {
   if (depth > MAX_MANIFEST_DEPTH) {
@@ -470,16 +527,17 @@ const assertNoForbiddenKeys = (value: unknown, where: string, depth: number): vo
 };
 
 /**
- * 検査を通す前に「利用可能なもの」を最善努力で拾う。壊れた manifest でも
- * 「では何なら動くのか」をエラーに載せられるようにするためだけの走査で、絶対に throw しない。
+ * Collects "what is available" on a best-effort basis before the checks run. A walk whose only
+ * purpose is to let errors carry "then what does work" even for a broken manifest; it never throws.
  *
- * `model` を渡すとそのモデルの quant / dtype まで拾う（モデルを跨いだ混合はしない — 別モデルの
- * quant 名を勧めるのは誤誘導）。
+ * Passing `model` collects that model's quants / dtypes too (no mixing across models — recommending
+ * a quant name of another model would mislead).
  *
- * MUST: この走査は表の件数検査（{@link parseMap}）より**先**に走るので、入力の件数に比例する
- * より重い処理を置かない — 置くと 1MiB 以内の manifest 1 本で主スレッドを止められ、規模上限
- * （ADR 0041 §7）の DoS 防波堤が素通りになる。一覧は各表をその規模上限の件数で打ち切る。
- * 上限は表の正当な最大件数でもあるので、検査を通る manifest の `available` は欠けない。
+ * MUST: this walk runs **before** the table count checks ({@link parseMap}), so put no work in it
+ * heavier than linear in the input's counts — otherwise one manifest within 1MiB could stall the
+ * main thread, and the DoS guard of the size limits (ADR 0041 decision 7) would be bypassed. Each
+ * table's list is cut off at that table's size limit. The limit is also the largest legitimate
+ * count, so a manifest that passes the checks always gets a complete `available`.
  */
 const surveyLabels = (root: Record<string, unknown>, model?: string): LabelSurvey => {
   const modelsRaw = root["models"];
@@ -497,7 +555,8 @@ const surveyLabels = (root: Record<string, unknown>, model?: string): LabelSurve
   const weightsRaw = entry["weights"];
   const weightsRecord = isRecord(weightsRaw) ? weightsRaw : {};
   const weights = headKeys(weightsRecord, MAX_WEIGHTS);
-  // 一度で組む — 累積オブジェクトを 1 件ごとにスプレッドで複製すると件数の 2 乗になる。
+  // Build it in one go — copying an accumulating object with spread per entry would be quadratic in
+  // the count.
   const dtypes = Object.fromEntries(
     weights.keys.flatMap((name) => {
       const labels = weightsRecord[name];
@@ -510,7 +569,7 @@ const surveyLabels = (root: Record<string, unknown>, model?: string): LabelSurve
   };
 };
 
-/** 表のキーを先頭 `max` 件までに打ち切る（診断用走査の部品 — throw しない）。 */
+/** Cuts a table's keys off at the first `max` (a part of the diagnostic walk — never throws). */
 const headKeys = (
   record: Record<string, unknown>,
   max: number,
@@ -533,9 +592,9 @@ const assertAllowedKeys = (
 };
 
 /**
- * path の**許可リスト**検査（ADR 0038 §2・v2 も据え置き = ADR 0041 §6）。取得層はセグメントを
- * percent-encode してもドットを透過するため、禁止列挙では抜けがそのまま SHA ピン外への
- * traversal になる。
+ * The **allowlist** check of paths (ADR 0038 §2, kept in v2 = ADR 0041 decision 6). The fetch layer
+ * percent-encodes segments but lets dots through, so with a denylist any gap would become traversal
+ * outside the SHA pin as is.
  */
 const assertPath = (fail: Fail, path: string, where: string): void => {
   for (const segment of path.split("/")) {
@@ -561,17 +620,18 @@ const assertPath = (fail: Fail, path: string, where: string): void => {
 };
 
 /**
- * HF の repo 名（`owner/name`）の綴りか — {@link REPO_SEGMENT_RE} の許可リストを 2 セグメント
- * ちょうどに掛ける。取得層が URL へ綴り込む生文字列なので、越境参照の検査と HF のリポ参照を
- * 受ける入口（`fetch.ts` の `loadManifest`）が**この 1 本**を共有する（受理集合を入口ごとに
- * 分けない）。
+ * Whether a string is spelt as an HF repo name (`owner/name`) — applies the allowlist
+ * {@link REPO_SEGMENT_RE} to exactly two segments. It is the raw string the fetch layer writes into
+ * the URL, so the cross-repo reference check and the entry that takes HF repo references
+ * (`loadManifest` in `fetch.ts`) share **this one predicate** (the accepted set is not split per
+ * entry).
  */
 export const isRepoName = (repo: string): boolean => {
   const segments = repo.split("/");
   return segments.length === 2 && segments.every((segment) => REPO_SEGMENT_RE.test(segment));
 };
 
-/** 越境参照の `repo`（`owner/name`）を検査する（{@link isRepoName}）。 */
+/** Checks the `repo` (`owner/name`) of a cross-repo reference ({@link isRepoName}). */
 const assertRepo = (fail: Fail, repo: string, where: string): void => {
   if (!isRepoName(repo)) {
     throw fail.format(
@@ -581,29 +641,32 @@ const assertRepo = (fail: Fail, repo: string, where: string): void => {
   }
 };
 
-/** parse 1 回ぶんで、ファイル参照の検査が manifest 全域にわたって共有する文脈。 */
+/** The context the file reference checks share across the whole manifest, for one parse. */
 type RefScope = {
-  /** 同一性（{@link fileRefKey}）→ 最初に現れた参照（3 点セット一致検査の表）。 */
+  /** Identity ({@link fileRefKey}) → the first ref seen (the table of the triple-match check). */
   readonly seen: Map<string, FileRef>;
   /**
-   * manifest を読み込んだ repo（HF 取得元のみ・それ以外は `undefined`）。
+   * The repo the manifest was loaded from (HF source only; `undefined` otherwise).
    *
-   * MUST: 越境参照がこの repo 自身を指すのは拒否する — 参照の同一性（{@link fileRefKey}）は
-   * revision を含む一方、HF のキャッシュ実体は revision を含まないので、自リポの別 revision を
-   * 越境で指すと「別の 1 本として数える参照」が実体を共有する（在庫の保護が片方の削除で崩れ、
-   * 取得計画の一意化キーも消費側とずれる）。自リポのファイルは越境の席を使わずに書ける。
+   * MUST: reject a cross-repo reference that points at this repo itself — ref identity
+   * ({@link fileRefKey}) includes the revision while HF's cached files do not, so pointing at
+   * another revision of our own repo through a cross-repo reference would make "refs counted as
+   * separate files" share one file (inventory protection breaks when one of them is deleted, and
+   * the deduplication key of the fetch plan drifts from the consumer's). Files of our own repo can
+   * be written without the cross-repo fields.
    */
   readonly ownRepo: string | undefined;
 };
 
 /**
- * 越境参照（`repo` + `revision`）を読む。**両方同時にのみ合法**で、片方だけの宣言は
- * fail loudly — `repo` だけなら「どのコミットか」が可変 ref に落ちて不変性が崩れ、
- * `revision` だけなら自リポの解決済み SHA を黙って上書きする経路になる（どちらも
- * 「宣言の意図が読み取れないまま何かを取りに行く」形なので、推測で補わない）。
+ * Reads a cross-repo reference (`repo` + `revision`). **Legal only with both together**; a
+ * declaration of one alone fails loudly — `repo` alone would leave "which commit" to a mutable ref
+ * and break immutability, and `revision` alone would become a path that silently overrides our own
+ * repo's resolved SHA (both are "fetching something without being able to read the declaration's
+ * intent", so nothing is filled in by guessing).
  *
- * 越境先が manifest を読み込んだ repo 自身（`ownRepo`）なら fail loudly（理由は
- * {@link RefScope.ownRepo}）。
+ * A cross-repo target that is the repo the manifest was loaded from (`ownRepo`) fails loudly (for
+ * the reason see {@link RefScope.ownRepo}).
  */
 const parseCrossRepo = (
   fail: Fail,
@@ -641,10 +704,11 @@ const parseCrossRepo = (
 };
 
 /**
- * 3 点セットを検査して読む。同一ファイルの重複参照は合法（モデル間の共有はこれだけで成立する —
- * ADR 0041 §5）だが `{size, sha256}` の完全一致を要求する（矛盾 manifest は self-heal を
- * 振動させ、正しいキャッシュを evict し続ける）。同一性の判定は {@link fileRefKey}
- * （越境参照は repo と revision まで含めて 1 本）。
+ * Checks and reads the triple. Duplicate refs to the same file are legal (sharing between models
+ * rests on this alone — ADR 0041 decision 5) but must match `{size, sha256}` exactly (a
+ * contradictory manifest makes self-heal oscillate, evicting a correct cache over and over).
+ * Identity is judged by {@link fileRefKey} (a cross-repo reference is one file including its repo
+ * and revision).
  */
 const parseFileRef = (
   fail: Fail,
@@ -664,8 +728,9 @@ const parseFileRef = (
   if (!SHA256_RE.test(sha256)) {
     throw fail.format(`${where}: 'sha256' は小文字 hex 64 桁でなければならない: '${sha256}'`);
   }
-  // 空を許すのは `container.parts` の添字 1 以上だけ（長さ 0 の part — ADR 0109 決定 3）。
-  // 他の席で `size: 0` は「取りに行っても 1 バイトも来ない参照」なので従来どおり拒否する。
+  // Empty is allowed only for index 1 and above of `container.parts` (a zero-length part — ADR 0109
+  // decision 3). In any other field `size: 0` is "a ref that brings no bytes when fetched", so it
+  // is rejected as before.
   const floor = allowEmpty ? 0 : 1;
   if (!Number.isSafeInteger(size) || size < floor || size > MAX_FILE_BYTES) {
     throw fail.format(
@@ -673,7 +738,8 @@ const parseFileRef = (
         `: ${size}`,
     );
   }
-  // 長さ 0 の実体は 1 通りしかないので、名乗る sha256 も 1 つに決まる（ADR 0109 決定 3）。
+  // There is only one zero-length file, so the sha256 it declares is fixed too (ADR 0109 decision
+  // 3).
   if (size === 0 && sha256 !== EMPTY_SHA256) {
     throw fail.format(
       `${where}: 'size' が 0 の参照の 'sha256' は空列の値 ${EMPTY_SHA256} でなければならない` +
@@ -698,7 +764,10 @@ const parseFileRef = (
   return ref;
 };
 
-/** descriptor の 1 文書の期待値（長さ + sha256）。長さの天井は文書ごとに独立に掛ける。 */
+/**
+ * The expectation for one descriptor document (length + sha256). The length ceiling applies to each
+ * document independently.
+ */
 const parseDocument = (fail: Fail, raw: unknown, where: string): DocumentExpectation => {
   if (!isRecord(raw)) throw fail.format(`${where}: 無い / オブジェクトでない`);
   assertAllowedKeys(fail, raw, DOCUMENT_KEYS, where);
@@ -719,13 +788,13 @@ const parseDocument = (fail: Fail, raw: unknown, where: string): DocumentExpecta
 };
 
 /**
- * part 列を宣言順のまま読む。並べ替えも重複畳み込みもしない — 添字が part の id なので、列を
- * 触った瞬間に識別子が壊れる（同一 path の 3 点セット一致だけは {@link parseFileRef} の表が
- * 全域で見る）。
+ * Reads the part list in declaration order. No reordering and no folding of duplicates — the index
+ * is the part's id, so touching the list breaks the identifiers (only the triple match of identical
+ * paths is checked across the whole manifest by the table of {@link parseFileRef}).
  *
- * バイト上限（{@link MAX_PART_BYTES}）を掛けるのはここ — 1 本ずつ独立に見る検査で、席
- * （先頭 / 末尾）による例外は無い。{@link parseFileRef} 側へ下ろさないのは、あの関数を
- * `assets` と共有しているため（上限は part 分割の契約に限る）。
+ * The byte limit ({@link MAX_PART_BYTES}) applies here — a check of each part on its own, with no
+ * exception by position (first / last). It is not pushed down into {@link parseFileRef} because
+ * that function is shared with `assets` (the limit belongs only to the part-splitting contract).
  */
 const parseParts = (
   fail: Fail,
@@ -744,7 +813,8 @@ const parseParts = (
     throw fail.format(`${where}: ${raw.length} 件が上限 ${MAX_PARTS} を超えた`);
   }
   return raw.map((entry, index) => {
-    // 長さ 0 は「const が空の part 1」の形だけ（part 0 はヘッダ + 2 文書を必ず持つ）。
+    // Zero length only in the shape "part 1 with an empty const region" (part 0 always holds the
+    // header + the two documents).
     const ref = parseFileRef(fail, entry, `${where}[${index}]`, scope, { allowEmpty: index > 0 });
     if (ref.size > MAX_PART_BYTES) {
       throw fail.format(
@@ -757,8 +827,9 @@ const parseParts = (
 };
 
 /**
- * コンテナ 1 本の入口を読む。ここで見るのは**宣言だけで閉じるもの**だけ（ADR 0109 決定 6）—
- * descriptor の長さ / part の件数と天井 / part 0 の長さ / 越境の一様性。
+ * Reads the entry of one container. Only **what closes on the declarations alone** is checked here
+ * (ADR 0109 decision 6) — descriptor lengths / part count and ceiling / length of part 0 / uniform
+ * cross-repo references.
  */
 const parseContainer = (fail: Fail, raw: unknown, where: string, scope: RefScope): ContainerRef => {
   if (!isRecord(raw)) throw fail.format(`${where}: 無い / オブジェクトでない`);
@@ -767,12 +838,14 @@ const parseContainer = (fail: Fail, raw: unknown, where: string, scope: RefScope
   if (!isRecord(descriptorRaw)) throw fail.format(`${where}.descriptor: 無い / オブジェクトでない`);
   assertAllowedKeys(fail, descriptorRaw, DESCRIPTOR_KEYS, `${where}.descriptor`);
   const graph = parseDocument(fail, descriptorRaw["graph"], `${where}.descriptor.graph`);
-  // krm は必ずモデル記述を持つ（グラフだけの `krg` を配る席は karume/5 に無い — ADR 0109 決定 5）。
+  // A krm always has a model descriptor (karume/5 has no field that distributes a graph-only `krg`
+  // — ADR 0109 decision 5).
   const model = parseDocument(fail, descriptorRaw["model"], `${where}.descriptor.model`);
   const parts = parseParts(fail, raw["parts"], `${where}.parts`, scope);
 
-  // part 0 は「ヘッダ + 2 文書ちょうど」（container-v1 §8）。宣言どうしの整合なので、1 バイトも
-  // 取らずにここで見られる — 取得してから長さ違いに気づく形を作らない。
+  // Part 0 is "header + exactly the two documents" (container-v1 §8). It is consistency between
+  // declarations, so it can be checked here without fetching a byte — never noticing a length
+  // mismatch only after fetching.
   const part0 = CONTAINER_HEADER_BYTES + graph.length + model.length;
   if (parts[0].size !== part0) {
     throw fail.format(
@@ -782,8 +855,9 @@ const parseContainer = (fail: Fail, raw: unknown, where: string, scope: RefScope
     );
   }
 
-  // 越境参照は**容器単位**（ADR 0109 決定 3）。片方だけ・混在は、残りの part をセッションの
-  // repo へ取りに行く形になり、そこには無いので取得の途中で初めて落ちる。
+  // Cross-repo references are **per container** (ADR 0109 decision 3). One-sided or mixed
+  // references would fetch the remaining parts from the session's repo, where they do not exist,
+  // failing only in the middle of the fetch.
   const head = crossRefOf(parts[0]);
   for (const [index, ref] of parts.entries()) {
     const cross = crossRefOf(ref);
@@ -813,7 +887,7 @@ const parseWeightContainer = (
   return { container: parseContainer(fail, raw["container"], `${where}.container`, scope) };
 };
 
-/** weights の 1 エントリ（dtype ラベル → コンテナ）。**dtype キーは 1 つ以上必須**。 */
+/** One weights entry (dtype label → container). **At least one dtype key is required**. */
 const parseWeightEntry = (
   fail: Fail,
   raw: unknown,
@@ -852,7 +926,7 @@ const readEnum = <T extends string>(
   return found;
 };
 
-/** 明示falseを保ち、nullや数値を未指定扱いしない。 */
+/** Keeps an explicit false, and does not treat null or numbers as unspecified. */
 const readBoolean = (
   fail: Fail,
   raw: Record<string, unknown>,
@@ -909,8 +983,9 @@ const parseGpuFeatures = (fail: Fail, raw: unknown, where: string): GpuFeaturesS
 };
 
 /**
- * quant の weights 写像を読む。**weights に実在するキー → そのエントリに実在する dtype ラベル**
- * の完全写像であることを実行時にも検査する（型だけでは配布 JSON を縛れない — ADR 0041 §3）。
+ * Reads a quant's weights mapping. Checks at run time too that it is a complete mapping **from keys
+ * that exist in weights → dtype labels that exist in that entry** (types alone cannot constrain the
+ * distributed JSON — ADR 0041 decision 3).
  */
 const parseQuantWeights = (
   fail: Fail,
@@ -949,12 +1024,13 @@ const parseQuantWeights = (
 };
 
 /**
- * 表示欄（ADR 0075 決定 1）を読む。**長さ上限を検査するだけで意味は解釈しない**
- * （決定 2 — 説明が実態と合っているかは検査できないし、しない。表示は呼び手の責任）。
- * 上限は「manifest は外部入力」という前提から来る境界検査。
+ * Reads a display field (ADR 0075 decision 1). **It only checks the length limit and does not
+ * interpret the meaning** (decision 2 — whether a description matches reality cannot be checked,
+ * and is not; display is the caller's responsibility). The limit is a boundary check that comes
+ * from the premise "the manifest is external input".
  *
- * NOTE: 長さは**コードポイント数**で数える（UTF-16 の符号単位ではない）— 同じ見た目の
- * 文字列が綴り方（サロゲートペア・結合文字）で通ったり落ちたりするのを避ける。
+ * NOTE: length counts **code points** (not UTF-16 code units) — so that strings that look the same
+ * do not pass or fail depending on how they are spelt (surrogate pairs, combining characters).
  */
 const parseText = (
   fail: Fail,
@@ -975,12 +1051,12 @@ const parseText = (
 };
 
 /**
- * `requiredLimits`（limit 名 → 満たすべき最小値）を読む。名前は allowlist
- * （{@link REQUIRED_LIMIT_NAMES}）、値は正の安全整数だけを受ける。
+ * Reads `requiredLimits` (limit name → minimum to satisfy). Names must be in the allowlist
+ * ({@link REQUIRED_LIMIT_NAMES}); values must be positive safe integers.
  *
- * MUST: 未知名を黙って無視しない — device の limit 名は綴り違いが**静かな頭打ち**として
- * 現れる軸（要求しなかった limit は仕様既定値に落ちる）なので、無視は「宣言したのに効いて
- * いない」を沈黙で常態化させる。
+ * MUST: do not silently ignore unknown names — a misspelt device limit name shows up as **a silent
+ * ceiling** (a limit not requested falls back to the spec default), so ignoring it would make
+ * "declared but not in effect" the silent norm.
  */
 const parseRequiredLimits = (
   fail: Fail,
@@ -1040,9 +1116,10 @@ const parsePipeline = (fail: Fail, raw: unknown, where: string): PipelineId => {
   if (matched === null) {
     throw fail.format(`${where}.pipeline: '<name>/<major>' の形でない: '${raw}'`);
   }
-  // 正規表現は桁数を縛らないので、変換後に安全整数かを見る — 見ないと 400 桁は `Infinity`、
-  // 2^53 超は隣の整数へ丸まった major が「形は正しい」として models の裁定まで届き、エラー文に
-  // manifest に書かれていない値を名乗らせる。
+  // The regular expression does not bound the digit count, so check for a safe integer after
+  // conversion — otherwise 400 digits become `Infinity`, and above 2^53 a major rounded to a
+  // neighbouring integer reaches the models side's decision as "well-formed", making the error
+  // message name a value the manifest does not contain.
   const major = Number(matched[2]);
   if (!Number.isSafeInteger(major)) {
     throw fail.format(
@@ -1087,8 +1164,8 @@ const parsePipelineConfig = (
 };
 
 /**
- * 名前付きマップを上限つきで読む。`allowEmpty` は「宣言は必須だが中身が無くてもよい」席
- * （`assets` — 重みだけのモデルに空でない assets を捏造させない）にだけ使う。
+ * Reads a named map with a limit. `allowEmpty` is used only for a field that "must be declared but
+ * may be empty" (`assets` — a weights-only model is not forced to invent non-empty assets).
  */
 const parseMap = <T>(
   fail: Fail,
@@ -1166,22 +1243,23 @@ const parseModel = (
 };
 
 /**
- * `karume.json` のテキストを検査して読む。ADR 0041 の検査を**全て** parse 時に走らせ、1 つでも
- * 破れたら fetch を開始せずに throw する（「DL 開始後に初めて欠けが分かる」を許さないのが
- * manifest 導入の目的そのもの）。
+ * Checks and reads the text of `karume.json`. Runs **every** check of ADR 0041 at parse time and
+ * throws without starting any fetch if even one fails (not allowing "missing pieces found only
+ * after the download started" is the very purpose of introducing the manifest).
  *
- * NOTE: テキストだけでは「どの repo の manifest か」が分からないので、越境参照が読み込んだ repo
- * 自身を指していないかの検査（{@link parseRepoManifest}）はここでは掛からない。取得の入口
- * （`loadManifest`）は取得元の repo を添えてそちらで読む。
+ * NOTE: the text alone does not say "whose repo's manifest this is", so the check that no
+ * cross-repo reference points at the loading repo itself ({@link parseRepoManifest}) does not apply
+ * here. The fetch entry (`loadManifest`) reads through that one, with the source's repo attached.
  */
 export const parseManifest = (text: string): Manifest => parseRepoManifest(text, undefined);
 
 /**
- * {@link parseManifest} に、manifest を読み込んだ repo（`ownRepo`）を添えて読む。越境参照が
- * `ownRepo` 自身を指していたら fail loudly（{@link RefScope.ownRepo}）。repo という概念を持たない
- * 取得元（ローカルディレクトリ）は `undefined` を渡す。
+ * {@link parseManifest} with the repo the manifest was loaded from (`ownRepo`) attached. A
+ * cross-repo reference pointing at `ownRepo` itself fails loudly ({@link RefScope.ownRepo}). A
+ * source without the notion of a repo (a local directory) passes `undefined`.
  *
- * MUST NOT: barrel（`mod.ts`）には出さない — 取得層の内側の入口（`fetch.ts` の `loadManifest`）。
+ * MUST NOT: export it from the barrel (`mod.ts`) — it is an entry inside the fetch layer
+ * (`loadManifest` in `fetch.ts`).
  */
 export const parseRepoManifest = (text: string, ownRepo: string | undefined): Manifest => {
   const bytes = new TextEncoder().encode(text).length;
@@ -1203,10 +1281,11 @@ export const parseRepoManifest = (text: string, ownRepo: string | undefined): Ma
   const survey = surveyLabels(root);
   const { available } = survey;
   const fail = createFail(survey);
-  // MUST: `format` を未知キー検査より**先**に見る。v1 manifest はトップレベルの綴りが丸ごと
-  // 違うので、順が逆だと「未知キー 'components'」という的外れな診断が出て、本当の理由
-  // （この版は karume/5 のみ読む）が隠れる（ADR 0109 決定 1）。v4 との差は dtype エントリの
-  // 中身だけなので、そちらは「未知キー 'shards'」という枝葉の診断になる。
+  // MUST: check `format` **before** the unknown-key check. A v1 manifest spells its top level
+  // entirely differently, so in the reverse order an off-target diagnostic `未知キー 'components'`
+  // would appear and hide the real reason (this version reads only karume/5) (ADR 0109
+  // decision 1). The difference from v4 is only inside the dtype entries, so there it becomes the
+  // minor diagnostic `未知キー 'shards'`.
   const format = parseFormat(fail, root["format"]);
   assertAllowedKeys(fail, root, ENVELOPE_KEYS, "manifest");
   const generator = root["generator"];
@@ -1214,8 +1293,9 @@ export const parseRepoManifest = (text: string, ownRepo: string | undefined): Ma
     throw fail.format("generator: 無い / 非空文字列でない");
   }
 
-  // MUST: path の重複検査は manifest 全域で 1 つの表を共有する — モデル間の共有は「同じ path を
-  // 書く」だけで成立する形（ADR 0041 §5）なので、モデルごとに表を分けると矛盾を見逃す。
+  // MUST: the duplicate-path check shares one table across the whole manifest — sharing between
+  // models works just by "writing the same path" (ADR 0041 decision 5), so a table per model would
+  // miss contradictions.
   const scope: RefScope = { seen: new Map<string, FileRef>(), ownRepo };
   const models = parseMap(fail, root["models"], "models", MAX_MODELS, (name, value) =>
     parseModel(root, name, value, scope),

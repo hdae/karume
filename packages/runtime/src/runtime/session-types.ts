@@ -1,7 +1,8 @@
 /**
- * Session の公開型面。executor.ts の前半にあった宣言のみの公開 API 型群と、
- * {@link SessionOptions} の鍵になる unique symbol をここへ移した（executor.ts は再輸出で
- * 公開面を保つ）。MUST: executor.ts へ import を張らない（循環 import の禁止）。
+ * The public type surface of the Session. The declaration-only public API types that used to sit
+ * in the first half of executor.ts, and the unique symbols that serve as keys of
+ * {@link SessionOptions}, were moved here (executor.ts re-exports them to keep its public surface).
+ * MUST: do not import executor.ts from here (no circular imports).
  */
 
 import type { IrDtype } from "../format/ir.ts";
@@ -16,23 +17,26 @@ import type { SharedWeight } from "./weight-residency.ts";
 
 type TensorOf<D extends IrDtype, A> = {
   readonly dtype: D;
-  /** 束縛解決済みの具体値。 */
+  /** Concrete values, with every symbol already bound. */
   readonly shape: readonly number[];
   readonly data: A;
 };
 
 /**
- * 意味論 dtype で判別するテンソル（ADR 0009 — ADR 0008 の公開面の部分改訂）。
+ * A tensor discriminated by its semantic dtype (ADR 0009 — a partial revision of ADR 0008's public
+ * surface).
  *
- * 要素は全型 4 バイトで、**bool は u32 の 0 / 1**（WebGPU のストレージバッファに 1bit 型が
- * 無いため。GPU 側の格納と同じ規約）。入力・出力とも同じ形で扱う。
+ * Every element type is 4 bytes, and **bool is a u32 holding 0 / 1** (WebGPU storage buffers have
+ * no 1-bit type; this is the same convention as the GPU-side storage). Inputs and outputs use the
+ * same shape.
  *
- * MUST NOT: **入力として渡した `data` は `run` / `enqueue` の戻り Promise が settle するまで
- * 書き換えない**（borrowed — ランタイムは写しを取らない）。GPU への `writeBuffer` は発行の
- * 同期区間ではなくマイクロタスクの先で出るので、書き換えは例外も警告も無い沈黙誤値になる。
- * `shape` の方は発行時に複製されるため、書き換えても実行中の run には影響しない（契約の全体は
- * `Session.run` の「入力の寿命」節）。出力として受け取った `Tensor` は呼び出し側の所有物で、
- * この制約は掛からない。
+ * MUST NOT: **do not modify the `data` passed as an input until the Promise returned by `run` /
+ * `enqueue` settles** (it is borrowed — the runtime does not copy it). The `writeBuffer` to the GPU
+ * is issued after a microtask, not inside the synchronous section of the call, so a modification
+ * produces a silently wrong value with no exception and no warning. `shape`, on the other hand, is
+ * copied when the call is issued, so modifying it does not affect a run in flight (the full
+ * contract is the "input lifetime" section of `Session.run`). A `Tensor` received as an output is
+ * owned by the caller and is not subject to this constraint.
  */
 export type Tensor =
   | TensorOf<"f32", Float32Array<ArrayBuffer>>
@@ -40,80 +44,93 @@ export type Tensor =
   | TensorOf<"bool", Uint32Array<ArrayBuffer>>;
 
 /**
- * 実行の入力 1 本。ホスト配列（{@link Tensor}）か、GPU 常駐のまま束ねる
- * {@link ResidentTensor}（第 4 の寿命クラス）。
+ * One input of a run: a host array ({@link Tensor}), or a {@link ResidentTensor} bound while it
+ * stays resident on the GPU (the fourth lifetime class).
  *
- * MUST: 常駐入力は **`writeBuffer` を 1 度も出さない** — バッファをそのまま bind group へ
- * 焼き込む。したがってホスト側に shape も dtype も無く、検査できるのは**大きさだけ**
- * （宣言 shape ぶんと厳密一致）。記号次元はその常駐入力からは束縛されないので、他の入力か
- * `bindings` で決まっていなければ fail loudly（{@link bindSymbols} の `deferredInputs`）。
+ * MUST: a resident input **never issues a `writeBuffer`** — its buffer is baked into the bind group
+ * as is. The host therefore has neither its shape nor its dtype, and the only thing that can be
+ * checked is **its size** (exactly the size of the declared shape). Symbolic dimensions are not
+ * bound from a resident input, so unless another input or `bindings` determines them, the run
+ * fails loudly ({@link bindSymbols}' `deferredInputs`).
  */
 export type RunInput = Tensor | ResidentTensor;
 /**
- * 実行の入力の束（名前 → 入力 1 本）。
+ * The inputs of a run (name → one input).
  *
- * **この Record の member 構成は `run` / `enqueue` の発行時に写し取られる**ので、戻り Promise を
- * 待たずに差し替えても、その実行は発行時点の顔ぶれで走る（同じく shape と `bindings` も固定
- * される）。写すのは metadata だけで、{@link Tensor} の `data` は borrowed のまま — 契約の全体は
- * `Session.run` の「入力の寿命」節。
+ * **The member set of this Record is copied when `run` / `enqueue` is issued**, so replacing
+ * members without awaiting the returned Promise leaves that run with the members it had at issue
+ * time (shapes and `bindings` are fixed the same way). Only the metadata is copied; the `data` of a
+ * {@link Tensor} stays borrowed — the full contract is the "input lifetime" section of
+ * `Session.run`.
  */
 export type RunInputs = Readonly<Record<string, RunInput>>;
 export type RunOutputs = Readonly<Record<string, Tensor>>;
 
 /**
- * generation実行1回ぶんの指定（Session.runの第3引数、EnqueueOptions.generation）。
+ * The specification of one generation run (the third argument of Session.run, and
+ * EnqueueOptions.generation).
  *
- * `queryLength` は今 step の実 token 数（prefill は `1..chunkLength`・decode は 1）で、
- * **`pastLength` は渡さない** — 論理長の進行はcontextが所有し、runまたはbatchの最終成功でのみ進む
- * （ADR 0066 決定 6 の二重簿記の禁止）。
+ * `queryLength` is the number of real tokens in this step (`1..chunkLength` for prefill, 1 for
+ * decode). **`pastLength` is not passed** — the context owns the advance of the logical length,
+ * which advances only on the final success of a run or a batch (ADR 0066 decision 6: no double
+ * bookkeeping).
  */
 export type GenerationRun = {
   readonly context: GenerationContext;
   readonly queryLength: number;
   /**
-   * 論理長を進める時点（既定 `"immediate"` = 従来 — run が例外なく返った時点で `queryLength` 行
-   * ぶん進む）。enqueueではbatchが例外なく完了するまで進めない。
+   * When the logical length advances (default `"immediate"` = the original behaviour — it
+   * advances by `queryLength` rows when the run returns without an exception). With enqueue it
+   * does not advance until the batch completes without an exception.
    *
-   * `"deferred"` は進行を保留し、**受理した行数**を後から `GenerationContext.commit(rows)` で
-   * 確定させる（投機デコードの検証形 — draft の何行が受理されるかは、その run の出力を読んで
-   * 初めて決まる）。保留がある間は次の run と `rewind` を拒否するので、論理長を動かす経路は
-   * 依然 1 本のまま（ADR 0066 決定 6 の二重簿記の禁止）。
+   * `"deferred"` holds the advance back, and the **number of accepted rows** is committed later
+   * with `GenerationContext.commit(rows)` (the verify shape of speculative decoding — how many
+   * draft rows are accepted is known only after reading that run's output). While a commit is
+   * pending, the next run and `rewind` are rejected, so there is still only one path that moves
+   * the logical length (ADR 0066 decision 6: no double bookkeeping).
    */
   readonly commit?: "immediate" | "deferred";
 };
 
-/** {@link Session.enqueue} の指定。 */
+/** The specification of {@link Session.enqueue}. */
 export type EnqueueOptions = {
-  /** 束ねる区間（{@link GpuContext.beginBatch}）。フェンスはこの区間の決着 1 本だけ。 */
+  /**
+   * The batch to join ({@link GpuContext.beginBatch}). Its only fence is the settlement of this
+   * batch.
+   */
   readonly batch: BatchScope;
   /**
-   * 会話状態を使う実行。使用予約は発行時からbatchの最終決着まで保つ。
-   * 論理長のadvance/deferはenqueueの戻り時でなく、finish/finishAndReadの成功時に行う。
-   * 同じcontextを未確定のまま重ねて使えない。context/Sessionのdisposeはfinish後に行う。
+   * A run that uses conversation state. The usage reservation is held from issue until the final
+   * settlement of the batch. The logical length is advanced or deferred on the success of
+   * finish / finishAndRead, not when enqueue returns. The same context cannot be used again while
+   * it is still uncommitted. Dispose the context / Session after finish.
    */
   readonly generation?: GenerationRun;
   /**
-   * 記号次元の明示指定。常駐入力は束縛源にならないので、その入力**だけ**が持つシンボルは
-   * ここで与える（`run` の第 2 引数と同じ意味）。
+   * Explicit values of symbolic dimensions. A resident input is not a binding source, so symbols
+   * that **only** a resident input carries are given here (the same meaning as `run`'s second
+   * argument).
    */
   readonly bindings?: SymbolBindings;
   /**
-   * グラフ出力 → 書き出し先の常駐テンソル。dispatch 列の**後**に同じコマンド列へ
-   * `copyBufferToBuffer` を積む（readback もフェンスも伴わない）。
+   * Graph output → the resident tensor it is written to. A `copyBufferToBuffer` is recorded in the
+   * same command stream **after** the dispatch sequence (no readback, no fence).
    *
-   * MUST: 大きさは宣言 shape ぶんと厳密一致（fail loudly）。`enqueue` は readback をしないので、
-   * ここに載せなかった出力は次の同一 signature の enqueue で slot ごと上書きされて消える。
+   * MUST: the size must exactly match the declared shape (fail loudly). `enqueue` does not read
+   * back, so an output not listed here is overwritten with its slot by the next enqueue of the same
+   * signature and is lost.
    */
   readonly copyOutputs?: Readonly<Record<string, ResidentTensor>>;
 };
 
 /**
- * {@link Session.enqueueRead} の戻り — 受理とグラフ出力の 2 本の決着。
+ * The return value of {@link Session.enqueueRead} — two settlements: admission and graph outputs.
  *
- * `admitted` は {@link Session.enqueue} の戻りと同じ意味（エンコードの受理・失敗はここにも出る）。
- * `outputs` は batch の**決着後**にだけ解決する（区間の失敗では同じ理由で拒否する）。
- * MUST NOT: `finish` / `finishAndRead` を呼ぶ前に `outputs` を await する（区間が閉じるまで
- * 解決しないので、その await は永久に返らない）。
+ * `admitted` has the same meaning as the return value of {@link Session.enqueue} (acceptance or
+ * failure of the encode shows here too). `outputs` resolves only **after the batch settles** (a
+ * failed batch rejects it with the same reason).
+ * MUST NOT: await `outputs` before calling `finish` / `finishAndRead` (it does not resolve until the
+ * batch closes, so that await never returns).
  */
 export type EnqueueRead = {
   readonly admitted: Promise<void>;
@@ -121,622 +138,759 @@ export type EnqueueRead = {
 };
 
 /**
- * {@link Session.createGenerationContext} の指定（ADR 0066 決定 6）。
+ * The specification of {@link Session.createGenerationContext} (ADR 0066 decision 6).
  *
- * スロット容量（`graph.states` の記号次元）と `chunkLength` を確定して物理確保する。context は
- * 入力を 1 本も持たないので、記号次元は**ここで与えた束縛だけ**で決まる（states は束縛源に
- * ならない — ADR 0066 決定 2）。
+ * Fixes the slot capacity (the symbolic dimensions of `graph.states`) and `chunkLength`, and
+ * allocates the physical storage. A context has no inputs at all, so its symbolic dimensions are
+ * determined **only by the bindings given here** (states are not a binding source — ADR 0066
+ * decision 2).
  */
 export type GenerationContextSpec = {
   /**
-   * state スロットの shape に現れる記号次元の値。`graph.symbols` に無い名前は fail loudly。
-   * 数値次元だけで容量が決まるグラフでは省略できる。
+   * Values of the symbolic dimensions that appear in the shapes of the state slots. A name not in
+   * `graph.symbols` fails loudly. May be omitted for a graph whose capacity is determined by
+   * numeric dimensions alone.
    */
   readonly bindings?: SymbolBindings;
   /**
-   * 固定長 prefill chunk の行数（ADR 0066 決定 4 — 計画時定数で、末尾 chunk は pad で埋める）。
-   * decode は `queryLength = 1` 固定形なので、この値とは独立に走る。
+   * The row count of the fixed-length prefill chunk (ADR 0066 decision 4 — a plan-time constant;
+   * the last chunk is filled with padding). Decode has the fixed shape `queryLength = 1` and runs
+   * independently of this value.
    *
-   * 短い chunk を pad 無しで回す追加の物理形は {@link GenerationContextSpec.chunkBuckets}。
+   * Additional physical shapes that run short chunks without padding are
+   * {@link GenerationContextSpec.chunkBuckets}.
    */
   readonly chunkLength: number;
   /**
-   * prefill 形として `chunkLength` に**加えて**許す物理 chunk 行数（ADR 0066 決定 4 /
-   * 追記〈バケット〉）。各要素は 2 以上 `chunkLength` 未満の整数で、**狭義昇順**。
-   * 省略 / 空配列 = 追加なし（従来どおり prefill 形 1 本 + decode 形の 2 本）。
+   * Physical chunk row counts allowed as prefill shapes **in addition to** `chunkLength` (ADR 0066
+   * decision 4 / addendum 2026-08-17, item 10, buckets). Each element is an integer from 2 to below
+   * `chunkLength`, in **strictly ascending** order. Omitted or empty = nothing added (as before: one
+   * prefill shape plus one decode shape).
    *
-   * 短い prompt は `chunkLength` 行へ pad すると pad 行ぶんの仕事がそのまま無駄になる
-   * （行局所な linear / pointwise / norm は物理行数に比例する）。バケットを宣言すると、
-   * 呼び出し側は chunk ごとに `queryLength` 以上の最小バケットを物理行数に選べる。
-   * 既定を下げる形を採らないのは、長い prompt では大きい chunk の一括が最速だから。
+   * Padding a short prompt to `chunkLength` rows wastes the work of the pad rows (row-local
+   * linear / pointwise / norm cost grows with the physical row count). With buckets declared, the
+   * caller can pick, per chunk, the smallest bucket at or above `queryLength` as the physical row
+   * count. The default is not lowered instead because a long prompt is fastest in one large chunk.
    *
-   * MUST: 本数は「同時に定常化させてよい PreparedPlan の本数」でもある（実行形 1 本 =
-   * 別鍵の計画 1 本 — ADR 0042 決定 2 の LRU）。増やしすぎると decode のホットパスが
-   * 追い出しで静かに再導出へ落ちる。
+   * MUST: the count is also "the number of PreparedPlans allowed to stay warm at once" (one
+   * execution shape = one plan under its own key — the LRU of ADR 0042 decision 2). Too many, and
+   * the decode hot path is silently evicted and falls back to re-derivation.
    */
   readonly chunkBuckets?: readonly number[];
   /**
-   * **借り先の context**（ADR 0096 段 2 §2.1 — drafter が読む target の生成 context）。
+   * **The context to borrow from** (ADR 0096 stage 2 addendum, borrowing context — the target's
+   * generation context that the drafter reads).
    *
-   * 指定できるのは「グラフの全スロットが external」のときだけで、逆も MUST（external が
-   * あるのに `borrow` 無しは fail loudly）。借り手は自前のスロットを 1 本も確保せず、
-   * external スロットを**名前**で貸し手のスロットに束ねる。`bindings` は貸し手のものを継承
-   * するので**渡せない**・`chunkLength` は 1 ちょうど・`chunkBuckets` は宣言できない
-   * （借り手の実行形は decode 1 本だけ）。
+   * Allowed only when "every slot of the graph is external", and the converse is a MUST too (a
+   * graph with external slots and no `borrow` fails loudly). The borrower allocates none of its
+   * own slots and binds the external slots **by name** to the lender's slots. `bindings` are
+   * inherited from the lender and **cannot be passed**, `chunkLength` is exactly 1 and
+   * `chunkBuckets` cannot be declared (the borrower has a single execution shape, decode).
    *
-   * 借り手の run は貸し手の run リースを取るので、貸し手の run / commit / rewind と直列化され、
-   * 貸し手に `pendingCommit` が残っている間は拒否される（draft は commit の後）。
+   * A borrower's run takes the lender's run lease, so it is serialised with the lender's run /
+   * commit / rewind, and it is rejected while the lender has a `pendingCommit` (the draft comes
+   * after the commit).
    */
   readonly borrow?: GenerationContext;
 };
 
 /**
- * 整数内積の変種（w8a8 経路）。**両者は同じ整数を返す**ので、これは速度の選択でしかない
- * （src/kernels/linear-i8a8.ts）。
+ * The integer dot-product variant (the w8a8 path). **Both return the same integers**, so this is a
+ * choice of speed only (src/kernels/linear-i8a8.ts).
  */
 export type I8a8Dot = "dp4a" | "emu";
 
 /**
- * **テスト専用の非公開面**（mod.ts からは輸出しない — ADR 0008 の「薄い面」を汚さない）。
+ * **A private, test-only surface** (not exported from mod.ts — it does not pollute the "thin
+ * surface" of ADR 0008).
  *
- * i8a8 の整数内積変種を**強制する**（linear / 融合 attention の**全 i8a8 カーネル共通** —
- * 指定した変種が両族に等しく載る）。拡張のある機で `dot4I8Packed` 版とエミュ版を実走して
- * atol=0 で突合するのが「エミュは数値同一」という主張の唯一の機械的検出器で、環境変数では
- * なく Session 単位のノブにしてあるのは 1 プロセス内で両方を回すため。
+ * **Forces** the i8a8 integer dot-product variant (**common to every i8a8 kernel** of linear and
+ * fused attention — the given variant applies equally to both families). Running the
+ * `dot4I8Packed` version and the emulated version on a machine with the extension and comparing
+ * them at atol=0 is the only mechanical detector for the claim "the emulation is numerically
+ * identical"; it is a per-Session knob rather than an environment variable so that one process can
+ * run both.
  *
- * MUST: 強制の意味は族を跨いで 1 つ（既定が族ごとに分かれても、このノブは分けない）。
- * **既定**は族ごとに別々に決まる — linear は言語機能の列挙、attention は device 単位の
- * 実走カナリア（src/gpu/attention-dp4a-canary.ts）。指定するとカナリアは走らない
- * （テストが「この変種で回す」と言っている以上、環境の判定を挟むと何を測ったのか消える）。
+ * MUST: forcing has one meaning across families (even though the defaults differ per family, this
+ * knob is not split). **The default** is decided separately per family — linear by enumerating the
+ * language features, attention by a per-device run-time canary
+ * (src/gpu/attention-dp4a-canary.ts). When this is given, the canary does not run (the test says
+ * "run with this variant"; inserting an environment check would erase what was measured).
  */
 export const I8A8_DOT: unique symbol = Symbol("karume.i8a8Dot");
 
 /**
- * **テスト専用の非公開面**（mod.ts からは輸出しない — {@link I8A8_DOT} と同じ流儀）。
+ * **A private, test-only surface** (not exported from mod.ts — the same convention as
+ * {@link I8A8_DOT}).
  *
- * 分解 attention の行ブロック枚数（src/runtime/fusion.ts の `rowBlockAttention`）を強制する。
- * 既定の枚数は device の `maxStorageBufferBindingSize` から静的に決まるので、**上限に余裕の
- * ある機では常に 1 枚**になり、2 枚以上の経路（行窓カーネル・ブロック跨ぎの full-write）が
- * 1 度も走らない。強制分割はその経路を実機で回して 1 枚実行と Uint32 一致させるための唯一の
- * 手段で、環境変数ではなく Session 単位のノブにしてあるのは 1 プロセス内で両方を回すため。
+ * Forces the row-block count of decomposed attention (`rowBlockAttention` in
+ * src/runtime/fusion.ts). The default count is determined statically from the device's
+ * `maxStorageBufferBindingSize`, so **on a machine with headroom under the limit it is always 1**,
+ * and the paths with two or more blocks (the row-window kernels, the full-write across blocks)
+ * never run. A forced split is the only way to run those paths on real hardware and match a
+ * one-block run at Uint32 level; it is a per-Session knob rather than an environment variable so
+ * that one process can run both.
  *
- * MUST: 上限に収まらない枚数は fail loudly（緩める向きには使えない）。上限は
- * {@link SessionOptions.attentionRowBlockMaxBytes} を渡したときは束縛上限との小さいほうで、強制枚数は
- * その範囲でだけ効く（ADR 0124 決定 6）。
+ * MUST: a count that does not fit the limit fails loudly (it cannot be used to loosen it). When
+ * {@link SessionOptions.attentionRowBlockMaxBytes} is given, the limit is the smaller of that and
+ * the binding limit, and the forced count takes effect only within that range (ADR 0124 decision 6).
  */
 export const ROW_BLOCK_SPLIT: unique symbol = Symbol("karume.rowBlockSplit");
 
 /**
- * op 族ごとの計算精度ノブ（ADR 0028 / attention の i8a8 は設計 §9.2）。**重み格納の f16
- * （ADR 0018）とは別の軸**で、`"f16"` は共有タイルを f16 に落として内積を回す変種
- * （累積は f32）、`"a8"` は活性を per-token i8 へ量子化して整数内積で回す変種を選ぶ。
+ * The compute precision knob per op family (ADR 0028 / attention i8a8: design §9.2). **A separate
+ * axis from f16 weight storage (ADR 0018)**: `"f16"` selects the variant that drops the shared
+ * tiles to f16 for the dot product (accumulating in f32), and `"a8"` selects the variant that
+ * quantizes activations to per-token i8 and uses an integer dot product.
  *
- * MUST: 3 値は**相互排他**（直積ではない）。attention の q/k/v は全て活性で格納軸を持たない
- * ので、「f16 かつ a8」という組み合わせは表現する対象がそもそも存在しない。
- * MUST: `"f16"` は `acquireGpu({ shaderF16: true })` を伴う（Session 構築時に fail loudly）。
- * **`"a8"` は `shader-f16` を要求しない**（feature ゲートに混ぜないこと）。
+ * MUST: the three values are **mutually exclusive** (not a product). The q/k/v of attention are all
+ * activations with no storage axis, so the combination "f16 and a8" has nothing to describe.
+ * MUST: `"f16"` comes with `acquireGpu({ shaderF16: true })` (fails loudly at Session construction).
+ * **`"a8"` does not require `shader-f16`** (do not mix it into the feature check).
  *
- * NOTE: 値の綴りは 0.5.0 で `"i8a8"` → `"a8"` へ改名した（ADR 0074 決定 3）— このノブが
- * 決めているのは**活性の扱いだけ**で、重みの格納形は資産ヘッダが決める。カーネル側の内部
- * 識別子（`linear-i8a8.ts` / パイプラインキーの `:i8a8:`）は実行変種の名前なので不変。
+ * NOTE: the value was renamed from `"i8a8"` to `"a8"` in 0.5.0 (ADR 0074 decision 3) — this knob
+ * decides **only how activations are handled**; the storage form of the weights is decided by the
+ * asset header. The kernel-side internal identifiers (`linear-i8a8.ts` / `:i8a8:` in pipeline keys)
+ * name an execution variant and stay unchanged.
  */
 export type ComputePrecision = "f32" | "f16" | "a8";
 
-/** states 形 attention ①QK / ③PV の縮約形（{@link SessionOptions.stateAttentionReduce}）。 */
+/**
+ * The reduction form of ①QK / ③PV of states-form attention ({@link
+ * SessionOptions.stateAttentionReduce}).
+ */
 export type StateAttentionReduce = "sequential" | "parallel" | "parallel-fused";
 
-/** 実行とメモリ見積りで共有する値域。 */
+/** The value set shared by execution and the memory estimate. */
 export const STATE_ATTENTION_REDUCES: Readonly<Record<StateAttentionReduce, true>> = {
   sequential: true,
   parallel: true,
   "parallel-fused": true,
 };
 
-/** 量子化 GEMV の K 加算順（ADR 0098）。 */
+/** The K summation order of the quantized GEMV (ADR 0098). */
 export type LinearGemvReduce = "sequential" | "parallel" | "parallel-subgroup32";
 
-/** RMS正規化の縮約方式。subgroup32は参照と加算順が異なる（ADR 0100）。 */
+/**
+ * The reduction method of RMS normalization. subgroup32 sums in a different order from the
+ * reference (ADR 0100).
+ */
 export type RmsNormReduce = "workgroup" | "subgroup32";
 
 export type SessionOptions = {
-  /** submit の時間予算政策（TDR / watchdog 対策 — ADR 0004）。既定は DEFAULT_SUBMIT_POLICY。 */
+  /**
+   * The submit time-budget policy (against TDR / watchdogs — ADR 0004). Default:
+   * DEFAULT_SUBMIT_POLICY.
+   */
   readonly submitPolicy?: SubmitPolicy;
   /**
-   * linear の実行形（既定 `"f32"` = 従来どおり）。
+   * The execution form of linear (default `"f32"` = the original behaviour).
    *
-   * `"a8"` は **整数常駐（i8 / i4）の重みの linear** に効き、活性を per-token i8 へ
-   * 量子化して整数内積で回す。ノブが指すのは「活性の i8 化 + 整数内積」だけで、**重みの
-   * 格納形は別軸** — 格納形で数値契約の違う 2 変種に分かれる:
-   * - i8 常駐 → **w8a8**: 縮約全体が 1 つの i32（整数部は丸め 0 回）で、dequant は
-   *   `xs · wscale` を先に 1 つの f32 へ畳んでから `f32(acc)` へ掛ける形 — 丸めは**その積と
-   *   最後の fma の 2 回**（設計 = docs/research/2026-08-03-dp4a-w8a8-design.md。丸め回数の
-   *   勘定は fma 融合実装での性質 — 仕様保証ではない。src/kernels/linear-i8a8.ts の MUST）。
-   * - i4 常駐 → **w4a8**: group ごとに i32 内積して group 境界で f32 へ flush するので、
-   *   丸めは `k/g + 1` 回（同じく融合実装での勘定）。wscale が group ごとに変わり畳めないため
-   *   `xs` は**最後の fma 1 回**へ回る。数値契約の差は 2 つ — ①縮約の粒度（全体 vs group 部分縮約 = 丸め回数が
-   *   k と g に依る）②`xs` の掛け位置（ADR 0076 決定 2）。起票は
-   *   docs/perf-ledger.md の Q-8、契約は src/kernels/linear-i8a8.ts の「w4a8 変種」節。
+   * `"a8"` applies to **linears with integer-resident (i8 / i4) weights**: activations are
+   * quantized to per-token i8 and an integer dot product is used. The knob means only "i8
+   * activations + integer dot product"; **the storage form of the weights is a separate axis** — the
+   * storage form splits it into two variants with different numeric contracts:
+   * - i8 resident → **w8a8**: the whole reduction is one i32 (zero roundings in the integer part),
+   *   and dequantization first folds `xs · wscale` into one f32 and then multiplies it into
+   *   `f32(acc)` — **two roundings: that product and the final fma** (design =
+   *   docs/research/2026-08-03-dp4a-w8a8-design.md. The rounding count is a property of an
+   *   fma-fusing implementation — not a specification guarantee. See the MUST in
+   *   src/kernels/linear-i8a8.ts).
+   * - i4 resident → **w4a8**: an i32 dot product per group, flushed to f32 at each group boundary,
+   *   so there are `k/g + 1` roundings (counted for the same fusing implementation). wscale changes
+   *   per group and cannot be folded, so `xs` goes into **the final fma alone**. The numeric
+   *   contracts differ in two ways — ① the reduction granularity (whole vs partial reductions per
+   *   group = the rounding count depends on k and g) ② where `xs` is multiplied (ADR 0076 decision
+   *   2). Filed as Q-8 in docs/perf-ledger.md; the contract is the "w4a8 variant" section of
+   *   src/kernels/linear-i8a8.ts.
    *
-   * `"f16"` は共有タイルを f16 に落とす計算変種（ADR 0028）で、重み格納が f32 / f16 の
-   * linear に効く（**i8 / i4 常駐の重みとは組めない** — w8a16 / w4a16 は未実装なので fail loudly）。
-   * MUST: 既定は `"f32"` — i8 / i4 / f16 資産を自動で低精度実行にすると既存の PNG sha256 門と
-   * E2E tolerance が黙って変わる。opt-in 以外はあり得ない。
+   * `"f16"` is the compute variant that drops the shared tiles to f16 (ADR 0028) and applies to
+   * linears with f32 / f16 weight storage (**it cannot be combined with i8 / i4 resident weights** —
+   * w8a16 / w4a16 are not implemented, so this fails loudly).
+   * MUST: the default is `"f32"` — running i8 / i4 / f16 assets in low precision automatically would
+   * silently change the existing PNG sha256 checks and the E2E tolerances. Only opt-in is possible.
    */
   readonly linearCompute?: "f32" | "a8" | "f16";
   /**
-   * 融合 attention（ADR 0023 の 3 カーネル）の実行形（既定 `"f32"` = 従来どおり）。
+   * The execution form of fused attention (the three kernels of ADR 0023; default `"f32"` = the
+   * original behaviour).
    *
-   * `"f16"` は ①QK / ②行統計 / ③PV の共有タイルを f16 にし、**S も f16 で受け渡す**
-   * （① が書き ②③ が読む — transient が半減する）。`linearCompute` と**別の軸**なのは、
-   * 1024px の内訳が attention 46% / linear 42% で片方だけ f16 にしたい場面が実際にあるため。
+   * `"f16"` makes the shared tiles of ①QK / ②row statistics / ③PV f16 and **passes S in f16 as
+   * well** (① writes it, ② and ③ read it — the transient is halved). It is **a separate axis** from
+   * `linearCompute` because at 1024 px the split is attention 46% / linear 42%, and there are real
+   * cases that want only one of them in f16.
    *
-   * `"a8"` は q / k / v を i8 へ量子化して整数内積で回す変種
-   * （設計 = docs/research/2026-08-04-attention-a8-design.md）。**現時点の意味論は
-   * 「①QK と ③PV が i8a8・②行統計は f32 のまま」**（③ の A 側 = P̃ は scale が 1/127 に
-   * 構造縮退するので量子化カーネルを通らず、V だけが Vᵀ 経由の per-column i8 になる）。
-   * `"f16"` と違い `shader-f16` を要求せず、資産の格納形（f32 / f16 / i8）とも独立に効く —
-   * attention の入力は全て活性だから。
-   * **適格判定は段ごとに独立で、満たさない段だけが f32 経路へ沈黙で縮退する**
-   * （① は `D % 4 == 0`・③ は `N % 4 == 0` — i8 ペイロードの語境界条件で、パック方向が
-   * 段ごとに違う）。したがって **`D % 4 == 0` かつ `N % 4 != 0` なら「①QK は i8a8・③PV は
-   * f32」の混成**になる。linear の `k % 4` と同じ流儀で、落ちたことは診断のパイプライン
-   * キーにだけ出る。
-   * MUST: 既定は `"f32"`。
+   * `"a8"` is the variant that quantizes q / k / v to i8 and uses an integer dot product
+   * (design = docs/research/2026-08-04-attention-a8-design.md). **Its current semantics are "①QK
+   * and ③PV are i8a8, ②row statistics stay f32"** (the A side of ③, P̃, has a scale that collapses
+   * to 1/127 by construction, so it does not go through the quantization kernel; only V becomes a
+   * per-column i8 through Vᵀ). Unlike `"f16"`, it does not require `shader-f16` and applies
+   * independently of the storage form of the assets (f32 / f16 / i8) — attention's inputs are all
+   * activations.
+   * **Eligibility is decided per stage, and only a stage that does not qualify falls back silently
+   * to the f32 path** (① needs `D % 4 == 0`, ③ needs `N % 4 == 0` — a word-boundary condition of
+   * the i8 payload, whose packing direction differs per stage). So **with `D % 4 == 0` and
+   * `N % 4 != 0` the result is the mix "①QK in i8a8, ③PV in f32"**. Same convention as linear's
+   * `k % 4`: the fallback shows only in the diagnostic pipeline keys.
+   * MUST: the default is `"f32"`.
    */
   readonly attentionCompute?: ComputePrecision;
   /**
-   * 融合 attention の中間バッファ **S（スコア）の格納形**（既定 `"f32"` = 従来どおり）。
-   * `attentionCompute`（計算形）と**直交する第 2 の軸**で、S は中間バッファなので
-   * 「どの精度で計算するか」と「どの精度で置くか」を別々に選べる。
+   * **The storage form of the intermediate buffer S (scores)** of fused attention (default
+   * `"f32"` = the original behaviour). **A second axis orthogonal to** `attentionCompute` (the
+   * compute form): S is an intermediate buffer, so "which precision to compute in" and "which
+   * precision to store in" can be chosen separately.
    *
-   * `"f16"` は S を `array<u32>` に **`pack2x16float` で 2 要素／語**詰める（core WGSL・
-   * **`shader-f16` を要求しない** — ADR 0030 決定 1「i8a8 は shader-f16 を要求しない」を
-   * 保ったまま `attentionCompute: "a8"` と組める。本命はこの組）。丸めは格納の 1 回だけで、
-   * 読み側の `unpack2x16float` は厳密。したがって出力は「**S をホストで f16 に丸めた
-   * f32 変種**」とビット単位で一致する。
+   * `"f16"` packs S into `array<u32>` **with `pack2x16float`, two elements per word** (core WGSL,
+   * **does not require `shader-f16`** — it combines with `attentionCompute: "a8"` while keeping ADR
+   * 0030 decision 1, "i8a8 does not require shader-f16"; this combination is the main target). The
+   * only rounding is the one at storage, and `unpack2x16float` on the read side is exact. The output
+   * therefore matches, bit for bit, "**the f32 variant with S rounded to f16 on the host**".
    *
-   * MUST: 既定は `"f32"` — S の格納形を自動で落とすと既存の PNG sha256 門と E2E tolerance が
-   * 黙って変わる（ADR 0028 決定 1 が auto を禁じたのと同じ理由）。
-   * MUST: `attentionCompute: "f16"`（`:c16`）との併用は **fail loudly**。あちらは S を
-   * `array<f16>` で持つ**別の格納形**なので、冗長かつ矛盾する組になる。
-   * **適格判定は `D % 4 == 0 && N % 4 == 0`**（書き手 ①QK が v4 経路を取る条件 — 1 スレッドが
-   * 4 連続列 = 2 語ちょうどを排他に書く）で、満たさない形は f32 格納へ**沈黙で**縮退する
-   * （linear の `k % 4`・ADR 0030 決定 5 と同じ流儀で、落ちたことは診断のパイプライン
-   * キーにだけ出る）。
+   * MUST: the default is `"f32"` — dropping the storage form of S automatically would silently
+   * change the existing PNG sha256 checks and the E2E tolerances (the same reason ADR 0028 decision
+   * 1 forbids an auto mode).
+   * MUST: combining it with `attentionCompute: "f16"` (`:c16`) **fails loudly**. That option holds S
+   * as `array<f16>`, **a different storage form**, so the combination is redundant and
+   * contradictory.
+   * **Eligibility is `D % 4 == 0 && N % 4 == 0`** (the condition for the writer ①QK to take the v4
+   * path — one thread writes four consecutive columns = exactly two words, exclusively); other
+   * shapes fall back **silently** to f32 storage (same convention as linear's `k % 4` and ADR 0030
+   * decision 5: the fallback shows only in the diagnostic pipeline keys).
    */
   readonly attentionScoreStorage?: ScoreStorage;
   /**
-   * states 形 attention（ADR 0067 決定 4 — 生成 context の KV スロットを読む形）の **①QK と
-   * ③PV の縮約形**（既定 `"sequential"` = 参照経路）。**1 つのノブが 2 段を一緒に切り替える**
-   * （2026-09-06 裁定 — 段ごとに席を割らない）。
+   * The **reduction form of ①QK and ③PV** of states-form attention (ADR 0067 decision 4 — the form
+   * that reads the KV slots of a generation context; default `"sequential"` = the reference path).
+   * **One knob switches both stages together** (ruling of 2026-09-06 — no separate option per
+   * stage).
    *
-   * `"parallel"` はどちらの段も**縮約を workgroup 内の 16 レーンで分担し固定順の木で畳む**変種:
-   * - ③PV は KV 長方向を分担（perf-ledger K-12 — src/kernels/state-attention.ts「③' KV 並列
-   *   縮約変種」節）。decode（M=1）で 1 スレッドの逐次長が KV 長に比例して伸びる形を潰す。
-   * - ①QK は内積の D 方向を分担（perf-ledger K-14 — 同「①' D 並列縮約変種」節）。1 invocation
-   *   が D 本の積和を逐次で回す遅延を縮める。
+   * `"parallel"` is the variant in which **both stages split the reduction across 16 lanes of a
+   * workgroup and fold it in a fixed-order tree**:
+   * - ③PV splits along the KV length (perf-ledger K-12 — the "③' KV-parallel reduction variant"
+   *   section of src/kernels/state-attention.ts). It removes the shape in which, for decode (M=1),
+   *   one thread's sequential length grows with the KV length.
+   * - ①QK splits along D of the dot product (perf-ledger K-14 — the "①' D-parallel reduction
+   *   variant" section of the same file). It shortens the latency of one invocation summing D
+   *   products sequentially.
    *
-   * **2 段で適用範囲が違う**（席は 1 つのまま）: **①' が選ばれるのは `M`（物理 chunk 行数）が
-   * 8 以下の計画**（decode の M=1 と投機の verify M ≤ 8）で、prefill 計画（M > 8）は `"parallel"`
-   * を指定しても ①' を選ばない。prefill では ① が既に行 × 列で埋まっており、①' に替えると
-   * 遅くなると実測したため（2026-09-06 — 適用条件と実測は `stateQkParallelEligible` の WHY）。
-   * QK の経路は M で 3 段に分かれる: M ≤ 8 は ①'、9〜15 は ①（逐次）、M ≥ 16 は席に依らず ①ₜ
-   * （GEMM 骨格の K 行タイル共有・① とビット同一 — `stateQkTiledEligible`）。**③' が選ばれるのは
-   * `M < 16` の計画だけ**で、`M ≥ 16` は席に依らず ③ₜ（GEMM 骨格の V 行タイル共有 —
-   * perf-ledger K-13 段 2）が取る。③ₜ は ③ と**ビット同一**なので、席が `"parallel"` でも
-   * prefill 計画の値は参照経路のものになる（decode = M 1 の計画では従来どおり ③' が効く）。
+   * **The two stages apply to different shapes** (still one option): **①' is chosen only for plans
+   * whose `M` (physical chunk row count) is 8 or less** (decode's M=1 and speculative verify's
+   * M ≤ 8); a prefill plan (M > 8) does not choose ①' even when `"parallel"` is given. In prefill,
+   * ① already fills rows × columns, and switching to ①' was measured to be slower (2026-09-06 — the
+   * conditions and measurements are in the WHY of `stateQkParallelEligible`). The QK path splits
+   * three ways by M: M ≤ 8 is ①', 9 to 15 is ① (sequential), and M ≥ 16 is ①ₜ regardless of the
+   * option (K-row tile sharing on the GEMM skeleton, bit-identical to ① — `stateQkTiledEligible`).
+   * **③' is chosen only for plans with `M < 16`**; `M ≥ 16` takes ③ₜ regardless of the option (V-row
+   * tile sharing on the GEMM skeleton — perf-ledger K-13 step 2). ③ₜ is **bit-identical** to ③, so
+   * even when the option is `"parallel"`, a prefill plan produces the values of the reference path
+   * (a decode plan, M = 1, uses ③' as before).
    *
-   * どちらも縮約順が変わるので **参照経路とビット同一ではない**（決定性は保つ）。融合
-   * attention（`attentionCompute`）とは別族なので直交する。
-   * MUST: 既定は `"sequential"`（ADR 0058 決定 2 — 数値を変える経路の自動選択禁止）。
+   * Both change the reduction order, so they are **not bit-identical to the reference path**
+   * (determinism is kept). They are a separate family from fused attention (`attentionCompute`) and
+   * orthogonal to it.
+   * MUST: the default is `"sequential"` (ADR 0058 decision 2 — no automatic selection of a path that
+   * changes the numbers).
    *
-   * parallel-fused は parallel の加算順を保ち、M<=8・列上限<=1024 の states 形だけ
-   * 行統計と PV を融合する。readonly / その他の形は parallel の経路。ADR 0102。
+   * parallel-fused keeps parallel's summation order and fuses the row statistics with PV only for
+   * states shapes with M<=8 and a column limit <=1024. readonly and other shapes use the parallel
+   * path. ADR 0102.
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
   /**
-   * 量子化 GEMV の加算順（既定 sequential）。parallel は実測済みの INT2/4/8 形状と M=1..8 に
-   * 限る任意指定。f32 演算のみで、対象外形状・格納は従来経路（診断キーで区別）。
-   * 加算順が変わるため、QAT の再量子化を含め生成列は既定と一致しない場合がある。
-   * M=1 と M=4/8 は同一の加算順を使う。追加重みコピーは無い。ADR 0098。
-   * parallel-subgroup32はparallelと同じ配分・加算木を32レーン内の値交換で実行する（ADR 0101）。
-   * acquireGpu({ subgroups: true })が必要。不足時は拒否し、自動でparallelへ戻さない。
+   * The summation order of the quantized GEMV (default sequential). parallel is an optional setting
+   * limited to the measured INT2/4/8 shapes and M=1..8. f32 compute only; other shapes and storage
+   * use the original path (distinguished by the diagnostic key).
+   * The summation order changes, so the generated sequence may differ from the default, including
+   * with QAT re-quantization. M=1 and M=4/8 use the same summation order. No extra weight copy.
+   * ADR 0098.
+   * parallel-subgroup32 runs the same partition and summation tree as parallel through value
+   * exchange within 32 lanes (ADR 0101).
+   * Requires acquireGpu({ subgroups: true }). Without it the option is rejected, with no automatic
+   * fallback to parallel.
    */
   readonly linearGemvReduce?: LinearGemvReduce;
   /**
-   * 隣接するf32のrms_norm→addを融合する（既定false、ADR 0099）。
-   * 最終次元256/1536/2560、同一shape、内部値が専有される形だけに適用する。
-   * 丸め保持を実測しているが、未検証GPUで参照とビット同一とは保証しない。
-   * submitPolicyは独立の設定で、この指定だけでは投入上限を変更しない。
+   * Fuses an adjacent f32 rms_norm→add (default false, ADR 0099).
+   * Applies only to last dimensions 256/1536/2560, identical shapes, and intermediate values with a
+   * single consumer.
+   * Rounding preservation has been measured, but bit identity with the reference is not guaranteed
+   * on unverified GPUs.
+   * submitPolicy is an independent setting; this option alone does not change the submission limit.
    */
   readonly fuseRmsNormAdd?: boolean;
   /**
-   * 隣接するlinear→static_quantizeを融合する（既定false、ADR 0103）。
-   * linearGemvReduce: parallel / linearCompute: f32との組合せのみ対応する。
-   * 検収済みINT2/4/8の形状、M=1..8、内部値が専有される形だけ。既存scaleを借用する。
-   * 未検証GPUのビット一致は保証せず、falseで非融合の参照へ戻せる。
+   * Fuses an adjacent linear→static_quantize (default false, ADR 0103).
+   * Supported only together with linearGemvReduce: parallel / linearCompute: f32.
+   * Only the accepted INT2/4/8 shapes, M=1..8, and intermediate values with a single consumer. It
+   * borrows the existing scale.
+   * Bit identity on unverified GPUs is not guaranteed; false returns to the unfused reference.
    */
   readonly fuseLinearStaticQuantize?: boolean;
   /**
-   * 固定SRQの活性をpacked int8（u32 1語にint8コード4個）で並列GEMVへ渡す（既定false、ADR 0105）。
-   * linearGemvReduce: parallel / linearCompute: f32との組合せのみ対応する。
-   * 対象は「素のstatic_quantizeノードで、消費先が全て並列GEMVへ落ちるlinearの活性」だけで、
-   * 1本でも別の消費先が混ざる形・k が16の倍数でない形・scale 0（恒等）は従来のf32のまま。
-   * 重み1語あたりの活性ロードがi2 16→4本・i4 8→2本・i8 4→1本に減る（research 2026-09-19 §14）。
-   * 復元は`f32(code) * scale`で、現行SRQ出力と要素ごとにu32一致する（ADR 0105）。
-   * 例外は int8 に席が無い2値 — -0.0は+0.0へ落ち（積和の結果は動かない）、NaNは飽和する。
+   * Passes fixed-SRQ activations to the parallel GEMV as packed int8 (four int8 codes in one u32
+   * word) (default false, ADR 0105).
+   * Supported only together with linearGemvReduce: parallel / linearCompute: f32.
+   * It applies only to "linear activations from a plain static_quantize node whose consumers all go
+   * to the parallel GEMV"; a shape with even one other consumer, a shape whose k is not a multiple
+   * of 16, and scale 0 (identity) stay in f32 as before.
+   * Activation loads per weight word drop from 16 to 4 for i2, 8 to 2 for i4 and 4 to 1 for i8
+   * (research 2026-09-19 §14).
+   * Decoding is `f32(code) * scale`, and matches the current SRQ output per element at u32 level
+   * (ADR 0105).
+   * The exceptions are two values with no int8 representation — -0.0 becomes +0.0 (the
+   * multiply-add result does not move) and NaN saturates.
    */
   readonly packedStaticQuantize?: boolean;
   /**
-   * RMSの縮約方式（既定workgroup）。subgroup32は幅128超のRMSと任意のRMS→add融合に適用。
-   * acquireGpu({ subgroups: true })が必要。不足時は拒否し、自動で参照へ戻さない。
-   * 加算順が変わるため生成列は参照と異なりうる。M2・投機生成の採用は別途検収する。
+   * The RMS reduction method (default workgroup). subgroup32 applies to RMS wider than 128 and to
+   * the optional RMS→add fusion.
+   * Requires acquireGpu({ subgroups: true }). Without it the option is rejected, with no automatic
+   * fallback to the reference.
+   * The summation order changes, so the generated sequence may differ from the reference. Adoption
+   * on M2 and for speculative generation is accepted separately.
    */
   readonly rmsNormReduce?: RmsNormReduce;
   /**
-   * 行ブロック gemv（linear の GEMV 族・M ≥ 2）の**並列度の目標**（スレッド数 = 出力列 n ×
-   * y タイル数）。既定 16384 = 参照 device（RTX 3080 Ti）の飽和点。
+   * The **parallelism target** of the row-block gemv (the GEMV family of linear, M ≥ 2) (thread
+   * count = output columns n × y tiles). Default 16384 = the saturation point of the reference
+   * device (RTX 3080 Ti).
    *
-   * 飽和点が小さい GPU（内蔵 GPU・Apple M 系）では下げると `rows`（1 スレッドが持つ行数）が
-   * 増えて重みの読み直しが減る（機序は src/kernels/linear-gemv.ts の
-   * `linearGemvRowsForShape`）。**静的**なノブ — Session 生成時に固定し、実行時に変えない・
-   * device を見て自動選択しない（ADR 0022 の実行時オートチューン禁止）。
-   * 目標が変われば選ばれる `rows` が変わり、`rows` はパイプラインキーに載るので
-   * 「同一キー → バイト同一 WGSL」は保たれる。
-   * MUST: 1 以上の安全な整数でなければ fail loudly。
+   * On GPUs with a smaller saturation point (integrated GPUs, Apple M series), lowering it raises
+   * `rows` (rows per thread) and reduces weight re-reads (the mechanism is
+   * `linearGemvRowsForShape` in src/kernels/linear-gemv.ts). A **static** knob — fixed at Session
+   * creation, not changed at run time, and not selected automatically from the device (the ban on
+   * run-time autotuning, ADR 0022).
+   * A different target changes the chosen `rows`, and `rows` is part of the pipeline key, so
+   * "same key → byte-identical WGSL" holds.
+   * MUST: anything other than a safe integer of at least 1 fails loudly.
    */
   readonly linearGemvRowsThreadTarget?: number;
   /**
-   * slot backing（導出済み計画にヒットした run が使う中間バッファ束）を**同時に保持する予算**
-   * （バイト・既定 {@link DEFAULT_PLAN_BACKING_BUDGET_BYTES} = 256 MiB）。
+   * The **budget for slot backings held at once** (a slot backing is the set of intermediate
+   * buffers used by runs that hit a prepared plan) (bytes; default
+   * {@link DEFAULT_PLAN_BACKING_BUDGET_BYTES} = 256 MiB).
    *
-   * run の形（signature）ごとに 1 本の backing があり、生成では prefill 形 ↔ decode 形の切替が
-   * 毎ターン起きる。予算内なら切り替えても作り直さず保持し（切替 1 回 ≈ 40 ms の作り直しが
-   * 消える — perf-ledger H-15）、超える分は古い順に退役する。**新規 1 本だけで予算を超える形は
-   * 他を全て退役させてその 1 本だけを持つ**（= 従来の容量 1 の挙動）ので、常駐は
-   * `max(予算, 最大 1 本)` を超えない。予算 0 は従来どおり常に 1 本。
-   * 勘定するのは各 backing が抱える VRAM = **領域の総和 + 所有する入力バッファ**
-   * （{@link PlanBackingStats.residentBytes} + {@link PlanBackingStats.inputBytes}）。
-   * MUST: 非負の安全な整数でなければ fail loudly。
+   * There is one backing per run shape (signature), and generation switches between the prefill
+   * and decode shapes every turn. Within the budget, switching keeps both instead of rebuilding
+   * (removing a rebuild of ≈ 40 ms per switch — perf-ledger H-15); beyond it, the oldest are
+   * retired. **A shape whose single new backing alone exceeds the budget retires all the others and
+   * keeps only itself** (= the original capacity-1 behaviour), so residency never exceeds
+   * `max(budget, largest single backing)`. A budget of 0 always keeps one, as before.
+   * What is counted is the VRAM each backing holds = **the sum of its regions + the input buffers
+   * it owns** ({@link PlanBackingStats.residentBytes} + {@link PlanBackingStats.inputBytes}).
+   * MUST: anything other than a non-negative safe integer fails loudly.
    */
   readonly planBackingBudgetBytes?: number;
   /**
-   * attention の**行ブロックの一時 1 本ごとの上限**（バイト・既定なし — ADR 0124）。
+   * The **limit per row-block temporary** of attention (bytes; no default — ADR 0124).
    *
-   * スコア S を実体化する attention の 3 つの形（融合 attention・states 形・分解 attention の
-   * `rowBlockAttention`）は、S をクエリ行のかたまり（行ブロック）に分けて順に計算する。枚数は
-   * 「S 1 枚と行統計 1 枚のそれぞれが上限に収まる最小枚数」で、上限は device の
-   * `maxStorageBufferBindingSize` とこの値の**小さいほう**になる。束縛上限より小さい値では枚数が
-   * 増え、行ブロック 1 枚ぶんの一時（S と行統計）が縮む。中間全体の山（VRAM の山）は予算なしより
-   * 下がりうるが、値を小さくするほど下がるとは限らない（中間の配置の割れ方に依る — Wan2.2 の 1 形の
-   * 実測は ADR 0124 の段 4b の結果の節と `docs/research/2026-10-11-row-block-budget-stage-4b.md`）。
-   * 代わりに dispatch が「増えた枚数 × 1 枚あたりの dispatch 数」だけ増える
-   * （1 枚あたり融合 attention 3・分解 attention 4・states 形 2〜3 — 速度への効きは形と機に依る）。
+   * The three attention forms that materialise the scores S (fused attention, the states form, and
+   * decomposed attention's `rowBlockAttention`) split S into groups of query rows (row blocks) and
+   * compute them in turn. The count is "the smallest count at which one S block and one row-stats
+   * block each fit the limit", and the limit is the **smaller** of the device's
+   * `maxStorageBufferBindingSize` and this value. A value below the binding limit raises the count
+   * and shrinks the per-block temporaries (S and row statistics). The peak of all intermediates
+   * (the VRAM peak) can drop below the no-budget case, but a smaller value does not always lower it
+   * (it depends on how the intermediate layout splits — the measurement of one Wan2.2 shape is in
+   * the Results section of ADR 0124, step 4b, and in
+   * `docs/research/2026-10-11-row-block-budget-stage-4b.md`).
+   * In exchange, dispatches grow by "added blocks × dispatches per block"
+   * (3 per block for fused attention, 4 for decomposed attention, 2 to 3 for the states form — the
+   * effect on speed depends on the shape and the machine).
    *
-   * - **合計ではない**: S 1 枚と行統計 1 枚はそれぞれこの値以下で、同時に生きる合計はこの値を
-   *   超えうる。i8a8 の量子化の一時（行ブロックのループの外）と他の中間はこの値で縛らない。
-   * - **数値は変えない**: 行ブロックは担当行の割り当てだけを変える（ADR 0060 決定 3）ので、出力は
-   *   予算なしとビット単位で一致する（強制分割の parity が変種を横断して縛る）。数値の席（quant 席・
-   *   manifest の `session`）には入れない資源の政策で、`submitPolicy` と同じ扱い。
-   * - **既定（省略）は束縛上限のまま**: 枚数・パイプラインキー・WGSL・dispatch 列・backing は
-   *   この欄を足す前と 1 バイトも変わらない。
-   * - **落ちる時点**: クエリ 1 行ぶんの一時がこの値を超える形は、その形の計画を最初に導く run で
-   *   予算を名指して fail loudly（構築時には形が記号のままで枚数が決まらない）。事前に知る手段は
-   *   見積り（`EstimateOptions.attentionRowBlockMaxBytes` に同じ値を渡す）。構築時に落とすのは
-   *   値域の外（0・負・非整数・NaN・数値でない値）だけ。
+   * - **Not a total**: one S block and one row-stats block are each at most this value, and the
+   *   total alive at once can exceed it. The temporaries of i8a8 quantization (outside the
+   *   row-block loop) and other intermediates are not bounded by this value.
+   * - **Does not change the numbers**: row blocks only change the assignment of rows (ADR 0060
+   *   decision 3), so the output matches the no-budget case bit for bit (the parity of forced
+   *   splits binds this across variants). It is a resource policy kept out of the numeric settings
+   *   (quant presets, the manifest's `session`), handled like `submitPolicy`.
+   * - **The default (omitted) stays at the binding limit**: the count, pipeline keys, WGSL,
+   *   dispatch sequence and backing are byte-for-byte what they were before this field was added.
+   * - **When it fails**: a shape whose temporary for a single query row exceeds this value fails
+   *   loudly, naming the budget, in the run that first derives that shape's plan (at construction
+   *   the shape is still symbolic and the count is unknown). The way to know in advance is the
+   *   estimate (pass the same value to `EstimateOptions.attentionRowBlockMaxBytes`). Construction
+   *   fails only for values outside the range (0, negative, non-integer, NaN, non-numbers).
    *
-   * MUST: 正の安全な整数でなければ fail loudly。
+   * MUST: anything other than a positive safe integer fails loudly.
    */
   readonly attentionRowBlockMaxBytes?: number;
   /**
-   * **共有 initializer の実体**（ADR 0096 段 2 §1.3 / §2.2 — 借り手の initializer 名 →
-   * 貸し手 `Session.exportWeight()` の戻り）。
+   * **The backing of shared initializers** (ADR 0096 decision 2 and its stage 2 addendum —
+   * borrower's initializer name → the return value of the lender's `Session.exportWeight()`).
    *
-   * グラフの `shared` 宣言**全部**に対して過不足なく与える MUST。門は 6 点（同一 device・
-   * 宣言 shape・意味論 dtype・消費席（貸し手の codec から導く）・行の軸 — `resolveSharedWeights`）で、
-   * どれも破れは例外ではなく別の値として出るため fail loudly。
+   * MUST be given for **every** `shared` declaration of the graph, no more and no fewer. There are
+   * six checks (same device, declared shape, semantic dtype, consuming residency class (derived
+   * from the lender's codec), row axis — `resolveSharedWeights`); any violation would surface as a
+   * different value rather than an exception, so each fails loudly.
    *
-   * 寿命: 借り手 Session が生きている間、貸し手 Session の `dispose()` は fail loudly になる
-   * （借用計数 — `dispose` の冪等・非 throw 契約からの意図的な逸脱）。
+   * Lifetime: while a borrowing Session is alive, `dispose()` of the lending Session fails loudly
+   * (borrow counting — a deliberate departure from the idempotent, non-throwing contract of
+   * `dispose`).
    */
   readonly sharedWeights?: Readonly<Record<string, SharedWeight>>;
-  /** テスト専用（{@link I8A8_DOT}）。既定は wgslLanguageFeatures の列挙から決める。 */
+  /**
+   * Test only ({@link I8A8_DOT}). The default is decided from the enumeration of
+   * wgslLanguageFeatures.
+   */
   readonly [I8A8_DOT]?: I8a8Dot;
-  /** テスト専用（{@link ROW_BLOCK_SPLIT}）。既定は device の limit から静的に決まる枚数。 */
+  /**
+   * Test only ({@link ROW_BLOCK_SPLIT}). The default is the count determined statically from the
+   * device's limit.
+   */
   readonly [ROW_BLOCK_SPLIT]?: number;
 };
 
 /**
- * 低精度格納（f16 — ADR 0018 / i8 — ADR 0019）の実績。**ADR 0006 が義務づける常設診断**で、
- * 「f16 / i8 指定なのに適格 0MB」を沈黙させないための唯一の観測点。
+ * What low-precision storage (f16 — ADR 0018 / i8 — ADR 0019) achieved. **The permanent diagnostic
+ * required by ADR 0006**, and the only observation point that keeps "f16 / i8 requested but 0 MB
+ * eligible" from going unnoticed.
  *
- * 対象は圧縮格納の initializer だけ（格納 f32 / i32 はどちらにも数えない）。両方 0 なら
- * 「そのモデルに低精度格納が 1 本も無い」、`resident` が 0 で `hostExpanded` が大きければ
- * 「低精度と宣言したのに適格判定で全部落ちている」— この 2 つが区別できる形にしてある。
+ * Only initializers with compressed storage are counted (f32 / i32 storage counts in neither). Both
+ * 0 means "the model has no low-precision storage at all"; `resident` 0 with a large
+ * `hostExpanded` means "low precision was declared but everything failed the eligibility check" —
+ * the shape lets the two be told apart.
  */
 export type StorageDiagnostics = {
   /**
-   * 圧縮のまま GPU 常駐した重みの **GPU バッファ上のバイト数**（整列のゼロ詰め込み。
-   * i8 / i2 / i4 は **scale（i8 / i2 は per-channel・i4 は group ごと）のバッファぶんも加算**する —
-   * 実際に GPU が抱えるバイト数を表す欄なので、scale を除くと VRAM 実績と食い違う）。
-   * f32 で持ったときの 1/2（f16）・約 1/4（i8）になるのがこの経路の目的。
+   * The **bytes in GPU buffers** of weights resident on the GPU in compressed form (including the
+   * alignment zero padding; for i8 / i2 / i4 **the scale buffers (per-channel for i8 / i2, per
+   * group for i4) are added too** — the field represents the bytes the GPU actually holds, so
+   * leaving out the scales would disagree with the actual VRAM). The point of this path is 1/2 (f16)
+   * and about 1/4 (i8) of holding them in f32.
    */
   readonly residentCompressedBytes: number;
   /**
-   * 適格外でロード時に CPU で f32 展開した重みの、**展開後**のバイト数（= 実際に GPU が
-   * 抱えるバイト数）。VRAM 削減はゼロで、縮んだのは配信サイズだけ。
+   * The bytes, **after decoding**, of weights that were not eligible and were decoded to f32 on the
+   * CPU at load (= the bytes the GPU actually holds). They save no VRAM; only the download size
+   * shrank.
    */
   readonly hostExpandedBytes: number;
 };
 
 /**
- * Session 構築相（`Session.build` = 重みアップロードの明示 async ステージ）の費用内訳。
- * 「構築に 2.50s 掛かった」を**どこで消えたか**へ分解するための常設診断で、値は Session の
- * 寿命を通じて不変（構築が終わった時点で確定し、run では 1 つも動かない）。
+ * The cost breakdown of the Session construction phase (`Session.build` = the explicit async stage
+ * that uploads the weights). A permanent diagnostic that breaks "construction took 2.50s" down
+ * into **where the time went**; the values do not change over the Session's lifetime (they are
+ * fixed when construction finishes, and no run moves any of them).
  *
- * ## 帰属の限界（この分解が到達できる上限）
+ * ## Limits of attribution (the furthest this breakdown can go)
  *
- * 計測はホスト時計（`performance.now()`）だけで、**GPU フェンスを 1 本も追加しない**
- * （追加すると part ごとの submit 1 回という契約が崩れ、瞬間ピークが重み 1 本ぶん押し上がる —
- * ADR 0108 決定 9）。したがって `queue.writeBuffer` の**実 GPU 転送時間はホスト時計から分離
- * できず**、part 末尾のフェンス待ち（{@link SessionBuildStats.uploadFenceMs}）に丸ごと吸われる。
- * MUST: この 7 席から「転送そのものの速度」を読まないこと。分解の上限は
- * **「ホストが費やした時間」（supplyWait / decode / bufferCreate / writeBufferIssue）と
- * 「GPU の完了を待った時間」（uploadFence）の 2 区分**で、後者の内訳（実転送 / キュー待ち /
- * ドライバの都合）はランタイムからは見えない。
+ * Only the host clock (`performance.now()`) is used, and **no GPU fence is added** (adding one
+ * would break the contract of one submit per part and push the instantaneous peak up by one weight
+ * — ADR 0108 decision 9). **The real GPU transfer time of `queue.writeBuffer` therefore cannot be
+ * separated with the host clock**, and is absorbed whole into the fence wait at the end of each
+ * part ({@link SessionBuildStats.uploadFenceMs}).
+ * MUST: do not read "the speed of the transfer itself" from these seven fields. The breakdown can
+ * go no further than **two categories, "time the host spent"** (supplyWait / decode / bufferCreate
+ * / writeBufferIssue) **and "time spent waiting for the GPU to complete"** (uploadFence); the
+ * breakdown of the latter (real transfer / queue wait / driver behaviour) is not visible to the
+ * runtime.
  *
- * NOTE: バイト数・本数の席は**既存の診断を流用する**（ここには置かない）— CPU 展開後のバイト数は
- * {@link StorageDiagnostics.hostExpandedBytes}、圧縮常駐のバイト数は
- * {@link StorageDiagnostics.residentCompressedBytes}、確保したバッファ本数は
- * {@link SessionDiagnostics.weights} の `allocCount`。
- * NOTE: グラフ検証・パイプライン生成の費用はここに**入らない** — 前者は構築相の外
- * （`prepareContainer` 相）で、後者は構築相にそもそも存在しない（パイプラインは初回 run で作られる。
- * 構築直後の `pipelineCount` は 0）。混ぜると「構築費」の定義が濁る。
+ * NOTE: byte and count fields **reuse the existing diagnostics** (they are not repeated here) —
+ * bytes after CPU decoding are {@link StorageDiagnostics.hostExpandedBytes}, compressed resident
+ * bytes are {@link StorageDiagnostics.residentCompressedBytes}, and the number of allocated buffers
+ * is `allocCount` of {@link SessionDiagnostics.weights}.
+ * NOTE: the cost of graph validation and pipeline creation is **not included** — the former is
+ * outside the construction phase (the `prepareContainer` phase), and the latter does not exist in
+ * the construction phase at all (pipelines are created on the first run; `pipelineCount` right
+ * after construction is 0). Mixing them in would blur the definition of "construction cost".
  */
 export type SessionBuildStats = {
   /**
-   * 消費した供給単位（容器の part）の本数。
+   * The number of supply units (container parts) consumed.
    */
   readonly partCount: number;
   /**
-   * 供給の**次の 1 本を待った**時間の総和（`for await` の反復待ち）。待ちは 2 段あり、どちらも
-   * 足す — part の列の次の 1 本と、part の中の次の block。block は引かれるたびに 1 本ずつ読まれる
-   * （lazy）ので、取得と検証（未検証の取得元での sha256・三値の符号検査）の費用はほぼ全部
-   * block 側の待ちに入る。ネットワーク / ディスクの費用がここに集まるので、この席が構築費から
-   * その帰属を分離する唯一の点になる（大きければ遅いのは Karume ではなく供給側）。
+   * The total time spent **waiting for the next item** of the supply (the iteration wait of
+   * `for await`). There are two levels of wait, and both are added — the next part in the part
+   * sequence, and the next block within a part. Blocks are read one at a time as they are pulled
+   * (lazy), so nearly all of the cost of fetching and verification (sha256 for an unverified
+   * source, the sign check of ternary values) lands in the block-level wait. Network / disk cost
+   * collects here, so this field is the only point that separates that attribution from the
+   * construction cost (if it is large, the slow part is the supply side, not Karume).
    */
   readonly supplyWaitMs: number;
   /**
-   * 適格外の重みを CPU で f32 展開した時間の総和（f16 / i8 / i2 / i4 の decode）。
-   * **適格判定に全部通っていれば 0** — 0 でないことは VRAM 削減が落ちている
-   * （{@link StorageDiagnostics.hostExpandedBytes} が正）ことと表裏。
+   * The total time spent decoding non-eligible weights to f32 on the CPU (decode of f16 / i8 / i2 /
+   * i4). **0 if every weight passed the eligibility check** — a non-zero value goes together with
+   * lost VRAM savings ({@link StorageDiagnostics.hostExpandedBytes} is positive).
    */
   readonly decodeMs: number;
-  /** `createBuffer`（重み本体 + scale）に費やした時間の総和。 */
+  /** The total time spent in `createBuffer` (weight bodies + scales). */
   readonly bufferCreateMs: number;
   /**
-   * `queue.writeBuffer` の**発行**に費やした時間の総和。呼び出しは staging への複製を伴うが
-   * GPU 転送の完了は待たないので、これは「ホスト側の複製費用」であって転送時間ではない
-   * （上の「帰属の限界」）。
+   * The total time spent **issuing** `queue.writeBuffer`. The call copies into staging but does not
+   * wait for the GPU transfer to complete, so this is "the host-side copy cost", not the transfer
+   * time ("Limits of attribution" above).
    */
   readonly writeBufferIssueMs: number;
   /**
-   * `queue.writeBuffer` で実際に渡したバイト数の総和（重み本体 + scale・整列のゼロ詰め込み）。
-   * {@link StorageDiagnostics} の 2 席の和とは一致しない — あちらは GPU が抱えるバイト数で、
-   * こちらは**ホストから流したバイト数**（適格外の重みは展開後の f32 を流すので後者が膨らむ）。
+   * The total bytes actually passed to `queue.writeBuffer` (weight bodies + scales, including the
+   * alignment zero padding). It does not match the sum of the two fields of
+   * {@link StorageDiagnostics} — those are the bytes the GPU holds, and this is **the bytes streamed
+   * from the host** (non-eligible weights stream their decoded f32, so this one is larger).
    */
   readonly uploadedBytes: number;
   /**
-   * 供給単位（part）ごとの明示 submit の完了を待った時間の総和（ADR 0108 決定 9 のフェンス）。
-   * 実 GPU 転送時間はここに吸われている（上の「帰属の限界」）。
+   * The total time spent waiting for the explicit submit per supply unit (part) to complete (the
+   * fence of ADR 0108 decision 9). The real GPU transfer time is absorbed here ("Limits of
+   * attribution" above).
    */
   readonly uploadFenceMs: number;
 };
 
 /**
- * params バッファの内容アドレスキャッシュの実績（1 run ぶん）。params は実行時のテンソル値に
- * 依存しないので、shape が変わらない限り 2 run 目以降の `allocCount` は 0 に落ちる。
+ * What the content-addressed cache of params buffers achieved (for one run). params do not depend
+ * on tensor values at run time, so as long as shapes do not change, `allocCount` drops to 0 from
+ * the second run on.
  *
- * MUST: 常設診断として出す。キャッシュが外れても値は正しいまま（毎 dispatch 確保に戻るだけ）
- * で、例外も警告も出ない — ここが唯一の観測点。
+ * MUST: emit this as a permanent diagnostic. A cache miss keeps the values correct (it only falls
+ * back to allocating per dispatch), with no exception and no warning — this is the only
+ * observation point.
  *
- * NOTE: 導出済み計画がヒットした run（{@link PreparedPlanStats}）では**導出相そのものが
- * 走らない**ため `allocCount` / `reuseCount` とも 0 になる。値の意味は変わらず、「その run が
- * params に対して行った GPU 操作がゼロ」という事実の報告。
+ * NOTE: in a run that hit a prepared plan ({@link PreparedPlanStats}) **the derivation phase does
+ * not run at all**, so `allocCount` and `reuseCount` are both 0. The meaning of the values does not
+ * change; it reports the fact that "that run performed zero GPU operations on params".
  */
 export type ParamsCacheStats = {
-  /** この run で新規に確保 + writeBuffer した params の本数。 */
+  /** The number of params newly allocated + written with writeBuffer in this run. */
   readonly allocCount: number;
-  /** この run でキャッシュから配り直した params の本数（GPU 操作ゼロ）。 */
+  /** The number of params handed out again from the cache in this run (zero GPU operations). */
   readonly reuseCount: number;
 };
 
 /**
- * 導出済み実行計画（Session 常駐）の実績。同一 bindings で走り直す run は計画・融合判定・
- * レシピ導出を丸ごと飛ばし、レシピ列をそのまま実行相へ渡す。
+ * What the prepared execution plans (resident in the Session) achieved. A run repeated with the
+ * same bindings skips planning, fusion decisions and recipe derivation entirely, and hands the
+ * recipe sequence straight to the execution phase.
  *
- * MUST: 常設診断として出す。キャッシュが外れても値は正しいまま（毎 run 導出に戻るだけ）で、
- * 例外も警告も出ない — 性能だけが静かに戻る。ここが唯一の観測点。
+ * MUST: emit this as a permanent diagnostic. A cache miss keeps the values correct (it only falls
+ * back to deriving on every run), with no exception and no warning — only the speed quietly drops.
+ * This is the only observation point.
  */
 export type PreparedPlanStats = {
-  /** この run が導出済み計画に当たったか。 */
+  /** Whether this run hit a prepared plan. */
   readonly hit: boolean;
-  /** この run の決着時点で Session が抱えている導出済み計画の本数（上限あり）。 */
+  /** The number of prepared plans the Session holds when this run settles (bounded). */
   readonly cachedPlans: number;
 };
 
 /**
- * 中間バッファの GPU backing（Session 常駐の領域バッファ群 — ADR 0093）の実績。導出済み計画に
- * ヒットした run は中間バッファをここから配るので、run ごとの領域確保・createBuffer / destroy が
- * ゼロになる。
+ * What the GPU backing of intermediate buffers (the region buffers resident in the Session — ADR
+ * 0093) achieved. A run that hits a prepared plan hands out its intermediate buffers from here, so
+ * per-run region allocation and createBuffer / destroy drop to zero.
  *
- * MUST: 常設診断として出す。予算（{@link SessionOptions.planBackingBudgetBytes}）に収まる形は
- * signature を往復しても両方の backing を保持して再利用する（ADR 0095 決定 1）が、**予算に収まらず
- * 退役が起きる形では切替のたびに作り直しになり**（予算 0 では signature が変わるたびに作り直す）、
- * 値は正しいまま run ごとに数百 MiB の createBuffer / destroy が復活する（例外も警告も出ない）。
- * `buildCount` が run 数に比例して伸びていないことが、その沈黙劣化の唯一の観測点。
+ * MUST: emit this as a permanent diagnostic. Shapes that fit the budget
+ * ({@link SessionOptions.planBackingBudgetBytes}) keep and reuse both backings across signature
+ * round trips (ADR 0095 decision 1), but **for shapes that do not fit and cause retirement, every
+ * switch rebuilds** (with budget 0, every change of signature rebuilds), and createBuffer /
+ * destroy of hundreds of MiB per run returns while the values stay correct (no exception, no
+ * warning). `buildCount` not growing in proportion to the run count is the only observation point
+ * for that silent degradation.
  */
 export type PlanBackingStats = {
   /**
-   * 保持中の backing 全てが常駐させている**領域の総和**（未構築 / 破棄済みなら 0）。
-   * MUST: 定義は「計画の領域の総和」— backing が併せて常駐させる入力バッファは含めない
-   * （理由と門は {@link ActiveBacking.bytes}）。{@link SessionOptions.planBackingBudgetBytes} が
-   * 勘定するのはこれに {@link PlanBackingStats.inputBytes} を足した `residentBytes + inputBytes`。
+   * **The sum of the regions** kept resident by all retained backings (0 if not built or
+   * destroyed).
+   * MUST: the definition is "the sum of the plan's regions" — the input buffers a backing also keeps
+   * resident are not included (the reason and the check are in {@link ActiveBacking.bytes}).
+   * What {@link SessionOptions.planBackingBudgetBytes} counts is this plus
+   * {@link PlanBackingStats.inputBytes}, `residentBytes + inputBytes`.
    */
   readonly residentBytes: number;
   /**
-   * 保持中の backing が所有する入力バッファの総和（常駐入力は所有しないので含めない）。
-   * 予算（{@link SessionOptions.planBackingBudgetBytes}）が勘定するのは `residentBytes + inputBytes`。
+   * The total of the input buffers owned by the retained backings (resident inputs are not owned,
+   * so they are not included). What the budget ({@link SessionOptions.planBackingBudgetBytes})
+   * counts is `residentBytes + inputBytes`.
    */
   readonly inputBytes: number;
-  /** 保持中の backing の本数（予算内で複数保持する — {@link SessionOptions.planBackingBudgetBytes}）。 */
+  /**
+   * The number of retained backings (several are retained within the budget — {@link
+   * SessionOptions.planBackingBudgetBytes}).
+   */
   readonly retainedCount: number;
-  /** Session の生存中に backing を構築した累計回数（run ごとではなく累計）。 */
+  /**
+   * The cumulative number of backings built over the Session's lifetime (cumulative, not per run).
+   */
   readonly buildCount: number;
 };
 
 /**
- * {@link SessionOptions.planBackingBudgetBytes} の既定（256 MiB）。gemma4 E2B では decode 形
- * （3 MiB）と prefill バケット 32 / 64 / 128 形（capacity 16K で 23 / 45 / 89 MiB）が収まり、
- * chunk 768 形（capacity 16K で ≈ 500 MiB）は 1 本だけ持つ側に落ちる。
+ * The default of {@link SessionOptions.planBackingBudgetBytes} (256 MiB). For gemma4 E2B the decode
+ * shape (3 MiB) and the prefill bucket 32 / 64 / 128 shapes (23 / 45 / 89 MiB at capacity 16K) fit,
+ * and the chunk 768 shape (≈ 500 MiB at capacity 16K) falls to the keep-only-one side.
  */
 export const DEFAULT_PLAN_BACKING_BUDGET_BYTES = 256 * 1024 * 1024;
 
 /**
- * state backing（{@link GenerationContext} 所有バッファ群）の実績。ADR 0066 決定 5 が
- * {@link PlanBackingStats} と同格で置くよう定めた診断席で、KV の常駐量と焼き直しの沈黙劣化に
- * 対する唯一の観測点になる。
+ * What the state backing (the buffers owned by a {@link GenerationContext}) achieved. The
+ * diagnostic field that ADR 0066 decision 5 places on a par with {@link PlanBackingStats}, and the
+ * only observation point for KV residency and the silent degradation of re-baking.
  *
- * MUST: 常設診断として出す。**context の識別子は計画鍵に入らない**（決定 5 の MUST）ので、
- * context を切り替えてもレシピ再導出は起きない — その代わり「state を含む bind group の焼き直し」
- * だけが起きる形になっており、そこが暴走しても例外も警告も出ない。
+ * MUST: emit this as a permanent diagnostic. **The context identity is not part of the plan key**
+ * (a MUST of decision 5), so switching contexts does not re-derive recipes — instead only "re-baking
+ * the bind groups that contain state" happens, and if that runs away there is no exception and no
+ * warning.
  */
 export type StateBackingStats = {
   /**
-   * 生存中の context が常駐させている総バイト数（未生成 / 全て dispose 済みなら 0）。
-   * MUST: 定義は「state スロットの総バイト数 + 論理長 uniform」= context が実際に GPU 上で
-   * 抱えるバイト数（{@link StorageDiagnostics.residentCompressedBytes} が scale ぶんを数えるのと
-   * 同じ規律）。生存集合から毎回導出し、独立に更新するカウンタは持たない。
+   * The total bytes kept resident by the live contexts (0 if none were created or all are
+   * disposed).
+   * MUST: the definition is "the total bytes of the state slots + the logical-length uniform" = the
+   * bytes a context actually holds on the GPU (the same discipline as
+   * {@link StorageDiagnostics.residentCompressedBytes} counting the scales). It is derived from the
+   * live set each time; no independently updated counter is kept.
    */
   readonly residentBytes: number;
-  /** Session の生存中に生成した context の累計本数（現存数ではなく累計）。 */
+  /**
+   * The cumulative number of contexts created over the Session's lifetime (cumulative, not
+   * current).
+   */
   readonly contextCount: number;
   /**
-   * state を含む bind group を焼き直した累計回数（ADR 0066 決定 5 の焼き込み単位の分離）。
+   * The cumulative number of times the bind groups containing state were re-baked (the separate
+   * bake units of ADR 0066 decision 5).
    *
-   * 焼き直しが起きるのは **(context, backing 実体) の組が変わったとき**だけ — 初回・context の
-   * 切替・backing の再構築（別 signature への切替 / LRU 追い出し / 構築失敗からの復帰）。
-   * MUST: **run 数に比例して伸びていないこと**が、決定 5 の分離が効いていることの唯一の観測点。
-   * 比例して伸びる形は「切替のたびに全部組み直す」状態そのもので、値は正しいまま decode の
-   * ホットパスに createBindGroup が戻る（例外も警告も出ない）。
+   * Re-baking happens only **when the (context, backing instance) pair changes** — the first time,
+   * a context switch, and a rebuild of the backing (a switch to another signature / LRU eviction /
+   * recovery from a failed build).
+   * MUST: **this not growing in proportion to the run count** is the only observation point that
+   * decision 5's separation is working. Proportional growth is exactly the state of "rebuilding
+   * everything on every switch", in which createBindGroup returns to the decode hot path while the
+   * values stay correct (no exception, no warning).
    */
   readonly rebindCount: number;
 };
 
 export type SessionDiagnostics = {
   /**
-   * **この Session が使った**パイプラインキーの本数（グラフと opt-in の組み合わせに対して
-   * 何本のカーネルが立ったか）。
+   * The number of pipeline keys **this Session used** (how many kernels were set up for the
+   * combination of graph and opt-ins).
    *
-   * MUST: 定義は「使ったキーの本数」であって「この Session が生成させた本数」ではない。
-   * パイプラインキャッシュは device 寿命（GpuContext 所有）なので、同一 device の先行 Session が
-   * 既に作っていればこの Session は 1 本も生成しない — 生成側の定義にすると、同じグラフの
-   * Session が「1 本目は 3・2 本目は 0」と報告する形になり、カーネル本数の観測点として使えない。
-   * NOTE: パイプラインは初回 run で作られるので、構築直後は 0（{@link SessionBuildStats}）。
+   * MUST: the definition is "the number of keys used", not "the number this Session caused to be
+   * created". The pipeline cache lives as long as the device (owned by the GpuContext), so if an
+   * earlier Session on the same device already created them, this Session creates none — with a
+   * creation-side definition, Sessions of the same graph would report "3 for the first, 0 for the
+   * second", useless as an observation point for the kernel count.
+   * NOTE: pipelines are created on the first run, so this is 0 right after construction
+   * ({@link SessionBuildStats}).
    */
   readonly pipelineCount: number;
   /**
-   * この device 上のキャッシュが抱えるパイプラインキーの総本数（全 Session の和集合）。
+   * The total number of pipeline keys held by the cache on this device (the union over all
+   * Sessions).
    *
-   * dispose 済み Session が使ったキーもここには残る（キャッシュの寿命は GpuContext と一致し、
-   * 解放は `GpuContext.destroy` のみ）。{@link SessionDiagnostics.pipelineCount} との差が
-   * 「同一 device の他 Session ぶん」で、run を跨いで単調に増え続ける形は codegen 決定性の破れ
-   * （キーに載せるべきでない値が載っている）の唯一の観測点になる。
+   * Keys used by disposed Sessions stay here too (the cache lives as long as the GpuContext and is
+   * released only by `GpuContext.destroy`). The difference from
+   * {@link SessionDiagnostics.pipelineCount} is "the share of other Sessions on the same device",
+   * and steady growth across runs is the only observation point for a break of codegen determinism
+   * (a value that should not be in the key is in it).
    */
   readonly devicePipelineCount: number;
   readonly submit: SubmitStats;
   /**
-   * 重み（initializer）アリーナの実績。**params キャッシュ（Session 常駐）の実体もここが
-   * 所有する**ので、`allocCount` は initializer 本数 + 生成済み params 本数になる。
+   * What the weight (initializer) arena achieved. **It also owns the backing of the params cache
+   * (resident in the Session)**, so `allocCount` is the initializer count + the number of params
+   * created.
    */
   readonly weights: ArenaStats;
-  /** 低精度格納の適格 / 適格外の内訳（ADR 0006 の常設診断）。 */
+  /**
+   * The eligible / non-eligible breakdown of low-precision storage (the permanent diagnostic of ADR
+   * 0006).
+   */
   readonly storage: StorageDiagnostics;
   /**
-   * 構築相の費用内訳（Session の寿命を通じて不変 — 構築が終わった時点で確定する）。
-   * 帰属の限界は {@link SessionBuildStats} の docstring。
+   * The cost breakdown of the construction phase (unchanged over the Session's lifetime — fixed
+   * when construction finishes).
+   * The limits of attribution are in the docstring of {@link SessionBuildStats}.
    */
   readonly buildStats: SessionBuildStats;
   /**
-   * この Session の GEMM 幾何プロファイルの名前（adapter の vendor / architecture から構築時に
-   * 1 度だけ選ばれる静的な表 — どれにも当たらない機は `"default"`。`acquireGpu({ geometryProfile })`
-   * で表が注入された device では、その表の `id`）。Session の寿命を通じて不変。
+   * The name of this Session's GEMM geometry profile (a static table selected once at construction
+   * from the adapter's vendor / architecture — `"default"` on a machine that matches none; on a
+   * device into which a table was injected with `acquireGpu({ geometryProfile })`, that table's
+   * `id`). Unchanged over the Session's lifetime.
    *
-   * 幾何は数値契約を動かさない（担当割りだけ）ので値には出ないが、速度とパイプラインキーの
-   * 幾何判別子（`reg64x32r4x4w8` など）には出る。どの表で走ったかを名指す唯一の観測点。
-   * NOTE: 名前は診断用のラベルで semver の対象外（表の追加・改名で予告なく変わる）。
+   * Geometry does not move the numeric contract (only the work assignment), so it does not show in
+   * the values, but it does show in speed and in the geometry discriminator of the pipeline keys
+   * (`reg64x32r4x4w8` and the like). The only observation point that names which table ran.
+   * NOTE: the name is a diagnostic label outside semver (it can change without notice as tables are
+   * added or renamed).
    */
   readonly geometryProfile: string;
   /**
-   * 直近 run の中間バッファ実績。未実行なら undefined。
+   * The intermediate-buffer figures of the latest run. undefined if nothing has run.
    *
-   * NOTE: slot backing に乗った run（{@link PlanBackingStats}）では中間バッファも入力バッファも
-   * アリーナを通らないため、ここに残るのは readback staging のぶんだけになり、計画から写す
-   * 3 欄（`reuseCount` / `transientBytes` / `peakTransientBytes`）は 0 になる
-   * （値の意味は不変 — 「その run がアリーナで確保したもの」と「その run の計画」）。
+   * NOTE: in a run on a slot backing ({@link PlanBackingStats}), neither intermediate buffers nor
+   * input buffers go through the arena, so only the readback staging remains here, and the three
+   * fields copied from the plan (`reuseCount` / `transientBytes` / `peakTransientBytes`) are 0 (the
+   * meaning of the values is unchanged — "what that run allocated from the arena" and "that run's
+   * plan").
    */
   readonly lastRun: ArenaStats | undefined;
   /**
-   * 直近 run の **op 別 GPU 実時間内訳**（パイプラインキー別 — ADR 0021）。
-   * 計測が無効な device（`acquireGpu` の `gpuTiming` / feature 不在）では undefined。
-   * `lastRun` と同じ寿命で、run の開始でリセットされる。
+   * The **per-op GPU time breakdown** of the latest run (per pipeline key — ADR 0021).
+   * undefined on a device where measurement is disabled (`gpuTiming` of `acquireGpu` / the feature
+   * is absent). Same lifetime as `lastRun`; reset at the start of a run.
    */
   readonly lastRunTiming: GpuTimingStats | undefined;
   /**
-   * 直近 run の**計画時**に適用が決まった融合 / 別名化の回数（ルール別 —
-   * src/runtime/fusion.ts）。未実行なら undefined で、run のたびに丸ごと置き換わる。
+   * The number of fusions / aliasings decided **at planning time** for the latest run (per rule —
+   * src/runtime/fusion.ts). undefined if nothing has run, and replaced wholesale by every run.
    *
-   * MUST: 常設診断として出す。融合はエクスポータのノード発行順が 1 つ変わるだけで黙って
-   * 外れ、値は正しいまま性能だけが戻る（例外も警告も出ない）。ここが唯一の観測点。
+   * MUST: emit this as a permanent diagnostic. A fusion silently stops applying when a single node
+   * of the exporter's emission order changes, and only the speed drops while the values stay
+   * correct (no exception, no warning). This is the only observation point.
    */
   readonly lastRunFusions: FusionCounts | undefined;
   /**
-   * 直近 run の params キャッシュ実績。未実行なら undefined で、run のたびに置き換わる。
-   * 実体（バッファ）は Session 常駐なので、ここは「その run が何本作り、何本使い回したか」。
+   * The params cache figures of the latest run. undefined if nothing has run; replaced by every run.
+   * The backing (the buffers) is resident in the Session, so this is "how many that run created and
+   * how many it reused".
    */
   readonly lastRunParams: ParamsCacheStats | undefined;
   /**
-   * 直近 run の導出済み計画キャッシュ実績。run の開始でリセットされ、導出相が決着した時点で
-   * 埋まる（未実行、および導出相の途中で落ちた run では undefined）。
+   * The prepared-plan cache figures of the latest run. Reset at the start of a run and filled when
+   * the derivation phase settles (undefined if nothing has run, and for a run that failed during
+   * the derivation phase).
    */
   readonly lastRunPrepared: PreparedPlanStats | undefined;
   /**
-   * 直近 run の**計画上の** dispatch 本数（パイプラインキー別・キーの辞書順）。run のたびに丸ごと
-   * 置き換わり、中身は計画時に決まる（{@link SessionDiagnostics.lastRunFusions} と同じ）。埋まる
-   * のは {@link SessionDiagnostics.lastRunPrepared} と同じ時点で、未実行の Session と導出相の
-   * 途中で落ちた run では undefined。
+   * The **planned** dispatch counts of the latest run (per pipeline key, in lexicographic key
+   * order). Replaced wholesale by every run; the content is decided at planning time (like
+   * {@link SessionDiagnostics.lastRunFusions}). It is filled at the same point as
+   * {@link SessionDiagnostics.lastRunPrepared}, and is undefined for a Session that has not run and
+   * for a run that failed during the derivation phase.
    *
-   * 計測（`acquireGpu` の `gpuTiming`）に依らず、常駐経路（`enqueue` / `enqueueRead`）でも埋まる。
-   * 縮退はパイプラインキーに出る（ADR 0058 決定 3）が、キーの一覧を
-   * {@link SessionDiagnostics.lastRunTiming} だけに載せると計測を要求した device でしか読めず、
-   * 計測を使えない常駐経路（ADR 0054）では縮退が観測できない — この欄がその穴を塞ぐ。
-   * NOTE: 数えるのは計画上の本数。論理長から workgroup 数を算出する states 形の dispatch は、
-   * その step の仕事量がゼロなら実際には積まれないので、`lastRunTiming` の `dispatchCount` より
-   * 多く出ることがある（それ以外の dispatch は実発行と 1 対 1）。
-   * NOTE: キーの綴りは診断用のラベルで semver の対象外（変種の追加・改名で予告なく変わる）。
+   * It is filled regardless of measurement (`gpuTiming` of `acquireGpu`), and also on the resident
+   * path (`enqueue` / `enqueueRead`). Fallbacks show in the pipeline keys (ADR 0058 decision 3), but
+   * if the list of keys were only in {@link SessionDiagnostics.lastRunTiming}, it could be read only
+   * on devices that requested measurement, and fallbacks could not be observed on the resident path,
+   * which cannot use measurement (ADR 0054) — this field closes that gap.
+   * NOTE: it counts planned dispatches. A states-form dispatch whose workgroup count is computed
+   * from the logical length is not actually recorded when that step has zero work, so this can be
+   * larger than `dispatchCount` of `lastRunTiming` (every other dispatch corresponds 1:1 to an
+   * actual issue).
+   * NOTE: the spelling of the keys is a diagnostic label outside semver (it can change without notice
+   * as variants are added or renamed).
    */
   readonly lastRunPipelines:
     | readonly { readonly key: string; readonly dispatchCount: number }[]
     | undefined;
   /**
-   * transient slot の GPU backing の実績（run ごとではなく Session の現況 + 累計）。
-   * 未構築の Session では `{ residentBytes: 0, inputBytes: 0, retainedCount: 0, buildCount: 0 }`。
+   * What the GPU backing of transient slots achieved (the Session's current state + cumulative
+   * counts, not per run).
+   * For a Session that has not built one:
+   * `{ residentBytes: 0, inputBytes: 0, retainedCount: 0, buildCount: 0 }`.
    */
   readonly planBacking: PlanBackingStats;
   /**
-   * state backing（{@link GenerationContext} 所有）の実績（Session の現況 + 累計 —
-   * ADR 0066 決定 5）。context を 1 本も作っていない Session では
-   * `{ residentBytes: 0, contextCount: 0, rebindCount: 0 }`。
+   * What the state backing (owned by a {@link GenerationContext}) achieved (the Session's current
+   * state + cumulative counts — ADR 0066 decision 5). For a Session that has created no context:
+   * `{ residentBytes: 0, contextCount: 0, rebindCount: 0 }`.
    */
   readonly stateBacking: StateBackingStats;
 };

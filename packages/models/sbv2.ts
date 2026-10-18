@@ -1,21 +1,23 @@
 /**
- * `@karume/models/sbv2` — SBV2（テキスト → 音声）ファミリのサブパス面。
+ * `@karume/models/sbv2` — the subpath surface of the SBV2 (text → speech) family.
  *
- * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
- * 面は利用者ストーリーに対応する — 組む（{@link Sbv2Pipeline.fromPretrained} /
- * {@link Sbv2Pipeline.fromAssets}）/ 発話にする（{@link toSbv2Utterance}）/ 合成する
- * （`generate`）/ 解放する（`dispose`）。
+ * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
+ * wholesale. The surface follows the user's stories — build ({@link Sbv2Pipeline.fromPretrained} /
+ * {@link Sbv2Pipeline.fromAssets}) / turn into an utterance ({@link toSbv2Utterance}) / synthesize
+ * (`generate`) / release (`dispose`).
  *
- * **0.6.0 の再裁定（breaking）**: テキスト解析（辞書・修正辞書）は呼び手の責務になり、
- * `generate` は解析済みの {@link Sbv2Utterance} を第 1 引数に受ける。ADR 0072 の注入席
- * （`text` / `overlay` / `prosody` / `givenTone` / `analyzeProsody`）とその語彙はシム無しで
- * 撤去した — 解析器を持たないぶん、入口は「渡された構造が自己整合していること」だけを見る。
+ * **The 0.6.0 re-ruling (breaking)**: text analysis (dictionary, correction dictionary) became the
+ * caller's responsibility, and `generate` takes an analysed {@link Sbv2Utterance} as its first
+ * argument. The injection slots of ADR 0072 (`text` / `overlay` / `prosody` / `givenTone` /
+ * `analyzeProsody`) and their vocabulary were removed without a shim — since the package has no
+ * analyser, the entry point checks only that "the given structure is self-consistent".
  *
- * スタイル名・話者名の受理集合は**配布形の `pipelineConfig`** が持つ（ADR 0038 §1）ので、
- * Anima の `parseResolution` に相当する「綴りの正本」はこのファミリには無い。
+ * The accepted sets of style names and speaker names are held by **the distribution's
+ * `pipelineConfig`** (ADR 0038 §1), so this family has no "source of truth for spellings" like
+ * Anima's `parseResolution`.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
- * barrel（`mod.ts`）経由の tree-shaking はこの不変条件の上にだけ成立する。
+ * MUST: every module is free of side effects (no execution at import, no global mutable state —
+ * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
 export { Sbv2Pipeline } from "./src/sbv2/pipeline.ts";
@@ -29,38 +31,43 @@ export type {
 } from "./src/sbv2/pipeline.ts";
 
 /**
- * 句構造の解析結果 → 発話の変換（純関数・GPU 不要）。核をモーラごとの 2 値トーンへ展開し、
- * 句の記号を末尾モーラへ寄せる。**アクセント句と核で読みを返す解析器の出力**は
- * {@link Sbv2Phrases} を構造的に満たすので、そのまま渡せる。
+ * Conversion from a phrase-structure analysis to an utterance (a pure function, no GPU needed). It
+ * expands the accent nucleus into a binary tone per mora and moves phrase punctuation onto the last
+ * mora. **The output of an analyser that returns readings as accent phrases with nuclei**
+ * structurally satisfies {@link Sbv2Phrases}, so it can be passed as is.
  */
 export { toSbv2Utterance } from "./src/sbv2/text/utterance.ts";
 
 /**
- * 発話の語彙。`moras` が編集面（`tone` を直すとアクセントが動く）で、`words` は読み取り専用。
- * **SBV2 が実際に読む欄だけ**を持つ（渡せるのに効かない欄を公開面に作らないため）。
+ * The vocabulary of an utterance. `moras` is the editable surface (changing `tone` moves the
+ * accent), and `words` is read-only. It has **only the fields SBV2 actually reads** (so that the
+ * public surface has no field that can be passed but has no effect).
  */
 export type { Sbv2Mora, Sbv2Phrases, Sbv2Utterance, Sbv2Word } from "./src/sbv2/text/utterance.ts";
 
 /**
- * 入力起因の失敗（呼び手が渡した要求が受理できない）。内部不変条件の破れは素の `Error` のまま
- * 飛ぶので、HTTP サーバーなら `instanceof` で 400 と 500 を分けられる。
+ * A failure caused by the input (the request the caller passed cannot be accepted). Broken internal
+ * invariants are thrown as plain `Error`s, so an HTTP server can tell 400 from 500 with
+ * `instanceof`.
  */
 export { Sbv2InputError } from "./src/sbv2/errors.ts";
 
 /**
- * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から
- * `karume-` を落とした綴り・値は pin 済み commit SHA — ADR 0073 / 0092）。今は 1 エントリ:
+ * **The table of sources verified with this package version** (one table per family; keys are the
+ * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
+ * One entry for now:
  *
  * - `SBV2_SOURCES["sbv2-jvnv"]` = `hdae/karume-sbv2-jvnv`
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link Sbv2Pipeline.fromPretrained}
- * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この表ではなく自分の
- * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
+ * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
+ * is as the first argument of {@link Sbv2Pipeline.fromPretrained}. To pin reproducibility yourself,
+ * write your own `{ repo, revision }` instead of using this table (`fromPretrained` has no default).
  */
 export { SBV2_SOURCES } from "./src/sbv2/config.ts";
 
 /**
- * 入力起因の失敗の**家族横断の親**（{@link Sbv2InputError} はこれの派生）。複数の家族を同じ
- * ホストに載せる側は、家族ごとの型を知らずにこれ 1 つで 400 と 500 を分けられる。
+ * **The cross-family parent** of input-caused failures ({@link Sbv2InputError} is a subclass of it).
+ * A host serving several families can tell 400 from 500 with this one type, without knowing each
+ * family's type.
  */
 export { ModelInputError } from "./src/errors.ts";

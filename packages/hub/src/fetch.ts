@@ -1,17 +1,21 @@
 /**
- * 取得の共通層。**取得元そのものは持たない** — 取得元の面は `source.ts` の契約で、実装は
- * `sources/`（HF とローカルディレクトリ）。ここに残るのは、取得元が何であっても同じでなければ
- * ならない作法だけ:
+ * The common fetch layer. **It holds no source itself** — the source surface is the contract in
+ * `source.ts`, implemented in `sources/` (HF and local directory). What remains here are only the
+ * conventions that must be the same whatever the source is:
  *
- * - 世代は**セッションあたり 1 回だけ**解決し、manifest も全ファイルも同一世代に固定して取得する
- *   （可変 ref のまま複数回解決すると manifest と重みが別の世代から来る）。例外は manifest が
- *   明示した**越境参照**（`FileRef` の `repo` / `revision` — ADR 0038 §7）だけで、その 1 本は
- *   セッションの世代ではなく宣言された (repo, revision) から取る。
- * - 取得と進捗総量の一意化（{@link fileRefKey}）・進捗の集計（`progress.ts`）。
- * - 同時取得の律速は面ごとに違う（全量面はバイト予算・温め面は本数 4）。
- * - `AbortSignal` は全取得へ透過し、**取得元が network に出ない区間でも**面の境界で明示的に見る。
- * - 引き渡すバイト列が buffer 全体を占めること（tight view）の検査。
- * - 失敗の文脈付け（`context.ts` — 真の第一失敗の復元を含む）。
+ * - The generation is resolved **only once per session**, and the manifest and every file are
+ *   fetched pinned to that one generation (resolving a mutable ref several times would let the
+ *   manifest and the weights come from different generations). The only exception is a **cross-repo
+ *   reference** the manifest declares explicitly (`repo` / `revision` of a `FileRef` — ADR 0038
+ *   §7); that one file comes from the declared (repo, revision), not from the session's generation.
+ * - Deduplication of fetches and of the progress total ({@link fileRefKey}), and progress
+ *   aggregation (`progress.ts`).
+ * - Pacing of concurrent fetches differs per surface (a byte budget on the whole-file surface,
+ *   4 files on the warm-up surface).
+ * - `AbortSignal` is passed through to every fetch and is checked explicitly at the surface
+ *   boundaries, **even in stretches where the source does not go to the network**.
+ * - The check that handed-over bytes span the whole buffer (a tight view).
+ * - Adding context to failures (`context.ts` — including restoring the real first failure).
  */
 
 import { purgeLegacyCaches } from "./cache.ts";
@@ -51,65 +55,74 @@ import {
 import { createHfSource } from "./sources/hf.ts";
 
 /**
- * 温め面 {@link prefetchAssets}（相 1）の同時取得数（数十コンポーネントの manifest で接続を
- * 破綻させない）。相 1 は body をそのままキャッシュへ流す streaming なので、受信バッファの
- * 前確保が無い＝本数だけで RAM が決まらない。
+ * The number of concurrent fetches of the warm-up surface {@link prefetchAssets} (phase 1), so that
+ * a manifest with dozens of components does not break the connections. Phase 1 streams the body
+ * straight into the cache, with no pre-allocated receive buffer = the count alone does not
+ * determine RAM.
  */
 const CONCURRENCY = 4;
 
 /**
- * 全量面 {@link fetchAssets} の in-flight バイト予算（1.5GiB = 1,610,612,736 バイト）。
+ * The in-flight byte budget of the whole-file surface {@link fetchAssets} (1.5GiB =
+ * 1,610,612,736 bytes).
  *
- * `karume/5` では、容器の part（重み）は温め面（相 1）と容器面（`openContainerSource`）を
- * 通り、この面を通るのは manifest の `assets`（tokenizer・style vectors 等）だけになった
- * （`@karume/models` の呼び手は資産の取得の 1 か所）。ADR 0109 決定 7 が part 向けに決めた
- * 「本数 2・合計 = 最大 part 長 × 2」はこの面には入れず、予算は 1.5GiB のまま据え置く
- * （part が通らない面の予算を part 長から決める根拠が無い）。見直しの記録は ADR 0109 追記 2。
+ * With `karume/5`, container parts (the weights) go through the warm-up surface (phase 1) and the
+ * container surface (`openContainerSource`); only the manifest's `assets` (tokenizer, style
+ * vectors, …) go through this surface (the caller in `@karume/models` is the single place that
+ * fetches assets). The "count 2, total = largest part length × 2" that ADR 0109 decision 7 set for
+ * parts is not applied to this surface, and the budget stays at 1.5GiB (there is no basis for
+ * deriving the budget of a surface that parts do not pass through from the part length). The review
+ * is recorded in ADR 0109 addendum 2.
  *
- * 全量面は 1 ファイルにつき `ref.size` ぶんの受信バッファを**受信前に**確保するので、律速を
- * 本数にすると RAM ピークが「同時本数 × その時点で一番大きいファイル」で決まってしまう
- * （`karume/4` の shard を全量面で取っていた頃の実測: anima turbo i4 の先頭 4 本で計
- * 2.503GiB を同時前確保 — 8GB 機ターゲットではブラウザごと落ちる）。予算は前確保の合計に
- * 課すもので、これに加えて完走済みファイルの保持と検証の一時コピー（Chrome の
- * `crypto.subtle.digest` は入力を Blink 内部へ全量コピーする）が乗るため、単一 ArrayBuffer の
- * 上限（Chromium は 2,145,386,496 バイトで打ち切る）よりも明確に下へ置く。
+ * The whole-file surface allocates a receive buffer of `ref.size` per file **before receiving**,
+ * so pacing by count would make the RAM peak "concurrent count × the largest file at that moment"
+ * (measured when `karume/4` shards were fetched through this surface: the first 4 anima turbo i4
+ * files pre-allocated 2.503GiB at once — on an 8 GB target machine the whole browser goes down).
+ * The budget caps the sum of the pre-allocations; on top of it come the retained finished files and
+ * the temporary verification copy (Chrome's `crypto.subtle.digest` copies the whole input into
+ * Blink), so it sits clearly below the single-ArrayBuffer limit (Chromium cuts off at 2,145,386,496
+ * bytes).
  *
- * NOTE: その digest は取得元の中（network 取得の検証）にあり、共通層からは直列化できない —
- * 検証を委ねた以上、同時に走る本数を決めるのはこの予算だけになった。キャッシュヒットは記録
- * ハッシュの文字列比較で済むので digest ごと起きない（2 回目以降の起動でこのピークは立たない）。
+ * NOTE: that digest happens inside the source (verification of the network fetch) and cannot be
+ * serialised from the common layer — with verification delegated, this budget alone decides how
+ * many run at once. A cache hit needs only a string comparison of the recorded hash, so no digest
+ * happens at all (this peak does not appear on the second and later starts).
  *
- * 公開ノブにはしない — 「安全側へ下げる」以外の使い道が無い値であり、上げれば上のピークが
- * そのまま戻る。合わない配布が出たら定数ごと裁定し直す。
+ * Not a public knob — the value has no use other than "lower it to be safe", and raising it brings
+ * the peak above straight back. If a distribution does not fit, the constant is ruled on again.
  */
 const BYTE_BUDGET = 1.5 * 1024 * 1024 * 1024;
 
 /**
- * 中断（呼び出し側の `AbortSignal`）かどうか。中断は取得失敗ではないので `HubFetchError` に
- * 包まず素通しする — 包むと呼び出し側の「自分が止めたのか落ちたのか」の判別が壊れる。
+ * Whether this is a cancellation (the caller's `AbortSignal`). A cancellation is not a fetch
+ * failure, so it passes through without being wrapped in a `HubFetchError` — wrapping it would
+ * break the caller's ability to tell "I stopped it" from "it failed".
  *
- * MUST: 既定の `abort()` が作る DOMException だけを見ない — `abort(reason)` の custom reason
- * では `fetch` が **reason 自体**で reject するため、任意の値が中断の正体になり得る。判定は
- * 「実際に取得へ渡した signal が aborted で、捕まえた値がその reason と同一」に依る（合成した
- * 場合は合成後の signal — 上流の reason はそのまま伝播する）。
+ * MUST: do not look only at the DOMException the default `abort()` creates — with a custom reason,
+ * `abort(reason)` makes `fetch` reject with **the reason itself**, so any value can be the
+ * cancellation. The test is "the signal actually passed to the fetch is aborted, and the caught
+ * value is identical to its reason" (for a combined signal, the combined one — the upstream reason
+ * propagates as is).
  */
 const isAborted = (error: unknown, signal?: AbortSignal): boolean =>
   (error instanceof DOMException && error.name === "AbortError") ||
   (signal?.aborted === true && error === signal.reason);
 
 /**
- * 取得層が返す bytes は buffer 全体を占めていなければならない。理由は面ごとに 3 つ:
+ * The bytes the fetch layer returns must span the whole buffer. Three reasons, one per surface:
  *
- * - 全量面（`fetchAssets`）: 呼び手は `bytes.buffer` を全量 `ArrayBuffer` としてパーサへ渡す
- *   （slice で辻褄を合わせると RAM ピークが倍増する）。
- * - 区間読み口（`openAsset` と、`openContainerSource` の seek 経路）: `AssetRangeReader.read` の
- *   MUST（`source.ts`）どおり区間ちょうどの器を返す — 呼び手は `bytes.buffer` を写さずに区間
- *   そのものとして使え、byteOffset 0 なので整列要件のある view もそのまま作れる。
- * - 容器面（`openContainerSource` の scan 経路）: block はこの器の view として切り出すので、器が
- *   tight であることが「byteOffset = block.offset（64 の倍数）」— scale の Float32Array view に
- *   要る 4 B 整列 — の成立条件になる。
+ * - Full-download surface (`fetchAssets`): callers hand `bytes.buffer` to parsers as a full
+ *   `ArrayBuffer` (compensating with slice would double the RAM peak).
+ * - Range readers (`openAsset`, and the seek path of `openContainerSource`): per the MUST of
+ *   `AssetRangeReader.read` (`source.ts`) they return a buffer of exactly the range — callers can
+ *   use `bytes.buffer` as the range itself without copying, and with byteOffset 0, views with
+ *   alignment requirements can be created directly.
+ * - Container surface (the scan path of `openContainerSource`): blocks are sliced as views into
+ *   this buffer, so the buffer being tight is the condition for "byteOffset = block.offset (a
+ *   multiple of 64)" — the 4 B alignment a scale Float32Array view needs.
  *
- * SharedArrayBuffer 背面はここで弾く（述語が主張する `Uint8Array<ArrayBuffer>` を型の上でも嘘に
- * しない）。
+ * A SharedArrayBuffer backing is rejected here (so that the `Uint8Array<ArrayBuffer>` the predicate
+ * claims is not a lie at the type level either).
  */
 const isTightView = (bytes: Uint8Array<ArrayBufferLike>): bytes is Uint8Array<ArrayBuffer> =>
   bytes.buffer instanceof ArrayBuffer &&
@@ -131,8 +144,9 @@ export const assertTightView = (
 };
 
 /**
- * バイト列 → `Manifest` の唯一の変換点（取得元の検証フックの内側で呼ばれる）。`ownRepo` は
- * manifest を読み込んだ repo（取得元の名乗り `SourceOrigin.repo` — 持たない取得元は `undefined`）。
+ * The single conversion point bytes → `Manifest` (called inside the source's verification hook).
+ * `ownRepo` is the repo the manifest was loaded from (the source's naming `SourceOrigin.repo` —
+ * `undefined` for a source without it).
  */
 const decodeManifest = (
   bytes: Uint8Array<ArrayBufferLike>,
@@ -150,32 +164,38 @@ const decodeManifest = (
 };
 
 /**
- * `karume.json` を取得して parse する。世代の解決はここで 1 回だけ行い、**取得元ごと**返り値に
- * 載せる（{@link fetchAssets} 以降はその取得元・その世代で取得する）。
+ * Fetches and parses `karume.json`. The generation is resolved here, once, and **the source
+ * itself** is carried in the return value ({@link fetchAssets} and later fetch from that source and
+ * that generation).
  *
- * 第 1 引数は HF のリポ参照（{@link HubRepoRef}）か、取得元そのもの
- * （`localDirectory(...)` 等が返す不透明ハンドル）。前者は HF 取得元の省略記法。
+ * The first argument is an HF repo reference ({@link HubRepoRef}) or a source itself (the opaque
+ * handle returned by `localDirectory(...)` and the like). The former is shorthand for the HF
+ * source.
  *
- * セッションの入口でもあるので、ここで旧名前空間（`karume/1` 系）を 1 回だけ回収する
- * （取得元に関わらず — 旧版の hub が残した写しは、今どの取得元を使っていても不要）。
+ * This is also the session's entry point, so the legacy namespaces (the `karume/1` family) are
+ * reclaimed here, once (regardless of the source — copies left by older hub versions are unneeded
+ * whatever source is in use now).
  *
- * NOTE: manifest は資産と違い**期待 sha256 を事前に持てない**（正本の根なので）。したがって
- * キーは SHA 固定 resolve URL のままで、`parse` = UTF-8 decode + parse がバイト列 →
- * `Manifest` の唯一の変換点として残る（資産側の検証だけが取得元へ移った）。
+ * NOTE: unlike assets, the manifest **cannot have an expected sha256 in advance** (it is the root
+ * of the source of truth). So its key stays the SHA-pinned resolve URL, and `parse` = UTF-8
+ * decoding + parsing remains the single conversion point bytes → `Manifest` (only the verification
+ * of assets moved into the source).
  */
 export const loadManifest = async (
   ref: HubRepoRef | DistributionSource,
   options: LoadManifestOptions = {},
 ): Promise<LoadedManifest> => {
-  // 取得元の判別は**同一性**で行う（`source.ts` — ブランド欄も構造判別も持たせない）。
+  // A source is recognised by **identity** (`source.ts` — no brand field, no structural check).
   const isSource = isDistributionSource(ref);
-  // MUST: HF の repo 名は取得にも旧名前空間の回収にも触れる前に綴りを見る — repo は取得層で
-  // percent-encode されずに URL へ綴り込まれる（`/` が構造要素）ので、`?` `#` は
-  // `/resolve/<SHA>/...` を query / fragment へ押し出し、`../` や 3 セグメント以上は別の path を
-  // 指す。受理集合は越境参照の検査と同じ 1 本（{@link isRepoName}）。エラーを組み立てるのは
-  // 共通層なので、検査は取得元アダプター（`sources/hf.ts`）ではなくここに置く。
-  // 型の外（JS からの呼び出し等）で repo の無い参照が来ると `isRepoName` の split が素の
-  // TypeError で落ち、HubError で分岐する利用者に届かないので、文字列でないものも同じ分岐で断る。
+  // MUST: check the spelling of an HF repo name before touching either the fetch or the reclaiming
+  // of legacy namespaces — the fetch layer writes the repo into the URL without percent-encoding
+  // (`/` is structural), so `?` `#` push `/resolve/<SHA>/...` into the query / fragment, and `../`
+  // or three or more segments point at another path. The accepted set is the same single one as the
+  // cross-repo reference check ({@link isRepoName}). The common layer assembles errors, so the
+  // check lives here, not in the source adapter (`sources/hf.ts`).
+  // A ref without a repo arriving from outside the types (a call from JS, …) would make the split
+  // in `isRepoName` fail with a bare TypeError that never reaches users who branch on HubError, so
+  // non-strings are refused by the same branch.
   if (!isSource && (typeof ref.repo !== "string" || !isRepoName(ref.repo))) {
     throw new HubError(
       `loadManifest: repo '${ref.repo}' が HF の 'owner/name' でない` +
@@ -191,9 +211,10 @@ export const loadManifest = async (
     if (isAborted(error, options.signal)) throw error;
     throw revisionResolutionFailure(driver.origin, error);
   }
-  // MUST: SHA 固定 URL のキャッシュヒットは network に出ない＝取得元の signal 監視が効かないので、
-  // 取得の前後で明示的に中断を見る（見ないと中断済みの signal で呼んでも manifest が返り、
-  // 取り消したはずのロードがそのまま先へ進む）。
+  // MUST: a cache hit on a SHA-pinned URL does not go to the network = the source's signal watch
+  // has no effect, so check cancellation explicitly before and after the fetch (otherwise a call
+  // with an already-aborted signal still returns the manifest, and a load that was cancelled
+  // carries on).
   options.signal?.throwIfAborted();
   const pinned = driver.pin(generation, options);
   let manifest: Manifest | undefined;
@@ -209,24 +230,28 @@ export const loadManifest = async (
     if (error instanceof HubError || isAborted(error, options.signal)) throw error;
     throw manifestFetchFailure(pinned.origin, error);
   }
-  // 取得を抜けた直後にも見る（この後は同期の組み立てだけなので、これが返却前の最後の関門）。
+  // Check again right after the fetch (only synchronous assembly follows, so this is the last check
+  // before returning).
   options.signal?.throwIfAborted();
   if (manifest === undefined) {
     throw new Error(`hub: ${MANIFEST_FILENAME} の検証フックが走っていない（取得層の不変条件破れ）`);
   }
-  // 取得元は**この値が運ぶ**（識別欄から組み立て直さない — 復元手段の無い取得元が入れられない）。
+  // **This value carries** the source (it is not rebuilt from the identity fields — a source with
+  // no way to restore it could not be added otherwise).
   return new LoadedManifest(manifest, { driver, generation }, pinned.origin);
 };
 
 /**
- * 「キー → ファイル参照」の表を取得する。取得と進捗総量は **{@link fileRefKey} で一意化**され、
- * 同じ実体を指す複数のキーには同一のバイト列が入る。キーの綴りは**呼び手が決める** — hub は
- * 表を受け取って同じキーで返すだけで、意味を解釈しない。
+ * Fetches a "key → file reference" table. Fetches and the progress total are **deduplicated by
+ * {@link fileRefKey}**, and several keys pointing at the same file get the same bytes. **The caller
+ * decides** the spelling of the keys — hub takes the table and returns it with the same keys,
+ * without interpreting them.
  *
- * 検証（size / sha256）は取得元へ委ねる — manifest の `sha256` / `size` を期待値として渡すので、
- * network 取得は受信中に照合され、通ったエントリには記録ハッシュが焼かれる。以後のヒットは記録
- * との文字列比較だけで済み（全量ハッシュ 0 回）、記録が食い違う・記録が無いのに実ハッシュが
- * 合わないエントリは evict → 取り直し（self-heal）になる。
+ * Verification (size / sha256) is delegated to the source — the manifest's `sha256` / `size` are
+ * passed as expected values, so a network fetch is checked while receiving, and an entry that
+ * passes gets the hash recorded. Later hits need only a string comparison with the record (zero
+ * full-file hashes); an entry whose record disagrees, or which has no record and whose real hash
+ * does not match, is evicted and fetched again (self-heal).
  */
 export const fetchAssets = (
   loaded: LoadedManifest,
@@ -236,11 +261,11 @@ export const fetchAssets = (
   fetchAssetsWithBudget(loaded, files, options, BYTE_BUDGET);
 
 /**
- * {@link fetchAssets} の本体。in-flight のバイト予算だけを引数で受ける。
+ * The body of {@link fetchAssets}. Only the in-flight byte budget is taken as an argument.
  *
- * MUST: barrel（`mod.ts`）には出さない — 予算は公開ノブにしない（{@link BYTE_BUDGET} の注記）。
- * この口があるのは、律速の結線（予算待ち・追い越し禁止）を GB 級のデータ無しに数十バイトの予算で
- * 踏むテストのためだけである。
+ * MUST: not exported from the barrel (`mod.ts`) — the budget is not a public knob (the note on
+ * {@link BYTE_BUDGET}). This entry exists only for tests that exercise the pacing wiring (waiting
+ * for the budget, no overtaking) with a budget of tens of bytes instead of GB-sized data.
  */
 export const fetchAssetsWithBudget = async (
   loaded: LoadedManifest,
@@ -252,8 +277,9 @@ export const fetchAssetsWithBudget = async (
   const context = createFetchContext(loaded, source.origin);
 
   const keys = Object.keys(files);
-  // MUST: 一意化は path ではなく {@link fileRefKey} で行う — 越境参照が入った以上、別リポの
-  // 同名 path は別のバイト列であり、path で畳むと片方の bytes がもう片方に配られる。
+  // MUST: deduplicate by {@link fileRefKey}, not by path — with cross-repo references, a same-named
+  // path in another repo is different bytes, and folding by path would hand one's bytes to the
+  // other.
   const unique = new Map<string, FileRef>();
   for (const key of keys) {
     const ref = files[key];
@@ -271,9 +297,10 @@ export const fetchAssetsWithBudget = async (
   const bytesByRef = new Map<string, Uint8Array<ArrayBuffer>>();
 
   const fetchOne = async (ref: FileRef): Promise<void> => {
-    // MUST: キャッシュヒットは network に出ない＝取得元の signal 監視が効かない区間なので、
-    // 取得の前後で明示的に中断を見る（数 GB の読出しを回している最中に取り消しが効かないのは
-    // 中断の透過が壊れているのと同じ — 温め面 prefetchAssets と同型の確認）。
+    // MUST: a cache hit does not go to the network = a stretch where the source's signal watch has
+    // no effect, so check cancellation explicitly before and after the fetch (cancellation not
+    // working while several GB are being read is the same as broken cancellation pass-through — the
+    // same check as on the warm-up surface prefetchAssets).
     signal.throwIfAborted();
     let bytes: Uint8Array<ArrayBufferLike>;
     try {
@@ -286,55 +313,60 @@ export const fetchAssetsWithBudget = async (
       if (error instanceof HubError || isAborted(error, signal)) throw error;
       throw context.fetchFailure(ref, "取得", error);
     }
-    // 取得を抜けた直後にも見る — 前段の確認だけだと「キャッシュ読出しの最中に中断された」形が
-    // 観測されず、取り消したはずのファイルが complete まで進む。
+    // Check again right after the fetch — with only the earlier check, "cancelled in the middle of
+    // a cache read" goes unobserved, and a file that was cancelled advances to complete.
     signal.throwIfAborted();
     bytesByRef.set(fileRefKey(ref), assertTightView(bytes, ref.path));
     progress.complete(ref);
   };
 
-  // 送出は「本数」ではなく「in-flight の `ref.size` 合計」で律速する（{@link BYTE_BUDGET}）。
-  // 待つのはこのループ 1 本だけなので、`targets`（= 渡された表の順）の head-of-line
-  // blocking がそのまま送出順になる — 後続の小さいファイルに追い越させないので、同じ
-  // manifest なら同じ順に出る。
+  // Dispatch is paced by "the in-flight sum of `ref.size`", not by count ({@link BYTE_BUDGET}).
+  // Only this one loop waits, so head-of-line blocking over `targets` (= the order of the given
+  // table) is the dispatch order — later small files never overtake, so the same manifest
+  // dispatches in the same order.
   const admission = createByteAdmission(byteBudget);
   const running: Promise<void>[] = [];
   const run = async (ref: FileRef): Promise<void> => {
     try {
       await fetchOne(ref);
     } catch (error) {
-      // 1 本でも落ちたら残りを止める（fail loud — 全体が reject するのに DL を続ける意味はない）。
-      // MUST: ここで reject を外へ漏らさない — 決着を待つのは全送出の後なので、漏らすと
-      // 送出待ちの間に unhandled rejection になる。真の失敗理由は `failure` の reason が持つ。
+      // If even one fails, stop the rest (fail loud — there is no point continuing downloads when
+      // the whole call rejects).
+      // MUST: do not let the reject escape here — settlement is awaited only after every dispatch,
+      // so an escaped reject would become an unhandled rejection while dispatch is pending. The
+      // real failure reason is held by the reason of `failure`.
       failure.abort(error);
     } finally {
-      // 成否を問わず席を返す（返さないと後続が永久に待つ）。
+      // Return the slots whatever the outcome (otherwise later fetches wait forever).
       admission.release(ref.size);
     }
   };
   for (const ref of targets) {
-    // 失敗・中断の後に新しい取得を起こさない（`fetchOne` 冒頭の確認より前に止める）。
+    // Start no new fetch after a failure or cancellation (stop before the check at the top of
+    // `fetchOne`).
     if (signal.aborted) break;
     await admission.admit(ref.size);
     running.push(run(ref));
   }
-  // MUST: 失敗しても送出済み全本の決着を待ってから抜ける（早期 reject だと呼び出し側が
-  // catch した後も取得が背後で走り続け、abort の意味が無くなる）。`run` は reject しないので
-  // ここは常に成功で返る。
+  // MUST: even on failure, return only after every dispatched fetch has settled (an early reject
+  // would leave fetches running in the background after the caller caught it, making abort
+  // meaningless). `run` never rejects, so this always resolves.
   await Promise.all(running);
-  // MUST: 巻き添えの失敗ではなく**真の第一失敗**を上げる。`failure.abort()` は最初の 1 回だけが
-  // reason を決めるので、`failure.signal.reason` は必ず最初に落ちた 1 本の理由になる。ワーカーの
-  // reject をそのまま拾うと、巻き添え側が先に決着した場合にそちらが表面化する — しかも巻き添えは
-  // 中断由来なので `isAborted` で `HubFetchError` に包まれず（生の AbortError）、Chrome では
-  // 理由の文言まで固定文言（"BodyStreamBuffer was aborted"）へ差し替えられて真因が消える。
-  // 呼び手渡しの外部 signal による中断も、その reason がそのまま `failure` に載るので素通しの
-  // ままになる（中断が取得失敗に化けない）。
+  // MUST: raise **the real first failure**, not a collateral one. Only the first `failure.abort()`
+  // sets the reason, so `failure.signal.reason` is always the reason of the first fetch that
+  // failed. Picking up a worker's reject directly would surface a collateral failure when it
+  // settled first — and a collateral failure comes from the cancellation, so `isAborted` keeps it
+  // from being wrapped in a `HubFetchError` (a raw AbortError), and in Chrome even the message is
+  // replaced by a fixed text ("BodyStreamBuffer was aborted"), erasing the real cause.
+  // A cancellation through the external signal the caller passed also puts its reason into
+  // `failure` as is, so it still passes through (a cancellation does not turn into a fetch
+  // failure).
   if (failure.signal.aborted) throw failure.signal.reason;
-  // MUST: 全ファイルがキャッシュ済みの起動は 1 度も network に出ないため、決着後にも中断を見る
-  // （この後は同期の組み立てだけなので、これが返却前の最後の関門になる）。
+  // MUST: a start with every file cached never goes to the network, so check cancellation after
+  // settlement too (only synchronous assembly follows, so this is the last check before returning).
   signal.throwIfAborted();
 
-  // 表は一度だけ組む。fromEntries は __proto__ も通常の own property にする。
+  // Build the table once. fromEntries makes even __proto__ an ordinary own property.
   return Object.fromEntries(
     keys.map((key): readonly [string, Uint8Array<ArrayBuffer>] => {
       const bytes = bytesByRef.get(fileRefKey(files[key]));
@@ -347,8 +379,9 @@ export const fetchAssetsWithBudget = async (
 };
 
 /**
- * 相 1 の入力検査と進捗の組み立て。**取得元に触れる前**に済ませる（相 1 は渡された全 ref を
- * 落としてしまうので、network に出た後で呼び出し側の誤りに気づいても帯域が戻らない）。
+ * Input checks and progress setup for phase 1. Done **before touching the source** (phase 1
+ * downloads every ref given, so noticing a caller error after going to the network does not give
+ * the bandwidth back).
  */
 const preparePhase = (
   context: FetchContext,
@@ -362,8 +395,9 @@ const preparePhase = (
       { available },
     );
   }
-  // 重複検査の表はそのまま進捗の per-file 引き当て（`fileTotal`）にも使う。同一性は
-  // {@link fileRefKey}（越境参照は別リポの同名 path を別の 1 本として数える）。
+  // The duplicate-check table doubles as the per-file lookup for progress (`fileTotal`). Identity
+  // is {@link fileRefKey} (a cross-repo reference counts a same-named path of another repo as a
+  // separate file).
   const declared = new Map<string, FileRef>();
   for (const ref of refs) {
     const refKey = fileRefKey(ref);
@@ -380,13 +414,14 @@ const preparePhase = (
 };
 
 /**
- * 全 ref を「RAM に載せずに、後の全量読みが安く済む状態」にする**相 1**（{@link prefetchAssets}
- * の本体）。
+ * **Phase 1**, which puts every ref into "a state where a later full read is cheap, without holding
+ * it in RAM" (the body of {@link prefetchAssets}).
  *
- * MUST: 相 1 の能力は**ref ごとに**見る（`source.ts` ④は取得元ごとの optional 能力で、越境参照は
- * セッションと違う取得元から来る）。セッションの取得元だけで決めると、ローカルセッション +
- * 越境先が HF という正当な構成で越境ぶんの温めが丸ごと飛び、進捗も `signal` も届かないまま
- * 実際の取得が後の読みの中（`openFile` の温め直し）で無音のまま走る。
+ * MUST: check the phase-1 capability **per ref** (`source.ts` (4) is an optional per-source
+ * capability, and a cross-repo reference comes from a source other than the session's). Deciding
+ * by the session's source alone would, in the valid setup of a local session + an HF cross-repo
+ * target, skip the warm-up of the cross-repo files entirely, and the real fetch would run silently
+ * inside a later read (the re-warm of `openFile`) with neither progress nor `signal` reaching it.
  */
 const runPrefetchPhase = async (
   source: PinnedSource,
@@ -402,33 +437,37 @@ const runPrefetchPhase = async (
       : AbortSignal.any([failure.signal, options.signal]);
 
   const prefetchOne = async (ref: FileRef): Promise<void> => {
-    // MUST: 記録ハッシュが一致するエントリは network に出ない＝取得元の signal 監視が効かない
-    // 区間なので、ファイルごとに明示的に中断を見る（見ないと、取り消しも第一失敗も温まっている
-    // ファイルに対してだけ効かず、残り全 ref を舐め切ってから決着する）。全量面 fetchOne と
-    // 同じ綴り。
+    // MUST: an entry whose recorded hash matches does not go to the network = a stretch where the
+    // source's signal watch has no effect, so check cancellation explicitly per file (otherwise
+    // neither cancellation nor the first failure takes effect for already-warm files, and the call
+    // settles only after running through every remaining ref). Spelt the same as fetchOne of the
+    // whole-file surface.
     prefetchSignal.throwIfAborted();
     let origin: PinnedSource;
     try {
       origin = sourceForRef(source, ref);
     } catch (error) {
-      // 未 mapping の越境（`sources/local.ts` の素の Error）は呼び手の設定不足なので、全量面と
-      // 同じ文脈付きの失敗にする（面ごとに見え方を変えない）。
+      // An unmapped cross-repo target (the bare Error of `sources/local.ts`) is missing
+      // configuration on the caller's side, so make it the same failure with context as on the
+      // whole-file surface (the surfaces do not differ in how it looks).
       if (error instanceof HubError) throw error;
       throw context.fetchFailure(ref, "事前取得", error);
     }
     const prefetchFile = origin.prefetchFile;
     if (prefetchFile === undefined) {
-      // セッションが相 1 を持つのに越境先だけが持たない形は取得元契約の破れ（`originFor` は
-      // 同じ取得元の別座標を返すものであって、能力を落とす口ではない）。
+      // The session having phase 1 while only the cross-repo target lacks it breaks the source
+      // contract (`originFor` returns other coordinates of the same source; it is not a way to drop
+      // capabilities).
       if (source.prefetchFile !== undefined) {
         throw new Error(
           `hub: 越境先の取得元が相 1 を持たない（${fileRefKey(ref)} — 取得元契約の不変条件破れ）`,
         );
       }
-      // 相 1 を持たない取得元（ローカルディレクトリ）の ref は温めずに、complete だけを 1 回出す
-      // （ADR 0086 追記 2026-10-11）— 直接読める取得元では「後の読みが安く済む状態」が最初から
-      // 満たされているので、この ref の温めは完了している。出さないと、呼び手が進捗の分母に
-      // 入れたこの ref の分だけ最後の値が合計に届かず、取得元が混ざると規則が割れる。
+      // A ref of a source without phase 1 (a local directory) is not warmed; only one complete is
+      // emitted (ADR 0086 addendum 2026-10-11) — for a source that reads directly, "a later read is
+      // cheap" holds from the start, so this ref's warm-up is done. Without it, the final value
+      // would fall short of the total by this ref, which the caller put in the progress
+      // denominator, and the rule would split when sources are mixed.
       progress.complete(ref);
       return;
     }
@@ -440,19 +479,22 @@ const runPrefetchPhase = async (
       });
     } catch (error) {
       if (error instanceof HubError || isAborted(error, prefetchSignal)) throw error;
-      // MUST: 捕まえた値の同一性だけで中断を判定しない — 相 1 はバイト列を手元に持たない
-      // 面なので、転送中断も put の reject として現れ、`cause` に沈めて包まれる。signal が
-      // 落ちていればその reason（巻き添えなら最初の失敗そのもの）を素通しする。
-      // NOTE: 上の `isAborted` を先に通る形（生の AbortError）ではここに来ないので、これだけでは
-      //       真因の復元にならない。最終的な決着は相 1 の allSettled の後で reason から取る。
+      // MUST: do not judge cancellation by the identity of the caught value alone — phase 1 is a
+      // surface that does not hold the bytes, so an interrupted transfer also shows up as a put
+      // reject, wrapped and buried in `cause`. If the signal is aborted, pass its reason through
+      // (for a collateral failure, the first failure itself).
+      // NOTE: the shape that passes the `isAborted` above first (a raw AbortError) never gets here,
+      //       so this alone does not restore the real cause. The final outcome is taken from the
+      //       reason after phase 1's allSettled.
       if (prefetchSignal.aborted) throw prefetchSignal.reason;
       throw context.fetchFailure(ref, "事前取得", error);
     }
-    // 温めを抜けた直後にも見る（全量面 fetchOne と同じ前後の確認）— 前段だけだと、中断の前に
-    // 飛び込み済みのファイル（最大 {@link CONCURRENCY} 本）が中断の後に complete を出し、取り消した
-    // ロードの進捗が進んで見える。
+    // Check again right after the warm-up (the same before-and-after checks as fetchOne of the
+    // whole-file surface) — with only the earlier check, files already in flight before the
+    // cancellation (at most {@link CONCURRENCY}) would emit complete after it, and a cancelled
+    // load's progress would appear to advance.
     prefetchSignal.throwIfAborted();
-    // この面が `complete` の発行者（終端はここしかない — `AssetPhase` の契約）。
+    // This surface emits `complete` (this is the only end — the contract of `AssetPhase`).
     progress.complete(ref);
   };
 
@@ -461,48 +503,54 @@ const runPrefetchPhase = async (
     try {
       while (next < refs.length) await prefetchOne(refs[next++]);
     } catch (error) {
-      // 1 本でも落ちたら残りを止める（fail loud — 全体が reject するのに DL を続ける意味はない）。
+      // If even one fails, stop the rest (fail loud — there is no point continuing downloads when
+      // the whole call rejects).
       failure.abort(error);
       throw error;
     }
   };
-  // MUST: 失敗しても全ワーカーの決着を待ってから抜ける（全量面と同じ理由 — 早期 reject だと
-  // 呼び出し側が catch した後も取得が背後で走り続ける）。
+  // MUST: even on failure, return only after every worker has settled (the same reason as on the
+  // whole-file surface — an early reject would leave fetches running in the background after the
+  // caller caught it).
   await Promise.allSettled(
     Array.from({ length: Math.min(CONCURRENCY, refs.length) }, () => worker()),
   );
-  // MUST: 巻き添えではなく**真の第一失敗**を上げる（全量面と同じ理由）。ワーカーの reject を
-  // 配列順に拾うと、真犯人が worker[0] 以外だったときに巻き添え側が表面化する。
+  // MUST: raise **the real first failure**, not a collateral one (the same reason as on the
+  // whole-file surface). Picking up worker rejects in array order would surface a collateral
+  // failure when the real culprit was not worker[0].
   if (failure.signal.aborted) throw failure.signal.reason;
 };
 
 /**
- * 資産を**先に温めるだけ**の面（相 1）。重みを先に落としておく面 — 後続の
- * {@link fetchAssets} や容器面（`openContainerSource`）は network に出ない。
+ * A surface that **only warms assets ahead of time** (phase 1). It downloads the weights first —
+ * later {@link fetchAssets} calls and the container surface (`openContainerSource`) do not go to
+ * the network.
  *
- * 使いどころは「Session を遅延構築するパイプラインのロード時」— 構築が初回の実行まで遅れると
- * 重みの DL もそこまで遅れ、ロード進捗にも現れない。ここで先に落としておけば、進捗は
- * ロード中に出揃い、構築はキャッシュ読出しだけで済む。
+ * Use it "at load time of a pipeline that builds its Session lazily" — if building waits until the
+ * first run, the weight download waits too and does not show in the load progress. Downloading here
+ * first makes the progress complete during the load, and building needs only cache reads.
  *
- * 同時 {@link CONCURRENCY} 本・`sha256` は通過中に照合・失敗は真因を復元して `HubFetchError`。
- * バイト列は返さない（RAM に載せない面なので、欲しいときは {@link fetchAssets} や容器の区間読み
- * （{@link openAsset}）で読み直す — キャッシュヒットになる）。
+ * {@link CONCURRENCY} at a time, `sha256` checked in transit, a failure restores the real cause as
+ * a `HubFetchError`. No bytes are returned (this surface keeps nothing in RAM; to get them, read
+ * again with {@link fetchAssets} or a range read ({@link openAsset}) — it will be a cache hit).
  *
- * 進捗は `downloading`* に続けて**ファイルごとに `complete` を 1 回**出す（この面が終端 —
- * `AssetPhase` の契約。キャッシュ済みのファイルは `complete` 1 点だけ）。取得の要らない ref
- * （下の段落）も例外ではない — 渡した全 ref が `complete` を 1 回ずつ出すので、呼び手が渡した
- * ref の size 合計を分母にすれば、取得元が混ざっても最後の `loaded` が分母に届く（ADR 0086 追記
- * 2026-10-11）。
+ * Progress emits `downloading`* followed by **one `complete` per file** (this surface is the end —
+ * the contract of `AssetPhase`; a cached file emits only the single `complete`). Refs that need no
+ * fetch (next paragraph) are no exception — every ref passed in emits one `complete`, so if the
+ * caller uses the sum of the sizes of the refs it passed as the denominator, the final `loaded`
+ * reaches it even with mixed sources (ADR 0086 addendum 2026-10-11).
  *
- * **相 1 を持たない取得元（ローカルディレクトリ）の ref は、入力検査だけを行って温めない** —
- * その ref の進捗は `complete` の 1 点だけ（キャッシュ済みと同じ形）。判定は**ref ごと**なので、
- * ローカルセッション + 越境先が HF という構成では越境ぶんだけが温まる。
- * fail loudly にはしない: この面の約束は「後続の読みが安く済む状態にする」
- * ことで、直接読める取得元では**最初から満たされている**（温めるべきキャッシュが無いのは失敗
- * ではない）。落とすと、取得元を差し替えられるはずのアプリが取得元ごとに分岐する羽目になる。
+ * **Refs of a source without phase 1 (a local directory) get the input checks only and are not
+ * warmed** — their progress is the single `complete` (the same shape as a cached file). The
+ * decision is **per ref**, so with a local session + an HF cross-repo target only the cross-repo
+ * files are warmed.
+ * It does not fail loudly: this surface promises "a state where later reads are cheap", which for a
+ * source that reads directly **holds from the start** (having no cache to warm is not a failure).
+ * Failing would force apps, which should be able to swap sources, to branch per source.
  *
- * NOTE: HF 取得元では `caches` が無い環境・キャッシュ書込み失敗（quota 超過等）は **fail loud**
- * （バイト列を手元に持たない面なので素 fetch へ縮退する余地が無い）。
+ * NOTE: with the HF source, an environment without `caches` and a failed cache write (quota
+ * exceeded, …) **fail loudly** (this surface does not hold the bytes, so there is no room to fall
+ * back to a plain fetch).
  */
 export const prefetchAssets = async (
   loaded: LoadedManifest,
@@ -513,47 +561,54 @@ export const prefetchAssets = async (
   const context = createFetchContext(loaded, source.origin);
   const progress = preparePhase(context, refs, options);
   await runPrefetchPhase(source, context, refs, options, progress);
-  // MUST: 全ファイルがキャッシュ済みの呼び出しは 1 度も network に出ない＝取得元の signal 監視が
-  // 効かないので、決着後にも中断を見る（これが返却前の最後の関門）。
+  // MUST: a call with every file cached never goes to the network = the source's signal watch has
+  // no effect, so check cancellation after settlement too (the last check before returning).
   options.signal?.throwIfAborted();
 };
 
 /**
- * 資産 1 本の**区間読み口**を開く（`source.ts` ⑧）。全量面 {@link fetchAssets} が「宣言 size を
- * 丸ごと 1 本」を単位にするのに対し、この面は同じ 1 本から
- * `[offset, offset + length)` だけを引く — 数百 MiB の表から数 KB の行だけが要る消費側のための面。
+ * Opens the **range reader** of one asset (`source.ts` (8)). Where the whole-file surface
+ * {@link fetchAssets} works in units of "one whole file of the declared size", this surface pulls
+ * only `[offset, offset + length)` out of the same file — a surface for consumers that need only
+ * rows of a few KB out of a table of hundreds of MiB.
  *
- * **取得元がその能力を持たなければ `undefined`**（位置読みを持たないディレクトリアダプターを
- * 差したローカル取得元がその形）。fail loudly に
- * しないのは相 1（{@link prefetchAssets}）と同じ理由で、持たないことは失敗ではなく能力の差
- * だから — 呼び手は `undefined` を見て全量読みへ倒す（分岐は 1 箇所で済む）。
+ * **`undefined` when the source lacks that capability** (a local source given a directory adapter
+ * without positional reads has that shape). It does not fail loudly for the same reason as phase 1
+ * ({@link prefetchAssets}): lacking it is a difference in capability, not a failure — the caller
+ * sees `undefined` and falls back to a full read (one branch is enough).
  *
- * 読み口は**費用の型**を名乗る（{@link AssetRangeReader.cost}）。呼び手はそれで「行読みに
- * 切り替えてよい行数の上限」を変える — `"scan"` の取得元では offset に比例した読み飛ばしが
- * 1 行ごとに乗るので、行数が増えると全量 1 回の方が安くなる。
+ * The reader names its **cost class** ({@link AssetRangeReader.cost}). Callers use it to change
+ * "the maximum row count for which switching to row reads pays off" — with a `"scan"` source each
+ * row carries skipping proportional to the offset, so as the row count grows one full read becomes
+ * cheaper.
  *
- * ref の取得元は他の面と同じ解決（越境参照は宣言された (repo, revision) の取得元）で決まる。
- * **開く動作が何に触るかは取得元による**（`source.ts` ⑧）— ローカル取得元は読み口を作るだけで
- * network にもキャッシュにも書かない。HF 取得元は在庫が無い参照に限り、相 1 と同じ温め
- * （全量 DL → 永続キャッシュ）を 1 度だけ挟んでから開く（この呼び出しの `signal` はその温めの
- * 中断に効く）。温め以外のバイト取得は起きず、区間の実体に触れるのは
- * {@link AssetRangeReader.read} を呼んだときだけ。取得の文脈付け（{@link HubError} 系への
- * 包み直し）は通らない: この面は取得ではないので、失敗は取得元の素の `Error` として上がる。
+ * The ref's source is resolved as on the other surfaces (a cross-repo reference uses the source of
+ * the declared (repo, revision)). **What opening touches depends on the source** (`source.ts` (8))
+ * — the local source only creates the reader and writes neither to the network nor to a cache. The
+ * HF source, only for a ref not in the inventory, inserts the same warm-up as phase 1 (full
+ * download → persistent cache) exactly once before opening (this call's `signal` cancels that
+ * warm-up). No byte fetch other than warming happens, and the range's bytes are touched only when
+ * {@link AssetRangeReader.read} is called. The fetch context (re-wrapping into the {@link HubError}
+ * family) is not applied: this surface is not a fetch, so failures surface as the source's bare
+ * `Error`.
  *
- * この面が見るのは**宣言 `size` の境界だけ**で、全量面の size 門（`sizeViolation` →
- * `IntegrityError`）も sha256 の照合も掛からない（区間だけを読む以上、宣言と照合できる
- * 全量が手元に無い）。実体の破損は読んだ行の値として現れる。
+ * This surface checks **only the bounds of the declared `size`**; neither the whole-file size
+ * check (`sizeViolation` → `IntegrityError`) nor the sha256 comparison applies (reading only a
+ * range, there is no whole file at hand to compare with the declaration). Corruption of the file
+ * shows up as the values of the rows read.
  *
- * 面ごとの作法（`fetch` / `caches` / `headers` / `onCacheError` / `onRetry`）は他の面と同じく
- * **この呼び出しに渡した分だけ**が効く（ADR 0086 決定 1 — 取得元は生成時ではなく `pin` ごとに
- * 作法を受け取る）。ローカル取得元では 1 つも効かない（HTTP 取得元専用の語彙）。
+ * As on the other surfaces, the per-surface options (`fetch` / `caches` / `headers` /
+ * `onCacheError` / `onRetry`) apply **only as passed to this call** (ADR 0086 decision 1 — a source
+ * takes its options per `pin`, not at creation). None of them applies to the local source (they are
+ * vocabulary of the HTTP source only).
  */
 export const openAsset = async (
   loaded: LoadedManifest,
   ref: FileRef,
   options: LoadManifestOptions = {},
 ): Promise<AssetRangeReader | undefined> => {
-  // 中断は口の有無より先に見る（取得元の能力差で中断の見え方が変わらない — 共通層の作法）。
+  // Check cancellation before checking whether a reader exists (so source capabilities do not
+  // change how cancellation looks — a convention of the common layer).
   options.signal?.throwIfAborted();
   const source = sourceForRef(pinnedSourceOf(loaded, options), ref);
   const openFile = source.openFile;
@@ -561,19 +616,23 @@ export const openAsset = async (
   const reader = await openFile(ref, {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
-  // MUST: 開いた直後にも見る — 温め済みの口は network に出ない＝取得元の signal 監視が効かない
-  // 区間なので、見ないと開いている最中の中断が観測されず、取り消したはずの読み口が返る
-  // （loadManifest / prefetchAssets と同じ前後の確認）。open 時の signal を読み口へ持ち越さない
-  // 設計（`source.ts` ⑧の MUST NOT）はそのまま — ここで見るのは開く 1 回の決着だけ。
+  // MUST: check again right after opening — opening a warm reader does not go to the network = a
+  // stretch where the source's signal watch has no effect, so otherwise a cancellation during the
+  // open goes unobserved and a reader that was cancelled is returned (the same before-and-after
+  // checks as loadManifest / prefetchAssets). The design of not carrying the open-time signal into
+  // the reader (the MUST NOT of `source.ts` (8)) is unchanged — this checks only the settlement of
+  // the one open.
   options.signal?.throwIfAborted();
-  // tight view の検査も共通層の作法（`source.ts` の MUST）— 取得元ごとに置くと、取得元が
-  // 増えるたびに同じ不変条件を書き直すことになる。
+  // The tight view check is also a convention of the common layer (the MUST in `source.ts`) —
+  // placing it per source would mean rewriting the same invariant for every new source.
   return {
     cost: reader.cost,
     read: async (offset, length, readOptions) => {
-      // MUST: 宣言 size の境界もここで見る（この面の約束 — 上の doc）。取得元に任せると、HF の
-      // 取得層は宣言 size を読み出しの境界に使わないので、同じ sha256 に短い size を宣言した参照が
-      // warm エントリを開いたとき宣言の外（実体の残り）が読め、宣言で拒否するローカルと割れる。
+      // MUST: check the bounds of the declared size here too (this surface's promise — the doc
+      // above). Left to the source, the HF fetch layer does not use the declared size as the read
+      // bound, so a ref declaring a shorter size for the same sha256 could, on opening a warm
+      // entry, read past the declaration (the rest of the file), diverging from the local source,
+      // which rejects by the declaration.
       if (
         !Number.isInteger(offset) ||
         !Number.isInteger(length) ||

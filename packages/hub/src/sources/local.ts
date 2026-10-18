@@ -1,31 +1,35 @@
 /**
- * ローカル取得元アダプター — 「配布形がもう手元にある」場合の取得元。純 Web 標準（このファイル
- * は特定ランタイムの API を一切参照しない）。実体の読みは {@link DirectoryAdapter} 1 面へ委ね、
- * そこへ Deno / OPFS / IndexedDB / File System Access の picker を差し込む。
+ * The local source adapter — the source for when "the distribution is already here". Pure Web
+ * standard (this file references no runtime-specific API). Reading the files is delegated to the
+ * one surface {@link DirectoryAdapter}, into which Deno / Node / OPFS / IndexedDB / the File System
+ * Access picker are plugged.
  *
- * HF 取得元（`hf.ts`）との違いは能力そのもの:
+ * The difference from the HF source (`hf.ts`) is in the capabilities themselves:
  *
- * - **世代を持たない** — 手元のディレクトリは「今そこにある内容」しかなく、可変 ref も commit
- *   SHA も無い。暗黙 `main` の警告も出ない（固定するものが無い）。
- * - **相 1（prefetch）を持たない** — CacheStorage を通らないので「温める」に意味がない
- *   （`source.ts` ④）。バイト列の複製が 1 つも増えないのがローカル取得元の最大の利点で、
- *   キャッシュへ写すのは害でしかない。
- * - **区間読み（`source.ts` ⑧）を持てる** — アダプターが位置読み（`readFileRange`）を持つときだけ
- *   `openFile` が生え、費用の型は `"seek"`（offset に依らない）。
- *   ⑧ が見るのは**宣言 size の境界だけ**で、全量面の size 門（`sizeViolation`）も sha256 も
- *   掛からない（区間だけを読む以上、宣言と照合できる全量が手元に無い）— 実体の破損は読んだ行の
- *   値として現れる。
- * - **検証は size 厳密一致のみ**（sha256 は信頼する）。手元の
- *   ファイルは配布元と同じ「取得物」ではなく利用者の資産で、毎起動の全量ハッシュ（数 GiB）に
- *   見合う脅威が無い。size は読み終えた時点でタダで分かるので門として残す（途中で切れた
- *   コピー・別 quant の取り違えはここで落ちる）。
- * - **越境は明示 mapping だけ** — 隣接する同名ディレクトリを推測しない（`originFor`）。
- * - **在庫の削除を持たない** — 消せるのは「取ってきて溜めたもの」だけで、ディレクトリの中身は
- *   利用者の資産。在庫の照会（`source.ts` ⑥）の方は「全部ある」と答える。
+ * - **No generations** — a local directory has only "what is there now", with neither a mutable ref
+ *   nor a commit SHA. No implicit-`main` warning either (there is nothing to pin).
+ * - **No phase 1 (prefetch)** — it does not go through CacheStorage, so "warming" means nothing
+ *   (`source.ts` (4)). Adding not a single copy of the bytes is the local source's greatest
+ *   advantage; copying into a cache could only do harm.
+ * - **Range reads (`source.ts` (8)) are possible** — `openFile` exists only when the adapter has
+ *   positional reads (`readFileRange`), and the cost class is `"seek"` (independent of the offset).
+ *   (8) checks **only the bounds of the declared size**; neither the whole-file size check
+ *   (`sizeViolation`) nor sha256 applies (reading only a range, there is no whole file at hand to
+ *   compare with the declaration) — corruption of the file shows up as the values of the rows read.
+ * - **Verification is an exact size match only** (the sha256 is trusted). Local files are the
+ *   user's assets, not "fetched copies" of what the distributor serves, and there is no threat that
+ *   justifies hashing the whole thing (several GiB) on every start. The size is known for free once
+ *   reading finishes, so it stays as a check (a copy cut off midway or a mix-up with another quant
+ *   fails here).
+ * - **Cross-repo references by explicit mapping only** — no guessing of an adjacent directory of
+ *   the same name (`originFor`).
+ * - **No inventory deletion** — only "what was fetched and kept" can be deleted, and a directory's
+ *   contents are the user's assets. The inventory query (`source.ts` (6)) answers "everything is
+ *   there".
  *
- * MUST NOT: ここでエラーを組み立てない（診断の文脈を持つのは共通層 — `context.ts`）。例外は
- * 「呼び手の設定が足りない」ことを告げる素の `Error`（未 mapping の越境）で、共通層がそれを
- * 取得失敗として `cause` に残したまま包む。
+ * MUST NOT: assemble errors here (the common layer holds the diagnostic context — `context.ts`).
+ * The exception is a bare `Error` reporting that "the caller's configuration is incomplete" (an
+ * unmapped cross-repo target); the common layer wraps it as a fetch failure, keeping it as `cause`.
  */
 
 import { type FileRef, fileRefKey, MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "../manifest.ts";
@@ -40,23 +44,25 @@ import {
 } from "../source.ts";
 
 /**
- * ディレクトリ 1 つぶんの読み口。**必須はこの 1 メソッド（`readFile`）だけ**で、実装は
- * `@karume/hub/deno` の `denoDirectory`（`Deno.readFile`）のほか、ブラウザでは OPFS
- * （`FileSystemDirectoryHandle` → `File.arrayBuffer()`）・IndexedDB・File System Access の
- * picker が同じ形で乗る。
+ * The reader of one directory. **The only required method is `readFile`**; besides `denoDirectory`
+ * of `@karume/hub/deno` (`Deno.readFile`) and `nodeDirectory` of `@karume/hub/node`, in browsers
+ * OPFS (`FileSystemDirectoryHandle` → `File.arrayBuffer()`), IndexedDB and the File System Access
+ * picker fit the same shape.
  *
- * MUST: `readFile` が返す `Uint8Array` は **buffer 全体を占める**（tight view）— 共通層はここで
- * 受けたバイト列をそのまま `openContainer` の `bytes` 入力へ渡すので、余白のある view を返すと
- * 辻褄合わせの `slice` で RAM ピークが倍増する（共通層の tight view 検査がその場で落とす）。
- * MUST: 欠損は fail loudly（`undefined` や空バイト列を返さない）。エラーには**実体のパス**を
- * 載せる — 共通層が付けられるのは manifest 上の相対 path までで、「どのディレクトリの下を
- * 探したか」を知っているのはアダプターだけ。
- * MUST: `signal` を透過する（大きい part の読みは中断できなければならない）。
+ * MUST: the `Uint8Array` that `readFile` returns **spans its whole buffer** (a tight view) — the
+ * common layer passes the bytes received here as is to the `bytes` input of `openContainer`, so
+ * returning a view with slack would double the RAM peak with a compensating `slice` (the common
+ * layer's tight view check fails it on the spot).
+ * MUST: a missing file fails loudly (never return `undefined` or empty bytes). The error carries
+ * **the path of the file** — the common layer can add only the relative path in the manifest, and
+ * only the adapter knows "under which directory it looked".
+ * MUST: pass `signal` through (reads of large parts must be cancellable).
  *
- * `readFileRange`（任意）は**区間読み**（`source.ts` ⑧）の実体側: `[offset, offset + length)` を
- * `length` ちょうど返す（足りなければ throw — 短い戻りを返さない）。ディレクトリの実体は位置読みが
- * できるので、これを持つアダプターの読み口は費用の型 `"seek"` を名乗る。持たないアダプター
- * （区間だけを安く取れない読み口）では `openFile` ごと生えず、消費側は全量読みへ倒す。
+ * `readFileRange` (optional) is the file side of **range reads** (`source.ts` (8)): it returns
+ * exactly `length` bytes of `[offset, offset + length)` (throwing if there are not enough — never a
+ * short return). Directory files support positional reads, so an adapter with this method gets a
+ * reader with cost class `"seek"`. With an adapter without it (a reader that cannot fetch just a
+ * range cheaply), `openFile` does not exist at all, and the consumer falls back to a full read.
  */
 export type DirectoryAdapter = {
   readonly readFile: (
@@ -71,30 +77,34 @@ export type DirectoryAdapter = {
   ) => Promise<Uint8Array<ArrayBuffer>>;
 };
 
-/** {@link localDirectory} の設定。 */
+/** Settings of {@link localDirectory}. */
 export type LocalDirectoryOptions = {
   /**
-   * 診断に載せるディレクトリの名前（`ディレクトリ <label>` の形で全エラーの文言に出る）。
-   * 省略時は `"(ローカル)"` — アダプターがパスを知っている場合は必ず渡すこと
-   * （`denoDirectory` は解決済みの root をここへ入れる）。
+   * The directory name shown in diagnostics (it appears in every error message as the directory
+   * label). When omitted, a fixed placeholder (see `localDirectory`) — an adapter that knows the
+   * path should always pass it (`denoDirectory` and `nodeDirectory` put the `root` they were given
+   * here).
    */
   readonly label?: string;
   /**
-   * 越境参照（`FileRef` の `repo` + `revision` — ADR 0038 §7）の取得元。キーは manifest が
-   * 宣言している `"owner/name"` で、値はその repo を**まるごと**提供する取得元。
+   * The sources for cross-repo references (`repo` + `revision` of a `FileRef` — ADR 0038 §7). The
+   * key is the `"owner/name"` the manifest declares; the value is a source that provides that repo
+   * **as a whole**.
    *
-   * MUST: 明示 mapping だけを見る — 「隣に同名のディレクトリがあればそれ」のような推測は、
-   * 取り違えたバイト列を黙って読ませる（サイズが合えば通る）。宣言が無ければ落とす。
+   * MUST: look only at explicit mappings — a guess such as "if there is a same-named directory next
+   * door, use it" would silently read mixed-up bytes (they pass if the size matches). Without a
+   * declaration, fail.
    *
-   * NOTE: mapping に無い越境の委譲先（repo を問わず受ける取得元）の欄は持たない。委譲先として
-   * 働くのは HF リポの取得元だが、それを {@link DistributionSource} のハンドルとして組む公開 API
-   * が無い（`loadManifest` / `fromPretrained` が `HubRepoRef` を内部で解決する）ので、欄を置いても
-   * 公開面で作れる値のどれも委譲先として機能しない。公開 factory ができた時点で足す。
+   * NOTE: there is no field for a fallback delegate for cross-repo targets missing from the mapping
+   * (a source that accepts any repo). The delegate would be an HF repo source, but there is no
+   * public API that builds one as a {@link DistributionSource} handle (`loadManifest` /
+   * `fromPretrained` resolve a `HubRepoRef` internally), so even with the field, no value the
+   * public surface can create would work as a delegate. It is added once a public factory exists.
    */
   readonly crossRepo?: Readonly<Record<string, DistributionSource>>;
 };
 
-/** 越境先を宣言された (repo, revision) の座標で開く。 */
+/** Opens a cross-repo target at the declared (repo, revision) coordinates. */
 const pinTarget = (
   target: DistributionSource,
   revision: string,
@@ -109,18 +119,19 @@ const missingCrossRepo = (label: string, repo: string, revision: string): Error 
   );
 
 /**
- * ⑧区間読み口（`source.ts`）。**開く時点では実体に触れない** — 読みは `read` ごとに起きるので、
- * 開いたまま使わなければ I/O は 1 回も走らない。
+ * (8) The range reader (`source.ts`). **Opening does not touch the file** — reads happen per
+ * `read`, so a reader opened and never used runs no I/O at all.
  *
- * 区間の検査を**アダプターへ降ろさない**のは、アダプターが知っているのが実体だけだから: 実体は
- * 宣言 `size` より長いことがある（別 quant の取り違え・書きかけのコピー）ので、実体長で検査すると
- * manifest の外側のバイト列が黙って読める。宣言 size を持っているのはここ（取得元）だけ。
+ * The range check is **not pushed down to the adapter** because the adapter knows only the file:
+ * the file can be longer than the declared `size` (a mixed-up quant, a copy still being written),
+ * so checking against the file length would silently read bytes outside the manifest. Only this
+ * place (the source) holds the declared size.
  */
 const localRangeReader = (
   readRange: NonNullable<DirectoryAdapter["readFileRange"]>,
   ref: FileRef,
 ): AssetRangeReader => ({
-  // ディレクトリの実体は位置読みができるので、費用は offset に依らない。
+  // Directory files support positional reads, so the cost does not depend on the offset.
   cost: "seek",
   read: async (offset, length, options = {}) => {
     if (
@@ -139,8 +150,9 @@ const localRangeReader = (
     const bytes = await readRange(ref.path, offset, length, {
       ...(signal === undefined ? {} : { signal }),
     });
-    // MUST: 長さ違いを黙って通さない（短ければ消費側が 0 埋めの行を正常な値として読み、
-    // 長ければ要求の外のバイト列が混じる）。短い / 長いで原因が別なので文言を分ける。
+    // MUST: do not let a length mismatch through silently (if short, the consumer reads zero-filled
+    // rows as valid values; if long, bytes outside the request slip in). Short and long have
+    // different causes, so the messages differ.
     if (bytes.byteLength !== length) {
       const cause =
         bytes.byteLength < length
@@ -160,11 +172,12 @@ const pinnedLocalSource = (
   settings: LocalDirectoryOptions & { readonly label: string },
   options: LoadManifestOptions,
 ): PinnedSource => {
-  // 能力の有無はここで 1 度だけ見る（束縛にしておくと、口の中でも型が絞れたまま使える）。
+  // Check the capability once here (binding it keeps the type narrowed inside the reader too).
   const readRange = adapter.readFileRange;
   const origin: SourceOrigin = {
     label: `ディレクトリ ${settings.label}`,
-    // 取り直しても同じバイト列が返る失敗元（network のような再試行の余地が無い）。
+    // A failure origin that returns the same bytes when read again (no room for retry, unlike the
+    // network).
     integrity: "local",
   };
   return {
@@ -174,38 +187,42 @@ const pinnedLocalSource = (
       const bytes = await adapter.readFile(MANIFEST_FILENAME, {
         ...(signal === undefined ? {} : { signal }),
       });
-      // NOTE: 全量を読んでから門を見る（アダプターは全量読みしか持たない）。手元の実体に対する
-      // 形式検査で、送出側の悪意を想定する門ではないので、読み切ってから落として構わない
-      // （HF 取得元の `karume.json` も取得層に厳密一致なしの上限が無いため、同じく全量受信後に
-      // `parseManifest` が見る — `sources/hf.ts`）。
+      // NOTE: the check runs after reading everything (the adapter has only full reads). It is a
+      // format check on a local file, not a check that assumes a malicious sender, so failing after
+      // reading it all is fine (for the HF source's `karume.json` too, the fetch layer has no cap
+      // without exact match, so `parseManifest` checks it after the full receive —
+      // `sources/hf.ts`).
       if (bytes.byteLength > MAX_MANIFEST_BYTES) {
         throw sizeViolation(bytes.byteLength, origin.integrity);
       }
-      // MUST: parse の throw をそのまま外へ出す（ローカルには evict すべきキャッシュが無いので、
-      // 壊れた manifest は毎回同じ ManifestFormatError で落ちるのが正しい）。
+      // MUST: let parse's throw out as is (locally there is no cache to evict, so a broken manifest
+      // correctly fails with the same ManifestFormatError every time).
       parse(bytes);
     },
 
     readFile: async (ref, { signal, sizeViolation }) => {
       const abort = signal === undefined ? {} : { signal };
       const bytes = await adapter.readFile(ref.path, abort);
-      // 検証は size 厳密一致だけ（sha256 は信頼する）。onProgress は 1 度も呼ばない —
-      // 受信の途中という状態が無いので、共通層が complete の 1 点で閉じる。
+      // Verification is an exact size match only (the sha256 is trusted). onProgress is never
+      // called — there is no "midway through receiving" state, so the common layer closes with the
+      // single complete.
       if (bytes.byteLength !== ref.size) {
         throw sizeViolation(bytes.byteLength, origin.integrity);
       }
       return bytes;
     },
 
-    // 相 1（prefetchFile）は持たない — 上のモジュール doc を参照。
+    // No phase 1 (prefetchFile) — see the module doc above.
 
-    // ⑧区間読みは、アダプターが位置読みを持つときだけ生やす（`prefetchFile` と同じ流儀で
-    // optional 能力 — 持たないアダプターでは口ごと現れず、消費側は全量読みへ倒す）。
+    // (8) Range reads exist only when the adapter has positional reads (an optional capability in
+    // the same style as `prefetchFile` — with an adapter without it the reader does not appear at
+    // all, and the consumer falls back to a full read).
     ...(readRange === undefined
       ? {}
       : {
-          // 開く側の中断確認は共通層（`fetch.ts` の `openAsset`）の作法なのでここには置かない。
-          // 読みごとの中断は `AssetRangeReader.read` の signal がアダプターへ透過する。
+          // The cancellation check on open is a convention of the common layer (`openAsset` in
+          // `fetch.ts`), so it is not here. Per-read cancellation passes the signal of
+          // `AssetRangeReader.read` through to the adapter.
           openFile: (ref: FileRef) => Promise.resolve(localRangeReader(readRange, ref)),
         }),
 
@@ -217,17 +234,18 @@ const pinnedLocalSource = (
       return pinTarget(mapped[repo], revision, options);
     },
 
-    // ⑥在庫は常に「渡された全部がある」— 相 1 を持たないのと同じ理屈で、直接読める取得元では
-    // 「後の読みが安く済む状態」が最初から満たされている。実体の欠損は読む時に落ちる
-    // （在庫の照会でディレクトリを舐めると、資産数ぶんの I/O を照会のたびに払うことになる）。
+    // (6) The inventory is always "everything passed in is there" — by the same reasoning as having
+    // no phase 1, for a source that reads directly "a later read is cheap" holds from the start. A
+    // missing file fails when read (walking the directory on an inventory query would pay I/O per
+    // asset on every query).
     inventory: (refs) => Promise.resolve(new Set(refs.map(fileRefKey))),
-    // ⑦削除は持たない — ディレクトリの中身は取得物ではなく利用者の資産。
+    // No (7) deletion — a directory's contents are the user's assets, not fetched copies.
   };
 };
 
 /**
- * 手元のディレクトリを取得元にする。`loadManifest(localDirectory(adapter), …)` /
- * `fromPretrained(localDirectory(adapter))` の形で、HF 取得元と同じ面に乗る。
+ * Makes a local directory a source. It fits the same surfaces as the HF source, in the form
+ * `loadManifest(localDirectory(adapter), …)` / `fromPretrained(localDirectory(adapter))`.
  *
  * ```ts ignore
  * import { localDirectory, loadManifest } from "@karume/hub";
@@ -236,9 +254,9 @@ const pinnedLocalSource = (
  * const loaded = await loadManifest(denoDirectory("./models/karume-gemma4"));
  * ```
  *
- * 越境参照の相対サブディレクトリは**別の取得元を作って渡す**（`crossRepo: { "owner/name":
- * denoDirectory("./models/other") }`）— 取得元 1 つ = ディレクトリ 1 つに保つと、mapping の
- * 値がそのままリモートの取得元にも差し替わる。
+ * For relative subdirectories of cross-repo references, **create another source and pass it**
+ * (`crossRepo: { "owner/name": denoDirectory("./models/other") }`) — keeping one source = one
+ * directory lets a mapping value be swapped for a remote source as is.
  */
 export const localDirectory = (
   adapter: DirectoryAdapter,
@@ -247,7 +265,8 @@ export const localDirectory = (
   const settings = { ...options, label: options.label ?? "(ローカル)" };
   const driver: SourceDriver = {
     origin: { label: `ディレクトリ ${settings.label}`, integrity: "local" },
-    // 世代の概念が無いので解決も要求も起きない（暗黙 main の警告も出ない — 固定する対象が無い）。
+    // There is no notion of generations, so no resolution or request happens (no implicit-main
+    // warning either — there is nothing to pin).
     resolveGeneration: () => Promise.resolve(""),
     pin: (_generation, callOptions) => pinnedLocalSource(adapter, settings, callOptions),
   };

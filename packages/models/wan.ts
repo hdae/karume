@@ -1,62 +1,73 @@
 /**
- * `@karume/models/wan` — Wan2.1 / 2.2（テキスト → 動画）ファミリのサブパス面（ADR 0118 決定 7・
- * ADR 0121 決定 10）。
+ * `@karume/models/wan` — the subpath surface of the Wan2.1 / 2.2 (text → video) family (ADR 0118
+ * decision 7, ADR 0121 decision 10).
  *
- * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
- * 面は利用者ストーリーに対応する — 組む（{@link WanPipeline.fromPretrained} /
- * {@link WanPipeline.fromAssets}・Wan2.2 は {@link WanTi2vPipeline} の同名の 2 つ・テキストエンコーダの
- * 経路 `textEncoder`）/ 取得元を選ぶ（{@link WAN_SOURCES} — Wan2.2 だけ）/ 例示のプロンプトを引く
- * （`prompts`）/ 生成する（`generate` — Wan2.2 は条件画像からも: {@link WanTi2vGenerateRequest}）/ 生成の途中経過を
- * 購読する（`onEvent` — {@link WanGenerateEvent}）/
- * 中断する（構築と生成の `signal`）/ フレームを画素にする（{@link wanFrameToRgba}）/ 解放する（`dispose`）。
+ * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
+ * wholesale. The surface follows the user's stories — build ({@link WanPipeline.fromPretrained} /
+ * {@link WanPipeline.fromAssets}; for Wan2.2 the two methods of the same names on
+ * {@link WanTi2vPipeline}; the text encoder path `textEncoder`) / choose a source
+ * ({@link WAN_SOURCES} — Wan2.2 only) / look up the example prompts (`prompts`) / generate
+ * (`generate` — Wan2.2 also from a conditioning image: {@link WanTi2vGenerateRequest}) / subscribe
+ * to generation progress (`onEvent` — {@link WanGenerateEvent}) / abort (the `signal` of
+ * construction and generation) / turn frames into pixels ({@link wanFrameToRgba}) / release
+ * (`dispose`).
  *
- * テキストエンコーダの経路は 2 つ（ADR 0119 決定 7）: 既定の `"gpu"` は umT5（i8・umT5 の配布リポへの
- * 越境参照）を GPU で回して任意のプロンプトを受け、`"precomputed"` は umT5 を取らずにテキスト埋め込み
- * 資産の固定プロンプトだけを受ける。
+ * There are two text encoder paths (ADR 0119 decision 7): the default `"gpu"` runs umT5 (i8, by
+ * cross-repository reference to umT5's distribution repository) on the GPU and accepts any prompt;
+ * `"precomputed"` does not fetch umT5 and accepts only the fixed prompts of the text embedding
+ * asset.
  *
- * 取得元の対応表（{@link WAN_SOURCES}）が持つのは Wan2.2（`karume-wan2.2`）だけ — Wan2.1 の配布形
- * `karume-wan2.1` は HF に公開しない（ADR 0118 追記（2026-10-15））。手元の配布形は `@karume/hub/deno` の
- * `denoDirectory` で `fromPretrained` へ渡し、`"gpu"` の経路では umT5 の配布形（`karume-umt5-xxl`）を
- * その `crossRepo` の mapping で渡す。
+ * The source table ({@link WAN_SOURCES}) holds only Wan2.2 (`karume-wan2.2`) — the Wan2.1
+ * distribution `karume-wan2.1` is not published on Hugging Face (ADR 0118 addendum (2026-10-15)). A
+ * local distribution is passed to `fromPretrained` with `nodeDirectory` of `@karume/hub/node` or
+ * `denoDirectory` of `@karume/hub/deno`, and on the `"gpu"` path umT5's distribution
+ * (`karume-umt5-xxl`) is passed through that source's `crossRepo` mapping.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
- * barrel（`mod.ts`）経由の tree-shaking はこの不変条件の上にだけ成立する。
+ * MUST: every module is free of side effects (no execution at import, no global mutable state —
+ * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
 export { WanPipeline } from "./src/wan/pipeline.ts";
 /**
- * Wan2.2 TI2V 5B のテキスト（+ 条件画像）→ 動画（T2V と I2V）。構築・生成・中断・解放の面と公開型（結果・
- * イベント・構築オプション）は {@link WanPipeline} と同じで、受理集合（1280×704 / 704×1280・5〜121 フレーム）・
- * 潜在の形・fps は世代の値（ADR 0121 決定 10）。要求の型だけは 2.2 専用（{@link WanTi2vGenerateRequest} — I2V の
- * 条件画像 `image` と寸法の合わせ方 `fit`・ADR 0121 決定 11）。配布形は `karume-wan2.2`（ADR 0121 段 8 — recipe
- * `dist.py --pipeline wan-ti2v` が組む・HF の公開リポは {@link WAN_SOURCES} の `"wan2.2"`）。
+ * Wan2.2 TI2V 5B: text (+ a conditioning image) → video (T2V and I2V). The surface for
+ * construction, generation, abort and release and the public types (results, events, construction
+ * options) are the same as {@link WanPipeline}; the accepted set (1280×704 / 704×1280, 5 to 121
+ * frames), the latent shape and the fps are the generation's values (ADR 0121 decision 10). Only the
+ * request type is specific to 2.2 ({@link WanTi2vGenerateRequest} — the I2V conditioning image
+ * `image` and how it is fitted to the size, `fit`; ADR 0121 decision 11). The distribution is
+ * `karume-wan2.2` (ADR 0121 stage 8 — built by the recipe `dist.py --pipeline wan-ti2v`; the public
+ * Hugging Face repository is `"wan2.2"` of {@link WAN_SOURCES}).
  */
 export { WanTi2vPipeline } from "./src/wan/ti2v-pipeline.ts";
 export type { WanTi2vGenerateRequest } from "./src/wan/ti2v-pipeline.ts";
 /**
- * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から
- * `karume-` を落とした綴り・値は pin 済み commit SHA — ADR 0073 / 0092）。世代は別リポで、公開しているのは
- * Wan2.2 の 1 本だけ:
+ * **The table of sources verified with this package version** (one table per family; keys are the
+ * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
+ * Each generation is a separate repository, and only Wan2.2 is published:
  *
- * - `WAN_SOURCES["wan2.2"]` = `hdae/karume-wan2.2`（{@link WanTi2vPipeline.fromPretrained} が読む — umT5 は
- *   `karume-umt5-xxl` を越境参照する）
+ * - `WAN_SOURCES["wan2.2"]` = `hdae/karume-wan2.2` (read by {@link WanTi2vPipeline.fromPretrained} —
+ *   umT5 comes from `karume-umt5-xxl` by cross-repository reference)
  *
- * Wan2.1 は HF に公開しないのでキーが無い（{@link WanPipeline} には手元の配布形を渡す）。
+ * Wan2.1 is not published on Hugging Face, so it has no key (pass a local distribution to
+ * {@link WanPipeline}).
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link WanTi2vPipeline.fromPretrained}
- * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この表ではなく自分の
- * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
+ * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
+ * is as the first argument of {@link WanTi2vPipeline.fromPretrained}. To pin reproducibility
+ * yourself, write your own `{ repo, revision }` instead of using this table (`fromPretrained` has no
+ * default).
  */
 export { WAN_SOURCES } from "./src/wan/config.ts";
 /**
- * I2V の条件画像の寸法の合わせ方の語彙（{@link WanTi2vGenerateRequest} の `fit` — `"crop"` / `"stretch"`）。CLI / UI が
- * 選択肢を出すときに型で引けるように出す（{@link WanPromptRole} と同じ扱い）。
+ * The vocabulary of how the I2V conditioning image is fitted to the size (`fit` of
+ * {@link WanTi2vGenerateRequest} — `"crop"` / `"stretch"`). Exported so that CLIs / UIs can get the
+ * choices from the type (handled like {@link WanPromptRole}).
  */
 export type { WanI2vFit } from "./src/wan/i2v-preprocess.ts";
 /**
- * I2V の条件画像の形（RGB8・インターリーブ — {@link WanTi2vGenerateRequest} の `image`）。decode は呼び手（Karume は
- * 画像の decode を持たない）なので、型をこのサブパスだけで引けるように出す（birefnet / depth-anything / siglip2 の
- * サブパスと同じ型）。
+ * The shape of the I2V conditioning image (RGB8, interleaved — `image` of
+ * {@link WanTi2vGenerateRequest}). Decoding is the caller's job (Karume has no image decoder), so the
+ * type is exported to be available from this subpath alone (the same type as in the birefnet /
+ * depth-anything / siglip2 subpaths).
  */
 export type { Rgb8Image } from "./src/image/preprocess.ts";
 export type {
@@ -71,25 +82,28 @@ export type {
 } from "./src/wan/pipeline.ts";
 
 /**
- * テキスト埋め込み資産のプロンプトの 1 行（資産のメタ — class の `prompts`〈`WanPipeline.prompts` /
- * `WanTi2vPipeline.prompts`〉の要素）と役割の語彙。
- * `"precomputed"` の経路では受理集合そのもの（集合の外の文字列は `ModelInputError`）、`"gpu"` の経路では
- * 例示なので、CLI / UI が選択肢を出すにはこの型が要る。
+ * One prompt line of the text embedding asset (the asset's metadata — an element of the class's
+ * `prompts`, `WanPipeline.prompts` / `WanTi2vPipeline.prompts`) and the vocabulary of its role.
+ * On the `"precomputed"` path they are the accepted set itself (a string outside the set is a
+ * `ModelInputError`); on the `"gpu"` path they are examples. Either way, CLIs / UIs need this type to
+ * offer choices.
  */
 export type { WanPrompt, WanPromptRole } from "./src/wan/text-embeds.ts";
 
 /**
- * 生成した動画の 1 フレーム → RGBA 8bit（`encodePng` へそのまま渡せる）。uint8 化の規則
- * （`clamp(x/2 + 0.5, 0, 1)` → `round(·255)`）はパッケージが正本で、参照値（sha256）もこの規則の
- * バイト列で採る — 消費側に規則を書き直させない。
+ * One frame of a generated video → 8-bit RGBA (can be passed as is to `encodePng`). The package is
+ * the source of truth for the uint8 conversion rule (`clamp(x/2 + 0.5, 0, 1)` → `round(·255)`), and
+ * the reference values (sha256) are taken over the bytes from this rule too — consumers do not have
+ * to rewrite it.
  */
 export { wanFrameToRgba } from "./src/wan/frames.ts";
 
 /**
- * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る — 前処理・トークナイザが拒む
- * プロンプト〈文言が直し方を言う〉・集合の外のプロンプト・受理集合の外の寸法・値域外のノブ）。
- * **家族横断で 1 本**なので、複数の家族を同じホストに載せる側は
- * これだけで 400 と 500 を分けられる。内部不変条件の破れ・資産の齟齬・GPU 容量は素の `Error` の
- * まま飛ぶ。
+ * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it
+ * pass — a prompt rejected by the preprocessing or the tokenizer, with a message that says how to
+ * fix it; a prompt outside the set; a size outside the accepted set; a knob out of range). **One
+ * type across all families**, so a host serving several families can tell 400 from 500 with this
+ * alone. Broken internal invariants, asset mismatches and GPU capacity are thrown as plain
+ * `Error`s.
  */
 export { ModelInputError } from "./src/errors.ts";

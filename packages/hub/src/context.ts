@@ -1,13 +1,15 @@
 /**
- * 取得の文脈 — エラーが名乗る「実際に取りに行った先」の組み立て点。
+ * The fetch context — where the "place actually fetched from" that errors name is assembled.
  *
- * MUST: 取得元（`sources/`）はエラーを組み立てない。文脈（取得元の名乗り・利用可能ラベル）を
- * 持つのは共通層だけであり、取得元ごとに組み立てると「存在しない repo を指す診断」や
- * 「越境先ではなくセッションの repo を名乗る診断」が取得元の数だけ再生産される。
+ * MUST: sources (`sources/`) do not assemble errors. Only the common layer holds the context (the
+ * source's naming and the available labels); assembling it per source would reproduce "diagnostics
+ * that point at a repo that does not exist" and "diagnostics that name the session's repo instead
+ * of the cross-repo target" once for every source.
  *
- * 取得元ごとに語彙が違う部分は {@link ../source.ts SourceOrigin} 1 つに畳んである — 文言に
- * 出るのは `label`（HF: `repo owner/name @ <SHA>` / ローカル: `ディレクトリ <ラベル>`）で、
- * 構造化欄（`repo` / `revisionSha`）は**持っている取得元だけ**が名乗る。
+ * The parts whose vocabulary differs per source are folded into one
+ * {@link ../source.ts SourceOrigin} — the message shows `label` (HF: `repo owner/name @ <SHA>` /
+ * local: the directory label as `localDirectory` formats it), and the structured fields (`repo` /
+ * `revisionSha`) are named **only by the sources that have them**.
  */
 
 import {
@@ -20,35 +22,51 @@ import { crossRefOf, type FileRef, MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from 
 import type { LoadedManifest } from "./session.ts";
 import type { SizeViolation, SourceOrigin } from "./source.ts";
 
-/** 取得失敗の文言に入る動詞（面によって「取得」と「事前取得」で割れる）。 */
+/** The verb in the failure message (the surfaces split between the fetch and the prefetch verb). */
 export type FetchVerb = "取得" | "事前取得";
 
 /**
- * 名乗りのうち診断が使う部分。**失敗元（{@link ../source.ts SourceOrigin.integrity}）は
- * 含まない** — 越境参照の名乗りは宣言（repo / revision）から作れるが、実際にバイト列を返した
- * 取得元がローカルか network かは宣言から決まらない（`localDirectory` は越境先にリモートの
- * 取得元を正式に受ける）。失敗元は {@link ../source.ts SizeViolation} を呼ぶ取得元が名乗る。
+ * The part of the naming that diagnostics use. **It does not include the failure origin
+ * ({@link ../source.ts SourceOrigin.integrity})** — the naming of a cross-repo reference can be
+ * built from the declaration (repo / revision), but whether the source that actually returned the
+ * bytes is local or network is not determined by the declaration (`localDirectory` formally accepts
+ * a remote source as a cross-repo target). The failure origin is named by the source that calls
+ * {@link ../source.ts SizeViolation}.
  */
 type OriginNaming = Omit<SourceOrigin, "integrity">;
 
-/** 資産の取得面が使う診断の組み立て（manifest 取得前の面はこの下の関数群を使う）。 */
+/**
+ * Diagnostics assembly used by the asset fetch surfaces (surfaces before the manifest fetch use the
+ * functions below).
+ */
 export type FetchContext = {
-  /** 診断の文言に載るセッションの名乗り（{@link ../source.ts SourceOrigin.label}）。 */
+  /**
+   * The session's naming shown in diagnostic messages ({@link ../source.ts SourceOrigin.label}).
+   */
   readonly session: string;
-  /** 失敗時に提示する「今このリポで選べるもの」の一覧（全 hub エラーの必須欄）。 */
+  /**
+   * The list of "what this repo offers right now" shown on failure (a required field of every hub
+   * error).
+   */
   readonly available: AvailableLabels;
   /**
-   * 実際に取りに行った先の名乗り。越境参照は**宣言された側**を名乗る（セッションの取得元を
-   * 名乗ると、そこには存在しない path を指す診断になる）。
+   * The naming of the place actually fetched from. A cross-repo reference names **the declared
+   * side** (naming the session's source would produce a diagnostic that points at a path that does
+   * not exist there).
    */
   readonly originOf: (ref: FileRef) => OriginNaming;
-  /** バイト数が manifest の `size` と食い違ったときのエラー。 */
+  /** The error for a byte count that disagrees with the manifest's `size`. */
   readonly sizeViolation: (ref: FileRef) => SizeViolation;
-  /** 取得元由来の失敗（404・認証・cache I/O・ローカルの欠損等）を文脈付きで包む。 */
+  /**
+   * Wraps a failure from the source (404, auth, cache I/O, a missing local file, …) with context.
+   */
   readonly fetchFailure: (ref: FileRef, verb: FetchVerb, cause: unknown) => HubFetchError;
 };
 
-/** 名乗りのうち、エラーの構造化欄に載せる部分だけを取り出す（持たない欄は載せない）。 */
+/**
+ * Extracts only the part of the naming that goes into the error's structured fields (absent fields
+ * are left out).
+ */
 const identityOf = (
   origin: OriginNaming,
 ): { readonly repo?: string; readonly revisionSha?: string } => ({
@@ -57,9 +75,11 @@ const identityOf = (
 });
 
 /**
- * 越境参照が宣言している座標の名乗り。**取得元には問い合わせない** — 越境先の取得元を引くと
- * 未 mapping の fail loudly（`sources/local.ts`）がエラーの組み立て中に飛び、真の失敗理由を
- * 覆い隠す。宣言そのもの（ADR 0038 §7 の repo / revision）は manifest が持っている一次情報。
+ * The naming of the coordinates a cross-repo reference declares. **It does not ask the source** —
+ * looking up the target's source would fire the fail loudly for an unmapped target
+ * (`sources/local.ts`) in the middle of assembling the error and hide the real failure. The
+ * declaration itself (the repo / revision of ADR 0038 §7) is primary information the manifest
+ * holds.
  */
 const crossOrigin = (repo: string, revision: string): OriginNaming => ({
   label: `repo ${repo} @ ${revision}`,
@@ -87,7 +107,8 @@ export const createFetchContext = (loaded: LoadedManifest, session: SourceOrigin
           path: ref.path,
           expected: String(ref.size),
           actual: String(actual),
-          // 失敗元は**実際に読んだ取得元**が名乗る（越境参照ではセッションと違う）。
+          // The failure origin is named by **the source that actually read the bytes** (for a
+          // cross-repo reference it differs from the session).
           source: integrity,
           available,
         },
@@ -106,11 +127,13 @@ export const createFetchContext = (loaded: LoadedManifest, session: SourceOrigin
 };
 
 /**
- * 世代識別子の解決に失敗した。manifest をまだ取得できていないので利用可能ラベルは空
- * （`errors.ts` 冒頭が挙げる 2 つの正当な空のうち片方）。
+ * Resolving the generation identifier failed. The manifest has not been fetched yet, so the
+ * available labels are empty (one of the two legitimate empty cases listed at the top of
+ * `errors.ts`).
  *
- * 名乗りは**世代解決前**のもの（{@link ../source.ts SourceDriver.origin} — HF なら要求した
- * ref まで含む）。世代の概念を持たない取得元はここで落ちようがないので、案内は可変 ref 向け。
+ * The naming is the one **before generation resolution** ({@link ../source.ts SourceDriver.origin}
+ * — for HF it includes the requested ref). A source without the notion of generations cannot fail
+ * here, so the guidance targets mutable refs.
  */
 export const revisionResolutionFailure = (origin: SourceOrigin, cause: unknown): HubFetchError =>
   new HubFetchError(
@@ -119,7 +142,7 @@ export const revisionResolutionFailure = (origin: SourceOrigin, cause: unknown):
     { ...identityOf(origin), cause },
   );
 
-/** `karume.json` が上限バイト数を超えた。 */
+/** `karume.json` exceeded the byte limit. */
 export const manifestOversize =
   (origin: SourceOrigin): SizeViolation =>
   (actual) =>
@@ -128,7 +151,7 @@ export const manifestOversize =
         `（${actual} バイト — ${origin.label}）`,
     );
 
-/** `karume.json` そのものの取得に失敗した。 */
+/** Fetching `karume.json` itself failed. */
 export const manifestFetchFailure = (origin: SourceOrigin, cause: unknown): HubFetchError =>
   new HubFetchError(`${MANIFEST_FILENAME} の取得に失敗した（${origin.label}）`, {
     ...identityOf(origin),

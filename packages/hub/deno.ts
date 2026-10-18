@@ -1,14 +1,15 @@
 /**
- * `@karume/hub/deno` — Deno のファイルシステムを取得元にするサブパス。
+ * `@karume/hub/deno` — the subpath that uses Deno's file system as a source.
  *
- * MUST: **このサブパスだけが Deno API に依存する**（`Deno.readFile`）。hub 本体（`mod.ts`）の
- * 「ランタイム依存は Web 標準 API のみ」という不変条件への opt-in の carve-out であり、
- * ブラウザ向けのコードから import してはならない — 本体を通る限り `Deno` は 1 度も現れない
- * （ブラウザでは OPFS / IndexedDB / File System Access の picker を
- * {@link ../mod.ts localDirectory} の `DirectoryAdapter` として渡す）。
+ * MUST: **only this subpath depends on the Deno API** (`Deno.readFile`). It is an opt-in carve-out
+ * from the invariant of the hub's main entry (`mod.ts`) that "runtime dependencies are Web standard
+ * APIs only", and must not be imported from browser code — as long as only the main entry is used,
+ * `Deno` never appears (in a browser, pass an OPFS / IndexedDB / File System Access picker as the
+ * `DirectoryAdapter` of {@link ../mod.ts localDirectory}).
  *
- * ここに置けるのは「ローカルの実体をどう読むか」だけで、取得元としての意味論（世代・検証・
- * 越境・進捗）は本体の `localDirectory` が持つ。
+ * Only "how to read the local files" belongs here; the semantics as a source (generations,
+ * verification, cross-repository references, progress) are owned by `localDirectory` in the main
+ * entry.
  */
 
 import {
@@ -37,15 +38,19 @@ type DenoFsFile = {
 };
 
 /**
- * root の下の実体を指す位置。文字列 root は**そのまま継ぐ** — manifest の path は POSIX 相対
- * （`transformer/model-00001-of-00004.krm`）で、`..` は parse 時に弾かれている（`ManifestPathError`）
- * ので、`URL` を通して正規化する必要が無い。逆に `URL` を通すと Windows のドライブ文字を
- * `file:` へ写す綴りが要るため、文字列のままの方が壊れにくい。
+ * The location of a file under root. A string root is **concatenated as is** — manifest paths are
+ * POSIX-relative (`transformer/model-00001-of-00004.krm`) and `..` is rejected at parse time
+ * (`ManifestPathError`), so there is no need to normalise through `URL`. Conversely, going through
+ * `URL` would need a spelling that maps a Windows drive letter to `file:`, so keeping the string is
+ * less fragile.
  */
 const locate = (base: string | URL, path: string): string | URL =>
   typeof base === "string" ? `${base}${path}` : new URL(path, base);
 
-/** 末尾 `/` を保証する（無いと `URL` 解決が兄弟を指し、文字列連結は path がめり込む）。 */
+/**
+ * Ensures a trailing `/` (without it, `URL` resolution points at a sibling and string concatenation
+ * runs into the path).
+ */
 const asDirectory = (root: string | URL): string | URL => {
   const href = typeof root === "string" ? root : root.href;
   const slashed = href.endsWith("/") ? href : `${href}/`;
@@ -53,8 +58,8 @@ const asDirectory = (root: string | URL): string | URL => {
 };
 
 /**
- * Deno 上のディレクトリを取得元にする。`root` はディレクトリのパス（相対なら cwd 基準）か
- * `file:` URL。
+ * Uses a directory under Deno as a source. `root` is a directory path (relative to the cwd when
+ * relative) or a `file:` URL.
  *
  * ```ts ignore
  * import { loadManifest } from "@karume/hub";
@@ -63,7 +68,8 @@ const asDirectory = (root: string | URL): string | URL => {
  * const loaded = await loadManifest(denoDirectory("./models/karume-gemma4"));
  * ```
  *
- * 必要な権限は root 以下への `--allow-read` だけ（network も CacheStorage も通らない）。
+ * The only permission needed is `--allow-read` under root (neither the network nor CacheStorage is
+ * used).
  */
 export const denoDirectory = (
   root: string | URL,
@@ -76,21 +82,24 @@ export const denoDirectory = (
       try {
         return await Deno.readFile(at, { ...(signal === undefined ? {} : { signal }) });
       } catch (error) {
-        // MUST: 中断はそのまま上げる（共通層が「取り消し」と「取得失敗」を区別できなくなる）。
+        // MUST: rethrow an abort as is (otherwise the common layer cannot tell "cancelled" from
+        // "fetch failed").
         if (signal?.aborted === true) throw error;
-        // 欠損・権限・実体がディレクトリ、いずれも「読めない」で等価に落とす（fail loudly）。
-        // **実体のパス**を名乗るのはここだけの責務 — 共通層が知っているのは manifest 上の
-        // 相対 path までで、どのディレクトリの下を探したかはアダプターしか知らない。
+        // Missing, permission denied, or a directory: all fail the same way, as "cannot read"
+        // (fail loudly). Naming **the real path** is this code's responsibility alone — the common
+        // layer knows only the relative path in the manifest; only the adapter knows which
+        // directory it looked under.
         throw new Error(`@karume/hub/deno: ${at} を読めない`, { cause: error });
       }
     },
-    // 区間読み（`DirectoryAdapter.readFileRange` の契約）: 位置読みで `[offset, offset + length)` を
-    // ちょうど返す。`Deno.open` / `read` は signal を受けないので、読みの切れ目で中断を見る
-    // （finally で close・実体パスを名乗る）。宣言 size に対する検査は取得元
-    // （`sources/local.ts`）が済ませているので、ここが落とすのは「実体が宣言より短い」場合だけ。
+    // Range read (the contract of `DirectoryAdapter.readFileRange`): a positional read that returns
+    // exactly `[offset, offset + length)`. `Deno.open` / `read` do not take a signal, so abort is
+    // checked between reads (close in finally, name the real path). The source
+    // (`sources/local.ts`) has already checked against the declared size, so this fails only when
+    // "the file is shorter than declared".
     readFileRange: async (path, offset, length, { signal }) => {
-      // 中断済みなら fd を開かない（開いてからループの先頭で気づく形だと、長さ 0 の読みで
-      // 中断が素通しになる — 実体に触れる前に 1 度見る）。
+      // Do not open an fd when already aborted (noticing it at the top of the loop after opening
+      // would let the abort slip through a zero-length read — check once before touching the file).
       signal?.throwIfAborted();
       const at = locate(base, path);
       let file: DenoFsFile;

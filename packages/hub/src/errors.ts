@@ -1,39 +1,47 @@
 /**
- * hub のエラー型（ADR 0038 §5「エラーの形」・語彙は ADR 0041 の v2 へ更新）。
+ * hub's error types (ADR 0038 §5, "error shape"; the vocabulary updated to v2 by ADR 0041).
  *
- * 分類の軸は**利用者の分岐先**:
- * - {@link ManifestFormatError} — JSON / 構造 / 規模（manifest が形として壊れている）
- * - {@link ManifestReferenceError} — 参照と語彙（defaultModel / defaultQuant・weights 写像・未知キー）
- * - {@link ManifestPathError} — path 許可リスト違反（SHA ピン外への traversal 防波堤）
- * - {@link IntegrityError} — ローカル取得元が読んだ実体のバイト数が manifest の `size` と
- *   食い違う（HF 取得元の size / sha256 不一致は取得層が検出し、{@link HubFetchError} の
- *   `cause` に載る）
- * - {@link HubFetchError} — 取得層由来（404・認証・revision 解決失敗）の文脈付き透過
+ * The classification axis is **where the user branches to**:
+ * - {@link ManifestFormatError} — JSON / structure / size (the manifest is broken as a shape)
+ * - {@link ManifestReferenceError} — references and vocabulary (defaultModel / defaultQuant, the
+ *   weights mapping, unknown keys)
+ * - {@link ManifestPathError} — path allowlist violation (the breakwater against traversal outside
+ *   the SHA pin)
+ * - {@link IntegrityError} — the byte count of a file read by the local source disagrees with the
+ *   manifest's `size` (a size / sha256 mismatch from the HF source is detected by the fetch layer
+ *   and carried in the `cause` of a {@link HubFetchError})
+ * - {@link HubFetchError} — pass-through with context of failures from the fetch layer (404, auth,
+ *   revision resolution failure)
  *
- * MUST: 全エラーに**利用可能な model / quant / dtype ラベル一覧**（{@link AvailableLabels}）を
- * 載せる — GGUF 利用者が README の quant 表で得ている情報の代替であり、失敗時に「では何なら
- * 動くのか」を一次情報として返すのが manifest 導入の目的の一部だから（ADR 0038 §5 / 0041 §8）。
- * 空になるのは列挙する材料が無い 2 つの場合だけ — ①manifest の構造が壊れていて列挙できない
- * ②manifest をまだ取得できていない（revision 解決失敗・`karume.json` の 404 等）。
+ * MUST: every error carries **the list of available model / quant / dtype labels**
+ * ({@link AvailableLabels}) — it replaces the information GGUF users get from the quant table in a
+ * README, and returning "then what does work" as primary information on failure is part of why the
+ * manifest was introduced (ADR 0038 §5 / 0041 decision 8). It is empty only in the two cases where
+ * there is nothing to list — (1) the manifest's structure is broken and cannot be enumerated, (2)
+ * the manifest has not been fetched yet (revision resolution failure, a 404 on `karume.json`, …).
  */
 
 /**
- * 失敗時に提示する「今このリポで選べるもの」の一覧。
+ * The list of "what this repo offers right now" shown on failure.
  *
- * NOTE: `quants` / `dtypes` は**文脈のモデル**のもの（v2 は 1 manifest = 複数モデルなので、
- * モデルを跨いで混ぜると「別モデルの quant 名」を勧める誤誘導になる）。モデル文脈が定まらない
- * 位置（トップレベルの検査・取得層）では空になり、`models` だけが埋まる。
+ * NOTE: `quants` / `dtypes` belong to **the model in context** (v2 has several models per manifest,
+ * so mixing across models would mislead by recommending "a quant name of another model"). Where the
+ * model context is not settled (top-level checks, the fetch layer) they are empty and only `models`
+ * is filled.
  */
 export type AvailableLabels = {
-  /** manifest に実在するモデル名（v2 で初めて機械可読になった列挙 — ADR 0041 §8）。 */
+  /**
+   * Model names that exist in the manifest (an enumeration first machine-readable in v2 — ADR 0041
+   * decision 8).
+   */
   readonly models: readonly string[];
-  /** 文脈のモデルに実在する quant 名。 */
+  /** Quant names that exist for the model in context. */
   readonly quants: readonly string[];
-  /** 文脈のモデルの weights 名 → その dtype ラベル一覧。 */
+  /** Weights name of the model in context → its list of dtype labels. */
   readonly dtypes: Readonly<Record<string, readonly string[]>>;
 };
 
-/** manifest の構造が壊れていてラベルを列挙できないときの値。 */
+/** The value used when the manifest's structure is broken and labels cannot be enumerated. */
 export const NO_LABELS: AvailableLabels = { models: [], quants: [], dtypes: {} };
 
 type HubErrorOptions = {
@@ -42,16 +50,18 @@ type HubErrorOptions = {
 };
 
 /**
- * hub が**公開する**エラー型の基底（`instanceof HubError` で一括して捌けるように公開する）。
- * 公開するのは「利用者の入力・環境に起因する失敗」だけ（`mod.ts` の方針）なので、取得ではない面
- * — `openAsset` が返す区間読み — の失敗は取得元の素の `Error` のまま上がり、この基底を通らない。
+ * The base of the error types hub **publishes** (published so that `instanceof HubError` handles
+ * them all at once). Only "failures caused by the user's input or environment" are published (the
+ * policy of `mod.ts`), so failures of surfaces that are not fetches — the range reads that
+ * `openAsset` returns — surface as the source's bare `Error` and do not go through this base.
  *
- * 直接 throw するのは「下の 5 分類のどれでもない、利用者が分岐すべき失敗」だけ — 現状は
- * `evictCachedAssets` が取得元の能力不足（キャッシュを持たない取得元）を断る箇所と、
- * `loadManifest` が HF の `owner/name` でない repo 名を取得の前に断る箇所の 2 つ。
+ * It is thrown directly only for "a failure the user should branch on that is none of the five
+ * classes below" — currently two places: `evictCachedAssets` refusing a source that lacks the
+ * capability (a source without a cache), and `loadManifest` refusing, before any fetch, a repo name
+ * that is not an HF `owner/name`.
  */
 export class HubError extends Error {
-  /** 失敗時点で判明している利用可能 model / quant / dtype ラベル。 */
+  /** The available model / quant / dtype labels known at the time of the failure. */
   readonly available: AvailableLabels;
 
   constructor(message: string, options: HubErrorOptions = {}) {
@@ -61,7 +71,10 @@ export class HubError extends Error {
   }
 }
 
-/** JSON 不正・構造違反・規模上限超過（ADR 0041 §2「トップレベル形」・§7「規模上限」）。 */
+/**
+ * Invalid JSON, structure violation, size limit exceeded (ADR 0041 decision 2 "top level", decision
+ * 7 "size limits").
+ */
 export class ManifestFormatError extends HubError {
   constructor(message: string, options: HubErrorOptions = {}) {
     super(message, options);
@@ -70,8 +83,9 @@ export class ManifestFormatError extends HubError {
 }
 
 /**
- * 参照と語彙の違反（ADR 0041 §2/§3）。宙吊りの `defaultModel` / `defaultQuant`・`weights`
- * 写像の過不足・未知キー・allowlist に無い `session` 値・重複 path の 3 点セット不一致。
+ * Violations of references and vocabulary (ADR 0041 decisions 2 / 3). A dangling `defaultModel` /
+ * `defaultQuant`, a `weights` mapping with missing or extra entries, unknown keys, a `session`
+ * value not in the allowlist, a mismatch of the triple for a duplicated path.
  */
 export class ManifestReferenceError extends HubError {
   constructor(message: string, options: HubErrorOptions = {}) {
@@ -82,9 +96,9 @@ export class ManifestReferenceError extends HubError {
 
 type ManifestPathErrorOptions = HubErrorOptions & { readonly path: string };
 
-/** path 許可リスト違反（ADR 0038 §2）。 */
+/** Path allowlist violation (ADR 0038 §2). */
 export class ManifestPathError extends HubError {
-  /** 違反した生の path 文字列（URL 組み立て前）。 */
+  /** The raw path string that violated it (before the URL is built). */
   readonly path: string;
 
   constructor(message: string, options: ManifestPathErrorOptions) {
@@ -95,10 +109,11 @@ export class ManifestPathError extends HubError {
 }
 
 /**
- * 完全性検証の失敗元（キャッシュ読出し / network 取得 / ローカルの実体読み）。
+ * Where an integrity check failed (cache read / network fetch / reading a local file).
  *
- * `"local"` は CacheStorage も network も通らない取得元（ローカルディレクトリ）が読んだバイト列
- * のこと。取り直しても同じものが返るので、`"network"` と違って再試行は回復手段にならない。
+ * `"local"` means bytes read by a source that goes through neither CacheStorage nor the network (a
+ * local directory). Fetching again returns the same bytes, so unlike `"network"`, a retry is not a
+ * way to recover.
  */
 export type IntegritySource = "cache" | "network" | "local";
 
@@ -112,28 +127,33 @@ type IntegrityErrorOptions = HubErrorOptions & {
 };
 
 /**
- * 取得物が manifest の 3 点セットと食い違った（ADR 0038 §5）。
+ * A fetched file disagreed with the manifest's triple (ADR 0038 §5).
  *
- * NOTE: 外へ出るのはローカル取得元が読んだ実体の不一致（`source: "local"`）。HF 取得元の
- * 不一致はキャッシュ読出し側なら取得層が self-heal（evict → 取り直し・1 往復まで）に使い、
- * network 取得物なら取得層の検証失敗として {@link HubFetchError} の `cause` に載る。
+ * NOTE: what surfaces is a mismatch in a file read by the local source (`source: "local"`). A
+ * mismatch from the HF source is, on the cache-read side, used by the fetch layer for self-heal
+ * (evict → fetch again, at most one round trip), and for a network fetch it is carried as the fetch
+ * layer's verification failure in the `cause` of a {@link HubFetchError}.
  */
 export class IntegrityError extends HubError {
-  /** 取得元が repo という概念を持つ場合のみ（HF）。ローカル取得元では**名乗らない**。 */
+  /** Only when the source has the notion of a repo (HF). The local source **does not name one**. */
   readonly repo?: string;
-  /** 取得を固定していた commit SHA（40 桁）。世代の概念を持つ取得元のみ。 */
+  /**
+   * The commit SHA (40 digits) the fetch was pinned to. Only for sources with the notion of
+   * generations.
+   */
   readonly revisionSha?: string;
   readonly path: string;
-  /** manifest が宣言していた値（sha256 / バイト数）。 */
+  /** The value the manifest declared (sha256 / byte count). */
   readonly expected: string;
-  /** 実際に得られた値。 */
+  /** The value actually obtained. */
   readonly actual: string;
   readonly source: IntegritySource;
 
   constructor(message: string, options: IntegrityErrorOptions) {
     super(message, options);
     this.name = "IntegrityError";
-    // 持たない身元は欄ごと現れない（合成 repo・偽 SHA を作らない — `source.ts` SourceOrigin）。
+    // An identity the source lacks does not appear as a field at all (no synthetic repo, no fake
+    // SHA — `source.ts` SourceOrigin).
     if (options.repo !== undefined) this.repo = options.repo;
     if (options.revisionSha !== undefined) this.revisionSha = options.revisionSha;
     this.path = options.path;
@@ -150,18 +170,24 @@ type HubFetchErrorOptions = HubErrorOptions & {
 };
 
 /**
- * 取得層由来の失敗（404・認証・revision 解決失敗）を**文脈付きで透過**する容れ物
- * （ADR 0038 §5）。原因は `cause` にそのまま残す。
+ * A container that **passes through with context** the failures from the fetch layer (404, auth,
+ * revision resolution failure) (ADR 0038 §5). The original error stays as `cause`.
  */
 export class HubFetchError extends HubError {
   /**
-   * 取得元が repo という概念を持つ場合のみ（HF）。ローカル取得元では**名乗らない** —
-   * どこを読んだかは `message` の名乗り（ディレクトリ / path）が一次情報になる。
+   * Only when the source has the notion of a repo (HF). The local source **does not name one** —
+   * the naming in `message` (directory / path) is the primary information on what was read.
    */
   readonly repo?: string;
-  /** 解決済み commit SHA。revision 解決自体に失敗した場合・世代を持たない取得元では undefined。 */
+  /**
+   * The resolved commit SHA. undefined when revision resolution itself failed, or for a source
+   * without generations.
+   */
   readonly revisionSha?: string;
-  /** 対象ファイルの path。manifest 取得前 / revision 解決失敗では undefined。 */
+  /**
+   * The path of the target file. undefined before the manifest fetch / on revision resolution
+   * failure.
+   */
   readonly path?: string;
 
   constructor(message: string, options: HubFetchErrorOptions) {

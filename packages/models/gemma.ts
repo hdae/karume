@@ -1,142 +1,176 @@
 /**
- * `@karume/models/gemma` — Gemma ファミリ（gemma4 = 文字列 → 文字列の生成）のサブパス面。
+ * `@karume/models/gemma` — the subpath surface of the Gemma family (gemma4 = text → text
+ * generation).
  *
- * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
- * 面は利用者ストーリーに対応する — 組む（{@link Gemma4Pipeline.fromPretrained} /
- * {@link Gemma4Pipeline.fromAssets}）/ 会話する（`chat`）/ 自分で回す（`sequence` +
- * {@link gemma4ChatPrompt} + tokenizer の復号）/ 解放する（`dispose`）。
+ * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
+ * wholesale. The surface follows the user's stories — build ({@link Gemma4Pipeline.fromPretrained} /
+ * {@link Gemma4Pipeline.fromAssets}) / converse (`chat`) / drive it yourself (`sequence` +
+ * {@link gemma4ChatPrompt} + decoding with the tokenizer) / release (`dispose`).
  *
- * 生成の語彙（`GenerationEvent` / `GenerationStop` / `SamplerSpec` / `GenerationCapacityError`）
- * は**パイプライン非依存**だが、今のところ触れるのはこのファミリだけなので barrel とこの面の
- * 両方から出す。`GenerationProgram` / `GenerationSequence` を**作る**関数は出さない — 入口は
- * パイプラインだけで、静的配線を迂回して組める面を作らない。
+ * The generation vocabulary (`GenerationEvent` / `GenerationStop` / `SamplerSpec` /
+ * `GenerationCapacityError`) is **independent of any pipeline**, but for now only this family uses
+ * it, so it is exported from both the barrel and this surface. Functions that **create** a
+ * `GenerationProgram` / `GenerationSequence` are not exported — the pipeline is the only entry
+ * point, and no surface lets one be assembled around the static wiring.
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
+ * MUST: every module is free of side effects (no execution at import, no global mutable state —
+ * CLAUDE.md).
  */
 
 export { Gemma4Pipeline } from "./src/gemma/pipeline.ts";
-/** {@link Gemma4PipelineOptions.chunkBuckets} の省略時の既定（`chunkLength` 未満の段だけが載る）。 */
+/**
+ * The default of {@link Gemma4PipelineOptions.chunkBuckets} when omitted (only the steps below
+ * `chunkLength` are used).
+ */
 export { GEMMA4_CHUNK_BUCKETS } from "./src/gemma/pipeline.ts";
 export type {
   Gemma4Assets,
   Gemma4ChatOptions,
-  /** `estimateSessionMemory` が見積る生成の形（容量 / chunk 長 — どちらも実行時ノブ）。 */
+  /**
+   * The generation shape `estimateSessionMemory` estimates (capacity / chunk length — both run-time
+   * knobs).
+   */
   Gemma4EstimateOptions,
   Gemma4FromPretrainedOptions,
   Gemma4PipelineOptions,
-  /** `sequence()` の指定（この会話が確保する容量）。 */
+  /** The specification of `sequence()` (the capacity this conversation allocates). */
   Gemma4SequenceOptions,
 } from "./src/gemma/pipeline.ts";
 export type {
-  /** `chat` の停止理由（sequence 層の理由 + この層でしか判定できない `stop-string`）。 */
+  /**
+   * The stop reason of `chat` (the sequence layer's reasons + `stop-string`, which only this layer
+   * can decide).
+   */
   Gemma4ChatStop,
   Gemma4ChatStream,
-  /** prefill の進捗 1 通（`chunk / chunks` — `onPrefill` が受ける）。 */
+  /** One prefill progress report (`chunk / chunks` — received by `onPrefill`). */
   Gemma4PrefillProgress,
-  /** 観測席の 1 通がどの run か（prefill の chunk / decode の step — `onRunDiagnostics` が受ける）。 */
+  /**
+   * Which run one diagnostics report belongs to (a prefill chunk / a decode step — received by
+   * `onRunDiagnostics`).
+   */
   Gemma4RunPhase,
 } from "./src/gemma/chat-turn.ts";
 /**
- * 自己採算ゲートのノブ（{@link Gemma4PipelineOptions.speculative} の `gate` — **計測・検収用の
- * 静的ノブ**で、既定で十分である）。公開面に在るのは、ノブの A/B（既定 vs 別の閾値）を同じ台本で
- * 回す側が {@link Gemma4PipelineOptions} を組み立てるのに要るためである。
+ * The knobs of the self-tuning gate (`gate` of {@link Gemma4PipelineOptions.speculative} — **static
+ * knobs for measurement and acceptance**; the defaults are enough). They are on the public surface
+ * because a caller running an A/B of the knobs (default vs another threshold) with the same script
+ * needs them to build {@link Gemma4PipelineOptions}.
  */
 export type { SpeculationGateOptions } from "./src/generation/speculation-gate.ts";
 /**
- * PLE の置き場（{@link Gemma4PipelineOptions.pleResidency} の値域 — 既定 `"host"`）。
+ * Where PLE lives (the values of {@link Gemma4PipelineOptions.pleResidency} — default `"host"`).
  *
- * `"gpu"` は量子化バイト列をロード時に 1 度だけ GPU へ上げ、run ごとの `per_layer_inputs` を
- * GPU 内 gather で作る opt-in の席である（ADR 0085 追記〈GPU 常駐席〉）。
+ * `"gpu"` is the opt-in value that uploads the quantized bytes to the GPU once at load and builds
+ * each run's `per_layer_inputs` with a gather on the GPU (ADR 0085 addendum 2026-09-19, GPU
+ * residency).
  */
 export type { Gemma4PleResidency } from "./src/gemma/ple-gpu.ts";
 /**
- * 多ターンの会話を持ち回る中間層（`chat` と `sequence` の間 — ADR 0083 追記 2026-09-02）。
+ * The middle layer that carries a multi-turn conversation (between `chat` and `sequence` — ADR 0083
+ * addendum 2026-09-02).
  *
- * `chat` は 1 ターン = 1 sequence で過去 turn を毎回描き直し（会話が伸びるほど prefill が
- * O(n²)）、`sequence` は token id と KV の寿命を呼び手へ渡す。{@link Gemma4ChatSession} は
- * その落差だけを持つ — KV を継ぎ、容量が足りないターンは**送る前に**
- * {@link Gemma4ChatSessionOptions.onOverflow}（既定 {@link dropOldestTurns}）で切り詰める。
+ * `chat` is one sequence per turn and re-renders the past turns every time (prefill grows O(n²) as
+ * the conversation grows); `sequence` hands token ids and the KV lifetime to the caller.
+ * {@link Gemma4ChatSession} covers only the gap between them — it carries the KV over and truncates
+ * a turn that does not fit the capacity **before sending it** with
+ * {@link Gemma4ChatSessionOptions.onOverflow} (default {@link dropOldestTurns}).
  */
 export { dropOldestTurns, Gemma4ChatSession } from "./src/gemma/chat-session.ts";
 export type {
   Gemma4ChatOverflow,
   Gemma4ChatOverflowPolicy,
-  /** セッションがパイプラインから読む面（{@link Gemma4Pipeline} がそのまま満たす）。 */
+  /**
+   * The surface the session reads from the pipeline ({@link Gemma4Pipeline} satisfies it as is).
+   */
   Gemma4ChatSessionHost,
   Gemma4ChatSessionOptions,
   Gemma4ChatTurnOptions,
 } from "./src/gemma/chat-session.ts";
-/** 配布形が宣言する静的配線（`karume.json` の `pipelineConfig` — ADR 0038 §1）。 */
+/**
+ * The static wiring declared by the distribution (`pipelineConfig` of `karume.json` — ADR 0038 §1).
+ */
 export type { Gemma4DefaultSampler, Gemma4PipelineConfig } from "./src/gemma/config.ts";
 /**
- * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から
- * `karume-` を落とした綴り・値は pin 済み commit SHA — ADR 0073 / 0092）。同一家族 = 1 リポ
- * なので今は 1 エントリで、将来の E4B / 12B もここに同居する:
+ * **The table of sources verified with this package version** (one table per family; keys are the
+ * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
+ * One family = one repository, so one entry for now; a future E4B / 12B will live here too:
  *
  * - `GEMMA4_SOURCES["gemma4"]` = `hdae/karume-gemma4`
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link Gemma4Pipeline.fromPretrained}
- * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この表ではなく自分の
- * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
+ * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
+ * is as the first argument of {@link Gemma4Pipeline.fromPretrained}. To pin reproducibility
+ * yourself, write your own `{ repo, revision }` instead of using this table (`fromPretrained` has no
+ * default).
  */
 export { GEMMA4_SOURCES } from "./src/gemma/config.ts";
 /**
- * 生の宣言（`unknown`）→ 検証済みの {@link Gemma4PipelineConfig}（失敗は fail loudly）。
+ * A raw declaration (`unknown`) → a validated {@link Gemma4PipelineConfig} (failures fail loudly).
  *
- * **`fromAssets` を使う消費者のための口**である。`fromPretrained` は内部でこれを通すので呼ぶ
- * 必要は無く、要るのは `karume.json` を自分で読んで {@link Gemma4Pipeline.fromAssets} へ渡す側
- * （手元にあるのは hub の `ModelEntry.pipelineConfig` = `Record<string, unknown>` なので、
- * この口が無いと `as` で被せるか 3 つの数を二重持ちするしかない）。
+ * **An entry point for consumers that use `fromAssets`**. `fromPretrained` runs it internally, so
+ * there is no need to call it there; it is needed by callers that read `karume.json` themselves and
+ * pass it to {@link Gemma4Pipeline.fromAssets} (what they have is the hub's
+ * `ModelEntry.pipelineConfig` = `Record<string, unknown>`, so without this entry point they could
+ * only cast with `as` or keep their own copy of the three numbers).
  */
 export { parseGemma4PipelineConfig } from "./src/gemma/config.ts";
 /**
- * 配布形が宣言する RoPE のパラメータ（`pipelineConfig.rope` — 層種別 2 本）。
+ * The RoPE parameters declared by the distribution (`pipelineConfig.rope` — two layer types).
  *
- * 表は配布形に無く、cos / sin は chunk ぶんだけホストが作る。式の正本は
- * `src/gemma/rope.ts`（exporter 側は鏡像）。
+ * The distribution has no table; the host computes cos / sin for one chunk at a time. The source of
+ * truth for the formula is `src/gemma/rope.ts` (the exporter side mirrors it).
  */
 export type { Gemma4RopeLayerSpec, Gemma4RopeLayerType, Gemma4RopeSpec } from "./src/gemma/rope.ts";
 /**
- * 位置列 → RoPE のグラフ入力 4 本（`rope_{sliding,full}_attention_{cos,sin}` の
- * `[1, rows, headDim]` f32）。
+ * Positions → the four RoPE graph inputs (`[1, rows, headDim]` f32 of
+ * `rope_{sliding,full}_attention_{cos,sin}`).
  *
- * `Gemma4Pipeline` は内部でこれを派生入力の席へ差すので呼ぶ必要は無い。要るのは**製品グラフを
- * 自分で回す**側（低レベル面より下 — 実 Session に自分で run を出す検収・計測の経路）で、この口が
- * 無いと式を写して持つしかない（写した時点で「同じ式を 2 回書いて比べただけ」になる）。
+ * `Gemma4Pipeline` feeds these into the derived-input slots internally, so there is no need to call
+ * it there. It is needed by callers that **run the production graph themselves** (below the
+ * low-level surface — acceptance and measurement paths that issue runs on a real Session); without
+ * this entry point they would have to copy the formula (and a copy only compares the same formula
+ * written twice).
  */
 export { gemma4RopeInputs } from "./src/gemma/rope.ts";
 
 /**
- * 会話 → token id 列（`<bos>` 込み・末尾は生成プロンプト）。素の会話だけを受け、tools /
- * thinking / 未知 role は fail loudly で拒否する（ADR 0084 決定 5）。
+ * Conversation → token ids (including `<bos>`, ending with the generation prompt). Accepts plain
+ * conversations only; tools / thinking / unknown roles are rejected with fail loudly (ADR 0084
+ * decision 5).
  *
- * `chat` は内部でこれを通すので、要るのは低レベル面（`sequence`）を自分で回すときだけ。
+ * `chat` runs this internally, so it is needed only when driving the low-level surface
+ * (`sequence`) yourself.
  */
 export { gemma4ChatPrompt } from "./src/gemma/text/chat.ts";
 /**
- * 新しい発話 1 つ → **会話の続きとして描き足す差分 token 列**（多ターンを `sequence` で回すときの
- * 2 ターン目以降の入口 — 過去 turn は context の KV にあるので描き直さない）。
+ * One new message → **the delta tokens appended as the continuation of the conversation** (the entry
+ * point for the second and later turns when running multiple turns with `sequence` — past turns are
+ * in the context's KV, so they are not re-rendered).
  *
- * MUST: 前 turn を閉じる `<turn|>` は含めない（`GenerationSequence` の `pendingToken` が前置する
- * — turn-local 契約の正本は `renderGemma4ChatTurn` の doc、成立は `gemma4_chat_test.ts` の門）。
+ * MUST: do not include the `<turn|>` that closes the previous turn (the `pendingToken` of
+ * `GenerationSequence` prepends it — the turn-local contract is defined in the doc of
+ * `renderGemma4ChatTurn`, and the check in `gemma4_chat_test.ts` verifies it holds).
  */
 export { gemma4ChatTurn } from "./src/gemma/text/chat.ts";
 export type { Gemma4ChatMessage, Gemma4ChatRole } from "./src/gemma/text/chat.ts";
 
 /**
- * 資産から組んだトークナイザ（`Gemma4Pipeline.tokenizer`）。低レベル面で受け取った token id を
- * 文字列へ戻す口（`decode` / `createDetokenizer`）がここにある。
+ * The tokenizer built from the assets (`Gemma4Pipeline.tokenizer`). It holds the entry points that
+ * turn token ids received on the low-level surface back into strings (`decode` /
+ * `createDetokenizer`).
  *
- * 値としては公開しない — 入口は `Gemma4Pipeline.fromAssets` で、資産の突合を迂回した半端な
- * トークナイザを作れる面にしない（ADR 0008）。
+ * Not public as a value — the entry point is `Gemma4Pipeline.fromAssets`, and no surface lets a
+ * half-built tokenizer be created around the asset checks (ADR 0008).
  */
 export type { GemmaDecodeOptions, GemmaTokenizer } from "./src/gemma/text/tokenizer.ts";
 export type { StreamingDetokenizer } from "./src/text/detokenizer.ts";
 
 /**
- * 生成の語彙（ADR 0083）。`sequence()` を自分で回すときに要る型と、「会話が入り切らない」を
- * 他の失敗と読み分けるための例外（決定 10 — **低レベル面では**会話の切り詰めはホストの責務。
- * 高レベル面 {@link Gemma4ChatSession} は注入可能な既定ポリシーを持つ — 同 追記 2026-09-02）。
+ * The generation vocabulary (ADR 0083). The types needed to drive `sequence()` yourself, and the
+ * exception that tells "the conversation does not fit" apart from other failures (decision 10 — **on
+ * the low-level surface** truncating the conversation is the host's responsibility. The high-level
+ * surface {@link Gemma4ChatSession} has an injectable default policy — the same ADR's addendum
+ * 2026-09-02).
  */
 export { GenerationCapacityError } from "./src/generation/sequence.ts";
 export type {
@@ -144,20 +178,22 @@ export type {
   GenerationCapacityDetail,
   GenerationEvent,
   /**
-   * 観測 1 通に載る自己採算ゲートの状態（`GenerationRunPhase.gate` — 定常モード・そのターン内の
-   * 切替回数・その run を壁の観測に入れたか）。
+   * The self-tuning gate state carried by one diagnostics report (`GenerationRunPhase.gate` — the
+   * steady mode, the number of switches within the turn, and whether the run was included in the
+   * wall-time observation).
    */
   GenerationGateTrace,
   GenerationRequest,
   /**
-   * run 1 本につき 1 通の観測（`onRunDiagnostics` が受ける {@link Gemma4RunPhase} の実体 —
-   * prefill の chunk / decode の step / 投機の draft・verify の cycle・run の壁とゲートの状態）。
+   * One diagnostics report per run (what the {@link Gemma4RunPhase} received by `onRunDiagnostics`
+   * is — a prefill chunk / a decode step / a speculative draft-verify cycle, plus the run's wall time
+   * and the gate state).
    */
   GenerationRunPhase,
   GenerationSequence,
   /**
-   * 投機の勘定（`GenerationStop.speculation` — cycle 数・draft run 数・受理数・受理数の
-   * ヒストグラム。drafter を載せた pipeline のターンにだけ載る）。
+   * The speculation tally (`GenerationStop.speculation` — cycle count, draft run count, accepted
+   * count, and a histogram of accepted counts. Present only on turns of a pipeline with a drafter).
    */
   GenerationSpeculation,
   GenerationStop,
@@ -167,9 +203,10 @@ export type { GenerationProgram } from "./src/generation/program.ts";
 export type { SamplerSpec } from "./src/generation/sampler.ts";
 
 /**
- * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る — sampler の値域・
- * `maxNewTokens`・会話が容量に入らない場合の {@link GenerationCapacityError} はこれの派生）。
- * **家族横断で 1 本**なので、複数の家族を同じホストに載せる側はこれだけで 400 と 500 を
- * 分けられる。内部不変条件の破れ・資産の齟齬・GPU 容量は素の `Error` のまま飛ぶ。
+ * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it
+ * pass — the range of sampler values, `maxNewTokens`; {@link GenerationCapacityError}, raised when
+ * the conversation does not fit the capacity, is a subclass of it). **One type across all
+ * families**, so a host serving several families can tell 400 from 500 with this alone. Broken
+ * internal invariants, asset mismatches and GPU capacity are thrown as plain `Error`s.
  */
 export { ModelInputError } from "./src/errors.ts";

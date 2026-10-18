@@ -1,15 +1,15 @@
 /**
- * `@karume/models/anima` — Anima（テキスト → 画像）ファミリのサブパス面。
+ * `@karume/models/anima` — the subpath surface of the Anima (text → image) family.
  *
- * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
- * 面は利用者ストーリーに対応する — 組む（{@link AnimaPipeline.fromPretrained} /
- * {@link AnimaPipeline.fromAssets}）/ 生成する（`generate`）/ 生成の途中経過を購読する
- * （`onEvent` — {@link AnimaGenerateEvent}）/ **途中 latent からプレビューを近似する**
- * （{@link approximatePreview}）/ 解放する（`dispose`）/ 解像度の綴りを扱う
- * （{@link parseResolution} / {@link formatResolution}）。
+ * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
+ * wholesale. The surface follows the user's stories — build ({@link AnimaPipeline.fromPretrained} /
+ * {@link AnimaPipeline.fromAssets}) / generate (`generate`) / subscribe to generation progress
+ * (`onEvent` — {@link AnimaGenerateEvent}) / **approximate a preview from an intermediate latent**
+ * ({@link approximatePreview}) / release (`dispose`) / handle the spelling of resolutions
+ * ({@link parseResolution} / {@link formatResolution}).
  *
- * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
- * barrel（`mod.ts`）経由の tree-shaking はこの不変条件の上にだけ成立する。
+ * MUST: every module is free of side effects (no execution at import, no global mutable state —
+ * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
 export { AnimaPipeline } from "./src/anima/pipeline.ts";
@@ -25,18 +25,20 @@ export type {
 } from "./src/anima/pipeline.ts";
 
 /**
- * denoise の更新則の語彙（`AnimaGenerateRequest.sampler` が受ける値）。省略時は manifest の
- * `pipelineConfig.scheduler.type` が既定を決めるので、**指定は配布者の推奨からの明示的な離脱**
- * になる。型だけでは選択肢を列挙できず、消費側（CLI の引数検査 / UI の選択肢）が値を綴り直す
- * ことになるので、値の並び（凍結済み）も面に出す。
+ * The vocabulary of denoise update rules (the values `AnimaGenerateRequest.sampler` accepts). When
+ * omitted, `pipelineConfig.scheduler.type` of the manifest decides the default, so **giving one is an
+ * explicit departure from the distributor's recommendation**. A type alone cannot enumerate the
+ * choices, and consumers (CLI argument checks / UI choices) would have to respell the values, so the
+ * list of values (frozen) is on the surface too.
  */
 export type { AnimaSamplerType } from "./src/anima/config.ts";
 export { ANIMA_SAMPLER_TYPES } from "./src/anima/config.ts";
 
 /**
- * DiT の常駐（ADR 0112）の語彙。{@link AnimaPipelineOptions} / {@link AnimaGenerateRequest} の
- * `residency` が受ける値と、`residency` イベント（{@link AnimaGenerateEvent}）の `action` /
- * `reason`。消費側が理由で分岐する（格下げを UI に出す等）ときに綴りを書き直さずに済むよう型を出す。
+ * The vocabulary of DiT residency (ADR 0112): the values accepted by `residency` of
+ * {@link AnimaPipelineOptions} / {@link AnimaGenerateRequest}, and `action` / `reason` of the
+ * `residency` event ({@link AnimaGenerateEvent}). The types are exported so that consumers branching
+ * on the reason (showing a downgrade in the UI and the like) do not have to respell the values.
  */
 export type {
   AnimaResidency,
@@ -45,67 +47,76 @@ export type {
 } from "./src/anima/residency.ts";
 
 /**
- * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から
- * `karume-` を落とした綴り・値は pin 済み commit SHA — ADR 0073 / 0092）。リポの分割軸は
- * 「公式 / 追加学習」（ADR 0087）で 2 エントリ:
+ * **The table of sources verified with this package version** (one table per family; keys are the
+ * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
+ * The repositories are split by "official / further training" (ADR 0087), so two entries:
  *
- * - `ANIMA_SOURCES["anima"]` = `hdae/karume-anima`（公式モデル同居・既定 = Turbo）
- * - `ANIMA_SOURCES["anima-extra"]` = `hdae/karume-anima-extra`（第三者 fine-tune 同居・既定 = wai）
+ * - `ANIMA_SOURCES["anima"]` = `hdae/karume-anima` (the official models; default = Turbo)
+ * - `ANIMA_SOURCES["anima-extra"]` = `hdae/karume-anima-extra` (third-party fine-tunes;
+ *   default = wai)
  *
- * どちらも既定以外は `{ model }` で選ぶ。**既定の席は無い**（どのエントリを使うかは呼び手が綴る）。
+ * In both, models other than the default are chosen with `{ model }`. **There is no default entry**
+ * (the caller spells out which entry to use).
  *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン** — `fromPretrained` の第 1 引数へ
- * そのまま渡す。再現性を自分で固定したい場合は、この表ではなく自分の `{ repo, revision }` を
- * 書く（`fromPretrained` に既定は無い）。
+ * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
+ * is as the first argument of `fromPretrained`. To pin reproducibility yourself, write your own
+ * `{ repo, revision }` instead of using this table (`fromPretrained` has no default).
  *
- * NOTE: 旧 turbo 専用リポ（`hdae/karume-anima-turbo`）のエントリは廃止（2026-09-01・breaking
- * — `src/anima/config.ts` の NOTE 参照）。
+ * NOTE: the entry of the old turbo-only repository (`hdae/karume-anima-turbo`) was removed
+ * (2026-09-01, breaking — see the NOTE in `src/anima/config.ts`).
  */
 export { ANIMA_SOURCES } from "./src/anima/config.ts";
 
 /**
- * 途中 latent からの RGB プレビュー近似。`denoise-step` イベントの `copyLatents()`
- * （{@link AnimaLatentSnapshot}）が返す 2 欄を**そのまま**（逆正規化せずに）渡すと、latent
- * 解像度（元画像の 1/8）の RGBA が返る —
- * `const { data, shape } = event.copyLatents(); approximatePreview(data, shape)`。
+ * An approximate RGB preview from an intermediate latent. Passing the two fields returned by
+ * `copyLatents()` of the `denoise-step` event ({@link AnimaLatentSnapshot}) **as they are** (without
+ * denormalizing) returns RGBA at latent resolution (1/8 of the image) —
+ * `const { data, shape } = event.copyLatents(); approximatePreview(data, shape)`.
  *
- * VAE は DiT を解放した**後**にしかロードできない（VRAM の MUST）ため、パイプラインは毎 step の
- * VAE プレビューを提供しない — step ごとの経過を絵で見せる手段はこの近似だけなので、面に出す。
- * 厳密な decode ではない（16ch → 3ch の線形射影）。係数の出所・較正空間の実測記録・限界は
- * 実装の doc が持つ。
+ * The VAE can be loaded only **after** the DiT is released (a VRAM MUST), so the pipeline does not
+ * provide a VAE preview per step — this approximation is the only way to show per-step progress as
+ * a picture, so it is on the surface. It is not an exact decode (a linear projection from 16 to 3
+ * channels). The origin of the coefficients, the measurements of the calibration space and the
+ * limits are in the implementation's doc.
  */
 export { approximatePreview } from "./src/anima/preview.ts";
 
 /**
- * 途中 latent の逆正規化素材（`const { mean, std } = animaLatents()` で取り、
- * `denormalizeLatents(latents, shape, mean, std)` へ渡す）。**プレビューには要らない** —
- * {@link approximatePreview} の係数は**正規化空間**で較正されている（2026-08-24 実測）ので、
- * 逆正規化した値を渡すと白飛びした別物になる。`copyLatents()` の返り値はそのまま渡す。
+ * The constants for denormalizing an intermediate latent (get them with
+ * `const { mean, std } = animaLatents()` and pass them to
+ * `denormalizeLatents(latents, shape, mean, std)`). **Not needed for previews** — the coefficients of
+ * {@link approximatePreview} are calibrated in **the normalized space** (measured 2026-08-24), so
+ * passing denormalized values gives a blown-out, different picture. Pass the return value of
+ * `copyLatents()` as is.
  *
- * ここを出すのは、VAE decode と同じ土俵で latent を扱いたい消費側（自前の decode・latent の
- * 解析・別の射影の較正）のため。この 2 本は VAE の config にしかなく、IR にも配布資産にも
- * 入っていないので、逆正規化を消費側で書き直すと定数が二重に持たれる。
+ * This is exported for consumers that want to handle latents on the same footing as the VAE decode
+ * (their own decode, latent analysis, calibrating another projection). The two constants exist only
+ * in the VAE's config, in neither the IR nor the distributed assets, so rewriting the
+ * denormalization on the consumer side would duplicate the constants.
  *
- * MUST: 定数の実体ではなく**アクセサ**を出す — {@link animaLatents} は呼び出しごとに独立した
- * 写しを返す。可変な TypedArray の実体を配ると、消費側の書き換えが `generate` の逆正規化へ
- * 黙って波及する（グローバル可変状態の禁止 — CLAUDE.md 横断不変条件）。
- * {@link denormalizeLatents} は mean / std を引数で受ける純関数なのでそのまま出す。
+ * MUST: export an **accessor**, not the constants themselves — {@link animaLatents} returns an
+ * independent copy on every call. Handing out the mutable TypedArray itself would let a consumer's
+ * modification silently leak into the denormalization of `generate` (no global mutable state — a
+ * cross-cutting invariant in CLAUDE.md).
+ * {@link denormalizeLatents} is a pure function that takes mean / std as arguments, so it is
+ * exported as is.
  */
 export { animaLatents, denormalizeLatents } from "./src/anima/latents.ts";
 
 /**
- * 解像度の綴り（`1344x768` / 正方の略記 `512`）と受理集合。
+ * The spelling of resolutions (`1344x768` / the square shorthand `512`) and the accepted set.
  *
- * **受理集合の正本はこのパッケージ**（ADR 0038 §2 — manifest には書かない）なので、CLI や
- * UI が `WxH` を解釈する経路も同じ実装を通す。ここを出さないと綴りの契約が二重に持たれる。
+ * **This package is the source of truth for the accepted set** (ADR 0038 §2 — it is not written in
+ * the manifest), so CLIs and UIs that interpret `WxH` go through the same implementation. Without
+ * this export the spelling contract would be duplicated.
  */
 export { formatResolution, parseResolution } from "./src/anima/resolution.ts";
 export type { ImageSize } from "./src/anima/resolution.ts";
 
 /**
- * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る — `seed` の値域・
- * 解像度の綴り）。**家族横断で 1 本**なので、複数の家族を同じホストに載せる側は
- * これだけで 400 と 500 を分けられる。内部不変条件の破れ・資産の齟齬・GPU 容量は素の `Error` の
- * まま飛ぶ。
+ * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it
+ * pass — the range of `seed`, the spelling of the resolution). **One type across all families**, so
+ * a host serving several families can tell 400 from 500 with this alone. Broken internal
+ * invariants, asset mismatches and GPU capacity are thrown as plain `Error`s.
  */
 export { ModelInputError } from "./src/errors.ts";
