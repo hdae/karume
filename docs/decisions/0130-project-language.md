@@ -203,7 +203,7 @@ See "Open points".
 | Phase 2 — step 2-9a (2026-10-18) | Rulings recorded here; `CLAUDE.md` language section rewritten; the three checks in `tools/lang/` | Baseline taken: 170,828 lines with Japanese text in tracked files |
 | 2-9b (done 2026-10-18) | ADRs: force triage over every ADR → the maintainer's rulings → translation in numeric batches of five, each with an independent review | Every ADR in force is English; excluded ADRs carry an English status line; links and `DECIDED:` pointers resolve |
 | 2-9c (done 2026-10-18) | `docs/*.md` and `docs/glossary.md` (English; the Japanese column moves to `GLOSSARY.ja.md`); `CLAUDE.md`, `AGENTS.md`, `.claude/ACTIVE_DESIGN.md` as a whole; CHANGELOG remnants; the English header line on research snapshots | No Japanese under `docs/` outside `GLOSSARY.ja.md` and `research/` |
-| 2-9d | Comments and JSDoc of `packages/*/src` rewritten with a fact check; WGSL comments translated and the snapshots regenerated in the same commit | Code skeleton unchanged per file; lanes green; sha256 rows unchanged |
+| 2-9d (done 2026-10-18) | Comments and JSDoc of `packages/*/src` rewritten with a fact check; WGSL comments translated and the snapshots regenerated in the same commit | Code skeleton unchanged per file; lanes green; sha256 rows unchanged |
 | 2-9e | Error messages with their assertions, module by module; verbatim quotes in docs in the same commit | All lanes green with unchanged test counts |
 | 2-9f | Python exporter (`tools/exporter`, sources and tests) | AST unchanged apart from docstrings; `uv run pytest` green |
 | 2-9g | Remaining tools and fixture notes | The scan shows no Japanese there |
@@ -253,6 +253,16 @@ All resolved by the maintainer's rulings of 2026-10-18 (step 2-9 plan check):
   commands (known-issues 3, release-runbook 1); one quoted commit subject (perf-ledger). The quotes and
   filters go when 2-9d / 2-9e translate their sources; the anchors stay on the allow-list with research.
   The `*-results.json` files under research (10) carry Japanese labels and stay with research.
+- **Residue after 2-9d (2026-10-18).** The comments, JSDoc and WGSL comments of `packages/*/src` and
+  of the public entry points are English; the code skeleton of every file is unchanged
+  (`tools/lang/code-skeleton.ts`, which now carries a WGSL comment across `${…}`), the 249 WGSL
+  fixtures were regenerated with `KARUME_WGSL_SNAPSHOT=write` (comment lines only), and the kernel
+  fingerprint of the two embedded geometry profiles was re-derived because it hashes the generated
+  WGSL with its comments (ADR 0117 decision 4). What stays Japanese there is string literals —
+  error messages, diagnostics, WGSL header fragments such as `gemmGeometryNote`, test-name labels
+  — about 3,150 lines, the subject of 2-9e; a few comments keep a Japanese example in a code span.
+  Three test assertions that matched Japanese comment text (`codegen_wgsl_test.ts`,
+  `linear_gemv_rows_test.ts`) were re-keyed to the English text.
 - **Baseline (tracked files, line-based, 2026-10-18).** `docs/decisions` 19,541 lines in 129 files;
   `docs/` otherwise 5,651; `docs/research` 23,964; `packages/runtime/src` 16,512; `packages/models/src`
   11,911; `packages/hub/src` 1,433; tests of the three packages and e2e 37,113; test fixtures 11,964;
