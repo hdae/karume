@@ -22,8 +22,8 @@
   practical preset, and Wan2.2 has no f16 preset — an instance of decisions 1 and 4) /
   [0109](0109-manifest-v5-container.md) (`karume/5`; the `defaultQuant` field is unchanged) /
   [0106](0106-device-keyed-references.md) (sha256 reference rows per environment key) /
-  [0126](0126-numerics-profiles.md) (numerics profiles; activation quantization stays out of them —
-  decision 7) / [0131](0131-bf16-weight-execution.md) (bf16 storage; Anima's original-weights preset
+  [0126](0126-numerics-profiles.md) (numerics profiles — deferred 2026-10-18; activation quantization stays
+  out of them — decision 7) / [0131](0131-bf16-weight-execution.md) (bf16 storage; Anima's original-weights preset
   `bf16`) / [0073](0073-models-source-pin.md) (revision pins).
 
 ## Context
@@ -190,8 +190,9 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
    0126's automatic selection covers kernel variants of classes E / C / R only; `a8` reaches a
    Session only through a preset's `session` declaration or an explicit option. ADR 0126 decision
    2's sentence "quantization stays an explicit choice in 0.15.0" is to be read as "the runtime
-   never selects it automatically" — a default preset may declare it; the wording is adjusted when
-   ADR 0126 is implemented (phase 2 step 2-8).
+   never selects it automatically" — a default preset may declare it. The wording was adjusted at phase 2
+   step 2-8 (2026-10-18), when ADR 0126 was deferred: its sentence now says that the runtime never selects
+   activation quantization automatically and that a default preset may declare it.
 
 ## Consequences
 
@@ -237,4 +238,5 @@ sync. No distribution was rebuilt.
 2. Revisiting decision 5 (warning versus automatic sibling) once there is field evidence.
 3. The memory pre-check's "which presets fit this device" report (building blocks exist:
    `estimateGraphMemory`, `fitsHeadroom`); not scheduled.
-4. The wording of ADR 0126 decision 2 (decision 7), at step 2-8.
+4. The wording of ADR 0126 decision 2 (decision 7) — resolved 2026-10-18 at step 2-8 (ADR 0126 deferred,
+   sentence reworded).

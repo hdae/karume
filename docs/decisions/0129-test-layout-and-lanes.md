@@ -269,6 +269,8 @@ See "Open points".
    moved files, with the coverage gate rebuilt on the same table.
 3. **Phase 3 — behaviour changes** (numerics profile, default preset — separate ADRs). Their
    intended differences are re-recorded in the sha rows with `rewrite`, per ADR 0106 and ADR 0110.
+   *(2026-10-18: the numerics profile was deferred — ADR 0126 — and the default presets stay — ADR 0128
+   decision 6 — so 0.15.0 rewrites no sha row for either.)*
 
 ## Open points
 

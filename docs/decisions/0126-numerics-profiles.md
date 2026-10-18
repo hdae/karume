@@ -1,6 +1,8 @@
 # 0126: Numerics profiles — practical by default, reference on request
 
-- Status: proposed (2026-10-16; to be accepted by the maintainer after review)
+- Status: deferred (2026-10-18 — not implemented in 0.15.0 by the maintainer's ruling at phase 2 step 2-8:
+  the runtime default stays the reference path and the practical bundles reach users through the default
+  presets of [0128](0128-default-preset-original-weights.md); reason and re-entry conditions in the addendum)
 - Date: 2026-10-16
 - Related:
   - [0058](0058-numerics-opt-in-contract.md) — the numerics opt-in contract; this ADR amends its decision 2
@@ -69,7 +71,9 @@ runtime default (ADR 0058 decision 2 / ADR 0110 decision 1). The freeze has thre
    default weight preset is the original weights): Mac WebGPU has no hardware 4×8-bit dot product, so w8a8 is
    not faster there. A default chosen for speed on one adapter would make another adapter slower. The default
    MUST NOT be slower on Mac WebGPU than the reference path; selection from adapter capabilities gives that,
-   a single fixed variant does not.
+   a single fixed variant does not. *(Addendum 2026-10-18: this premise no longer holds — ADR 0128 decision 5
+   keeps the activation-quantized default preset on a device without dp4a and warns once per device, and the
+   companion decision "default = original weights" was withdrawn in the same ADR.)*
 
 ADR 0028 was an early decision. The maintainer's judgement (2026-10-15): current GPUs commonly expose the
 features involved (shader-f16, subgroups, the dp4a WGSL feature — all green under Node + Dawn in the
@@ -108,8 +112,9 @@ moves the remaining piece, the default itself.
    - **Q is never automatic.** Approximation variants (wider band than the reference path's op band, for
      example flash-style attention with widened bands) run only when requested explicitly. Activation
      quantization (8-bit attention, 8-bit linear activations) is also explicit-only under this ADR, although
-     ADR 0110 classifies its oracle as E: it changes the computation the oracle mirrors, and quantization stays
-     an explicit choice in 0.15.0.
+     ADR 0110 classifies its oracle as E: it changes the computation the oracle mirrors. "Explicit" means that
+     the runtime never selects it automatically; a default preset may declare it through its `session` bundle
+     (ADR 0128 decision 7 — wording adjusted 2026-10-18).
    - **Deterministic** (MUST): the selection is a pure function of the graph's shapes, the device's features
      and limits, and the Session options. It MUST NOT depend on wall-clock timing or run-time measurement —
      ADR 0022's ban on run-time autotuning and ADR 0110 decision 6 stay as they are.
@@ -226,7 +231,8 @@ which classes are eligible and on what conditions.
 
 The plan of record fixes only that the profile work is phase 3-1 ("numerics profile → re-classify and write
 reference values"), after the Node port (phase 1) and the cleanup (phase 2). The order inside 3-1 below is a
-proposal.
+proposal. *(2026-10-18: the plan of record moved this work to phase 2 step 2-8, where it was deferred — none of
+3-1a–3-1d is scheduled; see the addendum.)*
 
 1. **Now (phase 0-4):** this ADR is proposed. No code changes; the default stays the reference path.
 2. **3-1a — knob without behaviour change:** add the profile knob with the reference profile as the effective
@@ -267,3 +273,53 @@ proposal.
 - **Quality ruling.** Whether the flip needs a human quality ruling per family (ADR 0058 decision 5, ADR 0110
   decision 8) for C and R selections, or whether the op gates suffice.
 - **Release date.** 0.15.0 is the target release; no date is set.
+
+## Addendum (2026-10-18) — deferred at phase 2 step 2-8
+
+The maintainer's ruling at step 2-8: this ADR is not implemented in 0.15.0. The runtime's omitted-value path
+stays the reference path (ADR 0058 decision 2 and ADR 0110 decisions 1, 7 and 8 are unchanged), the practical
+bundles reach users through the default presets of ADR 0128, and the amendments tabled above do not take
+effect. The knob, the automatic selection and the row re-classification are not built; 0.15.0 carries no
+runtime numerics change and no **Breaking** entry on this account.
+
+### Why
+
+Each of the three costs in Context is handled by a later decision, and the automatic selection has no
+occupant today that a preset does not already deliver.
+
+| Cost in Context                                 | State on 2026-10-18 (`wip/0.15`)                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Parity is paid on every runtime change       | Upstream parity at the model exit is opt-in since step 2-1 (`KARUME_UPSTREAM_PARITY=1`, `packages/e2e/tests/helpers/upstream-parity.ts`) and the lanes split runtime from models (ADR 0129). The torch comparisons that still run by default are the runtime's small graph goldens (`packages/runtime/tests/e2e_golden_test.ts`) and EmbeddingGemma's — both cheap.              |
+| 2. Faster variants have no route to the default | ADR 0128 keeps the per-model practical preset as `defaultQuant`, and the preset's `session` bundle carries every variant a family uses today (gemma4 `i4-fast` = parallel GEMV + fusions + parallel-fused state attention; anima / Wan / irodori = activation quantization). A new variant reaches the default by one knob in `SessionSpec` plus a row in the family's acceptance table — flash-style attention included (Q is explicit-only under decision 2 as well). |
+| 3. A fixed fast default is not portable (Mac)   | ADR 0128 decision 5 keeps the activation-quantized default on a device without dp4a and warns once per device, so the MUST of Context item 3 no longer holds; activation quantization is outside this ADR's automatic selection by decision 2.                                                                                                                                       |
+
+What the automatic selection could pick today, and why it cannot yet (measurements as recorded in the
+repository; none of them was taken under Node + Dawn):
+
+| Variant                                               | Measured                                                                                                                                        | Blocked by                                                                                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rmsNormReduce: "subgroup32"` (gemma4-qat)            | +2–6 % on the RTX 3080 Ti under Chrome (ABBA +2.06 %, attribution runs +3.77 % / +6.16 % — research 2026-09-13), within noise on the M2 (ADR 0100) | not expressible in a manifest (`SessionSpec` has no such key, `GpuFeaturesSpec` only `shaderF16`); four-point gate items ② ④ missing (ADR 0110 §9); `subgroups` is requested from the adapter only on an explicit knob; not re-measured on top of `i4-fast`                                                                       |
+| `linearCompute` / `attentionCompute: "f16"` (class C) | 0.92–0.98× on the RTX 3080 Ti (ADR 0028); FP16 2:1 devices unmeasured (perf-ledger K-68)                                                        | no measured win; siglip2 / depth-anything / birefnet reject `linearCompute` in their acceptance tables                                                                                                                                                                                                                          |
+| `linearGemvReduce: "parallel-subgroup32"`             | QAT +4–5 % on the RTX 3080 Ti, slower on the M2 (research 2026-09-13, ADR 0101)                                                                 | not a candidate: the packed / fused variants of `i4-fast` require `"parallel"`, and a preset declaration ranks above the profile (decision 6)                                                                                                                                                                                  |
+
+Variants that depend on an optional GPU feature, or whose win flips between adapters, are the one class a
+preset cannot express; none of them wins today on the reference devices.
+
+### Re-entry conditions
+
+The ADR is reopened when either is measured:
+
+1. an E / C / R variant that needs an optional GPU feature (`subgroups`, `shader-f16`) or whose win flips
+   between adapters wins on a family's reference device — for example `-c16` on an FP16 2:1 device (K-68), or
+   `subgroup32` reproducing its gain on top of `i4-fast`;
+2. a family whose acceptance table rejects every knob (siglip2, depth-anything, birefnet, vowel-detector,
+   umT5) gains an E / R variant that is not bit-identical to the reference path.
+
+### Wording adjusted by this addendum
+
+- Decision 2, last sentence of the "Q is never automatic" item: "explicit" means that the runtime never
+  selects it automatically; a default preset may declare it (ADR 0128 decision 7).
+- Context item 3: its MUST is superseded by ADR 0128 decision 5 (noted inline).
+- Staging: the work moved to phase 2 step 2-8 and was deferred there; none of 3-1a–3-1d is scheduled.
+- The glossary (`docs/GLOSSARY.ja.md`) marks the profile terms as deferred and restores "reference path"
+  (参照経路) as the term for the runtime's omitted-value path.

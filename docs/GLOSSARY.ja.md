@@ -18,9 +18,10 @@
 
 | 英語（コード・docs） | 日本語（対話） | 意味 | やめる言い方 | 正本 |
 | --- | --- | --- | --- | --- |
-| numerics profile ◆ | 数値プロファイル | `SessionOptions` の実行形の束。`practical` / `reference` の 2 値 | 層・経路（実用層・参照層・既定経路） | 新 ADR（0058 / 0110 の改定） |
-| practical profile ◆ | 実用プロファイル | 既定。形と adapter の能力で E / C / R の変種を選ぶ。近似（Q）は含まない | 実用層・実用経路 | 同上 |
-| reference profile ◆ | 参照プロファイル | opt-in。今の既定値の束（自動選択なし）。オラクルと参照値の根 | 参照層・参照経路・既定経路 | 同上 |
+| numerics profile ◆ | 数値プロファイル | 見送り（2026-10-18・ADR 0126 は deferred — 0.15.0 には無い）。`SessionOptions` の実行形の束。`practical` / `reference` の 2 値 | 層（実用層・参照層）・既定経路 | ADR 0126（deferred・0058 / 0110 の改定は発効せず） |
+| practical profile ◆ | 実用プロファイル | 見送り（同上）。実装されれば既定で、形と adapter の能力で E / C / R の変種を選ぶ。近似（Q）は含まない。今の既定の実用側は manifest の実用プリセット（`session` の束） | 実用層・実用経路 | 同上 |
+| reference profile ◆ | 参照プロファイル | 見送り（同上）。opt-in の knob の値として予定していた「省略値の束（自動選択なし）」。今はその状態が runtime の既定そのもの = 参照経路（次の行） | 参照層・既定経路 | 同上 |
+| reference path ◆ | 参照経路 | runtime の省略値の経路（数値ノブを全て省略した Session）。sha 行の参照行・オラクル・上流一致の根。2-8 の裁定（2026-10-18・1-1）で「やめる言い方」から戻した | 参照層・既定経路・参照席 | ADR 0058 決定 2・ADR 0110 §1 |
 | original weights ◆ | オリジナルの重み（忠実な重み） | Karume 側で量子化していない重み。上流の格納のまま（f32 → f32・bf16 → bf16・上流が f16 なら f16・QAT はその整数）で演算は f32 | 忠実席・参照席・忠実な席 | ADR 0128 決定 4・0131 |
 | quantized weights ◆ | 量子化された重み | i8 / i4 / i2 の格納型。`quant` の明示指定で選ぶ | 実用席の重み | 同上 |
 | storage dtype | 格納型 | 容器に書いた重みの形（f32 / f16 / i8 / i4 / i2） | — | glossary.md |
@@ -31,7 +32,7 @@
 | variant | 変種 | あるノブの値 1 つに対応するカーネル経路 | 入居者 | ADR 0058 |
 | option / knob △ | オプション（ノブ） | `SessionOptions` の個別の設定 | 席（実行の席） | ADR 0058 決定 1 |
 | fallback △ | フォールバック | 形や limit が適格でないとき参照の変種へ落ちること。診断のパイプラインキーに必ず出る | 縮退・沈黙縮退 | ADR 0058 決定 3 |
-| auto-selection | 自動選択 | 実用プロファイルが形 / adapter で変種を選ぶこと。選択は確認可能で、ノブで上書きできる ◆ | auto | 新 ADR |
+| auto-selection | 自動選択 | 見送り（2026-10-18・ADR 0126 は deferred）。実用プロファイルが形 / adapter で変種を選ぶこと。選択は確認可能で、ノブで上書きできる ◆ | auto | ADR 0126（deferred） |
 
 ## 配布と資産
 
@@ -60,7 +61,7 @@
 | golden | golden | 上流（torch）由来の期待値。許容差つき | — | ADR 0005 |
 | fake-quant golden △ | fake-quant の golden | torch に活性量子化を掛けて採った期待値 | 鏡像 golden | glossary.md |
 | census | census | 変種のパイプラインキーが実際に走った本数の検査（黙って落ちるのを防ぐ） | — | ADR 0058 決定 4 |
-| self A/B △ | 自機 A/B | 同じ機で参照プロファイルと実用側の出力を比べる検査 | 自機 A/B 門 | ADR 0110 決定 5 |
+| self A/B △ | 自機 A/B | 同じ機で参照経路（省略値）と実用プリセットの出力を比べる検査 | 自機 A/B 門 | ADR 0110 決定 5 |
 | difference floor △ | 差の下限 | 自機 A/B で「1 bit 以上違う」こと（束が丸ごと効いていない状態の検出） | 床 | ADR 0110 決定 5 |
 | collapse ceiling | 崩壊上限 | 自機 A/B の相対 RMS の上限 | — | ADR 0110 決定 5 |
 | fault injection | 故障注入 | チェックが空振りでないことの証明（わざと壊して赤にする） | — | ADR 0110 決定 3 |

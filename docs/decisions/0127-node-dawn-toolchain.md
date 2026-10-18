@@ -202,9 +202,9 @@ and four checks built on Deno subcommands (`deno doc`, `deno info`, `deno bundle
 
 ### Explicitly left open
 
-See Open points. This ADR does not decide the numerics profile, the default weight preset, the
-test reorganisation beyond the port, or the language of sources and documents; those are recorded
-separately.
+See Open points. This ADR does not decide the numerics profile (ADR 0126 — deferred 2026-10-18), the
+default weight preset (ADR 0128), the test reorganisation beyond the port (ADR 0129), or the language of
+sources and documents (ADR 0130); those are recorded separately.
 
 ## Staging
 

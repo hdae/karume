@@ -9,14 +9,14 @@
 
 ## now — 0.14.0 リリース後（2026-10-16）
 
-- **0.15 への移行（起票 2026-10-15・利用者の裁定 — ADR [0126](decisions/0126-numerics-profiles.md) / [0127](decisions/0127-node-dawn-toolchain.md) / [0128](decisions/0128-default-preset-original-weights.md) / [0129](decisions/0129-test-layout-and-lanes.md) / [0130](decisions/0130-project-language.md)・全て proposed）**:
+- **0.15 への移行（起票 2026-10-15・利用者の裁定 — ADR [0126](decisions/0126-numerics-profiles.md) / [0127](decisions/0127-node-dawn-toolchain.md) / [0128](decisions/0128-default-preset-original-weights.md) / [0129](decisions/0129-test-layout-and-lanes.md) / [0130](decisions/0130-project-language.md)・0126 は 2026-10-18 に deferred・他は proposed）**:
   branch `wip/0.15`（worktree はリポ外 `~/workspace/karume-wt-0.15`・main は 0.14.0 のまま）。
   **フェーズ 1（移植）✅ 2026-10-16**: Node 24 + Dawn（npm `webgpu`）+ Vite+（Vitest の projects = レーン・Oxlint・Oxfmt・TypeScript 7）へ移植。
   テスト一式を機械移植し、実重みの e2e 61 本を私的 `packages/e2e` へ、共通の土台（Dawn の注入・fs など）を私的 `packages/test-support` へ。
   Deno ツール依存の検証 4 本（公開面・依存グラフ・barrel・local-dist-server）を置き換え、計測 tools / examples は削除（ブラウザアプリとして作り直す — ADR 0127）。
   結果: 全レーン緑（core 2,929 + 家族 16 レーン 2,119 passed・17 skipped〈opt-in のケース〉・0 failed — 2026-10-16〜17・`26053ef2`〈core はタイマーの空振り 1 件を直した `1c8f6f8b` で再走〉）・Deno 基線との成果物の突合は数値の差 0（[research](research/2026-10-16-node-port-results.md)）。
   **フェーズ 2（整理 — 0.15.0 の中身）**: ① テスト選別（[一覧](research/2026-10-16-test-triage.md): keep 306 / move 16 / drop 4 / merge 42 / review 24 — 利用者の裁定で実施）
-  ② ADR の整理と英訳・コメントの英語化（ADR 0130）③ 数値プロファイル（ADR 0126: 既定 = practical・reference は opt-in）④ ✅ 既定のプリセットの方針（ADR 0128 を書き換え — 既定はモデルごとの手続きで選び記録する実用プリセットのまま・manifest の制約 C1〜C3 を配布門番で検査・README とカードで透明性・dp4a の無い device で a8 を要求すると runtime が警告・オリジナルの重みのプリセットは努力目標・breaking ではない・2026-10-17・ステップ 2-7）
+  ② ADR の整理と英訳・コメントの英語化（ADR 0130）③ ✅ 数値プロファイルの収容判断（2026-10-18・ステップ 2-8 — ADR 0126 を deferred: 既定プリセットが実用束を運び〈ADR 0128〉・上流一致は 2-1 で opt-in・自動選択に今選べる変種が無い〈subgroup32 は manifest で表せず 4 点チェックの ②④ も欠け〉→ runtime の既定は参照経路のまま・再入条件は ADR 0126 の追記）④ ✅ 既定のプリセットの方針（ADR 0128 を書き換え — 既定はモデルごとの手続きで選び記録する実用プリセットのまま・manifest の制約 C1〜C3 を配布門番で検査・README とカードで透明性・dp4a の無い device で a8 を要求すると runtime が警告・オリジナルの重みのプリセットは努力目標・breaking ではない・2026-10-17・ステップ 2-7）
   ⑤ ✅ Node 向けの CacheStorage（`@karume/hub/node` の `nodeCacheStorage`・2026-10-17・ステップ 2-4）⑥ ✅ PNG の sha 行を画素の sha に（ADR 0106 追記 2026-10-17・ステップ 2-5）⑦ lint の規則集合（既定規則の警告 331 件）
   ⑧ ✅ `Deno.test` 形の shim を Vitest 本来の形へ（2026-10-17・ステップ 2-2）。⑨ ✅ bf16 格納（ADR 0131 — runtime / exporter / anima の忠実プリセット `bf16`〈base・4 役〉・2026-10-17・ステップ 2-6。後続 ✅ 同日: 残り 6 モデル〈turbo / aesthetic ×2 世代・wai / copycat〉も `bf16`・bf16 の conditioner は base 以外自前・export は上流 checkpoint とバイト突合で 7 モデル全部一致）。⑩ a8 の計測 ✅ 計測（2026-10-18・[research](research/2026-10-18-a8-umt5-sbv2.md)・perf-ledger K-80）: umt5 の a8 は L ≥ 118 で 2.1〜2.7 倍速い（L 28〜50 は揺れ・L 8 は 0.4〜0.5 倍）が埋め込みの追加誤差は i8 の丸めの 4〜8 倍（実プロンプトの数行が崩れる）・Wan の step 1 の潜在では DiT 自身の a8 より小さい効き・sbv2 の `i8-a8` は速度の意味が無いことを再確認。視認は利用者「概ね問題なし」・原因調査 ✅（§6: per-token int8 が機能語の行で潰れる・主因 `wo` の入力・混成では消えない）。裁定（2026-10-18・利用者）: **opt-in でも足さない — 根治を優先**（umt5 は今の速度で困っていない・根治は later の perf-ledger K-81）。副産物: Qwen3 text encoder の export の修正（`a5427e6b` 以降落ちていた）・bf16 の丸めは非永続 buffer を外す。**フェーズ 3**: 0.15.0 のリリース（JSR のみか npm も — ADR 0127 未決）。
   同乗の候補（判断はリリース前）: irodori 2 リポの重複の越境参照・sbv2 のサブパス面の再設計・hub ≤ 0.4 の旧名前空間の回収グルーの撤去・HTTP Range 取得。
