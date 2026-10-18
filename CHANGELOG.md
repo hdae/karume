@@ -333,7 +333,7 @@ measurements in `docs/research/`.
   the transformer forwards). Each row of the gpu-lab Wan tab gains `seams` (per-step spans split at
   each forward's end, their medians from step 2 on, and the VAE tile-assembly time) and, for
   Wan2.2, `seamInputCheck` (the transformer's owned input bytes against the expected total); a new
-  Wan2.2-only **切れ目の下見** (seam probe) button measures one step's host work on full-size arrays and an
+  Wan2.2-only **seam probe** button measures one step's host work on full-size arrays and an
   upload and readback of the same bytes as one forward, kept in the top-level `seamProbe[]`. The
   JSON is now `karume-wan-browser/6`. `tools/wan-seams/main.ts` is the Deno twin: it runs the probe
   and a text-to-video generate per frame count and writes `karume-wan-seams/1`.
@@ -376,9 +376,9 @@ measurements in `docs/research/`.
   tokenizer series once their upstream sha256 match. The checkpoint is now loaded into a model built
   on the meta device, so loading no longer holds a second f32 copy of the weights (about 35 GiB for
   E4B). Graphs and weights are unchanged. The published `karume-gemma4` still carries E2B only.
-- `tools/gpu-lab` (`deno task bench:gpu-lab`): a local Chrome (WebGPU) page. **1. 掃引** (sweep)
-  runs `runGeometrySweep` and saves the `karume-geometry-sweep/2` record; **2. プロファイル**
-  (profile) derives a `GeometryProfile` from one or more sweeps of one adapter (the rules of
+- `tools/gpu-lab` (`deno task bench:gpu-lab`): a local Chrome (WebGPU) page. **1. sweep**
+  runs `runGeometrySweep` and saves the `karume-geometry-sweep/2` record; **2. profile**
+  derives a `GeometryProfile` from one or more sweeps of one adapter (the rules of
   `deriveGeometryProfile`) and exports it as TypeScript, injection JSON or a registration command;
   **3. Anima** generates on an injected, built-in or stored-and-matched profile, records per-stage
   wall and GPU time, the DiT residency and the PNG sha256, and A/Bs the default geometry against
@@ -1119,8 +1119,8 @@ measurements in `docs/research/`.
 - **Breaking:** the runtime's in-memory graph (`IrGraph`) now uses the merged storage vocabulary:
   `initializers[name]` is `{ storage: { codec, groupSize?, rowAxis? } }` or `{ shared: true }`,
   initializer names are the tensor keys (the exporter's FQN / `const.<hash>`), and the `tensor` /
-  `storage.dtype` / `storage.scale` fields are gone, and capability diagnostics say
-  `非対応 格納 '<layout>'`. Shared initializers
+  `storage.dtype` / `storage.scale` fields are gone, and capability diagnostics name the
+  unsupported storage layout. Shared initializers
   are named after the lender's initializer.
 - **Breaking:** hub reads manifest `karume/5` only (no `karume/4`); `resolveFiles` / `ResolvedFiles` /
   `WeightFiles` are replaced by `resolveSelection` / `ResolvedSelection` / `WeightContainer`, the

@@ -1,14 +1,14 @@
 name: Publish
 
-# JSR への公開。GitHub Release を published にしたときだけ発火する（誤公開耐性）。
-# `deno publish` は workspace ルートで 3 パッケージ（hub / runtime → models）を依存順に一括
-# publish し、version が既に公開済みなら冪等にスキップする。認証は OIDC トークンレス
-# （secret 不要）— 事前に各パッケージ settings で GitHub リポを Link しておくこと。
+# Publish to JSR. Fires only when a GitHub Release is published (guards against accidental publishes).
+# `deno publish` at the workspace root publishes the 3 packages (hub / runtime → models) in dependency
+# order and skips idempotently when the version is already published. Authentication is OIDC, tokenless
+# (no secret) — link the GitHub repository in each package's settings beforehand.
 #
-# 前提: Release は CI 緑の main コミットから切る（テストゲートは ci.yml に集約）。deno publish
-# 自体も slow types 等を検証し、通らなければ publish しない。
+# Precondition: a Release is cut from a main commit with green CI (the test gate lives in ci.yml). deno publish
+# itself also checks slow types etc. and does not publish when they fail.
 #
-# workflow_dispatch は初回公開・緊急時の手動フォールバック。
+# workflow_dispatch is the manual fallback for the first publish and for emergencies.
 
 on:
   release:
@@ -17,7 +17,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # OIDC ID トークンが JSR との認証に使われる。
+  id-token: write # the OIDC ID token authenticates with JSR.
 
 jobs:
   publish:
