@@ -1,5 +1,7 @@
 # part 長とホスト RAM ピーク（段 3e・2026-09-24）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（Arc B570 / Deno 2.9.6 / Linux・HEAD `994bdad8` + 段 3e の未コミット差分）。道具は
 > `tools/ram-peak/matrix.ts`（1 構成 1 プロセス・cold → warm → local を各 3 回・中央値）。生の記録と中央値の
 > 表は `outputs/ram-peak/3e-{base,m1,m2}/<系列>-<part 長>/`（`results.jsonl` / `summary.md`・git 追跡外）。

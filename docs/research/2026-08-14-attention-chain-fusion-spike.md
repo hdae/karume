@@ -1,5 +1,7 @@
 # 2026-08-14 — 分解 attention 窓の鎖融合スパイク（K-5b 案 X・棄却の実測記録）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 性格: **時点スナップショット**（2026-08-14・RTX 3080 Ti / Vulkan / Deno 2.9.4）。数値の正本は
 > この doc、判断と順序は [perf-ledger](../perf-ledger.md) K-5b が持つ。
 

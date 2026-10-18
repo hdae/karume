@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-26 時点の実測スナップショット。Intel Arc B570（BMG G21・VRAM 9.93 GiB）/ Linux xe / Deno 2.9.6 / HEAD `4e1dc883` + ADR 0112 の実装（未コミット）。壁時計は `performance.now()`。
 
 # anima の DiT 常駐 — B570 での利得と OOM 退避の経路

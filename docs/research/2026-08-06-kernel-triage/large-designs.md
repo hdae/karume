@@ -1,5 +1,7 @@
 # 大規模最適化・互換性設計候補（2026-08-06）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。ここにある項目は原則未実装であり、採用決定ではなく検証可能な設計候補である。
 >
 > NOTE: 本ファイルは**参照実装ブランチ（`codex/kernel-quick-fixes`）での設計候補記録を原文のまま持ち込んだもの**で、本リポ main の実装状態とは一致しない（実測は Apple M2 / Metal と RTX 3080 Ti / Vulkan）。

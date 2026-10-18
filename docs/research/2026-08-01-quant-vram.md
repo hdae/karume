@@ -1,5 +1,7 @@
 # 量子化と VRAM 削減の実態確認（2026-08-01）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。文中のパス・コマンド・コミットハッシュは記録当時のリポジトリ構成に基づく。
 
 ADR [0006](../decisions/0006-quantization.md) の「VRAM への効果」節の根拠調査

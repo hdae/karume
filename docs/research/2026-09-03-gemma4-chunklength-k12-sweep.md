@@ -1,5 +1,7 @@
 # gemma4 E2B — chunkLength 掃引と K-12（③PV の KV 並列縮約）の実測（2026-09-03）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-09-03・RTX 3080 Ti 12GB / Linux / Vulkan (wgpu) / Deno 2.9.6）。
 > [P 掃引](2026-09-03-gemma4-context-length-sweep.md) の続編で、可変 capacity 波の設計材料 2 点 —
 > ①chunkLength（prefill の刻み幅）を再 export なしで上げたときの prefill 時間、②decode の full 層 attention

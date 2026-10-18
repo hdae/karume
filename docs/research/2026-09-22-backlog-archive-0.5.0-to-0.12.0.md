@@ -1,5 +1,7 @@
 # backlog の消化済み節の退避（0.4.x〜0.12.0 リリース後・2026-08-20〜09-22）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-22 時点のスナップショット。[backlog](../backlog.md) の運用契約①「完了した項目は削除する」へ戻すために、
 > 当時 backlog に残っていた `## 消化済み（…）` 12 節を**逐語で**退避したもの。設計と実測の正本は各節が指す
 > ADR / research / perf-ledger 側にあり、この文書は「当時どうまとめられていたか」を引くための索引兼保存箱である。

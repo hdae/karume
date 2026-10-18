@@ -1,5 +1,7 @@
 # OP マイクロベンチ 2 段目 — `opbench single` / `graph` / `torch` と Fusion 2 段目 `inductor`（2026-09-04）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（RTX 3080 Ti / Vulkan・Deno 2.9.x・torch 2.13.0+cu130 / CUDA 13.0）。道具の正本は
 > `tools/opbench/`・`tools/fusion-hints/`（README が使い方）、性能候補の採否は
 > [perf-ledger](../perf-ledger.md)、波順は [backlog](../backlog.md)。生データは `outputs/bench/<資産>/2026-09-04_*`

@@ -1,5 +1,7 @@
 # M2の融合追試とRMS縮約候補の比較
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 2026-09-13の時点スナップショット。利用者のM2結果と、RTX 3080 Tiの実験・統合検収を区別する。
 
 ## 利用者のM2結果

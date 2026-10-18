@@ -1,5 +1,7 @@
 # TurboQuant recon — karume への適用可否（2026-09-02）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-09-02・調査のみ・実測なし）。backlog 次波④「TurboQuant recon
 > スパイク」の調査段。調査 Workflow（掃引 3: 論文一次情報 / karume の量子化リグ / 二次情報 → 深掘り 2:
 > 重み / KV → 反証検証 2・全 8 主張 holds）の統合。数値は論文と既存 research の引用で、本記録での新規

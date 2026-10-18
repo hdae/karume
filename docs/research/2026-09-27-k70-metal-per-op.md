@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-27 時点の実測スナップショット。Apple M2（Chrome 153 / Dawn / metal-3）と Intel Arc B570（BMG G21・Deno 2.9.6 /
 > wgpu / Vulkan）の op 別 GPU 時間の突き合わせ。JSON は `outputs/bench-browser/` と
 > `outputs/bench/karume/2026-09-27_metal-recon/`（どちらも git 追跡外）。公称性能は各社の公開値で、この機で測った値ではない。

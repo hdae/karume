@@ -1,5 +1,7 @@
 # ChromeでのGEMV追試と大語彙INT8の担当列数
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-12の調査・実測スナップショット。RTXの結果であり、M2の検収とは区別する。
 
 RoPE融合の後、語彙出力の形状選択、submitの上限、K方向の並列加算を調べた。

@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-12時点の調査・実測。利用者のM2結果と、こちらのRTX 3080 Tiによる改善前後の比較を区別する。
 
 # Gemma の PLE 行キャッシュと初回応答の改善

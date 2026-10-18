@@ -1,5 +1,7 @@
 # K-13: states 形 attention の prefill を GEMM 骨格のタイル経路へ（①ₜ / ③ₜ）— K/V を行タイルごとに 1 回読む（2026-09-06）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（RTX 3080 Ti / Vulkan・Deno 2.9.6）。設計の正本は ADR
 > [0067](../decisions/0067-autoregressive-attention-vocabulary.md)（追記 2026-09-06「幾何表」）、採否は
 > [perf-ledger](../perf-ledger.md) K-13。前段 = K-14（[research](2026-09-06-state-qk-parallel-k14.md) §3 の

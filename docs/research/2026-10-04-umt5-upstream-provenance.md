@@ -1,5 +1,7 @@
 # umT5 配布リポの上流を google/umt5-xxl にできるか — 出所の実測
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-10-04）— karume-umt5-xxl の上流を Wan 同梱の umT5 から本家 google/umt5-xxl へ移せるかを、重み・トークナイザ・容器への影響まで実測で確定した調査記録（recipe と配布物は未変更）。
 
 使った版: transformers 5.14.1・torch 2.13.0+cpu・huggingface_hub 1.27.0・hf-xet 1.6.0（`tools` の venv・`uv run --group wan --inexact`）。

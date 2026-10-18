@@ -1,5 +1,7 @@
 # リリース前の GPU 実測 — gemma4 の run 時間の伸び / PLE メモリ内容器のフェンス本数（2026-09-24）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（Arc B570〈xe〉/ Ryzen 5 5600 / RAM 31 GiB / Linux 7.1.8 / Deno 2.9.6〈glibc malloc〉・
 > 2026-09-24）。前段の測定は [part 長と RAM ピーク](2026-09-24-part-length-ram-peak.md)（M0 / M1 / M2 の定義も
 > そちら）。生データと計測スクリプトは作業用の scratchpad に置いた（git 追跡外）。本リポへの計測用の変更は無い。

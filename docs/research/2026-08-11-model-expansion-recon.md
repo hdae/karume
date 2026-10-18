@@ -1,5 +1,7 @@
 # モデル拡充 recon — EmbeddingGemma / Irodori-TTS v4 / BiRefNet_HR / Gemma 4 E2B + 追加候補
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-08-11）。Web 掃引 5 レッグ + コードベース棚卸し 1 レッグ +
 > torch.export 実測スパイク 1 レッグの統合。EmbeddingGemma は同日中に実装着地したため
 > §1 は「当時の判断材料」、§2〜§5 が生きているキュー情報。出典 URL の取得日は 2026-08-11。

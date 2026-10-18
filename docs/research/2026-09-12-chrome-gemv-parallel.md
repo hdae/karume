@@ -1,5 +1,7 @@
 # Chrome の量子化 GEMV 並列化と残る費用
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-12 時点の隔離実験・統合検収のスナップショット。RTX 3080 Ti / Chrome 153 の値であり、M2 の実測ではない。
 
 [先行追試](2026-09-12-chrome-gemv-followup.md)の大語彙INT8 c16を基準に、K方向の分担、重み配置、SRQを比較した。

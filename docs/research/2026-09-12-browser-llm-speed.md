@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-12時点の実測と調査。本文の表はRTX 3080 Ti / Linux / Chrome。利用者のM2実測は末尾のリンク先に区別して保存する。
 
 # Gemma E2B / QAT E2B のブラウザ速度比較
@@ -6,11 +8,11 @@
 
 利用者のtok/s比較を優先し、[Deno / PyTorch基準](2026-09-12-llm-speed-baseline.md)に続いて、
 karumeとTransformers.jsを同じChromeで測る。M2でも`deno task bench:llm-browser`と
-`http://localhost:8787`だけで起動できる[計測ページ](../../tools/llm-speed/browser/README.md)を追加した。
+`http://localhost:8787`だけで起動できる計測ページ (`tools/llm-speed/browser/README.md`, removed in 0.15)を追加した。
 通常 / QAT E2Bを選び、初回、追加暖機1回、本計測3回を順に実行する。JSONは画面から保存できる。
 両エンジンの公開pipelineを使い、runtimeのカーネルやモデルの既定動作は変更しない。
 
-入力は前回の固定英語31 / 日本語37 tokenをそのまま[fixture](../../tools/llm-speed/browser/cases.json)へ移した。
+入力は前回の固定英語31 / 日本語37 tokenをそのままfixture (`tools/llm-speed/browser/cases.json`, removed in 0.15)へ移した。
 温度0、最大64新規token、停止ID `[1,106,50]`。両エンジンへ同じ入力IDを渡す。
 karumeではtokenizer / chat templateがfixtureと一致することも確認する。
 TTFTは最初の非停止tokenまで、decode速度は`(配送数 - 1) / (完了 - 最初の配送)`。
@@ -24,7 +26,7 @@ Transformers.jsは入力Tensorを準備してからgenerateを測る。generate�
 
 ## 実行条件とモデル差
 
-ライブラリとONNX revisionの正本は[config.ts](../../tools/llm-speed/browser/config.ts)。
+ライブラリとONNX revisionの正本はconfig.ts (`tools/llm-speed/browser/config.ts`, removed in 0.15)。
 Transformers.js 4.2.0とONNX Runtime Web 1.29.0の公式配布ファイルを使う。
 Transformers.jsのbrowser ESMは外部importするORT実行部とTensorクラスを同じORTモジュールへ解決する。
 JS/WASMを同じ版に揃え、asyncify WASM、1 thread、WebGPU EPを使用する。

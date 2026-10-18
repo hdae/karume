@@ -1,5 +1,7 @@
 # DeBERTa text_encoder のサイズ recon — ONNX 版の実態と karume 側の削減余地
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-08-11）。発端は「SBV2 の ONNX 推論で使われる
 > `tsukumijima/deberta-v2-large-japanese-char-wwm-onnx` は hidden[-3] だけを出す変換らしいが、
 > 配布サイズを縮める材料になるか」という問い。外部一次情報の掃引 4 レッグ + ローカル深掘り

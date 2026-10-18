@@ -1,5 +1,7 @@
 # GPTQ 掃引軸の実測 — static-groups / act-order / damping（minicpm5・2026-08-31）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 性格: **時点スナップショット**（実測記録）。実装 = `892bfb3`（core・既定 off でビット同一）+
 > `683d6a0`（minicpm5 sweep の EXPERIMENT_CONFIGS）。生ログ / JSON はセッション scratchpad
 > （揮発）— 再実行は `uv run python -m minicpm5.sweep_w4 --only gptq-rtn-static …`。

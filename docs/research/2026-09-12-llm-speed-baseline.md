@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-12時点のRTX 3080 Tiでの実測スナップショット。M2の結果や各フレームワークの性能上限ではない。
 
 # LLM の TTFT・生成速度ベースライン
@@ -9,7 +11,7 @@ MiniCPM5-2B、Qwen3-0.6Bを同じ固定入力でDeno/WebGPUと公式PyTorch/Tran
 
 ## 条件と再現方法
 
-ツールは[tools/llm-speed](../../tools/llm-speed/README.md)。固定入力を1モデルずつ準備し、
+ツールはtools/llm-speed (`tools/llm-speed/README.md`, removed in 0.15)。固定入力を1モデルずつ準備し、
 保存先を変えてDenoとPyTorchを逐次実行する。資産はローカル直読で変更・再量子化しない。
 `--checkpoint`で公式config/tokenizer、`--source`で変換済み配布形/系列を指定できる。
 公式会話テンプレートが無い場合は`--chat-template`で明示する。検証したE4Bのローカル配置ではこれが必要だった。

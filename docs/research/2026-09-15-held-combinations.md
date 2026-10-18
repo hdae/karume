@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-15時点の調査・実測スナップショット。RTX 3080 Ti / Chrome 153の実験用の試作で、M2の実測や製品採用ではない。
 
 # Gemma E2Bの保留候補を組み合わせた再検証

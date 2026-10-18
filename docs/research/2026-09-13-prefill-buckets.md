@@ -1,5 +1,7 @@
 # Gemma E2Bの入力バケットとキャッシュ
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 2026-09-13時点の調査・実測スナップショット。継続候補はH-23、数値と生データの所在はこの記録と付属JSONを参照する。
 
 ## 目的と測定条件
@@ -122,7 +124,7 @@ QATには投機を追加していない。
 
 ## ブラウザの比較設定
 
-[比較画面の説明](../../tools/llm-speed/browser/README.md#prefill-bucket-experiment)を追加した。
+比較画面の説明 (`tools/llm-speed/browser/README.md`, removed in 0.15)を追加した。
 標準/少数追加/細分化と、ABC→CBAの往復を選べる。各設定を別iframeで実行し、
 選択した `prefillBuckets` と実際の `chunkBuckets` を表・JSONへ記録する。
 既存のGEMV比較とは独立し、両方を比較すると1モデル12回の読み込みになる。

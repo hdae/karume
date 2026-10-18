@@ -1,5 +1,7 @@
 # gemma4 E2B — プロンプト長 P に対する decode / prefill の実測（可変 capacity 波の設計材料・2026-09-03）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-09-03・RTX 3080 Ti 12GB / Linux / Vulkan (wgpu) / Deno 2.9.6）。
 > ユーザー意向「コンテキスト窓は可能な限り伸ばす」（2026-09-02 裁定: RoPE 表は TS 正本でホスト生成し
 > capacity を実行時ノブへ・メモリ見積りも結線）の前提となる P 依存の実測。各 P 1 回。

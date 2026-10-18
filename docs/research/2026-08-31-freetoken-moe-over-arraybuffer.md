@@ -1,5 +1,7 @@
 # FreeToken（MoE Cache）と ArrayBuffer 超級モデルの成立戦略 — 調査記録
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-08-31・Web 一次ソース + 現物コード照合。Sonnet 掃引 4 +
 > Opus 深掘り 2 の統合）。裁定はここに書かない — 分岐点の列挙まで（裁定が出たら
 > backlog / ADR / limitations が正本）。

@@ -1,5 +1,7 @@
 # OP census と Fusion 候補列挙 — 8 家族の実資産に掛けた結果（2026-09-03）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-09-03・GPU 不要の静的解析 — 配布ミラー 5 + 系列出力 5 の IR）。
 > OP マイクロベンチ波（backlog ②）と Fusion 半自動発見（同 ③）の **1 段目**の成果で、道具は
 > `tools/opbench`（census）と `tools/fusion-hints`（候補列挙）。生データは

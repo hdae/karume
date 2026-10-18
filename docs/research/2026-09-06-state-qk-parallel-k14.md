@@ -1,5 +1,7 @@
 # K-14: states 形 attention ①QK の D 方向並列縮約 ①′ — decode ×1.6・prefill は M=1 門で据え置き（2026-09-06）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（RTX 3080 Ti / Vulkan・Deno 2.9.6・実装 = `cce129d` + 門 `4182b8b`）。設計の正本は
 > ADR [0067](../decisions/0067-autoregressive-attention-vocabulary.md)（追記 2026-09-06）、席は ADR
 > [0058](../decisions/0058-numerics-opt-in-contract.md)、採否は [perf-ledger](../perf-ledger.md) K-14。

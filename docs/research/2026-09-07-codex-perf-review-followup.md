@@ -1,5 +1,7 @@
 # Codex 性能調査（2026-09-06）の消化 — 診断 phase・sampler heap・PLE gather / 行読み・prefill M バケット（2026-09-07）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（RTX 3080 Ti / Vulkan・Deno 2.9.6・Chrome 152 / macOS の 1 点はユーザー実機）。出発点は
 > `.claude/reviews/2026-09-06_performance-investigation/`（Codex による調査・git 追跡外 — 数値はここへ転記）。設計の
 > 正本は ADR [0066](../decisions/0066-generation-context-state-slots.md) 追記 10 / [0085](../decisions/0085-ple-host-gather.md)

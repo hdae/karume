@@ -1,5 +1,7 @@
 # safe-softmax ガードの「-inf 源」判定変更（W-E1-3）の A/B — 公開 8 家族の再 export 実測
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-09-05・エクスポータ = 網羅レビュー修正波 ffa1de9 以降・torch 2.13.0+cpu）。
 > 生データと系列別の表は `outputs/bench/softmax-guard-ab/REPORT.md`（git 追跡外）が正本で、ここは結論と
 > 読み方だけを残す。

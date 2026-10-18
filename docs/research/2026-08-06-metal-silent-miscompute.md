@@ -1,5 +1,7 @@
 # Metal（Deno + wgpu）の沈黙誤値と性能 — Mac 実機 recon
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。文中のパス・行番号・実測値は記録当時（2026-08-06）のリポジトリ
 > 構成と実機に基づく。
 

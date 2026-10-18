@@ -1,5 +1,7 @@
 # Irodori DiT（G4/G5）export 設計 recon — U3 の解体と実行形の実測
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-08-11・実重み `inputs/irodori/v4-small` + 実装 clone に対する
 > torch.export / TS 束縛の実測。GPU 実行はしていない — export 到達性と数値同値の確認）。
 > 裁定の帰結は ADR [0046](../decisions/0046-cat-symbolic-axis.md)（cat 緩和）と

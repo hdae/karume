@@ -1,5 +1,7 @@
 # ブラウザ推論ランタイム勢力図と karume の位置
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-08-16 調査・情報源は文中に明記）。以降の記述は調査時点の
 > 一次ソース／訓練知識に基づく。バージョン・活発さの類は数か月で陳腐化する前提で読むこと。
 > 用途: ①ORT Web 対比ベンチ慣行（backlog）の測定条件の根拠 ②「有界論理 extent の席予約」

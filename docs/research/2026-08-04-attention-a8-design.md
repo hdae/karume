@@ -1,5 +1,7 @@
 # attention a8 化（QK/PV の int8・dp4a 化）の設計 recon — 2026-08-04
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。文中のパス・コマンド・コミットハッシュは記録当時のリポジトリ構成に基づく。
 
 > 読み専レッグの成果物。コード変更なし。数値は全て一次ファイルから引いた（【実測】= 計測ファイル・

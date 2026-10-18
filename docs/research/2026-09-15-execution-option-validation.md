@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-15時点の不具合調査・修正記録。性能候補の採否とは別の、JavaScript入力境界の修正。
 
 # 実行設定の型をキー変換の前に検査する

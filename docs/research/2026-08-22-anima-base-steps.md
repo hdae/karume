@@ -1,5 +1,7 @@
 # 素の Anima（LoRA 無し）の既定 step 数と CFG — 実測と視認裁定
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 性格: **時点スナップショット**（2026-08-22）。素の base 系列を新設した日の実測と、既定値を
 > 決めた視認裁定の記録。恒久の規約ではないので、席や既定が動いたらこの文書ではなく
 > [backlog](../backlog.md) と recipe のコメントが正本になる。

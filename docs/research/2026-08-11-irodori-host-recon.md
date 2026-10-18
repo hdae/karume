@@ -1,5 +1,7 @@
 # Irodori 推論ホスト経路 recon — 第 3 波（TS 移植）の対象確定
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-08-11・上流実装 clone `inputs/irodori/Irodori-TTS/` の静的読解 +
 > 一部は exporter の常設門による実測）。移植の裁定は ADR
 > [0048](../decisions/0048-irodori-host-port.md)、DiT 実行形は [0047](../decisions/0047-irodori-dit-execution.md)

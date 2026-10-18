@@ -1,5 +1,7 @@
 # OP / Fusion 作業前の実走ベースライン — 4 家族の op 別 GPU 時間と壁時計（2026-09-06）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（RTX 3080 Ti / Vulkan・Deno 2.9.6・karume `3b7084d`）。道具は
 > `tools/opbench/main.ts graph`（この日に siglip2 / irodori へ広げた — `3b7084d`）。性能候補の採否は
 > [perf-ledger](../perf-ledger.md)、波順は [backlog](../backlog.md)。生データは

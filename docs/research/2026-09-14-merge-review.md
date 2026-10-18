@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-14時点のマージ前レビュー資料。実装の比較範囲を`4dca96a..c014231`へ固定し、後続の整理コミットは文書だけを変更する。独立レビューの結論ではない。
 
 # codex/review-and-fix のマージ前レビュー
@@ -113,14 +115,14 @@ PYTHONPATH=tools/export-recipes tools/.venv/bin/python -m pytest -q tools/llm-ba
 
 Chromeの実装検収とM2結果は[並列GEMV](2026-09-13-gemv-subgroup.md)、[M2の採否](2026-09-13-m2-gemv-subgroup-adoption.md)、[RMS](2026-09-13-rms-subgroup-reduction.md)へ辿る。
 今回の文書整理ではChromeの生成を取り直していない。最新の実験は[大きいI4の不採用比較](2026-09-14-i4-lane-comparison.md)。
-計測を再開する場合は`deno task bench:llm-browser`と[ブラウザ手順](../../tools/llm-speed/browser/README.md)を使い、新しい実験ディレクトリへ保存する。
+計測を再開する場合は`deno task bench:llm-browser`とブラウザ手順 (`tools/llm-speed/browser/README.md`, removed in 0.15)を使い、新しい実験ディレクトリへ保存する。
 
 ## マージと公開の違い・未完項目
 
 コードをマージしても、`models/`・`outputs/`の変換済みモデルや実験台本はgitへ含まれない。
 `.claude/reviews/`の原レビューも追跡外で、移植可能な入口は本資料・追跡済みresearch・テスト・CLIとする。
 実測JSONに記録したローカル生データのパスは、別checkoutに自動では現れない。既存の量子化モデルや実測値を捏造して補わない。
-QATの配布作成は[recipe README](../../tools/export-recipes/gemma4_qat/README.md)、追加LLMは各[MiniCPM5](../../examples/minicpm5/README.md) / [Qwen3](../../examples/qwen3/README.md)の手順を読む。
+QATの配布作成は[recipe README](../../tools/export-recipes/gemma4_qat/README.md)、追加LLMは各MiniCPM5 (`examples/minicpm5/README.md`, removed in 0.15) / Qwen3 (`examples/qwen3/README.md`, removed in 0.15)の手順を読む。
 
 公開source表・既存の公開pinはこのブランチで変更していない。パッケージのバージョン更新・release・HF uploadも含めない。
 新しいIR/PLE/quant語彙を使う配布形の公開には、対応readerとの組合せを[release-runbook](../release-runbook.md)で検収する必要がある。

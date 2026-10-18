@@ -1,5 +1,7 @@
 # states attention の行統計・PV 融合（2026-09-15）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-15時点の調査・実測スナップショット。RTX 3080 Ti / Chrome 153の自動測定と、利用者提供のApple M2測定を区別する。
 
 数値と生データのSHAは[結果JSON](2026-09-15-attention-fusion-results.json)、契約は[ADR 0102](../decisions/0102-state-attention-stats-pv-fusion.md)を正本とする。

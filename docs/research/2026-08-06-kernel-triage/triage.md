@@ -1,5 +1,7 @@
 # カーネル・実行系トリアージ（2026-08-06）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。数値は 2026-08-06 時点の現行 IR・コード・既存実機記録に基づき、再 export や実機再計測前の値を含む。
 >
 > NOTE: 本ファイルは**参照実装ブランチ（`codex/kernel-quick-fixes`）での triage 記録を原文のまま持ち込んだもの**で、本リポ main の実装状態とは一致しない（実測は Apple M2 / Metal と RTX 3080 Ti / Vulkan）。

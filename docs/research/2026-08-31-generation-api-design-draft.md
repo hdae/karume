@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-08-31・生成 API 波の設計ドラフト逐語退避）。裁定 10 点は
 > すべて★推奨案で承認済み（2026-08-31 ユーザー裁定）。**正本化済み** — 決定の正本は ADR
 > [0083](../decisions/0083-generation-api-surface.md)（API 面）/

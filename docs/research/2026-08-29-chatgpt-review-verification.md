@@ -1,5 +1,7 @@
 # ChatGPT レビュー 4 本の検証波 — 実測記録（2026-08-29）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 性格: **時点スナップショット**（HEAD `3ec3d45` = v0.7.0 直後・RTX 3080 Ti / Vulkan /
 > Deno 2.9.6）。外部レビュー 4 本（`.claude/reviews/2026-08-29_chatgpt-reviews/` — git 追跡外）
 > の統合指摘 13 件を検証した際の実測値の正本。裁定の帰結は perf-ledger（H-8〜H-10 / L-7 /

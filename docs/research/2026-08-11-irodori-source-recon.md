@@ -1,5 +1,7 @@
 # Irodori-TTS v4 ソース精読 recon（karume 移植可否の確定）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-08-11）。GitHub `Aratako/Irodori-TTS`（HEAD `8224daf`）+
 > `facebookresearch/dacvae` のソース精読と、実重み safetensors ヘッダ / codec pickle メタの
 > range 取得による実測（重み本体は未取得）。先行 recon

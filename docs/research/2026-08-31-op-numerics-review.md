@@ -1,5 +1,7 @@
 # OP 実装の数値レビュー — 正しさ・危険クラス・精度（2026-08-31）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 性格: **時点スナップショット**（HEAD b35cf5c 時点の横断監査記録）。修正はレビュー直後の
 > コミット列で消化済み — 現況は git log とコード側 doc が正。レビューの一次台帳
 > （findings / 敵対検証の全文）は `.claude/reviews/2026-08-31_b35cf5c/`（git 追跡外）。

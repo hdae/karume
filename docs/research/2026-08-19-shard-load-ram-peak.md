@@ -1,5 +1,7 @@
 # shard 逐次ロードの RAM ピーク実測（ADR 0070 受入③）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-08-19・RTX 3080 Ti 12,288MiB・Deno 2.9.4 /
 > Linux）。ADR [0070](../decisions/0070-shard-loading-admission.md) 決定 3 の実装
 > （`createSessionFromShards`）が「全量 ArrayBuffer 保持の RAM 二重持ち」を実際に解消して

@@ -1,5 +1,7 @@
 # EmbeddingGemma-300m: karume vs ONNX Runtime Web/Node の実測比較
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-08-11）。同一機（Ryzen 5 5600 / RTX 3080 Ti / Linux）・同一入力
 > 5 ケースでの実測。karume = 本リポの export（IR v1・f32・Tmax=512）、ORT = onnx-community/
 > embeddinggemma-300m-ONNX（fp32 / int8 — com.microsoft contrib op 入りの最適化済みグラフ）。

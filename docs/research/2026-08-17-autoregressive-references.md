@@ -1,5 +1,7 @@
 # autoregressive 対応の参照実装調査（2026-08-17）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-08-17 実施）。backlog「next — autoregressive-ready
 > 基盤波」の ADR ①〜⑤ の根拠資料として、llama.cpp / vLLM / ONNX Runtime（本体 + GenAI +
 > Web）/ WebLLM（MLC / TVM）/ transformers.js の一次ソースを shallow clone（commit 固定 —

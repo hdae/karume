@@ -1,5 +1,7 @@
 # コンテナ経路のホスト RAM ピーク（段 2 の検収②③・2026-09-23）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（Arc B570 / Deno 2.9.6 / Linux・HEAD `750b78b1` の直後）。道具は
 > `tools/ram-peak/matrix.ts`（1 構成 1 プロセス・cold → warm → local を各 3 回・中央値）。生の記録は
 > `outputs/ram-peak/2026-09-23_<系列>/results.jsonl`（git 追跡外）。判定の正本は

@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-15時点のGemma E2B高速quant統合とRTXでの自動検証のスナップショット。Apple M2の既存実測とは区別する。
 
 # 検収済み融合をE2Bの高速quantへ宣言

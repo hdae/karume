@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-12時点の実測。WebML/Karumeの比較はRTX 3080 Ti、M2の追試は利用者の提出JSONによる。
 
 # WebML Space の headless 実行と Karume の生成長比較

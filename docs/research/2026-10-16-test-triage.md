@@ -1,5 +1,7 @@
 # Test triage after the Node port (draft for the maintainer's decision)
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > Snapshot of 2026-10-16. Produced by 16 reviewing agents (one chunk of ~25 files each) reading every
 > test file of the ported suite (392 files); the orchestrator did not change any verdict.
 > Nothing has been deleted or moved on the basis of this list. The maintainer decides per row; the

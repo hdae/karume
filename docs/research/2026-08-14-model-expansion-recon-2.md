@@ -1,5 +1,7 @@
 # モデル拡充 recon 第 2 次 — 12 候補の判定と、5 本を実装して分かった差分
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-08-13〜14）。Web 掃引 6 レッグ + コードベース棚卸し 2 レッグ +
 > 群別の適合判定 7 レッグ + 敵対検証 2 レッグの統合に、**同じ波で実際に移植した 5 本の実測**を
 > 突き合わせたもの。§1 が「recon が当たったか外れたか」の記録、§2 が候補キューの当時判定

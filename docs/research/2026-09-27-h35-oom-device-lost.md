@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-27 時点の調査スナップショット。Intel Arc B570（BMG G21・VRAM 9.93 GiB・ReBAR）/ Linux xe / Mesa ANV 25.0.7 /
 > Deno 2.9.6（wgpu-core 29.0.1・wgpu-hal 29.0.3・gpu-allocator 0.28.0）。ソースは crates.io の tarball（Deno v2.9.6 の
 > Cargo.lock のチェックサムと一致）・deno v2.9.6 の `ext/webgpu`・Dawn main `6c1e2771`。台本・JSON・保存したソースは

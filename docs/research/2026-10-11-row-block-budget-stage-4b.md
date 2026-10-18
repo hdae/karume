@@ -1,5 +1,7 @@
 # attention の行ブロックの予算の実測（ADR 0124 の段 4b と層 1 の u32 A/B）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-10-11 10:04〜10:37 UTC）— 開発機（RTX 3080 Ti・Deno）1 台での実測。Chrome と 10 GB 級の機は測っていない。
 
 ## 条件

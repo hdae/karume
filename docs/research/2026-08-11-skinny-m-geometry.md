@@ -1,5 +1,7 @@
 # skinny-M GEMM 幾何の掃引と第 1 波の効果実測
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-08-11・RTX 3080 Ti / Vulkan / Deno 2.9.4）。EmbeddingGemma
 > フロア最適化第 1 波（skinny-M 幾何 + rope 融合一般化）の設計材料と検収実測。幾何の規約は
 > ADR 0022 追記、rope は ADR 0040 追記が正本。掃引の生 JSON とハーネスは scratchpad（揮発）。

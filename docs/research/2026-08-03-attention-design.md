@@ -1,5 +1,7 @@
 # perf-a — 融合 attention の設計 recon（2026-08-03）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。文中のパス・コマンド・コミットハッシュは記録当時のリポジトリ構成に基づく。
 
 > 対象: DiT の `bmm(QK^T) → safe_softmax → bmm(·V)` 連鎖を、ランタイム内蔵の融合 op 1 個へ

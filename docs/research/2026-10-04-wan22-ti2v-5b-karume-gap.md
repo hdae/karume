@@ -1,5 +1,7 @@
 # Wan2.2 TI2V-5B を Karume へ移植するときの差分（Karume 側の部品・容量・時間・段の案）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-10-04）— Wan2.2 TI2V-5B の ADR を起こすための、Karume 側の差分分析（部品の再利用 / 変更 / 新規・容量と時間の外挿・段の案）。裁定は含まない。
 
 手法: 上流の構造は [2026-10-04 の上流調査](2026-10-04-wan22-ti2v-5b-upstream.md)（以下「上流調査 §n」）を正とし、調べ直していない。

@@ -1,5 +1,7 @@
 # op 別 tolerance の実測 — 汎用 DEFAULT_TOLERANCE を置き換えるための測定（2026-08-31）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 性格: **時点スナップショット**（HEAD `683d6a0` / RTX 3080 Ti・Vulkan / Deno 2.9.6）。
 > OP 数値レビュー W-5（`.claude/reviews/2026-08-31_b35cf5c/SUMMARY.md` — git 追跡外）の
 > 「DEFAULT_TOLERANCE は M1 の宿題のまま」に対する実測。**計測のみでリポは無変更**、

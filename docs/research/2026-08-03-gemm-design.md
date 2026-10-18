@@ -1,5 +1,7 @@
 # GEMM 3 カーネル（linear / bmm / matmul）レジスタ 4×4 + vec4 置換 — 設計書
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。文中のパス・コマンド・コミットハッシュは記録当時のリポジトリ構成に基づく。
 
 > NOTE（実装後追記・2026-08-03）: 本設計は同日実装済み（e1e13e2 + 60620c2）。裁定 6 件と

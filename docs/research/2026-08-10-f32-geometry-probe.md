@@ -1,5 +1,7 @@
 # f32/f16 GEMM 骨格のタイル幾何プローブと横展開実測
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット（2026-08-10・RTX 3080 Ti / Linux / Vulkan (wgpu) /
 > Deno 2.9.4・main `25ed0e1` 起点）。比（ABBA 対計測）のみが有効で、絶対秒を別日の測定と
 > 比較しないこと。計測規約は

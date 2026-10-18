@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > この文書は 2026-10-03 時点の計測記録で、正本ではない。
 
 # umT5 の export のホスト RAM — 段 10b の実測（ADR 0119 決定 6）

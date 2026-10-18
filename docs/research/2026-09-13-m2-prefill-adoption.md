@@ -1,5 +1,7 @@
 # M2の入力バケット採用とベンチマーク初期選択
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 2026-09-13時点の利用者実測と採用判断のスナップショット。前提となるRTXの負荷検証は[前回の記録](2026-09-13-prefill-buckets.md)を参照する。
 
 ## 入力と照合

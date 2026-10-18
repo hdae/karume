@@ -1,5 +1,7 @@
 # フラグ無しの Chrome（M2）でのアプリ内掃引 — ADR 0117 段 7 の記録（2026-10-02・時点スナップショット）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 性格: 2026-10-02 時点の観測記録。裁定は含まない — 正本は ADR [0117](../decisions/0117-app-geometry-tuning.md) と backlog。
 
 ## 1. 目的

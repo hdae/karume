@@ -1,5 +1,7 @@
 # 2026-09-08 — MTP 復活条件 ③: i4 target での受理数 E[a] 再実測（E-4 — perf-ledger K-20）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-09-08・RTX 3080 Ti 12 GB / torch 2.13 + transformers 5.14.1 / Deno 2.9 / Vulkan）。
 > 採否と復活条件の台帳は [perf-ledger](../perf-ledger.md) K-20、前回の採算実測（E-0〜E-3・BF16 target の
 > E[a]）は [research 2026-09-07 §7](2026-09-07-codex-perf-review-followup.md)。生データと台本の写しは

@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-15時点の利用者によるApple M2 / Chrome計測のスナップショット。RTXでの自動検証と区別する。
 
 # M2での並列GEMVと固定再量子化融合の検収

@@ -1,5 +1,7 @@
 # DACVAE codec（G6/G7）recon — 第 4 波の設計材料
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-08-12・実重み `inputs/irodori/dacvae-32dim` + 実装 clone
 > `inputs/irodori/dacvae-src`〈facebookresearch/dacvae @ 414c2078〉に対する静的読解 + 部分
 > export・受容野・メモリの実測）。裁定の帰結は ADR

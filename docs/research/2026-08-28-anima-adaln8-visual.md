@@ -1,5 +1,7 @@
 # anima 素版 i4 の adaLN-i8 変種 — 視認裁定（不採用）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット（2026-08-28 の視認裁定の記録）。採否の台帳は
 > [perf-ledger](../perf-ledger.md) Q-9、波の記録は [backlog](../backlog.md)。
 

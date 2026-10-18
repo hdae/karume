@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-19 時点の実測と調査のスナップショット。RTX 3080 Ti / Deno 2.9.6 の値が主で、Chrome と Apple M2 の値は過去 research からの引用。
 
 # gemma4-qat の decode 速度の帰属と次に試すこと

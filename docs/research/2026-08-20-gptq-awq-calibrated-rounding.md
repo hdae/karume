@@ -1,5 +1,7 @@
 # 校正付き丸め（GPTQ / AWQ）第 1 段スクリーニング（2026-08-20）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **時点スナップショット** — 波 J-2 の安いファミリ 2 つ（MiniCPM5-1B / EmbeddingGemma-300m）
 > における校正付き丸め 5 構成の実測記録。実装の正本 = `karume.quant_calib`（コミット
 > `ce568b0`）と各リグ（`730c21b`）、方式の採否は [perf-ledger](../perf-ledger.md) Q 節が正本。

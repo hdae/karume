@@ -1,5 +1,7 @@
 # 動画生成モデル recon — Wan2.1 T2V 1.3B と MiniMax H3（2026-10-02 時点）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 2026-10-02 時点の調査記録（時点スナップショット）。裁定は含まない — 正本は ADR と
 > backlog。手法: 並列調査 7 レッグ（掃引 4 本: Wan2.1 1.3B の中身 / MiniMax H3 / karume の受け入れ
 > 状況 / 先行事例と相場、深掘り 3 本: Wan の op と形状の棚卸し / H3 の敵対的裏取り / karume に無い

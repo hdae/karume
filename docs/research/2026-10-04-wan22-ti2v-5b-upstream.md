@@ -1,5 +1,7 @@
 # Wan2.2 TI2V-5B の上流構造 — Wan2.1 T2V 1.3B との差（2026-10-04 時点）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-10-04）— Wan2.2 TI2V-5B を Karume へ移植する ADR の材料として、上流の構造・数値を一次ソースから写した調査記録（裁定は含まない）。
 
 手法: Wan-Video/Wan2.2 を clone して読み、HF の 2 リポ（公式形式 / Diffusers 形式）を HF API と HTTP Range で調べた

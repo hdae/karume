@@ -1,5 +1,7 @@
 # レビュー指摘の再検証と修正（2026-09-10）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 この文書は 2026-09-10〜11 時点の調査・実測スナップショットであり、恒久的な作業状態は [backlog](../backlog.md) を正本とする。
 
 ## 対象と環境
@@ -927,8 +929,8 @@ E4B の短い会話についても CPU / Deno / Chrome の一致を確認でき�
 
 ## 追加 LLM のローカル CLI（2026-09-11）
 
-利用者の依頼により、[MiniCPM5-2B](../../examples/minicpm5/README.md) と
-[Qwen3-0.6B](../../examples/qwen3/README.md) を試せる CLI を追加した。
+利用者の依頼により、MiniCPM5-2B (`examples/minicpm5/README.md`, removed in 0.15) と
+Qwen3-0.6B (`examples/qwen3/README.md`, removed in 0.15) を試せる CLI を追加した。
 取得元を省略すると既存のローカル系列を優先し、現在の手元では GPTQ i4 を選ぶ。
 Anima / Irodori の既定もローカル配布形を優先する（`acee48e`）。Gemma 4 は元からローカルが既定。
 

@@ -1,5 +1,7 @@
 # Wan2.2 の DiT のパスの切れ目の計測（perf-ledger H-37 段 1）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-10-15）— 2 機（Deno の RTX 3080 Ti・Chrome の RTX 5070 Ti）で各 1 回測った値。切れ目の見積もりは最大でも
 > 1 step の約 1.3% で、kill 線（5%）の下 → [perf-ledger](../perf-ledger.md) H-37 は ❌。
 

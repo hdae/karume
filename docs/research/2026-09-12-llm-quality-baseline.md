@@ -1,5 +1,7 @@
 # PyTorch / Transformers の LLM 品質ベースライン
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-12時点のローカル重み・固定した小規模評価集合の記録。公開ベンチマークの完全走行や、モデル全般の品質保証ではない。
 
 ## 目的と評価条件

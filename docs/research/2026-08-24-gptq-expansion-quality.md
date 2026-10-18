@@ -1,5 +1,7 @@
 # 波 J-4: GPTQ 適用拡大の品質実測（irodori w4 / anima 素版 i4）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 性格: **時点スナップショット**（2026-08-23〜24 実測）。波 J-4（GPTQ 適用拡大 — 2026-08-23
 > ユーザー裁定「g の最適化より多くのモデルで GPTQ を採用できることを優先」）の品質
 > イテレーションと裁定の記録。席の設計判断は ADR

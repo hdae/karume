@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-14時点のI4レーン配置の比較スナップショット。RTX 3080 Ti / Chrome 153の短文実測であり、M2や広い生成品質へ外挿しない。
 
 # 大きいI4行列のレーン数変更を見送る

@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-15時点の実装・実測スナップショット。利用者のApple M2計測と、RTX 3080 Ti / Chrome 153の自動検証を区別する。
 
 # M2 attention追試とlinear→SRQ融合の製品化

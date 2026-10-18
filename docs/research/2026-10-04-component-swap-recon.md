@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-10-04）— 依存モデルの差し替え（部品差し替え席 `components`）の現状・穴・設計候補の読み取り調査。正本ではない。
 
 # 依存モデルの差し替え — 部品差し替え席の現状と穴（Wan の umT5 を例に）

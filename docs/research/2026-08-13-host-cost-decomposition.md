@@ -1,5 +1,7 @@
 # ホスト固定費の分解実測（H-2）— フェンス待ちが支配・K-7 按分の置換
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。数値は 2026-08-13 の実測（RTX 3080 Ti / Linux / Vulkan /
 > Deno 2.9.4・main `34a3e18` = K-4a 後）。手法・台本は scratchpad（揮発）— 恒等式分解 +
 > 遅延注入。perf-ledger H-2 の消化記録で、H-1/H-3/H-5 の採否根拠と K-7 の裁定材料を持つ。

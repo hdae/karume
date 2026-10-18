@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-12時点のChrome実測と最適化実験のスナップショット。RTX 3080 Tiの結果であり、Apple M2の実測ではない。
 
 # ChromeでのGemma速度差の帰属とRoPE融合

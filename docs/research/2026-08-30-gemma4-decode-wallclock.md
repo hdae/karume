@@ -1,5 +1,7 @@
 # Gemma 4 E2B decode の壁時計・dispatch・融合実数（初回実測）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-08-30・単一リグ・各 1 走）。判断の正本は
 > [perf-ledger](../perf-ledger.md) — 本書は数値と導出だけを持つ。
 

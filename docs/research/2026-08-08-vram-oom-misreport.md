@@ -1,5 +1,7 @@
 # VRAM 不足が「破棄後使用」に化ける誤報告 — 根因と修正 recon
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。文中のパス・行番号・実測値は記録当時（2026-08-08）のリポジトリ
 > 構成と実機（RTX 3080 Ti 12,288MiB / Deno 2.9.4 / wgpu 29.0.1 / x86_64-linux）に基づく。
 

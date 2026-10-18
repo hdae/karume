@@ -1,5 +1,7 @@
 # 融合 attention op のノード内一時を見積りに数える前後の表（ADR 0124 決定 7）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-10-11）— 見積り（`estimateGraphMemory` / `PreparedModel.estimate`）に融合 attention op（states 欄なし）の
 > ノード内一時を数える変更が、既存の呼び手の数字をどれだけ動かすか。GPU 不要の計算値で、実測ではない。
 

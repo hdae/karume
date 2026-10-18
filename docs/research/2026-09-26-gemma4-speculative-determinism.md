@@ -1,5 +1,7 @@
 # gemma4 投機デコードの M=1 / M=4 同一性 — 既定席の「報告」を門へ上げた根拠の実測（2026-09-26）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-26 時点の実測スナップショット（Intel Arc B570〈BMG G21〉/ Deno・features: shader-f16, timestamp-query〈subgroups 無し〉・資産 `models/karume-gemma4` の e2b〈既定 quant `i4-fast`〉・HEAD `8bd655d0` の `e2e_gemma4_speculative_test.ts`）。門へ上げる**前**のテストで採った値で、数値はログの逐語から写した。
 
 ## 1. 何を確かめたか

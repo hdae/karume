@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-14時点の独立レビューと利用者提供M2計測のスナップショット。未計測条件の品質・性能や、未発見の不具合が無いことを保証するものではない。
 
 # マージ前レビューの結果とM2の再計測

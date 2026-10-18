@@ -1,5 +1,7 @@
 # M2再計測とRMS正規化周辺の融合
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 2026-09-13時点の利用者実測、RTXでの隔離実験、任意指定の実装判断を保存したスナップショット。
 
 ## M2の再計測

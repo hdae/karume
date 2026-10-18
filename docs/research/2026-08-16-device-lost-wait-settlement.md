@@ -1,5 +1,7 @@
 # device 消失後の待ちは解決するか（時点スナップショット）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 NOTE: この文書は 2026-08-16 時点の実測記録であり、仕様の一般化ではない。
 [2026-08-01-m0-review.md](2026-08-01-m0-review.md) の記録を上書きせず補足する。
 

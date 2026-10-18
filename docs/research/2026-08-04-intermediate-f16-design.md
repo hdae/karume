@@ -1,5 +1,7 @@
 # 案 γ「中間バッファ（活性テンソル）の f16 格納」設計 recon — 2026-08-04
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。文中のパス・コマンド・コミットハッシュは記録当時のリポジトリ構成に基づく。
 
 > 読み取り専用レッグの成果物。**リポジトリのコード・既存文書は 1 バイトも変更していない**

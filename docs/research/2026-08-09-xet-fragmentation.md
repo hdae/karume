@@ -1,5 +1,7 @@
 # HF Xet の再構成断片化が DL を律速する — 実測と機序
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。数値は 2026-08-09 の実測（開発機 / 開発回線・`curl` と Deno の
 > `fetch` 直叩き）に基づく。HF 側の CAS・CDN の挙動は変わりうるので、再現には §9 の手順で
 > 測り直すこと。先行実験は [2026-08-08-xet-split-probe.md](2026-08-08-xet-split-probe.md)（E1）。

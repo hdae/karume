@@ -1,5 +1,7 @@
 # WebGPU features の活用度と余地（subgroups / DP4a / immediates / subgroup matrix）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（2026-08-10）。実機 = RTX 3080 Ti / Linux / Deno 2.9.4（wgpu 29.0.1）。
 > 外部状況の出典 URL は取得日 2026-08-10。裁定の文脈: prepared 機構（ADR 0042）の維持判断と
 > LLM 対応の見通しと合わせて評価した。

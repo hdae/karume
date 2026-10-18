@@ -1,5 +1,7 @@
 # perf スパイク P-1 / P-2 / P-3 の実測（2026-09-03）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-09-03・RTX 3080 Ti / Linux / Vulkan (wgpu) / Deno 2.9.6）。
 > perf-ledger の P-1〜P-3（2026-08-29 レンズで起票・2026-08-30 スパイク承認）の実装後 A/B。採否は
 > [perf-ledger](../perf-ledger.md) の各行が正本で、ここは数値と方法を持つ。台本は scratchpad

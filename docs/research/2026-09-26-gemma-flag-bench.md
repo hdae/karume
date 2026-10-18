@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-26 時点の実測スナップショット。Intel Arc B570（BMG G21）/ Deno 2.9.6 / `tools/flag-bench`（HEAD `9142e37d`〜`5442b5c2`）。壁時計は Deno のフェンス床込み、GPU 時間は timestamp-query の tick 未換算（B570 は 1 tick = 52.08 ns）なので**基準比 % だけを読む**。
 
 # gemma の実行フラグ単体ベンチ — `-fast` 束の中身を実測で決める

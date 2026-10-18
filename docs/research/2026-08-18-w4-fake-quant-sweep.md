@@ -1,5 +1,7 @@
 # w4 fake-quant sweep — MiniCPM5-1B（ADR 0069 Phase 0・2026-08-18）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-08-18 実測）。ADR
 > [0069](../decisions/0069-packed-w4-storage.md) 決定 6 の Phase 0 — 既定 group_size と
 > 裁定 B（zero-point 欄なし）の実測根拠。台本 =

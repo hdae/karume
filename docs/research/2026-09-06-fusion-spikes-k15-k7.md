@@ -1,5 +1,7 @@
 # 融合スパイク K-15 / K-7 の ABBA 実測と P-5 の計測 2 段・fusion-hints 再掃引（2026-09-06）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 時点スナップショット（RTX 3080 Ti / Vulkan・Deno 2.9.6）。事前ベースラインは
 > [2026-09-06-op-fusion-baseline](2026-09-06-op-fusion-baseline.md)、候補の採否は
 > [perf-ledger](../perf-ledger.md)。スパイク実装 = `4dd5e1f`（K-15 `geluTanhMul`）/ `8c80aab`

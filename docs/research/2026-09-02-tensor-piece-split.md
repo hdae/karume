@@ -1,5 +1,7 @@
 # テンソル分割（piece）の成立性スパイク — GPU オフセット書き・変換の行分離・詰めの実資産適用
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-09-02・RTX 3080 Ti 12GB / Linux / Vulkan (wgpu) /
 > Deno 2.9.6）。ADR [0090](../decisions/0090-shard-spec-v3-tensor-pieces.md) の設計を実装前に
 > 3 点で確かめたもの。数値は本機依存で、Mac（Metal）/ Chrome（Dawn）は未測。

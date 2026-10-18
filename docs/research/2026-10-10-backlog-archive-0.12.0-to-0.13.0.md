@@ -1,5 +1,7 @@
 # backlog の now 節の消化済み記録の退避（0.12.0 公開〜0.13.0 リリース後の波・2026-09-06〜10-03）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-10-10 時点のスナップショット。[backlog](../backlog.md) の now 節（見出し「now — 0.13.0 リリース後（2026-09-25）」）に
 > 残っていた完了済みの記録 6 項目を**逐語で**退避したもの（利用者裁定 2026-10-10: now の済んだ記録を research のアーカイブへ —
 > 内容は消さず移すだけ）。設計と実測の正本は各項目が指す ADR / research / perf-ledger 側にあり、この文書は
@@ -127,7 +129,7 @@
   [添付参照資料の現行再検証](../research/2026-09-14-reference-rope-optimization.md)からK-41のpermuteコピー削減を実装しM2検収済み。[K-42のattention融合](../research/2026-09-15-attention-fusion.md)もM2の80生成で出力一致を確認したが利得は無く、任意指定に残す。[K-43の保留候補併用](../research/2026-09-15-held-combinations.md)から単独の[linear→SRQ融合](../research/2026-09-15-linear-static-quantize-fusion.md)をK-44として統合した。常駐scaleの借用・丸め障壁・元のSRQとの数値比較を検収。[M2のQAT40生成](../research/2026-09-15-m2-linear-srq-adoption.md)も検収済み。[高速quant宣言と明示上書き](../research/2026-09-15-gemma-fast-quant.md)を統合。次は投入政策・prefillバケットの適用判断。同じM2追試は再依頼しない。広い併用は未統合で、gate/up入力共有の費用調査も残る。
   広いchunk/複数容量への一括適用は見送り。ChromeのGPU Instance消失は原因の切り分けを残す。
   残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
-  [MiniCPM5 CLI](../../examples/minicpm5/README.md) / [Qwen3 CLI](../../examples/qwen3/README.md) は容器（`krm`）の系列を読む。
+  MiniCPM5 CLI (`examples/minicpm5/README.md`, removed in 0.15) / Qwen3 CLI (`examples/qwen3/README.md`, removed in 0.15) は容器（`krm`）の系列を読む。
   旧 shard 形の `-probe` 系列は読まず、今はリポ内でその容器の系列を作れない（各 README）。
   容量 128 の対話・履歴整理・reset・中断と、公式 CPU 参照への多ターン一致を検収済み。
   Anima w4a8 / drafter / f16 GEMM の既存形状比較は不採用で完了。f16 M=1 GEMV は

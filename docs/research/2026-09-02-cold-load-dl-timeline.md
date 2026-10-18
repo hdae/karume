@@ -1,5 +1,7 @@
 # anima cold ロードの DL タイムライン — 律速の特定（2026-09-02）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-09-02・Linux / Deno 2.9.6・疑似 HF サーバ + 帯域制限・遅延注入・
 > 各条件 1 回、②のみ再走で再現性 0.1%）。backlog「anima-web の cold ロード DL スロット改善（提案
 > b+a）」の前提を実測で確かめる計測。台本は scratchpad（セッションで消える）— 方法と数値をここに残す。

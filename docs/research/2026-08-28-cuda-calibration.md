@@ -1,5 +1,7 @@
 # GPTQ 校正の CUDA 実行 — 速度と丸め解の再抽選（実測）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット（2026-08-28 の初回実測）。配管の設計は `50f094d`
 > （`--calib-device`・core JIT デバイス移動）、運用方針の帰結はこのメモが正本。
 

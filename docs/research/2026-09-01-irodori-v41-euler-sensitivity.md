@@ -1,5 +1,7 @@
 # Irodori v4.1-small: full-loop golden 検証の許容超過と誤差増幅の実測
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット（2026-09-01 実測）。恒久の判定ロジックは
 > `tools/export-recipes/irodori/pipeline_ref.py`（`EULER_REFERENCE_ATOL` 周辺と
 > `euler_reference_within_sensitivity`）が正本。

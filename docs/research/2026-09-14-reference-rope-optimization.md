@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 この文書は2026-09-14時点の添付資料の再検証とRTX 3080 Ti実測のスナップショットである。
 
 # Gemma E2Bの参照資料再検証とRoPE周辺のコピー削減

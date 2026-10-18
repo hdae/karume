@@ -1,5 +1,7 @@
 # w4 方式スクリーニング + 横展開 — 5 ファミリ実測（2026-08-19）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **性格**: 時点スナップショット（2026-08-19 実測）。w4 横展開 + 量子化方式スクリーニング波
 > （backlog now 節・ADR [0069](../decisions/0069-packed-w4-storage.md) 追記 5）の実測正本。
 > 全て torch CPU の fake-quant（GPU 非接触・ADR 0006 の方法論 — E2E 実装誤差とは分離した

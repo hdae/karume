@@ -1,5 +1,7 @@
 # DiT linear i8a8 + attention の変種スイープ実測（A 波）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。数値は 2026-08-10 の実測（RTX 3080 Ti / Linux / Vulkan /
 > Deno 2.9.4・main `187b986`）。**比（ABBA 対計測）のみが有効**で、絶対 ms を別日の測定と
 > 直接比較してはならない（§5 の理由）。op 別内訳の前提は

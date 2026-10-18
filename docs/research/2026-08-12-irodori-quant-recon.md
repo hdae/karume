@@ -1,5 +1,7 @@
 # Irodori-TTS v4 量子化 recon（2026-08-12）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 性格: **時点スナップショット**（網羅レビュー並行の recon レッグ・opus/medium・読み取りのみ）。
 > サイズは配布形 safetensors ヘッダの実測、適格判定はランタイム plan.ts と同じ規則で機械判定。
 > 系列構成の裁定と実装は量子化波の ADR が正本になる（本書は判断材料の記録）。

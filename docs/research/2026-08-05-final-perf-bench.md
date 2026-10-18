@@ -1,5 +1,7 @@
 # 最終 perf ベンチ（1024×1024・turbo 8 step・方式×フェーズ）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。文中のパス・コマンド・コミットハッシュは記録当時のリポジトリ構成に基づく。
 
 2026-08-05・ユーザー指示の予約実測（タスク #22）。perf 本線（ADR 0021〜0035）の締めの記録。

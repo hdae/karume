@@ -1,5 +1,7 @@
 # JSR publish の CI/Release 設計（monorepo・OIDC・ロックステップ版管理）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。文中のパス・コマンド・コミットハッシュは記録当時のリポジトリ構成に基づく。
 > JSR / Deno の仕様は 2026-08-05 時点の一次ソース（docs.deno.com・jsr-io/jsr・実リポの workflow）に基づく。
 

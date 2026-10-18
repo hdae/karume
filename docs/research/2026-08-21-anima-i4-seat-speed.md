@@ -1,5 +1,7 @@
 # Anima の i4 配布席 — 速度実測（2026-08-21）
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > **時点スナップショット** — 波 J-4 を anima だけ先行させる裁定を受けた第 1 段（速度実測
 > スパイク）の記録で、§1〜§5 の丸めは**素の RTN**（GPTQ 未結線 — 速度は丸め値に依存しない
 > ため）。**§6 以降は同日の追記**で、GPTQ 結線後の実測・視認裁定（§6）・仮説の棄却（§7）・

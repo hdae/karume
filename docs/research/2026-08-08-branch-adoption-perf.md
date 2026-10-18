@@ -1,5 +1,7 @@
 # 参照実装ブランチからの再実装（C 波）— 採否と E2E 実測
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。数値は 2026-08-08 の実機実測（RTX 3080 Ti 12,288MiB /
 > Deno 2.9.4 / wgpu 29.0.1 / x86_64-linux）に基づく。参照実装ブランチ側の数値は
 > [2026-08-06-kernel-triage/](2026-08-06-kernel-triage/) の記録（Apple M2 / Metal と

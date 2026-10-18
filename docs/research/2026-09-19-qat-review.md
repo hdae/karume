@@ -1,3 +1,5 @@
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-19 時点（`main` `d1a4377`）の gemma4-qat 実装検証と公式実装突合のスナップショット。読み取り専用のレビューで得た実測で、以後の変更を反映しない。
 
 # QAT レビューの実測記録

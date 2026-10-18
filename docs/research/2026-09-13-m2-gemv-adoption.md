@@ -1,5 +1,7 @@
 # M2のGEMV並列加算とquant定義での採用
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > 2026-09-13時点の利用者実機測定と採用判断のスナップショット。M2での操作は利用者が行い、こちらは保存JSONの検査と生成文の読解を行った。
 
 ## 実測

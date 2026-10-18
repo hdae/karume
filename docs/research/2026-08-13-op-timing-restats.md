@@ -1,5 +1,7 @@
 # op 別 GPU 内訳の再実測 — perf-ledger 第 1 段の消化と K-8 の裁定
 
+> English readers: this is a point-in-time research snapshot kept in Japanese ([ADR 0130](../decisions/0130-project-language.md) decision 3 (d)); it was written before the repository switched to English on 2026-10-18 and is not translated.
+
 > NOTE: 時点スナップショット。数値は 2026-08-13 の実測（RTX 3080 Ti / driver 610.43.03 /
 > Linux / Vulkan / Deno 2.9.4・main `01bffe6`）。手法は
 > [2026-08-10-op-timing-stats.md](2026-08-10-op-timing-stats.md) §5 の再現（差分は §5）。
