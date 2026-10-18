@@ -24,11 +24,15 @@
  *
  * - **ホストの自己整合**（GPU 不要）: 参照が記録した DiT の出力（cond / uncond）から、ホストの CFG +
  *   UniPC が参照の潜在を**ビット一致**で再現する（参照の精度の確認と、ホストの結線の門を兼ねる）。
- * - **帯**（決定 8 の指標 = 比 = 最大絶対差 ÷ 参照の最大絶対値 — CPU f32 の参照に対する比）: 決定用 2 本
- *   （`band-boxing-cats`・seed 20261030 / `band-cat-dog-baking`・seed 20261032）の実測最悪 × 5 で
- *   観測点ごと（各 step の後の潜在・フレーム）に帯を決め（{@link LATENT_RATIO_BANDS} /
- *   {@link FRAME_RATIO_BAND}）、受入れ 1 本（`accept-ferret`・seed 20261033 — 決定用と seed も
- *   プロンプトも違う）で受け入れる（決定 8 の形 — 段 3 と同じ決定用 / 受入れの分け方）。
+ * - **Band (opt-in upstream parity)** (decision 8's metric: ratio = max absolute difference ÷ the
+ *   reference's max absolute value, against the CPU f32 reference): per observation point (the
+ *   latents after each step and the frames) the band is the measured worst of the two deciding cases
+ *   (`band-boxing-cats`, seed 20261030 / `band-cat-dog-baking`, seed 20261032) × 5
+ *   ({@link LATENT_RATIO_BANDS} / {@link FRAME_RATIO_BAND}), and the acceptance case
+ *   (`accept-ferret`, seed 20261033 — seed and prompt differ from the deciding cases) must fall
+ *   inside it (decision 8's form — the same deciding / acceptance split as step 3). The judgement
+ *   runs only with `KARUME_UPSTREAM_PARITY=1` ("Default run vs opt-in upstream parity" below); the
+ *   three cases themselves run by default for their sha256 rows.
  * - **故障注入**（受入れの初期ノイズ）: プロンプトの正負の取り違え・guide の 1% のずれ が帯の外
  *   （床 {@link FAULT_MARGIN} 倍）。
  * - **sha256 の環境行**（ADR 0106）: 出力フレーム（uint8 の RGB を全フレーム連結したバイト列 —
@@ -56,6 +60,22 @@
  *   sha 行（固定プロンプト `boxing-cats` と自由プロンプト 1 本・2 ステップ・seed 42）で、CPU の参照は持たない（umT5 の
  *   数値の門は `e2e_wan_umt5_test.ts`）。umT5 は別の配布リポ（`models/karume-umt5-xxl/` — Wan の manifest の
  *   `text_encoder` が越境参照する）で、取得元の `crossRepo` の mapping で渡す。無い機ではその 2 本だけ明示 SKIP。
+ *
+ * ## Default run vs opt-in upstream parity
+ *
+ * The band judgement (each reference case's latents and frames inside the band of the diffusers CPU
+ * f32 reference) is upstream parity, so it is opt-in behind `KARUME_UPSTREAM_PARITY=1`
+ * (helpers/upstream-parity.ts — ADR 0129 decision 4 and its addendum 2026-10-17 (2)). It is gated at
+ * the assertion, not by skipping the cases: the three reference cases run by default because their
+ * initial noise comes from the fixtures and their outputs carry sha256 rows. Without the opt-in they
+ * log the ratios but neither assert the band nor record it as a measurement; with the opt-in the band
+ * is asserted before the row is settled, so `KARUME_REFERENCE=write` run together with the opt-in
+ * still refuses to write a row for an output outside the band. Everything else runs by default: the
+ * GPU-free host self-consistency (bit identity, no tolerance), the admission faults, the sha256 rows
+ * (the `f16` seat, the reference and practical i8 seats, the seed path and the GPU text path) and the
+ * fault injections. The fault injections read the accept fixture and use the band only as the margin
+ * a wiring fault must exceed (ratio > {@link FAULT_MARGIN} × band) — a check on the wiring, not on
+ * parity.
  *
  * ## 50 ステップの通し（env の opt-in — 既定のレーンに入れない）
  *
@@ -133,6 +153,7 @@ import {
   sha256Hex,
 } from "../../runtime/tests/helpers/reference.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
+import { UPSTREAM_PARITY } from "./helpers/upstream-parity.ts";
 
 /**
  * 2 ステップの通しの潜在（各 step の後 — `[16,9,60,104]`）の帯（比 = 最大絶対差 ÷ 参照の最大絶対値）。
@@ -843,8 +864,9 @@ test.skipIf(!ANY_PRESENT)(
 );
 
 describe.skipIf(!ANY_PRESENT || !GPU_AVAILABLE)(
-  "Wan 通し 2 ステップ（実 GPU）: 832×480・33 フレームの潜在とフレームが参照と帯の内・故障注入は帯の外・" +
-    "sha256 の環境行（`f16` 席と i8 の 2 席〈参照行 / 実用行〉）",
+  "Wan 通し 2 ステップ（実 GPU）: 832×480・33 フレームの故障注入は帯の外・" +
+    "sha256 の環境行（`f16` 席と i8 の 2 席〈参照行 / 実用行〉）— the latents and frames inside the band " +
+    "of the diffusers reference only with KARUME_UPSTREAM_PARITY=1",
   () => {
     let deviceLost: string | undefined;
     // One device and one `f16` pipeline shared by the its below (built before them, disposed after them all).
@@ -905,26 +927,39 @@ describe.skipIf(!ANY_PRESENT || !GPU_AVAILABLE)(
               diff: difference(observed.video.data, clamped(fixture.tensor("frames"))),
             },
           ];
-          for (const { output, band, diff } of diffs) {
-            measurements.push({
-              output,
-              maxAbs: diff.maxAbs,
-              maxRel: diff.maxRel,
-              tolerance: { atol: band * diff.referenceMax, rtol: 0 },
-              stage: "karume",
-            });
+          // A measurement records the band it was judged against, so it exists only when the band
+          // is judged (upstream parity is opt-in — module doc).
+          if (UPSTREAM_PARITY) {
+            for (const { output, band, diff } of diffs) {
+              measurements.push({
+                output,
+                maxAbs: diff.maxAbs,
+                maxRel: diff.maxRel,
+                tolerance: { atol: band * diff.referenceMax, rtol: 0 },
+                stage: "karume",
+              });
+            }
           }
           const notes = [
             ...diffs.map(({ output, diff }) => formatDifference(output, diff)),
+            ...(UPSTREAM_PARITY
+              ? []
+              : ["band not judged (upstream parity is opt-in: KARUME_UPSTREAM_PARITY=1)"]),
             ...formatObserved(observed),
           ];
           console.log(`[wan-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
-          for (const { output, band, diff } of diffs) {
+          for (const { output, diff } of diffs) {
             assertEquals(diff.nonFinite, 0, `${id}: ${output} の非有限`);
-            assert(
-              diff.ratio <= band,
-              `${id}: ${formatDifference(output, diff)} が帯 ${band} の外`,
-            );
+          }
+          // MUST stay before the row is settled: with the opt-in, an output outside the band is
+          // never written as a row under KARUME_REFERENCE=write.
+          if (UPSTREAM_PARITY) {
+            for (const { output, band, diff } of diffs) {
+              assert(
+                diff.ratio <= band,
+                `${id}: ${formatDifference(output, diff)} が帯 ${band} の外`,
+              );
+            }
           }
           assertEquals(deviceLost, undefined, "device lost");
           const outcome = await settleOrObserve(references, results, {

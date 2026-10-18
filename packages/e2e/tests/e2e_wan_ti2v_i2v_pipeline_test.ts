@@ -20,20 +20,28 @@
  *   ビット一致する。参照が記録した DiT の出力から、ホストの CFG + UniPC（置き換え無し — diffusers の callback と同じ）が参照の
  *   `latents.<i>` をビット一致で作り直し、製品の置き換えの関数（`withWanFirstFrameCondition`）が `latents.1` と条件の潜在から
  *   参照の `latents_final` をビット一致で作り直す。
- * - **帯**（比 = 最大絶対差 ÷ 参照の最大絶対値 — T2V と同じ指標）: 観測点は各 step の後のスケジューラの潜在（`latents.0` /
- *   `latents.1` — `denoise-step` の `copyLatents`・置き換える前）・最後の潜在（`latents_final` — 置き換えた後・VAE へ渡す値。
- *   下の「最後の潜在の観測」）・クランプ後のフレーム。帯は決定用 2 本（`band-boxing-cats` / `band-cat-dog-baking`）の観測点ごとの
- *   最悪 × 5（有効数字 2 桁へ切り上げ）で、受入れ（`accept-ferret`）が帯の内であることを見る。帯が未導出（`undefined`）の間は、
- *   各ケースは比を記録して赤で止まり、「帯の候補」の step が決定用の最悪 × 5 を出す（決定用の 2 本目は opt-in なので、候補は
- *   opt-in を付けた走行でだけ出る）。MUST: 受入れの結果を見て帯もケースも変えない。受入れが帯を外れたら、帯を広げずに原因を
- *   調べる。
+ * - **Band (opt-in upstream parity)** (ratio = max absolute difference ÷ the reference's max absolute value — the
+ *   same metric as T2V): the observation points are the scheduler latents after each step (`latents.0` / `latents.1`
+ *   — the `denoise-step` event's `copyLatents`, before the replacement), the last latents (`latents_final` — after the
+ *   replacement, the value handed to the VAE; "最後の潜在の観測" below) and the clamped frames. The band is the worst
+ *   of the two deciding cases (`band-boxing-cats` / `band-cat-dog-baking`) per observation point × 5 (rounded up to two
+ *   significant digits), and the acceptance case (`accept-ferret`) must fall inside it. While a band is underived
+ *   (`undefined`), each case records its ratios and fails, and the "band candidate" case prints the deciding worst × 5
+ *   (the second deciding case is behind `KARUME_WAN_TI2V_I2V_FULL=1`, so the candidate needs that opt-in as well). The
+ *   judgement and the candidate run only with `KARUME_UPSTREAM_PARITY=1` ("Default run vs opt-in upstream parity"
+ *   below); the cases themselves run for their wiring checks and sha256 rows. MUST: do not change the band or the cases
+ *   after seeing the acceptance result. If the acceptance case leaves the band, investigate the cause instead of
+ *   widening the band.
  * - **DiT の入力の結線**（帯のケースごと — 実走の入力そのもの）: DiT の run は CFG の 2 パス × 2 step。各 run の条件マスクは
  *   先頭 880 トークンだけが真、条件側の時刻は t = 0 の proj（`timestepsProj(0)`）とビット一致、モデル入力の先頭の潜在フレームは
  *   全 run で同じ値（= 条件の潜在）で、残りのフレームはその step のスケジューラの状態（step 0 は注入した初期ノイズ・step 1 は
  *   `latents.0`）と一致する。段の並びは encoder → DiT（事前計算の経路は text の段を持たない）で、encoder の 3 グラフの診断が届く。
- * - **条件の潜在**（帯のケースごと）: DiT が受けた先頭フレーム（encoder の段の出口）と参照の `condition_latents` の最大絶対差が
- *   encoder の GPU の門と同じ帯（`WAN_I2V_ENCODER_BAND` — 帯の決定と受入れの独立は encoder の門の側で保たれている）の内。
- *   encoder の退行を潜在の帯に任せず、encoder の段を名指しで落とす。
+ * - **Condition latents (opt-in upstream parity, per band case)**: the max absolute difference between the first frame
+ *   the DiT received (the exit of the encoder stage) and the reference's `condition_latents` is inside the band of the
+ *   encoder's GPU check (`WAN_I2V_ENCODER_BAND` — the encoder check keeps the deciding / acceptance split), so an encoder
+ *   regression is named at the encoder stage instead of being left to the latent band. It compares against diffusers
+ *   under a tolerance, so it runs only with `KARUME_UPSTREAM_PARITY=1` like the encoder check itself; the non-finite
+ *   count of the condition latents is checked by default.
  * - **VAE の入力の結線**（帯のケースごと）: 下の「最後の潜在の観測」。
  * - **故障注入**（決定用の既定のケース `band-boxing-cats` の初期ノイズ・DiT の段で打ち切り `latents.1` で比べる・床は帯の
  *   {@link FAULT_MARGIN} 倍）: 条件マスクを全て偽・条件マスクを 1 トークンずらす・時刻の入力 2 本を取り違える・モデル入力の
@@ -48,6 +56,23 @@
  *   shift を全て持つ（{@link caseIdOf} — 裁定 F12）。行が無い機はそのケースの sha の突合を飛ばし（実物と実測の sha は残す）、
  *   参照門が赤になる。行は帯が緑になった後に `KARUME_REFERENCE=write` をこのファイル単独で回して作る。
  * - **席は全ケースで明示する**: manifest の `defaultQuant` は品質の裁定で動きうる値で、既定席に乗ると同じ ID が別の席の値で回る。
+ *
+ * ## Default run vs opt-in upstream parity
+ *
+ * The band judgement (each reference case's latents, last latents and frames inside the band of the diffusers CPU f32
+ * reference), the condition-latent check against the reference's `condition_latents` and the band candidate are
+ * upstream parity, so they are opt-in behind `KARUME_UPSTREAM_PARITY=1` (`helpers/upstream-parity.ts` — ADR 0129
+ * decision 4 and its addendum 2026-10-17 (2)). They are gated at the assertion, not by skipping the cases: the reference
+ * cases run as before (the default case by default, the other two with `KARUME_WAN_TI2V_I2V_FULL=1`) because their
+ * initial noise and condition image come from the fixtures, their DiT / VAE input wiring is checked on the run's own
+ * inputs, and their outputs carry sha256 rows. Without the opt-in they log the ratios but neither assert the bands nor
+ * record them as measurements; with the opt-in the bands are asserted before the row is settled, so
+ * `KARUME_REFERENCE=write` run together with the opt-in still refuses to write a row for an output outside the band.
+ * Everything else runs by default: the GPU-free host self-consistency (bit identity, no tolerance), the wiring checks,
+ * the sha256 rows (with the practical seat's floor against the reference seat) and the fault injections. The fault
+ * injections read the default case's fixture and use the bands only as the margin a fault must exceed (ratio >
+ * {@link FAULT_MARGIN} × band, and the condition-latent check must turn red for the unnormalised condition) — checks on
+ * the wiring, not on parity.
  *
  * ## opt-in（env `KARUME_WAN_TI2V_I2V_FULL=1` の 1 つ — 既定のレーンに入れない）
  *
@@ -216,6 +241,7 @@ import {
   sha256Hex,
 } from "../../runtime/tests/helpers/reference.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
+import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
  * 2 ステップの通しのスケジューラの潜在（各 step の後 — `[48,3,44,80]`）の帯（比 = 最大絶対差 ÷ 参照の最大絶対値）。添字が
@@ -1200,8 +1226,9 @@ const roundUpTwoDigits = (value: number): number => {
 };
 
 describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
-  "Wan2.2 I2V 通し 2 ステップ（実 GPU）: 1280×704・9 フレームの潜在・最後の潜在・フレームが参照と帯の内・DiT の入力の結線・" +
-    "故障注入は帯の外・sha256 の環境行（参照席の帯のケース・実用席・opt-in の縦長）",
+  "Wan2.2 I2V 通し 2 ステップ（実 GPU）: 1280×704・9 フレームの DiT の入力の結線・" +
+    "故障注入は帯の外・sha256 の環境行（参照席の帯のケース・実用席・opt-in の縦長）— the latents, last latents, " +
+    "frames and condition latents inside the bands of the diffusers reference only with KARUME_UPSTREAM_PARITY=1",
   () => {
     let deviceLost: string | undefined;
     // One device and one reference-quant inner state shared by the its below (built before them, released after them all).
@@ -1361,18 +1388,22 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
                           fixture.tensor(point),
                         ),
               }));
-              for (const { point, band, diff } of diffs) {
-                measurements.push({
-                  output: point,
-                  maxAbs: diff.maxAbs,
-                  maxRel: diff.maxRel,
-                  // 未導出の帯は無限の帯として記録する（判定は下で赤にする — T2V と同じ扱い）。
-                  tolerance:
-                    band === undefined
-                      ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
-                      : { atol: band * diff.referenceMax, rtol: 0 },
-                  stage: "karume",
-                });
+              // A measurement records the band it was judged against, so it exists only when the band is
+              // judged (upstream parity is opt-in — module doc).
+              if (UPSTREAM_PARITY) {
+                for (const { point, band, diff } of diffs) {
+                  measurements.push({
+                    output: point,
+                    maxAbs: diff.maxAbs,
+                    maxRel: diff.maxRel,
+                    // 未導出の帯は無限の帯として記録する（判定は下で赤にする — T2V と同じ扱い）。
+                    tolerance:
+                      band === undefined
+                        ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
+                        : { atol: band * diff.referenceMax, rtol: 0 },
+                    stage: "karume",
+                  });
+                }
               }
               const conditionDiff = difference(condition, fixture.tensor("condition_latents"));
               const notes = [
@@ -1402,6 +1433,12 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
                     )}`,
                 ),
                 formatFirstFrame(firstFrameDifference(video, fixture.bytes("rgb8"))),
+                ...(UPSTREAM_PARITY
+                  ? []
+                  : [
+                      "bands and condition latents not judged (upstream parity is opt-in: " +
+                        "KARUME_UPSTREAM_PARITY=1)",
+                    ]),
                 ...formatObserved(observed),
               ];
               caseNote = notes.join(" / ");
@@ -1410,7 +1447,11 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
                 assertEquals(diff.nonFinite, 0, `${id}: ${point} の非有限`);
               }
               // 条件の門は帯の候補の材料を積む前（encoder が壊れた回の比で帯を導かない）。
-              assertConditionInBand(conditionDiff, id);
+              if (UPSTREAM_PARITY) {
+                assertConditionInBand(conditionDiff, id);
+              } else {
+                assertEquals(conditionDiff.nonFinite, 0, `${id}: 条件の潜在の非有限`);
+              }
               assertEquals(deviceLost, undefined, "device lost");
               caseRatios.push({
                 name,
@@ -1422,17 +1463,21 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
                   frames: diffs[3].diff.ratio,
                 },
               });
-              for (const { point, band, diff } of diffs) {
-                if (band === undefined) {
-                  throw new Error(
-                    `${id}: ${point} の帯が未導出（比 ${diff.ratio.toExponential(3)}）— ` +
-                      "帯の候補は「帯の候補」の step が出す（opt-in で決定用の 2 本を回す）",
+              // MUST stay before the row is settled: with the opt-in, an output outside the band is never
+              // written as a row under KARUME_REFERENCE=write.
+              if (UPSTREAM_PARITY) {
+                for (const { point, band, diff } of diffs) {
+                  if (band === undefined) {
+                    throw new Error(
+                      `${id}: ${point} の帯が未導出（比 ${diff.ratio.toExponential(3)}）— ` +
+                        "帯の候補は「帯の候補」の step が出す（opt-in で決定用の 2 本を回す）",
+                    );
+                  }
+                  assert(
+                    diff.ratio <= band,
+                    `${id}: ${formatDifference(point, diff)} が帯 ${band} の外`,
                   );
                 }
-                assert(
-                  diff.ratio <= band,
-                  `${id}: ${formatDifference(point, diff)} が帯 ${band} の外`,
-                );
               }
               const outcome = await settleCase(id, video, (bytes) => {
                 if (name === DEFAULT_CASE) referenceRgb = bytes;
@@ -1454,7 +1499,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
     // 未導出の帯の候補（決定用だけから作る — 受入れの比は並べるが候補に使わない。決定用のどれかが比を出す前に落ちた回・
     // opt-in を付けずに決定用の 2 本目が回っていない回は候補を出さない）。帯が導出済みなら step を作らない。
     if (!BANDS_DERIVED) {
-      it("帯の候補（未導出）", () => {
+      it.skipIf(!UPSTREAM_PARITY)(`帯の候補（未導出）${UPSTREAM_PARITY_OPT_IN}`, () => {
         const expected = CASES.filter(({ role }) => role === "band").length;
         const decided = caseRatios.filter(({ role }) => role === "band");
         const candidate =

@@ -1,1039 +1,980 @@
-# 0118: Wan2.1 T2V 1.3B を受け入れる — op `conv3d`・動画 VAE の chunk グラフ 2 種・テキスト埋め込みの段階化
+# 0118: Accept Wan2.1 T2V 1.3B — op `conv3d`, two chunk graphs for the video VAE, staged text embeddings
 
-- Status: accepted（利用者裁定 2026-10-02 の 5 論点〈H3 の扱い・conv3d の追加方式・テキストエンコーダの段階化・原版 50 ステップ・
-  最初の到達目標〉と、本 ADR の「裁定」節の 4 点〈VAE の常時タイル・既定 shift・固定プロンプト・配布リポ名〉は全て推奨案で承認
-  — 2026-10-02）
+- Status: accepted (2026-10-02 — the maintainer approved the five points of the request (handling of H3,
+  how conv3d is added, staging of the text encoder, the original 50-step sampler, the first target) and
+  the four points of "Rulings" (always-tiled VAE, default shift, fixed prompts, distribution repository
+  name), all with the recommended option); implemented (steps 0–8 on 2026-10-02/03, step 9 on 2026-10-04;
+  step 10 became [0119](0119-wan-umt5-gpu-text-encoder.md)). Partly superseded: the precomputed text
+  path is no longer the default ([0119](0119-wan-umt5-gpu-text-encoder.md) decision 7, 2026-10-03); the
+  default preset is the practical preset ([0120](0120-wan-dit-w8a8-seat.md) ruling of 2026-10-04,
+  generalised by [0128](0128-default-preset-original-weights.md) decision 1); the ban on online softmax
+  binds the reference path only and the runtime has a byte budget for row blocks
+  ([0124](0124-attention-row-block-budget.md), 2026-10-11); the diffusers band of the Wan lane is opt-in
+  ([0129](0129-test-layout-and-lanes.md) decision 4, ruling of 2026-10-18). Re-graded 2026-10-18: the
+  separate umT5 process (decision 4) to MAY. Withdrawn 2026-10-18: the B570 timestamp conversion
+  (decision 6) and the conditional release wait between the DiT and VAE stages (decision 7). Wan2.1 is
+  not published on Hugging Face (addendum 2026-10-15).
 - Date: 2026-10-02
-- 関連: research [2026-10-02-video-gen-recon](../research/2026-10-02-video-gen-recon.md)（以下「調査 §n」）/
-  [2026-09-10 の事前調査](../research/2026-09-10-codex-mtp-optimization.md#動画生成の事前調査-wan-と-minimax-h3)
-  （検収順序 ①〜④）/ ADR [0024](0024-conv2d-implicit-gemm.md)（conv の implicit GEMM・ビット同一の土台）/
-  [0059](0059-op-vocabulary-entry-doors.md) + [0064](0064-entry-door-generality-axes.md)（op 語彙の入場門・
-  意味論の射程）/ [0065](0065-exporter-core-recipe-split.md)（exporter core と recipe の境界）/
+- Related: research [2026-10-02-video-gen-recon](../research/2026-10-02-video-gen-recon.md) (below
+  "recon §n") / [the pre-study of 2026-09-10](../research/2026-09-10-codex-mtp-optimization.md)
+  (its section on video generation, Wan and MiniMax H3: verification order ① to ④) / ADR [0024](0024-conv2d-implicit-gemm.md) (implicit GEMM for conv — the
+  basis of bit identity) / [0059](0059-op-vocabulary-entry-doors.md) +
+  [0064](0064-entry-door-generality-axes.md) (entry doors of the op vocabulary, semantic scope) /
+  [0065](0065-exporter-core-recipe-split.md) (exporter core and recipe boundary) /
   [0066](0066-generation-context-state-slots.md) + [0067](0067-autoregressive-attention-vocabulary.md)
-  （state スロット — 本 ADR は使わない）/ [0054](0054-resident-loop-and-fence.md)（常駐テンソル）/
-  [0009](0009-dtype-i32-bool.md)（i64 境界）/ [0106](0106-device-keyed-references.md)（sha256 参照値の
-  環境行）/ [0115](0115-geometry-profiles.md)（幾何プロファイル）/ [0033](0033-vae-fixed-tile-decode.md) +
-  [0038](0038-manifest-v1.md) §4（VAE の常時タイル）/ [0034](0034-dit-dynamic-tokens.md)（DiT の S 形）/
-  [0016](0016-anima-chain-export.md) + [0112](0112-anima-transformer-residency.md)（段ごとの Session）/
-  [0092](0092-distribution-repos-and-sources.md)（配布リポの命名）/ backlog「ブラウザ動画生成の基盤」
+  (state slots — not used here) / [0054](0054-resident-loop-and-fence.md) (resident tensors) /
+  [0009](0009-dtype-i32-bool.md) (i64 boundary) / [0106](0106-device-keyed-references.md) (sha256
+  reference rows per environment) / [0115](0115-geometry-profiles.md) (geometry profiles) /
+  [0033](0033-vae-fixed-tile-decode.md) + [0038](0038-manifest-v1.md) §4 (always-tiled VAE) /
+  [0034](0034-dit-dynamic-tokens.md) (S-shaped DiT) / [0016](0016-anima-chain-export.md) +
+  [0112](0112-anima-transformer-residency.md) (one Session per stage) /
+  [0092](0092-distribution-repos-and-sources.md) (distribution repository names) / backlog "foundation for
+  browser video generation"
 
 ## Context
 
-### 要望と裁定（2026-10-02）
+### Request and rulings (2026-10-02)
 
-利用者の要望は「まず Wan2.1 T2V 1.3B（Alibaba の text-to-video の最小版・Apache 2.0・HF
-`Wan-AI/Wan2.1-T2V-1.3B`）を karume で動かす」で、最終目標は MiniMax H3。調査 §10 の論点を次のとおり
-推奨案で裁定した。
+The maintainer asked to "first run Wan2.1 T2V 1.3B (Alibaba's smallest text-to-video model, Apache 2.0,
+HF `Wan-AI/Wan2.1-T2V-1.3B`) on Karume"; the long-term target is MiniMax H3. The points of recon §10 were
+ruled with the recommended options:
 
-| 論点                | 裁定                                                                                                                      |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| H3 の扱い           | 構造調査 + 部品単位の候補に留める（本 ADR の範囲外）                                                                      |
-| conv3d              | IR に op を足す（implicit GEMM・conv1d / conv2d の系譜）。recipe で conv2d に分解する案は採らない                         |
-| 動画 VAE のデコード | 潜在 1 フレーム分のグラフを「最初の chunk 用」と「それ以降用」の 2 種類 export し、因果キャッシュはグラフの入出力で渡す   |
-| テキストエンコーダ  | 段階化。第 1 段 = 事前計算した埋め込み（固定プロンプト）。第 2 段 = umT5-XXL を GPU に i8（per-channel・活性 f32）        |
-| サンプラ            | 原版（flow matching・UniPC・50 ステップ・CFG は cond / uncond の逐次 2 回・B = 1）。蒸留版は採らない                      |
-| 最初の到達目標      | 832×480・33 フレーム（潜在 `[16,9,60,104]`・トークン 14,040）・Deno・手元の B570 → 81 フレーム（32,760 トークン）→ Chrome |
+| Point                | Ruling                                                                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| H3                   | Structure survey and per-component candidates only (outside this ADR)                                                           |
+| conv3d               | Add an op to the IR (implicit GEMM, in the line of conv1d / conv2d). Decomposing into conv2d in the recipe is not taken         |
+| Video VAE decode     | Export two graphs for one latent frame — "first chunk" and "later chunks" — and pass the causal cache as graph inputs / outputs |
+| Text encoder         | Staged. Stage 1 = precomputed embeddings (fixed prompts). Stage 2 = umT5-XXL on the GPU in i8 (per channel, f32 activations)    |
+| Sampler              | The original (flow matching, UniPC, 50 steps, CFG as two sequential passes cond / uncond, B = 1). Distilled variants not taken  |
+| First target         | 832×480, 33 frames (latent `[16,9,60,104]`, 14,040 tokens), Deno, the B570 at hand → 81 frames (32,760 tokens) → Chrome         |
 
-利用者の見立て: 公開値 8.19 GB（RTX 4090）は `--offload_model True --t5_cpu` の値で（調査 §3.10）、埋め込みを
-事前計算すれば B570 でも入るはず。本 ADR の見積り（Consequences — DiT 段 約 5.7 GiB・VAE 段 約 2.0 GiB）も
-これと整合する（推測）。なお公開値 8.19 GB は公式の bf16 autocast の DiT を offload + `t5_cpu` で回した値で、
-int4 などの量子化を前提にした数字ではない（調査 §3.4・§3.10）。
+The maintainer's estimate: the published 8.19 GB (RTX 4090) is measured with `--offload_model True
+--t5_cpu` (recon §3.10), so with precomputed embeddings it should fit the B570. The estimates of this
+ADR (DiT stage about 5.7 GiB, VAE stage about 2.0 GiB) agree (speculation). The 8.19 GB is the official
+bf16-autocast DiT with offload and `t5_cpu`, not a quantized model (recon §3.4, §3.10).
 
-### 用語（本 ADR の初出）
+### Terms (first used in this ADR)
 
-- **DiT**: 潜在（VAE で圧縮した動画）をパッチに切ったトークン列を Transformer で denoise する拡散モデル本体。
-- **causal 3D VAE**: 時間方向は過去のフレームだけを見る 3D 畳み込みの VAE。Wan の VAE は時間 4 倍・空間 8 倍の
-  圧縮（調査 §3.8）。
-- **chunk**: VAE のデコード 1 回に通す潜在 1 フレーム分。出力は最初の chunk が 1 フレーム、以降は 4 フレーム。
-  容器の block（取得の単位）とは別物。prefill の `chunkLength`（1 回に流す行数 — glossary）とも、submit の
-  チャンク（1 回の `queue.submit` に積む dispatch の束 — ADR [0004](0004-execution-model.md)）とも区別する。
-- **因果キャッシュ（feat_cache）**: 時間カーネル 3 の CausalConv3d ごとに、前の chunk の入力の末尾 2 フレームを
-  次の chunk へ持ち越すテンソル（上流の `CACHE_T = 2` — `vae.py:14`）。
-- **implicit GEMM**: 畳み込みを `C[Cout, N] = W[Cout, K] × Xcol[K, N]` の行列積とみなし、`Xcol` を実体化せずに
-  カーネルの中で集めて計算する方式（ADR 0024）。
-- **unbatched**: バッチ軸を持たない形（`[C, T, H, W]`）。torch の conv3d が受ける 2 つの形の片方。
-- **行ブロック**: 融合 attention がスコア行列 S を実体化するとき、クエリ行を束縛上限に収まる枚数へ等分して
-  順に回す実行形（ADR [0060](0060-row-block-attention.md)）。
-- flow matching・UniPC・CFG・shift・qk-norm・adaLN・3D RoPE は調査 §3.1 の定義のまま使う。
+- **DiT**: the diffusion model that denoises the token sequence of patches cut from the latent (the
+  VAE-compressed video) with a Transformer.
+- **causal 3D VAE**: a 3D-convolution VAE that sees only past frames along time. Wan's VAE compresses
+  time 4× and space 8× (recon §3.8).
+- **chunk**: one latent frame passed through one VAE decode call. The first chunk outputs 1 frame, later
+  ones 4 frames. Not the container block (unit of fetching), not the prefill `chunkLength`, and not the
+  submit chunk (the dispatches of one `queue.submit` — ADR [0004](0004-execution-model.md)).
+- **causal cache (feat_cache)**: the tensor that carries the last 2 input frames of each time-kernel-3
+  CausalConv3d from one chunk to the next (upstream `CACHE_T = 2` — `vae.py:14`).
+- **implicit GEMM**: computing a convolution as `C[Cout, N] = W[Cout, K] × Xcol[K, N]` while gathering
+  `Xcol` inside the kernel instead of materialising it (ADR 0024).
+- **unbatched**: the shape without a batch axis (`[C, T, H, W]`), one of the two shapes torch's conv3d
+  accepts.
+- **row block**: when fused attention materialises the score matrix S, the query rows are split evenly
+  into blocks that fit the binding limit and run in turn (ADR [0060](0060-row-block-attention.md)).
+- Flow matching, UniPC, CFG, shift, qk-norm, adaLN and 3D RoPE are used as defined in recon §3.1.
 
-### 調査の結論（数値は調査の値）
+### Findings of the reconnaissance (numbers from the recon)
 
-- DiT は現行の語彙でほぼ足りる。新しい op は要らず、recipe のパッチ（complex 形 RoPE の実数化・unpatchify の
-  rank 下げ）で済む見込み（調査 §2・§4.1）。
-- 空白は 4 つ。動画 VAE の conv3d と因果キャッシュの持ち越し・umT5-XXL（5.68B パラメータ）の載せ方・長い
-  トークン列の attention の計算時間・TDR（GPU のタイムアウト検出）（調査 §2）。
-- DiT は 30 層・dim 1536・12 heads × 128・FFN 8960・1,418,996,800 パラメータ（fp16 換算 2.84 GB）。VAE の
-  デコーダは 73,295,331 パラメータ（調査 §3.2・§3.6）。
-- 832×480・81 フレームで DiT 1 forward は約 283 TFLOP、生成 1 本は約 28.3 PFLOP で、self-attn が約 70%
-  （調査 §3.9）。
-- 因果キャッシュは全画面で合計 944,286,720 要素（調査 §3.9）。f32 で 3,777,146,880 B = 3.52 GiB（調査の表の
-  「3.6 GiB」はこの値の丸め違い）。
-- karume の現状（調査 §4.3）: conv3d は語彙・カーネル・exporter のどこにも無い。strided コピー族
-  （permute / expand / slice / cat …）は rank ≤ 4。pad は最終次元・定数 0 だけ。state スロットは attention の
-  `[B,Hkv,M,D]` 専用。融合 attention の加算 mask は `[1,1,M,N]` だけ。
+- The DiT fits the current vocabulary. No new op is needed; recipe patches (real-valued complex RoPE,
+  rank reduction of unpatchify) are expected to suffice (recon §2, §4.1).
+- Four gaps: conv3d and the causal cache carry-over of the video VAE, how to run umT5-XXL (5.68B
+  parameters), attention time on long token sequences, and TDR (GPU timeout detection) (recon §2).
+- DiT: 30 layers, dim 1536, 12 heads × 128, FFN 8960, 1,418,996,800 parameters (2.84 GB in fp16). The
+  VAE decoder has 73,295,331 parameters (recon §3.2, §3.6).
+- At 832×480 and 81 frames one DiT forward is about 283 TFLOP and one generation about 28.3 PFLOP;
+  self-attention is about 70 % (recon §3.9).
+- The full-frame causal cache totals 944,286,720 elements (recon §3.9): 3,777,146,880 B = 3.52 GiB in
+  f32 (the recon table's "3.6 GiB" is a rounding difference).
+- Karume at the time (recon §4.3): conv3d nowhere in vocabulary, kernels or exporter; the strided copy
+  family (permute / expand / slice / cat …) is rank ≤ 4; pad is last-axis, constant 0 only; state slots
+  serve attention `[B,Hkv,M,D]` only; the additive mask of fused attention is `[1,1,M,N]` only.
 
-### 制約
+### Constraints
 
-- ビット同一と数値照合の規律は既存どおり。sha256 参照値は環境キーごとの行（ADR 0106）、門の tolerance 化は
-  禁止、想定外は fail loudly で、黙って近似しない。
-- 融合 attention は S を実体化する 3 dispatch 方式で、online softmax への書き換えは MUST NOT
-  （`packages/runtime/src/kernels/attention.ts:30-31`）。
-- B570（BMG G21・VRAM 9.93 GiB・Linux xe・Deno 2.9.6）の事実:
-  - `maxStorageBufferBindingSize` 2,147,483,644 B / `maxBufferSize` 2,147,483,647 B（research
-    [2026-09-24](../research/2026-09-24-prerelease-gpu-measurements.md) の PLE の節の前提）。
-  - xe は 1 submit = 1 ジョブに `job_timeout_ms` 5,000 を持ち、超えると device lost（limitations
-    「BiRefNet 系」節）。
-  - Deno は device lost を例外にせず panic する。Deno の timestamp は raw tick で、B570 では ×52.0833 で ns に
-    なる（known-issues「Intel Arc B570（Linux / Vulkan ANV / xe）で OOM 門が赤 + Deno の timestamp 単位と device lost の panic（2026-09-20 実測・記録のみ）」節）。
-  - Deno の GPU バッファの総確保はドライバ申告予算の 97% で頭打ち（limitations）。B570 の申告予算は未測。
-  - Intel / wgpu では `destroy()` の解放が次の device poll まで遅れる（known-issues の同じ節の OOM 門の項）。
-- 配布形の const は 32 MiB が上限（調査 §4.4）。
+- Bit identity and numeric verification as before: sha256 reference rows per environment key (ADR 0106),
+  no tolerance on the sha256 regression check, fail loudly on the unexpected, no silent approximation.
+- Fused attention materialises S in three dispatches. Rewriting pass ② of the reference path into a
+  one-pass online softmax is forbidden (`packages/runtime/src/kernels/attention.ts:30-32`); see decision 6
+  for the scope.
+- Facts of the development machine at the time — the Intel Arc B570 (BMG G21, 9.93 GiB VRAM, Linux xe,
+  Deno 2.9.6). It is the previous development machine (docs/limitations.md); the current one is an RTX
+  3080 Ti on Node + Dawn (ADR [0127](0127-node-dawn-toolchain.md)).
+  - `maxStorageBufferBindingSize` 2,147,483,644 B / `maxBufferSize` 2,147,483,647 B (research
+    [2026-09-24](../research/2026-09-24-prerelease-gpu-measurements.md)).
+  - xe gives each submit (one job) `job_timeout_ms` 5,000; beyond it the device is lost.
+  - Deno panics on device loss instead of raising an exception.
+  - Deno caps the total GPU allocation at 97 % of the driver-reported budget (docs/limitations.md); the
+    B570's budget was not yet measured.
+  - On Intel / wgpu the release by `destroy()` is deferred to the next device poll (docs/known-issues.md).
+- Constants in the distribution are limited to 32 MiB (recon §4.4).
 
 ## Decision
 
-### 1. op `conv3d` を IR に足す（拡張分子層・unbatched・implicit GEMM）
+### 1. Add op `conv3d` to the IR (extended composite layer, unbatched, implicit GEMM)
 
-守るもの: 動画 VAE の中間を出力サイズのまま保つこと（分解による kt 倍を作らない）と、conv2d と同じビット
-同一の土台（平坦 K 昇順・bias-first・範囲外は 0）。
+What it protects: video VAE intermediates stay at output size (no kt-fold growth from decomposition), on
+the same bit-identity basis as conv2d (flat K ascending, bias first, zero outside the input).
 
-**入場門**:
+**Entry door**:
 
-- `aten.conv3d` は Core ATen 外（調査 §5.1 の実測）。exporter が分解を止めて保存するので、conv1d / conv2d と同じ
-  **拡張分子層**（ADR 0059 決定 5）に置く。本 ADR がその ADR を兼ねる。
-- 入場条件は ②中間実体化（ADR 0059 決定 3）。recipe で `Σ_kt conv2d` に分解すると、出力サイズの中間が
-  kt = 3 倍になり、slice の実体化コピーと add も増える（調査 §5.2）。前例ガイドの「1.5〜2 倍で保存側の前例」
-  （ADR 0059 決定 4）を超える。
-- 需要側（ADR 0059 決定 4 の「op を足すか否かは再出現率で決める」）: conv3d は Wan2.1 の VAE だけで終わらない。
-  後の候補の Wan2.2 の VAE（4×16×16 圧縮・48ch — 調査 §3.11）と、他の動画モデルの causal 3D VAE
-  （HunyuanVideo など）にも出る見込み（推測）。
-- `aten.convolution` の attr 変種として Core ATen 層に置く読みは採らない。前例が無く、conv1d / conv2d と門が
-  割れる。
+- `aten.conv3d` is outside Core ATen (measured, recon §5.1). The exporter stops its decomposition, so it
+  sits in the **extended composite layer** like conv1d / conv2d (ADR 0059 decision 5). This ADR is that
+  ADR.
+- Entry condition ② (materialising the intermediate does not hold up — ADR 0059 decision 3).
+  Decomposing into `Σ_kt conv2d` in the recipe triples the output-sized intermediate (kt = 3) and adds
+  materialising slice copies and adds (recon §5.2), beyond the precedent guide of 1.5–2× (ADR 0059
+  decision 4).
+- Demand (ADR 0059 decision 4: whether to add an op is decided by recurrence): conv3d does not end with
+  the Wan2.1 VAE. It is expected in the Wan2.2 VAE (4×16×16 compression, 48 channels — recon §3.11) and in
+  causal 3D VAEs of other video models (HunyuanVideo and others) (speculation).
+- Placing it in the Core ATen layer as an attr variant of `aten.convolution` is not taken: no precedent,
+  and conv1d / conv2d would go through a different door.
 
-**契約**（`conv3d`・f32・attrs `stride` / `padding` / `dilation` / `groups`・アリティ 3 固定）:
+**Contract** (`conv3d`, f32, attrs `stride` / `padding` / `dilation` / `groups`, arity fixed at 3):
 
-- `x[Cin, T, H, W] * W[Cout, Cin/groups, Kt, Kh, Kw] + b[Cout] → [Cout, Tout, Hout, Wout]`。x は
-  **unbatched の rank 4**。
-- `stride` / `padding` / `dilation` は **`[T, H, W]` の長さ 3 の配列**（スカラ表記は受理しない — conv2d の
-  `[H, W]` と同じ規律）。`groups` はスカラ。4 つとも宣言必須で既定値補完をしない（ADR
-  [0015](0015-conv-family-extension.md)）。
-- 出力長は軸ごとに `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1`。padding は軸ごとに**対称**。
-- `groups` が Cin / Cout を割り切ること・重みの第 2 軸が `Cin/groups` であること・**`Kt, Kh, Kw` の順**が契約。
-  取り違えは非対称形（Cin ≠ Cout・Kt ≠ Kh ≠ Kw）のテストで固定する。
-- bias 無しの conv は exporter がゼロ bias を合成する（conv 族と同じ）。
+- `x[Cin, T, H, W] * W[Cout, Cin/groups, Kt, Kh, Kw] + b[Cout] → [Cout, Tout, Hout, Wout]`; x is
+  **unbatched rank 4**.
+- `stride` / `padding` / `dilation` are **arrays of length 3 in `[T, H, W]` order** (a scalar is
+  rejected — the same rule as conv2d's `[H, W]`). `groups` is a scalar. All four must be declared; no
+  default filling (ADR [0015](0015-conv-family-extension.md)).
+- Output length per axis is `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1`. Padding is
+  **symmetric** per axis.
+- The contract includes: `groups` divides Cin and Cout, the second weight axis is `Cin/groups`, and the
+  kernel axes are **in the order `Kt, Kh, Kw`**. Mix-ups are pinned by tests with asymmetric shapes
+  (Cin ≠ Cout, Kt ≠ Kh ≠ Kw).
+- For a conv without bias the exporter synthesises a zero bias (as for the conv family).
 
-**意味論の射程と実装済み subset**（ADR 0064 軸 A）:
+**Semantic scope and implemented subset** (ADR 0064 axis A):
 
-| 項目       | 意味論（op が約束する）       | 実装済み subset（GPU）                                     | 一般化の条件                                                                                                                                                                                                                                                         |
-| ---------- | ----------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 入力の形   | unbatched `[Cin,T,H,W]`       | 同じ                                                       | batched `[B,Cin,T,H,W]` は rank 5 で strided 族の上限に当たる。上限を上げるか B > 1 の需要が出たら、rank で判別して足す                                                                                                                                              |
-| groups     | 一般（Cin / Cout を割り切る） | 1 だけ（implicit GEMM）。groups > 1 は計画時に fail loudly | depthwise などの需要が出たら、直接カーネルか GEMM 骨格の拡張を足す                                                                                                                                                                                                   |
-| stride     | 一般                          | 一般（xcol の gather が持つ）                              | —                                                                                                                                                                                                                                                                    |
-| dilation   | 一般                          | 一般                                                       | —                                                                                                                                                                                                                                                                    |
-| padding    | 軸ごとの対称ゼロ              | 同じ（範囲外は 0 を書く）                                  | 非対称は語彙に入れない（因果パディングは recipe が cache の cat で表す — 決定 2）                                                                                                                                                                                    |
-| 重みの格納 | f32 / f16                     | f32 / f16（f16 の適格 op に conv3d を足す）                | i8 は scale = 出力チャネル行（ADR 0024 決定 6）で書ける。**実装では i8 も実行・常駐できる**（適格は f16 と同じ表 — 追記 2026-10-02）。DiT の i8 系列は [ADR 0120](0120-wan-dit-w8a8-seat.md) 段 1（2026-10-03）。品質の門は recipe の quant 席（決定 7 は f16 だけ） |
+| Item           | Semantics (what the op promises) | Implemented subset (GPU)                                     | Condition to generalise                                                                                                                         |
+| -------------- | -------------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Input shape    | unbatched `[Cin,T,H,W]`          | Same                                                         | batched `[B,Cin,T,H,W]` is rank 5 and hits the strided family's limit. Add it, distinguished by rank, when that limit rises or B > 1 is needed |
+| groups         | General (divides Cin / Cout)     | 1 only (implicit GEMM); groups > 1 fails loudly at plan time | Add a direct kernel or extend the GEMM skeleton when depthwise or similar is needed                                                             |
+| stride         | General                          | General (the xcol gather carries it)                         | —                                                                                                                                               |
+| dilation       | General                          | General                                                      | —                                                                                                                                               |
+| padding        | Symmetric zero per axis          | Same (zero is written outside the input)                     | Asymmetric padding stays out of the vocabulary (causal padding is the recipe's cache cat — decision 2)                                          |
+| Weight storage | f32 / f16                        | f32 / f16 (conv3d added to the f16-eligible ops)             | i8 with scale = output-channel row (ADR 0024 decision 6). **i8 also executes and stays resident** (same eligibility as f16 — addendum 2026-10-02). The DiT i8 presets are [ADR 0120](0120-wan-dit-w8a8-seat.md) |
 
-- CPU 参照は意味論の全体（groups 一般）を実装する。
-- **軸 B**（ADR 0064 決定 2）: 単一出力・静的形状・full-write・4 バイト格納・常駐の全域書きのどれも壊さない。
-  重みの initializer が rank 5 になるのは初めてだが、initializer に rank の上限は無い（strided 族の上限は値に
-  掛かる）。
+- The CPU reference implements the full semantics (general groups).
+- **Axis B** (ADR 0064 decision 2): it breaks none of single output, static shape, full write, 4-byte
+  storage, full-range resident writes. A rank-5 weight initializer appears for the first time, but
+  initializers have no rank limit (the strided family's limit applies to values).
 
-**因果パディングは op に入れない**:
+**Causal padding stays out of the op**:
 
-- CausalConv3d は時間方向の先頭に `2·pad_t` 枚のゼロを詰める（`vae.py:17-36`）。IR の pad（最終次元・定数 0
-  だけ）では書けない。
-- recipe が「前の chunk の cache を時間軸の先頭に cat し、時間 padding 0 の conv3d に通す」形へ書き換える。
-  最初の chunk ではゼロの cache を渡す（決定 2）。
-- 空間の padding は conv3d の attrs へ畳む（Anima の VAE パッチと同じ — `tools/export-recipes/anima/patch.py:77`）。
+- CausalConv3d prepends `2·pad_t` zero frames in time (`vae.py:17-36`). The IR pad (last axis, constant 0)
+  cannot express it.
+- The recipe rewrites it as "cat the previous chunk's cache in front along time, then conv3d with time
+  padding 0". The first chunk receives a zero cache (decision 2).
+- Spatial padding is folded into the conv3d attrs (as in the Anima VAE patch —
+  `tools/export-recipes/anima/patch.py`).
 
-**implicit GEMM の 3D 化**（ADR 0024 の骨格を共有 — 内積ループの正本は 1 箇所のまま）:
+**Implicit GEMM in 3D** (shares the ADR 0024 skeleton — the inner-product loop stays in one place):
 
-- `M = Cout`・`N = Tout·Hout·Wout`・`K = Cin·Kt·Kh·Kw`。重み `[Cout, Cin/g, Kt, Kh, Kw]` の平坦化が A タイル
-  `[M, K]` そのもので、出力 `[Cout][Tout·Hout·Wout]` の行優先が unbatched の出力テンソルそのもの（reshape
-  ゼロ — ADR 0024 決定 1 と同じ論証）。
-- 時間軸は N に畳み、dispatch は `[ceil(N/tileN), ceil(M/tileM), 1]`。
-- 次元に依存して書き足すのは 4 か所（調査 §5.2）。uniform の幾何の語（`CONV2D_DIMS_EXTRA` の 3D 版・（推測）
-  m / n / k の 3 語 + 幾何 18 語 = 21 語で 24 語の確保）・x の暗黙 gather（xcol）・平坦 k の分解
-  `(ic, kt, kh, kw)`・B タイルの充填。n から `(ot, oy, ox)` を戻すのに `Hout·Wout` と `Wout` を使う。conv1d の
-  implicit GEMM（`packages/runtime/src/kernels/gemm.ts:2080-2245`）が同じ型で次元違いを複製した前例。
-- ビット同一の土台は ADR 0024 決定 3 をそのまま継ぐ。縮約は平坦 K 昇順・K タイル 16・bias は `acc` の初期値・
-  範囲外の x は 0 を書く。
-- v4 判定は `kFlat%4 == 0 && Wout%4 == 0 && strideW == 1`（最内軸は W — ADR 0024 決定 4 と同じ 3 条件）。
-  m タイル 64 / 32 行の切替は述語 `conv2dIgemmMTile` を共有する。
-- N のタイル数が 65,535 を超える形は `DispatchLimitError`（既定の tileN 128 で N ≤ 8,388,480）。Wan の chunk
-  グラフの最大 N は 4 × 256 × 256 = 262,144（決定 2 のタイル 32）。
-- 添字と uniform は u32（`assertU32Params`）。conv3d は整数テンソルを扱わないので、i64 境界（ADR 0009）の影響は
-  無い。
+- `M = Cout`, `N = Tout·Hout·Wout`, `K = Cin·Kt·Kh·Kw`. The flattened weight `[Cout, Cin/g, Kt, Kh, Kw]` is
+  the A tile `[M, K]` itself, and the row-major output `[Cout][Tout·Hout·Wout]` is the unbatched output
+  tensor itself (zero reshape — the same argument as ADR 0024 decision 1).
+- Time folds into N; the dispatch is `[ceil(N/tileN), ceil(M/tileM), 1]`.
+- Four dimension-dependent pieces (recon §5.2): the uniform geometry words (3D version of
+  `CONV2D_DIMS_EXTRA`; implemented as 21 words — addendum 2026-10-02), the implicit gather of x (xcol),
+  the decomposition of flat k into `(ic, kt, kh, kw)`, and filling the B tile. `(ot, oy, ox)` is recovered
+  from n with `Hout·Wout` and `Wout`. The conv1d implicit GEMM (`packages/runtime/src/kernels/conv1d.ts`)
+  is the precedent of the same pattern in another dimension.
+- The bit-identity basis is ADR 0024 decision 3 unchanged: reduction in flat K ascending order, K tile 16,
+  bias as the initial value of `acc`, zero written for x outside the input.
+- The v4 predicate is `kFlat%4 == 0 && Wout%4 == 0 && strideW == 1` (innermost axis W — the same three
+  conditions as ADR 0024 decision 4). The 64 / 32-row m-tile switch shares the predicate
+  `conv2dIgemmMTile`.
+- A shape with more than 65,535 N tiles throws `DispatchLimitError` (N ≤ 8,388,480 with the default tileN
+  128). The largest N of Wan's chunk graphs is 4 × 256 × 256 = 262,144 (tile 32, decision 2).
+- Indices and uniforms are u32 (`assertU32Params`). conv3d handles no integer tensors, so the i64 boundary
+  (ADR 0009) is not affected.
 
-**幾何プロファイル**（ADR 0115）: conv3d はプロファイルを引かず、**既定の幾何**（`gemmMTileGeometry(64 / 32)`）
-で走る。conv1d と同じ扱い（ADR 0115 決定 6 の「既定のままにする経路」）にする。理由は 3 つ。
+**Geometry profile** (ADR 0115): conv3d reads no profile and runs on the **default geometry**
+(`gemmMTileGeometry(64 / 32)`), like conv1d (the "stay on the default" path of ADR 0115 decision 6).
+Reasons:
 
-- conv3d の掃引ケースが無い。conv2d 欄を共有すると、2D の gather で測った幾何を測らずに 3D へ当てることになる。
-  カーネルの指紋（ADR 0117 決定 4）もその欄のケースしか覆わない。
-- 欄かケースを新設すると、ケース集合の版が変わり、全利用者の保存した表が照合で不一致になる（ADR 0117
-  Consequences）。
-- 幾何は担当割りだけを変え、出力のビットを動かさない（ADR 0115）。既定のままでも正しさと sha256 の行には効かない。
-  速度の候補は実測してから perf-ledger に起票する。
+- No conv3d sweep cases exist. Sharing the conv2d slot would apply a geometry measured on the 2D gather to
+  3D without measuring it; the kernel fingerprint (ADR 0117 decision 4) covers only that slot's cases.
+- A new slot or case changes the version of the case set and every user's saved table stops matching
+  (ADR 0117 Consequences).
+- Geometry changes only the work split, not the output bits (ADR 0115), so the default affects neither
+  correctness nor the sha256 rows. Speed candidates go to the perf ledger after measurement.
 
-**exporter core**（ADR 0065 — モデル非依存の部品なので core に入れる）:
+**Exporter core** (ADR 0065 — a model-independent part, so it belongs in core):
 
-- `PRESERVED_OP_PREFIXES` に `aten.conv3d.` を足す。`_h_conv3d` は unbatched の rank 4 入力と rank 5 重みだけを
-  受け、batched の rank 5 入力は recipe 側の書き方を名指して fail loudly にする。attrs は `[T, H, W]` の 3 成分へ
-  正規化する（`_pair_spatial` の 3D 版）。
-- unbatched の `F.conv3d` が `aten.conv3d` のまま trace に残るかは段 1 で実測する（推測では残る）。残らない
-  （unsqueeze → convolution → squeeze に散る）なら、その 3 つ組を unbatched の conv3d へ畳む正規化パスを足す
-  （rank 下げは exporter の仕事 — ADR [0016](0016-anima-chain-export.md)・limitations「strided コピー族」節）。
+- Add `aten.conv3d.` to `PRESERVED_OP_PREFIXES`. `_h_conv3d` accepts only an unbatched rank-4 input and a
+  rank-5 weight; a batched rank-5 input fails loudly naming the recipe-side form. Attrs are normalised to
+  three `[T, H, W]` components (3D version of `_pair_spatial`).
+- Whether an unbatched `F.conv3d` stays `aten.conv3d` in the trace was measured at step 1: it does (torch
+  2.13.0); no normalisation pass was needed (addendum 2026-10-02).
 
-### 2. 動画 VAE — chunk グラフ 2 種・因果キャッシュは常駐テンソルで入出力・常時タイル
+### 2. Video VAE — two chunk graphs, the causal cache as resident inputs / outputs, always tiled
 
-守るもの: 上流の因果デコード（調査 §3.8）と値が一致すること・B570 で VAE 段が入ること・資産が解像度から
-独立すること（ADR 0038 §4）。
+What it protects: values match upstream's causal decode (recon §3.8), the VAE stage fits the B570, and the
+assets are independent of resolution (ADR 0038 §4).
 
-**テンソルは unbatched の rank 4 `[C, T, H, W]`**。recipe が B = 1 を落とす。時間軸の cat と slice（cache の
-結合と切り出し）は rank 4 の strided 族に収まる。
+**Tensors are unbatched rank 4 `[C, T, H, W]`**. The recipe drops B = 1. The time-axis cat and slice
+(joining and cutting the cache) stay within the rank-4 strided family.
 
-**cache の正規化**（上流と値で一致する書き換え）:
+**Cache normalisation** (a rewrite that matches upstream in value):
 
-- 上流は cache の長さが chunk ごとに変わる。最初の chunk の後は 1 フレームで、`time_conv` は番兵 `'Rep'` で
-  飛ばす（`vae.py:101-137`）。
-- これを「cache は常に 2 フレーム・初期値ゼロ・更新は `cat(cache, x)` の末尾 2 フレーム」に揃える。時間カーネル 3
-  の CausalConv3d は、どの chunk でも `conv3d(cat(cache, x))`（時間 padding 0）になる。
-- 上流が F.pad で詰めるゼロと、こちらの cache のゼロは同じ値なので、conv の入力は要素ごとに上流と一致する
-  （導出 — 段 4 で確かめる）。潜在解像度の conv の例:
-  - 上流: chunk 1 = `[0,0,x0]`・chunk 2 = `[0,x0,x1]`（cache 1 枚 + pad 1 枚）・chunk 3 = `[x0,x1,x2]`。
-  - こちら: cache が `[0,0]` → `[0,x0]` → `[x0,x1]` と進み、同じ並びになる。
-  - 時間 upsample の後（chunk 1 は 1 フレーム・2 以降は 2 / 4 フレーム）でも同じ式で一致する。
-- `time_conv`（`(3,1,1)`）は最初の chunk で走らない。こちらはその cache をゼロのまま残し、chunk 2 が `[0,0,x1]`
-  を読む。上流の `'Rep'` の経路（ゼロ 2 枚の pad）と同じ。
-- cache が要るのは時間カーネル 3 の CausalConv3d だけ。shortcut と post-quant の 1×1×1 は要らない（調査 §5.3）。
+- Upstream's cache length changes per chunk: 1 frame after the first chunk, and `time_conv` is skipped with
+  the sentinel `'Rep'` (`vae.py:101-137`).
+- Here the cache is always 2 frames, initialised to zero, updated as the last 2 frames of
+  `cat(cache, x)`. Every time-kernel-3 CausalConv3d becomes `conv3d(cat(cache, x))` (time padding 0) in
+  every chunk.
+- The zeros upstream pads with F.pad and the zeros of this cache are the same values, so the conv input
+  matches upstream element by element (derived; confirmed at step 4). Example for a conv at latent
+  resolution:
+  - Upstream: chunk 1 = `[0,0,x0]`, chunk 2 = `[0,x0,x1]` (1 cache frame + 1 pad frame), chunk 3 =
+    `[x0,x1,x2]`.
+  - Here: the cache advances `[0,0]` → `[0,x0]` → `[x0,x1]`, giving the same sequence.
+  - The same holds after the time upsample (chunk 1 has 1 frame, later chunks 2 / 4 frames).
+- `time_conv` (`(3,1,1)`) does not run in the first chunk. Its cache stays zero and chunk 2 reads
+  `[0,0,x1]`, the same as upstream's `'Rep'` path (2 zero pad frames).
+- Only time-kernel-3 CausalConv3d needs a cache; the shortcut and the post-quant 1×1×1 do not (recon §5.3).
 
-**グラフは 2 種類**:
+**Two graphs**:
 
-| グラフ              | 入力                              | 出力                                            | 中身                                 |
-| ------------------- | --------------------------------- | ----------------------------------------------- | ------------------------------------ |
-| `vae_decoder_first` | 潜在 `[16,1,32,32]` + cache 30 本 | フレーム `[3,1,256,256]` + 更新後の cache 30 本 | `time_conv` 無し・全段 T = 1         |
-| `vae_decoder_next`  | 潜在 `[16,1,32,32]` + cache 32 本 | フレーム `[3,4,256,256]` + 更新後の cache 32 本 | `time_conv` 2 本あり・T は 1 → 2 → 4 |
+| Graph               | Inputs                               | Outputs                                         | Content                                  |
+| ------------------- | ------------------------------------ | ----------------------------------------------- | ---------------------------------------- |
+| `vae_decoder_first` | latent `[16,1,32,32]` + 30 caches    | frames `[3,1,256,256]` + 30 updated caches      | no `time_conv`, T = 1 throughout         |
+| `vae_decoder_next`  | latent `[16,1,32,32]` + 32 caches    | frames `[3,4,256,256]` + 32 updated caches      | 2 `time_conv`, T goes 1 → 2 → 4          |
 
-cache の一覧（形は潜在 32×32 のタイルのとき。各 `[Cin, 2, h, w]`）:
+Caches (shapes for a 32×32 latent tile; each `[Cin, 2, h, w]`):
 
-| 位置               | 本数 | 形                                     | first              | next   |
-| ------------------ | ---: | -------------------------------------- | ------------------ | ------ |
-| conv_in（16→384）  |    1 | `[16,2,32,32]`                         | 入出力             | 入出力 |
-| mid の Res ×2      |    4 | `[384,2,32,32]`                        | 入出力             | 入出力 |
-| up0 の Res ×3      |    6 | `[384,2,32,32]`                        | 入出力             | 入出力 |
-| up0 の `time_conv` |    1 | `[384,2,32,32]`                        | 無し（ゼロのまま） | 入出力 |
-| up1 の Res ×3      |    6 | `[192,2,64,64]` ×1・`[384,2,64,64]` ×5 | 入出力             | 入出力 |
-| up1 の `time_conv` |    1 | `[384,2,64,64]`                        | 無し（ゼロのまま） | 入出力 |
-| up2 の Res ×3      |    6 | `[192,2,128,128]`                      | 入出力             | 入出力 |
-| up3 の Res ×3      |    6 | `[96,2,256,256]`                       | 入出力             | 入出力 |
-| head（96→3）       |    1 | `[96,2,256,256]`                       | 入出力             | 入出力 |
+| Position            | Count | Shape                                  | first                 | next          |
+| ------------------- | ----: | -------------------------------------- | --------------------- | ------------- |
+| conv_in (16→384)    |     1 | `[16,2,32,32]`                         | in / out              | in / out      |
+| mid Res ×2          |     4 | `[384,2,32,32]`                        | in / out              | in / out      |
+| up0 Res ×3          |     6 | `[384,2,32,32]`                        | in / out              | in / out      |
+| up0 `time_conv`     |     1 | `[384,2,32,32]`                        | absent (stays zero)   | in / out      |
+| up1 Res ×3          |     6 | `[192,2,64,64]` ×1, `[384,2,64,64]` ×5 | in / out              | in / out      |
+| up1 `time_conv`     |     1 | `[384,2,64,64]`                        | absent (stays zero)   | in / out      |
+| up2 Res ×3          |     6 | `[192,2,128,128]`                      | in / out              | in / out      |
+| up3 Res ×3          |     6 | `[96,2,256,256]`                       | in / out              | in / out      |
+| head (96→3)         |     1 | `[96,2,256,256]`                       | in / out              | in / out      |
 
-合計 32 本・154,959,872 要素（f32 で 0.58 GiB）。全画面（潜在 60×104）なら 944,286,720 要素。
+In total 32 caches, 154,959,872 elements (0.58 GiB in f32); 944,286,720 elements for the full frame
+(latent 60×104).
 
-**受け渡しは常駐テンソル**（ADR 0054）:
+**Hand-over through resident tensors** (ADR 0054):
 
-- cache 32 本を `ResidentTensor` に置いて入力に束縛し、更新後の cache は `copyOutputs` で同じ常駐テンソルへ写す。
-  写しは run の全 dispatch の後に積まれる（ADR 0054 決定 3 の FIFO）。ホストへの往復はしない。
-- 各タイルの最初の chunk の前に cache をゼロに書く。ただし `ResidentTensor.write` は `queue.writeBuffer`
-  （`packages/runtime/src/gpu/context.ts:686-694`）で、B570（ReBAR）では staging が VRAM の heap に載り、
-  staging の OOM は device lost になる（limitations の 97% 節）。タイル 1 枚ぶんの cache 0.58 GiB を毎タイル
-  ホストから書くのは避けたい。GPU 側でゼロを書く口（`clearBuffer`）を runtime が持つか・持たないなら足すかと、
-  ゼロ化の対象の絞り込みを段 4 で見る。
-- 同じ常駐テンソルを入力と写し先に使う形が runtime の検査を通るかは段 4 で確かめる（推測では通る —
-  `executor.ts` の `#resolveCopyOutputs` が落とすのは写し元と写し先が同じバッファの形だけ）。
-- **state スロット（ADR 0066 / 0067）は使わない**。裁定どおり入出力で渡す。state スロットは attention の
-  `[B,Hkv,M,D]` と `state_append` 専用で、汎用の書き込み口を足すのは別の ADR になる。入出力の形は cache を
-  2 倍持つ（常駐の入力 + 出力の slot）が、タイル化でタイル 1 枚ぶん 1.16 GiB に収まる。first の出力 slot も残るので
-  実際は 3 組で約 1.72 GiB（追記 2026-10-02・独立レビュー）。
+- The 32 caches live in `ResidentTensor`s bound as inputs; the updated caches are copied back into the same
+  resident tensors with `copyOutputs`. The copy is queued after every dispatch of the run (FIFO of ADR 0054
+  decision 3). No host round trip.
+- Each tile's first chunk starts from a zeroed cache. `ResidentTensor.write` is `queue.writeBuffer`
+  (`packages/runtime/src/gpu/context.ts`); on the B570 (ReBAR) the staging sits in the VRAM heap and a
+  staging OOM loses the device. The zeroing stays a host write for now (addendum 2026-10-02; a GPU-side
+  `clearBuffer` was perf-ledger K-72, killed).
+- Using the same resident tensor as input and as `copyOutputs` destination passes the runtime's checks
+  (confirmed at step 4).
+- **State slots (ADR 0066 / 0067) are not used.** As ruled, the cache goes through inputs / outputs. State
+  slots serve attention `[B,Hkv,M,D]` and `state_append` only; a general write port would be another ADR.
+  Inputs / outputs hold the cache twice (resident input + output slot), 1.16 GiB per tile; with the
+  output slots of `first` about 1.72 GiB (addendum 2026-10-02).
 
-**常時タイル**（ADR 0033 / 0038 §4 の動画版）:
+**Always tiled** (the video version of ADR 0033 / 0038 §4):
 
-- chunk グラフの空間は潜在 32×32 の固定タイルにする。ホストが切り出し・ブレンド・貼り付けを行う。
-- タイル辺はホストに literal で置かず、開いた資産の入力形（潜在 `[16,1,h,w]`）から導く（ADR 0033 決定 6 の
-  流儀）。export の既定は 32。将来タイル 60 や Chrome の小さい上限向けの辺へ差し替えるときに、配布物の差し替え
-  だけで済む。
-- 理由（推測）: 全画面のまま回すと cache だけで入力 3.52 GiB + 出力 3.52 GiB になる。中間（up2 の nearest 出力
-  `[4,192,480,832]` f32 1.14 GiB など — 調査 §3.9）を足すと、B570 の 9.93 GiB に Deno の 97% の線を掛けた枠を
-  超える見込み。Chrome ではさらに小さい。タイル 32 なら VAE 段は約 2.0 GiB（Consequences）。first の Session の保持領域を
-  足すと約 2.6〜3.2 GiB（追記 2026-10-02・独立レビュー）。
-- ループは**タイルが外・chunk が内**（diffusers `tiled_decode` と同じ — タイルごとに cache を作り直す）。逆順だと
-  タイル 12 枚ぶんの cache（6.9 GiB）を同時に持つ。
-- タイル幾何は Anima の丸め等間隔配置（`planTileAxis`・最小の重なり 8 潜在 = 64 px — ADR 0033 追記 P-3）。
-  832×480（潜在 60×104）は 3 × 4 = 12 枚（行の開始 0 / 14 / 28・列の開始 0 / 24 / 48 / 72）で、面積は非タイルの
-  1.97 倍。
-- タイル 32 は diffusers の既定（`tile_sample_min` 256 px・stride 192 px）と同じ大きさ。ブレンドは上流の
-  `blend_v` / `blend_h` と同じ式・同じ順（ADR 0033 決定 3）を各フレームに掛ける。
-- タイル化は近似（受容野がタイル内に閉じる）。参照は recipe に同じ幾何を自前で実装したもの（ADR 0033 決定 5 —
-  `enable_tiling` の走査は最後のタイルが短く、固定形のグラフでは食えない）。
+- The chunk graphs are fixed 32×32 latent tiles. The host cuts, blends and pastes.
+- The tile side is not a host literal; it is derived from the input shape of the opened asset (latent
+  `[16,1,h,w]`, the style of ADR 0033 decision 6). The export default is 32; another side (60, or a smaller
+  one for Chrome's limits) needs only a new distribution.
+- Reason (speculation): the full frame needs 3.52 GiB of cache input + 3.52 GiB of output; with
+  intermediates (up2's nearest output `[4,192,480,832]` f32 is 1.14 GiB — recon §3.9) it exceeds 97 % of
+  the B570's 9.93 GiB, and Chrome is smaller still. Tile 32 needs about 2.0 GiB for the VAE stage, about
+  2.6–3.2 GiB with the first Session's retained buffers (addendum 2026-10-02).
+- The loop is **tiles outside, chunks inside** (as diffusers `tiled_decode` — the cache is rebuilt per
+  tile). The reverse order would hold the caches of 12 tiles (6.9 GiB) at once.
+- Tile geometry follows Anima's rounded even spacing (`planTileAxis`, minimum overlap 8 latents = 64 px —
+  ADR 0033 addendum P-3). 832×480 (latent 60×104) gives 3 × 4 = 12 tiles (row starts 0 / 14 / 28, column
+  starts 0 / 24 / 48 / 72), 1.97× the untiled area.
+- Tile 32 equals the diffusers default (`tile_sample_min` 256 px, stride 192 px). Blending uses upstream's
+  `blend_v` / `blend_h` formulas in the same order (ADR 0033 decision 3) on every frame.
+- Tiling is an approximation (the receptive field is cut at the tile). The reference is the same geometry
+  implemented in the recipe (ADR 0033 decision 5 — `enable_tiling` leaves the last tile short, which a
+  fixed-shape graph cannot take).
 
-**rank 4 以下への書き直し**（recipe のパッチ）:
+**Rewrites to rank ≤ 4** (recipe patches):
 
-- `upsample3d` の時間インターリーブ（`time_conv` の 2 倍チャネルの出力をフレーム方向へ交互に並べ直す操作）:
-  上流は `reshape(b,2,c,t,h,w)` → `stack(dim=3)` で rank 6 を経由する（`vae.py:134-137`）。こちらは
-  `[2C,T,H,W]` → reshape `[2,C,T,H·W]` → permute `(1,2,0,3)` → `[C,T,2,H·W]` → reshape `[C,2T,H,W]` にする。
-  `out[c, 2t+i] = x[i·C+c, t]` で上流と同じ並び（データ移動だけなのでビット一致）。
-- フレームごとの 2D 処理（Resample の nearest ×2 + Conv2d 3×3・mid の attention）は、上流の
-  `rearrange(b c t h w → (b t) c h w)` を rank 4 の permute `[C,T,H,W] → [T,C,H,W]` で写す。conv2d はフレームを
-  バッチとして z 軸で回す（ADR 0024 決定 2）。上流と op が 1 対 1 で対応するので、パッチの eager 同値をビットで
-  確かめられる。
-- nearest-exact ×2 は Anima の reshape / expand の形（`anima/patch.py` の `_upsample_forward`）。融合ルール
-  upsample2x に乗るかは段 4 で観測する（推測では `[T,C,H,W]` の rank 4 NCHW に乗る）。
-- mid の単一 head attention は `[C,T,h,w]` → `[T,1,h·w,C]`（B = T・H = 1・D = 384）で融合 attention に通す。
-  chunk の mid は常に T = 1（潜在 1 フレーム）なので B = 1。Anima の VAE が同じ形（D = 384・単一 head）を既に
-  通している（`anima/patch.py` の `_attention_block_forward`）。
-- RMS_norm（`F.normalize` × √C × gamma — ノルムを `clamp_min(1e-12)` してから割る形）は、Anima の
-  `_shared/vae_rank4.py` の `l2_normalize`（旧 anima の `_l2_normalize_channels`）と同じく、チャネル軸の `sum` → `sqrt` → `clamp_min` → 除算で書く。`[C,T,H,W]` では
-  dim 0、attention の中の `[T,C,H,W]` では dim 1。
-- diffusers は fp16 / bf16 入力のとき normalize を f32 で行う（`autoencoder_kl_wan.py:202-210`）。karume の活性は
-  f32（格納だけを圧縮 — ADR [0006](0006-quantization.md)）なので常に f32 で正規化され、追加の扱いは要らない。
-- 前処理の `z·std + mean`（16 チャネルの固定値）と最後の `clamp(-1, 1)` はホストで行う。
-- パッチの書き方は Anima の VAE パッチを手本にする。Anima の VAE（QwenImage の VAE）は Wan の VAE からの
-  fine-tune で（diffusers `autoencoder_kl_qwenimage.py:15-18`）、クラス構成も 1 対 1 で対応する。最初は wan の
-  recipe に置き、段 4 で同値（同じパッチ関数が両方の VAE で eager 同値）を確かめたら `tools/export-recipes` の
-  `_shared/` へ寄せる（条件付き — ADR 0065 決定 2）。
+- Time interleave of `upsample3d` (reordering the 2×-channel output of `time_conv` alternately along
+  frames): upstream goes through rank 6 with `reshape(b,2,c,t,h,w)` → `stack(dim=3)` (`vae.py:134-137`).
+  Here: `[2C,T,H,W]` → reshape `[2,C,T,H·W]` → permute `(1,2,0,3)` → `[C,T,2,H·W]` → reshape
+  `[C,2T,H,W]`. `out[c, 2t+i] = x[i·C+c, t]`, the same order as upstream (pure data movement, bit-exact).
+- Per-frame 2D work (Resample nearest ×2 + Conv2d 3×3, mid attention) maps upstream's
+  `rearrange(b c t h w → (b t) c h w)` to the rank-4 permute `[C,T,H,W] → [T,C,H,W]`; conv2d runs frames as
+  the batch on the z axis (ADR 0024 decision 2). Ops correspond one to one with upstream, so eager
+  equivalence of the patch can be checked bit for bit.
+- nearest-exact ×2 uses Anima's reshape / expand form (now `nearest_exact_2x` in
+  `tools/export-recipes/_shared/vae_rank4.py`).
+- The mid single-head attention goes `[C,T,h,w]` → `[T,1,h·w,C]` (B = T, H = 1, D = 384) through fused
+  attention; the chunk mid always has T = 1, so B = 1. Anima's VAE already runs the same shape.
+- RMS_norm (`F.normalize` × √C × gamma — the norm clamped with `clamp_min(1e-12)` before dividing) is
+  written as channel-axis `sum` → `sqrt` → `clamp_min` → divide, as `l2_normalize` in `_shared/vae_rank4.py`;
+  dim 0 for `[C,T,H,W]`, dim 1 for `[T,C,H,W]` inside attention.
+- diffusers normalises in f32 for fp16 / bf16 inputs (`autoencoder_kl_wan.py:202-210`). Karume's
+  activations are f32 (only storage is compressed — ADR [0006](0006-quantization.md)), so nothing extra is
+  needed.
+- The pre-step `z·std + mean` (16 fixed channel values) and the final `clamp(-1, 1)` run on the host.
+- The Anima VAE patch is the model: Anima's VAE (the QwenImage VAE) is a fine-tune of Wan's VAE (diffusers
+  `autoencoder_kl_qwenimage.py:15-18`) with a one-to-one class structure. The shared leaf functions moved to
+  `tools/export-recipes/_shared/` after step 4 (ADR 0065 decision 2; see Open issues).
 
-### 3. DiT の recipe パッチ（新しい op は足さない）
+### 3. DiT recipe patches (no new op)
 
-守るもの: 上流 diffusers `WanTransformer3DModel` と eager 同値な IR を、既存の語彙だけで作ること。
+What it protects: an IR eager-equivalent to upstream diffusers `WanTransformer3DModel`, built from the
+existing vocabulary only.
 
-切り出し元は diffusers（公式 `WanModel` は torch.export に向かない — 調査 §3.10）。グラフは Anima と同じ
-**S 形**（ADR 0034）にする。入口は patchify の後・出口は unpatchify の前で、次元はトークン長 S の 1 シンボル
-（`Dim("S", max=32760)` — 81 フレームまで）。
+The source is diffusers (the official `WanModel` does not suit torch.export — recon §3.10). The graph is
+**S-shaped** like Anima (ADR 0034): entry after patchify, exit before unpatchify, one symbol for the token
+length S (`Dim("S", max=32760)` — up to 81 frames).
 
-| 部位                     | 扱い                                                                                                                                                                                                         | 根拠・前例                                                                                                           |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| patchify・patch 埋め込み | ホストが潜在 `[16,F,H,W]` を `[1,S,64]`（並びは `(c, pt, ph, pw)`）にする。`Conv3d(16→1536, k = s = (1,2,2))` を `Linear(64→1536)`（重み `[1536,16,1,2,2]` の平坦化）へ差し替える                            | 窓が重ならない conv3d は reshape + Linear と同じ計算（調査 §4.1）                                                    |
-| unpatchify               | ホスト。出力 `[1,S,64]` の並びは `(pt, ph, pw, c)` で、patchify の並びと違う（`transformer_wan.py:723-730`）                                                                                                 | 上流の rank 8 の permute をグラフに出さない                                                                          |
-| 3D RoPE                  | interleave 形の回転を「隣接ペアの入れ替え + cos / sin の要素積」で rank 4 のまま書く。表は軸別の素表（t / h / w × 位置 1024）を transformer 容器の資産（役割 `rope-base`）に焼き、ホストは並べ替えだけをする | irodori の実数化（`irodori/patch.py:12-16`）・Anima の `rope-base.ts`（TS で三角関数を計算しない MUST）              |
-| qk-norm                  | `nn.RMSNorm(1536)`（affine 付き・eps 1e-6）は weight が正規化軸長の rank 1 なので、`aten.rms_norm` の保存経路にそのまま乗る見込み（段 2 で確かめる）                                                         | ADR [0017](0017-rms-norm-conv2d-clamp-min.md)・調査 §3.2                                                             |
-| adaLN                    | 式は上流のまま。融合ルール adaln に乗るかは `lastRunFusions` で観測する。乗らなければ非融合で走らせ、ルールの拡張は perf の別起票にする                                                                      | 調査 §4.3（推測: 式の順が違えば乗らない）                                                                            |
-| 時刻埋め込み             | sinusoidal 256 次元はホスト（Anima の `timestepsProj` と同じ式）で、グラフ入力 `timesteps_proj [1,256]` にする。MLP（256→1536→1536→9216）はグラフの中（M = 1 の linear）                                     | Anima（`packages/models/src/anima/sampler.ts:118-136`）・ADR [0013](0013-sbv2-chain-export.md)（実行時ノブはホスト） |
-| テキスト文脈             | グラフ入力 `[1,512,4096]`（umT5 の出力を有効長で切り、ホストがゼロで 512 まで埋めたもの）。`text_embedding` は 512 行すべてに掛け、cross-attn はマスク無し                                                   | 上流の挙動（パディング位置は非ゼロの定数ベクトル — 調査 §3.3）の再現                                                 |
-| cross-attn の K / V      | DiT の中で毎 forward 計算する                                                                                                                                                                                | 1 forward の 0.2%（72.5 G MAC / 36.39 T MAC・S = 14,040）で、ADR 0114 の別グラフ化の利得が小さい                     |
-| attention                | SDPA を `attention` として保存する（Anima と同じ opt-in — `anima/export.py:636-641`）。self は M = N = S、cross は M = S・N = 512                                                                            | 調査 §4.1                                                                                                            |
+| Part                     | Treatment                                                                                                                                                                                                                                       | Grounds / precedent                                                                                                                   |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| patchify, patch embed    | The host turns the latent `[16,F,H,W]` into `[1,S,64]` (order `(c, pt, ph, pw)`). `Conv3d(16→1536, k = s = (1,2,2))` is replaced by `Linear(64→1536)` (flattened weight `[1536,16,1,2,2]`)                                                       | A conv3d with non-overlapping windows is reshape + Linear (recon §4.1)                                                                |
+| unpatchify               | Host. The output `[1,S,64]` is ordered `(pt, ph, pw, c)`, unlike patchify (`transformer_wan.py:723-730`)                                                                                                                                         | Keeps upstream's rank-8 permute out of the graph                                                                                      |
+| 3D RoPE                  | The interleaved rotation is written at rank 4 as "swap adjacent pairs + elementwise cos / sin". Per-axis base tables (t / h / w × 1024 positions) are baked into an asset of the transformer container (role `rope-base`); the host only reorders | The real-valued form of irodori (`irodori/patch.py`), Anima's `rope-base.ts` (TS MUST NOT compute trigonometric functions)              |
+| qk-norm                  | `nn.RMSNorm(1536)` (affine, eps 1e-6) has a rank-1 weight of the normalised length, so it takes the preserved `aten.rms_norm` path                                                                                                              | ADR [0017](0017-rms-norm-conv2d-clamp-min.md), recon §3.2                                                                            |
+| adaLN                    | Upstream formula. It does not match the adaln fusion rule (addendum 2026-10-02); it runs unfused, and extending the rule is a separate perf entry (K-73)                                                                                          | recon §4.3                                                                                                                            |
+| Timestep embedding       | The 256-dim sinusoid on the host (same formula as Anima's `timestepsProj`) as graph input `timesteps_proj [1,256]`. The MLP (256→1536→1536→9216) is in the graph (M = 1 linear)                                                                 | Anima (`timestepsProj` in `packages/models/src/anima/sampler.ts`), ADR [0013](0013-sbv2-chain-export.md) (runtime knobs on the host) |
+| Text context             | Graph input `[1,512,4096]` (umT5 output cut to the valid length, zero-padded to 512 by the host). `text_embedding` runs over all 512 rows; cross-attention has no mask                                                                            | Reproduces upstream (padding positions become a non-zero constant vector — recon §3.3)                                               |
+| Cross-attention K / V    | Computed inside the DiT on every forward                                                                                                                                                                                                         | 0.2 % of one forward (72.5 G MAC / 36.39 T MAC at S = 14,040); a separate graph (ADR 0114) gains little                              |
+| attention                | SDPA preserved as `attention` (the same opt-in as Anima — `anima/export.py`). Self: M = N = S; cross: M = S, N = 512                                                                                                                             | recon §4.1                                                                                                                            |
 
-- バッチは B = 1（CFG は 2 回の forward — 決定 5）。
-- 活性は f32、重みは f16 格納（quant 席 `f16` — 決定 7。DiT の i8 席は [ADR 0120](0120-wan-dit-w8a8-seat.md)）。上流の bf16 autocast の区間も、こちらは f32 で計算する
-  （WebGPU に bf16 も f64 も無い — 調査 §7.4）。
-- パッチは eager 同値 MUST（`anima/patch.py` と同じ規律・実重みで実測）。RoPE の書き換えは、diffusers が既に
-  実数形（`x1·cos − x2·sin` の strided 代入）なので、`a − b = a + (−b)` と加算の可換でビット一致する見込み
-  （推測 — 段 2 で実測）。外れたら差を記録し、段 2 の帯の内側なら進む（移植の誤りの疑いは帯で掴む）。
-  patch 埋め込みの Linear 化は、torch CPU の conv3d と GEMM で縮約順が違うのでビット一致を期待せず、差を記録する。
-- RoPE の表の精度: diffusers は MPS が使える機でだけ表を float32 で作り、他は float64 で作る
-  （`transformer_wan.py:375`）。素表と参照が機に依って変わらないよう、recipe は MPS 不在を assert するか、
-  float64 を強制して表を作る。
+- Batch B = 1 (CFG is two forwards — decision 5).
+- Activations f32, weights f16 in the `f16` preset (decision 7; the DiT i8 presets are
+  [ADR 0120](0120-wan-dit-w8a8-seat.md)). Upstream's bf16-autocast regions are computed in f32 here
+  (WebGPU has neither bf16 nor f64 arithmetic — recon §7.4).
+- Patches MUST be eager-equivalent (the `anima/patch.py` rule, measured on real weights). Measured at step
+  2: every patch, including RoPE and the Linear patch embedding, is bit-exact with upstream (addendum
+  2026-10-02).
+- RoPE table precision: diffusers builds the table in float32 only where MPS is available and in float64
+  elsewhere (`transformer_wan.py:375`). So that the base tables and the reference do not depend on the
+  machine, the recipe asserts the absence of MPS or forces float64.
 
-### 4. テキスト埋め込みの段階化
+### 4. Staged text embeddings
 
-守るもの: DiT と VAE の移植を T5 の実装と数値のリスクから切り離すこと・第 2 段で DiT のグラフを変えずに
-差し替えられること。
+What it protects: the DiT and VAE port is isolated from the implementation and numeric risk of T5, and
+stage 2 replaces stage 1 without changing the DiT graph.
 
-**第 1 段 = 事前計算した埋め込み**:
+**Stage 1 = precomputed embeddings**:
 
-- 境界は **umT5 の出力**（`[L_valid, 4096]`・射影の前・`L_valid` はトークナイザのマスクが 1 の長さ = 有効長）。
-  DiT の入力は第 2 段と同じ `[1,512,4096]` で、ゼロ埋めはどちらの段でもホストが行う。
-- 形式は **safetensors の f32**（プロンプトごとに 1 テンソル `[L_valid, 4096]`）+ プロンプト文と `L_valid` の
-  メタ。置き場は manifest のモデル単位の `assets`（quant 非依存 — ADR [0109](0109-manifest-v5-container.md)
-  決定 4。sbv2 の `style_vectors.safetensors` と同じ席）。
-  - krm にしないのは、グラフでも重みでもなく、quant 席を跨いで共有する表だから。
-  - f16 にしないのは、参照（上流と同じ bf16 の umT5 の出力を f32 に広げた値）に無い丸めを足すことになるから。大きさは 1 トークン 16 KiB で、
-    512 行でも 8 MiB。
-- 作り方: recipe が diffusers の `WanPipeline._get_t5_prompt_embeds`（`prompt_clean` → トークナイザ
-  `padding="max_length"`・`max_length=512` → `UMT5EncoderModel` を CPU **bf16**〈上流の `t5_dtype`・追記 2026-10-02〉）で作る。系列出力は
-  `outputs/series/wan2.1-t2v-1.3b-text-embeds/`（トークナイザと同じ「グラフを持たない compile 生成物」の席 —
-  assets-layout）。
-- `prompt_clean` は ftfy が入っているときだけ `ftfy.fix_text` を掛ける（全角の正規化など —
-  `pipeline_wan.py:78-81`）。入っているかどうかで埋め込みが変わらないよう、wan の recipe の依存群に ftfy を
-  固定で入れる。正規化後の文字列も埋め込み資産のメタに書く。
-- umT5 は埋め込みを作る別プロセスで回す。開発機の RAM は 31 GiB で、umT5 の f32 22.7 GB と DiT 5.7 GB を
-  1 プロセスに載せると境界に来る。DiT と VAE の参照パイプラインは `text_encoder=None` で組み、
-  `prompt_embeds` / `negative_prompt_embeds` に資産と同じ埋め込みを注入して回す。
-- 固定プロンプトは正 3 本 + negative 1 本。
-  - 1 本目は公式 `generate.py` の t2v-1.3B の例文（`EXAMPLE_PROMPT`）。
-  - negative は公式の `sample_neg_prompt`（`shared_config.py`）を diffusers に明示で渡す。diffusers の既定
-    （`negative_prompt` 省略で空文字）は使わない。
-  - 残り 2 本は動きの量が違う題材を選ぶ（視認の A/B は 2〜3 プロンプト × seed 4 本で見る運用）。文面は裁定待ち。
-- 公開 API は第 1 段から `generate({ prompt })`（文字列）にする。第 1 段は事前計算の集合（資産のメタの
-  プロンプト文）に無い文字列を fail loudly で拒む。第 2 段（umT5 i8）で受理集合が広がるだけになり、API を
-  割らない。
+- The boundary is the **umT5 output** (`[L_valid, 4096]`, before the projection; `L_valid` = the length
+  where the tokenizer mask is 1 = valid length). The DiT input is `[1,512,4096]` in both stages; the host
+  zero-pads in both.
+- Format: **f32 safetensors** (one `[L_valid, 4096]` tensor per prompt) with the prompt text and `L_valid`
+  as metadata, in the model-level `assets` of the manifest (quant-independent — ADR
+  [0109](0109-manifest-v5-container.md) decision 4; the same place as sbv2's `style_vectors.safetensors`).
+  - Not `krm`: it is neither graph nor weights, but a table shared across presets.
+  - Not f16: that would add a rounding the reference (upstream's bf16 umT5 output widened to f32) does not
+    have. Size is 16 KiB per token, 8 MiB at 512 rows.
+- Produced by the recipe with diffusers `WanPipeline._get_t5_prompt_embeds` (`prompt_clean` → tokenizer
+  `padding="max_length"`, `max_length=512` → `UMT5EncoderModel` on the CPU in **bf16**, upstream's
+  `t5_dtype` — revised from f32 in the addendum of 2026-10-02). Series output:
+  `outputs/series/wan2.1-t2v-1.3b-text-embeds/` (the place of "compile outputs without a graph", like
+  tokenizers — assets-layout).
+- `prompt_clean` applies `ftfy.fix_text` only when ftfy is installed (full-width normalisation and more —
+  `pipeline_wan.py:78-81`). So that installation does not change the embeddings, ftfy is pinned in the wan
+  dependency group of the recipes. The normalised string is also written into the asset metadata.
+- Producing the embeddings in a separate process MAY be used (re-graded 2026-10-18 to MAY: the reason was
+  the 31 GiB of RAM of the machine at the time, where umT5 in f32 (22.7 GB) and the DiT (5.7 GB) in one
+  process came to the limit; the development machine now has 61 GiB). The reference pipeline of the DiT and
+  VAE is built with `text_encoder=None` and receives the same embeddings as the assets through
+  `prompt_embeds` / `negative_prompt_embeds`.
+- Fixed prompts: 3 positive + 1 negative.
+  - The first is the t2v-1.3B example of the official `generate.py` (`EXAMPLE_PROMPT`).
+  - The negative is the official `sample_neg_prompt` (`shared_config.py`), passed explicitly to diffusers;
+    the diffusers default (empty string when `negative_prompt` is omitted) is not used.
+  - The other two cover different amounts of motion (visual A/B uses 2–3 prompts × 4 seeds); taken from the
+    examples of the official README / Diffusers documentation (Rulings, point 3).
+- The public API is `generate({ prompt })` (a string) from stage 1 on. Stage 1 rejects a string outside the
+  precomputed set (the prompt texts in the asset metadata) with a loud failure; stage 2 only widens the
+  accepted set without breaking the API. (Superseded by ADR 0119 on 2026-10-03: the GPU path is the
+  default, `textEncoder: "gpu"`; the rejection holds only for an explicit `textEncoder: "precomputed"`,
+  where it stays an invariant of that path — ADR 0119 decision 7 and the 10d addendum, item B.)
 
-**第 2 段 = umT5-XXL を GPU に i8**（本 ADR は前提だけを決める。設計は別の ADR）:
+**Stage 2 = umT5-XXL on the GPU in i8** (this ADR fixes only the premises; the design is
+[ADR 0119](0119-wan-umt5-gpu-text-encoder.md)):
 
-- 重みは i8 per-channel（ADR [0019](0019-i8-weight-execution.md)）・活性は f32（karume の既定）。f16 の活性で
-  報告される溢れ（調査 §6）と公式の `fp16_clamp` は、f32 では踏まない。mlx-umt5 の報告でも per-channel の int8
-  だけが安全（調査 §6）。
-- 相対位置バイアス `[1,64,L,L]` は融合 attention の mask 契約（`[1,1,M,N]` だけ）に入らない。umT5 では SDPA を
-  保存しない分解経路（bmm → add → softmax → bmm）で通し、バイアスはグラフの中で作る（i32 のバケット添字表
-  `[512,512]` = 1 MiB の定数 + 層ごとの `[32,64]` 表の gather）。1 層 64 MiB のバイアスを定数に焼くと const の
-  32 MiB 上限に当たる（調査 §4.3）。mask 契約を `[1,H,M,N]` へ広げるかは、速度を見てからの別判断。
-- 語彙埋め込み `256,384 × 4,096` は i8 で 1,050,148,864 B で、B570 の束縛上限に収まる。ブラウザの既定上限を
-  見るなら、ホストの行 gather（PLE の前例 — ADR [0085](0085-ple-host-gather.md)）。
-- export のホスト RAM: fp32 の重みだけで 22.7 GB あり、gemma4 E4B の export が 31 GiB 機で OOM した前例がある
-  （backlog）。第 2 段の最初の作業はこの実測にする。足りなければ、層を数グラフに割る export か、fake tensor で
-  trace して重みを逐次 emit する形を exporter core に足す（どちらにするかは第 2 段の ADR）。
-- token id は exporter 境界で i32 へ正規化する（ADR 0009。語彙 256,384 は i32 に収まる）。
+- Weights i8 per channel (ADR [0019](0019-i8-weight-execution.md)), activations f32 (Karume's default).
+  The overflow reported for f16 activations (recon §6) and the official `fp16_clamp` do not arise in f32;
+  the mlx-umt5 report also finds only per-channel int8 safe (recon §6).
+- The relative position bias `[1,64,L,L]` does not fit the mask contract of fused attention
+  (`[1,1,M,N]` only). umT5 goes through the decomposed path without preserving SDPA (bmm → add → softmax →
+  bmm) and builds the bias in the graph. The bucket index table is built by the host as an `[L,L]` i32
+  graph input (revised 2026-10-03 from a baked `[512,512]` constant — ADR 0119 decision 3). Whether to widen
+  the mask contract to `[1,H,M,N]` is a later decision based on speed.
+- The vocabulary embedding `256,384 × 4,096` is 1,050,148,864 B in i8 and fits the B570's binding limit.
+  For the browser default limits, a host row gather (the PLE precedent — ADR [0085](0085-ple-host-gather.md)).
+- Export host RAM: the fp32 weights alone are 22.7 GB, and the gemma4 E4B export ran out of memory on a
+  31 GiB machine (backlog). Stage 2 starts by measuring this (ADR 0119 decision 6).
+- Token ids are normalised to i32 at the exporter boundary (ADR 0009; the vocabulary of 256,384 fits i32).
 
-### 5. サンプラ
+### 5. Sampler
 
-守るもの: diffusers の参照と同じ σ 列・同じ更新式で、ステップの軌跡を照合できること。
+What it protects: the same σ sequence and update formula as the diffusers reference, so that step
+trajectories can be compared.
 
-- flow matching の UniPC（solver_order 2・bh2・predict_x0・最後の σ は 0・`lower_order_final`）。Diffusers 版の
-  `scheduler/scheduler_config.json` の値をそのまま写す（調査 §3.5）。
-- **参照出力を作る設定は 1 つ**: 50 ステップ・guide 5.0・**shift 3.0**・σ の元の列は diffusers の
-  `linspace(1, 0.001, 51)[:-1]`。
-  - 理由: 参照実装が diffusers で（決定 8）、Diffusers 版の配布物の `flow_shift` が 3.0（docstring「3.0 for
-    480P」）。832×480 は 480P。
-  - 公式 `generate.py` の 5.0 と README の 8〜12 は参照の外に置く。参照を作る側でだけ値を書き換えると、誰でも
-    `from_pretrained` だけで同じ参照を作れる性質が消える。
-- shift・guide・ステップ数はホストの値で、グラフにも重みにも入らない。製品の既定（manifest の
-  `pipelineConfig.scheduler`）は 3.0 で起こし、視認の A/B で変えるかを決める（裁定待ち）。
-- σ 列と timestep の作り方は diffusers 0.39.0 の `set_timesteps`（flow の分岐）に揃える（調査 §3.5）:
-  - σ は float64 で計算する（linspace → shift）。shift 後の σ[0] が 1 なら `sigmas[0] -= 1e-6` を引く
-    （`scheduling_unipc_multistep.py:437-440` — 最初の更新の `log(alpha)` の発散よけ）。
-  - timestep は float64 の `σ × 1000` を int64 へ切り捨てた値。上の補正で最初の timestep は 1000 ではなく 999。
-  - σ は最後の 0 を足してから float32 へ落とす。ホストの TS も同じ順（f64 で計算 → 最後に f32）で作る。
-- 重みの取得元は `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` で、recipe の `SOURCES`（上流取得元の表）に repo と
-  revision の 40 桁の sha を焼く（ADR 0092 決定 3 の流儀を上流側にも当てる・値は段 2 で取る）。
-- CFG は cond / uncond を同じ Session で順に 2 回回す（B = 1 — Anima と同じ）。合成
-  `uncond + g·(cond − uncond)` はホストで、f32 の演算順を diffusers と揃える。UniPC の更新もホストの TS で行い、
-  Anima の DPM-Solver（`anima/dpmsolver_ref.py` と TS 実装の突合）と同じ形で照合する。
-- 初期ノイズ:
-  - 製品は seed つきのホスト生成器（Anima と同じ splitmix64 + Box–Muller。torch とは別の列 —
-    `packages/models/src/anima/random.ts`）。
-  - 参照との照合はノイズを外から注入する（fixture の `latents_init` — Anima の前例）。参照側は torch CPU の
-    `randn` で作り、diffusers の `latents=` に渡す。CUDA の RNG は機を跨いで再現できない（調査 §3.5）ので使わない。
+- Flow-matching UniPC (solver_order 2, bh2, predict_x0, last σ 0, `lower_order_final`), copied from the
+  Diffusers version's `scheduler/scheduler_config.json` (recon §3.5).
+- **One setting produces the reference outputs**: 50 steps, guide 5.0, **shift 3.0**, base σ sequence
+  diffusers `linspace(1, 0.001, 51)[:-1]`.
+  - Reason: the reference implementation is diffusers (decision 8), and the Diffusers distribution sets
+    `flow_shift` 3.0 (docstring "3.0 for 480P"); 832×480 is 480P.
+  - The official `generate.py` 5.0 and the README's 8–12 stay outside the reference. Changing the value only
+    on the reference side would lose the property that anyone can build the same reference with
+    `from_pretrained` alone.
+- Shift, guide and the step count are host values, in neither the graph nor the weights. The product
+  default (manifest `pipelineConfig.scheduler`) starts at 3.0 (Rulings, point 2).
+- σ and timesteps follow diffusers 0.39.0 `set_timesteps` (the flow branch — recon §3.5):
+  - σ is computed in float64 (linspace → shift). If the shifted σ[0] is 1, subtract `sigmas[0] -= 1e-6`
+    (`scheduling_unipc_multistep.py:437-440` — avoids the divergence of `log(alpha)` in the first update).
+  - A timestep is the float64 `σ × 1000` truncated to int64; with the correction the first timestep is 999,
+    not 1000.
+  - The final 0 is appended to σ before casting to float32. The host TS follows the same order (f64, then
+    f32 at the end).
+- Weights come from `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`; the recipe's `SOURCES` (upstream source table)
+  pins the repository and the 40-digit revision sha (the style of ADR 0092 decision 3 applied upstream).
+- CFG runs cond / uncond in turn on the same Session (B = 1, as Anima). The combination
+  `uncond + g·(cond − uncond)` is on the host with the f32 operation order of diffusers. The UniPC update is
+  also host TS, checked against the reference in the same way as Anima's DPM-Solver
+  (`anima/dpmsolver_ref.py` against the TS implementation).
+- Initial noise:
+  - The product uses a seeded host generator (splitmix64 + Box–Muller as in Anima; a different sequence
+    from torch — `packages/models/src/wan/random.ts`).
+  - Reference comparisons inject the noise (fixture `latents_init` — the Anima precedent). The reference
+    side draws it with torch CPU `randn` and passes it as diffusers `latents=`. CUDA's RNG is not used: it
+    is not reproducible across machines (recon §3.5).
 
-### 6. attention の長さ・dispatch・TDR
+### 6. Attention length, dispatch and TDR
 
-守るもの: 長いトークン列でもビット同一の門を保ったまま、容量とタイムアウトの内側で回すこと。
+What it protects: long token sequences run within capacity and timeouts while keeping the sha256
+regression checks bit-exact.
 
-- S は実体化したまま（online softmax は MUST NOT）。行ブロック（`planRowBlocks`）がクエリ行を束縛上限に収まる
-  枚数へ等分する（ADR 0060）。B570（束縛上限 2,147,483,644 B・H = 12・f32 格納）での見込み:
+- S stays materialised; online softmax MUST NOT be used. (Superseded by ADR 0124 on 2026-10-11: the binding
+  rule is the MUST of `packages/runtime/src/kernels/attention.ts:30-32` — pass ② of the reference path is
+  not rewritten into a one-pass online softmax, and a variant with another order needs its own key and a
+  re-derived tolerance; an opt-in fast path that never builds S is left to its own future ADR, ADR 0124
+  decision 9.) Row blocks (`planRowBlocks`) split the query rows evenly into blocks within the binding
+  limit (ADR 0060). Expected on the B570 (binding limit 2,147,483,644 B, H = 12, f32 storage):
 
-| トークン              | 1 行の S    | 行ブロック       | 1 ブロックの S              |
-| --------------------- | ----------- | ---------------- | --------------------------- |
-| 14,040（33 フレーム） | 673,920 B   | 5 枚 × 2,808 行  | 1,892,367,360 B（1.76 GiB） |
-| 32,760（81 フレーム） | 1,572,480 B | 24 枚 × 1,365 行 | 2,146,435,200 B（2.00 GiB） |
+| Tokens               | S per row   | Row blocks       | S per block                 |
+| -------------------- | ----------- | ---------------- | --------------------------- |
+| 14,040 (33 frames)   | 673,920 B   | 5 × 2,808 rows   | 1,892,367,360 B (1.76 GiB)  |
+| 32,760 (81 frames)   | 1,572,480 B | 24 × 1,365 rows  | 2,146,435,200 B (2.00 GiB)  |
 
-- cross-attn の S（12 × S × 512・f32）は 14,040 で 345,047,040 B・32,760 で 805,109,760 B で、どちらも 1 枚に
-  収まる。
-- `attentionScoreStorage: "f16"`（ADR [0031](0031-attention-score-f16-storage.md)）は数値を変える opt-in
-  （ADR [0058](0058-numerics-opt-in-contract.md)）なので、既定では使わない。
-- 計算量は S² のまま残る。online softmax にしても積和は減らないが、S の一時領域とその書き込み・読み直しは
-  消えるので、帯域の面では速度に効く余地がある。速度への効果は未測定（小さいタイルでは K / V の再読込が増える）
-  （訂正 2026-10-10 — 旧記述は「容量だけの手」）。
+- Cross-attention S (12 × S × 512, f32) is 345,047,040 B at 14,040 and 805,109,760 B at 32,760; one block
+  each.
+- `attentionScoreStorage: "f16"` (ADR [0031](0031-attention-score-f16-storage.md)) changes the numbers and
+  is opt-in (ADR [0058](0058-numerics-opt-in-contract.md)), so it is not used by default. (Superseded by
+  ADR 0120 on 2026-10-04: the product default preset is the practical preset `f16+dit8-a8-attn8-s16`, which
+  includes s16 — ADR 0120 ruling 4 of 2026-10-04, generalised by ADR 0128 decision 1. The runtime's
+  omitted value is still the reference path, ADR 0058 decision 2.)
+- Compute stays O(S²). Online softmax would not reduce the multiply-adds, but it removes the temporary S
+  and its write and re-read, so it may help bandwidth; the speed effect is unmeasured (small tiles re-read
+  K / V more) (corrected 2026-10-10 — the earlier text said it saves capacity only).
 
-**タイムアウト**:
+**Timeouts**:
 
-- Deno には Chrome の GPU ウォッチドッグ（約 10 秒 — 調査 §7.4・準一次）が無い。代わりに OS 側の検出がある。
-  - B570（Linux xe）: 1 submit = 1 ジョブに `job_timeout_ms` 5,000。超えると device lost（実測の事実）。
-  - Windows: TDR 2 秒（調査 §7.4）。macOS の扱いは調べていない。
-- xe の上限は **submit 単位**で掛かる（1 dispatch 単位ではない — limitations「BiRefNet 系」節）。submit は
-  時間予算で分割される（ADR [0004](0004-execution-model.md)）が、次の 2 つの穴がある。
-  - 既定の `SubmitPolicy`（`packages/runtime/src/gpu/submit.ts:91-94` — `timeBudgetMs` 100・
-    `initialChunkSize` 16）は、実測の裏付けが付くまで 16 dispatch を 1 submit に積む。
-  - 推定の単位は workgroup の平均コスト（ADR 0004 の適応制御の不変条件 ③④）なので、軽い elementwise と
-    重い GEMM が混ざるグラフでは、GEMM だけが並ぶ submit を過小評価しうる。
-  - 1 dispatch の重さはそもそも分割できない。
-- Deno 2.9.6 は device lost で panic するので、超えると生成ごとプロセスが消える。
-- 見込み（推測 — B570 の linear の実効 約 4.1 TFLOPS〈research
-  [2026-09-27](../research/2026-09-27-k70-metal-per-op.md) §5.2〉を当てた）:
-  - 33 フレームで最も重い単発は FFN 上り 0.386 TFLOP ≈ 0.09 s。QK の 1 ブロックは 0.121 TFLOP ≈ 0.03 s。
-  - 81 フレームで FFN 上り 0.902 TFLOP ≈ 0.22 s。QK の 1 ブロックは 0.137 TFLOP。
-  - VAE はタイル 32 で up3 の conv3d 1 本が約 0.13 TFLOP。
-  - 裏付けの付く前の 16 dispatch が重い GEMM だけで並ぶと、81 フレームで FFN 上り 0.22 s × 16 ≈ 3.5 s になり、
-    5 s の上限の危険域に入る。
-- **門は submit 窓**: 段 3 と段 8 で、1 submit の窓の最大時間を記録・判定する。読むのは `ChunkBudgetStats` の
-  `maxWindowMeanMs`（窓平均の最大 — 最大チャンク時間の下界としてだけ読む席。訂正 2026-10-10: 下界ではない —
-  窓はホスト側のエンコード・停止・待ちを含む信号で、GPU 側の超過は 1 submit ごとの GPU 時間で判定する）と、
-  予算超過の件数（`overBudgetChunks`）。窓平均の最大が B570 で **1 s 以下**であることを門にする。1 s は
-  5 s の 1/5 で、81 フレームで linear が S に比例して 2.33 倍になる分と、熱の揺れ（±10% — ADR 0024 追補）を
-  見込んだ余裕。
-  窓平均は下界なので、緑でも 1 本の submit が超えていないことまでは言えない。余裕の 5 倍はその分も兼ねる。
-  （訂正 2026-10-10: 窓平均は下界ではなく、ホスト時間込みの信号。重い 1 本が平均に埋もれうるので
-  「緑でも言えない」はそのまま成り立つが、理由は下界だからではない。ホストの停止だけでも上がるので、
-  赤でも GPU の超過は断定できない）
-  （2026-10-02 改定: 窓平均では足りない。検収の門は 1 submit ごとの完了時間の最大にする — 追記・独立レビュー）
-- 単発 dispatch の最大 GPU 時間も目安として記録する（1 s 以下が目安・門ではない）。submit 窓か単発が超えたら、
-  submit の初期チャンクの縮小・行ブロックの強制分割・linear の行分割のどれかを足す（その時に別起票）。
-- Deno の B570 の timestamp は raw tick なので、×52.0833 で ns に直して読む。
-- VRAM の見込みは Consequences。行ブロックの大きさは束縛上限だけで決まり、VRAM の予算では決まらない。81 フレーム
-  で DiT 段が予算に入らなければ、段 8 で手を決める。
+- Deno has no GPU watchdog like Chrome's (about 10 s — recon §7.4, quasi-primary). The OS detects
+  instead: on the B570 (Linux xe) `job_timeout_ms` 5,000 per submit (measured), on Windows a TDR of 2 s
+  (recon §7.4). macOS was not examined.
+- The xe limit applies **per submit**, not per dispatch. Submits are split by a time budget (ADR
+  [0004](0004-execution-model.md)) with these gaps:
+  - The default `SubmitPolicy` (`packages/runtime/src/gpu/submit.ts` — `timeBudgetMs` 100,
+    `initialChunkSize` 16) queues 16 dispatches per submit until measurements back it.
+  - The estimate uses the mean workgroup cost (invariants ③④ of ADR 0004's adaptive control), so a submit
+    of heavy GEMMs alone in a graph that mixes light elementwise ops can be underestimated.
+  - A single dispatch cannot be split.
+- Expected (speculation — the B570's effective linear rate of about 4.1 TFLOPS, research
+  [2026-09-27](../research/2026-09-27-k70-metal-per-op.md) §5.2): at 33 frames the heaviest single op is the
+  FFN up-projection, 0.386 TFLOP ≈ 0.09 s, one QK block 0.121 TFLOP ≈ 0.03 s; at 81 frames the FFN
+  up-projection is 0.902 TFLOP ≈ 0.22 s. Sixteen unbacked heavy GEMMs in one submit at 81 frames would be
+  0.22 s × 16 ≈ 3.5 s.
+- **The check is the GPU time of each submit**: at steps 3 and 8 the largest GPU time of one submit
+  (`ChunkBudgetStats.submitGpuTime`), including the first unbacked chunks, is checked to be at most 1 s (revised
+  2026-10-02 from the window mean `maxWindowMeanMs` — addendum 2026-10-02; `SUBMIT_GPU_LIMIT_MS` in
+  `packages/e2e/tests/e2e_wan_dit_test.ts`). Rationale (rewritten 2026-10-18): 1 s stays below the Windows
+  TDR of 2 s and well below Chrome's watchdog of about 10 s, the targets of the browser product; it was
+  first set as 1/5 of the B570's xe limit of 5 s, which no longer applies on the current machine. On the
+  B570 a single overrun after long continuous load was seen once and passed on a cooled solo re-run
+  (2026-10-03, docs/known-issues.md). `maxWindowMeanMs` and `overBudgetChunks` are still recorded, not
+  checked.
+- The largest single-dispatch GPU time is recorded as a guide (1 s, not a check). If a submit or a single
+  dispatch exceeds it, add one of: a smaller initial submit chunk, forced row-block splitting, row
+  splitting of linear (filed separately at that time).
+- Withdrawn 2026-10-18: reading Deno's raw B570 timestamps ×52.0833 as ns — the conversion is
+  per environment key in `packages/models/tests/helpers/timestamp-unit.ts`.
+- VRAM estimates are in Consequences. The row-block size was set by the binding limit alone, not by a VRAM
+  budget. (Superseded by ADR 0124 on 2026-10-11: the runtime has the optional `attentionRowBlockMaxBytes`
+  in `SessionOptions`; Wan does not expose it, ADR 0124 decision 10.)
 
-### 7. パッケージ構成
+### 7. Package layout
 
-守るもの: 既存の家族と同じ置き場と命名で、core / recipe の境界（ADR 0065）を崩さないこと。
+What it protects: the same places and names as the existing families, without breaking the core / recipe
+boundary (ADR 0065).
 
-| 置き場                                                            | 中身                                                                                                                                                                                                                                    |
-| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@karume/models` のサブパス `./wan`（`packages/models/src/wan/`） | `WanPipeline`（`fromAssets` / `generate`）・ホストの patchify / unpatchify / rope の並べ替え / 時刻埋め込み / UniPC / CFG / タイル decode / 入力の門。barrel（`mod.ts`）にも出す                                                        |
-| `tools/export-recipes/wan/`                                       | DiT と VAE のパッチ・export 台本・参照パイプライン（diffusers CPU f32）・タイルの参照・テキスト埋め込みの生成・dist の recipe・カード・`THIRD_PARTY_NOTICES.md`・テスト                                                                 |
-| exporter core（PyPI `karume`）                                    | conv3d の保存・ハンドラ・契約・shape 規則・golden だけ（モデル非依存）                                                                                                                                                                  |
-| 系列                                                              | `outputs/series/wan2.1-t2v-1.3b-f16-dyn/`（`transformer` / `vae_decoder_first` / `vae_decoder_next` — 接尾辞 `-dyn` は ADR 0077 の慣例）・`outputs/series/wan2.1-t2v-1.3b-text-embeds/`                                                 |
-| 配布形                                                            | `models/karume-wan2.1/`（モデル `t2v-1.3b`・`defaultModel`）。家族 1 リポ・世代は別リポの規則（ADR 0092 決定 1 / 2 — Wan2.2 は `karume-wan2.2`）                                                                                        |
-| 名前の対応                                                        | 家族名 `wan2.1` = 配布リポ `hdae/karume-wan2.1` = `WAN_SOURCES["wan2.1"]`（キーはリポ名から `karume-` を落としたもの — ADR 0092 決定 3）。サブパスと TS の名前は世代を持たない `./wan` / `WAN_SOURCES`（Wan2.2 はキー `wan2.2` を足す） |
-| quant 席                                                          | `f16`（DiT と VAE の重みを f16 格納・活性 f32）が既定。DiT の i8 席〈参照席 / 実用席〉は [ADR 0120](0120-wan-dit-w8a8-seat.md)（2026-10-03・検収中）・i4 は未定。→ 2026-10-04 から既定 = 実用席（ADR 0120 裁定）                        |
-| 受理集合                                                          | 832×480 / 480×832 × フレーム数 4n+1（5〜81）。検収するのは 33 と 81                                                                                                                                                                     |
+| Place                                                              | Content                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@karume/models` subpath `./wan` (`packages/models/src/wan/`)      | `WanPipeline` (`fromAssets` / `generate`), host patchify / unpatchify / RoPE reordering / timestep embedding / UniPC / CFG / tiled decode / input checks. Also exported from the barrel (`mod.ts`)                             |
+| `tools/export-recipes/wan/`                                        | DiT and VAE patches, export scripts, reference pipeline (diffusers on CPU), tile reference, text-embedding generation, dist recipe, card, `THIRD_PARTY_NOTICES.md`, tests                                                        |
+| Exporter core (PyPI `karume`)                                      | Only conv3d preservation, handler, contract, shape rule and golden (model-independent)                                                                                                                                         |
+| Series                                                             | `outputs/series/wan2.1-t2v-1.3b-f16-dyn/` (`transformer` / `vae_decoder_first` / `vae_decoder_next`; suffix `-dyn` per ADR 0077), `outputs/series/wan2.1-t2v-1.3b-text-embeds/`                                                    |
+| Distribution                                                       | `models/karume-wan2.1/` (model `t2v-1.3b`, `defaultModel`). One repository per family, generations in separate repositories (ADR 0092 decisions 1 / 2 — Wan2.2 is `karume-wan2.2`)                                             |
+| Names                                                              | Family `wan2.1` = distribution repository `hdae/karume-wan2.1`. Subpath and TS names carry no generation (`./wan`, `WAN_SOURCES`). `WAN_SOURCES` has no `wan2.1` key: Wan2.1 is not published (addenda 2026-10-03 and 2026-10-15) |
+| Presets                                                            | `f16` (DiT and VAE weights stored in f16, f32 activations) and the DiT i8 presets of [ADR 0120](0120-wan-dit-w8a8-seat.md). `f16` was the default. (Superseded by ADR 0120 on 2026-10-04: the default is the practical preset `f16+dit8-a8-attn8-s16` — ADR 0120 ruling 4, ADR 0128 decision 1) |
+| Accepted set                                                       | 832×480 / 480×832 × 4n+1 frames (5–81). Accepted at 33 and 81                                                                                                                                                                  |
 
-- recipe の依存は recipes の uv プロジェクトの dependency group `wan` に置く（ADR 0065 決定 4）。中身は
-  `diffusers==0.39.0`（anima の group と同じ版の pin — `tools/export-recipes/pyproject.toml:44`。決定 5 の σ の
-  補正と決定 3 の RoPE の表はこの版の実装に依る）と `ftfy`（決定 4）。
-- 段は Anima と同じく段ごとに Session を張って畳む（既定 `"per-stage"` — ADR 0112）。DiT の段を閉じてから VAE の
-  段を開く。B570 では `destroy()` の解放が次の device poll まで遅れる（Context の制約）ので、段 6 で DiT → VAE の
-  切り替え時のピークを測り、足りなければ VAE の段を開く前に解放を待つ手順（anima の `settleReleasedMemory` —
-  `submit([])` を出してから `onSubmittedWorkDone` を待つ。ADR 0112 決定 3 ② と追記 2026-09-27）を入れる。
-- 上流は Apache 2.0（調査 §3.10）。配布形のリポ直下に `LICENSE.md` / `NOTICE.md` を置く（ADR 0092 決定 7）。
-  HF への公開はリリースの判断で、本 ADR の段には入れない。
-- 第 2 段のトークナイザ（`google/umt5-xxl`・Unigram）は、Anima の T5 トークナイザの TS 実装
-  （`packages/models/src/anima/text/t5-tokenizer.ts`）を使う見込み（推測）。ライセンス表記は未確認（調査 §3.10）。
+- Recipe dependencies live in the dependency group `wan` of the recipes' uv project (ADR 0065 decision 4):
+  `diffusers==0.39.0` (the same pin as the anima group — `tools/export-recipes/pyproject.toml`; the σ
+  correction of decision 5 and the RoPE table of decision 3 rely on this version) and `ftfy==6.3.1`
+  (decision 4).
+- Stages open and fold one Session each, as in Anima (default `"per-stage"` — ADR 0112); the DiT stage is
+  closed before the VAE stage opens. Withdrawn 2026-10-18: the conditional wait for released memory between
+  the DiT and VAE stages on the B570 — steps 6 and 8 measured that the peaks do not overlap and no wait is
+  needed (addendum 2026-10-03, step 8).
+- Upstream is Apache 2.0 (recon §3.10). The distribution carries `LICENSE.md` / `NOTICE.md` at its root
+  (ADR 0092 decision 7). Publishing on HF is a release decision, outside these steps.
+- The stage-2 tokenizer (`google/umt5-xxl`, Unigram) reuses the TS T5 tokenizer (ADR 0119 decision 1).
 
-### 8. 数値照合と参照値
+### 8. Numeric verification and reference values
 
-守るもの: 「移植できた」を数値で言えること・環境ごとの退行を 1 ビットで掴むこと。
+What it protects: "the port works" can be stated in numbers, and a regression per environment is caught
+to the bit.
 
-- **参照実装は diffusers を CPU f32 で**。重みは資産と同じ格納型へ fake-quant してから参照を採る（ADR 0006・
-  Anima の `pipeline_ref.py` と同じ規律）。タイル decode の参照は recipe の自前実装（決定 2）。
-- **照合の順序**は 2026-09-10 の事前調査の ①〜④。① 小さな固定の text 条件で DiT の CPU / GPU 照合 → ② 実トークン長
-  （14,040）の容量と時間 → ③ causal VAE の短い chunk 列 → ④ scheduler と各段の結線。その前に conv3d の op 単体
-  （段 1）を置く。
-- **許容差の決め方**は既存の実重み系列と同じ。`atol = rtol = 0` の素の突合で実測最悪を測り、その約 5 倍で固定する
-  （`packages/runtime/tests/e2e_birefnet_test.ts` の各 TOLERANCE は 4.5〜7 倍・ADR 0033 は 7 倍）。帯は段ごと・
-  系列ごとに独立に導く。帯を決めたケースと受入れのケースは分ける（追記 2026-10-02・独立レビュー）。
-- **事前の目安**: 最大絶対差 ÷ 参照の最大絶対値 ≤ 1e-4。既存系列の実測は約 2e-5（birefnet 2.11e-4 / 10.8・Anima
-  VAE 1.642e-5 / 1）で、その 5 倍。これは目安であって停止線ではない（既存の e2e には atol 5e-4 / 2e-4 の帯がある
-  — `e2e_deberta_test.ts:84`・`e2e_depth_anything_test.ts:102`）。超えたらまず移植の誤りを探し、誤りが無く差の
-  伸びが層数と S で説明できるなら、実測から導いた帯で進む（その判断と数値を検収の欄に書く）。
-- **S = 192 から S = 14,040 への外挿**: 段 2 の S = 192 の帯をそのまま実寸へ持ち込まない。段 3 で、層ごとの出口の
-  誤差（層数に対する伸び）と、S を数点（192 → 中間 → 14,040）振った誤差の伸びを記録する。S = 14,040 の帯はその
-  実寸の実測最悪の約 5 倍で独立に導く。
-- **sha256 参照値**（ADR 0106）:
-  - 少ステップの通し（2 ステップ・seed 固定・固定プロンプト）と、50 ステップの通しの出力フレーム（uint8 の
-    RGB を全フレーム連結したバイト列 — uint8 化は Anima の画像と同じ規則）の sha256 を、`packages/models/tests/fixtures/references/wan.json` の環境
-    キーの行（B570 = `deno-intel-graphics-bmg-g21`）で持つ。
-  - 行は `KARUME_REFERENCE=write` で作る。実物は `outputs/verify/<環境キー>/<日付>_<系列>/` に残す。系列は
-    `wan-pipeline`（2 ステップの通しの RGB バイト列）/ `wan-pipeline-full`（50 ステップの通しの PNG の連番）/
-    `wan-dit` / `wan-vae-chunks` / `wan-vae-tiles`（`packages/runtime/tests/helpers/results.ts` の `openResults` が
-    ラベルから席を作る）。
-- **門の tolerance 化は禁止**（ADR 0106）。
-- 50 ステップの通しには CPU の参照を作らない（CPU f32 で 1 forward 72.8 TFLOP を 100 回 — 推測で数時間）。通しの
-  照合は少ステップ（2 ステップ・CFG あり）で行い、50 ステップは sha256 と利用者の目視で受ける。
-- **レーンの既定は少ステップ**: `test:models:wan` の既定は 2 ステップの照合とその sha256 だけを回す。50 ステップの
-  通し（B570 で約 31 分 — 推測）は env で opt-in にし（名前は段 7 で決める）、リリース前と参照値の焼き直しの
-  ときだけ回す。
+- **Reference implementation: diffusers on the CPU.** Weights are fake-quantised to the asset's storage
+  type before the reference is taken (ADR 0006; the rule of Anima's `pipeline_ref.py`). The tiled-decode
+  reference is the recipe's own (decision 2). At full size the DiT reference is **CPU f64** (activations
+  f64, weights f16 fake-quant) and the metric is the normalised ratio r (revised 2026-10-02 — addendum
+  "Step 3 attribution"); S = 192 and the VAE keep the f32 reference with the ratio "max |GPU − ref| ÷
+  max |ref|" (addendum "Step 2 / 4 results").
+- Verification order: conv3d alone (step 1), then ① to ④ of the 2026-09-10 pre-study (DiT CPU / GPU at a
+  small fixed text condition → real token length → short causal-VAE chunk sequence → scheduler and wiring);
+  done in steps 1–6.
+- **How tolerances are set** as for the existing real-weight series: measure the worst case with a bare
+  `atol = rtol = 0` comparison and fix the band at about 5× (`packages/e2e/tests/e2e_birefnet_test.ts`
+  uses about 4.5–4.7×, ADR 0033 7×). Bands are derived per step and per series. **The cases that set a
+  band and the acceptance cases are separate** (addendum 2026-10-02).
+- **Prior guide**: max abs difference ÷ max abs reference ≤ 1e-4 (existing series measure about 2e-5;
+  5× that). A guide, not a stop line: when exceeded, first look for a porting error; if none exists and the
+  growth is explained by layer count and S, proceed with the measured band and record the reasoning and
+  the numbers in the acceptance.
+- **Extrapolating from S = 192 to S = 14,040**: the S = 192 band is not carried to full size. Step 3 records
+  per-layer exit error (growth with depth) and error growth over several S (192 → middle → 14,040); the
+  S = 14,040 band is derived independently at about 5× the full-size worst case.
+- **sha256 reference values** (ADR 0106): the few-step run (2 steps, fixed seed, fixed prompt) and the
+  50-step run keep the sha256 of the output frames (uint8 RGB of all frames concatenated; uint8 conversion
+  as for Anima's images) in environment-key rows of `packages/models/tests/fixtures/references/wan.json`.
+  Rows are written with `KARUME_REFERENCE=write`; artifacts stay in
+  `outputs/verify/<environment key>/<date>_<series>/` (series `wan-pipeline`, `wan-pipeline-full`,
+  `wan-dit`, `wan-vae-chunks`, `wan-vae-tiles`; `openResults` in
+  `packages/runtime/tests/helpers/results.ts`). The rows were first written on the B570
+  (`deno-intel-graphics-bmg-g21`). (Superseded by ADR 0106 (2026-09-20) as of the 2026-10-18 triage: rows
+  per environment key are the general rule; the 2-step cases also carry `node-nvidia-geforce-rtx-3080-ti`
+  rows, while the four 50-step cases have only the B570 row, so an opt-in 50-step run on the current
+  machine skips its comparison and the reference guard turns red until its row is written.)
+- **No tolerance on the sha256 regression check** (ADR 0106).
+- The 50-step run has no CPU reference (one forward is 72.8 TFLOP on the CPU in f32, 100 times — hours,
+  speculation). The full run is compared at few steps (2 steps with CFG); 50 steps are accepted by sha256
+  and the maintainer's visual check.
+- **The default lane runs the few-step run**: `test:models:wan` runs the 2-step comparison and its
+  sha256; the 50-step run (about 31 minutes on the B570) is an env opt-in (`KARUME_WAN_FULL_PIPELINE=1`,
+  addendum 2026-10-02) for releases and re-recording reference values. (Superseded by ADR 0129 decision 4
+  on 2026-10-18, maintainer's ruling: the diffusers band of the Wan lane is opt-in
+  (`KARUME_UPSTREAM_PARITY=1`); the sha256 rows and the wiring fault injection stay in the default lane, now
+  `vp test --project models:wan`. Implemented the same day in `packages/e2e/tests/e2e_wan_pipeline_test.ts`:
+  the band judgement and its measurement run only with the opt-in; the cases themselves run by default
+  for their sha256 rows and fault injections.)
 
-## 採らなかった案
+## Alternatives not taken
 
-- **conv3d を recipe で conv2d に分解（案 B）** — 中間が kt = 3 倍になり、slice の実体化コピーと add も増える
-  （調査 §5.2）。前例ガイドの 1.5〜2 倍を超える（ADR 0059 決定 4）。kt ごとの部分和を足すので縮約順が平坦 K と
-  変わり、後から op を足しても同じビットにならない。利用者裁定で不採用。
-- **`aten.convolution` の attr 変種として Core ATen 層に置く** — 前例が無く、conv1d / conv2d（拡張分子層）と門が
-  割れる。
-- **batched の rank 5 契約** — 周りの cat / slice が strided 族の rank 上限 4 に当たる。上限は横断の前提（ADR
-  [0011](0011-layout-strategy.md) / [0014](0014-layout-ops-full-write.md) / 0016）で、B > 1 の需要も無い。
-- **時間軸の非対称 padding を attrs に持たせる** — torch の conv3d の意味論に無い形を IR に足すことになる。cache の
-  cat で表せるので要らない。
-- **ゼロ定数の cat で因果パディングを表す** — 数百 MB の定数になり（調査 §5.3）、const の 32 MiB 上限にも当たる。
-- **時間軸を implicit GEMM の z 軸に置く** — 出力の行ストライドが `Tout·Hout·Wout` になり、共有骨格の store に
-  欄を足すことになる。N に畳めば unbatched の出力がそのまま行優先になり、タイル 32 で N ≤ 262,144 なので dispatch
-  上限にも遠い。
-- **conv3d に幾何プロファイルの欄を足す / conv2d 欄を共有する** — 決定 1。
-- **因果キャッシュを state スロットに置く** — 決定 2。裁定はグラフの入出力で、state スロットは attention 専用。
-  汎用の書き込み口は別 ADR になる。入出力で cache を 2 倍持つ不利は、タイル化でタイル 1 枚 1.16 GiB に収まる
-  （first の出力 slot を足すと約 1.72 GiB — 追記 2026-10-02）。
-- **非タイルの VAE（全画面 1 枚）** — cache の入出力だけで 7.04 GiB で、B570 に入らない見込み（推測）。Chrome は
-  さらに小さい。解像度ごとに資産が要り、ADR 0038 §4 に反する。
-- **cache を f16 で持つ** — 活性の丸めが増える数値の変更で、タイル化で容量の理由が消える。
-- **chunk が外・タイルが内のループ** — タイル 12 枚ぶんの cache（6.9 GiB）を同時に持つ。
-- **フレームごとの 2D conv を conv3d `(1,3,3)` にして permute を消す** — 上流と op が 1 対 1 で対応しなくなり、
-  パッチの eager 同値をビットで確かめられなくなる。permute の量はタイル 32 で 1 本 100 MB 級（推測）。
-- **蒸留版（FastWan / Self-Forcing）** — 重みのライセンスと配布形が未確認（調査 §3.11・§9.1）で、参照照合の相手が
-  別物になる。利用者裁定で原版。
-- **T5 を第 1 段から GPU に載せる** — 5.68B・export のホスト RAM（E4B の前例）・相対位置バイアスと mask 契約・
-  f16 の溢れの報告が、全部 DiT と VAE の手前に並ぶ。公式自身が `--t5_cpu` で回している。
-- **online softmax（flash 型）** — ビット同一の門を失うので MUST NOT（`kernels/attention.ts:30-31`）。容量は
-  行ブロックで足り（81 フレームで 24 枚）、計算量は減らない。
-- **CFG を B = 2 に束ねる** — FFN 中間が 81 フレームで 2,348,236,800 B になり、束縛上限を超える（調査 §4.4）。
-  mask も `[1,1,M,N]` だけ。
-- **cross-attn の K / V を別グラフに割る**（ADR [0114](0114-irodori-dit-context-split.md) の手）— 1 forward の
-  0.2% しか無い。
-- **interleave 形の RoPE を q / k の出力チャネルの並べ替えで half-split に寄せ、rope 融合に乗せる** — eager 同値が
-  未確認（調査 §9.2）。速度の候補に回す。（→ perf-ledger K-78 に起票した〈2026-10-09〉）
-- **shift 5.0（公式 CLI）/ 8〜12（README）を参照にする** — 決定 5。
+- **Decompose conv3d into conv2d in the recipe** — the intermediate grows kt = 3 times plus materialising
+  slice copies and adds (recon §5.2), beyond the 1.5–2× guide (ADR 0059 decision 4). Summing per-kt partial
+  sums changes the reduction order from flat K, so adding the op later would not give the same bits. Not
+  taken by the maintainer's ruling.
+- **An attr variant of `aten.convolution` in the Core ATen layer** — no precedent; a different door from
+  conv1d / conv2d (extended composite layer).
+- **A batched rank-5 contract** — the surrounding cat / slice hit the strided family's rank limit of 4,
+  a cross-cutting premise (ADR [0011](0011-layout-strategy.md) / [0014](0014-layout-ops-full-write.md) /
+  0016), and B > 1 is not needed.
+- **Asymmetric time padding in attrs** — a form outside torch's conv3d semantics; the cache cat expresses
+  it.
+- **Causal padding as a cat with a zero constant** — hundreds of MB of constants (recon §5.3), beyond the
+  32 MiB limit.
+- **Time on the z axis of the implicit GEMM** — the output row stride becomes `Tout·Hout·Wout` and the
+  shared skeleton's store needs another field. Folded into N, the unbatched output is row-major as is, and
+  N ≤ 262,144 at tile 32 is far from the dispatch limit.
+- **A geometry-profile slot for conv3d / sharing the conv2d slot** — decision 1.
+- **The causal cache in state slots** — decision 2. Ruled as graph inputs / outputs; state slots serve
+  attention only and a general write port is another ADR. Holding the cache twice fits at 1.16 GiB per tile
+  (about 1.72 GiB with the output slots of `first` — addendum 2026-10-02).
+- **An untiled VAE (one full frame)** — 7.04 GiB for cache inputs / outputs alone, expected not to fit the
+  B570 (speculation); Chrome is smaller; assets per resolution would contradict ADR 0038 §4.
+- **The cache in f16** — a numeric change (more rounding of activations), and tiling removed the capacity
+  reason.
+- **Chunks outside, tiles inside** — holds the caches of 12 tiles (6.9 GiB) at once.
+- **Per-frame 2D conv as conv3d `(1,3,3)` to drop the permute** — ops would no longer match upstream one to
+  one and eager equivalence could not be checked bit for bit. The permute is about 100 MB per call at tile 32
+  (speculation).
+- **Distilled variants (FastWan / Self-Forcing)** — weight licences and distribution unconfirmed (recon §3.11,
+  §9.1), and the reference would be another model. The maintainer ruled for the original.
+- **T5 on the GPU from stage 1** — 5.68B parameters, export host RAM (the E4B precedent), relative position
+  bias against the mask contract and reported f16 overflow would all come before the DiT and VAE. The
+  official code itself runs with `--t5_cpu`.
+- **Online softmax (flash-style)** — MUST NOT, because the sha256 regression checks would lose bit identity
+  (`kernels/attention.ts:30-32`); row blocks suffice for capacity (24 blocks at 81 frames) and compute does
+  not shrink. (Superseded by ADR 0124 on 2026-10-11: the ban binds the reference path only; an opt-in path
+  that never builds S is left to its own ADR — decision 6.)
+- **CFG batched as B = 2** — the FFN intermediate at 81 frames becomes 2,348,236,800 B, beyond the binding
+  limit (recon §4.4); the mask is `[1,1,M,N]` only.
+- **Cross-attention K / V in a separate graph** (the method of ADR [0114](0114-irodori-dit-context-split.md))
+  — only 0.2 % of one forward.
+- **Moving interleaved RoPE to half-split by reordering q / k output channels to use the rope fusion** —
+  eager equivalence unconfirmed (recon §9.2); a speed candidate (perf-ledger K-78, filed 2026-10-09).
+- **Shift 5.0 (official CLI) / 8–12 (README) as the reference** — decision 5.
 
 ## Consequences
 
-- IR 語彙に `conv3d` が 1 本増える（拡張分子層）。f16 の適格 op に conv3d が入る。既存の op・資産・codegen
-  スナップショットは変わらない。
-- 重みの initializer に rank 5 が初めて現れる（conv3d の重みだけ）。値の rank 上限（strided 族の 4）は変えない。
-- 公開面: `@karume/models` にサブパス `./wan` が増える。`@karume/runtime` の公開面は変わらない（conv3d は IR の
-  op で、公開の値ではない）。
-- 第 1 段のパイプラインは事前計算の集合にあるプロンプト文しか受けない（API は文字列のまま・集合の外は fail
-  loudly — limitations に書く）。
-- VAE は常時タイルなので、出力は公式の非タイル decode と近似の差を持つ（Anima では maxAbs 5.07e-2 の前例 —
-  ADR 0033）。
+- The IR vocabulary gains `conv3d` (extended composite layer), which also joins the f16-eligible ops.
+  Existing ops, assets and codegen snapshots do not change.
+- A rank-5 weight initializer appears for the first time (conv3d weights only). The value rank limit
+  (strided family, 4) does not change.
+- Public surface: `@karume/models` gains the subpath `./wan`. The public surface of `@karume/runtime` does
+  not change (conv3d is an IR op, not a public value).
+- The precomputed text path accepts only prompts of its set (the API takes a string; outside the set it
+  fails loudly — docs/limitations.md).
+- The VAE is always tiled, so the output differs from the official untiled decode by an approximation
+  (Anima's precedent maxAbs 5.07e-2 — ADR 0033).
+- Affected files (runtime vocabulary, CPU reference, kernels, plan, codecs; exporter core; recipe; models;
+  lanes; docs) were listed at drafting time; the code now carries `ADR 0118` pointers at each place.
 
-### 影響ファイル
+### Tests
 
-| 区分           | ファイル                                                                                                                                                                                               | 中身                                                            |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
-| IR 語彙        | `packages/runtime/src/ops/names.ts`・`ops/attrs.ts`・`ops/contracts.ts`・`ops/shapes.ts`                                                                                                               | `CONV3D_OP`・attrs `[T,H,W]`・契約・shape 規則・重みスロット    |
-| CPU 参照       | `packages/runtime/src/reference/ops.ts`                                                                                                                                                                | conv3d（groups 一般）                                           |
-| カーネル       | `packages/runtime/src/kernels/conv3d.ts`（新規）・`kernels/gemm.ts`                                                                                                                                    | implicit GEMM の 3D 断片（DIMS_EXTRA / XCOL / kDecode / fillB） |
-| 計画と実行     | `packages/runtime/src/runtime/recipe-builders/conv.ts`・`runtime/recipe-builder.ts`・`runtime/plan.ts`                                                                                                 | dispatch・`DispatchLimitError`・groups > 1 の fail loudly       |
-| 格納           | `packages/runtime/src/format/container/codecs.ts`（`CODEC_LEDGER` の f16 の適格 op）                                                                                                                   | f16 重みの適格                                                  |
-| exporter core  | `tools/exporter/src/karume/convert.py`・`aten_handlers.py`・`ops.py`・`shapes.py`・`goldens.py` / `golden_models.py`・`normalize.py`（trace の形しだい）                                               | 保存・ハンドラ・契約・golden                                    |
-| recipe         | `tools/export-recipes/wan/`（新規）・`tools/export-recipes/pyproject.toml`・`tools/export-recipes/dist.py`                                                                                             | 決定 2〜5・7                                                    |
-| models         | `packages/models/src/wan/`（新規）・`packages/models/mod.ts`・`packages/models/deno.json`（exports `./wan`）                                                                                           | 決定 3〜7                                                       |
-| テストのレーン | `deno.json`（`test:models:wan`）・`verify_lanes_test.ts`                                                                                                                                               | レーン分割（ADR [0005](0005-verification.md) 追記）             |
-| example        | `examples/wan/`（英語 README）・`deno.json` の check タスク                                                                                                                                            | 段 7                                                            |
-| 文書           | `docs/op-vocabulary.md`（NOTE）・`docs/ir-v2.md`・`docs/limitations.md`・`docs/quantization.md`・`docs/glossary.md`・`docs/assets-layout.md`・`docs/backlog.md`・`.claude/ACTIVE_DESIGN.md`・CHANGELOG | 同期                                                            |
+| Test                                               | Content                                                                                                                                                                                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Contract (TS / Python, `fixtures/op-contracts.json`) | missing attrs, 2-component or scalar attrs rejected, groups divisibility, weight-axis mix-ups (asymmetric shapes), rank-5 input rejected, K = 0, windows that do not reach the input                                                 |
+| CPU reference                                      | small hand-computed cases, groups > 1, stride / dilation ≠ 1                                                                                                                                                                         |
+| Codegen snapshots                                  | conv3d WGSL and keys (f32 / f16 / i8 × v4 / scalar × m64 / m32); existing snapshots unchanged to the byte                                                                                                                             |
+| GPU (`packages/runtime/tests/gpu_conv3d_parity_test.ts`) | comparison with the CPU reference, two identity checks (Uint32), poison values for full write, loud failure at the dispatch limit                                                                                              |
+| Fault injection (conv3d)                           | ① kt and kh swapped in kDecode ② bias moved to the store ③ `Wout%4` dropped from the v4 predicate ④ `Hout·Wout` taken for `Wout` when decomposing n ⑤ clamped reads outside the input ⑥ one n tile fewer                            |
+| Exporter (pytest)                                  | preservation of `aten.conv3d`, unbatched → IR, batched fails loudly, 3-component attr normalisation, verify accepts it (`test_verify.py`)                                                                                            |
+| Recipe (pytest)                                    | eager equivalence of DiT and VAE patches, equivalence of cache normalisation, frozen tile-geometry table, verbatim upstream blending, UniPC reference, text-embedding shapes                                                          |
+| Models (unit)                                      | patchify / unpatchify round trip and upstream order, RoPE base-table reordering (Uint32), `timesteps_proj` (atol), UniPC (σ and timestep sequences including the σ[0] correction, trajectory, fault injection), tile plan, input checks |
+| e2e (real GPU, Wan lane)                           | DiT comparison (S = 192 / 14,040 / 32,760), VAE chunk sequence, tiled decode with the degenerate-case check, few-step comparison and its sha256 (default), 50-step sha256 (env opt-in)                                             |
 
-### テスト
+### Steps and estimates
 
-| テスト                                            | 中身                                                                                                                                                                                                                               |
-| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 契約（TS / Python・`fixtures/op-contracts.json`） | attrs の欠落・2 成分やスカラの拒否・groups の割り切れ・重みの軸の取り違え（非対称形）・rank 5 入力の拒否・K = 0・窓が入力に届かない形                                                                                              |
-| CPU 参照                                          | 小形の手計算・groups > 1・stride / dilation ≠ 1                                                                                                                                                                                    |
-| codegen スナップショット                          | conv3d の WGSL とキー（f32 / f16 × v4 / スカラ × m64 / m32）。既存のスナップショットは 1 バイトも変わらない                                                                                                                        |
-| GPU（新規 `gpu_conv3d_parity_test.ts`）           | CPU 参照との照合・恒等門 2 種（Uint32）・full-write の毒値・dispatch 上限の fail loudly                                                                                                                                            |
-| 故障注入（conv3d）                                | ① kDecode の kt と kh の入れ替え ② bias を store 側へ ③ v4 判定から `Wout%4` を落とす ④ n の分解で `Hout·Wout` を `Wout` と取り違える ⑤ 範囲外をクランプ読み ⑥ n タイルを 1 減らす                                                 |
-| exporter（pytest）                                | `aten.conv3d` の保存・unbatched → IR・batched の fail loudly・attrs 3 成分の正規化・verify の受理（`test_verify.py` の conv3d 拒否を書き換える）                                                                                   |
-| recipe（pytest）                                  | DiT と VAE のパッチの eager 同値・cache の正規化の同値・タイル幾何の凍結表・ブレンドの上流逐語・UniPC の参照・テキスト埋め込みの形                                                                                                 |
-| models（単体）                                    | patchify / unpatchify の往復と上流の並び・rope 素表の並べ替え（Uint32）・`timesteps_proj`（atol）・UniPC（σ 列・timestep 列〈σ[0] の 1e-6 補正込み〉・軌跡・故障注入）・タイル計画・入力の門（集合に無いプロンプトの fail loudly） |
-| e2e（実 GPU・`test:models:wan`）                  | DiT の参照照合（S = 192 / 14,040）・VAE の chunk 列・タイル decode と縮退門・少ステップの通しの参照照合とその sha256（既定）・50 ステップの sha256（env の opt-in）。環境キーの held 行で明示 SKIP できる構成                      |
+Steps 0–9 are complete (results in Acceptance); step 10 moved to ADR 0119. The pre-implementation estimates
+(B570, 33 frames, `f16` preset: DiT about 17.8 s per forward and about 30 minutes per generation, DiT stage
+about 5.7 GiB, VAE stage about 2.0 → 2.6–3.2 GiB, 81-frame DiT stage about 7.6 GiB) were replaced by the
+measurements of steps 3, 5, 6 and 8.
 
-### 段階分解
+## Acceptance
 
-各段は単独で検収できる粒度にした。本 ADR 自体は段の外（この commit）。
+| Step | Green when (condensed)                                                                                                                                                       | Result                                                                                                                                                                                                                       |
+| ---: | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|    0 | The total-allocation ceiling of Deno on the B570 is measured at least twice; the reported budget and its ratio are compared with the stage estimates                         | ✅ 2026-10-02: ceiling 9,600–9,631 MiB, reported budget 9,897–9,930 MiB (94.4–94.7 % of 10,172 MiB) — [research](../research/2026-10-02-b570-vram-budget.md)                                                                 |
+|    1 | Contract tests green; GPU matches the CPU reference at atol / rtol 1e-5 on 8 shapes; two identity checks Uint32-exact; existing snapshots unchanged; 6 fault injections red; exporter round trip green | ✅ 2026-10-02: worst abs difference 4.17e-6; identity checks exact on small and full-size shapes; 12 new snapshots, existing unchanged; all 6 injections red                                                      |
+|    2 | S-shaped export within the vocabulary; patches eager-equivalent; base tables and patchify bit-exact; S = 192 matches diffusers within about 5× the worst case, acceptance on separate cases, fault injection red | ✅ 2026-10-02 (`4af318e6`): patches bit-exact with upstream; ratio band 9.6e-5 (`DIT_RATIO_BAND`), acceptance worst 6.19e-5, timestep +1 about 20× the band                                                    |
+|    3 | S = 14,040 completes on the B570 without device loss; independent band; 5 row blocks; largest per-submit GPU time ≤ 1 s; growth over layers and S recorded                  | ✅ 2026-10-02: band r 75, acceptance r 2.93 / 4.60; per-submit max 270 ms; 5.15 GiB; 16.75 s per forward; attribution in the addendum                                                                               |
+|    4 | Two chunk graphs within rank 4 (rank 5 only for conv3d weights); cache normalisation bit-exact with upstream; GPU chunk sequence within the band with resident caches; cache not round-tripped to the host | ✅ 2026-10-02 (`4af318e6`): normalised form bit-exact with upstream `_decode`; GPU ratio 3.58e-6 against band 2.5e-5; 2.54 GiB; leaf functions moved to `_shared/vae_rank4.py`                               |
+|    5 | Tile plan frozen twice (Python, TS); degenerate case (one tile) Uint32-exact; 832×480 × 33 tiled decode within the band; peak recorded                                     | ✅ 2026-10-02: ratio 2.65e-6 / 3.15e-6 against band 2e-5; 128 s; peak 2.876 GiB; untiled difference 8.2e-2 (observation)                                                                                                  |
+|    6 | Text-embedding assets; UniPC sequences exact, trajectory within a measured atol, fault injections red; 2-step run within its band; 50-step run completes without NaN / Inf   | ✅ 2026-10-02 (`3de7d277`): σ / timestep sequences bit-exact; trajectory atol 2e-5; 2-step acceptance 0.16–0.67 of the band; 50 steps in 1,811 s; no release wait needed                                            |
+|    7 | sha256 rows written and reproduced; Wan lane and full verify green; 50 steps opt-in; distribution builds and verifies; the maintainer's visual check (seeds 42–45 × 3 prompts) | ✅ 2026-10-03 (`67c8d1d2`): distribution `models/karume-wan2.1` (2.92 GiB); visual check of 12 videos accepted, perf-ledger K-75 kept as is                                                                    |
+|    8 | S = 32,760: 24 row blocks, per-submit GPU time ≤ 1 s, completes on the B570; sha256 row added                                                                                  | ✅ 2026-10-03: band r 104, acceptance r 13.1 / 4.89; per-submit max 458.6 ms; DiT peak 7.31 GiB, VAE 3.78 GiB; 81 frames × 50 steps in 7,173 s                                                                  |
+|    9 | Completes in Chrome on the maintainer's RTX 5070 Ti                                                                                                                           | ✅ 2026-10-04: 81 frames × 50 steps in 2,767.9 s, no device loss (addendum 2026-10-04). The checking page was the Deno-era gpu-lab Wan tab, removed in `bb35fe2a`                                           |
+|   10 | Per ADR 0119                                                                                                                                                                  | —                                                                                                                                                                                                                            |
 
-| 段 | 中身                                                                                                                                                                | 条件                         |
-| -: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-|  0 | B570 の Deno の申告予算を `tools/diag/hold-vram.ts` で測る（DiT 段 約 5.7 GiB が入るかの前提）                                                                      | —                            |
-|  1 | conv3d の op 単体（契約 1 セット・CPU 参照・implicit GEMM・exporter の保存とハンドラ・codegen スナップショット・GPU の照合と恒等門・故障注入・台帳 NOTE・ir-v2）    | —                            |
-|  2 | DiT のパッチと S 形の export・ホストの patchify / unpatchify / rope の並べ替え / `timesteps_proj`・小形（潜在 `[16,3,16,16]` → S = 192）の参照照合                  | 段 1 と独立（並行可）        |
-|  3 | DiT の実トークン長（S = 14,040）の 1 forward を B570 で回す（照合・行ブロック・submit 窓の最大時間・誤差の伸び・VRAM）                                              | 段 2 の後                    |
-|  4 | VAE のパッチと chunk グラフ 2 種の export（タイル 32）・eager 同値・GPU で chunk 列の参照照合（常駐の cache）                                                       | 段 1 の後                    |
-|  5 | VAE のタイル decode（ホストのタイル計画・ブレンド・貼り付け）・縮退門・832×480・33 フレームの decode（入力は seed 固定の乱数潜在）と VRAM                           | 段 4 の後                    |
-|  6 | テキスト埋め込み資産・ホストの UniPC と CFG・パイプライン `./wan` の結線・DiT → VAE の切り替えのピーク・少ステップの通しの照合・50 ステップの通し（B570・Deno）     | 段 3 と段 5 の後             |
-|  7 | sha256 の環境行・e2e レーン（既定は少ステップ・50 ステップは env の opt-in）・example・配布形（`models/karume-wan2.1` のローカルミラー）・docs の同期・利用者の目視 | 段 6 の後                    |
-|  8 | 81 フレーム（S = 32,760）                                                                                                                                           | 段 7 の後                    |
-|  9 | Chrome                                                                                                                                                              | 段 8 の後                    |
-| 10 | 第 2 段のテキストエンコーダ（umT5 i8）— 別 ADR を起こしてから                                                                                                       | 段 7 の後（段 8 / 9 と独立） |
+## Rulings (2026-10-02, approved by the maintainer — all four as recommended)
 
-### 所要とメモリの見積り（B570・33 フレーム・f16 席・全て推測）
+Open at drafting time; the approved content ends each item.
 
-| 量                          | 見積り                                                                                          | 導出                                                                                                                                                       |
-| --------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| DiT 1 forward の計算量      | 36.39 T MAC ≈ 72.8 TFLOP（linear 17.56・self-attn 18.17・cross 0.66 T MAC。self-attn は 49.9%） | 調査 §3.9 の式を S = 14,040 で計算し直した                                                                                                                 |
-| 生成 1 本の DiT             | 7.28 PFLOP                                                                                      | × 50 ステップ × CFG 2                                                                                                                                      |
-| DiT の所要                  | 約 30 分（1 forward 約 17.8 s）                                                                 | B570 の linear の実効 約 4.1 TFLOPS（research 2026-09-27 §5.2）を attention にも当てた                                                                     |
-| VAE の計算量                | 約 110 T MAC ≈ 220 TFLOP                                                                        | 4 フレームの chunk 6.77 T MAC × 8 + 最初の chunk（調査 §3.9）= 約 56 T MAC × タイルの面積比 1.97                                                           |
-| VAE の所要                  | 約 1 分                                                                                         | 同じ実効                                                                                                                                                   |
-| DiT 段の VRAM               | 約 5.7 GiB                                                                                      | 重み 2.64 + S の 1 ブロック 1.76 + FFN 中間 0.47 + cross の S 0.32 + 残差と q / k / v / o 約 0.5                                                           |
-| VAE 段の VRAM               | 約 2.0 GiB → 約 2.6〜3.2 GiB（追記 2026-10-02）                                                 | cache 0.58 × 2（常駐 + 出力 slot）+ 重み 0.14 × 2（first / next の 2 Session — 共有は未決）+ 中間 約 0.6。追記で first の出力 0.56 と first の中間を足した |
-| 81 フレームの DiT 段の VRAM | 約 7.6 GiB                                                                                      | 重み 2.64 + S 2.00 + FFN 中間 1.09 + cross の S 0.75 + 残差ほか 約 1.1                                                                                     |
-| 81 フレームの DiT の所要    | 約 115 分                                                                                       | 28.28 PFLOP ÷ 4.1 TFLOPS                                                                                                                                   |
-| 比較（公式）                | RTX 4090・81 フレーム 261.4 s / ピーク 8.19 GB（offload + t5_cpu）                              | 調査 §3.10                                                                                                                                                 |
+1. **Always-tiled VAE** (square latent tiles of 32, always on) — **adopted**. The full-frame decode is
+   expected not to fit the B570 (speculation), at the cost of an approximation against the official untiled
+   output. The tile side is derived from the asset's input shape (decision 2), so changing it needs only a
+   new distribution.
+2. **Product default shift** — **start at 3.0, as the reference** (the diffusers distribution setting);
+   visual A/B later.
+3. **Text of the two remaining fixed prompts** — **taken from the examples of the official README /
+   Diffusers documentation** (the first is the official example, the negative the official
+   `sample_neg_prompt`).
+4. **Distribution repository `karume-wan2.1`** (model `t2v-1.3b`) — **as proposed**, following ADR 0092's
+   one repository per family and separate repositories per generation.
 
-- VRAM の単位は GiB。B570 の申告予算（Deno の 97% の線の基準）は未測なので、段 0 で測り、実際の余裕は段 3 / 5 で
-  量る。RTX 3080 Ti では申告予算が総量の 61% だった前例がある（limitations の 97% 節 — 2026-08-03。同じ機の
-  2026-08-08 の再測では天井が 11,136〜11,264 MiB で、申告は時点値）。B570 で 61% なら 97% の線は約 5.9 GiB で、
-  DiT 段の約 5.7 GiB は境界に来る（推測）。
-- 81 フレームの DiT 段（約 7.6 GiB）は B570 では余裕が小さい。段 8 で量り、入らなければ行ブロックを VRAM の
-  予算で小さくする口などを検討する。
+## Open issues
 
-## 検収
+- **Speed candidates** (perf ledger): adaLN fusion (K-73), RoPE fusion (K-78), weight sharing between the
+  two VAE graphs (K-79), the conv3d geometry sweep, the tile side (latent 60 gives 2 tiles at 832×480, 1.15×
+  the area, about 6 GiB of VRAM expected).
+- **Chrome** (step 9): measured on the RTX 5070 Ti (addendum 2026-10-04). The binding-limit floor is "the
+  largest value that row blocks cannot split": the FFN intermediate 503,193,600 B (33 frames) /
+  1,174,118,400 B (81 frames) and the VAE 201,326,592 B. Chrome's default 128 MiB is below even the VAE's
+  192 MiB, but `acquireGpu` requests the adapter's values. The environment key changes with developer flags.
+  The M2's Chrome is unlikely to work (the maintainer, 2026-10-03).
+- **Quality of the f16 weights** against the official f32 / bf16, and of the official float64 regions (RoPE,
+  timestep embedding) computed in f32 — recorded as observations (the diffusers reference is f32, so the
+  comparison is not affected — recon §9.1).
+- **Quality of weight-only i8 / i4 for the 1.3B** (recon §9.1; the i8 presets are ADR 0120).
+- **An allocation left once after the DiT stage** (addendum "Step 6 results" — about 0.24 GiB more than
+  before the stage, unexplained). fdinfo: 0.632 → 0.873 GiB at 33 frames (step 6), 0.632 → 1.084 GiB at
+  81 frames (step 8); the second run in the same process (2026-10-03, 33 frames) stays at 1.088 →
+  1.089 GiB. Not attributed.
+- **MiniMax H3** stays outside this ADR (structure survey and per-component candidates).
+- Closed: stage 2 design (ADR 0119); weight sharing of the two VAE graphs (not shared — separate containers
+  and Sessions, perf-ledger K-79); same resident tensor as input and `copyOutputs` destination (passes,
+  step 4); the trace of unbatched `F.conv3d` (stays `aten.conv3d.default`, step 1); 81-frame DiT VRAM
+  (7.31 GiB, no budget port, step 8); B570 budget (step 0); Deno's panic on device loss (no held rows —
+  Wan completes on the B570, ADR 0106 addendum decision 8; the panic itself is outside Karume); weakness
+  of the metric r (p99.99-based r within 2× of the max-based r, not replaced, step 8); sharing the VAE
+  patch functions with Anima (three leaf functions in `_shared/vae_rank4.py`, step 4); Wan2.2 TI2V-5B
+  (accepted in [ADR 0121](0121-wan22-ti2v-5b.md)).
 
-| 段 | 緑の条件                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | 結果                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| -: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-|  0 | `tools/diag/hold-vram.ts` で B570 の Deno の総確保の天井を 2 回以上測り、申告予算（天井 ÷ 0.97）と総量に対する比を記録する。DiT 段（約 5.7 GiB）・VAE 段（約 2.0 GiB — 追記 2026-10-02 で約 2.6〜3.2 GiB）の見積りと並べ、入らない見込みなら段 3 の前に手を決める                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | ✅（2026-10-02・[research](../research/2026-10-02-b570-vram-budget.md): 天井 9,600〜9,631 MiB〈3 系列・揺れなし・失敗は常に 9,472 MiB の次の 1 本〉・申告予算 9,897〜9,930 MiB・総量 10,172 MiB の 94.4〜94.7%〈61% の前例より 3.5 GiB 高い〉。DiT 段 33 フレーム 5.7 GiB は入る・VAE 段〈追記の改定見積り 2.6〜3.2 GiB〉と同時でも 8.3〜8.9 GiB で入る〈推測〉・81 フレームは DiT 7.6 GiB を持ったまま VAE 段へ進むと越えるので段 6 の解放待ちが要る。device lost の 99% 線と Chrome の天井は未測）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-|  1 | 契約テスト（TS / Python）が緑で `op-contracts.json` に conv3d が載る。GPU が CPU 参照と atol 1e-5 / rtol 1e-5（conv2d の parity テストの帯 — 同じ骨格・同じ縮約順）で形 8 種が一致（chunk グラフの 4 形〈16→384 k3・384→768 `(3,1,1)`・96→96 k3・96→3 k3〉は空間を縮めた縮小形 + K 端数・`Wout%4 ≠ 0`・stride ≠ 1・dilation ≠ 1 の小形）。chunk グラフの 4 形の実寸は GPU どうしの恒等門で見る（実寸の 96→96 k3・T = 6・256² は 65 G MAC で、JS の CPU 参照は分単位）。恒等門 2 種が Uint32 一致（① Kt = 1 の conv3d ≡ フレームごとの conv2d・形 3 種 ② 時間の先頭 2 枚がゼロの Kt = 3 ≡ 重みの最終スライスの Kt = 1。② は符号付きゼロだけ差を許す — ADR 0024 決定 3）。既存の codegen スナップショットが 1 バイトも変わらない。故障注入 6 件が赤（② の bias 移動は恒等門 ① だけが赤になる形 — ADR 0024 の故障注入 ① と同じ）。unbatched conv3d を含む小モデルの export → IR → verify が緑。`deno task test:core` と exporter の `uv run pytest` が緑                                   | ✅（2026-10-02: 契約 TS / Python 緑・op-contracts.json に ops 1 + attr_values 4 + shapes 19・CPU 参照〈groups 一般〉・implicit GEMM の 3D 化〈uniform 21 語・v4 3 条件・dispatch 1 関数〉・スナップショット 12 本新規で既存は無変更・GPU 照合 8 形 × m 64 / 32 で atol 1e-5 内〈最大絶対差 4.17e-6・96→96 k3 i8〉・恒等門 ① 小形 3 + 実寸 4 が Uint32 完全一致・② 小形 1 + 実寸 4 一致・毒値 / dispatch 上限 / groups>1 / f16 常駐 緑・故障注入 6 件とも赤〈② は恒等門 ① だけ〉・golden conv3d_block の export → IR → verify 緑・pytest 3,497 緑・test:core 2297 緑〈独立検証でも全緑〉。独立の仕様照合 18/22 holds・refuted は docs の本数の表記等 low のみ〈同期済み〉）                                                                                                                                                                                                                                                                                                                                                                             |
-|  2 | S 形の export が通り、IR に語彙外の op が無い。パッチの eager 同値は patch 埋め込み以外がビット一致（RoPE も — 推測。外れたら差を記録し、帯の内側なら進む）で、patch 埋め込みは差を記録。RoPE の表は MPS 不在の assert か float64 の強制の下で作る。rope 素表の並べ替えが diffusers の表と Uint32 一致。patchify / unpatchify が上流の reshape / permute とビット一致。`timesteps_proj` は実測から導いた atol（Anima の 6e-7 の前例）。S = 192 の 1 forward が diffusers CPU f32 と、実測最悪の約 5 倍の帯で一致し、事前の目安（1e-4）との比を記録（超えたら決定 8 の手順）。`lastRunFusions` の adaln / rope の件数を記録。帯の受入れは決定用と別のケースで見て、故障注入で赤（追記 2026-10-02）                                                                                                                                                                                                                                                                                       | ✅（2026-10-02・`4af318e6`: S 形〈Dim S 2〜32,760〉の export が通り op 13 種は語彙内・パッチ後の eager は patch 埋め込みも含め上流とビット一致〈RoPE も〉・RoPE の表は MPS 不在の assert 下・B570 の照合は**比〈max abs ÷ max ref〉で判定**: 帯 9.6e-5〈決定用 6 本の最悪の比 1.915e-5 の約 5 倍〉・受入れ 3 本の最悪 6.19e-5〈帯の 0.64 倍〉・故障注入は timestep +1 の最小 1.93e-3〈帯の約 20 倍〉で赤・旧い絶対値の帯は未見ケースが 3.247e-4 で超えたので比へ移した〈経緯は追記「段 2 / 4 の結果」・ケースごとの表は `packages/models/tests/e2e_wan_dit_test.ts` の `DIT_RATIO_BAND` の NOTE〉・融合は adaln 0 / rope 0〈同 e2e の `EXPECTED_FUSIONS`〉）                                                                                                                                                                                                                                                                                                                                                                                           |
-|  3 | S = 14,040 の 1 forward が B570・Deno で device lost なく完走し、CPU f32 参照と、実寸の実測最悪の約 5 倍で独立に導いた帯で一致（事前の目安との比を記録）。層数と S（192 → 中間 → 14,040）に対する誤差の伸びを記録。診断で行ブロックが 5 枚。submit 窓の最大時間（`maxWindowMeanMs`）≤ 1 s と、予算超過の件数（`overBudgetChunks`）を記録（追記 2026-10-02 で、門は 1 submit ごとの完了時間の最大 ≤ 1 s〈初回の未学習チャンクを含む〉に改定）。帯の受入れは決定用と別のケースで見て、故障注入で赤（追記 2026-10-02）。単発 dispatch の最大 GPU 時間も目安として記録（raw tick を ×52.0833 で換算）。1 forward の GPU 時間と VRAM のピークを記録し、見積り（約 17.8 s・約 5.7 GiB）と並べる                                                                                                                                                                                                                                                                                               | ✅（2026-10-02: S = 14,040〈832×480・33 フレーム〉の 1 forward が B570・Deno で device lost なく完走・行ブロック 5 枚・1 submit の GPU 時間の最大 270 ms〈門 1 s・裏付け前の 148 本で出た〉・単発 dispatch 最大 84 ms・VRAM 5.15 GiB〈見積り 5.7〉・GPU 16.75 s〈見積り 17.8〉。照合は改定した決定 8〈f64 参照・正規化比 r = GPU 誤差 ÷ CPU f32 参照の誤差〉: 決定用 6 本の r = 14.9 / 7.29 / 5.13 / 4.44 / 2.64 / 1.60 → 帯 75・受入れ 2 本〈新 seed・t 999 / 600〉r = 2.93 / 4.60 で帯の内・独立検証の seed〈t=400〉r = 3.19・故障注入 4 件は r 332〜6.7e5 で帯の外〈timestep +1 の最小は帯の 4.42 倍 ≥ 床 2〉・層ごとの比の伸びは S 192 → 768 → 14,040 で f32 参照と同じ形〈research は e2e の results.json〉。帰属 = GEMM の K 縮約の精度差〈K-75・現状維持の裁定〉）                                                                                                                                                                                                                                                                              |
-|  4 | 2 グラフの IR に rank 5 以上の値・pad・rank 6 の reshape が無い（rank 5 は conv3d の重みだけ）。cache の入出力が決定 2 の表のとおり（first 30 本・next 32 本・形）。cache の正規化だけを当てた形（空間の pad は明示のまま）が、上流の非タイル `_decode` の chunk ループ（潜在 `[16,9,32,32]` → 33 フレーム）とビット一致。空間の pad を conv の attrs へ畳んだ最終形は差を記録。GPU で 9 chunk の連続 decode（常駐の cache）が Python 参照と、実測最悪の約 5〜7 倍の帯で一致し、事前の目安との比を記録。cache のゼロ化の経路（GPU 側で書く口〈`clearBuffer`〉の有無・対象の絞り込み）を決めて記録。パッチ関数が Anima の VAE でも eager 同値なら `_shared/` へ寄せる。故障注入 3 件が赤（cache の 2 フレームの順を逆に渡す・chunk 2 以降に first を使う・タイルの最初に cache をゼロに戻さない）。帯の受入れは決定用と別の潜在・chunk 境界で見て、cache 更新忘れの故障注入で赤（追記 2026-10-02）。フレームだけを読み戻す経路（追記 2026-10-02）で、chunk の cache がホストへ往復しない | ✅（2026-10-02・`4af318e6`: first〈cache 30 本・445 ノード〉/ next〈32 本・457 ノード〉の 2 グラフ・op 15 種・pad 無し・rank 5 は conv3d の重みだけ・rank 6 無し・cache 出力は cat の末尾 2 枚の slice〈構造で検査・取り違えの故障注入は赤〉・cache の正規化だけを当てた形は上流の非タイル _decode と**ビット一致**〈タイル 32・9 chunk / タイル 8・5 chunk〉・B570 の chunk 列照合は追記の手順〈beginBatch → first を copyOutputs → next ×8 → finishAndRead〉で比 3.58e-6〈帯 2.5e-5〉・毒値 0・故障注入 4 件赤・VRAM 2.54 GiB〈ゼロ化の staging 0.58 GiB は未計上〉・末端関数は _shared/vae_rank4.py へ〈anima も使う・ビット同一〉。独立検証は別 seed で比 3.2e-6）                                                                                                                                                                                                                                                                                                                                                                                 |
-|  5 | タイル計画（潜在 60×104 → 12 枚・開始位置）を Python と TS の表で二重に凍結（ADR 0033 追記 9a の流儀）。縮退門: 潜在 32×32（1 枚）でタイル経路 ≡ 非タイルの chunk 列が Uint32 一致（ADR 0033 決定 4）。832×480・33 フレームの固定の乱数潜在（seed 固定 — 50 ステップの参照出力は要らない）のタイル decode が Python のタイル参照と段 4 と同じ流儀の帯で一致。非タイルの diffusers decode との差は観測として記録（門ではない）。VAE 段が device lost なく完走し、ピーク（見積り 約 2.0 GiB — 追記 2026-10-02 で約 2.6〜3.2 GiB）を記録。帯の受入れは決定用と別の潜在で見る（追記 2026-10-02）                                                                                                                                                                                                                                                                                                                                                                                            | ✅（2026-10-02・12 枚〈行 0 / 14 / 28・列 0 / 24 / 48 / 72〉を Python と TS で二重凍結・縮退門 Uint32 一致・band 比 2.65e-6 / accept 比 3.15e-6〈帯 2e-5〉・非有限 0・故障注入 2 件赤・所要 128 s〈ADR の見込み約 1 分の 2 倍〉・VRAM fdinfo ピーク 2.876 GiB〈見積り 2.6〜3.2 の内〉・非タイルとの差は比 8.2e-2〈観測のみ〉・独立検証でも同値）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-|  6 | テキスト埋め込み資産（正 3 本 + negative 1 本・`[L_valid, 4096]` f32）ができ、`L_valid` がトークナイザのマスク長と一致。UniPC: timestep 列が diffusers と完全一致（整数・最初は 999）・σ 列が Uint32 一致（推測 — 実測で確認）・固定のモデル出力列を与えた軌跡が diffusers の `step` と、実測から導いた atol で一致（Anima の DPM-Solver の前例）・故障注入 4 件（1 次に落とす・σ 列を 1 つずらす・shift を 5.0 にする・σ[0] の 1e-6 補正を落とす）が帯の 1e4 倍以上の差で赤（Anima の前例）。少ステップの通し（832×480・33 フレーム・2 ステップ・CFG あり・注入したノイズ）が diffusers CPU f32 + タイルの参照と帯で一致（帯の受入れは決定用と別の seed・プロンプトで見る — 追記 2026-10-02）。DiT → VAE の切り替え時の VRAM のピークを記録し、足りなければ VAE の段の前に解放待ちを入れる。50 ステップの通しが B570・Deno で完走し、NaN / Inf が無い。所要と VRAM のピークを記録（見積り 約 31 分）                                                                                   | ✅（2026-10-02・`3de7d277`: 資産 4 本〈L_valid 28 / 118 / 50 / 126・bf16 の umT5・ftfy 正規化文字列をメタに・2 回でバイト同一〉・UniPC の σ / timestep 列は diffusers とビット一致〈最初 999・独立検証 78 ケース〉・軌跡は atol 2e-5〈torch f32 log の 1 ULP〉・CFG ビット一致・故障注入は σ の門か 1e3 倍以上〈実測 2e3〜1e4・ADR の 1e4 の文言は改定〉・2 ステップの通しは決定用 2 本の最悪 × 5 の step ごとの帯〈latents 8.5e-5 / 9.1e-4・frames 8.5e-3・f32 参照〉で受入れ〈別 seed〉が 0.16〜0.67 倍・故障注入 1952 倍 / 146 倍・sha 行 2 回一致・切り替えの山は DiT 段の山そのもの〈6.19 → 0.87 → 3.32 GiB・解放待ち不要〉・50 ステップ 1,811 s 完走〈段の内訳は transformer 1,681.9 s ÷ 100 パス = 1 パス 16.8 s・VAE 128.9 s — `2026-10-02_wan-pipeline-full/results.json`・モデルカードの所要の出所〉・非有限 0・PNG 33 枚 + 一覧図〈K-75 の視認待ち〉）                                                                                                                                                                                      |
-|  7 | `KARUME_REFERENCE=write` で B570 の行ができ、続けて回すと一致（同じ機で決定的）。`deno task test:models:wan`（既定 = 2 ステップの照合とその sha256）と フル verify が緑。50 ステップの通しと sha256 の行は env の opt-in で回し、既定のレーンに入れない。device lost の経路（未解決）が残る間は、この機の環境キーの held 行で明示 SKIP にできる構成にする（limitations「BiRefNet 系」節の前例）。example が check タスクに入る。`dist.py --pipeline wan` で `models/karume-wan2.1` が組め、`verify_dist` が緑。利用者の目視（seed 42〜45 × 固定プロンプト 3 本）                                                                                                                                                                                                                                                                                                                                                                                                                        | ✅（2026-10-03・`67c8d1d2`: 配布形 models/karume-wan2.1〈karume/5・t2v-1.3b・f16・2.92 GiB・再生成 26 ファイル同一〉・fromPretrained・配布形経由の e2e で sha 行 3 本が系列直読みと一致〈2 回〉・distribution_gate / assets_fusion_counts の門番・モデルカード〈資源の目安・受理集合は TS と fixture で突き合わせ〉・pytest 3,511 緑）。フル verify 2026-10-03〈段 7 のコードを含む〉: 3,547 passed・赤 3 = 既知の B570 OOM 門 1 + 受理表の登録表 2 本〈census-table.ts / session_options_mirror_test.ts〉に wan を足し忘れた登録漏れ → 足して当該 2 本を単独で緑。利用者の目視 2026-10-03: 先行の単 seed〈段 6 の 50 ステップ boxing-cats seed 42 — 題材として成立・継ぎ目なし〉に続き、12 本〈seed 42〜45 × boxing-cats / ferret / cat-dog-baking・50 ステップ・各約 1,817 s・非有限 0・outputs/verify/deno-intel-graphics-bmg-g21/2026-10-03_wan-visual/〉を確認 — 「意図した感じの動画」で視認差なし → perf-ledger K-75 は現状維持で確定。held 行の仕組みは ADR 0106 追記決定 8 により今は作らない〈B570 で完走するため〉                          |
-|  8 | S = 32,760 で行ブロックが 24 枚・submit 窓の最大時間 ≤ 1 s（追記 2026-10-02 で 1 submit ごとの完了時間の最大〈初回の未学習チャンクを含む〉に改定・単発 dispatch は目安）・B570 で完走（VRAM が入らなければこの段で手を決める）。sha256 の行を足す                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | ✅（2026-10-03: S = 32,760〈潜在 [16,21,60,104]〉の 1 forward が B570・Deno で完走・行ブロック 24 枚・1 submit の GPU 時間の最大 458.6 ms〈門 1 s・裏付け前の 255 本で出た〉・単発 dispatch 最大 192.3 ms・診断の確保 6.17 GiB・GPU 68.2 s〈壁 68.7 s〉。照合は f64 参照 + 正規化比 r: 決定用 6 本の r = 20.8 / 12.2 / 6.18 / 4.11 / 5.56 / 3.94 → 帯 104〈最悪 × 5・式は実測前に固定〉・受入れ 2 本 r = 13.1 / 4.89 で帯の内・故障注入 4 件は r 276〜3.44e5 で帯の外〈timestep +1 の最小 276 = 帯の 2.65 倍 ≥ 床 2〉・p99.99 ベースの r は 8.6〜16.1〈記録のみ〉。VAE 21 chunk〈long〉は比 2.98e-6 で帯の内。通し 81 フレーム 50 ステップ: 壁 7,173 s〈transformer 6,857 s = 68.6 s/パス・VAE 315 s〉・VRAM 山 7.31 GiB〈DiT〉/ 3.78 GiB〈VAE〉・非有限 0・sha 行 50step-boxing-cats-seed42-81f・33 フレーム側は既存の行と一致。CPU 参照の再生成は 27 ケース 27,271 s〈f64 1 forward 約 1,505 s・f32 約 630 s〉で、既存 19 ケース・krm・配布形はバイト一致。層別 probe〈S = 14,040〉は S = 32,760 の照合の後だと OOM になったので実寸の先頭へ移した） |
-|  9 | 利用者の RTX 5070 Ti 機の Chrome で完走（アダプタ上限とウォッチドッグを実測してから条件を詰める）。確認ページは tools/gpu-lab の「4. Wan」タブ（README「Checking Wan in Chrome」）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | 🚧 ページ完成（2026-10-03）・利用者の実走待ち。M2 の Chrome は見込み薄（利用者の判断 2026-10-03）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| 10 | 第 2 段の ADR の検収に従う                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | —                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+## Addendum (2026-10-02) — findings of the independent review (Codex)
 
-## 裁定（2026-10-02・利用者承認 — 4 点とも推奨案）
+Four design concerns of the independent review were reflected into decisions 2 / 6 / 8 and the acceptance,
+as the orchestrator ruled.
 
-起草時は裁定待ちだった点。承認の内容は各項の末尾。
+- **The VAE VRAM estimate includes the retained buffers of the `first` Session** (decision 2): with two
+  Sessions enqueued, each keeps its own slot backing; `dispose()` is the only public way to release it, so
+  the cache outputs of `first` (30 caches, 151,027,712 elements, about 0.56 GiB) can stay in VRAM during the
+  8 `next` chunks. Revised estimate: resident cache 0.58 + first outputs 0.56 + next outputs 0.58 + weights
+  0.14 × 2 + next intermediates about 0.6 + first intermediates 0–0.6 + frame residents and staging about
+  0.05 = about 2.6–3.2 GiB (speculation; measured 2.54 / 2.876 GiB at steps 4 / 5). Both Sessions are kept.
+- **Only the frames are read back** (decision 2). `Session.run` and `Session.enqueueRead` read every graph
+  output back (`#planReadback` reads all of `graph.outputs`), which would round-trip 0.56–0.58 GiB per chunk.
+  The chunk graphs MUST NOT use either. Procedure (one tile = one batch):
+  1. `gpu.beginBatch()` opens the batch.
+  2. `first` is queued with `Session.enqueue(inputs, { copyOutputs })`: the 30 cache outputs → the resident
+     caches, the frame output → a frame resident for `first` (`[3,1,256,256]` f32, 786,432 B).
+  3. `next` is queued 8 times: the 32 cache outputs → the resident caches, the frame output → a separate
+     frame resident per chunk (`[3,4,256,256]` f32, 3,145,728 B × 8).
+  4. `batch.finishAndRead({ the 9 frame residents })` closes it; only the frames are read back into one
+     staging buffer, whose map is the single fence of the batch (ADR 0054 batched readback).
+  - Frame residents are per shape (`copyOutputs` checks that the destination's byte size matches the output
+    shape) and per `next` chunk, because the copies are queued FIFO and the readback runs once at settlement
+    (a shared resident would keep only the last chunk). Total 25,952,256 B (24.75 MiB).
+  - The staging buffer lives only during settlement (`finishAndRead` creates it and always destroys it after
+    the map); on the B570 (ReBAR) it sits in VRAM, so 24.75 MiB was added to the estimate.
+  - The frame residents are reused across tiles; `finishAndRead` reserves them until settlement, so the next
+    tile's batch opens after the previous one settles.
+- **The submit limit is checked on each submit's GPU time** (decision 6, steps 3 / 8). `maxWindowMeanMs`
+  averages a window: a 4.9 s submit and nine light ones average about 0.5 s and would pass. Revised: the
+  diagnostic `ChunkBudgetStats` gained the per-submit GPU time, including the first unbacked chunks
+  (`initialChunkSize`); its maximum is the check. The measuring mode waits for each submit, so durations are
+  recorded from normal runs.
+- **Band decision and acceptance are separate** (decision 8, steps 2–6). A band of 5× a case's own worst
+  error always accepts that case and can absorb a missed systematic error. Acceptance cases use another seed,
+  condition or chunk boundary (DiT: another seed and timestep; VAE: another latent seed and chunk boundary;
+  full run: another seed and prompt), fixed in fixtures. The acceptance adds fault injection that pushes an acceptance case outside
+  the band (for example, dropping one cache from `copyOutputs`); an injection that stays green signals a band
+  that is too wide.
 
-1. **VAE の常時タイル**（潜在 32 の正方タイル・常に ON）— **採用**。全画面の decode は B570 に入らない見込み（推測）だが、
-   公式の出力（非タイル）とは近似の差が出る。不採用のときの退路: 全画面は B570 に入らない見込み（推測）なので
-   タイルは外せないが、タイル辺は資産の入力形から導く（決定 2）ので、辺の差し替えは配布物だけで済む。
-2. **製品の既定 shift** — **参照と同じ 3.0 で始める**（diffusers の配布設定）。視認の A/B は後で。
-3. **固定プロンプトの残り 2 本の文面** — **公式 README / Diffusers ドキュメントの例文から取る**（1 本目は公式の例文・negative は公式の `sample_neg_prompt`）。
-4. **配布リポ名 `karume-wan2.1`**（モデル `t2v-1.3b`）— **そのまま**。ADR 0092 の家族 1 リポ・世代は別リポの規則に合わせた。
+## Addendum (2026-10-02) — step 1 results and deviations from decision 1
 
-## 未解決
+- **f16 eligibility was added through `WEIGHT_SLOTS` / `WEIGHT_CHANNEL_AXES` (TS and Python)** and the
+  fixture fields `weight_slot` / `channel_axis`, not through `CODEC_LEDGER` (`codecs.ts` has no per-op field).
+- **i8 weights also execute and stay resident.** Runtime eligibility is the same set for f16 and i8; only
+  i4 / i2 have a narrowed set. Narrowing i8 per op would need a new set on both TS and Python sides and
+  would touch every model's common path. The maintainer's ruling (2026-10-02, recommended option a): keep it
+  — i8 runs as an op, and the quality check belongs to the recipe's presets. Hence 12 snapshots instead of 8
+  (f32 / f16 / i8 × v4 / scalar × m64 / m32).
+- **The dispatch derivation is one function (`conv3dIgemmWorkgroups`)** shared by production and the GPU
+  test (fault injection ⑥ is caught at kernel level too).
+- `normalize.py` was not needed: with torch 2.13.0 an unbatched `F.conv3d` stays `aten.conv3d.default` with a
+  rank-4 input.
+- conv3d was added to the executable ops of `int8-sym` in `docs/container-v1.md` §6.3 (it disagreed with the
+  implementation).
 
-- **第 2 段（umT5 i8）の設計**は別 ADR。export のホスト RAM・相対位置バイアスの経路・品質の門・トークナイザの
-  ライセンス表記（調査 §9.1）を扱う。
-- **VAE の 2 グラフの重みの共有**（f16 で 146,590,662 B を 2 本持つか）は、段 4 の export で決める。VRAM の見積り
-  （Consequences）は共有しない 2 本で数えた。
-  - **閉じた（段 4 の export の形 = 共有しない）**: first / next はグラフごとに別の容器へ export する
-    （`tools/export-recipes/wan/export_vae.py` の `emit_targets`）。配布形でも別の path に置く
-    （`tools/export-recipes/wan/distribution.py` の `WAN_OUTPUT_PATHS`）。パイプラインは別の部品として開き、
-    Session を 2 本張る（`packages/models/src/wan/pipeline.ts` の `vaeFirst` / `vaeNext` と `#decode`）。重みは
-    first 0.133 GiB / next 0.137 GiB を別々に持つ（値は段 6 の `results.json` の診断。first が小さいのは
-    `time_conv` 2 本を持たないため — 決定 2 の表）。段 4 / 5 の VRAM の実測（2.54 / 2.876 GiB）はこの 2 本を含む。
-    共有する口（容器をまたぐ重みの束縛）は無く、作るなら別起票。（→ perf-ledger K-79 に起票した〈2026-10-09〉）
-- **同じ常駐テンソルを入力と `copyOutputs` の写し先に使う形**が runtime の検査を通るか（段 4）。
-  - **閉じた（段 4）**: 通った。追記「独立レビュー」の手順（`beginBatch` → `copyOutputs` → `finishAndRead`）で
-    chunk 列の照合が緑（検収 段 4）。
-- **unbatched の `F.conv3d` の trace の形**（段 1）。
-  - **閉じた（段 1）**: torch 2.13.0 で `aten.conv3d.default` のまま残る。正規化パスは不要（追記「段 1 の結果」）。
-- **速度の候補**（perf-ledger に回す）: adaLN と rope の融合・cross-attn の K / V の別グラフ化・conv3d の幾何の
-  掃引・タイルの辺（潜在 60 なら 832×480 で 2 枚・面積 1.15 倍。VRAM は約 6 GiB の見込み）。（→ adaLN は perf-ledger K-73・rope は K-78 に起票した）
-- **81 フレームの DiT 段の VRAM**（約 7.6 GiB の見込み）と、行ブロックを VRAM の予算で決める口の要否（段 8）。
-  - **閉じた（段 8）**: DiT 段の fdinfo の山 7.31 GiB で天井の内。口は作らない（段 8 の結果）。
-- **Chrome**（段 9）: 利用者の M2 / RTX でのアダプタ上限・ウォッチドッグ・メモリ予算・Chromium の単一
-  ArrayBuffer 上限（2,145,386,496 B — 調査 §4.4）・軽量デコーダ（調査 §7.5）。**2026-10-03**: 確認ページ（gpu-lab の
-  Wan タブ）を作った。束縛上限の下限は「行ブロックで割れない最大の値」= FFN 中間 503,193,600 B（33 フレーム）/
-  1,174,118,400 B（81 フレーム）と VAE 201,326,592 B（全フレーム数共通）で、スコアの行ブロックは上限に合わせて枚数が
-  増えるだけ（段 7 追記の「中間テンソル 480 MiB」の補足）。Chrome 既定の 128 MiB では VAE の 192 MiB にも足りないが、
-  `acquireGpu` はアダプタ値を要求するので既定には留まらない。環境キーは開発者フラグの有無で変わる。利用者の実走の結果
-  （adapter info・limits・所要・sha）待ち。
-- **f16 重みの品質**（公式の f32 / bf16 との差）は観測として記録する。公式の float64 区間（RoPE・時刻埋め込み）を
-  f32 にした差も同じ（参照の diffusers は f32 なので照合には効かない — 調査 §9.1）。
-- **1.3B の weight-only 量子化（i8 / i4）の品質**（調査 §9.1）。
-- **Anima の VAE（QwenImage VAE）と Wan2.1 の VAE のパッチ関数の共有**: QwenImage の VAE は Wan の VAE からの
-  fine-tune でクラス構成が 1 対 1（決定 2）。同じパッチ関数で両方が eager 同値かは段 4 で確かめる。
-  - **閉じた（段 4）**: 末端の純関数 3 本（l2_normalize / nearest_exact_2x / interleave_frames）を
-    `tools/export-recipes/_shared/vae_rank4.py` へ寄せた（anima も使う・ビット同一）。chunk の仕組みは wan に残す
-    （追記「段 2 / 4 の結果」）。
-- **B570 のドライバ申告予算**（Deno の 97% の線の基準）は未測（段 0 で測る）。
-  - **閉じた（段 0）**: 天井 9,600〜9,631 MiB・申告予算 9,897〜9,930 MiB（検収 段 0・research
-    [2026-10-02](../research/2026-10-02-b570-vram-budget.md)）。
-- **device lost で Deno が panic する経路**: submit の 5 s 超過（決定 6）・申告予算の天井（99% の線）・`destroy()`
-  の解放遅れ（決定 7）。どれもプロセスごと消えて後続のテストを道連れにする。根本の手（Deno 側の例外化）は
-  karume の外なので、段 6 / 7 の e2e はこの機の環境キーで held / 明示 SKIP にできる構成で持つ（段 7 の検収）。
-  - **閉じた（段 7・held の構成は作らない）**: ADR 0106 追記決定 8 は held 行を「プロセスごと落ちる場合」に限り、
-    B570 では Wan が完走する（追記「段 7 の結果」）。経路そのもの（Deno の panic）は karume の外に残る。
-- **指標 r の弱点**（追記「段 3 の結果」— 分母が max の統計量で外れ値 1 要素で決まる）。
-  - **閉じた（段 8・置き換えは見送り）**: p99.99 ベースの r は 8.6〜16.1 で、max ベースとの差は 2 倍以内
-    （段 8 の結果）。
-- **DiT 段の後に初回だけ確保が残る**（追記「段 6 の結果」— 段の前より約 0.24 GiB・未説明）。fdinfo の観測
-  （`results.json` の「VRAM 点」）: 段 6 の 33 フレームは 0.632 → 0.873 GiB、段 8 の 81 フレームは 0.632 →
-  1.084 GiB（約 0.45 GiB）。同じプロセスの 2 本目（2026-10-03 の 33 フレーム）は 1.088 → 1.089 GiB で増えない。
-  帰属は未調査。
-- **MiniMax H3** は構造調査 + 部品単位の候補に留める（本 ADR の範囲外）。Wan2.2 TI2V-5B（新しい VAE が要る）も
-  後の候補。
-  - **Wan2.2 TI2V-5B は [ADR 0121](0121-wan22-ti2v-5b.md) で受け入れた**: T2V は `WanTi2vPipeline`（`./wan`）が出し、
-    配布形 `karume-wan2.2`・example・gpu-lab のタブまで揃った（ADR 0121 の段 8）。I2V は同 ADR の段 9、実用席の自機 A/B 門と
-    既定の寸法・フレーム数の裁定は段 7 で残る。MiniMax H3 は範囲外のまま。
-    （→ 段 7 は閉じた〈ADR 0121 追記（2026-10-09）「段 7 の結果」— 自機 A/B 門と既定の 1280×704・33 フレーム〉。I2V は段 9 で
-    公開 API・example・gpu-lab まで出た〈ADR 0121 追記（2026-10-10）「段 9b の結果」「段 9c の結果」〉）
+## Addendum (2026-10-02) — step 2 / 4 results and deviations from decisions 2 / 3 / 4 / 8
 
-## 追記（2026-10-02）: 独立レビュー（Codex）の指摘
+- **Bands are judged on the ratio** (decision 8's "max error ÷ max reference" became the metric). The
+  absolute band (worst of 4 cases × 5 = 3.2e-4) was exceeded by one element of 12,288 on an unseen seed
+  (3.247e-4) — max abs is sensitive to the tail; its ratio was 6.19e-5, inside the guide. Six band cases
+  (timesteps 999 / 750 / 500 / 250 / 600 / 113) and three acceptance cases (seeds from 777001, t 600 / 30 /
+  400) are fixed. **The band cases MUST NOT change after seeing acceptance results** (`export_dit.py` and the
+  e2e comments). The subtle fault injection (timestep +1) gives ratios of 1.9e-3 to 9.2e-3, over 20× the band.
+- **adaLN does not match the fusion rule**: the four computations line up, but the rule expects 2–3 reshapes
+  right after layer_norm and Wan cuts the modulation vector before layer_norm (0 reshapes). Runs unfused
+  (perf-ledger K-73).
+- **The TS `timesteps_proj` differs by 1 ULP of exp** (2 of 128 frequencies), atol 1.5e-4; GPU outputs stay
+  within the band (a frequency table would remove it — K-74, killed).
+- **The Linear patch embedding is also bit-exact with upstream** (decision 3 expected a difference).
+- **The VAE cache normalisation is bit-exact with upstream** (as argued in decision 2). The whole chunk loop
+  differs from upstream by ratio 2.8e-6, because the cat form of causal padding changes the reduction order of
+  T ≥ 2 conv3d (explicit pad would be bit-exact at rank 4 too).
+- **Cache zeroing is a host write for now** (0.58 GiB, 134 ms per tile; the maintainer's ruling, option b).
+  The runtime has no GPU-side `clearBuffer` (K-72, killed). The 2.54 GiB of step 4 excludes this write's
+  staging (in VRAM on ReBAR).
+- **Leaf functions moved to `_shared/vae_rank4.py`** (`l2_normalize` / `nearest_exact_2x` /
+  `interleave_frames`; anima uses them too, bit-identical). The chunk mechanism stays in wan (three obstacles,
+  for example QwenImage's config has no `is_residual`).
+- The `wan` group runs as `uv run --group wan --inexact` (a plain sync would remove other groups from the
+  shared venv); ftfy is pinned at 6.3.1; `pipeline_ref` requires `negative_prompt_embeds` (otherwise upstream
+  tries to embed the empty string with umT5 and fails).
+- The Wan lane (excluded from the core lane) was created before step 7, so that the real weights are not read
+  twice; a measurement series `wan2.1-t2v-1.3b-f16-dyn-probe` (31 per-layer exits) was added — not a product
+  graph.
 
-独立レビュー（Codex・2026-10-02）の設計上の懸念 4 点を、オーケストレータの裁定どおりに決定 2 / 6 / 8 と検収へ反映した。
-数値は本 ADR の既存の節（決定 2 の cache の表・見積りの表）から導いた。
+## Addendum (2026-10-02) — step 3 attribution: the GPU's K reduction in GEMM rounds 3–14× more than CPU f32 (precision, not an error)
 
-- **VAE の VRAM 見積りに first の Session の保持領域を入れる（決定 2・見積りの表）**:
-  - first / next の 2 Session を持って enqueue すると、各 Session が独立の slot backing を持つ。Session が backing を
-    手放す公開の口は `dispose()` だけ（退役 `#retireBacking` は executor.ts の内部）。first の backing はタイルの 1 chunk 目
-    の後も残り、next の 8 chunk の間も first の cache 出力（30 本・151,027,712 要素・f32 で約 0.56 GiB）が VRAM に残りうる。
-  - 元の見積り「cache 0.58 × 2」は常駐の入力と出力 slot 1 組だけで、first の出力を数えていなかった。計上し直す（推測）:
+The DiT forward at S = 14,040 was measured per layer against an f64 reference (activations f64, weights f16
+fake-quant).
 
-    | 内訳                     | GiB         | 導出                                               |
-    | ------------------------ | ----------- | -------------------------------------------------- |
-    | 常駐 cache               | 0.58        | 32 本・154,959,872 要素（決定 2 の表）             |
-    | first の cache 出力      | 0.56        | 30 本（`time_conv` の 2 本を除く）                 |
-    | next の cache 出力       | 0.58        | 32 本                                              |
-    | 重み                     | 0.14 × 2    | first / next の 2 Session（共有は未決 — 未解決）   |
-    | next の中間              | 約 0.6      | 元の見積りの中間                                   |
-    | first の中間             | 0〜約 0.6   | 全段 T = 1 なので next 以下（推測）                |
-    | フレームの常駐と staging | 約 0.05     | 下の「フレームだけを読み戻す経路」の 24.75 MiB × 2 |
-    | 計                       | 約 2.6〜3.2 | 元の約 2.0 から増える                              |
+- **Attribution**: |GPU − f64| is 3.7–4.4× |CPU f32 reference − f64| (per-layer medians 3.1–5.1; 11–12× in
+  layers 14–15 at t = 500). The growth shape and the amplification at t = 999 are the same for both, so the
+  excess is the GPU's own rounding amplified by the input. Per op: linear 3.2–7.5×, FFN (down projection,
+  K = 8960) 11–14×, cross-attention 2–4×; softmax row statistics, GELU and normalisation 0.7–1.0×. Reproducing
+  the GPU GEMM on the CPU (K ascending, one f32 accumulator, fma, bias last) matched the GPU bit for bit on 512
+  rows of to_v / to_out, and at K = 8960 this order's error is about 10× torch f32. **The cause is the reduction
+  order of ADR 0024 decision 3** (the basis of determinism and bit identity); changing it would change every
+  series' sha256 rows and outputs — perf-ledger K-75, kept as is after the step 7 visual check.
+- **Decision 8 revised for full size**: the reference is **CPU f64** (activations f64, weights f16
+  fake-quant); the metric cancels the input amplification:
+  **r = (max|GPU − f64| ÷ max|f64|) ÷ (max|CPU f32 reference − f64| ÷ max|f64|)**. Band = worst r of 6 band
+  cases × 5; the 2 acceptance cases are created after the band cases and the metric are fixed; the 4 fault
+  injections must fall outside the band, the subtle one (timestep +1) by a margin. S = 192 (step 2) keeps the
+  f32 reference and the ratio metric (small amplification).
+- An absolute band of worst × 5 (1.1e-2) would swallow the timestep +1 injection at t = 600 (1.77e-3), so it
+  is not used.
 
-  - 決定: 2 Session を持ったまま、この見積りで受ける。段 0 の申告予算と段 5 の実測ピークで判断する。予算に入らなければ段 5 で
-    手を決める（候補: タイルごとに first の Session を張り直す・Session に backing を手放す口を足す〈runtime の公開面の変更 —
-    別起票〉）。
-- **フレームだけを読み戻す経路を固定する（決定 2）**:
-  - グラフ出力はフレームと cache の全部（first 1 + 30 本・next 1 + 32 本）。`Session.run` と `Session.enqueueRead` は
-    全グラフ出力を読み戻すので（`enqueueRead` の `#planReadback` は `graph.outputs` を全部読む）、chunk ごとに約 0.56〜0.58 GiB
-    がホストへ往復し、「cache はホスト往復しない」と両立しない。chunk グラフでは両方とも使わない MUST NOT。
-  - 手順（1 タイル = 1 batch）:
-    1. `gpu.beginBatch()` で区間を開く。
-    2. first を `Session.enqueue(inputs, { copyOutputs })` で積む。`copyOutputs` は cache の出力 30 本 → 常駐 cache と、
-       フレームの出力 → first 用のフレームの常駐（`[3,1,256,256]` f32・786,432 B）。
-    3. next を 8 回 `enqueue` で積む。`copyOutputs` は cache の出力 32 本 → 常駐 cache と、フレームの出力 → chunk ごとに
-       別の next 用のフレームの常駐（`[3,4,256,256]` f32・3,145,728 B × 8）。
-    4. `batch.finishAndRead({ フレームの常駐 9 本 })` で閉じる。フレームだけが 1 本の staging に連結されて読み戻り、
-       その map が区間の唯一のフェンスになる（ADR 0054 の一括読み戻し）。
-  - first と next でフレーム数が違う（1 / 4）ので、フレームの常駐は形ごとに分ける（`copyOutputs` は写し先のバイト数が
-    出力の shape と一致することを検査する）。
-  - next のフレームの常駐を chunk ごとに分けるのは、写しが区間の FIFO で積まれ、読み戻しは決着時に 1 度だけ走るため。
-    同じ常駐へ写すと後の chunk が前の chunk を上書きし、最後の chunk しか読めない。合計 25,952,256 B（24.75 MiB）。
-  - staging の寿命: `finishAndRead` が区間の決着時に合計バイト数の staging を 1 本作り、map の後に必ず `destroy()` する
-    （`gpu/context.ts` の batch の読み戻し）。生きるのは決着の間だけ。B570（ReBAR）では VRAM の heap に載るので、見積りに
-    24.75 MiB を足した。
-  - フレームの常駐は全タイルで使い回す。`finishAndRead` は決着まで指定した常駐を使用予約するので、次のタイルの batch は
-    前の決着を待ってから開く。
-  - 区間の粒度（1 タイル = 1 batch）は段 4 で確定する。失敗の帰属が粗すぎれば 1 chunk = 1 batch に下げる（フェンスの本数が
-    増えるだけで、経路は同じ）。
-- **submit 上限の検収は 1 submit ごとの完了時間の最大で見る（決定 6・検収 段 3 / 8）**:
-  - `maxWindowMeanMs` は窓の実測を窓内の submit 数で割った平均。4.9 s の submit と軽い 9 本が同じ窓なら平均は約 0.5 s で
-    門を通り、熱で 10% 遅くなると 5 s を超えうる（推測）。決定 6 の「余裕の 5 倍が下界の分も兼ねる」には、偏りを抑える根拠が無い。
-  - 改定: 検収（段 3 / 8）は、1 submit ごとの完了時間を測るモードで見る。`SubmitPolicy` の診断（`ChunkBudgetStats`）に
-    1 submit ごとの完了時間の最大を足し、それが B570 で 1 s 以下であることを門にする。実装は段 3 で（名前と測り方も段 3 で決める）。
-  - 初回の未学習チャンク（実測の裏付けが付く前の 16 dispatch — `initialChunkSize`）も測る。決定 6 が危険域に挙げた形はここで出る。
-  - `maxWindowMeanMs` と `overBudgetChunks` は引き続き記録する（門ではない）。
-  - 測るモードは submit ごとに完了を待つので、全体の所要は通常の実行と変わりうる（推測）。所要の記録は通常の実行で取る。
-- **許容差の決定と受入れを分ける（決定 8・検収 段 2〜6）**:
-  - 同じケースの最大誤差から 5 倍で帯を決め、そのケースを受け入れるだけなら必ず通る。見逃した系統誤差も帯に取り込みうる。
-  - 改定: 帯の決定用とは別の seed・条件・chunk 境界のケースを受入れ用に固定し、受入れはそちらで判定する。例:
-    - DiT（段 2 / 3）: 別の seed の入力と別の timestep。
-    - VAE（段 4 / 5）: 別の seed の潜在と、別の chunk 境界（chunk 数・タイルの位置）。
-    - 通し（段 6）: 別の seed とプロンプト。
-  - 受入れ用の具体の組は各段で決め、fixture に固定する。
-  - 故障注入で、受入れ用のケースが帯の外（赤）になることを検収に足す。例: cache 更新忘れ（`copyOutputs` から cache を 1 本外す）。
-    DiT 側の注入は段 2 で決める。赤にならない注入があれば、帯が広すぎる兆候として帯の決め方を見直す。
+## Addendum (2026-10-02) — step 3 results: the fault margin and the weakness of r
 
-## 追記（2026-10-02）: 段 1 の結果と決定 1 からの逸脱
+- Acceptance r 2.93 / 4.60 (seeds 777006 / 777007) and the independent seed (888123, t = 400) r 3.19, inside
+  band 75.
+- **Fault margin**: the required margin of the timestep +1 injection over the band was first set at 5 (not in
+  the ADR); a new seed at t = 600 gave 4.42 (the fault itself moves about 3× with the input). The band, metric
+  and band cases stayed; only the margin was lowered to **2** after the observation, disclosed. Observed
+  margins 4.42–80.
+- **Weakness of r**: the denominator is a max statistic decided by a single outlier (max / p99.99 is 1.4–3.6);
+  a very small denominator can make r jumpy. Closed at step 8: the p99.99-based r stays within 2× of the
+  max-based r; not replaced.
 
-- **f16 の適格は `CODEC_LEDGER` ではなく `WEIGHT_SLOTS` / `WEIGHT_CHANNEL_AXES`（TS と Python）と fixture の `weight_slot` /
-  `channel_axis` で入れた**。`codecs.ts` には op ごとの欄が実装されていない（backlog 2026-09-24 の「仕様と実装のずれ」と同じ件）。
-- **i8 の重みも実行・常駐できる**（決定 1 の表は「品質の実測まで適格にしない」と書いたが、ランタイムの適格は f16 と i8 で同じ集合で、
-  i4 / i2 だけが絞り込みの集合を持つ）。op の段階で i8 を適格外にするには絞り込みの集合を TS / Python の両側に新設する必要があり、
-  影響範囲が全モデルの共通経路に及ぶ。利用者裁定（2026-10-02・推奨案 a）: **現状のまま進める** — i8 は op として実行でき、品質の門は
-  recipe の quant 席（決定 7 は f16 だけ）が持つ。スナップショットが 8 本でなく 12 本（f32 / f16 / i8 × v4 / スカラ × m 64 / 32）なのは
-  このため。
-- **dispatch の導出を 1 関数（`conv3dIgemmWorkgroups`）にまとめ**、本番と GPU テストが共有する（故障注入 ⑥ をカーネル単体でも検出）。
-- `normalize.py` は不要だった: torch 2.13.0 で unbatched の `F.conv3d` は rank 4 入力のまま `aten.conv3d.default` で trace に残る。
-- `docs/container-v1.md` §6.3 の `int8-sym` の executableOps に conv3d を足した（実装と食い違うため — 依頼の範囲外の docs）。
-- 提案（未着手・backlog 行き）: exporter README の「attrs を持つ op」の列挙に `static_quantize` が以前から抜けている。
+## Addendum (2026-10-02) — step 6 results and deviations from decisions 4 / 5 / 7 / 8 and the acceptance
 
-## 追記（2026-10-02）: 段 2 / 4 の結果と決定 2 / 3 / 4 / 8 からの逸脱
+- **umT5 runs in bf16** (upstream's `t5_dtype`) and its output is widened to f32 for the assets; decision 4's
+  "CPU f32" was revised. Stage 2's comparison basis is this bf16 output.
+- Frames were first accepted at 4n+1 in 5–33 and opened to 5–81 at step 8; error messages do not name steps.
+- **No release wait between DiT and VAE**: fdinfo shows the peak falling right after the DiT Session is folded,
+  not overlapping the VAE peak (3.3 GiB). About 0.24 GiB stays the first time (Open issues).
+- **UniPC fault injection**: the three σ faults (σ[0] correction, shift of one, shift value) fall to the
+  bit-exact σ check; update-rule faults land at 1e3× or more of the trajectory atol (measured 2e3–1e4) — the
+  acceptance's "1e4×" wording is revised to this.
+- **The 2-step run checks the wiring** (positive / negative swapped, guidance drift); the numbers of one
+  forward are covered by r of step 3. Bands are ratios against the f32 reference per step and quantity,
+  worst of 2 band cases (boxing-cats / cat-dog-baking) × 5; acceptance (ferret, another seed) ran after the
+  bands were fixed. The latent ratio 1.8e-4 above the 1e-4 guide comes from the K reduction of the 4 DiT
+  forwards (K-75); the host CFG + UniPC reproduce the reference bit for bit.
+- **The 50-step run is the opt-in `KARUME_WAN_FULL_PIPELINE=1`**, recorded in its own series
+  (`…_wan-pipeline-full/`).
+- The pipeline rejects a measuring device (the runtime opens no batch on it, so the VAE stage cannot run);
+  GPU time is not in the diagnostics — durations, VRAM (fdinfo and diagnostics) and submit statistics are.
 
-- **帯は比で判定する**（決定 8 の「最大誤差 ÷ 参照の最大値」を判定の指標そのものにした）。絶対値の帯〈4 ケースの最悪 × 5 = 3.2e-4〉は
-  未見 seed の 1 要素（12,288 中）が 3.247e-4 で超えた — max abs は裾に敏感で、比では 6.19e-5 と目安の内側だった。決定用 6 ケース
-  〈timestep 999 / 750 / 500 / 250 / 600 / 113・seed は SEED + salt〉と受入れ 3 ケース〈別系統 seed 777001〜・t 600 / 30 / 400〉を
-  固定し、**受入れの結果を見て決定用を変えない**（MUST・export_dit.py と e2e のコメント）。受入れ own-a は決定用と timestep 600 が
-  重なる（seed・有効長は別 — 旧帯を超えた未見ケースを逐語で残すため）。微妙な故障注入 timestep +1 は比 1.9e-3〜9.2e-3 で帯の 20 倍以上。
-- **adaLN の融合ルールには乗らない**: 計算 4 本の並びは一致するが、ルールは layer_norm の直後に reshape 2〜3 本を要求し、Wan は変調
-  ベクトルを layer_norm の前に切り出すので reshape が 0 本。非融合で進む（perf-ledger K-73 に起票）。
-- **timesteps_proj の TS は exp の 1 ULP 差**（周波数 128 本のうち 2 本）で atol 1.5e-4。GPU の出力は全ケースで帯の内側。周波数表を
-  持たせれば消える（K-74 に起票）。
-- **patch 埋め込みの Linear 化も上流とビット一致**した（決定 3 は「差を記録」としたが差 0）。テストは縮約順の差の上界で見る形のまま。
-- **VAE の cache の正規化は上流とビット一致**（決定 2 の論証どおり）。chunk ループ全体の上流との差は比 2.8e-6（因果 padding の cat 化で
-  T ≥ 2 の conv3d の縮約順が変わるため — 明示 pad なら rank 4 でもビット一致）。
-- **cache のゼロ化は当面ホスト書き込み**（1 タイル 0.58 GiB・134 ms・利用者裁定 b）。runtime に GPU 側でゼロを書く口（clearBuffer）は
-  無い（K-72 に起票）。VRAM 2.54 GiB の内訳に、この書き込みの staging（ReBAR では VRAM 側）は入っていない。
-- **末端の純関数を `_shared/vae_rank4.py` へ**（l2_normalize / nearest_exact_2x / interleave_frames・anima も使う・演算列はビット同一）。
-  chunk の仕組み・assert_supported・normalized_cache_decode は wan に残す（QwenImage の config に is_residual が無い等の障害 3 つ）。
-- 依存群 `wan` は `uv run --group wan --inexact`（素の sync は共有 venv から他群を消す）。ftfy は 6.3.1 に固定。pipeline_ref は
-  negative_prompt_embeds を必須にした（省くと上流が空文字を umT5 で埋め込もうとして落ちる）。
-- テストのレーン `test:models:wan`（test:core からは除外）を段 7 を待たずに作った（wan の GPU e2e が core に入ると実重みを 2 回読むため）。
-- 計測用の系列 `wan2.1-t2v-1.3b-f16-dyn-probe`（層ごとの出口 31 本）を足した — 製品のグラフではない。
+## Addendum (2026-10-03) — step 7 results and deviations from decisions 4 / 7 and the acceptance
 
-## 追記（2026-10-02）: 段 3 の帰属 — GPU の GEMM の K 縮約は CPU f32 の 3〜14 倍の丸め誤差を持つ（誤りではなく精度差）
+- **`WAN_SOURCES` gets an entry only when the public repository exists.** ADR 0092 decision 3's table lists
+  public repositories, and unpublished families carry no row (ADR 0073 decision 1, vowel-detector).
+  `sources_test.ts` requires a 40-digit sha and `test_dist_driver.py` requires the TS table to equal the set
+  of public repositories, so an unpublished entry would weaken one of them. Adding it at publication follows
+  docs/release-runbook.md §3.
+- **`rope_base` is an asset of the transformer container**, not of the manifest `assets` (ADR 0109
+  decision 4, as anima); assembly checks the declaration.
+- **`fromAssets` takes `{ manifest, assets }`** (a breaking change inside Unreleased) and goes through the same
+  admission and assembly as `fromPretrained`.
+- **No held rows**: ADR 0106 addendum decision 8 allows them only for cases that crash the process, and Wan
+  completes on the B570. Added when needed.
+- **The model card states the resources** (ADR 0089 decision 3): VRAM peaks 6.19 / 3.32 GiB, about 30
+  minutes, a 480 MiB intermediate above WebGPU's default `maxStorageBufferBindingSize` (128 MiB).
+- Without the distribution, the host self-consistency test that reads embeddings from it is skipped as well
+  (the all-skip guard turns an all-skip into a failure, so it is not silent).
+- Out of scope (existing, filed separately): the ports from diffusers in packages/models (UniPC in
+  `scheduler.ts`, blending in `vae-tiles.ts`) have no third-party notice, like anima's sampler.
 
-S = 14,040（832×480・33 フレーム）の DiT 1 forward を f64 参照（活性 f64・重みは f16 fake-quant）に対して層ごとに測った。
+## Addendum (2026-10-03) — step 8 (81 frames)
 
-- **帰属**: |GPU − f64| は |CPU f32 参照 − f64| の 3.7〜4.4 倍（層ごとの中央値 3.1〜5.1・t=500 の 14〜15 層目で 11〜12 倍）。伸びの形
-  （峰が 17・27〜28 層目）と t=999 での増幅（GPU 38 倍・CPU f32 46 倍）は同じで、超えたのは f32 参照の誤差ではなく GPU 自身の丸めが
-  入力で増幅された分。op ごとに切ると linear 3.2〜7.5 倍・FFN（down は K = 8960）11〜14 倍・cross-attn 2〜4 倍で、softmax の行統計・
-  GELU・正規化は 0.7〜1.0 倍。GPU の GEMM を CPU で再現（K 昇順・1 本の f32 累積・fma・bias は最後）すると to_v / to_out の 512 行が
-  GPU とビット一致し、K = 8960 でこの縮約順の誤差が torch f32 の約 10 倍になった。**原因は ADR 0024 決定 3 の縮約順そのもの**
-  （決定性・ビット同一の土台）で、変えると全系列の sha256 参照値と生成物が変わる — perf-ledger K-75 に起票し利用者裁定へ。
-- **決定 8 の改定（実寸）**: 参照は **CPU f64**（活性 f64・重みは f16 fake-quant）。指標は入力の増幅を打ち消すため
-  **r = (max|GPU − f64| ÷ max|f64|) ÷ (max|CPU f32 参照 − f64| ÷ max|f64|)**（GPU の誤差 ÷ CPU f32 参照自身の誤差）。帯 = 決定用
-  6 本（t 999 × 2 seed・750・500・250・113）の r の最悪 × 5。受入れ 2 本（t 999 / 600・新 seed）は決定用と指標を決めた後に作る。
-  故障注入 4 件が帯の外で、微妙な注入（timestep +1）は帯の 5 倍以上であること（赤にならない注入は帯が広すぎる兆候）。
-  S = 192（段 2）は f32 参照・比の指標のまま（増幅が小さい）。絶対値の比の記録（GPU vs f64・f32 vs f64・GPU vs f32）は results に残す。
-- 最悪 × 5 の絶対値の帯（1.1e-2）は t=600 の timestep +1（1.77e-3）を飲み込むので採らない。
-- golden は実寸 8 本中 2 本（決定用 t=999 seed 1 本目・受入れ t=999）だけ層ごとの出力を持つ（他は最終出力のみ）。
+- The DiT at S = 32,760 was accepted like step 3 (6 `full-band` + 2 `full-accept` cases, f64 reference, r,
+  independent band); per-layer probes are not run at this size (readback staging about 6 GB). The VAE gained
+  the 21-chunk acceptance case `long` in the default lane. The 81-frame full run is the 50-step opt-in only
+  (`50step-boxing-cats-seed42-81f`); no 2-step CPU reference is made at 81 frames, because the parts are
+  covered separately and one case costs about 60 minutes of CPU. The host fixture grew to T' = 21 (latent
+  `[16,21,6,10]`, 24 rope_base rows) so the t axis 9–20 of RoPE is checked against upstream directly.
+- **The accepted frame set is 4n+1 in 5–81** (decision 7); the default stays 33.
+- **Premise corrected**: "holding the DiT while entering the VAE exceeds VRAM, so at most 33 frames" did not
+  match the measurements — the DiT Session is folded before the VAE stage, so 81 frames depend on the DiT
+  stage alone. The backlog item "release wait before the VAE" was closed as unnecessary.
+- **The CPU reference relies on flash SDPA**: torch 2.13.0+cpu picks
+  `aten._scaled_dot_product_flash_attention_for_cpu` for f32 and f64 and never builds S×S (O(S) memory);
+  falling back to MATH would need 51.5 GB (f32) / 103 GB (f64) per score matrix. The reference forward runs
+  under `sdpa_kernel([FLASH_ATTENTION])` so that a fallback fails loudly (`tools/export-recipes/wan/dit_patch.py`).
+  `export_dit.py` rewrites the whole series (no partial output — staged publication), so the existing cases
+  are regenerated and compared with the distribution.
+- The reference guard passed when any one caseId had a row, so a new case without a row only warned; fixed on
+  2026-10-03 (`7dc17309`, ADR 0106 addendum).
 
-## 追記（2026-10-02）: 段 3 の結果 — 帯の床と指標 r の弱点
+### Step 8 results (2026-10-03)
 
-- 受入れ 2 本（seed 777006 / 777007）は r 2.93 / 4.60 で帯 75 の内。独立検証の seed（888123・t=400）も r 3.19。
-- **微妙な故障注入の床**: 「timestep +1 は帯の N 倍以上」の N を最初 5 と置いた（ADR に無い見積り）が、t=600 の新 seed で 4.42 倍に
-  とどまった（故障の大きさ自体が入力で約 3 倍動く — 同じ t=600 でも旧 seed は 1.77e-3・新 seed は 6.09e-4）。帯・指標・決定用は
-  動かさず、床だけを観測の後に **2** へ下げた（開示）。観測の余裕は 4.42〜80 倍。
-- **指標 r の弱点（未解決へ）**: 分母（CPU f32 参照の f64 に対する誤差）は max の統計量で、外れ値 1 要素で決まる（max と p99.99 の比
-  1.4〜3.6 倍）。受入れ t0600 の分母 1.83e-6 は決定用の分母の最小 3.72e-6 の半分で、帯を決めた範囲の外にある。分母が極端に小さい
-  入力では r が暴れうる。p99.99 などの頑健な統計量への置き換えは、段 8（81 フレーム）の実測で r の分布を見てから判断する。
-- golden: 実寸 8 本中、層ごとの出力（1 本 2.6 GB）を持つのは t=999 の決定用 1 本と受入れ 1 本だけ（io + reference 6.2 GB・export 88 分
-  — 所要はほぼ CPU の参照計算〈f64 370 s・f32 140 s × 2 / ケース〉）。
+- **Band at S = 32,760 is 104** (worst r 20.8 × 5, set by one t = 999 case; the other 5 at 3.9–12.2).
+  Acceptance r 13.1 / 4.89; the smallest fault (timestep +1, t = 600) r 276 = 2.65× the band. p99.99-based r
+  8.6–16.1, within 2× of the max-based r — the metric is not replaced.
+- **VAE, 21 chunks (`long`)**: maxAbs 4.116e-6 (ratio 2.98e-6), inside band 2.5e-5 (derived from `band`,
+  unchanged); the same order as the 9-chunk `band` (4.65e-6) — error does not accumulate with chunks.
+- **VRAM**: DiT stage fdinfo peak 7.31 GiB (about 2.07 GiB below the ceiling), VAE stage 3.78 GiB. No release
+  wait (back to 1.08 GiB right after the DiT Session is folded); no VRAM-budgeted row blocks.
+- **Submit check**: per-submit GPU time max 458.6 ms (1.7× the 270 ms at S = 14,040, below the linear 2.33×).
+  Observation: in the VAE `first` graph over-budget chunks grow from 781 of 1,919 (33 frames) to 1,727 of
+  2,689 (81 frames), window-mean max 391 → 957 ms — the chunk budget does not learn for that graph; outside
+  the check.
+- **Scope of the submit check**: the ≤ 1 s check and the times recorded at steps 3 / 8 (per-submit max 270 /
+  458.6 ms, single dispatch max 84 / 192.3 ms) are values of the measuring mode (`gpuTiming`). It runs one
+  dispatch per pass and changes the window wall time, so only the unbacked chunks (`initialChunkSize`) split
+  as in normal runs (the comment before `acquireTestGpu({ gpuTiming: true })` in
+  `packages/e2e/tests/e2e_wan_dit_test.ts`). The per-submit maximum under normal submits is not measured
+  (backlog).
+- **Wan lane acceptance**: 58 passed plus one overrun of the time check (S = 32,760, one submit 1,268.6 ms —
+  a single-dispatch stall); a cooled solo re-run gave 459.3 ms, 7 passed. Attributed to a transient GPU stall
+  (estimate — docs/known-issues.md, Intel Arc B570).
+- **Probe order**: the S = 14,040 probe (9.85 GiB) after the S = 32,760 comparison ran out of memory (deferred
+  `destroy()` on the B570); the largest allocation goes first, so the probe moved to the front.
+- **CPU reference cost**: one S = 32,760 forward is about 1,505 s in f64, 630 s in f32, 546 s for the patched
+  eager; 27 cases plus containers took 27,271 s.
+- **Regeneration**: the existing DiT cases, the `krm` files and the 25 distribution files are byte-identical.
+  The VAE fixtures changed bytes but not tensors — safetensors 0.8.0 writes `__metadata__` from a HashMap, so
+  the header key order differs per process; fixture regeneration is compared on tensors, not bytes (backlog).
 
-## 追記（2026-10-02）: 段 6 の結果と決定 4 / 5 / 7 / 8・検収からの逸脱
+## Addendum (2026-10-03) — review of two independent reviews; supplements to decisions 1 / 4 / 7
 
-- **umT5 は bf16**（上流の `t5_dtype`）で回し、出力を f32 に広げて資産にした。決定 4 の「CPU f32」は改めた（RAM 31 GiB で f32 22.7 GB は
-  境界・上流の参照と同じ dtype で揃える）。第 2 段（umT5 i8）の照合の基準もこの bf16 出力になる。
-- **フレーム数の受理は 4n+1 の 5〜33**（決定 7 の 81 までは段 8 で解禁 — 段 0 の見積りで DiT 7.6 GiB を持ったまま VAE へ進むと越える）。
-  エラー文言には段の番号を出さない。
-- **DiT → VAE の切り替えに解放待ちは入れない**: fdinfo で DiT の Session を畳んだ直後に山が下がり、VAE の山（3.3 GiB）と重ならない。
-  初回だけ約 0.24 GiB が段の前より残る（未説明 — 未解決へ）。
-- **UniPC の故障注入**: σ 列に出る 3 件（σ[0] 補正・ずれ・shift）はビット一致の門で落とし、更新則の故障は軌跡の atol の 1e3 倍以上
-  （実測 2e3〜1e4）— 検収の「1e4 倍」の文言はこれに改める。
-- **2 ステップの通しの門は結線**（プロンプトの正負の取り違え・guidance の揺れ）で、forward 1 本の数値の門は段 3 の正規化比 r が持つ。
-  帯は f32 参照に対する比で step / 量ごとに決定用 2 本〈boxing-cats / cat-dog-baking〉の最悪 × 5。受入れ〈ferret・別 seed〉は帯を
-  固定した後に回した。潜在の比 1.8e-4 が目安 1e-4 を超えるのは DiT の 4 forward の K 縮約（K-75）で、ホストの CFG + UniPC は参照を
-  ビット一致で再現する。
-- **50 ステップは opt-in `KARUME_WAN_FULL_PIPELINE=1`**（名前はこれで確定）。記録は既定レーンと別の席（`…_wan-pipeline-full/`）。
-- 公開面 `./wan` は `fromAssets({ assets })` で系列の krm と資産を直接読む形（manifest / `WAN_SOURCES` は段 7 で足す — 未リリース
-  なので形は変わってよい）。
-- 計測の device はパイプラインが拒む（runtime が計測の device で batch を開かないため VAE の段が回らない）。GPU 時間は診断に出ず、
-  所要・VRAM（fdinfo と診断）・submit 統計で見る。
+Two independent reviews of the commit range `b9245574..e2b14aa9` (29 commits) — a diff review (75 findings, 72 held)
+and Codex (12 findings, all held) — were worked off in 37 fix commits; records in
+`.claude/reviews/2026-10-03_{diff-review,codex-review}-wan/` (not tracked). What stays in force:
 
-## 追記（2026-10-03）: 段 7 の結果と決定 4 / 7・検収からの逸脱
+- **Decision 1 supplement (by design)**: GPU execution of conv3d requires `input length + 2·padding ≤ 2^31 − 1`
+  per axis (WGSL coordinate arithmetic is i32). Larger IR throws `CodegenError` at Session construction; the
+  CPU reference semantics do not change (docs/limitations.md; the check is shared in
+  `packages/runtime/src/kernels/conv-bounds.ts`).
+- **Decision 7 supplement (accepted set)**: guidance is at least 1 and finite after rounding to f32; steps ×
+  shift only where UniPC's σ sequence is strictly decreasing (otherwise `ModelInputError`). Non-finite values
+  during generation fail loudly (latents per step, VAE output before clamping).
+- **Decision 4 revised**: stage 2's relative-position bucket table is an `[L,L]` i32 index table built by the
+  host and passed as a graph input, not a baked `[512,512]` constant. The stage-2 design moved to
+  [ADR 0119](0119-wan-umt5-gpu-text-encoder.md) (decision 3 is canonical).
+- **The maintainer's rulings (2026-10-03)**: Wan gets an AbortSignal too (ADR 0119 decision 9); a w8a8 preset
+  is added ([ADR 0120](0120-wan-dit-w8a8-seat.md)); step 9 is checked by the maintainer in Chrome on the RTX
+  5070 Ti machine; step 10 runs in parallel with step 9.
 
-- **`WAN_SOURCES` は公開リポができるまで作らない**。ADR 0092 決定 3 の表は「公開リポ全部」で、ADR 0073 決定 1 の前例（vowel-detector）も
-  未公開の家族は表を持たない。`sources_test.ts` は 40 桁の sha を要求し、`test_dist_driver.py` は TS の表と公開リポの集合の一致を要求する
-  ので、未公開のまま入れるとどちらかの門を緩めることになる。公開の回に足す手順は docs/release-runbook.md §3。決定 7 の「名前の対応」の
-  行はその前提で読む。
-- **`rope_base` は manifest の assets ではなく transformer の容器の資産**（ADR 0109 決定 4・anima と同じ）。組み立てで宣言の有無を確かめる。
-- **`fromAssets` の引数は `{ manifest, assets }`** に変えた（Unreleased 内の破壊的変更）。fromPretrained と同じ admission / 組み立てを通す。
-- **held 行の仕組みは作らない**（検収 7 の「device lost に備えた held 行で明示 SKIP」）: ADR 0106 追記決定 8 は行を足せるのを「プロセスごと
-  落ちる場合」に限り、B570 では Wan が完走する。必要になった時点で足す。
-- **モデルカードに資源の目安**（ADR 0089 決定 3）: VRAM の山 6.19 / 3.32 GiB・約 30 分・中間テンソル 480 MiB は WebGPU 既定の
-  maxStorageBufferBindingSize（128 MiB）を超える〈Deno は adapter の上限を認める・ブラウザは段 9 で確認〉。
-- 配布形の無い機では、埋め込みを配布形から読むホストの自己整合テストも SKIP になる（門番が全 SKIP を FAIL にするので無音にはならない）。
-- 範囲外（既存・別起票）: packages/models の diffusers からの移植（scheduler.ts の UniPC・vae-tiles.ts の blend）に third-party notice が無い
-  のは anima の sampler 等と同じ既存の状態。
+## Addendum (2026-10-04) — step 9: 81 frames × 50 steps complete in Chrome on the RTX 5070 Ti
 
-## 追記（2026-10-03）: 段 8（81 フレーム）の計画と検収の形
+- Step 9 ✅ (the maintainer's run, Windows Chrome 154, environment key `chrome-nvidia-geforce-rtx-5070-ti`,
+  precomputed text path, `f16` preset, `boxing-cats`, seed 42, 832×480, 81 frames, 50 steps): 2,767.9 s, no
+  device loss, the GPU watchdog not reached. Record:
+  `outputs/bench-browser/wan-browser-2026-10-03T21-46-58.503Z.json`.
+- **This environment key gets no row in `fixtures/references/wan.json`** (the maintainer's ruling 2026-10-04 —
+  a row that needs a 46-minute run cannot catch regressions; the sha256 comparison is held by the B570 Deno row,
+  and a Chrome row, when needed, is made from a short 2-step case). The RGB sha256 of
+  `50step-boxing-cats-seed42-81f` was `ac09a3e6b8677ee270778abe07ccdb879364b4b062eca59e7d252e1d6ca1de8a`.
 
-段 7 のコードとフル verify が済み、目視 12 本の生成（GPU）と並行して段 8 を起こした。読み取り調査（記録・コード・CPU の
-小プローブ）で前提を確かめ、検収の形を次のとおり決めた。
+## Addendum (2026-10-15) — Wan2.1 is not published on Hugging Face
 
-- **DiT の実寸（S = 32,760・潜在 `[16,21,60,104]`）は段 3 と同じ形で検収する**: `export_dit.py` の CASES に `full-band` 6 本 +
-  `full-accept` 2 本（S = 14,040 の 8 本と timestep / text_length を揃え、seed だけ新規）を足し、f64 参照 + 正規化比 r で見る。
-  帯は決定 8 により S = 32,760 で独立に導く（`full-band` 6 本の最悪 r × 5 — 実測前は 75 を仮置き）。層別の probe（`blocks=True`）
-  は S = 32,760 では readback の staging が約 6 GB になり B570 に入らないので置かない。門は行ブロック 24 枚・1 submit の GPU 時間
-  ≤ 1 s（S = 14,040 の 270 ms から linear の比例で約 630 ms の見込み）・B570 で完走・非有限 0。VRAM と所要は記録する。
-- **指標 r の分布も記録する**（追記「段 3 の帯の床と指標 r の弱点」の宿題）: max ベースの r に加えて p99.99 ベースの r を
-  results.json に書く。門は max の r のままで、置き換えの判断は分布を見てから。
-- **VAE は 21 chunk の受入れケース `long` を既定レーンに足す**（1 タイル・seed 20261004・role accept）。GPU で検収した chunk 数の
-  最大が 9、Python の「誤差が chunk 数で伸びない」が 5 までだったので、81 フレームの chunk 数そのもので見る。タイル計画は空間
-  だけで決まり T に依存しない（Python / TS で二重に凍結済み）。
-- **通しの 81 フレームは 50 ステップの opt-in（`KARUME_WAN_FULL_PIPELINE=1`）だけ**: `50step-boxing-cats-seed42-81f`（sha 行・PNG
-  81 枚・一覧図・段ごとの DRM の山・利用者の目視）。2 ステップの CPU 参照（81 フレーム）は作らない — DiT（r の帯）・VAE（21 chunk）・
-  タイル（T 非依存）・UniPC / CFG（T 非依存）・patchify / unpatchify（DiT の e2e が T = 21 で通す）で部品は覆われ、通しの参照は
-  1 ケース約 60 分の CPU（RSS 約 10〜11 GiB）で、1 本では帯を独立に導けず（決定 8）、2 本以上は所要に見合わない。
-- **ホスト側の fixture を T' = 21 に広げる**（`dit_host_fixture.py`: 潜在 `[16,21,6,10]`・rope_base 24 行）: RoPE の t 軸 9〜20 を
-  上流表との Uint32 一致で直接見る（従来は F' = 2・8 行）。
-- **受理集合は 4n+1 の 5〜81 に解禁**（決定 7）。既定は 33 のまま（参照設定）。モデルカード・README・fixture（`wan-card-limits.json`）・
-  `card.py` の `WAN_FRAMES` を追随。コミットは GPU の検収が通ってから（未計測の数値は書かない）。
-
-### 前提の訂正と判断
-
-- **「DiT を持ったまま VAE へ進むと VRAM を越えるので 33 まで」という上限の理由は実測と合っていない**（pipeline.ts の旧コメント・
-  README・本 ADR の追記）。段 6 の実測では DiT の Session を畳んだ直後に 0.43 GiB へ戻り、DiT 段と VAE 段は重ならない。81 の可否は
-  **DiT 段単独の VRAM** で決まる（見積り 6.7〜8 GiB〈段 3 の実測比で縮めた値〜fdinfo の山からの外挿〉・天井 9,600〜9,631 MiB）。
-  backlog の「VAE 前の解放待ちの設計」は不要として閉じる。入らなければこの段で手を決める（行ブロックを VRAM の予算でも切る口、など）。
-- **CPU 参照は flash SDPA に依存する**: torch 2.13.0+cpu は f32 / f64 とも既定で `aten._scaled_dot_product_flash_attention_for_cpu`
-  を選び、S×S を実体化しない（プローブ: S 4096・12 heads で peak RSS 0.57 GiB・O(S)）。MATH に落ちるとスコア 1 枚が 51.5 GB
-  （f32）/ 103 GB（f64）で即 OOM。参照の forward を `sdpa_kernel([FLASH_ATTENTION])` の下に置いて fail loudly にする（既定で flash が
-  選ばれる限り数値は変わらない — 小ケースで既存 golden とバイト比較して確かめる）。所要の見込み（推測・S² 外挿と MAC 比の両方で
-  ほぼ同じ）: 1 forward f64 約 22〜24 分・f32 約 8〜9 分、1 ケース（f64 + f32 + パッチ後 eager）約 40 分、8 本で約 5.5 時間。RSS は
-  f64 で約 17〜18 GiB — 他の重い CPU 作業と同居させない。`export_dit.py` は系列を丸ごと書き直す（部分出力の口は作らない —
-  staged publication の原則）ので、既存 19 ケース（約 87 分）の再生成を伴い、krm の配布形とのバイト一致を再確認する。
-- **参照門の抜け**（隣接・別起票 — 2026-10-03 に締めた・`7dc17309`・ADR 0106 追記）: `referenceGatePasses` は caseIds のどれか 1 本に行があれば緑になるので、新しい case id の行を
-  書き忘れても警告付き SKIP で止まらない。段 8 では行を書くことで対処し、門の意味論は runtime の共通ヘルパなので別に起票する。
-
-### 段 8 の結果（2026-10-03）
-
-- **帯は S = 32,760 で 104**（`full-band` 6 本の最悪 r 20.8 × 5。S = 14,040 の 75 より広い。最悪は t = 999 の 1 本で、他の 5 本は
-  3.9〜12.2 と S = 14,040 と同程度）。受入れ 2 本 r 13.1 / 4.89・故障注入の最小（timestep +1・t0600）は r 276 = 帯の 2.65 倍。
-  p99.99 ベースの r は 8.6〜16.1 で、max ベースとの差は 2 倍以内 — 指標の置き換えは見送る（分布は results.json に残る）。
-- **VAE の 21 chunk（`long`・81 フレームの chunk 数）**: maxAbs 4.116e-6（参照の max 1.380 で割った比 2.98e-6）で、
-  帯 2.5e-5（絶対値 — `band` から導いた値のまま）の内。9 chunk の `band` の 4.65e-6 と同じ桁で、chunk 数で誤差が
-  積もっていない（`2026-10-03_wan-vae-chunks/results.json`）。
-- **VRAM**: DiT 段の fdinfo の山 7.31 GiB（見積り 6.7〜8 GiB の内・天井 9,600 MiB〈9.38 GiB〉に約 2.07 GiB の余裕）・VAE 段 3.78 GiB。解放待ちは
-  要らない（DiT の Session を畳んだ直後に 1.08 GiB へ戻る）。行ブロックを VRAM の予算で切る口は作らない。
-- **submit の門**: 1 submit の GPU 時間の最大 458.6 ms（S = 14,040 の 270 ms の 1.7 倍・linear の比例 2.33 倍より小さい）。
-  観察: VAE の first グラフの予算超過は 33 フレームの 781 本（1,919 中）→ 81 フレームで 1,727 本（2,689 中）・窓平均の最大
-  391 → 957 ms。既存の性質（33 フレームでも出ていた）で門の外だが、first グラフの chunk 予算の学習が効いていない形なので
-  観察として残す。
-- **submit の門の範囲**: 「1 submit ≤ 1 s」の門と、段 3 / 8 で記録した時間値（1 submit の最大 270 / 458.6 ms・
-  単発 dispatch の最大 84 / 192.3 ms）は、計測モード（`gpuTiming`）の値である。計測モードは 1 dispatch = 1 pass で
-  窓の壁時計が変わるので、通常実行と同じ切れ目になるのは裏付け前のチャンク（`initialChunkSize`）だけで、裏付けが
-  付いた後のチャンクの切れ目は通常実行と異なりうる（`packages/models/tests/e2e_wan_dit_test.ts` の計測モードの
-  `acquireGpu({ gpuTiming: true })` の直前のコメント）。パイプラインは計測の device を拒むので、通常実行の submit
-  構成での 1 submit の最大時間は測っていない（backlog の Wan の小物に起票）。
-- **wan レーン全体の受け入れ**: 58 passed + 時間門の 1 回だけの超過（S = 32,760 の 1 submit 1,268.6 ms — 単発 dispatch の stall・裏付け前の最大は不変）→ 冷ましてから単独再走で 459.3 ms・7 passed。帰属は GPU 側の一過性の stall（推定・known-issues「Intel Arc B570: Wan DiT 実寸の「1 submit の GPU 時間 ≤ 1 s」の門が、長時間の連続負荷の後に 1 回だけ超えた（2026-10-03・記録のみ）」節）。
-- **層別 probe の並び**: S = 14,040 の probe（確保 9.85 GiB）を S = 32,760 の照合の後に置くと OOM になった（B570 の destroy()
-  の遅れで前の確保が残る — known-issues）。確保が最大のものを先頭に置く原則どおり probe を実寸の先頭へ移した。
-- **CPU 参照の所要**: S = 32,760 の 1 forward は f64 約 1,505 s・f32 約 630 s・パッチ後 eager 約 546 s（外挿 22〜24 分 / 8〜9 分
-  の内）。27 ケース + 容器で 27,271 s（7.6 時間・目視 12 本の GPU ジョブと同居）。
-- **再生成のバイト一致**: DiT の既存 19 ケース・krm・配布形 25 ファイルはバイト一致。VAE の `vae_chunks.band / accept` は
-  バイトが変わったがテンソルは同一（GPU との差 maxAbs が 2026-10-02 と一致）— safetensors 0.8.0 の `__metadata__` は
-  HashMap で、ヘッダのキー順がプロセスごとに変わる（3 回書いて 3 通り）。fixture の再生成をバイトで見る運用は成り立たず、
-  テンソルで見る（隣接・backlog に起票）。
-
-## 追記（2026-10-03）: レビュー 2 本の消化と決定 1 / 4 / 7 の補足
-
-- 対象: 波 `b9245574..e2b14aa9`（29 コミット）への独立レビュー 2 本。差分レビュー（6 観点 × Opus → 観点ごとの敵対検証・
-  75 件: holds 72 / refuted 3〈P-6 VAE に `{}` を渡すのは取り決め・P-10 整列違反は parseSafetensors が名指しで落とす・
-  TG-07 縮退の格子は同じ関数を通る〉）と Codex（12 件: medium 8 / low 4・未検証の 9 件を検証レッグに掛けて全て holds）。
-  記録は `.claude/reviews/2026-10-03_{diff-review,codex-review}-wan/`（git 追跡外）。
-- 直したもの（fix 単位のコミット 37 本・領域ごと）:
-  - runtime / exporter: conv3d の座標演算の i32 折り返しを params で拒む（M1）・submitGpuTime の maxDispatchKey（F5）・
-    WEIGHT_SLOTS の件数と i4 の除外列挙（F2）・i4 / 方式別の丸めの Conv3d 被覆（F3）・README の attrs 列挙（F6）・verify の
-    境界と quantize の注記（F1 / F7）。
-  - models（本体）: DiT 段の後始末が本体の失敗を上書き（P-2 / M3）・guidance の f32 門と非有限値の門〈step ごとの潜在・VAE の
-    クランプ前〉（P-5 / M2）・steps × shift の σ 列の門（P-1 / L3）・admission でタイル計画の全数照合と ditContract の
-    rank / batch / S（M4）・自前 GPU の requiredLimits（L1）・VAE chunk ホスト関数の範囲検査（H-1 / H-6）・doc（H-2 / H-3 /
-    P-7 / P-6 / P-11）・example の出力名（P-8）。
-  - models（テスト）: seed → 列の値のピン + seed 経路の sha ケース（TG-01）・VAE e2e の disposeSteps（L2 / TG-17）・解放待ちと
-    VRAM 標本化の helper 化（TG-09 / TG-03）・時間換算の局所化と行ブロックの導出（TG-02）・通常 / 計測モードの Uint32 一致
-    （TG-04）・RoPE 注入の格子 assert（TG-05）・step 数（TG-08）・gpuTiming 拒否（P-9）・入れ子ブレンドの CPU テスト（H-5）。
-  - recipes: 書き手の eager 同値の門（M5）・VAE 2 グラフ + fixture の一組公開と wan_plan の組の突合（M6）・埋め込み資産の門に
-    dtype / 版〈diffusers・ftfy・transformers〉/ normalized（F1 / F2 / M7）・few_step_ref の cond / uncond を値で振り分け +
-    flash 固定（F5 / F6）・_NarrowFloatWatch の形（F4）・RoPE の dtype 一致の assert（F13）・NOTICE の RoPE の記述（F14）・
-    README / pyproject / コメント（F8 / F9 / L4 / D14）・テスト被覆（F11 / F12）。配布形の NOTICE / README を dist.py で再生成
-    （他のバイトは不変）。
-  - docs: 検収表 段 2 のセル復元（D1）・limitations の Wan 節と B570 の実測（D2 / D13）・未解決節の現況化（D3）・単位 / 置き場名 /
-    節名 / 実測の追補（D4 / D7 / D11 / F10 / TG-12）・perf-ledger K-72 / K-74 を kill（D9）・quantization / glossary /
-    release-runbook / ACTIVE_DESIGN（D8 / D12 / D5 / D15 / L4）・時間門の範囲の明示（M8）。
-- 記録のみ（直さない・理由つき）: TG-10（帯 104 は外れ値 1 本・床 2 で開示済み）・TG-13（VAE の帯は決定用 1 ケース・開示済み）・
-  H-7（cache の対応は recipe が構造で検査）・H-8（乱数の決定性はエンジン内・sha 行は環境ごと）・recipes F3（`.double()` の
-  共有切れは今の経路で実害なし）・F15（ライセンスの出所 2 系統は門が食い違いを捕まえる）・TG-11（DiT ホストテストの RSS 未計測）・
-  TG-18（note の区切り）・X-2（空入力の RangeError）・X-3（anima/image.ts の同じ文言 — 範囲外）。backlog に起票: M8 の本体
-  （通常実行の submit 構成での計測）・runtime F4（golden conv3d の v4 / m64）・conv1d / conv2d の同型の境界監査・AbortSignal。
-- **決定 1 の補足（by-design）**: conv3d の GPU 実行は軸ごとに `入力長 + 2·padding ≤ 2^31 − 1`（WGSL の座標演算が i32）。超える
-  IR は Session 構築時に CodegenError。CPU 参照の意味論は変えない（limitations に記載）。
-- **決定 7 の補足（受理集合）**: guidance は 1 以上で f32 に丸めても有限、steps × shift は UniPC の σ 列が狭義単調減少に組める組
-  だけ（外は ModelInputError）。生成中の非有限値は fail loudly（step ごとの潜在・VAE のクランプ前）。
-- **決定 4 の改訂**: 第 2 段（umT5 を GPU で）の相対位置のバケット表は `[512,512]` の定数を焼く形ではなく、ホストが `[L,L]` の
-  i32 添字表を作ってグラフ入力で渡す。第 2 段の設計全体は [ADR 0119](0119-wan-umt5-gpu-text-encoder.md) に移した（決定 3 が正本）。
-- **利用者の裁定（2026-10-03）**: Wan にも AbortSignal を足す（ADR 0119 決定 9）・w8a8 席を作る
-  （[ADR 0120](0120-wan-dit-w8a8-seat.md)）・段 9 は利用者が RTX 5070 Ti 機の Chrome で確認する・段 10 は段 9 と並列に進める。
-- 検証: ホスト専用テスト緑（models 55 / runtime 233）・exporter pytest 3,498・recipes pytest 262 + 288・ruff 緑・GPU:
-  gpu_f16_weights_test 12 passed・wan レーン（`KARUME_REFERENCE=write`・seed 経路の sha 行を作成）: 66 passed / 0 failed / 1 ignored〈50 ステップの opt-in〉・48 分 32 秒。seed 経路の sha 行
-  `2step-seed-boxing-cats-seed42` を作成。通常モードの出力は計測モードと Uint32 で一致（S = 32,760 / 14,040）。行ブロックは
-  device の束縛上限から導いた 24 / 5 枚。1 submit の GPU 時間の最大は 458.8 ms（S = 32,760）/ 270.4 ms（S = 14,040）で前回と同じ。
-
-## 追記（2026-10-04）: 段 9 の結果 — RTX 5070 Ti の Chrome で 81 フレーム 50 ステップが完走
-
-- **段 9 ✅**（利用者の実走・記録 `outputs/bench-browser/wan-browser-2026-10-03T21-46-58.503Z.json`・checkout `b4f6df74`・Windows の
-  Chrome 154・adapter `nvidia` / `blackwell`・環境キー `chrome-nvidia-geforce-rtx-5070-ti`・幾何プロファイル `nvidia-blackwell`）。
-  資産の経路（`textEncoder: "precomputed"`）・既定席 `f16`・`boxing-cats`・seed 42・832×480・81 フレーム・50 ステップ。
-  device lost なし。
-- **上限**: `maxBufferSize` 2,147,483,648 B・`maxStorageBufferBindingSize` 2,147,483,644 B（adapter と device が同値 — `acquireGpu` が
-  アダプタ値を要求している）。81 フレームの FFN 中間 1,174,118,400 B は束縛上限に収まり、linear の行分割の口は要らない。
-- **所要**: 壁 2,767.9 s（46.1 分）= DiT 段 2,686.2 s + VAE 段 81.4 s。DiT は 1 ステップ目 83.9 s・以降 52.5〜55.5 s（B570 の
-  Deno は同じ設定で約 2 時間 — 段 8）。VAE はタイル 12 枚で、1 枚目 10.1 s・以降 6.35〜6.37 s。
-- **資源**: DiT の重み 2,840,521,640 B・backing 3,776,775,424 B。VRAM の山は約 8 GB（利用者の目視 — 記録には無い）。
-- **GPU ウォッチドッグ**: 踏んでいない。チャンクの窓平均の最大は DiT 102.3 ms・VAE の first 231.1 ms・next 45.1 ms（調査 §7.4 の
-  約 10 秒に対して 40 倍以上の余裕）。VAE の first は `overBudgetChunks` 154 本（単独で予算を超える dispatch — 切りようが無い側）で、
-  DiT と VAE の next は 0 本（観測のみ）。
-- **sha256**: RGB は `ac09a3e6b8677ee270778abe07ccdb879364b4b062eca59e7d252e1d6ca1de8a`（case id
-  `50step-boxing-cats-seed42-81f`）。この環境キーの行は `fixtures/references/wan.json` に**足さない**（利用者の裁定 2026-10-04 —
-  46 分の再走が前提の行は回帰の検出に使えない。sha の突き合わせは B570 の Deno の行で持つ。Chrome の行が要るときは 2 ステップの
-  短いケースで作る）。
-- **未実走**: Chrome での GPU 経路（umT5 を GPU で — ADR 0119）と実用席（ADR 0120）。gpu-lab の Wan タブの既定の経路は
-  `precomputed` のまま（backlog）。
-
-## 追記（2026-10-15）: Wan2.1 は HF に公開しない
-
-- **利用者裁定（2026-10-15）**: 0.14.0 の Wan 家族の初公開は `karume-umt5-xxl` と `karume-wan2.2`（ADR 0121）だけで、`karume-wan2.1` は
-  上げない（利用者 2026-10-10「2.2 が上位互換なので 2.1 は上げないこともできる」）。決定 7 のリポ名は手元の配布形の名前として残り、`WanPipeline`
-  のコードもパッケージに残る（取得元を明示すれば `fromPretrained` で使える — `WAN_SOURCES` に `wan2.1` のキーは無い）。配布形は
-  `dist.py --pipeline wan` で手元に組む。
+- **The maintainer's ruling (2026-10-15)**: the first Wan release of 0.14.0 publishes only `karume-umt5-xxl` and
+  `karume-wan2.2` (ADR 0121); `karume-wan2.1` is not uploaded (the maintainer, 2026-10-10: "2.2 is a superset,
+  so 2.1 need not be uploaded"). The repository name of decision 7 remains the name of the local distribution,
+  and `WanPipeline` stays in the package (usable through `fromPretrained` with an explicit source — `WAN_SOURCES`
+  has no `wan2.1` key). The distribution is built locally with `dist.py --pipeline wan`.
