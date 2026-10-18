@@ -1,20 +1,24 @@
 /**
- * op 契約テーブル — op ごとに「アリティ / dtype 規則 / attrs スキーマ / 出力 shape 計算」を
- * 1 箇所に持つ。codegen・CPU 参照・executor は全てここを参照する。
+ * The op contract table — per op, "arity / dtype rules / attrs schema / output shape computation"
+ * in one place. codegen, the CPU reference and the executor all consult it.
  *
- * MUST: ランタイムの capability 宣言（{@link RUNTIME_SUPPORT}）はこの表からのみ導出する。
- * op 名だけの突合は dtype と属性の差を見逃す（対応表に名前だけある op が実行時に落ちる）。
- * MUST: 意味論 dtype の解禁は op ごとに行う（一括解禁しない — ADR 0007 の語彙 allowlist
- * 凍結）。i32 / bool を許すのは実測グラフに現れた形と、その形のために新設した op だけ。
+ * MUST: the runtime's capability declaration ({@link RUNTIME_SUPPORT}) is derived from this table
+ * only. Matching op names alone misses dtype and attribute differences (an op that the support
+ * table lists by name only fails at run time).
+ * MUST: semantic dtypes are enabled per op (never all at once — the vocabulary allowlist of ADR 0007
+ * is frozen). i32 / bool are allowed only in the forms that appeared in measured graphs and in the
+ * ops created for those forms.
  *
- * 出力 shape の計算は**束縛解決後の数値 shape**に対して行う。記号次元は実行前に必ず具体値へ
- * 解決される（静的形状 — ADR 0004）ため、broadcast 可否のような判定を記号のまま扱う必要が無い。
+ * Output shapes are computed on **the numeric shape after binding resolution**. Symbolic
+ * dimensions are always resolved to concrete values before execution (static shapes — ADR 0004),
+ * so a decision such as "can these broadcast" never has to be made on symbols.
  */
 
-// 実体は src/ops/ の 4 モジュール（names = op 名と基底 / attrs = attrs スキーマとアクセサ /
-// contracts = 契約表と照会 / shapes = shape 計算）。この面は再輸出のみで、公開名は分割前と同一。
-// 同じディレクトリの support.ts（ランタイム対応表の型と列挙門）はこの面の外で、
-// runtime/executor.ts・runtime/estimate.ts・mod.ts が直接 import する。
+// The bodies are the 4 modules of src/ops/ (names = op names and bases / attrs = the attrs schema
+// and accessors / contracts = the contract table and queries / shapes = shape computation). This
+// surface only re-exports; the public names are the same as before the split. support.ts in the same
+// directory (the runtime support table's types and the enumeration check) is outside this surface;
+// runtime/executor.ts, runtime/estimate.ts and mod.ts import it directly.
 
 export {
   ARGMAX_OP,
