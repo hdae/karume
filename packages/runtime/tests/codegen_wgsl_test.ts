@@ -1,4 +1,4 @@
-import { readDirSync, readTextFile } from "@karume/test-support/fs";
+import { readDirSync, readTextFile, writeTextFile } from "@karume/test-support/fs";
 import { describe, it, test } from "vite-plus/test";
 import { stateStatsPvWgsl } from "../src/kernels/state-attention-stats-pv.ts";
 import { rmsNormSubgroupWgsl } from "../src/kernels/rms-norm-subgroup.ts";
@@ -276,8 +276,13 @@ import {
 import { attentionScoreUsesF16 } from "../src/kernels/score-storage.ts";
 import { BINARY_OPS, OP_CONTRACTS, REDUCE_OPS, UNARY_OPS, WHERE_OP } from "../src/ops.ts";
 
-const fixture = (name: string): Promise<string> =>
-  readTextFile(new URL(`./fixtures/wgsl/${name}`, import.meta.url));
+const fixtureUrl = (name: string): URL => new URL(`./fixtures/wgsl/${name}`, import.meta.url);
+const fixture = (name: string): Promise<string> => readTextFile(fixtureUrl(name));
+// `KARUME_WGSL_SNAPSHOT=write` rewrites every snapshot from the current generators before the
+// comparison (the same shape as `KARUME_REFERENCE=write` for the sha rows). It exists for commits
+// that change only the comments inside the WGSL templates (ADR 0130 step 2-9d): the diff of the
+// fixtures then has to be comment lines only, which the commit's review checks.
+const WRITE_SNAPSHOTS = process.env.KARUME_WGSL_SNAPSHOT === "write";
 
 // 融合 5 カーネルは重み格納の変種を持つ（ADR 0018）。既存の不変条件は **w=f32 変種**に
 // 掛かっているので、従来の名前をその変種に束ねる（f16 変種は専用テストが別に見る）。
@@ -822,6 +827,7 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["state_append_sliding.wgsl", stateAppendWgsl(true)],
   ];
   for (const [name, generated] of cases) {
+    if (WRITE_SNAPSHOTS) await writeTextFile(fixtureUrl(name), generated);
     assertEquals(generated, await fixture(name), name);
   }
   // MUST: スナップショットの列挙とディレクトリの中身を突き合わせる。列挙から漏れた
