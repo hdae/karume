@@ -1,4 +1,4 @@
-// karume attention_state_qk (states 形の S 実体化, f32, D 並列縮約, readonly = past のみ, sliding window, GQA)
+// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction, readonly = past only, sliding window, GQA)
 struct Params {
   rows_block: u32,
   row_offset: u32,
@@ -72,8 +72,8 @@ fn main(
   let row = params.row_offset + local_row;
   let q_base = (z * params.chunk_rows + row) * params.depth;
   let kv_plane = z / params.kv_repeat;
-  // 読むのはスロット（past）だけ。端数タイル（cl ≥ live）は内積を回さず **return もしない**
-  // （下の barrier は一様制御流の中だけ）
+  // Only the slot (past) is read. The edge tile (cl ≥ live) does not run the dot product and **does
+  // not return either** (the barrier below sits only inside uniform control flow)
   let inside = cl < live && in_window(col, past);
   var acc = 0.0;
   if (inside) {
@@ -81,7 +81,7 @@ fn main(
   }
   scratch[lane * 16u + lid.x] = acc;
   workgroupBarrier();
-  // 固定順の木縮約（stride 8 → 4 → 2 → 1）— 決定性の根拠
+  // Fixed-order tree reduction (stride 8 → 4 → 2 → 1) — the basis of determinism
   var stride = 8u;
   while (stride > 0u) {
     if (lane < stride) {
@@ -91,7 +91,8 @@ fn main(
     workgroupBarrier();
     stride = stride / 2u;
   }
-  // 述語外は -inf。live 範囲は**述語外でも必ず書く**（書かないと ② が前回の残骸を食う）
+  // -inf outside the predicate. The live range is **always written, even outside the predicate**
+  // (otherwise ② consumes the previous leftovers)
   if (lane == 0u && cl < live) {
     var value = bitcast<f32>(params.neg_inf);
     if (inside) {

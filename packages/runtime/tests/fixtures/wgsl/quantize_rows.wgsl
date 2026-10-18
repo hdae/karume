@@ -1,4 +1,4 @@
-// karume quantize_rows (行ごとの per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127))
+// karume quantize_rows (per-row per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127))
 struct Params {
   rows: u32,
   dim: u32,
@@ -26,13 +26,13 @@ fn main(
 ) {
   let lid = lid3.x;
   let dim = params.dim;
-  // 呼び出し側が dim % 4 == 0 を保証する（i8 ペイロードは平坦添字 4 詰め）
+  // The caller guarantees dim % 4 == 0 (the i8 payload packs 4 per flat index)
   let quads = dim / 4u;
   var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 行の絶対値最大（NaN はビット列判定で伝播 — 素の max は NaN を飲む）
+    // ① Absolute maximum of the row (NaN propagates by a bit-pattern check — plain max swallows it)
     var acc = 0.0;
     var i = lid;
     while (i < dim) {
@@ -50,14 +50,16 @@ fn main(
       stride = stride / 2u;
     }
     let amax = scratch[0u];
-    // 全ゼロ行は s = tiny → q = 0 → 0·tiny = 0 で厳密。NaN は max に飲まれるので外殻で通す。
-    // MUST: 127 での除算ではなく **1/127 との乗算**（乗算だけが正しく丸められる — 上の MUST）
+    // An all-zero row is exact: s = tiny → q = 0 → 0·tiny = 0. max swallows NaN, so the outer
+    // select passes it.
+    // MUST: **multiplication by 1/127**, not division by 127 (only multiplication is correctly
+    // rounded — the MUST above)
     let s = select(max(amax * 0.007874015748031496, 1.1754943508222875e-38), amax, is_nan_bits(amax));
     if (lid == 0u) {
       xs[row] = s;
     }
 
-    // ② 4 連続要素（quad）ごとに量子化して 1 語へ詰める
+    // ② Quantize each 4 consecutive elements (quad) and pack them into one word
     let qbase = row * quads;
     var q = lid;
     while (q < quads) {
@@ -68,7 +70,7 @@ fn main(
       q = q + 256u;
     }
 
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // Make sure scratch[0] has been read before the next row overwrites scratch[lid]
     workgroupBarrier();
     row = row + nwg.x;
   }

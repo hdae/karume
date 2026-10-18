@@ -1,30 +1,33 @@
 /**
- * `sigmoid(x) → mul` の中間 f32 格納境界を保った SiLU 融合カーネル（融合ルール `silu` の
- * 実体 — src/runtime/fusion.ts）。
+ * The SiLU fusion kernel that keeps the intermediate f32 storage boundary of `sigmoid(x) → mul`
+ * (the body of the fusion rule `silu` — src/runtime/fusion.ts).
  *
- * 置換元の primitive 列は sigmoid の結果を storage へ書き、次 dispatch の mul が読み戻す。
- * 単に `x * sigmoid_stable(x)` と書くとこの境界をコンパイラが畳めるため、sigmoid の f32
- * ビット列を workgroup `u32` へ書いて barrier 後に読み戻し、明示的な materialization 点を残す。
+ * The primitive sequence it replaces writes the sigmoid result to storage, and the next dispatch's
+ * mul reads it back. Written simply as `x * sigmoid_stable(x)`, the compiler could fold this
+ * boundary, so the sigmoid's f32 bit pattern is written to a workgroup `u32` and read back after a
+ * barrier, leaving an explicit materialization point.
  *
- * **この「丸め障壁」は WGSL 仕様の保証ではない** — 仕様は浮動小数の fusion（fma への縮約）を
- * 許すだけで、workgroup memory 往復を最適化障壁として尊重することは要求していない。有限値の
- * ビット一致はバックエンドごとの実 GPU A/B（tests/gpu_silu_fusion_test.ts）で採用門にした
- * 実測事実であり、**バックエンド更新で PNG sha256 門が割れたら、まずここを疑うこと**
- * （融合を外して primitive 列に戻せば切り分けられる）。WGSL が規定しない NaN payload に
- * ついては分類の一致だけを契約にする。
+ * **This "rounding barrier" is not guaranteed by the WGSL specification** — the specification only
+ * allows floating-point fusion (contraction to fma) and does not require a workgroup memory round
+ * trip to be respected as an optimisation barrier. The bit equality of finite values is a measured
+ * fact used as the adoption check in per-backend real-GPU A/B (tests/gpu_silu_fusion_test.ts);
+ * **if a backend update breaks the PNG sha256 regression check, suspect this first** (removing the
+ * fusion and going back to the primitive sequence isolates it). For NaN payloads, which WGSL does
+ * not specify, only matching classification is part of the contract.
  *
- * MUST: barrier は workgroup 一様な block loop の中だけに置く（2 本目は、次 block の書き込みを
- * 前 block の全 lane が読み終えてから始めるため）。subgroup / atomics / optional feature を
- * 使わないので WebGPU core の Metal / Dawn / wgpu 経路で使える。
- * MUST: sigmoid 本体は elementwise codegen と**同じ文字列**を共有する（別々に書くと
- * primitive と融合版で丸め列が割れうる）。
+ * MUST: barriers sit only inside the workgroup-uniform block loop (the second one makes the next
+ * block's writes start only after every lane of the previous block has finished reading). It uses
+ * no subgroups / atomics / optional features, so it works on WebGPU core's Metal / Dawn / wgpu
+ * paths.
+ * MUST: the sigmoid body shares **the same string** as the elementwise codegen (written
+ * separately, the primitive and the fused version could split in rounding sequence).
  */
 
 import { SIGMOID_STABLE_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
-/** 置換元 mul の入力順（有限値では可換だが、NaN payload はバックエンド差がありうる）。 */
+/** Input order of the replaced mul (commutative for finite values; NaN payloads may differ). */
 export type SiluMulOrder = "x-sigmoid" | "sigmoid-x";
 
 export const SILU_WORKGROUP_SIZE = 256;
@@ -40,13 +43,16 @@ export const siluKey = (order: SiluMulOrder): string => {
 };
 
 /**
- * MUST: 入力順は WGSL とパイプラインキーの両方に残す。有限値では乗算は可換でも、NaN payload
- * の選ばれ方はバックエンドごとに違いうるので、片方だけで畳むと沈黙で別の列になる。
- * NOTE: block 数の切り上げを `(n + 255) / 256` と書かない — n = u32::MAX で桁溢れする。
+ * MUST: the input order stays in both the WGSL and the pipeline key. Multiplication is commutative
+ * for finite values, but which NaN payload is chosen can differ per backend, so folding it on one
+ * side only silently produces a different sequence.
+ * NOTE: the ceiling of the block count is not written as `(n + 255) / 256` — it overflows at
+ * n = u32::MAX.
  */
 export const siluWgsl = (order: SiluMulOrder): string => {
   const canonicalOrder = canonicalizeOrder(order);
-  // 置換元 mul も元入力を別 dispatch で読み直す。レジスタ越しに持ち越さない形で書く。
+  // The replaced mul also re-reads the original input in a separate dispatch. Written so it is not
+  // carried over in a register.
   const product =
     canonicalOrder === "x-sigmoid"
       ? "x_for_mul * sigmoid_after_store"
@@ -93,7 +99,7 @@ fn main(
 `;
 };
 
-/** 16-byte uniform params。n は f32 input / output の要素数。 */
+/** 16-byte uniform params. n is the element count of the f32 input / output. */
 export const siluParams = (n: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("silu params", { n });
   return new Uint32Array([n, 0, 0, 0]);

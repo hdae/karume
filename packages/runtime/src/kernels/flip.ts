@@ -1,16 +1,20 @@
 /**
- * flip（静的軸の添字反転、f32）の固定カーネル。
+ * The fixed kernel of flip (index reversal along a static axis, f32).
  *
- * 軸の位置は `[outer, len, inner]` の 3 分割に畳んで運ぶ（`outer` = 反転軸より前の次元の積、
- * `inner` = 後ろの次元の積）。rank を params に載せないので rank 上限が要らず、
- * strided 族の負 stride 化（既存 params と決定性スナップショットの全面改版）も避けられる —
- * ADR 0014 が「新カーネル 1 本」を採った理由そのもの。
+ * The axis position is carried folded into three parts `[outer, len, inner]` (`outer` = the
+ * product of the dimensions before the flipped axis, `inner` = the product of those after it).
+ * Rank is not carried in params, so no rank limit is needed, and turning the strided family's
+ * strides negative (a full revision of the existing params and the determinism snapshots) is
+ * avoided too — exactly the reason ADR 0014 chose "one new kernel".
  *
- * MUST: 出力の全バイトを書く（full-write 不変条件 — ADR 0014 / 0004）。反転は全単射なので、
- * 1 dispatch = 出力 1 要素の grid-stride がそのまま全域被覆になる。
- * MUST: grid-stride ループ前提。1 次元の dispatch 上限（仕様既定 65535）は実モデルで超える。
- * MUST: 反転は `len - 1 - c`。`len - c` にすると先頭要素が範囲外を読み、shape も要素数も
- * 変わらないので値でしか検出できない（tests/gpu_ops_test.ts が非対称な列で固定する）。
+ * MUST: every byte of the output is written (the full-write invariant — ADR 0014 / 0004). The
+ * reversal is a bijection, so the grid-stride of one dispatch = one output element covers the
+ * whole range as is.
+ * MUST: grid-stride loop. Real models exceed the one-dimensional dispatch limit (spec default
+ * 65535).
+ * MUST: the reversal is `len - 1 - c`. With `len - c` the first element reads out of range, and
+ * since neither the shape nor the element count changes it is detectable only in the values
+ * (tests/gpu_ops_test.ts pins it with an asymmetric sequence).
  */
 
 import { assertU32Params } from "../codegen/params.ts";
@@ -51,9 +55,11 @@ export const FLIP_WGSL: string = [
 ].join("\n");
 
 /**
- * uniform の Params（3 語だが 16 バイト確保する — 16 バイト単位の確保はプロジェクトの
- * 慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
- * `outer` は載せない（`n = outer · len · inner` から復元は不要で、載せれば同じ事実の二重管理）。
+ * The uniform Params (three words, but 16 bytes are allocated — allocating in 16-byte units is a
+ * project convention (the fusion pass fixes the same form in ADR 0040), not a requirement of the
+ * specification).
+ * `outer` is not carried (recovering it from `n = outer · len · inner` is unnecessary, and carrying
+ * it would hold the same fact twice).
  */
 export const flipParams = (
   outer: number,

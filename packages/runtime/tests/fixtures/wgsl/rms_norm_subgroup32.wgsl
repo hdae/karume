@@ -35,13 +35,13 @@ fn main(
     let subtotal = subgroupAdd(acc);
     if (subgroupElect()) { scratch[sg] = subtotal; }
     workgroupBarrier();
-    // local_invocation_idとsubgroup内の配置の対応を仮定しない。
-    // 各subgroupが8個の部分和を同じ順に読み、全レーンへ合計を渡す。
+    // Do not assume a mapping between local_invocation_id and the position within a subgroup.
+    // Every subgroup reads the 8 partial sums in the same order and hands the total to all lanes.
     var across = 0.0;
     if (sub < numsg) { across = scratch[sub]; }
     let sum = subgroupAdd(across);
     let inv = inverseSqrt(sum * scale + params.eps);
-    // grid-strideで次の行が共有部分和を上書きする前に読み終える。
+    // Finish reading before the next grid-stride row overwrites the shared partial sums.
     workgroupBarrier();
     var o = lid;
     while (o < dim) {

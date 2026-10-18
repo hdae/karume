@@ -1,4 +1,4 @@
-// karume conv2d (x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout], f32, 直接畳み込み)
+// karume conv2d (x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout], f32, direct convolution)
 struct Dims {
   n: u32,
   batch: u32,
@@ -30,7 +30,7 @@ fn main(
   @builtin(num_workgroups) nwg: vec3<u32>,
 ) {
   let step = nwg.x * 256u;
-  // 契約検査（src/ops.ts）で groups は Cin / Cout を割り切る — 除算は厳密。
+  // The contract check (src/ops.ts) guarantees groups divides Cin / Cout — the division is exact.
   let in_per_group = dims.channels_in / dims.groups;
   let out_per_group = dims.channels_out / dims.groups;
   var i = gid.x;
@@ -43,10 +43,10 @@ fn main(
     let pixel = rest % plane;
     let oy = pixel / dims.width_out;
     let ox = pixel % dims.width_out;
-    // 入力側の開始位置は符号付き（padding ぶん負に出る）
+    // the start position on the input side is signed (it goes negative by the padding)
     let origin_y = i32(oy * dims.stride_h) - i32(dims.padding_h);
     let origin_x = i32(ox * dims.stride_w) - i32(dims.padding_w);
-    // 重みの第 2 軸は Cin/groups — グループ内の相対番号で引く
+    // the weight's second axis is Cin/groups — indexed by the relative number within the group
     let group_index = oc / out_per_group;
     let ic_base = group_index * in_per_group;
     var acc = bias[oc];
@@ -55,7 +55,7 @@ fn main(
       let w_base = (oc * in_per_group + ic_rel) * dims.kernel_h * dims.kernel_w;
       for (var kh = 0u; kh < dims.kernel_h; kh = kh + 1u) {
         let iy = origin_y + i32(kh * dims.dilation_h);
-        // padding 域は 0 詰め — 加算せずに読み飛ばす
+        // the padding region is zero-filled — skipped rather than added
         if (iy < 0 || u32(iy) >= dims.height_in) {
           continue;
         }

@@ -1,106 +1,118 @@
 /**
- * i8a8 GEMM 族（linear / 融合 attention の ①QK・③PV）が共有する**タイル幾何のパラメタ面**。
+ * The **tile-geometry parameter surface** shared by the i8a8 GEMM family (linear and ①QK / ③PV of
+ * fused attention).
  *
- * 3 本のカーネルは生成器を共有しない（違いが断片差し込みでは吸収できない位置に散っている —
- * src/kernels/linear-i8a8.ts の docstring）が、**幾何の算術と内積ループだけはここ 1 箇所**に
- * 置く。幾何を各ファイルの定数へ書き写すと、`sa` / `sb` の添字算術（pack ストライド・充填の
- * スレッド割当）が 3 通りに分岐して、片方だけ静かに壊れる形になる。
+ * The 3 kernels do not share a generator (their differences are scattered in places that fragment
+ * insertion cannot absorb — the docstring of src/kernels/linear-i8a8.ts), but **the geometry
+ * arithmetic and the inner-product loop live only here, in one place**. Copying the geometry into
+ * constants in each file would let the index arithmetic of `sa` / `sb` (pack stride, thread
+ * assignment of the fill) diverge three ways, so that one of them breaks silently.
  *
  * ```
- * tileM = regM · wgY   （1 workgroup が持つ出力の行数）
- * tileN = regN · wgX   （                     列数）
- * threads = wgX · wgY  （1 スレッドが regM×regN の出力を持つ）
+ * tileM = regM · wgY   (rows of output one workgroup holds)
+ * tileN = regN · wgX   (columns                          )
+ * threads = wgX · wgY  (one thread holds regM×regN outputs)
  * ```
  *
- * ## なぜパラメタにしてよいか（数値契約との関係）
+ * ## Why parameterising is allowed (relation to the numeric contract)
  *
- * i8a8 の縮約は **i32 の厳密加算で順序非依存**なので、「どのスレッドがどの出力を担当するか」
- * を変えても返る整数は 1 ビットも動かない（RTX 3080 Ti で 100 変種以上を production カーネルと
- * バイト単位で突合し不一致 0 件 — docs/research/2026-08-10-kernel-variant-sweep.md）。
- * MUST: この自由度は **i8a8 経路だけのもの**。f32 / f16 の GEMM（src/kernels/gemm.ts）は
- * K 縮約順が数値契約そのもの（ADR 0022）で、同じ理屈は使えない。
- * MUST: 幾何は**パイプラインキーに載せる**（{@link i8a8GeometryKeyPart}）。載せないと
- * 「同一キー → バイト同一 WGSL」の決定性が崩れる（`gemmUsesVec4` の v4 フラグと同じ語彙）。
+ * i8a8 reduction is **exact i32 addition and order-independent**, so changing "which thread handles
+ * which output" does not move the returned integers by a single bit (on an RTX 3080 Ti, more than 100
+ * variants were compared byte by byte against the production kernel with 0 mismatches —
+ * docs/research/2026-08-10-kernel-variant-sweep.md).
+ * MUST: this freedom **belongs to the i8a8 path only**. For the f32 / f16 GEMM
+ * (src/kernels/gemm.ts) the K reduction order is the numeric contract itself (ADR 0022), and the same
+ * reasoning does not apply.
+ * MUST: the geometry **goes into the pipeline key** ({@link i8a8GeometryKeyPart}). Without it the
+ * determinism "same key → byte-identical WGSL" breaks (the same vocabulary as the v4 flag of
+ * `gemmUsesVec4`).
  *
- * ## 既定の出どころ
+ * ## Where the default comes from
  *
- * {@link defaultI8a8Geometry} が唯一の選択点。実測（同上・§2 / §3.2）で
- * linear と ①QK は `M128N64 r8×8 wg8×16 K16`（3 形状で ×1.39〜1.47 / QK ×1.92）、
- * ③PV だけ `M64N128 r8×8 wg16×8 K16`（N = D = 128 が 1 タイルに収まる形 — ×1.74）が勝つ。
- * 律速は LDS 帯域 × 発行で、効くのは**レジスタブロック（regM·regN）が第一**・
- * threads ≤ 128 が第二・tileK が第三。
+ * {@link defaultI8a8Geometry} is the only selection point. In measurement (same research, §2 /
+ * §3.2) linear and ①QK are won by `M128N64 r8×8 wg8×16 K16` (×1.39–1.47 on 3 shapes / QK ×1.92),
+ * and only ③PV by `M64N128 r8×8 wg16×8 K16` (the shape where N = D = 128 fits in one tile — ×1.74).
+ * The bottleneck is LDS bandwidth × issue; what matters is **first the register block
+ * (regM·regN)**, second threads ≤ 128, third tileK.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
 import { workgroupVariableBytes } from "./workgroup-storage.ts";
 
-/** i8 ペイロードの 4 詰め（u32 1 語 = 4 要素）。dp4a の粒度そのもの。 */
+/** Packing i8 payload by 4 (one u32 word = 4 elements). Exactly the granularity of dp4a. */
 export const I8A8_PACK = 4;
 
-/** 幾何を選ぶ単位。**キーの op 欄と一致させる**（診断で読み手が対応を取れる形にする）。 */
+/**
+ * The unit a geometry is chosen for. **Matches the op field of the key** (so that a reader of
+ * diagnostics can map one to the other).
+ */
 type I8a8GemmOp = "linear" | "attention_qk" | "attention_pv";
 
 /**
- * 生成パラメタ。出力タイル辺は `regM · wgY` × `regN · wgX` で**導出**する
- * （タイル辺を独立に持つと 3 つの値が食い違いうる — 導出なら食い違いようがない）。
+ * Generation parameters. The output tile edges are **derived** as `regM · wgY` × `regN · wgX`
+ * (holding the tile edges independently would let 3 values disagree — derived, they cannot).
  */
 export type I8a8Geometry = {
-  /** 1 スレッドが持つ出力の行数。 */
+  /** Rows of output one thread holds. */
   readonly regM: number;
-  /** 1 スレッドが持つ出力の列数（`acc` を vec4 に束ねる都合で 4 の倍数）。 */
+  /** Columns of output one thread holds (a multiple of 4, because `acc` is grouped into vec4). */
   readonly regN: number;
-  /** workgroup の x 辺（列方向）。 */
+  /** x edge of the workgroup (column direction). */
   readonly wgX: number;
-  /** workgroup の y 辺（行方向）。 */
+  /** y edge of the workgroup (row direction). */
   readonly wgY: number;
-  /** K タイル幅（要素数 — pack 数は `tileK / 4`）。 */
+  /** K tile width (in elements — the pack count is `tileK / 4`). */
   readonly tileK: number;
 };
 
-/** 出力タイルの行数。dispatch の y は `ceil(m / tileM)`。 */
+/** Rows of the output tile. The dispatch's y is `ceil(m / tileM)`. */
 export const i8a8TileM = (geometry: I8a8Geometry): number => geometry.regM * geometry.wgY;
 
-/** 出力タイルの列数。dispatch の x は `ceil(n / tileN)`。 */
+/** Columns of the output tile. The dispatch's x is `ceil(n / tileN)`. */
 export const i8a8TileN = (geometry: I8a8Geometry): number => geometry.regN * geometry.wgX;
 
-/** 1 workgroup のスレッド数。 */
+/** Threads per workgroup. */
 export const i8a8Threads = (geometry: I8a8Geometry): number => geometry.wgX * geometry.wgY;
 
-/** K タイルあたりのパック数（共有タイルの pack ストライド）。 */
+/** Packs per K tile (the pack stride of the shared tile). */
 export const i8a8KPacks = (geometry: I8a8Geometry): number => geometry.tileK / I8A8_PACK;
 
 /**
- * 共有タイル充填の担当ストライド。1 スレッドは `tid / kPacks` 行目から
- * このストライドで {@link i8a8ASlots} 本（B 側は {@link i8a8BSlots} 本）を埋める。
+ * The assignment stride of the shared-tile fill. One thread fills {@link i8a8ASlots} entries (on the
+ * B side {@link i8a8BSlots}) with this stride, starting at row `tid / kPacks`.
  */
 export const i8a8FillStride = (geometry: I8a8Geometry): number =>
   i8a8Threads(geometry) / i8a8KPacks(geometry);
 
-/** A（活性 / q / P̃）タイルを 1 スレッドが埋める本数。 */
+/** Entries of the A (activation / q / P̃) tile one thread fills. */
 export const i8a8ASlots = (geometry: I8a8Geometry): number =>
   i8a8TileM(geometry) / i8a8FillStride(geometry);
 
-/** B（重み / k / Vᵀ）タイルを 1 スレッドが埋める本数。 */
+/** Entries of the B (weight / k / Vᵀ) tile one thread fills. */
 export const i8a8BSlots = (geometry: I8a8Geometry): number =>
   i8a8TileN(geometry) / i8a8FillStride(geometry);
 
-/** u32 1 語のバイト数（共有タイル sa / sb の要素型）。 */
+/** Bytes of one u32 word (the element type of the shared tiles sa / sb). */
 const U32_BYTES = 4;
 
 /**
- * 共有タイル sa（`kPacks · tileM` 語）+ sb（`kPacks · tileN` 語）が使う workgroup storage のバイト数
- * （WebGPU が `maxComputeWorkgroupStorageSize` と比べる量 — {@link workgroupVariableBytes}）。linear /
- * 融合 attention ①QK・③PV の 3 本とも同じ 2 本の宣言なので op に依らない。
- * MUST: 生成器の `var<workgroup>` 宣言と同じ式であること（tests/geometry_profile_test.ts が WGSL の宣言から
- * 数えた総量と突き合わせる）— 食い違うと上限の門（geometry-profile.ts）が上限超えの表を通す。
+ * Bytes of workgroup storage used by the shared tiles sa (`kPacks · tileM` words) + sb
+ * (`kPacks · tileN` words) (the amount WebGPU compares with `maxComputeWorkgroupStorageSize` —
+ * {@link workgroupVariableBytes}). linear and ①QK / ③PV of fused attention all have the same 2
+ * declarations, so it does not depend on the op.
+ * MUST: the same expression as the generator's `var<workgroup>` declarations
+ * (tests/geometry_profile_test.ts compares it with the total counted from the WGSL declarations) —
+ * if they disagree, the limit check (geometry-profile.ts) lets a table that exceeds the limit
+ * through.
  */
 export const i8a8WorkgroupStorageBytes = (geometry: I8a8Geometry): number =>
   workgroupVariableBytes(i8a8KPacks(geometry) * i8a8TileM(geometry) * U32_BYTES) +
   workgroupVariableBytes(i8a8KPacks(geometry) * i8a8TileN(geometry) * U32_BYTES);
 
 /**
- * 幾何の整合を生成時に落とす。**割り切れない組み合わせは共有タイルの穴になる**
- * （充填が届かない語が 0 のまま内積へ入る = 例外の出ない誤値）ので、fail loudly が唯一の門。
+ * Rejects an inconsistent geometry at generation time. **A combination that does not divide evenly
+ * leaves holes in the shared tile** (words the fill does not reach enter the inner product as 0 =
+ * a wrong value with no exception), so failing loudly is the only guard.
  */
 export const assertI8a8Geometry = (geometry: I8a8Geometry, where: string): void => {
   const { regM, regN, wgX, wgY, tileK } = geometry;
@@ -139,13 +151,15 @@ export const assertI8a8Geometry = (geometry: I8a8Geometry, where: string): void 
 };
 
 /**
- * i4 group 長と K タイルの整合門（**w4a8 変種だけ**の門 — {@link "./linear-i8a8.ts"}）。
+ * Consistency guard between the i4 group length and the K tile (a guard of **the w4a8 variant
+ * only** — {@link "./linear-i8a8.ts"}).
  *
- * MUST: `groupSize % tileK == 0`。1 枚の K タイルが group 境界を跨ぐと、そのタイルの整数
- * 内積に 2 つの group の重みが混ざり、flush では片方の scale しか掛からない。形も型も
- * 合ったまま値だけが狂う**沈黙誤値**なので、生成時の fail loudly が唯一の門になる。
+ * MUST: `groupSize % tileK == 0`. If one K tile crosses a group boundary, the integer inner product
+ * of that tile mixes the weights of 2 groups, and the flush applies only one of the scales. Shape
+ * and type stay consistent while only the values go wrong — a **silent wrong value** — so failing
+ * loudly at generation time is the only guard.
  *
- * NOTE: 逆向き（tileK が group より大きい）は上の割り切れ条件が同時に落とす。
+ * NOTE: the reverse (tileK larger than the group) is rejected by the same divisibility condition.
  */
 export const assertI8a8GroupGeometry = (
   geometry: I8a8Geometry,
@@ -161,38 +175,41 @@ export const assertI8a8GroupGeometry = (
 };
 
 /**
- * パイプラインキーの幾何判別子。`reg64x64r8x4w16v4`（f32 骨格の {@link "./gemm.ts"}
- * `gemmKeyPart`）の流儀を保ったまま、**タイル辺だけでは幾何が決まらなくなった**ぶんを足す
- * （`M128N64` は `r8×8 wg8×16` とも `r16×8 wg8×8` とも組めるので、タイル辺だけのキーは
- * 別物へ衝突する）。v4 フラグの位置と綴りは従来どおり末尾。
+ * The geometry discriminator of the pipeline key. It keeps the style of `reg64x64r8x4w16v4`
+ * (`gemmKeyPart` of the f32 skeleton, {@link "./gemm.ts"}) and adds what is needed now that **the
+ * tile edges alone no longer determine the geometry** (`M128N64` can be built as `r8×8 wg8×16` or as
+ * `r16×8 wg8×8`, so a key of tile edges alone would collide with a different kernel). The position
+ * and spelling of the v4 flag stay at the end as before.
  */
 export const i8a8GeometryKeyPart = (geometry: I8a8Geometry, v4: boolean): string =>
   `tile${i8a8TileM(geometry)}x${i8a8TileN(geometry)}r${geometry.regM}x${geometry.regN}` +
   `w${geometry.wgX}x${geometry.wgY}k${geometry.tileK}${v4 ? "v4" : ""}`;
 
-/** linear / ①QK の既定（実測で 3 形状すべてが同じ最良点を指した唯一の変種）。 */
+/** Default for linear / ①QK (the only variant all 3 shapes picked as their best in measurement). */
 const GEOMETRY_M128N64: I8a8Geometry = { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 };
 
-/** ③PV の既定（N = D = 128 を 1 タイルで覆う形が self / cross とも勝つ）。 */
+/** Default for ③PV (the shape that covers N = D = 128 with one tile wins for both self and cross). */
 const GEOMETRY_M64N128: I8a8Geometry = { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 16 };
 
 /**
- * 既定の幾何を決める**唯一の純関数**。
+ * The **only pure function** that decides the default geometry.
  *
- * 現状は op ごとの定数で、形状バケットは切っていない — L2（4096×8192×2048）だけは
- * `r16×8 wg8×8` が僅差（~6%）で勝つが、境界を 1 本切るとキー本数と検証面が倍になる。
- * 手動チューン（掃引）で作った adapter 別の表は、この関数ではなくプロファイル
- * （src/kernels/geometry-profile.ts の `i8a8` 欄 — DECIDED: ADR 0115）が持つ。この関数は既定
- * プロファイルの値の出どころで、Session の導出相はプロファイルから幾何を受け取って流すだけ。
+ * For now it is a constant per op, with no shape buckets — only on L2 (4096×8192×2048) does
+ * `r16×8 wg8×8` win by a narrow margin (~6%), but adding one boundary doubles the key count and the
+ * verification surface. The per-adapter tables made by manual tuning (sweeps) are held not by this
+ * function but by the profile (the `i8a8` field of src/kernels/geometry-profile.ts — DECIDED: ADR
+ * 0115). This function is the source of the default profile's values; the Session's derivation phase
+ * only receives the geometry from the profile and passes it on.
  */
 export const defaultI8a8Geometry = (op: I8a8GemmOp): I8a8Geometry =>
   op === "attention_pv" ? GEOMETRY_M64N128 : GEOMETRY_M128N64;
 
 /**
- * i32 accumulator の初期化。**配列 1 本ではなく `acc{行}_{列 quad}` の名前付き変数**にするのは、
- * `acc[i]` の動的添字がアドレス可能な関数ローカル領域を要求し、レジスタに載らずローカル
- * メモリへ落ちるため（Metal で顕著）。展開しても縮約は i32 の厳密加算のまま・出力ごとに
- * 独立なので、**返る整数は 1 ビットも変わらない**。
+ * Initialisation of the i32 accumulator. It uses **named variables `acc{row}_{column quad}` rather
+ * than one array** because the dynamic index of `acc[i]` requires an addressable function-local
+ * region, which does not stay in registers and spills to local memory (pronounced on Metal).
+ * Unrolled, the reduction is still exact i32 addition and independent per output, so **the returned
+ * integers do not change by a single bit**.
  */
 export const i8a8AccumulatorInit = (geometry: I8a8Geometry): string => {
   const quads = geometry.regN / I8A8_PACK;
@@ -204,12 +221,14 @@ export const i8a8AccumulatorInit = (geometry: I8a8Geometry): string => {
 };
 
 /**
- * K タイル内側の内積ループ。共有タイル（`sa` = `[pack][行]` / `sb` = `[pack][列]`）から
- * B を `regN` 語・A を `regM` 語読んで `regM · regN` 個の整数内積を回す。
+ * The inner-product loop inside a K tile. It reads `regN` words of B and `regM` words of A from the
+ * shared tiles (`sa` = `[pack][row]` / `sb` = `[pack][column]`) and runs `regM · regN` integer inner
+ * products.
  *
- * MUST: 3 本のカーネルはこの 1 本を使う（幾何の添字算術を書き写すと、片方だけ pack ストライドを
- * 取り違える形になる）。1 出力あたりの加算順序は「K タイル昇順・pack 内 4 語まとめ」で、
- * 幾何を変えても i32 の厳密加算なので結果は順序非依存。
+ * MUST: the 3 kernels use this one loop (copying the geometry's index arithmetic would let one of
+ * them get the pack stride wrong). The addition order per output is "K tiles ascending, 4 words of a
+ * pack together"; whatever the geometry, it is exact i32 addition, so the result is
+ * order-independent.
  */
 export const i8a8InnerProductLoop = (geometry: I8a8Geometry): string => {
   const { regM, regN } = geometry;
@@ -230,10 +249,11 @@ export const i8a8InnerProductLoop = (geometry: I8a8Geometry): string => {
     }).join("\n");
     return `      let a${row} = sa[arow_at${at(row)}];\n${updates}`;
   }).join("\n");
-  return `    // 共有ロード ${regN + regM} 回（B の ${regN} 語 + A の ${regM} 語）で ${
+  return `    // ${regN + regM} shared loads (${regN} words of B + ${regM} words of A) give ${
     regM * regN
-  } 個の整数内積 = ${regM * regN * I8A8_PACK} MAC。
-    // 縮約は i32 の厳密加算なので**順序に依存しない**（f32 骨格と違い加算順は数値契約に無い）
+  } integer inner products = ${regM * regN * I8A8_PACK} MACs.
+    // The reduction is exact i32 addition, so it **does not depend on order** (unlike the f32
+    // skeleton, the addition order is not part of the numeric contract)
     for (var p = 0u; p < ${kPacks}u; p = p + 1u) {
       let bcol = p * ${i8a8TileN(geometry)}u + lid.x * ${regN}u;
 ${bLoads}
@@ -242,7 +262,7 @@ ${rows}
     }`;
 };
 
-/** 生成コメント用の幾何注記（ヘッダ 1 行に載せる形）。 */
+/** Geometry note for generated comments (in a form that fits on one header line). */
 export const i8a8GeometryNote = (geometry: I8a8Geometry): string =>
   `タイル ${i8a8TileM(geometry)}x${i8a8TileN(
     geometry,

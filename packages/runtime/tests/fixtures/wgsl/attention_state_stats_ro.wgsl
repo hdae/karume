@@ -1,4 +1,4 @@
-// karume attention_state_stats (states 形の行統計 m = amax(S) と inv = 1/Σexp(S - m), f32, readonly = past のみ)
+// karume attention_state_stats (states-form row statistics m = amax(S) and inv = 1/Σexp(S - m), f32, readonly = past のみ)
 struct Params {
   batch_heads: u32,
   rows_block: u32,
@@ -57,7 +57,7 @@ fn main(
     let row = (index / rows) * params.rows_block + index % rows;
     let base = row * params.col_cap;
 
-    // ① 行の最大値。identity は **-inf**（有限 sentinel は MUST NOT — ADR 0067 決定 6）
+    // ① Row maximum. The identity is **-inf** (a finite sentinel is MUST NOT — ADR 0067 decision 6)
     var hi = neg_inf;
     var i = lid;
     while (i < live) {
@@ -77,7 +77,8 @@ fn main(
     let amax = scratch[0u];
     workgroupBarrier();
 
-    // ② Σ exp(S - amax)。**空行（amax == -inf・P = 0 の列 0 本を含む）は 1 度も回さない**
+    // ② Σ exp(S - amax). **An empty row (amax == -inf, including P = 0 with 0 columns)
+    // never runs it**
     let empty = amax == neg_inf;
     var acc = 0.0;
     if (!empty) {

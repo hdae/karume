@@ -1,4 +1,4 @@
-// karume attention_state_pv (states 形の O = P @ V, f32, KV 並列縮約, readonly = past のみ, sliding window)
+// karume attention_state_pv (states-form O = P @ V, f32, KV-parallel reduction, readonly = past only, sliding window)
 struct Params {
   rows_block: u32,
   row_offset: u32,
@@ -68,7 +68,7 @@ fn main(
   let s_base = s_row * params.col_cap;
   let amax = stats[s_row * 2u];
   let inv = stats[s_row * 2u + 1u];
-  // レーンごとの部分和（col 昇順・stride KV_LANES）。読むのはスロット（past）だけ
+  // Per-lane partial sum (ascending col, stride KV_LANES). Only the slot (past) is read
   var acc = 0.0;
   if (in_depth) {
     for (var cl = lane; cl < live; cl = cl + 16u) {

@@ -1,17 +1,21 @@
 /**
- * linear（`x[…,in] × W[out,in] + b[out]`、f32）。先行次元は平坦化して `[m,k] × [k,n]` の
- * 2 次元 GEMM に落とす（`m` = 先行次元の積、`k` = 入力特徴数、`n` = 出力特徴数）。
+ * linear (`x[…,in] × W[out,in] + b[out]`, f32). The leading dimensions are flattened down to a 2-D
+ * GEMM `[m,k] × [k,n]` (`m` = product of the leading dimensions, `k` = input features, `n` = output
+ * features).
  *
- * 実体は GEMM 族が共有するレジスタブロッキング骨格（src/kernels/gemm.ts — 寸法は GemmGeometry）で、
- * matmul / bmm との違いは 3 点だけ:
+ * The body is the register-blocking skeleton shared by the GEMM family (src/kernels/gemm.ts —
+ * dimensions in GemmGeometry); it differs from matmul / bmm in only 3 points:
  *
- * - **重みは転置レイアウト**（torch の `Linear.weight` は `[out, in]`）。連続方向が k なので、
- *   1 スレッドが k 連続 4 要素を読み、**共有メモリ側で転置して置く**（転置コピーは出さない）。
- * - 末尾で bias を 1 度だけ足す（accumulator に初期値として入れない — 縮約順序を matmul と
- *   同じ「k 昇順の逐次」に保つため。bias を先に積むと丸めの並びが変わる）。
- * - 重み格納の変種を持つ（`w=f32` / `w=f16` / `w=i8` / `w=i4` / `w=i2` — ADR 0018 / 0019 / 0069 /
- *   0097）。差は共有メモリへの読み出し式（と i8 / i4 / i2 の scale 束縛）だけで、i8 の scale は**共有タイルへの読み込み時**に
- *   要素ごとに掛かる（MAC ごとでも縮約の外でもない — ADR 0019）。
+ * - **The weight is in transposed layout** (torch's `Linear.weight` is `[out, in]`). The contiguous
+ *   direction is k, so one thread reads 4 k-contiguous elements and **places them transposed on the
+ *   shared-memory side** (no transposed copy is emitted).
+ * - The bias is added exactly once at the end (it is not put into the accumulator as the initial
+ *   value — to keep the reduction order the same "sequential in ascending k" as matmul. Adding the
+ *   bias first changes the order of rounding).
+ * - It has weight-storage variants (`w=f32` / `w=f16` / `w=i8` / `w=i4` / `w=i2` — ADR 0018 / 0019 /
+ *   0069 / 0097). The only difference is the expression that reads into shared memory (and the scale
+ *   bindings of i8 / i4 / i2); the i8 scale is applied per element **when loading into the shared
+ *   tile** (neither per MAC nor outside the reduction — ADR 0019).
  */
 
 import { assertU32Params } from "../codegen/params.ts";
@@ -27,15 +31,16 @@ import {
 export { LINEAR_SCALE_BINDING } from "./gemm.ts";
 
 /**
- * `rows` は平坦化後の M（先行次元の積）。タイル幾何のバケット（src/kernels/gemm-geometry.ts の
- * `gemmGeometryForRows`）を決める形状由来の値で、MUST: キー・WGSL・dispatch に**同じ M** を通す。
+ * `rows` is the M after flattening (the product of the leading dimensions). It is the shape-derived
+ * value that selects the tile-geometry bucket (`gemmGeometryForRows` in
+ * src/kernels/gemm-geometry.ts), and MUST: pass the **same M** to the key, the WGSL and the dispatch.
  *
- * `groupSize` は i4 の group 長（i4 のとき必須）。shift を WGSL に焼くので**キーにも入れる**
- * （`:wi4g32` — 同一キー → バイト同一 WGSL の codegen 決定性）。
+ * `groupSize` is the i4 group length (required for i4). The shift is baked into the WGSL, so **it
+ * also goes into the key** (`:wi4g32` — codegen determinism: same key → byte-identical WGSL).
  *
- * `geometry` は明示の幾何（src/kernels/gemm.ts の `GemmSpec` — Session ではプロファイルの値・
- * 計測では掃引の候補）。渡すと `rows` のバケットより優先し、MUST: キーと WGSL へ**同じ値**を
- * 通す（`rows` と同じ規律）。
+ * `geometry` is the explicit geometry (`GemmSpec` in src/kernels/gemm.ts — in a Session the
+ * profile's value, in measurement a sweep candidate). When given it takes precedence over the `rows`
+ * bucket, and MUST: pass the **same value** to the key and the WGSL (the same discipline as `rows`).
  */
 export const linearKey = (
   weight: WeightStorage,
@@ -46,7 +51,7 @@ export const linearKey = (
   geometry?: GemmGeometry,
 ): string => {
   i4GroupShift("linear", weight, groupSize);
-  // i8 の scale 読出しを保護した世代。未変更の格納形式のキーは維持する。
+  // The generation that guarded the i8 scale read. Keys of unchanged storage formats are kept.
   return `linear:v${weight === "i8" ? 3 : 2}:f32:${gemmKeyPart(v4, rows, geometry)}${weightKeyPart(
     weight,
   )}${i4GroupKeyPart(groupSize)}${gemmComputeKeyPart(compute)}`;
@@ -71,13 +76,15 @@ export const linearWgsl = (
   });
 
 /**
- * uniform の Dims（m / n / k の u32 域は {@link gemmParams} が見る）。
+ * The uniform Dims (the u32 range of m / n / k is checked by {@link gemmParams}).
  *
- * MUST: 重みの論理要素数 `n·k ≤ 2^32 − 1`。GEMM 経路は行頭を論理要素番号 `wcol·dims.k` として
- * u32 で先に作り、ローダが語位置へ変える（i2 は `>> 4`・i4 は `>> 3`）。積が先に折り返すと
- * 上位ビットは戻らず、別の出力チャネルの重みを例外なしに読む。i2 では格納が約 1 GiB で届くので
- * binding 上限や常駐計画の圧縮後バイト数の検査では止まらない（格納形を問わず添字は同じ式なので、
- * 検査も格納形で分けない）。
+ * MUST: the logical element count of the weight `n·k ≤ 2^32 − 1`. The GEMM path first builds the row
+ * start as the logical element index `wcol·dims.k` in u32, and the loader turns it into a word
+ * position (i2 `>> 4`, i4 `>> 3`). If the product wraps first, the high bits do not come back and the
+ * weights of another output channel are read without any error. With i2 the storage reaches this at
+ * about 1 GiB, so neither the binding limit nor the residency plan's compressed-byte check stops it
+ * (the index is the same expression regardless of storage format, so the check is not split by
+ * storage format either).
  */
 export const linearParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> => {
   const params = gemmParams("linear", m, n, k);

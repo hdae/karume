@@ -1,4 +1,4 @@
-// karume adaLN (layer_norm -> 1 + scale -> mul -> add, f32, staged 変調)
+// karume adaLN (layer_norm -> 1 + scale -> mul -> add, f32, staged modulation)
 struct Params {
   rows: u32,
   dim: u32,
@@ -25,14 +25,14 @@ fn main(
   let lid = lid3.x;
   let dim = params.dim;
   let scale = 1.0 / f32(dim);
-  // NOTE: 切り上げを (dim + 255) / 256 と書かない — dim = u32::MAX で桁溢れする。
+  // NOTE: the ceiling is not written as (dim + 255) / 256 — it overflows at dim = u32::MAX.
   let blocks = dim / 256u +
     select(0u, 1u, dim % 256u != 0u);
   var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 和 → 平均
+    // ① sum → mean
     var acc = 0.0;
     var i = lid;
     while (i < dim) {
@@ -50,10 +50,10 @@ fn main(
       stride = stride / 2u;
     }
     let mean = scratch[0u] * scale;
-    // scratch の読み終わりを揃えてから ② で上書きする
+    // make every read of scratch finish before ② overwrites it
     workgroupBarrier();
 
-    // ② 偏差平方和 → 母分散（correction = 0）
+    // ② sum of squared deviations → population variance (correction = 0)
     var sq = 0.0;
     var j = lid;
     while (j < dim) {
@@ -72,24 +72,26 @@ fn main(
       stride2 = stride2 / 2u;
     }
     let inv = 1.0 / sqrt(scratch[0u] * scale + params.eps);
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // make every read of scratch[0] finish before the next row overwrites scratch[lid]
     workgroupBarrier();
 
     var block = 0u;
     while (block < blocks) {
       let o = block * 256u + lid;
-      // ③ 変調係数 1 + scale の実体化（素の列では add ノードが storage へ書く点）
+      // ③ materialize the modulation factor 1 + scale (where the add node writes to storage in the
+      // plain sequence)
       if (o < dim) {
         staged[lid] = bitcast<u32>(scale_vec[o] + one[0u]);
       }
       workgroupBarrier();
-      // ④ 正規化（素の layer_norm と同一式）→ 乗算。素の mul と同じ位置で丸める。
+      // ④ normalisation (the same expression as the plain layer_norm) → multiply. Rounded at the
+      // same point as the plain mul.
       if (o < dim) {
         let modulation = bitcast<f32>(staged[lid]);
         staged[lid] = bitcast<u32>(((x[base + o] - mean) * inv * weight[o] + bias[o]) * modulation);
       }
       workgroupBarrier();
-      // ⑤ shift の加算（素の add ノード）
+      // ⑤ add shift (the plain add node)
       if (o < dim) {
         out[base + o] = bitcast<f32>(staged[lid]) + shift[o];
       }

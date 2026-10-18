@@ -32,7 +32,7 @@ fn main(
   let lid = lid3.x;
   let dim = params.dim;
   let neg_inf = f32_rank_key(params.neg_inf);
-  // x 軸 = 区間（1 workgroup = 1 区間・上限超過は fail loudly）・y 軸 = 行（grid-stride）
+  // x axis = span (1 workgroup = 1 span; exceeding the limit fails loudly), y axis = row (grid-stride)
   let group = wid.x;
   let start = group * 4096u;
   let end = min(start + 4096u, dim);

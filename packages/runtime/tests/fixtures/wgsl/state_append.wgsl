@@ -1,4 +1,4 @@
-// karume state_append (今 step の k / v を state スロットへ, f32)
+// karume state_append (this step's k / v into the state slot, f32)
 struct Params {
   kv_planes: u32,
   chunk_rows: u32,
@@ -26,7 +26,7 @@ fn main(
 ) {
   let past = lengths.past;
   let query = lengths.query;
-  // 総仕事は **B·Hkv·Q·D**（pad 行は添字空間に入らない = 書かれない）
+  // Total work is **B·Hkv·Q·D** (pad rows are not in the index space = not written)
   let total = params.kv_planes * query * params.depth;
   let stride = nwg.x * 256u;
   var i = gid.x;

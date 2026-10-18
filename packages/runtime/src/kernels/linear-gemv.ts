@@ -1,84 +1,97 @@
 /**
- * linear の **GEMV 族**（重み i2 / i4 / i8 格納、および M=1 の f16 / f32 格納 — ADR 0082 / 0097）。`linear` の 2 本目のカーネル族で、
- * 出力・束縛・uniform は既定経路（src/kernels/gemm.ts の linear）と同じまま、**担当割りだけ**が
- * 「1 スレッド = 1 出力列」へ変わる。M=1（decode）の変種と、小 M（2〜{@link LINEAR_GEMV_MAX_ROWS}・
- * 短い prefill / 投機検証）の**行ブロック変種**の 2 形を持つ（後者は ADR 0082 追記 5 /
- * perf-ledger K-21）。
+ * The **GEMV family** of linear (weights stored as i2 / i4 / i8, and f16 / f32 storage at M=1 —
+ * ADR 0082 / 0097). The second kernel family of `linear`: output, bindings and uniform stay the same
+ * as on the default path (linear in src/kernels/gemm.ts), and **only the work assignment** changes to
+ * "1 thread = 1 output column". It has 2 forms: the M=1 (decode) variant and the **row-block
+ * variant** for small M (2–{@link LINEAR_GEMV_MAX_ROWS}, short prefill / speculative verification)
+ * (the latter is ADR 0082 addendum 5 / perf-ledger K-21).
  *
- * ## なぜ既定の GEMM 骨格では足りないのか（機序 — ADR 0082 / research 2026-08-30 §7）
+ * ## Why the default GEMM skeleton is not enough (mechanism — ADR 0082 / research 2026-08-30 §7)
  *
- * 既定は M のバケットで幾何を選ぶ（src/kernels/gemm-geometry.ts の `gemmGeometryForRows`）が、
- * どのバケットも「共有タイル + K タイル 16 ごとの二重 barrier」という 1 つの骨格を共有する。
- * M=1 に当たる `GEOMETRY_M16N16`（64 スレッド）では:
+ * The default chooses the geometry by M bucket (`gemmGeometryForRows` in
+ * src/kernels/gemm-geometry.ts), but every bucket shares one skeleton: "shared tiles + a double
+ * barrier per K tile of 16". With `GEOMETRY_M16N16` (64 threads), which M=1 hits:
  *
- * - **出力を書くのは 64 スレッド中 4 本だけ**（`lid.y == 0` の行）。共有 A タイル（16 行 × K16）は
- *   1 行しか実体が無く、残り 15 行は 0 で埋めた死荷重になる。
- * - K タイルごとに `workgroupBarrier()` を 2 回通るため、**重み読みのレイテンシがタイル本数ぶん
- *   逐次に露出する**。実測は `k / 16 × ≈1.3µs` の k 比例で **n にほぼ非依存**、重みが L2 に
- *   収まる小形でも同じだけ遅い — つまり律速は帯域飢餓ではなく**発行の逐次化**。
+ * - **Only 4 of the 64 threads write output** (the row with `lid.y == 0`). The shared A tile (16
+ *   rows × K16) has only 1 real row; the other 15 rows are dead weight filled with 0.
+ * - Each K tile passes `workgroupBarrier()` twice, so **the latency of the weight reads is exposed
+ *   sequentially, once per tile**. The measurement is proportional to k, `k / 16 × ≈1.3µs`, and
+ *   **almost independent of n**; small shapes whose weights fit in L2 are just as slow — so the
+ *   bottleneck is not bandwidth starvation but **serialised issue**.
  *
- * 本族は共有メモリと barrier を丸ごと落とし、重み語を先読みしてメモリ並列度を作る。
- * `n` 本の独立した縮約が同時に走るので、遅延は列方向の並列で隠れる。
- * この費用は M=2〜32 でも M に無関係にそのまま残る（同じ幾何 M16N16 が M ≤ 64 を受ける —
- * research 2026-09-07 §7.2 で GEMM 経路 65〜67 ms が M=2〜16 で不変）ので、行ブロック変種は
- * 同じ手で同じ費用を消す。
+ * This family drops the shared memory and the barriers altogether and prefetches weight words to
+ * create memory parallelism. `n` independent reductions run at once, so the latency is hidden by
+ * parallelism across columns.
+ * This cost stays as is for M=2–32 too, independent of M (the same geometry M16N16 takes M ≤ 64 —
+ * in research 2026-09-07 §7.2 the GEMM path's 65–67 ms is unchanged across M=2–16), so the row-block
+ * variant removes the same cost with the same means.
  *
- * ## 行ブロック（M ≥ 2）— 重み語 1 回読みを `rows` 行で共有し、行方向は y タイル
+ * ## Row block (M ≥ 2) — one read of a weight word shared by `rows` rows, y tiles along rows
  *
- * 1 スレッドが 1 列 × `rows` 行の縮約を持ち、重み語（と i4 の group scale）は 1 回だけ読んで
- * 行ごとの x と積和する。M は `ceil(m / rows)` 枚の y タイルに割る（重みはタイルごとに読み直す）。
- * `rows` は {@link linearGemvRowsForShape} が **(格納, m, n, 並列度の目標) の純関数**で決める
- * （目標は Session 生成時に固定される静的なノブ — {@link ROWS_THREAD_TARGET}）。掃引（RTX 3080 Ti・
- * gemma4 E2B の census 13 形 × M ∈ {1..64} — docs/research/2026-09-07-gemv-rows-k21.md）で見えた機序:
+ * One thread holds the reduction of 1 column × `rows` rows, reads the weight word (and the i4 group
+ * scale) once and multiply-adds it with each row's x. M is split into `ceil(m / rows)` y tiles (the
+ * weights are re-read per tile). `rows` is decided by {@link linearGemvRowsForShape} as **a pure
+ * function of (storage, m, n, parallelism target)** (the target is a static knob fixed at Session
+ * creation — {@link ROWS_THREAD_TARGET}). The mechanism seen in the sweep (RTX 3080 Ti, the 13 census
+ * shapes of gemma4 E2B × M ∈ {1..64} — docs/research/2026-09-07-gemv-rows-k21.md):
  *
- * - スレッド数（= n × y タイル数）が **≈16K を下回る間は、行を 1 スレッドに畳むより y タイルで
- *   並列度を買う方が速い**（重みの読み直しは同じ dispatch 内で L2 が吸う）。n が小さい形
- *   （256 / 512 / 1536 列）は M=32 でも `rows = 1` が最良。
- * - 16K を超えた先は重みの転送量が効き、`rows` を増やして読み直しを減らす方が速い（lm_head
- *   262,144 列は `rows = M` が最良）。
- * - ただし 1 スレッドが 1 語あたりに抱える要素数（`rows × 刻み`）には天井が 2 つある。実行時間の
- *   天井は 512（i4 16 行 / i8 32 行 — その上はレジスタ圧で遅い）、**シェーダのコンパイル費**の
- *   天井がその手前の {@link ROWS_ELEMENTS_PER_WORD_CAP} = 256（生成テキストが行数に比例し、
- *   解析・検証の費用がテキスト量に超線形 — 定数の doc）。
+ * - **While the thread count (= n × y tiles) is below ≈16K, buying parallelism with y tiles is faster
+ *   than folding rows into one thread** (L2 absorbs the weight re-reads within one dispatch). Shapes
+ *   with small n (256 / 512 / 1536 columns) are best at `rows = 1` even at M=32.
+ * - Beyond 16K the weight traffic matters, and increasing `rows` to reduce re-reads is faster
+ *   (lm_head with 262,144 columns is best at `rows = M`).
+ * - However, the elements one thread holds per word (`rows × step`) have 2 ceilings. The run-time
+ *   ceiling is 512 (i4 16 rows / i8 32 rows — above that, register pressure slows it down), and the
+ *   ceiling of **shader compile cost** comes before it: {@link ROWS_ELEMENTS_PER_WORD_CAP} = 256
+ *   (generated text grows with the row count, and the cost of parsing and validation is
+ *   super-linear in the text size — see the constant's doc).
  *
- * 目標値 {@link ROWS_THREAD_TARGET} と天井 1 つずつで両側を再現し、形ごとの最良（oracle）との差は
- * census 加重で M ≤ 32 は 1〜5%・M ≤ 64 は ≤ 13%。M=1 は行ブロック化しない（既存の M=1 変種の
- * 生成物と同じテキスト — 実測でも同等以上で、decode の生成物を 1 バイトも動かさない）。
+ * The target {@link ROWS_THREAD_TARGET} and one ceiling reproduce both sides; the gap to the best
+ * per shape (oracle) is, census-weighted, 1–5% for M ≤ 32 and ≤ 13% for M ≤ 64. M=1 is not turned
+ * into a row block (the same text as the generated M=1 variant — equal or better in measurement too,
+ * and the generated decode shaders do not move by a single byte).
  *
- * ## 格納の軸（i4 / i8）
+ * ## The storage axis (i4 / i8)
  *
- * 機序（barrier による発行の逐次化）は格納 dtype に依らないので、族の内側では格納が**変種軸**に
- * なる。重み 1 語は**どちらも `vec4<u32>` = 16 B** で、運ぶ要素数（= 縮約の刻み
- * {@link linearGemvUnit}）だけが違う: i4 は 32 要素・i8 は 16 要素。scale の引き方も違い、
- * i4 は group ごと（k 依存なので語ごとに引き直す）・i8 は出力チャネルごと 1 本
- * （k 不変なので縮約の外で 1 度だけ束ねる — ADR 0019 のループ不変巻き上げ）。
+ * The mechanism (serialised issue caused by the barriers) does not depend on the storage dtype, so
+ * inside the family the storage is a **variant axis**. One weight word is **`vec4<u32>` = 16 B for
+ * both**, and only the number of elements it carries (= the reduction step {@link linearGemvUnit})
+ * differs: 32 elements for i4, 16 for i8. The scale lookup differs too: i4 per group (depends on k,
+ * so it is looked up again per word), i8 one per output channel (invariant in k, so it is bound once
+ * outside the reduction — the loop-invariant hoisting of ADR 0019).
  *
- * ## 数値契約（ビット同一 MUST）
+ * ## Numeric contract (bit identity MUST)
  *
- * MUST: 1 出力要素あたりの縮約は **k 昇順の逐次**・積和の字面は `acc = acc + a * b`・bias は
- * 最後に 1 度だけ加算。重みの復元は既定経路（weight-storage.ts の `dequant4`）と**同じ字面**で、
- * i4 は `f32(i32(u) − 8) * scale`・i8 は `f32(q) * scale` の成分ごと f32 乗算
- * （scale を縮約の外へ括り出さない — ADR 0019）。変わるのは ADR 0022 決定 3 が自由と認めた
- * **担当割り**だけ = **既定経路とビット同一**。行ブロックでも 1 出力要素あたりの縮約順・積の
- * 対応・bias の足し順は M=1 と同一。行ブロックでは語ごとの関数を行別に呼ぶが、
- * 復元の丸め点は同じ 1 個の f32 乗算を保つ（ADR 0082 追記 8・9）。
- * MUST: 先読み（`unroll`）は「語をまとめて読む」だけで、**積和の順序は語の昇順のまま**。
- * 語をまたいで積和を混ぜると 1 出力要素あたりの加算順が動き、契約が割れる。
- * NOTE: f32 の縮約に順序非依存の理論保証は無いので、ビット同一は gemm-geometry と同じく
- * **実測命題**（門 = tests/gpu_linear_gemv_test.ts の u32 完全一致）。
+ * MUST: the reduction per output element is **sequential in ascending k**, the literal form of the
+ * multiply-add is `acc = acc + a * b`, and the bias is added once at the end. Weight decode uses
+ * **the same literal form** as the default path (`dequant4` in weight-storage.ts): a per-component
+ * f32 multiply, `f32(i32(u) − 8) * scale` for i4 and `f32(q) * scale` for i8 (the scale is not
+ * factored out of the reduction — ADR 0019). What changes is only the **work assignment** that ADR
+ * 0022 decision 3 grants as free = **bit-identical to the default path**. In the row block too, the
+ * reduction order per output element, the pairing of products and the order of adding the bias are
+ * the same as at M=1. The row block calls a per-word function per row, but the rounding point of the
+ * decode stays the same single f32 multiply (ADR 0082 addenda 8 and 9).
+ * MUST: prefetching (`unroll`) only "reads words together"; **the multiply-add order stays in
+ * ascending word order**. Mixing multiply-adds across words would move the addition order per output
+ * element and break the contract.
+ * NOTE: f32 reduction has no theoretical guarantee of order independence, so bit identity is, as in
+ * gemm-geometry, **an empirical claim** (the check = exact u32 match in tests/gpu_linear_gemv_test.ts).
  *
- * MUST NOT: k を分割して部分和を足し直す（split-K）形は縮約順が変わるため、この族には
- * 入れない。別の任意指定カーネル `linearGemvParallelWgsl` は ADR 0098 に従う。
+ * MUST NOT: the form that splits k and adds partial sums back together (split-K) changes the
+ * reduction order, so it is not put into this family. The separate opt-in kernel
+ * `linearGemvParallelWgsl` follows ADR 0098.
  *
- * ## 幾何との関係（gemm-geometry の「唯一の選択点」MUST の射程）
+ * ## Relation to the geometry (the reach of gemm-geometry's "only selection point" MUST)
  *
- * gemm-geometry は「担当割りの選択点は `gemmGeometryForRows` 1 箇所」と書くが、その射程は
- * **GEMM 骨格の中**にとどまる（ADR 0082 決定 2）。本族は骨格を共有しない別カーネルで、選択は
- * 2 段 — **族の選択**（GEMV 族に入るか）は `buildLinear` の 1 箇所、**変種の選択**（M=1 変種か
- * 行ブロックか・行ブロックの `rows`）は {@link defaultLinearGemvRowsVariant} の 1 箇所 — で、
- * どちらも**プラン時 shape の純関数**。判別子はパイプラインキーの族名 `linear_gemv`（行ブロックは
- * 変種の `r<rows>`）に載る — 実行時オートチューン禁止と「同一キー → バイト同一 WGSL」は
- * どちらも保たれる。
+ * gemm-geometry says "the selection point of the work assignment is the one place
+ * `gemmGeometryForRows`", but its reach stays **inside the GEMM skeleton** (ADR 0082 decision 2).
+ * This family is a separate kernel that does not share the skeleton, and selection has 2 stages —
+ * **family selection** (whether to enter the GEMV family) in one place, `buildLinear`, and **variant
+ * selection** (M=1 variant or row block, and the row block's `rows`) in one place,
+ * {@link defaultLinearGemvRowsVariant} — both **pure functions of plan-time shapes**. The
+ * discriminator is in the pipeline key as the family name `linear_gemv` (for the row block, the
+ * variant's `r<rows>`) — both the ban on run-time autotuning and "same key → byte-identical WGSL"
+ * are kept.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -95,11 +108,14 @@ import {
 } from "./weight-storage.ts";
 
 /**
- * 重み 1 語（`vec4<u32>` または `vec4<f32>` = 16 B）が運ぶ要素数 = **縮約の刻み**（格納ごと）。
+ * Elements carried by one weight word (`vec4<u32>` or `vec4<f32>` = 16 B) = **the reduction step**
+ * (per storage).
  *
- * 適格判定（src/runtime/recipe-builders/linear.ts の `buildLinear`）が k と group 長へ課す整除の
- * 単位でもあるので、門とカーネルが格納ごとに同じ 1 個の導出点を読む。
- * f16 / bf16 は 8 要素 / 語、f32 は 4 要素 / 語で、いずれも M=1 のみ（ADR 0082 追記 6・7・bf16 は ADR 0131）。
+ * It is also the divisibility unit the eligibility check (`buildLinear` in
+ * src/runtime/recipe-builders/linear.ts) imposes on k and the group length, so the check and the
+ * kernel read the same single derivation point per storage.
+ * f16 / bf16 carry 8 elements per word and f32 4, all M=1 only (ADR 0082 addenda 6 and 7; bf16 is
+ * ADR 0131).
  */
 export const linearGemvUnit = (storage: WeightStorage): number => {
   if (storage === "i2") return 64;
@@ -107,106 +123,121 @@ export const linearGemvUnit = (storage: WeightStorage): number => {
   if (storage === "i8") return 16;
   if (storage === "f16" || storage === "bf16") return 8;
   if (storage === "f32") return 4;
-  // 到達不能で、格納を足したときの刻みの結線漏れをコンパイル時に赤くするのがこの行の役目。
+  // Unreachable; this line exists to turn a missing step for a newly added storage red at compile time.
   const unhandled: never = storage;
   throw new CodegenError(`linear_gemv: 未処理の重み格納: ${JSON.stringify(unhandled)}`);
 };
 
-/** f16 / bf16 / f32 は M=1 だけで検収する。行ブロック側へ暗黙に広げない。 */
+/** f16 / bf16 / f32 are accepted at M=1 only. Do not widen them implicitly to the row block. */
 const assertRowsStorage = (storage: WeightStorage): void => {
   if (storage === "f16" || storage === "bf16" || storage === "f32") {
     throw new CodegenError(`linear_gemv: ${storage} 格納の行ブロックは未対応（M=1 変種のみ）`);
   }
 };
 
-/** WebGPU core が保証する 1 workgroup のスレッド数上限（`cols` の上界）。 */
+/** The per-workgroup thread limit WebGPU core guarantees (upper bound of `cols`). */
 const MAX_THREADS = 256;
 
 /**
- * 生成パラメタ（幾何にあたるもの）。**{@link defaultLinearGemvVariant} が唯一の選択点**で、
- * 実行時に選び直さない（ADR 0022 の実行時オートチューン禁止は本族にも掛かる）。
+ * Generation parameters (the counterpart of the geometry). **{@link defaultLinearGemvVariant} is the
+ * only selection point**, and nothing re-chooses at run time (ADR 0022's ban on run-time autotuning
+ * applies to this family too).
  */
 export type LinearGemvVariant = {
-  /** 1 workgroup が担当する出力列数（= workgroup のスレッド数 — 1 スレッド 1 列）。 */
+  /** Output columns one workgroup handles (= threads per workgroup — 1 thread per column). */
   readonly cols: number;
-  /** 1 反復で先読みする重み語数（メモリ並列度）。積和の順序には影響しない。 */
+  /**
+   * Weight words prefetched per iteration (memory parallelism). Does not affect the multiply-add
+   * order.
+   */
   readonly unroll: number;
 };
 
 /**
- * 行ブロック変種（M ≥ 2）の生成パラメタ。`cols` / `unroll` は M=1 変種と同じ意味で、
- * `rows` = 1 スレッドが持つ行数（y タイルの高さ）。**{@link defaultLinearGemvRowsVariant} が
- * 唯一の選択点**。
+ * Generation parameters of the row-block variant (M ≥ 2). `cols` / `unroll` mean the same as in the
+ * M=1 variant, and `rows` = the rows one thread holds (the height of a y tile).
+ * **{@link defaultLinearGemvRowsVariant} is the only selection point**.
  */
 export type LinearGemvRowsVariant = LinearGemvVariant & {
   readonly rows: number;
 };
 
 /**
- * 既定の変種。**RTX 3080 Ti / gemma4 E2B decode の実 12 形 + 端数 4 形の掃引**で census 加重
- * 最良（`c32 u4`・対既定 ×8.45 — ADR 0082 / docs/research/2026-08-30-gemma4-decode-wallclock.md
- * §7）。M=1の実測形を渡す場合は追記10の語彙INT8をc16へ選択する。
- * MUST: 既定の変更はビット同一門（tests/gpu_linear_gemv_test.ts）の再実測とセット。
+ * The default variant. Census-weighted best in **the sweep of the 12 real shapes + 4 remainder
+ * shapes of gemma4 E2B decode on an RTX 3080 Ti** (`c32 u4`, ×8.45 over the default — ADR 0082 /
+ * docs/research/2026-08-30-gemma4-decode-wallclock.md §7). When a shape is passed, the
+ * large-vocabulary INT8 shape measured at M=1 (addendum 10) selects c16.
+ * MUST: a change of the default goes together with re-measuring the bit-identity check
+ * (tests/gpu_linear_gemv_test.ts).
  */
 export const defaultLinearGemvVariant = (shape?: {
   readonly storage: WeightStorage;
   readonly n: number;
   readonly k: number;
 }): LinearGemvVariant => ({
-  // DECIDED: 大語彙INT8の実測形だけ担当列数を減らす（ADR 0082 追記10）。
+  // DECIDED: only the measured large-vocabulary INT8 shape gets fewer cols/workgroup (ADR 0082 addendum 10).
   // docs/decisions/0082-linear-gemv-decode.md
   cols: shape?.storage === "i8" && shape.n === 262144 && shape.k === 1536 ? 16 : 32,
   unroll: 4,
 });
 
 /**
- * 行ブロック変種が受ける M の上限 = **門の上限**（`buildLinear` が本族へ入れる行数の範囲）。
- * 掃引した範囲（M ≤ 64 — 既定 GEMM 骨格の M16N16 バケットと同じ幅）そのもので、その外は既定の
- * GEMM 骨格のまま（ADR 0082 決定 4 の「実測した範囲に留める」）。
+ * The upper bound of M the row-block variant takes = **the guard's upper bound** (the range of row
+ * counts `buildLinear` sends to this family). It is exactly the swept range (M ≤ 64 — the same width
+ * as the M16N16 bucket of the default GEMM skeleton); outside it, the default GEMM skeleton stays
+ * (ADR 0082 decision 4, "Eligibility stays inside the measured range").
  */
 export const LINEAR_GEMV_MAX_ROWS = 64;
 
 /**
- * `rows` を決める並列度の目標（スレッド数 = 出力列 n × y タイル数 `ceil(m / rows)`）。
- * RTX 3080 Ti の掃引で、この値を下回る形は y タイルで並列度を買う方が速く、上回る形は
- * `rows` で重みの読み直しを減らす方が速かった（モジュール doc の機序）。
- * NOTE: **参照 device（RTX 3080 Ti・80 SM）の飽和点を焼いた値**で、可搬な最適値ではない。
- * 飽和点が 1 桁小さい GPU（内蔵 GPU・Apple M 系）では y タイルを買いすぎて重みの読み直しが
- * 最適より増える。他 device の値は `SessionOptions.linearGemvRowsThreadTarget` で差し替える
- * （Session 生成時に固定する**静的**なノブ = {@link linearGemvRowsForShape} の第 4 引数に流れる
- * 限界値で、選択は純関数のまま）。device を見て自動で選ぶことはしない（実行時オートチューン禁止
- * 〈ADR 0022〉— docs/limitations.md）。
- * NOTE: 目標を替えても `rows` はキーに載る（{@link linearGemvRowsKey} の `r<rows>`）ので、
- * 「同一キー → バイト同一 WGSL」は保たれる — 目標が違えば選ばれる `rows` が変わり、キーも変わる。
- * MUST: 変更は掃引の再実測とセット（tests/gpu_linear_gemv_test.ts の門は値を固定しない —
- * 選択が (格納, m, n, 目標) の純関数であることだけを見る）。
+ * The parallelism target that decides `rows` (thread count = output columns n × y tiles
+ * `ceil(m / rows)`). In the RTX 3080 Ti sweep, shapes below this value were faster buying
+ * parallelism with y tiles, and shapes above it were faster reducing weight re-reads with `rows`
+ * (the mechanism in the module doc).
+ * NOTE: **a value baked from the saturation point of the reference device (RTX 3080 Ti, 80 SMs)**,
+ * not a portable optimum. On GPUs whose saturation point is an order of magnitude smaller
+ * (integrated GPUs, Apple M series) it buys too many y tiles and the weight re-reads exceed the
+ * optimum. For other devices the value is replaced with `SessionOptions.linearGemvRowsThreadTarget`
+ * (a **static** knob fixed at Session creation = the limit that flows into the 4th argument of
+ * {@link linearGemvRowsForShape}; the selection stays a pure function). Nothing chooses it
+ * automatically by looking at the device (the ban on run-time autotuning (ADR 0022) —
+ * docs/limitations.md).
+ * NOTE: even with another target, `rows` goes into the key (`r<rows>` of {@link linearGemvRowsKey}),
+ * so "same key → byte-identical WGSL" is kept — a different target changes the chosen `rows` and so
+ * the key.
+ * MUST: a change goes together with a re-measured sweep (the check in tests/gpu_linear_gemv_test.ts
+ * does not pin the value — it only checks that the selection is a pure function of (storage, m, n,
+ * target)).
  */
 const ROWS_THREAD_TARGET = 16384;
 
 /**
- * 1 スレッドが重み語 1 本あたりに抱える要素数（`rows × ` {@link linearGemvUnit}）の天井 =
- * i4 8 行 / i8 16 行。実行時間だけなら 512（i4 16 行 / i8 32 行）まで伸びる（その上はレジスタ圧で
- * 遅くなる）が、**生成テキストが行数に比例してシェーダのコンパイル費になる**ので 256 で止める:
- * 512 では i4 16 行が 138 KB / ≈165 ms・i8 32 行が 137 KB / ≈0.9 s（naga の解析・検証がテキスト量に
- * 超線形）で、初回ターンに ≈1 s 乗る。256 なら選ばれうる最大形（i4 8 行 73 KB・i8 16 行 70 KB）で
- * 1 本 ≈55〜60 ms・初回ターン合計 ≈150 ms。失う実行時間は census 加重で M=32 / 64 の +3%（i4）と
- * lm_head +1.6 ms/run（i8）— research 2026-09-07-gemv-rows-k21 §6。
- * MUST: 変更は掃引（実行時間 + コンパイル時間）の再実測とセット。
+ * The ceiling of elements one thread holds per weight word (`rows × ` {@link linearGemvUnit}) =
+ * i4 8 rows / i8 16 rows. For run time alone it would go up to 512 (i4 16 rows / i8 32 rows; above
+ * that, register pressure slows it down), but **generated text grows with the row count and becomes
+ * shader compile cost**, so it stops at 256: at 512, i4 16 rows is 138 KB / ≈165 ms and i8 32 rows is
+ * 137 KB / ≈0.9 s (naga's parsing and validation are super-linear in text size), adding ≈1 s to the
+ * first turn. At 256 the largest shapes that can be chosen (i4 8 rows 73 KB, i8 16 rows 70 KB) take
+ * ≈55–60 ms each, ≈150 ms in total for the first turn. The run time lost is, census-weighted, +3% at
+ * M=32 / 64 (i4) and lm_head +1.6 ms/run (i8) — research 2026-09-07-gemv-rows-k21 §6.
+ * MUST: a change goes together with a re-measured sweep (run time + compile time).
  */
 const ROWS_ELEMENTS_PER_WORD_CAP = 256;
 
 /**
- * 行ブロックの高さ `rows` を **(格納, m, n, 目標) の純関数**で選ぶ: m 以下の最大の 2 冪
- * （天井 {@link ROWS_ELEMENTS_PER_WORD_CAP} / 刻み の内側）から始め、スレッド数
- * `n · ceil(m / rows)` が `threadTarget` に届くまで半分にする（届かなければ 1）。
- * n が小さい形は常に 1（= M=1 のカーネルを y に M 枚並べた形）、lm_head 級の n では天井まで伸びる。
+ * Chooses the row-block height `rows` as **a pure function of (storage, m, n, target)**: start from
+ * the largest power of 2 not above m (within the ceiling {@link ROWS_ELEMENTS_PER_WORD_CAP} / step)
+ * and halve it until the thread count `n · ceil(m / rows)` reaches `threadTarget` (1 if it never
+ * does). Shapes with small n always get 1 (= the M=1 kernel laid out M times along y); for n of
+ * lm_head size it grows up to the ceiling.
  *
- * `threadTarget` は既定が {@link ROWS_THREAD_TARGET}（参照 device の飽和点）で、他 device では
- * `SessionOptions.linearGemvRowsThreadTarget` が Session 生成時に固定した値がここへ来る。
- * 値域の門は Session 側 1 箇所（同じ門を 2 実装持たない）。
+ * `threadTarget` defaults to {@link ROWS_THREAD_TARGET} (the saturation point of the reference
+ * device); on other devices the value `SessionOptions.linearGemvRowsThreadTarget` fixed at Session
+ * creation arrives here. The range guard lives in one place on the Session side (the same guard is
+ * not implemented twice).
  *
- * MUST: 返り値はキーに載る（{@link linearGemvRowsKey}）。純関数であることが
- * 「同一キー → バイト同一 WGSL」と実行時オートチューン禁止の両方を担保する。
+ * MUST: the return value goes into the key ({@link linearGemvRowsKey}). Being a pure function
+ * guarantees both "same key → byte-identical WGSL" and the ban on run-time autotuning.
  */
 export const linearGemvRowsForShape = (
   storage: WeightStorage,
@@ -229,8 +260,9 @@ export const linearGemvRowsForShape = (
 };
 
 /**
- * 行ブロック変種の既定（`cols` / `unroll` は M=1 の既定と同じ・`rows` は格納と形と目標から）。
- * `threadTarget` の意味と既定は {@link linearGemvRowsForShape}。
+ * The default of the row-block variant (`cols` / `unroll` the same as the M=1 default, `rows` from
+ * the storage, the shape and the target). For the meaning and default of `threadTarget`, see
+ * {@link linearGemvRowsForShape}.
  */
 export const defaultLinearGemvRowsVariant = (
   storage: WeightStorage,
@@ -261,11 +293,13 @@ const assertRowsVariant = (variant: LinearGemvRowsVariant): void => {
 };
 
 /**
- * group 長 → WGSL に焼く shift（i2 / i8 は group を持たないので `undefined`）。
+ * Group length → the shift baked into the WGSL (`undefined` for i2 / i8, which have no group).
  *
- * 2 冪 ≥ 16 と「格納と group 長は対」は {@link i4GroupShift}（宣言層と同じ導出点）が見る。
- * 本族はさらに **group ≥ {@link linearGemvUnit}** を要求する — 1 語ぶんの要素が group を跨ぐと
- * 語あたり 1 個の scale では足りず、黙って別の scale が掛かった値が出るため。
+ * "Power of 2 ≥ 16" and "storage and group length come in pairs" are checked by
+ * {@link i4GroupShift} (the same derivation point as the declaration layer). This family further
+ * requires **group ≥ {@link linearGemvUnit}** — if the elements of one word crossed a group, one
+ * scale per word would not be enough, and values with the wrong scale applied would come out
+ * silently.
  */
 const gemvGroupShift = (
   storage: WeightStorage,
@@ -273,7 +307,7 @@ const gemvGroupShift = (
 ): number | undefined => {
   const unit = linearGemvUnit(storage);
   const shift = i4GroupShift("linear_gemv", storage, groupSize);
-  // i2 / i8 は group を持たない（対の検査は i4GroupShift が済ませている）
+  // i2 / i8 have no group (i4GroupShift has already checked the pairing)
   if (groupSize === undefined) return shift;
   if (shift === undefined || groupSize < unit) {
     throw new CodegenError(
@@ -285,16 +319,19 @@ const gemvGroupShift = (
 };
 
 /**
- * uniform の Dims（既定経路の `linearParams(m, n, k)` とバイト単位で同一 — 束縛レイアウトを
- * 分けない契約）。族固有なのは検査だけで、m / n / k の u32 域は {@link gemmParams} へ委譲する。
+ * The uniform Dims (byte-identical to the default path's `linearParams(m, n, k)` — the contract not
+ * to split the binding layout). Only the checks are family-specific; the u32 range of m / n / k is
+ * delegated to {@link gemmParams}.
  *
- * MUST: k を **{@link linearGemvUnit} の倍数**に限る。WGSL の `units = dims.k / <刻み>u` は
- * 端数を切り捨てるので、外すと縮約が行の末尾を黙って落とした値を返す（例外は出ない）。
- * MUST: i4 では k を **group_size の倍数**にも限る（WGSL の `scale_base = col * (k >> shift)` が
- * 行あたりの scale 本数を割り算で導くため）。宣言層（ADR 0069 決定 2）と recipe-builder の
- * 適格判定が同じ条件を保証しているが、カーネル直呼びはそこを通らない。
- * MUST: m は 1..{@link LINEAR_GEMV_MAX_ROWS}（M=1 変種は 1 のみ・行ブロック変種は
- * `ceil(m / rows)` 枚の y タイルで受ける）。
+ * MUST: k is limited to **multiples of {@link linearGemvUnit}**. The WGSL `units = dims.k / <step>u`
+ * truncates the remainder, so otherwise the reduction returns values that silently dropped the end
+ * of the row (no exception).
+ * MUST: for i4, k is also limited to **multiples of group_size** (the WGSL
+ * `scale_base = col * (k >> shift)` derives the number of scales per row by division). The
+ * declaration layer (ADR 0069 decision 2) and the recipe builder's eligibility check guarantee the
+ * same condition, but a direct kernel call does not go through them.
+ * MUST: m is 1..{@link LINEAR_GEMV_MAX_ROWS} (the M=1 variant only 1; the row-block variant takes it
+ * in `ceil(m / rows)` y tiles).
  */
 export const linearGemvParams = (
   storage: WeightStorage,
@@ -321,11 +358,13 @@ export const linearGemvParams = (
 };
 
 /**
- * パイプラインキー（M=1 変種）。族名 `linear_gemv` が既定経路（`linear`）との判別子で、変種・格納・
- * group 長はどれも WGSL に焼かれるのでキーに載せる（同一キー → バイト同一 WGSL の codegen 決定性）。
+ * Pipeline key (M=1 variant). The family name `linear_gemv` discriminates it from the default path
+ * (`linear`); variant, storage and group length are all baked into the WGSL, so they go into the key
+ * (codegen determinism: same key → byte-identical WGSL).
  *
- * 格納判別子（`:wi4` / `:wi8`）と group 断片（`g32`）は weight-storage.ts の綴りをそのまま使う —
- * 診断・census が `:wi4g32` / `:wi8` で経路を識別する既存の読み方（ADR 0069 決定 5）に揃える。
+ * The storage discriminator (`:wi4` / `:wi8`) and the group fragment (`g32`) use the spelling of
+ * weight-storage.ts as is — aligned with the existing reading in which diagnostics and the census
+ * identify the path by `:wi4g32` / `:wi8` (ADR 0069 decision 5).
  */
 export const linearGemvKey = (
   storage: WeightStorage,
@@ -340,9 +379,10 @@ export const linearGemvKey = (
 };
 
 /**
- * パイプラインキー（行ブロック変種）。M=1 変種のキーに `r<rows>` を足した形で、`rows` は
- * WGSL（アキュムレータ本数・y タイルの高さ）に焼かれるのでキーに載る。
- * NOTE: `r1` は M=1 変種とは別のテキスト（y タイル化された行ブロック）— 判別子の有無で区別する。
+ * Pipeline key (row-block variant). The M=1 variant's key plus `r<rows>`; `rows` is baked into the
+ * WGSL (accumulator count, y-tile height), so it goes into the key.
+ * NOTE: `r1` is a different text from the M=1 variant (a row block tiled along y) — they are told
+ * apart by the presence of the discriminator.
  */
 export const linearGemvRowsKey = (
   storage: WeightStorage,
@@ -358,16 +398,16 @@ export const linearGemvRowsKey = (
 };
 
 /**
- * 束縛。**既定経路の linear と同じ番号・同じ意味**（0 dims / 1 x / 2 w / 3 bias / 4 out /
- * 5 wscale）で、`buildLinear` が組む束縛列をそのまま受ける。
+ * Bindings. **The same numbers and meanings as the default path's linear** (0 dims / 1 x / 2 w /
+ * 3 bias / 4 out / 5 wscale), taking the binding list `buildLinear` builds as is.
  *
- * 変わるのは要素型 2 つだけ: 重みは `vec4<u32>`（16 B = i4 32 要素 / i8 16 要素を 1 度に読む）、
- * 出力は `f32`（1 スレッド 1 列のスカラ書き — 既定 v4 経路の `vec4<f32>` と違い n の整除を
- * 要らない）。
+ * Only 2 element types change: the weight is `vec4<u32>` (16 B = 32 i4 / 16 i8 elements read at
+ * once), and the output is `f32` (a scalar write of 1 column per thread — unlike the `vec4<f32>` of
+ * the default v4 path, n need not be divisible).
  */
 const bindings = (unit: number, storage: WeightStorage, quantize = false, packed = false): string =>
   `@group(0) @binding(1) var<storage, read> x: array<vec4<${packed ? "u32" : "f32"}>>;
-// 行頭が 16 B 整列なのは k % ${unit} == 0 から（適格判定が保証する）
+// Row starts are 16 B aligned because k % ${unit} == 0 (guaranteed by the eligibility check)
 @group(0) @binding(2) var<storage, read> w: array<vec4<${storage === "f32" ? "f32" : "u32"}>>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<${quantize ? "u32" : "f32"}>;
@@ -378,10 +418,10 @@ ${
 }`;
 
 /**
- * 語 1 本ぶんの読み（重み語 + x の quad 先頭 + i4 だけ group scale）。
+ * The reads for one word (the weight word + the first x quad + the group scale, for i4 only).
  *
- * i8 の scale は出力チャネルごとで K ループ不変なので、ここではなく縮約の外で 1 度だけ束ねる
- * （{@link weightScaleWgsl} — ADR 0019 と同じ巻き上げ）。
+ * The i8 scale is per output channel and invariant in the K loop, so it is bound once outside the
+ * reduction rather than here ({@link weightScaleWgsl} — the same hoisting as ADR 0019).
  */
 const unitLoads = (
   storage: WeightStorage,
@@ -397,30 +437,39 @@ const unitLoads = (
       ? `
     let ws${slot} = wscale[scale_base + ((unit${slot} * ${unit}u) >> ${shift}u)];`
       : "";
-  // packed 活性は 1 束縛要素（`vec4<u32>`）が 16 要素を運ぶ（f32 の quad は 4 要素）。
+  // With packed activations one binding element (`vec4<u32>`) carries 16 elements (an f32 quad
+  // carries 4).
   return `    let unit${slot} = ${unitExpr};
     let pw${slot} = w[row_base + unit${slot}];${groupScale}
     let xq${slot} = ${inputBase}unit${slot} * ${unit / (packed ? 16 : 4)}u;`;
 };
 
-/** 語内の成分名（`vec4` の静的添字 — Metal の動的添字を避ける規律）。 */
+/**
+ * Component names within a word (static `vec4` indices — the discipline that avoids dynamic
+ * indexing on Metal).
+ */
 const LANES = ["x", "y", "z", "w"] as const;
 
 /**
- * 活性 1 quad（4 要素）を読む 1 行。既定は `vec4<f32>` の quad をそのまま引く。
+ * One line that reads one activation quad (4 elements). By default it reads a `vec4<f32>` quad as
+ * is.
  *
- * packed 活性（ADR 0105）では束縛が `array<vec4<u32>>` になり、**16 要素 = 1 本**で読める。
- * 語は 4 quad に 1 度だけ読み、quad ごとに `unpack4xI8` で int8 コードへ戻してから
- * `f32(code) * x_scale` で f32 値を作る。これで 1 重み語あたりの活性ロードが
- * i2 は 16 → 4 本・i4 は 8 → 2 本・i8 は 4 → 1 本になる（research 2026-09-19 §14 の律速）。
+ * With packed activations (ADR 0105) the binding becomes `array<vec4<u32>>`, and **16 elements = 1
+ * entry** can be read. The word is read once per 4 quads, and per quad it is turned back into int8
+ * codes with `unpack4xI8`, then `f32(code) * x_scale` makes the f32 value. This brings the activation
+ * loads per weight word from 16 → 4 for i2, 8 → 2 for i4 and 4 → 1 for i8 (the bottleneck in
+ * research 2026-09-19 §14).
  *
- * MUST: 復元の字面は `vec4<f32>(unpack4xI8(…)) * dims.x_scale` = **要素ごとの f32 1 乗算**。
- * 生産側 SRQ の出力値表（static-quantize.ts の `params[129 + level]` = `Math.fround(level*scale)`）
- * と要素ごとに u32 一致する — level ≤ 128 と f32 scale の積は f64 で厳密なので、表側も
- * この乗算も「厳密な積を正しく丸めた f32」に一致する（ADR 0105 の決定 3）。
- * MUST: 語の成分は静的添字（`.x` / `.y` / `.z` / `.w`）で引く（既定経路と同じ Metal の規律）。
- * NOTE: 復元値に丸め障壁は置かない。Metal で f32 経路と割れた原因は積和の fma 縮約の入れ方で、
- * 並列族の積和を明示 `fma()` で綴ることで両経路が揃う（{@link mac} — ADR 0105 追記 4）。
+ * MUST: the literal form of the restoration is `vec4<f32>(unpack4xI8(…)) * dims.x_scale` = **one f32
+ * multiply per element**. It matches the producer-side SRQ output table (`params[129 + level]` =
+ * `Math.fround(level*scale)` in static-quantize.ts) u32 for u32 per element — the product of
+ * level ≤ 128 and an f32 scale is exact in f64, so both the table and this multiply equal "the exact
+ * product correctly rounded to f32" (ADR 0105 decision 3).
+ * MUST: the components of a word are read with static indices (`.x` / `.y` / `.z` / `.w`) (the same
+ * Metal discipline as the default path).
+ * NOTE: no rounding barrier is placed on the restored value. The divergence from the f32 path on
+ * Metal came from how the multiply-add was contracted to fma; spelling the parallel family's
+ * multiply-add with explicit `fma()` makes both paths agree ({@link mac} — ADR 0105 addendum 4).
  */
 const activationQuad = (packed: boolean, slot: string, name: string, quad: number): string => {
   if (!packed) return `    let ${name} = x[xq${slot} + ${quad}u];`;
@@ -432,30 +481,35 @@ const activationQuad = (packed: boolean, slot: string, name: string, quad: numbe
 };
 
 /**
- * 積和 1 行。並列族（`parallelWgsl` の f32 / packed × 融合なし / あり）と subgroup32 変種は明示
- * `fma()` で綴る。
+ * One multiply-add line. The parallel family (`parallelWgsl`'s f32 / packed × without / with
+ * fusion) and the subgroup32 variant spell it with explicit `fma()`.
  *
- * MUST: 並列族と subgroup32 は `fma`。`acc + x * d` の綴りは fma への縮約をコンパイラに委ねる形で、
- * RTX / Vulkan では常に縮約される（明示 fma と u32 同一 — 540 組の掃引）が、Metal（M2）は式形ごとに
- * 縮約の入れ方を変え、同じ数式のカーネル 2 本（f32 と packed）が u32 で割れた。明示 fma は縮約の
- * 自由度そのものを消すので、両経路が同じ丸めになる（ADR 0105 追記 4）。subgroup32 は parallel と
- * 同じ和を subgroup の値交換で出す変種なので、積和の綴りも parallel と同一にする（ADR 0101 決定 3・
- * 追記 2026-09-25）。逐次 GEMV・行ブロックは参照経路の数値を動かさないため従来の綴りのまま。
+ * MUST: the parallel family and subgroup32 use `fma`. The spelling `acc + x * d` leaves contraction
+ * to fma to the compiler; on RTX / Vulkan it is always contracted (u32-identical to explicit fma — a
+ * sweep of 540 combinations), but Metal (M2) contracts differently per expression form, and 2
+ * kernels with the same formula (f32 and packed) diverged in u32. Explicit fma removes the freedom to
+ * contract itself, so both paths round the same way (ADR 0105 addendum 4). subgroup32 is a variant
+ * that computes the same sum as parallel through subgroup value exchange, so its multiply-add
+ * spelling is also identical to parallel's (ADR 0101 decision 3, addendum 2026-09-25). The
+ * sequential GEMV and the row block keep the existing spelling so as not to move the numerics of the
+ * reference path.
  */
 const mac = (fma: boolean, x: string, d: string): string =>
   fma ? `    acc = fma(${x}, ${d}, acc);` : `    acc = acc + ${x} * ${d};`;
 
 /**
- * 語 1 本（i4 32 要素）の積和展開（M=1 変種）。
+ * Unrolled multiply-adds for one word (32 i4 elements) (M=1 variant).
  *
- * nibble の並びは weight-storage.ts の `dequant4` と同一（要素 2i = 下位 / 2i+1 = 上位・
- * 格納値 `u = q + 8` — 正本はエクスポータ `karume/emit.py: pack_int4`）。
- * MUST: 展開順は語内の要素昇順（成分 x→w × バイト x→w × 下位→上位 nibble）— これが
- * 「k 昇順の逐次」そのもので、崩すと既定経路とのビット同一が割れる。
- * MUST: x は `vec4<f32>` 束縛から**静的成分**で引く（動的成分添字は Metal でローカル領域へ
- * 落ちる — gemm.ts の `storeBTransposed` と同じ規律）。
- * MUST: このテキストは行ブロック化の前と 1 バイトも変えない（decode の生成物 —
- * tests/fixtures/wgsl/linear_gemv_*.wgsl が検出器）。
+ * The nibble order is the same as `dequant4` in weight-storage.ts (element 2i = low / 2i+1 = high,
+ * stored value `u = q + 8` — the canonical source is the exporter's `karume/emit.py: pack_int4`).
+ * MUST: the unroll order is ascending element order within the word (component x→w × byte x→w ×
+ * low→high nibble) — that is exactly "sequential in ascending k", and breaking it breaks bit
+ * identity with the default path.
+ * MUST: x is read from the `vec4<f32>` binding with **static components** (a dynamic component
+ * index spills to the local region on Metal — the same discipline as `storeBTransposed` in
+ * gemm.ts).
+ * MUST: this text does not change by a single byte from before row blocks were introduced (the
+ * generated decode shaders — tests/fixtures/wgsl/linear_gemv_*.wgsl are the detectors).
  */
 const unitMacsI4 = (slot: string, packed = false, fma = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
@@ -464,7 +518,7 @@ const unitMacsI4 = (slot: string, packed = false, fma = false): string => {
       const bytes = `b${slot}_${quad}`;
       const xa = `xa${slot}_${quad}`;
       const xb = `xb${slot}_${quad}`;
-      // 語の成分 `quad` は要素 8·quad..8·quad+7 = x の quad 2 本ぶん。
+      // Component `quad` of the word is elements 8·quad..8·quad+7 = 2 quads of x.
       const macs = lanes
         .flatMap((byte, lane) => {
           const source = lane < 2 ? xa : xb;
@@ -485,12 +539,15 @@ ${macs}`;
 };
 
 /**
- * 語 1 本（i8 16 要素）の積和展開（M=1 変種）。
+ * Unrolled multiply-adds for one word (16 i8 elements) (M=1 variant).
  *
- * レーンの並びは weight-storage.ts の `dequant4`（i8 quad 版 = `vec4<f32>(unpack4xI8(…)) * scale`）
- * と同一で、成分 `quad` の 4 要素がちょうど x の 1 quad に対応する（i4 の 2 quad と違う唯一の点）。
- * MUST: 展開順は語内の要素昇順（成分 x→w × レーン x→w）・字面は `f32(q) * ws` の要素ごと乗算。
- * MUST: x は `vec4<f32>` 束縛から**静的成分**で引く（i4 版と同じ Metal の規律）。
+ * The lane order is the same as `dequant4` in weight-storage.ts (the i8 quad version =
+ * `vec4<f32>(unpack4xI8(…)) * scale`), and the 4 elements of component `quad` correspond exactly to
+ * one quad of x (the only difference from the 2 quads of i4).
+ * MUST: the unroll order is ascending element order within the word (component x→w × lane x→w), and
+ * the literal form is the per-element multiply `f32(q) * ws`.
+ * MUST: x is read from the `vec4<f32>` binding with **static components** (the same Metal discipline
+ * as the i4 version).
  */
 const unitMacsI8 = (slot: string, packed = false, fma = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
@@ -509,8 +566,9 @@ ${macs}`;
 };
 
 /**
- * f16 8 要素 / 語。unpack2x16float は既定 GEMM と同じ復元で、scale は持たない。
- * MUST: 語の x→w、各対の下位→上位の順に積和する。活性の成分添字は静的に展開する。
+ * f16, 8 elements per word. unpack2x16float is the same decode as the default GEMM, with no scale.
+ * MUST: multiply-add in the order word x→w, then low→high within each pair. The activation's
+ * component indices are unrolled statically.
  */
 const unitMacsF16 = (slot: string): string => {
   const lanes = ["x", "y", "z", "w"] as const;
@@ -527,8 +585,9 @@ const unitMacsF16 = (slot: string): string => {
 };
 
 /**
- * bf16 8 要素 / 語。詰め方と K 昇順の積和は f16 版と同文で、展開だけが bitcast
- * （語の下位半分 = `<< 16u`・上位半分 = `& 0xFFFF0000u` — ADR 0131）。
+ * bf16, 8 elements per word. The packing and the ascending-K multiply-add are the same text as the
+ * f16 version; only the decode is a bitcast (low half of the word = `<< 16u`, high half =
+ * `& 0xFFFF0000u` — ADR 0131).
  */
 const unitMacsBf16 = (slot: string): string => {
   const lanes = ["x", "y", "z", "w"] as const;
@@ -544,7 +603,10 @@ const unitMacsBf16 = (slot: string): string => {
     .join("\n");
 };
 
-/** f32 4 要素 / 語。通常 GEMM と同じ K 昇順の積和を静的成分で展開する。 */
+/**
+ * f32, 4 elements per word. Unrolls the same ascending-K multiply-add as the regular GEMM with
+ * static components.
+ */
 const unitMacsF32 = (slot: string): string => {
   const macs = ["x", "y", "z", "w"]
     .map((lane) => `    acc = acc + xf${slot}.${lane} * pw${slot}.${lane};`)
@@ -553,7 +615,10 @@ const unitMacsF32 = (slot: string): string => {
 ${macs}`;
 };
 
-/** INT2 の16 B語を K 昇順に積和する。成分添字を静的にして Metal の動的添字を避ける。 */
+/**
+ * Multiply-adds an INT2 16 B word in ascending K. Static component indices avoid dynamic indexing
+ * on Metal.
+ */
 const unitMacsI2 = (slot: string, packed = false, fma = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
   return lanes
@@ -574,8 +639,9 @@ ${products}`;
 };
 
 /**
- * INT2 の行ブロックだけを関数にまとめ、語・行ごとの展開による初回の解析費を減らす。
- * 1 出力の K 昇順、成分の静的添字、復元と積和の丸め点は M=1 と同じ。
+ * Puts only the INT2 row block into a function, reducing the first-time parse cost of unrolling per
+ * word and per row. The ascending K per output, the static component indices and the rounding
+ * points of decode and multiply-add are the same as at M=1.
  * DECIDED: docs/decisions/0082-linear-gemv-decode.md#addendum-8-2026-09-11--smaller-int2-row-block-shaders-k-30
  */
 const i2WordWgsl = (): string => `
@@ -607,8 +673,9 @@ const unitMacs = (storage: WeightStorage, slot: string, packed = false, fma = fa
             : unitMacsI8(slot, packed, fma);
 
 /**
- * I4/I8も行ごとの積和を小さな関数へまとめる。K昇順とf32の丸め点はM=1と同じ。
- * 逆量子化の式を行ごとに複製する代わりに関数を呼び、WGSLの解析・コンパイル量を減らす。
+ * I4/I8 also put the per-row multiply-add into a small function. The ascending K and the f32
+ * rounding points are the same as at M=1. Calling a function instead of duplicating the dequantise
+ * expression per row reduces the amount of WGSL to parse and compile.
  * DECIDED: docs/decisions/0082-linear-gemv-decode.md#addendum-9-2026-09-11--the-function-form-for-int4-and-int8-row-blocks-too
  */
 const rowsWordCall = (storage: "i4" | "i8", slot: string, rows: number): string =>
@@ -637,7 +704,10 @@ const rowsMacs = (storage: WeightStorage, slot: string, rows: number): string =>
       ? rowsMacsI2(slot, rows)
       : rowsWordCall("i8", slot, rows);
 
-/** i4 は行あたりの scale 本数から group の先頭を導く / i8 は出力チャネル 1 本を巻き上げる。 */
+/**
+ * i4 derives the group start from the number of scales per row / i8 hoists the single
+ * per-output-channel scale.
+ */
 const scaleSetupWgsl = (storage: WeightStorage, shift: number | undefined): string =>
   storage === "i4"
     ? `
@@ -645,10 +715,12 @@ const scaleSetupWgsl = (storage: WeightStorage, shift: number | undefined): stri
     : weightScaleWgsl(storage, "col", "  ");
 
 /**
- * GEMV の WGSL（`out[n] = x[k] · wᵀ[n,k] + bias[n]`・M=1・重み f32 / f16 / i2 / i4 / i8 格納）。
+ * The GEMV WGSL (`out[n] = x[k] · wᵀ[n,k] + bias[n]`, M=1, weights stored as f32 / f16 / i2 / i4 /
+ * i8).
  *
- * 1 スレッドが 1 出力列の縮約を丸ごと持つので、並列度の上限は `n`。これはビット同一の代償
- * そのもので、k 方向へ割れば並列度は上がるが縮約順が動く（MUST NOT — モジュール doc）。
+ * One thread holds the whole reduction of one output column, so parallelism is bounded by `n`. That
+ * is the very price of bit identity: splitting along k would raise parallelism but move the
+ * reduction order (MUST NOT — module doc).
  */
 export const linearGemvWgsl = (
   storage: WeightStorage,
@@ -664,7 +736,7 @@ export const linearGemvWgsl = (
   const macs = slots.map((slot) => unitMacs(storage, slot)).join("\n");
   return `// karume linear gemv (M=1: out[n] = x[k] · wᵀ[n,k] + bias[n], f32${weightNote(
     storage,
-  )}, ${cols} 列 / wg, 語 ${unroll} 本先読み)
+  )}, ${cols} cols / wg, ${unroll} words prefetched)
 struct Dims {
   m: u32,
   n: u32,
@@ -676,7 +748,7 @@ ${bindings(unit, storage)}
 @compute @workgroup_size(${cols})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let col = gid.x;
-  // 共有メモリも barrier も持たないので、端の workgroup は早期 return してよい
+  // No shared memory and no barrier, so edge workgroups may return early
   if (col >= dims.n) {
     return;
   }
@@ -684,13 +756,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let row_base = col * units;${scaleSetupWgsl(storage, shift)}
   var acc = 0.0;
   var unit = 0u;
-  // 先読みぶんの重み語を**先に**全て発行してから積和へ入る（メモリ並列度）。語の処理順は
-  // 昇順のままなので、1 出力要素あたりの加算順序は先読み本数によらず同じ
+  // Issue all prefetched weight words **first**, then do the multiply-adds (memory parallelism).
+  // Words are still processed in ascending order, so the addition order per output element is the
+  // same whatever the prefetch count
   for (; unit + ${unroll}u <= units; unit = unit + ${unroll}u) {
 ${loads}
 ${macs}
   }
-  // 端数の語（units % ${unroll} 本）— 上と同じ順序を 1 語ずつ辿る
+  // Remainder words (units % ${unroll} of them) — walk the same order one word at a time
   for (; unit < units; unit = unit + 1u) {
 ${unitLoads(storage, "t", "unit", shift)}
 ${unitMacs(storage, "t")}
@@ -701,15 +774,20 @@ ${unitMacs(storage, "t")}
 };
 
 /**
- * 行ブロック GEMV の WGSL（`out[m,n] = x[m,k] · wᵀ[n,k] + bias[n]`・M ≥ 2・重み i2 / i4 / i8 格納）。
+ * The row-block GEMV WGSL (`out[m,n] = x[m,k] · wᵀ[n,k] + bias[n]`, M ≥ 2, weights stored as i2 /
+ * i4 / i8).
  *
- * dispatch は `[ceil(n / cols), ceil(m / rows), 1]`。1 スレッドは列 `gid.x` × 行
- * `gid.y · rows .. +rows` を持ち、重み語と scale は 1 回だけ読んで行ごとの x と積和する。
- * MUST: m を超える行は **x の最終行を読み直す**（読みを束縛の範囲内に保つため）が、
- * **書き戻しは `row < m` の行だけ**。出力の形は `[m, n]` で、行 r の列 c は `out[r·n + c]`。
- * MUST: `dims.m ≥ 1` が前提（`min(row0 + r, dims.m - 1u)` は m = 0 で u32 が巻き戻る）。
- * 担保は {@link linearGemvParams} の m 域検査（1..{@link LINEAR_GEMV_MAX_ROWS}）— WGSL 側は検査しない。
- * MUST: 縮約の字面・順序は M=1 変種（{@link linearGemvWgsl}）と同一（モジュール doc の数値契約）。
+ * The dispatch is `[ceil(n / cols), ceil(m / rows), 1]`. One thread holds column `gid.x` × rows
+ * `gid.y · rows .. +rows`, reads the weight word and the scale once and multiply-adds them with each
+ * row's x.
+ * MUST: rows beyond m **re-read the last row of x** (to keep reads inside the binding), but **only
+ * rows with `row < m` are written back**. The output shape is `[m, n]`; column c of row r is
+ * `out[r·n + c]`.
+ * MUST: `dims.m ≥ 1` is assumed (`min(row0 + r, dims.m - 1u)` wraps the u32 around at m = 0). It is
+ * guaranteed by the m range check of {@link linearGemvParams} (1..{@link LINEAR_GEMV_MAX_ROWS}) —
+ * the WGSL side does not check it.
+ * MUST: the literal form and order of the reduction are the same as the M=1 variant
+ * ({@link linearGemvWgsl}) (the numeric contract in the module doc).
  */
 export const linearGemvRowsWgsl = (
   storage: WeightStorage,
@@ -739,7 +817,7 @@ export const linearGemvRowsWgsl = (
     .join("\n");
   return `// karume linear gemv rows (M≥2: out[m,n] = x[m,k] · wᵀ[n,k] + bias[n], f32${weightNote(
     storage,
-  )}, ${cols} 列 / wg, 語 ${unroll} 本先読み, ${rows} 行 / スレッド)
+  )}, ${cols} cols / wg, ${unroll} words prefetched, ${rows} rows / thread)
 struct Dims {
   m: u32,
   n: u32,
@@ -751,26 +829,27 @@ ${bindings(unit, storage)}${wordHelperWgsl(storage)}
 @compute @workgroup_size(${cols})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let col = gid.x;
-  // 共有メモリも barrier も持たないので、端の workgroup は早期 return してよい
+  // No shared memory and no barrier, so edge workgroups may return early
   if (col >= dims.n) {
     return;
   }
   let units = dims.k / ${unit}u;
   let row_base = col * units;
-  // 行ブロックの先頭行と、行ごとの x の先頭（quad 単位）。m を超える行は最終行を読み直す
-  // （読みを範囲内に保つだけで、書き戻しは行数の内側だけ）
+  // The first row of the row block and the start of x per row (in quads). Rows beyond m re-read the
+  // last row (only to keep reads in range; write-back is only inside the row count)
   let kq = dims.k / 4u;
   let row0 = gid.y * ${rows}u;
 ${rowHeads}${scaleSetupWgsl(storage, shift)}
 ${accs}
   var unit = 0u;
-  // 先読みぶんの重み語を**先に**全て発行してから積和へ入る（メモリ並列度）。語の処理順は
-  // 昇順のままなので、1 出力要素あたりの加算順序は先読み本数によらず同じ
+  // Issue all prefetched weight words **first**, then do the multiply-adds (memory parallelism).
+  // Words are still processed in ascending order, so the addition order per output element is the
+  // same whatever the prefetch count
   for (; unit + ${unroll}u <= units; unit = unit + ${unroll}u) {
 ${loads}
 ${macs}
   }
-  // 端数の語（units % ${unroll} 本）— 上と同じ順序を 1 語ずつ辿る
+  // Remainder words (units % ${unroll} of them) — walk the same order one word at a time
   for (; unit < units; unit = unit + 1u) {
 ${unitLoads(storage, "t", "unit", shift)}
 ${rowsMacs(storage, "t", rows)}
@@ -780,7 +859,7 @@ ${stores}
 `;
 };
 
-/** K を分担する lane 数。1 workgroup は常に128 thread（共有部分和512 byte）。 */
+/** Number of lanes sharing K. One workgroup is always 128 threads (512 bytes of shared partial sums). */
 export type LinearGemvParallelLanes = 2 | 4 | 8 | 16 | 32;
 
 type ParallelShape = {
@@ -790,17 +869,19 @@ type ParallelShape = {
   readonly group?: number;
   readonly lanes: LinearGemvParallelLanes;
   /**
-   * packed int8 活性（ADR 0105）で受け取る形か。**実測で速くなった行だけ true**。
-   * E4B の行だけは例外で、E2B の同じ役割の行の値を写した未実測の暫定（表の E4B 節）。
+   * Whether the shape takes packed int8 activations (ADR 0105). **true only for rows that measured
+   * faster**. The E4B rows are the exception: an unmeasured provisional value copied from the E2B row
+   * with the same role (the E4B section of the table).
    *
-   * 効くのは「K が長く lanes 32」= 1 スレッドが 1 重み語あたりに読む活性が多い形だけで、
-   * K=1536 の lanes 2 / 4 と i8 は追加の unpack / 変換 / 乗算が利得を食い潰す
-   * （ADR 0105 追記 1 の per-key 実測）。
+   * It pays off only for "long K with lanes 32" = shapes where one thread reads many activations per
+   * weight word; for K=1536 with lanes 2 / 4 and for i8, the extra unpack / conversion / multiply eat
+   * the gain (per-key measurement of ADR 0105 addendum 1).
    */
   readonly packedActivations: boolean;
 };
 
-// DECIDED: 実測した形だけを任意指定の対象にする。GPU名による自動選択ではない。
+// DECIDED: only measured shapes are eligible for the opt-in option. Not an automatic selection by
+// GPU name.
 // docs/decisions/0098-linear-gemv-parallel.md
 const PARALLEL_SHAPES: readonly ParallelShape[] = [
   { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4, packedActivations: false },
@@ -828,57 +909,58 @@ const PARALLEL_SHAPES: readonly ParallelShape[] = [
   { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32, packedActivations: true },
   { storage: "i2", n: 12288, k: 1536, lanes: 2, packedActivations: false },
   { storage: "i2", n: 1536, k: 12288, lanes: 32, packedActivations: true },
-  // ---- E4B（2026-09-26 追加）— 以下の行は**どれも未実測**。lanes / packedActivations は E2B の
-  // 同じ役割の行から写した推測で、E4B の flag-bench（per-key の census と GPU 時間）で見直す
-  // （ADR 0098 追記 2026-09-26）。形は通常 E4B = 上流 config（hidden 2560・intermediate 10240・
-  // kv 2・層 42・PLE 256）から、QAT E4B = 配布ミラーのコンテナ記述子から読んだ実形。
-  // E4B 通常 i4 g32: per_layer_model_projection（42×256）— lanes は E2B 8960×1536 から（未実測）
+  // ---- E4B (added 2026-09-26) — **none of the rows below is measured**. lanes / packedActivations
+  // are guesses copied from the E2B row with the same role, to be revisited with E4B's flag-bench
+  // (per-key census and GPU time) (ADR 0098 addendum 2026-09-26). The shapes are the real ones, read
+  // for regular E4B from the upstream config (hidden 2560, intermediate 10240, kv 2, 42 layers, PLE
+  // 256) and for QAT E4B from the container descriptor of the distribution mirror.
+  // E4B regular i4 g32: per_layer_model_projection (42×256) — lanes from E2B 8960×1536 (unmeasured)
   { storage: "i4", n: 10752, k: 2560, group: 32, lanes: 4, packedActivations: false },
-  // E4B 通常 i4 g32: q（sliding）— lanes は E2B 2048×1536 から（未実測）
+  // E4B regular i4 g32: q (sliding) — lanes from E2B 2048×1536 (unmeasured)
   { storage: "i4", n: 2048, k: 2560, group: 32, lanes: 4, packedActivations: false },
-  // E4B 通常 i4 g32: k / v（sliding）— lanes は E2B 256×1536 から（未実測）
+  // E4B regular i4 g32: k / v (sliding) — lanes from E2B 256×1536 (unmeasured)
   { storage: "i4", n: 512, k: 2560, group: 32, lanes: 32, packedActivations: false },
-  // E4B 通常 i4 g32: per_layer_input_gate — lanes は E2B 256×1536 から（未実測）
+  // E4B regular i4 g32: per_layer_input_gate — lanes from E2B 256×1536 (unmeasured)
   { storage: "i4", n: 256, k: 2560, group: 32, lanes: 32, packedActivations: false },
-  // E4B 通常 i4 g32: o（sliding）— lanes は E2B 1536×2048 から（未実測）
+  // E4B regular i4 g32: o (sliding) — lanes from E2B 1536×2048 (unmeasured)
   { storage: "i4", n: 2560, k: 2048, group: 32, lanes: 32, packedActivations: false },
-  // E4B 通常 i4 g32: gate / up — lanes は E2B 6144×1536 から（未実測）
+  // E4B regular i4 g32: gate / up — lanes from E2B 6144×1536 (unmeasured)
   { storage: "i4", n: 10240, k: 2560, group: 32, lanes: 4, packedActivations: false },
-  // E4B 通常 i4 g32: down — lanes は E2B 1536×6144 から（未実測）
+  // E4B regular i4 g32: down — lanes from E2B 1536×6144 (unmeasured)
   { storage: "i4", n: 2560, k: 10240, group: 32, lanes: 32, packedActivations: false },
-  // E4B 通常 i4 g32: per_layer_projection — lanes は E2B 1536×256 から（未実測）
+  // E4B regular i4 g32: per_layer_projection — lanes from E2B 1536×256 (unmeasured)
   { storage: "i4", n: 2560, k: 256, group: 32, lanes: 4, packedActivations: false },
-  // E4B 通常 i4 g32: q（full）— lanes は E2B 4096×1536 から（未実測）
+  // E4B regular i4 g32: q (full) — lanes from E2B 4096×1536 (unmeasured)
   { storage: "i4", n: 4096, k: 2560, group: 32, lanes: 4, packedActivations: false },
-  // E4B 通常 i4 g32: k / v（full）— lanes は E2B 512×1536 から（未実測）
+  // E4B regular i4 g32: k / v (full) — lanes from E2B 512×1536 (unmeasured)
   { storage: "i4", n: 1024, k: 2560, group: 32, lanes: 32, packedActivations: false },
-  // E4B 通常 i4 g32: o（full）— lanes は E2B 1536×4096 から（未実測）
+  // E4B regular i4 g32: o (full) — lanes from E2B 1536×4096 (unmeasured)
   { storage: "i4", n: 2560, k: 4096, group: 32, lanes: 32, packedActivations: false },
-  // E4B 通常 i8: lm_head（tied embedding）— lanes は E2B 262144×1536 から（未実測）
+  // E4B regular i8: lm_head (tied embedding) — lanes from E2B 262144×1536 (unmeasured)
   { storage: "i8", n: 262144, k: 2560, lanes: 16, packedActivations: false },
-  // E4B QAT i4 g512: q（sliding）— lanes は E2B QAT 2048×1536 g512 から（未実測）
+  // E4B QAT i4 g512: q (sliding) — lanes from E2B QAT 2048×1536 g512 (unmeasured)
   { storage: "i4", n: 2048, k: 2560, group: 512, lanes: 4, packedActivations: false },
-  // E4B QAT i4 g512: k / v（sliding）— lanes は E2B QAT 256×1536 g512 から（未実測）
+  // E4B QAT i4 g512: k / v (sliding) — lanes from E2B QAT 256×1536 g512 (unmeasured)
   { storage: "i4", n: 512, k: 2560, group: 512, lanes: 32, packedActivations: false },
-  // E4B QAT i4 g2048: o（sliding）— lanes / packed は E2B QAT 1536×2048 g2048 から（未実測）
+  // E4B QAT i4 g2048: o (sliding) — lanes / packed from E2B QAT 1536×2048 g2048 (unmeasured)
   { storage: "i4", n: 2560, k: 2048, group: 2048, lanes: 32, packedActivations: true },
-  // E4B QAT i4 g512: gate / up — lanes は E2B QAT 6144×1536 g512 から（未実測）
+  // E4B QAT i4 g512: gate / up — lanes from E2B QAT 6144×1536 g512 (unmeasured)
   { storage: "i4", n: 10240, k: 2560, group: 512, lanes: 4, packedActivations: false },
-  // E4B QAT i4 g2048: down — lanes / packed は E2B QAT 1536×6144 g2048 から（未実測）
+  // E4B QAT i4 g2048: down — lanes / packed from E2B QAT 1536×6144 g2048 (unmeasured)
   { storage: "i4", n: 2560, k: 10240, group: 2048, lanes: 32, packedActivations: true },
-  // E4B QAT i8: per_layer_input_gate — lanes は E2B QAT 256×1536 i8 から（未実測）
+  // E4B QAT i8: per_layer_input_gate — lanes from E2B QAT 256×1536 i8 (unmeasured)
   { storage: "i8", n: 256, k: 2560, lanes: 32, packedActivations: false },
-  // E4B QAT i8: per_layer_projection — lanes は E2B QAT 1536×256 i8 から（未実測）
+  // E4B QAT i8: per_layer_projection — lanes from E2B QAT 1536×256 i8 (unmeasured)
   { storage: "i8", n: 2560, k: 256, lanes: 4, packedActivations: false },
-  // E4B QAT i4 g512: q（full）— lanes は E2B QAT 4096×1536 g512 から（未実測）
+  // E4B QAT i4 g512: q (full) — lanes from E2B QAT 4096×1536 g512 (unmeasured)
   { storage: "i4", n: 4096, k: 2560, group: 512, lanes: 4, packedActivations: false },
-  // E4B QAT i4 g512: k / v（full）— lanes は E2B QAT 512×1536 g512 から（未実測）
+  // E4B QAT i4 g512: k / v (full) — lanes from E2B QAT 512×1536 g512 (unmeasured)
   { storage: "i4", n: 1024, k: 2560, group: 512, lanes: 32, packedActivations: false },
-  // E4B QAT i4 g4096: o（full）— lanes / packed は E2B QAT 1536×4096 g4096 から（未実測）
+  // E4B QAT i4 g4096: o (full) — lanes / packed from E2B QAT 1536×4096 g4096 (unmeasured)
   { storage: "i4", n: 2560, k: 4096, group: 4096, lanes: 32, packedActivations: true },
 ];
 
-/** 実測表の行引き（M の範囲も含めて 1 箇所）。 */
+/** Row lookup in the measured table (including the M range, in one place). */
 const parallelShapeFor = (
   storage: WeightStorage,
   m: number,
@@ -892,7 +974,10 @@ const parallelShapeFor = (
   );
 };
 
-/** 同じ形の M=1/4/8 は同じ加算順。M>8 の prefill は既存の行ブロックを維持する。 */
+/**
+ * M=1/4/8 of the same shape have the same addition order. Prefill with M>8 keeps the existing row
+ * block.
+ */
 export const linearGemvParallelLanes = (
   storage: WeightStorage,
   m: number,
@@ -902,12 +987,14 @@ export const linearGemvParallelLanes = (
 ): LinearGemvParallelLanes | undefined => parallelShapeFor(storage, m, n, k, group)?.lanes;
 
 /**
- * 「この形が並列 GEMV（{@link linearGemvParallelWgsl} 族）へ落ちるか」を返す**唯一の純関数**。
+ * The **only pure function** that returns "whether this shape goes to the parallel GEMV (the
+ * {@link linearGemvParallelWgsl} family)".
  *
- * {@link linearGemvParallelLanes}（実測形の表引き）に、recipe-builders/linear.ts の `buildLinear` が
- * GEMV 族へ入れる条件（格納・`k % 刻み`・i4 の group 長・出力 vec4 の実測範囲）を重ねたもの。
- * packed 活性の対付け（ADR 0105）はこれをさらに行ごとの採否で絞った
- * {@link linearGemvPackedEligible} を読む。
+ * {@link linearGemvParallelLanes} (the lookup of measured shapes) overlaid with the conditions under
+ * which `buildLinear` in recipe-builders/linear.ts sends a shape to the GEMV family (storage,
+ * `k % step`, the i4 group length, the measured range of vec4 output). The pairing of packed
+ * activations (ADR 0105) reads {@link linearGemvPackedEligible}, which narrows this further by the
+ * per-row adoption.
  */
 export const linearGemvParallelEligible = (
   storage: WeightStorage,
@@ -926,15 +1013,17 @@ export const linearGemvParallelEligible = (
 };
 
 /**
- * 「この形を **packed int8 活性**（ADR 0105）で受け取るか」を返す**唯一の純関数**。
+ * The **only pure function** that returns "whether this shape takes **packed int8 activations**
+ * (ADR 0105)".
  *
- * {@link linearGemvParallelEligible}（並列 GEMV へ落ちるか）に、実測表の行の
- * `packedActivations` を重ねたもの。packed 変種の WGSL・params は全形ぶん生成できる
- * （テストとスナップショットは全形を維持する）が、**製品の plan が選ぶのはこの述語が
- * lane を返す形だけ**。
+ * {@link linearGemvParallelEligible} (whether it goes to the parallel GEMV) overlaid with the
+ * `packedActivations` of the measured table's row. The WGSL and params of the packed variant can be
+ * generated for every shape (tests and snapshots keep every shape), but **the production plan
+ * chooses only shapes for which this predicate returns a lane count**.
  *
- * MUST: 対付け（fusion.ts）と recipe-builder の門が同じ 1 本を読む。別に持つと、片方だけ
- * 広いときに `vec4<u32>` 束縛へ f32 の語を流す形（例外なしの沈黙誤値）が出る。
+ * MUST: the pairing (fusion.ts) and the recipe builder's guard read this same single function. Kept
+ * separately, when one of them is wider, f32 words would flow into a `vec4<u32>` binding (a silent
+ * wrong value with no exception).
  */
 export const linearGemvPackedEligible = (
   storage: WeightStorage,
@@ -955,9 +1044,11 @@ export const linearGemvParallelKey = (
 ): string => `linear_gemv_parallel${weightKeyPart(storage)}${i4GroupKeyPart(group)}:l${lanes}`;
 
 /**
- * 圧縮語を K の lane に巡回配分する任意指定版。逆量子化と語内の積和は逐次版と共有するが、
- * 語をまたぐ加算順は異なる。128 thread 内の木縮約だけで完結し、追加 feature を要求しない。
- * M を shader に焼かず、decode と少数行の投機検証を同一キー・同一算術にする。
+ * The opt-in version that distributes compressed words over K lanes round-robin. Dequantisation and
+ * the multiply-adds within a word are shared with the sequential version, but the addition order
+ * across words differs. It completes with a tree reduction inside 128 threads and requires no extra
+ * feature. M is not baked into the shader, so decode and speculative verification of a few rows use
+ * the same key and the same arithmetic.
  * DECIDED: docs/decisions/0098-linear-gemv-parallel.md
  */
 export const linearGemvParallelWgsl = (
@@ -966,7 +1057,10 @@ export const linearGemvParallelWgsl = (
   lanes: LinearGemvParallelLanes,
 ): string => parallelWgsl(storage, group, lanes, false);
 
-/** 固定SRQまで融合する別キー。参照のparallel本文はバイト単位で維持する（ADR 0103）。 */
+/**
+ * A separate key that also fuses the fixed SRQ. The reference parallel body is kept byte for byte
+ * (ADR 0103).
+ */
 export const linearGemvStaticQuantizeKey = (
   storage: WeightStorage,
   group: number | undefined,
@@ -985,7 +1079,7 @@ export const linearGemvStaticQuantizeParams = (
   assertRowsStorage(storage);
   const params = new Uint32Array(264);
   params.set(linearGemvParams(storage, m, n, k, group));
-  // 第4語は実行時の丸め障壁。0とのXORを定数式へ置き換えない。
+  // The 4th word is a run-time rounding barrier. Do not replace the XOR with 0 by a constant expression.
   params.set(staticQuantizeParams(m * n, scale), 4);
   return params;
 };
@@ -997,8 +1091,9 @@ export const linearGemvStaticQuantizeWgsl = (
 ): string => parallelWgsl(storage, group, lanes, true);
 
 /**
- * packed int8 活性の変種（ADR 0105）を表すキー断片。**既存キーの末尾に足す**ので、診断・census が
- * 読んでいる格納判別子（`:wi4g512` / `:l4` / `:static-quantize:v1`）の位置は 1 つも動かない。
+ * The key fragment for the packed int8 activation variant (ADR 0105). It is **appended to the end of
+ * the existing key**, so none of the storage discriminators diagnostics and the census read
+ * (`:wi4g512` / `:l4` / `:static-quantize:v1`) moves.
  */
 const PACKED_ACTIVATION_KEY_PART = ":packed-x-i8";
 
@@ -1009,8 +1104,9 @@ export const linearGemvParallelPackedKey = (
 ): string => `${linearGemvParallelKey(storage, group, lanes)}${PACKED_ACTIVATION_KEY_PART}`;
 
 /**
- * 並列 GEMV の packed 活性変種。幾何・lane 表・縮約木・bias の足し順は
- * {@link linearGemvParallelWgsl} と 1 バイトも変えず、**活性の読みと復元だけ**が違う。
+ * The packed-activation variant of the parallel GEMV. Geometry, lane table, reduction tree and the
+ * order of adding the bias do not differ by a single byte from {@link linearGemvParallelWgsl}; **only
+ * the activation read and restoration** differ.
  */
 export const linearGemvParallelPackedWgsl = (
   storage: WeightStorage,
@@ -1024,7 +1120,10 @@ export const linearGemvStaticQuantizePackedKey = (
   lanes: LinearGemvParallelLanes,
 ): string => `${linearGemvStaticQuantizeKey(storage, group, lanes)}${PACKED_ACTIVATION_KEY_PART}`;
 
-/** SRQ 融合エピローグ付き並列 GEMV の packed 活性変種（出力側 SRQ は f32 のまま）。 */
+/**
+ * The packed-activation variant of the parallel GEMV with the fused SRQ epilogue (the output-side
+ * SRQ stays f32).
+ */
 export const linearGemvStaticQuantizePackedWgsl = (
   storage: WeightStorage,
   group: number | undefined,
@@ -1032,10 +1131,12 @@ export const linearGemvStaticQuantizePackedWgsl = (
 ): string => parallelWgsl(storage, group, lanes, true, true);
 
 /**
- * packed 活性の復元 scale（= 生産側 SRQ の f32 scale）を u32 の bit 列にする。
+ * Turns the restoration scale of packed activations (= the producer-side SRQ's f32 scale) into u32
+ * bits.
  *
- * MUST: 正・有限・厳密に f32 表現できる値（生産側 {@link staticQuantizeParams} と同じ門）。
- * 0 は恒等 SRQ で packed int8 に落とせないので、ここでも拒否する（fail loudly）。
+ * MUST: a positive, finite value exactly representable in f32 (the same guard as the producer side,
+ * {@link staticQuantizeParams}). 0 is the identity SRQ and cannot be turned into packed int8, so it
+ * is rejected here too (fail loudly).
  */
 const activationScaleBits = (scale: number): number => {
   if (!Number.isFinite(scale) || scale <= 0 || Math.fround(scale) !== scale) {
@@ -1048,7 +1149,7 @@ const activationScaleBits = (scale: number): number => {
   return new Uint32Array(scratch.buffer)[0];
 };
 
-/** packed 活性変種の params（Dims の最終メンバ `x_scale` に 1 語足すだけ）。 */
+/** Params of the packed-activation variant (only one word added for the last Dims member `x_scale`). */
 export const linearGemvParallelPackedParams = (
   storage: WeightStorage,
   m: number,
@@ -1064,9 +1165,10 @@ export const linearGemvParallelPackedParams = (
 };
 
 /**
- * SRQ 融合エピローグ付き packed 活性変種の params。既存の並び（`m/n/k/rounding_mask` +
- * 出力側 SRQ の表 260 語）をそのまま保ち、**末尾**へ `x_scale` を 1 語足す
- * （`array<vec4<u32>>` の 16 B 整列で語 264 に落ちる — WGSL の Dims と同じ導出）。
+ * Params of the packed-activation variant with the fused SRQ epilogue. It keeps the existing layout
+ * (`m/n/k/rounding_mask` + the 260-word output-side SRQ table) as is and appends one word, `x_scale`,
+ * **at the end** (the 16 B alignment of `array<vec4<u32>>` puts it at word 264 — the same derivation
+ * as the WGSL Dims).
  */
 export const linearGemvStaticQuantizePackedParams = (
   storage: WeightStorage,
@@ -1083,7 +1185,10 @@ export const linearGemvStaticQuantizePackedParams = (
   return params;
 };
 
-/** SRQの整数表を共用し、128境界の上限探索だけを固定回数へ展開する。 */
+/**
+ * Shares the SRQ integer table and unrolls only the upper-bound search over the 128 boundaries into
+ * a fixed count.
+ */
 const staticQuantizeEpilogue = (): string => `
 fn srqWord(index: u32) -> u32 { return dims.srq[index >> 2u][index & 3u]; }
 fn quantize(bits: u32) -> u32 {
@@ -1114,7 +1219,8 @@ const parallelWgsl = (
   assertRowsStorage(storage);
   const unit = linearGemvUnit(storage);
   const shift = gemvGroupShift(storage, group);
-  // MUST: `x_scale` は Dims の**最終メンバ**（packed 変種の params はこの位置へ 1 語足す）。
+  // MUST: `x_scale` is the **last member** of Dims (the packed variant's params add one word at
+  // this position).
   return `// karume linear gemv K parallel (${storage}, ${lanes} lanes/output${
     packed ? ", packed int8 活性" : ""
   })
@@ -1134,7 +1240,7 @@ fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: ve
   let lane = lid % ${lanes}u;
   let col = wg.x * ${128 / lanes}u + lid / ${lanes}u;
   var acc = 0.0;
-  // 端の列も部分和0を書き、全threadが同じbarrierを通る。
+  // Edge columns also write a partial sum of 0, so every thread passes the same barriers.
   if (col < dims.n) {
     let units = dims.k / ${unit}u;
     let row_base = col * units;${scaleSetupWgsl(storage, shift)}
@@ -1169,9 +1275,10 @@ export const linearGemvSubgroupKey = (
 ): string => `${linearGemvParallelKey(storage, group, lanes)}:subgroup32`;
 
 /**
- * parallelと同じ入力配分・加算木をsubgroup内の値交換で実行する。
- * 既存のWGSLとキーは維持する。固定32レーンの機能を明示要求し、共有メモリを使わない。
- * 積和は parallel と同じ明示 `fma()`（{@link mac} — 綴りが違うと Metal で parallel と u32 が割れる）。
+ * Runs the same input distribution and addition tree as parallel with value exchange inside a
+ * subgroup. The existing WGSL and keys are kept. It explicitly requires the fixed-32-lane feature and
+ * uses no shared memory. The multiply-add is the same explicit `fma()` as parallel ({@link mac} — a
+ * different spelling makes it diverge from parallel in u32 on Metal).
  * DECIDED: docs/decisions/0101-linear-gemv-subgroup.md
  */
 export const linearGemvSubgroupWgsl = (
@@ -1204,7 +1311,8 @@ fn main(
   let lane = sub % ${lanes}u;
   let col = wg.x * ${128 / lanes}u + sg * ${32 / lanes}u + sub / ${lanes}u;
   var acc = 0.0;
-  // 端の列も全レーンがshuffleへ参加する。local IDとsubgroup IDの配置を仮定しない。
+  // All lanes of edge columns also take part in the shuffle. No layout of local ID vs subgroup ID
+  // is assumed.
   if (col < dims.n) {
     let units = dims.k / ${unit}u;
     let row_base = col * units;${scaleSetupWgsl(storage, shift)}

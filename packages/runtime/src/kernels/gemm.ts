@@ -1,52 +1,61 @@
 /**
- * GEMM 族（matmul / bmm / linear + 融合 attention の QK / PV + states 形 attention の ①ₜ / ③ₜ +
- * conv1d / conv2d / conv3d の implicit GEMM — ADR 0022 / 0023 / 0024 / 0067 / 0118）が共有する
- * **レジスタブロッキング + vec4** の骨格。
+ * The **register blocking + vec4** skeleton shared by the GEMM family (matmul / bmm / linear + QK /
+ * PV of fused attention + ①ₜ / ③ₜ of states-shaped attention + the implicit GEMM of conv1d /
+ * conv2d / conv3d — ADR 0022 / 0023 / 0024 / 0067 / 0118).
  *
- * 1 スレッドが {@link GemmGeometry} の `regM`×`regN` の出力を持ち（`acc{行}_{列 quad}` の
- * 名前付き変数へ codegen 時に静的展開する — {@link gemmAccumulatorInit}）、共有 B タイルは
- * **列方向を vec4 に束ねた** `[k][列 quad]`。内側ループは共有ロード `regM + regN/4` 回
- * （A のスカラ `regM` + B の vec4 `regN/4`）で `regM · regN` MAC を回す — 共有帯域あたりの
- * 演算密度は `regM·regN / (regM + regN/4)` で、1 スレッド 1 出力の 16×16 タイル
- * （2 ロード 1 MAC = 0.5）に対して幾何を上げるほど大きくなる。
+ * One thread holds `regM`×`regN` outputs of the {@link GemmGeometry} (statically unrolled at codegen
+ * time into named variables `acc{row}_{column quad}` — {@link gemmAccumulatorInit}), and the shared
+ * B tile is `[k][column quad]` **with the column direction grouped into vec4**. The inner loop runs
+ * `regM · regN` MACs on `regM + regN/4` shared loads (`regM` scalars of A + `regN/4` vec4 of B) —
+ * the arithmetic intensity per unit of shared bandwidth is `regM·regN / (regM + regN/4)`, which grows
+ * with the geometry compared with a 16×16 tile of 1 output per thread (2 loads per MAC = 0.5).
  *
- * MUST: **具体値をここに書かない**（幾何・doc・表の 3 箇所に同じ事実が散るとドリフトする）。
- * 既定は {@link defaultGemmGeometry}・出力タイル辺は {@link gemmTileM} / {@link gemmTileN}・
- * K タイル幅は {@link GEMM_TILE_K}（幾何ではなく数値契約）・共有メモリのバイト数は skeleton が
- * 生成時に計算して WGSL ヘッダへ書く（生成物とスナップショット tests/fixtures/wgsl/ が正本）。
- * 幾何の候補表と実測の出どころは src/kernels/gemm-geometry.ts のモジュール doc。
+ * MUST: **do not write concrete values here** (the same fact spread over 3 places — geometry, doc and
+ * table — drifts). The default is {@link defaultGemmGeometry}, the output tile edges are
+ * {@link gemmTileM} / {@link gemmTileN}, the K tile width is {@link GEMM_TILE_K} (numeric contract,
+ * not geometry), and the bytes of shared memory are computed by the skeleton at generation time and
+ * written into the WGSL header (the generated code and the snapshots tests/fixtures/wgsl/ are the
+ * canonical source). The table of geometry candidates and the source of the measurements are in the
+ * module doc of src/kernels/gemm-geometry.ts.
  *
- * MUST: タイル幾何が決めてよいのは**どのスレッドがどの出力を担当するか**だけで、
- * 既定は {@link defaultGemmGeometry} の 1 箇所（src/kernels/gemm-geometry.ts に幾何の
- * 算術・門・キー断片がまとまっている）。共有タイルの容量と 1 workgroup = 1 出力タイルの
- * 対応は幾何によらず不変なので、dispatch 側（executor の `tiledWorkgroups`）は無関係。
- * MUST: dispatch の辺は**幾何から導く**（`tiledWorkgroups(n, gemmTileN(geometry), …)`）。
- * 辺の値を定数で持ち回ると幾何と食い違いうる値が 2 つになり、`ceil(dim / 定数)` が
- * `ceil(dim / 実タイル辺)` を下回った瞬間に**タイルが欠落して沈黙誤値**になる。
+ * MUST: the tile geometry may decide only **which thread handles which output**, and the default
+ * lives in one place, {@link defaultGemmGeometry} (src/kernels/gemm-geometry.ts gathers the geometry
+ * arithmetic, guards and key fragments). The capacity of the shared tiles and the correspondence
+ * 1 workgroup = 1 output tile do not change with the geometry, so the dispatch side (the executor's
+ * `tiledWorkgroups`) is not affected.
+ * MUST: the dispatch edges are **derived from the geometry** (`tiledWorkgroups(n, gemmTileN(geometry),
+ * …)`). Carrying the edge around as a constant gives 2 values that can disagree with the geometry,
+ * and the moment `ceil(dim / constant)` drops below `ceil(dim / actual tile edge)`, **tiles go
+ * missing — a silent wrong value**.
  *
- * MUST: 全 op は**この 1 本の骨格を共有する**。内積ループの正本が 1 箇所にあることが
- * 「縮約順序が全 op で同一」という不変条件を機械的に守る唯一の手段で、括り出しを禁じると
- * 同じループを 5 回書き写すことになる。旧 16×16 実装が持っていた「共通化するな」MUST は
- * 「既存の生成バイト列とスナップショットを動かすな」が目的で、3 本とも WGSL を総取り替え
- * してキーを v2 へ改版した時点で保護対象が消えている。融合 attention（ADR 0023）が
- * **分解経路とビット同一**でいられるのも、conv1d / conv2d の implicit GEMM（ADR 0024）が
- * **直接畳み込みとビット同一**でいられるのも、どちらもここの内積ループをそのまま使うため。
- * MUST: 断片を足すときは**既存 3 op の生成バイト列を 1 バイトも動かさない**（省略時の既定が
- * 従来の文字列を返す形にする）。スナップショット（tests/fixtures/wgsl/）が検出器。
- * MUST: K タイル幅は 16 のまま・外側 `t` も内側 `kk` も昇順。1 出力要素あたりの加算順序が
- * 旧 16×16 カーネルと完全に一致する（既存の数値契約を動かさないための土台）。
- * MUST: m タイルの行数（{@link GEMM_MTILE_SMALL} の 32 行変種 — conv1d / conv2d の implicit GEMM のみ）を変えても
- * **1 出力要素の数値経路は変えない**。タイル形が決めるのは「どの workgroup がどの出力を
- * 担当するか」だけで、K 縮約の順序も丸めの並びも `acc` の初期値も共通の骨格が持つ。
- * MUST: 1 workgroup = 1 出力タイルで全域を覆う。grid-stride で縮退できないため dispatch 数の
- * 上限超過は fail loudly（{@link tiledWorkgroups}）— 縮退させるとタイルが欠落し、例外なしに
- * 出力の一部が未書き込み（配り直しなら前の値）のまま残る。bmm のバッチ軸（z）も同じ。
+ * MUST: every op **shares this one skeleton**. Having the canonical inner-product loop in one place
+ * is the only way to mechanically keep the invariant "the reduction order is the same for every
+ * op"; forbidding the factoring-out would mean copying the same loop 5 times. The "do not share
+ * code" MUST of the old 16×16 implementation was meant to "not move the existing generated bytes and
+ * snapshots", and its object of protection disappeared when all 3 had their WGSL replaced and their
+ * keys bumped to v2. Fused attention (ADR 0023) stays **bit-identical to the decomposed path**, and
+ * the implicit GEMM of conv1d / conv2d (ADR 0024) stays **bit-identical to direct convolution**,
+ * both because they use this inner-product loop as is.
+ * MUST: when adding a fragment, **do not move the generated bytes of the existing 3 ops by a single
+ * byte** (make the default on omission return the previous string). The snapshots
+ * (tests/fixtures/wgsl/) are the detector.
+ * MUST: the K tile width stays 16, and both the outer `t` and the inner `kk` are ascending. The
+ * addition order per output element matches the old 16×16 kernel exactly (the foundation for not
+ * moving the existing numeric contract).
+ * MUST: changing the row count of the m tile (the 32-row variant {@link GEMM_MTILE_SMALL} — only the
+ * implicit GEMM of conv1d / conv2d) **does not change the numeric path of an output element**. The
+ * tile shape decides only "which workgroup handles which output"; the K reduction order, the
+ * sequence of roundings and the initial value of `acc` are held by the common skeleton.
+ * MUST: 1 workgroup = 1 output tile covers the whole domain. It cannot fall back to grid-stride, so
+ * exceeding the dispatch count limit fails loudly ({@link tiledWorkgroups}) — falling back would
+ * drop tiles and leave part of the output unwritten (or, for a reused buffer, the previous values)
+ * with no exception. The same holds for bmm's batch axis (z).
  *
- * **v4 経路**（{@link gemmUsesVec4}: `k % 4 == 0 && n % 4 == 0`）は入出力を `vec4<f32>` で
- * 読み書きする。条件を満たさない形は**同じレジスタ構造のままスカラ読み書きへ落ちる**変種で、
- * v4 フラグはパイプラインキーに載る。キーが形状の関数になるが決定性は崩れない（形状 →
- * 1 ビットの写像なので「同一キー ⇔ 同一 WGSL バイト列」は保たれる — `elementwiseKey` の
- * `r${rank}` と同じ語彙）。
+ * The **v4 path** ({@link gemmUsesVec4}: `k % 4 == 0 && n % 4 == 0`) reads and writes inputs and
+ * outputs as `vec4<f32>`. Shapes that do not meet the condition use a variant that **falls back to
+ * scalar reads and writes with the same register structure**, and the v4 flag goes into the pipeline
+ * key. The key becomes a function of the shape, but determinism holds (shape → a 1-bit mapping, so
+ * "same key ⇔ same WGSL bytes" is kept — the same vocabulary as `r${rank}` of `elementwiseKey`).
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -104,41 +113,47 @@ import {
 } from "./weight-storage.ts";
 
 /**
- * conv1d / conv2d の implicit GEMM だけが持つ **32 行 m タイル**（n タイルは幾何のまま —
- * ADR 0024 隣接）。
+ * The **32-row m tile** held only by the implicit GEMM of conv1d / conv2d (the n tile stays the
+ * geometry's — adjacent to ADR 0024).
  *
- * 動機は M = Cout が 64 の倍数でない層のタイル量子化の無駄（census の Cout=96 は
- * `ceil(96/64)·64/96 = 1.33×`）。**1 スレッドの出力は幾何のまま**で workgroup の y 辺だけを
- * 半分に落とすので、内積ループの演算密度は 64 行版と変わらない（1 スレッドの出力を削って
- * workgroup を保つ形は密度が落ちる）。
- * MUST: 1 出力要素あたりの K 縮約順・丸め列は 64 行版と厳密一致（タイル形は「どの workgroup が
- * どの出力を担当するか」だけを変える）。
+ * The motivation is the waste of tile quantisation on layers where M = Cout is not a multiple of 64
+ * (the census's Cout=96 gives `ceil(96/64)·64/96 = 1.33×`). **The outputs per thread stay the
+ * geometry's** and only the workgroup's y edge is halved, so the arithmetic intensity of the
+ * inner-product loop is the same as the 64-row version (cutting the outputs per thread to keep the
+ * workgroup would lower the intensity).
+ * MUST: the K reduction order and the sequence of roundings per output element match the 64-row
+ * version exactly (the tile shape changes only "which workgroup handles which output").
  */
 export const GEMM_MTILE_SMALL = 32;
 
 /**
- * i8 変種の scale 束縛（出力束縛の次の番号 — executor の bind entries と対）。
+ * The scale binding of the i8 variant (the number after the output binding — pairs with the
+ * executor's bind entries).
  *
- * linear と conv1d / conv2d の implicit GEMM は束縛配置が同じ（0 dims / 1 活性 / 2 重み /
- * 3 bias / 4 出力）なので、番号は 1 本で足りる。
+ * linear and the implicit GEMM of conv1d / conv2d have the same binding layout (0 dims /
+ * 1 activation / 2 weight / 3 bias / 4 output), so one number is enough.
  */
 export const LINEAR_SCALE_BINDING = 5;
 
 /**
- * 融合 attention ①QK の**加算 mask** の束縛（S の次の番号 — executor の bind entries と対）。
+ * The binding of the **additive mask** of fused attention ①QK (the number after S — pairs with the
+ * executor's bind entries).
  *
- * MUST: mask 変種でだけ束縛する。無い変種で番号を予約すると、束縛されていない binding を
- * 宣言したパイプラインとして validation で落ちる。
+ * MUST: bind it only in the mask variant. Reserving the number in a variant without a mask would fail
+ * validation as a pipeline declaring an unbound binding.
  */
 export const ATTENTION_QK_MASK_BINDING = 4;
 
 /**
- * m タイルの行数から幾何を解決する（既定幾何の **wgY だけ**を `mTile / regM` へ差し替える）。
+ * Resolves the geometry from the row count of the m tile (replaces **only wgY** of the default
+ * geometry with `mTile / regM`).
  *
- * conv1d / conv2d の implicit GEMM が持つヒューリスティック（`conv2dIgemmMTile`）は「行数」で答えを
- * 出すので、その 1 値を幾何へ吸収する唯一の点。**生成（{@link gemmWgsl}）もキーも dispatch も
- * ここを通す** — 通さずに mTile を直に読む経路を残すと、キーの幾何と生成物の幾何が食い違う。
- * 割り切れない mTile は {@link assertGemmGeometry} の「wgY は正整数」で落ちる。
+ * The heuristic of the conv1d / conv2d implicit GEMM (`conv2dIgemmMTile`) answers with a "row
+ * count", and this is the only point that absorbs that one value into the geometry. **Generation
+ * ({@link gemmWgsl}), the key and the dispatch all go through here** — leaving a path that reads
+ * mTile directly would make the key's geometry and the generated code's geometry disagree. An mTile
+ * that does not divide evenly is rejected by "wgY is a positive integer" of
+ * {@link assertGemmGeometry}.
  */
 export const gemmMTileGeometry = (mTile: number): GemmGeometry => {
   const geometry = defaultGemmGeometry();
@@ -146,198 +161,219 @@ export const gemmMTileGeometry = (mTile: number): GemmGeometry => {
 };
 
 /**
- * v4 経路（vec4 の読み書き）を使えるかどうかの判定。
+ * Decides whether the v4 path (vec4 reads and writes) can be used.
  *
- * dense 側は a が `[m,k]`（k%4）・b が `[k,n]`（n%4）・c が `[m,n]`（n%4）、linear 側は
- * x が `[m,k]`（k%4）・out が `[m,n]`（n%4）・W が `[n,k]`（k%4 で行頭が quad 境界）で、
- * **両方**必要になる。
+ * On the dense side a is `[m,k]` (k%4), b is `[k,n]` (n%4) and c is `[m,n]` (n%4); on the linear
+ * side x is `[m,k]` (k%4), out is `[m,n]` (n%4) and W is `[n,k]` (k%4 puts row starts on a quad
+ * boundary) — **both** are needed.
  *
- * MUST: 判定はここ 1 箇所。`k%4` だけ見て `n%4` を見落とすと、v4 の書き出しが quad 境界を
- * 越えて隣接行を潰す（例外なしの誤値）。
+ * MUST: the decision lives here, in one place. Checking only `k%4` and missing `n%4` makes the v4
+ * write cross a quad boundary and clobber the adjacent row (a wrong value with no exception).
  */
 export const gemmUsesVec4 = (k: number, n: number): boolean => k % 4 === 0 && n % 4 === 0;
 
 /**
- * 行数 M から幾何を解決する（matmul / bmm / linear の 3 経路）。**キーと生成の両方がここを通る**
- * ので、片方だけ別の幾何になることが構造的に起こらない。
+ * Resolves the geometry from the row count M (the 3 paths matmul / bmm / linear). **Both the key and
+ * generation go through here**, so it structurally cannot happen that only one of them ends up with a
+ * different geometry.
  *
- * `rows` 省略は「行数を持たない呼び出し」= 融合 attention（幾何は Anima の実測選定で固定 —
- * {@link "./gemm-geometry.ts"} `gemmGeometryForRows` の MUST）と、既定変種だけを見る
- * スナップショット / キー検査。
+ * Omitting `rows` means "a call without a row count" = fused attention (its geometry is fixed by the
+ * measured choice on Anima — the MUST of `gemmGeometryForRows` in {@link "./gemm-geometry.ts"}) and
+ * the snapshot / key checks that look only at the default variant.
  */
 const rowsGeometry = (rows: number | undefined): GemmGeometry =>
   rows === undefined ? defaultGemmGeometry() : gemmGeometryForRows(rows);
 
 /**
- * パイプラインキーのタイル判別子。v4 フラグは形状から導いた 1 ビット。
+ * The tile discriminator of the pipeline key. The v4 flag is 1 bit derived from the shape.
  *
- * MUST: タイル辺だけでなく**幾何そのもの**を載せる（{@link gemmGeometryKeyPart}）— 64×64 は
- * 複数の `regM×regN wgX` から組めるので、辺だけのキーは別の生成物へ衝突する。
- * MUST: `rows` は生成（{@link gemmWgsl}）へ渡すものと**同じ値**にする。片方だけ渡し忘れると
- * キーと生成物の幾何が食い違い、キャッシュに載った別幾何の WGSL が dispatch 数と噛み合わずに
- * 出力タイルが欠落する（例外の出ない誤値）。
+ * MUST: carry **the geometry itself**, not only the tile edges ({@link gemmGeometryKeyPart}) — 64×64
+ * can be built from several `regM×regN wgX`, so a key of edges alone would collide with another
+ * generated kernel.
+ * MUST: `rows` is **the same value** as the one passed to generation ({@link gemmWgsl}). Forgetting
+ * it on one side makes the key's geometry and the generated code's geometry disagree, the cached WGSL
+ * of another geometry does not match the dispatch count, and output tiles go missing (a wrong value
+ * with no exception).
  *
- * `geometry` は**明示の幾何**（{@link GemmSpec} の `geometry` — Session の経路では adapter の
- * プロファイルが選んだ値・計測では tools/geometry-sweep の候補）。渡すと `rows` より優先する
- * （{@link gemmWgsl} の解決と同じ規則）。渡してよいのは生成側が明示を読む op（matmul / bmm /
- * linear / attention_qk / attention_pv）のキーだけ。
- * MUST: 生成へ渡すものと同じ値にする（理由は `rows` と同文）。省略時のキーは 1 バイトも動かない。
+ * `geometry` is the **explicit geometry** (`geometry` of {@link GemmSpec} — on the Session path the
+ * value the adapter's profile chose, in measurement a candidate of tools/geometry-sweep (removed in
+ * 0.15; now `runGeometrySweep` of `@karume/runtime/tune`)). When given it takes precedence over
+ * `rows` (the same rule as the resolution in {@link gemmWgsl}). It may be passed only to the keys of
+ * ops whose generation reads the explicit value (matmul / bmm / linear / attention_qk /
+ * attention_pv).
+ * MUST: the same value as the one passed to generation (the reason is the same as for `rows`). When
+ * omitted, the key does not move by a single byte.
  */
 export const gemmKeyPart = (v4: boolean, rows?: number, geometry?: GemmGeometry): string =>
   `${gemmGeometryTileKeyPart(geometry ?? rowsGeometry(rows))}${v4 ? "v4" : ""}`;
 
 /**
- * 内積の**計算**変種（ADR 0028）。`"f16"` は共有タイルを f16 に落とす形で、
- * **重み格納**の f16（ADR 0018 の `wf16`）とは完全に別の軸。
+ * The **compute** variant of the inner product (ADR 0028). `"f16"` lowers the shared tiles to f16,
+ * an axis entirely separate from f16 **weight storage** (`wf16` of ADR 0018).
  *
- * 丸め列（ここが数値契約の全て。TS 参照はこの並びを写す）:
+ * The sequence of roundings (this is the whole numeric contract; the TS reference copies this
+ * order):
  *
- * 1. 共有タイルへ書く直前に `f16()` で 1 度だけ丸める（A / B とも）。`scale` の乗算や
- *    `exp(S−m)·inv` の評価は**丸める前**に f32 で済ませる。
- * 2. 内側ループはタイルから読んだ値を `f32()` へ広げてから MAC する（f16 → f32 は厳密なので
- *    丸めではない）。**MAC ごとに f16↔f32 変換を挟まない** — 変換はレジスタロード 1 回ぶんで、
- *    `regM · regN` MAC あたり `regM + regN/4` 回（B の vec4 + A のスカラ）。
- * 3. 累積は f32（`acc{行}_{列 quad}` はどれも vec4<f32>）。k が大きい経路で f16 累積にすると
- *    桁落ちが値に出る。
- * 4. 出力は f32（唯一の例外が融合 attention の S — ①が f16 で書き②③が f16 で読む形にして
- *    transient を半減させる。この丸めは {@link store} の書き出し 1 箇所）。
+ * 1. Round once with `f16()` just before writing into the shared tile (both A and B). The `scale`
+ *    multiply and the evaluation of `exp(S−m)·inv` are done in f32 **before rounding**.
+ * 2. The inner loop widens values read from the tile to `f32()` before the MAC (f16 → f32 is exact,
+ *    so it is not a rounding). **No f16↔f32 conversion per MAC** — the conversion happens once per register
+ *    load, `regM + regN/4` times per `regM · regN` MACs (vec4 of B + scalars of A).
+ * 3. Accumulation is f32 (every `acc{row}_{column quad}` is vec4<f32>). Accumulating in f16 on a
+ *    path with large k would show cancellation in the values.
+ * 4. Output is f32 (the only exception is S of fused attention — ① writes it as f16 and ②③ read it
+ *    as f16, halving the transient. This rounding is in one place, the write in {@link store}).
  *
- * したがって **f16 変種の値は「入力を f16 に丸めた f32 変種」と厳密に一致する**（縮約順序も
- * 丸め列も f32 変種と同じ）。この性質が単体テストのオラクル（f32 カーネル × 事前丸め入力）を
- * 成立させている。
+ * So **the values of the f16 variant match exactly "the f32 variant with inputs rounded to f16"**
+ * (the reduction order and the sequence of roundings are the same as the f32 variant). This
+ * property is what makes the unit-test oracle (f32 kernel × pre-rounded inputs) work.
  */
 export type GemmCompute = "f32" | "f16";
 
 /**
- * パイプラインキーの計算変種判別子。
+ * The compute-variant discriminator of the pipeline key.
  *
- * MUST: f32 は空文字（既存キーはバイト単位で不変）。MUST: 語は格納 f16 の `:wf16` と**別**に
- * する — 同じ語にすると「重みが f16 で常駐している」と「内積を f16 タイルで回している」が
- * 診断で区別できなくなる（両方同時に起こりうる組み合わせ）。
+ * MUST: f32 is the empty string (existing keys unchanged byte for byte). MUST: the word is
+ * **different** from `:wf16` of f16 storage — with the same word, diagnostics could not tell "the
+ * weights are resident as f16" from "the inner product runs on f16 tiles" (a combination where both
+ * can happen at once).
  */
 export const gemmComputeKeyPart = (compute: GemmCompute): string =>
   compute === "f16" ? ":c16" : "";
 
 /**
- * 行窓変種。クエリ行のブロック実行（分解 attention は src/runtime/fusion.ts の
- * `rowBlockAttention`・融合 attention は src/runtime/recipe-builders/attention.ts の `buildAttention`）で、
- * `[B,M,K] × [B,K,N]` の M を行ブロック 1 枚ぶんに縮めたまま、**片側だけ**を元の全 M
- * （`rows_full`）のストライドで数えて行オフセット（`row_offset`）から読み書きするための 1 ビット。
+ * The row-window variant. A 1-bit switch for block execution over query rows (decomposed attention:
+ * `rowBlockAttention` in src/runtime/fusion.ts; fused attention: `buildAttention` in
+ * src/runtime/recipe-builders/attention.ts) that keeps the M of `[B,M,K] × [B,K,N]` shrunk to one
+ * row block while **only one side** is counted with the stride of the original full M (`rows_full`)
+ * and read or written from the row offset (`row_offset`).
  *
- * - `"a"` = QK 側。A（q）を全 M の中の `row_offset` 行目から読み、C（scores）は
- *   `m` 行のブロックとして 0 から書く。
- * - `"c"` = PV 側。A（block-local な P）は 0 から読み、C（出力）を全 M の中の
- *   `row_offset` 行目へ書く。
+ * - `"a"` = the QK side. A (q) is read from row `row_offset` of the full M, and C (scores) is written
+ *   from 0 as a block of `m` rows.
+ * - `"c"` = the PV side. A (the block-local P) is read from 0, and C (the output) is written to row
+ *   `row_offset` of the full M.
  *
- * MUST: 効くのは**バッチ base の算術 1 行だけ**（{@link batchPrologue}）。行内の K 縮約順も
- * 積和の字面も 1 文字も動かないので、行ブロック実行は 1 枚実行と**ビット同一**になる
- * （src/kernels/gemm-geometry.ts の数値契約）。唯一の例外が ①QK の加算 mask で、mask の行は
- * 全 M の添字なので `row_offset` を足す（{@link store}）。
- * MUST: オフセットと全 M は **uniform 値**でキーには載せない（キーに載せると同じ WGSL が
- * ブロックの本数だけパイプラインへ複製される）。キーに載るのはこの 1 ビットだけ。
- * MUST: 共有の {@link gemmParams}（3 語 `{m,n,k}`）には足さない — 足すと全 op の uniform
- * レイアウトとスナップショットが総取っ替えになる。追加 2 語は変種を持つ op の params
- * （`bmmRowWindowParams` / `attentionQkParams` / `attentionPvParams`）が末尾に足す。
- * MUST: 融合 attention では**側が op から決まる**（`attention_qk` は必ず `"a"`・
- * `attention_pv` は必ず `"c"`）ので、生成入力は側ではなく真偽で受ける。取り違えると
- * S と O のどちらかが全 M ストライドで読み書きされる例外なしの誤値になる。
+ * MUST: it affects **only one line of arithmetic, the batch base** ({@link batchPrologue}). Neither
+ * the K reduction order within a row nor the literal form of the multiply-add moves by a character,
+ * so row-block execution is **bit-identical** to single-block execution (the numeric contract of
+ * src/kernels/gemm-geometry.ts). The only exception is the additive mask of ①QK: mask rows are
+ * indices into the full M, so `row_offset` is added ({@link store}).
+ * MUST: the offset and the full M are **uniform values** and do not go into the key (in the key, the
+ * same WGSL would be duplicated into pipelines once per block). Only this 1 bit goes into the key.
+ * MUST: do not add them to the shared {@link gemmParams} (3 words `{m,n,k}`) — that would change the
+ * uniform layout and the snapshots of every op. The 2 extra words are appended by the params of the
+ * ops that have the variant (`bmmRowWindowParams` / `attentionQkParams` / `attentionPvParams`).
+ * MUST: in fused attention **the side is decided by the op** (`attention_qk` is always `"a"`,
+ * `attention_pv` always `"c"`), so the generation input takes a boolean rather than a side. Mixing
+ * them up would read or write S or O with the full-M stride — a wrong value with no exception.
  */
 export type GemmRowWindow = "a" | "c";
 
 /**
- * 生成入力。`weight` は重みスロットを持つ op（linear / conv2d）だけが取る（matmul / bmm /
- * attention は活性が f32 固定）。`compute` は f16 計算変種（ADR 0028）を結んだ op
- * （linear / attention_qk / attention_pv）だけが取る — 省略時は `"f32"` で、生成物は
- * 1 バイトも動かない。
+ * Generation input. `weight` is taken only by ops with a weight slot (linear / conv2d) (the
+ * activations of matmul / bmm / attention are fixed f32). `compute` is taken only by ops wired to
+ * the f16 compute variant (ADR 0028) (linear / attention_qk / attention_pv) — omitted it is `"f32"`
+ * and the generated code does not move by a single byte.
  *
- * `attention_qk` / `attention_pv` は融合 attention の ① と ③（ADR 0023）。②（行統計）は
- * GEMM 骨格ではないので src/kernels/attention.ts が別に持つ。`conv1d` / `conv2d` は
- * implicit GEMM（ADR 0024）で、**groups == 1 専用**（groups > 1 は直接カーネルが受ける）。
- * `attention_state_qk` / `attention_state_pv` は states 形 ①ₜ / ③ₜ（K / V の行タイル共有 —
- * ADR 0067 決定 4 / perf-ledger K-13）で、uniform は骨格の `Dims` に states の欄を足した形
- * （キー・workgroup 算出・切替条件は src/kernels/state-attention.ts が持つ）。
+ * `attention_qk` / `attention_pv` are ① and ③ of fused attention (ADR 0023). ② (row statistics) is
+ * not a GEMM skeleton, so src/kernels/attention.ts holds it separately. `conv1d` / `conv2d` are the
+ * implicit GEMM (ADR 0024), **for groups == 1 only** (groups > 1 go to the direct kernel).
+ * `attention_state_qk` / `attention_state_pv` are states-shaped ①ₜ / ③ₜ (shared K / V row tiles —
+ * ADR 0067 decision 4 / perf-ledger K-13); their uniform is the skeleton's `Dims` plus the states
+ * fields (key, workgroup computation and switching condition are held by
+ * src/kernels/state-attention.ts).
  *
- * `matmul` / `bmm` / `linear` / `attention_qk` / `attention_pv` / `conv2d` の 6 variant だけが取る
- * `geometry` は**明示の幾何**で、渡すと op 別の解決（行数バケット・m タイル・既定固定）より優先する
- * （{@link resolveGeometry}）。渡し手は 2 つ — Session の導出相（recipe-builders）が adapter の
- * プロファイル（src/kernels/geometry-profile.ts）から引いた値と、同じ shape で幾何だけを変える
- * 計測（tools/geometry-sweep）。どちらも静的な選択で、実行時オートチューンではない
- * （DECIDED: ADR 0115）。省略時の生成物は 1 バイトも動かない MUST。
+ * `geometry`, taken only by the 6 variants `matmul` / `bmm` / `linear` / `attention_qk` /
+ * `attention_pv` / `conv2d`, is the **explicit geometry**; when given it takes precedence over the
+ * per-op resolution (row-count bucket, m tile, fixed default) ({@link resolveGeometry}). There are 2
+ * callers that pass it — the Session's derivation phase (recipe-builders), with the value looked up
+ * in the adapter's profile (src/kernels/geometry-profile.ts), and measurement that changes only the
+ * geometry on the same shape (tools/geometry-sweep (removed in 0.15); now `runGeometrySweep` of
+ * `@karume/runtime/tune`). Both are static selections, not run-time autotuning (DECIDED: ADR 0115).
+ * MUST: when omitted, the generated code does not move by a single byte.
  */
 type GemmSpec =
   | {
       readonly op: "matmul";
       readonly v4: boolean;
-      /** 出力の行数 M（幾何のバケット — 省略時は既定幾何）。 */
+      /** Rows of output M (the geometry bucket — default geometry when omitted). */
       readonly rows?: number;
-      /** 明示の幾何（省略時は op 別の解決 — {@link resolveGeometry}）。 */
+      /** Explicit geometry (per-op resolution when omitted — {@link resolveGeometry}). */
       readonly geometry?: GemmGeometry;
     }
   | {
       readonly op: "bmm";
       readonly v4: boolean;
-      /** 出力の行数 M（幾何のバケット — 省略時は既定幾何）。 */
+      /** Rows of output M (the geometry bucket — default geometry when omitted). */
       readonly rows?: number;
-      /** 行窓変種（{@link GemmRowWindow} — 省略時の生成物は 1 バイトも動かない）。 */
+      /**
+       * Row-window variant ({@link GemmRowWindow} — when omitted the generated code does not move
+       * by a single byte).
+       */
       readonly rowWindow?: GemmRowWindow;
-      /** 明示の幾何（省略時は op 別の解決 — {@link resolveGeometry}）。 */
+      /** Explicit geometry (per-op resolution when omitted — {@link resolveGeometry}). */
       readonly geometry?: GemmGeometry;
     }
   | {
       readonly op: "attention_qk" | "attention_pv";
       readonly v4: boolean;
       readonly compute?: GemmCompute;
-      /** S の格納形（ADR 0023 の ①が書き ③が読むバッファ — 省略時 `"f32"`）。 */
+      /** Storage of S (the buffer ① writes and ③ reads in ADR 0023 — `"f32"` when omitted). */
       readonly score?: ScoreStorage;
       /**
-       * 加算 mask の有無（①QK だけ・省略時 `false` で生成物は 1 バイトも動かない）。
-       * ③PV は mask を見ない（S は既に mask 済み）。
+       * Whether there is an additive mask (①QK only; when omitted, `false`, and the generated code
+       * does not move by a single byte). ③PV does not look at the mask (S is already masked).
        */
       readonly mask?: boolean;
       /**
-       * GQA（整除 broadcast — ADR 0067 決定 1 / 2）の 1 ビット。立つと K / V 側の**バッチ base
-       * だけ**が kv-head へ写る（{@link batchPrologue}）。省略時（= `r` が 1）の生成物は
-       * 1 バイトも動かない MUST — 既存スナップショットとビット同一門がその検出器。
+       * The 1 bit of GQA (divisible broadcast — ADR 0067 decisions 1 / 2). When set, **only the
+       * batch base** of the K / V side maps to the kv-head ({@link batchPrologue}). MUST: when
+       * omitted (= `r` is 1) the generated code does not move by a single byte — the existing
+       * snapshots and the bit-identity check are its detectors.
        */
       readonly gqa?: boolean;
       /**
-       * 行窓変種（{@link GemmRowWindow}）を立てるか。**側は op が決める**（①QK は必ず `"a"`・
-       * ③PV は必ず `"c"`）ので、bmm と違い側ではなく真偽で受ける。省略時の生成物は
-       * 1 バイトも動かない MUST。
+       * Whether to set the row-window variant ({@link GemmRowWindow}). **The op decides the side**
+       * (①QK is always `"a"`, ③PV always `"c"`), so unlike bmm it takes a boolean rather than a
+       * side. MUST: when omitted the generated code does not move by a single byte.
        */
       readonly rowWindow?: boolean;
-      /** 明示の幾何（省略時は op 別の解決 — {@link resolveGeometry}）。 */
+      /** Explicit geometry (per-op resolution when omitted — {@link resolveGeometry}). */
       readonly geometry?: GemmGeometry;
     }
   | {
       /**
-       * states 形 attention の ①ₜ（**K 行タイル共有** — perf-ledger K-13 / ADR 0067 決定 4）。
-       * 融合 attention の `attention_qk` と違うのは B タイル（K の出どころが論理 col で 2 つに
-       * 分かれる）と store（述語 + live 切り）だけで、A タイル・共有タイル・内積ループは同一。
-       * v4 は取らない（実効 N が実行時の live なので quad 書きが `[live, col_cap)` を潰す）。
+       * ①ₜ of states-shaped attention (**shared K row tiles** — perf-ledger K-13 / ADR 0067
+       * decision 4). It differs from `attention_qk` of fused attention only in the B tile (K comes
+       * from 2 sources split by logical col) and the store (predicate + live cut); the A tile, the
+       * shared tiles and the inner-product loop are the same.
+       * It takes no v4 (the effective N is the run-time live, so a quad write would clobber
+       * `[live, col_cap)`).
        */
       readonly op: "attention_state_qk";
-      /** sliding window 変種（`W > 0` — `stateSliding` の 1 ビット）。 */
+      /** Sliding-window variant (`W > 0` — the 1 bit of `stateSliding`). */
       readonly sliding: boolean;
-      /** GQA 変種（`r > 1`）。 */
+      /** GQA variant (`r > 1`). */
       readonly gqa: boolean;
-      /** `M`（物理 chunk 行数 — 幾何のバケット）。 */
+      /** `M` (physical chunk rows — the geometry bucket). */
       readonly rows: number;
     }
   | {
       /**
-       * states 形 attention の ③ₜ（**V 行タイル共有** — perf-ledger K-13 段 2 / ADR 0067 決定 4）。
-       * 融合 attention の `attention_pv` と違うのは B タイル（V の出どころが論理 col で 2 つに
-       * 分かれる）・K ループの上限（実行時の live）・store（pad 行は厳密 0）の 3 点だけで、
-       * A タイル（`P = exp(S−m)·inv` を充填時に作る）・共有タイル・内積ループは同一。
-       * v4 は取らない（実効 K が実行時の live なので quad 読みが `[live, col_cap)` を巻き込む）。
+       * ③ₜ of states-shaped attention (**shared V row tiles** — perf-ledger K-13 step 2 / ADR 0067
+       * decision 4). It differs from `attention_pv` of fused attention in only 3 points: the B tile
+       * (V comes from 2 sources split by logical col), the upper bound of the K loop (the run-time
+       * live) and the store (pad rows are exactly 0); the A tile (`P = exp(S−m)·inv` is built during
+       * the fill), the shared tiles and the inner-product loop are the same.
+       * It takes no v4 (the effective K is the run-time live, so a quad read would pull in
+       * `[live, col_cap)`).
        */
       readonly op: "attention_state_pv";
-      /** sliding window 変種（`W > 0` — `stateSliding` の 1 ビット）。 */
+      /** Sliding-window variant (`W > 0` — the 1 bit of `stateSliding`). */
       readonly sliding: boolean;
-      /** GQA 変種（`r > 1`）。 */
+      /** GQA variant (`r > 1`). */
       readonly gqa: boolean;
-      /** `M`（物理 chunk 行数 — 幾何のバケット）。 */
+      /** `M` (physical chunk rows — the geometry bucket). */
       readonly rows: number;
     }
   | {
@@ -345,54 +381,64 @@ type GemmSpec =
       readonly v4: boolean;
       readonly weight: WeightStorage;
       readonly compute?: GemmCompute;
-      /** 平坦化後の行数 M（幾何のバケット — 省略時は既定幾何）。 */
+      /** Row count M after flattening (the geometry bucket — default geometry when omitted). */
       readonly rows?: number;
       /**
-       * i4 の group 長の log2（`weight: "i4"` のとき**必須**・他では禁止 — ADR 0069）。
-       * WGSL に焼くので、group 長が違えばキーも違う（linearKey が `g<group>` を付ける）。
-       * scale 添字は `wcol · (dims.k >> shift) + (wk0 >> shift)` — group 数は既存の uniform
-       * `dims.k` から導けるため params の形は変わらない。
+       * log2 of the i4 group length (**required** with `weight: "i4"`, forbidden otherwise — ADR
+       * 0069). It is baked into the WGSL, so a different group length means a different key
+       * (linearKey appends `g<group>`). The scale index is `wcol · (dims.k >> shift) + (wk0 >> shift)`
+       * — the group count can be derived from the existing uniform `dims.k`, so the shape of the
+       * params does not change.
        */
       readonly weightGroupShift?: number;
-      /** 明示の幾何（省略時は op 別の解決 — {@link resolveGeometry}）。 */
+      /** Explicit geometry (per-op resolution when omitted — {@link resolveGeometry}). */
       readonly geometry?: GemmGeometry;
     }
   | ({
       /**
-       * 1D / 2D / 3D の implicit GEMM。**A タイル（重み）・bias-first・store は完全に共通**で、
-       * 違うのは B タイル（x の暗黙 gather）が平坦 k を `(ic, k)` / `(ic, kh, kw)` /
-       * `(ic, kt, kh, kw)` のどれに割るか、と uniform の幾何欄だけ。
+       * The 1D / 2D / 3D implicit GEMM. **The A tile (weights), bias-first and the store are fully
+       * shared**; the only differences are whether the B tile (the implicit gather of x) splits the
+       * flat k into `(ic, k)` / `(ic, kh, kw)` / `(ic, kt, kh, kw)`, and the geometry fields of the
+       * uniform.
        */
       readonly v4: boolean;
       readonly weight: WeightStorage;
-      /** m タイルの行数（`conv2dIgemmMTile` が返す 64 行か {@link GEMM_MTILE_SMALL} の 32 行）。 */
+      /**
+       * Rows of the m tile (as returned by `conv2dIgemmMTile`: 64 rows, or the 32 rows of
+       * {@link GEMM_MTILE_SMALL}).
+       */
       readonly mTile: number;
       /**
-       * i4 の group 長の log2（`weight: "i4"` のとき**必須**・他では禁止 — ADR 0069 決定 5 の
-       * conv1d 追補）。conv は重みが **A 側**なので、scale 添字は linear の鏡映で
-       * `arow · (dims.k >> shift) + (ak0 >> shift)`（`dims.k = Cin·K` = 平坦後の行長）。
-       * MUST: **conv1d だけ**が取る（conv2d に i4 の適格判定は無い — {@link gemmWgsl} の門）。
+       * log2 of the i4 group length (**required** with `weight: "i4"`, forbidden otherwise — the
+       * conv1d supplement to ADR 0069 decision 5). In conv the weights are on **the A side**, so the
+       * scale index mirrors linear: `arow · (dims.k >> shift) + (ak0 >> shift)` (`dims.k = Cin·K` =
+       * the row length after flattening).
+       * MUST: taken **only by conv1d** (conv2d has no i4 eligibility — the guard in
+       * {@link gemmWgsl}).
        */
       readonly weightGroupShift?: number;
     } & (
       | { readonly op: "conv1d" }
-      // unbatched（ADR 0118 決定 1）なのでバッチ軸を持たず {@link BATCHED_OPS} に入らない。
-      // 幾何プロファイルは引かない（conv1d と同じく既定の幾何 — 明示の欄を持たない）。
+      // Unbatched (ADR 0118 decision 1), so it has no batch axis and is not in {@link BATCHED_OPS}.
+      // It does not read the geometry profile (the default geometry, like conv1d — no explicit field).
       | { readonly op: "conv3d" }
       | {
           readonly op: "conv2d";
-          /** 明示の幾何（省略時は op 別の解決 — {@link resolveGeometry}。渡すと `mTile` より優先）。 */
+          /**
+           * Explicit geometry (per-op resolution when omitted — {@link resolveGeometry}; when
+           * given, takes precedence over `mTile`).
+           */
           readonly geometry?: GemmGeometry;
         }
     ));
 
 /**
- * uniform の Dims（3 語 `{m,n,k}`）。3 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保は
- * プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない — WGSL の
- * 最小 binding サイズは struct の実サイズ）。
+ * The uniform Dims (3 words `{m,n,k}`). 16 bytes are allocated even for 3 words of content
+ * (allocating in 16-byte units is a project convention (the fusion pass fixes the same shape in ADR
+ * 0040), not a requirement of the spec — the minimum binding size in WGSL is the actual struct size).
  *
- * bmm もバッチを uniform で運ばない — バッチは `wid.z` から導くので、載せても WGSL が
- * 一度も読まない死んだフィールドになる。
+ * bmm does not carry the batch in the uniform either — the batch is derived from `wid.z`, so it
+ * would be a dead field the WGSL never reads.
  */
 export const gemmParams = (
   op: GemmSpec["op"],
@@ -409,8 +455,9 @@ export const gemmParams = (
 };
 
 /**
- * 行窓変種が uniform の**末尾**へ足す 2 語（{@link ROW_WINDOW_DIMS_EXTRA} と対）。
- * `rowsFull` は行窓側の元の全 M、`offset` はそのうちこのブロックが担当する先頭行。
+ * The 2 words the row-window variant appends **at the end** of the uniform (pairs with
+ * {@link ROW_WINDOW_DIMS_EXTRA}). `rowsFull` is the original full M of the row-window side, and
+ * `offset` is the first row of it that this block handles.
  */
 export type GemmRowWindowSpan = {
   readonly offset: number;
@@ -418,10 +465,11 @@ export type GemmRowWindowSpan = {
 };
 
 /**
- * 行窓 2 語の門（bmm / 融合 attention の params が共有する唯一の検査）。
+ * Guard on the 2 row-window words (the only check, shared by the params of bmm and fused
+ * attention).
  *
- * MUST: `offset + m ≤ rowsFull`。超えた形は隣のバッチの行を読み書きするだけで例外を出さない
- * ので、ここで落とさないと検出器が残らない。
+ * MUST: `offset + m ≤ rowsFull`. A shape beyond it only reads and writes rows of the next batch
+ * without any exception, so unless it is rejected here, no detector is left.
  */
 export const assertGemmRowWindow = (where: string, m: number, window: GemmRowWindowSpan): void => {
   assertU32Params(where, { row_offset: window.offset, rows_full: window.rowsFull });
@@ -433,12 +481,12 @@ export const assertGemmRowWindow = (where: string, m: number, window: GemmRowWin
 };
 
 /**
- * バッチ軸（dispatch の z）を持つ op。attention は B·H を 1 本のバッチ軸に畳んだ形。
+ * Ops with a batch axis (the dispatch's z). attention folds B·H into one batch axis.
  *
- * MUST: conv1d / conv2d もここに入る。出力 NCHW は `[B][Cout][Hout·Wout]`（1D は `[B][Cout][Lout]`）
- * なので、バッチを N 側へ畳むと `[Cout][B·Hout·Wout]` になって**軸の順序が入れ替わる**
- * （B = 1 でだけ一致するため実測形では露見しない）。B を z 軸に置けば 1 タイルが
- * `[Cout][Hout·Wout]` の平面に閉じる。
+ * MUST: conv1d / conv2d are in here too. The NCHW output is `[B][Cout][Hout·Wout]` (`[B][Cout][Lout]`
+ * for 1D), so folding the batch into the N side gives `[Cout][B·Hout·Wout]` and **swaps the axis
+ * order** (it agrees only at B = 1, so the measured shapes do not reveal it). With B on the z axis,
+ * one tile stays inside the `[Cout][Hout·Wout]` plane.
  */
 const BATCHED_OPS: ReadonlySet<GemmSpec["op"]> = new Set([
   "bmm",
@@ -450,17 +498,18 @@ const BATCHED_OPS: ReadonlySet<GemmSpec["op"]> = new Set([
   "conv2d",
 ]);
 
-/** バッチのオフセット接頭辞（matmul / linear だけ空）。 */
+/** The batch offset prefix (empty only for matmul / linear). */
 const batchBase = (op: GemmSpec["op"], name: string): string =>
   BATCHED_OPS.has(op) ? `${name} + ` : "";
 
 /**
- * 共有タイルへ書く 1 要素 / 1 quad の丸め（{@link GemmCompute} の丸め列 1）。
+ * Rounding of one element / one quad written into the shared tile (rounding 1 of the
+ * {@link GemmCompute} sequence).
  *
- * MUST: f32 変種では**恒等**（引数の式をそのまま返す）。既存 6 op の生成バイト列がここに
- * 掛かっている。
- * MUST: 丸めるのは共有タイルへの書き込み**だけ**。読んだ直後や MAC ごとに `f16()` を挟むと
- * 丸めが 2 回起きて「入力を f16 に丸めた f32 変種」という等価性が崩れる。
+ * MUST: **identity** in the f32 variant (returns the argument expression as is). The generated bytes
+ * of the existing 6 ops depend on this.
+ * MUST: round **only** on the write into the shared tile. Inserting `f16()` right after a read or per
+ * MAC would round twice and break the equivalence "the f32 variant with inputs rounded to f16".
  */
 const tileScalar = (compute: GemmCompute, expr: string): string =>
   compute === "f16" ? `f16(${expr})` : expr;
@@ -468,19 +517,24 @@ const tileScalar = (compute: GemmCompute, expr: string): string =>
 const tileQuad = (compute: GemmCompute, expr: string): string =>
   compute === "f16" ? `vec4<f16>(${expr})` : expr;
 
-/** 共有タイルの要素型（f16 変種はバイト半減 — 期待利得はこの 1 機序に全て乗る）。 */
+/**
+ * Element type of the shared tiles (the f16 variant halves the bytes — the expected gain rests
+ * entirely on this one mechanism).
+ */
 const tileScalarType = (compute: GemmCompute): string => (compute === "f16" ? "f16" : "f32");
 
 const tileQuadType = (compute: GemmCompute): string =>
   compute === "f16" ? "vec4<f16>" : "vec4<f32>";
 
 /**
- * 骨格（{@link skeleton}）の共有タイル sa（`tileM · K` スカラ）+ sb（`K · 列 quad` の vec4）が使う workgroup
- * storage のバイト数（WebGPU が `maxComputeWorkgroupStorageSize` と比べる量 — {@link workgroupVariableBytes}）。
- * GEMM の全経路（matmul / bmm / linear / 融合 attention ①QK・③PV / conv1d / conv2d / states 形）が同じ
- * 骨格なので op に依らず、計算変種（f32 / f16 — 要素のバイト幅）にだけ依る。
- * MUST: 骨格の `var<workgroup>` 宣言と同じ式であること（tests/geometry_profile_test.ts が WGSL の宣言から
- * 数えた総量と突き合わせる）— 食い違うと上限の門（geometry-profile.ts）が上限超えの表を通す。
+ * Bytes of workgroup storage used by the skeleton's ({@link skeleton}) shared tiles sa (`tileM · K`
+ * scalars) + sb (`K · column quads` vec4) (the amount WebGPU compares with
+ * `maxComputeWorkgroupStorageSize` — {@link workgroupVariableBytes}). Every GEMM path (matmul / bmm /
+ * linear / fused attention ①QK and ③PV / conv1d / conv2d / states-shaped) has the same skeleton, so
+ * it does not depend on the op, only on the compute variant (f32 / f16 — the element's byte width).
+ * MUST: the same expression as the skeleton's `var<workgroup>` declarations
+ * (tests/geometry_profile_test.ts compares it with the total counted from the WGSL declarations) — if
+ * they disagree, the limit check (geometry-profile.ts) lets a table that exceeds the limit through.
  */
 export const gemmWorkgroupStorageBytes = (geometry: GemmGeometry, compute: GemmCompute): number => {
   const scalarBytes = compute === "f16" ? 2 : 4;
@@ -490,39 +544,40 @@ export const gemmWorkgroupStorageBytes = (geometry: GemmGeometry, compute: GemmC
   );
 };
 
-/** v4 経路が使う quad 数の束縛（スカラ経路では空）。 */
+/** Bindings of the quad counts used by the v4 path (empty on the scalar path). */
 const quadDims = (v4: boolean): string =>
   v4 ? `  let k4 = dims.k / ${GEMM_QUAD}u;\n  let n4 = dims.n / ${GEMM_QUAD}u;\n` : "";
 
 /**
- * 充填スロットの列挙（0..n-1）。1 スレッドが複数の行 / k 行を受け持つ形は幾何の帰結で、
- * どの断片も同じ「スロット番号を接尾辞にした静的展開」で書く。
+ * Enumerates fill slots (0..n-1). One thread handling several rows / k rows follows from the
+ * geometry, and every fragment writes it the same way: "static unrolling with the slot number as
+ * suffix".
  */
 const slots = (count: number): readonly number[] =>
   Array.from({ length: count }, (_, index) => index);
 
-/** 添字の加算オフセット（0 は省く — 生成物を読める形に保つ）。 */
+/** Additive index offset (0 is omitted — keeps the generated code readable). */
 const at = (offset: number): string => (offset === 0 ? "" : ` + ${offset}u`);
 
 /**
- * スロットごとの i8 scale 変数名。スロット 0 は従来名（{@link WEIGHT_SCALE_VAR}）のままで、
- * 1 スレッド 1 チャネルの他カーネルと名前が揃う。
+ * The i8 scale variable name per slot. Slot 0 keeps the previous name ({@link WEIGHT_SCALE_VAR}),
+ * matching the name in the other kernels with 1 channel per thread.
  */
 const scaleVar = (slot: number): string =>
   slot === 0 ? WEIGHT_SCALE_VAR : `${WEIGHT_SCALE_VAR}${slot}`;
 
 /**
- * bmm のバッチ base。
+ * The batch base of bmm.
  *
- * MUST: v4 では **quad 単位**で数える（`wid.z * m * k4` であって `m * k` ではない）。
- * 要素単位のまま組むと batch ≥ 2 で隣のバッチを読み書きする — 例外なしの誤値。
+ * MUST: with v4, count **in quads** (`wid.z * m * k4`, not `m * k`). Built in elements, batch ≥ 2
+ * reads and writes the next batch — a wrong value with no exception.
  *
- * `gqa` は融合 attention の GQA 変種（ADR 0067 決定 2）で、**B 側（K / V）の base だけ**を
- * kv-head へ写す。A（q）・C（S / O）・行統計（`rbase`）は q-head のままで、写すのは
- * この 1 行に閉じる。
- * MUST: 立てるのは attention の 2 op だけ（型で `GemmSpec` の attention 枝にしか無い）。
- * ③PV の base 式は bmm と同居しているので、`gqa` を bmm 側から立てられる形にすると
- * バッチ完全一致の契約（ADR 0022 / 0023）を黙って割れる。
+ * `gqa` is the GQA variant of fused attention (ADR 0067 decision 2), mapping **only the base of the B
+ * side (K / V)** to the kv-head. A (q), C (S / O) and the row statistics (`rbase`) stay on the q-head;
+ * the mapping is confined to this one line.
+ * MUST: only the 2 attention ops set it (by type it exists only in the attention branch of
+ * `GemmSpec`). The base expression of ③PV lives together with bmm's, so a form that lets bmm set
+ * `gqa` would silently break the contract of exact batch match (ADR 0022 / 0023).
  */
 const batchPrologue = (
   op: GemmSpec["op"],
@@ -532,42 +587,44 @@ const batchPrologue = (
 ): string => {
   const kUnit = v4 ? "k4" : "dims.k";
   const nUnit = v4 ? "n4" : "dims.n";
-  // 行窓は「バッチ base に全 M ストライドと行オフセットを畳み込む」だけで表せる。
-  // prologueA の `abase + arow * k` も store の `cbase + orow * n` も**そのまま**で
-  // 正しい添字になるので、行窓は共有断片（fillA / store / 内積ループ）に 1 文字も触れない。
+  // The row window can be expressed just by "folding the full-M stride and the row offset into the
+  // batch base". Both `abase + arow * k` of prologueA and `cbase + orow * n` of the store become the
+  // right index **as they are**, so the row window does not touch a character of the shared
+  // fragments (fillA / store / inner-product loop).
   const aRows = rowWindow === "a" ? "dims.rows_full" : "dims.m";
   const aOffset = rowWindow === "a" ? ` + dims.row_offset * ${kUnit}` : "";
   const cRows = rowWindow === "c" ? "dims.rows_full" : "dims.m";
   const cOffset = rowWindow === "c" ? ` + dims.row_offset * ${nUnit}` : "";
-  // GQA: `wid.z = b·H + h` に対し `H = Hkv·r` なら整数除算 `wid.z / r = b·Hkv + h/r` が
-  // 厳密に成立する（ORT WebGPU と同一構成 — ADR 0067 決定 2）。`r` は uniform でキーには
-  // 載らない（値の種類ぶんパイプラインが増える — scale / row_offset と同じ規律）。
+  // GQA: for `wid.z = b·H + h`, if `H = Hkv·r` then the integer division `wid.z / r = b·Hkv + h/r`
+  // holds exactly (the same layout as ORT WebGPU — ADR 0067 decision 2). `r` is a uniform and not in
+  // the key (pipelines would multiply per value — the same discipline as scale / row_offset).
   const bZ = gqa ? "(wid.z / dims.kv_repeat)" : "wid.z";
-  return `  // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチのタイル）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすための前提${
+  return `  // The batch is uniform per workgroup (one z index = the tiles of one batch) — the premise for the
+  // inner workgroupBarrier to meet WGSL's uniformity requirement${
     v4 ? "。MUST: base は quad 単位（要素単位で組むと隣のバッチを読む）" : ""
   }${
     rowWindow === undefined
       ? ""
       : `
-  // 行窓（${
+  // Row window (${
     rowWindow === "a"
       ? "A = q を全 M の row_offset 行目から読む"
       : "C = 出力を全 M の row_offset 行目へ書く"
-  }）。
-  // 反対側は m 行のブロックとして 0 から数える`
+  }).
+  // The other side is counted from 0 as a block of m rows`
   }${
     gqa
       ? `
-  // GQA（ADR 0067 決定 2）: K / V だけ kv-head へ写す（wid.z / r = b·Hkv + h/r）。
-  // q / S / O / 行統計は q-head のまま`
+  // GQA (ADR 0067 decision 2): only K / V map to the kv-head (wid.z / r = b·Hkv + h/r).
+  // q / S / O / row statistics stay on the q-head`
       : ""
   }
   let abase = wid.z * ${aRows} * ${kUnit}${aOffset};
 ${
   op === "attention_qk"
-    ? // k は [B·H, N, D] のまま読む（旧経路の permute(kᵀ) が要らない）。転置読みは行頭を
-      // **平坦添字**で作るので、base は v4 でも quad ではなく**要素単位**。
+    ? // k is read as [B·H, N, D] as is (the old path's permute(kᵀ) is not needed). The transposed read
+      // builds row starts from a **flat index**, so the base is **in elements**, not quads, even
+      // with v4.
       `  let bbase = ${bZ} * dims.n * dims.k;\n`
     : `  let bbase = ${bZ} * dims.k * ${nUnit};\n`
 }  let cbase = wid.z * ${cRows} * ${nUnit}${cOffset};
@@ -575,10 +632,11 @@ ${op === "attention_pv" ? "  let rbase = wid.z * dims.m;\n" : ""}`;
 };
 
 /**
- * A タイル（`[m,k]` 行優先）の担当と行頭オフセット。どれも K タイルループ不変。
+ * Assignment and row-start offsets of the A tile (`[m,k]` row-major). All of them are invariant in
+ * the K tile loop.
  *
- * 1 スレッドが受け持つ行は {@link gemmRowSlots} 本で、スロット間は
- * {@link gemmRowFillStride} 行ずつ離れる（担当が重ならず、タイルに穴も空かない唯一の割り）。
+ * One thread handles {@link gemmRowSlots} rows, with slots {@link gemmRowFillStride} rows apart (the
+ * only split where assignments do not overlap and the tile has no holes).
  */
 const prologueA = (geometry: GemmGeometry, op: GemmSpec["op"], v4: boolean): string => {
   const stride = gemmRowFillStride(geometry);
@@ -594,44 +652,50 @@ const prologueA = (geometry: GemmGeometry, op: GemmSpec["op"], v4: boolean): str
   let sa_base${slot} = sa_base0 + ${slot * stride * GEMM_TILE_K}u;`,
     )
     .join("\n");
-  return `  // A タイルの担当（${gemmTileM(geometry)} 行 × ${GEMM_K_QUADS} quad を ${gemmThreads(
+  return `  // A tile assignment (${gemmTileM(geometry)} rows × ${GEMM_K_QUADS} quads over ${gemmThreads(
     geometry,
-  )} スレッドで ${gemmRowSlots(geometry)} 巡）
+  )} threads in ${gemmRowSlots(geometry)} rounds)
   let ar = tid / ${GEMM_K_QUADS}u;
   let aq = tid % ${GEMM_K_QUADS}u;
 ${rows}`;
 };
 
 /**
- * A タイルの境界（{@link fillA} が行と K に掛けるガードの式）。
+ * Bounds of the A tile (the guard expressions {@link fillA} applies to rows and K).
  *
- * 既定は骨格の静的 `Dims`（`m` 行 × `k` 列）そのままで、既存 op の生成バイト列はここに
- * 掛かっている。states 形 ③ₜ だけが**実行時の値**（有効行 / live 列）を渡す — 行は S / 行統計が
- * 書かれた範囲まで・K は S が実体化した live までしか読めないため。
+ * The default is the skeleton's static `Dims` (`m` rows × `k` columns) as is, and the generated
+ * bytes of the existing ops depend on it. Only states-shaped ③ₜ passes **run-time values** (valid
+ * rows / live columns) — rows can be read only up to where S / the row statistics were written, and
+ * K only up to the live part S materialised.
  */
 type GemmABounds = {
-  /** 行のガード（既定 `dims.m`）。 */
+  /** Row guard (default `dims.m`). */
   readonly rows: string;
-  /** K のガード（既定 `dims.k`）。 */
+  /** K guard (default `dims.k`). */
   readonly k: string;
 };
 
 const DEFAULT_A_BOUNDS: GemmABounds = { rows: "dims.m", k: "dims.k" };
 
 /**
- * A タイルの充填。範囲外は 0 で埋める（内積に寄与しないので K タイル端数でも結果は変わらない）。
- * v4 は 1 スレッドが vec4 を 1 回読み、スカラ版は 4 成分を個別に境界検査して詰める。
+ * Fill of the A tile. Out-of-range entries are filled with 0 (they do not contribute to the inner
+ * product, so a K-tile remainder does not change the result).
+ * With v4 one thread reads one vec4; the scalar version bounds-checks the 4 components one by one.
  *
- * `value` は読んだ 1 要素に掛ける変換式（融合 attention の半スケール / `exp(S−m)·inv`）。
- * 第 2 引数は充填スロット番号 — ③PV が**行ごとの統計**（`row_max{slot}` / `row_inv{slot}`）を
- * 引くために要る（1 スレッドが複数行を埋めるので、統計も行ごとに別の変数になる）。
- * MUST: 変換は**範囲内の要素にだけ**掛ける。範囲外の 0 に `exp(0−m)·inv` を掛けると
- * 0 でない値が内積へ混ざり、端数タイルだけが静かに誤る。states 形 ③ₜ が pad 行と
- * `[live, col_cap)` を `bounds` で締め出すのも同じ理由（そこの S / 行統計は**そもそも書かれて
- * いない**ので、掛けたら残骸が内積へ入る）。
- * MUST: 変換は**成分ごとのスカラ式**で書く（`vec4` へまとめて `exp` を掛けない）。加減乗算と
- * 違って超越関数のベクトル版は実装依存で、分解経路とのビット同一の前提が崩れうる。
- * MUST: `value` / `bounds` 省略時の生成物は従来のバイト列そのまま（スナップショットが検出器）。
+ * `value` is the transform applied to each element read (the half scale of fused attention /
+ * `exp(S−m)·inv`). The 2nd argument is the fill slot number — ③PV needs it to look up the **per-row
+ * statistics** (`row_max{slot}` / `row_inv{slot}`) (one thread fills several rows, so the statistics
+ * are separate variables per row too).
+ * MUST: apply the transform **only to in-range elements**. Applying `exp(0−m)·inv` to an out-of-range
+ * 0 mixes a non-zero value into the inner product, and only remainder tiles go silently wrong.
+ * States-shaped ③ₜ shuts out pad rows and `[live, col_cap)` with `bounds` for the same reason (S /
+ * the row statistics there were **never written**, so applying it would let leftovers into the inner
+ * product).
+ * MUST: write the transform as a **scalar expression per component** (do not apply `exp` to a whole
+ * `vec4`). Unlike add, subtract and multiply, the vector versions of transcendental functions are
+ * implementation-dependent and can break the premise of bit identity with the decomposed path.
+ * MUST: with `value` / `bounds` omitted, the generated code is the previous bytes as is (the
+ * snapshots are the detector).
  */
 const fillA = (
   geometry: GemmGeometry,
@@ -645,7 +709,8 @@ const fillA = (
   const filled = slots(gemmRowSlots(geometry))
     .map((slot) => {
       const read = (expr: string): string => (value === undefined ? expr : value(expr, slot));
-      // s16 の quad 読みは**同じ quad 添字**を取る（f32 変種の添字算術を 1 文字も動かさない）
+      // The s16 quad read takes **the same quad index** (does not move a character of the f32
+      // variant's index arithmetic)
       const quad = scoreReadQuad(name, score, `arow_base${slot} + t * ${GEMM_K_QUADS}u + aq`);
       const load = v4
         ? value === undefined
@@ -680,15 +745,17 @@ ${load}
     sa[sa_base${slot} + 3u] = ${tileScalar(compute, `av${slot}.w`)};`;
     })
     .join("\n");
-  return `    // 範囲外は 0 で埋める。内積に寄与しないので端数 shape でも結果は変わらない
+  return `    // Fill out-of-range entries with 0. They do not contribute to the inner product, so
+    // remainder shapes give the same result
     let ak0 = t * ${GEMM_TILE_K}u + aq * ${GEMM_QUAD}u;
 ${filled}`;
 };
 
 /**
- * dense な B タイル（`[k,n]` 行優先 — 列方向がそのまま vec4）の担当。
+ * Assignment of the dense B tile (`[k,n]` row-major — the column direction is a vec4 as is).
  *
- * 列 quad はスロット不変で、担当する k 行だけが {@link gemmQuadFillStride} ずつ進む。
+ * The column quad is invariant across slots; only the assigned k row advances by
+ * {@link gemmQuadFillStride}.
  */
 const prologueBDense = (geometry: GemmGeometry, v4: boolean): string => {
   const stride = gemmQuadFillStride(geometry);
@@ -697,9 +764,9 @@ const prologueBDense = (geometry: GemmGeometry, v4: boolean): string => {
     .slice(1)
     .map((slot) => `\n  let bk${slot} = bk0 + ${slot * stride}u;`)
     .join("");
-  return `  // B タイルの担当（K ${GEMM_TILE_K} 行 × 列 quad ${nQuads} を ${gemmThreads(
+  return `  // B tile assignment (K ${GEMM_TILE_K} rows × ${nQuads} column quads over ${gemmThreads(
     geometry,
-  )} スレッドで ${gemmQuadSlots(geometry)} 巡）
+  )} threads in ${gemmQuadSlots(geometry)} rounds)
   let bk0 = tid / ${nQuads}u;
   let bcq = tid % ${nQuads}u;
   ${
@@ -746,24 +813,26 @@ ${
     )
     .join("\n");
 
-/** 共有 B タイルの成分（転置後に `wsl` が指す先）。 */
+/** Components of the shared B tile (what `wsl` points to after the transpose). */
 const TILE_COMPONENTS = ["x", "y", "z", "w"] as const;
 
 /**
- * `wv` の k 連続 4 要素を共有 B タイルへ**転置して**置く（書き込む成分は実行時の `wsl`）。
+ * Places the 4 k-contiguous elements of `wv` **transposed** into the shared B tile (the component
+ * written is the run-time `wsl`).
  *
- * MUST: `sb[i][wsl] = v` と**動的インデックスで成分を書かない**。Deno 2.9.4 / Apple M2
- * （Metal）では `wsl != 0` の書き込みが**黙って捨てられ**、B タイルの 4 要素中 3 要素が 0 の
- * まま内積へ入る。動的成分書き込みを持たない matmul / bmm は無傷で、linear / attention /
- * conv2d だけが壊れる — 相対誤差が 1 を超える「全く違う値」になるのに例外は一切出ない。
- * ポインタ経由（`(*p)[wsl] = v`）も naga が同じ MSL に落とすため同様に壊れるので、
- * **静的成分へ落とす以外に回避手段が無い**（現状 / switch / スカラ配列 / ポインタの 4 通りを
- * 実機で突合して確認）。Linux / Vulkan では動的インデックスでも正しく動くため、この冗長さは
- * Metal のためだけにある。
+ * MUST: **do not write a component with a dynamic index**, as in `sb[i][wsl] = v`. On Deno 2.9.4 /
+ * Apple M2 (Metal), writes with `wsl != 0` are **silently dropped**, and 3 of the 4 elements of the
+ * B tile enter the inner product as 0. matmul / bmm, which have no dynamic component writes, are
+ * unharmed, and only linear / attention / conv2d break — "completely different values" with a
+ * relative error above 1, yet no exception at all.
+ * Going through a pointer (`(*p)[wsl] = v`) breaks the same way because naga lowers it to the same
+ * MSL, so **there is no workaround other than lowering to static components** (confirmed by
+ * comparing 4 forms on real hardware: the current one / switch / scalar array / pointer). On Linux /
+ * Vulkan dynamic indexing works correctly, so this verbosity exists only for Metal.
  *
- * NOTE: `wsl = (tid / 4) % 4` なので simdgroup 内に 4 値が揃い、4 アームとも実行される。
- * コストが乗るのは B タイル充填だけで、頻度が桁違いに高い内積ループの読み出しは `sb` を
- * vec4 のまま一括で読む（共有タイルのレイアウトを変えない選択の理由）。
+ * NOTE: `wsl = (tid / 4) % 4`, so all 4 values occur within a simdgroup and all 4 arms execute. The
+ * cost lands only on the B tile fill; the far more frequent reads of the inner-product loop read
+ * `sb` as a whole vec4 (the reason for the choice not to change the shared tile layout).
  */
 const storeBTransposed = (geometry: GemmGeometry, compute: GemmCompute, slot: number): string => {
   const arm = (component: string): string =>
@@ -784,14 +853,15 @@ const storeBTransposed = (geometry: GemmGeometry, compute: GemmCompute, slot: nu
 };
 
 /**
- * linear の B タイル（重み `[n,k]` — 連続方向が k）の担当。
+ * Assignment of linear's B tile (weights `[n,k]` — the contiguous direction is k).
  *
- * 1 スレッドが担当チャネルごとに **k 連続 4 要素**を読み、**共有メモリ側で転置して置く**。
- * 内積ループを dense と共有できるのはこの転置のおかげ。i8 の scale は担当チャネル
- * `wcol{スロット}` のもので、K タイルループ不変なので**スロットごとに 1 度だけ**束ねる
- * （ADR 0019 のループ不変巻き上げ。名前は {@link scaleVar}）。端タイルでは `wcol >= n` に
- * なりうるため、scale は有効な末尾チャネルの添字へ制限してから読む。無効列の重みは
- * 充填側で 0 となり、出力も store のガードで捨てる。barrier 前の範囲外読みを起こさない。
+ * One thread reads **4 k-contiguous elements** per assigned channel and **places them transposed on
+ * the shared-memory side**. This transpose is what lets the inner-product loop be shared with dense.
+ * The i8 scale belongs to the assigned channel `wcol{slot}` and is invariant in the K tile loop, so
+ * it is bound **once per slot** (the loop-invariant hoisting of ADR 0019; the name is
+ * {@link scaleVar}). On edge tiles `wcol >= n` can happen, so the scale is read after clamping the
+ * index to the last valid channel. Weights of invalid columns become 0 on the fill side, and their
+ * output is discarded by the store's guard. No out-of-range read happens before the barrier.
  */
 const prologueBLinear = (geometry: GemmGeometry, weight: WeightStorage): string => {
   const stride = gemmRowFillStride(geometry);
@@ -808,7 +878,8 @@ const prologueBLinear = (geometry: GemmGeometry, weight: WeightStorage): string 
     scaleVar(0),
   )}
   let wrow_base0 = wcol0 * dims.k;
-  // 共有メモリ側で転置して置く（列 quad = wc / ${GEMM_QUAD}・成分 = wc % ${GEMM_QUAD}）
+  // Placed transposed on the shared-memory side
+  // (column quad = wc / ${GEMM_QUAD}, component = wc % ${GEMM_QUAD})
   let wsq0 = wc0 / ${GEMM_QUAD}u;
   let wsl0 = wc0 % ${GEMM_QUAD}u;
   let sb_base0 = (wq * ${GEMM_QUAD}u) * ${nQuads}u + wsq0;`
@@ -825,9 +896,9 @@ const prologueBLinear = (geometry: GemmGeometry, weight: WeightStorage): string 
   let sb_base${slot} = (wq * ${GEMM_QUAD}u) * ${nQuads}u + wsq${slot};`,
     )
     .join("\n");
-  return `  // W タイルの担当（${gemmTileN(geometry)} 出力チャネル × ${GEMM_K_QUADS} quad を ${gemmThreads(
+  return `  // W tile assignment (${gemmTileN(geometry)} output channels × ${GEMM_K_QUADS} quads over ${gemmThreads(
     geometry,
-  )} スレッドで ${gemmColumnSlots(geometry)} 巡）
+  )} threads in ${gemmColumnSlots(geometry)} rounds)
 ${channels}`;
 };
 
@@ -839,11 +910,12 @@ const fillBLinear = (
   compute: GemmCompute = "f32",
   groupShift?: number,
 ): string => {
-  // i4 の group scale は k 依存なのでチャネル不変の巻き上げ（{@link scaleVar}）が使えない —
-  // **quad ごと**に 1 度引く（wk0 は 4 整列・group_size ≥ 16 なので quad は group を跨がない
-  // — ADR 0069 決定 3 の「タイル読み込み時に group 境界で引き直す」の実装形）。範囲外は
-  // 読まない: 読みは `wcol < dims.n` の分岐の内側にあり、`k % group_size == 0` かつ
-  // `group_size ≥ 16`（2 冪）から k は K タイル幅の倍数になるので `wk0 < dims.k` も常に成り立つ。
+  // The i4 group scale depends on k, so the channel-invariant hoisting ({@link scaleVar}) cannot be
+  // used — it is looked up once **per quad** (wk0 is 4-aligned and group_size ≥ 16, so a quad never
+  // crosses a group — the implementation of ADR 0069 decision 3, "look up again at group boundaries
+  // when loading the tile"). No out-of-range read: the read is inside the `wcol < dims.n` branch, and
+  // `k % group_size == 0` with `group_size ≥ 16` (power of 2) makes k a multiple of the K tile
+  // width, so `wk0 < dims.k` always holds.
   const groupScale = (slot: number): string =>
     weight === "i4"
       ? `
@@ -883,11 +955,12 @@ ${filled}`;
 };
 
 /**
- * 融合 attention ① の B タイル（k `[B·H, N, D]` — 連続方向が D）の担当。
+ * Assignment of the B tile of fused attention ① (k `[B·H, N, D]` — the contiguous direction is D).
  *
- * 構造は linear の重み読み（`[n,k]` を k 連続で読み、共有側で転置して置く）と同一で、
- * 違いは **バッチ base が要る**ことと **重み格納の変種を持たない**（活性は常に f32）ことだけ。
- * この共有のおかげで、旧経路の `permute` による kᵀ 実体化がまるごと消える。
+ * The structure is the same as linear's weight read (read `[n,k]` k-contiguously and place it
+ * transposed on the shared side); the only differences are that **a batch base is needed** and that
+ * **there are no weight-storage variants** (the activation is always f32). Thanks to this sharing,
+ * the old path's materialisation of kᵀ by `permute` disappears entirely.
  */
 const prologueBAttentionQk = (geometry: GemmGeometry): string => {
   const stride = gemmRowFillStride(geometry);
@@ -910,10 +983,11 @@ const prologueBAttentionQk = (geometry: GemmGeometry): string => {
   let sb_base${slot} = (wq * ${GEMM_QUAD}u) * ${nQuads}u + wsq${slot};`,
     )
     .join("\n");
-  return `  // k タイルの担当（${gemmTileN(geometry)} 列（N）× ${GEMM_K_QUADS} quad を ${gemmThreads(
+  return `  // k tile assignment (${gemmTileN(geometry)} columns (N) × ${GEMM_K_QUADS} quads over ${gemmThreads(
     geometry,
-  )} スレッドで ${gemmColumnSlots(geometry)} 巡）。
-  // k は [N,D] のまま読み、**共有メモリ側で転置して置く**（linear の重み読みと同じ構造）
+  )} threads in ${gemmColumnSlots(geometry)} rounds).
+  // k is read as [N,D] as is and **placed transposed on the shared-memory side** (the same
+  // structure as linear's weight read)
 ${columns}`;
 };
 
@@ -946,8 +1020,9 @@ ${
       }
     }`
 }
-    // 半スケール契約（ADR 0023）: scale は q 側と k 側の**両方**へ掛ける。範囲外は 0 のままで
-    // 0 · scale = 0 なので端数タイルの結論は変わらない
+    // Half-scale contract (ADR 0023): scale is applied to **both** the q side and the k side.
+    // Out-of-range entries stay 0 and 0 · scale = 0, so the outcome of remainder tiles does not
+    // change
     wv${slot} = wv${slot} * dims.scale;
 ${storeBTransposed(geometry, compute, slot)}`,
     )
@@ -957,18 +1032,21 @@ ${filled}`;
 };
 
 /**
- * 融合 attention ③ が使う行統計の束縛（K タイルループ不変なので 1 度だけ引く）。
+ * Bindings of the row statistics used by fused attention ③ (invariant in the K tile loop, so looked
+ * up once).
  *
- * `stats` は `[B·H·M, 2]` で `[0]` が行の最大値 `m`・`[1]` が `1/Σexp(S−m)`。②（行統計）が
- * 現行 softmax のパス①②と同一の縮約で作る。
+ * `stats` is `[B·H·M, 2]`: `[0]` is the row maximum `m`, `[1]` is `1/Σexp(S−m)`. ② (row statistics)
+ * builds them with the same reduction as passes ① and ② of the current softmax.
  *
- * MUST: 行の添字は `rbase + arow`（バッチごとの行オフセット）。`arow` だけで引くと
- * B·H ≥ 2 で全バッチが 0 番目のバッチの統計を使い、**B=H=1 のテストでは値に出ない**。
- * 1 スレッドは A タイルを {@link gemmRowSlots} 行ぶん埋めるので、統計もその行ごとに引く。
+ * MUST: the row index is `rbase + arow` (the per-batch row offset). Looking up with `arow` alone,
+ * every batch uses batch 0's statistics when B·H ≥ 2, and **a B=H=1 test does not show it in the
+ * values**. One thread fills {@link gemmRowSlots} rows of the A tile, so the statistics are looked
+ * up per row as well.
  *
- * `rowBound` は「統計が書かれている行」の上限（既定は骨格の `dims.m` で、既存の生成バイト列は
- * ここに掛かっている）。states 形 ③ₜ は**有効行**を渡す — pad 行の統計は ② が 1 語も書かない
- * ので、`dims.m` で切ると未書込みの残骸を掴む。
+ * `rowBound` is the upper bound of "rows whose statistics were written" (the default is the
+ * skeleton's `dims.m`, and the existing generated bytes depend on it). States-shaped ③ₜ passes the
+ * **valid rows** — ② writes not a single word of statistics for pad rows, so cutting at `dims.m`
+ * would pick up unwritten leftovers.
  */
 const prologueAttentionStats = (geometry: GemmGeometry, rowBound = "dims.m"): string => {
   const rows = slots(gemmRowSlots(geometry))
@@ -979,39 +1057,45 @@ const prologueAttentionStats = (geometry: GemmGeometry, rowBound = "dims.m"): st
   let row_inv${slot} = stats[stat_at${slot} + 1u];`,
     )
     .join("\n");
-  return `  // 端タイルでは arow >= m がありうるので添字を 0 へ倒す（読んだ値は arow < m の枝でしか
-  // 使われない）。範囲外の stats を読むこと自体は WGSL の境界付きアクセスで安全
+  return `  // On edge tiles arow >= m can happen, so the index falls back to 0 (the value read is used only in the
+  // arow < m branch). Reading stats out of range is itself safe under WGSL's bounded access
 ${rows}`;
 };
 
 /**
- * 書き出し。`ceil(m/tileM) × ceil(n/tileN)` タイル（{@link gemmTileM} / {@link gemmTileN}）が出力の全要素をちょうど 1 回ずつ覆う
- * （full-write — ADR 0014）。v4 は `n % 4 == 0` なので quad の端数が出ない。
+ * The write-out. `ceil(m/tileM) × ceil(n/tileN)` tiles ({@link gemmTileM} / {@link gemmTileN})
+ * cover every element of the output exactly once (full-write — ADR 0014). With v4, `n % 4 == 0`, so
+ * there is no quad remainder.
  *
- * `bias` は常に f32 なのでキャスト無しで vec4 に組める（ADR 0006）。
+ * `bias` is always f32, so it can be assembled into a vec4 without a cast (ADR 0006).
  *
- * `outF16` は融合 attention ① の S だけが立てる（ADR 0028 の丸め列 4 — ②③ が f16 で読むので
- * transient が半減する）。**bias とは同時に立たない**（bias を持つのは linear / conv2d だけで、
- * どちらも出力は f32）。
+ * `outF16` is set only for S of fused attention ① (rounding 4 of the ADR 0028 sequence — ②③ read it
+ * as f16, so the transient is halved). **It is never set together with bias** (only linear / conv2d
+ * have a bias, and both output f32).
  *
- * `score` も融合 attention ① の S だけが立てる（案 γ 波 1 の `pack2x16float` 格納）。
- * MUST: **v4 経路でしか立たない** — スカラ経路の部分書きは同じ u32 語への read-modify-write
- * になる（src/kernels/score-storage.ts）。生成の入口が `!v4` を fail loudly で落とす。
+ * `score` is also set only for S of fused attention ① (the `pack2x16float` storage of option γ,
+ * phase 1).
+ * MUST: **set only on the v4 path** — a partial write on the scalar path would be a
+ * read-modify-write of the same u32 word (src/kernels/score-storage.ts). The generation entry point
+ * rejects `!v4` loudly.
  *
- * `mask` も融合 attention ① だけが立てる（加算型 mask — ADR 0023 改訂）。**書き出しの直前に
- * `S' = fl(acc + mask[m·N + n])` を 1 度足すだけ**で、縮約ループには一切触れない。
- * MUST: mask の添字に**バッチ base を足さない**（契約は `[1,1,M,N]` で B·H 全体へ broadcast
- * する — 足すと 2 バッチ目以降が範囲外／別の行を読む）。
- * MUST: 行窓（`maskRowOffset`）が立つときだけ mask の**行**に `row_offset` を足す。mask は
- * S と違い全 M ぶんの実体なので、ブロック相対の行で引くと 2 枚目以降が先頭ブロックの
- * mask を読む（例外の出ない誤値）。列は S も mask も同じ N なので触らない。
- * MUST: 加算は f32 で行い、`outF16` / `score` の丸めはその**後**に来る（分解経路の
- * `bmm → add` と丸めの位置と回数が一致することがビット同一の根拠）。
- * MUST: `bias` とは同時に立たない（bias を持つのは linear / conv2d だけ）。
+ * `mask` is also set only by fused attention ① (additive mask — ADR 0023 revision). **It only adds
+ * `S' = fl(acc + mask[m·N + n])` once, just before the write-out**, and does not touch the reduction
+ * loop at all.
+ * MUST: **do not add the batch base** to the mask index (the contract is `[1,1,M,N]` broadcast over
+ * all of B·H — adding it makes the 2nd batch onward read out of range / another row).
+ * MUST: add `row_offset` to the mask's **row** only when the row window (`maskRowOffset`) is set.
+ * Unlike S, the mask exists for the full M, so looking it up with the block-relative row would make
+ * the 2nd block onward read the first block's mask (a wrong value with no exception). Columns are
+ * the same N for S and the mask, so they are not touched.
+ * MUST: the addition is done in f32, and the rounding of `outF16` / `score` comes **after** it
+ * (matching the position and count of roundings of the decomposed path's `bmm → add` is the basis of
+ * bit identity).
+ * MUST: never set together with `bias` (only linear / conv2d have a bias).
  *
- * 行・列 quad とも codegen 時に展開して `acc{行}_{列 quad}` を静的に読む
- * （{@link gemmAccumulatorInit} の理由）。ガードの構造・bias の足し順・書き出す語の並びは
- * 幾何によらず同一。
+ * Both rows and column quads are unrolled at codegen time and read `acc{row}_{column quad}`
+ * statically (the reason given in {@link gemmAccumulatorInit}). The structure of the guards, the
+ * order of adding the bias and the order of the words written are the same whatever the geometry.
  */
 const store = (
   geometry: GemmGeometry,
@@ -1025,7 +1109,7 @@ const store = (
   maskRowOffset = false,
 ): string => {
   const base = batchBase(op, "cbase");
-  /** mask の行（行窓のときだけ全 M の添字へ戻す）。 */
+  /** The mask row (turned back into an index into the full M only with the row window). */
   const maskRow = (row: number): string =>
     maskRowOffset ? `(orow${row} + dims.row_offset)` : `orow${row}`;
   const quads = gemmQuadsPerThread(geometry);
@@ -1050,9 +1134,9 @@ const store = (
       .map((quad) => {
         const biasBind = bias
           ? `
-    // n % ${GEMM_QUAD} == 0 かつ ocq${quad} < n4 なので oc + ${
+    // n % ${GEMM_QUAD} == 0 and ocq${quad} < n4, so oc + ${
       GEMM_QUAD - 1
-    } < n（bias は常に f32 — ADR 0006）
+    } < n (bias is always f32 — ADR 0006)
     let oc = ocq${quad} * ${GEMM_QUAD}u;
     let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);`
           : "";
@@ -1061,8 +1145,9 @@ const store = (
             const acc = `acc${row}_${quad}`;
             const summed = mask ? "sv" : acc;
             const value = bias ? `${summed} + biasv` : outF16 ? `vec4<f16>(${summed})` : summed;
-            // 加算 mask は行 m・列 n の平坦添字（バッチ base 無し）。quad 単位で数えるのは
-            // 出力と同じ `n % 4 == 0` が v4 の条件だから（mask の行頭も quad 境界にある）。
+            // The additive mask uses the flat index of row m, column n (no batch base). It is
+            // counted in quads because v4's condition is the same `n % 4 == 0` as the output (mask
+            // row starts are on quad boundaries too).
             const maskAdd = mask
               ? `      let sv = ${acc} + mask[${maskRow(row)} * n4 + ocq${quad}];\n`
               : "";
@@ -1083,7 +1168,8 @@ ${blocks}`;
   const write = (row: number, col: number): string => {
     const acc = `acc${row}_${Math.floor(col / GEMM_QUAD)}.${TILE_COMPONENTS[col % GEMM_QUAD]}`;
     const summed = mask ? "sv" : acc;
-    // 加算 mask は `mbase`（バッチ base を含まない行頭）からの平坦添字で 1 要素だけ読む
+    // The additive mask reads one element by flat index from `mbase` (the row start without the
+    // batch base)
     const maskAdd = mask ? `      let sv = ${acc} + mask[mbase + ocol${at(col)}];\n` : "";
     return `    if (ocol${at(col)} < dims.n) {
 ${maskAdd}      ${name}[obase + ocol${at(col)}] = ${outF16 ? `f16(${summed})` : summed}${
@@ -1108,13 +1194,15 @@ ${rowStores}`;
 };
 
 /**
- * K 内側ループ 1 段（共有タイルから `regN/4` 本の vec4 と `regM` 本のスカラを読み、
- * `regM · regN` 個の MAC を回す）。行 昇順・列 quad 昇順に並べるだけなので、
- * **1 出力要素あたりの加算順序は幾何によらず同一**（K タイル 16 昇順の逐次）。
+ * One step of the inner K loop (reads `regN/4` vec4 and `regM` scalars from the shared tiles and runs
+ * `regM · regN` MACs). It only orders them by ascending row and ascending column quad, so **the
+ * addition order per output element is the same whatever the geometry** (sequential, ascending
+ * through the K tile of 16).
  *
- * MUST: 積和は `acc = acc + a * b` の字面のまま（`fma` を明示しない）。i8a8 の i32 縮約と
- * 違ってここは f32 縮約なので、**backend の fma 縮約判断が変われば最終ビットは動きうる**
- * — PNG sha256 門（f16-1024 を含む 4 本）と WAV 門が検出器。
+ * MUST: the multiply-add keeps the literal form `acc = acc + a * b` (no explicit `fma`). Unlike the
+ * i32 reduction of i8a8, this is an f32 reduction, so **if the backend's decision to contract to fma
+ * changes, the final bits can move** — the PNG sha256 checks (4 of them, including f16-1024) and the
+ * WAV checks are the detectors.
  */
 const accumulatorUpdate = (geometry: GemmGeometry, compute: GemmCompute): string => {
   const { regM } = geometry;
@@ -1144,18 +1232,22 @@ const accumulatorUpdate = (geometry: GemmGeometry, compute: GemmCompute): string
 };
 
 /**
- * head / Dims 追加欄 / prologue / fillA / fillB / store の断片を差し込んだ 1 本のシェーダ。
+ * One shader with the fragments for head / extra Dims fields / prologue / fillA / fillB / store
+ * inserted.
  *
- * `dimsExtra` は uniform の 4 語目以降（融合 attention ① の `scale` / conv1d / conv2d の畳み込み幾何）。
- * uniform は 16 バイト単位で確保するので 4 語目は既に確保済みで、既存 3 op では空文字
- * （生成物は 1 バイトも動かない）。`accInit` も同様に省略時は従来の 0 初期化そのまま。
+ * `dimsExtra` is the 4th word of the uniform onward (the `scale` of fused attention ① / the
+ * convolution geometry of conv1d / conv2d). The uniform is allocated in 16-byte units, so the 4th
+ * word is already allocated, and for the existing 3 ops it is the empty string (the generated code
+ * does not move by a single byte). `accInit` likewise is the previous 0 initialisation as is when
+ * omitted.
  *
- * `kExtent` は K タイルループの回数を決める式（既定は静的な `dims.k`）。states 形 ③ₜ だけが
- * **prologue で畳んだ実行時の値**を渡す — 縮約長が live 列数で、静的上界の `col_cap` で回すと
- * 容量比例の仕事量になる（ADR 0066 決定 3 の不合格形）。
- * MUST: 渡す式は **workgroup 一様**であること（`workgroup_id` と uniform だけから作る）。
- * 内側の `workgroupBarrier` が WGSL の一様性要件を満たすための前提で、レーン依存の値を
- * 渡すとシェーダ生成そのものが落ちる。
+ * `kExtent` is the expression that decides the number of K tile iterations (default the static
+ * `dims.k`). Only states-shaped ③ₜ passes **a run-time value folded in the prologue** — the
+ * reduction length is the number of live columns, and iterating to the static bound `col_cap` would
+ * make the work proportional to capacity (the rejected form of ADR 0066 decision 3).
+ * MUST: the expression passed is **workgroup-uniform** (built only from `workgroup_id` and
+ * uniforms). This is the premise for the inner `workgroupBarrier` to meet WGSL's uniformity
+ * requirement; passing a lane-dependent value makes shader creation itself fail.
  */
 const skeleton = (
   geometry: GemmGeometry,
@@ -1173,8 +1265,9 @@ const skeleton = (
   const tileM = gemmTileM(geometry);
   const nQuads = gemmColumnQuads(geometry);
   return `${header}${
-    // MUST: `enable` はモジュール先頭・全ての global 宣言より前の directive（コメントだけが
-    // 前に来てよい）。f16 変種のときだけここが差し込む — f32 変種の生成物は 1 バイトも動かない。
+    // MUST: `enable` is a directive at the top of the module, before every global declaration (only
+    // comments may precede it). It is inserted here only for the f16 variant — the generated f32
+    // variant does not move by a single byte.
     compute === "f16" ? "\nenable f16;" : ""
   }
 struct Dims {
@@ -1185,14 +1278,14 @@ ${dimsExtra}}
 @group(0) @binding(0) var<uniform> dims: Dims;
 ${bindings}
 ${loader}
-// 共有 A タイル（${tileM} 行 × K ${GEMM_TILE_K}・スカラ格納）と
-// 共有 B タイル（K ${GEMM_TILE_K} × 列 quad ${nQuads}・列方向を vec4 に束ねた形）${
+// Shared A tile (${tileM} rows × K ${GEMM_TILE_K}, scalar storage) and
+// shared B tile (K ${GEMM_TILE_K} × ${nQuads} column quads, column direction grouped into vec4)${
     compute === "f16"
       ? `。f16 変種は共有バイトが半分
-// （${gemmWorkgroupStorageBytes(geometry, "f32")} B → ${gemmWorkgroupStorageBytes(
+// (${gemmWorkgroupStorageBytes(geometry, "f32")} B → ${gemmWorkgroupStorageBytes(
           geometry,
           "f16",
-        )} B / WG）— 期待利得はこの 1 機序に全て乗る`
+        )} B / WG) — the expected gain rests entirely on this one mechanism`
       : ""
   }
 var<workgroup> sa: array<${tileScalarType(compute)}, ${tileM * GEMM_TILE_K}>;
@@ -1205,27 +1298,28 @@ fn main(
 ) {
   let tid = lid.y * ${geometry.wgX}u + lid.x;
 ${prologue}
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner workgroupBarrier
+  // to meet WGSL's uniformity requirement
   let tiles = (${kExtent} + ${GEMM_TILE_K - 1}u) / ${GEMM_TILE_K}u;
 ${accInit}
   for (var t = 0u; t < tiles; t = t + 1u) {
 ${fillTiles}
     workgroupBarrier();
-    // 共有ロード ${geometry.regM + gemmQuadsPerThread(geometry)} 回（B の vec4 ${gemmQuadsPerThread(
+    // ${geometry.regM + gemmQuadsPerThread(geometry)} shared loads (${gemmQuadsPerThread(
       geometry,
-    )} + A のスカラ ${geometry.regM}）で ${geometry.regM * geometry.regN} MAC。
-    // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
-    // 完全に一致する。${
+    )} vec4 of B + ${geometry.regM} scalars of A) give ${geometry.regM * geometry.regN} MACs.
+    // The reduction is sequential in ascending k, and the addition order per output element matches
+    // the 16×16 kernel with 1 output per thread exactly.${
       compute === "f16"
         ? `
-    // MUST: f32 への拡幅は**レジスタロード時に 1 回**（${
+    // MUST: widening to f32 happens **once at register load** (${
       geometry.regM + gemmQuadsPerThread(geometry)
-    } 回 / ${geometry.regM * geometry.regN} MAC）。MAC ごとに
-    // f32(av * bv) と書くと変換が ${
+    } times / ${geometry.regM * geometry.regN} MACs). Writing
+    // f32(av * bv) per MAC would raise the conversions to ${
       geometry.regM * geometry.regN
-    } 回に増え、しかも積が f16 精度に落ちる（ADR 0028 の丸め列 2）。
-    // f16 → f32 の拡幅は厳密なので、値は「入力を f16 に丸めた f32 変種」と 1 ビットも違わない。`
+    } and also drop the product to f16 precision (rounding 2 of the ADR 0028 sequence).
+    // Widening f16 → f32 is exact, so the values do not differ by a single bit from
+    // "the f32 variant with inputs rounded to f16".`
         : ""
     }
     for (var kk = 0u; kk < ${GEMM_TILE_K}u; kk = kk + 1u) {
@@ -1239,29 +1333,30 @@ ${storeTile}
 };
 
 /**
- * 行窓変種の uniform 追加欄。MUST: **常に追加欄の末尾**へ置く（bmm では 4〜5 語目・融合
- * attention では `scale` / `kv_repeat` の**後ろ**）。位置を op ごとに動かすと、既存の
- * GQA 変種の語位置が行窓の有無で変わる。MUST: 並びは `bmmRowWindowParams`
- * （src/kernels/bmm.ts）/ `attentionQkParams` / `attentionPvParams`（src/kernels/attention.ts）と対。
+ * The extra uniform fields of the row-window variant. MUST: placed **always at the end of the extra
+ * fields** (words 4–5 for bmm, **after** `scale` / `kv_repeat` for fused attention). Moving the
+ * position per op would change the word positions of the existing GQA variant depending on whether
+ * the row window is present. MUST: the order pairs with `bmmRowWindowParams` (src/kernels/bmm.ts) /
+ * `attentionQkParams` / `attentionPvParams` (src/kernels/attention.ts).
  */
 export const ROW_WINDOW_DIMS_EXTRA = `  row_offset: u32,
   rows_full: u32,
 `;
 
 /**
- * GQA 変種の uniform 追加欄（`r = H / Hkv` — ADR 0067 決定 2）。
+ * The extra uniform field of the GQA variant (`r = H / Hkv` — ADR 0067 decision 2).
  *
- * MUST: 並びは `attentionQkParams` / `attentionPvParams`（src/kernels/attention.ts）と対。
- * ①QK では `scale` の次（5 語目 = struct 32 バイト）・③PV では 4 語目（16 バイトのまま）。
- * MUST: `r` は uniform に置く（WGSL に焼くと r の値ごとにパイプラインが増える）。
+ * MUST: the order pairs with `attentionQkParams` / `attentionPvParams` (src/kernels/attention.ts).
+ * For ①QK it follows `scale` (word 5 = a 32-byte struct); for ③PV it is word 4 (stays 16 bytes).
+ * MUST: `r` is placed in the uniform (baked into the WGSL, pipelines would multiply per value of r).
  */
 const GQA_DIMS_EXTRA = `  kv_repeat: u32,
 `;
 
 /**
- * dense 側で `rowWindow` を立てられるのは bmm だけ（{@link GemmRowWindow} — matmul にバッチ軸が
- * 無い）。uniform の 4〜5 語目に `row_offset` / `rows_full` が増え、生成物の差は
- * {@link batchPrologue} の base 2 行に閉じる。
+ * On the dense side only bmm can set `rowWindow` ({@link GemmRowWindow} — matmul has no batch axis).
+ * `row_offset` / `rows_full` are added as words 4–5 of the uniform, and the difference in the
+ * generated code is confined to the 2 base lines of {@link batchPrologue}.
  */
 const denseWgsl = (
   geometry: GemmGeometry,
@@ -1294,21 +1389,24 @@ ${fillBDense(geometry, "b", op, v4)}`,
 };
 
 /**
- * 融合 attention ①（QK）— `S[b,m,n] = Σ_d (q·scale)[b,m,d] · (k·scale)[b,n,d]`（ADR 0023）。
+ * Fused attention ① (QK) — `S[b,m,n] = Σ_d (q·scale)[b,m,d] · (k·scale)[b,n,d]` (ADR 0023).
  *
- * A は q（`[batch,M,D]` 連続）で dense の A 充填そのまま、B は k（`[batch,N,D]` 連続）を
- * linear の重み読みと同じ「k 連続で読んで共有側で転置」構造で読む。**縮約は K 昇順・
- * K タイル 16** で現行 bmm と 1 ビット違わない。
+ * A is q (`[batch,M,D]` contiguous) with the dense A fill as is; B reads k (`[batch,N,D]`
+ * contiguous) with the same "read k-contiguously and transpose on the shared side" structure as
+ * linear's weight read. **The reduction is ascending K with K tile 16** and does not differ by a
+ * single bit from the current bmm.
  *
- * `mask` 変種は**書き出しの epilogue で `S' = fl(S + mask[m·N+n])` を足すだけ**（束縛が
- * 1 本増える以外は同一の生成物）。分解経路の `bmm`（S を実体化）→ `add`（mask）と丸めが
- * 起きる位置も回数も同じなので、ビット同一が保たれる。
+ * The `mask` variant **only adds `S' = fl(S + mask[m·N+n])` in the write-out epilogue** (the
+ * generated code is the same apart from one more binding). The position and count of roundings are
+ * the same as the decomposed path's `bmm` (materialising S) → `add` (mask), so bit identity holds.
  *
- * `gqa` 変種は **k の base 1 行と uniform 1 語**だけが違う（ADR 0067 決定 2）。共有タイル充填も
- * 縮約ループも 1 文字も動かないので、同じ k を実体化（repeat_kv）した非 GQA 形とビット同一。
+ * The `gqa` variant differs only in **one base line of k and one uniform word** (ADR 0067 decision
+ * 2). Neither the shared tile fill nor the reduction loop moves by a character, so it is
+ * bit-identical to the non-GQA form with the same k materialised (repeat_kv).
  *
- * `rowWindow` 変種（{@link GemmRowWindow} の `"a"`）は **q の base 1 行と mask の行添字**だけが
- * 違う。S はブロックとして 0 行目から書くので、②③ から見た形は 1 枚実行と同じ。
+ * The `rowWindow` variant (`"a"` of {@link GemmRowWindow}) differs only in **one base line of q and
+ * the mask's row index**. S is written as a block from row 0, so the shape seen from ②③ is the same
+ * as single-block execution.
  */
 const attentionQkWgsl = (
   geometry: GemmGeometry,
@@ -1337,7 +1435,7 @@ const attentionQkWgsl = (
     )}>;${
       mask
         ? `
-// 加算 mask [1,1,M,N]（B·H の全バッチへ broadcast — 添字にバッチ base は入らない）
+// Additive mask [1,1,M,N] (broadcast to every batch of B·H — no batch base in the index)
 @group(0) @binding(${ATTENTION_QK_MASK_BINDING}) var<storage, read> mask: array<${element}>;`
         : ""
     }`,
@@ -1358,19 +1456,21 @@ ${fillBAttentionQk(geometry, v4, compute)}`,
 };
 
 /**
- * 融合 attention ③（PV）— `O[b,m,d] = Σ_n P[b,m,n] · v[b,n,d]`、`P = exp(S−m)·inv`（ADR 0023）。
+ * Fused attention ③ (PV) — `O[b,m,d] = Σ_n P[b,m,n] · v[b,n,d]`, `P = exp(S−m)·inv` (ADR 0023).
  *
- * 形は bmm そのもの（B = v は `[batch,N,D]` 連続の dense）で、違いは **A タイル充填時に
- * P を作る**ことだけ。P を実体化しないので、旧経路の softmax 出力（+ 恒等 expand）1 枚ぶんの
- * バッファと dispatch が消える。値は現行 softmax のパス③（`exp(x−amax)·inv`）と同じ式・
- * 同じ演算順なので**ビット同一**。
+ * The shape is bmm itself (B = v is dense, `[batch,N,D]` contiguous); the only difference is that
+ * **P is built while filling the A tile**. P is not materialised, so one buffer of the old path's
+ * softmax output (+ identity expand) and its dispatch disappear. The values use the same expression
+ * and the same order of operations as pass ③ of the current softmax (`exp(x−amax)·inv`), so they are
+ * **bit-identical**.
  *
- * `gqa` 変種は **v の base 1 行と uniform 1 語**だけが違う（ADR 0067 決定 2）。①QK 側だけを
- * 写して ③PV を写し忘れると、P は正しいのに V だけ別 head を読む沈黙誤値になる
- * （検出器は tests/gpu_attention_gqa_test.ts の故障注入 ②）。
+ * The `gqa` variant differs only in **one base line of v and one uniform word** (ADR 0067 decision
+ * 2). Mapping only the ①QK side and forgetting ③PV would give a silent wrong value where P is right
+ * but only V reads another head (the detector is fault injection ② in
+ * tests/gpu_attention_gqa_test.ts).
  *
- * `rowWindow` 変種（{@link GemmRowWindow} の `"c"`）は **O の base 1 行**だけが違う。S も
- * 行統計もブロック相対（`dims.m` = ブロック行数）のままなので、`rbase` は触らない。
+ * The `rowWindow` variant (`"c"` of {@link GemmRowWindow}) differs only in **one base line of O**. S
+ * and the row statistics stay block-relative (`dims.m` = block rows), so `rbase` is not touched.
  */
 const attentionPvWgsl = (
   geometry: GemmGeometry,
@@ -1382,13 +1482,14 @@ const attentionPvWgsl = (
 ): string => {
   const f16 = compute === "f16";
   assertScoreStorageSupported("attention_pv", score, v4, f16);
-  // MUST: S を f32 へ広げてから `exp(S−m)·inv` を評価する（拡幅は厳密なので値は動かない）。
-  // f16 のまま `exp` を評価すると指数関数が f16 精度になり、丸め列が 1 段増える。
+  // MUST: widen S to f32 before evaluating `exp(S−m)·inv` (widening is exact, so values do not
+  // move). Evaluating `exp` in f16 would make the exponential f16-precision and add one step to the
+  // rounding sequence.
   const probability = (expr: string, slot: number): string =>
     `exp(${f16 ? `f32(${expr})` : expr} - row_max${slot}) * row_inv${slot}`;
   return skeleton(
     geometry,
-    `// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv は非実体化, f32${
+    `// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv not materialised, f32${
       f16 ? ", f16 タイル計算・S は f16" : ""
     }${scoreNote(score)}${gqa ? ", GQA（v は kv-head へ整数除算で写す）" : ""}${
       rowWindow ? ", 行窓 c" : ""
@@ -1418,14 +1519,16 @@ ${fillBDense(geometry, "v", "attention_pv", v4, compute)}`,
 };
 
 /**
- * states 形 ①ₜ の K 読み（**2 源** — 論理 col < P はスロット・以降は今 step の `ins`）。
+ * The K read of states-shaped ①ₜ (**2 sources** — logical col < P from the slot, the rest from this
+ * step's `ins`).
  *
- * MUST: 束縛の選択だけをここに置き、行頭は列ごとに prologue で畳む（{@link prologueBStateQk}）。
- * 行頭の 2 源分岐を充填側へ持ち込むと、K タイルループの回数ぶん同じ分岐を回すことになる。
+ * MUST: only the choice of binding lives here; row starts are folded per column in the prologue
+ * ({@link prologueBStateQk}). Bringing the 2-source branch of the row start into the fill would run
+ * the same branch once per K tile iteration.
  */
 const STATE_QK_K_READ_WGSL = `
-// K の 2 源（① の score_slot / score_ins と同じ踏み分け）。行頭は列ごとに畳んであるので、
-// ここは束縛の選択だけ
+// The 2 sources of K (the same split as score_slot / score_ins of ①). Row starts are already folded
+// per column, so this is only the choice of binding
 fn k_read(from_slot: bool, index: u32) -> f32 {
   if (from_slot) {
     return slot_k[index];
@@ -1435,16 +1538,17 @@ fn k_read(from_slot: bool, index: u32) -> f32 {
 `;
 
 /**
- * states 形 ①ₜ の B タイル（Kᵀ `[depth, live]` — 列 = 論理 col）の担当。
+ * Assignment of the B tile of states-shaped ①ₜ (Kᵀ `[depth, live]` — column = logical col).
  *
- * 構造は融合 attention の {@link prologueBAttentionQk} と同じ「k 連続で読んで共有側で転置」で、
- * 違うのは**行頭が論理 col の 2 源で分かれる**ことだけ。2 源の式は ① と同一
- * （`col < P` はスロット `(kv_plane · C + slot_row(col)) · D`・以降は ins
- * `(kv_plane · M + (col − P)) · D`）。
+ * The structure is the same "read k-contiguously and transpose on the shared side" as
+ * {@link prologueBAttentionQk} of fused attention; the only difference is that **the row start is
+ * split into 2 sources by logical col**. The 2-source expression is the same as ① (`col < P`: slot
+ * `(kv_plane · C + slot_row(col)) · D`; the rest: ins `(kv_plane · M + (col − P)) · D`).
  *
- * MUST: 行頭も出どころも **K タイルループ不変**なので prologue で 1 度だけ畳む。
- * NOTE: `wcol >= live` の列でも行頭は計算される（u32 の算術は wrap するだけで、その値は
- * 充填側の `wcol < live` ガードに阻まれて一度も読みに使われない）。
+ * MUST: both the row start and the source are **invariant in the K tile loop**, so they are folded
+ * once in the prologue.
+ * NOTE: the row start is computed even for columns with `wcol >= live` (u32 arithmetic merely wraps,
+ * and the value is never used for a read, blocked by the fill side's `wcol < live` guard).
  */
 const prologueBStateQk = (geometry: GemmGeometry): string => {
   const stride = gemmRowFillStride(geometry);
@@ -1478,24 +1582,28 @@ const prologueBStateQk = (geometry: GemmGeometry): string => {
   }`,
     )
     .join("\n");
-  return `  // K タイルの担当（${gemmTileN(geometry)} 列（論理 col）× ${GEMM_K_QUADS} quad を ${gemmThreads(
+  return `  // K tile assignment (${gemmTileN(geometry)} columns (logical col) × ${GEMM_K_QUADS} quads over ${gemmThreads(
     geometry,
-  )} スレッドで ${gemmColumnSlots(geometry)} 巡）。
-  // K は [行, D] のまま読み、**共有メモリ側で転置して置く**（融合 attention の k 読みと同じ構造）
+  )} threads in ${gemmColumnSlots(geometry)} rounds).
+  // K is read as [row, D] as is and **placed transposed on the shared-memory side** (the same
+  // structure as fused attention's k read)
 ${columns}
-  // 列ごとの K 行頭と出どころ（K タイルループ不変なのでここで 1 度だけ畳む）。
-  // 式は ① と同一 — col < P はスロット（物理行は読み書き同式の slot_row）・以降は ins の col − P
+  // K row start and source per column (invariant in the K tile loop, so folded once here). Same
+  // expression as ① — col < P from the slot (physical row via slot_row, the same expression for
+  // read and write), the rest from ins at col − P
 ${bases}`;
 };
 
 /**
- * states 形 ①ₜ の B タイル充填。
+ * B tile fill of states-shaped ①ₜ.
  *
- * MUST: 実効 `N` は**実行時の live**（`dims.n` = `col_cap` は S のストライドの静的上界）。
- * `dims.n` で切ると `[live, col_cap)` に当たる論理 col の K を読み、S へ寄与させてしまう。
- * MUST: 半スケールは k 側にも掛ける（① の `stateScoreFn` が持つ 1 項の式
- * `(q·scale) · (k·scale)` と字面を揃える — 片側 1 回に畳むと丸めが変わってビット同一が崩れる）。
- * 範囲外は 0 のままで `0 · scale = 0` なので端数タイルの結論は変わらない。
+ * MUST: the effective `N` is **the run-time live** (`dims.n` = `col_cap` is the static upper bound of
+ * S's stride). Cutting at `dims.n` would read the K of logical cols in `[live, col_cap)` and let them
+ * contribute to S.
+ * MUST: the half scale is applied to the k side too (matching the literal form of the one-term
+ * expression `(q·scale) · (k·scale)` held by ①'s `stateScoreFn` — folding it into one side changes
+ * the rounding and breaks bit identity).
+ * Out-of-range entries stay 0 and `0 · scale = 0`, so the outcome of remainder tiles does not change.
  */
 const fillBStateQk = (geometry: GemmGeometry): string => {
   const filled = slots(gemmColumnSlots(geometry))
@@ -1516,7 +1624,7 @@ const fillBStateQk = (geometry: GemmGeometry): string => {
         wv${slot}.w = k_read(kpast${slot}, krow_base${slot} + wk0 + 3u);
       }
     }
-    // 半スケール契約（① と同じ）: scale は q 側と k 側の**両方**へ掛ける
+    // Half-scale contract (same as ①): scale is applied to **both** the q side and the k side
     wv${slot} = wv${slot} * dims.scale;
 ${storeBTransposed(geometry, "f32", slot)}`,
     )
@@ -1526,17 +1634,20 @@ ${filled}`;
 };
 
 /**
- * states 形 ①ₜ の書き出し（S `[B·H, rows_block, col_cap]` — 添字は ① と同一）。
+ * Write-out of states-shaped ①ₜ (S `[B·H, rows_block, col_cap]` — the same indices as ①).
  *
- * 共通の {@link store} を使わないのは、境界と値が states 固有の 3 点で違うため:
- * 行は `dims.m`（`rows_block`）ではなく**有効行**まで・列は `dims.n`（`col_cap`）ではなく
- * **live** まで・値は述語外なら **−inf のビット列**（`bitcast<f32>(dims.neg_inf)`）。
+ * The common {@link store} is not used because bounds and values differ in 3 states-specific
+ * points: rows go up to the **valid rows**, not `dims.m` (`rows_block`); columns up to **live**, not
+ * `dims.n` (`col_cap`); and outside the predicate the value is **the bit pattern of −inf**
+ * (`bitcast<f32>(dims.neg_inf)`).
  *
- * MUST: live 範囲は**述語外でも必ず書く**（S は一時バッファで、書かないと ② の amax が前回の
- * 残骸を食う）。逆に `[live, col_cap)` と pad 行は 1 語も書かない（① と同じ — 読者が live と
- * 有効行で切ることと対）。
- * MUST: 述語は ① と同じ `in_window(col, past + row)`（`row` は chunk 内のグローバル行 =
- * `row_offset` + 局所行）。上限だけの実装は sliding で沈黙混入になる。
+ * MUST: the live range is **always written, even outside the predicate** (S is a transient buffer;
+ * unwritten, ②'s amax would pick up leftovers from the previous run). Conversely, `[live, col_cap)`
+ * and pad rows get not a single word (same as ① — paired with readers cutting at live and the valid
+ * rows).
+ * MUST: the predicate is the same `in_window(col, past + row)` as ① (`row` is the global row within
+ * the chunk = `row_offset` + local row). An implementation with only the upper bound would silently
+ * mix values in under sliding.
  */
 const storeStateQk = (geometry: GemmGeometry): string => {
   const rows = slots(geometry.regM)
@@ -1566,8 +1677,8 @@ ${slots(geometry.regN)
   }`,
     )
     .join("\n");
-  return `  // 行は**有効行**まで（pad 行の S は誰も読まない — ③ が 0 を書いて返す）。列は live まで
-  // （[live, col_cap) の残骸は ① と同じく触らないのが正）
+  return `  // Rows up to the **valid rows** (nobody reads S of pad rows — ③ writes 0 and returns).
+  // Columns up to live (leaving the leftovers in [live, col_cap) untouched is correct, as in ①)
   let rows_live = effective_rows(lengths.query);
   let ocol = wid.x * ${gemmTileN(geometry)}u + lid.x * ${geometry.regN}u;
 ${rows}
@@ -1575,18 +1686,20 @@ ${rowStores}`;
 };
 
 /**
- * states 形 attention ①ₜ（**K 行タイル共有** — perf-ledger K-13）。
- * `S[z, 局所行, cl] = Σ_d (q·scale)[z, row_offset + 局所行, d] · (k·scale)[列 cl の K 行, d]`。
+ * States-shaped attention ①ₜ (**shared K row tiles** — perf-ledger K-13).
+ * `S[z, local row, cl] = Σ_d (q·scale)[z, row_offset + local row, d] · (k·scale)[K row of col cl, d]`.
  *
- * A は q（`[B·H, M, D]` の行ブロック）で融合 attention の A 充填そのまま、B は K を
- * 「D 連続で読んで共有側で転置」（{@link prologueBStateQk} — 違いは行頭の 2 源だけ）。
- * **縮約は K 昇順・K タイル 16 の逐次**なので、1 出力要素あたりの加算順が ①（`stateScoreFn` の
- * `d` 逐次）と厳密に一致する = **① とビット同一**（ADR 0022 決定 3 の数値契約）。
+ * A is q (a row block of `[B·H, M, D]`) with fused attention's A fill as is; B is K "read
+ * D-contiguously and transposed on the shared side" ({@link prologueBStateQk} — the only difference
+ * is the 2 sources of the row start). **The reduction is sequential, ascending K with K tile 16**,
+ * so the addition order per output element matches ① (sequential over `d` in `stateScoreFn`)
+ * exactly = **bit-identical to ①** (the numeric contract of ADR 0022 decision 3).
  *
- * MUST: `Lengths` は**ヘッダ側**（`struct Dims` より前）で宣言する。骨格の `enable f16`
- * ディレクティブ位置の MUST と同居させないため、この経路は f16 計算変種を取らない。
- * MUST: 束縛番号は ①（0 params / 1 q / 2 ins_k / 3 slot_k / 4 s / 5 lengths）と同一に保つ —
- * runtime 側は キー・WGSL・params・workgroup の 4 点だけを差し替える。
+ * MUST: `Lengths` is declared **on the header side** (before `struct Dims`). So as not to coexist
+ * with the MUST on the position of the skeleton's `enable f16` directive, this path takes no f16
+ * compute variant.
+ * MUST: keep the binding numbers the same as ① (0 params / 1 q / 2 ins_k / 3 slot_k / 4 s /
+ * 5 lengths) — the runtime side swaps only 4 things: key, WGSL, params and workgroup.
  */
 const attentionStateQkTiledWgsl = (
   geometry: GemmGeometry,
@@ -1595,7 +1708,7 @@ const attentionStateQkTiledWgsl = (
 ): string =>
   skeleton(
     geometry,
-    `// karume attention_state_qk (states 形の S 実体化, f32, GEMM 骨格の K 行タイル共有${
+    `// karume attention_state_qk (states-shaped S materialisation, f32, shared K row tiles of the GEMM skeleton${
       sliding ? ", sliding window" : ""
     }${gqa ? ", GQA" : ""}, ${gemmGeometryNote(geometry)})
 ${STATE_LENGTHS_STRUCT}`,
@@ -1607,16 +1720,16 @@ ${STATE_LENGTHS_STRUCT}`,
     `
 ${stateTiledGeometryWgsl(sliding)}
 ${STATE_QK_K_READ_WGSL}`,
-    `  // 論理長は uniform（context 所有）なので workgroup 一様 — 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすための前提
+    `  // The logical lengths are uniform (owned by the context), so workgroup-uniform — the premise for the
+  // inner workgroupBarrier to meet WGSL's uniformity requirement
   let past = lengths.past;
   let live = live_columns(past, lengths.query);
   let base_col = column_base(past);
   let neg_inf = bitcast<f32>(dims.neg_inf);
   let z = wid.z;
   let kv_plane = ${stateTiledKvPlaneWgsl(gqa)};
-  // A（q）は chunk 全体 [B·H, M, D] の row_offset 行目から読み、S はブロック相対で 0 行目から
-  // 書く（① の添字 (z · rows_block + 局所行) · col_cap + cl と同じ）
+  // A (q) is read from row row_offset of the whole chunk [B·H, M, D], and S is written
+  // block-relative from row 0 (the same as ①'s index (z · rows_block + local row) · col_cap + cl)
   let abase = (z * dims.chunk_rows + dims.row_offset) * dims.k;
   let cbase = z * dims.m * dims.n;
 ${prologueA(geometry, "attention_state_qk", false)}
@@ -1628,14 +1741,17 @@ ${fillBStateQk(geometry)}`,
   );
 
 /**
- * states 形 ③ₜ の V 読み（**2 源** — 論理 col < P はスロット・以降は今 step の `ins`）。
+ * The V read of states-shaped ③ₜ (**2 sources** — logical col < P from the slot, the rest from this
+ * step's `ins`).
  *
- * MUST: 束縛の選択だけをここに置く（①ₜ の `k_read` と同型）。①ₜ と違って**行頭は prologue へ
- * 畳めない** — B の K 方向が論理 col なので、行頭は K タイルごとに変わる（畳めるのは
- * 「1 スレッドの担当列が K タイルループ不変」な ①ₜ の側だけ）。
+ * MUST: only the choice of binding lives here (the same shape as `k_read` of ①ₜ). Unlike ①ₜ, **the
+ * row start cannot be folded into the prologue** — B's K direction is the logical col, so the row
+ * start changes per K tile (folding works only on the ①ₜ side, where "the columns one thread handles
+ * are invariant in the K tile loop").
  */
 const STATE_PV_V_READ_WGSL = `
-// V の 2 源（③ の slot_v / ins_v と同じ踏み分け）。行頭は充填側が K タイルごとに作る
+// The 2 sources of V (the same split as slot_v / ins_v of ③). The fill side builds the row start
+// per K tile
 fn v_read(from_slot: bool, index: u32) -> f32 {
   if (from_slot) {
     return slot_v[index];
@@ -1645,18 +1761,19 @@ fn v_read(from_slot: bool, index: u32) -> f32 {
 `;
 
 /**
- * states 形 ③ₜ の B タイル（V `[live, depth]` — **行 = 論理 col・列 = D**）の充填。
+ * Fill of the B tile of states-shaped ③ₜ (V `[live, depth]` — **row = logical col, column = D**).
  *
- * 構造は融合 attention ③ の {@link fillBDense} と同じ「K 行 × 列 quad を連続で読む」形で、
- * 違うのは**行頭が論理 col の 2 源で分かれる**ことと、行の境界が `dims.k`（= `col_cap`）では
- * なく**実行時の live** であることの 2 点。①ₜ の「D 連続で読んで共有側で転置」は取らない —
- * こちらは N 方向（D）がそのまま連続なので、転置なしで共有タイルの vec4 に載る。
+ * The structure is the same "read K rows × column quads contiguously" form as {@link fillBDense} of
+ * fused attention ③; it differs in 2 points: **the row start is split into 2 sources by logical
+ * col**, and the row bound is **the run-time live** rather than `dims.k` (= `col_cap`). The "read
+ * D-contiguously and transpose on the shared side" of ①ₜ is not used — here the N direction (D) is
+ * contiguous as is, so it goes into the shared tile's vec4 without a transpose.
  *
- * MUST: 行頭の式は ③ と同一（`col < P` はスロット `(kv_plane · C + slot_row(col)) · D`・
- * 以降は ins `(kv_plane · M + (col − P)) · D`）。
- * MUST: 境界は `live`（`dims.k` で切ると `[live, col_cap)` に当たる論理 col の V を読み、
- * A 側が 0 でも `0 · 非有限 = NaN` を通す）。範囲外は 0 のままで、A 側も 0 なので端数タイルの
- * 結論は変わらない。
+ * MUST: the row-start expression is the same as ③ (`col < P`: slot
+ * `(kv_plane · C + slot_row(col)) · D`; the rest: ins `(kv_plane · M + (col − P)) · D`).
+ * MUST: the bound is `live` (cutting at `dims.k` would read the V of logical cols in
+ * `[live, col_cap)` and let `0 · non-finite = NaN` through even with A's side at 0). Out-of-range
+ * entries stay 0, and A's side is 0 too, so the outcome of remainder tiles does not change.
  */
 const fillBStatePv = (geometry: GemmGeometry): string =>
   slots(gemmQuadSlots(geometry))
@@ -1665,7 +1782,8 @@ const fillBStatePv = (geometry: GemmGeometry): string =>
         `    let brow${slot} = t * ${GEMM_TILE_K}u + bk${slot};
     var bv4_${slot} = vec4<f32>(0.0);
     if (brow${slot} < live) {
-      // 列 col の V 行頭（③ と同式）。K タイルごとに変わるので prologue へは畳めない
+      // V row start of column col (same expression as ③). It changes per K tile, so it cannot be
+      // folded into the prologue
       let vcol${slot} = base_col + brow${slot};
       let vpast${slot} = vcol${slot} < past;
       var vrow_base${slot} = 0u;
@@ -1692,16 +1810,18 @@ const fillBStatePv = (geometry: GemmGeometry): string =>
     .join("\n");
 
 /**
- * states 形 ③ₜ の書き出し（O `[B,H,M,D]` — 添字は ③ と同一）。
+ * Write-out of states-shaped ③ₜ (O `[B,H,M,D]` — the same indices as ③).
  *
- * 共通の {@link store} を使わないのは、pad 行の値が states 固有で違うため: 行の範囲は ③ と
- * 同じ `dims.m`（= `rows_block`）**全て**（full-write）だが、有効行より下は `acc` ではなく
- * **厳密 `0.0`** を書く。
+ * The common {@link store} is not used because the value of pad rows differs in a states-specific
+ * way: the row range is **all** of `dims.m` (= `rows_block`), as in ③ (full-write), but below the
+ * valid rows it writes **exactly `0.0`** rather than `acc`.
  *
- * MUST: pad 行に `acc` を書かない。A タイルは pad 行を 0 で埋めてあるが、非有限な V が
- * 混ざると `0 · NaN = NaN` が積み上がり、③ の「pad 行は live を 1 列も走査せず 0」と 1 語違う
- * （ADR 0066 追記 6 の行局所性は、この 0 書きが構造的に保証している）。
- * MUST: 行は `dims.m` まで書く（有効行で切ると O に未書き込みが残り full-write が崩れる）。
+ * MUST: do not write `acc` to pad rows. The A tile fills pad rows with 0, but if a non-finite V gets
+ * mixed in, `0 · NaN = NaN` accumulates and differs by a word from ③'s "pad rows scan not a single
+ * live column and are 0" (the row locality of ADR 0066 addendum item 6 is structurally guaranteed by
+ * this 0 write).
+ * MUST: rows are written up to `dims.m` (cutting at the valid rows would leave O partly unwritten and
+ * break full-write).
  */
 const storeStatePv = (geometry: GemmGeometry): string => {
   const rows = slots(geometry.regM)
@@ -1729,28 +1849,30 @@ ${slots(geometry.regN)
   }`,
     )
     .join("\n");
-  return `  // 行は rows_block 全て（③ と同じ full-write）。pad 行は acc ではなく**厳密 0**
+  return `  // All rows of rows_block (full-write, as in ③). Pad rows get **exactly 0**, not acc
   let ocol = wid.x * ${gemmTileN(geometry)}u + lid.x * ${geometry.regN}u;
 ${rows}
 ${rowStores}`;
 };
 
 /**
- * states 形 attention ③ₜ（**V 行タイル共有** — perf-ledger K-13 段 2）。
- * `O[z, row_offset + 局所行, d] = Σ_cl p[局所行, cl] · v[列 cl の V 行, d]`、
- * `p = exp(S − m)·inv` は**非実体化**（③ と同じ）。
+ * States-shaped attention ③ₜ (**shared V row tiles** — perf-ledger K-13 step 2).
+ * `O[z, row_offset + local row, d] = Σ_cl p[local row, cl] · v[V row of column cl, d]`, with
+ * `p = exp(S − m)·inv` **not materialised** (same as ③).
  *
- * A は P（S と行統計から充填時に作る — 融合 attention ③ の A 充填そのまま）、B は V を
- * dense に読む（{@link fillBStatePv} — 違いは行頭の 2 源と live 境界だけ）。**縮約は col 昇順・
- * K タイル 16 の逐次**なので、1 出力要素あたりの加算順が ③（`statePvWgsl` の cl 逐次）と
- * 厳密に一致する = **③ とビット同一**（ADR 0022 決定 3 の数値契約）。
+ * A is P (built from S and the row statistics during the fill — fused attention ③'s A fill as is),
+ * B reads V densely ({@link fillBStatePv} — the only differences are the 2 sources of the row start
+ * and the live bound). **The reduction is sequential, ascending col with K tile 16**, so the
+ * addition order per output element matches ③ (sequential over cl in `statePvWgsl`) exactly =
+ * **bit-identical to ③** (the numeric contract of ADR 0022 decision 3).
  *
- * MUST: K ループの上限は `k_live`（= 実行時の live。ただしこの行タイルが有効行を 1 行も
- * 含まないなら 0）。`dims.k`（= `col_cap`）で回すと容量比例の仕事量になり、pad 行だけの
- * 行タイルが live ぶん空回りする（どちらも ADR 0066 決定 3 の不合格形）。
- * MUST: `Lengths` は**ヘッダ側**（`struct Dims` より前）で宣言する（①ₜ と同文）。
- * MUST: 束縛番号は ③（0 params / 1 s / 2 stats / 3 ins_v / 4 slot_v / 5 out / 6 lengths）と
- * 同一に保つ — runtime 側はキー・WGSL・params・workgroup の 4 点だけを差し替える。
+ * MUST: the upper bound of the K loop is `k_live` (= the run-time live, but 0 if this row tile
+ * contains not a single valid row). Iterating to `dims.k` (= `col_cap`) would make the work
+ * proportional to capacity, and row tiles of only pad rows would spin through live for nothing (both
+ * are the rejected forms of ADR 0066 decision 3).
+ * MUST: `Lengths` is declared **on the header side** (before `struct Dims`) (same as ①ₜ).
+ * MUST: keep the binding numbers the same as ③ (0 params / 1 s / 2 stats / 3 ins_v / 4 slot_v /
+ * 5 out / 6 lengths) — the runtime side swaps only 4 things: key, WGSL, params and workgroup.
  */
 const attentionStatePvTiledWgsl = (
   geometry: GemmGeometry,
@@ -1759,7 +1881,7 @@ const attentionStatePvTiledWgsl = (
 ): string =>
   skeleton(
     geometry,
-    `// karume attention_state_pv (states 形の O = P @ V, P = exp(S − m)·inv は非実体化, f32, GEMM 骨格の V 行タイル共有${
+    `// karume attention_state_pv (states-shaped O = P @ V, P = exp(S − m)·inv not materialised, f32, shared V row tiles of the GEMM skeleton${
       sliding ? ", sliding window" : ""
     }${gqa ? ", GQA" : ""}, ${gemmGeometryNote(geometry)})
 ${STATE_LENGTHS_STRUCT}`,
@@ -1772,25 +1894,26 @@ ${STATE_LENGTHS_STRUCT}`,
     `
 ${stateTiledPvGeometryWgsl(sliding)}
 ${STATE_PV_V_READ_WGSL}`,
-    `  // 論理長は uniform（context 所有）なので workgroup 一様 — 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすための前提
+    `  // The logical lengths are uniform (owned by the context), so workgroup-uniform — the premise for the
+  // inner workgroupBarrier to meet WGSL's uniformity requirement
   let past = lengths.past;
   let live = live_columns(past, lengths.query);
   let base_col = column_base(past);
   let rows_live = effective_rows(lengths.query);
   let z = wid.z;
   let kv_plane = ${stateTiledKvPlaneWgsl(gqa)};
-  // A（S）と行統計はブロック相対（③ の (z · rows_block + 局所行) · col_cap と同じ）、
-  // O は chunk 全体 [B·H, M, D] の row_offset 行目から書く
+  // A (S) and the row statistics are block-relative (the same as ③'s (z · rows_block + local row) ·
+  // col_cap), and O is written from row row_offset of the whole chunk [B·H, M, D]
   let abase = z * dims.m * dims.k;
   let cbase = (z * dims.chunk_rows + dims.row_offset) * dims.n;
   let rbase = z * dims.m;
 ${prologueA(geometry, "attention_state_pv", false)}
 ${prologueAttentionStats(geometry, "rows_live")}
 ${prologueBDense(geometry, false)}
-  // K ループは live 列まで。**有効行を 1 行も含まない行タイルは 1 周も回さない**（③ の
-  // pad 行が live を走査しないことの写し — 仕事量 ∝ Q）。wid.y 由来なので workgroup 一様で、
-  // 内側の workgroupBarrier の一様性要件を壊さない
+  // The K loop goes up to the live columns. **A row tile with not a single valid row does not
+  // iterate at all** (the counterpart of ③'s pad rows not scanning live — work ∝ Q). It derives
+  // from wid.y, so it is workgroup-uniform and does not break the uniformity requirement of the
+  // inner workgroupBarrier
   let k_live = select(0u, live, wid.y * ${gemmTileM(geometry)}u < rows_live);`,
     `${fillA(
       geometry,
@@ -1816,9 +1939,11 @@ const linearVariantWgsl = (
   compute: GemmCompute = "f32",
   groupShift?: number,
 ): string => {
-  // MUST: i8 重み × f16 計算は組まない（w8a16 — ADR 0028 決定 3）。ALU が 1:1 の機では
-  // 速度の案として成立せず、品質の案としては需要が出てから別途裁定する。黙って f32 計算へ
-  // 落とすと「i8 資産のときだけ f16 変種が効かない」形の沈黙になるので、生成の入口で落とす。
+  // i8 weights × f16 compute (w8a16) is not built; it MAY be reopened when a speed measurement on an
+  // FP16 2:1 device shows a gain (re-graded 2026-10-18 — ADR 0028 decision 4). On machines with a 1:1
+  // ALU ratio it does not work as a speed option, and as a quality option it is a separate ruling once
+  // there is demand. Silently falling back to f32 compute would be a silence of the form "the f16
+  // variant has no effect only with i8 assets", so it is rejected at the generation entry point.
   if (compute === "f16" && weight === "i2") {
     throw new CodegenError("linear: 重み i2 格納 × f16 計算は未対応（ADR 0097）");
   }
@@ -1828,15 +1953,17 @@ const linearVariantWgsl = (
         "linearCompute を 'f32' か 'a8' にするか、重みを f32 / f16 格納で持つこと",
     );
   }
-  // i4 も同型（w4a16 は未実装 — ADR 0069。黙って f32 計算へ落とさない理由は i8 と同文）。
+  // i4 is the same (w4a16 is not implemented — ADR 0069; the reason not to fall back silently to
+  // f32 compute is the same as for i8).
   if (compute === "f16" && weight === "i4") {
     throw new CodegenError(
       "linear: 重み i4 格納 × f16 計算（w4a16）は未実装 — " +
         "linearCompute を 'f32' にするか、重みを f32 / f16 格納で持つこと",
     );
   }
-  // MUST: group 長の log2 は i4 と 1 対 1（欠けたまま生成すると scale 添字が壊れた WGSL が
-  // 出る・i4 以外に付くのは呼び出し側の結線バグ）— どちらも生成の入口で落とす。
+  // MUST: the log2 of the group length is one-to-one with i4 (generating without it emits WGSL with
+  // a broken scale index; having it on anything other than i4 is a wiring bug in the caller) — both
+  // are rejected at the generation entry point.
   if ((weight === "i4") !== (groupShift !== undefined)) {
     throw new CodegenError(
       `linear: weightGroupShift は重み i4 格納と対で渡す（weight=${weight} / shift=${groupShift}）`,
@@ -1865,12 +1992,12 @@ ${fillBLinear(geometry, "w", weight, v4, compute, groupShift)}`,
 };
 
 /**
- * conv2d の implicit GEMM が uniform に足す幾何 12 語（`{m,n,k}` の後ろ）。
+ * The 12 geometry words the implicit GEMM of conv2d appends to the uniform (after `{m,n,k}`).
  *
- * `m = Cout` / `n = Hout·Wout` / `k = Cin·Kh·Kw`（groups == 1・バッチは dispatch の z 軸）。
- * MUST: 並びは src/kernels/conv2d.ts の `conv2dIgemmParams` と対。
- * NOTE: `height_out` は載せない（`n / width_out` で導けるうえ WGSL が一度も読まない死んだ
- * フィールドになる — ADR 0022 決定 5 で bmm の `batch` を落としたのと同じ規律）。
+ * `m = Cout` / `n = Hout·Wout` / `k = Cin·Kh·Kw` (groups == 1, batch on the dispatch's z axis).
+ * MUST: the order pairs with `conv2dIgemmParams` in src/kernels/conv2d.ts.
+ * NOTE: `height_out` is not included (it can be derived as `n / width_out`, and it would be a dead
+ * field the WGSL never reads — the same discipline as dropping bmm's `batch` in ADR 0022 decision 5).
  */
 const CONV2D_DIMS_EXTRA = `  channels_in: u32,
   height_in: u32,
@@ -1887,13 +2014,15 @@ const CONV2D_DIMS_EXTRA = `  channels_in: u32,
 `;
 
 /**
- * conv1d / conv2d の `acc` 初期値 = **bias-first**（ADR 0024 の MUST ①）。
+ * The initial value of `acc` for conv1d / conv2d = **bias-first** (the bias-first MUST of ADR 0024
+ * decision 3).
  *
- * 直接カーネルの `var acc = bias[oc];` をそのまま再現する。GEMM の「store で最後に足す」形に
- * 流用すると `(Σ) + bias` になり、丸めの並びが変わってビット同一が崩れる（本設計で最大の
- * 分岐点）。行 = 出力チャネルなので bias は行ごとのスカラ splat になる。
- * 端タイルの無効行は、有効な末尾チャネルの bias を読む。出力は store のガードで捨てるが、
- * 読み自体も範囲内に収める必要がある（範囲外読みは後続 barrier の進行を保証しない）。
+ * It reproduces the direct kernel's `var acc = bias[oc];` as is. Reusing the GEMM form "add at the
+ * end in the store" would give `(Σ) + bias`, change the order of rounding and break bit identity
+ * (the biggest fork of this design). Row = output channel, so the bias is a scalar splat per row.
+ * Invalid rows of edge tiles read the bias of the last valid channel. Their output is discarded by
+ * the store's guard, but the read itself must also stay in range (an out-of-range read does not
+ * guarantee progress of the following barrier).
  */
 const convAccInit = (geometry: GemmGeometry, fullTileGuard = false): string => {
   const base = `  let bias0 = wid.y * ${gemmTileM(geometry)}u + lid.y * ${geometry.regM}u;`;
@@ -1903,9 +2032,10 @@ const convAccInit = (geometry: GemmGeometry, fullTileGuard = false): string => {
     return `${base}
 ${gemmAccumulatorInit(geometry, (row) => bias(row, true))}`;
   }
-  // 完全なタイルでは全行の読出しが有効。端タイルだけ添字を制限する。
-  // 積で上端を作らず、完全なタイル数で比較すれば u32 の加算 overflow も起こさない。
-  // 適用範囲は呼び手で絞る（docs/research/2026-09-10-codex-mtp-optimization.md）。
+  // In a full tile every row's read is valid. Only edge tiles clamp the index. Comparing against
+  // the number of full tiles, instead of building the upper end by multiplication, avoids u32
+  // addition overflow too. The callers narrow where this applies
+  // (docs/research/2026-09-10-codex-mtp-optimization.md).
   const assign = (bounded: boolean): string =>
     Array.from({ length: geometry.regM }, (_, row) =>
       Array.from(
@@ -1923,16 +2053,17 @@ ${assign(true)}
 };
 
 /**
- * `Xcol[k][n]` の 1 要素（x の暗黙 gather — im2col を実体化しない）。
+ * One element of `Xcol[k][n]` (the implicit gather of x — im2col is not materialised).
  *
- * MUST: 範囲外は **0 を返す**（ADR 0024 の MUST ③）。クランプした添字で読むと実在する別
- * ピクセルが混ざり、例外の出ない誤値になる。直接カーネルの「padding 域は加算せず読み飛ばす」
- * と値が一致するのは `a + 0.0 == a`（`a` が有限）だからで、唯一の例外は符号付きゼロ
- * （部分和がちょうど `−0.0` のときだけ `+0.0` に転ぶ）。
+ * MUST: out of range **returns 0** (the out-of-range-0 MUST of ADR 0024 decision 3). Reading with a
+ * clamped index would mix in a different real pixel — a wrong value with no exception. The values
+ * agree with the direct kernel's "skip the padding area without adding" because `a + 0.0 == a`
+ * (`a` finite); the only exception is signed zero (only when the partial sum is exactly `−0.0` does
+ * it turn into `+0.0`).
  */
 const CONV2D_XCOL_WGSL = `
-// Xcol[k][n] = x[b, ic, oy·sh − ph + kh·dh, ox·sw − pw + kw·dw]（範囲外は 0）。
-// xc = b·Cin + ic（バッチは dispatch の z 軸なので呼び出し側で足す）
+// Xcol[k][n] = x[b, ic, oy·sh − ph + kh·dh, ox·sw − pw + kw·dw] (0 out of range).
+// xc = b·Cin + ic (the batch is the dispatch's z axis, so the caller adds it)
 fn xcol(xc: u32, ky: i32, kx: i32, n: u32) -> f32 {
   let iy = i32((n / dims.width_out) * dims.stride_h) + ky;
   let ix = i32((n % dims.width_out) * dims.stride_w) + kx;
@@ -1944,18 +2075,20 @@ fn xcol(xc: u32, ky: i32, kx: i32, n: u32) -> f32 {
 `;
 
 /**
- * conv1d / conv2d の A タイル（重み `[Cout, K]` — 平坦化すると行優先の `[m,k]` そのもの）の担当。
+ * Assignment of the conv1d / conv2d A tile (weights `[Cout, K]` — flattened, exactly a row-major
+ * `[m,k]`).
  *
- * 1D と 2D で**完全に共通**（平坦化した重みの形が同じで、K の割り方は B タイル側にしか
- * 現れない）。dense の {@link prologueA} と同じ割り当てだが、読みが weight-storage 経由に
- * なるぶん **行頭は要素単位**で持つ（{@link weightRead4} が平坦添字を取り、f32 の quad
- * 添字化は内部で行う）。
- * MUST: i8 の scale は **行 = 出力チャネル**（ADR 0024 の MUST ④）。linear 側の `wcol`
- * （= 列）を持ってくると列 = ピクセルの scale を引く沈黙誤値になり、**m タイルが 2 枚以上
- * ある形**のテストだけが検出器になる。
+ * **Fully shared** between 1D and 2D (the flattened weight has the same shape, and how K is split
+ * appears only on the B tile side). The same assignment as dense {@link prologueA}, but since reads
+ * go through weight-storage, **row starts are held in elements** ({@link weightRead4} takes a flat
+ * index and turns it into an f32 quad index internally).
+ * MUST: the i8 scale is per **row = output channel** (ADR 0024 decision 6). Bringing over linear's
+ * `wcol` (= column) would silently look up the scale of column = pixel, and only tests with
+ * **shapes that have 2 or more m tiles** would detect it.
  *
- * NOTE: i4 の group scale はここで束ねない（{@link weightScaleWgsl} が i4 で空文字を返す）—
- * group は k 依存なので行不変の巻き上げが成立せず、引くのは充填側（{@link fillAConv}）。
+ * NOTE: the i4 group scale is not bound here ({@link weightScaleWgsl} returns the empty string for
+ * i4) — the group depends on k, so row-invariant hoisting does not work; the fill side
+ * ({@link fillAConv}) looks it up.
  */
 const prologueAConv = (geometry: GemmGeometry, weight: WeightStorage): string => {
   const stride = gemmRowFillStride(geometry);
@@ -1980,23 +2113,25 @@ const prologueAConv = (geometry: GemmGeometry, weight: WeightStorage): string =>
   let sa_base${slot} = sa_base0 + ${slot * stride * GEMM_TILE_K}u;`,
     )
     .join("\n");
-  return `  // A タイルの担当（${gemmTileM(geometry)} 行 × ${GEMM_K_QUADS} quad を ${gemmThreads(
+  return `  // A tile assignment (${gemmTileM(geometry)} rows × ${GEMM_K_QUADS} quads over ${gemmThreads(
     geometry,
-  )} スレッドで ${gemmRowSlots(geometry)} 巡）
+  )} threads in ${gemmRowSlots(geometry)} rounds)
   let ar = tid / ${GEMM_K_QUADS}u;
   let aq = tid % ${GEMM_K_QUADS}u;
 ${rows}`;
 };
 
 /**
- * conv1d / conv2d の A タイル充填（{@link fillA} と {@link fillBLinear} を合成した形）。
+ * Fill of the conv1d / conv2d A tile (a composition of {@link fillA} and {@link fillBLinear}).
  *
- * `groupShift` は i4（conv1d 限定 — ADR 0069 決定 5 の追補）の group 長の log2。linear が
- * B 側でやっていることの **A 側への鏡映**で、group scale は k 依存なのでチャネル不変の
- * 巻き上げ（{@link scaleVar}）が使えず **quad ごと**に 1 度引く。`ak0` は 4 整列・
- * `group_size ≥ 16` なので quad は group を跨がない（ADR 0069 決定 3）。行長 `dims.k` が
- * group で割り切れることは適格判定（plan.ts）と宣言層（format/ir.ts）が保証済み。
- * MUST: 省略時（f32 / f16 / i8）の生成物は 1 バイトも動かない（スナップショットが検出器）。
+ * `groupShift` is the log2 of the group length for i4 (conv1d only — the supplement to ADR 0069
+ * decision 5). It is **the mirror on the A side** of what linear does on the B side: the group scale
+ * depends on k, so the channel-invariant hoisting ({@link scaleVar}) cannot be used and it is looked
+ * up once **per quad**. `ak0` is 4-aligned and `group_size ≥ 16`, so a quad never crosses a group
+ * (ADR 0069 decision 3). That the row length `dims.k` is divisible by the group is guaranteed by the
+ * eligibility check (plan.ts) and the declaration layer (format/ir.ts).
+ * MUST: when omitted (f32 / f16 / i8), the generated code does not move by a single byte (the
+ * snapshots are the detector).
  */
 const fillAConv = (
   geometry: GemmGeometry,
@@ -2042,16 +2177,18 @@ ${
     sa[sa_base${slot} + 3u] = av${slot}.w;`,
     )
     .join("\n");
-  return `    // 範囲外は 0 で埋める。内積に寄与しないので K 端数でも結果は変わらない
+  return `    // Fill out-of-range entries with 0. They do not contribute to the inner product, so a K
+    // remainder gives the same result
     let ak0 = t * ${GEMM_TILE_K}u + aq * ${GEMM_QUAD}u;
 ${filled}`;
 };
 
 /**
- * conv2d の B タイル（`Xcol[k,n]` の暗黙 gather）の担当。割り当ては dense と同じ。
+ * Assignment of the conv2d B tile (the implicit gather of `Xcol[k,n]`). The assignment is the same
+ * as dense.
  *
- * MUST: バッチは `wid.z`（{@link BATCHED_OPS} の doc）。`xbase` は x の**チャネル平面**単位、
- * `cbase` は出力要素（v4 では quad）単位で数える。
+ * MUST: the batch is `wid.z` (the doc of {@link BATCHED_OPS}). `xbase` counts in **channel planes**
+ * of x, `cbase` in output elements (quads with v4).
  */
 const prologueBConv2d = (geometry: GemmGeometry, v4: boolean): string => {
   const stride = gemmQuadFillStride(geometry);
@@ -2060,12 +2197,13 @@ const prologueBConv2d = (geometry: GemmGeometry, v4: boolean): string => {
     .slice(1)
     .map((slot) => `\n  let bk${slot} = bk0 + ${slot * stride}u;`)
     .join("");
-  return `  // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチの出力平面 [Cout, Hout·Wout]）
+  return `  // The batch is uniform per workgroup
+  // (one z index = the output plane [Cout, Hout·Wout] of one batch)
   let xbase = wid.z * dims.channels_in;
   let cbase = wid.z * dims.m * ${v4 ? "n4" : "dims.n"};
-  // B タイルの担当（K ${GEMM_TILE_K} 行 × 列 quad ${nQuads} を ${gemmThreads(
+  // B tile assignment (K ${GEMM_TILE_K} rows × ${nQuads} column quads over ${gemmThreads(
     geometry,
-  )} スレッドで ${gemmQuadSlots(geometry)} 巡）
+  )} threads in ${gemmQuadSlots(geometry)} rounds)
   let bk0 = tid / ${nQuads}u;
   let bcq = tid % ${nQuads}u;
   ${
@@ -2073,15 +2211,15 @@ const prologueBConv2d = (geometry: GemmGeometry, v4: boolean): string => {
       ? `let bc4 = wid.x * ${nQuads}u + bcq;`
       : `let bcol = wid.x * ${gemmTileN(geometry)}u + bcq * ${GEMM_QUAD}u;`
   }${rows}
-  // K タイルループ不変（平坦 k を (ic, kh, kw) へ割るための刻み）
+  // Invariant in the K tile loop (the step for splitting flat k into (ic, kh, kw))
   let khw = dims.kernel_h * dims.kernel_w;`;
 };
 
 /**
- * 平坦 k → `(ic, kh, kw)` の分解と入力座標のオフセット。
+ * Decomposition of flat k → `(ic, kh, kw)` and the offset of the input coordinates.
  *
- * MUST: 平坦 k の昇順が直接カーネルの `(ic, kh, kw)` 三重昇順と一致することが、
- * K タイル 16 昇順 → ビット同一の土台（ADR 0024）。
+ * MUST: that ascending flat k matches the direct kernel's triple ascending `(ic, kh, kw)` is the
+ * foundation of K tile 16 ascending → bit identity (ADR 0024).
  */
 const conv2dKDecode = (slot: number): string =>
   `      let ic = brow${slot} / khw;
@@ -2090,17 +2228,18 @@ const conv2dKDecode = (slot: number): string =>
       let kx = i32((kr % dims.kernel_w) * dims.dilation_w) - i32(dims.padding_w);`;
 
 /**
- * conv2d の B タイル充填（本設計で唯一の完全新規部分）。
+ * Fill of the conv2d B tile (the only entirely new part of this design).
  *
- * MUST: x を読むのは `bc4 < n4`（v4）/ `bcol + j < n`（スカラ）の門の**内側**だけ。
- * MUST: v4 の連続 4 列読みが成立する条件は `Wout % 4 == 0 && stride_w == 1`
- * （`N % 4 == 0` では不十分 — Hout=Wout=2 は N=4 だが quad が出力行をまたぐ）。判定は
- * `conv2dUsesVec4`（src/kernels/conv2d.ts）1 箇所。
+ * MUST: x is read only **inside** the guard `bc4 < n4` (v4) / `bcol + j < n` (scalar).
+ * MUST: the condition for the v4 read of 4 contiguous columns is `Wout % 4 == 0 && stride_w == 1`
+ * (`N % 4 == 0` is not enough — Hout=Wout=2 has N=4, but the quad crosses output rows). The decision
+ * is in one place, `conv2dUsesVec4` (src/kernels/conv2d.ts).
  *
- * NOTE（検出限界・実測）: `bc4 < n4` の門を落としても**数値テストは全て緑のまま**になる
- * （故障注入で実測）。WGSL の境界付きアクセスで範囲外読みが安全なうえ、そこで作った `sb` の
- * 列は `store` の `ocq < n4` に阻まれて一度も書き出されないため。検出器は WGSL スナップ
- * ショット（tests/fixtures/wgsl/conv2d_igemm*.wgsl）だけで、これは意図した構造の固定。
+ * NOTE (detection limit, measured): dropping the `bc4 < n4` guard **leaves every numeric test green**
+ * (measured by fault injection). WGSL's bounded access makes the out-of-range read safe, and the
+ * `sb` columns built from it are never written out, blocked by the store's `ocq < n4`. The only
+ * detector is the WGSL snapshots (tests/fixtures/wgsl/conv2d_igemm*.wgsl), which pin the intended
+ * structure.
  */
 const fillBConv2d = (geometry: GemmGeometry, v4: boolean): string =>
   slots(gemmQuadSlots(geometry))
@@ -2113,7 +2252,8 @@ ${
     ? `    if (brow${slot} < dims.k && bc4 < n4) {
 ${conv2dKDecode(slot)}
       let xc = xbase + ic;
-      // quad の 4 列は同じ出力行の連続 ox（v4 の条件）なので x 側も連続に読める
+      // The 4 columns of the quad are contiguous ox in the same output row (the v4 condition), so x
+      // can be read contiguously too
       let n0 = bc4 * ${GEMM_QUAD}u;
       let iy = i32((n0 / dims.width_out) * dims.stride_h) + ky;
       let ix0 = i32((n0 % dims.width_out) * dims.stride_w) + kx;
@@ -2121,7 +2261,7 @@ ${conv2dKDecode(slot)}
         let base = (xc * dims.height_in + u32(iy)) * dims.width_in + u32(ix0);
         bv4_${slot} = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
       } else {
-        // 画像端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        // Only image edges and the padding area come here (0 out of range — the MUST of xcol)
         bv4_${slot} = vec4<f32>(
           xcol(xc, ky, kx, n0),
           xcol(xc, ky, kx, n0 + 1u),
@@ -2152,13 +2292,15 @@ ${conv2dKDecode(slot)}
     .join("\n");
 
 /**
- * conv2d の implicit GEMM（ADR 0024）— `C[Cout, N] = W[Cout, K] × Xcol[K, N]`。
+ * The implicit GEMM of conv2d (ADR 0024) — `C[Cout, N] = W[Cout, K] × Xcol[K, N]`.
  *
- * A は重み（平坦化で `[M,K]` 行優先そのもの・weight-storage 3 変種）、B は x の暗黙 gather、
- * store は 1 バッチぶんの `[Cout][Hout·Wout]` 行優先 = **NCHW の平面そのもの**なので後段の
- * レイアウト変換は要らない（バッチは z 軸 — {@link BATCHED_OPS}）。
- * bias は `acc` の初期値（{@link convAccInit}）。m タイルは 64 行 / 32 行の 2 変種
- * （{@link GEMM_MTILE_SMALL} — 出力の**担当割り**だけが変わり、数値経路は共通）。
+ * A is the weight (flattened, exactly a row-major `[M,K]`; 3 weight-storage variants), B is the
+ * implicit gather of x, and the store writes one batch's row-major `[Cout][Hout·Wout]` = **exactly the
+ * NCHW plane**, so no later layout conversion is needed (the batch is the z axis —
+ * {@link BATCHED_OPS}).
+ * The bias is the initial value of `acc` ({@link convAccInit}). The m tile has 2 variants, 64 rows /
+ * 32 rows ({@link GEMM_MTILE_SMALL} — only the **work assignment** of the output changes; the numeric
+ * path is shared).
  */
 const conv2dIgemmWgsl = (geometry: GemmGeometry, weight: WeightStorage, v4: boolean): string =>
   skeleton(
@@ -2181,13 +2323,13 @@ ${fillBConv2d(geometry, v4)}`,
   );
 
 /**
- * conv1d の implicit GEMM が uniform に足す幾何 6 語（`{m,n,k}` の後ろ）。
+ * The 6 geometry words the implicit GEMM of conv1d appends to the uniform (after `{m,n,k}`).
  *
- * `m = Cout` / `n = Lout` / `k = Cin·K`（groups == 1・バッチは dispatch の z 軸）。
- * MUST: 並びは src/kernels/conv1d.ts の `conv1dIgemmParams` と対。
- * NOTE: `length_out` は載せない（**そのまま `dims.n`** なので、載せると同じ事実が 2 語に
- * 分かれて食い違いうる — conv2d が `height_out` を落としたのと同じ規律。2D では
- * `width_out` だけが n の内訳を割るために要る）。
+ * `m = Cout` / `n = Lout` / `k = Cin·K` (groups == 1, batch on the dispatch's z axis).
+ * MUST: the order pairs with `conv1dIgemmParams` in src/kernels/conv1d.ts.
+ * NOTE: `length_out` is not included (it is **`dims.n` as is**, so including it would split the same
+ * fact into 2 words that can disagree — the same discipline as conv2d dropping `height_out`; in 2D
+ * only `width_out` is needed, to split n into its parts).
  */
 const CONV1D_DIMS_EXTRA = `  channels_in: u32,
   length_in: u32,
@@ -2198,17 +2340,18 @@ const CONV1D_DIMS_EXTRA = `  channels_in: u32,
 `;
 
 /**
- * `Xcol[k][n]` の 1 要素（x の暗黙 gather — im2col を実体化しない）。
+ * One element of `Xcol[k][n]` (the implicit gather of x — im2col is not materialised).
  *
- * MUST: 範囲外は **0 を返す**（ADR 0024 の MUST ③）。クランプした添字で読むと実在する別
- * 位置が混ざり、例外の出ない誤値になる。直接カーネルの「padding 域は加算せず読み飛ばす」
- * と値が一致するのは `a + 0.0 == a`（`a` が有限）だからで、唯一の例外は符号付きゼロ
- * （部分和がちょうど `−0.0` のときだけ `+0.0` に転ぶ）。
+ * MUST: out of range **returns 0** (the out-of-range-0 MUST of ADR 0024 decision 3). Reading with a
+ * clamped index would mix in a different real position — a wrong value with no exception. The
+ * values agree with the direct kernel's "skip the padding area without adding" because
+ * `a + 0.0 == a` (`a` finite); the only exception is signed zero (only when the partial sum is
+ * exactly `−0.0` does it turn into `+0.0`).
  */
 const CONV1D_XCOL_WGSL = `
-// Xcol[k][n] = x[b, ic, n·stride − padding + k·dilation]（範囲外は 0）。
-// kt = k·dilation − padding は K タイル内で不変なので呼び出し側が畳んで渡す。
-// xc = b·Cin + ic（バッチは dispatch の z 軸なので呼び出し側で足す）
+// Xcol[k][n] = x[b, ic, n·stride − padding + k·dilation] (0 out of range).
+// kt = k·dilation − padding is invariant within the K tile, so the caller folds it and passes it in.
+// xc = b·Cin + ic (the batch is the dispatch's z axis, so the caller adds it)
 fn xcol(xc: u32, kt: i32, n: u32) -> f32 {
   let ix = i32(n * dims.stride) + kt;
   if (ix < 0 || u32(ix) >= dims.length_in) {
@@ -2219,12 +2362,13 @@ fn xcol(xc: u32, kt: i32, n: u32) -> f32 {
 `;
 
 /**
- * conv1d の B タイル（`Xcol[k,n]` の暗黙 gather）の担当。割り当ては dense と同じ。
+ * Assignment of the conv1d B tile (the implicit gather of `Xcol[k,n]`). The assignment is the same
+ * as dense.
  *
- * MUST: バッチは `wid.z`（{@link BATCHED_OPS} の doc）。`xbase` は x の**チャネル行**単位、
- * `cbase` は出力要素（v4 では quad）単位で数える。
- * NOTE: 2D 版が持つ `khw`（`Kh·Kw`）に当たる刻みは 1D では `dims.kernel` そのものなので、
- * ループ不変の束ねが要らない。
+ * MUST: the batch is `wid.z` (the doc of {@link BATCHED_OPS}). `xbase` counts in **channel rows** of
+ * x, `cbase` in output elements (quads with v4).
+ * NOTE: the step corresponding to the 2D version's `khw` (`Kh·Kw`) is `dims.kernel` itself in 1D, so
+ * no loop-invariant binding is needed.
  */
 const prologueBConv1d = (geometry: GemmGeometry, v4: boolean): string => {
   const stride = gemmQuadFillStride(geometry);
@@ -2233,12 +2377,12 @@ const prologueBConv1d = (geometry: GemmGeometry, v4: boolean): string => {
     .slice(1)
     .map((slot) => `\n  let bk${slot} = bk0 + ${slot * stride}u;`)
     .join("");
-  return `  // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチの出力平面 [Cout, Lout]）
+  return `  // The batch is uniform per workgroup (one z index = the output plane [Cout, Lout] of one batch)
   let xbase = wid.z * dims.channels_in;
   let cbase = wid.z * dims.m * ${v4 ? "n4" : "dims.n"};
-  // B タイルの担当（K ${GEMM_TILE_K} 行 × 列 quad ${nQuads} を ${gemmThreads(
+  // B tile assignment (K ${GEMM_TILE_K} rows × ${nQuads} column quads over ${gemmThreads(
     geometry,
-  )} スレッドで ${gemmQuadSlots(geometry)} 巡）
+  )} threads in ${gemmQuadSlots(geometry)} rounds)
   let bk0 = tid / ${nQuads}u;
   let bcq = tid % ${nQuads}u;
   ${
@@ -2249,24 +2393,26 @@ const prologueBConv1d = (geometry: GemmGeometry, v4: boolean): string => {
 };
 
 /**
- * 平坦 k → `(ic, k)` の分解と入力座標のオフセット。
+ * Decomposition of flat k → `(ic, k)` and the offset of the input coordinate.
  *
- * MUST: 平坦 k の昇順が直接カーネルの `(ic, k)` 二重昇順と一致することが、K タイル 16 昇順 →
- * ビット同一の土台（ADR 0024 と同格 — {@link conv2dKDecode} の 1D 版）。`ic` を最内に取ると
- * 同じ tap 集合のまま加算順序だけが変わり、**値は近いがビットが割れる**（tolerance 比較では
- * 絶対に露見しない）。
+ * MUST: that ascending flat k matches the direct kernel's double ascending `(ic, k)` is the
+ * foundation of K tile 16 ascending → bit identity (on a par with ADR 0024 — the 1D version of
+ * {@link conv2dKDecode}). Making `ic` the innermost keeps the same set of taps but changes only the
+ * addition order, so **the values are close but the bits diverge** (never revealed by a tolerance
+ * comparison).
  */
 const conv1dKDecode = (slot: number): string =>
   `      let ic = brow${slot} / dims.kernel;
       let kt = i32((brow${slot} % dims.kernel) * dims.dilation) - i32(dims.padding);`;
 
 /**
- * conv1d の B タイル充填（2D 版 {@link fillBConv2d} の 1 軸版）。
+ * Fill of the conv1d B tile (the 1-axis version of the 2D {@link fillBConv2d}).
  *
- * MUST: x を読むのは `bc4 < n4`（v4）/ `bcol + j < n`（スカラ）の門の**内側**だけ。
- * MUST: v4 の連続 4 列読みが成立する条件は `Lout % 4 == 0 && stride == 1`（判定は
- * `conv1dUsesVec4` — src/kernels/conv1d.ts の 1 箇所）。1D では出力平面が 1 行なので
- * 2D の「quad が出力行をまたがない」条件（`Wout % 4`）は `n % 4` と一致する。
+ * MUST: x is read only **inside** the guard `bc4 < n4` (v4) / `bcol + j < n` (scalar).
+ * MUST: the condition for the v4 read of 4 contiguous columns is `Lout % 4 == 0 && stride == 1`
+ * (decided in one place, `conv1dUsesVec4` in src/kernels/conv1d.ts). In 1D the output plane is one
+ * row, so the 2D condition "the quad does not cross output rows" (`Wout % 4`) coincides with
+ * `n % 4`.
  */
 const fillBConv1d = (geometry: GemmGeometry, v4: boolean): string =>
   slots(gemmQuadSlots(geometry))
@@ -2279,14 +2425,15 @@ ${
     ? `    if (brow${slot} < dims.k && bc4 < n4) {
 ${conv1dKDecode(slot)}
       let xc = xbase + ic;
-      // quad の 4 列は連続する ox（v4 の条件 stride == 1）なので x 側も連続に読める
+      // The 4 columns of the quad are contiguous ox (the v4 condition stride == 1), so x can be
+      // read contiguously too
       let n0 = bc4 * ${GEMM_QUAD}u;
       let ix0 = i32(n0 * dims.stride) + kt;
       if (ix0 >= 0 && u32(ix0) + 3u < dims.length_in) {
         let base = xc * dims.length_in + u32(ix0);
         bv4_${slot} = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
       } else {
-        // 系列端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        // Only sequence edges and the padding area come here (0 out of range — the MUST of xcol)
         bv4_${slot} = vec4<f32>(
           xcol(xc, kt, n0),
           xcol(xc, kt, n0 + 1u),
@@ -2317,15 +2464,16 @@ ${conv1dKDecode(slot)}
     .join("\n");
 
 /**
- * conv1d の implicit GEMM（ADR 0024 の 1D 版）— `C[Cout, N] = W[Cout, K] × Xcol[K, N]`。
+ * The implicit GEMM of conv1d (the 1D version of ADR 0024) — `C[Cout, N] = W[Cout, K] × Xcol[K, N]`.
  *
- * A タイル（重み）・bias-first・store は 2D 版と**同じ断片**で、違うのは B タイルの k 分解
- * （`(ic, k)` の 2 段）と uniform の幾何欄だけ。store は 1 バッチぶんの `[Cout][Lout]`
- * 行優先 = NCL の平面そのものなので後段のレイアウト変換は要らない（バッチは z 軸 —
- * {@link BATCHED_OPS}）。
+ * The A tile (weights), bias-first and the store are **the same fragments** as the 2D version; the
+ * only differences are the k decomposition of the B tile (the 2 levels `(ic, k)`) and the geometry
+ * fields of the uniform. The store writes one batch's row-major `[Cout][Lout]` = exactly the NCL
+ * plane, so no later layout conversion is needed (the batch is the z axis — {@link BATCHED_OPS}).
  *
- * `groupShift` は i4 変種（ADR 0069 決定 5 の conv1d 追補）の group 長の log2。差は
- * {@link weightLoaderWgsl} が出す scale 束縛と、{@link fillAConv} が quad ごとに引く 1 行だけ。
+ * `groupShift` is the log2 of the group length of the i4 variant (the conv1d supplement to ADR 0069
+ * decision 5). The only differences are the scale binding emitted by {@link weightLoaderWgsl} and
+ * the one line {@link fillAConv} looks up per quad.
  */
 const conv1dIgemmWgsl = (
   geometry: GemmGeometry,
@@ -2353,14 +2501,16 @@ ${fillBConv1d(geometry, v4)}`,
   );
 
 /**
- * conv3d の implicit GEMM が uniform に足す幾何 18 語（`{m,n,k}` の後ろ — ADR 0118 決定 1）。
+ * The 18 geometry words the implicit GEMM of conv3d appends to the uniform (after `{m,n,k}` — ADR
+ * 0118 decision 1).
  *
- * `m = Cout` / `n = Tout·Hout·Wout`（**時間軸は N に畳む** — unbatched なので出力
- * `[Cout][Tout·Hout·Wout]` の行優先がそのまま出力テンソル）/ `k = Cin·Kt·Kh·Kw`（groups == 1）。
- * MUST: 並びは src/kernels/conv3d.ts の `conv3dIgemmParams` と対。
- * NOTE: `time_out` は載せない（`n / (height_out·width_out)` で導けるうえ WGSL が一度も読まない —
- * conv2d が `height_out` を落としたのと同じ規律）。3D では n から `(ot, oy, ox)` を戻すのに
- * `height_out·width_out` と `width_out` の 2 つが要るので、`height_out` は残る。
+ * `m = Cout` / `n = Tout·Hout·Wout` (**the time axis is folded into N** — unbatched, so the row-major
+ * output `[Cout][Tout·Hout·Wout]` is the output tensor as is) / `k = Cin·Kt·Kh·Kw` (groups == 1).
+ * MUST: the order pairs with `conv3dIgemmParams` in src/kernels/conv3d.ts.
+ * NOTE: `time_out` is not included (it can be derived as `n / (height_out·width_out)`, and the WGSL
+ * never reads it — the same discipline as conv2d dropping `height_out`). In 3D, getting
+ * `(ot, oy, ox)` back from n needs both `height_out·width_out` and `width_out`, so `height_out`
+ * stays.
  */
 const CONV3D_DIMS_EXTRA = `  channels_in: u32,
   time_in: u32,
@@ -2383,16 +2533,18 @@ const CONV3D_DIMS_EXTRA = `  channels_in: u32,
 `;
 
 /**
- * `Xcol[k][n]` の 1 要素（x の暗黙 gather — im2col を実体化しない）の 3D 版。
+ * The 3D version of one element of `Xcol[k][n]` (the implicit gather of x — im2col is not
+ * materialised).
  *
- * MUST: 範囲外は **0 を返す**（ADR 0024 の MUST ③）。クランプした添字で読むと実在する別
- * ボクセルが混ざり、例外の出ない誤値になる。
- * MUST: n の分解は `plane = height_out·width_out` で時間を、`width_out` で行を割る。取り違えると
- * 1 フレームしか無い形（Tout = 1）では一致してしまうので、テストは Tout ≥ 2 で固定する。
+ * MUST: out of range **returns 0** (the out-of-range-0 MUST of ADR 0024 decision 3). Reading with a
+ * clamped index would mix in a different real voxel — a wrong value with no exception.
+ * MUST: n is decomposed by splitting time with `plane = height_out·width_out` and rows with
+ * `width_out`. Mixing them up still agrees on a shape with a single frame (Tout = 1), so the tests
+ * are pinned at Tout ≥ 2.
  */
 const CONV3D_XCOL_WGSL = `
-// Xcol[k][n] = x[ic, ot·st − pt + kt·dt, oy·sh − ph + kh·dh, ox·sw − pw + kw·dw]（範囲外は 0）。
-// n = (ot·Hout + oy)·Wout + ox。unbatched なのでバッチの base は無い
+// Xcol[k][n] = x[ic, ot·st − pt + kt·dt, oy·sh − ph + kh·dh, ox·sw − pw + kw·dw] (0 out of range).
+// n = (ot·Hout + oy)·Wout + ox. Unbatched, so there is no batch base
 fn xcol(ic: u32, kt: i32, ky: i32, kx: i32, n: u32) -> f32 {
   let plane = dims.height_out * dims.width_out;
   let pixel = n % plane;
@@ -2408,9 +2560,11 @@ fn xcol(ic: u32, kt: i32, ky: i32, kx: i32, n: u32) -> f32 {
 `;
 
 /**
- * conv3d の B タイル（`Xcol[k,n]` の暗黙 gather）の担当。割り当ては dense と同じ。
+ * Assignment of the conv3d B tile (the implicit gather of `Xcol[k,n]`). The assignment is the same
+ * as dense.
  *
- * unbatched なので `xbase` / `cbase` を持たない（conv1d / conv2d の z 軸のバッチ base が無い形）。
+ * Unbatched, so there is no `xbase` / `cbase` (the form of conv1d / conv2d without the z-axis batch
+ * base).
  */
 const prologueBConv3d = (geometry: GemmGeometry, v4: boolean): string => {
   const stride = gemmQuadFillStride(geometry);
@@ -2419,9 +2573,9 @@ const prologueBConv3d = (geometry: GemmGeometry, v4: boolean): string => {
     .slice(1)
     .map((slot) => `\n  let bk${slot} = bk0 + ${slot * stride}u;`)
     .join("");
-  return `  // B タイルの担当（K ${GEMM_TILE_K} 行 × 列 quad ${nQuads} を ${gemmThreads(
+  return `  // B tile assignment (K ${GEMM_TILE_K} rows × ${nQuads} column quads over ${gemmThreads(
     geometry,
-  )} スレッドで ${gemmQuadSlots(geometry)} 巡）
+  )} threads in ${gemmQuadSlots(geometry)} rounds)
   let bk0 = tid / ${nQuads}u;
   let bcq = tid % ${nQuads}u;
   ${
@@ -2429,19 +2583,20 @@ const prologueBConv3d = (geometry: GemmGeometry, v4: boolean): string => {
       ? `let bc4 = wid.x * ${nQuads}u + bcq;`
       : `let bcol = wid.x * ${gemmTileN(geometry)}u + bcq * ${GEMM_QUAD}u;`
   }${rows}
-  // K タイルループ不変（平坦 k を (ic, kt, kh, kw) へ割るための刻み${
+  // Invariant in the K tile loop (the step for splitting flat k into (ic, kt, kh, kw)${
     v4 ? "と、quad の先頭 n を (ot, 画素) へ割る刻み" : ""
-  }）
+  })
   let khw = dims.kernel_h * dims.kernel_w;
   let kthw = dims.kernel_t * khw;${v4 ? "\n  let hw_out = dims.height_out * dims.width_out;" : ""}`;
 };
 
 /**
- * 平坦 k → `(ic, kt, kh, kw)` の分解と入力座標のオフセット。
+ * Decomposition of flat k → `(ic, kt, kh, kw)` and the offset of the input coordinates.
  *
- * MUST: 平坦 k の昇順が `(ic, kt, kh, kw)` の四重昇順（重み `[Cout, Cin, Kt, Kh, Kw]` の行優先）と
- * 一致することが、K タイル 16 昇順 → ビット同一の土台（ADR 0024 決定 3 を 3D へ継ぐ — ADR 0118
- * 決定 1）。Kt = 1 の形でこの並びは conv2d の `(ic, kh, kw)` と同じ列になる（恒等門 ①）。
+ * MUST: that ascending flat k matches the quadruple ascending `(ic, kt, kh, kw)` (row-major weights
+ * `[Cout, Cin, Kt, Kh, Kw]`) is the foundation of K tile 16 ascending → bit identity (ADR 0024
+ * decision 3 carried over to 3D — ADR 0118 decision 1). With Kt = 1 this order is the same sequence
+ * as conv2d's `(ic, kh, kw)` (identity check ①).
  */
 const conv3dKDecode = (slot: number): string =>
   `      let ic = brow${slot} / kthw;
@@ -2452,12 +2607,13 @@ const conv3dKDecode = (slot: number): string =>
       let kx = i32((ks % dims.kernel_w) * dims.dilation_w) - i32(dims.padding_w);`;
 
 /**
- * conv3d の B タイル充填（2D 版 {@link fillBConv2d} の 3 軸版）。
+ * Fill of the conv3d B tile (the 3-axis version of the 2D {@link fillBConv2d}).
  *
- * MUST: x を読むのは `bc4 < n4`（v4）/ `bcol + j < n`（スカラ）の門の**内側**だけ。
- * MUST: v4 の連続 4 列読みが成立する条件は `Wout % 4 == 0 && stride_w == 1`（判定は
- * `conv3dUsesVec4` — src/kernels/conv3d.ts の 1 箇所）。`Wout % 4 == 0` なら quad の 4 列は
- * 同じフレームの同じ出力行に収まる（`N % 4 == 0` では不十分 — conv2d と同じ理由）。
+ * MUST: x is read only **inside** the guard `bc4 < n4` (v4) / `bcol + j < n` (scalar).
+ * MUST: the condition for the v4 read of 4 contiguous columns is `Wout % 4 == 0 && stride_w == 1`
+ * (decided in one place, `conv3dUsesVec4` in src/kernels/conv3d.ts). With `Wout % 4 == 0` the 4
+ * columns of the quad fit in the same output row of the same frame (`N % 4 == 0` is not enough —
+ * the same reason as conv2d).
  */
 const fillBConv3d = (geometry: GemmGeometry, v4: boolean): string =>
   slots(gemmQuadSlots(geometry))
@@ -2469,7 +2625,8 @@ ${
   v4
     ? `    if (brow${slot} < dims.k && bc4 < n4) {
 ${conv3dKDecode(slot)}
-      // quad の 4 列は同じフレーム・同じ出力行の連続 ox（v4 の条件）なので x 側も連続に読める
+      // The 4 columns of the quad are contiguous ox in the same frame and output row (the v4
+      // condition), so x can be read contiguously too
       let n0 = bc4 * ${GEMM_QUAD}u;
       let pixel0 = n0 % hw_out;
       let it = i32((n0 / hw_out) * dims.stride_t) + kt;
@@ -2481,7 +2638,8 @@ ${conv3dKDecode(slot)}
           u32(ix0);
         bv4_${slot} = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
       } else {
-        // 時間端・画像端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        // Only time edges, image edges and the padding area come here (0 out of range — the MUST of
+        // xcol)
         bv4_${slot} = vec4<f32>(
           xcol(ic, kt, ky, kx, n0),
           xcol(ic, kt, ky, kx, n0 + 1u),
@@ -2511,12 +2669,14 @@ ${conv3dKDecode(slot)}
     .join("\n");
 
 /**
- * conv3d の implicit GEMM（ADR 0118 決定 1 — ADR 0024 の 3D 版）— `C[Cout, N] = W[Cout, K] × Xcol[K, N]`。
+ * The implicit GEMM of conv3d (ADR 0118 decision 1 — the 3D version of ADR 0024) —
+ * `C[Cout, N] = W[Cout, K] × Xcol[K, N]`.
  *
- * A タイル（重み）・bias-first・store は 1D / 2D 版と**同じ断片**で、違うのは B タイルの k 分解
- * （`(ic, kt, kh, kw)` の 4 段）・n の分解（`(ot, oy, ox)`）・uniform の幾何欄だけ。store は
- * unbatched の `[Cout][Tout·Hout·Wout]` 行優先 = 出力テンソルそのもので、バッチ base を持たない
- * （{@link BATCHED_OPS} に入らない — dispatch の z は 1）。
+ * The A tile (weights), bias-first and the store are **the same fragments** as the 1D / 2D versions;
+ * the only differences are the k decomposition of the B tile (the 4 levels `(ic, kt, kh, kw)`), the
+ * decomposition of n (`(ot, oy, ox)`) and the geometry fields of the uniform. The store writes the
+ * unbatched row-major `[Cout][Tout·Hout·Wout]` = the output tensor itself, with no batch base (not in
+ * {@link BATCHED_OPS} — the dispatch's z is 1).
  */
 const conv3dIgemmWgsl = (geometry: GemmGeometry, weight: WeightStorage, v4: boolean): string =>
   skeleton(
@@ -2539,13 +2699,15 @@ ${fillBConv3d(geometry, v4)}`,
   );
 
 /**
- * op 別の解決（conv1d / conv2d / conv3d = m タイル / 融合 attention = 既定固定 / 残り 3 op = 行数バケット）。
- * 明示の幾何（{@link GemmSpec} の `geometry` — matmul / bmm / linear / attention_qk / attention_pv /
- * conv2d だけが取る）があれば、その 6 op ではそれを先に採る。
+ * Per-op resolution (conv1d / conv2d / conv3d = m tile / fused attention = fixed default / the other
+ * 3 ops = row-count bucket).
+ * If there is an explicit geometry (`geometry` of {@link GemmSpec} — taken only by matmul / bmm /
+ * linear / attention_qk / attention_pv / conv2d), those 6 ops take it first.
  */
 const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
-  // MUST: 明示は op 別の解決より先に見る。キー側（`gemmKeyPart` / conv2d の `conv2dIgemmKey`）も
-  // 同じ優先順で解くので、片方だけ明示を読み落とすとキーと生成物の幾何が食い違う。
+  // MUST: look at the explicit value before the per-op resolution. The key side (`gemmKeyPart` /
+  // conv2d's `conv2dIgemmKey`) resolves in the same order, so missing the explicit value on one side
+  // makes the key's and the generated code's geometry disagree.
   switch (spec.op) {
     case "conv1d":
     case "conv3d":
@@ -2555,27 +2717,31 @@ const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
     case "attention_qk":
     case "attention_pv":
       return spec.geometry ?? defaultGemmGeometry();
-    // states 形 ①ₜ / ③ₜ は**行数バケットを通す**（融合 attention が通さないのは Anima の
-    // 実測選定を動かさないためで、states 形にはその前提が無い — 実効 M は chunk 行数そのもの）。
+    // States-shaped ①ₜ / ③ₜ **go through the row-count bucket** (fused attention does not, so as
+    // not to move the measured choice on Anima; states-shaped attention has no such premise — the
+    // effective M is the chunk row count itself).
     case "attention_state_qk":
     case "attention_state_pv":
       return gemmGeometryForRows(spec.rows);
-    // matmul / bmm / linear（行数バケット）
+    // matmul / bmm / linear (row-count bucket)
     default:
       return spec.geometry ?? rowsGeometry(spec.rows);
   }
 };
 
 /**
- * 生成入力 1 つから WGSL 1 本。同じ入力からは常にバイト単位で同じ文字列が出る。
+ * One WGSL shader from one generation input. The same input always yields byte-identical text.
  *
- * タイル幾何を解決する**唯一の点**（conv1d / conv2d / conv3d は {@link gemmMTileGeometry}・matmul / bmm / linear は
- * 行数バケット {@link rowsGeometry}・融合 attention は {@link defaultGemmGeometry}）で、門
- * （{@link assertGemmGeometry}）もここ 1 箇所。断片は幾何を受け取って流すだけなので、既定を
- * 差し替えたときの影響がこの関数に閉じる。
- * `spec.geometry`（明示）は Session の導出相が adapter のプロファイルから引いた値か、計測
- * （tools/geometry-sweep）の候補で、どちらも実行時オートチューンではない — 選択は shape × adapter の
- * 静的な表で、ADR 0022 の MUST（実行中に測って選び直さない）は不変（DECIDED: ADR 0115）。
+ * The **only point** that resolves the tile geometry ({@link gemmMTileGeometry} for conv1d / conv2d
+ * / conv3d, the row-count bucket {@link rowsGeometry} for matmul / bmm / linear,
+ * {@link defaultGemmGeometry} for fused attention), and the guard ({@link assertGemmGeometry}) is
+ * also in this one place. The fragments only receive the geometry and pass it on, so the effect of
+ * replacing the default is confined to this function.
+ * `spec.geometry` (explicit) is either the value the Session's derivation phase looked up in the
+ * adapter's profile or a candidate in measurement (tools/geometry-sweep (removed in 0.15); now
+ * `runGeometrySweep` of `@karume/runtime/tune`); neither is run-time autotuning — the selection is a
+ * static table of shape × adapter, and ADR 0022's MUST (do not measure and re-choose during
+ * execution) is unchanged (DECIDED: ADR 0115).
  */
 export const gemmWgsl = (spec: GemmSpec): string => {
   const geometry = resolveGeometry(spec);
@@ -2587,8 +2753,9 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       if (spec.weight === "i2") {
         throw new CodegenError("conv1d: 重み i2 格納は未対応（ADR 0097）");
       }
-      // MUST: group 長の log2 は i4 と 1 対 1（linear と同文 — 欠けたまま生成すると scale 添字が
-      // 壊れた WGSL が出る・i4 以外に付くのは呼び出し側の結線バグ）。
+      // MUST: the log2 of the group length is one-to-one with i4 (same as linear — generating
+      // without it emits WGSL with a broken scale index; having it on anything other than i4 is a
+      // wiring bug in the caller).
       if ((spec.weight === "i4") !== (spec.weightGroupShift !== undefined)) {
         throw new CodegenError(
           `conv1d igemm: weightGroupShift は重み i4 格納と対で渡す（weight=${spec.weight} / shift=${spec.weightGroupShift}）`,
@@ -2599,9 +2766,10 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       if (spec.weight === "i2") {
         throw new CodegenError("conv2d: 重み i2 格納は未対応（ADR 0097）");
       }
-      // MUST: conv2d に i4 の実行経路は無い（ADR 0069 決定 5 の追補は conv1d まで）。A 側の
-      // 展開器は 1D / 2D で共有なので**生成が通ってしまう** — 適格判定（plan.ts）が閉じている
-      // 前提に乗らず、生成の入口でも落とす（直呼び経路の沈黙誤値を塞ぐ）。
+      // MUST: conv2d has no i4 execution path (the supplement to ADR 0069 decision 5 reaches only
+      // conv1d). The A-side unroller is shared by 1D / 2D, so **generation would go through** —
+      // instead of relying on the eligibility check (plan.ts) being closed, it is also rejected at
+      // the generation entry point (closing the silent wrong value of a direct call).
       if (spec.weight === "i4" || spec.weightGroupShift !== undefined) {
         throw new CodegenError(
           "conv2d: 重み i4 格納は未実装 — i4 の実行経路は linear / embedding / conv1d(groups==1) だけ（ADR 0069 決定 5）",
@@ -2612,8 +2780,9 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       if (spec.weight === "i2") {
         throw new CodegenError("conv3d: 重み i2 格納は未対応（ADR 0097）");
       }
-      // MUST: conv3d に i4 の実行経路は無い（ADR 0069 決定 5 の追補は conv1d まで）。A 側の展開器は
-      // 1D / 2D / 3D で共有なので生成が通ってしまう — conv2d と同じく生成の入口でも落とす。
+      // MUST: conv3d has no i4 execution path (the supplement to ADR 0069 decision 5 reaches only
+      // conv1d). The A-side unroller is shared by 1D / 2D / 3D, so generation would go through — as
+      // with conv2d, it is also rejected at the generation entry point.
       if (spec.weight === "i4" || spec.weightGroupShift !== undefined) {
         throw new CodegenError(
           "conv3d: 重み i4 格納は未実装 — i4 の実行経路は linear / embedding / conv1d(groups==1) だけ（ADR 0069 決定 5）",
@@ -2644,25 +2813,28 @@ export const gemmWgsl = (spec: GemmSpec): string => {
 };
 
 /**
- * states 形 ①ₜ の WGSL（{@link gemmWgsl} の states 枝への薄い面 — attention.ts の
- * `attentionQkWgsl` と同じ役回り）。
+ * The WGSL of states-shaped ①ₜ (a thin entry point to the states branch of {@link gemmWgsl} — the
+ * same role as `attentionQkWgsl` in attention.ts).
  *
- * MUST: `chunkRows` はキー（src/kernels/state-attention.ts の `stateQkTiledKey`）と dispatch
- * （同 `stateQkTiledWorkgroups`）へ渡すものと**同じ値**。3 者とも `gemmGeometryForRows` の
- * 1 純関数を通るので、値が同じなら幾何は必ず一致する。
- * NOTE: 生成が gemm.ts 側に居るのは骨格の断片を所有するのがこのファイルだから（キー・
- * workgroup 算出・切替条件は state-attention.ts が持つ）。逆向きの import は作らない。
+ * MUST: `chunkRows` is **the same value** as the one passed to the key (`stateQkTiledKey` in
+ * src/kernels/state-attention.ts) and the dispatch (`stateQkTiledWorkgroups` in the same file). All
+ * 3 go through the one pure function `gemmGeometryForRows`, so with the same value the geometry
+ * always matches.
+ * NOTE: generation lives on the gemm.ts side because this file owns the skeleton's fragments (key,
+ * workgroup computation and switching condition are held by state-attention.ts). No import in the
+ * reverse direction is made.
  */
 export const stateQkTiledWgsl = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
   gemmWgsl({ op: "attention_state_qk", sliding, gqa, rows: chunkRows });
 
 /**
- * states 形 ③ₜ の WGSL（{@link gemmWgsl} の states 枝への薄い面 — {@link stateQkTiledWgsl} と
- * 同じ役回り）。
+ * The WGSL of states-shaped ③ₜ (a thin entry point to the states branch of {@link gemmWgsl} — the
+ * same role as {@link stateQkTiledWgsl}).
  *
- * MUST: `chunkRows` はキー（src/kernels/state-attention.ts の `statePvTiledKey`）と dispatch
- * （同 `statePvTiledWorkgroups`）へ渡すものと**同じ値**。3 者とも `gemmGeometryForRows` の
- * 1 純関数を通るので、値が同じなら幾何は必ず一致する。
+ * MUST: `chunkRows` is **the same value** as the one passed to the key (`statePvTiledKey` in
+ * src/kernels/state-attention.ts) and the dispatch (`statePvTiledWorkgroups` in the same file). All
+ * 3 go through the one pure function `gemmGeometryForRows`, so with the same value the geometry
+ * always matches.
  */
 export const statePvTiledWgsl = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
   gemmWgsl({ op: "attention_state_pv", sliding, gqa, rows: chunkRows });

@@ -1,4 +1,4 @@
-// karume deform_conv2d (DCNv2: x[B,Cin,H,W] * W[Cout,Cin,Kh,Kw] + b[Cout], f32, 直接畳み込み)
+// karume deform_conv2d (DCNv2: x[B,Cin,H,W] * W[Cout,Cin,Kh,Kw] + b[Cout], f32, direct convolution)
 struct Dims {
   n: u32,
   batch: u32,
@@ -22,18 +22,20 @@ struct Dims {
 @group(0) @binding(5) var<storage, read> bias: array<f32>;
 @group(0) @binding(6) var<storage, read_write> out: array<f32>;
 
-// NaN のビット列判定（ADR 0020）— 指数部が全 1 かつ仮数部が非 0。比較演算に寄せると
-// ドライバの畳み込みで判定ごと消える。
+// NaN test on the bit pattern (ADR 0020) — exponent all ones and mantissa non-zero. Expressed with
+// comparisons, the test disappears entirely under the driver's constant folding.
 fn is_nan_bits(x: f32) -> bool {
   return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
 }
 
-// 入力平面 `plane` の双線形サンプル。範囲外はゼロ埋め（4 隅個別）・NaN は伝播。
+// bilinear sample of the input plane `plane`. Out of range is zero padding (per corner); NaN
+// propagates.
 fn deform_sample(plane: u32, sy: f32, sx: f32) -> f32 {
   if (is_nan_bits(sy) || is_nan_bits(sx)) {
     return bitcast<f32>(dims.oob);
   }
-  // 正の形の範囲判定。これを通れば floor(sy) は [-1, H-1] なので i32 変換は必ず定義される。
+  // range test in the positive form. Past it, floor(sy) is in [-1, H-1], so the i32 conversion is
+  // always defined.
   let inside = sy > -1.0 && sy < f32(dims.height_in)
     && sx > -1.0 && sx < f32(dims.width_in);
   if (!inside) {
@@ -71,7 +73,7 @@ fn deform_sample(plane: u32, sy: f32, sx: f32) -> f32 {
       v11 = x[row + u32(x0 + 1)];
     }
   }
-  // 重みと加算順は torchvision 逐語（w1*v1 + w2*v2 + w3*v3 + w4*v4）。
+  // weights and addition order follow torchvision verbatim (w1*v1 + w2*v2 + w3*v3 + w4*v4).
   return ly0 * lx0 * v00 + ly0 * lx1 * v01 + ly1 * lx0 * v10 + ly1 * lx1 * v11;
 }
 
@@ -93,10 +95,12 @@ fn main(
     let pixel = rest % plane_out;
     let oy = pixel / dims.width_out;
     let ox = pixel % dims.width_out;
-    // 入力側の基準位置は符号付き（padding ぶん負に出る）。stride / dilation は 1 固定。
+    // the reference position on the input side is signed (it goes negative by the padding).
+    // stride / dilation are fixed at 1.
     let origin_y = i32(oy) - i32(dims.padding_h);
     let origin_x = i32(ox) - i32(dims.padding_w);
-    // offset / mask は B と出力画素で引く（offset_groups == 1 なのでグループ軸は無い）。
+    // offset / mask are indexed by B and the output pixel (offset_groups == 1, so there is no
+    // group axis).
     let offset_base = b * 2u * taps * plane_out + pixel;
     let mask_base = b * taps * plane_out + pixel;
     var acc = bias[oc];
@@ -106,7 +110,7 @@ fn main(
       for (var kh = 0u; kh < dims.kernel_h; kh = kh + 1u) {
         for (var kw = 0u; kw < dims.kernel_w; kw = kw + 1u) {
           let tap = kh * dims.kernel_w + kw;
-          // 偶数チャネル = y / 奇数チャネル = x
+          // even channel = y / odd channel = x
           let sy = f32(origin_y + i32(kh)) + offsets[offset_base + 2u * tap * plane_out];
           let sx = f32(origin_x + i32(kw)) + offsets[offset_base + (2u * tap + 1u) * plane_out];
           let m = modulator[mask_base + tap * plane_out];

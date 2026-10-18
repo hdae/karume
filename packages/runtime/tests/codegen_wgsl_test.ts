@@ -2452,8 +2452,8 @@ const undoGqa = (text: string, side: "k" | "v", mapped: string, plain: string): 
     .filter(
       (line) =>
         line !== "  kv_repeat: u32," &&
-        !line.includes("GQA（ADR 0067 決定 2）") &&
-        !line.includes("q / S / O / 行統計は q-head のまま"),
+        !line.includes("GQA (ADR 0067 decision 2)") &&
+        !line.includes("q / S / O / row statistics stay on the q-head"),
     )
     .map((line) => (line === mapped ? plain : line))
     .join("\n")
@@ -4140,7 +4140,7 @@ test("w=f16 変種は重みだけを array<u32> + unpack2x16float で読み、�
     assertEquals(f16Wgsl.includes("enable f16"), false, where);
     // MUST: 読み出しは f32 変種と**同じ添字式**を展開関数に渡す（平坦添字の偶奇で対を選ぶ）
     let rewound = f16Wgsl
-      .replace(/\/\/ f16 格納の展開:[\s\S]*?\n}\n\n/, "")
+      .replace(/\/\/ decode of f16 storage:[\s\S]*?\n}\n\n/, "")
       .replace(`read> ${name}: array<u32>;`, `read> ${name}: array<f32>;`);
     for (const index of indices) {
       assertEquals(f32Wgsl.includes(`${name}[${index}]`), true, `${where}: f32 変種の読み出し`);
@@ -4208,9 +4208,9 @@ test("linear の v4 変種は重みを quad 展開で読み、他は f32 v4 変�
   ] as const) {
     let rewound = wgsl
       .replace(/\n@group\(0\) @binding\(5\) var<storage, read> wscale: array<f32>;\n/, "")
-      .replace(/\/\/ (f16|i8) 格納の quad 展開:[\s\S]*?\n}\n\n/, "")
+      .replace(/\/\/ quad decode of (f16|i8) storage:[\s\S]*?\n}\n\n/, "")
       .replaceAll(
-        /\n {2}\/\/ 出力チャネルの scale はループ不変[\s\S]*?\n {2}let wscale_v\d* = wscale\[min\(wcol\d, dims\.n - 1u\)\];/g,
+        /\n {2}\/\/ the output channel's scale is loop-invariant[\s\S]*?\n {2}let wscale_v\d* = wscale\[min\(wcol\d, dims\.n - 1u\)\];/g,
         "",
       )
       .replace("read> w: array<u32>;", "read> w: array<vec4<f32>>;");

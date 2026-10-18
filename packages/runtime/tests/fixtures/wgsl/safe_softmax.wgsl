@@ -1,4 +1,4 @@
-// karume safe_softmax (last dim, f32, safe-softmax: exp(x - amax), 行 max が -inf の行は全 0)
+// karume safe_softmax (last dim, f32, safe-softmax: exp(x - amax), rows whose max is -inf are all 0)
 struct Params {
   rows: u32,
   dim: u32,
@@ -31,7 +31,7 @@ fn main(
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 行の最大値（safe-softmax の減算項 — identity は -inf）
+    // ① row maximum (the subtrahend of safe-softmax — identity is -inf)
     var hi = neg_inf;
     var i = lid;
     while (i < dim) {
@@ -49,13 +49,14 @@ fn main(
       stride = stride / 2u;
     }
     let row_max = scratch[0u];
-    // 全要素 -inf の行（torch のガードが 0 を返す行）— 減算項を 0 にして NaN を作らない
+    // a row of all -inf (the row torch's guard returns 0 for) — the subtrahend becomes 0 so no
+    // NaN is made
     let empty = row_max == neg_inf;
     let amax = select(row_max, 0.0, empty);
-    // scratch の読み終わりを揃えてから ② で上書きする
+    // make every read of scratch finish before ② overwrites it
     workgroupBarrier();
 
-    // ② Σ exp(x - amax)（最大要素が exp(0) = 1 を出すので分母は必ず 1 以上）
+    // ② Σ exp(x - amax) (the largest element yields exp(0) = 1, so the denominator is always ≥ 1)
     var acc = 0.0;
     var j = lid;
     while (j < dim) {
@@ -73,10 +74,11 @@ fn main(
       stride2 = stride2 / 2u;
     }
     let inv = 1.0 / scratch[0u];
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // make every read of scratch[0] finish before the next row overwrites scratch[lid]
     workgroupBarrier();
 
-    // ③ 書き出し（exp は ② と同じ引数 — 同じ値が返るので決定的）
+    // ③ write-out (exp takes the same argument as in ② — it returns the same value, so it is
+    // deterministic)
     var o = lid;
     while (o < dim) {
       out[base + o] = select(exp(x[base + o] - amax) * inv, 0.0, empty);

@@ -18,8 +18,9 @@ struct Dims {
 
 @group(0) @binding(5) var<storage, read> wscale: array<f32>;
 
-// i4 格納の quad 展開: 要素 i..i+3 = 同一語内の 2 バイト（i は 4 の倍数 — 語も group も跨がない）
-// 復元は f32(i32(u) − 8) · scale の成分ごと f32 乗算（CPU 展開 format/i4.ts と同一の丸め）
+// quad decode of i4 storage: elements i..i+3 = two bytes of the same word (i is a multiple of 4 —
+// crosses neither a word nor a group); restored as f32(i32(u) − 8) · scale with a per-component f32
+// multiply (the same rounding as the CPU decode in format/i4.ts)
 fn dequant4(i: u32, scale: f32) -> vec4<f32> {
   let bytes = unpack4xU8(w[i >> 3u]);
   let b0 = bytes[(i >> 1u) & 3u];
@@ -32,9 +33,9 @@ fn dequant4(i: u32, scale: f32) -> vec4<f32> {
   ) * scale;
 }
 
-// Xcol[k][n] = x[b, ic, n·stride − padding + k·dilation]（範囲外は 0）。
-// kt = k·dilation − padding は K タイル内で不変なので呼び出し側が畳んで渡す。
-// xc = b·Cin + ic（バッチは dispatch の z 軸なので呼び出し側で足す）
+// Xcol[k][n] = x[b, ic, n·stride − padding + k·dilation] (0 out of range).
+// kt = k·dilation − padding is invariant within the K tile, so the caller folds it and passes it in.
+// xc = b·Cin + ic (the batch is the dispatch's z axis, so the caller adds it)
 fn xcol(xc: u32, kt: i32, n: u32) -> f32 {
   let ix = i32(n * dims.stride) + kt;
   if (ix < 0 || u32(ix) >= dims.length_in) {
@@ -43,8 +44,8 @@ fn xcol(xc: u32, kt: i32, n: u32) -> f32 {
   return x[xc * dims.length_in + u32(ix)];
 }
 
-// 共有 A タイル（32 行 × K 16・スカラ格納）と
-// 共有 B タイル（K 16 × 列 quad 32・列方向を vec4 に束ねた形）
+// Shared A tile (32 rows × K 16, scalar storage) and
+// shared B tile (K 16 × 32 column quads, column direction grouped into vec4)
 var<workgroup> sa: array<f32, 512>;
 var<workgroup> sb: array<vec4<f32>, 512>;
 
@@ -55,7 +56,7 @@ fn main(
 ) {
   let tid = lid.y * 16u + lid.x;
   let n4 = dims.n / 4u;
-  // A タイルの担当（32 行 × 4 quad を 64 スレッドで 2 巡）
+  // A tile assignment (32 rows × 4 quads over 64 threads in 2 rounds)
   let ar = tid / 4u;
   let aq = tid % 4u;
   let arow0 = wid.y * 32u + ar;
@@ -64,10 +65,10 @@ fn main(
   let arow1 = arow0 + 16u;
   let arow_base1 = arow_base0 + 16u * dims.k;
   let sa_base1 = sa_base0 + 256u;
-  // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチの出力平面 [Cout, Lout]）
+  // The batch is uniform per workgroup (one z index = the output plane [Cout, Lout] of one batch)
   let xbase = wid.z * dims.channels_in;
   let cbase = wid.z * dims.m * n4;
-  // B タイルの担当（K 16 行 × 列 quad 32 を 64 スレッドで 8 巡）
+  // B tile assignment (K 16 rows × 32 column quads over 64 threads in 8 rounds)
   let bk0 = tid / 32u;
   let bcq = tid % 32u;
   let bc4 = wid.x * 32u + bcq;
@@ -78,8 +79,8 @@ fn main(
   let bk5 = bk0 + 10u;
   let bk6 = bk0 + 12u;
   let bk7 = bk0 + 14u;
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner workgroupBarrier
+  // to meet WGSL's uniformity requirement
   let tiles = (dims.k + 15u) / 16u;
   let bias0 = wid.y * 32u + lid.y * 8u;
   var acc0_0 = vec4<f32>(bias[min(bias0, dims.m - 1u)]);
@@ -99,7 +100,8 @@ fn main(
   var acc7_0 = vec4<f32>(bias[min(bias0 + 7u, dims.m - 1u)]);
   var acc7_1 = vec4<f32>(bias[min(bias0 + 7u, dims.m - 1u)]);
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める。内積に寄与しないので K 端数でも結果は変わらない
+    // Fill out-of-range entries with 0. They do not contribute to the inner product, so a K
+    // remainder gives the same result
     let ak0 = t * 16u + aq * 4u;
     var av0 = vec4<f32>(0.0);
     if (arow0 < dims.m && ak0 < dims.k) {
@@ -125,14 +127,15 @@ fn main(
       let ic = brow0 / dims.kernel;
       let kt = i32((brow0 % dims.kernel) * dims.dilation) - i32(dims.padding);
       let xc = xbase + ic;
-      // quad の 4 列は連続する ox（v4 の条件 stride == 1）なので x 側も連続に読める
+      // The 4 columns of the quad are contiguous ox (the v4 condition stride == 1), so x can be
+      // read contiguously too
       let n0 = bc4 * 4u;
       let ix0 = i32(n0 * dims.stride) + kt;
       if (ix0 >= 0 && u32(ix0) + 3u < dims.length_in) {
         let base = xc * dims.length_in + u32(ix0);
         bv4_0 = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
       } else {
-        // 系列端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        // Only sequence edges and the padding area come here (0 out of range — the MUST of xcol)
         bv4_0 = vec4<f32>(
           xcol(xc, kt, n0),
           xcol(xc, kt, n0 + 1u),
@@ -148,14 +151,15 @@ fn main(
       let ic = brow1 / dims.kernel;
       let kt = i32((brow1 % dims.kernel) * dims.dilation) - i32(dims.padding);
       let xc = xbase + ic;
-      // quad の 4 列は連続する ox（v4 の条件 stride == 1）なので x 側も連続に読める
+      // The 4 columns of the quad are contiguous ox (the v4 condition stride == 1), so x can be
+      // read contiguously too
       let n0 = bc4 * 4u;
       let ix0 = i32(n0 * dims.stride) + kt;
       if (ix0 >= 0 && u32(ix0) + 3u < dims.length_in) {
         let base = xc * dims.length_in + u32(ix0);
         bv4_1 = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
       } else {
-        // 系列端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        // Only sequence edges and the padding area come here (0 out of range — the MUST of xcol)
         bv4_1 = vec4<f32>(
           xcol(xc, kt, n0),
           xcol(xc, kt, n0 + 1u),
@@ -171,14 +175,15 @@ fn main(
       let ic = brow2 / dims.kernel;
       let kt = i32((brow2 % dims.kernel) * dims.dilation) - i32(dims.padding);
       let xc = xbase + ic;
-      // quad の 4 列は連続する ox（v4 の条件 stride == 1）なので x 側も連続に読める
+      // The 4 columns of the quad are contiguous ox (the v4 condition stride == 1), so x can be
+      // read contiguously too
       let n0 = bc4 * 4u;
       let ix0 = i32(n0 * dims.stride) + kt;
       if (ix0 >= 0 && u32(ix0) + 3u < dims.length_in) {
         let base = xc * dims.length_in + u32(ix0);
         bv4_2 = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
       } else {
-        // 系列端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        // Only sequence edges and the padding area come here (0 out of range — the MUST of xcol)
         bv4_2 = vec4<f32>(
           xcol(xc, kt, n0),
           xcol(xc, kt, n0 + 1u),
@@ -194,14 +199,15 @@ fn main(
       let ic = brow3 / dims.kernel;
       let kt = i32((brow3 % dims.kernel) * dims.dilation) - i32(dims.padding);
       let xc = xbase + ic;
-      // quad の 4 列は連続する ox（v4 の条件 stride == 1）なので x 側も連続に読める
+      // The 4 columns of the quad are contiguous ox (the v4 condition stride == 1), so x can be
+      // read contiguously too
       let n0 = bc4 * 4u;
       let ix0 = i32(n0 * dims.stride) + kt;
       if (ix0 >= 0 && u32(ix0) + 3u < dims.length_in) {
         let base = xc * dims.length_in + u32(ix0);
         bv4_3 = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
       } else {
-        // 系列端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        // Only sequence edges and the padding area come here (0 out of range — the MUST of xcol)
         bv4_3 = vec4<f32>(
           xcol(xc, kt, n0),
           xcol(xc, kt, n0 + 1u),
@@ -217,14 +223,15 @@ fn main(
       let ic = brow4 / dims.kernel;
       let kt = i32((brow4 % dims.kernel) * dims.dilation) - i32(dims.padding);
       let xc = xbase + ic;
-      // quad の 4 列は連続する ox（v4 の条件 stride == 1）なので x 側も連続に読める
+      // The 4 columns of the quad are contiguous ox (the v4 condition stride == 1), so x can be
+      // read contiguously too
       let n0 = bc4 * 4u;
       let ix0 = i32(n0 * dims.stride) + kt;
       if (ix0 >= 0 && u32(ix0) + 3u < dims.length_in) {
         let base = xc * dims.length_in + u32(ix0);
         bv4_4 = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
       } else {
-        // 系列端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        // Only sequence edges and the padding area come here (0 out of range — the MUST of xcol)
         bv4_4 = vec4<f32>(
           xcol(xc, kt, n0),
           xcol(xc, kt, n0 + 1u),
@@ -240,14 +247,15 @@ fn main(
       let ic = brow5 / dims.kernel;
       let kt = i32((brow5 % dims.kernel) * dims.dilation) - i32(dims.padding);
       let xc = xbase + ic;
-      // quad の 4 列は連続する ox（v4 の条件 stride == 1）なので x 側も連続に読める
+      // The 4 columns of the quad are contiguous ox (the v4 condition stride == 1), so x can be
+      // read contiguously too
       let n0 = bc4 * 4u;
       let ix0 = i32(n0 * dims.stride) + kt;
       if (ix0 >= 0 && u32(ix0) + 3u < dims.length_in) {
         let base = xc * dims.length_in + u32(ix0);
         bv4_5 = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
       } else {
-        // 系列端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        // Only sequence edges and the padding area come here (0 out of range — the MUST of xcol)
         bv4_5 = vec4<f32>(
           xcol(xc, kt, n0),
           xcol(xc, kt, n0 + 1u),
@@ -263,14 +271,15 @@ fn main(
       let ic = brow6 / dims.kernel;
       let kt = i32((brow6 % dims.kernel) * dims.dilation) - i32(dims.padding);
       let xc = xbase + ic;
-      // quad の 4 列は連続する ox（v4 の条件 stride == 1）なので x 側も連続に読める
+      // The 4 columns of the quad are contiguous ox (the v4 condition stride == 1), so x can be
+      // read contiguously too
       let n0 = bc4 * 4u;
       let ix0 = i32(n0 * dims.stride) + kt;
       if (ix0 >= 0 && u32(ix0) + 3u < dims.length_in) {
         let base = xc * dims.length_in + u32(ix0);
         bv4_6 = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
       } else {
-        // 系列端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        // Only sequence edges and the padding area come here (0 out of range — the MUST of xcol)
         bv4_6 = vec4<f32>(
           xcol(xc, kt, n0),
           xcol(xc, kt, n0 + 1u),
@@ -286,14 +295,15 @@ fn main(
       let ic = brow7 / dims.kernel;
       let kt = i32((brow7 % dims.kernel) * dims.dilation) - i32(dims.padding);
       let xc = xbase + ic;
-      // quad の 4 列は連続する ox（v4 の条件 stride == 1）なので x 側も連続に読める
+      // The 4 columns of the quad are contiguous ox (the v4 condition stride == 1), so x can be
+      // read contiguously too
       let n0 = bc4 * 4u;
       let ix0 = i32(n0 * dims.stride) + kt;
       if (ix0 >= 0 && u32(ix0) + 3u < dims.length_in) {
         let base = xc * dims.length_in + u32(ix0);
         bv4_7 = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
       } else {
-        // 系列端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        // Only sequence edges and the padding area come here (0 out of range — the MUST of xcol)
         bv4_7 = vec4<f32>(
           xcol(xc, kt, n0),
           xcol(xc, kt, n0 + 1u),
@@ -304,9 +314,9 @@ fn main(
     }
     sb[bk7 * 32u + bcq] = bv4_7;
     workgroupBarrier();
-    // 共有ロード 10 回（B の vec4 2 + A のスカラ 8）で 64 MAC。
-    // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
-    // 完全に一致する。
+    // 10 shared loads (2 vec4 of B + 8 scalars of A) give 64 MACs.
+    // The reduction is sequential in ascending k, and the addition order per output element matches
+    // the 16×16 kernel with 1 output per thread exactly.
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
       let bv0 = sb[kk * 32u + lid.x * 2u];
       let bv1 = sb[kk * 32u + lid.x * 2u + 1u];

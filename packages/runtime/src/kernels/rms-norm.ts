@@ -1,30 +1,35 @@
 /**
- * rms_norm（最終次元・weight のみ、f32）のカーネル（ADR 0017）。
+ * The kernel of rms_norm (last dimension, weight only, f32) (ADR 0017).
  * `out[r, i] = x[r, i] · rsqrt(mean_r(x²) + eps) · weight[i]`
  *
- * 入力は先行次元を平坦化した `[rows, dim]` の連続レイアウトとして扱う（契約は最終次元の
- * 正規化のみ — src/ops.ts）。
+ * The input is treated as a contiguous `[rows, dim]` layout with the leading dimensions flattened
+ * (the contract is normalisation over the last dimension only — src/ops.ts).
  *
- * ## layer_norm との差（MUST）
+ * ## Difference from layer_norm (MUST)
  *
- * **平均を引かない**。layer_norm が「2 パス（平均 → 偏差平方和）」を強いられていたのは
- * 母分散の桁落ちを避けるためで、rms_norm の縮約は**二乗和 1 本**なので 1 パスで足りる
- * （`E[x²] − E[x]²` のような相殺が構造的に起きない）。bias も無い — ADR 0017 の arity 2
- * （x と weight の 2 入力）の契約による。
+ * **The mean is not subtracted**. layer_norm is forced into "two passes (mean → sum of squared
+ * deviations)" to avoid cancellation in the population variance; rms_norm's reduction is **a
+ * single sum of squares**, so one pass suffices (no cancellation like `E[x²] − E[x]²` can arise
+ * structurally). There is no bias either — by ADR 0017's arity-2 contract (two inputs, x and
+ * weight).
  *
- * ## 走査と加算順序
+ * ## Scan and addition order
  *
- * 1 行 = 1 workgroup（dim ≤ 128 は 128、それ以外は 256 スレッド）の木構造縮約で、
- * 行方向は reduce.ts / layer-norm.ts と同じ grid-stride。行数が dispatch 上限（仕様既定 65535）を超えても縮退できる
- * （実測: Qwen3 の [1,512,1024] は 512 行だが、DiT の QK ノルムは head 軸ぶん行数が増える）。
+ * One row = one workgroup (128 threads for dim ≤ 128, 256 otherwise) with a tree reduction; rows
+ * use the same grid-stride as reduce.ts / layer-norm.ts, so a row count above the dispatch limit
+ * (spec default 65535) still works (measured: Qwen3's [1,512,1024] is 512 rows, but the DiT's QK
+ * norm multiplies the row count by the head axis).
  *
- * dim ≤ 128 では 256 版の上半分は二乗和 0 のみ。最初の +0 段だけを省き、
- * 下半分の加算順序と出力式を保つ（ADR 0017 追記 1）。
+ * For dim ≤ 128, the upper half of the 256 version holds only zero sums of squares. Only the first
+ * +0 stage is skipped, keeping the lower half's addition order and the output expression (ADR 0017
+ * addendum 1).
  *
- * MUST: params は uniform で渡す。行ループの中に workgroupBarrier があり、ループ条件が
- * workgroup 内で一様である必要がある（storage からのロードは一様性解析で保証されない）。
- * MUST: 逆数平方根は `inverseSqrt`（torch の `rsqrt` と同じ 1 演算）。CPU 参照は
- * `1 / Math.sqrt(…)` の別形で書く — 同じ式を写すと丸めの誤りが両側で相殺する。
+ * MUST: params are passed as a uniform. There is a workgroupBarrier inside the row loop, and the
+ * loop condition must be uniform within the workgroup (loads from storage are not proven uniform by
+ * the uniformity analysis).
+ * MUST: the reciprocal square root is `inverseSqrt` (the same single operation as torch's
+ * `rsqrt`). The CPU reference is written in the different form `1 / Math.sqrt(…)` — copying the
+ * same expression would let a rounding error cancel out on both sides.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -33,14 +38,14 @@ import { assertU32Params } from "../codegen/params.ts";
 
 export const RMS_NORM_WORKGROUP_SIZE = 256;
 
-/** MUST: WGSL を変えたらキーも上げる（異なる本文を同じキーへ混ぜない）。 */
+/** MUST: bump the key when the WGSL changes (do not mix different sources under one key). */
 export const RMS_NORM_KEY = `rms_norm:v1:f32:lastdim:wg${RMS_NORM_WORKGROUP_SIZE}`;
 
-/** 後続addの入力順。加算の左右をコード生成でも維持する。 */
+/** Input order of the following add. Code generation keeps the left / right of the addition too. */
 export type RmsNormAddOrder = "norm-residual" | "residual-norm";
 
 const rmsNormWgsl = (workgroupSize: 128 | 256, addOrder?: RmsNormAddOrder): string =>
-  `// karume rms_norm (last dim, weight only, f32, 二乗和 1 パス)
+  `// karume rms_norm (last dim, weight only, f32, sum of squares in 1 pass)
 struct Params {
   rows: u32,
   dim: u32,
@@ -68,7 +73,7 @@ fn main(
   while (row < params.rows) {
     let base = row * dim;
 
-    // 二乗和（1 パス）
+    // sum of squares (1 pass)
     var acc = 0.0;
     var i = lid;
     while (i < dim) {
@@ -87,7 +92,7 @@ fn main(
       stride = stride / 2u;
     }
     let inv = inverseSqrt(scratch[0u] * scale + params.eps);
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // make every read of scratch[0] finish before the next row overwrites scratch[lid]
     workgroupBarrier();
 
     var o = lid;
@@ -106,17 +111,19 @@ fn main(
 }
 `;
 
-// 256 版は既存の本文とキーを維持する。WGSL の純粋な生成だけで GPU には触れない。
+// The 256 version keeps its existing source and key. This is pure WGSL generation; no GPU work.
 export const RMS_NORM_WGSL: string = rmsNormWgsl(RMS_NORM_WORKGROUP_SIZE);
 export const RMS_NORM_128_KEY = "rms_norm:v1:f32:lastdim:wg128";
 export const RMS_NORM_128_WGSL: string = rmsNormWgsl(128);
 
 /**
- * 任意指定のRMS→add融合（DECIDED: docs/decisions/0099-rms-norm-add-fusion.md）。
- * 直接つなぐと最後の乗算とaddが融合し丸めが変わるため、uniformの0との整数XORを挟む。
- * この値はrmsNormParamsの第4語（0）。定数式のbitcast往復に簡略化しないこと。
- * 実測では参照と一致するが、WGSLは全バックエンドのビット同一を保証しない。
- * workgroup内の縮約とgrid-strideは単体RMSと共有し、公開の既定経路は変更しない。
+ * Opt-in RMS → add fusion (DECIDED: docs/decisions/0099-rms-norm-add-fusion.md).
+ * Connected directly, the last multiply and the add fuse and the rounding changes, so an integer
+ * XOR with a uniform 0 is inserted. The value is the fourth word of rmsNormParams (0). Do not
+ * simplify it into a constant-expression bitcast round trip.
+ * It matches the reference in measurement, but WGSL does not guarantee bit identity on every
+ * backend. The workgroup reduction and the grid-stride are shared with the standalone RMS, and the
+ * public default path does not change.
  */
 export const rmsNormAddWgsl = (order: RmsNormAddOrder): string => {
   assertRmsNormAddOrder(order);
@@ -135,22 +142,25 @@ const assertRmsNormAddOrder = (order: RmsNormAddOrder): void => {
 };
 
 /**
- * uniform の Params（rows / dim / eps。3 語ぶんの内容でも 16 バイト確保する — 16 バイト単位の確保は
- * プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
+ * The uniform Params (rows / dim / eps. 16 bytes are allocated even for three words of content —
+ * allocating in 16-byte units is a project convention (the fusion pass fixes the same form in ADR
+ * 0040), not a requirement of the specification).
  *
- * MUST: eps は f32 のビット列として載せる。u32 として書くと指数部が整数値に化けて、
- * 例外なしに「eps ≈ 0」で走る。
+ * MUST: eps is stored as an f32 bit pattern. Written as a u32, the exponent turns into an integer
+ * value, and it runs with "eps ≈ 0" without an exception.
  *
- * MUST: eps の値域は **f32 として**見る（layer_norm params と同じ二重の門）。f64 で有限正でも
- * `1e-50` は f32 で 0、`1e39` は `+Inf` になり、どちらも f64 のまま計算する CPU 参照と分岐する。
- * 非ゼロの subnormal も FTZ の GPU では 0 に潰れるので拒否する（判定は codegen/f32-eps.ts を共有）。
+ * MUST: the range of eps is checked **as an f32** (the same double check as layer_norm params).
+ * Even when finite and positive in f64, `1e-50` becomes 0 and `1e39` becomes `+Inf` in f32, and
+ * both diverge from the CPU reference, which computes in f64. A non-zero subnormal is also flushed
+ * to 0 on FTZ GPUs, so it is rejected (the test is shared in codegen/f32-eps.ts).
  */
 export const rmsNormParams = (rows: number, dim: number, eps: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("rms_norm params", { rows, dim });
   if (dim < 1) {
     throw new CodegenError(`rms_norm params: dim は正整数（${dim}）`);
   }
-  // 判定は op 契約（ops/attrs.ts の assertEps）と共有する — 片側だけ subnormal を通さないため。
+  // The test is shared with the op contract (assertEps in ops/attrs.ts) — so that neither side
+  // alone lets a subnormal through.
   const defect = f32EpsDefect(eps);
   if (defect !== undefined) {
     throw new CodegenError(

@@ -20,7 +20,7 @@ fn main(
     let c1 = rem % params[2u]; rem = rem / params[2u];
     let c0 = rem;
     let mask_index = c0 * params[5u] + c1 * params[6u] + c2 * params[7u] + c3 * params[8u];
-    // bool の格納は u32 の 0 / 1（ADR 0009）— 真の位置だけを埋め値に差し替える
+    // bool is stored as u32 0 / 1 (ADR 0009) — only the true positions are replaced with the fill value
     out[i] = select(x[i], fill, mask[mask_index] != 0u);
     i = i + stride;
   }

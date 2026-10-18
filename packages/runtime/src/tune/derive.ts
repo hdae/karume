@@ -1,59 +1,77 @@
 /**
- * 掃引の記録（`karume-geometry-sweep/2` — `report.ts`）から、adapter 1 種ぶんの**幾何プロファイル**
- * （runtime の `src/kernels/geometry-profile.ts` の `GeometryProfile`）を導く純関数（perf-ledger K-71）。
- * Deno の API に依らない — 公開面 `@karume/runtime/tune` の {@link deriveGeometryProfile}（利用者アプリ）・
- * CLI（`tools/geometry-sweep` の `main.ts profile`）・ブラウザのページ（`tools/gpu-lab` のプロファイルタブ）が
- * 同じ規則で表を作る（別々に持つと、ページやアプリで作った表と CLI の生成物が黙ってずれる）。リポへ登録する
- * 生成物の TS の描画は道具側（`tools/geometry-sweep/render.ts`）に置く（ADR 0117 決定 1）。
+ * Pure functions that derive one adapter's **geometry profile** (`GeometryProfile` in the runtime's
+ * `src/kernels/geometry-profile.ts`) from sweep records (`karume-geometry-sweep/2` — `report.ts`)
+ * (perf-ledger K-71). Independent of Deno's API — {@link deriveGeometryProfile} of the public
+ * surface `@karume/runtime/tune` (user applications), the CLI (`main.ts profile` of
+ * `tools/geometry-sweep`) and the browser page (the profile tab of `tools/gpu-lab`) — both tools
+ * removed in 0.15 — build tables by the same rules (kept separately, tables built by the page or an
+ * application and the CLI's output would silently drift apart). Rendering the generated TS
+ * registered in the repository lives on the tool side (`tools/geometry-sweep/render.ts`, removed in
+ * 0.15) (ADR 0117 decision 1).
  *
- * 幾何の選択は runtime では「shape × adapter の静的な表」で、実行時オートチューンは禁止のまま
- * （ADR 0022 決定 3 の MUST）。この生成器は**明示のチューニング（掃引）で測った結果を表にする側**で、
- * runtime は埋め込みの表を adapter の (vendor, architecture, description) で 1 本選ぶか、注入された表を
- * 使うだけ — acquire / Session の経路では測らない（ADR 0117 決定 9）。`match` を省いた表（`--opt-in`）は
- * 自動選択されない注入専用の表になる。利用者が自分の掃引から作った表は `acquireGpu({ geometryProfile })`
- * で注入できる（{@link geometryProfileJson}）。
+ * In the runtime, geometry selection is "a static table of shape × adapter", and run-time
+ * autotuning stays banned (the MUST NOT of the ADR 0022 addendum). This generator is **the side
+ * that turns the results measured by explicit tuning (the sweep) into a table**; the runtime only
+ * picks one embedded table by the adapter's (vendor, architecture, description), or uses an
+ * injected table — nothing is measured on the acquire / Session path (ADR 0117 decision 9). A table
+ * without `match` (`optIn`; the CLI's `--opt-in`, removed in 0.15) is an injection-only table that
+ * is never selected automatically. A table a user built from their own sweep can be injected with
+ * `acquireGpu({ geometryProfile })` ({@link geometryProfileJson}).
  *
- * ## 規則の導出
+ * ## Deriving the rules
  *
- * プロファイルの欄 1 つ（= クラス）ごとに、そのクラスの**全ケース**で「出力が既定と一致
- * （`identicalToDefault`）」かつ「既定比（`speedupVsDefault`）≥ `--min-speedup`」を満たす幾何のうち、
- * ケース間の幾何平均が最大のものを採る。無ければ既定（掃引の既定の行の幾何）を書く。
+ * For each profile field (= class), among the geometries that satisfy, in **every case** of that
+ * class, "the output matches the default (`identicalToDefault`)" and "the ratio to the default
+ * (`speedupVsDefault`) ≥ `minSpeedup` (the CLI's `--min-speedup`, removed in 0.15)", the one with
+ * the largest geometric mean across the cases is taken. If there is none, the default (the geometry
+ * of the sweep's default row) is written.
  *
- * - 全ケースで勝つことを要求するのは、1 ケースの大勝ちで別のケースの退行を覆い隠さないため
- *   （クラスの幾何はそのクラスの全 shape に効く）。
- * - 平均を幾何平均にするのは、比の平均だから（×2 と ×0.5 の算術平均は ×1.25 になり、勝ち負けが
- *   相殺されない）。
- * - 出力の一致を門にするのは、f32 の K 縮約順が幾何に依存しないこと（ADR 0022）の実測上の裏付けが
- *   ここにしか無いから — 不一致の幾何はどれほど速くても候補にしない。
- * - 同じ (ケース, 幾何) を複数の掃引が測っていれば、比は観測の幾何平均・一致と失敗は全観測で見る
- *   （quick と full を重ねる用途 — 1 度でも不一致・失敗した幾何は採らない）。
- * - 掃引の既定の行の幾何が今の runtime の既定と違えば生成しない（fail loudly）。既定比は既定の行に
- *   対する比なので、土台が今の既定と別物なら「既定より速い」が今の runtime では成り立たない。
+ * - Winning in every case is required so that a big win in one case does not hide a regression in
+ *   another (a class's geometry applies to every shape of that class).
+ * - The mean is geometric because it averages ratios (the arithmetic mean of ×2 and ×0.5 is ×1.25,
+ *   and wins and losses would not cancel).
+ * - The output match is a check because this is the only measured evidence that f32's K reduction
+ *   order does not depend on the geometry (ADR 0022) — a mismatching geometry is never a candidate,
+ *   however fast.
+ * - If several sweeps measured the same (case, geometry), the ratio is the geometric mean of the
+ *   observations, and match and failure are judged over all observations (for overlaying quick and
+ *   full — a geometry that mismatched or failed even once is not taken).
+ * - If the geometry of the sweep's default row differs from the current runtime's default, nothing
+ *   is generated (fail loudly). The ratio to the default is relative to the default row, so if the
+ *   baseline differs from the current default, "faster than the default" does not hold on the
+ *   current runtime.
  *
- * 材料の門: 掃引ごとに、既定の再測定比（`cases[].defaultRepeat.driftRatio`）が
- * `DEFAULT_DRIFT_RANGE`（report.ts — 0.9〜1.1）の外か、再測定が失敗 / 無いケースは、その掃引の比の観測から
- * 外す（{@link deriveProfile}）。比の土台（既定の値）がケースの途中で動いた疑いがあり、どの幾何の既定比も
- * 信用できないから。外すのは比だけで、出力の不一致と失敗はそのケースでも判定に効く（出力の一致は正しさの
- * 門で熱に依らない）。外したケースは採否の行に全部残す。
+ * Material check: per sweep, a case whose default re-measurement ratio
+ * (`cases[].defaultRepeat.driftRatio`) is outside `DEFAULT_DRIFT_RANGE` (report.ts — 0.9–1.1), or
+ * whose re-measurement failed or is missing, is dropped from that sweep's ratio observations
+ * ({@link deriveProfile}). The ratio baseline (the default value) likely moved during the case, so
+ * no geometry's ratio to the default can be trusted. Only the ratios are dropped; output mismatches
+ * and failures still count for that case (the output match is a correctness check and does not
+ * depend on heat). Every dropped case stays in the verdict lines.
  *
- * 入力の門（ADR 0115 §4 を ADR 0117 決定 3 で改定）: GPU の timestamp で測った掃引（`gpuTiming.unit` が
- * `ns` か `deno-raw-tick`）だけを受ける。壁時計は submit → 完了の床を含み、その誤差は pass ごとに動くので
- * 記録だけから上界を出せない。timestamp の丸め（Chrome のフラグ無しの 100 µs）は掃引ごと拒まず、観測
- * （掃引 1 本の中の 1 行）ごとに比の誤差の上界 E = e(行) + e(既定の行)（e = 刻み ÷ 最小の round）を出し、
- * {@link ROUNDING_ERROR_LIMIT} を超える観測をその掃引の比の材料から外す（{@link roundingBound}）。
- * 既定の行の e が超えるケースは全観測を外す。外した観測は採否の行に E の値つきで残す。
+ * Input check (ADR 0115 §4 as amended by ADR 0117 decision 3): only sweeps measured with GPU
+ * timestamps (`gpuTiming.unit` is `ns` or `deno-raw-tick`) are accepted. Wall clock includes the
+ * submit-to-completion floor, whose error moves per pass, so no bound can be derived from the
+ * record alone. Timestamp rounding (Chrome's 100 µs without flags) does not reject a whole sweep;
+ * instead, per observation (one row in one sweep) the upper bound of the ratio's error E = e(row) +
+ * e(default row) (e = step ÷ shortest round) is computed, and observations above
+ * {@link ROUNDING_ERROR_LIMIT} are dropped from that sweep's ratio material
+ * ({@link roundingBound}). A case whose default row's e exceeds it has every observation dropped.
+ * Dropped observations stay in the verdict lines with their E.
  *
- * 記録の照合キー（ADR 0117 決定 8）: 記録が `caseSet`（ケース集合の版）・`defaultKernels`（既定の表のカーネルの
- * 指紋）・`candidateKernels`（測った候補のカーネルの指紋）を持てば、今の runtime の値と違う記録を拒む（欄の無い古い
- * 記録は今までどおり受ける）。`aborted`・
- * `startedAt`・`cases[].elapsedMs` は読まない。
+ * The record's matching keys (ADR 0117 decision 8): if a record carries `caseSet` (the case-set
+ * version), `defaultKernels` (the kernel fingerprint of the default table) and `candidateKernels`
+ * (the kernel fingerprint of the measured candidates), a record that differs from the current
+ * runtime's values is rejected (old records without the fields are accepted as before). `aborted`,
+ * `startedAt` and `cases[].elapsedMs` are not read.
  *
- * クラスの境界: linear / matmul / bmm は行数 M の段（境界は掃引の形状表の `PROFILE_GEMM_ROWS_BOUNDS` =
- * ≤ 16 / 17〜32 / 33〜64 / 65〜128 / 129〜256 / 257〜512 / > 512 — 既定の表 `GEMM_ROWS_BUCKETS` の
- * 64 / 512 / ∞ を細分した 7 段・ADR 0116）、融合 attention の ①QK / ③PV、conv2d の m タイル 64 / 32 行
- * （既定の行の tileM）、i8a8 の linear / ①QK / ③PV。掃引にケースが無いクラスは runtime の既定を
- * そのまま書く（理由を生成物のコメントに残す）。gemmRows の段の既定は、その段の範囲を覆う既定の表の
- * 段の幾何（{@link profileRowsSegments}）。
+ * Class boundaries: linear / matmul / bmm by buckets of the row count M (the boundaries are
+ * `PROFILE_GEMM_ROWS_BOUNDS` of the sweep's shape table = ≤ 16 / 17–32 / 33–64 / 65–128 / 129–256 /
+ * 257–512 / > 512 — seven buckets refining the default table `GEMM_ROWS_BUCKETS`'s 64 / 512 / ∞,
+ * ADR 0116), fused attention's ①QK / ③PV, conv2d's m tile of 64 / 32 rows (the default row's
+ * tileM), and i8a8's linear / ①QK / ③PV. A class with no case in the sweep gets the runtime's
+ * default as is (the reason is left in the generated file's comment). A gemmRows bucket's default
+ * is the geometry of the default table's bucket covering its range ({@link profileRowsSegments}).
  */
 import {
   defaultGemmGeometry,
@@ -87,21 +105,28 @@ import {
 } from "./geometries.ts";
 import { CHROME_TIMESTAMP_QUANTUM_NS, driftOutOfRange, REPORT_FORMAT } from "./report.ts";
 
-/** `--min-speedup` の既定（既定比がこれ未満の勝ちは測定の揺れと区別しない）。 */
+/**
+ * The default of `minSpeedup` (the CLI's `--min-speedup`, removed in 0.15) (a win below this ratio
+ * to the default is not told apart from measurement noise).
+ */
 export const DEFAULT_MIN_SPEEDUP = 1.05;
 
 /**
- * 観測の比の丸め誤差の上界 E のしきい値（ADR 0117 決定 3）。採用の閾値 ×1.05 の余地（5%）の 1/5、
- * 再測定比の許容幅（0.9〜1.1）の 1/10。80 ms の pass なら E は約 0.25% で、超えるのは reps の見積りが
- * 外れた短い pass だけ。規則は 1 つ — 引数にも options にもしない（除外を無効にする口も作らない）。
+ * The threshold of the rounding-error bound E of an observation's ratio (ADR 0117 decision 3). One
+ * fifth of the margin (5%) of the ×1.05 adoption threshold, one tenth of the allowed range of the
+ * re-measurement ratio (0.9–1.1). For an 80 ms pass E is about 0.25%; only short passes where the
+ * reps estimate missed exceed it. One rule — neither an argument nor an option (and no switch to
+ * disable the exclusion).
  */
 export const ROUNDING_ERROR_LIMIT = 0.01;
 
 /**
- * 表を当てる adapter（生成物の `match`）。`vendor` / `architecture` / `description` は runtime の選択と
- * 同じ文字列の完全一致で、`description` は `architecture` と組でだけ指定できる（runtime の門と同じ条件）。
- * `optIn` は `match` を省いた**注入専用**の表 — runtime は自動では選ばず、アプリが id で引いて
- * `acquireGpu({ geometryProfile })` へ渡す（ADR 0115 追記決定 7）。
+ * The adapter the table applies to (the generated `match`). `vendor` / `architecture` /
+ * `description` use exact string equality as in the runtime's selection, and `description` can be
+ * given only together with `architecture` (the same condition as the runtime's check). `optIn` is
+ * an **injection-only** table without `match` — the runtime never picks it automatically; the
+ * application looks it up by id and passes it to `acquireGpu({ geometryProfile })` (ADR 0115
+ * addendum decision 7).
  */
 export type ProfileTarget =
   | {
@@ -119,7 +144,10 @@ export type ProfileTarget =
 
 type Geometry = GemmGeometry | I8a8Geometry;
 
-/** 掃引した adapter（記録の `adapter` — `GPUAdapterInfo` の 4 欄・空文字も値のまま）。 */
+/**
+ * The swept adapter (the record's `adapter` — the four `GPUAdapterInfo` fields, empty strings kept
+ * as values).
+ */
 type SweepAdapter = {
   readonly vendor: string;
   readonly architecture: string;
@@ -127,7 +155,7 @@ type SweepAdapter = {
   readonly description: string;
 };
 
-/** 掃引の 1 行のうち生成が読む欄。 */
+/** The fields of one sweep row that generation reads. */
 type SweepObservation = {
   readonly caseId: string;
   readonly op: SweepOp;
@@ -139,38 +167,47 @@ type SweepObservation = {
   readonly identicalToDefault?: boolean;
   readonly error?: string;
   /**
-   * 計測 round ごとの pass の時間（単位は `gpuTiming.unit`・負だった round は 0 に丸めて残る — report.ts）。
-   * 丸め誤差の上界（{@link roundingBound}）だけが読む。
+   * The pass time per measurement round (unit: `gpuTiming.unit`; negative rounds stay clamped to 0
+   * — report.ts). Only the rounding-error bound ({@link roundingBound}) reads it.
    */
   readonly rounds?: readonly number[];
 };
 
-/** ケース末尾の既定の再測定（`cases[]` のうち生成が読む欄 — report.ts の `CaseSummary`）。 */
+/**
+ * The default re-measurement at the end of a case (the fields of `cases[]` that generation reads —
+ * report.ts's `CaseSummary`).
+ */
 type SweepCaseRepeat = {
   readonly caseId: string;
-  /** 再測定 ÷ 初回（`defaultRepeat.driftRatio`）。 */
+  /** Re-measurement ÷ first (`defaultRepeat.driftRatio`). */
   readonly driftRatio?: number;
-  /** 再測定の失敗（`defaultRepeatError`）。 */
+  /** The re-measurement failure (`defaultRepeatError`). */
   readonly error?: string;
 };
 
-/** 掃引の記録 1 本（unknown 境界で検査したもの）。 */
+/** One sweep record (checked at the `unknown` boundary). */
 export type SweepSource = {
-  /** 表示と再生成コマンドに載せる path（リポ直下からの相対）。 */
+  /**
+   * The path shown in the output and in the regeneration command (relative to the repository root).
+   */
   readonly path: string;
   readonly sha256: string;
   readonly date: string;
   readonly adapter: SweepAdapter;
-  /** 候補集合（`settings.candidateSet` — 欄の無い古い記録は `settings.quick` から `quick` / `full`）。 */
+  /**
+   * The candidate set (`settings.candidateSet` — old records without the field give `quick` /
+   * `full` from `settings.quick`).
+   */
   readonly candidateSet: CandidateSet;
   /**
-   * 掃引を走らせたブラウザ（記録の `userAgent` を {@link userAgentText} で文字列にしたもの — 表の
-   * `provenance.userAgent` の材料）。欄の無い記録は undefined。
+   * The browser that ran the sweep (the record's `userAgent` turned into a string by
+   * {@link userAgentText} — material for the table's `provenance.userAgent`). undefined for records
+   * without the field.
    */
   readonly userAgent?: string;
   /**
-   * timestamp の量子化の刻み q（`rounds` と同じ単位）。`gpuTiming.quantized` が true なら Chrome の 100 µs、
-   * false なら 0（丸めが無い）。
+   * The timestamp quantization step q (same unit as `rounds`). Chrome's 100 µs when
+   * `gpuTiming.quantized` is true, 0 (no rounding) when false.
    */
   readonly timestampQuantum: number;
   readonly cases: readonly SweepCaseRepeat[];
@@ -208,7 +245,10 @@ const isString = (value: unknown): value is string => typeof value === "string";
 const isPositiveInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 
-/** `rounds` の形（report.ts — 負だった round は 0 に丸めて残すので、負の値は記録の形として壊れている）。 */
+/**
+ * The shape of `rounds` (report.ts — negative rounds are kept clamped to 0, so a negative value
+ * means a broken record).
+ */
 const isRounds = (value: unknown): value is readonly number[] =>
   Array.isArray(value) &&
   value.every((entry) => typeof entry === "number" && Number.isFinite(entry) && entry >= 0);
@@ -218,7 +258,10 @@ const isSweepOp = (value: unknown): value is SweepOp =>
 
 const isI8a8Op = (op: SweepOp): boolean => op === "i8a8-linear" || op === "i8a8-attention";
 
-/** 幾何の欄（f32 族は 4 値・i8a8 族は tileK 込みの 5 値 — 族と欄の組が違えば落とす）。 */
+/**
+ * The geometry fields (4 values for the f32 family, 5 including tileK for the i8a8 family — a wrong
+ * combination of family and fields fails).
+ */
 const parseGeometryParams = (value: unknown, op: SweepOp, where: string): Geometry => {
   if (!isRecord(value)) throw new Error(`${where}: geometryParams がオブジェクトでない`);
   const keys = isI8a8Op(op)
@@ -257,8 +300,9 @@ const parseRow = (value: unknown, where: string): SweepObservation => {
   const identicalToDefault = optional(value, "identicalToDefault", isBoolean, where);
   const error = optional(value, "error", isString, where);
   const rounds = optional(value, "rounds", isRounds, where);
-  // reps は検査だけ: 丸め誤差の上界 e = q ÷ min(round) が perDispatch（= min ÷ reps）の相対誤差の上界に
-  // なるのは、reps が整数で誤差を持たないから（ADR 0117 決定 3）。値そのものは上界に効かない
+  // reps is only checked: the rounding-error bound e = q ÷ min(round) bounds the relative error of
+  // perDispatch (= min ÷ reps) because reps is an integer and carries no error (ADR 0117 decision
+  // 3). The value itself does not affect the bound
   optional(value, "reps", isPositiveInteger, where);
   return {
     caseId: requireString(value, "caseId", where),
@@ -293,8 +337,9 @@ const parseCaseRepeat = (value: unknown, where: string): SweepCaseRepeat => {
 };
 
 /**
- * 記録の候補集合（表の `provenance.candidateSet` に載る — ADR 0117 決定 4）。`settings.candidateSet` が
- * 正本で、欄の無い古い記録（quick+ の導入前）は `settings.quick` から `quick` / `full` を読む。
+ * The record's candidate set (goes into the table's `provenance.candidateSet` — ADR 0117 decision
+ * 4). `settings.candidateSet` is the source of truth; old records without the field (before quick+
+ * was introduced) read `quick` / `full` from `settings.quick`.
  */
 const parseCandidateSet = (settings: unknown, where: string): CandidateSet => {
   if (!isRecord(settings)) throw new Error(`${where}: settings が無い（候補集合が読めない）`);
@@ -316,10 +361,12 @@ const parseCandidateSet = (settings: unknown, where: string): CandidateSet => {
 };
 
 /**
- * 記録の `userAgent` の文字列（表の `provenance.userAgent` の綴り）。ブラウザの記録は `navigator.userAgent` の
- * 文字列のまま、Deno の CLI の記録（`{ deno: <版> }`）は `Deno/<版>` — Deno の `navigator.userAgent` と同じ綴りに
- * そろえ、アプリが今の `navigator.userAgent` と並べて比べられるようにする。欄が無ければ undefined、それ以外の
- * 形は落とす（黙って読み飛ばさない）。
+ * The string of the record's `userAgent` (the spelling of the table's `provenance.userAgent`). A
+ * browser record keeps the `navigator.userAgent` string as is; a record of the Deno CLI (removed in
+ * 0.15) (`{ deno: <version> }`) becomes `Deno/<version>` — the same spelling as Deno's
+ * `navigator.userAgent`, so that an application can compare it with its current
+ * `navigator.userAgent`. undefined when the field is absent; any other shape fails (not silently
+ * skipped).
  */
 const userAgentText = (value: unknown, where: string): string | undefined => {
   if (value === undefined || typeof value === "string") return value;
@@ -332,8 +379,10 @@ const userAgentText = (value: unknown, where: string): string | undefined => {
 };
 
 /**
- * 記録が焼いた照合キー（`caseSet` / `defaultKernels`）を今の runtime の値と突き合わせる（ADR 0117 決定 8）。
- * 欄の無い記録（この欄より前の記録）は照合しない。今の値は欄があるときだけ導く（指紋は約 13 ms）。
+ * Compares a matching key written into the record (`caseSet` / `defaultKernels`) with the current
+ * runtime's value (ADR 0117 decision 8). Records without the field (from before it) are not
+ * matched. The current value is derived only when the field is present (the fingerprint takes about
+ * 13 ms).
  */
 const assertRecordedKey = (
   record: Record<string, unknown>,
@@ -356,7 +405,7 @@ const assertRecordedKey = (
   }
 };
 
-/** 記録の `dp4a`（測った i8a8 の変種 — `candidateKernels` の導出が読む）。 */
+/** The record's `dp4a` (the measured i8a8 variant — read when deriving `candidateKernels`). */
 const recordedDp4a = (record: Record<string, unknown>, where: string): boolean => {
   const { dp4a } = record;
   if (!isBoolean(dp4a)) {
@@ -368,10 +417,11 @@ const recordedDp4a = (record: Record<string, unknown>, where: string): boolean =
 };
 
 /**
- * 掃引の記録を読む（unknown 境界 — 生成が読む欄だけを検査して fail loudly）。
+ * Reads a sweep record (the `unknown` boundary — checks only the fields generation reads and fails
+ * loudly).
  *
- * MUST: ケースごとに既定の行がちょうど 1 本あること。比の土台が無い・2 つあるケースは、
- * どの幾何を既定比で比べたのかが決まらない。
+ * MUST: each case has exactly one default row. With no ratio baseline, or two, it is undefined
+ * which geometry the ratios were taken against.
  */
 export const parseSweepReport = (
   parsed: unknown,
@@ -384,9 +434,10 @@ export const parseSweepReport = (
   }
   const adapter = parsed.adapter;
   if (!isRecord(adapter)) throw new Error(`${where}: adapter が無い`);
-  // MUST: GPU の timestamp で測った掃引だけを受ける（ADR 0115 §4・ADR 0117 決定 3）。壁時計は
-  // submit → 完了の床を含むので幾何どうしの比が 1 へ縮み、床は pass ごとに動くので丸めのような
-  // 既知の定数で誤差を押さえられない（行ごとの上界を記録だけから出せない）
+  // MUST: only sweeps measured with GPU timestamps are accepted (ADR 0115 §4, ADR 0117 decision 3).
+  // Wall clock includes the submit-to-completion floor, so ratios between geometries shrink toward
+  // 1, and the floor moves per pass, so the error cannot be bounded by a known constant as rounding
+  // can (no per-row bound can be derived from the record alone)
   const timingFix =
     "Deno の CLI は adapter が timestamp-query を列挙すれば timestamp で測る" +
     "（単位 deno-raw-tick）ので timestamp-query を持つ adapter で、Chrome のページは" +
@@ -402,21 +453,23 @@ export const parseSweepReport = (
         `wall は壁時計で比が 1 へ縮む）— ${timingFix}`,
     );
   }
-  // 量子化（Chrome の 100 µs 丸め）は掃引ごとは拒まない — 丸めの刻み q を観測ごとの誤差の上界に使う
-  // （deriveProfile・ADR 0117 決定 3）
+  // Quantization (Chrome's 100 µs rounding) does not reject a whole sweep — the rounding step q is
+  // used for the per-observation error bound (deriveProfile, ADR 0117 decision 3)
   const quantized = gpuTiming.quantized;
   if (!isBoolean(quantized)) {
     throw new Error(`${where}: gpuTiming.quantized が真偽値でない（${JSON.stringify(quantized)}）`);
   }
-  // 書き手（report.ts の roundsLookQuantized）は単位 ns でだけ量子化を判定する。raw tick に ns の刻みを
-  // 当てると上界が別物になるので、組が崩れた記録は落とす
+  // The writer (roundsLookQuantized in report.ts) judges quantization only for unit ns. Applying an
+  // ns step to raw ticks would give a different bound, so a record with a broken combination fails
   if (quantized && unit !== "ns") {
     throw new Error(
       `${where}: gpuTiming.quantized が true なのに単位が ${unit}（ns でだけ判定する）`,
     );
   }
-  // MUST: 比の土台（既定の表のカーネル）とケース集合が今の runtime と同じ記録だけを受ける（ADR 0117 決定 8 —
-  // 既定の行の突合〈ADR 0115 決定 4〉と同じ理由: 土台が別物なら「既定より速い」が今の runtime で成り立たない）
+  // MUST: only records whose ratio baseline (the default table's kernels) and case set equal the
+  // current runtime's are accepted (ADR 0117 decision 8 — the same reason as checking the default
+  // row (ADR 0115 decision 4): with a different baseline, "faster than the default" does not hold
+  // on the current runtime)
   assertRecordedKey(parsed, "caseSet", sweepCaseSetId, "ケース集合", where);
   assertRecordedKey(
     parsed,
@@ -426,8 +479,8 @@ export const parseSweepReport = (
     where,
   );
   const userAgent = userAgentText(parsed.userAgent, where);
-  // 既定の再測定（cases[]）は材料の門が読む — 無い記録は「どのケースも再測定が無い」になるので、
-  // 黙って全ケースを外さずに落とす
+  // The default re-measurements (cases[]) are read by the material check — a record without them
+  // would mean "no case has a re-measurement", so fail instead of silently dropping every case
   if (!Array.isArray(parsed.cases)) {
     throw new Error(`${where}: cases が配列でない（ケースごとの既定の再測定が読めない）`);
   }
@@ -441,9 +494,11 @@ export const parseSweepReport = (
   }
   if (!Array.isArray(parsed.rows)) throw new Error(`${where}: rows が配列でない`);
   const rows = parsed.rows.map((row, index) => parseRow(row, `${where} rows[${index}]`));
-  // MUST: 測った候補のカーネルが今の runtime と同じ記録だけを受ける（ADR 0117 決定 8）— defaultKernels は比の土台
-  // しか守らず、採用する候補の速さと出力の一致は候補自身のカーネルから来る。今の値は記録の行から導く
-  // （fingerprint.ts の sweepCandidateKernelsId — 書き手と同じ 1 本）
+  // MUST: only records whose measured candidates' kernels equal the current runtime's are accepted
+  // (ADR 0117 decision 8) — defaultKernels protects only the ratio baseline, and the speed and
+  // output match of an adopted candidate come from the candidate's own kernels. The current value
+  // is derived from the record's rows (sweepCandidateKernelsId in fingerprint.ts — the same single
+  // function as the writer)
   assertRecordedKey(
     parsed,
     "candidateKernels",
@@ -479,13 +534,14 @@ export const parseSweepReport = (
 };
 
 /**
- * gemmRows の段の欄名。段を行数の範囲で綴る（`gemmRows ≤ 16`・`gemmRows 17〜32`・`gemmRows > 512` —
- * {@link profileRowsSegments}）。添字（`gemmRows[1]`）で綴らないのは、3 段時代の `gemmRows[1]`（65〜512）と
- * 7 段の 2 番目（17〜32）が同じ綴りで別の範囲を指すから（ADR 0116 決定 6）。
+ * The field name of a gemmRows bucket. A bucket is spelled by its row range (`gemmRows ≤ 16`,
+ * `gemmRows 17〜32`, `gemmRows > 512` — {@link profileRowsSegments}). It is not spelled by index
+ * (`gemmRows[1]`) because `gemmRows[1]` of the three-bucket era (65–512) and the second of seven
+ * (17–32) would have the same spelling for different ranges (ADR 0116 decision 6).
  */
 export type GemmRowsSlot = `gemmRows ${string}`;
 
-/** プロファイルの欄（= クラス）。生成物のコメントでもこの綴りで欄を指す。 */
+/** A profile field (= class). The generated file's comments name fields with this spelling too. */
 export type ProfileSlot =
   | GemmRowsSlot
   | "attention.qk"
@@ -498,29 +554,35 @@ export type ProfileSlot =
 
 type SlotSpec = {
   readonly slot: ProfileSlot;
-  /** 欄が効く範囲（コメント用）。 */
+  /** The range the field applies to (for comments). */
   readonly scope: string;
   /**
-   * 今の runtime の既定と、その表示名（掃引の `geometry` と同じ綴り）。掃引にケースが無いクラスに
-   * 書く値で、掃引の既定の行と突き合わせる比の土台でもある。
+   * The current runtime's default and its display name (same spelling as the sweep's `geometry`).
+   * The value written for a class with no case in the sweep, and also the ratio baseline compared
+   * with the sweep's default row.
    */
   readonly fallback: () => { readonly name: string; readonly geometry: Geometry };
 };
 
-/** gemmRows の段 1 つ（{@link profileRowsSegments}）。 */
+/** One gemmRows bucket ({@link profileRowsSegments}). */
 export type RowsSegment = {
   readonly slot: GemmRowsSlot;
-  /** 欄が効く範囲（コメント用）。 */
+  /** The range the field applies to (for comments). */
   readonly scope: string;
   readonly maxRows: number;
   /**
-   * 段の範囲を覆う既定の表（`GEMM_ROWS_BUCKETS`）の段の幾何。採用が無い・掃引にケースが無い段に書く値で、
-   * 掃引の既定の行（掃引は既定の表 `gemmGeometryForRows(m)` で組む）と突き合わせる比の土台でもある。
+   * The geometry of the default table's (`GEMM_ROWS_BUCKETS`) bucket covering this bucket's range.
+   * The value written for a bucket with no adoption or no case in the sweep, and also the ratio
+   * baseline compared with the sweep's default row (the sweep builds it from the default table,
+   * `gemmGeometryForRows(m)`).
    */
   readonly fallback: GemmGeometry;
 };
 
-/** 段 `index` の行数の範囲の綴り（`≤ 16`・`17〜32`・`> 512`）。境界は検査済みの列（正整数・狭義昇順・末尾 Infinity）。 */
+/**
+ * The spelling of the row range of bucket `index` (`≤ 16`, `17〜32`, `> 512`). The boundaries are a
+ * checked list (positive integers, strictly ascending, ending in Infinity).
+ */
 export const rowsRange = (bounds: readonly number[], index: number): string => {
   const maxRows = bounds[index];
   if (index === 0) return `≤ ${maxRows}`;
@@ -529,18 +591,23 @@ export const rowsRange = (bounds: readonly number[], index: number): string => {
 };
 
 /**
- * gemmRows の段の境界（`maxRows` の列）を検査して段の一覧にする純関数（ADR 0116 決定 3）。生成器は
- * 掃引の形状表の `PROFILE_GEMM_ROWS_BOUNDS` を渡す（境界の定数は 1 か所 — ここに複製しない）。
+ * A pure function that checks the gemmRows bucket boundaries (the `maxRows` column) and turns them
+ * into a list of buckets (ADR 0116 decision 3). The generator passes `PROFILE_GEMM_ROWS_BOUNDS` of
+ * the sweep's shape table (the boundary constant lives in one place — not duplicated here).
  *
- * MUST: 境界は末尾が Infinity・末尾以外は正整数で狭義昇順・既定の表（`GEMM_ROWS_BUCKETS`）の `maxRows` を
- * 全て含む細分であること。満たさなければ生成を止める（fail loudly）。細分でない段は、掃引の既定の行の幾何が
- * 段の中で 2 種類に割れ（比の土台が 2 つになる）、段の既定（fallback）も 1 つに決まらないから。
- * 段の既定は、その段の範囲を覆う既定の段の幾何（細分なので段の全行数が同じ既定の段に入る）。
+ * MUST: the boundaries end in Infinity, the others are positive integers in strictly ascending
+ * order, and they form a refinement that contains every `maxRows` of the default table
+ * (`GEMM_ROWS_BUCKETS`). Otherwise generation stops (fail loudly). A bucket that is not a
+ * refinement would split the geometry of the sweep's default row in two within the bucket (two
+ * ratio baselines), and the bucket's default (fallback) would not be unique either. A bucket's
+ * default is the geometry of the default bucket covering its range (as a refinement, every row
+ * count of the bucket falls in the same default bucket).
  *
- * NOTE: 既定は `gemm-geometry.ts` から取る（生成物の値を既定の正本にしない）。ただし生成器は
- * 生成物へ依存している — 候補集合 `quick+`（geometries.ts が `geometry-profiles/index.ts` を読む）を
- * 通じて。登録済みの生成物が構文的に壊れると生成器自体が読めなくなるので、その場合は index.ts の登録を
- * 外してから再生成する。
+ * NOTE: the default is taken from `gemm-geometry.ts` (the generated values are not the source of
+ * truth for the default). The generator does depend on the generated files, though — through the
+ * candidate set `quick+` (geometries.ts reads `geometry-profiles/index.ts`). If a registered
+ * generated file breaks syntactically, the generator itself can no longer be loaded; in that case,
+ * remove its registration from index.ts and then regenerate.
  */
 export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSegment[] => {
   const where = `gemmRows の段の境界 [${bounds.join(", ")}]`;
@@ -582,7 +649,10 @@ export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSeg
   });
 };
 
-/** gemmRows 以外の欄（生成物の欄の順・コメントの採否の順で、gemmRows の段の後ろに並ぶ）。 */
+/**
+ * The fields other than gemmRows (in the order of the generated fields and of the verdicts in the
+ * comments, after the gemmRows buckets).
+ */
 const FIXED_SLOTS: readonly SlotSpec[] = [
   {
     slot: "attention.qk",
@@ -621,7 +691,10 @@ const FIXED_SLOTS: readonly SlotSpec[] = [
   },
 ];
 
-/** 欄の一覧（生成物の欄の順・コメントの採否の順 — gemmRows の段 → それ以外）。 */
+/**
+ * The list of fields (in the order of the generated fields and of the verdicts in the comments —
+ * gemmRows buckets → the rest).
+ */
 const profileSlots = (segments: readonly RowsSegment[]): readonly SlotSpec[] => [
   ...segments.map((segment) => ({
     slot: segment.slot,
@@ -631,11 +704,14 @@ const profileSlots = (segments: readonly RowsSegment[]): readonly SlotSpec[] => 
   ...FIXED_SLOTS,
 ];
 
-/** linear / matmul の行数（`caseShape` の `M{m} N{n} K{k}`）。 */
+/** The row count of linear / matmul (`M{m} N{n} K{k}` of `caseShape`). */
 const LINEAR_SHAPE = /^M(\d+) N\d+ K\d+$/;
-/** bmm の行列 1 枚の行数（`caseShape` の `B{batch} M{m} N{n} K{k}` — バッチは z 軸でバケットに効かない）。 */
+/**
+ * The row count of one bmm matrix (`B{batch} M{m} N{n} K{k}` of `caseShape` — the batch is on the z
+ * axis and does not affect the bucket).
+ */
 const BMM_SHAPE = /^B\d+ M(\d+) N\d+ K\d+$/;
-/** 融合 attention の段（`caseShape` の `{qk|pv} BH…`）。 */
+/** The stage of fused attention (`{qk|pv} BH…` of `caseShape`). */
 const ATTENTION_SHAPE = /^(qk|pv) BH\d+ M\d+ N\d+ D\d+$/;
 
 const attentionStage = (row: SweepObservation, where: string): "qk" | "pv" => {
@@ -647,9 +723,12 @@ const attentionStage = (row: SweepObservation, where: string): "qk" | "pv" => {
 };
 
 /**
- * 行の欄。linear / matmul / bmm は shape の M が `rows <= maxRows` で最初に当たる段（本番の 3 経路が同じ gemmRows の
- * 表を M で引く規則と同じ — src/runtime/recipe-builders/linear.ts・geometry-profile.ts の gemmRowsGeometry）・attention は shape の段・conv2d は**そのケースの既定の行の tileM**
- * （本番の m タイルの選択 `conv2dIgemmMTile` が選んだ側 — 掃引が既定として測った幾何が正本）。
+ * A row's field. For linear / matmul / bmm, the first bucket where the shape's M satisfies `rows <=
+ * maxRows` (the same rule by which the three production paths look up the same gemmRows table by M
+ * — src/runtime/recipe-builders/linear.ts, gemmRowsGeometry in geometry-profile.ts); for attention,
+ * the shape's stage; for conv2d, **the tileM of the case's default row** (the side chosen by the
+ * production m-tile selection `conv2dIgemmMTile` — the geometry the sweep measured as the default
+ * is the source of truth).
  */
 const slotOf = (
   row: SweepObservation,
@@ -666,7 +745,8 @@ const slotOf = (
         throw new Error(`${where}: ${row.caseId} の shape を読めない（${row.shape}）`);
       }
       const rows = Number(matched[1]);
-      // 段の列は末尾が Infinity（profileRowsSegments の検査済み）なので必ずどれかに当たる
+      // The bucket list ends in Infinity (checked by profileRowsSegments), so some bucket always
+      // matches
       return (segments.find((segment) => rows <= segment.maxRows) ?? segments[segments.length - 1])
         .slot;
     }
@@ -693,20 +773,22 @@ const geometryKey = (geometry: Geometry): string =>
 const geometricMean = (values: readonly number[]): number =>
   Math.exp(values.reduce((sum, value) => sum + Math.log(value), 0) / values.length);
 
-/** 比の表示（生成物のコメントと標準出力で同じ綴り）。 */
+/**
+ * The display of a ratio (same spelling in the generated file's comments and on standard output).
+ */
 export const formatRatio = (value: number): string => `×${value.toFixed(3)}`;
 
 export type SlotVerdict = {
   readonly slot: ProfileSlot;
   readonly scope: string;
-  /** クラスのケース（id の昇順）。 */
+  /** The class's cases (ascending by id). */
   readonly cases: readonly string[];
   readonly outcome:
     | {
         readonly kind: "adopted";
         readonly name: string;
         readonly geometry: Geometry;
-        /** ケース間の幾何平均。 */
+        /** The geometric mean across the cases. */
         readonly geomean: number;
         readonly min: number;
         readonly max: number;
@@ -717,41 +799,54 @@ export type SlotVerdict = {
         readonly geometry: Geometry;
         readonly reason: string;
       };
-  /** 採らなかった幾何と理由（名前の昇順）。 */
+  /** The geometries not taken and why (ascending by name). */
   readonly rejected: readonly { readonly name: string; readonly reason: string }[];
   /**
-   * このクラスのケース・観測のうち、掃引ごとに比の材料から外したもの（掃引を渡した順 → ケース id の昇順 →
-   * ケース単位の除外 → 幾何名の昇順）。ケース単位（再測定比の範囲外・既定の行の丸め誤差）と観測単位
-   * （丸め誤差の上界 E > 1% — `geometry` あり）がある。
+   * The cases and observations of this class dropped from the ratio material, per sweep (in the
+   * order the sweeps were passed → ascending case id → per-case exclusions → ascending geometry
+   * name). There are per-case exclusions (re-measurement ratio out of range, the default row's
+   * rounding error) and per-observation exclusions (rounding-error bound E > 1% — with `geometry`).
    */
   readonly excluded: readonly ExcludedCase[];
 };
 
 /**
- * 掃引 1 本の中で比の材料から外したケース（{@link exclusionReason}）か、ケースの 1 幾何の観測
- * （`geometry` あり — 丸め誤差の上界が超えた行・{@link roundingBound}）— 出力の一致と失敗は見る。
+ * A case dropped from the ratio material within one sweep ({@link exclusionReason}), or one
+ * geometry's observation of a case (with `geometry` — a row whose rounding-error bound was
+ * exceeded, {@link roundingBound}) — output match and failures are still checked.
  */
 export type ExcludedCase = {
   readonly path: string;
   readonly caseId: string;
-  /** 外したのがケースの 1 幾何の観測だけのとき、その幾何の名前（無ければケースの全観測）。 */
+  /**
+   * When only one geometry's observation of the case was dropped, that geometry's name (absent =
+   * every observation of the case).
+   */
   readonly geometry?: string;
-  /** 「既定の再測定比 ×1.160 が範囲外」など（{@link excludedCaseLine} が文にする）。 */
+  /**
+   * E.g. "the default re-measurement ratio ×1.160 is out of range" ({@link excludedCaseLine} makes
+   * it a sentence).
+   */
   readonly reason: string;
 };
 
-/** 外したケース・観測の 1 行（生成物のコメント・標準出力・ページで同じ文）。 */
+/**
+ * One line for a dropped case or observation (the same sentence in the generated file's comments,
+ * on standard output and on the page).
+ */
 export const excludedCaseLine = (excluded: ExcludedCase): string =>
   `掃引 ${excluded.path}: ${excluded.caseId}${
     excluded.geometry === undefined ? "" : ` の ${excluded.geometry}`
   } は${excluded.reason}のため比の材料から外した（出力の一致と失敗は見る）`;
 
 /**
- * ケースをその掃引の比の材料から外す理由（外さないなら undefined）。
+ * The reason to drop a case from that sweep's ratio material (undefined if it is kept).
  *
- * 既定の再測定比（ケースの末尾で既定をもう 1 度測った値 ÷ 初回）が report.ts の `DEFAULT_DRIFT_RANGE` の外なら、
- * 熱・クロックがケースの途中で動いた疑いがあり、比の土台（既定の値）ごと揺れている — そのケースの既定比は
- * どの幾何についても信用できない。再測定が失敗した・無いケースは揺れを確かめられないので同じ扱い。
+ * If the default re-measurement ratio (the default measured once more at the end of the case ÷ the
+ * first) is outside report.ts's `DEFAULT_DRIFT_RANGE`, heat or clocks likely moved during the case
+ * and the ratio baseline (the default value) itself is unstable — the case's ratios to the default
+ * cannot be trusted for any geometry. A case whose re-measurement failed or is missing cannot be
+ * checked for drift, so it is treated the same.
  */
 const exclusionReason = (repeat: SweepCaseRepeat | undefined): string | undefined => {
   if (repeat?.error !== undefined) return `既定の再測定が失敗（${repeat.error}）`;
@@ -761,20 +856,23 @@ const exclusionReason = (repeat: SweepCaseRepeat | undefined): string | undefine
     : undefined;
 };
 
-/** 丸め誤差の上界（`bound` = 相対誤差）か、上界を出せない理由。 */
+/** The rounding-error bound (`bound` = relative error), or why no bound can be given. */
 type RoundingBound = { readonly bound: number } | { readonly unknown: string };
 
 /**
- * 行の丸め誤差の上界 e(r) = q ÷ min(rounds)（ADR 0117 決定 3）。timestamp 2 つの差の丸め誤差は 1 刻み
- * 未満なので、e は min の round（= `perDispatch` × reps）の相対誤差の上界になる（1 次の近似）。
+ * A row's rounding-error bound e(r) = q ÷ min(rounds) (ADR 0117 decision 3). The rounding error of
+ * a difference of two timestamps is under one step, so e bounds the relative error of the min round
+ * (= `perDispatch` × reps) (to first order).
  *
- * 0 の round は min の候補にしない — 負だった round は記録に 0 で残り（report.ts）、`perDispatch` の
- * min の候補から外れているから。負でなく丸めで 0 になった round が min なら `perDispatch` が 0 で、外しても
- * 判定は変わらない: その行が候補なら既定比を持たず、既定の行なら比の土台が 0 なので、そのケースのどの行も
- * 既定比を持たず、既定の再測定も無い（report.ts の比較・harness.ts の再測定 — どちらも 0 の側を書かない）。
+ * Rounds of 0 are not min candidates — negative rounds stay in the record as 0 (report.ts) and are
+ * excluded from the min candidates of `perDispatch`. If a round rounded to 0 (not negative) is the
+ * min, `perDispatch` is 0 and excluding it does not change the verdict: as a candidate row it has
+ * no ratio to the default; as the default row the ratio baseline is 0, so no row of the case has a
+ * ratio to the default and there is no default re-measurement either (the comparison in report.ts
+ * and the re-measurement in harness.ts — neither writes the 0 side).
  */
 const roundingBound = (row: SweepObservation, quantum: number): RoundingBound => {
-  // 丸めが無ければ誤差も無い — rounds の無い古い記録もここで通る
+  // No rounding means no error — old records without rounds pass here too
   if (quantum === 0) return { bound: 0 };
   if (row.rounds === undefined) return { unknown: "rounds が無い" };
   const kept = row.rounds.filter((round) => round > 0);
@@ -782,14 +880,15 @@ const roundingBound = (row: SweepObservation, quantum: number): RoundingBound =>
   return { bound: quantum / Math.min(...kept) };
 };
 
-/** 百分率の表示（丸め誤差の上界 — 採否の行の綴り）。 */
+/** The display of a percentage (the rounding-error bound — the spelling in the verdict lines). */
 const formatPercent = (value: number): string => `${(value * 100).toFixed(2)}%`;
 
 const LIMIT_LABEL = `${ROUNDING_ERROR_LIMIT * 100}%`;
 
 /**
- * 既定の行の丸め誤差の上界 e(d) がしきい値を超える・出せないケースは、そのケースの全観測の E が超える
- * （E = e(r) + e(d) ≥ e(d)）ので、ケースごと外す理由（外さないなら undefined）。
+ * When the default row's rounding-error bound e(d) exceeds the threshold or cannot be given, the E
+ * of every observation of the case exceeds it (E = e(r) + e(d) ≥ e(d)), so this is the reason to
+ * drop the whole case (undefined if it is kept).
  */
 const defaultRoundingReason = (bound: RoundingBound): string | undefined => {
   if ("unknown" in bound) return `既定の行の丸め誤差の上界が不明（${bound.unknown}）`;
@@ -798,7 +897,10 @@ const defaultRoundingReason = (bound: RoundingBound): string | undefined => {
     : undefined;
 };
 
-/** 観測の比の丸め誤差の上界 E = e(r) + e(d) がしきい値を超える・出せないとき、外す理由。 */
+/**
+ * The reason to drop an observation when its ratio's rounding-error bound E = e(r) + e(d) exceeds
+ * the threshold or cannot be given.
+ */
 const rowRoundingReason = (bound: RoundingBound, defaultBound: number): string | undefined => {
   if ("unknown" in bound) return `丸め誤差の上界が不明（${bound.unknown}）`;
   const total = bound.bound + defaultBound;
@@ -807,7 +909,7 @@ const rowRoundingReason = (bound: RoundingBound, defaultBound: number): string |
     : undefined;
 };
 
-/** クラスに振り分けた行（`included` = 材料に残したか）。 */
+/** A row assigned to a class (`included` = kept as material). */
 type SlotRow = { readonly row: SweepObservation; readonly included: boolean };
 
 type Eligibility =
@@ -820,12 +922,15 @@ type Eligibility =
   | { readonly eligible: false; readonly reason: string };
 
 /**
- * 候補 1 つの判定。クラスの**全ケース**を見る — 測っていない・失敗・不一致・比が無いケースが
- * 1 つでもあれば落とし（ケース id の昇順で最初のもの）、全ケースが揃えば最も負けたケースで門を見る。
+ * The verdict on one candidate. Looks at **every case** of the class — if even one case is
+ * unmeasured, failed, mismatched or lacks a ratio, the candidate is dropped (the first such case in
+ * ascending case id); if every case is present, the check is applied to the case it loses most.
  *
- * 失敗と出力の不一致は、比の材料から外した行（`included: false`）も含めて見る — 出力の一致は正しさの門で
- * 熱・クロックに依らないから、どれか 1 本の掃引で不一致 / 失敗ならその幾何は採らない。比は材料に残した行
- * だけから取り、全掃引で比の材料から外したケース（`unmeasured`）は、どの幾何も比を測っていない扱い。
+ * Failures and output mismatches are checked including the rows dropped from the ratio material
+ * (`included: false`) — the output match is a correctness check and does not depend on heat or
+ * clocks, so a geometry that mismatched or failed in any one sweep is not taken. Ratios come only
+ * from the rows kept as material; a case dropped from the ratio material in every sweep
+ * (`unmeasured`) counts as having no ratio measured for any geometry.
  */
 const judgeCandidate = (
   cases: readonly string[],
@@ -896,8 +1001,9 @@ const judgeSlot = (
       excluded,
     };
   }
-  // 既定の行の門とケースの一覧は比の材料から外した行も含めて見る（外すのは比の観測だけ — 土台の検査と
-  // 出力の一致・失敗は記録そのものに掛ける）
+  // The default-row check and the case list include the rows dropped from the ratio material (only
+  // the ratio observations are dropped — the baseline check, output match and failures apply to the
+  // record itself)
   const rows = slotRows.map(({ row }) => row);
   const cases = [...new Set(rows.map((row) => row.caseId))].sort();
   const measured = new Set(
@@ -906,7 +1012,8 @@ const judgeSlot = (
   const unmeasured = new Set(cases.filter((caseId) => !measured.has(caseId)));
   const defaults = rows.filter((row) => row.isDefault);
   const defaultKeys = new Set(defaults.map((row) => geometryKey(row.geometryParams)));
-  // MUST: クラスの既定は 1 つ。割れていれば比の土台がケースごとに違う（掃引の版違いなど）
+  // MUST: a class has one default. If it splits, the ratio baseline differs per case (sweeps of
+  // different versions and the like)
   if (defaultKeys.size !== 1) {
     throw new Error(
       `${spec.slot}: 既定の行の幾何が割れている（${[
@@ -916,8 +1023,9 @@ const judgeSlot = (
   }
   const defaultRow = defaults[0];
   const runtimeDefault = spec.fallback();
-  // MUST: 比の土台（掃引の既定の行）が今の runtime の既定であること。違えば既定比は別の幾何に対する
-  // 比で、「既定より速い」が今の runtime では成り立たない
+  // MUST: the ratio baseline (the sweep's default row) is the current runtime's default. Otherwise
+  // the ratios are relative to another geometry, and "faster than the default" does not hold on the
+  // current runtime
   if (geometryKey(defaultRow.geometryParams) !== geometryKey(runtimeDefault.geometry)) {
     throw new Error(
       `${spec.slot}: 掃引の既定の行（${defaultRow.geometry}）が今の runtime の既定（${runtimeDefault.name}）` +
@@ -935,7 +1043,8 @@ const judgeSlot = (
     if (geometryKey(entry.geometry) !== geometryKey(row.geometryParams)) {
       throw new Error(`${spec.slot}: 幾何 ${row.geometry} の geometryParams が行ごとに違う`);
     }
-    // 外した行も観測に載せる — 比には使わないが、失敗と出力の不一致は判定に効く（judgeCandidate）
+    // Dropped rows are kept as observations too — not used for ratios, but failures and output
+    // mismatches count in the verdict (judgeCandidate)
     entry.observations.set(row.caseId, [...(entry.observations.get(row.caseId) ?? []), slotRow]);
     byName.set(row.geometry, entry);
   }
@@ -950,7 +1059,7 @@ const judgeSlot = (
     .flatMap((candidate) =>
       candidate.eligibility.eligible ? [{ ...candidate, ...candidate.eligibility }] : [],
     )
-    // 幾何平均の降順・同値は名前の昇順（入力の順に依らず決まる）
+    // Descending geometric mean, ties by ascending name (decided independently of input order)
     .sort((left, right) => right.geomean - left.geomean || (left.name < right.name ? -1 : 1));
   const winner = eligible[0];
   const rejected = judged
@@ -991,7 +1100,10 @@ const judgeSlot = (
   };
 };
 
-/** 表の相手の表示（`vendor / architecture / description` — 指定した欄だけ）。 */
+/**
+ * The display of the table's target (`vendor / architecture / description` — only the given
+ * fields).
+ */
 export const targetLabel = (target: ProfileTarget): string =>
   target.optIn === true
     ? "（注入専用 — match なし）"
@@ -1000,27 +1112,34 @@ export const targetLabel = (target: ProfileTarget): string =>
         .join(" / ");
 
 /**
- * 掃引の記録（1 本以上・同じ adapter）から欄ごとの採否を出す（純関数）。
+ * Produces the per-field verdicts from sweep records (one or more, same adapter) (a pure function).
  *
- * 材料の門: 掃引ごとに、既定の再測定比が範囲外か再測定が失敗 / 無いケース（{@link exclusionReason}）は
- * **その掃引の**比の観測から外す。同じケースを別の掃引が測っていればそちらの比で判定し、どの掃引にも
- * 残らないケースはどの幾何も比を測っていない扱い（クラスの全ケースで勝つ規則により欄は既定のまま）。
- * 出力の不一致と失敗は外したケースでも判定に残す — 出力の一致は正しさの門で熱に依らないので、外した掃引で
- * 不一致 / 失敗の幾何は他の掃引で一致していても候補にしない。外すかどうかの選択肢は持たない（規則は 1 つ）。
+ * Material check: per sweep, a case whose default re-measurement ratio is out of range or whose
+ * re-measurement failed or is missing ({@link exclusionReason}) is dropped from **that sweep's**
+ * ratio observations. If another sweep measured the same case, its ratios decide; a case left in no
+ * sweep counts as having no ratio measured for any geometry (by the rule of winning every case of
+ * the class, the field stays at the default). Output mismatches and failures stay in the verdict
+ * even for dropped cases — the output match is a correctness check and does not depend on heat, so
+ * a geometry that mismatched or failed in a dropped sweep is no candidate even if it matched in
+ * other sweeps. There is no option for whether to drop (one rule).
  *
- * 丸めの門（ADR 0117 決定 3）: 既定の行の丸め誤差の上界 e(d) が 1% を超える（か出せない）ケースも同じくその掃引の
- * 比の観測から外し（{@link defaultRoundingReason}）、それ以外の行は E = e(r) + e(d) が 1% を超える観測だけを外す
- * （{@link rowRoundingReason}）。非量子化（q = 0）なら e = 0 で rounds を見ない。
+ * Rounding check (ADR 0117 decision 3): a case whose default row's rounding-error bound e(d)
+ * exceeds 1% (or cannot be given) is likewise dropped from that sweep's ratio observations
+ * ({@link defaultRoundingReason}); for the other rows, only observations whose E = e(r) + e(d)
+ * exceeds 1% are dropped ({@link rowRoundingReason}). Without quantization (q = 0), e = 0 and
+ * rounds are not read.
  */
 export const deriveProfile = (
   sources: readonly SweepSource[],
   options: ProfileTarget & { readonly minSpeedup: number },
 ): readonly SlotVerdict[] => {
   if (sources.length === 0) throw new Error("掃引の記録が 1 本も無い");
-  // 段の境界が既定の表の細分でなければここで止める（段の中で比の土台が割れる — profileRowsSegments）
+  // Stop here if the bucket boundaries do not refine the default table (the ratio baseline would
+  // split within a bucket — profileRowsSegments)
   const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
-  // runtime の門（assertGeometryProfile）と同じ条件 — 生成してから注入・登録の段で落ちる前に止める。
-  // description は機種の名前で、vendor / architecture の内側を分けるためだけの欄
+  // The same conditions as the runtime's check (assertGeometryProfile) — stop before generating
+  // rather than failing at the injection or registration step. description is the machine model's
+  // name, a field only for splitting within a vendor / architecture
   if (options.description === "") throw new Error("description は空文字にしない（未指定は省く）");
   if (options.description !== undefined && options.architecture === undefined) {
     throw new Error("description は vendor と architecture の両方と組で指定する");
@@ -1028,13 +1147,14 @@ export const deriveProfile = (
   const seen = new Map<string, string>();
   for (const source of sources) {
     const twin = seen.get(source.sha256);
-    // 同じ記録を 2 度数えると、そのケースの観測だけが重く効く
+    // Counting the same record twice would give that record's observations double weight
     if (twin !== undefined) {
       throw new Error(`同じ掃引を 2 度渡している（${twin} と ${source.path}）`);
     }
     seen.set(source.sha256, source.path);
-    // MUST: 別の adapter の実測を混ぜない（表は adapter ごとの答え — B570 と M2 は逆を指す）。
-    // description を指定したら、その機種の掃引だけ（同じ vendor / architecture の別機種を混ぜない）
+    // MUST: measurements of different adapters are not mixed (a table is a per-adapter answer —
+    // B570 and M2 point in opposite directions). When description is given, only sweeps of that
+    // model (other models of the same vendor / architecture are not mixed)
     const { vendor, architecture, description } = source.adapter;
     if (
       options.optIn !== true &&
@@ -1048,10 +1168,12 @@ export const deriveProfile = (
         )} と合わない`,
       );
     }
-    // MUST: 掃引どうしは adapter の 4 欄が全て一致（空どうしは一致・片方だけ空は不一致 — ADR 0117
-    // 決定 4）。表の provenance は adapter を 1 つだけ持ち、照合（geometryProfileMismatch）はその 4 欄で
-    // 見る。--opt-in や --description 省略では上の門が description を見ないので、同じ vendor /
-    // architecture の別機種（M2 と M5 など）が混ざるのもここで止める
+    // MUST: all sweeps agree on all four adapter fields (two empty values match, one empty value
+    // does not — ADR 0117 decision 4). The table's provenance holds a single adapter, and matching
+    // (geometryProfileMismatch) looks at those four fields. With optIn or without description (the
+    // CLI's --opt-in / --description, removed in 0.15) the check above does not look at
+    // description, so mixing other models of the same vendor / architecture (M2 and M5, say) is
+    // stopped here too
     const first = sources[0].adapter;
     for (const field of ["vendor", "architecture", "device", "description"] as const) {
       if (source.adapter[field] !== first[field]) {
@@ -1082,14 +1204,16 @@ export const deriveProfile = (
     for (const row of source.rows) {
       const slot = slotOf(row, segments, conv2dDefaultTileM, source.path);
       const base = defaultBounds.get(row.caseId);
-      // parseSweepReport がケースごとに既定の行 1 本を検査済み
+      // parseSweepReport has checked one default row per case
       if (base === undefined) throw new Error(`${source.path}: ${row.caseId} の既定の行が無い`);
-      // ケースごと外す理由（再測定比 → 既定の行の丸め）。既定の行が失敗したケースは比を持たないので
-      // 丸めを見ない（比の材料が無い — 失敗は judgeCandidate が見る）
+      // The reason to drop the whole case (re-measurement ratio → the default row's rounding). A
+      // case whose default row failed has no ratios, so rounding is not checked (no ratio material
+      // — judgeCandidate looks at the failure)
       const caseReason =
         exclusionReason(repeats.get(row.caseId)) ??
         (base.row.error === undefined ? defaultRoundingReason(base.bound) : undefined);
-      // 観測ごとに外す理由（E = e(r) + e(d)）。既定比を持たない行（失敗など）は比の材料でないので見ない
+      // The reason to drop an observation (E = e(r) + e(d)). Rows without a ratio to the default
+      // (failures and the like) are no ratio material, so they are not checked
       const rowReason =
         caseReason !== undefined ||
         row.isDefault ||
@@ -1120,7 +1244,7 @@ export const deriveProfile = (
         { row, included: caseReason === undefined && rowReason === undefined },
       ]);
     }
-    // ケース id の昇順 → ケースごとの除外が先 → 幾何の名前の昇順
+    // Ascending case id → per-case exclusions first → ascending geometry name
     const order = (excluded: ExcludedCase): string =>
       `${excluded.caseId}\u0000${excluded.geometry ?? ""}`;
     const sorted = [...excludedHere].sort((left, right) => {
@@ -1141,7 +1265,10 @@ export const deriveProfile = (
   );
 };
 
-/** 採否の一覧（生成物の冒頭コメントと標準出力で同じ行）。 */
+/**
+ * The list of verdicts (the same lines in the generated file's header comment and on standard
+ * output).
+ */
 export const verdictLines = (verdicts: readonly SlotVerdict[]): string[] =>
   verdicts.flatMap((verdict) => {
     const head = `${verdict.slot}（${verdict.scope}・${verdict.cases.length} ケース）`;
@@ -1159,7 +1286,7 @@ export const verdictLines = (verdicts: readonly SlotVerdict[]): string[] =>
     ];
   });
 
-/** 掃引から作った表（{@link buildGeometryProfile} — `provenance` を必ず持つ）。 */
+/** A table built from sweeps ({@link buildGeometryProfile} — always carries `provenance`). */
 export type GeneratedProfile = GeometryProfile & {
   readonly provenance: NonNullable<GeometryProfile["provenance"]>;
 };
@@ -1183,20 +1310,25 @@ const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geom
 };
 
 /**
- * 採否から表の値を組む（リポへ登録する生成物の TS〈`tools/geometry-sweep/render.ts`〉の値と、
- * `acquireGpu({ geometryProfile })` に注入する値の両方の正本）。
+ * Builds the table's values from the verdicts (the source of truth both for the values of the
+ * generated TS registered in the repository (`tools/geometry-sweep/render.ts`, removed in 0.15) and
+ * for the values injected into `acquireGpu({ geometryProfile })`).
  *
- * MUST: `provenance` を書くのはこの関数だけ（ADR 0117 決定 4）。掃引の path / sha256 / 日付 / 候補集合は
- * 渡した順に `", "` で連結し、userAgent は重複を除いた配列（{@link distinctUserAgents}）、adapter は 4 欄をそのまま（{@link deriveProfile} が全ての記録で一致を検査済み）、
- * カーネルの指紋とケース集合の版は今の runtime で導く（照合 `geometryProfileMismatch` が同じ関数で導き直す）。
+ * MUST: only this function writes `provenance` (ADR 0117 decision 4). The sweeps' paths / sha256 /
+ * dates / candidate sets are joined with `", "` in the order given, userAgent is a deduplicated
+ * array ({@link distinctUserAgents}), adapter is the four fields as they are ({@link deriveProfile}
+ * has checked that every record agrees), and the kernel fingerprint and the case-set version are
+ * derived with the current runtime (matching, `geometryProfileMismatch`, re-derives them with the
+ * same functions).
  */
 export const buildGeometryProfile = (
   spec: { readonly id: string } & ProfileTarget,
   sources: readonly SweepSource[],
   verdicts: readonly SlotVerdict[],
 ): GeneratedProfile => {
-  // MUST: 末尾の規則は全行数に当たること（runtime の門と同じ条件 — 生成時に先に落とす）。
-  // 末尾 Infinity と既定の細分は profileRowsSegments が検査する
+  // MUST: the last rule covers every row count (the same condition as the runtime's check — fail
+  // early at generation). profileRowsSegments checks the trailing Infinity and the refinement of
+  // the default
   const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
   if (sources.length === 0) throw new Error("掃引の記録が 1 本も無い（provenance を書けない）");
   const joined = (pick: (source: SweepSource) => string): string => sources.map(pick).join(", ");
@@ -1249,9 +1381,11 @@ export const buildGeometryProfile = (
 };
 
 /**
- * 生成した表を注入の門（`assertGeometryProfile` — `acquireGpu` と保存物の読み戻しが通す門）に通す。門に落ちる表
- * （空の id など — 公開の生成器は利用者の options をそのまま書く）を、注入や読み戻しの段まで持ち越さずに
- * 生成の段で止める。条件は門の 1 本だけ（生成器側に同じ条件を複製しない）。
+ * Runs the generated table through the injection check (`assertGeometryProfile` — the check that
+ * `acquireGpu` and reading back a stored table go through). A table that fails it (an empty id and
+ * the like — the public generator writes the user's options as they are) is stopped at generation
+ * instead of being carried to injection or read-back. The conditions live only in that one check
+ * (not duplicated on the generator side).
  */
 const assertGeneratedProfile = (profile: GeneratedProfile): void => {
   try {
@@ -1267,10 +1401,12 @@ const assertGeneratedProfile = (profile: GeneratedProfile): void => {
 };
 
 /**
- * 表の `provenance.userAgent`（ADR 0117 追記 2026-10-02）: 記録の `userAgent` を、現れた順に重複を除いた配列
- * （全て同じなら 1 要素 — 今のブラウザとそのまま比べられる）。他の欄のように `", "` で連結しないのは、ブラウザの
- * userAgent 自体が `", "` を含み（`(KHTML, like Gecko)`）、連結すると値ごとに分けられないから。`userAgent` の
- * 無い記録が混ざれば書かない（一部の記録だけのブラウザを表全体の値として残さない）。
+ * The table's `provenance.userAgent` (ADR 0117 addendum 2026-10-02): the records' `userAgent` as an
+ * array deduplicated in order of appearance (one element if they are all the same — directly
+ * comparable with the current browser). It is not joined with `", "` like the other fields because
+ * a browser's userAgent itself contains `", "` (`(KHTML, like Gecko)`), and joined values could not
+ * be split again. If any record lacks `userAgent`, nothing is written (a browser of only some
+ * records is not kept as the value of the whole table).
  */
 const distinctUserAgents = (sources: readonly SweepSource[]): string[] | undefined => {
   const agents: string[] = [];
@@ -1282,9 +1418,11 @@ const distinctUserAgents = (sources: readonly SweepSource[]): string[] | undefin
 };
 
 /**
- * 生成した表のカーネルの指紋。表の幾何から掃引の shape のカーネルを組めない（codegen の門・dispatch 数の
- * 上限 — 指紋は全 device が保証する 65535 で組むので、上限の大きい device の掃引を通った幾何でも落ちうる）
- * ときは、表を作らずに理由（ケース・欄・幾何）を名指して投げる — 照合で必ず不一致になる表を保存させない。
+ * The kernel fingerprint of the generated table. When the table's geometry cannot build the kernels
+ * of the sweep shapes (a codegen check, the dispatch-count limit — the fingerprint builds with the
+ * 65535 every device guarantees, so a geometry that passed the sweep on a device with a larger
+ * limit can still fail), throws naming the reason (case, field, geometry) instead of building the
+ * table — no table that would always mismatch at matching gets stored.
  */
 const generatedKernelsId = (table: GeometryProfile): string => {
   try {
@@ -1301,47 +1439,64 @@ const generatedKernelsId = (table: GeometryProfile): string => {
 };
 
 /**
- * 公開の生成器（{@link deriveGeometryProfile}）の入力 1 本 — 掃引の記録と、表の `provenance` に載せる識別。
- * `report` は unknown 境界（保存した JSON を `JSON.parse` した値でも `runGeometrySweep` の戻りでもよい —
- * 生成が読む欄を {@link parseSweepReport} で検査する）。
+ * One input of the public generator ({@link deriveGeometryProfile}) — a sweep record and the
+ * identification that goes into the table's `provenance`. `report` is an `unknown` boundary (a
+ * value from `JSON.parse` of saved JSON or the return value of `runGeometrySweep` — the fields
+ * generation reads are checked by {@link parseSweepReport}).
  */
 export type GeometrySweepInput = {
   readonly report: unknown;
-  /** 記録の名前（ファイルの path など — `provenance.sweep` に載る）。 */
+  /** The record's name (a file path or the like — goes into `provenance.sweep`). */
   readonly path: string;
-  /** 記録のバイト列の SHA-256（16 進 — `provenance.sha256` に載る。同じ値の記録を 2 本渡すと落ちる）。 */
+  /**
+   * The SHA-256 of the record's bytes (hex — goes into `provenance.sha256`. Passing two records
+   * with the same value fails).
+   */
   readonly sha256: string;
 };
 
-/** {@link deriveGeometryProfile} の options（表の id・表を当てる adapter・採用の閾値）。 */
+/**
+ * Options of {@link deriveGeometryProfile} (the table's id, the adapter the table applies to, the
+ * adoption threshold).
+ */
 export type DeriveGeometryProfileOptions = ProfileTarget & {
   readonly id: string;
-  /** 既定比の採用の閾値（既定 {@link DEFAULT_MIN_SPEEDUP}・1 以上 — CLI の `--min-speedup`）。 */
+  /**
+   * The adoption threshold for the ratio to the default (default {@link DEFAULT_MIN_SPEEDUP}, at
+   * least 1 — the CLI's `--min-speedup`, removed in 0.15).
+   */
   readonly minSpeedup?: number;
 };
 
-/** {@link deriveGeometryProfile} の戻り（表と採否の行）。 */
+/** The return value of {@link deriveGeometryProfile} (the table and the verdict lines). */
 export type GeometryProfileDerivation = {
-  /** 生成した表（`provenance` 付き — {@link geometryProfileJson} で保存し、`acquireGpu` に注入する）。 */
+  /**
+   * The generated table (with `provenance` — saved with {@link geometryProfileJson} and injected
+   * into `acquireGpu`).
+   */
   readonly profile: GeometryProfile;
   /**
-   * 欄ごとの採否・退けた幾何と理由・比の材料から外したケース（{@link verdictLines} — リポの生成物の
-   * 冒頭コメントと CLI の標準出力と同じ行）。
+   * Per-field verdicts, rejected geometries and why, and the cases dropped from the ratio material
+   * ({@link verdictLines} — the same lines as the header comment of the repository's generated
+   * files and the CLI's standard output (the CLI was removed in 0.15)).
    */
   readonly verdicts: readonly string[];
 };
 
 /**
- * 掃引の記録 1 本以上から表を作る（公開面 `@karume/runtime/tune` の生成器 — ADR 0117 決定 2）。規則は
- * {@link deriveProfile}（ADR 0115 決定 4・ADR 0116・ADR 0117 決定 3）、表の値は {@link buildGeometryProfile} の 1 本で、
- * CLI と GPU lab が作る表と同じ値になる。門に落ちた入力は理由つきで投げる（fail loudly）。
+ * Builds a table from one or more sweep records (the generator of the public surface
+ * `@karume/runtime/tune` — ADR 0117 decision 2). The rules are {@link deriveProfile} (ADR 0115
+ * decision 4, ADR 0116, ADR 0117 decision 3) and the table's values come from the single
+ * {@link buildGeometryProfile}, so they equal the tables the CLI and the GPU lab (both removed in
+ * 0.15) built. Input that fails a check throws with the reason (fail loudly).
  */
 export const deriveGeometryProfile = (
   reports: readonly GeometrySweepInput[],
   options: DeriveGeometryProfileOptions,
 ): GeometryProfileDerivation => {
   const minSpeedup = options.minSpeedup ?? DEFAULT_MIN_SPEEDUP;
-  // 1 未満を許すと既定より遅い幾何を採りうる（比の門の意味が消える — CLI の --min-speedup と同じ条件）
+  // Allowing less than 1 could adopt a geometry slower than the default (the ratio check would lose
+  // its meaning — the same condition as the CLI's --min-speedup, removed in 0.15)
   if (!Number.isFinite(minSpeedup) || minSpeedup < 1) {
     throw new Error(`minSpeedup は 1 以上の数（${minSpeedup}）`);
   }
@@ -1356,22 +1511,28 @@ export const deriveGeometryProfile = (
   };
 };
 
-/** {@link geometryProfileJson} が Infinity の位置に一時的に置く印（表の文字列に NUL は現れない）。 */
+/**
+ * The marker {@link geometryProfileJson} puts temporarily where Infinity goes (NUL never appears in
+ * the table's strings).
+ */
 const INFINITY_MARK = "\u0000karume-infinity\u0000";
 
 /**
- * 注入に使う表の JSON（`JSON.parse` の結果をそのまま `acquireGpu({ geometryProfile })` へ渡せる）。
+ * The JSON of a table for injection (the result of `JSON.parse` can be passed to
+ * `acquireGpu({ geometryProfile })` as is).
  *
- * `gemmRows` の末尾の `maxRows`（Infinity）は JSON の値に無いので `1e999` と書く — `JSON.parse` は
- * 範囲外の数を Infinity に読む。素の `JSON.stringify` は Infinity を null にし、null の表は runtime の門
- * （最後の規則は Infinity）で落ちる。
+ * The trailing `maxRows` of `gemmRows` (Infinity) has no JSON value, so it is written as `1e999` —
+ * `JSON.parse` reads an out-of-range number as Infinity. Plain `JSON.stringify` turns Infinity into
+ * null, and a table with null fails the runtime's check (the last rule is Infinity).
  */
 export const geometryProfileJson = (profile: GeometryProfile): string => infinityJson(profile);
 
 /**
- * `JSON.stringify(value, null, 2)` と同じ形で、`Infinity` だけを `1e999` と書く（{@link geometryProfileJson}
- * と同じ綴り — 注入した表を載せる記録〈GPU lab の Anima の JSON〉も表の値を null に落とさない）。綴りは
- * fingerprint.ts の `INFINITY_JSON`（照合キーの正規の JSON と 1 つ）。
+ * The same shape as `JSON.stringify(value, null, 2)`, writing only `Infinity` as `1e999` (the same
+ * spelling as {@link geometryProfileJson} — records that carry an injected table (the GPU lab's
+ * Anima JSON; GPU lab removed in 0.15) do not drop the table's values to null either). The spelling
+ * is fingerprint.ts's `INFINITY_JSON` (one and the same with the canonical JSON of the matching
+ * keys).
  */
 export const infinityJson = (value: unknown): string => {
   const plain = JSON.stringify(value);

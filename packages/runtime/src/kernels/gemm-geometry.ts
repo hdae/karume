@@ -1,131 +1,151 @@
 /**
- * f32 / f16 GEMM 骨格（src/kernels/gemm.ts が持つ matmul / bmm / linear / 融合 attention の
- * ①QK・③PV / states 形 attention の ①ₜ・③ₜ / conv1d / conv2d / conv3d の implicit GEMM）が
- * 共有する**タイル幾何のパラメタ面**。
+ * The **tile-geometry parameter surface** shared by the f32 / f16 GEMM skeleton (the matmul / bmm /
+ * linear, ①QK / ③PV of fused attention, ①ₜ / ③ₜ of states-shaped attention and the implicit GEMM of
+ * conv1d / conv2d / conv3d held by src/kernels/gemm.ts).
  *
  * ```
- * tileM = regM · wgY   （1 workgroup が持つ出力の行数 — conv1d / conv2d / conv3d の
- *                       implicit GEMM だけが 32 の変種を取る）
- * tileN = regN · wgX   （                     列数）
- * threads = wgX · wgY  （1 スレッドが regM×regN の出力を持つ）
+ * tileM = regM · wgY   (rows of output one workgroup holds — only the implicit GEMM of
+ *                       conv1d / conv2d / conv3d takes a variant of 32)
+ * tileN = regN · wgX   (columns                          )
+ * threads = wgX · wgY  (one thread holds regM×regN outputs)
  * ```
  *
- * ## なぜパラメタにしてよいか（数値契約との関係）
+ * ## Why parameterising is allowed (relation to the numeric contract)
  *
- * MUST: 幾何が決めてよいのは**どのスレッドがどの出力を担当するか**だけ。1 出力要素あたりの
- * K 縮約順（外側 `t` 昇順・内側 `kk` 昇順）と積和式の字面（`acc = acc + a * b`）は幾何に
- * よらず不変で、ここが ADR 0022 決定 3 の数値契約そのもの（i8a8 の i32 縮約と違い f32 の
- * 加算は順序依存なので、担当割り以外を触ると値が動く）。
- * MUST: 幾何は**パイプラインキーに載せる**（{@link gemmGeometryKeyPart}）。載せないと
- * 「同一キー → バイト同一 WGSL」の決定性が崩れる。
- * MUST: 概念が重なっても i8a8 側（src/kernels/i8a8-geometry.ts）と実装を共有しない。
- * あちらは整数縮約が順序非依存だからこそ幾何が自由で、こちらは f32 縮約の担当割りだけが
- * 自由 — 数値契約が別物なので、独立していること自体が不変条件になっている。
+ * MUST: the geometry may decide only **which thread handles which output**. The K reduction order
+ * per output element (outer `t` ascending, inner `kk` ascending) and the literal form of the
+ * multiply-add (`acc = acc + a * b`) do not change with the geometry, and that is the numeric
+ * contract of ADR 0022 decision 3 itself (unlike the i32 reduction of i8a8, f32 addition is
+ * order-dependent, so touching anything other than the work assignment moves the values).
+ * MUST: the geometry **goes into the pipeline key** ({@link gemmGeometryKeyPart}). Without it the
+ * determinism "same key → byte-identical WGSL" breaks.
+ * MUST: even where the concepts overlap, do not share the implementation with the i8a8 side
+ * (src/kernels/i8a8-geometry.ts). There the geometry is free precisely because integer reduction is
+ * order-independent; here only the work assignment of the f32 reduction is free — the numeric
+ * contracts differ, so being independent is itself an invariant.
  *
- * ## 既定の出どころ
+ * ## Where the default comes from
  *
- * {@link defaultGemmGeometry} が唯一の選択点。RTX 3080 Ti の E2E 実測（ABBA 回文・冷却
- * 規約つき — docs/research/2026-08-10-f32-geometry-probe.md）で、64×64 掃引の最良
- * `r8×4 wg16×8` に対しタイル軸 128 の `M128N128 r8×8 wg16×16`（256 スレッド・共有 16KB）が
- * さらに f16-1024 ×1.17（w8a8-s16-1024 は中立）。効いた順は「レジスタブロック第一
- * （regM·regN = 32 → 64）・タイル辺第二」で i8a8 側の掃引と同じだが、最良のタイル形は
- * i8a8（M128N64）と**一致しない** — 幾何の答えは経路ごとの実測でしか出ない。
- * いずれの幾何でも PNG / WAV の sha256 門はビット同一（実測命題 — ADR 0022 追記）。
+ * {@link defaultGemmGeometry} is the only selection point. In end-to-end measurement on an RTX 3080
+ * Ti (ABBA palindrome with the cool-down rule — docs/research/2026-08-10-f32-geometry-probe.md),
+ * against `r8×4 wg16×8`, the best of the 64×64 sweep, `M128N128 r8×8 wg16×16` with tile axis 128
+ * (256 threads, 16KB shared) gave a further ×1.17 on f16-1024 (w8a8-s16-1024 neutral). What
+ * mattered, in order, was "first the register block (regM·regN = 32 → 64), second the tile edge",
+ * the same as in the i8a8 sweep, but the best tile shape **does not match** i8a8's (M128N64) — the
+ * answer on geometry comes only from measurement per path.
+ * With every geometry the PNG / WAV sha256 checks are bit-identical (an empirical claim — ADR 0022
+ * addendum).
  *
- * ## 形状バケット
+ * ## Shape buckets
  *
- * 既定は M ≥ 128 を前提にした形なので、skinny-M（M < 128）だけ {@link gemmGeometryForRows} が
- * 別の幾何を返す。**選択は静的な shape の純関数**（実行時オートチューンは ADR 0022 で禁止）で、
- * 返り値はそのままキーに載るため「同一キー → バイト同一 WGSL」は保たれる。
+ * The default is a shape that assumes M ≥ 128, so only for skinny M (M < 128) does
+ * {@link gemmGeometryForRows} return another geometry. **The selection is a pure function of the
+ * static shape** (run-time autotuning is banned by ADR 0022), and the return value goes into the key
+ * as is, so "same key → byte-identical WGSL" is kept.
  *
- * NOTE: 上の「唯一の選択点」の射程は**この骨格の内側**（どの幾何でタイルを切るか）。linear は
- * M=1 × i4 でこの骨格自体を使わない別族（{@link "./linear-gemv.ts"} の GEMV — ADR 0082）を
- * 持ち、族の選択は `src/runtime/recipe-builders/linear.ts` の `buildLinear` 1 箇所にある。段が 2 つに
- * なっても純関数であることとキーに載ることは両段とも変わらない（ADR 0082 決定 2）。
+ * NOTE: the reach of "the only selection point" above is **inside this skeleton** (which geometry
+ * cuts the tiles). linear has another family that does not use this skeleton at all for M=1 × i4
+ * (the GEMV of {@link "./linear-gemv.ts"} — ADR 0082), and family selection lives in one place,
+ * `buildLinear` in `src/runtime/recipe-builders/linear.ts`. With two stages, both stages remain pure
+ * functions and both still go into the key (ADR 0082 decision 2).
  */
 
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
 /**
- * conv2d の m タイルヒューリスティック（`conv2dIgemmMTile`）の基準行数。既定幾何の
- * tileM（128）とは別物 — conv2d は出力チャネル数が小さいので m タイルを 64 / 32 に抑える。
+ * The base row count of the conv2d m-tile heuristic (`conv2dIgemmMTile`). Different from the tileM
+ * (128) of the default geometry — conv2d has few output channels, so it keeps the m tile at 64 / 32.
  *
- * MUST: **実タイル辺の正本は幾何**（{@link gemmTileM} / {@link gemmTileN}）。この定数は
- * ヒューリスティックの語彙で、生成・dispatch が辺として直接読むと幾何と食い違いうる値が
- * 2 つになる。
+ * MUST: **the canonical source of the actual tile edges is the geometry** ({@link gemmTileM} /
+ * {@link gemmTileN}). This constant is vocabulary of the heuristic; if generation or dispatch read
+ * it directly as an edge, there would be 2 values that can disagree with the geometry.
  */
 export const GEMM_TILE = 64;
 
 /**
- * K タイル幅。**幾何ではなく数値契約**（ADR 0022 の MUST）なので {@link GemmGeometry} には
- * 入れない — 変えると 1 出力要素あたりの加算の刻みが動く。
+ * K tile width. It is **not geometry but numeric contract** (ADR 0022's MUST), so it is not part of
+ * {@link GemmGeometry} — changing it moves the step of the additions per output element.
  */
 export const GEMM_TILE_K = 16;
 
-/** vec4 の成分数。共有 B タイルの束ね方と入出力の quad 読み書きの粒度で、**幾何とは別軸**。 */
+/**
+ * Components of a vec4. The granularity of how the shared B tile is grouped and of quad reads and
+ * writes of inputs and outputs — **an axis separate from the geometry**.
+ */
 export const GEMM_QUAD = 4;
 
-/** K タイルあたりの quad 数（A / W タイル充填のスレッド割当に使う）。 */
+/** Quads per K tile (used for the thread assignment of the A / W tile fill). */
 export const GEMM_K_QUADS = GEMM_TILE_K / GEMM_QUAD;
 
 /**
- * 生成パラメタ。出力タイル辺は `regM · wgY` × `regN · wgX` で**導出**する
- * （タイル辺を独立に持つと食い違いうる値が 2 つになる — i8a8 側と同じ規律）。
+ * Generation parameters. The output tile edges are **derived** as `regM · wgY` × `regN · wgX`
+ * (holding the tile edges independently gives 2 values that can disagree — the same discipline as
+ * the i8a8 side).
  */
 export type GemmGeometry = {
-  /** 1 スレッドが持つ出力の行数。 */
+  /** Rows of output one thread holds. */
   readonly regM: number;
-  /** 1 スレッドが持つ出力の列数（`acc` を vec4 に束ねる都合で {@link GEMM_QUAD} の倍数）。 */
+  /**
+   * Columns of output one thread holds (a multiple of {@link GEMM_QUAD}, because `acc` is grouped
+   * into vec4).
+   */
   readonly regN: number;
-  /** workgroup の x 辺（列方向）。 */
+  /** x edge of the workgroup (column direction). */
   readonly wgX: number;
-  /** workgroup の y 辺（行方向）。 */
+  /** y edge of the workgroup (row direction). */
   readonly wgY: number;
 };
 
-/** 出力タイルの行数。dispatch の y は `ceil(m / tileM)`。 */
+/** Rows of the output tile. The dispatch's y is `ceil(m / tileM)`. */
 export const gemmTileM = (geometry: GemmGeometry): number => geometry.regM * geometry.wgY;
 
-/** 出力タイルの列数。dispatch の x は `ceil(n / tileN)`。 */
+/** Columns of the output tile. The dispatch's x is `ceil(n / tileN)`. */
 export const gemmTileN = (geometry: GemmGeometry): number => geometry.regN * geometry.wgX;
 
-/** 1 workgroup のスレッド数。 */
+/** Threads per workgroup. */
 export const gemmThreads = (geometry: GemmGeometry): number => geometry.wgX * geometry.wgY;
 
-/** 1 スレッドが持つ列 quad 数（`acc{行}_{列 quad}` の列側の本数）。 */
+/** Column quads one thread holds (the column-side count of `acc{row}_{column quad}`). */
 export const gemmQuadsPerThread = (geometry: GemmGeometry): number => geometry.regN / GEMM_QUAD;
 
-/** 出力タイルの列 quad 数（共有 B タイルの列ストライド）。 */
+/** Column quads of the output tile (the column stride of the shared B tile). */
 export const gemmColumnQuads = (geometry: GemmGeometry): number => gemmTileN(geometry) / GEMM_QUAD;
 
 /**
- * `[行][k quad]` 配置のタイル（A / linear の W / ①QK の k / conv2d の重み）を埋めるとき、
- * 1 スロットで進む行数。1 スレッドは自分の行から この刻みで {@link gemmRowSlots} 本
- * （W 側は {@link gemmColumnSlots} 本）を受け持つ。
+ * When filling a tile laid out as `[row][k quad]` (A / linear's W / ①QK's k / conv2d's weight), the
+ * number of rows one slot advances. One thread takes {@link gemmRowSlots} entries (on the W side
+ * {@link gemmColumnSlots}) from its own row with this step.
  */
 export const gemmRowFillStride = (geometry: GemmGeometry): number =>
   gemmThreads(geometry) / GEMM_K_QUADS;
 
-/** A タイル（{@link gemmTileM} 行）を 1 スレッドが埋める本数。 */
+/** Entries of the A tile ({@link gemmTileM} rows) one thread fills. */
 export const gemmRowSlots = (geometry: GemmGeometry): number =>
   gemmTileM(geometry) / gemmRowFillStride(geometry);
 
-/** W / k タイル（出力チャネル = 列を行として読むので {@link gemmTileN} 本）の担当本数。 */
+/**
+ * Entries one thread handles in the W / k tile ({@link gemmTileN}, since output channels = columns
+ * are read as rows).
+ */
 export const gemmColumnSlots = (geometry: GemmGeometry): number =>
   gemmTileN(geometry) / gemmRowFillStride(geometry);
 
-/** `[k 行][列 quad]` 配置の dense B タイルを埋めるとき、1 スロットで進む k 行数。 */
+/**
+ * When filling a dense B tile laid out as `[k row][column quad]`, the number of k rows one slot
+ * advances.
+ */
 export const gemmQuadFillStride = (geometry: GemmGeometry): number =>
   gemmThreads(geometry) / gemmColumnQuads(geometry);
 
-/** dense B タイル（K {@link GEMM_TILE_K} 行）を 1 スレッドが埋める本数。 */
+/** Entries of the dense B tile (K {@link GEMM_TILE_K} rows) one thread fills. */
 export const gemmQuadSlots = (geometry: GemmGeometry): number =>
   GEMM_TILE_K / gemmQuadFillStride(geometry);
 
 /**
- * 幾何の整合を生成時に落とす。**割り切れない組み合わせは共有タイルの穴になる**
- * （充填が届かない語が 0 のまま内積へ入る = 例外の出ない誤値）ので、fail loudly が唯一の門。
+ * Rejects an inconsistent geometry at generation time. **A combination that does not divide evenly
+ * leaves holes in the shared tile** (words the fill does not reach enter the inner product as 0 =
+ * a wrong value with no exception), so failing loudly is the only guard.
  */
 export const assertGemmGeometry = (geometry: GemmGeometry, where: string): void => {
   const { regM, regN, wgX, wgY } = geometry;
@@ -139,7 +159,7 @@ export const assertGemmGeometry = (geometry: GemmGeometry, where: string): void 
       throw new CodegenError(`${where}: 幾何の ${name} は正整数（${value}）`);
     }
   }
-  // regN が quad の倍数なら tileN も倍数なので、v4 経路の `n4` 換算はここで従う。
+  // If regN is a multiple of the quad, so is tileN, so the `n4` conversion of the v4 path follows here.
   if (regN % GEMM_QUAD !== 0) {
     throw new CodegenError(`${where}: regN は ${GEMM_QUAD} の倍数（acc は vec4 束ね・${regN}）`);
   }
@@ -171,102 +191,112 @@ export const assertGemmGeometry = (geometry: GemmGeometry, where: string): void 
 };
 
 /**
- * パイプラインキーの幾何判別子（タイル辺の断片 `reg{tileM}x{tileN}` の後ろに付く形）。
+ * The geometry discriminator of the pipeline key (appended after the tile-edge fragment
+ * `reg{tileM}x{tileN}`).
  *
- * **タイル辺だけでは幾何が決まらない**ぶんを足す（64×64 は `r4×4 wg16×16` とも
- * `r8×4 wg16×8` とも組めるので、辺だけのキーは別物へ衝突する）。wgY は載せない —
- * `tileM / regM` で決まるので、辺と regM を載せた時点で判別力は尽きている。conv2d の
- * implicit GEMM は自前のキー（`igemm{tileM}x{tileN}…:wg{x}x{y}`）が workgroup 形を
- * 載せているので、そちらはこの断片を使わずに同じ判別力を持つ。
+ * It adds what is needed because **the tile edges alone do not determine the geometry** (64×64 can
+ * be built as `r4×4 wg16×16` or as `r8×4 wg16×8`, so a key of edges alone would collide with a
+ * different kernel). wgY is not included — it is fixed by `tileM / regM`, so once the edges and regM
+ * are in, there is nothing left to discriminate. The implicit GEMM of conv2d carries the workgroup
+ * shape in its own key (`igemm{tileM}x{tileN}…:wg{x}x{y}`), so it has the same discriminating power
+ * without this fragment.
  */
 const gemmGeometryKeyPart = (geometry: GemmGeometry): string =>
   `r${geometry.regM}x${geometry.regN}w${geometry.wgX}`;
 
 /**
- * 「タイル辺 + 幾何」のキー断片（`reg128x128r8x8w16`）。
+ * The "tile edges + geometry" key fragment (`reg128x128r8x8w16`).
  *
- * gemm.ts の `gemmKeyPart`（v4 ビットを後置する）と states 形 ①ₜ のキー
- * （src/kernels/state-attention.ts の `stateQkTiledKey`）が共有する**唯一の綴り**。2 箇所に
- * 書き写すと、幾何を足したときに片方のキーだけが判別力を失う。
+ * The **only spelling** shared by `gemmKeyPart` in gemm.ts (which appends the v4 bit) and the key of
+ * states-shaped ①ₜ (`stateQkTiledKey` in src/kernels/state-attention.ts). Copied into 2 places, only
+ * one of the keys would lose its discriminating power when a geometry parameter is added.
  */
 export const gemmGeometryTileKeyPart = (geometry: GemmGeometry): string =>
   `reg${gemmTileM(geometry)}x${gemmTileN(geometry)}${gemmGeometryKeyPart(geometry)}`;
 
-/** 生成コメント用の幾何注記（WGSL ヘッダ 1 行に載せる形）。 */
+/** Geometry note for generated comments (in a form that fits on one WGSL header line). */
 export const gemmGeometryNote = (geometry: GemmGeometry): string =>
   `レジスタ ${gemmTileM(geometry)}x${gemmTileN(
     geometry,
   )} タイル / 1 スレッド ${geometry.regM}x${geometry.regN} / wg ${geometry.wgX}x${geometry.wgY}`;
 
 /**
- * 既定の幾何を決める**唯一の純関数**。全 op 共通の 1 点で、op 別の既定は持たない
- * （必要になったら i8a8 側（{@link "./i8a8-geometry.ts"} `defaultI8a8Geometry`）と同じ形に
- * 上げられるので、今は要らない機械を足さない）。
+ * The **only pure function** that decides the default geometry. One point common to every op, with
+ * no per-op defaults (if they become necessary, this can be raised to the same shape as the i8a8
+ * side (`defaultI8a8Geometry` in {@link "./i8a8-geometry.ts"}), so no machinery that is not needed
+ * now is added).
  *
- * `M128N128 r8×8 wg16×16` の出どころはモジュール冒頭の実測。
- * MUST: 既定の変更は PNG / WAV 門の再実測とセット（ADR 0022 追記 — ビット同一は実測命題）。
+ * `M128N128 r8×8 wg16×16` comes from the measurement at the top of the module.
+ * MUST: a change of the default goes together with re-measuring the PNG / WAV checks (ADR 0022
+ * addendum — bit identity is an empirical claim).
  */
 export const defaultGemmGeometry = (): GemmGeometry => ({ regM: 8, regN: 8, wgX: 16, wgY: 16 });
 
 /**
- * 小 M バケットの候補（{@link gemmGeometryForRows} の表）。
+ * Candidates for the small-M buckets (the table of {@link gemmGeometryForRows}).
  *
- * ## なぜ M で切るか
+ * ## Why split on M
  *
- * 既定 `M128N128` は 1 workgroup が 128 行 × 128 列を持つので、**M < 128 では行タイルが 1 枚しか
- * 立たない**。dispatch 数は `ceil(n / 128)` だけになり、EmbeddingGemma（bare T=4）の実測形
- * `M=4, N ∈ {256, 768, 1152, 3072}` では workgroup が 2〜24 個 = SM を埋め切らない
- * （実測 170 dispatch で 41.3ms・242.6µs/本 — 重み転送量から見た所要の 2 桁上）。
+ * The default `M128N128` has one workgroup hold 128 rows × 128 columns, so **for M < 128 only one
+ * row tile is launched**. The dispatch count is just `ceil(n / 128)`, and on the measured shapes of
+ * EmbeddingGemma (bare T=4) `M=4, N ∈ {256, 768, 1152, 3072}` there are 2–24 workgroups = not enough
+ * to fill the SMs (measured: 170 dispatches in 41.3ms, 242.6µs each — two orders of magnitude above
+ * what the weight traffic would require).
  *
- * 行タイルが 1 枚のとき、重み `[n,k]` は**どの幾何でもちょうど 1 回ずつ**読まれる（タイルを
- * 跨いで重複しない）ので、幾何の効き所は「同じ転送量をどれだけ並列に流せるか」だけになる。
- * grid 全体のスレッド数は `n · wgY / regN`、workgroup 数は `n / tileN` なので、
- * **tileM を M の直上に抑えて wgY を稼ぎ、tileN を絞って workgroup を増やす**のが方向。
+ * With one row tile, the weight `[n,k]` is read **exactly once with every geometry** (no overlap
+ * across tiles), so the only lever the geometry has is "how parallel the same traffic can flow".
+ * The thread count of the whole grid is `n · wgY / regN` and the workgroup count is `n / tileN`, so
+ * the direction is **keep tileM just above M to gain wgY, and shrink tileN to add workgroups**.
  *
- * ## 整除の根拠（{@link assertGemmGeometry} の 5 条件）
+ * ## Why they divide evenly (the 5 conditions of {@link assertGemmGeometry})
  *
- * | 幾何 | tileM×tileN | threads | rowFillStride | quadFillStride | 共有 |
+ * | Geometry | tileM×tileN | threads | rowFillStride | quadFillStride | Shared |
  * | --- | --- | --- | --- | --- | --- |
  * | M16N16 `r1×4 wg4×16` | 16×16 | 64 | 16 | 4 | 2,048 B |
- * | 既定 M128N128 `r8×8 wg16×16` | 128×128 | 256 | 64 | 8 | 16,384 B |
+ * | default M128N128 `r8×8 wg16×16` | 128×128 | 256 | 64 | 8 | 16,384 B |
  *
- * `regN % 4 == 0`・`threads % 4`（K quad 数）`== 0`・`threads % (tileN/4)`（列 quad 数）`== 0`・
- * `tileM % rowFillStride == 0 && tileN % rowFillStride == 0`・`16 % quadFillStride == 0` を
- * 満たす。**`tileM ≥ threads / 4` が実質の上限**（行充填ストライドがタイル辺を越えられない）で、
- * tileM=16 なら threads ≤ 64、tileM=64 なら threads ≤ 256。
+ * They satisfy `regN % 4 == 0`, `threads % 4` (K quads) `== 0`, `threads % (tileN/4)` (column
+ * quads) `== 0`, `tileM % rowFillStride == 0 && tileN % rowFillStride == 0` and
+ * `16 % quadFillStride == 0`. **`tileM ≥ threads / 4` is the effective upper bound** (the row fill
+ * stride cannot exceed the tile edge): with tileM=16, threads ≤ 64; with tileM=64, threads ≤ 256.
  *
- * ## 値の出どころ（RTX 3080 Ti・2026-08-11 掃引 — docs/research/2026-08-11-skinny-m-geometry.md）
+ * ## Where the values come from (RTX 3080 Ti, sweep of 2026-08-11 — docs/research/2026-08-11-skinny-m-geometry.md)
  *
- * 候補 11 種 × EmbeddingGemma の実 linear 形状 × M ∈ {1,4,64,318,512} の ABBA 対計測
- * （全候補・全形状でビット同一を同時確認）。実 run の形状構成で重み付けした結果:
+ * ABBA paired measurement of 11 candidates × the real linear shapes of EmbeddingGemma ×
+ * M ∈ {1,4,64,318,512} (bit identity confirmed at the same time for every candidate and every
+ * shape). Results weighted by the shape mix of a real run:
  *
- * - M = 1 / 4 / 64 とも **M16N16 が対既定 ×3.0〜3.2** で、2 段目に置いていた
- *   `M64N32 r4×4 wg8×16`（×2.5）を **M=64 でも**上回った — tileM を M の直上に置いて重みの
- *   読み直しを避けるより、行タイルを 4 枚に割ってでも workgroup を増やす方が勝つ。
- *   よって M ≤ 64 のバケットは **M16N16 の 1 段だけ**（この 3 点の掃引時点の結論 — 65〜512 の
- *   バケットは下の項で後から足した）。
- * - `M16N8`（threads 32）は M16N16 と 1% 未満差の同着（3 点とも僅差で上だが規約上は同値）。
- *   タイの側は採らず、実装済み・検査済みの M16N16 を保持。
- * - M = 318 / 512 は `M64N32 r4×4 wg8×16` が ×1.67 / ×1.28 で最良（M16N16 は ×1.35 へ落ちる —
- *   行タイル 20〜32 枚の読み直しが効き始める）。65〜512 のバケットは当初 Anima / SBV2 への
- *   波及を理由に見送ったが、**両モデルの E2E A/B（ABBA・PNG/WAV 門込み）とセットで採用**
- *   （2026-08-11 波① — 実測は docs/research/2026-08-11-skinny-m-geometry.md §4）。
- * - M ≥ 513 は既定のまま。掃引の実測点は 512 までで、DiT（S = 1024 / 4096）の領域は
- *   2026-08-10 のタイル軸掃引で既定が選ばれている — 実測の無い区間を補間で埋めない。
+ * - For M = 1 / 4 / 64 alike, **M16N16 gives ×3.0–3.2 over the default** and beat
+ *   `M64N32 r4×4 wg8×16` (×2.5), which had been placed as the second step, **even at M=64** —
+ *   adding workgroups, even by splitting into 4 row tiles, wins over placing tileM just above M to
+ *   avoid re-reading the weights. So the M ≤ 64 bucket is **the single step M16N16** (the conclusion
+ *   at the time of this 3-point sweep — the 65–512 bucket was added later, see the item below).
+ * - `M16N8` (threads 32) ties with M16N16 within less than 1% (slightly ahead at all 3 points, but
+ *   equal under the rule). The tied candidate is not taken; the implemented and tested M16N16 is
+ *   kept.
+ * - For M = 318 / 512, `M64N32 r4×4 wg8×16` is best at ×1.67 / ×1.28 (M16N16 drops to ×1.35 —
+ *   re-reading 20–32 row tiles starts to matter). The 65–512 bucket was first deferred because of
+ *   its spill-over into Anima / SBV2, but was **adopted together with the end-to-end A/B of both
+ *   models (ABBA, including the PNG/WAV checks)** (phase ① of 2026-08-11 — measurements in
+ *   docs/research/2026-08-11-skinny-m-geometry.md §4).
+ * - M ≥ 513 stays at the default. The measured points of the sweep go up to 512, and for the DiT
+ *   region (S = 1024 / 4096) the default was chosen by the tile-axis sweep of 2026-08-10 — a range
+ *   without measurements is not filled by interpolation.
  */
 const GEOMETRY_M16N16: GemmGeometry = { regM: 1, regN: 4, wgX: 4, wgY: 16 };
 
 const GEOMETRY_M64N32: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
 
 /**
- * {@link gemmGeometryForRows} の表そのもの（`rows <= maxRows` で最初に当たる規則・`maxRows` は
- * 昇順・最後は上限なし）。境界 64 / 512 と各段の出どころは下の {@link gemmGeometryForRows} と
- * 上の候補表の doc。
+ * The table of {@link gemmGeometryForRows} itself (the first rule with `rows <= maxRows` applies;
+ * `maxRows` ascending; the last one has no upper bound). Where the boundaries 64 / 512 and each
+ * step come from: {@link gemmGeometryForRows} below and the doc of the candidate table above.
  *
- * MUST: 既定プロファイル（src/kernels/geometry-profile.ts の `DEFAULT_GEOMETRY_PROFILE`）の
- * `gemmRows` は**この配列をそのまま参照する**。境界や幾何を向こうへ書き写すと既定が 2 か所に
- * なり、片方だけ直したときに、プロファイル経路（matmul / bmm / linear）とこの表を直に引く経路
- * （states 形 ①ₜ / ③ₜ・分解 attention の行ブロック）が同じ M で別の幾何を選ぶ。
+ * MUST: `gemmRows` of the default profile (`DEFAULT_GEOMETRY_PROFILE` in
+ * src/kernels/geometry-profile.ts) **references this array as is**. Copying the boundaries or
+ * geometries over there would put the default in 2 places, and when only one is fixed, the profile
+ * path (matmul / bmm / linear) and the paths that read this table directly (states-shaped ①ₜ / ③ₜ,
+ * the row blocks of decomposed attention) would choose different geometries for the same M.
  */
 export const GEMM_ROWS_BUCKETS: readonly {
   readonly maxRows: number;
@@ -278,28 +308,33 @@ export const GEMM_ROWS_BUCKETS: readonly {
 ];
 
 /**
- * 行数 M から幾何を選ぶ**静的テーブル**（matmul / bmm / linear の 3 経路専用）。
+ * A **static table** that chooses the geometry from the row count M (only for the 3 paths matmul /
+ * bmm / linear).
  *
- * MUST: 純関数 = プラン時 shape だけの関数であること。実行時オートチューン（実測して選び直す）は
- * ADR 0022 で禁じている — f32 縮約は担当割りしか自由がなく、選択が実行ごとに揺れると
- * 「同一キー → バイト同一 WGSL」も PNG / WAV 門のビット同一もキーの意味も同時に崩れる。
- * MUST: **M ≥ 513 は既定をそのまま返す**。DiT（S = 1024 / 4096）の実測選定（2026-08-10
- * タイル軸掃引）を動かさない境界で、掃引の実測点（M ≤ 512）の外側を補間で埋めない。
- * MUST: 融合 attention（①QK / ③PV）はこの表を通さない。あちらの既定は Anima の実測で選ばれた
- * ものなので、M（= クエリ長）で勝手に振り替えると実測の前提が消える。
+ * MUST: a pure function = a function of plan-time shapes only. Run-time autotuning (measuring and
+ * re-choosing) is banned by ADR 0022 — the f32 reduction is free only in its work assignment, and if
+ * the choice varied per run, "same key → byte-identical WGSL", the bit identity of the PNG / WAV
+ * checks and the meaning of the key would all break at once.
+ * MUST: **for M ≥ 513 return the default as is**. This boundary keeps the measured choice for the DiT
+ * (S = 1024 / 4096) (tile-axis sweep of 2026-08-10) in place, and the range outside the sweep's
+ * measured points (M ≤ 512) is not filled by interpolation.
+ * MUST: fused attention (①QK / ③PV) does not go through this table. Its default was chosen by
+ * measurement on Anima, so switching it on M (= query length) on its own would remove the premise
+ * of that measurement.
  *
- * バケット境界 64 / 512 は掃引の実測境界（M=64 まで M16N16 が最良・M=318/512 は M64N32・
- * それより上は未実測 = 既定）。65〜512 段の採用は Anima / SBV2 の E2E A/B（ABBA・門込み）で
- * 退行なしを確認した上でのもの（research doc §4）。
+ * The bucket boundaries 64 / 512 are the measured boundaries of the sweep (M16N16 is best up to
+ * M=64, M64N32 at M=318/512, above that unmeasured = default). The 65–512 step was adopted after the
+ * end-to-end A/B of Anima / SBV2 (ABBA, including the checks) confirmed no regression (research doc
+ * §4).
  *
- * NOTE: これは**既定プロファイルの表**。Session の matmul / bmm / linear は adapter ごとの
- * プロファイル（src/kernels/geometry-profile.ts の `gemmRowsGeometry`）を引き、既定プロファイルは
- * この表（{@link GEMM_ROWS_BUCKETS}）をそのまま持つ。選択は「shape × adapter の静的な表」で、
- * 実行時オートチューン禁止は不変（DECIDED: ADR 0115）。
+ * NOTE: this is **the table of the default profile**. A Session's matmul / bmm / linear read the
+ * per-adapter profile (`gemmRowsGeometry` in src/kernels/geometry-profile.ts), and the default
+ * profile holds this table ({@link GEMM_ROWS_BUCKETS}) as is. The selection is "a static table of
+ * shape × adapter", and the ban on run-time autotuning is unchanged (DECIDED: ADR 0115).
  */
 export const gemmGeometryForRows = (rows: number): GemmGeometry => {
   assertU32Params("幾何の選択", { "行数 M": rows });
-  // 最後の段は上限なし（Infinity）なので、u32 の行数は必ずどれかの段に当たる。
+  // The last step has no upper bound (Infinity), so a u32 row count always hits one of the steps.
   const bucket =
     GEMM_ROWS_BUCKETS.find((rule) => rows <= rule.maxRows) ??
     GEMM_ROWS_BUCKETS[GEMM_ROWS_BUCKETS.length - 1];
@@ -307,13 +342,14 @@ export const gemmGeometryForRows = (rows: number): GemmGeometry => {
 };
 
 /**
- * f32 accumulator の初期化。**配列 1 本ではなく `acc{行}_{列 quad}` の名前付き変数**にするのは、
- * `acc[i]` の動的添字がアドレス可能な関数ローカル領域を要求し、レジスタに載らずローカル
- * メモリへ落ちるため（Metal で顕著）。展開しても K タイル幅・`t` / `kk` の昇順・1 出力要素
- * あたりの加算順序は変わらない（出力ごとに独立な縮約を名前へ割り当て直すだけ）。
+ * Initialisation of the f32 accumulator. It uses **named variables `acc{row}_{column quad}` rather
+ * than one array** because the dynamic index of `acc[i]` requires an addressable function-local
+ * region, which does not stay in registers and spills to local memory (pronounced on Metal).
+ * Unrolled, the K tile width, the ascending `t` / `kk` and the addition order per output element do
+ * not change (the reductions, independent per output, are only reassigned to names).
  *
- * `init` は 1 行ぶんの初期値式（既定は 0）。conv1d / conv2d の implicit GEMM だけが **bias-first**（ADR 0024 の MUST）で
- * 行 = 出力チャネルの bias を差し込む。
+ * `init` is the initial-value expression for one row (default 0). Only the implicit GEMM of conv1d /
+ * conv2d inserts the bias of row = output channel, **bias-first** (ADR 0024's MUST).
  */
 export const gemmAccumulatorInit = (
   geometry: GemmGeometry,

@@ -1,15 +1,19 @@
 /**
- * 埋め込みの幾何プロファイルの一覧（DECIDED: ADR 0115 — 選択は src/kernels/geometry-profile.ts の
- * `selectGeometryProfile`）。
+ * The list of embedded geometry profiles (DECIDED: ADR 0115 — selection is `selectGeometryProfile`
+ * in src/kernels/geometry-profile.ts).
  *
- * MUST: 既定プロファイル（`DEFAULT_GEOMETRY_PROFILE`）は**含めない** — 既定はどれにも当たらない
- * adapter の受け皿で、一覧に入れると `match` 空の表が 2 本になる（選択が落とす）。
- * MUST: 並べるのは掃引から生成した `./<id>.ts` の定数だけ（副作用なし・配列リテラル 1 本）。
- * 並び順は選択に効かない（同じ順位に 2 本当たる一覧は選択が落とす）。
+ * MUST: the default profile (`DEFAULT_GEOMETRY_PROFILE`) is **not included** — the default is the
+ * fallback for an adapter that matches nothing, and listing it would give two tables with an empty
+ * `match` (selection rejects that).
+ * MUST: list only the constants of the `./<id>.ts` modules generated from sweeps (no side effects, a
+ * single array literal). The order does not affect selection (selection rejects a list where two
+ * tables match at the same rank).
  *
- * 一覧は公開面（mod.ts）から出るので、配列も各表も深く凍結した**複製**を置く — アプリが一覧の表を
- * 書き換えると、同じ realm の全 Session の自動選択が黙って別の幾何になる。凍結は読み込み時の副作用では
- * ない: 各 `./<id>.ts` の定数には触れず、新しいオブジェクトを組んで凍結するだけの純粋な構築。
+ * The list leaves the public surface (mod.ts), so the array and every table are deeply frozen
+ * **copies** — if an application rewrote a table of the list, automatic selection for every Session in
+ * the same realm would silently switch to another geometry. The freezing is not an import-time side
+ * effect: it does not touch the constants of each `./<id>.ts`; it is a pure construction that builds
+ * new objects and freezes them.
  */
 
 import type { GemmGeometry } from "../gemm-geometry.ts";
@@ -19,12 +23,13 @@ import { APPLE_METAL_3 } from "./apple-metal-3.ts";
 import { NVIDIA_BLACKWELL } from "./nvidia-blackwell.ts";
 
 /**
- * 表 1 本の深く凍結した複製（引数は書き換えない純関数）。
+ * A deeply frozen copy of one table (a pure function that does not modify its argument).
  *
- * NOTE: geometry-profile.ts に置かないのは、あちらがこの一覧を値として import する（選択の既定引数）
- * 循環のため — この module が先に評価される import 順では、あちらの `const` がまだ初期化前で落ちる。
- * 幾何はどれも数だけの平たいオブジェクトなので、1 段の複製で深い。`provenance` は `adapter` の 1 段と
- * `userAgent`（文字列の配列）を入れ子に持つので、そこも複製して凍結する。
+ * NOTE: it does not live in geometry-profile.ts because of a cycle: that module imports this list as a
+ * value (the default argument of selection) — with an import order that evaluates this module first,
+ * that module's `const` is not yet initialised and access throws. Every geometry is a flat object of
+ * numbers only, so a one-level copy is already deep. `provenance` nests one level in `adapter` and
+ * `userAgent` (an array of strings), so those are copied and frozen too.
  */
 const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
   const geometry = <T extends GemmGeometry | I8a8Geometry>(value: T): T =>

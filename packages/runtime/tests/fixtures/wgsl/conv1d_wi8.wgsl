@@ -1,4 +1,4 @@
-// karume conv1d (x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout], f32, 重み i8 格納, 直接畳み込み)
+// karume conv1d (x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout], f32, 重み i8 格納, direct convolution)
 struct Dims {
   n: u32,
   batch: u32,
@@ -20,8 +20,8 @@ struct Dims {
 
 @group(0) @binding(5) var<storage, read> wscale: array<f32>;
 
-// i8 格納の展開: 要素 i = f32(unpack4xI8(w[i / 4])[i % 4]) · scale
-// （平坦添字で語と位置を割る。scale は出力チャネルごと — ADR 0019）
+// decode of i8 storage: element i = f32(unpack4xI8(w[i / 4])[i % 4]) · scale
+// (the flat index gives the word and the position. The scale is per output channel — ADR 0019)
 fn dequant(i: u32, scale: f32) -> f32 {
   return f32(unpack4xI8(w[i >> 2u])[i & 3u]) * scale;
 }
@@ -32,7 +32,7 @@ fn main(
   @builtin(num_workgroups) nwg: vec3<u32>,
 ) {
   let step = nwg.x * 256u;
-  // 契約検査（src/ops.ts）で groups は Cin / Cout を割り切る — 除算は厳密。
+  // The contract check (src/ops.ts) guarantees groups divides Cin / Cout — the division is exact.
   let in_per_group = dims.channels_in / dims.groups;
   let out_per_group = dims.channels_out / dims.groups;
   var i = gid.x;
@@ -42,12 +42,12 @@ fn main(
     let rest = i % plane;
     let oc = rest / dims.length_out;
     let ox = rest % dims.length_out;
-    // 入力側の開始位置は符号付き（padding ぶん負に出る）
+    // the start position on the input side is signed (it goes negative by the padding)
     let origin = i32(ox * dims.stride) - i32(dims.padding);
-    // 重みの第 2 軸は Cin/groups — グループ内の相対番号で引く
+    // the weight's second axis is Cin/groups — indexed by the relative number within the group
     let group_index = oc / out_per_group;
     let ic_base = group_index * in_per_group;
-    // 出力チャネルの scale はループ不変 — 重みの要素ごとに引き直さない（ADR 0019）
+    // the output channel's scale is loop-invariant — not re-read per weight element (ADR 0019)
     let wscale_v = wscale[oc];
     var acc = bias[oc];
     for (var ic_rel = 0u; ic_rel < in_per_group; ic_rel = ic_rel + 1u) {
@@ -55,7 +55,7 @@ fn main(
       let w_base = (oc * in_per_group + ic_rel) * dims.kernel;
       for (var k = 0u; k < dims.kernel; k = k + 1u) {
         let ix = origin + i32(k * dims.dilation);
-        // padding 域は 0 詰め — 加算せずに読み飛ばす
+        // the padding region is zero-filled — skipped rather than added
         if (ix >= 0 && u32(ix) < dims.length_in) {
           acc = acc + x[x_base + u32(ix)] * dequant(w_base + k, wscale_v);
         }

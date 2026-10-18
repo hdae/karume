@@ -1,9 +1,10 @@
 /**
- * 保存した表を当ててよいかの照合（DECIDED: ADR 0117 決定 5）。
+ * Matching: whether a saved table may be applied (DECIDED: ADR 0117 decision 5).
  *
- * runtime は注入時に照合しない（ADR 0115 追記決定 6 — 別の機の表を当てて A/B する用途を残す）。照合は
- * 純関数で公開し、呼ぶかどうかと不一致のときの打つ手（既定で走る・再掃引する・利用者に知らせる）はアプリが
- * 決める（`sessionOptionsViolation` と同じ流儀）。
+ * The runtime does not match at injection (ADR 0115 addendum decision 6 — keeps the use of applying
+ * another machine's table for an A/B). Matching is exposed as a pure function; the application
+ * decides whether to call it and what to do on a mismatch (run with the default, re-sweep, tell the
+ * user) — the same style as `sessionOptionsViolation`.
  */
 import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import { geometryProfileKernelsId, KernelsIdError, sweepCaseSetId } from "./fingerprint.ts";
@@ -11,27 +12,33 @@ import { geometryProfileKernelsId, KernelsIdError, sweepCaseSetId } from "./fing
 const ADAPTER_FIELDS = ["vendor", "architecture", "device", "description"] as const;
 
 /**
- * 表 `profile` をこの adapter と今の runtime に当ててよいか。最初の不一致の文言を返し、全て一致なら
- * `undefined`。投げない。
+ * Whether the table `profile` may be applied to this adapter and the current runtime. Returns the
+ * message of the first mismatch, or `undefined` when everything matches. Does not throw.
  *
- * 照合する物（全て文字列の完全一致・この順）:
- * 1. `provenance` があること（無い表 = 手書きの表 → 照合の材料が無い）。
- * 2. adapter の 4 欄（`vendor` / `architecture` / `device` / `description` — 空文字も値として比べる）。
- * 3. カーネルの指紋（今の runtime で表から導き直した値と `provenance.kernels`）。
- * 4. ケース集合の版（今の runtime の値と `provenance.caseSet`）。
+ * What is compared (all by exact string equality, in this order):
+ * 1. `provenance` is present (a table without it = a hand-written table → nothing to match
+ *    against).
+ * 2. The four adapter fields (`vendor` / `architecture` / `device` / `description` — empty strings
+ *    are compared as values too).
+ * 3. The kernel fingerprint (the value re-derived from the table by the current runtime vs
+ *    `provenance.kernels`).
+ * 4. The case-set version (the current runtime's value vs `provenance.caseSet`).
  *
- * 照合しない物: `candidateSet`（quick+ の表で足りるかはアプリの判断）・`match`（注入は `match` を見ない）・
- * ブラウザやドライバの版（取れる情報が無い — 更新で黙って遅くなりうるので、再掃引は利用者の明示操作で）。
+ * Not compared: `candidateSet` (whether a quick+ table suffices is the application's call), `match`
+ * (injection does not look at `match`), browser and driver versions (no information is available —
+ * an update may silently slow things down, so re-sweeping is an explicit action of the user).
  *
- * 限界: フラグ無しの Chrome は `device` と `description` を空で返し、Apple M2 と M5 は同じ 4 欄になる。
- * その 2 機の間で表を持ち運んだことはこの関数では検出できない。
+ * Limit: Chrome without flags returns empty `device` and `description`, so Apple M2 and M5 have the
+ * same four fields. This function cannot detect a table carried between those two machines.
  *
- * 指紋の導出に GPU は要らないが、掃引の全ケースで codegen を回す（約 1 MB の WGSL）。表の幾何から掃引の
- * shape のカーネルを組めない（codegen の門に落ちる・dispatch 数が上限を超える）表は、その理由を返す。
+ * Deriving the fingerprint needs no GPU, but it runs codegen over every sweep case (about 1 MB of
+ * WGSL). A table whose geometry cannot build the kernels of the sweep shapes (it fails a codegen
+ * check, or the dispatch count exceeds the limit) returns that reason.
  */
 export const geometryProfileMismatch = (
   profile: GeometryProfile,
-  // 照合する adapter の欄だけを要求する（`GPUAdapterInfo`・`GpuContext.adapterInfo` はそのまま渡せる）
+  // Requires only the adapter fields that are compared (`GPUAdapterInfo` and
+  // `GpuContext.adapterInfo` can be passed as is)
   adapterInfo: Pick<GPUAdapterInfo, "vendor" | "architecture" | "device" | "description">,
 ): string | undefined => {
   const { provenance } = profile;
@@ -49,8 +56,9 @@ export const geometryProfileMismatch = (
   try {
     kernels = geometryProfileKernelsId(profile);
   } catch (cause) {
-    // 表の幾何が今の codegen の門か dispatch 数の上限に落ちる — 当てると Session 構築で落ちる表なので、
-    // 投げずに不一致として返す（他の例外は実装の誤りなのでそのまま伝える）
+    // The table's geometry fails the current codegen checks or the dispatch-count limit — a table
+    // that would fail Session construction if applied, so return it as a mismatch instead of
+    // throwing (other exceptions are implementation errors and propagate as is)
     if (cause instanceof KernelsIdError) {
       return `表 '${profile.id}' の幾何から掃引の shape のカーネルを組めない（${cause.message}）`;
     }

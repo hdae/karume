@@ -1,21 +1,25 @@
 /**
- * cumsum（最終次元の前縁和 `out[…, j] = Σ_{i ≤ j} x[…, i]`、f32）の固定カーネル。
+ * The fixed kernel of cumsum (prefix sum over the last dimension `out[…, j] = Σ_{i ≤ j} x[…, i]`,
+ * f32).
  *
- * 入力は先行次元を平坦化した `[rows, dim]` の連続レイアウトで、出力も同形・連続。
+ * The input is a contiguous `[rows, dim]` layout with the leading dimensions flattened; the output
+ * has the same shape and is contiguous.
  *
- * **1 invocation = 1 行の逐次走査**にしている（行 reduce の「1 workgroup = 1 行 + 木状の
- * 縮約」とは別の形）。理由は実測の行長: spline の cumwidths / cumheights は bins ≈ 10 で
- * （recon §2）、Hillis–Steele や Blelloch の並列スキャンを持ち込むと 1 行あたり
- * log2(dim) 回の workgroupBarrier を払って 10 要素を畳むことになり、逐次より遅いうえに
- * 実装の複雑さ（バリアの一様性・行の跨ぎ）だけが増える。行数の方が並列度の源なので、
- * **行方向を grid-stride** で回す。
+ * It uses **one invocation = a sequential scan of one row** (a different form from the row
+ * reduce's "one workgroup = one row + tree reduction"). The reason is the measured row length: the
+ * spline's cumwidths / cumheights have bins ≈ 10 (recon §2), and a Hillis–Steele or Blelloch
+ * parallel scan would pay log2(dim) workgroupBarriers per row to fold 10 elements — slower than
+ * sequential, adding only implementation complexity (barrier uniformity, crossing rows). The row
+ * count is the source of parallelism, so **rows go through a grid-stride**.
  *
- * MUST: 行長が伸びる需要（数千要素の行）が実測に出たら、この選択は見直すこと。逐次走査は
- * 1 行あたり O(dim) を 1 スレッドで払う形で、dim が大きいと並列度が行数だけになる。
- * MUST: grid-stride ループ前提。1 次元の dispatch 上限（仕様既定 65535）は実モデルで超える。
- * MUST: 累積は**前から**（`out[j]` は `x[0..j]` の和）。逆向きに書いても shape も要素数も
- * 変わらないため、方向の取り違えは値でしか検出できない（tests/gpu_ops_test.ts が
- * 非対称な列で固定する）。
+ * MUST: if demand for longer rows (rows of thousands of elements) shows up in measurement, revisit
+ * this choice. The sequential scan pays O(dim) per row on one thread, and with a large dim the
+ * parallelism is only the row count.
+ * MUST: grid-stride loop. Real models exceed the one-dimensional dispatch limit (spec default
+ * 65535).
+ * MUST: the accumulation runs **from the front** (`out[j]` is the sum of `x[0..j]`). Writing it
+ * backwards changes neither the shape nor the element count, so a mixed-up direction is detectable
+ * only in the values (tests/gpu_ops_test.ts pins it with an asymmetric sequence).
  */
 
 import { assertU32Params } from "../codegen/params.ts";
@@ -57,8 +61,9 @@ export const CUMSUM_WGSL: string = [
 ].join("\n");
 
 /**
- * uniform の Params（行 op 族と同じ 2 語）。2 語ぶんの内容でも 16 バイト確保する（16 バイト単位の
- * 確保はプロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
+ * The uniform Params (the same two words as the row-op family). 16 bytes are allocated even for
+ * two words of content (allocating in 16-byte units is a project convention (the fusion pass fixes
+ * the same form in ADR 0040), not a requirement of the specification).
  */
 export const cumsumParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("cumsum params", { rows, dim });

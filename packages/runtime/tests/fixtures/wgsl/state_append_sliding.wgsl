@@ -1,4 +1,4 @@
-// karume state_append (今 step の k / v を state スロットへ, f32, sliding window のリング書込み)
+// karume state_append (this step's k / v into the state slot, f32, sliding window のリング書込み)
 struct Params {
   kv_planes: u32,
   chunk_rows: u32,
@@ -26,7 +26,7 @@ fn main(
 ) {
   let past = lengths.past;
   let query = lengths.query;
-  // 総仕事は **B·Hkv·Q·D**（pad 行は添字空間に入らない = 書かれない）
+  // Total work is **B·Hkv·Q·D** (pad rows are not in the index space = not written)
   let total = params.kv_planes * query * params.depth;
   let stride = nwg.x * 256u;
   var i = gid.x;
@@ -37,9 +37,10 @@ fn main(
     let kv_plane = rest / query;
     let src = (kv_plane * params.chunk_rows + row) * params.depth + d;
     let dst = (kv_plane * params.capacity + slot_row(past + row)) * params.depth + d;
-    // ring が一周する Q > C では同じ物理行へ複数の論理行が写る。**最後の論理行だけ**が
-    // 書く（全行を並列に書かせると勝者が実装依存 = 沈黙の非決定性）。法は slot_row と同じ
-    // **capacity**（window で切ると C > W のとき誰とも alias しない行が黙って書かれない）
+    // With Q > C the ring wraps and several logical rows map to the same physical row. **Only
+    // the last logical row** writes (letting every row write in parallel makes the winner
+    // implementation-dependent = silent nondeterminism). The modulus is **capacity**, as in
+    // slot_row (cutting by window would, when C > W, silently skip rows that alias nothing)
     if (row + params.capacity >= query) {
       slot[dst] = x[src];
     }

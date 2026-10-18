@@ -1,58 +1,71 @@
 /**
- * GRU の**隠れ側スキャン**（op `gru_scan` / `gru_scan_reverse`・第 2 層 — ADR 0056）の
- * f32 固定カーネル。入力側 GEMM は呼び手が既存 `linear` で用意する（この op は持たない）。
+ * The fixed f32 kernel of the GRU **hidden-side scan** (ops `gru_scan` / `gru_scan_reverse`, an
+ * extended composite op — ADR 0056). The caller prepares the input-side GEMM with the existing
+ * `linear` (this op does not include it).
  *
  * ```
- * gh      = W_hh · h + b_hh                     // [3H]（bias は last = GEMM の epilogue 形）
+ * gh      = W_hh · h + b_hh                     // [3H] (bias last = the GEMM epilogue form)
  * r       = sigmoid(gh_r + gi_r)
  * z       = sigmoid(gh_z + gi_z)
  * n       = tanh(gi_n + gh_n · r)
  * h'      = (h − n) · z + n
  * ```
  *
- * MUST: 演算の**並びと括り方は torch の GRU 分解の逐語**（ADR 0056 決定 3）。数学的に同値な
- * `(1 − z)·n + z·h` は f32 で別の丸め列になる（10 万要素中 44,345 件がビット不一致の実測）。
- * ゲートの足し順（隠れ側が第 1 引数）と `n` の積の順（`gh_n · r`）も分解形に合わせる。
- * MUST: bias は **last**（`(Σ W·h) + b`）。conv 系の bias-first（ADR 0024）を写すと丸めの
- * 並びが変わり、分解経路の `linear` とのビット同一が崩れる。
- * MUST: 縮約は `k` 昇順の逐次で、字面も `acc = acc + w * h`（GEMM と同じ形 — src/kernels/gemm.ts
- * の `accumulatorUpdate`）。GEMM は K タイル 16 で分割するが 1 出力あたりの加算順は k 昇順の
- * ままなので、この素の逐次ループと丸め列が一致する。
- * MUST: `sigmoid` の本体は elementwise codegen と**同じ文字列**を共有する（silu.ts と同じ理由 —
- * 書き写すと primitive と融合版で丸め列が割れうる）。
+ * MUST: **the order and grouping of the operations follow torch's GRU decomposition verbatim**
+ * (ADR 0056 decision 3). The mathematically equivalent `(1 − z)·n + z·h` gives a different rounding
+ * sequence in f32 (measured: 44,345 of 100,000 elements differ in bits). The order of the gate sums
+ * (hidden side as the first operand) and of the `n` product (`gh_n · r`) also match the
+ * decomposition.
+ * MUST: bias is **last** (`(Σ W·h) + b`). Copying the conv family's bias-first (ADR 0024) changes
+ * the rounding sequence and breaks bit identity with the decomposed path's `linear`.
+ * MUST: the reduction runs sequentially in ascending `k`, spelled `acc = acc + w * h` (the same
+ * form as GEMM — `accumulatorUpdate` in src/kernels/gemm.ts). GEMM splits by K tiles of 16, but the
+ * addition order per output stays ascending in k, so the rounding sequence matches this plain
+ * sequential loop.
+ * MUST: the body of `sigmoid` shares **the same string** as the elementwise codegen (the same
+ * reason as silu.ts — a copy could split the rounding sequence between the primitive and the fused
+ * version).
  *
- * MUST: `tanh` の本体も elementwise codegen の `TANH_STABLE_WGSL` を**同じ文字列**で共有する
- * （sigmoid と同じ理由）。素の組込 `tanh` は `(exp(2x)−1)/(exp(2x)+1)` で計算する実装
- * （Metal fast-math）で |gi_n + gh_n·r| > 44.36 の沈黙 NaN になり、分解経路（tanh_stable 済み）
- * とのビット同一も飽和域で割れる。配布資産の実測は前活性 最大 17.81 で飽和域 9.5 を既に
- * 踏んでいる（NaN 境界への静的上界は層 1 で 31.57 — docs/research/2026-08-31-op-numerics-review.md）。
- * 打ち切りは IEEE 忠実な tanh に対してビット同一（根拠は TANH_STABLE_WGSL の doc）。
+ * MUST: the body of `tanh` also shares `TANH_STABLE_WGSL` of the elementwise codegen as **the same
+ * string** (the same reason as sigmoid). A plain built-in `tanh` computed as
+ * `(exp(2x)−1)/(exp(2x)+1)` (Metal fast-math) silently produces NaN for |gi_n + gh_n·r| > 44.36,
+ * and bit identity with the decomposed path (already tanh_stable) also breaks in the saturation
+ * range. Measured on the distributed assets, the pre-activation reaches 17.81, already in the
+ * saturation range 9.5 (the static upper bound towards the NaN boundary is 31.57 in layer 1 —
+ * docs/research/2026-08-31-op-numerics-review.md). The clamp is bit-identical to an IEEE-faithful
+ * tanh (the grounds are in the doc of TANH_STABLE_WGSL).
  *
- * ## 丸め障壁（workgroup memory 往復）
+ * ## Rounding barrier (workgroup memory round trip)
  *
- * `a * b + c` を 1 式で書くと **fma へ縮約される**（本ワークツリーの実 GPU 実測: 65,536 要素中
- * 15,371 件が mul / add 2 dispatch の結果とビット不一致。`let p = a * b;` と名前を付けても
- * 結果は同じで、`bitcast` の往復でも止まらない）。分解経路は `mul` と `add` が別 dispatch =
- * storage 往復なので縮約されない。そこで **積を workgroup memory へ書いて barrier 後に読み戻す**
- * ことで明示的な materialization 点を残す（silu.ts の技法・同実測で不一致 0）。
+ * Writing `a * b + c` as one expression **gets contracted to an fma** (measured on a real GPU in
+ * this worktree: 15,371 of 65,536 elements differ in bits from the result of two dispatches, mul /
+ * add. Naming it `let p = a * b;` gives the same result, and a `bitcast` round trip does not stop
+ * it either). In the decomposed path `mul` and `add` are separate dispatches = a storage round
+ * trip, so no contraction happens. So **the product is written to workgroup memory and read back
+ * after a barrier**, leaving an explicit materialization point (the technique of silu.ts; 0
+ * mismatches in the same measurement).
  *
- * **この丸め障壁は WGSL 仕様の保証ではない** — 仕様は fusion を許すだけで、workgroup memory
- * 往復を最適化障壁として尊重することは要求していない。ビット同一門
- * （tests/gpu_gru_scan_parity_test.ts）が割れたら、まずここを疑うこと。
- * NOTE（M2 実測・2026-08-31）: Metal では実際にこの門が割れる（H=128 で 1〜64 ULP・
- * tanh_stable 化の前後で同一署名 = 既存。docs/known-issues.md の Metal 節）。実品質は
- * vowel-detector golden が M2 緑で担保 — 障壁の式形強化は根治候補として起票済み。
+ * **This rounding barrier is not guaranteed by the WGSL specification** — the specification only
+ * allows fusion and does not require a workgroup memory round trip to be respected as an
+ * optimisation barrier. If the bit-identity check (tests/gpu_gru_scan_parity_test.ts) breaks,
+ * suspect this first.
+ * NOTE (measured on M2, 2026-08-31): on Metal this check does break (1–64 ULP at H=128; the same
+ * signature before and after the tanh_stable change = pre-existing; the Metal section of
+ * docs/known-issues.md). Real quality is covered by the vowel-detector golden being green on M2 —
+ * strengthening the barrier's expression form is filed as a root-cause candidate.
  *
- * ## 走査の裁定（性能ではなく正しさの都合）
+ * ## The scan decision (for correctness, not performance)
  *
- * バッチ要素どうしの再帰は独立なので **1 workgroup = 1 バッチ要素**（バッチ方向は
- * layer-norm と同じ grid-stride で dispatch 上限を跨ぐ）。**1 lane = 1 隠れユニット**に固定し、
- * `H ≤ {@link GRU_SCAN_MAX_HIDDEN}` を超える形は {@link gruScanParams} が fail loudly にする
- * （ADR 0056 決定 5）。時間ループと barrier 群は workgroup 一様な制御流の中だけに置く
- * （dims は uniform — layer-norm.ts の MUST と同じ）。
+ * The recurrences of different batch elements are independent, so **one workgroup = one batch
+ * element** (the batch direction crosses the dispatch limit with the same grid-stride as
+ * layer-norm). The assignment is fixed at **one lane = one hidden unit**, and shapes above
+ * `H ≤ {@link GRU_SCAN_MAX_HIDDEN}` fail loudly in {@link gruScanParams} (ADR 0056 decision 5).
+ * The time loop and the barriers sit only inside workgroup-uniform control flow (dims is uniform —
+ * the same as the MUST of layer-norm.ts).
  *
- * MUST: 逆方向は**走査順だけ**が逆で、書き出しは常に順方向の時間添字（`flip` を挟まない形が
- * この op の存在理由の 1 つ — ADR 0056 決定 2）。
+ * MUST: the reverse direction reverses **only the scan order**; output is always written at the
+ * forward time index (a form without an interposed `flip` is one of the reasons this op exists —
+ * ADR 0056 decision 2).
  */
 
 import {
@@ -65,14 +78,15 @@ import { GRU_SCAN_MAX_HIDDEN } from "../codegen/limits.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
 /**
- * 1 workgroup の lane 数。**1 lane = 1 隠れユニット**なので隠れ幅の上限
- * {@link GRU_SCAN_MAX_HIDDEN} と同じ数で、そこから導いて 2 か所に数を持たない。
- * 上限そのものは契約層（ops/shapes.ts）も見るので中立な codegen/limits.ts に置く
- * （実測に出ている形は H = 128 の vowel-detector 2 層 BiGRU だけ — ADR 0056 決定 5）。
+ * Lanes per workgroup. **One lane = one hidden unit**, so it equals the hidden-width limit
+ * {@link GRU_SCAN_MAX_HIDDEN} and is derived from it rather than kept as a number in two places.
+ * The limit itself is also checked by the contract layer (ops/shapes.ts), so it lives in the
+ * neutral codegen/limits.ts (the only measured shape is vowel-detector's 2-layer BiGRU with
+ * H = 128 — ADR 0056 decision 5).
  */
 export const GRU_SCAN_WORKGROUP_SIZE = GRU_SCAN_MAX_HIDDEN;
 
-/** 走査方向（`gru_scan` / `gru_scan_reverse` の 2 op に 1 対 1 で対応する）。 */
+/** Scan direction (one-to-one with the two ops `gru_scan` / `gru_scan_reverse`). */
 export type GruScanDirection = "forward" | "reverse";
 
 const canonicalizeDirection = (direction: GruScanDirection): GruScanDirection => {
@@ -81,8 +95,9 @@ const canonicalizeDirection = (direction: GruScanDirection): GruScanDirection =>
 };
 
 /**
- * MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。
- * v2: 候補ゲートの tanh を TANH_STABLE_WGSL の共有へ差し替え（Metal fast-math の沈黙 NaN 根治）。
+ * MUST: bump the key when the WGSL changes (the pipeline cache does not look at the source).
+ * v2: the candidate gate's tanh was switched to the shared TANH_STABLE_WGSL (root-cause fix of the
+ * silent NaN under Metal fast-math).
  */
 export const gruScanKey = (direction: GruScanDirection): string =>
   `gru_scan:v2:f32:${canonicalizeDirection(
@@ -91,9 +106,10 @@ export const gruScanKey = (direction: GruScanDirection): string =>
 
 export const gruScanWgsl = (direction: GruScanDirection): string => {
   const canonical = canonicalizeDirection(direction);
-  // 逆方向は走査順だけを反転する（出力の時間添字 `t` はどちらも順方向の並び）。
+  // The reverse direction flips only the scan order (the output time index `t` is in forward
+  // order in both).
   const timeIndex = canonical === "reverse" ? "dims.time - 1u - step" : "step";
-  return `// karume gru_scan (${canonical}, f32, 1 workgroup = 1 バッチ要素 / 1 lane = 1 隠れユニット)
+  return `// karume gru_scan (${canonical}, f32, 1 workgroup = 1 batch element / 1 lane = 1 hidden unit)
 struct Dims {
   time: u32,
   batch: u32,
@@ -107,7 +123,8 @@ struct Dims {
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;
 
 var<workgroup> h_shared: array<f32, ${GRU_SCAN_MAX_HIDDEN}>;
-// 丸め障壁の中継（f32 のビット列をそのまま置く）。lane は自分の枠しか触らない。
+// relay for the rounding barriers (holds the f32 bit pattern as is). Each lane touches only its
+// own slot.
 var<workgroup> stage: array<u32, ${GRU_SCAN_MAX_HIDDEN}>;
 
 ${SIGMOID_STABLE_WGSL}
@@ -126,7 +143,7 @@ fn main(
   let hidden = dims.hidden;
   let gates = hidden * 3u;
   let lane_used = lid < hidden;
-  // W_hh は [3H, H] の行優先。ゲートは r / z / n の順に H 行ずつ並ぶ。
+  // W_hh is [3H, H], row-major. The gates are laid out H rows each, in the order r / z / n.
   let row_r = lid * hidden;
   let row_z = (hidden + lid) * hidden;
   let row_n = (hidden * 2u + lid) * hidden;
@@ -153,19 +170,21 @@ fn main(
           acc_z = acc_z + w_hh[row_z + k] * hk;
           acc_n = acc_n + w_hh[row_n + k] * hk;
         }
-        // bias は last（GEMM の epilogue と同じ）。ゲートの足し順は隠れ側が第 1 引数。
+        // bias last (the same as the GEMM epilogue). The gate sums take the hidden side as the
+        // first operand.
         let gate_r = sigmoid_stable((acc_r + b_hh[lid]) + gi[gi_base + lid]);
         gate_z = sigmoid_stable((acc_z + b_hh[hidden + lid]) + gi[gi_base + hidden + lid]);
         let gh_n = acc_n + b_hh[hidden * 2u + lid];
-        // 丸め障壁 ①: 分解経路の mul は別 dispatch なので、fma 縮約させない
+        // rounding barrier ①: the decomposed path's mul is a separate dispatch, so no fma
+        // contraction here
         stage[lid] = bitcast<u32>(gh_n * gate_r);
       }
       workgroupBarrier();
       var cand = 0.0;
       if (lane_used) {
-        // n = tanh(i_n + h_n·r) — 入力側が第 1 引数
+        // n = tanh(i_n + h_n·r) — the input side is the first operand
         cand = tanh_stable(gi[gi_base + hidden * 2u + lid] + bitcast<f32>(stage[lid]));
-        // 丸め障壁 ②: h' = (h − n)·z + n の mul と add の間
+        // rounding barrier ②: between the mul and the add of h' = (h − n)·z + n
         stage[lid] = bitcast<u32>((h_prev - cand) * gate_z);
       }
       workgroupBarrier();
@@ -174,7 +193,7 @@ fn main(
         h_shared[lid] = h_next;
         out[(t * dims.batch + item) * hidden + lid] = h_next;
       }
-      // 次ステップの縮約が h_shared を読む前に、この書き込みを揃える
+      // make this write complete before the next step's reduction reads h_shared
       workgroupBarrier();
       step = step + 1u;
     }
@@ -184,22 +203,24 @@ fn main(
 `;
 };
 
-/** gru_scan の幾何（params の唯一の入力型）。 */
+/** Geometry of gru_scan (the one input type of params). */
 type GruScanDims = {
-  /** 時間長 T（記号次元が束縛された後の実長）。 */
+  /** Time length T (the actual length after the symbolic dimension is bound). */
   readonly time: number;
-  /** バッチ N。 */
+  /** Batch N. */
   readonly batch: number;
-  /** 隠れ幅 H。 */
+  /** Hidden width H. */
   readonly hidden: number;
 };
 
 /**
- * 12 バイトの内容を 16 バイトで確保する uniform Dims（16 バイト単位の確保はプロジェクトの
- * 慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない — layer-norm.ts と同じ扱い）。
+ * The uniform Dims: 12 bytes of content allocated as 16 bytes (allocating in 16-byte units is a
+ * project convention (the fusion pass fixes the same form in ADR 0040), not a requirement of the
+ * specification — the same treatment as layer-norm.ts).
  *
- * MUST: `hidden` の上限をここで見る（契約検査と二重だが、カーネル直呼びの経路も通る門）。
- * 超過を黙って通すと `h_shared` の範囲外書き込みになり、例外なしに別ユニットの状態が壊れる。
+ * MUST: the limit on `hidden` is checked here (redundant with the contract check, but a check that
+ * the direct kernel-call path also passes). Letting an excess through silently writes `h_shared`
+ * out of range and corrupts other units' state without an exception.
  */
 export const gruScanParams = (dims: GruScanDims): Uint32Array<ArrayBuffer> => {
   const { time, batch, hidden } = dims;

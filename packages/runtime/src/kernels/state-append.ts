@@ -1,28 +1,33 @@
 /**
- * `state_append`（今 step の k / v を state スロットへ書く単機能 op — ADR 0067 決定 5）の
- * 固定カーネル。1 ノード = 1 dispatch で、値を定義しない **effect op**（出力 0 本）。
+ * Fixed kernel of `state_append` (the single-purpose op that writes this step's k / v into a state
+ * slot — ADR 0067 decision 5). 1 node = 1 dispatch, an **effect op** that defines no value (0
+ * outputs).
  *
- * 入力 `[B,Hkv,M,D]` の**先頭 `queryLength` 行だけ**を、スロット `[B,Hkv,C,D]` の論理行
- * `[P, P+Q)` へ写す。物理行の写像は {@link stateSlotRowWgsl}（sliding は `col % C` のリング —
- * 法が窓 `W` ではなく容量 `C` である理由は同関数の doc）で、**読み側（①QK / ③PV）と同一文字列を
- * 共有する MUST**（ADR 0067 決定 4「読み書き同式」— 片方だけ別式にすると ring が一周した後の
- * 全読みが黙って別の行を指す）。
+ * Maps **only the first `queryLength` rows** of the input `[B,Hkv,M,D]` to the logical rows
+ * `[P, P+Q)` of the slot `[B,Hkv,C,D]`. The physical-row mapping is {@link stateSlotRowWgsl}
+ * (sliding is a `col % C` ring — why the modulus is the capacity `C` and not the window `W` is in
+ * that function's doc), and it **MUST share the identical string with the readers (①QK / ③PV)**
+ * (ADR 0067 decision 4 "same formula for reads and writes" — a different formula on one side
+ * silently points every read at another row once the ring has wrapped).
  *
- * MUST: **pad 行（`row ≥ Q`）は書かない**（スロットは full-write 対象外 — ADR 0066 追記 6。
- * 残骸は次 step の append が同じ式で上書きし、読者は resident 範囲外を読まない）。書くと
- * 「窓の中に無意味な値が混ざったスロット」になり、次 step の読者がそれを past として食う。
- * MUST: 仕事量は `B·Hkv·Q·D` に比例する（容量 `C` に比例させない — ADR 0066 決定 3）。
- * MUST: sliding で `Q > C` のとき、同じ物理行へ写る論理行のうち**最後の 1 本だけ**が書く
- * （`row + C ≥ Q`）。ring の意味論では最新の行が残るのが正だが、全行を並列に書かせると
- * どちらが勝つかは実装依存 — 沈黙の非決定性になる。full は `dst = P + row` が単射なので
- * 衝突しない（この門は sliding 変種にだけ生成される）。
+ * MUST: **pad rows (`row ≥ Q`) are not written** (slots are outside full-write — ADR 0066 addendum
+ * 6; leftovers are overwritten by the next step's append with the same formula, and readers do not
+ * read outside the resident range). Writing them gives "a slot with meaningless values inside the
+ * window", which the next step's readers consume as past.
+ * MUST: the work is proportional to `B·Hkv·Q·D` (not to the capacity `C` — ADR 0066 decision 3).
+ * MUST: with sliding and `Q > C`, among the logical rows that map to the same physical row **only
+ * the last one** writes (`row + C ≥ Q`). Ring semantics say the newest row remains, but letting
+ * every row write in parallel makes the winner implementation-dependent — silent nondeterminism.
+ * Full is injective (`dst = P + row`), so it does not collide (this check is generated only in the
+ * sliding variant).
  *
- * NOTE: full スロットの `P + Q ≤ C`（ADR 0067 決定 4 ④）は **context 側の実行時検査**で、
- * ここでは見ない（`P` は実行時値で params に載らない）。破った場合、`P + row ≥ C` の行の書き先
- * `dst = (kv_plane·C + P + row)·D + d` は、最後の平面を除き**隣の kv 平面の行 `[0, P+row−C)` を
- * 沈黙で上書きする**（範囲外へ落ちて捨てられるのは最後の平面だけ）。①QK / ③PV の読み
- * `(kv_plane·C + slot_row(col))·D` も同じ隣の平面を誤読する。別 head の KV が例外なしに壊れるので、
- * context 側の検査は MUST。
+ * NOTE: `P + Q ≤ C` for full slots (ADR 0067 decision 4 ④) is a **run-time check on the context
+ * side** and is not looked at here (`P` is a run-time value, not in params). If it is violated, the
+ * write target `dst = (kv_plane·C + P + row)·D + d` of rows with `P + row ≥ C` **silently overwrites
+ * rows `[0, P+row−C)` of the next kv plane** for every plane except the last (only the last plane
+ * falls out of range and is discarded). The ①QK / ③PV read `(kv_plane·C + slot_row(col))·D` misreads
+ * the same neighbouring plane. Another head's KV breaks without an exception, so the context-side
+ * check is MUST.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -36,20 +41,21 @@ export const stateAppendKey = (sliding: boolean): string =>
   `state_append:v1:f32:wg${STATE_APPEND_WORKGROUP_SIZE}${stateVariantKeyPart(sliding, false)}`;
 
 /**
- * 束縛（**binding 0 = 静的 params・最後 = 論理長** — states 形 3 カーネルと同じ並び）:
+ * Bindings (**binding 0 = static params, last = logical lengths** — the same order as the three
+ * states-form kernels):
  *
- * | binding | 資源                                |
- * | ------- | ----------------------------------- |
- * | 0       | `Params`（uniform）                 |
- * | 1       | `x` `[B,Hkv,M,D]`（読み）           |
- * | 2       | `slot` `[B,Hkv,C,D]`（書き）        |
- * | 3       | `Lengths`（uniform — context 所有） |
+ * | binding | Resource                               |
+ * | ------- | -------------------------------------- |
+ * | 0       | `Params` (uniform)                     |
+ * | 1       | `x` `[B,Hkv,M,D]` (read)               |
+ * | 2       | `slot` `[B,Hkv,C,D]` (write)           |
+ * | 3       | `Lengths` (uniform — owned by context) |
  *
- * params の語順（**この表が正本**）: `kv_planes`（= `B·Hkv`）/ `chunk_rows`（= `M`）/
- * `depth`（= `D`）/ `capacity`（= `C`）/ `window`（= `W`・`0` = full）。
+ * Word order of params (**this table is the source of truth**): `kv_planes` (= `B·Hkv`) /
+ * `chunk_rows` (= `M`) / `depth` (= `D`) / `capacity` (= `C`) / `window` (= `W`, `0` = full).
  */
 export const stateAppendWgsl = (sliding: boolean): string =>
-  `// karume state_append (今 step の k / v を state スロットへ, f32${
+  `// karume state_append (this step's k / v into the state slot, f32${
     sliding ? ", sliding window のリング書込み" : ""
   })
 struct Params {
@@ -74,7 +80,7 @@ fn main(
 ) {
   let past = lengths.past;
   let query = lengths.query;
-  // 総仕事は **B·Hkv·Q·D**（pad 行は添字空間に入らない = 書かれない）
+  // Total work is **B·Hkv·Q·D** (pad rows are not in the index space = not written)
   let total = params.kv_planes * query * params.depth;
   let stride = nwg.x * ${STATE_APPEND_WORKGROUP_SIZE}u;
   var i = gid.x;
@@ -87,9 +93,10 @@ fn main(
     let dst = (kv_plane * params.capacity + slot_row(past + row)) * params.depth + d;
 ${
   sliding
-    ? `    // ring が一周する Q > C では同じ物理行へ複数の論理行が写る。**最後の論理行だけ**が
-    // 書く（全行を並列に書かせると勝者が実装依存 = 沈黙の非決定性）。法は slot_row と同じ
-    // **capacity**（window で切ると C > W のとき誰とも alias しない行が黙って書かれない）
+    ? `    // With Q > C the ring wraps and several logical rows map to the same physical row. **Only
+    // the last logical row** writes (letting every row write in parallel makes the winner
+    // implementation-dependent = silent nondeterminism). The modulus is **capacity**, as in
+    // slot_row (cutting by window would, when C > W, silently skip rows that alias nothing)
     if (row + params.capacity >= query) {
       slot[dst] = x[src];
     }`
@@ -100,28 +107,30 @@ ${
 }
 `;
 
-/** `state_append` の静的幾何（uniform の語順の型側）。 */
+/** Static geometry of `state_append` (the type side of the uniform word order). */
 export type StateAppendGeometry = {
-  /** `B·Hkv`（スロットの平面数 — 入力とスロットで共通）。 */
+  /** `B·Hkv` (number of slot planes — shared by the input and the slot). */
   readonly kvPlanes: number;
-  /** `M`（入力の行ストライド = 物理 chunk 行数）。 */
+  /** `M` (row stride of the input = physical chunk row count). */
   readonly chunkRows: number;
-  /** `D`。 */
+  /** `D`. */
   readonly depth: number;
-  /** `C`（スロットの行容量）。 */
+  /** `C` (row capacity of the slot). */
   readonly capacity: number;
-  /** `W`（`0` = full）。 */
+  /** `W` (`0` = full). */
   readonly window: number;
 };
 
 /**
- * uniform の Params（5 語を 16 バイト単位に切り上げて 32 バイト確保する — 16 バイト単位の確保は
- * プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
+ * Uniform Params (5 words rounded up to 16-byte units, 32 bytes allocated — allocating in 16-byte
+ * units is a project convention (the fusion pass fixes the same form in ADR 0040), not a
+ * requirement of the spec).
  *
- * MUST: `W ≤ C`（窓がスロット容量を超える形は ADR 0067 決定 4 ③ の違反）。sliding かどうかは
- * `window > 0`（src/kernels/state-attention.ts の `stateSliding`）で、`W = 0` = full。呼び手は
- * キー選択・WGSL 生成・この params の 3 者を**同じ `window` の値**から導くこと（片方だけ
- * sliding にすると `col % 0u` が実装依存値になる）。
+ * MUST: `W ≤ C` (a window larger than the slot capacity violates ADR 0067 decision 4 ③). Whether it
+ * is sliding is `window > 0` (`stateSliding` in src/kernels/state-attention.ts), and `W = 0` = full.
+ * The caller derives the key selection, the WGSL generation and these params, all three, **from the
+ * same `window` value** (making only one of them sliding turns `col % 0u` into an
+ * implementation-dependent value).
  */
 export const stateAppendParams = (geometry: StateAppendGeometry): Uint32Array<ArrayBuffer> => {
   const { kvPlanes, chunkRows, depth, capacity, window } = geometry;
@@ -153,10 +162,11 @@ export const stateAppendParams = (geometry: StateAppendGeometry): Uint32Array<Ar
 };
 
 /**
- * workgroup 数 `[⌈B·Hkv·Q·D / 256⌉, 1, 1]`（grid-stride なので上限超過は縮退）。
+ * Workgroup count `[⌈B·Hkv·Q·D / 256⌉, 1, 1]` (grid-stride, so exceeding the limit is clamped).
  *
- * MUST: 容量 `C` を引数に取らない（`C` に比例した dispatch は ADR 0066 決定 3 の不合格形）。
- * `Q` に**比例**し、`P` には依らない（書くのは今 step の Q 行だけ）。
+ * MUST: the capacity `C` is not a parameter (a dispatch proportional to `C` is the form ADR 0066
+ * decision 3 rejects). It is **proportional** to `Q` and does not depend on `P` (only this step's Q
+ * rows are written).
  */
 export const stateAppendWorkgroups = (
   geometry: Pick<StateAppendGeometry, "kvPlanes" | "depth">,

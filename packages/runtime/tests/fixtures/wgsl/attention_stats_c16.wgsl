@@ -1,4 +1,4 @@
-// karume attention_stats (行ごとの m = amax(S) と inv = 1/Σexp(S - m), f32, S は f16 格納)
+// karume attention_stats (per-row m = amax(S) and inv = 1/Σexp(S - m), f32, S は f16 格納)
 enable f16;
 struct Params {
   rows: u32,
@@ -32,7 +32,7 @@ fn main(
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 行の最大値（safe-softmax の減算項 — identity は -inf）
+    // ① Row maximum (the subtracted term of safe-softmax — identity is -inf)
     var hi = neg_inf;
     var i = lid;
     while (i < dim) {
@@ -50,13 +50,14 @@ fn main(
       stride = stride / 2u;
     }
     let row_max = scratch[0u];
-    // 全要素 -inf の行（全マスク行）— 減算項を 0 にして NaN を作らない（safe_softmax と同形）
+    // A row with every element -inf (no key visible) — make the subtracted term 0 so no NaN is
+    // produced (same form as safe_softmax)
     let empty = row_max == neg_inf;
     let amax = select(row_max, 0.0, empty);
-    // scratch の読み終わりを揃えてから ② で上書きする
+    // Make sure scratch has been read before ② overwrites it
     workgroupBarrier();
 
-    // ② Σ exp(S - amax)（最大要素が exp(0) = 1 を出すので分母は必ず 1 以上）
+    // ② Σ exp(S - amax) (the largest element gives exp(0) = 1, so the denominator is at least 1)
     var acc = 0.0;
     var j = lid;
     while (j < dim) {
@@ -73,14 +74,16 @@ fn main(
       workgroupBarrier();
       stride2 = stride2 / 2u;
     }
-    // MUST: 逆数はここで作る（③ で割り算に戻すと softmax のパス③と演算が変わる）
+    // MUST: the reciprocal is built here (going back to a division in ③ would change the operation
+    // versus softmax pass ③)
     let inv = 1.0 / scratch[0u];
     if (lid == 0u) {
-      // 空行は (0.0, 0.0) — ③ の exp(S - 0) = exp(-inf) = 0 に inv = 0 が掛かり出力が厳密 0
+      // An empty row is (0.0, 0.0) — ③ multiplies exp(S - 0) = exp(-inf) = 0 by inv = 0, so the
+      // output is exactly 0
       stats[row * 2u] = amax;
       stats[row * 2u + 1u] = select(inv, 0.0, empty);
     }
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // Make sure scratch[0] has been read before the next row overwrites scratch[lid]
     workgroupBarrier();
     row = row + nwg.x;
   }

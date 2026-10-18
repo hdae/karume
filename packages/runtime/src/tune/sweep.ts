@@ -1,13 +1,17 @@
 /**
- * 掃引の入口（公開面 `@karume/runtime/tune` の `runGeometrySweep` — ADR 0117 決定 2）。
+ * The sweep entry point (`runGeometrySweep` of the public surface `@karume/runtime/tune` — ADR 0117
+ * decision 2).
  *
- * 専用の device を自分で取って掃引し、終わったら捨てる。呼び手の `GpuContext` を受けないのは、掃引と
- * 推論が同じ device を共有する形を型の上で作れなくするため（決定 9 の MUST を構造で守る）。Deno の CLI
- * （`tools/geometry-sweep/main.ts`）と GPU lab の掃引タブもこれを呼ぶ殻で、device の取り直し・計測・
- * 記録の組み立てはここ 1 本（別々に持つと、2 本の記録が黙ってずれる）。
+ * It acquires its own dedicated device, sweeps, and discards it when done. It takes no caller
+ * `GpuContext` so that "the sweep and inference share a device" cannot be expressed in the types
+ * (decision 9's MUST kept by structure). The Deno CLI (`tools/geometry-sweep/main.ts`, removed in
+ * 0.15) and the GPU lab's sweep tab (`tools/gpu-lab`, removed in 0.15) were shells calling this
+ * too; re-acquiring the device, measuring and assembling the record live only here (kept
+ * separately, two records would silently drift apart).
  *
- * MUST: acquire / Session の経路からは呼ばない — runtime は実行時に幾何を測らない（ADR 0022 追記の
- * オートチューン禁止・ADR 0117 決定 9）。測るのは利用者が明示的に呼んだときだけ。
+ * MUST: never called from the acquire / Session path — the runtime does not measure geometries at
+ * run time (ADR 0022 addendum's ban on autotuning, ADR 0117 decision 9). Measuring happens only
+ * when the user calls this explicitly.
  */
 import { acquireGpu } from "../gpu/device.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../kernels/geometry-profile.ts";
@@ -36,18 +40,25 @@ import {
   WALL_TIMING_NOTE,
 } from "./report.ts";
 
-/** adapter の列挙を見る feature 名（`acquireGpu({ gpuTiming: true })` が要求するもの）。 */
+/**
+ * The feature name looked up in the adapter's list (the one `acquireGpu({ gpuTiming: true })`
+ * requests).
+ */
 const TIMESTAMP_QUERY: GPUFeatureName = "timestamp-query";
 
 /**
- * 掃引の進捗（{@link GeometrySweepOptions.onProgress} に渡す — ケース / 幾何の単位）。
+ * Sweep progress (passed to {@link GeometrySweepOptions.onProgress} — per case / geometry).
  *
- * - `started` — device を取り、計測の文脈ができた（単位・dp4a・ケース数が決まった）。
- * - `status` — 今どこを測っているか（「<ケース>: <幾何>（i/n）」など — 表示用の 1 行）。
- * - `row` — (ケース, 幾何) の行が 1 つ確定した。ケースの最初の行は既定の幾何（`isDefault`）で、
- *   続く行は既定比（`speedupVsDefault`）と出力の一致（`identicalToDefault`）を持つ。
- * - `case` — ケースを測り終えた（末尾で既定を測り直した比 `defaultRepeat.driftRatio` を持つ）。
- * - `deviceLost` — device を失った（残りの行は失敗の行になる）。
+ * - `started` — the device is acquired and the measurement context exists (unit, dp4a and case
+ *   count are fixed).
+ * - `status` — what is being measured now ("<case>: <geometry> (i/n)" and the like — one line for
+ *   display).
+ * - `row` — one (case, geometry) row is final. A case's first row is the default geometry
+ *   (`isDefault`); the following rows carry the ratio to the default (`speedupVsDefault`) and the
+ *   output match (`identicalToDefault`).
+ * - `case` — the case is fully measured (it carries `defaultRepeat.driftRatio`, the ratio of the
+ *   default re-measured at the end).
+ * - `deviceLost` — the device was lost (the remaining rows become failure rows).
  */
 export type GeometrySweepProgress =
   | {
@@ -62,32 +73,42 @@ export type GeometrySweepProgress =
   | { readonly kind: "case"; readonly summary: CaseSummary }
   | { readonly kind: "deviceLost"; readonly reason: string; readonly message: string };
 
-/** {@link runGeometrySweep} の options（全て省略可）。 */
+/** Options of {@link runGeometrySweep} (all optional). */
 export type GeometrySweepOptions = {
   /** The `GPU` instance to use (default `navigator.gpu` — same as `acquireGpu({ gpu })`). */
   readonly gpu?: GPU;
-  /** `requestAdapter` に渡す（`powerPreference` 等 — `acquireGpu({ adapter })` と同じ）。 */
+  /** Passed to `requestAdapter` (`powerPreference` etc. — same as `acquireGpu({ adapter })`). */
   readonly adapter?: GPURequestAdapterOptions;
-  /** 候補集合（既定 `quick+`）。 */
+  /** The candidate set (default `quick+`). */
   readonly candidateSet?: CandidateSet;
-  /** 掃引する op 族（既定は全族）。 */
+  /** The op families to sweep (default: all families). */
   readonly ops?: readonly SweepOp[];
-  /** ケース id で絞る（既定は `ops` の全ケース — CLI の `--case`）。 */
+  /**
+   * Narrows by case id (default: every case of `ops` — the CLI's `--case`; the CLI was removed in
+   * 0.15).
+   */
   readonly cases?: readonly string[];
-  /** 幾何ごとの計測 round の数（既定 5 — 代表値はその min）。 */
+  /**
+   * The number of measurement rounds per geometry (default 5 — the representative value is their
+   * min).
+   */
   readonly rounds?: number;
   /**
-   * adapter が `timestamp-query` を列挙すれば GPU の timestamp で測る（既定 true）。`false` か、列挙
-   * しない adapter では壁時計で測る（単位 `wall` — 記録は残せるが、生成器は表の材料にしない）。
+   * Measures with GPU timestamps when the adapter lists `timestamp-query` (default true). With
+   * `false`, or on an adapter that does not list it, measures by wall clock (unit `wall` — the
+   * record can be kept, but the generator does not build a table from it).
    */
   readonly timestamps?: boolean;
-  /** 中断（今の幾何を測り終えたところで止める — 記録は測れた行までを持つ）。 */
+  /**
+   * Abort (stops once the current geometry is measured — the record holds the rows measured so
+   * far).
+   */
   readonly signal?: AbortSignal;
-  /** 進捗の通知（{@link GeometrySweepProgress}）。 */
+  /** Progress notifications ({@link GeometrySweepProgress}). */
   readonly onProgress?: (progress: GeometrySweepProgress) => void;
 };
 
-/** options を検査して既定を埋めた掃引の設定と、選んだケース。 */
+/** The sweep settings with options checked and defaults filled in, and the chosen cases. */
 type SweepPlan = {
   readonly candidateSet: CandidateSet;
   readonly ops: readonly SweepOp[];
@@ -100,8 +121,9 @@ const isSweepOp = (value: string): value is SweepOp =>
   (SWEEP_OPS as readonly string[]).includes(value);
 
 /**
- * options を検査してケースを選ぶ（GPU に触れる前 — 綴り違いの集合・op・ケースを既定で走らせない）。
- * ケースは op と id の両方に合うもの（id を渡さなければ op の全ケース）で、並びは形状表の順。
+ * Checks the options and chooses the cases (before touching the GPU — a misspelled set, op or case
+ * is never run as the default). The cases are those matching both op and id (every case of the op
+ * when no id is given), in the order of the shape table.
  */
 const planSweep = (options: GeometrySweepOptions): SweepPlan => {
   const candidateSet = options.candidateSet ?? DEFAULT_CANDIDATE_SET;
@@ -131,31 +153,38 @@ const planSweep = (options: GeometrySweepOptions): SweepPlan => {
 };
 
 /**
- * timestamp の差の単位。Deno の WebGPU（wgpu）は timestamp を ns に換算せず raw tick のまま返す
- * （docs/known-issues.md「Intel Arc B570」節 — B570 で 1 tick = 52.08 ns）ので `deno-raw-tick`、それ以外
- * （Chrome / Dawn）は仕様どおり `ns`。実装の判別は `navigator.userAgent`（Deno は `Deno/<版>` を返す）。
+ * The unit of timestamp differences. Deno's WebGPU (wgpu) returns timestamps as raw ticks without
+ * converting them to ns (docs/known-issues.md section "Intel Arc B570 (Linux / Vulkan ANV / xe)" —
+ * 1 tick = 52.08 ns on B570), hence `deno-raw-tick`; everything else (Chrome / Dawn) is `ns` as the
+ * specification says. The implementation is told apart by `navigator.userAgent` (Deno returns
+ * `Deno/<version>`).
  */
 export const timestampUnitFor = (userAgent: string): "ns" | "deno-raw-tick" =>
   userAgent.startsWith("Deno/") ? "deno-raw-tick" : "ns";
 
 /**
- * 専用の device を取ってケースを掃引し、記録（`karume-geometry-sweep/2`）を返す。device は終わったら
- * （中断・失敗でも）捨てる。行ごとの失敗（確保・コンパイル・device lost）は記録の行に残して掃引を続け、
- * options の誤りと device が取れない環境は GPU に触れる前 / 取得の段で投げる。
+ * Acquires a dedicated device, sweeps the cases, and returns the record
+ * (`karume-geometry-sweep/2`). The device is discarded when done (also on abort or failure).
+ * Per-row failures (allocation, compilation, device lost) are kept as rows of the record and the
+ * sweep continues; option errors and environments where no device can be acquired throw before
+ * touching the GPU / at the acquisition step.
  *
- * MUST: 推論と並走させない（測定が汚れ、GPU も取り合う）— runtime は別の device の使われ方を見られない
- * ので、これは呼び手との契約（公開面の doc に書く）。
+ * MUST: never run alongside inference (it pollutes the measurement, and both compete for the GPU) —
+ * the runtime cannot see how another device is used, so this is a contract with the caller (stated
+ * in the public surface's doc).
  */
 export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Promise<Report> => {
   const plan = planSweep(options);
-  // 開始時刻は device を取る前（`date` は記録を組む時点 = 終了時刻 — 差が所要・ADR 0117 決定 8）
+  // The start time is taken before acquiring the device (`date` is when the record is assembled =
+  // the end time — the difference is the duration, ADR 0117 decision 8)
   const startedAt = new Date().toISOString();
   const notify = options.onProgress;
-  // timestamp-query は adapter が列挙すれば要求する（決定 2）。acquireGpu の gpuTiming は「必須」か
-  // 「要求しない」で「あれば使う」を持たないので、列挙を見るためだけに adapter を 1 度取って捨てる。
-  // NOTE: requestAdapter を 2 回呼んで同じ物理 adapter が選ばれる保証は仕様に無い — 選び直された
-  // adapter が timestamp-query を持たなければ acquireGpu が GpuFeatureError で落ちる（黙って壁時計に
-  // 落とさない）。navigator.gpu が無い環境は acquireGpu が GpuUnavailableError で落とす。
+  // timestamp-query is requested when the adapter lists it (decision 2). acquireGpu's gpuTiming is
+  // either "required" or "not requested" and has no "use if present", so an adapter is acquired
+  // once and discarded only to look at the list. NOTE: the specification does not guarantee that
+  // calling requestAdapter twice picks the same physical adapter — if the re-picked adapter lacks
+  // timestamp-query, acquireGpu fails with GpuFeatureError (it does not silently drop to wall
+  // clock). Without navigator.gpu, acquireGpu fails with GpuUnavailableError.
   const webgpu: GPU | undefined = options.gpu ?? navigator.gpu;
   const probe =
     options.timestamps === false || webgpu === undefined
@@ -216,9 +245,11 @@ export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Prom
       date: new Date().toISOString(),
       startedAt,
       aborted,
-      // 比の土台・測った候補のカーネルとケースの版を記録に焼く（生成器が今の runtime と照合する — ADR 0117
-      // 決定 8）。どれも GPU を読まない純関数で、掃引に比べて無視できる所要（既定の指紋は約 13 ms・候補の指紋は
-      // full の全行でも 1 秒未満）
+      // Write the ratio baseline, the kernels of the measured candidates and the case-set version
+      // into the record (the generator matches them against the current runtime — ADR 0117 decision
+      // 8). All are pure functions that read no GPU, with a negligible cost next to the sweep (the
+      // default fingerprint takes about 13 ms; the candidate fingerprint stays under 1 second even
+      // for every row of full)
       caseSet: sweepCaseSetId(),
       defaultKernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
       candidateKernels: sweepCandidateKernelsId(rows, context.dp4a),

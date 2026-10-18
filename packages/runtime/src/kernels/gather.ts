@@ -1,30 +1,36 @@
 /**
- * gather（最終次元固定、`out[..., j] = src[..., index[..., j]]`、値 f32 / 添字 i32）の
- * 固定カーネル。
+ * The fixed kernel of gather (last dimension fixed, `out[..., j] = src[..., index[..., j]]`, f32
+ * values / i32 indices).
  *
- * 出力・src・index はいずれも連続レイアウトで、先行次元は src と index で一致している
- * （契約 — src/ops.ts）。よって出力の平坦添字 i から `row = i / J` を作れば、読み出しは
- * `src[row * D + index[i]]` の 1 本で足りる（D = src の最終次元、J = 出力の最終次元）。
+ * Output, src and index are all contiguous, and the leading dimensions of src and index match (the
+ * contract — src/ops.ts). So with `row = i / J` from the output's flat index i, one read
+ * `src[row * D + index[i]]` suffices (D = src's last dimension, J = the output's last dimension).
  *
- * MUST: grid-stride ループ前提。1 次元の dispatch 上限（仕様既定 65535）は実モデルで超える。
+ * MUST: grid-stride loop. Real models exceed the one-dimensional dispatch limit (spec default
+ * 65535).
  *
- * ## 範囲外添字の扱い（裁定の正本は ADR 0061）
+ * ## Out-of-range indices (the canonical ruling is ADR 0061)
  *
- * 契約は `0 <= index < D`（添字は範囲内）。違反したときは**黙って別の要素を返さない**ことを
- * 優先し、該当要素だけを quiet NaN で汚染する:
+ * The contract is `0 <= index < D` (indices are in range). On a violation, **not silently
+ * returning another element** takes priority, and only the affected elements are contaminated with
+ * quiet NaN:
  *
- * - **GPU**: 範囲外の要素にだけ NaN（{@link GATHER_OOB_BITS}）を書く。検査は 2 比較 / 要素で
- *   gather はメモリ律速なので実効コストはほぼ 0。WebGPU の境界付きアクセスに任せて無検査に
- *   すると「0 または別の in-bounds 要素」が静かに返り、下流と突合の両方を通過してしまう。
- *   NaN は該当カーネルの出力に残り、allclose・golden 突合と算術の後段へ伝播する。ただし比較・
- *   where・int への cast など NaN を落とす後段では消えうる（比較は NaN に false を返す — torch と同じ）。
- * - **例外にしない理由**: カーネルから throw はできず、host へ通知するには run ごとの
- *   デバイス側フォールト旗 + readback（新しい診断チャネル）が要る。これは gather に付随して
- *   入れる機構ではないので、NaN 汚染に留める。
- * - **CPU 参照は厳密**（範囲外で throw）。段 2 の突合ではオラクル側が先に落ちる。
+ * - **GPU**: writes NaN ({@link GATHER_OOB_BITS}) only to the out-of-range elements. The check is
+ *   two comparisons per element and gather is memory-bound, so the effective cost is almost 0.
+ *   Leaving it unchecked and relying on WebGPU's bounded access would quietly return "0 or another
+ *   in-bounds element", which passes both downstream and the comparisons. The NaN stays in that
+ *   kernel's output and propagates to allclose, the golden comparison and later arithmetic.
+ *   However, it can disappear in later steps that drop NaN, such as comparisons, where and casts to
+ *   int (comparisons return false for NaN — the same as torch).
+ * - **Why not an exception**: a kernel cannot throw, and notifying the host would need a per-run
+ *   device-side fault flag + readback (a new diagnostic channel). That is not a mechanism to add
+ *   along with gather, so it stops at NaN contamination.
+ * - **The CPU reference is strict** (throws when out of range). In the step 2 comparison the
+ *   oracle side fails first.
  *
- * MUST: NaN のビット列は params で運ぶ。WGSL には NaN リテラルが無く、`bitcast<f32>(...)` を
- * 定数式で書くと「const-expression が NaN」としてシェーダ生成エラーになりうる実装がある。
+ * MUST: the NaN bit pattern travels in params. WGSL has no NaN literal, and some implementations
+ * may fail shader creation with "const-expression is NaN" when `bitcast<f32>(...)` is written as a
+ * constant expression.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -32,12 +38,12 @@ import { assertU32Params } from "../codegen/params.ts";
 
 export const GATHER_WORKGROUP_SIZE = 256;
 
-/** 範囲外添字の出力に書く quiet NaN のビット列（f32）。 */
+/** The quiet NaN bit pattern (f32) written to the output for an out-of-range index. */
 export const GATHER_OOB_BITS = 0x7fc00000;
 
 export const GATHER_KEY = `gather:v1:f32:i32:lastdim:wg${GATHER_WORKGROUP_SIZE}`;
 
-export const GATHER_WGSL: string = `// karume gather (out[..., j] = src[..., index[..., j]], 最終次元固定, f32 / 添字 i32)
+export const GATHER_WGSL: string = `// karume gather (out[..., j] = src[..., index[..., j]], last dim fixed, f32 / index i32)
 struct Dims {
   n: u32,
   cols: u32,
@@ -59,7 +65,8 @@ fn main(
   while (i < dims.n) {
     let row = i / dims.cols;
     let pick = index[i];
-    // 契約外の添字は別の要素を返さず NaN で汚染する（カーネル doc の裁定）
+    // an index outside the contract contaminates with NaN instead of returning another element
+    // (the ruling in the kernel doc)
     if (pick < 0 || u32(pick) >= dims.src_cols) {
       out[i] = bitcast<f32>(dims.oob);
     } else {
@@ -71,9 +78,9 @@ fn main(
 `;
 
 /**
- * uniform の Dims（ちょうど 4 語 = 16 バイト — プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に
- * 固定〉の 16 バイト単位）。
- * `cols` は 0 でもよい（そのとき `n` も 0 でカーネルのループが 1 度も回らない）。
+ * The uniform Dims (exactly 4 words = 16 bytes — the 16-byte unit of the project convention (the
+ * fusion pass fixes the same form in ADR 0040)).
+ * `cols` may be 0 (then `n` is 0 too and the kernel's loop never runs).
  */
 export const gatherParams = (
   count: number,
@@ -82,7 +89,8 @@ export const gatherParams = (
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("gather params", { count, cols, srcCols });
   if (cols === 0 && count !== 0) {
-    // 0 除算になる組み合わせ（要素数 > 0 なのに列が無い）は shape 契約上ありえない。
+    // The combination that divides by zero (element count > 0 with no columns) cannot arise under
+    // the shape contract.
     throw new CodegenError(`gather params: 列数 0 で要素数 ${count} の組み合わせは無い`);
   }
   const params = new Uint32Array(4);

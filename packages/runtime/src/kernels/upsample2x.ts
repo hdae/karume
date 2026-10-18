@@ -1,15 +1,16 @@
 /**
- * NCHW の最終 2 空間軸を nearest-neighbor で 2 倍にする f32 固定カーネル（融合ルール
- * `upsample2x` の実体 — src/runtime/fusion.ts）。
+ * A fixed f32 kernel that doubles the last two spatial axes of NCHW by nearest neighbour (the body
+ * of the fusion rule `upsample2x` — src/runtime/fusion.ts).
  *
- * 入力を連続 `[N*C*H, W]` として平坦に読み、1 invocation が入力 1 要素を出力の 2×2 block へ
- * 書く。入力要素ごとに出力先が重ならないので atomics も workgroup memory も要らない。f32 を
- * 演算せず `u32` のビット view で複製するため、NaN payload / subnormal / ±0 もバックエンドの
- * 浮動小数正規化を受けない（丸め障壁の議論が要らないのはこのルールだけ）。出力の全要素は
- * ちょうど 1 回書かれる（full-write 不変条件 — ADR 0014）。
+ * It reads the input flat as a contiguous `[N*C*H, W]`, and one invocation writes one input
+ * element to a 2×2 block of the output. Output destinations do not overlap between input elements,
+ * so neither atomics nor workgroup memory are needed. The f32 values are copied through a `u32`
+ * bit view without arithmetic, so NaN payloads / subnormals / ±0 are not subject to the backend's
+ * floating-point normalisation (this is the only rule that needs no rounding-barrier discussion).
+ * Every output element is written exactly once (the full-write invariant — ADR 0014).
  *
- * MUST: grid-stride を使う。NCHW の batch / channel / height は row に畳み、width だけを
- * params に残すので rank 固有の座標復元を持ち込まない。
+ * MUST: use grid-stride. NCHW's batch / channel / height fold into row, and only width stays in
+ * params, so no rank-specific coordinate recovery is brought in.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -17,7 +18,7 @@ import { assertU32Params } from "../codegen/params.ts";
 
 export const UPSAMPLE_2X_WORKGROUP_SIZE = 256;
 
-/** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
+/** MUST: bump the key when the WGSL changes (the pipeline cache does not look at the source). */
 export const UPSAMPLE_2X_KEY = `upsample2x:v1:nchw:f32:wg${UPSAMPLE_2X_WORKGROUP_SIZE}`;
 
 export const UPSAMPLE_2X_WGSL: string = `// karume upsample2x (NCHW nearest, f32 bits, full-write)
@@ -53,10 +54,12 @@ fn main(
 `;
 
 /**
- * 16-byte uniform params。`n` は入力の全要素数、`width` は入力 NCHW の最終次元。
+ * 16-byte uniform params. `n` is the input's total element count, `width` the last dimension of
+ * the NCHW input.
  *
- * MUST: `n % width` をここで拒否する。割れない値を通すと、最後の不完全な行の 2×2 書き込みが
- * 次行と重なり、全要素数だけでは検出できない沈黙誤値になる。
+ * MUST: `n % width` is rejected here. Letting a non-divisible value through makes the 2×2 writes
+ * of the last incomplete row overlap the next row — a silent wrong value that the total element
+ * count alone cannot detect.
  */
 export const upsample2xParams = (n: number, width: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("upsample2x params", { n, width });

@@ -1,4 +1,4 @@
-// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv は非実体化, f32, f16 タイル計算・S は f16, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16 + vec4)
+// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv not materialised, f32, f16 タイル計算・S は f16, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16 + vec4)
 enable f16;
 struct Dims {
   m: u32,
@@ -11,9 +11,9 @@ struct Dims {
 @group(0) @binding(3) var<storage, read> stats: array<f32>;
 @group(0) @binding(4) var<storage, read_write> o: array<vec4<f32>>;
 
-// 共有 A タイル（128 行 × K 16・スカラ格納）と
-// 共有 B タイル（K 16 × 列 quad 32・列方向を vec4 に束ねた形）。f16 変種は共有バイトが半分
-// （16384 B → 8192 B / WG）— 期待利得はこの 1 機序に全て乗る
+// Shared A tile (128 rows × K 16, scalar storage) and
+// shared B tile (K 16 × 32 column quads, column direction grouped into vec4)。f16 変種は共有バイトが半分
+// (16384 B → 8192 B / WG) — the expected gain rests entirely on this one mechanism
 var<workgroup> sa: array<f16, 2048>;
 var<workgroup> sb: array<vec4<f16>, 512>;
 
@@ -25,13 +25,13 @@ fn main(
   let tid = lid.y * 16u + lid.x;
   let k4 = dims.k / 4u;
   let n4 = dims.n / 4u;
-  // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチのタイル）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすための前提。MUST: base は quad 単位（要素単位で組むと隣のバッチを読む）
+  // The batch is uniform per workgroup (one z index = the tiles of one batch) — the premise for the
+  // inner workgroupBarrier to meet WGSL's uniformity requirement。MUST: base は quad 単位（要素単位で組むと隣のバッチを読む）
   let abase = wid.z * dims.m * k4;
   let bbase = wid.z * dims.k * n4;
   let cbase = wid.z * dims.m * n4;
   let rbase = wid.z * dims.m;
-  // A タイルの担当（128 行 × 4 quad を 256 スレッドで 2 巡）
+  // A tile assignment (128 rows × 4 quads over 256 threads in 2 rounds)
   let ar = tid / 4u;
   let aq = tid % 4u;
   let arow0 = wid.y * 128u + ar;
@@ -40,21 +40,21 @@ fn main(
   let arow1 = arow0 + 64u;
   let arow_base1 = arow_base0 + 64u * k4;
   let sa_base1 = sa_base0 + 1024u;
-  // 端タイルでは arow >= m がありうるので添字を 0 へ倒す（読んだ値は arow < m の枝でしか
-  // 使われない）。範囲外の stats を読むこと自体は WGSL の境界付きアクセスで安全
+  // On edge tiles arow >= m can happen, so the index falls back to 0 (the value read is used only in the
+  // arow < m branch). Reading stats out of range is itself safe under WGSL's bounded access
   let stat_at0 = select(0u, (rbase + arow0) * 2u, arow0 < dims.m);
   let row_max0 = stats[stat_at0];
   let row_inv0 = stats[stat_at0 + 1u];
   let stat_at1 = select(0u, (rbase + arow1) * 2u, arow1 < dims.m);
   let row_max1 = stats[stat_at1];
   let row_inv1 = stats[stat_at1 + 1u];
-  // B タイルの担当（K 16 行 × 列 quad 32 を 256 スレッドで 2 巡）
+  // B tile assignment (K 16 rows × 32 column quads over 256 threads in 2 rounds)
   let bk0 = tid / 32u;
   let bcq = tid % 32u;
   let bc4 = wid.x * 32u + bcq;
   let bk1 = bk0 + 8u;
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner workgroupBarrier
+  // to meet WGSL's uniformity requirement
   let tiles = (dims.k + 15u) / 16u;
   var acc0_0 = vec4<f32>(0.0);
   var acc0_1 = vec4<f32>(0.0);
@@ -73,7 +73,8 @@ fn main(
   var acc7_0 = vec4<f32>(0.0);
   var acc7_1 = vec4<f32>(0.0);
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める。内積に寄与しないので端数 shape でも結果は変わらない
+    // Fill out-of-range entries with 0. They do not contribute to the inner product, so
+    // remainder shapes give the same result
     let ak0 = t * 16u + aq * 4u;
     var av0 = vec4<f32>(0.0);
     if (arow0 < dims.m && ak0 < dims.k) {
@@ -116,12 +117,13 @@ fn main(
     }
     sb[bk1 * 32u + bcq] = vec4<f16>(bv4_1);
     workgroupBarrier();
-    // 共有ロード 10 回（B の vec4 2 + A のスカラ 8）で 64 MAC。
-    // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
-    // 完全に一致する。
-    // MUST: f32 への拡幅は**レジスタロード時に 1 回**（10 回 / 64 MAC）。MAC ごとに
-    // f32(av * bv) と書くと変換が 64 回に増え、しかも積が f16 精度に落ちる（ADR 0028 の丸め列 2）。
-    // f16 → f32 の拡幅は厳密なので、値は「入力を f16 に丸めた f32 変種」と 1 ビットも違わない。
+    // 10 shared loads (2 vec4 of B + 8 scalars of A) give 64 MACs.
+    // The reduction is sequential in ascending k, and the addition order per output element matches
+    // the 16×16 kernel with 1 output per thread exactly.
+    // MUST: widening to f32 happens **once at register load** (10 times / 64 MACs). Writing
+    // f32(av * bv) per MAC would raise the conversions to 64 and also drop the product to f16 precision (rounding 2 of the ADR 0028 sequence).
+    // Widening f16 → f32 is exact, so the values do not differ by a single bit from
+    // "the f32 variant with inputs rounded to f16".
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
       let bv0 = vec4<f32>(sb[kk * 32u + lid.x * 2u]);
       let bv1 = vec4<f32>(sb[kk * 32u + lid.x * 2u + 1u]);

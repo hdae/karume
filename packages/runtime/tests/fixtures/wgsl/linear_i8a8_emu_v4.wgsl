@@ -1,4 +1,4 @@
-// karume linear (x[m,k] · wᵀ[k,n] + bias[n], 活性 per-token i8 × 重み i8 の整数内積・エミュ, タイル 128x64 / 1 スレッド 8x8 / wg 8x16 / K 16 + vec4)
+// karume linear (x[m,k] · wᵀ[k,n] + bias[n], integer dot product of per-token i8 activations × i8 weights・エミュ, タイル 128x64 / 1 スレッド 8x8 / wg 8x16 / K 16 + vec4)
 struct Dims {
   m: u32,
   n: u32,
@@ -12,14 +12,15 @@ struct Dims {
 @group(0) @binding(5) var<storage, read> wscale: array<f32>;
 @group(0) @binding(6) var<storage, read> xscale: array<f32>;
 
-// 整数内積のエミュレーション（core WGSL のみ）。dot4I8Packed と**同じ整数**を返す —
-// 整数加算は結合的かつ厳密で、中間値も最大 4·127² = 64,516 なので巻き戻らない
+// emulation of the integer dot product (core WGSL only); returns **the same integer** as dot4I8Packed —
+// integer addition is associative and exact, and the intermediates stay at most 4·127² = 64,516, so nothing wraps
 fn idot(a: u32, b: u32) -> i32 {
   return dot(unpack4xI8(a), unpack4xI8(b));
 }
 
-// 共有タイルは **[pack][行] / [pack][列]** 配置（プロトタイプの [行][pack] からの組み替え —
-// 内側の読みが語ストライド 4 になりバンク衝突が 8-way から 2-way に減る）
+// Shared tiles are laid out **[pack][row] / [pack][column]** (rearranged from the prototype's
+// [row][pack] — the inner reads get word stride 4 and bank conflicts drop from 8-way to
+// 2-way)
 var<workgroup> sa: array<u32, 512>;
 var<workgroup> sb: array<u32, 256>;
 
@@ -29,9 +30,10 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let tid = lid.y * 8u + lid.x;
-  // 適格条件で k % 4 == 0 なので、行頭は必ず語境界に来る（i8 ペイロードは平坦添字 4 詰め）
+  // Eligibility requires k % 4 == 0, so a row always starts on a word boundary (the i8 payload
+  // packs 4 per flat index)
   let k4 = dims.k / 4u;
-  // x タイルの担当（128 行 × 4 pack を 128 スレッドで 4 巡）
+  // x tile assignment (128 rows × 4 packs over 128 threads in 4 rounds)
   let ar = tid / 4u;
   let ap = tid % 4u;
   let sa_at = ap * 128u + ar;
@@ -43,8 +45,9 @@ fn main(
   let arow_base2 = arow2 * k4;
   let arow3 = arow0 + 96u;
   let arow_base3 = arow3 * k4;
-  // W タイルの担当（64 出力チャネル × 4 pack を 128 スレッドで 2 巡）。
-  // 重みは [n,k] のまま読む（連続方向が k = パック方向なので**転置が要らない**）
+  // W tile assignment (64 output channels × 4 packs over 128 threads in 2 rounds).
+  // Weights are read as [n,k] (the contiguous direction is k = the pack direction, so **no
+  // transpose is needed**)
   let wc = tid / 4u;
   let wp = tid % 4u;
   let sb_at = wp * 64u + wc;
@@ -52,8 +55,8 @@ fn main(
   let wrow_base0 = wcol0 * k4;
   let wcol1 = wcol0 + 32u;
   let wrow_base1 = wcol1 * k4;
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner
+  // workgroupBarrier to meet WGSL's uniformity requirement
   let tiles = (k4 + 3u) / 4u;
   var acc0_0 = vec4<i32>(0);
   var acc0_1 = vec4<i32>(0);
@@ -72,7 +75,8 @@ fn main(
   var acc7_0 = vec4<i32>(0);
   var acc7_1 = vec4<i32>(0);
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める（dot4I8Packed(0, x) == 0 なので K 端数でも結果は厳密）
+    // Zero-fill out of range (dot4I8Packed(0, x) == 0, so the result is exact even with a K
+    // remainder)
     let apack = t * 4u + ap;
     var av0 = 0u;
     if (arow0 < dims.m && apack < k4) {
@@ -106,8 +110,9 @@ fn main(
     }
     sb[sb_at + 32u] = wv1;
     workgroupBarrier();
-    // 共有ロード 16 回（B の 8 語 + A の 8 語）で 64 個の整数内積 = 256 MAC。
-    // 縮約は i32 の厳密加算なので**順序に依存しない**（f32 骨格と違い加算順は数値契約に無い）
+    // 16 shared loads (8 words of B + 8 words of A) give 64 integer inner products = 256 MACs.
+    // The reduction is exact i32 addition, so it **does not depend on order** (unlike the f32
+    // skeleton, the addition order is not part of the numeric contract)
     for (var p = 0u; p < 4u; p = p + 1u) {
       let bcol = p * 64u + lid.x * 8u;
       let b0 = sb[bcol];
@@ -158,11 +163,11 @@ fn main(
   let orow6 = orow0 + 6u;
   let orow7 = orow0 + 7u;
   if (ocq0 < n4) {
-    // n % 4 == 0 かつ ocq0 < n4 なので oc + 3 < n（bias は常に f32 — ADR 0006）
+    // n % 4 == 0 and ocq0 < n4, so oc + 3 < n (bias is always f32 — ADR 0006)
     let oc = ocq0 * 4u;
     let ws = vec4<f32>(wscale[oc], wscale[oc + 1u], wscale[oc + 2u], wscale[oc + 3u]);
     let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);
-    // MUST: xs·wscale を先に 1 つの f32 へ畳み、積和は fma（単一丸め）
+    // MUST: fold xs·wscale into one f32 first; the multiply-add is fma (single rounding)
     if (orow0 < dims.m) {
       out[orow0 * n4 + ocq0] = fma(vec4<f32>(acc0_0), xscale[orow0] * ws, biasv);
     }
@@ -189,11 +194,11 @@ fn main(
     }
   }
   if (ocq1 < n4) {
-    // n % 4 == 0 かつ ocq1 < n4 なので oc + 3 < n（bias は常に f32 — ADR 0006）
+    // n % 4 == 0 and ocq1 < n4, so oc + 3 < n (bias is always f32 — ADR 0006)
     let oc = ocq1 * 4u;
     let ws = vec4<f32>(wscale[oc], wscale[oc + 1u], wscale[oc + 2u], wscale[oc + 3u]);
     let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);
-    // MUST: xs·wscale を先に 1 つの f32 へ畳み、積和は fma（単一丸め）
+    // MUST: fold xs·wscale into one f32 first; the multiply-add is fma (single rounding)
     if (orow0 < dims.m) {
       out[orow0 * n4 + ocq1] = fma(vec4<f32>(acc0_1), xscale[orow0] * ws, biasv);
     }

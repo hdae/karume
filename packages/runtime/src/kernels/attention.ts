@@ -1,51 +1,57 @@
 /**
- * 融合 attention（ADR 0023）の 3 カーネル。1 ノード = 3 dispatch:
+ * The three kernels of fused attention (ADR 0023). 1 node = 3 dispatches:
  *
- * | 段 | キー                                        | 役割                                              |
- * | -- | ------------------------------------------- | ------------------------------------------------- |
- * | ①  | `attention_qk:v1:f32:reg64x64r8x4w16{v4}`   | `S = (q·scale) @ (k·scale)ᵀ` を**実体化**         |
- * | ②  | `attention_stats:v2:f32:lastdim:safe:wg256` | 行ごとの `m = amax S` と `inv = 1/Σexp(S−m)`      |
- * | ③  | `attention_pv:v1:f32:reg64x64r8x4w16{v4}`   | `O = P @ v`（`P = exp(S−m)·inv` は**非実体化**）  |
+ * | Step | Key                                         | Role                                         |
+ * | ---- | ------------------------------------------- | -------------------------------------------- |
+ * | ①    | `attention_qk:v1:f32:reg64x64r8x4w16{v4}`   | **materialises** `S = (q·scale) @ (k·scale)ᵀ` |
+ * | ②    | `attention_stats:v2:f32:lastdim:safe:wg256` | per-row `m = amax S`, `inv = 1/Σexp(S−m)`    |
+ * | ③    | `attention_pv:v1:f32:reg64x64r8x4w16{v4}`   | `O = P @ v` (`P = exp(S−m)·inv` not stored)  |
  *
- * ① と ③ は GEMM 骨格（src/kernels/gemm.ts）の断片共有で、内積ループの正本は 1 箇所のまま。
- * ② だけがここに実体を持つ。
+ * ① and ③ share fragments of the GEMM skeleton (src/kernels/gemm.ts), so the inner-product loop
+ * keeps a single source of truth. Only ② has its body here.
  *
- * ## ビット同一が設計の核（MUST）
+ * ## Bit identity is the core of the design (MUST)
  *
- * 出力は分解経路（`mul → permute → bmm → softmax → expand → bmm`）と**ビット単位で一致する**。
- * 成立の根拠は 4 つで、どれか 1 つでも崩すと丸め列が変わる:
+ * The output is **bit-identical** to the decomposed path (`mul → permute → bmm → softmax → expand →
+ * bmm`). It rests on four points; breaking any one of them changes the rounding sequence:
  *
- * 1. ① の縮約は K 昇順・K タイル 16（現行 bmm と同一の骨格）。
- * 2. `scale` は**タイル充填時に q 側と k 側の両方**へ掛ける（半スケール契約 — src/ops.ts）。
- *    内積の後に 1 度だけ掛ける形に変えると、`(q·s)·(k·s)` の各積が f32 へ丸まる位置が動く。
- * 3. ② は**現行 softmax.ts のパス①②を逐語で切り出したもの**（同じ 256 幅ツリー縮約・
- *    同じ走査順 `i += 256`・同じ `inv = 1.0 / Σ`）。v2 からは identity と空行ガードも
- *    **safe_softmax 側**に揃う（identity −inf・空行は stats (0,0)）— 有限要素を 1 つでも
- *    持つ行では amax / inv のビット列が plain softmax 形と同一なので、mask 無し経路の
- *    分解 parity（plain softmax）はそのまま成立する。全 −inf 行だけが「契約違反で
- *    不定値」から「出力 0 の正規入力」へ広がった（ADR 0044 追記 2026-08-31）。
- * 4. ③ の A 要素は `exp(S − m) · inv` を f32 で評価した値で、現行 softmax がパス③で
- *    書き出す値と同じ式・同じ演算順。以降の縮約も現行 bmm と同一。
+ * 1. ① reduces in K-ascending order with K tile 16 (the same skeleton as the current bmm).
+ * 2. `scale` is applied to **both the q side and the k side while filling tiles** (the half-scale
+ *    contract — src/ops.ts). Applying it once after the inner product moves the points where each
+ *    product of `(q·s)·(k·s)` is rounded to f32.
+ * 3. ② is **cut verbatim from passes ①② of the current softmax.ts** (the same 256-wide tree
+ *    reduction, the same scan order `i += 256`, the same `inv = 1.0 / Σ`). From v2 the identity
+ *    and the empty-row guard also follow **safe_softmax** (identity −inf, an empty row gives stats
+ *    (0,0)) — on rows with at least one finite element the amax / inv bits equal the plain softmax
+ *    form, so the decomposition parity of the mask-free path (plain softmax) still holds. Only
+ *    all −inf rows widened from "contract violation, undefined value" to "valid input with output
+ *    0" (ADR 0044 addendum 2026-08-31).
+ * 4. ③'s A element is `exp(S − m) · inv` evaluated in f32, the same expression and operation order
+ *    as the value the current softmax writes in pass ③. The reduction after that is the same as
+ *    the current bmm.
  *
- * MUST: ② を「1 パスの online softmax」へ書き換えない。速いが縮約順序が変わり、上記 3 が
- * 崩れてビット同一の門（PNG sha256 / atol=0 の実測一致）を失う。別順序の変種を入れるなら
- * **別キー + tolerance 全面再導出**とセット（ADR 0022 決定 3 の規律）。
+ * MUST: do not rewrite ② into a "one-pass online softmax". It is faster but changes the reduction
+ * order, breaks point 3 above and loses the bit-identity check (PNG sha256 / measured atol=0
+ * match). A variant with another order comes **with a separate key and new evidence** (ADR 0022
+ * decision 3; since ADR 0110 decision 2 the evidence is the one its declared contract class
+ * requires).
  *
- * ## 加算 mask は ① の epilogue だけの軸（ADR 0023 改訂）
+ * ## The additive mask is an axis of ①'s epilogue only (the ADR 0023 addendum of 2026-08-11)
  *
- * 省略可能な第 4 入力 `mask[1,1,M,N]`（src/ops.ts の契約）は、**①QK の書き出し直前で
- * `S' = fl(S + mask[m·N+n])` を 1 度足す**形で入る。分解経路が `bmm`（S を実体化）→
- * `add`（mask を足す）の 2 ノードで作る値と、丸めの位置も回数も同じなのでビット同一。
- * MUST: ②③ は mask を**一切見ない**（S は既に mask 済み）。生成物もキーも 1 バイト動かない
- * ことをスナップショットが固定する。
+ * The optional fourth input `mask[1,1,M,N]` (the contract in src/ops.ts) enters by **adding
+ * `S' = fl(S + mask[m·N+n])` once, just before ①QK writes its output**. The rounding position and
+ * count match the value the decomposed path builds with the two nodes `bmm` (materialises S) →
+ * `add` (adds the mask), so it is bit-identical.
+ * MUST: ②③ **never look at** the mask (S is already masked). The snapshots pin that neither the
+ * output nor the key moves by a single byte.
  *
- * ## S の格納形は独立した軸（案 γ 波 1）
+ * ## The storage form of S is an independent axis (option γ, phase 1)
  *
- * 3 カーネルが受け渡す S の**格納形**は、計算形（{@link "./gemm.ts"} の `GemmCompute}`）とは
- * **別のつまみ**（src/kernels/score-storage.ts）。`s16` は S を `array<u32>` に
- * `pack2x16float` で詰める形で、①が書き ②③ が読む以上 **3 カーネルが同時に切り替わる**
- * （段ごとの混成はあり得ない）。丸めが増えるのは格納の 1 点だけなので、上記 4 つの根拠は
- * 「S が f16 に丸まった f32 経路」としてそのまま生きる。
+ * The **storage form** of the S handed between the three kernels is **a separate knob**
+ * (src/kernels/score-storage.ts) from the compute form (`GemmCompute}` in {@link "./gemm.ts"}).
+ * `s16` packs S into `array<u32>` with `pack2x16float`; since ① writes and ②③ read it, **all three
+ * kernels switch together** (no per-step mix is possible). The only added rounding is the single
+ * storage point, so the four points above stay valid as "the f32 path with S rounded to f16".
  */
 
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
@@ -72,49 +78,55 @@ import {
   type ScoreStorage,
 } from "./score-storage.ts";
 
-/** ② の workgroup 幅。**softmax と同じ 256**（ツリー縮約の段数が縮約順序そのもの）。 */
+/**
+ * Workgroup width of ②. **256, as in softmax** (the number of tree-reduction levels is the reduction
+ * order itself).
+ */
 export const ATTENTION_STATS_WORKGROUP_SIZE = 256;
 
-/** 行統計 1 行あたりの語数（`[0]` = 行の最大値 / `[1]` = `1/Σexp(S−m)`）。 */
+/** Words per row of the row statistics (`[0]` = row maximum / `[1]` = `1/Σexp(S−m)`). */
 export const ATTENTION_STATS_STRIDE = 2;
 
 /**
- * ①QK の**加算 mask** 判別子（ADR 0023 改訂）。
+ * **Additive mask** discriminator of ①QK (the ADR 0023 addendum of 2026-08-11).
  *
- * MUST: 無しは空文字（既存キーは 1 文字も動かない）。MUST: 語は s16 のさらに**後ろ**に置く —
- * 計算 `:c16` / 格納 `:s16` / mask の 3 語が同時に立ちうるので、並び順をここ 1 箇所で固定
- * しないと同一構成が 2 通りのキーを持つ。
+ * MUST: absent is the empty string (existing keys do not move by a single character). MUST: the
+ * word goes **after** s16 — the three words compute `:c16` / storage `:s16` / mask can be set at
+ * once, so unless the order is fixed here in one place the same configuration gets two keys.
  */
 const maskKeyPart = (mask: boolean): string => (mask ? ":mask" : "");
 
 /**
- * **GQA**（整除 broadcast — ADR 0067 決定 1 / 2）の判別子。
+ * Discriminator of **GQA** (divisible broadcast — ADR 0067 decisions 1 / 2).
  *
- * MUST: 無しは空文字（`r = 1` の既存キーは 1 文字も動かない — ADR 0067 決定 2 の
- * 「r=1 はバイト同一」がキー側にも掛かる）。MUST: 語は mask の**さらに後ろ**（並び順を
- * ここ 1 箇所で固定する — 同一構成が 2 通りのキーを持たないための規律）。
- * MUST: `r` の値そのものは載せない（uniform で運ぶ — 載せると r の種類ぶんパイプラインが
- * 増える。scale / row_offset と同じ規律）。
+ * SHOULD: absent is the empty string (existing keys with `r = 1` do not move by a single character
+ * — the "r=1 is byte-identical" of ADR 0067 decision 2 applies to the key side too) (re-graded
+ * 2026-10-18 — ADR 0067 decision 2). MUST: the word goes **after** mask (the order is fixed here in
+ * one place — the rule that keeps one configuration from having two keys).
+ * MUST: the value of `r` itself is not in the key (it travels in the uniform — putting it in would
+ * add a pipeline per distinct r; the same rule as scale / row_offset).
  */
 const gqaKeyPart = (gqa: boolean): string => (gqa ? ":gqa" : "");
 
 /**
- * **行窓**（クエリ行のブロック実行 — {@link "./gemm.ts"} `GemmRowWindow`）の判別子。
+ * Discriminator of the **row window** (block execution of query rows — `GemmRowWindow` in
+ * {@link "./gemm.ts"}).
  *
- * MUST: 無しは空文字（n = 1 の機は既存キーと 1 文字も変わらない — 行ブロック化の
- * 「分割が発火しない形は既存と完全一致」がキー側にも掛かる）。MUST: 語は GQA の**さらに
- * 後ろ**（並び順をここ 1 箇所で固定する）。MUST: 側（`a` / `c`）は op から決まるので綴りは
- * 固定 — bmm の `:rwa` / `:rwc` と同じ語彙にして、診断のキー一覧で並べて読める形に保つ。
- * MUST: 行オフセットと全 M は載せない（uniform で運ぶ — 載せるとブロックの本数だけ
- * パイプラインが増える）。
+ * MUST: absent is the empty string (with n = 1 the key does not differ by a single character from
+ * the existing one — row blocking's "a shape where the split does not trigger is exactly the
+ * existing one" applies to the key side too). MUST: the word goes **after** GQA (the order is fixed
+ * here in one place). MUST: the side (`a` / `c`) follows from the op, so the spelling is fixed —
+ * the same vocabulary as bmm's `:rwa` / `:rwc`, so the diagnostic key list reads side by side.
+ * MUST: the row offset and the full M are not in the key (they travel in the uniform — putting
+ * them in would add a pipeline per block).
  */
 const rowWindowKeyPart = (side: "a" | "c", rowWindow: boolean): string =>
   rowWindow ? `:rw${side}` : "";
 
 /**
- * ①QK のキー。`geometry` は明示の幾何（src/kernels/gemm.ts の `GemmSpec` — Session では
- * プロファイルの値・計測では掃引の候補）で、MUST: {@link attentionQkWgsl} へ**同じ値**を通す
- * （省略時は既定幾何 = 既存キーのまま）。
+ * Key of ①QK. `geometry` is the explicit geometry (`GemmSpec` in src/kernels/gemm.ts — the
+ * profile's value in a Session, a sweep candidate in measurement), and MUST: pass **the same value**
+ * to {@link attentionQkWgsl} (omitted = the default geometry = the existing key).
  */
 export const attentionQkKey = (
   v4: boolean,
@@ -129,7 +141,7 @@ export const attentionQkKey = (
     score,
   )}${maskKeyPart(mask)}${gqaKeyPart(gqa)}${rowWindowKeyPart("a", rowWindow)}`;
 
-/** ③PV のキー（`geometry` の規律は {@link attentionQkKey} と同じ）。 */
+/** Key of ③PV (the `geometry` rule is the same as {@link attentionQkKey}). */
 export const attentionPvKey = (
   v4: boolean,
   compute: GemmCompute = "f32",
@@ -143,30 +155,30 @@ export const attentionPvKey = (
   )}${gqaKeyPart(gqa)}${rowWindowKeyPart("c", rowWindow)}`;
 
 /**
- * ② の **regcache 変種**（S を 1 回だけ読んでレジスタに残す）が受け持てる 1 スレッドあたりの
- * 要素数の上限。self（dim = 4096）は 16・cross（dim = 512）は 2 で、実測は ×1.672 / ×1.115
- * （docs/research/2026-08-10-kernel-variant-sweep.md §3.1）。
+ * Upper bound on the elements per thread that ②'s **regcache variant** (reads S once and keeps it
+ * in registers) can take. Self-attention (dim = 4096) is 16 and cross-attention (dim = 512) is 2;
+ * measured ×1.672 / ×1.115 (docs/research/2026-08-10-kernel-variant-sweep.md §3.1).
  *
- * 上限を置くのは、`epc` がそのままレジスタ本数になるから — dim が大きい形（32k のような
- * 長系列）で青天井にすると spill してレジスタ保持の意味が消える。超えた形は**現行の
- * 2 回読みループへ落ちる**（値はどちらもビット同一なので、これは速度変種の選択であって
- * 近似ではない）。
+ * The bound exists because `epc` is directly the register count — leaving it unbounded for shapes
+ * with a large dim (long sequences such as 32k) spills and defeats keeping values in registers.
+ * Shapes above it **fall back to the current two-read loop** (both give bit-identical values, so
+ * this is a choice of speed variant, not an approximation).
  */
 export const ATTENTION_STATS_REG_CACHE_MAX = 32;
 
 /**
- * dim から regcache 変種の 1 スレッドあたり要素数を決める**唯一の純関数**
- * （`undefined` = 2 回読みループのまま）。レシピ導出層（recipe-builders/attention.ts の
- * `buildAttention`）はこれをキーと WGSL の両方へ渡すので、
- * 「生成された `epc` と実際の dim が食い違う」状態が構造的に起こらない。
+ * **The only pure function** that derives the regcache variant's elements per thread from dim
+ * (`undefined` = stay with the two-read loop). The recipe derivation layer (`buildAttention` in
+ * recipe-builders/attention.ts) passes it to both the key and the WGSL, so a state where "the
+ * generated `epc` disagrees with the actual dim" cannot arise by construction.
  */
 export const attentionStatsRegCache = (dim: number): number | undefined => {
   const perThread = Math.ceil(dim / ATTENTION_STATS_WORKGROUP_SIZE);
   return perThread <= ATTENTION_STATS_REG_CACHE_MAX ? perThread : undefined;
 };
 
-// v2: ① を nan_max + identity −inf（params 経由）にし、全 −inf 行は stats (0,0) を書く
-// （safe_softmax のガード 3 点の移植 — 有限行のビット列は不変）
+// v2: ① uses nan_max + identity −inf (via params), and an all −inf row writes stats (0,0)
+// (a port of safe_softmax's three guards — the bits of finite rows do not change)
 export const attentionStatsKey = (
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
@@ -176,7 +188,7 @@ export const attentionStatsKey = (
     compute,
   )}${scoreKeyPart(score)}${regCache === undefined ? "" : `:rc${regCache}`}`;
 
-/** f32 変種のキー（既存の呼び出し面 — 正本は {@link attentionStatsKey}）。 */
+/** Key of the f32 variant (the existing call surface — source of truth: {@link attentionStatsKey}). */
 export const ATTENTION_STATS_KEY = attentionStatsKey();
 
 export const attentionQkWgsl = (
@@ -199,15 +211,16 @@ export const attentionPvWgsl = (
 ): string => gemmWgsl({ op: "attention_pv", v4, compute, score, gqa, rowWindow, geometry });
 
 /**
- * ② 行統計。**現行 softmax.ts のパス①②をそのまま切り出したもの**で、書き出しだけが
- * 「行ごとの 2 語」に変わっている（`exp` の 2 度目の評価と行全体の書き戻しが消えた）。
+ * ② row statistics. **Cut as is from passes ①② of the current softmax.ts**; only the output
+ * changed to "2 words per row" (the second evaluation of `exp` and the write-back of the whole row
+ * are gone).
  *
- * MUST: 走査順（`i = lid; i += 256`）とツリー縮約の段（`stride = 128, 64, …`）を
- * softmax と一致させる。1 行の総和は加算順序で最終 ulp が動くので、ここが違うと
- * 分解経路とのビット同一が壊れる。
- * MUST: 行 max は `nan_max`・identity は params 経由の −inf・空行は stats (0,0)
- * （safe_softmax のガード 3 点と同形 — モジュール doc の根拠 3。③PV は空行で
- * `exp(S − 0) = exp(−inf) = 0` に `inv = 0` が掛かり出力が厳密 0 になる）。
+ * MUST: match softmax in scan order (`i = lid; i += 256`) and tree-reduction levels
+ * (`stride = 128, 64, …`). The last ulp of a row sum moves with the summation order, so a
+ * difference here breaks bit identity with the decomposed path.
+ * MUST: row max is `nan_max`, the identity is −inf via params, and an empty row gives stats (0,0)
+ * (the same form as safe_softmax's three guards — point 3 of the module doc. For an empty row ③PV
+ * multiplies `exp(S − 0) = exp(−inf) = 0` by `inv = 0`, so the output is exactly 0).
  */
 export const attentionStatsWgsl = (
   compute: GemmCompute = "f32",
@@ -215,17 +228,18 @@ export const attentionStatsWgsl = (
   regCache?: number,
 ): string => {
   const f16 = compute === "f16";
-  // ② は S を**読むだけ**なので v4 の制約（書き側の RMW）は掛からない — 見るのは
-  // 「`:c16` と同時に立っていないこと」だけ。
+  // ② **only reads** S, so the v4 constraint (the write side's RMW) does not apply — the only
+  // check is "not set together with `:c16`".
   assertScoreStorageSupported("attention_stats", score, true, f16);
-  // MUST: S は f32 へ広げてから縮約する（拡幅は厳密なので、同じ S に対して f32 変種と
-  // **ビット単位で同じ** m / inv が出る）。f16 のまま max / exp を取ると縮約の丸め列が
-  // 変わり、ADR 0023 の「② は softmax のパス①② と逐語一致」が崩れる。
+  // MUST: widen S to f32 before reducing (widening is exact, so the same S yields **bit-identical**
+  // m / inv to the f32 variant). Taking max / exp in f16 changes the rounding sequence of the
+  // reduction and breaks ADR 0023's "② matches softmax passes ①② verbatim".
   const read = (index: string): string =>
     f16 ? `f32(s[${index}])` : scoreReadAt("s", score, index);
-  // regcache 変種は「要素 → スレッドの割当」も「縮約の順序」も 2 回読み版と**完全に同一**で、
-  // 違いは S を 2 度読むか 1 度読んでレジスタに残すかだけ（範囲外はどちらの段でも触らない）。
-  // したがって m / inv は 1 ビットも動かない — ADR 0023 のビット同一の根拠 3 を壊さない。
+  // The regcache variant is **exactly the same** as the two-read version in both "element →
+  // thread assignment" and "reduction order"; the only difference is reading S twice versus
+  // reading it once and keeping it in registers (out-of-range elements are touched in neither
+  // pass). So m / inv do not move by a single bit — point 3 of ADR 0023's bit identity holds.
   const slots = regCache === undefined ? [] : Array.from({ length: regCache }, (_, at) => at);
   const indexPrologue =
     regCache === undefined
@@ -268,7 +282,7 @@ export const attentionStatsWgsl = (
     }`,
           )
           .join("\n");
-  return `// karume attention_stats (行ごとの m = amax(S) と inv = 1/Σexp(S - m), f32${
+  return `// karume attention_stats (per-row m = amax(S) and inv = 1/Σexp(S - m), f32${
     f16 ? ", S は f16 格納" : ""
   }${scoreNote(score)}${
     regCache === undefined ? "" : `, S は 1 回読みでレジスタ保持（1 スレッド ${regCache} 要素）`
@@ -301,7 +315,7 @@ ${indexPrologue}  var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 行の最大値（safe-softmax の減算項 — identity は -inf）
+    // ① Row maximum (the subtracted term of safe-softmax — identity is -inf)
     var hi = neg_inf;
 ${maxPass}
     scratch[lid] = hi;
@@ -315,13 +329,14 @@ ${maxPass}
       stride = stride / 2u;
     }
     let row_max = scratch[0u];
-    // 全要素 -inf の行（全マスク行）— 減算項を 0 にして NaN を作らない（safe_softmax と同形）
+    // A row with every element -inf (no key visible) — make the subtracted term 0 so no NaN is
+    // produced (same form as safe_softmax)
     let empty = row_max == neg_inf;
     let amax = select(row_max, 0.0, empty);
-    // scratch の読み終わりを揃えてから ② で上書きする
+    // Make sure scratch has been read before ② overwrites it
     workgroupBarrier();
 
-    // ② Σ exp(S - amax)（最大要素が exp(0) = 1 を出すので分母は必ず 1 以上）
+    // ② Σ exp(S - amax) (the largest element gives exp(0) = 1, so the denominator is at least 1)
     var acc = 0.0;
 ${sumPass}
     scratch[lid] = acc;
@@ -334,14 +349,16 @@ ${sumPass}
       workgroupBarrier();
       stride2 = stride2 / 2u;
     }
-    // MUST: 逆数はここで作る（③ で割り算に戻すと softmax のパス③と演算が変わる）
+    // MUST: the reciprocal is built here (going back to a division in ③ would change the operation
+    // versus softmax pass ③)
     let inv = 1.0 / scratch[0u];
     if (lid == 0u) {
-      // 空行は (0.0, 0.0) — ③ の exp(S - 0) = exp(-inf) = 0 に inv = 0 が掛かり出力が厳密 0
+      // An empty row is (0.0, 0.0) — ③ multiplies exp(S - 0) = exp(-inf) = 0 by inv = 0, so the
+      // output is exactly 0
       stats[row * ${ATTENTION_STATS_STRIDE}u] = amax;
       stats[row * ${ATTENTION_STATS_STRIDE}u + 1u] = select(inv, 0.0, empty);
     }
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // Make sure scratch[0] has been read before the next row overwrites scratch[lid]
     workgroupBarrier();
     row = row + nwg.x;
   }
@@ -349,14 +366,16 @@ ${sumPass}
 `;
 };
 
-/** f32 変種の WGSL（既存の呼び出し面 — 正本は {@link attentionStatsWgsl}）。 */
+/** WGSL of the f32 variant (the existing call surface — source of truth: {@link attentionStatsWgsl}). */
 export const ATTENTION_STATS_WGSL: string = attentionStatsWgsl();
 
 /**
- * GQA の繰り返し数 `r = H / Hkv`（uniform に載る導出値 — ADR 0067 決定 2）の値域門。
+ * Range check of the GQA repeat count `r = H / Hkv` (a derived value carried in the uniform — ADR
+ * 0067 decision 2).
  *
- * MUST: 0 を通さない。WGSL の u32 ゼロ除算は trap せず実装依存の値を返すので、`r = 0` は
- * 例外も NaN も出ないまま K / V の base が化ける（沈黙誤値）。
+ * MUST: do not let 0 through. WGSL u32 division by zero does not trap and returns an
+ * implementation-dependent value, so `r = 0` corrupts the K / V base with neither an exception nor
+ * NaN (a silent wrong value).
  */
 const assertKvRepeat = (where: string, kvRepeat: number): void => {
   assertU32Params(where, { kv_repeat: kvRepeat });
@@ -366,19 +385,22 @@ const assertKvRepeat = (where: string, kvRepeat: number): void => {
 };
 
 /**
- * ① の uniform（`{m, n, k, scale}`）。4 語目が**半スケール**の f32 ビット列。
+ * Uniform of ① (`{m, n, k, scale}`). The 4th word is the f32 bits of the **half scale**.
  *
- * MUST: scale を WGSL に焼かない（値の種類だけパイプラインが増える — masked_fill の
- * 埋め値と同じ理由）。
+ * MUST: do not bake scale into the WGSL (a pipeline per distinct value — the same reason as the
+ * fill value of masked_fill).
  *
- * `kvRepeat` は **GQA 変種だけ**が渡す 5 語目（ADR 0067 決定 2）。16 バイト単位に切り上げて
- * 32 バイトに伸びる（bmm の行窓変種と同じ形 — 16 バイト単位の確保はプロジェクトの慣行で、仕様上の
- * 要件ではない）。MUST: 省略時のバイト列は従来どおり 16 バイトちょうど — `r = 1` の既存経路が
- * 1 バイトも動かないことがこの分岐の目的。
+ * `kvRepeat` is the 5th word passed **only by the GQA variant** (ADR 0067 decision 2). Rounded up
+ * to 16-byte units it grows to 32 bytes (the same form as bmm's row-window variant — allocating in
+ * 16-byte units is a project convention, not a requirement of the spec). SHOULD: when omitted the
+ * bytes stay exactly 16 as before — the purpose of this branch is that the existing `r = 1` path
+ * does not move by a single byte (re-graded 2026-10-18 — ADR 0067 decision 2).
  *
- * `window` は **行窓変種だけ**が渡す末尾 2 語（{@link "./gemm.ts"} `ROW_WINDOW_DIMS_EXTRA` と対）。
- * MUST: 位置は `kv_repeat` の**後ろ**（GQA の語位置を行窓の有無で動かさない — 生成側の
- * dimsExtra が同じ順で綴る）。MUST: `m` はブロック行数（全 M ではない）。
+ * `window` is the 2 trailing words passed **only by the row-window variant** (paired with
+ * `ROW_WINDOW_DIMS_EXTRA` in {@link "./gemm.ts"}).
+ * MUST: its position is **after** `kv_repeat` (the GQA word position does not move with the row
+ * window — the generator's dimsExtra spells them in the same order). MUST: `m` is the block row
+ * count (not the full M).
  */
 export const attentionQkParams = (
   m: number,
@@ -388,8 +410,9 @@ export const attentionQkParams = (
   kvRepeat?: number,
   window?: GemmRowWindowSpan,
 ): Uint32Array<ArrayBuffer> => {
-  // MUST: 有限判定は **f32 として**行う（載せ先が f32 語 — f64 で有限な `1e39` は `+Inf` に
-  // なり、`0 * Inf = NaN` でスコアが黙って壊れる。契約層 `assertFiniteAttr` と同じ門）。
+  // MUST: check finiteness **as f32** (the destination is an f32 word — `1e39`, finite in f64,
+  // becomes `+Inf`, and `0 * Inf = NaN` silently breaks the scores. The same check as the
+  // contract layer's `assertFiniteAttr`).
   if (!Number.isFinite(Math.fround(scale))) {
     throw new CodegenError(`attention_qk params: scale は f32 として有限の数値（${scale}）`);
   }
@@ -413,13 +436,15 @@ export const attentionQkParams = (
 };
 
 /**
- * ③ の uniform（`{m, n, k}` — bmm と同じ 3 語）。
+ * Uniform of ③ (`{m, n, k}` — the same 3 words as bmm).
  *
- * `kvRepeat` は **GQA 変種だけ**が渡す 4 語目（ADR 0067 決定 2）。16 バイト確保の余りに収まる
- * ので、GQA でもバイト数は変わらない（省略時は従来どおり 4 語目が 0）。
+ * `kvRepeat` is the 4th word passed **only by the GQA variant** (ADR 0067 decision 2). It fits in
+ * the slack of the 16-byte allocation, so GQA does not change the byte count (when omitted the 4th
+ * word is 0 as before).
  *
- * `window` は **行窓変種だけ**が渡す末尾 2 語（①QK と同じ規律 — `kv_repeat` の後ろ）。ここで
- * だけ struct が 16 バイトを越えるので 32 バイト確保する。MUST: `m` はブロック行数。
+ * `window` is the 2 trailing words passed **only by the row-window variant** (the same rule as ①QK
+ * — after `kv_repeat`). Only here does the struct exceed 16 bytes, so 32 bytes are allocated.
+ * MUST: `m` is the block row count.
  */
 export const attentionPvParams = (
   m: number,
@@ -445,13 +470,15 @@ export const attentionPvParams = (
 };
 
 /**
- * ② の uniform。2 語ぶんの内容でも 16 バイト確保する（softmax と同じ — 16 バイト単位の確保は
- * プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
+ * Uniform of ②. 16 bytes are allocated even though the content is 2 words (as in softmax —
+ * allocating in 16-byte units is a project convention (the fusion pass fixes the same form in ADR
+ * 0040), not a requirement of the spec).
  *
- * MUST: regcache 変種を使うなら、その `regCache` をここにも渡して幾何を見る（生成側と二重だが、
- * カーネル直呼びの経路も通る門 — gru_scan の hidden 上限と同型）。`epc` は生成時に焼かれる
- * 一方 `dim` は実行時値なので、`dim > epc · 256` になると余った要素が max にも Σ にも
- * 入らず、確率が黙ってずれる（例外も NaN も出ない沈黙誤値）。
+ * MUST: when the regcache variant is used, pass its `regCache` here too so the geometry is checked
+ * (redundant with the generator, but a check that the direct kernel call path also goes through —
+ * the same shape as gru_scan's hidden limit). `epc` is baked at generation while `dim` is a
+ * run-time value, so with `dim > epc · 256` the leftover elements enter neither max nor Σ and the
+ * probabilities silently shift (a silent wrong value with neither an exception nor NaN).
  */
 export const attentionStatsParams = (
   rows: number,
@@ -463,10 +490,11 @@ export const attentionStatsParams = (
     throw new CodegenError(`attention_stats params: dim は正整数（${dim}）`);
   }
   if (regCache !== undefined) {
-    // MUST: 整数であることを先に見る。生成側の `Array.from({ length: regCache })` は非整数長を
-    // **切り捨てて**スロットを並べる一方、下の被覆計算は非整数のまま `regCache · 256` を主張する
-    // ので、`1.5` は「スロット 1 本 = 256 要素ぶんしか展開していないのに 384 要素まで担当」と
-    // 名乗って通り、余った要素が max にも Σ にも入らない沈黙誤値になる。
+    // MUST: check that it is an integer first. The generator's `Array.from({ length: regCache })`
+    // **truncates** a non-integer length when laying out the slots, while the coverage computation
+    // below claims `regCache · 256` with the non-integer as is, so `1.5` passes claiming "384
+    // elements covered although only 1 slot = 256 elements is unrolled", and the leftover elements
+    // enter neither max nor Σ — a silent wrong value.
     if (!Number.isInteger(regCache)) {
       throw new CodegenError(`attention_stats params: regCache ${regCache} が整数でない`);
     }
@@ -485,8 +513,8 @@ export const attentionStatsParams = (
   const params = new Uint32Array(4);
   params[0] = rows;
   params[1] = dim;
-  // −inf のビット列（identity と空行判定 — 定数式 bitcast の shader-creation error 回避で
-  // params 経由。softmax.ts の MUST と同じ）
+  // Bits of −inf (identity and the empty-row test — via params to avoid the shader-creation error
+  // of a constant-expression bitcast; the same as the MUST in softmax.ts)
   params[2] = SAFE_SOFTMAX_NEG_INF_BITS;
   return params;
 };

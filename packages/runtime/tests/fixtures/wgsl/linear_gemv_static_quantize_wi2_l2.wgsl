@@ -8,7 +8,7 @@ struct Dims {
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
-// 行頭が 16 B 整列なのは k % 64 == 0 から（適格判定が保証する）
+// Row starts are 16 B aligned because k % 64 == 0 (guaranteed by the eligibility check)
 @group(0) @binding(2) var<storage, read> w: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<u32>;
@@ -39,11 +39,11 @@ fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: ve
   let lane = lid % 2u;
   let col = wg.x * 64u + lid / 2u;
   var acc = 0.0;
-  // 端の列も部分和0を書き、全threadが同じbarrierを通る。
+  // Edge columns also write a partial sum of 0, so every thread passes the same barriers.
   if (col < dims.n) {
     let units = dims.k / 64u;
     let row_base = col * units;
-  // 出力チャネルの scale はループ不変 — 重みの要素ごとに引き直さない（ADR 0019）
+  // the output channel's scale is loop-invariant — not re-read per weight element (ADR 0019)
   let wscale_v = wscale[col];
     for (var unit = lane; unit < units; unit += 2u) {
     let unitt = unit;

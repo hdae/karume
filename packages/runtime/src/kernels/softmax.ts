@@ -1,56 +1,65 @@
 /**
- * softmax / safe_softmax（最終次元、f32）の固定カーネル。
+ * The fixed kernel of softmax / safe_softmax (last dimension, f32).
  *
- * ## safe-softmax（MUST）
+ * ## safe-softmax (MUST)
  *
- * `exp(x − amax_r)` の形で組む。素朴な `exp(x) / Σexp(x)` は台帳の反例集どおり壊れる:
+ * Built in the form `exp(x − amax_r)`. The naive `exp(x) / Σexp(x)` breaks exactly as in the
+ * ledger's counterexamples:
  *
- * - 大きい正値: `exp(89) > f32 の最大有限値` で `inf`、`inf / inf = NaN`。
- * - 大きい負値: `exp(−104) < f32 の最小非正規数` で全項 0 になり `0 / 0 = NaN`。
- *   masked_fill の埋め値 −3.4028234663852886e+38 を通した行は**必ず**この領域に入る。
+ * - Large positive values: `exp(89) > the largest finite f32` gives `inf`, and `inf / inf = NaN`.
+ * - Large negative values: `exp(−104) < the smallest f32 subnormal` makes every term 0, and
+ *   `0 / 0 = NaN`. A row that went through masked_fill's fill value −3.4028234663852886e+38
+ *   **always** lands in this region.
  *
- * amax を引いた形なら指数の引数は常に `(−∞, 0]` で、最大要素が必ず `exp(0) = 1` を出すため
- * 分母が 0 にならない。全要素が同じ有限値の行（有限 sentinel −F32_MAX で埋めた全マスク行を
- * 含む）でも `1/dim` の一様分布になり、torch と一致する。
- * 全要素 −inf の行はこの保証の外にある。plain softmax の identity は有限の −F32_MAX なので、
- * `amax = −F32_MAX`・`Σ exp(−inf − amax) = 0` となり、`1.0 / 0` は WGSL では不定値になる。
- * この入力は契約違反で、検査はしない（ADR 0044 決定 3 — 全 −inf 行が正規なのは
- * safe_softmax 変種だけ）。
+ * With amax subtracted, the exponent's argument is always in `(−∞, 0]`, and the largest element
+ * always yields `exp(0) = 1`, so the denominator is never 0. A row whose elements are all the same
+ * finite value (including a fully masked row filled with the finite sentinel −F32_MAX) gives the
+ * uniform distribution `1/dim`, matching torch.
+ * A row of all −inf is outside this guarantee. Plain softmax's identity is the finite −F32_MAX, so
+ * `amax = −F32_MAX`, `Σ exp(−inf − amax) = 0`, and `1.0 / 0` is an indeterminate value in WGSL.
+ * This input violates the contract and is not checked (ADR 0044 decision 3 — an all −inf row is
+ * canonical only for the safe_softmax variant).
  *
- * 入力は先行次元を平坦化した `[rows, dim]` の連続レイアウトとして扱う。1 行 = 1 workgroup
- * （256 スレッド）の**3 パス**: ① amax ② `Σ exp(x − amax)` ③ 書き出し。②③ で `exp` を
- * 2 度評価するのは、行長ぶんの中間バッファを持たずに済ませるため（正しさ優先 — 性能
- * マイルストーンでの置換対象）。同じ引数の `exp` は同じ値を返すので決定性は保たれる。
+ * The input is treated as a contiguous `[rows, dim]` layout with the leading dimensions flattened.
+ * One row = one workgroup (256 threads) in **three passes**: (1) amax (2) `Σ exp(x − amax)` (3)
+ * write-out. (2) and (3) evaluate `exp` twice to avoid an intermediate buffer of the row length
+ * (correctness first — a target for replacement in the performance milestone). `exp` of the same
+ * argument returns the same value, so determinism holds.
  *
- * MUST: params は uniform で渡す（行ループ内に workgroupBarrier があり、ループ条件が
- * workgroup 内で一様である必要がある）。
- * MUST: ① の行 max は `nan_max`（ビット列 NaN 判定 — ADR 0020）。WGSL の `max` は仕様レベルで
- * NaN を落とす（"Returns e2 if e1 is less than e2, and e1 otherwise"）ため、素の `max` だと
- * **全要素 NaN の行が safe_softmax の空行判定に化けて厳密 0 になり、NaN が黙って消える**
- * （部分 NaN 行は ② の総和経由で従来から伝播していた — 穴は全 NaN 行だけ）。非 NaN 入力では
- * nan_max = 素の max なので既存の数値結果は 1 ビットも動かない（v2）。
+ * MUST: params are passed as a uniform (there is a workgroupBarrier inside the row loop, and the
+ * loop condition must be uniform within the workgroup).
+ * MUST: the row max of (1) is `nan_max` (NaN test on the bit pattern — ADR 0020). WGSL's `max`
+ * drops NaN at the specification level ("Returns e2 if e1 is less than e2, and e1 otherwise"), so
+ * with a plain `max` **a row of all NaN passes safe_softmax's empty-row test, becomes exactly 0,
+ * and the NaN disappears silently** (a row with some NaN already propagated before v2 through the sum of (2)
+ * — the hole was only the all-NaN row). For non-NaN inputs nan_max = plain max, so the existing
+ * numeric results do not move by a single bit (v2).
  *
- * ## safe_softmax 変種（ADR 0044）
+ * ## The safe_softmax variant (ADR 0044)
  *
- * 契約は softmax と同一 + 「**行 max が −inf の行は全 0 を書く**」（torch の SDPA 分解が
- * 出す safe-softmax ガードと同じ意味論）。**同じ生成関数から両方を出す** MUST — ②③ の
- * 縮約順序・丸め位置が softmax と 1 語でもずれると、分解経路とのビット同一（parity テスト）
- * が壊れる。変種が足すのは次の 3 点だけ:
+ * The contract is the same as softmax plus "**a row whose max is −inf is written as all 0**" (the
+ * same semantics as the safe-softmax guard torch's SDPA decomposition emits). **Both are emitted
+ * from the same generator** MUST — if the reduction order or the rounding points of (2) and (3)
+ * differ from softmax by even one word, bit identity with the decomposed path (the parity test)
+ * breaks. The variant adds only these three points:
  *
- * 1. ① の identity を **−inf** にする（素の softmax は −F32_MAX）。有限要素を 1 つでも持つ
- *    行では max がその要素に支配されるので amax は両者で**同じビット列**になり、違いが出る
- *    のは「全要素 −inf」の行だけ — そこだけ amax が −inf になって判別できる。
- * 2. `empty`（行 max が −inf）なら ② の減算項を 0 に差し替える。`−inf − (−inf) = NaN` を
- *    そもそも作らないための置換で、非 empty 行では `select` が元の値をそのまま返す。
- * 3. ③ の書き出しを `select(…, 0.0, empty)` で包む。empty 行の ② は分母 0（0 除算の結果は
- *    WGSL では不定値）なので、**値を捨てる側で** 0 を確定させる。
+ * 1. The identity of (1) is **−inf** (plain softmax uses −F32_MAX). In a row with at least one
+ *    finite element the max is dominated by that element, so amax has **the same bit pattern** in
+ *    both, and the only difference is in rows of all −inf — only there does amax become −inf and
+ *    tell them apart.
+ * 2. If `empty` (row max is −inf), the subtrahend of (2) is replaced with 0. The replacement keeps
+ *    `−inf − (−inf) = NaN` from being produced at all; in non-empty rows `select` returns the
+ *    original value as is.
+ * 3. The write-out of (3) is wrapped in `select(…, 0.0, empty)`. In an empty row (2) has a zero
+ *    denominator (the result of division by 0 is indeterminate in WGSL), so 0 is fixed **on the
+ *    side that discards the value**.
  *
- * MUST: 分岐（`if`）で empty 行を早期に書き出さない。`amax` は workgroup メモリ由来の値で、
- * その条件下に `workgroupBarrier` を置くと WGSL の一様性解析に掛かる。`select` なら barrier
- * の位置が両経路で同じまま保たれる。
- * MUST: −inf のビット列は params で運ぶ（gather / embedding の NaN と同じ理由 — 定数式の
- * `bitcast<f32>(0xff800000u)` を「const-expression が inf」としてシェーダ生成エラーにする
- * 実装がありうる）。
+ * MUST: do not write out empty rows early with a branch (`if`). `amax` comes from workgroup
+ * memory, and a `workgroupBarrier` under that condition trips WGSL's uniformity analysis. With
+ * `select` the barrier stays at the same position on both paths.
+ * MUST: the −inf bit pattern travels in params (the same reason as gather / embedding's NaN — an
+ * implementation may reject the constant expression `bitcast<f32>(0xff800000u)` with a shader
+ * creation error, "const-expression is inf").
  */
 
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
@@ -59,24 +68,25 @@ import { assertU32Params } from "../codegen/params.ts";
 
 export const SOFTMAX_WORKGROUP_SIZE = 256;
 
-// v2: 行 max を nan_max へ（全 NaN 行の沈黙 0 化を塞ぐ — 上の MUST）
+// v2: row max via nan_max (closes the silent zeroing of all-NaN rows — the MUST above)
 export const SOFTMAX_KEY = `softmax:v2:f32:lastdim:safe:wg${SOFTMAX_WORKGROUP_SIZE}`;
 
 export const SAFE_SOFTMAX_KEY = `safe_softmax:v2:f32:lastdim:safe:emptyrow0:wg${SOFTMAX_WORKGROUP_SIZE}`;
 
-/** f32 の最大有限値。WGSL に無限大リテラルが無いため amax の identity にこれを使う。 */
+/** The largest finite f32. WGSL has no infinity literal, so this is amax's identity. */
 const F32_MAX = "3.402823466e38";
 
-/** −inf の f32 ビット列（safe_softmax の params 3 語目）。 */
+/** f32 bit pattern of −inf (the third params word of safe_softmax). */
 export const SAFE_SOFTMAX_NEG_INF_BITS = 0xff800000;
 
 /**
- * softmax（`safe` で safe_softmax 変種）の WGSL。正本はこの 1 本で、変種が触るのは
- * 上の doc が列挙した 3 点だけ（共通部を 2 本に複製しない MUST）。
+ * The WGSL of softmax (the safe_softmax variant with `safe`). This one function is the source of
+ * truth, and the variant touches only the three points the doc above lists (the shared part
+ * MUST NOT be duplicated into two).
  */
 const softmaxWgsl = (safe: boolean): string =>
   `// karume ${safe ? "safe_softmax" : "softmax"} (last dim, f32, safe-softmax: exp(x - amax)${
-    safe ? ", 行 max が -inf の行は全 0" : ""
+    safe ? ", rows whose max is -inf are all 0" : ""
   })
 struct Params {
   rows: u32,
@@ -104,7 +114,7 @@ ${safe ? "  let neg_inf = bitcast<f32>(params.neg_inf);\n" : ""}  var row = wid.
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 行の最大値（safe-softmax の減算項${safe ? " — identity は -inf" : ""}）
+    // ① row maximum (the subtrahend of safe-softmax${safe ? " — identity is -inf" : ""})
     var hi = ${safe ? "neg_inf" : `-${F32_MAX}`};
     var i = lid;
     while (i < dim) {
@@ -124,15 +134,16 @@ ${safe ? "  let neg_inf = bitcast<f32>(params.neg_inf);\n" : ""}  var row = wid.
 ${
   safe
     ? `    let row_max = scratch[0u];
-    // 全要素 -inf の行（torch のガードが 0 を返す行）— 減算項を 0 にして NaN を作らない
+    // a row of all -inf (the row torch's guard returns 0 for) — the subtrahend becomes 0 so no
+    // NaN is made
     let empty = row_max == neg_inf;
     let amax = select(row_max, 0.0, empty);
 `
     : "    let amax = scratch[0u];\n"
-}    // scratch の読み終わりを揃えてから ② で上書きする
+}    // make every read of scratch finish before ② overwrites it
     workgroupBarrier();
 
-    // ② Σ exp(x - amax)（最大要素が exp(0) = 1 を出すので分母は必ず 1 以上）
+    // ② Σ exp(x - amax) (the largest element yields exp(0) = 1, so the denominator is always ≥ 1)
     var acc = 0.0;
     var j = lid;
     while (j < dim) {
@@ -150,10 +161,11 @@ ${
       stride2 = stride2 / 2u;
     }
     let inv = 1.0 / scratch[0u];
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // make every read of scratch[0] finish before the next row overwrites scratch[lid]
     workgroupBarrier();
 
-    // ③ 書き出し（exp は ② と同じ引数 — 同じ値が返るので決定的）
+    // ③ write-out (exp takes the same argument as in ② — it returns the same value, so it is
+    // deterministic)
     var o = lid;
     while (o < dim) {
       out[base + o] = ${
@@ -171,11 +183,12 @@ export const SOFTMAX_WGSL: string = softmaxWgsl(false);
 export const SAFE_SOFTMAX_WGSL: string = softmaxWgsl(true);
 
 /**
- * uniform の Params。2 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保はプロジェクトの
- * 慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
+ * The uniform Params. 16 bytes are allocated even for two words of content (allocating in 16-byte
+ * units is a project convention (the fusion pass fixes the same form in ADR 0040), not a
+ * requirement of the specification).
  *
- * `safe` のとき 3 語目に −inf のビット列を載せる（safe_softmax は WGSL 側で `bitcast` して
- * ① の identity と空行判定に使う）。
+ * With `safe`, the third word carries the −inf bit pattern (safe_softmax `bitcast`s it on the WGSL
+ * side and uses it as the identity of ① and for the empty-row test).
  */
 export const softmaxParams = (
   rows: number,

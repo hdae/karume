@@ -1,4 +1,4 @@
-// karume embedding (out[..., h] = weight[index[...], h], f32 / 添字 i32, 重み bf16 格納)
+// karume embedding (out[..., h] = weight[index[...], h], f32 / index i32, 重み bf16 格納)
 struct Dims {
   n: u32,
   hidden: u32,
@@ -10,7 +10,8 @@ struct Dims {
 @group(0) @binding(2) var<storage, read> index: array<i32>;
 @group(0) @binding(3) var<storage, read_write> out: array<f32>;
 
-// bf16 格納の展開: 要素 i = weight[i / 2] の下位 / 上位 16 bit を f32 の上位へ（平坦添字の偶奇で選ぶ）
+// decode of bf16 storage: element i = the lower / upper 16 bits of weight[i / 2] moved to the top
+// of an f32 (the parity of the flat index picks)
 fn dequant(i: u32) -> f32 {
   let word = weight[i >> 1u];
   return bitcast<f32>(select(word << 16u, word & 0xFFFF0000u, (i & 1u) == 1u));
@@ -27,7 +28,8 @@ fn main(
     let row = i / dims.hidden;
     let col = i % dims.hidden;
     let pick = index[row];
-    // 契約外の添字は別の行を返さず NaN で汚染する（カーネル doc の裁定）
+    // an index outside the contract contaminates with NaN instead of returning another row (the
+    // ruling in the kernel doc)
     if (pick < 0 || u32(pick) >= dims.vocab) {
       out[i] = bitcast<f32>(dims.oob);
     } else {

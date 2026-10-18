@@ -6,7 +6,7 @@ struct Dims {
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
-// 行頭が 16 B 整列なのは k % 32 == 0 から（適格判定が保証する）
+// Row starts are 16 B aligned because k % 32 == 0 (guaranteed by the eligibility check)
 @group(0) @binding(2) var<storage, read> w: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
@@ -18,7 +18,7 @@ fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: ve
   let lane = lid % 4u;
   let col = wg.x * 32u + lid / 4u;
   var acc = 0.0;
-  // 端の列も部分和0を書き、全threadが同じbarrierを通る。
+  // Edge columns also write a partial sum of 0, so every thread passes the same barriers.
   if (col < dims.n) {
     let units = dims.k / 32u;
     let row_base = col * units;

@@ -1,4 +1,4 @@
-// karume static_quantize: 固定 f32 scale の SRQ（ADR 0097）
+// karume static_quantize: SRQ with a fixed f32 scale (ADR 0097)
 @group(0) @binding(0) var<uniform> params: array<vec4<u32>, 65>;
 @group(0) @binding(1) var<storage, read> input: array<u32>;
 @group(0) @binding(2) var<storage, read_write> output: array<u32>;

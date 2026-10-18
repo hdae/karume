@@ -11,9 +11,9 @@ struct Dims {
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
 
-// 共有 A タイル（128 行 × K 16・スカラ格納）と
-// 共有 B タイル（K 16 × 列 quad 32・列方向を vec4 に束ねた形）。f16 変種は共有バイトが半分
-// （16384 B → 8192 B / WG）— 期待利得はこの 1 機序に全て乗る
+// Shared A tile (128 rows × K 16, scalar storage) and
+// shared B tile (K 16 × 32 column quads, column direction grouped into vec4)。f16 変種は共有バイトが半分
+// (16384 B → 8192 B / WG) — the expected gain rests entirely on this one mechanism
 var<workgroup> sa: array<f16, 2048>;
 var<workgroup> sb: array<vec4<f16>, 512>;
 
@@ -23,7 +23,7 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let tid = lid.y * 16u + lid.x;
-  // A タイルの担当（128 行 × 4 quad を 256 スレッドで 2 巡）
+  // A tile assignment (128 rows × 4 quads over 256 threads in 2 rounds)
   let ar = tid / 4u;
   let aq = tid % 4u;
   let arow0 = wid.y * 128u + ar;
@@ -32,12 +32,13 @@ fn main(
   let arow1 = arow0 + 64u;
   let arow_base1 = arow_base0 + 64u * dims.k;
   let sa_base1 = sa_base0 + 1024u;
-  // W タイルの担当（128 出力チャネル × 4 quad を 256 スレッドで 2 巡）
+  // W tile assignment (128 output channels × 4 quads over 256 threads in 2 rounds)
   let wc0 = tid / 4u;
   let wq = tid % 4u;
   let wcol0 = wid.x * 128u + wc0;
   let wrow_base0 = wcol0 * dims.k;
-  // 共有メモリ側で転置して置く（列 quad = wc / 4・成分 = wc % 4）
+  // Placed transposed on the shared-memory side
+  // (column quad = wc / 4, component = wc % 4)
   let wsq0 = wc0 / 4u;
   let wsl0 = wc0 % 4u;
   let sb_base0 = (wq * 4u) * 32u + wsq0;
@@ -47,8 +48,8 @@ fn main(
   let wsq1 = wc1 / 4u;
   let wsl1 = wc1 % 4u;
   let sb_base1 = (wq * 4u) * 32u + wsq1;
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner workgroupBarrier
+  // to meet WGSL's uniformity requirement
   let tiles = (dims.k + 15u) / 16u;
   var acc0_0 = vec4<f32>(0.0);
   var acc0_1 = vec4<f32>(0.0);
@@ -67,7 +68,8 @@ fn main(
   var acc7_0 = vec4<f32>(0.0);
   var acc7_1 = vec4<f32>(0.0);
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める。内積に寄与しないので端数 shape でも結果は変わらない
+    // Fill out-of-range entries with 0. They do not contribute to the inner product, so
+    // remainder shapes give the same result
     let ak0 = t * 16u + aq * 4u;
     var av0 = vec4<f32>(0.0);
     if (arow0 < dims.m) {
@@ -193,12 +195,13 @@ fn main(
       }
     }
     workgroupBarrier();
-    // 共有ロード 10 回（B の vec4 2 + A のスカラ 8）で 64 MAC。
-    // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
-    // 完全に一致する。
-    // MUST: f32 への拡幅は**レジスタロード時に 1 回**（10 回 / 64 MAC）。MAC ごとに
-    // f32(av * bv) と書くと変換が 64 回に増え、しかも積が f16 精度に落ちる（ADR 0028 の丸め列 2）。
-    // f16 → f32 の拡幅は厳密なので、値は「入力を f16 に丸めた f32 変種」と 1 ビットも違わない。
+    // 10 shared loads (2 vec4 of B + 8 scalars of A) give 64 MACs.
+    // The reduction is sequential in ascending k, and the addition order per output element matches
+    // the 16×16 kernel with 1 output per thread exactly.
+    // MUST: widening to f32 happens **once at register load** (10 times / 64 MACs). Writing
+    // f32(av * bv) per MAC would raise the conversions to 64 and also drop the product to f16 precision (rounding 2 of the ADR 0028 sequence).
+    // Widening f16 → f32 is exact, so the values do not differ by a single bit from
+    // "the f32 variant with inputs rounded to f16".
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
       let bv0 = vec4<f32>(sb[kk * 32u + lid.x * 2u]);
       let bv1 = vec4<f32>(sb[kk * 32u + lid.x * 2u + 1u]);

@@ -1,204 +1,242 @@
 /**
- * states 形 attention（ADR 0067 決定 4 / 6 / 7）の 3 カーネル。1 ノード = 3 dispatch:
+ * The three kernels of states-form attention (ADR 0067 decisions 4 / 6 / 7). 1 node = 3 dispatches:
  *
- * | 段 | キー                                     | 役割                                            |
- * | -- | ---------------------------------------- | ----------------------------------------------- |
- * | ①  | `attention_state_qk:v1:f32:wg16x4`       | 論理 col 空間の `S` を**行ブロック窓で実体化**  |
- * | ①' | `attention_state_qk:v1:f32:wg16x16:par`  | ① の **D 並列縮約**変種（opt-in — 下記）       |
- * | ①ₜ | `attention_state_qk:v1:f32:reg<幾何>`     | ① の **K 行タイル共有**変種（既定 — 下記）      |
- * | ②  | `attention_state_stats:v2:f32:wg256`     | 行ごとの `m = amax S` と `inv = 1/Σexp(S−m)`    |
- * | ③  | `attention_state_pv:v1:f32:wg16x4`       | `O = P @ V`（`P = exp(S−m)·inv` は**非実体化**）|
- * | ③' | `attention_state_pv:v1:f32:wg16x16:par`  | ③ の **KV 並列縮約**変種（opt-in — 下記）      |
- * | ③ₜ | `attention_state_pv:v1:f32:reg<幾何>`     | ③ の **V 行タイル共有**変種（既定 — 下記）      |
+ * | Step | Key                                      | Role                                                    |
+ * | ---- | ---------------------------------------- | ------------------------------------------------------- |
+ * | ①    | `attention_state_qk:v1:f32:wg16x4`       | **materialises** `S` over logical cols in row-block windows |
+ * | ①'   | `attention_state_qk:v1:f32:wg16x16:par`  | **D-parallel reduction** variant of ① (opt-in — below)  |
+ * | ①ₜ   | `attention_state_qk:v1:f32:reg<geometry>` | **K row-tile sharing** variant of ① (default — below)   |
+ * | ②    | `attention_state_stats:v2:f32:wg256`     | per-row `m = amax S` and `inv = 1/Σexp(S−m)`            |
+ * | ③    | `attention_state_pv:v1:f32:wg16x4`       | `O = P @ V` (`P = exp(S−m)·inv` is **not materialised**) |
+ * | ③'   | `attention_state_pv:v1:f32:wg16x16:par`  | **KV-parallel reduction** variant of ③ (opt-in — below) |
+ * | ③ₜ   | `attention_state_pv:v1:f32:reg<geometry>` | **V row-tile sharing** variant of ③ (default — below)   |
  *
- * 既存の融合 attention（src/kernels/attention.ts + GEMM 骨格）とは**別系統**（キー族も別）。
- * ただし ①ₜ / ③ₜ は GEMM 骨格（src/kernels/gemm.ts）の行タイルを共有し、states の読み口の断片だけを
- * 差す。別系統である理由は 2 つで、どれも既存側を触らずに済ませるためではなく、意味論が違うため:
+ * A **separate family** from the existing fused attention (src/kernels/attention.ts + the GEMM
+ * skeleton), with its own key family. ①ₜ / ③ₜ do share the row tiles of the GEMM skeleton
+ * (src/kernels/gemm.ts) and plug in only the fragments that read states. There are two reasons for
+ * the separate family, both because the semantics differ, not to avoid touching the existing side:
  *
- * 1. **K / V の出どころが 2 つ**（論理 col < pastLength は state スロット・以降は今 step の
- *    `ins`）で、既存の融合 attention のタイル充填は「1 本の連続バッファ」を前提にしている。
- * 2. **走査範囲が実行時値**（論理長 uniform から読む live 列数）で、容量 `C` に比例しない
- *    （ADR 0066 決定 3 の仕事量合格条件）。
+ * 1. **K / V come from two sources** (logical col < pastLength from the state slot, the rest from
+ *    this step's `ins`), while the tile fill of the existing fused attention assumes "one
+ *    contiguous buffer".
+ * 2. **The scan range is a run-time value** (the live column count read from the logical-length
+ *    uniform), not proportional to the capacity `C` (the workload acceptance condition of ADR 0066
+ *    decision 3).
  *
- * 行統計の identity −inf と空行ガード（states 形は padding 行と空 context 行が**正規に**出るので、
- * 空行 → 出力 0 を構造で保証する — ADR 0067 決定 6・有限 sentinel での代用は MUST NOT）は、既存 ②
- * も v2 で同じ形に揃ったので、もう別系統の理由ではない。
+ * The identity −inf of the row statistics and the empty-row guard (the states form **legitimately**
+ * produces padding rows and empty-context rows, so empty row → output 0 is guaranteed by
+ * construction — ADR 0067 decision 6; substituting a finite sentinel is MUST NOT) are no longer a
+ * reason for the separate family, since the existing ② took the same form in v2.
  *
- * QK の経路は M（物理 chunk 行数）で 3 段に分かれる: M ≤ 8 で席が parallel なら ①'
- * （{@link stateQkParallelEligible}）、M ≥ 16 は席に依らず ①ₜ（{@link stateQkTiledEligible}）、
- * それ以外（9〜15 と、M ≤ 8 の sequential）は ①。
+ * The QK path splits three ways by M (physical chunk rows): ①' for M ≤ 8 when the option is
+ * parallel ({@link stateQkParallelEligible}), ①ₜ for M ≥ 16 regardless of the option
+ * ({@link stateQkTiledEligible}), and ① otherwise (9 to 15, and M ≤ 8 with sequential).
  *
- * MUST: **ビット同一契約（分解経路との一致）は states 形に適用されない**（ADR 0067 決定 4 は
- * 分解経路を持たない — GQA モデルは SDPA 保存が必須）。代わりに従来どおり**決定性**が掛かる:
- * 同一キー → バイト同一 WGSL・同一入力 → 同一出力（縮約は col 昇順の逐次で固定）。
+ * MUST: **the bit-identity contract (agreement with the decomposed path) does not apply to the
+ * states form** (ADR 0067 decision 4 has no decomposed path — GQA models must preserve SDPA).
+ * Instead **determinism** applies as before: same key → byte-identical WGSL, same input → same
+ * output (the reduction is fixed as a sequential pass in ascending col).
  *
- * ## ③' KV 並列縮約変種（`SessionOptions.stateAttentionReduce: "parallel"` — perf-ledger K-12）
+ * ## ③' KV-parallel reduction variant (`SessionOptions.stateAttentionReduce: "parallel"` — perf-ledger K-12)
  *
- * `"parallel-fused"` も同じ席として ③' を選ぶ（適格な計画では ② と ③' を融合 stats-PV に替える —
- * ADR 0102・state-attention-stats-pv.ts）。
+ * `"parallel-fused"` selects ③' as the same option value (on eligible plans it replaces ② and ③'
+ * with the fused stats-PV — ADR 0102, state-attention-stats-pv.ts).
  *
- * ③ は 1 invocation が O の 1 要素を live 列の**逐次ループ**で積むため、decode（M=1）では
- * 有効 invocation が `D × B·H`（Gemma 4 E2B の full 層で 4,096）に固定され、KV 長が伸びるほど
- * 1 スレッドの逐次長だけが伸びる（P=16K で attention が decode GPU 時間の 72% —
- * docs/research/2026-09-03-gemma4-context-length-sweep.md）。③' は workgroup を
- * `TILE_X（D 方向）× KV_LANES（KV 方向）` の 2 次元に組み替え、レーン `l` が `cl ≡ l (mod KV_LANES)`
- * の列を昇順に部分累積し、workgroup 共有メモリで**固定順の木縮約**（stride 8 → 4 → 2 → 1）に
- * 畳む。dispatch 数・中間バッファは ③ と同じ（増えるのは workgroup 内のレーンだけ）。
+ * In ③ one invocation accumulates one element of O in a **sequential loop** over the live columns,
+ * so in decode (M=1) the active invocations are fixed at `D × B·H` (4,096 on the full layers of
+ * Gemma 4 E2B), and as the KV length grows only one thread's sequential length grows (at P=16K
+ * attention is 72% of decode GPU time — docs/research/2026-09-03-gemma4-context-length-sweep.md).
+ * ③' rearranges the workgroup in two dimensions, `TILE_X (D direction) × KV_LANES (KV direction)`;
+ * lane `l` accumulates the columns with `cl ≡ l (mod KV_LANES)` in ascending order, and the partial
+ * sums are folded in workgroup shared memory by a **fixed-order tree reduction** (stride 8 → 4 → 2
+ * → 1). The dispatch count and intermediate buffers are the same as ③ (only the lanes inside the
+ * workgroup increase).
  *
- * MUST: 縮約順が ③ と違うので**ビット同一ではない**（決定性は保つ — 同一入力 → 同一出力）。
- * ADR 0058 の opt-in 席で、既定は ③（参照経路）。検証門は 3 点セット（参照経路の門は無変更・
- * ③' の A/B 帯門 = tests/gpu_state_attention_parallel_test.ts・census 門 =
- * tests/gpu_state_execution_test.ts）。
- * MUST: **③' が選ばれるのは `M < 16` の計画だけ**（適用条件は {@link statePvTiledEligible} の
- * 裏側）。`M ≥ 16` は席に依らず ③ₜ（下記・③ とビット同一）が取る — 席が `"parallel"` でも
- * prefill 計画の値は参照経路のものになる。K-12 の実測で ③' の利得は decode に閉じており
- * （prefill 側は誤差内 — docs/research/2026-09-03-gemma4-chunklength-k12-sweep.md）、
- * traffic を削る ③ₜ を優先しても失うものが無い。
- * MUST: pad 行の分岐は **workgroup 一様**（局所行は `workgroup_id.y` 由来）なので barrier の
- * 手前で返してよいが、`d ≥ D` のレーンは barrier に参加させる（return しない — 走査を空回り
- * させて `0.0` を寄与する）。WGSL の barrier は一様制御流の外に置けない。
+ * MUST: the reduction order differs from ③, so it is **not bit-identical** (determinism holds —
+ * same input → same output). It is an opt-in option value under ADR 0058, and the default is ③
+ * (the reference path). The checks come as a set of three (the reference path's checks unchanged,
+ * the A/B tolerance check of ③' = tests/gpu_state_attention_parallel_test.ts, the census check =
+ * tests/gpu_state_execution_test.ts).
+ * SHOULD: **③' is selected only for plans with `M < 16`** (the condition is the other side of
+ * {@link statePvTiledEligible}) (re-graded 2026-10-18 — ADR 0067, geometry-table addendum of
+ * 2026-09-06). `M ≥ 16` is taken by ③ₜ regardless of the option (below, bit-identical to ③) — even
+ * with the option `"parallel"`, prefill plans produce the reference path's values. In the K-12
+ * measurements the gain of ③' was confined to decode (prefill within noise —
+ * docs/research/2026-09-03-gemma4-chunklength-k12-sweep.md), so preferring ③ₜ, which cuts
+ * traffic, loses nothing.
+ * MUST: the pad-row branch is **workgroup-uniform** (the local row comes from `workgroup_id.y`), so
+ * returning before the barrier is allowed, but lanes with `d ≥ D` take part in the barrier (they do
+ * not return — they run an empty scan and contribute `0.0`). A WGSL barrier cannot sit outside
+ * uniform control flow.
  *
- * ## ①' D 並列縮約変種（**席は ③' と同じ** `stateAttentionReduce: "parallel"` — perf-ledger K-14）
+ * ## ①' D-parallel reduction variant (**the same option value as ③'**, `stateAttentionReduce: "parallel"` — perf-ledger K-14)
  *
- * `"parallel-fused"` も同じ席として ①' を選ぶ（融合は ③ 側だけ — ADR 0102・
- * state-attention-stats-pv.ts）。
+ * `"parallel-fused"` selects ①' as the same option value (the fusion is on the ③ side only — ADR
+ * 0102, state-attention-stats-pv.ts).
  *
- * ① は 1 invocation が S の 1 要素（`(局所行, live 列)`）を持ち、内積が `D` の**逐次ループ**
- * （1 スレッドが D 本の積和）。decode（M=1）では live 列が伸びるほど invocation 数は増えるが、
- * 1 invocation の遅延は D 逐次のまま長く、P=16K で ①QK が decode GPU 時間の 17% を占める
- * （K-12 後の内訳 — docs/research/2026-09-03-gemma4-chunklength-k12-sweep.md）。①' は ③' と
- * **対称**に workgroup を `TILE_X（列方向 = S の cl）× D_LANES（D 方向）` へ組み替え、1 workgroup =
- * 局所行 1 本（`workgroup_id.y`）× `TILE_X` 本の列。レーン `l` が `d = l, l + D_LANES, …` を
- * 昇順に部分累積し、workgroup 共有メモリで**固定順の木縮約**（stride 8 → 4 → 2 → 1）に畳んで
- * レーン 0 が S の 1 語を書く。dispatch 数・束縛・params・中間バッファは ① と同じ
- * （増えるのは workgroup 内のレーンだけ・行軸だけが `⌈有効行 / TILE_M⌉` から「有効行」へ変わる）。
+ * In ① one invocation owns one element of S (`(local row, live column)`) and the dot product is a
+ * **sequential loop** over `D` (one thread does D multiply-adds). In decode (M=1) the invocation
+ * count grows with the live columns, but the latency of one invocation stays the long D-sequential
+ * one, and at P=16K ①QK is 17% of decode GPU time (breakdown after K-12 —
+ * docs/research/2026-09-03-gemma4-chunklength-k12-sweep.md). ①' rearranges the workgroup
+ * **symmetrically** to ③' into `TILE_X (column direction = S's cl) × D_LANES (D direction)`; one
+ * workgroup = one local row (`workgroup_id.y`) × `TILE_X` columns. Lane `l` accumulates `d = l,
+ * l + D_LANES, …` in ascending order, the partial sums are folded in workgroup shared memory by a
+ * **fixed-order tree reduction** (stride 8 → 4 → 2 → 1), and lane 0 writes the one word of S. The
+ * dispatch count, bindings, params and intermediate buffers are the same as ① (only the lanes
+ * inside the workgroup increase, and only the row axis changes from `⌈valid rows / TILE_M⌉` to
+ * "valid rows").
  *
- * MUST: 縮約順が ① と違うので**ビット同一ではない**（決定性は保つ）。**席は ③' と同じ 1 つ**
- * （`"parallel"` を指定すると ①' と ③' が一緒に選ばれる — 2026-09-06 裁定。新しいノブは作らない）。
- * MUST: **①' が選ばれるのは `M ≤ 8` の計画だけ**（適用条件は
- * {@link stateQkParallelEligible} — decode の M=1 と投機の verify M ≤ 8）。`M ≥ 9` の計画は席が
- * `"parallel"` でも ① のまま走る — prefill では ① が既に行 × 列で埋まっており、①' は行タイル幅を
- * 落として barrier を積むぶんだけ遅くなると実測した（2026-09-06 — 詳細は同関数の WHY）。③' の側は
- * `M < 16` の計画だけが取る（`M ≥ 16` は席に依らず ③ₜ）ので、**席 1 つで 2 段の適用範囲が違う**
- * 形になる（`M ≤ 8` の decode / verify では ①' と ③' が揃って選ばれる）。
- * MUST: ① の契約は 1 つも動かさない — 述語（causal + sliding 下限）外は live 範囲内なら
- * **必ず −inf を書く**（② が残骸を食わないため）・`cl ≥ live` の列と pad 行は書かない・
- * scale の掛け方（半スケールを q 側と k 側の両方へ）と −inf のビット（`params.neg_inf`）は ① と同一。
- * MUST: pad 行の分岐は **workgroup 一様**（`workgroup_id.y` 由来）なので barrier の手前で
- * 返してよいが、`cl ≥ live` の列と `d ≥ D` のレーンは return せず**空回りで 0 を寄与する**
- * （③' と同じ理由 — WGSL の barrier は一様制御流の外に置けない）。
+ * MUST: the reduction order differs from ①, so it is **not bit-identical** (determinism holds).
+ * **The option value is the same single one as ③'** (specifying `"parallel"` selects ①' and ③'
+ * together — the ruling of 2026-09-06; no new knob).
+ * MUST: **①' is selected only for plans with `M ≤ 8`** (the condition is
+ * {@link stateQkParallelEligible} — decode's M=1 and speculative verify with M ≤ 8). Plans with
+ * `M ≥ 9` run ① even with the option `"parallel"` — in prefill ① is already filled by rows ×
+ * columns, and ①' was measured slower by the narrower row tile and the added barriers (2026-09-06
+ * — details in that function's WHY). On the ③' side only plans with `M < 16` take it (`M ≥ 16`
+ * takes ③ₜ regardless of the option), so **one option value covers two steps with different
+ * ranges** (for decode / verify with `M ≤ 8`, ①' and ③' are selected together).
+ * MUST: not one of ①'s contracts moves — outside the predicate (causal + sliding lower bound) but
+ * inside the live range, **−inf is always written** (so ② does not consume leftovers); columns with
+ * `cl ≥ live` and pad rows are not written; the scaling (half scale on both the q side and the k
+ * side) and the bits of −inf (`params.neg_inf`) are the same as ①.
+ * MUST: the pad-row branch is **workgroup-uniform** (from `workgroup_id.y`), so returning before
+ * the barrier is allowed, but columns with `cl ≥ live` and lanes with `d ≥ D` do not return and
+ * **contribute 0 through an empty run** (the same reason as ③' — a WGSL barrier cannot sit outside
+ * uniform control flow).
  *
- * ## ①ₜ K 行タイル共有変種（**席に依らない既定経路** — perf-ledger K-13）
+ * ## ①ₜ K row-tile sharing variant (**the default path regardless of the option** — perf-ledger K-13)
  *
- * ① は 1 invocation = S の 1 要素なので、K の 1 行を**行の本数ぶん**読み直す。prefill
- * （M = 768）では 14.7K token の chunk で ①QK が chunk GPU 時間の 40% を占める traffic 律速
- * （docs/research/2026-09-06-state-qk-parallel-k14.md の内訳）。①ₜ は融合 attention の
- * `attention_qk` が既に持つ **GEMM 骨格**（共有メモリのタイル・レジスタブロック・M バケット幾何
- * — src/kernels/gemm.ts）に states 用の断片を差した 1 本で、K を行タイルへ 1 度だけ載せて
- * `tileM` 行の q で使い回す。行列の対応は A = この行ブロックの q（`[rows_block × depth]`）・
- * B = Kᵀ（`[depth × live]`・列 = 論理 col の 2 源）・出力 = S（① と同じ添字）。
+ * In ① one invocation = one element of S, so one row of K is re-read **once per row**. In prefill
+ * (M = 768), on a 14.7K-token chunk, ①QK is a traffic-bound 40% of the chunk's GPU time (breakdown
+ * in docs/research/2026-09-06-state-qk-parallel-k14.md). ①ₜ is the **GEMM skeleton** that fused
+ * attention's `attention_qk` already has (shared-memory tiles, register blocking, M-bucket geometry
+ * — src/kernels/gemm.ts) with the states fragments plugged in; it loads K into the row tile once
+ * and reuses it across the q of `tileM` rows. The matrix mapping is A = the q of this row block
+ * (`[rows_block × depth]`), B = Kᵀ (`[depth × live]`, columns = the two sources of logical col),
+ * output = S (the same indexing as ①).
  *
- * MUST: **① とビット同一**。1 出力要素あたりの加算順は骨格側で `d` 昇順の逐次に固定されており
- * （K タイル 16 昇順 — ADR 0022 決定 3）、① の `stateScoreFn` の逐次と厳密に一致する。半スケールも
- * 1 項の式（`(q·scale) · (k·scale)`）で揃える（A ローダで q 側・B ローダで k 側）。だから席
- * （`stateAttentionReduce`）に依らない**既定経路**で選べる — 縮約順が変わる ①' とは性格が違う。
- * MUST: 実効 `N` は**実行時の live**。骨格の `Dims.n` には静的上界 `col_cap` を入れるが、B ローダは
- * `cl < live` の列しか読まず store も `cl < live` しか書かない（`[live, col_cap)` の残骸は ① と
- * 同じく触らない）。行は `local_row < effective_rows(query)` まで（pad 行は 1 語も書かない）。
- * MUST: 述語は ① と同じ `in_window(col, past + row)`。live 範囲内なら述語外でも **−inf を必ず
- * 書く**（② が残骸を食わないため）。述語外の列の積和は回してよい（読む K 行は範囲内なので安全で、
- * 値は書き出しの `select` で捨てる）。
- * MUST: 適用条件は {@link stateQkTiledEligible}（`M ≥ 16`）。優先順は `M ≤ 8`（decode の M=1 と
- * verify）かつ席が `"parallel"` / `"parallel-fused"` → ①' / `M ≥ 16` → ①ₜ / それ以外 → ①
- * （判定は runtime 側 `buildStateAttention` の 1 箇所）。
+ * MUST: **bit-identical to ①**. The summation order per output element is fixed by the skeleton as
+ * a sequential pass in ascending `d` (K tiles of 16 in ascending order — ADR 0022 decision 3),
+ * exactly matching the sequential pass of ①'s `stateScoreFn`. The half scale is also matched in the
+ * one-term expression (`(q·scale) · (k·scale)`) (q side in the A loader, k side in the B loader).
+ * That is why it can be selected as the **default path** regardless of the option
+ * (`stateAttentionReduce`) — unlike ①', which changes the reduction order.
+ * MUST: the effective `N` is **the run-time live**. The skeleton's `Dims.n` gets the static upper
+ * bound `col_cap`, but the B loader reads only columns with `cl < live` and the store writes only
+ * `cl < live` (the leftovers in `[live, col_cap)` are left untouched, as in ①). Rows go up to
+ * `local_row < effective_rows(query)` (pad rows get not a single word).
+ * MUST: the predicate is the same `in_window(col, past + row)` as ①. Inside the live range **−inf
+ * is always written** even outside the predicate (so ② does not consume leftovers). Running the
+ * multiply-adds of columns outside the predicate is allowed (the K rows read are in range, so it is
+ * safe, and the value is discarded by the `select` at the store).
+ * SHOULD: the condition is {@link stateQkTiledEligible} (`M ≥ 16`) (re-graded 2026-10-18 — ADR
+ * 0067, geometry-table addendum of 2026-09-06). The priority is `M ≤ 8` (decode's M=1 and verify)
+ * with the option `"parallel"` / `"parallel-fused"` → ①' / `M ≥ 16` → ①ₜ / otherwise → ① (decided
+ * in one place on the runtime side, `buildStateAttention`).
  *
- * ## ③ₜ V 行タイル共有変種（**席に依らない既定経路** — perf-ledger K-13 段 2）
+ * ## ③ₜ V row-tile sharing variant (**the default path regardless of the option** — perf-ledger K-13 step 2)
  *
- * ③ は 1 invocation = O の 1 要素なので、V の 1 行を**行の本数ぶん**読み直す（①ₜ が K で潰した
- * のと同じ traffic 律速が、prefill では V 側にもそのまま居る）。③ₜ は ①ₜ と同じ GEMM 骨格
- * （src/kernels/gemm.ts）に states 用の断片を差した 1 本で、V を行タイルへ 1 度だけ載せて
- * `tileM` 行の P で使い回す。行列の対応は A = P（`[rows_block × live]`・**S と行統計から充填時に
- * 計算**して実体化しない）・B = V（`[live × depth]`・行 = 論理 col の 2 源）・出力 = O
- * （③ と同じ添字）。
+ * In ③ one invocation = one element of O, so one row of V is re-read **once per row** (the same
+ * traffic bound that ①ₜ removed on the K side is still there on the V side in prefill). ③ₜ is the
+ * same GEMM skeleton as ①ₜ (src/kernels/gemm.ts) with the states fragments plugged in; it loads V
+ * into the row tile once and reuses it across the P of `tileM` rows. The matrix mapping is A = P
+ * (`[rows_block × live]`, **computed from S and the row statistics while filling**, not
+ * materialised), B = V (`[live × depth]`, rows = the two sources of logical col), output = O (the
+ * same indexing as ③).
  *
- * MUST: **③ とビット同一**。1 項の式は ③ と同じ `p = exp(S − m) · inv` を A ローダで組み
- * （融合 attention ③PV の `probability` と同じ形）、縮約は骨格側で **col 昇順の逐次**に固定
- * されている（K タイル 16 昇順 — ADR 0022 決定 3）ので、③ の col 昇順逐次と加算順が厳密に
- * 一致する。だから席（`stateAttentionReduce`）に依らない**既定経路**で選べる。
- * MUST: 実効 `K`（縮約長）は**実行時の live**。骨格の `Dims.k` には S の列ストライド `col_cap` を
- * 入れるが、K タイルループの上限は live から作る（`col_cap` で回すと容量比例の仕事量になり
- * ADR 0066 決定 3 の合格条件を落とす）。A ローダは `cl < live` の列しか読まない。
- * MUST: 行は `rows_block` **全て**を書く（③ と同じ full-write 不変条件 — dispatch の行軸も
- * `rowsBlock`）。ただし pad 行（`local_row ≥ 有効行`）は **`acc` ではなく厳密 `0.0`** を書く
- * （③ の「pad 行は live を 1 列も走査せず 0」と同値。A を 0 で埋めるだけでは、非有限な V が
- * 混ざったとき `0 · NaN` で pad 行が NaN 化して ③ と 1 語違う）。
- * MUST: 行タイルが有効行を 1 行も含まないなら **K ループを 1 周も回さない**（③ の pad 行が
- * live を走査しないことの写し — 仕事量が Q に比例する機構）。判定は `workgroup_id.y` 由来で
- * workgroup 一様なので、内側の `workgroupBarrier` の一様性要件を壊さない。
- * MUST: 適用条件は {@link statePvTiledEligible}（`M ≥ 16`）。優先順は `M ≥ 16` → ③ₜ（席に
- * 依らない）/ `M < 16` かつ席が `"parallel"` → ③' / それ以外 → ③（判定は runtime 側
- * `buildStateAttention` の 1 箇所）。
+ * MUST: **bit-identical to ③**. The A loader builds the same one-term expression as ③,
+ * `p = exp(S − m) · inv` (the same form as `probability` in fused attention's ③PV), and the
+ * reduction is fixed by the skeleton as a **sequential pass in ascending col** (K tiles of 16 in
+ * ascending order — ADR 0022 decision 3), so the summation order exactly matches ③'s sequential
+ * ascending-col pass. That is why it can be selected as the **default path** regardless of the
+ * option (`stateAttentionReduce`).
+ * MUST: the effective `K` (reduction length) is **the run-time live**. The skeleton's `Dims.k`
+ * gets S's column stride `col_cap`, but the K tile loop bound is built from live (looping up to
+ * `col_cap` makes the work proportional to the capacity and fails the acceptance condition of ADR
+ * 0066 decision 3). The A loader reads only columns with `cl < live`.
+ * MUST: **all** `rows_block` rows are written (the same full-write invariant as ③ — the dispatch's
+ * row axis is `rowsBlock` too). But pad rows (`local_row ≥ valid rows`) get **an exact `0.0`, not
+ * `acc`** (equivalent to ③'s "pad rows scan no live column and are 0". Merely zero-filling A would,
+ * with a non-finite V mixed in, turn a pad row into NaN through `0 · NaN` and differ from ③ by one
+ * word).
+ * MUST: if a row tile contains no valid row, **the K loop does not run even once** (a mirror of ③'s
+ * pad rows not scanning live — the mechanism that keeps the work proportional to Q). The test comes
+ * from `workgroup_id.y` and is workgroup-uniform, so it does not break the uniformity requirement
+ * of the inner `workgroupBarrier`.
+ * SHOULD: the condition is {@link statePvTiledEligible} (`M ≥ 16`) (re-graded 2026-10-18 — ADR
+ * 0067, geometry-table addendum of 2026-09-06). The priority is `M ≥ 16` → ③ₜ (regardless of the
+ * option) / `M < 16` with the option `"parallel"` → ③' / otherwise → ③ (decided in one place on the
+ * runtime side, `buildStateAttention`).
  *
- * ## 記号（正本 = ADR 0067 決定 4）
+ * ## Symbols (source of truth = ADR 0067 decision 4)
  *
- * | 記号     | 意味                                   | 出どころ                          |
- * | -------- | -------------------------------------- | --------------------------------- |
- * | `P`      | pastLength（確定済み KV の論理長）     | **実行時** — 論理長 uniform       |
- * | `Q`      | queryLength（今 step の実 token 数）   | **実行時** — 論理長 uniform       |
- * | `M`      | 物理 chunk 行数（`chunk_rows`）        | 静的（宣言 shape）                |
- * | `W`      | sliding window（`0` = full）           | 静的（attrs `window`）            |
- * | `C`      | スロットの行容量（`capacity`）         | 静的（states 宣言 + 束縛）        |
- * | `r`      | GQA の繰り返し数 `H / Hkv`             | 静的（導出値）                    |
- * | `D`      | head 次元                              | 静的                              |
+ * | Symbol   | Meaning                                    | Source                               |
+ * | -------- | ------------------------------------------ | ------------------------------------ |
+ * | `P`      | pastLength (logical length of committed KV) | **run time** — logical-length uniform |
+ * | `Q`      | queryLength (real tokens of this step)     | **run time** — logical-length uniform |
+ * | `M`      | physical chunk rows (`chunk_rows`)         | static (declared shape)              |
+ * | `W`      | sliding window (`0` = full)                | static (attrs `window`)              |
+ * | `C`      | row capacity of the slot (`capacity`)      | static (states declaration + binding) |
+ * | `r`      | GQA repeat count `H / Hkv`                 | static (derived value)               |
+ * | `D`      | head dimension                             | static                               |
  *
- * ## 論理 col 空間と live 範囲
+ * ## Logical col space and the live range
  *
- * 論理 col は `[0, P+Q)`。`col < P` は past（**スロット**から読む）・`col ≥ P` は current
- * （**ins** の行 `col − P` から読む）。S が実体化するのは resident 範囲だけで、
- * `colBase = full: 0 / sliding: P − min(P, W−1)`（{@link stateColumnBase}）から
- * `n_live = (P − colBase) + Q` 列（{@link stateLiveColumns}）。
+ * Logical col is `[0, P+Q)`. `col < P` is past (read from the **slot**), `col ≥ P` is current
+ * (read from row `col − P` of **ins**). S materialises only the resident range: from
+ * `colBase = full: 0 / sliding: P − min(P, W−1)` ({@link stateColumnBase}),
+ * `n_live = (P − colBase) + Q` columns ({@link stateLiveColumns}).
  *
- * S の格納は `[B·H, rows_block, colCap]` 行優先で、`colCap` は**静的**な列ストライド上限。
- * MUST: カーネルは `colCap` を**ストライドとしてだけ**使い、走査は `n_live` で切る（`colCap`
- * まで走らせると容量比例の仕事量になり ADR 0066 決定 3 の合格条件を落とす）。
- * MUST: `[n_live, colCap)` の残骸は**読者が触らない**ことで無害化する（②③ とも `n_live` で
- * 切る）。逆に `[0, n_live)` は述語外でも**必ず −inf を書く**（S は一時バッファで前回の残骸が
- * 居るため — 書かないと ② の amax が残骸を食う）。
+ * S is stored row-major as `[B·H, rows_block, colCap]`, where `colCap` is a **static** upper bound
+ * on the column stride.
+ * MUST: kernels use `colCap` **only as a stride** and cut the scan at `n_live` (running up to
+ * `colCap` makes the work proportional to the capacity and fails the acceptance condition of ADR
+ * 0066 decision 3).
+ * MUST: the leftovers in `[n_live, colCap)` are made harmless by **readers not touching them** (②③
+ * both cut at `n_live`). Conversely `[0, n_live)` **always gets −inf** even outside the predicate
+ * (S is a temporary buffer holding leftovers from the previous run — without the write ②'s amax
+ * consumes them).
  *
- * ## 述語は両側 MUST（ADR 0067 決定 4 の第 5 巡 high）
+ * ## The predicate is MUST on both sides (ADR 0067 decision 4, a high finding of the fifth review round)
  *
- * 出力行 `row`（= `row_offset` + 局所行）に対し `col ≤ P + row`（causal）AND sliding のとき
- * `col ≥ max(0, P + row − W + 1)`。**上限だけの実装は禁止** — W=4 で row 1 が 5 個の key を
- * 見る沈黙混入になる。下限は `(P + row) − col < W` の形で持つ（{@link stateWindowFn} —
- * 同値変形: `col ≥ limit−W+1 ⟺ limit−col ≤ W−1 ⟺ limit−col < W`。引き算は causal 上限
- * `col ≤ limit` が**短絡してから**評価されるので u32 で巻き戻らない）。
+ * For output row `row` (= `row_offset` + local row): `col ≤ P + row` (causal) AND, with sliding,
+ * `col ≥ max(0, P + row − W + 1)`. **An implementation with only the upper bound is forbidden** —
+ * with W=4, row 1 would silently mix in 5 keys. The lower bound is held as `(P + row) − col < W`
+ * ({@link stateWindowFn} — equivalent forms: `col ≥ limit−W+1 ⟺ limit−col ≤ W−1 ⟺ limit−col < W`.
+ * The subtraction is evaluated **only after** the causal upper bound `col ≤ limit` short-circuits,
+ * so it does not wrap around in u32).
  *
- * ## 有効行と pad 行（仕事量は Q に比例する — ADR 0066 決定 3 / 追記 1 の訂正式）
+ * ## Valid rows and pad rows (work proportional to Q — ADR 0066 decision 3 / the corrected formula of addendum item 1)
  *
- * 物理 chunk は `M` 行だが、有効データは先頭 `Q` 行の compact-prefix（ADR 0066 追記 6）。
- * 行ブロック `[row_offset, row_offset + rows_block)` の**有効行数**は
- * `clamp(Q − row_offset, 0, rows_block)`（{@link stateEffectiveRows}）で、
+ * The physical chunk has `M` rows, but valid data is the compact prefix of the first `Q` rows (ADR
+ * 0066 addendum 6). The **valid row count** of row block `[row_offset, row_offset + rows_block)` is
+ * `clamp(Q − row_offset, 0, rows_block)` ({@link stateEffectiveRows}), and
  *
- * - **①QK / ②stats は有効行だけを覆う**（dispatch 数もカーネルの行範囲も同じ 1 つの式から出る —
- *   ホスト側が幾何の純関数・WGSL 側が {@link stateEffectiveRowsWgsl} の写し）。有効行 0 の
- *   ブロックはホスト算出が 0 を返し、dispatch そのものが積まれない。
- * - **③PV は宣言 shape の全 M 行を書く**（full-write 不変条件は不変）が、**pad 行は live を
- *   1 列も走査せず全 D に厳密 `0.0` を書いて返す**。空行（述語を満たす col が 1 本も無い行）は
- *   **pad 行の部分集合**（valid 行は causal 自己参照 `col = P + row` を必ず含むので非空）なので、
- *   この 0 書きが空行 → 0（ADR 0067 決定 6）を**構造的に包含**し、同時に「非有限な V が
- *   `0 · NaN` で空行出力を NaN 化する」残穴も閉じる。② の空行ガードは**防御として残す**。
+ * - **①QK / ②stats cover valid rows only** (the dispatch count and the kernel's row range come from
+ *   the same single formula — the host side is a pure function of the geometry, the WGSL side is
+ *   its mirror {@link stateEffectiveRowsWgsl}). For a block with 0 valid rows the host computation
+ *   returns 0 and the dispatch itself is not recorded.
+ * - **③PV writes all M rows of the declared shape** (the full-write invariant is unchanged), but
+ *   **pad rows scan no live column and write an exact `0.0` to all of D, then return**. Empty rows
+ *   (rows where no col satisfies the predicate) are **a subset of pad rows** (a valid row always
+ *   contains the causal self-reference `col = P + row`, so it is non-empty), so this zero write
+ *   **contains empty row → 0 (ADR 0067 decision 6) by construction**, and also closes the remaining
+ *   hole where "a non-finite V turns an empty row's output into NaN through `0 · NaN`". ②'s
+ *   empty-row guard **stays as a defence**.
  *
- * ## 空行 → 0 の構成（ADR 0067 決定 6）
+ * ## How empty row → 0 is built (ADR 0067 decision 6)
  *
- * ② の行 max は identity **−inf**。`amax == −inf`（空行）なら `(m, inv) = (0.0, 0.0)` を書き、
- * それ以外は `inv = 1/Σexp(S−amax)`（最大要素が `exp(0)=1` を出すので分母 ≥ 1）。③ の
- * `p = exp(S − m)·inv` は
+ * ②'s row max has the identity **−inf**. If `amax == −inf` (an empty row) it writes `(m, inv) =
+ * (0.0, 0.0)`, otherwise `inv = 1/Σexp(S−amax)` (the largest element gives `exp(0)=1`, so the
+ * denominator is ≥ 1). ③'s `p = exp(S − m)·inv` becomes
  *
- * - 空行: `exp(−inf − 0) · 0 = 0 · 0 = 0`（厳密）
- * - 非空行の述語外: `exp(−inf − 有限) · inv = 0 · inv = 0`（厳密）
+ * - empty row: `exp(−inf − 0) · 0 = 0 · 0 = 0` (exact)
+ * - outside the predicate on a non-empty row: `exp(−inf − finite) · inv = 0 · inv = 0` (exact)
  *
- * となり、**厳密 0** が構造的に出る。MUST: ② の Σ ループを空行でも回さない（`exp(−inf −
- * (−inf))` = `exp(NaN)` = NaN が分母へ入る）。
+ * so **an exact 0** comes out by construction. MUST: ②'s Σ loop does not run on an empty row
+ * (`exp(−inf − (−inf))` = `exp(NaN)` = NaN would enter the denominator).
  */
 
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
@@ -212,44 +250,49 @@ import {
   gemmTileN,
 } from "./gemm-geometry.ts";
 
-/** ①QK / ③PV の workgroup 幅（① は列方向・③ は D 方向）。 */
+/** Workgroup width of ①QK / ③PV (columns for ①, D for ③). */
 export const STATE_ATTENTION_TILE_X = 16;
 
-/** ①QK / ③PV の workgroup 高さ（両者とも行方向 — 行ブロックの局所行）。 */
+/** Workgroup height of ①QK / ③PV (rows for both — the local rows of the row block). */
 export const STATE_ATTENTION_TILE_M = 4;
 
-/** ② の workgroup 幅（1 行 = 1 workgroup の 256 幅ツリー縮約 — 既存 attention_stats と同型）。 */
+/**
+ * Workgroup width of ② (a 256-wide tree reduction with 1 row = 1 workgroup — the same shape as
+ * the existing attention_stats).
+ */
 export const STATE_STATS_WORKGROUP_SIZE = 256;
 
-/** ② の行統計 1 行あたりの語数（`[0]` = 行の最大値 / `[1]` = `1/Σexp(S−m)`）。 */
+/** Words per row of ②'s row statistics (`[0]` = row maximum / `[1]` = `1/Σexp(S−m)`). */
 export const STATE_STATS_STRIDE = 2;
 
 /**
- * −inf の f32 ビット列（params の語で運ぶ）。
+ * f32 bits of −inf (carried in a params word).
  *
- * MUST: WGSL に定数式で書かない（argmax / topk / safe_softmax と同じ理由 — 定数式の
- * `bitcast<f32>(0xff800000u)` を「const-expression が inf」としてシェーダ生成エラーにする
- * 実装がありうる）。
+ * MUST: do not write it as a constant expression in WGSL (the same reason as argmax / topk /
+ * safe_softmax — an implementation may reject the constant expression `bitcast<f32>(0xff800000u)`
+ * with a shader-creation error as "a const-expression is inf").
  */
 export const STATE_NEG_INF_BITS = 0xff800000;
 
 /**
- * 変種の判別子（**`:sliding` と `:gqa` の 2 ビットだけ**）。
+ * Variant discriminator (**only the two bits `:sliding` and `:gqa`**).
  *
- * MUST: 並び順をここ 1 箇所で固定する（両方立ちうるので、順序が散ると同一構成が 2 通りの
- * キーを持つ — attention.ts の `maskKeyPart` / `gqaKeyPart` と同じ規律）。
- * MUST: `W` / `r` / `C` の**値そのものは載せない**（uniform で運ぶ — 載せると値の種類ぶん
- * パイプラインが増える）。
+ * MUST: the order is fixed here in one place (both can be set, so a scattered order gives the same
+ * configuration two keys — the same rule as `maskKeyPart` / `gqaKeyPart` in attention.ts).
+ * MUST: **the values of `W` / `r` / `C` themselves are not in the key** (they travel in the uniform —
+ * putting them in would add a pipeline per distinct value).
  */
 export const stateVariantKeyPart = (sliding: boolean, gqa: boolean): string =>
   `${sliding ? ":sliding" : ""}${gqa ? ":gqa" : ""}`;
 
 /**
- * sliding 変種かどうかの**唯一の判定**（`window = 0` = attrs 欄の不存在 = 全 context）。
+ * **The only test** for the sliding variant (`window = 0` = the attrs field is absent = the whole
+ * context).
  *
- * MUST: キー選択・WGSL 生成・params 検査の 3 者はこの 1 関数で揃える。片方が `window > 0` で
- * もう片方が別条件だと、full の params（`window = 0`）が sliding の WGSL に入り、
- * `window - 1u` の u32 アンダーフローと `col % 0u` の実装依存値で沈黙誤読になる。
+ * MUST: key selection, WGSL generation and the params check all go through this one function. If
+ * one side tested `window > 0` and another a different condition, full params (`window = 0`) would
+ * reach sliding WGSL, and the u32 underflow of `window - 1u` plus the implementation-dependent value
+ * of `col % 0u` would cause silent misreads.
  */
 export const stateSliding = (window: number): boolean => window > 0;
 
@@ -260,12 +303,12 @@ export const stateQkKey = (sliding: boolean, gqa: boolean): string =>
   )}`;
 
 /**
- * ①' の D 方向レーン数（workgroup = `TILE_X × D_LANES` = 256 スレッド — ③' と同じ
- * ポータビリティの床 `maxComputeInvocationsPerWorkgroup` の仕様既定 256 に収める）。
+ * D-direction lane count of ①' (workgroup = `TILE_X × D_LANES` = 256 threads — fits the same
+ * portability floor as ③', the spec default 256 of `maxComputeInvocationsPerWorkgroup`).
  */
 export const STATE_QK_D_LANES = 16;
 
-/** ①' のキー（`:par` が census 門の目印 — ① と同じ変種ビットを後置）。 */
+/** Key of ①' (`:par` is the marker for the census check — followed by the same variant bits as ①). */
 export const stateQkParallelKey = (sliding: boolean, gqa: boolean): string =>
   `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_QK_D_LANES}:par${stateVariantKeyPart(
     sliding,
@@ -273,37 +316,44 @@ export const stateQkParallelKey = (sliding: boolean, gqa: boolean): string =>
   )}`;
 
 /**
- * ①' の**適用条件** — `M`（物理 chunk 行数）が 8 以下の計画だけ。席（`stateAttentionReduce`）が
- * `"parallel"` でも、この条件を満たさない計画は ① のまま走る（席の判定は runtime 側
- * `buildStateAttention` が持ち、ここは計画の形だけを見る純関数）。
+ * **Eligibility** of ①' — only plans whose `M` (physical chunk rows) is 8 or less. Even with the
+ * option (`stateAttentionReduce`) set to `"parallel"`, plans that fail this condition run ① (the
+ * option itself is checked on the runtime side by `buildStateAttention`; this is a pure function
+ * that looks only at the shape of the plan).
  *
- * WHY: ①' が縮めるのは「1 invocation が `D` 本の積和を逐次で回す遅延」で、それが律速なのは
- * 有効 invocation が `live 列 × 1 行` しか無い decode（M=1）だけ。prefill（M=768）では ① が
- * 既に行 × 列で埋まっており、①' は行タイル幅を `TILE_M` = 4 から 1 へ落として 4 倍の
- * workgroup と barrier を積むだけになる（1 workgroup = 1 行なので K 行の行間再利用も失う）。
- * 実測（2026-09-06）でも decode は 6.3 → 3.7〜4.1 ms/token（×1.55〜1.72）で効いた一方、
- * prefill の ①QK は GPU 時間が 1.5〜1.9 倍に伸び、prefill 全体で +30〜60% 逆行した。
- * 投機の verify（M = k+1 ≤ 8・MTP 段 4-B ⑤・2026-09-09 の実測 — research 2026-09-09 §6.2）では
- * 中立だった: RTX・P≈4.8K・M=4 で ①QK full 3.32 → 3.87 ms・sliding 1.87 → 1.09 ms（合計 −0.2 ms）・
- * 壁 −2%（誤差内）。中立でも広げるのは、既定席（parallel）で verify の行 0 と decode が**同じ
- * 縮約順**になり（u32 一致）、投機の on/off がどこで切り替わっても行 0 の logits が動かないため。
- * MUST: 条件は**実測した範囲に留める**（ADR 0082 決定 4 と同じ規律 — 「M が小さければ得だろう」
- * の外挿で広げない。測ったのは M=1（効く）と M=4（中立）で、`M <= 8` は verify のバケット
- * 上限 = sliding 余裕 8 に合わせた範囲。M ≥ 9 は未実測なので ① のまま）。③'（PV）はこの門を持たない
- * ことが対称でないように見えるが、③' は prefill でも逆行しないことを 2026-09-03 の実測で
- * 確かめてある（縮約するのが KV 長方向で、prefill でも 1 スレッドの逐次長が伸びるため）。
+ * WHY: what ①' shortens is "the latency of one invocation running `D` multiply-adds
+ * sequentially", and that is the bottleneck only in decode (M=1), where the active invocations are
+ * just `live columns × 1 row`. In prefill (M=768) ① is already filled by rows × columns, and ①'
+ * only narrows the row tile from `TILE_M` = 4 to 1, adding 4× the workgroups and barriers (1
+ * workgroup = 1 row, so the reuse of K rows across rows is lost as well). The measurements
+ * (2026-09-06) showed decode improving 6.3 → 3.7–4.1 ms/token (×1.55–1.72), while prefill's ①QK
+ * GPU time grew 1.5–1.9× and prefill as a whole regressed by +30–60%.
+ * For speculative verify (M = k+1 ≤ 8, MTP stage 4-B ⑤, measured 2026-09-09 — research 2026-09-09
+ * §6.2) it was neutral: RTX, P≈4.8K, M=4, ①QK full 3.32 → 3.87 ms, sliding 1.87 → 1.09 ms (−0.2 ms
+ * in total), wall −2% (within noise). It is widened even though neutral because with the default
+ * option value (parallel) verify's row 0 and decode then share **the same reduction order** (u32
+ * match), so row 0's logits do not move wherever speculation switches on or off.
+ * SHOULD: keep the condition **inside the measured range** (the same rule as ADR 0082 decision 4 —
+ * do not widen it by extrapolating "a small M is probably a gain". M=1 (a gain) and M=4 (neutral)
+ * were measured, and `M <= 8` is the range matched to verify's bucket limit = the sliding slack 8.
+ * M ≥ 9 is unmeasured, so it stays on ①) (re-graded 2026-10-18 — ADR 0082 decision 4). That ③'
+ * (PV) has no such check may look asymmetric, but the 2026-09-03 measurements confirmed that ③'
+ * does not regress in prefill either (it reduces along the KV length, and the sequential length per
+ * thread grows in prefill too).
  */
 export const stateQkParallelEligible = (chunkRows: number): boolean => chunkRows <= 8;
 
 /**
- * ①ₜ のキー（GEMM 骨格のタイル経路 — perf-ledger K-13）。幾何の綴りは gemm 側と同じ断片
- * （{@link gemmGeometryTileKeyPart}）で、`M` のバケットがそのまま載る。
+ * Key of ①ₜ (the tiled path of the GEMM skeleton — perf-ledger K-13). The geometry is spelled with
+ * the same fragment as on the gemm side ({@link gemmGeometryTileKeyPart}), so the `M` bucket goes in
+ * as is.
  *
- * MUST: 幾何を載せる（① の `wg16x4` に当たる位置）。載せないと、`M` バケットの違う 2 つの計画が
- * 同じキーで別の WGSL を要求し、「同一キー → バイト同一 WGSL」が崩れる。
- * MUST: `chunkRows` は生成（gemm.ts の `attentionStateQkTiledWgsl`）へ渡すものと**同じ値**
- * （gemm.ts の `gemmKeyPart` の MUST と同文 — 片方だけ渡し忘れるとキャッシュに載った別幾何の WGSL が
- * dispatch 数と噛み合わずに出力タイルが欠落する）。
+ * MUST: the geometry goes in (in the position of ①'s `wg16x4`). Without it, two plans in different
+ * `M` buckets would ask for different WGSL under the same key, breaking "same key → byte-identical
+ * WGSL".
+ * MUST: `chunkRows` is **the same value** passed to generation (`attentionStateQkTiledWgsl` in
+ * gemm.ts) (the same wording as the MUST of `gemmKeyPart` in gemm.ts — forgetting to pass it on one
+ * side lets cached WGSL of another geometry disagree with the dispatch count and drop output tiles).
  */
 export const stateQkTiledKey = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
   `attention_state_qk:v1:f32:${gemmGeometryTileKeyPart(gemmGeometryForRows(chunkRows))}${stateVariantKeyPart(
@@ -312,24 +362,26 @@ export const stateQkTiledKey = (sliding: boolean, gqa: boolean, chunkRows: numbe
   )}`;
 
 /**
- * ①ₜ の**適用条件** — `M`（物理 chunk 行数）が最小の行タイル辺 16 以上の計画だけ。
+ * **Eligibility** of ①ₜ — only plans whose `M` (physical chunk rows) is at least the smallest row
+ * tile edge, 16.
  *
- * WHY: ① は 1 invocation = S の 1 要素で、K の 1 行を**行の本数ぶん**読み直す traffic 律速。
- * ①ₜ は GEMM 骨格の共有メモリタイルへ K を 1 度だけ載せ、その行タイル（`M` バケットの
- * `tileM`）ぶんの q 行で使い回す。読み直しが減るのは行タイルに 2 行以上載るときで、
- * 最小バケット M16N16 の `tileM` が 16 なので、`M < 16` はタイルの大半が空振りして
- * ① と同じ traffic のまま barrier と共有メモリのぶんだけ損になる。
- * MUST: **① とビット同一**（1 出力要素あたりの加算順が d 昇順の逐次で一致 — ADR 0022 決定 3 の
- * 数値契約が骨格側の不変条件）。だから席（`stateAttentionReduce`）に依らない**既定経路**で、
- * 縮約順が変わる ①' とは性格が違う。
- * MUST: `M ≤ 8` の計画（decode の M=1 と verify）では ①' の適用条件
- * （{@link stateQkParallelEligible}）と重ならない（8 < 16）。優先順は runtime 側
- * `buildStateAttention` が 1 箇所で持つ。
+ * WHY: ① is one invocation = one element of S, traffic-bound because it re-reads one row of K
+ * **once per row**. ①ₜ loads K into the shared-memory tile of the GEMM skeleton once and reuses it
+ * across the q rows of that row tile (`tileM` of the `M` bucket). Re-reads drop only when the row
+ * tile holds 2 or more rows, and the smallest bucket M16N16 has `tileM` = 16, so with `M < 16` most
+ * of the tile runs empty: the same traffic as ① plus the cost of barriers and shared memory.
+ * MUST: **bit-identical to ①** (the summation order per output element matches as a sequential
+ * pass in ascending d — the numeric contract of ADR 0022 decision 3 is an invariant of the
+ * skeleton). That is why it is the **default path** regardless of the option
+ * (`stateAttentionReduce`), unlike ①', which changes the reduction order.
+ * MUST: for plans with `M ≤ 8` (decode's M=1 and verify) it does not overlap ①'s condition
+ * ({@link stateQkParallelEligible}) (8 < 16). The priority is held in one place on the runtime
+ * side, `buildStateAttention`.
  */
 export const stateQkTiledEligible = (chunkRows: number): boolean => chunkRows >= 16;
 
-// v2: 行 max を nan_max へ（全 NaN 行が空行判定へ化けて stats (0,0) になる穴を塞ぐ —
-// ADR 0020。非 NaN 入力ではビット不変）
+// v2: the row max uses nan_max (closes the hole where an all-NaN row passed as an empty row and got
+// stats (0,0) — ADR 0020. Bit-identical for non-NaN input)
 export const stateStatsKey = (sliding: boolean): string =>
   `attention_state_stats:v2:f32:wg${STATE_STATS_WORKGROUP_SIZE}${stateVariantKeyPart(
     sliding,
@@ -343,12 +395,12 @@ export const statePvKey = (sliding: boolean, gqa: boolean): string =>
   )}`;
 
 /**
- * ③' の KV 方向レーン数（workgroup = `TILE_X × KV_LANES` = 256 スレッド — ポータビリティの床
- * `maxComputeInvocationsPerWorkgroup` の仕様既定 256 に収める）。
+ * KV-direction lane count of ③' (workgroup = `TILE_X × KV_LANES` = 256 threads — fits the
+ * portability floor, the spec default 256 of `maxComputeInvocationsPerWorkgroup`).
  */
 export const STATE_PV_KV_LANES = 16;
 
-/** ③' のキー（`:par` が census 門の目印 — ③ と同じ変種ビットを後置）。 */
+/** Key of ③' (`:par` is the marker for the census check — followed by the same variant bits as ③). */
 export const statePvParallelKey = (sliding: boolean, gqa: boolean): string =>
   `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par${stateVariantKeyPart(
     sliding,
@@ -356,14 +408,15 @@ export const statePvParallelKey = (sliding: boolean, gqa: boolean): string =>
   )}`;
 
 /**
- * ③ₜ のキー（GEMM 骨格のタイル経路 — perf-ledger K-13 段 2）。綴りの規律は ①ₜ の
- * {@link stateQkTiledKey} と同文で、幾何断片（{@link gemmGeometryTileKeyPart}）に `M` の
- * バケットがそのまま載る。
+ * Key of ③ₜ (the tiled path of the GEMM skeleton — perf-ledger K-13 step 2). The spelling rule is
+ * the same as ①ₜ's {@link stateQkTiledKey}: the `M` bucket goes into the geometry fragment
+ * ({@link gemmGeometryTileKeyPart}) as is.
  *
- * MUST: 幾何を載せる（③ の `wg16x4` に当たる位置）。載せないと、`M` バケットの違う 2 つの計画が
- * 同じキーで別の WGSL を要求し、「同一キー → バイト同一 WGSL」が崩れる。
- * MUST: `chunkRows` は生成（gemm.ts の `attentionStatePvTiledWgsl`）と dispatch
- * （{@link statePvTiledWorkgroups}）へ渡すものと**同じ値**。
+ * MUST: the geometry goes in (in the position of ③'s `wg16x4`). Without it, two plans in different
+ * `M` buckets would ask for different WGSL under the same key, breaking "same key → byte-identical
+ * WGSL".
+ * MUST: `chunkRows` is **the same value** passed to generation (`attentionStatePvTiledWgsl` in
+ * gemm.ts) and to the dispatch ({@link statePvTiledWorkgroups}).
  */
 export const statePvTiledKey = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
   `attention_state_pv:v1:f32:${gemmGeometryTileKeyPart(gemmGeometryForRows(chunkRows))}${stateVariantKeyPart(
@@ -372,43 +425,49 @@ export const statePvTiledKey = (sliding: boolean, gqa: boolean, chunkRows: numbe
   )}`;
 
 /**
- * ③ₜ の**適用条件** — `M`（物理 chunk 行数）が最小の行タイル辺 16 以上の計画だけ。
+ * **Eligibility** of ③ₜ — only plans whose `M` (physical chunk rows) is at least the smallest row
+ * tile edge, 16.
  *
- * WHY: ③ は 1 invocation = O の 1 要素で、V の 1 行を**行の本数ぶん**読み直す traffic 律速
- * （①ₜ が K で潰したのと同じ形が V 側に残っている）。③ₜ は GEMM 骨格の共有メモリタイルへ V を
- * 1 度だけ載せ、その行タイル（`M` バケットの `tileM`）ぶんの P の行で使い回す。読み直しが減るのは
- * 行タイルに 2 行以上載るときで、最小バケット M16N16 の `tileM` が 16 なので、`M < 16` は
- * タイルの大半が空振りして ③ と同じ traffic のまま barrier と共有メモリのぶんだけ損になる。
- * MUST: **③ とビット同一**（1 項の式が `exp(S − m)·inv` で同じ・加算順が col 昇順の逐次で
- * 一致 — ADR 0022 決定 3 の数値契約が骨格側の不変条件）。だから席（`stateAttentionReduce`）に
- * 依らない**既定経路**で、縮約順が変わる ③' とは性格が違う。
- * MUST: しきい値は ①ₜ（{@link stateQkTiledEligible}）と**同じ 16**だが、関数は別に持つ
- * （①ₜ と ③ₜ は別カーネルで、片方だけ適用範囲を動かせる形にしておく）。`M = 1` の decode は
- * どちらの条件も満たさないので、席どおり ①' / ③' が選ばれる。
+ * WHY: ③ is one invocation = one element of O, traffic-bound because it re-reads one row of V
+ * **once per row** (the same shape that ①ₜ removed on the K side remains on the V side). ③ₜ loads V
+ * into the shared-memory tile of the GEMM skeleton once and reuses it across the P rows of that row
+ * tile (`tileM` of the `M` bucket). Re-reads drop only when the row tile holds 2 or more rows, and
+ * the smallest bucket M16N16 has `tileM` = 16, so with `M < 16` most of the tile runs empty: the
+ * same traffic as ③ plus the cost of barriers and shared memory.
+ * MUST: **bit-identical to ③** (the one-term expression is the same `exp(S − m)·inv`, and the
+ * summation order matches as a sequential pass in ascending col — the numeric contract of ADR 0022
+ * decision 3 is an invariant of the skeleton). That is why it is the **default path** regardless of
+ * the option (`stateAttentionReduce`), unlike ③', which changes the reduction order.
+ * MUST: the threshold is **the same 16** as ①ₜ ({@link stateQkTiledEligible}), but the function is
+ * kept separate (①ₜ and ③ₜ are separate kernels, so the range of one can move on its own). Decode
+ * with `M = 1` meets neither condition, so ①' / ③' are selected per the option.
  */
 export const statePvTiledEligible = (chunkRows: number): boolean => chunkRows >= 16;
 
 /**
- * ①③ が共有する静的 params（**内容アドレスキャッシュ適格** — 毎 step 変わる値を含まない）。
+ * Static params shared by ①③ (**eligible for the content-addressed cache** — no value that changes
+ * every step).
  *
- * 語順（**この表が正本**。ホスト側は {@link stateAttentionParams} 1 本だけが組む）:
+ * Word order (**this table is the source of truth**; on the host side only
+ * {@link stateAttentionParams} builds it):
  *
- * | 語 | 欄           | 意味                                             | ① | ③ |
- * | -- | ------------ | ------------------------------------------------ | - | - |
- * | 0  | `rows_block` | この dispatch が担当する行数（S の行数）         | ✓ | ✓ |
- * | 1  | `row_offset` | chunk 内の先頭行（グローバル行 = offset + 局所） | ✓ | ✓ |
- * | 2  | `chunk_rows` | `M`（q / ins / O の行ストライド）                | ✓ | ✓ |
- * | 3  | `depth`      | `D`                                              | ✓ | ✓ |
- * | 4  | `kv_repeat`  | `r = H / Hkv`                                    | ✓ | ✓ |
- * | 5  | `window`     | `W`（`0` = full）                                | ✓ | ✓ |
- * | 6  | `capacity`   | `C`（スロットの行容量）                          | ✓ | ✓ |
- * | 7  | `col_cap`    | S の列ストライド                                 | ✓ | ✓ |
- * | 8  | `neg_inf`    | −inf の f32 ビット列                             | ✓ |   |
- * | 9  | `scale`      | 半スケール（**f32**）                            | ✓ |   |
+ * | Word | Field        | Meaning                                                  | ① | ③ |
+ * | ---- | ------------ | -------------------------------------------------------- | - | - |
+ * | 0    | `rows_block` | rows this dispatch handles (rows of S)                   | ✓ | ✓ |
+ * | 1    | `row_offset` | first row in the chunk (global row = offset + local)     | ✓ | ✓ |
+ * | 2    | `chunk_rows` | `M` (row stride of q / ins / O)                          | ✓ | ✓ |
+ * | 3    | `depth`      | `D`                                                      | ✓ | ✓ |
+ * | 4    | `kv_repeat`  | `r = H / Hkv`                                            | ✓ | ✓ |
+ * | 5    | `window`     | `W` (`0` = full)                                         | ✓ | ✓ |
+ * | 6    | `capacity`   | `C` (row capacity of the slot)                           | ✓ | ✓ |
+ * | 7    | `col_cap`    | column stride of S                                       | ✓ | ✓ |
+ * | 8    | `neg_inf`    | f32 bits of −inf                                         | ✓ |   |
+ * | 9    | `scale`      | half scale (**f32**)                                     | ✓ |   |
  *
- * MUST: ①③ で同一の struct（= 同一の語順）にする。同じ幾何を 2 つの表で持つと、片方だけ
- * 更新した dispatch が例外なしに別のバッファ領域を読む。③ が読まない 2 語（`neg_inf` /
- * `scale`）ぶんの無駄より、語順が 1 箇所しかない性質が優先する。
+ * MUST: ①③ use the same struct (= the same word order). Holding the same geometry in two tables
+ * lets a dispatch whose table was updated on one side only read another buffer region without an
+ * exception. Having the word order in one place outweighs the waste of the two words ③ does not
+ * read (`neg_inf` / `scale`).
  */
 export const STATE_PARAMS_STRUCT = `struct Params {
   rows_block: u32,
@@ -424,12 +483,14 @@ export const STATE_PARAMS_STRUCT = `struct Params {
 }`;
 
 /**
- * 論理長 uniform（ADR 0066 追記 4 の搬送路 — `GenerationContext` 所有の可変 8 バイト）。
+ * Logical-length uniform (the carrier of ADR 0066 addendum 4 — 8 mutable bytes owned by the
+ * `GenerationContext`).
  *
- * MUST: `P` / `Q` を静的 params に載せない（毎 step 値が変わるものを内容アドレスキャッシュへ
- * 載せると「キャッシュ無界成長」と「PreparedPlan ヒット時に更新不能」の両方を踏む）。
- * MUST: **最後の binding** に置く（束縛表の末尾 = context 所有の面、という並びを 4 カーネルで
- * 揃える。src/runtime/generation-context.ts の `lengths` がそのまま入る）。
+ * MUST: `P` / `Q` are not put into the static params (putting values that change every step into
+ * the content-addressed cache hits both "unbounded cache growth" and "cannot be updated on a
+ * PreparedPlan hit").
+ * MUST: it goes in **the last binding** (the four kernels share the order "the end of the binding
+ * table = the context-owned surface"; `lengths` of src/runtime/generation-context.ts goes in as is).
  */
 export const STATE_LENGTHS_STRUCT = `struct Lengths {
   past: u32,
@@ -437,30 +498,36 @@ export const STATE_LENGTHS_STRUCT = `struct Lengths {
 }`;
 
 /**
- * 述語・幾何の断片が読む uniform 変数名の既定（① ①' ② ③ ③' と `state_append` の `params`）。
+ * Default name of the uniform variable the predicate and geometry fragments read (`params` of ①
+ * ①' ② ③ ③' and `state_append`).
  *
- * ①ₜ（GEMM 骨格のタイル経路）だけは骨格が持つ `dims` を binding 0 に置くので、断片へ
- * {@link STATE_TILED_UNIFORM} を渡して**同じ 1 つの式**から生成する（式を書き写すと、片方だけ
- * 直された時に読み書きが黙ってずれる）。
+ * Only ①ₜ (the tiled path of the GEMM skeleton) puts the skeleton's `dims` at binding 0, so it
+ * passes {@link STATE_TILED_UNIFORM} to the fragments and generates from **the same single
+ * expression** (copying the expression would let reads and writes drift silently when only one copy
+ * is fixed).
  */
 const STATE_UNIFORM = "params";
 
 /**
- * 論理 col → スロット物理行の写像（**読み書き同式 MUST** — ADR 0067 決定 4）。
+ * Mapping from logical col → physical slot row (**same formula for reads and writes, MUST** — ADR
+ * 0067 decision 4).
  *
- * ①QK / ①ₜ / ③PV の**読み**と `state_append` の**書き**がこの 1 文字列を共有する
- * （src/kernels/state-append.ts が import する）。読み側だけ別式にすると、ring が一周した
- * 後の全読みが黙って別の行を指す（例外も NaN も出ない沈黙誤読）。
+ * The **reads** of ①QK / ①ₜ / ③PV and the **writes** of `state_append` share this one string
+ * (src/kernels/state-append.ts imports it). A different formula on the read side alone silently
+ * points every read at another row once the ring has wrapped (a silent misread with neither an
+ * exception nor NaN).
  *
- * WHY 剰余の法が `window` ではなく **`capacity`**: sliding スロットの物理行数は窓ちょうどでは
- * なく「窓 + 余裕」で、余裕は**論理長より先に書かれた行**（投機デコードの draft — 検証で
- * 棄却されうる行）の置き場になる。棄却された行 `P+i`（`0 ≤ i < 余裕`）が潰す論理列は
- * `P+i − capacity` で、次 run の live 窓の下端 `P+a − (W−1)`（`a` = 受理した行数 `≥ 0`）より
- * 必ず小さい（`i + W − 1 − a ≤ W + 余裕 − 2 < capacity`）。つまり余裕がある限り、棄却行の
- * 書き込みは live な過去 KV を 1 行も壊さない。法を `window` に戻すと棄却行が窓の内側の列を
- * 上書きし、**例外も NaN も出ないまま**次の step が別の token の KV を過去として読む。
- * `window` は `column_base` / `live_columns` / `in_window`（論理列の窓）の側が持ち続ける —
- * 物理行数と論理窓幅はこの改めで別の量になった。
+ * WHY the modulus is **`capacity`**, not `window`: the physical row count of a sliding slot is not
+ * exactly the window but "window + slack", and the slack holds **rows written ahead of the logical
+ * length** (speculative-decoding drafts — rows that verification may reject). The logical column a
+ * rejected row `P+i` (`0 ≤ i < slack`) overwrites is `P+i − capacity`, which is always below the
+ * lower edge of the next run's live window `P+a − (W−1)` (`a` = accepted rows `≥ 0`)
+ * (`i + W − 1 − a ≤ W + slack − 2 < capacity`). So as long as there is slack, the writes of rejected
+ * rows break not a single row of live past KV. Going back to `window` as the modulus lets rejected
+ * rows overwrite columns inside the window, and the next step reads another token's KV as its past
+ * **with neither an exception nor NaN**. `window` stays with `column_base` / `live_columns` /
+ * `in_window` (the window over logical columns) — with this change the physical row count and the
+ * logical window width became separate quantities.
  */
 export const stateSlotRowWgsl = (sliding: boolean, uniform = STATE_UNIFORM): string =>
   `fn slot_row(col: u32) -> u32 {
@@ -468,10 +535,10 @@ export const stateSlotRowWgsl = (sliding: boolean, uniform = STATE_UNIFORM): str
 }`;
 
 /**
- * live 範囲（S が実体化する論理 col の窓）を決める 2 関数。
+ * The two functions that decide the live range (the window of logical cols that S materialises).
  *
- * `column_base` = full: `0` / sliding: `P − min(P, W−1)`（append 前なので row 0 の窓まで
- * 全行 resident — ADR 0067 決定 4）。`live_columns` = `(P − column_base) + Q`。
+ * `column_base` = full: `0` / sliding: `P − min(P, W−1)` (before the append, so every row up to
+ * row 0's window is resident — ADR 0067 decision 4). `live_columns` = `(P − column_base) + Q`.
  */
 export const stateLiveWgsl = (sliding: boolean, uniform = STATE_UNIFORM): string =>
   `fn column_base(past: u32) -> u32 {
@@ -483,15 +550,17 @@ fn live_columns(past: u32, query: u32) -> u32 {
 }`;
 
 /**
- * 述語（`limit = P + row`）。causal 上限に sliding の下限を **AND する MUST**。
+ * The predicate (`limit = P + row`). The sliding lower bound **MUST be ANDed** with the causal upper
+ * bound.
  *
- * 下限は `limit − col < W`（`col ≥ limit − W + 1` の u32 安全形）。
+ * The lower bound is `limit − col < W` (the u32-safe form of `col ≥ limit − W + 1`).
  *
- * MUST: **引き算は `limit − col` の側**（`col + W > limit` にしない）。WGSL の `&&` は短絡なので
- * 先行する `col <= limit` が真のときしか評価されず、`limit − col` は決して巻き戻らない。逆に
- * `col + W` は **P が u32 の上限近くまで進んだ生成で加算が巻き戻り**、causal 対角（`col = limit`）
- * まで窓外と判定して行が静かに空になる。`limit − W + 1` を直接計算する形も
- * `limit < W−1` でアンダーフローするので採らない。
+ * MUST: **the subtraction is on the `limit − col` side** (not `col + W > limit`). WGSL's `&&`
+ * short-circuits, so it is evaluated only when the preceding `col <= limit` is true, and
+ * `limit − col` never wraps around. Conversely `col + W` **wraps around in a generation where P has
+ * advanced near the u32 maximum**, judging even the causal diagonal (`col = limit`) outside the
+ * window and silently emptying the row. Computing `limit − W + 1` directly is not used either,
+ * since it underflows when `limit < W−1`.
  */
 const stateWindowFn = (sliding: boolean, uniform = STATE_UNIFORM): string =>
   `fn in_window(col: u32, limit: u32) -> bool {
@@ -499,15 +568,17 @@ const stateWindowFn = (sliding: boolean, uniform = STATE_UNIFORM): string =>
 }`;
 
 /**
- * 行ブロック内の**有効行数**を論理長から出す（{@link stateEffectiveRows} の WGSL 側の写し）。
+ * Derives the **valid row count** in a row block from the logical lengths (the WGSL-side mirror of
+ * {@link stateEffectiveRows}).
  *
- * MUST: ホスト（dispatch 数の算出）と WGSL（行範囲の切り方）は**同じ 1 つの式**から出る。
- * ずれると ①② が書く行と ③ が pad と見なす行が食い違い、未書込みの S / stats を読む沈黙誤値に
- * なる（例外も NaN も出ない）。
- * MUST: 引き算はアンダーフローを避けて分岐で切る（`query - row_offset` は u32 で巻き戻る）。
- * NOTE: 3 カーネルとも params の欄名を `rows_block` / `row_offset` で揃えてあるので、この
- * 1 文字列をそのまま共有できる。①ₜ だけは行数が骨格の `dims.m` に居る（Dims の先頭 3 語は
- * `m` / `n` / `k` 固定）ので、欄名も引数で受ける。
+ * MUST: the host (dispatch count) and the WGSL (row range) come from **the same single formula**.
+ * If they drift, the rows ①② write and the rows ③ treats as pad disagree, and unwritten S / stats
+ * are read as a silent wrong value (neither an exception nor NaN).
+ * MUST: the subtraction is guarded by a branch to avoid underflow (`query - row_offset` wraps
+ * around in u32).
+ * NOTE: all three kernels name the params fields `rows_block` / `row_offset`, so this one string can
+ * be shared as is. Only ①ₜ has its row count in the skeleton's `dims.m` (the first 3 words of Dims
+ * are fixed as `m` / `n` / `k`), so the field name is a parameter too.
  */
 export const stateEffectiveRowsWgsl = (uniform = STATE_UNIFORM, rows = "rows_block"): string =>
   `fn effective_rows(query: u32) -> u32 {
@@ -518,14 +589,17 @@ export const stateEffectiveRowsWgsl = (uniform = STATE_UNIFORM, rows = "rows_blo
 }`;
 
 /**
- * ①QK の内積（**半スケール契約** — `scale` を q 側と k 側の**両方**へ載せてから積む）。
+ * Dot product of ①QK (**the half-scale contract** — `scale` is applied to **both** the q side and
+ * the k side before multiplying).
  *
- * MUST: 生成の実体は 1 箇所（この関数）。K の出どころがスロットと ins の 2 つあるぶん本文は
- * 2 つ生成されるが、式が 2 箇所に書かれていると片方だけ「内積の後に 1 度掛ける」形へ
- * 直された時に、スロット由来の列と ins 由来の列で丸めが変わる。
- * MUST: ①' の**部分和**（`lanes` 指定 — `d = lane, lane + lanes, …`）も同じ 1 箇所から出す。
- * 積の式を ① と ①' で別々に書くと、片方だけ半スケールを畳む形へ直された時に A/B 帯の根拠
- * （「同じ積を違う順に足しているだけ」）が黙って崩れる。走査の**開始と刻み**だけが変わる。
+ * MUST: generation has a single body (this function). K comes from two sources, the slot and ins,
+ * so two function bodies are generated, but with the expression written in two places, fixing only
+ * one into "multiply once after the dot product" would make columns from the slot and columns from
+ * ins round differently.
+ * MUST: ①''s **partial sums** (with `lanes` — `d = lane, lane + lanes, …`) come from the same
+ * single place too. Writing the product expression separately for ① and ①' would, when only one is
+ * changed to fold the half scale, silently break the basis of the A/B tolerance ("the same products
+ * summed in a different order"). Only the **start and step** of the scan change.
  */
 const stateScoreFn = (name: string, array: string, lanes?: number): string =>
   `fn ${name}(q_base: u32, k_base: u32${lanes === undefined ? "" : ", lane: u32"}) -> f32 {
@@ -539,31 +613,34 @@ const stateScoreFn = (name: string, array: string, lanes?: number): string =>
 }`;
 
 /**
- * kv 平面の写像（`z = b·H + h` に対し `z / r = b·Hkv + h/r` が整数除算で厳密成立 —
- * ADR 0067 決定 2 と同じ恒等式）。
+ * Mapping to the kv plane (for `z = b·H + h`, `z / r = b·Hkv + h/r` holds exactly under integer
+ * division — the same identity as ADR 0067 decision 2).
  *
- * MUST: 非 GQA 変種は除算そのものを生成しない（`r = 1` の経路に整数除算を残さない）。
- * 値域門（{@link assertStateGeometry}）が `r ≥ 1` を保証するので、GQA 変種のゼロ除算は
- * 起こらない。
+ * SHOULD: non-GQA variants do not generate the division at all (no integer division is left on the
+ * `r = 1` path) (re-graded 2026-10-18 — ADR 0067 decision 2). The range check
+ * ({@link assertStateGeometry}) guarantees `r ≥ 1`, so the GQA variant never divides by zero.
  */
 export const kvPlaneWgsl = (gqa: boolean, uniform = STATE_UNIFORM): string =>
   gqa ? `z / ${uniform}.kv_repeat` : "z";
 
 /**
- * ①ₜ（GEMM 骨格のタイル経路 — src/kernels/gemm.ts の `attentionStateQkTiledWgsl`）が読む
- * uniform 変数名。骨格が binding 0 に `dims: Dims` を置くので、① の `params` とは名前だけが違う。
+ * Name of the uniform variable read by ①ₜ (the tiled path of the GEMM skeleton —
+ * `attentionStateQkTiledWgsl` in src/kernels/gemm.ts). The skeleton puts `dims: Dims` at binding 0,
+ * so only the name differs from ①'s `params`.
  */
 const STATE_TILED_UNIFORM = "dims";
 
 /**
- * ①ₜ が使う述語・幾何関数の一式（`slot_row` / `column_base` / `live_columns` / `in_window` /
- * `effective_rows`）。
+ * The set of predicate and geometry functions ①ₜ uses (`slot_row` / `column_base` /
+ * `live_columns` / `in_window` / `effective_rows`).
  *
- * MUST: 生成の実体は ① と**同じ 4 つの断片**（この関数は uniform 名と行数の欄名を差し替えて
- * 呼ぶだけ）。①ₜ 用に式を書き写すと、ring 写像・窓の下限・live の切り方のどれかが片方だけ
- * 直された時に**例外も NaN も出ない**まま読み書きがずれる。
- * NOTE: `effective_rows` の行数は骨格の `dims.m`（= `rows_block`）。Dims の先頭 3 語は
- * `m` / `n` / `k` 固定なので、states の欄名をそのまま置けない唯一の欄。
+ * MUST: generation uses **the same four fragments** as ① (this function only swaps the uniform name
+ * and the field name of the row count). Copying the expressions for ①ₜ would, when the ring
+ * mapping, the window's lower bound or the live cut is fixed on one side only, let reads and writes
+ * drift **with neither an exception nor NaN**.
+ * NOTE: the row count of `effective_rows` is the skeleton's `dims.m` (= `rows_block`). The first 3
+ * words of Dims are fixed as `m` / `n` / `k`, so this is the one field whose states name cannot be
+ * used as is.
  */
 export const stateTiledGeometryWgsl = (sliding: boolean): string =>
   `${stateSlotRowWgsl(sliding, STATE_TILED_UNIFORM)}
@@ -575,13 +652,14 @@ ${stateWindowFn(sliding, STATE_TILED_UNIFORM)}
 ${stateEffectiveRowsWgsl(STATE_TILED_UNIFORM, "m")}`;
 
 /**
- * ③ₜ が使う述語・幾何関数の一式（`slot_row` / `column_base` / `live_columns` /
- * `effective_rows`）。①ₜ の {@link stateTiledGeometryWgsl} から **`in_window` を落とした**もので、
- * 生成の実体は同じ断片。
+ * The set of predicate and geometry functions ③ₜ uses (`slot_row` / `column_base` /
+ * `live_columns` / `effective_rows`). It is ①ₜ's {@link stateTiledGeometryWgsl} **without
+ * `in_window`**, generated from the same fragments.
  *
- * WHY: ③ 系は述語を自分で評価しない — 述語外の列は ① が S へ −inf を書いており、
- * `p = exp(−inf − m)·inv = 0` が厳密に出ることで落ちる（ADR 0067 決定 6）。使わない
- * `in_window` を生成物へ残すと、読者が「③ₜ も窓を切っている」と誤読する。
+ * WHY: the ③ family does not evaluate the predicate itself — ① has written −inf into S for the
+ * columns outside the predicate, and they drop out because `p = exp(−inf − m)·inv = 0` comes out
+ * exactly (ADR 0067 decision 6). Leaving an unused `in_window` in the output would make readers
+ * think "③ₜ also cuts the window".
  */
 export const stateTiledPvGeometryWgsl = (sliding: boolean): string =>
   `${stateSlotRowWgsl(sliding, STATE_TILED_UNIFORM)}
@@ -590,23 +668,24 @@ ${stateLiveWgsl(sliding, STATE_TILED_UNIFORM)}
 
 ${stateEffectiveRowsWgsl(STATE_TILED_UNIFORM, "m")}`;
 
-/** ①ₜ / ③ₜ の kv 平面（{@link kvPlaneWgsl} の uniform 差し替え版 — `z` は `wid.z` の別名）。 */
+/** kv plane of ①ₜ / ③ₜ ({@link kvPlaneWgsl} with the uniform swapped — `z` is an alias of `wid.z`). */
 export const stateTiledKvPlaneWgsl = (gqa: boolean): string =>
   kvPlaneWgsl(gqa, STATE_TILED_UNIFORM);
 
 /**
- * ①ₜ が骨格の `Dims`（`{m, n, k}`）へ足す 7 語。先頭 3 語は
- * **`m` = `rows_block` / `n` = `col_cap` / `k` = `depth`** で、行列としての M / N / K そのもの
- * （実効 N は実行時の live なので `col_cap` は**ストライドの静的上界**にしか使わない）。
+ * The 7 words ①ₜ appends to the skeleton's `Dims` (`{m, n, k}`). The first 3 words are
+ * **`m` = `rows_block` / `n` = `col_cap` / `k` = `depth`**, exactly the M / N / K of the matrix
+ * product (the effective N is the run-time live, so `col_cap` serves only as **the static upper
+ * bound of the stride**).
  *
- * MUST: 並びは {@link stateQkTiledParams} と対（この 2 つが唯一の対 — gemm.ts 側の
- * `ROW_WINDOW_DIMS_EXTRA` / `GQA_DIMS_EXTRA` と同じ規律）。
- * MUST: ① ③ が共有する {@link STATE_PARAMS_STRUCT} とは**別の並び**にしてよい（①ₜ は束縛の
- * 番号だけを ① と揃えた差し替え可能なカーネルで、params は自分専用の 1 本を持つ）。逆に
- * `STATE_PARAMS_STRUCT` の語順は動かさない — ③ と見積りが同じ表を読む。
- * MUST: 変種（sliding / GQA）で欄を出し入れしない。1 つの struct を全変種で使うことで、
- * ホスト側の params 組み立てが 1 本で済む（欄が変種依存だと、片方の変種だけ語位置がずれた
- * params を書いても例外が出ない）。
+ * MUST: the order pairs with {@link stateQkTiledParams} (these two are the only pair — the same
+ * rule as `ROW_WINDOW_DIMS_EXTRA` / `GQA_DIMS_EXTRA` on the gemm.ts side).
+ * MUST: it may use **a different order** from {@link STATE_PARAMS_STRUCT}, which ① ③ share (①ₜ is a
+ * swappable kernel whose binding numbers alone match ①, and it has params of its own). Conversely
+ * the word order of `STATE_PARAMS_STRUCT` does not move — ③ and the estimate read the same table.
+ * MUST: no field comes or goes with the variant (sliding / GQA). Using one struct for every variant
+ * keeps the host-side params assembly to one function (with variant-dependent fields, writing
+ * params whose word positions are shifted for one variant only would raise no exception).
  */
 export const STATE_QK_TILED_DIMS_EXTRA = `  row_offset: u32,
   chunk_rows: u32,
@@ -618,16 +697,17 @@ export const STATE_QK_TILED_DIMS_EXTRA = `  row_offset: u32,
 `;
 
 /**
- * ③ₜ が骨格の `Dims`（`{m, n, k}`）へ足す 5 語。先頭 3 語は
- * **`m` = `rows_block` / `n` = `depth` / `k` = `col_cap`** で、行列としての M / N / K
- * （実効 K は実行時の live なので `col_cap` は **S の行ストライドと K の静的上界**にしか使わない）。
+ * The 5 words ③ₜ appends to the skeleton's `Dims` (`{m, n, k}`). The first 3 words are
+ * **`m` = `rows_block` / `n` = `depth` / `k` = `col_cap`**, the M / N / K of the matrix product (the
+ * effective K is the run-time live, so `col_cap` serves only as **S's row stride and the static
+ * upper bound of K**).
  *
- * MUST: 並びは {@link statePvTiledParams} と対（この 2 つが唯一の対）。
- * MUST: ①ₜ の {@link STATE_QK_TILED_DIMS_EXTRA} から `neg_inf` / `scale` を**落とす**
- * （③ 系はどちらも読まない — ① が S へ焼いた −inf を `exp` が 0 にするだけ）。読まない語を
- * 残すと「③ₜ も述語や半スケールを持つ」という誤読が params 側にも生える。
- * MUST: 変種（sliding / GQA）で欄を出し入れしない（①ₜ と同文 — ホスト側の params 組み立てが
- * 1 本で済む）。
+ * MUST: the order pairs with {@link statePvTiledParams} (these two are the only pair).
+ * MUST: **drop** `neg_inf` / `scale` from ①ₜ's {@link STATE_QK_TILED_DIMS_EXTRA} (the ③ family reads
+ * neither — `exp` merely turns the −inf ① baked into S into 0). Keeping words that are not read
+ * would grow the misreading "③ₜ also has a predicate and a half scale" on the params side too.
+ * MUST: no field comes or goes with the variant (sliding / GQA) (the same wording as ①ₜ — the
+ * host-side params assembly stays one function).
  */
 export const STATE_PV_TILED_DIMS_EXTRA = `  row_offset: u32,
   chunk_rows: u32,
@@ -637,21 +717,22 @@ export const STATE_PV_TILED_DIMS_EXTRA = `  row_offset: u32,
 `;
 
 /**
- * ①QK。1 invocation = S の 1 要素（`(局所行, live 列)`）で、内積は D の逐次ループ。
+ * ①QK. 1 invocation = one element of S (`(local row, live column)`); the dot product is a
+ * sequential loop over D.
  *
- * 束縛（**binding 0 = 静的 params・最後 = 論理長**）:
+ * Bindings (**binding 0 = static params, last = logical lengths**):
  *
- * | binding | 資源                              |
- * | ------- | --------------------------------- |
- * | 0       | `Params`（uniform）               |
- * | 1       | `q` `[B,H,M,D]`                   |
- * | 2       | `ins_k` `[B,Hkv,M,D]`             |
- * | 3       | `slot_k` `[B,Hkv,C,D]`            |
- * | 4       | `s` `[B·H, rows_block, col_cap]`（書き） |
- * | 5       | `Lengths`（uniform — context 所有）|
+ * | binding | Resource                                  |
+ * | ------- | ----------------------------------------- |
+ * | 0       | `Params` (uniform)                        |
+ * | 1       | `q` `[B,H,M,D]`                           |
+ * | 2       | `ins_k` `[B,Hkv,M,D]`                     |
+ * | 3       | `slot_k` `[B,Hkv,C,D]`                    |
+ * | 4       | `s` `[B·H, rows_block, col_cap]` (write)  |
+ * | 5       | `Lengths` (uniform — owned by context)    |
  */
 export const stateQkWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_qk (states 形の S 実体化, f32${sliding ? ", sliding window" : ""}${
+  `// karume attention_state_qk (states-form S materialisation, f32${sliding ? ", sliding window" : ""}${
     gqa ? ", GQA" : ""
   })
 ${STATE_PARAMS_STRUCT}
@@ -681,9 +762,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let live = live_columns(past, lengths.query);
   let local_row = gid.y;
   let cl = gid.x;
-  // 端数タイルの空振り。live より右（[live, col_cap)）は残骸のまま残すのが正で、
-  // 読者（②③）が live で切ることと対になっている。行は**有効行まで**（pad 行の S は
-  // 誰も読まない — ③ が 0 を書いて返す）ので、仕事量が Q に比例する
+  // Empty run of the edge tile. Leaving the leftovers right of live ([live, col_cap)) in place is
+  // correct and pairs with the readers (②③) cutting at live. Rows go **up to the valid rows** (no
+  // one reads the S of pad rows — ③ writes 0 and returns), so the work is proportional to Q
   if (local_row >= effective_rows(lengths.query) || cl >= live) {
     return;
   }
@@ -692,14 +773,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let row = params.row_offset + local_row;
   let q_base = (z * params.chunk_rows + row) * params.depth;
   let kv_plane = ${kvPlaneWgsl(gqa)};
-  // 述語外は -inf。live 範囲は**述語外でも必ず書く**（書かないと ② が前回の残骸を食う）
+  // -inf outside the predicate. The live range is **always written, even outside the predicate**
+  // (otherwise ② consumes the previous leftovers)
   var value = bitcast<f32>(params.neg_inf);
   if (in_window(col, past + row)) {
     if (col < past) {
-      // past（col < P）はスロットから。物理行は読み書き同式の slot_row
+      // past (col < P) comes from the slot. The physical row is slot_row (same formula for reads
+      // and writes)
       value = score_slot(q_base, (kv_plane * params.capacity + slot_row(col)) * params.depth);
     } else {
-      // current（col ≥ P）は今 step の ins の行 col − P から
+      // current (col ≥ P) comes from row col − P of this step's ins
       value = score_ins(q_base, (kv_plane * params.chunk_rows + (col - past)) * params.depth);
     }
   }
@@ -708,18 +791,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 /**
- * ①' D 並列縮約変種（ファイル冒頭「①' D 並列縮約変種」節）。束縛と params は ① と**同一**
- * （差し替え可能 — 呼び手はキーと WGSL と workgroup 算出だけを切り替える）。
+ * ①' D-parallel reduction variant (the section "①' D-parallel reduction variant" at the top of the
+ * file). Bindings and params are **the same** as ① (swappable — the caller switches only the key,
+ * the WGSL and the workgroup computation).
  *
- * 1 workgroup = 局所行 1 本 × `TILE_X` 本の列 `cl`。レーン `lane` は `d = lane, lane + D_LANES, …`
- * を昇順に部分累積し、`scratch[lane][x]` に置いてから固定順の木で畳んで**レーン 0 が S を書く**。
+ * 1 workgroup = 1 local row × `TILE_X` columns `cl`. Lane `lane` accumulates `d = lane, lane +
+ * D_LANES, …` in ascending order, puts the result in `scratch[lane][x]`, and after the fixed-order
+ * tree fold **lane 0 writes S**.
  *
- * MUST: 書く条件は ① と同一 — `cl < live` なら述語外でも `-inf` を書き、`cl ≥ live` と pad 行は
- * 1 語も書かない。`cl ≥ live` は workgroup 一様でない（端数タイル）ので、そのレーンは
- * **return せず**内積を空回りして barrier に参加する。
+ * MUST: the write conditions are the same as ① — with `cl < live`, `-inf` is written even outside
+ * the predicate, and for `cl ≥ live` and pad rows not a single word is written. `cl ≥ live` is not
+ * workgroup-uniform (the edge tile), so those lanes **do not return**; they run the dot product
+ * empty and take part in the barrier.
  */
 export const stateQkParallelWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_qk (states 形の S 実体化, f32, D 並列縮約${
+  `// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction${
     sliding ? ", sliding window" : ""
   }${gqa ? ", GQA" : ""})
 ${STATE_PARAMS_STRUCT}
@@ -751,8 +837,8 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let local_row = wid.y;
-  // pad 行の S は誰も読まない（③ が 0 を書いて返す）ので 1 語も書かずに返る。局所行は
-  // workgroup 一様なので barrier の手前で返してよい
+  // No one reads the S of pad rows (③ writes 0 and returns), so return without writing a word. The
+  // local row is workgroup-uniform, so returning before the barrier is allowed
   if (local_row >= effective_rows(lengths.query)) {
     return;
   }
@@ -765,22 +851,24 @@ fn main(
   let row = params.row_offset + local_row;
   let q_base = (z * params.chunk_rows + row) * params.depth;
   let kv_plane = ${kvPlaneWgsl(gqa)};
-  // 端数タイル（cl ≥ live）と述語外の列は内積を回さない。**return はしない** — この分岐は
-  // workgroup 一様でなく、下の barrier は一様制御流の中だけに置けるため（0.0 を寄与する）
+  // Edge-tile columns (cl ≥ live) and columns outside the predicate do not run the dot product.
+  // **No return** — this branch is not workgroup-uniform, and the barrier below can sit only inside
+  // uniform control flow (contributes 0.0)
   let inside = cl < live && in_window(col, past + row);
   var acc = 0.0;
   if (inside) {
     if (col < past) {
-      // past（col < P）はスロットから。物理行は読み書き同式の slot_row
+      // past (col < P) comes from the slot. The physical row is slot_row (same formula for reads
+      // and writes)
       acc = score_slot(q_base, (kv_plane * params.capacity + slot_row(col)) * params.depth, lane);
     } else {
-      // current（col ≥ P）は今 step の ins の行 col − P から
+      // current (col ≥ P) comes from row col − P of this step's ins
       acc = score_ins(q_base, (kv_plane * params.chunk_rows + (col - past)) * params.depth, lane);
     }
   }
   scratch[lane * ${STATE_ATTENTION_TILE_X}u + lid.x] = acc;
   workgroupBarrier();
-  // 固定順の木縮約（stride 8 → 4 → 2 → 1）— 決定性の根拠
+  // Fixed-order tree reduction (stride 8 → 4 → 2 → 1) — the basis of determinism
   var stride = ${STATE_QK_D_LANES / 2}u;
   while (stride > 0u) {
     if (lane < stride) {
@@ -790,7 +878,8 @@ fn main(
     workgroupBarrier();
     stride = stride / 2u;
   }
-  // 述語外は -inf。live 範囲は**述語外でも必ず書く**（書かないと ② が前回の残骸を食う）
+  // -inf outside the predicate. The live range is **always written, even outside the predicate**
+  // (otherwise ② consumes the previous leftovers)
   if (lane == 0u && cl < live) {
     var value = bitcast<f32>(params.neg_inf);
     if (inside) {
@@ -802,54 +891,57 @@ fn main(
 `;
 
 /**
- * ② 行統計の 2 入口（states 形 {@link stateStatsWgsl} / readonly {@link stateStatsReadonlyWgsl}）が
- * 差し替える断片。束縛・params・縮約順・barrier の位置は 2 入口で 1 バイトも違わず、差は
- * **header の注記・live 列の前置き・WGSL コメント**だけなので、それだけを引数にする。
+ * The fragments swapped by the two entry points of ② row statistics (states form
+ * {@link stateStatsWgsl} / readonly {@link stateStatsReadonlyWgsl}). Bindings, params, reduction
+ * order and barrier positions do not differ by a single byte between the two; the only differences
+ * are **the header note, the live-column prologue and the WGSL comments**, so only those are
+ * parameters.
  *
- * MUST: 生成される WGSL は**コメントまで含めてスナップショットで凍結**されている
- * （`codegen_wgsl_test.ts` の `attention_state_stats*.wgsl`）。注記は行頭のインデントと末尾改行を
- * 込みで渡す（空文字列なら行ごと消える）。
+ * MUST: the generated WGSL is **frozen by snapshots, comments included** (`attention_state_stats*.wgsl`
+ * of `codegen_wgsl_test.ts`). Notes are passed with their leading indentation and trailing newline
+ * (an empty string removes the whole line).
  */
 type StateStatsShape = {
-  /** header 行の `f32` の直後に足す注記（readonly は `, readonly = past のみ`）。 */
+  /** Note appended right after `f32` on the header line (readonly: a note that only past is read). */
   readonly headerNote: string;
-  /** `column_base` / `live_columns` の定義（states 形は past+query・readonly は past のみ）。 */
+  /** Definitions of `column_base` / `live_columns` (states form: past+query, readonly: past only). */
   readonly live: string;
-  /** `let rows` の直前 — 有効行が前詰めであることと 0 除算にならない根拠。 */
+  /** Right before `let rows` — valid rows are packed at the front, and why no division by 0 occurs. */
   readonly rowsNote: string;
-  /** 行 max を読んだ後の `workgroupBarrier()` の直前 — scratch 再利用の同期理由。 */
+  /** Right before the `workgroupBarrier()` after reading the row max — why reusing scratch syncs. */
   readonly amaxBarrierNote: string;
-  /** Σ exp の段の見出し — 空行を 1 度も回さない理由。 */
+  /** Heading of the Σ exp stage — why empty rows never run it. */
   readonly sumNote: string;
-  /** `stats` へ書く直前 — 空行が (0.0, 0.0) になる理由。 */
+  /** Right before writing `stats` — why an empty row becomes (0.0, 0.0). */
   readonly emptyStatsNote: string;
-  /** 行ループ末尾の `workgroupBarrier()` の直前 — 次の行が scratch を上書きする前の同期理由。 */
+  /** Right before the `workgroupBarrier()` closing the row loop — why sync before the next row. */
   readonly tailBarrierNote: string;
 };
 
 /**
- * ② 行統計。1 行 = 1 workgroup(256) + 行方向 grid-stride（既存 attention_stats と同じ骨格で、
- * 違うのは **dim が実行時値**（live 列数）の 1 点。identity −inf と空行ガードは既存 ② の v2 も同じ形）。
+ * ② row statistics. 1 row = 1 workgroup (256) + grid-stride over rows (the same skeleton as the
+ * existing attention_stats; the one difference is that **dim is a run-time value** (the live column
+ * count). The identity −inf and the empty-row guard have the same form in the existing ②'s v2).
  *
- * 束縛:
+ * Bindings:
  *
- * | binding | 資源                                        |
- * | ------- | ------------------------------------------- |
- * | 0       | `Params`（uniform — 下の 6 語だけの別 struct）|
- * | 1       | `s`（読み）                                 |
- * | 2       | `stats` `[B·H·rows_block, 2]`（書き）       |
- * | 3       | `Lengths`（uniform）                        |
+ * | binding | Resource                                              |
+ * | ------- | ----------------------------------------------------- |
+ * | 0       | `Params` (uniform — a separate struct of the 6 words below) |
+ * | 1       | `s` (read)                                            |
+ * | 2       | `stats` `[B·H·rows_block, 2]` (write)                 |
+ * | 3       | `Lengths` (uniform)                                   |
  *
- * MUST: 覆うのは**有効行だけ**（`B·H × effective_rows` 本）。統計の書き先は S と同じ
- * `z · rows_block + 局所行` で、pad 行のぶんは書かれないまま残る（読者が居ない — ③ は pad 行で
- * `stats` を 1 語も読まずに 0 を書く）。
- * MUST: `col_cap` は**ストライド**で、走査は live まで。
- * MUST: 行 max は `nan_max`（ビット列 NaN 判定 — ADR 0020）。素の `max` は仕様レベルで
- * NaN を落とし、全 NaN 行が空行（stats (0,0)）へ化ける。nan_max なら m = NaN が ③ へ渡り
- * 出力の NaN 分類が保存される。非 NaN 入力ではビット不変（v2）。
+ * MUST: it covers **valid rows only** (`B·H × effective_rows`). Statistics are written to the same
+ * `z · rows_block + local row` as S, and the entries of pad rows stay unwritten (they have no
+ * reader — ③ writes 0 for pad rows without reading a single word of `stats`).
+ * MUST: `col_cap` is **a stride**, and the scan goes up to live.
+ * MUST: the row max is `nan_max` (a bit-pattern NaN check — ADR 0020). The plain `max` drops NaN at
+ * the spec level, turning an all-NaN row into an empty row (stats (0,0)). With nan_max, m = NaN
+ * reaches ③ and the NaN class of the output is preserved. Bit-identical for non-NaN input (v2).
  */
 const stateStatsBodyWgsl = (sliding: boolean, shape: StateStatsShape): string =>
-  `// karume attention_state_stats (states 形の行統計 m = amax(S) と inv = 1/Σexp(S - m), f32${shape.headerNote}${
+  `// karume attention_state_stats (states-form row statistics m = amax(S) and inv = 1/Σexp(S - m), f32${shape.headerNote}${
     sliding ? ", sliding window" : ""
   })
 struct Params {
@@ -892,7 +984,7 @@ ${shape.rowsNote}  let rows = effective_rows(lengths.query);
     let row = (index / rows) * params.rows_block + index % rows;
     let base = row * params.col_cap;
 
-    // ① 行の最大値。identity は **-inf**（有限 sentinel は MUST NOT — ADR 0067 決定 6）
+    // ① Row maximum. The identity is **-inf** (a finite sentinel is MUST NOT — ADR 0067 decision 6)
     var hi = neg_inf;
     var i = lid;
     while (i < live) {
@@ -947,47 +1039,51 @@ ${shape.tailBarrierNote}    workgroupBarrier();
 }
 `;
 
-/** ② 行統計（states 形 — live は past+query）。骨格と契約は {@link stateStatsBodyWgsl}。 */
+/** ② row statistics (states form — live is past+query). Contract: {@link stateStatsBodyWgsl}. */
 export const stateStatsWgsl = (sliding: boolean): string =>
   stateStatsBodyWgsl(sliding, {
     headerNote: "",
     live: stateLiveWgsl(sliding),
-    rowsNote: `  // 有効行は各 z 平面の**前詰め** rows 本。total = 0 ならループへ入らないので rows での
-  // 除算・剰余は 0 除算にならない（ホストも 0 なら dispatch を積まない）
+    rowsNote: `  // The valid rows are the first rows of each z plane (**packed at the front**). With
+  // total = 0 the loop is not entered, so dividing by rows or taking the remainder never divides
+  // by 0 (the host records no dispatch for 0 either)
 `,
-    amaxBarrierNote: `    // scratch の読み終わりを揃えてから ② で上書きする
+    amaxBarrierNote: `    // Make sure scratch has been read before ② overwrites it
 `,
-    sumNote: `    // ② Σ exp(S - amax)。**空行（amax == -inf）は 1 度も回さない** —
-    // exp(-inf - (-inf)) = exp(NaN) = NaN が分母へ入る
+    sumNote: `    // ② Σ exp(S - amax). **An empty row (amax == -inf) never runs it** —
+    // exp(-inf - (-inf)) = exp(NaN) = NaN would enter the denominator
 `,
-    emptyStatsNote: `      // 空行は (0.0, 0.0)。③ の exp(-inf - 0) * 0 = 0 で出力が**厳密 0** になる
+    emptyStatsNote: `      // An empty row is (0.0, 0.0). ③'s exp(-inf - 0) * 0 = 0 makes the output
+      // **exactly 0**
 `,
-    tailBarrierNote: `    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    tailBarrierNote: `    // Make sure scratch[0] has been read before the next row overwrites scratch[lid]
 `,
   });
 
 /**
- * ③PV。1 invocation = O の 1 要素（`(局所行, D)`）で、縮約は **live 列の昇順逐次**（決定性）。
+ * ③PV. 1 invocation = one element of O (`(local row, D)`); the reduction is **a sequential pass in
+ * ascending live-column order** (determinism).
  *
- * 束縛:
+ * Bindings:
  *
- * | binding | 資源                                |
- * | ------- | ----------------------------------- |
- * | 0       | `Params`（uniform — ① と同一 struct）|
- * | 1       | `s`（読み）                         |
- * | 2       | `stats`（読み）                     |
- * | 3       | `ins_v` `[B,Hkv,M,D]`               |
- * | 4       | `slot_v` `[B,Hkv,C,D]`              |
- * | 5       | `out` `[B,H,M,D]`（書き）           |
- * | 6       | `Lengths`（uniform）                |
+ * | binding | Resource                                   |
+ * | ------- | ------------------------------------------ |
+ * | 0       | `Params` (uniform — the same struct as ①)  |
+ * | 1       | `s` (read)                                 |
+ * | 2       | `stats` (read)                             |
+ * | 3       | `ins_v` `[B,Hkv,M,D]`                      |
+ * | 4       | `slot_v` `[B,Hkv,C,D]`                     |
+ * | 5       | `out` `[B,H,M,D]` (write)                  |
+ * | 6       | `Lengths` (uniform)                        |
  *
- * MUST: 出力は `row_offset` からの `rows_block` 行**全て**を書く（pad 行〈`row ≥ Q`〉も
- * 通常出力としては書かれる — ADR 0066 追記 6 の「不定 = 値が契約上無意味」であって未書込み
- * ではない）。ただし pad 行は **live を 1 列も走査せず厳密 `0.0`** を書く（① ② が有効行しか
- * 覆わないので S / stats が居ない + 仕事量を Q に比例させる + 空行 → 0 を構造的に包含する）。
+ * MUST: the output writes **all** `rows_block` rows from `row_offset` (pad rows (`row ≥ Q`) are
+ * written as ordinary output too — ADR 0066 addendum 6's "undefined = the value is meaningless by
+ * contract", not unwritten). But pad rows get **an exact `0.0` without scanning a single live
+ * column** (① ② cover valid rows only, so there is no S / stats for them + the work stays
+ * proportional to Q + empty row → 0 is contained by construction).
  */
 export const statePvWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_pv (states 形の O = P @ V, f32${sliding ? ", sliding window" : ""}${
+  `// karume attention_state_pv (states-form O = P @ V, f32${sliding ? ", sliding window" : ""}${
     gqa ? ", GQA" : ""
   })
 ${STATE_PARAMS_STRUCT}
@@ -1015,9 +1111,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let z = gid.z;
   let at = (z * params.chunk_rows + params.row_offset + local_row) * params.depth + d;
-  // pad 行（row ≥ Q）: live を走査せず**厳密 0** を書いて返す（full-write は保つ = ADR 0066
-  // 追記 6 の「値が契約上無意味」を 0 で固定）。空行 ⊂ pad 行なので ADR 0067 決定 6 の
-  // 「空行 → 厳密 0」はこの分岐が構造的に包含し、非有限 V による 0·NaN の穴も同時に閉じる
+  // Pad rows (row ≥ Q): write **an exact 0** without scanning live and return (full-write holds =
+  // ADR 0066 addendum 6's "the value is meaningless by contract" is pinned to 0). Empty rows ⊂ pad
+  // rows, so this branch contains ADR 0067 decision 6's "empty row → exact 0" by construction and
+  // also closes the 0·NaN hole of a non-finite V
   if (local_row >= effective_rows(lengths.query)) {
     out[at] = 0.0;
     return;
@@ -1030,7 +1127,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let s_base = s_row * params.col_cap;
   let amax = stats[s_row * ${STATE_STATS_STRIDE}u];
   let inv = stats[s_row * ${STATE_STATS_STRIDE}u + 1u];
-  // 縮約は col 昇順の逐次（決定性）。述語外は S が -inf なので p = 0 が**厳密**に出る
+  // The reduction is a sequential pass in ascending col (determinism). Outside the predicate S is
+  // -inf, so p = 0 comes out **exactly**
   var acc = 0.0;
   for (var cl = 0u; cl < live; cl = cl + 1u) {
     let col = base_col + cl;
@@ -1048,14 +1146,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 /**
- * ③' KV 並列縮約変種（ファイル冒頭「③' KV 並列縮約変種」節）。束縛と params は ③ と**同一**
- * （差し替え可能 — 呼び手はキーと workgroup 算出だけを切り替える）。
+ * ③' KV-parallel reduction variant (the section "③' KV-parallel reduction variant" at the top of
+ * the file). Bindings and params are **the same** as ③ (swappable — the caller switches only the
+ * key and the workgroup computation).
  *
- * 1 workgroup = 局所行 1 本 × `TILE_X` 本の `d`。レーン `lane` は `cl = lane, lane + KV_LANES, …`
- * を昇順に部分累積し、`scratch[lane][x]` に置いてから固定順の木で畳む。
+ * 1 workgroup = 1 local row × `TILE_X` values of `d`. Lane `lane` accumulates `cl = lane, lane +
+ * KV_LANES, …` in ascending order, puts the result in `scratch[lane][x]`, and folds it with the
+ * fixed-order tree.
  */
 export const statePvParallelWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_pv (states 形の O = P @ V, f32, KV 並列縮約${
+  `// karume attention_state_pv (states-form O = P @ V, f32, KV-parallel reduction${
     sliding ? ", sliding window" : ""
   }${gqa ? ", GQA" : ""})
 ${STATE_PARAMS_STRUCT}
@@ -1087,9 +1187,10 @@ fn main(
   let z = wid.z;
   let in_depth = d < params.depth;
   let at = (z * params.chunk_rows + params.row_offset + local_row) * params.depth + d;
-  // pad 行（row ≥ Q）は live を走査せず厳密 0（③ と同じ契約）。局所行は workgroup 一様なので
-  // barrier の手前で返してよい。KV_LANES 本が同じ out[at] を指すので、通常行と同じく lane 0
-  // だけが書く（同値でも同期なしの同一要素書き込みは WGSL のデータ競合）
+  // Pad rows (row ≥ Q) do not scan live and are exactly 0 (the same contract as ③). The local row is
+  // workgroup-uniform, so returning before the barrier is allowed. KV_LANES lanes point at the same
+  // out[at], so as on ordinary rows only lane 0 writes (unsynchronised writes to the same element are
+  // a WGSL data race even with equal values)
   if (local_row >= effective_rows(lengths.query)) {
     if (lane == 0u && in_depth) {
       out[at] = 0.0;
@@ -1104,8 +1205,8 @@ fn main(
   let s_base = s_row * params.col_cap;
   let amax = stats[s_row * ${STATE_STATS_STRIDE}u];
   let inv = stats[s_row * ${STATE_STATS_STRIDE}u + 1u];
-  // レーンごとの部分和（col 昇順・stride KV_LANES）。d が範囲外のレーンは走査せず 0 を寄与する
-  // （barrier に参加させるため return しない）
+  // Per-lane partial sum (ascending col, stride KV_LANES). A lane whose d is out of range does not
+  // scan and contributes 0 (it does not return, so that it takes part in the barrier)
   var acc = 0.0;
   if (in_depth) {
     for (var cl = lane; cl < live; cl = cl + ${STATE_PV_KV_LANES}u) {
@@ -1122,7 +1223,7 @@ fn main(
   }
   scratch[lane * ${STATE_ATTENTION_TILE_X}u + lid.x] = acc;
   workgroupBarrier();
-  // 固定順の木縮約（stride 8 → 4 → 2 → 1）— 決定性の根拠
+  // Fixed-order tree reduction (stride 8 → 4 → 2 → 1) — the basis of determinism
   var stride = ${STATE_PV_KV_LANES / 2}u;
   while (stride > 0u) {
     if (lane < stride) {
@@ -1138,41 +1239,43 @@ fn main(
 }
 `;
 
-/** ①③ が共有する静的幾何（{@link STATE_PARAMS_STRUCT} の語順の型側）。 */
+/** Static geometry shared by ①③ (the type side of the word order of {@link STATE_PARAMS_STRUCT}). */
 export type StateAttentionGeometry = {
-  /** この dispatch が担当する行数（S の行数 — `rows_block`）。 */
+  /** Rows this dispatch handles (rows of S — `rows_block`). */
   readonly rowsBlock: number;
-  /** chunk 内の先頭行。グローバル行 = `rowOffset` + 局所行。 */
+  /** First row in the chunk. Global row = `rowOffset` + local row. */
   readonly rowOffset: number;
-  /** `M`（q / ins / O の行ストライド = 物理 chunk 行数）。 */
+  /** `M` (row stride of q / ins / O = physical chunk row count). */
   readonly chunkRows: number;
-  /** `D`。 */
+  /** `D`. */
   readonly depth: number;
-  /** `r = H / Hkv`（GQA の繰り返し数）。 */
+  /** `r = H / Hkv` (the GQA repeat count). */
   readonly kvRepeat: number;
-  /** `W`（`0` = full — {@link stateSliding}）。 */
+  /** `W` (`0` = full — {@link stateSliding}). */
   readonly window: number;
-  /** `C`（スロットの行容量）。 */
+  /** `C` (row capacity of the slot). */
   readonly capacity: number;
-  /** S の列ストライド上限。 */
+  /** Upper bound on the column stride of S. */
   readonly colCap: number;
-  /** 半スケール（q 側と k 側の両方へ載る値）。 */
+  /** Half scale (the value applied to both the q side and the k side). */
   readonly scale: number;
 };
 
 /**
- * 静的幾何の値域門。
+ * Range check of the static geometry.
  *
- * MUST: `kvRepeat ≥ 1`（WGSL の u32 ゼロ除算は trap せず実装依存の値を返すので、`r = 0` は
- * 例外も NaN も出ないまま kv 平面が化ける — attention.ts の `assertKvRepeat` と同型）。
- * MUST: sliding は `1 ≤ W ≤ C`（ADR 0067 決定 4 ③）。`W = 0` で sliding の WGSL を撃つと
- * `window - 1u` がアンダーフローし `col % 0u` が実装依存値になる。
- * MUST: `colCap` は live 列の**静的上限**以上（full は `P + Q ≤ C` の context 側検査から `C`・
- * sliding は `(W−1) + M`）。足りないと ① の書き `s[(z·rows_block + local_row)·col_cap + cl]` は
- * `cl ≥ col_cap` の列で、最後の行を除き**隣の行の S を沈黙で上書きする**（範囲外へ落ちて
- * 捨てられるのは末尾の行だけ）。②③ も同じ添字で隣の行を自分の列として誤読する。例外も NaN も
- * 出ないので、この門は MUST。
- * MUST: `rowOffset + rowsBlock ≤ M`（行ブロックが chunk からはみ出さない）。
+ * MUST: `kvRepeat ≥ 1` (WGSL u32 division by zero does not trap and returns an
+ * implementation-dependent value, so `r = 0` corrupts the kv plane with neither an exception nor
+ * NaN — the same shape as `assertKvRepeat` in attention.ts).
+ * MUST: sliding requires `1 ≤ W ≤ C` (ADR 0067 decision 4 ③). Dispatching sliding WGSL with
+ * `W = 0` underflows `window - 1u` and makes `col % 0u` an implementation-dependent value.
+ * MUST: `colCap` is at least **the static upper bound** of the live columns (`C` for full, from the
+ * context-side check `P + Q ≤ C`; `(W−1) + M` for sliding). If it is short, ①'s write
+ * `s[(z·rows_block + local_row)·col_cap + cl]` for columns with `cl ≥ col_cap` **silently overwrites
+ * the S of the next row** for every row except the last (only the last row falls out of range and
+ * is discarded). ②③ misread the next row as their own columns through the same index. There is
+ * neither an exception nor NaN, so this check is MUST.
+ * MUST: `rowOffset + rowsBlock ≤ M` (the row block does not run past the chunk).
  */
 const assertStateGeometry = (where: string, geometry: StateAttentionGeometry): void => {
   const { rowsBlock, rowOffset, chunkRows, depth, kvRepeat, window, capacity, colCap } = geometry;
@@ -1219,17 +1322,17 @@ const assertStateGeometry = (where: string, geometry: StateAttentionGeometry): v
       `${where}: col_cap ${colCap} が full の live 上限 ${capacity}（= C）に足りない`,
     );
   }
-  // MUST: 有限判定は **f32 として**行う（attention_qk params と同じ門 — f64 で有限な `1e39` は
-  // f32 語で `+Inf` になり、`0 * Inf = NaN` でスコアが黙って壊れる）。
+  // MUST: check finiteness **as f32** (the same check as the attention_qk params — `1e39`, finite in
+  // f64, becomes `+Inf` in an f32 word, and `0 * Inf = NaN` silently breaks the scores).
   if (!Number.isFinite(Math.fround(geometry.scale))) {
     throw new CodegenError(`${where}: scale は f32 として有限の数値（${geometry.scale}）`);
   }
 };
 
 /**
- * ①③ が共有する uniform（{@link STATE_PARAMS_STRUCT} の 10 語を
- * 16 バイト単位に切り上げて 48 バイト確保する — 16 バイト単位の確保はプロジェクトの
- * 慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
+ * Uniform shared by ①③ (the 10 words of {@link STATE_PARAMS_STRUCT} rounded up to 16-byte units,
+ * 48 bytes allocated — allocating in 16-byte units is a project convention (the fusion pass fixes
+ * the same form in ADR 0040), not a requirement of the spec).
  */
 export const stateAttentionParams = (
   geometry: StateAttentionGeometry,
@@ -1250,12 +1353,13 @@ export const stateAttentionParams = (
 };
 
 /**
- * ①ₜ の uniform（{@link STATE_QK_TILED_DIMS_EXTRA} と骨格の `{m, n, k}` を合わせた 10 語 —
- * 16 バイト単位に切り上げて 48 バイト確保する — 理由は {@link stateAttentionParams}）。
+ * Uniform of ①ₜ (10 words: {@link STATE_QK_TILED_DIMS_EXTRA} plus the skeleton's `{m, n, k}` —
+ * rounded up to 16-byte units, 48 bytes allocated — the reason is at {@link stateAttentionParams}).
  *
- * MUST: 幾何の値域門は ① と**同じ 1 本**（{@link assertStateGeometry}）。①ₜ は ① と同じ
- * 静的幾何から出るので、門を別に持つと片方だけ通る形ができる。
- * MUST: 並びは {@link STATE_QK_TILED_DIMS_EXTRA} と対（この 2 つが唯一の対）。
+ * MUST: the geometry range check is **the same single one** as ① ({@link assertStateGeometry}). ①ₜ
+ * comes from the same static geometry as ①, so a separate check would allow a shape that passes
+ * only one of them.
+ * MUST: the order pairs with {@link STATE_QK_TILED_DIMS_EXTRA} (these two are the only pair).
  */
 export const stateQkTiledParams = (geometry: StateAttentionGeometry): Uint32Array<ArrayBuffer> => {
   assertStateGeometry("attention_state_qk (tiled) params", geometry);
@@ -1274,12 +1378,13 @@ export const stateQkTiledParams = (geometry: StateAttentionGeometry): Uint32Arra
 };
 
 /**
- * ③ₜ の uniform（{@link STATE_PV_TILED_DIMS_EXTRA} と骨格の `{m, n, k}` を合わせた 8 語 =
- * 32 バイトちょうど — 16 バイト単位の確保の理由は {@link stateAttentionParams}）。
+ * Uniform of ③ₜ (8 words: {@link STATE_PV_TILED_DIMS_EXTRA} plus the skeleton's `{m, n, k}` =
+ * exactly 32 bytes — the reason for 16-byte units is at {@link stateAttentionParams}).
  *
- * MUST: 幾何の値域門は ③ と**同じ 1 本**（{@link assertStateGeometry}）。③ₜ は ③ と同じ
- * 静的幾何から出るので、門を別に持つと片方だけ通る形ができる。
- * MUST: 並びは {@link STATE_PV_TILED_DIMS_EXTRA} と対（この 2 つが唯一の対）。
+ * MUST: the geometry range check is **the same single one** as ③ ({@link assertStateGeometry}). ③ₜ
+ * comes from the same static geometry as ③, so a separate check would allow a shape that passes
+ * only one of them.
+ * MUST: the order pairs with {@link STATE_PV_TILED_DIMS_EXTRA} (these two are the only pair).
  */
 export const statePvTiledParams = (geometry: StateAttentionGeometry): Uint32Array<ArrayBuffer> => {
   assertStateGeometry("attention_state_pv (tiled) params", geometry);
@@ -1296,16 +1401,18 @@ export const statePvTiledParams = (geometry: StateAttentionGeometry): Uint32Arra
 };
 
 /**
- * ② の uniform（`{batch_heads, rows_block, row_offset, col_cap, window, neg_inf}` の 6 語 —
- * 16 バイト単位に切り上げて 32 バイト確保する — 理由は {@link stateAttentionParams}）。
+ * Uniform of ② (the 6 words `{batch_heads, rows_block, row_offset, col_cap, window, neg_inf}` —
+ * rounded up to 16-byte units, 32 bytes allocated — the reason is at {@link stateAttentionParams}).
  *
- * MUST: `B·H` と `rows_block` を**畳まずに**受ける（① ③ と同じ 2 軸）。畳んだ 1 語では
- * `z · rows_block + 局所行` へ戻せず、有効行の前詰めから S / stats の行を引けない。
- * MUST: `window` も値域門に通す（{@link stateSliding} が要求する「キー選択・WGSL 生成・
- * params 検査の 3 者を揃える」の ② 側）。② は `capacity` / `M` を受けないので上限式
- * `W−1 + M`（{@link assertStateGeometry}）そのものは書けないが、`M ≥ 1` から従う必要条件
- * `W ≤ col_cap` は書ける。これが破れると `live_columns` が `col_cap` を跨いで隣接行の S を
- * 自分の行の amax に混ぜる（例外も NaN も出ない沈黙誤値）。
+ * MUST: `B·H` and `rows_block` are taken **without folding them** (the same two axes as ① ③). A
+ * single folded word cannot be turned back into `z · rows_block + local row`, so the rows of S /
+ * stats could not be found from the front-packed valid rows.
+ * MUST: `window` also goes through the range check (②'s side of "key selection, WGSL generation and
+ * the params check all agree", which {@link stateSliding} requires). ② does not take `capacity` /
+ * `M`, so it cannot write the bound `W−1 + M` ({@link assertStateGeometry}) itself, but it can write
+ * the necessary condition `W ≤ col_cap` that follows from `M ≥ 1`. If that breaks, `live_columns`
+ * crosses `col_cap` and mixes the S of the adjacent row into this row's amax (a silent wrong value
+ * with neither an exception nor NaN).
  */
 export const stateStatsParams = (
   batchHeads: number,
@@ -1344,30 +1451,33 @@ export const stateStatsParams = (
 };
 
 /**
- * sliding スロットの resident 範囲の先頭（論理 col）。full は常に 0。
+ * Start of the resident range of a sliding slot (logical col). Always 0 for full.
  *
- * MUST: ホスト（dispatch 数の算出）と WGSL（{@link stateLiveWgsl}）で**同じ式**にする。
- * ずれると ① が書く範囲と ②③ が読む範囲が食い違い、読者側が広ければ残骸を食う。
+ * MUST: the host (dispatch count) and the WGSL ({@link stateLiveWgsl}) use **the same formula**. If
+ * they drift, the range ① writes and the range ②③ read disagree, and a wider reader side consumes
+ * leftovers.
  */
 export const stateColumnBase = (window: number, past: number): number =>
   stateSliding(window) ? past - Math.min(past, window - 1) : 0;
 
-/** live 列数 `n_live = (P − colBase) + Q`（S が実体化する列数 = ②③ の走査長）。 */
+/** Live column count `n_live = (P − colBase) + Q` (columns S materialises = the scan length of ②③). */
 export const stateLiveColumns = (window: number, past: number, query: number): number =>
   past - stateColumnBase(window, past) + query;
 
 /**
- * 行ブロック `[rowOffset, rowOffset + rowsBlock)` の**有効行数**（`row < Q` の局所行の本数）。
+ * **Valid row count** of row block `[rowOffset, rowOffset + rowsBlock)` (the number of local rows
+ * with `row < Q`).
  *
- * MUST: ①QK / ②stats の dispatch 数はこの 1 関数から出す（ADR 0066 決定 3 の仕事量合格条件 —
- * 物理 chunk 行数 `M` に比例させると、`Q = 1` の decode が `M` 倍の行を回す）。
- * MUST: WGSL 側（{@link stateEffectiveRowsWgsl}）と**同じ式**。ホストが幾何の純関数で、
- * カーネルはその写し。
+ * MUST: the dispatch counts of ①QK / ②stats come from this one function (the workload acceptance
+ * condition of ADR 0066 decision 3 — making them proportional to the physical chunk rows `M` would
+ * make decode with `Q = 1` run `M` times the rows).
+ * MUST: **the same formula** as the WGSL side ({@link stateEffectiveRowsWgsl}). The host is the pure
+ * function of the geometry, and the kernel is its mirror.
  */
 export const stateEffectiveRows = (rowsBlock: number, rowOffset: number, query: number): number =>
   Math.min(rowsBlock, Math.max(0, query - rowOffset));
 
-/** `queryLength` の値域門（搬送先は u32・`Q ≥ 1` は `GenerationContext` の契約と同じ）。 */
+/** Range check of `queryLength` (carried as u32; `Q ≥ 1` as in the `GenerationContext` contract). */
 const assertQueryLength = (where: string, query: number): void => {
   assertU32Params(where, { query });
   if (query < 1) {
@@ -1375,30 +1485,32 @@ const assertQueryLength = (where: string, query: number): void => {
   }
 };
 
-/** 論理長の値域門（搬送先は u32・`Q ≥ 1` は `GenerationContext` の契約と同じ）。 */
+/** Range check of the logical lengths (carried as u32; `Q ≥ 1` per the `GenerationContext` contract). */
 const assertLengths = (where: string, past: number, query: number): void => {
   assertU32Params(where, { past });
   assertQueryLength(where, query);
 };
 
 /**
- * dispatch 幾何（**論理長から算出する側** — ADR 0066 決定 3 / ADR 0067 決定 4）。
+ * Dispatch geometry (**the side computed from the logical lengths** — ADR 0066 decision 3 / ADR 0067
+ * decision 4).
  *
- * MUST: `capacity` / `colCap` を**持たない**。持てば「容量に比例した workgroup 数」を書ける
- * ようになり、131K 容量 × 短系列で 3 桁の無駄という ADR 0066 決定 3 の不合格形へ静かに戻る。
+ * MUST: it does **not hold** `capacity` / `colCap`. Holding them would make "a workgroup count
+ * proportional to the capacity" writable, silently going back to the form ADR 0066 decision 3
+ * rejects: three orders of magnitude of waste with a 131K capacity × a short sequence.
  */
 export type StateDispatchGeometry = {
-  /** `B·H`（z 軸 — 1 workgroup = 1 (b, h)）。 */
+  /** `B·H` (the z axis — 1 workgroup = 1 (b, h)). */
   readonly batchHeads: number;
   readonly rowsBlock: number;
-  /** chunk 内の先頭行（有効行数 `clamp(Q − rowOffset, 0, rowsBlock)` の算出に要る）。 */
+  /** First row in the chunk (needed for the valid row count `clamp(Q − rowOffset, 0, rowsBlock)`). */
   readonly rowOffset: number;
   readonly depth: number;
-  /** `W`（`0` = full — live 列数が `min(P, W−1) + Q` で頭打ちになる）。 */
+  /** `W` (`0` = full — the live column count is capped at `min(P, W−1) + Q`). */
   readonly window: number;
 };
 
-/** dispatch 幾何の値域門（3 軸とも正整数・`rowOffset` は 0 可）。 */
+/** Range check of the dispatch geometry (all three axes positive integers; `rowOffset` may be 0). */
 const assertDispatchGeometry = (where: string, geometry: StateDispatchGeometry): void => {
   const { batchHeads, rowsBlock, rowOffset, depth, window } = geometry;
   assertU32Params(where, {
@@ -1416,15 +1528,16 @@ const assertDispatchGeometry = (where: string, geometry: StateDispatchGeometry):
 };
 
 /**
- * ①QK の workgroup 数 `[live 列, 有効行, B·H]`。
+ * Workgroup count of ①QK `[live columns, valid rows, B·H]`.
  *
- * MUST: 列軸は **live 列数**（`colCap` でも `C` でもない）・行軸は**有効行数**
- * （`rowsBlock` でも `M` でもない）。この 2 軸が仕事量合格条件（∝ `Q × (有効 past + Q)`）の
- * 機構そのもので、容量を渡せないよう {@link StateDispatchGeometry} から容量を外してある。
- * MUST: 上限超過は fail loudly（タイル系 — 縮退させると S のタイルが欠落し、②③ が残骸を
- * 読んだまま例外なしに進む）。
- * NOTE: 有効行 0 のブロック（`rowOffset ≥ Q`）は行軸が 0 になり、呼び手は dispatch そのものを
- * 積まない（{@link stateEffectiveRows} の doc）。
+ * MUST: the column axis is **the live column count** (neither `colCap` nor `C`), and the row axis is
+ * **the valid row count** (neither `rowsBlock` nor `M`). These two axes are the mechanism of the
+ * workload acceptance condition (∝ `Q × (valid past + Q)`), and the capacity is left out of
+ * {@link StateDispatchGeometry} so that it cannot be passed.
+ * MUST: exceeding the limit fails loudly (tiled — clamping would drop tiles of S, and ②③ would read
+ * leftovers and carry on without an exception).
+ * NOTE: a block with 0 valid rows (`rowOffset ≥ Q`) gets a row axis of 0, and the caller records no
+ * dispatch at all (the doc of {@link stateEffectiveRows}).
  */
 export const stateQkWorkgroups = (
   geometry: StateDispatchGeometry,
@@ -1445,11 +1558,13 @@ export const stateQkWorkgroups = (
 };
 
 /**
- * ①' の workgroup 数 `[⌈live / TILE_X⌉, 有効行, B·H]`（行軸は **1 行 = 1 workgroup**）。
+ * Workgroup count of ①' `[⌈live / TILE_X⌉, valid rows, B·H]` (the row axis is **1 row = 1
+ * workgroup**).
  *
- * ① と同じく列軸は **live 列数**・行軸は**有効行数**（`colCap` / `rowsBlock` にすると仕事量
- * 合格条件を落とし、pad 行の S を書いてしまう）。上限超過は fail loudly も ① と同じ。
- * 変わるのは行のタイル幅だけで、D 方向は workgroup 内のレーンに畳まれるので dispatch に出ない。
+ * As in ①, the column axis is **the live column count** and the row axis **the valid row count**
+ * (`colCap` / `rowsBlock` would fail the workload acceptance condition and write the S of pad rows).
+ * Exceeding the limit fails loudly, also as in ①. Only the row tile width changes; the D direction
+ * is folded into the lanes inside the workgroup, so it does not show in the dispatch.
  */
 export const stateQkParallelWorkgroups = (
   geometry: StateDispatchGeometry,
@@ -1470,16 +1585,19 @@ export const stateQkParallelWorkgroups = (
 };
 
 /**
- * ①ₜ の workgroup 数 `[⌈live / tileN⌉, ⌈有効行 / tileM⌉, B·H]`（1 workgroup = 1 出力タイル）。
+ * Workgroup count of ①ₜ `[⌈live / tileN⌉, ⌈valid rows / tileM⌉, B·H]` (1 workgroup = 1 output
+ * tile).
  *
- * MUST: タイル辺は**幾何から導く**（gemm 骨格の MUST と同文 — 定数で持ち回ると幾何と食い違い
- * うる値が 2 つになり、`ceil(dim / 定数)` が実タイル辺での本数を下回った瞬間に**タイルが欠落
- * して沈黙誤値**になる）。幾何を解決するのはキー・生成・ここの 3 者で、全部 `chunkRows` 1 値の
- * 純関数（{@link gemmGeometryForRows}）を通る。
- * MUST: ① と同じく列軸は **live 列数**・行軸は**有効行数**（`colCap` / `rowsBlock` にすると
- * 仕事量合格条件〈ADR 0066 決定 3〉を落とし、pad 行の S を書いてしまう）。
- * MUST: 上限超過は fail loudly（タイル系 — 縮退させると S のタイルが欠落し、②③ が残骸を
- * 読んだまま例外なしに進む）。
+ * MUST: the tile edges are **derived from the geometry** (the same wording as the gemm skeleton's
+ * MUST — carrying a constant around makes two values that can disagree with the geometry, and the
+ * moment `ceil(dim / constant)` falls below the count for the real tile edge, **tiles are dropped, a
+ * silent wrong value**). The key, generation and this function resolve the geometry, all three
+ * through the pure function of the single value `chunkRows` ({@link gemmGeometryForRows}).
+ * MUST: as in ①, the column axis is **the live column count** and the row axis **the valid row
+ * count** (`colCap` / `rowsBlock` would fail the workload acceptance condition (ADR 0066 decision 3)
+ * and write the S of pad rows).
+ * MUST: exceeding the limit fails loudly (tiled — clamping would drop tiles of S, and ②③ would read
+ * leftovers and carry on without an exception).
  */
 export const stateQkTiledWorkgroups = (
   geometry: StateDispatchGeometry,
@@ -1502,10 +1620,12 @@ export const stateQkTiledWorkgroups = (
 };
 
 /**
- * ② の workgroup 数 `[B·H × 有効行, 1, 1]`（行方向 grid-stride なので上限超過は**縮退**）。
+ * Workgroup count of ② `[B·H × valid rows, 1, 1]` (grid-stride over rows, so exceeding the limit is
+ * **clamped**).
  *
- * 覆うのは有効行だけ（pad 行の統計は誰も読まない）。live の走査は行ループの内側なので、
- * 総反復回数は `B·H × 有効行 × live` = 仕事量合格条件どおり `Q × (有効 past + Q)` に比例する。
+ * It covers valid rows only (no one reads the statistics of pad rows). The live scan is inside the
+ * row loop, so the total iteration count is `B·H × valid rows × live`, proportional to
+ * `Q × (valid past + Q)` as the workload acceptance condition requires.
  */
 export const stateStatsWorkgroups = (
   geometry: StateDispatchGeometry,
@@ -1520,13 +1640,13 @@ export const stateStatsWorkgroups = (
 };
 
 /**
- * ③PV の workgroup 数 `[D, 行, B·H]`。
+ * Workgroup count of ③PV `[D, rows, B·H]`.
  *
- * MUST: 行軸は **`rows_block` 全て**（① ② と違って有効行で切らない — pad 行も書くのが
- * full-write 不変条件）。仕事量が Q に比例するのはカーネル側で、pad 行の invocation は
- * live を 1 列も回さず `0.0` を 1 語書いて返る。
- * MUST: 上限超過は fail loudly（タイル系 — 縮退させると O の一部が未書き込みのまま残り、
- * full-write 不変条件が黙って崩れる）。
+ * MUST: the row axis is **all of `rows_block`** (unlike ① ②, not cut at the valid rows — writing pad
+ * rows too is the full-write invariant). Keeping the work proportional to Q happens in the kernel:
+ * a pad-row invocation runs no live column, writes one word of `0.0` and returns.
+ * MUST: exceeding the limit fails loudly (tiled — clamping would leave part of O unwritten and
+ * silently break the full-write invariant).
  */
 export const statePvWorkgroups = (
   geometry: StateDispatchGeometry,
@@ -1542,9 +1662,10 @@ export const statePvWorkgroups = (
 };
 
 /**
- * ③' の workgroup 数 `[D / TILE_X, rows_block, B·H]`（行軸は **1 行 = 1 workgroup**）。
+ * Workgroup count of ③' `[D / TILE_X, rows_block, B·H]` (the row axis is **1 row = 1 workgroup**).
  *
- * ③ と同じく行軸は `rows_block` 全て（pad 行も full-write）・上限超過は fail loudly。
+ * As in ③, the row axis is all of `rows_block` (pad rows are full-write too), and exceeding the
+ * limit fails loudly.
  */
 export const statePvParallelWorkgroups = (
   geometry: StateDispatchGeometry,
@@ -1560,18 +1681,21 @@ export const statePvParallelWorkgroups = (
 };
 
 /**
- * ③ₜ の workgroup 数 `[⌈D / tileN⌉, ⌈rows_block / tileM⌉, B·H]`（1 workgroup = 1 出力タイル）。
+ * Workgroup count of ③ₜ `[⌈D / tileN⌉, ⌈rows_block / tileM⌉, B·H]` (1 workgroup = 1 output tile).
  *
- * MUST: タイル辺は**幾何から導く**（①ₜ の {@link stateQkTiledWorkgroups} と同文 — 定数で
- * 持ち回ると幾何と食い違いうる値が 2 つになり、`ceil(dim / 定数)` が実タイル辺での本数を
- * 下回った瞬間に**タイルが欠落して沈黙誤値**になる）。幾何を解決するのはキー・生成・ここの
- * 3 者で、全部 `chunkRows` 1 値の純関数（{@link gemmGeometryForRows}）を通る。
- * MUST: 行軸は **`rows_block` 全て**（① 系と違って有効行で切らない — pad 行も書くのが ③ の
- * full-write 不変条件）。仕事量が Q に比例するのはカーネル側で、有効行を 1 行も含まない
- * 行タイルは K ループを 1 周も回さずに `0.0` を書いて終わる。
- * MUST: 論理長を受け取らない（③ / ③' と同じく出力側の形だけで決まる）。
- * MUST: 上限超過は fail loudly（タイル系 — 縮退させると O の一部が未書き込みのまま残り、
- * full-write 不変条件が黙って崩れる）。
+ * MUST: the tile edges are **derived from the geometry** (the same wording as ①ₜ's
+ * {@link stateQkTiledWorkgroups} — carrying a constant around makes two values that can disagree
+ * with the geometry, and the moment `ceil(dim / constant)` falls below the count for the real tile
+ * edge, **tiles are dropped, a silent wrong value**). The key, generation and this function resolve
+ * the geometry, all three through the pure function of the single value `chunkRows`
+ * ({@link gemmGeometryForRows}).
+ * MUST: the row axis is **all of `rows_block`** (unlike the ① family, not cut at the valid rows —
+ * writing pad rows too is ③'s full-write invariant). Keeping the work proportional to Q happens in
+ * the kernel: a row tile with no valid row runs the K loop zero times and ends by writing `0.0`.
+ * MUST: it does not take the logical lengths (like ③ / ③', it is decided by the output shape
+ * alone).
+ * MUST: exceeding the limit fails loudly (tiled — clamping would leave part of O unwritten and
+ * silently break the full-write invariant).
  */
 export const statePvTiledWorkgroups = (
   geometry: StateDispatchGeometry,
@@ -1588,29 +1712,35 @@ export const statePvTiledWorkgroups = (
   ];
 };
 
-// ---- readonly 変種（past だけを読む — ADR 0096 決定 1 / 段 2 の drafter） -----------------
+// ---- readonly variants (read past only — ADR 0096 decision 1 / the stage 2 drafter) ----------
 //
-// drafter（MTP head）は自前の K/V を持たず、貸し手 context の**スロットだけ**を読む。query は
-// 論理位置 `P`（未 commit の frontier token）に居る 1 行で、読むのは過去の列 `[column_base, P)`
-// だけ — 自分の列は貸し手の ring に無い（ADR 0096 追記〈段 3〉: drafter の入力は frontier `b@P`・
-// hidden `h@(P−1)`・RoPE 位置 `P`）。今 step の ins は無い（append も無い）。
-// 3 段（①' ② ③'）の骨格・縮約順・数値契約は states 形と同一で、変わるのは
-// **live 範囲の式と述語、ins 分岐と束縛が無いこと**だけ。
+// The drafter (MTP head) has no K/V of its own and reads **only the slots** of the lending context.
+// The query is one row at logical position `P` (the uncommitted frontier token), and it reads only
+// the past columns `[column_base, P)` — its own column is not in the lender's ring (the ADR 0096
+// addendum on stage 3: the drafter's inputs are frontier `b@P`, hidden `h@(P−1)` and RoPE position
+// `P`). There is no ins for this step (and no append).
+// The skeleton, reduction order and numeric contract of the three steps (①' ② ③') are the same as
+// the states form; what changes is **the live-range formula and the predicate, and the absence of
+// the ins branch and binding** only.
 //
-// MUST: 物理行の写像は {@link stateSlotRowWgsl}（読み書き同式）を共有する。貸し手の append と
-// 別式にすると ring が一周した後の全読みが黙って別の行を指す。
-// MUST: 述語は `col < P`（棄却行 = 論理長より先に書かれた行を**読まない** — ADR 0066 追記
-// 2026-09-08 の余裕は「棄却行が live 窓の外に落ちる」ことしか保証せず、`col ≤ P` にすると
-// 位置 P の未確定行を過去として食う）。
+// MUST: the physical-row mapping shares {@link stateSlotRowWgsl} (the same formula for reads and
+// writes). A formula different from the lender's append silently points every read at another row
+// once the ring has wrapped.
+// MUST: the predicate is `col < P` (rejected rows = rows written ahead of the logical length are
+// **not read** — the slack of the ADR 0066 addendum of 2026-09-08 only guarantees that "rejected
+// rows fall outside the live window"; with `col ≤ P` the unconfirmed row at position P would be
+// consumed as past).
 
 /**
- * readonly の live 範囲（`column_base = P − min(P, W)` / `live = min(P, W)`・full は `0` / `P`）。
+ * The readonly live range (`column_base = P − min(P, W)` / `live = min(P, W)`; `0` / `P` for full).
  *
- * states 形（{@link stateLiveWgsl}）との違いは「+Q が無い」「窓が W−1 でなく W」の 2 点 —
- * 位置 P の query が読むのは過去だけ（自分の列は ring に無い）なので、live 範囲は `[P−W, P)` の
- * W 列ちょうどになる（states 形は自分の Q 列を窓に含めるぶん過去側が W−1）。最古列が `P−W` で
- * あることは deferred の門 `queryLength ≤ slidingSlack` の根拠でもある（ADR 0096 追記〈段 3〉）。
- * `query` 引数は署名を states 形と揃えるためだけに受ける（読まない）。
+ * It differs from the states form ({@link stateLiveWgsl}) in two points, "no +Q" and "the window is
+ * W, not W−1" — the query at position P reads only the past (its own column is not in the ring), so
+ * the live range is exactly the W columns `[P−W, P)` (the states form includes its own Q columns in
+ * the window, so its past side is W−1). That the oldest column is `P−W` is also the basis of the
+ * deferred limit `queryLength ≤ slidingSlack` (the ADR 0096 addendum on stage 3).
+ * The `query` parameter is taken only to keep the signature the same as the states form (it is not
+ * read).
  */
 const stateReadonlyLiveWgsl = (sliding: boolean, uniform = STATE_UNIFORM): string =>
   `fn column_base(past: u32) -> u32 {
@@ -1622,32 +1752,34 @@ fn live_columns(past: u32, query: u32) -> u32 {
 }`;
 
 /**
- * readonly の述語（`col < P` AND sliding `(P−1−col) < W`）。
+ * The readonly predicate (`col < P` AND, with sliding, `(P−1−col) < W`).
  *
- * MUST: 引き算は `past − 1u − col` の側で、`col < past` が真のときだけ評価される（WGSL の `&&`
- * は短絡 — `past ≥ 1` かつ `col ≤ past − 1` なので巻き戻らない）。live 範囲の列は構成上すべて
- * 述語内だが、① と同じ「述語外は −inf を書く」構造を保つために残す（境界の式が 1 箇所にある）。
+ * MUST: the subtraction is on the `past − 1u − col` side and is evaluated only when `col < past` is
+ * true (WGSL's `&&` short-circuits — `past ≥ 1` and `col ≤ past − 1`, so it does not wrap around).
+ * By construction every column in the live range is inside the predicate, but the predicate stays
+ * to keep the same "write −inf outside the predicate" structure as ① (the boundary formula lives in
+ * one place).
  */
 const stateReadonlyWindowFn = (sliding: boolean, uniform = STATE_UNIFORM): string =>
   `fn in_window(col: u32, past: u32) -> bool {
   return col < past${sliding ? ` && (past - 1u - col) < ${uniform}.window` : ""};
 }`;
 
-/** ①' readonly のキー（`:par:ro` — 束縛が 1 本少ないので ①' とは別キー MUST）。 */
+/** Key of ①' readonly (`:par:ro` — it has one binding fewer, so a key separate from ①' is MUST). */
 export const stateQkParallelReadonlyKey = (sliding: boolean, gqa: boolean): string =>
   `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_QK_D_LANES}:par:ro${stateVariantKeyPart(
     sliding,
     gqa,
   )}`;
 
-/** ② readonly のキー（live の式が違うので ② とは別キー MUST）。 */
+/** Key of ② readonly (the live formula differs, so a key separate from ② is MUST). */
 export const stateStatsReadonlyKey = (sliding: boolean): string =>
   `attention_state_stats:v2:f32:wg${STATE_STATS_WORKGROUP_SIZE}:ro${stateVariantKeyPart(
     sliding,
     false,
   )}`;
 
-/** ③' readonly のキー（`:par:ro`）。 */
+/** Key of ③' readonly (`:par:ro`). */
 export const statePvParallelReadonlyKey = (sliding: boolean, gqa: boolean): string =>
   `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par:ro${stateVariantKeyPart(
     sliding,
@@ -1655,20 +1787,22 @@ export const statePvParallelReadonlyKey = (sliding: boolean, gqa: boolean): stri
   )}`;
 
 /**
- * ①' readonly。束縛（**ins が無いので 1 本詰まる** — ①' と同じ番号にしない）:
+ * ①' readonly. Bindings (**there is no ins, so they shift up by one** — not the same numbers as
+ * ①'):
  *
- * | binding | 資源                          |
- * | ------- | ----------------------------- |
- * | 0       | `Params`（uniform）           |
- * | 1       | `q` `[B,H,M,D]`（M = 1）       |
- * | 2       | `slot_k` `[B,Hkv,C,D]`        |
- * | 3       | `s` `[B·H, rows_block, colCap]`（書き） |
- * | 4       | `Lengths`（uniform — `past` だけを読む・`query` は 1） |
+ * | binding | Resource                                                 |
+ * | ------- | -------------------------------------------------------- |
+ * | 0       | `Params` (uniform)                                       |
+ * | 1       | `q` `[B,H,M,D]` (M = 1)                                  |
+ * | 2       | `slot_k` `[B,Hkv,C,D]`                                   |
+ * | 3       | `s` `[B·H, rows_block, colCap]` (write)                  |
+ * | 4       | `Lengths` (uniform — reads only `past`; `query` is 1)    |
  *
- * 縮約は ①' と同じ D 方向の固定順の木（{@link stateScoreFn} の部分和を同じ 1 箇所から出す）。
+ * The reduction is the same fixed-order tree over D as ①' (the partial sums of
+ * {@link stateScoreFn} come from the same single place).
  */
 export const stateQkParallelReadonlyWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_qk (states 形の S 実体化, f32, D 並列縮約, readonly = past のみ${
+  `// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction, readonly = past only${
     sliding ? ", sliding window" : ""
   }${gqa ? ", GQA" : ""})
 ${STATE_PARAMS_STRUCT}
@@ -1709,8 +1843,8 @@ fn main(
   let row = params.row_offset + local_row;
   let q_base = (z * params.chunk_rows + row) * params.depth;
   let kv_plane = ${kvPlaneWgsl(gqa)};
-  // 読むのはスロット（past）だけ。端数タイル（cl ≥ live）は内積を回さず **return もしない**
-  // （下の barrier は一様制御流の中だけ）
+  // Only the slot (past) is read. The edge tile (cl ≥ live) does not run the dot product and **does
+  // not return either** (the barrier below sits only inside uniform control flow)
   let inside = cl < live && in_window(col, past);
   var acc = 0.0;
   if (inside) {
@@ -1718,7 +1852,7 @@ fn main(
   }
   scratch[lane * ${STATE_ATTENTION_TILE_X}u + lid.x] = acc;
   workgroupBarrier();
-  // 固定順の木縮約（stride 8 → 4 → 2 → 1）— 決定性の根拠
+  // Fixed-order tree reduction (stride 8 → 4 → 2 → 1) — the basis of determinism
   var stride = ${STATE_QK_D_LANES / 2}u;
   while (stride > 0u) {
     if (lane < stride) {
@@ -1728,7 +1862,8 @@ fn main(
     workgroupBarrier();
     stride = stride / 2u;
   }
-  // 述語外は -inf。live 範囲は**述語外でも必ず書く**（書かないと ② が前回の残骸を食う）
+  // -inf outside the predicate. The live range is **always written, even outside the predicate**
+  // (otherwise ② consumes the previous leftovers)
   if (lane == 0u && cl < live) {
     var value = bitcast<f32>(params.neg_inf);
     if (inside) {
@@ -1740,7 +1875,8 @@ fn main(
 `;
 
 /**
- * ② readonly。② と同じ骨格・束縛・params で、live の式だけ readonly（{@link stateReadonlyLiveWgsl}）。
+ * ② readonly. The same skeleton, bindings and params as ②; only the live formula is the readonly one
+ * ({@link stateReadonlyLiveWgsl}).
  */
 export const stateStatsReadonlyWgsl = (sliding: boolean): string =>
   stateStatsBodyWgsl(sliding, {
@@ -1748,30 +1884,32 @@ export const stateStatsReadonlyWgsl = (sliding: boolean): string =>
     live: stateReadonlyLiveWgsl(sliding),
     rowsNote: "",
     amaxBarrierNote: "",
-    sumNote: `    // ② Σ exp(S - amax)。**空行（amax == -inf・P = 0 の列 0 本を含む）は 1 度も回さない**
+    sumNote: `    // ② Σ exp(S - amax). **An empty row (amax == -inf, including P = 0 with 0 columns)
+    // never runs it**
 `,
     emptyStatsNote: "",
     tailBarrierNote: "",
   });
 
 /**
- * ③' readonly。束縛（**ins が無いので 1 本詰まる**）:
+ * ③' readonly. Bindings (**there is no ins, so they shift up by one**):
  *
- * | binding | 資源                          |
- * | ------- | ----------------------------- |
- * | 0       | `Params`（uniform — ① と同一 struct）|
- * | 1       | `s`（読み）                   |
- * | 2       | `stats`（読み）               |
- * | 3       | `slot_v` `[B,Hkv,C,D]`        |
- * | 4       | `out` `[B,H,M,D]`（書き）      |
- * | 5       | `Lengths`（uniform）          |
+ * | binding | Resource                                   |
+ * | ------- | ------------------------------------------ |
+ * | 0       | `Params` (uniform — the same struct as ①)  |
+ * | 1       | `s` (read)                                 |
+ * | 2       | `stats` (read)                             |
+ * | 3       | `slot_v` `[B,Hkv,C,D]`                     |
+ * | 4       | `out` `[B,H,M,D]` (write)                  |
+ * | 5       | `Lengths` (uniform)                        |
  *
- * 縮約は ③' と同じ KV 方向の固定順の木。pad 行（`row ≥ Q`）は厳密 0（③ と同じ契約）。
- * pad 行の 0 書きも ③' と同じく lane 0 だけ — KV_LANES 本が同じ `out[at]` を指すので、
- * 同値でも同期なしの同一要素書き込みは WGSL のデータ競合になる。
+ * The reduction is the same fixed-order tree over KV as ③'. Pad rows (`row ≥ Q`) are exactly 0 (the
+ * same contract as ③). As in ③', only lane 0 writes the zeros of pad rows — KV_LANES lanes point at
+ * the same `out[at]`, and unsynchronised writes to the same element are a WGSL data race even with
+ * equal values.
  */
 export const statePvParallelReadonlyWgsl = (sliding: boolean, gqa: boolean): string =>
-  `// karume attention_state_pv (states 形の O = P @ V, f32, KV 並列縮約, readonly = past のみ${
+  `// karume attention_state_pv (states-form O = P @ V, f32, KV-parallel reduction, readonly = past only${
     sliding ? ", sliding window" : ""
   }${gqa ? ", GQA" : ""})
 ${STATE_PARAMS_STRUCT}
@@ -1816,7 +1954,7 @@ fn main(
   let s_base = s_row * params.col_cap;
   let amax = stats[s_row * ${STATE_STATS_STRIDE}u];
   let inv = stats[s_row * ${STATE_STATS_STRIDE}u + 1u];
-  // レーンごとの部分和（col 昇順・stride KV_LANES）。読むのはスロット（past）だけ
+  // Per-lane partial sum (ascending col, stride KV_LANES). Only the slot (past) is read
   var acc = 0.0;
   if (in_depth) {
     for (var cl = lane; cl < live; cl = cl + ${STATE_PV_KV_LANES}u) {
@@ -1842,19 +1980,23 @@ fn main(
 }
 `;
 
-/** readonly の resident 範囲の先頭（論理 col）— WGSL {@link stateReadonlyLiveWgsl} と同じ式 MUST。 */
+/**
+ * Start of the readonly resident range (logical col) — the same formula as the WGSL
+ * {@link stateReadonlyLiveWgsl}, MUST.
+ */
 export const stateColumnBaseReadonly = (window: number, past: number): number =>
   stateSliding(window) ? past - Math.min(past, window) : 0;
 
-/** readonly の live 列数 `min(P, W)`（full は `P`）— WGSL と同じ式 MUST。 */
+/** Readonly live column count `min(P, W)` (`P` for full) — the same formula as the WGSL, MUST. */
 const stateLiveColumnsReadonly = (window: number, past: number): number =>
   stateSliding(window) ? Math.min(past, window) : past;
 
 /**
- * ①' readonly の workgroup 数 `[⌈live / TILE_X⌉, 有効行, B·H]`。
+ * Workgroup count of ①' readonly `[⌈live / TILE_X⌉, valid rows, B·H]`.
  *
- * `query` は 1 固定（借り手 context の契約）なので引数に取らない。`P = 0` は live 0 → 列軸 0 で
- * dispatch が空になり、S は 1 語も書かれない（② が live 0 で空行 → ③' が厳密 0 を書く）。
+ * `query` is fixed at 1 (the borrowing context's contract), so it is not a parameter. `P = 0` gives
+ * live 0 → a column axis of 0, the dispatch is empty and not a single word of S is written (② sees
+ * an empty row with live 0 → ③' writes an exact 0).
  */
 export const stateQkParallelReadonlyWorkgroups = (
   geometry: StateDispatchGeometry,
@@ -1873,7 +2015,7 @@ export const stateQkParallelReadonlyWorkgroups = (
   ];
 };
 
-/** ② readonly の workgroup 数 `[B·H × 有効行, 1, 1]`（`query` は 1 固定）。 */
+/** Workgroup count of ② readonly `[B·H × valid rows, 1, 1]` (`query` is fixed at 1). */
 export const stateStatsReadonlyWorkgroups = (
   geometry: StateDispatchGeometry,
   limit: number,
@@ -1884,7 +2026,7 @@ export const stateStatsReadonlyWorkgroups = (
   return [gridStrideWorkgroups(geometry.batchHeads * rows, 1, limit), 1, 1];
 };
 
-/** ③' readonly の workgroup 数（③' と同じ — 行軸は `rows_block` 全て・論理長を受けない）。 */
+/** Workgroup count of ③' readonly (as ③' — the row axis is all of `rows_block`; no logical lengths). */
 export const statePvParallelReadonlyWorkgroups = (
   geometry: StateDispatchGeometry,
   limit: number,

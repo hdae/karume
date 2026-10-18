@@ -1,43 +1,52 @@
 /**
- * NCHW の最終 2 空間軸を双線形補間で任意長へ resample する f32 固定カーネル
- * （`align_corners = True` 専業 — op `upsample_bilinear2d`）。
+ * A fixed f32 kernel that resamples the last two spatial axes of NCHW to any length by bilinear
+ * interpolation (`align_corners = True` only — op `upsample_bilinear2d`).
  *
- * 1 invocation = **出力 1 要素**で、入力の 4 近傍を読んで重み付き和を書く（出力駆動）。
- * 出力の全要素はちょうど 1 回書かれる（full-write 不変条件 — ADR 0014）。拡大・縮小の
- * どちらも同じ式で、倍率は非整数でよい（重みは出力位置ごとに違う）。
+ * One invocation = **one output element**, which reads the input's four neighbours and writes
+ * their weighted sum (output-driven). Every output element is written exactly once (the full-write
+ * invariant — ADR 0014). Upscaling and downscaling use the same formula, and the ratio may be
+ * non-integer (the weights differ per output position).
  *
- * 数値は torch の `aten/src/ATen/native/UpSample.h` に合わせる:
+ * The numerics follow torch's `aten/src/ATen/native/UpSample.h`:
  *
- * - scale = `(in − 1) / (out − 1)`、**出力長 1 の軸は 0**（`area_pixel_compute_scale`）
- * - 源座標 = `scale · 出力添字`（`align_corners` 側は 0.5 のずらしを持たない）
- * - `index0 = min(trunc(源座標), in − 1)` / `index1 = index0 + (index0 < in − 1 ? 1 : 0)` /
- *   `λ1 = 源座標 − index0` / `λ0 = 1 − λ1`（`compute_source_index_and_lambda` と
- *   `guard_index_and_lambda`）
- * - 式木は **H が外・W が内**の入れ子 `λy0·(λx0·v00 + λx1·v01) + λy1·(λx0·v10 + λx1·v11)`
- *   （CUDA `UpSampleBilinear2d.cu` と同形）
+ * - scale = `(in − 1) / (out − 1)`, **0 for an axis of output length 1**
+ *   (`area_pixel_compute_scale`)
+ * - source coordinate = `scale · output index` (the `align_corners` side has no 0.5 shift)
+ * - `index0 = min(trunc(source coordinate), in − 1)` /
+ *   `index1 = index0 + (index0 < in − 1 ? 1 : 0)` / `λ1 = source coordinate − index0` /
+ *   `λ0 = 1 − λ1` (`compute_source_index_and_lambda` and `guard_index_and_lambda`)
+ * - the expression tree nests **H outside, W inside**:
+ *   `λy0·(λx0·v00 + λx1·v01) + λy1·(λx0·v10 + λx1·v11)` (the same form as CUDA's
+ *   `UpSampleBilinear2d.cu`)
  *
- * MUST: index0 の上限 `in − 1` を**整数の min** で掛ける。1 軸が大きいと scale と源座標の
- * f32 丸めで末尾の源座標が `in` に届き（in = 8650802・out = 34 / in = 16777220・out = 2 で実例）、
- * 上限が無いと平面の端点が隣の平面の先頭を読む（例外の出ない誤値）。1 軸がおよそ 2^23 を超える
- * 形でだけ発動する。
- * MUST: 末尾タップの特例（`index1 = index0`）を**整数比較**で書く。f32 の `min` / `max` に
- * 寄せると NaN を飲む実測（ADR 0020 の根治対象と同型）を再演する。
- * MUST: scale は**ホストで割ってから params で運ぶ**。WGSL の f32 除算は 2.5 ULP まで許され
- * （加減乗は正しく丸められる）ので、シェーダ内で割ると同じ形の出力が**バックエンドごとに
- * 変わる**。ホストで割れば `Math.fround` の 1 回の丸めに固定され、torch の
- * `float(in−1)/float(out−1)` と同じ値になる。
- * NOTE: ホスト側で割っても「出力の端が入力の端と厳密一致」は一般には成り立たない。
- * `fl(scale · (out−1))` が `in−1` を下回る形が実在する（実測: in=2 → out=42 の末尾は
- * 0.9999999403953552）。これは実装の欠陥ではなく **torch 自身が同じ値を出す**
- * （`area_pixel_compute_scale` を float で評価して `scale · dst_index` を float で掛ける）—
- * 上の「数値は torch に合わせる」契約に忠実な結果で、端点をクランプして厳密化すると
- * 逆に torch とビットが割れる（ADR 0058）。厳密一致するのは `(in−1)/(out−1)` が f32 で
- * 往復する形（2 冪系など）に限られ、配布モデルの実形状 47 サイトは全てその側にある。
- * MUST: 源座標は非負なので `u32(...)` の切り捨てが floor と一致する — `align_corners = False`
- * の座標式（`scale·(i+0.5) − 0.5`）は負値を取りうるのでこの前提が崩れる。**契約に欄が無い**
- * のはそのためで、受理を広げるならこの切り捨てから設計し直すこと。
- * MUST: grid-stride を使う。実モデルの出力は `[1,192,2048,2048]` 級 = 8.05 億要素で、必要な
- * workgroup 数（256 スレッドで 3,145,728）が 1 次元 dispatch 上限（既定 65535）の約 48 倍になる。
+ * MUST: the upper bound `in − 1` of index0 is applied with **an integer min**. On a large axis the
+ * f32 rounding of scale and of the source coordinate lets the last source coordinate reach `in`
+ * (real examples: in = 8650802, out = 34 / in = 16777220, out = 2), and without the bound the end
+ * point of a plane reads the start of the next plane (a wrong value without an exception). It
+ * triggers only on shapes with an axis above roughly 2^23.
+ * MUST: the special case of the last tap (`index1 = index0`) is written as **an integer
+ * comparison**. Routing it through f32 `min` / `max` would replay the measured NaN swallowing (the
+ * same kind as what ADR 0020 fixed at the root).
+ * MUST: scale is **divided on the host and carried in params**. WGSL's f32 division is allowed up
+ * to 2.5 ULP (addition, subtraction and multiplication are correctly rounded), so dividing in the
+ * shader makes the output of the same shape **vary per backend**. Dividing on the host pins it to
+ * one `Math.fround` rounding, the same value as torch's `float(in−1)/float(out−1)`.
+ * NOTE: even with the division on the host, "the output's edges match the input's edges exactly"
+ * does not hold in general. Shapes really exist where `fl(scale · (out−1))` falls below `in−1`
+ * (measured: the last element for in=2 → out=42 is 0.9999999403953552). This is not a defect of
+ * the implementation — **torch itself produces the same value** (it evaluates
+ * `area_pixel_compute_scale` in float and multiplies `scale · dst_index` in float) — a result
+ * faithful to the contract "the numerics follow torch" above; clamping the end points to make them
+ * exact would instead split the bits from torch (ADR 0058). An exact match is limited to shapes
+ * where `(in−1)/(out−1)` round-trips through f32 (powers of two and the like), and the 47
+ * real-shape sites of the distributed models are all on that side.
+ * MUST: the source coordinate is non-negative, so truncation by `u32(...)` equals floor — the
+ * coordinate formula of `align_corners = False` (`scale·(i+0.5) − 0.5`) can go negative and breaks
+ * this premise. That is why **the contract has no field** for it; widening the accepted set means
+ * redesigning from this truncation.
+ * MUST: use grid-stride. A real model's output is on the order of `[1,192,2048,2048]` = 805
+ * million elements, and the workgroups needed (3,145,728 at 256 threads) are about 48 times the
+ * one-dimensional dispatch limit (default 65535).
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -45,7 +54,7 @@ import { assertU32Params } from "../codegen/params.ts";
 
 export const UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE = 256;
 
-/** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
+/** MUST: bump the key when the WGSL changes (the pipeline cache does not look at the source). */
 export const UPSAMPLE_BILINEAR2D_KEY = `upsample_bilinear2d:v2:nchw:f32:align_corners:wg${UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE}`;
 
 export const UPSAMPLE_BILINEAR2D_WGSL: string = `// karume upsample_bilinear2d (NCHW bilinear, align_corners=true, f32, full-write)
@@ -55,7 +64,7 @@ struct Params {
   in_w: u32,
   out_h: u32,
   out_w: u32,
-  // ホストが f32 で割った (in - 1) / (out - 1)（出力長 1 の軸は 0）
+  // (in - 1) / (out - 1) divided by the host in f32 (0 for an axis of output length 1)
   scale_h: f32,
   scale_w: f32,
   reserved: u32,
@@ -74,7 +83,8 @@ fn main(
   let in_hw = params.in_h * params.in_w;
   var i = gid.x;
   while (i < params.n) {
-    // N と C は補間に関与しないので 1 本の平面添字へ畳む（rank を params に載せない）。
+    // N and C take no part in the interpolation, so they fold into one plane index (rank is not
+    // carried in params).
     let ox = i % params.out_w;
     let oy = (i / params.out_w) % params.out_h;
     let plane = i / out_hw;
@@ -107,26 +117,30 @@ fn main(
 `;
 
 /**
- * torch の `area_pixel_compute_scale`（`align_corners` 側）。**出力長 1 の軸は 0**
- * （そこで `(in−1)/(out−1)` を書くとゼロ除算になり、torch も同じ特例を持つ）。
+ * torch's `area_pixel_compute_scale` (the `align_corners` side). **0 for an axis of output length
+ * 1** (writing `(in−1)/(out−1)` there divides by zero, and torch has the same special case).
  *
- * `Math.fround` は f64 除算を f32 へ丸めるが、被除数・除数がともに小さな整数なので
- * 二重丸めは起こらない（除数が 2 冪なら商は f32 で厳密・そうでなければ商は無限 2 進小数なので
- * f32 の丸め境界ちょうどにはならない）。torch の `float(in−1) / float(out−1)` と同じ値になるのは
- * `in − 1 ≤ 2^24` の範囲だけ — それを超えると torch は被除数を先に f32 へ丸めるので二重丸めになり、
- * 食い違う（in = 16777218・out = 6 で torch 3355443.5 に対しこちらは 3355443.25）。
+ * `Math.fround` rounds the f64 division to f32, but dividend and divisor are both small integers,
+ * so no double rounding occurs (with a power-of-two divisor the quotient is exact in f32; otherwise
+ * the quotient is an infinite binary fraction and never lands exactly on an f32 rounding boundary).
+ * It equals torch's `float(in−1) / float(out−1)` only in the range `in − 1 ≤ 2^24` — beyond that
+ * torch rounds the dividend to f32 first, which double-rounds and disagrees (in = 16777218, out = 6
+ * gives 3355443.5 in torch against 3355443.25 here).
  */
 const alignCornersScale = (lengthIn: number, lengthOut: number): number =>
   lengthOut > 1 ? Math.fround((lengthIn - 1) / (lengthOut - 1)) : 0;
 
 /**
- * 32-byte uniform params（u32 5 語 + f32 2 語 + 予約 1 語 — 16 バイト単位の確保は
- * プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉）。`n` は出力の全要素数。
+ * 32-byte uniform params (5 u32 words + 2 f32 words + 1 reserved word — allocating in 16-byte units
+ * is a project convention (the fusion pass fixes the same form in ADR 0040)). `n` is the output's
+ * total element count.
  *
- * MUST: 空間軸の長さ 0 をここで拒否する。0 は scale が `(0−1)/(out−1)` で負になり、
- * 読み出しが入力の外へ出る（GPU では例外なしに隣の値が出る）。
- * MUST: `n % (out_h · out_w)` をここで拒否する。割れない値を通すと最後の不完全な平面の
- * 添字分解が次の平面へずれ、要素数だけでは検出できない沈黙誤値になる（upsample2x と同じ罠）。
+ * MUST: a spatial axis of length 0 is rejected here. With 0 the scale `(0−1)/(out−1)` goes
+ * negative and reads go outside the input (on the GPU, a neighbouring value comes out without an
+ * exception).
+ * MUST: `n % (out_h · out_w)` is rejected here. Letting a non-divisible value through shifts the
+ * index decomposition of the last incomplete plane into the next plane — a silent wrong value that
+ * the element count alone cannot detect (the same trap as upsample2x).
  */
 export const upsampleBilinear2dParams = (
   n: number,

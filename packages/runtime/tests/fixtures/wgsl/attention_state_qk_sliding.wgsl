@@ -1,4 +1,4 @@
-// karume attention_state_qk (states 形の S 実体化, f32, sliding window)
+// karume attention_state_qk (states-form S materialisation, f32, sliding window)
 struct Params {
   rows_block: u32,
   row_offset: u32,
@@ -67,9 +67,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let live = live_columns(past, lengths.query);
   let local_row = gid.y;
   let cl = gid.x;
-  // 端数タイルの空振り。live より右（[live, col_cap)）は残骸のまま残すのが正で、
-  // 読者（②③）が live で切ることと対になっている。行は**有効行まで**（pad 行の S は
-  // 誰も読まない — ③ が 0 を書いて返す）ので、仕事量が Q に比例する
+  // Empty run of the edge tile. Leaving the leftovers right of live ([live, col_cap)) in place is
+  // correct and pairs with the readers (②③) cutting at live. Rows go **up to the valid rows** (no
+  // one reads the S of pad rows — ③ writes 0 and returns), so the work is proportional to Q
   if (local_row >= effective_rows(lengths.query) || cl >= live) {
     return;
   }
@@ -78,14 +78,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let row = params.row_offset + local_row;
   let q_base = (z * params.chunk_rows + row) * params.depth;
   let kv_plane = z;
-  // 述語外は -inf。live 範囲は**述語外でも必ず書く**（書かないと ② が前回の残骸を食う）
+  // -inf outside the predicate. The live range is **always written, even outside the predicate**
+  // (otherwise ② consumes the previous leftovers)
   var value = bitcast<f32>(params.neg_inf);
   if (in_window(col, past + row)) {
     if (col < past) {
-      // past（col < P）はスロットから。物理行は読み書き同式の slot_row
+      // past (col < P) comes from the slot. The physical row is slot_row (same formula for reads
+      // and writes)
       value = score_slot(q_base, (kv_plane * params.capacity + slot_row(col)) * params.depth);
     } else {
-      // current（col ≥ P）は今 step の ins の行 col − P から
+      // current (col ≥ P) comes from row col − P of this step's ins
       value = score_ins(q_base, (kv_plane * params.chunk_rows + (col - past)) * params.depth);
     }
   }

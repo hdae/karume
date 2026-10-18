@@ -1,62 +1,68 @@
 /**
- * topk（最終次元・**static-k**・出力 2 本 = 値 f32 の降順 + 添字 i32）の固定カーネル
- * （ADR 0068 決定 3 — ノード多出力の最初の入居者）。
+ * The fixed kernel of topk (last dimension, **static k**, two outputs = f32 values in descending
+ * order + i32 indices) (ADR 0068 decision 3 — the first user of node-level multi-output).
  *
- * 入力は先行次元を平坦化した `[rows, dim]` の連続レイアウトで、出力は行ごとに k 語ずつ
- * （宣言 shape は 2 本とも `[…, k]`）。`k` は**計画時定数**（attrs 宣言必須）なので WGSL に
- * 焼き、params では運ばない（同じ事実を 2 箇所で持たない）。
+ * The input is a contiguous `[rows, dim]` layout with the leading dimensions flattened; the output
+ * is k words per row (both declared shapes are `[…, k]`). `k` is **a plan-time constant**
+ * (attrs declaration required), so it is baked into the WGSL and not carried in params (one fact
+ * is not held in two places).
  *
- * 形は **1 行 = 1 workgroup** の 2 相で、行方向は grid-stride（1 次元の workgroup 上限を実
- * モデルが超える）:
+ * The form is **one row = one workgroup** in two phases, with a grid-stride over rows (real models
+ * exceed the one-dimensional workgroup limit):
  *
- * 1. **レーン局所 top-k** — レーン `l` は `i ≡ l (mod W)` の要素だけを走査し、自分の
- *    ブロック（`cand_*` の K 語）を**降順のまま**保つ挿入で更新する。末尾（最弱）に勝てない
- *    候補はそこで捨てる。
- * 2. **merge** — k ラウンドの **W 者トーナメント**。各ラウンドで「各レーンの現在の先頭」の
- *    最大元を木で畳み、それが残り集合の最大元（各ブロックが降順だから）。勝った要素の
- *    持ち主だけがカーソルを 1 進める。
+ * 1. **Lane-local top-k** — lane `l` scans only the elements with `i ≡ l (mod W)` and updates its
+ *    block (K words of `cand_*`) by insertion that keeps it **in descending order**. A candidate
+ *    that cannot beat the tail (the weakest) is dropped there.
+ * 2. **merge** — k rounds of a **W-way tournament**. Each round folds the maximum of "every lane's
+ *    current head" over a tree; that is the maximum of the remaining set (each block is
+ *    descending). Only the owner of the winning element advances its cursor by one.
  *
- * MUST: **全語彙 argsort を経由しない**（ADR 0068 決定 3）。候補の走査は行を 1 回だけで、
- * 仕事量は `dim/W` の走査 + `k·log2(W)` の畳み込み。k 回の行 reduce（マスク付き argmax の
- * 反復）に均すと行を k 回読むことになり、ADR が避けている高コスト側に落ちる。
- * 選択値を書き出すときだけ元入力の k 要素を再読し、値のビット列を保つ。
+ * MUST: **no full-vocabulary argsort** (ADR 0068 decision 3). The candidate scan reads the row
+ * once; the work is a scan of `dim/W` plus a fold of `k·log2(W)`. Flattening it into k row reduces
+ * (repeated masked argmax) reads the row k times and lands on the expensive side the ADR avoids.
+ * Only when writing out the selected values are the k elements of the original input re-read, to
+ * keep the value bits.
  *
- * MUST: この通常形の **scratch は workgroup storage に閉じる**（出力バッファへの同居も一時バッファも
- * 出さない — ADR 0068 決定 3 の「確保仕様が読めなくなる」を構造で回避）。代わりに k の
- * **実装上限**が workgroup storage の device limit から決まる（{@link topkMaxK}）ので、
- * 超過は縮退させず {@link assertTopkK} が上限値つきで fail loudly にする。
- * k=1 の長い行は argmax と同じ分割形を使う（ADR 0068 追記 9）。
+ * MUST: in this regular form **the scratch stays in workgroup storage** (no co-location in an
+ * output buffer and no temporary buffer — structurally avoiding ADR 0068 decision 3's "the
+ * allocation spec becomes unreadable"). In exchange, the **implementation limit** of k follows from
+ * the device's workgroup storage limit ({@link topkMaxK}), so exceeding it does not fall back:
+ * {@link assertTopkK} fails loudly with the limit. Long rows with k=1 use the same split form as
+ * argmax (ADR 0068 addendum 9).
  *
- * MUST: タイブレークは **最小 index**（ADR 0068 決定 3）。述語 {@link F32_RANK_WGSL} は
- * argmax と共通で、(値 降順, index 昇順) の
- * 辞書式順序の厳密比較 — ①どちらの子を第 1 引数にしても勝者が変わらない ②勝者は候補集合の
- * 最大元。よってレーン局所の挿入・木の畳み込み・ラウンド間の順序が全て 1 本の述語で閉じ、
- * 結合順に依らず「値降順・同値なら index 昇順」で出る。k=1 は argmax と同じ答えになる
- * （族間の食い違いを門が突き合わせる）。
+ * MUST: the tie-break is **the smallest index** (ADR 0068 decision 3). The predicate
+ * {@link F32_RANK_WGSL} is shared with argmax: a strict comparison in the lexicographic order of
+ * (value descending, index ascending) — (1) the winner does not change whichever child is the
+ * first argument, (2) the winner is the maximum of the candidate set. So the lane-local insertion,
+ * the tree fold and the order across rounds all close over one predicate, and the result comes out
+ * "values descending, ties by ascending index" regardless of the combination order. k=1 gives the
+ * same answer as argmax (a check compares the two ops for disagreement).
  *
- * NOTE: torch の `topk` は**同値要素の順序を保証しない**（実測 2026-08-17 / torch 2.13.0+cpu):
- * `topk([5,5,5,5], 1)` は index **2** を返すのに `argmax([5,5,5,5])` は **0** で、torch 自身が
- * 同一リポ内で食い違っている（k=1 の 7 行中 3 行で不一致）。`[…9…9…9…]` の 700 列では
- * `[650,300,12]` = **降順 index** で返る。したがって ADR 0068 決定 3 の括弧書き「同値要素の
- * 順序も torch と一致」は**実測で成り立たない** — 一致するのは**値の列**（降順・多重度が
- * 同じなので (値降順, index昇順) 実装とビット一致。重複だらけの 200×4 ケースで実測）で、
- * 添字の列は karume が最小 index に**規定する**側にした（argmax と同族・決定的）。
+ * NOTE: torch's `topk` **does not guarantee the order of equal elements** (measured 2026-08-17 /
+ * torch 2.13.0+cpu): `topk([5,5,5,5], 1)` returns index **2** while `argmax([5,5,5,5])` returns
+ * **0** — torch disagrees with itself in the same repository (3 of 7 rows mismatch at k=1). Over
+ * 700 columns of `[…9…9…9…]` it returns `[650,300,12]` = **descending indices**. So the
+ * parenthetical of ADR 0068 decision 3, "the order of equal elements also matches torch", **does
+ * not hold in measurement** — what matches is **the sequence of values** (descending with the same
+ * multiplicities, so bit-identical to the (value descending, index ascending) implementation;
+ * measured on a 200×4 case full of duplicates), and for the index sequence karume chose to
+ * **define** the smallest index (the same family as argmax, deterministic).
  *
- * MUST: 行 max の初期値は **−inf**、ブロックの identity は `(−inf, 番兵 index = dim)`
- * （有限 sentinel 禁止 — argmax と同じ理由）。実要素は必ず identity に勝つ（値が −inf でも
- * index 比較で `< dim` が勝つ）ので、全 −inf 行でも答えは「最小 index から k 本」に決まる。
- * `1 ≤ k ≤ dim` は契約層（shape 規則）が保証するので、レーン局所リストの和には必ず k 本以上の
- * 実要素が入り（`Σ min(K, count_l) ≥ min(K, Σ count_l) = K`）、identity が出力へ漏れることは
- * 無い。
+ * MUST: the initial row max is **−inf**, and the block identity is `(−inf, sentinel index = dim)`
+ * (no finite sentinel — the same reason as argmax). A real element always beats the identity (even
+ * with value −inf, `< dim` wins the index comparison), so even an all −inf row has the answer "k
+ * entries from the smallest index". The contract layer (the shape rule) guarantees `1 ≤ k ≤ dim`,
+ * so the union of the lane-local lists always holds at least k real elements
+ * (`Σ min(K, count_l) ≥ min(K, Σ count_l) = K`), and the identity never leaks into the output.
  *
- * MUST: NaN は**最大として扱う**（argmax と同じ規律。torch も NaN を先頭へ出す — 実測同上）。
- * 判定は**ビット列**（{@link F32_RANK_WGSL}）— ドライバの比較は NaN で全て false になるので、
- * 素の `>` に任せると NaN が黙って負ける。
+ * MUST: NaN is **treated as the maximum** (the same discipline as argmax; torch also puts NaN
+ * first — measured as above). The comparison is **on the bit pattern** ({@link F32_RANK_WGSL}) —
+ * driver comparisons are all false with NaN, so a plain `>` makes NaN lose silently.
  *
- * MUST: params は uniform で渡す（行ループ内に workgroupBarrier があり、ループ条件が
- * workgroup 内で一様である必要がある）。
- * −inf のビット列は既存の params レイアウトで運ぶ。比較・保存とも整数のまま扱い、
- * 非正規数が途中でゼロ化されないようにする（ADR 0068 追記 10）。
+ * MUST: params are passed as a uniform (there is a workgroupBarrier inside the row loop, and the
+ * loop condition must be uniform within the workgroup). The −inf bit pattern travels in the
+ * existing params layout. Comparison and storage both stay integer, so subnormals are not flushed
+ * to zero on the way (ADR 0068 addendum 10).
  */
 
 import { F32_RANK_WGSL } from "../codegen/numerics-wgsl.ts";
@@ -64,50 +70,52 @@ import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
 /**
- * 1 行を畳むレーン数。
+ * Number of lanes that fold one row.
  *
- * MUST: 大きくしない。workgroup storage は `8·W·(k+1)` バイト（レーンごとに K 語の
- * (値, index) 対 + トーナメント 1 語）で、W を倍にすると k の実装上限が半分になる
- * （{@link topkMaxK}）。W=32 は WebGPU 既定の 16384 バイトで **k ≤ 63** を通す最大の 2 冪で、
- * top-k sampling の実用域（k ≤ 50 級）を既定の機でも収める側に振った選択。
+ * MUST: do not increase it. Workgroup storage is `8·W·(k+1)` bytes (K (value, index) pairs per
+ * lane + one tournament word), so doubling W halves the implementation limit of k
+ * ({@link topkMaxK}). W=32 is the largest power of two that admits **k ≤ 63** within WebGPU's
+ * default 16384 bytes — a choice that keeps the practical range of top-k sampling (k ≤ 50 or so)
+ * on machines with the default limits.
  */
 export const TOPK_WORKGROUP_SIZE = 32;
 
-/** −inf の f32 ビット列（params 3 語目 — WGSL に無限大リテラルが無い）。 */
+/** f32 bit pattern of −inf (the third params word — WGSL has no infinity literal). */
 export const TOPK_NEG_INF_BITS = 0xff800000;
 
-/** 1 候補ぶんの workgroup storage（f32 の値 + u32 の添字）。 */
+/** Workgroup storage for one candidate (an f32 value + a u32 index). */
 const TOPK_CANDIDATE_BYTES = 8;
 
 /**
- * `k` を通すのに要る workgroup storage のバイト数 = `8·W·(k+1)`。
- * 内訳はレーンごとの候補ブロック `k` 語（`cand_value` / `cand_index`）と、トーナメントの
- * 先頭 1 語（`head_value` / `head_index`）。
+ * Bytes of workgroup storage needed to admit `k` = `8·W·(k+1)`.
+ * The breakdown is the per-lane candidate block of `k` words (`cand_value` / `cand_index`) and the
+ * tournament head of one word (`head_value` / `head_index`).
  */
 export const topkWorkgroupStorageBytes = (k: number): number =>
   TOPK_CANDIDATE_BYTES * TOPK_WORKGROUP_SIZE * (k + 1);
 
 /**
- * device の workgroup storage 上限から決まる **k の実装上限**（ADR 0068 決定 3）。
- * `8·W·(k+1) ≤ limit` の最大の k で、WebGPU 既定（16384 バイト）では **63**。
+ * **The implementation limit of k** given by the device's workgroup storage limit (ADR 0068
+ * decision 3). The largest k with `8·W·(k+1) ≤ limit`; **63** at the WebGPU default (16384 bytes).
  */
 export const topkMaxK = (storageLimitBytes: number): number =>
   Math.floor(storageLimitBytes / (TOPK_CANDIDATE_BYTES * TOPK_WORKGROUP_SIZE)) - 1;
 
 /**
- * WebGPU core 既定（`maxComputeWorkgroupStorageSize` = 16384）で保証される k の上限。
- * これを超える k は「手元のアダプタでは通るが既定の機で落ちる」ポータビリティの段差になる
- * （どちらでも黙って縮退はしない — {@link assertTopkK} が上限つきで落とす）。
+ * The limit on k guaranteed by the WebGPU core default (`maxComputeWorkgroupStorageSize` = 16384).
+ * A k above it is a portability step: "it runs on this adapter but fails on a machine with the
+ * defaults" (neither falls back silently — {@link assertTopkK} fails with the limit).
  */
 export const TOPK_CORE_LIMIT_MAX_K = 63;
 
 /**
- * k が実装上限の内側であることを検査する（ADR 0068 決定 3 — **縮退しない**）。
+ * Checks that k is within the implementation limit (ADR 0068 decision 3 — **no fallback**).
  *
- * MUST: 診断に**上限値そのもの**を載せる。「k が大きすぎる」だけでは利用者が k をいくつまで
- * 下げればよいか分からず、device 依存の値（{@link topkMaxK}）を当てさせることになる。
- * MUST: `1 ≤ k ≤ 最終次元` はこの関数の担当ではない（device に依らない受理領域なので契約層 —
- * src/ops/attrs.ts の `TOPK_ATTRS` と src/ops/shapes.ts の shape 規則が持つ）。
+ * MUST: the diagnostic carries **the limit itself**. "k is too large" alone does not tell the user
+ * how far to lower k, and leaves them guessing a device-dependent value ({@link topkMaxK}).
+ * MUST: `1 ≤ k ≤ last dimension` is not this function's job (an accepted range that does not
+ * depend on the device, so it belongs to the contract layer — `TOPK_ATTRS` in src/ops/attrs.ts and
+ * the shape rule in src/ops/shapes.ts).
  */
 export const assertTopkK = (k: number, storageLimitBytes: number, where: string): void => {
   assertU32Params(`${where} の topk`, { k });
@@ -125,13 +133,13 @@ export const assertTopkK = (k: number, storageLimitBytes: number, where: string)
 };
 
 /**
- * パイプラインキー。**k を含む**（WGSL が k で変わるので、含めないと最初の k のパイプラインが
- * 別の k の dispatch に配られ、例外なしに別のバイト列が書かれる）。
+ * Pipeline key. **It includes k** (the WGSL changes with k; without it, the pipeline of the first
+ * k is handed to dispatches of another k, and different bytes are written without an exception).
  */
 export const topkKey = (k: number): string =>
   `topk:v2:f32+i32:lastdim:desc:minindex:k${k}:wg${TOPK_WORKGROUP_SIZE}`;
 
-/** k を焼いた WGSL（配列長とラウンド数が k で決まる）。 */
+/** WGSL with k baked in (k determines the array lengths and the number of rounds). */
 export const topkWgsl = (k: number): string => {
   const w = TOPK_WORKGROUP_SIZE;
   return `// karume topk (last dim, f32 values + i32 indices, descending, min-index tie-break, -inf identity, k=${k})
@@ -165,8 +173,9 @@ fn main(
   var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
-    // 相 1: レーン局所 top-k。identity は値も index も最弱（番兵 dim = 候補なし）なので、
-    // 実要素は必ず勝つ — 全 -inf 行でも答えが最小 index から k 本に決まる
+    // phase 1: lane-local top-k. The identity is the weakest in both value and index (sentinel
+    // dim = no candidate), so a real element always wins — even an all -inf row gives k entries
+    // from the smallest index
     for (var s = 0u; s < ${k}u; s = s + 1u) {
       cand_value[block + s] = neg_inf;
       cand_index[block + s] = dim;
@@ -174,7 +183,8 @@ fn main(
     var i = lid;
     while (i < dim) {
       let v = f32_rank_key(x[base + i]);
-      // 末尾（最弱）に勝てない候補はここで捨てる。勝つ候補だけが降順を保つ挿入へ進む
+      // a candidate that cannot beat the tail (the weakest) is dropped here. Only a winner goes on
+      // to the insertion that keeps the descending order
       if (rank_key_beats(v, i, cand_value[block + ${k - 1}u], cand_index[block + ${k - 1}u])) {
         var s = ${k - 1}u;
         while (s > 0u && rank_key_beats(v, i, cand_value[block + s - 1u], cand_index[block + s - 1u])) {
@@ -187,9 +197,9 @@ fn main(
       }
       i = i + ${w}u;
     }
-    // 相 2: merge。各レーンの先頭同士の最大元 = 残り集合の最大元（各ブロックが降順）なので、
-    // k ラウンド回せば値降順・同値なら index 昇順で出る。カーソルは k-1 回しか進まないので
-    // block + cursor は常にブロック内
+    // phase 2: merge. The maximum of the lanes' heads = the maximum of the remaining set (each
+    // block is descending), so k rounds give values descending, ties by ascending index. The
+    // cursor advances at most k-1 times, so block + cursor always stays inside the block
     var cursor = 0u;
     for (var r = 0u; r < ${k}u; r = r + 1u) {
       head_value[lid] = cand_value[block + cursor];
@@ -213,11 +223,11 @@ fn main(
         values[row * ${k}u + r] = x[base + won];
         indices[row * ${k}u + r] = i32(won);
       }
-      // 走査は i ≡ lid (mod ${w}) の分担なので、勝った要素の持ち主は won % ${w} で決まる
+      // the scan splits work by i ≡ lid (mod ${w}), so the winning element's owner is won % ${w}
       if (won % ${w}u == lid) {
         cursor = cursor + 1u;
       }
-      // 次ラウンドが head を上書きする前に won の読み終わりを揃える
+      // make every read of won finish before the next round overwrites head
       workgroupBarrier();
     }
     row = row + nwg.x;
@@ -227,13 +237,14 @@ fn main(
 };
 
 /**
- * uniform の Params（`{rows, dim, neg_inf}`）。3 語ぶんの内容でも 16 バイト確保する（16 バイト単位の
- * 確保はプロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
+ * The uniform Params (`{rows, dim, neg_inf}`). 16 bytes are allocated even for three words of
+ * content (allocating in 16-byte units is a project convention (the fusion pass fixes the same
+ * form in ADR 0040), not a requirement of the specification).
  *
- * MUST: `k` を載せない（WGSL に焼いてある — 同じ事実を 2 箇所で持つと、片方だけ更新した
- * dispatch が黙って別の本数を書く）。
- * MUST: `dim` は正整数（`dim = 0` の行に「大きい順の k 本」は無い）。契約側も
- * `1 ≤ k ≤ 最終次元` を要求するので、ここは二重の門。
+ * MUST: `k` is not carried (it is baked into the WGSL — holding one fact in two places lets a
+ * dispatch with only one of them updated silently write a different count).
+ * MUST: `dim` is a positive integer (a row with `dim = 0` has no "k largest"). The contract side
+ * also requires `1 ≤ k ≤ last dimension`, so this is a double check.
  */
 export const topkParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("topk params", { rows, dim });

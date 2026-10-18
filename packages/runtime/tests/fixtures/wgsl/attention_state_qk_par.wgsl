@@ -1,4 +1,4 @@
-// karume attention_state_qk (states 形の S 実体化, f32, D 並列縮約)
+// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction)
 struct Params {
   rows_block: u32,
   row_offset: u32,
@@ -69,8 +69,8 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let local_row = wid.y;
-  // pad 行の S は誰も読まない（③ が 0 を書いて返す）ので 1 語も書かずに返る。局所行は
-  // workgroup 一様なので barrier の手前で返してよい
+  // No one reads the S of pad rows (③ writes 0 and returns), so return without writing a word. The
+  // local row is workgroup-uniform, so returning before the barrier is allowed
   if (local_row >= effective_rows(lengths.query)) {
     return;
   }
@@ -83,22 +83,24 @@ fn main(
   let row = params.row_offset + local_row;
   let q_base = (z * params.chunk_rows + row) * params.depth;
   let kv_plane = z;
-  // 端数タイル（cl ≥ live）と述語外の列は内積を回さない。**return はしない** — この分岐は
-  // workgroup 一様でなく、下の barrier は一様制御流の中だけに置けるため（0.0 を寄与する）
+  // Edge-tile columns (cl ≥ live) and columns outside the predicate do not run the dot product.
+  // **No return** — this branch is not workgroup-uniform, and the barrier below can sit only inside
+  // uniform control flow (contributes 0.0)
   let inside = cl < live && in_window(col, past + row);
   var acc = 0.0;
   if (inside) {
     if (col < past) {
-      // past（col < P）はスロットから。物理行は読み書き同式の slot_row
+      // past (col < P) comes from the slot. The physical row is slot_row (same formula for reads
+      // and writes)
       acc = score_slot(q_base, (kv_plane * params.capacity + slot_row(col)) * params.depth, lane);
     } else {
-      // current（col ≥ P）は今 step の ins の行 col − P から
+      // current (col ≥ P) comes from row col − P of this step's ins
       acc = score_ins(q_base, (kv_plane * params.chunk_rows + (col - past)) * params.depth, lane);
     }
   }
   scratch[lane * 16u + lid.x] = acc;
   workgroupBarrier();
-  // 固定順の木縮約（stride 8 → 4 → 2 → 1）— 決定性の根拠
+  // Fixed-order tree reduction (stride 8 → 4 → 2 → 1) — the basis of determinism
   var stride = 8u;
   while (stride > 0u) {
     if (lane < stride) {
@@ -108,7 +110,8 @@ fn main(
     workgroupBarrier();
     stride = stride / 2u;
   }
-  // 述語外は -inf。live 範囲は**述語外でも必ず書く**（書かないと ② が前回の残骸を食う）
+  // -inf outside the predicate. The live range is **always written, even outside the predicate**
+  // (otherwise ② consumes the previous leftovers)
   if (lane == 0u && cl < live) {
     var value = bitcast<f32>(params.neg_inf);
     if (inside) {

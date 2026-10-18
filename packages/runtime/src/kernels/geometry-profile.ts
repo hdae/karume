@@ -1,26 +1,33 @@
 /**
- * GEMM 幾何の**プロファイル**（shape × adapter の静的な表 — DECIDED: ADR 0115）。
+ * GEMM geometry **profiles** (static tables of shape × adapter — DECIDED: ADR 0115).
  *
- * 幾何（どのスレッドがどの出力を担当するか）の最良点は GPU によって逆転する — Apple M2 で
- * 1.4〜1.7 倍速い幾何が Arc B570 では 0.72〜0.98 倍になる（docs/research/2026-09-27-k70-metal-per-op.md
- * §9）。共通の既定 1 本ではどちらかが負けるので、選択を「shape の純関数」から「shape ×
- * プロファイルの純関数」へ広げ、プロファイルは adapter の (vendor, architecture, description) から
- * 決定的な順で 1 本選ぶ（`match` を省いた表は自動選択されず、注入でだけ使われる）。
+ * The best geometry (which thread handles which output) reverses between GPUs — a geometry 1.4–1.7×
+ * faster on Apple M2 becomes 0.72–0.98× on Arc B570 (docs/research/2026-09-27-k70-metal-per-op.md
+ * §9). With one common default one of them loses, so the selection is widened from "a pure function
+ * of the shape" to "a pure function of shape × profile", and one profile is chosen in a
+ * deterministic order from the adapter's (vendor, architecture, description) (a table without
+ * `match` is not auto-selected and is used only by injection).
  *
- * MUST: プロファイルは**純データ**（副作用なし・実行時に外から読まない）。明示のチューニング
- * （tools/geometry-sweep の掃引）で測った結果を生成物としてソースに埋め込む
- * （`./geometry-profiles/`）。実行時オートチューン（実行中に測って選び直す）は禁止のまま
- * （ADR 0022 追記の MUST）— 同じ機・同じ shape なら毎回同じ幾何・同じキー・同じ WGSL になる。
- * MUST: 幾何が変えてよいのは担当割りだけで、数値契約（K 縮約順・積和の字面）は動かない
- * （src/kernels/gemm-geometry.ts / src/kernels/i8a8-geometry.ts）。幾何はパイプラインキーに載るので、
- * プロファイルが違えばキーも違い、device 寿命のパイプラインキャッシュで取り違えは起きない。
+ * MUST: a profile is **plain data** (no side effects, nothing read from outside at run time). The
+ * results measured by explicit tuning (sweeps of tools/geometry-sweep (removed in 0.15); the sweep
+ * now runs through `@karume/runtime/tune`, ADR 0117) are embedded in the source as generated files
+ * (`./geometry-profiles/`). Run-time autotuning (measuring and re-choosing during execution) stays
+ * banned (the MUST of the ADR 0022 addendum) — on the same machine and the same shape, the
+ * geometry, key and WGSL are the same every time.
+ * MUST: the geometry may change only the work assignment; the numeric contract (K reduction order,
+ * literal form of the multiply-add) does not move (src/kernels/gemm-geometry.ts /
+ * src/kernels/i8a8-geometry.ts). The geometry goes into the pipeline key, so a different profile
+ * means a different key, and the device-lifetime pipeline cache cannot mix them up.
  *
- * 適用範囲（プロファイルを引く経路）は matmul / bmm / linear の行数バケット・融合 attention f32 の
- * ①QK / ③PV・conv2d の implicit GEMM・i8a8 の linear / 融合 attention ①QK / ③PV だけ。行数バケットの
- * 表は matmul / bmm / linear の 3 経路で共有する（同じ GEMM 骨格 — 幾何の意味・K 縮約順が同じで、
- * B 側の充填だけが違う）。掃引は 3 経路のケースを持ち、生成器はその全部で速い幾何だけを採る
- * （tools/geometry-sweep の profile）。states 形 attention（①ₜ / ③ₜ）・分解 attention の行ブロック・
- * conv1d の implicit GEMM は既定の選択のまま（掃引の対象外 — 測っていない経路を表で動かさない）。
+ * The scope (the paths that read the profile) is only the row-count buckets of matmul / bmm /
+ * linear, ①QK / ③PV of fused attention f32, the implicit GEMM of conv2d, and the i8a8 linear / fused
+ * attention ①QK / ③PV. The row-count bucket table is shared by the 3 paths matmul / bmm / linear
+ * (the same GEMM skeleton — the same meaning of geometry and the same K reduction order; only the
+ * B-side fill differs). The sweep has cases for all 3 paths, and the generator adopts only
+ * geometries that are faster on all of them (the `profile` command of tools/geometry-sweep (removed
+ * in 0.15); now `deriveGeometryProfile` of `@karume/runtime/tune`). States-shaped attention (①ₜ /
+ * ③ₜ), the row blocks of decomposed attention and the implicit GEMM of conv1d keep the default
+ * selection (outside the sweep — a path that was not measured is not moved by a table).
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -42,41 +49,52 @@ import {
 import { BUILTIN_GEOMETRY_PROFILES } from "./geometry-profiles/index.ts";
 
 /**
- * 行数バケットの規則 1 本。`rows <= maxRows` で最初に当たる規則を使う（{@link gemmRowsGeometry}）。
- * 規則列は `maxRows` の狭義昇順で、最後は `Number.POSITIVE_INFINITY`（どの行数も必ず当たる）。
+ * One row-count bucket rule. The first rule with `rows <= maxRows` is used ({@link gemmRowsGeometry}).
+ * The rules are in strictly ascending `maxRows`, and the last is `Number.POSITIVE_INFINITY` (every
+ * row count hits some rule).
  */
 export type GemmRowsRule = { readonly maxRows: number; readonly geometry: GemmGeometry };
 
 /**
- * GEMM 幾何のプロファイル = op × バケットごとのタイル幾何の静的な表（DECIDED: ADR 0115）。
- * 埋め込みの表（`./geometry-profiles/`）は adapter の (vendor, architecture, description) で選ばれ、
- * 利用者は `acquireGpu({ geometryProfile })` で自分の掃引から作った表か埋め込みの表
- * （公開面の `BUILTIN_GEOMETRY_PROFILES` — ADR 0115 追記決定 7）を注入できる。
+ * A GEMM geometry profile = a static table of tile geometries per op × bucket (DECIDED: ADR 0115).
+ * The embedded tables (`./geometry-profiles/`) are chosen by the adapter's (vendor, architecture,
+ * description), and users can inject, with `acquireGpu({ geometryProfile })`, a table made from
+ * their own sweep or an embedded table (`BUILTIN_GEOMETRY_PROFILES` on the public surface — ADR 0115
+ * addendum decision 7).
  */
 export type GeometryProfile = {
-  /** プロファイルの名前（`"default"` / `"apple-metal-3"` など — 生成物のファイル名と一致）。 */
+  /**
+   * Name of the profile (`"default"` / `"apple-metal-3"` and so on — matches the generated file
+   * name).
+   */
   readonly id: string;
   /**
-   * どの adapter に当てるか（`GPUAdapterInfo` の `vendor` / `architecture` / `description` と文字列の
-   * 完全一致）。全欄 undefined（`{}`）は既定プロファイル（{@link DEFAULT_GEOMETRY_PROFILE}）だけの形。
+   * Which adapter it applies to (exact string match with `vendor` / `architecture` / `description`
+   * of `GPUAdapterInfo`). All fields undefined (`{}`) is the form of the default profile
+   * ({@link DEFAULT_GEOMETRY_PROFILE}) only.
    *
-   * 省略 = 自動選択の対象外（注入専用 = オプトイン — ADR 0115 追記決定 7）。同じ vendor /
-   * architecture を名乗る別の機（Chrome の Apple M2 と M5 は両方 `apple` / `metal-3`）へ黙って
-   * 当てたくない表は、`match` を省いて埋め込み、アプリが id で引いて注入する。
+   * Omitted = not auto-selected (injection only = opt-in — ADR 0115 addendum decision 7). A table
+   * that must not be applied silently to another machine reporting the same vendor / architecture
+   * (in Chrome, Apple M2 and M5 both report `apple` / `metal-3`) is embedded without `match`, and an
+   * application looks it up by id and injects it.
    */
   readonly match?: {
     readonly vendor?: string;
     readonly architecture?: string;
     readonly description?: string;
   };
-  /** linear / matmul / bmm（行数バケット）。 */
+  /** linear / matmul / bmm (row-count buckets). */
   readonly gemmRows: readonly GemmRowsRule[];
-  /** 融合 attention f32 の ①QK / ③PV。S は両段の間で実体化されるので、段ごとに別の幾何でよい。 */
+  /**
+   * ①QK / ③PV of fused attention f32. S is materialised between the two stages, so each stage may
+   * have its own geometry.
+   */
   readonly attention: { readonly qk: GemmGeometry; readonly pv: GemmGeometry };
   /**
-   * conv2d の implicit GEMM。m タイルの**クラス**（`conv2dIgemmMTile` が返す 64 行 / 32 行）ごとの
-   * 幾何で、クラスを決めるのは今までどおりその述語。実タイル辺の正本は幾何なので、32 行クラスに
-   * tileM = 64 の幾何を割り当ててもよい（dispatch は幾何から導く）。
+   * The implicit GEMM of conv2d. A geometry per m-tile **class** (64 rows / 32 rows as returned by
+   * `conv2dIgemmMTile`); the class is decided by that predicate as before. The canonical source of
+   * the actual tile edge is the geometry, so a geometry with tileM = 64 may be assigned to the
+   * 32-row class (dispatch is derived from the geometry).
    */
   readonly conv2d: { readonly rows64: GemmGeometry; readonly rows32: GemmGeometry };
   readonly i8a8: {
@@ -85,49 +103,60 @@ export type GeometryProfile = {
     readonly attentionPv: I8a8Geometry;
   };
   /**
-   * 掃引から生成したプロファイルだけが持つ出どころと照合の材料（DECIDED: ADR 0117 決定 4）。書くのは
-   * 生成器（`@karume/runtime/tune` の `deriveGeometryProfile`）だけで、照合は `./tune` の
-   * `geometryProfileMismatch` が行う。runtime（`assertGeometryProfile`・`acquireGpu` の注入口）は形（欄の型）だけを
-   * 見て、照合には使わない。
+   * Provenance and matching material held only by profiles generated from a sweep (DECIDED: ADR 0117
+   * decision 4). Only the generator (`deriveGeometryProfile` of `@karume/runtime/tune`) writes it,
+   * and `geometryProfileMismatch` of `./tune` does the matching. The runtime (`assertGeometryProfile`,
+   * the injection entry point of `acquireGpu`) checks only the shape (the field types) and does not
+   * use it for matching.
    */
   readonly provenance?: {
-    /** 掃引の記録の path（生成に渡した順に `", "` で連結）。 */
+    /** Paths of the sweep records (joined with `", "` in the order given to the generator). */
     readonly sweep: string;
-    /** 同上の記録のバイト列の SHA-256（16 進）。 */
+    /** SHA-256 (hex) of the bytes of the same records. */
     readonly sha256: string;
-    /** 同上の掃引の日付。 */
+    /** Dates of the same sweeps. */
     readonly date: string;
-    /** 同上の候補集合（`quick` / `quick+` / `full`）。 */
+    /** Candidate sets of the same sweeps (`quick` / `quick+` / `full`). */
     readonly candidateSet: string;
     /**
-     * 同上の掃引を走らせたブラウザ（記録の `userAgent` — Deno の CLI の記録は `Deno/<版>`）を、現れた順に
-     * 重複を除いて並べたもの（全て同じなら 1 要素）。連結しないのは、ブラウザの userAgent 自体が `", "` を含み
-     * （`(KHTML, like Gecko)`）連結すると値ごとに分けられないから。照合（`geometryProfileMismatch`）には使わない
-     * 参考の欄で、アプリが今のブラウザと比べて再掃引を勧める材料（DECIDED: ADR 0117 追記 2026-10-02）。
-     * `userAgent` の無い記録が混ざると書かない（空の配列も書かない）。
+     * The browsers that ran the same sweeps (the records' `userAgent` — records from the Deno CLI
+     * carry `Deno/<version>`), deduplicated in order of appearance (one element when all are the
+     * same). They are not joined because a browser's userAgent itself contains `", "`
+     * (`(KHTML, like Gecko)`) and joined values could not be split apart. A reference field not used
+     * for matching (`geometryProfileMismatch`); material for an application to compare with the
+     * current browser and suggest a re-sweep (DECIDED: ADR 0117 addendum 2026-10-02).
+     * Not written when a record without `userAgent` is among the inputs (an empty array is not
+     * written either).
      */
     readonly userAgent?: readonly string[];
-    /** 掃引した adapter（`GPUAdapterInfo` の 4 欄 — 空文字も値のまま。全ての記録で一致する）。 */
+    /**
+     * The swept adapter (the 4 fields of `GPUAdapterInfo` — an empty string stays a value;
+     * identical across all records).
+     */
     readonly adapter: {
       readonly vendor: string;
       readonly architecture: string;
       readonly device: string;
       readonly description: string;
     };
-    /** カーネルの指紋（表と既定の幾何が掃引の shape で組むカーネルのハッシュ — 16 進）。 */
+    /**
+     * Kernel fingerprint (hash of the kernels the table and the default geometry build on the
+     * sweep's shapes — hex).
+     */
     readonly kernels: string;
-    /** ケース集合の版（掃引のケースと gemmRows の段の境界のハッシュ — 16 進）。 */
+    /** Case-set version (hash of the sweep's cases and the step boundaries of gemmRows — hex). */
     readonly caseSet: string;
   };
 };
 
 /**
- * 既定プロファイル（どの生成物にも当たらない adapter が使う表）。
+ * The default profile (the table used by an adapter that no generated table matches).
  *
- * MUST: 値は既存の選択関数を**参照して**組む（書き写さない — 写すと既定が 2 か所になり、片方だけ
- * 直したときに Session の経路と shape 純関数の経路が別の幾何を選ぶ）。この表が選ばれた機では、
- * キー・WGSL・dispatch がプロファイル導入前と 1 バイトも変わらない（codegen スナップショットと
- * tests/geometry_profile_test.ts が検出器）。
+ * MUST: the values are built **by referencing** the existing selection functions (not copied —
+ * copying would put the default in 2 places, and when only one is fixed, the Session path and the
+ * shape-pure-function path would choose different geometries). On a machine where this table is
+ * chosen, key, WGSL and dispatch do not differ by a single byte from before profiles were introduced
+ * (the codegen snapshots and tests/geometry_profile_test.ts are the detectors).
  */
 export const DEFAULT_GEOMETRY_PROFILE: GeometryProfile = {
   id: "default",
@@ -146,8 +175,9 @@ export const DEFAULT_GEOMETRY_PROFILE: GeometryProfile = {
 };
 
 /**
- * 行数バケットの規則列の門。**昇順でない列は後ろの規則が死に、最後が Infinity でない列は大きな
- * M で当たる規則が無くなる** — どちらも選択が黙って別物になる形なので fail loudly。
+ * Guard on the row-count bucket rules. **Rules not in ascending order leave later rules dead, and
+ * rules whose last entry is not Infinity leave no rule for large M** — both silently turn the
+ * selection into something else, so fail loudly.
  */
 const assertGemmRowsRules = (rules: readonly GemmRowsRule[], where: string): void => {
   if (rules.length === 0) {
@@ -176,7 +206,10 @@ const assertGemmRowsRules = (rules: readonly GemmRowsRule[], where: string): voi
   });
 };
 
-/** 欄を読めるオブジェクトであることの門（配列・null・プリミティブを欄の path つきで落とす）。 */
+/**
+ * Guard that a value is an object whose fields can be read (rejects arrays, null and primitives
+ * with the field path).
+ */
 const recordOf = (value: unknown, where: string, path: string): Record<string, unknown> => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new CodegenError(`${where}: ${path} がオブジェクトでない`);
@@ -195,9 +228,10 @@ const optionalStringOf = (value: unknown, where: string, path: string): string |
   value === undefined ? undefined : stringOf(value, where, path);
 
 /**
- * 配列の欄の全要素（穴を欄の path つきで落とす）。`map` / `forEach` は疎な配列の穴を飛ばすので、穴が門を
- * 素通りし、門の外（選択の `find` や添字の読み）で TypeError になる — JS の呼び手が組んだ表
- * （`new Array(n)` など）を、欄の欠けとして門の {@link CodegenError} で落とす。
+ * All elements of an array field (rejects holes with the field path). `map` / `forEach` skip the
+ * holes of a sparse array, so a hole would pass the guard and become a TypeError outside it (in the
+ * selection's `find` or an index read) — a table built by a JS caller (`new Array(n)` and so on) is
+ * rejected as a missing field with the guard's {@link CodegenError}.
  */
 const denseEntriesOf = (
   values: readonly unknown[],
@@ -215,8 +249,9 @@ const denseEntriesOf = (
 };
 
 /**
- * 幾何の欄が数であることの門。値域（正整数）と整除条件は {@link assertGemmGeometry} /
- * {@link assertI8a8Geometry} の担当（数でない値も同じ文言で落とす）。
+ * Guard that a geometry field is a number. The range (positive integer) and the divisibility
+ * conditions belong to {@link assertGemmGeometry} / {@link assertI8a8Geometry} (a non-number is
+ * rejected with the same wording).
  */
 const numberOf = (value: unknown, where: string, path: string, name: string): number => {
   if (typeof value === "number") return value;
@@ -239,9 +274,10 @@ const i8a8GeometryOf = (value: unknown, where: string, path: string): I8a8Geomet
 };
 
 /**
- * `provenance` の形（欄の型だけ）。中身の照合は `@karume/runtime/tune` の `geometryProfileMismatch` の担当で、
- * runtime は読まない — ここで見るのは、門を通った値を {@link GeometryProfile} と名乗らせる以上、型の宣言と
- * 違う値を通さないため。
+ * The shape of `provenance` (field types only). Matching its content is the job of
+ * `geometryProfileMismatch` in `@karume/runtime/tune`, and the runtime does not read it — it is
+ * checked here because a value that passes the guard is typed as {@link GeometryProfile}, so a value
+ * that differs from the type declaration must not pass.
  */
 const assertProvenanceShape = (value: unknown, where: string): void => {
   const provenance = recordOf(value, where, "provenance");
@@ -261,17 +297,21 @@ const assertProvenanceShape = (value: unknown, where: string): void => {
 };
 
 /**
- * プロファイル 1 本の門（match の形・規則列・全欄の幾何の整除条件）。
+ * Guard on one profile (shape of match, the rules, divisibility conditions of the geometry in every
+ * field).
  *
- * 幾何は生成時（`gemmWgsl` / i8a8 の生成器）にも同じ門を通るが、ここで先に落とすのは、壊れた
- * プロファイルを**その op に当たるまで**気づけない形にしないため（Session 構築で 1 度だけ見る）。
- * NOTE: w4a8 の `groupSize % tileK` は資産の group 長に依るので、ここでは見られない（生成時の
- * `assertI8a8GroupGeometry` の担当）。
+ * The geometry also passes the same guards at generation time (`gemmWgsl` / the i8a8 generators);
+ * it is rejected here first so that a broken profile is not left unnoticed **until it hits that
+ * op** (checked once at Session construction).
+ * NOTE: the w4a8 `groupSize % tileK` depends on the asset's group length, so it cannot be checked
+ * here (the job of `assertI8a8GroupGeometry` at generation time).
  *
- * 受けるのは unknown で、通った値を {@link GeometryProfile} へ絞る型述語（`acquireGpu` は JS の呼び手や保存物から
- * 組んだ値も受けるので、欄の欠けや型違いを TypeError ではなくこの門の {@link CodegenError} で落とす）。欄の型は
- * 全て見る（`provenance` を含む）が、未知の欄は拒まない（それは保存物を読む `parseGeometryProfileJson` の担当）。
- * device の上限は見ない（{@link assertGeometryProfileWithinLimits} の担当 — adapter が要る）。
+ * It takes unknown and is a type predicate that narrows a passing value to {@link GeometryProfile}
+ * (`acquireGpu` also takes values built by JS callers or from stored data, so a missing field or a
+ * wrong type is rejected with this guard's {@link CodegenError} rather than a TypeError). It checks
+ * the type of every field (including `provenance`) but does not reject unknown fields (that is the
+ * job of `parseGeometryProfileJson`, which reads stored data). It does not check device limits (the
+ * job of {@link assertGeometryProfileWithinLimits} — that needs an adapter).
  */
 export const assertGeometryProfile: (profile: unknown) => asserts profile is GeometryProfile = (
   profile,
@@ -298,8 +338,9 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
     if (architecture !== undefined && vendor === undefined) {
       throw new CodegenError(`${where}: match の architecture は vendor と対で指定する`);
     }
-    // description は機種の名前で、vendor / architecture の内側を分けるためだけの欄。単独で許すと
-    // 別 vendor の同名（または空の vendor の機）に当たる形が作れる。
+    // description is the model name, a field only for splitting within a vendor / architecture. If
+    // it were allowed alone, a rule could hit a machine of another vendor with the same name (or
+    // one with an empty vendor).
     if (description !== undefined && (vendor === undefined || architecture === undefined)) {
       throw new CodegenError(
         `${where}: match の description は vendor と architecture の両方と組で指定する`,
@@ -345,8 +386,9 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
 };
 
 /**
- * 上限の門が見る device の limits（`GPUSupportedLimits` のうち幾何だけで決まる 4 欄 — {@link assertGeometryProfileWithinLimits}）。
- * `acquireGpu` の計画した requiredLimits（RequiredLimits）はそのまま渡せる。
+ * The device limits the limit guard checks (the 4 fields of `GPUSupportedLimits` decided by the
+ * geometry alone — {@link assertGeometryProfileWithinLimits}). The requiredLimits planned by
+ * `acquireGpu` (RequiredLimits) can be passed as is.
  */
 export type WorkgroupLimits = {
   readonly maxComputeInvocationsPerWorkgroup: number;
@@ -355,30 +397,39 @@ export type WorkgroupLimits = {
   readonly maxComputeWorkgroupStorageSize: number;
 };
 
-/** 上限超えの文言の幾何の綴り（どの幾何かを値で名指す — 欄の名前だけでは持ち込みの表を直せない）。 */
+/**
+ * Spelling of the geometry in the over-limit message (names the geometry by its values — the field
+ * name alone is not enough to fix a table brought in from outside).
+ */
 const geometryLabel = (geometry: GemmGeometry | I8a8Geometry): string =>
   `regM=${geometry.regM} regN=${geometry.regN} wgX=${geometry.wgX} wgY=${geometry.wgY}${
     "tileK" in geometry ? ` tileK=${geometry.tileK}` : ""
   }`;
 
 /**
- * プロファイルの全欄の幾何が device の workgroup の上限に収まることの門（門を通った表だけを受ける —
- * 順序は {@link assertGeometryProfile} → これ）。超えた欄を全て名指して {@link CodegenError} で落とす。
+ * Guard that the geometry of every field of a profile fits the device's workgroup limits (takes only
+ * tables that passed the shape guard — the order is {@link assertGeometryProfile} → this). It names
+ * every field that exceeds a limit and rejects with a {@link CodegenError}.
  *
- * 見る上限は WebGPU の compute パイプライン検証と同じ 4 つ: `@workgroup_size(wgX, wgY)` の成分ごと
- * （`maxComputeWorkgroupSizeX` / `Y`）・スレッド数 wgX · wgY（`maxComputeInvocationsPerWorkgroup`）・
- * 共有タイルの workgroup storage（`maxComputeWorkgroupStorageSize` — {@link gemmWorkgroupStorageBytes} /
- * {@link i8a8WorkgroupStorageBytes}）。
- * MUST: 注入された表は device を作る前にここを通す。超えた幾何のパイプラインは検証エラーになり、その op に
- * 当たるまで（Session の構築・最初の実行）気づけない — 壊れた表で device を作らない、と同じ規律。
- * GEMM の共有メモリは f32 変種（f16 の 2 倍）で数える: 表は計算変種を選ばずに全ての変種へ当たるので、
- * 大きい方が収まらない表はどこかの経路で落ちる。
- * NOTE: dispatch 数の上限（`maxComputeWorkgroupsPerDimension`）は見ない。あちらは幾何と**実行時の shape** の
- * 組で決まり（`ceil(M / tileM)` など）、表だけでは判定できない — dispatch を組む時点の
- * `tiledWorkgroups` が `DispatchLimitError` で落とす担当（src/codegen/dispatch.ts）。こちらは shape に依らない
- * 1 workgroup の形だけを見る。
- * NOTE: 埋め込みの表と既定の表は WebGPU の既定の上限（256 / 256 / 256 / 16,384 B — どの device も最低これを
- * 出す）で通ることをテストが縛るので、自動選択の経路ではここを通さない。
+ * The limits checked are the same 4 as WebGPU's compute pipeline validation: each component of
+ * `@workgroup_size(wgX, wgY)` (`maxComputeWorkgroupSizeX` / `Y`), the thread count wgX · wgY
+ * (`maxComputeInvocationsPerWorkgroup`), and the workgroup storage of the shared tiles
+ * (`maxComputeWorkgroupStorageSize` — {@link gemmWorkgroupStorageBytes} /
+ * {@link i8a8WorkgroupStorageBytes}).
+ * MUST: an injected table passes here before the device is created. A pipeline with an exceeding
+ * geometry fails validation, which goes unnoticed until that op is hit (Session construction, the
+ * first run) — the same discipline as "do not create a device with a broken table".
+ * GEMM shared memory is counted for the f32 variant (twice f16): a table applies to every variant
+ * without choosing the compute variant, so a table where the larger one does not fit fails on some
+ * path.
+ * NOTE: the dispatch count limit (`maxComputeWorkgroupsPerDimension`) is not checked. It is decided
+ * by the geometry together with the **run-time shape** (`ceil(M / tileM)` and so on) and cannot be
+ * judged from the table alone — that is the job of `tiledWorkgroups`, which rejects with
+ * `DispatchLimitError` when the dispatch is built (src/codegen/dispatch.ts). This guard checks only
+ * the shape of one workgroup, which does not depend on the shape of the data.
+ * NOTE: tests pin that the embedded tables and the default table pass under WebGPU's default limits
+ * (256 / 256 / 256 / 16,384 B — every device provides at least these), so the auto-selection path
+ * does not go through here.
  */
 export const assertGeometryProfileWithinLimits = (
   profile: GeometryProfile,
@@ -428,8 +479,9 @@ export const assertGeometryProfileWithinLimits = (
 };
 
 /**
- * 選択の照合に使う adapter の欄（`GpuContext.adapterInfo` はそのまま渡せる）。`description` は
- * `GPUAdapterInfo.description` そのままで、空文字は「無い」と同じ扱い（フラグ無しの Chrome は空を返す）。
+ * The adapter fields used for matching in the selection (`GpuContext.adapterInfo` can be passed as
+ * is). `description` is `GPUAdapterInfo.description` as is, and an empty string is treated the same
+ * as absent (Chrome without the flag returns an empty one).
  */
 type AdapterIdentity = {
   readonly vendor: string;
@@ -438,19 +490,22 @@ type AdapterIdentity = {
 };
 
 /**
- * adapter に当てるプロファイルを 1 本選ぶ（Session 構築で 1 度だけ呼ぶ）。
+ * Chooses one profile for the adapter (called once at Session construction).
  *
- * 選択順（決定的）: ① `match` の vendor・architecture・description が全て一致 → ② description
- * 未指定で vendor と architecture が一致 → ③ architecture 未指定で vendor だけ一致 →
- * ④ {@link DEFAULT_GEOMETRY_PROFILE}。照合は文字列の完全一致（正規化も前方一致も部分一致もしない）。
- * adapter の description が空・無いなら①には当たらない。`match` を省いた表は照合しない（注入専用）が、
- * 門と id の重複検査は受ける（壊れた表を一覧に置いたまま気づけない形にしない）。
+ * Selection order (deterministic): ① vendor, architecture and description of `match` all match →
+ * ② description unset, vendor and architecture match → ③ architecture unset, only vendor matches →
+ * ④ {@link DEFAULT_GEOMETRY_PROFILE}. Matching is exact string equality (no normalisation, no prefix
+ * or substring matching). If the adapter's description is empty or absent, ① never matches. A table
+ * without `match` is not matched (injection only), but it still goes through the guard and the
+ * duplicate-id check (so a broken table is not left in the list unnoticed).
  *
- * MUST: 同じ順位に 2 本当たりうる一覧は fail loudly — 一覧の並び順で黙って 1 本を選ぶと、一覧の
- * 編集だけで選択が変わる。**当たった adapter に限らず一覧そのもので落とす**（同じ `match` を持つ
- * 2 本は、その `match` の機でだけ衝突する — 他の機の CI では見えないまま残る）。
- * MUST: 類似度（GPU 名の近さ等）で最近傍を選ばない。環境キーごとの参照 sha の行（ADR 0106）と
- * 「その機がどの幾何で走ったか」の対応が崩れる。
+ * MUST: a list in which 2 tables can hit the same rank fails loudly — silently choosing one by list
+ * order would let an edit of the list alone change the selection. **The list itself is rejected,
+ * not only for the adapter that hits it** (2 tables with the same `match` collide only on a machine
+ * with that `match` — on other machines' CI it would stay invisible).
+ * MUST: do not choose the nearest neighbour by similarity (closeness of GPU names and so on). That
+ * would break the correspondence between the reference sha rows per environment key (ADR 0106) and
+ * "which geometry that machine ran with".
  */
 export const selectGeometryProfile = (
   adapter: AdapterIdentity,
@@ -472,7 +527,7 @@ export const selectGeometryProfile = (
           "注入専用の表は match を省く）",
       );
     }
-    // JSON の配列形は区切り文字の衝突が起きない（`a/b` + `c` と `a` + `b/c` を取り違えない）。
+    // The JSON array form cannot collide on a separator (`a/b` + `c` is not confused with `a` + `b/c`).
     const match = JSON.stringify([vendor, architecture ?? null, description ?? null]);
     if (matches.has(match)) {
       throw new CodegenError(
@@ -485,7 +540,8 @@ export const selectGeometryProfile = (
     }
     matches.add(match);
   }
-  // match を省いた表は `profile.match?.vendor` が undefined で、文字列の adapter.vendor に一致しない。
+  // A table without match has `profile.match?.vendor` undefined, which never equals the string
+  // adapter.vendor.
   const described = adapter.description === "" ? undefined : adapter.description;
   const withDescription =
     described === undefined
@@ -513,24 +569,27 @@ export const selectGeometryProfile = (
 };
 
 /**
- * 行数 M から幾何を引く（matmul / bmm / linear の 3 経路）。
+ * Looks up the geometry from the row count M (the 3 paths matmul / bmm / linear).
  *
- * MUST: 導出相はキー・WGSL・dispatch の 3 つへ**この 1 回の返り値**を通す（片方だけ別の幾何に
- * なるとキャッシュに載った WGSL と dispatch 数が噛み合わず、出力タイルが例外なしに欠ける）。
+ * MUST: the derivation phase passes **the return value of this one call** to all three of key, WGSL
+ * and dispatch (if one of them got a different geometry, the cached WGSL and the dispatch count would
+ * not match, and output tiles would be missing without any exception).
  */
 export const gemmRowsGeometry = (profile: GeometryProfile, rows: number): GemmGeometry => {
   assertU32Params("幾何の選択", { "行数 M": rows });
   assertGemmRowsRules(profile.gemmRows, `幾何プロファイル '${profile.id}'`);
   const rules = profile.gemmRows;
-  // 規則列の門を通った列は最後が Infinity なので、u32 の行数は必ずどれかに当たる。
+  // Rules that passed the guard end with Infinity, so a u32 row count always hits one of them.
   return (rules.find((rule) => rows <= rule.maxRows) ?? rules[rules.length - 1]).geometry;
 };
 
 /**
- * conv2d の m タイルのクラス（`conv2dIgemmMTile` の返り値 64 / 32）からプロファイルの幾何を引く。
+ * Looks up the profile's geometry from the conv2d m-tile class (64 / 32 as returned by
+ * `conv2dIgemmMTile`).
  *
- * MUST: クラスは 2 値だけ。それ以外の m タイルは述語と表の食い違い（片方だけ値を足した）なので
- * fail loudly — 近い方へ丸めると、測っていないクラスに別クラスの幾何が黙って当たる。
+ * MUST: there are only 2 classes. Any other m tile means the predicate and the table disagree (a
+ * value was added to only one of them), so fail loudly — rounding to the nearer one would silently
+ * apply another class's geometry to a class that was not measured.
  */
 export const conv2dProfileGeometry = (profile: GeometryProfile, mTile: number): GemmGeometry => {
   if (mTile === GEMM_TILE) return profile.conv2d.rows64;

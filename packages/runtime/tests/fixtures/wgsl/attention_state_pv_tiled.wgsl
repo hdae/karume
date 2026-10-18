@@ -1,4 +1,4 @@
-// karume attention_state_pv (states 形の O = P @ V, P = exp(S − m)·inv は非実体化, f32, GEMM 骨格の V 行タイル共有, レジスタ 16x16 タイル / 1 スレッド 1x4 / wg 4x16)
+// karume attention_state_pv (states-shaped O = P @ V, P = exp(S − m)·inv not materialised, f32, shared V row tiles of the GEMM skeleton, レジスタ 16x16 タイル / 1 スレッド 1x4 / wg 4x16)
 struct Lengths {
   past: u32,
   query: u32,
@@ -40,7 +40,8 @@ fn effective_rows(query: u32) -> u32 {
   return min(dims.m, query - dims.row_offset);
 }
 
-// V の 2 源（③ の slot_v / ins_v と同じ踏み分け）。行頭は充填側が K タイルごとに作る
+// The 2 sources of V (the same split as slot_v / ins_v of ③). The fill side builds the row start
+// per K tile
 fn v_read(from_slot: bool, index: u32) -> f32 {
   if (from_slot) {
     return slot_v[index];
@@ -48,8 +49,8 @@ fn v_read(from_slot: bool, index: u32) -> f32 {
   return ins_v[index];
 }
 
-// 共有 A タイル（16 行 × K 16・スカラ格納）と
-// 共有 B タイル（K 16 × 列 quad 4・列方向を vec4 に束ねた形）
+// Shared A tile (16 rows × K 16, scalar storage) and
+// shared B tile (K 16 × 4 column quads, column direction grouped into vec4)
 var<workgroup> sa: array<f32, 256>;
 var<workgroup> sb: array<vec4<f32>, 64>;
 
@@ -59,44 +60,46 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let tid = lid.y * 4u + lid.x;
-  // 論理長は uniform（context 所有）なので workgroup 一様 — 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすための前提
+  // The logical lengths are uniform (owned by the context), so workgroup-uniform — the premise for the
+  // inner workgroupBarrier to meet WGSL's uniformity requirement
   let past = lengths.past;
   let live = live_columns(past, lengths.query);
   let base_col = column_base(past);
   let rows_live = effective_rows(lengths.query);
   let z = wid.z;
   let kv_plane = z;
-  // A（S）と行統計はブロック相対（③ の (z · rows_block + 局所行) · col_cap と同じ）、
-  // O は chunk 全体 [B·H, M, D] の row_offset 行目から書く
+  // A (S) and the row statistics are block-relative (the same as ③'s (z · rows_block + local row) ·
+  // col_cap), and O is written from row row_offset of the whole chunk [B·H, M, D]
   let abase = z * dims.m * dims.k;
   let cbase = (z * dims.chunk_rows + dims.row_offset) * dims.n;
   let rbase = z * dims.m;
-  // A タイルの担当（16 行 × 4 quad を 64 スレッドで 1 巡）
+  // A tile assignment (16 rows × 4 quads over 64 threads in 1 rounds)
   let ar = tid / 4u;
   let aq = tid % 4u;
   let arow0 = wid.y * 16u + ar;
   let arow_base0 = abase + arow0 * dims.k;
   let sa_base0 = ar * 16u + aq * 4u;
-  // 端タイルでは arow >= m がありうるので添字を 0 へ倒す（読んだ値は arow < m の枝でしか
-  // 使われない）。範囲外の stats を読むこと自体は WGSL の境界付きアクセスで安全
+  // On edge tiles arow >= m can happen, so the index falls back to 0 (the value read is used only in the
+  // arow < m branch). Reading stats out of range is itself safe under WGSL's bounded access
   let stat_at0 = select(0u, (rbase + arow0) * 2u, arow0 < rows_live);
   let row_max0 = stats[stat_at0];
   let row_inv0 = stats[stat_at0 + 1u];
-  // B タイルの担当（K 16 行 × 列 quad 4 を 64 スレッドで 1 巡）
+  // B tile assignment (K 16 rows × 4 column quads over 64 threads in 1 rounds)
   let bk0 = tid / 4u;
   let bcq = tid % 4u;
   let bcol = wid.x * 16u + bcq * 4u;
-  // K ループは live 列まで。**有効行を 1 行も含まない行タイルは 1 周も回さない**（③ の
-  // pad 行が live を走査しないことの写し — 仕事量 ∝ Q）。wid.y 由来なので workgroup 一様で、
-  // 内側の workgroupBarrier の一様性要件を壊さない
+  // The K loop goes up to the live columns. **A row tile with not a single valid row does not
+  // iterate at all** (the counterpart of ③'s pad rows not scanning live — work ∝ Q). It derives
+  // from wid.y, so it is workgroup-uniform and does not break the uniformity requirement of the
+  // inner workgroupBarrier
   let k_live = select(0u, live, wid.y * 16u < rows_live);
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner workgroupBarrier
+  // to meet WGSL's uniformity requirement
   let tiles = (k_live + 15u) / 16u;
   var acc0_0 = vec4<f32>(0.0);
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める。内積に寄与しないので端数 shape でも結果は変わらない
+    // Fill out-of-range entries with 0. They do not contribute to the inner product, so
+    // remainder shapes give the same result
     let ak0 = t * 16u + aq * 4u;
     var av0 = vec4<f32>(0.0);
     if (arow0 < rows_live) {
@@ -120,7 +123,8 @@ fn main(
     let brow0 = t * 16u + bk0;
     var bv4_0 = vec4<f32>(0.0);
     if (brow0 < live) {
-      // 列 col の V 行頭（③ と同式）。K タイルごとに変わるので prologue へは畳めない
+      // V row start of column col (same expression as ③). It changes per K tile, so it cannot be
+      // folded into the prologue
       let vcol0 = base_col + brow0;
       let vpast0 = vcol0 < past;
       var vrow_base0 = 0u;
@@ -144,16 +148,16 @@ fn main(
     }
     sb[bk0 * 4u + bcq] = bv4_0;
     workgroupBarrier();
-    // 共有ロード 2 回（B の vec4 1 + A のスカラ 1）で 4 MAC。
-    // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
-    // 完全に一致する。
+    // 2 shared loads (1 vec4 of B + 1 scalars of A) give 4 MACs.
+    // The reduction is sequential in ascending k, and the addition order per output element matches
+    // the 16×16 kernel with 1 output per thread exactly.
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
       let bv0 = sb[kk * 4u + lid.x];
       acc0_0 = acc0_0 + sa[(lid.y * 1u + 0u) * 16u + kk] * bv0;
     }
     workgroupBarrier();
   }
-  // 行は rows_block 全て（③ と同じ full-write）。pad 行は acc ではなく**厳密 0**
+  // All rows of rows_block (full-write, as in ③). Pad rows get **exactly 0**, not acc
   let ocol = wid.x * 16u + lid.x * 4u;
   let orow0 = wid.y * 16u + lid.y * 1u;
   if (orow0 < dims.m) {

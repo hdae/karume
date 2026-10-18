@@ -1,42 +1,48 @@
 /**
- * embedding（`out[…, h] = weight[index[…], h]`、値 f32 / 添字 i32）の固定カーネル。
+ * The fixed kernel of embedding (`out[…, h] = weight[index[…], h]`, f32 values / i32 indices).
  *
- * 出力・weight とも連続レイアウトで、出力の平坦添字 `i` から `row = i / H`・`col = i % H` を
- * 作れば読み出しは `weight[index[row] * H + col]` の 1 本で足りる（H = weight の最終次元）。
+ * Output and weight are both contiguous, so with `row = i / H` and `col = i % H` from the output's
+ * flat index `i`, one read `weight[index[row] * H + col]` suffices (H = the weight's last
+ * dimension).
  *
- * MUST: grid-stride ループ前提。1 次元の dispatch 上限（仕様既定 65535）は実モデルで超える
- * （実測は V=22012 / H=1024）。
+ * MUST: grid-stride loop. Real models exceed the one-dimensional dispatch limit (spec default
+ * 65535) (measured: V=22012 / H=1024).
  *
- * ## `padding_idx` は forward に効かない（契約 — ADR 0012）
+ * ## `padding_idx` has no effect on forward (contract — ADR 0012)
  *
- * torch の `padding_idx` は「勾配で padding 行を更新しない」ための欄で、順伝播は素の行
- * gather と完全に同じ（`F.embedding` の forward も参照しない）。したがってこのカーネルは
- * attrs を 1 つも受け取らない。契約表（src/ops.ts）が受理して検証するのは、無視するために
- * 落とすと「未知 attr は fail loudly」の規律に穴が開くため。
+ * torch's `padding_idx` is a field for "do not update the padding row through gradients"; the
+ * forward pass is exactly a plain row gather (`F.embedding`'s forward does not reference it
+ * either). So this kernel takes no attrs at all. The contract table (src/ops.ts) accepts and
+ * validates it because dropping it in order to ignore it would open a hole in the "unknown attrs
+ * fail loudly" discipline.
  *
- * ## 範囲外添字の扱い（gather と同じ裁定 — src/kernels/gather.ts）
+ * ## Out-of-range indices (the same ruling as gather — src/kernels/gather.ts)
  *
- * 契約は `0 <= index < V`。違反は**モデル側の誤り**だが、起きたときに黙って別の行を返さない
- * ことを優先する: **GPU は範囲外の要素にだけ NaN（{@link EMBEDDING_OOB_BITS}）を書き**、
- * **CPU 参照は throw** する。カーネルから throw はできず、host へ通知するには run ごとの
- * デバイス側フォールト旗 + readback（新しい診断チャネル）が要るのでこの波では採らない。
+ * The contract is `0 <= index < V`. A violation is **an error on the model side**, but when it
+ * happens, not silently returning another row takes priority: **the GPU writes NaN
+ * ({@link EMBEDDING_OOB_BITS}) only to the out-of-range elements**, and **the CPU reference
+ * throws**. A kernel cannot throw, and notifying the host would need a per-run device-side fault
+ * flag + readback (a new diagnostic channel), so that is not adopted in this phase.
  *
- * MUST: NaN のビット列は params で運ぶ。WGSL には NaN リテラルが無く、`bitcast<f32>(...)` を
- * 定数式で書くと「const-expression が NaN」としてシェーダ生成エラーになりうる実装がある。
+ * MUST: the NaN bit pattern travels in params. WGSL has no NaN literal, and some implementations
+ * may fail shader creation with "const-expression is NaN" when `bitcast<f32>(...)` is written as a
+ * constant expression.
  *
- * 重みは格納の変種を持つ（`w=f32` / `w=f16` / `w=i8` / `w=i4` / `w=i2` — ADR 0018 / 0019 / 0069 /
- * 0097）。
- * 差は行の読み出し 1 行と scale の引き方だけで、範囲外添字の裁定は共通
- * （src/kernels/weight-storage.ts）。scale の読み出しは範囲内分岐の**内側**に置く
- * （範囲外の `pick` で `wscale` を引かない）。
+ * The weight has storage variants (`w=f32` / `w=f16` / `w=i8` / `w=i4` / `w=i2` — ADR 0018 / 0019
+ * / 0069 / 0097).
+ * They differ only in the one row-read line and in how the scale is read; the out-of-range ruling
+ * is shared (src/kernels/weight-storage.ts). The scale read sits **inside** the in-range branch
+ * (`wscale` is not read with an out-of-range `pick`).
  *
- * ## i4 の group scale は**要素ごと**（ADR 0069 決定 3）
+ * ## The i4 group scale is **per element** (ADR 0069 decision 3)
  *
- * i8 の scale は行（= 語彙エントリ）ごとで、行が決まればループ不変になる。i4 の group scale は
- * 量子化軸（重み `[V,D]` の D 軸）方向に `group_size` ごと変わるので、`col` から引き直す:
- * `wscale[pick * (D / group_size) + col / group_size]`。1 スレッドが 1 出力要素しか持たない
- * ので巻き上げる先が無く、linear（gemm.ts の充填が quad ごとに引く）と違いここで直に引く。
- * MUST: group 長は WGSL に shift として焼くので**キーにも入れる**（`:wi4g32`）。
+ * i8's scale is per row (= vocabulary entry) and becomes loop-invariant once the row is known.
+ * i4's group scale changes every `group_size` along the quantized axis (the D axis of the weight
+ * `[V,D]`), so it is re-read from `col`: `wscale[pick * (D / group_size) + col / group_size]`. One
+ * thread has only one output element, so there is nowhere to hoist it, and unlike linear (where
+ * gemm.ts's fill reads it per quad) it is read directly here.
+ * MUST: the group length is baked into the WGSL as a shift, so it **goes into the key too**
+ * (`:wi4g32`).
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -56,22 +62,25 @@ import {
 
 export const EMBEDDING_WORKGROUP_SIZE = 256;
 
-/** i8 / i4 変種の scale 束縛（出力の次の番号 — executor の bind entries と対で使う）。 */
+/** i8 / i4 scale binding (the number after the output — paired with the executor bind entries). */
 export const EMBEDDING_SCALE_BINDING = 4;
 
-/** 範囲外添字の出力に書く quiet NaN のビット列（f32）。 */
+/** The quiet NaN bit pattern (f32) written to the output for an out-of-range index. */
 export const EMBEDDING_OOB_BITS = 0x7fc00000;
 
 /**
- * i4 の group scale を**この 1 スレッドぶんだけ**束ねる行（i8 は行 scale・他は空文字）。
+ * The line that binds the i4 group scale **for this one thread only** (i8 binds the row scale;
+ * the others are the empty string).
  *
- * MUST: 束縛名は i8 と同じ {@link WEIGHT_SCALE_VAR} — {@link weightRead} へ渡す式を格納形で
- * 分岐させないため。行の位置（範囲内分岐の内側・字下げ）も i8 と揃える。
+ * MUST: the binding name is {@link WEIGHT_SCALE_VAR}, the same as i8 — so the expression passed to
+ * {@link weightRead} does not branch on the storage dtype. The line's position (inside the
+ * in-range branch, its indentation) also matches i8.
  */
 const embeddingScaleWgsl = (weight: WeightStorage, groupShift: number | undefined): string =>
   weight === "i4"
     ? `
-      // group scale は量子化軸（列）依存 — 1 スレッド 1 要素なので巻き上げず要素ごとに引く
+      // the group scale depends on the quantized axis (column) — one element per thread, so it is
+      // read per element, not hoisted
       let ${WEIGHT_SCALE_VAR} = wscale[u32(pick) * (dims.hidden >> ${groupShift}u) + (col >> ${groupShift}u)];`
     : weightScaleWgsl(weight, "u32(pick)", "      ");
 
@@ -83,7 +92,7 @@ export const embeddingKey = (weight: WeightStorage, groupSize?: number): string 
 };
 
 export const embeddingWgsl = (weight: WeightStorage, groupSize?: number): string =>
-  `// karume embedding (out[..., h] = weight[index[...], h], f32 / 添字 i32${weightNote(weight)})
+  `// karume embedding (out[..., h] = weight[index[...], h], f32 / index i32${weightNote(weight)})
 struct Dims {
   n: u32,
   hidden: u32,
@@ -106,7 +115,8 @@ fn main(
     let row = i / dims.hidden;
     let col = i % dims.hidden;
     let pick = index[row];
-    // 契約外の添字は別の行を返さず NaN で汚染する（カーネル doc の裁定）
+    // an index outside the contract contaminates with NaN instead of returning another row (the
+    // ruling in the kernel doc)
     if (pick < 0 || u32(pick) >= dims.vocab) {
       out[i] = bitcast<f32>(dims.oob);
     } else {${embeddingScaleWgsl(weight, i4GroupShift("embedding", weight, groupSize))}
@@ -118,14 +128,15 @@ fn main(
 `;
 
 /**
- * uniform の Dims（ちょうど 4 語 = 16 バイト — プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に
- * 固定〉の 16 バイト単位）。
- * `hidden` は 0 でもよい（そのとき `n` も 0 でカーネルのループが 1 度も回らない）。
+ * The uniform Dims (exactly 4 words = 16 bytes — the 16-byte unit of the project convention (the
+ * fusion pass fixes the same form in ADR 0040)).
+ * `hidden` may be 0 (then `n` is 0 too and the kernel's loop never runs).
  *
- * MUST: i4 の group 長は `hidden` を割り切ること（linear の `k % group_size` 門と同じ規律）。
- * 割り切れないと scale の添字 `pick·(hidden >> shift) + (col >> shift)` が行を跨いでずれ、
- * storage 読みの境界クランプにより**例外なしの沈黙誤値**になる。IR 経由は format 層の門が
- * 守るが、カーネル直呼びの経路はここが唯一の門。
+ * MUST: the i4 group length divides `hidden` (the same discipline as linear's `k % group_size`
+ * check). Otherwise the scale index `pick·(hidden >> shift) + (col >> shift)` shifts across rows,
+ * and the bounds clamp of storage reads turns it into **a silent wrong value without an
+ * exception**. Through the IR the format layer's check protects it, but for the direct kernel-call
+ * path this is the only check.
  */
 export const embeddingParams = (
   count: number,
@@ -134,12 +145,14 @@ export const embeddingParams = (
   groupSize?: number,
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("embedding params", { count, hidden, vocab });
-  // MUST: 重みの論理要素数 `vocab·hidden ≤ 2^32 − 1`。WGSL は `u32(pick) * dims.hidden + col` を
-  // u32 の平坦添字として作り、packed のローダ（i2 / i4）が語位置へ変える。積が折り返すと
-  // 最後の行が先頭行の整数コードを読み、例外の出ない誤値になる（i2 は約 1 GiB の格納で届く）。
+  // MUST: the weight's logical element count `vocab·hidden ≤ 2^32 − 1`. The WGSL builds
+  // `u32(pick) * dims.hidden + col` as a u32 flat index, and the packed loaders (i2 / i4) turn it
+  // into a word position. If the product wraps, the last row reads the integer codes of the first
+  // row — a wrong value without an exception (i2 reaches it at about 1 GiB of storage).
   assertU32Params("embedding params", { "vocab * hidden": vocab * hidden });
   if (hidden === 0 && count !== 0) {
-    // 0 除算になる組み合わせ（要素数 > 0 なのに hidden が無い）は shape 契約上ありえない。
+    // The combination that divides by zero (element count > 0 with no hidden) cannot arise under
+    // the shape contract.
     throw new CodegenError(`embedding params: hidden 0 で要素数 ${count} の組み合わせは無い`);
   }
   if (groupSize !== undefined && hidden % groupSize !== 0) {

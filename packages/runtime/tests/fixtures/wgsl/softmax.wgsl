@@ -29,7 +29,7 @@ fn main(
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 行の最大値（safe-softmax の減算項）
+    // ① row maximum (the subtrahend of safe-softmax)
     var hi = -3.402823466e38;
     var i = lid;
     while (i < dim) {
@@ -47,10 +47,10 @@ fn main(
       stride = stride / 2u;
     }
     let amax = scratch[0u];
-    // scratch の読み終わりを揃えてから ② で上書きする
+    // make every read of scratch finish before ② overwrites it
     workgroupBarrier();
 
-    // ② Σ exp(x - amax)（最大要素が exp(0) = 1 を出すので分母は必ず 1 以上）
+    // ② Σ exp(x - amax) (the largest element yields exp(0) = 1, so the denominator is always ≥ 1)
     var acc = 0.0;
     var j = lid;
     while (j < dim) {
@@ -68,10 +68,11 @@ fn main(
       stride2 = stride2 / 2u;
     }
     let inv = 1.0 / scratch[0u];
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // make every read of scratch[0] finish before the next row overwrites scratch[lid]
     workgroupBarrier();
 
-    // ③ 書き出し（exp は ② と同じ引数 — 同じ値が返るので決定的）
+    // ③ write-out (exp takes the same argument as in ② — it returns the same value, so it is
+    // deterministic)
     var o = lid;
     while (o < dim) {
       out[base + o] = exp(x[base + o] - amax) * inv;

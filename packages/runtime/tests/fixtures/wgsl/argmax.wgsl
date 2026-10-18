@@ -34,8 +34,8 @@ fn main(
   var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
-    // identity は値も index も最弱（番兵 dim = 候補なし）— 全 -inf 行でも最初の実要素が
-    // index 比較で勝つので、結果は決定的に最小 index になる
+    // the identity is the weakest in value and index (sentinel dim = no candidate) — even in
+    // an all -inf row a real element wins on index, so the result is always the smallest index
     var best = neg_inf;
     var best_at = dim;
     var i = lid;
@@ -66,7 +66,7 @@ fn main(
     if (lid == 0u) {
       out[row] = i32(scratch_index[0u]);
     }
-    // 次の行が scratch を上書きする前に scratch[0] の読み終わりを揃える
+    // make every read of scratch[0] finish before the next row overwrites scratch
     workgroupBarrier();
     row = row + nwg.x;
   }

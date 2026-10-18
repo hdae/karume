@@ -1,15 +1,18 @@
 /**
- * pad（最終次元の定数 0 埋め、f32）の固定カーネル。
+ * The fixed kernel of pad (constant-0 padding of the last dimension, f32).
  *
- * 入力は先行次元を平坦化した `[rows, in_len]` の連続レイアウトで、出力は
- * `[rows, left + in_len + right]`。実測は相対位置注意の value 側 `F.pad(p_attn, [w, w])`
- * のみ（recon §2）で、最終次元・定数 0・左右パディングの 1 形しか無い。
+ * The input is a contiguous `[rows, in_len]` layout with the leading dimensions flattened; the
+ * output is `[rows, left + in_len + right]`. The only measured use is `F.pad(p_attn, [w, w])` on
+ * the value side of relative-position attention (recon §2), so there is a single form: last
+ * dimension, constant 0, left and right padding.
  *
- * MUST: **1 dispatch で出力の全バイトを書く**（full-write 不変条件 — ADR 0014 / 0004）。
- * 範囲内は転写・範囲外は 0 を**書く**形にしてあり、「ゼロ初期化されたバッファへ範囲内だけ
- * copy する」形にはしない。バッファプールの再利用バッファはゼロ初期化されないため、
- * 後者はプールと両立しない（プロトタイプ既知の罠）。
- * MUST: grid-stride ループ前提。1 次元の dispatch 上限（仕様既定 65535）は実モデルで超える。
+ * MUST: **one dispatch writes every byte of the output** (the full-write invariant — ADR 0014 /
+ * 0004). In-range elements are copied and out-of-range elements are **written** as 0; it is not
+ * the form "copy only the in-range part into a zero-initialised buffer". Recycled buffers from the
+ * buffer pool are not zero-initialised, so the latter is incompatible with the pool (a trap known
+ * from the prototype).
+ * MUST: grid-stride loop. Real models exceed the one-dimensional dispatch limit (spec default
+ * 65535).
  */
 
 import { assertU32Params } from "../codegen/params.ts";
@@ -40,7 +43,7 @@ export const PAD_WGSL: string = [
   "  while (i < params.n) {",
   "    let col = i % params.out_len;",
   "    let row = i / params.out_len;",
-  "    // 範囲外にも必ず 0 を書く（未書き込みを 1 要素も残さない）",
+  "    // always write 0 out of range too (not a single element is left unwritten)",
   "    var value = 0.0;",
   "    if (col >= params.left && col < params.left + params.in_len) {",
   "      value = x[row * params.in_len + (col - params.left)];",
@@ -53,8 +56,8 @@ export const PAD_WGSL: string = [
 ].join("\n");
 
 /**
- * uniform の Params（行 op 族と同じく 4 語 = 16 バイト — プロジェクトの慣行〈融合パスは ADR 0040 で
- * 同じ形に固定〉の 16 バイト単位）。
+ * The uniform Params (4 words = 16 bytes, like the row-op family — the 16-byte unit of the project
+ * convention (the fusion pass fixes the same form in ADR 0040)).
  */
 export const padParams = (
   rows: number,

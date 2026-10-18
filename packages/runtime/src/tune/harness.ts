@@ -1,51 +1,65 @@
 /**
- * タイル幾何の掃引の計測核（perf-ledger K-70 — 掃引の入口 `runGeometrySweep`〈sweep.ts〉が使い、Deno の
- * CLI・ブラウザのページ `tools/gpu-lab` の掃引タブ・利用者アプリがその入口を共有する。使うのは WebGPU
- * 標準 API と runtime の src だけ）。
+ * The measurement core of the tile-geometry sweep (perf-ledger K-70 — used by the sweep entry point
+ * `runGeometrySweep` (sweep.ts), which the Deno CLI, the sweep tab of the browser page
+ * `tools/gpu-lab` (both removed in 0.15) and user applications share. It uses only the WebGPU
+ * standard API and the runtime's src).
  *
- * 同じ shape・同じ入力のまま**幾何だけ**を変えて 1 dispatch の時間を測る。WGSL とキーは runtime の
- * 生成入口に明示の幾何を渡して作る（`linearWgsl(…, geometry)` 等 — Session の経路は通らない）ので、
- * 測っているカーネルは本番のカーネルと同じ生成器の出力そのもの。
+ * It measures the time of one dispatch, changing **only the geometry** while keeping the same shape
+ * and the same inputs. WGSL and keys are built by passing an explicit geometry to the runtime's
+ * generator entry points (`linearWgsl(…, geometry)` etc. — the Session path is not used), so the
+ * measured kernels are exactly the output of the same generators as the production kernels.
  *
- * ## 計測の規約（measurement.ts — tools/opbench と共有する）
+ * ## Measurement protocol (measurement.ts — shared with tools/opbench, removed in 0.15)
  *
- * 1. 1 compute pass に同じ dispatch を `reps` 本積み、pass の `timestampWrites`（beginning / end）の
- *    差 ÷ `reps` を 1 dispatch の時間とする。`reps` は 1 pass ≈ {@link TARGET_PASS_MS} になる本数
- *    （{@link calibrateReps}・上限は掃引専用の {@link SWEEP_MAX_REPS}）。
- * 2. 代表値は `rounds` 回の **min**（熱ドリフトを吸う）。timestamp の差が負だった round は
- *    0 に丸めて記録に残すが min の候補から外す（全 round が負なら行を失敗にする）。
- * 3. 幾何ごとに、計測の前に pass を「累計 ≥ {@link WARMUP_NS} かつ ≥ {@link WARMUP_MIN_RUNS} 回」まで
- *    空回しする（opbench の `pinClocks` の下限と同じ・打ち切りも同じ {@link WARMUP_MAX_PASSES} 回）。
- *    累計は単位 `ns` なら GPU 時間、`deno-raw-tick` / `wall` なら壁時計で数える（raw tick は ns
- *    ではない）。
- * 4. ケースの末尾で既定幾何をもう 1 度測り、初回との比（`driftRatio`）をケース単位で残す — 掃引の
- *    間に熱やクロックが動いたかの目安（比の土台の既定の値が揺れていないか）。
- * 5. 絶対値を別機と比べない — 同じ機の中の比（既定幾何に対する速さ）だけが有効。
+ * 1. Stack `reps` copies of the same dispatch in one compute pass, and take the difference of the
+ *    pass's `timestampWrites` (beginning / end) ÷ `reps` as the time of one dispatch. `reps` is the
+ *    count that makes one pass ≈ {@link TARGET_PASS_MS} ({@link calibrateReps}; the upper bound is
+ *    the sweep-specific {@link SWEEP_MAX_REPS}).
+ * 2. The representative value is the **min** of `rounds` (absorbs thermal drift). A round whose
+ *    timestamp difference is negative is clamped to 0 and kept in the record, but excluded from the
+ *    min candidates (if every round is negative, the row fails).
+ * 3. For each geometry, before measuring, run passes idle until "cumulative ≥ {@link WARMUP_NS} and
+ *    ≥ {@link WARMUP_MIN_RUNS} runs" (the same lower bounds as opbench's `pinClocks`, with the same
+ *    cut-off of {@link WARMUP_MAX_PASSES} passes). The cumulative time counts GPU time for unit
+ *    `ns` and wall clock for `deno-raw-tick` / `wall` (raw ticks are not ns).
+ * 4. At the end of a case, measure the default geometry once more and keep the ratio to the first
+ *    (`driftRatio`) per case — a sign of whether heat or clocks moved during the sweep (whether the
+ *    default value the ratios rest on is unstable).
+ * 5. Never compare absolute values with another machine — only ratios within one machine (speed
+ *    relative to the default geometry) are valid.
  *
- * NOTE: `reps` の見積りの入力は opbench と違い **壁時計**（`reps` を倍々に積んで pass の壁時計が
- * 目標の 1/2 に届いたところで、直前の 2 点の傾き = 1 dispatch の増分を採る）。Deno は timestamp を
- * ns に換算しない（B570 で 1 tick = 52.08 ns）ので timestamp から見積ると本数が 52 倍に膨らみ、
- * Chrome は開発者フラグ無しでは 100 µs に丸めるので短い dispatch が 0 に読めて上限まで積む。
- * 傾きを採るのは submit → 完了の床（Deno で ≈ 11 ms — B570 の実測で平均だと本数が半分に出た）を
- * 消すため。timestamp-query が無い device は同じ規約を壁時計で回す（単位 `wall`）。
+ * NOTE: unlike opbench, the input of the `reps` estimate is the **wall clock** (stack `reps` by
+ * doubling until the pass's wall clock reaches half the target, then take the slope of the last two
+ * points = the increment of one dispatch). Deno does not convert timestamps to ns (1 tick = 52.08
+ * ns on B570), so an estimate from timestamps inflates the count 52-fold, and Chrome without
+ * developer flags rounds to 100 µs, so a short dispatch reads as 0 and gets stacked up to the
+ * bound. The slope is taken to cancel the submit-to-completion floor (≈ 11 ms on Deno — measured on
+ * B570, the average gave half the count). A device without timestamp-query runs the same protocol
+ * by wall clock (unit `wall`).
  *
- * ## 束縛の寸法（写し元）
+ * ## Binding sizes (where they are copied from)
  *
- * 束縛は本番と同じく**位置**で渡す: 各 {@link Launch} の `bindings` は recipe-builders が同じカーネルに
- * 渡している `binds` の並び（binding 1 から順）を写した表。表は PipelineCache が WGSL から採る
- * storage の役割（`roles` — src/gpu/pipeline-cache.ts `parseStorageRoles`）と突き合わせ、束縛の本数と
- * 書き込み先の位置が食い違えば行を失敗にする（{@link assertBindingRoles}）。役割の同じ束縛どうしの
- * 入れ替わりは役割では見えない — linear / matmul / bmm は CPU 参照の突合テスト（tests/tune_harness_test.ts）が検出器。寸法の
- * 式は各 recipe-builder の確保と params 関数から写す（{@link casePlan} の各枝に `file:line`）。
+ * Bindings are passed **by position**, as in production: each {@link Launch}'s `bindings` is a
+ * table copying the order of `binds` (from binding 1 on) that recipe-builders pass to the same
+ * kernel. The table is checked against the storage roles that PipelineCache takes from the WGSL
+ * (`roles` — `parseStorageRoles` in src/gpu/pipeline-cache.ts); if the binding count or the
+ * positions of the write targets disagree, the row fails ({@link assertBindingRoles}). A swap
+ * between bindings of the same role is invisible to the roles — for linear / matmul / bmm the
+ * CPU-reference comparison test (tests/tune_harness_test.ts) is the detector. The size formulas are
+ * copied from each recipe-builder's allocations and params functions (`file:line` on each branch of
+ * {@link casePlan}).
  *
- * ## ビット同一の確認
+ * ## Checking bit identity
  *
- * 幾何ごとに出力を 0 に戻してから回し、出力の digest（{@link outputDigest}）を既定幾何の行と比べる。
- * f32 は ADR 0022 決定 3（K 縮約順は幾何に依らない）で、i8a8 は整数縮約の厳密性で一致が期待される。
- * 一致しない幾何は、速くても採用条件を満たさない。
+ * For each geometry the output is reset to 0 before running, and the output digest
+ * ({@link outputDigest}) is compared with the default geometry's row. A match is expected: for f32
+ * by ADR 0022 decision 3 (the K reduction order does not depend on the geometry), for i8a8 by the
+ * exactness of the integer reduction. A geometry that does not match fails the adoption criteria
+ * however fast it is.
  */
-// WHY: 公開面（mod.ts）には errorScope のロック・device lost の競走・パイプラインキャッシュが無い。
-// 本番と同じキャッシュ（キー衝突の検出込み）とスコープ規律で測るため、内部面に意図して結合する。
+// WHY: the public surface (mod.ts) has no errorScope lock, no device-lost race and no pipeline
+// cache. This couples to the internal surface on purpose, to measure with the same cache
+// (key-collision detection included) and scope discipline as production.
 import { type GpuContext, RUNTIME_INTERNAL } from "../gpu/device.ts";
 import type { StorageRoles } from "../gpu/pipeline-cache.ts";
 import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gpu/error-scope.ts";
@@ -136,77 +150,101 @@ import {
 } from "./report.ts";
 
 /**
- * 掃引の `reps` の上限（計測の規約 1）。opbench の `MAX_REPS`（1024）は出力の readback とメモリが
- * 反復に比例して増えるので打ち切る上限だが、掃引は同じバッファに重ね打ちするので反復を増やしても
- * readback もメモリも増えない。1 dispatch 15 µs で 1 pass ≈ {@link TARGET_PASS_MS} に要る反復は
- * 5,334（1024 では 15 ms にしかならず、既定幾何の再測定比が 0.70〜1.55 と揺れた）・5 µs でも
- * 16,000 で上限内。opbench の `MAX_REPS` は変えない（あちらの打ち切りの理由はそのまま残る）。
+ * The sweep's upper bound of `reps` (protocol rule 1). opbench's `MAX_REPS` (1024; opbench was
+ * removed in 0.15) is a cut-off because its output readback and memory grow with the repetitions,
+ * but the sweep overdraws the same buffer, so more repetitions add neither readback nor memory. At
+ * 15 µs per dispatch, one pass ≈ {@link TARGET_PASS_MS} needs 5,334 repetitions (1024 gives only
+ * 15 ms, and the default geometry's re-measurement ratio fluctuated between 0.70 and 1.55); even at
+ * 5 µs, 16,000 stays within the bound. opbench's `MAX_REPS` is not changed (its reason for the
+ * cut-off still holds).
  */
 export const SWEEP_MAX_REPS = 16384;
 
 /**
- * 空回しの打ち切り（計測の規約 3 — opbench の `pinClocks` と同じ 64 回）。reps が上限で頭打ちの
- * 短い dispatch で累計が {@link WARMUP_NS} に届かないときに、空回しを際限なく続けない。
+ * The cut-off of idle runs (protocol rule 3 — the same 64 as opbench's `pinClocks`). Keeps idle
+ * runs from going on forever when a short dispatch, with reps capped at the bound, never reaches
+ * {@link WARMUP_NS} cumulatively.
  */
 export const WARMUP_MAX_PASSES = 64;
 
-/** `reps` の見積りを締める pass の壁時計（目標長の 1/2 — モジュール doc の NOTE）。 */
+/**
+ * The pass wall clock that closes the `reps` estimate (half the target length — the module doc's
+ * NOTE).
+ */
 const PROBE_MIN_NS = (TARGET_PASS_MS / 2) * 1e6;
 
-/** 出力の読み戻しと入力の書き込みの 1 区切り（64 MiB — 1 GiB の S を丸ごと JS に載せない）。 */
+/**
+ * One chunk of output readback and input writes (64 MiB — a 1 GiB S is never loaded into JS whole).
+ */
 export const DIGEST_CHUNK_BYTES = 64 * 1024 * 1024;
 
-/** 入力を書き込む区切り（生成した乱数列を持つ JS 側の峰を抑える）。 */
+/** The chunk for writing inputs (bounds the JS-side peak holding the generated random sequence). */
 const FILL_CHUNK_BYTES = 16 * 1024 * 1024;
 
 export type SweepSettings = {
-  /** 計測 round の数（既定は measurement.ts の `ROUNDS`）。 */
+  /** The number of measurement rounds (default: measurement.ts's `ROUNDS`). */
   readonly rounds: number;
-  /** 候補集合（geometries.ts の {@link CandidateSet}）。 */
+  /** The candidate set ({@link CandidateSet} in geometries.ts). */
   readonly candidateSet: CandidateSet;
-  /** timestamp-query が有効なときの単位（Chrome = `ns`・Deno = `deno-raw-tick`）。 */
+  /** The unit when timestamp-query is enabled (Chrome = `ns`, Deno = `deno-raw-tick`). */
   readonly timestampUnit: "ns" | "deno-raw-tick";
 };
 
 export type SweepHooks = {
-  /** 進捗 1 行（ページの状態行・CLI の標準エラー）。 */
+  /** One progress line (the page's status line, the CLI's standard error). */
   readonly onProgress?: (message: string) => void;
-  /** 行が 1 つ確定するたびに呼ぶ（既定幾何の行が先に来る）。 */
+  /** Called each time a row is final (the default geometry's row comes first). */
   readonly onRow?: (row: SweepRow) => void;
-  /** ケースを測り終えるたびに呼ぶ（そのケースの最後の行の後・既定幾何の再測定を含む）。 */
+  /**
+   * Called each time a case is fully measured (after the case's last row, including the default
+   * geometry's re-measurement).
+   */
   readonly onCase?: (summary: CaseSummary) => void;
-  /** 中断（今の幾何を測り終えたところで止める — 残りは行を作らない）。 */
+  /** Abort (stops once the current geometry is measured — no rows are made for the rest). */
   readonly signal?: AbortSignal;
 };
 
-/** 入力 1 本の中身（決定的な擬似乱数 — seed は資源の並び順で固定）。 */
+/**
+ * The contents of one input (deterministic pseudo-random — the seed is fixed by the resource
+ * order).
+ */
 export type Fill = "f32" | "f16" | "i8" | "scale" | "none";
 
-/** 資源 1 本。名前は資源表の中の識別子（カーネルを跨いで同じ名前は同じバッファ — WGSL の束縛名に揃える）。 */
+/**
+ * One resource. The name is its identifier within the resource table (the same name across kernels
+ * is the same buffer — aligned with the WGSL binding names).
+ */
 type ResourceSpec = {
   readonly name: string;
   readonly bytes: number;
   readonly fill: Fill;
 };
 
-/** 1 dispatch ぶんの生成物と寸法。 */
+/** The generated artifacts and sizes of one dispatch. */
 type Launch = {
   readonly key: string;
   readonly wgsl: string;
   readonly params: Uint32Array<ArrayBuffer>;
   /**
-   * binding 1 から順に渡す資源の名前（recipe-builders の `binds` の並びを写した表 — 本番と同じ
-   * 位置束縛）。`bindings[i]` が binding `i + 1`。
+   * The names of the resources passed from binding 1 on (a table copying the order of
+   * recipe-builders' `binds` — positional binding as in production). `bindings[i]` is binding
+   * `i + 1`.
    */
   readonly bindings: readonly string[];
-  /** そのカーネルが書く資源（WGSL の `read_write` と突き合わせる — {@link assertBindingRoles}）。 */
+  /**
+   * The resources the kernel writes (checked against the WGSL's `read_write` —
+   * {@link assertBindingRoles}).
+   */
   readonly writes: readonly string[];
   readonly workgroups: readonly [number, number, number];
 };
 
 export type CasePlan = {
   readonly resources: readonly ResourceSpec[];
-  /** 既定幾何で 1 度だけ回す前段（③PV の S と行統計を作る ①QK → ②）。 */
+  /**
+   * The prelude run once with the default geometry (①QK → ②, which make ③PV's S and row
+   * statistics).
+   */
   readonly prelude: readonly Launch[];
   readonly output: string;
   readonly defaultCandidate: GeometryCandidate;
@@ -230,19 +268,23 @@ const i8a8Of = (candidate: GeometryCandidate, where: string): I8a8Geometry => {
 };
 
 /**
- * 生の重みバッファの寸法 = 格納バイト長の 4 バイト切り上げ（src/runtime/session-build.ts:960 の
- * 生バイト席と同じ — f16 は 2 B / 要素・i8 は 1 B / 要素）。
+ * The size of a raw weight buffer = the stored byte length rounded up to 4 bytes (the same as the
+ * raw-byte classes at src/runtime/session-build.ts:905 — f16 is 2 B / element, i8 is 1 B /
+ * element).
  */
 const rawWeightBytes = (payloadBytes: number): number =>
   payloadBytes + ((4 - (payloadBytes % 4)) % 4);
 
-/** f32 linear（重み f16 格納）— src/runtime/recipe-builders/linear.ts:310-337 の GEMM 経路。 */
+/**
+ * f32 linear (f16-stored weights) — the GEMM path of src/runtime/recipe-builders/linear.ts:342-369.
+ */
 const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
   const { m, n, k } = sweepCase;
   const v4 = gemmUsesVec4(k, n);
   return {
     resources: [
-      // x[m,k] / W[n,k] / b[n] / out[m,n]（束縛 1..4 = binds の順・linear.ts:327-331。f16 は scale 無し）
+      // x[m,k] / W[n,k] / b[n] / out[m,n] (bindings 1..4 = the order of binds, linear.ts:360-364;
+      // f16 has no scale)
       { name: "x", bytes: m * k * F32, fill: "f32" },
       { name: "w", bytes: rawWeightBytes(n * k * 2), fill: "f16" },
       { name: "bias", bytes: n * F32, fill: "f32" },
@@ -250,8 +292,9 @@ const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
     ],
     prelude: [],
     output: "out",
-    // 掃引の既定 = 既定プロファイルの幾何（行数バケット `gemmGeometryForRows(m)` — 比の土台）。
-    // Session が実際に使う幾何は adapter のプロファイル（src/kernels/geometry-profile.ts）
+    // The sweep's default = the default profile's geometry (row-count bucket
+    // `gemmGeometryForRows(m)` — the ratio baseline). The geometry a Session actually uses is the
+    // adapter's profile (src/kernels/geometry-profile.ts)
     defaultCandidate: gemmCandidate(gemmGeometryForRows(m)),
     launch: (candidate) => {
       const geometry = gemmOf(candidate, sweepCase.id);
@@ -261,7 +304,7 @@ const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
         params: linearParams(m, n, k),
         bindings: ["x", "w", "bias", "out"],
         writes: ["out"],
-        // linear.ts:332-336
+        // linear.ts:365-369
         workgroups: [
           tiledWorkgroups(n, gemmTileN(geometry), limit, sweepCase.id),
           tiledWorkgroups(m, gemmTileM(geometry), limit, sweepCase.id),
@@ -272,28 +315,30 @@ const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
   };
 };
 
-/** f32 matmul — src/runtime/recipe-builders/linear.ts:65-107（buildMatmul）。 */
+/** f32 matmul — src/runtime/recipe-builders/linear.ts:67-107 (buildMatmul). */
 const matmulPlan = (sweepCase: MatmulCase, limit: number): CasePlan => {
   const { m, n, k } = sweepCase;
-  // linear.ts:77
+  // linear.ts:79
   const v4 = gemmUsesVec4(k, n);
   return {
     resources: [
-      // a[m,k] / b[k,n] / c[m,n]（束縛 1..3 = binds[0] / binds[1] / outs[0] の順・linear.ts:96-100。
-      // 名前は WGSL の束縛名 — kernels/gemm.ts の denseWgsl）
+      // a[m,k] / b[k,n] / c[m,n] (bindings 1..3 = in the order binds[0] / binds[1] / outs[0],
+      // linear.ts:96-100. The names are the WGSL binding names — denseWgsl in kernels/gemm.ts)
       { name: "a", bytes: m * k * F32, fill: "f32" },
       { name: "b", bytes: k * n * F32, fill: "f32" },
       { name: "c", bytes: m * n * F32, fill: "none" },
     ],
     prelude: [],
     output: "c",
-    // 掃引の既定 = 既定プロファイルの幾何（行数バケット `gemmGeometryForRows(m)` — 比の土台）。
-    // Session が実際に使う幾何は adapter のプロファイル（linear.ts:81 の gemmRowsGeometry）
+    // The sweep's default = the default profile's geometry (row-count bucket
+    // `gemmGeometryForRows(m)` — the ratio baseline).
+    // The geometry a Session actually uses is the adapter's profile (gemmRowsGeometry at
+    // linear.ts:84)
     defaultCandidate: gemmCandidate(gemmGeometryForRows(m)),
     launch: (candidate) => {
       const geometry = gemmOf(candidate, sweepCase.id);
       return {
-        // linear.ts:82-87
+        // linear.ts:84-86
         key: matmulKey(v4, m, geometry),
         wgsl: matmulWgsl(v4, m, geometry),
         params: matmulParams(m, n, k),
@@ -310,32 +355,33 @@ const matmulPlan = (sweepCase: MatmulCase, limit: number): CasePlan => {
   };
 };
 
-/** f32 bmm（バッチは z 軸）— src/runtime/recipe-builders/linear.ts:113-153（buildBmm）。 */
+/** f32 bmm (the batch on the z axis) — src/runtime/recipe-builders/linear.ts:114-155 (buildBmm). */
 const bmmPlan = (sweepCase: BmmCase, limit: number): CasePlan => {
   const { batch, m, n, k } = sweepCase;
-  // linear.ts:123
+  // linear.ts:124
   const v4 = gemmUsesVec4(k, n);
   return {
     resources: [
-      // a[batch,m,k] / b[batch,k,n] / c[batch,m,n]（束縛 1..3 = linear.ts:141-145）
+      // a[batch,m,k] / b[batch,k,n] / c[batch,m,n] (bindings 1..3 = linear.ts:143-147)
       { name: "a", bytes: batch * m * k * F32, fill: "f32" },
       { name: "b", bytes: batch * k * n * F32, fill: "f32" },
       { name: "c", bytes: batch * m * n * F32, fill: "none" },
     ],
     prelude: [],
     output: "c",
-    // 掃引の既定 = 既定プロファイルの幾何（行列 1 枚の m のバケット — linear.ts:124-126）
+    // The sweep's default = the default profile's geometry (the bucket of one matrix's m —
+    // linear.ts:125-128)
     defaultCandidate: gemmCandidate(gemmGeometryForRows(m)),
     launch: (candidate) => {
       const geometry = gemmOf(candidate, sweepCase.id);
       return {
-        // linear.ts:127-132（行窓無し）
+        // linear.ts:129-133 (no row window)
         key: bmmKey(v4, m, undefined, geometry),
         wgsl: bmmWgsl(v4, m, undefined, geometry),
         params: bmmParams(m, n, k),
         bindings: ["a", "b", "c"],
         writes: ["c"],
-        // linear.ts:146-151（バッチは z 軸の 1 workgroup = 1 バッチ）
+        // linear.ts:148-153 (the batch on the z axis, 1 workgroup = 1 batch)
         workgroups: [
           tiledWorkgroups(n, gemmTileN(geometry), limit, sweepCase.id),
           tiledWorkgroups(m, gemmTileM(geometry), limit, sweepCase.id),
@@ -346,19 +392,23 @@ const bmmPlan = (sweepCase: BmmCase, limit: number): CasePlan => {
   };
 };
 
-/** i8a8 linear（重み i8 per-channel）— src/runtime/recipe-builders/linear.ts:438-523 の ② GEMM。 */
+/**
+ * i8a8 linear (i8 per-channel weights) — the ② GEMM of
+ * src/runtime/recipe-builders/linear.ts:494-587.
+ */
 const i8a8LinearPlan = (sweepCase: LinearCase, limit: number, dp4a: boolean): CasePlan => {
   const { m, n, k } = sweepCase;
   const v4 = linearI8a8UsesVec4(n);
   return {
     resources: [
-      // 量子化済み活性 xq（i8 を 4 詰め・linear.ts:462）と per-token scale xs（linear.ts:463）。
-      // 本番は quantize_rows が作る — ここは同じ形式（kernels/quantize-rows.ts: 行 = token・
-      // `row·dim/4` 語・±127）の値を直接書く（① は幾何を持たないので掃引の外）
+      // The quantized activations xq (four i8 packed per word, linear.ts:519) and the per-token
+      // scale xs (linear.ts:520). In production quantize_rows makes them — here values of the same
+      // format (kernels/quantize-rows.ts: row = token, `row·dim/4` words, ±127) are written
+      // directly (① has no geometry, so it is outside the sweep)
       { name: "xq", bytes: m * (k / 4) * 4, fill: "i8" },
       { name: "xscale", bytes: m * F32, fill: "scale" },
-      // 重み i8 [n,k]（生バイト席）と per-channel scale [n,1]（format/container/codecs.ts の
-      // groupScaleShape + scaleBytes = n·4 B）。束縛は linear.ts:505-515
+      // The i8 weights [n,k] (a raw-byte class) and the per-channel scale [n,1] (groupScaleShape +
+      // scaleBytes in format/container/codecs.ts = n·4 B). Bindings: linear.ts:564-575
       { name: "w", bytes: rawWeightBytes(n * k), fill: "i8" },
       { name: "wscale", bytes: n * F32, fill: "scale" },
       { name: "bias", bytes: n * F32, fill: "f32" },
@@ -366,7 +416,7 @@ const i8a8LinearPlan = (sweepCase: LinearCase, limit: number, dp4a: boolean): Ca
     ],
     prelude: [],
     output: "out",
-    // 掃引の既定 = 既定プロファイルの i8a8 linear 幾何（比の土台）
+    // The sweep's default = the default profile's i8a8 linear geometry (the ratio baseline)
     defaultCandidate: i8a8Candidate(defaultI8a8Geometry("linear")),
     launch: (candidate) => {
       const geometry = i8a8Of(candidate, sweepCase.id);
@@ -376,7 +426,7 @@ const i8a8LinearPlan = (sweepCase: LinearCase, limit: number, dp4a: boolean): Ca
         params: linearI8a8Params(m, n, k),
         bindings: ["xq", "w", "bias", "out", "wscale", "xscale"],
         writes: ["out"],
-        // linear.ts:516-520
+        // linear.ts:576-580
         workgroups: [
           tiledWorkgroups(n, i8a8TileN(geometry), limit, sweepCase.id),
           tiledWorkgroups(m, i8a8TileM(geometry), limit, sweepCase.id),
@@ -388,8 +438,9 @@ const i8a8LinearPlan = (sweepCase: LinearCase, limit: number, dp4a: boolean): Ca
 };
 
 /**
- * ② 行統計（S の格納形に合わせた変種・regcache 無しの 2 回読み — ③PV の入力を作るだけなので
- * 速さは問わない）。params と dispatch は src/runtime/recipe-builders/attention.ts:432-443。
+ * ② Row statistics (the variant matching S's storage format, two reads without regcache — it only
+ * makes ③PV's input, so its speed does not matter). params and dispatch are
+ * src/runtime/recipe-builders/attention.ts:653-661.
  */
 const statsLaunch = (sweepCase: AttentionCase, limit: number): Launch => {
   const rows = sweepCase.batchHeads * sweepCase.m;
@@ -404,8 +455,9 @@ const statsLaunch = (sweepCase: AttentionCase, limit: number): Launch => {
 };
 
 /**
- * 融合 attention 共通の資源（src/runtime/recipe-builders/attention.ts）。S = `B·H·M·N·格納幅`
- * （:289 の scoreBytes・:370）・行統計 = `B·H·M·2` 語（:371）・O = `B·H·M·D` f32。
+ * Resources shared by fused attention (src/runtime/recipe-builders/attention.ts). S =
+ * `B·H·M·N·storage width` (scoreBytes at :496, :592), row statistics = `B·H·M·2` words (:593),
+ * O = `B·H·M·D` f32.
  */
 const attentionShared = (sweepCase: AttentionCase): ResourceSpec[] => {
   const { batchHeads, m, n, d } = sweepCase;
@@ -422,7 +474,7 @@ const attentionShared = (sweepCase: AttentionCase): ResourceSpec[] => {
   ];
 };
 
-/** f32 融合 attention（S は f32 格納）— src/runtime/recipe-builders/attention.ts:401-491。 */
+/** f32 fused attention (S stored in f32) — src/runtime/recipe-builders/attention.ts:425-734. */
 const attentionPlan = (sweepCase: AttentionCase, limit: number): CasePlan => {
   const { batchHeads, m, n, d, scale } = sweepCase;
   const qkV4 = gemmUsesVec4(d, n);
@@ -431,10 +483,10 @@ const attentionPlan = (sweepCase: AttentionCase, limit: number): CasePlan => {
     key: attentionQkKey(qkV4, "f32", "f32", false, false, false, geometry),
     wgsl: attentionQkWgsl(qkV4, "f32", "f32", false, false, false, geometry),
     params: attentionQkParams(m, n, d, scale),
-    // attention.ts:417-421（mask 無し）
+    // attention.ts:632-637 (no mask)
     bindings: ["q", "k", "s"],
     writes: ["s"],
-    // attention.ts:423-427
+    // attention.ts:638-642
     workgroups: [
       tiledWorkgroups(n, gemmTileN(geometry), limit, sweepCase.id),
       tiledWorkgroups(m, gemmTileM(geometry), limit, sweepCase.id),
@@ -444,12 +496,12 @@ const attentionPlan = (sweepCase: AttentionCase, limit: number): CasePlan => {
   const pv = (geometry: GemmGeometry): Launch => ({
     key: attentionPvKey(pvV4, "f32", "f32", false, false, geometry),
     wgsl: attentionPvWgsl(pvV4, "f32", "f32", false, false, geometry),
-    // attention.ts:476-478（m = M・n = D・k = N）
+    // attention.ts:696-698 (m = M, n = D, k = N)
     params: attentionPvParams(m, d, n),
-    // attention.ts:480-485
+    // attention.ts:700-705
     bindings: ["s", "v", "stats", "o"],
     writes: ["o"],
-    // attention.ts:486-490
+    // attention.ts:706-710
     workgroups: [
       tiledWorkgroups(d, gemmTileN(geometry), limit, sweepCase.id),
       tiledWorkgroups(m, gemmTileM(geometry), limit, sweepCase.id),
@@ -457,12 +509,14 @@ const attentionPlan = (sweepCase: AttentionCase, limit: number): CasePlan => {
     ],
   });
   const stagePv = sweepCase.stage === "pv";
-  // 掃引の既定 = 既定プロファイルの幾何（①QK / ③PV とも `defaultGemmGeometry()` — 比の土台）。
-  // Session が実際に使う幾何は adapter のプロファイル（src/kernels/geometry-profile.ts）
+  // The sweep's default = the default profile's geometry (`defaultGemmGeometry()` for both ①QK and
+  // ③PV — the ratio baseline). The geometry a Session actually uses is the adapter's profile
+  // (src/kernels/geometry-profile.ts)
   const fallback = defaultGemmGeometry();
   return {
     resources: [
-      // q[B·H,M,D] / k[B·H,N,D] / v[B·H,N,D]（rank-4 head-first の入力をバッチ軸に畳んだ形）
+      // q[B·H,M,D] / k[B·H,N,D] / v[B·H,N,D] (the rank-4 head-first inputs folded into the batch
+      // axis)
       { name: "q", bytes: batchHeads * m * d * F32, fill: "f32" },
       { name: "k", bytes: batchHeads * n * d * F32, fill: "f32" },
       ...(stagePv ? [{ name: "v", bytes: batchHeads * n * d * F32, fill: "f32" as const }] : []),
@@ -479,8 +533,8 @@ const attentionPlan = (sweepCase: AttentionCase, limit: number): CasePlan => {
 };
 
 /**
- * i8a8 融合 attention（S は f16 格納 = s16）— src/runtime/recipe-builders/attention.ts:378-469 と
- * 前段の確保 :1044-1047（q / k の量子化）・:1141-1142（Vᵀ の量子化）。
+ * i8a8 fused attention (S stored in f16 = s16) — src/runtime/recipe-builders/attention.ts:425-734
+ * and the preceding allocations :1276-1279 (q / k quantization) and :1376-1377 (Vᵀ quantization).
  */
 const i8a8AttentionPlan = (sweepCase: AttentionCase, limit: number, dp4a: boolean): CasePlan => {
   const { batchHeads, m, n, d, scale, score } = sweepCase;
@@ -490,10 +544,10 @@ const i8a8AttentionPlan = (sweepCase: AttentionCase, limit: number, dp4a: boolea
     key: attentionQkI8a8Key(qkV4, dp4a, score, geometry),
     wgsl: attentionQkI8a8Wgsl(qkV4, dp4a, score, geometry),
     params: attentionQkI8a8Params(m, n, d, scale),
-    // attention.ts:387-393
+    // attention.ts:609-615
     bindings: ["qq", "kq", "s", "qscale", "kscale"],
     writes: ["s"],
-    // attention.ts:394-398
+    // attention.ts:616-620
     workgroups: [
       tiledWorkgroups(n, i8a8TileN(geometry), limit, sweepCase.id),
       tiledWorkgroups(m, i8a8TileM(geometry), limit, sweepCase.id),
@@ -503,12 +557,12 @@ const i8a8AttentionPlan = (sweepCase: AttentionCase, limit: number, dp4a: boolea
   const pv = (geometry: I8a8Geometry): Launch => ({
     key: attentionPvI8a8Key(pvV4, dp4a, score, geometry),
     wgsl: attentionPvI8a8Wgsl(pvV4, dp4a, score, geometry),
-    // attention.ts:453-455（m = M・n = D・k = N）
+    // attention.ts:673-675 (m = M, n = D, k = N)
     params: attentionPvI8a8Params(m, d, n),
-    // attention.ts:457-463
+    // attention.ts:677-683
     bindings: ["s", "vq", "stats", "o", "vscale"],
     writes: ["o"],
-    // attention.ts:464-468
+    // attention.ts:684-688
     workgroups: [
       tiledWorkgroups(d, i8a8TileN(geometry), limit, sweepCase.id),
       tiledWorkgroups(m, i8a8TileM(geometry), limit, sweepCase.id),
@@ -516,19 +570,21 @@ const i8a8AttentionPlan = (sweepCase: AttentionCase, limit: number, dp4a: boolea
     ],
   });
   const stagePv = sweepCase.stage === "pv";
-  // 掃引の既定 = 既定プロファイルの i8a8 attention 幾何（①QK / ③PV で別・比の土台）
+  // The sweep's default = the default profile's i8a8 attention geometry (separate for ①QK / ③PV —
+  // the ratio baseline)
   const qkDefault = defaultI8a8Geometry("attention_qk");
   const pvDefault = defaultI8a8Geometry("attention_pv");
   return {
     resources: [
-      // qq / kq は i8 を 4 詰め（B·H·M·D / B·H·N·D バイト）・qs / ks は per-token scale（:1044-1047）
+      // qq / kq pack four i8 per word (B·H·M·D / B·H·N·D bytes), qs / ks are per-token scales
+      // (:1276-1279)
       { name: "qq", bytes: batchHeads * m * d, fill: "i8" },
       { name: "qscale", bytes: batchHeads * m * F32, fill: "scale" },
       { name: "kq", bytes: batchHeads * n * d, fill: "i8" },
       { name: "kscale", bytes: batchHeads * n * F32, fill: "scale" },
       ...(stagePv
         ? [
-            // Vᵀ[B·H,D,N] の per-column 量子化（行 = (b,h,d)・N 連続 — :1141-1142）
+            // Per-column quantization of Vᵀ[B·H,D,N] (row = (b,h,d), N contiguous — :1376-1377)
             { name: "vq", bytes: batchHeads * d * n, fill: "i8" as const },
             { name: "vscale", bytes: batchHeads * d * F32, fill: "scale" as const },
           ]
@@ -545,7 +601,7 @@ const i8a8AttentionPlan = (sweepCase: AttentionCase, limit: number, dp4a: boolea
   };
 };
 
-/** conv2d の implicit GEMM（重み f16 格納）— src/runtime/recipe-builders/conv.ts:357-397。 */
+/** conv2d's implicit GEMM (f16-stored weights) — src/runtime/recipe-builders/conv.ts:381-424. */
 const conv2dPlan = (sweepCase: Conv2dCase, limit: number): CasePlan => {
   const { channelsIn, channelsOut, height, width } = sweepCase;
   const dims: Conv2dDims = {
@@ -566,14 +622,15 @@ const conv2dPlan = (sweepCase: Conv2dCase, limit: number): CasePlan => {
     dilationW: 1,
     groups: 1,
   };
-  // conv.ts:366-370（M = Cout・N = Hout·Wout・K = Cin·Kh·Kw）
+  // conv.ts:390-394 (M = Cout, N = Hout·Wout, K = Cin·Kh·Kw)
   const n = height * width;
   const kFlat = channelsIn * 9;
   const v4 = conv2dUsesVec4(kFlat, width, 1);
   const mTile = conv2dIgemmMTile(channelsOut);
   return {
     resources: [
-      // x[B,Cin,H,W] / W[Cout,Cin,3,3] / b[Cout] / out[B,Cout,H,W]（束縛 1..4 = conv.ts:387-391）
+      // x[B,Cin,H,W] / W[Cout,Cin,3,3] / b[Cout] / out[B,Cout,H,W] (bindings 1..4 =
+      // conv.ts:413-417)
       { name: "x", bytes: channelsIn * n * F32, fill: "f32" },
       { name: "w", bytes: rawWeightBytes(channelsOut * kFlat * 2), fill: "f16" },
       { name: "bias", bytes: channelsOut * F32, fill: "f32" },
@@ -581,7 +638,8 @@ const conv2dPlan = (sweepCase: Conv2dCase, limit: number): CasePlan => {
     ],
     prelude: [],
     output: "out",
-    // 掃引の既定 = 既定プロファイルの conv2d 幾何（m タイルのクラス 64 / 32 行ごと・比の土台）
+    // The sweep's default = the default profile's conv2d geometry (per m-tile class of 64 / 32 rows
+    // — the ratio baseline)
     defaultCandidate: conv2dCandidate(gemmMTileGeometry(mTile)),
     launch: (candidate) => {
       const geometry = gemmOf(candidate, sweepCase.id);
@@ -591,7 +649,7 @@ const conv2dPlan = (sweepCase: Conv2dCase, limit: number): CasePlan => {
         params: conv2dIgemmParams(dims),
         bindings: ["x", "w", "bias", "out"],
         writes: ["out"],
-        // conv.ts:392-396
+        // conv.ts:418-422
         workgroups: [
           tiledWorkgroups(n, gemmTileN(geometry), limit, sweepCase.id),
           tiledWorkgroups(channelsOut, gemmTileM(geometry), limit, sweepCase.id),
@@ -602,7 +660,10 @@ const conv2dPlan = (sweepCase: Conv2dCase, limit: number): CasePlan => {
   };
 };
 
-/** ケースの資源表・前段・候補ごとの dispatch（テストは資源の並びと中身をここから引く）。 */
+/**
+ * A case's resource table, prelude and per-candidate dispatch (the tests take the resource order
+ * and contents from here).
+ */
 export const casePlan = (sweepCase: SweepCase, limit: number, dp4a: boolean): CasePlan => {
   switch (sweepCase.op) {
     case "linear":
@@ -622,7 +683,10 @@ export const casePlan = (sweepCase: SweepCase, limit: number, dp4a: boolean): Ca
   }
 };
 
-/** op 族ごとの候補（`set` の集合）。既定幾何は含まれていなくても {@link sweepCase} が先頭に足す。 */
+/**
+ * The candidates per op family (the set `set`). Even when the default geometry is not included,
+ * {@link sweepCase} adds it at the front.
+ */
 export const candidatesFor = (sweepCase: SweepCase, set: CandidateSet): GeometryCandidate[] => {
   switch (sweepCase.op) {
     case "linear":
@@ -642,10 +706,11 @@ const sortedList = (values: Iterable<number>): string =>
   [...values].sort((a, b) => a - b).join(", ");
 
 /**
- * 写した束縛表（{@link Launch} の `bindings` / `writes`）が WGSL の storage の役割（PipelineCache の
- * `roles`）と噛み合うかを見る: storage 束縛が binding 1..n にちょうど揃い、書き込み先（`read_write`）
- * の位置が表の `writes` の位置と一致すること。食い違いは写し元のカーネルか recipe-builders の並びが
- * 変わった印なので、推測で束縛せずに行を失敗にする。
+ * Checks that the copied binding table ({@link Launch}'s `bindings` / `writes`) fits the WGSL's
+ * storage roles (PipelineCache's `roles`): the storage bindings line up exactly at binding 1..n,
+ * and the positions of the write targets (`read_write`) match the positions of the table's
+ * `writes`. A disagreement signals that the source kernel or the order in recipe-builders changed,
+ * so the row fails instead of binding by guesswork.
  */
 export const assertBindingRoles = (
   launch: Pick<Launch, "key" | "bindings" | "writes">,
@@ -673,7 +738,7 @@ export const assertBindingRoles = (
   }
 };
 
-/** xorshift32（決定的・seed ≠ 0）。 */
+/** xorshift32 (deterministic, seed ≠ 0). */
 const xorshift = (seed: number): (() => number) => {
   let state = seed >>> 0 || 1;
   return () => {
@@ -686,26 +751,26 @@ const xorshift = (seed: number): (() => number) => {
 
 const TWO_POW_32 = 2 ** 32;
 
-/** 1 語ぶんの値を `fill` の形式で作る（u32 のビット列として返す）。 */
+/** Makes one word's value in the `fill` format (returned as u32 bits). */
 const wordFiller = (fill: Exclude<Fill, "none">, next: () => number): (() => number) => {
   const bits = new Float32Array(1);
   const word = new Uint32Array(bits.buffer);
   switch (fill) {
     case "f32":
-      // [-1, 1) の f32
+      // f32 in [-1, 1)
       return () => {
         bits[0] = (next() / TWO_POW_32) * 2 - 1;
         return word[0];
       };
     case "scale":
-      // 正の scale（|x| ≤ 1 を ±127 に載せた値の近傍 — [0.5, 1.5) / 127）
+      // Positive scales (near the value that maps |x| ≤ 1 onto ±127 — [0.5, 1.5) / 127)
       return () => {
         bits[0] = (0.5 + next() / TWO_POW_32) / 127;
         return word[0];
       };
     case "f16": {
-      // f16 の正規数（|v| ∈ [2^-4, 1)・符号は乱数）を 2 つ詰める（下位 = 偶数添字 —
-      // kernels/weight-storage.ts の `unpack2x16float(w[i >> 1])[i & 1]`）
+      // Packs two f16 normal numbers (|v| ∈ [2^-4, 1), random sign) (low half = even index —
+      // `unpack2x16float(w[i >> 1])[i & 1]` in kernels/weight-storage.ts)
       const half = (): number => {
         const r = next();
         return (((r >>> 12) & 1) << 15) | ((11 + (r & 3)) << 10) | ((r >>> 2) & 0x3ff);
@@ -713,8 +778,8 @@ const wordFiller = (fill: Exclude<Fill, "none">, next: () => number): (() => num
       return () => (half() | (half() << 16)) >>> 0;
     }
     case "i8":
-      // i8 を 4 つ詰める（レーン j = バイト j — `pack4xI8` / `unpack4xI8` と同じ並び）。値は
-      // [-127, 127]（量子化の格子 — kernels/quantize-rows.ts の ±127）
+      // Packs four i8 (lane j = byte j — the same order as `pack4xI8` / `unpack4xI8`). Values in
+      // [-127, 127] (the quantization grid — the ±127 of kernels/quantize-rows.ts)
       return () => {
         const r = next();
         let packed = 0;
@@ -728,20 +793,23 @@ const wordFiller = (fill: Exclude<Fill, "none">, next: () => number): (() => num
 };
 
 /**
- * 資源表の `index` 番目を埋める u32 語の列（決定的 — {@link createResources} とテストの CPU 参照が
- * 共有する 1 本の経路）。
+ * The sequence of u32 words that fills entry `index` of the resource table (deterministic — the
+ * single path shared by {@link createResources} and the tests' CPU reference).
  */
 export const resourceWordStream = (fill: Exclude<Fill, "none">, index: number): (() => number) =>
   wordFiller(fill, xorshift(0x9e3779b9 ^ (index + 1)));
 
-/** 計測に使う device まわりの束（掃引 1 回ぶん — 後始末は {@link destroySweepContext}）。 */
+/**
+ * The device-related bundle used for measuring (one sweep's worth — cleaned up by
+ * {@link destroySweepContext}).
+ */
 export type SweepContext = {
   readonly gpu: GpuContext;
   readonly unit: TimingUnit;
   readonly dp4a: boolean;
-  /** 出力の読み戻し（{@link DIGEST_CHUNK_BYTES} 区切り）。 */
+  /** Output readback (in {@link DIGEST_CHUNK_BYTES} chunks). */
   readonly staging: GPUBuffer;
-  /** pass の begin / end の timestamp（timestamp-query が無い device では無い）。 */
+  /** The pass's begin / end timestamps (absent on a device without timestamp-query). */
   readonly timestamps?: {
     readonly querySet: GPUQuerySet;
     readonly resolve: GPUBuffer;
@@ -750,8 +818,8 @@ export type SweepContext = {
 };
 
 /**
- * errorScope（validation + out-of-memory）で包んで `body` を同期実行する。区間は device 単位の
- * スコープロックの中（src/gpu/context.ts「errorScope 区間の不変条件」）。
+ * Runs `body` synchronously wrapped in errorScopes (validation + out-of-memory). The section is
+ * inside the per-device scope lock (src/gpu/context.ts "Invariants of errorScope sections").
  */
 const scoped = <T>(gpu: GpuContext, label: string, body: () => T): Promise<T> =>
   gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
@@ -769,8 +837,9 @@ const scoped = <T>(gpu: GpuContext, label: string, body: () => T): Promise<T> =>
   });
 
 /**
- * 1 command buffer を積んで完了まで待ち、submit → 完了の壁時計（ns）を返す。errorScope の pop は
- * submit と同じ同期区間で発行し、完了待ちと並べて待つ（pop の往復を壁時計に直列で足さない）。
+ * Submits one command buffer, waits for completion and returns the submit-to-completion wall clock
+ * (ns). The errorScope pop is issued in the same synchronous section as the submit and awaited
+ * alongside the completion wait (the pop's round trip is not added serially to the wall clock).
  */
 const submitAndWait = (
   gpu: GpuContext,
@@ -802,8 +871,8 @@ const submitAndWait = (
   });
 
 /**
- * 掃引の文脈を作る（timestamp の query set と読み戻しの staging を 1 本ずつ）。単位は
- * timestamp-query が有効なら `timestampUnit`、無ければ `wall`。
+ * Creates the sweep context (one timestamp query set and one readback staging buffer). The unit is
+ * `timestampUnit` when timestamp-query is enabled, `wall` otherwise.
  */
 export const createSweepContext = async (
   gpu: GpuContext,
@@ -837,16 +906,17 @@ export const createSweepContext = async (
   return {
     gpu,
     unit,
-    // i8a8 の整数内積の変種は数値が同一（kernels/linear-i8a8.ts）— 選択は本番の linear と同じ
-    // 「WGSL 言語機能の列挙」（src/runtime/session-build.ts:698 / :1090）。attention の本番は
-    // カナリア（gpu/attention-dp4a-canary.ts）で選ぶが、掃引は速さを見るだけなので回さない。
+    // The variants of i8a8's integer dot product have identical numerics (kernels/linear-i8a8.ts) —
+    // the choice is the same as production linear's, "the list of WGSL language features"
+    // (src/runtime/session-build.ts:610 / :1047). Production attention chooses by a canary
+    // (gpu/attention-dp4a-canary.ts), but the sweep only looks at speed, so it does not run it.
     dp4a: dp4aAvailable(gpu.wgslLanguageFeatures),
     staging: created.staging,
     ...(created.timestamps === undefined ? {} : { timestamps: created.timestamps }),
   };
 };
 
-/** 文脈の資源を返す（device は呼び手のもの — ここでは破棄しない）。 */
+/** Releases the context's resources (the device belongs to the caller — not destroyed here). */
 export const destroySweepContext = (context: SweepContext): void => {
   context.staging.destroy();
   context.timestamps?.querySet.destroy();
@@ -854,7 +924,10 @@ export const destroySweepContext = (context: SweepContext): void => {
   context.timestamps?.read.destroy();
 };
 
-/** 資源を確保して決定的な値で埋める（失敗したら確保済みを返してから投げる）。 */
+/**
+ * Allocates the resources and fills them with deterministic values (on failure, releases what was
+ * allocated, then throws).
+ */
 const createResources = async (
   context: SweepContext,
   specs: readonly ResourceSpec[],
@@ -894,7 +967,7 @@ const createResources = async (
   return buffers;
 };
 
-/** パイプライン・params・bind group まで解決した dispatch。 */
+/** A dispatch resolved down to pipeline, params and bind group. */
 type ReadyLaunch = {
   readonly launch: Launch;
   readonly pipeline: GPUComputePipeline;
@@ -908,8 +981,9 @@ const prepareLaunch = async (
   resources: ReadonlyMap<string, GPUBuffer>,
 ): Promise<ReadyLaunch> => {
   const { gpu } = context;
-  // パイプラインは device 寿命のキャッシュから引く（同じキーに別の WGSL が来たら
-  // PipelineKeyConflictError — 明示幾何のキーが判別力を失っていないことの検出器にもなる）
+  // The pipeline comes from the device-lifetime cache (a different WGSL for the same key raises
+  // PipelineKeyConflictError — which also detects an explicit-geometry key losing its
+  // discriminating power)
   const { pipeline, layout, roles } = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
     gpu[RUNTIME_INTERNAL].pipelines().get(launch.key, launch.wgsl),
   );
@@ -942,14 +1016,15 @@ const prepareLaunch = async (
 
 type PassSample = {
   readonly wallNs: number;
-  /** timestamp の差（単位 = 文脈の unit）。計測しない pass では無い。 */
+  /** The timestamp difference (unit = the context's unit). Absent on passes that are not timed. */
   readonly gpu?: number;
   readonly clamped: boolean;
 };
 
 /**
- * 1 compute pass に同じ dispatch を `reps` 本積んで回す。`timed` なら pass の begin / end に
- * timestamp を書いて差を返す。`clear` を渡すと pass の前にそのバッファを 0 に戻す。
+ * Runs `reps` copies of the same dispatch in one compute pass. With `timed`, writes timestamps at
+ * the pass's begin / end and returns the difference. With `clear`, resets that buffer to 0 before
+ * the pass.
  */
 const runPass = async (
   context: SweepContext,
@@ -990,8 +1065,8 @@ const runPass = async (
   const stamps = new BigUint64Array(timestamps.read.getMappedRange());
   const delta = stamps[1] - stamps[0];
   timestamps.read.unmap();
-  // MUST: 負値は 0 に丸めて件数を残す（黙って捨てない — ADR 0021 と同じ）。min の候補からは
-  // 呼び手（timeLaunch）が外す
+  // MUST: clamp negatives to 0 and keep the count (no silent dropping — same as ADR 0021). The
+  // caller (timeLaunch) excludes them from the min candidates
   return { wallNs, gpu: delta < 0n ? 0 : Number(delta), clamped: delta < 0n };
 };
 
@@ -999,9 +1074,10 @@ const hex = (bytes: ArrayBuffer): string =>
   Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 
 /**
- * 出力の digest = **64 MiB 区切りの各 SHA-256 を連結したものの SHA-256**（2 段）。S は 1 GiB に
- * なるので、区切りごとに staging へ写して読み、JS 側の峰を区切り 1 本に抑える。同じ出力 ⇔ 同じ
- * digest なので、幾何どうしの一致の判定には平の SHA-256 と同じ力を持つ。
+ * The output digest = **the SHA-256 of the concatenated SHA-256s of each 64 MiB chunk** (two
+ * levels). S reaches 1 GiB, so each chunk is copied to staging and read, keeping the JS-side peak
+ * at one chunk. Same output ⇔ same digest, so for judging a match between geometries it is as
+ * strong as a plain SHA-256.
  */
 export const outputDigest = async (context: SweepContext, buffer: GPUBuffer): Promise<string> => {
   const { gpu, staging } = context;
@@ -1015,8 +1091,8 @@ export const outputDigest = async (context: SweepContext, buffer: GPUBuffer): Pr
       staging.mapAsync(MAP_MODE.READ, 0, length),
       "出力の読み戻し",
     );
-    // digest は呼び出し時点で入力を写す（WebCrypto の規定）が、実装差に寄らないよう unmap の前に
-    // JS 側へ複製してから渡す
+    // digest copies its input at call time (as WebCrypto specifies), but to stay independent of
+    // implementation differences, the data is copied to the JS side before unmap and then passed
     const copy = new Uint8Array(staging.getMappedRange(0, length)).slice();
     staging.unmap();
     chunks.push(await crypto.subtle.digest("SHA-256", copy));
@@ -1024,7 +1100,10 @@ export const outputDigest = async (context: SweepContext, buffer: GPUBuffer): Pr
   return await joinChunkDigests(chunks);
 };
 
-/** 区切りごとの SHA-256 を連結して SHA-256 を採る（{@link outputDigest} の 2 段目 — テストも使う）。 */
+/**
+ * Concatenates the per-chunk SHA-256s and takes their SHA-256 (the second level of
+ * {@link outputDigest} — the tests use it too).
+ */
 export const joinChunkDigests = async (chunks: readonly ArrayBuffer[]): Promise<string> => {
   const joined = new Uint8Array(chunks.length * 32);
   chunks.forEach((chunk, index) => joined.set(new Uint8Array(chunk), index * 32));
@@ -1034,7 +1113,7 @@ export const joinChunkDigests = async (chunks: readonly ArrayBuffer[]): Promise<
 const describeCause = (cause: unknown): string =>
   cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
 
-/** 失敗した組の行（掃引は止めない）。 */
+/** The row of a failed pair (the sweep does not stop). */
 const errorRow = (
   sweepCase: SweepCase,
   candidate: GeometryCandidate,
@@ -1052,8 +1131,9 @@ const errorRow = (
 });
 
 /**
- * 空回し（計測の規約 3）。累計は単位 `ns` なら pass の GPU 時間、それ以外は壁時計で数える
- * （Deno の raw tick は ns ではないので下限の ns と比べられない）。
+ * Idle runs (protocol rule 3). The cumulative time counts the pass's GPU time for unit `ns` and
+ * wall clock otherwise (Deno's raw ticks are not ns, so they cannot be compared with the lower
+ * bound in ns).
  */
 const warmUp = async (context: SweepContext, ready: ReadyLaunch, reps: number): Promise<void> => {
   const timed = context.unit === "ns";
@@ -1065,20 +1145,20 @@ const warmUp = async (context: SweepContext, ready: ReadyLaunch, reps: number): 
   }
 };
 
-/** 1 幾何ぶんの時間の記録（行の計測欄）。 */
+/** The time record of one geometry (the measurement fields of a row). */
 type Timing = {
   readonly reps: number;
   readonly rounds: readonly number[];
   readonly wallRounds: readonly number[];
   readonly clampedNegativeSamples: number;
-  /** 負でなかった round の min ÷ reps（全 round が負なら無い）。 */
+  /** The min of the non-negative rounds ÷ reps (absent if every round is negative). */
   readonly perDispatch?: number;
   readonly wallNsPerDispatch: number;
 };
 
 /**
- * 1 幾何を測る: 出力を 0 に戻して 1 本流し → `reps` を見積り → 空回し → `rounds` 回の計測
- * （計測の規約 1〜3）。
+ * Measures one geometry: reset the output to 0 and run once → estimate `reps` → idle runs →
+ * `rounds` measurements (protocol rules 1–3).
  */
 const timeLaunch = async (
   context: SweepContext,
@@ -1086,9 +1166,10 @@ const timeLaunch = async (
   output: GPUBuffer,
   rounds: number,
 ): Promise<Timing> => {
-  // 1 本目は出力を 0 に戻してから（書き漏らしたタイルが digest の不一致として見える）
+  // The first run starts from an output reset to 0 (unwritten tiles show as a digest mismatch)
   await runPass(context, ready, 1, false, output);
-  // reps の見積り（モジュール doc の NOTE — 壁時計で倍々に積み、最後の 2 点の傾きを採る）
+  // Estimating reps (the module doc's NOTE — double by wall clock and take the slope of the last
+  // two points)
   let reps = 1;
   let previous: { readonly reps: number; readonly wallNs: number } | undefined;
   let probeNs: number;
@@ -1098,8 +1179,9 @@ const timeLaunch = async (
       const average = wallNs / reps;
       const slope =
         previous === undefined ? 0 : (wallNs - previous.wallNs) / (reps - previous.reps);
-      // 傾きが立たない（1 点目で届いた / 揺れで負）なら平均へ倒す。揺れで傾きが潰れても pass が
-      // 目標の 4 倍を超えないよう、平均の 1/4 を下限に置く
+      // Without a usable slope (reached on the first point / negative from noise), fall back to the
+      // average. A quarter of the average is the floor, so that a slope flattened by noise does
+      // not push the pass beyond 4 times the target
       probeNs = slope > 0 ? Math.max(slope, average / 4) : average;
       break;
     }
@@ -1117,8 +1199,8 @@ const timeLaunch = async (
     const value = sample.gpu ?? sample.wallNs;
     gpuRounds.push(value);
     wallRounds.push(sample.wallNs);
-    // MUST: 0 に丸めた sample は記録に残すが min の候補から外す（0 が min を取ると速さの比が
-    // 無限大に化ける）
+    // MUST: a sample clamped to 0 stays in the record but is excluded from the min candidates (a 0
+    // taking the min would turn the speed ratio into infinity)
     if (sample.clamped) clamped += 1;
     else kept.push(value);
   }
@@ -1132,7 +1214,7 @@ const timeLaunch = async (
   };
 };
 
-/** 候補 1 つの dispatch を用意して測る（params は測り終えたら返す）。 */
+/** Prepares and measures one candidate's dispatch (params are released after measuring). */
 const timeCandidate = async (
   context: SweepContext,
   plan: CasePlan,
@@ -1181,7 +1263,8 @@ const measureGeometry = async (
   if (timing.perDispatch === undefined) {
     return { ...measured, wallNsPerDispatch: timing.wallNsPerDispatch, error: ALL_ROUNDS_NEGATIVE };
   }
-  // raw tick は ns ではないので TFLOPS は壁時計から出す（report.ts の `tflops` の定義）
+  // Raw ticks are not ns, so TFLOPS comes from the wall clock (the definition of `tflops` in
+  // report.ts)
   const realNs = context.unit === "ns" ? timing.perDispatch : timing.wallNsPerDispatch;
   const output = resources.get(plan.output);
   if (output === undefined) throw new Error(`${sweepCase.id}: 出力 ${plan.output} が無い`);
@@ -1194,19 +1277,24 @@ const measureGeometry = async (
   };
 };
 
-/** 1 ケースの結果（全幾何の行と、ケース単位の記録）。 */
+/** The result of one case (the rows of every geometry and the per-case record). */
 export type CaseResult = {
   readonly rows: readonly SweepRow[];
   readonly summary: CaseSummary;
-  /** 中断（`signal`）で、候補の幾何か既定の再測定を測り終える前に止まったか。 */
+  /**
+   * Whether an abort (`signal`) stopped it before the candidate geometries or the default
+   * re-measurement were done.
+   */
   readonly aborted: boolean;
 };
 
 /**
- * 1 ケースを候補の全幾何で測る（既定幾何を先頭に置き、残りは候補の順）。測り終えたら既定幾何を
- * もう 1 度測って初回との比をケース単位の記録に残す（計測の規約 4）。計画・資源の確保・前段が
- * 失敗したら全幾何を失敗の行にする。device を失ったら残りを失敗の行にし、中断されたら残りは
- * 行を作らない（再測定もしない）。ケースの壁時計（`elapsedMs`）は計画から再測定までの全段を含む。
+ * Measures one case with every candidate geometry (the default geometry first, the rest in
+ * candidate order). When done, measures the default geometry once more and keeps the ratio to the
+ * first in the per-case record (protocol rule 4). If planning, resource allocation or the prelude
+ * fails, every geometry becomes a failure row. If the device is lost, the rest become failure rows;
+ * if aborted, no rows are made for the rest (and no re-measurement). The case's wall clock
+ * (`elapsedMs`) covers every step from planning to the re-measurement.
  */
 export const sweepCase = async (
   context: SweepContext,
@@ -1232,7 +1320,8 @@ export const sweepCase = async (
   try {
     plan = casePlan(target, gpu.limits.maxComputeWorkgroupsPerDimension, context.dp4a);
   } catch (cause) {
-    // 既定幾何も解けていないので、候補の行だけを失敗として残す
+    // The default geometry was not resolved either, so only the candidates' rows are kept as
+    // failures
     candidates.forEach((candidate) => emit(errorRow(target, candidate, false, cause)));
     return finish({ caseId: target.id });
   }
@@ -1241,10 +1330,12 @@ export const sweepCase = async (
     ...candidates.filter((candidate) => candidate.name !== plan.defaultCandidate.name),
   ];
   let resources: Map<string, GPUBuffer>;
-  // MUST: 利用者のコールバック（onProgress / onRow / onCase）は計測の try の外で呼ぶ — 中で呼ぶと、利用者の
-  // コードが投げた例外が計測の失敗（失敗の行・defaultRepeatError）に化けて記録に焼き込まれ、通知も重なる。
-  // 利用者の例外は呼び手へそのまま伝える（資源は外側の finally が返す）。catch 節の中の emit / finish は
-  // 再捕捉されないのでそのままでよい
+  // MUST: the user's callbacks (onProgress / onRow / onCase) are called outside the measurement's
+  // try — called inside, an exception thrown by the user's code would turn into a measurement
+  // failure (a failure row, defaultRepeatError), get written into the record, and the notifications
+  // would be duplicated. The user's exception propagates to the caller as is (the outer finally
+  // releases the resources). emit / finish inside a catch clause are not re-caught, so they can
+  // stay there
   hooks.onProgress?.(`${target.id}: 入力を用意中`);
   try {
     resources = await createResources(context, plan.resources);
@@ -1298,8 +1389,9 @@ export const sweepCase = async (
       emit(compareToDefault(row, reference));
     }
     const initial = reference.perDispatch;
-    // 既定の初回が失敗・0（timestamp が壊れて差が 0 — 比が無限大か NaN に化ける）・device lost のケースは
-    // 中断でなくても再測定しない（比の土台が無い — 生成器はそのケースを比の材料から外す）
+    // A case whose first default measurement failed, is 0 (a broken timestamp with a difference of
+    // 0 — the ratio would turn into infinity or NaN), or hit device lost is not re-measured even
+    // without an abort (no ratio baseline — the generator drops the case from the ratio material)
     if (initial === undefined || !(initial > 0) || gpu.lost !== undefined) {
       return finish({ caseId: target.id });
     }
@@ -1318,7 +1410,9 @@ export const sweepCase = async (
         settings.rounds,
       );
       if (timing.perDispatch === undefined) throw new Error(ALL_ROUNDS_NEGATIVE);
-      // 再測定が 0 なら比も 0 で、正の比だけを受ける生成器が記録ごと拒む — 失敗として残し、ケースだけを外させる
+      // A re-measurement of 0 gives a ratio of 0, and the generator, which accepts only positive
+      // ratios, would reject the whole record — keep it as a failure so that only the case is
+      // dropped
       if (!(timing.perDispatch > 0)) {
         throw new Error("既定の再測定の perDispatch が 0（timestamp の差が 0 — 比を出せない）");
       }
@@ -1331,25 +1425,30 @@ export const sweepCase = async (
     } catch (cause) {
       repeat = { defaultRepeatError: describeCause(cause) };
     }
-    // onCase は再測定の try の外（関数の頭の MUST — 利用者の例外を再測定の失敗に化かさない・2 度通知しない）
+    // onCase is outside the re-measurement's try (the MUST at the top of the function — a user
+    // exception does not turn into a re-measurement failure, and nothing is notified twice)
     return finish({ caseId: target.id, ...repeat });
   } finally {
     for (const buffer of resources.values()) buffer.destroy();
   }
 };
 
-/** 掃引全体の結果（行と、ケース単位の記録）。 */
+/** The result of the whole sweep (rows and per-case records). */
 export type SweepResult = {
   readonly rows: readonly SweepRow[];
   readonly cases: readonly CaseSummary[];
   /**
-   * 中断（`signal`）で、計画したケース・幾何・既定の再測定を測り終える前に止まったか。全てを測り終えた
-   * 後に届いた中断は数えない（記録は欠けていない）。
+   * Whether an abort (`signal`) stopped it before the planned cases, geometries and default
+   * re-measurements were done. An abort that arrives after everything was measured does not count
+   * (the record is complete).
    */
   readonly aborted: boolean;
 };
 
-/** ケースの列を順に掃引する（device を失ったか中断されたら、残りのケースは回さない）。 */
+/**
+ * Sweeps the cases in order (if the device is lost or the sweep aborted, the remaining cases are
+ * not run).
+ */
 export const runSweep = async (
   context: SweepContext,
   cases: readonly SweepCase[],

@@ -1,94 +1,109 @@
 /**
- * 融合 attention ①QK / ③PV の **i8a8 変種**（活性 i8 の**整数内積**）— 設計は
- * docs/research/2026-08-04-attention-a8-design.md §2.1 / §2.2 / §2.3 / §4.1 / §4.2、
- * opt-in は `SessionOptions.attentionCompute: "a8"`（既定 `"f32"`）。
+ * The **i8a8 variants** of fused attention ①QK / ③PV (an **integer dot product** of i8
+ * activations) — design in docs/research/2026-08-04-attention-a8-design.md §2.1 / §2.2 / §2.3 /
+ * §4.1 / §4.2, opt-in through `SessionOptions.attentionCompute: "a8"` (default `"f32"`).
  *
  * ```
- * ①QK: acc[i32] = Σ_d qq[b,m,d] · kq[b,n,d]          （厳密な整数・丸め 0 回）
- *       S        = f32(acc) · (qs'[b,m] · ks'[b,n])   （qs' = qs·scale / ks' = ks·scale）
- * ③PV: acc[i32] = Σ_n qP[b,m,n] · vq[b,d,n]          （qP は A タイル充填で作る非実体化の列）
- *       O        = f32(acc) · (prow[b,m] · vs[b,d])   （prow = inv·(1/127)）
+ * ①QK: acc[i32] = Σ_d qq[b,m,d] · kq[b,n,d]          (exact integers, 0 roundings)
+ *       S        = f32(acc) · (qs'[b,m] · ks'[b,n])   (qs' = qs·scale / ks' = ks·scale)
+ * ③PV: acc[i32] = Σ_n qP[b,m,n] · vq[b,d,n]          (qP: built in the A tile fill, not stored)
+ *       O        = f32(acc) · (prow[b,m] · vs[b,d])   (prow = inv·(1/127))
  * ```
  *
- * ## linear の i8a8（src/kernels/linear-i8a8.ts）との関係
+ * ## Relation to linear's i8a8 (src/kernels/linear-i8a8.ts)
  *
- * `S[b,m,n] = Σ_d q[b,m,d]·k[b,n,d]` は **縮約軸 D が q / k の両方で最内連続**なので、
- * linear の `x[m,k]`（k 連続）× `w[n,k]`（k 連続）と添字の形が完全に一致する。したがって
- * 活性量子化は {@link "./quantize-rows.ts"} を**無改変で 2 回呼ぶだけ**で足り、内積ループ・
- * 共有タイルの `[pack][行]` 配置・K 端数の 0 埋めも linear の i8a8 と同型になる。
+ * In `S[b,m,n] = Σ_d q[b,m,d]·k[b,n,d]` **the reduction axis D is innermost and contiguous in both
+ * q and k**, so the index shape matches linear's `x[m,k]` (k contiguous) × `w[n,k]` (k contiguous)
+ * exactly. Activation quantization therefore just **calls {@link "./quantize-rows.ts"} twice,
+ * unmodified**, and the inner-product loop, the `[pack][row]` layout of the shared tiles and the
+ * zero fill of the K remainder take the same shape as linear's i8a8.
  *
- * 生成器を linear と共有しないのは、違いが**断片差し込みでは吸収できない位置**に散っている
- * ため（バッチ base 5 本 / dequant が両側 scale + 半スケール / bias 無し）。共有するのは
- * **タイル幾何とその算術**（{@link "./i8a8-geometry.ts"}）と**整数内積の実体**
- * （{@link i8a8IdotWgsl}）で、数値契約と添字算術に効く部分の正本は 1 箇所に保つ。
+ * The generator is not shared with linear because the differences are scattered **where fragment
+ * splicing cannot absorb them** (5 batch bases / dequant with scales on both sides + the half scale
+ * / no bias). What is shared is **the tile geometry and its arithmetic**
+ * ({@link "./i8a8-geometry.ts"}) and **the body of the integer dot product**
+ * ({@link i8a8IdotWgsl}), so the parts that affect the numeric contract and the index arithmetic
+ * keep a single source of truth.
  *
- * MUST: ①QK と ③PV は**別の幾何**を既定に取る（③ は N = D = 128 が 1 タイルに収まる
- * `M64N128` が勝つ — docs/research/2026-08-10-kernel-variant-sweep.md §3.2）。「1 本の最良幾何」
- * を仮定して 2 段を束ねると、どちらかが必ず劣後する。
+ * MUST: ①QK and ③PV take **different geometries** as their defaults (for ③, `M64N128`, which fits
+ * N = D = 128 into one tile, wins — docs/research/2026-08-10-kernel-variant-sweep.md §3.2). Tying the
+ * two steps together on the assumption of "one best geometry" always leaves one of them behind.
  *
- * ## 数値契約（GPU vs TS 参照 atol=0 — src/reference/i8a8.ts）
+ * ## Numeric contract (GPU vs TS reference at atol=0 — src/reference/i8a8.ts)
  *
- * 整数縮約が順序非依存の厳密値なので、出力 1 要素あたりの浮動小数演算は
- * `qs = amax_q·(1/127)` / `ks = amax_k·(1/127)` / `qs·scale` / `ks·scale` /
- * `qs'·ks'` / `f32(acc)·(…)` の 6 つだけ。どれも round-to-nearest-even で決定的
- * （唯一のほころびは量子化の `x/s` = データ依存の除算で、WGSL の 2.5 ULP 許容ぶん
- * 丸め境界近傍の要素が ±1 段揺れうる — テストが `quantizeRowsTieMargin` で余裕を実測して門にする）。
+ * The integer reduction is an order-independent exact value, so the floating-point operations per
+ * output element are only six: `qs = amax_q·(1/127)` / `ks = amax_k·(1/127)` / `qs·scale` /
+ * `ks·scale` / `qs'·ks'` / `f32(acc)·(…)`. Each is deterministic with round-to-nearest-even (the
+ * only weak point is the quantization's `x/s` = a data-dependent division, where elements near a
+ * rounding boundary may move by ±1 step within WGSL's 2.5 ULP allowance — the tests measure the
+ * margin with `quantizeRowsTieMargin` and make it a check).
  *
- * MUST: dequant の乗算順序を固定する — **`qs' · ks'` を先に 1 つの f32 へ畳んでから**
- * `f32(acc)` に掛ける。`f32(acc)·qs'·ks'` の逐次形は丸めの位置が動いて参照とのビット一致が
- * 崩れる（linear の `xs·wscale` と同型の MUST）。**bias が無いので `fma` は使わない**。
- * MUST: 半スケール（ADR 0023 の `√scale_factor`）は **dequant 側**へ q / k の両方に掛ける。
- * 量子化の**前**に掛ける形（`q·scale` を量子化する）は、amax も同じ倍率で動くので整数値は
- * ほぼ同じだが f32 の丸めが 1 段増えるだけの純損で、しかも `quantize_rows` を無改変で
- * 使えなくなる（設計 §2.1 の裁定）。attrs の契約（`scale` は √scale のまま）は不変。
- * MUST: 行 scale は `qs[batch·M + arow]`・列 scale は `ks[batch·N + wcol]`。取り違えは
- * 例外の出ない誤値で、**B·H ≥ 2 かつ head ごとに統計が違う形** × **m / n タイル 2 枚以上**
- * のテストだけが検出器になる（ADR 0024 の MUST ④ と同型の罠）。
+ * MUST: fix the multiplication order of dequant — **fold `qs' · ks'` into one f32 first**, then
+ * multiply `f32(acc)` by it. The sequential form `f32(acc)·qs'·ks'` moves the rounding points and
+ * breaks bit identity with the reference (the same MUST as linear's `xs·wscale`). **There is no
+ * bias, so `fma` is not used**.
+ * MUST: the half scale (ADR 0023's `√scale_factor`) is applied **on the dequant side**, to both q
+ * and k. Applying it **before** quantization (quantizing `q·scale`) moves amax by the same factor,
+ * so the integers are almost the same, but it only adds one f32 rounding — a pure loss — and
+ * `quantize_rows` could no longer be used unmodified (the ruling of design §2.1). The attrs
+ * contract (`scale` stays √scale) does not change.
+ * MUST: the row scale is `qs[batch·M + arow]` and the column scale `ks[batch·N + wcol]`. Mixing
+ * them up is a wrong value without an exception, and the only detector is a test with **B·H ≥ 2 and
+ * per-head statistics that differ** × **2 or more m / n tiles** (the same trap as ADR 0024 decision
+ * 6).
  *
- * ## ③PV の構造（設計 §2.2 / §2.3 — ①QK と決定的に違う 3 点）
+ * ## Structure of ③PV (design §2.2 / §2.3 — three points where it decisively differs from ①QK)
  *
- * 1. **A 側（P̃）は量子化カーネルを通らない**。`P̃ = exp(S−m)` は行内 max が構造的に 1.0
- *    （`exp(0)` は f32 で厳密）なので、per-token amax 量子化を掛けても scale は **1/127 に
- *    縮退する**。したがって amax を取る意味が無く、A タイル充填が `round(127·exp(S−m))` を
- *    その場で作って 4 詰めする（**除算ゼロ**・上限 127 は構造的で clamp も不要）。
- *    MUST: amax を取れる形に書かないこと — 「行ごとに適応している」と誤読され、
- *    ランタイムに実装できない楽観上界（設計 §5.1 の粒度表）へ静かに寄っていく。
- * 2. **V の scale は per-column（N 全体の amax）でなければならない**。縮約軸は n なので、
- *    `f32(acc)·s` 形が成立する条件は **s が n に依存しないこと**そのもの。per-token
- *    （V の行 n ごと）にすると scale が縮約軸上で変わり総和から括り出せない — 黙って使うと
- *    例外の出ない誤値になる（linear で `wcol` を行に流用する誤りと同型 — ADR 0024 の MUST④）。
- *    レシピ導出層（recipe-builders/attention.ts の `buildAttention`）は既存の `strided`
- *    （permute）で Vᵀ`[B·H, D, N]` を作り、その上で
- *    `quantize_rows`（行 = `(b,h,d)`）を呼ぶ — **per-column 量子化と dp4a が要求する
- *    N 連続パックが同時に得られる**ので新カーネルは要らない。
- * 3. **行の `1/l` は dequant 側へ移る**。`prow = inv·(1/127)` は行ループ不変なので、
- *    `O = f32(acc)·(prow·vs[d])` が linear の `xs·wscale` と同型になる。②行統計は
- *    **f32 のまま 1 バイトも変えない**（分母を量子化後の総和にする案は波 Q0 の実測で
- *    明確悪化と出て不採用確定 — 設計 §4.3 に対する反証）。
+ * 1. **The A side (P̃) does not go through the quantization kernel**. `P̃ = exp(S−m)` has an in-row
+ *    max of 1.0 by construction (`exp(0)` is exact in f32), so per-token amax quantization would
+ *    give a scale that **collapses to 1/127**. Taking amax is therefore pointless, and the A tile
+ *    fill builds `round(127·exp(S−m))` on the spot and packs 4 per word (**no division**, and the
+ *    upper bound 127 is structural, so no clamp is needed either).
+ *    MUST: do not write it in a form that can take amax — it would be misread as "adapting per
+ *    row" and drift silently toward the optimistic bound that the runtime cannot implement (the
+ *    granularity table of design §5.1).
+ * 2. **V's scale must be per-column (amax over all of N)**. The reduction axis is n, so the
+ *    condition for the `f32(acc)·s` form to hold is exactly **s not depending on n**. Per-token
+ *    (per row n of V) makes the scale vary along the reduction axis so it cannot be factored out of
+ *    the sum — used silently, it is a wrong value without an exception (the same error as reusing
+ *    `wcol` for rows in linear — ADR 0024 decision 6).
+ *    The recipe derivation layer (`buildAttention` in recipe-builders/attention.ts) builds
+ *    Vᵀ`[B·H, D, N]` with the existing `strided` (permute) and then calls
+ *    `quantize_rows` (rows = `(b,h,d)`) — **per-column quantization and the N-contiguous packing
+ *    that dp4a needs come at once**, so no new kernel is needed.
+ * 3. **The row's `1/l` moves to the dequant side**. `prow = inv·(1/127)` is invariant over the row
+ *    loop, so `O = f32(acc)·(prow·vs[d])` takes the same shape as linear's `xs·wscale`. ② row
+ *    statistics **stay f32, unchanged to the byte** (using the post-quantization sum as the
+ *    denominator was measured clearly worse in phase Q0 and rejected for good — a refutation of
+ *    design §4.3).
  *
- * ## ③PV の数値契約（②とは違い O に atol=0 は立たない — 設計 §4.2）
+ * ## Numeric contract of ③PV (unlike ②, atol=0 does not hold for O — design §4.2)
  *
- * `qP = round(127·exp(S−m))` の `exp` は WGSL と JS でビット一致する保証が無く、
- * `127·exp` は [0,127] に密に分布するので丸め境界に落ちる要素が必ず出る。そこで契約を
- * **2 段に割る**:
+ * The `exp` in `qP = round(127·exp(S−m))` is not guaranteed to be bit-identical between WGSL and
+ * JS, and `127·exp` is densely distributed over [0,127], so some elements always land on a rounding
+ * boundary. The contract is therefore **split in two**:
  *
- * - **整数を受け取ってからの純関数**（`referenceAttentionPvI8a8Core`）とは **atol=0**。
- *   ここは `f32(acc)` / `prow·vs` / 積 の 3 演算しか無い。
- * - `qP` の生成は別の門: TS 参照との不一致は **必ず ±1 段**（±2 が 1 件でも出たら実装バグ）で、
- *   不一致率そのものを記録する（tests/gpu_attention_pv_i8a8_test.ts）。
+ * - **The pure function after the integers are received** (`referenceAttentionPvI8a8Core`) matches
+ *   at **atol=0**. It has only three operations: `f32(acc)` / `prow·vs` / the product.
+ * - Generating `qP` is a separate check: a mismatch with the TS reference is **always ±1 step** (a
+ *   single ±2 means an implementation bug), and the mismatch rate itself is recorded
+ *   (tests/gpu_attention_pv_i8a8_test.ts).
  *
- * MUST: dequant の乗算順序を固定する — **`prow · vs[d]` を先に 1 つの f32 へ畳んでから**
- * `f32(acc)` に掛ける（①QK と同型）。MUST: `1/127` は**乗算**で作る（除算は 2.5 ULP まで
- * 許される — quantize-rows.ts の実測）。
- * NOTE（契約の外）: S に非有限値がある行の `qP` は**実装依存**（`vec4<i32>(NaN)` の値が
- * WGSL で未定義）。f32 変種は NaN をそのまま O へ伝播させるので、**そこだけ挙動が違う**。
- * quantize-rows.ts の「非有限行の量子化値は契約の外」と同じ扱いで、突合の対象にしない。
+ * MUST: fix the multiplication order of dequant — **fold `prow · vs[d]` into one f32 first**, then
+ * multiply `f32(acc)` by it (the same shape as ①QK). MUST: build `1/127` by **multiplication**
+ * (division is allowed up to 2.5 ULP — the measurement in quantize-rows.ts).
+ * NOTE (outside the contract): `qP` of a row with non-finite values in S is
+ * **implementation-dependent** (the value of `vec4<i32>(NaN)` is undefined in WGSL). The f32
+ * variant propagates NaN into O as is, so **only there does the behaviour differ**. It is treated
+ * like quantize-rows.ts's "quantized values of non-finite rows are outside the contract" and is not
+ * compared.
  *
- * ## 波の位置づけ（段階導入）
+ * ## Phases (staged introduction)
  *
- * 本ファイルが受け持つのは ①QK と ③PV で、②行統計は f32 のまま走る（設計 §7 の波 1 + 波 2）。
- * 適格判定は**段ごとに独立**（①は `D % 4 == 0`・③は `N % 4 == 0`）なので、
- * **片方だけ i8a8 の混成**が起こりうる（recipe-builders/attention.ts の `buildAttention`）。
+ * This file covers ①QK and ③PV; ② row statistics run in f32 as they are (phases 1 + 2 of design
+ * §7). Eligibility is **independent per step** (① needs `D % 4 == 0`, ③ needs `N % 4 == 0`), so
+ * **a mix with only one of them in i8a8** can occur (`buildAttention` in
+ * recipe-builders/attention.ts).
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -128,45 +143,49 @@ import {
   scoreStoreWgsl,
 } from "./score-storage.ts";
 
-/** q の per-token scale（`[B·H·M]`）の束縛（出力 S の次の番号）。 */
+/** Binding of q's per-token scale (`[B·H·M]`) (the number after the output S). */
 export const ATTENTION_QK_Q_SCALE_BINDING = 4;
-/** k の per-token scale（`[B·H·N]`）の束縛。**出力列ごとの scale** に相当する。 */
+/** Binding of k's per-token scale (`[B·H·N]`). It amounts to **a per-output-column scale**. */
 export const ATTENTION_QK_K_SCALE_BINDING = 5;
 /**
- * Vᵀ の per-row scale（`[B·H·D]`）の束縛（③PV の出力 O の次の番号）。Vᵀ の「行」= `(b,h,d)`
- * なので、これは **V の per-column（N 全体の amax）scale** そのもの（上の MUST 2）。
+ * Binding of Vᵀ's per-row scale (`[B·H·D]`) (the number after ③PV's output O). A "row" of Vᵀ =
+ * `(b,h,d)`, so this is exactly **V's per-column scale (amax over all of N)** (point 2 above).
  */
 export const ATTENTION_PV_V_SCALE_BINDING = 5;
 
 /**
- * ①QK を i8a8 変種で撃てる形か。q / k のパック方向は縮約軸 D なので、`D` が 4 要素 1 語で
- * 割り切れることが条件になる。非適格の段は f32 経路へ縮退する（ADR 0030 決定 5）。
- * 段の適格条件の定義で、経路の判定の正本は `attentionRoute`（src/runtime/attention-route.ts）。
- * レシピ導出（`buildAttention`）と受理集合のテストはどちらもそれを通る（判定を二重に書くと
- * 片方だけが動いて食い違う）。
+ * Whether ①QK can be dispatched with the i8a8 variant. q / k pack along the reduction axis D, so
+ * the condition is that `D` divides into words of 4 elements. A step that is not eligible falls
+ * back to the f32 path (ADR 0030 decision 5).
+ * This defines the step's eligibility; the source of truth for the path decision is
+ * `attentionRoute` (src/runtime/attention-route.ts). Both the recipe derivation (`buildAttention`)
+ * and the tests of the accepted set go through it (writing the decision twice lets one copy move
+ * alone and disagree).
  */
 export const attentionQkI8a8Eligible = (depth: number): boolean => depth % I8A8_PACK === 0;
 
 /**
- * ③PV を i8a8 変種で撃てる形か。P̃ / Vᵀ のパック方向は縮約軸 N（キー長）なので、`N` が
- * 4 要素 1 語で割り切れることが条件になる（①とは軸が違うので、片方だけ適格な形が実在する）。
+ * Whether ③PV can be dispatched with the i8a8 variant. P̃ / Vᵀ pack along the reduction axis N (the
+ * key length), so the condition is that `N` divides into words of 4 elements (the axis differs from
+ * ①, so shapes eligible for only one of them do exist).
  */
 export const attentionPvI8a8Eligible = (cols: number): boolean => cols % I8A8_PACK === 0;
 
 /**
- * P̃ の量子化格子の端。**quantize-rows.ts の `QUANTIZE_ROWS_ABS_MAX` を輸入しない** —
- * あちらは「行 amax から作る適応 scale の格子」で、こちらは「行内 max が構造的に 1.0 だから
- * scale が 1/127 に縮退する」という**別の事実**（設計 §2.2）。値が一致するのは偶然に近く、
- * 束ねると片方の変更がもう片方へ黙って伝播する。
+ * Edge of P̃'s quantization lattice. **Do not import `QUANTIZE_ROWS_ABS_MAX` from
+ * quantize-rows.ts** — that one is "the lattice of an adaptive scale built from the row amax",
+ * while this one is **a different fact**, "the in-row max is 1.0 by construction, so the scale
+ * collapses to 1/127" (design §2.2). That the values match is close to a coincidence, and tying
+ * them together would silently propagate a change of one into the other.
  */
 const P_LATTICE_MAX = 127;
-/** MUST: `1/127` は乗算で作る（WGSL の f32 除算は 2.5 ULP まで許される）。 */
+/** MUST: build `1/127` by multiplication (WGSL f32 division is allowed up to 2.5 ULP). */
 const INV_P_LATTICE = 1 / P_LATTICE_MAX;
 
-/** 添字の加算オフセット（0 は省く — 生成物を読める形に保つ）。 */
+/** Additive index offset (0 is omitted — keeps the output readable). */
 const at = (offset: number): string => (offset === 0 ? "" : ` + ${offset}u`);
 
-/** 出力の行番号（`orow0` を基点に展開）。 */
+/** Output row numbers (unrolled from `orow0`). */
 const rowDecls = (geometry: I8a8Geometry): string =>
   Array.from({ length: geometry.regM }, (_, row) =>
     row === 0
@@ -174,7 +193,7 @@ const rowDecls = (geometry: I8a8Geometry): string =>
       : `  let orow${row} = orow0 + ${row}u;`,
   ).join("\n");
 
-/** 出力の列 quad（v4 経路 — `ocq0` を基点に展開）。 */
+/** Output column quads (v4 path — unrolled from `ocq0`). */
 const quadDecls = (geometry: I8a8Geometry): string => {
   const quads = geometry.regN / I8A8_PACK;
   return Array.from({ length: quads }, (_, quad) =>
@@ -184,7 +203,10 @@ const quadDecls = (geometry: I8a8Geometry): string => {
   ).join("\n");
 };
 
-/** A（q / P̃）タイルの担当 — 行番号は K タイルループ不変なので prologue で 1 度だけ組む。 */
+/**
+ * Assignment of the A (q / P̃) tile — row numbers are invariant over the K tile loop, so the
+ * prologue builds them once.
+ */
 const prologueA = (geometry: I8a8Geometry, base: string, label: string): string => {
   const tileM = i8a8TileM(geometry);
   const stride = i8a8FillStride(geometry);
@@ -194,16 +216,19 @@ const prologueA = (geometry: I8a8Geometry, base: string, label: string): string 
       `  let arow${slot} = ${slot === 0 ? `wid.y * ${tileM}u + ar` : `arow0 + ${slot * stride}u`};
   let arow_base${slot} = ${base} + arow${slot} * k4;`,
   ).join("\n");
-  return `  // ${label}（${tileM} 行 × ${i8a8KPacks(geometry)} pack を ${i8a8Threads(
+  return `  // ${label} (${tileM} rows × ${i8a8KPacks(geometry)} packs over ${i8a8Threads(
     geometry,
-  )} スレッドで ${i8a8ASlots(geometry)} 巡）
+  )} threads in ${i8a8ASlots(geometry)} rounds)
   let ar = tid / ${i8a8KPacks(geometry)}u;
   let ap = tid % ${i8a8KPacks(geometry)}u;
   let sa_at = ap * ${tileM}u + ar;
 ${slots}`;
 };
 
-/** B（k / Vᵀ）タイルの担当 — どちらもパック方向が最内連続なので転置が要らない。 */
+/**
+ * Assignment of the B (k / Vᵀ) tile — in both, the pack direction is innermost and contiguous, so
+ * no transpose is needed.
+ */
 const prologueB = (
   geometry: I8a8Geometry,
   base: string,
@@ -218,9 +243,9 @@ const prologueB = (
       `  let wcol${slot} = ${slot === 0 ? `wid.x * ${tileN}u + wc` : `wcol0 + ${slot * stride}u`};
   let ${baseName}${slot} = ${base} + wcol${slot} * k4;`,
   ).join("\n");
-  return `  // B タイルの担当（${tileN} 列 × ${i8a8KPacks(geometry)} pack を ${i8a8Threads(
+  return `  // B tile assignment (${tileN} columns × ${i8a8KPacks(geometry)} packs over ${i8a8Threads(
     geometry,
-  )} スレッドで ${i8a8BSlots(geometry)} 巡）。
+  )} threads in ${i8a8BSlots(geometry)} rounds).
   // ${note}
   let wc = tid / ${i8a8KPacks(geometry)}u;
   let wp = tid % ${i8a8KPacks(geometry)}u;
@@ -228,7 +253,7 @@ const prologueB = (
 ${slots}`;
 };
 
-/** ①QK の A タイル充填（q をそのまま読む — linear の x と同型）。 */
+/** A tile fill of ①QK (reads q as is — the same shape as linear's x). */
 const fillA = (geometry: I8a8Geometry, name: string): string => {
   const stride = i8a8FillStride(geometry);
   const slots = Array.from(
@@ -245,14 +270,17 @@ ${slots}`;
 };
 
 /**
- * B タイルの充填（範囲外は 0 埋め — `idot(0, x) == 0` なので K 端数でも厳密）。
+ * B tile fill (out of range is zero-filled — `idot(0, x) == 0`, so it is exact even with a K
+ * remainder).
  *
- * MUST: スロットの値変数は `bv<番号>` 固定で、呼び手の接頭辞（`value`）から組まない。①QK の接頭辞 `k`
- * で組むと 5 番目のスロットが `var k4` になり、関数スコープの `let k4`（K のパック数）を覆い隠す —
- * WGSL ではシャドーイングが合法なのでコンパイルも validation も通り、以降のスロットの範囲判定
- * `kpack < k4` が常に偽になって S の列が黙って 0 になる（充填スロット 5 以上の 16 幾何で実測）。
- * 検出器は tests/codegen_i8a8_shadowing_test.ts（宣言名の重なり）と tests/gpu_attention_pv_i8a8_test.ts
- * （スロット 8 / 16 の幾何で参照と atol=0）。
+ * MUST: the slot value variables are fixed as `bv<number>`, not built from the caller's prefix
+ * (`value`). Built from ①QK's prefix `k`, the 5th slot becomes `var k4` and shadows the
+ * function-scope `let k4` (the K pack count) — shadowing is legal in WGSL, so compilation and
+ * validation pass, the range test `kpack < k4` of the following slots is always false, and columns
+ * of S silently become 0 (measured on the 16 geometries with 5 or more fill slots).
+ * The detectors are tests/codegen_i8a8_shadowing_test.ts (overlapping declaration names) and
+ * tests/gpu_attention_pv_i8a8_test.ts (atol=0 against the reference on geometries with 8 / 16
+ * slots).
  */
 const fillB = (geometry: I8a8Geometry, name: string, baseName: string, value: string): string => {
   const stride = i8a8FillStride(geometry);
@@ -270,10 +298,12 @@ ${slots}`;
 };
 
 /**
- * パイプラインキー。`linear:v4:i8a8:…` の前例に厳密に倣う（**世代を上げ、dtype 欄を `i8a8` に
- * し、幾何判別子を丸ごと載せ、内積変種を末尾に付ける**）。幾何がパラメタになったので
- * タイル辺だけのキーでは生成物が決まらない（{@link i8a8GeometryKeyPart}）。
- * MUST: 既存の f32 / `:c16` キーは 1 文字も動かさない（スナップショットが検出器）。
+ * Pipeline key. It strictly follows the precedent of `linear:v4:i8a8:…` (**bump the generation,
+ * set the dtype field to `i8a8`, include the whole geometry discriminator, and append the
+ * dot-product variant**). The geometry became a parameter, so a key with only the tile edges does
+ * not determine the output ({@link i8a8GeometryKeyPart}).
+ * MUST: the existing f32 / `:c16` keys do not move by a single character (the snapshots are the
+ * detector).
  */
 export const attentionQkI8a8Key = (
   v4: boolean,
@@ -287,15 +317,17 @@ export const attentionQkI8a8Key = (
   )}${rowWindow ? ":rwa" : ""}`;
 
 /**
- * S を `vec4<f32>` で書けるか。**D 側の条件は適格判定（`D % 4 == 0`）が既に担っている**ので
- * ここは N（出力の列）だけを見る（linear の i8a8 と同じ規律）。
+ * Whether S can be written as `vec4<f32>`. **The D-side condition is already covered by the
+ * eligibility check (`D % 4 == 0`)**, so this looks only at N (the output columns) (the same rule as
+ * linear's i8a8).
  */
 export const attentionQkI8a8UsesVec4 = (n: number): boolean => n % I8A8_PACK === 0;
 
 /**
- * ①QK の書き出し。行・列 quad とも codegen 時に展開して `acc{行}_{列 quad}` を静的に読む
- * （`acc[i]` の動的添字を残さないための展開 — 理由は {@link i8a8AccumulatorInit}）。
- * ガードの構造・`qs'·ks'` の畳み順・半スケールの位置は幾何に依らず同一。
+ * Store of ①QK. Both rows and column quads are unrolled at codegen and `acc{row}_{column quad}` is
+ * read statically (unrolled so that no dynamic `acc[i]` index remains — the reason is in
+ * {@link i8a8AccumulatorInit}). The guard structure, the folding order of `qs'·ks'` and the
+ * position of the half scale are the same for every geometry.
  */
 const store = (geometry: I8a8Geometry, v4: boolean, score: ScoreStorage): string => {
   const { regM, regN } = geometry;
@@ -316,8 +348,8 @@ const store = (geometry: I8a8Geometry, v4: boolean, score: ScoreStorage): string
     }`,
       ).join("\n");
       return `  if (ocq${quad} < n4) {
-    // n % ${I8A8_PACK} == 0 かつ ocq${quad} < n4 なので oc + ${I8A8_PACK - 1} < n。
-    // MUST: 半スケールは dequant 側で q / k の**両方**へ（列側はここで 1 度だけ）
+    // n % ${I8A8_PACK} == 0 and ocq${quad} < n4, so oc + ${I8A8_PACK - 1} < n.
+    // MUST: the half scale goes to **both** q and k on the dequant side (the column side once, here)
     let oc = ocq${quad} * ${I8A8_PACK}u;
     let ks = vec4<f32>(
       kscale[ksbase + oc],
@@ -325,7 +357,7 @@ const store = (geometry: I8a8Geometry, v4: boolean, score: ScoreStorage): string
       kscale[ksbase + oc + 2u],
       kscale[ksbase + oc + 3u],
     ) * dims.scale;
-    // MUST: qs'·ks' を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+    // MUST: fold qs'·ks' into one f32 first, then multiply f32(acc) by it (no bias, so no fma)
 ${rowStores}
   }`;
     }).join("\n");
@@ -344,7 +376,7 @@ ${blocks}`;
     }).join("\n");
     return `  if (orow${row} < dims.m) {
     let obase = sbase + orow${row} * dims.n;
-    // MUST: qs'·ks' を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+    // MUST: fold qs'·ks' into one f32 first, then multiply f32(acc) by it (no bias, so no fma)
     let qs = qscale[qsbase + orow${row}] * dims.scale;
 ${writes}
   }`;
@@ -364,14 +396,15 @@ export const attentionQkI8a8Wgsl = (
   assertScoreStorageSupported("attention_qk i8a8", score, v4);
   assertI8a8Geometry(geometry, "attention_qk i8a8");
   const kPacks = i8a8KPacks(geometry);
-  // 行窓（{@link "./gemm.ts"} `GemmRowWindow` の `"a"`）: **量子化済み q の base 2 本**だけが
-  // 全 M ストライド + 行オフセットで数える。S / 行統計はブロック相対のままなので、内積ループ・
-  // 共有タイル充填・dequant は 1 文字も動かない = 1 枚実行とビット同一。
-  // MUST: ペイロードは pack 単位・scale は行数単位（単位を取り違えると隣の head を読む）。
+  // Row window (`"a"` of `GemmRowWindow` in {@link "./gemm.ts"}): only **the 2 bases of the
+  // quantized q** count with the full M stride + the row offset. S / row statistics stay
+  // block-relative, so the inner-product loop, the shared tile fill and dequant do not move by a
+  // single character = bit-identical to a single-block run.
+  // MUST: the payload counts in packs and the scale in rows (mixing up the units reads the next head).
   const qRows = rowWindow ? "dims.rows_full" : "dims.m";
-  return `// karume attention_qk (S[b,m,n] = q[b,m,d] · k[b,n,d]ᵀ, q/k とも per-token i8 の整数内積${
+  return `// karume attention_qk (S[b,m,n] = q[b,m,d] · k[b,n,d]ᵀ, integer dot product of per-token i8 q and k${
     dp4a ? "" : "・エミュ"
-  }, 半スケールは dequant 側${scoreNote(score)}${rowWindow ? ", 行窓 a" : ""}, ${i8a8GeometryNote(
+  }, half scale on the dequant side${scoreNote(score)}${rowWindow ? ", 行窓 a" : ""}, ${i8a8GeometryNote(
     geometry,
   )}${v4 ? " + vec4" : ""})
 struct Dims {
@@ -392,8 +425,8 @@ ${rowWindow ? ROW_WINDOW_DIMS_EXTRA : ""}}
 ${scoreStoreWgsl("s", score)}
 ${i8a8IdotWgsl(dp4a)}
 
-// 共有タイルは **[pack][行] / [pack][列]** 配置（linear の i8a8 と同じ — 内側の読みが
-// 語ストライド ${I8A8_PACK} になりバンク衝突が 8-way から 2-way に減る）
+// Shared tiles are laid out **[pack][row] / [pack][column]** (as in linear's i8a8 — the inner reads
+// get word stride ${I8A8_PACK} and bank conflicts drop from 8-way to 2-way)
 var<workgroup> sa: array<u32, ${kPacks * i8a8TileM(geometry)}>;
 var<workgroup> sb: array<u32, ${kPacks * i8a8TileN(geometry)}>;
 
@@ -403,14 +436,16 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let tid = lid.y * ${geometry.wgX}u + lid.x;
-  // 適格条件で D % 4 == 0 なので、行頭は必ず語境界に来る（i8 ペイロードは平坦添字 4 詰め）
+  // Eligibility requires D % 4 == 0, so a row always starts on a word boundary (the i8 payload
+  // packs 4 per flat index)
   let k4 = dims.k / ${I8A8_PACK}u;
 ${
   v4 ? `  let n4 = dims.n / ${I8A8_PACK}u;\n` : ""
-}  // B と H を畳んだバッチ軸（workgroup 単位で一様 — 内側の workgroupBarrier が WGSL の
-  // 一様性要件を満たすための前提）。MUST: q / k のペイロードは **pack 単位**、scale は行数
-  // 単位、S は要素${v4 ? "（v4 では quad）" : ""}単位で数える — 単位を取り違えると B·H ≥ 2 で
-  // 隣の head を読み書きする（例外なしの誤値で、B=H=1 のテストには出ない）
+}  // The batch axis folding B and H (uniform per workgroup — a precondition for the inner
+  // workgroupBarrier to meet WGSL's uniformity requirement). MUST: the q / k payloads count in
+  // **packs**, the scales in rows, S in elements${v4 ? "（v4 では quad）" : ""} — mixing up the units
+  // reads and writes the next head when B·H ≥ 2 (a wrong value without an exception, invisible
+  // to tests with B=H=1)
   let qbase = wid.z * ${qRows} * k4${rowWindow ? " + dims.row_offset * k4" : ""};
   let kbase = wid.z * dims.n * k4;
   let qsbase = wid.z * ${qRows}${rowWindow ? " + dims.row_offset" : ""};
@@ -423,12 +458,12 @@ ${prologueB(
   "krow_base",
   "k は [N,D] のまま読む（連続方向が D = パック方向なので**転置が要らない**）",
 )}
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner
+  // workgroupBarrier to meet WGSL's uniformity requirement
   let tiles = (k4 + ${kPacks - 1}u) / ${kPacks}u;
 ${i8a8AccumulatorInit(geometry)}
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める（dot4I8Packed(0, x) == 0 なので K 端数でも結果は厳密）
+    // Zero-fill out of range (dot4I8Packed(0, x) == 0, so the result is exact even with a K remainder)
 ${fillA(geometry, "qq")}
 ${fillB(geometry, "kq", "krow_base", "k")}
     workgroupBarrier();
@@ -441,13 +476,14 @@ ${store(geometry, v4, score)}
 };
 
 /**
- * uniform の Dims（`{m,n,k}` + 4 語目が**半スケール**の f32 ビット列 — f32 変種の
- * {@link "./attention.ts"} `attentionQkParams` と同じ並び）。
+ * Uniform Dims (`{m,n,k}` + the 4th word, the f32 bits of the **half scale** — the same order as
+ * the f32 variant's `attentionQkParams` in {@link "./attention.ts"}).
  *
- * MUST: scale を WGSL に焼かない（値の種類だけパイプラインが増える）。
+ * MUST: do not bake scale into the WGSL (a pipeline per distinct value).
  *
- * `window` は **行窓変種だけ**が渡す 5〜6 語目（f32 変種の `attentionQkParams` と同じ規律で、
- * struct は 32 バイトへ伸びる）。MUST: `m` はブロック行数（全 M ではない）。
+ * `window` is the 5th–6th words passed **only by the row-window variant** (the same rule as the f32
+ * variant's `attentionQkParams`; the struct grows to 32 bytes). MUST: `m` is the block row count
+ * (not the full M).
  */
 export const attentionQkI8a8Params = (
   m: number,
@@ -456,8 +492,9 @@ export const attentionQkI8a8Params = (
   scale: number,
   window?: GemmRowWindowSpan,
 ): Uint32Array<ArrayBuffer> => {
-  // MUST: 有限判定は f32 語で見る（attention.ts / state-attention.ts と同じ — f64 では有限でも
-  // f32 へ落とすと +Inf になる値が 0·Inf = NaN で S を汚染する。公開 API 側 attrs 門との二重化）。
+  // MUST: check finiteness on the f32 word (as in attention.ts / state-attention.ts — a value finite
+  // in f64 that becomes +Inf in f32 contaminates S through 0·Inf = NaN. Redundant with the attrs
+  // check on the public API side).
   if (!Number.isFinite(Math.fround(scale))) {
     throw new CodegenError(`attention_qk i8a8 params: scale は f32 で有限の数値（${scale}）`);
   }
@@ -484,10 +521,13 @@ export const attentionQkI8a8Params = (
 };
 
 // ---------------------------------------------------------------------------
-// ③PV（P̃ は非実体化のまま整数化 / V は per-column i8）
+// ③PV (P̃ is turned into integers without being materialised / V is per-column i8)
 // ---------------------------------------------------------------------------
 
-/** ③PV の i8a8 変種のキー（①QK と同じ規約 — 世代 ++ / dtype 欄 i8a8 / 幾何 / 内積変種）。 */
+/**
+ * Key of ③PV's i8a8 variant (the same convention as ①QK — generation ++ / dtype field i8a8 /
+ * geometry / dot-product variant).
+ */
 export const attentionPvI8a8Key = (
   v4: boolean,
   dp4a: boolean,
@@ -500,24 +540,27 @@ export const attentionPvI8a8Key = (
   )}${rowWindow ? ":rwc" : ""}`;
 
 /**
- * O を `vec4<f32>` で書けるか。**縮約側（N）の条件は適格判定（`N % 4 == 0`）が既に担っている**
- * ので、ここは出力の列 = D だけを見る（①QK / linear の i8a8 と同じ規律）。
+ * Whether O can be written as `vec4<f32>`. **The reduction-side (N) condition is already covered by
+ * the eligibility check (`N % 4 == 0`)**, so this looks only at the output columns = D (the same
+ * rule as ①QK / linear's i8a8).
  */
 export const attentionPvI8a8UsesVec4 = (depth: number): boolean => depth % I8A8_PACK === 0;
 
 /**
- * A タイル（P̃）の充填。**S を読んで `round(127·exp(S−m))` をその場で作り 4 詰めする**ので、
- * P は 1 バイトも実体化されない（ADR 0023 の性質をそのまま保つ）。
+ * Fill of the A tile (P̃). It **reads S, builds `round(127·exp(S−m))` on the spot and packs 4 per
+ * word**, so not a single byte of P is materialised (keeping the property of ADR 0023 as is).
  *
- * MUST: 変換を掛けるのは**範囲内の要素だけ**。範囲外に `exp(0−m)·127` を掛けると 0 でない
- * 整数が内積へ混ざり、K 端数タイルだけが静かに誤る（gemm.ts の `fillA` と同じ MUST）。
- * MUST: `exp` は**成分ごとのスカラ式**（`vec4` へまとめない — 超越関数のベクトル版は実装依存）。
- * MUST: 行の最大 `m` は**その充填スロットが担当する行**のもの（`row_max{slot}`）。1 本で
- * 使い回すと、1 スレッドが 2 行以上を埋める幾何（`tileM > threads / kPacks`）で
- * 隣の行の最大値が混ざる — 例外の出ない誤値。
- * NOTE: clamp を置かないのは、`exp(S−m) ≤ 1` が `m = amax` から構造的だから（設計 §2.2）。
- * 「格子を 128 にする」退行の検出器は clamp ではなく **この 127 と dequant 側の 1/127** で、
- * どちらも参照との突合が拾う。
+ * MUST: apply the conversion **only to in-range elements**. Applying `exp(0−m)·127` out of range
+ * mixes non-zero integers into the dot product, and only the K-remainder tile goes silently wrong
+ * (the same MUST as `fillA` in gemm.ts).
+ * MUST: `exp` is **a per-component scalar expression** (not grouped into a `vec4` — vector versions
+ * of transcendental functions are implementation-dependent).
+ * MUST: the row max `m` is the one of **the row this fill slot handles** (`row_max{slot}`). Reusing
+ * a single one mixes in the next row's max on geometries where one thread fills 2 or more rows
+ * (`tileM > threads / kPacks`) — a wrong value without an exception.
+ * NOTE: there is no clamp because `exp(S−m) ≤ 1` follows structurally from `m = amax` (design
+ * §2.2). The detector of a "lattice becomes 128" regression is **this 127 and the 1/127 on the
+ * dequant side**, not a clamp; comparison with the reference catches both.
  */
 const fillPTile = (geometry: I8a8Geometry, score: ScoreStorage): string => {
   const stride = i8a8FillStride(geometry);
@@ -529,8 +572,8 @@ const fillPTile = (geometry: I8a8Geometry, score: ScoreStorage): string => {
       `    var av${slot} = 0u;
     if (arow${slot} < dims.m && apack < k4) {
       let raw${slot} = ${scoreReadQuad("s", score, `arow_base${slot} + apack`)};
-      // P̃ の scale は **1/127 固定**（行内 max が exp(0) = 1 で構造的 — amax は取らない）。
-      // 除算が 1 つも無いので WGSL の 2.5 ULP 問題の外側にいる
+      // P̃'s scale is **fixed at 1/127** (the in-row max is exp(0) = 1 by construction — no amax).
+      // There is not a single division, so this stays outside WGSL's 2.5 ULP problem
       let p${slot} = vec4<f32>(
         ${["x", "y", "z", "w"].map((component) => lane(slot, component)).join(",\n        ")},
       );
@@ -538,12 +581,13 @@ const fillPTile = (geometry: I8a8Geometry, score: ScoreStorage): string => {
     }
     sa[sa_at${at(slot * stride)}] = av${slot};`,
   ).join("\n");
-  return `    // 範囲外は 0 で埋める（qP = 0 は内積に寄与しないので K 端数でも結果は厳密）
+  return `    // Zero-fill out of range (qP = 0 adds nothing to the dot product, so the result is exact
+    // even with a K remainder)
     let apack = t * ${i8a8KPacks(geometry)}u + ap;
 ${slots}`;
 };
 
-/** 各充填スロットが担当する行の最大値（K タイルループ不変なので 1 度だけ引く）。 */
+/** Max of the row each fill slot handles (invariant over the K tile loop, so read once). */
 const prologuePvStats = (geometry: I8a8Geometry): string =>
   Array.from(
     { length: i8a8ASlots(geometry) },
@@ -553,16 +597,17 @@ const prologuePvStats = (geometry: I8a8Geometry): string =>
   ).join("\n");
 
 /**
- * ③PV の書き出し。①QK の {@link store} と同じく行・列 quad を codegen 時に展開して
- * `acc{行}_{列 quad}` を静的に読む。ガードの構造・`prow·vs` の畳み順・`1/127` の乗算は
- * 幾何に依らず同一。
+ * Store of ③PV. As in ①QK's {@link store}, rows and column quads are unrolled at codegen and
+ * `acc{row}_{column quad}` is read statically. The guard structure, the folding order of `prow·vs`
+ * and the multiplication by `1/127` are the same for every geometry.
  */
 const pvStore = (geometry: I8a8Geometry, v4: boolean): string => {
   const { regM, regN } = geometry;
   const quads = regN / I8A8_PACK;
   const rows = rowDecls(geometry);
-  // MUST: prow は**出力行**の統計（`rbase + orow`）。A タイル充填で引いた `arow` の側を
-  // 流用すると、担当が違うスレッドの行 inv が乗る（B·H = M = 1 でしか一致しない）。
+  // MUST: prow is the statistic of **the output row** (`rbase + orow`). Reusing the `arow` side
+  // read in the A tile fill applies the row inv of another thread's row (it matches only with
+  // B·H = M = 1).
   const prow = (row: number, indent: string): string =>
     `${indent}let prow = stats[(rbase + orow${row}) * 2u + 1u] * ${INV_P_LATTICE};`;
   if (v4) {
@@ -576,9 +621,9 @@ ${prow(row, "      ")}
     }`,
       ).join("\n");
       return `  if (ocq${quad} < n4) {
-    // D % ${I8A8_PACK} == 0 かつ ocq${quad} < n4 なので oc + ${I8A8_PACK - 1} < D。
-    // MUST: 列 scale は Vᵀ の**行** = (b, h, d)（= V の per-column scale）。行 scale の側と
-    // 取り違えても例外は出ない
+    // D % ${I8A8_PACK} == 0 and ocq${quad} < n4, so oc + ${I8A8_PACK - 1} < D.
+    // MUST: the column scale is a **row** of Vᵀ = (b, h, d) (= V's per-column scale). Mixing it
+    // up with the row scale raises no exception
     let oc = ocq${quad} * ${I8A8_PACK}u;
     let vs = vec4<f32>(
       vscale[vsbase + oc],
@@ -586,7 +631,7 @@ ${prow(row, "      ")}
       vscale[vsbase + oc + 2u],
       vscale[vsbase + oc + 3u],
     );
-    // MUST: prow·vs を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+    // MUST: fold prow·vs into one f32 first, then multiply f32(acc) by it (no bias, so no fma)
 ${rowStores}
   }`;
     }).join("\n");
@@ -605,7 +650,7 @@ ${blocks}`;
     }).join("\n");
     return `  if (orow${row} < dims.m) {
     let orow_base = obase + orow${row} * dims.n;
-    // MUST: prow·vs を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+    // MUST: fold prow·vs into one f32 first, then multiply f32(acc) by it (no bias, so no fma)
 ${prow(row, "    ")}
 ${writes}
   }`;
@@ -624,13 +669,14 @@ export const attentionPvI8a8Wgsl = (
 ): string => {
   assertI8a8Geometry(geometry, "attention_pv i8a8");
   const kPacks = i8a8KPacks(geometry);
-  // 行窓（{@link "./gemm.ts"} `GemmRowWindow` の `"c"`）: **O の base 1 本**だけが全 M
-  // ストライド + 行オフセットで数える。S / 行統計 / Vᵀ はブロック相対のままなので、
-  // P̃ の生成も dequant も 1 文字も動かない = 1 枚実行とビット同一。
+  // Row window (`"c"` of `GemmRowWindow` in {@link "./gemm.ts"}): only **the 1 base of O** counts
+  // with the full M stride + the row offset. S / row statistics / Vᵀ stay block-relative, so
+  // neither P̃ generation nor dequant moves by a single character = bit-identical to a single-block
+  // run.
   const oUnit = v4 ? "n4" : "dims.n";
-  return `// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P̃ = round(127·exp(S − m)) は非実体化${
+  return `// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P̃ = round(127·exp(S − m)) not materialised${
     dp4a ? "" : "・エミュ"
-  }, v は per-column i8（Vᵀ 連続）${scoreNote(score)}${rowWindow ? ", 行窓 c" : ""}, ${i8a8GeometryNote(
+  }, v is per-column i8 (Vᵀ contiguous)${scoreNote(score)}${rowWindow ? ", 行窓 c" : ""}, ${i8a8GeometryNote(
     geometry,
   )}${v4 ? " + vec4" : ""})
 struct Dims {
@@ -639,7 +685,8 @@ struct Dims {
   k: u32,
 ${rowWindow ? ROW_WINDOW_DIMS_EXTRA : ""}}
 @group(0) @binding(0) var<uniform> dims: Dims;
-// 適格条件で N % 4 == 0 なので、S の行頭は常に quad 境界に来る（P̃ の 4 詰めと同じ刻み）
+// Eligibility requires N % 4 == 0, so a row of S always starts on a quad boundary (the same step
+// as P̃'s packing of 4)
 @group(0) @binding(1) var<storage, read> s: array<${scoreArrayType(score, "vec4<f32>")}>;
 @group(0) @binding(2) var<storage, read> vq: array<u32>;
 @group(0) @binding(3) var<storage, read> stats: array<f32>;
@@ -648,8 +695,8 @@ ${rowWindow ? ROW_WINDOW_DIMS_EXTRA : ""}}
 ${scoreQuadLoaderWgsl("s", score)}
 ${i8a8IdotWgsl(dp4a)}
 
-// 共有タイルは **[pack][行] / [pack][列]** 配置（①QK / linear の i8a8 と同じ — 内側の読みが
-// 語ストライド ${I8A8_PACK} になりバンク衝突が 8-way から 2-way に減る）
+// Shared tiles are laid out **[pack][row] / [pack][column]** (as in ①QK / linear's i8a8 — the inner
+// reads get word stride ${I8A8_PACK} and bank conflicts drop from 8-way to 2-way)
 var<workgroup> sa: array<u32, ${kPacks * i8a8TileM(geometry)}>;
 var<workgroup> sb: array<u32, ${kPacks * i8a8TileN(geometry)}>;
 
@@ -659,14 +706,16 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let tid = lid.y * ${geometry.wgX}u + lid.x;
-  // 縮約軸 N は S 側では quad 単位・vq 側では pack 単位（同じ 4 要素の刻み）
+  // The reduction axis N counts in quads on the S side and in packs on the vq side (the same step
+  // of 4 elements)
   let k4 = dims.k / ${I8A8_PACK}u;
 ${
   v4 ? `  let n4 = dims.n / ${I8A8_PACK}u;\n` : ""
-}  // B と H を畳んだバッチ軸（workgroup 単位で一様 — 内側の workgroupBarrier が WGSL の
-  // 一様性要件を満たすための前提）。MUST: S は quad 単位、vq は pack 単位、行統計は行あたり
-  // 2 語、vscale は D 本、O は要素${v4 ? "（v4 では quad）" : ""}単位で数える — 単位を
-  // 取り違えると B·H ≥ 2 で隣の head を読み書きする（例外なしの誤値で B=H=1 では出ない）
+}  // The batch axis folding B and H (uniform per workgroup — a precondition for the inner
+  // workgroupBarrier to meet WGSL's uniformity requirement). MUST: S counts in quads, vq in packs,
+  // the row statistics in 2 words per row, vscale in D entries, O in elements${v4 ? "（v4 では quad）" : ""}
+  // — mixing up the units reads and writes the next head when B·H ≥ 2 (a wrong value without an
+  // exception, invisible with B=H=1)
   let sbase = wid.z * dims.m * k4;
   let vbase = wid.z * dims.n * k4;
   let rbase = wid.z * dims.m;
@@ -675,8 +724,8 @@ ${
     rowWindow ? ` + dims.row_offset * ${oUnit}` : ""
   };
 ${prologueA(geometry, "sbase", "P̃ タイルの担当")}
-  // 行の最大 m（K タイルループ不変なので 1 度だけ引く）。端タイルでは arow >= M がありうるので
-  // 添字を 0 へ倒す（読んだ値は arow < M の枝でしか使われない）
+  // Row max m (invariant over the K tile loop, so read once). On the edge tile arow >= M can
+  // happen, so the index falls back to 0 (the value read is used only in the arow < M branch)
 ${prologuePvStats(geometry)}
 ${prologueB(
   geometry,
@@ -684,8 +733,8 @@ ${prologueB(
   "vrow_base",
   "列は D。vq は [D,N] の N 連続（= パック方向）なので**転置が要らない**",
 )}
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner
+  // workgroupBarrier to meet WGSL's uniformity requirement
   let tiles = (k4 + ${kPacks - 1}u) / ${kPacks}u;
 ${i8a8AccumulatorInit(geometry)}
   for (var t = 0u; t < tiles; t = t + 1u) {
@@ -701,11 +750,12 @@ ${pvStore(geometry, v4)}
 };
 
 /**
- * uniform の Dims（`{m, n, k}` = `{M, D, N}` — f32 変種の {@link "./attention.ts"}
- * `attentionPvParams` と同じ並び。③PV に半スケールは登場しない）。
+ * Uniform Dims (`{m, n, k}` = `{M, D, N}` — the same order as the f32 variant's
+ * `attentionPvParams` in {@link "./attention.ts"}. The half scale does not appear in ③PV).
  *
- * `window` は **行窓変種だけ**が渡す 4〜5 語目（struct は 32 バイトへ伸びる）。
- * MUST: `m` はブロック行数（全 M ではない）。
+ * `window` is the 4th–5th words passed **only by the row-window variant** (the struct grows to 32
+ * bytes).
+ * MUST: `m` is the block row count (not the full M).
  */
 export const attentionPvI8a8Params = (
   m: number,

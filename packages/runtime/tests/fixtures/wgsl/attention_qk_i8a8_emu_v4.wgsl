@@ -1,4 +1,4 @@
-// karume attention_qk (S[b,m,n] = q[b,m,d] · k[b,n,d]ᵀ, q/k とも per-token i8 の整数内積・エミュ, 半スケールは dequant 側, タイル 128x64 / 1 スレッド 8x8 / wg 8x16 / K 16 + vec4)
+// karume attention_qk (S[b,m,n] = q[b,m,d] · k[b,n,d]ᵀ, integer dot product of per-token i8 q and k・エミュ, half scale on the dequant side, タイル 128x64 / 1 スレッド 8x8 / wg 8x16 / K 16 + vec4)
 struct Dims {
   m: u32,
   n: u32,
@@ -12,14 +12,14 @@ struct Dims {
 @group(0) @binding(4) var<storage, read> qscale: array<f32>;
 @group(0) @binding(5) var<storage, read> kscale: array<f32>;
 
-// 整数内積のエミュレーション（core WGSL のみ）。dot4I8Packed と**同じ整数**を返す —
-// 整数加算は結合的かつ厳密で、中間値も最大 4·127² = 64,516 なので巻き戻らない
+// emulation of the integer dot product (core WGSL only); returns **the same integer** as dot4I8Packed —
+// integer addition is associative and exact, and the intermediates stay at most 4·127² = 64,516, so nothing wraps
 fn idot(a: u32, b: u32) -> i32 {
   return dot(unpack4xI8(a), unpack4xI8(b));
 }
 
-// 共有タイルは **[pack][行] / [pack][列]** 配置（linear の i8a8 と同じ — 内側の読みが
-// 語ストライド 4 になりバンク衝突が 8-way から 2-way に減る）
+// Shared tiles are laid out **[pack][row] / [pack][column]** (as in linear's i8a8 — the inner reads
+// get word stride 4 and bank conflicts drop from 8-way to 2-way)
 var<workgroup> sa: array<u32, 512>;
 var<workgroup> sb: array<u32, 256>;
 
@@ -29,19 +29,21 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let tid = lid.y * 8u + lid.x;
-  // 適格条件で D % 4 == 0 なので、行頭は必ず語境界に来る（i8 ペイロードは平坦添字 4 詰め）
+  // Eligibility requires D % 4 == 0, so a row always starts on a word boundary (the i8 payload
+  // packs 4 per flat index)
   let k4 = dims.k / 4u;
   let n4 = dims.n / 4u;
-  // B と H を畳んだバッチ軸（workgroup 単位で一様 — 内側の workgroupBarrier が WGSL の
-  // 一様性要件を満たすための前提）。MUST: q / k のペイロードは **pack 単位**、scale は行数
-  // 単位、S は要素（v4 では quad）単位で数える — 単位を取り違えると B·H ≥ 2 で
-  // 隣の head を読み書きする（例外なしの誤値で、B=H=1 のテストには出ない）
+  // The batch axis folding B and H (uniform per workgroup — a precondition for the inner
+  // workgroupBarrier to meet WGSL's uniformity requirement). MUST: the q / k payloads count in
+  // **packs**, the scales in rows, S in elements（v4 では quad） — mixing up the units
+  // reads and writes the next head when B·H ≥ 2 (a wrong value without an exception, invisible
+  // to tests with B=H=1)
   let qbase = wid.z * dims.m * k4;
   let kbase = wid.z * dims.n * k4;
   let qsbase = wid.z * dims.m;
   let ksbase = wid.z * dims.n;
   let sbase = wid.z * dims.m * n4;
-  // q タイルの担当（128 行 × 4 pack を 128 スレッドで 4 巡）
+  // q タイルの担当 (128 rows × 4 packs over 128 threads in 4 rounds)
   let ar = tid / 4u;
   let ap = tid % 4u;
   let sa_at = ap * 128u + ar;
@@ -53,7 +55,7 @@ fn main(
   let arow_base2 = qbase + arow2 * k4;
   let arow3 = arow0 + 96u;
   let arow_base3 = qbase + arow3 * k4;
-  // B タイルの担当（64 列 × 4 pack を 128 スレッドで 2 巡）。
+  // B tile assignment (64 columns × 4 packs over 128 threads in 2 rounds).
   // k は [N,D] のまま読む（連続方向が D = パック方向なので**転置が要らない**）
   let wc = tid / 4u;
   let wp = tid % 4u;
@@ -62,8 +64,8 @@ fn main(
   let krow_base0 = kbase + wcol0 * k4;
   let wcol1 = wcol0 + 32u;
   let krow_base1 = kbase + wcol1 * k4;
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner
+  // workgroupBarrier to meet WGSL's uniformity requirement
   let tiles = (k4 + 3u) / 4u;
   var acc0_0 = vec4<i32>(0);
   var acc0_1 = vec4<i32>(0);
@@ -82,7 +84,7 @@ fn main(
   var acc7_0 = vec4<i32>(0);
   var acc7_1 = vec4<i32>(0);
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める（dot4I8Packed(0, x) == 0 なので K 端数でも結果は厳密）
+    // Zero-fill out of range (dot4I8Packed(0, x) == 0, so the result is exact even with a K remainder)
     let apack = t * 4u + ap;
     var av0 = 0u;
     if (arow0 < dims.m && apack < k4) {
@@ -116,8 +118,9 @@ fn main(
     }
     sb[sb_at + 32u] = bv1;
     workgroupBarrier();
-    // 共有ロード 16 回（B の 8 語 + A の 8 語）で 64 個の整数内積 = 256 MAC。
-    // 縮約は i32 の厳密加算なので**順序に依存しない**（f32 骨格と違い加算順は数値契約に無い）
+    // 16 shared loads (8 words of B + 8 words of A) give 64 integer inner products = 256 MACs.
+    // The reduction is exact i32 addition, so it **does not depend on order** (unlike the f32
+    // skeleton, the addition order is not part of the numeric contract)
     for (var p = 0u; p < 4u; p = p + 1u) {
       let bcol = p * 64u + lid.x * 8u;
       let b0 = sb[bcol];
@@ -167,8 +170,8 @@ fn main(
   let orow6 = orow0 + 6u;
   let orow7 = orow0 + 7u;
   if (ocq0 < n4) {
-    // n % 4 == 0 かつ ocq0 < n4 なので oc + 3 < n。
-    // MUST: 半スケールは dequant 側で q / k の**両方**へ（列側はここで 1 度だけ）
+    // n % 4 == 0 and ocq0 < n4, so oc + 3 < n.
+    // MUST: the half scale goes to **both** q and k on the dequant side (the column side once, here)
     let oc = ocq0 * 4u;
     let ks = vec4<f32>(
       kscale[ksbase + oc],
@@ -176,7 +179,7 @@ fn main(
       kscale[ksbase + oc + 2u],
       kscale[ksbase + oc + 3u],
     ) * dims.scale;
-    // MUST: qs'·ks' を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+    // MUST: fold qs'·ks' into one f32 first, then multiply f32(acc) by it (no bias, so no fma)
     if (orow0 < dims.m) {
       s[sbase + orow0 * n4 + ocq0] = vec4<f32>(acc0_0) * ((qscale[qsbase + orow0] * dims.scale) * ks);
     }
@@ -203,8 +206,8 @@ fn main(
     }
   }
   if (ocq1 < n4) {
-    // n % 4 == 0 かつ ocq1 < n4 なので oc + 3 < n。
-    // MUST: 半スケールは dequant 側で q / k の**両方**へ（列側はここで 1 度だけ）
+    // n % 4 == 0 and ocq1 < n4, so oc + 3 < n.
+    // MUST: the half scale goes to **both** q and k on the dequant side (the column side once, here)
     let oc = ocq1 * 4u;
     let ks = vec4<f32>(
       kscale[ksbase + oc],
@@ -212,7 +215,7 @@ fn main(
       kscale[ksbase + oc + 2u],
       kscale[ksbase + oc + 3u],
     ) * dims.scale;
-    // MUST: qs'·ks' を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+    // MUST: fold qs'·ks' into one f32 first, then multiply f32(acc) by it (no bias, so no fma)
     if (orow0 < dims.m) {
       s[sbase + orow0 * n4 + ocq1] = vec4<f32>(acc0_1) * ((qscale[qsbase + orow0] * dims.scale) * ks);
     }

@@ -1,4 +1,4 @@
-// karume static_quantize packed: 固定 f32 scale の SRQ を int8 コード 4 個 / u32 語で書く（ADR 0105）
+// karume static_quantize packed: SRQ with a fixed f32 scale written as 4 int8 codes per u32 word (ADR 0105)
 @group(0) @binding(0) var<uniform> params: array<vec4<u32>, 65>;
 @group(0) @binding(1) var<storage, read> input: array<u32>;
 @group(0) @binding(2) var<storage, read_write> output: array<u32>;
@@ -14,10 +14,10 @@ fn quantizeCode(bits: u32) -> u32 {
   }
   let sign = bits & 0x80000000u;
   let level = min(lo, select(127u, 128u, sign != 0u));
-  // 負は 2 の補数の低位 8 bit（level 0 の符号は席が無く +0 へ落ちる）
+  // Negatives are the low 8 bits of the two's complement (level 0 has no sign slot and falls to +0)
   return select(level, (0u - level) & 255u, sign != 0u);
 }
-// 1 タイル（128 要素）ぶんのコード置き場
+// Code storage for one tile (128 elements)
 var<workgroup> codes: array<u32, 128>;
 @compute @workgroup_size(128)
 fn main(
@@ -27,14 +27,15 @@ fn main(
 ) {
   let count = word(0u);
   let tiles = (count + 127u) / 128u;
-  // タイルの選択は workgroup_id だけで決まる = 下の barrier は端でも workgroup 一様
+  // Tile selection depends on workgroup_id alone = the barrier below is uniform even at the edge
   for (var tile = wg.x; tile < tiles; tile += groups.x) {
     let index = tile * 128u + lid;
     var code = 0u;
     if (index < count) { code = quantizeCode(input[index]); }
     codes[lid] = code;
     workgroupBarrier();
-    // 要素数は 4 の倍数（params の門）なので、1 語は全要素が範囲内か全要素が範囲外のどちらか
+    // The element count is a multiple of 4 (the params check), so a word is either entirely in range
+    // or entirely out of range
     if (lid < 32u) {
       let base = lid * 4u;
       if (tile * 128u + base < count) {
@@ -42,7 +43,7 @@ fn main(
           (codes[base + 1u] << 8u) | (codes[base + 2u] << 16u) | (codes[base + 3u] << 24u);
       }
     }
-    // 次のタイルが codes を上書きする前に、上の読みを全スレッドが終える（WAR）
+    // Every thread finishes the reads above before the next tile overwrites codes (WAR)
     workgroupBarrier();
   }
 }

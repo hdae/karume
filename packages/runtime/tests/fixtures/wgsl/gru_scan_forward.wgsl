@@ -1,4 +1,4 @@
-// karume gru_scan (forward, f32, 1 workgroup = 1 バッチ要素 / 1 lane = 1 隠れユニット)
+// karume gru_scan (forward, f32, 1 workgroup = 1 batch element / 1 lane = 1 hidden unit)
 struct Dims {
   time: u32,
   batch: u32,
@@ -12,7 +12,8 @@ struct Dims {
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;
 
 var<workgroup> h_shared: array<f32, 256>;
-// 丸め障壁の中継（f32 のビット列をそのまま置く）。lane は自分の枠しか触らない。
+// relay for the rounding barriers (holds the f32 bit pattern as is). Each lane touches only its
+// own slot.
 var<workgroup> stage: array<u32, 256>;
 
 fn sigmoid_stable(x: f32) -> f32 {
@@ -40,7 +41,7 @@ fn main(
   let hidden = dims.hidden;
   let gates = hidden * 3u;
   let lane_used = lid < hidden;
-  // W_hh は [3H, H] の行優先。ゲートは r / z / n の順に H 行ずつ並ぶ。
+  // W_hh is [3H, H], row-major. The gates are laid out H rows each, in the order r / z / n.
   let row_r = lid * hidden;
   let row_z = (hidden + lid) * hidden;
   let row_n = (hidden * 2u + lid) * hidden;
@@ -67,19 +68,21 @@ fn main(
           acc_z = acc_z + w_hh[row_z + k] * hk;
           acc_n = acc_n + w_hh[row_n + k] * hk;
         }
-        // bias は last（GEMM の epilogue と同じ）。ゲートの足し順は隠れ側が第 1 引数。
+        // bias last (the same as the GEMM epilogue). The gate sums take the hidden side as the
+        // first operand.
         let gate_r = sigmoid_stable((acc_r + b_hh[lid]) + gi[gi_base + lid]);
         gate_z = sigmoid_stable((acc_z + b_hh[hidden + lid]) + gi[gi_base + hidden + lid]);
         let gh_n = acc_n + b_hh[hidden * 2u + lid];
-        // 丸め障壁 ①: 分解経路の mul は別 dispatch なので、fma 縮約させない
+        // rounding barrier ①: the decomposed path's mul is a separate dispatch, so no fma
+        // contraction here
         stage[lid] = bitcast<u32>(gh_n * gate_r);
       }
       workgroupBarrier();
       var cand = 0.0;
       if (lane_used) {
-        // n = tanh(i_n + h_n·r) — 入力側が第 1 引数
+        // n = tanh(i_n + h_n·r) — the input side is the first operand
         cand = tanh_stable(gi[gi_base + hidden * 2u + lid] + bitcast<f32>(stage[lid]));
-        // 丸め障壁 ②: h' = (h − n)·z + n の mul と add の間
+        // rounding barrier ②: between the mul and the add of h' = (h − n)·z + n
         stage[lid] = bitcast<u32>((h_prev - cand) * gate_z);
       }
       workgroupBarrier();
@@ -88,7 +91,7 @@ fn main(
         h_shared[lid] = h_next;
         out[(t * dims.batch + item) * hidden + lid] = h_next;
       }
-      // 次ステップの縮約が h_shared を読む前に、この書き込みを揃える
+      // make this write complete before the next step's reduction reads h_shared
       workgroupBarrier();
       step = step + 1u;
     }

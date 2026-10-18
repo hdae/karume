@@ -1,4 +1,4 @@
-// karume rms_norm (last dim, weight only, f32, 二乗和 1 パス)
+// karume rms_norm (last dim, weight only, f32, sum of squares in 1 pass)
 struct Params {
   rows: u32,
   dim: u32,
@@ -26,7 +26,7 @@ fn main(
   while (row < params.rows) {
     let base = row * dim;
 
-    // 二乗和（1 パス）
+    // sum of squares (1 pass)
     var acc = 0.0;
     var i = lid;
     while (i < dim) {
@@ -45,7 +45,7 @@ fn main(
       stride = stride / 2u;
     }
     let inv = inverseSqrt(scratch[0u] * scale + params.eps);
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // make every read of scratch[0] finish before the next row overwrites scratch[lid]
     workgroupBarrier();
 
     var o = lid;

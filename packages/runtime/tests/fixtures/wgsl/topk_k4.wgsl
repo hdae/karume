@@ -38,8 +38,9 @@ fn main(
   var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
-    // 相 1: レーン局所 top-k。identity は値も index も最弱（番兵 dim = 候補なし）なので、
-    // 実要素は必ず勝つ — 全 -inf 行でも答えが最小 index から k 本に決まる
+    // phase 1: lane-local top-k. The identity is the weakest in both value and index (sentinel
+    // dim = no candidate), so a real element always wins — even an all -inf row gives k entries
+    // from the smallest index
     for (var s = 0u; s < 4u; s = s + 1u) {
       cand_value[block + s] = neg_inf;
       cand_index[block + s] = dim;
@@ -47,7 +48,8 @@ fn main(
     var i = lid;
     while (i < dim) {
       let v = f32_rank_key(x[base + i]);
-      // 末尾（最弱）に勝てない候補はここで捨てる。勝つ候補だけが降順を保つ挿入へ進む
+      // a candidate that cannot beat the tail (the weakest) is dropped here. Only a winner goes on
+      // to the insertion that keeps the descending order
       if (rank_key_beats(v, i, cand_value[block + 3u], cand_index[block + 3u])) {
         var s = 3u;
         while (s > 0u && rank_key_beats(v, i, cand_value[block + s - 1u], cand_index[block + s - 1u])) {
@@ -60,9 +62,9 @@ fn main(
       }
       i = i + 32u;
     }
-    // 相 2: merge。各レーンの先頭同士の最大元 = 残り集合の最大元（各ブロックが降順）なので、
-    // k ラウンド回せば値降順・同値なら index 昇順で出る。カーソルは k-1 回しか進まないので
-    // block + cursor は常にブロック内
+    // phase 2: merge. The maximum of the lanes' heads = the maximum of the remaining set (each
+    // block is descending), so k rounds give values descending, ties by ascending index. The
+    // cursor advances at most k-1 times, so block + cursor always stays inside the block
     var cursor = 0u;
     for (var r = 0u; r < 4u; r = r + 1u) {
       head_value[lid] = cand_value[block + cursor];
@@ -86,11 +88,11 @@ fn main(
         values[row * 4u + r] = x[base + won];
         indices[row * 4u + r] = i32(won);
       }
-      // 走査は i ≡ lid (mod 32) の分担なので、勝った要素の持ち主は won % 32 で決まる
+      // the scan splits work by i ≡ lid (mod 32), so the winning element's owner is won % 32
       if (won % 32u == lid) {
         cursor = cursor + 1u;
       }
-      // 次ラウンドが head を上書きする前に won の読み終わりを揃える
+      // make every read of won finish before the next round overwrites head
       workgroupBarrier();
     }
     row = row + nwg.x;

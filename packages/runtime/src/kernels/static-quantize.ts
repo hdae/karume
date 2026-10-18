@@ -1,13 +1,16 @@
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
-/** f32 の除算 → 偶数丸め → [-128,127] 飽和 → f32 乗算を整数表で再現する。 */
+/**
+ * Reproduces f32 division → round half to even → saturation to [-128,127] → f32 multiplication
+ * with an integer table.
+ */
 export const staticQuantizeParams = (count: number, scale: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("static_quantize params", { count });
   if (!Number.isFinite(scale) || scale < 0 || Math.fround(scale) !== scale) {
     throw new CodegenError("static_quantize: scale は非負・有限で厳密に f32 表現できる値が必要");
   }
-  // 16 byte 整列。count / 境界 128 語 / 出力 129 語 / 恒等フラグ / padding。
+  // 16-byte aligned. count / 128 boundary words / 129 output words / identity flag / padding.
   const params = new Uint32Array(260);
   const scratch = new Float32Array(1);
   const bits = new Uint32Array(scratch.buffer);
@@ -18,7 +21,8 @@ export const staticQuantizeParams = (count: number, scale: number): Uint32Array<
     const half = j + 0.5;
     const error = 2 ** (Math.floor(Math.log2(half)) - 24);
     const strict = j % 2 === 0;
-    // f32 除算が half へ丸まる区間を含める。積は f64 で厳密（最大49bit）。
+    // Include the interval where the f32 division rounds to half. The product is exact in f64 (at
+    // most 49 bits).
     const cut = (half + (strict ? error : -error)) * scale;
     scratch[0] = cut;
     if (scratch[0] < cut || (strict && scratch[0] === cut)) bits[0]++;
@@ -33,7 +37,7 @@ export const staticQuantizeParams = (count: number, scale: number): Uint32Array<
 
 export const STATIC_QUANTIZE_WORKGROUP_SIZE = 128;
 export const STATIC_QUANTIZE_KEY = "static_quantize:v1:f32:wg128";
-export const STATIC_QUANTIZE_WGSL: string = `// karume static_quantize: 固定 f32 scale の SRQ（ADR 0097）
+export const STATIC_QUANTIZE_WGSL: string = `// karume static_quantize: SRQ with a fixed f32 scale (ADR 0097)
 @group(0) @binding(0) var<uniform> params: array<vec4<u32>, 65>;
 @group(0) @binding(1) var<storage, read> input: array<u32>;
 @group(0) @binding(2) var<storage, read_write> output: array<u32>;
@@ -65,14 +69,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 `;
 
 /**
- * packed int8 出力の SRQ（ADR 0105）の params。**表は f32 経路と同じもの**で、
- * packed で表せない 2 つの形だけを追加で拒否する:
+ * params of the SRQ with packed int8 output (ADR 0105). **The table is the same as the f32 path's**;
+ * only the two forms that packed cannot represent are additionally rejected:
  *
- * - `scale === 0`（恒等 — 入力 f32 語をそのまま流す形）は int8 コードに落とせない。
- * - 要素数が 4 の倍数でない形は 1 語 4 要素に詰め切れない。
+ * - `scale === 0` (identity — the form that passes the input f32 words through) cannot be reduced
+ *   to int8 codes.
+ * - A form whose element count is not a multiple of 4 cannot be packed into 4 elements per word.
  *
- * MUST: どちらも fail loudly（黙って f32 経路へ退避しない — 退避すると消費側の GEMV が
- * `vec4<u32>` 束縛のまま f32 の語を読み、例外なしの沈黙誤値になる）。
+ * MUST: both fail loudly (no silent fallback to the f32 path — with a fallback the consuming GEMV
+ * would read f32 words through its `vec4<u32>` binding, a silent wrong value without an exception).
  */
 export const staticQuantizePackedParams = (
   count: number,
@@ -89,32 +94,38 @@ export const staticQuantizePackedParams = (
 
 export const STATIC_QUANTIZE_PACKED_KEY = "static_quantize:v1:packed-i8:wg128";
 /**
- * packed int8 出力の SRQ（ADR 0105）。出力は u32 1 語 = int8 コード 4 個で、要素 i のコードは
- * 語 `i >> 2` のバイト `i & 3`（`pack4xI8` / `unpack4xI8` と同じリトルエンディアン順）。
+ * SRQ with packed int8 output (ADR 0105). One u32 output word = 4 int8 codes; the code of element i
+ * is byte `i & 3` of word `i >> 2` (the same little-endian order as `pack4xI8` / `unpack4xI8`).
  *
- * MUST: 境界表と level / sign の確定は f32 経路（{@link STATIC_QUANTIZE_WGSL} の `quantize`）と
- * **同じ字面**。違うのは最後の 1 手だけ — 出力値表 `word(129 + level)` を引く代わりに
- * int8 コード（2 の補数）を返す。消費側は `f32(code) * scale` で戻し、表引きと要素ごとに
- * u32 一致する（根拠は ADR 0105）。
- * NOTE: int8 に席が無い 2 値だけは f32 経路と違う。**-0.0 はコード 0 = +0.0 へ落ち**
- * （GEMV の積和では `acc` が +0.0 始まりなので出力は動かない — ADR 0105）、**NaN は境界表の
- * 外側として ±127 / -128 へ飽和する**（f32 経路は NaN をそのまま流す）。
+ * MUST: the boundary table and the resolution of level / sign are **textually identical** to the
+ * f32 path (`quantize` in {@link STATIC_QUANTIZE_WGSL}). Only the last step differs — instead of
+ * looking up the output value table `word(129 + level)` it returns the int8 code (two's
+ * complement). The consumer restores it with `f32(code) * scale`, which matches the table lookup
+ * per element as u32 (rationale: ADR 0105).
+ * NOTE: only the two values int8 has no code for differ from the f32 path. **-0.0 falls to code
+ * 0 = +0.0** (in the GEMV multiply-add `acc` starts at +0.0, so the output does not move — ADR
+ * 0105), and **NaN saturates to ±127 / -128 as outside the boundary table** (the f32 path passes NaN
+ * through).
  *
- * ## 幾何（f32 経路と同じ「1 スレッド 1 要素」— ADR 0105 追記 1）
+ * ## Geometry (the same "1 thread, 1 element" as the f32 path — ADR 0105 addendum 1)
  *
- * 1 語 4 要素を 1 スレッドが直列に量子化する形は、スレッド数が要素数の 1/4 に落ちて
- * 占有率が足りない（k=1536 なら 384 スレッド = workgroup 3 個）。実測でも f32 経路より
- * 19% 遅かったので、**担当割りだけ**を f32 経路に揃える:
+ * A form where one thread quantizes the 4 elements of a word serially drops the thread count to
+ * 1/4 of the element count and lacks occupancy (k=1536 gives 384 threads = 3 workgroups). It also
+ * measured 19% slower than the f32 path, so **only the work assignment** is aligned with the f32
+ * path:
  *
- * - 1 スレッドが自分の 1 要素のコードを求め、workgroup 共有メモリへ置く（128 要素 = 1 タイル）。
- * - `workgroupBarrier()` の後、下位 32 スレッドが 4 コードずつ 1 語へ詰めて書く。
- * - タイルの選択は `workgroup_id` だけで決まる grid-stride なので、dispatch 数は f32 経路と同じ
- *   `ceil(count / 128)` で、barrier は端のタイルでも workgroup 全体で一様。
+ * - Each thread computes the code of its own element and puts it in workgroup shared memory (128
+ *   elements = 1 tile).
+ * - After `workgroupBarrier()`, the lower 32 threads pack 4 codes each into one word and write it.
+ * - Tile selection is a grid-stride decided by `workgroup_id` alone, so the dispatch count is the
+ *   same `ceil(count / 128)` as the f32 path, and the barrier is uniform across the whole
+ *   workgroup even on the edge tile.
  *
- * MUST: barrier を跨ぐ分岐は `workgroup_id` 由来だけにする（`local_invocation_index` で
- * ループを回すと端のタイルで barrier が非一様になり、WGSL の一様性解析で落ちる）。
+ * MUST: branches that span a barrier derive only from `workgroup_id` (looping on
+ * `local_invocation_index` makes the barrier non-uniform on the edge tile and fails WGSL
+ * uniformity analysis).
  */
-export const STATIC_QUANTIZE_PACKED_WGSL: string = `// karume static_quantize packed: 固定 f32 scale の SRQ を int8 コード 4 個 / u32 語で書く（ADR 0105）
+export const STATIC_QUANTIZE_PACKED_WGSL: string = `// karume static_quantize packed: SRQ with a fixed f32 scale written as 4 int8 codes per u32 word (ADR 0105)
 @group(0) @binding(0) var<uniform> params: array<vec4<u32>, 65>;
 @group(0) @binding(1) var<storage, read> input: array<u32>;
 @group(0) @binding(2) var<storage, read_write> output: array<u32>;
@@ -130,10 +141,10 @@ fn quantizeCode(bits: u32) -> u32 {
   }
   let sign = bits & 0x80000000u;
   let level = min(lo, select(127u, 128u, sign != 0u));
-  // 負は 2 の補数の低位 8 bit（level 0 の符号は席が無く +0 へ落ちる）
+  // Negatives are the low 8 bits of the two's complement (level 0 has no sign slot and falls to +0)
   return select(level, (0u - level) & 255u, sign != 0u);
 }
-// 1 タイル（${STATIC_QUANTIZE_WORKGROUP_SIZE} 要素）ぶんのコード置き場
+// Code storage for one tile (${STATIC_QUANTIZE_WORKGROUP_SIZE} elements)
 var<workgroup> codes: array<u32, ${STATIC_QUANTIZE_WORKGROUP_SIZE}>;
 @compute @workgroup_size(${STATIC_QUANTIZE_WORKGROUP_SIZE})
 fn main(
@@ -143,14 +154,15 @@ fn main(
 ) {
   let count = word(0u);
   let tiles = (count + ${STATIC_QUANTIZE_WORKGROUP_SIZE - 1}u) / ${STATIC_QUANTIZE_WORKGROUP_SIZE}u;
-  // タイルの選択は workgroup_id だけで決まる = 下の barrier は端でも workgroup 一様
+  // Tile selection depends on workgroup_id alone = the barrier below is uniform even at the edge
   for (var tile = wg.x; tile < tiles; tile += groups.x) {
     let index = tile * ${STATIC_QUANTIZE_WORKGROUP_SIZE}u + lid;
     var code = 0u;
     if (index < count) { code = quantizeCode(input[index]); }
     codes[lid] = code;
     workgroupBarrier();
-    // 要素数は 4 の倍数（params の門）なので、1 語は全要素が範囲内か全要素が範囲外のどちらか
+    // The element count is a multiple of 4 (the params check), so a word is either entirely in range
+    // or entirely out of range
     if (lid < ${STATIC_QUANTIZE_WORKGROUP_SIZE / 4}u) {
       let base = lid * 4u;
       if (tile * ${STATIC_QUANTIZE_WORKGROUP_SIZE}u + base < count) {
@@ -158,7 +170,7 @@ fn main(
           (codes[base + 1u] << 8u) | (codes[base + 2u] << 16u) | (codes[base + 3u] << 24u);
       }
     }
-    // 次のタイルが codes を上書きする前に、上の読みを全スレッドが終える（WAR）
+    // Every thread finishes the reads above before the next tile overwrites codes (WAR)
     workgroupBarrier();
   }
 }

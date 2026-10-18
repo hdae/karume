@@ -11,8 +11,8 @@ struct Dims {
 @group(0) @binding(2) var<storage, read> k: array<f32>;
 @group(0) @binding(3) var<storage, read_write> s: array<f32>;
 
-// 共有 A タイル（128 行 × K 16・スカラ格納）と
-// 共有 B タイル（K 16 × 列 quad 32・列方向を vec4 に束ねた形）
+// Shared A tile (128 rows × K 16, scalar storage) and
+// shared B tile (K 16 × 32 column quads, column direction grouped into vec4)
 var<workgroup> sa: array<f32, 2048>;
 var<workgroup> sb: array<vec4<f32>, 512>;
 
@@ -22,14 +22,14 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let tid = lid.y * 16u + lid.x;
-  // バッチは workgroup 単位で一様（z 軸 1 つが 1 バッチのタイル）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすための前提
-  // GQA（ADR 0067 決定 2）: K / V だけ kv-head へ写す（wid.z / r = b·Hkv + h/r）。
-  // q / S / O / 行統計は q-head のまま
+  // The batch is uniform per workgroup (one z index = the tiles of one batch) — the premise for the
+  // inner workgroupBarrier to meet WGSL's uniformity requirement
+  // GQA (ADR 0067 decision 2): only K / V map to the kv-head (wid.z / r = b·Hkv + h/r).
+  // q / S / O / row statistics stay on the q-head
   let abase = wid.z * dims.m * dims.k;
   let bbase = (wid.z / dims.kv_repeat) * dims.n * dims.k;
   let cbase = wid.z * dims.m * dims.n;
-  // A タイルの担当（128 行 × 4 quad を 256 スレッドで 2 巡）
+  // A tile assignment (128 rows × 4 quads over 256 threads in 2 rounds)
   let ar = tid / 4u;
   let aq = tid % 4u;
   let arow0 = wid.y * 128u + ar;
@@ -38,8 +38,9 @@ fn main(
   let arow1 = arow0 + 64u;
   let arow_base1 = arow_base0 + 64u * dims.k;
   let sa_base1 = sa_base0 + 1024u;
-  // k タイルの担当（128 列（N）× 4 quad を 256 スレッドで 2 巡）。
-  // k は [N,D] のまま読み、**共有メモリ側で転置して置く**（linear の重み読みと同じ構造）
+  // k tile assignment (128 columns (N) × 4 quads over 256 threads in 2 rounds).
+  // k is read as [N,D] as is and **placed transposed on the shared-memory side** (the same
+  // structure as linear's weight read)
   let wc0 = tid / 4u;
   let wq = tid % 4u;
   let wcol0 = wid.x * 128u + wc0;
@@ -53,8 +54,8 @@ fn main(
   let wsq1 = wc1 / 4u;
   let wsl1 = wc1 % 4u;
   let sb_base1 = (wq * 4u) * 32u + wsq1;
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner workgroupBarrier
+  // to meet WGSL's uniformity requirement
   let tiles = (dims.k + 15u) / 16u;
   var acc0_0 = vec4<f32>(0.0);
   var acc0_1 = vec4<f32>(0.0);
@@ -73,7 +74,8 @@ fn main(
   var acc7_0 = vec4<f32>(0.0);
   var acc7_1 = vec4<f32>(0.0);
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める。内積に寄与しないので端数 shape でも結果は変わらない
+    // Fill out-of-range entries with 0. They do not contribute to the inner product, so
+    // remainder shapes give the same result
     let ak0 = t * 16u + aq * 4u;
     var av0 = vec4<f32>(0.0);
     if (arow0 < dims.m) {
@@ -129,8 +131,9 @@ fn main(
         wv0.w = k[krow_base0 + wk0 + 3u];
       }
     }
-    // 半スケール契約（ADR 0023）: scale は q 側と k 側の**両方**へ掛ける。範囲外は 0 のままで
-    // 0 · scale = 0 なので端数タイルの結論は変わらない
+    // Half-scale contract (ADR 0023): scale is applied to **both** the q side and the k side.
+    // Out-of-range entries stay 0 and 0 · scale = 0, so the outcome of remainder tiles does not
+    // change
     wv0 = wv0 * dims.scale;
     switch wsl0 {
       case 0u: {
@@ -173,8 +176,9 @@ fn main(
         wv1.w = k[krow_base1 + wk0 + 3u];
       }
     }
-    // 半スケール契約（ADR 0023）: scale は q 側と k 側の**両方**へ掛ける。範囲外は 0 のままで
-    // 0 · scale = 0 なので端数タイルの結論は変わらない
+    // Half-scale contract (ADR 0023): scale is applied to **both** the q side and the k side.
+    // Out-of-range entries stay 0 and 0 · scale = 0, so the outcome of remainder tiles does not
+    // change
     wv1 = wv1 * dims.scale;
     switch wsl1 {
       case 0u: {
@@ -203,9 +207,9 @@ fn main(
       }
     }
     workgroupBarrier();
-    // 共有ロード 10 回（B の vec4 2 + A のスカラ 8）で 64 MAC。
-    // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
-    // 完全に一致する。
+    // 10 shared loads (2 vec4 of B + 8 scalars of A) give 64 MACs.
+    // The reduction is sequential in ascending k, and the addition order per output element matches
+    // the 16×16 kernel with 1 output per thread exactly.
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
       let bv0 = sb[kk * 32u + lid.x * 2u];
       let bv1 = sb[kk * 32u + lid.x * 2u + 1u];

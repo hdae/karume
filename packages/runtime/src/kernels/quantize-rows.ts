@@ -1,77 +1,85 @@
 /**
- * 活性の **per-token symmetric int8 量子化**（w8a8 実行経路の前段 — ADR 0025 /
- * 設計は docs/research/2026-08-03-dp4a-w8a8-design.md §4.2）。
+ * **Per-token symmetric int8 quantization** of activations (the front stage of the w8a8 execution
+ * path — ADR 0025 / design in docs/research/2026-08-03-dp4a-w8a8-design.md §4.2).
  *
- * `[rows, dim]` の連続レイアウトを行（= token）ごとに量子化して 2 本の出力を書く:
+ * Quantizes a contiguous `[rows, dim]` layout per row (= token) and writes two outputs:
  *
  * ```
- * s        = max(rowmax(|x|) / 127, f32 tiny)      … xs[row]（per-token scale・f32）
- * q        = clamp(round(x / s), -127, +127)       … xq[row·dim/4 + …]（i8 を 4 詰めた u32）
+ * s        = max(rowmax(|x|) / 127, f32 tiny)      … xs[row] (per-token scale, f32)
+ * q        = clamp(round(x / s), -127, +127)       … xq[row·dim/4 + …] (u32 packing 4 i8)
  * ```
  *
- * 形は行 reduce 族と同型（**1 行 = 1 workgroup（256）・行方向は grid-stride**）で、行を
- * 2 回走る（パス① absmax → パス② 量子化）。行をもう一度グローバルから読むのは、行長ぶんの
- * 共有メモリを持てないため（実測形の最大は 1 行 32KB）。
+ * The shape matches the row-reduce family (**1 row = 1 workgroup (256), grid-stride over rows**),
+ * and each row is walked twice (pass ① absmax → pass ② quantization). The row is read from global
+ * memory a second time because shared memory cannot hold a whole row (the largest measured shape is
+ * 32KB per row).
  *
- * MUST: **±127 に閉じる**（−128 を使わない）。ADR 0019 の重み側と同じ規約で、絶対値最大の
- * 要素が厳密に復元され fake-quant が冪等になる。`pack4xI8Clamp`（[−128,127] へ飽和）には
- * 頼らない — 明示 `clamp(±127)` の後に `pack4xI8` を使う。
- * NOTE（検出限界・故障注入で実測）: この `clamp` の**枝そのものは有限データでは到達しない**。
- * `s = amax/127` なので `|x/s| ≤ 127` が構造的に成り立ち、丸め誤差を足しても 127.5 を超え
- * られないため。つまり「格子を ±128 にする」退行の検出器は clamp ではなく **scale の分母**で、
- * `clamp` の境界だけを ±128 に変えても全テストが緑のまま通る（分母を 128 にすると 6 本が赤）。
- * clamp を残すのは非有限値と将来の `s` 変更に対する防御で、数値契約の担い手ではない。
- * MUST: absmax の NaN 伝播は**ビット列判定**（ADR 0020）。ドライバの `max` は NaN を飲むので、
- * 素の `max` に頼ると NaN 行の scale が有限値になり、行全体の NaN が静かに消える。
- * `s` を作る `max(…, tiny)` も同じ理由で NaN を外殻の `select` で通す。
- * MUST: `dim % 4 == 0` を呼び出し側が保証する（i8 ペイロードは平坦添字 4 詰めで、行頭が
- * 語境界に来る条件そのもの — 適格判定は src/runtime/executor.ts）。ここでは端数を持たない
- * 前提で `dim / 4` 語を全て書く（full-write）。
+ * MUST: **closed at ±127** (−128 is not used). The same rule as the weight side of ADR 0019: the
+ * element with the largest magnitude is restored exactly and fake-quant is idempotent. Do not rely
+ * on `pack4xI8Clamp` (saturates to [−128,127]) — use `pack4xI8` after an explicit `clamp(±127)`.
+ * NOTE (detection limit, measured by fault injection): **the `clamp` branch itself is unreachable
+ * with finite data**. Since `s = amax/127`, `|x/s| ≤ 127` holds structurally, and rounding error
+ * cannot push it past 127.5. So the detector of a "lattice becomes ±128" regression is **the
+ * denominator of the scale**, not the clamp: changing only the `clamp` bounds to ±128 keeps every
+ * test green (making the denominator 128 turns 6 red). The clamp stays as a guard against
+ * non-finite values and future changes to `s`, not as a carrier of the numeric contract.
+ * MUST: NaN propagation of absmax is a **bit-pattern check** (ADR 0020). The driver's `max`
+ * swallows NaN, so relying on the plain `max` gives a NaN row a finite scale and silently erases
+ * the NaN of the whole row. The `max(…, tiny)` that builds `s` lets NaN through with an outer
+ * `select` for the same reason.
+ * MUST: the caller guarantees `dim % 4 == 0` (the i8 payload packs 4 per flat index, and this is
+ * exactly the condition for a row to start on a word boundary — eligibility is decided in
+ * src/runtime/recipe-builders/linear.ts and src/runtime/attention-route.ts). Here every one of the
+ * `dim / 4` words is written on the assumption that there is no remainder (full-write).
  *
- * NOTE（実測・2026-08-03 / 本機 Deno 2.9.4 + RTX 3080 Ti）: WGSL の `round` は**偶数丸め**
- * （`round(0.5) = 0` / `round(1.5) = 2` / `round(-0.5) = -0` / `round(2.5) = 2`）で、
- * `torch.round` と一致する。TS 参照は `Math.round`（half-up）ではなく
- * `roundTiesToEven`（src/reference/i8a8.ts）を使う。
+ * NOTE (measured 2026-08-03 on the development machine, Deno 2.9.4 + RTX 3080 Ti): WGSL `round`
+ * **rounds half to even** (`round(0.5) = 0` / `round(1.5) = 2` / `round(-0.5) = -0` /
+ * `round(2.5) = 2`), matching `torch.round`. The TS reference uses `roundTiesToEven`
+ * (src/reference/i8a8.ts), not `Math.round` (half-up).
  *
- * ## 除算の精度（実測で判明した設計上の制約・2026-08-03）
+ * ## Division precision (a design constraint found by measurement, 2026-08-03)
  *
- * WGSL の f32 除算は**正しく丸められない**（仕様の許容は 2.5 ULP。本機の実測では
- * `a / b` は `a * rcp(b)` に落ち、IEEE の正しい丸めと **200,000 サンプル中 55,605 件**で
- * 1 ULP 割れた）。乗算・加算・`fma` は正しく丸められる（同実測で 0 件）。ここから 2 つ:
+ * WGSL f32 division is **not correctly rounded** (the spec allows 2.5 ULP; measured on the
+ * development machine, `a / b` lowers to `a * rcp(b)` and differed by 1 ULP from IEEE correct
+ * rounding in **55,605 of 200,000 samples**). Multiplication, addition and `fma` are correctly
+ * rounded (0 cases in the same measurement). Two consequences:
  *
- * - MUST: scale の `amax / 127` は **`amax * INV_127` の乗算で書く**（`INV_127` は 1/127 の
- *   f32 リテラル）。本機のコンパイラは定数除数を同じ乗算へ畳むので生成コードは変わらないが、
- *   畳まないドライバでは 2.5 ULP の除算に落ちて `xs` が参照と割れる。**ソースの側で
- *   決定性を持たせる**。
- * - `q` を作る `x / s` は除数がデータ依存なので置き換えられない。したがって **`x/s` が
- *   丸め境界（半整数）の近傍にある要素では量子化値が ±1 段揺れうる**。GPU と TS 参照の
- *   atol=0 突合は「境界から十分離れたデータ」でのみ成立する契約で、テスト側が余裕を
- *   実測して門にする（tests/gpu_i8a8_test.ts）。実モデルでは ±1 段の揺れがそのまま
- *   数値差として乗る（E2E の tolerance を実測導出する理由の 1 つ）。
+ * - MUST: write the scale's `amax / 127` **as the multiplication `amax * INV_127`** (`INV_127` is
+ *   the f32 literal of 1/127). The development machine's compiler folds the constant divisor into
+ *   the same multiplication, so the generated code does not change, but a driver that does not fold
+ *   it drops to the 2.5 ULP division and `xs` diverges from the reference. **Determinism is
+ *   established on the source side**.
+ * - The `x / s` that builds `q` has a data-dependent divisor and cannot be replaced. So **for
+ *   elements where `x/s` lies near a rounding boundary (a half-integer) the quantized value may
+ *   move by ±1 step**. The atol=0 comparison of GPU and TS reference is a contract that holds only
+ *   for "data far enough from the boundaries"; the test measures the margin and makes it a check
+ *   (tests/gpu_i8a8_test.ts). In real models the ±1 step wobble shows up directly as a numeric
+ *   difference (one reason the E2E tolerances are derived from measurements).
  */
 
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
-/** 1 行を畳む workgroup の幅（行 reduce / softmax と同じ 256）。 */
+/** Width of the workgroup that folds one row (256, as in row reduce / softmax). */
 export const QUANTIZE_ROWS_WORKGROUP_SIZE = 256;
 
-/** 量子化の格子の端（**−128 は使わない** — 上の MUST）。 */
+/** Edge of the quantization lattice (**−128 is not used** — the MUST above). */
 const QUANTIZE_ROWS_ABS_MAX = 127;
 
-/** f32 の最小 normal（`torch.finfo(float32).tiny`）。全ゼロ行の scale の床。 */
+/** Smallest f32 normal (`torch.finfo(float32).tiny`). Floor of the scale of an all-zero row. */
 const F32_TINY = 1.1754943508222875e-38;
 
 /**
- * 1/127 の**倍精度リテラル**（WGSL 側は f32 へ正しく丸めて読む）。scale を除算ではなく
- * この定数との乗算で作るための正本（上の MUST）。
+ * **Double-precision literal** of 1/127 (the WGSL side reads it correctly rounded to f32). The
+ * source of truth for building the scale by multiplying with this constant instead of dividing
+ * (the MUST above).
  */
 const INV_ABS_MAX = 1 / QUANTIZE_ROWS_ABS_MAX;
 
 export const QUANTIZE_ROWS_KEY = `quantize_rows:v1:f32>i8:pertoken:wg${QUANTIZE_ROWS_WORKGROUP_SIZE}`;
 
-export const QUANTIZE_ROWS_WGSL: string = `// karume quantize_rows (行ごとの per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127))
+export const QUANTIZE_ROWS_WGSL: string = `// karume quantize_rows (per-row per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127))
 struct Params {
   rows: u32,
   dim: u32,
@@ -95,13 +103,13 @@ fn main(
 ) {
   let lid = lid3.x;
   let dim = params.dim;
-  // 呼び出し側が dim % 4 == 0 を保証する（i8 ペイロードは平坦添字 4 詰め）
+  // The caller guarantees dim % 4 == 0 (the i8 payload packs 4 per flat index)
   let quads = dim / 4u;
   var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 行の絶対値最大（NaN はビット列判定で伝播 — 素の max は NaN を飲む）
+    // ① Absolute maximum of the row (NaN propagates by a bit-pattern check — plain max swallows it)
     var acc = 0.0;
     var i = lid;
     while (i < dim) {
@@ -119,14 +127,16 @@ fn main(
       stride = stride / 2u;
     }
     let amax = scratch[0u];
-    // 全ゼロ行は s = tiny → q = 0 → 0·tiny = 0 で厳密。NaN は max に飲まれるので外殻で通す。
-    // MUST: 127 での除算ではなく **1/127 との乗算**（乗算だけが正しく丸められる — 上の MUST）
+    // An all-zero row is exact: s = tiny → q = 0 → 0·tiny = 0. max swallows NaN, so the outer
+    // select passes it.
+    // MUST: **multiplication by 1/127**, not division by 127 (only multiplication is correctly
+    // rounded — the MUST above)
     let s = select(max(amax * ${INV_ABS_MAX}, ${F32_TINY}), amax, is_nan_bits(amax));
     if (lid == 0u) {
       xs[row] = s;
     }
 
-    // ② 4 連続要素（quad）ごとに量子化して 1 語へ詰める
+    // ② Quantize each 4 consecutive elements (quad) and pack them into one word
     let qbase = row * quads;
     var q = lid;
     while (q < quads) {
@@ -137,7 +147,7 @@ fn main(
       q = q + ${QUANTIZE_ROWS_WORKGROUP_SIZE}u;
     }
 
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // Make sure scratch[0] has been read before the next row overwrites scratch[lid]
     workgroupBarrier();
     row = row + nwg.x;
   }
@@ -145,9 +155,9 @@ fn main(
 `;
 
 /**
- * uniform の Params（`{rows, dim}`）。2 語ぶんの内容でも 16 バイト確保する（softmax / reduce と
- * 同じ — 16 バイト単位の確保はプロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の
- * 要件ではない）。
+ * Uniform Params (`{rows, dim}`). 16 bytes are allocated even though the content is 2 words (as in
+ * softmax / reduce — allocating in 16-byte units is a project convention (the fusion pass fixes the
+ * same form in ADR 0040), not a requirement of the spec).
  */
 export const quantizeRowsParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("quantize_rows params", { rows, dim });
@@ -164,23 +174,25 @@ export const quantizeRowsParams = (rows: number, dim: number): Uint32Array<Array
 };
 
 /**
- * 行長に対する workgroup の割り当て（**小 D 変種** — perf-ledger P-1）。
+ * Workgroup assignment relative to the row length (**small-D variant** — perf-ledger P-1).
  *
- * 上の形は 1 行 = 1 workgroup（256 レーン）で、行長が短いとレーンの大半が遊ぶ（D=128 なら
- * パス① は 128 レーン・パス② は 32 quad = レーン利用 12.5%）うえ、固定費（8 段の木 reduce +
- * barrier）を行数ぶん払う。実形状では融合 attention の QK 前段（D=128）が量子化の行数の 87% を
- * 占める。そこで **パス② の quad 数以上の最小の 2 のべきをレーン幅**にし、余ったレーンで別の行を
- * 同じ workgroup に並べて畳む（`rowsPerGroup = 256 / lanesPerRow`）。
+ * The shape above is 1 row = 1 workgroup (256 lanes); with short rows most lanes idle (for D=128,
+ * pass ① uses 128 lanes and pass ② 32 quads = 12.5% lane utilisation), and the fixed cost (an
+ * 8-level tree reduce + barriers) is paid per row. In real shapes the QK front stage of fused
+ * attention (D=128) is 87% of the quantized rows. So **the lane width is the smallest power of 2
+ * not below pass ②'s quad count**, and the remaining lanes line up other rows in the same
+ * workgroup and fold them (`rowsPerGroup = 256 / lanesPerRow`).
  *
- * 数値契約は不変: absmax の縮約は `nan_max`（結合的・可換）なので木の形を変えても amax は
- * ビット同一、パス② は要素独立。1 行が 256 レーンを使い切る行長（quad ≥ 256 = dim ≥ 1024）は
- * 従来の形そのもの（`rowsPerGroup = 1`・キーも WGSL も {@link QUANTIZE_ROWS_KEY} /
- * {@link QUANTIZE_ROWS_WGSL} のまま — 既存の生成物は 1 バイトも動かない）。
+ * The numeric contract does not change: the absmax reduction is `nan_max` (associative and
+ * commutative), so changing the tree shape keeps amax bit-identical, and pass ② is per element.
+ * Row lengths where one row uses all 256 lanes (quad ≥ 256 = dim ≥ 1024) keep exactly the old shape
+ * (`rowsPerGroup = 1`, key and WGSL stay {@link QUANTIZE_ROWS_KEY} / {@link QUANTIZE_ROWS_WGSL} —
+ * existing outputs do not move by a single byte).
  */
 export type QuantizeRowsGeometry = {
-  /** 1 行を畳むレーン数（2 のべき・1..256）。 */
+  /** Lanes that fold one row (a power of 2, 1..256). */
   readonly lanesPerRow: number;
-  /** 1 workgroup が並べて畳む行数（= 256 / lanesPerRow）。 */
+  /** Rows one workgroup lines up and folds (= 256 / lanesPerRow). */
   readonly rowsPerGroup: number;
 };
 
@@ -195,27 +207,29 @@ export const quantizeRowsGeometry = (dim: number): QuantizeRowsGeometry => {
 };
 
 /**
- * 幾何ごとのパイプラインキー。従来形（1 行 = 1 workgroup）は {@link QUANTIZE_ROWS_KEY} を
- * そのまま（過去の内訳 research と照合できるよう名前を変えない）、並べ畳む形だけ `:r<行数>w<幅>`
- * を足す（幾何が違えば WGSL が違う = 別キー、の決定性契約）。
+ * Pipeline key per geometry. The old shape (1 row = 1 workgroup) keeps {@link QUANTIZE_ROWS_KEY}
+ * as is (the name does not change, so it can be matched against past breakdowns in research), and
+ * only the lined-up shape appends `:r<rows>w<width>` (the determinism contract: a different
+ * geometry means different WGSL = a different key).
  */
 export const quantizeRowsKey = (geometry: QuantizeRowsGeometry): string =>
   geometry.rowsPerGroup === 1
     ? QUANTIZE_ROWS_KEY
     : `${QUANTIZE_ROWS_KEY}:r${geometry.rowsPerGroup}w${geometry.lanesPerRow}`;
 
-/** 幾何ごとの WGSL（従来形は {@link QUANTIZE_ROWS_WGSL} そのもの）。 */
+/** WGSL per geometry (the old shape is exactly {@link QUANTIZE_ROWS_WGSL}). */
 export const quantizeRowsWgsl = (geometry: QuantizeRowsGeometry): string =>
   geometry.rowsPerGroup === 1 ? QUANTIZE_ROWS_WGSL : quantizeRowsGroupedWgsl(geometry);
 
 /**
- * 並べ畳む形の WGSL。1 workgroup（256）を幅 W のレーン組 R 本に切り、組 `slot` が行
- * `rowBase + slot` を担当する。行ループ（`rowBase`）は workgroup 一様なので barrier は
- * 従来形と同じ位置に置ける — 行が無い組（末尾）はメモリに触らずに barrier だけ揃える。
- * 木 reduce は組の中（幅 W・log2(W) 段）で閉じる。
+ * WGSL of the lined-up shape. One workgroup (256) is cut into R lane groups of width W, and group
+ * `slot` handles row `rowBase + slot`. The row loop (`rowBase`) is workgroup-uniform, so the
+ * barriers sit at the same places as in the old shape — a group without a row (at the tail) only
+ * joins the barriers without touching memory. The tree reduce stays inside the group (width W,
+ * log2(W) levels).
  */
 const quantizeRowsGroupedWgsl = ({ lanesPerRow, rowsPerGroup }: QuantizeRowsGeometry): string =>
-  `// karume quantize_rows (行ごとの per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127)) — ${rowsPerGroup} 行 × ${lanesPerRow} レーン / workgroup
+  `// karume quantize_rows (per-row per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127)) — ${rowsPerGroup} rows × ${lanesPerRow} lanes / workgroup
 struct Params {
   rows: u32,
   dim: u32,
@@ -239,19 +253,20 @@ fn main(
 ) {
   let lid = lid3.x;
   let dim = params.dim;
-  // 呼び出し側が dim % 4 == 0 を保証する（i8 ペイロードは平坦添字 4 詰め）
+  // The caller guarantees dim % 4 == 0 (the i8 payload packs 4 per flat index)
   let quads = dim / 4u;
-  // レーン組: 幅 ${lanesPerRow} × ${rowsPerGroup} 組。組の中の位置 lane と組の番号 slot
+  // Lane groups: width ${lanesPerRow} × ${rowsPerGroup} groups. lane = position in a group, slot = group
   let lane = lid % ${lanesPerRow}u;
   let slot = lid / ${lanesPerRow}u;
   var rowBase = wid.x * ${rowsPerGroup}u;
   while (rowBase < params.rows) {
     let row = rowBase + slot;
-    // 末尾で行が無い組は読み書きをせず barrier だけ揃える（行ループは workgroup 一様）
+    // A group without a row at the tail does not read or write and only joins the barriers (the
+    // row loop is workgroup-uniform)
     let has_row = row < params.rows;
     let base = row * dim;
 
-    // ① 行の絶対値最大（NaN はビット列判定で伝播 — 素の max は NaN を飲む）
+    // ① Absolute maximum of the row (NaN propagates by a bit-pattern check — plain max swallows it)
     var acc = 0.0;
     if (has_row) {
       var i = lane;
@@ -271,14 +286,16 @@ fn main(
       stride = stride / 2u;
     }
     let amax = scratch[slot * ${lanesPerRow}u];
-    // 全ゼロ行は s = tiny → q = 0 → 0·tiny = 0 で厳密。NaN は max に飲まれるので外殻で通す。
-    // MUST: 127 での除算ではなく **1/127 との乗算**（乗算だけが正しく丸められる — 上の MUST）
+    // An all-zero row is exact: s = tiny → q = 0 → 0·tiny = 0. max swallows NaN, so the outer
+    // select passes it.
+    // MUST: **multiplication by 1/127**, not division by 127 (only multiplication is correctly
+    // rounded — the MUST above)
     let s = select(max(amax * ${INV_ABS_MAX}, ${F32_TINY}), amax, is_nan_bits(amax));
     if (has_row && lane == 0u) {
       xs[row] = s;
     }
 
-    // ② 4 連続要素（quad）ごとに量子化して 1 語へ詰める
+    // ② Quantize each 4 consecutive elements (quad) and pack them into one word
     if (has_row) {
       let qbase = row * quads;
       var q = lane;
@@ -291,7 +308,7 @@ fn main(
       }
     }
 
-    // 次の行が scratch[lid] を上書きする前に scratch の読み終わりを揃える
+    // Make sure scratch has been read before the next row overwrites scratch[lid]
     workgroupBarrier();
     rowBase = rowBase + nwg.x * ${rowsPerGroup}u;
   }

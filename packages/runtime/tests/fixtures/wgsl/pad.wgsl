@@ -19,7 +19,7 @@ fn main(
   while (i < params.n) {
     let col = i % params.out_len;
     let row = i / params.out_len;
-    // 範囲外にも必ず 0 を書く（未書き込みを 1 要素も残さない）
+    // always write 0 out of range too (not a single element is left unwritten)
     var value = 0.0;
     if (col >= params.left && col < params.left + params.in_len) {
       value = x[row * params.in_len + (col - params.left)];

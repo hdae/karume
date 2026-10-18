@@ -1,4 +1,4 @@
-// karume attention_state_pv (states 形の O = P @ V, f32)
+// karume attention_state_pv (states-form O = P @ V, f32)
 struct Params {
   rows_block: u32,
   row_offset: u32,
@@ -51,9 +51,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let z = gid.z;
   let at = (z * params.chunk_rows + params.row_offset + local_row) * params.depth + d;
-  // pad 行（row ≥ Q）: live を走査せず**厳密 0** を書いて返す（full-write は保つ = ADR 0066
-  // 追記 6 の「値が契約上無意味」を 0 で固定）。空行 ⊂ pad 行なので ADR 0067 決定 6 の
-  // 「空行 → 厳密 0」はこの分岐が構造的に包含し、非有限 V による 0·NaN の穴も同時に閉じる
+  // Pad rows (row ≥ Q): write **an exact 0** without scanning live and return (full-write holds =
+  // ADR 0066 addendum 6's "the value is meaningless by contract" is pinned to 0). Empty rows ⊂ pad
+  // rows, so this branch contains ADR 0067 decision 6's "empty row → exact 0" by construction and
+  // also closes the 0·NaN hole of a non-finite V
   if (local_row >= effective_rows(lengths.query)) {
     out[at] = 0.0;
     return;
@@ -66,7 +67,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let s_base = s_row * params.col_cap;
   let amax = stats[s_row * 2u];
   let inv = stats[s_row * 2u + 1u];
-  // 縮約は col 昇順の逐次（決定性）。述語外は S が -inf なので p = 0 が**厳密**に出る
+  // The reduction is a sequential pass in ascending col (determinism). Outside the predicate S is
+  // -inf, so p = 0 comes out **exactly**
   var acc = 0.0;
   for (var cl = 0u; cl < live; cl = cl + 1u) {
     let col = base_col + cl;

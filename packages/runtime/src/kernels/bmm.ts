@@ -1,14 +1,16 @@
 /**
- * bmm（rank-3 バッチ matmul `[B,M,K] × [B,K,N] → [B,M,N]`、f32）。実体は GEMM 族が共有する
- * レジスタブロッキング骨格（src/kernels/gemm.ts — 寸法は GemmGeometry）で、matmul との違いはバッチ軸を
- * dispatch の z 軸に取り、3 入出力のオフセットを行列 1 枚ぶんから導く点だけ。
+ * bmm (rank-3 batched matmul `[B,M,K] × [B,K,N] → [B,M,N]`, f32). The body is the
+ * register-blocking skeleton shared by the GEMM family (src/kernels/gemm.ts — dimensions in
+ * GemmGeometry); the only difference from matmul is that the batch axis is taken on the dispatch's z
+ * axis and the offsets of the 3 inputs/outputs are derived from the size of one matrix.
  *
- * uniform は matmul / linear と同じ 3 語 `{m,n,k}`。バッチ数はシェーダが `wid.z` から導くので
- * uniform に載せない（載せても一度も読まない死んだフィールドになる）。
+ * The uniform is the same 3 words `{m,n,k}` as matmul / linear. The shader derives the batch index
+ * from `wid.z`, so it is not put in the uniform (it would be a dead field that is never read).
  *
- * **行窓変種**（{@link GemmRowWindow}）だけが uniform を 5 語へ広げる。分解 attention の
- * 行ブロック実行（src/runtime/fusion.ts）専用で、共有の `gemmParams` には 1 語も足さない
- * — 足すと全 op の uniform レイアウトとスナップショットが総取っ替えになる。
+ * Only the **row-window variant** ({@link GemmRowWindow}) widens the uniform to 5 words. It exists
+ * solely for the row-block execution of decomposed attention (src/runtime/fusion.ts) and adds not a
+ * single word to the shared `gemmParams` — adding one would change the uniform layout and the
+ * snapshots of every op.
  */
 
 import {
@@ -23,16 +25,17 @@ import type { GemmGeometry } from "./gemm-geometry.ts";
 export type { GemmRowWindow };
 
 /**
- * `rows` は**行列 1 枚の M**（バッチ軸は含めない — バッチは dispatch の z で、タイル幾何とは
- * 独立）。タイル幾何のバケットは src/kernels/gemm-geometry.ts の `gemmGeometryForRows`。
+ * `rows` is **the M of one matrix** (the batch axis is not included — the batch is the dispatch's z
+ * and independent of the tile geometry). The tile-geometry bucket is `gemmGeometryForRows` in
+ * src/kernels/gemm-geometry.ts.
  *
- * `window` は行窓変種の判別子（省略時は従来のキーと 1 バイトも変わらない）。**行オフセットと
- * 全 M は uniform 値なのでキーに載せない** — 載せるとブロックの本数だけ同じ WGSL が
- * パイプラインへ複製される。
+ * `window` is the discriminator of the row-window variant (when omitted, the key does not differ by
+ * a single byte from the existing one). **The row offset and the full M are uniform values and are
+ * not put in the key** — putting them in would duplicate the same WGSL into pipelines once per block.
  *
- * `geometry` は明示の幾何（src/kernels/gemm.ts の `GemmSpec` — Session の bmm ノードでは adapter の
- * プロファイルが選んだ値）。渡すと `rows` のバケットより優先し、MUST: キーと WGSL へ**同じ値**を
- * 通す（`rows` と同じ規律）。
+ * `geometry` is the explicit geometry (`GemmSpec` in src/kernels/gemm.ts — on a Session's bmm node,
+ * the value the adapter's profile chose). When given it takes precedence over the `rows` bucket, and
+ * MUST: pass the **same value** to the key and the WGSL (the same discipline as `rows`).
  */
 export const bmmKey = (
   v4: boolean,
@@ -53,14 +56,15 @@ export const bmmParams = (m: number, n: number, k: number): Uint32Array<ArrayBuf
   gemmParams("bmm", m, n, k);
 
 /**
- * 行窓変種の uniform（`{m,n,k}` + `{row_offset, rows_full}` の 5 語）。
+ * The uniform of the row-window variant (5 words: `{m,n,k}` + `{row_offset, rows_full}`).
  *
- * 5 語ぶんの内容を 16 バイト単位に切り上げて **32 バイト**確保する（16 バイト単位の確保は
- * プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
- * MUST: 並びは gemm.ts の `ROW_WINDOW_DIMS_EXTRA` と対。
+ * The 5 words of content are rounded up to a 16-byte unit and **32 bytes** are allocated (allocating
+ * in 16-byte units is a project convention (the fusion pass fixes the same shape in ADR 0040), not a
+ * requirement of the spec). MUST: the order pairs with `ROW_WINDOW_DIMS_EXTRA` in gemm.ts.
  *
- * `rowsFull` は行窓側の**元の全 M**、`rowOffset` はそのうちこのブロックが担当する先頭行
- * （門は {@link assertGemmRowWindow} — 融合 attention の params と共有）。
+ * `rowsFull` is the **original full M** of the row window, and `rowOffset` is the first row of it
+ * that this block handles (the guard is {@link assertGemmRowWindow} — shared with the params of fused
+ * attention).
  */
 export const bmmRowWindowParams = (
   m: number,

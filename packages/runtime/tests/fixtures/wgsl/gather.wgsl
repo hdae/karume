@@ -1,4 +1,4 @@
-// karume gather (out[..., j] = src[..., index[..., j]], 最終次元固定, f32 / 添字 i32)
+// karume gather (out[..., j] = src[..., index[..., j]], last dim fixed, f32 / index i32)
 struct Dims {
   n: u32,
   cols: u32,
@@ -20,7 +20,8 @@ fn main(
   while (i < dims.n) {
     let row = i / dims.cols;
     let pick = index[i];
-    // 契約外の添字は別の要素を返さず NaN で汚染する（カーネル doc の裁定）
+    // an index outside the contract contaminates with NaN instead of returning another element
+    // (the ruling in the kernel doc)
     if (pick < 0 || u32(pick) >= dims.src_cols) {
       out[i] = bitcast<f32>(dims.oob);
     } else {

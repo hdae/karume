@@ -5,7 +5,7 @@ struct Params {
   in_w: u32,
   out_h: u32,
   out_w: u32,
-  // ホストが f32 で割った (in - 1) / (out - 1)（出力長 1 の軸は 0）
+  // (in - 1) / (out - 1) divided by the host in f32 (0 for an axis of output length 1)
   scale_h: f32,
   scale_w: f32,
   reserved: u32,
@@ -24,7 +24,8 @@ fn main(
   let in_hw = params.in_h * params.in_w;
   var i = gid.x;
   while (i < params.n) {
-    // N と C は補間に関与しないので 1 本の平面添字へ畳む（rank を params に載せない）。
+    // N and C take no part in the interpolation, so they fold into one plane index (rank is not
+    // carried in params).
     let ox = i % params.out_w;
     let oy = (i / params.out_w) % params.out_h;
     let plane = i / out_hw;

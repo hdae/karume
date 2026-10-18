@@ -1,53 +1,57 @@
 /**
- * conv1d（`x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout]`、f32）の 2 カーネル。
+ * The two kernels of conv1d (`x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout]`, f32).
  *
- * | 経路          | キー                                                        | 条件        |
+ * | Path          | Key                                                         | Condition   |
  * | ------------- | ----------------------------------------------------------- | ----------- |
  * | implicit GEMM | `conv1d:v4:f32:igemm{tileM}x{tileN}{v4}:wg{x}x{y}{:w…}{g…}` | groups == 1 |
- * | 直接畳み込み  | `conv1d:v2:f32:direct:wg256{:w…}`                           | groups > 1  |
+ * | direct        | `conv1d:v2:f32:direct:wg256{:w…}`                           | groups > 1  |
  *
- * implicit GEMM のキーの辺と workgroup 形は**幾何から導く**（{@link conv1dIgemmKey} —
- * conv2d と同じ規律で、具体値を書き写すと幾何を差し替えたとき doc とキーだけが古い辺を名乗る）。
+ * The tile edges and workgroup shape in the implicit GEMM key are **derived from the geometry**
+ * ({@link conv1dIgemmKey} — the same discipline as conv2d: copying the concrete values would make
+ * only the doc and the key keep naming the old edges when the geometry is swapped).
  *
- * implicit GEMM（ADR 0024 の 1D 版）は `C[Cout, N] = W[Cout, K] × Xcol[K, N]` を GEMM 骨格
- * （src/kernels/gemm.ts）の断片共有で解く。**縮約順序が直接畳み込みと厳密に一致する**ので
- * 出力はビット同一（唯一の例外 = 符号付きゼロ — {@link conv1dIgemmKey} の doc）。
- * 直接畳み込み（ADR 0017）は 1 スレッド = 1 出力要素で、groups > 1 を受け持つと同時に
- * **恒久の差分オラクル**（tests/gpu_conv1d_parity_test.ts）を兼ねる。
+ * The implicit GEMM (the 1D version of ADR 0024) solves `C[Cout, N] = W[Cout, K] × Xcol[K, N]` by
+ * sharing fragments of the GEMM skeleton (src/kernels/gemm.ts). **Its reduction order matches the
+ * direct convolution exactly**, so the output is bit-identical (the only exception = signed zero —
+ * the doc of {@link conv1dIgemmKey}). The direct convolution (ADR 0017) is one thread = one output
+ * element; it handles groups > 1 and doubles as **the permanent differential oracle**
+ * (tests/gpu_conv1d_parity_test.ts).
  *
- * ## 契約の狭さ（ADR 0007: IR ではなくランタイム capability 側に置く）
+ * ## Narrow contract (ADR 0007: kept on the runtime capability side, not in the IR)
  *
- * - **groups / dilation は attrs（ADR 0015）**。従来の「欄が無い = 1 固定」で担保していた
- *   「1 以外を黙って 1 で実行する経路が無い」性質は、欄を作った後は**既定値補完をしない**
- *   ことだけが担保する（src/ops.ts の CONV1D_ATTRS）。
- * - **bias は常時あり（アリティ 3 固定）**。bias 無しの conv はエクスポータが**ゼロ bias を
- *   合成**してアリティ 3 へ正規化する（ADR 0015）— カーネルに arity 分岐を持ち込まない。
- * - `B` / `Cin` / `Cout` / `K` / stride / padding / dilation / groups は params で運ぶ
- *   **通常のループ境界**なので、実測値へ固定はしない。固定しても実行できる形が減るだけで、
- *   誤りを検出する力は増えない（誤りが出るのは軸の取り違えで、それは非対称な shape の
- *   テストが捕まえる）。
+ * - **groups / dilation are attrs (ADR 0015)**. The property "there is no path that silently runs
+ *   a value other than 1 as 1", once guaranteed by "no field = fixed at 1", is guaranteed after the
+ *   fields were added only by **not filling in defaults** (CONV1D_ATTRS in src/ops/attrs.ts).
+ * - **bias is always present (arity fixed at 3)**. A conv without bias is normalised to arity 3 by
+ *   the exporter **synthesising a zero bias** (ADR 0015) — no arity branch in the kernel.
+ * - `B` / `Cin` / `Cout` / `K` / stride / padding / dilation / groups are **ordinary loop bounds**
+ *   carried in params, so they are not pinned to measured values. Pinning would only reduce the
+ *   shapes that can run without adding any power to detect errors (errors come from mixed-up axes,
+ *   which tests with asymmetric shapes catch).
  *
- * MUST: grid-stride ループ前提。1 次元の dispatch 上限（仕様既定 65535）は実モデルで超える
- * （実測は出力 1024×T 要素）。
+ * MUST: grid-stride loop. Real models exceed the one-dimensional dispatch limit (spec default
+ * 65535) (measured: outputs of 1024×T elements).
  *
- * 縮約は `(ic, k)` 昇順の逐次で、同じ入力なら常に同じ丸めになる（決定性）。padding 域は
- * 0 詰めなので**加算せずに読み飛ばす**（0 を足すと丸めの並びが変わるうえ、範囲外読みの
- * 分岐が消えて添字が負になる）。
+ * The reduction runs sequentially in ascending `(ic, k)` order, so the same input always gets the
+ * same rounding (determinism). The padding region is zero-filled, so it is **skipped rather than
+ * added** (adding 0 changes the rounding sequence, and dropping the out-of-range branch lets the
+ * index go negative).
  *
- * groups は「出力チャネル oc が属するグループ g = oc / (Cout/groups) の入力チャネル帯
- * `[g·Cin/groups, (g+1)·Cin/groups)` だけを縮約する」形で載せる。重みの第 2 軸は
- * **Cin ではなく Cin/groups** なので、w の添字も帯の中の相対番号で組む（ここを Cin のまま
- * にすると depthwise で重みを読み飛ばす沈黙誤値になる）。
+ * groups is implemented as "reduce only the input channel band `[g·Cin/groups, (g+1)·Cin/groups)`
+ * of the group g = oc / (Cout/groups) that output channel oc belongs to". The weight's second axis
+ * is **Cin/groups, not Cin**, so the w index is also built from the relative number within the
+ * band (leaving it at Cin is a silent wrong value that skips weights in depthwise convolutions).
  *
- * 重みは格納の変種を持つ（`w=f32` / `w=f16` / `w=i8` — ADR 0018 / 0019）。差は縮約内の
- * 読み出し 1 行と、i8 の per-channel scale（`oc` 単位でループ不変なので縮約の外へ巻き上げる）
- * だけ（src/kernels/weight-storage.ts）。
+ * The weight has storage variants (`w=f32` / `w=f16` / `w=i8` — ADR 0018 / 0019). They differ only
+ * in the one read line inside the reduction and in i8's per-channel scale (loop-invariant per `oc`,
+ * so hoisted out of the reduction) (src/kernels/weight-storage.ts).
  *
- * **`w=i4` は implicit GEMM だけ**が持つ（ADR 0069 決定 5 の conv1d 追補・波 J-5b）。group
- * scale は k = `Cin·K` 依存で `oc` 単位に巻き上げられないため、A タイル充填が quad ごとに
- * 引く（gemm.ts の `fillAConv`）— 直接カーネル（groups > 1）に展開経路は無く、生成の入口が
- * 落とす（{@link conv1dKey} / {@link conv1dWgsl}）。i4 変種は group 長を WGSL に焼くので
- * キーに `g` 部が乗る（`:wi4g32` — linear と同じ流儀）。
+ * **Only the implicit GEMM has `w=i4`** (the conv1d addendum of ADR 0069 decision 5, wave J-5b).
+ * The group scale depends on k = `Cin·K` and cannot be hoisted per `oc`, so the A-tile fill reads
+ * it per quad (`fillAConv` in gemm.ts) — the direct kernel (groups > 1) has no decode path, and the
+ * generator entry points reject it ({@link conv1dKey} / {@link conv1dWgsl}). The i4 variant bakes
+ * the group length into the WGSL, so the key carries a `g` part (`:wi4g32` — the same style as
+ * linear).
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -70,17 +74,18 @@ import {
 
 export const CONV1D_WORKGROUP_SIZE = 256;
 
-/** i8 / i4 変種の scale 束縛（出力の次の番号 — executor の bind entries と対で使う）。 */
+/** i8 / i4 scale binding (the number after the output — paired with the executor bind entries). */
 export const CONV1D_SCALE_BINDING = 5;
 
 /**
- * 直接カーネル（groups > 1）は **i4 を受けない**（ADR 0069 決定 5 の conv1d 追補は
- * implicit GEMM = groups == 1 限定）。
+ * The direct kernel (groups > 1) **does not accept i4** (the conv1d addendum of ADR 0069 decision
+ * 5 is limited to the implicit GEMM = groups == 1).
  *
- * MUST: 適格判定（plan.ts の `i4EligibleInitializers`）が `groups > 1` の conv1d を i4 の
- * 適格集合から落とすので通常は届かないが、**カーネル直呼びの経路も塞ぐ**（生成だけは
- * 通ってしまう形で、group scale の添字が無いまま `dequant(i, scale)` が未定義識別子を
- * 参照する不成立 WGSL になる — 既存の fail loudly 流儀）。
+ * MUST: the eligibility check (`i4EligibleInitializers` in plan.ts) drops conv1d with `groups > 1`
+ * from the i4 eligible set, so this is normally unreachable, but **the path of calling the kernel
+ * directly is closed too** (generation alone would succeed, producing invalid WGSL in which
+ * `dequant(i, scale)` references an undeclared identifier without a group scale index — the
+ * existing fail-loudly style).
  */
 const assertDirectWeight = (weight: WeightStorage): void => {
   if (weight === "i2") {
@@ -93,39 +98,41 @@ const assertDirectWeight = (weight: WeightStorage): void => {
   }
 };
 
-/** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
+/** MUST: bump the key when the WGSL changes (the pipeline cache does not look at the source). */
 export const conv1dKey = (weight: WeightStorage): string => {
   assertDirectWeight(weight);
   return `conv1d:v2:f32:direct:wg${CONV1D_WORKGROUP_SIZE}${weightKeyPart(weight)}`;
 };
 
 /**
- * implicit GEMM の v4（vec4 読み書き）判定。
+ * Whether the implicit GEMM uses v4 (vec4 reads and writes).
  *
- * MUST: 判定はここ 1 箇所。3 つの条件は 2 つの理由に対応する:
- * - `kFlat % 4 == 0` … A 側の quad 読み（f16 の `dequant4` / i8 の `unpack4xI8` は**平坦添字が
- *   4 の倍数**であることに依存し、行頭 = `arow · kFlat` がその条件を満たす）。
- *   **`Cin % 4` ではない**（Cin=1 の K=7 は kFlat=7）。
- * - `lengthOut % 4 == 0 && stride == 1` … B 側の列 quad が x の連続 4 要素に落ちること、
- *   および store 側の quad 書きに端数が出ないこと。1D では出力平面が 1 行なので
- *   `n = Lout` で、conv2d が `Wout % 4` と `N % 4` を区別した理由（quad が出力行をまたぐ）は
- *   ここでは消える。
+ * MUST: this is the only place that decides. The three conditions answer two reasons:
+ * - `kFlat % 4 == 0` … the A-side quad read (f16's `dequant4` / i8's `unpack4xI8` rely on **the
+ *   flat index being a multiple of 4**, and the row start = `arow · kFlat` satisfies it).
+ *   **Not `Cin % 4`** (K=7 with Cin=1 has kFlat=7).
+ * - `lengthOut % 4 == 0 && stride == 1` … the B-side column quad lands on four contiguous elements
+ *   of x, and the store side's quad write has no remainder. In 1D the output plane is one row, so
+ *   `n = Lout`, and the reason conv2d distinguishes `Wout % 4` from `N % 4` (a quad crossing an
+ *   output row) disappears here.
  */
 export const conv1dUsesVec4 = (kFlat: number, lengthOut: number, stride: number): boolean =>
   kFlat % 4 === 0 && lengthOut % 4 === 0 && stride === 1;
 
 /**
- * implicit GEMM のパイプラインキー（ADR 0024 の 1D 版）。直接カーネルの `v2` とは別系統で、
- * v4 フラグは形状 → 1 ビットの写像（決定性は崩れない — ADR 0022 決定 2 と同じ語彙）。
+ * Pipeline key of the implicit GEMM (the 1D version of ADR 0024). A separate line from the direct
+ * kernel's `v2`; the v4 flag is a shape → one-bit mapping (determinism is preserved — the same
+ * vocabulary as ADR 0022 decision 2).
  *
- * NOTE: 出力は直接カーネルと**ビット同一**（縮約順序が厳密一致）。唯一の例外は符号付きゼロ
- * で、部分和がちょうど `−0.0` の位置に padding 由来の `+0.0` を足すと `+0.0` に転ぶ
- * （直接カーネルは padding を加算しないので `−0.0` が残る）。bias が 0 でない限り到達しない
- * （機序の固定は tests/gpu_conv1d_parity_test.ts の負ケース）。
+ * NOTE: the output is **bit-identical** to the direct kernel (the reduction order matches exactly).
+ * The only exception is signed zero: adding a padding `+0.0` where the partial sum is exactly
+ * `−0.0` turns it into `+0.0` (the direct kernel does not add padding, so `−0.0` remains). It is
+ * unreachable unless the bias is 0 (the mechanism is pinned by the negative case of
+ * tests/gpu_conv1d_parity_test.ts).
  *
- * NOTE: m タイルの選択述語は `conv2dIgemmMTile`（src/kernels/conv2d.ts）を共有する。
- * **M = Cout の関数でしかない**（無駄 = `ceil(M/tile)·tile / M`）ので次元に依らず、
- * 1D 用に写すと同じ境界が 2 箇所に散る。
+ * NOTE: the m-tile selection predicate is shared with `conv2dIgemmMTile` (src/kernels/conv2d.ts).
+ * **It is a function of M = Cout only** (waste = `ceil(M/tile)·tile / M`), so it does not depend on
+ * the dimensionality; copying it for 1D would scatter the same boundary over two places.
  */
 export const conv1dIgemmKey = (
   weight: WeightStorage,
@@ -134,8 +141,9 @@ export const conv1dIgemmKey = (
   groupSize?: number,
 ): string => {
   i4GroupShift("conv1d igemm", weight, groupSize);
-  // MUST: キーの幾何は生成と**同じ解決点**（`gemmMTileGeometry`）から導く。mTile を直に
-  // 埋めると、幾何を差し替えたときにキーだけが古い辺を名乗って別物の WGSL へ衝突する。
+  // MUST: the key's geometry is derived from **the same resolution point** as generation
+  // (`gemmMTileGeometry`). Embedding mTile directly would make only the key keep naming the old
+  // edges when the geometry is swapped, colliding with a different WGSL.
   const geometry = gemmMTileGeometry(mTile);
   return `conv1d:v4:f32:igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}${
     v4 ? "v4" : ""
@@ -143,8 +151,9 @@ export const conv1dIgemmKey = (
 };
 
 /**
- * `groupSize` は i4 の group 長（i4 のとき必須 — ADR 0069 決定 5 の conv1d 追補）。shift を
- * WGSL に焼くので**キーにも入れる**（`:wi4g32` — linear と同じ流儀）。
+ * `groupSize` is the i4 group length (required for i4 — the conv1d addendum of ADR 0069 decision
+ * 5). The shift is baked into the WGSL, so it **goes into the key too** (`:wi4g32` — the same style
+ * as linear).
  */
 export const conv1dIgemmWgsl = (
   weight: WeightStorage,
@@ -164,7 +173,7 @@ export const conv1dWgsl = (weight: WeightStorage): string => {
   assertDirectWeight(weight);
   return `// karume conv1d (x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout], f32${weightNote(
     weight,
-  )}, 直接畳み込み)
+  )}, direct convolution)
 struct Dims {
   n: u32,
   batch: u32,
@@ -190,7 +199,7 @@ fn main(
   @builtin(num_workgroups) nwg: vec3<u32>,
 ) {
   let step = nwg.x * ${CONV1D_WORKGROUP_SIZE}u;
-  // 契約検査（src/ops.ts）で groups は Cin / Cout を割り切る — 除算は厳密。
+  // The contract check (src/ops.ts) guarantees groups divides Cin / Cout — the division is exact.
   let in_per_group = dims.channels_in / dims.groups;
   let out_per_group = dims.channels_out / dims.groups;
   var i = gid.x;
@@ -200,9 +209,9 @@ fn main(
     let rest = i % plane;
     let oc = rest / dims.length_out;
     let ox = rest % dims.length_out;
-    // 入力側の開始位置は符号付き（padding ぶん負に出る）
+    // the start position on the input side is signed (it goes negative by the padding)
     let origin = i32(ox * dims.stride) - i32(dims.padding);
-    // 重みの第 2 軸は Cin/groups — グループ内の相対番号で引く
+    // the weight's second axis is Cin/groups — indexed by the relative number within the group
     let group_index = oc / out_per_group;
     let ic_base = group_index * in_per_group;${weightScaleWgsl(weight, "oc", "    ")}
     var acc = bias[oc];
@@ -211,7 +220,7 @@ fn main(
       let w_base = (oc * in_per_group + ic_rel) * dims.kernel;
       for (var k = 0u; k < dims.kernel; k = k + 1u) {
         let ix = origin + i32(k * dims.dilation);
-        // padding 域は 0 詰め — 加算せずに読み飛ばす
+        // the padding region is zero-filled — skipped rather than added
         if (ix >= 0 && u32(ix) < dims.length_in) {
           acc = acc + x[x_base + u32(ix)] * ${weightRead(
             "w",
@@ -229,7 +238,7 @@ fn main(
 `;
 };
 
-/** conv1d の幾何（2 つの params 関数が共有する唯一の入力型）。 */
+/** Geometry of conv1d (the one input type shared by the two params functions). */
 export type Conv1dDims = {
   readonly batch: number;
   readonly channelsIn: number;
@@ -244,14 +253,17 @@ export type Conv1dDims = {
 };
 
 /**
- * 幾何の契約検査（両カーネル共通）。直接カーネルの Dims 並び順で値を返す。
+ * Contract check of the geometry (shared by both kernels). Returns the values in the order of the
+ * direct kernel's Dims.
  *
- * MUST: stride 0 を拒否する。stride は座標の乗算にだけ使う（ループの増分ではない）ので、0 だと
- * 出力長の式（shapes.ts）がゼロ除算になり、カーネルでは全出力が同じ窓を読む誤値になる（例外に
- * ならない）— 契約検査と二重だが、カーネル直呼びの経路も塞ぐ。
+ * MUST: reject stride 0. stride is used only to multiply coordinates (not as a loop increment), so
+ * with 0 the output-length formula (shapes.ts) divides by zero and the kernel gives wrong values
+ * where every output reads the same window (no exception) — redundant with the contract check, but
+ * it closes the direct kernel-call path too.
  */
 const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
-  // 名前は WGSL の Dims 欄名（`n` の次から）と対。並びがそのまま uniform の語順になる。
+  // The names pair with the WGSL Dims field names (from the one after `n`). The order is the
+  // uniform's word order as is.
   const dimensions = {
     batch: dims.batch,
     channels_in: dims.channelsIn,
@@ -271,8 +283,9 @@ const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
       `conv1d params: stride / kernel / dilation / groups は正整数（${dims.stride}, ${dims.kernel}, ${dims.dilation}, ${dims.groups}）`,
     );
   }
-  // MUST: テンソルの実寸も正整数に限る。0 の辺は縮約を 1 度も回さず、出力が bias 一色に
-  // なるのに例外が出ない（deform_conv2d が同じ集合を持つのと対）。
+  // MUST: the tensor extents are positive integers too. A zero edge never runs the reduction and
+  // the output becomes all bias without an exception (pairs with deform_conv2d, which has the
+  // same set).
   const positive: readonly (readonly [string, number])[] = [
     ["batch", dims.batch],
     ["channels_in", dims.channelsIn],
@@ -283,17 +296,18 @@ const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
   for (const [name, value] of positive) {
     if (value < 1) throw new CodegenError(`conv1d params: ${name} は正整数（${value}）`);
   }
-  // MUST: `入力長 + 2·padding ≤ 2^31 − 1`（WGSL の座標演算が i32 — direct 版と暗黙 GEMM 版の
-  // 受理集合を揃えるため、両者が通るこの検査に置く）。
+  // MUST: `input length + 2·padding ≤ 2^31 − 1` (WGSL coordinate arithmetic is i32 — kept in this
+  // check, which both pass, so the direct and the implicit GEMM versions accept the same set).
   assertConvAxisExtent("conv1d params", "l", dims.lengthIn, dims.padding);
-  // MUST: グループの割り切れは params 層でも見る（シェーダの除算が切り捨てになり、
-  // 読む入力チャネル帯が黙ってずれる — 契約検査と二重だが、カーネル直呼びの経路も塞ぐ）。
+  // MUST: divisibility by groups is checked in the params layer too (the shader's division
+  // truncates, and the input channel band read shifts silently — redundant with the contract
+  // check, but it closes the direct kernel-call path too).
   if (dims.channelsIn % dims.groups !== 0 || dims.channelsOut % dims.groups !== 0) {
     throw new CodegenError(
       `conv1d params: groups ${dims.groups} が Cin ${dims.channelsIn} / Cout ${dims.channelsOut} を割り切らない`,
     );
   }
-  // 重みの要素数は Cin/groups を使うので、割り切れの検査の後に置く。
+  // The weight's element count uses Cin/groups, so it comes after the divisibility check.
   assertConvFlatExtents("conv1d params", {
     input: dims.batch * dims.channelsIn * dims.lengthIn,
     output: dims.batch * dims.channelsOut * dims.lengthOut,
@@ -303,9 +317,9 @@ const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
 };
 
 /**
- * 直接カーネルの uniform Dims。11 語を 16 バイト単位に切り上げて 12 語（48 バイト）確保する
- * （16 バイト単位の確保はプロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の
- * 要件ではない）。
+ * The direct kernel's uniform Dims. 11 words rounded up to a 16-byte unit: 12 words (48 bytes) are
+ * allocated (allocating in 16-byte units is a project convention (the fusion pass fixes the same
+ * form in ADR 0040), not a requirement of the specification).
  */
 export const conv1dParams = (dims: Conv1dDims): Uint32Array<ArrayBuffer> => {
   const values = checkConv1dDims(dims);
@@ -320,13 +334,14 @@ export const conv1dParams = (dims: Conv1dDims): Uint32Array<ArrayBuffer> => {
 };
 
 /**
- * implicit GEMM の uniform Dims（`{m, n, k}` + 幾何 6 語 = 9 語なので 12 語 = 48 バイト確保）。
+ * The implicit GEMM's uniform Dims (`{m, n, k}` + 6 geometry words = 9 words, so 12 words = 48
+ * bytes are allocated).
  *
- * `m = Cout` / `n = Lout`（**1 バッチぶんの出力平面** — バッチは dispatch の z 軸）/
- * `k = Cin·K`。
- * MUST: 並びは gemm.ts の `CONV1D_DIMS_EXTRA` と対。`groups == 1` 専用で、それ以外は
- * fail loudly（**縮約帯がグループごとに違うので 1 枚の m タイルが同じ B タイルを共有できない**
- * — groups > 1 は直接カーネルへ流す）。
+ * `m = Cout` / `n = Lout` (**the output plane of one batch** — the batch is the dispatch's z axis)
+ * / `k = Cin·K`.
+ * MUST: the order pairs with `CONV1D_DIMS_EXTRA` in gemm.ts. Only for `groups == 1`; anything else
+ * fails loudly (**the reduction band differs per group, so one m tile cannot share one B tile** —
+ * groups > 1 goes to the direct kernel).
  */
 export const conv1dIgemmParams = (dims: Conv1dDims): Uint32Array<ArrayBuffer> => {
   checkConv1dDims(dims);

@@ -1,4 +1,4 @@
-// karume conv_transpose1d (x[B,Cin,L] * W[Cin,Cout,K] + b[Cout], f32, 重み bf16 格納, gather 形)
+// karume conv_transpose1d (x[B,Cin,L] * W[Cin,Cout,K] + b[Cout], f32, 重み bf16 格納, gather form)
 struct Dims {
   n: u32,
   batch: u32,
@@ -16,7 +16,8 @@ struct Dims {
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
 
-// bf16 格納の展開: 要素 i = w[i / 2] の下位 / 上位 16 bit を f32 の上位へ（平坦添字の偶奇で選ぶ）
+// decode of bf16 storage: element i = the lower / upper 16 bits of w[i / 2] moved to the top
+// of an f32 (the parity of the flat index picks)
 fn dequant(i: u32) -> f32 {
   let word = w[i >> 1u];
   return bitcast<f32>(select(word << 16u, word & 0xFFFF0000u, (i & 1u) == 1u));
@@ -36,15 +37,17 @@ fn main(
     let oc = rest / dims.length_out;
     let ox = rest % dims.length_out;
     // ox = ix*stride - padding + k  =>  ix*stride = ox + padding - k
-    // 有効 tap は k ≡ shifted (mod stride) だけ — 出力要素あたり 1 回だけ商と剰余へ分解する
+    // the valid taps are only k ≡ shifted (mod stride) — decompose into quotient and remainder
+    // once per output element
     let shifted = ox + dims.padding;
     let q = shifted / dims.stride;
     let r = shifted % dims.stride;
-    // 有効 tap は k = r + j*stride / ix = q - j。j の範囲は 3 本の不等式で閉じる:
+    // the valid taps are k = r + j*stride / ix = q - j. The range of j closes with three
+    // inequalities:
     // ix <= L-1 → j >= q+1-L / ix >= 0 → j <= q / k <= K-1 → j <= (K-1-r)/stride
     let j_start = max(0, i32(q) + 1 - i32(dims.length_in));
-    // r > K-1（stride > K のときだけ到達）は有効 tap ゼロ。K-1-r の u32 桁借りを避けて
-    // j_end = -1 < j_start（j_start >= 0）で空ループへ倒す
+    // r > K-1 (reachable only when stride > K) has zero valid taps. Avoids the u32 borrow of K-1-r
+    // and turns it into an empty loop with j_end = -1 < j_start (j_start >= 0)
     var j_end = -1;
     if (r < dims.kernel) {
       j_end = min(i32((dims.kernel - 1u - r) / dims.stride), i32(q));
@@ -52,10 +55,12 @@ fn main(
     var acc = bias[oc];
     for (var ic = 0u; ic < dims.channels_in; ic = ic + 1u) {
       let x_base = (b * dims.channels_in + ic) * dims.length_in;
-      // 重みは [Cin, Cout, K] — conv1d と転置（第 1 軸が入力チャネル）
+      // the weight is [Cin, Cout, K] — the transpose of conv1d (the first axis is the input
+      // channel)
       let w_base = (ic * dims.channels_out + oc) * dims.kernel;
-      // MUST: j 昇順 = k 昇順。tap 集合も (ic, k) 昇順の縮約順序も k 全数走査版と同一で、
-      // 同じ被演算子に同じ f32 積和が同じ順で掛かる = ビット同一（並べ替えは丸めを変える）
+      // MUST: ascending j = ascending k. The tap set and the ascending (ic, k) reduction order are
+      // identical to the version that scans every k: the same f32 multiply-adds apply to the same
+      // operands in the same order = bit-identical (reordering changes the rounding)
       for (var j = j_start; j <= j_end; j = j + 1) {
         let ix = q - u32(j);
         let k = r + u32(j) * dims.stride;

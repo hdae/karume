@@ -10,8 +10,8 @@ struct Dims {
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<vec4<f32>>;
 
-// 共有 A タイル（16 行 × K 16・スカラ格納）と
-// 共有 B タイル（K 16 × 列 quad 4・列方向を vec4 に束ねた形）
+// Shared A tile (16 rows × K 16, scalar storage) and
+// shared B tile (K 16 × 4 column quads, column direction grouped into vec4)
 var<workgroup> sa: array<f32, 256>;
 var<workgroup> sb: array<vec4<f32>, 64>;
 
@@ -23,27 +23,29 @@ fn main(
   let tid = lid.y * 4u + lid.x;
   let k4 = dims.k / 4u;
   let n4 = dims.n / 4u;
-  // A タイルの担当（16 行 × 4 quad を 64 スレッドで 1 巡）
+  // A tile assignment (16 rows × 4 quads over 64 threads in 1 rounds)
   let ar = tid / 4u;
   let aq = tid % 4u;
   let arow0 = wid.y * 16u + ar;
   let arow_base0 = arow0 * k4;
   let sa_base0 = ar * 16u + aq * 4u;
-  // W タイルの担当（16 出力チャネル × 4 quad を 64 スレッドで 1 巡）
+  // W tile assignment (16 output channels × 4 quads over 64 threads in 1 rounds)
   let wc0 = tid / 4u;
   let wq = tid % 4u;
   let wcol0 = wid.x * 16u + wc0;
   let wrow_base0 = wcol0 * dims.k;
-  // 共有メモリ側で転置して置く（列 quad = wc / 4・成分 = wc % 4）
+  // Placed transposed on the shared-memory side
+  // (column quad = wc / 4, component = wc % 4)
   let wsq0 = wc0 / 4u;
   let wsl0 = wc0 % 4u;
   let sb_base0 = (wq * 4u) * 4u + wsq0;
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner workgroupBarrier
+  // to meet WGSL's uniformity requirement
   let tiles = (dims.k + 15u) / 16u;
   var acc0_0 = vec4<f32>(0.0);
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める。内積に寄与しないので端数 shape でも結果は変わらない
+    // Fill out-of-range entries with 0. They do not contribute to the inner product, so
+    // remainder shapes give the same result
     let ak0 = t * 16u + aq * 4u;
     var av0 = vec4<f32>(0.0);
     if (arow0 < dims.m && ak0 < dims.k) {
@@ -85,9 +87,9 @@ fn main(
       }
     }
     workgroupBarrier();
-    // 共有ロード 2 回（B の vec4 1 + A のスカラ 1）で 4 MAC。
-    // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
-    // 完全に一致する。
+    // 2 shared loads (1 vec4 of B + 1 scalars of A) give 4 MACs.
+    // The reduction is sequential in ascending k, and the addition order per output element matches
+    // the 16×16 kernel with 1 output per thread exactly.
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
       let bv0 = sb[kk * 4u + lid.x];
       acc0_0 = acc0_0 + sa[(lid.y * 1u + 0u) * 16u + kk] * bv0;
@@ -97,7 +99,7 @@ fn main(
   let ocq0 = wid.x * 4u + lid.x;
   let orow0 = wid.y * 16u + lid.y * 1u;
   if (ocq0 < n4) {
-    // n % 4 == 0 かつ ocq0 < n4 なので oc + 3 < n（bias は常に f32 — ADR 0006）
+    // n % 4 == 0 and ocq0 < n4, so oc + 3 < n (bias is always f32 — ADR 0006)
     let oc = ocq0 * 4u;
     let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);
     if (orow0 < dims.m) {

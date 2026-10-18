@@ -1,24 +1,31 @@
 /**
- * タイル幾何の掃引（perf-ledger K-70）で測る**形状表**（純データ）。
+ * The **shape table** measured by the tile-geometry sweep (perf-ledger K-70) (pure data).
  *
- * 出典は anima の op census（`outputs/bench/karume-anima/2026-09-04_op-census/summary.json` の
- * `scenarios[0].weights[]` — 1024px 生成・パッチトークン S = 4096・quant `f16+dit8-a8-attn8-s16`）。
- * 値は census から**書き写した**もので、実行時に census を読まない（census の在否と形式に道具を
- * 依存させない — 形状は anima の IR が変わらない限り動かない）。
+ * The source is anima's op census (`scenarios[0].weights[]` of
+ * `outputs/bench/karume-anima/2026-09-04_op-census/summary.json` — 1024px generation, patch tokens
+ * S = 4096, quant `f16+dit8-a8-attn8-s16`). The values are **copied** from the census, and the
+ * census is not read at run time (the tool does not depend on the census being present or on its
+ * format — the shapes do not move unless anima's IR changes).
  *
- * `censusCount` は census の `count`（そのグラフ 1 本 = 各コンポーネント 1 回の forward の中の
- * ノード本数）。M = 1024（512²）の行は census に無い — 1024px の行の M（S = 4096）を 512px の
- * S = 1024 に置き換えたもので、ノード本数は解像度に依らないので同じ count を載せる。linear の
- * M = 16 / 32 / 128 / 256 と bmm の M = 16 / 32 / 128 / 256 も同じく census の行の M を置き換えた
- * 派生（census に無い M）で、幾何プロファイルの `gemmRows` の各段（{@link PROFILE_GEMM_ROWS_BOUNDS}）の
- * 上端を linear / matmul / bmm の 3 経路で測るための対照（ADR 0116 決定 1 / 4）。
+ * `censusCount` is the census's `count` (the number of nodes in one graph = one forward of each
+ * component). Rows with M = 1024 (512²) are not in the census — they replace the M of the 1024px
+ * row (S = 4096) with the 512px S = 1024, and carry the same count because the node count does not
+ * depend on the resolution. linear's M = 16 / 32 / 128 / 256 and bmm's M = 16 / 32 / 128 / 256 are
+ * likewise derived by replacing the M of a census row (M values absent from the census): controls
+ * that measure the upper end of each bucket of the geometry profile's `gemmRows`
+ * ({@link PROFILE_GEMM_ROWS_BOUNDS}) on the three paths linear / matmul / bmm (ADR 0116 decisions 1
+ * / 4).
  *
- * rank-2 の matmul は census に無い（anima を含む全系列の census に行が無い）。matmul のケースは
- * linear の各段 1 本の**鏡像**（同じ M / N / K・B 側は `[K,N]`）で、census 由来でないことを
- * `censusCount: 0` と `mirrorOf`（鏡像元の linear のケース id）で表す。
+ * rank-2 matmul is not in the census (no family's census, anima included, has a row for it). The
+ * matmul cases are **counterparts** of one linear case per bucket (same M / N / K, B side `[K,N]`);
+ * `censusCount: 0` and `mirrorOf` (the case id of the linear case it mirrors) mark that they do not
+ * come from the census.
  */
 
-/** 掃引の op 族（CLI の `--op` とページのチェックボックスの語彙）。 */
+/**
+ * The op families of the sweep (the vocabulary of the CLI's `--op` and the page's checkboxes — both
+ * removed in 0.15).
+ */
 export type SweepOp =
   | "linear"
   | "matmul"
@@ -39,8 +46,9 @@ export const SWEEP_OPS: readonly SweepOp[] = [
 ];
 
 /**
- * linear（`x[M,K] · Wᵀ[K,N] + b[N]`）。`linear` は重み f16 格納 × f32 計算（quant `f16` の DiT と
- * text 系と同じ `wf16`）、`i8a8-linear` は重み i8（per-channel scale）× 活性 per-token i8 の整数内積。
+ * linear (`x[M,K] · Wᵀ[K,N] + b[N]`). `linear` is f16-stored weights × f32 compute (the same `wf16`
+ * as the DiT and the text components of quant `f16`); `i8a8-linear` is the integer dot product of
+ * i8 weights (per-channel scale) × per-token i8 activations.
  */
 export type LinearCase = {
   readonly id: string;
@@ -49,13 +57,14 @@ export type LinearCase = {
   readonly n: number;
   readonly k: number;
   readonly censusCount: number;
-  /** census のどの行か（コンポーネントと census 上の入力形）。 */
+  /** Which census row (the component and its input shape in the census). */
   readonly source: string;
 };
 
 /**
- * matmul（`a[M,K] · b[K,N]`・f32 × f32）。linear と同じ GEMM 骨格で、違いは B 側を `[K,N]` の
- * dense で読む充填と bias が無いことだけ。census に行が無いので linear のケースの鏡像を測る。
+ * matmul (`a[M,K] · b[K,N]`, f32 × f32). The same GEMM skeleton as linear; the only differences are
+ * the fill that reads the B side as a dense `[K,N]` and the absence of bias. The census has no row
+ * for it, so counterparts of the linear cases are measured.
  */
 export type MatmulCase = {
   readonly id: string;
@@ -63,16 +72,16 @@ export type MatmulCase = {
   readonly m: number;
   readonly n: number;
   readonly k: number;
-  /** census に matmul の行は無いので常に 0。 */
+  /** The census has no matmul row, so always 0. */
   readonly censusCount: 0;
-  /** 鏡像元の linear のケース id（同じ M / N / K）。 */
+  /** The case id of the mirrored linear case (same M / N / K). */
   readonly mirrorOf: string;
   readonly source: string;
 };
 
 /**
- * bmm（`a[B,M,K] · b[B,K,N]`・f32 × f32）。バッチは dispatch の z 軸で、タイル幾何のバケットは
- * 行列 1 枚の M（src/runtime/recipe-builders/linear.ts の buildBmm）。
+ * bmm (`a[B,M,K] · b[B,K,N]`, f32 × f32). The batch is the dispatch's z axis, and the tile-geometry
+ * bucket is the M of one matrix (buildBmm in src/runtime/recipe-builders/linear.ts).
  */
 export type BmmCase = {
   readonly id: string;
@@ -86,23 +95,24 @@ export type BmmCase = {
 };
 
 /**
- * 融合 attention の ①QK / ③PV（B·H = 16・D = 128）。`attention` は f32 計算・S は f32 格納、
- * `i8a8-attention` は整数内積・S は f16 格納（s16 — quant `…-attn8-s16` と同じ）。
- * ③PV は同じ形の ①QK → ②行統計 を既定幾何で 1 度回した S と行統計を入力にする。
+ * Fused attention's ①QK / ③PV (B·H = 16, D = 128). `attention` is f32 compute with S stored in f32;
+ * `i8a8-attention` is the integer dot product with S stored in f16 (s16 — same as quant
+ * `…-attn8-s16`). ③PV takes as input the S and row statistics from one run of ①QK → ②row
+ * statistics of the same shape with the default geometry.
  */
 export type AttentionCase = {
   readonly id: string;
   readonly op: "attention" | "i8a8-attention";
   readonly stage: "qk" | "pv";
-  /** B·H（バッチ軸に畳んだ本数）。 */
+  /** B·H (the count folded into the batch axis). */
   readonly batchHeads: number;
-  /** クエリ長 M。 */
+  /** Query length M. */
   readonly m: number;
-  /** キー長 N。 */
+  /** Key length N. */
   readonly n: number;
-  /** head の次元 D。 */
+  /** Head dimension D. */
   readonly d: number;
-  /** attrs の `scale`（半スケール — q / k の両方に掛かる）。 */
+  /** The `scale` of attrs (half scale — applied to both q and k). */
   readonly scale: number;
   readonly score: "f32" | "f16";
   readonly censusCount: number;
@@ -110,8 +120,8 @@ export type AttentionCase = {
 };
 
 /**
- * conv2d の implicit GEMM（groups = 1・3×3・stride 1・padding 1・dilation 1・B = 1・重み f16 格納）。
- * `M = Cout`・`N = H·W`・`K = Cin·9`。
+ * conv2d's implicit GEMM (groups = 1, 3×3, stride 1, padding 1, dilation 1, B = 1, f16-stored
+ * weights). `M = Cout`, `N = H·W`, `K = Cin·9`.
  */
 export type Conv2dCase = {
   readonly id: string;
@@ -127,10 +137,12 @@ export type Conv2dCase = {
 export type SweepCase = LinearCase | MatmulCase | BmmCase | AttentionCase | Conv2dCase;
 
 /**
- * 幾何プロファイルの `gemmRows` の段の境界（`maxRows` の列・ADR 0116 決定 1）。生成器が段を切る
- * 唯一の定数で、末尾以外は linear / matmul / bmm の掃引ケースの M（≤ 512）の集合と一致すること
- * MUST（cases_test が縛る — 段の上端を測っていない段を作らないため）。既定の表の境界 64 / 512 を
- * 含む細分であること MUST（ADR 0116 決定 3 — 段の中で掃引の既定の行の幾何が割れないため）。
+ * The bucket boundaries of the geometry profile's `gemmRows` (the `maxRows` column, ADR 0116
+ * decision 1). The only constant by which the generator cuts buckets; the entries other than the
+ * last MUST equal the set of M (≤ 512) of the linear / matmul / bmm sweep cases (tune_cases_test
+ * enforces it — so that no bucket is created whose upper end is not measured). It MUST be a
+ * refinement that contains the default table's boundaries 64 / 512 (ADR 0116 decision 3 — so that
+ * the geometry of the sweep's default row does not split within a bucket).
  */
 export const PROFILE_GEMM_ROWS_BOUNDS: readonly number[] = [
   16,
@@ -142,10 +154,12 @@ export const PROFILE_GEMM_ROWS_BOUNDS: readonly number[] = [
   Number.POSITIVE_INFINITY,
 ];
 
-/** census の attention の `attrs.scale`（DiT の self / cross 共通 — `128^-0.25`）。 */
+/** The census's attention `attrs.scale` (common to the DiT's self / cross — `128^-0.25`). */
 const DIT_ATTENTION_SCALE = 0.2973017692565918;
 
-/** DiT の linear 3 形（census: transformer の `[1,4096,K] × [N,K]`・count 168 / 28 / 28）。 */
+/**
+ * The DiT's three linear shapes (census: transformer's `[1,4096,K] × [N,K]`, count 168 / 28 / 28).
+ */
 const DIT_LINEAR: readonly {
   readonly n: number;
   readonly k: number;
@@ -156,7 +170,7 @@ const DIT_LINEAR: readonly {
   { n: 2048, k: 8192, count: 28 },
 ];
 
-/** DiT の M（512² = 1024・1024² = 4096）。 */
+/** The DiT's M (512² = 1024, 1024² = 4096). */
 const DIT_ROWS = [1024, 4096] as const;
 
 const linearId = (op: LinearCase["op"], m: number, n: number, k: number): string =>
@@ -180,7 +194,8 @@ const ditLinear = (op: LinearCase["op"]): LinearCase[] =>
 const LINEAR_CASES: readonly LinearCase[] = [
   ...ditLinear("linear"),
   {
-    // 中 M の対照（census: transformer の cross-attention の k / v 射影 `[1,512,1024] × [2048,1024]`）
+    // Medium-M control (census: the k / v projection of transformer's cross-attention
+    // `[1,512,1024] × [2048,1024]`)
     id: linearId("linear", 512, 2048, 1024),
     op: "linear",
     m: 512,
@@ -190,7 +205,8 @@ const LINEAR_CASES: readonly LinearCase[] = [
     source: "transformer [1,512,1024] × [2048,1024]",
   },
   ...[128, 256].map((m): LinearCase => ({
-    // 段 65〜128 / 129〜256 の上端の対照（上の M 512 の行の M を置換）
+    // Controls for the upper ends of buckets 65–128 / 129–256 (the M of the M 512 row above
+    // replaced)
     id: linearId("linear", m, 2048, 1024),
     op: "linear",
     m,
@@ -200,7 +216,7 @@ const LINEAR_CASES: readonly LinearCase[] = [
     source: `transformer [1,${m},1024] × [2048,1024]（census の M 512 を ${m} に置換）`,
   })),
   {
-    // 小 M の対照（census: text_encoder の `[1,64,1024] × [3072,1024]`・格納 f16）
+    // Small-M control (census: text_encoder's `[1,64,1024] × [3072,1024]`, stored in f16)
     id: linearId("linear", 64, 3072, 1024),
     op: "linear",
     m: 64,
@@ -210,7 +226,7 @@ const LINEAR_CASES: readonly LinearCase[] = [
     source: "text_encoder [1,64,1024] × [3072,1024]",
   },
   ...[16, 32].map((m): LinearCase => ({
-    // 段 ≤ 16 / 17〜32 の上端の対照（上の M 64 の行の M を置換）
+    // Controls for the upper ends of buckets ≤ 16 / 17–32 (the M of the M 64 row above replaced)
     id: linearId("linear", m, 3072, 1024),
     op: "linear",
     m,
@@ -223,10 +239,11 @@ const LINEAR_CASES: readonly LinearCase[] = [
 ];
 
 /**
- * matmul の鏡像 7 本（linear の、幾何プロファイルの `gemmRows` の 7 段から 1 本ずつ — 同じ M / N / K）。
- * census に matmul の行が無いので、表（gemmRows）が matmul にも効く以上、その骨格で遅い幾何を
- * 採らないための観測として置く。M 16 / 32 / 128 / 256 の 4 本は鏡像元の linear が census の M を
- * 置き換えた派生（ADR 0116 決定 4）。
+ * Seven matmul counterparts (one linear case from each of the seven buckets of the geometry
+ * profile's `gemmRows` — same M / N / K). The census has no matmul row, but since the table
+ * (gemmRows) applies to matmul too, these are observations that keep a geometry slow on that
+ * skeleton from being adopted. The four with M 16 / 32 / 128 / 256 mirror linear cases that are
+ * themselves derived by replacing the census M (ADR 0116 decision 4).
  */
 const MATMUL_CASES: readonly MatmulCase[] = [
   { m: 64, n: 3072, k: 1024 },
@@ -251,8 +268,8 @@ const MATMUL_CASES: readonly MatmulCase[] = [
 });
 
 /**
- * bmm 5 本（census: text_encoder の 2 形・text_conditioner の 3 形。形は
- * `[B,M,K] × [B,K,N]` で census の in_shapes そのまま）。
+ * Five bmm cases (census: two shapes of text_encoder, three of text_conditioner. The shapes are
+ * `[B,M,K] × [B,K,N]`, the census in_shapes as is).
  */
 const BMM_CASES: readonly BmmCase[] = [
   { component: "text_encoder", batch: 16, m: 64, k: 64, n: 128, count: 28 },
@@ -272,11 +289,12 @@ const BMM_CASES: readonly BmmCase[] = [
 }));
 
 /**
- * bmm の派生 8 本（ADR 0116 決定 4）: M 16 / 32 / 128 / 256 の各段に、census の行の M を置き換えた
- * N 64 の 2 形ずつ。`K 64` は text_conditioner `[16,512,64] × [16,64,64]`、`K 128` は text_encoder
- * `[16,64,128] × [16,128,64]` の M を置換したもの（census に無い M）。N 64 の形を選んだのは、
- * linear と bmm の両方を測った M 64 / 512 で linear 単独の勝者を止めたのが N 64 の形だったため。
- * count は置換元の行の count を載せる（linear の派生と同じ扱い）。
+ * Eight derived bmm cases (ADR 0116 decision 4): two N 64 shapes for each of the buckets M 16 / 32
+ * / 128 / 256, with the M of a census row replaced. `K 64` replaces the M of text_conditioner
+ * `[16,512,64] × [16,64,64]`, `K 128` that of text_encoder `[16,64,128] × [16,128,64]` (M values
+ * absent from the census). The N 64 shapes were chosen because, at M 64 / 512 where both linear and
+ * bmm were measured, it was the N 64 shapes that stopped the linear-only winners. count carries the
+ * count of the replaced row (handled like the linear derivations).
  */
 const BMM_DERIVED_CASES: readonly BmmCase[] = [16, 32, 128, 256].flatMap((m) =>
   [
@@ -294,7 +312,10 @@ const BMM_DERIVED_CASES: readonly BmmCase[] = [16, 32, 128, 256].flatMap((m) =>
   })),
 );
 
-/** DiT の attention 4 形（census: transformer の self `[1,16,4096,128]`²・cross N = 512・各 count 28）。 */
+/**
+ * The DiT's four attention shapes (census: transformer's self `[1,16,4096,128]`², cross N = 512,
+ * count 28 each).
+ */
 const DIT_ATTENTION: readonly { readonly kind: string; readonly m: number; readonly n: number }[] =
   [
     { kind: "self", m: 1024, n: 1024 },
@@ -328,8 +349,9 @@ const ATTENTION_CASES: readonly AttentionCase[] = [
 ];
 
 /**
- * VAE の conv2d 上位 3 行（census の `count × out_elements` 降順 — 150,994,944 / 75,497,472 /
- * 31,457,280）。Cout = 96 は m タイル 32 行（`igemm32x128`）、192 / 384 は 64 行（`igemm64x128`）。
+ * The VAE's top three conv2d rows (census `count × out_elements` descending — 150,994,944 /
+ * 75,497,472 / 31,457,280). Cout = 96 uses the 32-row m tile (`igemm32x128`), 192 / 384 the 64-row
+ * one (`igemm64x128`).
  */
 const CONV2D_CASES: readonly Conv2dCase[] = [
   { channels: 96, size: 512, count: 6 },
@@ -346,7 +368,7 @@ const CONV2D_CASES: readonly Conv2dCase[] = [
   source: `vae_decoder conv2d [1,${channels},${size},${size}] × [${channels},${channels},3,3]`,
 }));
 
-/** 全ケース（op 族の順 = {@link SWEEP_OPS}）。 */
+/** Every case (in op-family order = {@link SWEEP_OPS}). */
 export const SWEEP_CASES: readonly SweepCase[] = [
   ...LINEAR_CASES.filter((c) => c.op === "linear"),
   ...MATMUL_CASES,
@@ -358,7 +380,10 @@ export const SWEEP_CASES: readonly SweepCase[] = [
   ...CONV2D_CASES,
 ];
 
-/** 1 dispatch の演算数（積和 = 2）。i8a8 は整数演算の数（TOPS 相当）。 */
+/**
+ * The operation count of one dispatch (multiply-add = 2). For i8a8, the number of integer
+ * operations (the TOPS equivalent).
+ */
 export const caseFlops = (sweepCase: SweepCase): number => {
   switch (sweepCase.op) {
     case "linear":
@@ -371,7 +396,8 @@ export const caseFlops = (sweepCase: SweepCase): number => {
     case "i8a8-attention":
       return 2 * sweepCase.batchHeads * sweepCase.m * sweepCase.n * sweepCase.d;
     case "conv2d":
-      // implicit GEMM 換算（M = Cout・N = H·W・K = Cin·9 — padding 域の読み飛ばしは数えない）
+      // As implicit GEMM (M = Cout, N = H·W, K = Cin·9 — skipped reads of the padding are not
+      // counted)
       return (
         2 * sweepCase.channelsOut * sweepCase.height * sweepCase.width * sweepCase.channelsIn * 9
       );
@@ -379,8 +405,9 @@ export const caseFlops = (sweepCase: SweepCase): number => {
 };
 
 /**
- * 表示用の形状 1 行。生成器（profile.ts の slotOf）が linear / matmul / bmm の M を正規表現で
- * 読むので、M の綴り（`M{m}`）を変えるときは slotOf と揃える。
+ * One line of shape for display. The generator (slotOf in derive.ts) reads the M of linear / matmul
+ * / bmm with a regular expression, so when changing the spelling of M (`M{m}`), change slotOf to
+ * match.
  */
 export const caseShape = (sweepCase: SweepCase): string => {
   switch (sweepCase.op) {

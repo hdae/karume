@@ -1,4 +1,4 @@
-// karume attention_state_stats_pv (states 形の O = P @ V, f32, KV 並列縮約, sliding window, GQA)
+// karume attention_state_stats_pv (states-form O = P @ V, f32, KV-parallel reduction, sliding window, GQA)
 struct Params {
   rows_block: u32,
   row_offset: u32,
@@ -61,8 +61,8 @@ fn main(
   let z = wid.z;
   let in_depth = d < params.depth;
   let at = (z * params.chunk_rows + params.row_offset + local_row) * params.depth + d;
-  // pad 行（row ≥ Q）は live を走査せず厳密 0（③ と同じ契約）。局所行は workgroup 一様なので
-  // barrier の手前で返してよい
+  // Pad rows (row ≥ Q) do not scan live and are exactly 0 (the same contract as ③). The local row is
+  // workgroup-uniform, so returning before the barrier is allowed
   if (local_row >= effective_rows(lengths.query)) {
     if (lane == 0u && in_depth) {
       out[at] = 0.0;
@@ -75,7 +75,8 @@ fn main(
   let kv_plane = z / params.kv_repeat;
   let s_row = z * params.rows_block + local_row;
   let s_base = s_row * params.col_cap;
-  // 行統計は元の 256 lane と同じ添字・加算順。PV の KV lane とは別の写像。
+  // Row statistics use the same indices and summation order as the original 256 lanes. A mapping
+  // separate from the PV KV lanes.
   let flat = lid.y * 16u + lid.x;
   let neg_inf = bitcast<f32>(params.neg_inf);
   var hi = neg_inf;
@@ -112,10 +113,10 @@ fn main(
     amax = maximum;
     inv = 1.0 / scratch[0u];
   }
-  // 分母を読み終えてから scratch を PV の部分和へ使い回す。
+  // Reuse scratch for the PV partial sums only after the denominator has been read.
   workgroupBarrier();
-  // レーンごとの部分和（col 昇順・stride KV_LANES）。d が範囲外のレーンは走査せず 0 を寄与する
-  // （barrier に参加させるため return しない）
+  // Per-lane partial sum (ascending col, stride KV_LANES). A lane whose d is out of range does not
+  // scan and contributes 0 (it does not return, so that it takes part in the barrier)
   var acc = 0.0;
   if (in_depth) {
     for (var cl = lane; cl < live; cl = cl + 16u) {
@@ -132,7 +133,7 @@ fn main(
   }
   scratch[lane * 16u + lid.x] = acc;
   workgroupBarrier();
-  // 固定順の木縮約（stride 8 → 4 → 2 → 1）— 決定性の根拠
+  // Fixed-order tree reduction (stride 8 → 4 → 2 → 1) — the basis of determinism
   var stride = 8u;
   while (stride > 0u) {
     if (lane < stride) {

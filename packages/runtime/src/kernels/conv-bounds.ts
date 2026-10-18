@@ -1,27 +1,29 @@
-// 畳み込みの GPU 座標が i32 に収まることの門（conv1d / conv2d / conv3d / conv_transpose1d の
-// params が共有する葉関数）。
+// The check that a convolution's GPU coordinates fit in i32 (leaf functions shared by the params
+// of conv1d / conv2d / conv3d / conv_transpose1d).
 //
-// `assertU32Params` は uniform に載せる個々の値の u32 収まりを見るが、WGSL が掛けた・足した
-// 結果は保証しない。conv の WGSL は入力座標を i32 で組むので、真の座標が i32 の域を出ると
-// 折り返し、範囲外の判定を実在する別の画素として通り抜ける（例外の出ない誤値）。判定を
-// カーネルごとに書くと direct 版と暗黙 GEMM 版の受理集合が割れ、片側だけ直し忘れる
-// （conv3d だけが持っていた前例がある）ため、ここ 1 箇所に置く。
+// `assertU32Params` checks that each value carried in the uniform fits in u32, but not the results
+// the WGSL multiplies and adds. The conv WGSL builds input coordinates in i32, so a true coordinate
+// outside the i32 range wraps and passes the out-of-range test as another, existing pixel (a wrong
+// value without an exception). Writing the test per kernel splits the accepted sets of the direct
+// and the implicit GEMM versions and lets one side be left unfixed (there is a precedent: only
+// conv3d had it), so it lives here, in one place.
 
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
-/** i32 の最大値（2^31 − 1）。 */
+/** The largest i32 (2^31 − 1). */
 const I32_MAX = 0x7fff_ffff;
 
 /**
- * WGSL の i32 座標演算に入る値（と、その上界を与える導出値）が i32 の非負域に収まることを
- * 確かめる。
+ * Checks that the values entering WGSL's i32 coordinate arithmetic (and the derived values that
+ * bound them) fit in the non-negative range of i32.
  *
- * MUST: 超えたら fail loudly。WGSL の `i32(u32)` はビットの再解釈なので、丸めも飽和もせずに
- * 負へ折り返す。
+ * MUST: fail loudly when exceeded. WGSL's `i32(u32)` reinterprets the bits, so it wraps to a
+ * negative value without rounding or saturating.
  *
- * @param where 失敗文言の頭（例: `"conv1d params"`）。
- * @param values 名前 → 値。名前は欄名か導出式（例: `"軸 w の入力長 + 2·padding"`）。
+ * @param where The head of the failure message (e.g. `"conv1d params"`).
+ * @param values Name → value. A name is a field name or a derived expression (e.g. the input
+ * length + 2·padding of axis w, as {@link assertConvAxisExtent} names it).
  */
 export const assertI32Coordinates = (
   where: string,
@@ -38,15 +40,17 @@ export const assertI32Coordinates = (
 };
 
 /**
- * 順方向の畳み込み（conv1d / conv2d / conv3d）の 1 軸の座標域。
+ * The coordinate range of one axis of a forward convolution (conv1d / conv2d / conv3d).
  *
- * MUST: `入力長 + 2·padding ≤ 2^31 − 1`。WGSL は入力座標を
- * `i32(出力座標·stride) + i32(k·dilation) − i32(padding)` の 32 ビット整数で組む。
- * 出力長の式（shapes.ts）から `(out − 1)·stride ≤ L + 2p − d(K − 1) − 1` と
- * `k·dilation ≤ d(K − 1) ≤ L + 2p − 1` が従い、座標は `[−p, L + p − 1]` に入るので、この 1 条件で
- * 中間値が全て i32 に収まる。CPU 参照の意味論は変えない（GPU 実行の subset — ADR 0064 軸 A）。
+ * MUST: `input length + 2·padding ≤ 2^31 − 1`. The WGSL builds the input coordinate as the 32-bit
+ * integer `i32(output coordinate·stride) + i32(k·dilation) − i32(padding)`. The output-length
+ * formula (shapes.ts) implies `(out − 1)·stride ≤ L + 2p − d(K − 1) − 1` and
+ * `k·dilation ≤ d(K − 1) ≤ L + 2p − 1`, so the coordinate lies in `[−p, L + p − 1]`, and this one
+ * condition keeps every intermediate value in i32. The CPU reference's semantics do not change
+ * (a subset for GPU execution — ADR 0064 axis A).
  *
- * 各値の u32 域は呼び手が src/codegen/params.ts の `assertU32Params` で先に確かめておくこと。
+ * The caller checks each value's u32 range first with `assertU32Params` in
+ * src/codegen/params.ts.
  */
 export const assertConvAxisExtent = (
   where: string,
@@ -58,14 +62,17 @@ export const assertConvAxisExtent = (
 };
 
 /**
- * 入力・出力・重みの平坦添字の門（各テンソルの要素数 ≤ 2^32 − 1）。
+ * The check on the flat indices of input, output and weight (each tensor's element count ≤
+ * 2^32 − 1).
  *
- * MUST: WGSL は 3 つのテンソルの添字を u32 の平坦添字（例 `((c·T + t)·H + y)·W + x`・
- * `(oc·Cin + ic)·K + k`）で組むので、要素数が 2^32 を超えると上位ビットが落ちて別の位置を
- * 例外なしに読み書きする。uniform の各値と m / n / k の u32 検査では止まらない（バッチやチャネルを
- * 掛けた積は uniform に載らない — 計画段の検査も安全整数 2^53 で、u32 ではない）。
+ * MUST: the WGSL builds the indices of the three tensors as u32 flat indices (e.g.
+ * `((c·T + t)·H + y)·W + x`, `(oc·Cin + ic)·K + k`), so with more than 2^32 elements the upper bits
+ * drop and another position is read or written without an exception. The u32 checks on each
+ * uniform value and on m / n / k do not stop it (products with the batch or channels are not in the
+ * uniform — the planning-step check is also against the safe integer 2^53, not u32).
  *
- * @param extents 要素数。出力はバッチを含めた全体（dispatch の z 軸で回すバッチも平坦添字に入る）。
+ * @param extents Element counts. The output is the whole including the batch (the batch iterated
+ * on the dispatch's z axis also enters the flat index).
  */
 export const assertConvFlatExtents = (
   where: string,

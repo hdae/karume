@@ -1,4 +1,4 @@
-// karume attention_state_stats (states 形の行統計 m = amax(S) と inv = 1/Σexp(S - m), f32)
+// karume attention_state_stats (states-form row statistics m = amax(S) and inv = 1/Σexp(S - m), f32)
 struct Params {
   batch_heads: u32,
   rows_block: u32,
@@ -50,8 +50,9 @@ fn main(
   let lid = lid3.x;
   let neg_inf = bitcast<f32>(params.neg_inf);
   let live = live_columns(lengths.past, lengths.query);
-  // 有効行は各 z 平面の**前詰め** rows 本。total = 0 ならループへ入らないので rows での
-  // 除算・剰余は 0 除算にならない（ホストも 0 なら dispatch を積まない）
+  // The valid rows are the first rows of each z plane (**packed at the front**). With
+  // total = 0 the loop is not entered, so dividing by rows or taking the remainder never divides
+  // by 0 (the host records no dispatch for 0 either)
   let rows = effective_rows(lengths.query);
   let total = params.batch_heads * rows;
   var index = wid.x;
@@ -59,7 +60,7 @@ fn main(
     let row = (index / rows) * params.rows_block + index % rows;
     let base = row * params.col_cap;
 
-    // ① 行の最大値。identity は **-inf**（有限 sentinel は MUST NOT — ADR 0067 決定 6）
+    // ① Row maximum. The identity is **-inf** (a finite sentinel is MUST NOT — ADR 0067 decision 6)
     var hi = neg_inf;
     var i = lid;
     while (i < live) {
@@ -77,11 +78,11 @@ fn main(
       stride = stride / 2u;
     }
     let amax = scratch[0u];
-    // scratch の読み終わりを揃えてから ② で上書きする
+    // Make sure scratch has been read before ② overwrites it
     workgroupBarrier();
 
-    // ② Σ exp(S - amax)。**空行（amax == -inf）は 1 度も回さない** —
-    // exp(-inf - (-inf)) = exp(NaN) = NaN が分母へ入る
+    // ② Σ exp(S - amax). **An empty row (amax == -inf) never runs it** —
+    // exp(-inf - (-inf)) = exp(NaN) = NaN would enter the denominator
     let empty = amax == neg_inf;
     var acc = 0.0;
     if (!empty) {
@@ -102,7 +103,8 @@ fn main(
       stride2 = stride2 / 2u;
     }
     if (lid == 0u) {
-      // 空行は (0.0, 0.0)。③ の exp(-inf - 0) * 0 = 0 で出力が**厳密 0** になる
+      // An empty row is (0.0, 0.0). ③'s exp(-inf - 0) * 0 = 0 makes the output
+      // **exactly 0**
       var m = 0.0;
       var inv = 0.0;
       if (!empty) {
@@ -112,7 +114,7 @@ fn main(
       stats[row * 2u] = m;
       stats[row * 2u + 1u] = inv;
     }
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // Make sure scratch[0] has been read before the next row overwrites scratch[lid]
     workgroupBarrier();
     index = index + nwg.x;
   }

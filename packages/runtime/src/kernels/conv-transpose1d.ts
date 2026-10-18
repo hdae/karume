@@ -1,48 +1,56 @@
 /**
- * conv_transpose1d（`x[B,Cin,L] ⊛ᵀ W[Cin,Cout,K] + b[Cout]`、f32）の固定カーネル。
- * 1 スレッド = 1 出力要素の **gather 形**（full-write 不変条件の側の要請 — 下記）。縮約の内側は
- * **residue grouping**（perf-ledger K-10 — 有効 tap だけを O(1) の範囲で回る）。
+ * The fixed kernel of conv_transpose1d (`x[B,Cin,L] ⊛ᵀ W[Cin,Cout,K] + b[Cout]`, f32).
+ * A **gather form** with one thread = one output element (required by the full-write invariant —
+ * below). The inside of the reduction uses **residue grouping** (perf-ledger K-10 — it walks only
+ * the valid taps, over an O(1) range).
  *
- * ## gather 形である理由（full-write 不変条件 — ADR 0014）
+ * ## Why the gather form (the full-write invariant — ADR 0014)
  *
- * 転置畳み込みの素直な実装は「入力 1 点を出力の複数点へ**散らす**」scatter で、出力バッファを
- * ゼロ初期化してから read-modify-write する形になる。Karume のバッファは配り直し
- * （ADR 0004）でゼロ初期化されないうえ、複数スレッドの加算が競合する。ここは
- * **出力 1 要素 = 寄与する入力の総和**へ裏返して、1 スレッドが 1 出力要素を**必ず 1 回書く**
- * 形にする。
+ * The straightforward implementation of a transposed convolution is a scatter that "**spreads** one
+ * input point over several output points", which zero-initialises the output buffer and then does
+ * read-modify-write. Karume's buffers are recycled (ADR 0004) and not zero-initialised, and the
+ * additions from several threads would race. Here it is turned inside out into **one output element
+ * = the sum of the inputs that contribute to it**, so one thread **writes exactly once** to one
+ * output element.
  *
- * 出力座標 `ox` に寄与するのは `ox = ix·stride − padding + k` を満たす `(ix, k)` の組で、
- * `t = ox + padding − k` が **stride で割り切れて** `0 <= t/stride < L` のときだけ。
- * 割り切れない `k` は「そこに入力が無い」＝寄与ゼロなので、padding 域と同じく
- * **加算に現れない**（0 を足すと丸めの並びが変わる）。
+ * The pairs `(ix, k)` that contribute to output coordinate `ox` satisfy
+ * `ox = ix·stride − padding + k`, and only when `t = ox + padding − k` **is divisible by stride**
+ * and `0 <= t/stride < L`. A `k` that does not divide means "there is no input there" = zero
+ * contribution, so like the padding region it **does not appear in the addition** (adding 0
+ * changes the rounding sequence).
  *
- * ## residue grouping（perf-ledger K-10）
+ * ## residue grouping (perf-ledger K-10)
  *
- * 割り切れ判定は `k ≡ shifted (mod stride)`（`shifted = ox + padding`）と同値なので、
- * `shifted = q·stride + r` へ**出力要素あたり 1 回だけ**分解すれば、有効 tap は
- * `k = r + j·stride` / `ix = q − j` と**数え上げ**で書ける。`j` の範囲は 3 本の不等式
- * （`ix <= L−1` / `ix >= 0` / `k <= K−1`）で O(1) に閉じるので、`k` 全数の走査と剰余判定が
- * 消える（dacvae の実測形 stride 8 / K 16 では tap の 7/8 が無効判定だった）。
+ * The divisibility test is equivalent to `k ≡ shifted (mod stride)` (`shifted = ox + padding`), so
+ * decomposing `shifted = q·stride + r` **once per output element** lets the valid taps be written
+ * as **an enumeration** `k = r + j·stride` / `ix = q − j`. The range of `j` closes in O(1) with
+ * three inequalities (`ix <= L−1` / `ix >= 0` / `k <= K−1`), so the scan over every `k` and the
+ * remainder test disappear (in dacvae's measured shape, stride 8 / K 16, 7/8 of the taps were
+ * tested invalid).
  *
- * ## 契約の狭さ
+ * ## Narrow contract
  *
- * - 重みは **`[Cin, Cout, K]`**（conv1d の `[Cout, Cin, K]` と転置）。取り違えても要素数が
- *   合う形（Cin == Cout）が作れて shape 検査を素通りするため、テストは**非対称チャネル数**で
- *   固定する（ADR 0015 / recon §4）。
- * - **stride >= 1 MUST**。プロトタイプ実装は stride 0 でループが進まず **GPU ハング**（例外に
- *   ならない）だった。gather 形の本カーネルはループ境界に stride を使わないが、residue 分割の
- *   `shifted % stride` が要素あたり 1 回ゼロ除算になるので {@link convTranspose1dParams} で
- *   遮断する（契約検査と二重の門）。
- * - bias は常時あり（アリティ 3 固定）。bias 無しはエクスポータのゼロ bias 合成で正規化される。
- * - `output_padding` / `dilation` / `groups` は attrs に無い = 実測どおりの 0 / 1 / 1 固定。
+ * - The weight is **`[Cin, Cout, K]`** (the transpose of conv1d's `[Cout, Cin, K]`). A mix-up can
+ *   produce a shape with the right element count (Cin == Cout) that slips through the shape check,
+ *   so the tests pin it with **asymmetric channel counts** (ADR 0015 / recon §4).
+ * - **stride >= 1 MUST**. The prototype's implementation did not advance its loop at stride 0 and
+ *   **hung the GPU** (no exception). This gather-form kernel does not use stride as a loop bound,
+ *   but residue splitting divides by zero once per element in `shifted % stride`, so
+ *   {@link convTranspose1dParams} blocks it (a double check with the contract check).
+ * - bias is always present (arity fixed at 3). A conv without bias is normalised by the exporter's
+ *   zero-bias synthesis.
+ * - `output_padding` / `dilation` / `groups` are not in attrs = fixed at 0 / 1 / 1, as measured.
  *
- * MUST: grid-stride ループ前提（dec の ups は出力 512×T·8 要素まで伸びる）。
- * 縮約は `(ic, k)` 昇順の逐次で、同じ入力なら常に同じ丸めになる（決定性）。
+ * MUST: grid-stride loop (the ups of dec grow the output to 512×T·8 elements).
+ * The reduction runs sequentially in ascending `(ic, k)` order, so the same input always gets the
+ * same rounding (determinism).
  *
- * 重みは格納の変種を持つ（`w=f32` / `w=f16` / `w=i8` — ADR 0018 / 0019）。差は縮約内の
- * 読み出し 1 行と、i8 の per-channel scale だけ（src/kernels/weight-storage.ts）。
- * MUST: i8 の scale の**チャネル軸は 1**（重み `[Cin, Cout, K]` の第 2 軸 = 出力チャネル）。
- * 他の 4 カーネルは軸 0 で、ここだけ転置レイアウトのぶんずれる。
+ * The weight has storage variants (`w=f32` / `w=f16` / `w=i8` — ADR 0018 / 0019). They differ only
+ * in the one read line inside the reduction and in i8's per-channel scale
+ * (src/kernels/weight-storage.ts).
+ * MUST: the **channel axis of the i8 scale is 1** (the second axis of the weight `[Cin, Cout, K]` =
+ * the output channel). The other four kernels use axis 0; only this one is shifted by the
+ * transposed layout.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -61,17 +69,18 @@ import {
 
 export const CONV_TRANSPOSE1D_WORKGROUP_SIZE = 256;
 
-/** i8 変種の scale 束縛（出力の次の番号 — executor の bind entries と対で使う）。 */
+/** i8 scale binding (the number after the output — paired with the executor bind entries). */
 export const CONV_TRANSPOSE1D_SCALE_BINDING = 5;
 
 /**
- * このカーネルは **i4 を受けない**（ADR 0069 決定 5 — i4 の実行経路は linear / embedding /
- * conv1d(groups == 1) の implicit GEMM だけで、conv_transpose1d には展開経路が無い）。
+ * This kernel **does not accept i4** (ADR 0069 decision 5 — the i4 execution path is only the
+ * implicit GEMM of linear / embedding / conv1d(groups == 1); conv_transpose1d has no decode path).
  *
- * MUST: 適格判定（plan.ts の `i4EligibleInitializers`）が conv_transpose1d を i4 の適格集合から
- * 落とすので通常は届かないが、**カーネル直呼びの経路も塞ぐ**（生成だけは通ってしまう形で、
- * group scale の束縛が無いまま `dequant(i, wscale_v)` が未定義識別子を参照する不成立 WGSL に
- * なる — conv1d 直接カーネルと同じ fail loudly の流儀）。
+ * MUST: the eligibility check (`i4EligibleInitializers` in plan.ts) drops conv_transpose1d from the
+ * i4 eligible set, so this is normally unreachable, but **the path of calling the kernel directly
+ * is closed too** (generation alone would succeed, producing invalid WGSL in which
+ * `dequant(i, wscale_v)` references an undeclared identifier without a group scale binding — the
+ * same fail-loudly style as the conv1d direct kernel).
  */
 const assertGatherWeight = (weight: WeightStorage): void => {
   if (weight === "i2") {
@@ -95,7 +104,7 @@ export const convTranspose1dWgsl = (weight: WeightStorage): string => {
   assertGatherWeight(weight);
   return `// karume conv_transpose1d (x[B,Cin,L] * W[Cin,Cout,K] + b[Cout], f32${weightNote(
     weight,
-  )}, gather 形)
+  )}, gather form)
 struct Dims {
   n: u32,
   batch: u32,
@@ -127,15 +136,17 @@ fn main(
     let oc = rest / dims.length_out;
     let ox = rest % dims.length_out;
     // ox = ix*stride - padding + k  =>  ix*stride = ox + padding - k
-    // 有効 tap は k ≡ shifted (mod stride) だけ — 出力要素あたり 1 回だけ商と剰余へ分解する
+    // the valid taps are only k ≡ shifted (mod stride) — decompose into quotient and remainder
+    // once per output element
     let shifted = ox + dims.padding;
     let q = shifted / dims.stride;
     let r = shifted % dims.stride;
-    // 有効 tap は k = r + j*stride / ix = q - j。j の範囲は 3 本の不等式で閉じる:
+    // the valid taps are k = r + j*stride / ix = q - j. The range of j closes with three
+    // inequalities:
     // ix <= L-1 → j >= q+1-L / ix >= 0 → j <= q / k <= K-1 → j <= (K-1-r)/stride
     let j_start = max(0, i32(q) + 1 - i32(dims.length_in));
-    // r > K-1（stride > K のときだけ到達）は有効 tap ゼロ。K-1-r の u32 桁借りを避けて
-    // j_end = -1 < j_start（j_start >= 0）で空ループへ倒す
+    // r > K-1 (reachable only when stride > K) has zero valid taps. Avoids the u32 borrow of K-1-r
+    // and turns it into an empty loop with j_end = -1 < j_start (j_start >= 0)
     var j_end = -1;
     if (r < dims.kernel) {
       j_end = min(i32((dims.kernel - 1u - r) / dims.stride), i32(q));
@@ -143,10 +154,12 @@ fn main(
     var acc = bias[oc];
     for (var ic = 0u; ic < dims.channels_in; ic = ic + 1u) {
       let x_base = (b * dims.channels_in + ic) * dims.length_in;
-      // 重みは [Cin, Cout, K] — conv1d と転置（第 1 軸が入力チャネル）
+      // the weight is [Cin, Cout, K] — the transpose of conv1d (the first axis is the input
+      // channel)
       let w_base = (ic * dims.channels_out + oc) * dims.kernel;
-      // MUST: j 昇順 = k 昇順。tap 集合も (ic, k) 昇順の縮約順序も k 全数走査版と同一で、
-      // 同じ被演算子に同じ f32 積和が同じ順で掛かる = ビット同一（並べ替えは丸めを変える）
+      // MUST: ascending j = ascending k. The tap set and the ascending (ic, k) reduction order are
+      // identical to the version that scans every k: the same f32 multiply-adds apply to the same
+      // operands in the same order = bit-identical (reordering changes the rounding)
       for (var j = j_start; j <= j_end; j = j + 1) {
         let ix = q - u32(j);
         let k = r + u32(j) * dims.stride;
@@ -161,9 +174,9 @@ fn main(
 };
 
 /**
- * uniform の Dims。9 語を 16 バイト単位に切り上げて 12 語（48 バイト）確保する
- * （16 バイト単位の確保はプロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の
- * 要件ではない）。
+ * The uniform Dims. 9 words rounded up to a 16-byte unit: 12 words (48 bytes) are allocated
+ * (allocating in 16-byte units is a project convention (the fusion pass fixes the same form in
+ * ADR 0040), not a requirement of the specification).
  */
 export const convTranspose1dParams = (dims: {
   readonly batch: number;
@@ -175,7 +188,8 @@ export const convTranspose1dParams = (dims: {
   readonly stride: number;
   readonly padding: number;
 }): Uint32Array<ArrayBuffer> => {
-  // 名前は WGSL の Dims 欄名（`n` の次から）と対。並びがそのまま uniform の語順になる。
+  // The names pair with the WGSL Dims field names (from the one after `n`). The order is the
+  // uniform's word order as is.
   const dimensions = {
     batch: dims.batch,
     channels_in: dims.channelsIn,
@@ -188,15 +202,17 @@ export const convTranspose1dParams = (dims: {
   };
   assertU32Params("conv_transpose1d params", dimensions);
   const values = Object.values(dimensions);
-  // MUST: stride 0 は WGSL の `% dims.stride` がゼロ除算になる（結果は未定義で、実装に
-  // よっては例外にならないまま沈黙誤値・ハングになる — recon §4 の前例）。
+  // MUST: with stride 0, WGSL's `% dims.stride` divides by zero (the result is undefined, and
+  // depending on the implementation it becomes a silent wrong value or a hang without an exception
+  // — the precedent of recon §4).
   if (dims.stride < 1 || dims.kernel < 1) {
     throw new CodegenError(
       `conv_transpose1d params: stride / kernel は正整数（${dims.stride}, ${dims.kernel}）`,
     );
   }
-  // MUST: テンソルの実寸も正整数に限る。0 の辺は縮約を 1 度も回さず、出力が bias 一色に
-  // なるのに例外が出ない（deform_conv2d が同じ集合を持つのと対）。
+  // MUST: the tensor extents are positive integers too. A zero edge never runs the reduction and
+  // the output becomes all bias without an exception (pairs with deform_conv2d, which has the
+  // same set).
   const positive: readonly (readonly [string, number])[] = [
     ["batch", dims.batch],
     ["channels_in", dims.channelsIn],
@@ -207,12 +223,13 @@ export const convTranspose1dParams = (dims: {
   for (const [name, value] of positive) {
     if (value < 1) throw new CodegenError(`conv_transpose1d params: ${name} は正整数（${value}）`);
   }
-  // MUST: tap の範囲の計算が i32 に収まる形に限る。WGSL は `shifted = ox + padding` を u32 で、
-  // `q = shifted / stride`・`length_in`・`(kernel − 1 − r) / stride` を i32 へ再解釈して j の範囲を
-  // 閉じるので、どれかが折り返すと範囲が空や別の区間になり、寄与を落とした・別の入力を読んだ
-  // 値を例外なしに返す（kernel > 2^31 で終端が負になり bias だけが残る形など）。
-  // `length_out + padding ≤ 2^31 − 1` なら shifted と q（と `q + 1`）が、kernel と length_in の
-  // 2 条件で残りの再解釈が i32 に収まる。
+  // MUST: only shapes whose tap-range arithmetic fits in i32. The WGSL computes
+  // `shifted = ox + padding` in u32 and reinterprets `q = shifted / stride`, `length_in` and
+  // `(kernel − 1 − r) / stride` as i32 to close the range of j, so if any of them wraps, the range
+  // becomes empty or a different interval, and values that dropped contributions or read other
+  // inputs are returned without an exception (e.g. kernel > 2^31 makes the end negative and only
+  // the bias remains). With `length_out + padding ≤ 2^31 − 1`, shifted and q (and `q + 1`) fit in
+  // i32, and the two conditions on kernel and length_in make the remaining reinterpretations fit.
   assertI32Coordinates("conv_transpose1d params", {
     kernel: dims.kernel,
     length_in: dims.lengthIn,

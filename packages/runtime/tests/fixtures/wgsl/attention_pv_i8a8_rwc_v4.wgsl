@@ -1,4 +1,4 @@
-// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P̃ = round(127·exp(S − m)) は非実体化, v は per-column i8（Vᵀ 連続）, 行窓 c, タイル 64x128 / 1 スレッド 8x8 / wg 16x8 / K 16 + vec4)
+// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P̃ = round(127·exp(S − m)) not materialised, v is per-column i8 (Vᵀ contiguous), 行窓 c, タイル 64x128 / 1 スレッド 8x8 / wg 16x8 / K 16 + vec4)
 struct Dims {
   m: u32,
   n: u32,
@@ -7,20 +7,21 @@ struct Dims {
   rows_full: u32,
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
-// 適格条件で N % 4 == 0 なので、S の行頭は常に quad 境界に来る（P̃ の 4 詰めと同じ刻み）
+// Eligibility requires N % 4 == 0, so a row of S always starts on a quad boundary (the same step
+// as P̃'s packing of 4)
 @group(0) @binding(1) var<storage, read> s: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> vq: array<u32>;
 @group(0) @binding(3) var<storage, read> stats: array<f32>;
 @group(0) @binding(4) var<storage, read_write> o: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> vscale: array<f32>;
 
-// 整数内積（WGSL 言語拡張 packed_4x8_integer_dot_product）。エミュ変種と**同じ整数**を返す
+// integer dot product (WGSL language extension packed_4x8_integer_dot_product); returns **the same integer** as the emulated variant
 fn idot(a: u32, b: u32) -> i32 {
   return dot4I8Packed(a, b);
 }
 
-// 共有タイルは **[pack][行] / [pack][列]** 配置（①QK / linear の i8a8 と同じ — 内側の読みが
-// 語ストライド 4 になりバンク衝突が 8-way から 2-way に減る）
+// Shared tiles are laid out **[pack][row] / [pack][column]** (as in ①QK / linear's i8a8 — the inner
+// reads get word stride 4 and bank conflicts drop from 8-way to 2-way)
 var<workgroup> sa: array<u32, 256>;
 var<workgroup> sb: array<u32, 512>;
 
@@ -30,19 +31,21 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let tid = lid.y * 16u + lid.x;
-  // 縮約軸 N は S 側では quad 単位・vq 側では pack 単位（同じ 4 要素の刻み）
+  // The reduction axis N counts in quads on the S side and in packs on the vq side (the same step
+  // of 4 elements)
   let k4 = dims.k / 4u;
   let n4 = dims.n / 4u;
-  // B と H を畳んだバッチ軸（workgroup 単位で一様 — 内側の workgroupBarrier が WGSL の
-  // 一様性要件を満たすための前提）。MUST: S は quad 単位、vq は pack 単位、行統計は行あたり
-  // 2 語、vscale は D 本、O は要素（v4 では quad）単位で数える — 単位を
-  // 取り違えると B·H ≥ 2 で隣の head を読み書きする（例外なしの誤値で B=H=1 では出ない）
+  // The batch axis folding B and H (uniform per workgroup — a precondition for the inner
+  // workgroupBarrier to meet WGSL's uniformity requirement). MUST: S counts in quads, vq in packs,
+  // the row statistics in 2 words per row, vscale in D entries, O in elements（v4 では quad）
+  // — mixing up the units reads and writes the next head when B·H ≥ 2 (a wrong value without an
+  // exception, invisible with B=H=1)
   let sbase = wid.z * dims.m * k4;
   let vbase = wid.z * dims.n * k4;
   let rbase = wid.z * dims.m;
   let vsbase = wid.z * dims.n;
   let obase = wid.z * dims.rows_full * n4 + dims.row_offset * n4;
-  // P̃ タイルの担当（64 行 × 4 pack を 128 スレッドで 2 巡）
+  // P̃ タイルの担当 (64 rows × 4 packs over 128 threads in 2 rounds)
   let ar = tid / 4u;
   let ap = tid % 4u;
   let sa_at = ap * 64u + ar;
@@ -50,13 +53,13 @@ fn main(
   let arow_base0 = sbase + arow0 * k4;
   let arow1 = arow0 + 32u;
   let arow_base1 = sbase + arow1 * k4;
-  // 行の最大 m（K タイルループ不変なので 1 度だけ引く）。端タイルでは arow >= M がありうるので
-  // 添字を 0 へ倒す（読んだ値は arow < M の枝でしか使われない）
+  // Row max m (invariant over the K tile loop, so read once). On the edge tile arow >= M can
+  // happen, so the index falls back to 0 (the value read is used only in the arow < M branch)
   let stat_at0 = select(0u, (rbase + arow0) * 2u, arow0 < dims.m);
   let row_max0 = stats[stat_at0];
   let stat_at1 = select(0u, (rbase + arow1) * 2u, arow1 < dims.m);
   let row_max1 = stats[stat_at1];
-  // B タイルの担当（128 列 × 4 pack を 128 スレッドで 4 巡）。
+  // B tile assignment (128 columns × 4 packs over 128 threads in 4 rounds).
   // 列は D。vq は [D,N] の N 連続（= パック方向）なので**転置が要らない**
   let wc = tid / 4u;
   let wp = tid % 4u;
@@ -69,8 +72,8 @@ fn main(
   let vrow_base2 = vbase + wcol2 * k4;
   let wcol3 = wcol0 + 96u;
   let vrow_base3 = vbase + wcol3 * k4;
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner
+  // workgroupBarrier to meet WGSL's uniformity requirement
   let tiles = (k4 + 3u) / 4u;
   var acc0_0 = vec4<i32>(0);
   var acc0_1 = vec4<i32>(0);
@@ -89,13 +92,14 @@ fn main(
   var acc7_0 = vec4<i32>(0);
   var acc7_1 = vec4<i32>(0);
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める（qP = 0 は内積に寄与しないので K 端数でも結果は厳密）
+    // Zero-fill out of range (qP = 0 adds nothing to the dot product, so the result is exact
+    // even with a K remainder)
     let apack = t * 4u + ap;
     var av0 = 0u;
     if (arow0 < dims.m && apack < k4) {
       let raw0 = s[arow_base0 + apack];
-      // P̃ の scale は **1/127 固定**（行内 max が exp(0) = 1 で構造的 — amax は取らない）。
-      // 除算が 1 つも無いので WGSL の 2.5 ULP 問題の外側にいる
+      // P̃'s scale is **fixed at 1/127** (the in-row max is exp(0) = 1 by construction — no amax).
+      // There is not a single division, so this stays outside WGSL's 2.5 ULP problem
       let p0 = vec4<f32>(
         round(exp(raw0.x - row_max0) * 127.0),
         round(exp(raw0.y - row_max0) * 127.0),
@@ -108,8 +112,8 @@ fn main(
     var av1 = 0u;
     if (arow1 < dims.m && apack < k4) {
       let raw1 = s[arow_base1 + apack];
-      // P̃ の scale は **1/127 固定**（行内 max が exp(0) = 1 で構造的 — amax は取らない）。
-      // 除算が 1 つも無いので WGSL の 2.5 ULP 問題の外側にいる
+      // P̃'s scale is **fixed at 1/127** (the in-row max is exp(0) = 1 by construction — no amax).
+      // There is not a single division, so this stays outside WGSL's 2.5 ULP problem
       let p1 = vec4<f32>(
         round(exp(raw1.x - row_max1) * 127.0),
         round(exp(raw1.y - row_max1) * 127.0),
@@ -141,8 +145,9 @@ fn main(
     }
     sb[sb_at + 96u] = bv3;
     workgroupBarrier();
-    // 共有ロード 16 回（B の 8 語 + A の 8 語）で 64 個の整数内積 = 256 MAC。
-    // 縮約は i32 の厳密加算なので**順序に依存しない**（f32 骨格と違い加算順は数値契約に無い）
+    // 16 shared loads (8 words of B + 8 words of A) give 64 integer inner products = 256 MACs.
+    // The reduction is exact i32 addition, so it **does not depend on order** (unlike the f32
+    // skeleton, the addition order is not part of the numeric contract)
     for (var p = 0u; p < 4u; p = p + 1u) {
       let bcol = p * 128u + lid.x * 8u;
       let b0 = sb[bcol];
@@ -192,9 +197,9 @@ fn main(
   let orow6 = orow0 + 6u;
   let orow7 = orow0 + 7u;
   if (ocq0 < n4) {
-    // D % 4 == 0 かつ ocq0 < n4 なので oc + 3 < D。
-    // MUST: 列 scale は Vᵀ の**行** = (b, h, d)（= V の per-column scale）。行 scale の側と
-    // 取り違えても例外は出ない
+    // D % 4 == 0 and ocq0 < n4, so oc + 3 < D.
+    // MUST: the column scale is a **row** of Vᵀ = (b, h, d) (= V's per-column scale). Mixing it
+    // up with the row scale raises no exception
     let oc = ocq0 * 4u;
     let vs = vec4<f32>(
       vscale[vsbase + oc],
@@ -202,7 +207,7 @@ fn main(
       vscale[vsbase + oc + 2u],
       vscale[vsbase + oc + 3u],
     );
-    // MUST: prow·vs を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+    // MUST: fold prow·vs into one f32 first, then multiply f32(acc) by it (no bias, so no fma)
     if (orow0 < dims.m) {
       let prow = stats[(rbase + orow0) * 2u + 1u] * 0.007874015748031496;
       o[obase + orow0 * n4 + ocq0] = vec4<f32>(acc0_0) * (prow * vs);
@@ -237,9 +242,9 @@ fn main(
     }
   }
   if (ocq1 < n4) {
-    // D % 4 == 0 かつ ocq1 < n4 なので oc + 3 < D。
-    // MUST: 列 scale は Vᵀ の**行** = (b, h, d)（= V の per-column scale）。行 scale の側と
-    // 取り違えても例外は出ない
+    // D % 4 == 0 and ocq1 < n4, so oc + 3 < D.
+    // MUST: the column scale is a **row** of Vᵀ = (b, h, d) (= V's per-column scale). Mixing it
+    // up with the row scale raises no exception
     let oc = ocq1 * 4u;
     let vs = vec4<f32>(
       vscale[vsbase + oc],
@@ -247,7 +252,7 @@ fn main(
       vscale[vsbase + oc + 2u],
       vscale[vsbase + oc + 3u],
     );
-    // MUST: prow·vs を先に 1 つの f32 へ畳んでから f32(acc) に掛ける（bias が無いので fma は無い）
+    // MUST: fold prow·vs into one f32 first, then multiply f32(acc) by it (no bias, so no fma)
     if (orow0 < dims.m) {
       let prow = stats[(rbase + orow0) * 2u + 1u] * 0.007874015748031496;
       o[obase + orow0 * n4 + ocq1] = vec4<f32>(acc0_1) * (prow * vs);

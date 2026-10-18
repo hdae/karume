@@ -1,30 +1,34 @@
 /**
- * layer_norm（最終次元・affine あり、f32）の固定カーネル。
+ * The fixed kernel of layer_norm (last dimension, with affine, f32).
  * `out[r, i] = (x[r, i] − mean_r) / sqrt(var_r + eps) · weight[i] + bias[i]`
  *
- * 入力は先行次元を平坦化した `[rows, dim]` の連続レイアウトとして扱う（契約は最終次元の
- * 正規化のみ — src/ops.ts）。
+ * The input is treated as a contiguous `[rows, dim]` layout with the leading dimensions flattened
+ * (the contract is normalisation over the last dimension only — src/ops.ts).
  *
- * ## 分散の規約（MUST）
+ * ## Variance convention (MUST)
  *
- * **母分散（N 割り、correction = 0）**。`torch.var` の既定は `correction = 1`（N−1 割り）だが、
- * 正規化層の内部分散は N 割りで、ここを取り違えると次元が小さいほど誤差が拡大する
- * （台帳の反例集「`var` = `sum((x−mean)²)/N` は誤り」の逆方向の罠）。
+ * **Population variance (divide by N, correction = 0)**. `torch.var` defaults to
+ * `correction = 1` (divide by N−1), but the internal variance of normalisation layers divides by
+ * N; mixing them up grows the error as the dimension gets smaller (the reverse trap of the
+ * ledger's counterexample "`var` = `sum((x−mean)²)/N` is wrong").
  *
- * ## 走査の裁定（性能ではなく正しさの都合）
+ * ## The scan decision (for correctness, not performance)
  *
- * 1 行 = 1 workgroup（256 スレッド）の**2 パス**で組む: ① 和 → 平均 ② 偏差平方和 → 分散。
- * `E[x²] − E[x]²` の 1 パス形にすると桁落ちで負の分散が出うる（f32 で `mean²` が大きい行）
- * ので採らない。行方向は reduce.ts と同じ grid-stride で、行数が dispatch 上限（仕様既定
- * 65535）を超えても縮退できる。
+ * One row = one workgroup (256 threads) in **two passes**: (1) sum → mean (2) sum of squared
+ * deviations → variance. The one-pass form `E[x²] − E[x]²` can give a negative variance through
+ * cancellation (rows with a large `mean²` in f32), so it is not used. Rows use the same
+ * grid-stride as reduce.ts, so a row count above the dispatch limit (spec default 65535) still
+ * works.
  *
- * NOTE: 台帳の「逐次行走査を複製してよいか」の裁定はここでは**逐次にしない**（行長 1024 に
- * 対し 256 スレッドの木構造縮約）。reduce.ts が既に木構造で、同じ形の複製にした方が
- * 「1 行 = 1 workgroup」の不変条件が族として揃う。性能マイルストーンでの置換対象は
- * matmul 族と同じ扱い。
+ * NOTE: the ledger's ruling "may the sequential row scan be copied" is answered here with **not
+ * sequential** (a 256-thread tree reduction for a row length of 1024). reduce.ts is already a tree,
+ * and copying the same form keeps the invariant "one row = one workgroup" consistent across the
+ * family. As a target for replacement in the performance milestone it is treated like the matmul
+ * family.
  *
- * MUST: params は uniform で渡す。行ループの中に workgroupBarrier があり、ループ条件が
- * workgroup 内で一様である必要がある（storage からのロードは一様性解析で保証されない）。
+ * MUST: params are passed as a uniform. There is a workgroupBarrier inside the row loop, and the
+ * loop condition must be uniform within the workgroup (loads from storage are not proven uniform by
+ * the uniformity analysis).
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -36,18 +40,19 @@ export const LAYER_NORM_WORKGROUP_SIZE = 256;
 export const LAYER_NORM_KEY = `layer_norm:v1:f32:lastdim:wg${LAYER_NORM_WORKGROUP_SIZE}`;
 
 /**
- * 1 行ぶんの統計（`base` / `mean` / `inv`）を出す本体。**融合カーネルと同一文字列を共有する
- * MUST** — 別々に書くと素の列と融合版で縮約順が割れ、`(x−mean)²` の足し合わせ順が 1 つ違う
- * だけでビット一致が崩れる（`SIGMOID_STABLE_WGSL` を silu.ts と共有しているのと同じ理由）。
+ * The body that produces one row's statistics (`base` / `mean` / `inv`). **It MUST share the same
+ * string with the fused kernel** — written separately, the plain sequence and the fused version
+ * split in reduction order, and a single difference in the order of summing `(x−mean)²` breaks bit
+ * equality (the same reason `SIGMOID_STABLE_WGSL` is shared with silu.ts).
  *
- * 前提（利用側が用意する識別子）: `params`（rows / dim / eps）・`x`・`scratch`
- * （`array<f32, {@link LAYER_NORM_WORKGROUP_SIZE}>`）・`lid`・`dim`・`scale`（= 1/dim）と、
- * workgroup 一様な行ループ変数 `row`。barrier を含むのでこのブロックは**一様な制御流**の
- * 中にしか置けない。
+ * Premises (identifiers the user provides): `params` (rows / dim / eps), `x`, `scratch`
+ * (`array<f32, {@link LAYER_NORM_WORKGROUP_SIZE}>`), `lid`, `dim`, `scale` (= 1/dim) and the
+ * workgroup-uniform row loop variable `row`. It contains barriers, so this block can only sit
+ * inside **uniform control flow**.
  */
 export const LAYER_NORM_ROW_STATS_WGSL: string = `    let base = row * dim;
 
-    // ① 和 → 平均
+    // ① sum → mean
     var acc = 0.0;
     var i = lid;
     while (i < dim) {
@@ -65,10 +70,10 @@ export const LAYER_NORM_ROW_STATS_WGSL: string = `    let base = row * dim;
       stride = stride / 2u;
     }
     let mean = scratch[0u] * scale;
-    // scratch の読み終わりを揃えてから ② で上書きする
+    // make every read of scratch finish before ② overwrites it
     workgroupBarrier();
 
-    // ② 偏差平方和 → 母分散（correction = 0）
+    // ② sum of squared deviations → population variance (correction = 0)
     var sq = 0.0;
     var j = lid;
     while (j < dim) {
@@ -87,17 +92,18 @@ export const LAYER_NORM_ROW_STATS_WGSL: string = `    let base = row * dim;
       stride2 = stride2 / 2u;
     }
     let inv = 1.0 / sqrt(scratch[0u] * scale + params.eps);
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // make every read of scratch[0] finish before the next row overwrites scratch[lid]
     workgroupBarrier();`;
 
 /**
- * 正規化済み 1 要素の affine（`weight` / `bias` を当てる式）。{@link LAYER_NORM_ROW_STATS_WGSL}
- * と同じ理由で融合カーネルと**同一文字列を共有する MUST**（fma へ縮約するかどうかは式の
- * 書き方で変わる）。行内添字は `base + o`、重み添字は `o` を前提にする。
+ * The affine of one normalised element (the expression that applies `weight` / `bias`). For the
+ * same reason as {@link LAYER_NORM_ROW_STATS_WGSL} it **MUST share the same string** with the fused
+ * kernel (whether it contracts to an fma depends on how the expression is written). It assumes the
+ * in-row index `base + o` and the weight index `o`.
  */
 export const LAYER_NORM_AFFINE_WGSL = "(x[base + o] - mean) * inv * weight[o] + bias[o]";
 
-export const LAYER_NORM_WGSL: string = `// karume layer_norm (last dim, affine, f32, 2 パス / 母分散)
+export const LAYER_NORM_WGSL: string = `// karume layer_norm (last dim, affine, f32, 2 passes / population variance)
 struct Params {
   rows: u32,
   dim: u32,
@@ -135,16 +141,19 @@ ${LAYER_NORM_ROW_STATS_WGSL}
 `;
 
 /**
- * uniform の Params（rows / dim / eps。3 語ぶんの内容でも 16 バイト確保する — 16 バイト単位の確保は
- * プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
+ * The uniform Params (rows / dim / eps. 16 bytes are allocated even for three words of content —
+ * allocating in 16-byte units is a project convention (the fusion pass fixes the same form in ADR
+ * 0040), not a requirement of the specification).
  *
- * MUST: eps は f32 のビット列として載せる。u32 として書くと指数部が整数値に化けて、
- * 例外なしに「eps ≈ 0」で走る。
+ * MUST: eps is stored as an f32 bit pattern. Written as a u32, the exponent turns into an integer
+ * value, and it runs with "eps ≈ 0" without an exception.
  *
- * MUST: eps の値域は **f32 として**見る（契約検査と二重だが、カーネル直呼びの経路も通る門）。
- * f64 で有限正でも `1e-50` は f32 で 0、`1e39` は `+Inf` になり、どちらも f64 のまま計算する
- * CPU 参照（reference/ops.ts）と黙って分岐する。非ゼロの subnormal も FTZ の GPU では 0 に潰れる
- * ので拒否する（受理集合は契約検査と同じ — 判定は codegen/f32-eps.ts を共有）。
+ * MUST: the range of eps is checked **as an f32** (redundant with the contract check, but a check
+ * that the direct kernel-call path also passes). Even when finite and positive in f64, `1e-50`
+ * becomes 0 and `1e39` becomes `+Inf` in f32, and both silently diverge from the CPU reference
+ * (reference/ops.ts), which computes in f64. A non-zero subnormal is also flushed to 0 on FTZ GPUs,
+ * so it is rejected (the accepted set is the same as the contract check — the test is shared in
+ * codegen/f32-eps.ts).
  */
 export const layerNormParams = (
   rows: number,
@@ -155,7 +164,8 @@ export const layerNormParams = (
   if (dim < 1) {
     throw new CodegenError(`layer_norm params: dim は正整数（${dim}）`);
   }
-  // 判定は op 契約（ops/attrs.ts の assertEps）と共有する — 片側だけ subnormal を通さないため。
+  // The test is shared with the op contract (assertEps in ops/attrs.ts) — so that neither side
+  // alone lets a subnormal through.
   const defect = f32EpsDefect(eps);
   if (defect !== undefined) {
     throw new CodegenError(

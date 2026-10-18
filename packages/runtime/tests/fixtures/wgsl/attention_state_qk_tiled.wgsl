@@ -1,4 +1,4 @@
-// karume attention_state_qk (states 形の S 実体化, f32, GEMM 骨格の K 行タイル共有, レジスタ 16x16 タイル / 1 スレッド 1x4 / wg 4x16)
+// karume attention_state_qk (states-shaped S materialisation, f32, shared K row tiles of the GEMM skeleton, レジスタ 16x16 タイル / 1 スレッド 1x4 / wg 4x16)
 struct Lengths {
   past: u32,
   query: u32,
@@ -45,8 +45,8 @@ fn effective_rows(query: u32) -> u32 {
   return min(dims.m, query - dims.row_offset);
 }
 
-// K の 2 源（① の score_slot / score_ins と同じ踏み分け）。行頭は列ごとに畳んであるので、
-// ここは束縛の選択だけ
+// The 2 sources of K (the same split as score_slot / score_ins of ①). Row starts are already folded
+// per column, so this is only the choice of binding
 fn k_read(from_slot: bool, index: u32) -> f32 {
   if (from_slot) {
     return slot_k[index];
@@ -54,8 +54,8 @@ fn k_read(from_slot: bool, index: u32) -> f32 {
   return ins_k[index];
 }
 
-// 共有 A タイル（16 行 × K 16・スカラ格納）と
-// 共有 B タイル（K 16 × 列 quad 4・列方向を vec4 に束ねた形）
+// Shared A tile (16 rows × K 16, scalar storage) and
+// shared B tile (K 16 × 4 column quads, column direction grouped into vec4)
 var<workgroup> sa: array<f32, 256>;
 var<workgroup> sb: array<vec4<f32>, 64>;
 
@@ -65,34 +65,36 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let tid = lid.y * 4u + lid.x;
-  // 論理長は uniform（context 所有）なので workgroup 一様 — 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすための前提
+  // The logical lengths are uniform (owned by the context), so workgroup-uniform — the premise for the
+  // inner workgroupBarrier to meet WGSL's uniformity requirement
   let past = lengths.past;
   let live = live_columns(past, lengths.query);
   let base_col = column_base(past);
   let neg_inf = bitcast<f32>(dims.neg_inf);
   let z = wid.z;
   let kv_plane = z;
-  // A（q）は chunk 全体 [B·H, M, D] の row_offset 行目から読み、S はブロック相対で 0 行目から
-  // 書く（① の添字 (z · rows_block + 局所行) · col_cap + cl と同じ）
+  // A (q) is read from row row_offset of the whole chunk [B·H, M, D], and S is written
+  // block-relative from row 0 (the same as ①'s index (z · rows_block + local row) · col_cap + cl)
   let abase = (z * dims.chunk_rows + dims.row_offset) * dims.k;
   let cbase = z * dims.m * dims.n;
-  // A タイルの担当（16 行 × 4 quad を 64 スレッドで 1 巡）
+  // A tile assignment (16 rows × 4 quads over 64 threads in 1 rounds)
   let ar = tid / 4u;
   let aq = tid % 4u;
   let arow0 = wid.y * 16u + ar;
   let arow_base0 = abase + arow0 * dims.k;
   let sa_base0 = ar * 16u + aq * 4u;
-  // K タイルの担当（16 列（論理 col）× 4 quad を 64 スレッドで 1 巡）。
-  // K は [行, D] のまま読み、**共有メモリ側で転置して置く**（融合 attention の k 読みと同じ構造）
+  // K tile assignment (16 columns (logical col) × 4 quads over 64 threads in 1 rounds).
+  // K is read as [row, D] as is and **placed transposed on the shared-memory side** (the same
+  // structure as fused attention's k read)
   let wc0 = tid / 4u;
   let wq = tid % 4u;
   let wcol0 = wid.x * 16u + wc0;
   let wsq0 = wc0 / 4u;
   let wsl0 = wc0 % 4u;
   let sb_base0 = (wq * 4u) * 4u + wsq0;
-  // 列ごとの K 行頭と出どころ（K タイルループ不変なのでここで 1 度だけ畳む）。
-  // 式は ① と同一 — col < P はスロット（物理行は読み書き同式の slot_row）・以降は ins の col − P
+  // K row start and source per column (invariant in the K tile loop, so folded once here). Same
+  // expression as ① — col < P from the slot (physical row via slot_row, the same expression for
+  // read and write), the rest from ins at col − P
   let kcol0 = base_col + wcol0;
   let kpast0 = kcol0 < past;
   var krow_base0 = 0u;
@@ -101,12 +103,13 @@ fn main(
   } else {
     krow_base0 = (kv_plane * dims.chunk_rows + (kcol0 - past)) * dims.k;
   }
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner workgroupBarrier
+  // to meet WGSL's uniformity requirement
   let tiles = (dims.k + 15u) / 16u;
   var acc0_0 = vec4<f32>(0.0);
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める。内積に寄与しないので端数 shape でも結果は変わらない
+    // Fill out-of-range entries with 0. They do not contribute to the inner product, so
+    // remainder shapes give the same result
     let ak0 = t * 16u + aq * 4u;
     var av0 = vec4<f32>(0.0);
     if (arow0 < dims.m) {
@@ -143,7 +146,7 @@ fn main(
         wv0.w = k_read(kpast0, krow_base0 + wk0 + 3u);
       }
     }
-    // 半スケール契約（① と同じ）: scale は q 側と k 側の**両方**へ掛ける
+    // Half-scale contract (same as ①): scale is applied to **both** the q side and the k side
     wv0 = wv0 * dims.scale;
     switch wsl0 {
       case 0u: {
@@ -172,17 +175,17 @@ fn main(
       }
     }
     workgroupBarrier();
-    // 共有ロード 2 回（B の vec4 1 + A のスカラ 1）で 4 MAC。
-    // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
-    // 完全に一致する。
+    // 2 shared loads (1 vec4 of B + 1 scalars of A) give 4 MACs.
+    // The reduction is sequential in ascending k, and the addition order per output element matches
+    // the 16×16 kernel with 1 output per thread exactly.
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
       let bv0 = sb[kk * 4u + lid.x];
       acc0_0 = acc0_0 + sa[(lid.y * 1u + 0u) * 16u + kk] * bv0;
     }
     workgroupBarrier();
   }
-  // 行は**有効行**まで（pad 行の S は誰も読まない — ③ が 0 を書いて返す）。列は live まで
-  // （[live, col_cap) の残骸は ① と同じく触らないのが正）
+  // Rows up to the **valid rows** (nobody reads S of pad rows — ③ writes 0 and returns).
+  // Columns up to live (leaving the leftovers in [live, col_cap) untouched is correct, as in ①)
   let rows_live = effective_rows(lengths.query);
   let ocol = wid.x * 16u + lid.x * 4u;
   let orow0 = wid.y * 16u + lid.y * 1u;

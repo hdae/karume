@@ -1,33 +1,39 @@
 /**
- * conv3d（unbatched `x[Cin,T,H,W] * W[Cout,Cin/groups,Kt,Kh,Kw] + b[Cout]`、f32 — ADR 0118 決定 1）の
- * implicit GEMM カーネル。
+ * The implicit GEMM kernel of conv3d (unbatched
+ * `x[Cin,T,H,W] * W[Cout,Cin/groups,Kt,Kh,Kw] + b[Cout]`, f32 — ADR 0118 decision 1).
  *
- * | 経路          | キー                                                       | 条件        |
+ * | Path          | Key                                                        | Condition   |
  * | ------------- | ---------------------------------------------------------- | ----------- |
  * | implicit GEMM | `conv3d:v1:f32:igemm{tileM}x{tileN}{v4}:wg{x}x{y}{:w…}`    | groups == 1 |
  *
- * `C[Cout, N] = W[Cout, K] × Xcol[K, N]` を GEMM 骨格（src/kernels/gemm.ts）の断片共有で解く。
- * `M = Cout`・`N = Tout·Hout·Wout`（**時間軸は N に畳む**）・`K = Cin·Kt·Kh·Kw`。重み
- * `[Cout, Cin, Kt, Kh, Kw]` の平坦化が A タイル `[M, K]` そのもので、出力 `[Cout][Tout·Hout·Wout]`
- * の行優先が unbatched の出力テンソルそのもの（reshape ゼロ — ADR 0024 決定 1 と同じ論証）。
+ * Solves `C[Cout, N] = W[Cout, K] × Xcol[K, N]` by sharing fragments of the GEMM skeleton
+ * (src/kernels/gemm.ts). `M = Cout`, `N = Tout·Hout·Wout` (**the time axis is folded into N**),
+ * `K = Cin·Kt·Kh·Kw`. Flattening the weight `[Cout, Cin, Kt, Kh, Kw]` is the A tile `[M, K]` as
+ * is, and the row-major output `[Cout][Tout·Hout·Wout]` is the unbatched output tensor as is (zero
+ * reshapes — the same argument as ADR 0024 decision 1).
  *
- * ビット同一の土台は ADR 0024 決定 3 をそのまま継ぐ: 縮約は平坦 K 昇順（= `(ic, kt, kh, kw)` の
- * 四重昇順）・K タイル 16・bias は `acc` の初期値・範囲外の x は 0。この並びは Kt = 1 で conv2d の
- * `(ic, kh, kw)` と同じ列になるので、「Kt = 1 の conv3d ≡ フレームごとの conv2d」が Uint32 で
- * 一致する（tests/gpu_conv3d_parity_test.ts の恒等門 ①）。
+ * The basis of bit identity is inherited from ADR 0024 decision 3 unchanged: the reduction runs
+ * over flat K in ascending order (= fourfold ascending `(ic, kt, kh, kw)`), K tiles of 16, the bias
+ * as the initial `acc`, out-of-range x as 0. With Kt = 1 this order becomes the same sequence as
+ * conv2d's `(ic, kh, kw)`, so "conv3d with Kt = 1 ≡ conv2d per frame" matches in Uint32 (identity
+ * check ① of tests/gpu_conv3d_parity_test.ts).
  *
- * ## 実装済み subset（ADR 0064 軸 A — 意味論は CPU 参照が全体を持つ）
+ * ## Implemented subset (ADR 0064 axis A — the CPU reference holds the full semantics)
  *
- * - **groups == 1 だけ**。groups > 1 は Session の構築時に fail loudly（src/runtime/plan.ts）で、
- *   params 層（{@link conv3dIgemmParams}）でも二重に落とす。直接カーネルは持たない — 需要
- *   （depthwise 等）が出たら足す（ADR 0118 決定 1 の一般化の条件）。
- * - 重み格納は f32 / f16 / i8（A タイルの充填は 1D / 2D と共有なので、i8 の per-channel scale は
- *   行 = 出力チャネルで引かれる — ADR 0024 決定 6）。i4 / i2 は生成の入口（gemm.ts）が落とす。
- * - **幾何プロファイルは引かない**。既定の幾何（`gemmMTileGeometry(64 / 32)`）で走る（ADR 0118
- *   決定 1 — conv1d と同じ扱い。掃引ケースが無いまま conv2d 欄の幾何を 3D へ当てない）。
+ * - **groups == 1 only**. groups > 1 fails loudly at Session construction (src/runtime/plan.ts)
+ *   and is rejected again in the params layer ({@link conv3dIgemmParams}). There is no direct
+ *   kernel — one is added when demand appears (depthwise and the like) (the generalisation
+ *   condition of ADR 0118 decision 1).
+ * - Weight storage is f32 / f16 / i8 (the A-tile fill is shared with 1D / 2D, so i8's per-channel
+ *   scale is read per row = output channel — ADR 0024 decision 6). The generator entry point
+ *   (gemm.ts) rejects i4 / i2.
+ * - **No geometry profile is consulted**. It runs on the default geometry
+ *   (`gemmMTileGeometry(64 / 32)`) (ADR 0118 decision 1 — the same treatment as conv1d. The conv2d
+ *   column's geometry is not applied to 3D without sweep cases).
  *
- * MUST: dispatch は `[ceil(N/tileN), ceil(M/tileM), 1]` で、N のタイル数が上限を超える形は
- * `DispatchLimitError`（grid-stride で縮退できない — タイル欠落は沈黙誤値になる）。
+ * MUST: the dispatch is `[ceil(N/tileN), ceil(M/tileM), 1]`, and shapes whose N tile count exceeds
+ * the limit raise `DispatchLimitError` (no fallback via grid-stride — a missing tile would be a
+ * silent wrong value).
  */
 
 import { tiledWorkgroups } from "../codegen/dispatch.ts";
@@ -39,12 +45,13 @@ import { GEMM_TILE, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
 import { weightKeyPart, type WeightStorage } from "./weight-storage.ts";
 
 /**
- * i8 変種の scale 束縛（出力の次の番号 — executor の bind entries と対で使う）。束縛配置は
- * linear / conv1d / conv2d の implicit GEMM と同じ（0 dims / 1 x / 2 重み / 3 bias / 4 出力）。
+ * Scale binding of the i8 variant (the number after the output — paired with the executor's bind
+ * entries). The binding layout is the same as the implicit GEMM of linear / conv1d / conv2d (0
+ * dims / 1 x / 2 weight / 3 bias / 4 output).
  */
 export const CONV3D_SCALE_BINDING = LINEAR_SCALE_BINDING;
 
-/** conv3d の幾何（params 関数の唯一の入力型）。 */
+/** Geometry of conv3d (the one input type of the params function). */
 export type Conv3dDims = {
   readonly channelsIn: number;
   readonly channelsOut: number;
@@ -70,26 +77,30 @@ export type Conv3dDims = {
 };
 
 /**
- * implicit GEMM の v4（vec4 読み書き）判定。
+ * Whether the implicit GEMM uses v4 (vec4 reads and writes).
  *
- * MUST: 判定はここ 1 箇所。3 条件は conv2d（`conv2dUsesVec4`）と同じ理由で、最内軸は W:
- * - `kFlat % 4 == 0` … A 側の quad 読み（f16 の `dequant4` / i8 の `unpack4xI8` は平坦添字が
- *   4 の倍数であることに依存する）。**`Cin % 4` ではない**。
- * - `widthOut % 4 == 0` … B 側の列 quad が**出力行（とフレーム）をまたがない**こと。
- *   **`N % 4 == 0` では不十分**（Hout·Wout が 4 の倍数でも Wout が 4 の倍数でなければ quad が
- *   2 行に割れる）。store 側が要求する `n % 4 == 0` はこの条件から従う。
- * - `strideW === 1` … 4 列の x アドレスが連続すること。
+ * MUST: this is the only place that decides. The three conditions have the same reasons as conv2d
+ * (`conv2dUsesVec4`); the innermost axis is W:
+ * - `kFlat % 4 == 0` … the A-side quad read (f16's `dequant4` / i8's `unpack4xI8` rely on the flat
+ *   index being a multiple of 4). **Not `Cin % 4`**.
+ * - `widthOut % 4 == 0` … the B-side column quad **does not cross an output row (or frame)**.
+ *   **`N % 4 == 0` is not enough** (even when Hout·Wout is a multiple of 4, a quad splits over two
+ *   rows unless Wout is a multiple of 4). The `n % 4 == 0` the store side requires follows from
+ *   this condition.
+ * - `strideW === 1` … the x addresses of the four columns are contiguous.
  */
 export const conv3dUsesVec4 = (kFlat: number, widthOut: number, strideW: number): boolean =>
   kFlat % 4 === 0 && widthOut % 4 === 0 && strideW === 1;
 
 /**
- * implicit GEMM のパイプラインキー。v4 フラグは形状 → 1 ビットの写像（決定性は崩れない —
- * ADR 0022 決定 2 と同じ語彙）。m タイルの選択述語は `conv2dIgemmMTile`（src/kernels/conv2d.ts）を
- * 共有する（M = Cout の関数でしかなく次元に依らない）。
+ * Pipeline key of the implicit GEMM. The v4 flag is a shape → one-bit mapping (determinism is
+ * preserved — the same vocabulary as ADR 0022 decision 2). The m-tile selection predicate is
+ * shared with `conv2dIgemmMTile` (src/kernels/conv2d.ts) (it is a function of M = Cout only and
+ * does not depend on the dimensionality).
  *
- * MUST: キーの幾何は生成と**同じ解決点**（`gemmMTileGeometry`）から導く。mTile を直に埋めると、
- * 幾何を差し替えたときにキーだけが古い辺を名乗って別物の WGSL へ衝突する。
+ * MUST: the key's geometry is derived from **the same resolution point** as generation
+ * (`gemmMTileGeometry`). Embedding mTile directly would make only the key keep naming the old
+ * edges when the geometry is swapped, colliding with a different WGSL.
  */
 export const conv3dIgemmKey = (
   weight: WeightStorage,
@@ -109,13 +120,15 @@ export const conv3dIgemmWgsl = (
 ): string => gemmWgsl({ op: "conv3d", v4, weight, mTile });
 
 /**
- * implicit GEMM の dispatch `[ceil(N/tileN), ceil(M/tileM), 1]`（unbatched — z は 1）。
+ * The implicit GEMM's dispatch `[ceil(N/tileN), ceil(M/tileM), 1]` (unbatched — z is 1).
  *
- * MUST: タイル辺は生成・キーと**同じ解決点**（`gemmMTileGeometry(mTile)`）から導く — 辺を定数で
- * 持ち回ると、幾何と食い違ったときに `ceil(dim / 定数)` が実タイル辺の枚数を下回って出力タイルが
- * 欠落する（例外の出ない誤値）。
- * MUST: 上限超過は `DispatchLimitError`（{@link tiledWorkgroups}）。1 workgroup = 1 出力タイルの
- * 骨格は grid-stride で縮退できない。既定の tileN 128 で N ≤ 8,388,480（上限 65,535 の機）。
+ * MUST: the tile edges are derived from **the same resolution point** as generation and the key
+ * (`gemmMTileGeometry(mTile)`) — passing edges around as constants means that when they disagree
+ * with the geometry, `ceil(dim / constant)` falls short of the real tile count and output tiles go
+ * missing (wrong values without an exception).
+ * MUST: exceeding the limit raises `DispatchLimitError` ({@link tiledWorkgroups}). The one
+ * workgroup = one output tile skeleton cannot fall back to grid-stride. With the default tileN of
+ * 128, N ≤ 8,388,480 (on a machine with a limit of 65,535).
  */
 export const conv3dIgemmWorkgroups = (
   dims: Conv3dDims,
@@ -137,21 +150,23 @@ export const conv3dIgemmWorkgroups = (
 };
 
 /**
- * implicit GEMM の uniform Dims（`{m, n, k}` + 幾何 18 語 = 21 語を 24 語 = 96 バイトに切り上げて確保 —
- * 16 バイト単位の確保はプロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の
- * 要件ではない）。
+ * The implicit GEMM's uniform Dims (`{m, n, k}` + 18 geometry words = 21 words, rounded up to 24
+ * words = 96 bytes — allocating in 16-byte units is a project convention (the fusion pass fixes
+ * the same form in ADR 0040), not a requirement of the specification).
  *
- * `m = Cout` / `n = Tout·Hout·Wout` / `k = Cin·Kt·Kh·Kw`。
- * MUST: 並びは gemm.ts の `CONV3D_DIMS_EXTRA` と対。
- * MUST: stride / dilation / 実寸は正整数（stride 0 は出力長の式のゼロ除算と全出力が同じ窓を
- * 読む誤値・0 の辺は縮約を 1 度も回さず出力が bias 一色になる — 契約検査と二重だが、カーネル
- * 直呼びの経路も塞ぐ）。
- * MUST: `groups == 1` 専用（縮約帯がグループごとに違うので 1 枚の m タイルが同じ B タイルを
- * 共有できない）。groups > 1 は fail loudly（ADR 0118 決定 1 の実装済み subset）。
- * MUST: 軸ごとに `入力長 + 2·padding ≤ 2^31 − 1`（WGSL の座標演算が i32 — 理由は本体の門）。
+ * `m = Cout` / `n = Tout·Hout·Wout` / `k = Cin·Kt·Kh·Kw`.
+ * MUST: the order pairs with `CONV3D_DIMS_EXTRA` in gemm.ts.
+ * MUST: stride / dilation / extents are positive integers (stride 0 divides by zero in the
+ * output-length formula and gives wrong values where every output reads the same window; a zero
+ * edge never runs the reduction and the output becomes all bias — redundant with the contract
+ * check, but it closes the direct kernel-call path too).
+ * MUST: only for `groups == 1` (the reduction band differs per group, so one m tile cannot share
+ * one B tile). groups > 1 fails loudly (the implemented subset of ADR 0118 decision 1).
+ * MUST: per axis `input length + 2·padding ≤ 2^31 − 1` (WGSL coordinate arithmetic is i32 — the
+ * reason is in the check itself).
  */
 export const conv3dIgemmParams = (dims: Conv3dDims): Uint32Array<ArrayBuffer> => {
-  // 名前は WGSL の Dims 欄名と対。並びがそのまま uniform の語順になる。
+  // The names pair with the WGSL Dims field names. The order is the uniform's word order as is.
   const geometry = {
     channels_in: dims.channelsIn,
     time_in: dims.timeIn,
@@ -209,13 +224,14 @@ export const conv3dIgemmParams = (dims: Conv3dDims): Uint32Array<ArrayBuffer> =>
   const n = dims.timeOut * dims.heightOut * dims.widthOut;
   const k = dims.channelsIn * dims.kernelT * dims.kernelH * dims.kernelW;
   assertU32Params("conv3d igemm params", { n, k });
-  // unbatched なので出力は Cout·n、重みは Cout·k（groups == 1）。
+  // Unbatched, so the output is Cout·n and the weight Cout·k (groups == 1).
   assertConvFlatExtents("conv3d igemm params", {
     input: dims.channelsIn * dims.timeIn * dims.heightIn * dims.widthIn,
     output: dims.channelsOut * n,
     weight: dims.channelsOut * k,
   });
-  // MUST: 軸ごとに `入力長 + 2·padding ≤ 2^31 − 1`（WGSL の座標演算が i32 — 証明は葉関数の doc）。
+  // MUST: per axis `input length + 2·padding ≤ 2^31 − 1` (WGSL coordinate arithmetic is i32 — the
+  // proof is in the leaf function's doc).
   assertConvAxisExtent("conv3d igemm params", "t", dims.timeIn, dims.paddingT);
   assertConvAxisExtent("conv3d igemm params", "h", dims.heightIn, dims.paddingH);
   assertConvAxisExtent("conv3d igemm params", "w", dims.widthIn, dims.paddingW);

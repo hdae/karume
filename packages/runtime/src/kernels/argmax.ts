@@ -1,41 +1,46 @@
 /**
- * argmax（最終次元・**rank 保存**・出力 i32）の固定カーネル（ADR 0068 決定 2）。
+ * The fixed kernel of argmax (last dimension, **rank-preserving**, i32 output) (ADR 0068
+ * decision 2).
  *
- * 入力は先行次元を平坦化した `[rows, dim]` の連続レイアウトで、出力は行ごとに 1 語
- * （宣言 shape は `[…, 1]` = 最終次元を 1 に潰した固定形。`keepdim` の欄は無い）。
+ * The input is a contiguous `[rows, dim]` layout with the leading dimensions flattened; the output
+ * is one word per row (the declared shape is `[…, 1]` = a fixed form with the last dimension
+ * collapsed to 1; there is no `keepdim` field).
  *
- * 形は行 reduce（src/codegen/reduce.ts）と同型 — 1 行 = 1 workgroup(256) + 256 幅の
- * ビット反転二分木 + **行方向も grid-stride**（1 次元の workgroup 上限 65535 を実モデルが
- * 超える）。新しいのは **(値, index) の対を運ぶ**点だけ。
+ * The form is the same as the row reduce (src/codegen/reduce.ts) — one row = one workgroup (256) +
+ * a 256-wide bit-reversed binary tree + **a grid-stride over rows too** (real models exceed the
+ * one-dimensional workgroup limit of 65535). The only new part is that it **carries (value, index)
+ * pairs**.
  *
- * MUST: reduce 族に相乗りしない（別族・別キー）。既存 `amax` の identity は
- * `-F32_MAX`（有限 sentinel）で、本カーネルが要求する **−inf 始まり**と衝突する。
- * reduce 側のキー版数を上げて合流させると既存のスナップショットと WAV / PNG 門が
- * 丸ごと動くので、席を分ける方が正しい。
+ * MUST: do not piggyback on the reduce family (a separate family, a separate key). The identity of
+ * the existing `amax` is `-F32_MAX` (a finite sentinel), which conflicts with the **−inf start**
+ * this kernel requires. Merging them by bumping the reduce side's key version would move the
+ * existing snapshots and the WAV / PNG checks wholesale, so keeping them apart is correct.
  *
- * MUST: **タイブレークは最小 index**（torch 準拠 — 実測 2026-08-17: 同値が複数ある行は
- * 先頭が返る）。llama.cpp は GPU 側 = 最大 index / CPU sampler = 最小 index で同一リポ内
- * でも食い違っており（調査 §2）、明文化しないと greedy の再現性が実装差で割れる。
- * 保存の機序は {@link F32_RANK_WGSL}: 「値が大きい方が勝ち・同値なら index が小さい方が
- * 勝ち」は **(値 降順, index 昇順) の辞書式順序での最大元**なので、木の結合の仕方
- * （どちらの子が第 1 引数か）に依らず結果が同じ。
+ * MUST: **the tie-break is the smallest index** (as torch — measured 2026-08-17: a row with several
+ * equal values returns the first). llama.cpp disagrees with itself in one repository, GPU side =
+ * largest index / CPU sampler = smallest index (research §2); without writing it down, greedy
+ * reproducibility splits over implementation differences. The mechanism that preserves it is
+ * {@link F32_RANK_WGSL}: "the larger value wins; on a tie the smaller index wins" is **the maximum
+ * in the lexicographic order of (value descending, index ascending)**, so the result is the same
+ * however the tree combines (whichever child is the first argument).
  *
- * MUST: 行 max の初期値は **−inf**（有限 sentinel 禁止）。index の初期値は番兵 `dim`
- * （= 「まだ候補が無い」）で、これで「全要素 −inf の行 → 最小 index = 0」が決定的になる:
- * 値が同値（−inf 対 −inf）でも index 比較で実要素（`< dim`）が必ず番兵に勝つ。dim ≥ 1 は
- * shape 層が保証する（長さ 0 の最終次元は契約で拒否）ので、レーン 0 は必ず 1 要素以上を
- * 走査し、最終結果の index は常に `[0, dim)` に入る。
+ * MUST: the initial row max is **−inf** (no finite sentinel). The initial index is the sentinel
+ * `dim` (= "no candidate yet"), which makes "a row of all −inf → smallest index = 0"
+ * deterministic: even with equal values (−inf vs −inf), a real element (`< dim`) always beats the
+ * sentinel in the index comparison. The shape layer guarantees dim ≥ 1 (a last dimension of length
+ * 0 is rejected by the contract), so lane 0 always scans at least one element and the final index
+ * always falls in `[0, dim)`.
  *
- * MUST: NaN は**最大として扱う**（torch 準拠 — 実測 2026-08-17: `argmax` は NaN の index を
- * 返し、複数あれば最小 index）。`amax` / `amin` の NaN 伝播（reduce.ts）と同じ規律で、
- * 判定は**ビット列**（{@link F32_RANK_WGSL}）が担う — ドライバの比較は NaN で全て false に
- * なるので、素の `>` に任せると NaN が黙って負けて「amax は NaN・argmax は別要素」という
- * 族内で食い違う結果になる。
+ * MUST: NaN is **treated as the maximum** (as torch — measured 2026-08-17: `argmax` returns the
+ * index of the NaN, the smallest one if there are several). The same discipline as NaN propagation
+ * in `amax` / `amin` (reduce.ts); the comparison is **on the bit pattern** ({@link F32_RANK_WGSL})
+ * — driver comparisons are all false with NaN, so a plain `>` makes NaN lose silently, and the
+ * family disagrees with itself: "amax is NaN, argmax is another element".
  *
- * MUST: params は uniform で渡す（行ループ内に workgroupBarrier があり、ループ条件が
- * workgroup 内で一様である必要がある）。
- * −inf のビット列は既存の params レイアウトで運ぶ。比較・保存とも整数のまま扱い、
- * 非正規数が途中でゼロ化されないようにする（ADR 0068 追記 10）。
+ * MUST: params are passed as a uniform (there is a workgroupBarrier inside the row loop, and the
+ * loop condition must be uniform within the workgroup). The −inf bit pattern travels in the
+ * existing params layout. Comparison and storage both stay integer, so subnormals are not flushed
+ * to zero on the way (ADR 0068 addendum 10).
  */
 
 import { F32_RANK_WGSL } from "../codegen/numerics-wgsl.ts";
@@ -46,7 +51,7 @@ export const ARGMAX_WORKGROUP_SIZE = 256;
 
 export const ARGMAX_KEY = `argmax:v2:f32>i32:lastdim:minindex:wg${ARGMAX_WORKGROUP_SIZE}`;
 
-/** −inf の f32 ビット列（params 3 語目）。 */
+/** f32 bit pattern of −inf (the third params word). */
 export const ARGMAX_NEG_INF_BITS = 0xff800000;
 
 export const ARGMAX_WGSL: string = [
@@ -77,8 +82,8 @@ export const ARGMAX_WGSL: string = [
   "  var row = wid.x;",
   "  while (row < params.rows) {",
   "    let base = row * dim;",
-  "    // identity は値も index も最弱（番兵 dim = 候補なし）— 全 -inf 行でも最初の実要素が",
-  "    // index 比較で勝つので、結果は決定的に最小 index になる",
+  "    // the identity is the weakest in value and index (sentinel dim = no candidate) — even in",
+  "    // an all -inf row a real element wins on index, so the result is always the smallest index",
   "    var best = neg_inf;",
   "    var best_at = dim;",
   "    var i = lid;",
@@ -109,7 +114,7 @@ export const ARGMAX_WGSL: string = [
   "    if (lid == 0u) {",
   "      out[row] = i32(scratch_index[0u]);",
   "    }",
-  "    // 次の行が scratch を上書きする前に scratch[0] の読み終わりを揃える",
+  "    // make every read of scratch[0] finish before the next row overwrites scratch",
   "    workgroupBarrier();",
   "    row = row + nwg.x;",
   "  }",
@@ -118,11 +123,13 @@ export const ARGMAX_WGSL: string = [
 ].join("\n");
 
 /**
- * uniform の Params（`{rows, dim, neg_inf}`）。3 語ぶんの内容でも 16 バイト確保する（16 バイト単位の
- * 確保はプロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
+ * The uniform Params (`{rows, dim, neg_inf}`). 16 bytes are allocated even for three words of
+ * content (allocating in 16-byte units is a project convention (the fusion pass fixes the same
+ * form in ADR 0040), not a requirement of the specification).
  *
- * MUST: `dim` は正整数（`dim = 0` は「最大値が無い行」で、番兵 index がそのまま出力へ
- * 漏れる）。契約側も長さ 0 の最終次元を拒否するので、ここは二重の門。
+ * MUST: `dim` is a positive integer (`dim = 0` is "a row with no maximum", and the sentinel index
+ * would leak into the output as is). The contract side also rejects a last dimension of length 0,
+ * so this is a double check.
  */
 export const argmaxParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("argmax params", { rows, dim });
@@ -136,43 +143,48 @@ export const argmaxParams = (rows: number, dim: number): Uint32Array<ArrayBuffer
   return params;
 };
 
-// ---- 2 相分割（長い行 — MTP 段 4-B ③） --------------------------------------------------
+// ---- two-phase split (long rows — MTP stage 4-B ③) ---------------------------------------
 //
-// 1 行 = 1 workgroup の形は、行が語彙長（gemma4 の drafter は 262,144）になると 256 スレッドが
-// 1,024 要素ずつを逐次で畳む遅延が律速になる（実測 2026-09-09・RTX 3080 Ti: 1 行 0.5〜0.6 ms・
-// drafter 3 段で 1.5〜2.1 ms/cycle）。長い行は **2 dispatch** に割る:
+// With one row = one workgroup, once a row reaches the vocabulary length (262,144 for gemma4's
+// drafter) the latency of 256 threads each folding 1,024 elements sequentially becomes the
+// bottleneck (measured 2026-09-09, RTX 3080 Ti: 0.5–0.6 ms per row, 1.5–2.1 ms/cycle over the
+// drafter's three steps). Long rows are split into **two dispatches**:
 //
-// - **partial**: 行を {@link ARGMAX_SPLIT_SPAN} 要素の区間に切り、区間ごとに 1 workgroup が
-//   区間内の最大元 `(順位キー, index)` を出して一時バッファへ書く（`[rows, groups, 2]` の u32 —
-//   順位キーは NaN を同点で最優先にする）。
-// - **merge**: 行ごとに 1 workgroup が `groups` 本の部分結果を畳んで添字を書く。
+// - **partial**: the row is cut into spans of {@link ARGMAX_SPLIT_SPAN} elements; one workgroup
+//   per span emits the span's maximum `(rank key, index)` into a temporary buffer (u32
+//   `[rows, groups, 2]` — the rank key ranks NaN first on ties).
+// - **merge**: one workgroup per row folds the `groups` partial results and writes the index.
 //
-// MUST: 結果は 1 dispatch 形と**ビット同一**（辞書式順序 (値 降順, index 昇順) の最大元は
-// 結合順に依らないので、区間ごとに最大元を取ってから畳んでも全域の最大元に一致する。部分
-// 結果の identity は同じ −inf / 番兵 `dim` で、区間は空にならない〈`groups = ceil(dim / span)`〉
-// ので各部分結果の index は `[0, dim)` に入り、全 −inf 行でも merge は最小 index = 0 を返す）。
-// MUST: 分割の閾値・区間幅は**形の純関数**（{@link argmaxSplitGroups}）— 同じ形は常に同じ
-// 経路・同じキーになる（実行時オートチューン禁止・ADR 0022）。
+// MUST: the result is **bit-identical** to the one-dispatch form (the maximum in the lexicographic
+// order (value descending, index ascending) does not depend on the combination order, so taking
+// the maximum per span and then folding equals the maximum over the whole row. The partial
+// results use the same identity −inf / sentinel `dim`, and no span is empty
+// (`groups = ceil(dim / span)`), so each partial index falls in `[0, dim)`, and even for an all
+// −inf row the merge returns the smallest index = 0).
+// MUST: the split threshold and the span width are **pure functions of the shape**
+// ({@link argmaxSplitGroups}) — the same shape always takes the same path with the same key (no
+// run-time autotuning, ADR 0022).
 
-/** partial 1 workgroup が受け持つ要素数（256 スレッド × 16 要素）。 */
+/** Elements handled by one partial workgroup (256 threads × 16 elements). */
 const ARGMAX_SPLIT_ELEMENTS = 16;
 export const ARGMAX_SPLIT_SPAN = ARGMAX_WORKGROUP_SIZE * ARGMAX_SPLIT_ELEMENTS;
 /**
- * 2 相に割る最小の行長（= 区間 4 本以上）。これより短い行は 1 dispatch 形のまま（キー・WGSL
- * とも不変 — 既存のスナップショット / ビット同一門はそのまま効く）。
+ * The smallest row length that is split into two phases (= four spans or more). Shorter rows stay
+ * in the one-dispatch form (key and WGSL unchanged — the existing snapshots / bit-identity checks
+ * keep working as they are).
  */
 export const ARGMAX_SPLIT_MIN_DIM = ARGMAX_SPLIT_SPAN * 4;
 
 export const ARGMAX_SPLIT_PARTIAL_KEY = `argmax:v2:f32>i32:lastdim:minindex:split-partial:wg${ARGMAX_WORKGROUP_SIZE}e${ARGMAX_SPLIT_ELEMENTS}`;
 export const ARGMAX_SPLIT_MERGE_KEY = `argmax:v2:f32>i32:lastdim:minindex:split-merge:wg${ARGMAX_WORKGROUP_SIZE}`;
 
-/** 行長 `dim` を 2 相に割るときの区間数（割らない形は 0）。 */
+/** Number of spans when a row of length `dim` is split into two phases (0 when not split). */
 export const argmaxSplitGroups = (dim: number): number =>
   dim >= ARGMAX_SPLIT_MIN_DIM ? Math.ceil(dim / ARGMAX_SPLIT_SPAN) : 0;
 
 /**
- * topk(k=1)の分割はWebGPUの既定dispatch上限内に限る。
- * 巨大な行は従来のgrid-stride 1 dispatchへ残し、対応入力を狭めない。
+ * The split of topk(k=1) is limited to WebGPU's default dispatch limit.
+ * Huge rows stay on the existing grid-stride single dispatch, so the accepted inputs do not shrink.
  * https://gpuweb.github.io/gpuweb/#dom-gpusupportedlimits-maxcomputeworkgroupsperdimension
  */
 export const topkOneSplitGroups = (dim: number): number => {
@@ -180,10 +192,10 @@ export const topkOneSplitGroups = (dim: number): number => {
   return groups <= 65_535 ? groups : 0;
 };
 
-/** 部分結果の一時バッファの大きさ（`[rows, groups]` × (値 u32 + index u32)）。 */
+/** Size of the partial-result temporary buffer (`[rows, groups]` × (u32 value + u32 index)). */
 export const argmaxSplitPartialBytes = (rows: number, groups: number): number => rows * groups * 8;
 
-/** 木の簡約（scratch の 256 対を 1 対へ）— 1 dispatch 形と同じ骨格。 */
+/** Tree reduction (scratch's 256 pairs to one) — the same skeleton as the one-dispatch form. */
 const ARGMAX_TREE_WGSL = [
   `    var stride = ${ARGMAX_WORKGROUP_SIZE / 2}u;`,
   "    while (stride > 0u) {",
@@ -226,7 +238,7 @@ export const ARGMAX_SPLIT_PARTIAL_WGSL: string = [
   "  let lid = lid3.x;",
   "  let dim = params.dim;",
   "  let neg_inf = f32_rank_key(params.neg_inf);",
-  "  // x 軸 = 区間（1 workgroup = 1 区間・上限超過は fail loudly）・y 軸 = 行（grid-stride）",
+  "  // x axis = span (1 workgroup = 1 span; exceeding the limit fails loudly), y axis = row (grid-stride)",
   "  let group = wid.x;",
   `  let start = group * ${ARGMAX_SPLIT_SPAN}u;`,
   `  let end = min(start + ${ARGMAX_SPLIT_SPAN}u, dim);`,
@@ -330,10 +342,11 @@ export const TOPK_ONE_SPLIT_MERGE_KEY = `topk:v2:f32+i32:lastdim:desc:minindex:k
 export const topkOneSplitMergeWgsl = (): string => splitMergeWgsl(true);
 
 /**
- * 2 相形の uniform（`{rows, dim, groups, neg_inf}` — partial / merge で同じ 4 語）。
+ * The uniform of the two-phase form (`{rows, dim, groups, neg_inf}` — the same four words for
+ * partial / merge).
  *
- * MUST: `groups` は {@link argmaxSplitGroups} の値（1 以上）— 0 で呼ぶのは 1 dispatch 形を
- * 選ぶべき形なので fail loudly。
+ * MUST: `groups` is the value of {@link argmaxSplitGroups} (1 or more) — calling with 0 is a shape
+ * that should take the one-dispatch form, so it fails loudly.
  */
 export const argmaxSplitParams = (
   rows: number,

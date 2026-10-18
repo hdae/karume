@@ -1,25 +1,26 @@
 /**
- * half-split RoPE を 1 pass で適用する f32 カーネル（融合ルール `rope` の実体 —
- * src/runtime/fusion.ts）。
+ * An f32 kernel that applies half-split RoPE in one pass (the body of the fusion rule `rope` —
+ * src/runtime/fusion.ts).
  *
- * 入力 `x` は `[1,H,S,D]` / table `[1,1,S,D]`、または
- * `[1,S,H,D]` / table `[1,S,1,D]`。最後の次元を半分に分け、
- * `rotate_half(x) = cat(-x[..., D/2:], x[..., :D/2])` として
- * `x * cos + rotate_half(x) * sin` を出力する。
+ * The input `x` is `[1,H,S,D]` with table `[1,1,S,D]`, or `[1,S,H,D]` with table `[1,S,1,D]`. The
+ * last dimension is split in half, and with `rotate_half(x) = cat(-x[..., D/2:], x[..., :D/2])` it
+ * outputs `x * cos + rotate_half(x) * sin`.
  *
- * MUST: cos / sin はホストが用意した f32 表をそのまま読む（anima = torch 由来の素表 /
- * gemma4 = ADR 0091 決定 1 / 2 の TS が f64 で計算して f32 へ丸めた表 — 上流の torch 表とは
- * ビット同一でない・limitations.md）。カーネル内で三角関数や位置（anima の token の H/W 座標を
- * 含む）を再計算しない（非正方形でも token 順だけが契約）。
- * MUST: 2 本の積を 2KiB の workgroup `u32` 配列へ書き、barrier 後に加算へ戻す。素の
- * `x*cos + rot*sin` と書くと、置換元の primitive 列（mul → mul → add の 3 dispatch）に
- * あった f32 の丸め 2 回が縮約されうる。
- * **この「丸め障壁」は WGSL 仕様の保証ではない** — 仕様は浮動小数の fusion（fma への縮約）を
- * 許すだけで禁じてはおらず、workgroup memory 往復を境界として尊重するかは実装依存の実測事実。
- * したがって**バックエンド更新で PNG sha256 門が割れたら、まずここを疑うこと**（融合を外して
- * primitive 列に戻せば切り分けられる）。
- * MUST: grid-stride で出力の全要素を書く。barrier は workgroup 一様な loop 内だけ。optional
- * feature / subgroup / atomics は使わない。
+ * MUST: cos / sin are read as is from the f32 tables the host prepared (anima = the raw tables
+ * from torch / gemma4 = tables that the TS of ADR 0091 decisions 1 / 2 computes in f64 and rounds
+ * to f32 — not bit-identical to the upstream torch tables, limitations.md). The kernel does not
+ * recompute trigonometric functions or positions (including the H/W coordinates of anima's
+ * tokens) (even for non-square inputs, only the token order is the contract).
+ * MUST: the two products are written to a 2 KiB workgroup `u32` array and brought back to the
+ * addition after a barrier. Written plainly as `x*cos + rot*sin`, the two f32 roundings of the
+ * primitive sequence it replaces (three dispatches, mul → mul → add) could be contracted.
+ * **This "rounding barrier" is not guaranteed by the WGSL specification** — the specification
+ * allows floating-point fusion (contraction to fma) and does not forbid it, and whether a workgroup
+ * memory round trip is respected as a boundary is an implementation-dependent measured fact.
+ * So **if a backend update breaks the PNG sha256 regression check, suspect this first** (removing
+ * the fusion and going back to the primitive sequence isolates it).
+ * MUST: every output element is written with grid-stride. Barriers only inside workgroup-uniform
+ * loops. No optional features / subgroups / atomics.
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -27,13 +28,13 @@ import { assertU32Params } from "../codegen/params.ts";
 
 export const ROPE_WORKGROUP_SIZE = 256;
 
-/** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
+/** MUST: bump the key when the WGSL changes (the pipeline cache does not look at the source). */
 export const ROPE_KEY = `rope:v1:half:f32:wg${ROPE_WORKGROUP_SIZE}`;
 
 export const ROPE_BSHD_KEY = `rope:v1:half:bshd:f32:wg${ROPE_WORKGROUP_SIZE}`;
 export type RopeLayout = "bhsd" | "bshd";
 
-/** 軸順で位置表の添字だけを切り替え、積の丸め障壁は共有する。 */
+/** The axis order switches only the position-table index; the rounding barrier is shared. */
 export const ropeWgsl = (layout: RopeLayout): string =>
   `// karume RoPE (half split, f32, full-write)
 struct Params {
@@ -88,7 +89,7 @@ fn main(
 }
 `;
 
-/** 16-byte uniform。第2値は BHSD の S、BSHD の H（位置表の添字計算に使う軸）。 */
+/** 16-byte uniform. The second value is S for BHSD, H for BSHD (the axis of the table index). */
 export const ropeParams = (
   n: number,
   tableAxisSize: number,

@@ -1,35 +1,43 @@
 /**
- * adaptive layer norm（DiT の変調）の融合カーネル。`layer_norm → (1 + scale) → mul → add` の
- * 4 ノードを 1 dispatch へ畳む（融合ルール `adaln` の実体 — src/runtime/fusion.ts）。
+ * The fused kernel of adaptive layer norm (the DiT's modulation). Folds the four nodes
+ * `layer_norm → (1 + scale) → mul → add` into one dispatch (the body of the fusion rule `adaln` —
+ * src/runtime/fusion.ts).
  *
- * 置換元の primitive 列は 3 本の中間 f32 を storage へ書いて次 dispatch が読み戻す:
- * `t = layer_norm(x)` → storage、`s = scale + 1` → storage、`p = t · s` → storage、最後に
- * `p + shift`。融合後に素直に 1 式で書くと `t · s + shift` も `t · (scale + 1)` も **fma 縮約の
- * 教科書的な形**で、1 丸め / 2 丸めの違いがそのままビット差になる。そこで `s` と `p` の
- * ビット列を workgroup `u32` へ書いて barrier 後に読み戻し、素の列と同じ位置に明示的な
- * materialization 点を 2 段残す（silu.ts と同じ手筋）。
+ * The primitive sequence it replaces writes three intermediate f32 values to storage, each read
+ * back by the next dispatch: `t = layer_norm(x)` → storage, `s = scale + 1` → storage,
+ * `p = t · s` → storage, and finally `p + shift`. Written naively as one expression after fusion,
+ * both `t · s + shift` and `t · (scale + 1)` are **textbook shapes for fma contraction**, and the
+ * difference between one and two roundings shows up directly as a bit difference. So the bit
+ * patterns of `s` and `p` are written to a workgroup `u32` and read back after a barrier, leaving
+ * two explicit materialization points at the same positions as the plain sequence (the same
+ * technique as silu.ts).
  *
- * `t` にも storage 境界があるが、3 段目は置いていない: 後段は乗算で `a·b+c` の形にならず、
- * 縮約が跨げない。ただし WGSL は縮約だけでなく再結合も許す（仕様の再結合と融合の節）ので、
- * `t` の実体化を省けるのは仕様の保証ではなく、採用時の実 GPU A/B（下記）でビット一致を確かめた
- * 範囲の事実である。`t` の式**内部**の縮約判断は、素の layer_norm と
- * 同一文字列を共有していることで揃う。
+ * `t` also has a storage boundary, but no third stage is placed there: the next step is a multiply
+ * and does not form `a·b+c`, so no contraction can span it. However, WGSL allows reassociation as
+ * well as contraction (the specification's section on reassociation and fusion), so omitting the
+ * materialization of `t` is not guaranteed by the specification; it is a fact within the range
+ * where the real-GPU A/B at adoption (below) confirmed bit equality. Contraction decisions
+ * **inside** the expression for `t` line up because it shares the same string as the plain
+ * layer_norm.
  *
- * **この「丸め障壁」は WGSL 仕様の保証ではない** — 仕様は浮動小数の fusion（fma への縮約）を
- * 許すだけで、workgroup memory 往復を最適化障壁として尊重することは要求していない。有限値の
- * ビット一致はバックエンドごとの実 GPU A/B（tests/gpu_adaln_fusion_test.ts）で採用門にした
- * 実測事実であり、**バックエンド更新で PNG sha256 門が割れたら、まずここを疑うこと**
- * （融合を外して primitive 列に戻せば切り分けられる）。WGSL が規定しない NaN payload に
- * ついては分類の一致だけを契約にする。
+ * **This "rounding barrier" is not guaranteed by the WGSL specification** — the specification only
+ * allows floating-point fusion (contraction to fma) and does not require a workgroup memory round
+ * trip to be respected as an optimisation barrier. The bit equality of finite values is a measured
+ * fact used as the adoption check in per-backend real-GPU A/B (tests/gpu_adaln_fusion_test.ts);
+ * **if a backend update breaks the PNG sha256 regression check, suspect this first** (removing the
+ * fusion and going back to the primitive sequence isolates it). For NaN payloads, which WGSL does
+ * not specify, only matching classification is part of the contract.
  *
- * MUST: 正規化の本体（行統計と affine）は素の layer_norm と**同一文字列**を共有する
- * （{@link LAYER_NORM_ROW_STATS_WGSL} / {@link LAYER_NORM_AFFINE_WGSL}）。別々に書くと
- * primitive と融合版で縮約順が割れうる。共有の代償として識別子が固定される — 変調の
- * scale ベクトルを `scale_vec` と呼ぶのは、共有ブロックが `scale` を `1/dim` に使っているため。
- * MUST: barrier は workgroup 一様な制御流の中だけに置く。行ループ（`row = wid.x` の
- * grid-stride）と block ループ（`0..blocks`）はどちらも一様で、layer_norm が既に同じ形の
- * 行ループの中で barrier を回している。出力を `o = lid` の while で回すと lane ごとに
- * 反復数が変わって barrier を置けないので、silu と同じ block ループへ組み替えてある。
+ * MUST: the body of the normalisation (row statistics and affine) shares **the same string** with
+ * the plain layer_norm ({@link LAYER_NORM_ROW_STATS_WGSL} / {@link LAYER_NORM_AFFINE_WGSL}).
+ * Written separately, the primitive and the fused version could split in reduction order. The
+ * price of sharing is fixed identifiers — the modulation's scale vector is called `scale_vec`
+ * because the shared block uses `scale` for `1/dim`.
+ * MUST: barriers sit only inside workgroup-uniform control flow. The row loop (the grid-stride of
+ * `row = wid.x`) and the block loop (`0..blocks`) are both uniform, and layer_norm already runs
+ * barriers inside a row loop of the same form. Iterating the output with a `o = lid` while loop
+ * would give each lane a different iteration count and leave no place for barriers, so it is
+ * restructured into the same block loop as silu.
  */
 
 import {
@@ -39,21 +47,21 @@ import {
 } from "./layer-norm.ts";
 
 /**
- * uniform の Params（rows / dim / eps の 16 バイト）。**素の layer_norm と同一の契約**なので
- * 生成器ごと共有する（eps を f32 のビット列として載せる MUST も込み）。
+ * The uniform Params (16 bytes of rows / dim / eps). **The same contract as the plain layer_norm**,
+ * so the generator itself is shared (including the MUST of storing eps as an f32 bit pattern).
  */
 export { layerNormParams as adalnNormParams } from "./layer-norm.ts";
 
 /**
- * MUST: 素の layer_norm と同じ値。共有する行統計ブロックが `scratch` の長さと木構造縮約の
- * 段数をこの定数から展開しているので、片方だけ動かすと WGSL が壊れる（か、黙って別の
- * 縮約順になる）。
+ * MUST: the same value as the plain layer_norm. The shared row-statistics block expands the length
+ * of `scratch` and the number of tree-reduction stages from this constant, so moving only one side
+ * breaks the WGSL (or silently changes the reduction order).
  */
 export const ADALN_NORM_WORKGROUP_SIZE = LAYER_NORM_WORKGROUP_SIZE;
 
 export const ADALN_NORM_KEY = `adaln_norm:v1:lastdim:f32:wg${ADALN_NORM_WORKGROUP_SIZE}`;
 
-export const ADALN_NORM_WGSL: string = `// karume adaLN (layer_norm -> 1 + scale -> mul -> add, f32, staged 変調)
+export const ADALN_NORM_WGSL: string = `// karume adaLN (layer_norm -> 1 + scale -> mul -> add, f32, staged modulation)
 struct Params {
   rows: u32,
   dim: u32,
@@ -80,7 +88,7 @@ fn main(
   let lid = lid3.x;
   let dim = params.dim;
   let scale = 1.0 / f32(dim);
-  // NOTE: 切り上げを (dim + 255) / 256 と書かない — dim = u32::MAX で桁溢れする。
+  // NOTE: the ceiling is not written as (dim + 255) / 256 — it overflows at dim = u32::MAX.
   let blocks = dim / ${ADALN_NORM_WORKGROUP_SIZE}u +
     select(0u, 1u, dim % ${ADALN_NORM_WORKGROUP_SIZE}u != 0u);
   var row = wid.x;
@@ -90,18 +98,20 @@ ${LAYER_NORM_ROW_STATS_WGSL}
     var block = 0u;
     while (block < blocks) {
       let o = block * ${ADALN_NORM_WORKGROUP_SIZE}u + lid;
-      // ③ 変調係数 1 + scale の実体化（素の列では add ノードが storage へ書く点）
+      // ③ materialize the modulation factor 1 + scale (where the add node writes to storage in the
+      // plain sequence)
       if (o < dim) {
         staged[lid] = bitcast<u32>(scale_vec[o] + one[0u]);
       }
       workgroupBarrier();
-      // ④ 正規化（素の layer_norm と同一式）→ 乗算。素の mul と同じ位置で丸める。
+      // ④ normalisation (the same expression as the plain layer_norm) → multiply. Rounded at the
+      // same point as the plain mul.
       if (o < dim) {
         let modulation = bitcast<f32>(staged[lid]);
         staged[lid] = bitcast<u32>((${LAYER_NORM_AFFINE_WGSL}) * modulation);
       }
       workgroupBarrier();
-      // ⑤ shift の加算（素の add ノード）
+      // ⑤ add shift (the plain add node)
       if (o < dim) {
         out[base + o] = bitcast<f32>(staged[lid]) + shift[o];
       }

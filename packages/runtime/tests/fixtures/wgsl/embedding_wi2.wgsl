@@ -1,4 +1,4 @@
-// karume embedding (out[..., h] = weight[index[...], h], f32 / 添字 i32, 重み i2 格納)
+// karume embedding (out[..., h] = weight[index[...], h], f32 / index i32, 重み i2 格納)
 struct Dims {
   n: u32,
   hidden: u32,
@@ -12,7 +12,7 @@ struct Dims {
 
 @group(0) @binding(4) var<storage, read> wscale: array<f32>;
 
-// INT2: 1語16要素。平坦添字から語と語内位置を求める。
+// INT2: 16 elements per word. The word and the position in it come from the flat index.
 fn dequant(i: u32, scale: f32) -> f32 {
   let u = (weight[i >> 4u] >> ((i & 15u) * 2u)) & 3u;
   return f32(i32(u) - 2) * scale;
@@ -29,11 +29,12 @@ fn main(
     let row = i / dims.hidden;
     let col = i % dims.hidden;
     let pick = index[row];
-    // 契約外の添字は別の行を返さず NaN で汚染する（カーネル doc の裁定）
+    // an index outside the contract contaminates with NaN instead of returning another row (the
+    // ruling in the kernel doc)
     if (pick < 0 || u32(pick) >= dims.vocab) {
       out[i] = bitcast<f32>(dims.oob);
     } else {
-      // 出力チャネルの scale はループ不変 — 重みの要素ごとに引き直さない（ADR 0019）
+      // the output channel's scale is loop-invariant — not re-read per weight element (ADR 0019)
       let wscale_v = wscale[u32(pick)];
       out[i] = dequant(u32(pick) * dims.hidden + col, wscale_v);
     }

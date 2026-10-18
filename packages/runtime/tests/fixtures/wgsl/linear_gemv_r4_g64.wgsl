@@ -1,4 +1,4 @@
-// karume linear gemv rows (M≥2: out[m,n] = x[m,k] · wᵀ[n,k] + bias[n], f32, 重み i4 格納, 32 列 / wg, 語 4 本先読み, 4 行 / スレッド)
+// karume linear gemv rows (M≥2: out[m,n] = x[m,k] · wᵀ[n,k] + bias[n], f32, 重み i4 格納, 32 cols / wg, 4 words prefetched, 4 rows / thread)
 struct Dims {
   m: u32,
   n: u32,
@@ -6,7 +6,7 @@ struct Dims {
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
-// 行頭が 16 B 整列なのは k % 32 == 0 から（適格判定が保証する）
+// Row starts are 16 B aligned because k % 32 == 0 (guaranteed by the eligibility check)
 @group(0) @binding(2) var<storage, read> w: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
@@ -64,14 +64,14 @@ fn linear_i4_word(pwa: vec4<u32>, xqa: u32, wsa: f32, initial: f32) -> f32 {
 @compute @workgroup_size(32)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let col = gid.x;
-  // 共有メモリも barrier も持たないので、端の workgroup は早期 return してよい
+  // No shared memory and no barrier, so edge workgroups may return early
   if (col >= dims.n) {
     return;
   }
   let units = dims.k / 32u;
   let row_base = col * units;
-  // 行ブロックの先頭行と、行ごとの x の先頭（quad 単位）。m を超える行は最終行を読み直す
-  // （読みを範囲内に保つだけで、書き戻しは行数の内側だけ）
+  // The first row of the row block and the start of x per row (in quads). Rows beyond m re-read the
+  // last row (only to keep reads in range; write-back is only inside the row count)
   let kq = dims.k / 4u;
   let row0 = gid.y * 4u;
   let xr0 = min(row0 + 0u, dims.m - 1u) * kq;
@@ -84,8 +84,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var acc2 = 0.0;
   var acc3 = 0.0;
   var unit = 0u;
-  // 先読みぶんの重み語を**先に**全て発行してから積和へ入る（メモリ並列度）。語の処理順は
-  // 昇順のままなので、1 出力要素あたりの加算順序は先読み本数によらず同じ
+  // Issue all prefetched weight words **first**, then do the multiply-adds (memory parallelism).
+  // Words are still processed in ascending order, so the addition order per output element is the
+  // same whatever the prefetch count
   for (; unit + 4u <= units; unit = unit + 4u) {
     let unit0 = unit + 0u;
     let pw0 = w[row_base + unit0];
@@ -120,7 +121,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     acc2 = linear_i4_word(pw3, xr2 + xq3, ws3, acc2);
     acc3 = linear_i4_word(pw3, xr3 + xq3, ws3, acc3);
   }
-  // 端数の語（units % 4 本）— 上と同じ順序を 1 語ずつ辿る
+  // Remainder words (units % 4 of them) — walk the same order one word at a time
   for (; unit < units; unit = unit + 1u) {
     let unitt = unit;
     let pwt = w[row_base + unitt];

@@ -12,16 +12,16 @@ struct Dims {
 
 @group(0) @binding(5) var<storage, read> wscale: array<f32>;
 
-// i4 格納の展開: 要素 i = f32(i32(nibble) − 8) · scale
-// （1 語 = 8 要素。平坦添字で語 i/8・バイト (i/2)%4・nibble i%2 を割る — ADR 0069）
+// decode of i4 storage: element i = f32(i32(nibble) − 8) · scale
+// (1 word = 8 elements. The flat index gives word i/8, byte (i/2)%4, nibble i%2 — ADR 0069)
 fn dequant(i: u32, scale: f32) -> f32 {
   let byte = unpack4xU8(w[i >> 3u])[(i >> 1u) & 3u];
   let nibble = select(byte & 0xFu, byte >> 4u, (i & 1u) == 1u);
   return f32(i32(nibble) - 8) * scale;
 }
 
-// 共有 A タイル（128 行 × K 16・スカラ格納）と
-// 共有 B タイル（K 16 × 列 quad 32・列方向を vec4 に束ねた形）
+// Shared A tile (128 rows × K 16, scalar storage) and
+// shared B tile (K 16 × 32 column quads, column direction grouped into vec4)
 var<workgroup> sa: array<f32, 2048>;
 var<workgroup> sb: array<vec4<f32>, 512>;
 
@@ -31,7 +31,7 @@ fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
   let tid = lid.y * 16u + lid.x;
-  // A タイルの担当（128 行 × 4 quad を 256 スレッドで 2 巡）
+  // A tile assignment (128 rows × 4 quads over 256 threads in 2 rounds)
   let ar = tid / 4u;
   let aq = tid % 4u;
   let arow0 = wid.y * 128u + ar;
@@ -40,12 +40,13 @@ fn main(
   let arow1 = arow0 + 64u;
   let arow_base1 = arow_base0 + 64u * dims.k;
   let sa_base1 = sa_base0 + 1024u;
-  // W タイルの担当（128 出力チャネル × 4 quad を 256 スレッドで 2 巡）
+  // W tile assignment (128 output channels × 4 quads over 256 threads in 2 rounds)
   let wc0 = tid / 4u;
   let wq = tid % 4u;
   let wcol0 = wid.x * 128u + wc0;
   let wrow_base0 = wcol0 * dims.k;
-  // 共有メモリ側で転置して置く（列 quad = wc / 4・成分 = wc % 4）
+  // Placed transposed on the shared-memory side
+  // (column quad = wc / 4, component = wc % 4)
   let wsq0 = wc0 / 4u;
   let wsl0 = wc0 % 4u;
   let sb_base0 = (wq * 4u) * 32u + wsq0;
@@ -55,8 +56,8 @@ fn main(
   let wsq1 = wc1 / 4u;
   let wsl1 = wc1 % 4u;
   let sb_base1 = (wq * 4u) * 32u + wsq1;
-  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
-  // WGSL の一様性要件を満たすために必要
+  // The loop condition is uniform (dims is a uniform buffer) — needed for the inner workgroupBarrier
+  // to meet WGSL's uniformity requirement
   let tiles = (dims.k + 15u) / 16u;
   var acc0_0 = vec4<f32>(0.0);
   var acc0_1 = vec4<f32>(0.0);
@@ -75,7 +76,8 @@ fn main(
   var acc7_0 = vec4<f32>(0.0);
   var acc7_1 = vec4<f32>(0.0);
   for (var t = 0u; t < tiles; t = t + 1u) {
-    // 範囲外は 0 で埋める。内積に寄与しないので端数 shape でも結果は変わらない
+    // Fill out-of-range entries with 0. They do not contribute to the inner product, so
+    // remainder shapes give the same result
     let ak0 = t * 16u + aq * 4u;
     var av0 = vec4<f32>(0.0);
     if (arow0 < dims.m) {
@@ -203,9 +205,9 @@ fn main(
       }
     }
     workgroupBarrier();
-    // 共有ロード 10 回（B の vec4 2 + A のスカラ 8）で 64 MAC。
-    // 縮約は k 昇順の逐次で、1 出力要素あたりの加算順序は 16×16 の 1 スレッド 1 出力と
-    // 完全に一致する。
+    // 10 shared loads (2 vec4 of B + 8 scalars of A) give 64 MACs.
+    // The reduction is sequential in ascending k, and the addition order per output element matches
+    // the 16×16 kernel with 1 output per thread exactly.
     for (var kk = 0u; kk < 16u; kk = kk + 1u) {
       let bv0 = sb[kk * 32u + lid.x * 2u];
       let bv1 = sb[kk * 32u + lid.x * 2u + 1u];

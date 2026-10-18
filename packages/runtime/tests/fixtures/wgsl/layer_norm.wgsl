@@ -1,4 +1,4 @@
-// karume layer_norm (last dim, affine, f32, 2 パス / 母分散)
+// karume layer_norm (last dim, affine, f32, 2 passes / population variance)
 struct Params {
   rows: u32,
   dim: u32,
@@ -25,7 +25,7 @@ fn main(
   while (row < params.rows) {
     let base = row * dim;
 
-    // ① 和 → 平均
+    // ① sum → mean
     var acc = 0.0;
     var i = lid;
     while (i < dim) {
@@ -43,10 +43,10 @@ fn main(
       stride = stride / 2u;
     }
     let mean = scratch[0u] * scale;
-    // scratch の読み終わりを揃えてから ② で上書きする
+    // make every read of scratch finish before ② overwrites it
     workgroupBarrier();
 
-    // ② 偏差平方和 → 母分散（correction = 0）
+    // ② sum of squared deviations → population variance (correction = 0)
     var sq = 0.0;
     var j = lid;
     while (j < dim) {
@@ -65,7 +65,7 @@ fn main(
       stride2 = stride2 / 2u;
     }
     let inv = 1.0 / sqrt(scratch[0u] * scale + params.eps);
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+    // make every read of scratch[0] finish before the next row overwrites scratch[lid]
     workgroupBarrier();
 
     var o = lid;

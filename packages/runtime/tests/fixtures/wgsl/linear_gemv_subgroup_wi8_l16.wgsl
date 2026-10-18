@@ -7,7 +7,7 @@ struct Dims {
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
-// 行頭が 16 B 整列なのは k % 16 == 0 から（適格判定が保証する）
+// Row starts are 16 B aligned because k % 16 == 0 (guaranteed by the eligibility check)
 @group(0) @binding(2) var<storage, read> w: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
@@ -22,11 +22,12 @@ fn main(
   let lane = sub % 16u;
   let col = wg.x * 8u + sg * 2u + sub / 16u;
   var acc = 0.0;
-  // 端の列も全レーンがshuffleへ参加する。local IDとsubgroup IDの配置を仮定しない。
+  // All lanes of edge columns also take part in the shuffle. No layout of local ID vs subgroup ID
+  // is assumed.
   if (col < dims.n) {
     let units = dims.k / 16u;
     let row_base = col * units;
-  // 出力チャネルの scale はループ不変 — 重みの要素ごとに引き直さない（ADR 0019）
+  // the output channel's scale is loop-invariant — not re-read per weight element (ADR 0019)
   let wscale_v = wscale[col];
     for (var unit = lane; unit < units; unit += 16u) {
     let unitt = unit;

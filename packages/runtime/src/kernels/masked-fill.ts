@@ -1,20 +1,22 @@
 /**
- * masked_fill（`out = mask ? value : x`、値 f32 / 条件 bool、埋め値は attrs のスカラ）の
- * 固定カーネル。
+ * The fixed kernel of masked_fill (`out = mask ? value : x`, f32 values / bool condition, the fill
+ * value a scalar in attrs).
  *
- * 出力と `x` は同形・連続で、**mask だけを右詰め broadcast の stride で読む**（実測は
- * `mask [1,1,T,T] × x [1,16,T,T]` と `mask [1,T,1024] × x [1,T,1024]` の 2 形 — recon §2）。
- * stride の組み立ては strided コピー族（ADR 0011）の expand と同一の規則なので
- * `expandSrcStrides` を共有する — 「長さ 1 の軸は stride 0 / 足りない先行軸も stride 0」は
- * 同じ右詰め broadcast の定義そのもので、別々に書けば規則が 2 箇所に割れる。
+ * The output and `x` have the same shape and are contiguous; **only mask is read with
+ * right-aligned broadcast strides** (measured in two shapes, `mask [1,1,T,T] × x [1,16,T,T]` and
+ * `mask [1,T,1024] × x [1,T,1024]` — recon §2). Building the strides follows the same rule as
+ * expand in the strided copy family (ADR 0011), so `expandSrcStrides` is shared — "an axis of
+ * length 1 has stride 0 / missing leading axes have stride 0 too" is the definition of the same
+ * right-aligned broadcast, and writing it twice would split the rule over two places.
  *
- * rank は strided 族と同じく {@link STRIDED_RANK} 固定にして 1 パイプラインへ畳む。実 rank が
- * 足りないぶんは呼び出し側が左詰めで 1（dims）と 0（strides）に埋める。
+ * The rank is fixed at {@link STRIDED_RANK}, as in the strided family, to fold into one pipeline.
+ * The caller left-pads a shorter real rank with 1 (dims) and 0 (strides).
  *
- * MUST: grid-stride ループ前提。1 次元の dispatch 上限（仕様既定 65535）は実モデルで超える。
- * MUST: 埋め値は params の**f32 のビット列**で運ぶ。定数として WGSL に焼くと、値ごとに
- * 別カーネルになってパイプラインキャッシュが埋め値の種類だけ膨らむ（-3.4e38 と 0 が別物に
- * なる）。
+ * MUST: grid-stride loop. Real models exceed the one-dimensional dispatch limit (spec default
+ * 65535).
+ * MUST: the fill value travels in params as **an f32 bit pattern**. Baking it into the WGSL as a
+ * constant makes a separate kernel per value, and the pipeline cache grows by the number of
+ * distinct fill values (-3.4e38 and 0 become different kernels).
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -26,10 +28,10 @@ export const MASKED_FILL_WORKGROUP_SIZE = 256;
 export const MASKED_FILL_KEY = `masked_fill:v1:f32:bool:r${STRIDED_RANK}:wg${MASKED_FILL_WORKGROUP_SIZE}`;
 
 /**
- * params のレイアウト（storage, u32 配列）:
- * `[0]=要素数 n, [1..STRIDED_RANK]=出力 dims, 続けて mask の strides を同数, 末尾に埋め値`。
- * uniform ではなく storage で渡すのは、この族に workgroupBarrier が無く一様性解析の制約を
- * 受けないため（elementwise / strided と同じ理由）。
+ * Layout of params (storage, a u32 array):
+ * `[0]=element count n, [1..STRIDED_RANK]=output dims, then as many mask strides, the fill value
+ * last`. It is passed as storage, not uniform, because this family has no workgroupBarrier and is
+ * not constrained by the uniformity analysis (the same reason as elementwise / strided).
  */
 const dimAt = (d: number): number => 1 + d;
 const strideAt = (d: number): number => 1 + STRIDED_RANK + d;
@@ -62,7 +64,7 @@ export const MASKED_FILL_WGSL: string = [
     { length: STRIDED_RANK },
     (_, d) => `c${d} * params[${strideAt(d)}u]`,
   ).join(" + ")};`,
-  "    // bool の格納は u32 の 0 / 1（ADR 0009）— 真の位置だけを埋め値に差し替える",
+  "    // bool is stored as u32 0 / 1 (ADR 0009) — only the true positions are replaced with the fill value",
   "    out[i] = select(x[i], fill, mask[mask_index] != 0u);",
   "    i = i + stride;",
   "  }",
@@ -71,12 +73,13 @@ export const MASKED_FILL_WGSL: string = [
 ].join("\n");
 
 /**
- * params バッファの中身を組み立てる。実 rank に足りないぶんは**左詰めで** dims=1 /
- * strides=0 に埋める（strided 族と同じ埋め方 — 余った先行軸の座標は常に 0 になり
- * 読み出し位置に寄与しない）。
+ * Builds the contents of the params buffer. A shorter real rank is padded **on the left** with
+ * dims=1 / strides=0 (the same padding as the strided family — the coordinates of the extra
+ * leading axes are always 0 and do not contribute to the read position).
  *
- * MUST: 埋め値は f32 へ丸めて載せる。IR の attrs は JSON の f64 なので、丸めずに扱うと
- * CPU 参照（`Math.fround`）と GPU（f32 語）で違う値になりうる。
+ * MUST: the fill value is rounded to f32 before it is stored. The IR's attrs are JSON f64, so
+ * without rounding the CPU reference (`Math.fround`) and the GPU (an f32 word) could see different
+ * values.
  */
 export const maskedFillParams = (
   outShape: readonly number[],
@@ -93,8 +96,9 @@ export const maskedFillParams = (
       `masked_fill params: mask の stride 本数 ${maskStrides.length} が出力 rank ${outShape.length} と違う`,
     );
   }
-  // MUST: 有限判定は **f32 として**行う（f64 で有限な `1e39` は f32 語で `+Inf` になり、
-  // 「有限の埋め値」を指定したはずの出力へ非有限値が書かれる — 契約層と同じ門）。
+  // MUST: the finiteness test is done **as an f32** (`1e39`, finite in f64, becomes `+Inf` as an
+  // f32 word, and a non-finite value would be written to an output that specified "a finite fill
+  // value" — the same check as the contract layer).
   if (!Number.isFinite(Math.fround(value))) {
     throw new CodegenError(`masked_fill params: 埋め値が f32 として有限でない（${value}）`);
   }

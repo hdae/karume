@@ -1,10 +1,13 @@
 /**
- * 保存した表の JSON を読む unknown 境界（DECIDED: ADR 0117 決定 7）。書き手は `geometryProfileJson`
- * （derive.ts — 末尾の `maxRows` の Infinity を `1e999` と書く）。
+ * The `unknown` boundary that reads the JSON of a saved table (DECIDED: ADR 0117 decision 7). The
+ * writer is `geometryProfileJson` (derive.ts — it writes the trailing `maxRows` Infinity as
+ * `1e999`).
  *
- * 未知の欄は全ての階層で拒む。表は注入して実行に効く値で、形の版が違う表を黙って読むと欄の意味の取り違えが
- * 通る — 読めない表は捨てて掃引し直すのがアプリの正しい手（ADR 0117 決定 10）。掃引の記録（追記型のログ
- * — 読み手は自分が読む欄だけを使う）とは方針が逆になる。
+ * Unknown fields are rejected at every level. A table is a value that is injected and affects
+ * execution; silently reading a table of a different shape version lets a misreading of a field's
+ * meaning through — the right move for the application is to discard an unreadable table and sweep
+ * again (ADR 0117 decision 10). The policy is the opposite of the sweep record's (an append-only
+ * log — a reader uses only the fields it reads).
  */
 import { CodegenError } from "../codegen/errors.ts";
 import type { GemmGeometry } from "../kernels/gemm-geometry.ts";
@@ -15,7 +18,10 @@ import {
 } from "../kernels/geometry-profile.ts";
 import type { I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 
-/** 保存した表の JSON を読めない（文言は欄の path を名指す — {@link parseGeometryProfileJson}）。 */
+/**
+ * The JSON of a saved table cannot be read (the message names the field's path —
+ * {@link parseGeometryProfileJson}).
+ */
 export class GeometryProfileParseError extends Error {
   override readonly name = "GeometryProfileParseError";
 }
@@ -23,7 +29,7 @@ export class GeometryProfileParseError extends Error {
 type Match = NonNullable<GeometryProfile["match"]>;
 type Provenance = NonNullable<GeometryProfile["provenance"]>;
 
-/** 表そのもの（最上位）の path の綴り。 */
+/** The path spelling of the table itself (the top level). */
 const ROOT = "最上位";
 
 const fail = (path: string, reason: string): never => {
@@ -32,13 +38,16 @@ const fail = (path: string, reason: string): never => {
 
 const show = (value: unknown): string => {
   if (value === undefined) return "無い";
-  // JSON.stringify は Infinity を null と綴るので、数は String で出す
+  // JSON.stringify spells Infinity as null, so numbers are printed with String
   return typeof value === "number" ? String(value) : JSON.stringify(value);
 };
 
 const child = (path: string, key: string): string => (path === ROOT ? key : `${path}.${key}`);
 
-/** `path` の値がオブジェクトで、欄が `required` ∪ `optional` に収まり、`required` が全てあることを見る。 */
+/**
+ * Checks that the value at `path` is an object, its fields fit in `required` ∪ `optional`, and
+ * every `required` field is present.
+ */
 const readRecord = (
   value: unknown,
   path: string,
@@ -67,7 +76,8 @@ const readString = (value: unknown, path: string): string =>
   typeof value === "string" ? value : fail(path, `が文字列でない（${show(value)}）`);
 
 /**
- * `provenance.userAgent`（文字列の配列 — 現れた順・重複除去は書き手の担当）。空の配列は書き手が書かない形なので拒む。
+ * `provenance.userAgent` (an array of strings — order of appearance; deduplication is the writer's
+ * job). An empty array is a form the writer never writes, so it is rejected.
  */
 const readUserAgents = (value: unknown, path: string): string[] => {
   if (!Array.isArray(value)) return fail(path, `が配列でない（${show(value)}）`);
@@ -104,7 +114,10 @@ const readI8a8Geometry = (value: unknown, path: string): I8a8Geometry => {
   };
 };
 
-/** `match`（3 欄とも任意 — 組の条件は {@link assertGeometryProfile} の担当）。 */
+/**
+ * `match` (all three fields optional — the combination rules are {@link assertGeometryProfile}'s
+ * job).
+ */
 const readMatch = (value: unknown, path: string): Match => {
   const fields = readRecord(value, path, [], ["vendor", "architecture", "description"]);
   const optional = (key: keyof Match): string | undefined =>
@@ -120,8 +133,9 @@ const readMatch = (value: unknown, path: string): Match => {
 };
 
 /**
- * `gemmRows`。末尾の `maxRows` は Infinity（JSON では `1e999` — `JSON.parse` が Infinity に読む）。末尾以外の
- * 値域・昇順は {@link assertGeometryProfile} の担当。
+ * `gemmRows`. The trailing `maxRows` is Infinity (`1e999` in JSON — `JSON.parse` reads it as
+ * Infinity). The range and ascending order of the other entries are {@link assertGeometryProfile}'s
+ * job.
  */
 const readGemmRows = (value: unknown, path: string): GemmRowsRule[] => {
   if (!Array.isArray(value)) return fail(path, `が配列でない（${show(value)}）`);
@@ -152,7 +166,8 @@ const readGemmRows = (value: unknown, path: string): GemmRowsRule[] => {
 };
 
 const readProvenance = (value: unknown, path: string): Provenance => {
-  // userAgent は参考の任意欄（照合に使わない — ADR 0117 追記 2026-10-02）。未知の欄の拒否は保つ
+  // userAgent is an optional reference field (not used for matching — ADR 0117 addendum
+  // 2026-10-02). Unknown fields are still rejected
   const fields = readRecord(
     value,
     path,
@@ -186,12 +201,14 @@ const readProvenance = (value: unknown, path: string): Provenance => {
 };
 
 /**
- * 保存した表の JSON（`geometryProfileJson` の文字列）を読み、`acquireGpu({ geometryProfile })` に渡せる
- * 表に戻す。失敗は {@link GeometryProfileParseError}（文言は欄の path を名指す）。
+ * Reads the JSON of a saved table (the string from `geometryProfileJson`) and turns it back into a
+ * table that can be passed to `acquireGpu({ geometryProfile })`. Failures are
+ * {@link GeometryProfileParseError} (the message names the field's path).
  *
- * 検査: JSON として読めること・全欄の型（`id` と `provenance` の欄は文字列・幾何は整数の欄だけ）・
- * 全ての階層の未知の欄の拒否・`gemmRows` の末尾の `maxRows` が Infinity（`1e999` の復元 — 末尾が `null`
- * なら Infinity の欠落と名指す）・最後に runtime の注入の門と同じ `assertGeometryProfile`。
+ * Checks: it parses as JSON; the types of all fields (the `id` and `provenance` fields are strings,
+ * geometries have integer fields only); unknown fields are rejected at every level; the trailing
+ * `maxRows` of `gemmRows` is Infinity (the restoration of `1e999` — a trailing `null` is named as
+ * a lost Infinity); finally `assertGeometryProfile`, the same check the runtime runs at injection.
  */
 export const parseGeometryProfileJson = (text: string): GeometryProfile => {
   let parsed: unknown;
@@ -236,7 +253,8 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
       : { provenance: readProvenance(fields.provenance, "provenance") }),
   };
   try {
-    // runtime の注入の門と同じ 1 本（規則列の昇順・幾何の整除条件・match の組）
+    // The same single check the runtime runs at injection (ascending rule lists, the divisibility
+    // of geometries, the combination of match)
     assertGeometryProfile(profile);
   } catch (cause) {
     if (cause instanceof CodegenError) {
