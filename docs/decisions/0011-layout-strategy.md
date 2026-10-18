@@ -1,91 +1,90 @@
-# 0011 — レイアウト実行戦略: エイリアス reshape + strided 実体化コピー
+# 0011: Layout execution strategy — alias reshape and strided materializing copy
 
-- Status: accepted（2026-08-02）
-- 根拠資料: [../research/2026-08-02-deberta-front-recon.md](../research/2026-08-02-deberta-front-recon.md)
-  （2 層で view 28 / permute 22 / clone 24 / expand 5 / squeeze 5 / unsqueeze 13 — M0 には
-  レイアウトの概念が皆無）
+- Status: accepted (2026-08-02); the rule that keeps the elementwise / reduce / matmul codegen
+  unchanged was re-graded to MAY on 2026-10-18
+- Date: 2026-08-02
+- Related: [0004](0004-execution-model.md) / [0014](0014-layout-ops-full-write.md) /
+  [0016](0016-anima-chain-export.md) / [0118](0118-wan21-video-generation.md)
 
-## 決定
+## Context
 
-- **要素順を変えないもの（view / squeeze / unsqueeze）**は IR op `reshape` 1 本に正規化し、
-  実行は**バッファ別名**（コピーなし）。アリーナの retain/release は別名参照を通常の
-  uses として計上する（エイリアス対応を ADR 0004 の不変条件に追記）。
-- **要素順が変わる・実体が要るもの（permute / expand / slice）**は
-  **strided 実体化コピー 1 カーネル族**で実行する: 入力を `(offset, strides[STRIDED_RANK])`
-  で読み、出力は常に連続。expand は stride 0。**STRIDED_RANK = 4**
-  （DeBERTa は全値 rank ≤ 4。rank ≥ 5 はエクスポータの rank 下げ正規化で先に潰す —
-  プロトタイプ前例）。
-- 追記（2026-08-08 perf 更新）: 束縛後の入出力 shape が rank を含め完全一致する `expand` は
-  複製軸を持たない恒等写像なので、`reshape` と同じバッファ別名で実行する。1 軸でも異なる
-  非恒等 `expand` は従来どおり strided 実体化コピーへ戻す（判定は `src/runtime/fusion.ts`
-  の純関数パスに置き、適用回数は `Session.diagnostics().lastRunFusions` に出る）。
-- **elementwise / reduce / matmul の codegen は変更しない**（入力は連続前提のまま）。
-  消費側カーネルへ strided 読みを融合してコピーを消す最適化は、**IR 語彙を変えずに実行
-  戦略の差し替えだけで到達できる**ため、perf マイルストーンの upgrade path として明記して
-  先送りする。
-- 追記（2026-08-02 ユーザー裁定・同日更新）: 案 B は正しさ優先の**暫定戦略**として受理
-  された（IR 語彙が同一のため B の実装が無駄になることはない）。perf マイルストーンの
-  優先目標は**「正しくパフォーマンスを出すこと」**であり、案 A（strided 融合読み）は
-  有力候補だが唯一の選択肢ではない — 実測でより良い別方針があればそちらを採ってよい。
-  検証しつつ段階的に改善する。いずれの方針でも同一 IR のまま golden E2E を回帰の網として
-  使う（帰結の項）。
+M0 had no notion of layout; two DeBERTa layers contain view 28 / permute 22 / clone 24 / expand 5 /
+squeeze 5 / unsqueeze 13 ([recon](../research/2026-08-02-deberta-front-recon.md)).
 
-## 検討した代替案
+## Decision
 
-- **案 A: strided 融合読みを最初から全 codegen に入れる**（プロトタイプ方式）。
-  コピーが出ず SBV2 以降の性能に有利だが、M0.1 で固めた elementwise / reduce codegen と
-  決定性スナップショットを全面書き換えする（P2 最大の blast radius）。
-- **案 B: メタ reshape + 実体化コピー（採択）**。
+- **Ops that keep the element order (view / squeeze / unsqueeze)** are normalized to the single IR op
+  `reshape` and run as a **buffer alias** (no copy). The arena counts alias references as ordinary uses
+  for retain / release; alias sharing is derived by `planAliases`
+  (`packages/runtime/src/runtime/fusion.ts`).
+- **Ops that change the element order or need a materialized tensor (permute / expand / slice)** run on
+  **one family of strided materializing-copy kernels**: the input is read through
+  `(offset, strides[STRIDED_RANK])` and the output is always contiguous; `expand` uses stride 0.
+  **`STRIDED_RANK = 4`** (`packages/runtime/src/codegen/strided.ts`). Rank ≥ 5 values are lowered
+  first by the exporter's rank-lowering normalization (a precedent from the earlier prototype). The
+  first premise (every DeBERTa value has rank ≤ 4) is gone; ADR 0016 keeps 4 for Anima, and ADR 0118
+  admits rank 5 only for conv3d weights and keeps the value rank cap at 4.
+- Addendum (2026-08-08, performance): an `expand` whose bound input and output shapes match exactly,
+  rank included, is an identity map and runs as a buffer alias like `reshape`. A non-identity `expand`
+  still runs as a strided copy. The check is a pure-function pass in `fusion.ts`; the count appears
+  in `Session.diagnostics().lastRunFusions`.
+- The elementwise / reduce / matmul codegen keeps its contiguous-input assumption for now. Fusing
+  strided reads into the consumer kernel to remove the copy MAY be done when measurement justifies it;
+  it needs only a different execution strategy, not a different IR vocabulary.
+  (re-graded 2026-10-18 to MAY: the record itself called strategy B provisional, and the M0.1 codegen
+  baseline it protected has since been changed — ADRs 0022 and 0023, the 2026-09-14 addendum below.)
+- Ruling of 2026-08-02 (the maintainer): B is provisional and correctness-first. The performance goal
+  is "correct and fast"; A is one candidate. The golden E2E tests on the same IR are the regression net.
 
-## 採択理由
+## Alternatives considered
 
-1. **不可逆性の低い側** — IR 語彙は両案で同一。B から A へは実行戦略の差し替えで移行でき、
-   逆方向の学び直しコストが無い。まず可逆な最小を取り、実測（perf マイルストーン）で
-   A の採否を裁定する。
-2. **blast radius 最小** — M0.1 でレビュー 2 巡を通した codegen と snapshot 基線を温存し、
-   P2 の新規リスクをレイアウトカーネル 1 族に閉じ込める。
-3. P2 の目標は正しさの E2E。B=1・T ≤ 512 でのコピーは MB 級（gather 添字の expand は
-   CSE 後 2 本 ≈ 16MB×2）で、正しさにも VRAM にも実害が無い。
+- **A: fused strided reads in every codegen from the start** (the prototype's approach). No copies,
+  but it rewrites the M0.1 elementwise / reduce codegen and its determinism snapshots (the largest
+  blast radius of P2).
+- **B: metadata reshape plus materializing copy (adopted).**
 
-開示: recon は「SBV2 front（rank ≥ 5）まで見ると A の方が負債が小さい」と評価しており、
-本 ADR はそこからの**意識的な逸脱**（rank ≥ 5 は両案とも rank 下げ正規化で処理する前提の
-ため、A の優位は融合による性能のみ — それは perf マイルストーンの裁定事項）。
+## Rationale
 
-## 帰結
+1. **The more reversible side.** Same IR vocabulary; B moves to A by swapping the execution strategy.
+2. **Smallest blast radius.** The M0.1 codegen and snapshots stay; new risk is one kernel family.
+3. The P2 goal is a correct E2E. At B = 1 and T ≤ 512 the copies are MB-sized (the gather-index expand
+   is two tensors of about 16 MB after CSE) and harm neither correctness nor VRAM.
 
-- 新 IR op: `reshape` / `permute` / `expand` / `slice`（+ 恒等 clone・恒等 repeat は
-  エクスポータの正規化で除去 — IR に持ち込まない）。
-  - 追記（2026-08-02 実装時）: **`slice` は見送り**。実測グラフの slice は相対位置バケット表の
-    部分木 1 本のみで、ADR 0010 の Tmax 畳み込みで消える側（語彙 allowlist — ADR 0007）。
-    strided カーネルは (offset, strides[4]) の形を保っており、将来 slice を族に足す場合の
-    可変点は params の offset 1 語のみ。
-    **→ この見送りは ADR [0014](0014-layout-ops-full-write.md) が撤回**（SBV2 で「Tmax
-    畳み込みで消える 1 本のみ」という前提が崩れ、`slice` を正式追加）。
-- エイリアス値の破棄規律（flush-before-destroy / discard）は実体バッファ単位で判定する。
-- perf マイルストーンで融合を入れる場合、golden E2E は同一 IR のまま回帰の網になる。
+Disclosure: the recon judged A to leave less debt for the SBV2 front (rank ≥ 5). Both options lower
+rank ≥ 5 first, so A's advantage is fusion performance only — a deliberate deviation.
 
-## 要素順を保つpermute（2026-09-14）
+## Consequences
 
-Gemma通常/QAT E2Bを調べると、decodeで100本、prefillで30本の`permute`が、
-平坦な要素順を変えずにコピーしていた。長さ1の軸の移動では座標が常に0であり、
-残る軸の順番が同じなら連続バッファをそのまま使える。
+- New IR ops: `reshape` / `permute` / `expand` / `slice`. Identity `clone` and identity `repeat` are
+  removed by the exporter's normalization and never reach the IR.
+- The discard rules for alias values (flush-before-destroy / discard) are decided per backing buffer.
 
-- 束縛後の入力shapeから長さ1の軸を除き、`dims`に残った軸番号が厳密な昇順なら別名化する。
-  同じ長さの非単位軸を交換する場合も実体化する。0要素の形は今回の対象から外す。
-- 宣言順の`planAliases`で別名と実体の由来を導出し、実行計画とメモリ見積りで共有する。
-  recipe builderは別名の場合にコピーを発行しない。共有元のretain/release、出力のpin、
-  resident重みの借用は既存のreshape/expandと同じ処理へ流す。
-- 新しく別名にするpermuteは、実体がグラフ内部で確保された値に限る。入力・重みや、
-  それらのreshape/恒等expandから最初に到達するpermuteはコピーを維持する。
-  入力まで別名を伸ばすと、従来通っていた`copyOutputs`の同じ常駐入力への書戻しが自己コピーとして拒否されるため。
-  既存のreshape/expandの別名規則と自己コピー拒否条件は変更しない。
-- 保存IR、公開オプション、量子化・数値演算の設定を増やさない。これは要素順を保つコピーの省略で、
-  加算順を変える任意カーネルとは別の実行戦略である。既存WGSL・golden・許容誤差は維持する。
-- `permute`の意味論dtypeに対する既存capability門を維持する。
-  現runtimeで非対応のi32/boolは、別名化できるshapeでもSession構築時に拒否する。
-- rank 1〜4、各軸長1/2/3の全2,127組を平坦な添字列と照合する。
-  記号束縛M=1/4/8、空テンソルの非適用、実GPUのf32語・特殊値、
-  共有元の後続利用、常駐重み、再実行、入力へのcopyOutputs、メモリ見積りを検証する。
+## Addendum (2026-08-02) — `slice` deferred, then reinstated
 
-RMS→RoPEの領域融合も独立に試したが、追加カーネルに対して全体利得が小さかったため保留する。
-性能・出力比較・残るM2検収は[調査記録](../research/2026-09-14-reference-rope-optimization.md)を参照する。
+`slice` was deferred at implementation time (its only measured use folded away under ADR 0010). ADR
+[0014](0014-layout-ops-full-write.md) withdrew the deferral and added `slice` for SBV2.
+
+## Addendum (2026-09-14) — permute that keeps element order
+
+Gemma (regular and QAT E2B) ran 100 `permute` copies in decode and 30 in prefill that kept the flat
+element order. An axis of length 1 always has coordinate 0, so if the other axes keep their order the
+contiguous buffer can be reused.
+
+- Drop the length-1 axes of the bound input shape; if the remaining axis numbers in `dims` are strictly
+  ascending, the `permute` is an alias. Swapping non-unit axes of equal length still materializes.
+  Zero-element shapes are out of scope.
+- `planAliases` derives aliases and their backing origin in declaration order; the execution plan and
+  the memory estimate share it, and the recipe builder emits no copy for an alias. Retain / release,
+  output pinning and borrowing of resident weights follow the existing `reshape` / `expand` aliases.
+- Only values whose backing buffer is allocated inside the graph are newly aliased. The first
+  `permute` reached from an input or a weight (or their `reshape` / identity `expand`) keeps its copy:
+  otherwise the existing `copyOutputs` write-back to the same resident input becomes a rejected
+  self-copy. The existing alias rules and the self-copy rejection are unchanged.
+- No new IR, public option or numerics setting; WGSL, goldens and tolerances are unchanged. The
+  dtype capability check of `permute` stays (i32 / bool are rejected even for shapes that could alias).
+- Checks: all 2,127 (shape, dims) pairs of rank 1–4 with axis lengths 1 / 2 / 3 against flat indices
+  (`packages/runtime/tests/runtime_permute_alias_test.ts`), plus bindings, empty tensors, special
+  values on a real GPU, shared sources, resident weights, re-runs, `copyOutputs` and the estimate.
+
+An RMS norm + RoPE region fusion was put on hold (small gain); see the
+[research record](../research/2026-09-14-reference-rope-optimization.md).

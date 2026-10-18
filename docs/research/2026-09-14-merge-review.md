@@ -157,7 +157,7 @@ M2のGEMV subgroupの80生成は完了して採用見送り。RMS subgroupも既
 別名時にコピーを発行しないこと、既存retain/release・出力pinとの整合、
 実行とメモリ見積りが同じ述語を使うことを確認する。
 回帰テストは`runtime_permute_alias_test.ts`、`gpu_permute_alias_test.ts`、独立添字oracleの`helpers/permute.ts`。
-IR・公開設定・dtype対応・数値演算・goldenは変更しない。理由と境界は[ADR 0011](../decisions/0011-layout-strategy.md#要素順を保つpermute2026-09-14)。
+IR・公開設定・dtype対応・数値演算・goldenは変更しない。理由と境界は[ADR 0011](../decisions/0011-layout-strategy.md#addendum-2026-09-14--permute-that-keeps-element-order)。
 
 RTXの最終実装160生成は通常約2.44%、QAT約0.93%速いが、別走行のQATは逆転しており、固定改善率の保証ではない。
 M2は未検収。588生成の出力比較・関連125テスト・全体verifyの出所は上記調査記録に集約する。

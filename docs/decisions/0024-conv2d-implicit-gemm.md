@@ -1,126 +1,114 @@
-# 0024 — conv2d の implicit GEMM 置換（groups==1・ビット同一）
+# 0024: conv2d as implicit GEMM (groups == 1, bit-identical)
 
-- Status: accepted（2026-08-03・perf a→b→c 続行のユーザー承認下でメイン裁定）
-- 対象: `conv2d` の実行カーネル（packages/runtime/src/kernels/conv2d.ts + gemm.ts 断片共有 +
-  executor の踏み分け）。IR・契約・エクスポータは無変更（純カーネル置換・再 emit 不要）
-- 需要の実測: VAE decoder の conv2d が 1024px で 15,180ms / 15,833ms（GPU の 95.9%・
-  総壁時計 85.9s の 17.7%）。実効 283 GFLOP/s は同骨格 GEMM 実測 3,320 の 8.5% で、
-  律速は帯域ではなく「共有メモリ無し・MAC 毎の添字計算 + f16 unpack + 範囲分岐」。
-  設計書 = [research/2026-08-03-conv2d-design.md](../research/2026-08-03-conv2d-design.md)。
+- Status: accepted (2026-08-03 — decided in the main session under the maintainer's approval to
+  continue the performance work); partly superseded: decision 7's dispatch limit moved with the
+  default GEMM geometry (2026-08-10) and is recorded in `docs/limitations.md` together with ADR
+  [0038](0038-manifest-v1.md) §4 (the VAE is always tiled); decision 1's Winograd rejection holds
+  for the default path only (ADR [0058](0058-numerics-opt-in-contract.md) decision 8, 2026-08-14);
+  the key spelling of decision 5 is now `v3`.
+- Date: 2026-08-03
+- Scope: the `conv2d` kernel (`packages/runtime/src/kernels/conv2d.ts`, shared fragments in
+  `gemm.ts`, the route choice in `packages/runtime/src/runtime/recipe-builders/conv.ts`). IR,
+  contract and exporter are unchanged (a pure kernel replacement, no re-export).
+- Related: [0022](0022-gemm-register-blocking.md) (GEMM skeleton) / [0018](0018-f16-weight-execution.md)
+  / [0019](0019-i8-weight-execution.md) (weight storage)
 
-## 決定
+## Context
 
-1. **implicit GEMM**: `C[Cout, N] = W[Cout, K] × Xcol[K, N]`（`M = Cout`・
-   `N = Hout·Wout`・`K = Cin·Kh·Kw`）。重み `[Cout,Cin,Kh,Kw]` は平坦化で `[M,K]` 行優先
-   そのもの・出力 `[Cout][Hout·Wout]` 行優先は NCHW の 1 バッチ平面そのもの — reshape ゼロ。
-   B タイルだけが x の暗黙 gather（im2col 実体化は単一バッファ 3.62GB で却下・Winograd は
-   算術が変わり tolerance 全面再導出 + f32 重み必須が ADR 0018/0019 と衝突するため却下）。
-   gemm.ts 骨格の断片共有で**内積ループの正本は 1 箇所のまま**（既存 op の生成バイト列は
-   1 バイトも不変 — スナップショット 56 本が検出器）。
-2. **バッチは dispatch の z 軸**（bmm と同じ）。**設計 recon と当初裁定の
-   「N = B·Hout·Wout に畳む」は B > 1 で不成立と実装波が実測で反証**（NCHW は
-   `[B][Cout][HW]` なので N へ畳むと出力が `[Cout][B·HW]` になり軸が入れ替わる。B=1 でだけ
-   一致するため census の実測形では永久に露見しない — parity テストの B=2 ケースが検出）。
-   この修正で `height_out` が uniform の死んだ欄になったため削除（ADR 0022 決定 5 と同じ規律）。
-3. **ビット同一（MUST）**: 縮約は平坦 K 昇順 = 現行直接カーネルの `(ic, kh, kw)` 三重昇順と
-   厳密一致・K タイル 16。**bias は `acc` の初期値**（`vec4<f32>(bias[行])` splat —
-   直接カーネルの bias-first を再現。GEMM の store 側加算に流用すると `(Σ)+bias` で丸めが
-   変わる — 本設計最大の分岐点）。**範囲外の x は 0 を書く**（クランプ添字読みは実在
-   ピクセル混入の沈黙誤値）。唯一の数値差分は符号付きゼロ（部分和がちょうど `−0.0` の位置に
-   padding 由来の `+0.0` を足すと `+0.0` に転ぶ — allclose にも PNG にも出ない）。
-4. **v4 判定は `kFlat%4==0 && Wout%4==0 && strideW==1`** の 3 条件（`conv2dUsesVec4`
-   1 箇所）。**`N%4` では不十分**（Hout=Wout=2 は N=4 だが列 quad が出力行をまたぐ —
-   census の実形状は Wout が全て 4 の倍数なので実モデルでは絶対に露見しない）。census
-   14 形状は全て v4 成立。端数はスカラ変種（ADR 0022 決定 2 と同じ語彙）。
-5. **groups == 1 専用**。groups > 1（64 行 m タイルが複数グループの縮約帯をまたぐ）は
-   **現行直接カーネルへ流す**（キー `conv2d:v1:…:direct` 温存）— 機能後退ゼロで、直接
-   カーネルが**恒久の A/B ビット比較オラクル**（packages/runtime/tests/gpu_conv2d_parity_test.ts）を兼ねる。
-   igemm キーは `conv2d:v2:f32:igemm64x64{v4}:wg16x16{:w…}`。
-6. **i8 の scale は行 = 出力チャネル**（`weightScaleWgsl(weight, "arow")`）。linear の
-   `wcol`（列）流用は「列 = ピクセルの scale」の沈黙誤値で、検出器は m タイル 2 枚以上の
-   形だけ（ADR 0022 検出限界③と同型 — 故障注入で实証済み、下記）。
-7. 64 行 m タイル一本（32 行変種は実測材料が出てから — 下記「隣接」）。dispatch は
-   `[ceil(N/64), ceil(M/64), B]` を `tiledWorkgroups` で fail loudly。**2048px の VAE は
-   n タイル 65,536 で上限 65,535 を 1 だけ超え DispatchLimitError になる**（直接カーネルは
-   grid-stride なので走れた形 — 意図的な機能絞りとして limitations に記録。動的解像度 recon
-   の「固定タイル VAE」で解消する見込みの領域）。
+At 1024 px the VAE decoder's conv2d took 15,180 ms of 15,833 ms GPU time (95.9%). At 283 GFLOP/s
+it ran at 8.5% of the GEMM skeleton's 3,320 GFLOP/s; the limit was not bandwidth but the lack of
+shared memory, index arithmetic per MAC, f16 unpacking and range branches. Design:
+[research/2026-08-03-conv2d-design.md](../research/2026-08-03-conv2d-design.md).
 
-## 検証（全て実測済み・2026-08-03）
+## Decision
 
-- **ビット同一の恒久の門**: packages/runtime/tests/gpu_conv2d_parity_test.ts — 直接カーネルと igemm を
-  同一入力の実 GPU で流し **Uint32 ビット列完全一致**を 10 形状（census 縮小 / 端数 K /
-  非対称 Kh≠Kw・stride・padding / dilation / Hout=Wout=2 / f16・i8 × v4・スカラ /
-  m タイル 2 枚 / バッチ 2）で assert + executor の踏み分け結線テスト。
-- **E2E**: 全 E2E 緑・**tolerance 変更ゼロ**・デモ PNG sha256 が 512px/wf16・1024px/wi8
-  とも置換前と完全一致（融合 attention と合算の門）。
-- **故障注入 8 件**（注入 → 赤実測 → 復元）: ① bias を store 側 `(Σ)+bias` へ →
-  **parity のみが 1 ulp 差で赤・CPU 参照は緑のまま**（A/B ビット比較だけが検出器という
-  設計主張の実証）② v4 判定から Wout%4 を落とす → Hout=Wout=2 ケース赤 ③ クランプ添字
-  読み → parity + 参照赤 ④ i8 scale を行→ar（タイル内相対）→ 最初の食い違いが出力
-  チャネル 65 = **m タイル 2 枚目の先頭**・既存 i8 スイート 19 本は緑のまま ⑤ バッチ z を
-  0 固定 → B=2 の 3 テスト赤 ⑥ n タイル 1 減 → full-write 毒値赤 ⑦ Kh/Kw 取り違え →
-  非対称ケース赤 ⑧ v4 の `bc4 < n4` ガード欠落 → **数値テストは全て緑（検出限界）** —
-  範囲外読みは境界付きアクセスで安全かつ store 側ガードが書き出しを阻むため。検出器は
-  WGSL スナップショットのみ（ソースに NOTE として恒久記録）。
+1. **Implicit GEMM**: `C[Cout, N] = W[Cout, K] × Xcol[K, N]` with `M = Cout`, `N = Hout·Wout`,
+   `K = Cin·Kh·Kw`. The weight `[Cout, Cin, Kh, Kw]` flattened is `[M, K]` row-major, and the
+   output `[Cout][Hout·Wout]` is one NCHW batch plane, so no reshape is needed. Only the B tile
+   gathers x implicitly. Rejected: materialised im2col (a single 3.62 GB buffer); Winograd as the
+   default path (different arithmetic, so a full tolerance re-derivation, and it needs f32 weights,
+   which conflicts with ADR 0018 / 0019). **(Winograd superseded for opt-in use by ADR 0058
+   decision 8 on 2026-08-14: perf-ledger K-2 names Winograd / i8a8 for the VAE conv2d as a
+   candidate opt-in option, admitted with the reference-path A/B check. The rejection stands for
+   the default path.)** Sharing the `gemm.ts` fragments keeps one inner-product loop; the existing
+   ops' generated bytes do not change (snapshots).
+2. **The batch is the dispatch z axis** (as in bmm). The design's first idea, folding
+   `N = B·Hout·Wout`, is wrong for B > 1: NCHW is `[B][Cout][HW]`, so the fold yields
+   `[Cout][B·HW]` and swaps axes. It agrees only at B = 1, which every measured shape has; the
+   parity test's B = 2 case caught it. `height_out` became a dead uniform field and was removed
+   (same rule as ADR 0022 decision 5).
+3. **Bit identity (MUST).** The reduction runs over flat K in ascending order, exactly the direct
+   kernel's `(ic, kh, kw)` triple loop, with K tile 16. **The bias is the initial value of `acc`**
+   (a `vec4<f32>(bias[row])` splat, the direct kernel's bias-first); adding it at the GEMM store as
+   `(Σ) + bias` changes the rounding — the key fork of this design. **Out-of-range x is written as
+   0**; clamped indices would silently mix in real pixels. The only numeric difference is signed
+   zero (a partial sum of exactly `−0.0` plus padding's `+0.0` gives `+0.0`; invisible to allclose
+   and to PNGs). Rationale today: the default MUST be the reference path (ADR 0058 decision 2), and
+   this kernel replaced the default path. If the class-R auto-selection of ADR
+   [0126](0126-numerics-profiles.md) (deferred on 2026-10-18) is resumed, this decision is reviewed
+   with it. (Kept as MUST at the 2026-10-18 triage.)
+4. **v4 requires `kFlat % 4 == 0 && Wout % 4 == 0 && strideW == 1`** (`conv2dUsesVec4`, one place).
+   `N % 4` is not enough: at Hout = Wout = 2, N = 4 but a column quad crosses output rows. Every
+   real shape has Wout divisible by 4, so real models never expose this. Other shapes take the
+   scalar variant (vocabulary of ADR 0022 decision 2).
+5. **groups == 1 only.** groups > 1 (a 64-row m tile would span several groups' reductions) goes
+   to the direct kernel (`conv2d:v1:f32:direct:wg256{:w…}`). Nothing is lost, and the direct kernel
+   is the permanent A/B bit-comparison oracle (`packages/runtime/tests/gpu_conv2d_parity_test.ts`).
+   The implicit GEMM key was `conv2d:v2:f32:igemm64x64{v4}:wg16x16{:w…}`; the current spelling is
+   the output of `conv2dIgemmKey`, `conv2d:v3:f32:igemm{tileM}x{tileN}{v4}:wg{x}x{y}{:w…}`
+   (`packages/runtime/src/kernels/conv2d.ts:6`).
+6. **The i8 scale is per row = output channel** (`weightScaleWgsl` bound on the row indices
+   `arow…` in `gemm.ts`). Reusing
+   linear's `wcol` (column) would silently apply a pixel's scale; only shapes with two or more m
+   tiles detect it (same pattern as ADR 0022's third detection limit; shown by fault injection).
+7. Dispatch is `[ceil(N / tileN), ceil(M / tileM), B]` through `tiledWorkgroups`, which fails
+   loudly. As decided, a 2048 px VAE exceeded the 65,535 limit by one n tile with a 64-wide tile;
+   the direct kernel (grid-stride) could run it, so this was a deliberate restriction.
+   **(superseded on 2026-08-10, when the default geometry moved to `tileN = 128`: the limit is now
+   Hout·Wout > 8,388,480 for the default profile and depends on the adapter's profile — see the
+   conv2d dispatch-limit entry of `docs/limitations.md`; the VAE
+   distribution is always tiled, ADR 0038 §4.)** The single 64-row m tile was extended by the
+   32-row variant (addendum).
 
-## 検出限界（記録）
+## Detection limits
 
-- K 端数 0 埋めとスカラ変種は census 全形状（K は 16 の倍数・v4 全成立）で実 E2E を
-  一度も通らない — ユニットテストと parity が唯一の検出器（ADR 0022 検出限界①と同型）。
-- バッチ B ≥ 2 の conv2d は実モデルに無い（census 全て B=1）— z 軸バッチの退行は
-  parity / full-write の B=2 ケースだけが検出する。
-- VAE は f32/f16 系列しか実測が無く、conv2d の i8 変種は unit + parity のみ。
+- Fault injection (8 cases, 2026-08-03): moving the bias to the store side was caught **only** by
+  the parity test (1 ulp), while the CPU reference stayed green — the A/B bit comparison is the
+  only detector, as designed. A missing `bc4 < n4` guard in v4 passes every numeric test (bounded
+  reads plus the store-side guard); only the WGSL snapshot detects it (recorded as a NOTE in the
+  source). The 32-row variant inherits this.
+- The K-remainder zero fill and the scalar variants never run on real E2E shapes (K is a multiple
+  of 16, v4 always holds); unit and parity tests are the only detectors.
+- No real model has conv2d with B ≥ 2; only the parity / full-write B = 2 cases cover the z-axis
+  batch.
+- The VAE was measured with f32 / f16 weights only; the i8 variant is covered by unit and parity
+  tests.
 
-## 実測効果（2026-08-03・seed 42 排他実測）
+## Consequences
 
-- **conv2d 単体**: 512px 1,603 → 250ms（**6.4×**）/ 1024px 15,180 → 1,382ms（**11.0×** —
-  設計見積り 5〜9× を超過）。マイクロベンチは 3,144 GFLOP/s = 同機 GEMM 実測の 95%。
-- **VAE decoder GPU**: 512px 1,680 → 325ms / 1024px 15,833 → 1,889ms（8.4×）。
-  VAE 壁時計 512px 2.1 → 0.6s / 1024px 10.4 → 2.3s。
-- 壁時計（ADR 0023 と合算）: 512px 26 → 23.9s / 1024px 87 → 68.3s。
-- VAE の次のボトルネック: strided（permute・1024px 221ms = 12%）と group norm 相当の
-  6 op 分解（≈7%）— スコープ外・次タスク候補。
+- Measured on 2026-08-03: conv2d 6.4× (512 px) and 11.0× (1024 px); the demo PNG sha256 matched
+  before and after; no tolerance changed. Details in the design research.
+- Implementation: `packages/runtime/src/kernels/conv2d.ts` (key, params, v4 predicate, direct
+  kernel kept), `gemm.ts` (`CONV2D_*` fragments), `recipe-builders/conv.ts`.
 
-## 隣接（報告のみ）
+## Addendum (2026-08-03, task #28) — 32-row m-tile variant
 
-- **32 行 m タイル変種の判断材料**: Cout=96 の実測 2,637 GFLOP/s は m タイル無駄 1.33× を
-  戻すと 3,507 GFLOP/s 相当の発行 = カーネルは満速で、落ち込みは丸ごとタイル量子化。
-  1024 系列 MAC の約 32% に最大 1.33× の上積み余地（採るなら別キー変種・ビット同一は保たれる）。
-  → **採った**（下の追補）。
-- 2048px の n タイル上限（決定 7）は limitations 記載事項。
+The m-tile row count is a skeleton parameter (default 64, existing variants unchanged in bytes).
+The 32-row variant keeps 4×4 outputs per thread and the same inner-product loop; only the B tile
+is filled in two passes.
 
-## 追補（2026-08-03・タスク #28）: 32 行 m タイル変種を実装・配線
-
-- 実装 = 骨格の m タイル行数パラメタ化（既定 64 で既存 6 変種はバイト不変）。32 行版は
-  **wg 16×8・1 スレッド 4×4 のまま**（内積密度 3.20 MAC/共有ロードを維持・内積ループの
-  正本は 1 文字も変えない）・B タイルのみ 2 パス充填。キー
-  `conv2d:v2:f32:igemm32x64{v4}:wg16x8{:w…}`・n タイルは常に 64（2048px 上限の扱い不変）。
-  **訂正（2026-09-05）**: n タイルは幾何から導く（`gemmMTileGeometry` の `tileN` — 現行 128）。
-  m タイル 64 / 32 の切替は n 側の上限判定を動かさない。キー文字列は `conv2dIgemmKey` の出力が
-  正本で、上の例は当時の綴り（本文へ写さない）。
-- 述語 `conv2dIgemmMTile` = **`M % 64 ∈ [1, 32]` のときだけ 32 行**。境界 `<= 32` が本命
-  （census の Cout=96 は `96 % 64 == 32`）。33〜64 帯はタイル無駄が同じで B 読みだけ増える
-  ため 64 行に残す。
-- 実測（同一 submit 交互 dispatch のマイクロベンチ・f16 格納・2 回再現）:
-  96→96 3×3 1024² **1.25×**（理論上限 1.33× の 94%）/ 192→96 **1.25×** / 96→3 **1.80×** /
-  16→16 **1.42×**。**対照の M%64==0（192→192）は 0.92× = 負け** — 「常に 32 行」は誤りで、
-  述語の形そのものを実測が支持。
-- **E2E: PNG sha256 が 2 系列（512 f16 `20990ae4…` / 1024 i8 `ce6c950f…`）とも置換前と
-  完全一致** — ビット同一の設計どおり。tolerance 変更ゼロ。m32 は 1024px VAE の 9/37
-  dispatch（GPU 時間の 26%）を担当。
-- **キー別 GPU 時間のクロス run 比較は熱で ±10% 動き効果測定に使えない**（同一コード経路の
-  VAE 合計自体が run 間で 1,687 ↔ 1,862ms — クロック低下は T2 実測どおり）。効果の正は
-  上記マイクロベンチ。壁時計への効きは 1024px で −0.1s 級（VAE conv2d の約 −6%）と小さい。
-- **検出限界（新記録）**: 述語の誤りは**数値テストでは一切検出できない**（両タイル形が
-  ビット同一だから）。検出器は「実際に走ったパイプラインキーを見る 2 本」（codegen の述語
-  テスト + executor 踏み分けテスト）だけ — 故障注入で実証済み。`bc4 < n4` ガード欠落
-  （検出器はスナップショットのみ）は 32 行版も構造ごと継承。
-- 16×16 のまま 1 スレッド 2×4 に落とす代替案は**実測せず**却下（内積ループの正本を書き換える
-  リスクがコストに見合わない・密度計算 2.67 < 3.20 + 採用案が理論上限の 94% に到達済みが根拠
-  — 純粋な実測比較でない点は明記）。
-
-## 参照
-
-- 設計書: [research/2026-08-03-conv2d-design.md](../research/2026-08-03-conv2d-design.md)
-- 実装: packages/runtime/src/kernels/conv2d.ts（igemm キー/params/v4 判定・直接カーネル温存）/
-  packages/runtime/src/kernels/gemm.ts（CONV2D_* 断片）/ executor `#encodeConv2dIgemm`
+- Predicate `conv2dIgemmMTile`: **32 rows only when `M % 64 ∈ [1, 32]`.** The boundary `<= 32` is
+  the point (Cout = 96 gives `96 % 64 == 32`). The 33–64 band wastes the same tile area but reads
+  B less with 64 rows, so it stays at 64. Measured: 1.25×–1.80× on the target shapes, 0.92× on the
+  control `M % 64 == 0`, so "always 32 rows" is wrong.
+- The demo PNG sha256 matched (bit identity by design). Per-key GPU time across runs varies ±10%
+  with heat and cannot measure the effect; the microbenchmark is the evidence.
+- **Detection limit:** a wrong predicate is invisible to every numeric test, since both tile shapes
+  are bit-identical. Only the two tests that look at the pipeline key that ran (codegen predicate
+  test, route test) detect it; shown by fault injection.
+- The alternative of 16×16 threads with 2×4 per thread was rejected without measurement (risk of
+  rewriting the inner-product loop; density 2.67 < 3.20; the chosen variant reached 94% of the
+  theoretical bound).
+- Correction (2026-09-05): the n tile comes from the geometry (`tileN` of `gemmMTileGeometry`,
+  currently 128). Switching between 64 and 32 m-tile rows does not move the n-side limit. The
+  canonical key spelling is the output of `conv2dIgemmKey`.

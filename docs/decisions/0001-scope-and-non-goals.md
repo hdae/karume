@@ -1,41 +1,40 @@
-# 0001 — スコープと非目標
+# 0001: Scope and non-goals
 
-- Status: accepted（2026-08-01、ユーザー裁定）
-- 改訂: ADR [0037](0037-karume-monorepo.md) §1 が「リポジトリ構成はフラット・workspace 機構は
-  使わない」の 1 点を置換（Deno workspace の monorepo）。他の決定・非目標は現行 —
-  帰結節にも同旨の追記がある。
-- 根拠資料: [../research/2026-08-01-prototype-recon.md](../research/2026-08-01-prototype-recon.md)
+- Status: accepted (2026-08-01, the maintainer's ruling); partly superseded by
+  [0037](0037-karume-monorepo.md) §1 (flat layout, 2026-08-05) and
+  [0127](0127-node-dawn-toolchain.md) decisions 3 and 6 (scope sentence, bare-Node non-goal; ruled
+  2026-10-18, effective when 0127 is accepted).
+- Date: 2026-08-01
 
-## 決定
+## Decision
 
-Karume は **Deno とブラウザの両方で動く WebGPU 汎用 NN 推論ランタイム**である。
-JSR に `@karume/runtime` として公開する。モデルは PyTorch（`torch.export`）からの
-エクスポートを想定する。
+Karume is a **general-purpose WebGPU neural-network inference runtime that runs on both Deno and the
+browser** *(superseded by ADR 0127 decisions 3 and 6 on 2026-10-18: browser and Node, importable
+from Deno; Deno numerics best effort from 0.15)*. It is published on JSR as `@karume/runtime` (npm
+in addition is open — ADR 0127 Open points). Models come from PyTorch (`torch.export`).
 
-- **先行実験プロジェクト（以下プロトタイプ）から独立**: プロトタイプのコード・型を
-  import しない。参照・移植のみ（本プロジェクトはプロトタイプ決定 0013 で決定された
-  JSR/Deno 移行の実行体）。
-- 単なる移植ではない: プロトタイプで実測済みのボトルネック改善・バグ根治・設計の堅牢化を
-  最初から織り込む（recon §9 の弱点 10 項目が対象台帳）。
-- 実装基盤は WebGPU 自前カーネル（WGSL 実行時 codegen）。プロトタイプ決定 0001 の WebNN 却下理由
-  （int4 型欠如・精度適合要件なし・custom shader 不可・in-place 禁止）を継承する。
+- **Independent of the prototype** (the earlier experimental project): its code and types are never
+  imported, only read and ported. This project carries out the move to JSR / Deno that the
+  prototype's decision 0013 chose.
+- Not a plain port: the prototype's measured bottlenecks, bug fixes and design hardening are built
+  in from the start (the ten weaknesses of [recon](../research/2026-08-01-prototype-recon.md) §9).
+- Custom WebGPU kernels (WGSL generated at run time). The reasons for not using WebNN, inherited
+  from the prototype's decision 0001 (no int4 type, no precision-conformance requirement, no custom
+  shaders, no in-place operations), SHOULD hold until WebNN or its implementations change
+  *(re-graded 2026-10-18 to SHOULD: they describe another specification at one point in time)*.
 
-## 非目標
+## Non-goals
 
-- ONNX 入力（プロトタイプの roadmap の非目標を継承）。torch.export → 自前 IR のみ。
-- WASM フォールバック。
-- WebNN バックエンドの即時対応 — ただし IR は「4 境界」（レイアウト非焼き込み /
-  量子化の論理表現保持 / op 粒度を細かく / 初期化の非同期許容）を守り、将来の
-  後付けバックエンド（NPU 入口）の余地を残す。
-- `navigator.gpu` が得られない環境（素の Node 等）のサポート。
-- MiniMax-M3 級（428B/23B MoE・ブロックスパース MSA）のブラウザ実行 — メモリ規模的に
-  現行スコープ外（2026-08-16 裁定。autoregressive 波の検収は Gemma 4 E2B /
-  MiniCPM5-1B — [backlog](../backlog.md) next 節）。
+- ONNX input (only `torch.export` → Karume's IR; inherited from the prototype). A WASM fallback.
+- An immediate WebNN backend. The IR keeps four boundaries open for a later backend (an NPU entry):
+  no baked-in layout, logical quantisation kept, fine op granularity, async initialisation allowed.
+- Environments without `navigator.gpu` (bare Node, etc.) *(superseded by ADR 0127 decision 6 on
+  2026-10-18: Node with an application-supplied WebGPU is supported; only an environment with no
+  WebGPU implementation stays out)*.
+- MiniMax-M3-class models (428B / 23B MoE, block-sparse MSA) in the browser, by memory size (ruling
+  of 2026-08-16; autoregressive work was accepted on Gemma 4 E2B / MiniCPM5-1B — [backlog](../backlog.md)).
 
-## 帰結
+## Consequences
 
-- リポジトリ構成はフラット（ユーザー裁定）: ルート = ライブラリ本体（JSR 公開対象）、
-  `tools/exporter/`（Python, uv）、`examples/`、`bench/`。workspace 機構は使わない。
-  **→ この 1 点は ADR [0037](0037-karume-monorepo.md) で改めた**（Deno workspace の monorepo・
-  `@karume/{runtime,hub,models}` の 3 パッケージ）。本 ADR の他の決定・非目標は有効。
-- エクスポータは Karume 配下に新設（ユーザー裁定）。プロトタイプの実装知見を移植する。
+- The flat repository layout was replaced on 2026-08-05 by the monorepo of ADR 0037 §1.
+- The exporter is new code inside Karume (the maintainer's ruling), porting the prototype's knowledge.

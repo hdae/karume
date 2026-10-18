@@ -128,7 +128,7 @@ export const FUSION_RULES: readonly FusionRule[] = [
 /**
  * 長さ1の軸は座標が常に0なので、移動しても平坦な要素順へ影響しない。
  * それ以外の軸は元の順を保つ必要がある。同じ長さの軸同士の交換も許さない。
- * 空テンソルは従来経路に残す。DECIDED: docs/decisions/0011-layout-strategy.md#要素順を保つpermute2026-09-14
+ * 空テンソルは従来経路に残す。DECIDED: docs/decisions/0011-layout-strategy.md#addendum-2026-09-14--permute-that-keeps-element-order
  */
 const permuteKeepsElementOrder = (plan: NodePlan): boolean => {
   const shape = plan.inputShapes[0];

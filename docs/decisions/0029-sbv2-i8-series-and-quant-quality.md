@@ -1,80 +1,81 @@
-# 0029: SBV2 生成ネットの i8 系列（w8a32）と量子化パターン品質実測
+# 0029: SBV2 synthesis network i8 series (w8a32) and measured quality of quantization patterns
 
-- Status: accepted（聴感ゲートまで**ユーザー受理** 2026-08-04「少なくとも崩壊はしてない。
-  w8-real-gpu だけ雰囲気が少し違うが、悪化しているとは感じない」= 品質込みで確定）
+- Status: accepted (2026-08-04; listening check accepted by the maintainer: "at least it does not
+  collapse; only w8-real-gpu sounds a little different, but I do not perceive it as worse");
+  the series directory of decision 1 superseded by [0074](0074-quant-seat-naming.md) and
+  [docs/assets-layout.md](../assets-layout.md); decision 4 re-graded to MAY on 2026-10-18
 - Date: 2026-08-04
-- 関連: ADR 0019（w8 の方式 — 実行経路はそのまま）/ 0027（系列の型。**決定 1「i8 は足さない」は
-  本 ADR で上書き** — ユーザー裁定 2026-08-04）/ 0025 決定⑤（SBV2 は w8a8 の受け皿でない —
-  この判断は不変）/ 0006（fake-quant 正）
+- Related: [0019](0019-i8-weight-execution.md) (the w8 method — execution path unchanged) /
+  [0027](0027-sbv2-f16-series.md) (the series pattern; its decision 1 "no i8" is overridden here —
+  maintainer ruling 2026-08-04) / [0025](0025-w8a8-linear-execution.md) decision 5 (SBV2 is not a
+  w8a8 target — unchanged) / [0006](0006-quantization.md) (fake-quant)
 
 ## Context
 
-ユーザー指示: SBV2 の生成ネット（dp/front/flow/dec/voice）は「w8a32 なら音質劣化はあるが
-成立していたはず」— これを試し、あわせて **w8a8 / w8a16 / f16 の劣化度も確認**したい。
-先行実測（プロトタイプ・per-channel i8）は voice SNR 12.8〜24.2dB で採用実績がある。
+The maintainer asked to try w8a32 on the SBV2 synthesis network (dp / front / flow / dec / voice),
+expected to "work with some loss of audio quality", and to measure the degradation of w8a8, w8a16
+and f16 as well. The prototype's per-channel i8 measurement had voice SNR 12.8–24.2 dB and was used
+in practice.
 
 ## Decision
 
-1. **`export_sbv2.py --dtype i8`（w8a32 系列）を配線** — ランタイムは 0 行変更（ADR 0019 の
-   実行経路で成立）。fake-quant は共有 `quantize.fake_quant_int8`（per-channel symmetric
-   ±127）を f16 と同じ順序 MUST（remove_weight_norm / パッチ後・参照/golden 採取前）で適用。
-   実重みでの**冪等性**（±127 に閉じた量子化は f32 の不動点）を pytest の門で固定。
-   系列 = `models/sbv2-i8/`（**合計 25.9%** = 121.81MB・companion scale 0.42%）。
-   `--dtype` は emit 専用（ADR 0027 決定 3 と同じ構造理由・i8 も CLI 拒否）。
-2. **E2E は i8 系列を追加**し、5 tolerance を素の実測から独立導出（全ターゲットで f32/f16
-   系列と同桁 — golden が量子化後の重みで採れていることの裏取り。front のみ 1.4 倍 =
-   spline 経路、f16 系列と同構造）。**系列×格納 dtype 検査を「圧縮 dtype 集合の等値」へ
-   強化**（f16 系列に i8 が混ざる形を遮断）+ i8 は scale の宣言と実体の両方を検査。
-3. **w8a8 / w8a16 の品質は実行カーネルを作る前に torch シミュレーションで測る**
-   （`tools/exporter/measure_quant_sbv2.py` — Anima の Q0 と同じ思想）。活性の差し替えは
-   **op 粒度**（`torch.nn.functional` 差し替え — パッチ層が `functional.conv1d` を直接呼ぶ
-   ためモジュールフックは発火しない）。conv1d の活性量子化はタップ分解形の per-時刻粒度
-   （実装しうる粒度のうち最も細かい = **楽観側の上界**として読む）。
-4. **w8a8 / w8a16 の実行経路（conv1d の dp4a / f16 タイル）は現時点で実装しない** —
-   下の実測が判断材料で、採否はユーザーの聴感ゲート。
+1. **Wire `--dtype i8` (the w8a32 series) into the SBV2 recipe** — zero runtime changes (the ADR
+   0019 execution path suffices). Fake-quant applies the shared `karume.quantize.fake_quant_int8`
+   (per-channel symmetric ±127) in the same order as f16, which is a MUST (after
+   `remove_weight_norm` and the patches, before the reference and golden are captured).
+   **Idempotence** on real weights (±127-closed quantization is a fixed point in f32) is pinned by
+   pytest (`tools/export-recipes/sbv2/tests/test_export.py`, `fake_quant_int8` applied twice).
+   Assets are 25.9% of f32 (121.81 MB; companion scales 0.42%).
+   `--dtype` is emit-only (the same structural reason as ADR 0027 decision 3; the CLI also rejects
+   i8 with `--verify`).
+   The series was `models/sbv2-i8/`. (Superseded by ADR 0074 on 2026-08-25 and
+   `docs/assets-layout.md`: the exporter writes `outputs/series/sbv2-F1-i8/`
+   (`tools/export-recipes/sbv2/export.py:21`) and the distribution ships the `i8` preset — ADR
+   0128, Context.)
+2. **The e2e check adds the i8 series**, with its 5 tolerances derived independently from raw
+   measurements (every target in the same decade as the f32 / f16 series — evidence that the
+   golden was captured with the quantized weights; front alone is 1.4 × larger, the spline path,
+   as with f16). **The series × storage dtype check is strengthened to equality of the set of
+   compressed dtypes** (blocks i8 mixed into the f16 series), and for i8 both the declared scales
+   and the actual ones are checked.
+3. **The quality of w8a8 / w8a16 is measured by torch simulation before any execution kernel is
+   built** (`python -m sbv2.measure_quant` in `tools/export-recipes` — as Anima's Q0). Activations
+   are replaced **at op granularity** (`torch.nn.functional`): the patch layer calls
+   `functional.conv1d` directly, so module hooks do not fire. Activation quantization of conv1d uses
+   per-time-step granularity in tap-decomposed form, the finest granularity an implementation could
+   use, so read it as an **optimistic upper bound**.
+4. **Execution paths for w8a8 / w8a16 on conv1d (dp4a / f16 tiles) are not implemented.** w8a8 is
+   closed on quality (below). w8a16 MAY be implemented if a speed measurement shows a gain;
+   adoption of either path still goes through the maintainer's listening check, with the
+   measurements below as the material (re-graded 2026-10-18 to MAY: w8a16 equals w8 in quality, so speed decides alone, and the
+   negative speed finding rests on one 1:1 device — tied to ADR 0028 decision 4; perf ledger K-68).
+   Today the SBV2 `i8-a8` preset sets only `linearCompute: "a8"`
+   (`tools/export-recipes/sbv2/distribution.py:315`).
 
-## 実測（2026-08-04・同一発話・同一乱数・BERT は全構成 f32）
+## Measurements (2026-08-04, same utterance and noise, BERT in f32 for every configuration)
 
-| 構成  | SNR vs f32 | LSD（主指標） | 発話長（自前 w_ceil） |
-| ----- | ---------: | ------------: | --------------------- |
-| f16   |    40.5 dB |       0.36 dB | 一致（198/198）       |
-| w8    |     8.6 dB |       3.20 dB | **割れ（196/198）**   |
-| w8a16 |     8.6 dB |       3.20 dB | 割れ（196/198）       |
-| w8a8  |     6.0 dB |       4.08 dB | 割れ（196/198）       |
+SNR vs f32 / LSD (main metric): f16 40.5 dB / 0.36 dB (effectively transparent); w8 8.6 / 3.20;
+w8a16 8.6 / 3.20 (≈ w8); w8a8 6.0 / 4.08 (clearly worse). w8 changes the utterance length
+(198 → 196 frames); the main degradation is on the front side. Full table: commit `99a3c649`, this
+file.
 
-- **f16 は事実上透明**（聴感受理済みの f16 系列と整合 — この表のスケールの校正点）。
-- **w8a16 ≒ w8**（LSD 差 0.00dB・活性 f16 丸めの relRMS ≤ 2.3e-4・飽和 0 件）— 活性の
-  f16 化は品質的にタダで、**w8a16 の採否は速度/実装コストだけで決めてよい**（本機は
-  ALU 1:1 で速度も出ない — ADR 0028）。
-- **w8a8 は明確に悪化**（worst 層は FFN conv と attention の conv_q/k/v）。
-- **劣化の主因は front 側**（直交分解: w8-front-only 7.0dB / w8-voice-only **13.6dB** —
-  後者がプロトタイプ既録 12.8〜24.2dB の下端と整合。既録値は voice 単体の測定）。
-- **w8 は発話長そのものが動く**（198→196 フレーム。実 GPU の i8 系列デモでも 196 を確認）—
-  SNR/LSD は時間グリッド固定での比較で、実運用ではプロソディも変わる。w4 で既録の
-  「発話長の系統的短縮」と同じ劣化軸の萌芽。
-- sim 経路の恒真化防止: f32 構成は既存 reference.wav と**バイト一致**・Karume 実 GPU
-  出力との突合 1.34e-5（既録と一致）・全 WAV 独立 2 run でバイト再現。
-- 検証: deno verify 642/0/2・pytest 1,873（どちらもメイン自己実測一致）。
+## Detection limits
 
-## 検出限界・知見
-
-- **パッチ層は `functional.conv1d` を直接呼ぶ** — モジュール単位のフック・量子化・計測は
-  FFN conv（enc_p 12 + flow 48 本)を沈黙で取り逃す（「劣化が軽く出る」向きに倒れる）。
-  op 粒度が唯一安全な適用点（ADR 0013 のパッチ層の副作用として記録）。
-- **波形 SNR は 10〜16dB 帯で構成の順序が入れ替わる**（位相ずれに弱い）— 判断は LSD 主・
-  SNR 従で読む。
-- 系列 root 取り違えの数値検出不能（ADR 0027 の検出限界）は **i8 でも再現** — 唯一の検出器
-  は系列×格納 dtype 一致検査（本波で集合比較へ強化）。
-- w8 系列では `w_ceil` 整数完全一致を前提にした検証（f32 デモの torch parity の形）は
-  成立しない（duration 自体が動くのは仕様側の性質）。
+- **The patch layer calls `functional.conv1d` directly.** Module-level hooks, quantization or
+  measurement silently miss the FFN convs (12 in enc_p, 48 in flow) and understate the
+  degradation. Op granularity is the only safe point of application (a side effect of the ADR 0013
+  patch layer).
+- **Waveform SNR reorders configurations in the 10–16 dB range** (it is sensitive to phase shift).
+  Read LSD first and SNR second.
+- The undetectable series-root mix-up of ADR 0027 recurs with i8; the only detector is the series ×
+  storage dtype check (strengthened here to a set comparison).
+- Checks that assume exact integer agreement of `w_ceil` (the torch parity form of the f32 demo) do
+  not hold for the w8 series: the duration itself moves.
 
 ## Consequences
 
-- SBV2 の i8 系列（w8a32）が実行可能になった — 資産 25.9%・ランタイム変更ゼロ。品質は
-  **数値上明確な劣化**（LSD 3.2dB・発話長変動）だが、**聴感はユーザー受理**（2026-08-04）。
-  受理時の所感「w8 実 GPU だけ雰囲気が少し違う」は実測済みの発話長変動（198→196 フレーム =
-  プロソディ変化）と整合する — 数値の LSD より「別の読み上げ」として知覚される、という
-  実測どおりの現れ方。
-- w8a8 実行経路（conv1d dp4a）は**品質面で不利が確定的**（w8 より確実に悪い + SBV2 では
-  速度動機も薄い）。w8a16 は品質面で w8 と等価なので、実行経路を作る理由は速度のみ —
-  本機では成立しない（ADR 0028）。どちらも実装しないまま記録で閉じる。
+- The SBV2 i8 series (w8a32) runs: 25.9% of the assets, no runtime change. Numerically clearly
+  worse (LSD 3.2 dB, length changes), but listening was accepted (2026-08-04). "Only w8 on the real
+  GPU sounds a little different" matches the measured prosody change (198 → 196 frames).
+- A conv1d w8a8 path is at a clear quality disadvantage (worse than w8, weak speed motive for
+  SBV2); a w8a16 path would be built for speed only.

@@ -1,42 +1,41 @@
-# 0009 — 意味論 i32 / bool の実行解禁と i64 境界正規化
+# 0009: Execution of semantic i32 / bool and i64 normalization at the exporter boundary
 
-- Status: accepted（2026-08-02）
-- 根拠資料: [../research/2026-08-02-deberta-front-recon.md](../research/2026-08-02-deberta-front-recon.md)
-  （DeBERTa front の実測 — 入力 i64・bool マスク経路は入力値依存で畳み込み不能）
+- Status: accepted (2026-08-02); "do not add `where`" withdrawn by [0015](0015-conv-family-extension.md).
+- Date: 2026-08-02
+- Related: [../research/2026-08-02-deberta-front-recon.md](../research/2026-08-02-deberta-front-recon.md)
+  (DeBERTa front: i64 inputs; the bool mask path depends on input values and cannot be folded).
 
-## 決定
+## Decision
 
-- **意味論 i32 / bool の実行を解禁する**（M1-P2）。IR の宣言語彙（ir-v2.md）には両者とも
-  既在 — 変えるのは実行系: 入力転送（`RUNTIME_SUPPORT.io`）、op 契約の dtype 集合、
-  elementwise codegen の要素型パラメタ化。**要素型は WGSL 正準化キーに含める**
-  （codegen 決定性の不変条件はそのまま）。
-- **bool の GPU 格納は u32 の 0 / 1**（ストレージバッファに 1bit 型は無い。
-  プロトタイプで実証済みの規約）。
-- **IR に i64 は導入しない。** torch の既定整数 i64 は**エクスポータ境界で i32 へ正規化**し、
-  値域検査（|x| > 2^31−1 で fail loudly）を必ず伴う。64bit の無い WebGPU 世界への変換点を
-  エクスポータ 1 箇所に固定する。
-- 新 op は **cast**（f32/i32/bool 間。f32→i32 は torch 準拠の truncate を契約に明記）と
-  **bitwise_not**（bool 否定 — attention mask 反転の実行に必須）。
-  `where` は現時点で実測グラフに実行対象として現れないため**追加しない**
-  （語彙 allowlist 凍結 — ADR 0007。必要になった実測グラフが追加の根拠）。
-  **→ この 1 点は ADR [0015](0015-conv-family-extension.md)「語彙追加の残り」で撤回**
-  （実測グラフが出て `where` を追加 — 現行は `WHERE_OP` として実装済み）。
-- **公開 `Tensor` を dtype 判別ユニオンへ改訂**（ADR 0008 の部分改訂）:
-  `data` は f32 = Float32Array / i32 = Int32Array / bool = Uint8Array ではなく
-  **Uint32Array**（GPU 格納と同じ 0/1）。入出力で対称に扱う。
+- **Execution of semantic i32 / bool is enabled.** Both are already in the IR's declared vocabulary
+  ([ir-v2.md](../ir-v2.md)); what changes is execution: input transfer (`RUNTIME_SUPPORT.io`), the
+  dtype sets of the op contracts, and the element type as a parameter of elementwise codegen. **The
+  element type is part of the WGSL canonical key** (the codegen determinism invariant is unchanged).
+- **bool is stored on the GPU as u32 0 / 1** (storage buffers have no 1-bit type; proven in the prototype).
+- **The IR has no i64.** torch's default integer i64 is **normalized to i32 at the exporter
+  boundary**, always with a range check (|x| > 2^31 − 1 fails loudly). The conversion into a world
+  without 64-bit integers happens in that one place (`tools/exporter/src/karume/convert.py`).
+- New ops: **cast** (between f32 / i32 / bool; f32 → i32 truncates as torch does, stated in the
+  contract) and **bitwise_not** (bool negation — needed to invert attention masks). `where` was not
+  added at the time (frozen allowlist, ADR 0007); withdrawn by ADR 0015, "remaining vocabulary
+  additions": a measured graph needed it, and it is implemented as `WHERE_OP`.
+- **The public `Tensor` becomes a dtype-discriminated union** (a partial revision of ADR 0008):
+  `data` is f32 = `Float32Array` / i32 = `Int32Array` / bool = **`Uint32Array`** (not `Uint8Array`;
+  the same 0 / 1 as the GPU storage), symmetric for inputs and outputs.
 
-## 検討した代替案
+## Alternatives considered
 
-1. **IR に i64 を追加**（プロトタイプ方式）— WebGPU に 64bit 整数バッファが無く、転送時に
-   必ず i32 変換が入る。語彙が増えるだけで実行表現力は増えない。
-2. **添字を f32 で運ぶ** — 2^24 超の添字で静かに精度が落ち、fail loudly の原則に反する。
-   意味論の濁りが契約表の検査可能性を壊す。
-3. **i32 境界正規化（採択）** — 語彙最小・検査可能・変換点 1 箇所。DeBERTa の実値域
-   （T ≤ 512、vocab 22012）は i32 に十分収まる。
+1. **Add i64 to the IR** (the prototype's way) — WebGPU has no 64-bit integer buffers, so a
+   conversion to i32 happens at transfer anyway; the vocabulary grows without adding expressiveness.
+2. **Carry indices as f32** — silent precision loss above 2^24 (against fail loudly);
+   the contract table loses checkability.
+3. **i32 normalization at the boundary (chosen)** — minimal vocabulary, checkable, one conversion
+   point. DeBERTa's real ranges (T ≤ 512, vocab 22012) fit easily in i32.
 
-## 帰結
+## Consequences
 
-- TS（`packages/runtime/src/ops.ts`）と Python（`karume/ops.py`）の契約表は 1 セットで拡張し、
-  op ごとに許容 dtype 集合を宣言する（f32 専用 op は f32 のまま — 一括解禁はしない）。
-- readback / アップロードは dtype ディスパッチになる（要素 4 バイトは全型共通）。
-- i32 / bool の演算を新設するたび、CPU 参照と golden を同時に足す（ADR 0005）。
+- The TS (`packages/runtime/src/ops/contracts.ts`) and Python (`tools/exporter/src/karume/ops.py`)
+  contract tables are extended as one set, each op declaring its allowed dtypes (f32-only ops stay
+  f32 — no blanket enabling).
+- Readback and upload dispatch on dtype (4-byte elements for every type). Each new i32 / bool
+  operation adds its CPU reference and golden at the same time (ADR 0005).

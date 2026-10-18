@@ -1,271 +1,136 @@
-# 0026: w8a8 の DeBERTa 展開（他モデル検証）
+# 0026: w8a8 on DeBERTa (validation on a second model)
 
-- Status: accepted
+- Status: accepted (2026-08-03; listening check accepted by the maintainer on 2026-08-04); partly
+  superseded by [0129](0129-test-layout-and-lanes.md) (the fake-quant golden comparisons of
+  decisions 2 and 3 are opt-in, 2026-10-17) and [0127](0127-node-dawn-toolchain.md) (the demo
+  knobs of decision 4 went with the Deno CLI examples, 2026-10-16)
 - Date: 2026-08-03
-- 検出器の現況（2026-08-15 追記）: 決定 2 / 3 が正本に指定した数値 E2E 2 本
-  （`e2e_deberta_test.ts` / `e2e_deberta_w8a8_test.ts`）は**未移植のままリポに無い**。
-  text_encoder の回帰を捉える現行の網は SBV2 の WAV sha256 門 +
-  `packages/models/tests/sbv2_rel_pos_parity_test.ts` の 2 本で、原因の局在はできない
-  （この認識は ADR [0045](0045-deberta-layer-trim.md) の Consequences にも記録済み）。
-  （2026-08-16 追記: `e2e_deberta_test.ts` は移植済み — 3 variant × 4 ケース・tolerance は
-  実測導出で歴史値〈f32 8.32e-5 / i8 1.23e-4 / atol 7e-4〉と一致。`e2e_deberta_w8a8_test.ts`
-  = 決定 3 の鏡像門は未設置のまま。）
-  （2026-09-24 追記: 決定 3 の鏡像門 `packages/runtime/tests/e2e_deberta_w8a8_test.ts` は `d3aecda1` で設置した。
-  門の定数〈output.0/1 の判別帯・output.2 以降の崩壊上限・census の本数〉は本 ADR の歴史値
-  〈RTX 3080 Ti・2026-08-03〉を起点に置いたもので、Arc B570 では実測から導き直していない。
-  導き直しは、門が毎回 `outputs/verify/` の results.json に残す全出力の maxAbs を読んで行う。
-  緩める根拠は仕様帯〈ADR 0106〉ではなくこの実測に限る。）
-  （2026-10-07 追記: output.2 以降の崩壊上限は maxAbs の atol 3 から出力ごとの相対 RMS 誤差の上限
-  〈実測 × 2 — output.2 の 0.020 〜 output.24 の 0.33〉へ替え、RTX 3080 Ti で実測から導き直した — 末尾の追記。output.0/1 の判別帯と census は歴史値のまま。）
-  **本 ADR の tolerance / 判別帯は歴史値**として読むこと。
-- 関連: ADR 0019（i8 格納）/ ADR 0025（w8a8 実行 — 決定⑤が本 ADR の親）/
+- Related: [0019](0019-i8-weight-execution.md) (i8 storage) / [0025](0025-w8a8-linear-execution.md)
+  (w8a8 execution — its decision 5 is the parent of this ADR) / [0045](0045-deberta-layer-trim.md)
+  (DeBERTa layer trim) / [0110](0110-practical-tier-numerics-contract.md) (band derivation rules) /
   [dp4a-w8a8-design](../research/2026-08-03-dp4a-w8a8-design.md) §7
+- Checks (as of 2026-10-18): the w8 check (`packages/e2e/tests/e2e_deberta_test.ts`) and the w8a8
+  fake-quant golden check (`packages/e2e/tests/e2e_deberta_w8a8_test.ts`) exist; their comparisons
+  with torch goldens run only with `KARUME_UPSTREAM_PARITY=1` (ADR 0129, addendum 2026-10-17 (2)).
+  The third tier of the w8a8 check uses per-output relative RMS ceilings (addendum 2026-10-07). The
+  output.0 / output.1 tolerance and the census counts are historical values from 2026-08-03.
 
 ## Context
 
-ADR 0025 決定⑤: w8a8 の「他モデル検証」の受け皿は DeBERTa full-24layer（linear が FLOP の
-86.8% — SBV2 は conv1d 支配で構造的に不成立）。ランタイムには opt-in の
-`SessionOptions.linearCompute: "i8a8"` が既にあり、必要なのは i8 資産系列と検証網・
-品質/速度実測の展開だけ（ランタイム変更 0 行で成立するかが一般性検証の中身）。
+ADR 0025 decision 5 named DeBERTa full-24layer as the second model for validating w8a8 (linear is
+86.8% of its FLOPs; SBV2 is dominated by conv1d and cannot serve). The runtime already had the
+opt-in w8a8 value of `SessionOptions.linearCompute` (spelled `"i8a8"` then, `"a8"` since 0.5.0 —
+ADR 0074 decision 3). What was needed was an i8 series, the checks, and quality and speed
+measurements. Whether this works with zero runtime changes is the substance of the generality test.
 
 ## Decision
 
-1. **資産系列**: `export_deberta.py --dtype {f32,i8}`（f16 は #30 SBV2 系列と一体で決める
-   ため足さない）。i8 は別系列 `models/deberta-i8/{dev-2layer,full-24layer}/`
-   （24 層 334,545,336 B = f32 比 25.4%）。fake-quant は export する wrapper そのものへ・
-   golden 採取より前（quantize.py の FQN 規律）。
-2. **w8（f32 計算）の網**: `packages/runtime/tests/e2e_deberta_test.ts` を系列パラメタ化。i8 系列 tolerance は
-   実測導出 atol 7e-4（素の最悪 1.23e-4 の 5.7 倍）。f32 系列の 8.32e-5 と同桁に収まること
-   自体が「golden が fake-quant 後の重みで採れている」ことの裏取り（掛け忘れなら量子化誤差
-   そのもの = 1e-1 級が 3 桁上に出る）。
-3. **w8a8 の網**: `packages/runtime/tests/e2e_deberta_w8a8_test.ts` 新設 — 鏡像 golden
-   （`--act-quant` → `io-i8a8.<case>`・`act_quant.py` が数値正本）との突合 + 診断キー検査。
-   数値の検出力は **output.0/1 の厳密 tolerance（atol 5e-5・f32 経路との余白 1,150×）に
-   集中**させる（下記・検出限界）。
-4. **品質ゲート**: 層別 SNR（数値・下記）+ SBV2 デモの聴感（最終・ユーザー裁定）。
-   デモに `--bert {f32,i8}` / `--bert-compute {f32,i8a8}` ノブ（anima の
-   `--dit` / `--linear-compute` と同型・i8a8 は `--bert i8` とだけ組める）。
+1. **Series.** The DeBERTa recipe takes `--dtype` (f32 and i8 at the time; f32 / i8 / i4 today —
+   `tools/export-recipes/deberta/export.py:106`). The i8 series is its own directory
+   (`outputs/series/deberta-i8/{dev-2layer,full-24layer}/` — `export.py:142`; 24 layers
+   334,545,336 B = 25.4% of f32). Fake-quant is applied to the exported wrapper itself, before the
+   goldens are captured (the FQN discipline of `karume.quantize`).
+   f16 is not added; it MAY be added when needed (re-graded 2026-10-18 to MAY: the SBV2 f16
+   decision this waited for, ADR 0027, did not decide DeBERTa f16, and no work item is filed).
+2. **The w8 (f32 compute) check.** `packages/e2e/tests/e2e_deberta_test.ts` is parameterised by
+   series. The i8 series tolerance is measured: atol 7e-4 (5.7 × the raw worst case 1.23e-4). That
+   it lands in the same decade as the f32 series (8.32e-5) shows that the golden was captured with
+   the fake-quantized weights; a forgotten fake-quant would show the quantization error itself
+   (1e-1 order, three decades higher). The torch comparison runs only with
+   `KARUME_UPSTREAM_PARITY=1` (`e2e_deberta_test.ts:431`).
+3. **The w8a8 check.** `packages/e2e/tests/e2e_deberta_w8a8_test.ts` compares against the
+   fake-quant golden (`--act-quant` → `io-i8a8.<case>`; `karume.act_quant` is the numeric
+   reference) and checks the diagnostic keys. Every tolerance, band, ceiling and count of this
+   check is relaxed only on the basis of a measurement of the kind recorded below, never on the
+   specification band of ADR 0106. Numeric detection power is concentrated in a strict
+   tolerance on output.0 / output.1 (atol 5e-5; 1,150 × margin to the f32 path — see Detection
+   limits). (Superseded by ADR 0129 on 2026-10-17: the golden comparison runs only with
+   `KARUME_UPSTREAM_PARITY=1` (`e2e_deberta_w8a8_test.ts:345`); the census checks run by default.)
+4. **Quality gate.** Per-layer SNR (numbers below) and listening on the SBV2 demo; the maintainer's
+   listening verdict is final. Withdrawn 2026-10-18: the demo knobs `--bert {f32,i8}` /
+   `--bert-compute` went with the Deno CLI examples (ADR 0127 decision 5).
 
-## 実測（2026-08-03・RTX 3080 Ti・排他）
+## Measurements (2026-08-03, RTX 3080 Ti)
 
-### 速度（T=512 合成トークン・full-24layer・warmup 1 + 5 run 平均）
+- Speed (T = 512, full-24layer): w8a8 makes the linear kernels 2.80 × and the GPU total 1.74 ×
+  faster; wall clock only 1.16 ×, because the graph outputs all 25 hidden states and the readback
+  (~52 MB) dominates. w8 alone does not speed up compute; it gives 3.2 × faster loading and 1/4 of
+  the assets. On the SBV2 demo (T = 17) the BERT stage went from 279 ms to 228 ms.
+- Quality: SNR falls by about 1 dB per layer; hidden[-3] (the layer SBV2 uses) is 20.7–23.3 dB.
+  Listening (f32 / w8 / w8a8, same seed): accepted by the maintainer on 2026-08-04 ("no degradation
+  heard"). Full tables: commit `99a3c649`, this file.
 
-| 構成                    | ロード  | GPU 合計   | linear カーネル     | 壁時計/run |
-| ----------------------- | ------- | ---------- | ------------------- | ---------- |
-| f32 資産                | 197.7ms | 125.7ms    | 93.7ms（74.6%）     | 291.7ms    |
-| w8（i8 資産・f32 計算） | 62.3ms  | 126.9ms    | 93.0ms（73.3%）     | 289.9ms    |
-| **w8a8**                | 62.3ms  | **72.4ms** | **33.2ms（45.8%）** | 251.6ms    |
+## Detection limits
 
-- **linear 単体 2.80×・GPU 合計 1.74×**（Anima DiT の 3.25× / 2.25× より小さいのは m=T=512
-  固定で GEMM が浅いため）。w8 は計算を速くしない（Anima と同じ — 効くのはロード 3.2× と
-  資産 1/4）。
-- 壁時計が 1.16× に留まるのは、このグラフが**全 25 層の hidden_states を出力に持ち**
-  読み戻し ~52MB が支配するから（SBV2 用途の形。出力を絞る用途なら GPU 比がそのまま出る）。
-- w8a8 時の次の支配項は bmm 18.6%（disentangled attention — 融合 attention は mask 契約が
-  要るため対象外・ADR 0023 スコープ判断のまま）。
-- SBV2 デモ実測（P=59・T=17）: bert 段 279ms → 228ms — 小 T ではロード/固定費支配で
-  効果は限定的。w8a8 が効くのは長系列・スループット用途。
-
-### 品質（GPU w8a8 vs w8 golden・full-24layer）
-
-- SNR は約 1dB/層で単調低下（output.1 39.2dB → output.24 19.4dB・段差なし — 一様量子化
-  雑音の層蓄積。Anima の層別実測と同じ性質）。
-- **hidden[-3]（SBV2 が使う層）= 20.7〜23.3dB**（4 ケース・maxAbs 6.3e-1〜9.6e-1・
-  |ref| 上端 16〜29）。参考: Anima の w8 PSNR 23.92dB / w8a8 13.28dB（後者をユーザーが
-  目視受理）の中間より上。
-- 聴感: WAV 3 構成（f32 / w8 / w8a8・同 seed）をユーザー裁定へ提出（2026-08-03）→
-  **ユーザー受理（2026-08-04・「劣化は感じられない」）**。
-
-## 検出限界（このタスクで確定した知見）
-
-- **活性量子化の不連続性は encoder の 1 forward でも数層で飽和する**: GPU i8a8 vs torch
-  鏡像は末端層で maxAbs 1.46 — f32 経路 vs 鏡像の 1.33 と同水準（= 判別不能）。ADR 0025
-  決定 6 の「同じ分布の別標本」が拡散 10 step どころか 24 層 1 パスで再現した。判別帯は
-  **1 層目の出口（output.1）にしか無い**（i8a8 5.72e-6 vs f32 経路 5.76e-2 = 10,058 倍）。
-  「実測の 5〜10 倍」の素直な tolerance 導出は f32 経路まで飲み込んで恒真化する —
-  数値の検出力は output.0/1 の厳密 tolerance と診断キー検査（192 本）に集中させた
-  （導出表はテスト冒頭 docstring が正本）。
-- **診断キーの期待本数はモジュール数と一致しない**: DeBERTa-v2 は `share_att_key` で
-  query/key_proj を相対位置射影へ再利用するため、1 層あたりモジュール 6 本・グラフノード
-  8 本（2 層 16 / 24 層 192）。torch のフックは呼び出しごとに掛かるので鏡像との数値対応は
-  1:1 に保たれる。
-- `rel_embeddings.weight` は fake-quant されるが linear の**入力**スロット消費 = 適格外で
-  f32 格納（量子化済みの値・余剰 scale は emit が無視）。ConvLayer の conv1d weight は
-  i8 適格（w8 実行・w8a8 対象外）。
-
-  > 訂正（2026-08-11・実資産の IR を直接読んだ実測）: 消費 op は linear ではなく **`layer_norm`
-  > の data スロット 1 箇所**（`get_rel_embedding()` が相対位置テーブルに LayerNorm を掛ける経路 —
-  > `norm_rel_ebd="layer_norm"`）。「重みスロット以外の消費 = 適格外」という結論そのものは変わらない。
-  > per-row i8 なら 512 行すべてビット一致で往復する（実測・最大差 0.0）が、適格判定を緩める
-  > blast radius に見合わないため見送り —
-  > [research/2026-08-11-deberta-size-recon.md](../research/2026-08-11-deberta-size-recon.md) §3。
+- **The discontinuity of activation quantization saturates within a few encoder layers in one
+  forward pass.** At the last layer, GPU i8a8 vs the torch fake-quant golden has maxAbs 1.46,
+  about the same as the f32 path vs the golden (1.33): the two cannot be told apart. ADR 0025
+  decision 6 ("another sample of the same distribution") reappears within 24 layers. A separation
+  margin exists only at the exit of the first layer (output.1: i8a8 5.72e-6 vs f32 path 5.76e-2,
+  10,058 ×). Deriving tolerances as "5–10 × the measurement" would admit the f32 path and make the
+  check vacuous, so numeric detection power sits in the strict output.0 / output.1 tolerance and the
+  diagnostic key census (192 keys).
+- **The expected key count is not the module count.** DeBERTa-v2 reuses query/key_proj for the
+  relative-position projection (`share_att_key`): 6 modules but 8 graph nodes per layer (16 for 2
+  layers, 192 for 24). torch hooks fire per call, so the numeric correspondence with the
+  fake-quant golden stays 1:1.
+- `rel_embeddings.weight` is fake-quantized but stored as f32 because it is consumed outside a
+  weight slot (ineligible; emit ignores the extra scale). The consumer is the data slot of a
+  `layer_norm` (`norm_rel_ebd="layer_norm"`), not a linear input (corrected 2026-08-11 —
+  [research/2026-08-11-deberta-size-recon.md](../research/2026-08-11-deberta-size-recon.md) §3).
+  The conv1d weight of ConvLayer is i8-eligible (w8 execution, not w8a8).
 
 ## Consequences
 
-- **一般性の確認は成立**: ランタイム 0 行変更・配線のみで第 2 のモデルに w8a8 が通り、
-  linear 2.80× / GPU 1.74× が出た。opt-in（既定 f32）の設計は変更しない。
-- SBV2 の実用（小 T）ではロード 3.2× と資産 1/4 が主な利得で、計算時間の利得は小さい。
-- 品質の最終裁定（聴感）= **ユーザー受理（2026-08-04・劣化なし）** — w8 / w8a8 とも
-  聴感ゲート通過。数値上は hidden[-3] SNR 20.7〜23.3dB（Anima の受理水準より上）。
-- 残タスクへの申し送り: #30（SBV2 f16 系列）で `--dtype f16` を `WEIGHT_DTYPES` へ足す
-  ときは `DEFAULT_OUT_ROOTS` に 1 行 — 形は準備済み。
+- Generality is confirmed: w8a8 runs on a second model with zero runtime changes and gives linear
+  2.80 × / GPU 1.74 ×. The opt-in design is unchanged.
+- For SBV2's small T, the gains are loading (3.2 ×) and asset size (1/4), not compute.
+- Quality: w8 and w8a8 both passed the listening check (2026-08-04). Numerically, hidden[-3] SNR is
+  above the level accepted for Anima.
 
-## 追記（2026-10-07）: 鏡像門の第 3 層を maxAbs から相対 RMS 誤差の上限へ替える
+## Addendum (2026-10-07) — the third tier of the w8a8 check uses relative RMS error ceilings
 
-### 何が起きたか
+After the GPU swap, `i8/full-24layer / case2` failed on one element of output.19 (maxAbs 3.544 >
+atol 3). It was not a GPU defect: regenerating the fake-quant golden on the new CPU moves the same
+element by 6.076, and CPU variants of the golden differ by up to 7.173. atol 3 was about twice the
+last-layer value 1.46, applied with maxAbs to every intermediate output. Details: commit `b9d9ac01`
+(this file); investigation notes in `.claude/reviews/2026-10-07_deberta-w8a8/` and
+`outputs/diag/deberta-w8a8-2026-10-07/` (both untracked).
 
-開発機の換装（RTX 3080 Ti・NVIDIA 615.71.09）の後の初めてのフル verify（HEAD `b744a9fd`）で、
-`e2e_deberta_w8a8_test.ts` の `i8/full-24layer / case2` が赤になった。外れたのは output.19
-（`layer_norm_40`）の 1 要素（添字 17070 = token 16・channel 686）で、maxAbs 3.544 が第 3 層の
-崩壊上限（maxAbs の atol 3）の外。単独の再走でも同じ要素・同じ値で、走行ごとの揺れではない。
+**Ruling (maintainer, 2026-10-07).** The third tier becomes a per-output ceiling on the relative
+RMS error ‖gpu − golden‖₂ / ‖golden‖₂. The non-finite check (NaN / ±Inf on either side) stays on
+every element. The first tier (output.0 / output.1, atol 5e-5) and the second tier (key census)
+are unchanged.
 
-### 原因の結論と決め手
-
-GPU の欠陥ではない。活性量子化の想定内の発散の裾が、置き方を誤った崩壊上限を超えた。
-
-- 決め手: 期待値（torch 鏡像 `io-i8a8.<case>`・換装前の機の CPU で 2026-09-05 に生成）を、同じコード・
-  同じ重み・同じ torch 2.13.0+cpu でこの機の CPU（Ryzen 5 7600）で作り直すだけで、同じ要素に 6.076 の差が
-  出る。CPU の別標本どうし（AVX512 / AVX2 / DEFAULT）の最大差は 7.173。正本の実装どうしでも atol 3 を
-  満たせない。
-- GPU の w8a8 の数値契約は実データで成り立つ: layer 14〜19 の linear 48 本で scale の不一致 0 / 7,929 行・
-  GPU 自身の q を与えた GEMM の不一致 0 / 8,764,416 要素。`gpu_i8a8_test.ts` 15 / 15 緑。
-- 層ごとの 1 段予測（GPU a8 の output.j を入力に CPU 鏡像で 1 層だけ進める）でも、別の関数を計算している
-  層は無い。鏡像自身に ±2^-23 の摂動を入れると、同じ 1 段が「差 1.9e-6」と「差 0.0534」の 2 状態の間で
-  切り替わり、GPU の 1 段差はその片方と一致する。
-- 置き方の誤り: atol 3 は上の「検出限界」の**末端層（output.24）だけ**の歴史値 1.46 の約 2 倍で、それを
-  output.2 以降の全中間出力に maxAbs で掛けていた。中間層は外れ値チャネル（channel 686・\|ref\| 最大 28.8）
-  の符号の分岐点で、量子化の段の反転が 1 要素を大きく動かす。
-
-調査の記録は `.claude/reviews/2026-10-07_deberta-w8a8/FINDINGS.md`、プローブと生データは
-`outputs/diag/deberta-w8a8-2026-10-07/`（どちらも git 追跡外 — 消えたら下の「導き直しの手順」で作り直す）。
-
-### 裁定（利用者 2026-10-07）
-
-第 3 層を出力ごとの相対 RMS 誤差 ‖gpu − golden‖₂ / ‖golden‖₂ の上限へ替える。非有限（NaN / ±Inf —
-どちらの側も）の検査は全要素で残す。第 1 層（output.0 / 1 の厳密 tolerance atol 5e-5）と第 2 層（キーの
-census）は変えない。
-
-### 新しい第 3 層
-
-- 判定: output.2〜24 の各出力で、非有限 0（両側・全要素）かつ相対 RMS 誤差 ≤ **その出力の上限**（下の
-  表 — output.2 の 0.020 〜 output.24 の 0.33）。maxAbs は判定に使わず、相対 RMS 誤差と並べて
-  `results.json` の `comparisons` に残す（帯の ceiling はその出力の上限・output.0 / 1 は従来どおり
-  `measurements`）。
-- 上限の導き方: 出力ごと（観測点 = output.k）に、正当な標本の相対 RMS 誤差の全標本・全ケースの最悪 × 2 を
-  有効数字 2 桁で切り上げた値。鏡像門は ADR 0110 決定 5 の A/B 門ではない（比較相手は同じ機の参照層では
-  なく torch 鏡像 golden）。崩壊上限の導き方だけを決定 5-3（E2E の崩壊上限 = 観測点の実測 × 2 程度）に揃え、
-  決定 4 の MUST NOT を踏まないようにした。5-3 の「量子化席なら理論値との整合を docstring に残す」は
-  当てはめない: 活性の丸めは不連続で、上流の 1e-5 級の差が段の ±1 飛びを起こして数層で飽和する（上の
-  「検出限界」）ので、output.k の相対 RMS 誤差に使える理論上界が無い。a8 の数値の正しさは
-  `gpu_i8a8_test.ts` の atol=0 の数値契約が受け持ち、第 3 層は崩壊の検出に限る。上限は
-  テスト（`e2e_deberta_w8a8_test.ts` の `COLLAPSE_CEILINGS`）の宣言の表で、環境キー別の行ではない（ADR 0110
-  決定 4）。
-- 標本（全て保存済みの鏡像 golden に対する差・2026-10-07・RTX 3080 Ti / Ryzen 5 7600）:
-  GPU a8 の 4 ケース・この機の CPU で採り直した鏡像の別標本 6 本（AVX512 / AVX2 / DEFAULT × 1 / 6
-  スレッド）・鏡像の埋め込みの出口に相対 ±2^-23 の乱数を入れた摂動アンサンブル各ケース 8 本。ケースごとに
-  数えて全 60 標本（4 ケース × 〈1 + 6 + 8〉）で、非有限は 0（上限に入れない GPU f32 の参考 4 本を含めた
-  64 本でも 0）。GPU f32 経路は a8 の標本ではないので上限に入れず、参考に並べる。
-- 採らなかった案: 全標本・全ケース・全出力の最悪 0.16202 × 5 = 0.81 を 1 つのスカラーで全出力に掛ける形。
-  「実測の 5〜10 倍」を E2E の帯の導出に使うことは ADR 0110 決定 4 の MUST NOT に反するので採らなかった
-  （1 つのスカラーは末端層の最悪から導いた上限を浅い出力にも掛け、output.2 では正当な最悪の約 80 倍まで
-  通していた）。
-
-ケースごとの最悪（output.2〜24 の最大）:
-
-| ケース | GPU a8 | CPU 鏡像の別標本 6 本 | 摂動アンサンブル 8 本 | 参考: GPU f32 経路 |
-| ------ | -----: | --------------------: | --------------------: | -----------------: |
-| case0  | 0.1489 |        0.1376〜0.1620 |        0.1440〜0.1613 |             0.1197 |
-| case1  | 0.0974 |        0.1001〜0.1021 |        0.0975〜0.1071 |             0.0823 |
-| case2  | 0.0944 |        0.0944〜0.1002 |        0.0902〜0.0971 |             0.0782 |
-| padded | 0.1382 |        0.1413〜0.1440 |        0.1362〜0.1508 |             0.1141 |
-
-出力ごとの最悪（全標本・全ケース）と上限（最悪 × 2 を有効数字 2 桁で切り上げ）:
-
-| 出力      |   最悪 | ケース | 標本                  |  上限 |
-| --------- | -----: | ------ | --------------------- | ----: |
-| output.2  | 0.0099 | padded | 摂動 seed 3           | 0.020 |
-| output.3  | 0.0182 | padded | CPU AVX512 6 スレッド | 0.037 |
-| output.4  | 0.0253 | padded | 摂動 seed 1           | 0.051 |
-| output.5  | 0.0308 | padded | 摂動 seed 7           | 0.062 |
-| output.6  | 0.0351 | padded | 摂動 seed 2           | 0.071 |
-| output.7  | 0.0422 | padded | CPU AVX512 6 スレッド | 0.085 |
-| output.8  | 0.0474 | padded | CPU AVX512 6 スレッド | 0.095 |
-| output.9  | 0.0517 | padded | CPU AVX512 6 スレッド |  0.11 |
-| output.10 | 0.0587 | padded | CPU AVX512 6 スレッド |  0.12 |
-| output.11 | 0.0638 | padded | CPU AVX512 6 スレッド |  0.13 |
-| output.12 | 0.0685 | padded | CPU AVX512 6 スレッド |  0.14 |
-| output.13 | 0.0724 | padded | CPU AVX512 6 スレッド |  0.15 |
-| output.14 | 0.0747 | padded | CPU AVX512 6 スレッド |  0.15 |
-| output.15 | 0.0807 | case0  | 摂動 seed 1           |  0.17 |
-| output.16 | 0.0848 | case0  | 摂動 seed 1           |  0.17 |
-| output.17 | 0.0932 | case0  | CPU AVX2 6 スレッド   |  0.19 |
-| output.18 | 0.1003 | case0  | CPU AVX2 6 スレッド   |  0.21 |
-| output.19 | 0.1090 | case0  | 摂動 seed 4           |  0.22 |
-| output.20 | 0.1192 | case0  | 摂動 seed 5           |  0.24 |
-| output.21 | 0.1289 | case0  | 摂動 seed 5           |  0.26 |
-| output.22 | 0.1365 | case0  | 摂動 seed 2           |  0.28 |
-| output.23 | 0.1506 | case0  | 摂動 seed 2           |  0.31 |
-| output.24 | 0.1620 | case0  | CPU AVX512 6 スレッド |  0.33 |
-
-故障注入（RTX 3080 Ti の GPU a8 の dump を写して壊し、門と同じ判定の関数と出力ごとの上限に通した・
-4 ケース × output.2〜24 = 92 出力）:
-
-| 壊し方                                | 赤の数 | 相対 RMS 誤差  |
-| ------------------------------------- | -----: | -------------- |
-| 壊さない                              |   0/92 | 0.0000〜0.1489 |
-| 全要素 0                              |  92/92 | 1.0000         |
-| 符号反転                              |  92/92 | 1.9944〜2.0000 |
-| 1 要素だけ NaN                        |  92/92 | （非有限）     |
-| 1 要素だけ +Inf                       |  92/92 | （非有限）     |
-| 全要素 × 2                            |  92/92 | 1.0000〜1.0218 |
-| 全要素 × 1.5                          |  92/92 | 0.5000〜0.5321 |
-| 全要素 × 1.25                         |  81/92 | 0.2500〜0.3003 |
-| 参考: GPU f32 経路の dump（壊さない） |   0/92 | 0.0158〜0.1197 |
-
-× 1.25 の出力ごとの内訳: output.2〜21 は 4 ケースとも赤。output.22 は case0 だけ赤（0.2890 vs 上限
-0.28）。output.23 / 24 は 4 ケースとも緑（0.27〜0.30 vs 上限 0.31 / 0.33）。壊さない GPU a8 の dump は、
-各出力の上限に対する比の最大が 0.478。
-
-- 捕まえないもの: 深い出力の × 1.25 の拡大（output.22〜24 の 12 出力のうち 11）、中間層の 1 要素の飛び、
-  f32 経路への沈黙フォールバック（GPU f32 経路の dump は 92 出力の全てで上限の内 — 上限に最も寄るのは
-  padded の output.2 で上限の 0.93 倍）。第 3 層は崩壊の検出だけを受け持つ — 細かな欠陥は第 1 層・
-  第 2 層と `gpu_i8a8_test.ts` の atol=0 の数値契約が受け持つ。浅い出力の欠陥を第 1 層に任せられるのは、
-  24 層が同じ形（k ∈ {1024, 4096}）の同じパイプラインを回るので、その欠陥は 1 層目の出口（output.1 —
-  atol 5e-5）にも出るうえ、census が 192 本の linear の降り方を直接見るから。最も緩い output.24 の上限
-  0.33 に対し、全要素 0 と × 2（≈ 1.0）の余白は約 3 倍、× 1.5（≈ 0.50）は約 1.5 倍。全要素 0 と × 2 が
-  捕まらなくなるのは、その出力の正当な最悪が約 0.5 を超えたとき（上限が 1.0 に届く）。
-- この判定の振る舞いは、同じテストファイルの GPU 無しで回るテストが固定する: 上限の表が output.2〜24 を
-  ちょうど覆う・上限は出力の順に非減少・output.24 の正当な揺れの大きさ（上限の半分 ≈ 0.165）の別標本は
-  output.2〜14 で赤・output.15〜24 で通す・各出力で上限の半分（導出の最悪以上）の別標本は通し、上限を 1%
-  超えた別標本は赤・外れ値チャネルの 1 要素が 7 動いた形は output.19 の上限で通す・全ゼロ / 符号反転 /
-  × 2 / × 1.5 は全出力で赤・NaN / ±Inf は両側で赤。次の改変は、どれもこのテストで赤になる（2026-10-07 に
-  実測）: 判定を常に合格にする（非有限以外）・表を 1 つのスカラーへ平坦化する（0.33 / 0.49 / 採らなかった
-  案の値の 3 通り）・浅い出力の 1 行の桁違い（output.2 を 0.20）・深い出力の 1 行の桁違い（output.20 を
-  0.024）・隣り合う 2 行の入れ替え（output.5 / 6）。このファイルは `test:core` から外れて
-  いるので、走るのは `test:models:deberta` とフル verify。
-- 走行の実測（2026-10-07・RTX 3080 Ti）: 4 ケースとも緑（92 出力の全てで上限の内・上限に対する比の最大
-  0.478）。output.2〜24 の相対 RMS 誤差の最大は case0 0.1489 / case1 0.0974 / case2 0.0944 / padded
-  0.1382（dump と同値）。case2 の maxAbs 3.544 は記録だけに残る。
-
-### 導き直しの手順
-
-台本は `tools/diag/deberta-collapse.ts`（GPU の dump と故障注入）と
-`tools/export-recipes/deberta/collapse_ceilings.py`（CPU の段）。4 段とも 1 つの作業 dir（例
-`outputs/diag/deberta-collapse-<日付>/`）を読み書きする。Python は `tools/export-recipes` から
-`HF_HUB_OFFLINE=1 uv run --with 'transformers==5.14.1' python -m deberta.collapse_ceilings …` で回す。
-
-1. GPU の dump（output.0〜24 を連結した f32・a8 と参考の f32 経路の両方）: リポ直下から `deno run -A
-   tools/diag/deberta-collapse.ts dump <作業 dir> case0 case1 case2 padded`。
-2. CPU 鏡像の別標本: `ATEN_CPU_CAPABILITY=<avx512|avx2|default>` を付けて `… mirror <作業 dir>
-   <isa>_t<スレッド数> <スレッド数>`（スレッド数は 1 と 6 — 計 6 本）。
-3. 上限の導出: `… derive <作業 dir>`。摂動アンサンブル（K = 8・埋め込みの出口に相対 ±2^-23 の乱数）は
-   この中で回す。結果は `<作業 dir>/derive.json`（`ceilings` がテストの上限の表）。
-4. 故障注入: `deno run -A tools/diag/deberta-collapse.ts faults <作業 dir>`（テストファイルの
-   `judgeCollapse` と `collapseCeilingOf` をそのまま import する）。結果は `<作業 dir>/fault_inject.json`。
-
-### 鏡像 golden を採り直さない
-
-鏡像 golden を作り直しても解決にはならない。第 1 層の厳密 tolerance は、golden を採った CPU の第 0 層の
-量子化の段の丸めの向きに依存する。この機の CPU で採り直すと case0 / padded の output.1 が保存版から
-1.285e-3 動き（GPU は旧機の CPU と同じ側・この機の CPU は反対側）、atol 5e-5 の第 1 層が赤になる。
-規則: 鏡像 golden（`--act-quant` の `io-i8a8.<case>`）は別の機の CPU で採り直さない。
+- **Judgement.** For each of output.2–24: no non-finite value and relative RMS error ≤ that
+  output's ceiling (0.020 for output.2 up to 0.33 for output.24). maxAbs is recorded next to it in
+  `results.json` (`comparisons`) but not judged.
+- **Derivation.** Per output, the worst relative RMS error over all legitimate samples and cases,
+  × 2, rounded up to two significant digits. Samples: GPU a8 (4 cases), 6 CPU variants of the golden
+  (AVX512 / AVX2 / DEFAULT × 1 / 6 threads), and 8 runs per case with a relative ±2^-23
+  perturbation at the embedding exit (60 samples, no non-finite value). The GPU f32 path is not a
+  legitimate sample. This follows ADR 0110 decision 5-3 (ceiling ≈ 2 × measurement) and avoids the
+  MUST NOT of decision 4: one scalar (worst 0.162 × 5 = 0.81) would have admitted about 80 × the
+  legitimate worst case at output.2. No theoretical bound is recorded, because activation rounding
+  is discontinuous and none exists; a8 correctness belongs to the atol = 0 contract of
+  `gpu_i8a8_test.ts`.
+- **Where the table lives.** `COLLAPSE_CEILINGS` in
+  `packages/models/tests/helpers/collapse-ceilings.ts` — a declared table, not a per-environment
+  reference row (ADR 0110 decision 4). `packages/models/tests/collapse_ceilings_test.ts` (core
+  lane, no GPU) pins the judgement; flattening, swapping or mis-scaling table rows turned it red
+  (fault injection, 2026-10-07).
+- **What it does not catch.** A × 1.25 scaling at deep outputs (11 of the 12 outputs
+  output.22–24), a single-element jump in a middle layer, and a silent fallback to the f32 path.
+  Those belong to the first two tiers and to `gpu_i8a8_test.ts`.
+- **Only measurements of this kind justify relaxing a ceiling**; a specification band
+  (ADR 0106) does not.
+- **Re-deriving.** The CPU steps are `tools/export-recipes/deberta/collapse_ceilings.py`
+  (`mirror` per ISA and thread count, then `derive`, which writes `derive.json` with `ceilings`).
+  The GPU dump and fault-injection steps used `tools/diag/deberta-collapse.ts`, which was removed
+  with the Deno tools in `bb35fe2a` (ADR 0127 decision 5); a re-derivation first needs a new GPU
+  dump step.
+- **Re-capturing the fake-quant golden.** The golden (`io-i8a8.<case>`) SHOULD NOT be re-captured
+  on another machine's CPU; if it is, the first-tier tolerance is re-derived with it
+  (re-graded 2026-10-18 to SHOULD: the strict first tier depends on the rounding direction of the
+  CPU that captured the golden — on the new CPU output.1 of case0 / padded moves by 1.285e-3 — but
+  the machine that captured it is gone, and the comparison is opt-in).

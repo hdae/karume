@@ -1,8 +1,9 @@
 # 0072: SBV2 テキスト層の外部注入席 — overlay 辞書と given_tone
 
-- Status: superseded by [0079](0079-sbv2-two-layer-input.md)（2026-08-25 — 0.6.0 で注入席一式を
-  2 層入力へ再設計・シム無しに撤去。下の追記が範囲。初版の採択は 2026-08-20 ユーザー裁定
-  「両方でお願いします」）
+- Status: superseded by [0079](0079-sbv2-two-layer-input.md) (2026-08-25 — 0.6.0 redesigned the
+  injection slots as the two-layer input and removed them without a shim; the addenda below mark the
+  scope. The first version was adopted on 2026-08-20 by the maintainer's ruling "both, please". Not
+  translated: a superseded record, kept in Japanese — ADR 0130 decision 6.)
 - Date: 2026-08-20
 - 関連: ADR [0008](0008-public-api.md)（薄い公開面 — 本 ADR は追記後の実態で 1 メソッド +
   4 型 + 1 エラークラスを追加）/ [0039](0039-sbv2-distribution.md)（決定 6 — 辞書取得の

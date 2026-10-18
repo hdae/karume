@@ -1,18 +1,18 @@
 # 0038: 配布 manifest v1 と hub の取得層
 
-- Status: superseded by [0041](0041-manifest-v2.md)（2026-08-08 — manifest v1 は v2
-  〈`karume/2`〉が全面置換。v1 パーサは持たない。本文は「なぜ現在形へ移ったか」を説明する
-  当時の記録として保存 — §4 の Anima 配布形〈S 形のみ + 常時 tiling〉と §5 の取得層
-  〈`@hdae/fetch-cache`〉は引き続き現行の正本）
-- 訂正（2026-09-05）: 上の「§5 は引き続き現行の正本」は**取得元非依存の契約に限る**。§5 が
-  並べた接続契約のうち**取得元固有の 4 点**（`verifying` フェーズ / `karume/1` 系キャッシュ
-  名前空間と credential 隔離 / キャッシュヒット毎の全量 sha256 / 依存 pin `^0.3`）は ADR
-  [0080](0080-hub-fetch-cache-050.md) で撤去・変更済みで、§5 の該当箇所に個別の打ち消しを
-  置いた。取得元非依存の契約（進捗の算出と `AbortSignal` の透過・同時取得数と in-flight
-  バイト予算・資産の読み手へ渡す前の tight view 検査〈`packages/hub/src/fetch.ts` の
-  `assertTightView`〉・エラーの形と利用可能ラベル・`onCacheError` のアプリ配達）は追記
-  2026-08-31 のとおり §5 のまま全取得元に掛かる。
-- Date: 2026-08-05（pre-mortem 3 レンズ・44 指摘を反映した改訂版）
+- Status: superseded by [0041](0041-manifest-v2.md) (2026-08-08 — manifest v2 `karume/2` replaced
+  v1 completely; no v1 parser is kept. The body is preserved as the record of why the current form
+  was adopted. Still canonical: §4, the Anima distribution form (S-shaped graphs only, always tiled),
+  and the source-independent part of §5, the fetch layer `@hdae/fetch-cache`. Correction 2026-09-05:
+  the four source-specific points of §5 — the `verifying` phase, the `karume/1` cache namespace with
+  credential isolation, the full sha256 on every cache hit, and the `^0.3` pin — were removed or
+  changed by [0080](0080-hub-fetch-cache-050.md), with a note at each place in §5; the
+  source-independent contract (progress and `AbortSignal` pass-through, the concurrency and in-flight
+  byte budget, the tight-view check before an asset reaches its reader — `assertTightView` in
+  `packages/hub/src/fetch.ts` —, the error shape and availability label, `onCacheError` delivery)
+  applies to every source as the addendum of 2026-08-31 states. Not translated: a superseded record,
+  kept in Japanese — ADR 0130 decision 6.)
+- Date: 2026-08-05 (revision after a three-lens pre-mortem, 44 findings)
 - 関連: ADR [0037](0037-karume-monorepo.md)（配布形の親決定）/
   [0033](0033-vae-fixed-tile-decode.md)（タイル VAE）/
   [0034](0034-dit-dynamic-tokens.md)（S 形 DiT）/ 当時の `docs/ir-v1.md`（現 [docs/ir-v2.md](../ir-v2.md) の前身・`2960ce37^` の版）（コンテナ規約）

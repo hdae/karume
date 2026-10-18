@@ -1,113 +1,104 @@
-# 0005 — 検証戦略（Deno GPU CI を一級成果物に）
+# 0005: Verification strategy (real-GPU tests as a first-class deliverable)
 
-- Status: accepted（2026-08-01）
-- 根拠資料: recon §1/§8/§9-2。先行実験プロジェクト（以下プロトタイプ）最大の検証の穴は
-  「WGSL カーネルの数値検証が自動テストに無い」ことで、プロトタイプ自身が Deno CI を
-  本筋の解と明記。本環境（Deno 2.9.4 + RTX 3080 Ti、
-  フラグ無しで WebGPU 動作、shader-f16 / timestamp-query 有効）で実行可能なことを実測済み。
+- Status: accepted (2026-08-01); partly superseded by [0127](0127-node-dawn-toolchain.md) decision 1
+  (the real-GPU stage runs under Vitest on Node + Dawn, not `deno test`) and
+  [0129](0129-test-layout-and-lanes.md) decision 2 (lanes come from one table), ruled 2026-10-18,
+  effective when those proposed ADRs are accepted. The stages and rules below are in force (ADR 0129
+  decision 3 keeps them).
+- Date: 2026-08-01
+- Related: recon §1 / §8 / §9-2 — the prototype's largest gap was no automated numeric test of its
+  WGSL kernels; Deno 2.9.4 + RTX 3080 Ti (WebGPU without flags, `shader-f16`, `timestamp-query`) was
+  measured to run them.
 
-## 決定
+## Decision
 
-検証は三段 + 受け入れの構成とし、**実 GPU の数値検証を CI（`deno test`）に含める**。
+Verification has three stages plus acceptance, and **real-GPU numeric verification is part of the
+automated suite** (`deno test` then — *superseded by ADR 0127 decision 1 on 2026-10-18: Vitest on
+Node + Dawn*).
 
-1. **WGSL スナップショット** — codegen 決定性（バイト単位同一）を固定する。
-2. **CPU 参照実装との allclose** — 判定は常に `|x−y| ≤ atol + rtol·|ref|`
-   （相対誤差のみは禁止）。NaN / Inf は不合格。GPU 不要でどこでも走る。
-3. **実 GPU golden 突合**（Deno + 実ハードウェア）— op 単位・グラフ単位で torch 由来の
-   ゴールデンと突合する。op を 1 個足すたびにここへテストを足すことを実装契約にする。
-4. **実ブラウザ受け入れレーン** — examples/ 側のハーネスで手動実行（自動化しない）。
-   Dawn ≠ wgpu の実装差（丸め・features）はここで受け止める。
+1. **WGSL snapshots** pin codegen determinism (byte-identical output).
+2. **allclose against the CPU reference implementation**, always `|x−y| ≤ atol + rtol·|ref|`
+   (relative error alone is forbidden); NaN / Inf fail. Needs no GPU.
+3. **Real-GPU golden comparison** (Deno + real hardware — *superseded by ADR 0127 decision 1 on
+   2026-10-18: Node + Dawn*), per op and per graph, against torch-derived goldens. A torch-derived
+   golden per new op SHOULD be added; the required evidence for a new op is the TypeScript oracle
+   (ADR [0129](0129-test-layout-and-lanes.md) decision 3) *(re-graded 2026-10-18 to SHOULD: ruling 5a)*.
+4. **Real-browser acceptance lane**, run by hand; it MAY be automated *(re-graded 2026-10-18 to MAY:
+   the browser is now the primary target and the `examples/` harness left the tree with ADR 0127
+   decision 5; its new home is an ADR 0127 open point)*. Dawn / wgpu differences (rounding,
+   features) are caught here.
 
-### 規律（プロトタイプから継承）
+### Rules (inherited from the prototype)
 
-- 全ケース SKIP は明示 FAIL（無音の見かけ成功を防ぐ）。
-- エクスポータの emit 集合 ⊆ ランタイム実行可能集合を**dtype 組込みの契約テーブル**で
-  突合する（op 名のみの突合は f32 sum 事故を見逃した）。
-- 「型が通った」≠「同じ数値が出る」— 移植・カーネル変更は必ず段 3 を通す。
-- GPU テストは環境により縮退する（アダプタ無し環境では段 3 を SKIP と明示表示するが、
-  リリース判定は段 3 緑を必須とする）。
+- An all-SKIP run is an explicit FAIL (no silent apparent success).
+- The exporter's emitted set ⊆ the runtime's executable set is checked against a **contract table
+  that includes dtypes** (op names alone missed the f32 `sum` incident).
+- "It type-checks" ≠ "it computes the same numbers": every port and kernel change MUST pass stage 3.
+- Without an adapter stage 3 shows as SKIP, but a release MUST have stage 3 green.
 
-## 帰結
+## Consequences
 
-- CI マトリクスに「バックエンド × dtype 経路」の緑条件を定義する必要がある
-  （lavapipe 等ソフトウェアアダプタは f16 を f32 計算するため、実 HW レーンと区別する）。
-  具体値は M0 実測後に追記する。
-- 追記（2026-09-05）: リリース判定機は `shader-f16` と `timestamp-query` を列挙するアダプタで
-  あること。列挙しない機で verify を通すには `KARUME_ALLOW_NO_SHADER_F16=1` /
-  `KARUME_ALLOW_NO_TIMESTAMP_QUERY=1` を意図表明として設定する（既定は
-  `packages/runtime/tests/gpu_gate_test.ts` が全 SKIP を FAIL にする）。実資産不在も同形で
-  `assets_gate_test.ts` が FAIL にし、opt-out は `KARUME_ALLOW_NO_ASSETS=1`。これらを設定した
-  環境の緑はリリース判定に使わない（[release-runbook](../release-runbook.md) §1）。
+- Withdrawn 2026-10-18: the planned "backend × dtype path" CI matrix with software adapters
+  (lavapipe) was never defined; CI runs the core lane without a GPU (`.github/workflows/ci.yml`).
+- Added 2026-09-05: a release machine's adapter MUST list `shader-f16` and `timestamp-query`.
+  Elsewhere `KARUME_ALLOW_NO_SHADER_F16=1` / `KARUME_ALLOW_NO_TIMESTAMP_QUERY=1` (and
+  `KARUME_ALLOW_NO_GPU=1` without an adapter) state the intent; by default
+  `packages/runtime/tests/gpu_gate_test.ts` fails the all-SKIP. Missing real-weight assets fail the
+  same way in `packages/e2e/tests/e2e_assets_gate_test.ts` (`KARUME_ALLOW_NO_ASSETS=1`). A green run
+  with any opt-out is not release evidence ([release-runbook](../release-runbook.md) §1).
 
-## 追記（2026-09-20）— テストレーン（実行単位の分割）
+## Addendum (2026-09-20) — test lanes (splitting the run into units)
 
-フル `deno test -A` は 30 分を超え、その大半は**モデル系列ごとの e2e**（`e2e_*_test.ts` 39 本 —
-実重み・実 GPU）に集中する。1 系列に閉じる変更のたびに他系列の e2e まで払うのは、時間の 9 割を
-関係の無い検査に使うことなので、`deno.json` の task を実行単位に分けた。**分けたのは実行単位
-だけで、検証戦略（上の 4 段と規律）は変えていない** — フル verify は横断変更とリリース前の
-最終確認として今のまま残る。
+The full run took over 30 minutes, mostly in per-family e2e tests (real weights, real GPU), so the
+suite was split into lanes. **Only the unit of execution changed; the stages and rules did not.**
 
-- **粒度**: `test:core`（runtime / hub / 共通層 + tools + examples）と `test:models:<系列>`
-  （anima / sbv2 / irodori / gemma4 / gemma4-qat / birefnet / depth-anything / siglip2 /
-  vowel-detector / minicpm5 / embeddinggemma / deberta / dacvae）。系列名は配布形の綴りに揃える
-  （テストファイル名もそれに追随させた — `gemma_*_test.ts` → `gemma4_*_test.ts` 他）。
-- **門番は core だけ**: `gpu_gate` / `assets_gate` / `distribution_gate` は全 SKIP を FAIL に
-  する門で、系列とは無関係に配布形を要求する（`distribution_gate` の射程は、2026-09-25 裁定で**公開済み 10 リポの
-  全ミラー** + `karume-gemma4-qat`〈未公開だが QAT の公開入口 e2e と融合ヒット数の検査が根にする〉へ広げた。
-  配布形ミラーを根にする実資産 e2e と、`assets_fusion_counts_test.ts` の融合ヒット数の配布形節〈anima /
-  anima-extra / irodori / gemma4 / gemma4-qat〉の無音 SKIP を塞ぐため。e2e がまだ読まないミラーも載せる —
-  e2e を足した日に門番の更新を忘れても無音 SKIP が戻らないように。未公開の vowel-detector は配布形を作ってから載せる。
-  見るのは manifest が `karume/5` であることと既定選択の part の実在・長さで、失敗文言は各ミラーの作り方
-  〈`tools/export-recipes` の `dist.py`・越境参照で焼く anima-extra は release-runbook〉と opt-out
-  `KARUME_ALLOW_NO_DISTRIBUTION=1` を案内する。2026-09-24 までの射程は gemma4 系 2 本だけだった）。
-  manifest の parse と既定選択の検査の射程は、名簿ではなく `models/` の子ディレクトリ全部
-  （`karume dist` の作業席 `.staging` / `.old` を除く）を配置から導く（2026-10-11 裁定 — 名簿へ
-  足していない新しい配布形も hub の parser に通すため。`karume.json` の無い子ディレクトリは FAIL）。
-  名簿が担うのは「在るべきミラーが無い」の検出だけ。
-  系列レーンに同梱すると、その系列と関係の無い資産の不在でレーンが赤くなる。
-- **被覆の門**: レーン分割の唯一の危険は「テストを足したのにどのレーンにも入らない」形で、
-  これは無音で通る（レーン実行では一度も走らず、フル verify でしか現れない）。
-  `packages/runtime/tests/verify_lanes_test.ts` が `deno.json` の task 文字列を真実源として
-  ①core ∪ 全レーン = リポの全 `*_test.ts` ②core と系列レーンは互いに素 ③各レーンは 1 本以上、
-  を見る。task 文字列が想定の形（`deno test -A <対象…> [--ignore=<glob,…>]`）から外れたら
-  推測せず throw する。
-- **系列レーンどうしの重複は許す**: 通常配布形と QAT 配布形の両方を読むファイル
-  （`e2e_gemma4_ple_gpu_test.ts`）は gemma4 と gemma4-qat の両レーンに入れる。被覆漏れは
-  許さないが、重複は 2 度払うだけで結論を変えない。
-- **リリース判定は従来どおりフル verify の緑**（レーンの緑の寄せ集めでは代えない — レーンは
-  互いに素だが、同一プロセスでの相互作用と実行順はフルでしか見ていない）。
+- **Granularity**: `core` (runtime, hub, shared layers, tools) and one lane per model family, named
+  after the distribution spelling (list: `packages/test-support/src/lanes.ts`; run one with
+  `vp test --project <lane>`).
+- **The all-skip guards are in core only** (`gpu_gate`, the assets gate, `distribution_gate`): they
+  require assets regardless of family, so a family lane would turn red on unrelated missing assets.
+  `distribution_gate` derives the scope of its manifest check from every child directory of
+  `models/` (ruling of 2026-10-11; a child without `karume.json` fails); its roster only detects a
+  mirror that should exist and does not (`packages/runtime/tests/distribution_gate_test.ts`).
+- **Coverage check**: the one danger of lanes is a test no lane runs, which passes silently.
+  `packages/runtime/tests/verify_lanes_test.ts` checks core ∪ all lanes = every test file, core
+  disjoint from the family lanes, and every lane non-empty. It read the `deno.json` task strings and
+  threw on an unexpected form *(superseded by ADR 0129 decision 2 on 2026-10-18: it reads the lane
+  table; the three conditions are unchanged)*.
+- **Family lanes may overlap** (`e2e_gemma4_ple_gpu_test.ts` is in both gemma4 lanes): a gap is not
+  allowed, an overlap only runs twice.
+- **A release needs one green full run** (`vp test`, release-runbook §1): only the full run covers
+  interaction within one process and run order. Whether a union of lane runs may replace it is open
+  (ADR 0129 Open points).
 
-## 追記（2026-09-20）— 参照門（sha256 参照値が無いままの全 SKIP を FAIL にする）
+## Addendum (2026-09-20) — reference guard (an all-SKIP of sha256 rows fails)
 
-sha256 参照値は**環境キーごとの行**になった（ADR [0106](0106-device-keyed-references.md)）ので、
-「この機の行がまだ 1 件も無い」状態が新しく生まれる。そのとき sha 門は全ケース明示 SKIP になるが、
-これを無音の緑にすると「検証していないもの」を「検証済み」と誤読させる — 上の規律「全ケース SKIP は
-明示 FAIL」そのものの形なので、**門番の並びに参照門を加える**。
+sha256 reference values are rows per environment key (ADR [0106](0106-device-keyed-references.md)),
+so a machine can have no row yet; every sha256 regression check is then an explicit SKIP, and a
+silent green would read "not verified" as "verified".
 
-- **参照門**（`registerReferenceGate` — sha256 参照値を持つ e2e 3 本の末尾に 1 本ずつ）: 現環境の行が
-  1 件も無く、かつ作るモード（`KARUME_REFERENCE`）でもないなら FAIL（2026-10-03 の改定で「登録した全ケースに現環境の行があるか、
-  無い id は held」が緑の条件 — ADR 0106 追記）。opt-out は
-  `KARUME_ALLOW_NO_REFERENCE=1` で、`KARUME_ALLOW_NO_SHADER_F16` などと同じ意図表明の席。
-  GPU も実資産も無くて sha 門自体が走らない環境では、この門番も鳴らさない。
-- **レーンとの関係**: 門番 3 本（`gpu_gate` / `assets_gate` / `distribution_gate`）は core にしか無いので
-  **系列レーンを単独で回すと走らない**。一方、参照門は系列ごとの e2e ファイルに同梱されるので、
-  `deno task test:models:<系列>` でも必ず一緒に走る（その系列の参照値の有無はその系列のレーンが見る）。
+- **Reference guard** (`registerReferenceGate`, `packages/runtime/tests/helpers/reference.ts`; at the
+  end of every e2e file with sha256 rows — 3 then, 13 on 2026-10-18): FAIL when the current
+  environment has no row and the run is not writing rows (`KARUME_REFERENCE`). Since 2026-10-03,
+  green means every registered case has a row here or its id is held (ADR 0106 addendum). Opt-out
+  `KARUME_ALLOW_NO_REFERENCE=1`. Without a GPU and assets the sha256 checks and the guard do not run.
+- **Relation to lanes**: the three core guards do not run in a family lane, but the reference guard
+  lives in the family's e2e files, so `vp test --project models:<family>` always runs it.
 
-## 追記（2026-10-11）— 上流との一致の方針（利用者の方針）
+## Addendum (2026-10-11) — upstream parity (the maintainer's policy)
 
-上流（参照実装）との一致は、次の方針で扱う。
-
-- **一致の水準**: 計算結果の数値の水準、または数値の意図の水準で取れていればよい。上流のミス・バグ・
-  速度のための精度の選択までは写さない（例: BiRefNet の後処理は上流の切り捨てと半精度を写さず、
-  補間のカーネルと段の順序を写す — ADR [0125](0125-birefnet-matte-postprocess.md)）。
-- **上流に問題があるとき**: 上流が常に正しく適切な処理をしているとは限らない。上流の処理に問題が
-  ある（品質の劣化・バグ・環境での破綻を示せる）ときは、回避策を公開のオプションで用意する。回避策の
-  ほうが優れていれば、それを既定にしてよい。問題が無ければ上流に合わせ、選択のオプションは足さない
-  （使いどころの無い選択肢で公開面を増やさない — ADR [0008](0008-public-api.md)）。
-- **上流に合わせると決めた処理**: できるだけ上流と一致させられる形にする（上流の関数そのものから作る
-  golden で突き合わせられる形）。実装上現実的でない場合は必須ではなく、別の方法で正しさを示す（例: f64 の
-  参照と正規化比の帯 — ADR [0118](0118-wan21-video-generation.md) 決定 8）。
-- **理由**: 上流と 100% 一致させることは、実装の初期に信頼性が低かった頃、テストしやすくするための手段
-  だった。実用の段階に入った今は高速化の比重が大きく、一致を 100% 守る旨みは小さい（できるならやる）。
-- **sha 門との関係**: sha256 の参照値（ADR [0106](0106-device-keyed-references.md)）は karume 自身の出力の
-  回帰を縛る門で、上流との一致とは別のもの。tolerance 化の禁止は変わらない。
+- **Level**: agreement in the computed numbers, or in their intent, is enough. Upstream mistakes,
+  bugs and precision choices made for speed are not copied (BiRefNet ports upstream's interpolation
+  kernels and step order, not its truncation and half precision — ADR
+  [0125](0125-birefnet-matte-postprocess.md)).
+- **When upstream has a demonstrable problem** (quality loss, a bug, breakage in some environment),
+  a workaround is offered as a public option and MAY become the default when better. Otherwise
+  Karume follows upstream and adds no option (ADR [0008](0008-public-api.md)).
+- **What follows upstream** is built to be compared with goldens from upstream's own functions
+  where practical; otherwise correctness is shown another way (f64 reference with normalised-ratio
+  bands — ADR [0118](0118-wan21-video-generation.md) decision 8).
+- **Why**: exact agreement was a means to make an early, untrusted implementation testable; with
+  speed weighing more now, 100 % agreement is worth little (done when possible).
+- sha256 regression checks (ADR 0106) guard Karume's own output, separately from upstream parity,
+  and MUST NOT become tolerances. In the suite, upstream-parity cases run only with
+  `KARUME_UPSTREAM_PARITY=1` (ADR 0129 addendum 2026-10-17 (2)).

@@ -1,84 +1,77 @@
-# 0006 — 量子化の意味論と初期対応範囲
+# 0006: Quantization semantics and the initial scope
 
-- Status: accepted（2026-08-01）
-- 改訂（「格納のみ量子化・計算は f32」の骨格は現行）: ADR
-  [0009](0009-dtype-i32-bool.md) — 「IR の宣言 dtype は常に f32」は意味論 i32 / bool の
-  解禁で当時の値になった / ADR [0031](0031-attention-score-f16-storage.md) 決定 7 —
-  「活性 f16: 不採用」を attention スコア S の**格納に限定して**上書き。骨格の射程（計算側の
-  opt-in と QAT の固定 SRQ）と、storage 記述の置き場の移転（ADR 0108）は末尾の追記。
-- 根拠資料: recon §6。方式の採否は先行実験プロジェクト（以下プロトタイプ）の実測裁定
-  （試聴・SNR・精度ゲート）を継承。
+- Status: accepted (2026-08-01); partly superseded by [0009](0009-dtype-i32-bool.md) (2026-08-02:
+  the declared IR dtype is no longer always f32), by [0028](0028-f16-compute-variants.md) /
+  [0031](0031-attention-score-f16-storage.md) decision 7 / [0110](0110-practical-tier-numerics-contract.md)
+  (activation f16 as an opt-in) and by [0025](0025-w8a8-linear-execution.md) decision 5 (no startup
+  benchmark for w8a8). Storage-only quantization with f32 compute on the reference path is in force.
+- Date: 2026-08-01
+- Related: [0003](0003-ir-v1.md) / [0019](0019-i8-weight-execution.md) /
+  [0069](0069-packed-w4-storage.md) / [0108](0108-container-format.md) /
+  [docs/quantization.md](../quantization.md) (index of storage dtypes and presets). Sources: the
+  prototype recon ([../research/2026-08-01-prototype-recon.md](../research/2026-08-01-prototype-recon.md)
+  §6); the adopted methods follow the prototype's measured rulings (listening, SNR, accuracy checks).
 
-## 決定
+## Decision
 
-- 意味論は **「格納のみ量子化・計算は f32」**。IR の宣言 dtype は常に f32 で、
-  量子化は initializer の storage 記述（0003）に閉じる。グラフ意味論を汚さない。
-- 検証は **エクスポータ側 fake-quant** を正とする: 重みを量子化表現可能値へ丸めてから
-  export・ゴールデン生成し、量子化誤差と実装誤差を分離する。格納時に dequant ビット一致を
-  検査する。
-- 初期対応: **f16 と w8（i8 + per-channel f32 scale、`unpack4xI8`、feature 依存ゼロ）**。
-- **bias（および折り畳み定数）は常に f32 で読む**。低精度適格判定に bias を含めない —
-  プロトタイプの f16 降格バグ（bias の f32 定数が weight を道連れにし、1024px DiT で適格 0MB・
-  ロード 32 秒・VRAM 節約ゼロ）の根治形。
-- 量子化対象の突合は **FQN（state_dict キー）+ 期待本数照合**。`id(tensor)` 同一性には
-  依存しない（torch.export の実装事情に乗った時限爆弾）。
-- **診断を常設**: 適格バイト数 / CPU 展開バイト数を初期化時に取得できるようにする
-  （「f16 指定なのに適格 0MB」を沈黙させない）。
+- The semantics are **storage-only quantization with f32 compute**. Quantization is confined to the
+  storage description of the initializers (ADR 0003) and stays out of the graph semantics. (The
+  declared IR dtype being always f32 was superseded by ADR 0009's semantic i32 and bool.)
+- **Exporter-side fake-quant** is the reference for verification: weights are rounded to
+  representable values before export and golden generation, which separates quantization error from
+  implementation error. Storing a weight checks that dequantization is bit-identical.
+- Initial scope (2026-08-01): **f16 and w8** (i8 with a per-channel f32 scale, `unpack4xI8`, no
+  feature dependency). The current storage dtypes (`i4` — ADR 0069, `bf16` — ADR
+  [0131](0131-bf16-weight-execution.md), the QAT integer formats — ADR
+  [0097](0097-gemma4-qat-integration.md)) are indexed in [docs/quantization.md](../quantization.md).
+- **Bias (and folded constants) are always read as f32** and are not part of the low-precision
+  eligibility check. This is the root fix for a prototype bug: an f32 bias dragged its weight out of
+  f16, so a 1024px DiT had 0 MB eligible, a 32 s load and no VRAM saving.
+- Quantization targets are matched by **FQN (`state_dict` key) plus the expected count**. The match
+  MUST NOT rely on `id(tensor)` identity, an implementation detail of `torch.export`.
+- **The diagnostics are permanent**: the eligible bytes and the bytes expanded on the CPU are
+  available after initialization, so "f16 requested but 0 MB eligible" is never silent (today
+  `Session.diagnostics().storage` — `packages/runtime/src/runtime/session-types.ts`).
 
-## VRAM への効果（プロトタイプ実測で確認済み — 詳細は research/2026-08-01-quant-vram.md）
+## VRAM effect (measured on the prototype)
 
-- 格納 dtype は **GPU 上の重みバッファにもそのまま適用される**（適格重みは圧縮のまま
-  writeBuffer し、dequant はカーネル内）。適格重みの VRAM は f16 ≈ 1/2・w8 ≈ 1/4
-  （+ per-channel scale の小バッファ）。「格納のみ量子化」は配信サイズだけの話ではない。
-- 適格外の重みはアップロード時に CPU で f32 展開され、**VRAM 削減はゼロ**
-  （配信サイズのみ縮む）。診断の常設（上記）はこのため。
-- プロトタイプの実測（Anima 1024px）: ピーク 15,690 → 12,483 MiB（−3.2GB）は **w8 による
-  削減**。f16 は降格バグで適格 0MB のため寄与せず、attention 融合が下げたのは中間バッファ
-  会計（2,214.6 → 302.0MB）でピーク（DiT ロード時 = 重み側）の主因ではない。
-  なお −3.2GB は「壊れた f16」比であり、f16 修正後想定比では w8 の上積みは約 1.8GB
-  （期待値は「w8 = f32 比 ≈1/4・正常な f16 比 ≈1/2」と等級を分けて扱う）。
-- 制約: プロトタイプでは conv2d に w8 変種が無く、conv 主体部（VAE 等）の VRAM 削減は
-  f16 頼みだった。Karume での conv 系 w8 対応は op 拡張時に判断する。
+The storage dtype also applies to the GPU weight buffers: eligible weights take ≈ 1/2 (f16) or ≈ 1/4
+(w8) of the f32 VRAM; ineligible weights are expanded to f32 on the CPU and save no VRAM. Details:
+[../research/2026-08-01-quant-vram.md](../research/2026-08-01-quant-vram.md).
 
-## 不採用・保留（プロトタイプ実測裁定の継承）
+## Not adopted or deferred (inherited from the prototype's measured rulings)
 
-- per-tensor i8: 却下（音声品質不足）。
-- 素朴 RTN w4: 不成立（SNR −1.5〜+5.1dB）。group-wise w4 機構は低優先 backlog。
-  〔訂正（2026-08-18 — ADR 0069 決定 1）: −1.5〜+5.1dB は **int4 group の実測**（0019 側の
-  帰属が正）で、素朴 RTN への帰属は不正確。group-wise w4 は 0069 で格納 `i4` として解禁済み〕
-- w8a8（DP4a、GEMM 4.73× の候補）: 保留。DP4a は言語機能列挙が HW 対応と無関係のため
-  **起動時マイクロベンチの実測で経路選択**し、精度ゲート定義とセットで個別 ADR にする。
-- 活性 f16: 不採用（検証の切り分けが濁る）。
+- Per-tensor i8 SHOULD NOT be used (re-graded 2026-10-18 to SHOULD NOT: the rejection rests on one
+  measurement of one model — SBV2 voice, SNR 4.7–5.7 dB — and ADR 0069 decision 1 already limited
+  the same kind of rejection of w4 to its measurement).
+- w4: rejected at the time (SNR −1.5 to +5.1 dB, measured on int4 group quantization — attribution
+  corrected 2026-08-18 by ADR 0069 decision 1). Group-wise w4 is enabled as storage `i4` by ADR 0069.
+- w8a8 (DP4a): deferred at the time; implemented as an opt-in by ADR 0025. No startup benchmark: the
+  dp4a and emulated variants are bit-identical, so ADR 0025 decision 5 picks one by
+  `wgslLanguageFeatures`, for speed only.
+- Activation f16: not adopted, because it blurs the separation of errors (superseded by ADR 0028 /
+  0031 decision 7 / 0110, recorded 2026-10-18: not adopted on the reference path; allowed as an opt-in).
 
-## 追記（2026-09-24）— storage 記述の置き場は ADR 0108 が上書きした
+## Addendum (2026-09-24) — the storage description moved to the container
 
-決定 1 の「量子化は initializer の storage 記述（0003）に閉じる」の**置き場**は、ADR
-[0108](0108-container-format.md) 決定 17（IR v2 = IR v1 − `storage`）で、グラフ JSON から
-コンテナの束縛表の `encoding`（codec 台帳の登録名・`rowAxis` / `groupSize` / `scale`）へ移った。
-量子化がグラフの外（格納の記述）に閉じるという構造は不変で、格納の記述がグラフから束縛表へ
-出ただけである。数値の契約（格納のみ量子化・計算は f32・i8 は ±127 対称 per-channel・
-bias は f32）は変えない。
+ADR 0108 decision 17 (IR v2 = IR v1 − `storage`) moved the storage description from the graph JSON
+to the `encoding` of the container's binding table. Quantization stays outside the graph; the
+numeric contract (storage-only, f32 compute, symmetric ±127 per-channel i8, f32 bias) is unchanged.
 
-## 追記（2026-09-24）— 骨格の射程（既定経路・計算側の opt-in・QAT）
+## Addendum (2026-09-24) — the reach of the core decision
 
-本 ADR の骨格「格納のみ量子化・計算は f32・量子化はグラフ意味論に入れない」は、次の 3 層の
-うち**既定経路**の決定として読む。後続の決定はこの骨格の外側に立つが、骨格を覆してはいない。
+The core of this ADR is the decision for the **reference path**. Later decisions stand outside it
+without overturning it:
 
-- **既定経路（本 ADR）**: 格納のみ量子化・f32 計算。runtime の `SessionOptions` の実行変種は
-  全て既定が f32 の参照経路（ADR [0058](0058-numerics-opt-in-contract.md) の一般契約）。
-- **計算側の opt-in の実行ノブ**: 活性や計算精度を落とす変種は、グラフを変えない実行時の
-  named option として足す — w8a8 の `linearCompute: "i8a8"`（ADR
-  [0025](0025-w8a8-linear-execution.md)）・f16 計算変種 `:c16`（ADR
-  [0028](0028-f16-compute-variants.md)）・attention a8（ADR
-  [0030](0030-attention-a8-execution.md)）・w4a8（ADR [0076](0076-w4a8-linear-execution.md)）・
-  固定 SRQ 活性の packed int8 受け渡し（ADR [0105](0105-packed-static-quantize-activations.md)）。
-  配布資産側が既定の実行形を選ぶ場合も manifest の quant 席が宣言する（グラフは不変）。
-- **QAT の固定 SRQ はモデル自身の意味論**: 公式 QAT の活性の丸めは学習時からモデルの計算の
-  一部なので、IR op `static_quantize` として**グラフに入る**（ADR
-  [0097](0097-gemma4-qat-integration.md) 追記 2・ADR 0108 決定 17「QAT は別グラフのまま」）。
-  PTQ の格納（本 ADR の射程）とは別物で、ADR 0025 決定 1 が IR op 化を却下した理由
-  （「量子化はグラフ意味論に入らない」）は PTQ の実行ノブにだけ掛かる。
-
-不採用・保留節の「w8a8 … 起動時マイクロベンチの実測で経路選択」は当時の予告で、実装は
-ADR 0025 決定 5（dp4a とエミュの 2 変種は数値完全一致なので、`wgslLanguageFeatures` の列挙で
-速度のためにだけ選ぶ — 起動時ベンチは行わない）が正本である。
+- **Reference path (this ADR)**: storage-only quantization, f32 compute. Every execution variant of
+  `SessionOptions` defaults to the f32 reference path (ADR [0058](0058-numerics-opt-in-contract.md)).
+- **Opt-in compute options**: variants that lower activation or compute precision are named runtime
+  options that leave the graph unchanged — `linearCompute: "a8"` (ADR 0025), the f16 compute variant
+  `:c16` (ADR 0028), attention a8 (ADR [0030](0030-attention-a8-execution.md)), w4a8 (ADR
+  [0076](0076-w4a8-linear-execution.md)), packed int8 static SRQ activations (ADR
+  [0105](0105-packed-static-quantize-activations.md)). A distribution that chooses a default
+  execution form declares it in the manifest's preset; the graph stays unchanged.
+- **The static SRQ of QAT is the model's own semantics**: the activation rounding of an official QAT
+  model is part of its computation since training, so it enters the graph as the IR op
+  `static_quantize` (ADR 0097 addendum 2; ADR 0108 decision 17). It is not PTQ storage; ADR 0025
+  decision 1's reason against an IR op applies only to PTQ execution options.

@@ -14,6 +14,8 @@ import {
   slugOf,
 } from "../check-doc-links.ts";
 
+const MARKER = ["DECIDED", ":"].join("");
+
 describe("slugOf / headingSlugs", () => {
   it("follows GitHub's rule, including Japanese headings and duplicates", () => {
     assertEquals(slugOf("Second heading"), "second-heading");
@@ -38,8 +40,9 @@ describe("linkTargets / decidedPointers", () => {
   });
 
   it("extracts decision-record paths and ADR numbers from DECIDED: lines only", () => {
+    // The marker is assembled so that the repository-wide check does not read this test as a pointer.
     const source =
-      "// DECIDED: docs/decisions/0042-plan.md#追記 and ADR 0058 決定 2\n// see ADR 0001 (not a pointer)\n";
+      `// ${MARKER} docs/decisions/0042-plan.md#追記 and ADR 0058 決定 2\n// see ADR 0001 (not a pointer)\n`;
     assertEquals(
       decidedPointers(source).map((t) => t.target),
       ["docs/decisions/0042-plan.md#追記", "adr:0058"],
@@ -74,7 +77,7 @@ describe("checkLinks", () => {
     );
     await writeTextFile(
       `${root}/src/x.ts`,
-      "// DECIDED: ADR 0001\n// DECIDED: docs/decisions/0001-first.md#first\n// DECIDED: ADR 0999\n",
+      `// ${MARKER} ADR 0001\n// ${MARKER} docs/decisions/0001-first.md#first\n// ${MARKER} ADR 0999\n`,
     );
   });
 

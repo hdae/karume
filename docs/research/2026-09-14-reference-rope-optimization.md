@@ -90,7 +90,7 @@ recipe builderも別名の場合はstrided copyを発行しない。
 両E2BのM=1/4/8/32/40/64、12プランのJSON全体は、この保護の前後で同一だった。
 証跡は`outputs/bench/karume/2026-09-14_23-16-03_permute-owned-plan-equivalence-wsuqhwo_/`。
 IR・dtype対応・公開設定・数値演算・量子化の既定は変更しない。
-[ADR 0011追記](../decisions/0011-layout-strategy.md#要素順を保つpermute2026-09-14)を正本とする。
+[ADR 0011追記](../decisions/0011-layout-strategy.md#addendum-2026-09-14--permute-that-keeps-element-order)を正本とする。
 
 | 実験                              | 通常 基準→候補 tok/s |    変化 | QAT 基準→候補 tok/s |    変化 |
 | --------------------------------- | -------------------: | ------: | ------------------: | ------: |

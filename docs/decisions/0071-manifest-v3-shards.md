@@ -1,10 +1,11 @@
 # 0071: manifest `karume/3` — dtype エントリの shard 欄
 
-- Status: superseded by [0109](0109-manifest-v5-container.md)（2026-09-22 — dtype エントリは
-  `{ container }`・`shards` / `extras` は退役。決定 3〈dtype ラベルは開語彙の選択子〉は 0109 の
-  前提として存続）。当初は accepted（2026-08-20 — ユーザー裁定「karume/3 へ format bump +
-  shards 単一形」。release 波の R1 のうち **HF 公開前締切ぶんの先行実施**〈同日のユーザー裁定 —
-  release 節「後回し（2026-08-19）」の部分変更〉）
+- Status: superseded by [0109](0109-manifest-v5-container.md) (2026-09-22 — dtype entries became
+  `{ container }` and `shards` / `extras` were retired; decision 3 — dtype labels as selectors of an
+  open vocabulary — lives on as a premise of 0109. Originally accepted on 2026-08-20 by the
+  maintainer's ruling "format bump to karume/3 + a single shards form", as the part of release item R1
+  that had to land before the HF publication. Not translated: a superseded record, kept in Japanese —
+  ADR 0130 decision 6.)
 - Date: 2026-08-20
 - 関連: ADR [0041](0041-manifest-v2.md)（manifest v2 — 本 ADR が format を上書き）/
   [0070](0070-shard-loading-admission.md)（shard ローダ契約の正本 — 決定 1 が本欄を予約）/

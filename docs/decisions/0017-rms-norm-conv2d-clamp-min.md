@@ -1,70 +1,69 @@
-# 0017 — 語彙拡張: rms_norm / conv2d / clamp_min
+# 0017: Op vocabulary extension — rms_norm / conv2d / clamp_min
 
-- Status: accepted（2026-08-02）
-- 改訂: NaN 意味論は ADR [0020](0020-nan-propagation-bitwise.md) が置換（`clamp_min` の
-  「select 形なら伝播する」は成立せず、ビット列判定を正本化）— 本文の「訂正」がその発端の
-  実測記録。op 語彙・契約の決定そのものは現行。
-- 根拠資料: [../research/2026-08-02-anima-recon.md](../research/2026-08-02-anima-recon.md)
-- 需要の実測: RMSNorm 269 本（Qwen3 113 / conditioner 43 / DiT 113 — QK ノルム含む）、
-  VAE decoder の conv2d 37 本（CausalConv3d 32 の T=1 スライス + 素の conv2d 5）、
-  チャネル L2 正規化の clamp(min=eps) 30 本。プロトタイプ最終 IR の語彙差分もこの 3 op に
-  収束する（recon §3）。TS 契約・Python 契約・WGSL カーネル・CPU 参照の **4 点セットを
-  同一波で同時に**広げる（ADR 0015 の規律）。
+- Status: accepted (2026-08-02); partly superseded by [0020](0020-nan-propagation-bitwise.md) (NaN of
+  `clamp_min`, 2026-08-03) and [0118](0118-wan21-video-generation.md) (conv3d rejection, 2026-10-02)
+- Date: 2026-08-02
+- Related: [../research/2026-08-02-anima-recon.md](../research/2026-08-02-anima-recon.md)
 
-## 決定
+## Context
 
-- **`rms_norm`**: arity 2（x, weight）・attrs `{eps}` 必須・正規化軸は最終次元 1 本のみ・
-  weight は最終次元長の rank1・f32。`y = x · rsqrt(mean(x², 最終次元) + eps) · weight`。
-  カーネルは layer_norm と同族の行 reduce（木構造縮約 — 二乗和 1 パスで足りるため
-  layer_norm の「2 パス母分散」問題は生じない）。供給ルートは 2 系統を両立させる:
-  ①diffusers `nn.RMSNorm` 由来の `aten.rms_norm` を PRESERVED に追加 ②手書き分解形
-  （Qwen3 / DiT）は `_fold_rms_norm` パスで合成（ADR 0016）。weight 無し形が実測で出たら
-  ones 合成で arity 2 へ正規化（ゼロ bias 合成と同じ手筋）。
-- **`conv2d`**: 入力 [B,Cin,H,W]・重み **[Cout, Cin/groups, Kh, Kw]**・bias [Cout]
-  （arity 3 固定 — bias 無しはエクスポータのゼロ bias 合成）。attrs は
-  `{stride, padding, dilation, groups}` を**宣言必須・既定値補完なし**（ADR 0015 の conv1d と
-  同じ規律。stride/padding/dilation は H/W の 2 成分）。出力長式は dilation を含む一般形。
-  `Cin % groups == 0` / `Cout % groups == 0` / `stride >= 1` を契約検査に入れる。
-  空間パディングは conv2d の padding 引数に畳まれた形しか出ない（パッチ層が保証 — IR の
-  pad を多軸に広げない）。テストは **Kh≠Kw・stride/padding の H/W 非対称・Cin/Cout とも
-  2 以上で互いに異なる**ケースを必ず持つ（重みレイアウト取り違えは要素数が合い shape 検査を
-  素通りする — conv_transpose1d の教訓、Pitfalls 済み）。
-- **`clamp_min`**: elementwise・attrs `{min}` 必須・f32。既存 clamp の attrs optional 化は
-  「宣言済み attrs の既定値補完はしない + Object.hasOwn 全キー照合」（ADR 0012）を崩すため
-  却下。「欠けた側を ±有限最大値で補う」は `_h_clamp` の MUST が名指しで禁じる手筋であり
-  採らない。NaN の扱いは leaky_relu / clamp と同じ select 形で torch 意味論に合わせる。
-  **訂正（2026-08-02 波 1 実 GPU 実測）**: 「select 形なら NaN が伝播する」は成立しない —
-  シェーダコンパイラが max イディオムへ畳み、ドライバの `max` が NaN を飲む
-  （`clamp_min(NaN, min=0) = 0`）。`clamp` / `relu` も同じで、`leaky_relu` が伝播するのは
-  両方の枝に x が現れるためであり select 形そのものの効能ではない。乖離の実測・機序・
-  根治候補（ビット列での NaN 判定）は [../known-issues.md](../known-issues.md)。
-- 新カーネルはいずれも **full-write（ADR 0004 ⑤）を遵守**し、縮退ハーネス
-  （packages/runtime/tests/gpu_gridstride_test.ts）へ同波で 1 本ずつ追加する（MUST — Pitfalls 索引）。
+Measured demand: 269 RMSNorms (Qwen3 113 / conditioner 43 / DiT 113, QK norms included), 37 conv2d in
+the VAE decoder (32 T=1 slices of CausalConv3d plus 5 plain), and 30 `clamp(min=eps)` in channel L2
+normalization; the prototype's final IR converges on the same three ops (recon §3). TS contract,
+Python contract, WGSL kernel and CPU reference are extended **together in one step** (ADR 0015).
 
-## 検討した代替案
+## Decision
 
-- mean.dim + rsqrt の 2 op 追加（RMSNorm を分解のまま実行）: dispatch 5 倍 × 269 箇所と
-  中間バッファ 3 本。却下（ADR 0016 と同判断）。
-- conv3d カーネルの新設: CausalConv3d(T=1) ⇒ conv2d 等価がプロトタイプで f64
-  max diff 1.78e-15 と実測済みで、需要が存在しない。重み格納も時間スライスで 2.8 倍縮む。却下。
-- upsample_nearest 専用カーネル: reshape→expand→reshape の 5 手で厳密表現できる
-  （パッチ層実装済みの先例）。新カーネル不要。却下。
+- **`rms_norm`**: arity 2 (x, weight), attrs `{eps}` required, normalized over the last dimension
+  only, weight rank 1 of the last-dimension length, f32: `y = x · rsqrt(mean(x², last dim) + eps) ·
+  weight`. A row-reduce kernel of the layer_norm family (tree reduction; one pass of the sum of
+  squares, so layer_norm's two-pass variance issue does not arise). Two supply routes: `aten.rms_norm`
+  (diffusers `nn.RMSNorm`) is preserved; the hand-written decomposition (Qwen3 / DiT) is folded by
+  `_fold_rms_norm` (ADR 0016). A form without weight, if it appears, gets synthesized ones (arity 2).
+- **`conv2d`**: input [B, Cin, H, W], weight **[Cout, Cin/groups, Kh, Kw]**, bias [Cout] (arity 3; a
+  missing bias becomes the exporter's zero bias). attrs `{stride, padding, dilation, groups}` are
+  **required, no defaults filled in** (as conv1d in ADR 0015; H and W components). The output length
+  includes dilation; the contract checks `Cin % groups == 0`, `Cout % groups == 0`, `stride >= 1`.
+  Spatial padding only appears folded into conv2d's padding (the patch layer ensures it; IR pad stays
+  single-axis). Tests MUST include **Kh ≠ Kw, H / W-asymmetric stride and padding, and Cin ≠ Cout,
+  both ≥ 2**: a swapped weight layout has the same element count and passes shape checks.
+- **`clamp_min`**: elementwise, attrs `{min}` required, f32. Making clamp's attrs optional is rejected
+  (it breaks "no defaults for declared attrs, all keys matched with `Object.hasOwn`", ADR 0012);
+  filling the missing side with ±finite max is what the MUST of `_h_clamp` forbids by name. NaN: the
+  planned select form did not propagate NaN on the GPU (measured 2026-08-02); ADR 0020 replaced it
+  with a bitwise NaN check.
+- Every new kernel **writes its whole output (full-write, ADR 0004 ⑤)** and gets one case in the
+  degenerate-shape harness (`packages/runtime/tests/gpu_gridstride_test.ts`) in the same step (MUST).
 
-## 追記 1（2026-09-11）: 幅 128 以下の RMS 正規化は空の上半分を省く（K-28）
+## Alternatives considered
 
-Anima の QK 正規化は最終次元が 128 でも 256 スレッドを使い、上半分の 128 スレッドは
-二乗和 0 を渡していた。[単体・画像生成全体の検収](../research/2026-09-10-codex-mtp-optimization.md#anima-の-rms-正規化と並べ替え融合2026-09-11)に基づき、
-**1 ≤ dim ≤ 128 だけ 128 スレッド版を選ぶ**。それ以外は従来の 256 版を維持する。
+- mean.dim plus rsqrt (RMSNorm decomposed): five times the dispatches at 269 sites and three
+  intermediate buffers. Rejected (as in ADR 0016).
+- A conv3d kernel: CausalConv3d(T=1) equals conv2d (prototype, f64 max diff 1.78e-15) and the time
+  slice shrinks the weights 2.8 times. Rejected for lack of demand (superseded by ADR 0118 on
+  2026-10-02: Wan2.1's video VAE needs it; `conv3d` is in the vocabulary and in `WEIGHT_SLOTS`).
+- A dedicated upsample_nearest kernel: reshape → expand → reshape expresses it exactly (done in the
+  patch layer). Rejected.
 
-- 省くのは最初の `+0` 段だけ。各入力の二乗、下半分の加算の木構造、逆平方根、weight との積を変えない。
-  行の grid-stride と scratch の寿命を揃える barrier も維持する。
-- 256 版の WGSL とキーは従来とバイト同一。128 版は同じテンプレートから生成する別キー。
-  公開 API / IR / 設定は追加しない。GPU に触れる初期化や可変な module global も追加しない。
-- 全幅を 128 にする案は採らない。128 を超える幅ではスレッド内で足す項の組が変わり、
-  従来版と同じ加算順序にはならない。64 スレッドへの追加縮小も別の検証が必要。
-- 直前の permute を融合する試作も比較した。128 版を採用した後の追加利得は単体からの見込みが小さく、
-  新しい融合判定・カーネルの製品化は見送る。全体の融合版は未検収。
+## Addendum 1 (2026-09-11) — RMS normalization of width ≤ 128 skips the empty upper half (K-28)
 
-数値の門は従来版との u32 一致、正本の op 許容差による CPU 参照、端の幅、縮退、full-write、
-非有限値の伝播。Anima の全ステップ潜在値 / PNG と、Qwen の全 logits も比較した。
-NaN の payload 自体は op の契約外で、伝播位置を検査する。M2 は別実機での追試が残る。
+Anima's QK normalization has a last dimension of 128 but used 256 threads; the upper 128 passed a sum
+of squares of 0. Based on the kernel-level and whole-generation acceptance in
+[the 2026-09-10 research](../research/2026-09-10-codex-mtp-optimization.md) (section on Anima RMS
+normalization, 2026-09-11), **the 128-thread variant is selected only for 1 ≤ dim ≤ 128**; other
+widths keep the 256 variant.
+
+- Only the first `+0` stage is skipped; the squares, the lower-half addition tree, the reciprocal
+  square root, the product with weight and the barrier aligning row grid-stride with scratch lifetime
+  are unchanged.
+- The 256 variant's WGSL and key are byte-identical to before; the 128 variant is a separate key from
+  the same template (`RMS_NORM_128_KEY`, `packages/runtime/src/kernels/rms-norm.ts`). No public API, IR
+  or option; no GPU-touching initialization or mutable module global.
+- 128 threads for every width is rejected: above 128 the terms summed per thread change, so the
+  addition order differs. 64 threads would need separate verification.
+- Fusing the preceding permute was prototyped; the extra gain is small, so it is not productized.
+
+Checks: u32 equality with the 256 variant, CPU reference under the canonical op tolerance, edge widths,
+degenerate shapes, full-write and non-finite propagation; Anima latents of every step / PNG and Qwen's
+full logits were compared. The NaN payload is outside the contract; its position is checked. A re-run
+on the M2 machine was open on 2026-09-11.

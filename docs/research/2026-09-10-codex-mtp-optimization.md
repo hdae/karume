@@ -1346,7 +1346,7 @@ CFG は条件の影響を強める係数で、1 と 4 の両方を検査した�
 | 4   |   20,880.161 |  20,656.344 |      1.07% |          17,652.366 |         17,421.454 |
 
 大幅な改善ではないが、単体 20% と全体 1% の採用線を満たすため既存 RMS 族の 128 版を採用する。
-判断は [ADR 0017 追記 1](../decisions/0017-rms-norm-conv2d-clamp-min.md#追記-12026-09-11-幅-128-以下の-rms-正規化は空の上半分を省くk-28)。
+判断は [ADR 0017 追記 1](../decisions/0017-rms-norm-conv2d-clamp-min.md#addendum-1-2026-09-11--rms-normalization-of-width--128-skips-the-empty-upper-half-k-28)。
 公開 API / IR / 資産に変更はない。Anima の画像品質改善を主張するものでもない。
 
 並べ替えまで融合する追加効果は、通常 128 との差が単体加重で約 9.707 ms / forward。

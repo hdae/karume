@@ -1,47 +1,46 @@
-# 0014 — レイアウト op 拡張: slice / cat / pad / flip と full-write 不変条件
+# 0014: Layout op extension — slice / cat / pad / flip and the full-write invariant
 
-- Status: accepted（2026-08-02）
-- 根拠資料: [../research/2026-08-02-sbv2-chain-recon.md](../research/2026-08-02-sbv2-chain-recon.md)
-- 前提の更新: ADR 0011 実装時追記の「`slice` は見送り」は「実測グラフの slice は Tmax 畳み込みで
-  消える 1 本のみ」という観測に依存していた。SBV2 でこの前提は崩れる（enc_p の m_p/logs_p
-  分割・coupling の 96/96 分割・spline 各所・flow/sdp の Flip）。
+- Status: accepted (2026-08-02); the static `cat` axis relaxed by [0046](0046-cat-symbolic-axis.md) (2026-08-11)
+- Date: 2026-08-02
+- Related: [recon](../research/2026-08-02-sbv2-chain-recon.md) / [0004](0004-execution-model.md) /
+  [0011](0011-layout-strategy.md)
 
-## 決定
+## Context
 
-- IR op に **`slice`（静的軸・静的範囲）/ `cat`（静的軸）/ `pad`（最終次元の定数 0 埋め）/
-  `flip`（静的軸）** を追加する。記号次元のスライスは従来どおり `sym_prefix_slice` の担当で、
-  `slice` は静的専用（重複させない）。
-  **改訂（2026-08-11・ADR [0046](0046-cat-symbolic-axis.md)）**: `cat（静的軸）` は
-  **同一シンボルの一次和**まで緩和済み（full-write 側の設計は不変）。
-- **実行モデルの不変条件を新設: 全カーネルは出力バッファの全バイトを書く（full-write）。**
-  プロトタイプの cat/pad は「WebGPU バッファのゼロ初期化保証 + copy_region」だったが、
-  この保証はバッファプール再利用で条件付きに偽になる（プロトタイプ既知の罠 — 再利用
-  バッファはゼロ初期化されない）。Karume は ADR 0004 でプールを先に持つため、
-  ゼロ初期化への依存を最初から設計で排除する:
-  - `slice`: 既存 strided **読み**コピー族で実行（params の offset は既在 — ADR 0011 が
-    予告した「可変点 1 語」の通り）。
-  - `cat`: **strided 書きコピー族**（入力を連続で読み、出力へ offset + strides で書く —
-    既存族の双対）を新設し、入力ごとに出力の部分領域へ書く。全入力で出力全域が
-    被覆されるため、単独では部分書きでも**ノード単位では full-write が成立**する。
-  - `pad`: 専用カーネル 1 本が出力全域を書く（範囲内は転写・範囲外は定数 0）。
-    ゼロ初期化保証にも noReuse 特例にも依存しない。
-  - `flip`: 専用の極小カーネル（静的軸の添字反転）。
-- CPU 参照は各 op 独立実装（scatter 方向の前例は sym_prefix_slice の参照実装）。
+ADR 0011 deferred `slice` because its only measured use folded away at Tmax. SBV2 breaks that premise
+(the m_p / logs_p split of enc_p, the 96 / 96 coupling split, the spline, the Flip of flow / sdp).
 
-## 検討した代替案
+## Decision
 
-- **flip を strided 族の負 stride で表現**: 新カーネル 0 本で済むが、既存 params の型と
-  決定性キー・スナップショット全面（M0.1 でレビュー 2 巡済み）の改版になる。blast radius
-  非対称のため却下（プロトタイプの flow 裁定と同型）。
-- **flip → slice+cat 正規化**: 軸長 2（sdp）にしか届かず、flow の 192ch 反転を表現できない。
-  却下。
-- **cat/pad をゼロ初期化 + copy_region で実装**: プールの再利用と両立しない（上記の罠）。
-  「pad 出力だけ noReuse で新品確保」という特例で救う案は、不変条件をカーネル実装の知識に
-  依存させる（アリーナ側が op 種別を知る必要が生じる）ため却下。
+- Add the IR ops **`slice` (static axis and range) / `cat` (static axis) / `pad` (constant zero on the
+  last axis) / `flip` (static axis)**. Symbolic slicing stays with `sym_prefix_slice`; `slice` is static
+  only. Revised 2026-08-11 (ADR 0046): the `cat` axis may be a linear sum of one symbol.
+- **New execution-model invariant: every kernel writes every byte of its output buffer (full-write).**
+  The prototype's cat / pad relied on WebGPU zero-initialized buffers plus `copy_region`, which fails
+  once a pool reuses buffers (reused buffers are not zeroed). Karume has the pool (ADR 0004), so no
+  kernel may depend on zero initialization:
+  - `slice`: the existing strided **read** copy family (its params already carry the offset ADR 0011
+    foresaw).
+  - `cat`: a new **strided write** copy family (contiguous read, output written through offset +
+    strides — the dual of the read family), one write per input; together the inputs cover the whole
+    output, so full-write holds **per node**.
+  - `pad`: one kernel writes the whole output (copy inside, constant 0 outside), with no reliance on
+    zero initialization or a no-reuse exception.
+  - `flip`: a small dedicated kernel (index reversal on a static axis).
+- The CPU reference implements each op independently.
 
-## 帰結
+## Alternatives considered
 
-- full-write 不変条件は ADR 0004 のアリーナ不変条件に追記し、フォールト注入
-  （プール再利用バッファに毒値を書いてから cat/pad を実行し、緑のまま = 全域書きの実証）で
-  固定する。
-- strided 書き族は読み族と同じ決定性キー規約（要素型・rank をキーに含む）に従う。
+- **flip as a negative stride**: no new kernel, but it revises the params type, the determinism keys
+  and every snapshot reviewed in M0.1. Rejected for the asymmetric blast radius.
+- **flip as slice + cat**: reaches only axis length 2 (sdp), not the 192-channel flip of flow. Rejected.
+- **cat / pad on zero initialization plus `copy_region`**: incompatible with pool reuse. A fresh
+  no-reuse buffer for pad outputs would make the arena know op kinds. Rejected.
+
+## Consequences
+
+- Full-write is invariant 5 of the ADR 0004 arena, pinned by fault injection: reused pool buffers are
+  poisoned before cat / pad / flip / conv_transpose1d run, and no poison may remain
+  (`packages/runtime/tests/gpu_full_write_test.ts`).
+- The strided write family follows the read family's determinism-key rule (element type, rank and
+  workgroup size are in the key — `stridedWriteKey`, `packages/runtime/src/codegen/strided.ts`).

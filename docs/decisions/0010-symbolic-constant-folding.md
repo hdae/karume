@@ -1,77 +1,76 @@
-# 0010 — 記号依存定数の Tmax 畳み込みと記号 prefix スライス
+# 0010: Folding symbol-dependent constants at Tmax and the symbolic prefix slice
 
-- Status: accepted（2026-08-02）
-- 根拠資料: [../research/2026-08-02-deberta-front-recon.md](../research/2026-08-02-deberta-front-recon.md)
-  （相対位置バケット表が未対応 op 27 種中 14 種の発生源）
+- Status: accepted (2026-08-02)
+- Date: 2026-08-02
+- Related: [../research/2026-08-02-deberta-front-recon.md](../research/2026-08-02-deberta-front-recon.md)
+  (the relative-position bucket table is the source of 14 of the 27 unsupported op kinds).
 
-## 決定
+## Decision
 
-DeBERTa の相対位置バケット表（arange / sign / log / ceil / clamp / 比較 / bitwise_and …の
-T 依存部分木）は、**エクスポータが Tmax（モデルの最大系列長）で実評価して i32 定数に焼き、
-実行時は記号 prefix スライスで切り出す**。
+DeBERTa's relative-position bucket table (the T-dependent subtree of arange / sign / log / ceil /
+clamp / comparisons / bitwise_and …) is **evaluated by the exporter at Tmax (the model's maximum
+sequence length), baked into an i32 constant, and cut out at run time with a symbolic prefix slice**.
 
-- IR v1 を改訂し、**initializer の意味論 i32 と格納 dtype `i32`（生の int32）**を追加する
-  （現行の「格納語彙は f32 値の符号化」の明示的な例外）。
-- IR op **`sym_prefix_slice`** を追加: attrs `{ sym, slices: [{dim, coeff, offset}] }`。
-  次元言語 `coeff·sym+offset`（ir-v2.md）をそのまま流用する。
-- 畳み込みの適格判定は「Tmax 実評価が prefix と可換」であること。**allowlist 掲載だけでは
-  担保しない** — エクスポータが **2 点評価（異なる 2 つの T で評価して prefix 一致を実測）**で
-  検査し、不一致は fail loudly（プロトタイプで実証済みの機構）。
+- IR v1 gains **semantic i32 initializers and the storage dtype `i32` (raw int32)**, an explicit
+  exception to "the storage vocabulary encodes f32 values" (storage moved on 2026-09-24, addendum).
+- The IR op **`sym_prefix_slice`** is added: attrs `{ sym, slices: [{dim, coeff, offset}] }`, reusing
+  the dimension language `coeff·sym+offset` of [ir-v2.md](../ir-v2.md).
+- A subtree may be folded only if evaluation at Tmax commutes with the prefix. **Being on an allowlist
+  is not enough**: the exporter **evaluates at two different T and compares the prefixes**; a
+  mismatch fails loudly (proven in the prototype). Revised on 2026-08-13 and 2026-10-10 (addenda).
 
-## 検討した代替案
+## Alternatives considered
 
-1. **GPU で整数演算をそのまま実行** — IR 改訂は不要だが、i32 elementwise・比較・sign・
-   ceil・log・clamp の実装に加え、台帳の未決 3 件（WGSL の NaN 比較 / sign(NaN) /
-   max の NaN 非伝播）を全部 load-bearing にする。さらに**バケット境界の 1 ulp 差が
-   gather 添字の 1 ずれになる**バグクラスが恒久的に残る。
-2. **ホスト側で事前計算して追加入力にする** — 実装最軽量だが「モデルファイル 1 個で完結」と
-   薄い公開面（ADR 0008）に反し、モデル固有ロジックが全呼び出し側へ漏れる。
-3. **Tmax 畳み込み + prefix スライス（採択）**。
+1. **Run the integer arithmetic on the GPU** — needs i32 elementwise, comparisons, sign, ceil, log
+   and clamp, makes three open ledger items (WGSL NaN comparison / sign(NaN) / max not propagating
+   NaN) load-bearing, and keeps a bug class where **a 1-ulp difference at a bucket boundary shifts a
+   gather index by one**.
+2. **Precompute on the host as an extra input** — the lightest, but breaks "one model file is
+   self-contained" and the thin public surface (ADR [0008](0008-public-api.md)).
+3. **Fold at Tmax + prefix slice (chosen).**
 
-## 採択理由
+## Rationale for the choice
 
-1. バケット境界バグクラスの**構造的排除** — 表は torch 自身が計算するので golden と同一
-   意味論。GPU 再実装の丸め差が添字に混入する経路が存在しない。
-2. 未対応 op が 27 種 → 実質 13 種前後に半減し、WGSL NaN 系の未決を P2 の経路に載せない。
-3. プロトタイプが同方式で DeBERTa E2E を実証済み（可換性の 2 点実測検査込み）。
-4. 未リリースにつき IR v1 非互換改訂のコストは仕様書と実装の同時更新のみ（ADR 0003 の
-   改訂手順どおり。シム・移行は作らない）。
+1. **The bucket-boundary bug class is removed by construction**: torch computes the table itself.
+2. Unsupported ops drop from 27 kinds to about 13; the WGSL NaN items stay off this path.
+3. The prototype proved DeBERTa end-to-end with the same scheme.
+4. Unreleased: the incompatible IR v1 revision needs no shim or migration (ADR [0003](0003-ir-v1.md)).
 
-## 帰結
+## Consequences
 
-- ir-v2.md の改訂（i32 initializer / storage `i32` / `sym_prefix_slice`）は実装波と同一
-  コミットで行う。
-- Tmax はモデル属性（DeBERTa は 512）。Tmax を超える実行時系列長は束縛検査で fail loudly。
-- prefix 非可換な部分木は畳まず、未対応 op として全件列挙に出す（黙って残さない）。
+- Tmax is a model attribute (512 for DeBERTa); a longer run-time sequence fails loudly when binding.
+- A subtree that does not commute with the prefix is not folded; it is listed as unsupported.
 
-## 追記
+## Addendum (2026-08-13) — commutativity is enforced in two stages
 
-- 2026-08-13: **可換性の担保機構を 2 段へ改訂**（外部レビュー P0-1 の消化）。従来の「2 点実測
-  （Tmax / Tmax−1）が担保する」は不健全だった — `scalar_tensor(T)` でシンボルがテンソル
-  **データ**へ昇格した部分木（例 `(T−Tmax)(T−(Tmax−1))` — 両評価点で 0）は 2 点で偶然一致し、
-  export・verify_model とも緑のまま他の T で沈黙誤値になる（反例を実行して確認済み）。現行は
-  ① シンボルの**消費位置**で拒否（`SYMBOL_EXTENT_ARGS` — extent = 長さ・形状の引数位置だけを
-  ホワイトリストで許し、値位置へ届いた部分木は畳まず通常 lowering へ落とす = 語彙外なら
-  export ごと拒否）② 2 点実測は防波堤として残す（比較は `torch.equal` から**ビット厳密**へ
-  強化 — `-0.0 == 0.0` の素通りを塞ぐ）。本文の「2 点実測検査込み」はこの改訂で読み替える。
+The claim that the two-point check (Tmax / Tmax − 1) guarantees commutativity was unsound: when
+`scalar_tensor(T)` lifts the symbol into tensor **data** (for example `(T − Tmax)(T − (Tmax − 1))`,
+zero at both points), the check matches by chance and other T give silent wrong values (reproduced).
+Now: (1) the symbol is rejected at its **consumption position** — `SYMBOL_EXTENT_ARGS` allowlists only
+extent arguments (lengths, shapes); a subtree reaching a value position is not folded and falls back
+to normal lowering (export fails outside the vocabulary); (2) the two-point check stays as a safety
+net, comparing **bit-exactly** instead of with `torch.equal` (`-0.0 == 0.0` no longer passes —
+`_bitwise_equal` in `tools/exporter/src/karume/convert.py`).
 
-- 2026-09-10: 動的 `view` の extent 引数も prefix 可換性を保証しない。例えば
-  `arange(2*T)` を `[2,T]` に並べると第 2 行の先頭が T で動く。記号次元を持つ view は
-  単位軸の増減だけを畳み、それ以外は入力側の prefix を切り出してから runtime の
-  `reshape` で実行する。2 点評価の点数追加では対処しない。
+## Addendum (2026-09-10) — dynamic `view` extents
 
-- 2026-09-24: 決定の「格納 dtype `i32`」は IR v1 の `storage` 語彙だったが、ADR
-  [0108](0108-container-format.md) 決定 17（IR v2 = IR v1 − `storage`）で格納の記述はグラフから
-  コンテナの束縛表へ移り、生の int32 は決定 12 の codec 台帳の登録名 `i32` になった。
-  initializer の意味論 i32 と、Tmax 実評価の焼き込み・`sym_prefix_slice` の決定は不変。
+A dynamic `view` extent does not guarantee prefix commutativity either (`arange(2*T)` laid out as
+`[2, T]` moves the second row's start with T). A view with a symbolic dimension is folded only when it
+adds or removes unit axes; otherwise the input prefix is cut first and the runtime `reshape` runs it.
 
-- 2026-10-10: 記号が値位置へ届かなくても、記号軸上の**位置**を参照する形は長さ T を要素の
-  値へ変える（`arange(T)[tensor([-1])]` は T−1、`arange(T)[-2:]` は `[T−2, T−1]`）。後段の
-  比較が 2 点で偶然一致すると沈黙誤値になるので、`_classify_foldable` は次の形を添字の値を
-  見ずに構造で畳み込みから外す: 記号軸を添字テンソルで引く `index`・記号軸を負の start で
-  切る `slice`・記号軸に沿った `cat`・記号軸を 2 回以上繰り返す `repeat`・記号軸で縮約する
-  `bmm`。bool / uint8 のマスク添字の `index` は記号軸の有無を問わず外す（rank 2 以上の
-  マスクは複数の軸を占めて添字と軸の対応が崩れ、出力長もマスクの値で決まる）。非負の start の
-  `slice` は先頭からの位置なので prefix と可換で、従来どおり畳む。
-  外した部分木は通常の lowering へ落ち、語彙外なら export ごと失敗する。2 点評価の点数追加
-  では対処しない。
+## Addendum (2026-09-24) — storage `i32` moved to the codec ledger
+
+ADR [0108](0108-container-format.md) decision 17 moved storage to the container's binding table; raw
+int32 is the codec `i32` of `CODEC_LEDGER` (`packages/runtime/src/format/container/codecs.ts`).
+
+## Addendum (2026-10-10) — positions on a symbolic axis are excluded by structure
+
+Referring to a **position** on a symbolic axis turns T into element values (`arange(T)[tensor([-1])]`
+is T − 1; `arange(T)[-2:]` is `[T − 2, T − 1]`), and a later comparison may match at both points by
+chance. `_classify_foldable` therefore excludes, by structure and without reading index values:
+`index` with an index tensor on a symbolic axis; `slice` with a negative start on a symbolic axis;
+`cat` along a symbolic axis; `repeat` of a symbolic axis two or more times; `bmm` contracting over a
+symbolic axis; and `index` with a bool / uint8 mask on any axis (a mask of rank ≥ 2 spans several
+axes and the output length depends on its values). A non-negative `slice` start counts from the
+front and is still folded. Excluded subtrees fall back to normal lowering. Neither addendum adds
+evaluation points as the remedy.

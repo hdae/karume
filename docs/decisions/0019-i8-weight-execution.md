@@ -1,100 +1,103 @@
-# 0019 — i8（w8）格納の実行経路（per-channel scale + カーネル内 dequant）
+# 0019: i8 (w8) weight storage — execution path (per-channel scale, dequantized in the kernel)
 
-- Status: accepted（2026-08-03）。**一部 supersede**（2026-08-18 — ADR
-  [0069](0069-packed-w4-storage.md) 決定 1）: 「w4 不採用・再測しない」の射程を「SBV2 voice の
-  音声 SNR / 発話長・per-tensor RTN および int4 group の 1 時点実測」に限定し、テキスト生成へ
-  一般化しない。w4（格納 `i4`・K 方向 group）は 0069 で解禁・実装済み。i8 経路・±127 対称・
-  平坦添字・タイル読み込み時 dequant・fake-quant 規律は 0069 の土台として現行のまま有効。
-- 前提: ADR [0006](0006-quantization.md)（格納のみ量子化・fake-quant 正・bias/折り畳み定数は
-  常に f32・FQN 突合・診断常設）/ [0018](0018-f16-weight-execution.md)（f16 実行経路 —
-  weight 変種の生成部品と検証規律はここで確立済み）。プロトタイプには i8 の完全な先行実装と
-  品質実測があり、本 ADR はその検証済み設計を Karume の構造（`WEIGHT_SLOTS` /
-  `weight-storage.ts`）へ写像した上で、数値契約を 1 点だけ意図的に変える。
+- Status: accepted (2026-08-03); partly superseded by [0069](0069-packed-w4-storage.md) decision 1 (w4,
+  2026-08-18), [0108](0108-container-format.md) (scale shape and declaration, `group_size`, I8 ordering,
+  2026-09-22; see the addendum), [0097](0097-gemma4-qat-integration.md) / 0108 (mixed storage,
+  2026-09-11 / 2026-09-22) and [0058](0058-numerics-opt-in-contract.md) /
+  [0110](0110-practical-tier-numerics-contract.md) decision 2 (the condition for faster forms,
+  2026-08-14 / 2026-09-26); the per-dtype asset directory withdrawn 2026-10-18. The numeric contract
+  is in force (the base of 0069).
+- Date: 2026-08-03
+- Related: [0006](0006-quantization.md) (storage-only quantization, fake-quant, f32 bias, FQN matching,
+  diagnostics) / [0018](0018-f16-weight-execution.md) (weight-variant generator, verification discipline)
 
-## 決定
+## Context
 
-- **方式: per-channel symmetric int8**。`scale = clamp(amax / 127, f32 tiny)`、
-  `q = round(w/scale)` を **±127 に閉じる**（−128 不使用 — 最大絶対値要素が厳密復元され
-  fake-quant が冪等になる）。zero-point なし。チャネル軸は出力チャネル:
-  linear/conv1d/conv2d/embedding = 0、conv_transpose1d = **1**（転置レイアウト）。
-  per-tensor はプロトタイプ実測（voice SNR 4.7〜5.7dB）で音声として不成立のため不採用。
-  w4 も先行実測（SNR −1.5〜+5.1dB・発話長の系統的短縮）で不採用確定 — IR の `group_size` は
-  予約のまま使わず、**付いていれば capability 不足で実行拒否**する（黙って per-channel と
-  読むと group scale の意味が変わる沈黙誤値になる）。〔supersede — この w4 項は ADR 0069 が
-  上書き: 実測の帰属は int4 group・射程は SBV2 voice の 1 時点。`group_size` は格納 `i4` で
-  解禁済み（`i4` 以外に付いた場合の実行拒否は現行のまま）〕
-- **scale は companion テンソル**（F32・weight と同 rank の keepdim broadcast 形）。IR v1 の
-  `storage.scale`（既存語彙）で**明示宣言**する — キー命名は自由だが実テンソル名との衝突を
-  emit 時に検査する。ロード時に存在・dtype・broadcast 可能形を検証して fail loudly。
-- **GPU 常駐 + カーネル内 dequant**: ペイロードを `array<u32>` で束縛し
-  **`unpack4xI8`（core WGSL・feature 依存ゼロ — ADR 0002/0018 と整合）**で展開する。
-  MUST: 語と位置の割り出しは**平坦添字**（`unpack4xI8(w[i >> 2u])[i & 3u]`）から作る —
-  行内相対添字は行長が 4 の倍数のとき偶然一致する（f16 の偶奇と同型の罠。検出器は
-  **行長が 4 の倍数でないテスト**）。末尾は 4 バイト整列までゼロ詰め（値に影響しない）。
-- **scale の適用は要素ごと（読み出し時 dequant）**: `out = Σ x·(q·s) + bias` の形。
-  GPU の dequant と CPU 展開（適格外の f32 展開経路）が**ビット一致**し、ADR 0018 の検証
-  規律（ユニットで固定・E2E は実装誤差だけを見る）を i8 でも維持できる。プロトタイプの
-  縮約外形 `(Σ x·q)·s` は乗算が出力要素あたり 1 回で済むが 1ulp 級の不一致が原理的に生じ、
-  検証が tolerance 論に落ちる。コスト: linear は共有メモリタイルへの読み込み時 1 回
-  （MAC あたりではない）、conv 系は `s` がループ不変なので巻き上げで乗算 1 個 —
-  現行素朴カーネルの支配項ではない。perf で縮約外形や DP4a（整数 MAC・プロトタイプ実測
-  4.73×）へ切り替える場合は**本 ADR の改訂 + tolerance 再導出を条件**とする。
-- **適格 = `WEIGHT_SLOTS` 全 5 op**（linear / conv1d / conv2d / conv_transpose1d /
-  embedding）。プロトタイプは 3 op（conv2d・embedding なし）だったが、カーネルごと手書き
-  だった構造的理由は `weight-storage.ts` 共有で消えている。embedding は縮約が無く per-row
-  dequant のみでビット一致が自明。適格判定は `eligibleCompressedInitializers` を**そのまま
-  共用**（新設なし — bias を表に載せない構造は元々 i8 由来であり降格系バグの余地なし）。
-  適格外の i8 宣言はロード時 CPU 展開（`q·s` の f32 丸め 1 回 = GPU と同値）。
-- **`weight-storage.ts` の拡張は 3 点に閉じる**: ① `WeightStorage` に `"i8"`
-  （キー判別子 `:wi8`・`WEIGHT_STORAGES` 網羅でスナップショット/縮退ハーネスが機械的に回る）
-  ② scale の**追加束縛**宣言（bind group layout が変種で変わる — 束縛宣言の生成も
-  weight-storage.ts に閉じ込め、executor の bind entries と対で分岐）③ `weightRead` に
-  **出力チャネルの scale 式**引数（f32/f16 は無視 — **両変種の生成物バイト不変 MUST を
-  維持**。当初案の「チャネル添字」渡しは scale の読み出しが重み要素ごとになり、conv 系の
-  ループ不変巻き上げをソースに書けないため、束縛済み局所変数の式を渡す形へ改訂
-  〈2026-08-03・運ぶ情報は同一・束縛忘れは WGSL コンパイルエラー〉）。
-  scale バッファのバイト数は `residentCompressedBytes` 側に加算（診断常設の一貫性）。
-- **エクスポータ**: fake-quant は**実効重み**に当てる（weight_norm 除去・LoRA 焼き込み・
-  conv3d→conv2d スライスの**後**、参照採取の**前** MUST — 使われない要素が amax に効くと
-  scale がずれる）。突合は FQN + 期待本数照合（`id()` 禁止 — ADR 0006）で、i8 指定なのに
-  0 本なら fail loudly。emit は fake-quant が使った scale を**そのまま**書き（再計算は f32
-  丸めで golden 対応が壊れる）、格納時に逆変換ビット一致 `torch.equal(q8.to(f32)·s, t)` を
-  門にする。1 ターゲット 1 dtype（混成格納は将来の拡張）。I8 は 1 バイト要素で reader の
-  整列制約が無いため並び順は**末尾**（既存 F16 規則の後ろ）。
-- **資産系列**: `models/anima-i8/` は **transformer のみ**（text/cond/vae は f16 系列と共有 —
-  DiT の −1.87GiB が支配項で、VAE の i8 化はプロトタイプ実測 −24.6MB と桁が 2 つ違う）。
-  conv2d/embedding の wi8 は tiny golden + ユニットで被覆する。サイズ試算: DiT フル 28 層
-  f32 7,465MiB → f16 ≈3,733MiB → **i8 ≈1,867MiB**（scale オーバヘッド実測 0.4〜0.9%）。
-- **品質ゲート**: fake-quant 方法論により E2E は実装誤差しか測らない — **量子化の質は別軸**で
-  測る。①DiT/VAE 直交分解の計測台本を移植（denoise 2 回 + decode 4 条件で PSNR/relRMS）
-  ②デモ画像の w8 変種を生成して**目視裁定**（プロトタイプ先行事例: DiT のみ i8 で
-  PSNR 27.28dB — 拡散は軌道が変わるため数値は「劣化」と「別の絵」を区別しない — 目視で採用）。
+This ADR maps the prototype's verified i8 design onto `WEIGHT_SLOTS` and
+`packages/runtime/src/kernels/weight-storage.ts`, changing one point on purpose: where the scale applies.
 
-## 検討した代替案
+## Decision
 
-- 縮約の外で scale（プロトタイプ形）: 乗算最少だが GPU/CPU 展開のビット一致を失う。
-  perf マイルストーンの upgrade path として温存（上記の改訂条件付き）。却下（保留）。
-- per-tensor / w4 group 量子化: プロトタイプの数値・聴感ゲートで不採用確定。再測しない。
-  〔supersede — 「再測しない」は ADR 0069 決定 1 が撤回。w4 group は再測（Phase 0 sweep）の
-  うえ格納 `i4` として解禁済み。per-tensor の不採用は現行のまま〕
-- DP4a（`dot4I8Packed` 系の整数 MAC）: プロトタイプ実測 4.73× と大きいが計算契約ごと変わる。
-  perf で裁定。
-- 全ターゲット一括 i8 系列: VAE/text 層の削減量が小さく検証コストだけ増える。
-  transformer 単独 + tiny golden 被覆で足りる。却下。
+- **Method: per-channel symmetric int8.** `scale = clamp(amax / 127, f32 tiny)`, `q = round(w / scale)`
+  **clamped to ±127** (−128 unused, so the largest-magnitude element is restored exactly and fake-quant
+  is idempotent). No zero-point. The channel axis is the output channel: 0 for linear / conv1d / conv2d
+  / conv3d / embedding, **1** for conv_transpose1d (transposed layout; `WEIGHT_CHANNEL_AXES`).
+  Per-tensor scales SHOULD NOT be used (re-graded 2026-10-18 to SHOULD: the rejection rests on one
+  prototype measurement of SBV2 voice quality, SNR 4.7–5.7dB, with no basis to generalize to other
+  models). w4 was rejected on the same kind of measurement (SNR −1.5 to +5.1dB, systematically shorter
+  utterances) and `group_size` was rejected at execution (superseded by ADR 0069 decision 1 on
+  2026-08-18: that measurement covers SBV2 voice only; w4 is storage `i4` with K-direction groups).
+- **The scale is a companion tensor** (F32), declared explicitly and validated at load (existence,
+  dtype, shape) with fail loudly; key collisions with real tensor names are checked at emit. The shape
+  and the declaration are now those of ADR 0108 (see the addendum).
+- **GPU-resident, dequantized in the kernel**: the payload is bound as `array<u32>` and unpacked with
+  **`unpack4xI8`** (core WGSL, no optional feature — consistent with ADRs 0002 / 0018). MUST: word and
+  lane come from the **flat index** (`unpack4xI8(w[i >> 2u])[i & 3u]`); a row-relative index matches
+  only by accident when the row length is a multiple of 4 (the same trap as f16's parity; the detector
+  is **a test whose row length is not a multiple of 4**). The tail is zero-padded to 4-byte alignment.
+- **The scale is applied per element on read**: `out = Σ x·(q·s) + bias`. GPU dequantization and the
+  CPU expansion (the f32 path for ineligible slots) are **bitwise equal**, so ADR 0018's discipline
+  (pinned by unit tests; E2E sees only implementation error) holds for i8. The prototype's form
+  `(Σ x·q)·s` saves multiplies but differs by about 1 ulp in principle, turning verification into a
+  tolerance argument. Cost: linear multiplies once when loading the shared-memory tile (not per MAC);
+  conv hoists the loop-invariant `s`. The original condition "switching to the outer-scale form or DP4a
+  requires revising this ADR and re-deriving tolerances" is superseded by ADRs 0058 (2026-08-14) and
+  0110 decision 2 (2026-09-26): a faster form enters as an opt-in option with a contract class and
+  leaves the default path unchanged (DP4a did so in ADR 0025, today `linearCompute: "a8"`).
+- **Eligible = every slot in `WEIGHT_SLOTS`** (five at the time; conv3d added by ADR 0118). The
+  prototype covered three ops; the reason (hand-written kernels) is gone with the shared
+  `weight-storage.ts`. Embedding has no reduction, so per-row dequantization is trivially bitwise
+  equal. Eligibility reuses `eligibleCompressedInitializers` unchanged (bias is never in the table).
+  Ineligible i8 declarations are expanded on the CPU at load (`q·s` rounded once in f32 = the GPU
+  value).
+- **`weight-storage.ts` grows in three places only**: (1) `WeightStorage` gains `"i8"` (key
+  discriminator `:wi8`; `WEIGHT_STORAGES` drives snapshots and the degenerate-shape harness);
+  (2) the extra scale binding (the bind group layout differs per variant; its generation stays in
+  `weight-storage.ts`, paired with the executor's bind entries); (3) `weightRead` takes the
+  **output-channel scale expression** (ignored by f32 / f16 — **their generated WGSL MUST stay byte
+  identical**). A bound local's expression is passed rather than a channel index (revised 2026-08-03 so
+  conv can hoist the scale; a missing binding is a WGSL compile error). Scale bytes count in
+  `residentCompressedBytes`.
+- **Exporter**: fake-quant applies to the **effective weights** — MUST run after weight_norm removal,
+  LoRA baking and the conv3d → conv2d slice, and before references are taken (unused elements would
+  shift amax and the scale). Matching is by FQN plus the expected count (`id()` forbidden — ADR 0006);
+  i8 requested with zero matches fails loudly. Emit writes the scale fake-quant used **as is**
+  (recomputing breaks the golden through f32 rounding) and gates storage on
+  `torch.equal(q8.to(f32)·s, t)`. "One dtype per target" is superseded by ADRs 0097 (2026-09-11) /
+  0108 (2026-09-22) (mixed I2 / I4 / I8 and per-initializer encodings are implemented).
+- Withdrawn 2026-10-18: "`models/anima-i8/` holds the transformer only" — distributions are containers
+  and the storage dtype is chosen by a manifest preset (ADR 0109). Size then: DiT f32 7,465MiB → i8 ≈
+  1,867MiB. conv2d / embedding `wi8` stay covered by a tiny golden plus unit tests
+  (`packages/runtime/tests/gpu_f16_i8_weights_test.ts`).
+- **Quality check**: with fake-quant, E2E measures only implementation error — **quantization quality
+  is measured separately**: (1) port the DiT / VAE orthogonal-decomposition script (two denoise runs and
+  four decode conditions, PSNR / relRMS); (2) generate w8 demo images and **decide by eye** (prototype:
+  DiT-only i8 at PSNR 27.28dB was adopted by eye — diffusion changes trajectory, so numbers do not
+  separate "degraded" from "a different picture").
 
-## 追記（2026-09-24）— scale の形と宣言は ADR 0108 が上書きした
+## Alternatives considered
 
-決定のうち**格納の記述**に当たる次の 3 点は、ADR [0108](0108-container-format.md) 決定 11 / 17 / 18
-（2026-09-22 以降・IR v2 とコンテナ `krm`）が上書きした。
+- Scale outside the reduction (prototype form): fewest multiplies, loses bitwise equality. Deferred.
+- Per-tensor / w4 group quantization: rejected on the prototype's numeric and listening checks (w4
+  reopened by ADR 0069; per-tensor see the SHOULD above).
+- DP4a (`dot4I8Packed`): 4.73× in the prototype, but a new compute contract; opt-in in ADR 0025.
+- i8 for every target: VAE / text savings are small (VAE −24.6MB vs DiT −1.87GiB) while verification
+  cost grows; transformer alone plus tiny goldens suffice. Rejected.
 
-- scale の形と宣言: 「weight と同 rank の keepdim broadcast 形・IR v1 の `storage.scale` で宣言」→
-  束縛表の `encoding.scale` が指す rank 2 group 形 `[shape[rowAxis], 行長 / groupSize]`（per-channel
-  の i8 は `[N, 1]`）。チャネル軸は宣言の `rowAxis`（`conv_transpose1d` の i8 だけ 1）で、GPU 常駐の席
-  では消費 op から導いた軸と突き合わせる（[glossary](../glossary.md) の `rowAxis` 行）。
-- `group_size`: 「付いていれば実行拒否」→ per-channel codec（`int8-sym`）は `groupSize` = 行長 MUST
-  （[container-v1](../container-v1.md) §6）。per-channel を group 形の特殊例として同じ欄で表す。
-- I8 の並び順「末尾」: safetensors の物理配置規則（ADR 0063）ごと退役した。
+## Addendum (2026-09-24) — ADR 0108 replaced the scale shape and declaration
 
-数値の契約は変えない: i8 は ±127 対称 per-channel（zero-point なし）・scale は要素ごとの
-読み出し時 dequant（`out = Σ x·(q·s) + bias`）・GPU と CPU 展開のビット一致・bias は f32・
-平坦添字・fake-quant 規律は現行のまま有効。
+ADR [0108](0108-container-format.md) decisions 11 / 17 / 18 (from 2026-09-22, IR v2 and the `krm`
+container) replaced three storage statements:
+
+- Scale shape and declaration: "keepdim broadcast shape of the weight's rank, declared by IR v1
+  `storage.scale`" → the rank-2 group shape `[shape[rowAxis], rowLength / groupSize]` named by
+  `encoding.scale` in the binding table (per-channel i8 is `[N, 1]`). The channel axis is the declared
+  `rowAxis` (1 only for i8 `conv_transpose1d`); GPU-resident presets check it against the axis derived
+  from the consuming op ([glossary](../glossary.md), `rowAxis`).
+- `group_size`: "rejected when present" → the per-channel codec (`int8-sym`) MUST have `groupSize` =
+  row length ([container-v1](../container-v1.md) §6); per-channel is a special case of the group form.
+- I8 placed last: retired with the safetensors layout rules (ADR 0063).
+
+The numeric contract is unchanged: ±127 symmetric per-channel without zero-point, per-element
+dequantization on read (`out = Σ x·(q·s) + bias`), bitwise equality of GPU and CPU expansion, f32
+bias, flat indexing and the fake-quant discipline.

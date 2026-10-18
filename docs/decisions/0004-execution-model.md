@@ -1,92 +1,88 @@
-# 0004 — 実行モデル（静的形状・submit 分割・資源管理）
+# 0004: Execution model (static shapes, split submits, resource management)
 
-- Status: accepted（2026-08-01）
-- 改訂（骨格は現行・以下の ①〜③ が後続 ADR で置換済み・④ は置換予告・⑤ は追加。①②⑤ は本文の該当箇所にも
-  追記がある）:
-  - ① **full-write** — ADR [0014](0014-layout-ops-full-write.md): 「全書きしない op は新品を
-    要求」からカーネル側の全域書きへ反転（バッファ管理 ⑤）。
-  - ② **submit スケジューラ** — ADR [0032](0032-deserialize-submit-and-optin-timing.md):
-    per-submit `onSubmittedWorkDone` を廃止し、適応制御の観測窓を flush 単位へ再定義。
-  - ③ **fence とバッファ寿命** — ADR [0054](0054-resident-loop-and-fence.md): ResidentTensor /
-    BatchScope を第 4 の寿命クラスとして追加し、通常 run の fence を `mapAsync` 1 本へ集約。
-  - ④ **置換済み（2026-09-05・ADR [0093](0093-transient-liveness-packing.md)）**: バッファ管理の
-    **サイズ別プール**は区間 + offset 配置（生存区間の first-fit パッキング）へ置換された。
-    `RunArena` は領域の所有と flush-before-destroy だけを持つ。
-  - ⑤ **送り込みの先行の上限** — ADR [0123](0123-submit-inflight-bound.md): run はステップの間で、フェンスの後の submit 64 回ごとに
-    完了印（`onSubmittedWorkDone`）を置き、未完了の印が 2 本を超えたら最も古い印を待つ（enqueue は印も待ちも無し）。
-- 根拠資料: recon §2/§3/§4（不変条件 14 項目は全て先行実験プロジェクト（以下プロトタイプ）
-  の実測障害由来）
+- Status: accepted (2026-08-01); partly superseded by [0014](0014-layout-ops-full-write.md)
+  (full-write moves to the kernels, 2026-08-02), [0032](0032-deserialize-submit-and-optin-timing.md)
+  (no per-submit `onSubmittedWorkDone`; the adaptive window is per flush, 2026-08-04),
+  [0054](0054-resident-loop-and-fence.md) (`ResidentTensor` / `BatchScope` as a fourth lifetime
+  class; one `mapAsync` fence per normal run, 2026-08-13) and [0093](0093-transient-liveness-packing.md)
+  (size-class pools replaced, 2026-09-05); amended by [0123](0123-submit-inflight-bound.md) (bound
+  on submits in flight, 2026-10-07). The skeleton below is in force.
+- Date: 2026-08-01
+- Related: recon §2 / §3 / §4 — all 14 invariants come from failures measured in the prototype.
 
-## 決定
+## Decision
 
-### 形状
+### Shapes
 
-- **全ノードの出力 shape を実行前に確定させる（静的形状）**。データ依存出力形状
-  （nonzero 等）は非対応。将来対応するなら「固定上限 + マスク」を個別 ADR で裁定する
-  （実行モデル全体に波及するため安易に変えない）。
+- **Every node's output shape is fixed before execution (static shapes).** Data-dependent output
+  shapes (`nonzero`, …) are unsupported. Supporting them ("fixed upper bound + mask") needs its own
+  ADR, because it reaches the whole execution model.
 
-### GPU 実行
+### GPU execution
 
-- dispatch 列は**時間予算ベースで複数 command buffer に分割して submit**
-  （TDR 2 秒 / Chromium watchdog 対策）。チャンクサイズ 0 は構築時に拒否。
-  **改訂（2026-08-04・ADR 0032）**: 旧「チャンク時間は前チャンク完了時刻からの差分」は廃止 —
-  submit ごとの `onSubmittedWorkDone` は Deno で CPU/GPU を直列化するため、計測は
-  flush の待ち 1 回へ集約した（窓の定義は下の④）。
-  **追記（2026-10-07・ADR 0123）**: 1 本の run の間にホストが GPU より無制限に先行しないよう、run はステップの間で、計測窓の中の
-  submit 64 回ごとに完了印を置き、未完了の印が 2 本を超えたら最も古い印を待つ（submit ごとには待たない — 上の改訂はそのまま）。
-- 適応制御の不変条件（M1-P2 で改訂 — 詳細は `packages/runtime/src/gpu/submit.ts` の doc）:
-  ① **成長は実測の裏付けにのみ基づく**（実測 0 = タイマ分解能未満は「速い」ではなく
-  「情報が無い」— 裏付けが無い間は初期チャンクサイズで据え置く）②積む前に判定して
-  **1 チャンクの推定時間が予算を超えない**ようにする（超えてから縮めない）③推定の単位は
-  dispatch 数ではなく **workgroup 数**（記号次元のグラフでは入力長で 1 dispatch の重さが
-  変わるため、dispatch 数で測ると短い入力で得た推定のまま長い入力を積む）④個々のチャンク
-  への時間帰属は信用しない（重なった submit の完了通知はほぼ同時に届き、先頭 1 本に全時間が
-  乗る）— 推定は窓の実測 ÷ 合計 workgroup 数で取る。**改訂（2026-08-04・ADR 0032）**:
-  窓 = 「窓で最初に submit した時刻 → flush の `onSubmittedWorkDone` 解決時刻」（旧
-  「キューが空になるまで」から flush 単位へ）。窓はホスト側エンコード時間を内側に含み
-  推定は過大 = チャンク縮小向き = TDR 安全側。仕事量 0 の窓も「情報なし」扱い
-  （0 除算 → Infinity → minChunkSize 永久張り付きの防止）。
-- **device.lost はランタイム一級イベント**。無視すると mapAsync が永久ハングする。
-  device / PipelineCache / スケジューラは `device.destroy()` 後に再構築できる構造にする
-  （VRAM を返すのは device.destroy() のみ — buffer.destroy() は 1 バイトも返さない）。
-  追記（2026-09-25）: この経路に届かない環境がある — Deno 2.9.6 は device lost を例外にせず
-  panic し、プロセスごと消える（`docs/known-issues.md`「Intel Arc B570」節）。また submit の
-  時間予算分割は 1 dispatch が単独で予算を超える場合には効かない（`docs/limitations.md`「BiRefNet
-  系の配布形」節の 2048² × B570）。
-- `requiredLimits` は compute 系（workgroup storage / invocations / workgroupSize X,Y,Z）
-  まで明示要求し、取得後に検証する。`pushErrorScope('validation')` を常設する
-  （無効パイプラインは throw せず dispatch no-op → 出力全 0 の沈黙故障）。
-- codegen は **決定性（同一キー → バイト単位同一 WGSL）** を不変条件とし
-  スナップショットで固定。elementwise と行 reduce 族は grid-stride 前提。
+- The dispatch sequence is **split by a time budget into several command buffers and submitted**
+  (against the 2 s TDR and the Chromium watchdog). A chunk size of 0 is rejected at construction.
+  *(Revised 2026-08-04, ADR 0032: chunk time is no longer measured from the previous chunk's
+  completion — a per-submit `onSubmittedWorkDone` serialises CPU and GPU on Deno — but from the
+  single wait in `flush`; window definition in ④ below. Amended 2026-10-07, ADR 0123: so that the
+  host does not run unboundedly ahead of the GPU, a run places a completion marker every 64 submits
+  of the window, between steps, and waits for the oldest marker when more than 2 are pending.)*
+- Invariants of the adaptive control (revised at M1-P2; details in the doc comment of
+  `packages/runtime/src/gpu/submit.ts`): ① **growth only on measured evidence** (a measurement of 0,
+  below timer resolution, means "no information", not "fast"; without evidence the initial chunk
+  size stays); ② decide before adding, so that **one chunk's estimated time never exceeds the
+  budget** (no shrinking after an overrun); ③ the estimate is per **workgroup**, not per dispatch
+  (with symbolic dimensions the weight of a dispatch changes with the input length); ④ no time is
+  attributed to individual chunks (completions of overlapping submits arrive together and the first
+  one takes all the time) — the estimate is the window's measured time ÷ its total workgroups.
+  *(Revised 2026-08-04, ADR 0032: window = first submit of the window → resolution of the flush's
+  `onSubmittedWorkDone`. It includes host encoding time, so the estimate errs large, towards smaller
+  chunks, which is the TDR-safe side. A window with no work is "no information", which prevents
+  0 ÷ 0 → Infinity pinning the size at `minChunkSize`.)*
+- **`device.lost` is a first-class runtime event**; ignoring it leaves `mapAsync` hanging forever.
+  The device, the `PipelineCache` and the scheduler can be rebuilt after `device.destroy()`. The
+  prototype observed that only `device.destroy()` returned VRAM and `buffer.destroy()` returned none;
+  this is implementation behaviour, not a guarantee (on Deno 2.9.6 a destroyed device kept its memory
+  until garbage collection — [known issues](../known-issues.md)). *Recorded 2026-09-25: Deno 2.9.6
+  panicked on device loss instead of reporting it, and a single dispatch over the budget cannot be
+  split (BiRefNet 2048² on the Intel Arc B570 — [limitations](../limitations.md)).*
+- `requiredLimits` requests the compute limits explicitly (workgroup storage, invocations,
+  workgroup size X / Y / Z) and checks them after acquisition. `pushErrorScope('validation')` is
+  always on (an invalid pipeline does not throw; its dispatch is a no-op and the output is silently
+  all zero).
+- Codegen is **deterministic (same key → byte-identical WGSL)**, pinned by snapshots. Elementwise
+  ops and the row-reduce family assume grid-stride loops.
 
-### バッファ管理
+### Buffer management
 
-- per-run アリーナ（サイズ別プール + 最終消費者解放）。不変条件: ① release はノード境界
-  のみ ② 出力 alloc は dispatch エンコード前 ③ useCounts は `node.ins` の厳密延べ計数
-  ④ `queue.writeBuffer` 対象はプール外 ⑤ **full-write: 全ノードは出力バッファの全バイトを
-  書く** ⑥ 破棄・失敗経路では必ず flush してから destroy。中間値の readback は拒否する。
-- ⑤ の改訂（2026-08-02 / ADR 0014）: 当初は「全書きしない op は新品を要求」（プールを迂回）
-  だったが、不変条件がカーネル実装の知識に依存する（アリーナ側が op 種別を知る必要が生じる）
-  ため却下し、**カーネル側に全域書きを課す**形へ反転した。プール再利用バッファはゼロ初期化
-  されないので、ゼロ埋めが要る op（pad）は範囲外にも 0 を**書く**。1 ノードが複数 dispatch を
-  出す形（cat）はノード単位で全域を覆えばよく、被覆は呼び出し側が offset の総和と出力の軸長で
-  突き合わせる。固定はフォールト注入（再利用バッファへ毒値 → 実行 → 毒値が残らないこと —
-  `packages/runtime/tests/gpu_full_write_test.ts`）。
+- A per-run arena (size-class pools + release at the last consumer) *(pools superseded by ADR 0093
+  on 2026-09-05: interval + offset placement, first-fit packing of live ranges; `RunArena` keeps
+  only region ownership and flush-before-destroy)*. Invariants: ① release only at node boundaries;
+  ② output allocation before dispatch encoding; ③ `useCounts` count `node.ins` exactly, with
+  repeats; ④ targets of `queue.writeBuffer` are outside the pool; ⑤ **full-write: every node writes
+  every byte of its output buffer**; ⑥ on disposal and failure paths, always flush, then destroy.
+  Reading back an intermediate value is rejected.
+- ⑤ revised 2026-08-02 by ADR 0014: originally "an op that does not write everything gets a fresh
+  buffer" (bypassing the pool); rejected because the arena would need per-op knowledge. **The kernels
+  write the whole range instead.** Reused buffers are not zeroed, so an op that needs zeros (`pad`)
+  writes 0 outside its data. A node with several dispatches (`cat`) covers the range per node; the
+  caller checks the sum of offsets against the output axis length. Pinned by fault injection (poison
+  a reused buffer, run, no poison remains — `packages/runtime/tests/gpu_full_write_test.ts`).
 
-### 規約
+### Conventions
 
-- **fail loudly 全域**: 未対応 op / 属性・格納 dtype の流出・未束縛シンボル・broadcast
-  不可・負 pad は黙って近似せず例外。シンボル束縛の参照は `Object.hasOwn` 経由。
-- **初期化は明示 async ステージ**（プロトタイプはコンストラクタ同期ループが 28.5 秒の床だった）。
-  重み取得と GPU アップロードをパイプライン化できる入口（チャンク逐次投入）を持つ。
-- グラフ最適化パス（恒等 expand の別名化・permute 連鎖畳み込み・融合）を一級機能とする。
-  融合は最適化のみで、正しさは常に非融合経路が担保する。
+- **Fail loudly everywhere**: unsupported ops or attributes, a storage dtype leaking out, unbound
+  symbols, impossible broadcasts and negative padding throw instead of approximating. Symbol
+  bindings are looked up through `Object.hasOwn`.
+- **Initialisation is an explicit async stage** (the prototype's synchronous constructor loop had a
+  28.5 s floor), with an entry that pipelines weight fetch and GPU upload (chunks fed in sequence).
+- Graph optimisation passes (aliasing identity `expand`, folding `permute` chains, fusion) are a
+  first-class feature. Fusion is only an optimisation; the unfused path always defines correctness.
 
-## 未決（個別 ADR 待ち）
+## Open points
 
-- KV キャッシュの IR/実行表現（静的最大長 vs prefill/decode 分割）— プロトタイプでも未決。
-  → ADR [0066](0066-generation-context-state-slots.md)（GenerationContext と名前付き state
-  スロット）で決着。
-- 時間予算の既定値の根拠づけ（プロトタイプは 100ms・安全率 0.5 の経験値）。
-- メモリプランの発展形（厳密 liveness / 静的アリーナ計画）。
-  → ADR [0093](0093-transient-liveness-packing.md)（区間 + offset 配置）で決着。
+- KV cache representation: resolved by ADR [0066](0066-generation-context-state-slots.md)
+  (`GenerationContext` and named state slots).
+- Grounds for the time-budget defaults: still the prototype's empirical values, 100 ms and safety
+  factor 0.5 (`packages/runtime/src/gpu/submit.ts`: `timeBudgetMs`, `CHUNK_TIME_SAFETY`).
+- Further memory planning: resolved by ADR [0093](0093-transient-liveness-packing.md).
