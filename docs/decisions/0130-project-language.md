@@ -201,8 +201,8 @@ See "Open points".
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | Phase 1 — port (in progress) | Decision 7: new material English, untouched Japanese stays, ported tests keep Japanese text                                                                           | Every lane runs on Node with the Deno baseline counts                     |
 | Phase 2 — step 2-9a (2026-10-18) | Rulings recorded here; `CLAUDE.md` language section rewritten; the three checks in `tools/lang/` | Baseline taken: 170,828 lines with Japanese text in tracked files |
-| 2-9b | ADRs: force triage over every ADR → the maintainer's rulings → translation in numeric batches of five, each with an independent review | Every ADR in force is English; excluded ADRs carry an English status line; links and `DECIDED:` pointers resolve |
-| 2-9c | `docs/*.md` and `docs/glossary.md` (English; the Japanese column moves to `GLOSSARY.ja.md`); `CLAUDE.md`, `AGENTS.md`, `.claude/ACTIVE_DESIGN.md` as a whole; CHANGELOG remnants; the English header line on research snapshots | No Japanese under `docs/` outside `GLOSSARY.ja.md` and `research/` |
+| 2-9b (done 2026-10-18) | ADRs: force triage over every ADR → the maintainer's rulings → translation in numeric batches of five, each with an independent review | Every ADR in force is English; excluded ADRs carry an English status line; links and `DECIDED:` pointers resolve |
+| 2-9c (done 2026-10-18) | `docs/*.md` and `docs/glossary.md` (English; the Japanese column moves to `GLOSSARY.ja.md`); `CLAUDE.md`, `AGENTS.md`, `.claude/ACTIVE_DESIGN.md` as a whole; CHANGELOG remnants; the English header line on research snapshots | No Japanese under `docs/` outside `GLOSSARY.ja.md` and `research/` |
 | 2-9d | Comments and JSDoc of `packages/*/src` rewritten with a fact check; WGSL comments translated and the snapshots regenerated in the same commit | Code skeleton unchanged per file; lanes green; sha256 rows unchanged |
 | 2-9e | Error messages with their assertions, module by module; verbatim quotes in docs in the same commit | All lanes green with unchanged test counts |
 | 2-9f | Python exporter (`tools/exporter`, sources and tests) | AST unchanged apart from docstrings; `uv run pytest` green |
@@ -246,6 +246,13 @@ All resolved by the maintainer's rulings of 2026-10-18 (step 2-9 plan check):
   decision 3 (d)); until then the gate's allow-list names them.
 - **Unpushed history.** The 27 commits on `wip/0.15` whose subject is Japanese (2026-10-17 and 18)
   are not reworded: decision 2 does not rewrite history, and the documents cite their hashes.
+- **Residue after 2-9c (2026-10-18).** Japanese that stays under `docs/` outside `GLOSSARY.ja.md` and
+  `research/`: anchors into Japanese research headings (perf-ledger 23 lines, backlog 3, ACTIVE_DESIGN 2);
+  verbatim quotes of error messages, exporter labels and script output that the code still prints
+  (limitations 4, known-issues 2, op-vocabulary 2, release-runbook 1); test-name filters inside recorded
+  commands (known-issues 3, release-runbook 1); one quoted commit subject (perf-ledger). The quotes and
+  filters go when 2-9d / 2-9e translate their sources; the anchors stay on the allow-list with research.
+  The `*-results.json` files under research (10) carry Japanese labels and stay with research.
 - **Baseline (tracked files, line-based, 2026-10-18).** `docs/decisions` 19,541 lines in 129 files;
   `docs/` otherwise 5,651; `docs/research` 23,964; `packages/runtime/src` 16,512; `packages/models/src`
   11,911; `packages/hub/src` 1,433; tests of the three packages and e2e 37,113; test fixtures 11,964;
