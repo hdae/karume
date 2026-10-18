@@ -6,7 +6,7 @@ distributions, so they have no dist recipe and no model card.
 
 The stack around them is not finished either: a public MiniCPM5 distribution and a published
 `MiniCPM5Pipeline` API are still pending. The recipes export MiniCPM5-1B only, so the MiniCPM5-2B
-series that the [MiniCPM5 CLI example](../../../examples/minicpm5/README.md) reads through
+series that the MiniCPM5 CLI example (`examples/minicpm5/README.md`, removed in 0.15) reads through
 `--source` cannot be produced here.
 
 Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The authority for the design

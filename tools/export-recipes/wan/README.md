@@ -702,7 +702,7 @@ contents. There is no publishing path for third-party encoders here.
 #### Swapping the mirror into Wan (ADR 0122 stage d)
 
 After step 4 above, swap the mirror into Wan. Run this from the repository root; the
-[swap section](../../examples/wan/README.md#swapping-the-text-encoder) of the `examples/wan` README
+swap section (`examples/wan/README.md`, removed in 0.15) of the `examples/wan` README
 explains the rules:
 
 ```bash
