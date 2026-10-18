@@ -238,7 +238,7 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
   （`q ∈ [−7, 7]`・`u = q + 8`・バイト内で要素 `2i` = 下位 nibble）。宣言 shape は**論理形の
   まま**で、payload は `numel / 2` バイト（要素数が奇数の宣言は bit 総量が byte 境界に乗らないので
   fail loudly）。展開カーネルは `array<u32>` で束縛する。
-- **`int2-off`**（ADR [0097](decisions/0097-gemma4-qat-integration.md#追記-1--int2-格納と実行の契約2026-09-11)）:
+- **`int2-off`**（ADR [0097](decisions/0097-gemma4-qat-integration.md#addendum-1-2026-09-11--int2-storage-and-execution-contract)）:
   論理形は正整数の rank 2 `[N,K]`、K は 16 の倍数。1 バイトに 4 要素を下位 2bit から `u = q + 2`
   で詰め、整数 `[−2, 1]` を保持する。復元は要素ごとの `fround(q·scale)`。linear の計算は f32
   のみで、a8 / f16 は明示拒否する。**`ternary`** は値域 `{−1, 0, +1}` を主張する別名 codec で、
@@ -701,7 +701,7 @@ state スロットを読み書きするノードの契約（ADR
     **縮小（`Hout < H`）も同じ op**（2 タップしか読まないのは torch と同じ仕様で `area` とは
     別物）。空間軸の長さ 0 は受理しない
 
-- **固定活性量子化**（ADR [0097](decisions/0097-gemma4-qat-integration.md#追記-2--固定-srq-op-の契約2026-09-11)）:
+- **固定活性量子化**（ADR [0097](decisions/0097-gemma4-qat-integration.md#addendum-2-2026-09-11--fixed-srq-op-contract)）:
   - `static_quantize`（f32、アリティ 1、attrs `scale`）— shape は不変。scale は非負・有限で厳密な f32 値。
     f32 除算 → 最近接の偶数への整数丸め → `[-128,127]` への飽和 → f32 乗算を行う。
     scale=0 は全ビットを保つ恒等動作。符号付きゼロと NaN の符号・payload を保持し、

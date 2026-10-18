@@ -1,68 +1,67 @@
-# 0109: manifest `karume/5` — コンテナ配布形の入口
+# 0109: Manifest `karume/5` — the entry point of the container distribution
 
-- Status: accepted（2026-09-22 — ユーザー裁定「それぞれ推奨案で承認」: コンテナ形式の波 段 2 の
-  計画で示した推奨案 1-1〜1-12 と、再アップロードする 1 系列 = irodori-v4.1-small）
+- Status: accepted (2026-09-22 — the maintainer approved the recommended options 1-1 to 1-12 of the
+  step 2 plan of the container-format work, and irodori-v4.1-small as the one repository to
+  re-upload); implemented in `@karume/hub`, the distribution format of 0.13.0 and 0.14.0. The
+  concurrent-fetch budget at the end of decision 7 was superseded by addendum 2 (2026-09-25).
 - Date: 2026-09-22
-- 関連: ADR [0108](0108-container-format.md)（コンテナ形式 — 決定 20 の責務分担を本 ADR が具体化し、
-  一部を訂正する〈0108 追記 2〉）/ [0038](0038-manifest-v1.md)（format 繰り上げ規則・FileRef 3 点
-  セット・越境の対）/ [0041](0041-manifest-v2.md)（`quants` の語彙）/
-  [0071](0071-manifest-v3-shards.md)（`shards` 欄 — 本 ADR で退役）/
-  [0075](0075-quant-presentation.md)（`label` / `description` — 据え置き）/
-  [0080](0080-hub-fetch-cache-050.md)（取得層の cold / warm 規律 — 継承）/
-  [0086](0086-distribution-source.md)（取得元の抽象 — 継承）/
-  [0089](0089-memory-limits-preflight.md)（1 バイトも取る前の見積り — 継承）/
-  [0090](0090-shard-spec-v3-tensor-pieces.md)（tensor pieces — 退役）/
-  [0085](0085-ple-host-gather.md)（PLE sidecar — 資産の席がコンテナへ移る）。
-  仕様の正本は [container-v1](../container-v1.md)（物理形式）と本 ADR（manifest の形）。
+- Related: [0108](0108-container-format.md) (makes 0108 decision 20 concrete and corrects part of
+  it — 0108 addendum 2) / [0038](0038-manifest-v1.md) (version bump rule, FileRef, cross-repository
+  pairs) / [0041](0041-manifest-v2.md) / [0071](0071-manifest-v3-shards.md) and
+  [0090](0090-shard-spec-v3-tensor-pieces.md) (shards and tensor pieces — retired) /
+  [0075](0075-quant-presentation.md) (unchanged) / [0080](0080-hub-fetch-cache-050.md),
+  [0086](0086-distribution-source.md), [0089](0089-memory-limits-preflight.md) (inherited) /
+  [0085](0085-ple-host-gather.md) (PLE moves into the container) /
+  [0128](0128-default-preset-original-weights.md) decision 6 (`defaultQuant` unchanged). Canonical
+  spec: [container-v1](../container-v1.md) (physical format) and this ADR (manifest shape).
 
 ## Context
 
-`karume/4` は「部品 × dtype → shard 列（先頭 = グラフ shard）+ extras」「quant 席 = 部品 → dtype
-ラベルの完全写像 + 実行ノブ」「model 単位の assets」の 3 層である
-（`packages/hub/src/manifest.ts:259-283, :306-352`）。配布形が safetensors 方言から `krm` へ
-移る（ADR 0108）ので、shard 列の席は**コンテナの入口**（descriptor と part の FileRef）へ置き
-換わる。ADR 0108 決定 20 の表は入口を `quants[].container` と書いていたが、実ミラー 11 本の
-棚卸し（2026-09-22・`models/*/karume.json` の集計）で次が分かった:
+`karume/4` had three layers: "component × dtype → shard list (first = graph shard) + extras",
+"preset = complete mapping component → dtype label + execution options", and model-level assets.
+With the distribution moving from the safetensors dialect to `krm` (ADR 0108), the shard list is
+replaced by **the container's entry point** (FileRefs of the descriptor and the parts). ADR 0108
+decision 20 put that entry point at `quants[].container`, but an inventory of the 11 real mirrors
+(2026-09-22, totals over `models/*/karume.json`) showed:
 
-- 部品 × dtype の一意ファイルは **65.9 GiB**。quant 席は「重みの写像 + 実行ノブ」であって重みの
-  単位ではない — gemma4 の 3 席（`i4` / `i4-gemvpar` / `i4-fast`）は**重みが同一**で実行ノブだけ
-  違い、anima は 5 モデル × 6 席が同じ text_encoder（1.1 GB）を指す。
-- 席ごとに 1 コンテナを物理ファイルにすると **197 GiB（×2.99）** になる（anima ×3.87・
-  sbv2 ×4.66・gemma4 ×3.00・irodori ×1.22）。
-- extras は anima transformer の `rope_base`（65,968 B・f16 / i8 が同じ path）**1 種だけ**。
-  越境参照は anima-extra の text_encoder / vae_decoder の shard と tokenizer 2 本。PLE は gemma4 の
-  `assets` に shard 9 本（計 2.3 GB）+ 索引 1 本。
-- 段 1 の読み手は取得の口をもう持っている: `BlockSource`（part 数・part 長・
-  `read(part, offset, length)`）を `openContainer` が受け、**2 文書それぞれ**の期待 length + sha256
-  で照合してから parse する（`packages/runtime/src/format/container/open.ts:44-61`）。
-- 取得層（`@hdae/fetch-cache` 0.8.0）に HTTP Range の口は無い。cold は「ファイル全量を流しながら
-  sha256 を検証し、記録ハッシュを焼く」、warm は記録ハッシュの文字列比較だけ
-  （`packages/hub/src/sources/hf.ts:110-131`・ADR 0080）。区間読みは温めた後のキャッシュに
-  対してだけ開き、費用は Deno の既定で scan（offset 比例）・ブラウザで seek
-  （`packages/hub/src/source.ts:108-113`）。
+- Unique component × dtype files total **65.9 GiB**. A preset is "weight mapping + execution
+  options", not a weight unit: gemma4's three presets (`i4` / `i4-gemvpar` / `i4-fast`) **share the
+  weights** and differ only in execution options; anima's 5 models × 6 presets point at the same
+  text_encoder (1.1 GB).
+- One physical container per preset would be **197 GiB (×2.99)** (anima ×3.87, sbv2 ×4.66, gemma4
+  ×3.00, irodori ×1.22).
+- `extras` held **one kind**: anima's `rope_base` (65,968 B). Cross-repository references:
+  anima-extra's text_encoder / vae_decoder and two tokenizer files. PLE: 9 shards (2.3 GB) + 1
+  index in gemma4's `assets`.
+- `openContainer` (step 1) takes a `BlockSource` (part count, part lengths,
+  `read(part, offset, length)`) and checks **each of the two documents** against an expected
+  length + sha256 before parsing (`DescriptorExpectation`, `packages/runtime/src/format/container/open.ts`).
+- The fetch layer (`@hdae/fetch-cache` 0.8.0) has no HTTP Range. Cold reads stream the whole file,
+  verify sha256 and record the hash; warm reads compare the recorded hash (ADR 0080). Range reads
+  exist only on the warmed cache: scan (cost proportional to the offset) on Deno and Node, seek in
+  browsers (`packages/hub/src/sources/hf.ts:244`).
 
 ## Decision
 
-### 1. format は `karume/5`。`karume/4` は読まない
+### 1. The format is `karume/5`; `karume/4` is not read
 
-ADR 0038 決定 1 の規則どおり major を繰り上げ、旧 major は unsupported format で落とす。
-両読みは実装しない（ADR 0108 決定 18・却下案 3）。
+The major version is bumped by ADR 0038 decision 1; an old major fails as an unsupported format. No
+dual reading (ADR 0108 decision 18, alternative 3).
 
-### 2. コンテナの粒度は**部品 × dtype**。quant 席は写像のまま
+### 2. Container granularity is **component × dtype**; presets stay mappings
 
-`weights.<部品>.<dtype>` が `{ container }` を持ち、`quants[].weights`（部品 → dtype ラベルの
-完全写像）と `session` / `gpuFeatures` / `requiredLimits` / `label` / `description` は `karume/4` の
-まま。ADR 0108 決定 20 の `quants[].container` は**この形に訂正する**（0108 追記 2）。
+`weights.<component>.<dtype>` holds `{ container }`. `quants[].weights` (complete mapping
+component → dtype label) and `session` / `gpuFeatures` / `requiredLimits` / `label` /
+`description` stay as in `karume/4`. ADR 0108 decision 20's `quants[].container` is **corrected to
+this shape** (0108 addendum 2).
 
-- 理由は上の実測: 席ごとの物理ファイルは ×2.99。段 1 の書き手（1 コンテナ 1 グラフ）と移行 CLI
-  もこの粒度で書いており、そのまま噛み合う。
-- 1 コンテナに複数グラフを載せる口（container-v1 §2.1 の `graphs`）は**形式の能力として残す**が、
-  `karume/5` は使わない。
-- dtype ラベルは選択・表示の語彙で、格納の正本は descriptor の `encoding.codec`（ADR 0071 決定 3 の
-  「ラベルは格納を主張しない」を継承）。hub は写像の完全性（席の全部品にコンテナがある）だけを
-  見る。
+- Reason: one file per preset is ×2.99; the step 1 writer and the migration CLI already wrote this
+  granularity. Several graphs per container **remains a format capability**, unused in `karume/5`.
+- The dtype label is vocabulary for selection and display; storage is canonical in the
+  descriptor's `encoding.codec` (ADR 0071 decision 3 inherited). The hub checks only that every
+  component of a preset has a container.
 
-### 3. `container` 欄 — descriptor の期待値 + part の FileRef 列
+### 3. The `container` field — descriptor expectations + part FileRefs
 
 ```json
 "container": {
@@ -78,158 +77,157 @@ ADR 0038 決定 1 の規則どおり major を繰り上げ、旧 major は unsup
 }
 ```
 
-- **`descriptor` は 2 文書それぞれの length + sha256**（part 0 ファイルの sha256 とは別の事実）。
-  読み手の契約（`DescriptorExpectation`）を変えずに済み、`graph` 文書の sha256 はそのまま `krg` の
-  同一性（ADR 0108 決定 4 — 内容ハッシュ）に使える。
-- **`parts` は part 0 を含む全 part** を添字順に並べる（container-v1 §8）。先頭が part 0 =
-  descriptor のファイルで、`size ≥ 24`（ヘッダ長）。2 要素以上（part 0 + part 1）。
-- **長さ 0 の part（const が空の part 1）は 0 バイトのファイルとして書き、`container.parts` に限り
-  `size: 0` を許す**（sha256 は空列の値）。hub は取得しない（`BlockSource.partLength` が 0 を
-  答え、読みは起きない）。FileRef 一般の `size > 0`（`manifest.ts:547`）はそのまま。
-- 上限は**独立に持つ**: part 件数 ≤ 1024・1 part ≤ 1024 MiB（part 長の天井 — container-v1 §10 の
-  値を hub 側の定数として持ち、Python の突合先は `tools/exporter/src/karume/container.py` の定数）。
-  `karume/4` の `MAX_SHARD_BYTES` = 256 MiB とその `assets` / `extras` 免除は退役。
-- **越境参照は容器単位**: `parts` の全要素が同じ `repo` / `revision` の対（または全部が自リポ）で
-  あることを parse で門にする。片方だけ・混在は fail loudly。
-- ファイル名の規約（`<stem>-NNNNN-of-NNNNN.krm` — container-v1 §8）は書き手の規約で、hub は
-  検査しない（`karume/4` の shard と同じ）。
+- **`descriptor` gives length + sha256 for each of the two documents** (not the part 0 file's
+  sha256). The reader contract (`DescriptorExpectation`) stays, and the `graph` document's sha256
+  serves as `krg` identity (ADR 0108 decision 4).
+- **`parts` lists every part including part 0** in index order (container-v1 §8). The first is
+  part 0 = the descriptor file, `size ≥ 24` (header length); at least two entries (part 0 + part 1).
+- **A zero-length part (part 1 with an empty const region) is written as a 0-byte file, and
+  `size: 0` is allowed only in `container.parts`** (sha256 = that of the empty string). The hub does
+  not fetch it (`BlockSource.partLength` answers 0, so no read happens). The general FileRef rule
+  `size > 0` stays (FileRef parsing in `packages/hub/src/manifest.ts`).
+- Limits are **kept independently**: part count ≤ 1024, one part ≤ 1024 MiB (container-v1 §10;
+  `MAX_PARTS` / `MAX_PART_BYTES` in `packages/hub/src/manifest.ts`, Python counterparts in
+  `tools/exporter/src/karume/container.py`). `MAX_SHARD_BYTES` and its exemptions retire.
+- **Cross-repository references are per container**: parsing checks that every element of `parts`
+  has the same `repo` / `revision` pair (or none, all local). One-sided or mixed references fail
+  loudly.
+- The file name convention (`<stem>-NNNNN-of-NNNNN.krm` — container-v1 §8) is the writer's; the hub
+  does not check it (as with `karume/4` shards).
 
-### 4. `assets` は残す。PLE と extras はコンテナの中へ
+### 4. `assets` stays; PLE and extras move into the container
 
-- **model 単位の `assets`（quant 非依存・FileRef）は残す** — tokenizer / symbols / style_vectors /
-  speaker_embeddings は複数コンテナで共有され、越境参照（anima-extra）も実在する。コンテナに畳むと
-  リポ間・席間で複製される。
-- **PLE sidecar は `assets` から消え、モデルコンテナの `assets` へ移る**: `values` と `scales` を別々の
-  行列として block 上限 32 MiB 以下・**行の倍数**で切り直し（旧 shard の境界は消える）、役割
-  `ple-values` / `ple-scales` の block 列（資産名 `ple.values.<k>` / `ple.scales.<k>`）と、役割 `ple-index`
-  の索引（schema 3 — 行バイト数と block ごとの token 区間）にする。区間読みを要する block は
-  **1 block = 1 part**（container-v1 §4.2 の「専用 part に単独」）。索引や `rope_base` のような全量読みの
-  資産は資産どうしで 1 part を共有してよい（重み block とは同居しない）。読み手は token → (block, 行 offset)
-  の翻訳だけをする。
-- 資産は shape を持たないので **`assets[].length`（payload のバイト数）を宣言する**（block 長 = 4 の倍数への
-  切り上げ）。消費側が末尾の 0x00 を推測で剥がない。
-- **`extras` は退役**し、実物 1 種（`rope_base`）はコンテナの `assets`（役割 `rope-base`）へ移る。
-  複製は 66 KB × 2 本（f16 / i8）で済む。
+- **Model-level `assets` (preset-independent FileRefs) stay** — tokenizers, symbols, style vectors
+  and speaker embeddings are shared by several containers and referenced across repositories;
+  folding them in would duplicate them.
+- **The PLE sidecar becomes assets of the model container**: `values` and `scales` are re-cut
+  separately into blocks of at most 32 MiB **on row multiples**, as block lists with roles
+  `ple-values` / `ple-scales` (asset names `ple.values.<k>` / `ple.scales.<k>`) plus an index with
+  role `ple-index` (schema 3 — row bytes and token range per block). Range-read blocks are **one
+  block per part** (container-v1 §4.2); whole-read assets (index, `rope_base`) may share a part with
+  each other, never with weight blocks. The reader translates token → (block, row offset).
+- Assets have no shape, so **`assets[].length` (payload bytes) is declared** (block length = rounded
+  up to a multiple of 4). Consumers do not guess and strip trailing 0x00.
+- **`extras` retires**; `rope_base` becomes a container asset (role `rope-base`, 66 KB × 2).
 
-### 5. 共有 `krg` の席は `karume/5` に置かない
+### 5. No shared-`krg` field in `karume/5`
 
-各 `krm` がグラフ記述を内包する（グラフ JSON は 77 本で 14.2 MB — 複製の費用が小さい）。
-descriptor の `graph` 文書の sha256 が同一性を与えるので、共有 `krg` を配る席（決定 20 の
-`graph: FileRef`）は**要る段（段 5 の LoRA）で足す**。
+Each `krm` embeds its graph descriptor (77 graph JSONs total 14.2 MB — duplication is cheap). The
+sha256 of the descriptor's `graph` document gives identity, so a field that distributes a shared
+`krg` (decision 20's `graph: FileRef`) is **added when needed (LoRA, step 5)**.
 
-### 6. hub の検査は「宣言だけで閉じるもの」に絞る
+### 6. The hub checks only what declarations alone decide
 
-件数・天井・`size: 0` の規則・part 0 の長さ（= 24 + 2 文書の長さ）・越境の一様性・descriptor 長
-（≤ 32 MiB）は parse で見る（part の長さに 64 の倍数の規則は無い — 64 B 整列は block の offset の規則で、
-part 長は 4 の倍数にしかならない）。**descriptor と parts の整合・block 目次・codec 台帳の突合は
-`openContainer` が持つ**（`open.ts:222-278`）ので hub には置かない — 検査点を 2 つにしない。
+Parsing checks counts, ceilings, the `size: 0` rule, the length of part 0 (= 24 + both document
+lengths), uniform cross-repository references and descriptor length (≤ 32 MiB); part lengths have no
+multiple-of-64 rule (64 B alignment is a block-offset rule). **Descriptor / parts consistency, the
+block index and the codec ledger are checked by `openContainer`**
+(`packages/runtime/src/format/container/open.ts`), not by the hub — one check point, not two.
 
-`resolveFiles` の戻りは **選択結果の構造型**（部品 → コンテナ参照・資産名 → FileRef）にし、
-prefetch / 在庫 / 進捗が使う平坦な FileRef 列はそこから導く。`karume/4` の取得キー規約
-（`<weights>[i]` / `<weights>.<extra>` — `packages/hub/src/resolve.ts:91-121`・models 側の連番復元
-`packages/models/src/hub/components.ts:141-172`）は退役する。
+Resolution returns **a structured selection** (component → container reference, asset name →
+FileRef): `resolveSelection`, with the flat FileRef list for prefetch, inventory and progress derived
+from it by `selectionRefs` (`packages/hub/src/resolve.ts`). The `karume/4` fetch-key convention
+(`<weights>[i]` / `<weights>.<extra>`, and the index reconstruction on the models side) retires.
 
-### 7. 取得単位は**段 2 では part**。取得層は変えない
+### 7. Fetching
 
-hub はコンテナ 1 本につき `BlockSource` を返す取得面を 1 本持つ。
+The hub has one fetch surface that returns a `BlockSource` per container.
 
-- **cold**: 相 1（`prefetchFile` — ファイル全量を流しながら sha256 検証・記録ハッシュ焼き込み）で
-  part を温め、区間読み口を開く。RAM に part は載らない。
-- **warm**: 記録ハッシュの文字列比較のみ（ADR 0080 を継承）。digest は 0 回。
-- **区間読みの費用型で分岐**: seek（ブラウザの Blob・ローカルの区間読み）は block ごとに読む。
-  scan（Deno の既定）は part を 1 度に読んで block に切る（同じ part の block を順に読むと読み飛ばしが
-  二次になる — `fetch-cache/src/core.ts:1510-1566`）。
-- **「検証済み」を運ぶ**: 取得層がファイル全体を検証したバイト列（HF 経由）は `BlockSource` が
-  検証済みと名乗り、`openContainer.readBlock` は**未検証の取得元にだけ** block の sha256 を掛ける
-  （`fromContainer(bytes)`・ローカルディレクトリ — hub がファイル全体の sha256 を照合しない点は
-  ADR 0086 決定 2 のまま）。cold の 2 重 digest（温めの逐次 + block）を避ける。container-v1 §7 の表を
-  この形に訂正する。
-- **HTTP Range は段 6 のまま**。前倒しの条件は「段 2 の RAM ピーク harness で cold のピークが
-  『part 長 + 重ね合わせ』を超える」こと。取得層（`@hdae/fetch-cache`）は段 2 では変更しない。
-- 進捗の単位は FileRef（= part）のまま。同時取得の予算は「本数と合計バイトの両方」
-  （container-v1 §11）で、`karume/4` の `BYTE_BUDGET` = 1.5 GiB（ファイル全量の前確保が前提）は
-  根拠が消えるので、**転送中 1 本 + 受信・検証中 1 本 = 本数 2・合計 = 選択中の最大 part 長 × 2**
-  を段 2 の既定にし、2f の harness で見直す。
+- **Cold**: phase 1 (`prefetchFile` — stream the whole file, verify sha256, record the hash) warms
+  the part, then range reads open. The part is not held in RAM.
+- **Warm**: recorded-hash comparison only (ADR 0080); zero digests.
+- **Branch on range-read cost**: seek (browser Blob, local positional reads) reads per block; scan
+  (Deno and Node via HF — `packages/hub/src/sources/hf.ts:244`) reads the part once and cuts it into
+  blocks (reading the blocks of one part in order would make the skipping quadratic).
+- **"Verified" is carried along**: bytes whose whole file the fetch layer verified (via HF) are
+  declared verified by the `BlockSource`, and `openContainer`'s `readBlock` digests blocks **only
+  for unverified sources** (the `{ kind: "bytes" }` input of `openContainer`, local directories —
+  the hub does not check whole-file sha256 there, ADR 0086 decision 2). This avoids double digests
+  on cold reads (warming + block). Container-v1 §7 was corrected to this shape.
+- **HTTP Range stays at step 6.** The trigger to bring it forward is "the RAM-peak harness shows a
+  cold peak above 'part length + overlap'". The fetch layer (`@hdae/fetch-cache`) is not changed.
+- Progress is counted per FileRef (= part). The concurrent-fetch budget "count 2, total = largest
+  selected part × 2" (replacing `BYTE_BUDGET` = 1.5 GiB) **was superseded by addendum 2 on
+  2026-09-25** (4 streamed warm-ups, at most one held part; container-v1 §11).
 
-### 8. 段 2 の書き手は移行 CLI の**リポ丸ごとモード**
+### 8. Step 2 writer — the whole-repository mode of the migration CLI
 
-`karume migrate --manifest <karume.json> --out <dir>` が旧 `karume/4` を読み、全 (モデル, 部品,
-dtype) を `krm` へ変換し、`assets` を写し、`karume/5` の `karume.json` を書く。旧 manifest から
-shard 列を引くので、ディレクトリを跨ぐ shard 列（sbv2 の `shared/front` / `shared/voice`・
-anima の話者別 transformer）もここで解ける。**dist.py / recipe が `krm` を直接書くのは段 3**
-（container-v1 §12 の記述どおり）。
+History (2026-09-22): `karume migrate --manifest <karume.json> --out <dir>` converted `karume/4`
+repositories to `krm` + `karume/5`; recipes and `karume dist` write `krm` directly since step 3
+(ADR 0108 addendum 4, item 1).
 
-### 9. 共存期間の運用
+### 9. Coexistence
 
-2b が入った時点で hub は `karume/5` だけを読む。ローカルミラー 11 本は 2d で全部移行して差し替え、
-レーンは移行済みミラーで回す。HF 上の pin は段 2 で irodori-v4.1-small だけ更新し、残りは段 3 の
-再アップロードまで**旧版パッケージからだけ**動く（pin は 40 桁 revision なので旧版は壊れない —
-ADR 0108 却下案 3）。
+History (2026-09-22): from step 2b the hub read only `karume/5`; local mirrors were migrated in 2d;
+the remaining pins moved at the release (addendum 1, item 2).
 
-### 10. 部品差し替え席との関係
+### 10. Relation to component replacement
 
-ADR 0108 決定 19 の `fromPretrained(source, { components: { <役割>: ComponentSource } })` は本 ADR の
-`container` 欄をそのまま受ける — `ComponentSource` は「別の `karume/5` リポの (model, quant, 部品)」
-またはコンテナ参照 1 本。admission は**重みを 1 バイトも取る前**に ①`graph` 文書の sha256 が
-ベースの期待値と一致 ②束縛表の不足 / 余剰 0（`openContainer` の合流が descriptor だけで出す）
-③席の実行ノブと codec の整合、を全件列挙で見る。型の詳細は段 2e で決める。
+ADR 0108 decision 19's `fromPretrained(source, { components: { <role>: ComponentSource } })` takes
+this ADR's `container` field as is — a `ComponentSource` is "(model, preset, component) of another
+`karume/5` repository" (the type is `{ source, model?, quant? }` — ADR 0108 addendum 3, item 5).
+**Before any weight byte is fetched**, admission checks, listing every failure: ① the `graph`
+document's sha256 equals the base's expectation, ② no missing / surplus bindings (computed by the
+merge in `openContainer` from the descriptor alone), ③ the preset's execution options agree with the
+codecs.
 
 ## Consequences
 
-- **破壊変更**（major 繰り上げ・hub の公開面 = `resolveFiles` の戻り型と取得面の追加・
-  `StreamedAsset` 系の shard 面は段 3 で退役）。CHANGELOG の Breaking は段 2 の docs 同期で書く。
-- 退役する契約: shard 順序の意味（ADR 0070 決定 3・0081 決定 1）・tensor pieces（0090）・
-  `SHARD_BYTE_LIMIT` の Python 突合（`shards.py:92` ↔ `manifest.ts:84`）。
-- モデルカード（`modelcard.py`）と `hf-upload.zsh` の断片化表は `*.krm` を歩く形へ追随する
-  （カードは段 3・upload は段 2 で前倒し）。
-- 検収は ADR 0108 の段階分解表 段 2 の ①〜④。
+- **Breaking change** (major bump; hub public surface: the resolution return type and the new fetch
+  surface; the `StreamedAsset` shard surface retired in step 3d). The CHANGELOG lists it under
+  Breaking.
+- Retired contracts: the meaning of shard order (ADR 0070 decision 3, 0081 decision 1), tensor
+  pieces (0090), and the Python ↔ TS `SHARD_BYTE_LIMIT` correspondence.
+- The model card (`modelcard.py`) and the upload script walk `*.krm`. Acceptance: ADR 0108 step 2.
 
-## 追記 1 — グラフ名の規則と pin 移行の時期（2026-09-24）
+## Addendum 1 (2026-09-24) — graph-name rule and timing of the pin migration
 
-段 3（3a〜3d）の実装で決めた点のうち manifest に掛かるもの。容器の形式側は ADR
-[0108](0108-container-format.md) 追記 4、規則の本文は [container-v1](../container-v1.md) §2.1 が正本。
+The manifest-side points of step 3 (3a–3d). The container side is ADR
+[0108](0108-container-format.md) addendum 4; the rule text is [container-v1](../container-v1.md)
+§2.1.
 
-1. **容器のグラフ名 = 部品名 = `karume.json` の `weights` のキー** MUST（決定 2 の補足）。
-   - **なぜ規則にするか**: 読み手はグラフを名前で引く（models の部品は `prepareContainer(opened, <weights の
-     キー>)` で Session を組む）。manifest は部品 × dtype ごとに容器を 1 本指し、容器は 1 グラフだけを持つので、
-     manifest から容器の中のグラフへ渡れる名前は weights のキーしか無い。書き手が別の綴りを名乗ると、
-     移行済みミラー（移行 CLI のリポ丸ごとモードはキーで焼く）と再 export した系列が別物になり、しかも
-     manifest の parse も容器の parse も通るので、利用者のロードで「コンテナにグラフが無い」として初めて
-     落ちる。
-   - **置き場のディレクトリ名は規則にしない**。系列直下に容器を置く family ではディレクトリ名が系列名に
-     なり（siglip2 の系列ディレクトリに対してキーは `vision`）、irodori の `caption-proj` はキーが
-     `caption_proj`、deberta の `full-24layer` はキーが `text_encoder` である。そのため export の一本道は
-     `graph_name` を必須にして既定を持たず、recipe は部品名を定数で名乗る。
-   - **検査点**: `karume dist` が組み立ての前に、現物の容器のグラフ名の集合とその席の weights のキーを
-     突き合わせる（`DistError`）。recipe の綴りは AST の門（`tools/export-recipes/tests/test_graph_names.py`）が
-     定数であることと、名乗るグラフ名が配布計画の weights のキーと対応することで固定する（例外的な family の
-     扱いもこの門が持つ）。
-2. **決定 9 の訂正 — 残りの pin の移行は段 3 ではなく release の波で行う**。段 3 で pin は 1 本も動いて
-   いない。`karume/5` を指すのは段 2 の irodori-v4.1-small だけで、残り 9 リポは release の波まで
-   旧版パッケージからだけ動く。[release-runbook](../release-runbook.md) §0 の順序（version bump → 焼き直し →
-   アップロード → pin → JSR publish）が非可換 MUST で、manifest の `generator` 欄がパッケージ版を写すため、
-   bump 前に上げると古い版を名乗る配布形が HF に載る。上げ直しでは新 manifest が参照しない旧ファイルを
-   同じリポから消し、pin は削除後の main で焼く（HF の履歴は残す — ADR 0108 決定 18）。手順は
-   release-runbook が持つ。
-3. **本文の段 3 への持ち越しは済んだ**。決定 8 の「dist.py / recipe が `krm` を直接書く」は段 3a / 3b、
-   Consequences の「`StreamedAsset` 系の shard 面の退役」は段 3d（hub の `streamAssets` / `StreamedAsset` /
-   `StreamAssetsOptions` を削除）で入った。
+1. **Container graph name = component name = the `weights` key of `karume.json`** MUST (adds to
+   decision 2).
+   - **Why a rule**: readers look up the graph by name (`prepareContainer(opened, <weights key>)`).
+     The manifest points at one single-graph container per component × dtype, so the weights key is
+     the only name leading from the manifest to the graph. Another spelling would make migrated
+     mirrors and re-exported series differ while both still parse, and the user's load would be the
+     first to fail ("graph not in container").
+   - **Directory names are not part of the rule** (siglip2's series directory has key `vision`,
+     irodori's `caption-proj` key `caption_proj`, deberta's `full-24layer` key `text_encoder`). The
+     export path requires `graph_name` without a default; recipes name the component by a constant.
+   - **Check points**: `karume dist` compares container graph names with the preset's weights keys
+     before assembly (`DistError`); the AST check `tools/export-recipes/tests/test_graph_names.py`
+     pins that recipes use a constant that maps to a weights key of the distribution plan (and owns
+     the exceptional families).
+2. **Correction of decision 9 — the remaining pins move at the release, not in step 3** (only
+   irodori-v4.1-small pointed at `karume/5` before; the other 9 repositories ran only from old
+   packages until the release). The order of
+   [release-runbook](../release-runbook.md) §0 (version bump → rebuild → upload → pin → JSR publish)
+   is a non-commutative MUST: the manifest's `generator` field copies the package version, so an
+   upload before the bump publishes a distribution naming an old version. A re-upload deletes old
+   files the new manifest no longer references from the same repository and pins the `main` after
+   the deletion (HF history is kept — ADR 0108 decision 18). The procedure lives in the runbook.
+3. History: decision 8's direct `krm` writing landed in steps 3a / 3b, and the `StreamedAsset` shard
+   surface was removed in step 3d.
 
-## 追記 2 — 決定 7 の同時取得予算と `fromContainer(bytes)` の実名（2026-09-25）
+## Addendum 2 (2026-09-25) — decision 7's concurrent-fetch budget and the real name of `fromContainer(bytes)`
 
-決定 7 の末尾（段 2 の既定 = 本数 2・合計 = 最大 part 長 × 2）は採られなかった。段 2f 以降の実装は次の形で、
-数え方の正本は [container-v1](../container-v1.md) §11 である。
+The end of decision 7 (step 2 default = count 2, total = largest part × 2) was not adopted. From
+step 2f the implementation is as follows; counting rules are canonical in
+[container-v1](../container-v1.md) §11.
 
-1. **温め（相 1）は本数 4 本の streaming**（`packages/hub/src/fetch.ts` の `CONCURRENCY` — `prefetchAssets`）。
-   body をそのままキャッシュへ流すので受信バッファの前確保が無く、本数からは RAM が決まらない。
-2. **区間読みの保持は scan 型で part 1 本ぶんの保持枠**（`packages/hub/src/container.ts` の保持枠）。seek 型の
-   保持は 0（block の区間 view だけ）。決定 7 の「本数 2」より厳しいので、実装を決定へ戻す利得は無い。
-3. **`BYTE_BUDGET`（1.5 GiB）は全量面 `fetchAssets` にだけ残る**（manifest の `assets` 用 — 1 ファイルの受信
-   バッファを受信前に確保する面なので、合計バイトの予算が要る）。容器の part はこの面を通らない。値は
-   据え置く（2026-09-25 裁定）。`fetch.ts` の `BYTE_BUDGET` の根拠文が引く実測（anima turbo i4 の先頭 4 本で
-   計 2.503 GiB の同時前確保）は `karume/4` の shard を全量面で取っていた頃のもので、今この面を通るのは資産だけ
-   である。値の根拠は「1 ファイルの前確保 + 検証の一時コピーを単一 ArrayBuffer の上限より下に置く」の側に残る。
-4. **`fromContainer(bytes)` の実名は `openContainer` の `{ kind: "bytes" }` 入力**
-   （`packages/runtime/src/format/container/open.ts` の `ContainerInput`）。決定 7 と ADR
-   [0108](0108-container-format.md)（決定 2 / 8 / 9 と追記 2 の 3）に残る `fromContainer` はこの口と読み替える。
-   本文は書き換えない。
+1. **Warming (phase 1) streams 4 files** (`CONCURRENCY` in `packages/hub/src/fetch.ts` —
+   `prefetchAssets`). The body flows straight into the cache with no pre-allocated receive buffer,
+   so the count does not determine RAM.
+2. **Scan-type range reads hold one part in a holding slot** (`packages/hub/src/container.ts`);
+   seek-type sources hold only block views. This is stricter than decision 7's "count 2".
+3. **`BYTE_BUDGET` (1.5 GiB) remains only on the whole-file surface `fetchAssets`** (manifest
+   `assets`; it allocates a file's receive buffer before receiving). Container parts do not pass it.
+   The value is kept (the maintainer's ruling of 2026-09-25). The measurement cited in `fetch.ts`
+   (2.503 GiB for the first 4 anima turbo i4 files) dates from `karume/4` shards; the remaining basis
+   is keeping one file's pre-allocation plus the verification copy below the single-ArrayBuffer
+   limit.
+4. History: `fromContainer(bytes)` is the `{ kind: "bytes" }` input of `openContainer`
+   (`ContainerInput` in `packages/runtime/src/format/container/open.ts`); the decisions above use
+   the real name.

@@ -1,67 +1,81 @@
-# 0103: 並列GEMVと固定再量子化の任意融合
+# 0103: Optional fusion of parallel GEMV with static requantization
 
-- Status: accepted（2026-09-15・利用者の最適化継続依頼の範囲）。M2の短文生成も検収済み。quant宣言への適用は別作業
-  → [ADR 0104](0104-gemma-fast-quant.md) で E2B の既定 quant へ宣言（2026-09-15）。
-- 関連: [0097](0097-gemma4-qat-integration.md)、[0098](0098-linear-gemv-parallel.md)、[0096](0096-speculative-decoding.md)、[0040](0040-fusion-pass.md)
-- 根拠: [保留候補の再検証](../research/2026-09-15-held-combinations.md)、[製品実装の検収](../research/2026-09-15-linear-static-quantize-fusion.md)
+- Status: accepted (2026-09-15, within the maintainer's request to continue optimization; M2 short
+  generation accepted); partly superseded by [0104](0104-gemma-fast-quant.md) (2026-09-15: the QAT
+  `i4-fast` presets declare `fuseLinearStaticQuantize: true` — "defaults unchanged" and the M2
+  condition) and [0111](0111-session-options-composition.md) (2026-09-26: composition of explicit
+  options, quant declarations and runtime defaults); on 2026-10-18 the Chrome page selection was
+  withdrawn
+- Date: 2026-09-15
+- Related: [0097](0097-gemma4-qat-integration.md), [0098](0098-linear-gemv-parallel.md),
+  [0096](0096-speculative-decoding.md), [0040](0040-fusion-pass.md)
+- Evidence: [re-check of held candidates](../research/2026-09-15-held-combinations.md),
+  [acceptance of the product implementation](../research/2026-09-15-linear-static-quantize-fusion.md)
 
-## 問題と選択
+## Problem and choice
 
-固定mobile QATのE2Bは、行列計算の直後に固定scaleへの再量子化（SRQ）を行う。
-現在の並列GEMVでは、2演算を1回のGPU起動にまとめる試作が単独で約5.5%改善した。
-旧逐次GEMVでの不採用は現在の並列経路へそのまま当てはまらない。
-広い融合・重み転置・投入上限の変更をまとめて採用せず、独立した融合だけを追加する。
+Static mobile QAT E2B runs a static requantization to a fixed scale (SRQ) right after each matrix
+product. A spike merging both into one dispatch on the current parallel GEMV gained about 5.5%; the
+earlier rejection on the old sequential GEMV does not carry over (2026-09-15). Broader fusion, weight
+transposition and a changed submit limit are not adopted together; only this fusion is added.
 
-## 指定と適格条件
+## Option and eligibility
 
-`SessionOptions.fuseLinearStaticQuantize?: boolean`を追加する。省略時はfalse。
-trueは`linearGemvReduce: "parallel"`と`linearCompute: "f32"`の組合せだけを受理し、
-未対応の組合せやboolean以外の値はSession構築時に拒否する。並列設定を暗黙には追加しない。
-Gemma通常版とQATの共通pipelineオプションから、target/drafterのSessionへ同じ指定を渡す。
+Add `SessionOptions.fuseLinearStaticQuantize?: boolean`, default false. True is accepted only with
+`linearGemvReduce: "parallel"` and `linearCompute: "f32"`; another combination or a non-boolean is
+rejected at Session construction, and the parallel setting is not added implicitly. The shared
+regular / QAT Gemma pipeline options pass the setting to the target and drafter Sessions.
 
-融合するのは隣接した`linear → static_quantize`で、全入力・出力がf32、出力shapeが同一、
-linearの出力が内部値かつ消費者が1本、3入力のbinding名が異なるものだけ。
-常駐したINT2/4/8の重みと、既存`linearGemvParallelLanes`が受理する実測形状、物理M=1..8に限定する。
-対象外の形や公開・共有された中間値は非融合の既存経路に残す。
-`lastRunFusions.linearStaticQuantize`と独立したカーネルキーで適用を観測できる。
+Fused are adjacent `linear → static_quantize` pairs with all inputs and outputs f32, equal output
+shapes, a private linear output with one consumer and three distinct input bindings; limited to
+resident INT2 / 4 / 8 weights, the shapes the existing `linearGemvParallelLanes` accepts, and
+physical M = 1..8. That is ADR 0098's table, which since 2026-09-26 includes unmeasured E4B rows that
+QAT E4B `i4-fast` fuses on (ADR 0104 addendum 2026-09-26). Other shapes and public or shared
+intermediates stay unfused. `lastRunFusions.linearStaticQuantize` and a separate key show it.
 
-モデル・quant・CLIの既定、manifest、IR、重み、公開source pinは変更しない。
-falseで非融合へ戻せる。通常版は現行のグラフに該当するSRQが無く、指定しても融合数0となる。
+The defaults of models, quants and CLI, the manifest, IR, weights and published source pins do not
+change. (Superseded by ADR 0104 on 2026-09-15: the option is in the manifest `session` vocabulary
+(`packages/hub/src/manifest.ts`) and the QAT `i4-fast` presets declare it.) False returns to the
+unfused path. Regular Gemma has no matching SRQ in its graph, so nothing is fused there.
 
-## 算術と生成
+## Arithmetic and code generation
 
-既存parallelと同じWGSL生成処理を共用し、最後の出力部分だけを切り替える。
-Kの巡回配分、語内の逆量子化と積和、workgroupの加算木、biasの加算順は維持する。
-既存のparallel・逐次・subgroupのキーと生成WGSLを変更しない。
+The fused kernel shares the existing `parallel` WGSL generator and switches only the output part.
+The cyclic K distribution, in-word dequantization and multiply-accumulate, workgroup summation tree
+and bias order stay; keys and WGSL of the parallel, sequential and subgroup variants do not change.
 
-biasを加えた結果をu32へ再解釈し、uniformの0とのXORを挟んでSRQの整数表へ渡す。
-この第4語を定数式へ置き換えない。scaleが0なら元の恒等演算を保ち、
-正負の飽和・NaNの分類・符号付き0は独立SRQと同じ表から求める。
-SRQの表生成は`staticQuantizeParams`を共用する。融合内だけ128境界の上限探索を固定回数へ展開する。
-独立SRQの二分探索・キー・WGSL・参照goldenは維持する。
+The result with bias is reinterpreted as u32, XORed with a uniform 0 and passed to the SRQ integer
+table; this fourth word is not replaced by a constant expression. Scale 0 keeps the identity
+operation; saturation, NaN classes and signed zero come from the same table as the standalone SRQ,
+built by the shared `staticQuantizeParams`. Only inside the fusion is the upper-bound search at the
+128 boundary unrolled to a fixed count; the standalone SRQ's binary search, key, WGSL and reference
+goldens stay.
 
-融合版のキーは格納・group長・lane数を含み、形状やscaleの実値はuniformで渡す。
-同じキーからは同じWGSLを生成する。M=1/4/8は同じ算術を使い、tile数のdevice上限を超えた場合は拒否する。
-実機でのu32一致は検収結果であり、全GPUでの浮動小数点丸めの仕様保証とはしない。
+The fused key includes storage, group length and lane count; shape and scale are uniforms, and the
+same key generates the same WGSL. M = 1 / 4 / 8 share the arithmetic; a tile count above the device
+limit is rejected. u32 identity on real devices is an acceptance result, not a specified guarantee
+of floating-point rounding on every GPU.
 
-## 所有権と検収
+## Ownership and acceptance
 
-融合の純関数にはGPU実体を持たない常駐格納の記述だけを渡す。
-レシピ導出時に重みのscaleを既存の常駐バッファから借りる。GPU転置・重みコピー・別のscale所有者を作らない。
-外部入力の延べ消費数は既存の融合機構が導き、scaleの寿命はSession/sharedWeightsのリースに従う。
-融合paramsは線形演算の4語とSRQの260語。既存のSession paramsキャッシュを使う。
+The pure fusion function receives only a description of resident storage, no GPU objects. At recipe
+derivation the weight scale is borrowed from the existing resident buffer; no GPU transposition,
+weight copy or separate scale owner. The existing fusion mechanism derives the total use count of
+external inputs, and the scale lives as long as the Session / `sharedWeights` lease. The fused params
+are the linear's 4 words and the SRQ's 260, through the existing Session params cache.
 
-適用・非適用、元のparallel＋元のSRQとの全境界・特殊値比較、0 scale、丸め用XORの実行、
-M1/4/8の行0一致、共有scaleの借用と破棄、実配布の融合数、生成と全体速度、MTP参照経路を検証する。
-QATのMTPそのものを新たに実装・保証する変更ではない。
+Checks: application and non-application; every boundary and special value against the original
+`parallel` + SRQ; scale 0; execution of the rounding XOR; row-0 identity for M = 1 / 4 / 8; borrowing
+and release of the shared scale; the fusion count of the real distribution; generation and speed;
+the MTP reference path. QAT MTP itself is not implemented or guaranteed by this change.
 
-Chrome画面の初期選択はQAT E2Bだけで非融合→融合→融合→非融合、計40生成。
-M2で利得を確認できなかったattention融合は選択肢へ残し、比較基準は従来のparallelにする。
-M2検収前に高速化付きquantのモデル既定へ昇格しない。
+Promotion to a speed-bundled default waited for the M2 check, and default adoption was to go through
+the `quant.session` allow table and the precedence of explicit options (superseded by ADR 0104 on
+2026-09-15 and ADR 0111 on 2026-09-26: both are met). Withdrawn 2026-10-18: the Chrome page
+selection (not ported — ADR 0127 decision 5).
 
-## M2検収後の判断（2026-09-15）
+## Addendum (2026-09-15) — after the M2 check
 
-[40生成の追試](../research/2026-09-15-m2-linear-srq-adoption.md)は出力一致、小幅な速度改善方向。
-任意高速化として採用を維持し、QAT E2Bの高速quant構成候補に含める。
-速度の標本は重なり、全環境で一定の改善率を保証しない。追加の同一追試は不要。
-既定化はquant.sessionの許可表と明示指定優先を整理して適用し、今回の文書更新では変更しない。
+The maintainer's 40 generations on M2 matched with a small gain; the fusion stays as an optional
+speed-up and joined the fast QAT E2B preset (ADR 0104). The speed samples overlap; no fixed gain is
+guaranteed everywhere. Data: [M2 adoption record](../research/2026-09-15-m2-linear-srq-adoption.md).

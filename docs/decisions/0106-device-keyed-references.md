@@ -1,375 +1,338 @@
-# 0106: sha256 参照値を環境キーごとの行で持つ
+# 0106: Keep sha256 reference values as rows per environment key
 
-- Status: accepted（2026-09-20 — テスト整理の波 段 1。実装は HEAD に入っている）
+- Status: accepted (2026-09-20 — step 1 of the test reorganisation; implemented). Amended by its own
+  addenda (the reference guard's green condition, 2026-10-03; PNG rows, 2026-10-17); partly superseded by
+  [0127](0127-node-dawn-toolchain.md) (the key base on Node, 2026-10-16). On 2026-10-18 decision 7 and the
+  Intel Arc B570 rows of addendum decisions 1 and 8 were withdrawn, the rule of the 2026-09-26 addendum
+  that deletes practical rows was kept with the `deno-*` rows exempt, and its rejected alternative was
+  re-graded to MAY. [0129](0129-test-layout-and-lanes.md) decision 3 keeps the rows, the three modes and
+  the reference guard as MUST.
 - Date: 2026-09-20
-- 対象: `packages/runtime/tests/helpers/environment.ts`（環境キー）/ `helpers/reference.ts`（参照値
-  fixture の読み書きと参照門）/ `helpers/results.ts`（結果の席）・単体テスト
-  `packages/runtime/tests/environment_key_test.ts` / `reference_fixture_test.ts` /
-  `results_writer_test.ts`・追跡 fixture `packages/models/tests/fixtures/references/{anima,sbv2,irodori}.json`・
-  消費側の e2e 5 本（`e2e_anima_test.ts` / `e2e_sbv2_wav_test.ts` / `e2e_irodori_wav_test.ts` は
-  参照値 + 結果、`e2e_birefnet_real_test.ts` / `e2e_depth_anything_real_test.ts` は結果のみ）。
-  2026-09-22 追記の対象は `packages/runtime/tests/e2e_golden_test.ts`（golden 判定の 2 段目 =
-  WGSL 仕様帯を環境キー別に + 実測の記録）・実重み golden 11 本の e2e（`<系列>-golden` の席）・
-  `tools/verify-diff/`（複数環境の `results.json` を並べる読み口）。
-  **ランタイム・配布形・exporter は無改変**（テストと検証道具の持ち物だけ）
-- 関連: ADR [0005](0005-verification.md)（検証戦略 — 「全ケース SKIP は明示 FAIL」の規律と
-  2026-09-20 追記のレーン分割）/ [limitations](../limitations.md) の「sha256 参照門」節
-  （クロスデバイスのビット同一を保証しない機序）/ [known-issues](../known-issues.md) の
-  「Intel Arc B570」節（載せ替えの実測）/ [assets-layout](../assets-layout.md)（`outputs/` の根）
+- Scope: `packages/runtime/tests/helpers/{environment,reference,results}.ts` (environment key; reading and
+  writing the fixtures and the reference guard; results directory); unit tests `environment_key_test.ts` /
+  `reference_fixture_test.ts` / `results_writer_test.ts` in `packages/runtime/tests/`; tracked fixtures
+  `packages/models/tests/fixtures/references/*.json`; the consuming e2e files (under `packages/e2e/tests/`
+  since ADR 0129). The 2026-09-22 addendum adds `packages/runtime/tests/e2e_golden_test.ts`, the real-weight
+  golden e2e files and `tools/verify-diff/`. **The runtime, the distributions and the exporter are
+  unchanged** (test and verification tooling only).
+- Related: ADR [0005](0005-verification.md) ("an all-SKIP is an explicit FAIL", the lane split of
+  2026-09-20) / [limitations](../limitations.md) (why bit identity across devices is not guaranteed) /
+  [known-issues](../known-issues.md) (the Intel Arc B570 section) / [assets-layout](../assets-layout.md)
+  (the `outputs/` root)
 
 ## Context
 
-e2e の移植の門（`e2e_anima_test` / `e2e_sbv2_wav_test` / `e2e_irodori_wav_test`）は、出力 PNG /
-WAV の sha256 が期待値と**ビット一致**するかだけを見る。この門が主張できるのは「**その機で**数値が
-1 ビットも動いていない」ことで、クロスデバイスのビット同一は仕様として保証しない（機序は
-limitations — 超越関数のドライバ依存・シェーダコンパイラの fma 融合判断・Tint / naga の経路差）。
+The e2e sha256 regression checks (anima, sbv2 WAV, irodori WAV) test only whether the sha256 of the output
+PNG / WAV is **bit-identical** to the expected value. They can claim that "the numbers did not move by one
+bit **on that machine**"; bit identity across devices is not guaranteed by specification (limitations:
+driver-dependent transcendental functions, the shader compiler's fma contraction, Tint / naga paths).
 
-期待値はテストソースの定数 1 本だった。そのため、2026-09-20 に開発機の GPU を RTX 3080 Ti から
-**Intel Arc B570**（BMG G21 / Mesa ANV / Linux xe）へ載せ替えてフル verify を回したところ、
-**sha256 参照門 16 本が全て赤**になった（出力 PNG は目視で正常 = 数値の微小差・known-issues）。
-このとき門は「退行を掴む」役目を失っている — 全部赤なので、本物の退行が 1 本混ざっても見分けが
-付かない。かといって tolerance 化は禁止で（緩めると「移植できた」の意味が消える）、定数を新しい機で
-焼き直せば今度は旧機の退行検出器が消える。**1 つの席を 2 台で奪い合っている**のが問題の形だった。
-
-併せて、割れたときに見る**実物**（PNG / WAV）の置き場も無かった。一致した回の実物が手元に無いので、
-次に割れたときの A/B の材料が割れた後にしか作れない。
+The expected value was one constant in the test source. When the development GPU was swapped from the RTX
+3080 Ti to the Intel Arc B570 on 2026-09-20, all 16 sha256 checks turned red (the PNGs looked correct).
+An all-red check catches no regression; a tolerance is forbidden (it erases what "the port worked"
+means); re-recording the constant removes the old machine's regression detector. **Two machines competed
+for one slot.** There was also no place for the **artifacts** (PNG / WAV) of a run, so the material for
+an A/B existed only after a failure.
 
 ## Decision
 
-### 1. 参照値は**環境キーごとの行**で持つ（追跡 JSON）
+### 1. Reference values are **rows per environment key** (tracked JSON)
 
-置き場は `packages/models/tests/fixtures/references/<系列>.json`（git 追跡下）。形は
-`{ "schema": 1, "kind": "sha256", "cases": { "<ケース ID>": { "<環境キー>": "<sha256>" } } }` で、
-読めない・JSON として壊れている・`schema` / `kind` が違うは全て throw する（空として扱わない）。
+They live in `packages/models/tests/fixtures/references/<series>.json` (tracked), shaped
+`{ "schema": 1, "kind": "sha256", "cases": { "<case ID>": { "<environment key>": "<sha256>" } } }`. A file
+that cannot be read, is broken JSON, or has a different `schema` / `kind` throws (never treated as empty).
+Writes are stable — case names and keys in **lexicographic order**, two-space indentation, trailing
+newline — because a diff of a file shared by several environments is required to show only the rows that
+actually changed.
 
-書き出しはケース名・環境キーとも**辞書順**・2 スペース・末尾改行で安定させる。複数環境の行が 1
-ファイルに同居する席では、差分が「実際に変わった行」だけになることが必須条件になる。
+### 2. Environment key = `<runtime>-<adapter name slug>`
 
-現況（2026-09-25 時点）の行数は anima 11 ケース / sbv2 6 ケース / irodori 2 ケース × 環境 2 本
-（`deno-intel-graphics-bmg-g21` と `deno-nvidia-geforce-rtx-3080-ti`）。anima の extra 2 ケースは
-`deno-intel-graphics-bmg-g21` の行だけを持つ。
+`helpers/environment.ts` builds it from `GPUAdapterInfo`. The base is `description` when not empty, else
+`${vendor}-${architecture}` (Deno fills `description`, Chrome fills `vendor` / `architecture`). (Superseded
+for Node by ADR 0127 on 2026-10-16: the base is `GPUAdapterInfo.device`, because Dawn's `description` is
+the driver version; the test harness builds `node-` keys only. Deno and Chrome keep this rule.) The base is
+lower-cased, `(r)` / `(tm)` / `(c)` are dropped, `[^a-z0-9]+` becomes `-`, and outer `-` are trimmed:
+`deno-intel-graphics-bmg-g21`, `chrome-apple-metal-3`, `node-nvidia-geforce-rtx-3080-ti`.
 
-### 2. 環境キー = `<ランタイム>-<アダプタ名 slug>`
+An environment that yields no name **throws** (an empty-key row would compare another machine's values as
+this machine's). An environment without a GPU adapter has **no** key (not an empty string).
+`environment_key_test.ts` pins the spelling.
 
-`helpers/environment.ts` が `GPUAdapterInfo` から作る。基底は `description` が空でなければそれ、
-空なら `${vendor}-${architecture}`（Deno は `description` に GPU 名を入れ `architecture` が空、
-Chrome は `vendor` / `architecture` に名前を入れ `description` が空 — どちらかは必ず埋まる）。
-小文字化 → 商標の飾り `(r)` / `(tm)` / `(c)` を落とす → `[^a-z0-9]+` を `-` へ → 前後の `-` を除去。
+**The key MUST NOT contain the driver version.** With it, every driver update would silently escape to "no
+row yet" = explicit SKIP; without it, a driver update that moves the numbers **breaks the row of the same
+key** and turns red. (Dawn does expose the version; it is left out on purpose.)
 
-- Deno + `Intel(R) Graphics (BMG G21)` → `deno-intel-graphics-bmg-g21`
-- Chrome + vendor `apple` / architecture `metal-3` → `chrome-apple-metal-3`
+**The OS is not in the key** (ruling of 2026-09-21): no machine uses one GPU under several OSes, so a
+longer key would only respell rows without preventing a real collision. If one occurs, it is reconsidered
+then; `results.json` records the OS, so a row's machine can be traced.
 
-名前が 1 つも採れない環境では **throw する**（空キーの行へ黙って混ぜると、別の機の参照値を「この機の
-参照値」として突き合わせることになる）。GPU アダプタが取れない環境は環境キーを**持たない**
-（空文字などで埋めない）。綴りの規則そのものは `environment_key_test.ts` が固定する。
+### 3. Three modes (environment variable `KARUME_REFERENCE`)
 
-**ドライバ版はキーに入れない。** 理由は 2 つで、① WebGPU API からドライバ版は採れない ②入れると
-ドライバ更新のたびに「新しい行が無い」= 明示 SKIP へ黙って逃げてしまう。入れなければ、ドライバ更新で
-数値が動いたときに**同じキーの行が割れる** = 赤で気づく形になる。
+| Mode      | Case without a row                                      | Case with a row                                                   |
+| --------- | ------------------------------------------------------- | ----------------------------------------------------------------- |
+| unset     | explicit SKIP (warns once at registration how to write) | compare (a mismatch is red; MUST NOT be turned into a tolerance) |
+| `write`   | **adds** the measurement, green                         | compare (**does not overwrite**)                                  |
+| `rewrite` | adds the measurement, green                             | **overwrites** with the measurement, green (prints old → new)     |
 
-**OS もキーに入れない**（2026-09-21 裁定）。同じ GPU を複数の OS で使い回す機は現状無いので、
-キーを太らせると既存の行の綴りが変わるだけで、防げる衝突が実在しない。衝突が実際に起きたら
-（同じアダプタ名の別 OS が同じ席を奪い合う形）そのときに再考する — 結果 JSON（決定 5 の
-`results.json`）は `environment` に OS を持つので、どの機の行かは後から辿れる。
+An unknown spelling throws. `rewrite` is for when you can say **in advance what changed**, and it **never
+touches another environment's rows**. `reference_fixture_test.ts` pins the three modes without a real GPU
+(environment and mode injected as arguments).
 
-### 3. 作るモードは 3 つ（環境変数 `KARUME_REFERENCE`）
+### 4. The reference guard (`registerReferenceGate`) and its opt-out
 
-| モード    | 行が無いケース                             | 行があるケース                            |
-| --------- | ------------------------------------------ | ----------------------------------------- |
-| 未設定    | 明示 SKIP（登録時に作り方を 1 度警告する） | 比較（不一致は赤・tolerance 化は禁止）    |
-| `write`   | 実測を**追加**して緑                       | 比較（**上書きしない**）                  |
-| `rewrite` | 実測を追加して緑                           | 実測で**上書き**して緑（旧→新を印字する） |
+A guard at the end of each sha256 file keeps "no reference value here yet, so every check was skipped"
+from **becoming a silent green** — ADR 0005's rule, with the opt-out `KARUME_ALLOW_NO_REFERENCE=1`. Where
+neither GPU nor assets exist and the checks do not run, the guard does not fire (`runnable`). The failure
+names where the rows live and how to write them (`KARUME_REFERENCE=write`). **It counts only the case IDs
+the file registered in this run** (the same set as `warnMissing`):
 
-未知の綴りは throw する（黙って「未設定」に落とさない）。`rewrite` は「何が変わったのかを先に
-言えるとき」だけの操作で、**他環境の行には決して触らない**。3 モードの意味論は
-`reference_fixture_test.ts` が実 GPU 無しで固定している（環境とモードを引数で注入する）。
+- Red when **none** of the registered cases has a row for the current environment.
+- Green when only **some** do. (Superseded by the addendum of 2026-10-03: green requires a row for every
+  registered case, or a hold for each id without one.)
+- **Orphan rows** of renamed or deleted cases are not counted (one orphan row would hide an all-SKIP of
+  the live cases).
+- A writing mode (`KARUME_REFERENCE`) is green with zero rows (that run writes them); the release machine
+  must not keep it set ([release-runbook](../release-runbook.md) §1).
 
-### 4. 参照門（`registerReferenceGate`）と opt-out
+### 5. Results go to `outputs/verify/<environment key>/<date>_<series>/`
 
-「この環境の参照値がまだ 1 件も無いので sha 門が全て SKIP された」を**無音の緑にしない**ための
-門番を、各 sha ファイルの末尾に 1 本置く。ADR 0005 の「全ケース SKIP は明示 FAIL」と同じ規律で、
-opt-out も同型の環境変数 `KARUME_ALLOW_NO_REFERENCE=1`。GPU も資産も無くて sha 門自体が走らない
-環境ではこの門番も鳴らさない（`runnable` で渡す）。失敗文面は行の置き場と
-`KARUME_REFERENCE=write` の作り方を出す。
+Reference values (tracked, per environment) and results (untracked, growing per run) live apart. Results
+are **safe to delete** (`rm -rf outputs/verify`; the `outputs/` convention of
+[assets-layout](../assets-layout.md); paired with `VERIFY_ROOT` in `tools/export-recipes/_shared/paths.py`):
 
-**数えるのは、そのファイルが今回登録したケース ID 集合だけ**である（`registerReferenceGate` は
-`warnMissing` と同じ集合を受け取る）。
+- `results.json` — `schema` / `family` / `environment` (runtime name, version, V8, TypeScript version, the
+  four adapter fields, the OS) / `checkout` (HEAD sha and dirty flag; `null` without `git`) / `startedAt`
+  / `cases[]` (`id` / `status` = `pass` | `fail` | `written` | `rewritten` / `expected?` / `actual?` /
+  `artifact?` / `elapsedMs` / `note?`), rewritten whole after every case so a crash keeps what came before.
+- **Artifacts** (PNG / WAV) — **every run, pass or fail**; otherwise a matching run leaves no A/B material.
 
-- 登録したケースの**どれにも**現環境の行が無ければ赤。
-- 登録したケースの**一部**にだけ行がある状態は緑（ADR の字義どおり — この門が言うのは
-  「この環境の参照値が 1 件も無いのではない」ことだけで、全ケース検証済みとは言わない）。
-- ケースの改名・削除で残った**孤児行**（もう誰も突き合わせない行）は数えない。fixture 全体を
-  横断して 1 行でもあれば緑にすると、孤児行 1 本が現役ケース全 SKIP を緑で隠す。
-- 作るモード（`KARUME_REFERENCE`）が立っているときは、行が 0 件でも緑（その走行が行を作るため）。
-  リリース判定機にこのモードを残さないこと（[release-runbook](../release-runbook.md) §1）。
+Two runs of one series on one day **keep the last** (split by date, not by run). Choosing and creating the
+directory are **deferred until use** (modules load on machines without a GPU too; demanding a key at load
+time would fail files that should be skipped).
 
-### 5. 結果の席は `outputs/verify/<環境キー>/<日付>_<系列>/`
+### 6. Twin cases compare against "the twin's **row** and the measurement"
 
-参照値（追跡が要る・環境ごとの行）と結果（追跡外・走らせるたびに増える）は性格が違うので席を分ける。
-結果は **消して安全**な側で、`rm -rf outputs/verify` で常に作り直せる（[assets-layout](../assets-layout.md)
-の `outputs/` 根の流儀・綴りは exporter 側 `tools/export-recipes/_shared/paths.py` の `VERIFY_ROOT`
-と対）。置くのは 2 種類だけ:
+Cases that should produce the same bytes from different paths (anima `fromPretrained-512` /
+`onEvent-1024` / `base-cfg-fromAssets-shards`) keep **a row under their own case ID** and also check that
+the measurement equals the twin's row; with per-environment rows, one constant can no longer serve both.
+The check lapses only while the twin's row is missing here.
 
-- `results.json` — `schema` / `family` / `environment`（ランタイム名・版・V8・TypeScript 版 +
-  アダプタ 4 欄 + OS）/ `checkout`（HEAD の sha と dirty 真偽。`git` が無ければ `null`）/
-  `startedAt` / `cases[]`（`id` / `status` = `pass` \| `fail` \| `written` \| `rewritten` /
-  `expected?` / `actual?` / `artifact?` / `elapsedMs` / `note?`）。1 件積むたびに丸ごと書き直すので、
-  途中で落ちても直前までが残る。
-- **実物**（PNG / WAV）— **成功・失敗を問わず毎回**。不一致のときだけ残す形だと、一致したときの実物が
-  手元に無く、次に割れたときの A/B が採れない。
+### 7. The RTX 3080 Ti row spelling was derived, not observed
 
-同じ日・同じ系列を 2 度走らせたら**最後の走行が残る**（日付までで席を分け、走行ごとには分けない —
-分けると「最新はどれか」を人が数えることになる）。置き場の決定も作成も**使うときまで遅らせる**
-（GPU 無しの機でもモジュールは読まれるので、開いた時点で環境キーを要求すると「SKIP されるはずの
-ファイル」がモジュール評価で落ちる）。
+Withdrawn 2026-10-18: the spelling `deno-nvidia-geforce-rtx-3080-ti`, derived from the recorded adapter
+name while that GPU was out of the machine, was confirmed after it returned on 2026-10-06 (addendum
+decision 9: the `deno-` and `node-` rows agree on all 11 anima cases).
 
-### 6. 双子ケースは「双子の**行**と実測」で突き合わせる
+## Alternatives considered
 
-別経路から同じバイトが出るはずのケース（anima の `fromPretrained-512` / `onEvent-1024` /
-`base-cfg-fromAssets-shards`）は、**自分のケース ID の行**を持ちつつ、双子のケースの行と実測が
-一致することも検査する。参照値が環境ごとの行になってからは、経路間のビット同一を「同じ定数を
-両方へ渡す」形では持てないためで、相手の行がこの環境にまだ無いときだけ検査が成立しない。
-
-### 7. RTX 3080 Ti の行は記録上の adapter 名から導いた綴り（実測未確認）
-
-既存の定数はそのまま `deno-nvidia-geforce-rtx-3080-ti` の行へ移した。この綴りは記録に残る adapter
-`description`（`NVIDIA GeForce RTX 3080 Ti`）へ決定 2 の規則を当てて**導いた**もので、その機で
-実際に名乗らせて確かめてはいない（GPU は既に載せ替え済み）。実機の綴りが違っていた場合は「その環境の
-行が無い」= 明示 SKIP + 参照門の赤になるので、**誤った行と黙って突き合わせることはない**
-（`environment_key_test.ts` にこの綴りの導出が 1 件入っている）。
-
-## 検討した代替案
-
-1. **テストソース内の参照値の配列に「環境」列を足す**（定数表を 2 次元にする）— 却下。行の追加が
-   毎回コード変更になり、`KARUME_REFERENCE=write` のような「実測が自分の席を作る」形にならない。
-   参照値は機械が書いて機械が読むデータで、レビューで読むコードではない。環境が 1 台増えるたびに
-   e2e 3 本を編集することになり、レビュー差分がハッシュの羅列で埋まる。
-2. **参照値を `outputs/` の下に置く**（結果と同居させる）— 却下。`outputs/` は 3 根とも git 追跡外
-   （[assets-layout](../assets-layout.md)）なので、clone 直後に突き合わせる相手が無く退行検出器に
-   ならない。参照値は「前回この機で出たバイト」ではなく「**この機が出すべきバイト**」の宣言なので、
-   追跡される側に置くのが正しい。結果（追跡外・毎回増える）との分割が決定 5。
-3. **不一致を tolerance で吸収する**（sha を画素差の閾値に替える）— 却下。ADR 0005 の規律どおりで、
-   緩めた時点で「移植できた」の意味が消える。デバイスが違うときの健全性検証は参照 sha との一致では
-   なく**自己 A/B**（同一入力・幾何 2 種または新旧 2 版の出力 sha の一致）で行う（limitations）。
-4. **golden の許容差も追跡 fixture へ出し、実測から行を起こす**（決定 1 と同じ形を 2 段目に当てる）—
-   却下。帯が走行のたびに実測へ追随する形になり、ADR 0005 の tolerance 化禁止と衝突する。帯は
-   「この GPU の実装はここまで外れてよい」という**仕様由来の宣言**で、実測から起こす値ではない。
-5. **結果を追跡下の台帳に集め、環境間の差異を門にする**（`tools/verify-diff` を赤で落とす）— 却下。
-   クロスデバイスのビット同一は非保証なので、差異そのものを赤にできない。追跡外の結果を追跡下へ
-   持ち込むことにもなり、参照値と結果の席の分割（決定 5）が崩れる。
+1. **An "environment" column in the test source's reference arrays** — rejected: every row becomes a code
+   change, nothing like `KARUME_REFERENCE=write` is possible, and review diffs fill with hashes. Reference
+   values are data written and read by machines.
+2. **Reference values under `outputs/`** — rejected: the local roots are untracked
+   ([assets-layout](../assets-layout.md)), so a fresh clone has no detector. A reference value declares the
+   bytes **this machine must produce**, so it is tracked; the split from results is decision 5.
+3. **Absorbing mismatches with a tolerance** — rejected by ADR 0005: loosening erases what "the port
+   worked" means. Sanity on another device is checked by a **self A/B** (limitations), not the reference sha.
+4. **Golden tolerances in tracked fixtures, derived from measurements** — rejected: the band would follow
+   each run, against ADR 0005's ban. A band is a **specification-derived declaration**, not a measurement.
+5. **A tracked ledger of results with cross-environment differences as a check** — rejected: bit identity
+   across devices is not guaranteed, and untracked results would move to the tracked side (decision 5).
 
 ## Consequences
 
-- **クロスデバイスのビット同一は依然として非保証**。行が増えても保証が増えるわけではなく、増えるのは
-  「その機での退行を検出できる台数」だけ。limitations の by-design はそのまま残る。
-- **新しい機での最初の走行は全ケース明示 SKIP + 参照門の赤**になる。`KARUME_REFERENCE=write` で同じ
-  レーンを回すと行ができるが、これは**その回の実測を正とする**操作なので、その機の健全性は別途
-  （出力の目視・自己 A/B）で確かめてから行を作る。
-- fixture に複数環境の行が同居するので、レビューでは「どの環境の行が動いたか」を見る（辞書順固定 +
-  `rewrite` が現環境の行しか触らないことで、それが差分から読める）。
-- 系列が増えるたびに fixture 1 本と参照門 1 本が増える。`results.json` は環境の素性とチェックアウトを
-  持つので、複数デバイスの結果を後から突き合わせる材料になる（突き合わせる道具は追記決定 3）。
+- **Bit identity across devices is still not guaranteed.** More rows add machines on which a regression is
+  detected, not a guarantee; the by-design entry in limitations stays.
+- **The first run on a new machine is an all-SKIP plus a red reference guard.** `KARUME_REFERENCE=write`
+  on the same lane writes the rows but **accepts that run as correct**, so the machine's sanity is checked
+  first (inspecting the output, a self A/B).
+- Review reads which environment's rows moved (lexicographic order, and `rewrite` touches only the current
+  environment). Each new series adds a fixture and a reference guard; `results.json` holds the environment
+  and checkout for later comparison (addendum decision 3).
 
-## 追記（2026-09-22）— golden 側の環境別化と結果の突き合わせ
+## Addendum (2026-09-22) — golden tolerances per environment and comparing results
 
-### 追記決定 1: golden の 2 段目（WGSL 仕様帯）も環境キーごとの行で持つ
+### Addendum decision 1: the golden second stage (WGSL specification band) is also kept per environment key
 
-`packages/runtime/tests/e2e_golden_test.ts` の `OUTPUT_TOLERANCE` は `<model>/<出力名>` →
-**環境キー** → `{ spec }` の 2 段の表にする。2 段目が発火するのは**走らせている機の行がある出力
-だけ**で、行が無い機では 2 段目そのものが無い（1 段目の Karume 独自基準だけで測り、超えれば赤）。
-1 段目・fail の文言・`note` の記録は不変。
+`OUTPUT_TOLERANCE` in `packages/runtime/tests/e2e_golden_test.ts` is a two-level table,
+`<model>/<output name>` → **environment key** → `{ spec }`. The second stage fires only **for outputs with
+a row for the running machine**; elsewhere only the first stage (Karume's own criterion) applies. The first
+stage, the failure messages and the `note` record are unchanged. Rows are split so that **a loosening added
+for one machine does not spread** to machines that round the op almost exactly. Golden expected values come
+from torch on the CPU and do not depend on the device, so only the **tolerances** are per machine (sha256
+rows keep the expected value itself per machine).
 
-行を分けるのは、**緩めを足した機の外へ緩めを広げない**ため。`activations/sin` の atol 2⁻¹¹ は
-Intel Arc B570（Mesa ANV）の実測で足した行で、キーが `<model>/<出力名>` だけだと、同じ op を
-ほぼ正しく丸める機（RTX 3080 Ti は 1e-6 で通る）の退行検出の網まで同じだけ緩む。
+Withdrawn 2026-10-18: the one row, `activations/sin` × `deno-intel-graphics-bmg-g21` (atol 2⁻¹¹, measured
+on the Intel Arc B570). It remains in `e2e_golden_test.ts` but never fires; the harness builds `node-` keys.
 
-決定 1 と並べる意味は違う。golden の期待値は **torch CPU 由来で device 非依存**なので、期待値を
-機ごとに持つ必要はない。機ごとに並ぶのは**許容差**の側である（sha256 の参照値は期待値そのものを
-機ごとに持つ — 決定 1）。
+### Addendum decision 2: a passing run records its differences in `results.json` (optional field `measurements`)
 
-### 追記決定 2: 合格した回の差も `results.json` に残す（任意欄 `measurements`）
+A case gains the optional `measurements`: `output` / `maxAbs` / `maxRel` / `tolerance` (the band used) /
+`stage` (`karume` | `spec`; on a fail, the last stage measured). A tolerance check shows numbers only on
+failure; recording passing differences gives the material for judging a band before anything breaks.
 
-`cases[]` の 1 件に任意欄 `measurements` を足す。1 本は `output`（グラフの出力名）/ `maxAbs` /
-`maxRel` / `tolerance`（受理に使った帯）/ `stage`（`karume` \| `spec` — fail のときは最後に測った段）。
-許容差の判定は落ちたときにしか数値を見せないので、合格した回の差はどこにも残らない。毎回残せば、
-帯を緩めるかどうかの判断材料が割れる前から手元に揃う。
+- **No derived values** (ratios to the band are derived by the reader, `tools/verify-diff`); two forms of
+  one number allow fixing one alone.
+- `schema` **stays 1** (optional field). Non-finite values become `null` through `JSON.stringify`.
+- Judgement, bands, asserts and `ignore` do not depend on the field (a record, not an input).
 
-- **派生値は持たない**（帯に対する比などは読む側 = `tools/verify-diff` が導く）。同じ数の別表現が
-  2 か所に乗ると、片方だけ直った形が作れてしまう。
-- `schema` は **1 のまま**（任意欄の追加で、既存の読み手は無影響）。非有限（NaN / ±Inf）は
-  `JSON.stringify` が `null` にするので、読む側は `null` を受ける。
-- 判定・帯・assert・`ignore` はこの欄と無関係（記録であって判定材料ではない）。
+The real-weight golden e2e files (11 then) write to results directories named `<series>-golden`, so they
+do not compete with the models-side e2e files that use the plain series name on the same day.
 
-実重み golden 11 本（sbv2 / irodori / birefnet / siglip2 / deberta / depth-anything / dacvae /
-embeddinggemma / minicpm5 / gemma4 / vowel-detector）にも結果の席を配線し、置き場は
-`<系列>-golden` にする。models 側の e2e が素の系列名で同じ根へ書くので、席を分けないと同じ日の
-同じ席を 2 つのファイルが奪い合う。
+### Addendum decision 3: comparing across environments is a read-only tool, not a check (`tools/verify-diff`)
 
-### 追記決定 3: 環境間の突き合わせは門ではなく読み取り専用の道具（`tools/verify-diff`）
+It reads only `outputs/verify/<environment key>/<date>_<series>/results.json` and writes nothing. It takes
+the newest directory per environment (`--date` pins one) and prints, in Markdown or `--json`, a "case ×
+environment key" matrix per series with differences in `status`, artifact sha and one-sided cases, plus
+warnings for `checkout` mismatches and dirty checkouts.
 
-読むのは `outputs/verify/<環境キー>/<日付>_<系列>/results.json`（決定 5 の席）だけで、何も書かない。
-環境ごとに最新の日付の席 1 本を採り（`--date` でその日付に固定）、系列ごとの「ケース × 環境キー」の
-行列と、`status` / 実物の sha / 片方にしか無いケースの差異、`checkout` の不一致・dirty の警告を
-Markdown（`--json` 可）で出す。
+**It is not a check**: cross-device bit identity is not guaranteed, so differences cannot be red. The exit
+code is 0 with differences and 1 only for unreadable documents or a different `schema` (never a silent "no
+differences"). A second machine's results are copied **by hand** (no sync — decision 5's split); results
+kept elsewhere are read with `--root`.
 
-**門にしない**。クロスデバイスのビット同一はそもそも非保証（limitations）なので、環境間の差異
-そのものを赤にできない。終了コードは差異があっても 0 で、1 で落ちるのは読めない・`schema` が違う
-ときだけ（黙って「差異なし」は出さない）。
+## Addendum (2026-09-25) — the date of the results directory is UTC
 
-2 台目の結果は**手で** `outputs/verify/<環境キー>/` へコピーする前提で、同期機構は置かない
-（追跡外の結果を追跡下へ持ち込まないための席の分割 = 決定 5 と整合させるため）。別の置き場に
-まとめてあるなら `--root` で指す。
+The `<date>` of decision 5 is the **UTC** date of the run's start (`toISOString()` —
+`packages/runtime/tests/helpers/results.ts`); behaviour is unchanged. On a JST machine a run before 09:00
+lands on the previous day, "the same day" is a UTC day, and `tools/verify-diff --date` takes a UTC date.
+UTC dates are monotonic in run time and give every machine one date basis.
 
-## 追記（2026-09-25）— 結果の席の日付は UTC
+## Addendum (2026-09-26) — row classes (reference rows / practical rows) and re-recording practical rows
 
-決定 5 の席 `outputs/verify/<環境キー>/<日付>_<系列>/` の `<日付>` は **UTC** の日付である（走行を始めた時刻の
-`toISOString()` の日付部 — `packages/runtime/tests/helpers/results.ts`）。挙動は変えない。
+[ADR 0110](0110-practical-tier-numerics-contract.md) decision 7 applied to these rows.
 
-- ローカル日付とはずれる。JST の機では 09:00 より前の走行が前日の席に入る。「同じ日・同じ系列を 2 度走らせたら
-  最後の走行が残る」の「日」も UTC の日である。
-- `tools/verify-diff` の `--date` も UTC の日付で指す。ローカル日付で指すと別の席を引く。
-- 「最新の日付の席」（追記決定 3）は取り違えない。UTC の日付は走行時刻に対して単調なので、最新の席は常に最新の
-  走行を含む。
-- ローカル日付にしない理由は、機の時刻帯で席の意味が変わるから。複数環境の結果を 1 か所に並べる読み口
-  （追記決定 3）では、席の日付が全機で同じ基準である方が突き合わせやすい。
+- The class is **derived** from whether the `session` of the case's quant preset is empty (no separate
+  table). Empty = **reference row** (frozen — `rewrite` only for a change that moves the reference path's
+  numerics). Non-empty = **practical row** (regression and determinism detector of the practical preset).
+- A commit that intentionally changes practical numerics rewrites the practical rows in the same commit and
+  records that the reference rows stay unchanged and green (ADR 0058 decision 4 ①) and that the A/B check
+  and the census are green.
+- Practical rows of environments that could not be rewritten in that commit are **deleted** (decision 3
+  rewrites only the current environment, so an old row would leave another machine stuck on red). That
+  environment rebuilds them: all-SKIP plus red guard → self A/B → `write`. (Kept by the ruling of
+  2026-10-18: the `deno-*` rows are exempt as the frozen baseline of the migration until Deno is retired —
+  ADR 0127 open point.)
+- At the time, 10 of anima's 11 cases (`f16+dit8-a8-attn8-s16`) were practical rows and `f16-1024` the
+  reference row; all sbv2 / irodori rows were reference rows.
+- Alternative not taken then: move every anima case to the reference-path preset (`f16+dit8`), which would
+  have removed the only E2E detector of the practical preset while the A/B check and the census were
+  missing. Both now exist (`packages/e2e/tests/e2e_anima_ab_test.ts`,
+  `packages/runtime/tests/helpers/pipeline-census.ts`), so the alternative MAY be reconsidered (re-graded
+  2026-10-18 to MAY: the condition set for reconsidering it is met).
 
-## 追記（2026-09-26）— 行のクラス（参照行 / 実用行）と実用行の焼き直し規約
+## Addendum (2026-09-26, second) — the optional `results.json` field `comparisons`
 
-[ADR 0110](0110-practical-tier-numerics-contract.md) 決定 7 を本 ADR の行に適用する。
+Self A/B measurements (ADR 0110 decision 5) are recorded in `comparisons`
+(`{ output, reference, practical, relRms, maxAbs, band? }`): optional under schema 1, no derived values,
+non-finite values as `null`; `tools/verify-diff` prints an A/B table per case. Bands are not per
+environment key (ADR 0110 decision 4).
 
-- 行のクラスは、ケースの quant 席の `session` が空か否かから**導出**する（別表に持たない）。
-  `session` 空 = **参照行**（凍結 — 決定 3 の `rewrite` は参照経路の数値が変わる変更のときだけ）。
-  `session` 非空 = **実用行**（実用層の退行 + 決定性の検出器）。
-- 実用層の数値を意図して変えるコミットは、実用行の `rewrite` を同じコミットで行い、参照行が無変更で
-  緑であること（ADR 0058 決定 4 ①）と、A/B 帯門・census が緑であることを記録する。
-- そのコミットで `rewrite` できなかった環境の実用行は**削除する**。決定 3 は現環境の行しか書き換えない
-  ので、古い実用行を残すと「別の機で赤のまま止まる」形が残る。削除した環境では次に走らせたとき、
-  明示 SKIP + 参照門の赤（決定 4）→ 自己 A/B（limitations）→ `write` の順で作り直す。
-- 現状の該当: anima の 11 ケース中 10 ケース（`f16+dit8-a8-attn8-s16`）が実用行、`f16-1024` の
-  1 ケースが参照行。sbv2 / irodori の行は全て参照行。RTX 3080 Ti の実用行は、その機が手元に無いため
-  最初の実用層変更で削除される。
-- 記録として残す代替（採らない）: anima の全ケースを参照経路の席（`f16+dit8`）へ付け替え、実用席の
-  行を外す。A/B 帯門と census が無い間は実用席の唯一の E2E 検出器を消すことになるため、両方が入った後
-  に再検討する。
+## Addendum (2026-09-26, third) — more series with rows, the runtime-side location, artifact rules, held rows
 
-## 追記（2026-09-26・その 2）— `results.json` の任意欄 `comparisons`
+### Addendum decision 4: the series with rows
 
-自機 A/B 門（ADR 0110 決定 5）の実測を `comparisons`（`{ output, reference, practical, relRms, maxAbs, band? }`）
-に積む。追記決定 2 の `measurements` と同じく schema 1 のままの任意欄で、派生値（帯に対する比）は持たず、
-非有限は `null` になる。読む側は `tools/verify-diff` がケースごとの A/B 表を出す。帯は環境キー別の行にしない
-（ADR 0110 決定 4）。
+Rows extend beyond anima / sbv2 / irodori (the maintainer's ruling of 2026-09-26):
 
-## 追記（2026-09-26・その 3）— 行を持つ系列の拡大・runtime 側の置き場・実物の規約・held 行
+| Series (fixture)                                             | Location | Case ID           | Artifact (bytes hashed)                                  |
+| ------------------------------------------------------------ | -------- | ----------------- | -------------------------------------------------------- |
+| anima / sbv2 / irodori                                       | models   | case name         | PNG pixels (addendum decision 9) / WAV                   |
+| siglip2 golden (`siglip2-golden`)                            | runtime  | `<series>/<case>` | f32 safetensors of the pooled output                     |
+| gemma4 golden (`gemma4-golden`)                              | runtime  | case name         | f32 safetensors of the last-position logits row `[1,V]`  |
+| birefnet real images (`birefnet`)                            | models   | `<series>/<case>` | f32 safetensors of the matte logits                      |
+| depth-anything real images (`depth-anything`)                | models   | case name         | f32 safetensors of the depth                             |
+| vowel-detector full chain (`vowel-detector`)                 | models   | case name         | f32 safetensors of the logits                            |
+| gemma4 / gemma4-qat quant presets (`gemma4` / `gemma4-qat`)  | models   | `<model>/<quant>` | JSON of the ids of 64 greedy tokens for a fixed prompt   |
 
-### 追記決定 4: 行を持つ系列は 9 系列
+`vowel-detector.json` has had no rows since it was added (`"cases": {}`, 639993d6). Wan2.1 (`wan.json`)
+and Wan2.2 (`wan-ti2v.json`) were added later.
 
-sha の行を持つ系列を、anima / sbv2 / irodori に加えて次の 6 系列へ広げる（利用者裁定 2026-09-26）。ケース ID と
-実物（sha を採るバイト列）は系列ごとに次のとおり。
+- The gemma presets are enumerated from **every quant preset** in the mirror's manifest (`mirrorSeats` in
+  `packages/models/tests/helpers/gemma-reference.ts`), not a fixed table, which would silently leave a new
+  preset without a row; the row class is derived from the same enumeration.
+- The ids JSON is `{ "ids": [...] }` (two spaces, trailing newline). Decoded text and stop reason go only
+  into the `note` (the text derives from the ids). The prompt asks for more than 64 tokens, and no row is
+  written from a run that stopped early (a shorter sequence weakens the check).
 
-| 系列（fixture）                                            | 置き場  | ケース ID         | 実物                                                    | ケース数                         |
-| ---------------------------------------------------------- | ------- | ----------------- | ------------------------------------------------------- | -------------------------------- |
-| anima / sbv2 / irodori                                     | models  | ケース名          | PNG / WAV                                               | 決定 1                           |
-| siglip2 golden（`siglip2-golden`）                         | runtime | `<系列>/<ケース>` | pooled 出力の f32 safetensors                           | 16（2 系列 × 合成 4 + 実画像 4） |
-| gemma4 golden（`gemma4-golden`）                           | runtime | ケース名          | 最終位置の logits 行 `[1,V]` の f32 safetensors         | 3                                |
-| birefnet 実画像（`birefnet`）                              | models  | `<系列>/<ケース>` | マット logits の f32 safetensors                        | 8（1024² の 2 系列 × 4）         |
-| depth-anything 実画像（`depth-anything`）                  | models  | ケース名          | 深度の f32 safetensors                                  | 4                                |
-| vowel-detector 全鎖（`vowel-detector`）                    | models  | ケース名          | ロジットの f32 safetensors                              | 4                                |
-| gemma4 / gemma4-qat の quant 席（`gemma4` / `gemma4-qat`） | models  | `<model>/<quant>` | 固定プロンプトを greedy で 64 token 回した id 列の JSON | 3 / 6                            |
+### Addendum decision 5: runtime-side fixtures live in `packages/runtime/tests/fixtures/references/`
 
-- gemma4 / gemma4-qat の席は固定表に持たず、ミラーの manifest の**全 quant 席**から列挙する
-  （`packages/models/tests/helpers/gemma-reference.ts` の `mirrorSeats`）。今のミラーでは gemma4 = e2b の 3 席、
-  gemma4-qat = e2b / e4b の各 3 席（`i4` / `i4-gemvpar` / `i4-fast`）。固定表だと、配布形に席が増えたとき行の無い席が
-  黙って残る。行のクラス（参照行 / 実用行 — 前の追記）も同じ列挙で席の `session` から導く。
-- id 列の JSON は `{ "ids": [...] }`（2 スペース・末尾改行）。復号した本文と停止理由は `results.json` の `note` にだけ
-  載せる（本文は id 列から導かれるので、実物に入れると同じ変化を 2 度数える）。固定プロンプトは 64 token を超える
-  応答が出る依頼にし、上限より前に停止した走行からは行を作らない（固定される id 列が短くなり、門が弱くなる）。
+Rows of the runtime-side golden e2e go to `packages/runtime/tests/fixtures/references/<results family
+name>.json` (`gemma4-golden` / `siglip2-golden`), named after the results directory (addendum decision 2)
+so that a series with e2e files on both sides (gemma4) does not confuse them with the models-side fixture
+(`gemma4.json`). Shape, order and modes follow decisions 1 and 3.
 
-### 追記決定 5: runtime 側 e2e の fixture は `packages/runtime/tests/fixtures/references/`
+### Addendum decision 6: artifact rules
 
-決定 1 の置き場は models 側 e2e のもの。runtime 側 e2e（golden）の行は
-`packages/runtime/tests/fixtures/references/<結果の席の family 名>.json`（`gemma4-golden` / `siglip2-golden`）に置く。
-ファイル名を結果の席の family 名（追記決定 2 の `<系列>-golden`）と揃えるのは、1 系列が runtime と models の両方に
-e2e を持つとき（gemma4）に、fixture と結果の席が同じ名前で対になり、models 側の fixture（`gemma4.json`）と取り違え
-ないため。形・書き出し順・モードの意味論は決定 1 / 3 と同じ。
+- An f32 tensor artifact is **one safetensors file** (`f32ArtifactBytes` in
+  `packages/runtime/tests/helpers/reference.ts`): tensor name = graph output name, dtype `F32`, shape as
+  output, **no metadata** (per-run values in metadata would make the row capture the run time, not the
+  numbers). A shape whose element count disagrees with the data length throws.
+- The sha is taken over **the artifact file's bytes** (`actual` always equals the artifact's sha).
+  (Superseded for PNG by addendum decision 9 on 2026-10-17; it holds for safetensors and WAV, which depend
+  on the numbers alone.)
+- birefnet / depth-anything also write PNGs for inspection, but the sha covers the f32 output before
+  quantization (8-bit conversion misses differences that cross no quantization boundary).
 
-### 追記決定 6: 実物の規約
+### Addendum decision 7: order of sha checks added to existing tests
 
-- f32 テンソルの実物は **safetensors 1 本**（`packages/runtime/tests/helpers/reference.ts` の `f32ArtifactBytes`）。
-  テンソル名 = グラフの出力名・dtype `F32`・shape は出力のまま・**metadata なし**。走行ごとに変わる値（時刻・
-  チェックアウト）を metadata に入れると、数値が同じでも sha が動き、行が数値の退行ではなく走らせた時刻を掴む。
-  shape の要素数とデータ長が食い違えば throw する。
-- sha は**実物ファイルのバイト列**に対して採る（結果の `actual` と実物の sha が常に一致する）。
-- birefnet / depth-anything は目視用の PNG も書くが、sha の対象は量子化前の f32 出力にする。PNG は 8bit 化で
-  量子化境界をまたがない差を見逃す。
-- PNG の実物は数値に加えてエンコーダの実装にも依存する（IDAT の圧縮は Web 標準の `CompressionStream("deflate")` で、
-  Deno の版で出力が変わりうる）。環境キーは Deno の版を含まない（決定 2）ので、Deno の版上げで同じキーの PNG の行が
-  割れうる。これは赤で気づく形で、数値の不変を確かめてから `rewrite` する（決定 3 の「何が変わったのかを先に言える
-  とき」）。WAV（TS 実装の PCM 書き出し）と f32 safetensors は数値だけで決まる。
-  **改訂（2026-10-17）**: PNG の行は圧縮前の画素列の sha に変えた（追記決定 9）— 圧縮器の差は行に乗らない。
+Series whose rows were added **on top of** an existing check (siglip2 / gemma4 golden = tolerance,
+birefnet / depth-anything real images = discrimination, vowel-detector = exact `.lab` match) follow these
+rules (canonical: the module doc "caller types" of `reference.ts` and `settleOrObserve`):
 
-### 追記決定 7: 既存の検査に足した sha の順序
+1. Rows are written or compared **after** the original check passes.
+2. In compare mode, a case without a row skips only the comparison, writes the artifact and records
+   `status: "pass"` + `actual` + `artifact` (no `expected`), so `tools/verify-diff` can compare `actual`
+   across environments. This branch lives in `settleOrObserve` alone, not per series.
+3. The outcome is **recorded before** a mismatch fails (otherwise the measured sha is lost).
 
-sha の行を既存テストの**追加検査**として足した系列（siglip2 / gemma4 の golden = tolerance 突合、birefnet /
-depth-anything の実画像 = 判別、vowel-detector の全鎖 = `.lab` の完全一致）は次の規約に従う
-（`reference.ts` のモジュール doc「呼び手の型」と `settleOrObserve` が正本）。
+Series whose test is itself the sha256 regression check (anima / sbv2 / irodori, the gemma presets) keep
+marking a case without a row as an explicit SKIP via `ignore`.
 
-1. 元の検査が**通った後で**行を作る・突き合わせる（元の検査が割れた出力から行を作らない）。
-2. 比較モードで現環境の行が無いケースは突合だけを飛ばし、実物を書いて `status: "pass"` + `actual` + `artifact`
-   （`expected` なし）を結果に積む。行が無くても実測 sha が残るので、`tools/verify-diff`（追記決定 3）が環境を
-   またいで `actual` を比べられる。この分岐は系列ごとに書かず `settleOrObserve` の 1 本に置く（系列ごとに割れると、
-   実測 sha を積む系列と何も積まない系列が混ざる）。
-3. 決着を結果に**積んでから**不一致で落とす（先に投げると実測 sha が結果に残らない）。
+### Addendum decision 8: held rows — environment-key rows that stop a series on a machine
 
-テストそのものが sha 門の系列（anima / sbv2 / irodori・gemma の quant 席）は従来どおり、行が無いケースを `ignore` で
-明示 SKIP する。
+Environment-key rows also mark **series that do not run on a machine**: `HELD_SERIES` (series →
+environment key → reason) in `packages/e2e/tests/e2e_birefnet_test.ts` (moved from `packages/runtime/tests/`
+by ADR 0129).
 
-### 追記決定 8: held 行 — 環境キーの行で「その機では走らせない系列」を持つ
+- A row MUST be added only when running the series there **crashes the whole process** (taking later
+  verification down). It is not for series whose numbers disagree (those stay red until fixed).
+- Only device tests (golden comparison, geometry discrimination) are stopped, not the asset integrity tests.
+- A stopped series announces itself once with `console.warn`; a self-test checks that the inner keys have
+  the environment-key format (a misspelled row would silently stop working).
+- Rows are per environment key; a machine without a GPU has no key and matches none.
+- The reason states the evidence and the removal condition; removing the row signals the cause is resolved.
 
-環境キーの行を、参照値だけでなく**その機で止める系列**にも使う。置き場は
-`packages/runtime/tests/e2e_birefnet_test.ts` の `HELD_SERIES`（系列名 → 環境キー → 理由）。
+Withdrawn 2026-10-18: the three rows for the 2048² series (`birefnet-hr-2048-f16` / `lucida-2048` /
+`lucida-2048-f16`) × `deno-intel-graphics-bmg-g21` (Intel Arc B570 under Linux xe: `deform_conv2d`
+exceeded the 5 s job limit and Deno panicked). The B570 left the development machine on 2026-10-06 and the
+harness builds `node-` keys, so the rows, still in the code, never match.
 
-- 行を足せるのは、その機で走らせると**プロセスごと落ちる**（後続の検証まで道連れにする）場合だけ。数値が合わない
-  系列を止める場所ではない（それは赤のまま直す）。
-- 止めるのは device を触るテスト（golden 突合・幾何判別）だけで、資産の完全性テスト（GPU 不要）には掛けない。
-- 止めた系列は登録時に `console.warn` で 1 度名乗る（無音の SKIP にしない）。内側のキーが環境キーの書式であることは
-  自己テストが検査する（綴りの外れた行は黙って効かなくなるため）。
-- 行は環境キーごとに持つ（全機共通で止めると、走れる機の検証まで消える）。GPU の無い機は環境キーを持たないので
-  どの行にも当たらない。
-- 行の理由文には根拠と解除条件を書く。解消の合図 = 行を消す。
-- 現在の行: 2048² の 3 系列（`birefnet-hr-2048-f16` / `lucida-2048` / `lucida-2048-f16`）× `deno-intel-graphics-bmg-g21`
-  （Intel Arc B570・Linux xe ドライバ）。
-  decoder 末尾の `deform_conv2d` 1 dispatch がドライバの compute ジョブ上限 5 s を超えて device lost になり、Deno が
-  プロセスごと panic する。解除条件は `deform_conv2d` の分割か高速化で 1 dispatch を上限内に収めること
-  （[perf-ledger](../perf-ledger.md) K-63・[limitations](../limitations.md)「BiRefNet 系」節）。
+## Addendum (2026-10-03) — decision 4 revised: the reference guard is green when every registered case has a row here or its id is held
 
-## 追記（2026-10-03）: 決定 4 の改定 — 参照門は「登録した全ケースに現環境の行があるか、無い id は held」で緑
+Decision 4's "green when only some cases have rows" let a forgotten row for a new case ID pass as a SKIP
+with a warning (ADR 0119 decision 8 relies on closing this). Revised in `7dc17309`:
 
-決定 4 の「登録したケースの一部にだけ行がある状態は緑」は、新しい case id の行の書き忘れが警告付き SKIP で通る抜けになっていた
-（backlog の隣接の小物 2026-10-03・ADR 0119 決定 8 の前提）。`7dc17309` で次に改める。
+- Green: every registered case ID has a row for the current environment, or each id without one is
+  **held** here (`ReferenceHolds` passed to `registerReferenceGate` — the shape of `HELD_SERIES`, for cases
+  that crash the process only). An id both held and with a row is red (the stale hold is named). Zero
+  registered cases stays red. A writing mode is always green.
+- A case without a row in compare mode behaves as before (explicit SKIP, artifact written); the failure
+  names the ids without rows and the `write` procedure.
+- Opt-in cases (enabled by an environment variable) are not registered while disabled (precedent: Wan's
+  conditional `CASE_IDS`).
 
-- 緑の条件: 登録した全 caseIds に現環境の行がある、または行の無い id が現環境の **held**（呼び手が `registerReferenceGate` に渡す
-  `ReferenceHolds` — 追記決定 8 の `HELD_SERIES` と同じ形・プロセスごと落ちるケースだけ）。held と行が両方ある id は赤（古い held を
-  名指し）。登録 0 件は従来どおり赤。作るモード（`KARUME_REFERENCE=write`）は常に緑。
-- 比較モードで行が無いケースの step の挙動（明示 SKIP + 実物の書き出し）は変えない。失敗の文面は行の無い id と write の手順を名指しする。
-- opt-in のケース（環境変数で有効になる id）は無効時に登録しない（Wan の `CASE_IDS` の条件つき登録が前例）。
-- 棚卸し（2026-10-03・全 12 家族）: B570 で行が無いのは Wan の `gpu-text-*` 2 本（10d-4 で write）だけ。RTX 3080 Ti では anima の
-  extra 2 本が新たに赤になる（行の無い機は赤 — 本 ADR の思想どおり）。行を 1 本も持たない機は前後で変わらない。
+## Addendum (2026-10-17) — PNG rows use the sha of the pixels before compression
 
-## 追記（2026-10-17）— PNG の行は圧縮前の画素列の sha で持つ
+### Addendum decision 9: for cases whose artifact is a PNG, the sha is taken over the RGB8 pixels that `encodePng` writes into IDAT, not over the PNG bytes
 
-### 追記決定 9: PNG を実物に持つケースの sha は、PNG のバイト列ではなく `encodePng` が IDAT に書く RGB8 の画素列に対して採る
+In the port to Node (ADR [0127](0127-node-dawn-toolchain.md)), Deno and Node on the same RTX 3080 Ti
+differed by zero in every series, yet anima's 11 PNG rows broke: IDAT is `CompressionStream("deflate")`
+output, and its zlib differs per runtime. The rows should capture the numbers, not the compressor, so the
+sha covers the pixels `encodePng` writes into IDAT (row-major RGB8 — the RGBA of `GeneratedImage.data`
+without alpha, which is always 255 and checked by `encodePng`). The PNG stays as an artifact for inspection.
 
-Node への移植（ADR [0127](0127-node-dawn-toolchain.md)）で、同じ GPU（RTX 3080 Ti）の Deno と Node の走行は全系列で数値の差 0 だったが、
-anima の PNG の行 11 本だけが割れた。PNG の IDAT は `CompressionStream("deflate")` の出力で、その zlib 実装はランタイムごとに違う
-（画素は同一・バイトが違う）。行が掴みたいのは数値であって圧縮器ではないので、sha は `encodePng` が IDAT に書く画素列（行優先・RGB8 —
-`GeneratedImage.data` の RGBA から alpha〈常に 255・`encodePng` が検査する〉を落としたもの）に対して採る。PNG は従来どおり
-実物として結果の席に残す（目視用）。
-
-- 追記決定 6 の「sha は実物ファイルのバイト列に対して採る」は PNG の実物には当てはまらない。実物の PNG を
-  `decodePng`（`@karume/test-support/png-decode`）で展開した画素列の sha が行と一致する。
-- 既存の行の焼き直し: 3 環境キー × 11 ケース = 33 行を、行のバイト sha と一致する凍結済みの実物
-  （`outputs/verify/<環境キー>/…/*.png`）を展開して再計算した（走り直しではない）。再計算の後、
-  `deno-nvidia-geforce-rtx-3080-ti` と `node-nvidia-geforce-rtx-3080-ti` の行は 11 ケース全てで一致した
-  （Dawn と wgpu でこの GPU の画素はビット同一 — 移植の突合の裏付け）。
-- 追記決定 6 の「Deno の版上げで PNG の行が割れうる」は解消（圧縮器の差は行に乗らない）。
-- `tools/verify-diff` は結果の `actual` を比べる道具で、PNG の行が画素の sha になっても扱いは変わらない。
+- The sha of the pixels of the artifact decoded with `decodePng` (`@karume/test-support/png-decode`)
+  equals the row.
+- Existing rows were recomputed on 2026-10-17 from the frozen artifacts (not re-run); the
+  `deno-nvidia-geforce-rtx-3080-ti` and `node-nvidia-geforce-rtx-3080-ti` rows then agreed on all 11 cases
+  (Dawn and wgpu produce bit-identical pixels on this GPU). A Deno upgrade can no longer break PNG rows.
+- `tools/verify-diff` compares `actual` and is unaffected.

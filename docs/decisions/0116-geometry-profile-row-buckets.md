@@ -1,242 +1,220 @@
-# 0116: 幾何プロファイルの行数バケットを 7 段に細分する（既定の表は 3 段のまま）
+# 0116: Refine the geometry-profile row buckets to seven (the default table keeps three)
 
-- Status: accepted（利用者裁定 2026-10-01。ADR 0115 追記 9 の裁定 3 = a〈2026-09-29〉の具体化）
+- Status: accepted (2026-10-01 — the maintainer's ruling; it implements the bucket refinement
+  approved on 2026-09-29 in ADR 0115 addendum 9); implemented 2026-10-01 (`c358832b`). The location
+  of the boundary constant in decision 1 is superseded by [0117](0117-app-geometry-tuning.md)
+  decision 1 (2026-10-01: moved to `packages/runtime/src/tune/`). Re-graded 2026-10-18: decision
+  3's "the default table keeps three buckets" to SHOULD; decision 5's one-time re-run on named
+  machines withdrawn.
 - Date: 2026-10-01
-- 関連: ADR [0115](0115-geometry-profiles.md)（幾何プロファイル・決定 1 / 4 / 5・追記決定 1 / 3 / 8・追記 8 / 9）/
-  [0022](0022-gemm-register-blocking.md)（GEMM 骨格・決定 3 の MUST「縮約順は数値契約」・追記の MUST「実行時オートチューン禁止」）/
-  [0106](0106-device-keyed-references.md)（sha256 参照値を環境キーごとの行で持つ）/ perf-ledger K-70・K-71。
-  読み取り調査（file:line の引用・数値シミュレーション・論点 1〜9）は `.claude/reviews/2026-10-01_rows-buckets-recon/SUMMARY.md`
-  （git 追跡外）。シミュレーションのスクリプトも同じ場所。実測の正本は [research K-70](../research/2026-09-27-k70-metal-per-op.md) §13 / §14。
-  実装 = `packages/runtime/src/tune/cases.ts`（境界の定数 `PROFILE_GEMM_ROWS_BOUNDS` と掃引ケース）・`packages/runtime/src/tune/derive.ts`（生成器）
-  — 2026-10-01 に ADR 0117 段 2 で `tools/geometry-sweep/` から移した。
+- Related: [0115](0115-geometry-profiles.md) (geometry profiles; decisions 1 / 4 / 5, addendum
+  decisions 1 / 3 / 8, addenda 8 / 9) / [0022](0022-gemm-register-blocking.md) (GEMM skeleton;
+  decision 3's MUST "the reduction order is a numerical contract"; the addendum's MUST "no run-time
+  autotuning") / [0106](0106-device-keyed-references.md) (sha256 reference values per environment
+  key) / perf-ledger K-70, K-71. The read-only investigation (file:line citations, the numeric
+  simulation and its script, open questions 1–9) is
+  `.claude/reviews/2026-10-01_rows-buckets-recon/SUMMARY.md` (not tracked by git). Measurements:
+  [research K-70](../research/2026-09-27-k70-metal-per-op.md) §13–§15.
+- Implementation: `packages/runtime/src/tune/cases.ts` (the boundary constant
+  `PROFILE_GEMM_ROWS_BOUNDS` and the sweep cases) and `packages/runtime/src/tune/derive.ts` (the
+  generator).
 
 ## Context
 
-幾何プロファイル（ADR 0115）の `gemmRows` は、行数 M のバケットごとに GEMM 幾何を 1 本持つ表である。linear / matmul / bmm の 3 経路が
-同じ表を引く。生成器は境界を runtime の既定の表 `GEMM_ROWS_BUCKETS`（64 / 512 / ∞ の 3 段）から導き、3 段でなければ止まる（ADR 0115 決定 4）。
+The `gemmRows` field of a geometry profile (ADR 0115) holds one GEMM geometry per bucket of row
+count M; linear, matmul and bmm all read it. The generator took its boundaries from the runtime's
+default table `GEMM_ROWS_BUCKETS` (64 / 512 / ∞) and stopped on anything else (ADR 0115 decision 4).
 
-M2 と RTX 5070 Ti の掃引で、**バケットの中で最良の幾何が M ごとに割れる**ことが分かった（ADR 0115 追記決定 3・追記 8）:
+Sweeps on the M2 and the RTX 5070 Ti showed that **the best geometry within a bucket differs by M**
+(ADR 0115 addendum decision 3, addendum 8):
 
-- M2 の ≤ 64 の中: M 16 は `reg16x32r2x4w8` ×1.21、M 32 は `reg32x64r4x4w16` ×1.75、M 64 は `reg64x64r4x4w16` ×2.25。
-- RTX の 1 ケース由来の規則（≤ 64 の `reg32x32r2x4w8` ×1.38・65〜512 の `reg128x128r8x8w16` ×1.48）は、同じバケットの他の M で大きく負けた
-  （M 16 で ×0.66・M 128 で ×0.41）。
-- 生成器の規則は「欄の全ケースで ×1.05 以上」なので、1 本の幾何でバケット全体を ×1.05 にできない。結果、M2 の ≤ 64 / 65〜512 と、RTX の
-  ≤ 64 / 65〜512 はどれも既定に戻っている。
+- M2, ≤ 64: M 16 → `reg16x32r2x4w8` ×1.21, M 32 → `reg32x64r4x4w16` ×1.75, M 64 →
+  `reg64x64r4x4w16` ×2.25.
+- The RTX single-case rules (≤ 64 `reg32x32r2x4w8` ×1.38, 65–512 `reg128x128r8x8w16` ×1.48) lost
+  badly at other M of the same bucket (M 16 ×0.66, M 128 ×0.41).
+- The generator requires ×1.05 on every case of a field, so no single geometry qualifies for a
+  whole bucket. As a result ≤ 64 and 65–512 had returned to the default on both machines.
 
-利用者は 2026-09-29 に裁定 3 = a を承認した（ADR 0115 追記 9）: 掃引ケースの M（16 / 32 / 64 / 128 / 256 / 512 / ∞）を境界にした表を
-プロファイルごとに作れるようにする。既定の表は 3 段のまま。runtime の表引き（`gemmRowsGeometry` の線形探索・`assertGemmRowsRules` の門 —
-空でない・狭義昇順・末尾 Infinity・整除）は段数の上限も下限も持たないので、変更は生成器と ADR 0115 決定 4 の改定に閉じる（調査 §1.1 で確認）。
+On 2026-09-29 the maintainer approved tables whose boundaries are the sweep cases' M (16 / 32 / 64 /
+128 / 256 / 512 / ∞), per profile, with the default table kept at three buckets (ADR 0115 addendum
+9). The runtime lookup (`gemmRowsGeometry`, a linear scan; the structural check of
+`assertGemmRowsRules` — non-empty, strictly ascending, ending in Infinity, divisible) has no lower
+or upper limit on the number of buckets, so the change is confined to the generator and to ADR 0115
+decision 4.
 
-### 調査の数値シミュレーション（7 段）
+A re-implementation of the generator rules with arbitrary boundaries (it matched the real generator
+on every three-bucket input) predicted adoptions in most of the new buckets on M2, M5 and RTX; the
+recon summary holds the table, and research K-70 §15 compares it with the result.
 
-生成器の判定規則（全ケースで出力一致・失敗なし・比の材料あり、最小比 ≥ ×1.05、幾何平均最大、再測定比による除外〈ADR 0115 追記決定 8〉）を、
-任意の境界で再実装して回した。再実装は、現行の 3 段で本物の生成器の `gemmRows` 3 欄と 5 通りの入力すべてで採否・幾何・幾何平均が一致した。
-入力は M5 の full 単独・M2 の `apple-metal-3` の `--from` 4 本・RTX の `nvidia-blackwell` の `--from` 2 本（いずれも 2026-10-01 時点のケース集合 45 本）。
-表の値は「採用幾何 幾何平均（最小〜最大）」。「既定」は採用なし。
+### Buckets with linear cases only
 
-| 段              | ケース                      | M5（full 単独）                            | M2（4 本）                               | RTX（2 本）                                   |
-| --------------- | --------------------------- | ------------------------------------------ | ---------------------------------------- | --------------------------------------------- |
-| ≤ 16            | linear 1                    | `reg16x32r2x4w8` ×1.065                    | `reg16x32r2x4w8` ×1.209                  | 既定（最良が既定そのもの）                    |
-| 17〜32          | linear 1                    | `reg32x32r4x4w8` ×1.541                    | `reg32x64r4x4w16` ×1.750                 | `reg32x16r2x4w4` ×1.072                       |
-| 33〜64          | linear 1 + matmul 1 + bmm 2 | `reg64x32r4x4w8` ×1.514（1.279〜1.917）    | `reg64x32r4x4w8` ×1.397（1.143〜2.220）  | 既定（bmm M 64 N 64 K 128 で最良でも ×1.026） |
-| 65〜128         | linear 1                    | 既定（最良 ×1.027）                        | `reg128x32r8x4w8` ×1.100                 | 既定（最良 ×1.035）                           |
-| 129〜256        | linear 1                    | `reg128x32r8x4w8` ×1.112                   | `reg128x32r8x4w8` ×1.054                 | `reg64x64r4x4w16` ×1.215                      |
-| 257〜512        | linear 1 + matmul 1 + bmm 3 | 既定                                       | 既定                                     | `reg64x64r8x4w16` ×1.338（1.184〜1.495）      |
-| > 512           | linear 6 + matmul 1         | 既定                                       | `reg128x32r8x4w8` ×1.647（1.171〜1.765） | 既定                                          |
-| 参考: 現行 3 段 | —                           | ≤ 64 `reg16x32r2x4w8` ×1.185 / 既定 / 既定 | 既定 / 既定 / ×1.647                     | 既定 / 既定 / 既定                            |
-
-### linear しか無い段の問題
-
-2026-10-01 時点のケースは M ごとに op が揃っていない。M 16 / 32 / 128 / 256 は linear 1 本だけで、M 64 / 512 だけが linear・matmul・bmm を持つ。
-linear だけの段では「全ケースで ×1.05 以上」が「linear 1 ケースで最大」に縮み、matmul / bmm で負ける幾何を止める安全網（ADR 0115 追記決定 1）が
-働かない。表は 3 経路に効くので、その M の matmul / bmm には測っていない幾何が当たる。
-
-両方の op を測った M 64 / 512 で「linear だけで決めたら」を試すと、6 組のうち 5 組で linear 単独の勝者が matmul / bmm のどれかで既定より遅い:
-
-| 機         |   M | linear だけの勝者          | その幾何の matmul / bmm での比                 | 全 op で決めた結果       |
-| ---------- | --: | -------------------------- | ---------------------------------------------- | ------------------------ |
-| M5         |  64 | `reg64x64r4x8w8` ×2.061    | bmm ×1.336 / ×1.172・matmul ×1.570（負けなし） | `reg64x32r4x4w8` ×1.514  |
-| M5         | 512 | `reg128x64r8x8w8` ×1.157   | **bmm M 512 N 64 K 64 ×0.954**                 | 既定                     |
-| M2（4 本） |  64 | `reg64x64r4x4w16` ×2.256   | **bmm M 64 N 64 K 128 ×0.919**                 | `reg64x32r4x4w8` ×1.397  |
-| M2（4 本） | 512 | `reg128x32r8x4w8` ×1.097   | **bmm M 512 N 64 K 512 ×0.983**・matmul ×1.027 | 既定                     |
-| RTX        |  64 | `reg32x32r2x4w8` ×1.365    | **bmm M 64 N 64 K 128 ×0.884**                 | 既定                     |
-| RTX        | 512 | `reg128x128r8x8w16` ×1.477 | **bmm ×0.710 / ×0.773**                        | `reg64x64r8x4w16` ×1.338 |
-
-linear 単独の勝者を止めたのは、どれも N 64 の bmm の形（M 64 N 64 K 128・M 512 N 64 K 64・M 512 N 64 K 512）だった。
+On 2026-10-01 the cases were uneven: M 16 / 32 / 128 / 256 had one linear case each, and only M 64
+/ 512 had linear, matmul and bmm. In a linear-only bucket "×1.05 on every case" shrinks to "best on
+one linear case", and the safety net of ADR 0115 addendum decision 1 (a geometry that loses on
+matmul / bmm is not adopted) does not work, although the table also serves matmul and bmm. Where
+all ops were measured (M 64 / 512 on M5, M2 and RTX), the linear-only winner was slower than the
+default on some matmul / bmm case in 5 of 6 (machine, M) pairs, each time on an N 64 bmm shape (M 64
+N 64 K 128, M 512 N 64 K 64, M 512 N 64 K 512).
 
 ## Decision
 
-### 1. 境界 = 固定の集合 `[16, 32, 64, 128, 256, 512, ∞]`
+### 1. Boundaries: the fixed set `[16, 32, 64, 128, 256, 512, ∞]`
 
-- プロファイルの `gemmRows` の境界（`maxRows` の列）は、定数 `PROFILE_GEMM_ROWS_BOUNDS = [16, 32, 64, 128, 256, 512, Infinity]` の 1 か所で持つ。
-  置き場は掃引の形状表 `tools/geometry-sweep/cases.ts`。生成器はそれを import する（生成器 → 形状表の依存は既にある向き）。
-- 末尾以外の境界は、linear / matmul / bmm の掃引ケースの M（≤ 512）の集合と一致すること MUST。`cases_test.ts` が縛る。
-  理由: 各段の上端を必ず測った状態にするため。ケースを足して境界を変えるときは、定数とケースを同じ変更で動かす。
-- 境界は掃引の入力から導かない。CLI 引数でも受けない（採らなかった案 B / C）。
+- The `gemmRows` boundaries of a profile (the `maxRows` column) are held in one place, the constant
+  `PROFILE_GEMM_ROWS_BOUNDS = [16, 32, 64, 128, 256, 512, Infinity]`, next to the sweep cases; the
+  generator imports it. (Superseded by ADR 0117 decision 1 on 2026-10-01 for the location: the
+  constant moved from `tools/geometry-sweep/cases.ts` to `packages/runtime/src/tune/cases.ts:135`.)
+- The boundaries other than the last MUST equal the set of M (≤ 512) of the linear / matmul / bmm
+  sweep cases; `packages/runtime/tests/tune_cases_test.ts` checks it. Reason: the upper end of every
+  bucket is always measured. Adding cases that change the boundaries moves the constant and the
+  cases in the same change.
+- Boundaries are not derived from the sweep input, nor taken as an argument (alternatives B / C).
 
-### 2. 段数は全プロファイルで 7 段固定・併合も圧縮もしない
+### 2. Seven buckets for every generated profile; no merging, no compaction
 
-- 生成器が書く表は、どのプロファイルでも 7 規則。隣接段の判定が同じでも併合しないし、出力で詰めもしない。
-- 理由: 併合（案 (b)）や出力の圧縮（案 (b')）は、M ごとに選ぶ幾何が (a) と同一で、違いは表の行数と採否の行の数字だけ（調査 §3.4）。
-  固定にすると、欄と規則が 1 対 1 になり、生成物の採否の行・gpu-lab の表・per-profile テストが「段ごとに 1 つ」で書ける。
-- 利用者が注入する表（`acquireGpu({ geometryProfile })` の JSON）は、runtime の門を通る限り段数が違ってよい（ADR 0115 決定 1 のまま）。
-  7 段固定は生成器が書く表についての規則である。
+- The generator writes seven rules for every profile. Adjacent buckets with the same verdict are not
+  merged, and the output is not compacted.
+- Reason: merging (option (b)) or compacting the output (option (b')) picks the same geometry per M
+  as (a); only the row count of the table and the numbers in the verdict lines differ (recon §3.4).
+  A fixed count keeps fields and rules one to one, so the verdict lines of the generated file and
+  the per-profile test can be written "one per bucket".
+- A table a user injects (`acquireGpu({ geometryProfile })`) may have a different number of buckets
+  as long as it passes the runtime's structural check (ADR 0115 decision 1). The fixed seven applies
+  to tables the generator writes.
 
-### 3. 既定の表は 3 段のまま・プロファイルの境界は既定の細分であること MUST
+### 3. The default table keeps three buckets; profile boundaries MUST refine the default
 
-- 不変: `GEMM_ROWS_BUCKETS`（64 / 512 / ∞）・`DEFAULT_GEOMETRY_PROFILE`・codegen スナップショット・`geometry_profile_test.ts` の既定の検査。
-  ADR 0115 決定 5（既定プロファイルは本 ADR の前の表とバイト同一）はそのまま成り立つ。
-- プロファイルの境界の集合は、既定の境界 64 / 512 を全て含む細分であること MUST。生成器はそうでない境界で生成を止める（fail loudly）。
-  理由は 2 つ。
-  - 掃引の既定の行は既定の 3 段の表（`gemmGeometryForRows(m)`）で組まれる。段が既定の境界をまたぐと、段の中で比の土台が 2 種類になる。
-  - 段ごとの fallback が一意に決まらない。
-- 段ごとの fallback（掃引にケースが無い段・採用が無い段に書く値、かつ掃引の既定の行と突き合わせる相手）は、**その段の範囲を覆う既定の段の幾何**。
-  例: ≤ 16・17〜32・33〜64 → 既定の ≤ 64 の幾何、65〜128・129〜256・257〜512 → 既定の 65〜512 の幾何、> 512 → 既定の > 512 の幾何。
-- runtime の表引き（`gemmRowsGeometry`）と門（`assertGeometryProfile`）は既に任意段数を受けるので変更しない。
+- The default table SHOULD stay at three buckets: `GEMM_ROWS_BUCKETS` (64 / 512 / ∞),
+  `DEFAULT_GEOMETRY_PROFILE`, the codegen snapshots and the default checks of
+  `geometry_profile_test.ts` do not change, and ADR 0115 decision 5 (the default profile is
+  byte-identical to the table before it) still holds (re-graded 2026-10-18 to SHOULD: the reason is
+  the cost of re-running the sha256 checks on every machine that the ADR 0022 addendum requires for
+  a default change, not correctness; the default may change through that procedure).
+- The set of profile boundaries MUST be a refinement that contains every default boundary (64 /
+  512). The generator stops on any other set (fail loudly). Two reasons:
+  - the sweep's default row is built from the three-bucket default table (`gemmGeometryForRows(m)`);
+    a bucket crossing a default boundary would mix two bases for its ratios;
+  - the per-bucket fallback would not be unique.
+- The per-bucket fallback (the value written when a bucket has no case or no adoption, and the
+  value the sweep's default row is compared against) is **the geometry of the default bucket that
+  covers the range**: ≤ 16, 17–32, 33–64 → the default ≤ 64 geometry; 65–128, 129–256, 257–512 →
+  the default 65–512 geometry; > 512 → the default > 512 geometry.
+- The runtime lookup (`gemmRowsGeometry`) and structural check (`assertGeometryProfile`) already
+  accept any number of buckets and do not change.
 
-### 4. linear しか無かった段に matmul / bmm の掃引ケースを足す
+### 4. matmul / bmm cases are added to the linear-only buckets
 
-M 16 / 32 / 128 / 256 の各段に、linear に加えて matmul と bmm を置く。全 12 ケース（matmul 4 + bmm 8）で、掃引は 45 → 57 ケースになる。
+Buckets M 16 / 32 / 128 / 256 get matmul and bmm cases besides linear: 12 cases (matmul 4 + bmm 8),
+which takes the sweep from 45 to 57 cases.
 
-| op     | 足すケース                                                                                               | 形の出どころ                                                                                                                         |
-| ------ | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| matmul | `matmul-m16-n3072-k1024`・`matmul-m32-n3072-k1024`・`matmul-m128-n2048-k1024`・`matmul-m256-n2048-k1024` | 同じ M / N / K の linear の鏡像（`mirrorOf` が鏡像元・既存の matmul と同じ扱い）                                                     |
-| bmm    | 各 M に `bmm-b16-m{M}-n64-k64` と `bmm-b16-m{M}-n64-k128`（M ∈ {16, 32, 128, 256}）                      | `n64-k64` は text_conditioner `[16,512,64] × [16,64,64]`、`n64-k128` は text_encoder `[16,64,128] × [16,128,64]` の M を置換した派生 |
+| op     | Added cases                                                                                              | Shape source                                                                                                                                        |
+| ------ | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| matmul | `matmul-m16-n3072-k1024`, `matmul-m32-n3072-k1024`, `matmul-m128-n2048-k1024`, `matmul-m256-n2048-k1024` | counterpart of the linear case with the same M / N / K (`mirrorOf` names it, as for the existing matmul cases)                                       |
+| bmm    | `bmm-b16-m{M}-n64-k64` and `bmm-b16-m{M}-n64-k128` for M ∈ {16, 32, 128, 256}                           | `n64-k64` from text_conditioner `[16,512,64] × [16,64,64]`, `n64-k128` from text_encoder `[16,64,128] × [16,128,64]`, with M replaced |
 
-- bmm を N 64 の 2 形にした根拠: 両 op を測った M 64 / 512 で linear 単独の勝者を止めたのが N 64 の形だった（Context の表）。
-- 派生のケースは census に無い M である。`source` に「census の M … を … に置換」と書き、census 由来でないことを明示する
-  （linear の M 16 / 32 / 128 / 256 と同じ流儀。`censusCount` は置換元の行の count を載せる）。
-- 結果、M ≤ 512 の 6 段はどれも linear・matmul・bmm を 1 本以上持つ。> 512 の段は linear 6 + matmul 1 のまま（bmm は census に無い）。
+- Why the two N 64 shapes: they were the ones that stopped the linear-only winners at M 64 / 512
+  (Context).
+- The derived cases have M values absent from the census. Their `source` says "census M … replaced
+  by …" (as for the linear M 16 / 32 / 128 / 256 cases), and `censusCount` carries the count of the
+  row they replace.
+- Every bucket M ≤ 512 now has at least one linear, matmul and bmm case. The > 512 bucket stays at
+  linear 6 + matmul 1 (no bmm in the census).
 
-### 5. 新ケースを含むクラスは 3 機で full を再走してから表を作る・登録済みの 2 表は再生成する
+### 5. A class with new cases is measured with full
 
-- `gemmRows`（linear / matmul / bmm）は新ケースを含むクラスなので、M2・M5・RTX 5070 Ti の 3 機で **full**（格子全体）を再走してから表を作る。
-  quick+ だけで足さない。理由: 生成器は欄の全ケースで測った幾何しか候補にしない。新ケースを quick+ だけで測ると、full 格子にしか無い幾何が
-  その欄で全て候補から落ちる（tools/geometry-sweep/README の注意書きと同じ規律）。
-- 登録済みの `apple-metal-3` / `nvidia-blackwell` は、再走の後に 7 段の生成器で再生成する。今の `--from` の列に再走の掃引を足す。
-  据え置くと、生成器と生成物が食い違ったまま残り、次に誰かが `--check` を回した時点で原因の分からない不一致になる（負債）。
+- A class that contains new cases (here `gemmRows`: linear / matmul / bmm) is measured with
+  **full** (the whole grid) before a table is built, not with quick+ alone. Reason: the generator
+  only considers geometries measured on every case of a field; measuring new cases with quick+
+  alone drops every geometry that exists only in the full grid from that field.
+- Withdrawn 2026-10-18: the one-time re-run on M2, M5 and RTX 5070 Ti and the regeneration of the
+  registered `apple-metal-3` / `nvidia-blackwell` with the seven-bucket generator (done 2026-10-01,
+  `c358832b`).
 
-### 6. 生成物の採否の行は段を範囲で綴る
+### 6. Verdict lines name buckets by range
 
-- 採否の行と退けた幾何の行は、段を範囲で書く: `gemmRows ≤ 16`・`gemmRows 17〜32`・`gemmRows 33〜64`・`gemmRows 65〜128`・
-  `gemmRows 129〜256`・`gemmRows 257〜512`・`gemmRows > 512`。
-- 添字（`gemmRows[1]` など）は使わない。3 段時代の `gemmRows[1]`（65〜512）と 7 段の 2 番目（17〜32）が同じ綴りで別の範囲を指し、
-  古いコメントや ADR 0115 の記述と混同しうるため。
-- TS の表は今までどおり `maxRows` の配列（`GemmRowsRule[]`）。型は変えない。
+- Verdict lines and rejected-geometry lines in the generated file name a bucket by its range:
+  `gemmRows ≤ 16`, `gemmRows 17–32`, `gemmRows 33–64`, `gemmRows 65–128`, `gemmRows 129–256`,
+  `gemmRows 257–512`, `gemmRows > 512`.
+- No index (`gemmRows[1]` and the like): the three-bucket `gemmRows[1]` (65–512) and the second of
+  seven (17–32) would share a spelling for different ranges and could be confused with old comments
+  and with ADR 0115.
+- The TS table stays a `maxRows` array (`GemmRowsRule[]`); the type does not change.
 
-### 7. per-profile の実 GPU テストは規則ごとに 1 ケース
+### 7. The per-profile real-GPU test has one case per rule
 
-- `packages/runtime/tests/gpu_geometry_profile_test.ts` の per-profile 検査（登録表ごとに既定との Uint32 一致）は、`gemmRows` の各規則に
-  その段の代表 M の 1 ケースを置く形へ広げる。今は linear M 40 / 300 / 1024（3 段を 1 本ずつ）なので、7 段にすると 4 段の採用幾何が
-  実 GPU の一致検査を受けない。
-- 代表 M は表の規則から導く（表が変わっても追随するため）。具体の取り方は段 4 で決める。
+- The per-profile check of `packages/runtime/tests/gpu_geometry_profile_test.ts` (each registered
+  table matches the default bit for bit as Uint32) has one case at a representative M for every
+  `gemmRows` rule. With the earlier three cases (linear M 40 / 300 / 1024), four of the seven
+  buckets' adopted geometries would escape the real-GPU identity check.
+- The representative M is derived from the table's rules, so it follows table changes
+  (`gpu_geometry_profile_test.ts:400`).
 
-## 採らなかった案
+## Alternatives not taken
 
-- **境界を掃引から導く（論点 1 の B）** — 入力の掃引にある M（≤ 512）をその場で境界にする。採らない。quick と full、古い掃引と新しい掃引で
-  ケース集合が違うと、合成した表の段の形が入力の組で変わる。ケース追加への自動追随は、決定 1 のテスト 1 本で担保できる。
-- **境界を CLI 引数で受ける（C — `--rows-bounds 16,32,…`）** — 採らない。未要求の設定項目で、再生成コマンドが長くなり、誤った境界も通る。
-- **隣接段の併合 (b) / 出力だけ詰める (b')（論点 2）** — 採らない。M ごとの選択は (a) と同一で、表現が変わるだけ（調査 §3.4）。(b') は
-  詰めた規則が既定の境界 64 をまたげる（M5 の 33〜64 と 65〜128 が同じ `reg64x32r4x4w8`）ので、決定 3 の細分の検査とも噛み合わない。
-- **linear 1 本のまま決める（論点 4 の Q）** — linear しか無い段は linear 1 ケースで決め、生成物に「linear 1 ケースで決めた」と明記する。
-  採らない。Context の表のとおり、linear 単独の勝者は 6 組中 5 組で matmul / bmm に負ける。ADR 0115 追記決定 1 が避けた外挿を、
-  一部の段だけ表に入れることになり、同じ規律が段によって二重になる。
-- **linear しか無い段を作らない（R — 境界は 64 / 512 のまま）** — 裁定 3 の否定になる。
-- **既定の表自体を 7 段にする** — 裁定 3 の「既定の表は 3 段のまま」に反する。既定は全機に効くので、変えるなら ADR 0022 追記の
-  「既定の変更は門の再実測とセット」を全機で回すことになる。
-- **段の中間点（M 24 / 48 / 96 / 192 / 384）を検証専用ケースとして足す（論点 9）** — 採否には使わず出力一致と退行だけを見るケース。
-  ケースの役割の区別という新しい仕組みが要るので、本 ADR では採らない（未解決に記録）。
+- **Deriving boundaries from the sweep (open question 1, B)**: the M values (≤ 512) present in the
+  input become boundaries. Rejected: quick and full, old and new sweeps have different case sets, so
+  the bucket layout would depend on the input combination. Following new cases automatically is
+  covered by the single test of decision 1.
+- **Boundaries as a CLI argument (C, `--rows-bounds 16,32,…`)**: an unrequested setting that
+  lengthens the regeneration command and lets wrong boundaries through.
+- **Merging adjacent buckets (b) / compacting the output only (b') (open question 2)**: the per-M
+  choice is identical to (a), only the representation changes (recon §3.4). (b') can produce a rule
+  that crosses the default boundary 64 (on the M5, 33–64 and 65–128 share `reg64x32r4x4w8`), which
+  conflicts with the refinement check of decision 3.
+- **Deciding linear-only buckets from the one linear case (open question 4, Q)**, with a note in the
+  generated file: linear-only winners lose on matmul / bmm in 5 of 6 pairs (Context). It would put
+  back into some buckets the extrapolation that ADR 0115 addendum decision 1 avoided, with two
+  disciplines in one table.
+- **No linear-only buckets (R, boundaries stay 64 / 512)**: the negation of the approved refinement.
+- **Seven buckets in the default table too**: against the approved scope ("the default table keeps
+  three buckets"). The default applies to every machine, so changing it means re-running the sha256
+  checks on all of them (ADR 0022 addendum).
+- **Bucket midpoints (M 24 / 48 / 96 / 192 / 384) as validation-only cases (open question 9)**: cases
+  that check output identity and regressions but not adoption. They need a new mechanism to
+  distinguish case roles; not taken here (see Open points).
 
 ## Consequences
 
-- **段の上端で測った勝者を段全体に当てる**。17〜32 の段は M = 32 の勝者を M 17〜31 にも当てる。既定の 3 段も同じ構造（≤ 64 を M 64 で決めていた）
-  なので新しい性質ではないが、1 段が少数の測定点で決まるので外挿の幅が目立つ（タイル辺 32 の幾何を M 17 に当てると行の約半分が空回り — 推測）。
-- **生成物が長くなる**。欄が 10 → 14 になり、採否の行と退けた幾何の行が 4 欄分増える（推測: 数百行）。gpu-lab のプロファイルタブの表も 14 行になる
-  （コードの変更は不要 — 欄の数に依らない）。`quick+` の候補は登録表の採用幾何が増えるぶん増える。
-- **参照 sha の行（ADR 0106）は変わらない見込み**。幾何は担当割りだけを変え、K の縮約順は変えない（ADR 0022 決定 3 の MUST）ので、
-  f32 / f16 の出力ビットは幾何に依らない — ただし実測命題（ADR 0022 追記）。掃引の出力一致の門が保証するのは「掃引したケースの shape × その機 ×
-  採用幾何」だけなので、段 5 で gpu-lab の自己 A/B（`default` 注入と表の注入の PNG sha 一致）で確かめる。tolerance 化はしない。
-- **効果の大きさは未計測（推測）**。anima で細分化が動かすのは text_encoder の linear / bmm（M 64）と、cross-attention の k / v 射影・conditioner の bmm
-  （M 512）。M2 の text 段 1.9 s のうち linear は 0.13 s（ADR 0115 追記決定 4）なので、anima の壁時計への効きは小さい見込み。
-- 再生成した場合の `gemmRows` の変化（Context のシミュレーション — 再走前のケース集合での値。再走で変わりうる）:
+- **The winner measured at a bucket's upper end applies to the whole bucket.** The 17–32 bucket
+  applies the M = 32 winner to M 17–31. The three-bucket default has the same structure (≤ 64 was
+  decided at M 64), but with fewer points per bucket the extrapolation is more visible (a geometry
+  with tile edge 32 at M 17 leaves about half the rows idle — estimate).
+- **Generated files grow**: 10 → 14 fields, with verdict and rejected-geometry lines for four more.
+  The `quick+` candidate set grows with the adopted geometries of the registered tables.
+- **Reference sha rows (ADR 0106) are not expected to change.** Geometry changes only the work
+  assignment, not the K reduction order (ADR 0022 decision 3 MUST), so f32 / f16 output bits do not
+  depend on geometry — an empirical claim (ADR 0022 addendum). The sweep's output-match check covers
+  only the swept shapes × that machine × the adopted geometries, so the self A/B on M2 and RTX
+  (PNG sha identical, 2026-10-01 / 02, research K-70 §15) confirmed it end to end. No tolerance is
+  introduced.
+- **The effect size was not measured in advance (estimate).** On anima the refinement moves the
+  text_encoder linear / bmm (M 64) and the cross-attention k / v projections and conditioner bmm (M
+  512). On the M2 the linear share of the 1.9 s text stage is 0.13 s (ADR 0115 addendum decision 4),
+  so the effect on wall time is expected to be small.
 
-  | 表                 | 変わる段                                                                                          | 変わらない段                      |
-  | ------------------ | ------------------------------------------------------------------------------------------------- | --------------------------------- |
-  | `apple-metal-3`    | ≤ 16 ×1.209・17〜32 ×1.750・33〜64 ×1.397・65〜128 ×1.100・129〜256 ×1.054（いずれも既定 → 採用） | 257〜512（既定）・> 512（×1.647） |
-  | `nvidia-blackwell` | 17〜32 ×1.072・129〜256 ×1.215・257〜512 ×1.338（既定 → 採用）                                    | 他の段（既定）                    |
+## Implementation and acceptance (2026-10-01 to 2026-10-02)
 
-  attention / conv2d / i8a8 の欄は入力の該当ケースが変わらないので不変の見込み（推測 — 生成して確かめる）。
+Done in five steps: boundaries and the 12 cases; full re-runs on M2, M5 and RTX 5070 Ti (57 cases, no
+failure, no mismatch); the seven-bucket generator (`8fbcef74`, fault injection red in three ways);
+regeneration of both tables and one GPU case per rule (`c358832b`, `d1294daa`); unchanged codegen
+snapshots and self A/B on M2 / RTX with identical PNG sha (research K-70 §15).
 
-### 影響ファイル
+## Open points
 
-| 区分   | ファイル                                                                                                    | 中身                                                                                                                                                                              |
-| ------ | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 決定   | `docs/decisions/0116-geometry-profile-row-buckets.md`（本 ADR）・`docs/decisions/0115-geometry-profiles.md` | 本 ADR・0115 決定 4 への改定注記                                                                                                                                                  |
-| 掃引   | `tools/geometry-sweep/cases.ts`・`cases_test.ts`・`README.md`                                               | 境界の定数・12 ケース・境界とケースの一致の検査・ケースの説明                                                                                                                     |
-| 生成器 | `tools/geometry-sweep/derive.ts`                                                                            | 冒頭コメント・`ProfileSlot`・`ROWS_BUCKETS` / `ROWS_SLOTS` / `rowsBucketGeometry` / `SLOTS`・`slotOf`・3 段のガード・`buildGeometryProfile`。細分の検査と段ごとの fallback を足す |
-| 文書   | `tools/geometry-sweep/README.md`（欄の表 `gemmRows[0..2]`）・`tools/gpu-lab/README.md`（必要なら）          | 欄の説明（段 3 と同時）                                                                                                                                                           |
-| 生成物 | `packages/runtime/src/kernels/geometry-profiles/apple-metal-3.ts`・`nvidia-blackwell.ts`                    | 再生成（`--check` でバイト同一）                                                                                                                                                  |
-| docs   | `docs/glossary.md`・`docs/backlog.md`・`docs/perf-ledger.md` K-71・`.claude/ACTIVE_DESIGN.md`・`CHANGELOG`  | 同期                                                                                                                                                                              |
+- **Which families reach the M 16–256 buckets.** f16 / f32-stored linear uses GEMV only at M = 1, so
+  M 2–64 reads `gemmRows`; quantized storage (i2 / i4 / i8) at M ≤ 64 uses the GEMV family and does
+  not. Which family paths (for example LLM prefill chunks) fall into these buckets has not been
+  investigated.
+- **Selection bias of one-case buckets.** Each bucket M ≤ 512 has cases of all three ops, but only
+  at its upper end. With tens to over a hundred candidates, picking the maximum biases ratios
+  upward (general argument; its size in this sweep is not measured). Adoptions just above ×1.05 have
+  no rule yet; validation cases at bucket midpoints (alternatives) are the candidate remedy.
+- **A table for the M5.** The M5 has no registered table (`apple-metal-3` matches only when
+  `description` is `"Apple M2"`); registering one is outside this ADR.
 
-変更しないと確認したもの（調査 §5.1）: `packages/runtime/src/kernels/geometry-profile.ts`・`gemm-geometry.ts`・`geometry-profiles/index.ts`・
-`tools/geometry-sweep/profile.ts`・`geometries.ts`・`tools/gpu-lab/browser/profile-tab.ts`。
+## Addendum (2026-10-01) — seven-bucket tables against the simulation
 
-### テスト
-
-| テスト                                                           | 変更                                                                                                                               |
-| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `tools/geometry-sweep/cases_test.ts`                             | 境界 = 掃引ケースの M ≤ 512 の集合・境界は既定の細分・M ≤ 512 の各段に linear / matmul / bmm・matmul は 7 段を 1 本ずつ            |
-| `tools/geometry-sweep/profile_test.ts`（境界と fallback の検査） | 「境界 = 既定の `maxRows`」から「境界は既定の細分・段ごとの fallback = 既定の対応する段」へ（テストの前提の変更 — 独立のコミット） |
-| `profile_test.ts` の欄名・振り分け                               | 欄名と振り分けの期待値（境界の ±1: 16 / 17 / 32 / 33 / 64 / 65 / 128 / 129 / 256 / 257 / 512 / 513）                               |
-| `tools/geometry-sweep/derive_test.ts`                            | `maxRows` 列の期待値                                                                                                               |
-| 新規（`profile_test.ts`）                                        | 既定の境界をまたぐ境界集合は fail loudly・1 ケースの段の判定・全掃引で比の材料から外れた 1 ケースの段は既定                        |
-| `packages/runtime/tests/gpu_geometry_profile_test.ts`            | 表の各規則に 1 ケース（実 GPU・B570）                                                                                              |
-| 不変                                                             | `packages/runtime/tests/geometry_profile_test.ts`（既定だけ）・codegen スナップショット                                            |
-
-### 段階分解
-
-| 段 | 中身                                                                                                        | 担い手・条件                      |
-| -: | ----------------------------------------------------------------------------------------------------------- | --------------------------------- |
-|  1 | 本 ADR・ADR 0115 決定 4 への改定注記・境界の定数と 12 ケースの追加（`cases.ts` / `cases_test.ts` / README） | この commit                       |
-|  2 | M2・M5・RTX 5070 Ti で `gemmRows` のクラス（linear / matmul / bmm）を full で再走                           | 利用者（M2 は熱の再測定比に注意） |
-|  3 | 生成器の 7 段化（決定 1 / 2 / 3 / 6）とテスト                                                               | 段 2 と並行可                     |
-|  4 | `apple-metal-3`・`nvidia-blackwell` の再生成と per-profile テストの拡張（決定 5 / 7）                       | 段 2・3 の後。B570 で緑           |
-|  5 | 検収（下の表）と docs の同期                                                                                | 段 4 の後                         |
-
-## 検収
-
-| 段 | 緑の条件                                                                                                                                                            | 結果                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| -: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-|  1 | `cases.ts` のケースが 57 本（45 + 12）・`cases_test.ts` / `harness_test.ts` 緑（新ケースの束縛表が既定幾何の WGSL と噛み合う）                                      | ✅（2026-10-01）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-|  2 | 3 機の full の JSON が `gemmRows` の 32 ケース（linear 12・matmul 7・bmm 13）を全て含み、失敗 0・出力不一致 0。再測定比の範囲外は生成器が除外する（件数を記録する） | ✅（2026-10-01・M2 `…T12-28-47.052Z` / M5 `…T16-28-06.082Z` / RTX 5070 Ti `…T16-46-50.379Z`・full 全 op 57 ケース・失敗 0・不一致 0・再測定比の範囲外は M5 の 2 件〈matmul M 16 N 3072 K 1024 1.169・conv2d Cout 192 256² 1.111〉だけで生成器が除外）                                                                                                                                                                                                                                                                                                                                                                                                                |
-|  3 | 生成器の単体テスト緑。故障注入で赤になる: 細分の検査を外す・fallback を末尾の段に固定する・欄を添字で綴る                                                           | ✅（2026-10-01・`8fbcef74`・故障注入 3 通りとも赤を実測・3 機の既存 full からの試走は Context のシミュレーションと 21 段すべて一致）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-|  4 | 2 表を再生成し `--check` がバイト同一。`gemmRows` が 7 規則で、採否の行が範囲で綴られている。B570 で per-profile の実 GPU テストが全規則で Uint32 一致              | ✅（2026-10-01・`c358832b`・`apple-metal-3` 5 本 / `nvidia-blackwell` 3 本から再生成・`--check` バイト同一・7 規則・範囲綴り・B570 の per-profile テスト 2 表 × 7 規則で Uint32 一致。規則ごと 1 ケース化は `d1294daa`）                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-|  5 | codegen スナップショット無変更（既定は不変）。M2（注入かフラグ有り）と RTX で gpu-lab の自己 A/B の PNG sha が一致し、text 段の GPU 時間を記録する                  | codegen スナップショットと公開面のスナップショットは無変更 ✅（2026-10-01・`deno task test:core`）。M2 / RTX の自己 A/B（gpu-lab の A/B ボタン・512²・N 3）: 既定 quant は ✅（PNG 6 / 6 一致・DiT の GPU 時間 M2 ×0.925・RTX ×0.87 — research §15）。`f16` quant: M2 ✅（2026-10-02・PNG 6 / 6 一致・DiT GPU 50.75 → 42.02 s ×0.828・③PV `reg64x64r4x8w8` は 2.64 → 1.53 s・research §15）。RTX ✅（2026-10-02・PNG 6 / 6 一致・DiT GPU 2.876 → 2.875 s ×1.000 = f32 の > 512 は既定のままなので変化なしが期待どおり・M 512 の linear は 0.139 → 0.106 s・research §15）。既定側が Chrome 154 の下で速くなっており〈帰属は推定〉利得は ×1.20（research §15 の観察） |
-
-## 未解決
-
-- **M 16〜256 の段が効く系列の見積り**。f16 / f32 格納の linear は M = 1 だけが GEMV で、M 2〜64 は `gemmRows` を引く。量子化格納（i2 / i4 / i8）の
-  M ≤ 64 は GEMV 族で表を引かない。どの系列のどの経路（LLM の prefill のチャンクなど）がこの段に入るかは調べていない。
-- **1 ケースの段の選択の偏り**。決定 4 で M ≤ 512 の各段は 3 経路のケースを持つが、段の中の M は上端の 1 点だけ。候補が格子全体（数十〜百数十）
-  あるので、最大を選ぶこと自体が比を楽観側へ寄せる（一般論で、この掃引での大きさは未測定）。×1.05 ぎりぎりの採用（シミュレーションでは
-  M5 ≤ 16 ×1.065・M2 129〜256 ×1.054・RTX 17〜32 ×1.072）の扱いは決めていない。段の中間点の検証ケース（採らなかった案）はその対策候補。
-- **M5 の表**。M5 には登録表が無い（`apple-metal-3` は `description` が `"Apple M2"` のときだけ当たる）。段 2 の M5 の再走は観察の記録で、
-  M5 の表を登録するかは本 ADR の範囲外。
-
-## 追記（2026-10-01）: 段 2 / 4b の結果 — 7 段の表と Context のシミュレーションの照合
-
-3 機の full 再走（57 ケース・全 op）から 2 表を再生成した（`c358832b`）。数値の正本は
-[research K-70](../research/2026-09-27-k70-metal-per-op.md) §15。
-
-- linear だけで決めていた 4 段（≤ 16 / 17〜32 / 65〜128 / 129〜256）× 3 機 = 12 段のうち、シミュレーションは 9 段で採用を予告したが、
-  matmul / bmm のケースが入った実結果の採用は 3 段（M2 17〜32・M5 17〜32・RTX 129〜256）。6 段は既定へ戻り
-  （M2 ≤ 16 / 65〜128 / 129〜256・M5 ≤ 16 / 129〜256・RTX 17〜32）、2 段は幾何が変わった（M2 / M5 の 17〜32 は `reg32x32r2x4w8`）。
-  決定 4 の動機（linear 単独の勝者は matmul / bmm で負ける）の実例。
-- 3 経路を持っていた段（33〜64 / 257〜512 / > 512）は 9 段すべて採否・幾何ともシミュレーションどおり（M2 > 512 の比は再走の観測が加わって
-  ×1.647 → ×1.513）。
-- 未解決に挙げた「×1.05 ぎりぎりの採用」3 件（M5 ≤ 16 ×1.065・M2 129〜256 ×1.054・RTX 17〜32 ×1.072）は、いずれも新ケースで既定へ戻った。
-  境界の採用が新ケース 1 本で消える、という意味で偏りの指摘は当たっていたが、対策（段の中間点の検証ケース）は引き続き未決。
-- `gemmRows` 以外で動いたのは M2 の attention ③PV（`reg32x64r4x8w8` ×1.635 → `reg64x64r4x8w8` ×1.661・再走の観測が幾何平均を動かした）
-  だけ。DiT が使う > 512・①QK・conv2d・i8a8 の採用幾何は 2 表とも不変。RTX は 129〜256 / 257〜512 の 2 段が新たに入り、text 段の
-  cross-attention の k / v 射影（M = 512）と bmm に効く。段 5 の自己 A/B はこの 2 点（M2 の ③PV・RTX の M 512）を見る。
-- M5 の 2 本からの試走（登録しない）は 17〜32 `reg32x32r2x4w8` ×1.246・33〜64 `reg64x32r4x4w8` ×1.538・conv2d rows32 ×1.097 以外すべて既定。
+Of the 12 linear-only buckets (4 × 3 machines), the simulation predicted 9 adoptions; with the new
+matmul / bmm cases only 3 remained, and the three borderline adoptions (M5 ≤ 16 ×1.065, M2 129–256
+×1.054, RTX 17–32 ×1.072) all returned to the default — the motivation of decision 4 in practice.
+Buckets that already had all three ops matched the simulation. Details: research K-70 §15, `c358832b`.

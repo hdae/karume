@@ -1,92 +1,91 @@
-# 0098: 量子化 GEMV の K 並列加算を任意指定する
+# 0098: Opt-in K-parallel summation for quantized GEMV
 
-- Status: accepted（2026-09-13）。runtimeは任意指定を維持し、Gemma通常/QAT E2Bの既定quantに明示する。
-- 関連: [0058](0058-numerics-opt-in-contract.md)、[0082](0082-linear-gemv-decode.md)、[0096](0096-speculative-decoding.md)、[0097](0097-gemma4-qat-integration.md)。
+- Status: accepted (2026-09-13 — opt-in in the runtime, declared by quant presets); partly superseded
+  by [0104](0104-gemma-fast-quant.md) / [0111](0111-session-options-composition.md) /
+  [0109](0109-manifest-v5-container.md) (session fields, manifest; 2026-09-22 to 26) and
+  [0128](0128-default-preset-original-weights.md) decision 1 (E4B default, 2026-10-17); decision 4
+  re-graded 2026-10-18 to SHOULD; decision 5 withdrawn 2026-10-18
+- Related: [0058](0058-numerics-opt-in-contract.md), [0082](0082-linear-gemv-decode.md),
+  [0096](0096-speculative-decoding.md), [0097](0097-gemma4-qat-integration.md).
 
-## 背景
+## Context
 
-逐次 GEMV は 1 出力の K 方向を 1 thread で計算する。Chrome の実測では長い K の待ちが大きく、
-16 byte の圧縮語を複数 lane に配ると改善した。一律適用は遅くなる形があり、実形の掃引とモデル全体の A/B で選別する。
-加算順が変わり、QAT は再量子化境界を通して生成列にも差が出る。既定を黙って変更してはならない。
+Sequential GEMV computes the K direction of one output on one thread. On Chrome long K waited long;
+spreading the 16-byte packed words over lanes helped but slowed some shapes, so shapes are selected by
+sweeps and whole-model A/B. The summation order changes, and for QAT the difference reaches the tokens
+through the re-quantization boundaries. The default MUST NOT change silently.
 
-## 決定
+## Decision
 
-1. `SessionOptions.linearGemvReduce` を追加する。値は `"sequential" | "parallel"`、省略時は `"sequential"`。
-   Gemma 通常/QAT の pipeline は指定を target / drafter の両 Session へ渡す。家族の既定も変更しない。
-2. `parallel` は f32 演算、INT2/INT4/INT8 格納、実測済み形状、物理 M=1..8 に限定する。
-   f16/a8 演算との組合せは未実装として構築時に拒否する。f16/f32 格納や対象外形状は従来経路を使い、診断キーで区別する。
-   M>8 は既存 prefill 経路。M=1 だけの切替は MTP の verify 行0との一致を壊すため採らない。
-3. 128 thread の workgroup 内で、1 出力あたり K の圧縮語を 2/4/16/32 lane に巡回配分する。
-   各 lane は語内の順序・逆量子化の f32 丸めを維持し、最後に固定順の木で部分和を足して bias を一度加える。
-   subgroup・跨 workgroup の同期・f16 の追加丸めは使わない。workgroup 内の全 thread が barrier を通る。
-   通常の誤差帯と参照経路との bit 一致は区別する。同一形状の M=1/4/8 は同じ shader と加算順を使う。
-4. 幾何は実測形状の静的な選択表に限る。GPU 名や実行時計から自動調整しない。
-   キーは `linear_gemv_parallel` と格納・group・lane 数を含み、同一キーの WGSL は byte 同一。
-   dispatch 上限は既存の検査で拒否する。重み・中間バッファの追加確保は無く、共有メモリは 512 byte / workgroup。
-5. CLI と Chrome 比較画面から明示的に試せるようにし、結果へ設定を記録する。
-   QAT の文章差、M2 未検収、対象外形状の扱いを説明する。公開 API は省略可能属性の追加のみで、IR・資産・既存 golden は変更しない。
+1. Add `SessionOptions.linearGemvReduce`: `"sequential" | "parallel"`, default `"sequential"`. The
+   Gemma regular / QAT pipelines pass it to the target and the drafter Session. The family code default
+   stays unchanged (distribution presets declare it — see the adoption section).
+2. `parallel` is limited to f32 compute, INT2 / INT4 / INT8 storage, the selection table's shapes and
+   physical M = 1..8. f16 / a8 compute is not implemented and is refused at construction. f16 / f32
+   storage and other shapes use the previous path, told apart by the diagnostics key; M > 8 uses the
+   prefill path. Switching for M=1 only is not taken: it would break the match with MTP verify row 0.
+3. A 128-thread workgroup spreads the K packed words of one output round-robin over 2 / 4 / 16 / 32
+   lanes. Each lane keeps the in-word order and the f32 rounding of dequantization; a fixed-order tree
+   adds the partial sums and the bias is added once. No subgroups, no cross-workgroup sync, no extra f16
+   rounding; every thread passes the barrier. The tolerance band and bit identity with the reference
+   path are kept distinct. M=1 / 4 / 8 of one shape share shader and summation order.
+4. The geometry SHOULD come from a static selection table of measured shapes; an unmeasured row MAY be
+   added when the table marks it so. No automatic tuning from the GPU name or a run-time clock.
+   (Re-graded 2026-10-18 to SHOULD: measurement serves speed only — correctness is covered for every
+   shape by the FP64 band and the M=1 / 4 / 8 u32 match; 22 unmeasured E4B rows already run, see the
+   2026-09-26 addendum.) The key holds `linear_gemv_parallel`, storage, group and lane count; WGSL of one
+   key is byte-identical. Dispatch limits are refused by the existing checks. No extra weight or
+   intermediate buffers; shared memory is 512 bytes per workgroup.
+5. Withdrawn 2026-10-18: "selectable from the CLI and the Chrome comparison page" — those tools were
+   removed by ADR [0127](0127-node-dawn-toolchain.md) decision 5 (2026-10-16). The public API only gains
+   an optional field; IR, assets and existing goldens are unchanged.
 
-## 検収と段階
+## Acceptance (history)
 
-- 第1段: 隔離実験の速度・FP64参照・固定小規模品質評価・MTP比較を保存する。
-- 第2段: 本カーネルを実装し、実験版との比較、端数列・短いK・scale添字・M1/4/8の一致、A/B誤差帯とcensusを検査する。
-- 第3段: CLI / Chromeの操作を通じて設定とJSONを検査し、既定の `deno task verify` を通す。
-- 第4段: M2で利用者が追試する。既定への昇格や他形状・他モデルへの拡張は、この記録だけでは行わない。
+Stages 1 to 4 (through the maintainer's M2 re-test) were completed by 2026-09-13:
+[acceptance record](../research/2026-09-12-chrome-gemv-parallel.md). Quality is not judged by speed alone.
 
-数値の正本は[調査・検収記録](../research/2026-09-12-chrome-gemv-parallel.md)とそこから辿る保存 JSON。品質の良否を速度だけで判断しない。
+## Adoption in the quant definition (2026-09-13)
 
-## quant定義での採用（2026-09-13）
+Adopted on the maintainer's M2 / Chrome measurements (regular E2B ≈ 25 %, QAT E2B ≈ 18 to 21 % faster,
+TTFT about unchanged), within the delegated speed / quality judgement; not a broad quality guarantee.
+Numbers: [the M2 adoption decision](../research/2026-09-13-m2-gemv-adoption.md).
 
-利用者のM2/Chrome測定で通常E2Bは約25％、QAT E2Bは約18〜21％改善し、TTFTはほぼ不変。
-保存された英語・日本語の出力を読み、問いへの関連性と文の連続性を確認した。通常のA/Bは64 token全一致。
-QATは語句が変わるが、今回の短い出力に崩壊は見られない。RTXの固定64問は45→44正答、NLLは約0.63％増。
-大幅劣化を示す証拠は無く、利用者が委任した速度/品質判断の範囲で採用する。広い品質を保証する判断ではない。
+- The regular / QAT E2B recipes add `i4-gemvpar` (the `i4` weights plus only
+  `session: { linearGemvReduce: "parallel" }`) and made it `defaultQuant`; `i4` and its reference golden
+  are unchanged. (The E2B default later moved to `i4-fast`, ADR 0104; E4B defaults: the 0104 addendum
+  of 2026-09-26 for QAT, ADR 0128 decision 1 for regular E4B.)
+- The hub's `SessionSpec` gains `linearGemvReduce`; unknown values are refused, an empty session is
+  unchanged, an older reader refuses the new key instead of ignoring it (manifest now `karume/5`).
+- `fromPretrained` passes the quant's declaration to target and drafter: explicit option →
+  `quant.session` → runtime reference default (`fromAssets`: explicit only); never by model name,
+  layer count or GPU name.
+- A quant declaring a session field Gemma does not accept is refused before download (acceptance
+  table: `packages/models/src/gemma/session-options.ts`, ADR 0111).
+- Local distributions and published pins are not rewritten; a rebuilt distribution carries the new
+  default without re-quantization. `i4` and explicit `"sequential"` remain for reference.
 
-- 通常/QAT E2Bの配布recipeに `i4-gemvpar` を追加し、`defaultQuant` に指定する。
-  重み写像は従来の `i4` と同じで、`session: { linearGemvReduce: "parallel" }` だけを加える。
-  従来の `i4` の意味と参照goldenは変更しない。E4Bの既定は検証前なので `i4` を維持する。
-- hubの `SessionSpec` に `linearGemvReduce: "sequential" | "parallel"` を追加する。
-  未知値を拒否し、modelsの共通写像も対応する。manifest形式は `karume/4` の省略可能欄の追加で、
-  既存の空sessionは従来どおり。旧readerは新欄を未知キーとして拒否し、黙って無視しない。
-- GemmaのfromPretrainedは選択quantの宣言をtarget/drafterへ渡す。
-  優先順位は呼び手の明示指定 → quant.session → runtimeの参照既定。
-  fromAssetsにはquant選択が無いので明示したオプションのみを使う。モデル名・層数・GPU名で自動選択しない。
-- Gemmaは今回 `linearGemvReduce` だけをquant.sessionから受理する。
-  未実装の他のsession欄を宣言したquantは、重みのダウンロード前に拒否する。値を捨てて続行しない。
-- CLIでquantを選べるようにし、Chrome画面の既定はmanifestの `defaultQuant` に従う。
-  比較時は同じ選択quantに加算方式を明示してA/Bする。結果には選択quantと有効な加算方式を記録する。
-- 既存のローカル配布形・公開pinを自動で書き換えない。recipeから新しい配布形を作ったときに既定が変わる。
-  重み自体の再量子化は不要。参照用 `quant: "i4"` と、実行指定 `linearGemvReduce: "sequential"` を残す。
+## Addendum (2026-09-20) — the parallel family spells multiply-add with explicit `fma()`
 
-数値と採否の根拠は[M2の採用判断](../research/2026-09-13-m2-gemv-adoption.md)。
+Two kernels of one formula (f32 and packed activations) differed in u32 on M2: Metal contracts to fma
+differently per expression shape. The parallel family's multiply-add (f32 / packed × linear→SRQ fusion
+off / on) is fixed to `acc = fma(x, d, acc)`. RTX / Vulkan numbers do not change (540 combinations, 0
+mismatches); on Metal the parallel output changes and the variants align. Sequential GEMV and row blocks
+keep their spelling (subgroup32 aligned on 2026-09-25, ADR 0101 addendum). Details: ADR
+[0105](0105-packed-static-quantize-activations.md) addendum 4 (2026-09-20).
 
-## 追記（2026-09-20）— 並列族の積和は明示 `fma()` で綴る
+## Addendum (2026-09-26) — E4B rows take the lanes of the matching E2B rows (unmeasured)
 
-M2（Metal）で同じ数式の 2 カーネル（f32 と packed 活性）が u32 で割れた件の帰結。Metal のコンパイラは
-式形ごとに fma 縮約の入れ方を変えるため、`acc + x * d` の綴りでは変種同士が揃わない。並列族
-（f32 / packed × linear→SRQ 融合なし / あり）の積和を `acc = fma(x, d, acc)` に固定した。RTX / Vulkan では
-数値不変（掃引 540 組で不一致 0・QAT E2B の生成文が同一）、Metal では並列経路の出力が変更前から変わる
-（変種同士は揃う）。逐次 GEMV・行ブロックは従来の綴りのまま（subgroup32 変種は 2026-09-25 に揃えた — ADR 0101 追記）。経緯と実測は
-[0105 追記 4](0105-packed-static-quantize-activations.md#追記-42026-09-20-追記-3-の撤回と並列-gemv-族の積和を明示-fma-で綴る決定)。
+The selection table (`PARALLEL_SHAPES`, `packages/runtime/src/kernels/linear-gemv.ts`) had no E4B row,
+so `parallel` and what builds on it (ADR 0103, 0105) fell back on every E4B linear.
 
-## 追記（2026-09-26）— E4B の行を E2B の同種行の lanes で足す（未実測）
-
-選択表（`PARALLEL_SHAPES`）は形の allowlist で、E4B の形は 1 行も無かった。このため E4B では
-`linearGemvReduce: "parallel"` と、その上に乗る linear→SRQ 融合（ADR 0103）・packed int8 活性（ADR 0105）が
-全 linear で縮退し、診断キーにしか出ない no-op になっていた。E4B のフラグ単体ベンチはこの表を埋めないと成立しない。
-
-- **決定 4 の「実測形状」の例外として、未実測の行を暫定で置く**。通常 E4B 12 行（i4 g32 11 + i8 lm_head 1）と
-  QAT E4B 10 行（i4 g512 / g2048 / g4096 8 + i8 2）。lanes と `packedActivations` は、E2B の**同じ役割**の行
-  （per_layer_model_projection・q・k/v・o・gate/up・down・per_layer_input_gate・per_layer_projection・lm_head、
-  sliding / full の別も含む）から写した推測。表の各行にその旨を書いた。
-- 形の出所。通常 E4B は配布ミラーが無いので上流 config（hidden 2560・intermediate 10240・kv 2・層 42・PLE 256・
-  double-wide MLP なし）から導いた。QAT E4B は配布ミラーのコンテナ記述子から、linear 344 本の実形・codec・group を読んだ。
-  両者の (n, k) は一致する。
-- 足していない形は 2 つ。QAT E4B の i2 lm_head（262144×2560）は E2B にも行が無い。QAT の f32 per_layer_model_projection
-  は f32 格納なので対象外（perf-ledger K-51）。
-- 数値の門。GPU テストの縮約長 × group に E4B の組を足し、FP64 参照との帯と M=1/4/8 の u32 一致を全 lanes で見る。
-  QAT E4B の製品グラフで各 linear が計画上どのキーへ落ちるかは、census テストが配布ミラーを根に固定する
-  （ミラーが無い機は明示 SKIP）。
-- 速度の採否は未決。E4B の flag-bench で per-key の census と GPU 時間を見て、遅い行は lanes を変えるか行を外す。
-  flag-bench は計測 ON の走行で、どのカーネルキーが走ったかを記録する。基準とキー集合が変わらない set には
-  `noKeyChange` を立てる。E4B の既定 quant は `i4` のまま変えない（ADR 0104）。
+- **As an exception to decision 4, unmeasured rows are added**: regular E4B 12 (i4 g32 11 + i8 lm_head)
+  and QAT E4B 10 (i4 g512 / g2048 / g4096 8 + i8 2). Lanes and `packedActivations` are copied from the
+  E2B row with **the same role** (sliding / full included); each row says so.
+- Shapes: regular E4B from the upstream config, QAT E4B from the mirror's container descriptor.
+  Not added: QAT E4B's i2 lm_head (no E2B row), f32 per_layer_model_projection (perf-ledger K-51).
+- Checks: GPU tests gain the E4B reduction length × group pairs (FP64 band, M=1 / 4 / 8 u32 match);
+  the planned key of each QAT E4B linear is pinned by
+  `packages/e2e/tests/e2e_gemma4_qat_parallel_gemv_plan_test.ts` (explicit SKIP without the mirror).
+- Speed adoption is open (per-key census and GPU time decide lanes or removal; the flag-bench named
+  for it went with the Deno tools, ADR 0127 decision 5).

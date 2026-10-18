@@ -1,60 +1,70 @@
-# 0100: RMS正規化の32レーンsubgroup縮約を明示指定で追加する
+# 0100: Opt-in 32-lane subgroup reduction for RMS normalization
 
-- Status: accepted（2026-09-13）。任意経路として提供。M2の利得が小さいため既定quantへの採用は見送り。
-- 関連: [0017](0017-rms-norm-conv2d-clamp-min.md)、[0058](0058-numerics-opt-in-contract.md)、[0099](0099-rms-norm-add-fusion.md)。
+- Status: accepted (2026-09-13; opt-in, not in a default preset); partly superseded by
+  [0127](0127-node-dawn-toolchain.md) / [0129](0129-test-layout-and-lanes.md) (2026-10-16: Node +
+  Dawn supports subgroups — decision 5's Deno / Chrome scope and the Deno SKIP) and by
+  [0128](0128-default-preset-original-weights.md) decision 2 C1 (2026-10-17: now the reason it stays
+  out of default presets); on 2026-10-18 decision 6 (the comparison page) was withdrawn
+- Date: 2026-09-13
+- Related: [0017](0017-rms-norm-conv2d-clamp-min.md), [0058](0058-numerics-opt-in-contract.md),
+  [0099](0099-rms-norm-add-fusion.md)
 
-## 背景と代替案
+## Context and alternatives
 
-RMSの元の256部分和と加算木を保持して128/64スレッドへ配る候補は遅くなった。
-vec2/vec4化は幅に依存し、元の木をsubgroupShuffleXorで保つ案もモデル全体の改善は小さい。
-subgroupAddで部分和を計算するスカラー案はQAT E2Bで全体の利得があり、小規模の品質評価に大幅な劣化を認めなかった。
-加算順が変わるので元のキーの実装へ差し替えず、利用者が承認した任意指定の方針に従う。
-数値の正本は[調査記録](../research/2026-09-13-rms-subgroup-reduction.md)。
+Rejected on 2026-09-13: spreading the 256 partial sums over 128 / 64 threads (slower), vec2 / vec4
+loads (width-dependent), the original tree via `subgroupShuffleXor` (little end-to-end gain). Scalar
+`subgroupAdd` partial sums gained end to end on QAT E2B with no large quality loss in a small
+evaluation. The summation order changes, so it does not replace the original key; it follows the
+approved opt-in policy (ADR 0058). Numbers: [research](../research/2026-09-13-rms-subgroup-reduction.md).
 
-## 決定
+## Decision
 
-1. `AcquireGpuOptions.subgroups?: boolean`を追加する。省略・falseでは新機能を要求しない。
-   trueはWebGPUの`subgroups`・`subgroup-size-control`とWGSLの`subgroup_id`を必須とし、不足を拒否する。
-   さらに32レーン×8グループで既知解を全256レーンへ返すカーネルを実走する。
-   必要な機能の列挙だけを動作証明にせず、生成・実行・読み戻しの失敗やdevice消失を例外にする。
-   能力の取得自体は推論の加算方式を切り替えない。
-2. `SessionOptions.rmsNormReduce?: "workgroup" | "subgroup32"`と型`RmsNormReduce`を追加する。
-   既定はworkgroup。不正な値と必要なdevice機能の不足は重み転送前に拒否する。
-   subgroup32は幅128を超えるf32 RMSと、`fuseRmsNormAdd: true`で既に適格なRMS→addに適用する。
-   幅128以下は従来版。融合のshape・使用数・公開値・引数順の条件は変えない。
-3. 新カーネルは256スレッド、`@subgroup_size(32)`。各スレッドの入力走査は従来と同じ。
-   subgroupAddの8部分和を共有メモリへ書き、同期後、各グループが同じ8値を読んで合計する。
-   subgroup IDとlocal IDの配置の対応は仮定しない。全レーンが縮約へ参加する。
-   行のgrid-strideと、共有部分和の読み終わりを揃える同期を維持する。
-   RMS→addの整数丸め障壁と引数順も維持する。元のRMSキー・WGSLは変更しない。
-4. 加算順の変化による下位bit・生成列の変化を許す別経路である。
-   参照golden・SHA・許容誤差は変更しない。同じ設定のM=1/4/8の先頭行は検査するが、
-   それだけで実モデルの投機生成全体を検収済みとはしない。
-5. Gemma通常/QATのpipelineへ`rmsNormReduce`を渡せるようにする。
-   GPUを内部取得する場合はsubgroup32指定時だけ必要な能力を要求し、渡されたGPUはSessionの門で検査する。
-   target/drafterへ同じ設定を渡す。quantの保存語彙・配布重み・既定・公開revisionは変更しない。
-   Deno 2.9.6では必要な機能が未提供で、共通の既定quantに指定すると既存利用者が起動できなくなる。
-   M2の速度・品質も未検収なので、今はChromeで明示指定する範囲に留める。
-6. 比較画面はQATのみ、並列GEMV・細分化chunk64・RMS→add融合・投入上限768を共通条件とする。
-   初期選択をworkgroup→subgroup32→subgroup32→workgroupの4設定・40生成にする。
-   通常版・参照経路・前回の3設定往復も残す。選んだ縮約方式と有効なGPU機能を保存する。
+1. Add `AcquireGpuOptions.subgroups?: boolean`; omitted or false requests nothing new. True requires
+   the features `subgroups` and `subgroup-size-control` and the WGSL language feature `subgroup_id`,
+   and rejects their absence. It also runs a kernel that returns a known answer to all 256 lanes
+   (32 lanes × 8 subgroups): the feature list is not proof that it works, and failures to create,
+   run or read back, and device loss, raise. Acquiring it does not switch the inference summation.
+2. Add `SessionOptions.rmsNormReduce?: "workgroup" | "subgroup32"` and the type `RmsNormReduce`,
+   default `workgroup`. Invalid values and missing device features are rejected before the weights
+   are uploaded. `subgroup32` applies to f32 RMS wider than 128 and to RMS → add pairs already
+   eligible under `fuseRmsNormAdd: true`; widths up to 128 keep the existing kernel. The fusion
+   conditions (shape, use count, public values, argument order) do not change.
+3. The new kernel: 256 threads, `@subgroup_size(32)`, the same input scan per thread. The 8
+   `subgroupAdd` partial sums go to shared memory; after a barrier each subgroup reads the same 8
+   values and adds them. No mapping between subgroup ID and local ID is assumed; every lane takes
+   part. The row grid-stride, the barrier after all reads of the shared sums, the integer
+   rounding barrier and the argument order of RMS → add stay. The original RMS key and WGSL stay.
+4. A separate path that accepts changes in low-order bits and generated sequences. Reference
+   goldens, SHA values and tolerances do not change. The first rows for M = 1 / 4 / 8 are checked,
+   but that alone does not accept whole speculative generation of a real model.
+5. The regular and QAT Gemma pipelines accept `rmsNormReduce`; when they acquire the GPU they request
+   the capability only for `subgroup32`, and a GPU passed in is checked at Session construction.
+   Target and drafter get the same setting. The quant storage vocabulary, distributed weights,
+   defaults and published revisions do not change. Deno 2.9.6 lacked the features, a shared default
+   with this option would have kept users from starting, and M2 was unchecked, so the option was
+   limited to explicit use on Chrome. (Superseded by ADR 0128 decision 2 C1 on 2026-10-17 together
+   with the M2 measurement below: it stays out of default presets because a default preset runs on
+   baseline WebGPU, and M2 gained 0.52%. Node + Dawn (ADR 0127) provides the features.)
+6. Withdrawn 2026-10-18: the Chrome comparison page settings (not ported — ADR 0127 decision 5).
 
-## 仕様と検収
+## Specification and acceptance
 
-[subgroupAdd](https://www.w3.org/TR/WGSL/#subgroupadd-builtin)と
-[WGSL仕様](https://www.w3.org/TR/WGSL/)のsubgroup_size属性・subgroup_idの条件に従う。
-固定32レーンを要求する実測案を採用し、未計測の可変サイズ案を代わりに実行しない。
-外部実装のソースコードは複製していない。
+Follows [subgroupAdd](https://www.w3.org/TR/WGSL/#subgroupadd-builtin) and the `subgroup_size` /
+`subgroup_id` conditions of the [WGSL specification](https://www.w3.org/TR/WGSL/). The measured fixed
+32-lane design is adopted; an unmeasured variable-size design is not run in its place. No external
+source code is copied.
 
-- 参照WGSLの既存snapshot、3種類の新WGSLの別snapshot、融合キーの分離。
-- 必要な機能・不正値・沈黙した全0・一部レーンの誤値・device消失の検査。
-- CPU参照との既存許容帯、端数幅、行数1/4/8/19、強制grid-stride、融合の両引数順と後続入力の寿命。
-- Chromeで実モデルの生成速度・固定入力列の帰属実験・固定品質評価。
-- Denoの全体verifyでは新機能の実走だけを明示SKIPする。Chromeで同じ数値検査を実走する。
-- M2の追試後に対象モデルと提供範囲を判断する。未計測のE4B・長文・投機へ既定適用しない。
+- Snapshots: the existing reference WGSL, the three new WGSL texts, keys separate from fusion keys.
+- Missing features, invalid values, a silent all-zero result, wrong lanes and device loss.
+- CPU-reference tolerance, odd widths, 1 / 4 / 8 / 19 rows, forced grid-stride, both fusion
+  argument orders and the later input's lifetime; real-model speed and quality runs (2026-09-13).
+- Deno skipped the new feature and Chrome ran the same checks. (Superseded by ADR 0127 decision 1 /
+  ADR 0129 on 2026-10-16: `packages/runtime/tests/gpu_rms_norm_subgroup_test.ts` skips by adapter
+  features and runs on Node + Dawn.)
+- Target models and scope are decided after the M2 check; not applied by default to unmeasured E4B,
+  long contexts or speculative decoding.
 
-## M2追試後の判断（2026-09-13）
+## Addendum (2026-09-13) — after the M2 check
 
-[M2の40生成](../research/2026-09-13-gemv-subgroup.md)は方式内の反復一致を保ち、decodeは34.899→35.081 tok/sだった。
-約0.52%の差は反復の幅と重なり、TTFTもほぼ同じ。任意指定は残すが、M2向けの既定へ昇格しない。
-比較画面の初期選択は次のGEMV候補（ADR 0101）へ移し、RMSのABBAは選択肢として維持する。
+Not promoted for M2: decode 34.899 → 35.081 tok/s (about 0.52%, inside the repeat spread), same TTFT;
+the option stays. Data: [M2 40 generations](../research/2026-09-13-gemv-subgroup.md).

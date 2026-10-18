@@ -1,69 +1,93 @@
-# 0115: GEMM 幾何の選択を「shape × adapter の静的な表（プロファイル）」へ広げる
+# 0115: GEMM geometry selection becomes a static shape × adapter table (geometry profiles)
 
-- Status: accepted（利用者裁定 2026-09-27。M2 の quick 掃引で、勝つ幾何が GPU によって逆転した — 下の Context）
+- Status: accepted (2026-09-27 — the maintainer's ruling after the M2 quick sweep showed the winning
+  geometry reversing between GPUs); partly superseded: decision 2's selection order by addendum
+  decision 7 (2026-09-30); decision 4's input check by [0117](0117-app-geometry-tuning.md) decision 3
+  (2026-10-01), its three-bucket boundaries by [0116](0116-geometry-profile-row-buckets.md)
+  decisions 1 / 3 (2026-10-01) and its disregard of drift by addendum decision 8 (2026-09-30);
+  decision 8's "no entry point for users" by addendum decision 6 (2026-09-29) and 0117 decision 6
+  (2026-10-01); the `tools/gpu-lab` tool of addendum 7 by [0127](0127-node-dawn-toolchain.md)
+  decision 5 (2026-10-16); the Consequences' deferral of "drop a8 from the default quant on Metal" is
+  taken up by [0128](0128-default-preset-original-weights.md) decision 5 (proposed 2026-10-16), which
+  settles it once accepted. Re-graded 2026-10-18: decision 4's regeneration command and `--check`
+  to SHOULD.
 - Date: 2026-09-27
-- 関連: ADR [0022](0022-gemm-register-blocking.md)（GEMM 骨格・決定 3 の MUST「縮約順は数値契約」・追記の MUST
-  「実行時オートチューン禁止」「既定変更は門の再実測とセット」「バックエンド別の静的既定は明確な退行が出た場合に検討する」）/
-  [0023](0023-fused-attention.md)（融合 attention ①QK・③PV）/ [0024](0024-conv2d-implicit-gemm.md)（conv の implicit GEMM）/
-  [0060](0060-row-block-attention.md)（行ブロック実行の分解 attention）/ [0067](0067-autoregressive-attention-vocabulary.md)（states 形 attention）/
-  [0106](0106-device-keyed-references.md)（sha256 参照値を環境キーごとの行で持つ）/
-  [0058](0058-numerics-opt-in-contract.md)（i8a8 attention の変種を実走カナリアで決める）/ perf-ledger K-70・K-71・K-67・K-22。
-  調査の正本は [research 2026-09-27 K-70](../research/2026-09-27-k70-metal-per-op.md) §5〜§10。
-  実装 = `packages/runtime/src/kernels/geometry-profile.ts`（型・既定プロファイル・選択の純関数）・
-  `packages/runtime/src/kernels/geometry-profiles/`（生成されたプロファイルと一覧 `BUILTIN_GEOMETRY_PROFILES`）。
-  前提の部品 = codegen 入口の明示幾何（`9947568c`）・掃引道具 `tools/geometry-sweep`（`c562c7ae`・形式 `karume-geometry-sweep/2`）。
+- Related: [0022](0022-gemm-register-blocking.md) (GEMM skeleton; decision 3's MUST "the reduction
+  order is a numerical contract"; the addendum's MUSTs "no run-time autotuning" and "a change of the
+  default geometry goes together with re-running the sha256 checks", and its rule that per-backend
+  static defaults are considered only after a clear measured regression) /
+  [0023](0023-fused-attention.md) (fused attention ①QK / ③PV) / [0024](0024-conv2d-implicit-gemm.md)
+  (conv implicit GEMM) / [0060](0060-row-block-attention.md) (decomposed attention in row blocks) /
+  [0067](0067-autoregressive-attention-vocabulary.md) (states-shaped attention) /
+  [0106](0106-device-keyed-references.md) (sha256 reference values per environment key) /
+  [0058](0058-numerics-opt-in-contract.md) (the i8a8 attention variant is chosen by a run-time
+  canary) / perf-ledger K-70, K-71, K-67, K-22. Research:
+  [research 2026-09-27 K-70](../research/2026-09-27-k70-metal-per-op.md) §5–§10.
+- Implementation: `packages/runtime/src/kernels/geometry-profile.ts` (types, default profile, pure
+  selection functions) and `packages/runtime/src/kernels/geometry-profiles/` (generated profiles and
+  the list `BUILTIN_GEOMETRY_PROFILES`); the sweep and the generator live in
+  `packages/runtime/src/tune/` (ADR 0117).
 
 ## Context
 
-Apple M2（Chrome 153 / Metal）で anima の DiT が Arc B570 の 10〜30 倍遅い。per-op 実測（research §4〜§6）で、
-遅さは一様ではなかった:
+On Apple M2 (Chrome 153 / Metal) the anima DiT ran 10 to 30 times slower than on Arc B570. Per-op
+measurements (research §4–§6) showed the slowdown was not uniform:
 
-| 群                                                   | M2 / B570 の比 | 公称比（演算 3.2〜4.0 倍・帯域 3.8 倍）を超える倍率 |
-| ---------------------------------------------------- | -------------: | --------------------------------------------------: |
-| 帯域律速の小カーネル（quantize_rows・rms_norm ほか） |       3.6〜4.7 |                                            0.9〜1.2 |
-| f32 中タイル linear（`reg64x32`）                    |            4.4 |                                            1.1〜1.4 |
-| f32 大タイル linear（`reg128x128`）                  |           10.2 |                                            2.6〜3.2 |
-| f32 attention ①QK / ③PV（大タイル）                  |     13.5 / 9.8 |                                            2.4〜4.2 |
-| f32 conv2d implicit GEMM（VAE）                      |       6.0〜8.8 |                                            1.5〜2.8 |
-| i8a8 linear / attention（dp4a）                      |     25.0〜33.8 |                                           6.3〜10.6 |
+| Group                                                      |  M2 / B570 | Excess over the nominal ratio (compute 3.2–4.0×, bandwidth 3.8×) |
+| ---------------------------------------------------------- | ---------: | ---------------------------------------------------------------: |
+| Bandwidth-bound small kernels (quantize_rows, rms_norm, …) |    3.6–4.7 |                                                          0.9–1.2 |
+| f32 mid-tile linear (`reg64x32`)                           |        4.4 |                                                          1.1–1.4 |
+| f32 large-tile linear (`reg128x128`)                       |       10.2 |                                                          2.6–3.2 |
+| f32 attention ①QK / ③PV (large tile)                       | 13.5 / 9.8 |                                                          2.4–4.2 |
+| f32 conv2d implicit GEMM (VAE)                             |    6.0–8.8 |                                                          1.5–2.8 |
+| i8a8 linear / attention (dp4a)                             |  25.0–33.8 |                                                         6.3–10.6 |
 
-同じ f32 GEMM でも中タイルは公称比どおりで、大タイル（128×128・1 スレッド 64 累積・256 スレッド）だけが外れる。
-実行系の差（Dawn / Metal 対 wgpu / Vulkan）が全 key に一様に効くなら中タイルも同じだけ超過するはずなので、
-**主因は大タイルの幾何が M2 に合わないこと**と帰属した（research §6）。i8a8 は別の原因（Tint が `dot4I8Packed` を
-展開する）で、幾何を直しても残る。
+Among f32 GEMMs the mid tile matched the nominal ratio and only the large tile (128×128, 64
+accumulators per thread, 256 threads) fell off. A runtime difference (Dawn / Metal vs wgpu / Vulkan)
+would hit every key alike, so **the main cause is that the large-tile geometry does not suit the M2**
+(research §6). i8a8 has a separate cause (Tint expands `dot4I8Packed`) that geometry does not fix.
 
-`tools/geometry-sweep` の quick 掃引（同じ shape で幾何だけを変えて GPU timestamp で測る）を M2 で回した結果
-（research §9・op 5 族・33 ケース・177 行）:
+A quick sweep on the M2 (same shape, only the geometry varied, timed with GPU timestamps; research
+§9, five op families, 33 cases, 177 rows):
 
-| op                      | M2 の最良幾何               | M2 の対既定 | 同じ幾何の B570 の対既定 |
-| ----------------------- | --------------------------- | ----------: | -----------------------: |
-| f32 linear（M ≥ 1024）  | `reg64x32r4x4w8`            | ×1.58〜1.60 |              ×0.72〜0.98 |
-| f32 attention ①QK       | `reg64x32r4x4w8`            | ×1.55〜1.60 |                 （未測） |
-| f32 attention ③PV       | `reg64x64r8x4w16`           | ×1.66〜1.67 |                 （未測） |
-| f32 conv2d              | `igemm64x64`（wg16x8 / 16） | ×1.37〜1.48 |                 （未測） |
-| i8a8 linear / attention | `tile64x64r8x4w16x8k16`     | ×1.06〜1.13 |              ×0.64〜0.84 |
+| op                      | Best on M2                 | M2 vs default | Same geometry on B570 |
+| ----------------------- | -------------------------- | ------------: | --------------------: |
+| f32 linear (M ≥ 1024)   | `reg64x32r4x4w8`           |    ×1.58–1.60 |            ×0.72–0.98 |
+| f32 attention ①QK       | `reg64x32r4x4w8`           |    ×1.55–1.60 |        (not measured) |
+| f32 attention ③PV       | `reg64x64r8x4w16`          |    ×1.66–1.67 |        (not measured) |
+| f32 conv2d              | `igemm64x64` (wg16x8 / 16) |    ×1.37–1.48 |        (not measured) |
+| i8a8 linear / attention | `tile64x64r8x4w16x8k16`    |    ×1.06–1.13 |            ×0.64–0.84 |
 
-- **勝つ幾何が GPU によって逆転する**。B570 では大 M の f32 / i8a8 linear は既定が最速だった。
-- **幾何間の出力 sha256 は全 177 行で既定と一致**（B570 の quick も全 77 行で一致）。f32 も i8a8 も幾何でビットは
-  動かない。f32 の一致は理論保証ではなく実測命題（ADR 0022 追記）で、M2 がそのデータ点に加わった。
-- 既定の再測定（ケースの最後に既定を測り直した比）は全ケース 0.99〜1.01 で、機の揺れは比の読みに効いていない。
+- **The winning geometry reverses between GPUs.** On B570 the default was fastest for large-M f32
+  and i8a8 linear.
+- **Output sha256 matched the default on all 177 rows** (and on all 77 rows of the B570 quick
+  sweep): geometry does not move bits for f32 or i8a8. For f32 this is an empirical claim, not a
+  theorem (ADR 0022 addendum); the M2 joins its data points.
+- The default re-measured at the end of each case stayed within 0.99–1.01, so machine drift did
+  not affect the ratios.
 
-ADR 0022 は「既定はバックエンド共通の 1 本（2026-08-10 裁定）。バックエンド別の静的既定は、実測で明確な退行が
-出た場合にのみ検討する（その場合も実行時オートチューン禁止は不変）」と書いていた。上の表がその条件に当たる:
-共通の既定は M2 で 1.4〜1.7 倍を取り逃し、M2 向けの幾何は B570 で退行する。1 本の既定ではどちらかが負ける。
+ADR 0022 allowed per-backend static defaults only after a clear measured regression, with the ban
+on run-time autotuning unchanged. The table meets that condition: the common default leaves 1.4 to
+1.7× unused on the M2, and the M2 geometry regresses on B570. One default loses on one of them.
 
 ## Decision
 
-### 1. プロファイル = op × バケットの静的な表
+### 1. A profile is a static table of op × bucket
 
-幾何の選択を「shape の純関数」から「shape × プロファイルの純関数」へ広げる。プロファイルは次の型を持つ純データで、
-`packages/runtime/src/kernels/geometry-profile.ts` に置く（副作用なし）:
+Geometry selection widens from a pure function of shape to a pure function of shape × profile. A
+profile is plain data, defined in `packages/runtime/src/kernels/geometry-profile.ts` (no side
+effects). Current type, abridged (`match.description` came with addendum decision 7 and the
+structured `provenance` with ADR 0117 decision 4 — geometry-profile.ts:56):
 
 ```ts
 export type GemmRowsRule = { readonly maxRows: number; readonly geometry: GemmGeometry };
 export type GeometryProfile = {
   readonly id: string;
-  readonly match: { readonly vendor?: string; readonly architecture?: string };
+  readonly match?: {
+    readonly vendor?: string;
+    readonly architecture?: string;
+    readonly description?: string;
+  };
   readonly gemmRows: readonly GemmRowsRule[];
   readonly attention: { readonly qk: GemmGeometry; readonly pv: GemmGeometry };
   readonly conv2d: { readonly rows64: GemmGeometry; readonly rows32: GemmGeometry };
@@ -72,505 +96,399 @@ export type GeometryProfile = {
     readonly attentionQk: I8a8Geometry;
     readonly attentionPv: I8a8Geometry;
   };
-  readonly provenance?: {
-    readonly sweep: string;
-    readonly sha256: string;
-    readonly date: string;
-    readonly adapter: string;
-  };
+  readonly provenance?: {/* sweep records, sha256, dates, adapter, kernels, caseSet, … */};
 };
 ```
 
-- `id` はプロファイルの名前で、生成物のファイル名と一致させる（既定 = `"default"`・M2 = `"apple-metal-3"`）。
-- `gemmRows` は行数バケットの表。`rows <= maxRows` で最初に当たる規則を使う。`maxRows` は昇順で、最後の規則は
-  `Number.POSITIVE_INFINITY`。引くのは `gemmRowsGeometry(profile, rows)` の 1 箇所。
-- `conv2d` の `rows64` / `rows32` は、implicit GEMM の m タイルのクラス（`conv2dIgemmMTile` が返す 64 行 / 32 行）ごとの
-  幾何。**クラスを決めるのは今までどおり述語 `conv2dIgemmMTile`**で、実際のタイル辺を決めるのは幾何
-  （`gemmTileM` / `gemmTileN` — 実タイル辺の正本は幾何という gemm-geometry.ts の MUST）。したがって 32 行クラスに
-  tileM が 32 でない幾何を割り当ててもよい（`apple-metal-3` は Cout = 96 の 32 行クラスに tileM = 128 の
-  `igemm128x64:wg16x16` を当てる）。
-- 格納 dtype（f32 / f16 / i8 重み）は区別しない。今の既定の表も区別していない。
-- `provenance` は掃引から生成したプロファイルだけが持つ（決定 4）。
+- `id` names the profile and matches the generated file name (default = `"default"`, M2 =
+  `"apple-metal-3"`).
+- `gemmRows` is the row-count bucket table: the first rule with `rows <= maxRows` applies; `maxRows`
+  ascends and the last rule is `Number.POSITIVE_INFINITY`. It is read in one place,
+  `gemmRowsGeometry(profile, rows)`.
+- `conv2d.rows64` / `rows32` give the geometry per m-tile class of the implicit GEMM (64 or 32 rows,
+  as returned by `conv2dIgemmMTile`). **The class is still decided by the predicate
+  `conv2dIgemmMTile`**; the actual tile edges come from the geometry (`gemmTileM` / `gemmTileN` —
+  the gemm-geometry.ts MUST that the geometry is the source of truth for tile edges). A 32-row class
+  may therefore get a geometry whose tileM is not 32 (`apple-metal-3` gives the Cout = 96 class
+  `igemm128x64:wg16x16`, tileM = 128).
+- The storage dtype (f32 / f16 / i8 weights) is not distinguished, as in the default table.
+- Only profiles generated from a sweep carry `provenance` (decision 4).
 
-### 2. 選択 = adapter の (vendor, architecture) から決定的な順で 1 本
+### 2. Selection: one profile per adapter, in a deterministic order
 
-`selectGeometryProfile(adapter, profiles = BUILTIN_GEOMETRY_PROFILES)` がプラン時に 1 回選ぶ。入力は
-`GpuContext.adapterInfo` の `vendor` / `architecture`（文字列の完全一致で比べる — 正規化も前方一致もしない）。
+(Superseded by addendum decision 7 on 2026-09-30: matching also uses `description`, and a table
+without `match` is injection-only.) `selectGeometryProfile(adapter, profiles =
+BUILTIN_GEOMETRY_PROFILES)` picks once at plan time from the `vendor` / `architecture` of
+`GpuContext.adapterInfo`, by exact string comparison (no normalisation, no prefix match):
 
-1. `match` の vendor と architecture が両方とも一致するプロファイル。
-2. 1 が無ければ、`match.architecture` が未指定で vendor だけが一致するプロファイル。
-3. どちらも無ければ `DEFAULT_GEOMETRY_PROFILE`。
+1. the profile whose `match` vendor and architecture both match;
+2. otherwise a profile with `match.architecture` unset and the vendor matching;
+3. otherwise `DEFAULT_GEOMETRY_PROFILE`.
 
-同じ順位に 2 本以上が当たったら `CodegenError` で落とす（fail loudly）。一覧の並び順で黙って 1 本を選ぶと、
-一覧の編集だけで選択が変わる。
+Two profiles at the same rank fail loudly with `CodegenError`; picking by list order would let an
+edit of the list change the selection.
 
-**類似度（GPU 名の近さ・コア数などで最近傍を選ぶ）は使わない。** 選ばれるプロファイルが機ごとに揺れると、
-環境キーごとの sha256 参照値の行（ADR 0106）と「その機がどの幾何で走ったか」の対応が取れなくなる。完全一致なら、
-環境キーを作るのと同じ `adapterInfo` から選択が一意に決まる。
+**No similarity matching** (nearest GPU name, core count, …). If the chosen profile varied from
+machine to machine, the per-environment-key sha256 rows (ADR 0106) could no longer be tied to the
+geometry the machine ran. With exact matching, the selection follows from the same `adapterInfo`
+that builds the environment key.
 
-### 3. 埋め込み = 生成された TS モジュールを commit する
+### 3. Embedding: generated TS modules are committed
 
-プロファイルは `packages/runtime/src/kernels/geometry-profiles/<id>.ts` の `export const <ID_UPPER>: GeometryProfile`
-として置き、`geometry-profiles/index.ts` の `BUILTIN_GEOMETRY_PROFILES`（既定を含まない生成物の一覧）に並べる。
+A profile lives in `packages/runtime/src/kernels/geometry-profiles/<id>.ts` as
+`export const <ID_UPPER>: GeometryProfile` and is listed in `BUILTIN_GEOMETRY_PROFILES` of
+`geometry-profiles/index.ts` (the generated profiles, without the default).
 
-- **実行時に外部から読まない**（JSON の fetch・環境変数・ファイル読み込みをしない）。ランタイム依存は Web 標準 API
-  だけという不変条件と、barrel の tree-shaking（副作用ゼロ）をそのまま保つ。
-- 生成物はモジュールの top-level で登録処理をしない（定数の export だけ）。一覧は `index.ts` の配列リテラル 1 本。
+- **Nothing is read from outside at run time** (no JSON fetch, environment variable or file read).
+  This keeps the Web-standard-only runtime dependency rule and barrel tree-shaking (no side effects).
+- Generated modules do no registration at top level (constant exports only). The list is a single
+  array in `index.ts`.
 
-### 4. 生成規則 = 掃引 JSON から、確かに速い幾何だけを規則にする
+### 4. Generation: only geometries that are reliably faster become rules
 
-生成器（`tools/geometry-sweep` の `main.ts profile`）は `karume-geometry-sweep/2` の掃引 JSON を 1 本以上
-（`--from` を繰り返す）受け、合成してプロファイル 1 本を作る。
+The generator (now `deriveGeometryProfile` in `packages/runtime/src/tune/derive.ts`, ADR 0117) takes
+one or more `karume-geometry-sweep/2` records and combines them into one profile.
 
-- **入力の門**: GPU timestamp で測った掃引だけを受ける（`gpuTiming.unit` が `ns` または `deno-raw-tick`、かつ
-  `quantized` が false）。`gpuTiming` が欠けた掃引と壁時計（`wall`）の掃引は拒む。壁時計や 100 µs 丸めの掃引は
-  比が 1 へ縮むので、生成を止める（fail loudly）。
-  > 2026-10-01 改定（ADR [0117](0117-app-geometry-tuning.md)）: 量子化フラグでの一律拒否をやめ、観測ごとの丸め誤差の上界（比で 1% 以下）で
-  > 判定する。超えた観測はその掃引の比の材料から外す。壁時計だけの記録と `gpuTiming` の無い記録は引き続き拒む。
-- **合成**: 全ての掃引の adapter が同じであること（違えば落とす）。同じ sha256 の JSON を 2 度渡しても落とす。
-  同じ (ケース, 幾何) を複数の掃引が測っていれば、比はその観測の幾何平均にする。出力の一致と失敗は全観測で見る。
-- **既定の行の突合**: 掃引の既定の行（`isDefault`）の幾何が、今の runtime の既定（欄ごとの fallback — 決定 5 の表）と
-  違えば落とす。比は既定の行に対する比なので、土台がずれた掃引では「既定より速い」が今の runtime で成り立たない。
-- **候補**: `error` が無く、`identicalToDefault` が true の幾何だけ。1 度でも出力不一致か失敗した幾何は候補にしない。
-  出力 sha が既定と違う幾何は、どれだけ速くても候補にしない（f32 の縮約順は数値契約 — ADR 0022 決定 3）。
-- **採る条件**: プロファイルの 1 欄（`gemmRows` の 1 バケット・`attention.qk` など）に入る掃引ケースの**全部**で
-  `speedupVsDefault >= 1.05`（既定より 5% 以上速い）。条件を満たす幾何のうち、そのケース群での幾何平均が最大の
-  1 本を採る。幾何平均が同値なら幾何名の辞書順で先の 1 本（生成の決定性のため）。
-- **満たさなければ既定のまま**。欄に入る掃引ケースが 1 本も無い場合も既定のまま（測っていない区間を補間しない —
-  ADR 0022 追記の MUST と同じ規律）。
-- 掃引中の揺れ（各ケースの末尾で既定を測り直した比 `defaultRepeat.driftRatio`）は、生成器は見ない。
-  > 2026-09-30 改定（追記決定 8）: 再測定比が 0.9〜1.1 の外か、再測定が失敗 / 無いケースは、その掃引の比の材料から外す。
-- `gemmRows` のバケット境界は `gemm-geometry.ts` の `GEMM_ROWS_BUCKETS`（既定プロファイルと同じ 64 / 512 / ∞）から導く。
-  3 段でなければ生成を止める。境界そのものを掃引から作ることはしない。
-  > 2026-10-01 改定（ADR [0116](0116-geometry-profile-row-buckets.md)）: 境界は固定の 7 段 `[16, 32, 64, 128, 256, 512, ∞]`
-  > （掃引ケースの M ≤ 512 の集合と一致 MUST・既定の境界 64 / 512 を含む細分 MUST）。段ごとの fallback はその範囲を覆う既定の段の幾何。
-  > 既定の表 `GEMM_ROWS_BUCKETS` は 3 段のまま。
-- 生成物は `provenance`（掃引 JSON の path・その sha256・掃引日・adapter の vendor / architecture / description）を
-  **欄とファイル冒頭のコメントの両方**に持つ。どの実測から来た値かを、ソースだけから辿れるようにするため。
-  複数の掃引から作ったときは、`sweep` / `sha256` / `date` をそれぞれ `--from` の順に `", "` で連結する。
-  `--from` の順序を変えると生成物が変わるので、`--check`（再生成とバイト同一かだけを見る）は不一致になる。
-  再生成のコマンドは生成物の冒頭コメントに書く。
+- **Input check** (superseded by ADR 0117 decision 3 on 2026-10-01: each observation is judged by an
+  upper bound on its rounding error, at most 1% of the ratio, instead of rejecting every record
+  flagged `quantized`). Only GPU-timestamp sweeps are accepted (`gpuTiming.unit` `ns` or
+  `deno-raw-tick` — `packages/runtime/src/tune/sweep.ts:138`); records without `gpuTiming` and
+  wall-clock records are rejected (unchanged).
+- **Combination**: all records come from the same adapter (otherwise generation stops), and the
+  same record (same sha256) given twice also stops it. When several records measure the same
+  (case, geometry), the ratio is the geometric mean of the observations; output match and failures
+  are checked over all observations.
+- **Default row check**: if a record's default row (`isDefault`) differs from the current runtime
+  default (the per-field fallback of decision 5), generation stops. Ratios are relative to the
+  default row, so a record on a shifted base cannot show "faster than the default" for the current
+  runtime.
+- **Candidates**: only geometries without `error` and with `identicalToDefault` true. A geometry with
+  even one output mismatch or failure is not a candidate. A geometry whose output sha differs from
+  the default is never a candidate, however fast (the f32 reduction order is a numerical contract —
+  ADR 0022 decision 3).
+- **Adoption**: a geometry is adopted for a profile field (one `gemmRows` bucket, `attention.qk`, …)
+  only if `speedupVsDefault >= 1.05` on **every** sweep case of that field. Among those, the one with
+  the largest geometric mean over the field's cases wins; ties go to the lexicographically first
+  geometry name (deterministic output).
+- **Otherwise the field keeps the default**, including when the field has no sweep case
+  (unmeasured ranges are not interpolated — the same discipline as the ADR 0022 addendum MUST).
+- Drift during the sweep (`defaultRepeat.driftRatio`) is not read by the generator (superseded by
+  addendum decision 8 on 2026-09-30: cases whose re-measured default ratio is outside 0.9–1.1, or
+  whose re-measurement failed or is missing, are dropped from that record's ratios).
+- `gemmRows` bucket boundaries come from `GEMM_ROWS_BUCKETS` in `gemm-geometry.ts` (64 / 512 / ∞);
+  generation stops on anything other than three buckets, and boundaries are never built from a
+  sweep (superseded by ADR 0116 decisions 1 / 3 on 2026-10-01: a fixed set of seven boundaries,
+  `PROFILE_GEMM_ROWS_BOUNDS`, that MUST refine the default boundaries; still not derived from the
+  sweep input; the default table `GEMM_ROWS_BUCKETS` keeps three buckets).
+- A generated profile records its `provenance` (sweep record paths, their sha256, sweep dates,
+  adapter) **both in the field and in the file's header comment**, so the measurement behind a value
+  can be traced from the source alone. For several records, the values are joined with `", "` in
+  the order given; changing that order changes the output.
+- The header comment SHOULD carry the regeneration command, and `--check` (regenerate and compare
+  byte for byte) SHOULD pass (re-graded 2026-10-18 to SHOULD: the CLI that ran them,
+  `tools/geometry-sweep`, was removed with the Deno tools by ADR 0127 decision 5 (`bb35fe2a`); they
+  cannot be met until the tools are rebuilt, and restoring them belongs to that rebuild). The
+  headers of `geometry-profiles/apple-metal-3.ts:12` and `nvidia-blackwell.ts:12` still name
+  `deno run -A tools/geometry-sweep/main.ts profile`, which no longer exists in the tree; so do the
+  comments at `packages/runtime/src/tune/derive.ts:5` and
+  `packages/runtime/tests/tune_profile_test.ts:6`.
 
-### 5. 既定プロファイルは今の表とバイト同一
+### 5. The default profile is byte-identical to the previous table
 
-`DEFAULT_GEOMETRY_PROFILE` は今の選択と**同じ値**を持つ:
+`DEFAULT_GEOMETRY_PROFILE` holds **the same values** as the selection before this ADR:
 
-| 欄          | 値の出どころ                                                                                                                 |
-| ----------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `gemmRows`  | `gemmGeometryForRows` の 3 段（≤ 64 → `M16N16 r1×4 wg4×16`・≤ 512 → `M64N32 r4×4 wg8×16`・それ以上 → `defaultGemmGeometry`） |
-| `attention` | ①QK / ③PV とも `defaultGemmGeometry`（`M128N128 r8×8 wg16×16`）                                                              |
-| `conv2d`    | `gemmMTileGeometry(64)` / `gemmMTileGeometry(32)`                                                                            |
-| `i8a8`      | `defaultI8a8Geometry`（linear / ①QK = `M128N64`・③PV = `M64N128`）                                                           |
+| Field       | Source                                                                                                                                                       |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `gemmRows`  | `GEMM_ROWS_BUCKETS`, the three buckets of `gemmGeometryForRows` (≤ 64 → `M16N16 r1×4 wg4×16`, ≤ 512 → `M64N32 r4×4 wg8×16`, above → `defaultGemmGeometry`) |
+| `attention` | `defaultGemmGeometry` for ①QK and ③PV (`M128N128 r8×8 wg16×16`)                                                                                              |
+| `conv2d`    | `gemmMTileGeometry(64)` / `gemmMTileGeometry(32)`                                                                                                            |
+| `i8a8`      | `defaultI8a8Geometry` (linear / ①QK = `M128N64`, ③PV = `M64N128`)                                                                                            |
 
-`match` は vendor / architecture とも未指定。既定プロファイルが選ばれた機では、生成される WGSL とパイプラインキーが
-本 ADR の前と 1 バイトも変わらない。既存の codegen スナップショットが無変更で緑であることが、その検出器になる。
+`match` is empty. On a machine that gets the default profile, the generated WGSL and pipeline keys
+are byte for byte what they were before this ADR; the unchanged codegen snapshots detect a drift.
 
-### 6. 適用範囲
+### 6. Scope
 
-| 経路                                        | プロファイルの欄    |
-| ------------------------------------------- | ------------------- |
-| linear / matmul / bmm（行数バケット）       | `gemmRows`          |
-| 融合 attention f32 の ①QK / ③PV（ADR 0023） | `attention.qk / pv` |
-| conv2d の implicit GEMM（ADR 0024）         | `conv2d`            |
-| i8a8 の linear / 融合 attention ①QK / ③PV   | `i8a8`              |
+| Path                                      | Profile field       |
+| ----------------------------------------- | ------------------- |
+| linear / matmul / bmm (row-count buckets) | `gemmRows`          |
+| fused attention f32 ①QK / ③PV (ADR 0023)  | `attention.qk / pv` |
+| conv2d implicit GEMM (ADR 0024)           | `conv2d`            |
+| i8a8 linear / fused attention ①QK / ③PV   | `i8a8`              |
 
-実測の裏付けの範囲:
+Measured coverage:
 
-- `gemmRows` は linear の実測で決める。同じ GEMM 骨格の matmul / bmm も同じ表を引く（違うのは B 側の充填だけ）。
-  matmul / bmm 単独の速度は掃引に無い。
-- `gemmRows` の ≤ 64 は M = 64 の 1 ケース、65〜512 は M = 512 の 1 ケースで決まる。M = 1〜63 の実測は無く、
-  その区間への適用は外挿になる。f16 / f32 重みの linear は M = 1 だけが GEMV なので、M = 2〜64 にこの表が効く。
-- `i8a8` の 3 欄は M ≥ 1024 の実測だけで決まり、全行数に効く（今の既定も行数で分けていない）。
-- 掃引にケースを足して裏付けを補う案（linear の M = 16 / 32 / 128 / 256・matmul / bmm）は採用した（利用者裁定
-  2026-09-29 — 追記決定 1。上の 2 点は `apple-metal-3` の時点の記述で、M2 の full 再走待ち）。
+- `gemmRows` is decided by linear / matmul / bmm cases (addendum decision 1; ADR 0116 decision 4);
+  all three ops read the same table (only the B-side fill differs).
+- The three `i8a8` fields are decided from M ≥ 1024 measurements only and apply to every row count
+  (the default does not split by row count either).
 
-**今回は既定のままにする経路**（プロファイルを引かず、今の選択を使い続ける）:
+**Paths that keep the default for now** (they do not read the profile):
 
-- states 形 attention の GEMM 骨格タイル経路 ①ₜ / ③ₜ（ADR 0067）と、行ブロック実行の分解 attention（ADR 0060 —
-  irodori の経路）。どちらも今は `gemmGeometryForRows` の表を通るが、掃引の対象に入っていない。別起票で測ってから広げる。
-- conv1d の implicit GEMM（`gemmMTileGeometry` を conv2d と共有しているが、掃引に conv1d のケースが無い）。
-- M = 1 × i4 の GEMV 族（ADR 0082 — GEMM 骨格の外）。
+- the GEMM-skeleton tile path of states-shaped attention ①ₜ / ③ₜ (ADR 0067) and decomposed
+  attention in row blocks (ADR 0060 — the irodori path). Both go through `gemmGeometryForRows` and
+  are not in the sweep; they are widened only after measurement under a separate item.
+- conv1d implicit GEMM (it shares `gemmMTileGeometry` with conv2d, but the sweep has no conv1d case).
+- the M = 1 × i4 GEMV family (ADR 0082 — outside the GEMM skeleton).
 
-### 7. dp4a カナリアはプロファイルの i8a8 attention 幾何で撃つ
+### 7. The dp4a canary fires with the profile's i8a8 attention geometry
 
-- i8a8 融合 attention の変種（dp4a / emu）を決める実走カナリア（`src/gpu/attention-dp4a-canary.ts`・ADR 0058 決定 2）は、
-  Session が選んだプロファイルの `i8a8.attentionQk` / `i8a8.attentionPv` の幾何で撃つ。
-- 理由: カナリアの MUST は「production の幾何で最低 1 タイル全域を撃つ」こと。既定の幾何のまま撃つと、プロファイルが
-  i8a8 attention の幾何を変えた機で、カナリアが検証する WGSL と実走の WGSL が別物になる。
-- 判定の記憶は device 単位のまま。プロファイルは同じ `GpuContext` の `adapterInfo` の純関数なので、同じ device なら
-  どの Session でも幾何は同じになる。
-- 固定入力の値・判定則・sanity 帯は変えない。B570 で `apple-metal-3` の幾何を渡しても判定は dp4a 厳密一致。
+- The run-time canary that picks the i8a8 fused attention variant (dp4a / emu;
+  `src/gpu/attention-dp4a-canary.ts`, ADR 0058 decision 2) uses `i8a8.attentionQk` /
+  `i8a8.attentionPv` of the profile the Session selected.
+- Reason: the canary's MUST is to cover at least one full tile with the production geometry. With
+  the default geometry, on a machine whose profile changes the i8a8 attention geometry, the canary
+  would check a different WGSL from the one that runs.
+- The verdict stays cached per device. The profile is a pure function of the same `GpuContext`'s
+  `adapterInfo`, so every Session on a device gets the same geometry.
+- Fixed inputs, verdict rule and sanity band are unchanged. On B570 the `apple-metal-3` geometry
+  still yields an exact dp4a match.
 
-### 8. 実行時オートチューン禁止は不変・利用者が選ぶ口は作らない
+### 8. No run-time autotuning; no entry point for users to choose
 
-> 2026-09-29 改定（追記決定 6）: 「利用者が選ぶ口」は `acquireGpu({ geometryProfile })` として公開した。実行時オートチューン禁止と
-> `SessionOptions` に出さない点は不変。
+(Superseded by addendum decision 6 on 2026-09-29 and ADR 0117 decision 6 on 2026-10-01: users can
+inject a profile through `acquireGpu({ geometryProfile })`. The ban on run-time autotuning and the
+absence from `SessionOptions` are unchanged.)
 
-- 選択は `adapterInfo` と静的な表だけの関数で、実行中に計測して選び直すことはしない（ADR 0022 追記の MUST のまま）。
-  同じ機・同じ shape なら毎回同じ幾何・同じキー・同じ WGSL になる。
-- 幾何はパイプラインキーに載ったまま（キーの綴りは不変）。プロファイルが違えばキーが違うので、パイプラインの
-  キャッシュで取り違えは起きない。
-- **`SessionOptions` には出さない**。利用者がプロファイルや幾何を渡す口は作らない。選ばれたプロファイルの `id` を
-  診断情報（`SessionDiagnostics.geometryProfile`）で見せるだけにする。
-- ADR 0022 追記の MUST「既定の変更は門の再実測とセット」は、プロファイルの追加・変更にもそのまま掛かる。プロファイルは
-  その adapter にとっての既定だから。
+- Selection is a function of `adapterInfo` and the static tables only; nothing is measured during
+  execution to re-select (the ADR 0022 addendum MUST). The same machine and shape always give the
+  same geometry, key and WGSL.
+- Geometry stays in the pipeline key (spelling unchanged). Different profiles give different keys,
+  so the pipeline cache cannot mix them up.
+- **Not exposed in `SessionOptions`.** The selected profile's `id` is shown in
+  `SessionDiagnostics.geometryProfile`.
+- The ADR 0022 addendum MUST "a change of the default geometry goes together with re-running the
+  sha256 checks" applies unchanged to adding or changing a profile, because a profile is the
+  default for its adapter. Reason: that geometry does not move bits is an empirical claim, so
+  re-running the checks is what keeps correctness. The per-profile GPU test
+  (`packages/runtime/tests/gpu_geometry_profile_test.ts:442`, `:471`) runs on any development
+  machine; the self A/B on the target machine used `tools/gpu-lab`, removed by ADR 0127 decision 5,
+  so until the tools are rebuilt an embedded table cannot be added or changed with this check run
+  on its target machine.
 
-### 採らなかった案
+### Alternatives not taken
 
-- **類似度で最近傍のプロファイルを選ぶ**（GPU 名の近さ・世代・コア数）— 採らない。未知の機で「近い」プロファイルが
-  当たる利点はあるが、選択が名前の揺れで変わり、環境キーごとの参照 sha の行（ADR 0106）と幾何の対応が取れなくなる。
-  未知の機は既定に落ちる方が、どの幾何で走ったかが一意に言える。
-- **実行時に計測して選ぶ（オートチューン）** — 採らない。ADR 0022 追記の MUST。選択が実行ごとに揺れると、
-  「同一キー → バイト同一 WGSL」とキーの意味が崩れる。f32 のビット同一は実測命題なので、測っていない組み合わせが
-  実行時に選ばれうる形は門の外に出る。初回の計測時間も要る。
-- **`SessionOptions` で幾何やプロファイルを渡す** — 採らない（2026-09-29: `SessionOptions` ではなく `acquireGpu` の GPU 単位の口として公開した — 追記決定 6）。公開面（ADR 0008 の薄い面）に内部の codegen 語彙
-  （`GemmGeometry`）が漏れ、利用者が掃引の門（出力 sha の一致・5% の閾値）を通っていない幾何を持ち込める。
-  掃引は `tools/geometry-sweep` が codegen の内部入口（明示幾何）で行えるので、公開の口は要らない。
+- **Nearest-profile selection by similarity** (GPU name, generation, core count). An unknown machine
+  could get a "close" profile, but the selection would change with naming noise and lose the tie
+  between per-environment-key sha rows (ADR 0106) and geometry. Falling back to the default lets one
+  state exactly which geometry ran.
+- **Measuring at run time (autotuning)** — the ADR 0022 addendum MUST. Selection varying per run
+  breaks "same key → byte-identical WGSL" and the meaning of the key; since f32 bit identity is
+  empirical, an unmeasured combination could be chosen at run time outside every check; first-run
+  measuring time is also needed.
+- **Passing geometry or a profile in `SessionOptions`** (2026-09-29: exposed instead as a per-GPU
+  entry point on `acquireGpu`, addendum decision 6). It would leak internal codegen vocabulary
+  (`GemmGeometry`) into the thin public surface (ADR 0008) and let users bring geometries that never
+  passed the sweep's checks (output sha match, 5% threshold).
 
 ## Consequences
 
-- **参照 sha は環境キーの行のまま**（ADR 0106）。プロファイルは幾何だけを変え、幾何はビットを動かさない（実測命題）
-  ので、プロファイルを足す前後で同じ機の sha は一致するはず。Apple 機の環境キーの行を足す（行が無い間は明示 SKIP）。
-- **キーの綴りは不変**。既に幾何判別子（`reg64x32r4x4w8` など）が載っているので、新しい語彙は増えない。
-- **M2 の DiT の見込み約 1.5 倍は推定**。research §9 の見積もり（f16 quant の DiT 段で linear が GPU 時間の約 85%、
-  それが 1.6 倍 + attention）で、DiT 段の実測で確定するまでは推定として扱う。VAE（conv2d）の効果も同じく未計測。
-  合成後の採用比は linear の大 M で ×1.74・attention で ×1.49〜1.73（下の表）。
-- **`apple-metal-3` を生成し、`BUILTIN_GEOMETRY_PROFILES` に登録した**（下の表は 2026-09-27 時点。2026-09-29 に
-  linear / matmul / bmm の full を 3 本目として足して再生成し、`gemmRows` ≤ 64 と 65〜512 は既定へ戻った — 現行の表は
-  追記決定 3）。入力は M2（Chrome 153）の掃引 2 本:
-  quick（2026-09-27T16-28・33 ケース・177 行・i8a8 を含む）と full（2026-09-27T18-31・linear / attention / conv2d の
-  格子全体・19 ケース・927 行・出力不一致 0・失敗 0）。欄ごとの採否と退けた幾何の理由は生成物の冒頭コメントが正本:
+- **Reference sha stays per environment key** (ADR 0106). A profile changes only geometry, and
+  geometry does not move bits (empirical), so the sha on a machine is expected to match before and
+  after a profile is added. Apple environment-key rows are added when available (explicit SKIP
+  until then).
+- **Key spelling is unchanged.** Geometry discriminators (`reg64x32r4x4w8`, …) were already in the
+  key; no new vocabulary.
+- **The DiT gain on the M2 was estimated at about 1.5×** (research §9); addendum decision 4 measured
+  it.
+- **`apple-metal-3` was generated and registered** on 2026-09-27 from two M2 sweeps (quick and
+  full); it was regenerated several times since (addendum decisions 3 and 8, ADR 0116). The
+  generated file and its header comment are the source of truth for the adopted and the rejected
+  geometries.
+- **Profiles also move dispatch limits.** A path with one workgroup per output tile handles n up to
+  `maxComputeWorkgroupsPerDimension` (65,535) × tileN; beyond that it fails with
+  `DispatchLimitError`, never a silent wrong value. `apple-metal-3`'s conv2d (tileN 64) handles
+  Hout·Wout ≤ 4,194,240 (about 2047×2048), half of the default (tileN 128, 8,388,480). Linear N and
+  attention ①QK N (key count) shrink to 2,097,120 with tileN 32, out of reach for practical shapes.
+- **Adapter spellings (measured, 2026-09-27)**: Chrome on M2 = vendor `apple` / architecture
+  `metal-3`; Chrome on RTX 5070 Ti (Windows) = `nvidia` / `blackwell`; Deno on B570 = vendor `32902`
+  (PCI vendor ID in decimal) / empty architecture (ADR 0106 decision 2), so under Deno every machine
+  then fell back to the default profile. The Deno spelling on macOS was not confirmed. Dawn on Node
+  uses a different name source (ADR 0127).
+- **Diagnostics field `SessionDiagnostics.geometryProfile`** (a field added to a public type) shows
+  the selected profile's `id`. The name is a diagnostic label outside semver.
+- The sweep's output-match check caught a real defect: the i8a8 fused attention ①QK generator
+  produced wrong values for geometries with five or more K-side fill slots (shadowed WGSL variable
+  names). It was fixed with this ADR and is guarded by
+  `packages/runtime/tests/codegen_i8a8_shadowing_test.ts`.
+- **No Intel / NVIDIA profile in this ADR**; `nvidia-blackwell` followed on 2026-09-29 (addendum
+  decision 2).
+- **"Drop a8 from the default quant on Metal" was deferred** to a separate decision (2026-09-27): on
+  the M2, i8a8 takes as long as f32 even with a better geometry (research §9), which a geometry table
+  cannot fix. The question was taken up by [0128](0128-default-preset-original-weights.md) (proposed
+  2026-10-16; decision 5: a device without dp4a gets a warning, not a fallback), which settles it
+  once accepted.
+- Profiles for states-shaped and row-block attention are a separate item (decision 6).
 
-  | 欄                 | 採用                    | 対既定（幾何平均・最小〜最大） | ケース          |
-  | ------------------ | ----------------------- | -----------------------------: | --------------- |
-  | `gemmRows` ≤ 64    | `reg64x64r4x4w16`       |                         ×2.261 | 1（M = 64）     |
-  | `gemmRows` 65〜512 | `reg128x32r8x4w8`       |                         ×1.102 | 1（M = 512）    |
-  | `gemmRows` > 512   | `reg128x32r8x4w8`       |         ×1.740（1.678〜1.773） | 6               |
-  | `attention.qk`     | `reg128x32r8x4w8`       |         ×1.734（1.571〜1.830） | 4               |
-  | `attention.pv`     | `reg64x64r8x4w16`       |         ×1.494（1.403〜1.671） | 4               |
-  | `conv2d.rows64`    | `igemm128x64:wg16x16`   |         ×1.444（1.219〜1.711） | 2               |
-  | `conv2d.rows32`    | `igemm128x64:wg16x16`   |                         ×1.648 | 1（Cout = 96）  |
-  | `i8a8.linear`      | `tile64x64r8x4w16x8k16` |         ×1.112（1.061〜1.127） | 6（quick 由来） |
-  | `i8a8.attentionQk` | `tile64x64r8x4w16x8k16` |         ×1.128（1.127〜1.130） | 4（quick 由来） |
-  | `i8a8.attentionPv` | `tile64x64r8x4w16x8k16` |         ×1.098（1.090〜1.106） | 4（quick 由来） |
+## Acceptance (2026-09-27 to 2026-09-29)
 
-  quick 単独の見込みと違う欄: 65〜512 が既定 → `reg128x32r8x4w8`、> 512 と ①QK が `reg64x32r4x4w8` →
-  `reg128x32r8x4w8`（比 ×1.59 → ×1.74・×1.58 → ×1.73）、conv2d が `igemm64x64` → `igemm128x64`。
-  `attention.pv` の比は揺れを含む。full の ③PV は既定の再測定比が 0.9〜1.1 を外れたケースがある
-  （pv-self-m1024 ×1.228・pv-cross-m1024 ×1.126）。合成後の比（×1.49）は quick 単独（×1.67）より低いが、幾何は同じ。
-- **プロファイルは dispatch 上限も動かす**。1 workgroup = 1 出力タイルの経路が扱える n は
-  `maxComputeWorkgroupsPerDimension`（65,535）× tileN まで。超えれば `DispatchLimitError` で落ち、黙って誤値は出ない。
-  `apple-metal-3` の conv2d（tileN 64）では Hout·Wout ≤ 4,194,240（約 2047×2048）で、既定（tileN 128）の 8,388,480 の半分。
-  linear の N 側（出力特徴数）と attention ①QK の N 側（キー数）も tileN 32 で 2,097,120 に縮むが、実用形では届かない。
-- **adapter の綴り（実測）**: Chrome の M2 = vendor `apple` / architecture `metal-3`。Chrome の RTX 5070 Ti（Windows）=
-  `nvidia` / `blackwell`。Deno の B570 = vendor `32902`（PCI ベンダ ID の 10 進）/ architecture 空（ADR 0106 決定 2）。
-  登録済みのプロファイルは architecture を指定しているので、architecture が空の Deno では今どの機も既定プロファイルに
-  落ちる（遅いが正しい）。Deno on macOS の `vendor` の綴りは未確認。
-- **診断欄 `SessionDiagnostics.geometryProfile`**（公開型への欄の追加）に、選ばれたプロファイルの `id` が出る。
-  名前は診断用のラベルで semver の対象外。
-- **掃引の出力一致の門が実際に欠陥を捕まえた**: i8a8 融合 attention ①QK の生成器は、K 側の充填スロットが 5 以上の幾何で
-  WGSL の変数名の重なり（シャドーイング）により誤値を出していた（既定と `apple-metal-3` の幾何は該当しない）。本 ADR と
-  同時に修正し、宣言名の重なりの門（`tests/codegen_i8a8_shadowing_test.ts`）とスロット 8 / 16 の幾何での GPU 突合を検出器に
-  した。生成器は出力不一致の幾何を候補にしないので、修正前でもプロファイルには入らなかった。
-- **Intel / NVIDIA のプロファイルは本 ADR では作らない**。RTX 5070 Ti（Chrome）の full 掃引では、f32 の大 M・
-  attention・conv2d は既定が最速か僅差だった（③PV の最良が ×1.02〜1.05・conv2d は c384 の ×1.092 だけ）。余地は中 M 512（`reg128x128r8x8w16` ×1.475）・小 M 64
-  （`reg32x32r2x4w8` ×1.352）・i8a8 の 3 欄（`tile128x64r8x4w16x16k16` が全ケースで ×1.13〜1.31）にある。
-  B570 の quick でも中 M 512 で 128×128 が ×1.41・小 M 64 で 64×32 が ×1.49。プロファイルを作るかは K-67 で
-  利用者が裁定する。→ `nvidia-blackwell` は 2026-09-29 に生成・登録した（追記決定 2）。
-- **「Metal では既定 quant の a8 を外す」は別 ADR**。M2 の i8a8 は幾何を直しても f32 と同じ時間で（research §9）、
-  幾何の表では解けない。quant の選択（配布の席）の話なので、本 ADR の外で裁定する。
-  この判断は保留中で、既定の quant 席を量子化にするか opt-in（元の重み）にするかの再検討に合流する（利用者裁定 2026-09-27）。
-- states 形 attention と行ブロック attention のプロファイル化は別起票（決定 6）。
+Passed: unchanged codegen snapshots with the default profile, selection order and same-rank
+failure (`geometry_profile_test`), full verify on B570 (2026-09-27, 3410 passed / 0 failed), M2 DiT
+timing and PNG sha256 identity before and after (addendum decision 4), the selected `id` in the
+diagnostics (seen on the RTX, addendum 5).
 
-## 検収
+## Addendum (2026-09-29) — new sweep cases and the `nvidia-blackwell` profile (the maintainer's ruling)
 
-| 項目                                                                                         | 結果                                                                                                   |
-| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| 既定プロファイルで codegen スナップショットが無変更で緑（WGSL・キーのバイト同一）            | ✅（`codegen_wgsl_test` / `codegen_dispatch_test` 79 本）                                              |
-| `selectGeometryProfile` の選択順（完全一致 → vendor のみ → 既定）と同順位 2 本の fail loudly | ✅（`geometry_profile_test`）                                                                          |
-| 生成器が M2 の掃引 JSON から `apple-metal-3` を作る                                          | ✅（quick + full の合成・Consequences の採用表）                                                       |
-| B570 でのフル verify（既定プロファイルが選ばれ、sha256 参照門が全一致）                      | ✅（2026-09-27・3410 passed / 0 failed / 26 ignored）                                                  |
-| M2（Chrome）で anima の DiT 段の GPU 時間・壁時計（適用前 / 後・f16 quant と既定 quant）     | ✅（2026-09-29・512²・f16 quant ×1.78・既定 ×1.15 — 追記決定 4）                                       |
-| M2 で適用前後の PNG sha256 が一致（幾何でビットが動かないことの E2E での確認）               | ✅（f16 `041027e63559`・既定 `0a5695470e4a` とも一致）                                                 |
-| 確認ページ・診断に選ばれたプロファイルの `id` が出る                                         | 実装済み（2026-09-29・段ごとの `geometryProfile` を表・環境行・JSON に出す）。実機表示は利用者確認待ち |
+### Addendum decision 1: `gemmRows` is decided by linear / matmul / bmm cases (updates decision 6)
 
-## 追記（2026-09-29）— 掃引ケースの追加と `nvidia-blackwell` の登録（利用者裁定 2026-09-29）
+- The sweep gained linear M = 16 / 32 (text_encoder shape `[1,M,1024] × [3072,1024]` with M
+  replaced) and M = 128 / 256 (transformer cross-attention k / v projection `[1,M,1024] ×
+  [2048,1024]`); three matmul cases (no family's op census has a rank-2 matmul, so each is the
+  counterpart of one linear case per bucket — same M / N / K, B side `[K,N]`, marked by
+  `censusCount: 0` and `mirrorOf`); five bmm cases from the anima census (text_encoder 2,
+  text_conditioner 3). The case table is now `packages/runtime/src/tune/cases.ts`.
+- Generator rule: every linear / matmul / bmm case counts toward its row bucket. Since the table
+  serves all three ops, a geometry under ×1.05 on a matmul or bmm case is not adopted even if linear
+  is faster.
+- A class with new cases is re-run with **full**, not quick: the generator only considers
+  geometries measured on every case of the field, so adding the cases with quick alone drops the
+  adopted geometries that quick does not contain.
+- Small bmm cases (15–40 µs per dispatch) did not reach the 80 ms pass target under the shared
+  repetition cap of 1024 and drifted (re-measured ratio 0.705–1.552). By the maintainer's ruling the
+  sweep got its own cap, `SWEEP_MAX_REPS` = 16384 (`packages/runtime/src/tune/harness.ts:145`;
+  recorded as `settings.maxReps`).
 
-### 追記決定 1: `gemmRows` は linear / matmul / bmm のケースで決める（決定 6 の更新）
+### Addendum decision 2: generate and register `nvidia-blackwell` (Chrome on RTX 5070 Ti = `nvidia` / `blackwell`)
 
-- 掃引（`tools/geometry-sweep`）に次のケースを足した。linear の M = 16 / 32（text_encoder の形 `[1,M,1024] × [3072,1024]` の
-  M を置換）と M = 128 / 256（transformer の cross-attention k / v 射影の形 `[1,M,1024] × [2048,1024]` の M を置換）。
-  matmul 3 本 — rank-2 の matmul は anima を含むどの系列の op census にも行が無いので、linear の各行数バケット 1 本の
-  **鏡像**（同じ M / N / K・B 側は `[K,N]`）を測る。census 由来でないことは `censusCount: 0` と `mirrorOf`（鏡像元の
-  linear のケース id）で表す。bmm 5 本 — anima の census の text_encoder 2 形・text_conditioner 3 形をそのまま。
-- 生成器の規則: 行数バケットの欄に入るケースは linear / matmul / bmm の全部。表が 3 経路に効く以上、matmul / bmm の
-  ケースで ×1.05 未満の幾何は、linear で速くても採らない。生成物の文言は「掃引にある linear / matmul / bmm のケースで
-  決め」（linear だけの掃引から作った表が、測っていない op で決めたと読めないように）。
-- 既存の生成物との関係: `apple-metal-3` は linear だけの掃引から作られたままで、値は不変（文言 1 行だけ再生成）。
-  **M2 で再走するときは full**（op = linear / matmul / bmm）。生成器は「欄の全ケースで測った幾何」しか候補にしないので、
-  新ケースを quick だけで足すと、quick 集合に無い採用幾何 `reg128x32r8x4w8` が「測っていない」で落ちて欄が後退する。
-- B570 の quick 実走（新ケースだけ・判断材料で、B570 の表は作らない）: ≤ 64 の M = 16 / 32 では大タイルが ×0.30〜0.77
-  と大きく負け、65〜512 では M = 128 の最良が ×1.019 に留まる一方 M = 256 と matmul M = 512 は ×1.4〜1.7 で、
-  1 点で欄を決める外挿のリスクを裏付けた。
-- 小さい bmm 3 本（1 dispatch が 15〜40 µs）は反復の上限 1024（`tools/opbench` と共有の `MAX_REPS` — 出力 readback の
-  線形増を抑える目的で、同じバッファに重ね打ちする掃引には当てはまらない）で pass が目標 80 ms に届かず、既定の
-  再測定比が 0.705〜1.552 と揺れた。→ 利用者裁定（同日）で掃引専用の上限 `SWEEP_MAX_REPS` = 16384 に分けた
-  （opbench の 1024 は不変・JSON の `settings.maxReps` で見分ける）。B570 の bmm 5 ケースの再走では既定の反復が
-  5,687 / 3,818 / 2,573 / 476 / 268 で、再測定比は 0.9995〜1.0049（全て範囲内）。
+- Input: one full sweep on RTX 5070 Ti (Windows, Chrome 153, 2026-09-27T18-37; 33 cases, 1,599
+  rows, no failure, no mismatch), rules of decision 4 (`--min-speedup 1.05`). At registration it
+  adopted geometries for `gemmRows` ≤ 64 and 65–512 and the three i8a8 fields (×1.19–1.21); the two
+  `gemmRows` fields returned to the default with addendum 8, and the table moved to seven buckets
+  with ADR 0116. The generated file is the source of truth for its values.
+- Acceptance: the per-profile GPU test passed; the before/after PNG sha256 match on the RTX was
+  confirmed later with an injected `default` profile (addendum 9).
 
-### 追記決定 2: `nvidia-blackwell`（Chrome の RTX 5070 Ti = `nvidia` / `blackwell`）を生成・登録する
+### Acceptance (addendum)
 
-- 入力 = RTX 5070 Ti（Windows・Chrome 153）の full 掃引 1 本（2026-09-27T18-37・5 族 33 ケース・1,599 行・失敗 0・
-  出力不一致 0・既定の再測定比が範囲外のケース 0）。生成規則は決定 4 のまま（`--min-speedup 1.05`）。
+All items passed on 2026-09-29: new cases without failure or mismatch, sweep paths matching the
+production recipe builders, the generator's all-cases rule over matmul / bmm, the per-profile GPU
+test with `nvidia-blackwell`, the M2 full re-run, and the RTX before/after sha match (addendum 9).
 
-  | 欄                 | 採用                      | 対既定（幾何平均・最小〜最大） | ケース       |
-  | ------------------ | ------------------------- | -----------------------------: | ------------ |
-  | `gemmRows` ≤ 64    | `reg32x32r2x4w8`          |                         ×1.352 | 1（M = 64）  |
-  | `gemmRows` 65〜512 | `reg128x128r8x8w16`       |                         ×1.475 | 1（M = 512） |
-  | `gemmRows` > 512   | 既定のまま                |                              — | 6            |
-  | `attention.qk`     | 既定のまま                |                              — | 4            |
-  | `attention.pv`     | 既定のまま                |                              — | 4            |
-  | `conv2d.rows64`    | 既定のまま                |                              — | 2            |
-  | `conv2d.rows32`    | 既定のまま                |                              — | 1            |
-  | `i8a8.linear`      | `tile128x64r8x4w16x16k16` |         ×1.194（1.156〜1.256） | 6            |
-  | `i8a8.attentionQk` | `tile128x64r8x4w16x16k16` |         ×1.214（1.199〜1.238） | 4            |
-  | `i8a8.attentionPv` | `tile128x64r8x4w16x16k16` |         ×1.212（1.134〜1.306） | 4            |
+### Addendum decision 3: regenerate `apple-metal-3` from three sweeps after the M2 full re-run (2026-09-29)
 
-- dispatch 上限: `gemmRows` ≤ 64 の tileN 32 で linear の N 側上限は 2,097,120（実用形では届かない）。i8a8 の tileN は
-  64 で既定と同じ。conv2d は既定のまま。
-- `gemmRows` の ≤ 64 と 65〜512 は、`apple-metal-3` と同じく M = 64 / M = 512 の各 1 ケースで決まっている。追記決定 1 の
-  新ケースは RTX ではまだ測っていない（B570 の観察は上）。RTX で full を再走したら `--from` を 2 本にして再生成する。
-- 検収: B570 の per-profile GPU テスト（`gpu_geometry_profile_test` — 既定との Uint32 一致 + 幾何判別子が実走キーに
-  載ること）は緑。RTX 5070 Ti（Chrome）での anima の登録前後の PNG sha256 一致と、診断 `geometryProfile` が
-  `nvidia-blackwell` になることは未計測（利用者作業）。
-- 注: RTX の掃引で i8a8-attention の cross M = 1024 の 2 ケースは反復の上限 1024 に当たっている（再測定比は範囲内）。
+The third record (linear / matmul / bmm, full) sent `gemmRows` ≤ 64 and 65–512 back to the default
+(no single geometry was ×1.05 on every case of the bucket); > 512, attention, conv2d and i8a8 were
+unchanged. Details: commit `9f50530f`.
 
-### 検収（追記分）
+### Addendum decision 4: the M2 DiT re-measurement confirms `apple-metal-3` (2026-09-29, K-71 adopted)
 
-| 項目                                                                                            | 結果                                                                                                                                              |
-| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 掃引に linear M 16 / 32 / 128 / 256・matmul 3・bmm 5 を足し、B570 で失敗 0・出力不一致 0        | ✅（2026-09-29・65 行）                                                                                                                           |
-| matmul / bmm の掃引経路が本番の recipe-builders と束縛・params・dispatch で一致（CPU 参照突合） | ✅（`harness_test` 実 GPU・故障注入で赤を確認）                                                                                                   |
-| 生成器が matmul / bmm の観測を `gemmRows` の全ケース門に数える                                  | ✅（`profile_test`）                                                                                                                              |
-| `nvidia-blackwell` を登録し、B570 の per-profile GPU テストが緑                                 | ✅（2026-09-29）                                                                                                                                  |
-| M2（Chrome）で full（linear / matmul / bmm）を再走し `apple-metal-3` を 3 本から再生成          | ✅（2026-09-29・追記決定 3）                                                                                                                      |
-| RTX 5070 Ti（Chrome）で登録前後の PNG sha256 一致・診断 `geometryProfile` = `nvidia-blackwell`  | ✅（2026-09-29 夜・gpu-lab で `default` を注入した走行と表の走行で f16 / 既定 quant とも sha 一致・既定 quant の DiT GPU 1.36 → 1.14 s — 追記 9） |
+The f16 DiT stage at 512² went from 80.5 s to 45.1 s (×1.78), above the kill criterion of 1.3×, with
+identical PNG sha256; `apple-metal-3` is adopted (perf-ledger K-71). Details: research K-70 §11.
 
-### 追記決定 3: M2 の full 再走（linear / matmul / bmm）で `apple-metal-3` を 3 本から再生成した（2026-09-29）
+### Addendum 5: `nvidia-blackwell` is selected on a real RTX 5070 Ti (2026-09-29)
 
-- 入力 = 2026-09-27 の quick + full に、2026-09-29 の full（op = linear / matmul / bmm・20 ケース・1,080 行・失敗 0・
-  出力不一致 0・既定の再測定比は全ケース範囲内・checkout `cb87ab93`）を 3 本目として足した。`--from` の順は生成物の冒頭。
+Confirmed in the diagnostics of all four anima stages; timings in research K-70 §12.
 
-  | 欄                                | 2026-09-27（linear だけ） | 2026-09-29（linear / matmul / bmm）      | ケース |
-  | --------------------------------- | ------------------------- | ---------------------------------------- | ------ |
-  | `gemmRows` ≤ 64                   | `reg64x64r4x4w16` ×2.261  | **既定のまま**                           | 6      |
-  | `gemmRows` 65〜512                | `reg128x32r8x4w8` ×1.102  | **既定のまま**                           | 7      |
-  | `gemmRows` > 512                  | `reg128x32r8x4w8` ×1.740  | `reg128x32r8x4w8` ×1.647（1.171〜1.766） | 7      |
-  | attention / conv2d / i8a8 の 7 欄 | 不変                      | 不変                                     | —      |
+### Addendum decision 6: users can inject one static profile into `acquireGpu` (amends decision 8; the maintainer's ruling 2026-09-29)
 
-- ≤ 64 が既定へ戻った理由: linear M = 16 で全候補が既定に負ける（旧採用 `reg64x64r4x4w16` は M = 16 で ×0.648・M = 32 で
-  ×1.148・M = 64 で ×2.252）。バケット ≤ 64 の中で最良の幾何が M ごとに違い（M = 16 は `reg16x32r2x4w8` ×1.21、M = 32 は
-  `reg32x64r4x4w16` ×1.75、M = 64 は `reg64x64r4x4w16` ×2.25）、1 本の幾何では全ケースを ×1.05 以上にできない。
-  65〜512 が戻った理由: 旧採用 `reg128x32r8x4w8` が bmm M = 512 / N 64 / K 512 で ×0.976（他のケースでは ×1.05〜1.10）。
-- 効果の範囲: DiT の linear（M = 1024 / 4096）・attention・conv2d・i8a8 は幾何が不変で、K-71 の狙い（DiT 段）には影響しない。
-  戻った 2 欄が効くのは text_encoder の linear（M = 64）・cross-attention の k / v 射影（M = 512）・text 段の bmm で、
-  M2 ではこれらは既定の幾何に戻る（速度は 2026-09-27 以前と同じ）。
-- 観察（別起票の材料・本 ADR では動かさない）: 行数バケットの境界（64 / 512 / ∞）は決定 4 のとおり掃引から作らない。
-  M2 では ≤ 64 の中で最良が M = 16 / 32 / 64 で割れるので、境界を細かくすれば ×1.2〜2.25 が取れる余地がある。
-  境界は runtime の既定の表（`GEMM_ROWS_BUCKETS`・ADR 0022）と共有なので、変えるなら既定プロファイルの門と一緒に別 ADR で
-  → ADR [0116](0116-geometry-profile-row-buckets.md)（2026-10-01・プロファイルの段を 7 段に細分・既定の表は 3 段のまま）。
-- M2 でも bmm の M = 64 の 2 ケースは反復の上限 1024 に当たった（追記決定 1 の末尾・再測定比は範囲内）。
-- 検収: 追記分の表の「M2（Chrome）で full を再走し 3 本から再生成」は ✅（2026-09-29）。B570 の per-profile GPU テストは緑。
+- Decision 8's "no entry point for users" dated from when profiles came only from the repository; it
+  did not weigh a user applying their own sweep on an unknown device, who otherwise stays on the
+  default until a table ships in a release. One entry point is therefore exposed.
+- Entry point: `acquireGpu({ geometryProfile })` (a field of `AcquireGpuOptions`; the types
+  `GeometryProfile`, `GemmRowsRule`, `GemmGeometry` and `I8a8Geometry` become public — types only;
+  the default table, the embedded list and the selection function are not exported as values; the
+  embedded list was exported later by addendum decision 7). A profile is a property of the device,
+  so it is given per GPU. When given, it is used without looking at the adapter, and `match` is not
+  compared (for A/B runs with another machine's table). Every Session on that device and the dp4a
+  canary (decision 7) use it. The table is copied at acquire time and does not change for the
+  device's lifetime.
+- Invariants kept: nothing is measured during execution to re-select (ADR 0022 addendum MUST);
+  geometry changes only the work assignment, not the K reduction order; not in `SessionOptions` or
+  the manifest (a device property does not belong on the model side, nor in the acceptance table of
+  ADR 0111); selection happens in one place at Session construction (`session-build.ts`), and the
+  diagnostics field and the canary read that result.
+- Structural check: a broken table (empty id, malformed `match`, `gemmRows` not ascending or not
+  ending in Infinity, a geometry that breaks divisibility) fails with the public `GpuFeatureError`
+  before the device is created. Output identity is an empirical claim checked by the sweep; the
+  runtime does not guarantee it for arbitrary user tables (generated tables pass, since the
+  generator never adopts a mismatching geometry).
+- An injected table's `id` may equal an embedded id. The diagnostics do not tell injection from
+  embedding, so a recording tool keeps what it injected in a separate field.
+- Acceptance (B570, real GPU, with fault injection): the injected table's id and geometry appear in
+  the keys and match the default bit for bit; a broken table never reaches `requestDevice`; the
+  canary compiles the injected geometries; snapshots without injection are unchanged.
 
-### 追記決定 4: M2 の DiT 再測で `apple-metal-3` を確定する（2026-09-29・K-71 採用）
+### Addendum 7: the PoC tool `tools/gpu-lab` (2026-09-29, the maintainer's ruling)
 
-- 計測 = 利用者の M2 24 GB（Chrome 153・`apple` / `metal-3`）・確認ページ（当時の `deno task bench:anima-browser` — 同日夜に `tools/gpu-lab` の Anima タブへ統合）・512²・seed 42・
-  DiT 常駐（2 回目以降の値）・checkout `cb87ab93`（DiT の幾何は現行と同じ。text_encoder の linear だけ当時の ≤ 64 の規則
-  `reg64x64r4x4w16` で走っており、追記決定 3 で既定へ戻った — text 段 1.9 s のうち linear は 0.13 s で影響は無視できる）。
-  記録 = `outputs/bench-browser/anima-residency-browser-f16-2026-09-29T17-15-47.294Z.json`（比較元は 2026-09-27 の 2 本）。
+(Superseded by ADR 0127 decision 5 on 2026-10-16: the Deno-era tools, `tools/gpu-lab` included, were
+removed from the development tree in `bb35fe2a`; they remain on `main` at 0.14.0.) What remains: the
+candidate set `quick+` (quick ∪ the adopted geometries of the registered profiles) is the default
+of the sweep in `./tune` (`DEFAULT_CANDIDATE_SET`, `packages/runtime/src/tune/geometries.ts:242`),
+because the fixed quick set lacked the M2 and RTX winners and trying other machines' winners costs
+about as much as quick. Tables for registration are built from `full`.
 
-  | 席（512²）        | 項目             |          2026-09-27（既定幾何） | 2026-09-29（`apple-metal-3`） |            比 |
-  | ----------------- | ---------------- | ------------------------------: | ----------------------------: | ------------: |
-  | `f16`             | DiT 段（壁時計） |                          80.5 s |                        45.1 s |         ×1.78 |
-  | `f16`             | DiT 段（GPU）    |                          77.3 s |                        44.2 s |         ×1.75 |
-  | `f16`             | 内訳 linear      |                          65.4 s |                        37.1 s |         ×1.76 |
-  | `f16`             | 内訳 ①QK / ③PV   |                     3.7 / 2.8 s |                   2.0 / 1.6 s | ×1.85 / ×1.75 |
-  | 既定（i8a8・s16） | DiT 段（壁時計） |                          81.5 s |                        71.1 s |         ×1.15 |
-  | 既定（i8a8・s16） | DiT 段（GPU）    |                          79.5 s |                        69.9 s |         ×1.14 |
-  | 両席              | VAE 段           |                      3.9〜4.4 s |                         2.9 s |          ×1.4 |
-  | 両席              | PNG sha256       | `041027e63559` / `0a5695470e4a` |                          同じ |          一致 |
+### Addendum 8: full re-runs on M2 and RTX 5070 Ti (2026-09-29 evening)
 
-- kill 線（f16 quant の DiT 段が 1.3 倍未満なら再検討）を超えたので、`apple-metal-3` を採用で確定する（perf-ledger K-71 ✅）。
-  research §9 の見込み（linear ×1.74・attention ×1.5〜1.7 から DiT 段 約 1.5 倍）に対し、実測は ×1.78 で見込みどおり。
-- M2 では **既定 quant（a8）が f16 quant より 1.58 倍遅い**（71.1 s 対 45.1 s）。09-27 の「a8 の利得ゼロ」は、幾何の直った
-  f32 経路が伸びたぶん「a8 が損」に変わった。これは「既定の quant 席を量子化にするか opt-in にするか」の再検討の材料
-  （backlog now・`.claude/reviews/2026-09-29_quant-default-recon/`）で、本 ADR では動かさない。
+`nvidia-blackwell` lost its single-case `gemmRows` rules (they lost badly at other M of the same
+bucket) and keeps only the three i8a8 fields; on the M2, thermal drift (re-measured ratio 1.160 on
+matmul M 4096) would have sent > 512 back to the default. Settled by addendum decision 8 and ADR
+0116; details in commit `b860e44b`.
 
-### 追記 5: RTX 5070 Ti の実走で `nvidia-blackwell` が選ばれることを確認した（2026-09-29）
+### Addendum 9: RTX before/after match and M5 observation (2026-09-29 to 30)
 
-- 計測 = 利用者の RTX 5070 Ti（Windows・Chrome 153・`nvidia` / `blackwell`）・確認ページをポート転送で開く・512²・seed 42・
-  DiT 常駐（2 回目以降の値）・checkout `9fd39823`。記録 = `outputs/bench-browser/anima-residency-browser-f16-2026-09-29T18-11-14.451Z.json`。
-  4 段（text_encoder / text_conditioner / transformer / vae_decoder）とも診断 `geometryProfile` は `nvidia-blackwell`。
+On RTX 5070 Ti the PNG sha256 matched between an injected `default` and the profile. Chrome reports
+Apple M5 as the same `apple` / `metal-3` as the M2, but the M2 winners lose on the M5 (up to 18% on
+VAE conv2d), so (vendor, architecture) cannot separate them. Settled by addendum decision 7; the
+bucket refinement approved here is ADR 0116. Details: research K-70 §13–§14.
 
-  | 席（512²）        | DiT 段（壁時計） | DiT 段（GPU） | 内訳 linear                       | PNG sha256     |
-  | ----------------- | ---------------: | ------------: | --------------------------------- | -------------- |
-  | `f16`             |           2.86 s |        2.79 s | `reg128x128r8x8w16`（既定）2.31 s | `c3cef8d6bc64` |
-  | 既定（i8a8・s16） |           1.21 s |        1.14 s | `tile128x64r8x4w16x16k16` 0.74 s  | `3b07b912c4d4` |
+### Addendum decision 7: `description` joins the match key; a table without `match` is injection-only; the embedded tables are exported (2026-09-30)
 
-  text 段の 12.8 s はポート転送越しの重み取得（research K-70 §3.1 と同じ経路の問題）で、幾何とは無関係。
-- 検収の「登録前後の PNG sha256 一致」は、登録前（既定幾何）の RTX のパイプライン記録が無いので未確認。幾何がビットを
-  動かさないことの RTX での根拠は、RTX の full 掃引で採用幾何の全ケースが既定と出力一致だったこと（追記決定 2）と、
-  B570 の per-profile GPU テスト（`nvidia-blackwell` の幾何と既定が Uint32 一致）。前後一致を取るなら、登録前のコミット
-  （`cd11cdc8`）の確認ページを別ポートで立てて同じ生成を 1 回回す。
-- 3 機の同条件比較（512²・DiT 常駐 2 回目以降・DiT 段の GPU 時間）: research K-70 §12。
+- Motivation (addendum 9): Chrome reports both Apple M2 and M5 as `apple` / `metal-3`. In Chrome
+  Beta guest mode `description` was empty; with a developer flag it showed `"Apple M2"`.
+- `match` gains `description` (exact match with `GPUAdapterInfo.description`; empty means absent).
+  Order: (vendor, architecture, description) exact → (vendor, architecture) → vendor → default. Two
+  tables at the same rank still fail loudly. A rule with `description` also requires vendor and
+  architecture.
+- A table without `match` is not auto-selected (injection-only, opt-in). It stays in the single
+  list `BUILTIN_GEOMETRY_PROFILES` next to auto-selected tables. This is data, not a predicate or a
+  flag, so tables stay plain data: JSON can carry them, the generator writes them from the sweep's
+  adapter, tests iterate the list, and nothing drifts toward name-similarity matching.
+- `BUILTIN_GEOMETRY_PROFILES` is exported as a value from `@karume/runtime`; an application picks a
+  table by id and passes it to `acquireGpu({ geometryProfile })` (for the M2: only when
+  `description` is available and contains `"Apple M2"`). The selection function and the default
+  table are not exported.
+- `apple-metal-3` matches `{ vendor: "apple", architecture: "metal-3", description: "Apple M2" }`.
+  In Chrome without the flag every Apple device gets the default (the M5 loses nothing; the M2 gets
+  ×1.75 by injection); with the flag only the M2 matches. `nvidia-blackwell` needs no `description`.
+- Generator options: an explicit `description` and `optIn` (no `match`) —
+  `packages/runtime/src/tune/derive.ts`.
 
-### 追記決定 6: 利用者が静的なプロファイル 1 本を `acquireGpu` に注入できる口を公開する（決定 8 の改定・利用者裁定 2026-09-29）
+### Addendum decision 8: the generator drops cases whose re-measured default is out of range (2026-09-30; amends decision 4)
 
-- 決定 8 の「利用者がプロファイルや幾何を渡す口は作らない」は、プロファイルの出所がリポジトリの埋め込みだけだった時点の判断で、
-  「未知の device で利用者が自分の掃引結果を当てる」場面を天秤に載せていなかった（利用者の指摘 2026-09-29）。その場面では既定幾何に
-  落ちるしかなく、表がリリースに入るまで最適化できない。よって口を 1 つ公開する。
-- 口 = `acquireGpu({ geometryProfile })`（`AcquireGpuOptions` の 1 欄・型 `GeometryProfile` と欄の型 `GemmRowsRule` / `GemmGeometry` /
-  `I8a8Geometry` を公開面に出す — 型だけで、既定の表・埋め込みの一覧・選択関数は値として出さない）。プロファイルは device の性質なので
-  GPU 単位に渡す。渡されたら adapter の (vendor, architecture) を見ずにその表を使い、`match` は照合しない（別の機の表を当てて A/B する
-  用途）。同じ device の全 Session と dp4a カナリア（決定 7）が同じ表を使う。表は acquire 時に複製して保持し、device の寿命の間は不変。
-- 据え置く不変条件: 実行中に測って選び直さない（ADR 0022 追記の MUST）・幾何は担当割りだけを変え K の縮約順は不変・`SessionOptions` と
-  manifest には出さない（device の性質をモデル側の口に置かない — ADR 0111 の受理表とも混ざらない）・選択は Session 構築の 1 箇所
-  （`session-build.ts`）で、診断 `geometryProfile` とカナリアはその結果を引く。
-- 門: 壊れた表（id が空・`match` の形の破れ・`gemmRows` の昇順 / 末尾 Infinity の破れ・整除の破れた幾何）は device を作る前に公開の
-  `GpuFeatureError` で落とす（利用者入力の失敗は公開型 — `subgroups` の検査と同じ流儀）。出力の一致は掃引の門で確かめる実測命題で、
-  利用者が持ち込む任意の表について runtime が保証するものではない（生成器は出力不一致の幾何を候補にしないので、掃引の生成物なら通る）。
-- 注入された表の `id` は埋め込みの id と重なってもよい（埋め込みの表そのものを別の機に当てる A/B では同じ id が真実）。診断だけでは
-  注入か埋め込みかを区別しないので、記録する道具（確認ページの JSON）は「何を注入したか」を別欄に持つ。
-- 検収: 注入した表の id・幾何判別子が実走キーに載ること・既定と Uint32 一致（B570・実 GPU）／壊れた表が requestDevice に届かないこと
-  （偽の `navigator.gpu` で回数 0）／カナリアが注入した表の ①QK / ③PV の WGSL をコンパイルすること／注入しない経路の codegen
-  スナップショットが無変更。故障注入 3 通り（門を外す・選択を adapter のみに戻す・カナリアにだけ adapter の選択を渡す）で赤を確認。
-- PoC の導線（同日裁定・別コミット）: 1 ページの道具 `tools/gpu-lab` で「掃引（quick+）→ 生成 → 注入して Anima を実行」を回す。
-  掃引の候補集合 quick+ = quick ∪ 登録済みプロファイルの採用幾何。
+- Motivation (addendum 8): on the M2 a thermally slowed candidate on matmul M 4096 (re-measured
+  ratio 1.160) sent the whole > 512 field back to the default, although the record captured the
+  drift in `defaultRepeat.driftRatio`.
+- Rule: within one record, a case whose re-measured default ratio is outside 0.9–1.1, or whose
+  re-measurement failed or is missing, is dropped from that record's ratios. If another record has
+  the case, that one decides; otherwise the case counts as unmeasured and the field keeps the
+  default (the safe side). Dropped cases and reasons are written in the generated header comment.
+  There is no switch to disable dropping (one rule).
+- Applied 2026-09-30: `apple-metal-3` regenerated from four records with `description` `"Apple M2"`
+  (five cases dropped; > 512 kept), `nvidia-blackwell` regenerated with unchanged values. Details:
+  commit `76812e94`.
 
-### 追記 7: PoC の道具 `tools/gpu-lab` — 掃引 → 生成 → 注入 → 実行を 1 ページで回す（2026-09-29・利用者裁定）
+### Addendum decision 9: sweep → generate → save → inject inside a user application (ADR 0117, the maintainer's ruling 2026-10-01)
 
-- 1 ページ 3 タブ（掃引 / プロファイル / Anima）・サーバ 1 本（`deno task bench:gpu-lab`・既定ポート 8790・localhost 限定・ポート転送で
-  別の機の Chrome から使う）。旧 2 ページ（掃引の Chrome ページ・Anima の確認ページ）は吸収して削除した。Deno の双子 CLI
-  （`tools/geometry-sweep/main.ts`・`tools/anima-residency/profile.ts`）は残る。
-- 掃引の候補集合は 3 段: `quick`（既定 + 4〜5 形）・**`quick+`（既定 — quick ∪ 登録済みプロファイルの採用幾何）**・`full`（格子全体）。
-  quick+ を既定にした理由: quick の固定集合には M2 の勝ち幾何（`reg128x32r8x4w8`）も RTX の i8a8 の勝ち幾何も無く、他の機で勝った幾何を
-  未知の機で試すのが安い（所要は quick とほぼ同じ）。CLI は `--set <quick|quick+|full>`（省略 = quick+・`--quick` は `--set quick` の別名）、
-  JSON は `settings.candidateSet`（互換の `settings.quick` は `candidateSet === "quick"` のときだけ true）。登録用の表は full で。
-- プロファイルのタブは生成器の純関数（`tools/geometry-sweep/derive.ts` — CLI と共有・Deno 非依存）でその場で表を作り、TS の生成物・
-  注入の JSON・アプリ用 TS（`@karume/runtime` の型を import）・登録のコマンドを出す。「適用」は GPU を取り直して注入する（Anima の
-  pipeline とダミーは畳む）。
-- Anima の JSON（`karume-anima-residency-browser/2`）に `geometryProfileRequested`（`auto` / `default` / `builtin:<id>` / `generated:<id>`）と
-  `geometryProfileInjected`（注入した表の値・auto では無い）を足した。段ごとの診断 `geometryProfile` は使われた表の id で、注入か埋め込みかは
-  この 2 欄で読む。
-- 検収はページの README「What to confirm」1〜7（利用者の実機で）。
-
-### 追記 8: gpu-lab での full 再走（M2・RTX 5070 Ti・2026-09-29 夜）— 1 ケース由来の規則の崩れと熱の影響
-
-- 入力 = 利用者が `tools/gpu-lab` で回した full（7 族 45 ケース・2,247 行・失敗 0・不一致 0・反復上限 16,384）:
-  M2 `outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json`・RTX `…-2026-09-29T20-42-08.545Z.json`。
-- **RTX**: 旧 full と合成して `nvidia-blackwell` を再生成した。登録時の `gemmRows` ≤ 64（`reg32x32r2x4w8` ×1.35・M = 64 の
-  1 ケース）と 65〜512（`reg128x128r8x8w16` ×1.48・M = 512 の 1 ケース）は、同じバケットの他のケースで大きく負ける
-  （前者は M 16 で ×0.66、後者は M 128 で ×0.41・M 256 で ×0.78・bmm M 512 で ×0.71〜0.77）ので既定へ戻した。
-  i8a8 の 3 欄（`tile128x64r8x4w16x16k16` ×1.19〜1.22）だけが残る。RTX の再測定比は全ケース範囲内（据え置き GPU）。
-- **M2**: 新 full 単独では `gemmRows` > 512 が既定へ戻る。原因は熱: matmul M 4096 のケースで候補 `reg128x32r8x4w8` が
-  37.3 ms（13:08 の掃引）→ 47.8 ms（21:04）に落ち、先に冷えた状態で測った既定（43.7 ms）に負けた。そのケースの
-  既定の再測定比は 1.160（範囲外 = 測り直しの目安）。linear M 4096 は ×1.75 のまま。掃引の記録（`defaultRepeat.driftRatio`）は
-  この揺れを捕まえているが、生成器は決定 4 のとおり見ないので、4 本を合成しても > 512 は既定へ戻る
-  （geomean(1.171, 0.915) = 1.035 < 1.05）。**`apple-metal-3` は再生成せず、3 本の表のまま据え置く**。
-  試算: 21:04 の掃引から再測定比が範囲外の 3 ケース（matmul M 4096・bmm M 64 N 128・bmm M 512 N 512）を除いて 4 本を合成すると、
-  > 512 は `reg128x32r8x4w8` ×1.647 で維持され、attention / conv2d は不変、i8a8 の 3 欄は full 格子で見つかった
-  > `tile64x64r4x8w8x16k16` ×1.13 / `tile32x64r4x8w8x8k16` ×1.16 / `tile16x128r4x8w16x4k16` ×1.13 に変わる。
-- 両機に共通の観察: ≤ 64 と 65〜512 の中で最良幾何が M ごとに割れる（RTX: M 64 ×1.38・M 512 ×1.48 は取れるのに、1 本の幾何では
-  バケット全体を ×1.05 以上にできない）。runtime の `gemmRowsGeometry` は狭義昇順なら任意の段数の規則を受けるので、細分化は
-  生成器（3 段固定）と決定 4「境界は掃引から作らない」の改定で足りる — 別起票（要判断）。
-- 裁定待ち: (a) 生成器が再測定比の範囲外のケースをその掃引の材料から外す（決定 4 の改定）、(b) 行数バケットの細分化。
-
-### 追記 9: gpu-lab の実機確認（RTX の前後一致・M5 の観察）と裁定 3 の承認（2026-09-29 夜〜30）
-
-- **RTX 5070 Ti の登録前後**: gpu-lab で `default` を注入した走行と、掃引から生成した表（値は登録済みと同じ）を注入した走行を
-  512²・seed 42 で比べた。PNG sha256 は f16 quant（`c3cef8d6bc64`）・既定 quant（`3b07b912c4d4`）とも一致。既定 quant の DiT 段 GPU 時間は
-  1.34〜1.38 s → 1.13〜1.16 s（×1.19 — 掃引の i8a8 ×1.19〜1.22 と一致）。f16 quant は同じ幾何（既定）なので同じ時間。
-  記録 = `outputs/bench-browser/anima-residency-browser-*_2026-09-29T21-21-11.708Z_tuned.json` / `…T21-32-20.323Z_default.json`
-  （JSON の `geometryProfileRequested` / `geometryProfileInjected` で見分ける）。
-- **Apple M5 の観察**（quick+・冷却あり・`geometry-sweep-browser-2026-09-29T21-37-17.817Z.json`・再測定比は 44 / 45 ケースが範囲内）:
-  Chrome は M5 も M2 と同じ `apple` / `metal-3` を名乗るので、`apple-metal-3` が自動で当たる。ところが M5 では M2 で勝った幾何が負ける:
-  linear M > 512 の `reg128x32r8x4w8` は ×0.89〜0.99（M2 ×1.71〜1.76）、attention ①QK ×0.96〜1.06、③PV ×0.85〜1.11、conv2d
-  `igemm128x64` ×0.82〜1.21、i8a8 ×1.02〜1.06。M5 の既定幾何の 1 dispatch は M2 の 1 / 4.3〜4.5（大 GEMM）で、M5 では既定
-  （128×128 タイル）がほぼ最良 — M5 単独の掃引から作る表は conv2d rows32 以外すべて既定になる。
-  つまり **同じ adapter の綴りの中に、最良幾何が逆の GPU が 2 つある**。決定 2（(vendor, architecture) の完全一致）だけでは分けられない。
-  M5 で `apple-metal-3` が当たったときの損は DiT 段で約 5%（linear ×0.94 前後）、VAE の conv2d で最大 18%。
-- **M5 の full でも同じ結論**（2026-10-01 記録・`geometry-sweep-browser-2026-09-29T22-31-21.284Z.json`・45 ケース・失敗 0・不一致 0・
-  再測定比の範囲外 3 件〈いずれも f32 attention〉）: M2 の表（`apple-metal-3`）の採用幾何は M5 で ×0.77〜1.10。M5 の full 単独から生成器で作る表は
-  `gemmRows` ≤ 64（`reg16x32r2x4w8` ×1.185）と conv2d rows32（`igemm128x64:wg8x16` ×1.071）以外は既定。詳細は
-  [research K-70](../research/2026-09-27-k70-metal-per-op.md) §14。
-- **裁定 3（行数バケットの細分化）は a で承認**（2026-09-29）: 掃引ケースの M（16 / 32 / 64 / 128 / 256 / 512 / ∞）を境界にした表を
-  プロファイルごとに作れるようにする。runtime の表引きは任意段数を受けるので、生成器の 3 段固定と決定 4「境界は掃引から作らない」の
-  改定で足りる。既定の表は 3 段のまま。着手は裁定 2 の後・別 ADR。
-- 裁定待ち: (2) 生成器が再測定比の範囲外のケースを外す（追記 8）、(4) Apple M2 と M5 の分け方（`description` を照合キーに足す /
-  `apple-metal-3` を自動適用から外す / 現状維持 + limitations に記録）。
-
-### 追記決定 7: 照合キーに `description` を足し、`match` を省略した表は注入専用にする・埋め込みの表を値として公開する（裁定 4 = a・2026-09-30）
-
-- 動機（追記 9）: Chrome は Apple M2 も M5 も `apple` / `metal-3` を名乗るので、(vendor, architecture) だけでは M2 で測った表が M5 に当たり
-  M5 が遅くなる。利用者が Chrome Beta のゲストモードで確かめたところ `description` は空だった（開発者向けフラグを立てると `"Apple M2"` が出る）。
-- `match` に `description`（`GPUAdapterInfo.description` との完全一致・空文字は「無い」）を足す。選択順は (vendor, architecture, description) の
-  完全一致 → (vendor, architecture) → vendor → 既定。同順位に 2 本当たる一覧は従来どおり fail loudly。`description` を持つ規則は vendor と
-  architecture も必須。
-- `match` を省略した表は自動選択の対象外（注入専用 = オプトイン）。埋め込みの一覧（`BUILTIN_GEOMETRY_PROFILES`）は 1 本のままで、
-  自動選択される表もされない表も同じ一覧に置く。判定関数やフラグではなくデータで持つ理由: 表が純データのままなので、ページが作る JSON でも
-  運べ、生成器が掃引の adapter から書け、テストが一覧を回して検査できる。名前の近さで選ぶ形（採らなかった案）へ滑らない。
-- `BUILTIN_GEOMETRY_PROFILES` を公開面（`@karume/runtime`）に値として出す。アプリは id で引いて `acquireGpu({ geometryProfile })` に渡す
-  （M2 なら `description` が取れて `"Apple M2"` を含むときだけ渡す、が想定の使い方）。選択関数と既定の表は出さない。
-- `apple-metal-3` は `match: { vendor: "apple", architecture: "metal-3", description: "Apple M2" }` に変える。結果: フラグ無しの Chrome では
-  Apple は全て既定（M5 が損しない・M2 は注入で ×1.75）、フラグ有りの Chrome と Deno（description に機種名）では M2 だけ自動で当たる。
-  `nvidia-blackwell` は architecture が十分に狭いので `description` を持たない。
-- 生成器: `--description <文字列>`（明示のみ）と `--opt-in`（`match` 省略）。ページは「description でも照合する」「注入専用」のチェック。
-
-### 追記決定 8: 生成器は既定の再測定比が範囲外のケースをその掃引の材料から外す（裁定 2 = a・2026-09-30・決定 4 の改定）
-
-- 動機（追記 8）: M2 の full 掃引で、熱により候補が遅く測られた matmul M 4096（再測定比 1.160）が、> 512 の欄全体を既定へ戻した。記録は
-  揺れを `defaultRepeat.driftRatio` で捕まえているのに、生成器は見ていなかった。
-- 規則: 掃引 1 本の中で、既定の再測定比が 0.9〜1.1 の外か、再測定が失敗 / 無いケースは、その掃引の材料から外す。他の掃引に同じケースが
-  あればそちらで判定し、無ければ「測っていない」扱いで欄は既定（安全側）。外したケースと理由は生成物の冒頭コメントに残す。
-  除外を無効にする口は作らない（規則は 1 つ）。
-- `apple-metal-3` を 4 本（09-27 quick・09-27 full・09-29 13:08 full・09-29 21:04 full）から再生成する。除外されるのは 21:04 の
-  matmul M 4096・bmm M 64 N 128・bmm M 512 N 512。期待 = > 512 は `reg128x32r8x4w8` ×1.65 前後で維持、attention / conv2d は不変、
-  i8a8 の 3 欄は full 格子で見つかった幾何に更新（結果は下の検収）。
-
-#### 追記決定 7 / 8 の検収（2026-09-30）
-
-- `apple-metal-3` を 4 本（09-27 quick・09-27 full・09-29 13:08 full・09-29 21:04 full）から `--description "Apple M2"` で再生成した。
-  比の材料から外れたケースは、21:04 の matmul M 4096（再測定比 1.160）・bmm M 64 N 128（0.800）・bmm M 512 N 512（1.176）に加え、
-  09-27 18:31 の attention ③PV self M 1024（1.228）と cross M 1024（1.126）— 後者 2 件は Consequences の表で「揺れを含む」と書いていたもの。
-
-  | 欄               | 3 本（09-29 昼）                    | 4 本 + 除外（09-30）                                                                                          |
-  | ---------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-  | `gemmRows` > 512 | `reg128x32r8x4w8` ×1.647            | 同じ幾何 ×1.647（除外しないと既定へ戻る）                                                                     |
-  | `attention.qk`   | `reg128x32r8x4w8` ×1.734            | 同じ幾何 ×1.754                                                                                               |
-  | `attention.pv`   | `reg64x64r8x4w16` ×1.494            | `reg32x64r4x8w8` ×1.635（2 位 `reg64x64r8x4w16` ×1.632）                                                      |
-  | `conv2d` 2 欄    | `igemm128x64:wg16x16`               | 同じ                                                                                                          |
-  | `i8a8` 3 欄      | `tile64x64r8x4w16x8k16` ×1.10〜1.13 | `tile64x64r4x8w8x16k16` ×1.128 / `tile32x64r4x8w8x8k16` ×1.156 / `tile16x128r4x8w16x4k16` ×1.133（full 格子） |
-
-  `attention.pv` の入れ替わりは 18:31 の 2 件の除外によるもので、1 位と 2 位の差は 0.2%（規則どおり幾何平均の大きい方）。
-- `nvidia-blackwell` は生成物の形式（除外の記録欄）が変わったので再生成し、値は不変（i8a8 3 欄のみ）。両方 `--check` バイト同一。
-- 自動選択: `apple-metal-3` は adapter の `description` が `"Apple M2"` のときだけ当たる。フラグ無しの Chrome（description 空）では Apple は既定。
-  M5 が `apple-metal-3` を受けて遅くなる形は無くなった（追記 9 の損は解消）。M2 でフラグ無しに ×1.75 を得るには注入する
-  （公開面の `BUILTIN_GEOMETRY_PROFILES` から id で引く）。
-- 検収: 選択順・門・公開面（+1 値）・per-profile の GPU テスト（B570・Uint32 一致）・生成器の除外規則（故障注入で赤）・独立レビュー
-  （中 2 件 = 除外は比だけに効かせる・掃引間の adapter 一致検査に description、を反映）。
-
-### 追記決定 9: 利用者アプリの中で掃引 → 生成 → 保存 → 注入を回す（ADR 0117・利用者裁定 2026-10-01）
-
-- 利用者ストーリーを足す: 利用者アプリが自分の端末で掃引し、表を作って保存し、次の `acquireGpu` に注入する。開発者が実機を持たない端末の
-  利用者も、自分の端末向けの表を得られる。入口は `@karume/runtime` のサブパス `./tune`（ADR [0117](0117-app-geometry-tuning.md) 決定 1 / 2）。
-- 決定 4 の「入力の門」を改定する: 量子化フラグ（`gpuTiming.quantized`）での一律拒否をやめ、観測ごとの丸め誤差の上界（比で 1% 以下）で
-  判定する。超えた観測はその掃引の比の材料から外す（追記決定 8 と同じ流儀）。壁時計だけの記録は引き続き拒む（ADR 0117 決定 3）。
-- `provenance` を構造化する（adapter の 4 欄・カーネルの指紋・ケース集合の版・候補集合 — ADR 0117 決定 4）。照合は純関数
-  `geometryProfileMismatch` でアプリが行い、runtime は注入時に照合しない（追記決定 6 のまま）。注入口に
-  `(adapterInfo) => GeometryProfile | undefined` の同期コールバック形を足す（ADR 0117 決定 6）。
-- 据え置く不変条件: acquire / Session の経路で測らない（決定 8・ADR 0022 追記の MUST。`./tune` の掃引は利用者が明示的に呼ぶ入口なので、
-  主語を「runtime」から「acquire / Session の経路」へ言い直す）・表は device の寿命の間は不変で、次の `acquireGpu` から効く・掃引は
-  専用の device で行い、推論と並走させない。
-- 責任の分界は ADR 0117 決定 9。runtime が保証するのは、注入された表を変えないこと・acquire / Session の経路で測らないこと・注入時の
-  構造検査だけ。アプリ内で作った表の出力一致の証拠は掃引の門（ケース集合の範囲）だけで、E2E の sha 門は掛からない。どの表で走ったかの
-  記録はアプリの責任。
+- New user story: an application sweeps on its own device, builds and saves a table, and injects it
+  into the next `acquireGpu`, so users of devices the developers do not own still get a tuned table.
+  Entry point: the subpath `./tune` of `@karume/runtime` (ADR [0117](0117-app-geometry-tuning.md)
+  decisions 1 / 2).
+- Decision 4's input check is amended: instead of rejecting on the quantized flag
+  (`gpuTiming.quantized`), each observation is judged by an upper bound on its rounding error (at
+  most 1% of the ratio); observations above it are dropped from that record's ratios (the same style
+  as addendum decision 8). Wall-clock-only records are still rejected (ADR 0117 decision 3).
+- `provenance` is structured (the four adapter fields, a kernel fingerprint, a case-set version,
+  the candidate set — ADR 0117 decision 4). Matching is done by the application with the pure
+  function `geometryProfileMismatch`; the runtime does not match at injection (as in addendum
+  decision 6). The injection entry point also takes a synchronous callback
+  `(adapterInfo) => GeometryProfile | undefined` (ADR 0117 decision 6).
+- Invariants kept: nothing is measured on the acquire / Session path (decision 8, ADR 0022 addendum
+  MUST; the subject is restated from "the runtime" to "the acquire / Session path" because the
+  `./tune` sweep is an entry point the user calls explicitly); a table does not change during the
+  device's lifetime and takes effect from the next `acquireGpu`; sweeps run on a dedicated device,
+  never alongside inference.
+- Responsibilities are split in ADR 0117 decision 9. The runtime guarantees only that it does not
+  change an injected table, does not measure on the acquire / Session path, and checks the
+  structure at injection. For a table built inside an application, the only evidence of output
+  identity is the sweep's check (over its case set); no end-to-end sha check applies. Recording
+  which table ran is the application's responsibility.

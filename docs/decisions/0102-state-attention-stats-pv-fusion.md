@@ -1,58 +1,68 @@
-# 0102: states attention の行統計と PV の任意融合
+# 0102: Optional fusion of row statistics and PV in states attention
 
-- Status: accepted（2026-09-15・利用者のattention最適化依頼の範囲）
-- 関連: [0067](0067-autoregressive-attention-vocabulary.md)、
-  [0058](0058-numerics-opt-in-contract.md)、[0096](0096-speculative-decoding.md)
-- 根拠: [調査・測定](../research/2026-09-15-attention-fusion.md)
+- Status: accepted (2026-09-15, within the maintainer's attention-optimization request); partly
+  superseded by [0104](0104-gemma-fast-quant.md) addendum 2026-09-26 (`parallel-fused` is declared in
+  the Gemma `i4-fast` presets, which are default presets — "defaults unchanged" and the M2 outcome
+  "not promoted"); on 2026-10-18 the browser comparison selection and the M2 condition for promotion
+  were withdrawn
+- Date: 2026-09-15
+- Related: [0067](0067-autoregressive-attention-vocabulary.md),
+  [0058](0058-numerics-opt-in-contract.md), [0096](0096-speculative-decoding.md)
+- Evidence: [research and measurements](../research/2026-09-15-attention-fusion.md)
 
-## 問題と選択
+## Problem and choice
 
-Gemma E2B の decode では各層が QK、行統計、PV の3 dispatchを発行する。
-行統計とPVを1カーネルにまとめ、行統計の一時バッファと1 dispatchを省く。
-QK・append・stateの所有権・commit順は変えない。
+Gemma E2B decode issues three dispatches per layer: QK, row statistics, PV. One kernel does the row
+statistics and PV, saving the temporary row-statistics buffer and one dispatch. QK, append, state
+ownership and commit order do not change.
 
-行統計の最大値と分母は256 lane、PVの部分和は16 laneで従来の順に計算する。
-行統計のlane番号は `lid.y * 16 + lid.x`。最大値を全員が読み終えてから
-分母で共有メモリを書き換え、分母を読み終えてからPVの部分和に使い回す。
-空行の `(amax, inv) = (0, 0)`、pad行の厳密0、ringの法がcapacityであることを維持する。
+The row maximum and denominator use 256 lanes and the PV partial sums 16 lanes, in the existing
+order; the row-statistics lane number is `lid.y * 16 + lid.x`. Shared memory is overwritten with the
+denominator only after every thread has read the maximum, and reused for PV partial sums only after
+every thread has read the denominator. An empty row stays `(amax, inv) = (0, 0)`, padded rows stay
+exactly 0, and the ring modulus stays the capacity.
 
-## 指定と互換性
+## Option and compatibility
 
-`SessionOptions.stateAttentionReduce` に `"parallel-fused"` を追加する。
-`"sequential"` と `"parallel"` の意味・既定・既存WGSL snapshotは維持する。
-Gemma通常版/QATのpipelineは既存の同名オプションで受ける。
-quant/defaultQuantとモデルの既定はこの段階では変更しない。
+Add `"parallel-fused"` to `SessionOptions.stateAttentionReduce`; the meaning, default and WGSL
+snapshots of `"sequential"` and `"parallel"` stay. The regular and QAT Gemma pipelines take it through
+the existing option of the same name. The quant / `defaultQuant` and model defaults do not change at
+this stage. (Superseded by ADR 0104 addendum on 2026-09-26: `stateAttentionReduce` is in the
+manifest `session` vocabulary, and the Gemma 4 `i4-fast` presets declare `parallel-fused`; `i4-fast`
+is the default preset of regular E2B and QAT E2B / E4B in the local mirrors on 2026-10-18.)
 
-融合は `M <= 8` かつ静的列上限 `colCap <= 1024` のstates形に限る。
-列上限はfullでcapacity、slidingでwindow−1+M。短い列でも実行時の論理長から
-別のpipelineを選ばない。対象外の形とreadonly attentionは従来のparallel経路を使う。
-深さタイルごとに行統計を再計算するため、長い列へ無条件には広げない。
+The fusion is limited to states shapes with `M <= 8` and a static column cap `colCap <= 1024`
+(`stateStatsPvEligible`, `packages/runtime/src/kernels/state-attention-stats-pv.ts`); the cap is the
+capacity for full attention and window − 1 + M for sliding. A short column does not select another
+pipeline from the logical length at run time. Other shapes and readonly attention use `parallel`.
+Row statistics are recomputed per depth tile, so long columns are not included unconditionally.
 
-融合前のparallelと加算順を保ち、実GPUではu32比較で検収する。
-sequentialとの同一性を新たに主張する変更ではない。
-既存の許容差・goldenを更新せず、MTP verify行0とdecodeの一致も別に確認する。
+The summation order of unfused `parallel` stays, and real GPUs are accepted by u32 comparison; no
+new identity with `sequential` is claimed. Tolerances and goldens are not updated; MTP verify row 0
+and decode identity are checked separately.
 
-## メモリと検収
+## Memory and acceptance
 
-`planStateAttention` が融合の適用と中間バイト数を決め、実行と見積りで共有する。
-`EstimateOptions.stateAttentionReduce` を指定すると同じ経路を見積る。
-省略時は従来の参照経路。Gemmaの見積りにはSession構築に使った不変の設定を渡す。
-この追加は保存IR/manifestの変更を伴わない。
+`planStateAttention` decides the application and the intermediate bytes, shared by execution and
+estimation. `EstimateOptions.stateAttentionReduce` estimates the same path; omitted, the estimate
+follows the default reference path. The Gemma estimate receives the invariant settings used at
+Session construction. No change to the stored IR or the manifest is needed.
 
-単体の非有限値分類、GQA、pad、行分割、ring周回、u32近傍の論理位置、
-Session経由の適用/非適用キー、メモリ見積り、実モデルの生成とMTPを検証する。
-ブラウザ比較の初期選択は両E2Bでparallel→parallel-fused→parallel-fused→parallel、
-8ロード・80生成。M2での採用判断を経てからモデル既定への昇格を検討する。
+Checks: non-finite classes, GQA, padding, row splitting, ring wrap-around and logical positions near
+the u32 range in the unit; applied / not-applied keys through a Session; the memory estimate;
+generation and MTP of the real model. Withdrawn 2026-10-18: the browser comparison selection and the
+M2 condition for promotion (page not ported — ADR 0127 decision 5; defaults: ADR 0128 decision 1).
 
-## 見送った案
+## Rejected alternatives
 
-PVの担当幅を64/256へ広げる案は文脈が長いほど遅くなり、256幅は4096列の1条件で
-既存の絶対許容差5e-6も超えた。検証条件は緩めず見送る。
-正規化済みの重みを共有する案も検証したが、全体の追加利得が明確でないため、
-共有配列を増やさない融合を先に採る。外部のソースコードは複製していない。
+Widening the PV lanes to 64 / 256 slowed down with longer context, and 256 lanes exceeded the
+absolute tolerance of 5e-6 in one 4096-column case; the check is not relaxed. Sharing normalized
+weights gave no clear end-to-end gain, so the fusion without extra shared arrays came first. No
+external source code is copied.
 
-## M2追試後（2026-09-15）
+## Addendum (2026-09-15) — after the M2 check
 
-[利用者の80生成](../research/2026-09-15-linear-static-quantize-fusion.md#利用者のm2-attention結果)は全て出力一致した。
-通常E2Bは−0.88%、QAT E2Bは−0.16%で、今回のM2では高速化の根拠にならない。
-任意指定を維持しモデル既定へは昇格しない。次候補の画面では従来parallelを基準にする。
+The maintainer's 80 generations on M2 matched (regular E2B −0.88%, QAT E2B −0.16%): no case for
+promotion, the option stayed opt-in (user M2 attention results in
+[research 2026-09-15](../research/2026-09-15-linear-static-quantize-fusion.md)). ADR 0104 promoted it
+on 2026-09-26 on Intel Arc B570 flag-bench measurements.

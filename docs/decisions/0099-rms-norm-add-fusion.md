@@ -1,55 +1,67 @@
-# 0099: RMS正規化と後続加算を任意指定で融合する
+# 0099: Optional fusion of RMS normalization with the following add
 
-- Status: accepted（2026-09-13）。runtimeは任意指定。M2検収は完了。モデル既定への組み込みは別段階
-  → [ADR 0104](0104-gemma-fast-quant.md) で E2B の既定 quant へ宣言（2026-09-15）。
-- 関連: [0017](0017-rms-norm-conv2d-clamp-min.md)、[0058](0058-numerics-opt-in-contract.md)、[0068](0068-decode-exit-multi-output.md)、[0098](0098-linear-gemv-parallel.md)。
+- Status: accepted (2026-09-13; opt-in in the runtime); partly superseded by
+  [0104](0104-gemma-fast-quant.md) (2026-09-15: the Gemma `i4-fast` presets, E2B's default, declare
+  `fuseRmsNormAdd: true` — decision 4's "defaults unchanged") and by
+  [0128](0128-default-preset-original-weights.md) decision 1 (2026-10-17: the M2 condition on
+  promotion); on 2026-10-18 decision 1's width limit was re-graded to SHOULD and decision 5 withdrawn
+- Date: 2026-09-13
+- Related: [0017](0017-rms-norm-conv2d-clamp-min.md), [0058](0058-numerics-opt-in-contract.md),
+  [0068](0068-decode-exit-multi-output.md), [0098](0098-linear-gemv-parallel.md)
 
-## 背景
+## Context
 
-Gemma通常/QAT E2Bには、内部値が専有される隣接の`rms_norm → add`が106本ある。
-正規化結果がaddの第1引数になるのは1本、第2引数になるのは105本。両順序の受理と実配布の融合数を検査する必要がある。
-直接つなぐと乗算と加算が融合して丸めが変わる。workgroupメモリによる丸め保持は単体で利得を相殺した。
-整数演算を挟む候補は、RTXのDenoで演算出力のu32、Chromeで固定生成列が参照と一致した。追加メモリなしで融合できた。
+Regular and QAT Gemma E2B contain 106 adjacent `rms_norm → add` pairs with a private intermediate;
+the normalized value is the first add argument in 1 and the second in 105, so both orders and the
+fusion count on the real distribution need checks. Chaining them directly lets the compiler fuse the
+last multiply with the add, which changes rounding. Keeping the rounding through workgroup memory
+cancelled the gain. Inserting an integer operation matched the reference (output u32 on Deno / RTX,
+a fixed generated sequence on Chrome) with no extra memory. Fusion alone did not speed up regular
+E2B; with a submit limit of 768 it did (2026-09-13). Dispatch counts and rejected candidates: the
+[research record](../research/2026-09-13-rms-norm-add-fusion.md).
 
-融合だけでは通常E2Bの全体速度が改善しなかった。診断付き経路では1128→1022 dispatchとなり、
-投入上限1024の境界を跨いで2→1 submitになる。投入頻度を独立に振ると、上限768と融合の組み合わせで改善した。
-CPUとGPUの仕事の重なりが関係するという推測はあるが、その詳細をGPU timestampの合計だけで断定しない。
+## Decision
 
-## 決定
+1. Add `SessionOptions.fuseRmsNormAdd?: boolean`, default false; a wrong type is rejected at
+   Session construction. Only adjacent f32 RMS → add pairs with the same shape, whose intermediate
+   has one consumer and is not a graph output, are accepted. The last dimension SHOULD be limited to
+   the widths the unit check covers — today 256 / 1536 / 2560
+   (`packages/runtime/src/runtime/fusion-rules/rms-norm-add.ts`) — and a width is added together
+   with the same width in the unit u32 check (re-graded 2026-10-18 to SHOULD: the limit comes from
+   test coverage, not from the arithmetic). Broadcast, duplicate bindings, non-adjacent forms and
+   other widths run on the existing path. `lastRunFusions.rmsNormAdd` reports the applications.
+2. The kernel shares the reduction and grid-stride of the 256-thread RMS, with two keys that keep the
+   left / right order of the add. The normalized value is reinterpreted as u32, XORed with a uniform
+   0 (the fourth word of `rmsNormParams`) and turned back into f32 before the add; this is not
+   simplified into a constant-expression bitcast round trip. A check that changes the mask confirms
+   that the integer operation runs.
+3. This is not a specified guarantee of bit identity on every GPU: WGSL allows
+   [reassociation and fusion](https://www.w3.org/TR/WGSL/#reassociation-and-fusion) and leeway for
+   special values ([bitcast](https://www.w3.org/TR/WGSL/#bitcast-builtin)). The default reference
+   path, the original key and WGSL, and the goldens stay. A mismatch with the reference does not
+   weaken the tolerance; cause, quality and speed are examined as a separate execution setting.
+4. `Gemma4Pipeline` and `Gemma4QatPipeline` accept `fuseRmsNormAdd` and the existing runtime option
+   `submitPolicy` and pass them to the target and the drafter. Fusion does not change the submit
+   limit implicitly; the two settings are independent. The defaults of the runtime, models, CLI and
+   quant definitions, the hub storage format, the exporter and the published revisions do not
+   change. (Superseded by ADR 0104 on 2026-09-15: `fuseRmsNormAdd` is in the manifest `session`
+   vocabulary (`packages/hub/src/manifest.ts`) and the `i4-fast` presets declare it.)
+5. Withdrawn 2026-10-18: the three settings on the Chrome comparison page (the Deno-era measurement
+   tools were not ported — ADR 0127 decision 5).
 
-1. `SessionOptions.fuseRmsNormAdd?: boolean`を追加する。省略時はfalse。不正な型はSession構築時に拒否する。
-   隣接するf32のRMS→add、同一shape、内部値の消費者が1本でgraph outputでない形だけを受理する。
-   最終次元は単体検収した256/1536/2560に限定し、broadcast、重複binding、非隣接の形は既存経路で実行する。
-   診断の`lastRunFusions.rmsNormAdd`に適用数を出す。
-2. 256 thread版RMSの縮約・grid-strideを共用し、加算の左右を維持した2種類のキーを使う。
-   正規化結果をu32へ再解釈し、uniformの0とのXORを通してf32に戻してから加算する。
-   `rmsNormParams`の第4語の0を使い、定数式のbitcast往復へ簡略化しない。
-   maskの値を変える検査で、この整数演算が実行されることも確認する。
-3. 整数演算を挟むことは、全GPUでのビット一致の仕様保証ではない。
-   WGSLは浮動小数点の再結合・融合や特殊値の扱いに裁量を認めるため、既定の参照経路、元のキーとWGSL、goldenを維持する。
-   参照との不一致が出た場合も許容誤差を弱めず、別の実行設定として原因・品質・速度を検査する。
-   根拠となる仕様は[WGSLの再結合・融合](https://www.w3.org/TR/WGSL/#reassociation-and-fusion)と[bitcast](https://www.w3.org/TR/WGSL/#bitcast-builtin)。
-4. `Gemma4Pipeline`と`Gemma4QatPipeline`に`fuseRmsNormAdd`と既存runtime型の`submitPolicy`を渡せるようにする。
-   target/drafterへ同じオプションを渡す。融合は投入上限を暗黙に変更せず、両設定を独立にする。
-   runtime・モデル・CLI・quant定義の既定は変えない。hubの保存形式・exporter・公開revisionも変更しない。
-5. Chrome比較画面で「従来」「投入上限768のみ」「融合 + 上限768」を選べるようにする。
-   上限768は既存の時間予算・安全率を保ち、`maxChunkSize`だけを下げる。
-   初期選択は3設定の往復、通常/QAT E2B、並列GEMV、細分化バケット。6設定×2モデル＝12設定・120生成。
-   実行した融合フラグと投入上限をJSONへ残し、Transformers.jsには適用しない。
+## Acceptance
 
-## 検収と採用範囲
+Checked on 2026-09-13: byte-identical original 128 / 256-thread RMS keys and WGSL; matcher accepts
+both orders, rejects shared, public, broadcast, non-adjacent and unchecked-width forms, and fuses all
+106 pairs; u32 identity of finite values with NaN classes, signed zero, cancellation, forced
+grid-stride, input lifetime and first rows for M = 1 / 4 / 8; real-weight generation, speculative
+verify row 0 and decode rows in u32. Speed is measured on the normal GPU greedy output path, not the
+diagnostic path. Promotion to a default waited for the maintainer's M2 check (superseded by ADR 0128
+decision 1 on 2026-10-17: the default preset is chosen per model by a recorded procedure).
 
-- 元の128/256 thread版RMSのキー・WGSLがバイト同一であること。
-- matcherの既定、両引数順、共有・公開・broadcast・非隣接・未検収幅の拒否、実配布106本。
-- 有限値のu32一致、NaN分類、符号付き0、相殺、強制grid-stride、後続consumerまでの入力寿命、M=1/4/8の先頭行一致。
-- 実重みの生成一致と、投機のverify行0/decode行のu32一致。既存のgolden・比較条件は維持する。
-- 通常のGPU greedy出力経路で全体を往復計測する。診断付き経路は出力取得と計測負荷が異なるため、速度の正本にしない。
-- `deno task verify`を通し、M2は利用者が比較画面で追試する。M2未検収の段階で高速化付きquantの既定へ昇格しない。
+## Addendum (2026-09-13) — after the M2 check
 
-数値・生データ・不採用候補は[調査記録](../research/2026-09-13-rms-norm-add-fusion.md)を参照する。
-
-## M2追試後の状態（2026-09-13）
-
-[利用者の120生成](../research/2026-09-13-rms-subgroup-reduction.md#利用者のm2結果)で参照との一致と小幅な速度向上を確認した。
-融合＋上限768を次候補の比較基準にする。融合のquant選択と、ADR 0038のホスト政策である投入上限は別の設定であり、
-この検収だけでsubmitPolicyをquantの保存語彙へ追加しない。モデル既定への組み込みは未完。
+The maintainer's 120 generations on M2 matched the reference with a small gain (user M2 results in
+[research 2026-09-13](../research/2026-09-13-rms-subgroup-reduction.md)). The fused quant choice and
+the submit limit (a host policy) stay separate: `submitPolicy` is not added to the quant storage
+vocabulary (reaffirmed by ADR 0104). ADR 0104 declared the fusion in the default preset on 2026-09-15.

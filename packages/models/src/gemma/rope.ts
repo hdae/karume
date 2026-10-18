@@ -225,7 +225,7 @@ export const gemma4RopeInputs = (
 ): Record<string, Tensor> => ropeInputs(spec, positions, false);
 /**
  * 固定 QAT 専用の f32 段丸め。pad を含む物理 chunk の RoPE 入力4本を作る。
- * DECIDED: [ADR 0097 追記5](../../../../docs/decisions/0097-gemma4-qat-integration.md#追記-5--固定-qat-recipe-と数値比較の扱い2026-09-11)。
+ * DECIDED: [ADR 0097 追記5](../../../../docs/decisions/0097-gemma4-qat-integration.md#addendum-5-2026-09-11--fixed-qat-recipe-and-how-numeric-comparisons-are-treated)。
  */
 export const gemma4QatRopeInputs = (
   spec: Gemma4RopeSpec,

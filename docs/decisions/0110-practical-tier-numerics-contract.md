@@ -1,208 +1,209 @@
-# 0110: 実用層の数値契約 — 参照層 / 実用層・契約クラス E / C / R / Q・デバイス内決定性・sha 行の分類
+# 0110: Numerics contract of the practical presets — reference path and practical presets, contract classes E / C / R / Q, in-device determinism, classes of sha256 reference values
 
-- Status: accepted（2026-09-26 — 利用者裁定: 「遅く正確な参照層」と「実用精度で速い実用層」の 2 層に
-  分ける・実用層でもデバイス内決定性 MUST・イテレーション 1「契約と土台」の計画を承認）
+- Status: accepted (2026-09-26 — the maintainer's ruling: split the numerics into a slow, exact
+  reference path and fast practical presets; in-device determinism is MUST for the practical presets
+  too; the plan of phase 1 "contract and groundwork" approved)
 - Date: 2026-09-26
-- 関連: ADR [0058](0058-numerics-opt-in-contract.md)（数値 opt-in 契約 — 本 ADR はその決定 2 / 4 / 6 を
-  2 層の語彙で読み替え、帯の導出規則と恒真化対策を足す）/ [0106](0106-device-keyed-references.md)
-  （環境キー別の sha 行 — 本 ADR 決定 7 が行のクラスを足す）/ [0074](0074-quant-seat-naming.md)（`fast`
-  トークン = 検収済みの高速化ノブ束）/ [0104](0104-gemma-fast-quant.md)（gemma の `i4-fast`）/
-  [0025](0025-w8a8-linear-execution.md)・[0026](0026-w8a8-deberta-deployment.md)・[0030](0030-attention-a8-execution.md)・
-  [0031](0031-attention-score-f16-storage.md)（E2E 帯が恒真化した実測の出典）/
-  [0096](0096-speculative-decoding.md)（投機デコードの自己採算ゲート — 決定 6 の適用例）。
-  調査の記録は `.claude/reviews/2026-09-25_perf-recon/`（git 追跡外・SUMMARY.md §2〜§3・§11）。
+- Related: [0058](0058-numerics-opt-in-contract.md) (numerics opt-in contract, restated here for the
+  two paths) / [0106](0106-device-keyed-references.md) (per-environment sha256 reference values) /
+  [0074](0074-quant-seat-naming.md) (the `fast` token) / [0104](0104-gemma-fast-quant.md) (gemma
+  `i4-fast`) / [0025](0025-w8a8-linear-execution.md), [0026](0026-w8a8-deberta-deployment.md),
+  [0030](0030-attention-a8-execution.md), [0031](0031-attention-score-f16-storage.md) (E2E bands
+  that went vacuous) / [0096](0096-speculative-decoding.md) (self-tuning gate, decision 6) /
+  [0126](0126-numerics-profiles.md) (numerics profiles; it planned to amend decisions 1, 7 and 8 but
+  was deferred on 2026-10-18, so they stand unchanged). Notes: `.claude/reviews/2026-09-25_perf-recon/`.
 
 ## Context
 
-Karume の「ビット同一」は 2 つの主張の束である。(a) 活性量子化・合成の変種（w8a8 / a8 / c16 / s16 等）は
-自前の TS 参照実装（オラクル）と atol=0 で一致する。格納型 i8 / f16 / i4 × f32 計算の GEMM / conv 族の
-参照経路は f64 参照との op 帯（`GEMM_TOLERANCE`）で、ビット一致の門を持つのは展開（dequant）と
-「常駐 ≡ CPU 展開」・「GEMV ≡ GEMM」の突合である。(b) 同じ機・同じ入力の出力 sha256 が動かない（ADR 0106 の環境キー別の行）。
-torch との golden 比較は最初から許容差つきで、ビット同一を主張したことは無い
-（`packages/runtime/tests/e2e_golden_test.ts` の `GOLDEN_TOLERANCE`）。
+Karume's "bit-identical" is two claims. (a) Activation-quantized and composed variants (w8a8 / a8 /
+c16 / s16 …) match the project's own TS reference implementation (the oracle) with atol = 0; the
+reference path of the GEMM / conv family with i8 / f16 / i4 storage and f32 compute is checked by the
+op band against f64 (`GEMM_TOLERANCE`), with bit-exact checks only for dequantization, "resident ≡ CPU
+dequantization" and "GEMV ≡ GEMM". (b) The output sha256 for the same input on the same machine does
+not move (ADR 0106). Torch golden comparisons always had a tolerance (`GOLDEN_TOLERANCE` in
+`packages/runtime/tests/e2e_golden_test.ts`).
 
-数値を変える高速化は ADR 0058 で「1 最適化 = 1 個の named option（席）・既定は参照経路・3 点セットの
-門」として入居してきた。2026-09-25 の棚卸しで次が分かった。
+Numerics-changing speed-ups entered under ADR 0058 (one named option each, the reference path as
+default, a three-part check). The review of 2026-09-25 found:
 
-- **2 層は半分できている。** 参照層 = runtime の省略値の経路 + 厳密オラクル + sha 門 + WGSL スナップ
-  ショット。実用層 = quant 席の `session` が束ねた opt-in の経路（gemma の `i4-fast`・anima の
-  `f16+dit8-a8-attn8-s16` 等・ADR 0074 追記 2026-09-19 の `fast` トークン）。
-- **無いのは実用層の受け入れ契約。** ADR 0058 決定 4 ②の「A/B 帯門」は近似を許す文言だが、帯の導出
-  （実測ドリフト × マージン）はあっても、**参照経路より広い帯**の扱いと**恒真化対策**が無い。
-- **帯で入った席は既に 3 つある**（`stateAttentionReduce: "parallel"`・`linearGemvReduce: "parallel"`・
-  subgroup 縮約の 2 変種）。いずれも加算順の入れ替えで、f64 参照との帯は参照経路の op 帯のまま。
-  参照経路より広い帯（近似カーネル）で入った席は 0。4 点型（決定 3）を全部そろえているのは
-  `stateAttentionReduce` の 1 席だけで、他は一部が欠けている（付表）。
-- **モデル出口の帯は恒真化する**（どんな実装でも通る）。anima w8a8（判別帯 = 実測の 1.6 倍・ADR 0025
-  決定 6）・DeBERTa（1 層目 10,058 倍 / 24 層目 1.46 vs 1.33・ADR 0026）・anima attn a8 運用形
-  （1.35 倍・ADR 0030）・s16 運用形（1.16 倍・ADR 0031）の 4 事例。機序は、活性量子化が不連続関数で
-  上流の 1e-5 級の差が数層で飽和すること、opt-in を積むほど後段の検出器が立たないこと、対照（torch
-  鏡像・別経路の f32）側にも実装誤差があることの 3 つ。
-- **anima の sha 行 11 ケース中 10 ケースは実用席で焼かれている**（`f16+dit8-a8-attn8-s16`・
-  2026-08-05 から）。ADR 0058 決定 2「sha 門は参照経路で凍結」の字義と食い違う。一方でその行が anima
-  実用席の**唯一の E2E 検出器**になっている（anima の実用席に E2E census も A/B 帯門も無い）。
-- **gemma の投機デコードは自己採算ゲートが壁時計で M=1 / M=4 を切り替える**（ADR 0096 決定 8）。
-  docs は「既定席では同じ seed でも稀に出力が変わりうる」と書いていた。2026-09-26 に B570 で実測した
-  ところ、attention × GEMV の全組で verify 行 0 と decode の logits が u32 一致し、既定席の投機あり /
-  無しの 200 token × 3 ケースも相違 0 だった（ADR 0096 追記 2026-09-26）。
+- **The two paths half exist.** Reference path = the runtime's omitted-value path + strict oracles +
+  sha256 regression checks + WGSL snapshots. Practical presets = opt-in paths bundled by a preset's
+  `session` (gemma `i4-fast`, anima `f16+dit8-a8-attn8-s16`; the `fast` token of ADR 0074).
+- **No admission contract for practical presets.** ADR 0058 decision 4 ② derives an A/B band from
+  measured drift × margin, but says nothing about bands **wider than the reference path's** and has
+  no defence against vacuous checks. Three options were admitted on a band
+  (`stateAttentionReduce: "parallel"`, `linearGemvReduce: "parallel"`, two subgroup reductions), all
+  reordering additions; only `stateAttentionReduce` has all four points of decision 3.
+- **Model-exit bands go vacuous** (any implementation passes): anima w8a8 (1.6 × measured, ADR 0025
+  decision 6), DeBERTa (layer 1 10,058× / layer 24 1.46 vs 1.33, ADR 0026), anima attention a8
+  (1.35×, ADR 0030), s16 (1.16×, ADR 0031). Activation quantization is discontinuous, so 1e-5
+  upstream differences saturate within a few layers; stacked opt-ins remove later detectors; the
+  control (a torch fake-quant reference or another f32 path) has its own implementation error.
+- **10 of anima's 11 sha256 cases were recorded on a practical preset** (since 2026-08-05), against
+  the letter of ADR 0058 decision 2, yet they were that preset's **only E2E detector**.
+- **gemma's speculative decoding switches M=1 / M=4 by wall clock** (ADR 0096 decision 8); on the
+  B570 (2026-09-26) both paths matched bit for bit (ADR 0096 addendum of 2026-09-26).
 
 ## Decision
 
-### 1. 層の定義
+### 1. The two paths
 
-- **参照層** = runtime の省略値の経路。省略値は変えない（ADR 0058 決定 2 を維持）。
-- **実用層** = quant 席の `session` が束ねた opt-in の経路。束の正本は manifest の quant 席だけで、
-  models 側に**値**の既定表を持たない（受理する方針表は持ってよい — 別 ADR）。
-- 層は Session 生成時に固定する（`SessionOptions` は構築時の静的ノブ）。同じ Session の中で層は動かない。
+- **Reference path** = the runtime's omitted-value path. The omitted values do not change (ADR 0058
+  decision 2 is kept).
+- **Practical presets** = the opt-in paths bundled by a preset's `session`. The only source of a
+  bundle is the manifest preset; `models` keeps no table of default **values** (an acceptance table
+  is allowed — ADR 0111).
+- The path is fixed at Session construction (`SessionOptions` are static construction-time options)
+  and does not change within a Session.
 
-### 2. 契約クラス（実用層に入る変種は 1 つを宣言する・強い順）
+### 2. Contract classes (a variant in a practical preset declares one, strongest first)
 
-| クラス          | 主張                                                         | 検証の形                      | 現在の入居者（付表）                               |
-| --------------- | ------------------------------------------------------------ | ----------------------------- | -------------------------------------------------- |
-| **E（鏡像）**   | TS 参照実装と atol=0                                         | 厳密比較                      | w8a8・attention a8 の ①QK・融合と融合前の u32 一致 |
-| **C（合成）**   | 「ホストで丸めた入力 + 既存 f32 カーネル」と atol=0          | 厳密比較                      | c16・s16                                           |
-| **R（加算順）** | 加算順だけが違う。f64 参照との帯は**参照経路の op 帯のまま** | 4 点型（決定 3）              | 並列 GEMV・state attention parallel・subgroup 縮約 |
-| **Q（近似）**   | 参照経路の op 帯より**広い**帯                               | 4 点型 + 誤差モデル（決定 4） | 0（予約）                                          |
+| Class                  | Claim                                                                      | Form of the check                      | Current members (decision 9)                           |
+| ---------------------- | -------------------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------ |
+| **E (mirror)**         | atol = 0 against the TS reference implementation                           | exact comparison                       | w8a8, attention a8 ① QK, fused vs unfused u32 equality |
+| **C (composition)**    | atol = 0 against "host-rounded input + the existing f32 kernel"            | exact comparison                       | c16, s16                                               |
+| **R (addition order)** | only the addition order differs; the f64 band **is the reference op band** | four points (decision 3)               | parallel GEMV, state attention parallel, subgroup      |
+| **Q (approximation)**  | a band **wider** than the reference path's op band                         | four points + error model (decision 4) | none (reserved)                                        |
 
-- C の atol=0 は、WGSL の f32 → f16 縮小変換が最近接偶数丸め（RTE）であることに依存する。仕様はこの丸め方向を
-  実装定義とするので、C の門は device ごとに RTE を検査した上で成り立つ（ADR 0028 / 0031 の門の形）。
-- MUST: 下位クラスを選ぶ前に、上位クラスが作れない理由を ADR に書く。恒真化対策の 1 本目である。
-  例: IEEE で厳密な演算（加減乗・明示 `fma`）だけで組める近似は TS 鏡像で E にできる見込みがある。
-  組込みの超越関数（`exp` 等）を使う近似はドライバ差で E にできないが、統計の門つきの鏡像（ADR 0030
-  の qP）という前例がある。
+- C's atol = 0 relies on f32 → f16 narrowing rounding to nearest even (RTE), implementation-defined
+  in WGSL; a C check holds after a per-device RTE check (ADR 0028 / 0031).
+- MUST: before choosing a weaker class, the ADR states why a stronger class cannot be built (the first
+  defence against vacuous checks). IEEE-exact operations (add, subtract, multiply, explicit `fma`)
+  can probably give E with a TS mirror; built-in transcendentals (`exp` …) cannot (driver
+  differences), but a mirror with a statistical check (qP, ADR 0030) is a precedent.
 
-### 3. カーネル門の 4 点型（R と Q に MUST）
+### 3. The four-point kernel check (MUST for R and Q)
 
-`gpu_state_attention_parallel_test.ts:1-18` の型を一般化する。
+Generalised from `packages/runtime/tests/gpu_state_attention_parallel_test.ts` (lines 1–18):
 
-1. f64 参照との帯（R は参照経路の op 帯・Q は誤差モデルの上界）。
-2. 参照経路との A/B 帯（同じ入力を参照経路と実用変種に流した差）。
-3. 構造的保証の厳密一致（特殊値・pad 行の厳密 0・−inf のビット列・NaN 伝播・幾何不変・同一入力の
-   2 回 dispatch のビット同一）。
-4. 故障注入で ① か ② が赤になる記録（門が空振りでない証明）。
+1. The band against f64 (R: the reference op band; Q: the error model's upper bound).
+2. The A/B band against the reference path (the same input through both).
+3. Exact checks of structural guarantees (special values, exact 0 on pad rows, the −inf bit pattern,
+   NaN propagation, geometry invariance, two dispatches of the same input bit-identical).
+4. A record of a fault injection that turns ① or ② red (the check is not vacuous).
 
-census（席を指定したとき変種が実際に走ること）は別の門で持つ（ADR 0058 決定 4 ③）。
+The census (the variant runs when selected) is a separate check (ADR 0058 decision 4 ③).
 
-### 4. 帯の導出規則
+### 4. Band derivation rules
 
-- R の f64 帯 = 参照経路の op 帯（`packages/runtime/tests/helpers/op-tolerance.ts` の同クラス）。
-  A/B 帯 = 実測最悪 × 4 以上、かつ理論上界（f64 帯の 2 倍）以下。
-- Q の f64 帯 = 誤差モデルの理論上界。実測の消費率が 1/4 以下であることを摂動コーパスで確かめる。
-- 帯は**宣言**であり、環境キー別の行にしない。`KARUME_REFERENCE` の作るモードで書き換えない（ADR 0106
-  代替案 4 の却下を維持）。環境別の緩めが要ると判明した Q の帯だけ、ADR 0106 追記決定 1 の形（その機の
-  行だけ緩める）を取る。
-- MUST NOT: 「実測の 5〜10 倍」を E2E の帯の導出に使う（ADR 0025 決定 6 の一般化）。
+- R: f64 band = the reference op band (same class in `packages/runtime/tests/helpers/op-tolerance.ts`);
+  A/B band ≥ 4 × the worst measured and ≤ the theoretical bound (2 × the f64 band).
+- Q: f64 band = the error model's bound; a perturbation corpus shows at most a quarter of it is used.
+- A band is a **declaration**, not a per-environment value; the writing modes of `KARUME_REFERENCE`
+  do not rewrite it (ADR 0106 alternative 4 stays rejected). Only a Q band shown to need a
+  per-environment relaxation takes the form of the ADR 0106 addendum decision 1 (that machine only).
+- MUST NOT: derive an E2E band as "5–10 × the measured" (ADR 0025 decision 6, generalised).
 
-### 5. E2E の A/B 門の位置づけ（数値契約ではない）
+### 5. The E2E A/B check (not a numerics contract)
 
-モデル出口の帯は数値契約ではない。E2E が担うのは次の 5 つだけで、比較相手は**同じ機の参照層**
-（torch golden は使わない）。
+A model-exit band is not a numerics contract. E2E carries only these five items, against **the
+reference path on the same machine** (not torch goldens):
 
-1. **census MUST**: 束の各ノブについて変種キーの本数。完全適格なら参照変種のキーは 0 本。
-2. **床 MUST**: 同じ機・同じ入力・**同じ重み（同じ格納型）で `session` が空の席**と 1 bit 以上違う
-   （束全体の沈黙縮退の検出）。anima の既定席 `f16+dit8-a8-attn8-s16` の対照は `f16+dit8` である
-   （`f16` は重みが違うので床が恒真になる）。同機の参照層は決定的なので対照側の雑音は 0 で、束全体の
-   床は分離比に依らず常に置ける。ノブ単位の縮退は ① が持つ（積層の機序は対照を替えても変わらない）。
-3. **崩壊上限 MUST**: 観測点の相対 RMS が上限以下・非有限なし。上限 = 観測点の実測 × 2 程度（ADR 0028 の
-   1.6 倍・irodori の 2.0 倍が前例）。量子化席なら理論値との整合を docstring に残す。
-4. **観測点は席が最初に効いた直後に置く MUST**（DiT = step 1 の latent・encoder = 1 層目の出口・
-   LLM = 先頭の logits）。最終出力（PNG / WAV / token 列）は記録するが帯にしない。
-5. 各門の docstring に、その門を赤にした故障注入を 1 つ以上残す（床 = ノブを外す・上限 = scale を 2 倍
-   にする 等）。
+1. **Census MUST**: variant keys per option of the bundle; fully eligible ⇒ 0 reference-variant keys.
+2. **Difference floor MUST**: the output differs by at least one bit from the preset with **the same
+   weights (same storage dtype) and an empty `session`** on the same machine and input (detects a
+   silent fallback of the whole bundle). For anima's `f16+dit8-a8-attn8-s16` the control is
+   `f16+dit8` (`f16` has other weights and would make the floor vacuous). The same-machine reference
+   path is deterministic, so the floor can always be set; fallback of a single option is item ①.
+3. **Collapse ceiling MUST**: relative RMS at the observation point under the ceiling, no non-finite
+   values. Ceiling ≈ 2 × the measured value (precedents: 1.6× in ADR 0028, 2.0× for irodori); for a
+   quantized preset the docstring records agreement with the theoretical value.
+4. **The observation point MUST sit right after the preset first takes effect** (DiT = the latent
+   after step 1; encoder = layer 1 output; LLM = the first logits). Final outputs (PNG / WAV / tokens)
+   are recorded but carry no band.
+5. Each check's docstring records at least one fault injection that turned it red.
 
-実装の形（結果の席・逐次 2 pipeline・帯の定数）は A/B 門の実装 ADR が持つ。`sharedWeights` による
-2 Session 同居は配布コンテナに `shared` 宣言が無いため使わない。
+The implementation form (result names, sequential pipelines, band constants) belongs to the ADR that
+implements the check. Sharing weights between two Sessions through `sharedWeights` is not used,
+because the distribution containers carry no `shared` declaration.
 
-### 6. デバイス内決定性 MUST（実用層を含む）
+### 6. In-device determinism MUST (practical presets included)
 
-同じ環境・同じ席・同じ入力・独立 2 Session で出力バイトが同一であること。
+The same environment, preset and input in two independent Sessions give byte-identical output.
 
-- MUST NOT: 浮動小数の atomics・到着順で合流する形（last-arriver merge）・キーに載らない実行時パラメータ
-  （subgroup 幅など）で縮約順が変わる形。
-- **ホスト側の適応方針**（壁時計・負荷で経路を選ぶもの）は、選べる経路どうしがその席の下でビット同一
-  だと**当該 device で機械検証済み**の場合に限る（ADR 0058 追記 2026-08-29 一般則 3 の拡張）。gemma の
-  自己採算ゲートは、M=1 / M=4 の同一性を e2e が device ごとに門で固定することでこの条件を満たす
-  （ADR 0096 追記 2026-09-26）。門が赤の機では相違が実在し、その機では `"always"` か sequential を選ぶ。
-- 決定性とは別に、経路同値（投機あり = なし 等）は席ごとの宣言事項とする。
+- MUST NOT: floating-point atomics, merges in arrival order (last-arriver merge), or a reduction order
+  that changes with a runtime parameter absent from the key (such as the subgroup width).
+- **Host-side adaptive policies** (path chosen by wall clock or load) are allowed only when the
+  selectable paths are **machine-verified on that device** to be bit-identical under the preset
+  (extends rule 3 of the ADR 0058 addendum of 2026-08-29). gemma's self-tuning gate meets this by an
+  e2e check per device; where it is red, that machine selects `"always"` or sequential.
+- Path equivalence (with speculation = without, and the like) is declared per preset, separately.
 
-### 7. sha 参照行の分類（ADR 0106 への追記）
+### 7. Classes of sha256 reference values (an addition to ADR 0106)
 
-- 行のクラスは、ケースの quant 席の `session` が空か否かから**導出**する。別表に持たない。
-- **参照行**（`session` 空）= 凍結。実用層の変更コミットで触れてはならない（ADR 0058 決定 2 の字義）。
-- **実用行**（`session` 非空）= 実用層の退行 + 決定性の検出器。ADR 0058 決定 4 ①の証明材料にはならない。
-- 実用層の数値を意図して変えるコミットは、実用行の `rewrite` を**同じコミット**で行う。コミットには理由と、
-  決定 3 / 5 の門が緑である記録を残す。
-- そのコミットで `rewrite` しなかった環境の実用行は**削除する**（古い行を残さない）。その機で次に回した
-  とき、明示 SKIP + 参照門の赤 → 自己 A/B → `write` の順で作り直す。
-- 現状の該当: anima の 11 ケース中 10 ケースが実用行、参照行は `f16-1024` の 1 ケース。sbv2 / irodori の
-  行は全て参照行。gemma4（e2b）と gemma4-qat（e2b / e4b）の quant 席の行は `i4` が参照行、`i4-gemvpar` /
-  `i4-fast` が実用行。siglip2 / gemma4 の golden・birefnet / depth-anything の実画像・vowel-detector の全鎖の行は
-  `session` が空の経路なので全て参照行（行を持つ系列の一覧は ADR 0106 追記 2026-09-26 その 3）。
+- The class is **derived** from whether the case's preset has an empty `session` (no separate table).
+- **Reference-path values** (empty `session`) are frozen; a commit that changes the practical presets
+  MUST NOT touch them (the letter of ADR 0058 decision 2).
+- **Practical-preset values** (non-empty `session`) detect regressions and nondeterminism of the
+  practical presets; they are not evidence for ADR 0058 decision 4 ①.
+- A commit that intentionally changes practical-preset numerics runs `rewrite` on those values **in
+  the same commit** and records the reason and the green checks of decisions 3 and 5.
+- Practical-preset values of environments not rewritten in that commit are **deleted**. The next run
+  on that machine rebuilds them: explicit SKIP + red reference guard → self A/B → `write`.
+- Inventory of 2026-09-26: ADR 0106 addendum (the third); anima's current 13 cases are in
+  `packages/models/tests/fixtures/references/anima.json`.
 
-### 8. 品質裁定の分担
+### 8. Division of the quality verdict
 
-機械の門（決定 2〜7）が示すのは「opt-in として安全」まで。quant 席を家族の `defaultQuant` に入れるとき
-だけ品質裁定を行う（ADR 0058 追記 2026-09-13 の手順 — 視認は seed 4 本以上 × プロンプト 2〜3 種・聴感・
-LLM は固定評価 + 出力の読解。未実施の人間評価を実施済みと書かない）。`fast` 束の**中身**（どのノブを
-入れるか）は、同じ機でノブ単体と全部入りを実測して速度で選ぶ（ADR 0104 追記）。runtime の省略値の変更
-（ADR 0058 決定 6）は実用層の制度では起こさない。
+The machine checks (decisions 2–7) show only "safe as an opt-in". A quality verdict is made only when
+a preset enters the family's `defaultQuant` (procedure of the ADR 0058 addendum of 2026-09-13: visual
+review with at least 4 seeds × 2–3 prompts, listening, for LLMs a fixed evaluation plus reading the
+output; a human review not done is never recorded as done). Which options a `fast` bundle holds is
+chosen by speed, measuring each option alone and all together on the same machine (ADR 0104
+addendum). The practical presets never change the runtime's omitted values (ADR 0058 decision 6).
 
-### 9. 既存席の分類（付表）
+### 9. Classification of existing options
 
-| 席（ノブ）                                                             | クラス                        | 4 点型の充足                              | 出典                                         |
-| ---------------------------------------------------------------------- | ----------------------------- | ----------------------------------------- | -------------------------------------------- |
-| `linearCompute: "a8"`                                                  | E                             | —                                         | ADR 0025                                     |
-| `attentionCompute: "a8"`                                               | E（③PV の qP 生成だけ統計門） | —                                         | ADR 0030                                     |
-| `linearCompute` / `attentionCompute: "f16"`                            | C                             | —                                         | ADR 0028                                     |
-| `attentionScoreStorage: "f16"`                                         | C                             | —                                         | ADR 0031                                     |
-| `stateAttentionReduce: "parallel"`                                     | R                             | ①②③④ そろう                               | `gpu_state_attention_parallel_test.ts`       |
-| `linearGemvReduce: "parallel"`                                         | R                             | ①②③（④ 故障注入と実測最悪値の記録が無い） | `gpu_linear_gemv_parallel_test.ts`・ADR 0098 |
-| `rmsNormReduce` / `linearGemvReduce` の subgroup32                     | R                             | ①③ + parallel との u32 一致（②④ 無し）    | ADR 0100・0101                               |
-| `fuseRmsNormAdd` / `fuseLinearStaticQuantize` / `packedStaticQuantize` | E（融合前経路が鏡像）         | —                                         | ADR 0099・0103・0105                         |
+| Option                                                                 | Class                                | Four points                                         | Source                                       |
+| ---------------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------- | -------------------------------------------- |
+| `linearCompute: "a8"`                                                  | E                                    | —                                                   | ADR 0025                                     |
+| `attentionCompute: "a8"`                                               | E (statistical check for qP of ③ PV) | —                                                   | ADR 0030                                     |
+| `linearCompute` / `attentionCompute: "f16"`                            | C                                    | —                                                   | ADR 0028                                     |
+| `attentionScoreStorage: "f16"`                                         | C                                    | —                                                   | ADR 0031                                     |
+| `stateAttentionReduce: "parallel"`                                     | R                                    | ① ② ③ ④                                             | `gpu_state_attention_parallel_test.ts`       |
+| `linearGemvReduce: "parallel"`                                         | R                                    | ① ② ③ (no ④ fault injection, no worst-case record) | `gpu_linear_gemv_parallel_test.ts`, ADR 0098 |
+| `rmsNormReduce` / `linearGemvReduce` subgroup32                        | R                                    | ① ③ + u32 equality with parallel (no ② ④)           | ADR 0100, 0101                               |
+| `fuseRmsNormAdd` / `fuseLinearStaticQuantize` / `packedStaticQuantize` | E (the unfused path is the mirror)   | —                                                   | ADR 0099, 0103, 0105                         |
 
-**猶予条項**: 既存の R 席は、欠けている点（GEMV parallel の ④・subgroup の ②④）を backlog に起票して
-入居を維持する。新しい R / Q 席は 4 点型が全部そろってから入居する。
+**Grace clause**: existing R options stay admitted with the missing points (④ of parallel GEMV; ② ④
+of subgroup) filed in the backlog. New R / Q options are admitted only with all four points.
 
-## 検討した代替案
+## Alternatives considered
 
-1. **E2E の帯門だけで入居できる席を作る** — 却下。モデル出口の帯は 4 事例で恒真化した（Context）。入居の
-   単位は「カーネルの厳密オラクルを、導出規則つきの帯オラクルへ置き換えること」である。
-2. **ADR 0058 の追記だけで済ませる** — 却下。契約クラス・4 点型・帯の導出・決定性・行の分類を追記の
-   連なりに埋めると、ADR 0058 が 5 本目の追記で読めなくなる。0058 / 0106 には 1 行の指し先だけ足す。
-3. **anima の sha 行を参照席へ付け替え、実用席の行を外す** — 却下（S1）。実用席の唯一の E2E 検出器を
-   消す。A/B 門と census が入った後に再検討する（ADR 0106 追記の (b) 案として記録）。
-4. **床の対照を torch golden や別席の f32 に置く** — 却下。対照側の実装誤差が分離比を縮め、床が置け
-   なかった原因そのもの。
+1. **Admit options on an E2E band alone** — rejected: model-exit bands went vacuous (Context).
+2. **Only add addenda to ADR 0058** — rejected: unreadable at its fifth addendum; 0058 / 0106 get
+   one-line pointers.
+3. **Move anima's sha256 values to the reference preset** — rejected (S1): it removes the practical
+   preset's only E2E detector; to be reconsidered once the A/B check and the census exist (ADR 0106
+   addendum, option (b)) — both exist today (`e2e_anima_ab_test.ts`, `census-table.ts`), so the
+   question is open again.
+4. **Use a torch golden or another preset's f32 as the floor's control** — rejected: the control's
+   implementation error shrinks the separation ratio.
 
 ## Consequences
 
-- 参照層は 1 bit も動かない。新しい変種は新しいキー語彙で入り、既存キーの WGSL はバイト不変（スナップ
-  ショットは増えるだけ）。
-- 近似カーネル（Q）に入口ができる。入口の費用は「誤差モデルの導出 + 4 点型 + 故障注入」で、E2E の帯設計
-  ではない。
-- anima の sha 行は 10 本が実用行になる。実用層の数値を変えるたびに、その機の実用行を焼き直す運用になる
-  （費用 = anima レーン 1 回 / 環境）。RTX 3080 Ti の実用行は、その機が無いため最初の実用層変更で削除される。
-- anima の実用席に E2E census と A/B 門が無いことは決定 5 の未充足として顕在化する（ADR 0058 決定 4 ③の
-  未充足でもある）。
-- gemma の自己採算ゲートは決定 6 に適合した状態になる（ADR 0096 追記 2026-09-26）。
+- The reference path does not move by one bit; WGSL of existing keys stays byte-identical.
+- Approximate kernels (Q) have an entry, at the cost of error model + four points + fault injection.
+- Each change to practical-preset numerics rewrites anima's practical-preset values per machine.
+- The missing E2E census and A/B check of anima's practical preset surfaced as unmet decision 5; they
+  now exist (`packages/e2e/tests/e2e_anima_ab_test.ts`, shared verdict in `e2e_ab_gate_test.ts`).
+- gemma's self-tuning gate conforms to decision 6 (ADR 0096 addendum of 2026-09-26).
 
-## 追記（2026-09-26）— 決定 5 の実装の形と初回の実測
+## Addendum (2026-09-26) — implementation form of decision 5 and first measurements
 
-- 結果の席は系列ごとに `<family>-ab`（anima-ab / irodori-ab / sbv2-ab）。逐次 3 pipeline（参照 1 + 実用 2）で、
-  `sharedWeights` の 2 Session 同居は使わない。参照席は manifest から導く（同じ weights 写像・`session` 空・
-  gpuFeatures の要求が部分集合・ちょうど 1 つ）。
-- 床は 2 段: 「参照とビット同一 → 赤」（決定 5 ② の MUST・帯と無関係に常に見る）+ `band.floor`（実測で示せた
-  ときだけ 0 より上）。帯が未導出（`undefined`）の門は実測を出して赤で止まる。
-- 初回の実測（B570・2026-09-26）: anima 既定席 step 1 latent の relRMS 1.43e-2（1024）/ 1.19e-2（512）、
-  attentionCompute を外した故障注入は 1.08e-2（全部入りの 0.90 倍 — 床を 0 より上に置く根拠にならず、ノブ単位は
-  census が持つ）。irodori `i8-a8` 3.6e-3 / 5.8e-3。sbv2 `i8-a8` front 4 出力 1.5e-4〜5.2e-3。上限 = 実測 × 2。
-- sbv2 の観測点は front の 4 出力（波形長が変わりうるので最終波形は帯にしない）。
-- 決定 5 ① の census の正本は束の census 表（`packages/models/tests/helpers/census-table.ts` — 鍵 = 実効 SessionOptions・値 =
-  部品 × 相ごとの期待本数と参照経路の残り）。`census_table_test.ts` はローカルミラーの非参照束に行が無ければ赤にする。
-  行を置かない席（prefill の並列 GEMV / attention・parallel-fused・anima の attention 席）は chunk 行数・容量・device 上限に
-  依るためで、そこは従来の「1 本以上 / 0 本」の検査が残る（導出関数の追加は残件）。gemma（LLM）と f32 のみの
-  4 系列にはまだ同機 A/B も sha 行も無い（要判断 — SUMMARY §12.2）。
-- sha 参照行は 2026-09-26 に 9 系列へ広げた（ADR 0106 追記その 3）。gemma は quant 席ごとの token id 列を持ち、
-  `i4-gemvpar` / `i4-fast` の実用行が実用層の退行 + 決定性の検出器を兼ねる。f32 のみの 4 系列（birefnet /
-  depth-anything / siglip2 / vowel-detector）は golden・実画像・全鎖の f32 出力の参照行を持つ。同機 A/B 門は
-  この 5 系列（gemma + f32 のみ 4）にはまだ無い。
+- One result name per family (`anima-ab`, `irodori-ab`, `sbv2-ab`); three sequential pipelines, no
+  `sharedWeights`. The reference partner preset is derived from the manifest (same weights mapping,
+  empty `session`, GPU feature requirements a subset, exactly one).
+- The floor has two levels: "bit-identical to the reference → red" (decision 5 ②, always checked) and
+  `band.floor` (above 0 only when measured). A check without a derived band prints its measurement
+  and stops red. Ceilings = 2 × the first B570 measurements (2026-09-26; derivation table in
+  `packages/e2e/tests/e2e_anima_ab_test.ts`); removing `attentionCompute` gave 0.90 × the full
+  bundle, so the floor stays 0 and single options are left to the census.
+- sbv2's observation points are the four front-graph outputs (the waveform length may change).
+- The census source of decision 5 ① is `packages/models/tests/helpers/census-table.ts` (key =
+  effective SessionOptions; value = expected counts per component × phase and the reference-path
+  remainder); `packages/models/tests/census_table_test.ts` turns red when a non-reference bundle of
+  the local mirror has no row. Presets without a row (prefill parallel GEMV / attention,
+  parallel-fused, anima's attention presets) keep the "at least one / zero" checks.
+- gemma (whose `i4-gemvpar` / `i4-fast` token ids are its practical-preset detectors) and the four
+  f32-only families have no same-machine A/B check yet.

@@ -1,239 +1,238 @@
-# 0112: Anima の DiT 常駐 — opt-in・要求単位・OOM で退避して読み直す
+# 0112: Anima DiT residency — opt-in, per request, evict and reload on OOM
 
-- Status: accepted（実測済み・採用 — 2026-09-26・高速化の波 イテレーション 2「DiT 速度」B3・利用者承認。Arc B570 で
-  2 回目以降の利得 2.45 s / 生成 = 壁の 10.4% が kill 線を超えた。opt-in のまま — 下の「kill 基準」節）
+- Status: accepted (2026-09-26 — measured and adopted, phase 2 "DiT speed" B3 of the speed-up
+  plan, approved by the maintainer; on the Arc B570 the gain from the second generation on, 2.45 s
+  per generation = 10.4 % of wall time, beat the kill criterion; stays opt-in). The rejection of
+  explicit staging re-graded 2026-10-18 to MAY, the headroom margin and the no-submit rule of
+  `fitsHeadroom` to SHOULD (2026-09-27 addendum)
 - Date: 2026-09-26
-- 関連: ADR [0016](0016-anima-chain-export.md)（グラフは 1 本ずつ開いて閉じる — 既定として残す）/
-  [0095](0095-plan-backing-budget.md)（backing の予算つき保持 — 解像度を変えたときの常駐量の上限）/
-  [0107](0107-model-input-error.md)（未知の綴りの送出型）/ [0033](0033-vae-fixed-tile-decode.md)（VAE の常時タイル化 —
-  チェーン最大が DiT 段へ移った理由）/ perf-ledger H-4・L-9。
-  実装 = `packages/models/src/anima/residency.ts`（決定の純関数と状態機械）と
-  `packages/models/src/anima/pipeline.ts`（結線）。調査の正本は
-  `.claude/reviews/2026-09-25_perf-recon/deep/B3-anima-resident.md`（git 追跡外）。実測の正本は
-  [research 2026-09-26](../research/2026-09-26-anima-residency-bench.md)。
+- Related: [0016](0016-anima-chain-export.md) (graphs are opened and closed one at a time — stays the
+  default) / [0095](0095-plan-backing-budget.md) (budgeted backing retention — bounds residency
+  across resolutions) / [0107](0107-model-input-error.md) (error type of unknown spellings) /
+  [0033](0033-vae-fixed-tile-decode.md) (VAE always tiled — why the chain peak moved to the DiT stage)
+  / perf-ledger H-4, L-9, H-35. Code: `packages/models/src/anima/residency.ts`, `pipeline.ts`.
+  Measurements: [research 2026-09-26](../research/2026-09-26-anima-residency-bench.md).
 
 ## Context
 
-`AnimaPipeline.generate` は段（text_encoder → text_conditioner → transformer → vae_decoder）ごとに Session を
-作っては捨てる。既定の VRAM の前提は「最大の段 1 本ぶん」で、VAE を常時タイル化した後はチェーン最大が
-DiT 段にある（既定席 1024² で runtime 集計 2,647 MiB）。
+`AnimaPipeline.generate` creates and discards a Session per stage (text_encoder → text_conditioner →
+transformer → vae_decoder). The default VRAM assumption is "the largest single stage"; since the VAE
+is always tiled, the chain peak is the DiT stage (2,647 MiB by runtime accounting for the default
+preset at 1024²).
 
-同じ pipeline で generate を繰り返す利用者（ブラウザのアプリ・サーバ・e2e）は、毎回 DiT の重みを読み直し、
-計画を導出し、中間バッファ（backing）を作り直す。2026-09-10 の同一プロセス 6 連続生成（RTX 3080 Ti・
-コンテナ移行前・turbo 1024²・CFG 1）で、これが 1 生成あたり **1.87〜2.25 s（壁の 15〜19%）** あった
-（DiT 段の run 以外 1.46〜1.54 s + 初回 run の超過 0.30〜0.49 s + 2 回目 run の超過 0.11〜0.22 s）。
-コンテナ移行後の Arc B570 での値は下の「kill 基準」節。
+Repeated generate calls on one pipeline (browser apps, servers, e2e) reload the DiT weights,
+re-derive the plan and rebuild the intermediate buffers (backing) each time: **1.87–2.25 s per
+generation (15–19 % of wall time)** on 2026-09-10 (RTX 3080 Ti, pre-container, turbo 1024², CFG 1).
 
 ## Decision
 
-1. **opt-in の常駐**: `AnimaPipelineOptions.residency?: "per-stage" | "transformer"`（既定 `"per-stage"` =
-   従来の挙動）。真偽値にしないのは、将来 text 段の常駐を列挙で足せるようにするため。未知の綴りは
-   admission 席（重みの part を取る前）で `ModelInputError`。構築は今までどおり Session を 1 本も張らない —
-   常駐 DiT は**最初の generate の DiT 段で作る**。
-2. **要求単位の決定**: `AnimaGenerateRequest.residency?`（同じ列挙）。実効値 = request ?? 構築オプション。
-   意味は「**この generate の後に** DiT の Session を持ち続けるか」。generate の開始時に常駐 DiT が既に
-   あれば、実効値に関わらずそれを使う（読み直さない）。連続生成の最後の 1 枚だけ `"per-stage"` にすれば、
-   その generate の後に解放される。**generate が失敗しても**（DiT 段より前の text 段の失敗・`stage` イベントでの
-   `onEvent` の throw 等）、実効値が `"per-stage"` なら持ち越した DiT を手放して `released` / `request` を名乗る
-   （効かせないと、手放したつもりの VRAM が次の generate か dispose まで残る）。入力の検査で落ちた要求は
-   GPU にも常駐の席にも触らない。
-3. **OOM で退避して読み直す**（利用者の言う「スワップ」— 2026-09-26 に意味を確認: 「追加で読んで OOM したら
-   解放して目的のモデルを読み直す」）。常駐 DiT がある状態で、他の段（text_encoder / text_conditioner /
-   vae_decoder）の Session 構築か run、または**前の generate から持ち越した** DiT の DiT 段の run が
-   `GpuOutOfMemoryError` を投げたら:
-   ① 常駐 DiT を dispose ② `device.queue.onSubmittedWorkDone()` を待つ（Intel / wgpu は `destroy()` の解放が
-   次の poll まで遅れる — known-issues「Intel Arc B570」節。device 消失とは競わせる）③ `residency` イベントで
-   `evicted` / `out-of-memory` を名乗る ④ **その段を 1 回だけ最初からやり直す**（DiT 段なら段ごと運転で
-   作り直す）。やり直しの失敗はそのまま投げる。判定は型（`instanceof GpuOutOfMemoryError`）で行い、
-   validation や device 消失は退避しない（本当の原因が 2 度目の失敗に埋もれる）。
-   - **同じ generate で作った DiT の run の OOM は退避しない**（格下げも通知もせず、段ごと運転の失敗と同じく
-     畳んで元の例外を投げる）。そのとき pipeline が持つ GPU 資源はその DiT 1 本だけ（text 段は畳んだ後）で、
-     VRAM の構成は段ごと運転と同じ — 常駐が原因の OOM ではないので、格下げして GB 級を読み直しても同じ構成を
-     もう一度試すだけになる。実装上その DiT は段が成功するまで常駐の席に載せない。
-   - ② の待ちの根拠: 素の WebGPU の probe（B570・2026-09-26 — [研究記録](../research/2026-09-26-anima-residency-bench.md)）で、
-     満杯から 1 GiB を destroy した後 `onSubmittedWorkDone` **だけ**を待てば、同じ 1 GiB の再確保と 256 MiB の
-     書き込みが通った（待ちは 11 ms。待たないと OOM）。固定の sleep は足さない。ただし退避経路を実機で踏むと、
-     やり直しの段が device lost になった（Consequences）— 原因は解放待ちの長さではなく、重みアップロードの
-     staging の OOM が device を失わせること（下の「追記（2026-09-27）」）。
-   - ①② が失敗しても（破棄・解放待ちの例外）格下げは立ち席は空くので、③ を名乗ってから元の OOM を先頭にした
-     `AggregateError` を投げる（やり直さない）。名乗らないと、常駐を失ったことが次の generate まで見えない。
-4. **格下げ**: 退避した pipeline は、その寿命の間は常駐しない。格下げ後に `"transformer"` を求められても
-   持たず、`released` / `downgraded` を名乗る。**黙って遅い経路へ落ちない**（イベント必須）。
-5. **失敗時は捨てる**: 前の generate から持ち越した DiT の段で例外が出たら（denoise ループ内の `onEvent` の
-   throw による中断を含む）、常駐 DiT を捨てて `evicted` / `failure` を名乗り、元の例外を投げる。壊れうる
-   Session を次の generate へ持ち越さない。格下げはしない。同じ generate で作った DiT の段の失敗は段ごと運転の
-   失敗と同じ（席に載る前の失敗 — 畳むだけで名乗らない）。`stage` / `vae-tile` / `residency` の通知での throw は
-   DiT 段の本体の外なので常駐 DiT を捨てない（決定 2 の手放しだけが効く）。後始末の失敗は元の例外を先頭にした
-   `AggregateError`（文言「anima: DiT の後始末が失敗した」— 段ごと運転の DiT にも同じ文言）。通知の購読側が
-   元と同じ例外を投げ直したとき（`signal.throwIfAborted()` を毎回呼ぶ中断の書き方）は並べない。
-6. **イベント**: `AnimaGenerateEvent` に `{ kind: "residency"; component: "transformer"; action; reason }` を
-   足す（`action` = `retained` / `released` / `evicted`、`reason` = `request` / `downgraded` / `out-of-memory` /
-   `failure`）。既定の段ごと運転で常駐と無関係な generate では出さない（既存の購読側のイベント列を変えない）。
-   `stage` イベントの意味は「Session 構築の前 / 解放の後」から「段の開始 / 終了」に変わる（型は不変）。
-   持ち越した常駐 DiT を実効値 `"transformer"` で使う `transformer` 段の start → end にはロードも解放も入らない。
-   実効値 `"per-stage"` で使う段では解放（手放し）が、OOM で退避した段では解放と段ごとのロードが start → end の
-   中に入る。OOM の退避の後は、その段の進捗イベント（`denoise-step` / `vae-tile`）が 1 から出直す。
-7. **dispose**: 直列化鎖の中で常駐 DiT を dispose してから GPU を破棄する（flush-before-destroy）。
-   `options.gpu` を共有していても常駐 DiT は pipeline の所有物なので畳む — 共有 GPU でも dispose は必須
-   （忘れると常駐 DiT が共有 device に残る）。device が失われていると常駐 DiT の破棄（Session の flush）が
-   失敗して dispose が reject しうる（内部で取った GPU はそれでも破棄する）。
-8. **決定は純関数 + 小さな状態機械に閉じる**（`residency.ts` の `transformerSource` /
-   `decideAfterTransformer` / `decideAfterFailedGenerate` / `evictsForMemory` / `TransformerResidency`）。
-   純関数は DiT 段の**開始時**の事実から決め、状態機械はその `action` を適用するだけ（真実は純関数 1 か所）。
-   到達しない組（席に DiT があるまま格下げ済み）は既定値へ落とさず投げる。pipeline はそれを呼ぶだけ。
-   GPU 無しの単体テストが故障注入で遷移を固定する（`anima_residency_test.ts`）。
-9. **数値は変えない**: 参照行（`fixtures/references/anima.json`）を 1 行も足さず、全ケースを既存の
-   turbo 1024 / 512 の行の双子として回す（`e2e_anima_test.ts` の「DiT 常駐」節）。
+1. **Opt-in residency**: `AnimaPipelineOptions.residency?: "per-stage" | "transformer"` (default
+   `"per-stage"` = the old behaviour). An enumeration, not a boolean, so text-stage residency can be
+   added later. An unknown spelling throws `ModelInputError` at admission (before any weight part is
+   fetched). Construction still opens no Session; the resident DiT is **created in the DiT stage of
+   the first generate**.
+2. **Per-request decision**: `AnimaGenerateRequest.residency?` (same enumeration); effective value =
+   request ?? construction option. It means "keep the DiT Session **after** this generate". A
+   resident DiT present at the start of a generate is used whatever the effective value (no reload);
+   making only the last of a series `"per-stage"` releases it after that generate. **Even when the
+   generate fails** (a text stage before the DiT stage fails, `onEvent` throws on a `stage` event,
+   …), an effective `"per-stage"` releases the carried-over DiT and reports `released` / `request`
+   (otherwise VRAM thought released stays until the next generate or dispose). A request rejected by
+   input validation touches neither the GPU nor the residency state.
+3. **Evict and reload on OOM** (the maintainer's "swap", meaning confirmed 2026-09-26: "if an extra
+   load hits OOM, release and reload the target model"). With a resident DiT, when another stage's
+   (text_encoder / text_conditioner / vae_decoder) Session construction or run, or the DiT-stage run
+   of a DiT **carried over from an earlier generate**, throws `GpuOutOfMemoryError`:
+   ① dispose the resident DiT; ② await `device.queue.onSubmittedWorkDone()` (on Intel / wgpu the
+   release by `destroy()` is deferred to the next poll — docs/known-issues.md, Intel Arc B570 section;
+   raced against device loss); ③ report `evicted` / `out-of-memory` with a `residency` event; ④
+   **re-run that stage once from the start** (a DiT stage is rebuilt per stage). A failure of the
+   re-run is thrown as is. The test is the type (`instanceof GpuOutOfMemoryError`); validation errors
+   and device loss are not evicted (the real cause would be buried under the second failure).
+   - **An OOM in the run of a DiT created in the same generate is not evicted** (no downgrade, no
+     report; folded like a per-stage failure and the original error thrown). The pipeline then holds
+     only that DiT (the text stages are folded), the same VRAM layout as per-stage operation, so a
+     downgrade and a GB-scale reload would retry the same layout. That DiT enters the resident slot
+     only after its stage succeeds.
+   - ② rests on a raw-WebGPU probe (B570, 2026-09-26 — research 2026-09-26): after destroying 1 GiB
+     at full memory, awaiting `onSubmittedWorkDone` alone let the same 1 GiB be reallocated (an 11 ms
+     wait; without it, OOM). No fixed sleep is added. The device loss later seen on the eviction path
+     came from staging OOM (2026-09-27 addendum), not from the wait.
+   - If ① or ② throws, the downgrade still applies: report ③ (otherwise the loss stays invisible),
+     then throw an `AggregateError` led by the original OOM (no re-run).
+4. **Downgrade**: an evicted pipeline does not keep a resident DiT for the rest of its life. A later
+   `"transformer"` request reports `released` / `downgraded`. **No silent fall to the slow path** (the
+   event is required).
+5. **Discard on failure**: an exception in the stage of a DiT carried over from an earlier generate
+   (including an abort by `onEvent` throwing in the denoise loop) discards the resident DiT, reports
+   `evicted` / `failure` and throws the original error. A Session that may be broken is not carried
+   into the next generate. No downgrade. A failure in the stage of a DiT created in the same generate
+   is a per-stage failure (before it enters the slot — folded, not reported). A throw from
+   `stage` / `vae-tile` / `residency` notifications is outside the DiT stage body and does not discard
+   the resident DiT (only decision 2's release applies). A clean-up failure is an `AggregateError` led
+   by the original error, with the message of `CLEANUP_FAILED` in `residency.ts` (also used for the
+   per-stage DiT); when a subscriber rethrows the same error (the `signal.throwIfAborted()` pattern),
+   it is not listed twice.
+6. **Event**: `AnimaGenerateEvent` gains `{ kind: "residency"; component: "transformer"; action;
+   reason }` (`action` = `retained` / `released` / `evicted`; `reason` = `request` / `downgraded` /
+   `out-of-memory` / `failure`, plus `headroom` from the addendum). A default per-stage generate
+   unrelated to residency emits none (existing event sequences unchanged). The `stage` event now means
+   "stage start / end" instead of "before Session construction / after release" (type unchanged). A
+   `transformer` stage using a carried-over DiT with effective `"transformer"` has no load or release
+   between start and end; with effective `"per-stage"` the release is inside; after an OOM eviction
+   the release and the per-stage load are inside, and the stage's progress events (`denoise-step` /
+   `vae-tile`) restart from 1.
+7. **Dispose**: within the serialisation chain the resident DiT is disposed before the GPU is
+   destroyed (flush-before-destroy). With a shared `options.gpu` the resident DiT still belongs to the
+   pipeline and is folded (otherwise it stays on the shared device). On a lost device the flush in its
+   disposal may fail and dispose may reject (an internally acquired GPU is still destroyed).
+8. **Decisions are pure functions plus a small state machine** (`transformerSource`,
+   `decideAfterTransformer`, `decideAfterFailedGenerate`, `evictsForMemory`, `TransformerResidency` in
+   `residency.ts`). The pure functions decide from the facts at the **start** of the DiT stage; the
+   state machine only applies the `action` (one source of truth). An unreachable combination (a DiT in
+   the slot while downgraded) throws instead of falling back. GPU-less unit tests pin the transitions
+   with fault injection (`packages/models/tests/anima_residency_test.ts`).
+9. **Numerics unchanged**: no sha256 reference value is added; every case is a twin of the turbo
+   1024 / 512 values (the "DiT residency" section of `packages/e2e/tests/e2e_anima_test.ts`).
 
-## VRAM（opt-in 側だけが上がる）
+## VRAM (only the opt-in side rises)
 
-| 量（既定席 `f16+dit8-a8-attn8-s16`・1024²・CFG 1）            | 値                                                               | 出典                                |
-| ------------------------------------------------------------- | ---------------------------------------------------------------- | ----------------------------------- |
-| 常駐ぶん（重み 1,870.9 + backing 768.1 + 入力 7.1 MiB）       | **+2,646 MiB**                                                   | 2026-09-10 runtime 集計             |
-| 段ごと運転の DiT 段ピーク（= 既定のチェーン最大）             | 2,647 MiB                                                        | 同                                  |
-| 常駐時のチェーン最大（text 段 / VAE 段が常駐 DiT の上に乗る） | 約 3.9〜4.1 GiB（推測・確度: 中 — text 段の runtime 集計が無い） | B3 報告 §2-4                        |
-| `f16` 席の DiT 重み                                           | 3,733 MiB（常駐すると text 段で +3.7 GB 超）                     | 2026-08-05 final-perf-bench VRAM 表 |
+| Quantity (default preset `f16+dit8-a8-attn8-s16`, 1024², CFG 1)                | Value                                                                  | Source                                    |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ----------------------------------------- |
+| Resident share (weights 1,870.9 + backing 768.1 + inputs 7.1 MiB)               | **+2,646 MiB**                                                         | 2026-09-10 runtime accounting             |
+| DiT-stage peak of per-stage operation (= default chain peak)                    | 2,647 MiB                                                              | same                                      |
+| Chain peak with residency (text / VAE stages on top of the resident DiT)        | about 3.9–4.1 GiB (estimate, medium confidence — no text-stage figure) | B3 report §2-4                            |
+| DiT weights of the `f16` preset                                                 | 3,733 MiB (resident: over +3.7 GB during the text stages)              | 2026-08-05 final-perf-bench VRAM table    |
 
-- **4 GB 級の GPU では使えない**（段ごと運転の DiT 段だけで 2.65 GiB あり、常駐はそこへ text 段を積む）。
-  既定の段ごと運転では挙動は変わらない。
-- 解像度を変えると backing は予算 256 MiB を超える形 1 本だけに絞られる（ADR 0095 決定 1）ので、**定常状態の**
-  常駐量は「重み + 最大の backing 1 本」を超えない。解像度を切り替えた直後の run では、退役した古い backing
-  （か arena）が flush の後まで生きるので、一時的なピークはこれを超える（推測: text 段のピークよりは小さく、
-  チェーン最大は変わらない）。
-- 退避は OOM を型（`GpuOutOfMemoryError`）で報告する環境でだけ発動する。Metal の out-of-memory errorScope が
-  沈黙する環境（known-issues「Metal で out-of-memory errorScope が沈黙する」節）では、常駐が VRAM を超えても
-  退避も格下げもイベントも起きず、遅延か device 消失として現れうる。
+- **Not usable on 4 GB-class GPUs** (the DiT stage alone is 2.65 GiB; residency stacks the text
+  stages on it). Per-stage operation is unchanged.
+- A resolution change keeps only one backing over the 256 MiB budget (ADR 0095 decision 1), so the
+  **steady-state** residency does not exceed "weights + the largest backing". Right after a switch the
+  retired backing (or arena) lives until the flush, so a transient peak exceeds it (estimate: below
+  the text-stage peak; the chain peak is unchanged).
+- Eviction works only where OOM is reported as a type (`GpuOutOfMemoryError`). Where Metal's
+  out-of-memory error scope stays silent (docs/known-issues.md, Metal section), residency beyond VRAM
+  triggers no eviction, downgrade or event, and may show as slowness or device loss.
 
-## kill 基準
+## Kill criterion
 
-オーケストレータが Arc B570（現況の開発機）で測る（台本 = `outputs/bench/karume/2026-09-26_anima-residency/bench.ts`
-— per-stage / transformer をブロック単位の ABBA で回し、各ブロックの初回を除く）。
-**2 回目以降の 1 生成の壁の差が 0.5 s 未満、または 1024² turbo の壁の 5% 未満**なら閉じる（opt-in を撤去する
-かは閉じるときに裁定）。Chrome での同じ量は別に採る（ブラウザは CacheStorage から読むので利得が Deno より
-大きい可能性がある — 推測・確度: 低）。
+Measured on the Arc B570 (then the development machine) with block ABBA of per-stage / transformer
+(first run of each block dropped; script `outputs/bench/karume/2026-09-26_anima-residency/bench.ts`,
+untracked, Deno): close if the gain from the second generation on is **under 0.5 s or under 5 % of
+the 1024² turbo wall time**. Verdict (2026-09-26, B570 / Linux xe / Deno 2.9.6): **adopted, opt-in,
+default `"per-stage"`** — 2.45 s per generation (10.4 %), PNG sha256 identical to the reference value
+(research 2026-09-26). Not measured: Chrome, and machines other than the B570.
 
-**判定（2026-09-26・B570 / Linux xe / Deno 2.9.6）: 閉じない — 採用（opt-in のまま・既定は `"per-stage"`）**。
-既定モデル `anima-turbo-v1.1`・既定席・1024²・配布形の既定（8 step・CFG 1）。4 ブロック × 5 生成の ABBA で、
-各ブロックの初回を除いた n = 8 ずつの中央値（[研究記録](../research/2026-09-26-anima-residency-bench.md)）:
+## Alternatives considered
 
-| residency     | n | 壁      | DiT 段  | text 2 段 | VAE 段 |
-| ------------- | - | ------- | ------- | --------- | ------ |
-| `per-stage`   | 8 | 23.49 s | 16.77 s | 2.05 s    | 4.62 s |
-| `transformer` | 8 | 21.05 s | 14.15 s | 2.23 s    | 4.63 s |
-
-利得 = **2.45 s / 生成（`per-stage` の壁の 10.4%）**で、kill 線（0.5 s / 5%）を超える。PNG の sha256 は
-20 枚すべて 1 種類で、参照行 `f16+dit8-a8-attn8-s16-1024` の B570 の値と一致した（決定 9 — 数値は変わらない）。
-
-## 検討した代替案
-
-- **B: A に加え、generate の末尾で backing だけ手放す**（常駐 +1,871 MiB）— 見送り。runtime に backing の明示
-  退役の公開面が要り（ADR 0095 追記）、得るのは 768 MiB の節約だけ。6 GB 級の端末で A が収まらないと
-  測れてから A の上に積む。
-- **C: 跨がず、generate の中で DiT の構築を text 段と並走させる（先読み）** — 見送り。1 プロセス 1 生成の
-  利用者にも効く唯一の案だが、text 段も DiT の構築も読み + アップロード律速で同じ帯域を取り合い、利得
-  （0〜1.3 s・確度: 低）は測るまで分からない。A とは独立の候補として残す。
-- **ホスト RAM に DiT の block を保持する** — 却下。読みと digest は消えるが、アップロード・導出・backing は
-  毎回払う。ブラウザで 1.87 GB の ArrayBuffer を抱えるのは重い（perf-ledger L-9 の「opt-in の RAM 保持」）。
-- **OOM を退避せずにそのまま投げる** — 却下（利用者の要求そのもの）。opt-in の機で VRAM が足りなければ
-  生成ごと落ち、利用者は常駐を外して組み直すしかない。
-- **格下げしない（毎回常駐を試みる）** — 却下。VRAM が足りない機で generate ごとに OOM を踏み、退避の
-  費用（破棄 + 解放待ち + 段のやり直し）を毎回払う。
-- **OOM した run だけをやり直す（段の途中から再開）** — 見送り。DiT のホスト側状態（latent・DPM の履歴）は
-  保たれているので原理的には可能で、`denoise-step` の出直しも起きない。だが text 段は run を `Promise.all` で
-  並走させており run 単位の再試行が並行の退避を要し、段ごとのやり直しより契約が込み入る。まれな経路なので
-  段単位の単純さを採った（出る画素は同じ — 段の本体は seed から決定的）。
+- **B: A plus releasing the backing after each generate** (+1,871 MiB) — deferred: needs a public
+  backing-retirement surface (ADR 0095 addendum) to save 768 MiB; only if A misses 6 GB-class devices.
+- **C: build the DiT in parallel with the text stages (prefetch)** — deferred: it helps one-generation
+  processes too, but both sides compete for read + upload bandwidth (gain 0–1.3 s, low confidence,
+  unmeasured). Independent of A.
+- **Keep the DiT blocks in host RAM** — rejected: upload, derivation and backing are still paid, and a
+  1.87 GB ArrayBuffer is heavy in a browser (perf-ledger L-9).
+- **Throw OOM without eviction** — rejected (the maintainer's requirement itself).
+- **No downgrade** — rejected: a machine short of VRAM would pay the eviction on every generate.
+- **Re-run only the OOM'd run** — deferred: the text stages run in `Promise.all`, so per-run retries
+  need concurrent eviction; on this rare path the per-stage re-run is simpler and gives the same
+  pixels (the stage body is deterministic from the seed).
 
 ## Consequences
 
-- 既定（`"per-stage"`）のイベント列・VRAM・数値は変わらない（`onEvent-1024` の門がイベント列を固定している）。
-- `AnimaGenerateEvent` の union が 1 つ増えた（TS で 3 種を網羅して `else` で絞っていた購読側は型検査で落ちる —
-  CHANGELOG の Breaking）。公開面に `AnimaResidency` / `AnimaResidencyAction` / `AnimaResidencyReason` の
-  型 3 つが増えた（barrel と `./anima`）。
-- `stage` イベントの `transformer` の start → end は、常駐時に GB 級ロードの進捗を表さない。
-- 未計測: 常駐時の text / VAE 段のピーク（runtime 集計）、Chrome と B570 以外の機での利得。
-- **B570 の「退避 → やり直しが device lost」は原因が分かり、先回りの退避で塞いだ**（2026-09-27 — 下の
-  「追記（2026-09-27）」・[research 2026-09-27](../research/2026-09-27-h35-oom-device-lost.md)・perf-ledger H-35）。
-  2026-09-26 の観測は、常駐 DiT の上で共有 device に 6 GiB のダミーを積んだ 2 枚目で `evicted` / `out-of-memory`
-  までは出て、やり直しの text_encoder 構築（part 1 の重みアップロード中）が `GpuDeviceLostError` で失敗した
-  というもの（台本 = `outputs/bench/karume/2026-09-26_anima-residency/evict-probe.ts --dummy-gib 6`）。原因は
-  Deno（wgpu）で staging の OOM が device をその場で無効化することで、同じ再現は修正後に成功する。他機での
-  退避経路は未計測。
-- B570（VRAM 9.93 GiB）で退避が起きたのはダミー 6 GiB のときだけで、4 / 5 GiB では常駐のまま 2 枚目が通った
-  （20.96 s / 20.87 s・PNG sha は 1 枚目と一致）。
+- The default (`"per-stage"`) keeps its event sequence, VRAM and numerics (the `onEvent-1024` check
+  pins the sequence).
+- `AnimaGenerateEvent` gains a member (subscribers that covered three kinds and narrowed with `else`
+  fail type check — CHANGELOG Breaking). The public surface gains the types `AnimaResidency`,
+  `AnimaResidencyAction`, `AnimaResidencyReason` (barrel and `./anima`).
+- With residency, the `transformer` stage's start → end does not show the GB-scale load. Not
+  measured: text / VAE stage peaks with residency.
+- The B570's "eviction → re-run hits device loss" (2026-09-26, 6 GiB dummy load) came from staging
+  OOM invalidating the device on Deno (wgpu); closed by pre-emptive eviction (2026-09-27 addendum).
 
-## 追記（2026-09-27）— 決定 3 の見直し: 測った空きで先に退避する（H-35）
+## Addendum (2026-09-27) — decision 3 revisited: evict pre-emptively on measured headroom (H-35)
 
-調査の正本は [research 2026-09-27](../research/2026-09-27-h35-oom-device-lost.md)（素の WebGPU の probe と
-wgpu-core / deno_webgpu / Dawn のソース）。ここには決定だけを書く。
+The investigation ([research 2026-09-27](../research/2026-09-27-h35-oom-device-lost.md): raw-WebGPU
+probes and the wgpu-core / deno_webgpu / Dawn sources) is the source; only the decisions are here.
 
-### なぜ決定 3（OOM を踏んでから退避する）に頼れないか
+### Why reactive eviction (decision 3) cannot be relied on
 
-- **OOM には 2 種類ある**。`createBuffer` の OOM は非致命で、device は生きている（WebGPU 仕様が「副作用なく
-  失敗したら out-of-memory」と保証する唯一の形）。`queue.writeBuffer` が内部で作る staging の OOM（`writeTexture`・
-  MAP_WRITE を持たない `mappedAtCreation`・submit・bind group 生成も同じ）は、wgpu-core が device をその場で
-  失わせる（`handle_hal_error` → `lose()`）。
-- **Deno は後者も普通の `GPUOutOfMemoryError` として out-of-memory errorScope へ届ける**。JS から 2 つは区別
-  できない。しかも Deno は wgpu の device lost コールバックを登録していないので、`device.lost` は次に検証を通る
-  呼び出し（submit / writeBuffer / createBuffer / mapAsync）まで解決しない（`onSubmittedWorkDone` は検証しない）。
-  決定 3 の退避は生きた device の OOM に見えたまま進み、やり直しの最初のアップロードで消失が表面化する。
-- OOM の判定そのものは wgpu の事前予算チェック（予算の 97%・submit / poll の後に 99% を超えると device lost —
-  limitations「Deno では GPUBuffer の総確保がドライバ申告予算の 97% で頭打ちになる」節）。Arc B570（ReBAR）は
-  VRAM の heap が host-visible を兼ね、割り当て器が staging をそこへ置くので、VRAM が尽きると staging の OOM
-  として出る。Chrome（Dawn）も規則は同じ（OOM を errorScope へ通すのは createBuffer / createTexture /
-  createQuerySet だけ）だが、この機では staging をシステム RAM に置く（ソースからの推論・未実測）。
+- **There are two kinds of OOM.** A `createBuffer` OOM is non-fatal and the device lives (the one form
+  WebGPU guarantees as "fails without side effects"). An OOM in the staging that `queue.writeBuffer`
+  creates internally (likewise `writeTexture`, `mappedAtCreation` without MAP_WRITE, submit, bind
+  group creation) makes wgpu-core lose the device on the spot (`handle_hal_error` → `lose()`).
+- **Deno reports both as an ordinary `GPUOutOfMemoryError`**, and with no wgpu device-lost callback
+  registered, `device.lost` resolves only at the next validated call (submit / writeBuffer /
+  createBuffer / mapAsync; not `onSubmittedWorkDone`). Decision 3's eviction proceeds as if on a live
+  device and the loss surfaces at the first upload of the re-run.
+- The OOM itself is wgpu's pre-allocation budget check (97 % of the budget; above 99 % after submit /
+  poll the device is lost — docs/limitations.md, Deno 97 % budget section). On the Arc B570 (ReBAR)
+  the VRAM heap is also host-visible and the allocator puts staging there, so exhausted VRAM shows as
+  staging OOM. Chrome (Dawn) passes OOM to the error scope only for createBuffer / createTexture /
+  createQuerySet as well, but on that machine puts staging in system RAM (inferred from source, not
+  measured).
 
-### 足したもの
+### Added
 
-1. **runtime の `fitsHeadroom(gpu, bytes)`**（公開 — `packages/runtime/src/gpu/headroom.ts`）: STORAGE バッファを
-   `maxBufferSize` 以下の等分に割って試し確保し、すぐ destroy して `onSubmittedWorkDone`（device 消失と競わせる）
-   で解放を確定させてから、入るなら `true`・OOM なら `false` を返す。validation と device 消失は投げる。中で
-   `queue.submit([])` は出さない（submit 後の 99% 線の判定は解放より先に走る）。結果はその瞬間の事実で、予約
-   ではない。
-2. **anima の先回りの退避**（`TransformerResidency.ensureHeadroom(need, probe, notify)`）: 常駐 DiT があるときだけ、
-   generate の中の 2 点で量る。
-   - text 段の前（持ち越した常駐 DiT があるとき）: need = text_encoder と text_conditioner の必要量の大きいほう。
-   - `stage` の `transformer` end の後・`vae_decoder` start の前（その時点で常駐 DiT があるとき）: need =
-     vae_decoder の必要量。最初の generate（その generate で作った DiT が席に載り、その上に VAE が乗る）と、
-     持ち越した DiT が新しい解像度で backing を育てた generate を覆う。VAE を text 段の前の量りに含めないのは、
-     DiT 段で常駐の恩恵を受け終えてから退避するほうが得だから。
-   - 段 1 本の必要量 = `ModelComponent.estimate(...).peakAccountedBytes`（重み + 保持集合の上限 — 束縛と device の
-     上限は段の実引数と同じ）+ `ModelComponent.maxPartBytes`（最大の重み part = その part のフェンスまで残る
-     staging）+ 余裕 512 MiB（`HEADROOM_MARGIN_BYTES`）。
-   - **余裕 512 MiB の根拠**: gpu-allocator のブロック 256 MiB（ブロック未満の確保が新しいブロックを切ると、
-     試し確保が見た量より最大 256 MiB 多く取られる）+ 99% 線までの幅（予算の 2% — 9.93 GiB の B570 で約
-     178 MiB）+ estimator の `unaccounted`（params・量子化の一時など）。常駐ぶん（既定席 1024² で +2,646 MiB）に
-     比べて小さい。
-   - **入らなければ**: 格下げ（決定 4 — 反応の退避と同じく pipeline の寿命の間戻らない）→ 常駐 DiT を破棄 →
-     解放待ち → `residency` イベントで `evicted` / `headroom` を名乗る。段をまだ張っていないのでやり直しは無い。
-     後始末が失敗したら、名乗ってから後始末の失敗を並べた `AggregateError` を投げる。
-   - **試し確保が投げたら**（validation / device 消失）: 格下げも退避もせず、そのまま投げる。「入らない」では
-     ないので、退避で片付けると本当の原因が埋もれる。
-3. **解放待ち（`settleReleasedMemory` — 決定 3 ②）は待つ前に `queue.submit([])` を 1 本出す**。検証を通る
-   呼び出しなので、致命な OOM で既に無効な device をその場で表面化させる（Deno が lost を解決する契機）。保留中の
-   destroy も flush される。99% 線の判定を踏んでも安全なのは、この待ちに来るのが使用量 97% 以下のとき（試し確保
-   か本物の確保が拒まれた直後）か、device が既に死んでいるときだけだから。
-4. 公開の `AnimaResidencyReason` に `"headroom"` が増えた。models 内部の `ModelComponent` に `estimate` と
-   `maxPartBytes` を足した。
+1. **Runtime `fitsHeadroom(gpu, bytes)`** (public — `packages/runtime/src/gpu/headroom.ts`): allocates
+   STORAGE buffers in equal pieces of at most `maxBufferSize`, destroys them at once, settles the
+   release with `onSubmittedWorkDone` (raced against device loss), and returns `true` if they fit,
+   `false` on OOM. Validation errors and device loss throw. It SHOULD NOT issue `queue.submit([])`
+   inside (the 99 % check after submit runs before the release). (Re-graded 2026-10-18 to SHOULD: the
+   rule rests on wgpu's (Deno's) poll order; not re-derived on Dawn.) The result is a fact of that
+   moment, not a reservation.
+2. **Anima's pre-emptive eviction** (`TransformerResidency.ensureHeadroom(need, probe, notify)`),
+   measured at two points of a generate, only while a resident DiT exists:
+   - before the text stages (with a carried-over DiT): need = the larger of text_encoder and
+     text_conditioner;
+   - after the `stage` end of `transformer` and before `vae_decoder` start: need = vae_decoder. This
+     covers the first generate (its own DiT enters the slot and the VAE stacks on it) and a
+     carried-over DiT that grew its backing at a new resolution. The VAE is not included in the
+     earlier measurement because evicting after the DiT stage has already benefited is cheaper.
+   - Need of one stage = `ModelComponent.estimate(...).peakAccountedBytes` (weights + the bound of the
+     retained set, with the stage's own bindings and device limits) + `ModelComponent.maxPartBytes`
+     (the largest weight part = staging alive until that part's fence) + a margin of 512 MiB
+     (`HEADROOM_MARGIN_BYTES`).
+   - **The margin SHOULD be 512 MiB** — gpu-allocator's 256 MiB blocks (an allocation below block
+     size that opens a new block takes up to 256 MiB more than the probe saw) + the room up to the 99 %
+     line (2 % of the budget, about 178 MiB on the 9.93 GiB B570) + the estimator's `unaccounted`
+     (params, quantization scratch); small against the resident share (+2,646 MiB). (Re-graded
+     2026-10-18 to SHOULD: derived from wgpu's allocator and budget lines and the B570; not re-derived
+     on Dawn.)
+   - **If it does not fit**: downgrade (decision 4 — permanent, like reactive eviction) → dispose the
+     resident DiT → wait for the release → report `evicted` / `headroom`. No stage has been opened,
+     so there is no re-run. A clean-up failure is reported, then thrown as an `AggregateError`.
+   - **If the probe throws** (validation / device loss): no downgrade or eviction; it is thrown as is
+     ("does not fit" is not the cause, and eviction would bury it).
+3. **The release wait (`settleReleasedMemory`, decision 3 ②) issues one `queue.submit([])` before
+   waiting** (`packages/models/src/session/settle-released-memory.ts`). The validated call surfaces a
+   device already invalidated by a fatal OOM (the trigger for Deno to resolve loss) and flushes
+   pending destroys. Crossing the 99 % line is safe here: the wait is reached at ≤ 97 % (right after a
+   probe or a real allocation was refused) or with a dead device.
+4. The public `AnimaResidencyReason` gains `"headroom"`; `ModelComponent` (internal to `models`) gains
+   `estimate` and `maxPartBytes`.
 
-### 残すもの
+### Kept
 
-- **決定 3 の反応の退避は第二線として残す**（見積りが外れたとき・量った後に他プロセスが確保したとき）。踏んだ
-  OOM が `createBuffer` 側なら従来どおり退避してやり直す。staging 側なら device は既に無効で、解放待ちの
-  `submit([])` がそれを表面化させ、やり直しの段が `GpuDeviceLostError` で失敗する（黙っては落ちない）。
+- **Decision 3's reactive eviction stays as the second line** (an estimate off, or another process
+  allocating after the probe). A `createBuffer` OOM is evicted and re-run as before; a staging OOM has
+  already invalidated the device, the wait's `submit([])` surfaces it, and the re-run fails with
+  `GpuDeviceLostError` (not silently).
 
-### 棄却した案
+### Not adopted
 
-- **明示 staging**（`createBuffer(MAP_WRITE | COPY_SRC, mappedAtCreation)` → `copyBufferToBuffer`。確保が全部
-  `createBuffer` になるので OOM が非致命になる）— 棄却。Deno の `getMappedRange` は map した VRAM の範囲を CPU で
-  複製するので、1 GiB あたり 82.6 s かかる（現行の `queue.writeBuffer` は 0.28 s — research §3）。
+- **Explicit staging** (`createBuffer(MAP_WRITE | COPY_SRC, mappedAtCreation)` → `copyBufferToBuffer`;
+  every allocation becomes `createBuffer`, so OOM becomes non-fatal) MAY be reconsidered. It was
+  rejected because Deno's `getMappedRange` copies the mapped VRAM range on the CPU: 82.6 s per GiB
+  against 0.28 s for `queue.writeBuffer` (research 2026-09-27 §3). (Re-graded 2026-10-18 to MAY: the
+  only ground is a Deno measurement; the cost on Dawn, the primary target since ADR 0127, is not
+  measured.)
 
-### B570 での検証（2026-09-27）
+### Verification on the B570 (2026-09-27)
 
-- 再現台本 `evict-probe.ts --dummy-gib 6`: 1 枚目 23.44 s（`retained` / `request`）。2 枚目 23.46 s — generate
-  開始から 0.09 s（`text_encoder` の `stage` start の前）で `evicted` / `headroom`、DiT 段で `released` /
-  `downgraded`、生成は成功し PNG の sha は 1 枚目と一致（`16f7946acc33`）。OOM も device lost も出ない。
-- e2e（`--filter residency`）4 行緑。新しい 2 行 = text_encoder の前の退避（空きを 1 GiB 程度残す形）と、最初の
-  generate の VAE 段の前の退避（空き 256 MiB 未満）。
-- 費用: 常駐 DiT がある generate で試し確保 2 回ぶん（0.1 s 程度・実測は research）。段ごと運転では量らない。
-- Chrome での常駐と退避の挙動は、確認ページ（2026-09-29 に `tools/gpu-lab` の Anima タブへ統合 — `deno task bench:gpu-lab` →
-  http://localhost:8788）で観察する。
+The reproduction (`evict-probe.ts --dummy-gib 6`, untracked, Deno) now succeeds: the second generate
+reports `evicted` / `headroom` before `text_encoder` starts and the PNG sha matches the first; no OOM
+or device loss. e2e `residency` cases: 4 green. Cost: two probes per generate with a resident DiT
+(about 0.1 s); per-stage operation does not probe. The Chrome observation page named here
+(`tools/gpu-lab`) is not part of `wip/0.15` (ADR 0127 decision 5: Deno-era tools are not ported), so
+Chrome behaviour has no observation tool today.

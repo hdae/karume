@@ -1,302 +1,297 @@
-# 0108: Karume 専用コンテナ形式 — `krm` / `krg`・block / part・codec 台帳
+# 0108: Karume container format — `krm` / `krg`, blocks and parts, codec ledger
 
-- Status: accepted（2026-09-22 — 段 0 の成果物として proposed で起票し、同日の段 1 着手の裁定で
-  accepted。codec 登録名 4 種（決定 13）も同時に確定。本 ADR と [container-v1](../container-v1.md) が正本）
+- Status: accepted (2026-09-22 — filed as proposed as the output of step 0 and accepted the same day
+  when the maintainer approved the start of step 1; the four codec names of decision 13 were fixed
+  at the same time); steps 0–3 implemented (2026-09-24), steps 4–6 open. Partly superseded:
+  decision 20 by [0109](0109-manifest-v5-container.md) (container granularity, 2026-09-22),
+  decision 12 by addendum 12 (codec owners, 2026-10-11), the bf16 statements of decisions 12 and 19
+  and of the addendum 12 table by [0131](0131-bf16-weight-execution.md) (bf16 executes, 2026-10-17). On
+  2026-10-18 decision 15 was re-graded to SHOULD, the retention rule of decision 18 to MAY, and the
+  "no second implementation in Python" rule of decision 17 was withdrawn. This ADR and
+  [container-v1](../container-v1.md) are the canonical sources.
 - Date: 2026-09-22
-- 対象（段ごとに触る面の宣言 — 起票時点〈2026-09-22〉は未実装。2026-09-25 時点で段 3 まで実装済み —
-  追記 1〜5）:
-  - 仕様: [docs/container-v1.md](../container-v1.md)（新設 — 物理形式の正本）/
-    [docs/ir-v2.md](../ir-v2.md) → IR v2 へ改訂（`storage` の外出し・`scale` の rank 2 統一）
-  - runtime: `packages/runtime/src/format/`（`container.ts` / `ir.ts` / `safetensors.ts` /
-    `i2.ts` / `i4.ts` / `i8.ts`）・`packages/runtime/src/runtime/`（`session-build.ts` /
-    `plan.ts` / `weight-residency.ts` / `executor.ts`）
-  - hub: `packages/hub/src/`（`manifest.ts` を `karume/5` へ・`fetch.ts` / `sources/` を
-    block 単位取得へ）
-  - models: 家族入口の `components` 席・`gemma/qat.ts` / `speculative.ts` / `ple-shard.ts`
-  - exporter: `tools/exporter/src/karume/`（`emit.py` / `verify.py` / `repack.py` /
-    `shards.py` / `quantize.py` / `modelcard.py`）・`tools/export-recipes/`・**移行 CLI**（新設）
-  - 運用: `docs/release-runbook.md` / `hf-upload.zsh` / `karume dist` / 門番
-    （`distribution_gate` / `assets_gate`）
-- **Supersedes**（本 ADR が上書きする既存決定 — 既存 ADR の本文には追記で対応する）:
-  - ADR [0003](0003-ir-v1.md) の**コンテナ規約**（`docs/ir-v2.md:86-91`「配布形は safetensors
-    1 ファイル・`__metadata__.karume_ir` にグラフ JSON」）
-  - ADR [0037](0037-karume-monorepo.md) **§3**（「独自拡張子 `.krm` は不採用」・
-    「1 グラフ = 1 safetensors」）
-  - ADR [0063](0063-safetensors-physical-layout.md)（safetensors 物理配置の契約 — 隙間なし・
-    要素整列・固定書き出し順 `F32 → I32 → I4 → 偶数要素 F16 → 奇数要素 F16 → I8`）
-  - ADR [0081](0081-shard-spec-v2.md) 決定 1 / 3（shard 0 はグラフ専用・常時分割）
-  - ADR [0090](0090-shard-spec-v3-tensor-pieces.md) **決定 2**（受理上限 `SHARD_BYTE_LIMIT` =
-    256 MiB 1 本・ファイル長で測る）
-  - ADR [0003](0003-ir-v1.md) の「v0 から変えるもの 1」（initializer 単位の `storage` 記述を
-    グラフ JSON に持つ）— 決定 17 で束縛表の `encoding` へ移る
-  - ADR [0006](0006-quantization.md) 決定の「量子化は initializer の storage 記述（0003）に閉じる」
-    — 決定 17 で束縛表の `encoding` に閉じる
-  - ADR [0010](0010-symbolic-constant-folding.md) の格納 dtype `i32`（IR v1 の `storage` 語彙）
-    — 決定 12 の codec 台帳の `i32`
-  - ADR [0019](0019-i8-weight-execution.md) の scale の形と宣言（weight と同 rank の keepdim
-    broadcast 形・`storage.scale`・`group_size` が付けば拒否）と I8 の並び順（末尾）— 決定 11 の
-    rank 2 group 形 `[shape[rowAxis], 行長 / groupSize]`・`encoding.scale`・宣言の `rowAxis`
-    （per-channel codec は `groupSize` = 行長 MUST）と、決定 18 の safetensors 配置規則の退役
-  - 上の 4 本はいずれも**格納の記述**だけの上書きで、数値の契約（i8 は ±127 対称 per-channel・
-    scale は要素ごと dequant・bias は f32・意味論 dtype と格納の分離）は変えない
-- 関連: ADR [0038](0038-manifest-v1.md) §3 / §4（実行既定は manifest 所有・配布者に runtime の
-  綴りを書かせない — この分担は**変えない**）/ [0041](0041-manifest-v2.md) /
-  [0071](0071-manifest-v3-shards.md) / [0075](0075-quant-presentation.md)（manifest `karume/4` —
-  本 ADR の先に `karume/5` へ繰り上がる）/ [0069](0069-packed-w4-storage.md)（packed 4bit の
-  値域・pack 順・group scale 形 — codec 台帳へ逐語移送）/ [0097](0097-gemma4-qat-integration.md)
-  （INT2 格納と QAT の混成格納・SRQ）/ [0019](0019-i8-weight-execution.md)（i8 格納）/
-  [0089](0089-memory-limits-preflight.md)（宣言から RAM を事前見積りする流儀）/
-  [0105](0105-packed-static-quantize-activations.md)（packed int8 活性 — 低 bit codec の前提）/
-  [0106](0106-device-keyed-references.md)（環境キー別 sha256 参照門 — 移行の検収で「緑にしない」
-  規律が効く）/ [0058](0058-numerics-opt-in-contract.md)（数値 opt-in — 2 段 scale を将来入れる
-  ときの席）/ [assets-layout](../assets-layout.md) / [release-runbook](../release-runbook.md)
+- Scope: spec [container-v1](../container-v1.md) (new, canonical physical format) and
+  [ir-v2](../ir-v2.md); runtime `packages/runtime/src/format/` and `src/runtime/`
+  (`session-build.ts`, `plan.ts`, `weight-residency.ts`, `executor.ts`); hub `manifest.ts`
+  (`karume/5`), `fetch.ts`, `sources/`, `container.ts`; models (the `components` option, QAT,
+  speculative decoding, PLE readers); exporter `tools/exporter/src/karume/` with the migration CLI
+  and `tools/export-recipes/`; operations (`docs/release-runbook.md`, `tools/release/hf-upload.zsh`,
+  `karume dist`, the gate tests).
+- **Supersedes** (existing decisions this ADR overrides; the older ADRs carry addenda):
+  - ADR [0003](0003-ir-v1.md): the container convention (one safetensors file, graph JSON in
+    `__metadata__.karume_ir`), and "change 1 from v0" (per-initializer `storage` in the graph JSON —
+    moves to the binding table's `encoding`, decision 17)
+  - ADR [0037](0037-karume-monorepo.md) §3 ("no custom `.krm` extension", "one graph = one
+    safetensors")
+  - ADR [0063](0063-safetensors-physical-layout.md) (safetensors physical layout: no gaps, element
+    alignment, fixed write order `F32 → I32 → I4 → even-length F16 → odd-length F16 → I8`)
+  - ADR [0081](0081-shard-spec-v2.md) decisions 1 / 3 (shard 0 holds only the graph; always split)
+  - ADR [0090](0090-shard-spec-v3-tensor-pieces.md) decision 2 (one acceptance limit
+    `SHARD_BYTE_LIMIT` = 256 MiB measured on the file length)
+  - ADR [0006](0006-quantization.md) "quantization is confined to the initializer's storage
+    declaration (0003)" — now confined to the binding table's `encoding` (decision 17)
+  - ADR [0010](0010-symbolic-constant-folding.md): storage dtype `i32` (IR v1 `storage` vocabulary)
+    — now the `i32` entry of the codec ledger (decision 12)
+  - ADR [0019](0019-i8-weight-execution.md): the scale shape and declaration (keepdim broadcast of
+    the weight rank, `storage.scale`, rejected with `group_size`) and the I8 position in the write
+    order — replaced by the rank 2 group shape `[shape[rowAxis], rowLength / groupSize]`,
+    `encoding.scale` and a declared `rowAxis` (per-channel codecs MUST have `groupSize` = row
+    length) of decision 11, and by the retirement of the safetensors layout rules (decision 18)
+  - The last four override only how storage is declared. The numeric contracts (i8 is ±127
+    symmetric per channel, scale is applied per element at dequantization, bias is f32, semantic
+    dtype and storage are separate) do not change.
+- Related: [0038](0038-manifest-v1.md) §3 / §4 (execution defaults belong to the manifest — **not**
+  changed) / [0041](0041-manifest-v2.md) / [0071](0071-manifest-v3-shards.md) /
+  [0075](0075-quant-presentation.md) (`karume/4`, followed by `karume/5`) /
+  [0069](0069-packed-w4-storage.md) (packed 4-bit, moved verbatim into the codec ledger) /
+  [0097](0097-gemma4-qat-integration.md) (INT2 and mixed QAT storage) /
+  [0089](0089-memory-limits-preflight.md) / [0105](0105-packed-static-quantize-activations.md) /
+  [0106](0106-device-keyed-references.md) / [0058](0058-numerics-opt-in-contract.md) /
+  [assets-layout](../assets-layout.md) / [release-runbook](../release-runbook.md)
 
 ## Context
 
-配布形は今日「safetensors 1 ファイル + `__metadata__.karume_ir` にグラフ JSON」で、量子化格納
-`I4` / `I2` は safetensors の**方言**である（公式ライブラリ 0.8.0 は拒否する —
-`tools/exporter/src/karume/modelcard.py:368-376`・[limitations](../limitations.md):597-616 が
-「次の manifest format 変更時に独自形式への移行を検討」と既に書いている）。つまり
-「汎用 safetensors ツールで開ける」という当初の利得は、量子化席では**すでに失われている**。
+Before this ADR the distribution was "one safetensors file + graph JSON in
+`__metadata__.karume_ir`", and the quantized storage dtypes `I4` / `I2` were a safetensors
+**dialect** (the official library 0.8.0 rejects them; [limitations](../limitations.md) already said
+a custom format would be considered at the next manifest format change). The original benefit,
+"opens in any safetensors tool", was **already lost** for quantized presets.
 
-失われていない利得のために払っている費用が、実物で 5 つ数えられる:
+The benefit that remained cost five things, counted on the assets:
 
-1. **グラフと重みの分離が物理配置のハック**になっている。shard 0 をデータ節 0 テンソルの
-   「グラフ専用ファイル」にする規約（ADR 0081 決定 1）で分離を作っており、ミラー 447 本のうち
-   `karume_ir` を持つのは 77 本・すべてデータ節 0 テンソル（実測）。IR の総量 14.2 MB は
-   データ節 73.8 GB の **0.019 %** で、分離のために本数を増やしている割に中身は小さい。
-2. **テンソル名に物理の都合が綴られている**。分割テンソルは `<名前>#00002-of-00003` という
-   piece キー（`packages/runtime/src/format/container.ts:168`）で、名前空間に配置が漏れている。
-3. **付随資産が物理配置に依存した区間読みになっている**。PLE sidecar は safetensors の
-   `byteOffset` を自分で取り出して 1 token 分 9,100 B を 2 回に分けて読む
-   （`packages/models/src/gemma/ple-shard.ts:320-337`）。
-4. **末尾ゼロ詰めが読み手側に散っている**。`writeBuffer` が 4 の倍数でないサイズを拒むため、
-   転送側に「丸ごと / piece 列の末尾だけ詰める」分岐が 3 つある
-   （`packages/runtime/src/runtime/session-build.ts:819, 856, 883`）。詰め物は**バイト列では
-   なく実行時の都合**なのに、読み手が毎回作り直している。
-5. **取得単位 = ファイル 1 本**で、ホスト RAM のピークが「定数 + 最大 shard 1 本」でしか
-   抑えられない（ADR 0090 決定 2）。hub は HTTP Range を発行せず、区間読みは温め済み
-   キャッシュの中だけである（`packages/hub/src/sources/hf.ts:81-87, 153, 194-236`）。
+1. **Graph / weight separation was a physical-layout hack.** Shard 0 was a graph-only file with an
+   empty data section (ADR 0081 decision 1). Of 447 mirror files, 77 carried `karume_ir`, all with
+   zero tensors. The IR totalled 14.2 MB, **0.019 %** of the 73.8 GB data sections.
+2. **Tensor names carried physical concerns.** A split tensor used a piece key
+   `<name>#00002-of-00003`, leaking the layout into the name space.
+3. **Auxiliary assets depended on the physical layout.** The PLE sidecar extracted the safetensors
+   `byteOffset` itself and read 9,100 B per token in two reads.
+4. **Tail zero padding was scattered over the reader.** `writeBuffer` rejects sizes that are not a
+   multiple of 4, so the transfer side had three padding branches (whole tensor / last piece).
+   Padding is a runtime concern, not a byte-level one, yet every reader rebuilt it.
+5. **The fetch unit was one file**, so host RAM peaked at "constant + largest shard" (ADR 0090
+   decision 2). The hub issued no HTTP Range requests; range reads existed only inside a warmed
+   cache.
 
-一方で、やりたいことが 3 つ増えた。**無改変の上流 safetensors を読む**（対応済みアーキに
-上流重みを持ち込む）・**LoRA をその場で載せる**・**部品単位で差し替える**（transformer だけ
-別出所）。この 3 つはいずれも「グラフ契約」と「重み供給」を**別の物として組み合わせる**形を
-要求するが、今日の形式は 1 ファイルの中で両者が癒着している。
+Three new needs appeared: **reading unmodified upstream safetensors** (upstream weights for a
+supported architecture), **applying LoRA at load time**, and **replacing a single component**
+(for example a transformer from another source). All three combine a "graph contract" and a "weight
+supply" as separate things; the old format fused both in one file.
 
-加えて量子化側からの要求がある。gemma4 e2b の i4 g32 を三値 2 bit に落とすと格納は **−40 %**、
-f16 scale 化だけで **−10 %**、group 32 → 128 で **−15 %**（実測ヘッダからの試算）。ところが
-今日の宣言語彙は `storage.dtype` の**列挙**（`f32 | f16 | bf16 | i8 | i4 | i2 | i32` —
-`packages/runtime/src/format/ir.ts:18`）なので、新しい詰め方は語彙を 1 つ増やすたびに宣言・
-検査・展開・実行の全層へ枝を生やす。実測で、**宣言を足すのは 3 ファイル**（`ir.ts` /
-`verify.py` / `safetensors.ts` の bit・整列表）で済むのに、**実行を足すと非テスト 22 ファイル・
-WGSL スナップショット変種 10〜21 本**になる（`wi2` 10 本 / `wi8` 21 本 / `wi4` 21 本 —
-`packages/runtime/tests/fixtures/wgsl/` の実数）。
+Quantization added a fourth need. For gemma4 e2b, ternary 2-bit instead of i4 g32 saves **−40 %**
+storage, f16 scales **−10 %**, group 32 → 128 **−15 %** (estimates from real headers). The
+declaration vocabulary enumerated `storage.dtype` (`f32 | f16 | bf16 | i8 | i4 | i2 | i32`), so each
+new packing grew branches through every layer: a declaration touched **3 files**, execution **22
+non-test files and 10–21 WGSL snapshot variants**.
 
 ## Decision
 
-### 1. 専用コンテナを 2 種に分け、物理形式は 1 つにする
+### 1. Two container kinds, one physical format
 
-- **`krm`**（model）= グラフ + 学習済み重み + scale + 資産。
-- **`krg`**（graph）= グラフ + **重み block を持たない**もの。定義は「重み block を持たない」
-  であって「重み非依存」ではない — QAT は `static_quantize` の attr に活性 scale を焼き込む
-  （ADR 0097 追記 2）ので、`krg` でも重みに由来する数を抱えることがある。
-- 物理形式・グラフ表現・descriptor のスキーマは**両者で完全に同一**。区別は**magic 4 B の 1 文字**
-  （`KRMC` / `KRGC`）だけが持ち、descriptor の中に `kind` 欄は置かない — 同じ事実を 2 か所に
-  持たせない（横断の不変条件「導出できる状態を別欄で持たない」）。JSON を 1 バイトも読む前に
-  種別で弾けるという副次利得もある。
-- `krg` は**重みの束縛表**を持たない（重みの要求は `values` の宣言 shape / dtype から導出する）。
-  ただし**const 領域の block を initializer へ結ぶ表**（`const.constants[]` =
-  `{ graph, initializer, block, encoding }`）と `const.length` は**グラフ記述**が持つ。これが
-  `krg` 単独で `const.*` を供給できる唯一の手段であり、`krg` が part 1 の寸法を知る唯一の手段
-  でもある（CPU 試作 ① の指摘 — 「束縛表を一切持たない」と読むと const の `encoding` をどこから
-  読むのかが決まらない）。provenance は引き継がない。持ち出せる資産は `rope_base` のような
-  **重み非依存**のものだけ。
-- `@karume/models` への `krg` 同梱は**形式として許すが標準配布にはしない**。全グラフの重複除去
-  後の総量 9,444,431 B（9.0 MiB）に対し `@karume/models` の公開物は 1,408,706 B（1.34 MiB）で、
-  同梱は **6.7 倍**になる（却下案 2）。
+- **`krm`** (model) = graph + trained weights + scales + assets.
+- **`krg`** (graph) = graph **without weight blocks**. The definition is "no weight blocks", not
+  "weight-independent": QAT bakes activation scales into the `static_quantize` attributes (ADR 0097
+  addendum 2), so a `krg` can carry numbers derived from weights.
+- The physical format, graph representation and descriptor schema are **identical** for both. Only
+  **one character of the 4-byte magic** (`KRMC` / `KRGC`) distinguishes them; the descriptor has no
+  `kind` field (the same fact is not stored twice). A reader can reject the wrong kind before
+  reading any JSON.
+- A `krg` has **no weight binding table** (weight requirements derive from the declared shape and
+  dtype in `values`). The **graph descriptor** does hold the table that binds const-region blocks to
+  initializers (`const.constants[]` = `{ graph, initializer, block, encoding }`) and `const.length`.
+  This is the only way a `krg` alone supplies `const.*`, and the only way it knows the size of
+  part 1 (CPU spike ① — "no binding table at all" would leave the const `encoding` without a home).
+  Provenance is not inherited; the only assets a `krg` can carry are weight-independent ones such
+  as `rope_base`.
+- Bundling `krg` files in `@karume/models` is **allowed by the format but not the standard
+  distribution**: all graphs after deduplication total 9,444,431 B (9.0 MiB) against a published
+  `@karume/models` of 1,408,706 B (1.34 MiB), **6.7×** (alternative 2).
 
-### 2. ヘッダと **2 文書 descriptor**
+### 2. Header and a **two-document descriptor**
 
 ```text
-[magic 4 B]   "KRMC"（krm）/ "KRGC"（krg）
+[magic 4 B]   "KRMC" (krm) / "KRGC" (krg)
 [u32 LE container version]
 [u64 LE graph descriptor length]
-[u64 LE model descriptor length]     ※ krg では 0 MUST
+[u64 LE model descriptor length]     ※ MUST be 0 in a krg
 ```
 
-descriptor を**グラフ記述**と**モデル記述**の 2 文書に割る。
+The descriptor is split into a **graph descriptor** and a **model descriptor**.
 
-| 文書       | 持つもの                                                      |
-| ---------- | ------------------------------------------------------------- |
-| グラフ記述 | `graphs`（IR v2）・**const 領域の目次**・`capabilities`       |
-| モデル記述 | **束縛表**・重み / 資産の目次・parts の内部配置・`provenance` |
+| Document         | Holds                                                                       |
+| ---------------- | --------------------------------------------------------------------------- |
+| Graph descriptor | `graphs` (IR v2), the **const-region index**, `capabilities`                |
+| Model descriptor | the **binding table**, weight / asset index, part layout, `provenance`      |
 
-割る理由は §4 の「`krg` をバイトコピーで抜ける」を成立させるためである。1 文書のままだと
-`krg` を作るたびに JSON を再生成することになり、「同じグラフから抜いた `krg` が生成器の版で
-バイト違いになる」経路が残る。
+The split makes decision 4 ("extract a `krg` by byte copy") possible. With one document, every
+`krg` extraction would regenerate JSON, and a `krg` taken from the same graph could differ by
+generator version.
 
-descriptor は `session` / `gpuFeatures` / `requiredLimits` / `label` / `description` を
-**持たない**（ADR 0038 §3 — 実行既定は manifest の所有で、配布者に runtime の綴りを書かせない。
-`fromContainer` では呼び手が渡す）。
+The descriptor does **not** hold `session` / `gpuFeatures` / `requiredLimits` / `label` /
+`description` (ADR 0038 §3 — execution defaults belong to the manifest; with the bytes input of
+`openContainer` the caller passes them).
 
-### 3. 物理配置 — 単一形と分割形は同じ並び
+### 3. Physical layout — single and split forms share one order
 
-分割形:
+Split form:
 
-| part   | 中身                                                                     |
-| ------ | ------------------------------------------------------------------------ |
-| 0      | `[ヘッダ][グラフ記述][モデル記述]`                                       |
-| 1      | **const 領域**（グラフの所有・block の offset は**領域先頭からの相対**） |
-| 2 以降 | 重み / 資産の block                                                      |
+| Part     | Content                                                                         |
+| -------- | ------------------------------------------------------------------------------- |
+| 0        | `[header][graph descriptor][model descriptor]`                                  |
+| 1        | **const region** (owned by the graph; block offsets are **relative to the region start**) |
+| 2 and up | weight / asset blocks                                                           |
 
-単一形は**同じ順で連結**する（境界は 64 B 整列）。つまり単一形と分割形はバイト列として
-「切れ目があるか否か」だけが違い、descriptor の読み方は 1 本で済む。
+The single form **concatenates the same order** (boundaries 64 B aligned). The two forms differ only
+in whether the byte stream has cuts, and one descriptor reader serves both.
 
-const を専用 part に隔離するのは、const が小さいとは限らないからである（実測: gemma4 e2b i4 で
-0.08 % だが、birefnet 2048 f32 で 29.3 MB = 2.5 %・sbv2 F1 front i4 で 2.1 MB = **29.7 %**）。
-準備時に取るのは part 0 だけで、const は要るときに取る。
+Const data gets its own part because it is not always small (gemma4 e2b i4: 0.08 %; birefnet 2048
+f32: 29.3 MB = 2.5 %; sbv2 F1 front i4: 2.1 MB = **29.7 %**). Preparation fetches part 0 only;
+const is fetched when needed.
 
-part 0 だけで admission（グラフの受理・実行計画・見積り）が閉じる。これが「**先にグラフだけ
-取って `prepareModel` → admission → 重み**」の順序を現行より軽く保つ条件である。
+Part 0 alone closes admission (graph acceptance, execution plan, estimate). This keeps the order
+"graph first → admission → weights" as light as before.
 
-### 4. `krg` は**バイトコピー**で抜ける
+### 4. A `krg` is extracted by **byte copy**
 
-`krg` = `[ヘッダ'][グラフ記述][const 領域]` の連結。**offset の書き換えを 1 バイトも伴わない**
-（const block の offset が「const 領域の先頭からの相対」だからである — 決定 3）。
+`krg` = `[header'][graph descriptor][const region]`. Extraction rewrites **no offset** (const block
+offsets are relative to the region — decision 3).
 
-これで「`krm` から抜いた `krg`」と「最初から `krg` として書いた同じグラフ」がバイト同一になり、
-`krg` の同一性を**内容ハッシュ**で判定できる（名前でも「同アーキ」でもなく）。const の束縛表を
-グラフ記述が持つ（決定 1）ので、抜いた `krg` だけで const の供給が閉じる。
+A `krg` extracted from a `krm` and a `krg` written directly from the same graph are byte-identical,
+so `krg` identity is decided by **content hash** (not by name or "same architecture"). The graph
+descriptor holds the const binding table (decision 1), so an extracted `krg` supplies its consts on
+its own.
 
-バイト同一の前提がもう 1 つある: **再 export 間でもグラフ記述がバイト同一であること**。これには
-IR v2 の**直列化規則**（キー順・数値の綴り）を決め切る必要があり、段 1 の作業項目に入れる
-（CPU 試作 ① はグラフ名だけ整列し、IR 本体は Python 側の serialize 順をそのまま持っていた）。
+Byte identity has a second precondition: **the graph descriptor is byte-identical across
+re-exports**. This needs fixed IR v2 **serialization rules** (key order, number spelling); they
+were a step 1 work item (rules in addendum 1, item 2).
 
-NOTE: 設計案 v2 はこの流儀の先例として `distribution.py:570` の「RoPE 表の共有」を挙げていたが、
-**その参照は現物と合わない** — gemma4 の RoPE cos / sin 表は既に配布物から外れており、ホスト側が
-`pipelineConfig.rope` の宣言から実行時に組む（`tools/export-recipes/gemma4/distribution.py:35`）。
-先例としては数えず、本 ADR は内容ハッシュ判定を新規の決定として置く。
+The design draft cited "sharing the RoPE table" in the gemma4 distribution recipe as a precedent;
+that does not match the code — the gemma4 RoPE cos / sin tables are no longer distributed and the
+host builds them from the `pipelineConfig.rope` declaration
+(`tools/export-recipes/gemma4/distribution.py`). Content-hash identity is a new decision here.
 
-### 5. **block** = 取得・検証・解放の単位・上限 **32 MiB 以下**（独立定数）
+### 5. **Block** = unit of fetch, verification and release; limit **≤ 32 MiB** (independent constant)
 
-- block は独立に取得し、独立に sha256 を検証し、GPU へ上げたら独立に解放できる。
-- block は **part をまたがない**。
-- **上限は 32 MiB 以下**（`length ≤ 33,554,432 B`。「未満」ではない）。これは part 長からの
-  派生ではなく**独立した定数**である。根拠は 3 点（CPU 試作 ① / ② の実測・2026-09-22）:
-  1. **割っても digest の総費用は増えない**。256 MiB を一括 digest すると 923 MiB/s、
-     32 MiB × 8 に分けると 938 MiB/s（比 0.984）である。「block 単位で検証する」設計に
-     digest 側の言い訳は要らない。
-  2. **anima transformer の最大重み（2048×8192 f16）がちょうど 33,554,432 B で、56 本がこの値に
-     乗る**。上限を「以下」にすれば piece 分割は 0 本、「未満」にすると同じ 56 本が分割される。
-     境界の定義 1 つで実資産の分割件数が 0 と 56 に割れる。
-  3. **const block は piece 分割の機構を持てない**（piece 列を表せるのは重みの束縛表だけで、
-     `krg` はそれを持たない — 決定 1）ので、const 1 本が上限に収まらなければ表現できない。
-     現状の最大は birefnet 2048 の f32 定数 **29.3 MB** で、32 MiB まで約 2.7 MB の余裕しかない。
-- digest には **`subarray` を渡す**（`slice` コピーを挟むと 943 → 641 MiB/s）。
-- 並行 digest は効く（16 MiB × 16 を `Promise.all` で **3,702 MiB/s** — 逐次 16 MiB の 2.07 倍・
-  256 MiB 一括の 4.0 倍）。一括 digest ではこれが取れない。
-- ブラウザは未測。Chrome は digest の入力を Blink 内部へ全量コピーする
-  （`packages/hub/src/fetch.ts` の `BYTE_BUDGET` の記録）ので、block 化はブラウザでこそ効くはずである
-  （**推測** — コピー量が block 長で頭打ちになる）。
-- **将来の見直し（16 MiB へ下げる）**: 交互計測では 16 MiB = 1,784 MiB/s に対し 32 MiB =
-  938 MiB/s で、速さだけを見れば 16 MiB が有利である。下げるときの副作用は 2 つ —
-  ①**const の上限が先に壊れる**（birefnet の 29.3 MB が入らなくなり、上の根拠 3 の逃げ道
-  〈仕様 §10 の未決〉が必要になる）②**block 件数と descriptor が倍に膨らむ**。切り替えは定数
-  1 つなので、段 3 の RAM ピーク実測まで持ち越す。
-- **撤回**: 草案は「32 MiB ちょうどまで 1,865 MiB/s・33 MiB から 948 MiB/s と半減する」という
-  崖を根拠にしていたが、再実測で**再現しなかった**。あの数はサイズを昇順に連続計測したときだけ
-  出る測り方の産物で、16 MiB と交互に回すと 16 MiB = 1,784・32 MiB = 938・40 MiB = 959・
-  64 MiB = 933 MiB/s となり、**崖は 32 MiB の手前にある**（**推測**: 32 MiB は glibc の mmap
-  閾値の上限と同値で、この境界から先は確保のたびに mmap / munmap が走る）。サイズを振る digest
-  計測は交互に回さないと結論が逆になる。
+- A block is fetched, sha256-verified and released after GPU upload independently.
+- A block does **not** cross a part.
+- **The limit is ≤ 32 MiB** (`length ≤ 33,554,432 B`, inclusive). It is an **independent
+  constant**, not derived from the part length (`BLOCK_MAX_BYTES` in
+  `packages/runtime/src/format/container/limits.ts` and `tools/exporter/src/karume/container.py`).
+  Three reasons (CPU spikes ① / ②, 2026-09-22):
+  1. **Splitting does not raise the total digest cost.** One 256 MiB digest runs at 923 MiB/s;
+     8 × 32 MiB at 938 MiB/s (ratio 0.984).
+  2. **The largest anima transformer weight (2048×8192 f16) is exactly 33,554,432 B, and 56 tensors
+     have that size.** With "≤" no tensor is split into pieces; with "<" the same 56 are split.
+  3. **A const block cannot be split into pieces** (only the weight binding table can express a
+     piece list, and a `krg` has none — decision 1), so a const larger than the limit cannot be
+     represented. The largest today is birefnet 2048's f32 constant at **29.3 MB**, about 2.7 MB
+     under 32 MiB.
+- Digest takes a **`subarray`** (a `slice` copy drops 943 → 641 MiB/s).
+- Concurrent digests help (16 × 16 MiB with `Promise.all`: **3,702 MiB/s** — 2.07× sequential
+  16 MiB, 4.0× one 256 MiB digest). One whole-file digest cannot get this.
+- Browsers were not measured. Chrome copies the digest input into Blink in full (recorded with
+  `BYTE_BUDGET` in `packages/hub/src/fetch.ts`), so blocks should help most there (**speculation** —
+  the copy is capped at the block length).
+- **Possible reduction to 16 MiB**: interleaved runs gave 1,784 MiB/s for 16 MiB against 938 MiB/s
+  for 32 MiB. Side effects: ① **the const limit breaks first** (birefnet's 29.3 MB no longer fits;
+  the escape hatch is open in container-v1 §10), ② **block count and descriptor size double**. It is
+  one constant; the review moved to step 6 (addendum 4, item 14). The Deno RAM-peak harness of steps
+  2–3 (`tools/ram-peak/`) is not on the Node toolchain (ADR [0127](0127-node-dawn-toolchain.md)
+  decision 5).
+- History (2026-09-22): the draft's "cliff at 32 MiB" was an artefact of measuring sizes in
+  ascending order; digest size sweeps are run interleaved.
 
-### 6. **part** = 配信粒度・長さは**モデル規模で書き手が選ぶ**
+### 6. **Part** = delivery granularity; length **chosen by the writer by model size**
 
-- part の長さは書き手の選択 **`{256, 512, 768, 1024} MiB`**（既定 **256 MiB**）。
-- manifest と descriptor の**両方**が各 part の長さを宣言し、読み手は宣言だけで host RAM を
-  事前見積りできる（ADR 0089 の流儀 — 1 バイトも取る前に器の寸法が決まる）。
-- **exporter の既定を 256 から動かすのは段 3（block 化）の検収後**。段 1 / 2 では取得単位が
-  まだ part なので、1024 MiB を選ぶとピークが **+768 MiB** 乗る。
-- ADR 0090 決定 2 の根拠 3 点のうち、R1（RAM ピーク）と R3（Chromium の単一 ArrayBuffer 上限
-  2,145,386,496 B）は**block 上限へ移る**。part に残るのは R2（ファイル数・リクエスト数が
-  hub の 4 並列と `MAX_SHARDS` = 1024 の内側）だけである。
-- 実資産の実態: 447 本すべて 256 MiB 以下・最大 254.3 MiB・中央値 224.0 MiB・合計 68.8 GiB。
-  `assets` / `extras` に 256 MiB 上限が掛からない現行の免除（`packages/hub/src/manifest.ts:76-79`）は
-  **今日 1 本も使われていない**（PLE sidecar も自分で 9 / 5 本に割れている）。
+- Part length is the writer's choice of **`{256, 512, 768, 1024} MiB`** (default **256 MiB**,
+  kept after the step 3 measurement — addendum 5, item 1).
+- The manifest and the descriptor **both** declare every part length, so a reader estimates host
+  RAM from declarations alone (ADR 0089 — the size of every buffer is known before the first byte).
+- Of ADR 0090 decision 2's three reasons, R1 (RAM peak) and R3 (Chromium's single-ArrayBuffer limit
+  2,145,386,496 B) **move to the block limit**. Only R2 stays with the part (file and request count
+  within the hub's 4 concurrent fetches — `CONCURRENCY` in `packages/hub/src/fetch.ts` — and
+  `MAX_PARTS` = 1024).
+- Assets at the time: all 447 files ≤ 256 MiB, largest 254.3 MiB, median 224.0 MiB, total
+  68.8 GiB; the 256 MiB exemption for `assets` / `extras` was unused (ADR 0109 retired it).
 
-### 7. 末尾 padding は**書き手が焼く**
+### 7. Tail padding is **baked by the writer**
 
-`writeBuffer` は 4 の倍数でないサイズを validation で拒む。今日はこれを読み手が毎回作って
-いるが（決定の Context 4）、**書き手が block 長を 4 の倍数に揃えて焼く**。
+`writeBuffer` rejects sizes that are not a multiple of 4. The **writer pads each block to a multiple
+of 4**.
 
-- block 先頭は 64 B 整列（∴ offset は自動的に 4 の倍数）、**block 長は 4 の倍数**。
-- 詰め物のバイト値は **0x00 固定 MUST**。覆うハッシュは**2 段構え**である — **block 末尾の
-  詰め物は block の sha256 の対象内**（書き手が焼くので決定的・再梱包のビット同一が詰め物を
-  含めて定義される）、**block 間 / part 間の詰め物は part の sha256 だけが覆う**。
-- 詰め物を掛けてよいのは**丸ごと 1 本の block と piece 列の末尾**だけである。**中間 piece には
-  掛けない**（掛けると次の piece の先頭を潰す — `session-build.ts:816-819` が今そう書いている）。
-  中間 piece のバイト長は**元から 4 の倍数 MUST** で、書き手は行の刻みを `4/gcd(rowBytes,4)` に
-  丸めて切り、丸め切れないときは fail loudly。
-- これで `session-build.ts:819, 856, 883` の分岐 3 つと、**ADR 0063 の書き出し順規約が退役する**
-  （順序で整列を作る必要が無くなる）。
-- 束縛規則②（旧「末尾でない piece の block 長は 4 の倍数」）は「**全 block の長さが 4 の倍数**」へ
-  一般化する。**const と資産も含む全 block**に掛かり、長さが 4 の倍数でないもの（bool 表・
-  奇数長の f16 など）は詰め物込みで宣言する。**消費側は宣言 shape から論理長を導く**。
+- Block starts are 64 B aligned (so offsets are multiples of 4); **block lengths are multiples
+  of 4**.
+- The padding byte is **fixed at 0x00 (MUST)**. Two hashes cover it: **padding at a block's tail is
+  inside the block's sha256** (the writer bakes it, so it is deterministic and bit-identical
+  repacking includes padding); **padding between blocks or parts is covered only by the part's
+  sha256**.
+- Padding is applied only to **a whole block and the last piece of a piece list**, **never to a
+  middle piece** (it would overwrite the next piece's start). A middle piece's byte length **MUST be
+  a multiple of 4 already**; the writer rounds the row step to `4/gcd(rowBytes,4)` and fails loudly
+  when it cannot.
+- **ADR 0063's write-order rule retires** (order is no longer needed for alignment). The plan was
+  that the reader's three padding branches retire as well; addendum 10 corrected this — two remain
+  (`alignF16Payload` in `packages/runtime/src/format/f16.ts`, `alignI8Payload` in
+  `packages/runtime/src/format/i8.ts`, called from `session-build.ts`).
+- Binding rule ② (formerly "a non-final piece's block length is a multiple of 4") generalizes to
+  "**every block length is a multiple of 4**". It applies to **every block, const and assets
+  included**; data whose length is not a multiple of 4 (bool tables, odd-length f16) is declared with
+  its padding. **Consumers derive the logical length from the declared shape.**
 
-### 8. 完全性 — ハッシュの役割を 3 つに分ける
+### 8. Integrity — three roles for hashes
 
-- **descriptor は外側の期待 hash + 長さで先に検証する**（manifest の FileRef、または
-  `fromContainer` の呼び手が渡す pin）。descriptor 自身は自分の正しさを証明できない。
-- **実行時の完全性は descriptor と block の sha256**。cold は block ごとに一括 digest、warm は
-  記録ハッシュの文字列比較だけで **digest 0 回**（キャッシュヒット時に GB 級の digest を
-  走らせない — `packages/hub/src/fetch.ts` の `BYTE_BUDGET` の現行規律を継承）。
-- **ファイル全体の sha256 は公開・再梱包の突合用**として分離する（実行時には使わない）。
-- ハッシュの役割 3 分離を仕様に明記する: ①**取得物の期待ハッシュ**（外側が持つ）②**派生
-  キャッシュキー**（入力 digest + recipe 版 + 変換設定 — 生成前に決まる）③**派生物の内容
-  ハッシュ**（生成後に計算する）。この 3 つを 1 つの欄で兼ねると、上流重みの取り込みで
-  「まだ存在しないものの内容ハッシュ」を要求する形になる。
+- **The descriptor is verified first against an outer expected hash and length** (the manifest's
+  FileRef, or the pin the caller of `openContainer` passes). A descriptor cannot vouch for itself.
+- **Runtime integrity is the sha256 of the descriptor and of each block.** Warm reads compare the
+  recorded hash only: **zero digests** (no gigabyte digest on a cache hit — the existing
+  `BYTE_BUDGET` discipline of `packages/hub/src/fetch.ts`). The cold path digests blocks only for
+  unverified sources (refined by addendum 2, item 3).
+- **The whole-file sha256 is for publishing and repack comparison** (not used at runtime).
+- The spec states three hash roles: ① **expected hash of a fetched object** (held outside),
+  ② **derived cache key** (input digest + recipe version + conversion settings — known before
+  generation), ③ **content hash of a derived object** (computed after generation). One field for all
+  three would demand the content hash of something that does not exist yet when importing upstream
+  weights.
 
-### 9. GPU 転送とメモリ契約
+### 9. GPU transfer and the memory contract
 
-- **`mappedAtCreation` は採らない**（却下案 6）。全 block が揃うまで unmap できず、
-  「block ごとに解放する」という目的と逆を向く。`queue.writeBuffer(dstOffset)` を block ごとに
-  呼ぶ。
-- wgpu（Deno）の `writeBuffer` staging は **submit 完了まで解放されない**（実測: `createBuffer`
-  2 GiB 後 2,311 MiB → `writeBuffer` 後 4,359 MiB —
-  `docs/research/2026-08-08-vram-oom-misreport.md:73`）。したがって現行の
-  「shard ごとに空 submit + `onSubmittedWorkDone`」（ADR 0070 決定 3）は **part 単位（または
-  同時処理バイトの予算単位）のフェンス**として保つ。
-- **errorScope の粒度は block・フェンスの粒度は part** に分ける（2026-09-22 実測・Arc B570 /
-  Deno 2.9.6・256 MiB・5 回の中央値・`.claude/reviews/2026-09-22_codex-format-design/spikes/errorscope/`）:
-  push/pop 2 本組は **1.81 µs / 回**でほぼ無料、高いのは空 submit + `onSubmittedWorkDone` の
-  **13.0 ms / 回**である。pop もフェンスも block ごと（32 MiB × 8）だと 127.4 ms（現行相当 73.8 ms
-  の 1.73 倍）、pop だけ block ごとでフェンスは 256 MiB ごと 1 回だと **56.5 ms（0.77 倍）**。
-  失敗の帰属粒度を block へ上げつつ壁時計は悪化しない形が実在するので、決定 9 の宿題は閉じる。
-- 重ね合わせは「転送中 1 + 受信・検証中 1」のように**本数と合計バイトの両方**で制限する。
-  展開（1 bit → f32 は 32 倍）も処理単位を分ける。
-- 上限は**個別に持つ**（派生させない）: descriptor の長さ / 入れ子深さ / block 件数 /
-  part 長の集合 / block 長 / 同時処理バイト / 展開領域 / GPU の device 上限。
-- **`fromContainer(bytes)`（全量 ArrayBuffer の口）は残す**。Chromium の 2,145,386,496 B は
-  **この口にだけ残る制限**であることを仕様に明記する（HF 公式配布は分割形なので当たらない）。
-- **追記（2026-09-24・段 3e）— CPU 側の解放はフェンスを待たない**: 上のフェンスが律するのは wgpu の
-  staging だけで、CPU 側のバイト列は `writeBuffer` が戻った時点で手放してよい（WebGPU 仕様: content
-  timeline で呼び出しの時点に `dataContents` を写す）。Session 構築は part の block を 1 本ずつ読んでは
-  上げて手放す（`WeightBatch.items` の lazy 化）ので、JS 側で参照が生きる重みのバイト列は part 1 本
-  ぶんから item 1 本ぶん（block 1 本 + 同乗 scale + 展開席の f32 展開結果。展開席の piece 列の間は
-  持ち越し scale の写し〈その initializer の scale 全量〉がもう 1 本生きる — 数え方の正本は container-v1
-  §11）になる。ただし scan 型の
-  取得元では block が hub の保持枠の view なので、上限は保持枠 1 本 + GC を待つ前の器のまま（container-v1
-  §11）。段 3e の実測では scan 型の external 最大が最大 part の約 1.5〜4.4 本だった（追記 5 の 5）。フェンスは part ごと
-  1 回のまま。実機での成立は `packages/runtime/tests/gpu_write_buffer_copy_test.ts`（戻った直後に
-  毒で埋めても出力がビット一致）で固定し、ADR 0070 決定 3 の「フェンス後解放」は同日の追記で改めた。
+- **No `mappedAtCreation`** (alternative 6). It cannot be unmapped until every block is present,
+  which defeats per-block release. `queue.writeBuffer(dstOffset)` is called per block.
+- wgpu (Deno) keeps `writeBuffer` staging **until the submit completes** (measured: 2,311 MiB after a
+  2 GiB `createBuffer` → 4,359 MiB after `writeBuffer` —
+  `docs/research/2026-08-08-vram-oom-misreport.md`). The existing "empty submit +
+  `onSubmittedWorkDone` per shard" (ADR 0070 decision 3) is therefore kept as a **fence per part
+  (or per budget of in-flight bytes)** (`packages/runtime/src/runtime/session-build.ts`).
+- **errorScope per block, fence per part** (measured 2026-09-22, Arc B570 / Deno 2.9.6, 256 MiB,
+  median of 5): a push/pop pair costs **1.81 µs** — practically free; an empty submit +
+  `onSubmittedWorkDone` costs **13.0 ms**. Pop and fence per block (32 MiB × 8): 127.4 ms (1.73× the
+  73.8 ms of the old shape); pop per block with one fence per 256 MiB: **56.5 ms (0.77×)**. Failures
+  are attributed per block without a wall-clock penalty.
+- Overlap is limited by **both count and total bytes** (for example "1 in transfer + 1 being
+  received / verified"). Expansion (1 bit → f32 is 32×) has its own processing unit.
+- Limits are **kept separately** (none derived from another): descriptor length / nesting depth /
+  block count / part-length set / block length / in-flight bytes / expansion area / GPU device
+  limits.
+- **The whole-ArrayBuffer input stays** (`openContainer` with `{ kind: "bytes" }`, named
+  `fromContainer(bytes)` in the draft — addendum 8). Chromium's 2,145,386,496 B limit
+  **remains only on this input** (`MAX_SINGLE_CONTAINER_BYTES`); the HF distribution is split and
+  never hits it.
+- **Addendum (2026-09-24, step 3e) — CPU-side release does not wait for the fence.** The fence
+  governs only wgpu staging; WebGPU copies `dataContents` at the `writeBuffer` call, so CPU bytes
+  may be dropped when it returns. Session construction reads, uploads and drops one block at a time
+  (lazy `WeightBatch.items`): the live JS weight bytes shrink from one part to one item (counting in
+  container-v1 §11). For scan-type sources a block is a view of the hub's holding slot, so the bound
+  stays one slot + buffers awaiting GC. The fence stays once per part.
+  `packages/runtime/tests/gpu_write_buffer_copy_test.ts` pins it (bytes poisoned right after the
+  call still give bit-identical output); ADR 0070 decision 3 was amended the same day.
 
-### 10. `encoding` の宣言語彙 — bit 数は派生値にする
+### 10. `encoding` vocabulary — bit width is derived
 
-束縛表の各エントリが持つ供給記述:
+Each binding table entry carries a supply description:
 
 ```jsonc
 "encoding": {
-  "codec": "<台帳の登録名>",
+  "codec": "<ledger name>",
   "packing": { "blockElements": 8, "blockBytes": 4, "alignBytes": 4 },
   "rowAxis": 0,
   "groupSize": 32,
@@ -305,708 +300,707 @@ NOTE: 設計案 v2 はこの流儀の先例として `distribution.py:570` の�
 }
 ```
 
-- **bit 数は `blockElements` / `blockBytes` からの派生値**にする。`bits` を宣言に置くと
-  非整数 bpw（ビット面分解や外部形式の block 量子化）が表せず、payload バイト長も決まらない。
-  現行は `numel × bits / 8` の厳密一致（`packages/runtime/src/format/safetensors.ts:139-152`）
-  なので、ここを `packing` 経由にするのは**受理集合を変えずに一般化する**変更である。
-- **整列要求は codec の属性**（現行 `DTYPE_ALIGN`: I8 = 1 / I4 = 4 / I2 = 4 —
-  `safetensors.ts:43-53`）。GPU が `array<u32>` で束縛するかどうかで決まるので、
-  宣言側から導けない。
-- `groupSize` が行長に等しいとき = per-channel。
+- **Bit width derives from `blockElements` / `blockBytes`.** A declared `bits` cannot express
+  non-integer bits per weight (bit-plane decomposition, block quantization of external formats) and
+  does not fix the payload length. The old reader required exactly `numel × bits / 8`; going
+  through `packing` **generalizes without changing the accepted set**.
+- **Alignment is a codec attribute** (`alignBytes`; the old `DTYPE_ALIGN` was I8 = 1 / I4 = 4 /
+  I2 = 4). It depends on whether the GPU binds the data as `array<u32>` and cannot be derived from
+  the declaration.
+- `groupSize` equal to the row length means per-channel.
 
-### 11. `scale` は rank 2 group 形に一本化し、`rowAxis` を宣言に出す（**IR v2 に含める**）
+### 11. `scale` is unified to the rank 2 group shape, `rowAxis` is declared (**part of IR v2**)
 
-今日、scale の形は **2 種類**ある（i8 の keepdim broadcast 形 vs i4 / i2 の rank 2 group 形 —
-`packages/runtime/src/format/i4.ts:56-58` が「受理集合が交わらない**別物**」と明記している）。
-さらに i8 の**チャネル軸は宣言に書かれておらず、消費側 op から導いている**
-（`packages/runtime/src/runtime/plan.ts:411-435` の `weightChannelAxes`。消費 op が食い違うと
-`plan.ts:424-428` で落ちる）。
+Before, scale had **two shapes** (i8 keepdim broadcast vs i4 / i2 rank 2 group — disjoint accepted
+sets), and the i8 **channel axis was not declared but derived from the consuming op**
+(`weightChannelAxes` in `packages/runtime/src/runtime/plan.ts`, which fails when consumers disagree).
 
-- i8 の per-channel scale は「行 = 先頭次元・group 長 = 行長」とみなすと rank 2 group 形
-  `[shape[0], 1]` と**同じもの**になる（i2 は既にその形 `[N,1]` を採っている）。
-- 唯一の例外は **`conv_transpose1d` の i8**（重み `[Cin,Cout,K]` でチャネル軸が 1）。これは
-  `rowAxis: 1` と**宣言する**。
-- これで「宣言だけで scale の意味が閉じる」。`weightChannelAxes` は消える。
-- **段 1 の IR v2 に含める**。検収 = **77 グラフ全部で新旧の適格述語**
-  （`plan.ts:451` / `:496` / `:519`）**の結果が一致**すること。
+- An i8 per-channel scale, read as "row = first dimension, group length = row length", **is** the
+  rank 2 group shape `[shape[0], 1]` (i2 already used `[N,1]`).
+- The only exception is **i8 `conv_transpose1d`** (weight `[Cin,Cout,K]`, channel axis 1); it
+  **declares** `rowAxis: 1`.
+- The declaration alone fixes the meaning of the scale. (Corrected by addendum 1, item 4:
+  `weightChannelAxes` stays as the cross-check against the consuming ops.)
+- **Part of IR v2 in step 1.** Acceptance: **the old and new eligibility predicates agree on all 77
+  graphs**.
 
-### 12. codec は**リポ内の不変な台帳**にする
+### 12. Codecs live in an **immutable ledger in the repository**
 
-**撤回（2026-10-11）**: エントリの `decodeCpu` / `executableOps` / `wgsl?` と「述語を `executableOps` の 1 欄へ畳む」は撤回した。格納形式・CPU 展開・実行可否は別の所有者に置く（→ 追記 12）。
+**(Partly withdrawn by addendum 12 on 2026-10-11:** the entry fields `decodeCpu` / `executableOps` /
+`wgsl?` and folding the residency predicates into `executableOps` are withdrawn; storage format,
+CPU decoding and executability have separate owners.**)**
 
-- import 時登録は**しない**（横断の不変条件「全モジュール副作用ゼロ」に反する）。台帳は
-  リポ内のデータで、エントリは
-  `{ name, packing, levels, scale, zeroPoint, decodeCpu, executableOps, wgsl? }`。
-- **3 つの軸を分けて報告する**: ①宣言として読めるか ②実行できるか ③どの op で圧縮のまま
-  常駐できるか。この 3 分離は**現行が既にそうなっている**（`bf16` は①のみ — 宣言は valid で
-  `RUNTIME_SUPPORT.storage` に無いので実行は fail loudly、`packages/runtime/src/ops/contracts.ts:760`。
-  i2 は①②③だが③は linear / embedding だけ）。**新 codec を「宣言だけ先に受理する」道が
-  既に通っている**。
-- **未知 codec は重み取得前に拒否する**（現行 `asStorageDtype`（`ir.ts:271-277`）が語彙外を
-  拒むのと同じ形）。
-- 台帳の値打ちは「codec ごとに述語が生えるのを止める」ことにある。現行は
-  `eligibleCompressedInitializers` / `i2EligibleInitializers` / `i4EligibleInitializers` の
-  3 本で、i2 を足したときに i4 の述語がほぼ写された（`plan.ts:496-511` と `:519-534` が同文）。
-  これを `executableOps` の 1 欄へ畳む。
+- **No registration at import time** (it would break the "no module side effects" invariant). The
+  ledger is data in the repository (`CODEC_LEDGER` in
+  `packages/runtime/src/format/container/codecs.ts`).
+- **Three axes are reported separately**: ① readable as a declaration, ② executable, ③ which ops
+  keep it compressed and resident. The code already separated them when this ADR was written (i2 is
+  ①②③, with ③ only for linear / embedding), so **"accept a new codec as a declaration first" was an
+  existing path**. The example of the time, bf16 as ① only, no longer holds **(superseded by ADR
+  0131 on 2026-10-17: bf16 executes like f16; `RUNTIME_SUPPORT.storage` lists it —
+  `packages/runtime/src/ops/contracts.ts:855`)**.
+- **An unknown codec is rejected before any weight is fetched** (the same shape as the old rejection
+  of storage dtypes outside the vocabulary).
+- The ledger's purpose was to stop a predicate growing per codec (`eligibleCompressedInitializers` /
+  `i2EligibleInitializers` / `i4EligibleInitializers`; adding i2 nearly copied the i4 predicate).
+  Addendum 12 accepts the three predicates as the cost of keeping executability out of the ledger.
 
-### 13. 初版の codec は 4 種 — i8 / i4 / i2 / **三値**
+### 13. The first codecs are four — i8 / i4 / i2 / **ternary**
 
-既存 3 種の packing・levels・scale・復元式は
-[container-v1 §6](../container-v1.md) へ**逐語で移送する**（値を 1 つも作らない）。
+The ledger names are `int8-sym`, `int4-sym-g`, `int2-off` and `ternary`. The packing, levels, scale
+and reconstruction formula of the existing three are **moved verbatim** to
+[container-v1 §6](../container-v1.md) (no new value is created).
 
-4 種めの**三値**（ternary）は:
+The fourth, **ternary**:
 
-- 値域 `{−1, 0, +1}` は **i2 の値域 `[−2, +1]` の部分集合**なので、**詰め方も復元も i2 と
-  完全に同一**（`u = q + 2` ∈ `{1,2,3}`・コード 0 は未使用・復元は `fround((u − 2) · s)`）。
-- したがって **runtime の追加は 0 行**。WGSL も CPU 展開も i2 のものをそのまま使う。
-- exporter には **absmean 量子化器 1 本**を足す。
-- それでも**別名の codec として宣言する**。理由は「資産を識別できるようにする」ため — 逆は
-  成立しない。実資産の i2 は三値では**ない**（gemma4-qat e2b の I2 テンソル先頭 4 MiB を
-  2bit コードで数えた実測で、`q = −2` が **5.8〜7.4 %** 出ている）。i2 資産を三値として
-  読み替えると全要素の 6 % 前後が別の値になる。
+- The range `{−1, 0, +1}` is a **subset of the i2 range `[−2, +1]`**, so **packing and
+  reconstruction are identical to i2** (`u = q + 2` ∈ `{1,2,3}`, code 0 unused, reconstruction
+  `fround((u − 2) · s)`).
+- **The runtime adds zero lines**; WGSL and CPU decoding reuse i2.
+- The exporter adds **one absmean quantizer**.
+- It is still **declared as a separate codec**, so assets stay identifiable; the converse does not
+  hold. The existing i2 assets are **not** ternary (counting 2-bit codes in the first 4 MiB of
+  gemma4-qat e2b's I2 tensors, `q = −2` occurs **5.8–7.4 %**). Reading i2 assets as ternary would
+  change about 6 % of all elements.
 
-### 14. 奇数 bit（3 / 5 / 6 / 7）は**ビット面分解を予約するだけ**
+### 14. Odd bit widths (3 / 5 / 6 / 7) — **bit-plane decomposition is reserved only**
 
-- 方式: 32 要素を `bits` 本の u32 へ「平面」で置く（語 b のビット j = 要素 j の第 b ビット）。
-  **格納は厳密に `bits` / 要素**（捨てビット 0）で、平坦添字は常に 2 冪（32 要素 / 面）のまま
-  保たれる。
-- 予約するのは**台帳のエントリ形だけ**で、実装は需要が出た幅から行う。
-- **「u32 語に n 個で余りビットを捨てる」は採らない**（却下案 5）。
-- **base-243（GGUF TQ1_0 の 5 trit / byte）は採らない**（却下案 4）。
+- Method: 32 elements are stored as `bits` u32 words in "planes" (bit j of word b = bit b of
+  element j). **Storage is exactly `bits` per element** (no wasted bits) and the flat index keeps a
+  power-of-two granularity (32 elements per plane).
+- Only **the ledger entry shape** is reserved; implementation starts from the width that is needed.
+- **"n elements per u32 word, discard the remainder" is not adopted** (alternative 5).
+- **base-243 (GGUF TQ1_0, 5 trits / byte) is not adopted** (alternative 4).
 
-### 15. 低 bit 化は**速度の理由にしない**
+### 15. Low-bit codecs are **not justified by speed**
 
-decode は RTX 3080 Ti（Chrome・2026-09-19）で帯域律速に**なっていない**（帯域利用率 11.5 / 25.5 % の実測 —
-出典・ADR 0105 後の再計算・未測の機は追記 7）。低 bit codec を
-速度目的で入れると、律速でない側を削ることになる。低 bit codec は **packed int8 活性
-（ADR 0105）が前提**であり、効くのは**メモリ**である（決定の Context 末尾の −40 % / −10 % /
-−15 %）。
+Low-bit codecs SHOULD NOT be introduced for speed; a speed claim is measured on the target model
+family and machine first **(re-graded 2026-10-18 to SHOULD: the evidence is one model family on one
+machine — gemma4 LLM decode on an RTX 3080 Ti; DiT models and narrow-bandwidth devices were not
+measured)**. On the RTX 3080 Ti (Chrome, 2026-09-19) decode was **not** bandwidth-bound (bandwidth
+utilisation 11.5 / 25.5 %; source, recomputation after ADR 0105 and unmeasured machines in
+addendum 7). Introducing a low-bit codec for speed would trim the side that is not limiting.
+Low-bit codecs **presuppose packed int8 activations (ADR 0105)**, and what they save is
+**memory** (the −40 % / −10 % / −15 % of the Context).
 
-### 16. exporter 側の一般化
+### 16. Generalizing the exporter
 
-- RTN / GPTQ の **bit 幅依存は 3 箇所（`max_level`）** — ここを引数化する。
-- 三値の absmean は**冪等性の論証を本 ADR の追記として書き直す**（i8 / i4 の
-  「amax 要素が厳密復元され fake-quant が不動点」の論証をそのまま流用できない）。
-- **codebook 系は別裁定**（2 段 scale は「復元の丸めは f32 乗算 1 回」というビット一致の根拠
-  （`packages/runtime/src/format/i4.ts:9-11`）を壊すので、ADR 0058 の数値 opt-in の席になる）。
+- The bit-width dependence of RTN / GPTQ (`max_level`) is made a parameter (today a parameter of
+  `tools/exporter/src/karume/quant_methods.py`).
+- Withdrawn by addendum 9 on 2026-09-25: "ternary absmean gets a rewritten idempotency argument".
+  absmean has no fixed point; the rule became "one scale ledger per weight, never recomputed".
+- **Codebook schemes are a separate decision** (a two-level scale breaks the bit-identity argument
+  "reconstruction rounds once, one f32 multiply" in `packages/runtime/src/format/i4.ts`, so it
+  belongs to the numerics opt-in of ADR 0058).
 
-### 17. IR v2 = IR v1 − `storage`（+ 決定 11）
+### 17. IR v2 = IR v1 − `storage` (+ decision 11)
 
-- `initializers[name]` から `storage` を外して**束縛表**へ移す。狙いは
-  「**1 アーキ・1 量子化方式・1 グラフ**」で、PTQ の席（格納 dtype / group / session ノブ）と
-  同一 config の重み差し替え（fine-tune）からグラフを独立させることである。
-- **QAT はグラフ自体が方式の一部なので別グラフのまま**（`static_quantize` 485 ノードと
-  焼き込み活性 scale 403 個を持ち、`requires.ops` / `values` / `outputs` まで通常席と違う）。
-- 合流層は薄くない。**重み取得前にグラフ + 選択済み binding を合流し、現行 `parseIrGraph` の
-  storage 規則一式**（i8 / i4 は scale 必須・i4 の group_size は 2 冪 ≥ 16・i2 は group 不可・
-  行長の整除 — `ir.ts:296-345, 685-720`）**と `prepareModel` の検査・常駐計画・見積りを
-  合流後表現に対して走らせる**。置き場は runtime `format/` の 1 箇所。
-- Python 側も合流後表現を既存検査へ渡し、**規則を二重実装しない**。
+- `storage` moves from `initializers[name]` to the **binding table**. The aim is "**one
+  architecture, one quantization scheme, one graph**": the graph becomes independent of the PTQ
+  preset (storage dtype, group, session options) and of weight replacement with the same config
+  (fine-tuning).
+- **QAT stays a separate graph**, because the graph is part of the scheme (485 `static_quantize`
+  nodes and 403 baked activation scales; `requires.ops`, `values` and `outputs` differ from the
+  ordinary preset).
+- The merge layer is not thin. **Before any weight is fetched, the graph and the selected bindings
+  are merged, and the full set of old storage rules** (i8 / i4 require a scale; i4 `group_size` is a
+  power of two ≥ 16; i2 has no group; the row length divides) **plus the admission checks, residency
+  plan and estimate run on the merged representation.** It lives in one place in runtime `format/`
+  (`packages/runtime/src/format/container/bind.ts` — addendum 4, item 7).
+- Withdrawn 2026-10-18: "Python does not implement the rules twice". Python is not present at
+  runtime, so the exporter mirrors the merge rules (`bind_graphs` and the `bind.ts` mirror in
+  `tools/exporter/src/karume/verify.py`; `container.py`), and cross-language fixtures keep the two
+  implementations in agreement.
 
-### 18. 旧 safetensors 形式との互換は**全部切る**
+### 18. Compatibility with the old safetensors format is **cut completely**
 
-- 新パッケージは `karume/5` と新コンテナ**だけ**を読む。**両読みは実装しない**（却下案 3）。
-- 旧形式を読む処理は**移行 CLI**（Python）に限定する: 旧単一形 / 旧 shard 列 / 旧 manifest →
-  新 `krm` / `krg`。**旧入力は保持する**（消さない）。
-- **上流 checkpoint 取り込み用の safetensors reader は別用途として保持**する（無改変の上流
-  重みを読む経路 — こちらは配布形ではない）。
-- 旧版パッケージは旧 revision（40 桁 SHA）を pin しているので**動き続ける**。HF リポの
-  **履歴は残す**（release-runbook の「リポ削除・再作成」は使わない）。
-- 移行の対象（実数）: `models/` ミラー **11 本 447 ファイル 69 GB** の再梱包 /
-  golden **32 モデル 82 ファイル** + gemma4-ple-packed **8 本**の再 export（生成器あり・CPU・
-  固定 seed）/ `static-quantize-oracle` / examples のローカル経路 / テストヘルパ
-  `shard-files.ts`（呼び手 **33**）と `safetensors-write.ts`（**7**）/ 門番（`assets_gate` は
-  ディレクトリ・`distribution_gate` は manifest の存在しか見ていない → **中身を見る**形へ）/
-  `hf-upload.zsh` の glob / release-runbook / exporter の emit・verify・repack・dist・modelcard
-  （`I4` / `I2` 方言の節を退役）。
-- 再アップロードは **pin のある 10 リポ**（gemma4-qat は未公開 → ミラー再梱包のみ）。固定順序が
-  要るのは **anima → SHA 確定 → anima-extra** だけ（越境参照 4 鎖のため）。
-- `outputs/series/` は大掃除する（probe・重複変種は即削除。レーンが参照する系列は段 1 後に
-  新形式で再生成）。
+- New packages read only `karume/5` and the new container. **No dual reading** (alternative 3).
+- Reading the old format is confined to the **migration CLI** (Python): old single file / old shard
+  list / old manifest → new `krm` / `krg`. Old inputs MAY be kept, and the migration CLI
+  (`karume migrate`, `tools/exporter/src/karume/legacy.py`) MAY stay in the core **(re-graded
+  2026-10-18 to MAY: the migration is complete — acceptance ① closed in step 2, and 0.13.0 and 0.14.0
+  shipped `karume/5` — so keeping them is a maintenance-cost choice)**.
+- **The safetensors reader for upstream checkpoints is kept for its own purpose** (reading
+  unmodified upstream weights — not a distribution format).
+- Old packages pin old revisions (40-character SHA) and **keep working**. **HF repository history is
+  kept** (the runbook's "delete and recreate the repository" is not used).
+- History (2026-09-22): the migration covered 11 mirrors / 447 files / 69 GB, 32 golden models,
+  test helpers, gates, upload scripts and exporter modules; the 10 pinned repositories were
+  re-uploaded at the release (addendum 4, item 13).
 
-### 19. 部品単位の差し替え
+### 19. Replacing single components
 
-- 系列入口に `fromPretrained(source, { components: { <役割>: ComponentSource } })` を足す。
-  継ぎ目は既存の **`ComponentOpener`**（`packages/models/src/hub/components.ts:89` —
-  `AnimaPipeline.#build` は既に `open: ComponentOpener` を引数で受けている
-  （`packages/models/src/anima/pipeline.ts:723-726`））。
-- 検査（別出所の重みとグラフ宣言の突合・quant 席と実行設定の整合・`pipelineConfig` の上書き）は
-  **admission に置き、「重みを 1 バイトも取る前」を保つ**。
-- **runtime は出所を知らない**。hub は取得元を N 本扱えるようにするだけ。
-- 推定してよいのは「どの部品か（キー指紋）・変換表の版・格納 dtype」の 3 つだけ。**宣言必須**は
-  「ベースの `krg`・`pipelineConfig`・quant 席・上位集合のときの除外」。
-- **diffusers の `strict=False` は採らない**。不足も余剰も**全件列挙で拒否**する。単一ファイル
-  checkpoint は「部品名 → 重み供給」の集合として扱い、未選択部品は**理由付きの除外**として
-  宣言する。
-- 実測の裏付け（CPU 試作 ②・variant 2 本 = anima-wai-v1.0 / anima-copycat-20260610）: anima
-  transformer の recipe は **置換 23 件 + 削除 8 件**（diffusers 0.39.0 の Cosmos 2.0 表）
-  **+ 前置規則 3 件・数値変換 0**（IR キーへは `model.` を前置）である。checkpoint **685 本**が
-  **DiT 567 + conditioner 118** に 1:1 で割れ、**不足 0・余剰 0・形違い 0** — reshape /
-  transpose / 連結・分割は 1 本も要らない。
-- **`llm_adapter.` 前置の 118 本は「余剰」ではなく、`routedTo` で宣言済みの振り分けとして書く**
-  （text_conditioner 側へ回る）。
-- **置換表は順序が意味を持つので配列で持つ**。`adaln_modulation_self_attn.1` を `self_attn` より
-  先に当てないと対応が変わるため、JSON object にすると順序契約が消える。
-- 上流は bf16 なので **bf16 デコーダが前提**になる（`RUNTIME_SUPPORT.storage` に bf16 は
-  無い — `ops/contracts.ts:760`）。**bf16 → f32 厳密 → `Math.f16round`** の順で丸めると配布形の
-  f16 shard と **567/567 バイト一致**する。f32 格納の 113 本も**値は既に f16 へ丸め済み**である
-  （`tools/export-recipes/anima/export.py:931` の `round_weights_to_f16` がラッパ全体を回し、
-  格納 dtype は emit 側が別に決めるため）。「f32 席 = 素の bf16 → f32」と仮定すると 113 本が全部不一致に見える。
-- 重み recipe は**宣言的なデータ**（版付き・Python / TS 双方が読む）にする。**任意の前処理を
-  書ける言語にはしない**（却下案 7）。
-- **未決**: 上流の表が動いたことを検出する手段が無い（実行時に Python は居ない）。`krg` に
-  「対応済み上流の鍵集合ハッシュ」を持たせるか、派生キャッシュキーの recipe 版だけで足りるかは
-  実需が出たときの裁定とする。
+- Family entry points take `fromPretrained(source, { components: { <role>: ComponentSource } })`.
+  The seam is the existing **`ComponentOpener`** (`packages/models/src/hub/components.ts`;
+  `AnimaPipeline.#build` already receives `open: ComponentOpener`).
+- The checks (other-source weights against the graph declaration, preset vs execution settings,
+  `pipelineConfig` overrides) sit **in admission, before any weight byte is fetched**.
+- **The runtime does not know the source.** The hub only handles N sources.
+- Only three things may be inferred: "which component (key fingerprint), conversion table version,
+  storage dtype". **Required declarations**: "base `krg`, `pipelineConfig`, preset, exclusions for a
+  superset".
+- **diffusers' `strict=False` is not adopted.** Missing and surplus tensors are **all listed and
+  rejected**. A single-file checkpoint is a set of "component name → weight supply"; unselected
+  components are declared as **exclusions with a reason**.
+- Evidence (CPU spike ②, two variants anima-wai-v1.0 / anima-copycat-20260610): the anima
+  transformer recipe is **23 renames + 8 deletions** (diffusers 0.39.0 Cosmos 2.0 table) **+ 3 prefix
+  rules, 0 numeric conversions** (`model.` is prefixed for IR keys). The **685** checkpoint tensors
+  split 1:1 into **DiT 567 + conditioner 118**: **0 missing, 0 surplus, 0 shape mismatches** — no
+  reshape, transpose, concatenation or split.
+- **The 118 tensors prefixed `llm_adapter.` are a declared routing (`routedTo`, to the
+  text_conditioner), not "surplus".**
+- **The rename table is an array**: order matters (`adaln_modulation_self_attn.1` before
+  `self_attn`), and a JSON object would drop the order contract.
+- Upstream weights are bf16, so a **bf16 decoder is required**. (At the time the runtime did not
+  execute bf16 — **superseded by ADR 0131 on 2026-10-17**: `RUNTIME_SUPPORT.storage` lists `bf16`,
+  `packages/runtime/src/ops/contracts.ts:855`, decoded by `decodeBf16` in
+  `packages/runtime/src/format/bf16.ts`.) Rounding **bf16 → exact f32 → `Math.f16round`** matches the
+  distributed f16 weights **567/567 bytes**. The 113 tensors stored as f32 **already hold f16-rounded
+  values** (`round_weights_to_f16` in `tools/export-recipes/anima/export.py` runs over the whole
+  wrapper, and the emitter chooses the storage dtype separately). Assuming "f32 preset = plain bf16
+  → f32" makes all 113 look mismatched.
+- The weight recipe is **declarative data** (versioned, read by Python and TS). **It is not a
+  language for arbitrary preprocessing** (alternative 7).
+- **Open**: nothing detects a change of the upstream table (Python is not present at runtime).
+  Whether a `krg` carries a "hash of the supported upstream key set" or the recipe version in the
+  derived cache key suffices is decided when there is a real need.
 
-### 20. manifest `karume/5` との責務分担
+### 20. Split of responsibilities with manifest `karume/5`
 
-| 所有者              | 正本                                                                                                                                                                                                                                                                                                                                |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| manifest `karume/5` | model / quant の一覧・既定選択・`label` / `description`・`session` 既定・`gpuFeatures`・`requiredLimits`・**入口の FileRef**（`quants[].container = { descriptor: FileRef, parts: FileRef[] }`・共有 `krg` の `graph: FileRef`）・越境参照（容器単位 = descriptor と全 part が同一 repo + revision）・`pipeline` / `pipelineConfig` |
-| `krm` の descriptor | `graphs`（または graph の内容参照）・束縛表・blocks・parts の内部配置・assets・provenance・capabilities                                                                                                                                                                                                                             |
-| `krg`               | 計算契約・重み非依存の定数とその依存条件（config 値）                                                                                                                                                                                                                                                                               |
-| models              | `pipelineConfig` の意味検査・実行設定の明示指定優先・assets の解釈                                                                                                                                                                                                                                                                  |
-| 配布成果物          | LICENSE / NOTICE の本文（リポ直下 — ADR 0071）。単一 `krm` の持ち出し用に descriptor の `provenance` へ**ライセンス識別子と NOTICE 参照**を載せる（本文は載せない）                                                                                                                                                                 |
+**(Corrected by ADR [0109](0109-manifest-v5-container.md) decision 2 and addendum 2, item 1 on
+2026-09-22:** the container granularity is component × dtype — `weights.<component>.<dtype>.container`
+— not one container per preset, and `karume/5` has no shared-`krg` `graph: FileRef`.**)**
 
-hub は 1 バイトも取る前にファイルごとの `size` / `sha256` が要る（キャッシュキー・in-flight
-予算・器の寸法）ので、**parts の FileRef は manifest に残す**（descriptor の中だけに置くと
-descriptor を取るのが 2 周目になる）。
+| Owner                | Canonical for                                                                                                                                                                                                                                           |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| manifest `karume/5`  | model / quant lists, default selection, `label` / `description`, `session` defaults, `gpuFeatures`, `requiredLimits`, the **entry FileRefs** (descriptor expectations and the part FileRefs of each container), cross-repository references (per container: descriptor and every part from one repo + revision), `pipeline` / `pipelineConfig` |
+| `krm` descriptor     | `graphs` (or a content reference to the graph), binding table, blocks, part layout, assets, provenance, capabilities                                                                                                                                   |
+| `krg`                | the compute contract, weight-independent constants and their conditions (config values)                                                                                                                                                                |
+| models               | semantic checks of `pipelineConfig`, explicit execution settings take precedence, interpretation of assets                                                                                                                                             |
+| distribution         | LICENSE / NOTICE texts (repository root — ADR 0071). For a single `krm` taken elsewhere, the descriptor's `provenance` carries **the license identifier and a NOTICE reference** (not the text)                                                         |
 
-## 検討した代替案
+The hub needs each file's `size` / `sha256` before the first byte (cache key, in-flight budget,
+buffer size), so **the part FileRefs stay in the manifest** (inside the descriptor only, fetching
+the descriptor would be a second round trip).
 
-1. **単一 `krm` だけにする（`krg` を作らない）** — 却下。上流重み・LoRA・部品差し替えの 3 つは
-   いずれも「グラフ契約」と「重み供給」を別々に組む形を要求する。`krm` に差し替え口を足すと
-   実質 `krg` になり、しかも「グラフだけを配る」ときに重み用の欄を空にした `krm` を配ることに
-   なって、受理集合が「空の欄」で表現される（fail loudly が弱まる）。
-2. **`@karume/models` にグラフを同梱するのを標準にする** — 却下。既知モデルは楽になるが、
-   **パッケージと資産の版が結合する**（グラフの更新 = JSR 公開・未知モデルはパッケージ更新
-   待ち）。サイズも 1.34 MiB の公開物に対し 9.0 MiB で 6.7 倍。形式として同梱を**禁じはしない**
-   （決定 1）が、標準にはしない。
-3. **移行版で旧形式と新形式の両読みを維持する** — 却下。草稿 v1 と設計案 v2 §9 はこれを推して
-   いたが、**撤回する**。pin が 40 桁 revision なので旧版パッケージは動き続け、両読みが守るのは
-   「新版パッケージで旧資産を読む」場合だけである。その用途は**移行 CLI が 1 度だけ実行する
-   変換**で足り、両読みを本体に置くと、旧形式の検査・piece キー・物理配置ハック・`karume_ir`
-   の逐語保存という**退役させたい規約一式が読み手に残り続ける**。旧形式は magic で分岐できる
-   ので、必要になったら移行 CLI 側で読める。
-4. **base-243（GGUF TQ1_0 相当・5 trit / byte）で三値を 1.6875 bpw にする** — 却下。2 bit 詰めに
-   対して **−15.6 % しか縮まない**一方で失うものが大きい。5 要素粒度は 2 冪でないので
-   「平坦添字から語内位置をシフトで割る」不変条件と「行頭が語境界に来る」不変条件が**両方
-   壊れる**。行長 `K` に `% 5` の整除条件が要り、gemma4 の実形（1536 / 2048 / 6144 / 12288）は
-   **どれも 5 で割れない**。さらに base-243 の桁取り出しは要素ごとに乗算が要り、決定 15 の
-   「律速は ALU 側」という実測に照らして悪化方向である。
-5. **u32 語に n 個詰めて余りビットを捨てる**（3 bit なら 10 個 + 2 bit 捨て） — 却下。実効
-   bit / 要素が 3.200 / 5.333 / 6.400 / 8.000 と膨らむ（3 / 5 / 6 bit で +6.7 %・7 bit で
-   +14.3 %）うえ、**1 語あたりの要素数が 2 冪でなくなる**。GEMV 族は語ごとに完全展開している
-   のでループ内に除算は出ないが、**scale の group 添字**（`packages/runtime/src/kernels/linear-gemv.ts:404-406`
-   の `(unit·刻み) >> shift`）が 2 冪前提で書かれており、シフトが乗除算に変わる。
-   i4 の `i4GroupShift`（`kernels/weight-storage.ts:57-71`）が「group は 2 冪」を要求している
-   のも同じ理由である。
-6. **`mappedAtCreation` で staging コピーを減らす** — 却下。目的と逆を向く。マップした
-   バッファは**全 block が揃って unmap するまで解放できない**ので、「block ごとに取得・検証・
-   解放する」という本 ADR の核が成立しなくなる。なお `mappedAtCreation` はリポジトリ全体で
-   **1 箇所も使われていない**（重みも入力も常駐テンソルも `queue.writeBuffer` 1 本）。
-7. **重み recipe を「任意の前処理を書ける宣言的言語」にする** — 却下。上流 FQN ↔ IR キーの
-   写像に必要なのは有限個の演算（slice / split / transpose / alias / 定数供給 / 理由付き除外）
-   で、実測でも anima transformer は**置換 23 件 + 削除 8 件 + 前置規則 3 件・数値変換 0**で
-   ある（決定 19）。任意の言語にすると ①Python と TS の 2 実装で意味が一致する保証が要る
-   ②`karume_ir` と同じく「配布物の中に処理系が生える」③検査が「実行してみるまで分からない」
-   形になる。**数値変換は別定義の有限個の演算**（dtype・縮約軸・演算順・丸め・非有限の扱いを
-   固定し、変換後テンソルの比較 fixture を Python / TS 双方に持つ）として切り出す。
+## Alternatives considered
+
+1. **Only a single `krm` (no `krg`)** — rejected. Upstream weights, LoRA and component replacement
+   all combine the graph contract and the weight supply separately. A `krm` with a replacement slot
+   is effectively a `krg`, and distributing "just a graph" would ship a `krm` with empty weight
+   fields — the accepted set expressed by empty fields, which weakens fail-loudly.
+2. **Bundling graphs in `@karume/models` by default** — rejected. Known models get easier, but
+   **package and asset versions couple** (a graph update = a JSR release; unknown models wait for a
+   package update). Size: 9.0 MiB against a 1.34 MiB package, 6.7×. Bundling is **not forbidden**
+   (decision 1), only not the default.
+3. **Keeping dual reading of old and new formats in a transition version** — rejected (the first
+   draft and design v2 §9 proposed it; **retracted**). Pins are 40-character revisions, so old
+   packages keep working; dual reading only helps a new package read old assets. A **one-time
+   conversion in the migration CLI** covers that, while dual reading in the core would keep every
+   rule to retire (old checks, piece keys, physical-layout hacks, verbatim `karume_ir`) alive in the
+   reader. The old format is distinguishable by magic, so the migration CLI can read it when needed.
+4. **base-243 ternary (like GGUF TQ1_0, 5 trits / byte) at 1.6875 bits per weight** — rejected. It
+   saves **only −15.6 %** over 2-bit packing and loses much. A 5-element granularity is not a power
+   of two, so **both** invariants "the word position comes from the flat index by shift" and "a row
+   starts on a word boundary" break. The row length `K` needs a `% 5` divisibility condition, and
+   none of gemma4's real shapes (1536 / 2048 / 6144 / 12288) is divisible by 5. (The draft's further
+   reason "worse given that decode is ALU-bound" was withdrawn by addendum 6 on 2026-09-25 as a
+   misquotation; the rejection stands on the two broken invariants and the divisibility condition.)
+5. **n elements per u32 word, discarding the remaining bits** (3 bit: 10 elements + 2 bits wasted) —
+   rejected. Effective bits per element grow to 3.200 / 5.333 / 6.400 / 8.000 (+6.7 % for 3 / 5 / 6
+   bits, +14.3 % for 7), and **elements per word stop being a power of two**. The GEMV family unrolls
+   each word fully, so no division appears in the loop, but **the scale group index**
+   (`(unit·step) >> shift` in `packages/runtime/src/kernels/linear-gemv.ts`) assumes powers of two,
+   and shifts would become multiplications and divisions. `i4GroupShift`
+   (`packages/runtime/src/kernels/weight-storage.ts`) requires a power-of-two group for the same
+   reason.
+6. **`mappedAtCreation` to reduce staging copies** — rejected; it works against the goal. A mapped
+   buffer **cannot be released until every block is present and it is unmapped**, which breaks the
+   core of this ADR (fetch, verify, release per block). `mappedAtCreation` is used **nowhere** in the
+   repository (weights, inputs and resident tensors all use `queue.writeBuffer`).
+7. **A declarative language for arbitrary weight preprocessing** — rejected. Mapping upstream FQN ↔
+   IR key needs a finite set of operations (slice / split / transpose / alias / constant supply /
+   exclusion with reason); the anima transformer needed **23 renames + 8 deletions + 3 prefix rules,
+   0 numeric conversions** (decision 19). An arbitrary language would ① need a guarantee that the
+   Python and TS implementations agree, ② grow an interpreter inside the distribution like
+   `karume_ir`, ③ make checks "unknown until run". **Numeric conversions are a separately defined
+   finite set** (dtype, reduction axis, operation order, rounding and non-finite handling fixed;
+   comparison fixtures of the converted tensors in both Python and TS).
 
 ## Consequences
 
-- **破壊変更である**。配布形・manifest（`karume/4` → `karume/5`）・IR（v1 → v2）・公開 API の
-  読み口が同時に動く。CHANGELOG の Breaking に載せる。未リリースではないので、これは
-  「旧 pin は動き続ける・新 pin は新形式」という**版の分岐**として扱う（決定 18）。
-- **退役するもの**: ADR 0063 の書き出し順規約・`repack.py` 不変条件②（`karume_ir` の逐語同一 —
-  IR v2 で再 serialize するため。①生バイト同一は**継承する**）・piece キーの綴り規約
-  （`<名前>#00002-of-00003`）・shard 0 のグラフ専用規約・末尾ゼロ詰めの読み手側分岐 3 つ・
-  `weightChannelAxes`（決定 11）。
-- **失うもの**: HF の safetensors プレビュー（ただし i4 / i2 席では既に失われている）・
-  「汎用 safetensors ツールで開ける」性質・公開 10 リポの再アップロードと pin 10 本の差し替え・
-  `.safetensors` 前提の運用台本（`hf-upload.zsh` / runbook / 門番）。
-- **得るもの**: 入口が 1 つになる・PTQ 席と fine-tune からグラフが独立する（`krg` 共有）・
-  block 目次と検証の土台ができる（Range を足せば部分取得）・PLE などの資産が物理配置ハック
-  なしで一級市民になる・無改変 safetensors と LoRA と部品差し替えが**同じ束縛表**で組める。
-- **`krg` が持ち出せる資産は重み非依存のものだけ**という制約は、運用上「`krg` を配れば何でも
-  再現できる」わけではないことを意味する。QAT の活性 scale がグラフ側にある（決定 1）のは
-  その一例で、`krg` の同一性は**内容ハッシュと依存条件**で判定する（名前や「同アーキ」では
-  判定しない）。
-- **段 0 の宿題は閉じた**: `pushErrorScope('validation')` の同期区間を block 単位に割る費用は
-  実測でほぼ無料（決定 9 — push/pop 1.81 µs / 回）。費用の主はフェンス（13.0 ms / 回）なので、
-  フェンスの粒度は part（または予算単位）に留める。
-- 低 bit codec の**速度**は本 ADR の主張ではない（決定 15）。三値を入れてもデコードは速く
-  ならない見込みで、効くのはメモリだけである。速度の主張をするなら ADR 0105（packed int8
-  活性）側の実測が先に要る。
+- **This is a breaking change.** The distribution format, the manifest (`karume/4` → `karume/5`),
+  the IR (v1 → v2) and the public reading API move together; the CHANGELOG lists it under Breaking.
+  The project is released, so this is handled as a **version split**: old pins keep working, new
+  pins use the new format (decision 18).
+- **Retired**: ADR 0063's write order; `repack.py` invariant ② (verbatim `karume_ir` — IR v2 is
+  re-serialized; invariant ①, raw bytes identical, **is inherited**); the piece key spelling
+  `<name>#00002-of-00003`; the graph-only shard 0. (The plan also listed the reader's three tail
+  padding branches and `weightChannelAxes`; addendum 10 keeps two padding branches and addendum 1,
+  item 4 keeps `weightChannelAxes` as a cross-check.)
+- **Lost**: the HF safetensors preview (already lost for i4 / i2 presets), "opens in generic
+  safetensors tools", a re-upload of the 10 published repositories with 10 new pins, and the
+  `.safetensors`-based operation scripts (`hf-upload.zsh`, runbook, gate tests).
+- **Gained**: one entry point; the graph becomes independent of PTQ presets and fine-tunes (shared
+  `krg`); a block index and verification base (partial fetch once Range is added); PLE and other
+  assets become first-class without layout hacks; unmodified safetensors, LoRA and component
+  replacement compose through **one binding table**.
+- **A `krg` can carry only weight-independent assets**, so "ship a `krg` and reproduce anything"
+  does not hold. QAT activation scales living in the graph (decision 1) are one example; `krg`
+  identity is decided by **content hash and dependency conditions** (not by name or "same
+  architecture").
+- **The step 0 open item is closed**: splitting the synchronous `pushErrorScope('validation')`
+  section per block is practically free (decision 9 — push/pop 1.81 µs). The cost is the fence
+  (13.0 ms), so the fence stays per part (or per budget).
+- **Speed** of low-bit codecs is not a claim of this ADR (decision 15, SHOULD since 2026-10-18).
+  Ternary is not expected to decode faster; it saves memory. A speed claim needs measurements on
+  the side of ADR 0105 (packed int8 activations) first.
 
-## 段階分解と検収
+## Staging and acceptance
 
-| 段    | 作るもの                                                                                                                                                                                                                                                                                                 | 検収                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **0** | 本 ADR + [container-v1](../container-v1.md)。**CPU 試作 4 本**: ①container の読み書き（2 文書 descriptor・const 領域・単一 / 分割・`krg` のバイトコピー抽出）②anima transformer の上流重み → 束縛表（名前対応 1:1・bf16 → f16）③LoRA → 書き換え済みグラフ（`parseIrGraph` を通す）④既存 codec 4 種の台帳 | ①往復で**バイト同一**（書く → 読む → 書くで 1 バイトも動かない）・抜いた `krg` が独立生成の `krg` とバイト同一 ②DiT 567 + conditioner 118 本が 1 本残らず束縛表に載る（不足・余剰ともに 0） ③書き換え後グラフが `parseIrGraph` を通り、scale 0 で元グラフと構造一致 ④台帳の `decodeCpu` 4 本が現行 `decodeI8` / `decodeI4` / `decodeI2` と**全要素ビット一致**（三値は i2 経路の部分集合として）（`decodeCpu` は追記 12 で撤回 — CPU 展開は format の `decode*`） / GPU が空いたら errorScope 分割の費用を計測して本 ADR に追記                                                                           |
-| **1** | IR v2（`storage` 外出し + scale の rank 2 統一 + `rowAxis` + **直列化規則**〈キー順・数値の綴り〉）・TS リーダ（descriptor + `BlockSource`・**part 単位取得**）・Python writer と**移行 CLI**・単一 / 分割・QAT 込み・`verify_lanes` への新レーン登録                                                    | ①**主 = CPU の逐語突合**: 旧 shard 列と新 `krm` から initializer ごとに実体 / scale のバイト列・宣言 shape・格納 codec・group を取り出し sha256 が**128 鎖全本一致** ②**77 グラフ全部で新旧の適格述語**（`plan.ts:451` / `:496` / `:519`）**の結果が一致** ③同一環境で新旧を走らせ**出力バイトを直接比較** ④既存の環境別 sha256 参照行（ADR 0106）と golden を**維持**する。**`KARUME_REFERENCE=write` / `rewrite` で緑にしない**（golden は許容差の回帰網であってビット同一の門ではない） ⑤**同じグラフを再 export するとグラフ記述がバイト同一**（`krg` の同一性を内容ハッシュで判定する条件 — 決定 4） |
-| **2** | manifest `karume/5`・hub の **block 単位**取得 / キャッシュ / 検証・PLE の asset 化（専用 part）・extras の移行・部品差し替え席・1 系列の再アップロード                                                                                                                                                  | ①`fromPretrained` が新 pin で緑・越境参照が通る ②**RAM ピーク harness の新設**: 同じブラウザ版 / モデル / quant / 設定で **cold / warm / ローカル**を分け、Session 準備完了までの external 最大値と取得バッファ・展開 scratch・持越し scale を併記（複数回） ③warm で digest が **0 回**であることを計数で示す ④部品差し替えで、重みを 1 バイトも取る前に admission が不足 / 余剰を全件列挙して落とす                                                                                                                                                                                                     |
-| **3** | 全資産 / 全 pin の移行・門番 / runbook / `hf-upload.zsh` / `karume dist` の追随・**part 長の既定の見直し**                                                                                                                                                                                               | ①全レーン緑・CHANGELOG Breaking ②`distribution_gate` / `assets_gate` が manifest の**中身**を見る ③part 長を 256 から動かした構成で RAM ピーク harness を再測し、宣言からの事前見積りと実測が一致する                                                                                                                                                                                                                                                                                                                                                                                                     |
-| **4** | anima transformer f16 の上流取り込み（bf16 デコーダ・比較 fixture・`index.json`・大ファイルのストリーム取得）                                                                                                                                                                                            | 上流重み → TS 経路の出力テンソルが配布形のバイトと**1 本残らず一致**（f16 席）。RTN 経路は許容差                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| **5** | LoRA 実行時 A/B（PEFT → kohya）                                                                                                                                                                                                                                                                          | ①adapter を読み込んで scale 0 = 元グラフと**完全一致** ②同じ復元済み base + 同じ A/B 式の CPU 参照と一致 ③未消費テンソル 1 本で例外 ④追加ノード数・失った融合・dispatch 数・実時間を記録（PEFT との品質差は別評価）                                                                                                                                                                                                                                                                                                                                                                                       |
-| **6** | 新 bit 幅 / 三値カーネル・Range 取得・ロード時合成・再融合                                                                                                                                                                                                                                               | 各実測                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+Steps 0–3 are done (2026-09-22 to 2026-09-24; the details are in addenda 1–5). Steps 4–6 are open;
+[backlog](../backlog.md) tracks them and this table is canonical for what they build and how they
+are accepted.
 
-**段 5 の見積り（CPU 試作 ③ の実測）**: anima transformer の実 IR は**ノード 2603 / `linear`
-454 本 / `static_quantize` 0 本**である。
+| Step  | Builds                                                                                                                                                                      | Acceptance                                                                                                                                                                                                                                                                                         |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **0** | This ADR + container-v1; four CPU spikes (container read / write, upstream anima weights → binding table, LoRA → rewritten graph, codec ledger) — done 2026-09-22           | Round trip byte-identical; extracted `krg` = independently written `krg`; all 685 upstream tensors bound; ledger decoding bit-identical to `decodeI8` / `decodeI4` / `decodeI2`; errorScope cost measured (decision 9)                                                                              |
+| **1** | IR v2 (with serialization rules), TS reader, Python writer and migration CLI — done 2026-09-22 (addendum 1)                                                               | CPU verbatim comparison old ↔ new; eligibility predicates agree on 77 graphs; output bytes compared; existing sha256 reference values and goldens kept (general rule: ADR 0106 and ADR 0110 decision 7); re-export gives a byte-identical graph descriptor                                            |
+| **2** | manifest `karume/5`, block-level hub reads, PLE as assets, component replacement, one re-upload — done 2026-09-23 (addenda 2–3)                                             | `fromPretrained` green on a new pin; RAM-peak harness; zero warm digests; replacement rejected in admission with every missing / surplus tensor listed                                                                                                                                             |
+| **3** | Migration of all assets, gate tests / runbook / `hf-upload.zsh` / `karume dist`, part-length review — done 2026-09-24 (addenda 4–5; pins moved at the release)             | All lanes green, CHANGELOG Breaking; gate tests read manifest contents; part length re-measured (256 MiB kept)                                                                                                                                                                                      |
+| **4** | Import of the upstream anima transformer as f16 (bf16 decoder, comparison fixtures, `index.json`, streamed fetch of large files)                                             | Upstream weights → TS path produce tensors that match the distributed bytes **without exception** (f16 preset). The RTN path is checked against a tolerance                                                                                                                                          |
+| **5** | LoRA A/B at load time (PEFT → kohya)                                                                                                                                         | ① adapter with scale 0 **identical** to the base graph ② matches a CPU reference with the same reconstructed base and A/B formula ③ one unconsumed tensor throws ④ added nodes, lost fusions, dispatch count and wall time recorded (quality against PEFT evaluated separately)                     |
+| **6** | New bit widths / ternary kernels, Range fetch, composition at load, re-fusion                                                                                               | Measured case by case                                                                                                                                                                                                                                                                              |
 
-- 差し込みは対象 1 本につき **+3 ノード**（low / delta / add）で、**`mul` ノードは足さない**
-  （alpha / r は B 側へ畳む）。454 本全部に差し込むと 2603 → 3965 ノードになる。
-- **ゼロ bias の新設は 0 本で済む**。exporter は定数を内容ハッシュで名付けて重複除去しており
-  （`tools/exporter/src/karume/convert.py:635-678`）、この命名規約を TS 側で再現すると既存の
-  ゼロ bias 6 本が **6/6 再利用できた**（delta 枝の bias は長さ = 出力次元なので base の bias と
-  必ず同名になる）。
-- **454 本全部に差し込んでも `parseIrGraph` を通過する**。
-- 差し込みで**外れる融合は `linearStaticQuantize` の 1 本だけ**
-  （`packages/runtime/src/runtime/fusion-rules/linear-static-quantize.ts`）。anima は
-  `static_quantize` が 0 本なので実質 0 件である。
+Step 5 estimate (CPU spike ③, 2026-09-22): the anima transformer IR has 2,603 nodes, 454 `linear`
+and 0 `static_quantize`; inserting LoRA into all 454 adds 3 nodes each (2,603 → 3,965), reuses the
+6 existing zero biases, passes the IR parser, and loses only the `linearStaticQuantize` fusion (0 in
+anima).
 
-## 追記 1 — 段 1 の実装で確定した点（2026-09-22）
+## Addendum 1 (2026-09-22) — points settled while implementing step 1
 
-段 0 の設計を実装に落とす過程で決めた / 訂正した点。仕様の正本は [container-v1](../container-v1.md) と
-[ir-v2](../ir-v2.md) で、ここは「なぜそうしたか」だけを持つ。
+The spec lives in [container-v1](../container-v1.md) and [ir-v2](../ir-v2.md); this addendum keeps
+the reasons.
 
-1. **initializer 名 = 実体の鍵**（IR v2）。v1 の initializer 名は torch.export の placeholder 名で、
-   上流の鍵（FQN）は `tensor` 欄が別に持っていた。`tensor` 欄を束縛表へ外出しすると、上流 checkpoint の
-   取り込み（決定 19）と LoRA の対象解決（段 5）が鍵を失う。名前を FQN（定数は `const.<hash>`）にすれば
-   表を 1 つも足さずに済む（ミラー 77 グラフで名前・キーは全て ASCII・最長 87 文字・衝突 0 を実測）。
-   共有 initializer は**借り手の名前 = 貸し手の initializer 名**（`shared.tensor` は不要になった）。
-2. **正準直列化の規則**（決定 4 の条件）: 空白なし・キーはスキーマ順・名前キーの map は code point 順・
-   数値の綴りは ECMAScript `Number::toString`（JS 側は `JSON.stringify` がそのまま正準で、Python 側が
-   これを実装する）。descriptor の配列順も固定（`const.blocks` は offset 昇順 MUST・`blocks` は
-   (part, offset)・`constants` は (graph, initializer)）。
-3. **仕様の訂正 5 点**（container-v1 §「改訂履歴」）: ①`capabilities.codecs` はモデル記述の `codecs` へ
-   （グラフ記述は `krm` / `krg` でバイト同一 MUST なので、束縛表に依存する欄を持てない）②束縛表から
-   借用形を外す（shared 宣言は IR 側だけ。束縛表のキー集合は「shared でも const 供給でもない
-   initializer」と完全一致）③`rowAxis` / `groupSize` / `scale` は量子化 codec のみ ④`int8-sym` の packing
-   は 1 要素 / 1 バイト / 整列 4（4 / 4 / 1 だと `numel % 4 == 0` という v1 に無い制約が入る）
-   ⑤配列順の固定（上 2）。
-4. **`rowAxis` は宣言が正本だが、消費側 op の軸との突合は残す**（§13.2 の「`weightChannelAxes` は消える」を
-   訂正）。宣言だけで scale の意味は閉じるが、消費側と食い違う宣言は GPU 常駐経路が scale を別の軸に
-   当てる沈黙誤値になるので、`planWeightResidency` が突合点として持つ。group 形（`int4-sym-g`）の
-   `rowAxis` は 0 だけ（展開カーネルと `decodeI4` が先頭次元を行とする）。
-5. **要素数 0 の退化形**（`in_features = 0` など）: per-channel の `groupSize` は行長 0 では 1 以上 MUST を
-   満たせないので **1**、group 数は **1**（per-channel scale は行ごとに 1 本あり、旧配布形の `[rows, 1]`
-   と一致）。§6.1 の `scaleShape` の式はこの退化形を含む。
-6. **共有 initializer の門**: 借り手は格納を宣言しないので、旧 5 点のうち「宣言 格納 dtype が貸し手と
-   一致」は消え、代わりに**貸し手の codec と借り手側の消費（適格判定）から期待席を導いて**貸し手の
-   実際の席（i8 / i2 は行の軸まで）と突き合わせる。意味論 dtype の一致は ADR
-   [0096](0096-speculative-decoding.md) の追記（2026-10-10）で門に足した。
-7. **段 3 までの暫定接着**（両読みではない）: 旧配布形の読み手は残るが、①旧 v1 ローダ（`parseIrGraph`）は
-   読んだ時点で合流後の形へ写す（改名・codec 写像・`rowAxis` / `groupSize` の導出）②旧 shard の validator
-   は供給計画と同じ `ReadyInitializer`（バイト列 + rank 2 の scale）を返す。消費側（Session 構築・
-   常駐計画・models）は**合流後の 1 語彙**だけを見る。旧形式を読むコードは段 3 で削除する。
-8. **errorScope は block ごと・フェンスは part ごと**（決定 9 の実装）: 供給の単位 `WeightBatch`（旧 shard
-   1 本 / コンテナの part 1 本）ごとに空 submit + 完了待ちを 1 回、errorScope はコンテナでは item
-   （block）ごと、旧 shard では batch ごと（従来どおり）。
-9. **`krg` 単独では Session を組めない**（重みの供給が無い）— 設計どおり。const 供給と shared だけの
-   グラフは例外的に組める。
-10. **公開面**: `openContainer` / `prepareContainer` / `createSessionFromContainer` / `codecLayout`（codec →
-    展開経路。models が格納の性質で分岐する唯一の読み口）/ `ContainerFormatError`。
-11. **検収③の縮図**を `gpu_container_session_test.ts` に固定: 同じ重みバイト列から `krm` 経路と旧 safetensors
-    経路が同じ出力バイト列・同じ常駐バイト数・同じ見積りを出す（i4 + group scale / f16 / i8 + per-channel
-    scale・piece 分割込み）。
-12. **Python の書き手（段 1）は 1 コンテナ 1 グラフ**（`write_model_container(..., graph_name=…)`・
-    bindings はテンソルキー直下の flat map）。現行配布形の部品（component）1 本 = グラフ 1 本に対応
-    する。1 コンテナに複数グラフ（sbv2 の 4 グラフ級・決定 20 の「quant 席 1 つに container 1 つ」）を
-    載せる口は段 2（manifest `karume/5`）の裁定で足す。資産（`assets`）の受け口も同じく段 3
-    （PLE sidecar の専用 part）まで作らない。`provenance.writer` は呼び手が渡す（自動で焼くと版を
-    上げるたびに言語横断 fixture のバイトが動く）。part 長は天井（1024 MiB）だけを強制し、集合
-    `{256, 512, 768, 1024}` は既定値と定数で示す。
-13. **`__proto__` キーは両側で塞ぐ**（container-v1 §0）。
-14. **移行 CLI（段 1）の面**: コンポーネント単位（1 コンポーネント = 1 グラフ = 1 コンテナ）・manifest は
-    読まない / 書かない・`--license` 必須・グラフ名の既定は親ディレクトリ名・`provenance.writer` の
-    既定は生成器タグ・自己検査は payload 部で突合・`.partial` → 検査 → 据え替え（container-v1 §12）。
-    `karume verify` のコンテナ席（移行済み資産を CLI から検査する口）は段 2 で足す。
-15. **検収の状況（段 1 時点）**: ①CPU 逐語突合は実ミラー 3 コンポーネント（depth-anything-v2 small /
-    depth f32・sbv2 shared / text_encoder i8 と i4）で initializer 1,281 本の sha256 が一致。128 鎖全本は、
-    ディレクトリを跨ぐ shard 列（上 14 の未対応）を旧 manifest から引く経路が段 3 で入ってから閉じる。
-    ②77 グラフ全部で新旧の適格述語 3 本・codec 写像・`rowAxis` / `groupSize` が改名表を通して一致
-    （initializer 18,515 本・量子化 4,533 本・不一致 0）。③縮図（追記 11）は緑。④参照行は 1 行も書いて
-    いない。⑤Python が書いた fixture を TS が開いて `parse → serialize` がバイト同一、writer の決定性は
-    pytest で固定（同じグラフを 2 度書いてバイト同一）。
+1. **Initializer name = the key of the data** (IR v2). In v1 the initializer name was the
+   torch.export placeholder and the upstream key (FQN) sat in a separate `tensor` field. Moving
+   `tensor` to the binding table would lose the key for upstream import (decision 19) and for LoRA
+   target resolution (step 5). Naming by FQN (constants `const.<hash>`) needs no extra table (77
+   mirror graphs: all names ASCII, longest 87 characters, 0 collisions). A shared initializer's
+   **borrower name = the lender's initializer name** (`shared.tensor` is gone).
+2. **Canonical serialization** (the condition of decision 4): no whitespace; keys in schema order;
+   maps keyed by name in code point order; numbers spelled as ECMAScript `Number::toString` (JS
+   `JSON.stringify` is canonical as is; Python implements it). Descriptor arrays have a fixed order
+   (`const.blocks` by offset ascending, MUST; `blocks` by (part, offset); `constants` by (graph,
+   initializer)).
+3. **Five spec corrections** (container-v1 revision history): ① `capabilities.codecs` moves to the
+   model descriptor's `codecs` (the graph descriptor MUST be byte-identical between `krm` and `krg`,
+   so it cannot hold fields that depend on the binding table); ② the binding table has no borrowing
+   form (shared declarations live only in the IR; the binding table's key set equals exactly "the
+   initializers that are neither shared nor const-supplied"); ③ `rowAxis` / `groupSize` / `scale`
+   only for quantized codecs; ④ `int8-sym` packing is 1 element / 1 byte / alignment 4 (4 / 4 / 1
+   would add a `numel % 4 == 0` constraint absent in v1); ⑤ fixed array order (item 2).
+4. **`rowAxis` is canonical in the declaration, but the cross-check against the consuming op's axis
+   stays** (corrects "`weightChannelAxes` disappears" of decision 11 / container-v1 §13.2). A
+   declaration that disagrees with the consumer would make the GPU-resident path apply the scale to
+   another axis — a silent wrong value — so `planWeightResidency` keeps the cross-check. For the
+   group codec (`int4-sym-g`) `rowAxis` is 0 only (the expansion kernel and `decodeI4` treat the
+   first dimension as the row).
+5. **Zero-element degenerate shapes** (`in_features = 0` and the like): per-channel `groupSize`
+   cannot satisfy "≥ 1" with row length 0, so it is **1** and the group count is **1** (one
+   per-channel scale per row, matching the old `[rows, 1]`). The `scaleShape` formula of §6.1
+   includes this case.
+6. **Shared-initializer check**: borrowers declare no storage, so "declared storage dtype equals the
+   lender's" is gone; instead the **expected residency is derived from the lender's codec and the
+   borrower's consumption (eligibility)** and compared with the lender's actual residency (for i8 /
+   i2 down to the row axis). Semantic dtype equality was added by ADR
+   [0096](0096-speculative-decoding.md) (addendum 2026-10-10).
+7. **Temporary glue until step 3** (not dual reading): old readers converted to the merged form at
+   read time; consumers saw only the merged vocabulary. Closed in step 3d (addendum 4, item 6).
+8. **errorScope per block, fence per part** (implementation of decision 9): one empty submit + wait
+   per supply unit `WeightBatch` (one part), errorScope per item (block).
+9. **A `krg` alone cannot build a Session** (no weight supply) — by design. Graphs supplied only by
+   consts and shared initializers are the exception.
+10. **Public surface**: `openContainer` / `prepareContainer` / `createSessionFromContainer` /
+    `codecLayout` (codec → expansion path; the only place where models branch on storage) /
+    `ContainerFormatError`.
+11. History: the miniature of acceptance ③ (`gpu_container_session_test.ts`, `krm` vs the old
+    path) was deleted with the old path; successor in addendum 4, item 10.
+12. **The Python writer writes one graph per container** (`write_model_container(...,
+    graph_name=…)`, bindings as a flat map by tensor key; one component = one graph; several graphs
+    per container remain a format capability). Part length enforces only the ceiling (1024 MiB).
+    (Assets: addendum 2, item 4; `provenance.writer`: addendum 4, item 4.)
+13. **`__proto__` keys are blocked on both sides** (container-v1 §0).
+14. **Migration CLI surface**: per component (1 component = 1 graph = 1 container); `--license`
+    required; `.partial` → check → replace (container-v1 §12). (Graph name and `provenance.writer`
+    defaults corrected by addendum 4, items 3 and 4.)
+15. History: acceptance at step 1 — 3 real components compared verbatim, predicates agreed on all
+    77 graphs (18,515 initializers, 0 mismatches); full comparison closed in addendum 3, item 7.
 
-## 追記 2 — 段 2 の裁定（2026-09-22）
+## Addendum 2 (2026-09-22) — rulings for step 2
 
-段 2（manifest `karume/5`・hub の取得面・PLE の asset 化・部品差し替え席・1 系列の再アップロード）の
-計画で決めた点。manifest の形は ADR [0109](0109-manifest-v5-container.md) が正本で、ここは本 ADR の
-決定に対する訂正と補足だけを持つ。
+The manifest shape is canonical in ADR [0109](0109-manifest-v5-container.md); this addendum holds
+only corrections and additions to this ADR.
 
-1. **決定 20 の訂正 — コンテナの粒度は quant 席ではなく部品 × dtype**。`quants[].container` は
-   `weights.<部品>.<dtype>.container` に置き換わり、quant 席は `karume/4` と同じ写像のまま。根拠は
-   実ミラー 11 本の集計 — 席ごとに物理ファイルを作ると 65.9 GiB が 197 GiB（×2.99）になる
-   （quant 席は重みの単位ではない: gemma4 の 3 席は重みが同一で実行ノブだけ違う）。「1 コンテナに
-   複数グラフ」は形式の能力として残り、`karume/5` では使わない。model 単位の `assets`（tokenizer
-   等・越境あり）は manifest に残す。共有 `krg` の `graph: FileRef` 席は `karume/5` に置かない
-   （要る段 = 段 5 で足す）。
-2. **段 2 の取得単位は part**（決定 6 の記述どおり）。hub はコンテナ 1 本につき `BlockSource` を
-   返す面を 1 本持ち、cold は取得層の相 1（ファイル全量を流しながら sha256 検証 + 記録ハッシュ）で
-   part を温めてから区間読み口を開く。区間読みの費用型で分岐する — seek（ブラウザの Blob・ローカルの
-   区間読み）は block ごと、scan（Deno の既定）は part を 1 度に読んで切る。取得層
-   （`@hdae/fetch-cache`）は段 2 では変更しない。**HTTP Range は段 6 のまま**で、前倒しの条件は
-   「2f の RAM ピーク harness で cold のピークが『part 長 + 重ね合わせ』を超える」こと。
-3. **決定 8 の補足 — block の sha256 は未検証の取得元にだけ掛ける**。取得層がファイル全体を検証した
-   バイト列（HF 経由）は `BlockSource` が検証済みと名乗り、`readBlock` は digest を掛けない
-   （cold の 2 重 digest を避ける）。`fromContainer(bytes)` とローカルディレクトリ（ADR 0086 決定 2 —
-   hub がファイル全体の sha256 を照合しない取得元）は block ごとに digest する。warm は従来どおり 0 回。block の sha256 は
-   段 6 の Range 取得で「届いた分だけ検証する」ための契約として残る（container-v1 §7 を訂正）。
-4. **追記 1 の 12 の訂正 — assets の受け口は段 2 に入れる**（段階分解表が正本）。小段の最後に置き、
-   PLE は asset（役割 `ple-values` / `ple-scales` の block 列 — 区間読みの block は 1 block = 1 part — と
-   役割 `ple-index` の索引 schema 3）、`extras` の `rope_base` は asset（役割 `rope-base`・66 KB × 2 本の
-   複製）へ移る。資産は `assets[].length`（payload 長）を宣言する（ADR 0109 決定 4）。
-5. **段 2 で `karume/5` を書くのは移行 CLI のリポ丸ごとモード**（`karume migrate --manifest`）。
-   旧 manifest から shard 列を引くので、追記 1 の 14 / 15 で未対応だったディレクトリを跨ぐ shard 列と
-   128 鎖全本の逐語突合はここで閉じる。dist.py / recipe が `krm` を直接書くのは段 3
-   （container-v1 §12 の記述どおり）。`hf-upload.zsh` の `*.krm` 追随だけは再アップロードに要るので
-   段 2 へ前倒し。
-6. **共存期間**: 2b 以降 hub は `karume/5` だけを読む。ローカルミラー 11 本は 2d で全部移行して
-   差し替え、レーンは移行済みミラーで回す。HF の pin は段 2 で irodori-v4.1-small だけ更新し、残りは
-   段 3 まで旧版パッケージからだけ動く。
-7. **再アップロードする 1 系列 = irodori-v4.1-small**（5.8 GiB・部品 8 × dtype 4・quant 5 席・
-   extras / PLE / 越境なし — 部品と席の写像を一番広く踏み、移行 CLI の制約に当たらない）。
-8. **RAM ピーク harness（検収②）は Deno（`--expose-gc` + `Deno.memoryUsage().external`）で自動化**し、
-   Chrome は手動確認手順として渡す。取得（part 0 / const / block）を別々に数える。
-9. **小段の順**: 2a 仕様 → 2b hub → 2c runtime → 2d exporter（リポ丸ごとモード + 全ミラー移行 +
-   128 鎖突合）→ 2e models（8 系列の container 経路・部品差し替え席・PLE / extras の asset 化）→
-   2f 検収（harness・再アップロード・docs 同期）。
+1. **Correction of decision 20 — container granularity is component × dtype, not preset.**
+   `quants[].container` becomes `weights.<component>.<dtype>.container`; presets keep the
+   `karume/4` mapping. Basis: on the 11 real mirrors, one physical file per preset would turn
+   65.9 GiB into 197 GiB (×2.99) — a preset is not a weight unit (gemma4's three presets share the
+   same weights and differ only in execution options). "Several graphs per container" remains a
+   format capability, unused in `karume/5`. Model-level `assets` (tokenizers and the like,
+   cross-repository allowed) stay in the manifest. The shared-`krg` `graph: FileRef` is not in
+   `karume/5` (added at step 5 when needed).
+2. **The fetch unit of step 2 is the part** (as decision 6 says). The hub returns one `BlockSource`
+   per container; the cold path warms the part with phase 1 of the fetch layer (stream the whole
+   file, verify sha256, record the hash) and then opens range reads. Reads branch on cost type —
+   seek (browser Blob, local positional reads) reads per block, scan (Deno and Node via HF) reads
+   the part once and cuts it. The fetch layer (`@hdae/fetch-cache`) is not changed. **HTTP Range
+   stays at step 6**; the trigger to bring it forward is "the RAM-peak harness shows a cold peak above
+   'part length + overlap'".
+3. **Addition to decision 8 — block sha256 applies only to unverified sources.** Bytes whose whole
+   file the fetch layer verified (via HF) are declared verified by the `BlockSource`, and
+   `readBlock` does not digest them (no double digest on cold reads). The bytes input of
+   `openContainer` and local directories (ADR 0086 decision 2 — the hub does not check whole-file
+   sha256 there) are digested per block. Warm stays at zero. Block sha256 remains the contract for
+   "verify what arrived" under the Range fetch of step 6 (container-v1 §7 corrected).
+4. **Correction of addendum 1, item 12 — assets are taken in step 2.** PLE becomes assets (role
+   `ple-values` / `ple-scales` block lists — for range reads one block = one part — and role
+   `ple-index`, index schema 3); the `rope_base` of `extras` becomes an asset (role `rope-base`,
+   66 KB × 2 copies). Assets declare `assets[].length` (payload length — ADR 0109 decision 4).
+5. **In step 2 `karume/5` is written by the whole-repository mode of the migration CLI**
+   (`karume migrate --manifest`). It reads shard lists from the old manifest, which closes the
+   cross-directory shard lists and the full comparison left open in addendum 1. Recipes write `krm`
+   directly from step 3; `hf-upload.zsh` followed `*.krm` already in step 2 for the re-upload.
+6. History: coexistence during step 2 — see addendum 3, item 8.
+7. History: the re-uploaded repository was irodori-v4.1-small (widest component × preset mapping
+   without cross-repository references).
+8. **The RAM-peak harness (acceptance ②) is automated on Deno** (`--expose-gc` +
+   `Deno.memoryUsage().external`), with manual Chrome steps; fetches (part 0 / const / block) are
+   counted separately. (The harness was not ported to Node — ADR 0127 decision 5.)
+9. History: sub-steps 2a spec → 2b hub → 2c runtime → 2d exporter → 2e models → 2f acceptance.
 
-## 追記 3 — 段 2 の実装で確定した点（2026-09-22〜23）
+## Addendum 3 (2026-09-23) — points settled while implementing step 2
 
-manifest の形は ADR [0109](0109-manifest-v5-container.md)、PLE は ADR [0085](0085-ple-host-gather.md)
-追記 2026-09-22 が正本。ここは段 2 の実装で決めた / 訂正した点と検収の状況だけ。
+The manifest shape is canonical in ADR [0109](0109-manifest-v5-container.md), PLE in ADR
+[0085](0085-ple-host-gather.md) (addendum 2026-09-22).
 
-1. **資産は論理長を宣言する**（`assets[].length` — container-v1 §2.2 訂正 2 ⑤）。資産は shape を持たず
-   descriptor から payload 長を復元できないので、消費側が末尾の 0x00 詰めを推測で剥ぐ形になっていた
-   （PLE 索引の JSON がその実例）。block 長 = 論理長の 4 の倍数への切り上げ MUST を parse で突き合わせる。
-2. **区間読みの資産は 1 block = 1 part、全量読みの資産は資産どうしで part を共有してよい**（重み block とは
-   同居しない）。書き手の `AssetInput.dedicated_part` が区別する。gemma4 E2B の `model` 容器は 83 part
-   （重み 8 + 資産 74 + descriptor + const）になる。
-3. **hub の取得面は温めを持たない**（`openContainerSource` は同期・区間読みだけ）。温めは呼び手が
-   `prefetchAssets` で行い、順序は descriptor（part 0）→ admission → 重みの part → 資産。取得面の中で全 part を
-   温めると「実行できないモデルの重みは 1 バイトも落とさない」が面の内側から壊れる。併せて `runPrefetchPhase`
-   の相 1 の能力判定を ref ごとにし、ローカルセッション + HF 越境の温めが飛ぶ既存不具合を直した。
-4. **models の継ぎ目**（`hub/components.ts`）: `ModelComponent` は `graph` / `createSession` に加えて容器の
-   資産の宣言（`assets: 名前 → 役割`）と読み口（`asset(name)`）を持つ。admission は各部品のグラフ宣言と
-   資産の宣言で判定し、重み block と part を共有しない資産（索引・`rope_base`）はそこで読んでよい。
-   全量面 `assetComponentOpener` は同期の供給口を返すために全部品を先に開く（admission より先）。
-5. **部品差し替え席**は `ComponentSource = { source, model?, quant? }`（別の `karume/5` リポの同じ役割）。
-   admission = ①グラフ記述の sha256 が manifest の宣言と一致 ②束縛の不足 / 余剰 0（`openContainer`）
-   ③家族の門。①は 2 つの manifest だけで判定するので descriptor すら取らずに落ちる。QAT のように活性
-   scale をグラフへ焼く系列では checkpoint ごとにグラフ記述が変わり、差し替えは拒否される（段 5 で
-   「グラフ同一性の方針」を宣言するまでの規律）。
-6. **移行 CLI のリポ丸ごとモードで実ミラーから拾った 3 点**（合成 manifest だけのテストでは見えなかった）:
-   `pipeline` は `"<name>/<major>"` の文字列・`gemma4-qat` も PLE の持ち主・karume-gemma4（非 QAT）の PLE
-   索引は schema 1（I8・`storage` 欄なし）。schema 3 では `storage` を必ず綴る（`i8` へ正規化）。
-7. **検収①（CPU の逐語突合）は閉じた**: ミラー 11 本を `karume migrate --manifest` で移行（69 GiB・自己検査 =
-   旧 shard の payload と initializer ごとに一致）し、TS の読み手（`openContainer` + `readBlock`）で
-   一意な容器 108 本・block 40,939 本・initializer 31,882 本・66.8 GiB の sha256 と合流（不足 / 余剰 0）を
-   全件通した（越境 4 容器は karume-anima 側と同一実体）。「128 鎖」はモデルごとに数えた延べ数で、
-   共有部品を畳むと 108 本。
-8. **段 2 の間の共存**: hub は `karume/5` だけを読む。ローカルミラーは `models/`（移行済み）と、旧
-   `karume/4` のミラーはリポ外 `~/workspace/karume-models-v4/`（git 追跡外）に置き、レーンは `models/` で
-   回す。HF の pin は irodori-v4.1-small だけ段 2 で更新した（検収①の実 pin: SHA 固定の取得元で
-   `fromPretrained` → `generate` を通し、取得 26 本が全て pin の revision・同じ文と seed の WAV が
-   ローカルミラー経由と byte 同一）。残りの pin は段 3 まで旧版パッケージからだけ動く。
-9. **PLE 側で変わった規律**: 既定の常駐上限は「最大 block 2 本ぶん」（約 64 MiB — 旧は最大 shard 2 本 ≈
-   506 MiB）。読み口は費用型を持たないので seek / scan の方針表は消え、全量読みへ倒す下限は
-   `min(32, block の行数)`。読み 1 本を途中で畳む口は無い（`AssetReader.read` は signal を受けない）ので
-   中断は gather の段の境目だけ。
-10. **検収②③（RAM ピーク harness・warm の digest）**: `tools/ram-peak/matrix.ts` を新設し、実資産 3 構成
-    （gemma4 e2b `i4-fast` / irodori v4.1-small `i8-a8` / anima turbo `f16+dit8-a8-attn8-s16`）で cold →
-    warm → local を各 3 回測った（[研究記録](../research/2026-09-23-container-ram-peak.md)）。warm は
-    3 構成とも **payload の digest 0 回・キャッシュ書込 0 本**（descriptor 2 文書の突合は開くたびに掛かる —
-    container-v1 §7 の①）。ホスト RAM のピークは seek 型（ローカルの位置読み・ブラウザの Blob）で
-    「part 1 本 + block 1 本」の見積りに収まり、Deno の HF 経由（scan 型）はその約 2 倍（part 2〜3 本が
-    同時に生きる — 取得層の新規バッファ + hub の 1 枠 + runtime の part 単位の items）。改善候補は段 3
-    （「part 長の既定の見直し」と同じ回）で実測して採否を付ける。Range 取得（段 6）の前倒し条件
-    「cold のピークが part 長 + 重ね合わせを超える」には、seek 型では当たらず scan 型で当たる — ただし
-    scan 型の超過は取得ではなく保持の重複が原因なので、Range ではなく上の候補で閉じる。
+1. **Assets declare their logical length** (`assets[].length` — container-v1 §2.2). Assets have no
+   shape, so the payload length cannot be recovered from the descriptor and consumers had to guess
+   the trailing 0x00 (the PLE index JSON was the case). Parsing checks "block length = logical
+   length rounded up to a multiple of 4" (MUST).
+2. **Range-read assets: one block = one part; whole-read assets may share parts with each other**
+   (never with weight blocks). The writer's `AssetInput.dedicated_part` tells them apart. gemma4
+   E2B's `model` container has 83 parts (8 weight + 74 asset + descriptor + const).
+3. **The hub's container surface does not warm** (`openContainerSource` is synchronous and reads
+   ranges only). The caller warms with `prefetchAssets`, in the order descriptor (part 0) →
+   admission → weight parts → assets. Warming every part inside the surface would break "no weight
+   byte is fetched for a model that cannot run". The phase-1 capability check of `runPrefetchPhase`
+   became per ref, fixing a bug where a local session plus HF cross-repository references skipped
+   warming.
+4. **The models seam** (`packages/models/src/hub/components.ts`): `ModelComponent` carries, besides
+   `graph` / `createSession`, the container's asset declarations (`assets`: name → role) and a
+   reader (`asset(name)`). Admission decides from each component's graph and asset declarations;
+   assets that share no part with weight blocks (index, `rope_base`) may be read there. The
+   whole-file surface `assetComponentOpener` opens every component first (before admission) to
+   return a synchronous supply.
+5. **Component replacement**: `ComponentSource = { source, model?, quant? }` (the same role from
+   another `karume/5` repository). Admission = ① the graph descriptor sha256 equals the manifest's
+   declaration ② no missing / surplus bindings (`openContainer`) ③ the family's admission check.
+   ① needs only the two manifests and fails before any descriptor is fetched. For families that bake
+   activation scales into the graph (QAT), the graph descriptor differs per checkpoint and
+   replacement is rejected (until step 5 declares a graph-identity policy).
+6. **Three facts found by the whole-repository migration of real mirrors**: `pipeline` is the string
+   `"<name>/<major>"`; `gemma4-qat` also owns PLE; the PLE index of non-QAT karume-gemma4 is schema 1
+   (I8, no `storage` field) — schema 3 always spells `storage` (normalized to `i8`).
+7. History: acceptance ① (CPU verbatim comparison) closed on 2026-09-23 — 108 unique containers,
+   40,939 blocks, 31,882 initializers, 66.8 GiB, no missing or surplus binding.
+8. History: during step 2 the old `karume/4` mirrors lived outside the repository
+   (`~/workspace/karume-models-v4/`), and only irodori-v4.1-small was re-pinned.
+9. **PLE discipline**: the default residency limit is "two largest blocks" (about 64 MiB; formerly
+   two largest shards ≈ 506 MiB). The reader has no cost type, so the seek / scan policy table is
+   gone; the floor for falling back to a whole read is `min(32, rows per block)`. A single read
+   cannot be cut short (`AssetReader.read` takes no signal), so cancellation happens only between
+   gather steps.
+10. History: acceptance ②③ — warm runs did zero payload digests and zero cache writes on three
+    real configurations; seek-type sources stayed within "one part + one block", Deno via HF (scan)
+    about twice that ([research](../research/2026-09-23-container-ram-peak.md)). The harness
+    `tools/ram-peak/matrix.ts` is not on the Node toolchain (ADR 0127 decision 5).
 
-## 追記 4 — 段 3a〜3d の実装で確定した点（2026-09-23〜24）
+## Addendum 4 (2026-09-24) — points settled in steps 3a–3d
 
-書き手を `krm` の 1 本にし（3a）、系列出力を移し（3b）、テストと道具を追随させ（3c）、旧配布形の
-読み手を削除した（3d）回で決めた / 訂正した点と、段 3 の検収①②の状況。part 長の既定と RAM ピーク
-（検収③）は追記 5 が持つ。形式は [container-v1](../container-v1.md)、manifest は ADR
-[0109](0109-manifest-v5-container.md) が正本。
+One writer (3a), series outputs moved (3b), tests and tools followed (3c), old readers removed (3d).
+Part length and RAM peak are in addendum 5. Format: [container-v1](../container-v1.md); manifest:
+ADR [0109](0109-manifest-v5-container.md).
 
-1. **書き手は 1 本**（3a・`8086ed37`）。recipe の `publish_model` / `export_to_file` と `karume migrate` は、
-   同じ公開の 3 段（書く → 読み直して検証 → 据え替え — `karume.publish.publish_container`）を通る。
-   書き手が 2 本あると「移行済みミラー」と「再 export した系列」が別物になるため。`provenance` と
-   `graph_name` は必須にした（既定値で出所を偽らない・作業席名 `<部品>.staging` をグラフ名に拾わない）。
-   同一性は「旧 shard → `karume migrate`」と「直接書き」が part 列ごとバイト同一であることで固定した
-   （f32 / f16 / i8 / i4・`rope_base`・PLE の専用 part）。`karume repack` と旧 shard の書き手は退役し、
-   旧形式を読むのは移行専用の `karume.legacy` だけになった。追記 2 の 5 の「dist.py / recipe が `krm` を
-   直接書くのは段 3」はここ（recipe 側は `d2630521`）で済んだ。
-2. **`karume dist` は `karume/5` を組み、現物を宣言と突き合わせる**（3a・3b）。`weights.<部品>.<dtype>.container`
-   （2 文書の期待値 + part の FileRef 列）を書き、容器のグラフ名の集合が weights のキーと違えば組み立ての
-   前に落とす（`DistError`）。IR の受理規則（ランタイム支援 + op 契約 — `assert_runtime_support` /
-   `assert_op_contracts`）は export / `karume dist` / `karume verify` の 3 経路で同じ関数を掛ける。据えた容器の
-   2 文書から IR を起こし直して掛ける（`verify.ir_graph_from_container`）のは dist と verify の 2 経路で、export は
-   書く前のグラフ（`stored.graph`）に直接掛ける。
-3. **追記 1 の 14 の訂正 — 容器のグラフ名 = 部品名 = `karume.json` の weights のキー** MUST（3b・`2bbd013b` /
-   `0b86439e`）。規則の本文は container-v1 §2.1、なぜ規則にしたかは ADR 0109 追記 1 が持つ。ディレクトリ名は
-   規則にしない — 系列直下に容器を置く family ではディレクトリ名が系列名になり、irodori の `caption-proj`
-   （キーは `caption_proj`）や deberta の `full-24layer`（キーは `text_encoder`）のように綴りも違う。recipe は
-   グラフ名を定数で名乗り、AST の門 `tools/export-recipes/tests/test_graph_names.py` が「定数であること」と
-   「名乗るグラフ名が配布計画の weights のキーと対応すること」を見る（配布形に載らないグラフを名乗る
-   family・他 family の計画と突き合わせる family といった例外の扱いもこの門が持つ）。現物の側は上の 2 の
-   `karume dist` の門が、容器のグラフ名と weights のキーを検査する。
-4. **追記 1 の 14 の訂正 — `provenance.writer` は既定で書かない**（3b・`2bbd013b`）。既定で生成器タグを
-   焼くと、移行した容器と recipe が直接書いた容器の part 0 が版の分だけ永久に食い違い、同じ資産の
-   バイト同一が主張できない。ツールの版は `karume.json` の `generator` 欄 1 箇所が持つ。
-5. **全資産の移行**（3b・3c）。`outputs/series/` の旧 shard 形 54 系列 / 135 部品 / 70.9 GiB を
-   `python -m migrate_series` で `krm` へ移した（値はビット同一・sidecar は容器の資産・golden と json は
-   不変 — `0b86439e`）。「系列 → 部品 → weights キー → sidecar の畳み方」の対応は family しか知らないので、
-   core に系列モードは作らず、recipe 側の駆動に置いた（ADR 0065 の境界）。PLE（gemma4 / gemma4-qat）と
-   `rope_base`（anima）は recipe が容器の資産として直接書く（`d2630521`）。git 追跡の golden fixture
-   32 モデルは `karume.goldens` で焼き直し（旧 safetensors 50 本 → part 78 本・`io.*` は不変 —
-   `2bde1baf`）、packed PLE fixture は recipe の本番経路で再生成した（`f5736ac0`）。実証は 2 組ある。
-   ①`karume dist` の焼き直し（siglip2 / gemma4 / gemma4-qat）は、現ミラーと重み・資産の part でバイト同一。
-   ②recipe の直接 export（vowel-detector / deberta 3 variant / gemma4-e2b-product）は、移行結果と全 part で
-   バイト同一。
-6. **追記 1 の 7（段 3 までの暫定接着）を閉じた**（3d・`9e905d9f`・決定 18）。runtime から、旧 safetensors
-   方言の読み手・shard の進行検証・IR v1 ローダが消え、Session の供給元は容器 1 種（`BoundContainer`）に
-   なった。`parseSafetensors` は素の safetensors の付帯資産を読むために残し、方言 dtype `I4` / `I2` だけ
-   拒否する。hub は shard の逐次面（`streamAssets`）と使い回しの器（`into` / `readFileInto`）を削除した。
-   テストと道具は 3c で容器面へ移した（実資産 e2e は part 列の位置読みで開く
-   `packages/runtime/tests/helpers/container-files.ts`、系列 → 部品 → グラフ名の表は門番と e2e が共有する
-   `helpers/series-graphs.ts` の 1 本）。
-7. **決定 17 の合流層は `packages/runtime/src/format/container/bind.ts`**（3d）。2 文書に依存しない
-   `bindDeclarations` と、2 文書から引き当て口を組む外皮 `bindGraphs` の 2 段で、`krm` もメモリ内容器（下の 8）も
-   同じ `bindDeclarations` を通る。旧 `parseIrGraph` の storage 規則は 2 箇所に分かれた。scale /
-   `groupSize` / `rowAxis` の有無（量子化 codec では必須・それ以外では禁止）は記述文書の読み手（`descriptor.ts` の `parseEncoding`）が見て、メモリ内容器は
-   入力形が違うので同じ有無を `memory.ts` で見直す。値の側（codec × 意味論 dtype・`groupSize` の値域・行長の
-   整除・i2 経路の shape・scale 長）と、piece の被覆・中間 piece の長さ 4 の倍数・整数の行境界は `bind.ts` が
-   持つ。IR の読み手は格納を持たない IR v2 の宣言 1 種（`parseIrDeclaration` /
-   `parseIrDeclarationValue`）である。本文・段階分解表・段 5 の見積りに残る `parseIrGraph` / `prepareModel`
-   と、対象欄の `format/container.ts` は段 0 時点の名前で、書き換えない。
-8. **メモリ内容器**（3d・`9e905d9f`）— `openMemoryContainer`（`packages/runtime/src/format/container/memory.ts`）は、
-   手元のバイト列を**容器ファイルを書かずに** `krm` と同じ合流・admission・構築の経路へ載せる供給面で、
-   `openContainer` と同じ `BoundContainer` を返す。対象は models がホストで組むグラフ（irodori の CFG 合成 /
-   Euler 更新・gemma の最大値選択・PLE gather）と、道具の合成モデルである。旧 `createSession(gpu, model)` が
-   持っていた「手元のグラフを Session にする」口を、形式を増やさずに容器面へ寄せるために置いた。
-   - **入力**: `graphs`（グラフ名 → IR v2 宣言）と `tensors`（グラフ名 → initializer 名 → 供給）。shared で
-     ない initializer は過不足なく供給する MUST（不足も余剰も全件列挙で落ちる）。
-   - **供給の 2 形**: `bytes`（丸ごと 1 本 — 渡した器をそのまま返し、複製しない）と `pieces`（先頭次元の
-     行範囲 + `read()` の読み口を 2 本以上 — バイト列を抱えず、`readBlock` のたびに `read()` を引き直す）の
-     排他。量子化 codec は `encoding` に f32 の scale（rank 2・4 B 整列）と `groupSize` を持つ。
-   - **part の割り方**: 丸ごとの供給は宣言順に積み、既定の part 長（256 MiB）を超えるところで次の part へ
-     移る（companion scale は実体と同じ part）。piece は 1 本 = 1 part で、scale は piece 1 と同じ part
-     （規則③）。part は Session 構築のフェンスの単位なので、この割り方が決めるのは構築時の staging の
-     上限である（ホスト RAM は part の割り方に依らない — 追記 5 の 3）。
-   - **sha256 は掛けない**。渡されたバイト列はネットワークもディスクも通っていないので、宣言と現物の
-     食い違いを検証する相手が無い（block の digest は未検証の取得元のための門 — 決定 8）。
-   - **検査の門**: 束縛規則は上の 7 の合流層が `krm` と同じ 1 本で見る。この層が持つのは、上の 7 の
-     encoding の有無の見直しと、合成に閉じた 5 つである — 宣言との対応（不足 / 余剰・未宣言のグラフ名）、
-     `pieces` が 2 本以上、合成した block id の衝突、scale のバイト位置の 4 B 整列、`readBlock` の取得長と合成した宣言長の一致。ホストで組む宣言は
-     必ず公開面の `parseIrDeclarationValue`（`openContainer` が容器の宣言に掛けるのと同じ門）を通す。
-     `krm` 経路では記述文書の読み手が非有限数と入れ子の深さを検査するが、メモリ内容器ではこの 2 つを
-     呼び手が持つ（`packages/runtime/mod.ts` の doc）。
-9. **追記 1 の 10 の公開面の増減**（3d・公開面スナップショット）。runtime は −8 / +9 で、削除は `openModel` /
-   `KarumeModel` / `ModelShard` / `createSession` / `createSessionFromShards` / `prepareModel` /
-   `estimateSessionMemory` / `ContainerError`、追加は `openMemoryContainer` / `BoundContainer` /
-   `MemoryContainerInput` / `MemoryEncoding` / `MemoryPiece` / `MemoryTensor` / `parseIrDeclarationValue` /
-   `IrDeclaration` / `RuntimeSupportError`。hub は −3（`streamAssets` / `StreamedAsset` / `StreamAssetsOptions`）、
-   models は増減なし。追記 1 の 10 の 5 つは残る。capability 不足は `RuntimeSupportError`、容器の規則違反は
-   `ContainerFormatError` に分かれた。見積りは `prepareContainer(...).estimate()` が持つ。
-10. **追記 1 の 11 の縮図の後継と、独立オラクルの喪失**（3d）。`gpu_container_session_test.ts`（`krm` 経路と
-    旧 safetensors 経路の A/B）は旧経路と一緒に削除した。後継の `packages/runtime/tests/gpu_memory_container_test.ts`
-    は、同じ合成モデル（linear i4 + group scale → add f16 → linear i8 + per-channel scale + bias f32・piece
-    分割込み）で `krm` とメモリ内容器を突き合わせ、piece の割り方は 2 経路でわざと違えてある。ただし
-    2 経路は合流層から Session 構築までを共有するので、この縮図の出力を**別実装で**押さえる A/B は
-    無くなった。合流か構築の誤りは両辺に同じだけ乗り、この 1 本では検出できない。見積りの A/B
-    （`runtime_prepare_container_test.ts`）も同じ形である。緩和として外部の正解が 2 つ残る。①codec ごとの
-    GPU テストは CPU 参照（`applyReferenceOp` + `decodeI4` / `decodeI8`）と突き合わせる。②実資産の環境別
-    sha256 参照行（ADR 0106）は段 3 の間 1 行も書き換えていない（最終変更 `689157c7`・2026-09-20）ので、
-    行がある環境では新しい経路が旧経路で焼いた出力とビット同一であることを押さえている（anima /
-    irodori / sbv2）。3 codec 混在 × piece 分割の縮図には外部の正解が無く、これを戻す作業は
-    [backlog](../backlog.md) の later に置く。2026-09-24: `bafe1316` で縮図に CPU 参照の連鎖
-    （`decodeI4` / `decodeF16` / `decodeI8` + `applyReferenceOp`）を外部の正解として戻した。
-11. **検収②は成立**（3c・`dcd6fb1c`）。`packages/runtime/tests/distribution_gate_test.ts` は `karume.json` を
-    hub のパーサで読み、`karume/5` を名指しで断言し、既定の model / quant が選ぶ全容器の part の実在と長さを
-    宣言と突き合わせる（越境参照の part はローカルミラーに実体が無いので対象外）。`assets_gate_test.ts` は manifest を持たない系列について、容器を part 列として開き
-    （本数・長さ・2 文書の parse・束縛表との合流まで）、名乗るグラフ名が期待の weights キーであることを
-    見る。どちらも block の sha256 は読まない（実バイトの突合は各 e2e が `openContainer` の経路で通る —
-    決定 8）。射程の限りとして、配布形の門番が見るのは既定 quant だけで、他の quant 席の part は e2e が
-    開くまで検査されない。
-12. **検収①は条件つき成立**。CHANGELOG の Breaking は `994bdad8` で記載した。レーンはこの開発機（Intel
-    Arc B570・Deno 2.9.6）で 14 本を回した。3d のコミット本文（`9e905d9f`）は単独再走込みで全 14 レーン緑と
-    記録している。3e 後の通常走行では 12 / 14 が緑で、赤の 2 本は [known-issues](../known-issues.md)
-    「Intel Arc B570」節の環境要因である。①`test:core` の OOM 門
-    （`gpu_generation_context_test.ts`「state 確保の失敗は out-of-memory errorScope で fail loudly」— `destroy()`
-    の解放が次の device poll まで遅れる）。②`test:models:birefnet` の 2048² が device lost になり、Deno の
-    panic で走行ごと止まる（1024² の 11 本は緑）。ADR 0005 のリリース判定（緑必須）は、この 2 本を緑に
-    できる環境で満たす。
-13. **全 pin の移行は段 3 から release の波へ移す**（段階分解表の段 3「全 pin の移行」と、追記 2 の 6・
-    追記 3 の 8 の「残りの pin は段 3 まで」の訂正）。段 3 で pin は 1 本も動いておらず、`karume/5` を指すのは
-    段 2 で上げ直した irodori-v4.1-small だけである。残り 9 リポの再アップロードと pin の差し替えは
-    リリースの回に行う。[release-runbook](../release-runbook.md) §0 の順序（version bump → 焼き直し →
-    アップロード → pin → JSR publish）が非可換 MUST で、manifest の `generator` 欄がパッケージ版を写すので、
-    bump 前に上げると古い版を名乗る配布形が HF に載るため。再アップロードでは新 manifest が参照しない
-    旧ファイルを同じリポから消し、pin は削除後の main で焼く（irodori-v4.1-small で実施 — 旧 safetensors
-    65 本・5.84 GiB を削除して pin を付け替えた `1c952948`。旧 revision の pin は履歴から解決できる）。
-    リポの削除 → 再作成は、公開版の pin を持つリポでは使わない（決定 18 の「履歴は残す」）。台本
-    `hf-upload.zsh` は段 2 で `*.krm` に追随済み（`f33f7be2`）。manifest 側の訂正は ADR 0109 追記 1。
-14. **block 上限の見直し（32 → 16 MiB）は段 3 では測らなかった**。決定 5 は「段 3 の RAM ピーク実測まで
-    持ち越す」としていたが、段 3e で測ったのは part 長だけである（追記 5）。見直しは段 6（新 bit 幅・
-    Range 取得の回）へ持ち越す。下げる前に要るものは決定 5 のとおり（const の上限を超える定数の逃げ道
-    〈container-v1 §10 の未決〉と、block 件数・descriptor の倍増の評価）。
+1. **One writer** (3a, `8086ed37`). The recipes' `publish_model` / `export_to_file` and
+   `karume migrate` pass the same three publishing steps (write → re-read and verify → replace —
+   `karume.publish.publish_container`); two writers would make migrated mirrors and re-exported
+   series different things. `provenance` and `graph_name` are required (no default that misstates
+   the origin; no working name `<component>.staging` picked up as the graph name). Identity is pinned
+   by "old shards → `karume migrate`" and "direct write" giving byte-identical part lists (f32 / f16
+   / i8 / i4, `rope_base`, PLE dedicated parts). `karume repack` and the old shard writer retired;
+   only the migration module `karume.legacy` reads the old format. Recipes write `krm` directly
+   (`d2630521`).
+2. **`karume dist` builds `karume/5` and checks the files against the declarations** (3a, 3b). It
+   writes `weights.<component>.<dtype>.container` (the two descriptor expectations + part FileRefs)
+   and fails before assembly when the set of graph names differs from the weights keys
+   (`DistError`). The IR acceptance rules (runtime support + op contracts — `assert_runtime_support`
+   / `assert_op_contracts`) run with the same functions in export, `karume dist` and `karume verify`.
+   dist and verify rebuild the IR from the stored descriptors (`verify.ir_graph_from_container`);
+   export checks the graph before writing.
+3. **Correction of addendum 1, item 14 — container graph name = component name = the weights key of
+   `karume.json`** MUST (3b, `2bbd013b` / `0b86439e`). Rule text: container-v1 §2.1; reason: ADR
+   0109 addendum 1. Directory names are not part of the rule (directories may carry the series name,
+   and spellings differ: irodori's `caption-proj` has key `caption_proj`, deberta's `full-24layer`
+   has key `text_encoder`). Recipes name the graph by a constant; the AST check
+   `tools/export-recipes/tests/test_graph_names.py` verifies that it is a constant and that it maps
+   to a weights key of the distribution plan (and owns the exceptions). On the file side, the
+   `karume dist` check of item 2 compares container graph names with weights keys.
+4. **Correction of addendum 1, item 14 — `provenance.writer` is not written by default** (3b,
+   `2bbd013b`). A default generator tag would make part 0 of migrated and directly written containers
+   differ forever by version, and the same asset could not be claimed byte-identical. The tool
+   version lives once, in the `generator` field of `karume.json`.
+5. History: all assets migrated (54 series / 135 components / 70.9 GiB via `python -m
+   migrate_series`, values bit-identical — `0b86439e`); the 32 golden fixtures rebuilt with
+   `karume.goldens` (`2bde1baf`); migration stays in the recipes, not the core (ADR 0065).
+6. **Addendum 1, item 7 (temporary glue) closed** (3d, `9e905d9f`, decision 18). The runtime lost
+   the old safetensors-dialect reader, the shard progression checks and the IR v1 loader; Session
+   supply has one container kind (`BoundContainer`). `parseSafetensors` stays for plain safetensors
+   assets and rejects only the dialect dtypes `I4` / `I2`. The hub dropped the sequential shard
+   surface (`streamAssets`) and the reused buffers (`into` / `readFileInto`). Tests and tools moved to
+   the container surface in 3c (real-asset e2e opens part lists by positional reads —
+   `packages/runtime/tests/helpers/container-files.ts`; the series → component → graph-name table
+   shared by the gate tests and e2e is `packages/models/tests/helpers/series-graphs.ts`).
+7. **The merge layer of decision 17 is `packages/runtime/src/format/container/bind.ts`** (3d). Two
+   stages: `bindDeclarations`, independent of the descriptor documents, and the wrapper
+   `bindGraphs` that builds lookups from the two documents; `krm` and in-memory containers (item 8)
+   both pass `bindDeclarations`. The old storage rules are split in two: the presence of scale /
+   `groupSize` / `rowAxis` (required for quantized codecs, forbidden otherwise) is checked by the
+   descriptor reader (`parseEncoding` in `descriptor.ts`) and again in `memory.ts` for the
+   in-memory input; values (codec × semantic dtype, `groupSize` range, row-length divisibility, i2
+   shapes, scale length), piece coverage, middle pieces as multiples of 4 and integer row bounds are
+   in `bind.ts`. The IR reader reads one IR v2 declaration without storage (`parseIrDeclaration` /
+   `parseIrDeclarationValue`). Names in the decisions and the staging table (`parseIrGraph`,
+   `prepareModel`, `format/container.ts`) are step 0 names.
+8. **In-memory containers** (3d, `9e905d9f`) — `openMemoryContainer`
+   (`packages/runtime/src/format/container/memory.ts`) puts bytes at hand on the same merge,
+   admission and construction path as a `krm` **without writing a container file**, returning the
+   same `BoundContainer` as `openContainer`. It serves graphs that models build on the host (irodori
+   CFG composition / Euler update, gemma argmax selection, PLE gather) and the tools' synthetic
+   models; it replaces the old `createSession(gpu, model)` without adding a format.
+   - **Input**: `graphs` (graph name → IR v2 declaration) and `tensors` (graph name → initializer
+     name → supply). Every non-shared initializer MUST be supplied exactly (missing and surplus are
+     all listed and rejected).
+   - **Two supply forms**, mutually exclusive: `bytes` (one whole buffer — returned as passed, not
+     copied) and `pieces` (two or more first-dimension row ranges with a `read()` — no bytes held;
+     each `readBlock` calls `read()` again). Quantized codecs carry an f32 scale (rank 2, 4 B
+     aligned) and `groupSize` in `encoding`.
+   - **Part split**: whole supplies are stacked in declaration order and move to a new part past the
+     default part length (256 MiB) (a companion scale stays with its data); each piece is one part,
+     with the scale in piece 1's part (rule ③). Parts are the fence unit of Session construction, so
+     the split bounds construction-time staging (host RAM does not depend on it — addendum 5,
+     item 3).
+   - **No sha256**: the bytes passed in crossed neither network nor disk, so there is nothing to
+     verify the declaration against (block digests are for unverified sources — decision 8).
+   - **Checks**: binding rules run in the same merge layer as for `krm` (item 7). This layer adds the
+     presence re-check of item 7 and five checks of its own — correspondence with declarations
+     (missing / surplus, undeclared graph names), `pieces` count ≥ 2, collisions of synthesized block
+     ids, 4 B alignment of scale byte positions, and `readBlock` length equal to the synthesized
+     declared length. Host-built declarations always pass the public `parseIrDeclarationValue` (the
+     same check `openContainer` applies). The descriptor reader checks non-finite numbers and nesting
+     depth for `krm`; for in-memory containers the caller does (doc of `packages/runtime/mod.ts`).
+9. **Public surface after 3d** (snapshot): runtime removed `openModel`, `KarumeModel`,
+   `ModelShard`, `createSession`, `createSessionFromShards`, `prepareModel`,
+   `estimateSessionMemory`, `ContainerError` and added the in-memory container types
+   (`openMemoryContainer`, `BoundContainer`, `MemoryContainerInput`, `MemoryEncoding`, `MemoryPiece`,
+   `MemoryTensor`), `parseIrDeclarationValue`, `IrDeclaration`, `RuntimeSupportError`; hub removed
+   `streamAssets` / `StreamedAsset` / `StreamAssetsOptions`. The five names of addendum 1, item 10
+   remain. Missing capabilities raise `RuntimeSupportError`, container rule violations
+   `ContainerFormatError`; the estimate is `prepareContainer(...).estimate()`.
+10. **Successor of the miniature test of addendum 1, item 11** (3d).
+    `packages/runtime/tests/gpu_memory_container_test.ts` compares `krm` with an in-memory container
+    on the same synthetic model (linear i4 + group scale → add f16 → linear i8 + per-channel scale +
+    bias f32, with piece splits, split differently on purpose). The two paths share everything from
+    the merge layer to Session construction, so the test also compares against a CPU reference chain
+    (`decodeI4` / `decodeF16` / `decodeI8` + `applyReferenceOp`) as an independent oracle (restored
+    in `bafe1316`, 2026-09-24). The estimate A/B (`runtime_prepare_container_test.ts`) has the same
+    shared-path shape.
+11. History: acceptance ② passed (3c, `dcd6fb1c`) — `distribution_gate_test.ts` reads `karume.json`
+    with the hub parser and checks part existence and length for the default model / quant;
+    `packages/e2e/tests/e2e_assets_gate_test.ts` opens containers of series without a manifest. Other
+    presets' parts are checked only when an e2e test opens them.
+12. History: acceptance ① passed conditionally (CHANGELOG Breaking in `994bdad8`); on the Arc B570
+    development machine 12 of 14 lanes were green, the two red lanes being environment issues listed
+    in [known-issues](../known-issues.md) ("Intel Arc B570").
+13. **Moving all pins goes from step 3 to the release** (corrects step 3 of the staging table and
+    the "until step 3" of addenda 2 / 3). In step 3 no pin moved; only irodori-v4.1-small pointed at
+    `karume/5`. The other 9 repositories were re-uploaded and re-pinned at the release. The order of
+    [release-runbook](../release-runbook.md) §0 (version bump → rebuild → upload → pin → JSR
+    publish) is a non-commutative MUST: the manifest's `generator` field copies the package version,
+    so uploading before the bump would publish a distribution naming an old version. A re-upload
+    deletes old files the new manifest no longer references from the same repository and pins the
+    `main` after the deletion (done for irodori-v4.1-small in `1c952948`: 65 old safetensors,
+    5.84 GiB; old pins resolve from history). Deleting and recreating a repository is not used for
+    repositories with published pins (decision 18, "history is kept"). `hf-upload.zsh` followed
+    `*.krm` in step 2 (`f33f7be2`). The manifest side is ADR 0109 addendum 1.
+14. **The block-limit review (32 → 16 MiB) was not measured in step 3** (step 3e measured only part
+    length). It moves to step 6; decision 5's prerequisites apply (an escape hatch for oversized
+    constants — container-v1 §10 — and an assessment of doubled block count and descriptor size).
 
-## 追記 5 — 段 3e の実測で確定した点（2026-09-24）
+## Addendum 5 (2026-09-24) — points settled by the step 3e measurements
 
-段 3 の「part 長の既定の見直し」と、段 2 から持ち越した RAM ピークの改善候補 3 つの採否。実測の正本は
-[研究記録](../research/2026-09-24-part-length-ram-peak.md)（3 系列 × part 長 {256, 512, 1024} MiB ×
-cold / warm / local × 3 回の中央値）で、ここは決めた点と検収③の状況だけ。
+The part-length review of step 3 and the three RAM-peak candidates carried over from step 2. The
+numbers are canonical in the [research record](../research/2026-09-24-part-length-ram-peak.md)
+(3 series × part length {256, 512, 1024} MiB × cold / warm / local × median of 3).
 
-1. **part 長の既定は 256 MiB のまま**（決定 6 の「段 3 の検収後に見直す」への答え）。下の 2 / 3 の後、
-   seek 型（ローカルの位置読み・ブラウザの Blob）のピークは part 長に依らなくなったが、Deno の HF 経由
-   （scan 型）は hub の保持枠が part を握るので、おおむね part 長とともに伸びる（cold の anima run 1,139 / 1,741 /
-   2,245 MiB。gemma4 load は 1,038 / 1,032 / 1,515 MiB で、256 → 512 では伸びていない）。
-   既定を上げて得るのは part 本数だけで、区間読みの資産は 1 block = 1 part の専用 part なので本数もほとんど
-   減らない（gemma4 E2B の `model` 容器は 83 / 79 / 78 part）。
-2. **候補 3 を採る — hub の scan 型の切り出しは保持枠の器の view**（`slice()` → `subarray()`）。写しが
-   part ぶん 2 重に乗る形が消える。成立条件は整列で、器は tight（byteOffset 0）かつ block 開始は 64 B 整列
-   （決定 7）なので、scale の `Float32Array` view に要る 4 B 整列がそのまま満たされる。区間より長く持つ
-   呼び手は写す（`AssetReader.read` の MUST）。
-3. **候補 2(c) を採る — Session 構築は block を 1 本読んでは上げて手放す**（`WeightBatch.items` の
-   lazy 化・フェンスは part ごと 1 回のまま）。根拠は WebGPU 仕様の `writeBuffer`（呼び出しの時点で写す —
-   決定 9 の追記・ADR 0070 決定 3 の追記）で、`packages/runtime/tests/gpu_write_buffer_copy_test.ts` は
-   Arc B570 / Deno 2.9.6 の `test:core` レーンで緑。
-4. **候補 1（取得層の `readFile` に器を渡して使い回す）は採らない**。単独の削減は候補 3 以下で、候補 3 と
-   組むと器の view が hub の外へ出て、runtime 公開型 `BlockSource` の寿命契約を借用に変える破壊的変更が要る
-   （3 と衝突する）。加えて、取得層は同じ器の並行使用を拒むので PLE の行読み（16 本並行）が直列になり、
-   器が最大 part 長で常駐して gemma4 の host PLE の decode 中に約 +224 MiB 増える見込み（**推測**）。
-5. **検収③（part 長を動かした構成の再測・宣言からの事前見積りとの一致）**: seek 型は成立 — 3 と 2(c) の
-   後は part 長に依らず external 最大 71〜139 MiB で、item 1 本（最大 block 32 MiB + 同乗 scale + 展開席の
-   f32 展開結果）と固定分の見積りの桁に収まる。展開席の piece 列の間は、これに持ち越し scale の写し
-   （scale 全量）が 1 本加わる（式の正本は container-v1 §11）。scan 型は「保持枠 1 本 + GC を待つ前の器」で、GC を待つ
-   本数は宣言からは閉じない（part 256 の anima で最大 part の約 4.4 本 = run 1,139 MiB）。warm の payload
-   digest 0 回・キャッシュ書込 0 本（段 2 の検収③）は全 27 構成で保たれた。
-6. **Range 取得（段 6）の前倒し条件**（追記 2 の 2）について、追記 3 の 10 の見立て（scan 型の超過は保持の
-   重複が原因で、Range ではなく段 3 の候補で閉じる）は半分だけ当たった。重複は 2 / 3 で消えたが、scan 型の
-   cold は今も「part 長 + 重ね合わせ」を超える（part 256 で irodori 582・gemma4 1,038・anima 1,139 MiB）。
-   残りの原因は part 単位の全量読みそのもの（取得の粒度）で、条件は形式上成り立ったまま。前倒しするかは
-   ここでは決めない。
+1. **The default part length stays 256 MiB** (the answer to decision 6). After items 2 / 3, seek-type
+   peaks (local positional reads, browser Blob) no longer depend on part length; scan-type peaks
+   (Deno via HF) roughly grow with it because the hub's holding slot keeps a part (cold anima run
+   1,139 / 1,741 / 2,245 MiB). A larger default barely reduces the part count (gemma4 E2B's `model`
+   container: 83 / 79 / 78 parts, since range-read assets have dedicated parts).
+2. **Candidate 3 adopted — the hub's scan-type slices are views of the holding slot's buffer**
+   (`slice()` → `subarray()`). The double copy of a part is gone. It relies on alignment: the buffer
+   is tight (byteOffset 0) and block starts are 64 B aligned (decision 7), so the 4 B alignment a
+   `Float32Array` scale view needs holds. Callers that keep a range longer than the read copy it (a
+   MUST of `AssetReader.read`).
+3. **Candidate 2(c) adopted — Session construction reads, uploads and drops one block at a time**
+   (lazy `WeightBatch.items`; the fence stays once per part). The basis is the WebGPU spec of
+   `writeBuffer` (copied at the call — the addendum in decision 9, ADR 0070 decision 3 addendum);
+   `packages/runtime/tests/gpu_write_buffer_copy_test.ts` was green in the `test:core` lane on
+   Arc B570 / Deno 2.9.6.
+4. **Candidate 1 (lending a buffer to the fetch layer's `readFile`) is not adopted.** Alone it saves
+   no more than candidate 3; with 3, the buffer view would leave the hub and turn the lifetime
+   contract of the public `BlockSource` into a loan (a breaking change). The fetch layer also refuses
+   concurrent use of one buffer, serializing PLE's 16 parallel row reads, and a largest-part buffer
+   would stay resident (about +224 MiB during gemma4 host-PLE decode — **speculation**).
+5. History: acceptance ③ — seek-type peaks were 71–139 MiB independent of part length, within the
+   estimate of one item (block + scale + f32 expansion; formula in container-v1 §11); scan-type peaks
+   are "one slot + buffers awaiting GC" and are not bounded by declarations (up to about 4.4 largest
+   parts on anima). Warm stayed at zero payload digests on all 27 configurations.
+6. History: the Range trigger (addendum 2, item 2) still formally holds for scan-type cold reads
+   (part 256: irodori 582, gemma4 1,038, anima 1,139 MiB), now caused by whole-part reads; whether to
+   bring Range forward was left undecided.
 
-## 追記 6 — 却下案 4 の「律速は ALU 側」は誤引用（2026-09-25）
+## Addendum 6 (2026-09-25) — alternative 4's "ALU-bound" was a misquotation
 
-却下案 4（base-243 三値）の根拠のうち「決定 15 の『律速は ALU 側』という実測に照らして悪化方向」は撤回する。
-決定 15 の本文は「帯域律速ではない」としか言っておらず、出典の
-[研究記録 2026-09-19](../research/2026-09-19-qat-speed-recon.md) は §1 で「帯域律速でも演算律速でもない」、
-§14.1 で「語あたり ALU を 83 % 削っても down 形は 0.3 %」と測った。時間を食うのは活性のロード本数で、
-算術が効くのは lm_head 形（36 %）と gate / up 形（23 %）だけである。却下の結論は変わらない — 2 冪の
-不変条件が 2 つ壊れることと、行長 `K` に `% 5` の整除条件が要る（gemma4 の実形はどれも 5 で割れない）
-ことだけで成立する。
+Withdrawn: the reason "worse given that decode is ALU-bound" in alternative 4. Decision 15 says only
+"not bandwidth-bound" (the source, [research 2026-09-19](../research/2026-09-19-qat-speed-recon.md),
+found decode neither bandwidth- nor compute-bound); the rejection stands on its other reasons.
 
-## 追記 7 — 決定 15 の帯域利用率の出典と再計算（2026-09-25）
+## Addendum 7 (2026-09-25) — source and recomputation of decision 15's bandwidth utilisation
 
-- **出典**: [研究記録 2026-09-19](../research/2026-09-19-qat-speed-recon.md) §4 の roofline。機は RTX 3080 Ti
-  （帯域 912 GB/s）、GPU 時間は Chrome の pass 境界 timestamp（QAT 7.47 ms・通常 6.28 ms）。本 ADR の起票時
-  （2026-09-22）の開発機は Intel Arc B570 に替わっていたので、決定 15 の「本機」は RTX 3080 Ti に直した。
-- **ADR 0105（packed int8 活性）後の再計算**（式 = 読むバイト ÷ 912 GB/s ÷ 実測 GPU 時間）: QAT は
-  825 MB → 0.905 ms ÷ 6.63 ms ≈ **13.6 %**、通常は 1,577 MB → 1.729 ms ÷ 6.21 ms ≈ **27.8 %**。6.63 ms は
-  研究記録 §16 の 2 回目（packed on）、6.21 ms は §13.2 の値で、**別セッションの測定**を組み合わせている。
-  結論（帯域律速ではない）は RTX では今も成り立つ。
-- **表の数値の自己整合**: 同じ式を §4 の表の列（0.905 ms / 7.47 ms・1.729 ms / 6.28 ms）に当てると 12.1 % /
-  27.5 % になり、表の 11.5 % / 25.5 % とは一致しない。どちらでも結論は変わらない。
-- **未測**: Arc B570（帯域は RTX の約 4 割）と Apple M2 の帯域利用率は無い（推測: B570 では利用率が上がりうる）。
-  B570 で測るなら Chrome で採る — Deno の timestamp は B570 で過小に出る既知の問題がある（docs/known-issues.md）。
+Source: [research 2026-09-19](../research/2026-09-19-qat-speed-recon.md) §4 (RTX 3080 Ti, 912 GB/s,
+Chrome pass timestamps). Recomputed after ADR 0105: QAT ≈ 13.6 %, regular ≈ 27.8 % — still not
+bandwidth-bound on that machine; Arc B570 and Apple M2 were not measured.
 
-## 追記 8 — `fromContainer` の実名（2026-09-25）
+## Addendum 8 (2026-09-25) — the real name of `fromContainer`
 
-本文（決定 2 / 8 / 9）と追記 2 の 3 に残る `fromContainer(bytes)` は段 0 時点の名前で、実装の口は
-`openContainer` の `{ kind: "bytes" }` 入力（`packages/runtime/src/format/container/open.ts` の
-`ContainerInput`）である。本文は書き換えず、この口と読み替える（追記 4 の 7 と同じ扱い）。読み替えの記録は
-ADR [0109](0109-manifest-v5-container.md) 追記 2 にもある。
+`fromContainer(bytes)` in the draft is the `{ kind: "bytes" }` input of `openContainer`
+(`ContainerInput` in `packages/runtime/src/format/container/open.ts`); the decisions above use the
+real name.
 
-## 追記 9 — 決定 16 の「三値 absmean の冪等性論証」を撤回し、scale 台帳の単一性へ置き換える（2026-09-25）
+## Addendum 9 (2026-09-25) — decision 16's absmean idempotency argument is withdrawn; scale-ledger uniqueness instead
 
-決定 16 の「三値の absmean は**冪等性の論証を本 ADR の追記として書き直す**」は撤回する。書き直せる論証が
-無い。absmean（`γ = mean|W|`・`W̃ = RoundClip(W/γ, −1, 1)·γ`）は不動点を持たない。1 回目の丸めで要素は
-`{−γ, 0, +γ}` になる。もう 1 度掛けると `γ' = p·γ`（`p` = 非ゼロ要素の割合）になる。`p < 1` なら非ゼロ要素は
-`±1/p` に写って ±1 へクリップされ、`±p·γ` へ動く。不動点は `p = 1`（ゼロが 1 本も無い）のときしか無い。
+Decision 16's "ternary absmean gets a rewritten idempotency argument" is withdrawn: no such argument
+exists. absmean (`γ = mean|W|`, `W̃ = RoundClip(W/γ, −1, 1)·γ`) has no fixed point. One rounding
+maps elements to `{−γ, 0, +γ}`. Applying it again gives `γ' = p·γ` (`p` = share of non-zero
+elements). If `p < 1`, the non-zero elements map to `±1/p`, clip to ±1 and move to `±p·γ`. The only
+fixed point is `p = 1` (no zeros).
 
-代わりに次を段 6（absmean の実装）の前提にする。
+The following are preconditions of step 6 (absmean implementation):
 
-1. **scale 台帳は丸めと同時に確定し、確定後は再計算しない** MUST。格納値は確定した scale を渡して量子化する
-   （i8 の `quantize_to_int8(weight, scale)` と同じ受け渡し — `tools/exporter/src/karume/quantize.py`）。
-2. **冪等性を当てにする経路は absmean では使えない**。同じ重みに 2 度丸めを掛ける形（tied 重みの二重適用 —
-   `fake_quant_int8` の docstring が i8 / i4 の排他を MUST にしている形）は検出して fail loudly にする。
-   再 export で scale を引き直す形と、「scale を引き直しても同値」を当てにした検算も使わない。
-3. 規律の名前を「冪等性」から「**台帳の単一性**」（1 つの重みに scale 台帳は 1 本・引き直さない）へ改める。
+1. **The scale ledger is fixed together with the rounding and never recomputed afterwards** MUST.
+   Stored values are quantized with the fixed scale passed in (the same hand-off as i8's
+   `quantize_to_int8(weight, scale)` — `tools/exporter/src/karume/quantize.py`).
+2. **Paths that rely on idempotency are not usable with absmean.** Rounding the same weight twice
+   (double application to tied weights — the form that the `fake_quant_int8` docstring makes i8 / i4
+   mutually exclusive, MUST) is detected and fails loudly. Re-deriving the scale on re-export, and
+   checks that rely on "re-deriving the scale gives the same values", are not used.
+3. The discipline is renamed from "idempotency" to "**scale-ledger uniqueness**" (one scale ledger
+   per weight, never re-derived).
 
-冪等になる変種（例: scale を `max|W|` 基準にする）へ寄せる案は採らない。値域は三値のままでも BitNet 系の
-absmean とは別の量子化器になり、品質特性が変わる。現行コードへの影響は無い（absmean は未実装 — 段 6）。
+Moving to an idempotent variant (for example a `max|W|`-based scale) is not adopted: even with a
+ternary range it is a different quantizer from BitNet-style absmean, with different quality. No
+current code is affected (absmean is not implemented — step 6).
 
-## 追記 10 — 決定 7 / Consequences の訂正: 読み手側の末尾詰め物の分岐は 2 つ残る（2026-09-25）
+## Addendum 10 (2026-09-25) — correction of decision 7 / Consequences: two reader-side tail-padding branches remain
 
-決定 7 は「書き手が block 長を 4 の倍数に焼く」ことで読み手側の末尾ゼロ詰めの分岐 3 つが退役するとし、
-Consequences の「退役するもの」も同じことを書いた。書き手が block 末尾を 0x00 で焼く点は決定どおり入ったが、
-読み手側には次の **2 分岐が残る**（コードは現状維持 — 2026-09-25 裁定）。
+Decision 7 said that writer-baked block lengths retire the reader's three tail zero-padding
+branches, and the Consequences listed the same. The writer does bake 0x00 at block tails as
+decided, but **two branches remain** on the reader side (code unchanged — the maintainer's ruling of
+2026-09-25):
 
-- f16 席: 奇数要素長の payload を末尾 2 バイトのゼロ詰めで 4 バイト整列させる（`session-build.ts` の
-  `alignF16Payload`）。
-- i8 / i2 席: 要素数が 4 の倍数でない payload を末尾のゼロ詰めで 4 バイト整列させる（`alignI8Payload`）。
+- f16: an odd-length payload is padded with 2 trailing zero bytes to 4-byte alignment
+  (`alignF16Payload`, `packages/runtime/src/format/f16.ts`).
+- i8 / i2: a payload whose element count is not a multiple of 4 is zero-padded to 4-byte alignment
+  (`alignI8Payload`, `packages/runtime/src/format/i8.ts`).
 
-残る理由は供給側の形にある。`containerBatches`（`executor.ts`）は `readBlock(...)` を block の payload 長で
-切ってから渡すので、書き手が焼いた詰め物は読み手まで届かない。メモリ内容器（`openMemoryContainer`）の
-block はそもそも詰め物を持たない（`format/container/memory.ts` — 合成する目次の長さ = payload 長）。
-2 つの供給元を 1 つの形で受けるため、読み手が詰め直す。
+Both are called from `session-build.ts`. They remain because of the supply shape: `containerBatches`
+(`packages/runtime/src/runtime/executor.ts`) cuts `readBlock(...)` to the block's payload length
+before passing it on, so the writer's padding never reaches the reader. In-memory container blocks
+(`openMemoryContainer`) carry no padding at all (`format/container/memory.ts` — the synthesized
+index length = payload length). One shape serves both sources, so the reader re-pads.
 
-費用は、奇数長の f16 と要素数が 4 の倍数でない i8 / i2 の initializer ごとに、payload 1 本ぶんを新しい器へ
-写すことだけである。対象は bias などの小さいテンソルが大半になる。供給側で詰め物込みの長さを渡して 2 分岐を
-消す案は、Session 構築の長さ突合（`seat.payloadBytes` との一致）を範囲の検査へ緩めることになるので、ここでは
-採らない。
+The cost is one copy of the payload into a new buffer per odd-length f16 initializer and per i8 / i2
+initializer whose element count is not a multiple of 4 — mostly small tensors such as biases.
+Passing padded lengths from the supply side to remove the two branches would loosen Session
+construction's length check (equality with `seat.payloadBytes`) into a range check, so it is not
+adopted here.
 
-## 追記 11 — JSON の重複キーは後勝ちで受理する（2026-10-10）
+## Addendum 11 (2026-10-10) — duplicate JSON keys are accepted, last one wins
 
-グラフ記述・モデル記述・IR の JSON で、同じオブジェクト内の重複キーは**後勝ちで受理**する。
-読み手は `JSON.parse`（TS）と `json`（Python）の既定どおり後の値だけを見て、前の値は検査に届かない。
-重複を書かないのは書き手の責務で、正準直列化は重複を書けない。manifest の扱い（ADR 0038 —
-後勝ちで受理し、検出は exporter の責務）と揃え、他言語の検証器との解釈を一致させる。
-拒否に変える案は `JSON.parse` の前に字句解析を置くことになり、ここでは採らない。
-仕様は [container-v1](../container-v1.md) §0 と [ir-v2](../ir-v2.md)「コンテナ」節。
+In the graph descriptor, the model descriptor and the IR JSON, duplicate keys within one object are
+**accepted, last one wins**. Readers follow the defaults of `JSON.parse` (TS) and `json` (Python):
+only the later value is seen, the earlier one never reaches the checks. Not writing duplicates is the
+writer's responsibility; canonical serialization cannot write them. This matches the manifest (ADR
+0038 — accepted last-wins, detection is the exporter's job) and keeps the interpretation equal to
+validators in other languages. Rejecting would need a tokenizer in front of `JSON.parse`, which is
+not adopted here. Spec: [container-v1](../container-v1.md) §0 and [ir-v2](../ir-v2.md), "container"
+section.
 
-## 追記 12 — 決定 12 を撤回し、codec の 3 つの所有者を分ける（2026-10-11）
+## Addendum 12 (2026-10-11) — decision 12 is partly withdrawn; codecs have three owners
 
-決定 12 のうち、台帳 1 か所に「格納形式・CPU での展開・GPU で圧縮のまま実行できるか」の 3 つをまとめて持たせる
-部分を撤回する（2026-10-04 の利用者裁定）。仕様書を実装に合わせる変更で、コードは変えない。
+The part of decision 12 that puts storage format, CPU decoding and "executable compressed on the
+GPU" together in one ledger is withdrawn (the maintainer's ruling of 2026-10-04). This changes the
+spec to match the implementation; the code does not change.
 
-撤回するのは次の 2 点である。
+Withdrawn:
 
-1. 台帳のエントリに `decodeCpu` / `executableOps` / `wgsl?` を置くこと。`levels` と `name` も台帳の欄にしない
-   （登録名は台帳の Map のキー、値の集合・詰め順・復元式は codec の仕様で、実装は CPU 展開と WGSL）。
-2. 圧縮のまま常駐できるかの述語（`eligibleCompressedInitializers` / `i2EligibleInitializers` /
-   `i4EligibleInitializers`）を `executableOps` の 1 欄へ畳むこと。
+1. `decodeCpu` / `executableOps` / `wgsl?` as ledger entry fields. `levels` and `name` are not
+   ledger fields either (the registered name is the key of the ledger map; value set, pack order and
+   reconstruction formula belong to the codec spec, implemented by CPU decoding and WGSL).
+2. Folding the compressed-residency predicates (`eligibleCompressedInitializers` /
+   `i2EligibleInitializers` / `i4EligibleInitializers`) into one `executableOps` field.
 
-決定 12 の残りは維持する: 台帳はリポ内の不変なデータで import 時登録はしない・未知の codec は重み取得前に
-拒否する・3 つの軸（①宣言として読めるか ②実行できるか ③どの op で圧縮のまま常駐できるか）を分けて報告する。
+The rest of decision 12 stays: the ledger is immutable repository data, nothing registers at import
+time, an unknown codec is rejected before weights are fetched, and the three axes (① readable as a
+declaration, ② executable, ③ which ops keep it compressed and resident) are reported separately.
 
-代わりに、各軸の所有者を次のように置く。
+Owners of each axis:
 
-| 持つもの                        | 正本（実装）                                                                                                                                      | 中身                                                                                                                                                                                                                         |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 格納形式（軸 ①）                | `packages/runtime/src/format/container/codecs.ts` の `CODEC_LEDGER`（Python の鏡像は `tools/exporter/src/karume/container.py` の `CODEC_LEDGER`） | 登録名・`layout`（展開経路の種別）・`packing`・`scale`・`grouping`・`zeroPoint`・`rowAxes`。宣言規則は `descriptor.ts`（未知 codec の拒否・欄の有無）・`memory.ts`（欄の有無）・`bind.ts`（値域・整除・scale 長・`rowAxes`） |
-| CPU での展開                    | `packages/runtime/src/format/f16.ts` の `decodeF16`・`i8.ts` の `decodeI8`・`i4.ts` の `decodeI4`・`i2.ts` の `decodeI2`                          | 展開経路ごとに 1 本。呼ぶのは `packages/runtime/src/runtime/session-build.ts`（軸 ③ で適格外になった重みを f32 へ展開する）                                                                                                  |
-| 実行できるか（軸 ②）            | `packages/runtime/src/ops/contracts.ts` の `RUNTIME_SUPPORT.storage` と `packages/runtime/src/ops/support.ts` の `assertRuntimeSupport`           | 実行できる展開経路の集合。`bf16` は台帳にあってここに無い（宣言は受理・実行は capability 不足として重みを取る前に列挙で拒否）                                                                                                |
-| 圧縮のまま常駐できる op（軸 ③） | `packages/runtime/src/runtime/plan.ts` の 3 述語と `packages/runtime/src/runtime/weight-residency.ts` の `planWeightResidency`                    | 展開経路ごとの適格 op。適格外は CPU 展開へ回る                                                                                                                                                                               |
-| GPU での展開（WGSL）            | `packages/runtime/src/kernels/weight-storage.ts`（融合 5 カーネルが共有する生成部品）と専用カーネル（`linear-gemv.ts` / `linear-i8a8.ts` など）   | 格納形ごとの読み出しと scale の乗算                                                                                                                                                                                          |
+| Holds                                | Canonical source (implementation)                                                                                                                       | Content                                                                                                                                                                                                                               |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Storage format (axis ①)              | `CODEC_LEDGER` in `packages/runtime/src/format/container/codecs.ts` (Python mirror: `CODEC_LEDGER` in `tools/exporter/src/karume/container.py`)          | Registered name, `layout` (kind of expansion path), `packing`, `scale`, `grouping`, `zeroPoint`, `rowAxes`. Declaration rules in `descriptor.ts` (unknown-codec rejection, field presence), `memory.ts` (field presence), `bind.ts` (ranges, divisibility, scale length, `rowAxes`) |
+| CPU decoding                         | `decodeF16` (`packages/runtime/src/format/f16.ts`), `decodeBf16` (`bf16.ts`, since ADR 0131), `decodeI8` (`i8.ts`), `decodeI4` (`i4.ts`), `decodeI2` (`i2.ts`) | One per expansion path. Called from `packages/runtime/src/runtime/session-build.ts` (weights that axis ③ rules ineligible are expanded to f32)                                                                                        |
+| Executable (axis ②)                  | `RUNTIME_SUPPORT.storage` in `packages/runtime/src/ops/contracts.ts` and `assertRuntimeSupport` in `packages/runtime/src/ops/support.ts`                | The set of executable expansion paths. The original row said "`bf16` is in the ledger but not here (declaration accepted, execution rejected as a missing capability before weights are fetched)" — **superseded by ADR 0131 on 2026-10-17**: `bf16` is in the set (`contracts.ts:855`) |
+| Compressed-resident ops (axis ③)     | the three predicates in `packages/runtime/src/runtime/plan.ts` and `planWeightResidency` in `packages/runtime/src/runtime/weight-residency.ts`           | Eligible ops per expansion path; ineligible weights go to CPU decoding                                                                                                                                                                |
+| GPU decoding (WGSL)                  | `packages/runtime/src/kernels/weight-storage.ts` (generators shared by the five fused kernels) and dedicated kernels (`linear-gemv.ts`, `linear-i8a8.ts`, …) | Per storage form: reading and scale multiplication                                                                                                                                                                                    |
 
-- **依存の向き MUST**: format 層（台帳・宣言規則・CPU 展開）は実行を知らない。format は `ops/` / `runtime/` /
-  `kernels/` を import せず、実行側が台帳の `layout` を読んで分岐する。
-- **軸 ② の正本は `RUNTIME_SUPPORT.storage`** である。台帳に実行の欄を戻して ② をそこから導く形は採らない。
-- **理由**: 決定 12 のとおり 1 つのエントリに `executableOps` と `wgsl` を置くと、低い層の format が「どの op で
-  実行できるか」「WGSL があるか」という実行側の判断を持ち、依存の向きが逆になる。格納形式とバックエンドの
-  実行能力を別々に申告する作りは業界でも普通である（例: ONNX Runtime の実行プロバイダは、自分が受け持つ
-  ノードを `GetCapability()` で申告する）。決定 12 の動機だった「codec ごとに述語が増えるのを止める」は、
-  畳まずに残す費用として受け入れる。
-- **codec を足すときに触る場所**（実装の現物）: 台帳のエントリ（TS と Python の両側）・CPU 展開 1 本・
-  `RUNTIME_SUPPORT.storage`・圧縮常駐の述語と `planWeightResidency` の展開経路ごとの分岐（共有席の
-  `i4Eligible` / `i2Eligible` を含む）・WGSL の変種。既存の展開経路を共有する codec（`ternary` → `i2`）は、
-  runtime 側では台帳のエントリだけで済む（決定 13 — exporter の量子化器は別）。
-- 仕様書は [container-v1](../container-v1.md) §6.2 / §6.3 / §13.5・[ir-v2](../ir-v2.md)「値と型」・
-  [glossary](../glossary.md)「codec 台帳」を同時に直した。
+- **Dependency direction MUST**: the format layer (ledger, declaration rules, CPU decoding) knows
+  nothing about execution. `format` does not import `ops/` / `runtime/` / `kernels/`; the execution
+  side reads the ledger's `layout` and branches.
+- **The canonical source of axis ② is `RUNTIME_SUPPORT.storage`.** Putting an execution field back
+  into the ledger and deriving ② from it is not adopted.
+- **Reason**: with `executableOps` and `wgsl` in one entry as decision 12 had it, the lower format
+  layer would hold execution-side judgements ("which ops can execute it", "is there WGSL"), reversing
+  the dependency. Declaring the storage format and the backend's execution capability separately is
+  common practice (for example, ONNX Runtime execution providers declare the nodes they take via
+  `GetCapability()`). Decision 12's motive, "stop predicates growing per codec", is given up; the
+  predicates stay unfolded as an accepted cost.
+- **Places to touch when adding a codec** (as implemented): the ledger entry (TS and Python), one CPU
+  decoder, `RUNTIME_SUPPORT.storage`, the residency predicates and the per-path branch of
+  `planWeightResidency` (including `i4Eligible` / `i2Eligible` for shared initializers), and the WGSL
+  variants. A codec that shares an existing expansion path (`ternary` → `i2`) needs only the ledger
+  entry on the runtime side (decision 13 — the exporter's quantizer is separate).
+- The spec was corrected at the same time: [container-v1](../container-v1.md) §6.2 / §6.3 / §13.5,
+  [ir-v2](../ir-v2.md) "values and types", [glossary](../glossary.md) "codec ledger".
