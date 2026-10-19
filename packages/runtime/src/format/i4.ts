@@ -3,8 +3,8 @@
  * ADR 0069 / the host mirror of the GPU-side `unpack4xU8` + mask/shift + scale multiplication).
  *
  * MUST: decoding lives in this one place only (the same reason as format/i8.ts — if the load path
- * and the tests interpret i4 separately, a mix-up of the pack order 〈element 2i = low nibble / 2i+1 =
- * high, stored value u = q + 8〉 goes unnoticed). The source of truth for the pack order is the
+ * and the tests interpret i4 separately, a mix-up of the pack order (element 2i = low nibble / 2i+1 =
+ * high, stored value u = q + 8) goes unnoticed). The source of truth for the pack order is the
  * exporter's `karume/emit.py: pack_int4`.
  *
  * Why it is bit-identical: the decoded value is `f32(q) · s` with **one f32 rounding** (`q ∈ [−7,7]`
@@ -56,18 +56,20 @@ export const decodeI4 = (
   groupSize: number,
 ): Float32Array<ArrayBuffer> => {
   if (shape.length === 0) {
-    throw new I4Error("i4 の重みに量子化軸が無い（rank 0）");
+    throw new I4Error("i4 weights have no quantization axis (rank 0)");
   }
   const count = numel(shape);
   if (count % 2 !== 0 || bytes.byteLength * 2 !== count) {
     throw new I4Error(
-      `i4 ペイロード ${bytes.byteLength} バイトが shape [${shape.join(",")}] と違う` +
-        `（numel / 2 = ${count / 2} バイトが要る）`,
+      `i4 payload of ${bytes.byteLength} bytes does not match shape [${shape.join(",")}]` +
+        ` (numel / 2 = ${count / 2} bytes are needed)`,
     );
   }
   const width = rowLength(shape);
   if (!Number.isInteger(groupSize) || groupSize < 1 || width % groupSize !== 0) {
-    throw new I4Error(`group_size ${groupSize} が量子化軸（行長）${width} を割り切らない`);
+    throw new I4Error(
+      `group_size ${groupSize} does not divide the quantization axis (row length) ${width}`,
+    );
   }
   const expected = groupScaleShape(shape, 0, groupSize);
   const groups = expected[1];
@@ -76,14 +78,14 @@ export const decodeI4 = (
     scaleShape.some((dim, axis) => dim !== expected[axis])
   ) {
     throw new I4Error(
-      `scale [${scaleShape.join(",")}] が重み [${shape.join(",")}] の group 形 [${expected.join(
+      `scale [${scaleShape.join(",")}] is not the group shape of weights [${shape.join(",")}], [${expected.join(
         ",",
-      )}]（group_size=${groupSize}）でない`,
+      )}] (group_size=${groupSize})`,
     );
   }
   if (scale.length !== numel(scaleShape)) {
     throw new I4Error(
-      `scale の要素数 ${scale.length} が shape [${scaleShape.join(",")}] と合わない`,
+      `scale element count ${scale.length} does not match shape [${scaleShape.join(",")}]`,
     );
   }
   const out = new Float32Array(count);

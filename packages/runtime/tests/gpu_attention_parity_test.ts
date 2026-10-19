@@ -468,7 +468,7 @@ test.skipIf(!GPU_AVAILABLE)(
           await assertRejects(
             () => masked.run({ x0: q, x1: k, x2: v, x3: mask }),
             ExecutionError,
-            "加算 mask 付きの attention は attentionCompute 'a8' と組めない",
+            "attention with an additive mask cannot be combined with attentionCompute 'a8'",
           );
         } finally {
           await masked.dispose();

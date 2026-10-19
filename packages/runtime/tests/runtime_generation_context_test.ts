@@ -60,7 +60,7 @@ test("assertChunkBuckets は 2..chunkLength-1 の狭義昇順だけを受理す�
   for (const buckets of [[1], [0], [-2], [2.5], [8], [9]]) {
     const error = assertThrows(() => assertChunkBuckets(buckets, 8), ExecutionError);
     assert(error.message.includes("chunkBuckets[0]"), error.message);
-    assert(error.message.includes("2..7 の整数でない"), error.message);
+    assert(error.message.includes("is not an integer in 2..7"), error.message);
   }
 
   // 順序: 重複も降順も「queryLength 以上の最小」を線形走査で決められなくする。
@@ -70,7 +70,7 @@ test("assertChunkBuckets は 2..chunkLength-1 の狭義昇順だけを受理す�
   ]) {
     const error = assertThrows(() => assertChunkBuckets(buckets, 8), ExecutionError);
     assert(error.message.includes("chunkBuckets[1]"), error.message);
-    assert(error.message.includes("狭義昇順でない"), error.message);
+    assert(error.message.includes("not strictly ascending"), error.message);
   }
 
   // chunkLength = 1（decode 形しか無い context）ではどんなバケットも値域に入らない。
@@ -82,11 +82,11 @@ test("resolveBindings は未知の記号と非負整数でない値を拒否す�
   const graph = parse(symbolGraph());
 
   const unknown = assertThrows(() => resolveBindings(graph, { D: 8 }), ExecutionError);
-  assert(unknown.message.includes("束縛 'D'"), unknown.message);
+  assert(unknown.message.includes("Binding 'D'"), unknown.message);
 
   for (const value of [-1, 1.5]) {
     const error = assertThrows(() => resolveBindings(graph, { T: value }), ExecutionError);
-    assert(error.message.includes("非負整数でない"), error.message);
+    assert(error.message.includes("is not a non-negative integer"), error.message);
   }
 
   // 0 は「容量 0」として下流（resolveSlotShape）が落とす — ここは非負まで。
@@ -111,8 +111,8 @@ test("resolveSlotShape は未束縛シンボルと正でない容量を拒否す
   assertEquals(resolveSlotShape("k", [1, 2, 8, 4], {}), [1, 2, 8, 4]);
 
   const unbound = assertThrows(() => resolveSlotShape("k", [1, "C", 4], {}), ExecutionError);
-  assert(unbound.message.includes("'C' が束縛されていない"), unbound.message);
+  assert(unbound.message.includes("unbound symbol 'C'"), unbound.message);
 
   const empty = assertThrows(() => resolveSlotShape("k", [1, "C", 4], { C: 0 }), ExecutionError);
-  assert(empty.message.includes("容量 0"), empty.message);
+  assert(empty.message.includes("capacity 0"), empty.message);
 });

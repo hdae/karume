@@ -26,9 +26,10 @@ export const assertJsonSafe = (
   depth: number,
   fail: (message: string) => never,
 ): void => {
-  if (depth > MAX_JSON_DEPTH) fail(`${path}: 入れ子が深さ上限 ${MAX_JSON_DEPTH} を超えた`);
+  if (depth > MAX_JSON_DEPTH) fail(`${path}: nesting exceeded the depth limit ${MAX_JSON_DEPTH}`);
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) fail(`${path}: 非有限数（1e999 等の溢れを含む）`);
+    if (!Number.isFinite(value))
+      fail(`${path}: non-finite number (including overflows such as 1e999)`);
     return;
   }
   if (value === null || typeof value === "string" || typeof value === "boolean") return;
@@ -41,12 +42,12 @@ export const assertJsonSafe = (
       // The name whose assignment to a plain `{}` turns into setting [[Prototype]], so no own
       // property is created. Deno disabled this setter by default, but Node and browsers (the
       // target runtimes) perform it.
-      if (key === "__proto__") fail(`${path}: キー '__proto__' は受理しない`);
+      if (key === "__proto__") fail(`${path}: key '__proto__' is not accepted`);
       assertJsonSafe(value[key], `${path}.${key}`, depth + 1, fail);
     }
     return;
   }
-  fail(`${path}: JSON として表せない値`);
+  fail(`${path}: value not representable as JSON`);
 };
 
 /** Bytes → a checked JSON value. `maxBytes` is the per-document limit (§10). */
@@ -57,19 +58,19 @@ export const decodeJsonDocument = (
   fail: (message: string) => never,
 ): unknown => {
   if (bytes.byteLength > maxBytes) {
-    fail(`${path} が上限 ${maxBytes} バイトを超える: ${bytes.byteLength}`);
+    fail(`${path} exceeds the limit of ${maxBytes} bytes: ${bytes.byteLength}`);
   }
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (cause) {
-    fail(`${path} が UTF-8 として不正: ${String(cause)}`);
+    fail(`${path} is invalid UTF-8: ${String(cause)}`);
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (cause) {
-    fail(`${path} が JSON として不正: ${String(cause)}`);
+    fail(`${path} is invalid JSON: ${String(cause)}`);
   }
   assertJsonSafe(parsed, path, 0, fail);
   return parsed;
@@ -120,7 +121,7 @@ export class SortedEntries {
    */
   toJSON(): never {
     throw new ContainerFormatError(
-      "SortedEntries は JSON.stringify で綴れない（canonicalJsonText を使う）",
+      "SortedEntries cannot be serialized with JSON.stringify (use canonicalJsonText)",
     );
   }
 }
@@ -138,7 +139,7 @@ export const sortedObject = <T>(
 ): SortedEntries =>
   new SortedEntries(
     sortedByCodePoints(Object.keys(source)).map((key) => {
-      if (key === "__proto__") throw new ContainerFormatError("キー '__proto__' は書けない");
+      if (key === "__proto__") throw new ContainerFormatError("Key '__proto__' cannot be written");
       return [key, map(source[key], key)] as const;
     }),
   );
@@ -175,13 +176,14 @@ export const canonicalJsonText = (value: unknown): string => {
     return `{${fields.map(fieldText).join(",")}}`;
   }
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new ContainerFormatError(`非有限数 ${value} は書けない`);
+    if (!Number.isFinite(value))
+      throw new ContainerFormatError(`Non-finite number ${value} cannot be written`);
     return JSON.stringify(value);
   }
   if (value === null || typeof value === "string" || typeof value === "boolean") {
     return JSON.stringify(value);
   }
-  throw new ContainerFormatError(`JSON として表せない値: ${typeof value}`);
+  throw new ContainerFormatError(`Value not representable as JSON: ${typeof value}`);
 };
 
 export const encodeJsonBytes = (value: unknown): Uint8Array<ArrayBuffer> =>

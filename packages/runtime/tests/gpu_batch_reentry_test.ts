@@ -95,7 +95,7 @@ test("batch enqueue: 入力 getter からの enqueueRead 再入は写しの後�
       },
       { batch },
     );
-    await assertRejects(() => outer, BatchScopeError, "enqueueRead を積んだ batch");
+    await assertRejects(() => outer, BatchScopeError, "batch holding an enqueueRead");
     await batch.finish();
     assertEquals(
       Array.from((await read!.outputs).y.data),
@@ -124,7 +124,7 @@ test("batch enqueue: 入力 getter からの run 再入は自己デッドロッ�
       { batch },
     );
     await settleWithin(
-      assertRejects(() => outer, BatchScopeError, "未決着の run"),
+      assertRejects(() => outer, BatchScopeError, "unsettled run"),
       "enqueue",
     );
     await settleWithin(batch.finish(), "finish");
@@ -149,7 +149,7 @@ test("run: 入力 getter からの dispose 再入は破棄済みとして拒否�
           },
         }),
       ExecutionError,
-      "dispose 済み",
+      "disposed",
     );
     await disposal!;
     assertEquals(
@@ -259,7 +259,7 @@ test("batch 区間の内側で発行した未 await run は enqueue を fail lou
       await assertRejects(
         () => target.enqueue({ x: phasedInput(1) }, { batch }),
         BatchScopeError,
-        "未決着の run",
+        "unsettled run",
       );
     } finally {
       // 区間を閉じるとロックが返り、積んだままの run が完走できるようになる。
@@ -286,7 +286,7 @@ test("batch を開く前に発行した未 await run でも同じ閉路になる
       await assertRejects(
         () => target.enqueue({ x: phasedInput(1) }, { batch }),
         BatchScopeError,
-        "自己デッドロック",
+        "self-deadlock",
       );
     } finally {
       await batch.finish();

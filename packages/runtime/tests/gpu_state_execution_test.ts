@@ -531,7 +531,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => runVerifyChain(gpu, VERIFY_WINDOW, true),
         ExecutionError,
       );
-      assert(noSlack.message.includes("余裕 0"), noSlack.message);
+      assert(noSlack.message.includes("slack 0"), noSlack.message);
     } finally {
       gpu.destroy();
     }
@@ -999,7 +999,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const inputs = stepInputs(FULL, 1, 29);
       const running = runStep(session, context, FULL, inputs, 1, 1);
       const rejected = assertThrows(() => context.rewind(0), ExecutionError);
-      assert(rejected.message.includes("進行中の generation run"), rejected.message);
+      assert(rejected.message.includes("a generation run is in progress"), rejected.message);
 
       // run 自体は無傷（rewind の拒否が run を巻き添えにしない）。
       const actual = await running;
@@ -1058,13 +1058,13 @@ test.skipIf(!GPU_AVAILABLE)(
       await disposing;
 
       // 1 段目の効き: 利用者面は dispose の**呼び出し時点**から閉じている。
-      assertThrows(() => context.pastLength, ExecutionError, "dispose 済み");
+      assertThrows(() => context.pastLength, ExecutionError, "disposed");
       // 新規 run は admission で拒否（チェーンへ積む前 = 同期区間の判定）。
       const rejected = await assertRejects(
         () => runStep(session, context, FULL, stepInputs(FULL, 1, 41), 1, 1),
         ExecutionError,
       );
-      assert(rejected.message.includes("dispose 済み"), rejected.message);
+      assert(rejected.message.includes("disposed"), rejected.message);
     } finally {
       await session.dispose();
       gpu.destroy();
@@ -1230,7 +1230,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => runStep(session, context, SMALL, inputs, 4, 4),
         ExecutionError,
       );
-      assert(error.message.includes("full スロット"), error.message);
+      assert(error.message.includes("full slot"), error.message);
       // MUST: 汚染していない（poison していれば pastLength の読みが落ちる）。
       assertEquals(context.pastLength, 4, "拒否された run は論理長も汚染も動かさない");
 
@@ -1269,14 +1269,14 @@ test.skipIf(!GPU_AVAILABLE)(
         () => runStep(session, context, FULL, stepInputs(FULL, 1, 0), 1, 2),
         ExecutionError,
       );
-      assert(overRows.message.includes("物理 chunk 行数"), overRows.message);
+      assert(overRows.message.includes("physical chunk row count"), overRows.message);
 
       // ② Q > M（prefill 形 — chunkLength の上限もこの 1 本に畳まれている）
       const overChunk = await assertRejects(
         () => runStep(session, context, FULL, stepInputs(FULL, 2, 0), 2, 3),
         ExecutionError,
       );
-      assert(overChunk.message.includes("物理 chunk 行数"), overChunk.message);
+      assert(overChunk.message.includes("physical chunk row count"), overChunk.message);
 
       // ③ Q = 0（「何も進めない run」— 進行と物理内容の対応が観測できなくなる）
       const zero = await assertRejects(
@@ -1294,7 +1294,7 @@ test.skipIf(!GPU_AVAILABLE)(
           () => runStep(session, context, FULL, stepInputs(FULL, chunkRows, 0), chunkRows, 1),
           ExecutionError,
         );
-        assert(wrongForm.message.includes("固定 chunk 契約"), wrongForm.message);
+        assert(wrongForm.message.includes("fixed chunk contract"), wrongForm.message);
       }
 
       assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
@@ -1325,9 +1325,9 @@ test.skipIf(!GPU_AVAILABLE)(
           () => runStep(session, context, FULL, stepInputs(FULL, chunkRows, 0), chunkRows, 1),
           ExecutionError,
         );
-        assert(error.message.includes(`物理 chunk 行数 ${chunkRows}`), error.message);
+        assert(error.message.includes(`physical chunk row count ${chunkRows}`), error.message);
         // 診断は許可集合を列挙する（バケット宣言が無いので prefill 形は chunkLength の 1 本）。
-        assert(error.message.includes("prefill 形の {4}"), error.message);
+        assert(error.message.includes("prefill form's {4}"), error.message);
       }
       assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
     } finally {
@@ -1358,7 +1358,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => runStep(session, context, FULL, stepInputs(FULL, 1, 0), 1, 2),
         ExecutionError,
       );
-      assert(error.message.includes("物理 chunk 行数"), error.message);
+      assert(error.message.includes("physical chunk row count"), error.message);
     };
     try {
       const initial = session.diagnostics().weights.allocCount;
@@ -1412,7 +1412,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => runStep(session, context, FULL, stepInputs(FULL, 1, 0), 1, 2),
         ExecutionError,
       );
-      assert(error.message.includes("物理 chunk 行数"), error.message);
+      assert(error.message.includes("physical chunk row count"), error.message);
     };
     try {
       oom.arm();
@@ -1535,14 +1535,14 @@ test.skipIf(!GPU_AVAILABLE)(
         () => runStep(session, bucketed, FULL, stepInputs(FULL, 3, 0), 3, 3),
         ExecutionError,
       );
-      assert(gap.message.includes("prefill 形の {4, 8}"), gap.message);
+      assert(gap.message.includes("prefill form's {4, 8}"), gap.message);
 
       // ② 同じ M=4 が、バケットを宣言していない context では落ちる。
       const withoutBuckets = await assertRejects(
         () => runStep(session, plain, FULL, bucketInputs(FULL, 4, 3, 0), 4, 3),
         ExecutionError,
       );
-      assert(withoutBuckets.message.includes("prefill 形の {8}"), withoutBuckets.message);
+      assert(withoutBuckets.message.includes("prefill form's {8}"), withoutBuckets.message);
       assertEquals(bucketed.pastLength, 0, "拒否された run は 1 つも進めない");
       assertEquals(plain.pastLength, 0);
 
@@ -1650,7 +1650,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => runStep(session, first, SYMBOLIC, inputs, 1, 1, { C: 8 }),
         ExecutionError,
       );
-      assert(rejected.message.includes("states 専用記号"), rejected.message);
+      assert(rejected.message.includes("states-only symbol"), rejected.message);
     } finally {
       for (const context of [first, second, wider]) await context.dispose();
       await session.dispose();
@@ -1680,7 +1680,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => runStep(session, context, shared, stepInputs(shared, 3, 0), 3, 3),
         ExecutionError,
       );
-      assert(split.message.includes("記号 'M'"), split.message);
+      assert(split.message.includes("Symbol 'M'"), split.message);
       assert(split.message.includes("4"), split.message);
       assert(split.message.includes("3"), split.message);
       assertEquals(context.pastLength, 0, "拒否された run は進めない");
@@ -1758,13 +1758,13 @@ test.skipIf(!GPU_AVAILABLE)(
         () => runStep(session, context, SLIDING, inputs, 1, 1),
         ExecutionError,
       );
-      assert(error.message.includes("u32 の上限"), error.message);
+      assert(error.message.includes("the u32 limit"), error.message);
 
       // MUST: 以後の全操作が拒否される（読みも含む — 物理 ring は書かれてしまっている）。
       const poisoned = assertThrows(() => context.pastLength, ExecutionError);
-      assert(poisoned.message.includes("汚染された"), poisoned.message);
+      assert(poisoned.message.includes("poisoned"), poisoned.message);
       assert(
-        poisoned.message.includes("state 変更 dispatch を submit した run が失敗した"),
+        poisoned.message.includes("A run that submitted state-changing dispatches failed"),
         `真因が残っていない: ${poisoned.message}`,
       );
     } finally {

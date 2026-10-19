@@ -41,7 +41,7 @@ describe("a8EmulationWarning（a8 を要求したが device に dp4a が無い�
     assertStringIncludes(message, 'linearCompute: "a8"');
     assert(!message.includes("attentionCompute: "), "要求していない attention を名指ししない");
     // 何をすれば消えるか（逃げ先 2 つ）を文言が持つ
-    assertStringIncludes(message, "quant で明示");
+    assertStringIncludes(message, "pass quant explicitly");
     assertStringIncludes(message, "'f32'");
   });
 

@@ -51,19 +51,19 @@ describe("sessionOptionsViolation", () => {
     const cases: readonly (readonly [SessionOptions, string])[] = [
       [
         { fuseLinearStaticQuantize: true },
-        "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+        "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
       ],
       [
         { linearGemvReduce: "parallel", linearCompute: "a8", fuseLinearStaticQuantize: true },
-        "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+        "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
       ],
       [
         { packedStaticQuantize: true, linearGemvReduce: "sequential" },
-        "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+        "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
       ],
       [
         { linearGemvReduce: "parallel", linearCompute: "a8" },
-        "linearGemvReduce: parallel は linearCompute: f32 のみ対応",
+        "linearGemvReduce: parallel supports only linearCompute: f32",
       ],
     ];
     for (const [options, message] of cases) {
@@ -73,7 +73,11 @@ describe("sessionOptionsViolation", () => {
       attentionCompute: "f16",
       attentionScoreStorage: "f16",
     });
-    assert(s16c16?.startsWith("attentionScoreStorage 'f16' と attentionCompute 'f16' は同時に"));
+    assert(
+      s16c16?.startsWith(
+        "attentionScoreStorage 'f16' and attentionCompute 'f16' cannot be given together",
+      ),
+    );
   });
 
   it("型・綴り・値域の違反を返し、診断で利用者の変換を呼ばない", () => {
@@ -86,7 +90,7 @@ describe("sessionOptionsViolation", () => {
     };
     assertEquals(
       sessionOptionsViolation(withValue("fuseRmsNormAdd", 1)),
-      "options.fuseRmsNormAdd はbooleanでなければならない",
+      "options.fuseRmsNormAdd must be a boolean",
     );
     assert(
       sessionOptionsViolation(withValue("linearGemvReduce", object))?.includes(
@@ -98,9 +102,15 @@ describe("sessionOptionsViolation", () => {
         'linearCompute: "i8a8"',
       ),
     );
-    assert(sessionOptionsViolation({ planBackingBudgetBytes: -1 })?.includes("非負の安全な整数"));
     assert(
-      sessionOptionsViolation({ linearGemvRowsThreadTarget: 0 })?.includes("1 以上の安全な整数"),
+      sessionOptionsViolation({ planBackingBudgetBytes: -1 })?.includes(
+        "non-negative safe integer",
+      ),
+    );
+    assert(
+      sessionOptionsViolation({ linearGemvRowsThreadTarget: 0 })?.includes(
+        "safe integer of at least 1",
+      ),
     );
     assertEquals(conversions, 0);
   });
@@ -121,13 +131,13 @@ describe("sessionOptionsViolation", () => {
     ] as const) {
       assertEquals(
         sessionOptionsViolation({ attentionRowBlockMaxBytes: value }),
-        `options.attentionRowBlockMaxBytes ${shown} は正の安全な整数でなければならない`,
+        `options.attentionRowBlockMaxBytes ${shown} must be a positive safe integer`,
       );
     }
     // 数値でない値（JS の消費者）も拒否する。文字列は綴りのまま、他は型名だけを出す。
     assertEquals(
       sessionOptionsViolation(withValue("attentionRowBlockMaxBytes", "512")),
-      'options.attentionRowBlockMaxBytes "512" は正の安全な整数でなければならない',
+      'options.attentionRowBlockMaxBytes "512" must be a positive safe integer',
     );
     assert(
       sessionOptionsViolation(withValue("attentionRowBlockMaxBytes", Symbol("budget")))?.includes(

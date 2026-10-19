@@ -71,7 +71,7 @@ test("束縛が取れないシンボルは容器の読み手が受理しない�
   await assertRejects(
     () => openContainer({ kind: "parts", parts }),
     ContainerFormatError,
-    "束縛が取れない",
+    "cannot be bound",
   );
 });
 
@@ -235,7 +235,7 @@ test("sharedWeights に SharedWeight でない値を渡すと、内部面を読�
           sharedWeights: { w: value } as unknown as SessionOptions["sharedWeights"],
         }),
       ExecutionError,
-      "SharedWeight でない値",
+      "not a SharedWeight",
     );
   }
 });
@@ -312,7 +312,7 @@ test("消失済み・破棄要求済みの device では、重みを上げない
   await assertRejects(
     () => buildSession(destroyed, emptyGraph(), {}),
     GpuDeviceLostError,
-    "Session の構築",
+    "Session construction",
   );
 
   const { gpu, lose } = losableFakeGpu();
@@ -321,7 +321,7 @@ test("消失済み・破棄要求済みの device では、重みを上げない
   await assertRejects(
     () => buildSession(gpu, emptyGraph(), {}),
     GpuDeviceLostError,
-    "Session の構築",
+    "Session construction",
   );
   const { weight, borrowed } = countedSharedWeight(gpu);
   async function* noShards(): AsyncGenerator<never> {}
@@ -331,7 +331,7 @@ test("消失済み・破棄要求済みの device では、重みを上げない
         sharedWeights: { w: weight },
       }),
     GpuDeviceLostError,
-    "Session の構築",
+    "Session construction",
   );
   assertEquals(borrowed(), 0, "落ちた構築が借用を積んだまま");
 });
@@ -357,7 +357,7 @@ test("構築の途中（重みの供給待ち）で device が失われたら、
   lose();
   await gpu.device.lost;
   gate.resolve();
-  await assertRejects(() => building, GpuDeviceLostError, "Session の構築");
+  await assertRejects(() => building, GpuDeviceLostError, "Session construction");
   assertEquals(borrowed(), 0, "落ちた構築が借用を返していない");
 });
 
@@ -367,7 +367,7 @@ test("構築の後に device が失われたら、出力 0 本の run / enqueue 
   const destroyed = fakeGpu();
   const onDestroyed = await buildSession(destroyed, emptyGraph(), {});
   destroyed.destroy();
-  await assertRejects(() => onDestroyed.run({}), GpuDeviceLostError, "run の受付");
+  await assertRejects(() => onDestroyed.run({}), GpuDeviceLostError, "run acceptance");
   await onDestroyed.dispose();
 
   // enqueue は消失の前に開いた区間へ積む（消失後は区間の開始そのものが落ちる）。区間は errorScope
@@ -379,12 +379,12 @@ test("構築の後に device が失われたら、出力 0 本の run / enqueue 
   await assertRejects(
     () => onEnqueued.enqueue({}, { batch: opened }),
     GpuDeviceLostError,
-    "enqueue の受付",
+    "enqueue acceptance",
   );
   await assertRejects(
     () => onEnqueued.enqueueRead({}, { batch: opened }).admitted,
     GpuDeviceLostError,
-    "enqueue の受付",
+    "enqueue acceptance",
   );
   // 区間そのものの決着も消失で落ちる（ここが見るのは受付で、区間の後始末は別の門）。
   await assertRejects(() => opened.finish(), GpuDeviceLostError);
@@ -394,7 +394,7 @@ test("構築の後に device が失われたら、出力 0 本の run / enqueue 
   const onLost = await buildSession(gpu, emptyGraph(), {});
   lose();
   await gpu.device.lost;
-  await assertRejects(() => onLost.run({}), GpuDeviceLostError, "run の受付");
+  await assertRejects(() => onLost.run({}), GpuDeviceLostError, "run acceptance");
   await onLost.dispose();
 });
 

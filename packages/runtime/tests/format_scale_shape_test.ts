@@ -233,8 +233,8 @@ describe("companion scale の形: 4 経路が groupScaleShape の 1 本に従う
           ContainerFormatError,
           // 型だけでは、scale の長さ検査が死んでも別の規則で落ちれば緑のまま — 規則に固有の
           // 診断を見る。
-          `initializer 'w' scale: block 'model/w#scale' の長さ ${(numel(expected) + 1) * 4} が ` +
-            `payload ${numel(expected) * 4} バイト`,
+          `initializer 'w' scale: block 'model/w#scale' length ${(numel(expected) + 1) * 4} is not ` +
+            `payload ${numel(expected) * 4} bytes`,
         );
       });
 
@@ -272,7 +272,7 @@ describe("companion scale の形: 4 経路が groupScaleShape の 1 本に従う
         assertThrows(
           () => decodeI4(bytes, shape, new Float32Array(numel(wider)), wider, groupSize),
           I4Error,
-          "group 形",
+          "is not the group shape",
         );
       });
     });

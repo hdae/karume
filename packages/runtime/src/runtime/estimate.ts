@@ -401,11 +401,11 @@ export type EstimateOptions = {
  * field).
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
-  "行ブロック attention 以外の融合が畳んで消す中間と、その融合ルールが宣言するノード内一時（どちらも device limit と融合の成立に依存する。別名化した値と、行ブロック attention の一時は勘定に入っている）",
-  "linear i8a8 の量子化中間（数値変種と device limit に依存する）。attention のノード内一時は勘定に入っている — states 形のスコア S と stateAttentionReduce に応じて必要な行統計、融合 attention op のスコア S・行統計・i8a8 の量子化中間（attentionCompute / attentionScoreStorage を渡さなければ runtime 既定の f32 で数える。maxStorageBufferBindingSize を渡さなければ、枚数がどの device でも同じ形〈WebGPU core 既定で 1 枚に収まる形・attentionRowBlockMaxBytes が core 既定以下の形〉だけを数え、それ以外は数を返さない）",
-  "params バッファ（カーネル定数 — Session 常駐・内容アドレスキャッシュ）",
-  "queue.writeBuffer の実装 staging（submit の完了まで解放されない）",
-  "退役の窓（予算超過 / 計画の LRU 追い出しで退役した slot backing は、次の計画の確保より前に destroy されず flush 後の後始末まで生きるので、その run では退役分 + 新規が同時に載る）",
+  "Intermediates that fusions other than row-block attention fold away, and the in-node temporaries their fusion rules declare (both depend on the device limits and on whether the fusion applies; aliased values and the temporaries of row-block attention are counted)",
+  "Quantized intermediates of linear i8a8 (depend on the numeric variant and the device limits). The in-node temporaries of attention are counted — the score S of states-form attention and the row statistics stateAttentionReduce needs, and the score S, row statistics and i8a8 quantized intermediates of the fused attention op (counted with the runtime default f32 unless attentionCompute / attentionScoreStorage is passed; without maxStorageBufferBindingSize only the shapes whose block count is the same on every device are counted [shapes that fit in one block under the WebGPU core default, and shapes whose attentionRowBlockMaxBytes is at most the core default], and no number is returned for the others)",
+  "params buffers (kernel constants — resident for the Session's lifetime, content-addressed cache)",
+  "The implementation staging of queue.writeBuffer (not released until the submit completes)",
+  "The retirement window (slot backings retired by a budget overrun / the plan LRU eviction are not destroyed before the next plan's allocation and live until the cleanup after flush, so that run holds the retired backings and the new ones at the same time)",
 ]);
 
 /**
@@ -416,7 +416,7 @@ const shapeOf = (
   name: string,
 ): readonly number[] => {
   const shape = shapes.get(name);
-  if (shape === undefined) throw new ExecutionError(`値 '${name}' の shape が未解決`);
+  if (shape === undefined) throw new ExecutionError(`Shape of value '${name}' is unresolved`);
   return shape;
 };
 
@@ -503,21 +503,21 @@ const planBindings = (
   for (const sym of Object.keys(resolved)) {
     if (statesOnly.has(sym)) {
       throw new ExecutionError(
-        `束縛 '${sym}' は states 専用記号 — options.generation.bindings で与えること` +
-          "（ADR 0066 追記 7 の束縛点 2）",
+        `Binding '${sym}' is a states-only symbol — give it in options.generation.bindings` +
+          " (binding point 2 of ADR 0066 addendum 7)",
       );
     }
     if (chunkSymbols.has(sym)) {
       throw new ExecutionError(
-        `束縛 '${sym}' は物理 chunk 行 M の記号 — 値は options.generation.chunkLength` +
-          "（prefill 形）と 1（decode 形）から導く（ADR 0066 決定 4 の実行 2 形）",
+        `Binding '${sym}' is the physical chunk-row symbol M — its values are derived from options.generation.chunkLength` +
+          " (prefill shape) and 1 (decode shape) (the two execution shapes of ADR 0066 decision 4)",
       );
     }
   }
   for (const sym of graph.symbols) {
     if (statesOnly.has(sym) || chunkSymbols.has(sym) || Object.hasOwn(resolved, sym)) continue;
     throw new ExecutionError(
-      `シンボル '${sym}' が束縛されていない（options.bindings で与えること）`,
+      `Symbol '${sym}' is not bound (its value must be given in options.bindings)`,
     );
   }
   return resolved;
@@ -543,14 +543,14 @@ const bindChunkRows = (
     const solved = solveDim(expr, rows);
     if (solved === undefined) {
       throw new ExecutionError(
-        `シナリオ '${scenario}': 物理 chunk 行 ${rows} が宣言 '${dim}' の形をしていない` +
-          `（${expr.coeff} で割り切れる ${expr.offset} 以上の行数が要る — ADR 0066 決定 4）`,
+        `Scenario '${scenario}': physical chunk row count ${rows} does not have the declared form '${dim}'` +
+          ` (needs a row count divisible by ${expr.coeff} and at least ${expr.offset} — ADR 0066 decision 4)`,
       );
     }
     if (Object.hasOwn(bindings, expr.sym) && bindings[expr.sym] !== solved) {
       throw new ExecutionError(
-        `シナリオ '${scenario}': 記号 '${expr.sym}' の束縛が衝突（${bindings[expr.sym]} と ` +
-          `${solved}） — chunk 行の宣言が 1 グラフ内で割れている`,
+        `Scenario '${scenario}': conflicting bindings for symbol '${expr.sym}' (${bindings[expr.sym]} and ` +
+          `${solved}) — the chunk-row declarations disagree within one graph`,
       );
     }
     bindings[expr.sym] = solved;
@@ -567,7 +567,7 @@ const bindChunkRows = (
  */
 const assertLimitOption = (name: string, limit: number | undefined): void => {
   if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) {
-    throw new ExecutionError(`options.${name} ${limit} は正の安全整数でなければならない`);
+    throw new ExecutionError(`options.${name} ${limit} must be a positive safe integer`);
   }
 };
 
@@ -591,7 +591,7 @@ const stateEstimate = (
   // bytes of a context that cannot be built").
   if (names.length === 0) {
     throw new ExecutionError(
-      "このグラフは states 宣言を持たない（GenerationContext は作れないので options.generation を渡さないこと）",
+      "This graph has no states declarations (no GenerationContext can be created, so do not pass options.generation)",
     );
   }
   // MUST: return no estimate for a spec the real construction (GenerationContext.create) rejects —
@@ -673,7 +673,7 @@ const weightEstimate = (
         // not turn anything red). It is unreachable by type; this branch exists to turn a missed
         // wiring red at compile time when a residency class is added.
         const unhandled: never = buffer.seat;
-        throw new ExecutionError(`未処理の常駐席: ${JSON.stringify(unhandled)}`);
+        throw new ExecutionError(`Unhandled residency class: ${JSON.stringify(unhandled)}`);
       }
     }
   }
@@ -744,8 +744,8 @@ const stateAttentionTemps = (
   const where = `attention (states) [${q.join(",")}]`;
   if (limit === undefined) {
     throw new ExecutionError(
-      `${where}: states 形 attention の一時は options.maxStorageBufferBindingSize が要る` +
-        "（行ブロックの枚数は device の granted limit だけで決まる — ADR 0060 / ADR 0022）",
+      `${where}: the temporaries of states-form attention need options.maxStorageBufferBindingSize` +
+        " (the row-block count is decided by the device's granted limit alone — ADR 0060 / ADR 0022)",
     );
   }
   const [batch, heads, chunkRows] = q;
@@ -755,8 +755,8 @@ const stateAttentionTemps = (
   const slotShape = slotName === undefined ? undefined : stateShapes?.get(slotName);
   if (slotShape === undefined) {
     throw new ExecutionError(
-      `${where}: state スロット 'k' の解決済み容量が引けない` +
-        "（GenerationContext を伴わない見積りでは states 形 attention を数えられない）",
+      `${where}: the resolved capacity of state slot 'k' cannot be looked up` +
+        " (an estimate without a GenerationContext cannot count states-form attention)",
     );
   }
   // `forced`, which sets the row-block count explicitly (the test-only `ROW_BLOCK_SPLIT`), is not
@@ -827,7 +827,7 @@ const rowBlockAttentionSteps = (
       // execution).
       if (nodes[index + step.nodeCount - 1]?.outputs[0]?.name !== step.outputName) {
         throw new ExecutionError(
-          `見積り: 行ブロック attention '${step.outputName}' の窓が融合前の列 ${index} に一致しない`,
+          `Estimate: the window of row-block attention '${step.outputName}' does not match the unfused node list at index ${index}`,
         );
       }
       found.set(index, step);
@@ -858,9 +858,9 @@ const fusedTransientStep = (
   uses: ReadonlyMap<string, number>,
   outputNames: ReadonlySet<string>,
 ): TransientStepSpec => {
-  const where = `見積り: 融合ルール '${step.rule}'（出力 '${step.outputName}'）`;
+  const where = `Estimate: fusion rule '${step.rule}' (output '${step.outputName}')`;
   if (step.rule !== "rowBlockAttention") {
-    throw new ExecutionError(`${where} は融合後の形で数えられない（行ブロック attention 専用）`);
+    throw new ExecutionError(`${where} cannot be counted after fusion (row-block attention only)`);
   }
   const output: TransientRef = { kind: "value", name: step.outputName };
   const bindRef = (index: number): TransientRef => {
@@ -869,14 +869,16 @@ const fusedTransientStep = (
     // recipe-builder — silently creating a reference without a name would make the estimate alone
     // return a number for a shape on which the execution phase fails).
     if (name === undefined) {
-      throw new ExecutionError(`${where}: bind 添字 ${index} が宣言 ${step.binds.length} 本の外`);
+      throw new ExecutionError(
+        `${where}: bind index ${index} is outside the ${step.binds.length} declared binds`,
+      );
     }
     return { kind: "value", name };
   };
   const dispatches = step.dispatches.map((dispatch): TransientDispatchSpec => {
     if (dispatch.operands === undefined) {
       throw new ExecutionError(
-        `${where} の dispatch '${dispatch.key}' が operands を宣言していない`,
+        `${where}: dispatch '${dispatch.key}' does not declare its operands`,
       );
     }
     const roles = parseStorageRoles(dispatch.wgsl());
@@ -885,7 +887,7 @@ const fusedTransientStep = (
     dispatch.operands.forEach((operand, slot) => {
       if (operand.kind === "weightScale") {
         throw new ExecutionError(
-          `${where} の dispatch '${dispatch.key}' が常駐 scale を束ねている`,
+          `${where}: dispatch '${dispatch.key}' has a resident scale bound to it`,
         );
       }
       const ref: TransientRef =
@@ -900,8 +902,8 @@ const fusedTransientStep = (
       else if (roles.reads.has(binding)) reads.push(ref);
       else {
         throw new ExecutionError(
-          `${where} の dispatch '${dispatch.key}' の束縛 ${binding} に WGSL の` +
-            " storage 宣言が無い（読み / 読み書きの役割が採れない）",
+          `${where}: dispatch '${dispatch.key}' binding ${binding} has no WGSL` +
+            " storage declaration (its read / read-write role cannot be determined)",
         );
       }
     });
@@ -962,9 +964,9 @@ const fusedAttentionBlocks = (
     const whole = planAttentionBlocks(extent, Number.MAX_SAFE_INTEGER);
     if (whole.length !== 1 || Math.max(whole[0].scoreBytes, whole[0].statsBytes) > core) {
       throw new ExecutionError(
-        `${where}: 融合 attention の一時は WebGPU core 既定の束縛上限（${core}B）で 1 枚に収まらないので` +
-          " options.maxStorageBufferBindingSize が要る（行ブロックの枚数が device の granted limit で" +
-          "変わる — ADR 0124 決定 7 / ADR 0022）",
+        `${where}: the temporaries of fused attention do not fit in one block under the WebGPU core default binding limit (${core}B), so` +
+          " options.maxStorageBufferBindingSize is needed (the row-block count changes with the device's granted" +
+          " limit — ADR 0124 decision 7 / ADR 0022)",
       );
     }
   }
@@ -1309,12 +1311,12 @@ export const estimateGraphMemory = (
   const stateAttentionReduce = options.stateAttentionReduce ?? "sequential";
   if (typeof stateAttentionReduce !== "string") {
     throw new ExecutionError(
-      `options.stateAttentionReduce は文字列でなければならない（${typeof stateAttentionReduce}）`,
+      `options.stateAttentionReduce must be a string (${typeof stateAttentionReduce})`,
     );
   }
   if (!Object.hasOwn(STATE_ATTENTION_REDUCES, stateAttentionReduce)) {
     throw new ExecutionError(
-      "options.stateAttentionReduce '" + stateAttentionReduce + "' は未対応",
+      "options.stateAttentionReduce '" + stateAttentionReduce + "' is not supported",
     );
   }
   // MUST: check the ranges here, regardless of the graph's shape. Checking only inside
@@ -1330,7 +1332,7 @@ export const estimateGraphMemory = (
     throw new ExecutionError(
       `options.planBackingBudgetBytes ${describeInputValue(
         budgetBytes,
-      )} は非負の安全な整数でなければならない`,
+      )} must be a non-negative safe integer`,
     );
   }
   // The budget per row-block temporary is checked at the same point with the same message (the
@@ -1344,7 +1346,7 @@ export const estimateGraphMemory = (
     throw new ExecutionError(
       `options.attentionRowBlockMaxBytes ${describeInputValue(
         attentionRowBlockMaxBytes,
-      )} は正の安全な整数でなければならない`,
+      )} must be a positive safe integer`,
     );
   }
   // The compute form of fused attention and the storage form of S go through the same check as
@@ -1371,8 +1373,8 @@ export const estimateGraphMemory = (
     // Without failing here, it would fail in planGraph's dimension evaluation with the chunk symbol
     // unbound, as a DimError that does not name the binding point.
     throw new ExecutionError(
-      `物理 chunk 行 M の記号 [${chunkDims.join(", ")}] は options.generation.chunkLength で` +
-        "しか束縛できない（states 形ノードを持つグラフは GenerationContext が要る）",
+      `The physical chunk-row symbols M [${chunkDims.join(", ")}] can only be bound by options.generation.chunkLength` +
+        " (a graph with states-form nodes needs a GenerationContext)",
     );
   }
   // Compute the two execution shapes of ADR 0066 decision 4 independently (the same graph,
@@ -1395,7 +1397,7 @@ export const estimateGraphMemory = (
     for (const spec of generation.scenarios) {
       if (taken.has(spec.name)) {
         throw new ExecutionError(
-          `シナリオ名 '${spec.name}' が既にある（予約名は run / prefill / decode）`,
+          `Scenario name '${spec.name}' already exists (the reserved names are run / prefill / decode)`,
         );
       }
       taken.add(spec.name);
@@ -1407,8 +1409,8 @@ export const estimateGraphMemory = (
         spec.chunkLength > generation.chunkLength
       ) {
         throw new ExecutionError(
-          `シナリオ '${spec.name}': 物理 chunk 行 ${spec.chunkLength} が ` +
-            `1..${generation.chunkLength}（generation.chunkLength）の整数でない`,
+          `Scenario '${spec.name}': physical chunk row count ${spec.chunkLength} is not an integer in ` +
+            `1..${generation.chunkLength} (generation.chunkLength)`,
         );
       }
       // Override a copy of the default bindings, then run the same check as the existing two shapes

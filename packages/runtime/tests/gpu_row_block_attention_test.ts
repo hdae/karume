@@ -321,7 +321,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => run(gpu, attentionGraph(OVERSIZE, true), inputs),
         ExecutionError,
-        `中間バッファが device の上限を超える`,
+        `intermediate buffers exceed the device limits`,
       );
     } finally {
       gpu.destroy();

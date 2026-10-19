@@ -56,7 +56,9 @@ export const tryParseDim = (text: string): DimExpr | undefined => {
 export const parseDim = (text: string): DimExpr => {
   const expr = tryParseDim(text);
   if (expr === undefined) {
-    throw new DimError(`次元式 '${text}' が正準文法 coeff·sym+offset に適合しない`);
+    throw new DimError(
+      `Dimension expression '${text}' does not match the canonical grammar coeff·sym+offset`,
+    );
   }
   return expr;
 };
@@ -67,10 +69,10 @@ export const parseDim = (text: string): DimExpr => {
  */
 export const formatDim = (expr: DimExpr): string => {
   const { coeff, sym, offset } = expr;
-  if (!isSymbolName(sym)) throw new DimError(`シンボル名 '${sym}' が不正`);
-  if (!Number.isSafeInteger(coeff) || coeff < 1) throw new DimError(`係数 ${coeff} が不正`);
+  if (!isSymbolName(sym)) throw new DimError(`Invalid symbol name '${sym}'`);
+  if (!Number.isSafeInteger(coeff) || coeff < 1) throw new DimError(`Invalid coefficient ${coeff}`);
   if (!Number.isSafeInteger(offset) || offset < 0) {
-    throw new DimError(`オフセット ${offset} が不正`);
+    throw new DimError(`Invalid offset ${offset}`);
   }
   return `${coeff === 1 ? "" : coeff}${sym}${offset === 0 ? "" : `+${offset}`}`;
 };
@@ -83,15 +85,17 @@ export const formatDim = (expr: DimExpr): string => {
  */
 export const evalDim = (expr: DimExpr, bindings: Readonly<Record<string, number>>): number => {
   if (!Object.hasOwn(bindings, expr.sym)) {
-    throw new DimError(`シンボル '${expr.sym}' が束縛されていない`);
+    throw new DimError(`Symbol '${expr.sym}' is not bound`);
   }
   const bound = bindings[expr.sym];
   if (typeof bound !== "number" || !Number.isSafeInteger(bound) || bound < 0) {
-    throw new DimError(`シンボル '${expr.sym}' の束縛 ${String(bound)} が非負整数でない`);
+    throw new DimError(
+      `Symbol '${expr.sym}' is bound to ${String(bound)}, which is not a non-negative integer`,
+    );
   }
   const size = expr.coeff * bound + expr.offset;
   if (!Number.isSafeInteger(size)) {
-    throw new DimError(`次元 ${formatDim(expr)} の評価結果が安全整数を超える`);
+    throw new DimError(`Value of dimension ${formatDim(expr)} exceeds the safe integer range`);
   }
   return size;
 };

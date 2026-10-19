@@ -840,7 +840,7 @@ test("統一入口は契約が拒否する attrs のキーを値にせず落と�
   assertThrows(
     () => applyReferenceOp("attention", [q, key, value], { scale: 0.5, window: 2 }),
     OpContractError,
-    "attrs.window は states 欄を持つノードでのみ宣言できる",
+    "attrs.window can be declared only on a node with a states field",
   );
   assertThrows(
     () =>
@@ -850,7 +850,7 @@ test("統一入口は契約が拒否する attrs のキーを値にせず落と�
         { ...CONV, extra: 1 },
       ),
     OpContractError,
-    "契約外 attrs [extra]",
+    "attrs outside the contract [extra]",
   );
 });
 

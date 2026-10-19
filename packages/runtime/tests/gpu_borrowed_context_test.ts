@@ -472,13 +472,13 @@ test.skipIf(!GPU_AVAILABLE)(
       // ① 進行中の貸し手 run（リースは発行の同期区間で立つので、await しない並びで踏める）。
       const running = lenderStep(lender, lenderContext, 1, 1, 5);
       const concurrent = await assertRejects(draft, ExecutionError);
-      assert(concurrent.message.includes("進行中の generation run"), concurrent.message);
+      assert(concurrent.message.includes("generation run in progress"), concurrent.message);
       await running;
 
       // ② commit 待ち（deferred な貸し手 run — draft は commit の後）。
       await lenderStep(lender, lenderContext, 1, 1, 9, "deferred");
       const pending = await assertRejects(draft, ExecutionError);
-      assert(pending.message.includes("commit 待ち"), pending.message);
+      assert(pending.message.includes("awaiting commit"), pending.message);
       lenderContext.commit(1);
       await draft();
 
@@ -492,16 +492,16 @@ test.skipIf(!GPU_AVAILABLE)(
           ),
         ExecutionError,
       );
-      assert(deferred.message.includes("借り手 context"), deferred.message);
+      assert(deferred.message.includes("borrowing context"), deferred.message);
 
       // ④ 借り手の commit / rewind は常に拒否（論理長を持たない）。
-      assertThrows(() => borrowed.commit(0), ExecutionError, "借り手 context");
-      assertThrows(() => borrowed.rewind(0), ExecutionError, "借り手 context");
+      assertThrows(() => borrowed.commit(0), ExecutionError, "borrowing context");
+      assertThrows(() => borrowed.rewind(0), ExecutionError, "borrowing context");
 
       // ⑤ 貸し手の poison は借り手 run の拒否理由になる（故障注入）。
       internals(lenderContext).poison("テストの故障注入");
       const poisoned = await assertRejects(draft, ExecutionError);
-      assert(poisoned.message.includes("汚染された"), poisoned.message);
+      assert(poisoned.message.includes("poisoned"), poisoned.message);
     } finally {
       await borrowed.dispose();
       await lenderContext.dispose();
@@ -538,7 +538,7 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       await lenderStep(lender, lenderContext, 4, 4, 0);
       const refused = await assertRejects(() => lenderContext.dispose(), ExecutionError);
-      assert(refused.message.includes("借りている context"), refused.message);
+      assert(refused.message.includes("contexts are borrowing"), refused.message);
       // 拒否された dispose は貸し手を壊さない（受付終了フラグも立っていない）。
       assertEquals(lenderContext.pastLength, 4);
       await assertDraft(gpu, borrower, borrowed, lenderContext, capacity, 404, "拒否の後");
@@ -611,10 +611,18 @@ test.skipIf(!GPU_AVAILABLE)(
 
       // 借り手の run が走っている間は拒否（借り手の run は貸し手の予約も取る — 拒否の (d)）。
       const drafting = draftWords(borrower, borrowed, 0);
-      await assertRejects(() => lenderContext.fork(), ExecutionError, "進行中の generation run");
+      await assertRejects(
+        () => lenderContext.fork(),
+        ExecutionError,
+        "generation run is in progress",
+      );
       await drafting;
       // 借り手 context そのものは複製できない（拒否の (g) — スロットは貸し手の所有物）。
-      await assertRejects(() => borrowed.fork(), ExecutionError, "借り手 context は複製できない");
+      await assertRejects(
+        () => borrowed.fork(),
+        ExecutionError,
+        "a borrowing context cannot be forked",
+      );
 
       // 生きている借り手を持つ貸し手は fork できる（裁定 36 = a）。sliding を含む context も拒否しない。
       const forked = await lenderContext.fork();
@@ -653,7 +661,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await onFork.dispose();
       await forked.dispose();
       const refused = await assertRejects(() => lenderContext.dispose(), ExecutionError);
-      assert(refused.message.includes("借りている context が 2 本"), refused.message);
+      assert(refused.message.includes("2 contexts are borrowing"), refused.message);
     } finally {
       for (const context of extra.reverse()) await context.dispose();
       await borrowed.dispose();
@@ -689,14 +697,14 @@ test.skipIf(!GPU_AVAILABLE)(
         () => borrower.createGenerationContext({ chunkLength: 1 }),
         ExecutionError,
       );
-      assert(noBorrow.message.includes("external な state スロット"), noBorrow.message);
+      assert(noBorrow.message.includes("external state slots"), noBorrow.message);
 
       // ② 自前スロットのグラフに borrow（誰も読まないスロットを貸し手から掴む）
       const ownSlots = await assertRejects(
         () => lender.createGenerationContext({ chunkLength: 4, borrow: lenderContext }),
         ExecutionError,
       );
-      assert(ownSlots.message.includes("全スロットが external"), ownSlots.message);
+      assert(ownSlots.message.includes("slots are all external"), ownSlots.message);
 
       // ③ chunkLength は 1 ちょうど（借り手の実行形は decode 1 本）
       const chunk = await assertRejects(
@@ -715,7 +723,7 @@ test.skipIf(!GPU_AVAILABLE)(
           }),
         ExecutionError,
       );
-      assert(bindings.message.includes("継承"), bindings.message);
+      assert(bindings.message.includes("inherited"), bindings.message);
 
       // ⑤ chunkBuckets は宣言できない（`chunkLength = 1` なので既存のバケット門が落とす）
       const buckets = await assertRejects(
@@ -738,7 +746,7 @@ test.skipIf(!GPU_AVAILABLE)(
           () => wide.createGenerationContext({ chunkLength: 1, borrow: lenderContext }),
           ExecutionError,
         );
-        assert(mismatch.message.includes("貸し手と食い違う"), mismatch.message);
+        assert(mismatch.message.includes("disagrees with the lender"), mismatch.message);
       } finally {
         await wide.dispose();
       }
@@ -1050,7 +1058,7 @@ test.skipIf(!GPU_AVAILABLE)(
 
       // 借り手が生きている間の貸し手 dispose は拒否される。
       const refused = await assertRejects(() => lender.dispose(), ExecutionError);
-      assert(refused.message.includes("貸し出している"), refused.message);
+      assert(refused.message.includes("lent out"), refused.message);
       // 拒否された dispose は貸し手を壊さない。
       await lender.run({ index });
     } finally {
@@ -1087,14 +1095,14 @@ test.skipIf(!GPU_AVAILABLE)(
 
       // ① 渡し忘れ（宣言 1 本に対して 0 本）
       const missing = await assertRejects(() => build(weightBorrowerGraph()), ExecutionError);
-      assert(missing.message.includes("不足 [embed]"), missing.message);
+      assert(missing.message.includes("missing [embed]"), missing.message);
 
       // ② 余剰（宣言に無い名前）
       const surplus = await assertRejects(
         () => build(weightBorrowerGraph(), { embed: shared, unknown: shared }),
         ExecutionError,
       );
-      assert(surplus.message.includes("余剰 [unknown]"), surplus.message);
+      assert(surplus.message.includes("extra [unknown]"), surplus.message);
 
       // ③ 宣言 shape の不一致
       const wrongShape = weightBorrowerGraph();
@@ -1104,7 +1112,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => build(wrongShape, { embed: shared }),
         ExecutionError,
       );
-      assert(shapeError.message.includes("宣言 shape"), shapeError.message);
+      assert(shapeError.message.includes("declared shape"), shapeError.message);
 
       // ④ 行の軸の不一致。借り手は格納を宣言しない（期待する席は貸し手の codec から導く）ので、
       // 読み方の割れはこの軸が受け持つ: per-channel scale の軸は**消費側 op** から決まり、
@@ -1123,7 +1131,7 @@ test.skipIf(!GPU_AVAILABLE)(
             }),
           ExecutionError,
         );
-        assert(axisError.message.includes("行の軸"), axisError.message);
+        assert(axisError.message.includes("row axis"), axisError.message);
       } finally {
         await axisLender.dispose();
       }
@@ -1149,12 +1157,21 @@ test.skipIf(!GPU_AVAILABLE)(
         () => build(wrongSeat, { embed: shared }),
         ExecutionError,
       );
-      assert(seatError.message.includes("消費席が貸し手と互換でない"), seatError.message);
+      assert(
+        seatError.message.includes(
+          "the consuming residency class is not compatible with the lender's",
+        ),
+        seatError.message,
+      );
 
       // ⑥ 借り物の再輸出は拒否する（借用の連鎖は持たない）。
       const chained = await build(weightBorrowerGraph(), { embed: shared });
       try {
-        assertThrows(() => chained.exportWeight("embed"), ExecutionError, "借り物の再輸出");
+        assertThrows(
+          () => chained.exportWeight("embed"),
+          ExecutionError,
+          "borrowed weights are not re-exported",
+        );
       } finally {
         await chained.dispose();
       }
@@ -1312,7 +1329,7 @@ test.skipIf(!GPU_AVAILABLE)(
         }
         assertInstanceOf(outcome.error, ExecutionError);
         const message = outcome.error.message;
-        assert(message.includes("意味論 dtype"), message);
+        assert(message.includes("semantic dtype"), message);
         assert(message.includes(`'${dtype}'`) && message.includes(`'${lenderDtype}'`), message);
         // 仕様（借り手の重みのアップロード前）より強い条件として構築全体の確保 0 回を見ている。将来ここが
         // 赤になったら、門より前の確保の中身（重みか、重み以外か）を見て判断する。

@@ -114,7 +114,7 @@ const declarationOf = (
   const input = graph.inputs.find((spec) => spec.name === name);
   if (input !== undefined) return { dtype: input.dtype, shape: input.shape };
   if (!Object.hasOwn(graph.values, name)) {
-    throw new ExecutionError(`値 '${name}' の宣言が無い`);
+    throw new ExecutionError(`Value '${name}' has no declaration`);
   }
   const value = graph.values[name];
   return { dtype: value.dtype, shape: value.shape };
@@ -161,9 +161,9 @@ export const validateGraphContracts = (graph: IrGraph): void => {
   for (const spec of graph.inputs) {
     if (!IO_DTYPES.includes(spec.dtype)) {
       throw new ExecutionError(
-        `入力 '${spec.name}' の意味論 dtype '${spec.dtype}' は転送できない（${IO_DTYPES.join(
+        `Input '${spec.name}': semantic dtype '${spec.dtype}' cannot be transferred (${IO_DTYPES.join(
           " / ",
-        )} のみ）`,
+        )} only)`,
       );
     }
   }
@@ -184,8 +184,8 @@ const assertConv3dSubset = (node: IrNode, where: string): void => {
   const { groups } = conv3dAttrs(node.attrs, where);
   if (groups !== 1) {
     throw new ExecutionError(
-      `${where}: conv3d の groups ${groups} は GPU で実行できない（実装済み subset は groups == 1 の` +
-        " implicit GEMM だけ — ADR 0118 決定 1。意味論は CPU 参照が持つ）",
+      `${where}: conv3d groups ${groups} cannot run on the GPU (the implemented subset is the groups == 1` +
+        " implicit GEMM only — ADR 0118 decision 1; the CPU reference holds the semantics)",
     );
   }
 };
@@ -203,7 +203,7 @@ const assertConv3dSubset = (node: IrNode, where: string): void => {
  *    reads uninitialised rows)
  * 3. A slot referenced by a readonly reader is **external only** (the dual of 2 — reading an own
  *    slot readonly without an append would be a back door around the missing-writer check
- *    〈{@link assertStateOrder}〉)
+ *    ({@link assertStateOrder}))
  * 4. If any slot is external, **every slot is external** (the stage 2 borrowing context has no own
  *    slots, so a mix would mean "the allocating side and the borrowing side live in one context")
  *
@@ -223,27 +223,27 @@ const assertStateOwnership = (graph: IrGraph): void => {
       const isExternal = graph.states[slot].external;
       if (readonly && !isExternal) {
         throw new ExecutionError(
-          `${where}: readonly の attention が external でない state スロット '${slot}' を読む` +
-            "（readonly は借り先 context のスロット専用 — ADR 0096 段 2 §1.1）",
+          `${where}: a readonly attention reads the non-external state slot '${slot}'` +
+            " (readonly is only for slots of the context borrowed from — ADR 0096 stage 2 §1.1)",
         );
       }
       if (readonly || !isExternal) continue;
       throw new ExecutionError(
         node.op === STATE_APPEND_OP
-          ? `state スロット '${slot}': external なのに ${STATE_APPEND_OP}（${where}）が居る` +
-              "（借り物のスロットへ書けるのは貸し手だけ — ADR 0096 段 2 §1.1）"
-          : `${where}: external な state スロット '${slot}' を readonly でない ${node.op} が読む` +
-              "（external の読者は attrs.readonly の attention だけ — ADR 0096 段 2 §1.1）",
+          ? `State slot '${slot}': external, yet ${STATE_APPEND_OP} (${where}) is present` +
+              " (only the lender may write to a borrowed slot — ADR 0096 stage 2 §1.1)"
+          : `${where}: external state slot '${slot}' is read by the non-readonly ${node.op}` +
+              " (the only readers of an external slot are attentions with attrs.readonly — ADR 0096 stage 2 §1.1)",
       );
     }
   });
   if (external.length === 0 || external.length === names.length) return;
   throw new ExecutionError(
-    `state スロットに external と非 external が混在している（external: [${external.join(
+    `State slots mix external and non-external slots (external: [${external.join(
       ", ",
-    )}] / 自前: [${names
+    )}] / own: [${names
       .filter((name) => !graph.states[name].external)
-      .join(", ")}]）— 借り手 context は自前スロットを持たない（ADR 0096 段 2 §1.1）`,
+      .join(", ")}]) — a borrowing context has no slots of its own (ADR 0096 stage 2 §1.1)`,
   );
 };
 
@@ -305,29 +305,29 @@ const assertStateOrder = (graph: IrGraph): void => {
     }
     if (appends.length > 1) {
       throw new ExecutionError(
-        `state スロット '${slot}': ${STATE_APPEND_OP} が ${appends.length} 本（nodes[${appends
+        `State slot '${slot}': ${STATE_APPEND_OP} appears ${appends.length} times (nodes[${appends
           .map((touch) => touch.index)
-          .join("], nodes[")}]）— 1 step に 1 回まで（ADR 0067 決定 5b）`,
+          .join("], nodes[")}]) — at most once per step (ADR 0067 decision 5b)`,
       );
     }
     if (appends.length === 0) {
       throw new ExecutionError(
-        `state スロット '${slot}': ${STATE_APPEND_OP} が 1 本も無い（読者 nodes[${list
+        `State slot '${slot}': no ${STATE_APPEND_OP} at all (readers nodes[${list
           .map((touch) => touch.index)
           .join(
             "], nodes[",
-          )}] だけ）— 読者が居るスロットには終端 ${STATE_APPEND_OP} がちょうど 1 本 MUST` +
-          `（ADR 0067 決定 5b。書き手が居ないと未初期化の過去を読んで論理長だけ進む）`,
+          )}] only) — a slot with readers MUST have exactly one terminal ${STATE_APPEND_OP}` +
+          ` (ADR 0067 decision 5b; without a writer the readers read an uninitialised past and only the logical length advances)`,
       );
     }
     // Here there is exactly one append (the two branches above failed zero and two or more).
     const last = list[list.length - 1];
     if (!last.appends) {
       throw new ExecutionError(
-        `state スロット '${slot}': ${STATE_APPEND_OP}（nodes[${
+        `State slot '${slot}': after ${STATE_APPEND_OP} (nodes[${
           appends[0].index
-        }]）より後に読者 nodes[${last.index}] (${last.op}) が居る` +
-          `（append は当該スロットに触れる最後のノード MUST — ADR 0067 決定 5b）`,
+        }]) comes the reader nodes[${last.index}] (${last.op})` +
+          ` (the append MUST be the last node touching the slot — ADR 0067 decision 5b)`,
       );
     }
     assertSameWindow(slot, list);
@@ -344,10 +344,10 @@ const assertSameWindow = (slot: string, list: readonly StateTouch[]): void => {
   const mismatch = list.find((touch) => touch.window !== first.window);
   if (mismatch === undefined) return;
   const show = (touch: StateTouch): string =>
-    `nodes[${touch.index}] (${touch.op}) は ${touch.window ?? "宣言なし"}`;
+    `nodes[${touch.index}] (${touch.op}): ${touch.window ?? "undeclared"}`;
   throw new ExecutionError(
-    `state スロット '${slot}': attrs.window が食い違う（${show(first)} / ${show(mismatch)}）` +
-      ` — 論理 col → 物理 row の写像は読み書き同式 MUST（ADR 0067 決定 4）`,
+    `State slot '${slot}': attrs.window disagrees (${show(first)} / ${show(mismatch)})` +
+      ` — the logical col → physical row mapping MUST use the same formula for reads and writes (ADR 0067 decision 4)`,
   );
 };
 
@@ -371,23 +371,23 @@ const assertSymPrefixSlice = (graph: IrGraph, node: IrNode, where: string): void
   const { sym, slices } = symPrefixSliceAttrs(node.attrs, where);
   if (!graph.symbols.includes(sym)) {
     throw new ExecutionError(
-      `${where}: sym_prefix_slice の sym '${sym}' が graph.symbols [${graph.symbols.join(
+      `${where}: sym_prefix_slice sym '${sym}' is not in graph.symbols [${graph.symbols.join(
         ", ",
-      )}] に無い`,
+      )}]`,
     );
   }
   const source = declarationOf(graph, node.ins[0]).shape;
   if (source.some((dim) => typeof dim !== "number")) {
     throw new ExecutionError(
-      `${where}: sym_prefix_slice の入力 '${node.ins[0]}' の宣言 shape [${source.join(
+      `${where}: sym_prefix_slice input '${node.ins[0]}' has a symbolic dimension in its declared shape [${source.join(
         ",",
-      )}] に記号次元がある（入力は Tmax で焼いた静的形でなければならない）`,
+      )}] (the input must be a static shape baked at Tmax)`,
     );
   }
   for (const slice of slices) {
     if (slice.dim >= source.length) {
       throw new ExecutionError(
-        `${where}: sym_prefix_slice の dim ${slice.dim} が入力 rank ${source.length} の外`,
+        `${where}: sym_prefix_slice dim ${slice.dim} is outside the input rank ${source.length}`,
       );
     }
   }
@@ -422,16 +422,16 @@ const assertStaticLayoutAxis = (
     const shape = declarationOf(graph, name).shape;
     if (dim < shape.length && typeof shape[dim] !== "number") {
       throw new ExecutionError(
-        `${where}: ${node.op} の軸 ${dim} が入力 '${name}' の宣言 [${shape.join(
+        `${where}: ${node.op} axis ${dim} of input '${name}' is symbolic in the declaration [${shape.join(
           ",",
-        )}] で記号次元（記号軸の切り出しは sym_prefix_slice の担当）`,
+        )}] (slicing a symbolic axis is the job of sym_prefix_slice)`,
       );
     }
   }
 };
 
 /**
- * cat's concatenation axis is 〈a constant〉 or 〈a linear expression of **one** symbol〉 (ADR 0046
+ * cat's concatenation axis is a constant or a linear expression of **one** symbol (ADR 0046
  * revises ADR 0014).
  *
  * The sum `Σ(coeff_i·sym + offset_i)` fits the dimension language `coeff·sym+offset` as is when the
@@ -457,9 +457,9 @@ const assertCatAxis = (graph: IrGraph, node: IrNode, where: string): void => {
     const parsed = parseDim(extent);
     if (sym !== undefined && sym !== parsed.sym) {
       throw new ExecutionError(
-        `${where}: ${node.op} の連結軸 ${dim} に異なるシンボル（${sym} と ${parsed.sym}）が` +
-          `混ざる（入力 '${name}' の宣言 [${shape.join(",")}]）` +
-          " — 和が次元言語 coeff·sym+offset に載らない",
+        `${where}: ${node.op} concatenation axis ${dim} mixes different symbols (${sym} and ${parsed.sym})` +
+          ` (input '${name}' declared [${shape.join(",")}])` +
+          " — the sum does not fit the dimension language coeff·sym+offset",
       );
     }
     sym = parsed.sym;
@@ -498,12 +498,14 @@ export const weightChannelAxes = (graph: IrGraph): ReadonlyMap<string, number> =
     if (name === undefined || !Object.hasOwn(graph.initializers, name)) continue;
     const axis = WEIGHT_CHANNEL_AXES.get(node.op);
     if (axis === undefined) {
-      throw new ExecutionError(`op '${node.op}' に per-channel scale のチャネル軸の定義が無い`);
+      throw new ExecutionError(
+        `Op '${node.op}' has no channel axis definition for per-channel scales`,
+      );
     }
     const known = axes.get(name);
     if (known !== undefined && known !== axis) {
       throw new ExecutionError(
-        `initializer '${name}': チャネル軸が消費側で食い違う（${known} と ${axis}）`,
+        `Initializer '${name}': consumers disagree on the channel axis (${known} and ${axis})`,
       );
     }
     axes.set(name, axis);
@@ -637,7 +639,7 @@ export const countUses = (graph: IrGraph): ReadonlyMap<string, number> => {
 
 const assertExtent = (size: number, where: string): number => {
   if (!Number.isSafeInteger(size) || size < 0) {
-    throw new ExecutionError(`${where}: 次元 ${String(size)} が非負整数でない`);
+    throw new ExecutionError(`${where}: dimension ${String(size)} is not a non-negative integer`);
   }
   return size;
 };
@@ -687,9 +689,9 @@ export const assertGenerationBindings = (
     if (!Object.hasOwn(runBindings, sym)) continue;
     if (runBindings[sym] !== value) {
       throw new ExecutionError(
-        `記号 '${sym}' が GenerationContext の束縛 ${value} と run の解決値 ` +
-          `${runBindings[sym]} で食い違う（states と入力の両方に現れる記号は 2 つの束縛点で` +
-          "同じ値でなければならない — ADR 0066 追記 7）",
+        `Symbol '${sym}' differs between the GenerationContext binding ${value} and the run's resolved value ` +
+          `${runBindings[sym]} (a symbol that appears in both states and inputs must have the same value at` +
+          " both binding points — ADR 0066 addendum 7)",
       );
     }
   }
@@ -739,16 +741,16 @@ export const bindSymbols = (
   for (const [sym, value] of Object.entries(seed)) {
     if (!symbols.has(sym)) {
       throw new ExecutionError(
-        `束縛 '${sym}' はグラフの symbols [${graph.symbols.join(", ")}] に無い`,
+        `Binding '${sym}' is not in the graph's symbols [${graph.symbols.join(", ")}]`,
       );
     }
     if (statesOnly.has(sym)) {
       throw new ExecutionError(
-        `束縛 '${sym}' は states 専用記号 — 束縛点は createGenerationContext(spec.bindings)` +
-          "（ADR 0066 追記 7）。run / enqueue の bindings では与えられない",
+        `Binding '${sym}' is a states-only symbol — its binding point is createGenerationContext(spec.bindings)` +
+          " (ADR 0066 addendum 7); it cannot be given in the run / enqueue bindings",
       );
     }
-    bindings[sym] = assertExtent(value, `束縛 '${sym}'`);
+    bindings[sym] = assertExtent(value, `Binding '${sym}'`);
   }
 
   const declared = new Set(graph.inputs.map((spec) => spec.name));
@@ -756,30 +758,30 @@ export const bindSymbols = (
   // would silently ignore a resident tensor with a misspelt name, and the real input would fail as
   // "not passed").
   for (const name of [...Object.keys(inputShapes), ...(deferredInputs ?? [])]) {
-    if (!declared.has(name)) throw new ExecutionError(`'${name}' はグラフの入力ではない`);
+    if (!declared.has(name)) throw new ExecutionError(`'${name}' is not a graph input`);
   }
 
   for (const spec of graph.inputs) {
     if (deferredInputs?.has(spec.name) === true) continue;
     if (!Object.hasOwn(inputShapes, spec.name)) {
-      throw new ExecutionError(`入力 '${spec.name}' が渡されていない`);
+      throw new ExecutionError(`Input '${spec.name}' was not passed`);
     }
     const actual = inputShapes[spec.name];
     if (actual.length !== spec.shape.length) {
       throw new ExecutionError(
-        `入力 '${spec.name}': rank ${actual.length} が宣言 [${spec.shape.join(",")}] と違う`,
+        `Input '${spec.name}': rank ${actual.length} differs from the declaration [${spec.shape.join(",")}]`,
       );
     }
     spec.shape.forEach((dim, index) => {
-      const where = `入力 '${spec.name}' の次元 ${index}`;
+      const where = `Input '${spec.name}' dimension ${index}`;
       const size = assertExtent(actual[index], where);
       if (typeof dim === "number") return;
       const expr = parseDim(dim);
       const solved = solveDim(expr, size);
       if (solved === undefined) {
         throw new ExecutionError(
-          `${where}: 実測 ${size} が宣言 '${dim}' の形をしていない` +
-            `（${expr.coeff} で割り切れる ${expr.offset} 以上の長さが要る）`,
+          `${where}: actual ${size} does not have the declared form '${dim}'` +
+            ` (needs a length divisible by ${expr.coeff} and at least ${expr.offset})`,
         );
       }
       if (!Object.hasOwn(bindings, expr.sym)) {
@@ -788,7 +790,7 @@ export const bindSymbols = (
       }
       if (bindings[expr.sym] !== solved) {
         throw new ExecutionError(
-          `${where}: シンボル '${expr.sym}' の束縛が衝突（${bindings[expr.sym]} と ${solved}）`,
+          `${where}: conflicting bindings for symbol '${expr.sym}' (${bindings[expr.sym]} and ${solved})`,
         );
       }
     });
@@ -799,7 +801,7 @@ export const bindSymbols = (
     // MUST above).
     if (statesOnly.has(sym)) continue;
     if (!Object.hasOwn(bindings, sym)) {
-      throw new ExecutionError(`シンボル '${sym}' を入力 shape から束縛できなかった`);
+      throw new ExecutionError(`Symbol '${sym}' could not be bound from the input shapes`);
     }
   }
 
@@ -811,9 +813,9 @@ export const bindSymbols = (
     const actual = inputShapes[spec.name];
     if (resolved.some((dim, index) => dim !== actual[index])) {
       throw new ExecutionError(
-        `入力 '${spec.name}': shape [${actual.join(",")}] が宣言 [${spec.shape.join(
+        `Input '${spec.name}': shape [${actual.join(",")}] does not match the declaration [${spec.shape.join(
           ",",
-        )}]（束縛後 [${resolved.join(",")}]）と一致しない`,
+        )}] (after binding [${resolved.join(",")}])`,
       );
     }
   }
@@ -851,7 +853,7 @@ export const planGraph = (
       count *= dim;
       if (!Number.isSafeInteger(count)) {
         throw new ExecutionError(
-          `値 '${name}': shape [${shape.join(",")}] の要素数が安全整数を超える`,
+          `Value '${name}': the element count of shape [${shape.join(",")}] exceeds the safe integer range`,
         );
       }
     }
@@ -863,14 +865,14 @@ export const planGraph = (
     const inputShapes = node.ins.map((name) => {
       const shape = shapes.get(name);
       if (shape === undefined) {
-        throw new ExecutionError(`${where}: 入力 '${name}' の shape が未解決`);
+        throw new ExecutionError(`${where}: shape of input '${name}' is unresolved`);
       }
       return shape;
     });
     const declaredShapes = node.outs.map((name) => {
       const shape = shapes.get(name);
       if (shape === undefined) {
-        throw new ExecutionError(`${where}: 出力 '${name}' の宣言が無い`);
+        throw new ExecutionError(`${where}: output '${name}' has no declaration`);
       }
       return shape;
     });
@@ -893,7 +895,7 @@ export const planGraph = (
     // which slot of which op is missing.
     if (computed.length !== declaredShapes.length) {
       throw new ExecutionError(
-        `${where}: 出力 shape の計算が ${computed.length} 本（宣言は ${declaredShapes.length} 本）`,
+        `${where}: output shape computation returned ${computed.length} shapes (${declaredShapes.length} declared)`,
       );
     }
     declaredShapes.forEach((declaredShape, slot) => {
@@ -903,9 +905,9 @@ export const planGraph = (
         declaredShape.some((dim, i) => dim !== shape[i])
       ) {
         throw new ExecutionError(
-          `${where}: 出力 '${node.outs[slot]}' の計算 shape [${shape.join(",")}] が宣言 [${declaredShape.join(
+          `${where}: output '${node.outs[slot]}': computed shape [${shape.join(",")}] does not match the declaration [${declaredShape.join(
             ",",
-          )}] と一致しない`,
+          )}]`,
         );
       }
     });

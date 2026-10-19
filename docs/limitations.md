@@ -1207,7 +1207,7 @@ section** (Codex deep review R2B-001).
 ## Vowel detection: the input's 10ms frame count is **even**, and the limit is the distribution's declaration (ADR 0056 / 0057)
 
 - The time axis of the graph input is `2T` (the symbol `T` is the 20ms grid of the output). **Odd
-  lengths are not accepted** — `bindSymbols` fails with `実測 285 が宣言 '2T' の形をしていない`
+  lengths are not accepted** — `bindSymbols` fails with `actual 285 does not have the declared form '2T'`
   (no rounding). The caller **truncates** the last frame before passing it
   (`VowelDetectorPipeline.detect` and the real-weight E2E do so).
   Matching the length with right zero padding is **forbidden** (the backward GRU carries state back

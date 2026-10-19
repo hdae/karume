@@ -54,7 +54,7 @@ test("実行形ノブの非文字列は受理集合を引く前に落ち、診�
       const error = assertThrows(() => jsCallerAssert(...knobs), ExecutionError, name);
       // 型名だけを出す（利用者の `toString` の戻り値を載せない）。
       assertEquals(error.message.includes(`${name}: ${typeof value}`), true, error.message);
-      assertEquals(error.message.includes("実行形ノブ 1 本"), true, error.message);
+      assertEquals(error.message.includes("outside the accepted set: 1"), true, error.message);
     }
     assertEquals(conversions, 0, `${name}: 利用者の変換が呼ばれた`);
   }
@@ -65,7 +65,7 @@ test("union 外の綴りは全件列挙して 1 回で落ちる", () => {
   const error = assertThrows(
     () => jsCallerAssert("i8a8", "f32", "s16", "parallel-fused", "parallel"),
     ExecutionError,
-    "実行形ノブ 2 本",
+    "outside the accepted set: 2",
   );
   assertEquals(error.message.includes(`linearCompute: "i8a8"`), true, error.message);
   assertEquals(error.message.includes(`attentionScoreStorage: "s16"`), true, error.message);

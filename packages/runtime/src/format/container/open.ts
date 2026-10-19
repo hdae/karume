@@ -154,7 +154,7 @@ const sliceExact = (
 ): Uint8Array<ArrayBuffer> => {
   if (offset + length > bytes.byteLength) {
     throw new ContainerFormatError(
-      `${path}: ${offset}..${offset + length} が長さ ${bytes.byteLength} をはみ出す`,
+      `${path}: ${offset}..${offset + length} runs past the length ${bytes.byteLength}`,
     );
   }
   return bytes.subarray(offset, offset + length);
@@ -172,13 +172,13 @@ export const bytesSource = (
   const layout = derivePartOffsets(part0Bytes, partLengths);
   if (bytes.byteLength !== layout.totalLength) {
     throw new ContainerFormatError(
-      `単一形の長さ ${bytes.byteLength} が宣言から導いた ${layout.totalLength} と違う`,
+      `Single-form length ${bytes.byteLength} differs from ${layout.totalLength} derived from the declarations`,
     );
   }
   const lengths = [part0Bytes, ...partLengths];
   const partLength = (index: number): number => {
     const length = lengths[index];
-    if (length === undefined) throw new ContainerFormatError(`part ${index} は無い`);
+    if (length === undefined) throw new ContainerFormatError(`part ${index} does not exist`);
     return length;
   };
   return {
@@ -188,7 +188,7 @@ export const bytesSource = (
     read: (part, offset, length) => {
       if (offset + length > partLength(part)) {
         throw new ContainerFormatError(
-          `part ${part}: ${offset}..${offset + length} が part 長をはみ出す`,
+          `part ${part}: ${offset}..${offset + length} runs past the part length`,
         );
       }
       return Promise.resolve(
@@ -202,7 +202,7 @@ export const bytesSource = (
 export const partsSource = (parts: readonly Uint8Array<ArrayBuffer>[]): BlockSource => {
   const partOf = (index: number): Uint8Array<ArrayBuffer> => {
     const part = parts[index];
-    if (part === undefined) throw new ContainerFormatError(`part ${index} は無い`);
+    if (part === undefined) throw new ContainerFormatError(`part ${index} does not exist`);
     return part;
   };
   return {
@@ -219,16 +219,16 @@ const verifyDocument = async (
   expected: { readonly length: number; readonly sha256: string },
   path: string,
 ): Promise<void> => {
-  const expectedHash = asSha256Hex(expected.sha256, `${path}の期待 sha256`);
+  const expectedHash = asSha256Hex(expected.sha256, `${path} expected sha256`);
   if (bytes.byteLength !== expected.length) {
     throw new ContainerFormatError(
-      `${path}の長さ ${bytes.byteLength} が期待 ${expected.length} と違う`,
+      `${path} length ${bytes.byteLength} differs from the expected ${expected.length}`,
     );
   }
   const actual = await sha256Hex(bytes);
   if (actual !== expectedHash) {
     throw new ContainerFormatError(
-      `${path}の sha256 が期待と違う（期待 ${expected.sha256} / 実物 ${actual}）`,
+      `${path} sha256 differs from the expected value (expected ${expected.sha256} / actual ${actual})`,
     );
   }
 };
@@ -238,7 +238,7 @@ const initialSource = (input: ContainerInput): BlockSource => {
   if (input.kind === "parts") return partsSource(input.parts);
   if (input.bytes.byteLength > MAX_SINGLE_CONTAINER_BYTES) {
     throw new ContainerFormatError(
-      `単一形の全量 ${input.bytes.byteLength} バイトが上限 ${MAX_SINGLE_CONTAINER_BYTES} を超える（分割形で読む）`,
+      `Single-form total of ${input.bytes.byteLength} bytes exceeds the limit ${MAX_SINGLE_CONTAINER_BYTES} (read it in split form)`,
     );
   }
   // In the single form the part lengths are unknown until the descriptor is read. Build a
@@ -265,18 +265,18 @@ export const openContainer = async (
   const head = initialSource(input);
   if (head.partLength(0) < HEADER_BYTES) {
     throw new ContainerFormatError(
-      `part 0 が ${HEADER_BYTES} バイトに足りない: ${head.partLength(0)}`,
+      `part 0 is shorter than ${HEADER_BYTES} bytes: ${head.partLength(0)}`,
     );
   }
   const header = readHeader(await head.read(0, 0, HEADER_BYTES));
   const part0Bytes = part0Length(header);
   if (head.partLength(0) < part0Bytes) {
     throw new ContainerFormatError(
-      `part 0 が ${part0Bytes} バイトに足りない: ${head.partLength(0)}`,
+      `part 0 is shorter than ${part0Bytes} bytes: ${head.partLength(0)}`,
     );
   }
   const graphBytes = await head.read(0, HEADER_BYTES, header.graphDescriptorLength);
-  if (expect !== undefined) await verifyDocument(graphBytes, expect.graph, "グラフ記述");
+  if (expect !== undefined) await verifyDocument(graphBytes, expect.graph, "graph descriptor");
   const graph = parseGraphDescriptor(graphBytes);
 
   let model: ModelDescriptor | undefined;
@@ -285,18 +285,21 @@ export const openContainer = async (
     // graph would parse the model descriptor, which holds the binding table and the block sha256s,
     // unverified (symmetric with the krg-side check).
     if (expect !== undefined && expect.model === undefined) {
-      throw new ContainerFormatError("krm なのにモデル記述の期待値が渡されていない");
+      throw new ContainerFormatError(
+        "krm but no expected values for the model descriptor were passed",
+      );
     }
     const modelBytes = await head.read(
       0,
       HEADER_BYTES + header.graphDescriptorLength,
       header.modelDescriptorLength,
     );
-    if (expect?.model !== undefined) await verifyDocument(modelBytes, expect.model, "モデル記述");
+    if (expect?.model !== undefined)
+      await verifyDocument(modelBytes, expect.model, "model descriptor");
     model = parseModelDescriptor(modelBytes);
     validateAgainstGraph(model, graph);
   } else if (expect?.model !== undefined) {
-    throw new ContainerFormatError("krg なのにモデル記述の期待値が渡された");
+    throw new ContainerFormatError("krg but expected values for the model descriptor were passed");
   }
   const graphs = bindGraphs(graph, model);
 
@@ -306,7 +309,7 @@ export const openContainer = async (
   const source = input.kind === "bytes" ? bytesSource(input.bytes, part0Bytes, partLengths) : head;
   if (source.partCount !== partLengths.length + 1) {
     throw new ContainerFormatError(
-      `part が ${source.partCount} 本だが宣言は ${partLengths.length + 1} 本`,
+      `part count is ${source.partCount} but ${partLengths.length + 1} are declared`,
     );
   }
   if (input.kind !== "bytes") {
@@ -314,13 +317,13 @@ export const openContainer = async (
     // single form bytesSource checks the total length).
     if (source.partLength(0) !== part0Bytes) {
       throw new ContainerFormatError(
-        `part 0 の長さ ${source.partLength(0)} が宣言 ${part0Bytes} と違う`,
+        `part 0 length ${source.partLength(0)} differs from the declared ${part0Bytes}`,
       );
     }
     for (const [i, length] of partLengths.entries()) {
       if (source.partLength(i + 1) !== length) {
         throw new ContainerFormatError(
-          `part ${i + 1} の長さ ${source.partLength(i + 1)} が宣言 ${length} と違う`,
+          `part ${i + 1} length ${source.partLength(i + 1)} differs from the declared ${length}`,
         );
       }
     }
@@ -337,7 +340,7 @@ export const openContainer = async (
 
   const locate: OpenedContainer["locate"] = (id) => {
     const found = located.get(id);
-    if (found === undefined) throw new ContainerFormatError(`未宣言の block '${id}'`);
+    if (found === undefined) throw new ContainerFormatError(`Undeclared block '${id}'`);
     return found;
   };
 
@@ -346,14 +349,14 @@ export const openContainer = async (
     const bytes = await source.read(found.part, found.record.offset, found.record.length);
     if (bytes.byteLength !== found.record.length) {
       throw new ContainerFormatError(
-        `block '${id}': 取得長 ${bytes.byteLength} が宣言 ${found.record.length} と違う`,
+        `block '${id}': fetched length ${bytes.byteLength} differs from the declared ${found.record.length}`,
       );
     }
     if (source.verified) return bytes;
     const actual = await sha256Hex(bytes);
     if (actual !== found.record.sha256) {
       throw new ContainerFormatError(
-        `block '${id}' の sha256 が宣言と違う（宣言 ${found.record.sha256} / 実物 ${actual}）`,
+        `block '${id}' sha256 differs from the declared value (declared ${found.record.sha256} / actual ${actual})`,
       );
     }
     return bytes;
@@ -362,7 +365,7 @@ export const openContainer = async (
   const asset: OpenedContainer["asset"] = (name) => {
     const binding =
       model !== undefined && Object.hasOwn(model.assets, name) ? model.assets[name] : undefined;
-    if (binding === undefined) throw new ContainerFormatError(`未宣言の資産 '${name}'`);
+    if (binding === undefined) throw new ContainerFormatError(`Undeclared asset '${name}'`);
     const found = locate(binding.block);
     let verifiedBlock: Promise<Uint8Array<ArrayBuffer>> | undefined;
     return {
@@ -373,19 +376,19 @@ export const openContainer = async (
         // truncates fractions.
         if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length)) {
           throw new ContainerFormatError(
-            `資産 '${name}': 区間 (offset ${offset}, length ${length}) が安全整数でない`,
+            `asset '${name}': range (offset ${offset}, length ${length}) is not a safe integer`,
           );
         }
         if (offset < 0 || length < 0 || offset + length > binding.length) {
           throw new ContainerFormatError(
-            `資産 '${name}': ${offset}..${offset + length} が論理長 ${binding.length} をはみ出す`,
+            `asset '${name}': ${offset}..${offset + length} runs past the logical length ${binding.length}`,
           );
         }
         if (source.verified) {
           const bytes = await source.read(found.part, found.record.offset + offset, length);
           if (bytes.byteLength !== length) {
             throw new ContainerFormatError(
-              `資産 '${name}': 取得長 ${bytes.byteLength} が要求 ${length} と違う`,
+              `asset '${name}': fetched length ${bytes.byteLength} differs from the requested ${length}`,
             );
           }
           return bytes;
@@ -401,7 +404,9 @@ export const openContainer = async (
     // whole const region, so the integrity of the extracted bytes cannot be checked (readBlock checks
     // per-block hashes, but nobody checks the padding outside the blocks).
     if (model === undefined) {
-      throw new ContainerFormatError("krg 抽出は krm からだけ（krg 入力は抽出元にならない — §9）");
+      throw new ContainerFormatError(
+        "krg extraction works only from a krm (a krg input cannot be an extraction source — §9)",
+      );
     }
     const regionLength = graph.const.length;
     const region =
@@ -410,7 +415,7 @@ export const openContainer = async (
         : await source.read(1, 0, regionLength);
     if (region.byteLength !== regionLength) {
       throw new ContainerFormatError(
-        `const 領域: 取得長 ${region.byteLength} が宣言 ${regionLength} と違う`,
+        `const region: fetched length ${region.byteLength} differs from the declared ${regionLength}`,
       );
     }
     // The integrity of part 1 is held by parts[0] of the model descriptor. Verify it before
@@ -418,7 +423,7 @@ export const openContainer = async (
     const actual = await sha256Hex(region);
     if (actual !== model.parts[0].sha256) {
       throw new ContainerFormatError(
-        `const 領域の sha256 が宣言と違う（宣言 ${model.parts[0].sha256} / 実物 ${actual}）`,
+        `const region sha256 differs from the declared value (declared ${model.parts[0].sha256} / actual ${actual})`,
       );
     }
     return assembleGraphContainer(graphBytes.slice(), region.slice());

@@ -59,7 +59,7 @@ describe("Gemmaのquant実行設定", () => {
       assertThrows(
         () => resolve(fast, { linearGemvReduce }, "test"),
         ModelInputError,
-        "linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+        "supports only linearGemvReduce: parallel / linearCompute: f32",
       );
       assertEquals(
         resolve(
@@ -76,7 +76,7 @@ describe("Gemmaのquant実行設定", () => {
     assertThrows(
       () => resolve({}, { fuseLinearStaticQuantize: true }, "test"),
       ModelInputError,
-      "linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+      "supports only linearGemvReduce: parallel / linearCompute: f32",
     );
     assertEquals(
       resolve(
@@ -102,12 +102,12 @@ describe("Gemmaのquant実行設定", () => {
     assertThrows(
       () => resolve({ packedStaticQuantize: true }, {}, "test"),
       Error,
-      "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+      "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
     );
     assertThrows(
       () => resolve({}, { packedStaticQuantize: true }, "test"),
       ModelInputError,
-      "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+      "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
     );
     assertThrows(
       () =>
@@ -121,7 +121,7 @@ describe("Gemmaのquant実行設定", () => {
           "test",
         ),
       ModelInputError,
-      "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+      "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
     );
   });
   it("stateAttentionReduceは他の欄と同じ規則で解け、宣言が無ければ欄を作らない", () => {
@@ -230,7 +230,7 @@ describe("Gemmaのquant実行設定", () => {
     assertThrows(
       () => resolve({ linearGemvReduce: "sequential" }, { fuseLinearStaticQuantize: true }, "test"),
       ModelInputError,
-      "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+      "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
     );
     assertEquals(
       resolve({ packedStaticQuantize: true, linearGemvReduce: "parallel" }, {}, "test"),
@@ -249,7 +249,7 @@ describe("Gemmaのquant実行設定", () => {
           "test",
         ),
       ModelInputError,
-      "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+      "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
     );
   });
 });
@@ -262,7 +262,7 @@ describe("Gemmaのquant実行設定（明示指定だけの門）", () => {
     assertThrows(
       () => assertGemmaSessionOverrides({ fuseLinearStaticQuantize: true }, "test"),
       ModelInputError,
-      "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+      "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
     );
     const bogus = {};
     Object.defineProperty(bogus, "fuseRmsNormAdd", { value: 1, enumerable: true });

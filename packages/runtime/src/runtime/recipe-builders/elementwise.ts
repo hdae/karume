@@ -465,8 +465,8 @@ export const buildMaskedFill = async (
   // The rule is the same as expand, but the diagnostic's subject is switched to masked_fill (an
   // "input of expand" message on a graph with no expand would point away from the cause).
   const maskStrides = expandSrcStrides(step.inputShapes[1], outShape, {
-    src: "masked_fill の mask",
-    out: "masked_fill の出力",
+    src: "masked_fill mask",
+    out: "masked_fill output",
   });
   const value = maskedFillValue(step.node.attrs, `nodes (${step.node.op})`);
   const { pipeline, layout, roles } = await face.state.cache.get(MASKED_FILL_KEY, MASKED_FILL_WGSL);

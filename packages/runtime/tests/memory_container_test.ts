@@ -98,16 +98,16 @@ describe("openMemoryContainer: 宣言との対応", () => {
     const error = assertThrows(
       () => openWith(baseDeclaration(), {}),
       ContainerFormatError,
-      "不足 [w, b]",
+      "missing [w, b]",
     );
-    assertEquals(error.message.includes("余剰 []"), true, error.message);
+    assertEquals(error.message.includes("surplus []"), true, error.message);
   });
 
   it("宣言に無い initializer の供給を余剰として落とす", () => {
     assertThrows(
       () => openWith(baseDeclaration(), { ...baseSupply(), z: biasTensor() }),
       ContainerFormatError,
-      "余剰 [z]",
+      "surplus [z]",
     );
   });
 
@@ -115,7 +115,7 @@ describe("openMemoryContainer: 宣言との対応", () => {
     assertThrows(
       () => openWith(baseDeclaration(), baseSupply(), "other"),
       ContainerFormatError,
-      "供給に未宣言のグラフ 'other' がある",
+      "Supply has an undeclared graph 'other'",
     );
   });
 
@@ -127,7 +127,7 @@ describe("openMemoryContainer: 宣言との対応", () => {
           b: biasTensor(),
         }),
       ContainerFormatError,
-      "pieces は 2 本以上",
+      "pieces must have 2 or more entries",
     );
   });
 });
@@ -141,7 +141,7 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
           w: { bytes: f32Bytes(new Array(13).fill(0.5)), encoding: { codec: "f32" } },
         }),
       ContainerFormatError,
-      "payload 48 バイト + 詰め物",
+      "payload 48 bytes + padding",
     );
   });
 
@@ -153,7 +153,7 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
           w: { bytes: f32Bytes(new Array(11).fill(0.5)), encoding: { codec: "f32" } },
         }),
       ContainerFormatError,
-      "payload 48 バイト + 詰め物",
+      "payload 48 bytes + padding",
     );
   });
 
@@ -173,7 +173,7 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
           b: biasTensor(),
         }),
       ContainerFormatError,
-      "payload 16 バイト + 詰め物",
+      "payload 16 bytes + padding",
     );
   });
 
@@ -196,7 +196,7 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
           b: biasTensor(),
         }),
       ContainerFormatError,
-      "scale の byteOffset 1 が 4 バイト整列でない",
+      "scale byteOffset 1 is not 4-byte aligned",
     );
   });
 
@@ -221,7 +221,7 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
           b: biasTensor(),
         }),
       ContainerFormatError,
-      "が二重に束縛されている",
+      "is bound twice",
     );
   });
 
@@ -245,7 +245,7 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
     await assertRejects(
       () => container.readBlock(`${GRAPH_NAME}/q#piece1`),
       ContainerFormatError,
-      "取得長 64 が宣言 32 と違う",
+      "fetched length 64 differs from the declared 32",
     );
   });
 });
@@ -262,7 +262,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
           b: biasTensor(),
         }),
       ContainerFormatError,
-      "行 1 から続かない",
+      "does not continue from row 1",
     );
   });
 
@@ -277,7 +277,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
           b: biasTensor(),
         }),
       ContainerFormatError,
-      "宣言 shape の先頭次元 4 行に届かない",
+      "falls short of / exceeds the leading dimension of the declared shape, 4 rows",
     );
   });
 
@@ -293,7 +293,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
           b: biasTensor(),
         }),
       ContainerFormatError,
-      "末尾 5 行が宣言 shape の先頭次元 4 行に届かない / 超える",
+      "ends at row 5, which falls short of / exceeds the leading dimension of the declared shape, 4 rows",
     );
   });
 
@@ -310,7 +310,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
           b: biasTensor(),
         }),
       ContainerFormatError,
-      "piece[1]: 行範囲 [2, 2) が空区間",
+      "piece[1]: row range [2, 2) is an empty range",
     );
   });
 
@@ -325,7 +325,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
           b: biasTensor(),
         }),
       ContainerFormatError,
-      "piece[0]: 行範囲の 開始 -1 が非負の安全整数でない",
+      "piece[0]: row range start -1 is not a non-negative safe integer",
     );
   });
 
@@ -342,7 +342,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
           b: biasTensor(),
         }),
       ContainerFormatError,
-      "非負の安全整数でない",
+      "is not a non-negative safe integer",
     );
   });
 
@@ -363,7 +363,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
           },
         }),
       ContainerFormatError,
-      "中間 piece の行範囲のバイト数 6 が 4 の倍数でない",
+      "byte count 6 of a middle piece's row range is not a multiple of 4",
     );
   });
 
@@ -373,7 +373,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     assertThrows(
       () => openWith(graph, baseSupply()),
       ContainerFormatError,
-      "意味論 dtype 'i32' に codec 'f32' は組めない",
+      "semantic dtype 'i32' cannot be paired with codec 'f32'",
     );
   });
 
@@ -385,7 +385,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
           b: biasTensor(),
         }),
       ContainerFormatError,
-      "codec 'int8-sym' は scale と groupSize が要る",
+      "codec 'int8-sym' needs scale and groupSize",
     );
   });
 
@@ -397,7 +397,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
           b: { bytes: f32Bytes([1, 2, 3]), encoding: { codec: "f32", scale: qScale() } },
         }),
       ContainerFormatError,
-      "codec 'f32' は scale / groupSize / rowAxis を持てない",
+      "codec 'f32' cannot have scale / groupSize / rowAxis",
     );
   });
 });
@@ -487,7 +487,7 @@ describe("openMemoryContainer: codec 別の rowAxis（合流層）", () => {
           }),
         ),
       ContainerFormatError,
-      "codec 'int4-sym-g' の rowAxis は 0 だけ（宣言は 1",
+      "rowAxis of codec 'int4-sym-g' must be 0 only (declared 1",
     );
   });
 
@@ -505,7 +505,7 @@ describe("openMemoryContainer: codec 別の rowAxis（合流層）", () => {
           }),
         ),
       ContainerFormatError,
-      "codec 'int2-off' の rowAxis は 0 だけ（宣言は 1",
+      "rowAxis of codec 'int2-off' must be 0 only (declared 1",
     );
   });
 
@@ -542,7 +542,7 @@ describe("openMemoryContainer: 行数 0 の量子化重み（合流層）", () =
           b: { bytes: new Uint8Array(0), encoding: { codec: "f32" } },
         }),
       ContainerFormatError,
-      "initializer 'q': 行数 0（shape[0] = 0）の量子化重みは受理しない",
+      "initializer 'q': quantized weights with 0 rows (shape[0] = 0) are not accepted",
     );
   });
 
@@ -560,7 +560,7 @@ describe("openMemoryContainer: 行数 0 の量子化重み（合流層）", () =
           }),
         ),
       ContainerFormatError,
-      "initializer 'q': 行数 0（shape[1] = 0）の量子化重みは受理しない",
+      "initializer 'q': quantized weights with 0 rows (shape[1] = 0) are not accepted",
     );
   });
 });
@@ -597,7 +597,7 @@ describe("openMemoryContainer: 合成した目次", () => {
     await assertRejects(
       () => container.readBlock(`${GRAPH_NAME}/missing`),
       ContainerFormatError,
-      "未宣言の block",
+      "Undeclared block",
     );
   });
 

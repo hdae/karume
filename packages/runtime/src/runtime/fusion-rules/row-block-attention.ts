@@ -109,29 +109,29 @@ export const planRowBlocks = (
   const cap = typeof limit === "number" ? rowBlockLimit(limit, undefined) : limit;
   const byBudget = cap.source === "attentionRowBlockMaxBytes";
   const where =
-    `行ブロック分割（行 ${rows} × ${bytesPerRow}B / 上限 ${cap.bytes}B` +
-    `${byBudget ? " — 予算 attentionRowBlockMaxBytes" : ""}）`;
+    `row-block split (rows ${rows} × ${bytesPerRow}B / limit ${cap.bytes}B` +
+    `${byBudget ? " — budget attentionRowBlockMaxBytes" : ""})`;
   for (const [name, value] of [
-    ["行数", rows],
-    ["1 行のバイト数", bytesPerRow],
+    ["row count", rows],
+    ["bytes per row", bytesPerRow],
   ] as const) {
     if (!Number.isSafeInteger(value) || value < 1) {
-      throw new ExecutionError(`${where}: ${name} は正整数（${value}）`);
+      throw new ExecutionError(`${where}: ${name} must be a positive integer (${value})`);
     }
   }
   if (bytesPerRow > cap.bytes) {
     throw new ExecutionError(
       byBudget
-        ? `${where}: クエリ 1 行ぶんの一時 ${bytesPerRow}B が既に予算 attentionRowBlockMaxBytes を` +
-            "超える（行ブロックでは分割しきれない — 予算を 1 行ぶん以上にすること）"
-        : `${where}: クエリ 1 行ぶんの一時 ${bytesPerRow}B が既にストレージ束縛の上限を超える` +
-            "（行ブロックでは分割しきれない形）",
+        ? `${where}: the temporary for one query row, ${bytesPerRow}B, already exceeds the budget attentionRowBlockMaxBytes` +
+            " (row blocks cannot split it — set the budget to at least one row)"
+        : `${where}: the temporary for one query row, ${bytesPerRow}B, already exceeds the storage binding limit` +
+            " (a shape row blocks cannot split)",
     );
   }
   const count = forced ?? Math.ceil(rows / Math.floor(cap.bytes / bytesPerRow));
   if (!Number.isSafeInteger(count) || count < 1 || count > rows) {
     throw new ExecutionError(
-      `${where}: 枚数 ${count} は 1 以上 ${rows} 以下の整数でなければならない`,
+      `${where}: the block count ${count} must be an integer from 1 to ${rows}`,
     );
   }
   const base = Math.floor(rows / count);
@@ -139,8 +139,8 @@ export const planRowBlocks = (
   const widest = base + (remainder > 0 ? 1 : 0);
   if (widest * bytesPerRow > cap.bytes) {
     throw new ExecutionError(
-      `${where}: ${count} 枚では 1 枚 ${widest * bytesPerRow}B が` +
-        `${byBudget ? "予算 attentionRowBlockMaxBytes " : "上限"}に収まらない`,
+      `${where}: with ${count} blocks, one block of ${widest * bytesPerRow}B does not fit ` +
+        `${byBudget ? "the budget attentionRowBlockMaxBytes" : "the limit"}`,
     );
   }
   const blocks: RowBlock[] = [];
@@ -285,7 +285,7 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       return undefined;
     // The reduction axis is fixed to the last dimension (the contract already checks it, but it is
     // stated again as part of the window's accepted set).
-    if (softmaxDim(softmax.node.attrs ?? {}, "行ブロック attention の safe_softmax") !== 3) {
+    if (softmaxDim(softmax.node.attrs ?? {}, "row-block attention safe_softmax") !== 3) {
       return undefined;
     }
     if (!internalsArePrivate(chain, context)) return undefined;
@@ -344,7 +344,7 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       // ① QK: only A (q) is read with the full-M stride + row offset; S is written as a block.
       const qkV4 = gemmUsesVec4(headDim, keys);
       const qkGeometry = gemmGeometryForRows(rows);
-      const qkWhere = `行ブロック bmm(QK) [${heads},${rows},${headDim}] × [${heads},${headDim},${keys}]`;
+      const qkWhere = `row-block bmm(QK) [${heads},${rows},${headDim}] × [${heads},${headDim},${keys}]`;
       dispatches.push({
         key: bmmKey(qkV4, rows, windowed ? "a" : undefined),
         wgsl: () => bmmWgsl(qkV4, rows, windowed ? "a" : undefined),
@@ -403,7 +403,7 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       // offset.
       const pvV4 = gemmUsesVec4(keys, headDim);
       const pvGeometry = gemmGeometryForRows(rows);
-      const pvWhere = `行ブロック bmm(PV) [${heads},${rows},${keys}] × [${heads},${keys},${headDim}]`;
+      const pvWhere = `row-block bmm(PV) [${heads},${rows},${keys}] × [${heads},${keys},${headDim}]`;
       dispatches.push({
         key: bmmKey(pvV4, rows, windowed ? "c" : undefined),
         wgsl: () => bmmWgsl(pvV4, rows, windowed ? "c" : undefined),

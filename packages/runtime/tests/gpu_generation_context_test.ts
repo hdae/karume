@@ -309,12 +309,12 @@ test.skipIf(!GPU_AVAILABLE)(
       );
 
       // dispose 済み context の操作は fail loudly（読みも含む — 実体はもう無い）。
-      assertThrows(() => context.pastLength, ExecutionError, "dispose 済み");
-      assertThrows(() => context.rewind(0), ExecutionError, "dispose 済み");
+      assertThrows(() => context.pastLength, ExecutionError, "disposed");
+      assertThrows(() => context.rewind(0), ExecutionError, "disposed");
       // 内部面は dispose の**2 段目**（破棄本体が走った後）で閉じる — ここは await 済みなので
       // 2 段目まで済んでいる。
-      assertThrows(() => internals(context).advance(0, 1), ExecutionError, "dispose 済み");
-      assertThrows(() => internals(context).pastLength(), ExecutionError, "dispose 済み");
+      assertThrows(() => internals(context).advance(0, 1), ExecutionError, "disposed");
+      assertThrows(() => internals(context).pastLength(), ExecutionError, "disposed");
 
       // context は Session より長生きできる（dispose の順序に依存を作らない）。
       await session.dispose();
@@ -341,7 +341,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const disposal = session.dispose();
       await disposal;
       const error = await assertRejects(() => pending, ExecutionError);
-      assert(error.message.includes("dispose 済みの Session"), error.message);
+      assert(error.message.includes("disposed Session"), error.message);
       assertEquals(
         session.diagnostics().stateBacking,
         { residentBytes: 0, contextCount: 0, rebindCount: 0 },
@@ -368,7 +368,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => session.createGenerationContext({ chunkLength: 1 }),
         ExecutionError,
       );
-      assert(error.message.includes("states 宣言を持たない"), error.message);
+      assert(error.message.includes("has no states declarations"), error.message);
       assertEquals(session.diagnostics().stateBacking.contextCount, 0);
     } finally {
       await session.dispose();
@@ -397,21 +397,21 @@ test.skipIf(!GPU_AVAILABLE)(
         () => symbolic.createGenerationContext({ chunkLength: 2 }),
         ExecutionError,
       );
-      assert(unbound.message.includes("'C' が束縛されていない"), unbound.message);
+      assert(unbound.message.includes("unbound symbol 'C'"), unbound.message);
 
       // symbols に無い束縛も fail loudly（綴り違いが黙って無視されない）。
       const unknown = await assertRejects(
         () => symbolic.createGenerationContext({ chunkLength: 2, bindings: { D: 8 } }),
         ExecutionError,
       );
-      assert(unknown.message.includes("束縛 'D'"), unknown.message);
+      assert(unknown.message.includes("Binding 'D'"), unknown.message);
 
       // 容量 0 の束縛は「実体を持てないスロット」なので拒否。
       const empty = await assertRejects(
         () => symbolic.createGenerationContext({ chunkLength: 2, bindings: { C: 0 } }),
         ExecutionError,
       );
-      assert(empty.message.includes("容量 0"), empty.message);
+      assert(empty.message.includes("capacity 0"), empty.message);
 
       // 解決できた記号容量はそのまま物理容量になる（入力 `cap` は 1 度も渡していない）。
       const context = await symbolic.createGenerationContext({
@@ -464,8 +464,8 @@ test.skipIf(!GPU_AVAILABLE)(
           () => session.createGenerationContext({ chunkLength: 1 }),
           ExecutionError,
         );
-        assert(error.message.includes(`${slotBytes} バイト`), error.message);
-        assert(error.message.includes(`${CORE_STORAGE_BINDING_LIMIT} バイト`), error.message);
+        assert(error.message.includes(`${slotBytes} bytes`), error.message);
+        assert(error.message.includes(`${CORE_STORAGE_BINDING_LIMIT} bytes`), error.message);
         assertEquals(
           session.diagnostics().stateBacking.contextCount,
           0,
@@ -521,7 +521,7 @@ test.skipIf(!GPU_AVAILABLE || BINDING_LIMIT < OOM_SLOT_BYTES)(
         () => session.createGenerationContext({ chunkLength: 1 }),
         GpuOutOfMemoryError,
       );
-      assert(error.message.startsWith("GenerationContext の state 確保: "), error.message);
+      assert(error.message.startsWith("GenerationContext state allocation: "), error.message);
       assertEquals(session.diagnostics().stateBacking.contextCount, 0);
       // Dawn releases a destroyed allocation only once the submission serial that follows the
       // destroy() has completed (wgpu freed it at destroy()); with nothing submitted since, the
@@ -599,7 +599,7 @@ test.skipIf(!GPU_AVAILABLE)(
 
     gpu.destroy();
     const error = await assertRejects(() => pending, GpuDeviceLostError);
-    assert(error.message.includes("GenerationContext の state 確保"), error.message);
+    assert(error.message.includes("GenerationContext state allocation"), error.message);
     assertEquals(injected.destroyCounts, [1, 1, 1], "消失でも確保物は 1 本残らず返る");
   },
 );
@@ -737,9 +737,9 @@ test.skipIf(!GPU_AVAILABLE)(
       // 捕捉 P が現在値と割れた進行は fail loudly（リースがあれば起きない = 内部の不変条件破れ）。
       for (const captured of [4, 6]) {
         const split = assertThrows(() => internals(context).advance(captured, 1), ExecutionError);
-        assert(split.message.includes("食い違う"), split.message);
+        assert(split.message.includes("differs from"), split.message);
       }
-      assertThrows(() => internals(context).writeLengths(4, 1), ExecutionError, "食い違う");
+      assertThrows(() => internals(context).writeLengths(4, 1), ExecutionError, "differs from");
       assertEquals(context.pastLength, 5, "拒否された進行は論理長を動かさない");
 
       context.rewind(2);
@@ -782,7 +782,7 @@ test.skipIf(!GPU_AVAILABLE)(
         internals(context).advance(0, U32_MAX);
         assertEquals(context.pastLength, U32_MAX);
         const overflow = assertThrows(() => internals(context).advance(U32_MAX, 1), ExecutionError);
-        assert(overflow.message.includes("u32 の上限"), overflow.message);
+        assert(overflow.message.includes("u32 limit"), overflow.message);
         assertEquals(context.pastLength, U32_MAX, "拒否された進行は論理長を動かさない");
         // rewind の位置も pastLength を上限に持つので u32 を超えられない。
         assertThrows(() => context.rewind(U32_MAX + 1), ExecutionError, "rewind");
@@ -829,7 +829,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => internals(context).writeLengths(2, 1),
       ]) {
         const error = assertThrows(operation, ExecutionError);
-        assert(error.message.includes("汚染された"), error.message);
+        assert(error.message.includes("poisoned"), error.message);
         assert(
           error.message.includes("state 変更 dispatch を含む run が失敗した"),
           `真因が残っていない: ${error.message}`,
@@ -1059,7 +1059,7 @@ test.skipIf(!GPU_AVAILABLE)(
       generation.context = second;
       // リースは発行時の写し（= first）に立つ。書き換え後もこちらが「進行中 run あり」で落ちる。
       const blocked = assertThrows(() => first.rewind(0), ExecutionError);
-      assert(blocked.message.includes("進行中の generation run"), blocked.message);
+      assert(blocked.message.includes("generation run is in progress"), blocked.message);
       // 差し替え先は run に一切関与しないので、巻き戻しは素通りする（リースが漏れていない証拠）。
       second.rewind(0);
       await running;
@@ -1092,7 +1092,7 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(second.status, "rejected");
       assert(second.status === "rejected");
       assert(second.reason instanceof ExecutionError, `拒否の型が違う: ${String(second.reason)}`);
-      assert(second.reason.message.includes("並行発行"), second.reason.message);
+      assert(second.reason.message.includes("issued concurrently"), second.reason.message);
       assertEquals(context.pastLength, 1, "進んだのは 1 本目のぶんだけ");
 
       // 別 context への並行発行は従来どおり成立する（塞ぐのは同一 context だけ）。
@@ -1159,9 +1159,9 @@ test.skipIf(!GPU_AVAILABLE)(
         () => session.run({ x: RUN_INPUT }, {}, { context, queryLength: 1 }),
         ExecutionError,
       );
-      assert(rejected.message.includes("commit 待ち"), rejected.message);
+      assert(rejected.message.includes("awaiting commit"), rejected.message);
       const blocked = assertThrows(() => context.rewind(0), ExecutionError);
-      assert(blocked.message.includes("commit 待ち"), blocked.message);
+      assert(blocked.message.includes("awaiting commit"), blocked.message);
 
       // 値域: 非負整数 / 書いた行数まで。拒否は保留も論理長も動かさない。
       for (const rows of [-1, 1.5, 4]) {
@@ -1177,7 +1177,7 @@ test.skipIf(!GPU_AVAILABLE)(
 
       // 保留が無い commit は fail loudly（黙って no-op にすると受理行数が二重に効く）。
       const orphan = assertThrows(() => context.commit(1), ExecutionError);
-      assert(orphan.message.includes("確定待ちの generation run が無い"), orphan.message);
+      assert(orphan.message.includes("no generation run is awaiting commit"), orphan.message);
 
       // 次の run が載せる past は commit 後の値（ホストの簿記と GPU が見る値が一致している）。
       await session.run({ x: RUN_INPUT }, {}, { context, queryLength: 1 });
@@ -1200,7 +1200,7 @@ test.skipIf(!GPU_AVAILABLE)(
           ),
         ExecutionError,
       );
-      assert(spelling.message.includes("'immediate' か 'deferred'"), spelling.message);
+      assert(spelling.message.includes("'immediate' or 'deferred'"), spelling.message);
       assertEquals(context.pastLength, 4, "拒否された run は論理長も保留も動かさない");
       assertEquals(context.pendingCommit, undefined);
     } finally {
@@ -1263,8 +1263,8 @@ test.skipIf(!GPU_AVAILABLE)(
       await session.run({ x: RUN_INPUT }, {}, { context, queryLength: 2, commit: "deferred" });
       assertEquals(context.pendingCommit, { pastLength: 0, queryLength: 2 });
       await context.dispose();
-      assertThrows(() => context.commit(1), ExecutionError, "dispose 済み");
-      assertThrows(() => context.pendingCommit, ExecutionError, "dispose 済み");
+      assertThrows(() => context.commit(1), ExecutionError, "disposed");
+      assertThrows(() => context.pendingCommit, ExecutionError, "disposed");
     } finally {
       await session.dispose();
       gpu.destroy();
@@ -1341,7 +1341,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => sliding.run({ x: RUN_INPUT }, {}, { context, queryLength: 2, commit: "deferred" }),
         ExecutionError,
       );
-      assert(rejected.message.includes("余裕 1"), rejected.message);
+      assert(rejected.message.includes("slack 1"), rejected.message);
       assertEquals(context.pendingCommit, undefined);
       assertEquals(context.pastLength, 0);
       // immediate は全行を確定させるので上限は chunkLength のまま。
@@ -1641,7 +1641,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const second = source.fork();
       const disposal = source.dispose();
       // dispose 要求の後の fork は拒否される（拒否の (a)）。
-      const late = assertRejects(() => source.fork(), ExecutionError, "dispose 済み");
+      const late = assertRejects(() => source.fork(), ExecutionError, "disposed");
       forks.push(...(await Promise.all([first, second])));
       await disposal;
       await late;
@@ -1681,12 +1681,12 @@ test.skipIf(!GPU_AVAILABLE)(
       // (c) 汚染の後（背後の物理 state が失われた context を写させない）。
       const poisoned = await fresh();
       internals(poisoned).poison("テストの故障注入");
-      await assertRejects(() => poisoned.fork(), ExecutionError, "汚染された");
+      await assertRejects(() => poisoned.fork(), ExecutionError, "poisoned");
 
       // (d) 決着していない run（予約は発行の同期区間で立つので、await しない並びで踏める）。
       const busy = await fresh();
       const running = forkStep(session, busy, 1, 0);
-      await assertRejects(() => busy.fork(), ExecutionError, "進行中の generation run");
+      await assertRejects(() => busy.fork(), ExecutionError, "generation run is in progress");
       await running;
       contexts.push(await busy.fork());
 
@@ -1699,7 +1699,11 @@ test.skipIf(!GPU_AVAILABLE)(
           generation: { context: batched, queryLength: 1 },
           copyOutputs: { o: sink },
         });
-        await assertRejects(() => batched.fork(), ExecutionError, "batch の最終決着待ち");
+        await assertRejects(
+          () => batched.fork(),
+          ExecutionError,
+          "waiting for the final settlement of a batch",
+        );
       } finally {
         await batch.finish();
       }
@@ -1716,7 +1720,7 @@ test.skipIf(!GPU_AVAILABLE)(
           commit: "deferred",
         },
       );
-      await assertRejects(() => deferred.fork(), ExecutionError, "commit 待ち");
+      await assertRejects(() => deferred.fork(), ExecutionError, "awaiting commit");
       deferred.commit(1);
       contexts.push(await deferred.fork());
 
@@ -1731,10 +1735,17 @@ test.skipIf(!GPU_AVAILABLE)(
       await session.dispose();
       const crossed = await assertRejects(() => pending, ExecutionError);
       // 文言は fork の文脈つき（create の文言と読み分ける）。
-      assert(crossed.message.includes("fork: dispose 済みの Session"), crossed.message);
+      assert(
+        crossed.message.includes("fork: cannot fork a GenerationContext on a disposed Session"),
+        crossed.message,
+      );
       assertEquals(session.diagnostics().stateBacking, before, "確保した複製が生存集合に残った");
       // (h) 呼んだ時点で dispose 済みの Session。
-      await assertRejects(() => target.fork(), ExecutionError, "fork: dispose 済みの Session");
+      await assertRejects(
+        () => target.fork(),
+        ExecutionError,
+        "fork: cannot fork a GenerationContext on a disposed Session",
+      );
       assertEquals(target.pastLength, 0, "拒否された fork は元を汚さない");
     } finally {
       for (const context of contexts) await context.dispose();

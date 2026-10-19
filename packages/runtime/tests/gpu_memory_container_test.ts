@@ -420,7 +420,7 @@ describe.skipIf(!GPU_AVAILABLE)("memory container session", () => {
       await assertRejects(
         () => createSessionFromContainer(gpu, opened, "main"),
         ContainerFormatError,
-        "重みの供給が無い",
+        "no weight supply",
       );
     } finally {
       gpu.destroy();

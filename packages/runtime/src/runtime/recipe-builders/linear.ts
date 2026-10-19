@@ -174,7 +174,7 @@ export const buildLinear = async (
   const m = numel(x.slice(0, -1));
   const weightStorage = face.weightStorage(step);
   if (weightStorage === "i2" && face.state.linearCompute !== "f32") {
-    throw new ExecutionError("linear: i2 常駐は linearCompute 'f32' のみ対応（ADR 0097）");
+    throw new ExecutionError("linear: i2 residency supports only linearCompute 'f32' (ADR 0097)");
   }
   // If a linear declared to receive packed activations (ADR 0105) does not land on the parallel
   // GEMV, f32 words flow into the `vec4<u32>` binding = a silent wrong value with no exception.
@@ -195,7 +195,7 @@ export const buildLinear = async (
     if (!eligible) {
       throw new ExecutionError(
         `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
-          "packed 活性（ADR 0105）と宣言されたが並列 GEMV へ落ちない",
+          "declared as packed activations (ADR 0105) but does not land on the parallel GEMV",
       );
     }
   }
@@ -231,8 +231,8 @@ export const buildLinear = async (
   if (compute === "f16" && weightStorage === "i8") {
     throw new ExecutionError(
       `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
-        "linearCompute 'f16' は i8 常駐の重みとは組めない（w8a16 は未実装 — ADR 0028）。" +
-        "linearCompute を 'a8' にするか、この重みを f32 / f16 格納で持つこと",
+        "linearCompute 'f16' cannot be combined with i8-resident weights (w8a16 is not implemented — ADR 0028). " +
+        "Set linearCompute to 'a8', or store this weight as f32 / f16",
     );
   }
   // The same for i4 (w4a16 is not implemented — ADR 0069; the reason for not silently dropping to
@@ -240,8 +240,8 @@ export const buildLinear = async (
   if (compute === "f16" && weightStorage === "i4") {
     throw new ExecutionError(
       `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
-        "linearCompute 'f16' は i4 常駐の重みとは組めない（w4a16 は未実装 — ADR 0069）。" +
-        "linearCompute を 'a8' にするか、この重みを f32 / f16 格納で持つこと",
+        "linearCompute 'f16' cannot be combined with i4-resident weights (w4a16 is not implemented — ADR 0069). " +
+        "Set linearCompute to 'a8', or store this weight as f32 / f16",
     );
   }
   const v4 = gemmUsesVec4(k, n);
@@ -508,8 +508,8 @@ const buildLinearI8a8 = async (
   const groupSize = weightStorage === "i4" ? face.weightGroupSize(step) : undefined;
   if (groupSize === undefined && k > LINEAR_I8A8_MAX_K) {
     throw new ExecutionError(
-      `${where}: k=${k} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
-        "（linearCompute を 'f32' にするか、この linear を i8 常駐から外す）",
+      `${where}: k=${k} exceeds the i32 reduction guard ${LINEAR_I8A8_MAX_K} of the i8a8 path` +
+        " (set linearCompute to 'f32', or take this linear off i8 residency)",
     );
   }
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;

@@ -429,7 +429,7 @@ This is a state that lacks the check of "consistency between the quant preset an
 
 In `deno task test:models:wan`, the step of `e2e_wan_dit_test.ts` "practical preset `f16+dit8-a8-attn8-s16`, normal
 mode, S = 32,760" fails with
-**`GpuOutOfMemoryError: run のエンコードと readback: not enough memory left`**. In the lane it failed 2 times out of 2
+**`GpuOutOfMemoryError: run encoding and readback: not enough memory left`**. In the lane it failed 2 times out of 2
 (385 passed, 1 failed / 394 passed, 1 failed); running the same file alone with `--filter 実用席` is green 2 times out
 of 2. The failing step only records time and allocation, and all sha row and band comparisons pass.
 

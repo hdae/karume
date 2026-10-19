@@ -146,13 +146,13 @@ const resolveEncoding = (
   if (entry.scale === "forbidden") {
     if (input.scale !== undefined || input.groupSize !== undefined || input.rowAxis !== undefined) {
       throw new ContainerFormatError(
-        `${where}: codec '${input.codec}' は scale / groupSize / rowAxis を持てない`,
+        `${where}: codec '${input.codec}' cannot have scale / groupSize / rowAxis`,
       );
     }
     return { codec: input.codec, packing: entry.packing };
   }
   if (input.scale === undefined || input.groupSize === undefined || scaleBlock === undefined) {
-    throw new ContainerFormatError(`${where}: codec '${input.codec}' は scale と groupSize が要る`);
+    throw new ContainerFormatError(`${where}: codec '${input.codec}' needs scale and groupSize`);
   }
   return {
     codec: input.codec,
@@ -198,7 +198,7 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
     // `/` in an initializer name / graph name); the naming rules themselves are not changed.
     if (located.has(id)) {
       throw new ContainerFormatError(
-        `合成した block '${id}' が二重に束縛されている（1 block ≤ 1 binding — initializer 名 / グラフ名が id の区切り '#' / '/' を含んでいる）`,
+        `Synthesized block '${id}' is bound twice (1 block ≤ 1 binding — an initializer name / graph name contains the id separator '#' / '/')`,
       );
     }
     located.set(id, { part, record: { id, offset: 0, length }, read });
@@ -206,7 +206,7 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
 
   for (const graphName of Object.keys(input.tensors)) {
     if (!Object.hasOwn(input.graphs, graphName)) {
-      throw new ContainerFormatError(`供給に未宣言のグラフ '${graphName}' がある`);
+      throw new ContainerFormatError(`Supply has an undeclared graph '${graphName}'`);
     }
   }
 
@@ -242,9 +242,9 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
     const surplus = Object.keys(supplied).filter((name) => !expected.includes(name));
     if (missing.length > 0 || surplus.length > 0) {
       throw new ContainerFormatError(
-        `グラフ '${graphName}' の供給が initializer 宣言と一致しない: 不足 [${missing.join(
+        `Supply of graph '${graphName}' does not match the initializer declarations: missing [${missing.join(
           ", ",
-        )}] / 余剰 [${surplus.join(", ")}]（shared 宣言は供給しない）`,
+        )}] / surplus [${surplus.join(", ")}] (shared declarations are not supplied)`,
       );
     }
     const supplies: Record<string, WeightSupply> = Object.create(null);
@@ -264,7 +264,7 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
         // position"). Letting an unaligned view through raises a bare RangeError there, disguised
         // as a message from the transfer layer.
         throw new ContainerFormatError(
-          `${where}: scale の byteOffset ${scale.byteOffset} が ${SCALE_ALIGN} バイト整列でない（${SCALE_ALIGN} バイト整列した view を渡す）`,
+          `${where}: scale byteOffset ${scale.byteOffset} is not ${SCALE_ALIGN}-byte aligned (pass a ${SCALE_ALIGN}-byte aligned view)`,
         );
       }
       let scalePart: number;
@@ -276,7 +276,9 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
         supplies[name] = { block: id, encoding };
       } else {
         if (tensor.pieces.length < 2) {
-          throw new ContainerFormatError(`${where}: pieces は 2 本以上（1 本なら bytes で渡す）`);
+          throw new ContainerFormatError(
+            `${where}: pieces must have 2 or more entries (pass bytes for one)`,
+          );
         }
         const shape = declaration.values[name].shape.map(Number);
         const rowBytes = pieceRowBytes(encoding.codec, shape, where);
@@ -302,7 +304,7 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
 
   const locate: Locator = (id, by) => {
     const found = located.get(id);
-    if (found === undefined) throw new ContainerFormatError(`${by}: 未宣言の block '${id}'`);
+    if (found === undefined) throw new ContainerFormatError(`${by}: undeclared block '${id}'`);
     return found;
   };
 
@@ -317,7 +319,7 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
     }),
     readBlock: async (id) => {
       const found = located.get(id);
-      if (found === undefined) throw new ContainerFormatError(`未宣言の block '${id}'`);
+      if (found === undefined) throw new ContainerFormatError(`Undeclared block '${id}'`);
       // Whole data and scales return **the passed buffer as is** (no copy — the MUST of
       // `BoundContainer`). A piece calls `read()` again on every call (nothing kept = one buffer's
       // worth of RAM).
@@ -329,7 +331,7 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
       // row range and reader would land on the GPU as a silent wrong value.
       if (bytes.byteLength !== found.record.length) {
         throw new ContainerFormatError(
-          `block '${id}': 取得長 ${bytes.byteLength} が宣言 ${found.record.length} と違う`,
+          `block '${id}': fetched length ${bytes.byteLength} differs from the declared ${found.record.length}`,
         );
       }
       return bytes;

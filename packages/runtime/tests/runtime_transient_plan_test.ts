@@ -271,9 +271,13 @@ test("消費計数の誤り（解放過多 / 解放漏れ）は fail loudly", ()
       releases: ["a"],
     },
   ];
-  assertThrows(() => planTransients(over, LOOSE), ExecutionError, "参照カウントが負");
+  assertThrows(() => planTransients(over, LOOSE), ExecutionError, "has a negative reference count");
   const leak: TransientProgram = [node("a", 8, [], 2), node("b", 8, ["a"], 0, { pinned: true })];
-  assertThrows(() => planTransients(leak, LOOSE), ExecutionError, "解放されない中間");
+  assertThrows(
+    () => planTransients(leak, LOOSE),
+    ExecutionError,
+    "intermediates are left unreleased",
+  );
 });
 
 test("同じプログラムからは常に同じ計画が出る（決定性）", () => {

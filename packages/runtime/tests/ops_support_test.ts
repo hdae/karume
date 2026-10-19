@@ -73,7 +73,7 @@ describe("assertRuntimeSupport: op の軸", () => {
     const error = assertThrows(
       () => assertRuntimeSupport(graphOf(graph), M0_SUPPORT),
       RuntimeSupportError,
-      "非対応 op (2)",
+      "unsupported op (2)",
     );
     assertEquals(error.message.includes("gelu, tanh"), true, error.message);
   });
@@ -88,10 +88,10 @@ describe("assertRuntimeSupport: op の軸", () => {
       () => assertRuntimeSupport(graphOf(graph), M0_SUPPORT),
       RuntimeSupportError,
       // 件数は「直すべき宣言の本数」— h は matmul の outs と add の ins の 2 箇所に現れるが 1 件
-      "非対応 意味論 dtype (2)",
+      "unsupported semantic dtype (2)",
     );
-    assertEquals(error.message.includes("値 'x': i32"), true, error.message);
-    assertEquals(error.message.includes("値 'h': bool"), true, error.message);
+    assertEquals(error.message.includes("value 'x': i32"), true, error.message);
+    assertEquals(error.message.includes("value 'h': bool"), true, error.message);
   });
 
   // エイリアス入力（同じ値を 2 回取るノード）で件数が水増しされないこと。
@@ -104,9 +104,9 @@ describe("assertRuntimeSupport: op の軸", () => {
     const error = assertThrows(
       () => assertRuntimeSupport(graphOf(graph), M0_SUPPORT),
       RuntimeSupportError,
-      "非対応 意味論 dtype (1)",
+      "unsupported semantic dtype (1)",
     );
-    assertEquals(error.message.includes("値 'h': bool"), true, error.message);
+    assertEquals(error.message.includes("value 'h': bool"), true, error.message);
   });
 
   // ノード起点の突合だけでは、どのノードも消費しない入力の dtype 違反が門を素通りする
@@ -118,9 +118,9 @@ describe("assertRuntimeSupport: op の軸", () => {
     const error = assertThrows(
       () => assertRuntimeSupport(graphOf(graph), M0_SUPPORT),
       RuntimeSupportError,
-      "非対応 意味論 dtype (1)",
+      "unsupported semantic dtype (1)",
     );
-    assertEquals(error.message.includes("値 'z': i32"), true, error.message);
+    assertEquals(error.message.includes("value 'z': i32"), true, error.message);
   });
 });
 
@@ -143,10 +143,10 @@ describe("assertRuntimeSupport: スロット別の受理集合", () => {
     const error = assertThrows(
       () => assertRuntimeSupport(graphOf(graph, []), RUNTIME_SUPPORT),
       RuntimeSupportError,
-      "非対応 意味論 dtype (2)",
+      "unsupported semantic dtype (2)",
     );
-    assertEquals(error.message.includes("値 'src': i32"), true, error.message);
-    assertEquals(error.message.includes("値 'idx': f32"), true, error.message);
+    assertEquals(error.message.includes("value 'src': i32"), true, error.message);
+    assertEquals(error.message.includes("value 'idx': f32"), true, error.message);
   });
 
   // 出力もスロット 0（値の側）と同型でなければ実行できない — 和で見ると gather の i32 出力が通る。
@@ -164,9 +164,9 @@ describe("assertRuntimeSupport: スロット別の受理集合", () => {
     const error = assertThrows(
       () => assertRuntimeSupport(graphOf(graph, []), RUNTIME_SUPPORT),
       RuntimeSupportError,
-      "非対応 意味論 dtype (1)",
+      "unsupported semantic dtype (1)",
     );
-    assertEquals(error.message.includes("値 'y': i32"), true, error.message);
+    assertEquals(error.message.includes("value 'y': i32"), true, error.message);
   });
 
   // 多出力 op（topk）の出力宣言を slot 間で**入れ替えた**形。全出力を slot 0 の受理集合で見る
@@ -190,10 +190,10 @@ describe("assertRuntimeSupport: スロット別の受理集合", () => {
     const error = assertThrows(
       () => assertRuntimeSupport(graphOf(graph, []), RUNTIME_SUPPORT),
       RuntimeSupportError,
-      "非対応 意味論 dtype (2)",
+      "unsupported semantic dtype (2)",
     );
-    assertEquals(error.message.includes("値 'v': i32"), true, error.message);
-    assertEquals(error.message.includes("値 'i': f32"), true, error.message);
+    assertEquals(error.message.includes("value 'v': i32"), true, error.message);
+    assertEquals(error.message.includes("value 'i': f32"), true, error.message);
   });
 });
 
@@ -205,7 +205,7 @@ describe("assertRuntimeSupport: attrs と格納の軸", () => {
     const error = assertThrows(
       () => assertRuntimeSupport(graphOf(graph), M0_SUPPORT),
       RuntimeSupportError,
-      "未実装 attrs (1)",
+      "unimplemented attrs (1)",
     );
     assertEquals(error.message.includes("nodes[1] (add): alpha, approximate"), true, error.message);
   });
@@ -230,10 +230,10 @@ describe("assertRuntimeSupport: attrs と格納の軸", () => {
     const error = assertThrows(
       () => assertRuntimeSupport(graphOf(baseDeclaration(), tensors), M0_SUPPORT),
       RuntimeSupportError,
-      "capability 不足",
+      "Missing runtime capabilities",
     );
-    assertEquals(error.message.includes("非対応 格納 'bf16' (1): b"), true, error.message);
-    assertEquals(error.message.includes("非対応 格納 'f16' (1): w"), true, error.message);
+    assertEquals(error.message.includes("unsupported storage 'bf16' (1): b"), true, error.message);
+    assertEquals(error.message.includes("unsupported storage 'f16' (1): w"), true, error.message);
   });
 
   it("対応表に載っている格納なら通る（門が恒真でないことの対照）", () => {

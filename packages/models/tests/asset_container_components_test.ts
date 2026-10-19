@@ -131,5 +131,5 @@ test("assetComponentOpener: 重みの part が欠けた列は part 数と宣言�
     () => openerOf({ "dit[0]": part(0), "dit[1]": part(1) }),
     ContainerFormatError,
   );
-  assertStringIncludes(error.message, "part が 2 本だが宣言は 3 本");
+  assertStringIncludes(error.message, "part count is 2 but 3 are declared");
 });

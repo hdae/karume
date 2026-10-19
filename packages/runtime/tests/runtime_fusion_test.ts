@@ -1015,7 +1015,7 @@ test("予算 attentionRowBlockMaxBytes は束縛上限との小さいほうで�
     4,
   );
   // 1 行ぶんに満たない予算は、掴めた窓を素の列へ落とさず予算を名指して fail loudly。
-  assertThrows(() => planWith(511), ExecutionError, "予算を 1 行ぶん以上にすること");
+  assertThrows(() => planWith(511), ExecutionError, "set the budget to at least one row");
 });
 
 test("行ブロック分割は上限に収まる最小枚数を等分で返し、収まらない形は fail loudly", () => {
@@ -1039,9 +1039,17 @@ test("行ブロック分割は上限に収まる最小枚数を等分で返し�
     { offset: 7, rows: 3 },
   ]);
   // 1 行でも収まらない形は fail loudly（黙って素の列へ落とすと確保が失敗するだけ）。
-  assertThrows(() => planRowBlocks(10, 1001, 1000), ExecutionError, "クエリ 1 行ぶんの一時");
+  assertThrows(
+    () => planRowBlocks(10, 1001, 1000),
+    ExecutionError,
+    "the temporary for one query row",
+  );
   // 強制枚数が上限に収まらないのも fail loudly（緩める向きには使えない）。
-  assertThrows(() => planRowBlocks(10, 100, 400, 2), ExecutionError, "2 枚では 1 枚 500B");
+  assertThrows(
+    () => planRowBlocks(10, 100, 400, 2),
+    ExecutionError,
+    "with 2 blocks, one block of 500B",
+  );
   // 行数より多い枚数・0 枚は取れない。
   assertThrows(() => planRowBlocks(10, 100, 1000, 11), ExecutionError);
   assertThrows(() => planRowBlocks(10, 100, 1000, 0), ExecutionError);

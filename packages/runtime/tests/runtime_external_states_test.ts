@@ -141,7 +141,7 @@ test("external スロットへの state_append は拒否する（書けるのは
       });
     }),
   );
-  assertThrows(() => validateGraphContracts(graph), ExecutionError, "external なのに state_append");
+  assertThrows(() => validateGraphContracts(graph), ExecutionError, "external, yet state_append");
 });
 
 test("external スロットを readonly でない attention が読む形は拒否する", () => {
@@ -160,7 +160,7 @@ test("external スロットを readonly でない attention が読む形は拒�
   assertThrows(
     () => validateGraphContracts(graph),
     ExecutionError,
-    "readonly でない attention が読む",
+    "is read by the non-readonly attention",
   );
 });
 
@@ -172,11 +172,7 @@ test("readonly の読者が非 external スロットを読む形は拒否する"
       delete g.states["l13.v"].external;
     }),
   );
-  assertThrows(
-    () => validateGraphContracts(graph),
-    ExecutionError,
-    "external でない state スロット",
-  );
+  assertThrows(() => validateGraphContracts(graph), ExecutionError, "the non-external state slot");
 });
 
 test("external と非 external の混在は拒否する（借り手は自前スロットを持たない）", () => {
@@ -187,7 +183,7 @@ test("external と非 external の混在は拒否する（借り手は自前ス�
     }),
   );
   // 混在の判定より先に「readonly が非 external を読む」で落ちる（どちらも同じ層・同じ型）。
-  assertThrows(() => validateGraphContracts(graph), ExecutionError, "ADR 0096 段 2 §1.1");
+  assertThrows(() => validateGraphContracts(graph), ExecutionError, "ADR 0096 stage 2 §1.1");
 });
 
 test("external を宣言しつつ readonly も append も無いスロットは参照検査で落ちる", () => {
@@ -196,7 +192,7 @@ test("external を宣言しつつ readonly も append も無いスロットは�
     if (g.states === undefined) throw new Error("states が無い");
     g.states["l14.k"] = { dtype: "f32", shape: [1, KV_HEADS, CAPACITY, DEPTH], external: true };
   });
-  assertThrows(() => parse(graph), IrError, "どのノードからも参照されない");
+  assertThrows(() => parse(graph), IrError, "not referenced by any node");
 });
 
 test("states[].external は true 以外を書けない（不存在と同義の綴りを 2 つ持たない）", () => {
@@ -220,7 +216,7 @@ test("readonly の attention は入力 1 本ちょうど（3 本は拒否・stat
       g.nodes[0].ins = ["q", "k", "v"];
     }),
   );
-  assertThrows(() => validateGraphContracts(threeIns), OpContractError, "入力 1 本ちょうど");
+  assertThrows(() => validateGraphContracts(threeIns), OpContractError, "takes exactly 1 inputs");
 
   const noStates = parse(
     mutated((g) => {
@@ -237,7 +233,7 @@ test("readonly の attention は入力 1 本ちょうど（3 本は拒否・stat
   assertThrows(
     () => validateGraphContracts(noStates),
     OpContractError,
-    "states 欄を持つノードでのみ",
+    "only on a node with a states field",
   );
 });
 
@@ -247,7 +243,7 @@ test("attrs.readonly は true のみ・state_append には書けない", () => {
       g.nodes[0].attrs = { scale: 0.5, window: WINDOW, readonly: false };
     }),
   );
-  assertThrows(() => validateGraphContracts(falsy), OpContractError, "readonly は true のみ");
+  assertThrows(() => validateGraphContracts(falsy), OpContractError, "readonly accepts only true");
 
   const onAppend = parse(
     mutated((g) => {
@@ -262,7 +258,7 @@ test("attrs.readonly は true のみ・state_append には書けない", () => {
       });
     }),
   );
-  assertThrows(() => validateGraphContracts(onAppend), OpContractError, "attrs.readonly は無い");
+  assertThrows(() => validateGraphContracts(onAppend), OpContractError, "has no attrs.readonly");
 });
 
 test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C", () => {
@@ -273,7 +269,7 @@ test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C"
         g.inputs[0].shape = [1, HEADS, 2, DEPTH];
         g.values.o.shape = [1, HEADS, 2, DEPTH];
       },
-      "M（軸 2）が 1 ちょうど",
+      "M (axis 2) of exactly 1",
     ],
     [
       "D がスロットと不一致",
@@ -281,7 +277,7 @@ test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C"
         g.inputs[0].shape = [1, HEADS, 1, DEPTH * 2];
         g.values.o.shape = [1, HEADS, 1, DEPTH * 2];
       },
-      "B / D が不一致",
+      "B / D mismatch",
     ],
     [
       "H が Hkv の倍数でない",
@@ -292,14 +288,14 @@ test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C"
         g.states["l13.k"].shape = [1, 2, CAPACITY, DEPTH];
         g.states["l13.v"].shape = [1, 2, CAPACITY, DEPTH];
       },
-      "正の整数倍でない",
+      "is not a positive integer multiple",
     ],
     [
       "window が容量を超える",
       (g) => {
         g.nodes[0].attrs = { scale: 0.5, window: CAPACITY + 1, readonly: true };
       },
-      "スロット容量",
+      "slot capacity",
     ],
     [
       "k / v スロットが同形でない",
@@ -307,7 +303,7 @@ test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C"
         if (g.states === undefined) throw new Error("states が無い");
         g.states["l13.v"].shape = [1, KV_HEADS, CAPACITY * 2, DEPTH];
       },
-      "同形でない",
+      "differ in shape",
     ],
   ];
   for (const [name, mutate, message] of cases) {
@@ -364,10 +360,10 @@ test("共有 initializer に実体の鍵や格納を書く形は拒否する", (
   for (const key of ["tensor", "storage"]) {
     const graph = sharedGraph();
     Object.assign(graph.initializers[SHARED_NAME], { [key]: "model.lm_head.weight" });
-    assertThrows(() => parse(graph), IrError, `未知のキー '${key}'`);
+    assertThrows(() => parse(graph), IrError, `unknown key '${key}'`);
   }
   // `shared` に書けるのは `true` だけ（`false` は欄の不存在と同じ宣言 — 正準直列化が割れる）。
   const notTrue = sharedGraph();
   Object.assign(notTrue.initializers[SHARED_NAME], { shared: false });
-  assertThrows(() => parse(notTrue), IrError, "借り物のときだけ true");
+  assertThrows(() => parse(notTrue), IrError, "write true only when it is borrowed");
 });

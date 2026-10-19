@@ -281,7 +281,7 @@ test("batch generation: 相乗りした別Sessionの決着前disposeは拒否さ
     await read.admitted;
     // 通すと決着時の copy が破棄済みの slot backing を写し元に積み、区間全体が validation で
     // 落ちて context まで poison される（ADR 0066: 後続Sessionの失敗は区間全体の失敗）。
-    await assertRejects(() => reader.dispose(), Error, "enqueueRead の読み戻し");
+    await assertRejects(() => reader.dispose(), Error, "enqueueRead readback");
     await batch.finishAndRead({ o: sink });
     assertEquals(Array.from((await read.outputs).y.data), [-1, -2, -3, -4]);
     assertEquals(context.pastLength, 1);

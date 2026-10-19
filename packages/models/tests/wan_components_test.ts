@@ -70,7 +70,7 @@ const REPLACEMENT_REPO = "karume-test/umt5-compatible";
  * で、この骨格でほかに safetensors を読むのは `rope_base`（正しい資産）だけなので、正の経路は資産を
  * 取り終えたことのアサーションと組にして埋め込み資産での停止を特定する。
  */
-const STOPPED_AT_EMBEDS = "ヘッダ JSON を解析できない";
+const STOPPED_AT_EMBEDS = "Cannot parse the header JSON";
 
 /** RoPE の素表（`transformer` の容器の資産 `rope_base` — 実物の 1.3B と同じ幅 22 / 21 / 21）。 */
 const ROPE_BASE = await readFile(

@@ -89,7 +89,7 @@ describe("assertTernaryCodes: payload の全コードが {1, 2, 3}", () => {
     assertThrows(
       () => assertTernaryCodes(Uint8Array.of(0x55, 0x54), "w"),
       ContainerFormatError,
-      "バイト 1",
+      "(byte 1)",
     );
   });
 
@@ -99,7 +99,7 @@ describe("assertTernaryCodes: payload の全コードが {1, 2, 3}", () => {
       assertThrows(
         () => assertTernaryCodes(Uint8Array.of(byte), "w"),
         ContainerFormatError,
-        "コード 0",
+        "has code 0",
         `0x${byte.toString(16)}`,
       );
     }
@@ -120,7 +120,7 @@ describe("ternary: Session 構築の入口（containerBatches）", () => {
         }
       },
       ContainerFormatError,
-      "バイト 9",
+      "(byte 9)",
     );
   });
 

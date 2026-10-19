@@ -53,25 +53,25 @@ test("decodeI8: バイト長・rank・broadcast・scale 要素数の違反を拒
   assertThrows(
     () => decodeI8(i8Bytes([1, 2, 3]), [2, 2], Float32Array.from([1, 1]), [2, 1]),
     I8Error,
-    "が shape",
+    "does not match shape",
   );
   // rank 違いの scaleShape（keepdim 形でない）
   assertThrows(
     () => decodeI8(i8Bytes([1, 2, 3, 4]), [2, 2], scale, [2]),
     I8Error,
-    "keepdim 形が要る",
+    "a keepdim shape is required",
   );
   // 軸長が 1 でも同値でもない scaleShape
   assertThrows(
     () => decodeI8(i8Bytes([1, 2, 3, 4]), [2, 2], Float32Array.from([1, 1, 1]), [3, 1]),
     I8Error,
-    "broadcast できない",
+    "cannot be broadcast",
   );
   // scale の実要素数が scaleShape と合わない
   assertThrows(
     () => decodeI8(i8Bytes([1, 2, 3, 4]), [2, 2], Float32Array.from([1]), [2, 1]),
     I8Error,
-    "scale の要素数",
+    "scale element count",
   );
 });
 

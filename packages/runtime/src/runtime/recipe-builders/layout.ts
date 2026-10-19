@@ -162,9 +162,9 @@ export const buildCat = async (
   }
   if (written !== outShape[dim]) {
     throw new ExecutionError(
-      `${where}: cat の書き込みが出力全域を覆わない（軸 ${dim} に ${written} / 出力は ${
+      `${where}: the cat writes do not cover the whole output (axis ${dim}: ${written} / output ${
         outShape[dim]
-      }）`,
+      })`,
     );
   }
 };

@@ -54,10 +54,10 @@ test("parseIrDeclaration: 最小の正常系グラフを受理する", () => {
 });
 
 test("parseIrDeclaration: format / version の固定値", () => {
-  assertRejects("format 不一致", "graph.format が 'karume-ir' でない", (g) => {
+  assertRejects("format 不一致", "graph.format is not 'karume-ir'", (g) => {
     g.format = "karume";
   });
-  assertRejects("version 不一致", "graph.version が 2 でない", (g) => {
+  assertRejects("version 不一致", "graph.version is not 2", (g) => {
     g.version = 1;
   });
 });
@@ -66,43 +66,39 @@ test("parseIrDeclaration: トップレベルのキー集合", () => {
   assertThrows(
     () => parseIrDeclaration(JSON.stringify({ ...baseDeclaration(), extra: 1 })),
     IrError,
-    "未知のキー",
+    "unknown key",
   );
   const { requires: _dropped, ...withoutRequires } = baseDeclaration();
-  assertThrows(() => parseIrDeclaration(JSON.stringify(withoutRequires)), IrError, "必須キー");
+  assertThrows(() => parseIrDeclaration(JSON.stringify(withoutRequires)), IrError, "required key");
   assertThrows(
     () => parseIrDeclaration(JSON.stringify({ ...baseDeclaration(), nodes: {} })),
     IrError,
-    "配列でない",
+    "is not an array",
   );
 });
 
 test("parseIrDeclaration: requires.ops は使用 op 集合と一致する", () => {
-  assertRejects("宣言漏れ", "宣言漏れ [add]", (g) => {
+  assertRejects("宣言漏れ", "undeclared [add]", (g) => {
     g.requires.ops = ["matmul"];
   });
-  assertRejects("余剰", "余剰 [gelu]", (g) => {
+  assertRejects("余剰", "surplus [gelu]", (g) => {
     g.requires.ops = ["matmul", "add", "gelu"];
   });
-  assertRejects("重複", "graph.requires.ops: 'add' が重複している", (g) => {
+  assertRejects("重複", "graph.requires.ops: 'add' is duplicated", (g) => {
     g.requires.ops = ["matmul", "add", "add"];
   });
 });
 
 test("parseIrDeclaration: SSA 単一代入", () => {
-  assertRejects(
-    "ノード出力の二重定義",
-    "graph.nodes[1] (add): 値 'h' が二重に定義されている",
-    (g) => {
-      g.nodes[1].outs = ["h"];
-    },
-  );
-  assertRejects("入力名の重複", "graph.inputs: 値 'x' が二重に定義されている", (g) => {
+  assertRejects("ノード出力の二重定義", "graph.nodes[1] (add): value 'h' is defined twice", (g) => {
+    g.nodes[1].outs = ["h"];
+  });
+  assertRejects("入力名の重複", "graph.inputs: value 'x' is defined twice", (g) => {
     g.inputs.push({ name: "x", dtype: "f32", shape: ["T", 4] });
   });
   assertRejects(
     "initializer と入力の衝突",
-    "graph.initializers: 値 'x' が二重に定義されている",
+    "graph.initializers: value 'x' is defined twice",
     (g) => {
       g.initializers["x"] = {};
       g.values["x"] = { dtype: "f32", shape: [3] };
@@ -111,47 +107,59 @@ test("parseIrDeclaration: SSA 単一代入", () => {
 });
 
 test("parseIrDeclaration: トポロジカル順（前方参照拒否）", () => {
-  assertRejects("ノード順の逆転", "graph.nodes[0] (add): 入力 'h' が未定義（前方参照", (g) => {
-    g.nodes.reverse();
-  });
-  assertRejects("未定義の ins", "入力 'unknown' が未定義", (g) => {
+  assertRejects(
+    "ノード順の逆転",
+    "graph.nodes[0] (add): input 'h' is undefined (forward reference",
+    (g) => {
+      g.nodes.reverse();
+    },
+  );
+  assertRejects("未定義の ins", "input 'unknown' is undefined", (g) => {
     g.nodes[0].ins = ["x", "unknown"];
   });
-  assertRejects("未定義の outputs", "graph.outputs: 'z' が未定義", (g) => {
+  assertRejects("未定義の outputs", "graph.outputs: 'z' is undefined", (g) => {
     g.outputs = ["z"];
   });
-  assertRejects("outputs の重複", "graph.outputs: 'y' が重複している", (g) => {
+  assertRejects("outputs の重複", "graph.outputs: 'y' is duplicated", (g) => {
     g.outputs = ["y", "y"];
   });
 });
 
 test("parseIrDeclaration: 宣言の完全性", () => {
-  assertRejects("ノード出力が values に無い", "ノード出力 'y' の dtype/shape 宣言が無い", (g) => {
-    delete g.values["y"];
-  });
+  assertRejects(
+    "ノード出力が values に無い",
+    "no dtype/shape declaration for node output 'y'",
+    (g) => {
+      delete g.values["y"];
+    },
+  );
   assertRejects(
     "initializer が values に無い",
-    "graph.initializers['w']: values に dtype/shape 宣言が無い",
+    "graph.initializers['w']: no dtype/shape declaration in values",
     (g) => {
       delete g.values["w"];
     },
   );
-  assertRejects("入力の二重宣言", "入力は inputs[] で宣言済み（二重宣言）", (g) => {
+  assertRejects("入力の二重宣言", "inputs are declared in inputs[] (double declaration)", (g) => {
     g.values["x"] = { dtype: "f32", shape: ["T", 4] };
   });
   assertRejects(
     "孤立した values 宣言",
-    "graph.values['ghost']: どのノードでも定義されない宣言",
+    "graph.values['ghost']: declaration not defined by any node",
     (g) => {
       g.values["ghost"] = { dtype: "f32", shape: [1] };
     },
   );
-  assertRejects("initializer の記号次元", "initializer の shape に記号次元は使えない", (g) => {
-    g.values["w"] = { dtype: "f32", shape: ["T", 3] };
-  });
+  assertRejects(
+    "initializer の記号次元",
+    "symbolic dimensions cannot be used in an initializer shape",
+    (g) => {
+      g.values["w"] = { dtype: "f32", shape: ["T", 3] };
+    },
+  );
   assertRejects(
     "initializer の意味論 dtype が bool",
-    "initializer の意味論 dtype 'bool' は語彙外",
+    "initializer semantic dtype 'bool' is outside the vocabulary",
     (g) => {
       g.values["w"] = { dtype: "bool", shape: [4, 3] };
     },
@@ -178,7 +186,7 @@ test("parseIrDeclaration: initializer 宣言のキー集合は `shared` だけ",
           Object.assign(g.initializers["w"], { [key]: "enc.w" });
         }),
       IrError,
-      `未知のキー '${key}'`,
+      `unknown key '${key}'`,
     );
   }
   // MUST: `false` は欄の不存在と同じ宣言なので綴れない（正準直列化が 1 つに決まらない）。
@@ -188,7 +196,7 @@ test("parseIrDeclaration: initializer 宣言のキー集合は `shared` だけ",
         Object.assign(g.initializers["w"], { shared: false });
       }),
     IrError,
-    "借り物のときだけ true",
+    "write true only when it is borrowed",
   );
 });
 
@@ -208,34 +216,34 @@ test("parseIrDeclaration: 意味論 i32 の initializer を宣言として受理
 test("parseIrDeclaration: dtype 語彙", () => {
   assertRejects(
     "意味論 dtype に f16",
-    "graph.values['h'].dtype: 意味論 dtype 'f16' は語彙外",
+    "graph.values['h'].dtype: semantic dtype 'f16' is outside the vocabulary",
     (g) => {
       g.values["h"].dtype = "f16";
     },
   );
   assertRejects(
     "意味論 dtype に i64",
-    "graph.inputs[0].dtype: 意味論 dtype 'i64' は語彙外",
+    "graph.inputs[0].dtype: semantic dtype 'i64' is outside the vocabulary",
     (g) => {
       g.inputs[0].dtype = "i64";
     },
   );
 });
 test("parseIrDeclaration: シンボルの宣言と束縛可能性", () => {
-  assertRejects("未宣言シンボルの使用", "シンボル 'S' が graph.symbols で宣言されていない", (g) => {
+  assertRejects("未宣言シンボルの使用", "symbol 'S' is not declared in graph.symbols", (g) => {
     g.inputs[0].shape = ["S", 4];
   });
   assertRejects(
     "入力 shape の次元位置に一度も現れない",
-    "'T' が入力 shape / states shape の次元位置に現れない",
+    "'T' does not appear at a dimension position of an input shape / states shape",
     (g) => {
       g.inputs[0].shape = [8, 4];
     },
   );
-  assertRejects("symbols の重複", "graph.symbols: 'T' が重複している", (g) => {
+  assertRejects("symbols の重複", "graph.symbols: 'T' is duplicated", (g) => {
     g.symbols = ["T", "T"];
   });
-  assertRejects("シンボル名が不正", "シンボル名 '2T' が不正", (g) => {
+  assertRejects("シンボル名が不正", "invalid symbol name '2T'", (g) => {
     g.symbols = ["T", "2T"];
   });
   // 派生形だけの入力は**受理する**（実寸から解が一意 — ADR 0057）。母音検出 CRNN は
@@ -247,17 +255,21 @@ test("parseIrDeclaration: シンボルの宣言と束縛可能性", () => {
 });
 
 test("parseIrDeclaration: shape 要素", () => {
-  assertRejects("非正準な次元式", "次元式 '1T' が正準文法", (g) => {
-    g.inputs[0].shape = ["1T", 4];
-  });
-  assertRejects("負の次元", "次元 -3 が非負整数でない", (g) => {
+  assertRejects(
+    "非正準な次元式",
+    "dimension expression '1T' does not match the canonical grammar",
+    (g) => {
+      g.inputs[0].shape = ["1T", 4];
+    },
+  );
+  assertRejects("負の次元", "dimension -3 is not a non-negative integer", (g) => {
     g.values["b"].shape = [-3];
   });
-  assertRejects("小数の次元", "次元 1.5 が非負整数でない", (g) => {
+  assertRejects("小数の次元", "dimension 1.5 is not a non-negative integer", (g) => {
     g.values["b"].shape = [1.5];
   });
   const boolDim = JSON.stringify(baseDeclaration()).replace('"shape":[3]', '"shape":[true]');
-  assertThrows(() => parseIrDeclaration(boolDim), IrError, "数値でも文字列でもない");
+  assertThrows(() => parseIrDeclaration(boolDim), IrError, "neither a number nor a string");
 });
 
 test("parseIrDeclarationValue: ホストの配列の穴を path つきで拒否する", () => {
@@ -278,7 +290,7 @@ test("parseIrDeclarationValue: ホストの配列の穴を path つきで拒否�
     assertThrows(
       () => parseIrDeclarationValue(graph),
       IrError,
-      `graph.values['w'].shape[${index}] が無い（疎な配列の穴）`,
+      `graph.values['w'].shape[${index}] is missing (a hole in a sparse array)`,
       hint,
     );
   }
@@ -290,20 +302,24 @@ test("parseIrDeclarationValue: ホストの配列の穴を path つきで拒否�
   assertThrows(
     () => parseIrDeclarationValue(graph),
     IrError,
-    "graph.nodes[0].ins[1] が無い（疎な配列の穴）",
+    "graph.nodes[0].ins[1] is missing (a hole in a sparse array)",
   );
 });
 
 test("parseIrDeclaration: ノードの構造", () => {
-  assertRejects("attrs がオブジェクトでない", "graph.nodes[0].attrs: オブジェクトでない", (g) => {
+  assertRejects("attrs がオブジェクトでない", "graph.nodes[0].attrs: is not an object", (g) => {
     g.nodes[0].attrs = 5;
   });
-  assertRejects("op が空文字列", "graph.nodes[0].op: 空でない文字列でない", (g) => {
+  assertRejects("op が空文字列", "graph.nodes[0].op: is not a non-empty string", (g) => {
     g.nodes[0].op = "";
   });
-  assertRejects("outs の要素が空文字列", "graph.nodes[0].outs[0]: 空でない文字列でない", (g) => {
-    g.nodes[0].outs = [""];
-  });
+  assertRejects(
+    "outs の要素が空文字列",
+    "graph.nodes[0].outs[0]: is not a non-empty string",
+    (g) => {
+      g.nodes[0].outs = [""];
+    },
+  );
 });
 
 // ADR 0067 決定 5: `outs` の本数に意味を与えるのは**契約層**（0 本を許すのは契約が effect を
@@ -325,7 +341,7 @@ test("parseIrDeclaration: outs の本数はパーサの担当ではない", () =
         g.outputs = ["h"];
       }),
     IrError,
-    "どのノードでも定義されない宣言",
+    "declaration not defined by any node",
   );
 });
 
@@ -384,7 +400,7 @@ test("parseIrDeclaration: '__proto__' という名前でも孤立宣言は黙っ
     "nodes": [{ "op": "matmul", "ins": ["x", "w"], "outs": ["y"], "attrs": {} }]
   }`;
 
-  assertThrows(() => parseIrDeclaration(orphan), IrError, "どのノードでも定義されない宣言");
+  assertThrows(() => parseIrDeclaration(orphan), IrError, "declaration not defined by any node");
 });
 
 // ADR 0066 決定 2: 生成 1 本ぶんの可変 state を置く名前付きスロット。参照側の欄（ADR 0067 の
@@ -459,19 +475,19 @@ const assertStatesReject = (states: unknown, includes: string): void => {
 
 test("parseIrDeclaration: state スロットの dtype は f32 のみ", () => {
   // f16 は席の予約だけ（ADR 0066 追記 5）— 「語彙外」ではなく「未対応」として落ちる。
-  assertStatesReject({ cache: { dtype: "f16", shape: [4] } }, "は未対応");
+  assertStatesReject({ cache: { dtype: "f16", shape: [4] } }, "is not supported");
   for (const dtype of ["i32", "bool", "bf16", "i8"]) {
-    assertStatesReject({ cache: { dtype, shape: [4] } }, "は語彙外（f32）");
+    assertStatesReject({ cache: { dtype, shape: [4] } }, "is outside the vocabulary (f32)");
   }
 });
 
 test("parseIrDeclaration: state スロットの shape は容量込みの具体形", () => {
-  assertStatesReject({ cache: { dtype: "f32", shape: [1, 1, 1, 1, 1] } }, "rank 5 は 1..4 の外");
-  assertStatesReject({ cache: { dtype: "f32", shape: [] } }, "rank 0 は 1..4 の外");
-  assertStatesReject({ cache: { dtype: "f32", shape: [1, 0, 4] } }, "正整数でない");
-  assertStatesReject({ cache: { dtype: "f32", shape: [-4] } }, "非負整数でない");
-  assertStatesReject({ cache: { dtype: "f32", shape: ["S", 4] } }, "宣言されていない");
-  assertStatesReject({ cache: { dtype: "f32", shape: ["1T", 4] } }, "正準文法");
+  assertStatesReject({ cache: { dtype: "f32", shape: [1, 1, 1, 1, 1] } }, "rank 5 is outside 1..4");
+  assertStatesReject({ cache: { dtype: "f32", shape: [] } }, "rank 0 is outside 1..4");
+  assertStatesReject({ cache: { dtype: "f32", shape: [1, 0, 4] } }, "is not a positive integer");
+  assertStatesReject({ cache: { dtype: "f32", shape: [-4] } }, "is not a non-negative integer");
+  assertStatesReject({ cache: { dtype: "f32", shape: ["S", 4] } }, "is not declared");
+  assertStatesReject({ cache: { dtype: "f32", shape: ["1T", 4] } }, "canonical grammar");
 });
 
 /**
@@ -510,7 +526,7 @@ test("parseIrDeclaration: JSON の整数値 float 次元を受理し、非整数
           g.values["w"].shape = [dim];
         }),
       IrError,
-      "非負整数でない",
+      "is not a non-negative integer",
     );
     assertThrows(
       () =>
@@ -519,7 +535,7 @@ test("parseIrDeclaration: JSON の整数値 float 次元を受理し、非整数
           withStateReaders(g);
         }),
       IrError,
-      "非負整数でない",
+      "is not a non-negative integer",
     );
   }
   // safe range 超過は Python 側（> 2^53−1）と同じ点で落ちる。
@@ -529,7 +545,7 @@ test("parseIrDeclaration: JSON の整数値 float 次元を受理し、非整数
         g.values["w"].shape = [dim];
       }),
     IrError,
-    "非負整数でない",
+    "is not a non-negative integer",
   );
 });
 
@@ -550,7 +566,7 @@ test("parseIrDeclaration: 値名 / initializer 名の空文字列を拒否する
         g.initializers[""] = {};
       }),
     IrError,
-    "graph.values の値名: 空でない文字列でない",
+    "value name in graph.values: is not a non-empty string",
   );
   // initializer 側だけが空の形も落ちる（名前検査は宣言の両側に掛かる）
   assertThrows(
@@ -559,7 +575,7 @@ test("parseIrDeclaration: 値名 / initializer 名の空文字列を拒否する
         g.initializers[""] = {};
       }),
     IrError,
-    "graph.initializers の initializer 名: 空でない文字列でない",
+    "initializer name in graph.initializers: is not a non-empty string",
   );
   // 対: 名前が空でなければ同じ組は受理される（= 落としているのは空名だけで、宣言完全性の
   // 2 検査はどちらもこの組を通す — それがこの門が要る理由そのもの）
@@ -571,13 +587,16 @@ test("parseIrDeclaration: 値名 / initializer 名の空文字列を拒否する
 });
 
 test("parseIrDeclaration: states の構造", () => {
-  assertStatesReject([], "graph.states: オブジェクトでない");
-  assertStatesReject({ cache: 4 }, "graph.states['cache']: オブジェクトでない");
-  assertStatesReject({ cache: { dtype: "f32", shape: 4 } }, "shape: 配列でない");
-  assertStatesReject({ cache: { shape: [4] } }, "必須キー 'dtype' が無い");
-  assertStatesReject({ cache: { dtype: "f32", shape: [4], window: 512 } }, "未知のキー 'window'");
+  assertStatesReject([], "graph.states: is not an object");
+  assertStatesReject({ cache: 4 }, "graph.states['cache']: is not an object");
+  assertStatesReject({ cache: { dtype: "f32", shape: 4 } }, "shape: is not an array");
+  assertStatesReject({ cache: { shape: [4] } }, "required key 'dtype' is missing");
+  assertStatesReject({ cache: { dtype: "f32", shape: [4], window: 512 } }, "unknown key 'window'");
   // 空のスロット名は参照側の欄（ADR 0067）が受理しない = 参照できない宣言になる。
-  assertStatesReject({ "": { dtype: "f32", shape: [4] } }, "スロット名: 空でない文字列でない");
+  assertStatesReject(
+    { "": { dtype: "f32", shape: [4] } },
+    "slot name in graph.states: is not a non-empty string",
+  );
 });
 
 // スロット名は値名前空間と別（ins / outs で参照されない）だが、同名は「スロット名の欄に値名を
@@ -587,7 +606,7 @@ test("parseIrDeclaration: state スロット名は値名と衝突できない", 
   for (const name of ["x", "w", "h", "y"]) {
     assertStatesReject(
       { [name]: { dtype: "f32", shape: [4] } },
-      `graph.states['${name}']: 値名と同名`,
+      `graph.states['${name}']: same name as a value`,
     );
   }
 });
@@ -687,7 +706,7 @@ test("parseIrDeclaration: states 欄は宣言済みスロットしか参照で�
         g.nodes[3].states = { slot: "kv.missing" };
       }),
     IrError,
-    "state スロット 'kv.missing' が graph.states で宣言されていない",
+    "state slot 'kv.missing' is not declared in graph.states",
   );
   // 値名を書いた取り違え（スロット名前空間と値名前空間は別 — 値名は参照できない）
   assertThrows(
@@ -696,7 +715,7 @@ test("parseIrDeclaration: states 欄は宣言済みスロットしか参照で�
         g.nodes[3].states = { slot: "h" };
       }),
     IrError,
-    "graph.states で宣言されていない",
+    "is not declared in graph.states",
   );
 });
 
@@ -707,7 +726,7 @@ test("parseIrDeclaration: 誰も参照しない state スロットを拒否す�
         g.states!["kv.orphan"] = { dtype: "f32", shape: [1, 2, 512, 8] };
       }),
     IrError,
-    "graph.states['kv.orphan']: どのノードからも参照されない宣言",
+    "graph.states['kv.orphan']: declaration not referenced by any node",
   );
   // 参照が 1 本でもあれば足りる（読者だけ / 書き手だけの層はどちらも実在する —
   // KV 共有層は append を持たない）
@@ -729,10 +748,10 @@ test("parseIrDeclaration: states 欄の構造", () => {
       includes,
     );
   };
-  reject([], "graph.nodes[3].states: オブジェクトでない");
-  reject({ slot: 4 }, "graph.nodes[3].states['slot']: 空でない文字列でない");
-  reject({ slot: "" }, "graph.nodes[3].states['slot']: 空でない文字列でない");
-  reject({ "": "kv.k" }, "graph.nodes[3].states のキー: 空でない文字列でない");
+  reject([], "graph.nodes[3].states: is not an object");
+  reject({ slot: 4 }, "graph.nodes[3].states['slot']: is not a non-empty string");
+  reject({ slot: "" }, "graph.nodes[3].states['slot']: is not a non-empty string");
+  reject({ "": "kv.k" }, "graph.nodes[3].states key: is not a non-empty string");
 });
 
 // ADR 0066 追記 7: 束縛点は 2 つ（入力 shape / states shape）だが、**効く範囲は非対称**。
@@ -756,7 +775,7 @@ test("parseIrDeclaration: states 専用記号は宣言できるが値 shape に�
         g.values["att"].shape = ["C", 3];
       }),
     IrError,
-    "states 専用記号 'C' が値 shape に現れる",
+    "states-only symbol 'C' appears in a value shape",
   );
 
   // 入力にも states にも現れない記号は従来どおり束縛が取れない
@@ -766,7 +785,7 @@ test("parseIrDeclaration: states 専用記号は宣言できるが値 shape に�
         g.symbols.push("C");
       }),
     IrError,
-    "'C' が入力 shape / states shape の次元位置に現れない",
+    "'C' does not appear at a dimension position of an input shape / states shape",
   );
 
   // 入力**と** states の両方に現れる記号は「states 専用」ではない（値 shape に現れてよい）
@@ -778,14 +797,14 @@ test("parseIrDeclaration: states 専用記号は宣言できるが値 shape に�
 });
 
 test("parseIrDeclaration: JSON の受理集合", () => {
-  assertThrows(() => parseIrDeclaration("{"), IrError, "解析できない");
+  assertThrows(() => parseIrDeclaration("{"), IrError, "Cannot parse");
   assertThrows(
     () => parseIrDeclaration('{"format":"karume-ir","version":NaN}'),
     IrError,
-    "解析できない",
+    "Cannot parse",
   );
   // 1e999 は構文としては有効だが Infinity へ丸まる — 受理集合をブラウザ JSON.parse に
   // 揃える契約のため拒否する。
   const infinite = JSON.stringify(baseDeclaration()).replace('"shape":[4,3]', '"shape":[4,1e999]');
-  assertThrows(() => parseIrDeclaration(infinite), IrError, "有限");
+  assertThrows(() => parseIrDeclaration(infinite), IrError, "finite");
 });

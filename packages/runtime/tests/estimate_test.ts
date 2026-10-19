@@ -133,7 +133,7 @@ test("実構築が拒否する意味論 dtype に見積りを返さない", () =
   assertThrows(
     () => estimateGraphMemory(graph, planWeightResidency(graph), { bindings: { T: 7 } }),
     RuntimeSupportError,
-    "capability 不足",
+    "Missing runtime capabilities",
   );
 });
 
@@ -219,7 +219,7 @@ test("予算の値域は createSessionFromContainer と同じ門（非負の安�
           planBackingBudgetBytes: budget,
         }),
       ExecutionError,
-      "非負の安全な整数",
+      "non-negative safe integer",
     );
   }
   // 対照: 0 は正当値（従来の容量 1）— 上の 4 本が「何を渡しても落ちる」ではないことの証明。
@@ -243,7 +243,7 @@ test("予算の値域の診断は利用者の変換を呼ばず、非数値は�
     const refused = assertThrows(
       () => plainModel().estimate(options),
       ExecutionError,
-      "非負の安全な整数",
+      "non-negative safe integer",
     );
     const shown = typeof value === "string" ? JSON.stringify(value) : typeof value;
     assert(refused.message.includes(`planBackingBudgetBytes ${shown} `), refused.message);
@@ -697,7 +697,7 @@ test("数値で固定した chunk 行が context の許す行数に無い形は�
         generation: { chunkLength: 8, bindings: { C: 8 } },
       }),
     ExecutionError,
-    "物理 chunk 行数 4 が固定 chunk 契約に合わない",
+    "physical chunk row count 4 of the state node does not match the fixed chunk contract",
   );
   // 対照: 4 を明示のバケットに含めれば run も通る形なので、見積りも数を返す。
   const report = stateModel().estimate({
@@ -722,7 +722,7 @@ test("chunk 行の記号を options.bindings で受けない（束縛点は chun
         generation: { chunkLength: 4, bindings: { C: 8 } },
       }),
     ExecutionError,
-    "物理 chunk 行 M の記号",
+    "physical chunk-row symbol M",
   );
 });
 
@@ -730,7 +730,7 @@ test("chunk 記号を持つグラフを generation 無しで見積らない", ()
   assertThrows(
     () => openGraph(chunkSymbolGraph()).estimate(),
     ExecutionError,
-    "options.generation.chunkLength で",
+    "bound by options.generation.chunkLength",
   );
 });
 
@@ -824,7 +824,7 @@ test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 形と�
     assertThrows(
       () => verifyRowsReport([{ name, chunkLength: 2 }]),
       ExecutionError,
-      "予約名は run / prefill / decode",
+      "the reserved names are run / prefill / decode",
     );
   }
   // 追加名どうしの重複も同じ門（名前で引く呼び手が先頭だけを見る形を作らない）。
@@ -835,14 +835,14 @@ test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 形と�
         { name: "verify", chunkLength: 3 },
       ]),
     ExecutionError,
-    "既にある",
+    "already exists",
   );
   // 物理 chunk 行は 1..generation.chunkLength の整数。
   for (const chunkLength of [0, -1, 1.5, 5]) {
     assertThrows(
       () => verifyRowsReport([{ name: "verify", chunkLength }]),
       ExecutionError,
-      "1..4（generation.chunkLength）の整数でない",
+      "is not an integer in 1..4 (generation.chunkLength)",
     );
   }
   // 両端ちょうどは通る。
@@ -860,7 +860,7 @@ test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 形と�
         },
       }),
     ExecutionError,
-    "物理 chunk 行 M の記号",
+    "physical chunk-row symbol M",
   );
 });
 
@@ -876,7 +876,11 @@ test("追加シナリオの物理 chunk 行も context の許す行数の中だ�
         scenarios: [{ name: "verify", chunkLength: 2 }],
       },
     });
-  assertThrows(() => at(), ExecutionError, "物理 chunk 行数 2 が固定 chunk 契約に合わない");
+  assertThrows(
+    () => at(),
+    ExecutionError,
+    "physical chunk row count 2 of the state node does not match the fixed chunk contract",
+  );
   // 対照: 2 をバケットに宣言した context なら run も通るので、見積りも 3 本を返す。
   assertEquals(at([2]).scenarios.length, 3);
 });
@@ -1374,7 +1378,7 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
       assertThrows(
         () => fusedAttentionModel(true).estimate({ attentionCompute: "a8" }),
         ExecutionError,
-        "加算 mask 付きの attention は attentionCompute 'a8' と組めない",
+        "attention with an additive mask cannot be combined with attentionCompute 'a8'",
       );
     });
 
@@ -1387,7 +1391,7 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
             attentionScoreStorage: "f16",
           }),
         ExecutionError,
-        "states 形の attention は attentionScoreStorage 'f16' と組めない",
+        "states-form attention cannot be combined with attentionScoreStorage 'f16'",
       );
     });
 
@@ -1407,7 +1411,7 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
             attentionScoreStorage: "f16",
           }),
         ExecutionError,
-        "同時に指定できない",
+        "cannot be given together",
       );
     });
   });
@@ -1434,13 +1438,13 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
       assertThrows(
         () => wideAttention().estimate(),
         ExecutionError,
-        "1 枚に収まらないので options.maxStorageBufferBindingSize が要る",
+        `do not fit in one block under the WebGPU core default binding limit (${CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize}B), so options.maxStorageBufferBindingSize is needed`,
       );
       // 予算が core 既定より大きくても、上限は device の granted 値で変わるので同じ。
       assertThrows(
         () => wideAttention().estimate({ attentionRowBlockMaxBytes: 512 * 1024 * 1024 }),
         ExecutionError,
-        "1 枚に収まらないので options.maxStorageBufferBindingSize が要る",
+        `do not fit in one block under the WebGPU core default binding limit (${CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize}B), so options.maxStorageBufferBindingSize is needed`,
       );
     });
 
@@ -1517,7 +1521,7 @@ describe("行ブロックの予算（attentionRowBlockMaxBytes）は実行と同
           attentionRowBlockMaxBytes: 67_199,
         }),
       ExecutionError,
-      "予算を 1 行ぶん以上にすること",
+      "set the budget to at least one row",
     );
   });
 
@@ -1526,7 +1530,7 @@ describe("行ブロックの予算（attentionRowBlockMaxBytes）は実行と同
       assertThrows(
         () => plainModel().estimate({ bindings: { T: 7 }, attentionRowBlockMaxBytes: value }),
         ExecutionError,
-        `options.attentionRowBlockMaxBytes ${value} は正の安全な整数でなければならない`,
+        `options.attentionRowBlockMaxBytes ${value} must be a positive safe integer`,
       );
     }
   });
@@ -1711,7 +1715,7 @@ test("上限の値域はグラフの形に依らず入口で見る（読まな�
           maxStorageBufferBindingSize: limit,
         }),
       ExecutionError,
-      "正の安全整数",
+      "positive safe integer",
     );
   }
   // 対照: 正当値は従来どおり通る（上の 4 本が「何を渡しても落ちる」ではないことの証明）。
@@ -1731,7 +1735,7 @@ test("states 形 attention の見積りに上限を渡さないのは fail loudl
         generation: { chunkLength: 4, bindings: { C: 16 } },
       }),
     ExecutionError,
-    "options.maxStorageBufferBindingSize が要る",
+    "need options.maxStorageBufferBindingSize",
   );
 });
 
@@ -1741,7 +1745,7 @@ test("1 行でも上限に入らない形は fail loudly（行ブロックでは
     // の側だけ — スロットが上限を割る形は 1 段手前の門が先に落とす）
     () => stateAttentionReport({ capacity: 16, chunkLength: 4, heads: 64, limit: 2048 }),
     ExecutionError,
-    "既にストレージ束縛の上限を超える",
+    "already exceeds the storage binding limit",
   );
 });
 
@@ -1834,7 +1838,7 @@ describe("chunkBuckets を渡した見積りのピーク", () => {
 // ---------------------------------------------------------------------------
 
 test("未束縛の記号次元は fail loudly（黙って 0 で埋めない）", () => {
-  assertThrows(() => plainModel().estimate(), ExecutionError, "シンボル 'T' が束縛されていない");
+  assertThrows(() => plainModel().estimate(), ExecutionError, "Symbol 'T' is not bound");
 });
 
 test("契約違反のグラフは常駐計画より先に契約検査で落ちる（nodes[i] (op) を名乗る）", () => {
@@ -1892,7 +1896,7 @@ test("states 専用記号を options.bindings で受けない（束縛点は gen
   assertThrows(
     () => stateModel().estimate({ bindings: { T: 2, C: 8 } }),
     ExecutionError,
-    "states 専用記号",
+    "states-only symbol",
   );
 });
 
@@ -1908,7 +1912,7 @@ test("states 宣言の無いグラフに generation を渡すと fail loudly", (
         generation: { chunkLength: 4 },
       }),
     ExecutionError,
-    "states 宣言を持たない",
+    "has no states declarations",
   );
 });
 
@@ -1920,7 +1924,7 @@ test("実構築が拒否する chunkLength に見積りを返さない", () => {
         generation: { chunkLength: 0, bindings: { C: 8 } },
       }),
     ExecutionError,
-    "chunkLength 0 が",
+    "chunkLength 0 is",
   );
 });
 
@@ -1939,7 +1943,7 @@ test("states と入力の両方に現れる記号の食い違いは fail loudly�
         generation: { chunkLength: 4, bindings: { C: 8, T: 3 } },
       }),
     ExecutionError,
-    "記号 'T' が",
+    "Symbol 'T' differs",
   );
 });
 
@@ -1993,7 +1997,7 @@ test("読者だけの state スロットを持つグラフに見積りを返さ�
         generation: { chunkLength: 4, bindings: { C: 8 } },
       }),
     ExecutionError,
-    "state_append が 1 本も無い",
+    "no state_append at all",
   );
   assert(error.message.includes("kv.k"), error.message);
 });
@@ -2019,7 +2023,7 @@ test("cat の連結軸に異なるシンボルが混ざるグラフに見積り�
   assertThrows(
     () => estimateGraphMemory(graph, planWeightResidency(graph), { bindings: { T: 2, U: 3 } }),
     ExecutionError,
-    "異なるシンボル",
+    "different symbols",
   );
 });
 
@@ -2030,7 +2034,7 @@ test("cat の連結軸に異なるシンボルが混ざるグラフに見積り�
 test("unaccounted は勘定に入っていないものを明示する（見積りは絶対保証ではない）", () => {
   const { unaccounted } = plainModel().estimate({ bindings: { T: 7 } });
   const joined = unaccounted.join("\n");
-  assert(joined.includes("融合"), joined);
+  assert(joined.includes("fusion"), joined);
   assert(joined.includes("params"), joined);
   assert(joined.includes("writeBuffer"), joined);
 });
@@ -2046,9 +2050,14 @@ test("unaccounted は linear i8a8 の量子化中間を名乗り、attention の
   });
   const joined = unaccounted.join("\n");
   assert(!joined.includes("states 形でない attention のノード内一時"), joined);
-  assert(joined.includes("linear i8a8 の量子化中間"), joined);
-  assert(joined.includes("attention のノード内一時は勘定に入っている"), joined);
-  assert(joined.includes("融合 attention op のスコア S・行統計・i8a8 の量子化中間"), joined);
+  assert(joined.includes("Quantized intermediates of linear i8a8"), joined);
+  assert(joined.includes("The in-node temporaries of attention are counted"), joined);
+  assert(
+    joined.includes(
+      "the score S, row statistics and i8a8 quantized intermediates of the fused attention op",
+    ),
+    joined,
+  );
 });
 
 // ---------------------------------------------------------------------------

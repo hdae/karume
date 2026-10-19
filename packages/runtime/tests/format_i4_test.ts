@@ -95,7 +95,7 @@ test("decodeI4: conv1d の rank 3 重みは rank 2 scale で展開できる（�
   assertThrows(
     () => decodeI4(bytes, shape, Float32Array.from([1, 1, 1, 1, 1, 1, 1, 1]), [2, 4, 1], 4),
     I4Error,
-    "group 形",
+    "group shape",
   );
 });
 
@@ -115,23 +115,27 @@ test("decodeI4: バイト長・group 形 scale・整除の違反を拒否する"
   assertThrows(
     () => decodeI4(new Uint8Array(7), [2, 8], Float32Array.from([1, 1]), [2, 1], 8),
     I4Error,
-    "バイト",
+    "bytes",
   );
   // keepdim broadcast 形（i8 の形）は group 形として拒否 — 黙って通すと group scale が
   // 1 チャネル 1 値として配られる
   assertThrows(
     () => decodeI4(bytes, [2, 8], Float32Array.from([1, 1]), [2, 1], 4),
     I4Error,
-    "group 形",
+    "group shape",
   );
   // group が量子化軸を割り切らない
   assertThrows(
     () => decodeI4(bytes, [2, 8], Float32Array.from([1, 1]), [2, 1], 3),
     I4Error,
-    "割り切らない",
+    "does not divide",
   );
   // scale 実体の要素数が shape と合わない
-  assertThrows(() => decodeI4(bytes, [2, 8], Float32Array.from([1]), [2, 2], 4), I4Error, "要素数");
+  assertThrows(
+    () => decodeI4(bytes, [2, 8], Float32Array.from([1]), [2, 2], 4),
+    I4Error,
+    "element count",
+  );
   // rank 0（量子化軸が無い）
   assertThrows(
     () => decodeI4(new Uint8Array(0), [], Float32Array.from([]), [], 16),

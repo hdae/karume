@@ -189,7 +189,7 @@ test("batch enqueueRead: 出力が常駐入力の別名なら受理で落ち、�
     // 写しは決着時に走るので、通すと admitted の後・finish の前の write が読み戻しに混ざる
     // （積んだ時点と別の値が黙って返る）。
     const read = target.enqueueRead({ x0: resident }, { batch });
-    const failure = await assertRejects(() => read.admitted, ExecutionError, "別名");
+    const failure = await assertRejects(() => read.admitted, ExecutionError, "is an alias of");
     assertEquals(
       [failure.message.includes("'y'"), failure.message.includes("'x0'")],
       [true, true],
@@ -234,7 +234,7 @@ test("batch enqueueRead: 決着前の Session.dispose は受付終了の前に�
     const read = target.enqueueRead({ x0: input() }, { batch });
     await read.admitted;
     // 通すと破棄本体が slot backing を destroy した後に、決着時の copy がその実体を写し元に積む。
-    await assertRejects(() => target.dispose(), ExecutionError, "enqueueRead の読み戻し");
+    await assertRejects(() => target.dispose(), ExecutionError, "enqueueRead readback");
     await batch.finish();
     const outputs = await read.outputs;
     const u32 = (tensor: Tensor): number[] => {

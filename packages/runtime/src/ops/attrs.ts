@@ -22,7 +22,7 @@ export type AttrSchema = Readonly<Record<string, (value: unknown, where: string)
 const assertCastTarget = (value: unknown, where: string): IrDtype => {
   if (!isSemanticDtype(value)) {
     throw new OpContractError(
-      `${where}: cast の変換先が意味論 dtype でない（${SEMANTIC_DTYPES.join(" / ")}）: ${JSON.stringify(
+      `${where}: cast target is not a semantic dtype (${SEMANTIC_DTYPES.join(" / ")}): ${JSON.stringify(
         value,
       )}`,
     );
@@ -35,7 +35,7 @@ const assertCastTarget = (value: unknown, where: string): IrDtype => {
  * attrs).
  */
 export const castTargetDtype = (attrs: Readonly<Record<string, unknown>>, where: string): IrDtype =>
-  assertCastTarget(Object.hasOwn(attrs, "to") ? attrs["to"] : undefined, `${where} の attrs.to`);
+  assertCastTarget(Object.hasOwn(attrs, "to") ? attrs["to"] : undefined, `${where} attrs.to`);
 
 export const CAST_ATTRS: AttrSchema = {
   to: (value, where) => {
@@ -58,19 +58,19 @@ export const CAST_ATTRS: AttrSchema = {
 const assertPermuteDims = (value: unknown, where: string): readonly number[] => {
   if (!Array.isArray(value) || value.length === 0) {
     throw new OpContractError(
-      `${where}: permute の dims が非空の配列でない: ${JSON.stringify(value)}`,
+      `${where}: permute dims is not a non-empty array: ${JSON.stringify(value)}`,
     );
   }
   const dims: number[] = value.map((dim) => {
     if (typeof dim !== "number" || !Number.isSafeInteger(dim) || dim < 0) {
       throw new OpContractError(
-        `${where}: permute の dims に非負整数でない要素がある: ${JSON.stringify(value)}`,
+        `${where}: permute dims has an element that is not a non-negative integer: ${JSON.stringify(value)}`,
       );
     }
     return dim;
   });
   if (new Set(dims).size !== dims.length) {
-    throw new OpContractError(`${where}: permute の dims [${dims.join(",")}] に重複がある`);
+    throw new OpContractError(`${where}: permute dims [${dims.join(",")}] has duplicates`);
   }
   return dims;
 };
@@ -85,7 +85,7 @@ export const permuteDims = (
 ): readonly number[] =>
   assertPermuteDims(
     Object.hasOwn(attrs, "dims") ? attrs["dims"] : undefined,
-    `${where} の attrs.dims`,
+    `${where} attrs.dims`,
   );
 
 export const PERMUTE_ATTRS: AttrSchema = {
@@ -109,7 +109,7 @@ export const attrValue = (attrs: Readonly<Record<string, unknown>>, key: string)
  */
 const assertIntegerAttr = (value: unknown, where: string, min: number): number => {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min) {
-    throw new OpContractError(`${where}: ${min} 以上の整数でない: ${JSON.stringify(value)}`);
+    throw new OpContractError(`${where}: not an integer >= ${min}: ${JSON.stringify(value)}`);
   }
   return value;
 };
@@ -147,9 +147,9 @@ export const sliceAttrs = (
   attrs: Readonly<Record<string, unknown>>,
   where: string,
 ): SliceAttrs => ({
-  dim: assertIntegerAttr(attrValue(attrs, "dim"), `${where} の attrs.dim`, 0),
-  start: assertIntegerAttr(attrValue(attrs, "start"), `${where} の attrs.start`, 0),
-  end: assertIntegerAttr(attrValue(attrs, "end"), `${where} の attrs.end`, 0),
+  dim: assertIntegerAttr(attrValue(attrs, "dim"), `${where} attrs.dim`, 0),
+  start: assertIntegerAttr(attrValue(attrs, "start"), `${where} attrs.start`, 0),
+  end: assertIntegerAttr(attrValue(attrs, "end"), `${where} attrs.end`, 0),
 });
 
 /**
@@ -163,10 +163,10 @@ export const AXIS_ATTRS: AttrSchema = {
 };
 
 export const catDim = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
-  assertIntegerAttr(attrValue(attrs, "dim"), `${where} の attrs.dim`, 0);
+  assertIntegerAttr(attrValue(attrs, "dim"), `${where} attrs.dim`, 0);
 
 export const flipDim = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
-  assertIntegerAttr(attrValue(attrs, "dim"), `${where} の attrs.dim`, 0);
+  assertIntegerAttr(attrValue(attrs, "dim"), `${where} attrs.dim`, 0);
 
 /**
  * The left / right padding widths of pad (**last dimension, constant 0 only** — ADR 0014).
@@ -192,8 +192,8 @@ export const PAD_ATTRS: AttrSchema = {
 };
 
 export const padAttrs = (attrs: Readonly<Record<string, unknown>>, where: string): PadAttrs => ({
-  left: assertIntegerAttr(attrValue(attrs, "left"), `${where} の attrs.left`, 0),
-  right: assertIntegerAttr(attrValue(attrs, "right"), `${where} の attrs.right`, 0),
+  left: assertIntegerAttr(attrValue(attrs, "left"), `${where} attrs.left`, 0),
+  right: assertIntegerAttr(attrValue(attrs, "right"), `${where} attrs.right`, 0),
 });
 
 /** The cut-out spec of sym_prefix_slice for one axis (shrinks `dim` to length `coeff·sym+offset`). */
@@ -219,23 +219,23 @@ const PREFIX_SLICE_KEYS = ["dim", "coeff", "offset"] as const;
 const assertPrefixSlices = (value: unknown, where: string): readonly PrefixSlice[] => {
   if (!Array.isArray(value) || value.length === 0) {
     throw new OpContractError(
-      `${where}: sym_prefix_slice の slices が非空の配列でない: ${JSON.stringify(value)}`,
+      `${where}: sym_prefix_slice slices is not a non-empty array: ${JSON.stringify(value)}`,
     );
   }
   const slices: PrefixSlice[] = value.map((raw, index) => {
     const at = `${where}[${index}]`;
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-      throw new OpContractError(`${at}: オブジェクトでない: ${JSON.stringify(raw)}`);
+      throw new OpContractError(`${at}: not an object: ${JSON.stringify(raw)}`);
     }
     const entry: Record<string, unknown> = raw as Record<string, unknown>;
     const unknown = Object.keys(entry).filter(
       (key) => !PREFIX_SLICE_KEYS.some((known) => known === key),
     );
     if (unknown.length > 0) {
-      throw new OpContractError(`${at}: 未知のキー [${unknown.sort().join(", ")}]`);
+      throw new OpContractError(`${at}: unknown keys [${unknown.sort().join(", ")}]`);
     }
     for (const key of PREFIX_SLICE_KEYS) {
-      if (!Object.hasOwn(entry, key)) throw new OpContractError(`${at}: キー '${key}' が無い`);
+      if (!Object.hasOwn(entry, key)) throw new OpContractError(`${at}: key '${key}' is missing`);
     }
     return {
       dim: assertIntegerAttr(entry["dim"], `${at}.dim`, 0),
@@ -245,7 +245,7 @@ const assertPrefixSlices = (value: unknown, where: string): readonly PrefixSlice
   });
   const dims = slices.map((slice) => slice.dim);
   if (new Set(dims).size !== dims.length) {
-    throw new OpContractError(`${where}: sym_prefix_slice の slices に同じ dim が 2 度ある`);
+    throw new OpContractError(`${where}: sym_prefix_slice slices has the same dim twice`);
   }
   return slices;
 };
@@ -257,7 +257,7 @@ const assertPrefixSlices = (value: unknown, where: string): readonly PrefixSlice
 const assertPrefixSym = (value: unknown, where: string): string => {
   if (typeof value !== "string" || !isSymbolName(value)) {
     throw new OpContractError(
-      `${where}: sym_prefix_slice の sym がシンボル名でない: ${JSON.stringify(value)}`,
+      `${where}: sym_prefix_slice sym is not a symbol name: ${JSON.stringify(value)}`,
     );
   }
   return value;
@@ -280,8 +280,8 @@ export const symPrefixSliceAttrs = (
   attrs: Readonly<Record<string, unknown>>,
   where: string,
 ): { readonly sym: string; readonly slices: readonly PrefixSlice[] } => ({
-  sym: assertPrefixSym(attrValue(attrs, "sym"), `${where} の attrs.sym`),
-  slices: assertPrefixSlices(attrValue(attrs, "slices"), `${where} の attrs.slices`),
+  sym: assertPrefixSym(attrValue(attrs, "sym"), `${where} attrs.sym`),
+  slices: assertPrefixSlices(attrValue(attrs, "slices"), `${where} attrs.slices`),
 });
 
 /**
@@ -295,7 +295,7 @@ export const symPrefixSliceAttrs = (
 const assertNormalizedShape = (value: unknown, where: string): readonly number[] => {
   if (!Array.isArray(value) || value.length !== 1) {
     throw new OpContractError(
-      `${where}: layer_norm の normalized_shape は長さ 1 の配列のみ（最終次元の正規化だけを実行できる）: ${JSON.stringify(
+      `${where}: layer_norm normalized_shape must be an array of length 1 (only last-dimension normalisation can run): ${JSON.stringify(
         value,
       )}`,
     );
@@ -326,19 +326,19 @@ const assertEps = (value: unknown, where: string, what: string): number => {
   const defect = typeof value === "number" ? f32EpsDefect(value) : "not-positive";
   if (typeof value !== "number" || defect === "not-positive") {
     throw new OpContractError(
-      `${where}: ${what} の eps は有限の正数でない: ${JSON.stringify(value)}`,
+      `${where}: ${what} eps is not a finite positive number: ${JSON.stringify(value)}`,
     );
   }
   if (defect === "subnormal") {
     throw new OpContractError(
-      `${where}: ${what} の eps が f32 の正規化数へ丸まらない（FTZ 実装では GPU 側だけ eps=0 で走る）: ${JSON.stringify(
+      `${where}: ${what} eps does not round to a normal f32 number (an FTZ implementation would run with eps=0 on the GPU side only): ${JSON.stringify(
         value,
       )}`,
     );
   }
   if (defect === "overflow") {
     throw new OpContractError(
-      `${where}: ${what} の eps が f32 へ丸めると無限大になる（GPU 側だけ eps=Inf で走る）: ${JSON.stringify(
+      `${where}: ${what} eps becomes infinite when rounded to f32 (the GPU side alone would run with eps=Inf): ${JSON.stringify(
         value,
       )}`,
     );
@@ -366,11 +366,11 @@ const assertEps = (value: unknown, where: string, what: string): number => {
  */
 export const assertFiniteAttr = (value: unknown, where: string, what: string): number => {
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new OpContractError(`${where}: ${what} は有限の数値でない: ${JSON.stringify(value)}`);
+    throw new OpContractError(`${where}: ${what} is not a finite number: ${JSON.stringify(value)}`);
   }
   if (!Number.isFinite(Math.fround(value))) {
     throw new OpContractError(
-      `${where}: ${what} が f32 へ丸めると無限大になる: ${JSON.stringify(value)}`,
+      `${where}: ${what} becomes infinite when rounded to f32: ${JSON.stringify(value)}`,
     );
   }
   return value;
@@ -382,7 +382,7 @@ export const assertFiniteAttr = (value: unknown, where: string, what: string): n
  * tests/ops_conformance_test.ts).
  */
 const assertFillValue = (value: unknown, where: string): number =>
-  assertFiniteAttr(value, where, "masked_fill の value");
+  assertFiniteAttr(value, where, "masked_fill value");
 
 export const LAYER_NORM_ATTRS: AttrSchema = {
   eps: (value, where) => {
@@ -409,7 +409,7 @@ export const RMS_NORM_ATTRS: AttrSchema = {
 
 /** The eps of an rms_norm node (assumes {@link assertNodeContract} has already checked it). */
 export const rmsNormEps = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
-  assertEps(attrValue(attrs, "eps"), `${where} の attrs.eps`, "rms_norm");
+  assertEps(attrValue(attrs, "eps"), `${where} attrs.eps`, "rms_norm");
 
 export const SOFTMAX_ATTRS: AttrSchema = {
   // Negative axis notation is normalised at the exporter boundary by convention (as for permute's
@@ -433,13 +433,13 @@ export const SOFTMAX_ATTRS: AttrSchema = {
  */
 export const ATTENTION_ATTRS: AttrSchema = {
   scale: (value, where) => {
-    assertFiniteAttr(value, where, "attention の scale");
+    assertFiniteAttr(value, where, "attention scale");
   },
 };
 
 /** The half scale of an attention node (assumes {@link assertNodeContract} has already checked it). */
 export const attentionScale = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
-  assertFiniteAttr(attrValue(attrs, "scale"), `${where} の attrs.scale`, "attention の scale");
+  assertFiniteAttr(attrValue(attrs, "scale"), `${where} attrs.scale`, "attention scale");
 
 /**
  * The sliding window of a state-referencing node (ADR 0067 decisions 4 / 5). **An optional attr**;
@@ -473,8 +473,8 @@ export const STATE_READONLY_ATTRS: AttrSchema = {
   readonly: (value, where) => {
     if (value !== true) {
       throw new OpContractError(
-        `${where}: ${JSON.stringify(value)} は書けない（readonly は true のみ — ` +
-          "欄の不存在が「今 step の k/v も読む states 形」)",
+        `${where}: ${JSON.stringify(value)} is not allowed (readonly accepts only true — ` +
+          "omitting the field means the states form that also reads this step's k/v)",
       );
     }
   },
@@ -488,7 +488,7 @@ export const STATE_READONLY_ATTRS: AttrSchema = {
  */
 export const stateReadonly = (attrs: Readonly<Record<string, unknown>>, where: string): boolean => {
   if (!Object.hasOwn(attrs, "readonly")) return false;
-  STATE_READONLY_ATTRS["readonly"](attrs["readonly"], `${where} の attrs.readonly`);
+  STATE_READONLY_ATTRS["readonly"](attrs["readonly"], `${where} attrs.readonly`);
   return true;
 };
 
@@ -498,7 +498,7 @@ export const stateWindow = (
   where: string,
 ): number | undefined =>
   Object.hasOwn(attrs, "window")
-    ? assertIntegerAttr(attrs["window"], `${where} の attrs.window`, 1)
+    ? assertIntegerAttr(attrs["window"], `${where} attrs.window`, 1)
     : undefined;
 
 export const EMBEDDING_ATTRS: AttrSchema = {
@@ -526,10 +526,10 @@ export const MASKED_FILL_ATTRS: AttrSchema = {
 
 export const CLAMP_ATTRS: AttrSchema = {
   min: (value, where) => {
-    assertFiniteAttr(value, where, "clamp の min");
+    assertFiniteAttr(value, where, "clamp min");
   },
   max: (value, where) => {
-    assertFiniteAttr(value, where, "clamp の max");
+    assertFiniteAttr(value, where, "clamp max");
   },
 };
 
@@ -543,7 +543,7 @@ export const CLAMP_ATTRS: AttrSchema = {
  */
 export const CLAMP_MIN_ATTRS: AttrSchema = {
   min: (value, where) => {
-    assertFiniteAttr(value, where, "clamp_min の min");
+    assertFiniteAttr(value, where, "clamp_min min");
   },
 };
 
@@ -555,14 +555,14 @@ export const LEAKY_RELU_ATTRS: AttrSchema = {
    * into attrs (made explicit at the boundary).
    */
   negative_slope: (value, where) => {
-    assertFiniteAttr(value, where, "leaky_relu の negative_slope");
+    assertFiniteAttr(value, where, "leaky_relu negative_slope");
   },
 };
 
 /** The comparison operand of ge_scalar / le_scalar / gt_scalar (a finite f32 scalar). */
 export const SCALAR_COMPARE_ATTRS: AttrSchema = {
   value: (value, where) => {
-    assertFiniteAttr(value, where, "比較 op の value");
+    assertFiniteAttr(value, where, "comparison op value");
   },
 };
 
@@ -660,30 +660,30 @@ export const layerNormAttrs = (
 ): { readonly normalizedShape: readonly number[]; readonly eps: number } => ({
   normalizedShape: assertNormalizedShape(
     attrValue(attrs, "normalized_shape"),
-    `${where} の attrs.normalized_shape`,
+    `${where} attrs.normalized_shape`,
   ),
-  eps: assertEps(attrValue(attrs, "eps"), `${where} の attrs.eps`, "layer_norm"),
+  eps: assertEps(attrValue(attrs, "eps"), `${where} attrs.eps`, "layer_norm"),
 });
 
 /** The reduced axis of a softmax node (a non-negative axis index). */
 export const softmaxDim = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
-  assertIntegerAttr(attrValue(attrs, "dim"), `${where} の attrs.dim`, 0);
+  assertIntegerAttr(attrValue(attrs, "dim"), `${where} attrs.dim`, 0);
 
 /** The fill value of a masked_fill node. */
 export const maskedFillValue = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
-  assertFillValue(attrValue(attrs, "value"), `${where} の attrs.value`);
+  assertFillValue(attrValue(attrs, "value"), `${where} attrs.value`);
 
 /** The accumulation axis of a cumsum node (a non-negative axis index). */
 export const cumsumDim = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
-  assertIntegerAttr(attrValue(attrs, "dim"), `${where} の attrs.dim`, 0);
+  assertIntegerAttr(attrValue(attrs, "dim"), `${where} attrs.dim`, 0);
 
 /** The reduced axis of a reduce-family node (a non-negative axis index — no default filling). */
 export const reduceDim = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
-  assertIntegerAttr(attrValue(attrs, "dim"), `${where} の attrs.dim`, 0);
+  assertIntegerAttr(attrValue(attrs, "dim"), `${where} attrs.dim`, 0);
 
 /** The count k of a topk node (a positive integer — no default filling). */
 export const topkK = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
-  assertIntegerAttr(attrValue(attrs, "k"), `${where} の attrs.k`, 1);
+  assertIntegerAttr(attrValue(attrs, "k"), `${where} attrs.k`, 1);
 
 /**
  * Attrs passed to the elementwise kernel as f32 **at the end of params** (the order is the params
@@ -727,7 +727,7 @@ const assertIntPair = (
 ): readonly [number, number] => {
   if (!Array.isArray(value) || value.length !== 2) {
     throw new OpContractError(
-      `${where}: ${what} は [H, W] の長さ 2 の配列でない: ${JSON.stringify(value)}`,
+      `${where}: ${what} is not an array [H, W] of length 2: ${JSON.stringify(value)}`,
     );
   }
   return [
@@ -746,16 +746,16 @@ const assertIntPair = (
  */
 export const CONV2D_ATTRS: AttrSchema = {
   dilation: (value, where) => {
-    assertIntPair(value, where, 1, "conv2d の dilation");
+    assertIntPair(value, where, 1, "conv2d dilation");
   },
   groups: (value, where) => {
     assertIntegerAttr(value, where, 1);
   },
   padding: (value, where) => {
-    assertIntPair(value, where, 0, "conv2d の padding");
+    assertIntPair(value, where, 0, "conv2d padding");
   },
   stride: (value, where) => {
-    assertIntPair(value, where, 1, "conv2d の stride");
+    assertIntPair(value, where, 1, "conv2d stride");
   },
 };
 
@@ -771,25 +771,20 @@ export const conv2dAttrs = (
   attrs: Readonly<Record<string, unknown>>,
   where: string,
 ): Conv2dAttrs => ({
-  stride: assertIntPair(
-    attrValue(attrs, "stride"),
-    `${where} の attrs.stride`,
-    1,
-    "conv2d の stride",
-  ),
+  stride: assertIntPair(attrValue(attrs, "stride"), `${where} attrs.stride`, 1, "conv2d stride"),
   padding: assertIntPair(
     attrValue(attrs, "padding"),
-    `${where} の attrs.padding`,
+    `${where} attrs.padding`,
     0,
-    "conv2d の padding",
+    "conv2d padding",
   ),
   dilation: assertIntPair(
     attrValue(attrs, "dilation"),
-    `${where} の attrs.dilation`,
+    `${where} attrs.dilation`,
     1,
-    "conv2d の dilation",
+    "conv2d dilation",
   ),
-  groups: assertIntegerAttr(attrValue(attrs, "groups"), `${where} の attrs.groups`, 1),
+  groups: assertIntegerAttr(attrValue(attrs, "groups"), `${where} attrs.groups`, 1),
 });
 
 /**
@@ -808,7 +803,7 @@ const assertIntTriple = (
 ): readonly [number, number, number] => {
   if (!Array.isArray(value) || value.length !== 3) {
     throw new OpContractError(
-      `${where}: ${what} は [T, H, W] の長さ 3 の配列でない: ${JSON.stringify(value)}`,
+      `${where}: ${what} is not an array [T, H, W] of length 3: ${JSON.stringify(value)}`,
     );
   }
   return [
@@ -827,16 +822,16 @@ const assertIntTriple = (
  */
 export const CONV3D_ATTRS: AttrSchema = {
   dilation: (value, where) => {
-    assertIntTriple(value, where, 1, "conv3d の dilation");
+    assertIntTriple(value, where, 1, "conv3d dilation");
   },
   groups: (value, where) => {
     assertIntegerAttr(value, where, 1);
   },
   padding: (value, where) => {
-    assertIntTriple(value, where, 0, "conv3d の padding");
+    assertIntTriple(value, where, 0, "conv3d padding");
   },
   stride: (value, where) => {
-    assertIntTriple(value, where, 1, "conv3d の stride");
+    assertIntTriple(value, where, 1, "conv3d stride");
   },
 };
 
@@ -852,25 +847,20 @@ export const conv3dAttrs = (
   attrs: Readonly<Record<string, unknown>>,
   where: string,
 ): Conv3dAttrs => ({
-  stride: assertIntTriple(
-    attrValue(attrs, "stride"),
-    `${where} の attrs.stride`,
-    1,
-    "conv3d の stride",
-  ),
+  stride: assertIntTriple(attrValue(attrs, "stride"), `${where} attrs.stride`, 1, "conv3d stride"),
   padding: assertIntTriple(
     attrValue(attrs, "padding"),
-    `${where} の attrs.padding`,
+    `${where} attrs.padding`,
     0,
-    "conv3d の padding",
+    "conv3d padding",
   ),
   dilation: assertIntTriple(
     attrValue(attrs, "dilation"),
-    `${where} の attrs.dilation`,
+    `${where} attrs.dilation`,
     1,
-    "conv3d の dilation",
+    "conv3d dilation",
   ),
-  groups: assertIntegerAttr(attrValue(attrs, "groups"), `${where} の attrs.groups`, 1),
+  groups: assertIntegerAttr(attrValue(attrs, "groups"), `${where} attrs.groups`, 1),
 });
 
 /**
@@ -884,7 +874,7 @@ export const conv3dAttrs = (
  */
 export const DEFORM_CONV2D_ATTRS: AttrSchema = {
   padding: (value, where) => {
-    assertIntPair(value, where, 0, "deform_conv2d の padding");
+    assertIntPair(value, where, 0, "deform_conv2d padding");
   },
 };
 
@@ -899,9 +889,9 @@ export const deformConv2dAttrs = (
 ): DeformConv2dAttrs => ({
   padding: assertIntPair(
     attrValue(attrs, "padding"),
-    `${where} の attrs.padding`,
+    `${where} attrs.padding`,
     0,
-    "deform_conv2d の padding",
+    "deform_conv2d padding",
   ),
 });
 
@@ -917,7 +907,7 @@ export const deformConv2dAttrs = (
  */
 export const UPSAMPLE_BILINEAR2D_ATTRS: AttrSchema = {
   output_size: (value, where) => {
-    assertIntPair(value, where, 1, "upsample_bilinear2d の output_size");
+    assertIntPair(value, where, 1, "upsample_bilinear2d output_size");
   },
 };
 
@@ -932,9 +922,9 @@ export const upsampleBilinear2dAttrs = (
 ): UpsampleBilinear2dAttrs => ({
   outputSize: assertIntPair(
     attrValue(attrs, "output_size"),
-    `${where} の attrs.output_size`,
+    `${where} attrs.output_size`,
     1,
-    "upsample_bilinear2d の output_size",
+    "upsample_bilinear2d output_size",
   ),
 });
 
@@ -950,10 +940,10 @@ export const conv1dAttrs = (
   attrs: Readonly<Record<string, unknown>>,
   where: string,
 ): Conv1dAttrs => ({
-  stride: assertIntegerAttr(attrValue(attrs, "stride"), `${where} の attrs.stride`, 1),
-  padding: assertIntegerAttr(attrValue(attrs, "padding"), `${where} の attrs.padding`, 0),
-  dilation: assertIntegerAttr(attrValue(attrs, "dilation"), `${where} の attrs.dilation`, 1),
-  groups: assertIntegerAttr(attrValue(attrs, "groups"), `${where} の attrs.groups`, 1),
+  stride: assertIntegerAttr(attrValue(attrs, "stride"), `${where} attrs.stride`, 1),
+  padding: assertIntegerAttr(attrValue(attrs, "padding"), `${where} attrs.padding`, 0),
+  dilation: assertIntegerAttr(attrValue(attrs, "dilation"), `${where} attrs.dilation`, 1),
+  groups: assertIntegerAttr(attrValue(attrs, "groups"), `${where} attrs.groups`, 1),
 });
 
 /** The stride / padding of a conv_transpose1d node. */
@@ -961,15 +951,17 @@ export const convTranspose1dAttrs = (
   attrs: Readonly<Record<string, unknown>>,
   where: string,
 ): { readonly stride: number; readonly padding: number } => ({
-  stride: assertIntegerAttr(attrValue(attrs, "stride"), `${where} の attrs.stride`, 1),
-  padding: assertIntegerAttr(attrValue(attrs, "padding"), `${where} の attrs.padding`, 0),
+  stride: assertIntegerAttr(attrValue(attrs, "stride"), `${where} attrs.stride`, 1),
+  padding: assertIntegerAttr(attrValue(attrs, "padding"), `${where} attrs.padding`, 0),
 });
 
 /** The scale of fixed SRQ uses the stored f32 value as is (ADR 0097). */
 const assertStaticQuantizeScale = (value: unknown, where: string): number => {
-  const scale = assertFiniteAttr(value, where, "static_quantize の scale");
+  const scale = assertFiniteAttr(value, where, "static_quantize scale");
   if (scale < 0 || Math.fround(scale) !== scale) {
-    throw new OpContractError(`${where}: static_quantize の scale は非負・厳密な f32 値が必要`);
+    throw new OpContractError(
+      `${where}: static_quantize scale must be non-negative and an exact f32 value`,
+    );
   }
   return scale;
 };
@@ -981,4 +973,4 @@ export const STATIC_QUANTIZE_ATTRS: AttrSchema = {
 export const staticQuantizeScale = (
   attrs: Readonly<Record<string, unknown>>,
   where: string,
-): number => assertStaticQuantizeScale(attrValue(attrs, "scale"), `${where} の attrs.scale`);
+): number => assertStaticQuantizeScale(attrValue(attrs, "scale"), `${where} attrs.scale`);

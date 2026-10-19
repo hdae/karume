@@ -304,14 +304,14 @@ const slidingSlackRows = (
     const shape = slots.get(name)?.shape;
     if (shape === undefined || shape.length < 3) {
       throw new ExecutionError(
-        `state '${name}': sliding 宣言（window ${window}）に対して容量形 ` +
-          `[${shape?.join(",") ?? "?"}] から行容量 C（軸 2）が読めない`,
+        `state '${name}': sliding declaration (window ${window}), but the capacity shape ` +
+          `[${shape?.join(",") ?? "?"}] has no readable row capacity C (axis 2)`,
       );
     }
     const rows = shape[2] - window;
     if (rows < 0) {
       throw new ExecutionError(
-        `state '${name}': window ${window} が行容量 ${shape[2]} を超える（ADR 0067 決定 4 ③）`,
+        `state '${name}': window ${window} exceeds the row capacity ${shape[2]} (ADR 0067 decision 4 ③)`,
       );
     }
     slack = slack === undefined ? rows : Math.min(slack, rows);
@@ -330,8 +330,8 @@ const slidingSlackRows = (
 export const assertChunkLength = (chunkLength: number): void => {
   if (!Number.isSafeInteger(chunkLength) || chunkLength < 1 || chunkLength > MAX_LOGICAL_LENGTH) {
     throw new ExecutionError(
-      `chunkLength ${chunkLength} が 1..${MAX_LOGICAL_LENGTH} の整数でない` +
-        "（固定長 prefill chunk の行数・搬送先は u32 — ADR 0066 決定 4 / 追記 4）",
+      `chunkLength ${chunkLength} is not an integer in 1..${MAX_LOGICAL_LENGTH}` +
+        " (the row count of the fixed-length prefill chunk, carried in a u32 — ADR 0066 decision 4 / addendum 4)",
     );
   }
 };
@@ -360,14 +360,14 @@ export const assertChunkBuckets = (
   for (const [index, rows] of chunkBuckets.entries()) {
     if (!Number.isSafeInteger(rows) || rows < 2 || rows >= chunkLength) {
       throw new ExecutionError(
-        `chunkBuckets[${index}] ${rows} が 2..${chunkLength - 1} の整数でない` +
-          "（1 は decode 形・chunkLength は prefill 形そのもの — ADR 0066 決定 4 / 追記〈バケット〉）",
+        `chunkBuckets[${index}] ${rows} is not an integer in 2..${chunkLength - 1}` +
+          " (1 is the decode shape and chunkLength is the prefill shape itself — ADR 0066 decision 4 / addendum 10, buckets)",
       );
     }
     if (rows <= previous) {
       throw new ExecutionError(
-        `chunkBuckets[${index}] ${rows} が直前の ${previous} 以下（狭義昇順でない）` +
-          "。queryLength 以上の最小バケットを選ぶ側が並べ替えを持たない前提",
+        `chunkBuckets[${index}] ${rows} is not greater than the previous ${previous} (not strictly ascending)` +
+          ". The side that picks the smallest bucket ≥ queryLength assumes no reordering",
       );
     }
     previous = rows;
@@ -407,11 +407,11 @@ export const resolveBindings = (
   for (const [sym, value] of Object.entries(bindings ?? {})) {
     if (!symbols.has(sym)) {
       throw new ExecutionError(
-        `束縛 '${sym}' はグラフの symbols [${graph.symbols.join(", ")}] に無い`,
+        `Binding '${sym}' is not in the graph's symbols [${graph.symbols.join(", ")}]`,
       );
     }
     if (!Number.isSafeInteger(value) || value < 0) {
-      throw new ExecutionError(`束縛 '${sym}': ${value} が非負整数でない`);
+      throw new ExecutionError(`Binding '${sym}': ${value} is not a non-negative integer`);
     }
     resolved[sym] = value;
   }
@@ -435,15 +435,15 @@ export const resolveSlotShape = (
     const expr = parseDim(dim);
     if (!Object.hasOwn(bindings, expr.sym)) {
       throw new ExecutionError(
-        `state '${name}': 記号次元 '${dim}' のシンボル '${expr.sym}' が束縛されていない` +
-          "（createGenerationContext の bindings で与えること — states は束縛源にならない）",
+        `state '${name}': symbolic dimension '${dim}' has the unbound symbol '${expr.sym}'` +
+          " (give it in the createGenerationContext bindings — states are not a binding source)",
       );
     }
     const extent = evalDim(expr, bindings);
     if (extent < 1) {
       throw new ExecutionError(
-        `state '${name}': 次元 ${index} の容量 ${extent} が正でない` +
-          `（束縛 '${expr.sym}' = ${bindings[expr.sym]}）`,
+        `state '${name}': dimension ${index} has a non-positive capacity ${extent}` +
+          ` (binding '${expr.sym}' = ${bindings[expr.sym]})`,
       );
     }
     return extent;
@@ -489,9 +489,9 @@ export const assertSlotWithinLimits = (
     // decision 8), so an overrun can only fail at the call site as an error in capacity design.
     if (limit !== undefined && byteLength > limit) {
       throw new ExecutionError(
-        `state '${name}': 容量 [${shape.join(",")}] の ${byteLength} バイトが ` +
-          `${limitName} ${limit} バイトを超える（ADR 0066 追記 5）。` +
-          "容量を下げるか、スロットを分けてグラフを組み直すこと",
+        `state '${name}': capacity [${shape.join(",")}] takes ${byteLength} bytes, which exceeds ` +
+          `${limitName} ${limit} bytes (ADR 0066 addendum 5). ` +
+          "Lower the capacity, or split the slot and rebuild the graph",
       );
     }
   }
@@ -655,8 +655,8 @@ export class GenerationContext {
         this.#assertUsable(where);
         if (this.#borrow !== undefined) {
           throw new ExecutionError(
-            `${where}: 借り手 context は貸し手になれない（借用の連鎖は持たない — ` +
-              "ADR 0096 段 2 §2.1）",
+            `${where}: a borrowing context cannot be a lender (borrowing is not chained — ` +
+              "ADR 0096 stage 2 §2.1)",
           );
         }
       },
@@ -675,9 +675,9 @@ export class GenerationContext {
         // the P the GPU saw (a position shift with no exception).
         if (this.#pending !== undefined) {
           throw new ExecutionError(
-            `run: commit 待ちの generation run がある（pastLength ${this.#pending.pastLength} + ` +
-              `queryLength ${this.#pending.queryLength} まで書き込み済み）。` +
-              "context.commit(rows) で受理した行数を確定させてから次を発行すること",
+            `run: a generation run is awaiting commit (written up to pastLength ${this.#pending.pastLength} + ` +
+              `queryLength ${this.#pending.queryLength}). ` +
+              "Commit the accepted row count with context.commit(rows) before issuing the next",
           );
         }
         // MUST: at most one unsettled run per context. The second would build its uniform and
@@ -688,10 +688,10 @@ export class GenerationContext {
         // run before issuing the next — generations meant to run in parallel use separate contexts.
         if (this.#runKind !== undefined) {
           throw new ExecutionError(
-            "run: 進行中の generation run がある GenerationContext へ並行発行された" +
-              "（2 本目は 1 本目の進行後の論理長で走る一方、位置入力は発行時の論理長のままなので、" +
-              "例外の出ない位置ずれになる）。前の run の決着を await してから発行するか、" +
-              "context を分けること",
+            "run: issued concurrently to a GenerationContext with a generation run in progress" +
+              " (the second run would run at the logical length the first one advanced to, while its position inputs still carry the logical length at issue: " +
+              "a position shift that raises no exception). Await the settlement of the previous run before issuing, or " +
+              "use separate contexts",
           );
         }
         // MUST: a borrower's run **also takes the lender's lease** (ADR 0096, addendum of
@@ -708,7 +708,7 @@ export class GenerationContext {
       releaseRun: (): void => {
         if (this.#runKind === undefined) {
           throw new ExecutionError(
-            "releaseRun: 進行中の generation run が居ないのにリースを返した（簿記の破れ）",
+            "releaseRun: a lease was returned with no generation run in progress (broken bookkeeping)",
           );
         }
         this.#runKind = undefined;
@@ -768,8 +768,8 @@ export class GenerationContext {
     // this is the detection line for a mix-up (created from another model's Session).
     if (names.length === 0) {
       throw new ExecutionError(
-        "このグラフは states 宣言を持たない（GenerationContext は state スロットの所有者なので、" +
-          "state の無いモデルでは作れない — 1-shot 実行は Session.run / enqueue をそのまま使う）",
+        "This graph has no states declarations (a GenerationContext is the owner of state slots, so " +
+          "it cannot be created for a model without state — for one-shot execution use Session.run / enqueue directly)",
       );
     }
     // MUST: carry the checked values themselves (do not read `spec` again). Between the check and
@@ -788,16 +788,16 @@ export class GenerationContext {
     const external = names.filter((name) => graph.states[name].external);
     if (external.length > 0 && spec.borrow === undefined) {
       throw new ExecutionError(
-        `このグラフは external な state スロット [${external.join(", ")}] を持つ` +
-          "（借り物の実体は貸し手 context にあるので createGenerationContext({ borrow }) が要る" +
-          " — ADR 0096 段 2 §2.1）",
+        `This graph has external state slots [${external.join(", ")}]` +
+          " (the borrowed storage lives in the lender context, so createGenerationContext({ borrow }) is needed" +
+          " — ADR 0096 stage 2 §2.1)",
       );
     }
     if (spec.borrow !== undefined) {
       if (external.length === 0) {
         throw new ExecutionError(
-          "borrow を指定できるのは全スロットが external なグラフだけ" +
-            `（自前スロット [${names.join(", ")}] を持つ — ADR 0096 段 2 §2.1）`,
+          "borrow can only be given for a graph whose slots are all external" +
+            ` (this graph has own slots [${names.join(", ")}] — ADR 0096 stage 2 §2.1)`,
         );
       }
       return await GenerationContext.#createBorrowed(host, spec, spec.borrow, names);
@@ -814,7 +814,7 @@ export class GenerationContext {
     // the per-device LIFO — the third rule of "Invariants of errorScope sections" at the top of
     // GpuContext. It completes in a synchronous section, so no lock is needed).
     pushFailureScopes(gpu.device);
-    const where = "GenerationContext の state 確保";
+    const where = "GenerationContext state allocation";
     const created: GPUBuffer[] = [];
     const slots = new Map<string, StateSlotBacking>();
     let popped = false;
@@ -897,20 +897,20 @@ export class GenerationContext {
     internals.assertLendable("createGenerationContext(borrow)");
     if (internals.gpu !== gpu) {
       throw new ExecutionError(
-        "createGenerationContext(borrow): 貸し手 context と GpuContext（device）が別" +
-          "（別 device のスロットは束縛できない）",
+        "createGenerationContext(borrow): the lender context is on a different GpuContext (device)" +
+          " (slots of another device cannot be bound)",
       );
     }
     if (spec.chunkLength !== 1) {
       throw new ExecutionError(
-        `createGenerationContext(borrow): chunkLength ${spec.chunkLength} は 1 ちょうど` +
-          "（借り手の実行形は decode 1 本だけ — ADR 0096 段 2 §2.1）",
+        `createGenerationContext(borrow): chunkLength ${spec.chunkLength} must be exactly 1` +
+          " (a borrower's only execution shape is a single decode — ADR 0096 stage 2 §2.1)",
       );
     }
     if (spec.bindings !== undefined) {
       throw new ExecutionError(
-        "createGenerationContext(borrow): bindings は貸し手のものを継承する（渡せない）" +
-          "— 2 つの束縛点を持つと容量記号が割れたまま別容量のスロットを読む",
+        "createGenerationContext(borrow): bindings are inherited from the lender (cannot be passed)" +
+          " — with two binding points the capacity symbols would diverge and a slot of a different capacity would be read",
       );
     }
     const bindings = internals.bindings;
@@ -920,8 +920,8 @@ export class GenerationContext {
       const backing = internals.slots.get(name);
       if (backing === undefined) {
         throw new ExecutionError(
-          `state '${name}': 貸し手 context に同名のスロットが無い` +
-            "（external スロットは貸し手と同じ名前で宣言する MUST — ADR 0096 段 2 §2.1）",
+          `state '${name}': the lender context has no slot of the same name` +
+            " (an external slot MUST be declared with the same name as the lender's — ADR 0096 stage 2 §2.1)",
         );
       }
       // MUST: the window agrees with the lender's **in presence and value** (the same read/write
@@ -930,18 +930,18 @@ export class GenerationContext {
       const window = windows.get(name);
       const lent = internals.slidingSlots.get(name);
       if (window !== lent) {
-        const show = (value: number | undefined): string => value?.toString() ?? "宣言なし";
+        const show = (value: number | undefined): string => value?.toString() ?? "undeclared";
         throw new ExecutionError(
-          `state '${name}': attrs.window が貸し手と食い違う（貸し手 ${show(lent)} / 借り手 ${show(
+          `state '${name}': attrs.window disagrees with the lender (lender ${show(lent)} / borrower ${show(
             window,
-          )}）— 論理 col → 物理 row の写像は読み書き同式 MUST（ADR 0067 決定 4）`,
+          )}) — the logical col → physical row mapping MUST use the same formula for reads and writes (ADR 0067 decision 4)`,
         );
       }
       const shape = resolveSlotShape(name, graph.states[name].shape, bindings);
       if (shape.length !== backing.shape.length || shape.some((d, i) => d !== backing.shape[i])) {
         throw new ExecutionError(
-          `state '${name}': 借り手の宣言 [${shape.join(",")}]（貸し手の bindings で解決）が` +
-            `貸し手スロットの実形 [${backing.shape.join(",")}] と違う`,
+          `state '${name}': the borrower's declaration [${shape.join(",")}] (resolved with the lender's bindings) differs from` +
+            ` the actual shape [${backing.shape.join(",")}] of the lender's slot`,
         );
       }
       slots.set(name, backing);
@@ -952,7 +952,7 @@ export class GenerationContext {
     // limit, so without the scope it becomes a silent no-op that keeps writing logical lengths into
     // an invalid buffer.
     pushFailureScopes(gpu.device);
-    const where = "GenerationContext（借り手）の論理長確保";
+    const where = "GenerationContext (borrower) logical-length allocation";
     let popped = false;
     let created: GPUBuffer | undefined;
     let context: GenerationContext | undefined;
@@ -1012,7 +1012,7 @@ export class GenerationContext {
   ): Promise<GenerationContext> {
     const { gpu } = host;
     pushFailureScopes(gpu.device);
-    const where = "GenerationContext の fork（state の複製）";
+    const where = "GenerationContext fork (state copy)";
     const created: GPUBuffer[] = [];
     const slots = new Map<string, StateSlotBacking>();
     let popped = false;
@@ -1133,24 +1133,24 @@ export class GenerationContext {
     this.#assertNotBorrowing("commit");
     if (this.#runKind !== undefined) {
       throw new ExecutionError(
-        `commit: 進行中の generation run が 1 本ある間は確定できない` +
-          "（run の決着を await してから呼ぶこと）",
+        `commit: cannot commit while a generation run is in progress` +
+          " (await the run's settlement before calling)",
       );
     }
     const pending = this.#pending;
     if (pending === undefined) {
       throw new ExecutionError(
-        "commit: 確定待ちの generation run が無い" +
-          "（commit を要するのは GenerationRun.commit を 'deferred' で発行した run だけ）",
+        "commit: no generation run is awaiting commit" +
+          " (only a run issued with GenerationRun.commit 'deferred' needs a commit)",
       );
     }
     if (!Number.isSafeInteger(rows) || rows < 0) {
-      throw new ExecutionError(`commit: 受理行数 ${rows} が非負整数でない`);
+      throw new ExecutionError(`commit: accepted row count ${rows} is not a non-negative integer`);
     }
     if (rows > pending.queryLength) {
       throw new ExecutionError(
-        `commit: 受理行数 ${rows} が保留中の run の queryLength ${pending.queryLength} を超える` +
-          "（書いていない行は確定できない）",
+        `commit: accepted row count ${rows} exceeds the queryLength ${pending.queryLength} of the pending run` +
+          " (rows that were not written cannot be committed)",
       );
     }
     // The logical length has not moved since the run that set the pending commit (with leases and
@@ -1162,8 +1162,8 @@ export class GenerationContext {
     // even with both terms ≤ u32).
     if (next > MAX_LOGICAL_LENGTH) {
       throw new ExecutionError(
-        `commit: pastLength ${pending.pastLength} + 受理行数 ${rows} = ${next} が ` +
-          `u32 の上限 ${MAX_LOGICAL_LENGTH} を超える（論理長の搬送先は u32 — ADR 0066 追記 4）`,
+        `commit: pastLength ${pending.pastLength} + accepted row count ${rows} = ${next} exceeds ` +
+          `the u32 limit ${MAX_LOGICAL_LENGTH} (the logical length is carried in a u32 — ADR 0066 addendum 4)`,
       );
     }
     // MUST: updating the logical length and clearing the pending commit are indivisible (clearing
@@ -1194,34 +1194,34 @@ export class GenerationContext {
     this.#assertNotBorrowing("rewind");
     if (this.#runKind !== undefined) {
       throw new ExecutionError(
-        `rewind: 進行中の generation run が 1 本ある間は巻き戻せない` +
-          "（run は頭で捕捉した pastLength で uniform と dispatch 数を決めるので、横から動かすと" +
-          "GPU が見た論理長と進行の基準が分裂する）。run の決着を await してから呼ぶこと",
+        `rewind: cannot rewind while a generation run is in progress` +
+          " (a run decides its uniform and dispatch count from the pastLength captured at its head, so moving it from the side splits" +
+          " the logical length the GPU saw from the basis of the advance). Await the run's settlement before calling",
       );
     }
     if (this.#pending !== undefined) {
       throw new ExecutionError(
-        `rewind: commit 待ちの generation run がある間は巻き戻せない` +
-          `（pastLength ${this.#pending.pastLength} + queryLength ${this.#pending.queryLength} ` +
-          "まで物理 ring へ書き込み済み）。context.commit(rows) で確定させてから呼ぶこと",
+        `rewind: cannot rewind while a generation run is awaiting commit ` +
+          `(pastLength ${this.#pending.pastLength} + queryLength ${this.#pending.queryLength} ` +
+          "already written into the physical ring). Commit with context.commit(rows) before calling",
       );
     }
     if (this.#slidingSlots.size > 0) {
       throw new ExecutionError(
-        `rewind: sliding スロット [${[...this.#slidingSlots.keys()].join(
+        `rewind: a context with sliding slots [${[...this.#slidingSlots.keys()].join(
           ", ",
-        )}] を含む context は` +
-          "巻き戻せない（ring はエビクト後に物理配置と論理範囲が一致しないため — ADR 0066 " +
-          "追記 2）。有効なのは全スロットが非 sliding の context だけで、復旧は新しい context",
+        )}] cannot be rewound` +
+          " (after eviction the ring's physical layout no longer matches the logical range — ADR 0066 " +
+          "addendum 2). Only a context whose slots are all non-sliding can rewind; recovery is a new context",
       );
     }
     if (!Number.isSafeInteger(position) || position < 0) {
-      throw new ExecutionError(`rewind: 位置 ${position} が非負整数でない`);
+      throw new ExecutionError(`rewind: position ${position} is not a non-negative integer`);
     }
     if (position > this.#pastLength) {
       throw new ExecutionError(
-        `rewind: 位置 ${position} が現在の pastLength ${this.#pastLength} を超えている` +
-          "（前進は run の成功でのみ起きる）",
+        `rewind: position ${position} exceeds the current pastLength ${this.#pastLength}` +
+          " (moving forward happens only through a successful run)",
       );
     }
     this.#pastLength = position;
@@ -1260,26 +1260,26 @@ export class GenerationContext {
       this.#assertUsable("fork");
       if (this.#borrow !== undefined) {
         throw new ExecutionError(
-          "fork: 借り手 context は複製できない（スロットは貸し手の所有物 — 分岐するなら貸し手を " +
-            "fork し、借り手は複製に対して開き直す。ADR 0066 追記〈2026-10-11〉）",
+          "fork: a borrowing context cannot be forked (its slots belong to the lender — to branch, fork the lender " +
+            "and reopen the borrower against the copy; ADR 0066 addendum of 2026-10-11)",
         );
       }
       if (this.#runKind === "batch") {
         throw new ExecutionError(
-          "fork: GenerationContext は batch の最終決着待ち（finish 後に複製すること）",
+          "fork: the GenerationContext is waiting for the final settlement of a batch (fork it after finish)",
         );
       }
       if (this.#runKind !== undefined) {
         throw new ExecutionError(
-          "fork: 進行中の generation run がある間は複製できない（借り手の run も貸し手の予約を" +
-            "取る）。run の決着を await してから呼ぶこと",
+          "fork: cannot fork while a generation run is in progress (a borrower's run also takes the lender's" +
+            " reservation). Await the run's settlement before calling",
         );
       }
       if (this.#pending !== undefined) {
         throw new ExecutionError(
-          `fork: commit 待ちの generation run がある（pastLength ${this.#pending.pastLength} + ` +
-            `queryLength ${this.#pending.queryLength} まで書き込み済み）。` +
-            "context.commit(rows) で確定させてから呼ぶこと",
+          `fork: a generation run is awaiting commit (written up to pastLength ${this.#pending.pastLength} + ` +
+            `queryLength ${this.#pending.queryLength}). ` +
+            "Commit with context.commit(rows) before calling",
         );
       }
       pastLength = this.#pastLength;
@@ -1289,8 +1289,8 @@ export class GenerationContext {
     const host = this.#host;
     return host.adopt(
       () => GenerationContext.#forkFrom(host, this, pastLength),
-      "fork: dispose 済みの Session では GenerationContext を複製できない" +
-        "（Session の dispose が fork より先か、複製の確保の途中に発行された）",
+      "fork: cannot fork a GenerationContext on a disposed Session" +
+        " (the Session's dispose was issued before the fork, or while the copy was being allocated)",
     );
   }
 
@@ -1331,8 +1331,8 @@ export class GenerationContext {
     if (this.#borrowers.size > 0 && this.#disposal === undefined) {
       return Promise.reject(
         new ExecutionError(
-          `dispose: この GenerationContext を借りている context が ${this.#borrowers.size} 本ある` +
-            "（借り手の bind group が貸し手のスロットを掴んでいる）。借り手を先に dispose すること",
+          `dispose: ${this.#borrowers.size} contexts are borrowing this GenerationContext` +
+            " (the borrowers' bind groups hold the lender's slots). Dispose the borrowers first",
         ),
       );
     }
@@ -1370,7 +1370,7 @@ export class GenerationContext {
   #assertCanDispose(): void {
     if (this.#runKind === "batch") {
       throw new ExecutionError(
-        "dispose: GenerationContext は batch の最終決着待ち（finish 後に破棄すること）",
+        "dispose: the GenerationContext is waiting for the final settlement of a batch (dispose it after finish)",
       );
     }
   }
@@ -1422,8 +1422,8 @@ export class GenerationContext {
     // writeLengths silently put a truncated past on the GPU — {@link MAX_LOGICAL_LENGTH}).
     if (next > MAX_LOGICAL_LENGTH) {
       throw new ExecutionError(
-        `advance: pastLength ${this.#pastLength} + queryLength ${queryLength} = ${next} が ` +
-          `u32 の上限 ${MAX_LOGICAL_LENGTH} を超える（論理長の搬送先は u32 — ADR 0066 追記 4）`,
+        `advance: pastLength ${this.#pastLength} + queryLength ${queryLength} = ${next} exceeds ` +
+          `the u32 limit ${MAX_LOGICAL_LENGTH} (the logical length is carried in a u32 — ADR 0066 addendum 4)`,
       );
     }
     this.#pastLength = next;
@@ -1445,8 +1445,8 @@ export class GenerationContext {
     this.#assertQueryLength(queryLength, "defer");
     if (this.#pending !== undefined) {
       throw new ExecutionError(
-        `defer: commit 待ちの generation run が既にある（pastLength ${this.#pending.pastLength} / ` +
-          `queryLength ${this.#pending.queryLength}）— 内部の不変条件破れ`,
+        `defer: a generation run is already awaiting commit (pastLength ${this.#pending.pastLength} / ` +
+          `queryLength ${this.#pending.queryLength}) — internal invariant violated`,
       );
     }
     // MUST: set it frozen (the getter returns this object as is, and `commit` trusts its
@@ -1484,7 +1484,7 @@ export class GenerationContext {
    */
   #assertUsable(where: string): void {
     if (this.#disposeRequested) {
-      throw new ExecutionError(`${where}: dispose 済みの GenerationContext は使えない`);
+      throw new ExecutionError(`${where}: a disposed GenerationContext cannot be used`);
     }
     this.#assertLive(where);
   }
@@ -1496,7 +1496,7 @@ export class GenerationContext {
    */
   #assertInternalUsable(where: string): void {
     if (this.#disposed) {
-      throw new ExecutionError(`${where}: dispose 済みの GenerationContext は使えない`);
+      throw new ExecutionError(`${where}: a disposed GenerationContext cannot be used`);
     }
     this.#assertLive(where);
   }
@@ -1511,8 +1511,8 @@ export class GenerationContext {
   #assertNotBorrowing(where: string): void {
     if (this.#borrow === undefined) return;
     throw new ExecutionError(
-      `${where}: 借り手 context は論理長を持たない（進行も巻き戻しも貸し手 context の側で` +
-        "起きる — ADR 0096 段 2 §2.1）",
+      `${where}: a borrowing context has no logical length (advancing and rewinding happen on the` +
+        " lender context's side — ADR 0096 stage 2 §2.1)",
     );
   }
 
@@ -1521,8 +1521,8 @@ export class GenerationContext {
     assertDeviceUsable(this.#host.gpu, where);
     if (this.#poisoned !== undefined) {
       throw new ExecutionError(
-        `${where}: 汚染された GenerationContext は使えない（${this.#poisoned}）。` +
-          "復旧は新しい context + ホスト側の state 再構築",
+        `${where}: a poisoned GenerationContext cannot be used (${this.#poisoned}). ` +
+          "Recovery is a new context + rebuilding the state on the host",
       );
     }
   }
@@ -1539,8 +1539,8 @@ export class GenerationContext {
   #assertCapturedPast(pastLength: number, where: string): void {
     if (pastLength !== this.#pastLength) {
       throw new ExecutionError(
-        `${where}: run が捕捉した pastLength ${pastLength} が context の現在値 ` +
-          `${this.#pastLength} と食い違う（進行中 run の論理長が横から動いた — 内部の不変条件破れ）`,
+        `${where}: the pastLength ${pastLength} the run captured differs from the context's current value ` +
+          `${this.#pastLength} (the logical length of a run in progress moved from the side — internal invariant violated)`,
       );
     }
   }
@@ -1560,12 +1560,12 @@ export class GenerationContext {
    */
   #assertQueryLength(queryLength: number, where: string): void {
     if (!Number.isSafeInteger(queryLength) || queryLength < 1) {
-      throw new ExecutionError(`${where}: queryLength ${queryLength} が 1 以上の整数でない`);
+      throw new ExecutionError(`${where}: queryLength ${queryLength} is not an integer ≥ 1`);
     }
     if (queryLength > this.chunkLength) {
       throw new ExecutionError(
-        `${where}: queryLength ${queryLength} が chunkLength ${this.chunkLength} を超えている` +
-          "（prefill は固定長 chunk + pad・decode は 1 — ADR 0066 決定 4）",
+        `${where}: queryLength ${queryLength} exceeds chunkLength ${this.chunkLength}` +
+          " (prefill is a fixed-length chunk + pad, decode is 1 — ADR 0066 decision 4)",
       );
     }
   }

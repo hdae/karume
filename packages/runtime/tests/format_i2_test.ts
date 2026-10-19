@@ -68,7 +68,7 @@ test("INT2 は不正な形・scale・端数バイトを拒否する", () => {
     assertThrows(
       () => memoryModel(g, [i2Weight()]),
       ContainerFormatError,
-      "正の rank 2・行長 16 の倍数",
+      "positive rank-2 declared shape with a row length that is a multiple of 16",
     );
     assertThrows(() => decodeI2(bytes, shape, scales, [2, 1]), I2Error);
   }
@@ -90,7 +90,7 @@ test("INT2 は不正な形・scale・端数バイトを拒否する", () => {
         },
       ]),
     ContainerFormatError,
-    "scale と groupSize が要る",
+    "needs scale and groupSize",
   );
   // scale のバイト数は `rows × groups × 4` — 行数と合わない列は落ちる（v1 の scale shape 検査）。
   // 文言はバイト数の突合そのものを名指しする（`"scale"` だけだと「scale の有無」へ門が退行
@@ -98,9 +98,9 @@ test("INT2 は不正な形・scale・端数バイトを拒否する", () => {
   assertThrows(
     () => memoryModel(graph(), [i2Weight(new Uint8Array(Float32Array.of(0.375).buffer))]),
     ContainerFormatError,
-    "の長さ 4 が payload 8 バイト",
+    "length 4 is not payload 8 bytes",
   );
-  assertThrows(() => decodeI2(bytes.subarray(1), [2, 16], scales, [2, 1]), I2Error, "ペイロード");
+  assertThrows(() => decodeI2(bytes.subarray(1), [2, 16], scales, [2, 1]), I2Error, "payload");
   assertThrows(() => decodeI2(bytes, [2, 16], scales, [1, 2]), I2Error, "scale");
 });
 

@@ -141,7 +141,7 @@ export class IrError extends Error {
 }
 
 const IR_FORMAT = "karume-ir";
-/** IR v2（docs/ir-v2.md）。 */
+/** IR v2 (docs/ir-v2.md). */
 export const IR_VERSION = 2;
 
 const TOP_LEVEL_KEYS = [
@@ -209,7 +209,7 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 const asPlainObject = (value: unknown, where: string): Record<string, unknown> => {
-  if (!isPlainObject(value)) throw new IrError(`${where}: オブジェクトでない`);
+  if (!isPlainObject(value)) throw new IrError(`${where}: is not an object`);
   return value;
 };
 
@@ -220,17 +220,18 @@ const asPlainObject = (value: unknown, where: string): Record<string, unknown> =
  * (JSON.parse never produces holes).
  */
 const asArray = (value: unknown, where: string): readonly unknown[] => {
-  if (!Array.isArray(value)) throw new IrError(`${where}: 配列でない`);
+  if (!Array.isArray(value)) throw new IrError(`${where}: is not an array`);
   const list: readonly unknown[] = value;
   for (let index = 0; index < list.length; index += 1) {
-    if (!Object.hasOwn(list, index)) throw new IrError(`${where}[${index}] が無い（疎な配列の穴）`);
+    if (!Object.hasOwn(list, index))
+      throw new IrError(`${where}[${index}] is missing (a hole in a sparse array)`);
   }
   return list;
 };
 
 const asNonEmptyString = (value: unknown, where: string): string => {
   if (typeof value !== "string" || value.length === 0) {
-    throw new IrError(`${where}: 空でない文字列でない`);
+    throw new IrError(`${where}: is not a non-empty string`);
   }
   return value;
 };
@@ -245,7 +246,7 @@ const asUniqueStrings = (value: unknown, where: string): string[] => {
   );
   const seen = new Set<string>();
   for (const item of list) {
-    if (seen.has(item)) throw new IrError(`${where}: '${item}' が重複している`);
+    if (seen.has(item)) throw new IrError(`${where}: '${item}' is duplicated`);
     seen.add(item);
   }
   return list;
@@ -262,11 +263,11 @@ const checkKeys = (
   where: string,
 ): void => {
   for (const key of required) {
-    if (!Object.hasOwn(obj, key)) throw new IrError(`${where}: 必須キー '${key}' が無い`);
+    if (!Object.hasOwn(obj, key)) throw new IrError(`${where}: required key '${key}' is missing`);
   }
   for (const key of Object.keys(obj)) {
     if (!required.includes(key) && !optional.includes(key)) {
-      throw new IrError(`${where}: 未知のキー '${key}'`);
+      throw new IrError(`${where}: unknown key '${key}'`);
     }
   }
 };
@@ -275,7 +276,7 @@ const asSemanticDtype = (value: unknown, where: string): IrDtype => {
   const dtype = asNonEmptyString(value, where);
   if (!isSemanticDtype(dtype)) {
     throw new IrError(
-      `${where}: 意味論 dtype '${dtype}' は語彙外（${SEMANTIC_DTYPES.join(" / ")}）`,
+      `${where}: semantic dtype '${dtype}' is outside the vocabulary (${SEMANTIC_DTYPES.join(" / ")})`,
     );
   }
   return dtype;
@@ -286,17 +287,20 @@ const parseShape = (value: unknown, symbols: ReadonlySet<string>, where: string)
     const at = `${where}[${index}]`;
     if (typeof dim === "number") {
       if (!Number.isSafeInteger(dim) || dim < 0) {
-        throw new IrError(`${at}: 次元 ${dim} が非負整数でない`);
+        throw new IrError(`${at}: dimension ${dim} is not a non-negative integer`);
       }
       return dim;
     }
-    if (typeof dim !== "string") throw new IrError(`${at}: 次元が数値でも文字列でもない`);
+    if (typeof dim !== "string")
+      throw new IrError(`${at}: dimension is neither a number nor a string`);
     const expr = tryParseDim(dim);
     if (expr === undefined) {
-      throw new IrError(`${at}: 次元式 '${dim}' が正準文法 coeff·sym+offset に適合しない`);
+      throw new IrError(
+        `${at}: dimension expression '${dim}' does not match the canonical grammar coeff·sym+offset`,
+      );
     }
     if (!symbols.has(expr.sym)) {
-      throw new IrError(`${at}: シンボル '${expr.sym}' が graph.symbols で宣言されていない`);
+      throw new IrError(`${at}: symbol '${expr.sym}' is not declared in graph.symbols`);
     }
     return dim;
   });
@@ -305,13 +309,13 @@ const asStateDtype = (value: unknown, where: string): IrStateDtype => {
   const dtype = asNonEmptyString(value, where);
   if (RESERVED_STATE_DTYPES.some((reserved) => reserved === dtype)) {
     throw new IrError(
-      `${where}: state スロットの dtype '${dtype}' は未対応（ADR 0066 追記 5 の席予約 — ` +
-        `数値契約の opt-in が要る）`,
+      `${where}: state slot dtype '${dtype}' is not supported (a slot reserved by ADR 0066 addendum 5 — ` +
+        `needs a numerics-contract opt-in)`,
     );
   }
   if (!isStateDtype(dtype)) {
     throw new IrError(
-      `${where}: state スロットの dtype '${dtype}' は語彙外（${STATE_DTYPES.join(" / ")}）`,
+      `${where}: state slot dtype '${dtype}' is outside the vocabulary (${STATE_DTYPES.join(" / ")})`,
     );
   }
   return dtype;
@@ -341,19 +345,21 @@ const parseStateSlot = (
   // off" indistinguishable to the reader.
   if (Object.hasOwn(obj, "external") && obj["external"] !== true) {
     throw new IrError(
-      `${where}.external: ${JSON.stringify(obj["external"])} は書けない` +
-        "（欄の不存在が「自分で確保する」— 借り物のときだけ true を書く）",
+      `${where}.external: ${JSON.stringify(obj["external"])} cannot be written` +
+        " (the absence of the field means 'allocate it yourself' — write true only when it is borrowed)",
     );
   }
   const external = Object.hasOwn(obj, "external");
   if (shape.length < 1 || shape.length > MAX_STATE_RANK) {
     throw new IrError(
-      `${where}.shape: rank ${shape.length} は 1..${MAX_STATE_RANK} の外（固定 rank の容量込み具体形 MUST）`,
+      `${where}.shape: rank ${shape.length} is outside 1..${MAX_STATE_RANK} (a concrete fixed-rank shape including capacity MUST)`,
     );
   }
   shape.forEach((dim, index) => {
     if (typeof dim === "number" && dim < 1) {
-      throw new IrError(`${where}.shape[${index}]: 次元 ${dim} が正整数でない（容量が取れない）`);
+      throw new IrError(
+        `${where}.shape[${index}]: dimension ${dim} is not a positive integer (no capacity can be allocated)`,
+      );
     }
   });
   return { dtype, shape, external };
@@ -383,11 +389,11 @@ const parseNodeStates = (
   const states: Record<string, string> = Object.create(null);
   if (!Object.hasOwn(obj, "states")) return states;
   for (const [key, value] of Object.entries(asPlainObject(obj["states"], `${where}.states`))) {
-    asNonEmptyString(key, `${where}.states のキー`);
+    asNonEmptyString(key, `${where}.states key`);
     const slot = asNonEmptyString(value, `${where}.states['${key}']`);
     if (!Object.hasOwn(slots, slot)) {
       throw new IrError(
-        `${where}.states['${key}']: state スロット '${slot}' が graph.states で宣言されていない`,
+        `${where}.states['${key}']: state slot '${slot}' is not declared in graph.states`,
       );
     }
     states[key] = slot;
@@ -404,13 +410,13 @@ const parseJson = (json: string): unknown => {
   try {
     return JSON.parse(json, (key: string, value: unknown) => {
       if (typeof value === "number" && !Number.isFinite(value)) {
-        throw new IrError(`グラフ JSON の '${key}' が有限な数値でない`);
+        throw new IrError(`'${key}' in the graph JSON is not a finite number`);
       }
       return value;
     });
   } catch (cause) {
     if (cause instanceof IrError) throw cause;
-    throw new IrError(`グラフ JSON を解析できない: ${String(cause)}`);
+    throw new IrError(`Cannot parse the graph JSON: ${String(cause)}`);
   }
 };
 
@@ -430,11 +436,11 @@ const parseIrDocument = <I>(
 
   const format = root["format"];
   if (format !== IR_FORMAT) {
-    throw new IrError(`graph.format が '${IR_FORMAT}' でない: ${JSON.stringify(format)}`);
+    throw new IrError(`graph.format is not '${IR_FORMAT}': ${JSON.stringify(format)}`);
   }
   const version = root["version"];
   if (version !== expectedVersion) {
-    throw new IrError(`graph.version が ${expectedVersion} でない: ${JSON.stringify(version)}`);
+    throw new IrError(`graph.version is not ${expectedVersion}: ${JSON.stringify(version)}`);
   }
 
   const requires = asPlainObject(root["requires"], "graph.requires");
@@ -443,7 +449,7 @@ const parseIrDocument = <I>(
 
   const symbols = asUniqueStrings(root["symbols"], "graph.symbols");
   for (const symbol of symbols) {
-    if (!isSymbolName(symbol)) throw new IrError(`graph.symbols: シンボル名 '${symbol}' が不正`);
+    if (!isSymbolName(symbol)) throw new IrError(`graph.symbols: invalid symbol name '${symbol}'`);
   }
   const symbolSet = new Set(symbols);
 
@@ -472,7 +478,7 @@ const parseIrDocument = <I>(
     // through creates "a value that can be declared but in principle never referenced". The
     // orphan-declaration check is bypassed when it is written together with an empty-named
     // initializer.
-    asNonEmptyString(name, "graph.values の値名");
+    asNonEmptyString(name, "value name in graph.values");
     const where = `graph.values['${name}']`;
     const obj = asPlainObject(raw, where);
     checkKeys(obj, ["dtype", "shape"], [], where);
@@ -491,7 +497,7 @@ const parseIrDocument = <I>(
     // initializer written together with an empty-named value satisfies both sides of the
     // declaration-completeness check, and one unreferenceable real tensor stays in the
     // distribution).
-    asNonEmptyString(name, "graph.initializers の initializer 名");
+    asNonEmptyString(name, "initializer name in graph.initializers");
     const where = `graph.initializers['${name}']`;
     initializers[name] = parseInitializer(asPlainObject(raw, where), where);
   }
@@ -504,7 +510,7 @@ const parseIrDocument = <I>(
       // Empty slot names are rejected — the referencing field (ADR 0067) accepts only non-empty
       // strings, so letting one through creates "a slot that can be declared but in principle never
       // referenced" (for values, the orphan-declaration check closes the same hole).
-      asNonEmptyString(name, "graph.states のスロット名");
+      asNonEmptyString(name, "slot name in graph.states");
       states[name] = parseStateSlot(raw, symbolSet, `graph.states['${name}']`);
     }
   }
@@ -576,7 +582,7 @@ export const parseIrDeclarationValue = (document: unknown): IrDeclaration =>
       throw new IrError(
         `${where}.shared: ${JSON.stringify(
           obj["shared"],
-        )} は書けない（借り物のときだけ true を書く）`,
+        )} cannot be written (write true only when it is borrowed)`,
       );
     }
     return { shared: true };
@@ -656,8 +662,8 @@ const symbolsIn = (shape: readonly IrDim[], into: Set<string>): void => {
  *    (the vowel-detection CRNN) could not declare a symbolic length.
  * 2. **A dimension position of a states shape** (the KV capacity chosen by
  *    `createGenerationContext(spec.bindings)` — a value the user picks when creating the context,
- *    so baking it as an export-time constant contradicts ADR 0066 decision 3 〈static physical
- *    storage〉).
+ *    so baking it as an export-time constant contradicts ADR 0066 decision 3 (static physical
+ *    storage)).
  *
  * MUST: **a states-only symbol (one that appears only in states) must not appear in a value shape**
  * (item 7). Only input-derived bindings resolve ordinary value shapes, so if it appears, binding
@@ -676,7 +682,7 @@ const checkSymbolBindability = (
   for (const symbol of symbols) {
     if (!fromInputs.has(symbol) && !fromStates.has(symbol)) {
       throw new IrError(
-        `graph.symbols: '${symbol}' が入力 shape / states shape の次元位置に現れない — 束縛が取れない`,
+        `graph.symbols: '${symbol}' does not appear at a dimension position of an input shape / states shape — it cannot be bound`,
       );
     }
   }
@@ -686,8 +692,8 @@ const checkSymbolBindability = (
     for (const symbol of used) {
       if (!fromStates.has(symbol) || fromInputs.has(symbol)) continue;
       throw new IrError(
-        `graph.values['${name}']: states 専用記号 '${symbol}' が値 shape に現れる` +
-          `（値 shape の解決に効くのは入力由来の束縛だけ — ADR 0066 追記 7）`,
+        `graph.values['${name}']: states-only symbol '${symbol}' appears in a value shape` +
+          ` (only bindings from inputs resolve value shapes — ADR 0066 addendum 7)`,
       );
     }
   }
@@ -706,7 +712,9 @@ const checkDefinitions = (
   const defined = new Set<string>();
   const define = (name: string, where: string): void => {
     if (defined.has(name)) {
-      throw new IrError(`${where}: 値 '${name}' が二重に定義されている（SSA 単一代入違反）`);
+      throw new IrError(
+        `${where}: value '${name}' is defined twice (violates SSA single assignment)`,
+      );
     }
     defined.add(name);
   };
@@ -718,13 +726,15 @@ const checkDefinitions = (
       // nodes MUST be stored in topological order — a forward reference would make execution
       // order depend on implicit dependency analysis, so it fails here.
       if (!defined.has(ref)) {
-        throw new IrError(`${where}: 入力 '${ref}' が未定義（前方参照または未宣言）`);
+        throw new IrError(
+          `${where}: input '${ref}' is undefined (forward reference or undeclared)`,
+        );
       }
     }
     for (const out of node.outs) define(out, where);
   });
   for (const output of outputs) {
-    if (!defined.has(output)) throw new IrError(`graph.outputs: '${output}' が未定義`);
+    if (!defined.has(output)) throw new IrError(`graph.outputs: '${output}' is undefined`);
   }
   return defined;
 };
@@ -743,15 +753,17 @@ const checkDeclarations = (
   const inputNames = new Set(inputs.map((input) => input.name));
   for (const name of Object.keys(values)) {
     if (inputNames.has(name)) {
-      throw new IrError(`graph.values['${name}']: 入力は inputs[] で宣言済み（二重宣言）`);
+      throw new IrError(
+        `graph.values['${name}']: inputs are declared in inputs[] (double declaration)`,
+      );
     }
     if (!defined.has(name)) {
-      throw new IrError(`graph.values['${name}']: どのノードでも定義されない宣言`);
+      throw new IrError(`graph.values['${name}']: declaration not defined by any node`);
     }
   }
   for (const name of initializerNames) {
     if (!Object.hasOwn(values, name)) {
-      throw new IrError(`graph.initializers['${name}']: values に dtype/shape 宣言が無い`);
+      throw new IrError(`graph.initializers['${name}']: no dtype/shape declaration in values`);
     }
     // MUST: spec rules determined by the graph alone are checked in one place, the parser —
     // writing them per load path splits the rules. Pairs of semantic dtype and storage codec belong
@@ -759,21 +771,23 @@ const checkDeclarations = (
     // check against the runtime's support table (`ops/support.ts`).
     if (!INITIALIZER_DTYPES.has(values[name].dtype)) {
       throw new IrError(
-        `graph.values['${name}']: initializer の意味論 dtype '${
+        `graph.values['${name}']: initializer semantic dtype '${
           values[name].dtype
-        }' は語彙外（f32 / i32 のみ）`,
+        }' is outside the vocabulary (f32 / i32 only)`,
       );
     }
     // An initializer must be settled before binding, or it cannot be checked against the data's
     // shape.
     if (values[name].shape.some((dim) => typeof dim !== "number")) {
-      throw new IrError(`graph.values['${name}']: initializer の shape に記号次元は使えない`);
+      throw new IrError(
+        `graph.values['${name}']: symbolic dimensions cannot be used in an initializer shape`,
+      );
     }
   }
   for (const node of nodes) {
     for (const out of node.outs) {
       if (!Object.hasOwn(values, out)) {
-        throw new IrError(`graph.values: ノード出力 '${out}' の dtype/shape 宣言が無い`);
+        throw new IrError(`graph.values: no dtype/shape declaration for node output '${out}'`);
       }
     }
   }
@@ -801,7 +815,7 @@ const checkStateSlots = (
   for (const name of Object.keys(states)) {
     if (defined.has(name) || Object.hasOwn(values, name)) {
       throw new IrError(
-        `graph.states['${name}']: 値名と同名（state スロットは値名前空間と別 — 取り違えを拒否する）`,
+        `graph.states['${name}']: same name as a value (state slots are a separate namespace from values — the mix-up is rejected)`,
       );
     }
   }
@@ -811,7 +825,7 @@ const checkStateSlots = (
   }
   for (const name of Object.keys(states)) {
     if (!referenced.has(name)) {
-      throw new IrError(`graph.states['${name}']: どのノードからも参照されない宣言`);
+      throw new IrError(`graph.states['${name}']: declaration not referenced by any node`);
     }
   }
 };
@@ -824,7 +838,7 @@ const checkRequiredOps = (requiredOps: readonly string[], nodes: readonly IrNode
   const extra = [...declared].filter((op) => !used.has(op)).sort();
   if (missing.length > 0 || extra.length > 0) {
     throw new IrError(
-      `graph.requires.ops が使用 op 集合と一致しない: 宣言漏れ [${missing.join(", ")}] / 余剰 [${extra.join(
+      `graph.requires.ops does not match the set of ops used: undeclared [${missing.join(", ")}] / surplus [${extra.join(
         ", ",
       )}]`,
     );

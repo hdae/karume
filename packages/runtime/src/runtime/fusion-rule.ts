@@ -397,8 +397,8 @@ const assertTempLifetimes = (
       temp.releaseAfter >= dispatchCount
     ) {
       throw new ExecutionError(
-        `融合ルール '${name}': 一時 ${id} の寿命宣言 [${temp.allocBefore}, ${temp.releaseAfter}] が` +
-          ` dispatch ${dispatchCount} 本の内側で閉じていない（${temp.byteLength}B）`,
+        `fusion rule '${name}': temporary ${id} has a declared lifetime [${temp.allocBefore}, ${temp.releaseAfter}] that` +
+          ` does not close within the ${dispatchCount} dispatches (${temp.byteLength}B)`,
       );
     }
   });
@@ -446,7 +446,7 @@ export const defineRule = <Matched extends FusionMatch>(rule: {
     // are silent wrong values with no exception.
     if (passthrough.length + matched.chain.length !== matched.window.length) {
       throw new ExecutionError(
-        `融合ルール '${rule.name}': 畳んだ鎖 ${matched.chain.length} 本が窓 ${matched.window.length} 本の部分列でない`,
+        `fusion rule '${rule.name}': the folded chain of ${matched.chain.length} nodes is not a subsequence of the window of ${matched.window.length} nodes`,
       );
     }
     if (!passthroughIsIndependent(matched.chain, passthrough)) return undefined;

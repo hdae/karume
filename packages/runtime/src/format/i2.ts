@@ -17,13 +17,15 @@ export const decodeI2 = (
   scaleShape: readonly number[],
 ): Float32Array<ArrayBuffer> => {
   if (!isI2Shape(shape)) {
-    throw new I2Error(`i2 の shape [${shape.join(",")}] は正の rank 2・行長は16の倍数が必要`);
+    throw new I2Error(
+      `i2 shape [${shape.join(",")}] must be positive rank 2 with a row length that is a multiple of 16`,
+    );
   }
   const [rows, width] = shape;
   const count = rows * width;
   if (bytes.byteLength !== count / 4) {
     throw new I2Error(
-      `i2 ペイロード ${bytes.byteLength} バイトが shape [${shape.join(",")}] と違う`,
+      `i2 payload of ${bytes.byteLength} bytes does not match shape [${shape.join(",")}]`,
     );
   }
   if (
@@ -32,7 +34,7 @@ export const decodeI2 = (
     scaleShape[1] !== 1 ||
     scale.length !== rows
   ) {
-    throw new I2Error(`i2 の scale [${scaleShape.join(",")}] は [${rows},1] が必要`);
+    throw new I2Error(`i2 scale [${scaleShape.join(",")}] must be [${rows},1]`);
   }
   const result = new Float32Array(count);
   for (let row = 0; row < rows; row++) {

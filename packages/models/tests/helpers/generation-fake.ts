@@ -347,8 +347,8 @@ export const fakeSession = (options: FakeOptions = {}) => {
         const slack = generation.context.slidingSlack;
         if (slack !== undefined && generation.queryLength > slack) {
           throw new Error(
-            `run: deferred な generation run の queryLength ${generation.queryLength} が ` +
-              `sliding ring の余裕 ${slack} を超える（棄却行が live な過去 KV を潰す）`,
+            `run: queryLength ${generation.queryLength} of a deferred generation run exceeds ` +
+              `the sliding ring's slack ${slack} (rejected rows would overwrite live past KV)`,
           );
         }
       }

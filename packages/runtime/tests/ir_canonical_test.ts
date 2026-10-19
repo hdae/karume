@@ -55,10 +55,10 @@ describe("parseIrDeclaration", () => {
     assertThrows(() => parseIrDeclaration(JSON.stringify(v1)), IrError, "version");
     const withStorage = baseGraph();
     (withStorage.initializers as Json)["b"] = { tensor: "b", storage: { dtype: "f32" } };
-    assertThrows(() => parseIrDeclaration(JSON.stringify(withStorage)), IrError, "未知のキー");
+    assertThrows(() => parseIrDeclaration(JSON.stringify(withStorage)), IrError, "unknown key");
     const sharedFalse = baseGraph();
     (sharedFalse.initializers as Json)["b"] = { shared: false };
-    assertThrows(() => parseIrDeclaration(JSON.stringify(sharedFalse)), IrError, "書けない");
+    assertThrows(() => parseIrDeclaration(JSON.stringify(sharedFalse)), IrError, "cannot be written");
   });
 });
 

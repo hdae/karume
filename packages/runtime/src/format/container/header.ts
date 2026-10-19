@@ -46,7 +46,7 @@ export type ContainerHeader = {
 /** Rounds `value` up to a multiple of `align`. */
 export const alignUp = (value: number, align: number): number => {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new ContainerFormatError(`整列対象が非負の安全整数でない: ${value}`);
+    throw new ContainerFormatError(`Value to align is not a non-negative safe integer: ${value}`);
   }
   return Math.ceil(value / align) * align;
 };
@@ -59,7 +59,7 @@ const matchesMagic = (bytes: Uint8Array<ArrayBuffer>, magic: string): boolean =>
 const readSafeUint64 = (view: DataView, offset: number, label: string): number => {
   const raw = view.getBigUint64(offset, true);
   if (raw > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new ContainerFormatError(`${label}が安全整数を超える: ${raw}`);
+    throw new ContainerFormatError(`${label} exceeds the safe integer range: ${raw}`);
   }
   return Number(raw);
 };
@@ -67,13 +67,13 @@ const readSafeUint64 = (view: DataView, offset: number, label: string): number =
 /** Writes the header. Only a `modelDescriptorLength` of 0 may claim to be a `krg` (§1). */
 export const writeHeader = (header: ContainerHeader): Uint8Array<ArrayBuffer> => {
   if (header.kind === "graph" && header.modelDescriptorLength !== 0) {
-    throw new ContainerFormatError("krg はモデル記述を持てない（長さは 0 MUST）");
+    throw new ContainerFormatError("krg cannot have a model descriptor (length 0 MUST)");
   }
   if (header.kind === "model" && header.modelDescriptorLength === 0) {
-    throw new ContainerFormatError("krm はモデル記述を必ず持つ（長さ 0 は krg の形）");
+    throw new ContainerFormatError("krm always has a model descriptor (length 0 is the krg form)");
   }
   if (header.graphDescriptorLength === 0) {
-    throw new ContainerFormatError("グラフ記述の長さが 0");
+    throw new ContainerFormatError("Graph descriptor length is 0");
   }
   const bytes = new Uint8Array(new ArrayBuffer(HEADER_BYTES));
   bytes.set(magicBytes(header.kind === "model" ? MAGIC_MODEL : MAGIC_GRAPH), 0);
@@ -91,7 +91,7 @@ export const writeHeader = (header: ContainerHeader): Uint8Array<ArrayBuffer> =>
 export const readHeader = (bytes: Uint8Array<ArrayBuffer>): ContainerHeader => {
   if (bytes.byteLength < HEADER_BYTES) {
     throw new ContainerFormatError(
-      `ヘッダに ${HEADER_BYTES} バイト必要だが ${bytes.byteLength} バイトしかない`,
+      `Header needs ${HEADER_BYTES} bytes but only ${bytes.byteLength} bytes are present`,
     );
   }
   const kind: ContainerKind | undefined = matchesMagic(bytes, MAGIC_MODEL)
@@ -102,32 +102,36 @@ export const readHeader = (bytes: Uint8Array<ArrayBuffer>): ContainerHeader => {
   if (kind === undefined) {
     const seen = Array.from(bytes.subarray(0, 4), (b) => b.toString(16).padStart(2, "0")).join(" ");
     throw new ContainerFormatError(
-      `未知の magic: ${seen}（Karume のコンテナは '${MAGIC_MODEL}' / '${MAGIC_GRAPH}'）`,
+      `Unknown magic: ${seen} (Karume containers are '${MAGIC_MODEL}' / '${MAGIC_GRAPH}')`,
     );
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const version = view.getUint32(4, true);
   if (version !== CONTAINER_VERSION) {
-    throw new ContainerFormatError(`未対応のコンテナ版 ${version}（対応は ${CONTAINER_VERSION}）`);
+    throw new ContainerFormatError(
+      `Unsupported container version ${version} (supported: ${CONTAINER_VERSION})`,
+    );
   }
-  const graphDescriptorLength = readSafeUint64(view, 8, "グラフ記述の長さ");
-  const modelDescriptorLength = readSafeUint64(view, 16, "モデル記述の長さ");
-  if (graphDescriptorLength === 0) throw new ContainerFormatError("グラフ記述の長さが 0");
+  const graphDescriptorLength = readSafeUint64(view, 8, "graph descriptor length");
+  const modelDescriptorLength = readSafeUint64(view, 16, "model descriptor length");
+  if (graphDescriptorLength === 0) throw new ContainerFormatError("Graph descriptor length is 0");
   for (const [label, length] of [
-    ["グラフ記述", graphDescriptorLength],
-    ["モデル記述", modelDescriptorLength],
+    ["graph descriptor", graphDescriptorLength],
+    ["model descriptor", modelDescriptorLength],
   ] as const) {
     if (length > MAX_DESCRIPTOR_BYTES) {
       throw new ContainerFormatError(
-        `${label}の長さ ${length} が上限 ${MAX_DESCRIPTOR_BYTES} を超える`,
+        `${label} length ${length} exceeds the limit ${MAX_DESCRIPTOR_BYTES}`,
       );
     }
   }
   if (kind === "graph" && modelDescriptorLength !== 0) {
-    throw new ContainerFormatError(`krg なのにモデル記述の長さが ${modelDescriptorLength}`);
+    throw new ContainerFormatError(
+      `krg but the model descriptor length is ${modelDescriptorLength}`,
+    );
   }
   if (kind === "model" && modelDescriptorLength === 0) {
-    throw new ContainerFormatError("krm なのにモデル記述の長さが 0");
+    throw new ContainerFormatError("krm but the model descriptor length is 0");
   }
   return { kind, version, graphDescriptorLength, modelDescriptorLength };
 };

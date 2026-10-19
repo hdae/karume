@@ -1095,7 +1095,7 @@ test("topk は attrs k 宣言必須・出力 2 本（値 f32 + 添字 i32）で�
   assertThrows(
     () => assertNodeContract({ ...node("topk", ["x"], { k: 2 }), outs: ["v"] }, "t"),
     OpContractError,
-    "出力数が 1（契約は 2）",
+    "output count is 1 (contract: 2)",
   );
   // 出力 2 本のノード（`node` ヘルパは単一出力形なので、topk はここで組み直す）
   const topkNode = (attrs: Record<string, unknown>): IrNode => ({
@@ -1113,17 +1113,17 @@ test("topk は attrs k 宣言必須・出力 2 本（値 f32 + 添字 i32）で�
     [2, 3, 1],
   ]);
   // 受理領域の外は全て fail loudly（縮退しない）
-  assertThrows(() => shapes([6, 10], 11), OpContractError, "最終次元");
+  assertThrows(() => shapes([6, 10], 11), OpContractError, "last dimension");
   assertThrows(() => shapes([6, 10], -1), OpContractError);
   assertThrows(() => shapes([6, 10], 1.5), OpContractError);
   // k は宣言必須（欄が無い = 既定値補完しない）
   assertThrows(() => computeOutputShape(contract, [[6, 10]], "t"), OpContractError);
-  assertThrows(() => assertNodeContract(topkNode({}), "t"), OpContractError, "必須 attr");
+  assertThrows(() => assertNodeContract(topkNode({}), "t"), OpContractError, "required attr");
   // 契約外 attrs（torch の largest / sorted）は fail loudly
   assertThrows(
     () => assertNodeContract(topkNode({ k: 2, sorted: true }), "t"),
     OpContractError,
-    "契約外 attrs",
+    "attrs outside the contract",
   );
 });
 
@@ -1600,9 +1600,9 @@ test("params 層の値域門は契約層にも揃っている（f32 域 / カー
   assertThrows(
     () => shape("layer_norm", [[3, 8], [8], [8]], { normalized_shape: [8], eps: 1e39 }),
     OpContractError,
-    "無限大",
+    "infinite",
   );
-  assertThrows(() => shape("rms_norm", [[3, 8], [8]], { eps: 1e39 }), OpContractError, "無限大");
+  assertThrows(() => shape("rms_norm", [[3, 8], [8]], { eps: 1e39 }), OpContractError, "infinite");
   // 正常な eps はどちらも通る（門を広げすぎていないことの対）
   assertEquals(
     shape("layer_norm", [[3, 8], [8], [8]], { normalized_shape: [8], eps: 1e-5 }),
@@ -1634,19 +1634,19 @@ test("params 層の値域門は契約層にも揃っている（f32 域 / カー
   assertThrows(
     () => shape("conv1d", [[1, 1, 4], [1, 1, 0], [1]], conv1),
     OpContractError,
-    "カーネル長 K は正整数",
+    "kernel length K must be a positive integer",
   );
   assertEquals(shape("conv1d", [[1, 1, 4], [1, 1, 1], [1]], conv1), [1, 1, 4]);
   const conv2 = { stride: [1, 1], padding: [0, 0], dilation: [1, 1], groups: 1 };
   assertThrows(
     () => shape("conv2d", [[1, 1, 4, 4], [1, 1, 0, 1], [1]], conv2),
     OpContractError,
-    "カーネル長 Kh は正整数",
+    "kernel length Kh must be a positive integer",
   );
   assertThrows(
     () => shape("conv2d", [[1, 1, 4, 4], [1, 1, 1, 0], [1]], conv2),
     OpContractError,
-    "カーネル長 Kw は正整数",
+    "kernel length Kw must be a positive integer",
   );
   assertEquals(shape("conv2d", [[1, 1, 4, 4], [1, 1, 1, 1], [1]], conv2), [1, 1, 4, 4]);
 
@@ -1658,7 +1658,7 @@ test("params 層の値域門は契約層にも揃っている（f32 域 / カー
         padding: [1, 0],
       }),
     OpContractError,
-    "height_in は正整数",
+    "height_in must be a positive integer",
   );
   assertThrows(
     () =>
@@ -1666,7 +1666,7 @@ test("params 層の値域門は契約層にも揃っている（f32 域 / カー
         padding: [1, 0],
       }),
     OpContractError,
-    "kernel_h は正整数",
+    "kernel_h must be a positive integer",
   );
   assertEquals(
     shape("deform_conv2d", [[1, 2, 4, 4], [3, 2, 3, 3], [1, 18, 4, 4], [1, 9, 4, 4], [3]], {
@@ -1680,17 +1680,17 @@ test("params 層の値域門は契約層にも揃っている（f32 域 / カー
   assertThrows(
     () => shape("gru_scan", [[1, 1, 0], [1, 0], [0, 0], [0]]),
     OpContractError,
-    "隠れ幅 H 0",
+    "hidden width H 0",
   );
   assertThrows(
     () => shape("gru_scan", [[1, 1, 771], [1, 257], [771, 257], [771]]),
     OpContractError,
-    "隠れ幅 H 257",
+    "hidden width H 257",
   );
   assertThrows(
     () => shape("gru_scan_reverse", [[1, 1, 771], [1, 257], [771, 257], [771]]),
     OpContractError,
-    "隠れ幅 H 257",
+    "hidden width H 257",
   );
   // 上限ちょうどは通る（上限を下げる誤りもここで赤くなる）
   assertEquals(shape("gru_scan", [[1, 1, 768], [1, 256], [768, 256], [768]]), [1, 1, 256]);
@@ -1712,7 +1712,7 @@ test("attention の mask は f32・[1,1,M,N] ちょうどだけを受理する",
     computeOutputShape(contract, ins, "t", { attrs })[0];
 
   // アリティは 3 か 4（可変ではない — 「何本でも」は cat だけ）
-  assertEquals(describeArity(contract), "3 か 4");
+  assertEquals(describeArity(contract), "3 or 4");
   assertEquals(arityFits(contract, 3), true);
   assertEquals(arityFits(contract, 4), true);
   assertEquals(arityFits(contract, 2), false);
@@ -1724,7 +1724,7 @@ test("attention の mask は f32・[1,1,M,N] ちょうどだけを受理する",
   assertThrows(
     () => assertNodeContract(node("attention", ["q", "k", "v", "m", "m2"], attrs), "t"),
     OpContractError,
-    "3 か 4",
+    "3 or 4",
   );
 
   // 受理: mask 無し / [1,1,M,N]（M ≠ N の非正方も）
@@ -1770,24 +1770,24 @@ test("state_append は出力 0 本の effect op で、states 欄が必須", () =
   assertThrows(
     () => assertNodeContract({ ...appendNode(), outs: ["y"] }, "t"),
     OpContractError,
-    "出力数が 1（契約は 0）",
+    "output count is 1 (contract: 0)",
   );
   // states 欄そのものが必須（required: true）
   assertThrows(
     () => assertNodeContract({ ...appendNode(), states: {} }, "t"),
     OpContractError,
-    "states 欄が無い",
+    "states field is missing",
   );
   // キー集合はちょうど { slot }
   assertThrows(
     () => assertNodeContract(appendNode({}, { slot: "kv.k", extra: "kv.v" }), "t"),
     OpContractError,
-    "states 欄のキーが",
+    "states field keys are",
   );
   assertThrows(
     () => assertNodeContract(appendNode({}, { k: "kv.k" }), "t"),
     OpContractError,
-    "states 欄のキーが",
+    "states field keys are",
   );
 });
 
@@ -1801,7 +1801,7 @@ test("effect でない op の outs 空は契約層が落とす", () => {
     assertThrows(
       () => assertNodeContract({ ...node(op, ins, op === "topk" ? { k: 2 } : {}), outs: [] }, "t"),
       OpContractError,
-      "出力数が 0",
+      "output count is 0",
     );
   }
 });
@@ -1810,7 +1810,7 @@ test("states 欄を持たない op に states を書けない", () => {
   assertThrows(
     () => assertNodeContract(node("relu", ["a"], {}, { slot: "kv.k" }), "t"),
     OpContractError,
-    "states 欄を持たない",
+    "has no states field",
   );
   // topk（多出力 op）も同じ — states 欄は attention / state_append の 2 本だけの契約面
   assertThrows(
@@ -1820,7 +1820,7 @@ test("states 欄を持たない op に states を書けない", () => {
         "t",
       ),
     OpContractError,
-    "states 欄を持たない",
+    "has no states field",
   );
 });
 
@@ -1847,7 +1847,7 @@ test("attention は B = 0 / M = 0 の退化した q を契約層で名指しし�
         [0, 2, 4, 8],
       ]),
     OpContractError,
-    "attention の B",
+    "attention B",
   );
   // 従来形の M = 0（states 形は元から拒否していた）
   assertThrows(
@@ -1858,7 +1858,7 @@ test("attention は B = 0 / M = 0 の退化した q を契約層で名指しし�
         [1, 2, 4, 8],
       ]),
     OpContractError,
-    "M が 0",
+    "M = 0",
   );
 });
 
@@ -1876,14 +1876,14 @@ test("attention の states 形は欄の有無で判別され、従来形の受�
   assertThrows(
     () => assertNodeContract(node("attention", ["q", "k", "v", "m"], { scale: 0.5 }, states), "t"),
     OpContractError,
-    "states 形は入力 3 本ちょうど",
+    "states form takes exactly 3 inputs",
   );
   // キー集合はちょうど { k, v }
   assertThrows(
     () =>
       assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.5 }, { k: "kv.k" }), "t"),
     OpContractError,
-    "states 欄のキーが",
+    "states field keys are",
   );
   // k と v に同じスロットを書いた取り違えは shape では捕まらない（k/v スロットは同形）
   assertThrows(
@@ -1893,7 +1893,7 @@ test("attention の states 形は欄の有無で判別され、従来形の受�
         "t",
       ),
     OpContractError,
-    "同じスロット 'kv.k' を複数の欄から参照",
+    "the same slot 'kv.k' from more than one field",
   );
 });
 
@@ -1908,7 +1908,7 @@ test("省略可能 attr `window` は states 欄を持つノードでのみ宣言
   assertThrows(
     () => assertNodeContract(node("attention", ["q", "k", "v"], { scale: 0.5, window: 512 }), "t"),
     OpContractError,
-    "states 欄を持つノードでのみ宣言できる",
+    "can be declared only on a node with a states field",
   );
   // MUST: JSON の `512.0` / `5.12e2` は受理する（JSON.parse は整数値の float を単一の number へ
   // 潰すので TS 側にはそもそも区別が無い）。Python の `_assert_integer_attr` はこの受理集合へ
@@ -1931,6 +1931,6 @@ test("省略可能 attr `window` は states 欄を持つノードでのみ宣言
   assertThrows(
     () => assertNodeContract(appendNode({ windows: 512 }), "t"),
     OpContractError,
-    "契約外 attrs [windows]",
+    "attrs outside the contract [windows]",
   );
 });

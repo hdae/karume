@@ -157,7 +157,7 @@ export const codecLayout = (codec: CodecName): CodecLayout => codecEntry(codec).
 /** The ledger entry (registered names are closed by the type, so it always exists). */
 export const codecEntry = (codec: CodecName): CodecEntry => {
   const entry = CODEC_LEDGER.get(codec);
-  if (entry === undefined) throw new Error(`codec 台帳に '${codec}' が無い`);
+  if (entry === undefined) throw new Error(`codec '${codec}' is not in the codec ledger`);
   return entry;
 };
 
@@ -220,7 +220,7 @@ export const payloadBytes = (codec: CodecName, numel: number, where: string): nu
   const { blockElements, blockBytes } = codecEntry(codec).packing;
   if (numel % blockElements !== 0) {
     throw new Error(
-      `${where}: 要素数 ${numel} が codec '${codec}' の packing（${blockElements} 要素 / block）で割り切れない`,
+      `${where}: element count ${numel} is not divisible by the packing of codec '${codec}' (${blockElements} elements / block)`,
     );
   }
   return (numel / blockElements) * blockBytes;
@@ -237,11 +237,11 @@ export const payloadBytes = (codec: CodecName, numel: number, where: string): nu
  */
 export const scaleBytes = (count: number, where: string): number => {
   if (!Number.isSafeInteger(count) || count < 0) {
-    throw new Error(`${where}: scale の要素数 ${count} が非負の安全整数でない`);
+    throw new Error(`${where}: scale element count ${count} is not a non-negative safe integer`);
   }
   const bytes = count * 4;
   if (!Number.isSafeInteger(bytes)) {
-    throw new Error(`${where}: scale のバイト数 ${bytes} が安全整数の外`);
+    throw new Error(`${where}: scale byte count ${bytes} is outside the safe integer range`);
   }
   return bytes;
 };

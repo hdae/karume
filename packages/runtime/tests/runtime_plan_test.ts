@@ -75,9 +75,9 @@ test("宣言の形をしていない実寸は fail loudly（丸めない）", ()
   const error = assertThrows(
     () => bindSymbols(graph, { x: [285, 4] }),
     ExecutionError,
-    "宣言 '2T' の形をしていない",
+    "does not have the declared form '2T'",
   );
-  assert(error.message.includes("実測 285"), error.message);
+  assert(error.message.includes("actual 285"), error.message);
 });
 
 test("束縛と実 shape・宣言の食い違いは全て fail loudly", () => {
@@ -184,7 +184,7 @@ test("要素数が安全整数を超える shape は planGraph が fail loudly�
   assertThrows(
     () => planGraph(graph, { T: 2 ** 52 }),
     ExecutionError,
-    "値 'x': shape [4503599627370496,4] の要素数が安全整数を超える",
+    "Value 'x': the element count of shape [4503599627370496,4] exceeds the safe integer range",
   );
   // 対照: 同じグラフで積が安全整数に収まる束縛は通る（2^50·4 = 2^52）。
   assertEquals(planGraph(graph, { T: 2 ** 50 }).shapes.get("x"), [2 ** 50, 4]);
@@ -425,7 +425,7 @@ test("cat の連結軸は同一シンボルの一次和まで受理し、異シ�
         ),
       ),
     ExecutionError,
-    "異なるシンボル",
+    "different symbols",
   );
 });
 
@@ -541,7 +541,7 @@ test("同一スロットへの state_append は 1 step に 1 本まで", () => {
         ),
       ),
     ExecutionError,
-    "state_append が 2 本",
+    "state_append appears 2 times",
   );
 });
 
@@ -561,7 +561,7 @@ test("state を読むスロットには終端 state_append がちょうど 1 本
         }),
       ),
     ExecutionError,
-    "state_append が 1 本も無い",
+    "no state_append at all",
   );
   assert(error.message.includes("kv.k"), error.message);
 
@@ -581,7 +581,7 @@ test("state_append より後に同じスロットの読者を置けない", () =
   const error = assertThrows(
     () => validateGraphContracts(parse(stateGraph([nodes[1], nodes[2], nodes[0]]))),
     ExecutionError,
-    "より後に読者",
+    "comes the reader",
   );
   // 「append より後に読者が居る」は**そのスロットに触れる並び**だけの話（他スロットの
   // ノードが間に挟まっても順序は変わらない）
@@ -602,13 +602,13 @@ test("同一スロットに触れるノードの window は存在有無も値も
   assertThrows(
     () => validateGraphContracts(parse(stateGraph(windowed(undefined)))),
     ExecutionError,
-    "attrs.window が食い違う",
+    "attrs.window disagrees",
   );
   // 値が違う形も同じ
   assertThrows(
     () => validateGraphContracts(parse(stateGraph(windowed(4)))),
     ExecutionError,
-    "attrs.window が食い違う",
+    "attrs.window disagrees",
   );
   // 一致していれば通る
   validateGraphContracts(parse(stateGraph(windowed(8))));
@@ -628,7 +628,7 @@ test("sliding の window はスロット容量を超えられない（読み書�
   assertThrows(
     () => planGraph(graph, { M: 3, C: 16 }, stateShapes(16)),
     OpContractError,
-    "スロット容量 16 を超える",
+    "exceeds the slot capacity 16",
   );
 });
 
@@ -644,12 +644,12 @@ test("states 専用記号は bindSymbols が要求せず、seed に来たら拒�
   assertEquals(Object.hasOwn(bindings, "C"), false);
   // seed で渡す形は fail loudly（context 生成時の容量との二重簿記 — 食い違いは値に出ず
   // 計画キャッシュの鍵だけが静かに割れる）
-  assertThrows(() => bindSymbols(graph, inputs, { C: 16 }), ExecutionError, "states 専用記号");
+  assertThrows(() => bindSymbols(graph, inputs, { C: 16 }), ExecutionError, "states-only symbol");
   // 入力にも現れる記号は従来どおり（states に**も**現れる形は「専用」ではない）
   assertThrows(
     () => bindSymbols(graph, { q: [1, 8, 3, 4], k: [1, 2, 5, 4], v: [1, 2, 3, 4] }),
     ExecutionError,
-    "束縛が衝突",
+    "conflicting bindings",
   );
   // states の無いグラフでは空集合（挙動は 1 バイトも変わらない）
   assertEquals(statesOnlySymbols(parse(linearGraph())).size, 0);
@@ -731,7 +731,7 @@ test("conv3d の groups > 1 は計画時に fail loudly（意味論は通る・G
   assertThrows(
     () => validateGraphContracts(grouped),
     ExecutionError,
-    "conv3d の groups 3 は GPU で実行できない",
+    "conv3d groups 3 cannot run on the GPU",
   );
   // groups == 1 は通る
   validateGraphContracts(parse(conv3dGraph(1)));

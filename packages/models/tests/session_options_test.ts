@@ -280,7 +280,11 @@ describe("resolveSessionOptions: 受理できない指定", () => {
     // 宣言だけでは runtime が受けない組合せ（並列 GEMV × a8）でも、実効設定が受理されれば通す
     // （受理集合は実効設定 1 本で決める）。
     const declared = { linearCompute: "a8", linearGemvReduce: "parallel" } as const;
-    assertThrows(() => resolveSessionOptions(ALL, declared, {}, "test"), Error, "f32 のみ対応");
+    assertThrows(
+      () => resolveSessionOptions(ALL, declared, {}, "test"),
+      Error,
+      "supports only linearCompute: f32",
+    );
     assertEquals(resolveSessionOptions(ALL, declared, { linearCompute: "f32" }, "test"), {
       linearCompute: "f32",
       linearGemvReduce: "parallel",

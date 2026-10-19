@@ -251,7 +251,7 @@ test("役割の無い束縛（WGSL に storage 宣言が無い binding）は fai
   ];
   const error = assertThrows(() => buildTransientProgram(recipes), ExecutionError);
   assert(
-    error.message.includes("dispatch 'gemm' の束縛 7 に WGSL の storage 宣言が無い"),
+    error.message.includes("dispatch 'gemm' binding 7 has no WGSL storage declaration"),
     error.message,
   );
 });
@@ -303,15 +303,27 @@ test("dispatch 列の内側で閉じていない一時の寿命宣言は宣言�
   const two = [dispatch("k0"), dispatch("k1")];
   const broken: readonly (readonly [TempRecipe, string])[] = [
     // 解放が来ないまま組み上がった一時（`releaseTemp` の呼び忘れ = 実行相で漏れる）。
-    [{ byteLength: 64, allocBefore: 0, releaseAfter: -1 }, "一時 0 の寿命宣言 [0, -1]"],
+    [
+      { byteLength: 64, allocBefore: 0, releaseAfter: -1 },
+      "temporary 0 has a declared lifetime [0, -1]",
+    ],
     // 確保より前の dispatch で解放する形（束ねる dispatch が確保前に並ぶ）。
-    [{ byteLength: 64, allocBefore: 1, releaseAfter: 0 }, "一時 0 の寿命宣言 [1, 0]"],
+    [
+      { byteLength: 64, allocBefore: 1, releaseAfter: 0 },
+      "temporary 0 has a declared lifetime [1, 0]",
+    ],
     // allocBefore が列の外（負）。
-    [{ byteLength: 64, allocBefore: -1, releaseAfter: 1 }, "一時 0 の寿命宣言 [-1, 1]"],
+    [
+      { byteLength: 64, allocBefore: -1, releaseAfter: 1 },
+      "temporary 0 has a declared lifetime [-1, 1]",
+    ],
     // releaseAfter が列の外（dispatch 2 本に対する添字 2）。
-    [{ byteLength: 64, allocBefore: 0, releaseAfter: 2 }, "一時 0 の寿命宣言 [0, 2]"],
+    [
+      { byteLength: 64, allocBefore: 0, releaseAfter: 2 },
+      "temporary 0 has a declared lifetime [0, 2]",
+    ],
     // 確保仕様として意味を成さないバイト数。
-    [{ byteLength: 0, allocBefore: 0, releaseAfter: 1 }, "（0B）"],
+    [{ byteLength: 0, allocBefore: 0, releaseAfter: 1 }, "(0B)"],
   ];
   for (const [temp, message] of broken) {
     assertThrows(() => validateStepRecipe(tempStep([temp], two)), ExecutionError, message);
@@ -328,7 +340,7 @@ test("宣言外の一時を束ねる dispatch は宣言の受け口で落ちる"
   assertThrows(
     () => validateStepRecipe(tempStep(temps, bind(1))),
     ExecutionError,
-    "dispatch 'gemm' の束縛 1 が一時 1 を指すが、宣言は 1 本",
+    "dispatch 'gemm' binding 1 points to temporary 1, but 1 are declared",
   );
   // 対照: 宣言済みの添字なら通る（束縛の並びは同じで添字だけが違う）。
   validateStepRecipe(tempStep(temps, bind(0)));
@@ -349,7 +361,7 @@ test("生存区間の外で一時を束ねる dispatch は宣言の受け口で�
   assertThrows(
     () => validateStepRecipe(afterRelease),
     ExecutionError,
-    "dispatch 2 'r2' の束縛 1 が一時 0 を生存区間 [0, 0] の外で参照する",
+    "dispatch 2 'r2' binding 1 references temporary 0 outside its live range [0, 0]",
   );
   // 確保より前の dispatch が束ねる形（同じ領域の前の持ち主の値を読む）。
   const beforeAlloc = tempStep(
@@ -359,7 +371,7 @@ test("生存区間の外で一時を束ねる dispatch は宣言の受け口で�
   assertThrows(
     () => validateStepRecipe(beforeAlloc),
     ExecutionError,
-    "dispatch 0 'r0' の束縛 1 が一時 0 を生存区間 [1, 1] の外で参照する",
+    "dispatch 0 'r0' binding 1 references temporary 0 outside its live range [1, 1]",
   );
   // 対照: 区間の内側だけで束ねれば通る（上の 1 本目から dispatch 2 の読みを B へ移した形）。
   validateStepRecipe(
@@ -377,9 +389,18 @@ test("整数でない寿命境界と一時の添字は宣言の受け口で落�
   const two = [dispatch("k0"), dispatch("k1")];
   // 比較だけでは素通りする値（小数は区間の内側に見え、NaN はどの大小比較も偽）。
   const broken: readonly (readonly [TempRecipe, string])[] = [
-    [{ byteLength: 64, allocBefore: 0.5, releaseAfter: 1 }, "一時 0 の寿命宣言 [0.5, 1]"],
-    [{ byteLength: 64, allocBefore: Number.NaN, releaseAfter: 1 }, "一時 0 の寿命宣言 [NaN, 1]"],
-    [{ byteLength: 64, allocBefore: 0, releaseAfter: Number.NaN }, "一時 0 の寿命宣言 [0, NaN]"],
+    [
+      { byteLength: 64, allocBefore: 0.5, releaseAfter: 1 },
+      "temporary 0 has a declared lifetime [0.5, 1]",
+    ],
+    [
+      { byteLength: 64, allocBefore: Number.NaN, releaseAfter: 1 },
+      "temporary 0 has a declared lifetime [NaN, 1]",
+    ],
+    [
+      { byteLength: 64, allocBefore: 0, releaseAfter: Number.NaN },
+      "temporary 0 has a declared lifetime [0, NaN]",
+    ],
   ];
   for (const [temp, message] of broken) {
     assertThrows(() => validateStepRecipe(tempStep([temp], two)), ExecutionError, message);
@@ -392,7 +413,7 @@ test("整数でない寿命境界と一時の添字は宣言の受け口で落�
           tempStep(temps, [dispatch("gemm", [{ binding: 1, source: { kind: "temp", id } }])]),
         ),
       ExecutionError,
-      `dispatch 'gemm' の束縛 1 の一時の添字 ${id} が整数でない`,
+      `dispatch 'gemm' binding 1 has a temporary index ${id} that is not an integer`,
     );
   }
 });
@@ -402,7 +423,7 @@ test("消費計数が実際の解放より多いレシピ列は計画の閉包�
     // 消費者 1 本を宣言しながら、その値を解放するステップがどこにも無い形。
     () => planRecipes([step([alloc("a", 64, 1)])], CORE_TRANSIENT_LIMITS),
     ExecutionError,
-    "解放されない中間が残る",
+    "intermediates are left unreleased",
   );
   // 対照: 消費者ぶんの解放が来れば閉じる（同じ列に消費ステップを 1 本足すだけ）。
   assertEquals(
@@ -415,7 +436,7 @@ test("同じ値を二重に解放するレシピ列は参照カウントが負�
   assertThrows(
     () => planRecipes([step([alloc("a", 64, 0)]), step([], ["a", "a"])], CORE_TRANSIENT_LIMITS),
     ExecutionError,
-    "参照カウントが負",
+    "has a negative reference count",
   );
 });
 
@@ -562,7 +583,7 @@ test("焼き込み経路は context 側の焼き込みを経ていない dispatc
     ExecutionError,
   );
   assert(error.message.includes("dispatch 'attn.qk'"), error.message);
-  assert(error.message.includes("ADR 0066 決定 5"), error.message);
+  assert(error.message.includes("ADR 0066 decision 5"), error.message);
   assertEquals(log, []);
 
   // 対照: 穴が埋まっていれば throw せず 1 本積まれる（上が空振りでない証明）。
@@ -577,7 +598,7 @@ test("workgroup 数を論理長から算出する dispatch は GenerationContext
   const error = assertThrows(
     () => executeBakedPlan(derived, [[stubGroup()]], recordingScheduler(log)),
     ExecutionError,
-    "workgroup 数を論理長から算出する dispatch を GenerationContext 無しで",
+    "a dispatch whose workgroup count is derived from the logical length without a GenerationContext",
   );
   assert(error.message.includes("dispatch 'state.pv'"), error.message);
 
@@ -754,13 +775,17 @@ const bakeOne = (
 test("generation 面を欠いた実行は state / 論理長の束縛で fail loudly", () => {
   const lengths = assertThrows(() => bakeOne({ kind: "lengths" }), ExecutionError);
   assert(
-    lengths.message.includes("論理長 uniformを束ねる dispatch を GenerationContext 無しで"),
+    lengths.message.includes(
+      "logical-length uniform: tried to run a dispatch that binds it without a GenerationContext",
+    ),
     lengths.message,
   );
 
   const state = assertThrows(() => bakeOne({ kind: "state", name: "kv.k" }), ExecutionError);
   assert(
-    state.message.includes("state スロット 'kv.k'を束ねる dispatch を GenerationContext 無しで"),
+    state.message.includes(
+      "state slot 'kv.k': tried to run a dispatch that binds it without a GenerationContext",
+    ),
     state.message,
   );
 });
@@ -777,7 +802,7 @@ test("GenerationContext が持たないスロット名は実体解決で fail lo
     ExecutionError,
   );
   assert(
-    error.message.includes("state スロット 'kv.v' の実体が GenerationContext に無い"),
+    error.message.includes("state slot 'kv.v' has no buffer in the GenerationContext"),
     error.message,
   );
 });
@@ -812,7 +837,7 @@ test("assertGenerationRun は許可集合の物理 chunk 行数だけを通す",
       () => assertGenerationRun(chunkLimits([rows]), allowed, 0, 1),
       ExecutionError,
     );
-    assert(error.message.includes("固定 chunk 契約"), error.message);
+    assert(error.message.includes("fixed chunk contract"), error.message);
     // 診断は許可集合を列挙する（何が許されているのかを呼び出し点で見せる）。
     assert(error.message.includes("{2, 4, 8}"), error.message);
   }
@@ -836,7 +861,7 @@ test("assertGenerationRun は queryLength が物理 chunk 行数を超える run
     () => assertGenerationRun(chunkLimits([4]), allowed, 0, 5),
     ExecutionError,
   );
-  assert(error.message.includes("物理 chunk 行数 4 を超える"), error.message);
+  assert(error.message.includes("exceeds the physical chunk row count 4"), error.message);
 });
 
 test("assertGenerationRun は full スロットの容量超過を許可集合に依らず拒否する", () => {

@@ -155,7 +155,7 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
     // `#readBatch` も `entered` のまま = 決着前の後続 enqueue は拒まれる。
     const refused = await rejectionOf(session.enqueue({}, { batch: entered }));
     assertInstanceOf(refused, BatchScopeError);
-    assertStringIncludes(refused.message, "enqueueRead を積んだ batch には");
+    assertStringIncludes(refused.message, "A batch holding an enqueueRead");
     assertEquals(await outcomeOf(entered.finish()), { state: "resolved" });
     // 決着後は同じ区間ではなくなる（門が解除されることの逆側）。
     assertEquals(await outcomeOf(decoy.finish()), { state: "resolved" });
@@ -219,7 +219,7 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
     // 未決着 run を持つ Session の enqueue は自己デッドロックなので、受け口が型付き例外へ変換する。
     const refused = await rejectionOf(read.admitted);
     assertInstanceOf(refused, BatchScopeError);
-    assertStringIncludes(refused.message, "未決着の run が");
+    assertStringIncludes(refused.message, "unsettled runs");
     // リースを取る前に落ちているので区間は決着する。
     assertEquals(await outcomeOf(batch.finish()), { state: "resolved" });
     // run も区間ロックを取れるところまで進む（本体はフェイク device にコマンド列を作る口が
@@ -241,7 +241,7 @@ describe("Session.dispose は enqueueRead を積んだ batch の決着前には�
     // finish の copy より先に backing を destroy する。
     const refused = await rejectionOf(session.dispose());
     assertInstanceOf(refused, ExecutionError);
-    assertStringIncludes(refused.message, "enqueueRead の読み戻し");
+    assertStringIncludes(refused.message, "enqueueRead readback");
     // 拒否は受付終了の前 = Session はまだ使える（後続の区間へ積める）。
     assertEquals(await outcomeOf(batch.finish()), { state: "resolved" });
     assertEquals(await outcomeOf(read.outputs), { state: "resolved" });

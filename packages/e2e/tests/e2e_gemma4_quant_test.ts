@@ -388,7 +388,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                   linearGemvReduce: "sequential",
                 }),
               Error,
-              "linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+              "supports only linearGemvReduce: parallel / linearCompute: f32",
             );
           }
           assert(requested.includes("karume.json"));

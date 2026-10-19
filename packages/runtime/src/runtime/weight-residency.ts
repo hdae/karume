@@ -187,17 +187,17 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     // layer. They are optional only in the type, so restate the check rather than skip silently.
     const axis = rowAxis ?? 0;
     if (groupSize === undefined) {
-      throw new ExecutionError(`${where}: 量子化 codec '${codec}' なのに groupSize が無い`);
+      throw new ExecutionError(`${where}: quantized codec '${codec}' but no groupSize`);
     }
     const consumerAxis = consumerAxes.get(name);
     if (consumerAxis !== undefined && consumerAxis !== axis) {
       throw new ExecutionError(
-        `${where}: 宣言の rowAxis ${axis} が消費側 op のチャネル軸 ${consumerAxis} と違う`,
+        `${where}: the declared rowAxis ${axis} differs from the consuming op's channel axis ${consumerAxis}`,
       );
     }
     const rows = shape[axis];
     if (rows === undefined) {
-      throw new ExecutionError(`${where}: 重み [${shape.join(",")}] に行の軸 ${axis} が無い`);
+      throw new ExecutionError(`${where}: weight [${shape.join(",")}] has no row axis ${axis}`);
     }
     const scale = scaleBytes(numel(groupScaleShape(shape, axis, groupSize)), where);
     if (layout === "i8" || layout === "i2") {
@@ -208,7 +208,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     // of `decodeI4` — ADR 0069 decision 3).
     if (axis !== 0) {
       throw new ExecutionError(
-        `${where}: group 量子化（${codec}）の rowAxis は 0 だけ（宣言は ${axis}）`,
+        `${where}: group quantization (${codec}) supports rowAxis 0 only (declared ${axis})`,
       );
     }
     plan.set(name, { seat: "i4", payloadBytes: bytes, scaleBytes: scale, groupSize });
@@ -340,10 +340,10 @@ export const resolveSharedWeights = (
   const surplus = given.filter((name) => !declared.includes(name));
   if (missing.length > 0 || surplus.length > 0) {
     throw new ExecutionError(
-      `options.sharedWeights がグラフの shared 宣言と一致しない: 不足 [${missing.join(
+      `options.sharedWeights does not match the graph's shared declarations: missing [${missing.join(
         ", ",
-      )}] / 余剰 [${surplus.join(", ")}]` +
-        "（shared 宣言 1 本につき 1 つ・過不足なく渡す MUST — ADR 0096 段 2 §2.2）",
+      )}] / extra [${surplus.join(", ")}]` +
+        " (exactly one per shared declaration, none missing or extra, MUST — ADR 0096 step 2 §2.2)",
     );
   }
   return declared.map((name) => {
@@ -353,31 +353,31 @@ export const resolveSharedWeights = (
     // user's getter escape instead of an `ExecutionError`.
     if (!(weight instanceof SharedWeight)) {
       throw new ExecutionError(
-        `sharedWeights['${name}']: SharedWeight でない値（${typeof weight}）— 貸し手 Session の ` +
-          "exportWeight が返したものを渡すこと",
+        `sharedWeights['${name}']: not a SharedWeight (${typeof weight}) — pass what the lending Session's ` +
+          "exportWeight returned",
       );
     }
     const shared = weight[RUNTIME_INTERNAL];
-    const where = `sharedWeights['${name}'（貸し手の initializer '${shared.initializer}'）`;
+    const where = `sharedWeights['${name}' (lender initializer '${shared.initializer}')`;
     if (shared.gpu !== gpu) {
-      throw new ExecutionError(`${where}: 貸し手と借り手の GpuContext（device）が別`);
+      throw new ExecutionError(`${where}: lender and borrower GpuContexts (devices) differ`);
     }
     const shape = graph.values[name].shape.map(Number);
     if (shape.length !== shared.shape.length || shape.some((d, i) => d !== shared.shape[i])) {
       throw new ExecutionError(
-        `${where}: 宣言 shape [${shape.join(",")}] が貸し手の [${shared.shape.join(",")}] と違う`,
+        `${where}: the declared shape [${shape.join(",")}] differs from the lender's [${shared.shape.join(",")}]`,
       );
     }
     const dtype = graph.values[name].dtype;
     if (dtype !== shared.dtype) {
       throw new ExecutionError(
-        `${where}: 意味論 dtype '${dtype}' が貸し手の '${shared.dtype}' と違う` +
-          "（常駐形式が同じなので席の照合では区別できず、同じバイト列が別の型として読まれる）",
+        `${where}: the semantic dtype '${dtype}' differs from the lender's '${shared.dtype}'` +
+          " (the resident form is the same, so the residency class check cannot tell them apart and the same bytes would be read as another type)",
       );
     }
     const seat = residency.get(name);
     if (seat === undefined || seat.seat !== "shared") {
-      throw new ExecutionError(`${where}: 常駐分類が shared でない（簿記の破れ）`);
+      throw new ExecutionError(`${where}: the residency class is not shared (broken bookkeeping)`);
     }
     // The borrower declares no storage — derive the expected class from the lender's codec and the
     // borrower-side consumption, and match it against the lender's actual class (and the row axis for
@@ -387,11 +387,11 @@ export const resolveSharedWeights = (
       expected === "i8" || expected === "i2" ? (seat.consumerAxis ?? 0) : undefined;
     if (expected !== shared.seat || expectedAxis !== shared.rowAxis) {
       throw new ExecutionError(
-        `${where}: 消費席が貸し手と互換でない（借り手は席 '${expected}'${
-          expectedAxis === undefined ? "" : `・行の軸 ${expectedAxis}`
-        }・貸し手は席 '${shared.seat}'${
-          shared.rowAxis === undefined ? "" : `・行の軸 ${shared.rowAxis}`
-        }）— 同じバッファが別の読み方をされる`,
+        `${where}: the consuming residency class is not compatible with the lender's (borrower class '${expected}'${
+          expectedAxis === undefined ? "" : `, row axis ${expectedAxis}`
+        }, lender class '${shared.seat}'${
+          shared.rowAxis === undefined ? "" : `, row axis ${shared.rowAxis}`
+        }) — the same buffer would be read two ways`,
       );
     }
     return { name, shared: weight };
@@ -479,7 +479,7 @@ const bufferLabel = (buffer: WeightBuffer): string =>
   buffer.kind === "scale"
     ? "scale"
     : buffer.seat === "expanded"
-      ? "payload（f32 展開後）"
+      ? "payload (decoded to f32)"
       : "payload";
 
 /**
@@ -520,19 +520,19 @@ export const assertWeightsWithinLimits = (
   for (const buffer of planWeightBuffers(residency)) {
     const exceeded = entries
       .filter(([, limit]) => buffer.byteLength > limit)
-      .map(([key, limit]) => `${key} ${limit} バイトを ${buffer.byteLength - limit} バイト超える`);
+      .map(([key, limit]) => `exceeds ${key} ${limit} bytes by ${buffer.byteLength - limit} bytes`);
     if (exceeded.length === 0) continue;
     violations.push(
-      `  - initializer '${buffer.name}' の ${bufferLabel(buffer)}（席 ${buffer.seat}・確保 ` +
-        `${buffer.byteLength} バイト）: ${exceeded.join("・")}`,
+      `  - initializer '${buffer.name}' ${bufferLabel(buffer)} (residency class ${buffer.seat}, allocated ` +
+        `${buffer.byteLength} bytes): ${exceeded.join(", ")}`,
     );
   }
   if (violations.length === 0) return;
   throw new ExecutionError(
-    `重みバッファ ${violations.length} 本が device の上限を超える（確保の前に検出）:\n` +
+    `${violations.length} weight buffers exceed the device limits (detected before allocation):\n` +
       `${violations.join("\n")}\n` +
-      "1 バッファ単位の上限なので block を分けても（piece に割っても）解消しない — " +
-      "より小さい格納 dtype で export し" +
-      "直すか、重みを分割してグラフを組み直すこと",
+      "The limits are per buffer, so splitting into blocks (pieces) does not resolve it — " +
+      "re-export with a smaller storage dtype" +
+      ", or split the weight and rebuild the graph",
   );
 };

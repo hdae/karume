@@ -686,7 +686,7 @@ test.skipIf(!GPU_AVAILABLE)(
         `警告は device ごとに 1 回（出たもの: ${JSON.stringify(warnings)}）`,
       );
       assertStringIncludes(warnings[0] ?? "", 'linearCompute: "a8"');
-      assertStringIncludes(warnings[0] ?? "", "quant で明示");
+      assertStringIncludes(warnings[0] ?? "", "pass quant explicitly");
     } finally {
       gpu.destroy();
     }
@@ -785,7 +785,11 @@ test.skipIf(!GPU_AVAILABLE)(
         linearCompute: "a8",
       });
       try {
-        await assertRejects(() => session.run({ x: prepared.x }), ExecutionError, "i32 縮約の門");
+        await assertRejects(
+          () => session.run({ x: prepared.x }),
+          ExecutionError,
+          "i32 reduction guard",
+        );
       } finally {
         await session.dispose();
       }

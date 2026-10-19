@@ -306,9 +306,9 @@ export const fusedAttentionViolation = (
   const { i8a8, mask, route } = request;
   if (mask && i8a8) {
     return (
-      `${where}: 加算 mask 付きの attention は attentionCompute 'a8' と組めない` +
-      "（①QK の i8a8 変種は mask の epilogue を持たない — attentionCompute を 'f32' か " +
-      "'f16' にすること）"
+      `${where}: attention with an additive mask cannot be combined with attentionCompute 'a8'` +
+      " (the i8a8 variant of ①QK has no mask epilogue — set attentionCompute to 'f32' or " +
+      "'f16')"
     );
   }
   const kvRepeat = heads / kvHeads;
@@ -319,8 +319,8 @@ export const fusedAttentionViolation = (
   // silently).
   if (kvRepeat > 1 && i8a8) {
     return (
-      `${where}: GQA（H=${heads} / Hkv=${kvHeads} → r=${kvRepeat}）× i8a8 は未対応` +
-      "（ADR 0067 決定 3・後日サポート予定 — attentionCompute を 'f32' か 'f16' にすること）"
+      `${where}: GQA (H=${heads} / Hkv=${kvHeads} → r=${kvRepeat}) × i8a8 is not supported` +
+      " (ADR 0067 decision 3, support planned — set attentionCompute to 'f32' or 'f16')"
     );
   }
   // MUST: the reduction guard fails loudly (letting it pass would garble values, sign included,
@@ -328,14 +328,14 @@ export const fusedAttentionViolation = (
   // orders of magnitude of headroom, but without it there is nothing to catch a regression).
   if (route.qk === "i8a8" && depth > LINEAR_I8A8_MAX_K) {
     return (
-      `${where}: D=${depth} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
-      "（attentionCompute を 'f32' にすること）"
+      `${where}: D=${depth} exceeds the i32 reduction guard ${LINEAR_I8A8_MAX_K} of the i8a8 path` +
+      " (set attentionCompute to 'f32')"
     );
   }
   if (route.pv === "i8a8" && cols > LINEAR_I8A8_MAX_K) {
     return (
-      `${where}: N=${cols} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
-      "（attentionCompute を 'f32' にすること）"
+      `${where}: N=${cols} exceeds the i32 reduction guard ${LINEAR_I8A8_MAX_K} of the i8a8 path` +
+      " (set attentionCompute to 'f32')"
     );
   }
   return undefined;
@@ -358,16 +358,16 @@ export const stateAttentionVariantViolation = (
 ): string | undefined => {
   if (seats.attentionCompute !== "f32") {
     return form === "states"
-      ? `${where}: states 形の attention は attentionCompute '${seats.attentionCompute}' と` +
-          "組めない（f32 の別族カーネルのみ — ADR 0067 決定 3 / 4）"
-      : `${where}: readonly の attention は attentionCompute ` +
-          `'${seats.attentionCompute}' と組めない（f32 の別族カーネルのみ）`;
+      ? `${where}: states-form attention cannot be combined with attentionCompute '${seats.attentionCompute}'` +
+          " (only the separate f32 kernel family — ADR 0067 decisions 3 / 4)"
+      : `${where}: readonly attention cannot be combined with attentionCompute ` +
+          `'${seats.attentionCompute}' (only the separate f32 kernel family)`;
   }
   if (seats.attentionScoreStorage !== "f32") {
-    const subject = form === "states" ? "states 形の attention" : "readonly の attention";
+    const subject = form === "states" ? "states-form attention" : "readonly attention";
     return (
-      `${where}: ${subject} は attentionScoreStorage ` +
-      `'${seats.attentionScoreStorage}' と組めない（S の格納は f32 のみ）`
+      `${where}: ${subject} cannot be combined with attentionScoreStorage ` +
+      `'${seats.attentionScoreStorage}' (S is stored as f32 only)`
     );
   }
   return undefined;
@@ -749,12 +749,12 @@ const stateSlot = (
   where: string,
 ): { readonly name: string; readonly shape: readonly number[] } => {
   const name = step.node.states[key];
-  if (name === undefined) throw new ExecutionError(`${where}: states 欄に '${key}' が無い`);
+  if (name === undefined) throw new ExecutionError(`${where}: no '${key}' in the states field`);
   const shape = states.shapes.get(name);
   if (shape === undefined) {
     throw new ExecutionError(
-      `${where}: state スロット '${name}' の解決済み容量が無い` +
-        "（GenerationContext を伴わない実行では state 参照ノードを組めない）",
+      `${where}: state slot '${name}' has no resolved capacity` +
+        " (a node that references state cannot be built for a run without a GenerationContext)",
     );
   }
   return { name, shape };

@@ -290,6 +290,6 @@ test("チャネル軸が消費側で食い違う i8 は席を決めずに落ち�
   assertThrows(
     () => planWeightResidency(model.graph),
     ExecutionError,
-    "チャネル軸が消費側で食い違う",
+    "consumers disagree on the channel axis",
   );
 });

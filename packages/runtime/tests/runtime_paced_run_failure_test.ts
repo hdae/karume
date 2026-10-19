@@ -224,7 +224,7 @@ test("state を書く generation run が印の待ちの後で落ちたら、cont
   await assertRejects(
     () => model.run({ k: k(), x: x() }, {}, { context, queryLength: 1 }),
     ExecutionError,
-    "汚染された GenerationContext は使えない",
+    "a poisoned GenerationContext cannot be used",
   );
   // 対照: poison は context に閉じる — 新しい context では同じ Session がそのまま回る。
   const fresh = await model.createGenerationContext({ chunkLength: 2 });

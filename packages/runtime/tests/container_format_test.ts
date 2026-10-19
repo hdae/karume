@@ -288,27 +288,27 @@ describe("container header", () => {
     assertThrows(
       () => readHeader(corrupt((v) => v.setUint32(4, 2, true))),
       ContainerFormatError,
-      "版",
+      "version",
     );
     assertThrows(
       () => readHeader(corrupt((v) => v.setBigUint64(16, 0n, true))),
       ContainerFormatError,
-      "krm なのに",
+      "krm but",
     );
     assertThrows(
       () => readHeader(corrupt((v) => v.setBigUint64(8, 0n, true))),
       ContainerFormatError,
-      "長さが 0",
+      "length is 0",
     );
     assertThrows(
       () => readHeader(corrupt((v) => v.setBigUint64(8, 1n << 60n, true))),
       ContainerFormatError,
-      "安全整数",
+      "safe integer",
     );
     assertThrows(
       () => readHeader(corrupt((v) => v.setBigUint64(8, BigInt(MAX_DESCRIPTOR_BYTES + 1), true))),
       ContainerFormatError,
-      "上限",
+      "limit",
     );
     assertThrows(
       () =>
@@ -323,7 +323,7 @@ describe("container header", () => {
     assertThrows(
       () => readHeader(bytes.subarray(0, HEADER_BYTES - 1)),
       ContainerFormatError,
-      "しかない",
+      "but only",
     );
   });
 
@@ -458,12 +458,12 @@ describe("container round trip", () => {
     await assertRejects(
       () => openContainer({ kind: "bytes", bytes: tampered }, expect),
       ContainerFormatError,
-      "グラフ記述の sha256",
+      "graph descriptor sha256",
     );
     await assertRejects(
       () => openContainer({ kind: "bytes", bytes: written.graphContainer }, expect),
       ContainerFormatError,
-      "krg なのに",
+      "krg but",
     );
   });
 
@@ -478,7 +478,7 @@ describe("container round trip", () => {
     await assertRejects(
       () => openContainer({ kind: "bytes", bytes: written.single }, graphOnly),
       ContainerFormatError,
-      "モデル記述の期待値",
+      "expected values for the model descriptor",
     );
   });
 
@@ -492,11 +492,11 @@ describe("container round trip", () => {
     await assertRejects(
       () => opened.readBlock(weight.id),
       ContainerFormatError,
-      "sha256 が宣言と違う",
+      "sha256 differs from the declared value",
     );
     parts[1][0] ^= 0x01;
     const again = await openContainer({ kind: "parts", parts });
-    await assertRejects(() => again.extractGraph(), ContainerFormatError, "const 領域の sha256");
+    await assertRejects(() => again.extractGraph(), ContainerFormatError, "const region sha256");
   });
 
   it("krg 抽出は krm からだけ — krg 入力は const 領域の完全性を照合できないので抽出しない", async () => {
@@ -507,7 +507,7 @@ describe("container round trip", () => {
     tampered[tampered.byteLength - 1] ^= 0x01;
     const opened = await openContainer({ kind: "bytes", bytes: tampered });
     assertEquals(opened.header.kind, "graph");
-    await assertRejects(() => opened.extractGraph(), ContainerFormatError, "krm からだけ");
+    await assertRejects(() => opened.extractGraph(), ContainerFormatError, "only from a krm");
   });
 
   it("krm からの krg 抽出は取得元が const 領域を短く返したら落ちる（hash より先に長さを照合する）", async () => {
@@ -526,7 +526,7 @@ describe("container round trip", () => {
     await assertRejects(
       () => opened.extractGraph(),
       ContainerFormatError,
-      `取得長 ${written.graph.const.length - 4}`,
+      `fetched length ${written.graph.const.length - 4}`,
     );
   });
 
@@ -555,7 +555,7 @@ describe("container round trip", () => {
     await assertRejects(
       () => untrusted.readBlock(weight.id),
       ContainerFormatError,
-      "sha256 が宣言と違う",
+      "sha256 differs from the declared value",
     );
   });
 
@@ -599,14 +599,14 @@ describe("container round trip", () => {
     await assertRejects(
       () => tampered.asset("ple_table").read(0, 4),
       ContainerFormatError,
-      "sha256 が宣言と違う",
+      "sha256 differs from the declared value",
     );
 
     // 範囲外・未宣言・krg は fail loudly。
-    await assertRejects(() => reader.read(398, 4), ContainerFormatError, "はみ出す");
-    assertThrows(() => trusted.asset("nope"), ContainerFormatError, "未宣言の資産");
+    await assertRejects(() => reader.read(398, 4), ContainerFormatError, "runs past");
+    assertThrows(() => trusted.asset("nope"), ContainerFormatError, "Undeclared asset");
     const graphOnly = await openContainer({ kind: "bytes", bytes: written.graphContainer });
-    assertThrows(() => graphOnly.asset("ple_table"), ContainerFormatError, "未宣言の資産");
+    assertThrows(() => graphOnly.asset("ple_table"), ContainerFormatError, "Undeclared asset");
   });
 
   it("資産の読み口は区間が安全整数でなければ落ち、検証済みの取得元が短く返しても落ちる", async () => {
@@ -627,9 +627,17 @@ describe("container round trip", () => {
       const reader = (await openContainer({ kind: "source", source: sourceOf(verified) })).asset(
         "ple_table",
       );
-      await assertRejects(() => reader.read(Number.NaN, 4), ContainerFormatError, "安全整数でない");
-      await assertRejects(() => reader.read(1.5, 4), ContainerFormatError, "安全整数でない");
-      await assertRejects(() => reader.read(0, Number.NaN), ContainerFormatError, "安全整数でない");
+      await assertRejects(
+        () => reader.read(Number.NaN, 4),
+        ContainerFormatError,
+        "is not a safe integer",
+      );
+      await assertRejects(() => reader.read(1.5, 4), ContainerFormatError, "is not a safe integer");
+      await assertRejects(
+        () => reader.read(0, Number.NaN),
+        ContainerFormatError,
+        "is not a safe integer",
+      );
     }
 
     // 検証済みの取得元は block 全体を読まない経路なので、戻りの長さを要求と突き合わせる。
@@ -638,7 +646,7 @@ describe("container round trip", () => {
     await assertRejects(
       () => short.asset("ple_table").read(16, 8),
       ContainerFormatError,
-      "取得長 7 が要求 8 と違う",
+      "fetched length 7 differs from the requested 8",
     );
   });
 
@@ -647,7 +655,7 @@ describe("container round trip", () => {
     await assertRejects(
       () => openContainer({ kind: "parts", parts: written.parts.slice(0, -1) }),
       ContainerFormatError,
-      "本だが宣言は",
+      "are declared",
     );
     const shorter = written.parts.map((part, i) =>
       i === 2 ? part.subarray(0, part.byteLength - 4) : part,
@@ -655,7 +663,7 @@ describe("container round trip", () => {
     await assertRejects(
       () => openContainer({ kind: "parts", parts: shorter }),
       ContainerFormatError,
-      "part 2 の長さ",
+      "part 2 length",
     );
     await assertRejects(
       () =>
@@ -664,7 +672,7 @@ describe("container round trip", () => {
           bytes: written.single.subarray(0, written.single.byteLength - 1),
         }),
       ContainerFormatError,
-      "単一形の長さ",
+      "Single-form length",
     );
   });
 
@@ -698,7 +706,7 @@ describe("container round trip", () => {
     await assertRejects(
       () => openContainer({ kind: "source", source }),
       ContainerFormatError,
-      "part 長の天井",
+      "part length ceiling",
     );
     assertEquals(reads.includes(1), false);
   });
@@ -732,7 +740,7 @@ describe("container descriptor", () => {
       (doc) => {
         supply(doc).encoding.codec = "int3-sym";
       },
-      "台帳に無い codec",
+      "is not in the ledger",
     );
     rejectsModel(
       "packing 不一致",
@@ -740,7 +748,7 @@ describe("container descriptor", () => {
       (doc) => {
         supply(doc).encoding.packing.blockElements = 4;
       },
-      "別の版の台帳",
+      "a different version of the ledger",
     );
     rejectsModel(
       "未知キー",
@@ -748,7 +756,7 @@ describe("container descriptor", () => {
       (doc) => {
         supply(doc).encoding.bits = 4;
       },
-      "未知のキー",
+      "unknown key",
     );
     rejectsModel(
       "資産の論理長と block 長の不整合",
@@ -756,7 +764,7 @@ describe("container descriptor", () => {
       (doc) => {
         anyOf(doc).assets.style_vectors.length = 296;
       },
-      "切り上げた値が block",
+      "differs from block",
     );
     rejectsModel(
       "非量子化に groupSize",
@@ -764,7 +772,7 @@ describe("container descriptor", () => {
       (doc) => {
         anyOf(doc).binding.text_encoder["enc.weight"].encoding.groupSize = 32;
       },
-      "量子化でないので書けない",
+      "is not quantized, so it cannot be written",
     );
     rejectsModel(
       "量子化に scale 無し",
@@ -772,7 +780,7 @@ describe("container descriptor", () => {
       (doc) => {
         delete supply(doc).encoding.scale;
       },
-      "量子化なので必須",
+      "is quantized, so it is required",
     );
     rejectsModel(
       "codecs の集合が束縛表と違う",
@@ -780,7 +788,7 @@ describe("container descriptor", () => {
       (doc) => {
         anyOf(doc).codecs = ["f16"];
       },
-      "codec 集合",
+      "codec set",
     );
     const { graphDescriptorBytes } = await writeModelContainer(syntheticModel(), OPTIONS);
     assertThrows(
@@ -791,7 +799,7 @@ describe("container descriptor", () => {
           }),
         ),
       ContainerFormatError,
-      "未知の機能",
+      "unknown features",
     );
   });
 
@@ -805,7 +813,7 @@ describe("container descriptor", () => {
       (doc) => {
         anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.dtype = "f16";
       },
-      "受理集合",
+      "accepted set",
     );
   });
 
@@ -819,7 +827,7 @@ describe("container descriptor", () => {
       (doc) => {
         anyOf(doc).binding.front["front.bias"].block = "absent";
       },
-      "目次に無い block",
+      "is not in the index",
     );
     rejectsModel(
       "scale が未宣言の block",
@@ -827,7 +835,7 @@ describe("container descriptor", () => {
       (doc) => {
         anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block = "absent";
       },
-      "目次に無い block",
+      "is not in the index",
     );
   });
 
@@ -841,7 +849,7 @@ describe("container descriptor", () => {
     const nested = new TextEncoder().encode(
       `{"a":${"[".repeat(70)}1${"]".repeat(70)}}`,
     ) as Uint8Array<ArrayBuffer>;
-    assertThrows(() => parseGraphDescriptor(nested), ContainerFormatError, "深さ上限");
+    assertThrows(() => parseGraphDescriptor(nested), ContainerFormatError, "depth limit");
     const proto = new TextEncoder().encode('{"__proto__":{"format":1}}') as Uint8Array<ArrayBuffer>;
     assertThrows(() => parseGraphDescriptor(proto), ContainerFormatError, "__proto__");
   });
@@ -856,7 +864,7 @@ describe("container descriptor", () => {
       (doc) => {
         anyOf(doc).binding.front["front.bias"].block = bigSupply(doc).pieces[0].block;
       },
-      "二重に束縛",
+      "bound twice",
     );
     rejectsModel(
       "余剰 block（規則⑤）",
@@ -864,7 +872,7 @@ describe("container descriptor", () => {
       (doc) => {
         delete anyOf(doc).assets["style_vectors"];
       },
-      "参照されていない",
+      "is not referenced",
     );
     rejectsModel(
       "piece の穴（規則④）",
@@ -872,7 +880,7 @@ describe("container descriptor", () => {
       (doc) => {
         bigSupply(doc).pieces[1].rows[0] += 1;
       },
-      "から続かない",
+      "does not continue from",
     );
     rejectsModel(
       "piece 1 本",
@@ -880,7 +888,7 @@ describe("container descriptor", () => {
       (doc) => {
         bigSupply(doc).pieces = [bigSupply(doc).pieces[0]];
       },
-      "2 本以上",
+      "2 or more",
     );
     rejectsModel(
       "block と pieces の両方",
@@ -888,7 +896,7 @@ describe("container descriptor", () => {
       (doc) => {
         bigSupply(doc).block = "w0001";
       },
-      "どちらか一方",
+      "exactly one of",
     );
     rejectsModel(
       "role の取り違え",
@@ -897,7 +905,7 @@ describe("container descriptor", () => {
         const scaleId = anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block;
         anyOf(doc).blocks.find((block: { id: string }) => block.id === scaleId).role = "weight";
       },
-      "role は",
+      "has role",
     );
     rejectsModel(
       "scale が別 part（規則③）",
@@ -912,7 +920,7 @@ describe("container descriptor", () => {
         block.offset = Math.ceil(other.length / 64) * 64;
         other.length = block.offset + block.length;
       },
-      "同一 part MUST",
+      "same part MUST",
     );
     rejectsModel(
       "offset の整列",
@@ -920,7 +928,7 @@ describe("container descriptor", () => {
       (doc) => {
         anyOf(doc).blocks[0].offset += 4;
       },
-      "の倍数でない",
+      "is not a multiple of",
     );
     rejectsModel(
       "parts の添字",
@@ -928,7 +936,7 @@ describe("container descriptor", () => {
       (doc) => {
         anyOf(doc).parts[0].index = 0;
       },
-      "index が 1 でない",
+      "index is not 1",
     );
     rejectsModel(
       "part 1 への block",
@@ -936,7 +944,7 @@ describe("container descriptor", () => {
       (doc) => {
         anyOf(doc).blocks[0].part = 1;
       },
-      "2 未満",
+      "less than 2",
     );
   });
 
@@ -953,7 +961,7 @@ describe("container descriptor", () => {
           delete anyOf(doc).binding.text_encoder["enc.weight"];
         }),
       ContainerFormatError,
-      "不足 [enc.weight] / 余剰 [model.lm_head.weight]",
+      "missing [enc.weight] / surplus [model.lm_head.weight]",
     );
   });
 
@@ -997,7 +1005,7 @@ describe("container descriptor", () => {
           [first.part, second.part] = [second.part, first.part];
         }),
       ContainerFormatError,
-      "graph 'g' initializer 'tall.weight' piece[1]: part 2 が直前の piece の part 3 より前にある",
+      "graph 'g' initializer 'tall.weight' piece[1]: part 2 comes before part 3 of the previous piece",
     );
   });
 
@@ -1038,7 +1046,7 @@ describe("container descriptor", () => {
           [bias.block, conv.block] = [conv.block, bias.block];
         }),
       ContainerFormatError,
-      "initializer 'front.bias': block 'w0009' の長さ 96 が payload 130 バイト + 詰め物",
+      "initializer 'front.bias': block 'w0009' length 96 is not payload 130 bytes + padding",
     );
     // rowAxis 1 の initializer を piece 分割させる（block 上限を 1 行分より小さく）。
     await assertRejects(
@@ -1054,7 +1062,7 @@ describe("container descriptor", () => {
           { partBytes: 2048, blockBytes: 64 },
         ).then((written) => openContainer({ kind: "parts", parts: written.parts })),
       ContainerFormatError,
-      "piece 分割できない",
+      "cannot be split into pieces",
     );
     // per-channel codec の groupSize が行長と違う。
     await assertRejects(
@@ -1068,7 +1076,7 @@ describe("container descriptor", () => {
           ),
         })),
       ContainerFormatError,
-      "行長 32 に等しい",
+      "equal the row length 32",
     );
     // group codec の groupSize が 2 冪 ≥ 16 でない / 行長を割らない。
     await assertRejects(
@@ -1082,7 +1090,7 @@ describe("container descriptor", () => {
           ),
         })),
       ContainerFormatError,
-      "2 冪",
+      "power of two",
     );
     // scale の長さが `rows × groups × 4` と合わない。
     await assertRejects(
@@ -1122,7 +1130,7 @@ describe("container descriptor", () => {
           OPTIONS,
         ).then((written) => openContainer({ kind: "parts", parts: written.parts })),
       ContainerFormatError,
-      "組めない",
+      "cannot be paired with",
     );
   });
 
@@ -1153,7 +1161,7 @@ describe("container descriptor", () => {
     await assertRejects(
       () => openContainer({ kind: "parts", parts: written.parts }),
       ContainerFormatError,
-      "codec 'int4-sym-g' の rowAxis は 0 だけ（宣言は 1",
+      "rowAxis of codec 'int4-sym-g' must be 0 only (declared 1",
     );
     // 対照: 同じ容器の i8 conv_transpose1d 形（rowAxis 1）は受理される。
     const opened = await openContainer({
@@ -1192,7 +1200,7 @@ describe("container descriptor", () => {
     assertThrows(
       () => validateAgainstGraph(moved, graph),
       ContainerFormatError,
-      "不足 [toString] / 余剰 [ghost]",
+      "missing [toString] / surplus [ghost]",
     );
 
     // 合流層も束縛表の toString を Object.prototype の関数と取り違えない。
@@ -1207,7 +1215,7 @@ describe("container descriptor", () => {
           },
         }),
       ContainerFormatError,
-      "束縛表に供給が無い",
+      "no supply in the binding table",
     );
 
     // const 束縛のグラフ名 constructor は未宣言のグラフ。
@@ -1220,11 +1228,11 @@ describe("container descriptor", () => {
           }),
         ),
       ContainerFormatError,
-      "未宣言のグラフ 'constructor'",
+      "undeclared graph 'constructor'",
     );
 
     // 資産名 constructor は未宣言の資産。
     const opened = await openContainer({ kind: "parts", parts: written.parts });
-    assertThrows(() => opened.asset("constructor"), ContainerFormatError, "未宣言の資産");
+    assertThrows(() => opened.asset("constructor"), ContainerFormatError, "Undeclared asset");
   });
 });

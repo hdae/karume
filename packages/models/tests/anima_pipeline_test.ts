@@ -280,7 +280,7 @@ test("fromAssets: 明示と quant 宣言の合成が runtime の受けない組�
         { attentionCompute: "f16" },
       ),
     ModelInputError,
-    "同時に指定できない",
+    "cannot be given together",
   );
 });
 

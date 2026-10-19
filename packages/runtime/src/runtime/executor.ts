@@ -271,12 +271,12 @@ const residentNames = (
  */
 const assertResidentUsable = (resident: ResidentTensor, gpu: GpuContext, where: string): void => {
   if (resident.disposed) {
-    throw new ExecutionError(`${where}: 破棄済みの常駐テンソル '${resident.label}' は使えない`);
+    throw new ExecutionError(`${where}: disposed resident tensor '${resident.label}' is unusable`);
   }
   if (resident[RUNTIME_INTERNAL].owner !== gpu) {
     throw new ResidentTensorError(
-      `${where}: 常駐テンソル '${resident.label}' は別の GpuContext が所有している` +
-        "（識別子は GpuContext ごとの独立採番なので、跨いで渡すと導出済み計画のキーが衝突する）",
+      `${where}: resident tensor '${resident.label}' is owned by another GpuContext` +
+        " (identifiers are numbered independently per GpuContext, so passing one across contexts makes the keys of derived plans collide)",
     );
   }
 };
@@ -377,7 +377,7 @@ const resolvedShape = (
 ): readonly number[] => {
   const shape = shapes.get(name);
   if (shape === undefined) {
-    throw new ExecutionError(`値 '${name}' の解決済み shape が実行計画に無い`);
+    throw new ExecutionError(`Value '${name}' has no resolved shape in the execution plan`);
   }
   return shape;
 };
@@ -407,7 +407,7 @@ const assertGenerationCommit = (capturedGeneration: GenerationRun | undefined): 
     throw new ExecutionError(
       `run: generation.commit ${describeInputValue(
         capturedGeneration.commit,
-      )} は 'immediate' か 'deferred' のみ`,
+      )} must be 'immediate' or 'deferred'`,
     );
   }
   // MUST: a deferred run may write at most **the slack** rows into the sliding ring
@@ -432,15 +432,15 @@ const assertGenerationCommit = (capturedGeneration: GenerationRun | undefined): 
     // fails in the synchronous section of issue.
     if (capturedGeneration.context[RUNTIME_INTERNAL].borrowing) {
       throw new ExecutionError(
-        "run: 借り手 context の run に generation.commit 'deferred' は指定できない" +
-          "（借り手は論理長を進めないので確定させる相手が居ない）",
+        "run: generation.commit 'deferred' cannot be given for a run of a borrowing context" +
+          " (a borrower does not advance a logical length, so there is nothing to commit to)",
       );
     }
     const slack = capturedGeneration.context.slidingSlack;
     if (slack !== undefined && capturedGeneration.queryLength > slack) {
       throw new ExecutionError(
-        `run: deferred な generation run の queryLength ${capturedGeneration.queryLength} が ` +
-          `sliding ring の余裕 ${slack} を超える（棄却行が live な過去 KV を潰す）`,
+        `run: queryLength ${capturedGeneration.queryLength} of a deferred generation run exceeds ` +
+          `the sliding ring's slack ${slack} (rejected rows would overwrite live past KV)`,
       );
     }
   }
@@ -858,7 +858,7 @@ export class Session {
     // The disposed check happens at call time (checked inside the chain, runs issued before dispose
     // would fail along with it).
     if (this.#disposal !== undefined) {
-      return Promise.reject(new ExecutionError("dispose 済みの Session では実行できない"));
+      return Promise.reject(new ExecutionError("Cannot run on a disposed Session"));
     }
     // MUST: the context lease is acquired **before** pushing onto `#serialize` (the same reason as
     // `batch.enter` in `enqueue` — the body sits one microtask later, so acquiring it in the body
@@ -908,7 +908,7 @@ export class Session {
       // discipline as "once more after allocation" in {@link Session.#adopt} — the final check sits
       // right before resource reservation and joining the serialization chain).
       if (this.#disposal !== undefined) {
-        throw new ExecutionError("dispose 済みの Session では実行できない");
+        throw new ExecutionError("Cannot run on a disposed Session");
       }
       // MUST: device liveness is also checked in the synchronous section of acceptance
       // ({@link assertDeviceUsable}). The body's failure detection relies on errorScope and the
@@ -916,13 +916,13 @@ export class Session {
       // lost device or one whose destruction was requested. It sits after the copy because a
       // caller's getter can issue `destroy()` synchronously (the same position as the dispose
       // re-check).
-      assertDeviceUsable(this.#state.gpu, "run の受付");
+      assertDeviceUsable(this.#state.gpu, "run acceptance");
       // MUST: use reservations on resident inputs are also taken in the **synchronous section of
       // issue** (the body's binding reservation alone lets a `dispose()` in the same tick through
       // while an accepted run exists — {@link retainUsedResidents}).
       const targets: [where: string, resident: ResidentTensor][] = [];
       for (const [name, resident] of captured.residentInputs) {
-        targets.push([`入力 '${name}'`, resident]);
+        targets.push([`Input '${name}'`, resident]);
       }
       used = retainUsedResidents(targets, this.#state.gpu);
     } catch (cause) {
@@ -1049,25 +1049,25 @@ export class Session {
    */
   #assertEnqueueAdmissible(batch: EnqueueOptions["batch"]): void {
     if (this.#disposal !== undefined) {
-      throw new ExecutionError("dispose 済みの Session では実行できない");
+      throw new ExecutionError("Cannot run on a disposed Session");
     }
     // MUST: device liveness is checked too (the same reason as the acceptance of
     // {@link Session.run} — an enqueue with 0 outputs settles its returned Promise as a success
     // even on a device whose destruction was requested. The span's finish fails, but with the
     // enqueue's own settlement left as a success, one cannot read which enqueue hit the loss).
-    assertDeviceUsable(this.#state.gpu, "enqueue の受付");
+    assertDeviceUsable(this.#state.gpu, "enqueue acceptance");
     if (this.#readBatch === batch) {
       throw new BatchScopeError(
-        "enqueueRead を積んだ batch には、その決着まで同じ Session から enqueue できない" +
-          "（決着時に読む出力 slot を後続の enqueue が上書きすると沈黙誤値になる）",
+        "A batch holding an enqueueRead cannot take enqueues from the same Session until it settles" +
+          " (a later enqueue overwriting the output slot read at settlement would give silently wrong values)",
       );
     }
     if (this.#pendingRuns > 0) {
       throw new BatchScopeError(
-        `未決着の run が ${this.#pendingRuns} 本ある Session には enqueue できない` +
-          "（batch 区間は errorScope 区間ロックを握ったまま enqueue の決着を待ち、その " +
-          "enqueue は先行 run を待ち、run はそのロックを待つ = 自己デッドロック）。" +
-          "run を await してから batch を開くか、区間中は enqueue だけを使うこと",
+        `Cannot enqueue on a Session with ${this.#pendingRuns} unsettled runs` +
+          " (the batch span waits for the enqueue to settle while holding the errorScope section lock, that " +
+          "enqueue waits for the earlier run, and the run waits for that lock = self-deadlock). " +
+          "Await the run before opening the batch, or use only enqueue inside the span",
       );
     }
   }
@@ -1147,7 +1147,7 @@ export class Session {
       lease = capturedOptions.generation?.context[RUNTIME_INTERNAL];
       const targets: [where: string, resident: ResidentTensor][] = [];
       for (const [name, resident] of captured.residentInputs) {
-        targets.push([`入力 '${name}'`, resident]);
+        targets.push([`Input '${name}'`, resident]);
       }
       for (const [name, target] of Object.entries(capturedOptions.copyOutputs ?? {})) {
         targets.push([`copyOutputs '${name}'`, target]);
@@ -1257,7 +1257,7 @@ export class Session {
   createGenerationContext(spec: GenerationContextSpec): Promise<GenerationContext> {
     return this.#adopt(
       () => GenerationContext.create(this.#generationHost(), spec),
-      "dispose 済みの Session では GenerationContext を作れない",
+      "Cannot create a GenerationContext on a disposed Session",
     );
   }
 
@@ -1340,26 +1340,28 @@ export class Session {
    */
   exportWeight(initializerName: string): SharedWeight {
     if (this.#disposal !== undefined) {
-      throw new ExecutionError("dispose 済みの Session では重みを貸し出せない");
+      throw new ExecutionError("Cannot lend weights from a disposed Session");
     }
     const { graph, residency, weightBuffers, residentWeights, gpu } = this.#state;
     if (!Object.hasOwn(graph.initializers, initializerName)) {
-      throw new ExecutionError(`exportWeight: initializer '${initializerName}' がグラフに無い`);
+      throw new ExecutionError(`exportWeight: initializer '${initializerName}' not in the graph`);
     }
     const seat = residency.get(initializerName);
     if (seat === undefined) {
-      throw new ExecutionError(`exportWeight: initializer '${initializerName}' の常駐分類が無い`);
+      throw new ExecutionError(
+        `exportWeight: initializer '${initializerName}' has no residency class`,
+      );
     }
     if (seat.seat === "shared") {
       throw new ExecutionError(
-        `exportWeight: initializer '${initializerName}' はこの Session も借りている` +
-          "（借り物の再輸出はしない — 貸し手から直接借りること）",
+        `exportWeight: initializer '${initializerName}' is itself borrowed by this Session` +
+          " (borrowed weights are not re-exported — borrow directly from the lender)",
       );
     }
     const buffer = weightBuffers.get(initializerName);
     if (buffer === undefined) {
       throw new ExecutionError(
-        `exportWeight: initializer '${initializerName}' の重みバッファが台帳に無い`,
+        `exportWeight: initializer '${initializerName}' has no weight buffer in the ledger`,
       );
     }
     // The lender's codec (the borrower's expected residency class is derived from it and the
@@ -1368,7 +1370,7 @@ export class Session {
     const lenderCodec = graph.initializers[initializerName].storage?.codec;
     if (lenderCodec === undefined) {
       throw new ExecutionError(
-        `exportWeight: initializer '${initializerName}' の格納が無い（簿記の破れ）`,
+        `exportWeight: initializer '${initializerName}' has no storage (broken bookkeeping)`,
       );
     }
     return new SharedWeight({
@@ -1383,14 +1385,14 @@ export class Session {
       dtype: graph.values[initializerName].dtype,
       retain: (): void => {
         if (this.#disposal !== undefined) {
-          throw new ExecutionError("dispose 済みの Session の重みは借りられない");
+          throw new ExecutionError("Cannot borrow weights of a disposed Session");
         }
         this.#lentWeights += 1;
       },
       release: (): void => {
         if (this.#lentWeights < 1) {
           throw new ExecutionError(
-            `Session: 重みの借用計数の解放が過多（ランタイム内部の簿記の破れ）`,
+            `Session: weight borrow count released too many times (broken runtime-internal bookkeeping)`,
           );
         }
         this.#lentWeights -= 1;
@@ -1412,7 +1414,7 @@ export class Session {
       // Sessions riding on it) would fail on a validation far from the real cause.
       if (this.#readBatch !== undefined) {
         throw new ExecutionError(
-          "dispose: この Session は enqueueRead の読み戻しで batch の最終決着待ち（finish 後に破棄すること）",
+          "dispose: this Session is waiting for the final settlement of a batch for an enqueueRead readback (dispose it after finish)",
         );
       }
     } catch (cause) {
@@ -1425,8 +1427,8 @@ export class Session {
     if (this.#lentWeights > 0 && this.#disposal === undefined) {
       return Promise.reject(
         new ExecutionError(
-          `dispose: この Session の重みを ${this.#lentWeights} 本貸し出している` +
-            "（借り手 Session の bind group が掴んでいる）。借り手を先に dispose すること",
+          `dispose: this Session has ${this.#lentWeights} weights lent out` +
+            " (the borrowing Sessions' bind groups hold them). Dispose the borrowers first",
         ),
       );
     }
@@ -1622,8 +1624,8 @@ export class Session {
     // generation's KV bound", visible only in the values.
     if (generation !== undefined && !this.#contexts.has(generation.context)) {
       throw new ExecutionError(
-        "run の GenerationContext がこの Session の生存集合に無い" +
-          "（別の Session が作った context か、dispose 済み）",
+        "The run's GenerationContext is not in this Session's live set" +
+          " (a context created by another Session, or already disposed)",
       );
     }
     const {
@@ -1879,7 +1881,7 @@ export class Session {
             // two-stage-wait path).
             const pending = popFailureScopes(
               device,
-              singleFence ? "run のエンコードと readback" : "run のエンコード",
+              singleFence ? "run encoding and readback" : "run encoding",
             );
             popped = true;
             const failure = await pending.catch((cause: unknown) => {
@@ -2011,9 +2013,9 @@ export class Session {
     if (generation === undefined || snapshot === undefined) return;
     if (this.#state.scheduler.submitCount === snapshot) return;
     generation.context[RUNTIME_INTERNAL].poison(
-      `state 変更 dispatch を submit した run が失敗した（${
+      `A run that submitted state-changing dispatches failed (${
         cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause)
-      }）`,
+      })`,
     );
   }
 
@@ -2076,7 +2078,7 @@ export class Session {
 
     const generation = options.generation;
     if (generation !== undefined && !this.#contexts.has(generation.context)) {
-      throw new ExecutionError("enqueue の GenerationContext がこの Session の生存集合に無い");
+      throw new ExecutionError("The enqueue's GenerationContext is not in this Session's live set");
     }
     const { stateShapes, pastLength, face, preparedKey, prepared, derived, shapes } =
       this.#prepareInvocation(generation, captured, options.bindings ?? {});
@@ -2239,9 +2241,9 @@ export class Session {
     return Object.entries(copyOutputs).map(([name, target]) => {
       if (!this.#state.outputNames.has(name)) {
         throw new ExecutionError(
-          `copyOutputs '${name}' はグラフ出力ではない（[${[...this.#state.outputNames].join(
+          `copyOutputs '${name}' is not a graph output ([${[...this.#state.outputNames].join(
             ", ",
-          )}]）`,
+          )}])`,
         );
       }
       assertResidentUsable(target, this.#state.gpu, `copyOutputs '${name}'`);
@@ -2249,9 +2251,9 @@ export class Session {
       const size = outputByteSize(numel(shape));
       if (target.byteLength !== size) {
         throw new ExecutionError(
-          `copyOutputs '${name}': 常駐テンソル '${target.label}' の ${target.byteLength} バイトが shape [${shape.join(
+          `copyOutputs '${name}': resident tensor '${target.label}' has ${target.byteLength} bytes, but shape [${shape.join(
             ",",
-          )}] の ${size} バイトと合わない`,
+          )}] needs ${size} bytes`,
         );
       }
       return { name, target, size };
@@ -2283,16 +2285,16 @@ export class Session {
       // execution), so it fails.
       if (source === undefined) {
         throw new ExecutionError(
-          `copyOutputs '${copy.name}': ノード出力ではない（initializer をそのままグラフ出力に` +
-            "した値は写せない — その値は実行に依らず不変)",
+          `copyOutputs '${copy.name}': not a node output (a value that is an initializer used directly as a graph output` +
+            " cannot be copied — it does not change between executions)",
         );
       }
       const target = copy.target[RUNTIME_INTERNAL].buffer;
       if (source.buffer === target) {
         throw new ExecutionError(
-          `copyOutputs '${copy.name}': 写し元と写し先が同じバッファ（常駐テンソル ` +
-            `'${copy.target.label}'）— グラフ出力がその常駐入力の別名（reshape / 恒等 expand）に` +
-            "なっているため、写しは自己コピーになる（計算内容がゼロの構成）",
+          `copyOutputs '${copy.name}': source and destination are the same buffer (resident tensor ` +
+            `'${copy.target.label}') — the graph output is an alias of that resident input (reshape / identity expand),` +
+            " so the copy would be a self-copy (a configuration that computes nothing)",
         );
       }
       return { source, target, size: copy.size };
@@ -2650,7 +2652,9 @@ export class Session {
           if (resident !== undefined) return [spec.name, resident[RUNTIME_INTERNAL].buffer];
           const size = ownedInputSizes.get(spec.name);
           if (size === undefined) {
-            throw new ExecutionError(`入力 '${spec.name}' の大きさが表に無い（簿記の破れ）`);
+            throw new ExecutionError(
+              `No size in the table for input '${spec.name}' (broken bookkeeping)`,
+            );
           }
           const buffer = device.createBuffer({ size, usage: HOST_WRITTEN_USAGE });
           ownedInputs.push(buffer);
@@ -2824,7 +2828,7 @@ export class Session {
   #declaredDtype(name: string): IrDtype {
     const dtype = this.#state.dtypes.get(name);
     if (dtype === undefined) {
-      throw new ExecutionError(`値 '${name}' の宣言 dtype が無い`);
+      throw new ExecutionError(`Value '${name}' has no declared dtype`);
     }
     return dtype;
   }
@@ -2854,7 +2858,7 @@ export class Session {
   ): Tensor["data"] {
     // Missing inputs and shape mismatches are already handled by bindSymbols. Only dtype and
     // element count are checked here.
-    if (tensor === undefined) throw new ExecutionError(`入力 '${name}' が渡されていない`);
+    if (tensor === undefined) throw new ExecutionError(`Input '${name}' was not passed`);
     // MUST: both the discriminant and the actual data are checked against the declared dtype. Every
     // element type is 4 bytes, so a mix-up would pass through writeBuffer and become a
     // reinterpretation of the bit pattern (no exception).
@@ -2862,16 +2866,16 @@ export class Session {
     const expected = HOST_ARRAY[dtype];
     if (tensor.dtype !== dtype || !(tensor.data instanceof expected)) {
       throw new ExecutionError(
-        `入力 '${name}': 宣言 dtype '${dtype}'（${expected.name}）に対し渡されたのは '${tensor.dtype}' / ${tensor.data.constructor.name}`,
+        `Input '${name}': declared dtype '${dtype}' (${expected.name}), but got '${tensor.dtype}' / ${tensor.data.constructor.name}`,
       );
     }
     const shape = resolvedShape(shapes, name);
     const count = numel(shape);
     if (tensor.data.length !== count) {
       throw new ExecutionError(
-        `入力 '${name}': 要素数 ${tensor.data.length} が shape [${shape.join(
+        `Input '${name}': element count ${tensor.data.length} does not match shape [${shape.join(
           ",",
-        )}] の ${count} と合わない`,
+        )}] (${count})`,
       );
     }
     return tensor.data;
@@ -2891,14 +2895,14 @@ export class Session {
     resident: ResidentTensor,
     shapes: ReadonlyMap<string, readonly number[]>,
   ): void {
-    assertResidentUsable(resident, this.#state.gpu, `入力 '${name}'`);
+    assertResidentUsable(resident, this.#state.gpu, `Input '${name}'`);
     const shape = resolvedShape(shapes, name);
     const wanted = Math.max(4, numel(shape) * 4);
     if (resident.byteLength !== wanted) {
       throw new ExecutionError(
-        `入力 '${name}': 常駐テンソル '${resident.label}' の ${resident.byteLength} バイトが shape [${shape.join(
+        `Input '${name}': resident tensor '${resident.label}' has ${resident.byteLength} bytes, but shape [${shape.join(
           ",",
-        )}] の ${wanted} バイトと合わない`,
+        )}] needs ${wanted} bytes`,
       );
     }
   }
@@ -2951,7 +2955,7 @@ export class Session {
    */
   #writeInput(backing: ActiveBacking, name: string, data: Tensor["data"]): void {
     const buffer = backing.inputs.get(name);
-    if (buffer === undefined) throw new ExecutionError(`入力 '${name}' の常駐バッファが無い`);
+    if (buffer === undefined) throw new ExecutionError(`Input '${name}' has no resident buffer`);
     if (data.length > 0) this.#state.gpu.device.queue.writeBuffer(buffer, 0, data);
   }
 
@@ -2966,7 +2970,7 @@ export class Session {
     missValues: ReadonlyMap<string, ValueBinding> | undefined,
   ): ReadonlyMap<string, ValueBinding> {
     const values = backing?.outputs ?? missValues;
-    if (values === undefined) throw new ExecutionError("run の束縛先が組まれていない");
+    if (values === undefined) throw new ExecutionError("The run's bindings have not been built");
     return values;
   }
 
@@ -2989,9 +2993,9 @@ export class Session {
     const weight = this.#state.weightBuffers.get(name);
     const binding =
       values.get(name) ?? (weight === undefined ? undefined : { buffer: weight, readable: true });
-    if (binding === undefined) throw new ExecutionError(`グラフ出力 '${name}' のバッファが無い`);
+    if (binding === undefined) throw new ExecutionError(`Graph output '${name}' has no buffer`);
     if (!binding.readable) {
-      throw new ExecutionError(`グラフ出力 '${name}' がピン留めされておらず読み戻せない`);
+      throw new ExecutionError(`Graph output '${name}' is not pinned and cannot be read back`);
     }
     const shape = resolvedShape(shapes, name);
     const count = numel(shape);
@@ -3031,8 +3035,8 @@ export class Session {
       for (const [input, resident] of residentInputs) {
         if (resident[RUNTIME_INTERNAL].buffer === buffer) {
           throw new ExecutionError(
-            `enqueueRead: 出力 '${name}' は常駐入力 '${input}' の別名（reshape / 恒等 expand）— ` +
-              "読み戻しは決着時に走るので、決着前の write が読み戻しに混ざる",
+            `enqueueRead: output '${name}' is an alias of the resident input '${input}' (reshape / identity expand) — ` +
+              "the readback runs at settlement, so writes before settlement would leak into the readback",
           );
         }
       }
@@ -3162,7 +3166,7 @@ export class Session {
       // waiting on mapAsync). mapAsync itself enters no scope, but this is inside #runOnce's lock
       // section, so its failure is never attributed to someone else's scope (every GPU operation of
       // a run is inside the lock section — the invariant above).
-      const pending = popFailureScopes(device, "出力の readback");
+      const pending = popFailureScopes(device, "output readback");
       popped = true;
       const failure = await pending;
       if (failure !== undefined) throw failure;
@@ -3237,9 +3241,9 @@ export class PreparedModel {
     const bound = opened.graphs[graphName];
     if (bound === undefined) {
       throw new ExecutionError(
-        `コンテナにグラフ '${graphName}' が無い（在るのは ${Object.keys(opened.graphs).join(
+        `The container has no graph '${graphName}' (it has ${Object.keys(opened.graphs).join(
           " / ",
-        )}）`,
+        )})`,
       );
     }
     return new PreparedModel({ opened, graphName }, mergedGraph(bound, graphName));
@@ -3302,7 +3306,7 @@ export const containerBatches = async function* (
   graphName: string,
 ): AsyncGenerator<WeightBatch, void, unknown> {
   const bound = opened.graphs[graphName];
-  if (bound === undefined) throw new ExecutionError(`コンテナにグラフ '${graphName}' が無い`);
+  if (bound === undefined) throw new ExecutionError(`The container has no graph '${graphName}'`);
   const byPart = new Map<
     number,
     { readonly name: string; readonly supply: InitializerSupply; readonly index: number }[]

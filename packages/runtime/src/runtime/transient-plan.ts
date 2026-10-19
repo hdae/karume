@@ -148,12 +148,12 @@ const pairKey = (a: number, b: number): number => (a < b ? a * 0x100000 + b : b 
 const assertLimits = (limits: TransientLimits): void => {
   for (const [name, value] of Object.entries(limits)) {
     if (!Number.isSafeInteger(value) || value < 4) {
-      throw new ExecutionError(`transient 計画の上限 ${name} が不正: ${value}`);
+      throw new ExecutionError(`invalid transient plan limit ${name}: ${value}`);
     }
   }
   if (limits.offsetAlignment % 4 !== 0) {
     throw new ExecutionError(
-      `transient 計画の offsetAlignment は 4 の倍数: ${limits.offsetAlignment}`,
+      `transient plan offsetAlignment must be a multiple of 4: ${limits.offsetAlignment}`,
     );
   }
 };
@@ -199,9 +199,9 @@ export const planTransients = (
     const left = (refs.get(slot) ?? 0) - 1;
     if (left < 0) {
       throw new ExecutionError(
-        `transient 計画: '${
+        `transient plan: '${
           intervals[slot].label
-        }' の参照カウントが負（解放過多 — 消費計数の誤り）`,
+        }' has a negative reference count (released too often — wrong consumer count)`,
       );
     }
     refs.set(slot, left);
@@ -229,7 +229,7 @@ export const planTransients = (
     step.dispatches.forEach((dispatch, index) => {
       step.temps.forEach((temp, id) => {
         if (temp.allocBefore !== index) return;
-        const slot = alloc(temp.byteLength, `ステップ ${stepIndex} の一時 ${id}`);
+        const slot = alloc(temp.byteLength, `step ${stepIndex} temporary ${id}`);
         retain(slot, 0, false);
         temps[id] = slot;
       });
@@ -259,8 +259,8 @@ export const planTransients = (
   const leaked = [...refs].filter(([slot, count]) => count > 0 && !intervals[slot].pinned);
   if (leaked.length > 0) {
     throw new ExecutionError(
-      `transient 計画: 解放されない中間が残る（消費計数の誤り）: ${leaked
-        .map(([slot, count]) => `'${intervals[slot].label}'（refs=${count}）`)
+      `transient plan: intermediates are left unreleased (wrong consumer count): ${leaked
+        .map(([slot, count]) => `'${intervals[slot].label}' (refs=${count})`)
         .join(" / ")}`,
     );
   }
@@ -270,8 +270,8 @@ export const planTransients = (
   const oversized = intervals.filter((iv) => iv.byteLength > bindingCap);
   if (oversized.length > 0) {
     throw new ExecutionError(
-      `中間バッファが device の上限を超える（maxStorageBufferBindingSize ${limits.maxStorageBufferBindingSize} / ` +
-        `maxBufferSize ${limits.maxBufferSize}）: ${oversized
+      `intermediate buffers exceed the device limits (maxStorageBufferBindingSize ${limits.maxStorageBufferBindingSize} / ` +
+        `maxBufferSize ${limits.maxBufferSize}): ${oversized
           .map((iv) => `'${iv.label}' ${iv.byteLength}B`)
           .join(" / ")}`,
     );

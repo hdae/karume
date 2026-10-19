@@ -404,14 +404,14 @@ test.skipIf(!GPU_AVAILABLE)(
 
       assertThrows(() => dead.write(new Float32Array(COUNT)), ResidentTensorError, "破棄済み");
       await assertRejects(() => dead.read(), ResidentTensorError, "破棄済み");
-      await assertRejects(() => session.run({ x: dead }), ExecutionError, "破棄済み");
+      await assertRejects(() => session.run({ x: dead }), ExecutionError, "disposed");
 
       const batch = await gpu.beginBatch();
       try {
         await assertRejects(
           () => session.enqueue({ x: input(0) }, { batch, copyOutputs: { y: dead } }),
           ExecutionError,
-          "破棄済み",
+          "disposed",
         );
       } finally {
         await batch.finish();
@@ -472,25 +472,25 @@ test.skipIf(!GPU_AVAILABLE)(
     const right = await gpu.createResident(BYTES, "right");
     try {
       assertThrows(() => right.write(new Float32Array(COUNT + 1)), ResidentTensorError, "write");
-      await assertRejects(() => session.run({ x: wrong }), ExecutionError, "バイトと合わない");
+      await assertRejects(() => session.run({ x: wrong }), ExecutionError, "bytes, but shape");
 
       const batch = await gpu.beginBatch();
       try {
         await assertRejects(
           () => session.enqueue({ x: input(0) }, { batch, copyOutputs: { y: wrong } }),
           ExecutionError,
-          "バイトと合わない",
+          "bytes, but shape",
         );
         await assertRejects(
           () => session.enqueue({ x: input(0) }, { batch, copyOutputs: { nope: right } }),
           ExecutionError,
-          "グラフ出力ではない",
+          "is not a graph output",
         );
       } finally {
         // 落ちた enqueue の後も区間そのものは決着できる（残骸は discard 済み）。ただし決着は
         // **最初のホスト側失敗**を帰属する — 2 本目の「グラフ出力ではない」ではなく 1 本目の
         // 大きさ不一致が出るのが、記録を 1 件に絞っている根拠（派生失敗で根因が隠れない）。
-        await assertRejects(() => batch.finish(), ExecutionError, "バイトと合わない");
+        await assertRejects(() => batch.finish(), ExecutionError, "bytes, but shape");
       }
     } finally {
       await session.dispose();
@@ -661,7 +661,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => session.run({ x: foreign }),
         ResidentTensorError,
-        "別の GpuContext",
+        "another GpuContext",
       );
       assertEquals(
         session.diagnostics().planBacking.buildCount,
@@ -693,11 +693,15 @@ test.skipIf(!GPU_AVAILABLE)(
         await assertRejects(
           () => session.enqueue({ x: state }, { batch, copyOutputs: { y: state } }),
           ExecutionError,
-          "写し元と写し先が同じバッファ",
+          "source and destination are the same buffer",
         );
       } finally {
         // 落ちた enqueue はこの区間の最初のホスト側失敗として決着にも帰属する（RC1-2）。
-        await assertRejects(() => batch.finish(), ExecutionError, "写し元と写し先が同じバッファ");
+        await assertRejects(
+          () => batch.finish(),
+          ExecutionError,
+          "source and destination are the same buffer",
+        );
       }
     } finally {
       await session.dispose();
@@ -785,7 +789,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const attributed = await assertRejects(
         () => batch.finish(),
         ExecutionError,
-        "バイトと合わない",
+        "bytes, but shape",
       );
 
       const results = await settled;
@@ -876,7 +880,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => session.enqueue({ x: alive }, { batch, copyOutputs: { y: dead } }),
         ExecutionError,
-        "破棄済み",
+        "disposed",
       );
       assertEquals(alive.useReferences, 0, "取得済みの使用予約が巻き戻っていない");
       // 区間に入る前に落ちた enqueue は区間の失敗ではない（リースを取っていない）。
@@ -1022,7 +1026,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const attributed = await assertRejects(
         () => batch.finish(),
         ExecutionError,
-        "ノード出力ではない",
+        "not a node output",
       );
 
       const results = await settled;

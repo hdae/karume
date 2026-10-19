@@ -351,7 +351,7 @@ test("gemma4 fromAssets: quant 実行ノブの明示指定も資産を開く前�
         { fuseLinearStaticQuantize: true, linearGemvReduce: "sequential" },
       ),
     ModelInputError,
-    "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+    "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
   );
   assertEquals(error.message.includes("fromAssets"), true, error.message);
 });

@@ -59,7 +59,7 @@ const scaleStrides = (
 ): readonly number[] => {
   if (scaleShape.length !== shape.length) {
     throw new I8Error(
-      `scale の rank ${scaleShape.length} が重み [${shape.join(",")}] と違う（keepdim 形が要る）`,
+      `scale rank ${scaleShape.length} differs from weights [${shape.join(",")}] (a keepdim shape is required)`,
     );
   }
   const strides = new Array<number>(shape.length).fill(0);
@@ -68,9 +68,9 @@ const scaleStrides = (
     const extent = scaleShape[axis];
     if (extent !== 1 && extent !== shape[axis]) {
       throw new I8Error(
-        `scale [${scaleShape.join(",")}] の軸 ${axis} が重み [${shape.join(
+        `scale [${scaleShape.join(",")}] axis ${axis} cannot be broadcast to weights [${shape.join(
           ",",
-        )}] へ broadcast できない`,
+        )}]`,
       );
     }
     strides[axis] = extent === 1 ? 0 : stride;
@@ -95,12 +95,12 @@ export const decodeI8 = (
   const count = numel(shape);
   if (bytes.byteLength !== count) {
     throw new I8Error(
-      `i8 ペイロード ${bytes.byteLength} バイトが shape [${shape.join(",")}] と違う`,
+      `i8 payload of ${bytes.byteLength} bytes does not match shape [${shape.join(",")}]`,
     );
   }
   if (scale.length !== numel(scaleShape)) {
     throw new I8Error(
-      `scale の要素数 ${scale.length} が shape [${scaleShape.join(",")}] と合わない`,
+      `scale element count ${scale.length} does not match shape [${scaleShape.join(",")}]`,
     );
   }
   const strides = scaleStrides(shape, scaleShape);

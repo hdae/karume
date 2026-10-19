@@ -122,7 +122,7 @@ const scaleTensor = (
   const scale = item.scale;
   if (scale === undefined) {
     // Presence is optional only in the type, so restate the check rather than skip silently (fail loudly).
-    throw new ExecutionError(`initializer '${item.name}': 格納 ${layout} なのに scale が無い`);
+    throw new ExecutionError(`initializer '${item.name}': storage ${layout} but no scale`);
   }
   return {
     bytes: scale.bytes,
@@ -186,9 +186,9 @@ const assertRowScale = (
 ): void => {
   if (scaleShape[0] !== weightShape[rowAxis] || scaleShape[1] !== 1) {
     throw new ExecutionError(
-      `initializer '${name}': scale [${scaleShape.join(",")}] が重み [${weightShape.join(
+      `initializer '${name}': scale [${scaleShape.join(",")}] is not, for weight [${weightShape.join(
         ",",
-      )}] の軸 ${rowAxis} の per-channel 形 [${weightShape[rowAxis]},1] でない`,
+      )}] on axis ${rowAxis}, the per-channel shape [${weightShape[rowAxis]},1]`,
     );
   }
 };
@@ -229,7 +229,7 @@ export type WeightBatch = {
  * under two names when only one side changes how it names itself.
  */
 const uploadLabel = (origin: string | undefined): string =>
-  origin === undefined ? "重みのアップロード" : `${origin} の重みアップロード`;
+  origin === undefined ? "weight upload" : `${origin} weight upload`;
 
 /**
  * Adds the attribution (`part N`) to a failure that came from a supply unit and **returns the same
@@ -328,11 +328,11 @@ const resolveAttentionI8a8Dot = async (
  */
 const warnInexactAttentionCanary = (decision: AttentionI8a8Decision): void => {
   console.warn(
-    `@karume/runtime: 融合 attention の i8a8 カナリアが既知解と厳密一致しなかった。\n` +
+    `@karume/runtime: the i8a8 canary of fused attention did not match the known answer exactly.\n` +
       `  ${formatAttentionI8a8Decision(decision)}\n` +
-      `この device の a8 attention は他機とビット同一にはならない（差は sanity 帯の内側で、\n` +
-      `共有 f32 エピローグの丸め差の水準）。ビット同一が要るなら attentionCompute を 'f32' か\n` +
-      `'f16' にすること。`,
+      `a8 attention on this device is not bit-identical with other machines (the difference is inside the sanity band,\n` +
+      `at the level of rounding differences in the shared f32 epilogue). If you need bit identity, set attentionCompute to 'f32' or\n` +
+      `'f16'.`,
   );
 };
 
@@ -525,7 +525,7 @@ export const buildSessionState = async (
   // settling (the end of the try below). Waiting for the weight upload to complete turns a loss into
   // an exception, but a graph that uploads no weight (no initializers, or all shared) never reaches
   // that wait, and a Session tied to a lost device would return as a success.
-  assertDeviceUsable(gpu, "Session の構築");
+  assertDeviceUsable(gpu, "Session construction");
   // MUST: every check that does not depend on GPU capabilities (type, spelling, combination, range)
   // runs first through the single {@link sessionOptionsViolation}. The models-side composition
   // (explicit > declared > default) borrows the same decision before fetching weights, so adding a
@@ -549,7 +549,7 @@ export const buildSessionState = async (
       !gpu.features.has("subgroup-size-control") ||
       !gpu.wgslLanguageFeatures.has("subgroup_id"))
   ) {
-    throw new ExecutionError("rmsNormReduce: subgroup32 は acquireGpu({ subgroups: true }) が必要");
+    throw new ExecutionError("rmsNormReduce: subgroup32 requires acquireGpu({ subgroups: true })");
   }
   if (
     linearGemvReduce === "parallel-subgroup32" &&
@@ -558,7 +558,7 @@ export const buildSessionState = async (
       !gpu.wgslLanguageFeatures.has("subgroup_id"))
   ) {
     throw new ExecutionError(
-      "linearGemvReduce: parallel-subgroup32 は acquireGpu({ subgroups: true }) が必要",
+      "linearGemvReduce: parallel-subgroup32 requires acquireGpu({ subgroups: true })",
     );
   }
   // MUST: when f16 compute is requested on a device without the feature, **fail here**. Falling back
@@ -566,10 +566,10 @@ export const buildSessionState = async (
   // invisible in both the diagnostics and the numbers (the same reason as ADR 0025 decision 1).
   if ((linearCompute === "f16" || attentionCompute === "f16") && !gpu.shaderF16Enabled) {
     throw new ExecutionError(
-      "f16 計算変種を要求したが、device が 'shader-f16' を有効化していない" +
-        `（linearCompute: ${linearCompute} / attentionCompute: ${attentionCompute}）。` +
-        "acquireGpu({ shaderF16: true }) を渡して device を取り直すこと" +
-        "（feature は device 作成時にしか要求できない）",
+      "an f16 compute variant was requested, but the device does not enable 'shader-f16'" +
+        ` (linearCompute: ${linearCompute} / attentionCompute: ${attentionCompute}). ` +
+        "Acquire the device again with acquireGpu({ shaderF16: true })" +
+        " (a feature can only be requested when the device is created)",
     );
   }
   // The GEMM geometry profile (DECIDED: ADR 0115). If a table was injected through
@@ -724,14 +724,14 @@ export const buildSessionState = async (
         // initializer — a gap is a broken bookkeeping).
         const seat = residency.get(name);
         if (seat === undefined) {
-          throw new ExecutionError(`initializer '${name}': 常駐分類が無い`);
+          throw new ExecutionError(`initializer '${name}': no residency class`);
         }
         // MUST: an object arriving for a borrowed class fails. Shared initializers are outside the
         // matched set (supply side), so they never appear in `items` — if one does, the bookkeeping is
         // broken, and letting it through would overwrite with other bytes a name that points at the
         // lender's buffer.
         if (seat.seat === "shared" || initializer.storage === undefined) {
-          throw new ExecutionError(`initializer '${name}': 共有宣言（shared）なのに実体が来た`);
+          throw new ExecutionError(`initializer '${name}': declared shared but has a tensor`);
         }
         const storage = initializer.storage;
         const layout = codecLayout(storage.codec);
@@ -755,7 +755,7 @@ export const buildSessionState = async (
           piece === undefined ? seat.payloadBytes : rows * (seat.payloadBytes / declaredRows);
         if (raw.byteLength !== expectedBytes) {
           throw new ExecutionError(
-            `initializer '${name}': 宣言由来 ${expectedBytes} バイトに対し実テンソルが ${raw.byteLength} バイト`,
+            `initializer '${name}': ${expectedBytes} bytes from the declaration, but the actual tensor has ${raw.byteLength} bytes`,
           );
         }
         // The destination byte position (always 0 when whole). The raw-byte classes put the stored
@@ -785,7 +785,7 @@ export const buildSessionState = async (
           const carried = carriedScales.get(name);
           if (carried === undefined) {
             throw new ExecutionError(
-              `initializer '${name}': piece の scale が piece 1 から持ち越されていない`,
+              `initializer '${name}': the piece scale was not carried over from piece 1`,
             );
           }
           return scaleForPiece(carried, declaredRows, piece.rowOffset, rows);
@@ -846,8 +846,8 @@ export const buildSessionState = async (
         if (layout === "i4") {
           // Eligibility is narrower than for f16 / i8: "only weight slots consumed by linear /
           // embedding / conv1d(groups==1)" (ADR 0069 decision 5 and its addendum — decode paths exist
-          // only in the tile reads of the GEMM skeleton 〈B side for linear, A side for conv1d
-          // igemm〉 and in the embedding kernel). Weight slots without a decode path (conv2d /
+          // only in the tile reads of the GEMM skeleton (B side for linear, A side for conv1d
+          // igemm) and in the embedding kernel). Weight slots without a decode path (conv2d /
           // conv_transpose1d / conv1d with groups > 1) and shared i4 go to the CPU-decode fallback
           // (correctness is kept, VRAM saving is zero — the same design as the ineligible i8 case).
           // The planner has already decided.
@@ -882,7 +882,7 @@ export const buildSessionState = async (
             // convention as "stored i8 but no scale").
             const groupSize = storage.groupSize;
             if (groupSize === undefined) {
-              throw new ExecutionError(`initializer '${name}': 格納 i4 なのに groupSize が無い`);
+              throw new ExecutionError(`initializer '${name}': storage i4 but no groupSize`);
             }
             const scale = expandedScale();
             payload = timedDecode(() =>
@@ -907,7 +907,7 @@ export const buildSessionState = async (
         }
         const buffer = weightBuffers.get(name);
         if (buffer === undefined) {
-          throw new ExecutionError(`initializer '${name}': piece 1 で確保したバッファが台帳に無い`);
+          throw new ExecutionError(`initializer '${name}': piece 1 buffer is not in the ledger`);
         }
         if (payload.byteLength > 0) timedWrite(buffer, payload, byteOffset);
         // The carried scale is dropped once the list has been read to the end (only one list's worth is alive).
@@ -938,7 +938,7 @@ export const buildSessionState = async (
         }
         const failure = await popFailureScopes(
           gpu.device,
-          `${label}（initializer '${item.name}'）`,
+          `${label} for initializer '${item.name}'`,
         );
         if (failure !== undefined) throw failure;
         // The reference to the item ends with this iteration (releasing the CPU-side bytes does not
@@ -983,7 +983,7 @@ export const buildSessionState = async (
     }
     // The check right before settling (the MUST at the entry). It sits inside the try so that a
     // failure lets the catch below destroy the owned weights and return the added borrows.
-    assertDeviceUsable(gpu, "Session の構築");
+    assertDeviceUsable(gpu, "Session construction");
   } catch (cause) {
     // Transaction boundary (ADR 0108 decision 9): when a batch fails midway (a declaration violation,
     // an exception from the input sequence or a GPU error alike), the weights arena is destroyed

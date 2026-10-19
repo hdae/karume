@@ -84,7 +84,7 @@ export const buildStaticQuantize = async (
   const scale = staticQuantizeScale(step.node.attrs, `nodes (${step.node.op})`);
   if (packed !== undefined && packed.role !== "write") {
     throw new ExecutionError(
-      `static_quantize: packed 活性の役割 '${packed.role}' はこの op には来ない`,
+      `static_quantize: the packed activation role '${packed.role}' does not occur for this op`,
     );
   }
   const writesPacked = packed !== undefined;

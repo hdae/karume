@@ -108,15 +108,15 @@ const executionKnobsViolation = (
       ([name, value, accepted]) =>
         `  - ${name}: ${
           typeof value === "string" ? JSON.stringify(value) : typeof value
-        }（受理するのは ${Object.keys(accepted)
+        } (accepted: ${Object.keys(accepted)
           .map((accept) => `'${accept}'`)
-          .join(" / ")}）`,
+          .join(" / ")})`,
     );
   if (violations.length === 0) return undefined;
   return (
-    `SessionOptions の実行形ノブ ${violations.length} 本が受理集合の外（既定へ黙って縮退させない）:\n` +
+    `SessionOptions: execution knobs outside the accepted set: ${violations.length} (no silent fallback to the default):\n` +
     `${violations.join("\n")}\n` +
-    "綴りを確認すること（linearCompute の 'i8a8' は 0.5.0 で 'a8' へ改名した — ADR 0074 決定 3）"
+    "Check the spelling (linearCompute 'i8a8' was renamed to 'a8' in 0.5.0 — ADR 0074 decision 3)"
   );
 };
 
@@ -164,16 +164,16 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     options.fuseLinearStaticQuantize !== undefined &&
     typeof options.fuseLinearStaticQuantize !== "boolean"
   ) {
-    return "options.fuseLinearStaticQuantize はbooleanでなければならない";
+    return "options.fuseLinearStaticQuantize must be a boolean";
   }
   if (options.fuseRmsNormAdd !== undefined && typeof options.fuseRmsNormAdd !== "boolean") {
-    return "options.fuseRmsNormAdd はbooleanでなければならない";
+    return "options.fuseRmsNormAdd must be a boolean";
   }
   if (
     options.packedStaticQuantize !== undefined &&
     typeof options.packedStaticQuantize !== "boolean"
   ) {
-    return "options.packedStaticQuantize はbooleanでなければならない";
+    return "options.packedStaticQuantize must be a boolean";
   }
   const {
     rmsNormReduce,
@@ -187,7 +187,7 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
   if (rmsNormReduce !== "workgroup" && rmsNormReduce !== "subgroup32") {
     // Do not call the user's conversions in diagnostics (`String(x)` runs `Symbol.toPrimitive` /
     // `toString`, and an object that throws would escape instead of the `ExecutionError`).
-    return `options.rmsNormReduce: 未対応の値 ${
+    return `options.rmsNormReduce: unsupported value ${
       typeof rmsNormReduce === "string" ? JSON.stringify(rmsNormReduce) : typeof rmsNormReduce
     }`;
   }
@@ -206,7 +206,7 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     options.fuseLinearStaticQuantize === true &&
     (linearGemvReduce !== "parallel" || linearCompute !== "f32")
   ) {
-    return "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応";
+    return "fuseLinearStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32";
   }
   // Only the parallel GEMV family has the packed-activation variant (ADR 0105). Falling back silently
   // to the f32 path would make it an option that "does nothing when set", so it is rejected the same
@@ -215,10 +215,10 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     options.packedStaticQuantize === true &&
     (linearGemvReduce !== "parallel" || linearCompute !== "f32")
   ) {
-    return "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応";
+    return "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32";
   }
   if (linearGemvReduce !== "sequential" && linearCompute !== "f32") {
-    return `linearGemvReduce: ${linearGemvReduce} は linearCompute: f32 のみ対応`;
+    return `linearGemvReduce: ${linearGemvReduce} supports only linearCompute: f32`;
   }
   // Range checks (which do not read the union) come after the spelling check — the wording matches
   // the same check in estimate.ts.
@@ -226,7 +226,7 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     return (
       `options.planBackingBudgetBytes ${describeInputValue(
         planBackingBudgetBytes,
-      )} は非負の安全な整数で` + "なければならない"
+      )} must be a non-negative safe` + " integer"
     );
   }
   // The parallelism target of the row-block GEMV is checked the same way (0 / negative / non-integer
@@ -240,7 +240,7 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     return (
       `options.linearGemvRowsThreadTarget ${describeInputValue(
         linearGemvRowsThreadTarget,
-      )} は 1 以上の` + "安全な整数でなければならない"
+      )} must be a safe integer` + " of at least 1"
     );
   }
   // The budget per row-block temporary (ADR 0124 decision 5). Only invalid values known at
@@ -254,16 +254,16 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
   ) {
     return `options.attentionRowBlockMaxBytes ${describeInputValue(
       attentionRowBlockMaxBytes,
-    )} は正の安全な整数でなければならない`;
+    )} must be a positive safe integer`;
   }
   // MUST: the storage form of S must resolve to one. `:c16` is **a different form** that holds S as
   // array<f16> (ADR 0028), so when it is given together with s16, fail rather than silently pick one
   // reading (which rounding sequence ran would vanish from both the diagnostics and the numbers).
   if (attentionScoreStorage === "f16" && attentionCompute === "f16") {
     return (
-      "attentionScoreStorage 'f16' と attentionCompute 'f16' は同時に指定できない" +
-      "（attentionCompute 'f16' は S を array<f16> で持つ別の格納形 — " +
-      "shader-f16 無しで S を半分にするなら attentionCompute を 'f32' か 'a8' にすること）"
+      "attentionScoreStorage 'f16' and attentionCompute 'f16' cannot be given together" +
+      " (attentionCompute 'f16' is a different storage form that holds S as array<f16> — " +
+      "to halve S without shader-f16, set attentionCompute to 'f32' or 'a8')"
     );
   }
   return undefined;

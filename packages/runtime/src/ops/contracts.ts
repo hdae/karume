@@ -494,14 +494,10 @@ export const scalarParamValues = (
   const keys = SCALAR_PARAM_ATTRS.get(found.name);
   if (keys === undefined) return [];
   const values = keys.map((key) =>
-    assertFiniteAttr(
-      attrValue(attrs, key),
-      `${where} の attrs.${key}`,
-      `op '${found.name}' の ${key}`,
-    ),
+    assertFiniteAttr(attrValue(attrs, key), `${where} attrs.${key}`, `op '${found.name}' ${key}`),
   );
   if (found.name === "clamp" && values[0] > values[1]) {
-    throw new OpContractError(`${where}: clamp の min ${values[0]} が max ${values[1]} を超える`);
+    throw new OpContractError(`${where}: clamp min ${values[0]} exceeds max ${values[1]}`);
   }
   return values;
 };
@@ -934,8 +930,8 @@ export const arityFits = (found: OpContract, count: number): boolean =>
 
 /** The arity as displayed ("N or more" if variadic, "N or M" with an optional trailing input). */
 export const describeArity = (found: OpContract): string => {
-  if (found.variadic === true) return `${found.arity} 本以上`;
-  return found.maxArity === undefined ? `${found.arity}` : `${found.arity} か ${found.maxArity}`;
+  if (found.variadic === true) return `${found.arity} or more`;
+  return found.maxArity === undefined ? `${found.arity}` : `${found.arity} or ${found.maxArity}`;
 };
 
 export const assertArity = (
@@ -946,14 +942,14 @@ export const assertArity = (
 ): void => {
   if (arityFits(found, count)) return;
   throw new OpContractError(
-    `${where}: op '${found.name}' の${what}が ${count}（契約は ${describeArity(found)}）`,
+    `${where}: op '${found.name}' ${what} is ${count} (contract: ${describeArity(found)})`,
   );
 };
 
 export const resolveOpContract = (op: string): OpContract => {
   const found = OP_CONTRACTS.get(op);
   if (found === undefined) {
-    throw new OpContractError(`op '${op}' は契約表に無い`);
+    throw new OpContractError(`op '${op}' is not in the contract table`);
   }
   return found;
 };
@@ -974,8 +970,8 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
     // below.
     if (node.ins.length !== found.readonlyArity) {
       throw new OpContractError(
-        `${where}: op '${node.op}' の readonly（past のみ）形は入力 ${found.readonlyArity} 本` +
-          `ちょうど（${node.ins.length} 本 — 今 step の k / v は取らない・ADR 0096 段 2 §1.2）`,
+        `${where}: op '${node.op}' readonly (past-only) form takes exactly ${found.readonlyArity} inputs` +
+          ` (${node.ins.length} given — this step's k / v are not taken; ADR 0096 stage 2 §1.2)`,
       );
     }
   } else {
@@ -984,15 +980,15 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
     // attention with a mask would be accepted as "a form whose mask nobody reads".
     if (stateKeys.length > 0 && found.maxArity !== undefined && node.ins.length > found.arity) {
       throw new OpContractError(
-        `${where}: op '${node.op}' の states 形は入力 ${found.arity} 本ちょうど` +
-          `（${node.ins.length} 本 — 省略可能な末尾入力は取らない・ADR 0067 決定 4）`,
+        `${where}: op '${node.op}' states form takes exactly ${found.arity} inputs` +
+          ` (${node.ins.length} given — no optional trailing input; ADR 0067 decision 4)`,
       );
     }
-    assertArity(found, node.ins.length, "入力数", where);
+    assertArity(found, node.ins.length, "input count", where);
   }
   if (node.outs.length !== outputCountOf(found)) {
     throw new OpContractError(
-      `${where}: op '${node.op}' の出力数が ${node.outs.length}（契約は ${outputCountOf(found)}）`,
+      `${where}: op '${node.op}' output count is ${node.outs.length} (contract: ${outputCountOf(found)})`,
     );
   }
   assertAttrKeys(found, node.attrs, stateKeys.length > 0, where);
@@ -1016,15 +1012,15 @@ export const assertAttrValues = (
 ): void => {
   for (const key of attrKeysOf(found)) {
     if (!Object.hasOwn(attrs, key)) {
-      throw new OpContractError(`${where}: op '${found.name}' の必須 attr '${key}' が無い`);
+      throw new OpContractError(`${where}: op '${found.name}' is missing required attr '${key}'`);
     }
-    found.attrs[key](attrs[key], `${where} の attrs.${key}`);
+    found.attrs[key](attrs[key], `${where} attrs.${key}`);
   }
   const optional = found.optionalAttrs;
   if (optional !== undefined) {
     for (const key of Object.keys(optional)) {
       if (!Object.hasOwn(attrs, key)) continue;
-      optional[key](attrs[key], `${where} の attrs.${key}`);
+      optional[key](attrs[key], `${where} attrs.${key}`);
     }
   }
 };
@@ -1055,14 +1051,14 @@ export const assertAttrKeys = (
   );
   if (unknown.length > 0) {
     throw new OpContractError(
-      `${where}: op '${found.name}' の契約外 attrs [${unknown.sort().join(", ")}]`,
+      `${where}: op '${found.name}' has attrs outside the contract [${unknown.sort().join(", ")}]`,
     );
   }
   if (optional === undefined || hasStates) return;
   for (const key of Object.keys(optional)) {
     if (!Object.hasOwn(attrs, key)) continue;
     throw new OpContractError(
-      `${where}: op '${found.name}' の attrs.${key} は states 欄を持つノードでのみ宣言できる`,
+      `${where}: op '${found.name}' attrs.${key} can be declared only on a node with a states field`,
     );
   }
 };
@@ -1087,13 +1083,13 @@ const assertReadonlyForm = (
   if (!Object.hasOwn(node.attrs, "readonly")) return false;
   if (found.readonlyArity === undefined) {
     throw new OpContractError(
-      `${where}: op '${found.name}' に attrs.readonly は無い（past のみを読む形を持つのは ` +
-        "states 形 attention だけ — ADR 0096 段 2 §1.2）",
+      `${where}: op '${found.name}' has no attrs.readonly (only the states-form attention has ` +
+        "a form that reads the past only — ADR 0096 stage 2 §1.2)",
     );
   }
   if (stateKeys.length === 0) {
     throw new OpContractError(
-      `${where}: op '${found.name}' の attrs.readonly は states 欄を持つノードでのみ宣言できる`,
+      `${where}: op '${found.name}' attrs.readonly can be declared only on a node with a states field`,
     );
   }
   return stateReadonly(node.attrs, where);
@@ -1118,7 +1114,7 @@ const assertStateField = (
   if (declared === undefined) {
     if (keys.length > 0) {
       throw new OpContractError(
-        `${where}: op '${found.name}' は states 欄を持たない（[${[...keys].sort().join(", ")}]）`,
+        `${where}: op '${found.name}' has no states field ([${[...keys].sort().join(", ")}])`,
       );
     }
     return;
@@ -1126,9 +1122,9 @@ const assertStateField = (
   if (keys.length === 0) {
     if (declared.required) {
       throw new OpContractError(
-        `${where}: op '${found.name}' の states 欄が無い（契約は [${declared.keys.join(
+        `${where}: op '${found.name}' states field is missing (contract: exactly [${declared.keys.join(
           ", ",
-        )}] ちょうど）`,
+        )}])`,
       );
     }
     return;
@@ -1137,18 +1133,18 @@ const assertStateField = (
   const actual = [...keys].sort();
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
     throw new OpContractError(
-      `${where}: op '${found.name}' の states 欄のキーが [${actual.join(", ")}]（契約は [${expected.join(
+      `${where}: op '${found.name}' states field keys are [${actual.join(", ")}] (contract: exactly [${expected.join(
         ", ",
-      )}] ちょうど）`,
+      )}])`,
     );
   }
   const slots = declared.keys.map((key) => node.states[key]);
   const aliased = slots.findIndex((slot, index) => slots.indexOf(slot) !== index);
   if (aliased >= 0) {
     throw new OpContractError(
-      `${where}: op '${found.name}' の states 欄が同じスロット '${
+      `${where}: op '${found.name}' states field references the same slot '${
         slots[aliased]
-      }' を複数の欄から参照している（取り違えの検出線）`,
+      }' from more than one field (mix-up detection)`,
     );
   }
 };
@@ -1169,12 +1165,12 @@ export const outputDtypeOf = (
 ): IrDtype => {
   const column = found.outputDtypes[slot];
   if (column === undefined) {
-    throw new OpContractError(`${where}: op '${found.name}' に出力スロット ${slot} は無い`);
+    throw new OpContractError(`${where}: op '${found.name}' has no output slot ${slot}`);
   }
   const mapped = column.get(inputDtype);
   if (mapped === undefined) {
     throw new OpContractError(
-      `${where}: op '${found.name}' の出力 dtype 写像に入力 '${inputDtype}' が無い`,
+      `${where}: op '${found.name}' output dtype mapping has no input '${inputDtype}'`,
     );
   }
   return mapped;
@@ -1188,9 +1184,9 @@ export const outputDtypeOf = (
 export const assertDtype = (found: OpContract, dtype: IrDtype, where: string): void => {
   if (!found.dtypes.includes(dtype)) {
     throw new OpContractError(
-      `${where}: op '${found.name}' は意味論 dtype '${dtype}' を実行できない（対応: ${found.dtypes.join(
+      `${where}: op '${found.name}' cannot run semantic dtype '${dtype}' (supported: ${found.dtypes.join(
         ", ",
-      )}）`,
+      )})`,
     );
   }
 };
@@ -1211,13 +1207,13 @@ export const assertSlotDtype = (
   }
   const accept = found.slotDtypes.slots[slot];
   if (accept === undefined) {
-    throw new OpContractError(`${where}: op '${found.name}' に入力スロット ${slot} は無い`);
+    throw new OpContractError(`${where}: op '${found.name}' has no input slot ${slot}`);
   }
   if (!accept.includes(dtype)) {
     throw new OpContractError(
-      `${where}: op '${found.name}' の入力スロット ${slot} は意味論 dtype '${dtype}' を実行できない（対応: ${accept.join(
+      `${where}: op '${found.name}' input slot ${slot} cannot run semantic dtype '${dtype}' (supported: ${accept.join(
         ", ",
-      )}）`,
+      )})`,
     );
   }
 };
@@ -1242,7 +1238,7 @@ export const assertInputDtypes = (
     const mixed = inputDtypes.findIndex((dtype) => dtype !== inputDtypes[0]);
     if (mixed >= 0) {
       throw new OpContractError(
-        `${where}: op '${found.name}' の入力 dtype が混在（${inputDtypes.join(", ")}）`,
+        `${where}: op '${found.name}' input dtypes are mixed (${inputDtypes.join(", ")})`,
       );
     }
   }
@@ -1268,22 +1264,22 @@ export const resolveNodeDtypes = (
   declaredOutputs: readonly IrDtype[],
   where: string,
 ): readonly IrDtype[] => {
-  assertInputDtypes(found, inputDtypes, (index) => `${where} の入力 '${node.ins[index]}'`, where);
+  assertInputDtypes(found, inputDtypes, (index) => `${where} input '${node.ins[index]}'`, where);
   const expected: readonly IrDtype[] =
     found.kind === "cast"
       ? [castTargetDtype(node.attrs, where)]
       : found.outputDtypes.map((_, slot) => outputDtypeOf(found, slot, inputDtypes[0], where));
   if (declaredOutputs.length !== expected.length) {
     throw new OpContractError(
-      `${where}: op '${found.name}' の出力の宣言が ${declaredOutputs.length} 本（契約は ${expected.length} 本）`,
+      `${where}: op '${found.name}' declares ${declaredOutputs.length} outputs (contract: ${expected.length})`,
     );
   }
   expected.forEach((dtype, slot) => {
     if (declaredOutputs[slot] !== dtype) {
       throw new OpContractError(
-        `${where}: 出力 '${node.outs[slot]}' の宣言 dtype '${
+        `${where}: output '${node.outs[slot]}' declared dtype '${
           declaredOutputs[slot]
-        }' が契約の '${dtype}' と違う`,
+        }' differs from the contract's '${dtype}'`,
       );
     }
   });

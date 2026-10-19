@@ -643,7 +643,10 @@ test.skipIf(!GPU_AVAILABLE)(
           }),
         ExecutionError,
       );
-      assert(error.message.includes("同時に指定できない"), `案内が足りない: ${error.message}`);
+      assert(
+        error.message.includes("cannot be given together"),
+        `案内が足りない: ${error.message}`,
+      );
       // MUST: **s16 単独は shader-f16 無しの device で通る**（ADR 0030 決定 1 と同じ規律 —
       // ここが落ちると案 γ の「feature 非依存」という前提そのものが崩れる）
       const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME, {

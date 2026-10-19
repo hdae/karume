@@ -172,17 +172,19 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
 
   const diagnostics: string[] = [];
   if (missingOps.size > 0) {
-    diagnostics.push(`非対応 op (${missingOps.size}): ${[...missingOps].sort().join(", ")}`);
+    diagnostics.push(`unsupported op (${missingOps.size}): ${[...missingOps].sort().join(", ")}`);
   }
   if (badDtypes.size > 0) {
-    const listed = [...badDtypes].map(([name, dtype]) => `値 '${name}': ${dtype}`);
-    diagnostics.push(`非対応 意味論 dtype (${badDtypes.size}): ${listed.join(", ")}`);
+    const listed = [...badDtypes].map(([name, dtype]) => `value '${name}': ${dtype}`);
+    diagnostics.push(`unsupported semantic dtype (${badDtypes.size}): ${listed.join(", ")}`);
   }
   if (badAttrs.length > 0) {
-    diagnostics.push(`未実装 attrs (${badAttrs.length}): ${badAttrs.join(", ")}`);
+    diagnostics.push(`unimplemented attrs (${badAttrs.length}): ${badAttrs.join(", ")}`);
   }
   for (const [layout, users] of [...missingStorage].sort((a, b) => a[0].localeCompare(b[0]))) {
-    diagnostics.push(`非対応 格納 '${layout}' (${users.length}): ${users.sort().join(", ")}`);
+    diagnostics.push(
+      `unsupported storage '${layout}' (${users.length}): ${users.sort().join(", ")}`,
+    );
   }
-  throw new RuntimeSupportError(`ランタイムの capability 不足 — ${diagnostics.join(" / ")}`);
+  throw new RuntimeSupportError(`Missing runtime capabilities — ${diagnostics.join(" / ")}`);
 };

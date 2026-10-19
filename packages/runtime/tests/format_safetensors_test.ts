@@ -49,20 +49,20 @@ test("parseSafetensors: view はコピーせず元の ArrayBuffer を参照す�
 });
 
 test("parseSafetensors: ヘッダ長すら無いファイルを拒否する", () => {
-  assertThrows(() => parseSafetensors(new ArrayBuffer(4)), SafetensorsError, "短すぎる");
+  assertThrows(() => parseSafetensors(new ArrayBuffer(4)), SafetensorsError, "is too short");
 });
 
 test("parseSafetensors: ヘッダ長がファイル長を超えるものを拒否する", () => {
   const buffer = new ArrayBuffer(16);
   new DataView(buffer).setBigUint64(0, 4096n, true);
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "ファイル長");
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "the file length");
 });
 
 test("parseSafetensors: 壊れたヘッダ JSON を拒否する", () => {
   assertThrows(
     () => parseSafetensors(packSafetensorsRaw("{not json", new Uint8Array(0))),
     SafetensorsError,
-    "ヘッダ JSON",
+    "header JSON",
   );
 });
 
@@ -70,7 +70,7 @@ test("parseSafetensors: ヘッダがオブジェクトでないものを拒否�
   assertThrows(
     () => parseSafetensors(packSafetensorsRaw("[]", new Uint8Array(0))),
     SafetensorsError,
-    "オブジェクトでない",
+    "is not an object",
   );
 });
 
@@ -79,7 +79,7 @@ test("parseSafetensors: 未対応 dtype を拒否する", () => {
     { a: { dtype: "F64", shape: [1], data_offsets: [0, 8] } },
     new Uint8Array(8),
   );
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "未対応の dtype");
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "unsupported dtype");
 
   // 旧配布形の方言だった packed 4bit / 2bit（公式 safetensors には無い綴り）も同じ門で落ちる
   // MUST — 黙って受理すると、容器（`krm`）へ移したはずの量子化格納が資産経路から戻ってくる。
@@ -90,7 +90,7 @@ test("parseSafetensors: 未対応 dtype を拒否する", () => {
           packSafetensors({ w: { dtype, shape: [8], data_offsets: [0, 4] } }, new Uint8Array(4)),
         ),
       SafetensorsError,
-      "未対応の dtype",
+      "unsupported dtype",
     );
   }
 });
@@ -100,7 +100,7 @@ test("parseSafetensors: shape と data_offsets のサイズ不一致を拒否す
     { a: { dtype: "F32", shape: [2], data_offsets: [0, 4] } },
     new Uint8Array(4),
   );
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "サイズ不一致");
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "size mismatch");
 });
 
 test("parseSafetensors: 負の次元・非整数の宣言を拒否する", () => {
@@ -108,7 +108,7 @@ test("parseSafetensors: 負の次元・非整数の宣言を拒否する", () =>
     { a: { dtype: "F32", shape: [-1], data_offsets: [0, 0] } },
     new Uint8Array(0),
   );
-  assertThrows(() => parseSafetensors(negative), SafetensorsError, "shape 要素");
+  assertThrows(() => parseSafetensors(negative), SafetensorsError, "shape element");
 
   const fractional = packSafetensors(
     { a: { dtype: "F32", shape: [1], data_offsets: [0.5, 4.5] } },
@@ -122,7 +122,7 @@ test("parseSafetensors: データ節の範囲外を拒否する", () => {
     { a: { dtype: "F32", shape: [2], data_offsets: [0, 8] } },
     new Uint8Array(4),
   );
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "範囲外");
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "outside the data section");
 });
 
 test("parseSafetensors: 領域の重複を拒否する", () => {
@@ -133,7 +133,7 @@ test("parseSafetensors: 領域の重複を拒否する", () => {
     },
     new Uint8Array(12),
   );
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "重複");
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "overlaps");
 });
 
 test("parseSafetensors: テンソル間の隙間を拒否する", () => {
@@ -144,7 +144,7 @@ test("parseSafetensors: テンソル間の隙間を拒否する", () => {
     },
     new Uint8Array(12),
   );
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "未使用領域");
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "unused range");
 });
 
 test("parseSafetensors: 末尾の未使用領域を拒否する", () => {
@@ -152,7 +152,7 @@ test("parseSafetensors: 末尾の未使用領域を拒否する", () => {
     { a: { dtype: "F32", shape: [1], data_offsets: [0, 4] } },
     new Uint8Array(8),
   );
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "末尾に未使用領域");
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "at the end of the data section");
 });
 
 test("parseSafetensors: 要素サイズに整列しないテンソルを拒否する", () => {
@@ -164,12 +164,12 @@ test("parseSafetensors: 要素サイズに整列しないテンソルを拒否�
     },
     new Uint8Array(5),
   );
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "整列していない");
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "is not aligned");
 });
 
 test("parseSafetensors: __metadata__ の非文字列値を拒否する", () => {
   const buffer = packSafetensors({ __metadata__: { k: 1 } }, new Uint8Array(0));
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "文字列でない");
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "is not a string");
 });
 
 /**
@@ -181,19 +181,19 @@ test("parseSafetensors: ヘッダ長とヘッダ表の型のガードを個別�
   // ① ヘッダ長が安全整数を超える（Number へ落とすより前に見る）
   const huge = new ArrayBuffer(16);
   new DataView(huge).setBigUint64(0, 2n ** 60n, true);
-  assertThrows(() => parseSafetensors(huge), SafetensorsError, "安全整数を超える");
+  assertThrows(() => parseSafetensors(huge), SafetensorsError, "exceeds the safe integer range");
 
   // ② ヘッダが UTF-8 として不正（0xff は単独では不正なバイト）
   const invalidUtf8 = new ArrayBuffer(16);
   new DataView(invalidUtf8).setBigUint64(0, 8n, true);
   new Uint8Array(invalidUtf8, 8).fill(0xff);
-  assertThrows(() => parseSafetensors(invalidUtf8), SafetensorsError, "UTF-8 として不正");
+  assertThrows(() => parseSafetensors(invalidUtf8), SafetensorsError, "invalid UTF-8");
 
   // ③ ヘッダ項目がオブジェクトでない
   assertThrows(
     () => parseSafetensors(packSafetensors({ a: 5 }, new Uint8Array(0))),
     SafetensorsError,
-    "ヘッダ項目がオブジェクトでない",
+    "header entry is not an object",
   );
 
   // ④ shape が配列でない
@@ -203,7 +203,7 @@ test("parseSafetensors: ヘッダ長とヘッダ表の型のガードを個別�
         packSafetensors({ a: { dtype: "F32", shape: "x", data_offsets: [0, 4] } }, F32_2),
       ),
     SafetensorsError,
-    "shape が配列でない",
+    "shape is not an array",
   );
 
   // ⑤ data_offsets が配列でない / 要素数が 2 でない
@@ -213,7 +213,7 @@ test("parseSafetensors: ヘッダ長とヘッダ表の型のガードを個別�
         packSafetensors({ a: { dtype: "F32", shape: [1], data_offsets: 0 } }, new Uint8Array(4)),
       ),
     SafetensorsError,
-    "data_offsets が配列でない",
+    "data_offsets is not an array",
   );
   assertThrows(
     () =>
@@ -221,7 +221,7 @@ test("parseSafetensors: ヘッダ長とヘッダ表の型のガードを個別�
         packSafetensors({ a: { dtype: "F32", shape: [1], data_offsets: [0] } }, new Uint8Array(4)),
       ),
     SafetensorsError,
-    "data_offsets の要素数が 1",
+    "data_offsets has 1 elements",
   );
 
   // ⑥ 要素数が安全整数を超える（宣言だけで踏める — 実データは要らない）
@@ -234,14 +234,14 @@ test("parseSafetensors: ヘッダ長とヘッダ表の型のガードを個別�
         ),
       ),
     SafetensorsError,
-    "要素数が安全整数を超える",
+    "element count exceeds the safe integer range",
   );
 
   // ⑦ __metadata__ がオブジェクトでない（配列は JSON では object 型だが表ではない）
   assertThrows(
     () => parseSafetensors(packSafetensors({ __metadata__: [] }, new Uint8Array(0))),
     SafetensorsError,
-    "__metadata__ がオブジェクトでない",
+    "__metadata__ is not an object",
   );
 });
 
@@ -250,7 +250,7 @@ test("parseSafetensors: data_offsets の逆転を拒否する", () => {
     { a: { dtype: "F32", shape: [1], data_offsets: [8, 4] } },
     new Uint8Array(8),
   );
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "逆転");
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "reversed");
 });
 
 /**
@@ -319,7 +319,7 @@ test("parseSafetensorsHeader: prefix がヘッダ途中で切れていれば必�
         HEADER_FIXTURE.byteLength,
       ),
     SafetensorsError,
-    `先頭 ${need} バイトが必要`,
+    `needs the first ${need} bytes`,
   );
 });
 
@@ -328,37 +328,37 @@ test("parseSafetensorsHeader: ファイル長の取り違えは全量解析と�
   assertThrows(
     () => parseSafetensorsHeader(HEADER_FIXTURE, HEADER_FIXTURE.byteLength + 8),
     SafetensorsError,
-    "末尾に未使用領域",
+    "at the end of the data section",
   );
   assertThrows(
     () => parseSafetensorsHeader(HEADER_FIXTURE, HEADER_FIXTURE.byteLength - 4),
     SafetensorsError,
-    "範囲外",
+    "outside the data section",
   );
   assertThrows(
     () => parseSafetensors(HEADER_FIXTURE.slice(0, HEADER_FIXTURE.byteLength - 4)),
     SafetensorsError,
-    "範囲外",
+    "outside the data section",
   );
 
   assertThrows(
     () => parseSafetensorsHeader(HEADER_FIXTURE, -1),
     SafetensorsError,
-    "非負整数でない",
+    "is not a non-negative integer",
   );
-  assertThrows(() => parseSafetensorsHeader(HEADER_FIXTURE, 4), SafetensorsError, "短すぎる");
+  assertThrows(() => parseSafetensorsHeader(HEADER_FIXTURE, 4), SafetensorsError, "is too short");
 });
 
 test("safetensorsHeaderLength: 8 バイト未満の prefix を拒否する", () => {
   assertThrows(
     () => safetensorsHeaderLength(new ArrayBuffer(7)),
     SafetensorsError,
-    "先頭 8 バイトが必要",
+    "needs the first 8 bytes",
   );
   assertThrows(
     () => safetensorsHeaderLength(new Uint8Array(new ArrayBuffer(7))),
     SafetensorsError,
-    "先頭 8 バイトが必要",
+    "needs the first 8 bytes",
   );
 });
 
@@ -378,5 +378,9 @@ test("parseSafetensors: 正しいファイルの後ろに余白が続く buffer 
   const bytes = new Uint8Array(buffer);
   bytes.set(new Uint8Array(PREFIX_FILE));
   bytes.fill(0xab, PREFIX_FILE.byteLength);
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "末尾に未使用領域が 64 バイト");
+  assertThrows(
+    () => parseSafetensors(buffer),
+    SafetensorsError,
+    "Unused range of 64 bytes at the end",
+  );
 });

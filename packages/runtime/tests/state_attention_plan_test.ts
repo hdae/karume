@@ -86,7 +86,7 @@ test("1 行でも上限に入らない形は fail loudly（行ブロックでは
     // 1 行 = 8×16×4 = 512B > 256B
     () => planStateAttention({ batchHeads: 8, chunkRows: 4, capacity: 16 }, 256),
     ExecutionError,
-    "既にストレージ束縛の上限を超える",
+    "already exceeds the storage binding limit",
   );
 });
 
@@ -95,7 +95,7 @@ test("収まらない枚数の明示は fail loudly（上限の検査を forced 
     // 4 行を 2 枚 = 1 枚 2 行 = 1,024B が上限 512B に入らない。
     () => planStateAttention({ batchHeads: 8, chunkRows: 4, capacity: 16 }, 512, 2),
     ExecutionError,
-    "2 枚では 1 枚 1024B が上限に収まらない",
+    "with 2 blocks, one block of 1024B does not fit the limit",
   );
 });
 

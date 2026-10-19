@@ -99,7 +99,7 @@ const isKnownDtype = (dtype: string): dtype is SafetensorsDtype =>
 
 const asIndex = (value: unknown, where: string, what: string): number => {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new SafetensorsError(`${where}: ${what} ${String(value)} が非負整数でない`);
+    throw new SafetensorsError(`${where}: ${what} ${String(value)} is not a non-negative integer`);
   }
   return value;
 };
@@ -109,7 +109,7 @@ const elementCount = (shape: readonly number[], where: string): number => {
   for (const dim of shape) {
     count *= dim;
     if (!Number.isSafeInteger(count)) {
-      throw new SafetensorsError(`${where}: 要素数が安全整数を超える`);
+      throw new SafetensorsError(`${where}: element count exceeds the safe integer range`);
     }
   }
   return count;
@@ -124,39 +124,39 @@ const declaredByteLength = (dtype: SafetensorsDtype, count: number): number =>
 
 const parseDeclaration = (name: string, raw: unknown): DeclaredTensor => {
   const where = `tensor '${name}'`;
-  if (!isPlainObject(raw)) throw new SafetensorsError(`${where}: ヘッダ項目がオブジェクトでない`);
+  if (!isPlainObject(raw)) throw new SafetensorsError(`${where}: header entry is not an object`);
 
   const dtype = raw["dtype"];
   if (typeof dtype !== "string" || !isKnownDtype(dtype)) {
-    throw new SafetensorsError(`${where}: 未対応の dtype ${JSON.stringify(dtype)}`);
+    throw new SafetensorsError(`${where}: unsupported dtype ${JSON.stringify(dtype)}`);
   }
 
-  if (!Array.isArray(raw["shape"])) throw new SafetensorsError(`${where}: shape が配列でない`);
+  if (!Array.isArray(raw["shape"])) throw new SafetensorsError(`${where}: shape is not an array`);
   const rawShape: readonly unknown[] = raw["shape"];
-  const shape = rawShape.map((dim) => asIndex(dim, where, "shape 要素"));
+  const shape = rawShape.map((dim) => asIndex(dim, where, "shape element"));
 
   if (!Array.isArray(raw["data_offsets"])) {
-    throw new SafetensorsError(`${where}: data_offsets が配列でない`);
+    throw new SafetensorsError(`${where}: data_offsets is not an array`);
   }
   const rawOffsets: readonly unknown[] = raw["data_offsets"];
   if (rawOffsets.length !== 2) {
     throw new SafetensorsError(
-      `${where}: data_offsets の要素数が ${rawOffsets.length}（2 が必要）`,
+      `${where}: data_offsets has ${rawOffsets.length} elements (2 required)`,
     );
   }
   const begin = asIndex(rawOffsets[0], where, "data_offsets");
   const end = asIndex(rawOffsets[1], where, "data_offsets");
   if (end < begin) {
-    throw new SafetensorsError(`${where}: data_offsets が逆転している [${begin}, ${end})`);
+    throw new SafetensorsError(`${where}: data_offsets are reversed [${begin}, ${end})`);
   }
 
   const count = elementCount(shape, where);
   const expected = declaredByteLength(dtype, count);
   if (end - begin !== expected) {
     throw new SafetensorsError(
-      `${where}: サイズ不一致 offsets=${end - begin} 期待=${expected}（${dtype} [${shape.join(
+      `${where}: size mismatch offsets=${end - begin} expected=${expected} (${dtype} [${shape.join(
         ",",
-      )}]）`,
+      )}])`,
     );
   }
   return { name, dtype, shape, begin, end };
@@ -171,15 +171,15 @@ const decodeHeader = (
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    throw new SafetensorsError("ヘッダが UTF-8 として不正");
+    throw new SafetensorsError("Header is invalid UTF-8");
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (cause) {
-    throw new SafetensorsError(`ヘッダ JSON を解析できない: ${String(cause)}`);
+    throw new SafetensorsError(`Cannot parse the header JSON: ${String(cause)}`);
   }
-  if (!isPlainObject(parsed)) throw new SafetensorsError("ヘッダ JSON がオブジェクトでない");
+  if (!isPlainObject(parsed)) throw new SafetensorsError("Header JSON is not an object");
   return parsed;
 };
 
@@ -207,12 +207,12 @@ export const safetensorsHeaderLength = (prefix: Uint8Array<ArrayBuffer> | ArrayB
   const bytes = asPrefixBytes(prefix);
   if (bytes.byteLength < HEADER_LENGTH_BYTES) {
     throw new SafetensorsError(
-      `ヘッダ長を読むには先頭 ${HEADER_LENGTH_BYTES} バイトが必要（prefix は ${bytes.byteLength} バイト）`,
+      `Reading the header length needs the first ${HEADER_LENGTH_BYTES} bytes (prefix is ${bytes.byteLength} bytes)`,
     );
   }
   const raw = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, true);
   if (raw > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new SafetensorsError(`ヘッダ長 ${raw} が安全整数を超える`);
+    throw new SafetensorsError(`Header length ${raw} exceeds the safe integer range`);
   }
   return Number(raw);
 };
@@ -234,20 +234,22 @@ export const parseSafetensorsHeader = (
   fileLength: number,
 ): SafetensorsHeader => {
   if (!Number.isInteger(fileLength) || fileLength < 0) {
-    throw new SafetensorsError(`ファイル長 ${fileLength} が非負整数でない`);
+    throw new SafetensorsError(`File length ${fileLength} is not a non-negative integer`);
   }
   if (fileLength < HEADER_LENGTH_BYTES) {
-    throw new SafetensorsError(`ファイルが短すぎる: ${fileLength} バイト（ヘッダ長すら無い）`);
+    throw new SafetensorsError(`File is too short: ${fileLength} bytes (not even a header length)`);
   }
   const bytes = asPrefixBytes(prefix);
   const headerLength = safetensorsHeaderLength(bytes);
   const dataStart = HEADER_LENGTH_BYTES + headerLength;
   if (dataStart > fileLength) {
-    throw new SafetensorsError(`ヘッダ長 ${headerLength} がファイル長 ${fileLength} を超える`);
+    throw new SafetensorsError(
+      `Header length ${headerLength} exceeds the file length ${fileLength}`,
+    );
   }
   if (bytes.byteLength < dataStart) {
     throw new SafetensorsError(
-      `ヘッダを解くには先頭 ${dataStart} バイトが必要（prefix は ${bytes.byteLength} バイト）`,
+      `Decoding the header needs the first ${dataStart} bytes (prefix is ${bytes.byteLength} bytes)`,
     );
   }
   const header = decodeHeader(bytes, headerLength);
@@ -255,10 +257,10 @@ export const parseSafetensorsHeader = (
   const declared: DeclaredTensor[] = [];
   for (const [name, value] of Object.entries(header)) {
     if (name === "__metadata__") {
-      if (!isPlainObject(value)) throw new SafetensorsError("__metadata__ がオブジェクトでない");
+      if (!isPlainObject(value)) throw new SafetensorsError("__metadata__ is not an object");
       for (const [key, item] of Object.entries(value)) {
         if (typeof item !== "string") {
-          throw new SafetensorsError(`__metadata__.${key} が文字列でない`);
+          throw new SafetensorsError(`__metadata__.${key} is not a string`);
         }
         metadata.set(key, item);
       }
@@ -278,26 +280,26 @@ export const parseSafetensorsHeader = (
     const where = `tensor '${entry.name}'`;
     if (entry.begin < cursor) {
       throw new SafetensorsError(
-        `${where}: 先行テンソルと領域が重複 [${entry.begin}, ${entry.end}) 使用済み末尾=${cursor}`,
+        `${where}: range overlaps a preceding tensor [${entry.begin}, ${entry.end}) used end=${cursor}`,
       );
     }
     if (entry.begin > cursor) {
       throw new SafetensorsError(
-        `${where}: データ節に未使用領域 [${cursor}, ${entry.begin}) がある`,
+        `${where}: unused range [${cursor}, ${entry.begin}) in the data section`,
       );
     }
     if (entry.end > dataLength) {
       throw new SafetensorsError(
-        `${where}: データ節の範囲外 [${entry.begin}, ${entry.end}) データ節長=${dataLength}`,
+        `${where}: outside the data section [${entry.begin}, ${entry.end}) data section length=${dataLength}`,
       );
     }
     const align = DTYPE_BYTES[entry.dtype];
     if ((dataStart + entry.begin) % align !== 0) {
       // Not accepted: it breaks the premise that a typed array view is created without a copy.
       throw new SafetensorsError(
-        `${where}: 絶対 offset ${
+        `${where}: absolute offset ${
           dataStart + entry.begin
-        } が ${entry.dtype} の整列単位 ${align} バイトに整列していない`,
+        } is not aligned to the alignment unit of ${entry.dtype}, ${align} bytes`,
       );
     }
     cursor = entry.end;
@@ -310,7 +312,9 @@ export const parseSafetensorsHeader = (
     });
   }
   if (cursor !== dataLength) {
-    throw new SafetensorsError(`データ節末尾に未使用領域が ${dataLength - cursor} バイトある`);
+    throw new SafetensorsError(
+      `Unused range of ${dataLength - cursor} bytes at the end of the data section`,
+    );
   }
   return { dataStart, metadata, tensors };
 };

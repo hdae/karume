@@ -34,7 +34,7 @@ describe.skipIf(!GPU_AVAILABLE)("要素順を保つpermuteの共有と実体化�
               await assertRejects(
                 () => createSessionFromContainer(gpu, opened, GRAPH_NAME),
                 RuntimeSupportError,
-                "非対応 意味論 dtype",
+                "unsupported semantic dtype",
               );
               continue;
             }

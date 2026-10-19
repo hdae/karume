@@ -480,7 +480,7 @@ test.skipIf(!GPU_AVAILABLE)(
             jsCallerOptions({ linearCompute: "i8a8", attentionScoreStorage: "s16" }),
           ),
         ExecutionError,
-        "実行形ノブ 2 本",
+        "2 execution knobs",
       );
       assertEquals(error.message.includes(`linearCompute: "i8a8"`), true, error.message);
       assertEquals(error.message.includes(`attentionScoreStorage: "s16"`), true, error.message);
@@ -540,7 +540,7 @@ test.skipIf(!GPU_AVAILABLE)(
               planBackingBudgetBytes: budget,
             }),
           ExecutionError,
-          "非負の安全な整数",
+          "non-negative safe integer",
         );
       }
       // 対照: 0（従来の容量 1）と正の整数は通る（上の 3 本が「何を渡しても落ちる」ではない証明）。
@@ -572,7 +572,7 @@ test.skipIf(!GPU_AVAILABLE)(
               linearGemvRowsThreadTarget: target,
             }),
           ExecutionError,
-          "1 以上の安全な整数",
+          "safe integer of at least 1",
         );
       }
       // 対照: 正の整数は通る（上の 4 本が「何を渡しても落ちる」ではない証明）。
@@ -606,7 +606,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => session.run({ x: { dtype: "i32", shape: [8, 4], data: new Int32Array(32) } }),
         ExecutionError,
-        "宣言 dtype",
+        "declared dtype",
       );
 
       // 4 席は同じ 1 本の run（= 落ちた run）を映す。融合回数だけは落ちた run 自身の導出結果
@@ -733,7 +733,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => createSessionFromContainer(gpu, withAttrsModel, "model"),
         RuntimeSupportError,
-        "未実装 attrs (1): nodes[2] (relu): approximate",
+        "unimplemented attrs (1): nodes[2] (relu): approximate",
       );
 
       // i32 の転送自体は解禁済み（ADR 0009）だが、matmul は f32 専業なので op 契約で落ちる
@@ -743,7 +743,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => createSessionFromContainer(gpu, intInputModel, "model"),
         RuntimeSupportError,
-        "非対応 意味論 dtype (1): 値 'x': i32",
+        "unsupported semantic dtype (1): value 'x': i32",
       );
     } finally {
       gpu.destroy();
@@ -836,7 +836,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => session.run({ mcol: fill([4, 1], () => 1), mrow, scores }),
         ExecutionError,
-        "宣言 dtype 'i32'",
+        "declared dtype 'i32'",
       );
       // 判別子だけ合わせて配列型を偽った形（TS では作れないので明示的に組む）
       const spoofed = {

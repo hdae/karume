@@ -248,7 +248,7 @@ export class StepRecipeBuilder {
  * the same strength).
  */
 export const validateStepRecipe = (recipe: StepRecipe): void => {
-  const where = `ステップ '${recipe.outputs.map((output) => output.name).join(", ")}'`;
+  const where = `step '${recipe.outputs.map((output) => output.name).join(", ")}'`;
   const dispatchCount = recipe.dispatches.length;
   recipe.temps.forEach((temp, id) => {
     if (
@@ -261,8 +261,8 @@ export const validateStepRecipe = (recipe: StepRecipe): void => {
       temp.releaseAfter >= dispatchCount
     ) {
       throw new ExecutionError(
-        `${where}: 一時 ${id} の寿命宣言 [${temp.allocBefore}, ${temp.releaseAfter}] が` +
-          ` dispatch ${dispatchCount} 本の内側で閉じていない（${temp.byteLength}B）`,
+        `${where}: temporary ${id} has a declared lifetime [${temp.allocBefore}, ${temp.releaseAfter}] that` +
+          ` does not close within the ${dispatchCount} dispatches (${temp.byteLength}B)`,
       );
     }
   });
@@ -274,21 +274,21 @@ export const validateStepRecipe = (recipe: StepRecipe): void => {
       // separate from out-of-range.
       if (!Number.isSafeInteger(source.id)) {
         throw new ExecutionError(
-          `${where}: dispatch '${dispatch.key}' の束縛 ${entry.binding} の一時の添字 ` +
-            `${source.id} が整数でない`,
+          `${where}: dispatch '${dispatch.key}' binding ${entry.binding} has a temporary index ` +
+            `${source.id} that is not an integer`,
         );
       }
       if (source.id < 0 || source.id >= recipe.temps.length) {
         throw new ExecutionError(
-          `${where}: dispatch '${dispatch.key}' の束縛 ${entry.binding} が一時 ${source.id} を` +
-            `指すが、宣言は ${recipe.temps.length} 本`,
+          `${where}: dispatch '${dispatch.key}' binding ${entry.binding} points to temporary ${source.id},` +
+            ` but ${recipe.temps.length} are declared`,
         );
       }
       const temp = recipe.temps[source.id];
       if (index < temp.allocBefore || index > temp.releaseAfter) {
         throw new ExecutionError(
-          `${where}: dispatch ${index} '${dispatch.key}' の束縛 ${entry.binding} が一時 ` +
-            `${source.id} を生存区間 [${temp.allocBefore}, ${temp.releaseAfter}] の外で参照する`,
+          `${where}: dispatch ${index} '${dispatch.key}' binding ${entry.binding} references temporary ` +
+            `${source.id} outside its live range [${temp.allocBefore}, ${temp.releaseAfter}]`,
         );
       }
     }
@@ -355,9 +355,9 @@ export const assertChunkRowsAllowed = (
     if (allowedRows.has(rows)) continue;
     const prefill = [...allowedRows].filter((allowed) => allowed !== 1);
     throw new ExecutionError(
-      `state ノードの物理 chunk 行数 ${rows} が固定 chunk 契約に合わない` +
-        `（許されるのは prefill 形の {${prefill.join(", ")}} か decode 形の 1 だけ — ` +
-        "ADR 0066 決定 4 / 追記〈バケット〉）",
+      `the physical chunk row count ${rows} of the state node does not match the fixed chunk contract` +
+        ` (only the prefill form's {${prefill.join(", ")}} or the decode form's 1 is allowed — ` +
+        "ADR 0066 decision 4 / addendum 10, buckets)",
     );
   }
 };
@@ -390,16 +390,16 @@ export const assertGenerationRun = (
   for (const rows of limits.chunkRows) {
     if (queryLength > rows) {
       throw new ExecutionError(
-        `queryLength ${queryLength} が state ノードの物理 chunk 行数 ${rows} を超える` +
-          "（prefill は固定長 chunk + pad・decode は 1 — ADR 0066 決定 4）",
+        `queryLength ${queryLength} exceeds the physical chunk row count ${rows} of the state node` +
+          " (prefill is a fixed-length chunk + pad, decode is 1 — ADR 0066 decision 4)",
       );
     }
   }
   for (const [name, capacity] of limits.fullCapacities) {
     if (pastLength + queryLength > capacity) {
       throw new ExecutionError(
-        `state '${name}': pastLength ${pastLength} + queryLength ${queryLength} が full スロットの` +
-          `容量 ${capacity} を超える（ADR 0067 決定 4 ④ — sliding でないスロットは巻かない）`,
+        `state '${name}': pastLength ${pastLength} + queryLength ${queryLength} exceeds the full slot's` +
+          ` capacity ${capacity} (ADR 0067 decision 4 ④ — a slot that is not sliding does not wrap)`,
       );
     }
   }
@@ -433,7 +433,7 @@ const resolveValue = (
 ): ValueBinding => {
   if (source.kind === "resident") return { buffer: source.buffer, readable: true };
   const binding = env.get(source.name);
-  if (binding === undefined) throw new ExecutionError(`値 '${source.name}' のバッファが無い`);
+  if (binding === undefined) throw new ExecutionError(`no buffer for value '${source.name}'`);
   return binding;
 };
 
@@ -452,14 +452,14 @@ const resolveGeneration = (
   if (generation === undefined) {
     throw new ExecutionError(
       `${
-        source.kind === "lengths" ? "論理長 uniform" : `state スロット '${source.name}'`
-      }を束ねる dispatch を GenerationContext 無しで実行しようとした`,
+        source.kind === "lengths" ? "logical-length uniform" : `state slot '${source.name}'`
+      }: tried to run a dispatch that binds it without a GenerationContext`,
     );
   }
   if (source.kind === "lengths") return generation.lengths;
   const buffer = generation.slots.get(source.name);
   if (buffer === undefined) {
-    throw new ExecutionError(`state スロット '${source.name}' の実体が GenerationContext に無い`);
+    throw new ExecutionError(`state slot '${source.name}' has no buffer in the GenerationContext`);
   }
   return buffer;
 };
@@ -495,8 +495,8 @@ const resolveWorkgroups = (
   if (typeof recipe.workgroups !== "function") return recipe.workgroups;
   if (generation === undefined) {
     throw new ExecutionError(
-      `dispatch '${recipe.key}': workgroup 数を論理長から算出する dispatch を ` +
-        "GenerationContext 無しで実行しようとした",
+      `dispatch '${recipe.key}': tried to run a dispatch whose workgroup count is derived from the logical length ` +
+        "without a GenerationContext",
     );
   }
   return recipe.workgroups(generation.past, generation.query);
@@ -608,8 +608,8 @@ export const buildTransientProgram = (recipes: readonly StepRecipe[]): Transient
         else if (dispatch.roles.reads.has(entry.binding)) reads.push(ref);
         else {
           throw new ExecutionError(
-            `dispatch '${dispatch.key}' の束縛 ${entry.binding} に WGSL の storage 宣言が無い` +
-              "（読み / 読み書きの役割が採れない）",
+            `dispatch '${dispatch.key}' binding ${entry.binding} has no WGSL storage declaration` +
+              " (the read / read-write role cannot be taken from it)",
           );
         }
       }
@@ -633,7 +633,7 @@ const resolveSlot = (
   const placed = slot === undefined ? undefined : plan.slots[slot];
   const buffer = placed === undefined ? undefined : regions[placed.region];
   if (slot === undefined || placed === undefined || buffer === undefined) {
-    throw new ExecutionError(`slot ${slot} の領域バッファが無い`);
+    throw new ExecutionError(`no region buffer for slot ${slot}`);
   }
   return {
     buffer,
@@ -891,9 +891,9 @@ const dispatchBakedStep = (
     const bindGroup = stepGroups[id] ?? contextGroups?.[id];
     if (bindGroup === undefined) {
       throw new ExecutionError(
-        `dispatch '${dispatch.key}': GenerationContext 所有の実体を束ねる bind group が` +
-          "焼かれていない（ADR 0066 決定 5 の分離焼き込み — context 側の焼き込みを経ずに" +
-          "焼き込み経路へ来た）",
+        `dispatch '${dispatch.key}': the bind group that binds objects owned by the GenerationContext` +
+          " is not baked (the split baking of ADR 0066 decision 5 — reached the baked path without" +
+          " the context-side baking)",
       );
     }
     dispatchWithWork(

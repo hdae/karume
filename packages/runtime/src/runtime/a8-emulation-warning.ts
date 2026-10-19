@@ -45,10 +45,10 @@ export const a8EmulationWarning = (
   ];
   if (requested.length === 0 || dp4aAvailable(wgslLanguageFeatures)) return undefined;
   return (
-    `@karume/runtime: この device は dp4a（WGSL 言語機能 ${DP4A_WGSL_FEATURE}）を持たないため、\n` +
-    `  int8 活性（${requested.join(" / ")}: "a8"）の整数内積はエミュレーションで走る。\n` +
-    `数値は dp4a 版と同一だが、f32 の経路より速くならない（Apple の Metal では遅くなる実測がある）。\n` +
-    `速度のために選んだのなら、同じ重みで活性量子化を持たないプリセット（モデルカードの Quants 表で\n` +
-    `Compute 列が空のもの）を quant で明示するか、linearCompute / attentionCompute を 'f32' にすること。`
+    `@karume/runtime: this device lacks dp4a (WGSL language feature ${DP4A_WGSL_FEATURE}), so\n` +
+    `  the integer dot product of int8 activations (${requested.join(" / ")}: "a8") runs emulated.\n` +
+    `The values are identical to the dp4a version, but it is not faster than the f32 path (observed slower on Apple Metal).\n` +
+    `If you chose it for speed, pass quant explicitly with a preset of the same weights without activation quantization (one whose\n` +
+    `Compute column is empty in the Quants table of the model card), or set linearCompute / attentionCompute to 'f32'.`
   );
 };

@@ -474,7 +474,7 @@ export const enumerateUnfusedWindows = (
   maxWindow: number,
 ): readonly UnfusedWindow[] => {
   if (!Number.isSafeInteger(maxWindow) || maxWindow < 2) {
-    throw new ExecutionError(`窓幅の上限 ${maxWindow} は 2 以上の整数でなければならない`);
+    throw new ExecutionError(`window width limit ${maxWindow} must be an integer of at least 2`);
   }
   const found: UnfusedWindow[] = [];
   let run: NodePlan[] = [];

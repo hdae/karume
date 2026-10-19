@@ -192,11 +192,11 @@ test("上限を超える payload は席ごとの確保寸法で名指しされ�
     () => assertWeightsWithinLimits(residency, limits(32, 64)),
     ExecutionError,
   );
-  assertStringIncludes(error.message, "重みバッファ 1 本");
+  assertStringIncludes(error.message, "1 weight buffers");
   assertStringIncludes(
     error.message,
-    "initializer 'w' の payload（席 f16・確保 64 バイト）: " +
-      "maxStorageBufferBindingSize 32 バイトを 32 バイト超える",
+    "initializer 'w' payload (residency class f16, allocated 64 bytes): " +
+      "exceeds maxStorageBufferBindingSize 32 bytes by 32 bytes",
   );
 });
 
@@ -207,7 +207,7 @@ test("上限は maxStorageBufferBindingSize と maxBufferSize の 2 本とも見
     () => assertWeightsWithinLimits(residency, limits(1024, 32)),
     ExecutionError,
   );
-  assertStringIncludes(bufferOnly.message, "maxBufferSize 32 バイトを 32 バイト超える");
+  assertStringIncludes(bufferOnly.message, "exceeds maxBufferSize 32 bytes by 32 bytes");
   assertEquals(
     bufferOnly.message.includes("maxStorageBufferBindingSize"),
     false,
@@ -219,8 +219,8 @@ test("上限は maxStorageBufferBindingSize と maxBufferSize の 2 本とも見
     () => assertWeightsWithinLimits(residency, limits(16, 48)),
     ExecutionError,
   );
-  assertStringIncludes(both.message, "maxStorageBufferBindingSize 16 バイトを 48 バイト超える");
-  assertStringIncludes(both.message, "maxBufferSize 48 バイトを 16 バイト超える");
+  assertStringIncludes(both.message, "exceeds maxStorageBufferBindingSize 16 bytes by 48 bytes");
+  assertStringIncludes(both.message, "exceeds maxBufferSize 48 bytes by 16 bytes");
 });
 
 test("適格外席は f32 展開後の寸法で見る・companion scale も 1 本として見る", () => {
@@ -232,12 +232,15 @@ test("適格外席は f32 展開後の寸法で見る・companion scale も 1 �
   // 適格外の `m.g` は payload 16 バイト（= 上限ちょうど）だが、GPU に載るのは展開後の 32 バイト。
   assertStringIncludes(
     error.message,
-    "initializer 'g' の payload（f32 展開後）（席 expanded・確保 32 バイト）",
+    "initializer 'g' payload (decoded to f32) (residency class expanded, allocated 32 bytes)",
   );
   // scale は payload と別に確保されるので、payload が通っても scale で落ちる。
-  assertStringIncludes(error.message, "initializer 'w' の scale（席 i8・確保 32 バイト）");
+  assertStringIncludes(
+    error.message,
+    "initializer 'w' scale (residency class i8, allocated 32 bytes)",
+  );
   assertEquals(
-    error.message.includes("initializer 'w' の payload"),
+    error.message.includes("initializer 'w' payload"),
     false,
     "16 バイトの payload は上限ちょうどで通る（scale だけが超過）",
   );
@@ -249,7 +252,7 @@ test("超過は全件を 1 回で列挙する（1 本ずつ落とさない）", 
     ExecutionError,
   );
   // w.scale / b / g の 3 本（w.payload だけが 16 バイトで通る）。
-  assertStringIncludes(error.message, "重みバッファ 3 本");
+  assertStringIncludes(error.message, "3 weight buffers");
   assertEquals(
     error.message.split("\n").filter((line) => line.startsWith("  - initializer")).length,
     3,
@@ -295,7 +298,7 @@ test("createSessionFromContainer は上限超過の重みを createBuffer より
     () => createSessionFromContainer(gpu, f16LinearModel(), GRAPH_NAME),
     ExecutionError,
   );
-  assertStringIncludes(error.message, "device の上限を超える（確保の前に検出）");
+  assertStringIncludes(error.message, "exceed the device limits (detected before allocation)");
   assertEquals(
     spy.createBuffer,
     0,
@@ -346,7 +349,7 @@ test("state スロットの maxBufferSize 超過も createBuffer より前に落
   );
   assertStringIncludes(
     error.message,
-    "state 'kv': 容量 [8] の 32 バイトが maxBufferSize 16 バイトを超える",
+    "state 'kv': capacity [8] takes 32 bytes, which exceeds maxBufferSize 16 bytes",
   );
   assertEquals(spy.createBuffer, 0, "確保に 1 本も到達しない");
 });
@@ -362,7 +365,7 @@ test("state スロットの maxStorageBufferBindingSize 超過も createBuffer �
   );
   assertStringIncludes(
     error.message,
-    "state 'kv': 容量 [8] の 32 バイトが maxStorageBufferBindingSize 16 バイトを超える",
+    "state 'kv': capacity [8] takes 32 bytes, which exceeds maxStorageBufferBindingSize 16 bytes",
   );
   assertEquals(spy.createBuffer, 0, "確保に 1 本も到達しない");
 });
@@ -446,7 +449,7 @@ test("束縛上限の境界は見積りと実構築で同じ（1 バイト下回
   assertEquals(estimateError.message, rejection);
   assertStringIncludes(
     estimateError.message,
-    "state 'kv': 容量 [1,2,1,4] の 32 バイトが maxStorageBufferBindingSize 31 バイトを超える",
+    "state 'kv': capacity [1,2,1,4] takes 32 bytes, which exceeds maxStorageBufferBindingSize 31 bytes",
   );
 });
 
@@ -459,7 +462,7 @@ test("バッファ上限の境界も見積りと実構築で同じ（束縛上�
   assertEquals(estimateError.message, rejection);
   assertStringIncludes(
     estimateError.message,
-    "state 'kv': 容量 [1,2,1,4] の 32 バイトが maxBufferSize 31 バイトを超える",
+    "state 'kv': capacity [1,2,1,4] takes 32 bytes, which exceeds maxBufferSize 31 bytes",
   );
 });
 
@@ -481,6 +484,6 @@ test("上限を渡さない見積りは既定値を捏造しない（device を�
         maxBufferSize: 31,
       }),
     ExecutionError,
-    "maxBufferSize 31 バイトを超える",
+    "exceeds maxBufferSize 31 bytes",
   );
 });

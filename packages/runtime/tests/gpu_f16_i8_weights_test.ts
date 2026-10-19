@@ -444,7 +444,11 @@ test("同じ重みを軸の違う 2 op が食う形は fail loudly", () => {
       { op: "conv_transpose1d", ins: ["x", "w", "b"], outs: ["z"], attrs: {} },
     ],
   };
-  assertThrows(() => weightChannelAxes(graph as never), ExecutionError, "チャネル軸が消費側で");
+  assertThrows(
+    () => weightChannelAxes(graph as never),
+    ExecutionError,
+    "consumers disagree on the channel axis",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -480,7 +484,7 @@ test("per-channel codec に行長と違う groupSize を付けると合流で落
         }),
       ),
     ContainerFormatError,
-    "per-channel なので groupSize は行長 4 に等しい MUST",
+    "is per-channel, so groupSize MUST equal the row length 4",
   );
   assertEquals(error.message.includes("initializer 'w'"), true, error.message);
 });
@@ -519,7 +523,7 @@ test("消費側の軸と食い違う rowAxis は admission（prepareContainer）
   const error = assertThrows(
     () => prepareContainer(opened, GRAPH_NAME),
     ExecutionError,
-    "宣言の rowAxis 1 が消費側 op のチャネル軸 0 と違う",
+    "the declared rowAxis 1 differs from the consuming op's channel axis 0",
   );
   assertEquals(error.message.includes("initializer 'w'"), true, error.message);
 });
@@ -625,12 +629,12 @@ test("decodeI8: broadcast できない scale と要素数不一致を拒否す�
   assertThrows(
     () => decodeI8(bytes, [2, 3], Float32Array.from([1, 2, 3, 4]), [2, 2]),
     I8Error,
-    "broadcast できない",
+    "cannot be broadcast",
   );
   assertThrows(
     () => decodeI8(bytes, [2, 4], Float32Array.from([1, 2]), [2, 1]),
     I8Error,
-    "ペイロード",
+    "payload",
   );
 });
 

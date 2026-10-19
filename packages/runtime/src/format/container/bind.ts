@@ -144,7 +144,7 @@ const numelOf = (shape: readonly number[]): number => shape.reduce((count, dim) 
 const assertPadded = (record: SupplyRecord, payload: number, by: string): void => {
   if (record.length < payload || record.length - payload >= BLOCK_TAIL_ALIGN) {
     fail(
-      `${by}: block '${record.id}' の長さ ${record.length} が payload ${payload} バイト + 詰め物（${BLOCK_TAIL_ALIGN} 未満）でない`,
+      `${by}: block '${record.id}' length ${record.length} is not payload ${payload} bytes + padding (less than ${BLOCK_TAIL_ALIGN})`,
     );
   }
 };
@@ -192,7 +192,7 @@ const rowBytesOfPayload = (payload: number, shape: readonly number[], where: str
   const rows = shape.length === 0 ? 1 : shape[0];
   if (shape.length === 0 || payload % rows !== 0) {
     fail(
-      `${where}: payload ${payload} バイトが先頭次元 ${rows} 行で割り切れないので piece 分割できない`,
+      `${where}: payload ${payload} bytes is not divisible by the leading dimension of ${rows} rows, so it cannot be split into pieces`,
     );
   }
   return payload / rows;
@@ -215,14 +215,14 @@ const planSupply = (
   const { encoding } = supply;
   const entry = codecEntry(encoding.codec);
   if (!allowedLayouts(dtype).includes(entry.layout)) {
-    fail(`${where}: 意味論 dtype '${dtype}' に codec '${encoding.codec}' は組めない`);
+    fail(`${where}: semantic dtype '${dtype}' cannot be paired with codec '${encoding.codec}'`);
   }
   const numel = numelOf(shape);
   if (entry.layout === "i2" && !isI2Shape(shape)) {
     fail(
-      `${where}: codec '${encoding.codec}' は正の rank 2・行長 16 の倍数の宣言 shape が要る（[${shape.join(
+      `${where}: codec '${encoding.codec}' needs a positive rank-2 declared shape with a row length that is a multiple of 16 ([${shape.join(
         ",",
-      )}]）`,
+      )}])`,
     );
   }
   const payload = declaredPayloadBytes(encoding.codec, numel, where);
@@ -243,15 +243,17 @@ const planSupply = (
     });
   } else {
     if (encoding.rowAxis !== undefined && encoding.rowAxis !== 0) {
-      fail(`${where}: rowAxis ${encoding.rowAxis} の initializer は piece 分割できない（規則④）`);
+      fail(
+        `${where}: an initializer with rowAxis ${encoding.rowAxis} cannot be split into pieces (rule ④)`,
+      );
     }
     const rowBytes = rowBytesOfPayload(payload, shape, where);
     const last = supply.pieces[supply.pieces.length - 1];
     if (last.rows[1] !== rows) {
       fail(
-        `${where}: piece 列の末尾 ${
+        `${where}: the piece list ends at row ${
           last.rows[1]
-        } 行が宣言 shape の先頭次元 ${rows} 行に届かない / 超える（規則④）`,
+        }, which falls short of / exceeds the leading dimension of the declared shape, ${rows} rows (rule ④)`,
       );
     }
     // Rule ④: the row ranges continue from 0 without gaps. Holes, overlaps and empty ranges all
@@ -270,18 +272,18 @@ const planSupply = (
       for (const [edge, value] of piece.rows.entries()) {
         if (!Number.isSafeInteger(value) || value < 0) {
           fail(
-            `${by}: 行範囲の ${
-              edge === 0 ? "開始" : "終端"
-            } ${value} が非負の安全整数でない（規則④）`,
+            `${by}: row range ${
+              edge === 0 ? "start" : "end"
+            } ${value} is not a non-negative safe integer (rule ④)`,
           );
         }
       }
       if (piece.rows[1] <= piece.rows[0]) {
-        fail(`${by}: 行範囲 [${piece.rows[0]}, ${piece.rows[1]}) が空区間（規則④）`);
+        fail(`${by}: row range [${piece.rows[0]}, ${piece.rows[1]}) is an empty range (rule ④)`);
       }
       if (piece.rows[0] !== cursor) {
         fail(
-          `${by}: 行範囲 [${piece.rows[0]}, ${piece.rows[1]}) が行 ${cursor} から続かない（規則④）`,
+          `${by}: row range [${piece.rows[0]}, ${piece.rows[1]}) does not continue from row ${cursor} (rule ④)`,
         );
       }
       cursor = piece.rows[1];
@@ -295,7 +297,7 @@ const planSupply = (
       const previous = blocks.at(-1);
       if (previous !== undefined && found.part < previous.part) {
         fail(
-          `${by}: part ${found.part} が直前の piece の part ${previous.part} より前にある（piece の part は添字順に非減少 MUST — 規則④）`,
+          `${by}: part ${found.part} comes before part ${previous.part} of the previous piece (the parts of pieces are non-decreasing in index order MUST — rule ④)`,
         );
       }
       const pieceBytes = (piece.rows[1] - piece.rows[0]) * rowBytes;
@@ -308,12 +310,12 @@ const planSupply = (
         // message).
         if (pieceBytes % BLOCK_TAIL_ALIGN !== 0) {
           fail(
-            `${by}: 中間 piece の行範囲のバイト数 ${pieceBytes} が ${BLOCK_TAIL_ALIGN} の倍数でない（詰め物不可 — 規則④）`,
+            `${by}: byte count ${pieceBytes} of a middle piece's row range is not a multiple of ${BLOCK_TAIL_ALIGN} (no padding allowed — rule ④)`,
           );
         }
         if (found.record.length !== pieceBytes) {
           fail(
-            `${by}: 中間 piece の block 長 ${found.record.length} が行範囲のバイト数 ${pieceBytes} と違う（詰め物不可）`,
+            `${by}: block length ${found.record.length} of a middle piece differs from the byte count ${pieceBytes} of its row range (no padding allowed)`,
           );
         }
       } else {
@@ -337,13 +339,15 @@ const planSupply = (
   const groupSize = encoding.groupSize ?? 0;
   if (!entry.rowAxes.some((axis) => axis === rowAxis)) {
     fail(
-      `${where}: codec '${encoding.codec}' の rowAxis は ${entry.rowAxes.join(
+      `${where}: rowAxis of codec '${encoding.codec}' must be ${entry.rowAxes.join(
         " / ",
-      )} だけ（宣言は ${rowAxis} — container-v1 §6.3）`,
+      )} only (declared ${rowAxis} — container-v1 §6.3)`,
     );
   }
   if (shape.length === 0 || (rowAxis === 1 && shape.length < 2)) {
-    fail(`${where}: rowAxis ${rowAxis} に対して宣言 shape [${shape.join(",")}] の rank が足りない`);
+    fail(
+      `${where}: rowAxis ${rowAxis} needs a higher rank than the declared shape [${shape.join(",")}]`,
+    );
   }
   const rowCount = shape[rowAxis];
   // Quantized weights with 0 rows have no use in real models, so they are not in the accepted set
@@ -353,33 +357,33 @@ const planSupply = (
   // here regardless of the source.
   if (rowCount === 0) {
     fail(
-      `${where}: 行数 0（shape[${rowAxis}] = 0）の量子化重みは受理しない（宣言 shape [${shape.join(
+      `${where}: quantized weights with 0 rows (shape[${rowAxis}] = 0) are not accepted (declared shape [${shape.join(
         ",",
-      )}] — 量子化行が 1 本も無い）`,
+      )}] — there is not a single quantized row)`,
     );
   }
   const rowLength = quantizedRowLength(shape, rowAxis);
   if (entry.grouping === "channel" && groupSize !== perChannelGroupSize(rowLength)) {
     fail(
-      `${where}: codec '${encoding.codec}' は per-channel なので groupSize は行長 ${perChannelGroupSize(
+      `${where}: codec '${encoding.codec}' is per-channel, so groupSize MUST equal the row length ${perChannelGroupSize(
         rowLength,
-      )} に等しい MUST（宣言は ${groupSize}）`,
+      )} (declared ${groupSize})`,
     );
   }
   if (entry.grouping === "group") {
     if (!isPowerOfTwo(groupSize) || groupSize < MIN_GROUP_SIZE) {
       fail(
-        `${where}: groupSize ${groupSize} が 2 冪かつ ${MIN_GROUP_SIZE} 以上でない（ADR 0069 決定 2）`,
+        `${where}: groupSize ${groupSize} is not a power of two that is at least ${MIN_GROUP_SIZE} (ADR 0069 decision 2)`,
       );
     }
     if (rowLength % groupSize !== 0) {
       fail(
-        `${where}: 行長 ${rowLength}（= numel / shape[${rowAxis}]）が groupSize ${groupSize} で割り切れない（ADR 0069 決定 2）`,
+        `${where}: row length ${rowLength} (= numel / shape[${rowAxis}]) is not divisible by groupSize ${groupSize} (ADR 0069 decision 2)`,
       );
     }
   }
   const scaleRef = encoding.scale;
-  if (scaleRef === undefined) fail(`${where}: codec '${encoding.codec}' は scale 必須`);
+  if (scaleRef === undefined) fail(`${where}: codec '${encoding.codec}' requires a scale`);
   const scaleFound = locate(scaleRef.block, `${where} scale`);
   const scalePayload = declaredScaleBytes(
     numelOf(groupScaleShape(shape, rowAxis, groupSize)),
@@ -424,7 +428,7 @@ export const mergedGraph = (bound: BoundGraph, graphName: string): IrGraph => {
     const supply = bound.supplies.get(name);
     if (supply === undefined) {
       fail(
-        `graph '${graphName}' initializer '${name}': 重みの供給が無い（krg だけでは Session を組めない）`,
+        `graph '${graphName}' initializer '${name}': no weight supply (a krg alone cannot build a Session)`,
       );
     }
     const { codec, groupSize, rowAxis } = supply.encoding;
@@ -448,7 +452,7 @@ export const assertTernaryCodes = (payload: Uint8Array<ArrayBuffer>, where: stri
   for (let i = 0; i < payload.byteLength; i += 1) {
     const byte = payload[i];
     if ((byte & 3) === 0 || (byte & 12) === 0 || (byte & 48) === 0 || (byte & 192) === 0) {
-      fail(`${where}: ternary の payload にコード 0（三値の値域外）がある（バイト ${i}）`);
+      fail(`${where}: ternary payload has code 0 (outside the ternary range) (byte ${i})`);
     }
   }
 };
@@ -510,7 +514,7 @@ export const bindDeclarations = (input: {
         // In a krg (no binding table) a non-const initializer is a "needs weights" declaration — no
         // supply plan.
         if (binding === undefined) continue;
-        return fail(`${where}: 束縛表に供給が無い`);
+        return fail(`${where}: no supply in the binding table`);
       }
       supplies.set(name, planSupply(where, value.dtype, shape, supply, locate, "model"));
     }
@@ -535,7 +539,7 @@ export const bindGraphs = (
     if (constBlock !== undefined) return { part: 1, record: constBlock };
     const dataBlock = dataById.get(id);
     if (dataBlock !== undefined) return { part: dataBlock.part, record: dataBlock };
-    return fail(`${by}: 未宣言の block '${id}'`);
+    return fail(`${by}: undeclared block '${id}'`);
   };
   return bindDeclarations({
     graphs: graph.graphs,

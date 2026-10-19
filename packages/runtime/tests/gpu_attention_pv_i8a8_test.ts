@@ -1216,7 +1216,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => runAttention(gpu, shape, 4, { attentionCompute: "a8" }),
         ExecutionError,
-        "i32 縮約の門",
+        "i32 reduction guard",
       );
       // 既定の f32 経路では同じ形が普通に走る（門が i8a8 経路だけのものであること）
       const baseline = await runAttention(gpu, shape, 4, {});
@@ -1239,7 +1239,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => runAttention(gpu, shape, d, { attentionCompute: "a8" }),
         ExecutionError,
-        "i32 縮約の門",
+        "i32 reduction guard",
       );
       // 既定の f32 経路では同じ形が普通に走る（門が i8a8 経路だけのものであること）
       const baseline = await runAttention(gpu, shape, d, {});

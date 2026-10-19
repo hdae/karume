@@ -123,7 +123,7 @@ export const ADALN_RULE = defineRule<AdalnMatch>({
     ];
     if (new Set(binds).size !== binds.length) return undefined;
 
-    const { eps } = layerNormAttrs(norm.node.attrs, `融合 adaln の ${norm.node.op}`);
+    const { eps } = layerNormAttrs(norm.node.attrs, `fusion adaln ${norm.node.op}`);
     return {
       window: nodes.slice(index, cursor + 3),
       chain,

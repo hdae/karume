@@ -353,7 +353,7 @@ export class RecipeBuilder {
   #bindingSource(name: string, defined: ReadonlySet<string>): ValueSource {
     const resident = this.#state.weightBuffers.get(name);
     if (resident !== undefined) return { kind: "resident", buffer: resident };
-    if (!defined.has(name)) throw new ExecutionError(`値 '${name}' のバッファが無い`);
+    if (!defined.has(name)) throw new ExecutionError(`no buffer for value '${name}'`);
     return { kind: "value", name };
   }
 
@@ -477,7 +477,7 @@ export class RecipeBuilder {
         const source = binds[operand.index];
         if (source === undefined) {
           throw new ExecutionError(
-            `融合ルール '${step.rule}': bind 添字 ${operand.index} が宣言 ${binds.length} 本の外`,
+            `fusion rule '${step.rule}': bind index ${operand.index} is outside the ${binds.length} declared binds`,
           );
         }
         return source;
@@ -487,7 +487,7 @@ export class RecipeBuilder {
         const resident = this.#state.residentWeights.get(name);
         if (resident === undefined || resident.storage === "f16" || resident.storage === "bf16") {
           throw new ExecutionError(
-            `融合ルール '${step.rule}': bind ${operand.index} の常駐scaleが無い`,
+            `fusion rule '${step.rule}': bind ${operand.index} has no resident scale`,
           );
         }
         // Borrow the existing weight scale. The owner and the sharedWeights lease stay with the Session.
@@ -497,7 +497,7 @@ export class RecipeBuilder {
       // Binding an unallocated temporary breaks the lifetime declaration (it is read from a dispatch
       // before its allocation).
       if (temp === undefined) {
-        throw new ExecutionError(`融合ルール '${step.rule}': 一時 ${operand.id} が未確保`);
+        throw new ExecutionError(`fusion rule '${step.rule}': unallocated temporary ${operand.id}`);
       }
       return temp;
     };
@@ -710,7 +710,7 @@ export class RecipeBuilder {
         // value (a break of the full-write invariant — ADR 0014). It is unreachable by type; the job
         // of this branch is to turn a missing wiring red at compile time when an op is added.
         const unhandled: never = step.contract;
-        throw new ExecutionError(`未処理の op kind: ${JSON.stringify(unhandled)}`);
+        throw new ExecutionError(`unhandled op kind: ${JSON.stringify(unhandled)}`);
       }
     }
   }
@@ -732,7 +732,7 @@ export class RecipeBuilder {
   #weightSlotName(step: NodePlan): string {
     const slot = WEIGHT_SLOTS.get(step.node.op);
     if (slot === undefined) {
-      throw new ExecutionError(`op '${step.node.op}' に重みスロットの定義が無い`);
+      throw new ExecutionError(`op '${step.node.op}' has no weight slot definition`);
     }
     return step.node.ins[slot];
   }
@@ -772,7 +772,7 @@ export class RecipeBuilder {
     const resident = this.#residentWeight(step);
     if (resident?.storage !== "i4") {
       throw new ExecutionError(
-        `initializer '${this.#weightSlotName(step)}': i4 常駐なのに group_size が無い`,
+        `initializer '${this.#weightSlotName(step)}': i4-resident but has no group_size`,
       );
     }
     return resident.groupSize;

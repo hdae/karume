@@ -109,12 +109,12 @@ test("createGenerationProgram: chunkBuckets の受理集合は runtime の門を
   // 「context を作る前に落ちる」こと自体である（写した規則が育つと context と食い違う）。
   const cases: readonly (readonly [readonly number[], string])[] = [
     // 1 は decode 形そのもの / chunkLength 以上は queryLength ≤ chunkLength 契約の外。
-    [[1], "chunkBuckets[0] 1 が 2..3 の整数でない"],
-    [[4], "chunkBuckets[0] 4 が 2..3 の整数でない"],
-    [[2.5], "chunkBuckets[0] 2.5 が 2..3 の整数でない"],
+    [[1], "chunkBuckets[0] 1 is not an integer in 2..3"],
+    [[4], "chunkBuckets[0] 4 is not an integer in 2..3"],
+    [[2.5], "chunkBuckets[0] 2.5 is not an integer in 2..3"],
     // 重複と降順は「queryLength 以上の最小バケット」を線形走査で選べなくする。
-    [[2, 2], "chunkBuckets[1] 2 が直前の 2 以下"],
-    [[3, 2], "chunkBuckets[1] 2 が直前の 3 以下"],
+    [[2, 2], "chunkBuckets[1] 2 is not greater than the previous 2"],
+    [[3, 2], "chunkBuckets[1] 2 is not greater than the previous 3"],
   ];
   for (const [chunkBuckets, message] of cases) {
     assertThrows(() => createGenerationProgram(specOf({ chunkBuckets })), Error, message);

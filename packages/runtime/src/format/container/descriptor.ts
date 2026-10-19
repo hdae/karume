@@ -203,30 +203,30 @@ function fail(message: string): never {
 }
 
 const requireObject = (value: unknown, path: string): JsonObject => {
-  if (!isJsonObject(value)) fail(`${path} がオブジェクトでない`);
+  if (!isJsonObject(value)) fail(`${path} is not an object`);
   return value;
 };
 
 const requireArray = (value: unknown, path: string): readonly unknown[] => {
-  if (!Array.isArray(value)) fail(`${path} が配列でない`);
+  if (!Array.isArray(value)) fail(`${path} is not an array`);
   return value;
 };
 
 const requireString = (value: unknown, path: string): string => {
-  if (typeof value !== "string" || value.length === 0) fail(`${path} が非空文字列でない`);
+  if (typeof value !== "string" || value.length === 0) fail(`${path} is not a non-empty string`);
   return value;
 };
 
 const requireIndex = (value: unknown, path: string): number => {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    fail(`${path} が非負の安全整数でない: ${String(value)}`);
+    fail(`${path} is not a non-negative safe integer: ${String(value)}`);
   }
   return value;
 };
 
 const requirePositive = (value: unknown, path: string): number => {
   const n = requireIndex(value, path);
-  if (n === 0) fail(`${path} が 0`);
+  if (n === 0) fail(`${path} is 0`);
   return n;
 };
 
@@ -241,10 +241,10 @@ const requireKeys = (
   path: string,
 ): void => {
   for (const key of required) {
-    if (!Object.hasOwn(object, key)) fail(`${path}.${key} が無い`);
+    if (!Object.hasOwn(object, key)) fail(`${path}.${key} is missing`);
   }
   for (const key of Object.keys(object)) {
-    if (!required.includes(key) && !optional.includes(key)) fail(`${path}: 未知のキー '${key}'`);
+    if (!required.includes(key) && !optional.includes(key)) fail(`${path}: unknown key '${key}'`);
   }
 };
 
@@ -256,7 +256,7 @@ const requireUniqueStrings = (value: unknown, path: string): string[] => {
   const list = requireStrings(value, path);
   const seen = new Set<string>();
   for (const item of list) {
-    if (seen.has(item)) fail(`${path}: '${item}' が重複している`);
+    if (seen.has(item)) fail(`${path}: '${item}' is duplicated`);
     seen.add(item);
   }
   return list;
@@ -264,7 +264,7 @@ const requireUniqueStrings = (value: unknown, path: string): string[] => {
 
 export const asSha256Hex = (value: unknown, path: string): Sha256Hex => {
   if (typeof value !== "string" || !SHA256_HEX_PATTERN.test(value)) {
-    fail(`${path} が sha256（小文字 16 進 64 文字）でない: ${String(value)}`);
+    fail(`${path} is not a sha256 (64 lowercase hex characters): ${String(value)}`);
   }
   return value as Sha256Hex;
 };
@@ -279,7 +279,8 @@ export const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<Sha256H
 
 const requireBlockId = (value: unknown, path: string): string => {
   const id = requireString(value, path);
-  if (!BLOCK_ID_PATTERN.test(id)) fail(`${path}: block id '${id}' が語彙外（${BLOCK_ID_PATTERN}）`);
+  if (!BLOCK_ID_PATTERN.test(id))
+    fail(`${path}: block id '${id}' is outside the vocabulary (${BLOCK_ID_PATTERN})`);
   return id;
 };
 
@@ -297,7 +298,9 @@ export const parseEncoding = (value: unknown, path: string): Encoding => {
   requireKeys(object, ["codec", "packing"], ["rowAxis", "groupSize", "scale", "zeroPoint"], path);
   const codec = requireString(object["codec"], `${path}.codec`);
   if (!isCodecName(codec)) {
-    fail(`${path}.codec: 台帳に無い codec '${codec}'（台帳: ${CODEC_NAMES.join(" / ")}）`);
+    fail(
+      `${path}.codec: codec '${codec}' is not in the ledger (ledger: ${CODEC_NAMES.join(" / ")})`,
+    );
   }
   const entry = codecEntry(codec);
   const packingObject = requireObject(object["packing"], `${path}.packing`);
@@ -312,33 +315,35 @@ export const parseEncoding = (value: unknown, path: string): Encoding => {
   for (const key of PACKING_KEYS) {
     if (packing[key] !== entry.packing[key]) {
       fail(
-        `${path}.packing.${key}: codec '${codec}' の台帳は ${entry.packing[key]} だが宣言は ${
+        `${path}.packing.${key}: the ledger of codec '${codec}' has ${entry.packing[key]} but the declaration has ${
           packing[key]
-        }（別の版の台帳で書かれた資産）`,
+        } (an asset written with a different version of the ledger)`,
       );
     }
   }
   const quantized = entry.scale === "required";
   for (const key of ["rowAxis", "groupSize", "scale"] as const) {
     if (quantized && !Object.hasOwn(object, key)) {
-      fail(`${path}.${key}: codec '${codec}' は量子化なので必須`);
+      fail(`${path}.${key}: codec '${codec}' is quantized, so it is required`);
     }
     if (!quantized && Object.hasOwn(object, key)) {
-      fail(`${path}.${key}: codec '${codec}' は量子化でないので書けない`);
+      fail(`${path}.${key}: codec '${codec}' is not quantized, so it cannot be written`);
     }
   }
   if (entry.zeroPoint === "forbidden" && Object.hasOwn(object, "zeroPoint")) {
-    fail(`${path}.zeroPoint: codec '${codec}' は zeroPoint を持てない`);
+    fail(`${path}.zeroPoint: codec '${codec}' cannot have a zeroPoint`);
   }
   if (!quantized) return { codec, packing };
   const rowAxis = requireIndex(object["rowAxis"], `${path}.rowAxis`);
-  if (rowAxis !== 0 && rowAxis !== 1) fail(`${path}.rowAxis は 0 か 1（宣言は ${rowAxis}）`);
+  if (rowAxis !== 0 && rowAxis !== 1) fail(`${path}.rowAxis must be 0 or 1 (declared ${rowAxis})`);
   const groupSize = requirePositive(object["groupSize"], `${path}.groupSize`);
   const scaleObject = requireObject(object["scale"], `${path}.scale`);
   requireKeys(scaleObject, ["block", "dtype"], [], `${path}.scale`);
   const scaleDtype = requireString(scaleObject["dtype"], `${path}.scale.dtype`);
   if (!SCALE_DTYPES.some((dtype) => dtype === scaleDtype)) {
-    fail(`${path}.scale.dtype が受理集合（${SCALE_DTYPES.join(" / ")}）に無い: ${scaleDtype}`);
+    fail(
+      `${path}.scale.dtype is not in the accepted set (${SCALE_DTYPES.join(" / ")}): ${scaleDtype}`,
+    );
   }
   const encoding: Encoding = {
     codec,
@@ -380,14 +385,14 @@ const canonicalEncoding = (encoding: Encoding): Record<string, unknown> => ({
 
 const assertBlockShape = (block: ConstBlockRecord, path: string): void => {
   if (block.offset % BLOCK_START_ALIGN !== 0) {
-    fail(`${path}: offset ${block.offset} が ${BLOCK_START_ALIGN} の倍数でない`);
+    fail(`${path}: offset ${block.offset} is not a multiple of ${BLOCK_START_ALIGN}`);
   }
-  if (block.length === 0) fail(`${path}: length が 0`);
+  if (block.length === 0) fail(`${path}: length is 0`);
   if (block.length % BLOCK_TAIL_ALIGN !== 0) {
-    fail(`${path}: length ${block.length} が ${BLOCK_TAIL_ALIGN} の倍数でない`);
+    fail(`${path}: length ${block.length} is not a multiple of ${BLOCK_TAIL_ALIGN}`);
   }
   if (block.length > BLOCK_MAX_BYTES) {
-    fail(`${path}: length ${block.length} が block 上限 ${BLOCK_MAX_BYTES} を超える`);
+    fail(`${path}: length ${block.length} exceeds the block limit ${BLOCK_MAX_BYTES}`);
   }
 };
 
@@ -402,10 +407,12 @@ const assertNoOverlap = (
   const sorted = [...blocks].sort((a, b) => a.offset - b.offset);
   let cursor = 0;
   for (const block of sorted) {
-    if (block.offset < cursor) fail(`${path}: block '${block.id}' が直前の block と重なる`);
+    if (block.offset < cursor) fail(`${path}: block '${block.id}' overlaps the previous block`);
     cursor = block.offset + block.length;
     if (cursor > regionLength) {
-      fail(`${path}: block '${block.id}' が領域長 ${regionLength} をはみ出す（末尾 ${cursor}）`);
+      fail(
+        `${path}: block '${block.id}' runs past the region length ${regionLength} (end ${cursor})`,
+      );
     }
   }
 };
@@ -426,7 +433,7 @@ const parseDataBlock = (value: unknown, path: string): DataBlockRecord => {
   requireKeys(object, ["id", "part", "offset", "length", "sha256", "role"], [], path);
   const role = requireString(object["role"], `${path}.role`);
   if (!BLOCK_ROLES.some((known) => known === role)) {
-    fail(`${path}.role が ${BLOCK_ROLES.join(" / ")} のいずれでもない: ${role}`);
+    fail(`${path}.role is none of ${BLOCK_ROLES.join(" / ")}: ${role}`);
   }
   return {
     id: requireBlockId(object["id"], `${path}.id`),
@@ -446,8 +453,8 @@ const GRAPH_DESCRIPTOR_KEYS = ["format", "version", "capabilities", "graphs", "c
 
 const requireFormat = (object: JsonObject, expected: string, path: string): void => {
   const format = requireString(object["format"], `${path}.format`);
-  if (format !== expected) fail(`${path}.format が '${expected}' でない: ${format}`);
-  if (object["version"] !== 1) fail(`${path}.version が 1 でない: ${String(object["version"])}`);
+  if (format !== expected) fail(`${path}.format is not '${expected}': ${format}`);
+  if (object["version"] !== 1) fail(`${path}.version is not 1: ${String(object["version"])}`);
 };
 
 /**
@@ -470,19 +477,23 @@ export const parseGraphDescriptor = (bytes: Uint8Array<ArrayBuffer>): GraphDescr
   if (features.length > 0) {
     // The first edition defines no extension point (§2.1) — assets that require unknown features
     // are not read silently.
-    fail(`${path}.capabilities.features: 未知の機能 [${features.join(", ")}]（初版は空配列のみ）`);
+    fail(
+      `${path}.capabilities.features: unknown features [${features.join(", ")}] (the first edition allows only an empty array)`,
+    );
   }
 
   const graphsObject = requireObject(object["graphs"], `${path}.graphs`);
   const graphNames = Object.keys(graphsObject);
-  if (graphNames.length === 0) fail(`${path}.graphs が空`);
+  if (graphNames.length === 0) fail(`${path}.graphs is empty`);
   if (graphNames.length > MAX_GRAPHS) {
-    fail(`${path}.graphs の件数 ${graphNames.length} が上限 ${MAX_GRAPHS} を超える`);
+    fail(`${path}.graphs count ${graphNames.length} exceeds the limit ${MAX_GRAPHS}`);
   }
   const graphs: Record<string, IrDeclaration> = Object.create(null);
   for (const name of graphNames) {
     if (!GRAPH_NAME_PATTERN.test(name)) {
-      fail(`${path}.graphs: グラフ名 '${name}' が語彙外（${GRAPH_NAME_PATTERN}）`);
+      fail(
+        `${path}.graphs: graph name '${name}' is outside the vocabulary (${GRAPH_NAME_PATTERN})`,
+      );
     }
     try {
       graphs[name] = parseIrDeclarationValue(graphsObject[name]);
@@ -497,9 +508,9 @@ export const parseGraphDescriptor = (bytes: Uint8Array<ArrayBuffer>): GraphDescr
   );
   if (!sameSet(sortedByCodePoints(ops), union)) {
     fail(
-      `${path}.capabilities.ops [${ops.join(", ")}] が graphs の requires.ops の和集合 [${union.join(
+      `${path}.capabilities.ops [${ops.join(", ")}] does not match the union of requires.ops over graphs [${union.join(
         ", ",
-      )}] と一致しない`,
+      )}]`,
     );
   }
 
@@ -543,18 +554,20 @@ export const validateGraphDescriptor = (descriptor: GraphDescriptor): void => {
   // reaches a huge bulk read (a krm also checks it on the model descriptor's parts side, but the
   // duplication is harmless).
   if (region.length > PART_MAX_BYTES) {
-    fail(`${path}.length ${region.length} が part 長の天井 ${PART_MAX_BYTES} を超える`);
+    fail(`${path}.length ${region.length} exceeds the part length ceiling ${PART_MAX_BYTES}`);
   }
-  if (region.blocks.length > MAX_BLOCKS) fail(`${path}.blocks の件数が上限 ${MAX_BLOCKS} を超える`);
+  if (region.blocks.length > MAX_BLOCKS)
+    fail(`${path}.blocks count exceeds the limit ${MAX_BLOCKS}`);
   const ids = new Set<string>();
   let previousOffset = -1;
   for (const [i, block] of region.blocks.entries()) {
     const blockPath = `${path}.blocks[${i}]`;
-    if (ids.has(block.id)) fail(`${blockPath}: block id '${block.id}' が重複`);
+    if (ids.has(block.id)) fail(`${blockPath}: block id '${block.id}' is duplicated`);
     ids.add(block.id);
     assertBlockShape(block, blockPath);
     // const.blocks are in ascending offset order (§2.1 — the reader need not reorder them).
-    if (block.offset <= previousOffset) fail(`${blockPath}: offset ${block.offset} が昇順でない`);
+    if (block.offset <= previousOffset)
+      fail(`${blockPath}: offset ${block.offset} is not in ascending order`);
     previousOffset = block.offset;
   }
   assertNoOverlap(region.blocks, region.length, path);
@@ -562,9 +575,9 @@ export const validateGraphDescriptor = (descriptor: GraphDescriptor): void => {
   // Rule ①: 1 block ≤ 1 reference. The same for scale / zeroPoint blocks.
   const referenced = new Set<string>();
   const claim = (id: string, by: string): void => {
-    if (!ids.has(id)) fail(`${by}: const 目次に無い block '${id}'`);
+    if (!ids.has(id)) fail(`${by}: block '${id}' is not in the const index`);
     if (referenced.has(id)) {
-      fail(`${by}: block '${id}' が二重に束縛されている（1 block ≤ 1 binding）`);
+      fail(`${by}: block '${id}' is bound twice (1 block ≤ 1 binding)`);
     }
     referenced.add(id);
   };
@@ -574,22 +587,22 @@ export const validateGraphDescriptor = (descriptor: GraphDescriptor): void => {
     const graph = Object.hasOwn(descriptor.graphs, entry.graph)
       ? descriptor.graphs[entry.graph]
       : undefined;
-    if (graph === undefined) fail(`${entryPath}.graph: 未宣言のグラフ '${entry.graph}'`);
+    if (graph === undefined) fail(`${entryPath}.graph: undeclared graph '${entry.graph}'`);
     const declared = graph.initializers[entry.initializer];
     if (declared === undefined) {
       fail(
-        `${entryPath}.initializer: グラフ '${entry.graph}' に initializer '${entry.initializer}' が無い`,
+        `${entryPath}.initializer: graph '${entry.graph}' has no initializer '${entry.initializer}'`,
       );
     }
     if (declared.shared) {
       fail(
-        `${entryPath}: '${entry.initializer}' は shared 宣言（貸し手の重みを借りる）なので const では供給できない`,
+        `${entryPath}: '${entry.initializer}' is a shared declaration (it borrows the lender's weights), so it cannot be supplied as a const`,
       );
     }
     const key = `${entry.graph}/${entry.initializer}`;
     if (seen.has(key)) {
       fail(
-        `${entryPath}: (graph, initializer) = ('${entry.graph}', '${entry.initializer}') が重複`,
+        `${entryPath}: (graph, initializer) = ('${entry.graph}', '${entry.initializer}') is duplicated`,
       );
     }
     seen.add(key);
@@ -604,7 +617,8 @@ export const validateGraphDescriptor = (descriptor: GraphDescriptor): void => {
   for (const id of ids) {
     // Rule ⑤: a block referenced from nowhere is surplus (a bloated distribution is not accepted
     // silently).
-    if (!referenced.has(id)) fail(`${path}: block '${id}' がどこからも参照されていない（余剰）`);
+    if (!referenced.has(id))
+      fail(`${path}: block '${id}' is not referenced from anywhere (surplus)`);
   }
 };
 
@@ -641,7 +655,9 @@ export const serializeGraphDescriptor = (descriptor: GraphDescriptor): Uint8Arra
     },
   });
   if (bytes.byteLength > MAX_DESCRIPTOR_BYTES) {
-    fail(`グラフ記述が上限 ${MAX_DESCRIPTOR_BYTES} バイトを超える: ${bytes.byteLength}`);
+    fail(
+      `Graph descriptor exceeds the limit of ${MAX_DESCRIPTOR_BYTES} bytes: ${bytes.byteLength}`,
+    );
   }
   return bytes;
 };
@@ -676,7 +692,7 @@ const parseSupply = (value: unknown, path: string): WeightSupply => {
   const hasBlock = Object.hasOwn(object, "block");
   const hasPieces = Object.hasOwn(object, "pieces");
   if (hasBlock === hasPieces) {
-    fail(`${path}: 'block'（丸ごと 1 本）と 'pieces'（行分割）のどちらか一方だけを書く`);
+    fail(`${path}: write exactly one of 'block' (one whole block) and 'pieces' (row split)`);
   }
   if (hasBlock) return { block: requireBlockId(object["block"], `${path}.block`), encoding };
   const pieces = requireArray(object["pieces"], `${path}.pieces`).map((piece, i) => {
@@ -684,22 +700,24 @@ const parseSupply = (value: unknown, path: string): WeightSupply => {
     const pieceObject = requireObject(piece, piecePath);
     requireKeys(pieceObject, ["block", "rows"], [], piecePath);
     const rows = requireArray(pieceObject["rows"], `${piecePath}.rows`);
-    if (rows.length !== 2) fail(`${piecePath}.rows の長さが 2 でない`);
+    if (rows.length !== 2) fail(`${piecePath}.rows length is not 2`);
     const begin = requireIndex(rows[0], `${piecePath}.rows[0]`);
     const end = requireIndex(rows[1], `${piecePath}.rows[1]`);
-    if (end <= begin) fail(`${piecePath}.rows [${begin}, ${end}) が空区間`);
+    if (end <= begin) fail(`${piecePath}.rows [${begin}, ${end}) is an empty range`);
     return {
       block: requireBlockId(pieceObject["block"], `${piecePath}.block`),
       rows: [begin, end] as const,
     };
   });
-  if (pieces.length < 2) fail(`${path}.pieces は 2 本以上（1 本なら 'block' で書く）`);
+  if (pieces.length < 2) fail(`${path}.pieces must have 2 or more entries (write 'block' for one)`);
   // Rule ④: the row range is covered without gaps (end = shape[0] is checked by the merge layer,
   // which knows the declared shape).
   let cursor = 0;
   for (const [i, piece] of pieces.entries()) {
     if (piece.rows[0] !== cursor) {
-      fail(`${path}.pieces[${i}]: 行 ${cursor} から続かない（宣言は ${piece.rows[0]}）`);
+      fail(
+        `${path}.pieces[${i}]: does not continue from row ${cursor} (declared ${piece.rows[0]})`,
+      );
     }
     cursor = piece.rows[1];
   }
@@ -715,7 +733,9 @@ export const parseModelDescriptor = (bytes: Uint8Array<ArrayBuffer>): ModelDescr
 
   const codecs = requireUniqueStrings(object["codecs"], `${path}.codecs`).map((codec) => {
     if (!isCodecName(codec)) {
-      fail(`${path}.codecs: 台帳に無い codec '${codec}'（台帳: ${CODEC_NAMES.join(" / ")}）`);
+      fail(
+        `${path}.codecs: codec '${codec}' is not in the ledger (ledger: ${CODEC_NAMES.join(" / ")})`,
+      );
     }
     return codec;
   });
@@ -741,7 +761,7 @@ export const parseModelDescriptor = (bytes: Uint8Array<ArrayBuffer>): ModelDescr
     const graphPath = `${path}.binding['${graphName}']`;
     const supplies: Record<string, WeightSupply> = Object.create(null);
     for (const [name, raw] of Object.entries(requireObject(bindingObject[graphName], graphPath))) {
-      supplies[requireString(name, `${graphPath} のキー`)] = parseSupply(
+      supplies[requireString(name, `${graphPath} key`)] = parseSupply(
         raw,
         `${graphPath}['${name}']`,
       );
@@ -753,7 +773,7 @@ export const parseModelDescriptor = (bytes: Uint8Array<ArrayBuffer>): ModelDescr
   const assets: Record<string, AssetBinding> = Object.create(null);
   for (const [name, raw] of Object.entries(assetsObject)) {
     const assetPath = `${path}.assets['${name}']`;
-    requireString(name, `${path}.assets のキー`);
+    requireString(name, `${path}.assets key`);
     const assetObject = requireObject(raw, assetPath);
     requireKeys(assetObject, ["block", "role", "length"], [], assetPath);
     assets[name] = {
@@ -812,11 +832,14 @@ const supplyBlocks = (
 export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
   const path = "modelDescriptor";
   if (descriptor.parts.length === 0) {
-    fail(`${path}.parts が空（part 1 = const 領域は長さ 0 でも必ず宣言する）`);
+    fail(
+      `${path}.parts is empty (part 1 = the const region is always declared, even with length 0)`,
+    );
   }
-  if (descriptor.parts.length > MAX_PARTS) fail(`${path}.parts の件数が上限 ${MAX_PARTS} を超える`);
+  if (descriptor.parts.length > MAX_PARTS)
+    fail(`${path}.parts count exceeds the limit ${MAX_PARTS}`);
   if (descriptor.blocks.length > MAX_BLOCKS) {
-    fail(`${path}.blocks の件数が上限 ${MAX_BLOCKS} を超える`);
+    fail(`${path}.blocks count exceeds the limit ${MAX_BLOCKS}`);
   }
 
   // parts run from index 1 in ascending order without gaps (§2.2 — part 0 is not listed, as it would
@@ -824,9 +847,9 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
   const partLength = new Map<number, number>();
   for (const [i, part] of descriptor.parts.entries()) {
     const partPath = `${path}.parts[${i}]`;
-    if (part.index !== i + 1) fail(`${partPath}.index が ${i + 1} でない: ${part.index}`);
+    if (part.index !== i + 1) fail(`${partPath}.index is not ${i + 1}: ${part.index}`);
     if (part.length > PART_MAX_BYTES) {
-      fail(`${partPath}.length ${part.length} が part 長の天井 ${PART_MAX_BYTES} を超える`);
+      fail(`${partPath}.length ${part.length} exceeds the part length ceiling ${PART_MAX_BYTES}`);
     }
     partLength.set(part.index, part.length);
   }
@@ -835,12 +858,14 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
   const byPart = new Map<number, DataBlockRecord[]>();
   for (const [i, block] of descriptor.blocks.entries()) {
     const blockPath = `${path}.blocks[${i}]`;
-    if (byId.has(block.id)) fail(`${blockPath}: block id '${block.id}' が重複`);
+    if (byId.has(block.id)) fail(`${blockPath}: block id '${block.id}' is duplicated`);
     byId.set(block.id, block);
     if (block.part < 2) {
-      fail(`${blockPath}.part が 2 未満（part 0 は descriptor・part 1 は const 領域の専有）`);
+      fail(
+        `${blockPath}.part is less than 2 (part 0 is reserved for the descriptors, part 1 for the const region)`,
+      );
     }
-    if (!partLength.has(block.part)) fail(`${blockPath}.part: 未宣言の part ${block.part}`);
+    if (!partLength.has(block.part)) fail(`${blockPath}.part: undeclared part ${block.part}`);
     assertBlockShape(block, blockPath);
     const list = byPart.get(block.part);
     if (list === undefined) byPart.set(block.part, [block]);
@@ -855,12 +880,12 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
   const referenced = new Set<string>();
   const claim = (id: string, role: BlockRole, by: string): DataBlockRecord => {
     const block = byId.get(id);
-    if (block === undefined) fail(`${by}: 目次に無い block '${id}'`);
+    if (block === undefined) fail(`${by}: block '${id}' is not in the index`);
     if (block.role !== role) {
-      fail(`${by}: block '${id}' の role は '${block.role}'（'${role}' が要る）`);
+      fail(`${by}: block '${id}' has role '${block.role}' ('${role}' is required)`);
     }
     if (referenced.has(id)) {
-      fail(`${by}: block '${id}' が二重に束縛されている（1 block ≤ 1 binding）`);
+      fail(`${by}: block '${id}' is bound twice (1 block ≤ 1 binding)`);
     }
     referenced.add(id);
     return block;
@@ -883,7 +908,7 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
         const scalePart = claim(refs.scale, "scale", `${entryPath}.encoding.scale`).part;
         if (scalePart !== firstPart) {
           fail(
-            `${entryPath}.encoding.scale: scale が part ${scalePart}・実体の先頭が part ${firstPart}（同一 part MUST）`,
+            `${entryPath}.encoding.scale: scale is in part ${scalePart}, the first data block in part ${firstPart} (same part MUST)`,
           );
         }
       }
@@ -895,7 +920,7 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
         ).part;
         if (zeroPart !== firstPart) {
           fail(
-            `${entryPath}.encoding.zeroPoint: zeroPoint が part ${zeroPart}・実体の先頭が part ${firstPart}（同一 part MUST）`,
+            `${entryPath}.encoding.zeroPoint: zeroPoint is in part ${zeroPart}, the first data block in part ${firstPart} (same part MUST)`,
           );
         }
       }
@@ -909,12 +934,13 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
     // declaration (consumers do not strip trailing 0x00 by guessing).
     if (alignUp(asset.length, BLOCK_TAIL_ALIGN) !== block.length) {
       fail(
-        `${assetPath}.length: 論理長 ${asset.length} を ${BLOCK_TAIL_ALIGN} の倍数へ切り上げた値が block '${asset.block}' の長さ ${block.length} と違う`,
+        `${assetPath}.length: logical length ${asset.length} rounded up to a multiple of ${BLOCK_TAIL_ALIGN} differs from block '${asset.block}' length ${block.length}`,
       );
     }
   }
   for (const id of byId.keys()) {
-    if (!referenced.has(id)) fail(`${path}: block '${id}' がどこからも参照されていない（余剰）`);
+    if (!referenced.has(id))
+      fail(`${path}: block '${id}' is not referenced from anywhere (surplus)`);
   }
   // `codecs` equals exactly the set of codecs the binding table uses (declaration checked against
   // actual use — matched against the ledger before fetching weights).
@@ -922,9 +948,9 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
   const actual = sortedByCodePoints(usedCodecs);
   if (!sameSet(declared, actual)) {
     fail(
-      `${path}.codecs [${declared.join(", ")}] が束縛表の codec 集合 [${actual.join(
+      `${path}.codecs [${declared.join(", ")}] does not match the codec set of the binding table [${actual.join(
         ", ",
-      )}] と一致しない`,
+      )}]`,
     );
   }
 };
@@ -937,18 +963,20 @@ export const validateAgainstGraph = (model: ModelDescriptor, graph: GraphDescrip
   const constPart = model.parts[0];
   if (constPart.length !== graph.const.length) {
     fail(
-      `part 1 の長さ ${constPart.length} がグラフ記述の const.length ${graph.const.length} と違う`,
+      `part 1 length ${constPart.length} differs from the graph descriptor const.length ${graph.const.length}`,
     );
   }
   if (graph.const.blocks.length + model.blocks.length > MAX_BLOCKS) {
     fail(
-      `block 件数（const ${graph.const.blocks.length} + 重み ${model.blocks.length}）が上限 ${MAX_BLOCKS} を超える`,
+      `block count (const ${graph.const.blocks.length} + weights ${model.blocks.length}) exceeds the limit ${MAX_BLOCKS}`,
     );
   }
   const constIds = new Set(graph.const.blocks.map((block) => block.id));
   for (const block of model.blocks) {
     if (constIds.has(block.id)) {
-      fail(`block id '${block.id}' が const 目次とモデル目次で衝突（素集合 MUST）`);
+      fail(
+        `block id '${block.id}' collides between the const index and the model index (disjoint sets MUST)`,
+      );
     }
   }
   const constSupplied = new Set(
@@ -956,7 +984,7 @@ export const validateAgainstGraph = (model: ModelDescriptor, graph: GraphDescrip
   );
   for (const graphName of Object.keys(model.binding)) {
     if (!Object.hasOwn(graph.graphs, graphName)) {
-      fail(`modelDescriptor.binding: 未宣言のグラフ '${graphName}'`);
+      fail(`modelDescriptor.binding: undeclared graph '${graphName}'`);
     }
   }
   for (const [graphName, declaration] of Object.entries(graph.graphs)) {
@@ -971,9 +999,9 @@ export const validateAgainstGraph = (model: ModelDescriptor, graph: GraphDescrip
     const surplus = bound.filter((name) => !expected.includes(name));
     if (missing.length > 0 || surplus.length > 0) {
       fail(
-        `グラフ '${graphName}' の束縛表が initializer 宣言と一致しない: 不足 [${missing.join(
+        `Binding table of graph '${graphName}' does not match the initializer declarations: missing [${missing.join(
           ", ",
-        )}] / 余剰 [${surplus.join(", ")}]（shared 宣言と const 供給は束縛表に載せない）`,
+        )}] / surplus [${surplus.join(", ")}] (shared declarations and const supplies are not listed in the binding table)`,
       );
     }
   }
@@ -1029,7 +1057,9 @@ export const serializeModelDescriptor = (descriptor: ModelDescriptor): Uint8Arra
     },
   });
   if (bytes.byteLength > MAX_DESCRIPTOR_BYTES) {
-    fail(`モデル記述が上限 ${MAX_DESCRIPTOR_BYTES} バイトを超える: ${bytes.byteLength}`);
+    fail(
+      `Model descriptor exceeds the limit of ${MAX_DESCRIPTOR_BYTES} bytes: ${bytes.byteLength}`,
+    );
   }
   return bytes;
 };

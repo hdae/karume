@@ -458,7 +458,7 @@ const openDrafterPair = async (): Promise<DrafterPair> => {
   const close = async (): Promise<void> => {
     // MUST: 借り手 Session を先に畳む（貸し手の重みを借りている間の dispose は拒否される）。
     const refused = await assertRejects(() => target.dispose(), ExecutionError);
-    assert(refused.message.includes("貸し出している"), refused.message);
+    assert(refused.message.includes("lent out"), refused.message);
     await drafterSession.dispose();
     await target.dispose();
     gpu.destroy();
@@ -501,7 +501,7 @@ describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
       const borrowed = await openDrafterContext(drafter, context);
       // 貸し手 context は借り手が居る間 dispose できない（借り手の bind group が掴んでいる）。
       const refusedContext = await assertRejects(() => context.dispose(), ExecutionError);
-      assert(refusedContext.message.includes("借りている"), refusedContext.message);
+      assert(refusedContext.message.includes("are borrowing"), refusedContext.message);
       // 順序どおりなら通る。
       await borrowed.dispose();
       await context.dispose();

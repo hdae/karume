@@ -193,9 +193,9 @@ describe("1 行ぶんにも満たない予算", () => {
     const error = assertThrows(
       () => blocksOf(TOKENS_121F, TOKENS_121F, 2, 1 * MiB),
       ExecutionError,
-      "予算を 1 行ぶん以上にすること",
+      "set the budget to at least one row",
     );
-    assertEquals(error.message.includes("ストレージ束縛の上限を超える"), false, error.message);
+    assertEquals(error.message.includes("exceeds the storage binding limit"), false, error.message);
   });
 
   it("readonly の states 形（1 行 = decode）でも、長い容量に小さい予算を渡すと予算を名指して落ちる", () => {
@@ -207,7 +207,7 @@ describe("1 行ぶんにも満たない予算", () => {
           rowBlockLimit(GRANTED, 1 * MiB),
         ),
       ExecutionError,
-      "予算を 1 行ぶん以上にすること",
+      "set the budget to at least one row",
     );
   });
 });
@@ -245,7 +245,7 @@ describe("テスト専用の強制枚数（ROW_BLOCK_SPLIT）と予算の併用"
     assertThrows(
       () => planRowBlocks(10, 100, limit, 2),
       ExecutionError,
-      "2 枚では 1 枚 500B が予算 attentionRowBlockMaxBytes に収まらない",
+      "with 2 blocks, one block of 500B does not fit the budget attentionRowBlockMaxBytes",
     );
   });
 
