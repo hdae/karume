@@ -1,48 +1,50 @@
 /**
- * PNG → RGB8 の**最小デコーダ（テスト専用）**。
+ * A **minimal PNG → RGB8 decoder (tests only)**.
  *
- * karume 本体は decode を持たない（`packages/models/src/image/preprocess.ts` のモジュール
- * doc — 入口は「RGB8 の画素列 + 幅 + 高さ」で、PNG / JPEG のデコーダは持たない設計）。
- * ここはその設計を変えずに**テストが実画像を読む**ためだけの道具で、私的パッケージ
- * `@karume/test-support` のサブパス `./png-decode` に置く（公開パッケージには出さない）。
+ * Karume itself has no decoder (the module doc of `packages/models/src/image/preprocess.ts` — the
+ * entry point is "an RGB8 pixel array + width + height", by design without a PNG / JPEG decoder).
+ * This is a tool only for letting **tests read real images** without changing that design, and it
+ * lives at the subpath `./png-decode` of the private package `@karume/test-support` (it is not
+ * shipped in a public package).
  *
- * ## 受理するのは `encodePng` が書く形だけ（それ以外は fail loudly）
+ * ## Accepts only the form `encodePng` writes (anything else fails loudly)
  *
- * 読む相手は `packages/models/src/image/png.ts` が焼いた PNG（examples / bench の生成物）だけなので、
- * 汎用デコーダにはしない — **8bit / truecolor RGB（color type 2）/ 非インタレース / 全
- * スキャンラインの filter type が None** の 1 形のみを受け、外れたら例外にする。Paeth などの
- * 行フィルタや palette / gray / アルファ付きを「一応通す」形にすると、対応していない経路を
- * 黙って近似したまま実画像 e2e が緑になりうる。
+ * It reads only PNGs baked by `packages/models/src/image/png.ts` (the outputs of the image pipelines), so
+ * it is not made a general decoder — it accepts only the one form **8-bit / truecolor RGB (color
+ * type 2) / non-interlaced / filter type None on every scanline**, and throws on anything else.
+ * Letting row filters such as Paeth, or palette / gray / alpha, "pass just in case" could keep an
+ * unsupported path silently approximated while the real-image e2e goes green.
  *
- * NOTE: チャンク CRC は検証しない（改竄ではなく取り違えを見る道具で、壊れたバイト列は
- * zlib 展開か長さ検査で落ちる）。IDAT は複数チャンクに分かれていても連結して受ける
- * （PNG 仕様が許す形 — `encodePng` は 1 本しか書かないが、連結は分岐を増やさない）。
+ * NOTE: chunk CRCs are not verified (it is a tool against mix-ups, not tampering, and a broken
+ * byte sequence fails in the zlib inflation or the length check). IDAT split across several chunks
+ * is accepted by concatenating them (a form the PNG spec allows — `encodePng` writes only one, but
+ * the concatenation adds no branch).
  */
 
-/** デコード結果（`Rgb8Image` と構造互換 — 行優先・画素あたり 3 バイト）。 */
+/** Decode result (structurally compatible with `Rgb8Image` — row-major, 3 bytes per pixel). */
 export type DecodedRgb8 = {
   readonly data: Uint8Array<ArrayBuffer>;
   readonly width: number;
   readonly height: number;
 };
 
-/** PNG シグネチャ（8 バイト）。 */
+/** PNG signature (8 bytes). */
 const SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-/** 受理する IHDR（`encodePng` が書く値そのもの）。 */
+/** The accepted IHDR (exactly the values `encodePng` writes). */
 const BIT_DEPTH = 8;
-/** color type 2 = truecolor（RGB・アルファ無し）。 */
+/** color type 2 = truecolor (RGB, no alpha). */
 const COLOR_TYPE_RGB = 2;
 const COMPRESSION_DEFLATE = 0;
 const FILTER_ADAPTIVE = 0;
 const INTERLACE_NONE = 0;
-/** 受理するスキャンライン先頭の filter type（None のみ）。 */
+/** The accepted filter type at the start of a scanline (None only). */
 const FILTER_NONE = 0;
 
-/** チャネル数（RGB）。 */
+/** Channel count (RGB). */
 const CHANNELS = 3;
 
-/** zlib（RFC1950）を展開する。`encodePng` の `CompressionStream("deflate")` の逆。 */
+/** Inflates zlib (RFC1950). The inverse of `encodePng`'s `CompressionStream("deflate")`. */
 const inflate = async (bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> => {
   const source = new ReadableStream<BufferSource>({
     start(controller) {
@@ -54,11 +56,11 @@ const inflate = async (bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array<Array
   return new Uint8Array(await new Response(expanded).arrayBuffer());
 };
 
-/** チャンクの型（4 バイトの ASCII）を読む。 */
+/** Reads a chunk type (4 ASCII bytes). */
 const chunkType = (bytes: Uint8Array<ArrayBuffer>, at: number): string =>
   String.fromCharCode(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]);
 
-/** IHDR の 13 バイトを検査して `[width, height]` を返す。 */
+/** Checks the 13 bytes of IHDR and returns `[width, height]`. */
 const parseHeader = (data: Uint8Array<ArrayBuffer>, where: string): [number, number] => {
   if (data.length !== 13) throw new Error(`${where}: IHDR is ${data.length} bytes (13 required)`);
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -83,10 +85,10 @@ const parseHeader = (data: Uint8Array<ArrayBuffer>, where: string): [number, num
 };
 
 /**
- * PNG バイト列を RGB8 へ展開する。
+ * Expands PNG bytes into RGB8.
  *
- * @param bytes PNG ファイルの中身
- * @param where 失敗時に名指しする出所（ファイル名など）
+ * @param bytes the contents of the PNG file
+ * @param where the origin named on failure (a file name, for example)
  */
 export const decodePng = async (
   bytes: Uint8Array<ArrayBuffer>,

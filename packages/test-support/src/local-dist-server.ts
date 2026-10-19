@@ -1,43 +1,48 @@
 /**
- * ローカルの配布形ディレクトリ（`karume.json` を持つ）を **HF 形の HTTP** で配る使い捨て
- * サーバ。
+ * A throwaway server that serves a local distribution directory (one holding `karume.json`) over
+ * **HF-shaped HTTP**.
  *
- * ## 消費者は「実 DL 経路そのものを通す」ものだけ
+ * ## Its consumers are only those that go through the real download path itself
  *
- * デモの `--source <ローカルのパス>` はここを通らない — 手元の配布形は取得元ハンドル
- * （`@karume/hub/node` の `nodeDirectory` — `local-source.ts`）で直に読めるようになり、
- * ポートも永続キャッシュへの複製も要らなくなった。残る消費者は次の 2 つで、どちらも**実 DL
- * 経路**（revision 解決 → resolve URL → 受信バイト門 → 永続キャッシュ）を通すことが目的なので、
- * 疑似 HF を喋るこのサーバでなければならない:
+ * The demos' `--source <local path>` does not come through here — a local distribution can now be
+ * read directly through a source handle (`nodeDirectory` of `@karume/hub/node` — `local-source.ts`
+ * (removed in 0.15)), which needs neither a port nor a copy into the persistent cache. The two
+ * remaining consumers below both exist to go through the **real download path** (revision
+ * resolution → resolve URL → received-byte check → persistent cache), so they need this server
+ * that speaks pseudo-HF:
  *
- * - `packages/models/tests/e2e_gemma4_pretrained_test.ts` — その経路の疎通を見る門
- * - `tools/ram-peak/measure.ts` の `--state cold` / `warm` — その経路のホスト RAM ピークと
- *   キャッシュの挙動を測る
+ * - `packages/e2e/tests/e2e_gemma4_pretrained_test.ts` — the check that the path works end to end
+ * - `--state cold` / `warm` of `tools/ram-peak/measure.ts` (removed in 0.15) — measures the host
+ *   RAM peak and the cache behaviour of that path
  *
- * ## なぜ HTTP でも全量読みにしないのか
+ * ## Why not read whole files even over HTTP
  *
- * 部品は配布形の時点で **part 分割**されている（コンテナ — ADR 0109）。全量読み
- * （`local-assets.ts` + `from*Assets`）でも分割形は読めるが、その面は**全 part を同時に
- * ホスト RAM へ載せる**（3.7GiB の DiT がそのまま常駐する）。取得層を通せば取得面
- * （descriptor → admission → 重みの part を温める → block の区間読み）がそのまま効いて、
- * RAM に載るのは読んでいる block の周辺だけになる。
+ * Components are already **split into parts** in the distribution (container — ADR 0109). Whole
+ * reading (`local-assets.ts` (removed in 0.15) + `from*Assets`) can read the split form too, but
+ * that surface **puts every part in host RAM at once** (a 3.7GiB DiT stays resident as is). Going
+ * through the fetch layer lets the fetch surface (descriptor → admission → warming the weight
+ * parts → range reads of blocks) take effect as is, and only the neighbourhood of the block being
+ * read sits in RAM.
  *
- * 喋るのは hub が実際に叩く 2 経路だけ（revision 解決 API と resolve URL — 綴りの正本は
- * `@hdae/fetch-cache/hf` の `resolveHfRevision` / `hfResolveUrl`）。Range も HEAD も要らない
- * （取得層が撃つのは素の GET だけ）。
+ * It speaks only the 2 paths the hub actually hits (the revision resolution API and the resolve
+ * URL — the source of truth for their spelling is `resolveHfRevision` / `hfResolveUrl` of
+ * `@hdae/fetch-cache/hf`). Neither Range nor HEAD is needed (the fetch layer fires only plain
+ * GETs).
  *
- * ## 越境参照は隣のミラーから配る
+ * ## Cross-repository references are served from the neighbouring mirror
  *
- * 配布形は自リポの外を指せる（`FileRef` の `repo` / `revision` — ADR 0038 §7。例:
- * `karume-anima-extra` の text stack は `hdae/karume-anima` の 1 commit を指す）。取得層は
- * その 1 本を**セッションの (repo, SHA) ではなく宣言された (repo, revision) から**取りに来る
- * ので、1 組しか名乗らないサーバでは越境ぶんが丸ごと 404 になる。そこで配信表を
- * 「(repo, revision) → 配信ディレクトリ」の**複数エントリ**にし、越境先は **repo 名の最終要素と
- * 同名の隣接ディレクトリ**（`models/` に配布形ミラーが並ぶ配置）から配る。
+ * A distribution can point outside its own repository (`repo` / `revision` of `FileRef` — ADR 0038
+ * §7. Example: the text stack of `karume-anima-extra` points at 1 commit of `hdae/karume-anima`).
+ * The fetch layer fetches that one **from the declared (repo, revision), not from the session's
+ * (repo, SHA)**, so a server that names only one pair answers 404 for the whole cross-repository
+ * share. The serving table is therefore made of **multiple entries** "(repo, revision) → served
+ * directory", and a cross-repository target is served from **the adjacent directory named after
+ * the last element of the repo name** (the layout where distribution mirrors sit side by side in
+ * `models/`).
  *
- * NOTE: 取得層は資産を**永続キャッシュ**（Deno は DENO_DIR）へ写すので、ローカルの配布形が
- * ディスク上で二重に持たれる（2 回目以降の起動はそのキャッシュから読む）。掃除は
- * `@karume/hub` の `clearHubCache`。
+ * NOTE: the fetch layer copies assets into the **persistent cache** (the directory of `nodeCacheStorage` on Node), so a
+ * local distribution is held twice on disk (the second and later launches read from that cache).
+ * Clean up with `clearHubCache` of `@karume/hub`.
  */
 
 import { open, type FileHandle } from "node:fs/promises";
@@ -53,21 +58,23 @@ import {
 import { isNotFound, readTextFileSync, statSync } from "./fs.ts";
 
 /**
- * 使い捨てサーバが**主リポとして**名乗るリポジトリ名。取得層のキャッシュキーには repo が入る
- * （資産のキーは repo + path + sha256 の内容キー）ので、実在の HF リポと衝突しない綴りに
- * しておく。越境先は合成せず、manifest が名指しした実在の repo をそのまま名乗る。
+ * The repository name the throwaway server names **as its main repository**. The fetch layer's
+ * cache key includes the repo (an asset's key is the content key repo + path + sha256), so it is
+ * spelled so as not to collide with a real HF repository. Cross-repository targets are not
+ * synthesised: the server names the real repo the manifest named, as is.
  */
 const REPO = "karume-local/dist";
 
 /**
- * 主リポの revision 解決 API が返す固定 SHA。配布形のディレクトリ 1 つに revision は 1 つしか
- * 無いので、値そのものに意味は無い（40 桁小文字 hex であることだけが取得層の要求）。
+ * The fixed SHA the main repository's revision resolution API returns. One distribution directory
+ * has only one revision, so the value itself carries no meaning (the fetch layer only requires 40
+ * lowercase hex digits).
  */
 const REVISION_SHA = "0".repeat(40);
 
-/** `{hubUrl}/api/models/{repo}/revision/{ref}`（`resolveHfRevision`）。 */
+/** `{hubUrl}/api/models/{repo}/revision/{ref}` (`resolveHfRevision`). */
 const REVISION_ROUTE = /^\/api\/models\/(.+)\/revision\/(.+)$/;
-/** `{hubUrl}/{repo}/resolve/{revision}/{path}`（`hfResolveUrl`）。 */
+/** `{hubUrl}/{repo}/resolve/{revision}/{path}` (`hfResolveUrl`). */
 const RESOLVE_ROUTE = /^\/(.+?)\/resolve\/([^/]+)\/(.+)$/;
 
 // Same status, body and content-type as the Deno version's `new Response("not found", ...)`.
@@ -76,27 +83,33 @@ const notFound = (response: ServerResponse): void => {
 };
 
 /**
- * 配布形ディレクトリの**中**だけを指す相対 path か。使い捨てとはいえ 127.0.0.1 に開いた実
- * サーバなので、`..` や絶対 path をそのままファイルの open へ渡さない。
+ * Whether a relative path points only **inside** the distribution directory. Throwaway or not,
+ * this is a real server opened on 127.0.0.1, so `..` and absolute paths are not passed straight
+ * to a file open.
  */
 const isInsideDist = (path: string): boolean =>
   path.length > 0 &&
   !path.startsWith("/") &&
   path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
-/** 配信表の 1 エントリ = ある repo について「名乗る revision」と「配る元ディレクトリ」。 */
+/**
+ * One entry of the serving table = for one repo, "the revision it names" and "the directory it
+ * serves from".
+ */
 type ServedRepo = {
   readonly revision: string;
   readonly dir: string;
 };
 
 /**
- * manifest 全域の `FileRef`（全 model × 全 weights × 全 dtype のコンテナの part + assets）。
+ * Every `FileRef` across the manifest (the container parts of every model × every weights entry ×
+ * every dtype, plus assets).
  *
- * `resolveSelection` で 1 組の (model, quant) に絞らないのは、サーバが**選択より先に**立つため
- * （`serveLocalDist` は `dir` しか受け取らず、model / quant は後段の `fromPretrained` が決める）。
- * 表に載せ過ぎても実際に取りに来ない repo が増えるだけで害は無い。
+ * It does not narrow to one (model, quant) pair with `resolveSelection` because the server comes
+ * up **before the selection** (`serveLocalDist` receives only `dir`; model / quant are decided
+ * later by `fromPretrained`). Putting too much in the table does no harm: it only adds repos that
+ * are never actually fetched.
  *
- * 長さ 0 の part は落とす（取得層も取りに来ない — ADR 0109 決定 3）。
+ * Zero-length parts are dropped (the fetch layer does not fetch them either — ADR 0109 decision 3).
  */
 const allFileRefs = (manifest: Manifest): readonly FileRef[] => {
   const refs: FileRef[] = [];
@@ -112,10 +125,11 @@ const allFileRefs = (manifest: Manifest): readonly FileRef[] => {
 };
 
 /**
- * 越境参照の実体がミラーに在ることを**起動時に**確かめる。
+ * Confirms **at startup** that the body of each cross-repository reference exists in the mirror.
  *
- * MUST: 実行中の 404 で不発にしない。取得層は数百 MiB を流し終えてから欠けに気づく面なので、
- * 待たせた末に落とすくらいなら立ち上がりで落とす。
+ * MUST: do not let it fail through a 404 mid-run. The fetch layer is a surface that notices a gap
+ * only after streaming hundreds of MiB, so rather than failing after making the caller wait, fail
+ * at startup.
  */
 const assertMirrored = (ref: FileRef, mirror: string): void => {
   try {
@@ -130,19 +144,22 @@ const assertMirrored = (ref: FileRef, mirror: string): void => {
 };
 
 /**
- * 配信表を組む。主リポは合成名 {@link REPO} + 固定 SHA で `dir` を、越境先は宣言された
- * (repo, revision) で**隣接する同名ミラー**を配る。
+ * Builds the serving table. The main repository serves `dir` under the synthetic name
+ * {@link REPO} + the fixed SHA; a cross-repository target serves the **adjacent mirror of the same
+ * name** under the declared (repo, revision).
  *
- * 越境先の revision 解決 API は用意するだけで実際には叩かれない — 越境の `revision` は 40 桁
- * commit SHA 固定で、取得層は SHA をそのまま使う（解決要求が発生しない）。表を引く経路を
- * 2 ルートで揃えるほうが分岐が減るので、特例にせず同じ表に載せている。
+ * The revision resolution API of cross-repository targets is only provided and never actually hit
+ * — a cross-repository `revision` is always a 40-digit commit SHA, and the fetch layer uses the
+ * SHA as is (no resolution request occurs). Keeping the table lookup the same for the 2 routes
+ * means fewer branches, so it is not special-cased but put in the same table.
  */
 const buildRoutes = (dir: string): ReadonlyMap<string, ServedRepo> => {
   const routes = new Map<string, ServedRepo>([[REPO, { revision: REVISION_SHA, dir }]]);
   const manifest = parseManifest(readTextFileSync(`${dir}/${MANIFEST_FILENAME}`));
   for (const ref of allFileRefs(manifest)) {
     if (ref.repo === undefined || ref.revision === undefined) continue;
-    // `dir` の兄弟を `..` で辿る（path ライブラリを持ち込まずに絶対・相対の両方で効く）。
+    // Reach the siblings of `dir` through `..` (works for both absolute and relative paths
+    // without bringing in a path library).
     const mirror = `${dir}/../${ref.repo.slice(ref.repo.lastIndexOf("/") + 1)}`;
     const known = routes.get(ref.repo);
     if (known === undefined) routes.set(ref.repo, { revision: ref.revision, dir: mirror });
@@ -157,15 +174,18 @@ const buildRoutes = (dir: string): ReadonlyMap<string, ServedRepo> => {
   return routes;
 };
 
-/** 起動中の使い捨てサーバ。`await using` でも明示 {@link LocalDistServer.close} でも畳める。 */
+/**
+ * A running throwaway server. Shut it down with `await using` or an explicit
+ * {@link LocalDistServer.close}.
+ */
 export type LocalDistServer = AsyncDisposable & {
-  /** `fromPretrained` へ渡す取得元（このサーバを指す）。 */
+  /** The source to pass to `fromPretrained` (points at this server). */
   readonly source: HubRepoRef;
-  /** サーバを畳む（`await using` で受けたなら呼ばなくてよい）。 */
+  /** Shuts the server down (no need to call it when received with `await using`). */
   readonly close: () => Promise<void>;
 };
 
-/** 1 リクエストを捌く（綴りと 404 の条件は Deno 版と同一）。 */
+/** Handles one request (the spelling and the 404 conditions are identical to the Deno version). */
 const handle = async (
   routes: ReadonlyMap<string, ServedRepo>,
   request: IncomingMessage,
@@ -186,8 +206,8 @@ const handle = async (
   const [, repo, fixed, encoded] = resolved;
   const path = decodeURIComponent(encoded);
   const served = routes.get(repo);
-  // revision は「その repo に対して宣言された値」と照合する（主リポは固定 SHA・越境は
-  // manifest が名指しした commit SHA）。
+  // The revision is matched against "the value declared for that repo" (the fixed SHA for the
+  // main repository, the commit SHA the manifest named for a cross-repository target).
   if (served === undefined || fixed !== served.revision || !isInsideDist(path)) {
     return notFound(response);
   }
@@ -205,20 +225,22 @@ const handle = async (
     await file.close();
     throw error;
   }
-  // MUST: content-length を宣言する。hub の受信バイト門は申告と manifest の `size` の
-  // 厳密一致を見る面なので、省くと門が「申告なし」で素通りする（本番の HF は必ず申告する）。
+  // MUST: declare content-length. The hub's received-byte check requires the declared length to
+  // match the manifest's `size` exactly, so omitting it lets the check pass as "nothing declared"
+  // (the real HF always declares it).
   response.writeHead(200, { "content-length": String(size) });
   // The read stream owns the handle from here (autoClose), also when the pipeline fails.
   await pipeline(file.createReadStream(), response);
 };
 
 /**
- * `dir`（と、その manifest が指す越境ミラー）を HF 形で配り始める（ポートは自動割当・
- * 127.0.0.1 束縛）。ミラーの欠けはここで落ちる（{@link buildRoutes}）。
+ * Starts serving `dir` (and the cross-repository mirrors its manifest points at) HF-style (port
+ * auto-assigned, bound to 127.0.0.1). A missing mirror fails here ({@link buildRoutes}).
  *
- * `source.revision` に `"main"` を**明示**するのは、hub が revision 未指定の呼びに出す
- * 「main は付け替えられる」警告（実在の HF リポ向けの案内）を、revision が 1 つしか無い
- * このサーバで鳴らさないため。解決は本番と同じく revision 解決 API を 1 度だけ通る。
+ * `source.revision` is set to `"main"` **explicitly** so that the "main can be moved" warning the
+ * hub issues for calls without a revision (guidance meant for real HF repositories) does not fire
+ * on this server, which has only one revision. Resolution goes through the revision resolution API
+ * exactly once, as in production.
  *
  * Node binds a host-qualified port only asynchronously (`listen(0, "127.0.0.1")` resolves the
  * host first), so the server is handed out once it listens. The distribution checks above still
