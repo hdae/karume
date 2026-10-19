@@ -11,3 +11,6 @@ coverage/
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Vitest reporter output (vp test --reporter=json)
+.vitest/
