@@ -17,9 +17,10 @@
  *   node tools/lang/code-skeleton.ts --compare <git-ref> [--head <git-ref>] [file...]
  *       compares the skeleton of every changed `*.ts` file (or the given files) between `<git-ref>`
  *       and the working tree (or `--head`); exit 1 when a skeleton differs
- *   node tools/lang/code-skeleton.ts --strings --compare <git-ref> [--head <git-ref>] [file...]
- *       the same with the strings skeleton; lists every changed literal; exit 1 when a skeleton
- *       differs or a literal without Japanese changed
+ *   node tools/lang/code-skeleton.ts --strings [--json] --compare <git-ref> [--head <git-ref>] [file...]
+ *       the same with the strings skeleton; lists every changed literal (`--json`: as one JSON
+ *       array of {file, index, before, after, japaneseBefore} plus the files whose code differs);
+ *       exit 1 when a skeleton differs or a literal without Japanese changed
  *   node tools/lang/code-skeleton.ts <file>
  *       prints the skeleton of one file
  */
@@ -270,6 +271,7 @@ const main = (argv: readonly string[]): void => {
   let base: string | undefined;
   let head: string | undefined;
   let mode: "comments" | "strings" = "comments";
+  let json = false;
   const files: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -280,6 +282,7 @@ const main = (argv: readonly string[]): void => {
       head = argv[i + 1];
       i += 1;
     } else if (arg === "--strings") mode = "strings";
+    else if (arg === "--json") json = true;
     else files.push(arg);
   }
   if (base === undefined) {
@@ -295,12 +298,14 @@ const main = (argv: readonly string[]): void => {
   let differing = 0;
   let changed = 0;
   let withoutJapanese = 0;
+  const report: ({ file: string } & (LiteralChange | { codeDiffers: true }))[] = [];
   for (const file of targets) {
     const before = gitShow(root, base, file);
     const after =
       head === undefined ? readFileSync(join(root, file), "utf8") : gitShow(root, head, file);
     if (before === undefined || after === undefined) {
-      console.log(`${file}: added or removed (not comparable)`);
+      if (json) report.push({ file, codeDiffers: true });
+      else console.log(`${file}: added or removed (not comparable)`);
       differing += 1;
       continue;
     }
@@ -309,18 +314,29 @@ const main = (argv: readonly string[]): void => {
     const at = firstDifference(a.text, b.text);
     if (at >= 0) {
       differing += 1;
-      console.log(`${file}: code differs near: …${a.text.slice(Math.max(0, at - 40), at + 60)}…`);
+      if (json) report.push({ file, codeDiffers: true });
+      else
+        console.log(`${file}: code differs near: …${a.text.slice(Math.max(0, at - 40), at + 60)}…`);
       continue;
     }
     if (mode !== "strings") continue;
     for (const change of literalChanges(a, b)) {
       changed += 1;
       if (!change.japaneseBefore) withoutJapanese += 1;
+      if (json) {
+        report.push({ file, ...change });
+        continue;
+      }
       const note = change.japaneseBefore ? "" : " (no Japanese before — a code change)";
       console.log(
         `${file}: literal ${change.index}${note}: ${shown(change.before)} -> ${shown(change.after)}`,
       );
     }
+  }
+  if (json) {
+    console.log(JSON.stringify(report));
+    if (differing > 0 || withoutJapanese > 0) process.exitCode = 1;
+    return;
   }
   console.log(
     mode === "strings"
