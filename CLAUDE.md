@@ -14,7 +14,7 @@ design's source of truth is [docs/decisions/](docs/decisions/). The current focu
 - The Japanese terms of the conversation are in [docs/GLOSSARY.ja.md](docs/GLOSSARY.ja.md) (chosen from meaning, not by
   literal translation).
 
-## Language (ADR 0130 — phase 2 in progress since 2026-10-18)
+## Language (ADR 0130)
 
 - **The repository is English**: code, identifiers, comments and JSDoc, Python docstrings, WGSL comments,
   error messages and diagnostics, commit messages, ADRs, everything under `docs/`, READMEs, the CHANGELOG
@@ -24,8 +24,11 @@ design's source of truth is [docs/decisions/](docs/decisions/). The current focu
 - **Japanese appears in three places only**: the conversation with the maintainer; [docs/GLOSSARY.ja.md](docs/GLOSSARY.ja.md)
   (English term → the Japanese used in conversation — read it first when the conversation is in Japanese and
   use its terms); and material that is Japanese by nature (inputs of the Japanese TTS, tokenizer and generation
-  tests, and their fixtures). Existing Japanese text is being translated in phase 2 step 2-9; until then a
-  file may still mix both languages. Progress: `node tools/lang/scan-japanese.ts`.
+  tests, and their fixtures). **The language gate** (`packages/runtime/tests/verify_language_test.ts`, core
+  lane) fails on Japanese outside the allow-list `tools/lang/language-allow-list.ts` — one entry per file or
+  area with its reason; the areas still to translate (`packages/*/tests`, `tools/export-recipes`) are marked
+  `until: "0.15.x"`. New Japanese needs an entry with a reason; a translated area loses its entry (a stale
+  entry is red too). From the shell: `node tools/lang/language-gate.ts`; counts: `node tools/lang/scan-japanese.ts`.
 - Terms: English follows ordinary industry usage (no in-house coinages); the Japanese terms of the
   conversation are chosen from meaning, not by literal translation (ADR 0130 decisions 4 and 5).
 - Checks: `node tools/lang/check-doc-links.ts` (Markdown links and `DECIDED:` pointers resolve) and

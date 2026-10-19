@@ -207,7 +207,7 @@ See "Open points".
 | 2-9e (done 2026-10-19) | Error messages with their assertions, module by module; verbatim quotes in docs in the same commit | All lanes green with unchanged test counts |
 | 2-9f (done 2026-10-19) | Python exporter (`tools/exporter`, sources and tests) | AST unchanged apart from docstrings; `uv run pytest` green |
 | 2-9g (done 2026-10-19) | Remaining tools and the hand-written fixture notes | The scan shows no Japanese there apart from the allow-list |
-| 2-9h | Language gate (`verify_language_test.ts`, core lane) with an allow-list of the files that keep Japanese by nature or by this staging | Gate green; allow-list recorded here |
+| 2-9h (done 2026-10-19) | Language gate (`verify_language_test.ts`, core lane) with an allow-list of the files that keep Japanese by nature or by this staging | Gate green; allow-list recorded here |
 | 0.15.x (after the release) | Comments in `packages/*/tests` (about 37,000 lines), `tools/export-recipes` (about 30,000 lines) and, with the recipes, the notes of the fixtures the recipes generate (710 strings in 14 files) | Allow-list entries removed as each area is translated |
 | Phase 3 — behaviour change | None from this ADR | — |
 
@@ -230,11 +230,42 @@ All resolved by the maintainer's rulings of 2026-10-18 (step 2-9 plan check):
 - **Snapshot documents — resolved.** Kept Japanese behind an English header line (decision 3 (d)).
 - **Agent instruction files — resolved.** Rewritten in English as a whole (2-9c).
 - **Enforcement — resolved.** A test in the core lane (2-9h) fails on Japanese text outside an
-  allow-list; the allow-list is recorded in this ADR.
+  allow-list; the allow-list is recorded in this ADR (the addendum of 2026-10-19 below) and kept,
+  entry by entry with its reason, in `tools/lang/language-allow-list.ts`.
 - **Japanese user-facing strings — resolved.** The error messages and the three `console` messages of
   `packages/*/src` (2026-10-18 scan); translated at 2-9e.
 - **Exact wording of the new `CLAUDE.md` language section — resolved.** Written at step 2-9a; phase 2
   of the language work started on 2026-10-18.
+
+## Addendum (2026-10-19) — the language gate and its allow-list (step 2-9h)
+
+`packages/runtime/tests/verify_language_test.ts` (core lane) scans every tracked text file
+(`git ls-files`) with the character classes of `tools/lang/scan-japanese.ts` and applies the
+allow-list of `tools/lang/language-allow-list.ts`; `node tools/lang/language-gate.ts` prints the
+same report from the shell. The gate is red on three things: a file with Japanese that no entry
+covers, a file above the line budget of its entry, and an entry that covers no file with Japanese
+any more — so the list ratchets down as the remaining areas are translated and never keeps a dead
+exception. An entry names a file (exact path, optionally with `maxLines` pinned to its current
+count) or an area (a directory prefix); an exact entry wins over a prefix, the longest prefix wins.
+
+The entries fall into two kinds. **By nature** (permanent): `docs/research/` (dated snapshots behind
+an English header line), `docs/GLOSSARY.ja.md`, the four superseded ADRs excluded in 2-9b (0038,
+0043, 0071, 0072), the Japanese terms this ADR rules on, links into the Japanese headings of
+research snapshots (`docs/perf-ledger.md`, `docs/backlog.md`, `.claude/ACTIVE_DESIGN.md`), a few
+quoted observations and test-name filters (`docs/known-issues.md`, `docs/limitations.md`,
+`docs/release-runbook.md`, ADRs 0128 and 0131), the data of `packages/models/src` (the Wan default
+negative prompt, the irodori normalisation tables, tokenizer examples), the fixture data of
+`packages/models/tests/fixtures/`, three fixture payloads of `tools/exporter/tests`, and the
+language tools' own character classes and test inputs under `tools/lang/`. **By staging** (`until:
+"0.15.x"`): `packages/{runtime,hub,models,e2e,test-support}/tests/` and `tools/export-recipes/`
+(with the notes of the fixtures the recipes generate). Adding Japanese elsewhere needs a new entry
+with its reason; translating an area removes its entry.
+
+Step 2-9 closes with this gate: the ADRs in force, `docs/`, `packages/*/src`, the Python exporter,
+the tools, the hand-written fixture notes and the agent instruction files are English. Three
+messages of `packages/hub/deno.ts` (outside `src/`, missed by 2-9e) were translated with the gate.
+The `RUF001-003` ignore of `tools/exporter/pyproject.toml` stays, now because the English prose uses
+typographic characters the rules flag.
 
 ## Addendum (2026-10-18) — rulings at the plan check of step 2-9
 
