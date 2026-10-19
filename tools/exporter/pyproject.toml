@@ -57,6 +57,6 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
-# RUF001-003: the prose is Japanese, so full-width punctuation is flagged as "ambiguous with ASCII"
-# on every line (as the project convention has it).
+# RUF001-003: the English prose uses typographic characters (× — − ′ …) that these rules flag as
+# "ambiguous with ASCII" (281 hits on 2026-10-19); they are the project's spelling, not mistakes.
 ignore = ["RUF001", "RUF002", "RUF003"]

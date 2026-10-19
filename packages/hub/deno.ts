@@ -89,7 +89,7 @@ export const denoDirectory = (
         // (fail loudly). Naming **the real path** is this code's responsibility alone — the common
         // layer knows only the relative path in the manifest; only the adapter knows which
         // directory it looked under.
-        throw new Error(`@karume/hub/deno: ${at} を読めない`, { cause: error });
+        throw new Error(`@karume/hub/deno: cannot read ${at}`, { cause: error });
       }
     },
     // Range read (the contract of `DirectoryAdapter.readFileRange`): a positional read that returns
@@ -106,7 +106,7 @@ export const denoDirectory = (
       try {
         file = await Deno.open(at);
       } catch (error) {
-        throw new Error(`@karume/hub/deno: ${at} を読めない`, { cause: error });
+        throw new Error(`@karume/hub/deno: cannot read ${at}`, { cause: error });
       }
       try {
         await file.seek(offset, Deno.SeekMode.Start);
@@ -117,7 +117,7 @@ export const denoDirectory = (
           const read = await file.read(target.subarray(filled));
           if (read === null) {
             throw new Error(
-              `@karume/hub/deno: ${at} が offset ${offset} からの ${length} バイトに足りない`,
+              `@karume/hub/deno: ${at} ends before offset ${offset} plus ${length} bytes`,
             );
           }
           filled += read;
