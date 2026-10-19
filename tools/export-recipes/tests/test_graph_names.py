@@ -347,17 +347,22 @@ REPO_ROOT = RECIPES_ROOT.parent.parent
 DOCS_ROOT = REPO_ROOT / "docs"
 
 #: 「グラフ名 = weights のキー」の規則の本文を持つ仕様節（見出し行そのもの）。
-CONTAINER_SPEC_SECTION = "### 2.1 グラフ記述"
+CONTAINER_SPEC_SECTION = "### 2.1 Graph descriptor"
 
 #: 移行 CLI の契約。グラフ名の既定（親ディレクトリ名）を持ち、規則は §2.1 を参照する。
-MIGRATE_SPEC_SECTION = "## 12. 移行 CLI の契約"
+MIGRATE_SPEC_SECTION = "## 12. Migration CLI contract"
 
 #: グラフ名の話の指し先として**使ってはいけない**綴り。
 #:
 #: 決定 3 は `container` 欄（descriptor の期待値 + part の FileRef 列）、決定 8 は移行 CLI の
 #: リポ丸ごとモードの話で、どちらも**グラフ名を述べていない**。片方だけ縛ると、同じ種類の
 #: 誤指しがもう片方の綴りで復活する（実際に決定 3 を潰した後、決定 8 で 6 箇所に再発した）。
-WRONG_POINTERS = ("ADR 0109 決定 3", "ADR 0109 決定 8")
+WRONG_POINTERS = (
+    "ADR 0109 決定 3",
+    "ADR 0109 決定 8",
+    "ADR 0109 decision 3",
+    "ADR 0109 decision 8",
+)
 
 #: 誤指しを走査する根（`docs/` は ADR 自身が住む場所なので外す）。
 POINTER_SCAN_ROOTS = ("packages", "tools")
@@ -413,17 +418,18 @@ class TestThePointerNamesTheDocumentThatCarriesTheClaim:
         """`container-v1 §2.1` が「容器のグラフ名 = `weights` のキー MUST」を持つ。"""
         section = _spec_section(DOCS_ROOT / "container-v1.md", CONTAINER_SPEC_SECTION)
 
-        assert "**グラフ名の規則**" in section
+        assert "**Graph-name rules**" in section
         assert (
-            "容器のグラフ名 = 配布形の部品名 = `karume.json` の `weights` のキー** MUST" in section
+            "**Container graph name = component name in the distribution = key of `weights` in\n"
+            "  `karume.json`** MUST" in section
         )
 
     def test_the_migrate_spec_section_defers_to_the_rule(self) -> None:
         """`container-v1 §12` は CLI の既定（親ディレクトリ名）を持ち、規則は §2.1 を指す。"""
         section = _spec_section(DOCS_ROOT / "container-v1.md", MIGRATE_SPEC_SECTION)
 
-        assert "グラフ名の既定は親ディレクトリ名" in section
-        assert "規則は §2.1 のとおり weights のキー MUST" in section
+        assert "The graph name defaults to the parent directory\n  name" in section
+        assert "Per the rule of §2.1 it MUST be the key of weights" in section
 
     def test_the_old_pointers_do_not_state_the_rule(self) -> None:
         """対（非恒真）: 誤りの指し先 2 つが住む節には「グラフ名」という語が 1 度も出ない。"""
@@ -431,8 +437,9 @@ class TestThePointerNamesTheDocumentThatCarriesTheClaim:
             DOCS_ROOT / "decisions" / "0109-manifest-v5-container.md", "## Decision"
         )
 
-        assert "### 3. `container` 欄" in decision
-        assert "### 8. 段 2 の書き手は移行 CLI の**リポ丸ごとモード**" in decision
+        assert "### 3. The `container` field" in decision
+        assert "### 8. Step 2 writer — the whole-repository mode of the migration CLI" in decision
+        assert "graph name" not in decision
         assert "グラフ名" not in decision
 
     def test_no_source_cites_an_old_pointer_for_the_naming_rule(self) -> None:
@@ -449,7 +456,8 @@ class TestThePointerNamesTheDocumentThatCarriesTheClaim:
             for path in _scanned_sources()
             for number, line in enumerate(path.read_text(encoding="utf-8").split("\n"), start=1)
             for pointer in WRONG_POINTERS
-            if pointer in line and ("グラフ名" in line or "部品名" in line)
+            if pointer in line
+            and any(word in line for word in ("グラフ名", "部品名", "graph name", "component name"))
         ]
 
         assert offenders == [], (
