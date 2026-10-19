@@ -174,4 +174,4 @@ The current semantics of the demand (code unchanged, ruling of 2026-09-25):
 
 The docstring of `tools/exporter/src/karume/limits.py` already gives this reason (a limitation from
 having no Python mirror of the residency classification, not an exclusion to avoid false rejection);
-it still labels the rule MUST, while this ADR grades it MAY since 2026-10-18.
+it carries the MAY this ADR grades it since 2026-10-18 (the docstring was re-graded on 2026-10-19).

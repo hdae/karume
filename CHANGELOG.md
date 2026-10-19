@@ -19,7 +19,10 @@ measurements in `docs/research/`.
 
 - Every message the packages print — errors, warnings, diagnostics, labels and the notes in generated
   WGSL headers — is English (ADR 0130). Code that matched the Japanese wording of an error message
-  must be re-keyed; the error classes and the structure of each message are unchanged.
+  must be re-keyed; the error classes and the structure of each message are unchanged. The same
+  holds for the PyPI package `karume` (the exporter): its messages, CLI help and docstrings are
+  English; the labels of `UnsupportedAtenOpsError` read `[Core ATen]` / `[outside Core ATen]` /
+  `[outside aten]`.
 - The kernel fingerprint of a geometry profile (`provenance.kernels`, `@karume/runtime/tune`) hashes
   each kernel's WGSL without its comments and whitespace, so a comment edit in a kernel no longer
   invalidates saved tables. Tables saved by earlier versions mismatch once on the fingerprint and

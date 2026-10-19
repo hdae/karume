@@ -205,7 +205,7 @@ See "Open points".
 | 2-9c (done 2026-10-18) | `docs/*.md` and `docs/glossary.md` (English; the Japanese column moves to `GLOSSARY.ja.md`); `CLAUDE.md`, `AGENTS.md`, `.claude/ACTIVE_DESIGN.md` as a whole; CHANGELOG remnants; the English header line on research snapshots | No Japanese under `docs/` outside `GLOSSARY.ja.md` and `research/` |
 | 2-9d (done 2026-10-18) | Comments and JSDoc of `packages/*/src` rewritten with a fact check; WGSL comments translated and the snapshots regenerated in the same commit | Code skeleton unchanged per file; lanes green; sha256 rows unchanged |
 | 2-9e (done 2026-10-19) | Error messages with their assertions, module by module; verbatim quotes in docs in the same commit | All lanes green with unchanged test counts |
-| 2-9f | Python exporter (`tools/exporter`, sources and tests) | AST unchanged apart from docstrings; `uv run pytest` green |
+| 2-9f (done 2026-10-19) | Python exporter (`tools/exporter`, sources and tests) | AST unchanged apart from docstrings; `uv run pytest` green |
 | 2-9g | Remaining tools and fixture notes | The scan shows no Japanese there |
 | 2-9h | Language gate (`verify_language_test.ts`, core lane) with an allow-list of the files that keep Japanese by nature or by this staging | Gate green; allow-list recorded here |
 | 0.15.x (after the release) | Comments in `packages/*/tests` (about 37,000 lines) and `tools/export-recipes` (about 30,000 lines) | Allow-list entries removed as each area is translated |
@@ -284,6 +284,23 @@ All resolved by the maintainer's rulings of 2026-10-18 (step 2-9 plan check):
   Japanese to the scanner. Test comments that quote old messages verbatim (`*_pipeline_test.ts`
   headers) are left for the test-comment step. The Python exporter (2-9f) and `tools/*` (2-9g) still
   print Japanese.
+- **Residue after 2-9f (2026-10-19).** The Python exporter (`tools/exporter`: 31 modules, 39 test
+  files, `pyproject.toml`) is English — docstrings, comments, messages, CLI help and the tests'
+  own labels. The proof per file is `tools/lang/py_skeleton.py`: the AST without docstrings and
+  string constants is unchanged (1,221 constants changed in the sources, 130 in the tests; the only
+  constants without Japanese before are full-width parentheses turned ASCII in `dist.py`'s help).
+  The assertions of the exporter's tests and of the recipes' tests that matched the old messages
+  (`match=` is a regular expression — the English fragments are regex-safe) are re-keyed at the
+  same strength; both suites keep their counts (exporter 3,644 passed / 1 skipped, recipes 4,483
+  passed / 196 skipped). Facts the originals carried and the worktree contradicted were corrected
+  on the way (pointers into superseded ADRs now also name the current decision; the retired I4
+  dialect note; `computeOutputShape` lives in `ops/shapes.ts`). What stays Japanese under
+  `tools/exporter` is three fixture payloads in the tests (a LICENSE.md body, a stray file, an
+  interrupted staging file) — the allow-list of 2-9h. `tools/release/hf-upload.zsh` still prints
+  `### FAILED 公開前の門` (quoted by `docs/release-runbook.md`); it belongs to 2-9g, as does the rest
+  of `tools/*`. `tools/export-recipes` still prints Japanese (0.15.x). The `RUF001-003` ignore in
+  `tools/exporter/pyproject.toml` (full-width punctuation in Japanese prose) loses its reason once
+  2-9g ends; 2-9h decides whether to drop it.
 - **Baseline (tracked files, line-based, 2026-10-18).** `docs/decisions` 19,541 lines in 129 files;
   `docs/` otherwise 5,651; `docs/research` 23,964; `packages/runtime/src` 16,512; `packages/models/src`
   11,911; `packages/hub/src` 1,433; tests of the three packages and e2e 37,113; test fixtures 11,964;
