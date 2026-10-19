@@ -1076,7 +1076,7 @@ test.skipIf(!GPU_AVAILABLE)(
         async () =>
           await createSessionFromContainer(gpu, await openModelBytes(graph, []), GRAPH_NAME),
         ExecutionError,
-        "conv3d の groups 3 は GPU で実行できない",
+        "conv3d groups 3 cannot run on the GPU",
       );
     } finally {
       gpu.destroy();

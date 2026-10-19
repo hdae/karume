@@ -461,7 +461,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => runAttention(gpu, OVERSIZE, VARIANTS[0], 1),
         ExecutionError,
-        "上限に収まらない",
+        "does not fit the limit",
       );
     } finally {
       gpu.destroy();

@@ -480,7 +480,7 @@ test.skipIf(!GPU_AVAILABLE)(
             jsCallerOptions({ linearCompute: "i8a8", attentionScoreStorage: "s16" }),
           ),
         ExecutionError,
-        "2 execution knobs",
+        "outside the accepted set: 2",
       );
       assertEquals(error.message.includes(`linearCompute: "i8a8"`), true, error.message);
       assertEquals(error.message.includes(`attentionScoreStorage: "s16"`), true, error.message);

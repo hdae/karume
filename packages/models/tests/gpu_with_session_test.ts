@@ -98,7 +98,7 @@ const emptyLog = (): SessionLog => ({ sessions: [], options: [], disposeCalls: 0
 
 /** 解放済みの Session は以後の run を fail loudly で拒む（dispose が本当に効いたことの観測点）。 */
 const assertDisposed = async (session: Session): Promise<void> => {
-  await assertRejects(() => session.run(inputOf([1, 2])), ExecutionError, "dispose 済み");
+  await assertRejects(() => session.run(inputOf([1, 2])), ExecutionError, "disposed Session");
 };
 
 const withGpu = async (fn: (gpu: GpuContext) => Promise<void>): Promise<void> => {
