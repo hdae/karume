@@ -1,5 +1,5 @@
 {
-  "note": "quant の表示欄（label / description — ADR 0075）の受理集合。正本は hub の manifest parser（2026-10-11 裁定）で、Python の karume dist はこの表で同じ結果を出す。value が無いケースは欄そのものを書かない。長さはコードポイント数。",
+  "note": "The accepted set of the quant presentation fields (label / description — ADR 0075). The source of truth is the hub's manifest parser (maintainer ruling 2026-10-11), and Python's karume dist produces the same results with this table. A case without value does not write the field at all. Lengths are counted in code points.",
   "limits": {
     "label": 64,
     "description": 200

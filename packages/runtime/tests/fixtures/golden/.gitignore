@@ -1,3 +1,3 @@
-# リポジトリ直下の .gitignore が `*.safetensors` を除外している（実モデルの誤コミット防止）。
-# golden fixture は後段の E2E テストが読む成果物なので、ここだけ除外を打ち消す。
+# The repository root's .gitignore excludes `*.safetensors` (to keep real models from being committed by mistake).
+# Golden fixtures are artifacts that the downstream E2E tests read, so the exclusion is negated here only.
 !*.safetensors

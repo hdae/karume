@@ -1,67 +1,67 @@
 {
   "_doc": [
-    "op 契約の適合ケース表（TS 側 src/ops.ts と Python 側 tools/exporter/karume/ops.py",
-    "が同じ契約を持つことの正本）。両実装は**自分の表をこのファイルへ突き合わせる** — 片側だけ",
-    "動かすと必ず赤になり、『export は緑、ブラウザだけ落ちる』を構造的に塞ぐ。",
-    "先例は tests/fixtures/dim-grammar.json（次元文法の適合表）で、節の作りもそれに倣う。",
+    "Conformance case table of the op contracts (the source of truth that the TS side src/ops.ts and the Python side tools/exporter/src/karume/ops.py",
+    "hold the same contract). Both implementations **check their own table against this file** — moving only one side",
+    "always turns red, which structurally closes off \"export is green, only the browser fails\".",
+    "The precedent is tests/fixtures/dim-grammar.json (the conformance table of the dimension grammar), and the sections follow its layout.",
     "",
-    "節の意味:",
-    "- strided_rank_max: strided コピーカーネルが扱える最大 rank（両側の定数と一致すること）。",
-    "- ops: op ごとの宣言的な事実（アリティ / スロット dtype / 出力 dtype 写像 / attrs キー",
-    "  集合）。両側は自分の契約表からこの形を導出して突合する。dtype 集合と attrs キーは",
-    "  **昇順**で書く（Python 側は集合なので順序を持たない — 表現の差を突合の差にしない）。",
-    "  `variadic: true` は**入力数が可変**の op（cat のみ）で、そのとき arity は**下限**。",
-    "  省略 = 固定アリティ（入力数がちょうど arity）。",
-    "  `max_arity` は**末尾に省略可能な入力**を持つ op（attention の mask のみ）の上限で、",
-    "  そのとき受理する入力数は arity 以上 max_arity 以下。variadic とは別の欄で、",
-    "  併記はしない（「何本でも」と「決まった 1 本が増える」は別の契約面）。",
-    "  `optional_attrs` は**省略可能な attrs**（ADR 0067 の `window` — 欄の不存在それ自体が",
-    "  「全 context」という別の宣言になる欄だけが載る）。必須 attrs（`attrs`）と同じく",
-    "  attr_values 節が値域を持つ。`states` は **states 欄の契約**（`keys` = 欄が非空のときの",
-    "  キー集合ちょうど / `required` = 欄そのものの必須性）で、省略 = states 欄を持てない op。",
-    "  out_dtypes は**出力 slot 別**の「スロット 0 の入力 dtype → その出力の dtype」写像の**列**",
-    "  （ADR 0068 決定 1）。列の長さがその op の出力数で、**恒等でない op にだけ**書く",
-    "  （省略 = 出力 1 本・スロット 0 の受理集合上の恒等写像）。要素の写像も恒等な dtype は",
-    "  書かなくてよい（両側が恒等で埋める）ので、出力ごとに dtype が違う形（値 f32 + 添字 i32）は",
-    "  [{}, { \"f32\": \"i32\" }] のように書ける。cast だけは出力が attrs.to で決まるので",
-    "  この欄を持たない。",
-    "  `weight_slot` は低精度格納が**適格**になる重みスロット番号（ADR 0018 — 両側の",
-    "  WEIGHT_SLOTS 表の鏡像）。省略 = そのスロットを持たない op で、bias スロットは",
-    "  **決して載らない**（載せた瞬間にプロトタイプの f16 降格バグが再来する — ADR 0006）。",
-    "  `channel_axis` は i8 の per-channel scale が乗る重みテンソルの軸（ADR 0019 — 両側の",
-    "  WEIGHT_CHANNEL_AXES 表の鏡像）。**weight_slot と過不足なく同時に載る**（片方だけの",
-    "  op があると、新しい重みスロットの i8 が軸 0 として黙って量子化される）。",
-    "- attr_values: attrs スキーマの**値域**。スキーマは両側とも検査関数なので構造比較ができない。",
-    "  代わりに accept / reject の実値を両側の検査関数へ通す（dim-grammar の valid / invalid と",
-    "  同じ作り）。値は IR JSON に実際に現れうるものだけ — 非有限値は IR v1 が JSON 層で",
-    "  拒否するので載せない（各実装の単体テストが個別に固定している）。",
-    "- shapes: 出力 shape 規則の適合ケース。ins / declared / outs の次元は整数か次元言語",
-    "  （coeff·sym+offset）で書く。outs は**出力 slot 別**の shape の列（ADR 0068 決定 1 —",
-    "  `topk` だけ長さ 2・`state_append` は**空列**〈値を定義しない effect op〉で、他は長さ 1）。",
-    "  `states` はノードの states 欄（契約が固定するキー → スロット名）、`state_shapes` は",
-    "  そのスロットの**容量込み具体形**（ADR 0067 決定 4 — スロットの物理形と window ≤ C の",
-    "  検査に要る）。2 つは対で書く（states 参照ノードは解決済みスロット shape が無いと",
-    "  fail loudly する — GenerationContext の不在が黙って従来形に落ちないため）。",
-    "  TS 側は bindings で数値へ解決してから computeOutputShape に",
-    "  渡し、Python 側は記号のまま compute_output_shape に渡す — 同じ表が両方の定義域で",
-    "  同じ結論になることを要求する。rank 上限（strided コピー族）もこの節が担う:",
-    "  rank 4 の受理と rank 5 / rank 0 の拒否をケースとして持つ。",
+    "Meaning of the sections:",
+    "- strided_rank_max: the maximum rank the strided copy kernels handle (must match the constants on both sides).",
+    "- ops: the declarative facts per op (arity / slot dtypes / output dtype mapping / attrs key",
+    "  set). Both sides derive this shape from their own contract table and check it. Write dtype sets and attrs keys",
+    "  in **ascending order** (the Python side uses sets, which have no order — a difference of representation must not become a difference of the check).",
+    "  `variadic: true` marks an op whose **input count is variable** (cat only); arity is then the **lower bound**.",
+    "  Omitted = fixed arity (the input count is exactly arity).",
+    "  `max_arity` is the upper bound of an op with **optional trailing inputs** (attention's mask only);",
+    "  the accepted input count is then at least arity and at most max_arity. It is a separate field from variadic,",
+    "  and the two are not written together (\"any number of inputs\" and \"one specific input added\" are different contract surfaces).",
+    "  `optional_attrs` lists **optional attrs** (ADR 0067's `window` — only fields whose absence by itself",
+    "  is a different declaration, \"the full context\", appear here). Like the required attrs (`attrs`),",
+    "  their value ranges are in the attr_values section. `states` is **the contract of the states field** (`keys` = the exact key set",
+    "  when the field is non-empty / `required` = whether the field itself is required); omitted = an op that cannot have a states field.",
+    "  out_dtypes is a **list**, **per output slot**, of mappings \"slot 0's input dtype → that output's dtype\"",
+    "  (ADR 0068 decision 1). The list's length is the op's output count, and it is written **only for ops that are not the identity**",
+    "  (omitted = one output, the identity mapping over slot 0's accepted set). A dtype whose element mapping is also the identity",
+    "  need not be written (both sides fill in the identity), so a shape where each output has a different dtype (value f32 + index i32)",
+    "  can be written as [{}, { \"f32\": \"i32\" }]. Only cast, whose output is decided by attrs.to,",
+    "  has no such field.",
+    "  `weight_slot` is the weight slot number that is **eligible** for low-precision storage (ADR 0018 — a mirror of both sides'",
+    "  WEIGHT_SLOTS tables). Omitted = an op without such a slot; a bias slot",
+    "  **never appears** (the moment it does, the prototype's f16 demotion bug comes back — ADR 0006).",
+    "  `channel_axis` is the axis of the weight tensor that i8's per-channel scale applies to (ADR 0019 — a mirror of both sides'",
+    "  WEIGHT_CHANNEL_AXES tables). **It appears together with weight_slot, exactly** (an op with only one of the two",
+    "  would silently quantize the i8 of a new weight slot along axis 0).",
+    "- attr_values: the **value ranges** of the attrs schemas. On both sides the schemas are check functions, so they cannot be compared structurally.",
+    "  Instead, concrete accept / reject values are passed through both sides' check functions (the same layout as dim-grammar's valid / invalid).",
+    "  Only values that can actually appear in IR JSON are listed — non-finite values are rejected by IR v1 at the JSON layer,",
+    "  so they are not listed (each implementation's unit tests pin them separately).",
+    "- shapes: conformance cases of the output shape rules. The dimensions of ins / declared / outs are integers or the dimension language",
+    "  (coeff·sym+offset). outs is the list of shapes **per output slot** (ADR 0068 decision 1 —",
+    "  length 2 for `topk` only, an **empty list** for `state_append` (an effect op that defines no value), length 1 for the rest).",
+    "  `states` is the node's states field (key fixed by the contract → slot name), and `state_shapes` is",
+    "  the **concrete shape, capacity included,** of that slot (ADR 0067 decision 4 — needed for the slot's physical shape and the window ≤ C",
+    "  check). Write the two as a pair (a states-referencing node fails loudly without a resolved slot shape",
+    "  — so that a missing GenerationContext does not silently fall back to the plain form).",
+    "  The TS side resolves to numbers with bindings before passing to computeOutputShape,",
+    "  and the Python side passes the symbols as they are to compute_output_shape — the same table is required to reach",
+    "  the same conclusion in both domains. This section also carries the rank bound (the strided copy family):",
+    "  it has cases accepting rank 4 and rejecting rank 5 / rank 0.",
     "",
-    "MUST: ops 節に載る op 集合は両実装の契約表と**完全一致**（過不足とも赤）。",
-    "MUST: shapes 節は ops 節の全 op を最低 1 件は受理ケースで踏む（新 op の shape 規則が",
-    "片側だけ実装されていない状態を通さない）。",
-    "NOTE: op の内部 kind 名（TS の camelCase / Python の snake_case）は載せない — 消費側の",
-    "分岐タグであって契約面ではなく、綴りの差が言語規約由来だから。",
-    "NOTE（この表が担保しない範囲）: **宣言 shape 層の拒否規則**（slice / flip の切り出し軸が",
-    "記号でないこと、cat の連結軸に異なるシンボルが混ざらないこと（ADR 0046）、記号次元どうしを",
-    "式のまま比較すること等）は載せられない。TS 側は束縛済みの数値を、Python 側は束縛前の記号式を",
-    "定義域に取るので、同じ規則が両側で同じ入力を持たないから（この表の shapes 節が要求する",
-    "『同じ表が両方の定義域で同じ結論』が成り立たない領域 — 記号を数値へ解決した時点で",
-    "『T と U が別シンボル』という事実そのものが消える）。ここは両側の専用単体テストが",
-    "それぞれ固定する: TS は tests/runtime_plan_test.ts、Python は",
-    "tools/exporter/tests/test_shapes.py と境界での拒否を見る test_convert.py。",
-    "受理側は載る — 束縛を当てれば両側が同じ数値に至るので、記号軸 cat の適合ケースは",
-    "shapes 節が持つ。"
+    "MUST: the op set in the ops section matches both implementations' contract tables **exactly** (red on a surplus or a shortfall).",
+    "MUST: the shapes section exercises every op of the ops section with at least one accepting case (a new op's shape rule",
+    "implemented on one side only must not pass).",
+    "NOTE: the ops' internal kind names (TS camelCase / Python snake_case) are not listed — they are",
+    "branch tags of the consumers, not a contract surface, and their spelling differs because of language conventions.",
+    "NOTE (what this table does not cover): **the rejection rules of the declared-shape layer** (that the sliced axis of slice / flip",
+    "is not symbolic, that the concatenation axis of cat does not mix different symbols (ADR 0046), that symbolic dimensions",
+    "are compared as expressions, and so on) cannot be listed. The TS side takes bound numbers and the Python side takes unbound symbolic expressions",
+    "as its domain, so the same rule does not get the same input on both sides (a region where the shapes section's requirement",
+    "\"the same table reaches the same conclusion in both domains\" does not hold — the moment symbols are resolved to numbers,",
+    "the very fact \"T and U are different symbols\" disappears). Dedicated unit tests on each side",
+    "pin these: on TS, tests/runtime_plan_test.ts; on Python,",
+    "tools/exporter/tests/test_shapes.py and test_convert.py, which covers the rejection at the boundary.",
+    "The accepting side is listed — once the bindings are applied both sides reach the same numbers, so the conformance cases of cat on a symbolic axis",
+    "are in the shapes section."
   ],
   "strided_rank_max": 4,
   "ops": [
@@ -402,14 +402,14 @@
     {
       "op": "cast",
       "attr": "to",
-      "why": "変換先は IR v1 の意味論 dtype 語彙そのもの（同型 cast は恒等コピー）",
+      "why": "the target is exactly the IR v1 semantic dtype vocabulary (a cast to the same dtype is an identity copy)",
       "accept": ["f32", "i32", "bool"],
       "reject": ["i64", "f16", "u32", "", "F32", 3, null, true, ["f32"]]
     },
     {
       "op": "permute",
       "attr": "dims",
-      "why": "非負・重複無しの並べ替え表（負の軸表記はエクスポータ境界で正規化する規約）",
+      "why": "non-negative permutation without duplicates (by convention, negative axis notation is normalized at the exporter boundary)",
       "accept": [[0], [1, 0], [0, 2, 1], [3, 0, 2, 1]],
       "reject": [
         [],
@@ -427,63 +427,63 @@
     {
       "op": "slice",
       "attr": "dim",
-      "why": "非負の軸番号のみ（負の軸表記はエクスポータ境界で正規化する規約）",
+      "why": "non-negative axis numbers only (by convention, negative axis notation is normalized at the exporter boundary)",
       "accept": [0, 1, 3],
       "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
     },
     {
       "op": "slice",
       "attr": "start",
-      "why": "非負整数（start <= end と end <= 軸長は shapes 節が持つ — キーと入力を跨ぐ規則）",
+      "why": "non-negative integer (start <= end and end <= axis length are in the shapes section — rules spanning keys and inputs)",
       "accept": [0, 4, 96],
       "reject": [-1, 0.5, "0", null, true, 1000000000000000000]
     },
     {
       "op": "slice",
       "attr": "end",
-      "why": "非負整数（torch の既定 end（int64 最大）はエクスポータ境界で軸長へ詰める）",
+      "why": "non-negative integer (torch's default end (int64 max) is clamped to the axis length at the exporter boundary)",
       "accept": [0, 4, 192],
       "reject": [-1, 0.5, "0", null, true, 1000000000000000000]
     },
     {
       "op": "cat",
       "attr": "dim",
-      "why": "非負の軸番号のみ（連結軸。入力 rank との突合は shapes 節）",
+      "why": "non-negative axis numbers only (the concatenation axis; matching against the input rank is in the shapes section)",
       "accept": [0, 1, 2],
       "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
     },
     {
       "op": "pad",
       "attr": "left",
-      "why": "非負整数（負幅の切り詰めは pad ではなく slice の意味 — 受理すると同じ形が 2 通り書ける）",
+      "why": "non-negative integer (truncating with a negative width means slice, not pad — accepting it would allow two spellings of the same shape)",
       "accept": [0, 1, 4],
       "reject": [-1, 0.5, "0", null, true, 1000000000000000000]
     },
     {
       "op": "pad",
       "attr": "right",
-      "why": "非負整数（実測は左右対称の [w,w] だが、非対称も表現できる）",
+      "why": "non-negative integer (observed: the symmetric [w,w], but asymmetric values are expressible too)",
       "accept": [0, 1, 4],
       "reject": [-1, 0.5, "0", null, true, 1000000000000000000]
     },
     {
       "op": "flip",
       "attr": "dim",
-      "why": "非負の軸番号のみ（反転軸。実測は flow の 192ch と sdp の 2ch）",
+      "why": "non-negative axis numbers only (the flipped axis; observed: flow's 192ch and sdp's 2ch)",
       "accept": [0, 1, 2],
       "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
     },
     {
       "op": "sym_prefix_slice",
       "attr": "sym",
-      "why": "次元言語のシンボル名（束縛済みかはグラフ側の検査）",
+      "why": "a symbol name of the dimension language (whether it is bound is the graph-side check)",
       "accept": ["T", "_s", "seq_len", "T2"],
       "reject": ["2T", "T+1", "", "T ", " T", 1, null, true, ["T"]]
     },
     {
       "op": "sym_prefix_slice",
       "attr": "slices",
-      "why": "軸ごとの prefix 長 coeff·sym+offset（coeff >= 1 / offset >= 0 / 軸の重複は不可）",
+      "why": "per-axis prefix length coeff·sym+offset (coeff >= 1 / offset >= 0 / no duplicate axes)",
       "accept": [
         [{ "dim": 0, "coeff": 1, "offset": 0 }],
         [
@@ -512,196 +512,196 @@
     {
       "op": "layer_norm",
       "attr": "normalized_shape",
-      "why": "最終次元 1 本のみ（多軸正規化は語彙に無い）",
+      "why": "the last dimension only (multi-axis normalization is not in the vocabulary)",
       "accept": [[1], [8], [1024]],
       "reject": [[], [4, 8], [0], [-1], [1.5], [true], [1000000000000000000], 8, null]
     },
     {
       "op": "layer_norm",
       "attr": "eps",
-      "why": "有限の正数（0 は分散 0 の行で 1/sqrt(0) を作る）",
+      "why": "finite positive number (0 makes 1/sqrt(0) on a row with variance 0)",
       "accept": [1e-5, 1e-12, 0.5, 1],
       "reject": [0, -1e-5, "1e-5", null, true, [1e-5]]
     },
     {
       "op": "rms_norm",
       "attr": "eps",
-      "why": "有限の正数（0 は全要素 0 の行で 1/sqrt(0) を作る）。実測は 1e-6",
+      "why": "finite positive number (0 makes 1/sqrt(0) on an all-zero row). Observed: 1e-6",
       "accept": [1e-6, 1e-12, 0.5, 1],
       "reject": [0, -1e-6, "1e-6", null, true, [1e-6]]
     },
     {
       "op": "softmax",
       "attr": "dim",
-      "why": "非負の軸番号のみ（最終次元との突合は shape 側）",
+      "why": "non-negative axis numbers only (matching against the last dimension is on the shape side)",
       "accept": [0, 1, 3],
       "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
     },
     {
       "op": "safe_softmax",
       "attr": "dim",
-      "why": "softmax と同一の attrs 契約（ADR 0044 — 違いは空行の値だけ）",
+      "why": "the same attrs contract as softmax (ADR 0044 — only the value of an empty row differs)",
       "accept": [0, 1, 3],
       "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
     },
     {
       "op": "attention",
       "attr": "scale",
-      "why": "有限の f32 スカラ（**半スケール** = q と k の両方に掛かる √scale_factor — ADR 0023）。実測は f32(128^-0.25)",
+      "why": "finite f32 scalar (the **half scale** = √scale_factor applied to both q and k — ADR 0023). Observed: f32(128^-0.25)",
       "accept": [0.2973017692565918, 0.7071067811865476, 1, 0.25],
       "reject": ["0.29", null, true, [0.5]]
     },
     {
       "op": "attention",
       "attr": "window",
-      "why": "sliding window の幅（ADR 0067 決定 4）。**省略可能**で、欄の不存在 = 全 context。宣言されたら 1 以上の整数（Gemma 4 E2B の sliding 層は 512）",
+      "why": "the sliding window width (ADR 0067 decision 4). **Optional**; an absent field = the full context. When declared, an integer of 1 or more (Gemma 4 E2B's sliding layers use 512)",
       "accept": [1, 512, 4096],
       "reject": [0, -1, 1.5, "512", null, true, 1000000000000000000]
     },
     {
       "op": "attention",
       "attr": "readonly",
-      "why": "past だけを読む形の宣言（ADR 0096 段 2 §1.2）。**省略可能で true のみ** — 欄の不存在が「今 step の k/v も読む states 形」で、false は同義の 2 つ目の綴りになるので受理しない",
+      "why": "declares the past-only form (ADR 0096 stage 2 §1.2). **Optional, true only** — an absent field is \"the states form that also reads the current step's k/v\", and false would be a second spelling of the same meaning, so it is rejected",
       "accept": [true],
       "reject": [false, 0, 1, "true", null]
     },
     {
       "op": "state_append",
       "attr": "window",
-      "why": "書き側の ring 幅（ADR 0067 決定 5）。読み側（attention）と**同一の値域**でなければ、同じスロットに読み書き同式（決定 4）を課せない",
+      "why": "the write-side ring width (ADR 0067 decision 5). Unless it has **the same value range** as the read side (attention), the same formula for reading and writing a slot (decision 4) cannot be imposed",
       "accept": [1, 512, 4096],
       "reject": [0, -1, 1.5, "512", null, true, 1000000000000000000]
     },
     {
       "op": "embedding",
       "attr": "padding_idx",
-      "why": "torch 準拠で -1（未指定の番兵）以上。受理するが forward には効かない",
+      "why": "-1 (the unset sentinel) or more, as in torch. Accepted but has no effect on forward",
       "accept": [-1, 0, 5],
       "reject": [-2, 0.5, "0", null, true]
     },
     {
       "op": "masked_fill",
       "attr": "value",
-      "why": "有限の f32 スカラ（実測値 -3.4e38 は f32 の最小有限値ちょうど）",
+      "why": "finite f32 scalar (the observed -3.4e38 is exactly f32's lowest finite value)",
       "accept": [0, -1.5, 1e-8, -3.4028234663852886e38],
       "reject": ["0", null, true, [0]]
     },
     {
       "op": "clamp",
       "attr": "min",
-      "why": "有限の f32 スカラ（min <= max はキーを跨ぐので shapes 節の拒否ケースが持つ）",
+      "why": "finite f32 scalar (min <= max spans keys, so the rejecting cases of the shapes section carry it)",
       "accept": [0, -1.5, 1e-8, -3.4028234663852886e38],
       "reject": ["0", null, true, [0]]
     },
     {
       "op": "clamp",
       "attr": "max",
-      "why": "有限の f32 スカラ",
+      "why": "finite f32 scalar",
       "accept": [0, 1.5, 3.4028234663852886e38],
       "reject": ["0", null, true, [0]]
     },
     {
       "op": "clamp_min",
       "attr": "min",
-      "why": "有限の f32 スカラ。上限の欄は無い（片側 clamp — ADR 0017）。実測はチャネル L2 の eps",
+      "why": "finite f32 scalar. There is no upper-bound field (one-sided clamp — ADR 0017). Observed: the eps of the channel L2",
       "accept": [1e-12, 0, -1.5, -3.4028234663852886e38],
       "reject": ["0", null, true, [0]]
     },
     {
       "op": "leaky_relu",
       "attr": "negative_slope",
-      "why": "有限の f32 スカラ。実測は 0.1（ups / ResBlock）と 0.01（最終段の torch 既定）の 2 種",
+      "why": "finite f32 scalar. Observed: two values, 0.1 (ups / ResBlock) and 0.01 (torch's default in the last stage)",
       "accept": [0.1, 0.01, 0, 1],
       "reject": ["0.1", null, true, [0.1]]
     },
     {
       "op": "ge_scalar",
       "attr": "value",
-      "why": "有限の f32 スカラ（比較相手）",
+      "why": "finite f32 scalar (the comparison operand)",
       "accept": [0, -1.5, 3.4028234663852886e38],
       "reject": ["0", null, true, [0]]
     },
     {
       "op": "le_scalar",
       "attr": "value",
-      "why": "有限の f32 スカラ（比較相手）",
+      "why": "finite f32 scalar (the comparison operand)",
       "accept": [0, 1.5, -3.4028234663852886e38],
       "reject": ["0", null, true, [0]]
     },
     {
       "op": "gt_scalar",
       "attr": "value",
-      "why": "有限の f32 スカラ（比較相手）",
+      "why": "finite f32 scalar (the comparison operand)",
       "accept": [0, -20, 0.5],
       "reject": ["0", null, true, [0]]
     },
     {
       "op": "cumsum",
       "attr": "dim",
-      "why": "非負の軸番号のみ（最終次元との突合は shape 側 — softmax の dim と同じ）",
+      "why": "non-negative axis numbers only (matching against the last dimension is on the shape side — same as softmax's dim)",
       "accept": [0, 1, 3],
       "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
     },
     {
       "op": "topk",
       "attr": "k",
-      "why": "正整数のみ（static-k）。k=0 は torch では受理される形だが「大きい順の 0 本」は語彙に無く、記号 k は静的形状の前提に載らない。最終次元との突合は shape 側・実装上限は device limit 側",
+      "why": "positive integers only (static-k). torch accepts k=0, but \"the 0 largest\" is not in the vocabulary, and a symbolic k does not fit the static-shape premise. Matching against the last dimension is on the shape side; the implementation bound is on the device-limit side",
       "accept": [1, 2, 64],
       "reject": [0, -1, 1.5, "1", "K", null, true, 1000000000000000000]
     },
     {
       "op": "sum",
       "attr": "dim",
-      "why": "非負の軸番号のみ（**宣言必須** — 既定値補完をすると最終次元を畳んだ別の計算が黙って通る）",
+      "why": "non-negative axis numbers only (**must be declared** — filling in a default would silently pass a different computation that collapses the last dimension)",
       "accept": [0, 1, 3],
       "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
     },
     {
       "op": "amax",
       "attr": "dim",
-      "why": "非負の軸番号のみ（sum と同じ — reduce 族は 1 軸・keepdim 無し）",
+      "why": "non-negative axis numbers only (same as sum — the reduce family takes one axis, no keepdim)",
       "accept": [0, 1, 3],
       "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
     },
     {
       "op": "amin",
       "attr": "dim",
-      "why": "非負の軸番号のみ（sum と同じ — reduce 族は 1 軸・keepdim 無し）",
+      "why": "non-negative axis numbers only (same as sum — the reduce family takes one axis, no keepdim)",
       "accept": [0, 1, 3],
       "reject": [-1, 1.5, "1", null, true, 1000000000000000000]
     },
     {
       "op": "conv1d",
       "attr": "stride",
-      "why": "正整数",
+      "why": "positive integer",
       "accept": [1, 2, 7],
       "reject": [0, -1, 1.5, "1", null, true, 1000000000000000000]
     },
     {
       "op": "conv1d",
       "attr": "padding",
-      "why": "非負整数",
+      "why": "non-negative integer",
       "accept": [0, 1, 4],
       "reject": [-1, 0.5, "0", null, true]
     },
     {
       "op": "conv1d",
       "attr": "dilation",
-      "why": "正整数（ADR 0015 — 実測は 1 / 3 / 5 / 9）",
+      "why": "positive integer (ADR 0015 — observed: 1 / 3 / 5 / 9)",
       "accept": [1, 3, 9],
       "reject": [0, -1, 1.5, "1", null, true]
     },
     {
       "op": "conv1d",
       "attr": "groups",
-      "why": "正整数（ADR 0015 — 実測は 1 と depthwise の 192）",
+      "why": "positive integer (ADR 0015 — observed: 1 and depthwise 192)",
       "accept": [1, 2, 192],
       "reject": [0, -1, 1.5, "1", null, true]
     },
     {
       "op": "conv2d",
       "attr": "stride",
-      "why": "[H, W] の 2 成分・各成分は正整数（スカラ表記は境界で正規化する規約 — ADR 0017）",
+      "why": "[H, W], 2 components, each a positive integer (by convention, the scalar notation is normalized at the boundary — ADR 0017)",
       "accept": [
         [1, 1],
         [2, 2],
@@ -724,7 +724,7 @@
     {
       "op": "conv2d",
       "attr": "padding",
-      "why": "[H, W] の 2 成分・各成分は非負整数（H/W 非対称が実測に出る）",
+      "why": "[H, W], 2 components, each a non-negative integer (H/W asymmetry is observed)",
       "accept": [
         [0, 0],
         [1, 1],
@@ -736,7 +736,7 @@
     {
       "op": "conv2d",
       "attr": "dilation",
-      "why": "[H, W] の 2 成分・各成分は正整数",
+      "why": "[H, W], 2 components, each a positive integer",
       "accept": [
         [1, 1],
         [2, 3]
@@ -746,14 +746,14 @@
     {
       "op": "conv2d",
       "attr": "groups",
-      "why": "正整数のスカラ（空間軸を持たない唯一の conv2d attr）",
+      "why": "positive integer scalar (the only conv2d attr without a spatial axis)",
       "accept": [1, 2, 128],
       "reject": [0, -1, 1.5, "1", null, true, [1, 1]]
     },
     {
       "op": "conv3d",
       "attr": "stride",
-      "why": "[T, H, W] の 3 成分・各成分は正整数（スカラ表記と 2 成分は境界で正規化する規約 — ADR 0118 決定 1）",
+      "why": "[T, H, W], 3 components, each a positive integer (by convention, the scalar notation and 2 components are normalized at the boundary — ADR 0118 decision 1)",
       "accept": [
         [1, 1, 1],
         [1, 2, 2],
@@ -777,7 +777,7 @@
     {
       "op": "conv3d",
       "attr": "padding",
-      "why": "[T, H, W] の 3 成分・各成分は非負整数（軸ごとの対称ゼロ — 因果パディングは語彙に無い）",
+      "why": "[T, H, W], 3 components, each a non-negative integer (symmetric zeros per axis — causal padding is not in the vocabulary)",
       "accept": [
         [0, 0, 0],
         [0, 1, 1],
@@ -798,7 +798,7 @@
     {
       "op": "conv3d",
       "attr": "dilation",
-      "why": "[T, H, W] の 3 成分・各成分は正整数",
+      "why": "[T, H, W], 3 components, each a positive integer",
       "accept": [
         [1, 1, 1],
         [2, 3, 1]
@@ -818,28 +818,28 @@
     {
       "op": "conv3d",
       "attr": "groups",
-      "why": "正整数のスカラ（意味論は groups 一般 — GPU の実装済み subset は 1 だけで、それは計画時の門）",
+      "why": "positive integer scalar (the semantics are general groups — the subset the GPU implements is 1 only, and that is a plan-time check)",
       "accept": [1, 3, 96],
       "reject": [0, -1, 1.5, "1", null, true, [1, 1, 1]]
     },
     {
       "op": "conv_transpose1d",
       "attr": "stride",
-      "why": "正整数 MUST — stride 0 はカーネルのゼロ除算/ハング（recon §4）",
+      "why": "positive integer MUST — stride 0 makes the kernel divide by zero / hang (sbv2-chain recon §4)",
       "accept": [1, 2, 8],
       "reject": [0, -1, 1.5, "1", null, true]
     },
     {
       "op": "conv_transpose1d",
       "attr": "padding",
-      "why": "非負整数",
+      "why": "non-negative integer",
       "accept": [0, 3, 4],
       "reject": [-1, 0.5, "0", null, true]
     },
     {
       "op": "deform_conv2d",
       "attr": "padding",
-      "why": "[H, W] の 2 成分・各成分は非負整数（BiRefNet の 4 分岐は k//2 = 0 / 0 / 1 / 3）",
+      "why": "[H, W], 2 components, each a non-negative integer (BiRefNet's 4 branches use k//2 = 0 / 0 / 1 / 3)",
       "accept": [
         [0, 0],
         [1, 1],
@@ -851,7 +851,7 @@
     {
       "op": "upsample_bilinear2d",
       "attr": "output_size",
-      "why": "[Hout, Wout] の 2 成分・各成分は正整数（0 長は補間できず、スカラ表記は境界で正規化する規約）",
+      "why": "[Hout, Wout], 2 components, each a positive integer (a length of 0 cannot be interpolated; by convention, the scalar notation is normalized at the boundary)",
       "accept": [
         [1, 1],
         [7, 9],
@@ -875,7 +875,7 @@
     {
       "op": "static_quantize",
       "attr": "scale",
-      "why": "保存済み scale を丸め直さず受け取る非負の f32",
+      "why": "non-negative f32 that takes the stored scale without re-rounding it",
       "accept": [0, 1, 0.5, 0.09940945357084274, 1.401298464324817e-45, 3.4028234663852886e38],
       "reject": [-1, 0.1, 1e-50, 1e39, "1", null, true, [1]]
     }
@@ -898,7 +898,7 @@
       "op": "relu",
       "ins": [[2], [2]],
       "throws": true,
-      "why": "アリティ違反（入力 shape の本数が契約と違う）"
+      "why": "arity violation (the number of input shapes differs from the contract)"
     },
 
     { "op": "clamp", "ins": [[2, 3]], "attrs": { "min": -1, "max": 1 }, "outs": [[2, 3]] },
@@ -907,28 +907,28 @@
       "ins": [[4]],
       "attrs": { "min": 2, "max": 2 },
       "outs": [[4]],
-      "why": "min == max（潰す形）は受理する"
+      "why": "min == max (the collapsing form) is accepted"
     },
     {
       "op": "clamp",
       "ins": [[4]],
       "attrs": { "min": 1, "max": -1 },
       "throws": true,
-      "why": "min > max は WGSL の clamp が未定義になる向き（キーを跨ぐ不変条件）"
+      "why": "min > max is the direction in which WGSL's clamp is undefined (an invariant spanning keys)"
     },
     {
       "op": "clamp",
       "ins": [[4]],
       "attrs": { "min": 0 },
       "throws": true,
-      "why": "max の欠落（両方必須）"
+      "why": "max missing (both are required)"
     },
     {
       "op": "clamp_min",
       "ins": [[1, 16, 4, 4]],
       "attrs": { "min": 1e-12 },
       "outs": [[1, 16, 4, 4]],
-      "why": "VAE のチャネル L2 正規化 clamp(min=eps)（ADR 0017）— 上限の欄は無い"
+      "why": "the VAE's channel L2 normalization clamp(min=eps) (ADR 0017) — there is no upper-bound field"
     },
     {
       "op": "clamp_min",
@@ -936,35 +936,35 @@
       "attrs": { "min": -1.5 },
       "bindings": { "T": 4 },
       "outs": [["T"]],
-      "why": "負の下限も受理する（clamp と違い上限が無いだけ）"
+      "why": "a negative lower bound is accepted too (unlike clamp, there is just no upper bound)"
     },
     {
       "op": "clamp_min",
       "ins": [[4]],
       "attrs": {},
       "throws": true,
-      "why": "min は必須（既定値補完はしない）"
+      "why": "min is required (no default filled in)"
     },
     {
       "op": "leaky_relu",
       "ins": [[2, 4]],
       "attrs": { "negative_slope": 0.1 },
       "outs": [[2, 4]],
-      "why": "実測の slope 0.1（ups / ResBlock）"
+      "why": "observed slope 0.1 (ups / ResBlock)"
     },
     {
       "op": "leaky_relu",
       "ins": [[5]],
       "attrs": { "negative_slope": 0.01 },
       "outs": [[5]],
-      "why": "実測の slope 0.01（最終段 — torch 既定を境界で明示化したもの）"
+      "why": "observed slope 0.01 (last stage — torch's default made explicit at the boundary)"
     },
     {
       "op": "leaky_relu",
       "ins": [[5]],
       "attrs": {},
       "throws": true,
-      "why": "negative_slope は必須（既定値補完はしない — ADR 0015）"
+      "why": "negative_slope is required (no default filled in — ADR 0015)"
     },
     { "op": "ge_scalar", "ins": [[3, 2]], "attrs": { "value": 0 }, "outs": [[3, 2]] },
     {
@@ -989,7 +989,7 @@
       "ins": [[2, "T", 4], [4]],
       "bindings": { "T": 6 },
       "outs": [[2, "T", 4]],
-      "why": "右詰め broadcast（rank が違う被演算子）"
+      "why": "right-aligned broadcast (operands of different rank)"
     },
     {
       "op": "add",
@@ -998,9 +998,9 @@
         [4, 3]
       ],
       "throws": true,
-      "why": "どちらも長さ 1 でない次元は broadcast できない"
+      "why": "dimensions that are both not 1 cannot be broadcast"
     },
-    { "op": "sub", "ins": [[3], []], "outs": [[3]], "why": "スカラ側は右詰めで長さ 1 として読む" },
+    { "op": "sub", "ins": [[3], []], "outs": [[3]], "why": "scalar = length 1, right-aligned" },
     {
       "op": "mul",
       "ins": [
@@ -1022,7 +1022,7 @@
       "op": "add",
       "ins": [[0], [1]],
       "outs": [[0]],
-      "why": "0 と 1 の組は torch では 0（max で潰さない）"
+      "why": "a 0 and 1 pair gives 0 in torch (no max)"
     },
 
     {
@@ -1032,21 +1032,21 @@
         [1, 3]
       ],
       "outs": [[2, 3]],
-      "why": "比較も右詰め broadcast"
+      "why": "comparisons broadcast right-aligned too"
     },
     {
       "op": "ge",
       "ins": [[1, "T", 1], ["T"]],
       "bindings": { "T": 4 },
       "outs": [[1, "T", "T"]],
-      "why": "searchsorted の inputs[…,None] >= bl（rank の違う被演算子）"
+      "why": "searchsorted's inputs[…,None] >= bl (operands of different rank)"
     },
     { "op": "bitwise_and", "ins": [[4], [4]], "outs": [[4]] },
     {
       "op": "bitwise_and",
       "ins": [[3, 4], [4]],
       "outs": [[3, 4]],
-      "why": "論理積も右詰め broadcast"
+      "why": "logical and broadcasts right-aligned too"
     },
 
     {
@@ -1057,7 +1057,7 @@
         [3, 1]
       ],
       "outs": [[3, 4]],
-      "why": "三者の右詰め broadcast（条件も値と同じ規則で広がる）"
+      "why": "right-aligned broadcast of all three (the condition spreads by the same rule as the values)"
     },
     {
       "op": "where",
@@ -1068,19 +1068,19 @@
       ],
       "bindings": { "T": 3 },
       "outs": [["T", 5]],
-      "why": "記号次元を含む三項 broadcast"
+      "why": "ternary broadcast with symbolic dimensions"
     },
     {
       "op": "where",
       "ins": [[2], [3], [1]],
       "throws": true,
-      "why": "どちらも長さ 1 でない次元は broadcast できない（三項でも規則は同じ）"
+      "why": "dimensions that are both not 1 cannot be broadcast (the rule is the same for three operands)"
     },
     {
       "op": "where",
       "ins": [[2], [2]],
       "throws": true,
-      "why": "アリティ違反（三項 op に 2 本しか渡していない）"
+      "why": "arity violation (only 2 inputs passed to a ternary op)"
     },
 
     { "op": "cumsum", "ins": [[2, 5]], "attrs": { "dim": 1 }, "outs": [[2, 5]] },
@@ -1096,14 +1096,14 @@
       "ins": [[2, 5]],
       "attrs": { "dim": 0 },
       "throws": true,
-      "why": "最終次元以外は受理しない（行カーネルの前提が崩れる）"
+      "why": "only the last dimension is accepted (otherwise the row kernel's premise breaks)"
     },
     {
       "op": "cumsum",
       "ins": [[]],
       "attrs": { "dim": 0 },
       "throws": true,
-      "why": "スカラは累積できない"
+      "why": "a scalar cannot be accumulated"
     },
 
     { "op": "sum", "ins": [[6, 10]], "attrs": { "dim": 1 }, "outs": [[6]] },
@@ -1112,41 +1112,41 @@
       "ins": [[2, 384, 5, 7]],
       "attrs": { "dim": 1 },
       "outs": [[2, 5, 7]],
-      "why": "チャネル軸の縮約（VAE decoder の L2 正規化 — permute 対を消した形）"
+      "why": "reduction over the channel axis (the VAE decoder's L2 normalization — the form with the permute pair removed)"
     },
     {
       "op": "sum",
       "ins": [[4, 6]],
       "attrs": { "dim": 0 },
       "outs": [[6]],
-      "why": "先頭軸の縮約（rank-2 でも最終次元とは別の軸）"
+      "why": "reduction over the leading axis (an axis other than the last dimension, even at rank 2)"
     },
     {
       "op": "sum",
       "ins": [[3, 0]],
       "attrs": { "dim": 1 },
       "outs": [[3]],
-      "why": "空軸の総和は 0（identity がある）"
+      "why": "the sum over an empty axis is 0 (there is an identity)"
     },
     {
       "op": "sum",
       "ins": [[]],
       "attrs": { "dim": 0 },
       "throws": true,
-      "why": "スカラは縮約できない"
+      "why": "a scalar cannot be reduced"
     },
     {
       "op": "sum",
       "ins": [[6, 10]],
       "throws": true,
-      "why": "attrs.dim は宣言必須（既定値補完をしない）"
+      "why": "attrs.dim must be declared (no default filled in)"
     },
     {
       "op": "sum",
       "ins": [[6, 10]],
       "attrs": { "dim": 2 },
       "throws": true,
-      "why": "rank 外の軸"
+      "why": "axis outside the rank"
     },
     { "op": "amax", "ins": [[2, 3, 4]], "attrs": { "dim": 2 }, "outs": [[2, 3]] },
     {
@@ -1154,21 +1154,21 @@
       "ins": [[2, 3, 4]],
       "attrs": { "dim": 0 },
       "outs": [[3, 4]],
-      "why": "amax も 1 軸 attr で軸を選ぶ（sum と同じ契約）"
+      "why": "amax also selects its axis with a one-axis attr (the same contract as sum)"
     },
     {
       "op": "amax",
       "ins": [[3, 0]],
       "attrs": { "dim": 1 },
       "throws": true,
-      "why": "空軸の amax は identity が定義できない"
+      "why": "amax over an empty axis has no defined identity"
     },
     {
       "op": "amax",
       "ins": [[0, 3]],
       "attrs": { "dim": 1 },
       "outs": [[0]],
-      "why": "長さ 0 なのが縮約軸でなければ受理（出力が空になるだけ）"
+      "why": "a length-0 axis is accepted when it is not the reduced axis (the output is just empty)"
     },
     {
       "op": "amin",
@@ -1183,7 +1183,7 @@
       "attrs": { "dim": 0 },
       "bindings": { "T": 4 },
       "outs": [[5]],
-      "why": "記号次元そのものを縮約する形"
+      "why": "reducing the symbolic dimension itself"
     },
 
     { "op": "argmax", "ins": [[6, 10]], "outs": [[6, 1]] },
@@ -1191,39 +1191,39 @@
       "op": "argmax",
       "ins": [[7]],
       "outs": [[1]],
-      "why": "rank 1 でも rank 保存（reduce 族はここでスカラへ落ちる — 別の契約）"
+      "why": "rank is preserved even at rank 1 (the reduce family drops to a scalar here — a different contract)"
     },
     {
       "op": "argmax",
       "ins": [["T", 2, 3, 5]],
       "bindings": { "T": 4 },
       "outs": [["T", 2, 3, 1]],
-      "why": "rank 4 — 先行次元はそのまま（記号次元も素通し）"
+      "why": "rank 4 — leading dimensions unchanged (symbolic dimensions pass through too)"
     },
     {
       "op": "argmax",
       "ins": [[2, "T"]],
       "bindings": { "T": 4 },
       "outs": [[2, 1]],
-      "why": "記号の最終次元を潰す形（長さ 0 になるかは束縛次第 — 判定はランタイム側の層）"
+      "why": "collapsing a symbolic last dimension (whether it becomes length 0 depends on the binding — the runtime-side layer decides)"
     },
     {
       "op": "argmax",
       "ins": [[3, 1]],
       "outs": [[3, 1]],
-      "why": "既に長さ 1 の最終次元でも恒等（唯一の添字 0 が返る）"
+      "why": "identity even on a last dimension that is already length 1 (the only index, 0, is returned)"
     },
     {
       "op": "argmax",
       "ins": [[0, 3]],
       "outs": [[0, 1]],
-      "why": "長さ 0 なのが最終次元でなければ受理（出力が空になるだけ）"
+      "why": "a length-0 dimension is accepted when it is not the last dimension (the output is just empty)"
     },
     {
       "op": "argmax",
       "ins": [[]],
       "throws": true,
-      "why": "スカラは縮約できない"
+      "why": "a scalar cannot be reduced"
     },
     {
       "op": "topk",
@@ -1233,7 +1233,7 @@
         [6, 3],
         [6, 3]
       ],
-      "why": "2 出力とも [..., k]（値 f32 + 添字 i32 — 唯一の多出力 op）"
+      "why": "both outputs are [..., k] (value f32 + index i32 — the only multi-output op)"
     },
     {
       "op": "topk",
@@ -1243,14 +1243,14 @@
         [6, 1],
         [6, 1]
       ],
-      "why": "k=1 は argmax と同じ形（値も返る点だけが違う）"
+      "why": "k=1 has the same shape as argmax (the only difference is that values are returned too)"
     },
     {
       "op": "topk",
       "ins": [[4]],
       "attrs": { "k": 4 },
       "outs": [[4], [4]],
-      "why": "k = 最終次元は受理領域の上端（rank 1 でも rank 保存）"
+      "why": "k = the last dimension is the upper edge of the accepted range (rank is preserved even at rank 1)"
     },
     {
       "op": "topk",
@@ -1261,7 +1261,7 @@
         ["T", 2, 3, 2],
         ["T", 2, 3, 2]
       ],
-      "why": "rank 4 — 先行次元はそのまま（記号次元も素通し）"
+      "why": "rank 4 — leading dimensions unchanged (symbolic dimensions pass through too)"
     },
     {
       "op": "topk",
@@ -1272,7 +1272,7 @@
         [2, 2],
         [2, 2]
       ],
-      "why": "記号の最終次元では k との突合を保留する（束縛後に判定するのはランタイム側の層）"
+      "why": "on a symbolic last dimension the match against k is deferred (the runtime-side layer decides after binding)"
     },
     {
       "op": "topk",
@@ -1282,56 +1282,56 @@
         [0, 2],
         [0, 2]
       ],
-      "why": "長さ 0 なのが最終次元でなければ受理（出力が空になるだけ — argmax と同じ絞り）"
+      "why": "a length-0 dimension is accepted when it is not the last dimension (the output is just empty — the same narrowing as argmax)"
     },
     {
       "op": "topk",
       "ins": [[6, 10]],
       "attrs": { "k": 0 },
       "throws": true,
-      "why": "k=0 は語彙に無い（torch は受理するが「大きい順の 0 本」は値を定義しない）"
+      "why": "k=0 is not in the vocabulary (torch accepts it, but \"the 0 largest\" defines no value)"
     },
     {
       "op": "topk",
       "ins": [[6, 10]],
       "attrs": { "k": 11 },
       "throws": true,
-      "why": "k > 最終次元（torch も selected index k out of range で拒否する）"
+      "why": "k > the last dimension (torch also rejects it with selected index k out of range)"
     },
     {
       "op": "topk",
       "ins": [[6, 10]],
       "attrs": {},
       "throws": true,
-      "why": "k は宣言必須（既定値補完をしない — static-k）"
+      "why": "k must be declared (no default filled in — static-k)"
     },
     {
       "op": "topk",
       "ins": [[6, 10]],
       "attrs": { "k": "T" },
       "throws": true,
-      "why": "記号 k は静的形状の前提に載らない（確保バイト数が計画時に決まらない）"
+      "why": "a symbolic k does not fit the static-shape premise (the allocation size is not known at plan time)"
     },
     {
       "op": "topk",
       "ins": [[]],
       "attrs": { "k": 1 },
       "throws": true,
-      "why": "スカラは縮約できない"
+      "why": "a scalar cannot be reduced"
     },
     {
       "op": "topk",
       "ins": [[3, 0]],
       "attrs": { "k": 1 },
       "throws": true,
-      "why": "長さ 0 の最終次元は k >= 1 との突合でそのまま落ちる"
+      "why": "a length-0 last dimension fails the match against k >= 1 as is"
     },
 
     {
       "op": "argmax",
       "ins": [[3, 0]],
       "throws": true,
-      "why": "長さ 0 の最終次元に「最大値の添字」は無い（torch も拒否する）"
+      "why": "a length-0 last dimension has no \"index of the maximum\" (torch also rejects it)"
     },
 
     {
@@ -1349,7 +1349,7 @@
         [4, 3]
       ],
       "throws": true,
-      "why": "縮約次元の不一致"
+      "why": "contracted dimension mismatch"
     },
     {
       "op": "matmul",
@@ -1358,7 +1358,7 @@
         [4, 3]
       ],
       "throws": true,
-      "why": "rank-2 × rank-2 のみ（バッチは bmm）"
+      "why": "rank-2 × rank-2 only (batches are bmm's)"
     },
     {
       "op": "bmm",
@@ -1375,7 +1375,7 @@
         [3, 5]
       ],
       "throws": true,
-      "why": "rank-2 は matmul の担当"
+      "why": "rank 2 is matmul's job"
     },
     {
       "op": "bmm",
@@ -1384,7 +1384,7 @@
         [2, 5, 3]
       ],
       "throws": true,
-      "why": "縮約次元の不一致"
+      "why": "contracted dimension mismatch"
     },
     {
       "op": "bmm",
@@ -1393,7 +1393,7 @@
         [2, 3, 5]
       ],
       "throws": true,
-      "why": "バッチ次元の不一致"
+      "why": "batch dimension mismatch"
     },
 
     {
@@ -1403,7 +1403,7 @@
         [4, 6, 6]
       ],
       "outs": [[4, 6, 6]],
-      "why": "出力は index と同形（値は src から引く）"
+      "why": "the output has the shape of index (values are taken from src)"
     },
     {
       "op": "gather",
@@ -1421,7 +1421,7 @@
         [4, 5, 6]
       ],
       "throws": true,
-      "why": "先行次元の不一致"
+      "why": "leading dimension mismatch"
     },
     {
       "op": "gather",
@@ -1430,7 +1430,7 @@
         [6, 6]
       ],
       "throws": true,
-      "why": "rank の不一致"
+      "why": "rank mismatch"
     },
 
     { "op": "cast", "ins": [[2, 3, 4]], "attrs": { "to": "bool" }, "outs": [[2, 3, 4]] },
@@ -1448,13 +1448,13 @@
       "ins": [[2, 3]],
       "declared": [4, 2],
       "throws": true,
-      "why": "要素数の不一致"
+      "why": "element count mismatch"
     },
     {
       "op": "reshape",
       "ins": [[2, 3]],
       "throws": true,
-      "why": "目標形（出力の宣言 shape）を渡さずに推測しない"
+      "why": "no guessing without the target shape (the output's declared shape)"
     },
 
     { "op": "permute", "ins": [[2, 3, 4]], "attrs": { "dims": [1, 2, 0] }, "outs": [[3, 4, 2]] },
@@ -1463,28 +1463,28 @@
       "ins": [[2, 3, 4, 5]],
       "attrs": { "dims": [3, 0, 2, 1] },
       "outs": [[5, 2, 4, 3]],
-      "why": "rank 上限ちょうど（上限を下げる誤りもここで赤くなる）"
+      "why": "exactly the rank bound (a mistake that lowers the bound also turns red here)"
     },
     {
       "op": "permute",
       "ins": [[2, 3]],
       "attrs": { "dims": [0, 1, 2] },
       "throws": true,
-      "why": "dims と入力 rank の不一致"
+      "why": "dims and input rank mismatch"
     },
     {
       "op": "permute",
       "ins": [[2, 2, 2, 2, 2]],
       "attrs": { "dims": [0, 1, 2, 3, 4] },
       "throws": true,
-      "why": "rank 5 は strided カーネルの params に載らない"
+      "why": "rank 5 does not fit the strided kernels' params"
     },
     {
       "op": "permute",
       "ins": [[]],
       "attrs": { "dims": [0] },
       "throws": true,
-      "why": "rank 0 も同じ理由で載らない"
+      "why": "rank 0 does not fit either, for the same reason"
     },
 
     { "op": "expand", "ins": [[1, 6, 6]], "declared": [16, 6, 6], "outs": [[16, 6, 6]] },
@@ -1493,7 +1493,7 @@
       "ins": [[4]],
       "declared": [3, 4],
       "outs": [[3, 4]],
-      "why": "rank が増える形"
+      "why": "a shape whose rank grows"
     },
     {
       "op": "expand",
@@ -1507,7 +1507,7 @@
       "ins": [[2, 3]],
       "declared": [4, 3],
       "throws": true,
-      "why": "長さ 1 でない次元は拡張できない"
+      "why": "a dimension that is not 1 cannot be expanded"
     },
     {
       "op": "expand",
@@ -1515,14 +1515,14 @@
       "declared": ["2T"],
       "bindings": { "T": 3 },
       "throws": true,
-      "why": "記号次元も長さ 1 でない限り拡張できない"
+      "why": "a symbolic dimension cannot be expanded either unless it is 1"
     },
     {
       "op": "expand",
       "ins": [[1, 1, 1, 1, 1]],
       "declared": [2, 2, 2, 2, 2],
       "throws": true,
-      "why": "rank 5 は strided カーネルの params に載らない"
+      "why": "rank 5 does not fit the strided kernels' params"
     },
 
     {
@@ -1530,7 +1530,7 @@
       "ins": [[1, 8, 5]],
       "attrs": { "dim": 1, "start": 4, "end": 8 },
       "outs": [[1, 4, 5]],
-      "why": "enc_p の stats[:, c:] と同型（チャネル軸の後半）"
+      "why": "same shape as enc_p's stats[:, c:] (the second half of the channel axis)"
     },
     {
       "op": "slice",
@@ -1538,42 +1538,42 @@
       "attrs": { "dim": 1, "start": 0, "end": 2 },
       "bindings": { "T": 6 },
       "outs": [[1, 2, "T"]],
-      "why": "切り出す軸だけが静的で、他の軸は記号のまま残る"
+      "why": "only the sliced axis is static; the other axes stay symbolic"
     },
     {
       "op": "slice",
       "ins": [[6]],
       "attrs": { "dim": 0, "start": 0, "end": 6 },
       "outs": [[6]],
-      "why": "全長の切り出し（恒等コピー）も受理する"
+      "why": "a full-length slice (an identity copy) is accepted too"
     },
     {
       "op": "slice",
       "ins": [[3, 5]],
       "attrs": { "dim": 1, "start": 2, "end": 6 },
       "throws": true,
-      "why": "end が軸長を超える（GPU では例外なしに隣の行を読む形）"
+      "why": "end exceeds the axis length (on the GPU it would read the next row without an exception)"
     },
     {
       "op": "slice",
       "ins": [[3, 5]],
       "attrs": { "dim": 1, "start": 4, "end": 2 },
       "throws": true,
-      "why": "start > end は長さが負（キーを跨ぐ不変条件）"
+      "why": "start > end gives a negative length (an invariant spanning keys)"
     },
     {
       "op": "slice",
       "ins": [[3, 5]],
       "attrs": { "dim": 2, "start": 0, "end": 1 },
       "throws": true,
-      "why": "dim が入力 rank の外"
+      "why": "dim outside the input rank"
     },
     {
       "op": "slice",
       "ins": [[2, 2, 2, 2, 2]],
       "attrs": { "dim": 0, "start": 0, "end": 1 },
       "throws": true,
-      "why": "rank 5 は strided カーネルの params に載らない"
+      "why": "rank 5 does not fit the strided kernels' params"
     },
 
     {
@@ -1584,7 +1584,7 @@
       ],
       "attrs": { "dim": 1 },
       "outs": [[1, 6, 5]],
-      "why": "coupling reverse の cat([x0,x1], 1) と同型（軸の和）"
+      "why": "same shape as coupling reverse's cat([x0,x1], 1) (the sum of the axes)"
     },
     {
       "op": "cat",
@@ -1595,7 +1595,7 @@
       ],
       "attrs": { "dim": 1 },
       "outs": [[2, 8]],
-      "why": "3 入力（可変アリティ — 契約の arity 2 は下限）"
+      "why": "3 inputs (variable arity — the contract's arity 2 is the lower bound)"
     },
     {
       "op": "cat",
@@ -1606,7 +1606,7 @@
       "attrs": { "dim": 1 },
       "bindings": { "T": 4 },
       "outs": [[1, 8, "T"]],
-      "why": "連結軸だけが静的で、他の軸は記号のまま一致を要求する"
+      "why": "only the concatenation axis is static; the other axes must match as symbols"
     },
     {
       "op": "cat",
@@ -1617,7 +1617,7 @@
       "attrs": { "dim": 1 },
       "bindings": { "T": 7 },
       "outs": [[1, "T+1519", 4]],
-      "why": "記号軸 + 定数（ADR 0046 — DiT の joint attention の KV 連結と同型）"
+      "why": "symbolic axis + constant (ADR 0046 — same shape as the KV concatenation of the DiT's joint attention)"
     },
     {
       "op": "cat",
@@ -1628,7 +1628,7 @@
       "attrs": { "dim": 0 },
       "bindings": { "T": 5 },
       "outs": [["2T", 3]],
-      "why": "同一シンボルどうしの連結は係数が積み上がる（ADR 0046）"
+      "why": "concatenating the same symbol accumulates the coefficients (ADR 0046)"
     },
     {
       "op": "cat",
@@ -1640,14 +1640,14 @@
       "attrs": { "dim": 0 },
       "bindings": { "T": 3 },
       "outs": [["3T+5", 3]],
-      "why": "係数付き・オフセット付き・定数の混在も同一シンボルなら総和が正準形に載る"
+      "why": "a mix of coefficients, offsets and constants also sums to the canonical form when the symbol is the same"
     },
     {
       "op": "cat",
       "ins": [[2, 3]],
       "attrs": { "dim": 0 },
       "throws": true,
-      "why": "入力 1 本の cat は恒等コピー（下限 2 を割る）"
+      "why": "a cat of one input is an identity copy (below the lower bound of 2)"
     },
     {
       "op": "cat",
@@ -1657,7 +1657,7 @@
       ],
       "attrs": { "dim": 1 },
       "throws": true,
-      "why": "連結軸以外が一致しない（出力に誰も書かない領域ができる）"
+      "why": "axes other than the concatenation axis do not match (a region nobody writes to would appear in the output)"
     },
     {
       "op": "cat",
@@ -1667,7 +1667,7 @@
       ],
       "attrs": { "dim": 0 },
       "throws": true,
-      "why": "rank の不一致"
+      "why": "rank mismatch"
     },
     {
       "op": "cat",
@@ -1677,7 +1677,7 @@
       ],
       "attrs": { "dim": 2 },
       "throws": true,
-      "why": "dim が入力 rank の外"
+      "why": "dim outside the input rank"
     },
     {
       "op": "cat",
@@ -1687,7 +1687,7 @@
       ],
       "attrs": { "dim": 0 },
       "throws": true,
-      "why": "rank 5 は strided カーネルの params に載らない"
+      "why": "rank 5 does not fit the strided kernels' params"
     },
 
     {
@@ -1695,7 +1695,7 @@
       "ins": [[1, 2, 6, 6]],
       "attrs": { "left": 4, "right": 4 },
       "outs": [[1, 2, 6, 14]],
-      "why": "相対位置注意の value 側 F.pad(p_attn, [w, w])（w = 4）"
+      "why": "the value side of relative-position attention, F.pad(p_attn, [w, w]) (w = 4)"
     },
     {
       "op": "pad",
@@ -1703,21 +1703,21 @@
       "attrs": { "left": 4, "right": 4 },
       "bindings": { "T": 6 },
       "outs": [[1, 2, "T", "T+8"]],
-      "why": "記号長の最終次元は T+2w = T+8（次元言語のオフセット付き形）"
+      "why": "a symbolic last dimension becomes T+2w = T+8 (the offset form of the dimension language)"
     },
     {
       "op": "pad",
       "ins": [[3, 2]],
       "attrs": { "left": 0, "right": 3 },
       "outs": [[3, 5]],
-      "why": "非対称パディング（片側 0）"
+      "why": "asymmetric padding (0 on one side)"
     },
     {
       "op": "pad",
       "ins": [[]],
       "attrs": { "left": 1, "right": 1 },
       "throws": true,
-      "why": "スカラには埋める最終次元が無い"
+      "why": "a scalar has no last dimension to pad"
     },
 
     {
@@ -1726,28 +1726,28 @@
       "attrs": { "dim": 1 },
       "bindings": { "T": 5 },
       "outs": [[1, 192, "T"]],
-      "why": "flow の Flip（192ch の静的軸）— shape は恒等"
+      "why": "flow's Flip (a static 192ch axis) — the shape is the identity"
     },
     {
       "op": "flip",
       "ins": [[1, 2, 7]],
       "attrs": { "dim": 1 },
       "outs": [[1, 2, 7]],
-      "why": "sdp の Flip（2ch）"
+      "why": "sdp's Flip (2ch)"
     },
     {
       "op": "flip",
       "ins": [[2, 3]],
       "attrs": { "dim": 2 },
       "throws": true,
-      "why": "dim が入力 rank の外"
+      "why": "dim outside the input rank"
     },
     {
       "op": "flip",
       "ins": [[]],
       "attrs": { "dim": 0 },
       "throws": true,
-      "why": "スカラに反転する軸は無い"
+      "why": "a scalar has no axis to flip"
     },
 
     {
@@ -1762,7 +1762,7 @@
       },
       "bindings": { "T": 7 },
       "outs": [["T", "T"]],
-      "why": "相対位置バケット表の実測形（2 軸とも記号）"
+      "why": "the observed shape of the relative-position bucket table (both axes symbolic)"
     },
     {
       "op": "sym_prefix_slice",
@@ -1770,7 +1770,7 @@
       "attrs": { "sym": "T", "slices": [{ "dim": 0, "coeff": 1, "offset": 0 }] },
       "bindings": { "T": 7 },
       "outs": [["T", 64]],
-      "why": "縮めない軸は Tmax 形のまま残る"
+      "why": "an axis that is not shrunk keeps its Tmax shape"
     },
     {
       "op": "sym_prefix_slice",
@@ -1785,7 +1785,7 @@
       "attrs": { "sym": "T", "slices": [{ "dim": 2, "coeff": 1, "offset": 0 }] },
       "bindings": { "T": 4 },
       "throws": true,
-      "why": "dim が入力 rank の外"
+      "why": "dim outside the input rank"
     },
     {
       "op": "sym_prefix_slice",
@@ -1793,7 +1793,7 @@
       "attrs": { "sym": "T", "slices": [{ "dim": 0, "coeff": 1, "offset": 0 }] },
       "bindings": { "T": 2 },
       "throws": true,
-      "why": "rank 5 は strided カーネルの params に載らない"
+      "why": "rank 5 does not fit the strided kernels' params"
     },
 
     { "op": "linear", "ins": [[5, 7], [3, 7], [3]], "outs": [[5, 3]] },
@@ -1804,18 +1804,18 @@
       "outs": [[1, "T", 192]]
     },
     { "op": "linear", "ins": [[7], [3, 7], [3]], "outs": [[3]] },
-    { "op": "linear", "ins": [[5, 7], [3, 6], [3]], "throws": true, "why": "入力特徴数の不一致" },
+    { "op": "linear", "ins": [[5, 7], [3, 6], [3]], "throws": true, "why": "in-feature mismatch" },
     {
       "op": "linear",
       "ins": [[5, 7], [3, 7], [4]],
       "throws": true,
-      "why": "bias 長が出力特徴数と違う"
+      "why": "bias length differs from the out features"
     },
     {
       "op": "linear",
       "ins": [[5, 7], [2, 3, 7], [3]],
       "throws": true,
-      "why": "W は rank-2 のみ"
+      "why": "W is rank-2 only"
     },
 
     {
@@ -1836,14 +1836,14 @@
       "ins": [[3, 4], [8], [8]],
       "attrs": { "normalized_shape": [8], "eps": 1e-5 },
       "throws": true,
-      "why": "normalized_shape が入力の最終次元と違う"
+      "why": "normalized_shape differs from the input's last dimension"
     },
     {
       "op": "layer_norm",
       "ins": [[3, 8], [4], [8]],
       "attrs": { "normalized_shape": [8], "eps": 1e-5 },
       "throws": true,
-      "why": "affine の長さが normalized_shape と違う"
+      "why": "the affine length differs from normalized_shape"
     },
 
     {
@@ -1851,7 +1851,7 @@
       "ins": [[4, 10], [10]],
       "attrs": { "eps": 1e-6 },
       "outs": [[4, 10]],
-      "why": "アリティ 2（bias は無い）— 正規化長の正本は weight の長さ"
+      "why": "arity 2 (no bias) — the source of truth for the normalized length is the weight's length"
     },
     {
       "op": "rms_norm",
@@ -1859,14 +1859,14 @@
       "attrs": { "eps": 1e-6 },
       "bindings": { "T": 7 },
       "outs": [[1, "T", 1024]],
-      "why": "Qwen3 / DiT の実測形（hidden 1024・記号長 T）"
+      "why": "the observed shape of Qwen3 / DiT (hidden 1024, symbolic length T)"
     },
     {
       "op": "rms_norm",
       "ins": [[3, 8], [4]],
       "attrs": { "eps": 1e-6 },
       "throws": true,
-      "why": "weight 長が入力の最終次元と違う"
+      "why": "weight length differs from the input's last dimension"
     },
     {
       "op": "rms_norm",
@@ -1876,28 +1876,28 @@
       ],
       "attrs": { "eps": 1e-6 },
       "throws": true,
-      "why": "weight は rank1 のみ（[1,8] は要素数が合っても受理しない）"
+      "why": "weight is rank1 only ([1,8] is rejected even though the element count matches)"
     },
     {
       "op": "rms_norm",
       "ins": [[3, 0], [0]],
       "attrs": { "eps": 1e-6 },
       "throws": true,
-      "why": "長さ 0 の軸は正規化できない（mean が 0/0 になる）"
+      "why": "a length-0 axis cannot be normalized (the mean becomes 0/0)"
     },
     {
       "op": "rms_norm",
       "ins": [[3, 8], [8]],
       "attrs": {},
       "throws": true,
-      "why": "eps は必須（既定値補完はしない）"
+      "why": "eps is required (no default filled in)"
     },
     {
       "op": "rms_norm",
       "ins": [[3, 8], [8]],
       "attrs": { "eps": 0 },
       "throws": true,
-      "why": "eps 0 は全要素 0 の行で 1/sqrt(0) を作る"
+      "why": "eps 0 makes 1/sqrt(0) on an all-zero row"
     },
 
     { "op": "softmax", "ins": [[2, 3, 4]], "attrs": { "dim": 2 }, "outs": [[2, 3, 4]] },
@@ -1913,14 +1913,14 @@
       "ins": [[2, 3, 4]],
       "attrs": { "dim": 1 },
       "throws": true,
-      "why": "最終次元以外は受理しない（行カーネルの前提が崩れる）"
+      "why": "only the last dimension is accepted (otherwise the row kernel's premise breaks)"
     },
     {
       "op": "softmax",
       "ins": [[3, 0]],
       "attrs": { "dim": 1 },
       "throws": true,
-      "why": "空軸の softmax は amax の identity が定義できない"
+      "why": "softmax over an empty axis has no defined amax identity"
     },
 
     {
@@ -1928,7 +1928,7 @@
       "ins": [[2, 3, 4]],
       "attrs": { "dim": 2 },
       "outs": [[2, 3, 4]],
-      "why": "shape 規則は softmax と同一（ADR 0044）"
+      "why": "the shape rule is the same as softmax (ADR 0044)"
     },
     {
       "op": "safe_softmax",
@@ -1942,14 +1942,14 @@
       "ins": [[2, 3, 4]],
       "attrs": { "dim": 1 },
       "throws": true,
-      "why": "最終次元以外は受理しない（softmax と同じ絞り方）"
+      "why": "only the last dimension is accepted (the same narrowing as softmax)"
     },
     {
       "op": "safe_softmax",
       "ins": [[3, 0]],
       "attrs": { "dim": 1 },
       "throws": true,
-      "why": "空軸の safe_softmax は amax の identity が定義できない"
+      "why": "safe_softmax over an empty axis has no defined amax identity"
     },
 
     {
@@ -1961,7 +1961,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "outs": [[2, 3, 5, 4]],
-      "why": "B / H / M / N / D が全て違う cross-attention 形（軸の取り違えが値に出る形）"
+      "why": "a cross-attention shape where B / H / M / N / D all differ (a shape where swapped axes show up in the values)"
     },
     {
       "op": "attention",
@@ -1972,7 +1972,7 @@
       ],
       "attrs": { "scale": 0.2973017692565918 },
       "outs": [[1, 16, 1024, 128]],
-      "why": "DiT の self-attention 実測形（scale は f32(128^-0.25) = torch math decomp の定数）"
+      "why": "the observed shape of the DiT's self-attention (scale is f32(128^-0.25) = the constant of torch's math decomp)"
     },
     {
       "op": "attention",
@@ -1983,7 +1983,7 @@
       ],
       "attrs": { "scale": 0.2259794473648071 },
       "outs": [[1, 1, 4096, 384]],
-      "why": "VAE decoder の実測形（D=384 — flash 型なら共有メモリに載らない D も段階融合は通る）"
+      "why": "the observed shape of the VAE decoder (D=384 — a D that would not fit in shared memory with the flash kernel still passes with staged fusion)"
     },
     {
       "op": "attention",
@@ -1995,7 +1995,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "outs": [[2, 3, 5, 4]],
-      "why": "省略可能な第 4 入力 = 加算 mask [1,1,M,N]（B·H の全バッチへ broadcast）"
+      "why": "the optional 4th input = additive mask [1,1,M,N] (broadcast over every batch of B·H)"
     },
     {
       "op": "attention",
@@ -2007,7 +2007,7 @@
       ],
       "attrs": { "scale": 0.3535533845424652 },
       "outs": [[1, 8, 12, 64]],
-      "why": "双方向バンドマスク付き self-attention の実測形（EmbeddingGemma の sliding window）"
+      "why": "the observed shape of self-attention with a bidirectional band mask (EmbeddingGemma's sliding window)"
     },
     {
       "op": "attention",
@@ -2018,7 +2018,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "outs": [[2, 4, 5, 4]],
-      "why": "GQA の整除 broadcast r=2（ADR 0067 決定 1 — 出力は q 側の H）"
+      "why": "GQA's divisible broadcast r=2 (ADR 0067 decision 1 — the output has the q-side H)"
     },
     {
       "op": "attention",
@@ -2029,7 +2029,7 @@
       ],
       "attrs": { "scale": 0.2973017692565918 },
       "outs": [[1, 16, 4, 128]],
-      "why": "素の GQA 16:2 の実測形（MiniCPM5-1B — head_dim は独立フィールド）"
+      "why": "the observed shape of plain GQA 16:2 (MiniCPM5-1B — head_dim is an independent field)"
     },
     {
       "op": "attention",
@@ -2040,7 +2040,7 @@
       ],
       "attrs": { "scale": 0.25 },
       "outs": [[1, 8, 3, 256]],
-      "why": "MQA 8:1 の実測形（Gemma 4 E2B — Hkv=1 も同じ整除式で表す）"
+      "why": "the observed shape of MQA 8:1 (Gemma 4 E2B — Hkv=1 is expressed by the same divisibility formula)"
     },
     {
       "op": "attention",
@@ -2052,7 +2052,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "outs": [[2, 4, 5, 4]],
-      "why": "GQA × 加算 mask（mask は [1,1,M,N] のまま — Hkv とは独立の軸）"
+      "why": "GQA × additive mask (the mask stays [1,1,M,N] — an axis independent of Hkv)"
     },
     {
       "op": "attention",
@@ -2062,7 +2062,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "アリティは 3 か 4（v の欠落）"
+      "why": "arity is 3 or 4 (v missing)"
     },
     {
       "op": "attention",
@@ -2075,7 +2075,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "mask は 1 本だけ（上限 4 — 可変アリティではない）"
+      "why": "only one mask (upper bound 4 — not variable arity)"
     },
     {
       "op": "attention",
@@ -2087,7 +2087,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "mask の B が 1 でない形（[B,1,M,N] は受理しない — broadcast は B·H 全体固定）"
+      "why": "mask B is not 1 ([B,1,M,N] is rejected — the broadcast is fixed over all of B·H)"
     },
     {
       "op": "attention",
@@ -2099,7 +2099,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "mask の H が 1 でない形（head 別マスクは語彙に無い）"
+      "why": "mask H is not 1 (per-head masks are not in the vocabulary)"
     },
     {
       "op": "attention",
@@ -2111,7 +2111,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "mask の rank が 4 でない形（rank-2 の [M,N] は受理しない）"
+      "why": "mask rank is not 4 (a rank-2 [M,N] is rejected)"
     },
     {
       "op": "attention",
@@ -2123,7 +2123,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "mask の M が q と不一致"
+      "why": "mask M does not match q"
     },
     {
       "op": "attention",
@@ -2135,7 +2135,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "mask の N が k と不一致（M と N を取り違えた形 — 正方 mask なら素通りする軸）"
+      "why": "mask N does not match k (M and N swapped — an axis that slips through with a square mask)"
     },
     {
       "op": "attention",
@@ -2146,7 +2146,7 @@
       ],
       "attrs": {},
       "throws": true,
-      "why": "scale は宣言必須（既定値補完はしない）"
+      "why": "scale must be declared (no default filled in)"
     },
     {
       "op": "attention",
@@ -2157,7 +2157,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "rank-3（head 軸を畳んだ形）は受理しない — rank-4 head-first 固定"
+      "why": "rank 3 (head axis folded) is rejected — fixed at rank-4 head-first"
     },
     {
       "op": "attention",
@@ -2168,7 +2168,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "B と H の取り違え（積 6 は同じ — 軸ごとに突き合わせないと素通りする）"
+      "why": "B and H swapped (the product 6 is the same — it slips through unless each axis is matched)"
     },
     {
       "op": "attention",
@@ -2179,7 +2179,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "v の D だけ違う形（契約は 3 者とも同じ D）"
+      "why": "only v's D differs (the contract is the same D for all three)"
     },
     {
       "op": "attention",
@@ -2190,7 +2190,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "k と v の N が違う形"
+      "why": "k and v have different N"
     },
     {
       "op": "attention",
@@ -2201,7 +2201,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "H が Hkv の整数倍でない形（GQA は H % Hkv == 0 だけ — ADR 0067 決定 1）"
+      "why": "H is not an integer multiple of Hkv (GQA only requires H % Hkv == 0 — ADR 0067 decision 1)"
     },
     {
       "op": "attention",
@@ -2212,7 +2212,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "Hkv > H（broadcast の向きが逆 — q 側を増やす形は語彙に無い）"
+      "why": "Hkv > H (the broadcast goes the wrong way — growing the q side is not in the vocabulary)"
     },
     {
       "op": "attention",
@@ -2223,7 +2223,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "H = 0（`0 % Hkv == 0` は整除を満たすので H ≥ Hkv を別条件で見る）"
+      "why": "H = 0 (`0 % Hkv == 0` satisfies divisibility, so H ≥ Hkv is checked as a separate condition)"
     },
     {
       "op": "attention",
@@ -2234,7 +2234,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "(H,Hkv) = (0,0)（H = Hkv は等値で整除枝を短絡するので Hkv ≥ 1 を先に見る）"
+      "why": "(H,Hkv) = (0,0) (H = Hkv short-circuits the divisibility branch by equality, so Hkv ≥ 1 is checked first)"
     },
     {
       "op": "attention",
@@ -2245,7 +2245,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "k と v の Hkv が違う形（GQA でも k/v 間は完全一致が検出線）"
+      "why": "k and v have different Hkv (even with GQA, an exact match between k/v is the detection line)"
     },
     {
       "op": "attention",
@@ -2256,7 +2256,7 @@
       ],
       "attrs": { "scale": 0.5 },
       "throws": true,
-      "why": "N が 0 の attention は amax の identity が定義できない（softmax と同じ理由）"
+      "why": "attention with N of 0 has no defined amax identity (the same reason as softmax)"
     },
 
     {
@@ -2270,7 +2270,7 @@
       "states": { "k": "layer0.k", "v": "layer0.v" },
       "state_shapes": { "layer0.k": [1, 1, 4096, 128], "layer0.v": [1, 1, 4096, 128] },
       "outs": [[1, 8, 4, 128]],
-      "why": "states 形の full 層（Gemma 4 E2B の MQA 8:1 — ins は今 step の chunk だけで、過去は容量 4096 のスロットが持つ）"
+      "why": "a full layer in the states form (Gemma 4 E2B's MQA 8:1 — ins is only the current step's chunk, and the past is held by a slot of capacity 4096)"
     },
     {
       "op": "attention",
@@ -2283,7 +2283,7 @@
       "states": { "k": "layer0.k", "v": "layer0.v" },
       "state_shapes": { "layer0.k": [1, 1, 512, 128], "layer0.v": [1, 1, 512, 128] },
       "outs": [[1, 8, 1, 128]],
-      "why": "states 形の sliding 層 × decode（queryLength=1 の M=1・window = 容量ちょうど）"
+      "why": "a sliding layer in the states form × decode (M=1 from queryLength=1, window = exactly the capacity)"
     },
     {
       "op": "attention",
@@ -2296,7 +2296,7 @@
       "states": { "k": "kv.k", "v": "kv.v" },
       "state_shapes": { "kv.k": [2, 2, 16, 8], "kv.v": [2, 2, 16, 8] },
       "outs": [[2, 4, 3, 8]],
-      "why": "states 形 × GQA 2:1 × B>1（B / Hkv / D がスロットと一致し、M だけが chunk 側）"
+      "why": "states form × GQA 2:1 × B>1 (B / Hkv / D match the slot, and only M is on the chunk side)"
     },
     {
       "op": "attention",
@@ -2308,7 +2308,7 @@
       "attrs": { "scale": 0.5 },
       "states": { "k": "layer0.k", "v": "layer0.v" },
       "throws": true,
-      "why": "解決済みスロット shape が無い（state 参照ノードの実行には GenerationContext が要る — 黙って従来形に落ちない）"
+      "why": "no resolved slot shape (running a state-referencing node needs a GenerationContext — it does not silently fall back to the plain form)"
     },
     {
       "op": "attention",
@@ -2322,7 +2322,7 @@
       "states": { "k": "layer0.k", "v": "layer0.v" },
       "state_shapes": { "layer0.k": [1, 1, 4096, 128], "layer0.v": [1, 1, 4096, 128] },
       "throws": true,
-      "why": "states 形 + mask（causal 固定で mask tensor は実体化しない — ADR 0067 決定 4）"
+      "why": "states form + mask (causal is fixed and no mask tensor is materialized — ADR 0067 decision 4)"
     },
     {
       "op": "attention",
@@ -2335,7 +2335,7 @@
       "states": { "k": "layer0.k", "v": "layer0.v" },
       "state_shapes": { "layer0.k": [1, 1, 4096, 128], "layer0.v": [1, 1, 4096, 128] },
       "throws": true,
-      "why": "states 形で M が q と k/v で違う（従来形の自由な N と違い、今 step の chunk は 3 者共有）"
+      "why": "in the states form, M differs between q and k/v (unlike the plain form's free N, the current step's chunk is shared by all three)"
     },
     {
       "op": "attention",
@@ -2348,7 +2348,7 @@
       "states": { "k": "layer0.k", "v": "layer0.v" },
       "state_shapes": { "layer0.k": [1, 1, 4096, 128], "layer0.v": [1, 1, 2048, 128] },
       "throws": true,
-      "why": "k / v スロットが同形でない（片方だけ先に wrap する ring は値が静かにずれる）"
+      "why": "the k / v slots do not have the same shape (a ring where only one side wraps first silently shifts the values)"
     },
     {
       "op": "attention",
@@ -2361,7 +2361,7 @@
       "states": { "k": "layer0.k", "v": "layer0.v" },
       "state_shapes": { "layer0.k": [1, 2, 4096, 128], "layer0.v": [1, 2, 4096, 128] },
       "throws": true,
-      "why": "スロットの Hkv が ins と不一致（別の層のスロットを参照した形 — 容量が同じだと沈黙誤読になる）"
+      "why": "the slot's Hkv does not match ins (a slot of another layer referenced — with equal capacities it would be a silent misread)"
     },
     {
       "op": "attention",
@@ -2374,7 +2374,7 @@
       "states": { "k": "layer0.k", "v": "layer0.v" },
       "state_shapes": { "layer0.k": [1, 4096, 128], "layer0.v": [1, 4096, 128] },
       "throws": true,
-      "why": "スロットが rank-4 でない（物理形は [B,Hkv,C,D] 固定）"
+      "why": "the slot is not rank 4 (the physical shape is fixed at [B,Hkv,C,D])"
     },
     {
       "op": "attention",
@@ -2387,7 +2387,7 @@
       "states": { "k": "layer0.k", "v": "layer0.v" },
       "state_shapes": { "layer0.k": [1, 1, 512, 128], "layer0.v": [1, 1, 512, 128] },
       "throws": true,
-      "why": "window > C（ring 幅が容量を超えると、書いた行が同 step 中に自分で潰れる）"
+      "why": "window > C (when the ring width exceeds the capacity, rows written in the same step overwrite themselves)"
     },
 
     {
@@ -2397,7 +2397,7 @@
       "states": { "k": "layer0.k", "v": "layer0.v" },
       "state_shapes": { "layer0.k": [1, 1, 520, 128], "layer0.v": [1, 1, 520, 128] },
       "outs": [[1, 8, 1, 128]],
-      "why": "readonly の sliding 層（ADR 0096 段 2 §1.2 — ins は q だけで、過去は借り物スロットが持つ。MQA 8:1・window < C の余裕つき）"
+      "why": "a readonly sliding layer (ADR 0096 stage 2 §1.2 — ins is q alone and the past is held by the borrowed slot. MQA 8:1, with slack window < C)"
     },
     {
       "op": "attention",
@@ -2406,7 +2406,7 @@
       "states": { "k": "layer1.k", "v": "layer1.v" },
       "state_shapes": { "layer1.k": [1, 1, 4096, 128], "layer1.v": [1, 1, 4096, 128] },
       "outs": [[1, 8, 1, 128]],
-      "why": "readonly の full 層（window 宣言なし = 全 context・列は [0, P)）"
+      "why": "a readonly full layer (no window declared = the full context, columns [0, P))"
     },
     {
       "op": "attention",
@@ -2415,7 +2415,7 @@
       "states": { "k": "layer1.k", "v": "layer1.v" },
       "state_shapes": { "layer1.k": [1, 1, 4096, 128], "layer1.v": [1, 1, 4096, 128] },
       "throws": true,
-      "why": "readonly の M が 1 でない（読むのは論理位置 P−1 の 1 行だけ — 2 行目以降は同じ列範囲を読む沈黙誤値になる）"
+      "why": "readonly M is not 1 (only the one row at logical position P−1 is read — a second row onward would read the same column range, a silent wrong value)"
     },
     {
       "op": "attention",
@@ -2428,7 +2428,7 @@
       "states": { "k": "layer1.k", "v": "layer1.v" },
       "state_shapes": { "layer1.k": [1, 1, 4096, 128], "layer1.v": [1, 1, 4096, 128] },
       "throws": true,
-      "why": "readonly なのに今 step の k / v を取っている（ins は q 1 本ちょうど）"
+      "why": "readonly yet takes the current step's k / v (ins is exactly one q)"
     },
     {
       "op": "attention",
@@ -2437,7 +2437,7 @@
       "states": { "k": "layer1.k", "v": "layer1.v" },
       "state_shapes": { "layer1.k": [1, 3, 4096, 128], "layer1.v": [1, 3, 4096, 128] },
       "throws": true,
-      "why": "readonly の H (8) が スロットの Hkv (3) の整数倍でない（GQA は整除 broadcast のみ）"
+      "why": "readonly H (8) is not an integer multiple of the slot's Hkv (3) (GQA is divisible broadcast only)"
     },
 
     {
@@ -2447,7 +2447,7 @@
       "states": { "slot": "layer0.k" },
       "state_shapes": { "layer0.k": [1, 1, 4096, 128] },
       "outs": [],
-      "why": "full スロットへの append（出力 0 本 = 値を定義しない effect op — ADR 0067 決定 5）"
+      "why": "append to a full slot (0 outputs = an effect op that defines no value — ADR 0067 decision 5)"
     },
     {
       "op": "state_append",
@@ -2456,7 +2456,7 @@
       "states": { "slot": "kv.k" },
       "state_shapes": { "kv.k": [2, 2, 16, 8] },
       "outs": [],
-      "why": "sliding スロットへの ring 書込み（window = 容量ちょうど）"
+      "why": "ring write to a sliding slot (window = exactly the capacity)"
     },
     {
       "op": "state_append",
@@ -2464,7 +2464,7 @@
       "attrs": {},
       "states": { "slot": "layer0.k" },
       "throws": true,
-      "why": "解決済みスロット shape が無い（attention の states 形と同じ診断 — GenerationContext が要る）"
+      "why": "no resolved slot shape (the same diagnosis as attention's states form — a GenerationContext is needed)"
     },
     {
       "op": "state_append",
@@ -2473,7 +2473,7 @@
       "states": { "slot": "layer0.k" },
       "state_shapes": { "layer0.k": [1, 1, 4096, 128] },
       "throws": true,
-      "why": "入力が rank-4 でない（宣言 shape は [B,Hkv,M,D] 固定 — attention の ins と同じ物理 chunk 次元）"
+      "why": "the input is not rank 4 (the declared shape is fixed at [B,Hkv,M,D] — the same physical chunk dimensions as attention's ins)"
     },
     {
       "op": "state_append",
@@ -2482,7 +2482,7 @@
       "states": { "slot": "layer0.k" },
       "state_shapes": { "layer0.k": [1, 1, 4096, 128] },
       "throws": true,
-      "why": "入力とスロットの Hkv が不一致（読み側 attention と同じ検出線を書き側にも課す）"
+      "why": "the Hkv of the input and the slot do not match (the write side gets the same detection line as the read side's attention)"
     },
     {
       "op": "state_append",
@@ -2491,7 +2491,7 @@
       "states": { "slot": "layer0.k" },
       "state_shapes": { "layer0.k": [1, 1, 4096, 128] },
       "throws": true,
-      "why": "window > C（書き側でも同じ上限 — 読み書き同式 MUST の一部）"
+      "why": "window > C (the same bound on the write side — part of the MUST that reading and writing use the same formula)"
     },
 
     {
@@ -2518,14 +2518,14 @@
       "ins": [[7, 4], []],
       "attrs": { "padding_idx": -1 },
       "throws": true,
-      "why": "スカラ添字（rank 0）は契約の出力 […index, H] に載らない"
+      "why": "a scalar index (rank 0) does not fit the contract's output […index, H]"
     },
     {
       "op": "embedding",
       "ins": [[7], [5]],
       "attrs": { "padding_idx": -1 },
       "throws": true,
-      "why": "weight は rank-2 [V,H] のみ"
+      "why": "weight is rank-2 [V,H] only"
     },
 
     {
@@ -2558,21 +2558,21 @@
       "ins": [[1], [4]],
       "attrs": { "value": 0 },
       "throws": true,
-      "why": "mask が x を広げる形は拒否（出力は常に x と同形）"
+      "why": "a mask that widens x is rejected (the output always has x's shape)"
     },
     {
       "op": "masked_fill",
       "ins": [[2, 2, 2, 2, 2], [2]],
       "attrs": { "value": 0 },
       "throws": true,
-      "why": "rank 5 は strided カーネルの params に載らない"
+      "why": "rank 5 does not fit the strided kernels' params"
     },
     {
       "op": "masked_fill",
       "ins": [[2, 3], []],
       "attrs": { "value": 0 },
       "throws": true,
-      "why": "rank 0 の mask も同じ理由で載らない"
+      "why": "a rank-0 mask does not fit either, for the same reason"
     },
 
     {
@@ -2586,7 +2586,7 @@
       "ins": [[1, 2, 11], [3, 2, 4], [3]],
       "attrs": { "stride": 2, "padding": 0, "dilation": 1, "groups": 1 },
       "outs": [[1, 3, 4]],
-      "why": "出力長は floor((L + 2P - D*(K-1) - 1) / S) + 1"
+      "why": "output length is floor((L + 2P - D*(K-1) - 1) / S) + 1"
     },
     {
       "op": "conv1d",
@@ -2594,7 +2594,7 @@
       "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 1 },
       "bindings": { "P": 8 },
       "outs": [[1, 192, "P"]],
-      "why": "記号長 × stride 1 は長さが保たれる（実測 dp の形）"
+      "why": "symbolic length × stride 1 keeps the length (the observed shape of dp)"
     },
     {
       "op": "conv1d",
@@ -2602,7 +2602,7 @@
       "attrs": { "stride": 2, "padding": 0, "dilation": 1, "groups": 1 },
       "bindings": { "T": 5 },
       "outs": [[1, 6, "T"]],
-      "why": "stride が係数を割り切る記号長は正準表記へ落ちる"
+      "why": "a symbolic length whose coefficient the stride divides reduces to the canonical notation"
     },
     {
       "op": "conv1d",
@@ -2610,7 +2610,7 @@
       "attrs": { "stride": 1, "padding": 6, "dilation": 3, "groups": 192 },
       "bindings": { "P": 20 },
       "outs": [[1, 192, "P"]],
-      "why": "sdp の DDSConv 実測形（depthwise groups=192 / dilation 3 / k 5 / pad 6）"
+      "why": "the observed shape of sdp's DDSConv (depthwise groups=192 / dilation 3 / k 5 / pad 6)"
     },
     {
       "op": "conv1d",
@@ -2618,70 +2618,70 @@
       "attrs": { "stride": 1, "padding": 25, "dilation": 5, "groups": 1 },
       "bindings": { "T": 12 },
       "outs": [[1, 8, "T"]],
-      "why": "dec の ResBlock1 実測形（dilation 5 / k 11 / pad d*(k-1)/2 = 25）"
+      "why": "the observed shape of dec's ResBlock1 (dilation 5 / k 11 / pad d*(k-1)/2 = 25)"
     },
     {
       "op": "conv1d",
       "ins": [[1, 2, 10], [3, 2, 3], [3]],
       "attrs": { "stride": 1, "padding": 0, "dilation": 3, "groups": 1 },
       "outs": [[1, 3, 4]],
-      "why": "dilation は出力長を D*(K-1) だけ縮める"
+      "why": "dilation shortens the output length by D*(K-1)"
     },
     {
       "op": "conv1d",
       "ins": [[1, 6, 11], [9, 2, 3], [9]],
       "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 3 },
       "outs": [[1, 9, 11]],
-      "why": "中間の groups（Cin/groups = 2 が重みの第 2 軸・Cout は groups の倍数）"
+      "why": "intermediate groups (Cin/groups = 2 is the weight's second axis; Cout is a multiple of groups)"
     },
     {
       "op": "conv1d",
       "ins": [[2, 3, 9], [4, 2, 3], [4]],
       "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 1 },
       "throws": true,
-      "why": "重みの第 2 軸が Cin/groups でない（groups 1 なので Cin と完全一致が契約）"
+      "why": "the weight's second axis is not Cin/groups (groups is 1, so the contract is an exact match with Cin)"
     },
     {
       "op": "conv1d",
       "ins": [[1, 6, 11], [6, 6, 3], [6]],
       "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 6 },
       "throws": true,
-      "why": "depthwise なのに重みの第 2 軸が Cin のまま（Cin/groups = 1 のはず）"
+      "why": "depthwise, yet the weight's second axis is still Cin (it should be Cin/groups = 1)"
     },
     {
       "op": "conv1d",
       "ins": [[1, 6, 11], [9, 2, 3], [9]],
       "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 4 },
       "throws": true,
-      "why": "groups が Cin を割り切らない"
+      "why": "groups does not divide Cin"
     },
     {
       "op": "conv1d",
       "ins": [[1, 6, 11], [8, 3, 3], [8]],
       "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 3 },
       "throws": true,
-      "why": "groups が Cout を割り切らない"
+      "why": "groups does not divide Cout"
     },
     {
       "op": "conv1d",
       "ins": [[2, 3, 9], [4, 3, 3], [3]],
       "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 1 },
       "throws": true,
-      "why": "bias 長が出力チャネルと違う"
+      "why": "bias length differs from the output channels"
     },
     {
       "op": "conv1d",
       "ins": [[1, 1, 2], [1, 1, 5], [1]],
       "attrs": { "stride": 1, "padding": 1, "dilation": 1, "groups": 1 },
       "throws": true,
-      "why": "padding 込みでもカーネル長に足りない"
+      "why": "too short for the kernel length even with padding"
     },
     {
       "op": "conv1d",
       "ins": [[1, 1, 6], [1, 1, 3], [1]],
       "attrs": { "stride": 1, "padding": 0, "dilation": 4, "groups": 1 },
       "throws": true,
-      "why": "dilation で伸びたカーネル張り（9）が入力長に足りない"
+      "why": "the kernel span widened by dilation (9) is longer than the input"
     },
 
     {
@@ -2694,7 +2694,7 @@
         "groups": 1
       },
       "outs": [[1, 5, 8, 10]],
-      "why": "VAE の素の conv2d 実測形（k3 / pad1 / same）。H ≠ W で軸の取り違えが出る"
+      "why": "the observed shape of the VAE's plain conv2d (k3 / pad1 / same). H ≠ W exposes swapped axes"
     },
     {
       "op": "conv2d",
@@ -2706,7 +2706,7 @@
         "groups": 1
       },
       "outs": [[2, 5, 5, 3]],
-      "why": "Kh≠Kw・stride/padding が H/W 非対称（H: (9+2-2)/2+1=5 / W: (11-4)/3+1=3）"
+      "why": "Kh≠Kw, stride/padding asymmetric in H/W (H: (9+2-2)/2+1=5 / W: (11-4)/3+1=3)"
     },
     {
       "op": "conv2d",
@@ -2718,7 +2718,7 @@
         "groups": 1
       },
       "outs": [[1, 4, 4, 10]],
-      "why": "dilation も H/W 非対称（H: 10-3·2=4 / W: 12-2·1=10）"
+      "why": "dilation asymmetric in H/W too (H: 10-3·2=4 / W: 12-2·1=10)"
     },
     {
       "op": "conv2d",
@@ -2730,7 +2730,7 @@
         "groups": 6
       },
       "outs": [[1, 6, 7, 5]],
-      "why": "depthwise（groups = Cin = Cout → 重みの第 2 軸は 1）"
+      "why": "depthwise (groups = Cin = Cout → the weight's second axis is 1)"
     },
     {
       "op": "conv2d",
@@ -2742,7 +2742,7 @@
         "groups": 3
       },
       "outs": [[1, 9, 7, 5]],
-      "why": "中間の groups（Cin/groups = 2 が重みの第 2 軸・Cin ≠ Cout）"
+      "why": "intermediate groups (Cin/groups = 2 is the weight's second axis; Cin ≠ Cout)"
     },
     {
       "op": "conv2d",
@@ -2755,21 +2755,21 @@
       },
       "bindings": { "T": 5 },
       "outs": [[1, 8, "T", 6]],
-      "why": "記号の H は stride 1 / same padding で長さが保たれる（conv1d と同じ一次式規則）"
+      "why": "a symbolic H keeps its length with stride 1 / same padding (the same linear-expression rule as conv1d)"
     },
     {
       "op": "conv2d",
       "ins": [[1, 3, 8, 10], [5, 3, 3, 3], [5]],
       "attrs": { "stride": [1, 1], "padding": [1, 1], "dilation": [1, 1] },
       "throws": true,
-      "why": "groups の欠落（4 つとも宣言必須・既定値補完なし）"
+      "why": "groups missing (all four must be declared, no default filled in)"
     },
     {
       "op": "conv2d",
       "ins": [[1, 3, 8, 10], [5, 3, 3, 3], [5]],
       "attrs": { "stride": 1, "padding": [1, 1], "dilation": [1, 1], "groups": 1 },
       "throws": true,
-      "why": "スカラ表記の stride は受理しない（[H, W] へ正規化するのは境界の仕事）"
+      "why": "a scalar stride is rejected (normalizing it to [H, W] is the boundary's job)"
     },
     {
       "op": "conv2d",
@@ -2781,7 +2781,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "重みを [Cin/groups, Cout, Kh, Kw] と読む取り違え（非対称チャネルでのみ赤くなる）"
+      "why": "the weight read as [Cin/groups, Cout, Kh, Kw] by mistake (turns red only with asymmetric channels)"
     },
     {
       "op": "conv2d",
@@ -2793,7 +2793,7 @@
         "groups": 6
       },
       "throws": true,
-      "why": "depthwise なのに重みの第 2 軸が Cin のまま（Cin/groups = 1 のはず）"
+      "why": "depthwise, yet the weight's second axis is still Cin (it should be Cin/groups = 1)"
     },
     {
       "op": "conv2d",
@@ -2805,7 +2805,7 @@
         "groups": 4
       },
       "throws": true,
-      "why": "groups が Cin を割り切らない"
+      "why": "groups does not divide Cin"
     },
     {
       "op": "conv2d",
@@ -2817,7 +2817,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "bias 長が出力チャネルと違う"
+      "why": "bias length differs from the output channels"
     },
     {
       "op": "conv2d",
@@ -2829,7 +2829,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "H だけカーネル長に足りない（軸ごとに独立に見ていないと素通りする）"
+      "why": "only H is too short for the kernel length (it slips through unless each axis is checked independently)"
     },
     {
       "op": "conv2d",
@@ -2841,7 +2841,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "W だけカーネル長に足りない（H 側と対称に固定する）"
+      "why": "only W is too short for the kernel length (pinned symmetrically with the H side)"
     },
     {
       "op": "conv2d",
@@ -2853,7 +2853,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "rank 4 / 4 / 1 以外は受理しない（rank3 は conv1d の担当）"
+      "why": "anything but rank 4 / 4 / 1 is rejected (rank3 is conv1d's job)"
     },
 
     {
@@ -2866,7 +2866,7 @@
         "groups": 1
       },
       "outs": [[24, 1, 6, 8]],
-      "why": "chunk グラフの conv_in 形（cache 2 + 1 フレーム = T 3・時間 padding 0・空間 same — ADR 0118 決定 2）。x は unbatched の rank 4"
+      "why": "the conv_in shape of the chunk graph (cache 2 + 1 frame = T 3, temporal padding 0, spatial same — ADR 0118 decision 2). x is the unbatched rank 4"
     },
     {
       "op": "conv3d",
@@ -2878,7 +2878,7 @@
         "groups": 1
       },
       "outs": [[16, 1, 4, 5]],
-      "why": "time_conv 形（カーネル (3,1,1)・Cout = 2·Cin）。H ≠ W"
+      "why": "the time_conv shape (kernel (3,1,1), Cout = 2·Cin). H ≠ W"
     },
     {
       "op": "conv3d",
@@ -2890,7 +2890,7 @@
         "groups": 1
       },
       "outs": [[3, 5, 3, 3]],
-      "why": "Kt≠Kh≠Kw・stride / padding が 3 軸で非対称（T: 5 / H: (6+2−2−1)/2+1=3 / W: (7+2−1−1)/3+1=3）。カーネル軸の順を取り違えると出力形が変わる"
+      "why": "Kt≠Kh≠Kw, stride / padding asymmetric across the 3 axes (T: 5 / H: (6+2−2−1)/2+1=3 / W: (7+2−1−1)/3+1=3). Swapping the order of the kernel axes changes the output shape"
     },
     {
       "op": "conv3d",
@@ -2902,7 +2902,7 @@
         "groups": 1
       },
       "outs": [[2, 4, 4, 5]],
-      "why": "dilation も 3 軸で非対称（T: 7−3·1=4 / H: 8−2·2=4 / W: 9−4·1=5）"
+      "why": "dilation asymmetric across the 3 axes too (T: 7−3·1=4 / H: 8−2·2=4 / W: 9−4·1=5)"
     },
     {
       "op": "conv3d",
@@ -2914,7 +2914,7 @@
         "groups": 6
       },
       "outs": [[6, 3, 5, 4]],
-      "why": "depthwise（groups = Cin = Cout → 重みの第 2 軸は 1）— 意味論は groups 一般"
+      "why": "depthwise (groups = Cin = Cout → the weight's second axis is 1) — the semantics are general groups"
     },
     {
       "op": "conv3d",
@@ -2926,7 +2926,7 @@
         "groups": 3
       },
       "outs": [[9, 3, 5, 4]],
-      "why": "中間の groups（Cin/groups = 2 が重みの第 2 軸・Cin ≠ Cout）"
+      "why": "intermediate groups (Cin/groups = 2 is the weight's second axis; Cin ≠ Cout)"
     },
     {
       "op": "conv3d",
@@ -2939,28 +2939,28 @@
       },
       "bindings": { "T": 5 },
       "outs": [[8, "T", 6, 6]],
-      "why": "記号の T は stride 1 / same padding で長さが保たれる（conv1d / conv2d と同じ一次式規則）"
+      "why": "a symbolic T keeps its length with stride 1 / same padding (the same linear-expression rule as conv1d / conv2d)"
     },
     {
       "op": "conv3d",
       "ins": [[3, 4, 6, 6], [5, 3, 3, 3, 3], [5]],
       "attrs": { "stride": [1, 1, 1], "padding": [1, 1, 1], "dilation": [1, 1, 1] },
       "throws": true,
-      "why": "groups の欠落（4 つとも宣言必須・既定値補完なし）"
+      "why": "groups missing (all four must be declared, no default filled in)"
     },
     {
       "op": "conv3d",
       "ins": [[3, 4, 6, 6], [5, 3, 3, 3, 3], [5]],
       "attrs": { "stride": 1, "padding": [1, 1, 1], "dilation": [1, 1, 1], "groups": 1 },
       "throws": true,
-      "why": "スカラ表記の stride は受理しない（[T, H, W] へ正規化するのは境界の仕事）"
+      "why": "a scalar stride is rejected (normalizing it to [T, H, W] is the boundary's job)"
     },
     {
       "op": "conv3d",
       "ins": [[3, 4, 6, 6], [5, 3, 3, 3, 3], [5]],
       "attrs": { "stride": [1, 1, 1], "padding": [1, 1], "dilation": [1, 1, 1], "groups": 1 },
       "throws": true,
-      "why": "2 成分の padding は受理しない（時間軸の書き落としと [H, W] の区別がつかない）"
+      "why": "a 2-component padding is rejected (a dropped temporal axis cannot be told apart from [H, W])"
     },
     {
       "op": "conv3d",
@@ -2972,7 +2972,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "重みを [Cin/groups, Cout, Kt, Kh, Kw] と読む取り違え（非対称チャネルでのみ赤くなる）"
+      "why": "the weight read as [Cin/groups, Cout, Kt, Kh, Kw] by mistake (turns red only with asymmetric channels)"
     },
     {
       "op": "conv3d",
@@ -2984,7 +2984,7 @@
         "groups": 6
       },
       "throws": true,
-      "why": "depthwise なのに重みの第 2 軸が Cin のまま（Cin/groups = 1 のはず）"
+      "why": "depthwise, yet the weight's second axis is still Cin (it should be Cin/groups = 1)"
     },
     {
       "op": "conv3d",
@@ -2996,7 +2996,7 @@
         "groups": 4
       },
       "throws": true,
-      "why": "groups が Cin を割り切らない"
+      "why": "groups does not divide Cin"
     },
     {
       "op": "conv3d",
@@ -3008,7 +3008,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "bias 長が出力チャネルと違う"
+      "why": "bias length differs from the output channels"
     },
     {
       "op": "conv3d",
@@ -3020,7 +3020,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "batched の rank 5 入力は受理しない（unbatched の rank 4 だけ — ADR 0118 決定 1）"
+      "why": "a batched rank-5 input is rejected (unbatched rank 4 only — ADR 0118 decision 1)"
     },
     {
       "op": "conv3d",
@@ -3032,7 +3032,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "rank 4 の重みは受理しない（[Cout, Cin/groups, Kt, Kh, Kw] の rank 5 のみ）"
+      "why": "a rank-4 weight is rejected (rank 5 [Cout, Cin/groups, Kt, Kh, Kw] only)"
     },
     {
       "op": "conv3d",
@@ -3044,7 +3044,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "K = 0（Kt）— dilation·(K−1) が負に転んで出力が入力より長くなる形を出力長式へ入れない"
+      "why": "K = 0 (Kt) — keeps out of the output-length formula a shape where dilation·(K−1) turns negative and the output gets longer than the input"
     },
     {
       "op": "conv3d",
@@ -3056,7 +3056,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "T だけカーネル長に足りない（軸ごとに独立に見ていないと素通りする）"
+      "why": "only T is too short for the kernel length (it slips through unless each axis is checked independently)"
     },
     {
       "op": "conv3d",
@@ -3068,7 +3068,7 @@
         "groups": 1
       },
       "throws": true,
-      "why": "W だけカーネル長に足りない（T 側と対称に固定する）"
+      "why": "only W is too short for the kernel length (pinned symmetrically with the T side)"
     },
 
     {
@@ -3076,7 +3076,7 @@
       "ins": [[1, 5, 7], [5, 3, 2], [3]],
       "attrs": { "stride": 2, "padding": 0 },
       "outs": [[1, 3, 14]],
-      "why": "重みは [Cin, Cout, K]・出力長は L*stride（dec の ups 末尾 2 本の形）"
+      "why": "the weight is [Cin, Cout, K], output length is L*stride (the shape of the last 2 ups of dec)"
     },
     {
       "op": "conv_transpose1d",
@@ -3084,7 +3084,7 @@
       "attrs": { "stride": 8, "padding": 4 },
       "bindings": { "T": 6 },
       "outs": [[1, 2, "8T"]],
-      "why": "記号長は係数が stride 倍になる（dec の ups 先頭 up 8 / k 16 / pad 4）"
+      "why": "a symbolic length gets its coefficient multiplied by stride (the first ups of dec: up 8 / k 16 / pad 4)"
     },
     {
       "op": "conv_transpose1d",
@@ -3092,42 +3092,42 @@
       "attrs": { "stride": 2, "padding": 3 },
       "bindings": { "T": 4 },
       "outs": [[1, 2, "4T+2"]],
-      "why": "係数もオフセットも stride 倍（一次式のまま正準文法に載る）"
+      "why": "both coefficient and offset are multiplied by stride (stays a linear expression in the canonical grammar)"
     },
     {
       "op": "conv_transpose1d",
       "ins": [[1, 5, 7], [3, 5, 2], [5]],
       "attrs": { "stride": 2, "padding": 0 },
       "throws": true,
-      "why": "重みを [Cout, Cin, K] と読む取り違え（非対称チャネルでのみ赤くなる）"
+      "why": "the weight read as [Cout, Cin, K] by mistake (turns red only with asymmetric channels)"
     },
     {
       "op": "conv_transpose1d",
       "ins": [[1, 5, 7], [5, 3, 2], [5]],
       "attrs": { "stride": 2, "padding": 0 },
       "throws": true,
-      "why": "bias 長が出力チャネルと違う"
+      "why": "bias length differs from the output channels"
     },
     {
       "op": "conv_transpose1d",
       "ins": [[1, 5, 7], [5, 3, 3], [3]],
       "attrs": { "stride": 2, "padding": 0 },
       "throws": true,
-      "why": "2P != K - S の一般形は受理しない（出力長が L*stride にならない）"
+      "why": "the general form 2P != K - S is rejected (the output length would not be L*stride)"
     },
     {
       "op": "conv_transpose1d",
       "ins": [[1, 5, 7], [5, 3, 2], [3]],
       "attrs": { "stride": 2, "padding": 1 },
       "throws": true,
-      "why": "padding が (K - S) / 2 と違う"
+      "why": "padding differs from (K - S) / 2"
     },
     {
       "op": "conv_transpose1d",
       "ins": [[5, 7], [5, 3, 2], [3]],
       "attrs": { "stride": 2, "padding": 0 },
       "throws": true,
-      "why": "rank 3 / 3 / 1 以外は受理しない"
+      "why": "anything but rank 3 / 3 / 1 is rejected"
     },
 
     {
@@ -3135,42 +3135,42 @@
       "ins": [[1, 3, 4, 5], [5, 3, 3, 2], [1, 12, 4, 4], [1, 6, 4, 4], [5]],
       "attrs": { "padding": [1, 0] },
       "outs": [[1, 5, 4, 4]],
-      "why": "Cin != Cout・Kh != Kw・padding の H != W（軸と重みレイアウトの取り違えが shape に出る形）"
+      "why": "Cin != Cout, Kh != Kw, padding H != W (a shape where swapped axes or weight layout show up in the shape)"
     },
     {
       "op": "deform_conv2d",
       "ins": [[1, 4, 3, 3], [6, 4, 1, 1], [1, 2, 3, 3], [1, 1, 3, 3], [6]],
       "attrs": { "padding": [0, 0] },
       "outs": [[1, 6, 3, 3]],
-      "why": "k=1 分岐（ASPP の aspp1 / parallel_block_sizes 先頭）。offset は 2 チャネルだけ"
+      "why": "the k=1 branch (ASPP's aspp1 / the first of parallel_block_sizes). offset has only 2 channels"
     },
     {
       "op": "deform_conv2d",
       "ins": [[1, 3, 4, 5], [3, 5, 3, 2], [1, 12, 4, 4], [1, 6, 4, 4], [5]],
       "attrs": { "padding": [1, 0] },
       "throws": true,
-      "why": "重みを [Cin, Cout, Kh, Kw] と読む取り違え（非対称チャネルでのみ赤くなる）"
+      "why": "the weight read as [Cin, Cout, Kh, Kw] by mistake (turns red only with asymmetric channels)"
     },
     {
       "op": "deform_conv2d",
       "ins": [[1, 3, 4, 5], [5, 3, 3, 2], [1, 6, 4, 4], [1, 6, 4, 4], [5]],
       "attrs": { "padding": [1, 0] },
       "throws": true,
-      "why": "offset のチャネルが 2*Kh*Kw でない（y/x の 2 連を落とした形）"
+      "why": "offset channels are not 2*Kh*Kw (the y/x pair dropped)"
     },
     {
       "op": "deform_conv2d",
       "ins": [[1, 3, 4, 5], [5, 3, 3, 2], [1, 12, 4, 4], [1, 6, 4, 5], [5]],
       "attrs": { "padding": [1, 0] },
       "throws": true,
-      "why": "mask の空間軸が出力空間と違う（出力形の正本は x + weight + padding）"
+      "why": "the mask's spatial axes differ from the output's (the source of truth for the output shape is x + weight + padding)"
     },
     {
       "op": "deform_conv2d",
       "ins": [[1, 3, 4, 5], [5, 3, 3, 2], [1, 12, 4, 4], [1, 6, 4, 4], [3]],
       "attrs": { "padding": [1, 0] },
       "throws": true,
-      "why": "bias 長が出力チャネルと違う"
+      "why": "bias length differs from the output channels"
     },
     {
       "op": "deform_conv2d",
@@ -3182,28 +3182,28 @@
       ],
       "attrs": { "padding": [1, 0] },
       "throws": true,
-      "why": "アリティ 5 固定（mask を落とした DCNv1 は語彙に無い）"
+      "why": "arity fixed at 5 (DCNv1 without the mask is not in the vocabulary)"
     },
     {
       "op": "deform_conv2d",
       "ins": [[3, 4, 5], [5, 3, 3, 2], [1, 12, 4, 4], [1, 6, 4, 4], [5]],
       "attrs": { "padding": [1, 0] },
       "throws": true,
-      "why": "rank 4/4/4/4/1 以外は受理しない"
+      "why": "anything but rank 4/4/4/4/1 is rejected"
     },
     {
       "op": "deform_conv2d",
       "ins": [[1, 3, 2, 5], [5, 3, 3, 2], [1, 12, 2, 4], [1, 6, 2, 4], [5]],
       "attrs": { "padding": [0, 0] },
       "throws": true,
-      "why": "padding 無しで H 2 < Kh 3（カーネル張りに足りない）"
+      "why": "without padding, H 2 < Kh 3 (too short for the kernel span)"
     },
     {
       "op": "deform_conv2d",
       "ins": [[1, 3, 4, 5], [5, 3, 3, 2], [1, 12, 4, 4], [1, 6, 4, 4], [5]],
       "attrs": {},
       "throws": true,
-      "why": "padding の欠落（宣言必須・既定値補完なし）"
+      "why": "padding missing (must be declared, no default filled in)"
     },
 
     {
@@ -3211,21 +3211,21 @@
       "ins": [[1, 3, 4, 5]],
       "attrs": { "output_size": [7, 9] },
       "outs": [[1, 3, 7, 9]],
-      "why": "非整数倍の拡大（H 3/6・W 4/8）。H≠W かつ Hout≠Wout で軸の取り違えが shape に出る"
+      "why": "non-integer upscaling (H 3/6, W 4/8). With H≠W and Hout≠Wout, swapped axes show up in the shape"
     },
     {
       "op": "upsample_bilinear2d",
       "ins": [[2, 6, 8, 10]],
       "attrs": { "output_size": [2, 3] },
       "outs": [[2, 6, 2, 3]],
-      "why": "縮小も同じ op で通る（BiRefNet の forward_enc / cxt に 8 本ある形）"
+      "why": "downscaling passes through the same op too (the shape of the 8 calls in BiRefNet's forward_enc / cxt)"
     },
     {
       "op": "upsample_bilinear2d",
       "ins": [[1, 4, 1, 1]],
       "attrs": { "output_size": [5, 6] },
       "outs": [[1, 4, 5, 6]],
-      "why": "1×1 → N×M（ASPP の GAP 枝）。scale は 0 で全出力が同じ 1 点を読む"
+      "why": "1×1 → N×M (ASPP's GAP branch). scale is 0, so every output reads the same single point"
     },
     {
       "op": "upsample_bilinear2d",
@@ -3233,73 +3233,73 @@
       "bindings": { "T": 4 },
       "attrs": { "output_size": [3, 3] },
       "outs": [[1, 2, 3, 3]],
-      "why": "入力の空間軸が記号でも出力は attrs が決める（倍率の分母にしか効かない）"
+      "why": "even with symbolic input spatial axes the attrs decide the output (they only affect the denominator of the ratio)"
     },
     {
       "op": "upsample_bilinear2d",
       "ins": [[1, 3, 4, 5]],
       "attrs": {},
       "throws": true,
-      "why": "output_size の欠落（宣言必須・既定値補完なし）"
+      "why": "output_size missing (must be declared, no default filled in)"
     },
     {
       "op": "upsample_bilinear2d",
       "ins": [[3, 4, 5]],
       "attrs": { "output_size": [7, 9] },
       "throws": true,
-      "why": "rank 4 以外は受理しない（3D / 5D は別 aten op）"
+      "why": "anything but rank 4 is rejected (3D / 5D are different aten ops)"
     },
     {
       "op": "upsample_bilinear2d",
       "ins": [[1, 3, 0, 5]],
       "attrs": { "output_size": [7, 9] },
       "throws": true,
-      "why": "長さ 0 の空間軸は補間できない（scale が (0-1)/(out-1) で負になる）"
+      "why": "a length-0 spatial axis cannot be interpolated (scale becomes negative as (0-1)/(out-1))"
     },
 
     {
       "op": "gru_scan",
       "ins": [[6, 2, 12], [2, 4], [12, 4], [12]],
       "outs": [[6, 2, 4]],
-      "why": "gi[T,N,3H] / h0[N,H] / W_hh[3H,H] / b_hh[3H] -> y[T,N,H]（3H と H の取り違えが shape に出る形）"
+      "why": "gi[T,N,3H] / h0[N,H] / W_hh[3H,H] / b_hh[3H] -> y[T,N,H] (a shape where swapping 3H and H shows up in the shape)"
     },
     {
       "op": "gru_scan",
       "ins": [["T", 1, 384], [1, 128], [384, 128], [384]],
       "bindings": { "T": 5 },
       "outs": [["T", 1, 128]],
-      "why": "時間軸は記号のまま通る（この op の存在理由 — 分解形は T 回展開されて記号を失う）"
+      "why": "the time axis passes through symbolic (the reason this op exists — the decomposed form is unrolled T times and loses the symbol)"
     },
     {
       "op": "gru_scan_reverse",
       "ins": [["T", 1, 384], [1, 128], [384, 128], [384]],
       "bindings": { "T": 5 },
       "outs": [["T", 1, 128]],
-      "why": "逆方向 op も契約面は順方向と同一（違いは走査順だけで、出力形も時間順も変わらない）"
+      "why": "the reverse op has the same contract surface as the forward one (only the scan order differs; neither the output shape nor the time order changes)"
     },
     {
       "op": "gru_scan",
       "ins": [[6, 2, 8], [2, 4], [12, 4], [12]],
       "throws": true,
-      "why": "gi の最終次元が 3H でない（ゲート 3 本の束を 2 本と取り違えた形）"
+      "why": "gi's last dimension is not 3H (the bundle of 3 gates mistaken for 2)"
     },
     {
       "op": "gru_scan",
       "ins": [[6, 3, 12], [2, 4], [12, 4], [12]],
       "throws": true,
-      "why": "gi と h0 のバッチが不一致"
+      "why": "batch mismatch between gi and h0"
     },
     {
       "op": "gru_scan",
       "ins": [[6, 2, 12], [2, 4], [4, 12], [12]],
       "throws": true,
-      "why": "W_hh を [H, 3H] と読む取り違え（転置レイアウトは要素数が合うので非対称形でのみ赤くなる）"
+      "why": "W_hh read as [H, 3H] by mistake (the transposed layout has a matching element count, so it turns red only with asymmetric shapes)"
     },
     {
       "op": "gru_scan",
       "ins": [[6, 2, 12], [2, 4], [12, 4], [4]],
       "throws": true,
-      "why": "b_hh 長が 3H でない（H 本ぶんだけ持つ形）"
+      "why": "b_hh length is not 3H (holding only H of them)"
     },
     {
       "op": "gru_scan",
@@ -3309,13 +3309,13 @@
         [12, 4]
       ],
       "throws": true,
-      "why": "アリティ 4 固定（bias 無し GRU は語彙に無い）"
+      "why": "arity fixed at 4 (a GRU without bias is not in the vocabulary)"
     },
     {
       "op": "gru_scan",
       "ins": [[2, 12], [2, 4], [12, 4], [12]],
       "throws": true,
-      "why": "rank 3/2/2/1 以外は受理しない（batch_first / 時間軸を畳んだ形は語彙に無い）"
+      "why": "anything but rank 3/2/2/1 is rejected (batch_first / a folded time axis are not in the vocabulary)"
     },
     {
       "op": "static_quantize",
@@ -3357,7 +3357,7 @@
       "ins": [[3]],
       "attrs": {},
       "throws": true,
-      "why": "scale 必須"
+      "why": "scale is required"
     }
   ]
 }

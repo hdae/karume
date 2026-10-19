@@ -1,10 +1,10 @@
 {
   "_doc": [
-    "次元言語 `coeff·sym+offset` の適合ケース表（docs/ir-v2.md『shape と次元言語』の正本）。",
-    "valid: 正準表記 → 分解結果。parse と format の往復が文字列同一であることも含む。",
-    "invalid: 受理してはならない文字列（非正準表記・複数シンボル・負値・空白など）。",
-    "eval: 束縛表 + 式 → 値。throws=true は評価が失敗しなければならないケース。",
-    "TS 実装と将来の Python 実装はこの表で検証する（実装側に文法の正本を置かない）。"
+    "Conformance case table of the dimension language `coeff·sym+offset` (the source of truth for docs/ir-v2.md \"Shapes and the dimension language\").",
+    "valid: canonical notation → decomposed result. Includes that a parse and format round trip is string-identical.",
+    "invalid: strings that must not be accepted (non-canonical notation, multiple symbols, negative values, whitespace and so on).",
+    "eval: binding table + expression → value. throws=true marks a case whose evaluation must fail.",
+    "The TS implementation and the Python implementation (karume.dims) are checked against this table (the implementations hold no source of truth for the grammar)."
   ],
   "valid": [
     { "text": "T", "coeff": 1, "sym": "T", "offset": 0 },
@@ -69,49 +69,49 @@
       "expr": "T",
       "bindings": { "S": 5 },
       "throws": true,
-      "why": "未束縛のシンボルは黙って通さない"
+      "why": "an unbound symbol is not passed silently"
     },
     {
       "expr": "toString",
       "bindings": {},
       "throws": true,
-      "why": "Object.prototype 由来のキーは束縛ではない（存在判定は hasOwn 相当のみ）"
+      "why": "keys from Object.prototype are not bindings (presence is checked by the equivalent of hasOwn only)"
     },
     {
       "expr": "constructor",
       "bindings": {},
       "throws": true,
-      "why": "同上（prototype 汚染で算術が黙って NaN 化する経路を塞ぐ）"
+      "why": "same as above (closes the path where prototype pollution silently turns the arithmetic into NaN)"
     },
     {
       "expr": "valueOf",
       "bindings": {},
       "throws": true,
-      "why": "同上"
+      "why": "same as above"
     },
     {
       "expr": "hasOwnProperty",
       "bindings": {},
       "throws": true,
-      "why": "同上"
+      "why": "same as above"
     },
     {
       "expr": "toString",
       "bindings": { "toString": 4 },
       "value": 4,
-      "why": "自前の束縛として存在するなら通る（名前そのものは禁止語ではない）"
+      "why": "passes when it exists as an own binding (the name itself is not a forbidden word)"
     },
     {
       "expr": "T",
       "bindings": { "T": -1 },
       "throws": true,
-      "why": "次元は非負"
+      "why": "dimensions are non-negative"
     },
     {
       "expr": "T",
       "bindings": { "T": 1.5 },
       "throws": true,
-      "why": "次元は整数"
+      "why": "dimensions are integers"
     }
   ]
 }
